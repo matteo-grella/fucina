@@ -1,0 +1,14 @@
+.zig-cache/
+zig-out/
+models
+.DS_Store
+refs/
+compare/
+__pycache__/
+*.gguf
+*.wav
+*.rvq
+*.log
+.idea/
+.vscode/
+.claude/settings.local.json

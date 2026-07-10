@@ -1,0 +1,1 @@
+loudness_input.wav: the standardized 1 s / 48 kHz / 24-bit loudness-measurement signal vendored from https://github.com/sdatkinson/neural-amp-modeler (MIT, commit a11ed88) nam/models/_resources/. Exported .nam metadata.loudness = 20*log10(RMS(model(this))) must be computed on exactly this file to match upstream.

@@ -1,0 +1,259 @@
+diff --git a/src/align.cpp b/src/align.cpp
+index 6c2ebb1..36a4bec 100644
+--- a/src/align.cpp
++++ b/src/align.cpp
+@@ -1,4 +1,8 @@
+ #include "align.hpp"
++#include <fstream>
++#include <cstdlib>
++#include <cstdio>
++#include <cstdint>
+ #include "common.hpp"
+ 
+ #include <array>
+@@ -139,6 +143,17 @@ bool warp_affine(const Image& src, const std::array<float,6>& M, Image& out,
+ 
+ bool norm_crop(const Image& src, const Landmarks5& lmk, Image& out, int size) {
+     if (src.empty() || size <= 0) return false;
++    if (const char* dd = std::getenv("FACEDETECT_DUMP_DIR")) { // tools/ref-patches: decoded source image + arcface landmarks
++        char path[1024]; std::snprintf(path, sizeof(path), "%s/align_src.bin", dd);
++        std::ofstream df(path, std::ios::binary);
++        if (df) {
++            const uint32_t w = (uint32_t)src.width, h = (uint32_t)src.height; const uint8_t c = 3;
++            df.write("FDR1", 4); df.write((char*)&w, 4); df.write((char*)&h, 4); df.write((char*)&c, 1);
++            df.write(reinterpret_cast<const char*>(src.rgb.data()), (std::streamsize)src.rgb.size());
++        }
++        char lp[1024]; std::snprintf(lp, sizeof(lp), "%s/align_lmk.txt", dd);
++        std::ofstream lf(lp); if (lf) for (int i=0;i<5;++i) lf << lmk[i][0] << " " << lmk[i][1] << "\n";
++    }
+     return warp_affine(src, estimate_norm(lmk), out, size, size);
+ }
+ 
+diff --git a/src/antispoof_graph.cpp b/src/antispoof_graph.cpp
+index 70ff5f2..f8506a7 100644
+--- a/src/antispoof_graph.cpp
++++ b/src/antispoof_graph.cpp
+@@ -1,4 +1,8 @@
+ #include "antispoof_graph.hpp"
++#include <fstream>
++#include <cstdlib>
++#include <cstdio>
++#include <cstdint>
+ #include "align.hpp"
+ #include "backend.hpp"
+ #include "detect.hpp"
+@@ -559,6 +563,16 @@ std::array<double, 3> ensemble_softmax(const Model& m, const Image& img,
+         Image crop;
+         if (!antispoof_crop(img, d, sc[i], crop, size))
+             throw std::runtime_error("antispoof: crop failed");
++        if (const char* dd = std::getenv("FACEDETECT_DUMP_DIR")) { // tools/ref-patches: 80x80 member crop
++            char path[1024];
++            std::snprintf(path, sizeof(path), "%s/antispoof_crop_%zu.bin", dd, i);
++            std::ofstream df(path, std::ios::binary);
++            if (df) {
++                const uint32_t w = (uint32_t)crop.width, h = (uint32_t)crop.height; const uint8_t c = 3;
++                df.write("FDR1", 4); df.write((char*)&w, 4); df.write((char*)&h, 4); df.write((char*)&c, 1);
++                df.write(reinterpret_cast<const char*>(crop.rgb.data()), (std::streamsize)crop.rgb.size());
++            }
++        }
+         // Raw BGR planes (swap_rb=true on the RGB Image), no mean/std: exactly
+         // what the reference feeds onnxruntime.
+         std::vector<float> blob = to_blob(crop, size, 0.0f, 1.0f, /*swap_rb=*/true);
+@@ -572,6 +586,12 @@ std::array<double, 3> ensemble_softmax(const Model& m, const Image& img,
+     }
+     const double n = sc.empty() ? 1.0 : (double)sc.size();
+     for (int k = 0; k < 3; ++k) accum[k] /= n;
++    if (const char* dd = std::getenv("FACEDETECT_DUMP_DIR")) { // tools/ref-patches: averaged real_prob
++        char path[1024];
++        std::snprintf(path, sizeof(path), "%s/antispoof_real_prob.txt", dd);
++        std::ofstream df(path);
++        if (df) df << accum[1] << "\n";
++    }
+     return accum;
+ }
+ 
+diff --git a/src/arcface_graph.cpp b/src/arcface_graph.cpp
+index beec077..371c0ca 100644
+--- a/src/arcface_graph.cpp
++++ b/src/arcface_graph.cpp
+@@ -9,6 +9,10 @@
+ #include "ggml.h"
+ 
+ #include <cmath>
++#include <fstream>
++#include <cstdlib>
++#include <cstdio>
++#include <cstdint>
+ #include <cstdlib>
+ #include <cstring>
+ #include <stdexcept>
+@@ -209,6 +213,23 @@ int blocked_island_blocks(int n_blocks) {
+ 
+ std::vector<float> arcface_embed(const ModelLoader& ml, const Image& aligned112,
+                                  Backend& be) {
++    // FACEDETECT_DUMP_DIR: env-gated dump of the aligned 112x112 RGB crop (the
++    // strict-gate ArcFace input) in Fucina's FDR1 raw format. Read-only side
++    // effect; never perturbs the returned embedding. (tools/ref-patches)
++    if (const char* dd = std::getenv("FACEDETECT_DUMP_DIR")) {
++        char path[1024];
++        std::snprintf(path, sizeof(path), "%s/arcface_crop.bin", dd);
++        std::ofstream df(path, std::ios::binary);
++        if (df) {
++            const uint32_t w = (uint32_t)aligned112.width, h = (uint32_t)aligned112.height;
++            const uint8_t c = 3;
++            df.write("FDR1", 4);
++            df.write(reinterpret_cast<const char*>(&w), 4);
++            df.write(reinterpret_cast<const char*>(&h), 4);
++            df.write(reinterpret_cast<const char*>(&c), 1);
++            df.write(reinterpret_cast<const char*>(aligned112.rgb.data()), (std::streamsize)aligned112.rgb.size());
++        }
++    }
+     const int sz = (int)ml.config().rec_input_size;  // 112
+     // The aligned crop is already RGB (norm_crop warps the RGB source), so
+     // swap_rb=false yields R,G,B planes - identical to the reference's
+diff --git a/src/detect.cpp b/src/detect.cpp
+index a68ca75..329ad9a 100644
+--- a/src/detect.cpp
++++ b/src/detect.cpp
+@@ -1,4 +1,7 @@
+ #include "detect.hpp"
++#include <fstream>
++#include <cstdlib>
++#include <cstdio>
+ #include "common.hpp"
+ #include "model_loader.hpp"
+ #include "scrfd_graph.hpp"
+@@ -68,6 +71,10 @@ std::vector<Detection> scrfd_detect(const ModelLoader& ml, const Image& img) {
+     // be strictly positive or every decoded box collapses. Hard-assert it, per
+     // the Task 3.1 review (silent zero would map all boxes to +inf).
+     FD_ASSERT(det_scale > 0.0f);
++    if (const char* dd = std::getenv("FACEDETECT_DUMP_DIR")) { // tools/ref-patches: letterbox det_scale
++        char path[1024]; std::snprintf(path, sizeof(path), "%s/detect_scale.txt", dd);
++        std::ofstream df(path); if (df) df << det_scale << "\n";
++    }
+ 
+     auto raw = scrfd_forward(ml, lb, global_backend());
+     FD_ASSERT(raw.size() == c.det_strides.size());
+diff --git a/src/genderage_graph.cpp b/src/genderage_graph.cpp
+index 1a8d154..eae7aa4 100644
+--- a/src/genderage_graph.cpp
++++ b/src/genderage_graph.cpp
+@@ -1,4 +1,8 @@
+ #include "genderage_graph.hpp"
++#include <fstream>
++#include <cstdlib>
++#include <cstdio>
++#include <cstdint>
+ #include "align.hpp"
+ #include "backend.hpp"
+ #include "detect.hpp"
+@@ -120,6 +124,22 @@ ggml_tensor* task_branch(ggml_context* ctx, const ModelLoader& ml, ggml_tensor*
+ 
+ std::vector<float> genderage_forward(const ModelLoader& ml, const Image& crop96,
+                                      Backend& be) {
++    // FACEDETECT_DUMP_DIR: env-gated dump of the aligned 96x96 RGB genderage crop
++    // in Fucina's FDR1 raw format. Read-only; never perturbs output. (tools/ref-patches)
++    if (const char* dd = std::getenv("FACEDETECT_DUMP_DIR")) {
++        char path[1024];
++        std::snprintf(path, sizeof(path), "%s/genderage_crop.bin", dd);
++        std::ofstream df(path, std::ios::binary);
++        if (df) {
++            const uint32_t w = (uint32_t)crop96.width, h = (uint32_t)crop96.height;
++            const uint8_t c = 3;
++            df.write("FDR1", 4);
++            df.write(reinterpret_cast<const char*>(&w), 4);
++            df.write(reinterpret_cast<const char*>(&h), 4);
++            df.write(reinterpret_cast<const char*>(&c), 1);
++            df.write(reinterpret_cast<const char*>(crop96.rgb.data()), (std::streamsize)crop96.rgb.size());
++        }
++    }
+     const int sz = (int)ml.config().genderage_input_size;  // 96
+     // The crop is already RGB; genderage's reference blob is
+     // blobFromImage(BGR, swapRB=True) == R,G,B planes, mean 0 / std 1 (the net's
+diff --git a/src/landmark_graph.cpp b/src/landmark_graph.cpp
+index 046c9d6..1b511bd 100644
+--- a/src/landmark_graph.cpp
++++ b/src/landmark_graph.cpp
+@@ -1,4 +1,8 @@
+ #include "landmark_graph.hpp"
++#include <fstream>
++#include <cstdlib>
++#include <cstdio>
++#include <cstdint>
+ 
+ #include <algorithm>
+ #include <array>
+@@ -39,6 +43,16 @@ bool landmark_crop(const Image& img, const Detection& d, int size,
+ std::vector<float> landmark_forward(const ModelLoader& ml, bool three_d,
+                                     const Image& crop, Backend& be) {
+     const FaceConfig::LandmarkHead& h = pick(ml, three_d);
++    if (const char* dd = std::getenv("FACEDETECT_DUMP_DIR")) { // tools/ref-patches: landmark crop
++        char path[1024];
++        std::snprintf(path, sizeof(path), "%s/landmark_crop_%s.bin", dd, three_d ? "3d" : "2d");
++        std::ofstream df(path, std::ios::binary);
++        if (df) {
++            const uint32_t w = (uint32_t)crop.width, hh = (uint32_t)crop.height; const uint8_t c = 3;
++            df.write("FDR1", 4); df.write((char*)&w, 4); df.write((char*)&hh, 4); df.write((char*)&c, 1);
++            df.write(reinterpret_cast<const char*>(crop.rgb.data()), (std::streamsize)crop.rgb.size());
++        }
++    }
+     if (!h.present || h.graph.empty())
+         throw std::runtime_error("landmark: head not present in pack");
+     const int sz = (int)h.input_size;
+@@ -79,6 +93,12 @@ std::vector<LandmarkPoint> landmark_decode_crop(const ModelLoader& ml, bool thre
+         out[i].y = (p[1] + 1.0f) * half;
+         out[i].z = (dim == 3) ? (p[2] * half) : 0.0f;
+     }
++    if (const char* dd = std::getenv("FACEDETECT_DUMP_DIR")) { // tools/ref-patches: crop-space points
++        char path[1024];
++        std::snprintf(path, sizeof(path), "%s/landmark_pts_%s.txt", dd, three_d ? "3d" : "2d");
++        std::ofstream df(path);
++        if (df) for (const auto& q : out) df << q.x << " " << q.y << " " << q.z << "\n";
++    }
+     return out;
+ }
+ 
+diff --git a/src/scrfd_graph.cpp b/src/scrfd_graph.cpp
+index 5722e0c..669df71 100644
+--- a/src/scrfd_graph.cpp
++++ b/src/scrfd_graph.cpp
+@@ -1,4 +1,8 @@
+ #include "scrfd_graph.hpp"
++#include <fstream>
++#include <cstdlib>
++#include <cstdio>
++#include <cstdint>
+ #include "antispoof_graph.hpp"
+ #include "backend.hpp"
+ #include "graph_ops.hpp"
+@@ -200,6 +204,15 @@ std::vector<ScrfdRawOut> scrfd_forward(const ModelLoader& ml,
+     // Detector blob: R,G,B plane order, (px-127.5)/128 (== cv2 blobFromImage with
+     // swapRB on a BGR image; our Image is already RGB, so no plane swap).
+     std::vector<float> blob = to_blob(blob_img640, S, 127.5f, 128.0f, /*swap_rb=*/false);
++    if (const char* dd = std::getenv("FACEDETECT_DUMP_DIR")) { // tools/ref-patches: 640 detector input image
++        char path[1024]; std::snprintf(path, sizeof(path), "%s/detect_blob.bin", dd);
++        std::ofstream df(path, std::ios::binary);
++        if (df) {
++            const uint32_t w = (uint32_t)blob_img640.width, h = (uint32_t)blob_img640.height; const uint8_t c = 3;
++            df.write("FDR1", 4); df.write((char*)&w, 4); df.write((char*)&h, 4); df.write((char*)&c, 1);
++            df.write(reinterpret_cast<const char*>(blob_img640.rgb.data()), (std::streamsize)blob_img640.rgb.size());
++        }
++    }
+ 
+     // Captured raw head maps, [W,H,Ctot,1] ggml-contiguous, per stride.
+     std::vector<float> cap_score[3], cap_bbox[3], cap_kps[3];
+@@ -374,6 +387,14 @@ std::vector<ScrfdRawOut> scrfd_forward(const ModelLoader& ml,
+         outs[i].bbox  = flatten_head(cap_bbox[i],  W, H, A, 4);
+         outs[i].kps   = flatten_head(cap_kps[i],   W, H, A, 10);
+     }
++    if (const char* dd = std::getenv("FACEDETECT_DUMP_DIR")) { // tools/ref-patches: 9 flattened raw heads
++        char path[1024]; std::snprintf(path, sizeof(path), "%s/detect_heads.bin", dd);
++        std::ofstream df(path, std::ios::binary);
++        if (df) {
++            auto wv = [&](const std::vector<float>& v){ const uint32_t n = (uint32_t)v.size(); df.write((char*)&n, 4); df.write(reinterpret_cast<const char*>(v.data()), (std::streamsize)(v.size()*sizeof(float))); };
++            for (int i = 0; i < 3; ++i) { wv(outs[i].score); wv(outs[i].bbox); wv(outs[i].kps); }
++        }
++    }
+     return outs;
+ }
+ 

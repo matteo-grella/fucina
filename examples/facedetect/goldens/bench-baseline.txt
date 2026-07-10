@@ -1,0 +1,7 @@
+# face-detect.cpp ggml CPU bench baseline (buffalo_l, face_a.jpg) — the Phase-2 target
+# ref: refs/face-detect.cpp @ e22260d5, Release build; Apple M1 Max
+# reproduce: facedetect-cli bench --model buffalo_l.gguf --input face_a.jpg --mode <mode> --n 20
+pipeline:   pipeline: 837.725 ms/image over 20 passes
+recognizer: recognizer: 702.864 ms/image over 20 passes
+detect:     detect: 96.621 ms/image over 20 passes
+analyze:    analyze: 96.589 ms/image over 20 passes

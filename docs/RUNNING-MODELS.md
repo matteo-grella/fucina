@@ -1,0 +1,555 @@
+# RUNNING-MODELS — CLI cheat sheet for every model in the repo
+
+Copy-paste commands for running each supported model family from the terminal.
+Everything goes through `zig build <step> -- <args>`. The commands below assume the
+weights sit under `models/` — **the repo does not ship any weights**; see the next
+section for where to download each artifact.
+
+**Always build with `-Doptimize=ReleaseFast` when you care about speed** (Debug is
+10-50x slower), and **build on the machine you will run on**: without `-Dtarget`
+the binary is tuned to the compiling host's exact CPU; cross-compiling needs
+`-Dcpu=...` too or you get baseline features and lose the fast kernels (see
+`AGENTS.md`, build options). The first invocation compiles (~1 min); after that the binary is cached.
+You can also call the installed binaries directly from `zig-out/bin/` (e.g.
+`./zig-out/bin/fucina-zig-qwen3 …`) to skip the build step entirely.
+
+## Getting the weights
+
+All LLM/ASR/TTS weights are GGUF files from Hugging Face. The `hf` CLI (from
+`pip install -U huggingface_hub`; formerly `huggingface-cli`) downloads single files:
+
+```sh
+mkdir -p models
+hf download Qwen/Qwen3-0.6B-GGUF Qwen3-0.6B-Q8_0.gguf --local-dir models
+hf download unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF Qwen3-30B-A3B-Instruct-2507-Q5_K_M.gguf --local-dir models
+hf download unsloth/gemma-4-26B-A4B-it-GGUF gemma-4-26B-A4B-it-UD-Q6_K.gguf --local-dir models
+hf download unsloth/diffusiongemma-26B-A4B-it-GGUF diffusiongemma-26B-A4B-it-Q6_K.gguf --local-dir models
+```
+
+| Family | Runner | Where to download |
+| --- | --- | --- |
+| Qwen3 dense (0.6B/1.7B/…) | `zig build qwen3` | Official [`Qwen/Qwen3-0.6B-GGUF`](https://huggingface.co/Qwen/Qwen3-0.6B-GGUF) / [`Qwen/Qwen3-1.7B-GGUF`](https://huggingface.co/Qwen/Qwen3-1.7B-GGUF) ship Q8_0 only; the full K-quant ladder (Q4_K_S … Q6_K + bf16) is on [`bartowski/Qwen_Qwen3-0.6B-GGUF`](https://huggingface.co/bartowski/Qwen_Qwen3-0.6B-GGUF) or [`unsloth/Qwen3-0.6B-GGUF`](https://huggingface.co/unsloth/Qwen3-0.6B-GGUF) (same pattern per size). |
+| Qwen3 MoE 30B-A3B | `zig build qwen3` | [`unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF`](https://huggingface.co/unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF) — `…-Q5_K_M.gguf` (21.7 GB), `…-Q6_K.gguf` (25.1 GB). |
+| Qwen3.5 0.8B (Gated-DeltaNet hybrid) | `zig build qwen35` | [`unsloth/Qwen3.5-0.8B-GGUF`](https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF) — `Qwen3.5-0.8B-Q8_0.gguf` (812 MB); also mirrored by lmstudio-community and bartowski. |
+| Gemma 4 26B-A4B (MoE) | `zig build gemma4` | [`unsloth/gemma-4-26B-A4B-it-GGUF`](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) — `gemma-4-26B-A4B-it-UD-Q6_K.gguf` (23.2 GB). |
+| DiffusionGemma 26B-A4B | `zig build diffusion-gemma` | [`unsloth/diffusiongemma-26B-A4B-it-GGUF`](https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF) — `diffusiongemma-26B-A4B-it-Q6_K.gguf` (22.7 GB), `…-Q4_K_M.gguf` (16.8 GB). |
+| OmniVoice TTS | `zig build omnivoice` | [`Serveurperso/OmniVoice-GGUF`](https://huggingface.co/Serveurperso/OmniVoice-GGUF) — `omnivoice-base-*.gguf` + `omnivoice-tokenizer-*.gguf` (F32/BF16/Q8_0/Q4_K_M each). |
+| Parakeet ASR (NeMo FastConformer) | `zig build parakeet` | [`mudler/parakeet-cpp-gguf`](https://huggingface.co/mudler/parakeet-cpp-gguf) — e.g. `tdt_ctc-110m-f16.gguf` (267 MB), `tdt-0.6b-v3-f16.gguf` (1.44 GB); f16/q8_0/q6_k/q5_k/q4_k per model. |
+| NAM amp profiles | `zig build nam` | [TONE3000 (formerly ToneHunt)](https://tonehunt.org/) — free community `.nam` captures; any upstream-format 0.5.0–0.7.x profile loads. |
+
+Notes:
+
+- **Gemma license.** Gemma-family weights (Gemma 4, DiffusionGemma) are distributed
+  under Google's Gemma Terms of Use. The `google/…` originals on Hugging Face are gated
+  behind accepting those terms; the unsloth GGUF conversions were not gated at the time
+  of writing, but the terms still apply to the weights either way.
+- **Filenames.** The commands below use the upstream filenames for the artifacts above.
+  bartowski prefixes files with `Qwen_` (e.g. `Qwen_Qwen3-0.6B-Q4_K_S.gguf`) — every
+  runner takes a plain path, so rename or adjust as you like.
+- **f16 Qwen3.** Some commands reference `Qwen3-0.6B-f16.gguf`; if your source only
+  ships bf16, transcode one locally:
+  `zig build export-gguf -Doptimize=ReleaseFast -- --from-gguf <src>.gguf --out models/Qwen3-0.6B-f16.gguf --dtype f16`.
+
+---
+
+## Qwen3 (dense 0.6B/1.7B + MoE 30B-A3B) — `zig build qwen3`
+
+The most complete runner: chat, REPL, raw generation, speculative decoding, benchmarks,
+logit-parity tooling.
+
+```sh
+# Single-turn chat (streams the reply; --no-think skips the <think> phase)
+zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf \
+  --chat "What is the capital of France?" --no-think
+
+# Multi-turn interactive REPL (empty line or Ctrl-D quits)
+zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --repl
+
+# Chat with a system prompt + sampling overrides
+zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf \
+  --chat "Tell me a joke" --system "You are a pirate." \
+  --temp 0.7 --top-k 40 --top-p 0.9 --seed 42
+
+# The big MoE (20 GB — give it a moment to mmap)
+zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-30B-A3B-Instruct-2507-Q5_K_M.gguf \
+  --chat "Explain quantum entanglement in one paragraph." --no-think
+
+# Raw completion from a text prompt (greedy unless sampling flags given)
+zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf \
+  --prompt "The capital of France is" --gen 64
+
+# Lossless speculative decoding (SAM + Token-Recycling cascade; prints acceptance stats)
+zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q4_K_S.gguf \
+  --prompt "..." --gen 128 --spec
+
+# Speculative decoding with an injected reference document (the RAG seam:
+# the drafter can copy spans from the injected text)
+zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q4_K_S.gguf \
+  --prompt "Summarize the doc" --gen 128 --spec --spec-ref doc.txt
+
+# Warm prefill/decode benchmark, fair vs llama-bench (load once, best-of-R)
+zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-30B-A3B-Instruct-2507-Q5_K_M.gguf \
+  <prompt-token-ids> --gen 64 --bench 5
+
+# Batched multi-stream decode: N lockstep streams (one m=N weight pass/step)
+# vs N sequential runs, aggregate tok/s + token-for-token cross-check
+zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q4_K_S.gguf \
+  <prompt-token-ids> --gen 64 --bench 3 --streams 4
+
+# Tokenizer-parity oracle (one token id per line; no weights loaded)
+zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --tokenize input.txt
+
+# Logit parity vs another implementation (raw little-endian f32 dump/compare)
+zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf \
+  151644,872,198,9707 --logits-out /tmp/f.bin
+zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf \
+  151644,872,198,9707 --compare-logits /tmp/ref.bin
+
+# q8_0 KV cache (halves KV memory — capacity option; decode is NOT faster on M1)
+zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf \
+  --prompt "..." --gen 256 --cache-type q8_0
+```
+
+Other flags: `--repeat N` (re-run forward), `--profile` (per-block timings), `--info`,
+`--verify-cache N` (cached-vs-full attention check), `--min-p F`, `--repeat-penalty F`,
+`--stop TOKEN_ID`.
+
+---
+
+## Gemma 4 26B-A4B (MoE) — `zig build gemma4`
+
+Same chat/REPL UX as qwen3, Gemma's `<|turn>` template, SPM tokenizer from the GGUF.
+Weights: `gemma-4-26B-A4B-it-UD-Q6_K.gguf` from
+[`unsloth/gemma-4-26B-A4B-it-GGUF`](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF)
+(subject to Google's Gemma Terms of Use — see above).
+
+```sh
+# Single-turn chat (sampling defaults come from the GGUF: temp 1.0, top-k 64, top-p 0.95)
+zig build gemma4 -Doptimize=ReleaseFast -- models/gemma-4-26B-A4B-it-UD-Q6_K.gguf \
+  --chat "Why is the sky blue?"
+
+# --experts=borrow: map the MoE experts zero-copy instead of x4-packing them.
+# Q6_K experts otherwise copy+widen ~20 GB on load (slow, doubles memory, can
+# swap on <48 GB boxes); borrow loads in ~2-3 s at ~half the RSS. Default is
+# pack (peak CPU throughput). Numerically identical (same parity-tested kernels).
+zig build gemma4 -Doptimize=ReleaseFast -- models/gemma-4-26B-A4B-it-UD-Q6_K.gguf \
+  --chat "Why is the sky blue?" --experts=borrow
+
+# Interactive REPL with a system prompt; --think enables the thought channel
+zig build gemma4 -Doptimize=ReleaseFast -- models/gemma-4-26B-A4B-it-UD-Q6_K.gguf \
+  --repl --system "Answer tersely." --think
+
+# Lossless speculative decoding in chat/REPL (same SAM cascade + CostGate as
+# qwen3; greedy output verified byte-identical with and without --spec)
+zig build gemma4 -Doptimize=ReleaseFast -- models/gemma-4-26B-A4B-it-UD-Q6_K.gguf \
+  --chat "Why is the sky blue?" --spec
+
+# Greedy decoding, capped reply length, custom stop string
+zig build gemma4 -Doptimize=ReleaseFast -- models/gemma-4-26B-A4B-it-UD-Q6_K.gguf \
+  --chat "List three facts about Mars" --greedy --max 256 --stop "4."
+
+# Encode-only (prints token ids without loading the 22 GB of weights)
+zig build gemma4 -Doptimize=ReleaseFast -- models/gemma-4-26B-A4B-it-UD-Q6_K.gguf \
+  --prompt "Hello world" --tok-only
+
+# Prefill/decode benchmark + per-block profile; logit parity from raw ids
+zig build gemma4 -Doptimize=ReleaseFast -- models/gemma-4-26B-A4B-it-UD-Q6_K.gguf \
+  2,651,235 --bench 3 --profile
+zig build gemma4 -Doptimize=ReleaseFast -- models/gemma-4-26B-A4B-it-UD-Q6_K.gguf \
+  2,651,235 --logits-out /tmp/g4.bin
+```
+
+Sampling flags mirror qwen3 (`--temp --top-k --top-p --min-p --repeat-penalty
+--freq-penalty --presence-penalty --seed --greedy`); `--gen N` does raw token generation,
+`--info` prints the config.
+
+---
+
+## DiffusionGemma 26B-A4B (block text-diffusion) — `zig build diffusion-gemma`
+
+Weights: `diffusiongemma-26B-A4B-it-Q6_K.gguf` from
+[`unsloth/diffusiongemma-26B-A4B-it-GGUF`](https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF)
+(Gemma Terms of Use apply).
+
+Not autoregressive: it denoises 256-token canvases with the entropy-bound sampler
+(defaults from the model: ≤48 steps, temperature 0.8→0.4, bound 0.1) and commits blocks
+autoregressively. Expect a few seconds per denoising step on the 26B MoE; simple answers
+converge in ~7 steps.
+
+On a TTY, chat replies **denoise live inline** — the streaming equivalent for diffusion:
+the reply repaints in place where it belongs in the transcript, with not-yet-accepted
+tokens faint (they "crystallize" as the sampler converges) and a dim trailing status line
+(`… step 3/48 · accepted 201/256 · H̄ 0.522`); when the block finalizes, the clean text
+simply remains, followed by a dim stats trailer. `--no-visual` disables it, `--visual`
+forces it when piped, `--visual-interval N` redraws every Nth step.
+
+```sh
+# Chat (Gemma 4 turn template; reply denoises inline on a TTY)
+zig build diffusion-gemma -Doptimize=ReleaseFast -- models/diffusiongemma-26B-A4B-it-Q6_K.gguf \
+  --chat "Why is the sky blue? Answer in two sentences." --max 256 --seed 42
+
+# --experts=borrow: zero-copy MoE expert load. The Q6_K model otherwise x4-packs
+# ~20 GB on load (this is the slow/swappy default on memory-tight boxes); borrow
+# loads it in ~2.5 s at ~half the RSS. Default pack favors peak throughput.
+zig build diffusion-gemma -Doptimize=ReleaseFast -- models/diffusiongemma-26B-A4B-it-Q6_K.gguf \
+  --chat "Why is the sky blue? Answer in two sentences." --experts=borrow
+
+# Multi-turn interactive REPL (context carries across turns; empty line or Ctrl-D quits;
+# like llama.cpp -cnv, each turn re-encodes the full history)
+zig build diffusion-gemma -Doptimize=ReleaseFast -- models/diffusiongemma-26B-A4B-it-Q6_K.gguf \
+  --repl --system "Answer tersely."
+
+# Longer multi-block generation (each 256-token canvas is re-encoded into the KV cache)
+zig build diffusion-gemma -Doptimize=ReleaseFast -- models/diffusiongemma-26B-A4B-it-Q6_K.gguf \
+  --chat "Write a 400-word short story about a lighthouse keeper." --max 512 --seed 7
+
+# Tune the entropy-bound sampler (higher bound = more tokens accepted per step = faster/riskier)
+zig build diffusion-gemma -Doptimize=ReleaseFast -- models/diffusiongemma-26B-A4B-it-Q6_K.gguf \
+  --chat "..." --steps 32 --entropy-bound 0.2 --t-max 0.9 --t-min 0.4
+
+# Disable self-conditioning (slightly cheaper, usually worse convergence)
+zig build diffusion-gemma -Doptimize=ReleaseFast -- models/diffusiongemma-26B-A4B-it-Q6_K.gguf \
+  --chat "..." --no-sc
+
+# Raw-token block generation (no chat template)
+zig build diffusion-gemma -Doptimize=ReleaseFast -- models/diffusiongemma-26B-A4B-it-Q6_K.gguf \
+  --gen 256 2,818,7217,7412
+
+# Config/tokenizer info without loading weights
+zig build diffusion-gemma -Doptimize=ReleaseFast -- models/diffusiongemma-26B-A4B-it-Q6_K.gguf --info
+
+# Logit-parity harness vs llama.cpp PR #24423's llama-diffusion-gemma-eval
+# (prompt ids + EXACTLY canvas_length=256 canvas ids; dumps raw f32 [256, vocab])
+zig build diffusion-gemma -Doptimize=ReleaseFast -- models/diffusiongemma-26B-A4B-it-Q6_K.gguf \
+  --eval 2,651,235 --canvas <256-comma-separated-ids> \
+  --logits-out /tmp/dg.bin --compare-logits /tmp/oracle.bin
+# add --sc-logits prev.bin to feed a previous step's logits as self-conditioning (temp_inv=1)
+```
+
+Other knobs: `--confidence F` and `--stability N` (the adaptive stop), `--system "..."`,
+`--think`.
+
+---
+
+## Qwen3.5 0.8B (Gated-DeltaNet hybrid) — `zig build qwen35`
+
+Weights: `Qwen3.5-0.8B-Q8_0.gguf` from
+[`unsloth/Qwen3.5-0.8B-GGUF`](https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF).
+
+Loader/parity harness (streaming decode is in the module; the CLI is minimal):
+
+```sh
+zig build qwen35 -Doptimize=ReleaseFast -- models/Qwen3.5-0.8B-Q8_0.gguf
+zig build qwen35 -Doptimize=ReleaseFast -- models/Qwen3.5-0.8B-Q8_0.gguf --info
+zig build qwen35 -Doptimize=ReleaseFast -- models/Qwen3.5-0.8B-Q8_0.gguf --linear-scan chunked
+```
+
+---
+
+## OmniVoice TTS (MaskGIT, voice cloning/design) — `zig build omnivoice`
+
+Weights: `omnivoice-base-{F32,BF16,Q8_0,Q4_K_M}.gguf` +
+`omnivoice-tokenizer-{F32,BF16,Q8_0,Q4_K_M}.gguf` from
+[`Serveurperso/OmniVoice-GGUF`](https://huggingface.co/Serveurperso/OmniVoice-GGUF)
+(GGUF conversions of [k2-fsa/OmniVoice](https://huggingface.co/k2-fsa/OmniVoice); the
+tokenizer GGUF is the Higgs Audio v2 codec — HuBERT + DAC + RVQ). All 16 base×tokenizer
+combinations work. Q8_0 base + F32 tokenizer is the recommended pairing (fastest sane
+quality; the C++ reference's own default). Avoid the reference's BF16 base for speed
+comparisons — ggml's CPU BF16 matmul path is pathologically slow (~470 s vs our ~14 s
+per clip); Fucina runs BF16 at F32-class speed via resident-bf16 weights.
+
+```sh
+# voice design (six attribute categories; see examples/omnivoice/voicedesign.zig for the vocab)
+echo "Hello from Fucina." | zig build omnivoice -Doptimize=ReleaseFast -- tts \
+  --model models/omnivoice/omnivoice-base-Q8_0.gguf \
+  --codec models/omnivoice/omnivoice-tokenizer-F32.gguf \
+  --lang English --instruct "female, young adult, high pitch" --seed 42 -o out.wav
+
+# voice cloning (a 5-15 s reference wav + its transcript; 48 kHz input is resampled)
+echo "Text to speak in the cloned voice." | zig build omnivoice -Doptimize=ReleaseFast -- tts \
+  --model models/omnivoice/omnivoice-base-Q8_0.gguf \
+  --codec models/omnivoice/omnivoice-tokenizer-F32.gguf \
+  --lang English --ref-wav reference.wav --ref-text ref-transcript.txt --seed 42 -o out.wav
+
+# auto voice + chunked long-form (chunk 0 locks the speaker for later chunks)
+zig build omnivoice -Doptimize=ReleaseFast -- tts --model ... --codec ... \
+  --lang English -o out.wav < long-text.txt
+
+# speaker playback (--playback <idx> picks a device; `devices` lists them)
+zig build omnivoice -Doptimize=ReleaseFast -- tts --model ... --codec ... \
+  --lang English --play < text.txt
+
+# stream WAV to stdout as chunks finish ('-o -'); --stream-by-line = one WAV
+# header per input line
+zig build omnivoice -Doptimize=ReleaseFast -- tts --model ... --codec ... \
+  --lang English -o - < long-text.txt | ffplay -autoexit -nodisp -i -
+
+# codec round-trip (wav -> .rvq -> wav) and parity oracles
+zig build omnivoice -Doptimize=ReleaseFast -- codec --model models/omnivoice/omnivoice-tokenizer-F32.gguf -i clip.wav
+zig build omnivoice -Doptimize=ReleaseFast -- codec --model models/omnivoice/omnivoice-tokenizer-F32.gguf -i clip.rvq
+zig build omnivoice -- tts --model ... --codec ... --maskgit-test --duration 3 --lang English -o tokens.bin < text.txt
+```
+
+Determinism: greedy (`--maskgit-test`) and seeded runs are token-exact vs the C++
+reference ([omnivoice.cpp](https://github.com/ServeurpersoCom/omnivoice.cpp)) on F32;
+quantized bases produce equally-valid but *different* token streams — quantizing the
+backbone perturbs activations enough to flip sampling decisions, and the two
+implementations diverge the same way from each other as two quant levels do. CPU perf
+(M1 Max, cool chip, shipped defaults): 2.3–4.6× faster than omnivoice.cpp's CPU backend
+across F32/Q8_0/Q4_K_M design+clone runs.
+
+---
+
+## Parakeet ASR (NeMo FastConformer) — `zig build parakeet`
+
+Weights: [`mudler/parakeet-cpp-gguf`](https://huggingface.co/mudler/parakeet-cpp-gguf) —
+one flat repo with every supported NVIDIA NeMo Parakeet model × quantization
+(f16/q8_0/q6_k/q5_k/q4_k). Start with `tdt_ctc-110m-f16.gguf` (267 MB hybrid, fast) or
+`tdt-0.6b-v3-f16.gguf` (1.44 GB, multilingual). Input is 16 kHz mono WAV.
+
+```sh
+mkdir -p models/parakeet
+hf download mudler/parakeet-cpp-gguf tdt_ctc-110m-f16.gguf --local-dir models/parakeet
+
+# Transcribe a WAV (clean transcript on stdout)
+zig build parakeet -Doptimize=ReleaseFast -- --model models/parakeet/tdt_ctc-110m-f16.gguf \
+  --audio clip.wav --transcribe
+
+# JSON output / per-word timestamps (offline decode only)
+zig build parakeet -Doptimize=ReleaseFast -- --model models/parakeet/tdt_ctc-110m-f16.gguf \
+  --audio clip.wav --transcribe --json --timestamps
+
+# Batch a manifest (one audio path per line)
+zig build parakeet -Doptimize=ReleaseFast -- --model models/parakeet/tdt_ctc-110m-f16.gguf \
+  --manifest files.txt
+
+# Streaming pipeline (cache-aware chunked encode; use a streaming-capable model)
+zig build parakeet -Doptimize=ReleaseFast -- --model models/parakeet/tdt_ctc-110m-f16.gguf \
+  --audio clip.wav --stream
+
+# Live microphone (build the capture backend in with -Dparakeet-mic)
+zig build parakeet -Dparakeet-mic -Doptimize=ReleaseFast -- \
+  --model models/parakeet/tdt_ctc-110m-f16.gguf --mic
+
+# Benchmarks: best-of-N offline timing / streaming RTF + first-token latency
+zig build parakeet -Doptimize=ReleaseFast -- --model ... --audio clip.wav --transcribe --bench-reps 5
+zig build parakeet -Doptimize=ReleaseFast -- --model ... --audio clip.wav --stream-bench --bench-reps 5
+```
+
+Other flags: `--decoder tdt|ctc` (hybrid models), `--lang XX` (multilingual
+prompt-conditioned models; default auto), `--threads N`, `--mic-sim` (feed `--audio`
+through the incremental mic driver), `--compare <stage> <dump>` + `--tol F` (stage-level
+parity vs parakeet.cpp dumps), `--f32-cache`, `--fast-mel`. Running with only `--model`
+prints the config + tensor summary.
+
+Honest perf note: transcription is parity-checked against parakeet.cpp/NeMo, but
+parakeet.cpp is still faster on CPU — on the 110m hybrid, Fucina full-transcribe
+RTF ≈ 0.034 vs parakeet.cpp ≈ 0.021 (M1 Max), a ~1.6× gap. See `BENCHMARK.md`.
+
+---
+
+## LocateAnything-3B (open-vocabulary detection) — `zig build locate-anything`
+
+Give it an image and a text prompt; it returns labeled boxes. Port of
+[mudler/locate-anything.cpp](https://github.com/mudler/locate-anything.cpp)
+(NVIDIA `LocateAnything-3B`: MoonViT vision tower + MLP projector + Qwen2.5-3B;
+detection happens in token space via coordinate tokens). The GGUF uses that
+port's `locateanything.*` schema — build it with the reference converter
+(`scripts/convert_locateanything_to_gguf.py` in the reference repo, f32), or
+quantize the LM matmuls with its CLI (`quantize ... q8_0`); Fucina reads both.
+
+```sh
+# Detect: labeled boxes as JSON (byte-compatible with the reference CLI)
+zig build locate-anything -Doptimize=ReleaseFast -- detect \
+  --model models/locate-anything-f32.gguf --input scene.png \
+  --prompt 'Locate all the instances that matches the following description: cat</c>remote.' \
+  --mode hybrid --output boxes.json
+
+# Decode modes mirror upstream generation_mode: hybrid (parallel box decoding
+# with AR fallback, default), slow (pure autoregressive), fast (MTP-only).
+# --no-early-stop reproduces the reference's full uncapped token stream.
+
+# Parity gates vs a reference dump (tools/ref-patches/la_dump.cpp): exit 1 on any failure
+zig build locate-anything -Doptimize=ReleaseSafe -- compare \
+  --model models/locate-anything-f32.gguf --dump dumps/fixture_dump.gguf \
+  --image parity_image.png --prompt '...' --stage all
+```
+
+PNG input only (the pure-Zig reader; PNG decode is lossless so pixels are
+byte-identical to the reference's stb path).
+
+---
+
+## Neural Amp Modeler — `zig build nam`
+
+Runs standard `.nam` guitar-amp captures (WaveNet/LSTM/ConvNet/Linear, upstream format
+0.5.0–0.7.x). Get profiles from [TONE3000 (formerly ToneHunt)](https://tonehunt.org/) —
+free community captures, no account required — or train your own from a reamp pair.
+Profiles in `./nam-profiles` (or `$FUCINA_NAM_PROFILES`) show up in the interactive menu
+(`zig build nam` with no arguments).
+
+```sh
+# Offline render (matches upstream tools/render); --ir appends a cabinet IR
+zig build nam -Doptimize=ReleaseFast -- render "profile.nam" input.wav output.wav --ir cab.wav
+
+# Live playing through the profile (realtime; `devices` lists audio/MIDI devices)
+zig build nam -Doptimize=ReleaseFast -- live "profile.nam" --ir cab.wav
+zig build nam -- devices
+
+# Inspect / benchmark a profile
+zig build nam -- inspect "profile.nam"
+zig build nam -Doptimize=ReleaseFast -- bench "profile.nam" --blocksize 128
+
+# Train a WaveNet from an input/reamp WAV pair, then validate (reports ESR)
+zig build nam -Doptimize=ReleaseFast -- train --input in.wav --output reamp.wav \
+  --out model.nam --spec standard
+zig build nam -- validate model.nam --input in.wav --output reamp.wav
+
+# Lossless .nam <-> GGUF interchange
+zig build nam -- export-gguf model.nam model.gguf
+```
+
+`zig build nam -- --help` lists the full command set (profile capture, chains, MIDI
+mapping, loopback latency test).
+
+---
+
+## Fine-tune → merge → serve loop
+
+Uses any Qwen3 dense GGUF from the sources above.
+
+```sh
+# LoRA fine-tune a Qwen3 GGUF on CPU (built-in pirate-style SFT set; ~0.9 s/step on 0.6B)
+zig build finetune -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-Q4_K_S.gguf \
+  --steps 30 --rank 8 --alpha 16 --save /tmp/qwen3-lora
+
+# Useful extras: --lr F  --seq-max N  --checkpoint-layers (activation checkpointing)
+#                --load PATH (resume)  --seed N  --verify-grads (gradient-evidence audit)
+#                --accum-steps N (gradient accumulation windows, exact token-weighted; recipe in TRAINING.md §4)
+#                --state-dtype f32|bf16 (bf16 optimizer moments; TRAINING.md §3/§8)
+#                --data PATH.jsonl  --shuffle  --data-seed N (SFT data via src/llm/data.zig;
+#                resume CONTINUES the data order — loader state lives in trainer_state.json)
+
+# Merge the adapters into dense weights (merge needs an f32/f16/bf16 base — a quantized
+# base errors; see the f16 note in "Getting the weights". Merge and --dtype are separate
+# passes by design: one combined pass would chain-requantize.)
+zig build export-gguf -Doptimize=ReleaseFast -- --from-gguf models/Qwen3-0.6B-f16.gguf \
+  --out tuned-f16.gguf --adapters /tmp/qwen3-lora --alpha 16
+
+# Quantize the merged model in a second pass (runs in llama.cpp too)
+zig build export-gguf -Doptimize=ReleaseFast -- --from-gguf tuned-f16.gguf \
+  --out tuned.gguf --dtype q8_0
+
+# Serve the result
+zig build qwen3 -Doptimize=ReleaseFast -- tuned.gguf --chat "Who are you?"
+```
+
+`export-gguf` also re-emits/transcodes without adapters:
+`--dtype f16|bf16|f32|q8_0|q4_k|q5_k|q6_k|verbatim`.
+
+### Gradient-free variant: evolution strategies
+
+`es-finetune` is finetune's ES-at-scale twin (same data/checkpoint plumbing,
+no backward pass, no optimizer state — see `TRAINING.md` §13):
+
+```sh
+# ES fine-tune the LoRA q/v adapters (quantized base is fine — forward passes only).
+# --reward acc = bounded token-accuracy + 0.1*exp(-CE) composite (recommended: cheap AND stable);
+# --reward nll = raw negative CE (loss-comparable with finetune, but unbounded — degrades on
+#                long runs unless paired with --norm centered_ranks and --save-every selection);
+# --reward rule = R1-style rule reward on greedy generations (generation-bound, slower).
+zig build es-finetune -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-Q4_K_S.gguf \
+  --reward acc --iterations 100 --population 8 --batch 5 --sigma 0.02 --save-every 25 \
+  --save /tmp/qwen3-es
+
+# Full-parameter ES (the paper's setting): every resident float weight of the model.
+# Needs an f32/f16/bf16 GGUF — quantized blocks cannot take gaussian noise.
+zig build es-finetune -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-f16.gguf \
+  --mode full --reward nll --iterations 10 --population 4 --batch 2 --sigma 0.001
+
+# Useful extras: --alpha F (default sigma/2)  --noise iid|correlated  --antithetic  --norm z_score|centered_ranks
+#                --restore regenerate|snapshot  --anchor-decay l1|l2 --anchor-lambda F (AWD anti-drift)
+#                --max-new N + --format-prefix/--format-suffix (rule reward)  --load DIR (resume:
+#                (seed, es_iteration) regenerate the population stream)  --data/--shuffle/--data-seed
+```
+
+The lora checkpoint is the same adapters.safetensors finetune writes, so the
+merge → quantize → serve loop above applies unchanged.
+
+---
+
+## GPU offload (`-Dgpu=metal` on macOS, `-Dgpu=cuda` on Linux/NVIDIA)
+
+Two providers share one contract (gates + CPU fallback; `FUCINA_GPU=0` kill
+switch, `FUCINA_GPU_TRACE=1` dispatch tracing). CUDA extras:
+
+```sh
+# Linux/NVIDIA: no CUDA SDK needed at build time (dlopen'd cuBLAS + vendored
+# PTX kernels). Dense quantized prefill offloads automatically; measured on a
+# RTX 5000 Ada laptop + i9-13950HX, Qwen3-4B Q4_K_M, 841-token prompt:
+# prefill 109 -> 190 tok/s vs -Dgpu=none.
+zig build qwen3 -Dgpu=cuda -Doptimize=ReleaseFast -- models/Qwen3-4B-Q4_K_M.gguf --chat "..."
+
+# Experimental decode offload (m<=8 dequant-dot GEMV over resident weights):
+# measured 12.7 -> 33.4 tok/s decode on the same rig. Opt-in while the
+# sampled-token parity oracles run CPU-only.
+FUCINA_GPU_DECODE=1 zig build qwen3 -Dgpu=cuda -Doptimize=ReleaseFast -- models/Qwen3-4B-Q4_K_M.gguf --chat "..."
+
+# CUDA-only env knobs: FUCINA_GPU_TF32=1 (TF32 tensor cores for f32 GEMM,
+# 2.5-3x, changes numerics), FUCINA_GPU_MIN_WORK_TRANSIENT (work floor for
+# non-resident f32 operands), FUCINA_GPU_VRAM_BUDGET (bytes, tracked),
+# FUCINA_GPU_KERNELS=src (NVRTC-recompile the vendored kernels).
+```
+
+### Metal specifics (`-Dgpu=metal`) — what it does and doesn't speed up
+
+```sh
+# Dense f16 models: prefill GEMMs offload automatically — Qwen3-0.6B-f16 pp512
+# measured 488 -> 993 tok/s (2.03x). Decode (m=1) correctly stays on CPU.
+zig build qwen3 -Dgpu=metal -Doptimize=ReleaseFast -- models/Qwen3-0.6B-f16.gguf --chat "..."
+
+# Gemma 4 / DiffusionGemma MoE (Q6_K + Q8_0 experts): the batched expert FFN runs as
+# grouped dequant-in-kernel Metal GEMMs straight off the quantized blocks — no flag
+# needed. On gpu builds the loader also keeps ONE raw expert representation instead
+# of the x4 packs: load drops ~40 s -> seconds, ~24 GB less memory, and CPU decode
+# gets faster too (fewer weight bytes). Measured (M1 Max, macOS 14.6): MoE prefill
+# section ~2.2 s -> ~1.2 s/pass, diffusion ~4.6 s/denoise-step vs 5.8 CPU.
+# macOS 14 re-wires GPU buffers under CPU memory traffic (~0.5 s/pass of the
+# remainder); macOS 15 residency sets should roughly halve the MoE section again.
+zig build gemma4 -Dgpu=metal -Doptimize=ReleaseFast -- models/gemma-4-26B-A4B-it-UD-Q6_K.gguf --chat "..."
+# FUCINA_GPU_MIN_WORK_QMOE=<n> tunes the MoE offload gate (default 2^30 m·n·k/layer);
+# FUCINA_GPU_QMOE_MIN_FILL=<pct> = min 32-row-tile occupancy for GPU MoE dispatch (default 50;
+#   0 restores pre-gate behavior; >100 forces CPU) — mid-batch expert GEMMs run ~1.8-2.4x faster
+#   on CPU when tiles would be mostly empty (measured 2026-07-03, M1 Max);
+# FUCINA_GPU_DEBUG=1 logs per-dispatch wall/gpu/sched times.
+
+# Dense quantized linears (qwen3/gemma Q4_K/Q6_K/Q8_0 prefill projections) DO offload via the
+# dequant-in-kernel gemmQuantNt path (weights.linearSeqQ* -> ExecContext.denseQuantMatmulGpu,
+# Q6_K gated by FUCINA_GPU_MIN_WORK_DENSE_Q6 by default, Q4_K/Q8_0 by FUCINA_GPU_MIN_WORK_QMOE;
+# stable RHS resident-byte wraps; ~+24-33% pp on 0.6B-Q4_K).
+# Q5_K, decode (m=1), and training stay on CPU. For diffusion-gemma, --gpu-f16 additionally
+# dequantizes the dense weights (attn projections, shared FFN, lm head; +~4.6 GB resident):
+zig build diffusion-gemma -Dgpu=metal -Doptimize=ReleaseFast -- models/diffusiongemma-26B-A4B-it-Q6_K.gguf \
+  --chat "..." --gpu-f16
+# Training f32 GEMMs offload automatically when big enough (same 2^30 work gate).
+```
+
+# Global knobs (any runner)
+
+```sh
+# Thread count: default 8 (M1 Max P-cores). Lower at runtime:
+FUCINA_MAX_THREADS=6 zig build qwen3 -Doptimize=ReleaseFast -- ...
+# Raise ABOVE 8 only at build time: -Dmax-threads=N
+
+# GPU GEMM offload (Apple Silicon): big f32/f16 GEMMs, dense quantized linears (Q4_K/Q6_K/Q8_0),
+# and the MoE expert FFN (Q6_K/Q8_0) run on the GPU; decode (m=1) and training stay on CPU
+zig build <step> -Dgpu=metal -Doptimize=ReleaseFast -- ...
+FUCINA_GPU=0 ...              # runtime kill switch
+FUCINA_GPU_MIN_WORK=<n>       # offload threshold override (default 2^30 ≈ 1024³ m·n·k)
+
+# BLAS provider (default accelerate on macOS): -Dblas=none|accelerate|openblas|...
+# Reference backend (slow, for validation): -Dbackend=scalar
+```
+
+Benchmark etiquette: numbers count only in `-Doptimize=ReleaseFast`, on a cool chip,
+best-of-N — see `BENCHMARK.md` before making perf claims.

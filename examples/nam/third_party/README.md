@@ -1,0 +1,1 @@
+miniaudio.h v0.11.25 vendored verbatim from https://github.com/mackron/miniaudio (tag 0.11.25). Dual-licensed public domain (Unlicense) OR MIT-0 — no attribution required; see the header tail for the license text. Compiled once via audio_shim.c with decoding/encoding/generation/resource-manager/engine/node-graph subsystems disabled.

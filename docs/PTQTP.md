@@ -1,0 +1,227 @@
+# PTQTP — Post-Training Quantization to Trit-Planes
+
+Design record. Data-free post-training quantization of weight matrices into
+K ∈ {1,2,3} ternary planes over the TQ2_0 machinery (docs/TERNARY.md).
+Method: arXiv:2509.16989 (Xiao et al.), implemented from the paper's
+formulas; K = 3 is a Fucina capacity extension beyond the paper's dual
+decomposition. No calibration data, no retraining, no gradients: weights
+in, packed trit-planes out.
+
+## The method
+
+Each weight matrix decomposes as `W ≈ Σₖ diag(αₖ)Tₖ` with trit planes
+`Tₖ ∈ {-1,0,+1}` (topology) and one scale per plane per length-256 column
+group (magnitude). Each group is an independent problem, solved by
+alternating:
+
+1. **scales** — closed-form K×K ridge regression `α = (SᵀS + λI)⁻¹Sᵀw`
+   (Gram entries are integer trit counts). λ escalates ×10 from `lambda0`
+   (1e-8) while the Frobenius condition estimate exceeds `kappa_max` (1e6),
+   clamped at `lambda_max` (1.0) — required at init, where all planes start
+   at sign(w) and the unregularized system is singular.
+2. **topology** — per-element exhaustive 3ᴷ-way argmin of
+   `(w − Σₖ αₖcₖ)²` over trit tuples.
+
+A group converges when its scale vector moves less than `epsilon` (1e-4),
+capped at `max_iterations` (50). The candidate order is pinned — zero tuple
+first, sparser before denser, finer planes first, strictly-less
+keeps-first — so exact ties prefer sparser trits, the symmetric init breaks
+deterministically, and the whole solve is bitwise reproducible for any
+thread count (rows fan out with disjoint outputs; per-row stats reduce in
+row order).
+
+Deliberate deltas from the paper:
+
+- **G = 256, packed.** The paper uses G = 128 unpacked. Fucina's group size
+  is the TQ2_0 block width, so each plane is a byte-valid standalone TQ2_0
+  tensor whose per-block fp16 `d` IS the group scale: inference is K stock
+  ternary matmuls plus adds, no new kernels, and every plane is
+  individually llama.cpp-dequantizable. Measured cost of the coarser
+  groups: ~1.3% relative error (`reconstructReference` runs any G for such
+  studies).
+- **fp16 scale rounding at pack time.** |α| is rounded to fp16 first, then
+  one final topology pass runs against the rounded scales — stored trits
+  are elementwise-optimal for exactly the scales inference multiplies by
+  (measured: packed error equals the f32-scale reference to 4 decimals).
+  Packing |α| loses nothing: the candidate set is sign-symmetric.
+- **Non-finite weights** are excluded from the scale regression and forced
+  to trit 0 in every plane — one NaN degrades only itself.
+- **K = 1** is a least-squares upgrade over the blind absmean b1.58
+  encoder; **K = 3** adds a residual plane (27 levels per group, error
+  bound ~1/3 of dual) at +2.06 bpw where applied. Planes are separable by
+  construction: serving fewer planes than were solved is valid.
+
+## Surfaces
+
+- `src/ptqtp.zig` (`fucina.ptqtp`): `solveGroup` (pure, allocation-free),
+  `quantizeMatrix` → `PlanePair` (owns up to three `[]BlockTQ2_0` planes,
+  borrowed `rhs(plane)` matmul views, `reconstructInto`, `MatrixStats` —
+  rel Frobenius error of the served reconstruction, per-plane zero
+  fractions, iteration/convergence counts), `reconstructReference`
+  (arbitrary G, f32 scales, unpacked; the fidelity-study path). Sibling
+  tests pin: exact ternary recovery, byte parity with
+  `quantizeRowTQ2_0ScaledInto` (the layout contract), error ordering
+  K3 < K2 < K1 < absmean, RHS-view matmul equivalence, NaN benignity,
+  determinism, all-zero packing, option/shape validation.
+- `src/llm/weights.zig`: the `LinearWeight` union has a
+  `ptqtp: WeightPtqtp` arm (up to three plane tensors).
+  `LinearWeight.toPtqtp` dequantizes rows in chunks through `getRowsAs` —
+  **any loadable source dtype quantizes through one code path** (f32, f16,
+  bf16, K-quants, legacy, cold formats) — packs the planes, and drops the
+  original storage. `ptqtpEligible` gates on the 256-block contract
+  (in-dim % 256 == 0). `getRowsAs` on the arm returns the dequantized
+  plane sum, so `toResidentF16` doubles as un-decorate. Both LLM trainers'
+  frozen-dot dispatch handles the arm (per-plane frozen dots + adds).
+- **Fused inference entry** (`linearSeqPtqtpFused`, the `linearSeq` fast
+  path for the arm): one Q8_K activation quantization and ONE worker-team
+  dispatch per decorated linear; column-partitioned tasks compute every
+  plane and sum in the fixed plane order. Bitwise identical to a per-plane
+  facade dot chain (pinned by test). Falls back to facade dots for
+  gradient-tracking or non-contiguous inputs. Dispatch granularity is the
+  decode bottleneck this design addresses: per-plane fork-joins cost more
+  than the ternary kernel itself at 1.7B decode shapes.
+- `src/llm/qwen3/model.zig`: `Model.decoratePtqtp(ctx, options)` walks
+  attention q/k/v (split or fused), o_proj, and dense FFN projections in
+  place. `DecoratePtqtpOptions`: `solver` (plane count etc.),
+  `skip_first_layers`/`skip_last_layers` (edge layers stay in source
+  precision — pure configuration, still data-free), `down_planes`/
+  `o_planes` (per-projection plane-count overrides for the sensitive
+  residual-writing projections). Embeddings, lm_head, and norms are not
+  walked; MoE FFNs are counted skipped.
+- **GGUF persistence** (`src/llm/ptqtp_gguf.zig`): a decorated model saves
+  as one byte-valid standalone TQ2_0 tensor per plane — `<name>.ptqtp0/1/2`
+  replaces `<name>`, each plane individually llama.cpp-dequantizable — plus
+  a `fucina.ptqtp.version` metadata key; every other tensor and metadata
+  entry passes through byte-verbatim. Loading pair-detects per tensor
+  (metadata gate first, so undecorated files pay one map lookup; skip-layer
+  tensors inside a decorated file fall through to their base) and rebuilds
+  the `.ptqtp` arm bitwise. Fused in-memory weights persist under their
+  SOURCE tensor names — the solver's per-group independence makes the
+  fused rows' planes byte-identical to solo decoration, so they row-slice
+  out losslessly — and re-fuse at load through `fuseLinear`'s ptqtp arm.
+  `Model.savePtqtpGguf` walks the projections `decoratePtqtp` covers plus
+  the output head; save→load→save is byte-stable. The format invariants —
+  plane replacement, fused row-slicing vs solo decoration, 3-part
+  re-fusion, resave stability, save/load validation errors — are pinned
+  by sibling tests (`ptqtp_gguf_tests.zig`). Decoration thus runs once
+  (`--save`): the saved file serves through the ordinary qwen3 runners —
+  chat CLI, speculation, batch — with no re-decoration. Pair-detection is
+  wired in the qwen3 loaders only; other families do not read decorated
+  files yet.
+- Examples: `zig build ptqtp-spirals` (self-verifying acceptance demo:
+  float-trains an MLP, decorates post-training, PASSes only if dual planes
+  hold accuracy on the deployed int8 path) and `zig build ptqtp-qwen3`
+  (decorate a GGUF in place: `--planes 1|2|3`, `--down-planes/--o-planes N`,
+  `--skip-first/--skip-last N`, `--head-planes N` to decorate the lm_head,
+  `--nll FILE` teacher-forced perplexity before/after, `--save FILE` to
+  persist the decorated model, greedy completion + decode timing).
+
+## Configuration guidance
+
+- **Source precision**: quantize from bf16/f16 originals when available.
+  The from-quantized path (e.g. a Q4_K_M file) works through the same code
+  and degrades gracefully (~15–18% worse ppl), never collapses. f16 vs f32
+  is immaterial (source rounding sits orders below the ternary error
+  floor).
+- **Plane count**: K=3 for accuracy (parity-class, see below); K=2 only
+  with selective K=3 overrides on down_proj/o_proj — model sensitivity to
+  the K=2 error grows sharply with model size (0.6B tolerates it at ×3.2
+  ppl; 1.7B collapses ×17) and concentrates in the residual-writing
+  projections, with a tail spread over q/k/v/gate/up.
+- **lm_head** (`--head-planes`): quality-free at K=3 (measured Δppl ≈ 0).
+  On ARM keep the bf16 head for speed — the ternary GEMV is ALU-bound, so
+  at head shape three planes of int8-dot cost more than streaming bf16
+  through the AMX GEMM; decorate the head when memory or a no-float
+  deployment matters (fully-ternary 1.7B = 1.20 GiB of weights at
+  baseline-parity ppl), or on x86-VNNI where the ~2× per-plane kernel
+  margin flips the economics.
+- **Edge-layer skip**: subsumed by K=3 (buys ~nothing on top); useful as a
+  cheap quality lever for K=2-budget deployments (first layers matter more
+  than last).
+
+## Measured (M1 Max, ReleaseFast; NLL = teacher-forced over 512 held-out tokens)
+
+**Two-spirals MLP** (2→256→256→2 tanh, float-trained to 1.000, w2/w3
+decorated post-training):
+
+| variant | acc (exact-f32 path) | acc (deployed int8 path) | rel err w2 |
+|---|---|---|---|
+| float | 1.000 (CE 0.0042) | — | — |
+| absmean b1.58, 1 plane | 0.670 | 0.670 | — |
+| PTQTP K=1 | 0.644 | 0.644 | 0.474 |
+| **PTQTP K=2** | **1.000** (CE 0.0127) | **1.000** (CE 0.0126) | **0.190** |
+
+Single ternary planes collapse post-hoc; the dual decomposition holds full
+accuracy on the deployed int8 path.
+
+**Perplexity** (all data-free; decoration takes seconds at 0.6B, ~90 s at
+1.7B K=3, multi-threaded):
+
+| model / source | baseline | K=2 | K=2 +down3+o3 | K=3 |
+|---|---|---|---|---|
+| 0.6B f16 | 24.96 | 80.47 | 51.69 | **27.36** |
+| 1.7B Q4_K_M | 19.41 | 330.96 | — | 21.71 |
+| 1.7B BF16 | 18.57 | 184.45 | 45.70 | **18.43** |
+
+K=3 from the bf16 original matches the full-precision baseline at 1.7B
+(statistical parity; the greedy completion is flawless) and lands within
+10% at 0.6B, with weight-space rel err 0.067 on the 27-level bound
+(~1/3 of dual's 0.179). Solver diagnostics at these scales: mean ~17
+iterations, unconverged groups ≤ 0.2%. 0.6B data-free edge-skip curve
+(K=2 base): 1/1 → 69.0, 2/2 → 65.0, 3/3 → 51.6, 4/4 → 46.6.
+
+**Decode speed** (1.7B vs its BF16 original, interleaved runs; fused
+entry):
+
+| config | t/s | vs baseline | ppl |
+|---|---|---|---|
+| bf16 baseline | 20.2–21.0 | 1× | 18.57 |
+| K=2 | 47.1–48.3 | 2.3× | 184 |
+| **K=3** | **39.5–39.8** | **1.9×** | **18.43** |
+| K=3 + K=3 head (fully ternary) | 33.9 | 1.65× | 18.40 |
+| K=2 +down3+o3 | 49.3 | 2.4× | 45.7 |
+
+Against a Q4_K_M baseline (~44–48 t/s at 1.7B) K=2 is speed-parity and
+K=3 ~0.75×; at 0.6B K=2 is ~1.9× the f16 source and parity with Q4_K_M.
+Weights: 1.7B linears 3.2 GiB bf16 → 693 MiB (K=2) / 1040 MiB (K=3).
+Kernel truth is `zig build bench-ternary`: per plane the TQ2_0 kernel is
+~2.1× Q4_K on ARM and ~4.8× on x86-VNNI, so multi-plane configs win
+outright on x86-class VNNI hardware. The ARM kernel is verified at ~86% of
+the NEON ALU roofline (LLVM emits the fully-folded 10-ops-per-64-weights
+sequence; hand asm has ≤14% headroom), and the ARM↔x86 per-instruction gap
+is instruction-set density (sdot 16 weights/instr vs vpdpbusd 32; i8mm
+smmla would close it on ARMv8.6+ targets).
+
+## Limits and future work
+
+- Measured dead ends, recorded so they are not re-chased: sparse exact
+  outlier carry cannot rescue K=2 (carrying the top 1.56% |w| per group
+  exactly improves rel err only 0.184→0.146 vs K=3's 0.069 — the K=2 gap
+  is bulk 9-level resolution, not tails); per-128 packed scales (~1.3%
+  fidelity, needs a block-layout change); E-core threads (even column
+  splits go straggler-bound on heterogeneous cores); custom NEON asm
+  (≤14% under the verified roofline).
+- Decode dispatch: ~140 fork-joins/token remain at 1.7B (linears + attention
+  + norms), worth ~3–5 ms against a ~64 t/s ARM ceiling at K=3. The
+  dependency-respecting fix is a per-layer phase chain
+  (`thread.parallelChained`, `exec/moe_chain.zig` precedent, family-local
+  per the placement policy) — a second decode path with a parity burden;
+  cheaper spin/dispatch-cost tuning should be measured first.
+- Per-row selective third plane (plane3 over a chosen row subset + row
+  index, selection data-free) would shape the K=2↔K=3 frontier finer than
+  the per-projection overrides; unbuilt.
+- The generic facade tq2_0 dot (non-PTQTP consumers) still pays one
+  fork-join per call; the PTQTP path bypasses it via the fused entry.
+- MoE expert stacks (packed inference-only RHS) are not decorated.
+- Calibration-based extensions (activation-weighted solve, mean-correction
+  bias, sample repair, self-calibration) live on the `feat/ptqtp-repair`
+  branch, deliberately out of the data-free mainline.
+- PTQTP-as-init for STE fine-tuning (`dotTernarySte`) is unexplored.
+
+## Provenance
+
+Method: arXiv:2509.16989v3 (PTQTP), reimplemented from Algorithm 1 /
+Eq. 3–10; no reference code existed (the paper's repository link was empty
+at porting time). Substrate: the TQ2_0 kernels, encoders, and block layout
+of docs/TERNARY.md (ggml/llama.cpp lineage — MIT, see
+docs/THIRD-PARTY-NOTICES.md).

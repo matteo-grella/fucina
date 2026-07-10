@@ -1,0 +1,463 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6aeb7f8..62cd56f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -69,6 +69,7 @@ set(PARAKEET_SRC
+     src/audio_io.cpp
+     src/model_loader.cpp
+     src/backend.cpp
++    src/dump.cpp
+     src/ggml_graph.cpp
+     src/fft.cpp
+     src/mel.cpp
+diff --git a/src/ctc_decoder.cpp b/src/ctc_decoder.cpp
+index a5d2e31..93ecd53 100644
+--- a/src/ctc_decoder.cpp
++++ b/src/ctc_decoder.cpp
+@@ -1,6 +1,7 @@
+ #include "ctc_decoder.hpp"
+ #include "ggml_graph.hpp"
+ #include "backend.hpp"
++#include "dump.hpp"
+ #include "ggml.h"
+ #include <cassert>
+ #include <cstring>
+@@ -113,6 +114,9 @@ void CTCDecoder::forward(const std::vector<float>& enc, int d_model, int T,
+ 
+     assert(ok && "ctc_decoder graph failed");
+     (void)ok;
++
++    // Parity dump: CTC log-softmax logits [T, V] (row-major, logits[t*V+v]).
++    pk::dump_f32_2d("ctc_logits", logits.data(), T, V);
+ }
+ 
+ } // namespace pk
+diff --git a/src/dump.cpp b/src/dump.cpp
+new file mode 100644
+index 0000000..25b489e
+--- /dev/null
++++ b/src/dump.cpp
+@@ -0,0 +1,53 @@
++#include "dump.hpp"
++#include <cstdio>
++#include <cstdlib>
++#include <sys/stat.h>
++
++namespace pk {
++
++const std::string& dump_dir() {
++    // C++11 guarantees thread-safe one-time init of function-local statics.
++    static const std::string dir = [] {
++        const char* e = std::getenv("PARAKEET_DUMP_DIR");
++        std::string d = (e && *e) ? std::string(e) : std::string();
++        if (!d.empty()) {
++            // Best-effort single-level create; ignore EEXIST / failures (a bad
++            // path just makes the later fopen() fail and dumps are skipped).
++            ::mkdir(d.c_str(), 0777);
++        }
++        return d;
++    }();
++    return dir;
++}
++
++namespace {
++// Write the PKD1 header + raw little-endian payload. `dtype`: 0=f32, 1=i32.
++void write_pkd(const char* name, int dtype, const int32_t* dims, int ndim,
++               const void* data, size_t nbytes) {
++    if (!dump_enabled()) return;
++    std::string path = dump_dir() + "/" + name + ".pkd";
++    std::FILE* f = std::fopen(path.c_str(), "wb");
++    if (!f) return;
++    const unsigned char magic[4] = {'P', 'K', 'D', '1'};
++    std::fwrite(magic, 1, 4, f);
++    std::fwrite(&dtype, sizeof(int32_t), 1, f);
++    std::fwrite(&ndim, sizeof(int32_t), 1, f);
++    std::fwrite(dims, sizeof(int32_t), (size_t)ndim, f);
++    if (nbytes) std::fwrite(data, 1, nbytes, f);
++    std::fclose(f);
++}
++} // namespace
++
++void dump_f32_2d(const char* name, const float* data, int rows, int cols) {
++    if (!dump_enabled()) return;
++    const int32_t dims[2] = {rows, cols};
++    write_pkd(name, /*dtype=*/0, dims, 2, data, (size_t)rows * cols * sizeof(float));
++}
++
++void dump_i32_1d(const char* name, const int32_t* data, int n) {
++    if (!dump_enabled()) return;
++    const int32_t dims[1] = {n};
++    write_pkd(name, /*dtype=*/1, dims, 1, data, (size_t)n * sizeof(int32_t));
++}
++
++} // namespace pk
+diff --git a/src/dump.hpp b/src/dump.hpp
+new file mode 100644
+index 0000000..f1e2620
+--- /dev/null
++++ b/src/dump.hpp
+@@ -0,0 +1,33 @@
++#pragma once
++// Parity-dump helper (Fucina port). getenv("PARAKEET_DUMP_DIR")-gated: when that
++// env var is set, the transcription pipeline writes intermediate tensors (mel,
++// encoder output, per-step logits) and the decoded token ids to small
++// self-describing binary files so a reimplementation can be checked stage by
++// stage. No effect (zero overhead beyond one getenv) when the var is unset.
++//
++// File format "PKD1" (little-endian; Apple Silicon / x86-64 are native LE):
++//   off  bytes        field
++//   0    4            magic  = {'P','K','D','1'}
++//   4    4 (int32)    dtype  = 0 (f32) | 1 (i32)
++//   8    4 (int32)    ndim   = 1 or 2
++//   12   4*ndim int32 dims[] slowest-varying first (rows, then cols)
++//   ...  n*esz        data   row-major contiguous (esz = 4)
++#include <cstdint>
++#include <string>
++
++namespace pk {
++
++// Cached once per process from getenv("PARAKEET_DUMP_DIR"). Empty => disabled.
++// Creates the directory (best-effort mkdir) on first enabled access.
++const std::string& dump_dir();
++inline bool dump_enabled() { return !dump_dir().empty(); }
++
++// Write a 2-D f32 tensor as PKD1 to <dump_dir>/<name>.pkd. `rows` is the
++// slowest-varying dim (dim0), `cols` the fastest (dim1); `data` must be
++// contiguous row-major with rows*cols elements. No-op when disabled.
++void dump_f32_2d(const char* name, const float* data, int rows, int cols);
++
++// Write a 1-D i32 vector (e.g. decoded token ids) as PKD1. No-op when disabled.
++void dump_i32_1d(const char* name, const int32_t* data, int n);
++
++} // namespace pk
+diff --git a/src/encoder.cpp b/src/encoder.cpp
+index 0f77caa..3a7d1f7 100644
+--- a/src/encoder.cpp
++++ b/src/encoder.cpp
+@@ -4,6 +4,7 @@
+ #include "pos_enc.hpp"
+ #include "ggml_graph.hpp"
+ #include "backend.hpp"
++#include "dump.hpp"
+ #include "graph_builder.hpp"
+ #include "ggml.h"
+ #include <cassert>
+@@ -68,6 +69,10 @@ void Encoder::forward_capture(const std::vector<float>& mel, int n_mels, int T,
+     GraphInputPool pool;
+     Subsampling sub(ml_);
+     int Tp = 0, valid_len = 0, dm_out = 0;
++    // Parity dump (P3.2): capture the subsampling output [d_model, T'] (row-major
++    // [T', d_model]) from the fused encoder graph. No-op unless PARAKEET_DUMP_DIR.
++    std::vector<float> sub_capture;
++    const bool pk_dump = pk::dump_enabled();
+ 
+     bool ok = pk::run_graph(/*mem_bytes*/0, /*n_threads*/0,
+         [&](ggml_context* ctx) -> ggml_tensor* {
+@@ -76,6 +81,7 @@ void Encoder::forward_capture(const std::vector<float>& mel, int n_mels, int T,
+                                              valid_len);
+             dm_out = d_model_;
+             assert((int)x->ne[0] == d_model_);
++            if (pk_dump) pk::capture_graph_output(x, &sub_capture);
+ 
+             // ---- 2. xscaling (gated; off for this model). NeMo scales x. ----
+             if (xscaling_) {
+@@ -118,6 +124,9 @@ void Encoder::forward_capture(const std::vector<float>& mel, int n_mels, int T,
+     assert(ok && "encoder graph failed");
+     (void)ok;
+ 
++    if (pk_dump && !sub_capture.empty())
++        pk::dump_f32_2d("subsampling", sub_capture.data(), Tp, dm_out);
++
+     d_model = dm_out;
+     Tout = Tp;
+ }
+diff --git a/src/mel.cpp b/src/mel.cpp
+index 21d2b24..d6d2cb4 100644
+--- a/src/mel.cpp
++++ b/src/mel.cpp
+@@ -1,6 +1,7 @@
+ #include "mel.hpp"
+ #include "fft.hpp"
+ #include "backend.hpp"
++#include "dump.hpp"
+ #include "ggml.h"
+ #include <cassert>
+ #include <cmath>
+@@ -136,13 +137,23 @@ void MelFrontend::compute(const std::vector<float>& samples,
+     std::vector<float> frame, re, im;
+     std::vector<double> power;
+ 
++    // Parity dump (P2.2): per-frame power spectrum [T, n_bins] (frame-major,
++    // power[t*n_bins+b]). No-op unless PARAKEET_DUMP_DIR.
++    const bool pk_dump = pk::dump_enabled();
++    std::vector<float> dump_power;
++    if (pk_dump) dump_power.resize((size_t)T * k_.n_bins_);
++
+     // Each frame's mel column shares the exact per-frame math with the streaming
+     // front end via MelKernel::frame_logmel (one source of truth). out stride T
+     // writes feats[m*T + t] (feat-major, inner = time).
+     for (int t = 0; t < T; ++t) {
+         const int start = t * hop_;
+         k_.frame_logmel(&padded[start], &feats[t], T, frame, re, im, power);
++        if (pk_dump)
++            for (int b = 0; b < k_.n_bins_; ++b)
++                dump_power[(size_t)t * k_.n_bins_ + b] = (float)power[b];
+     }
++    if (pk_dump) pk::dump_f32_2d("stft_power", dump_power.data(), T, k_.n_bins_);
+ 
+     // ----- Step 7: per-feature normalization (normalize_batch, per_feature) -----
+     // Per mel-bin (row): mean over the first `seq_len` frames, unbiased std
+diff --git a/src/model.cpp b/src/model.cpp
+index 7cd9093..2dedbc4 100644
+--- a/src/model.cpp
++++ b/src/model.cpp
+@@ -17,6 +17,7 @@
+ #include "transcription.hpp"
+ #include "decode_types.hpp"
+ #include "backend.hpp"
++#include "dump.hpp"
+ #include "ggml_graph.hpp"
+ 
+ #include <algorithm>
+@@ -96,6 +97,7 @@ static std::string decode_enc_out(const ModelLoader& loader,
+         else
+             ids = rnnt_greedy(pred, joint, enc_row, Tout, d_model,
+                               (int)cfg.blank_id, max_symbols);
++        pk::dump_i32_1d("token_ids", ids.data(), (int)ids.size());
+         return detokenize(loader.tokenizer_pieces(), ids);
+     } else {
+         CTCDecoder ctc(loader);
+@@ -103,6 +105,7 @@ static std::string decode_enc_out(const ModelLoader& loader,
+         ctc.forward(enc_out, d_model, Tout, logits, vocab_plus_1);
+         std::vector<int32_t> ids = ctc_greedy(logits, Tout, vocab_plus_1,
+                                               (int)cfg.blank_id);
++        pk::dump_i32_1d("token_ids", ids.data(), (int)ids.size());
+         return detokenize(loader.tokenizer_pieces(), ids);
+     }
+ }
+@@ -125,6 +128,8 @@ std::string Model::transcribe_16k(const std::vector<float>& pcm16k,
+         MelFrontend mel(loader_);
+         mel.compute(pcm16k, feats, n_mels, T);
+     }
++    // Parity dump: mel features [n_mels, T] (feat-major, feats[m*T+t]).
++    pk::dump_f32_2d("mel", feats.data(), n_mels, T);
+ 
+     // 2. FastConformer encoder -> enc_out [d_model, Tout] (channels-first).
+     Encoder encoder(loader_);
+@@ -152,6 +157,9 @@ std::string Model::transcribe_16k(const std::vector<float>& pcm16k,
+     //     output with the selected language one-hot before decoding. No-op for
+     //     other models (prompt.present == false).
+     maybe_apply_prompt(loader_, enc_out, d_model, Tout, prompt_index);
++    // Parity dump: final encoder output [d_model, Tout] (channels-first,
++    // enc_out[c*Tout+t]). This is exactly what the decoder consumes.
++    pk::dump_f32_2d("encoder_out", enc_out.data(), d_model, Tout);
+ 
+     // Decide which head to use.
+     const bool use_tdt = (decoder == Decoder::kTDT)
+diff --git a/src/rnnt.cpp b/src/rnnt.cpp
+index 3c32517..4dced09 100644
+--- a/src/rnnt.cpp
++++ b/src/rnnt.cpp
+@@ -1,5 +1,6 @@
+ #include "rnnt.hpp"
+ #include "decode_common.hpp"
++#include "dump.hpp"
+ #include <cassert>
+ #include <cmath>
+ 
+@@ -70,11 +71,26 @@ std::vector<int32_t> rnnt_decode_frames(const PredictionNet& pred, const Joint&
+                 const int32_t last_label = st.have_token ? st.last_token : blank_id;
+                 pred.step(last_label, is_sos, st.state, g, out_state);
+                 g_valid = true;
++                { // P9.3 (Fucina): dump the FIRST predictor output (SOS g) once.
++                    static bool g_dumped = false;
++                    if (pk::dump_enabled() && !g_dumped) {
++                        pk::dump_f32_2d("stream_sos_g", g.data(), 1, (int)g.size());
++                        g_dumped = true;
++                    }
++                }
+             }
+ 
+             // Joint for (t,u): precomputed enc_proj[t] x g -> raw logits [V_plus].
+             joint.step_logits(enc_proj.data() + (size_t)t * H,
+                               g.data(), (int)g.size(), logits);
++            { // P9.5 (Fucina): dump the FIRST joint step's enc_proj + logits once.
++                static bool jd = false;
++                if (pk::dump_enabled() && !jd) {
++                    pk::dump_f32_2d("stream_encproj0", enc_proj.data() + (size_t)t * H, 1, H);
++                    pk::dump_f32_2d("stream_logits0", logits.data(), 1, (int)logits.size());
++                    jd = true;
++                }
++            }
+ 
+             const int k = decode_argmax(logits.data(), token_count);
+ 
+diff --git a/src/streaming.cpp b/src/streaming.cpp
+index 6f07c65..3d6430c 100644
+--- a/src/streaming.cpp
++++ b/src/streaming.cpp
+@@ -1,11 +1,21 @@
+ #include "streaming.hpp"
+ #include "tokenizer.hpp"
+ #include "mel.hpp"
++#include "dump.hpp"
+ #include <algorithm>
+ #include <cassert>
++#include <cstdio>
+ 
+ namespace pk {
+ 
++namespace {
++// P8.2 (Fucina port): streaming parity-dump accumulators, PARAKEET_DUMP_DIR-gated.
++// One --stream invocation == one process: accumulate per-chunk, dump at finalize.
++std::vector<float> g_stream_enc;  // [T'_total, d_model] frame-major, concatenated.
++std::vector<float> g_stream_encout;  // P9.2: PRE-prompt encoder output, concatenated.
++int g_stream_chunk = 0;
++}  // namespace
++
+ StreamingSession::StreamingSession(const ModelLoader& ml, const std::string& target_lang)
+     : ml_(ml), enc_(ml), pred_(ml), joint_(ml), prompt_(ml) {
+     const ParakeetConfig& cfg = ml.config();
+@@ -103,6 +113,15 @@ std::vector<int32_t> StreamingSession::feed_mel_chunk(const std::vector<float>&
+         return {};
+     }
+ 
++    // P9.2 (Fucina port): PRE-prompt encoder output (raw encoder frames, BEFORE
++    // the prompt block below), so the encoder is validated independently of the
++    // prompt projection. For non-prompt models this equals stream_chunk0_out.
++    if (pk::dump_enabled()) {
++        if (g_stream_chunk == 0)
++            pk::dump_f32_2d("stream_chunk0_encout", enc_frames.data(), n_valid, d_model_);
++        g_stream_encout.insert(g_stream_encout.end(), enc_frames.begin(), enc_frames.end());
++    }
++
+     // 1b. Prompt conditioning (nemotron multilingual): project the chunk's
+     //     encoder frames through prompt_kernel for the resolved language before
+     //     the RNN-T decode. The one-hot is constant over time, so applying it
+@@ -123,6 +142,20 @@ std::vector<int32_t> StreamingSession::feed_mel_chunk(const std::vector<float>&
+                 enc_frames[(size_t)t * d_model_ + c] = projected[(size_t)c * n_valid + t];
+     }
+ 
++    // P8.2 (Fucina port): dump the per-chunk streaming reference. PARAKEET_DUMP_DIR-gated.
++    if (pk::dump_enabled()) {
++        const int nm = (n_frames > 0) ? (int)(mel_chunk.size() / (size_t)n_frames) : 0;
++        char nm_buf[48];
++        std::snprintf(nm_buf, sizeof(nm_buf), "stream_mel_chunk%d", g_stream_chunk);
++        pk::dump_f32_2d(nm_buf, mel_chunk.data(), nm, n_frames); // per-chunk mel (P8.5b carry-over)
++        if (g_stream_chunk == 0) {
++            pk::dump_f32_2d("stream_chunk0_mel", mel_chunk.data(), nm, n_frames);
++            pk::dump_f32_2d("stream_chunk0_out", enc_frames.data(), n_valid, d_model_);
++        }
++        g_stream_enc.insert(g_stream_enc.end(), enc_frames.begin(), enc_frames.end());
++        ++g_stream_chunk;
++    }
++
+     // 2. RNN-T greedy over the new encoder frames, carrying the decoder state
+     //    across chunks (do NOT reset). Appends to state_.hyp and returns the ids
+     //    emitted in this chunk, with their LOCAL frame index in [0, n_valid) and
+@@ -197,6 +230,20 @@ std::string StreamingSession::finalize() {
+     // trailing open word is now final too — regroup with flush_all so it becomes
+     // available to drain_words().
+     regroup_words(/*flush_all=*/true);
++    // P8.2 (Fucina port): dump the accumulated streaming encoder output + token ids.
++    if (pk::dump_enabled()) {
++        const int d = d_model_;
++        const int tt = (d > 0) ? (int)(g_stream_enc.size() / (size_t)d) : 0;
++        pk::dump_f32_2d("stream_encoder_out", g_stream_enc.data(), tt, d);
++        const int ttp = (d > 0) ? (int)(g_stream_encout.size() / (size_t)d) : 0;
++        pk::dump_f32_2d("stream_encoder_out_preprompt", g_stream_encout.data(), ttp, d); // P9.2
++        pk::dump_i32_1d("stream_token_ids", non_special_.data(), (int)non_special_.size());
++        int32_t nchunks = g_stream_chunk; // P8.5b: chunk count (last chunk = is_last)
++        pk::dump_i32_1d("stream_nchunks", &nchunks, 1);
++        g_stream_enc.clear();
++        g_stream_encout.clear();
++        g_stream_chunk = 0;
++    }
+     return take_new_text();
+ }
+ 
+diff --git a/src/streaming_encoder.cpp b/src/streaming_encoder.cpp
+index 44f289d..a05fe0b 100644
+--- a/src/streaming_encoder.cpp
++++ b/src/streaming_encoder.cpp
+@@ -4,6 +4,7 @@
+ #include "ggml_graph.hpp"
+ #include "backend.hpp"
+ #include "graph_builder.hpp"
++#include "dump.hpp"
+ #include "ggml.h"
+ #include <cassert>
+ #include <cmath>
+@@ -384,6 +385,7 @@ std::vector<float> StreamingEncoder::step(const std::vector<float>& mel_chunk_fr
+     //         updated caches as captured outputs) -> valid output slice. Computed
+     //         in a SINGLE Backend::compute (vs the old ~5 graphs/layer). ----
+     std::vector<float> out_full;  // [Tc, D] row-major (the final layer output)
++    std::vector<float> sub_dump;  // P8.5 (Fucina): chunk0 post-subsampling input [Tc, D]
+     GraphInputPool pool;
+     bool ok = pk::run_graph(/*mem_bytes*/0, /*n_threads*/0,
+         [&](ggml_context* ctx) -> ggml_tensor* {
+@@ -418,6 +420,10 @@ std::vector<float> StreamingEncoder::step(const std::vector<float>& mel_chunk_fr
+             ggml_tensor* pe = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 2, pe_ne,
+                                   pe_host.data(), pe_host.size() * sizeof(float));
+ 
++            // P8.5 (Fucina): capture the post-subsampling chunk-0 input [Tc, D]
++            // (the conformer layer-stack input), PARAKEET_DUMP_DIR-gated.
++            if (pk::dump_enabled() && step_ == 0) pk::capture_graph_output(x, &sub_dump);
++
+             // Conformer layer stack (conv + attention caches threaded in-graph).
+             const int LP = left_pad_;
+             for (int i = 0; i < n_layers_; ++i) {
+@@ -440,6 +446,8 @@ std::vector<float> StreamingEncoder::step(const std::vector<float>& mel_chunk_fr
+             return x; // [D, Tc] -> row-major [Tc, D]
+         }, out_full);
+     assert(ok && "streaming fused encoder graph failed"); (void)ok;
++    if (pk::dump_enabled() && step_ == 0 && !sub_dump.empty())
++        pk::dump_f32_2d("stream_chunk0_sub", sub_dump.data(), Tc, D); // [Tc, D]
+ 
+     // ---- 4. Commit the captured next-step caches (read back from the graph). ----
+     for (int i = 0; i < n_layers_; ++i) {
+diff --git a/src/tdt.cpp b/src/tdt.cpp
+index 72b5f71..79a3f0a 100644
+--- a/src/tdt.cpp
++++ b/src/tdt.cpp
+@@ -1,5 +1,6 @@
+ #include "tdt.hpp"
+ #include "decode_common.hpp"
++#include "dump.hpp"
+ #include <cassert>
+ #include <cmath>
+ 
+@@ -41,6 +42,11 @@ std::vector<int32_t> tdt_greedy(const PredictionNet& pred, const Joint& joint,
+     PredState out_state;
+     std::vector<float> logits;
+ 
++    // Parity dump: accumulate per-step joint logits [n_steps, V_plus] (raw, in
++    // emission order) and write once at the end. No-op unless PARAKEET_DUMP_DIR.
++    std::vector<float> dump_logits;
++    int dump_steps = 0;
++
+     // Prediction-net output cache: `g`/`out_state` depend only on the committed
+     // (last_token, lstm_state), which change exclusively on an emit (k != blank).
+     // Steps that don't emit reuse the cached forward pass instead of recomputing
+@@ -73,6 +79,11 @@ std::vector<int32_t> tdt_greedy(const PredictionNet& pred, const Joint& joint,
+             joint.step_logits(enc_proj.data() + (size_t)t * H,
+                               g.data(), (int)g.size(), logits);
+ 
++            if (pk::dump_enabled()) {
++                dump_logits.insert(dump_logits.end(), logits.begin(), logits.end());
++                ++dump_steps;
++            }
++
+             // Split: token logits [0, token_count), duration logits [token_count, V_plus).
+             const int k   = decode_argmax(logits.data(), token_count);
+             const int d_k = decode_argmax(logits.data() + token_count, num_dur);
+@@ -114,6 +125,9 @@ std::vector<int32_t> tdt_greedy(const PredictionNet& pred, const Joint& joint,
+         if (symbols_added == max_symbols) t += 1;
+     }
+ 
++    if (dump_steps > 0)
++        pk::dump_f32_2d("tdt_logits", dump_logits.data(), dump_steps, V_plus);
++
+     return hyp;
+ }
+ 

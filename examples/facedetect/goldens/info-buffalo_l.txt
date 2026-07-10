@@ -1,0 +1,10 @@
+face-detect.cpp 0.0.1
+model: models/buffalo_l.gguf
+  arch            : scrfd+arcface
+  detector        : scrfd (input 640, anchors 2)
+  det strides     : [8,16,32]
+  det thresholds  : score=0.50 nms=0.40
+  recognizer      : arcface (input 112, dim 512)
+  verify thresh   : 0.35
+  genderage       : present
+  anti-spoof      : present

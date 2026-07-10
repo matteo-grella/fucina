@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos pinned (not -latest): the label migrates under our feet
+        # (macOS 26 rollout); bump deliberately, with a green run.
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Unit tests (native backend)
+        run: zig build test
+      - name: Build all executables
+        run: zig build
+      - name: Compile bench suite
+        run: zig build bench-check
+      - name: Import-graph check
+        run: zig build arch-check
+      - name: Doc-index link check
+        run: zig build doc-check
+      - name: REFERENCE.md snippet check
+        run: zig build snippet-check
+      - name: Cross-ISA dot parity check
+        run: zig build x86dot-check
+      - name: Unit tests (scalar reference backend)
+        if: matrix.os == 'ubuntu-latest'
+        run: zig build test -Dbackend=scalar
+      - name: Unit tests (no-BLAS native backend)
+        if: matrix.os == 'macos-15'
+        run: zig build test -Dblas=none
