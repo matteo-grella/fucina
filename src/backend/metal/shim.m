@@ -46,9 +46,13 @@ typedef struct {
 
 // variant: 0 = nn, 1 = tn (A stored [k,m]), 2 = nt (B stored [n,k]).
 enum { FUCINA_GEMM_NN = 0, FUCINA_GEMM_TN = 1, FUCINA_GEMM_NT = 2 };
-// dtype: 0 = f32 operands/output; 1 = f16 operands + f16 output staging
-// (the steel kernel accumulates in f32 either way).
-enum { FUCINA_GEMM_F32 = 0, FUCINA_GEMM_F16 = 1 };
+// dtype: 0 = f32 operands/output; 1 = f16 operands + f16 output staging;
+// 2 = f16 operands + direct f32 output. Steel accumulates in f32 for all.
+enum {
+    FUCINA_GEMM_F32 = 0,
+    FUCINA_GEMM_F16 = 1,
+    FUCINA_GEMM_F16_F32 = 2,
+};
 
 // Quantized-weights GEMM formats (ggml_mul_mm.metal). Must mirror
 // metal.QFormat in metal.zig.
@@ -97,7 +101,7 @@ typedef struct {
 @end
 
 #define FUCINA_GEMM_VARIANTS 3
-#define FUCINA_GEMM_DTYPES 2
+#define FUCINA_GEMM_DTYPES 3
 #define FUCINA_GEMM_PIPELINES (FUCINA_GEMM_DTYPES * FUCINA_GEMM_VARIANTS * 8)
 #define FUCINA_WRAP_CACHE 512
 
@@ -110,10 +114,10 @@ typedef struct {
     // Guards lazy pipeline construction. f32 dispatches are not caller-serialized
     // and f16/qmoe use different caller locks, so cache slots need their own lock.
     os_unfair_lock pipeline_lock;
-    // Grow-only f16 output staging (the steel kernel's D dtype matches its
-    // operands; the Zig side widens to f32). Valid until the next f16 call —
-    // the caller serializes f16 GEMMs (metal.zig holds a lock across
-    // call + widen).
+    // Grow-only output staging for the legacy blocking f16 entry. Valid until
+    // its next call; the caller holds f16_lock across dispatch + CPU widen.
+    // The eager async entry uses the mixed f16-input/f32-output steel variant
+    // and binds tensor output storage directly, so it never touches this.
     id<MTLBuffer> f16_out;
     size_t f16_out_cap;
     // Wrap cache for the f16 RHS operand: a fresh bytesNoCopy wrap costs
@@ -125,10 +129,9 @@ typedef struct {
     // during teardown (pool-churned activations are NOT cached).
     struct { uintptr_t base; uintptr_t end; } wrap_keys[FUCINA_WRAP_CACHE];
     id<MTLBuffer> wrap_bufs[FUCINA_WRAP_CACHE];
-    // Guards wrap_keys/wrap_bufs: lookups run under different caller locks
-    // (f16_lock vs qmoe_lock) and fucina_metal_alloc_resident_bytes registers
-    // buffers from concurrent model-loading workers. calloc zero-init ==
-    // OS_UNFAIR_LOCK_INIT.
+    // Guards wrap_keys/wrap_bufs: lookups run from eager async dispatch,
+    // f16_lock/qmoe_lock legacy paths, and concurrent resident allocation
+    // during model loading. calloc zero-init == OS_UNFAIR_LOCK_INIT.
     os_unfair_lock wrap_lock;
     size_t page_size;
     // Quantized grouped GEMM (ggml_mul_mm.metal): one pipeline per format,
@@ -156,6 +159,11 @@ static const char *fucina_gemm_fn_names[FUCINA_GEMM_DTYPES][FUCINA_GEMM_VARIANTS
         "gemm_nn_f16_f16_32_32_16_2_2",
         "gemm_tn_f16_f16_32_32_16_2_2",
         "gemm_nt_f16_f16_32_32_16_2_2",
+    },
+    {
+        "gemm_nn_f16_f32_32_32_16_2_2",
+        "gemm_tn_f16_f32_32_32_16_2_2",
+        "gemm_nt_f16_f32_32_32_16_2_2",
     },
 };
 
@@ -482,6 +490,71 @@ void *fucina_metal_gemm_f32_async(
         [enc setBytes:&batch_shape length:sizeof(batch_shape) atIndex:6];
         [enc setBytes:batch_strides length:sizeof(batch_strides) atIndex:7];
         [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)tiles_n, (NSUInteger)tiles_m, (NSUInteger)batch)
+            threadsPerThreadgroup:MTLSizeMake(32, 2, 2)];
+        [enc endEncoding];
+
+        FucinaMetalTicket *ticket = [[FucinaMetalTicket alloc] init];
+        ticket.command = cmd;
+        ticket.aBuffer = a_buf;
+        ticket.bBuffer = b_buf;
+        ticket.cBuffer = c_buf;
+        [cmd commit];
+        return (__bridge_retained void *)ticket;
+    }
+}
+
+// Eager asynchronous f16 NT GEMM with direct f32 output.  The public tensor
+// result is f32, so this mixed steel instantiation avoids the old shared f16
+// staging buffer, its process lock, and the CPU widening pass.
+void *fucina_metal_gemm_f16_nt_async(
+    void *ctx_opaque,
+    const uint16_t *a, const uint16_t *b, float *c,
+    void *a_wrap, void *b_wrap, void *c_wrap,
+    int64_t m, int64_t n, int64_t k) {
+    FucinaMetalCtx *ctx = (FucinaMetalCtx *)ctx_opaque;
+    if (ctx == NULL || m <= 0 || n <= 0 || k <= 0 ||
+        m > INT32_MAX || n > INT32_MAX || k > INT32_MAX) return NULL;
+    @autoreleasepool {
+        const int bm = 32, bn = 32, bk = 16;
+        id<MTLComputePipelineState> pipeline =
+            fucina_gemm_pipeline(ctx, FUCINA_GEMM_F16_F32, FUCINA_GEMM_NT,
+                                 m % bm == 0, n % bn == 0, k % bk == 0);
+        if (pipeline == nil) return NULL;
+
+        size_t a_len = (size_t)m * (size_t)k * sizeof(uint16_t);
+        size_t b_len = (size_t)n * (size_t)k * sizeof(uint16_t);
+        size_t c_len = (size_t)m * (size_t)n * sizeof(float);
+        size_t a_off, b_off, c_off;
+        id<MTLBuffer> a_buf = fucina_buffer_from_storage_wrap(ctx, a_wrap, a, a_len, &a_off);
+        id<MTLBuffer> b_buf = fucina_buffer_from_storage_wrap(ctx, b_wrap, b, b_len, &b_off);
+        id<MTLBuffer> c_buf = fucina_buffer_from_storage_wrap(ctx, c_wrap, c, c_len, &c_off);
+        if (a_buf == nil || b_buf == nil || c_buf == nil) return NULL;
+
+        int32_t tiles_n = (int32_t)((n + bn - 1) / bn);
+        int32_t tiles_m = (int32_t)((m + bm - 1) / bm);
+        FucinaGEMMParams params = {
+            .M = (int32_t)m, .N = (int32_t)n, .K = (int32_t)k,
+            .lda = (int32_t)k, .ldb = (int32_t)k, .ldd = (int32_t)n,
+            .tiles_n = tiles_n, .tiles_m = tiles_m,
+            .batch_stride_a = 0, .batch_stride_b = 0, .batch_stride_d = 0,
+            .swizzle_log = 0,
+            .gemm_k_iterations_aligned = (int32_t)(k / bk),
+            .batch_ndim = 1,
+        };
+        int32_t batch_shape = 1;
+        size_t batch_strides[2] = { 0, 0 };
+
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBufferWithUnretainedReferences];
+        if (cmd == nil) return NULL;
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:a_buf offset:a_off atIndex:0];
+        [enc setBuffer:b_buf offset:b_off atIndex:1];
+        [enc setBuffer:c_buf offset:c_off atIndex:3];
+        [enc setBytes:&params length:sizeof(params) atIndex:4];
+        [enc setBytes:&batch_shape length:sizeof(batch_shape) atIndex:6];
+        [enc setBytes:batch_strides length:sizeof(batch_strides) atIndex:7];
+        [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)tiles_n, (NSUInteger)tiles_m, 1)
             threadsPerThreadgroup:MTLSizeMake(32, 2, 2)];
         [enc endEncoding];
 
@@ -849,6 +922,86 @@ static id<MTLComputePipelineState> fucina_qmm_pipeline(FucinaMetalCtx *ctx, int 
     ctx->qmm_pipelines[format] = pipeline;
     os_unfair_lock_unlock(&ctx->pipeline_lock);
     return pipeline;
+}
+
+// Eager asynchronous dense/shared-input quantized NT GEMM. Unlike the MoE
+// protocol below, ordinary tensor input/output storage is wrapped directly:
+// no shared panels, CPU memcpy, process lock, or immediate wait. A compact
+// <=4 KiB tile table is copied into command-buffer-owned setBytes storage.
+void *fucina_metal_gemm_q_dense_nt_async(
+    void *ctx_opaque, int format,
+    const void *rhs_bytes, int64_t rhs_len,
+    int64_t nb01, int64_t nb02,
+    const float *a, float *c,
+    void *a_wrap, void *c_wrap,
+    int64_t batch_count, int64_t m, int64_t n, int64_t k) {
+    enum { max_dense_tiles = 256 };
+    FucinaMetalCtx *ctx = (FucinaMetalCtx *)ctx_opaque;
+    if (ctx == NULL || format < 0 || format >= FUCINA_QMM_FORMATS ||
+        rhs_bytes == NULL || rhs_len <= 0 || a == NULL || c == NULL ||
+        batch_count <= 0 || m <= 0 || n <= 0 || k <= 0 ||
+        batch_count > INT32_MAX || m > INT32_MAX || n > INT32_MAX || k > INT32_MAX) return NULL;
+    int64_t n_tiles = (m + 31) / 32;
+    if (n_tiles <= 0 || n_tiles > max_dense_tiles) return NULL;
+    if ((uint64_t)m > SIZE_MAX / (uint64_t)k / sizeof(float) ||
+        (uint64_t)batch_count > SIZE_MAX / (uint64_t)m ||
+        (uint64_t)(batch_count * m) > SIZE_MAX / (uint64_t)n / sizeof(float)) return NULL;
+
+    @autoreleasepool {
+        id<MTLComputePipelineState> pipeline = fucina_qmm_pipeline(ctx, format);
+        if (pipeline == nil) return NULL;
+
+        size_t a_len = (size_t)m * (size_t)k * sizeof(float);
+        size_t c_len = (size_t)batch_count * (size_t)m * (size_t)n * sizeof(float);
+        size_t a_off, c_off, w_off;
+        id<MTLBuffer> a_buf = fucina_buffer_from_storage_wrap(ctx, a_wrap, a, a_len, &a_off);
+        id<MTLBuffer> c_buf = fucina_buffer_from_storage_wrap(ctx, c_wrap, c, c_len, &c_off);
+        // This ABI is only used for stable GGUF/model weights. Registering the
+        // mapping once is therefore safe and removes dispatch-time page wiring.
+        id<MTLBuffer> w_buf = fucina_wrap_cached(ctx, rhs_bytes, (size_t)rhs_len, &w_off);
+        if (a_buf == nil || c_buf == nil || w_buf == nil) return NULL;
+
+        FucinaQMMArgs args = {
+            .ne00 = (int32_t)k,
+            .ne01 = (int32_t)n,
+            .nb01 = (uint64_t)nb01,
+            .nb02 = (uint64_t)nb02,
+        };
+        FucinaQMMTile tiles[max_dense_tiles];
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBufferWithUnretainedReferences];
+        if (cmd == nil) return NULL;
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:pipeline];
+        [enc setBytes:&args length:sizeof(args) atIndex:0];
+        [enc setBuffer:w_buf offset:w_off atIndex:1];
+        [enc setBuffer:a_buf offset:a_off atIndex:2];
+        [enc setThreadgroupMemoryLength:8192 atIndex:0];
+        for (int64_t bi = 0; bi < batch_count; bi++) {
+            for (int64_t ti = 0; ti < n_tiles; ti++) {
+                tiles[ti] = (FucinaQMMTile){
+                    .expert = (int32_t)bi,
+                    .base_row = 0,
+                    .m = (int32_t)m,
+                    .tile_m = (int32_t)ti,
+                };
+            }
+            [enc setBytes:tiles length:(NSUInteger)n_tiles * sizeof(FucinaQMMTile) atIndex:3];
+            [enc setBuffer:c_buf
+                    offset:c_off + (NSUInteger)bi * (NSUInteger)m * (NSUInteger)n * sizeof(float)
+                   atIndex:4];
+            [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)n_tiles, (NSUInteger)((n + 63) / 64), 1)
+                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        }
+        [enc endEncoding];
+
+        FucinaMetalTicket *ticket = [[FucinaMetalTicket alloc] init];
+        ticket.command = cmd;
+        ticket.aBuffer = a_buf;
+        ticket.bBuffer = w_buf;
+        ticket.cBuffer = c_buf;
+        [cmd commit];
+        return (__bridge_retained void *)ticket;
+    }
 }
 
 // Grouped quantized NT GEMM over the staged panels: for every tile t,

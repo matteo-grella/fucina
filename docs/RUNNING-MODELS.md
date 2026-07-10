@@ -699,8 +699,8 @@ zig build gemma4 -Dgpu=metal -Doptimize=ReleaseFast -- models/gemma-4-26B-A4B-it
 
 # Dense quantized linears (qwen3/gemma Q4_K/Q6_K/Q8_0 prefill projections) DO offload via the
 # dequant-in-kernel gemmQuantNt path (weights.linearSeqQ* -> ExecContext.denseQuantMatmulGpu,
-# Q6_K gated by FUCINA_GPU_MIN_WORK_DENSE_Q6 by default, Q4_K/Q8_0 by FUCINA_GPU_MIN_WORK_QMOE;
-# stable RHS resident-byte wraps; ~+24-33% pp on 0.6B-Q4_K).
+# per-format FUCINA_GPU_MIN_WORK_DENSE_Q4/Q6/Q8 gates against the packed CPU fallback;
+# stable RHS residency; eager submit with deferred host visibility; ~+24-33% pp on 0.6B-Q4_K).
 # Q5_K, decode (m=1), and training stay on CPU. For diffusion-gemma, --gpu-f16 additionally
 # dequantizes the dense weights (attn projections, shared FFN, lm head; +~4.6 GB resident):
 zig build diffusion-gemma -Dgpu=metal -Doptimize=ReleaseFast -- models/diffusiongemma-26B-A4B-it-Q6_K.gguf \
@@ -715,11 +715,12 @@ zig build diffusion-gemma -Dgpu=metal -Doptimize=ReleaseFast -- models/diffusion
 FUCINA_MAX_THREADS=6 zig build qwen3 -Doptimize=ReleaseFast -- ...
 # Raise ABOVE 8 only at build time: -Dmax-threads=N
 
-# GPU GEMM offload (Apple Silicon): big f32/f16 GEMMs, dense quantized linears (Q4_K/Q6_K/Q8_0),
-# and the MoE expert FFN (Q6_K/Q8_0) run on the GPU; decode (m=1) and training stay on CPU
+# GPU GEMM offload: big f32/f16 GEMMs, dense quantized linears (Q4_K/Q6_K/Q8_0),
+# and the MoE expert FFN (Q6_K/Q8_0) run on the GPU. Metal quantized decode and training stay
+# on CPU; CUDA resident f16 decode can offload, while quantized decode remains opt-in.
 zig build <step> -Dgpu=metal -Doptimize=ReleaseFast -- ...
 FUCINA_GPU=0 ...              # runtime kill switch
-FUCINA_GPU_MIN_WORK=<n>       # offload threshold override (default 2^30 ≈ 1024³ m·n·k)
+FUCINA_GPU_MIN_WORK=<n>       # f32 override (Metal default 2^32; CUDA base 2^30 plus residency policy)
 
 # BLAS provider (default accelerate on macOS): -Dblas=none|accelerate|openblas|...
 # Reference backend (slow, for validation): -Dbackend=scalar

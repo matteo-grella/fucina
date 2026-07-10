@@ -1046,54 +1046,11 @@ pub fn matmulTransB2DIntoUncheckedF16OperandsWithConfig(
     config: ParallelConfig,
 ) void {
     if (comptime build_options.use_gpu) {
-        if (gpu.shouldUseGpuF16(m, n, k)) {
-            const a_data = a.buffer.data[a.offset..][0 .. m * k];
-            const b_data = b.buffer.data[b.offset..][0 .. n * k];
-            // The shim's f16 output staging is shared across calls: hold the
-            // lock across the GEMM and the widen of its result.
-            gpu.f16_lock.lock();
-            defer gpu.f16_lock.unlock();
-            // This is a generic Tensor backend path: B may be a model weight,
-            // a public Tensor temporary, or an exec-scope value. Use an
-            // uncached wrap unless a future storage-level resident marker can
-            // prove process-lifetime stability.
-            if (gpu.gemmF16Nt(a_data, b_data, m, n, k, false)) |staging| {
-                widenF16IntoWithConfig(contiguousData(out, m * n), staging, config);
-                return;
-            }
+        if (gpu.shouldUseGpuF16ForRhs(b, m, n, k)) {
+            if (gpu.gemmF16NtAsync(a, b, out, m, n, k)) return;
         }
     }
     vector.matmulTransB2DIntoUncheckedF16OperandsWithConfig(out, a, b, m, n, k, config);
-}
-
-const WidenF16Task = struct {
-    dst: []f32,
-    src: []const f16,
-};
-
-fn runWidenF16Task(task: *const WidenF16Task) void {
-    for (task.dst, task.src) |*d, s| d.* = s;
-}
-
-/// Widen the GPU's f16 result staging into the f32 output, split over the
-/// work pool (an lm-head-sized result is ~67M elements).
-fn widenF16IntoWithConfig(dst: []f32, src: []const f16, config: ParallelConfig) void {
-    const pool = config.pool orelse {
-        runWidenF16Task(&.{ .dst = dst, .src = src });
-        return;
-    };
-    const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), @max(1, dst.len / (1 << 16)));
-    if (task_count <= 1) {
-        runWidenF16Task(&.{ .dst = dst, .src = src });
-        return;
-    }
-    var tasks: [parallel.vector_max_threads]WidenF16Task = undefined;
-    for (0..task_count) |t| {
-        const start = t * dst.len / task_count;
-        const end = (t + 1) * dst.len / task_count;
-        tasks[t] = .{ .dst = dst[start..end], .src = src[start..end] };
-    }
-    pool.parallelChunks(WidenF16Task, tasks[0..task_count], runWidenF16Task);
 }
 
 pub fn matmulTransB2DIntoUncheckedBf16RhsWithConfig(

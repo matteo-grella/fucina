@@ -457,6 +457,7 @@ protocol and thermal discipline in [`BENCHMARK.md`](BENCHMARK.md)):
 | `bench-f16gemm` | f16 TransB GEMM parallel efficiency (Qwen3 shapes). |
 | `bench-gemm` | Large-shape f32 GEMM: row kernels vs blocked packed kernel vs BLAS. |
 | `bench-gpu-dispatch` | CPU CBLAS vs blocking/async eager GPU GEMM/GEMV: host-visible latency, submit latency, queued throughput, and parity. |
+| `bench-gpu-formats` | Fucina f16/load-time-packed quant CPU kernels vs eager GPU f16/Q4_K/Q6_K/Q8_0 LLM linears: host-visible latency, submit latency, queued throughput, and parity. |
 | `bench-q5kmoe` | Q5_K MoE-expert matmul variants. |
 | `bench-ternary` | TQ2_0 ternary matmul: hot sdot/vpdpbusd tiles vs cold table path, f32 path, Q4_K, dense f32. |
 | `bench-facade` | Raw tensor ops vs the public no-grad `Tensor` facade. |
@@ -678,10 +679,13 @@ values. On Linux without libc the lookup scans `/proc/self/environ`
 | `FUCINA_GPU` | Kill switch: a value starting with `0` disables the GPU provider entirely. | enabled on `-Dgpu` builds |
 | `FUCINA_GPU_MIN_WORK` | Base f32 GEMM offload gate, in m·n·k work units. | Metal `2^32` (cold single-op crossover); CUDA `2^30` (the transient floor below still dominates ordinary host RHS) |
 | `FUCINA_GPU_MIN_WORK_F16` | f16 GEMM gate. | `2^27` (lower — the CPU f16 competitor has no AMX-class arm) |
+| `FUCINA_GPU_MIN_WORK_F16_RESIDENT` (cuda) | f16 GEMM/GEMV gate when the RHS already has a device address; permits small-m decode without admitting a streamed weight. | `2^20` |
 | `FUCINA_GPU_MIN_WORK_GEMV` | Resident dense-f32 GEMV/small-m GEMM gate (`m <= 8`; nonresident CUDA RHS is refused). | `2^24` |
 | `FUCINA_GPU_MIN_WORK_RESIDENT` (cuda) | Dense-f32 GEMM/batched-GEMM gate when the RHS already has a device address. | `2^27` (512³; 256³ loses to OpenBLAS-32 on the reference host) |
 | `FUCINA_GPU_MIN_WORK_QMOE` | Grouped quantized MoE GEMM gate; setting it also re-seeds the dense-Q6 gate. | `2^30` |
-| `FUCINA_GPU_MIN_WORK_DENSE_Q6` | Dense quantized (Q6_K-class) linear gate. | `2^22` (tuned on Parakeet 110M) |
+| `FUCINA_GPU_MIN_WORK_DENSE_Q4` | Dense Q4_K model-weight gate against the load-time-packed CPU fallback. | Metal `2^30`; CUDA `2^27` |
+| `FUCINA_GPU_MIN_WORK_DENSE_Q6` | Dense Q6_K gate; overrides both the compact/raw and packed-CPU tiers. | compact/raw `2^22`; packed Metal `2^31`, CUDA `2^24` |
+| `FUCINA_GPU_MIN_WORK_DENSE_Q8` | Dense Q8_0 model-weight gate against the load-time-packed CPU fallback. | Metal `2^29`; CUDA `2^24` |
 | `FUCINA_GPU_QMOE_MIN_FILL` | Tile-occupancy gate (percent) for grouped MoE: small expert batches whose 32-row tiles would run mostly empty stay on CPU; `0` disables the gate, `>100` never passes it. | `50` |
 | `FUCINA_GPU_TRACE` | Non-`0` first character enables dispatch tracing; dump via `fucina.internal.gpu.traceDump()` (no-op when off). | off |
 | `FUCINA_GPU_TF32` (cuda) | Non-`0` opts f32 GEMMs into TF32 tensor cores (default is strict FP32). | off |
@@ -5076,7 +5080,7 @@ What is not:
 
 - **Op execution, scope open/close, and every other context mutation are
   single-threaded**: drive one `ExecContext` from one thread at a time. CPU
-  ops fan work out to the team and join before returning. Eligible dense-f32
+  ops fan work out to the team and join before returning. Eligible f32/f16/dense-quant
   GPU ops submit before return and keep program order through their provider
   queue/stream; a later CPU access performs the storage readiness wait. The
   external call order remains serial.
@@ -7031,7 +7035,7 @@ MoE fill gate, tracing, TF32, the transient floor, VRAM budget, kernel
 source, and the decode opt-in — are all read once at first use and are
 tabulated with their defaults in §2.6.
 
-The dense-f32 implementation and its ordering/teardown contract are described
+The eager f32/f16/dense-quant implementation and its ordering/teardown contract are described
 in [GPU-OFFLOAD.md](GPU-OFFLOAD.md). Both providers keep their queue/streams
 and library state open across calls. Metal additionally caches storage page
 wrappers; CUDA uses a bounded eight-slot device pool, registers pooled host
@@ -7050,16 +7054,22 @@ by the ObjC shim (`src/backend/metal/shim.m`): the MLX "steel" f32/f16 GEMM
   (`gemmF32Async`/`gemmBatchedF32Async`; a batched call is ONE dispatch with
   grid depth = batch), behind the general or resident-small-m gate. The direct
   slice `gemmF32` twin is blocking for parity/benchmarks.
-- **f16 NT GEMM** (`gemmF16Nt`) behind `shouldUseGpuF16`: returns a shared
-  f16 staging buffer valid until the next f16 call; callers hold the public
-  `f16_lock` across the GEMM and the widen of its result (native.zig widens
-  to f32 across the pool).
+- **f16 NT GEMM** (`gemmF16NtAsync`) behind `shouldUseGpuF16ForRhs`: the
+  mixed steel instantiation reads f16 operands and writes the public f32
+  output directly. It commits immediately and attaches a Work; there is no
+  shared staging buffer, f16 lock, CPU widen pass, or result re-rounding. The
+  old direct-slice `gemmF16Nt` remains blocking only for low-level parity
+  tests/bench callers.
 - **Dense quantized prefill** (Q4_K/Q6_K/Q8_0): exec's
   `denseQuantMatmulGpu` seam (`src/exec/quant_matmul.zig`) offloads
-  `m ≥ 32` matmuls behind `shouldUseGpuDenseQuant` when
+  `m ≥ 32` stable-weight matmuls behind the compact/raw or packed-CPU
+  per-format gate when
   `k % QFormat.kMultiple() == 0` (32 for q8_0, 256 for q4_k/q6_k) and
-  `n % 4 == 0`, chunking rows into balanced ≤ 2048-row dispatches (the
-  providers' trivial tile tables hold 64 × 32-row tiles).
+  `n % 4 == 0`. `gemmQuantNtAsync` binds input/output tensor storage
+  directly and copies its ≤4 KiB tile table into command-owned bytes (up to
+  8192 rows); shared-input batches encode multiple weight matrices without
+  replicating input rows. Transient RHS or longer prompts retain the blocking
+  chunk fallback.
 - **MoE expert FFN** (llm tier, `src/llm/gemma/moe.zig`): CPU gathers
   activation rows into shared staging panels (`qmoeStage`, grow-only
   MTLBuffers), dispatches grouped tile-table GEMMs (`gemmQGroupedNt`, one
@@ -7074,10 +7084,10 @@ is a performance cache, not a correctness precondition — pageable client
 wraps are re-wired into the GPU address space on every commit (~45 µs/MB), so
 stable weights should live resident. The provider keeps a bounded
 address-keyed registry (512 ranges) so dispatch paths recognize resident
-operands without caller flags. Dense f32 additionally owns one page wrapper
-on each storage allocation; pooled reuse changes values, not the mapping, and
-the wrapper is evicted before the allocation is freed. F16/quantized stable
-host pages retain the bounded address-keyed shim cache. The stale-pages rule
+operands without caller flags. Dense f32/f16 inputs and f32 outputs own one
+page wrapper on each storage allocation; pooled reuse changes values, not the
+mapping, and the wrapper is evicted before the allocation is freed. Quantized
+stable weight pages retain the bounded address-keyed shim cache. The stale-pages rule
 is absolute: only bytes whose address is process-lifetime-stable may be
 flagged cacheable
 (`RhsLifetime.stable_process`) — a cached wrap of a freed-and-reused page
@@ -7118,13 +7128,21 @@ direct asynchronous DMA. What offloads:
   compute, and D2H overlap on their three lanes; the final D2H lands directly
   in the ordinary exec-owned output (a pinned-stage fallback remains for a
   host allocator the driver cannot register).
-- **f16 NT GEMM** via `cublasGemmEx` (f16 operands, f32 accumulate), pinned
-  host staging under the same `f16_lock` contract as Metal. No transient
-  floor — f16 halves the PCIe bytes and the CPU competitor is slow.
-- **Quantized prefill + grouped MoE** (Q4_K/Q6_K/Q8_0): the exact tile-table
-  protocol of the Metal provider (`qmoeStage` panels are pinned host memory
-  with device twins; `gemmQGroupedNt`; `qmoe_lock`), same numerics contract,
-  so the same parity tiers apply.
+- **f16 NT GEMM** via `cublasGemmEx` (f16 operands, direct f32 output and f32
+  accumulation) through the same eight async slots and three persistent lanes
+  as f32. Resident RHS decode uses the separate `2^20` gate; transient decode
+  is refused, while streamed prefill retains the `2^27` gate.
+- **Dense quantized prefill** (Q4_K/Q6_K/Q8_0): stable RHS bytes resolve to one
+  managed resident allocation. `gemmQuantNtAsync` reuses the slot's activation,
+  output, pinned-tile, and device-tile buffers; a pending f32 producer passes
+  its device address directly. Shared-input batches launch each weight matrix
+  on the same stream without copying activation rows. Host download is deferred
+  to the output Work.
+- **Grouped MoE** uses the same tile kernel but keeps its required CPU phase
+  boundaries (`qmoeStage`, `qmoe_lock`). Panel/tile H2D, compute, and panel D2H
+  are now event-chained across persistent streams; the CPU performs one final
+  fence when GeGLU/scatter needs the result, rather than synchronizing compute
+  and then starting a blocking download.
 - **Fused prefill attention** (`attnPrefillF16`): online-softmax grouped
   attention over f16 KV with the CPU tiled kernel's exact semantics
   (absolute positions, pre-clamped sliding window, causal or bidirectional,
@@ -7624,12 +7642,16 @@ and `matmul2DWithQuantizedBlocksRhs` /
 `matmul2DWithQuantizedBlocksRhsOptions` (the blocks-slice variants accept
 q8_0/q4_k/q5_k/q6_k only). The facade `dot` always uses the default
 transient/`allow_gpu`-when-not-training options — a `.transient` RHS may
-still dispatch on the GPU, but no address-keyed wrap survives the call.
-`fucina_llm`'s weight wrappers thread `.stable_process` through when they
-register GPU-resident weights (§13). The GPU arm itself
-(q4_k/q6_k/q8_0; prefill `m >= 32` behind a flops-tuned work gate, chunked
-at 2048 rows per dispatch; decode `m <= 8` behind a provider opt-in GEMV
-gate) is §9 material.
+still use the provider's blocking GPU path, but no address-keyed wrap survives
+the call and the borrowed bytes cannot be retained by an async command.
+`fucina_llm`'s weight wrappers thread `.stable_process` through for resident
+or mmap'd weights (§13); that lifetime first tries the direct-output async
+path (Metal and CUDA support up to 8192 activation rows per dense-quant
+submission) and falls back to balanced blocking chunks of at most 2048 rows
+when necessary. Q4_K/Q6_K/Q8_0 prefill uses provider- and format-specific work
+gates calibrated against the actual compact/raw or load-time-packed CPU
+fallback. Decode `m <= 8` remains behind the provider's explicit GEMV opt-in.
+The complete GPU contract is §9.
 
 ### 10.5 LHS activation quantization (`src/backend/quant/q8k.zig`, `src/backend/cpu.zig`, `src/backend/native.zig`)
 

@@ -181,7 +181,7 @@ Backends:
   matmul), `src/backend/ops.zig` (shared op enums),
   `src/backend/quant_tables.zig` (GGML lookup tables).
 - `src/backend/metal.zig` + `src/backend/metal/`: the `-Dgpu=metal` GPU GEMM
-  provider — Zig host (lazy init, persistent queue, eager-async dense-f32
+  provider — Zig host (lazy init, persistent queue, eager-async f32/f16/dense-quant
   completion, work-threshold gates, device-owned weight storage,
   storage-lifetime page wrappers) plus the ObjC shim (`shim.m`) and
   vendored kernels (`mlx_gemm.metal` f32/f16, `ggml_mul_mm.metal`
@@ -189,7 +189,7 @@ Backends:
 - `src/backend/cuda.zig` + `src/backend/cuda/`: the Linux/NVIDIA provider —
   dlopen'd driver/cuBLAS, persistent upload/compute/download streams, a
   bounded reusable in-flight slot pool and storage-lifetime host registration
-  for eager-async dense f32, managed weight residency, and vendored PTX
+  for eager-async f32/f16/dense quant, managed weight residency, and vendored PTX
   quant/GEMV/attention kernels.
 - `src/x86dot_check.zig`: standalone cross-ISA parity checker for the int8 dot
   primitives + Q4_K/Q8_0 dot kernels (per-arm coverage table in its header).
@@ -393,17 +393,22 @@ the quantized paths. On `-Dgpu=metal` builds, f32/f16 GEMM gates in
 `native.zig` and the quantized/MoE entries in the exec layer offload
 above-threshold work to `src/backend/metal.zig`.
 
-Dense f32 GPU calls are eagerly submitted but are not synchronously joined at
-every op return. Output storage carries a completion token: another GPU GEMM
-stays queue-ordered (CUDA can consume the producer device pointer), while the
-first CPU data access waits for host visibility. Final release waits before
-recycling but skips an unused D2H. Metal caches a page wrapper per storage
-allocation; CUDA pools eight in-flight device slots behind persistent
+Dense f32, f16, and stable-weight Q4_K/Q6_K/Q8_0 GPU calls are eagerly
+submitted but are not synchronously joined at every op return. Output storage
+carries a completion token: another GPU GEMM stays queue-ordered (CUDA can
+consume the producer device pointer), while the first CPU data access waits
+for host visibility. F16 kernels write the public f32 output directly; dense
+quantized linears bind exec input/output storage instead of copying through
+the grouped-MoE panels. Final release waits before recycling but skips an
+unused D2H. Metal caches a page wrapper per storage allocation; CUDA pools
+eight in-flight typed device/tile slots behind persistent
 upload/compute/download streams and uses storage-lifetime page registration so
 DMA lands directly in exec-owned tensors. Reusable events and one cuBLAS handle
-order the lanes. This is completion tracking for commands that already exist,
-not deferred execution or a graph; see `docs/GPU-OFFLOAD.md` for the ordering
-proof and measurements.
+order the lanes. Grouped MoE still fences at its CPU gather/GeGLU/scatter data
+dependencies, but CUDA transfers/kernel/download are event-chained before the
+one required host fence. This is completion tracking for commands that already
+exist, not deferred execution or a graph; see `docs/GPU-OFFLOAD.md` for the
+ordering proof and measurements.
 
 The allocation contract, precisely scoped:
 

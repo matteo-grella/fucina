@@ -825,6 +825,21 @@ pub fn denseQuantMatmulGpu(
     n: usize,
     k: usize,
 ) !?Tensor {
+    return denseQuantMatmulGpuImpl(self, dtype, rhs_bytes, rhs_lifetime, nb01, input, m, n, k, true);
+}
+
+fn denseQuantMatmulGpuImpl(
+    self: *Runtime,
+    comptime dtype: DType,
+    rhs_bytes: []const u8,
+    rhs_lifetime: RhsLifetime,
+    nb01: usize,
+    input: *const Tensor,
+    m: usize,
+    n: usize,
+    k: usize,
+    cpu_fallback_packed: bool,
+) !?Tensor {
     if (comptime backend_mod.gpu_impl.enabled) {
         const gpu = backend_mod.gpu_impl;
         const fmt: gpu.QFormat = comptime switch (dtype) {
@@ -834,24 +849,45 @@ pub fn denseQuantMatmulGpu(
             else => @compileError("denseQuantMatmulGpu supports q4_k/q6_k/q8_0 only"),
         };
         const work = quantMatmulWork(m, n, k);
-        // Prefill arm: m >= 32 behind the flops-tuned work gate. Both
-        // providers cap ONE dispatch at 2048 rows (their trivial tile tables
-        // hold 64 x 32-row tiles), so longer inputs are row-chunked into
-        // balanced <= 2048-row dispatches here — otherwise every prompt past
-        // 2048 tokens silently lost the whole dense-quant offload.
+        // Prefill arm: m >= 32 behind the relevant CPU-competitor gate. Stable
+        // weights first try the direct-storage async entry (Metal admits up to
+        // 8192 rows per command-data tile table; CUDA grows its slot table).
+        // Transient/longer fallbacks retain balanced <=2048-row blocking
+        // chunks, so prompts never silently lose the whole quant offload.
         // Decode arm (m <= 8, provider opt-in): bytes-bound GEMV — the work
         // gate never passes at decode shapes, so the provider's own decode
         // gate decides instead.
-        const prefill_arm = m >= 32 and gpu.shouldUseGpuDenseQuant(fmt, work);
+        const prefill_arm = m >= 32 and if (cpu_fallback_packed)
+            gpu.shouldUseGpuDenseQuantPacked(fmt, work)
+        else
+            gpu.shouldUseGpuDenseQuant(fmt, work);
         const decode_arm = m <= 8 and gpu.decodeGemvEnabled();
         if ((prefill_arm or decode_arm) and k % fmt.kMultiple() == 0 and n % 4 == 0 and
             input.isContiguous())
         {
+            var out = try self.emptyRank(2, .{ m, n });
+            errdefer out.deinit();
+            // Stable GGUF/model weights admit true eager-async dispatch:
+            // providers bind tensor storage directly and attach completion to
+            // `out`. Transient byte slices retain the blocking path because an
+            // asynchronous command cannot outlive an unowned RHS borrow.
+            if (rhs_lifetime.isCacheable() and gpu.gemmQuantNtAsync(
+                fmt,
+                rhs_bytes,
+                true,
+                nb01,
+                0,
+                input,
+                &out,
+                1,
+                m,
+                n,
+                k,
+            )) return out;
+
             const in_data = input.dataConst();
             const in_elems = std.math.mul(usize, m, k) catch return null;
             if (in_data.len == in_elems) {
-                var out = try self.emptyRank(2, .{ m, n });
-                errdefer out.deinit();
                 const max_rows_per_dispatch = 2048;
                 const n_chunks = (m + max_rows_per_dispatch - 1) / max_rows_per_dispatch;
                 const rows_per = (m + n_chunks - 1) / n_chunks;
@@ -875,8 +911,8 @@ pub fn denseQuantMatmulGpu(
                     }
                 }
                 if (ok) return out;
-                out.deinit();
             }
+            out.deinit();
         }
     }
     return null;
@@ -907,20 +943,34 @@ pub fn denseQuantMatmulGpuSharedInputBatch(
         const per_work = quantMatmulWork(m, n, k);
         const work = std.math.mul(u64, per_work, @as(u64, @intCast(batch_count))) catch std.math.maxInt(u64);
         const rows_total = std.math.mul(usize, batch_count, m) catch return null;
-        if (m >= 32 and m <= 2048 and k % fmt.kMultiple() == 0 and n % 4 == 0 and
+        if (m >= 32 and k % fmt.kMultiple() == 0 and n % 4 == 0 and
             input.isContiguous() and
             gpu.shouldUseGpuDenseQuant(fmt, work))
         {
+            var out = try self.emptyRank(2, .{ rows_total, n });
+            errdefer out.deinit();
+            if (rhs_lifetime.isCacheable() and gpu.gemmQuantNtAsync(
+                fmt,
+                rhs_bytes,
+                true,
+                nb01,
+                nb02,
+                input,
+                &out,
+                batch_count,
+                m,
+                n,
+                k,
+            )) return out;
+
             const in_data = input.dataConst();
             const in_elems = std.math.mul(usize, m, k) catch return null;
-            if (in_data.len == in_elems) {
-                var out = try self.emptyRank(2, .{ rows_total, n });
-                errdefer out.deinit();
+            if (m <= 2048 and in_data.len == in_elems) {
                 if (gpu.gemmQuantNtSharedABatch(fmt, rhs_bytes, rhs_lifetime.isCacheable(), nb01, nb02, in_data, out.data(), batch_count, m, n, k)) {
                     return out;
                 }
-                out.deinit();
             }
+            out.deinit();
         }
     }
     return null;
@@ -942,7 +992,7 @@ fn denseQuantMatmulGpuForBlocks(
         else => return null,
     }
     const nb01 = std.math.divExact(usize, rhs_bytes.len, n) catch return null;
-    return denseQuantMatmulGpu(self, dtype, rhs_bytes, rhs_lifetime, nb01, input, m, n, k);
+    return denseQuantMatmulGpuImpl(self, dtype, rhs_bytes, rhs_lifetime, nb01, input, m, n, k, false);
 }
 
 fn quantMatmulWork(m: usize, n: usize, k: usize) u64 {

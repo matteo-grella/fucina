@@ -128,6 +128,7 @@ pub const CUBLAS_OP_T: c_int = 1;
 pub const CUBLAS_DEFAULT_MATH: c_int = 0;
 pub const CUBLAS_TF32_TENSOR_OP_MATH: c_int = 3;
 pub const CUDA_R_16F: c_int = 2;
+pub const CUDA_R_32F: c_int = 0;
 pub const CUBLAS_COMPUTE_32F: c_int = 68;
 pub const CUBLAS_GEMM_DEFAULT: c_int = -1;
 

@@ -14,7 +14,7 @@ command/stream, copy back, return. It was simple, but it charged every op for a
 host round trip even when the next action was another GPU GEMM or independent
 CPU work.
 
-The new dense-f32 contract is:
+The dense f32/f16 and stable-weight Q4_K/Q6_K/Q8_0 contract is:
 
 1. validate and allocate the ordinary CPU-visible output through
    `ExecContext`;
@@ -77,9 +77,9 @@ retains its command and all referenced Metal buffers; Zig also retains both
 input storage buffers until completion because the command uses unretained
 resource references for lower submission overhead.
 
-CUDA uses eight reusable in-flight slots. Each slot owns grow-only A/B/C device
-buffers and reusable input-ready/completion events. Ordinary f32 storage is
-page-locked once with `cuMemHostRegister`; its `Resource` unregisters only when
+CUDA uses eight reusable in-flight slots. Each slot owns grow-only typed A/B/C
+and auxiliary tile buffers plus reusable input-ready/completion events.
+Ordinary f32/f16 storage is page-locked once with `cuMemHostRegister`; its `Resource` unregisters only when
 the backing allocation is destroyed, so `BufferPool` reuse amortizes page
 registration. H2D runs on the upload stream, which records an event consumed by
 the compute stream. A resident RHS is used by device address with no transfer.
@@ -123,11 +123,28 @@ fatal. Replaying the original call on CPU would require retaining an operation
 description and all operands after return—effectively a graph—so submission
 failures fall back before return, while post-submit device faults do not replay.
 
-F16 GEMM and the quantized grouped staging protocol retain their existing
-blocking staging contract in this change. They share the persistent provider
-resources but need typed/panel-specific ownership before they can use the same
-`Work` seam. Dense f32 GEMM/GEMV and every dense tagged `dot` lowered to it are
-the implemented async surface.
+F16 NT GEMM uses the same completion seam. Metal instantiates the steel kernel
+with f16 inputs and a direct f32 output; CUDA asks `cublasGemmEx` for f32 C.
+This removes the old process-global f16 staging lock, f16 result buffer, CPU
+widen pass, and an unnecessary output rounding step.
+
+Stable-weight dense Q4_K/Q6_K/Q8_0 linears also bind the ordinary input/output
+tensor storage directly. Metal copies at most 4 KiB of 32-row tile descriptors
+into command-buffer-owned bytes and supports up to 8192 rows in one eager
+submission. CUDA keeps a pinned/device tile pair in each in-flight slot and
+launches the vendored dequant kernel on the persistent compute stream. A
+shared-input batch encodes/launches one weight matrix after another without
+replicating activation rows. Transient quantized RHS slices retain the
+blocking path: deferring a command past the lifetime of an unowned byte borrow
+would be incorrect.
+
+Grouped MoE remains phase-synchronous by necessity: CPU gather feeds gate/up,
+CPU GeGLU consumes that output and feeds down, and CPU scatter consumes down.
+Metal waits at those two CPU boundaries over unified memory. CUDA now queues
+panel/tile H2D, kernel, and panel D2H through its persistent streams/events and
+performs one host fence at each boundary; it no longer synchronizes compute
+before starting the download. These are data-dependency fences, not
+per-dispatch setup overhead.
 
 ## Gates
 
@@ -140,6 +157,15 @@ allows `m <= 8`, `n,k >= 256`, and `m*n*k >= 2^24` only when the RHS already
 has a persistent mapping/device address; `FUCINA_GPU_MIN_WORK_GEMV` overrides
 that floor. CUDA refuses a nonresident decode RHS; Metal accepts a resident or
 already storage-mapped RHS because unified memory needs no PCIe weight copy.
+
+F16 uses `2^27` on Metal and for streamed CUDA prefill. CUDA has a separate
+resident f16 floor (`2^20`): a 1×4096×1024 resident call measured 18.3 µs on
+the RTX host versus 77.4 µs on CPU, while nonresident decode is still refused
+by the m≥32 transient gate. Dense quantized gates distinguish the CPU
+competitor. Compact/raw fallbacks retain the Parakeet/MoE thresholds; GGUF
+model weights that already own a load-time-packed CPU fallback use measured
+per-format floors. Metal defaults are Q4_K `2^30`, Q6_K `2^31`, Q8_0 `2^29`;
+CUDA defaults are Q4_K `2^27`, Q6_K/Q8_0 `2^24`.
 
 The explicit equal-shape vector `dot` returns one scalar and stays on CPU: a
 GPU launch plus a mandatory one-value host fence cannot amortize. Tagged
@@ -157,6 +183,7 @@ Commands (ReleaseFast for measurements):
 zig build test-fucina -Dgpu=metal
 zig build bench-gpu-dispatch -Dgpu=metal -Doptimize=ReleaseFast -- --iters 15 --queue 4
 zig build bench-gpu-dispatch -Dgpu=metal -Doptimize=ReleaseFast -- --shape 'gemm 1024^3' --iters 63 --crossover
+zig build bench-gpu-formats -Dgpu=metal -Doptimize=ReleaseFast -- --iters 5 --queue 4
 
 # on matteo@192.168.1.24
 zig build test-fucina -Dgpu=cuda
@@ -164,6 +191,7 @@ OPENBLAS_NUM_THREADS=32 \
 LIBRARY_PATH=/home/matteo/tools/openblas/lib \
 LD_LIBRARY_PATH=/home/matteo/tools/openblas/lib \
 zig build bench-gpu-dispatch -Dgpu=cuda -Dblas=openblas -Doptimize=ReleaseFast -- --iters 15 --queue 4
+zig build bench-gpu-formats -Dgpu=cuda -Dmax-threads=32 -Doptimize=ReleaseFast -- --workers 31 --iters 5 --queue 4
 ```
 
 `bench-gpu-dispatch` uses a resident RHS, reports median wall time, and checks
@@ -195,6 +223,13 @@ default. Resident GEMV still wins 1.55× in the interleaved run and 2048³ wins
 2.78×. `FUCINA_GPU_MIN_WORK` remains available for a sustained GPU-heavy
 workload whose preferred threshold is lower.
 
+A final skeptical re-audit on the completed tree confirmed the conservative
+choice. Two independent 31-pair 1024³ runs had Accelerate ahead by 14% and
+20% (CPU/GPU medians 1089.5/1241.3 µs and 1060.4/1270.5 µs). At 2^31 work,
+Accelerate still led 1996.9/2129.6 µs. At the configured 2^32 floor Metal led
+5491.0/4056.2 µs, a 1.35× win. In other words, the default does not claim a
+Metal win at the disputed 1024³ size.
+
 ### CUDA — RTX 5000 Ada Laptop, driver 580.126.18
 
 Host: Intel i9-13950HX. CPU comparison is the host's custom OpenBLAS 0.3.29
@@ -222,7 +257,70 @@ latency from 5.10 to 3.75 ms and raises queue-4 throughput from 3.43 to 6.50
 TFLOP/s (7.14 TFLOP/s in the final OpenBLAS-paired run). Submission returns in
 7–26 µs.
 
+The final OpenBLAS-32 crossover audit measured 512³ at 230.9/224.1 µs
+(only a 1.03× GPU edge), 640³ at 516.5/346.3 µs (1.49×), and 1024³ at
+1777.4/879.9 µs (2.02×). This is the custom OpenBLAS 0.3.29 installation at
+`/home/matteo/tools/openblas`, not the system `libblas` fallback.
+
+### F16 and GGUF quantized linears
+
+`bench-gpu-formats` compares the actual Fucina CPU competitors—its f16 row
+kernel and load-time-packed quant kernels—with one eager GPU call over resident
+GGUF weights. GPU time includes the eventual host visibility fence; submit
+time stops immediately after commit/launch. Results are checked pairwise
+(observed maximum absolute differences below 0.009 for quant and below 0.002
+for Metal f16; CUDA f16 was below 3e-6). The f16 rows are a kernel-level paired
+comparison: Fucina's public f32-activation/f16-weight linear first rounds its
+LHS into a pooled f16 temporary on CPU for either contender, so that common
+conversion is excluded. Any pending producer is necessarily made host-visible
+at that conversion boundary, consistent with the CPU-resident eager model.
+
+Representative Metal results (M1 Max, 7 workers + caller):
+
+| Format/shape | CPU µs | GPU host-visible µs | submit µs | queue-4 GF/s |
+| --- | ---: | ---: | ---: | ---: |
+| f16 32×4096×1024 | 757.5 | 302.3 | 9.5 | 2178.7 |
+| f16 128×4096×1024 | 1929.0 | 987.6 | 14.3 | 1652.6 |
+| f16 1×151936×1024 lm-head | 3129.6 | 2948.7 | 26.8 | 149.9 |
+| Q4_K 32×4096×4096 | 925.0 | 1020.9 | 8.1 | 1484.1 |
+| Q4_K 128×4096×4096 | 3354.3 | 1213.8 | 10.9 | 6254.4 |
+| Q6_K 64×4096×4096 | 1498.4 | 1499.5 | 10.8 | 2756.1 |
+| Q6_K 128×4096×4096 | 3532.8 | 1497.9 | 15.5 | 4695.7 |
+| Q8_0 32×4096×4096 | 1168.5 | 902.5 | 9.7 | 1695.7 |
+| Q8_0 128×4096×4096 | 2935.6 | 1305.3 | 13.1 | 5159.6 |
+
+These are why Metal's packed-CPU gates differ by format: Q4_K crosses near
+2^30 work, Q6_K is only at parity there and waits for 2^31, while Q8_0 already
+wins at 2^29. A 32×4096×1024 Qwen-sized quantized projection remained CPU
+favored for all three formats (202–263 µs CPU versus 382–425 µs Metal), so it
+is deliberately below every Metal packed gate. Small quantized decode remains
+CPU-only on Metal.
+
+Representative CUDA results (RTX 5000 Ada Laptop, 31 workers + caller for the
+packed CPU comparison):
+
+| Format/shape | CPU µs | GPU host-visible µs | submit µs | queue-4 GF/s |
+| --- | ---: | ---: | ---: | ---: |
+| f16 1×4096×1024 resident | 77.4 | 18.3 | 3.8 | 697.7 |
+| f16 32×4096×1024 resident | 725.3 | 87.1 | 3.9 | 4374.3 |
+| f16 128×4096×1024 resident | 1774.8 | 237.5 | 3.9 | 5240.1 |
+| f16 1×151936×1024 resident | 8232.8 | 797.6 | 3.9 | 421.7 |
+| Q4_K 32×4096×1024 | 256.5 | 132.7 | 4.6 | 3450.3 |
+| Q6_K 32×4096×1024 | 822.0 | 125.2 | 4.8 | 3610.6 |
+| Q8_0 32×4096×1024 | 640.9 | 132.4 | 4.4 | 3351.9 |
+| Q4_K 128×4096×4096 | 4074.3 | 1262.4 | 3.9 | 4414.1 |
+| Q6_K 128×4096×4096 | 8267.4 | 1016.0 | 3.6 | 5826.1 |
+| Q8_0 128×4096×4096 | 4042.6 | 1215.3 | 4.3 | 4640.2 |
+
+At 1×4096×4096 quantized decode, packed CPU still won (58–97 µs versus
+101–107 µs GPU), so the existing CUDA quant-decode arm remains opt-in. The
+resident f16 result is different: even small decode wins decisively because
+only the activation/output cross PCIe, hence its residency-aware gate.
+
 Provider tests add an edge-tile, two-GEMM dependency chain that performs no
-host read between commands and compares the final result with an f64 reference.
+host read between commands, direct-f32 f16 checks, and shared-input async
+Q4_K/Q6_K/Q8_0 checks against CPU references. They also mutate an input after
+submission to prove the reader fence. The grouped CUDA tests exercise the
+persistent upload/compute/download event chain.
 The normal Metal and remote CUDA test roots pass, as do `cuda-check`, the
 default core root, and `arch-check` (zero SCCs).

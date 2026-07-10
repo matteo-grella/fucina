@@ -60,6 +60,7 @@ zig build bench-backend        # scalar vs native backends on representative ops
 zig build bench-f16gemm        # f16 TransB GEMM parallel-efficiency microbench
 zig build bench-gemm           # large-shape f32 GEMM: row kernels vs blocked packed kernel vs BLAS dispatch (bench/gemm.zig)
 zig build bench-gpu-dispatch  # CPU BLAS vs blocking/async eager GPU GEMM/GEMV latency + queued throughput
+zig build bench-gpu-formats   # packed CPU vs eager GPU f16/Q4_K/Q6_K/Q8_0 LLM-linear latency + queued throughput
 zig build bench-q5kmoe         # Q5_K MoE-expert matmul: per-row vs 4-row lane-packed col-outer (bench/q5kmoe.zig)
 zig build bench-ternary        # TQ2_0 ternary matmul: hot sdot/vpdpbusd tiles vs cold table path, mul-free f32 path, Q4_K, dense f32 (bench/ternary.zig)
 zig build bench-attention-backward  # grouped causal attention backward (bench/attention_backward.zig)
@@ -87,16 +88,17 @@ Build options (consumed at comptime via `build_options`):
   32-row tiles would run mostly empty stay on CPU; 0 = old behavior), raw-block CPU fallback —
   gpu builds keep ONE raw expert representation instead of the x4 packs). **Dense quantized
   linears** (Q4_K/Q6_K/Q8_0 — e.g. the qwen3/gemma prefill projections) also offload via the same
-  `gemmQuantNt` dequant-in-kernel GEMM (`weights.linearSeqQ*` → `ExecContext.denseQuantMatmulGpu`,
-  `FUCINA_GPU_MIN_WORK_DENSE_Q6` for Q6_K by default, `FUCINA_GPU_MIN_WORK_QMOE` for Q4_K/Q8_0,
-  CPU packed-kernel fallback, stable RHS resident-byte wraps, ~+33% pp on 0.6B-Q4_K);
+  `gemmQuantNtAsync` dequant-in-kernel GEMM (`weights.linearSeqQ*` → `ExecContext.denseQuantMatmulGpu`,
+  per-format `FUCINA_GPU_MIN_WORK_DENSE_Q4/Q6/Q8` gates against the CPU packed-kernel fallback,
+  stable RHS residency, ~+33% pp on 0.6B-Q4_K);
   decode (m=1, below the gate) and training (grad path) stay on CPU.
-  On both providers, eligible **dense f32** GEMM/GEMV commands submit eagerly
+  On both providers, eligible **dense f32, f16, and stable-weight Q4_K/Q6_K/Q8_0** commands submit eagerly
   to persistent provider lanes and synchronize only at a CPU visibility boundary; pending CUDA outputs
   pass their device pointer directly to dependent GEMMs. CUDA registers pooled host allocations once
   and overlaps upload/compute/download; resident ordinary GEMM uses `FUCINA_GPU_MIN_WORK_RESIDENT`
   (default 2^27). Resident f32 `m≤8` uses the separate
-  `FUCINA_GPU_MIN_WORK_GEMV` gate (default 2^24). This is completion tracking, not a graph; see
+  `FUCINA_GPU_MIN_WORK_GEMV` gate (default 2^24), and resident CUDA f16 uses
+  `FUCINA_GPU_MIN_WORK_F16_RESIDENT` (default 2^20). This is completion tracking, not a graph; see
   `docs/GPU-OFFLOAD.md`.
   **cuda** (Linux/NVIDIA): no CUDA SDK at build time — dlopen'd
   cuBLAS + vendored PTX kernels; cross-compiles from macOS with `-Dtarget=x86_64-linux-gnu`.
@@ -164,7 +166,7 @@ Build options (consumed at comptime via `build_options`):
 | `examples/facedetect.zig`, `examples/facedetect/` | face-detect.cpp port: the buffalo_l pack (SCRFD det_10g detector + ArcFace R50 recognizer + genderage + MiniFASNet anti-spoof) plus 2d106/1k3d68 dense landmarks — channel-last conv2d/pool2d/prelu/channelAffine over the public facade, load-once Model structs (weights dequant/repack/BN-fold once, forwards are pure compute), an app-level compiled replay (`graph.zig`) for the interpreter-driven nets, cv2-exact letterbox and umeyama align. Parity: byte-identical detect/analyze JSON vs the reference CLI, embed cosine 0.999999, anti-spoof real_prob exact, landmarks ≤0.03px (goldens + regeneration recipe in `examples/facedetect/goldens/README.md`). Tests run under `zig build test`. |
 | `examples/nanochat.zig`, `examples/nanochat/` | nanochat port (karpathy/nanochat): the full CPU pipeline — rustbpe-equivalent BPE tokenizer training, GPT pretraining (Muon+AdamW, the MuonAdamW variant: Polar-Express orthogonalization + NorMuon variance reduction + cautious WD, reusing `fucina.optim.AdamW` for the Adam groups), SFT, bits-per-byte eval, and a chat CLI with a calculator tool over a KV-cached decode path. Entirely example-local over the public facade (no new core ops): half-split RoPE (inverse-built table), grouped causal attention, `crossEntropyExt`, gather/scatter embeddings, relu² MLP, tanh softcap. Parity vs the Python reference (CPU fp32): tokenizer encode token-ID-exact + trainer byte-identical to rustbpe, dataloader batches byte-identical, forward per-layer ≤1e-5, optimizer-step + loss-trace within a drift budget, greedy decode token-exact vs a trained reference checkpoint (goldens + regen recipe in `examples/nanochat/goldens/README.md`). `NANOCHAT_PARITY`-gated suites run under `zig build test`. |
 | `examples/nam.zig`, `examples/nam/` | Neural Amp Modeler port: `.nam` reader/writer with upstream-exact weight ordering, streaming WaveNet/LSTM/ConvNet/Linear engines (golden parity vs NeuralAmpModelerCore render), classic-recipe trainer over the core `causalConv1d` op, lossless GGUF interchange, vendored-miniaudio live device I/O, CoreMIDI control of the live knobs (`midi.zig`/`midi_shim.c` — hot-plug needs the runloop pump in the shim). Tests run under `zig build test`. |
-| `bench/` | Microbenchmarks (`mlp`, `backend`, `f16gemm`, `gemm`, `q5kmoe`, `attention_backward`, `facade`, `einsum`, `backward_diamond`, `optim`, `ce`, `scatter`) + shared helpers (`alloc.zig`, `timer.zig`). |
+| `bench/` | Microbenchmarks (`mlp`, `backend`, `f16gemm`, `gemm`, `gpu_dispatch`, `gpu_formats`, `q5kmoe`, `attention_backward`, `facade`, `einsum`, `backward_diamond`, `optim`, `ce`, `scatter`) + shared helpers (`alloc.zig`, `timer.zig`). |
 | `refs/` (untracked, by convention) | Optional local clones of the upstream reference repos (llama.cpp, omnivoice.cpp, parakeet.cpp, NeuralAmpModelerCore, …) plus locally captured parity goldens (e.g. `refs/omnivoice-research/goldens/`, consumed by the env-gated parity suites, which skip cleanly when absent). Source comments and `docs/BENCHMARK.md` cite `refs/<repo>/<file>:<line>` into these clones as parity provenance; `tools/fetch_refs.sh` clones every reference at the snapshot's pinned commit (`--build` also builds llama.cpp CPU-only). Nothing in the default build or test run depends on them. |
 
 **Placement policy (ports and families).** Engines intended as reusable `src/llm` families —

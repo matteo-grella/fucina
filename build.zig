@@ -1056,6 +1056,22 @@ pub fn build(b: *std.Build) void {
     const gpu_dispatch_bench_step = b.step("bench-gpu-dispatch", "CPU BLAS vs synchronous/asynchronous eager GPU GEMM/GEMV dispatch");
     gpu_dispatch_bench_step.dependOn(&gpu_dispatch_bench_cmd.step);
 
+    const gpu_formats_bench_exe = b.addExecutable(.{
+        .name = "fucina-zig-gpu-formats-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/gpu_formats.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    gpu_formats_bench_exe.root_module.addImport("raw_backend", raw_backend_module);
+    configureBlas(gpu_formats_bench_exe, blas_kind);
+    configureGpu(b, gpu_formats_bench_exe, gpu_kind);
+    const gpu_formats_bench_cmd = b.addRunArtifact(gpu_formats_bench_exe);
+    if (b.args) |args| gpu_formats_bench_cmd.addArgs(args);
+    const gpu_formats_bench_step = b.step("bench-gpu-formats", "Packed CPU vs eager GPU f16/Q4_K/Q6_K/Q8_0 LLM linears");
+    gpu_formats_bench_step.dependOn(&gpu_formats_bench_cmd.step);
+
     const q5kmoe_bench_exe = b.addExecutable(.{
         .name = "fucina-zig-q5kmoe-bench",
         .root_module = b.createModule(.{
