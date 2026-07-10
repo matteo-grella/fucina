@@ -259,7 +259,7 @@ pub const BufferPool = struct {
                 const byte_len = std.mem.alignForward(usize, buffer.data.len * @sizeOf(Elem), slab_size_quantum);
                 const base: [*]align(slab_align) u8 = @ptrCast(@alignCast(buffer.data.ptr));
                 const slab: Slab = base[0..byte_len];
-                buffer.allocator.destroy(buffer);
+                buffer.destroyHeader();
                 self.releaseSlab(slab);
             }
         }.reclaimTyped;

@@ -12,11 +12,11 @@
 // nonzero and the caller falls back to the CPU path, so correctness never
 // depends on the GPU.
 //
-// Synchronization: synchronous commit + waitUntilCompleted per call — exactly
-// cblas_sgemm's blocking contract (the caller thread blocks; Fucina's worker
-// team parks). Batched GEMM = ONE dispatch with grid depth = batch via the
-// params batch strides (the kernel adds batch_stride_* * tid.z itself), so a
-// backward "diamond" pays one round trip, not N.
+// Synchronization: the native tensor path commits immediately and returns an
+// owned completion ticket; CPU visibility waits through that ticket. The
+// direct slice ABI retains the old commit+wait behavior for parity/benchmarks.
+// Batched GEMM = ONE dispatch with grid depth = batch via the params batch
+// strides (the kernel adds batch_stride_* * tid.z itself).
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -75,6 +75,26 @@ typedef struct {
     uint64_t gpu_ns;
     uint64_t sched_ns;
 } FucinaCommandTiming;
+
+// ARC-owned wrappers returned through the C ABI.  A storage wrapper lives for
+// the backing Fucina buffer's lifetime; a ticket lives from eager submission
+// until that output is synchronized or discarded.
+@interface FucinaMetalWrap : NSObject
+@property(nonatomic, strong) id<MTLBuffer> buffer;
+@property(nonatomic) uintptr_t base;
+@property(nonatomic) uintptr_t end;
+@end
+@implementation FucinaMetalWrap
+@end
+
+@interface FucinaMetalTicket : NSObject
+@property(nonatomic, strong) id<MTLCommandBuffer> command;
+@property(nonatomic, strong) id<MTLBuffer> aBuffer;
+@property(nonatomic, strong) id<MTLBuffer> bBuffer;
+@property(nonatomic, strong) id<MTLBuffer> cBuffer;
+@end
+@implementation FucinaMetalTicket
+@end
 
 #define FUCINA_GEMM_VARIANTS 3
 #define FUCINA_GEMM_DTYPES 2
@@ -362,6 +382,136 @@ static id<MTLBuffer> fucina_wrap_resident_or_transient(FucinaMetalCtx *ctx, cons
     }
     os_unfair_lock_unlock(&ctx->wrap_lock);
     return fucina_wrap(ctx, ptr, len, offset_out);
+}
+
+// Cache one page wrapper on the storage object rather than in an address-only
+// process table.  Its owner destroys it before freeing/remapping the backing
+// allocation, so pooled buffers may safely reuse the mapping with new values.
+void *fucina_metal_wrap_storage(void *ctx_opaque, const void *ptr, int64_t len) {
+    FucinaMetalCtx *ctx = (FucinaMetalCtx *)ctx_opaque;
+    if (ctx == NULL || ptr == NULL || len <= 0) return NULL;
+    @autoreleasepool {
+        size_t offset = 0;
+        id<MTLBuffer> buffer = fucina_wrap_resident_or_transient(ctx, ptr, (size_t)len, &offset);
+        if (buffer == nil) return NULL;
+        FucinaMetalWrap *wrap = [[FucinaMetalWrap alloc] init];
+        wrap.buffer = buffer;
+        wrap.base = (uintptr_t)ptr - offset;
+        wrap.end = wrap.base + buffer.length;
+        return (__bridge_retained void *)wrap;
+    }
+}
+
+void fucina_metal_free_storage_wrap(void *wrap_opaque) {
+    if (wrap_opaque == NULL) return;
+    @autoreleasepool {
+        CFBridgingRelease(wrap_opaque);
+    }
+}
+
+static id<MTLBuffer> fucina_buffer_from_storage_wrap(
+    FucinaMetalCtx *ctx, void *wrap_opaque, const void *ptr, size_t len,
+    size_t *offset_out) {
+    if (wrap_opaque != NULL) {
+        FucinaMetalWrap *wrap = (__bridge FucinaMetalWrap *)wrap_opaque;
+        uintptr_t begin = (uintptr_t)ptr;
+        uintptr_t end = begin + len;
+        if (begin >= wrap.base && end >= begin && end <= wrap.end) {
+            *offset_out = begin - wrap.base;
+            return wrap.buffer;
+        }
+    }
+    return fucina_wrap_resident_or_transient(ctx, ptr, len, offset_out);
+}
+
+// Eager asynchronous f32 GEMM submission.  The operation is encoded and
+// committed before return; the ticket is only a completion/lifetime token.
+// Command-queue order carries dependencies between consecutive calls.
+void *fucina_metal_gemm_f32_async(
+    void *ctx_opaque, int variant,
+    const float *a, const float *b, float *c,
+    void *a_wrap, void *b_wrap, void *c_wrap,
+    int64_t m, int64_t n, int64_t k,
+    int64_t batch, int64_t stride_a, int64_t stride_b, int64_t stride_c) {
+    FucinaMetalCtx *ctx = (FucinaMetalCtx *)ctx_opaque;
+    if (ctx == NULL || variant < 0 || variant >= FUCINA_GEMM_VARIANTS ||
+        m <= 0 || n <= 0 || k <= 0 || batch <= 0 ||
+        m > INT32_MAX || n > INT32_MAX || k > INT32_MAX) return NULL;
+    @autoreleasepool {
+        const int bm = 32, bn = 32, bk = 16;
+        id<MTLComputePipelineState> pipeline =
+            fucina_gemm_pipeline(ctx, FUCINA_GEMM_F32, variant,
+                                 m % bm == 0, n % bn == 0, k % bk == 0);
+        if (pipeline == nil) return NULL;
+
+        size_t a_len = ((size_t)(batch - 1) * (size_t)stride_a + (size_t)m * (size_t)k) * sizeof(float);
+        size_t b_len = ((size_t)(batch - 1) * (size_t)stride_b + (size_t)k * (size_t)n) * sizeof(float);
+        size_t c_len = ((size_t)(batch - 1) * (size_t)stride_c + (size_t)m * (size_t)n) * sizeof(float);
+        size_t a_off, b_off, c_off;
+        id<MTLBuffer> a_buf = fucina_buffer_from_storage_wrap(ctx, a_wrap, a, a_len, &a_off);
+        id<MTLBuffer> b_buf = fucina_buffer_from_storage_wrap(ctx, b_wrap, b, b_len, &b_off);
+        id<MTLBuffer> c_buf = fucina_buffer_from_storage_wrap(ctx, c_wrap, c, c_len, &c_off);
+        if (a_buf == nil || b_buf == nil || c_buf == nil) return NULL;
+
+        int32_t tiles_n = (int32_t)((n + bn - 1) / bn);
+        int32_t tiles_m = (int32_t)((m + bm - 1) / bm);
+        FucinaGEMMParams params = {
+            .M = (int32_t)m, .N = (int32_t)n, .K = (int32_t)k,
+            .lda = (int32_t)(variant == FUCINA_GEMM_TN ? m : k),
+            .ldb = (int32_t)(variant == FUCINA_GEMM_NT ? k : n),
+            .ldd = (int32_t)n,
+            .tiles_n = tiles_n, .tiles_m = tiles_m,
+            .batch_stride_a = (size_t)stride_a,
+            .batch_stride_b = (size_t)stride_b,
+            .batch_stride_d = (size_t)stride_c,
+            .swizzle_log = 0,
+            .gemm_k_iterations_aligned = (int32_t)(k / bk),
+            .batch_ndim = 1,
+        };
+        int32_t batch_shape = (int32_t)batch;
+        size_t batch_strides[2] = { (size_t)stride_a, (size_t)stride_b };
+
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBufferWithUnretainedReferences];
+        if (cmd == nil) return NULL;
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:a_buf offset:a_off atIndex:0];
+        [enc setBuffer:b_buf offset:b_off atIndex:1];
+        [enc setBuffer:c_buf offset:c_off atIndex:3];
+        [enc setBytes:&params length:sizeof(params) atIndex:4];
+        [enc setBytes:&batch_shape length:sizeof(batch_shape) atIndex:6];
+        [enc setBytes:batch_strides length:sizeof(batch_strides) atIndex:7];
+        [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)tiles_n, (NSUInteger)tiles_m, (NSUInteger)batch)
+            threadsPerThreadgroup:MTLSizeMake(32, 2, 2)];
+        [enc endEncoding];
+
+        FucinaMetalTicket *ticket = [[FucinaMetalTicket alloc] init];
+        ticket.command = cmd;
+        ticket.aBuffer = a_buf;
+        ticket.bBuffer = b_buf;
+        ticket.cBuffer = c_buf;
+        [cmd commit];
+        return (__bridge_retained void *)ticket;
+    }
+}
+
+int fucina_metal_ticket_wait(void *ticket_opaque, FucinaCommandTiming *timing) {
+    if (ticket_opaque == NULL) return 1;
+    FucinaMetalTicket *ticket = (__bridge FucinaMetalTicket *)ticket_opaque;
+    [ticket.command waitUntilCompleted];
+    if (ticket.command.status == MTLCommandBufferStatusError) {
+        NSLog(@"fucina-metal: async gemm command failed: %@", ticket.command.error);
+        return 1;
+    }
+    fucina_record_timing(timing, ticket.command);
+    return 0;
+}
+
+void fucina_metal_ticket_free(void *ticket_opaque) {
+    if (ticket_opaque == NULL) return;
+    @autoreleasepool {
+        CFBridgingRelease(ticket_opaque);
+    }
 }
 
 // C[m,n] = op(A) * op(B) per variant, f32, row-major, beta=0 overwrite.

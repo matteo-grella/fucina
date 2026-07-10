@@ -94,17 +94,21 @@ pub fn columnThreadCount(m: usize, n: usize, k: usize) usize {
 // ---------------- Shared contiguous-data accessors ----------------
 
 pub fn contiguousDataConstOf(comptime dtype: DType, x: *const tensor.TensorOf(dtype), len: usize) []const dtype_mod.Scalar(dtype) {
+    @constCast(x.buffer).waitReady();
     return x.buffer.data[x.offset .. x.offset + len];
 }
 
 pub fn contiguousDataOf(comptime dtype: DType, x: *tensor.TensorOf(dtype), len: usize) []dtype_mod.Scalar(dtype) {
+    x.buffer.waitMutable();
     return x.buffer.data[x.offset .. x.offset + len];
 }
 
 pub fn contiguousDataConst(x: *const Tensor, len: usize) []const f32 {
+    @constCast(x.buffer).waitReady();
     return x.buffer.data[x.offset .. x.offset + len];
 }
 
 pub fn contiguousData(x: *Tensor, len: usize) []f32 {
+    x.buffer.waitMutable();
     return x.buffer.data[x.offset .. x.offset + len];
 }

@@ -456,6 +456,7 @@ protocol and thermal discipline in [`BENCHMARK.md`](BENCHMARK.md)):
 | `bench-backend` | Scalar vs native backends on representative ops. |
 | `bench-f16gemm` | f16 TransB GEMM parallel efficiency (Qwen3 shapes). |
 | `bench-gemm` | Large-shape f32 GEMM: row kernels vs blocked packed kernel vs BLAS. |
+| `bench-gpu-dispatch` | CPU CBLAS vs blocking/async eager GPU GEMM/GEMV: host-visible latency, submit latency, queued throughput, and parity. |
 | `bench-q5kmoe` | Q5_K MoE-expert matmul variants. |
 | `bench-ternary` | TQ2_0 ternary matmul: hot sdot/vpdpbusd tiles vs cold table path, f32 path, Q4_K, dense f32. |
 | `bench-facade` | Raw tensor ops vs the public no-grad `Tensor` facade. |
@@ -675,8 +676,10 @@ values. On Linux without libc the lookup scans `/proc/self/environ`
 | Variable | Effect | Default |
 | --- | --- | --- |
 | `FUCINA_GPU` | Kill switch: a value starting with `0` disables the GPU provider entirely. | enabled on `-Dgpu` builds |
-| `FUCINA_GPU_MIN_WORK` | f32 GEMM offload gate, in m·n·k work units. | `2^30` (the measured M1 Max crossover vs Accelerate/AMX) |
+| `FUCINA_GPU_MIN_WORK` | Base f32 GEMM offload gate, in m·n·k work units. | Metal `2^32` (cold single-op crossover); CUDA `2^30` (the transient floor below still dominates ordinary host RHS) |
 | `FUCINA_GPU_MIN_WORK_F16` | f16 GEMM gate. | `2^27` (lower — the CPU f16 competitor has no AMX-class arm) |
+| `FUCINA_GPU_MIN_WORK_GEMV` | Resident dense-f32 GEMV/small-m GEMM gate (`m <= 8`; nonresident CUDA RHS is refused). | `2^24` |
+| `FUCINA_GPU_MIN_WORK_RESIDENT` (cuda) | Dense-f32 GEMM/batched-GEMM gate when the RHS already has a device address. | `2^27` (512³; 256³ loses to OpenBLAS-32 on the reference host) |
 | `FUCINA_GPU_MIN_WORK_QMOE` | Grouped quantized MoE GEMM gate; setting it also re-seeds the dense-Q6 gate. | `2^30` |
 | `FUCINA_GPU_MIN_WORK_DENSE_Q6` | Dense quantized (Q6_K-class) linear gate. | `2^22` (tuned on Parakeet 110M) |
 | `FUCINA_GPU_QMOE_MIN_FILL` | Tile-occupancy gate (percent) for grouped MoE: small expert batches whose 32-row tiles would run mostly empty stay on CPU; `0` disables the gate, `>100` never passes it. | `50` |
@@ -993,7 +996,10 @@ Semantics:
 - `fromSlice` **copies** `values` into context-owned storage.
 - `fromBorrowedSlice` **borrows** caller-owned mutable storage zero-copy:
   the slice must stay alive and unmoved until the tensor's `deinit`;
-  mutations of the backing slice are visible through the tensor.
+  mutations of the backing slice are visible through the tensor. On a GPU
+  build, mutate through the tensor's `data()` boundary (or synchronize
+  externally) after submitting an op: direct writes through the external
+  slice cannot be observed by the storage reader fence.
 - `fromBorrowedConstSlice` borrows **read-only** storage (e.g. mmap'd GGUF
   weights) without a caller-side `@constCast`. The single internal
   `@constCast` is sound only under the contract that the data is never
@@ -1221,7 +1227,9 @@ pool mid-forward (see [MEMORY-MODEL.md](MEMORY-MODEL.md) and §6).
   single-threaded state: run ops on one context from one thread (parallelism
   happens *inside* ops via the context's worker pool, §9). Gradient
   *accumulation* is internally mutex-guarded (`GradState.grad_mutex`), but
-  facade tensor values carry no synchronization.
+  facade tensor values carry no cross-thread handle synchronization. A
+  backend-internal accelerator completion on storage is a host-visibility
+  fence, not permission to share a handle across threads (§9.9).
 
 ```zig
 pub fn detach(self: *const Self, ctx: *ExecContext) !Self       // f32 + typed-float branches
@@ -5067,17 +5075,20 @@ What is thread-safe inside a context:
 What is not:
 
 - **Op execution, scope open/close, and every other context mutation are
-  single-threaded**: drive one `ExecContext` from one thread at a time. Ops
-  internally fan work out to the team and join before returning; the
-  external contract stays serial.
+  single-threaded**: drive one `ExecContext` from one thread at a time. CPU
+  ops fan work out to the team and join before returning. Eligible dense-f32
+  GPU ops submit before return and keep program order through their provider
+  queue/stream; a later CPU access performs the storage readiness wait. The
+  external call order remains serial.
 - **Sharing tensor handles across threads is unspecified.** The runtime
   makes no promise about concurrent reads or writes through tensor handles
   on different threads (storage refcounts are atomic, but the handle structs
   are mutable value types with interior pointers). Confine a tensor and its
   views to the thread driving its context, or synchronize externally.
-  Parallelism inside the runtime — kernel chunking, ES perturbation fills,
+  CPU parallelism inside the runtime — kernel chunking, ES perturbation fills,
   dot-backward branches — is always mediated by the context's own team and
-  joins before the op returns.
+  joins before the op returns. Submitted GPU completion is the explicitly
+  documented exception (`GPU-OFFLOAD.md`).
 
 ## 7. Named axes: the tag algebra
 
@@ -6031,6 +6042,9 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
         refs: std.atomic.Value(u32),
         release_ctx: ?*anyopaque = null,
         release_fn: ?*const fn (*anyopaque, *Self) void = null,
+        pending_work: std.atomic.Value(?*accelerator.Work) = .init(null),
+        pending_use: std.atomic.Value(?*accelerator.Work) = .init(null),
+        accelerator_resource: std.atomic.Value(?*accelerator.Resource) = .init(null),
 
         pub const dtype = buffer_dtype;
         pub const Element = Elem;
@@ -6070,11 +6084,26 @@ Refcount operations:
   `ExecContext` buffer pool when recycling a cached buffer (§6).
 - `destroy()` — unconditionally frees data + header, bypassing the refcount.
   Only for owners that know no references remain (pool teardown).
+- `waitReady()` / `discardPending()` — complete already-submitted GPU output
+  work, respectively making host bytes visible or skipping an unused D2H.
+- `setPendingUse()` / `waitUnused()` / `waitMutable()` — track the latest
+  submitted GPU reader of this allocation. Const host reads may overlap a
+  device read; mutable access waits so post-call input mutation cannot race
+  Metal zero-copy reads or CUDA async upload. Provider queue order lets the
+  latest token subsume earlier readers. Final release always completes both
+  output and reader work before storage can be recycled.
+- `acceleratorResource` — provider mapping metadata tied to this allocation's
+  lifetime (Metal's pooled page-wrapper cache; CUDA host page registration).
+  It survives ordinary pool release/reacquire and is destroyed with the
+  backing allocation.
 
 **Release-hook contract.** For the borrowed-with-release variants the hook
 runs once, at the final `release()`, and takes *full* cleanup responsibility:
 it must dispose of the external data by whatever means created it **and**
-free the header (`buffer.allocator.destroy(buffer)`). The two in-tree
+free the header with `buffer.destroyHeader()` (which also releases any
+accelerator resource). Capture the external slice, call `destroyHeader()`
+first, then free/unmap the bytes: provider teardown may still need the live
+address to unregister it. The two in-tree
 production uses:
 
 - **GPU device-resident bytes** — `src/llm/weights.zig` wraps managed device
@@ -6101,8 +6130,8 @@ fn wrapMappedWeights(alloc: std.mem.Allocator, mapped: []f32) !fucina.internal.R
         fn releaseMapped(_: *anyopaque, buffer: *Buffer) void {
             // Full cleanup responsibility: the external bytes AND the header.
             const bytes = std.mem.sliceAsBytes(buffer.data);
+            buffer.destroyHeader();
             std.posix.munmap(@alignCast(bytes));
-            buffer.allocator.destroy(buffer);
         }
     };
 
@@ -6977,25 +7006,38 @@ dot-backward to overlap the two gradient GEMMs (§5).
 
 ### 9.9 GPU offload (`src/backend/gpu.zig`, `metal.zig`, `cuda.zig`)
 
-Both providers implement the same contract, mirroring the BLAS arm:
+Both providers implement the same eager accelerator contract:
 
 - **Gates decide, dispatchers run.** Cheap `shouldUse*` gates (no device
   init) sit at the dispatch sites; every dispatch entry returns
   `false`/`null` when the GPU did not run, and the caller falls through to
   BLAS/vector — correctness never depends on the GPU.
-- **Synchronous, serialized, eager.** Calls block until completion (like
-  `cblas_sgemm`); quantized staging is guarded by a process-global lock. The
-  public `Tensor` API has no device or location state.
+- **Submit eagerly; synchronize at host visibility.** Dense f32 commands are
+  encoded and submitted before the op returns. Output storage carries only a
+  completion/lifetime token: GPU consumers remain queue-ordered and a CPU
+  data accessor/kernel performs the deferred wait. F16 and quantized panel
+  staging remain blocking. The public `Tensor` API still has no device type or
+  location state, and no op description/graph is retained.
 - **Lazy init.** The device/library/context is created on first
   above-threshold use, double-checked under a mutex so concurrent
   `ExecContext`s share one device. Config (env vars) is read once, separately
   from device init, so below-threshold probes stay cheap.
-- **Shape gate** `m ≥ 32 and n ≥ 32 and k ≥ 16` in front of every work gate.
+- **Shape gates.** General GEMM requires `m ≥ 32, n ≥ 32, k ≥ 16`.
+  Resident dense-f32 GEMV/small-m GEMM has the separate `m ≤ 8`,
+  `n,k ≥ 256`, `FUCINA_GPU_MIN_WORK_GEMV` gate.
 
 The `FUCINA_GPU*` runtime knobs — kill switch, per-kind work gates, the
 MoE fill gate, tracing, TF32, the transient floor, VRAM budget, kernel
 source, and the decode opt-in — are all read once at first use and are
 tabulated with their defaults in §2.6.
+
+The dense-f32 implementation and its ordering/teardown contract are described
+in [GPU-OFFLOAD.md](GPU-OFFLOAD.md). Both providers keep their queue/streams
+and library state open across calls. Metal additionally caches storage page
+wrappers; CUDA uses a bounded eight-slot device pool, registers pooled host
+allocations once, and connects persistent upload/compute/download lanes with
+events. A pending producer's device address passes directly to a dependent
+GEMM.
 
 #### 9.9.1 Metal (`src/backend/metal.zig`, `-Dgpu=metal`, macOS)
 
@@ -7004,10 +7046,10 @@ by the ObjC shim (`src/backend/metal/shim.m`): the MLX "steel" f32/f16 GEMM
 (`metal/mlx_gemm.metal`, MIT, Apple) and the llama.cpp quantized `mul_mm`
 (`metal/ggml_mul_mm.metal`, dequant-in-kernel). What offloads:
 
-- **Dense f32 GEMM** `nn`/`tn`/`nt` and strided-batched (`gemmF32`,
-  `gemmBatchedF32`; a batched call is ONE dispatch with grid depth = batch),
-  behind `shouldUseGpu`/`shouldUseGpuBatched`. This includes training-shaped
-  GEMMs — the gate sees only shape.
+- **Dense f32 GEMM/GEMV** `nn`/`tn`/`nt` and strided-batched
+  (`gemmF32Async`/`gemmBatchedF32Async`; a batched call is ONE dispatch with
+  grid depth = batch), behind the general or resident-small-m gate. The direct
+  slice `gemmF32` twin is blocking for parity/benchmarks.
 - **f16 NT GEMM** (`gemmF16Nt`) behind `shouldUseGpuF16`: returns a shared
   f16 staging buffer valid until the next f16 call; callers hold the public
   `f16_lock` across the GEMM and the widen of its result (native.zig widens
@@ -7032,18 +7074,18 @@ is a performance cache, not a correctness precondition — pageable client
 wraps are re-wired into the GPU address space on every commit (~45 µs/MB), so
 stable weights should live resident. The provider keeps a bounded
 address-keyed registry (512 ranges) so dispatch paths recognize resident
-operands without caller flags; the shim additionally keeps a bounded wrap
-cache for stable host pages. The f32 GEMM path probes that cache lookup-only
-for each operand: a hit reuses the cached `MTLBuffer` (skipping the
-per-commit re-wire of a pageable wrap), a miss falls back to a transient
-wrap without inserting. The stale-pages rule is absolute: only bytes
-whose address is process-lifetime-stable may be flagged cacheable
+operands without caller flags. Dense f32 additionally owns one page wrapper
+on each storage allocation; pooled reuse changes values, not the mapping, and
+the wrapper is evicted before the allocation is freed. F16/quantized stable
+host pages retain the bounded address-keyed shim cache. The stale-pages rule
+is absolute: only bytes whose address is process-lifetime-stable may be
+flagged cacheable
 (`RhsLifetime.stable_process`) — a cached wrap of a freed-and-reused page
 reads stale data. `freeResidentBytes` unregisters and releases.
 
-What does **not** offload on Metal, per current tree: decode GEMV
-(`decodeGemvEnabled()` is hard-`false`; the work gates never pass at decode
-shapes anyway), attention (`shouldUseGpuAttn`/`attnPrefillF16` return
+What does **not** offload on Metal, per current tree: **quantized** decode GEMV
+(`decodeGemvEnabled()` is hard-`false`; resident dense-f32 GEMV is separate),
+attention (`shouldUseGpuAttn`/`attnPrefillF16` return
 `false`; the CPU tiled kernel runs), and the ES parameter-update device arm
 (`esPerturb`/`esUpdate`/`esAnchor` are stubs returning `false` — on unified
 memory the CPU kernels already mutate the shared pages the GPU reads
@@ -7060,15 +7102,22 @@ Missing libraries degrade per capability (no cuBLAS ⇒ only the f32/f16 GEMM
 arms are disabled). Quantized/GEMV/ES/attention kernels are vendored CUDA C
 (`cuda/kernels.cu`) shipped as committed PTX (`cuda/kernels.ptx`, driver JIT,
 disk-cached, ~26 ms cold), with an NVRTC recompile fallback
-(`FUCINA_GPU_KERNELS=src` forces it). One provider stream; dispatches are
-serialized under a dispatch lock. What offloads:
+(`FUCINA_GPU_KERNELS=src` forces it). Persistent upload, compute, and download
+streams use reusable events; cuBLAS stays bound to compute and submission holds
+a short dispatch lock. Pooled f32 host allocations are registered once for
+direct asynchronous DMA. What offloads:
 
-- **f32 GEMM** nn/tn/nt + strided-batched via cuBLAS, strict FP32 math by
+- **f32 GEMM/GEMV** nn/tn/nt + strided-batched via cuBLAS, strict FP32 math by
   default (`FUCINA_GPU_TF32=1` opts into TF32). The f32 gates add a
   *transient floor* on top of `min_work`: non-resident operands stream over
   PCIe (measured ~10.6 GB/s pageable), so shapes below `2^33` m·n·k or
   `m < 128` are refused even when the plain gate passes (trace counts these
-  separately as re-tuning evidence).
+  separately as re-tuning evidence). An already device-resident RHS instead
+  uses the `2^27` resident gate; resident `m≤8` uses the separate GEMV gate.
+  Pending outputs pass their device address directly to a dependent op. H2D,
+  compute, and D2H overlap on their three lanes; the final D2H lands directly
+  in the ordinary exec-owned output (a pinned-stage fallback remains for a
+  host allocator the driver cannot register).
 - **f16 NT GEMM** via `cublasGemmEx` (f16 operands, f32 accumulate), pinned
   host staging under the same `f16_lock` contract as Metal. No transient
   floor — f16 halves the PCIe bytes and the CPU competitor is slow.

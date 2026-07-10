@@ -7,29 +7,34 @@
 //! compiled once at lazy init from embedded source by the ObjC shim
 //! (`metal/shim.m`).
 //!
-//! Contract with the dispatch sites in native.zig (mirrors the BLAS arm):
-//! `gemmF32`/`gemmBatchedF32` return `false` when the GPU did not run (init
-//! failure, kill switch, shim error) and the caller falls through to
-//! BLAS/vector — correctness never depends on the GPU. Calls are synchronous
-//! (commit + waitUntilCompleted on the caller thread, like cblas_sgemm); a
+//! Contract with native.zig: `gemmF32Async` commits eagerly and attaches a
+//! completion token to the ordinary output storage; GPU consumers stay queue
+//! ordered and the first CPU access waits. Submission failure returns false
+//! before attachment so the caller falls through to BLAS/vector. The direct
+//! slice `gemmF32` entry remains blocking for parity/benchmark callers. A
 //! batched call is ONE dispatch with grid depth = batch.
 //!
 //! Quantized dense/MoE offload uses one process-global Metal context, one
 //! process-global staging panel pair, and a process-global lock. That is an
-//! explicit eager-runtime choice: dispatches are blocking and serialized like a
-//! BLAS call, while stable RHS operands may opt into resident storage owned by
-//! the model/session.
+//! explicit eager-runtime choice: those panel dispatches remain blocking and
+//! serialized, while stable RHS operands may opt into resident storage owned
+//! by the model/session.
 //! The public Tensor API has no device/location state.
 //!
-//! Heuristics: `shouldUseGpu` gates on m*n*k work (default 2^30 ≈ 1024³, the
-//! measured M1 Max crossover vs Accelerate/AMX — see `default_min_work`) with
+//! Heuristics: `shouldUseGpu` gates on m*n*k work (default 2^32, the measured
+//! M1 Max async crossover vs Accelerate/AMX — see `default_min_work`) with
 //! `FUCINA_GPU_MIN_WORK` to experiment and `FUCINA_GPU=0` as a runtime kill
 //! switch. Dense Q6_K dequant-in-kernel GEMM has a lower default gate, tuned on
 //! Parakeet 110M, and can be overridden with `FUCINA_GPU_MIN_WORK_DENSE_Q6`.
-//! Tune f32/f16 via `zig build bench-gemm -Dgpu=metal`.
+//! Tune f32 crossover via `zig build bench-gpu-dispatch -Dgpu=metal`.
 const std = @import("std");
+const accelerator = @import("../accelerator.zig");
 const build_options = @import("build_options");
+const storage = @import("../storage.zig");
+const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
+
+const Tensor = tensor.Tensor;
 
 pub const enabled = build_options.gpu_kind == .metal;
 
@@ -66,6 +71,27 @@ extern fn fucina_metal_gemm_f32(
     stride_c: i64,
     timing: ?*CommandTiming,
 ) c_int;
+extern fn fucina_metal_wrap_storage(ctx: *anyopaque, ptr: *const anyopaque, len: i64) ?*anyopaque;
+extern fn fucina_metal_free_storage_wrap(wrap: *anyopaque) void;
+extern fn fucina_metal_gemm_f32_async(
+    ctx: *anyopaque,
+    variant: c_int,
+    a: [*]const f32,
+    b: [*]const f32,
+    c: [*]f32,
+    a_wrap: ?*anyopaque,
+    b_wrap: ?*anyopaque,
+    c_wrap: ?*anyopaque,
+    m: i64,
+    n: i64,
+    k: i64,
+    batch: i64,
+    stride_a: i64,
+    stride_b: i64,
+    stride_c: i64,
+) ?*anyopaque;
+extern fn fucina_metal_ticket_wait(ticket: *anyopaque, timing: ?*CommandTiming) c_int;
+extern fn fucina_metal_ticket_free(ticket: *anyopaque) void;
 extern fn fucina_metal_gemm_f16_nt(
     ctx: *anyopaque,
     a: [*]const f16,
@@ -111,22 +137,27 @@ const State = struct {
     gpu_enabled: bool = true,
     min_work: u64 = default_min_work,
     min_work_f16: u64 = default_min_work_f16,
+    min_work_gemv: u64 = default_min_work_gemv,
     min_work_qmoe: u64 = default_min_work_qmoe,
     min_work_dense_q6: u64 = default_min_work_dense_q6,
     qmoe_min_fill_pct: u64 = default_qmoe_min_fill_pct,
 };
 
-/// Default offload threshold, set from `bench-gemm -Dgpu=metal` on M1 Max
-/// (2026-06-12): the GPU crosses Accelerate/AMX at ~1024³ m*n*k work
-/// (GPU 1361 vs 1302 GF/s there; 2048x1024x1024 "train" shape 2820 vs 1539,
-/// +83%; 2048³ 3859 vs 3175). Below it AMX wins decisively (768³: 2522 vs
-/// 1017) and the ~0.1-0.4 ms fixed round trip dominates small shapes.
-const default_min_work: u64 = 1 << 30;
+/// Default offload threshold, retuned from the eager-async paired benchmark
+/// on M1 Max (2026-07-10). 1024³ and 2048x1024x1024 (2^31 work) are
+/// DVFS-sensitive crossovers, while repeated
+/// alternating trials at 2048x2048x1024 (2^32) win by at least 24% and
+/// 2048³ wins decisively. Below it AMX and the fixed command cost dominate.
+const default_min_work: u64 = 1 << 32;
 /// The f16-operands NT entry competes with the CPU f16 row kernels (no AMX
 /// arm — Accelerate has no f16 GEMM here), which run an order of magnitude
 /// below AMX f32, so the GPU pays off much earlier. 2^27 ≈ 134M m*n*k keeps
 /// the ~0.3-0.5 ms round trip + output widen safely amortized.
 const default_min_work_f16: u64 = 1 << 27;
+/// Resident f32 GEMV has no weight transfer and the cached storage wrapper
+/// removes page-wiring overhead.  M1 Max crosses Accelerate around 8 Mi work;
+/// keep a conservative 16 Mi default and require m<=8 plus residency.
+const default_min_work_gemv: u64 = 1 << 24;
 /// Quantized grouped MoE GEMM gate (total m·n·k across both projections of a
 /// layer). The CPU competitor is the gather/quantize/small-m packed-kernel
 /// path, which runs ~10 GF/s effective (measured 2026-06-12; per-call
@@ -167,6 +198,9 @@ const Trace = struct {
     f32_ns: std.atomic.Value(u64) = .{ .raw = 0 },
     f32_gpu_ns: std.atomic.Value(u64) = .{ .raw = 0 },
     f32_sched_ns: std.atomic.Value(u64) = .{ .raw = 0 },
+    f32_async_calls: std.atomic.Value(u64) = .{ .raw = 0 },
+    f32_submit_ns: std.atomic.Value(u64) = .{ .raw = 0 },
+    f32_wait_ns: std.atomic.Value(u64) = .{ .raw = 0 },
     f16_calls: std.atomic.Value(u64) = .{ .raw = 0 },
     f16_ns: std.atomic.Value(u64) = .{ .raw = 0 },
     f16_gpu_ns: std.atomic.Value(u64) = .{ .raw = 0 },
@@ -309,6 +343,7 @@ pub fn traceDump() void {
     const quant_gpu = trace.quant_gpu_ns.load(.monotonic);
     std.debug.print(
         \\[gpu-trace] dispatch: f32={d} ({d:.1}ms) f16={d} ({d:.1}ms) quant={d} ({d:.1}ms)
+        \\[gpu-trace] async-f32: calls={d} submit={d:.1}ms host-wait={d:.1}ms
         \\[gpu-trace] gpu-time: f32={d:.1}ms overhead={d:.1}ms | f16={d:.1}ms overhead={d:.1}ms | quant={d:.1}ms overhead={d:.1}ms
         \\[gpu-trace] kernel-sched: f32={d:.1}ms f16={d:.1}ms quant={d:.1}ms
         \\[gpu-trace] quant overhead: lock-wait={d:.1}ms stage-copy={d:.1}ms
@@ -316,19 +351,21 @@ pub fn traceDump() void {
         \\[gpu-trace] gate decisions: pass={d} below-gate={d} shape-reject={d} shim-error={d} shape-overflow={d}
         \\
     , .{
-        trace.f32_calls.load(.monotonic),                                      ms(f32_wall),
-        trace.f16_calls.load(.monotonic),                                      ms(f16_wall),
-        trace.quant_calls.load(.monotonic),                                    ms(quant_wall),
-        ms(f32_gpu),                                                           ms(overheadNs(f32_wall, f32_gpu)),
-        ms(f16_gpu),                                                           ms(overheadNs(f16_wall, f16_gpu)),
-        ms(quant_gpu),                                                         ms(overheadNs(quant_wall, quant_gpu)),
-        ms(trace.f32_sched_ns.load(.monotonic)),                               ms(trace.f16_sched_ns.load(.monotonic)),
-        ms(trace.quant_sched_ns.load(.monotonic)),                             ms(trace.quant_lock_ns.load(.monotonic)),
-        ms(trace.quant_stage_ns.load(.monotonic)),                             trace.rhs_cacheable.load(.monotonic),
-        trace.rhs_transient.load(.monotonic),                                  trace.dev_alloc_calls.load(.monotonic),
-        @as(f64, @floatFromInt(trace.dev_alloc_bytes.load(.monotonic))) / 1e6, trace.gate_pass.load(.monotonic),
-        trace.gate_below.load(.monotonic),                                     trace.gate_shape.load(.monotonic),
-        trace.shim_err.load(.monotonic),                                       trace.shape_overflow.load(.monotonic),
+        trace.f32_calls.load(.monotonic),         ms(f32_wall),
+        trace.f16_calls.load(.monotonic),         ms(f16_wall),
+        trace.quant_calls.load(.monotonic),       ms(quant_wall),
+        trace.f32_async_calls.load(.monotonic),   ms(trace.f32_submit_ns.load(.monotonic)),
+        ms(trace.f32_wait_ns.load(.monotonic)),   ms(f32_gpu),
+        ms(overheadNs(f32_wall, f32_gpu)),        ms(f16_gpu),
+        ms(overheadNs(f16_wall, f16_gpu)),        ms(quant_gpu),
+        ms(overheadNs(quant_wall, quant_gpu)),    ms(trace.f32_sched_ns.load(.monotonic)),
+        ms(trace.f16_sched_ns.load(.monotonic)),  ms(trace.quant_sched_ns.load(.monotonic)),
+        ms(trace.quant_lock_ns.load(.monotonic)), ms(trace.quant_stage_ns.load(.monotonic)),
+        trace.rhs_cacheable.load(.monotonic),     trace.rhs_transient.load(.monotonic),
+        trace.dev_alloc_calls.load(.monotonic),   @as(f64, @floatFromInt(trace.dev_alloc_bytes.load(.monotonic))) / 1e6,
+        trace.gate_pass.load(.monotonic),         trace.gate_below.load(.monotonic),
+        trace.gate_shape.load(.monotonic),        trace.shim_err.load(.monotonic),
+        trace.shape_overflow.load(.monotonic),
     });
     trace_shape_lock.lock();
     var shapes = trace_shapes;
@@ -369,6 +406,9 @@ fn initConfigOnce() void {
     }
     if (std.c.getenv("FUCINA_GPU_MIN_WORK_F16")) |v_ptr| {
         state.min_work_f16 = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_f16;
+    }
+    if (std.c.getenv("FUCINA_GPU_MIN_WORK_GEMV")) |v_ptr| {
+        state.min_work_gemv = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_gemv;
     }
     if (std.c.getenv("FUCINA_GPU_MIN_WORK_QMOE")) |v_ptr| {
         const parsed = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_qmoe;
@@ -454,6 +494,31 @@ pub fn shouldUseGpuF16(m: usize, n: usize, k: usize) bool {
     const pass = state.gpu_enabled and work >= state.min_work_f16;
     tgate(pass);
     return pass;
+}
+
+/// Small-m f32 GEMV/GEMM gate.  Unlike the ordinary shape gate, this is legal
+/// only when the RHS already has a storage-lifetime Metal mapping (or is a
+/// device-owned resident allocation), so no large page-wrap cost is hidden.
+pub fn shouldUseGpuGemv(b: *const Tensor, m: usize, n: usize, k: usize) bool {
+    ensureConfig();
+    if (m == 0 or m > 8 or n < 256 or k < 256) return false;
+    const work = std.math.mul(u64, std.math.mul(u64, m, n) catch std.math.maxInt(u64), k) catch std.math.maxInt(u64);
+    if (work < state.min_work_gemv or !state.gpu_enabled) return false;
+    const bytes = std.mem.sliceAsBytes(b.buffer.data);
+    const resident = isResidentRange(bytes) or b.buffer.acceleratorResource(.metal) != null;
+    tgate(resident);
+    return resident;
+}
+
+/// Tensor-aware native-dispatch gate. Metal's ordinary large-op gate needs
+/// no residency distinction (host and device share memory); the separate arm
+/// only admits the small resident GEMV shape rejected by that gate.
+pub fn shouldUseGpuForRhs(b: *const Tensor, m: usize, n: usize, k: usize) bool {
+    return shouldUseGpuGemv(b, m, n, k) or shouldUseGpu(m, n, k);
+}
+
+pub fn shouldUseGpuBatchedForRhs(_: *const Tensor, m: usize, n: usize, k: usize, batch_count: usize) bool {
+    return shouldUseGpuBatched(m, n, k, batch_count);
 }
 
 /// Serializes f16 GEMMs: the shim's f16 output staging buffer is reused
@@ -545,6 +610,160 @@ pub fn gemmBatchedF32(
         if (rc != 0) tinc(&trace.shim_err, 1);
     }
     return rc == 0;
+}
+
+const MetalResource = struct {
+    resource: accelerator.Resource,
+    wrap: *anyopaque,
+
+    const vtable: accelerator.ResourceVTable = .{ .destroy = destroy };
+
+    fn destroy(ctx: *anyopaque) void {
+        const self: *MetalResource = @ptrCast(@alignCast(ctx));
+        fucina_metal_free_storage_wrap(self.wrap);
+        std.heap.c_allocator.destroy(self);
+    }
+};
+
+/// One storage-lifetime Metal page wrapper.  Buffer-pool reuse changes the
+/// values but not the allocation/mapping, so the wrapper remains valid until
+/// `Buffer.destroy` and removes both the per-call Objective-C allocation and
+/// the repeated VM residency wiring from the hot path.
+fn storageWrap(buffer: *storage.Buffer) ?*anyopaque {
+    if (buffer.acceleratorResource(.metal)) |resource| {
+        const cached: *MetalResource = @ptrCast(@alignCast(resource.ctx));
+        return cached.wrap;
+    }
+    const ctx = context() orelse return null;
+    const byte_len = std.math.mul(usize, buffer.data.len, @sizeOf(f32)) catch return null;
+    if (byte_len > std.math.maxInt(i64)) return null;
+    const wrap = fucina_metal_wrap_storage(ctx, buffer.data.ptr, @intCast(byte_len)) orelse return null;
+    const created = std.heap.c_allocator.create(MetalResource) catch {
+        fucina_metal_free_storage_wrap(wrap);
+        return null;
+    };
+    created.* = .{
+        .resource = .{ .provider = .metal, .ctx = created, .vtable = &MetalResource.vtable },
+        .wrap = wrap,
+    };
+    if (buffer.setAcceleratorResource(&created.resource)) return wrap;
+    created.resource.destroy();
+    const winner = buffer.acceleratorResource(.metal) orelse return null;
+    const cached: *MetalResource = @ptrCast(@alignCast(winner.ctx));
+    return cached.wrap;
+}
+
+const MetalWork = struct {
+    work: accelerator.Work,
+    ticket: *anyopaque,
+    a_buffer: *storage.Buffer,
+    b_buffer: *storage.Buffer,
+
+    const vtable: accelerator.WorkVTable = .{
+        .finish = finish,
+        .device_ptr = null,
+        .destroy = destroy,
+    };
+
+    fn finish(ctx: *anyopaque, _: bool) bool {
+        const self: *MetalWork = @ptrCast(@alignCast(ctx));
+        defer {
+            self.a_buffer.clearPendingUse(&self.work);
+            self.b_buffer.clearPendingUse(&self.work);
+        }
+        var timing: CommandTiming = .{ .gpu_ns = 0, .sched_ns = 0 };
+        const wait_started = tstart();
+        const rc = fucina_metal_ticket_wait(self.ticket, if (trace_on) &timing else null);
+        if (trace_on) {
+            tinc(&trace.f32_wait_ns, tfinish(wait_started));
+            tinc(&trace.f32_gpu_ns, timing.gpu_ns);
+            tinc(&trace.f32_sched_ns, timing.sched_ns);
+            if (rc != 0) tinc(&trace.shim_err, 1);
+        }
+        return rc == 0;
+    }
+
+    fn destroy(ctx: *anyopaque) void {
+        const self: *MetalWork = @ptrCast(@alignCast(ctx));
+        fucina_metal_ticket_free(self.ticket);
+        self.a_buffer.release();
+        self.b_buffer.release();
+        std.heap.c_allocator.destroy(self);
+    }
+};
+
+/// Submit one f32 GEMM immediately and attach its completion token to `out`.
+/// This is eager execution, not lazy evaluation: the command is committed
+/// before return.  A CPU read/CPU kernel waits through `Buffer.waitReady`,
+/// while another Metal GEMM relies on the persistent command queue's order.
+pub fn gemmBatchedF32Async(
+    orient: Orient,
+    a: *const Tensor,
+    b: *const Tensor,
+    out: *Tensor,
+    m: usize,
+    n: usize,
+    k: usize,
+    batch_count: usize,
+    stride_a: usize,
+    stride_b: usize,
+    stride_c: usize,
+) bool {
+    if (batch_count == 0 or m == 0 or n == 0 or k == 0) return false;
+    if (m > std.math.maxInt(i32) or n > std.math.maxInt(i32) or k > std.math.maxInt(i32)) return false;
+    if (batch_count > std.math.maxInt(i32)) return false;
+    const block_a = std.math.mul(usize, m, k) catch return false;
+    const block_b = std.math.mul(usize, k, n) catch return false;
+    const block_c = std.math.mul(usize, m, n) catch return false;
+    const total_a = std.math.add(usize, std.math.mul(usize, stride_a, batch_count - 1) catch return false, block_a) catch return false;
+    const total_b = std.math.add(usize, std.math.mul(usize, stride_b, batch_count - 1) catch return false, block_b) catch return false;
+    const total_c = std.math.add(usize, std.math.mul(usize, stride_c, batch_count - 1) catch return false, block_c) catch return false;
+    if (a.offset + total_a > a.buffer.data.len or b.offset + total_b > b.buffer.data.len or out.offset + total_c > out.buffer.data.len) return false;
+    if (out.buffer.pending() != null) return false;
+
+    const ctx = context() orelse return false;
+    const holder = std.heap.c_allocator.create(MetalWork) catch return false;
+    const submit_started = tstart();
+    const ticket = fucina_metal_gemm_f32_async(
+        ctx,
+        @intFromEnum(orient),
+        a.buffer.data[a.offset..].ptr,
+        b.buffer.data[b.offset..].ptr,
+        out.buffer.data[out.offset..].ptr,
+        storageWrap(a.buffer),
+        storageWrap(b.buffer),
+        storageWrap(out.buffer),
+        @intCast(m),
+        @intCast(n),
+        @intCast(k),
+        @intCast(batch_count),
+        @intCast(stride_a),
+        @intCast(stride_b),
+        @intCast(stride_c),
+    ) orelse {
+        std.heap.c_allocator.destroy(holder);
+        return false;
+    };
+    a.buffer.retain();
+    b.buffer.retain();
+    holder.* = .{
+        .work = accelerator.Work.init(.metal, holder, &MetalWork.vtable),
+        .ticket = ticket,
+        .a_buffer = a.buffer,
+        .b_buffer = b.buffer,
+    };
+    a.buffer.setPendingUse(&holder.work);
+    b.buffer.setPendingUse(&holder.work);
+    out.buffer.setPending(&holder.work);
+    if (trace_on) {
+        tinc(&trace.f32_async_calls, 1);
+        tinc(&trace.f32_submit_ns, tfinish(submit_started));
+    }
+    return true;
+}
+
+pub fn gemmF32Async(orient: Orient, a: *const Tensor, b: *const Tensor, out: *Tensor, m: usize, n: usize, k: usize) bool {
+    return gemmBatchedF32Async(orient, a, b, out, m, n, k, 1, 0, 0, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1335,4 +1554,86 @@ test "metal gemm f32 batched matches per-matrix calls" {
         const tol = @max(2e-5 * @max(@abs(want), @abs(got)), 2e-5);
         try std.testing.expect(@abs(got - want) <= tol);
     }
+}
+
+test "metal eager async gemm chains on the queue and synchronizes on host read" {
+    if (!enabled) return error.SkipZigTest;
+    if (context() == null) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const m = 65;
+    const n = 67;
+    const k = 33;
+
+    const av = try allocator.alloc(f32, m * k);
+    defer allocator.free(av);
+    const bv = try allocator.alloc(f32, n * k);
+    defer allocator.free(bv);
+    for (av, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 17)) * 0.03125 - 0.25;
+    for (bv, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 13)) * 0.015625 - 0.125;
+
+    var a = try Tensor.fromSlice(allocator, &.{ m, k }, av);
+    defer a.deinit();
+    var b = try Tensor.fromSlice(allocator, &.{ n, k }, bv);
+    defer b.deinit();
+    var first = try Tensor.zeros(allocator, &.{ m, n });
+    defer first.deinit();
+    var second = try Tensor.zeros(allocator, &.{ m, k });
+    defer second.deinit();
+
+    // Both calls submit immediately.  `first` is consumed by the second
+    // command directly from shared memory; no host wait occurs between them.
+    try std.testing.expect(gemmF32Async(.nt, &a, &b, &first, m, n, k));
+    try std.testing.expect(first.buffer.pending() != null);
+    try std.testing.expect(gemmF32Async(.nn, &first, &b, &second, m, k, n));
+    try std.testing.expect(second.buffer.pending() != null);
+
+    const got = second.dataConst(); // the first unavoidable host boundary
+    try std.testing.expect(second.buffer.pending() == null);
+
+    const tmp = try allocator.alloc(f64, m * n);
+    defer allocator.free(tmp);
+    for (0..m) |row| {
+        for (0..n) |col| {
+            var sum: f64 = 0;
+            for (0..k) |p| sum += @as(f64, av[row * k + p]) * @as(f64, bv[col * k + p]);
+            tmp[row * n + col] = sum;
+        }
+    }
+    for (0..m) |row| {
+        for (0..k) |col| {
+            var sum: f64 = 0;
+            for (0..n) |p| sum += tmp[row * n + p] * @as(f64, bv[p * k + col]);
+            try std.testing.expectApproxEqAbs(@as(f32, @floatCast(sum)), got[row * k + col], 3e-4);
+        }
+    }
+}
+
+test "metal eager async input mutation waits for the device reader" {
+    if (!enabled) return error.SkipZigTest;
+    if (context() == null) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const m = 33;
+    const n = 35;
+    const k = 31;
+    const av = try allocator.alloc(f32, m * k);
+    defer allocator.free(av);
+    const bv = try allocator.alloc(f32, k * n);
+    defer allocator.free(bv);
+    const expected = try allocator.alloc(f32, m * n);
+    defer allocator.free(expected);
+    for (av, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 11)) * 0.03125 - 0.125;
+    for (bv, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 7)) * 0.015625 - 0.0625;
+    cpuReference(.nn, av, bv, expected, m, n, k);
+
+    var a = try Tensor.fromSlice(allocator, &.{ m, k }, av);
+    defer a.deinit();
+    var b = try Tensor.fromSlice(allocator, &.{ k, n }, bv);
+    defer b.deinit();
+    var out = try Tensor.zeros(allocator, &.{ m, n });
+    defer out.deinit();
+    try std.testing.expect(gemmF32Async(.nn, &a, &b, &out, m, n, k));
+    try std.testing.expect(a.buffer.pending_use.load(.acquire) != null);
+    a.data()[0] += 100; // mutable host boundary must wait for the old value's reader
+    try std.testing.expect(a.buffer.pending_use.load(.acquire) == null);
+    for (out.dataConst(), expected) |got, want| try std.testing.expectApproxEqAbs(want, got, 2e-4);
 }

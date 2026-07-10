@@ -1,10 +1,11 @@
 //! CUDA GPU GEMM provider (`-Dgpu=cuda`) — Zig host side.
 //!
-//! Same provider contract as the Metal backend (src/backend/metal.zig): every
-//! entry returns `false`/`null` when the GPU did not run and the caller falls
-//! through to BLAS/vector kernels — correctness never depends on the GPU.
-//! Calls are synchronous (stream-synchronized before return, like cblas_sgemm)
-//! and serialized under a dispatch lock.
+//! Same eager provider contract as Metal: dense f32 commands submit to a
+//! persistent stream and return with a completion token on output storage;
+//! dependent GPU calls consume the producer device pointer and CPU access
+//! performs the deferred visibility wait. Submission failure falls through to
+//! BLAS/vector. Direct slice, f16, quant-panel, and attention entries remain
+//! blocking. Submission is serialized briefly around the shared cuBLAS handle.
 //!
 //! Host binding is dlopen (src/backend/cuda/api.zig): no CUDA SDK at build
 //! time, so `-Dgpu=cuda -Dtarget=x86_64-linux-gnu` cross-compiles from any
@@ -39,9 +40,14 @@
 //! the analog of the Metal shim's page wrap cache: mmap'd weights cross PCIe
 //! once per process, not per dispatch. FUCINA_GPU_VRAM_BUDGET bounds both.
 const std = @import("std");
+const accelerator = @import("../accelerator.zig");
 const build_options = @import("build_options");
+const storage = @import("../storage.zig");
+const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
 const api = @import("cuda/api.zig");
+
+const Tensor = tensor.Tensor;
 
 pub const enabled = build_options.gpu_kind == .cuda;
 
@@ -56,7 +62,9 @@ const State = struct {
     gpu_enabled: bool = true,
     tf32: bool = false,
     min_work: u64 = default_min_work,
+    min_work_resident: u64 = default_min_work_resident,
     min_work_f16: u64 = default_min_work_f16,
+    min_work_gemv: u64 = default_min_work_gemv,
     min_work_qmoe: u64 = default_min_work_qmoe,
     min_work_dense_q6: u64 = default_min_work_dense_q6,
     qmoe_min_fill_pct: u64 = default_qmoe_min_fill_pct,
@@ -73,13 +81,21 @@ const State = struct {
     min_work_attn: u64 = default_min_work_attn,
 };
 
-/// f32 offload threshold, same shape-work gate as the Metal provider.
-/// Resident-weight offload measured 20–30× at this size on the reference
-/// rig; retuning down waits for trace evidence.
+/// Base f32 threshold. Ordinary host RHS operands must also pass the much
+/// higher transient floor below; device-resident RHS uses its separately
+/// measured lower threshold.
 const default_min_work: u64 = 1 << 30;
+/// Dense f32 GEMM with an already device-resident RHS. Against OpenBLAS-32 on
+/// the reference RTX 5000 Ada host, 256^3 loses, 512^3 is a narrow GPU win,
+/// and 640^3+ is decisive; 2^27 is therefore the first competitive tier.
+const default_min_work_resident: u64 = 1 << 27;
 /// f16 NT gate: the CPU f16 row kernels run far below the f32 blocked path
 /// and f16 operands halve the PCIe bytes, so offload pays off early.
 const default_min_work_f16: u64 = 1 << 27;
+/// Resident f32 GEMV/GEMM: no RHS transfer, only a small activation/output
+/// crossing. The reference RTX 5000 Ada beats OpenBLAS-32 by 12x at the
+/// 4096-wide GEMV; 16 Mi work keeps launch/copy overhead amortized.
+const default_min_work_gemv: u64 = 1 << 24;
 /// Quantized grouped-MoE / dense-quant gates.
 const default_min_work_qmoe: u64 = 1 << 30;
 const default_min_work_dense_q6: u64 = 1 << 22;
@@ -107,6 +123,8 @@ const Ctx = struct {
     device: api.CUdevice,
     context: api.CUcontext,
     stream: api.CUstream,
+    upload_stream: api.CUstream,
+    transfer_stream: api.CUstream,
     blas: ?api.Cublas,
     blas_handle: api.CublasHandle,
     /// CONCURRENT_MANAGED_ACCESS == 1: managed memory may be touched by the
@@ -130,6 +148,9 @@ var trace_on: bool = false;
 const Trace = struct {
     f32_calls: std.atomic.Value(u64) = .{ .raw = 0 },
     f32_ns: std.atomic.Value(u64) = .{ .raw = 0 },
+    f32_async_calls: std.atomic.Value(u64) = .{ .raw = 0 },
+    f32_submit_ns: std.atomic.Value(u64) = .{ .raw = 0 },
+    f32_wait_ns: std.atomic.Value(u64) = .{ .raw = 0 },
     f16_calls: std.atomic.Value(u64) = .{ .raw = 0 },
     f16_ns: std.atomic.Value(u64) = .{ .raw = 0 },
     quant_calls: std.atomic.Value(u64) = .{ .raw = 0 },
@@ -174,6 +195,13 @@ inline fn telapsed(c: *std.atomic.Value(u64), start: u64) void {
     const now = @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
     _ = c.fetchAdd(now -% start, .monotonic);
 }
+inline fn tfinish(start: u64) u64 {
+    if (!trace_on) return 0;
+    var ts: CTimespec = undefined;
+    if (clock_gettime(clock_monotonic, &ts) != 0) return 0;
+    const now = @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+    return now -% start;
+}
 inline fn tgate(pass: bool) void {
     if (!trace_on) return;
     tinc(if (pass) &trace.gate_pass else &trace.gate_below, 1);
@@ -198,6 +226,7 @@ pub fn traceDump() void {
     }.f;
     std.debug.print(
         \\[gpu-trace] cuda dispatch: f32={d} ({d:.1}ms) f16={d} ({d:.1}ms) quant={d} ({d:.1}ms) gemv={d} attn={d} ({d:.1}ms) | h2d={d:.1}MB d2h={d:.1}MB
+        \\[gpu-trace] async-f32: calls={d} submit={d:.1}ms host-wait={d:.1}ms
         \\[gpu-trace] rhs: resident={d} streamed={d} | resident allocs={d} ({d:.1}MB)
         \\[gpu-trace] gate decisions: pass={d} below-gate={d} shape-reject={d} transient-floor={d} cuda-error={d}
         \\
@@ -213,6 +242,9 @@ pub fn traceDump() void {
         @as(f64, @floatFromInt(trace.attn_ns.load(.monotonic))) / 1e6,
         mb(trace.h2d_bytes.load(.monotonic)),
         mb(trace.d2h_bytes.load(.monotonic)),
+        trace.f32_async_calls.load(.monotonic),
+        @as(f64, @floatFromInt(trace.f32_submit_ns.load(.monotonic))) / 1e6,
+        @as(f64, @floatFromInt(trace.f32_wait_ns.load(.monotonic))) / 1e6,
         trace.rhs_resident.load(.monotonic),
         trace.rhs_streamed.load(.monotonic),
         trace.dev_alloc_calls.load(.monotonic),
@@ -249,8 +281,14 @@ fn initConfigOnce() void {
     if (std.c.getenv("FUCINA_GPU_MIN_WORK")) |v_ptr| {
         state.min_work = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work;
     }
+    if (std.c.getenv("FUCINA_GPU_MIN_WORK_RESIDENT")) |v_ptr| {
+        state.min_work_resident = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_resident;
+    }
     if (std.c.getenv("FUCINA_GPU_MIN_WORK_F16")) |v_ptr| {
         state.min_work_f16 = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_f16;
+    }
+    if (std.c.getenv("FUCINA_GPU_MIN_WORK_GEMV")) |v_ptr| {
+        state.min_work_gemv = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_gemv;
     }
     if (std.c.getenv("FUCINA_GPU_MIN_WORK_QMOE")) |v_ptr| {
         const parsed = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_qmoe;
@@ -323,6 +361,19 @@ fn initOnce() void {
     c.stream = null;
     if (c.driver.cuStreamCreate(&c.stream, 0) != 0) {
         std.log.warn("fucina-cuda: cuStreamCreate failed; GPU offload disabled", .{});
+        return;
+    }
+    c.upload_stream = null;
+    if (c.driver.cuStreamCreate(&c.upload_stream, 0) != 0) {
+        _ = c.driver.cuStreamDestroy(c.stream);
+        std.log.warn("fucina-cuda: upload stream creation failed; GPU offload disabled", .{});
+        return;
+    }
+    c.transfer_stream = null;
+    if (c.driver.cuStreamCreate(&c.transfer_stream, 0) != 0) {
+        _ = c.driver.cuStreamDestroy(c.upload_stream);
+        _ = c.driver.cuStreamDestroy(c.stream);
+        std.log.warn("fucina-cuda: transfer stream creation failed; GPU offload disabled", .{});
         return;
     }
     c.name_len = 0;
@@ -429,6 +480,55 @@ pub fn shouldUseGpuF16(m: usize, n: usize, k: usize) bool {
     const pass = state.gpu_enabled and work >= state.min_work_f16;
     tgate(pass);
     return pass;
+}
+
+fn tensorHasDeviceStorage(b: *const Tensor) bool {
+    if (b.buffer.pending()) |pending| {
+        if (pending.devicePtr(.cuda) != null) return true;
+    }
+    const ptr = @intFromPtr(b.buffer.data.ptr);
+    const len = b.buffer.data.len * @sizeOf(f32);
+    resident_lock.lock();
+    const resident = residentLookupLocked(ptr, len) != null;
+    resident_lock.unlock();
+    return resident;
+}
+
+pub fn shouldUseGpuGemv(b: *const Tensor, m: usize, n: usize, k: usize) bool {
+    ensureConfig();
+    if (m == 0 or m > 8 or n < 256 or k < 256) return false;
+    const work = std.math.mul(u64, std.math.mul(u64, m, n) catch std.math.maxInt(u64), k) catch std.math.maxInt(u64);
+    if (work < state.min_work_gemv or !state.gpu_enabled) return false;
+    const resident = tensorHasDeviceStorage(b);
+    tgate(resident);
+    return resident;
+}
+
+/// Tensor-aware native-dispatch gate. Resident weights skip the conservative
+/// transient-RHS PCIe floor, while ordinary host weights retain it. This is
+/// still a per-call decision: residency is storage metadata, not a graph.
+pub fn shouldUseGpuForRhs(b: *const Tensor, m: usize, n: usize, k: usize) bool {
+    if (shouldUseGpuGemv(b, m, n, k)) return true;
+    ensureConfig();
+    const work = std.math.mul(u64, std.math.mul(u64, m, n) catch std.math.maxInt(u64), k) catch std.math.maxInt(u64);
+    if (state.gpu_enabled and m != 0 and n >= 32 and k >= 16 and work >= state.min_work_resident) {
+        const resident = tensorHasDeviceStorage(b);
+        tgate(resident);
+        if (resident) return true;
+    }
+    return shouldUseGpu(m, n, k);
+}
+
+pub fn shouldUseGpuBatchedForRhs(b: *const Tensor, m: usize, n: usize, k: usize, batch_count: usize) bool {
+    ensureConfig();
+    const per = std.math.mul(u64, std.math.mul(u64, m, n) catch std.math.maxInt(u64), k) catch std.math.maxInt(u64);
+    const work = std.math.mul(u64, per, batch_count) catch std.math.maxInt(u64);
+    if (state.gpu_enabled and m >= 32 and n >= 32 and k >= 16 and work >= state.min_work_resident) {
+        const resident = tensorHasDeviceStorage(b);
+        tgate(resident);
+        if (resident) return true;
+    }
+    return shouldUseGpuBatched(m, n, k, batch_count);
 }
 
 /// Serializes f16 GEMMs: the provider's f16 output staging (pinned host
@@ -714,6 +814,325 @@ pub fn gemmBatchedF32(
         tinc(&trace.d2h_bytes, total_c * 4);
     }
     return true;
+}
+
+const PinnedBuf = struct {
+    ptr: ?[*]u8 = null,
+    cap: usize = 0,
+
+    fn ensure(self: *PinnedBuf, driver: *const api.Driver, bytes: usize) bool {
+        if (self.cap >= bytes) return true;
+        if (self.ptr) |p| _ = driver.cuMemFreeHost(@ptrCast(p));
+        self.ptr = null;
+        self.cap = 0;
+        var raw: ?*anyopaque = null;
+        if (driver.cuMemHostAlloc(&raw, bytes, 0) != 0) return false;
+        self.ptr = @ptrCast(raw.?);
+        self.cap = bytes;
+        return true;
+    }
+};
+
+/// Page-lock one ordinary Fucina allocation for its whole storage lifetime.
+/// BufferPool reuse therefore amortizes registration just like its host
+/// allocation, and CUDA DMA can target the tensor bytes directly.  This is a
+/// resource cache only; it does not imply that the bytes are device-resident.
+const CudaHostResource = struct {
+    resource: accelerator.Resource,
+    ctx: *Ctx,
+    ptr: *anyopaque,
+
+    const vtable: accelerator.ResourceVTable = .{ .destroy = destroy };
+
+    fn destroy(ctx_opaque: *anyopaque) void {
+        const self: *CudaHostResource = @ptrCast(@alignCast(ctx_opaque));
+        _ = self.ctx.driver.cuCtxSetCurrent(self.ctx.context);
+        _ = self.ctx.driver.cuMemHostUnregister(self.ptr);
+        std.heap.c_allocator.destroy(self);
+    }
+};
+
+fn ensureHostRegistered(ctx: *Ctx, buffer: *storage.Buffer) bool {
+    if (buffer.acceleratorResource(.cuda) != null) return true;
+    const holder = std.heap.c_allocator.create(CudaHostResource) catch return false;
+    const bytes = std.math.mul(usize, buffer.data.len, @sizeOf(f32)) catch {
+        std.heap.c_allocator.destroy(holder);
+        return false;
+    };
+    if (ctx.driver.cuMemHostRegister(buffer.data.ptr, bytes, 0) != 0) {
+        std.heap.c_allocator.destroy(holder);
+        return buffer.acceleratorResource(.cuda) != null;
+    }
+    holder.* = .{
+        .resource = .{ .provider = .cuda, .ctx = holder, .vtable = &CudaHostResource.vtable },
+        .ctx = ctx,
+        .ptr = buffer.data.ptr,
+    };
+    if (buffer.setAcceleratorResource(&holder.resource)) return true;
+    holder.resource.destroy();
+    return buffer.acceleratorResource(.cuda) != null;
+}
+
+/// One reusable in-flight operand set.  Streams and cuBLAS stay process-open;
+/// these slots remove cuMemAlloc/cuMemHostAlloc from steady-state calls while
+/// allowing a short queue of independent/dependent eager ops.
+const AsyncSlot = struct {
+    busy: bool = false,
+    a_dev: DeviceBuf = .{},
+    b_dev: DeviceBuf = .{},
+    c_dev: DeviceBuf = .{},
+    c_host: PinnedBuf = .{},
+    inputs_ready: api.CUevent = null,
+    done: api.CUevent = null,
+};
+
+const async_slot_count = 8;
+var async_slots: [async_slot_count]AsyncSlot = [_]AsyncSlot{.{}} ** async_slot_count;
+var async_slots_lock: thread.Mutex = .{};
+
+fn acquireAsyncSlot(ctx: *Ctx) ?*AsyncSlot {
+    async_slots_lock.lock();
+    defer async_slots_lock.unlock();
+    for (&async_slots) |*slot| {
+        if (slot.busy) continue;
+        if (slot.done == null and ctx.driver.cuEventCreate(&slot.done, 2) != 0) return null; // CU_EVENT_DISABLE_TIMING
+        if (slot.inputs_ready == null and ctx.driver.cuEventCreate(&slot.inputs_ready, 2) != 0) return null;
+        slot.busy = true;
+        return slot;
+    }
+    return null;
+}
+
+fn releaseAsyncSlot(slot: *AsyncSlot) void {
+    async_slots_lock.lock();
+    defer async_slots_lock.unlock();
+    std.debug.assert(slot.busy);
+    slot.busy = false;
+}
+
+const CudaWork = struct {
+    work: accelerator.Work,
+    ctx: *Ctx,
+    slot: *AsyncSlot,
+    output: [*]f32,
+    total_c: usize,
+    block_c: usize,
+    stride_c: usize,
+    batch_count: usize,
+    device_base: usize,
+    dep_a: ?*accelerator.Work,
+    dep_b: ?*accelerator.Work,
+    a_buffer: *storage.Buffer,
+    b_buffer: *storage.Buffer,
+    output_registered: bool,
+
+    const vtable: accelerator.WorkVTable = .{
+        .finish = finish,
+        .device_ptr = devicePtr,
+        .destroy = destroy,
+    };
+
+    fn finish(ctx_opaque: *anyopaque, copy_to_host: bool) bool {
+        const self: *CudaWork = @ptrCast(@alignCast(ctx_opaque));
+        defer {
+            self.a_buffer.clearPendingUse(&self.work);
+            self.b_buffer.clearPendingUse(&self.work);
+        }
+        const d = &self.ctx.driver;
+        const started = tstart();
+        if (d.cuCtxSetCurrent(self.ctx.context) != 0) return false;
+        if (copy_to_host) {
+            const bytes = self.total_c * @sizeOf(f32);
+            // Put the dependency on the persistent download lane instead of
+            // blocking the calling CPU until compute completes and only then
+            // starting DMA.  The final stream wait is the sole host fence.
+            if (d.cuStreamWaitEvent(self.ctx.transfer_stream, self.slot.done, 0) != 0) return false;
+            if (self.output_registered) {
+                if (self.batch_count == 1 or self.stride_c == self.block_c) {
+                    if (d.cuMemcpyDtoHAsync(self.output, self.slot.c_dev.ptr, bytes, self.ctx.transfer_stream) != 0) return false;
+                } else {
+                    for (0..self.batch_count) |bi| {
+                        const off = bi * self.stride_c;
+                        if (d.cuMemcpyDtoHAsync(self.output + off, self.slot.c_dev.ptr + off * @sizeOf(f32), self.block_c * @sizeOf(f32), self.ctx.transfer_stream) != 0) return false;
+                    }
+                }
+                if (d.cuStreamSynchronize(self.ctx.transfer_stream) != 0) return false;
+            } else {
+                if (d.cuMemcpyDtoHAsync(self.slot.c_host.ptr.?, self.slot.c_dev.ptr, bytes, self.ctx.transfer_stream) != 0 or
+                    d.cuStreamSynchronize(self.ctx.transfer_stream) != 0)
+                    return false;
+                const staged: [*]const f32 = @ptrCast(@alignCast(self.slot.c_host.ptr.?));
+                if (self.batch_count == 1 or self.stride_c == self.block_c) {
+                    @memcpy(self.output[0..self.total_c], staged[0..self.total_c]);
+                } else {
+                    for (0..self.batch_count) |bi| {
+                        const off = bi * self.stride_c;
+                        @memcpy(self.output[off..][0..self.block_c], staged[off..][0..self.block_c]);
+                    }
+                }
+            }
+            if (trace_on) tinc(&trace.d2h_bytes, bytes);
+        } else if (d.cuEventSynchronize(self.slot.done) != 0) {
+            // Discard has no host transfer to carry the dependency, but the
+            // slot cannot be recycled while compute still touches it.
+            return false;
+        }
+        if (trace_on) tinc(&trace.f32_wait_ns, tfinish(started));
+        return true;
+    }
+
+    fn devicePtr(ctx_opaque: *anyopaque) ?usize {
+        const self: *CudaWork = @ptrCast(@alignCast(ctx_opaque));
+        return self.device_base;
+    }
+
+    fn destroy(ctx_opaque: *anyopaque) void {
+        const self: *CudaWork = @ptrCast(@alignCast(ctx_opaque));
+        if (self.dep_a) |dep| dep.release();
+        if (self.dep_b) |dep| dep.release();
+        self.a_buffer.release();
+        self.b_buffer.release();
+        releaseAsyncSlot(self.slot);
+        std.heap.c_allocator.destroy(self);
+    }
+};
+
+fn pendingDeviceInput(x: *const Tensor, dep: *?*accelerator.Work) ?api.CUdeviceptr {
+    const work = x.buffer.pending() orelse return null;
+    const base = work.devicePtr(.cuda) orelse return null;
+    work.retain();
+    dep.* = work;
+    return @intCast(base + x.offset * @sizeOf(f32));
+}
+
+fn stageInput(
+    ctx: *Ctx,
+    x: *const Tensor,
+    elems: usize,
+    dev: *DeviceBuf,
+    copy_queued: *bool,
+) ?api.CUdeviceptr {
+    @constCast(x.buffer).waitReady();
+    const bytes = std.math.mul(usize, elems, @sizeOf(f32)) catch return null;
+    const values = x.buffer.data[x.offset..][0..elems];
+    if (residentDevPtr(ctx, std.mem.sliceAsBytes(values), false)) |resident| return resident;
+    if (!dev.ensure(&ctx.driver, bytes)) return null;
+    // Registration is an amortized best effort: allocators unsupported by
+    // the driver retain the correct pageable async fallback.
+    _ = ensureHostRegistered(ctx, x.buffer);
+    if (ctx.driver.cuMemcpyHtoDAsync(dev.ptr, values.ptr, bytes, ctx.upload_stream) != 0) return null;
+    copy_queued.* = true;
+    if (trace_on) tinc(&trace.h2d_bytes, bytes);
+    return dev.ptr;
+}
+
+/// CUDA twin of the Metal eager-async seam.  H2D input copies run on a
+/// persistent upload stream and feed the persistent compute stream by event.
+/// A dependent op consumes the
+/// producer slot directly; host materialization happens only at a CPU
+/// boundary, through the persistent transfer stream.
+pub fn gemmBatchedF32Async(
+    orient: Orient,
+    a: *const Tensor,
+    b: *const Tensor,
+    out: *Tensor,
+    m: usize,
+    n: usize,
+    k: usize,
+    batch_count: usize,
+    stride_a: usize,
+    stride_b: usize,
+    stride_c: usize,
+) bool {
+    if (batch_count == 0 or m == 0 or n == 0 or k == 0) return false;
+    if (m > std.math.maxInt(i32) or n > std.math.maxInt(i32) or k > std.math.maxInt(i32) or batch_count > std.math.maxInt(i32)) return false;
+    const block_a = std.math.mul(usize, m, k) catch return false;
+    const block_b = std.math.mul(usize, k, n) catch return false;
+    const block_c = std.math.mul(usize, m, n) catch return false;
+    const total_a = std.math.add(usize, std.math.mul(usize, stride_a, batch_count - 1) catch return false, block_a) catch return false;
+    const total_b = std.math.add(usize, std.math.mul(usize, stride_b, batch_count - 1) catch return false, block_b) catch return false;
+    const total_c = std.math.add(usize, std.math.mul(usize, stride_c, batch_count - 1) catch return false, block_c) catch return false;
+    if (a.offset + total_a > a.buffer.data.len or b.offset + total_b > b.buffer.data.len or out.offset + total_c > out.buffer.data.len) return false;
+    if (out.buffer.pending() != null) return false;
+
+    const ctx = context() orelse return false;
+    if (ctx.blas_handle == null) return false;
+    dispatch_lock.lock();
+    defer dispatch_lock.unlock();
+    if (ctx.driver.cuCtxSetCurrent(ctx.context) != 0) return false;
+    const slot = acquireAsyncSlot(ctx) orelse return false;
+    const holder = std.heap.c_allocator.create(CudaWork) catch {
+        releaseAsyncSlot(slot);
+        return false;
+    };
+    var dep_a: ?*accelerator.Work = null;
+    var dep_b: ?*accelerator.Work = null;
+    var copy_queued = false;
+    var success = false;
+    defer if (!success) {
+        _ = ctx.driver.cuStreamSynchronize(ctx.upload_stream);
+        _ = ctx.driver.cuStreamSynchronize(ctx.stream);
+        if (dep_a) |dep| dep.release();
+        if (dep_b) |dep| dep.release();
+        releaseAsyncSlot(slot);
+        std.heap.c_allocator.destroy(holder);
+    };
+
+    const submit_started = tstart();
+    if (!slot.c_dev.ensure(&ctx.driver, total_c * @sizeOf(f32))) return false;
+    const output_registered = ensureHostRegistered(ctx, out.buffer);
+    if (!output_registered and !slot.c_host.ensure(&ctx.driver, total_c * @sizeOf(f32))) return false;
+    const a_dev = pendingDeviceInput(a, &dep_a) orelse stageInput(ctx, a, total_a, &slot.a_dev, &copy_queued) orelse return false;
+    const b_dev = pendingDeviceInput(b, &dep_b) orelse stageInput(ctx, b, total_b, &slot.b_dev, &copy_queued) orelse return false;
+    if (copy_queued) {
+        if (ctx.driver.cuEventRecord(slot.inputs_ready, ctx.upload_stream) != 0 or
+            ctx.driver.cuStreamWaitEvent(ctx.stream, slot.inputs_ready, 0) != 0) return false;
+    }
+
+    const one: f32 = 1.0;
+    const zero: f32 = 0.0;
+    const op_b: c_int = if (orient == .nt) api.CUBLAS_OP_T else api.CUBLAS_OP_N;
+    const op_a: c_int = if (orient == .tn) api.CUBLAS_OP_T else api.CUBLAS_OP_N;
+    const ld_b: c_int = if (orient == .nt) @intCast(k) else @intCast(n);
+    const ld_a: c_int = if (orient == .tn) @intCast(m) else @intCast(k);
+    const blas = &(ctx.blas.?);
+    const rc = if (batch_count == 1)
+        blas.cublasSgemm(ctx.blas_handle, op_b, op_a, @intCast(n), @intCast(m), @intCast(k), &one, b_dev, ld_b, a_dev, ld_a, &zero, slot.c_dev.ptr, @intCast(n))
+    else
+        blas.cublasSgemmStridedBatched(ctx.blas_handle, op_b, op_a, @intCast(n), @intCast(m), @intCast(k), &one, b_dev, ld_b, @intCast(stride_b), a_dev, ld_a, @intCast(stride_a), &zero, slot.c_dev.ptr, @intCast(n), @intCast(stride_c), @intCast(batch_count));
+    if (rc != 0 or ctx.driver.cuEventRecord(slot.done, ctx.stream) != 0) return false;
+
+    a.buffer.retain();
+    b.buffer.retain();
+    holder.* = .{
+        .work = accelerator.Work.init(.cuda, holder, &CudaWork.vtable),
+        .ctx = ctx,
+        .slot = slot,
+        .output = out.buffer.data[out.offset..].ptr,
+        .total_c = total_c,
+        .block_c = block_c,
+        .stride_c = stride_c,
+        .batch_count = batch_count,
+        .device_base = @as(usize, @intCast(slot.c_dev.ptr)) - out.offset * @sizeOf(f32),
+        .dep_a = dep_a,
+        .dep_b = dep_b,
+        .a_buffer = a.buffer,
+        .b_buffer = b.buffer,
+        .output_registered = output_registered,
+    };
+    a.buffer.setPendingUse(&holder.work);
+    b.buffer.setPendingUse(&holder.work);
+    out.buffer.setPending(&holder.work);
+    success = true;
+    if (trace_on) {
+        tinc(&trace.f32_async_calls, 1);
+        tinc(&trace.f32_submit_ns, tfinish(submit_started));
+    }
+    return true;
+}
+
+pub fn gemmF32Async(orient: Orient, a: *const Tensor, b: *const Tensor, out: *Tensor, m: usize, n: usize, k: usize) bool {
+    return gemmBatchedF32Async(orient, a, b, out, m, n, k, 1, 0, 0, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -2077,6 +2496,86 @@ test "cuda decode gemv q6_K/q4_K/q8_0 parity vs dequantized reference" {
             }
         }
     }
+}
+
+test "cuda eager async gemm chains device results and synchronizes on host read" {
+    if (!enabled) return error.SkipZigTest;
+    if (context() == null) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const m = 65;
+    const n = 67;
+    const k = 33;
+
+    const av = try allocator.alloc(f32, m * k);
+    defer allocator.free(av);
+    const bv = try allocator.alloc(f32, n * k);
+    defer allocator.free(bv);
+    for (av, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 17)) * 0.03125 - 0.25;
+    for (bv, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 13)) * 0.015625 - 0.125;
+
+    var a = try Tensor.fromSlice(allocator, &.{ m, k }, av);
+    defer a.deinit();
+    var b = try Tensor.fromSlice(allocator, &.{ n, k }, bv);
+    defer b.deinit();
+    var first = try Tensor.zeros(allocator, &.{ m, n });
+    defer first.deinit();
+    var second = try Tensor.zeros(allocator, &.{ m, k });
+    defer second.deinit();
+
+    try std.testing.expect(gemmF32Async(.nt, &a, &b, &first, m, n, k));
+    const producer = first.buffer.pending() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(producer.devicePtr(.cuda) != null);
+    try std.testing.expect(gemmF32Async(.nn, &first, &b, &second, m, k, n));
+    try std.testing.expect(second.buffer.pending() != null);
+    const got = second.dataConst();
+    try std.testing.expect(second.buffer.pending() == null);
+
+    const tmp = try allocator.alloc(f64, m * n);
+    defer allocator.free(tmp);
+    for (0..m) |row| {
+        for (0..n) |col| {
+            var sum: f64 = 0;
+            for (0..k) |p| sum += @as(f64, av[row * k + p]) * @as(f64, bv[col * k + p]);
+            tmp[row * n + col] = sum;
+        }
+    }
+    for (0..m) |row| {
+        for (0..k) |col| {
+            var sum: f64 = 0;
+            for (0..n) |p| sum += tmp[row * n + p] * @as(f64, bv[p * k + col]);
+            try std.testing.expectApproxEqAbs(@as(f32, @floatCast(sum)), got[row * k + col], 3e-4);
+        }
+    }
+}
+
+test "cuda eager async input mutation waits for upload/device use" {
+    if (!enabled) return error.SkipZigTest;
+    if (context() == null) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const m = 33;
+    const n = 35;
+    const k = 31;
+    const av = try allocator.alloc(f32, m * k);
+    defer allocator.free(av);
+    const bv = try allocator.alloc(f32, k * n);
+    defer allocator.free(bv);
+    const expected = try allocator.alloc(f32, m * n);
+    defer allocator.free(expected);
+    for (av, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 11)) * 0.03125 - 0.125;
+    for (bv, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 7)) * 0.015625 - 0.0625;
+    cpuReference(.nn, av, bv, expected, m, n, k);
+
+    var a = try Tensor.fromSlice(allocator, &.{ m, k }, av);
+    defer a.deinit();
+    var b = try Tensor.fromSlice(allocator, &.{ k, n }, bv);
+    defer b.deinit();
+    var out = try Tensor.zeros(allocator, &.{ m, n });
+    defer out.deinit();
+    try std.testing.expect(gemmF32Async(.nn, &a, &b, &out, m, n, k));
+    try std.testing.expect(a.buffer.pending_use.load(.acquire) != null);
+    a.data()[0] += 100;
+    try std.testing.expect(a.buffer.pending_use.load(.acquire) == null);
+    for (out.dataConst(), expected) |got, want| try std.testing.expectApproxEqAbs(want, got, 2e-4);
 }
 
 test "cuda prefill attention parity vs f64 reference (gqa, offset, window, bidi)" {

@@ -449,6 +449,7 @@ pub fn rmsNormMulRopeAxisRankWithTable(
 
     var ww = try rt.prepareContiguous(weight);
     defer ww.deinit();
+    @constCast(x.buffer).waitReady();
     const input = x.buffer.data;
     const weights = ww.tensor().dataConst();
 

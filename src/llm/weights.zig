@@ -1592,8 +1592,9 @@ fn gpuResidentQuantTensor(comptime dtype: DType, ctx: *ExecContext, shape: [2]us
     const DevBuffer = std.meta.Child(@FieldType(Raw, "buffer"));
     const hook = struct {
         fn releaseDeviceBytes(_: *anyopaque, buffer: *DevBuffer) void {
-            fucina.internal.gpu.freeResidentBytes(std.mem.sliceAsBytes(buffer.data));
-            buffer.allocator.destroy(buffer);
+            const bytes = std.mem.sliceAsBytes(buffer.data);
+            buffer.destroyHeader();
+            fucina.internal.gpu.freeResidentBytes(bytes);
         }
     };
     var dev_owned: ?[]u8 = dev;
@@ -1621,8 +1622,9 @@ fn gpuResidentDenseTensor(comptime dtype: DType, comptime Facade: type, ctx: *Ex
     const DevBuffer = std.meta.Child(@FieldType(Raw, "buffer"));
     const hook = struct {
         fn releaseDeviceBytes(_: *anyopaque, buffer: *DevBuffer) void {
-            fucina.internal.gpu.freeResidentBytes(std.mem.sliceAsBytes(buffer.data));
-            buffer.allocator.destroy(buffer);
+            const bytes = std.mem.sliceAsBytes(buffer.data);
+            buffer.destroyHeader();
+            fucina.internal.gpu.freeResidentBytes(bytes);
         }
     };
     var dev_owned: ?[]u8 = dev;

@@ -59,6 +59,7 @@ zig build bench-scatter        # scatter-add (embedding-gradient) kernel at voca
 zig build bench-backend        # scalar vs native backends on representative ops
 zig build bench-f16gemm        # f16 TransB GEMM parallel-efficiency microbench
 zig build bench-gemm           # large-shape f32 GEMM: row kernels vs blocked packed kernel vs BLAS dispatch (bench/gemm.zig)
+zig build bench-gpu-dispatch  # CPU BLAS vs blocking/async eager GPU GEMM/GEMV latency + queued throughput
 zig build bench-q5kmoe         # Q5_K MoE-expert matmul: per-row vs 4-row lane-packed col-outer (bench/q5kmoe.zig)
 zig build bench-ternary        # TQ2_0 ternary matmul: hot sdot/vpdpbusd tiles vs cold table path, mul-free f32 path, Q4_K, dense f32 (bench/ternary.zig)
 zig build bench-attention-backward  # grouped causal attention backward (bench/attention_backward.zig)
@@ -78,7 +79,7 @@ Build options (consumed at comptime via `build_options`):
   default 8 = M1 Max P-cores; `src/parallel.zig`). `FUCINA_MAX_THREADS` still only lowers it at
   runtime (works on static/non-libc Linux too, via `/proc/self/environ`) — many-core servers
   must raise the ceiling at build time.
-- `-Dgpu=none|metal|cuda` — GPU GEMM offload. **metal** (macOS): big f32 GEMMs (default gate 2^30
+- `-Dgpu=none|metal|cuda` — GPU GEMM offload. **metal** (macOS): big f32 GEMMs (cold single-op gate 2^32
   m·n·k work, `FUCINA_GPU_MIN_WORK` override, `FUCINA_GPU=0` kill switch) run on the GPU via the
   vendored MLX steel kernel, and the Gemma/Diffusion MoE expert FFN runs as grouped
   dequant-in-kernel Q6_K/Q8_0 GEMMs (vendored ggml mul_mm; `FUCINA_GPU_MIN_WORK_QMOE` work gate +
@@ -90,6 +91,13 @@ Build options (consumed at comptime via `build_options`):
   `FUCINA_GPU_MIN_WORK_DENSE_Q6` for Q6_K by default, `FUCINA_GPU_MIN_WORK_QMOE` for Q4_K/Q8_0,
   CPU packed-kernel fallback, stable RHS resident-byte wraps, ~+33% pp on 0.6B-Q4_K);
   decode (m=1, below the gate) and training (grad path) stay on CPU.
+  On both providers, eligible **dense f32** GEMM/GEMV commands submit eagerly
+  to persistent provider lanes and synchronize only at a CPU visibility boundary; pending CUDA outputs
+  pass their device pointer directly to dependent GEMMs. CUDA registers pooled host allocations once
+  and overlaps upload/compute/download; resident ordinary GEMM uses `FUCINA_GPU_MIN_WORK_RESIDENT`
+  (default 2^27). Resident f32 `m≤8` uses the separate
+  `FUCINA_GPU_MIN_WORK_GEMV` gate (default 2^24). This is completion tracking, not a graph; see
+  `docs/GPU-OFFLOAD.md`.
   **cuda** (Linux/NVIDIA): no CUDA SDK at build time — dlopen'd
   cuBLAS + vendored PTX kernels; cross-compiles from macOS with `-Dtarget=x86_64-linux-gnu`.
   Covers big f32 GEMMs (strict FP32; `FUCINA_GPU_TF32=1` opts into TF32 tensor cores,
@@ -129,6 +137,7 @@ Build options (consumed at comptime via `build_options`):
 | `src/backend.zig`, `src/backend/` | Final numeric kernels (`native.zig`, `cpu.zig`, `ops.zig`, `vector/`, `quant/`, `packed.zig`; `vector/gemm_blocked.zig` = BLIS-style blocked packed f32 GEMM for the no-BLAS path; `quant/` also holds the f32→quantized row ENCODERS — Q4_K/Q5_K/Q6_K/TQ2_0 + legacy, byte-exact ggml parity, `quantizeRowForDType` dispatch; `quant/ternary.zig` = the hot TQ2_0 ternary {-1,0,+1} kernels — int8 sdot/vpdpbusd flagship + mul-free f32 path + b1.58 absmean encoder, see `docs/TERNARY.md`). |
 | `src/x86dot_check.zig` | Standalone cross-ISA parity checker for the int8 dot primitives + Q4_K/Q8_0/TQ2_0 dot kernels (Rosetta/qemu/x86-hardware validation vehicle; per-arm execution-coverage table + build matrix in its header). |
 | `src/storage.zig` | Refcounted owned storage. |
+| `src/accelerator.zig` | Backend-neutral lifetime tokens for already-submitted eager GPU work and storage-lifetime mapping resources (completion tracking only; no compute graph). |
 | `src/dtype.zig` | Scalar + block-quantized dtype definitions. |
 | `src/parallel.zig`, `src/thread.zig` | Thread pool + parallel-chunk helpers. |
 | `src/gguf.zig` | GGUF parser + writer (`Writer`: byte-verbatim metadata passthrough, llama.cpp-exact offsets/padding — a 449 MiB verbatim re-emit is byte-identical; `encodeF32` = the writer-side quantize seam onto the `quant/` encoders). |
@@ -223,6 +232,7 @@ trained on older Zig:
 - `docs/RUNNING-MODELS.md` — CLI cheat sheet: copy-paste commands to run every supported model (qwen3 chat/spec/bench, gemma4, diffusion-gemma, qwen35, omnivoice, the finetune→merge→serve loop, global knobs). Model weights are not bundled; it says where to get them.
 - `docs/LMSERVER.md` — the lmserve example: OpenAI chat-completions + stateless responses mapping tables (honored/rejected/ignored), the accept-concurrently/generate-sequentially architecture, streaming contracts (SSE chunk + semantic-event skeletons), constrained-output plumbing, the per-model Backend matrix.
 - `docs/BENCHMARK.md` — benchmark protocol for the Qwen GGUF runner, plus dated measurement snapshots/addenda. Read before making perf claims.
+- `docs/GPU-OFFLOAD.md` — graphless eager GPU completion design: persistent queues/streams, storage fences/resources, transfer/device-buffer reuse, sync rules, gates, and Metal/CUDA measurements.
 - `docs/MEMORY-MODEL.md` — why transient memory uses per-tensor `defer deinit` + `BufferPool` (not an arena); rationale, file:line evidence, the optional "frame" helper, and sharp edges.
 - `docs/TRAINING.md` — training guide: tensor-lifetime rules, exec scopes, optimizers/param groups/LR schedules/clipping, gradient accumulation, cross-entropy options, dropout + the deterministic-RNG contract, gradient checkpointing, checkpoint directory contracts, LoRA + Qwen3 GGUF fine-tuning, gradient verification, the fine-tune→merge→quantize→serve export loop, bf16 policy, bench numbers, evolution strategies (gradient-free ES-at-scale, §13).
 - `docs/DEVELOPMENT.md` — the development method: the design invariants (with enforcement and violation smells), the check-before-you-build capability inventory, the per-task template table, the gate matrix, and the delivery/reporting loop. Start here before writing new code.

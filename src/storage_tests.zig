@@ -47,7 +47,7 @@ test "borrowed buffer with release hook fires once at refs==0" {
         var calls: usize = 0;
         fn release(_: *anyopaque, buf: *Buffer) void {
             calls += 1;
-            buf.allocator.destroy(buf);
+            buf.destroyHeader();
         }
     };
     Hook.calls = 0;

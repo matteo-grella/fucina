@@ -1040,6 +1040,22 @@ pub fn build(b: *std.Build) void {
     const gemm_bench_step = b.step("bench-gemm", "Large-shape f32 GEMM: row kernels vs cache-blocked packed kernel (+BLAS reference)");
     gemm_bench_step.dependOn(&gemm_bench_cmd.step);
 
+    const gpu_dispatch_bench_exe = b.addExecutable(.{
+        .name = "fucina-zig-gpu-dispatch-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/gpu_dispatch.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    gpu_dispatch_bench_exe.root_module.addImport("raw_backend", raw_backend_module);
+    configureBlas(gpu_dispatch_bench_exe, blas_kind);
+    configureGpu(b, gpu_dispatch_bench_exe, gpu_kind);
+    const gpu_dispatch_bench_cmd = b.addRunArtifact(gpu_dispatch_bench_exe);
+    if (b.args) |args| gpu_dispatch_bench_cmd.addArgs(args);
+    const gpu_dispatch_bench_step = b.step("bench-gpu-dispatch", "CPU BLAS vs synchronous/asynchronous eager GPU GEMM/GEMV dispatch");
+    gpu_dispatch_bench_step.dependOn(&gpu_dispatch_bench_cmd.step);
+
     const q5kmoe_bench_exe = b.addExecutable(.{
         .name = "fucina-zig-q5kmoe-bench",
         .root_module = b.createModule(.{

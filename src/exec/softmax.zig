@@ -281,6 +281,7 @@ pub fn softmaxExtAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, 
     if (options.mask) |mask| {
         mask_value = try mask.broadcastToRank(rank, source.shape);
     }
+    if (mask_value) |*mask| mask.buffer.waitReady();
     const mask_ranked = if (mask_value) |*mask| try mask.rankView(rank) else null;
 
     var xx = try rt.prepareContiguous(x);

@@ -54,9 +54,9 @@ pub fn matmulBatched2DIntoUncheckedWithConfig(
     config: ParallelConfig,
 ) void {
     if (batch_count == 0) return;
-    const a_base = a.buffer.data[a.offset..];
-    const b_base = b.buffer.data[b.offset..];
-    const c_base = out.buffer.data[out.offset..];
+    const a_base = vm.contiguousDataConst(a, a.buffer.data.len - a.offset);
+    const b_base = vm.contiguousDataConst(b, b.buffer.data.len - b.offset);
+    const c_base = vm.contiguousData(out, out.buffer.data.len - out.offset);
 
     if (maybeParallelBatchedNN(config, c_base, a_base, b_base, m, n, k, batch_count, stride_a, stride_b, stride_c)) return;
     for (0..batch_count) |bi| {
@@ -102,9 +102,9 @@ pub fn matmulBatchedTransA2DIntoUncheckedWithConfig(
     config: ParallelConfig,
 ) void {
     if (batch_count == 0) return;
-    const a_base = a.buffer.data[a.offset..];
-    const b_base = b.buffer.data[b.offset..];
-    const c_base = out.buffer.data[out.offset..];
+    const a_base = vm.contiguousDataConst(a, a.buffer.data.len - a.offset);
+    const b_base = vm.contiguousDataConst(b, b.buffer.data.len - b.offset);
+    const c_base = vm.contiguousData(out, out.buffer.data.len - out.offset);
 
     if (maybeParallelBatchedTN(config, c_base, a_base, b_base, m, n, k, batch_count, stride_a, stride_b, stride_c)) return;
     for (0..batch_count) |bi| {
@@ -150,9 +150,9 @@ pub fn matmulBatchedTransB2DIntoUncheckedWithConfig(
     config: ParallelConfig,
 ) void {
     if (batch_count == 0) return;
-    const a_base = a.buffer.data[a.offset..];
-    const b_base = b.buffer.data[b.offset..];
-    const c_base = out.buffer.data[out.offset..];
+    const a_base = vm.contiguousDataConst(a, a.buffer.data.len - a.offset);
+    const b_base = vm.contiguousDataConst(b, b.buffer.data.len - b.offset);
+    const c_base = vm.contiguousData(out, out.buffer.data.len - out.offset);
 
     if (maybeParallelBatchedNT(config, c_base, a_base, b_base, m, n, k, batch_count, stride_a, stride_b, stride_c)) return;
     for (0..batch_count) |bi| {

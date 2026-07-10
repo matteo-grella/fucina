@@ -15,8 +15,9 @@ dtypes, `f16`/`bf16`/`f32`/`f64`, and the GGML block-quantized formats (see
 exposed from `src/fucina.zig`. Model families (Qwen3 dense + MoE, Qwen3.5,
 Gemma 4, DiffusionGemma, Parakeet ASR, plus the OmniVoice TTS and NAM ports in
 `examples/`) run from GGUF weights through the sibling `fucina_llm` module
-(`src/llm.zig`) and the example runners. Execution is CPU-first with an
-optional Metal GPU GEMM offload (`-Dgpu=metal`, `src/backend/metal.zig`).
+(`src/llm.zig`) and the example runners. Execution is CPU-first with optional
+Metal/CUDA callable-accelerator offload (`-Dgpu=metal|cuda`,
+`src/backend/{metal,cuda}.zig`).
 
 The core architecture is internally coherent: production dependencies are
 acyclic and direction-banded (machine-enforced — see *Layering And
@@ -41,7 +42,7 @@ Top-down; a band may depend only on bands at or below it:
 | tags | `src/tags.zig` (comptime tag algebra) |
 | tensor | `src/tensor.zig` (raw tensor) |
 | primitives | `src/thread.zig`, `src/parallel.zig` |
-| core | `src/dtype.zig`, `src/storage.zig`, `src/rng.zig` |
+| core | `src/dtype.zig`, `src/storage.zig`, `src/accelerator.zig`, `src/rng.zig` |
 
 ## Public Surface
 
@@ -116,7 +117,12 @@ Core value types and substrate:
   block-quantized storage block definitions, float compute/output policy.
 - `src/storage.zig`: refcounted typed buffer storage (`BufferOf(dtype)`),
   including borrowed-slice storage with an optional release hook
-  (`fromBorrowedSliceWithRelease`) used for device-resident weight bytes.
+  (`fromBorrowedSliceWithRelease`) used for device-resident weight bytes;
+  storage also owns optional submitted-writer/latest-reader accelerator
+  fences and storage-lifetime mapping resources.
+- `src/accelerator.zig`: backend-neutral lifetime tokens for
+  already-submitted eager GPU work (`Work`) and per-storage mapping caches
+  (`Resource`). They contain no operation description or compute graph.
 - `src/tensor.zig`: raw tensor value (`TensorOf(dtype)`), shape/stride
   metadata, views, broadcast, reshape, materialization, fixed-rank views.
 - `src/tags.zig`: comptime tag/rank algebra (no runtime representation).
@@ -175,10 +181,16 @@ Backends:
   matmul), `src/backend/ops.zig` (shared op enums),
   `src/backend/quant_tables.zig` (GGML lookup tables).
 - `src/backend/metal.zig` + `src/backend/metal/`: the `-Dgpu=metal` GPU GEMM
-  provider — Zig host (lazy init, work-threshold gates, device-owned weight
-  storage, bounded address-keyed wrap cache) plus the ObjC shim (`shim.m`) and
+  provider — Zig host (lazy init, persistent queue, eager-async dense-f32
+  completion, work-threshold gates, device-owned weight storage,
+  storage-lifetime page wrappers) plus the ObjC shim (`shim.m`) and
   vendored kernels (`mlx_gemm.metal` f32/f16, `ggml_mul_mm.metal`
   dequant-in-kernel).
+- `src/backend/cuda.zig` + `src/backend/cuda/`: the Linux/NVIDIA provider —
+  dlopen'd driver/cuBLAS, persistent upload/compute/download streams, a
+  bounded reusable in-flight slot pool and storage-lifetime host registration
+  for eager-async dense f32, managed weight residency, and vendored PTX
+  quant/GEMV/attention kernels.
 - `src/x86dot_check.zig`: standalone cross-ISA parity checker for the int8 dot
   primitives + Q4_K/Q8_0 dot kernels (per-arm coverage table in its header).
 
@@ -244,7 +256,7 @@ backend.zig
 
 tags.zig -> tensor.zig
 tensor.zig -> storage.zig, dtype.zig
-storage.zig -> dtype.zig
+storage.zig -> accelerator.zig, dtype.zig
 ```
 
 The `fucina_llm` module (`src/llm.zig` + `src/llm/`) sits above the facade:
@@ -380,6 +392,18 @@ arch-gated int8 dot kernels (NEON sdot/smmla, AVX2/AVX-VNNI/AVX512-VNNI) for
 the quantized paths. On `-Dgpu=metal` builds, f32/f16 GEMM gates in
 `native.zig` and the quantized/MoE entries in the exec layer offload
 above-threshold work to `src/backend/metal.zig`.
+
+Dense f32 GPU calls are eagerly submitted but are not synchronously joined at
+every op return. Output storage carries a completion token: another GPU GEMM
+stays queue-ordered (CUDA can consume the producer device pointer), while the
+first CPU data access waits for host visibility. Final release waits before
+recycling but skips an unused D2H. Metal caches a page wrapper per storage
+allocation; CUDA pools eight in-flight device slots behind persistent
+upload/compute/download streams and uses storage-lifetime page registration so
+DMA lands directly in exec-owned tensors. Reusable events and one cuBLAS handle
+order the lanes. This is completion tracking for commands that already exist,
+not deferred execution or a graph; see `docs/GPU-OFFLOAD.md` for the ordering
+proof and measurements.
 
 The allocation contract, precisely scoped:
 

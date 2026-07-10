@@ -184,7 +184,13 @@ pub fn main(init: std.process.Init) !void {
             defer c_t.deinit();
             const Disp = struct {
                 fn go(c: *Tensor, a: *const Tensor, b: *const Tensor, m: usize, n: usize, k: usize, c2: native.ParallelConfig) void {
+                    // The benchmark reuses one output unlike the eager
+                    // runtime, which allocates a fresh result. Clear any
+                    // preceding deferred completion and include this call's
+                    // host-visibility fence in end-to-end dispatch latency.
+                    c.buffer.waitReady();
                     native.matmul2DIntoUncheckedWithConfig(c, a, b, m, n, k, c2);
+                    c.buffer.waitReady();
                 }
             }.go;
             disp_ns = try median(Disp, .{ &c_t, &a_t, &b_t, s.m, s.n, s.k, cfg }, iters);

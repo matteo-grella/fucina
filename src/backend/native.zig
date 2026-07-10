@@ -169,8 +169,8 @@ pub fn matmul2DIntoUncheckedWithConfig(
     config: ParallelConfig,
 ) void {
     if (comptime build_options.use_gpu) {
-        if (gpu.shouldUseGpu(m, n, k)) {
-            if (gpu.gemmF32(.nn, contiguousDataConst(a, m * k), contiguousDataConst(b, k * n), contiguousData(out, m * n), m, n, k)) return;
+        if (gpu.shouldUseGpuForRhs(b, m, n, k)) {
+            if (gpu.gemmF32Async(.nn, a, b, out, m, n, k)) return;
         }
     }
     if (comptime build_options.use_blas) {
@@ -962,8 +962,8 @@ pub fn matmulTransA2DIntoUncheckedWithConfig(
     config: ParallelConfig,
 ) void {
     if (comptime build_options.use_gpu) {
-        if (gpu.shouldUseGpu(m, n, k)) {
-            if (gpu.gemmF32(.tn, contiguousDataConst(a, k * m), contiguousDataConst(b, k * n), contiguousData(out, m * n), m, n, k)) return;
+        if (gpu.shouldUseGpuForRhs(b, m, n, k)) {
+            if (gpu.gemmF32Async(.tn, a, b, out, m, n, k)) return;
         }
     }
     if (comptime build_options.use_blas) {
@@ -1012,8 +1012,8 @@ pub fn matmulTransB2DIntoUncheckedWithConfig(
     config: ParallelConfig,
 ) void {
     if (comptime build_options.use_gpu) {
-        if (gpu.shouldUseGpu(m, n, k)) {
-            if (gpu.gemmF32(.nt, contiguousDataConst(a, m * k), contiguousDataConst(b, n * k), contiguousData(out, m * n), m, n, k)) return;
+        if (gpu.shouldUseGpuForRhs(b, m, n, k)) {
+            if (gpu.gemmF32Async(.nt, a, b, out, m, n, k)) return;
         }
     }
     if (comptime build_options.use_blas) {
@@ -1138,7 +1138,7 @@ pub fn matmulBatched2DIntoUncheckedWithConfig(
 ) void {
     if (batch_count == 0) return;
     if (comptime build_options.use_gpu) {
-        if (gpu.shouldUseGpuBatched(m, n, k, batch_count)) {
+        if (gpu.shouldUseGpuBatchedForRhs(b, m, n, k, batch_count)) {
             if (gpuBatched(.nn, out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c)) return;
         }
     }
@@ -1181,7 +1181,7 @@ pub fn matmulBatchedTransA2DIntoUncheckedWithConfig(
 ) void {
     if (batch_count == 0) return;
     if (comptime build_options.use_gpu) {
-        if (gpu.shouldUseGpuBatched(m, n, k, batch_count)) {
+        if (gpu.shouldUseGpuBatchedForRhs(b, m, n, k, batch_count)) {
             if (gpuBatched(.tn, out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c)) return;
         }
     }
@@ -1224,7 +1224,7 @@ pub fn matmulBatchedTransB2DIntoUncheckedWithConfig(
 ) void {
     if (batch_count == 0) return;
     if (comptime build_options.use_gpu) {
-        if (gpu.shouldUseGpuBatched(m, n, k, batch_count)) {
+        if (gpu.shouldUseGpuBatchedForRhs(b, m, n, k, batch_count)) {
             if (gpuBatched(.nt, out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c)) return;
         }
     }
@@ -1252,16 +1252,11 @@ fn gpuBatched(
     stride_b: usize,
     stride_c: usize,
 ) bool {
-    const matrix_a_len = if (orient == .tn) k * m else m * k;
-    const matrix_b_len = if (orient == .nt) n * k else k * n;
-    const a_total = (batch_count - 1) * stride_a + matrix_a_len;
-    const b_total = (batch_count - 1) * stride_b + matrix_b_len;
-    const c_total = (batch_count - 1) * stride_c + m * n;
-    return gpu.gemmBatchedF32(
+    return gpu.gemmBatchedF32Async(
         orient,
-        a.buffer.data[a.offset..][0..a_total],
-        b.buffer.data[b.offset..][0..b_total],
-        out.buffer.data[out.offset..][0..c_total],
+        a,
+        b,
+        out,
         m,
         n,
         k,
@@ -1288,6 +1283,9 @@ fn blasBatched(
     lda: usize,
     ldb: usize,
 ) void {
+    @constCast(a.buffer).waitReady();
+    @constCast(b.buffer).waitReady();
+    out.buffer.waitMutable();
     const ap = a.buffer.data[a.offset..].ptr;
     const bp = b.buffer.data[b.offset..].ptr;
     const cp = out.buffer.data[out.offset..].ptr;
@@ -1385,9 +1383,11 @@ fn cDim(value: usize) c_int {
 }
 
 fn contiguousDataConst(x: *const Tensor, len: usize) []const f32 {
+    @constCast(x.buffer).waitReady();
     return x.buffer.data[x.offset .. x.offset + len];
 }
 
 fn contiguousData(x: *Tensor, len: usize) []f32 {
+    x.buffer.waitMutable();
     return x.buffer.data[x.offset .. x.offset + len];
 }

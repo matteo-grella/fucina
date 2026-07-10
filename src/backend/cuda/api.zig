@@ -17,6 +17,7 @@ pub const CUdevice = c_int;
 pub const CUdeviceptr = u64;
 pub const CUcontext = ?*anyopaque;
 pub const CUstream = ?*anyopaque;
+pub const CUevent = ?*anyopaque;
 
 pub const CUmodule = ?*anyopaque;
 pub const CUfunction = ?*anyopaque;
@@ -38,9 +39,10 @@ fn Sym(comptime F: type) type {
 fn symName(comptime field: []const u8) [:0]const u8 {
     @setEvalBranchQuota(100_000);
     const v2 = [_][]const u8{
-        "cuDeviceTotalMem", "cuMemAlloc",    "cuMemFree",       "cuMemcpyHtoD",
-        "cuMemcpyDtoH",     "cuStreamDestroy", "cublasCreate",  "cublasDestroy",
-        "cublasSetStream",  "cublasSgemm",   "cuMemGetInfo",
+        "cuDeviceTotalMem", "cuMemAlloc",        "cuMemFree",         "cuMemcpyHtoD",
+        "cuMemcpyDtoH",     "cuMemcpyHtoDAsync", "cuMemcpyDtoHAsync", "cuStreamDestroy",
+        "cuEventDestroy",   "cuMemHostRegister", "cublasCreate",      "cublasDestroy",
+        "cublasSetStream",  "cublasSgemm",       "cuMemGetInfo",
     };
     inline for (v2) |name| {
         if (comptime std.mem.eql(u8, field, name)) return field ++ "_v2";
@@ -79,8 +81,16 @@ pub const Driver = struct {
     cuMemFree: Sym(fn (CUdeviceptr) callconv(.c) CUresult),
     cuMemcpyHtoD: Sym(fn (CUdeviceptr, *const anyopaque, usize) callconv(.c) CUresult),
     cuMemcpyDtoH: Sym(fn (*anyopaque, CUdeviceptr, usize) callconv(.c) CUresult),
+    cuMemcpyHtoDAsync: Sym(fn (CUdeviceptr, *const anyopaque, usize, CUstream) callconv(.c) CUresult),
+    cuMemcpyDtoHAsync: Sym(fn (*anyopaque, CUdeviceptr, usize, CUstream) callconv(.c) CUresult),
     cuStreamCreate: Sym(fn (*CUstream, c_uint) callconv(.c) CUresult),
+    cuStreamDestroy: Sym(fn (CUstream) callconv(.c) CUresult),
     cuStreamSynchronize: Sym(fn (CUstream) callconv(.c) CUresult),
+    cuStreamWaitEvent: Sym(fn (CUstream, CUevent, c_uint) callconv(.c) CUresult),
+    cuEventCreate: Sym(fn (*CUevent, c_uint) callconv(.c) CUresult),
+    cuEventDestroy: Sym(fn (CUevent) callconv(.c) CUresult),
+    cuEventRecord: Sym(fn (CUevent, CUstream) callconv(.c) CUresult),
+    cuEventSynchronize: Sym(fn (CUevent) callconv(.c) CUresult),
     cuGetErrorString: Sym(fn (CUresult, *?[*:0]const u8) callconv(.c) CUresult),
     cuMemAllocManaged: Sym(fn (*CUdeviceptr, usize, c_uint) callconv(.c) CUresult),
     cuMemAdvise: Sym(fn (CUdeviceptr, usize, c_int, CUdevice) callconv(.c) CUresult),
@@ -88,6 +98,8 @@ pub const Driver = struct {
     cuMemGetInfo: Sym(fn (*usize, *usize) callconv(.c) CUresult),
     cuMemHostAlloc: Sym(fn (*?*anyopaque, usize, c_uint) callconv(.c) CUresult),
     cuMemFreeHost: Sym(fn (?*anyopaque) callconv(.c) CUresult),
+    cuMemHostRegister: Sym(fn (*anyopaque, usize, c_uint) callconv(.c) CUresult),
+    cuMemHostUnregister: Sym(fn (*anyopaque) callconv(.c) CUresult),
     cuModuleLoadData: Sym(fn (*CUmodule, *const anyopaque) callconv(.c) CUresult),
     cuModuleGetFunction: Sym(fn (*CUfunction, CUmodule, [*:0]const u8) callconv(.c) CUresult),
     cuFuncSetAttribute: Sym(fn (CUfunction, c_int, c_int) callconv(.c) CUresult),

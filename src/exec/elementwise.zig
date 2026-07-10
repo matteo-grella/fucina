@@ -416,6 +416,7 @@ fn applyElementwise(comptime op: ElementwiseOp, a: f32, b: f32) f32 {
 
 pub fn tailBroadcastInfo(x: *const Tensor) ?TailBroadcastInfo {
     if (x.isContiguous()) return null;
+    @constCast(x.buffer).waitReady();
 
     var start: ?usize = null;
     for (x.strides.slice(), 0..) |stride, i| {

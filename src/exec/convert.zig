@@ -147,6 +147,7 @@ pub fn castF16ToF32(output: []f32, input: []const f16) void {
 pub fn castF32RowsToF16Into(rt: *Runtime, x: *const tensor.Tensor, dst: []f16) !void {
     _ = rt;
     if (dst.len != x.len()) return tensor.TensorError.InvalidDataLength;
+    @constCast(x.buffer).waitReady();
     const data = x.buffer.data;
     if (x.isContiguous()) {
         castF32ToF16(dst, data[x.offset..][0..dst.len]);
@@ -173,6 +174,7 @@ pub fn quantizeF32RowsToQ8_0Into(rt: *Runtime, x: *const tensor.Tensor, dst: []B
     _ = rt;
     if (x.len() % q8_0_block_size != 0) return tensor.TensorError.InvalidDataLength;
     if (dst.len != x.len() / q8_0_block_size) return tensor.TensorError.InvalidDataLength;
+    @constCast(x.buffer).waitReady();
     const data = x.buffer.data;
     if (x.isContiguous()) {
         try backend_mod.quantized_matmul.quantizeRowQ8_0Into(dst, data[x.offset..][0..x.len()]);
