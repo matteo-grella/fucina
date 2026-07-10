@@ -601,8 +601,10 @@ no `build.zig.zon`. The full step list and options live in `AGENTS.md`; the
 verification-relevant steps are:
 
 - `zig build test` (+ `-Dbackend=scalar`, `-Dblas=none`, optimize variants):
-  drives five test roots — `src/fucina.zig`, `src/llm.zig`,
-  `examples/nam.zig`, `examples/parakeet.zig`, `examples/omnivoice.zig`. Parity suites needing local model/reference assets are
+  drives nine test roots — `src/fucina.zig`, `src/llm.zig`,
+  `examples/nam.zig`, `examples/parakeet.zig`, `examples/omnivoice.zig`,
+  `examples/locate_anything.zig`, `examples/facedetect.zig`,
+  `examples/nanochat.zig`, `examples/nla.zig`. Parity suites needing local model/reference assets are
   env-gated (e.g. `OMNIVOICE_PARITY`) and skip by default.
 - `zig build arch-check`: the production import-graph gate (see *Layering And
   Enforcement*).
@@ -613,7 +615,7 @@ verification-relevant steps are:
 - `zig build doc-check`: fails when `AGENTS.md`'s doc index names a root
   `.md` that does not exist (`tools/check_doc_links.zig`).
 - The model runners (`qwen3`, `qwen35`, `gemma4`, `diffusion-gemma`,
-  `parakeet`, `omnivoice`, `nam`, `finetune`, `export-gguf`) double as
+  `parakeet`, `omnivoice`, `nam`, `nla`, `finetune`, `export-gguf`) double as
   parity/oracle harnesses; `bench*` steps are the perf protocol vehicles
   (`BENCHMARK.md`).
 

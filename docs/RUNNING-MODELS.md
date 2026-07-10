@@ -478,6 +478,32 @@ merge → quantize → serve loop above applies unchanged.
 
 ---
 
+## Natural-language autoencoder (NLA)
+
+Research example: a text→vector→text autoencoder on a Qwen3 GGUF, trained with CPU LoRA.
+The AV stage verbalizes a hidden-state vector (injected as a single token embedding into
+a fixed chat prompt); the AR stage maps text back to the vector via a truncated forward
+pass + linear head; eval scores the round trip by cosine.
+
+```sh
+# The whole loop in one shot (datagen -> AR SFT -> AV SFT -> round-trip eval), 20-step demo defaults
+zig build nla -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-Q4_K_S.gguf --demo
+
+# Or stage by stage (artifacts land under --dir, default /tmp/fucina-nla):
+zig build nla -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-Q4_K_S.gguf --datagen
+zig build nla -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-Q4_K_S.gguf --train-ar --steps 30
+zig build nla -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-Q4_K_S.gguf --train-av --steps 30
+zig build nla -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-Q4_K_S.gguf --eval
+
+# Knobs: --layer-k N (residual capture depth, default 18)  --inject-scale F  --corpus FILE
+#        (one snippet per line)  --max-desc-tokens N
+```
+
+Honest caveat: at demo scale the AV stage memorizes its small training set rather than
+generalizing — treat the example as a working seam demonstration, not a trained model.
+
+---
+
 ## GPU offload (`-Dgpu=metal` on macOS, `-Dgpu=cuda` on Linux/NVIDIA)
 
 Two providers share one contract (gates + CPU fallback; `FUCINA_GPU=0` kill

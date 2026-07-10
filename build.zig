@@ -286,6 +286,30 @@ pub fn build(b: *std.Build) void {
     const locate_anything_step = b.step("locate-anything", "LocateAnything-3B open-vocabulary detection from GGUF: detect/info, parity oracles, bench");
     locate_anything_step.dependOn(&locate_anything_cmd.step);
 
+
+    const nla_exe = b.addExecutable(.{
+        .name = "fucina-zig-nla",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/nla.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    nla_exe.root_module.addImport("fucina", module);
+    nla_exe.root_module.addImport("fucina_llm", llm_module);
+    configureBlas(nla_exe, blas_kind);
+    configureGpu(b, nla_exe, gpu_kind);
+    b.installArtifact(nla_exe);
+
+    const nla_cmd = b.addRunArtifact(nla_exe);
+    nla_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        nla_cmd.addArgs(args);
+    }
+
+    const nla_step = b.step("nla", "Natural-language autoencoder on a Qwen3 GGUF: vector->text (AV) / text->vector (AR) LoRA stages + round-trip eval");
+    nla_step.dependOn(&nla_cmd.step);
+
     const finetune_exe = b.addExecutable(.{
         .name = "fucina-zig-finetune",
         .root_module = b.createModule(.{
@@ -1106,6 +1130,21 @@ pub fn build(b: *std.Build) void {
 
     const run_omnivoice_tests = b.addRunArtifact(omnivoice_tests);
     test_step.dependOn(&run_omnivoice_tests.step);
+
+    const nla_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/nla.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    nla_tests.root_module.addImport("fucina", module);
+    nla_tests.root_module.addImport("fucina_llm", llm_module);
+    configureBlas(nla_tests, blas_kind);
+    configureGpu(b, nla_tests, gpu_kind);
+
+    const run_nla_tests = b.addRunArtifact(nla_tests);
+    test_step.dependOn(&run_nla_tests.step);
 
     const locate_anything_tests = b.addTest(.{
         .root_module = b.createModule(.{

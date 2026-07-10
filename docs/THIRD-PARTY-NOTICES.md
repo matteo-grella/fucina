@@ -79,6 +79,7 @@ From other projects:
 | `erff` (used by `gelu_erf`) | `src/backend/ops.zig` | [musl libc](https://musl.libc.org) `src/math/erff.c` | MIT (FDLIBM lineage, Copyright (C) 1993 Sun Microsystems, Inc.) |
 | Muon optimizer | `src/optim.zig` | [KellerJordan/Muon](https://github.com/KellerJordan/Muon); RMS-matching scale per Moonlight (arXiv:2502.16982) | MIT |
 | splitmix64 PRNG | `src/rng.zig` | Sebastiano Vigna's reference implementation | CC0 / public domain |
+| Natural-language autoencoder example | `examples/nla.zig` | [kitft/natural_language_autoencoders](https://github.com/kitft/natural_language_autoencoders) (independent CPU/LoRA reimplementation) | Apache-2.0 (upstream) |
 
 `tools/ref-patches/` holds small instrumentation patches applied to the
 reference clones for parity-dump regeneration only; their diff context

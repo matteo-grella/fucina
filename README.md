@@ -94,7 +94,8 @@ into its own repository. Meanwhile they are here for convenience, and not by
 accident: with the Tensor core in place, Fucina grows and gets tested through real
 applications, so the runtime and the things built on it develop side by
 side. Research experiments that lack a reference oracle live on
-`research/*` branches rather than `main` — currently `research/nla`, a
+`research/*` branches rather than `main` — this branch, `research/nla`,
+carries one: a
 natural-language autoencoder study (text→vector→text on a Qwen3 GGUF)
 built on the trainer's hidden-state seams.
 
