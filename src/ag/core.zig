@@ -11,6 +11,7 @@ const Tensor = tensor.Tensor;
 pub const AgError = error{
     MissingOutputGradient,
     MissingBackwardGradient,
+    BackwardAlreadyRun,
 };
 
 const BackwardState = enum(u8) {
@@ -103,6 +104,15 @@ pub const GradState = struct {
     state: std.atomic.Value(u8) = std.atomic.Value(u8).init(@intFromEnum(BackwardState.idle)),
     pending_grads: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     grad_mutex: thread.Mutex = .{},
+    /// Set once a backward pass with this state as an OUTPUT completes.
+    /// The pass leaves its gradient contributions accumulated in every
+    /// interior state of the graph, so a second pass over the same graph
+    /// would compound them; `backwardGradImpl` rejects a marked output with
+    /// `AgError.BackwardAlreadyRun` before installing any scheduling state.
+    /// Leaves (`grad_fn == null`) are never marked — they have no graph to
+    /// consume. Touched only on the thread driving the pass, never from
+    /// pool tasks, so it needs no synchronization.
+    backward_done: bool = false,
 
     pub fn leaf(allocator: Allocator) !*GradState {
         const self = try allocator.create(GradState);
@@ -556,6 +566,7 @@ fn backwardGradImpl(ctx: *ExecContext, outputs: []const *GradState, output_value
         }
     }
     for (outputs, output_values, seeds) |output, output_value, *seed| {
+        if (output.backward_done) return AgError.BackwardAlreadyRun;
         seed.* = try output.prepareOutputSeed(ctx, output_value);
     }
 
@@ -570,6 +581,14 @@ fn backwardGradImpl(ctx: *ExecContext, outputs: []const *GradState, output_value
 
     engine.waitAll();
     if (engine.takeError()) |err| return err;
+
+    // The completed pass consumed the graph: interior states retain their
+    // accumulated gradients, so re-running over the same graph would compound
+    // them (one backward per graph, §5.2 in docs/REFERENCE.md). Failed passes
+    // stay unmarked and re-runnable; leaf outputs have no graph to consume.
+    for (outputs) |output| {
+        if (output.grad_fn != null) output.backward_done = true;
+    }
 }
 
 pub fn backwardGradOne(ctx: *ExecContext, output: *GradState, output_value: *const Tensor) !void {

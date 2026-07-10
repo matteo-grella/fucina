@@ -191,7 +191,9 @@ train with clipping disabled — its norm-growth limiter replaces it.
 The substrate already accumulates: `backward()` ADDS into each param's
 persisted `GradState.grad` (`src/ag/core.zig`, `accGradOwnedReady`), leaf
 grads live *outside* exec scopes, `step()` consumes them non-destructively,
-and `zeroGrad()` is the only clear. A batch of N sequences is therefore N
+and `zeroGrad()` is the only clear. Accumulation is one backward per fresh
+graph — a repeat over the *same* retained graph fails with
+`error.BackwardAlreadyRun` (docs/REFERENCE.md §5.2). A batch of N sequences is therefore N
 micro-batch loss+backward passes and ONE optimizer step — the raw-loop recipe
 (what `zig build finetune -- --accum-steps N` runs; the LLM trainers' `loss`
 is single-sequence, so accumulation IS their batching mechanism):
@@ -293,9 +295,11 @@ and the backward overwrites them IN PLACE with the logit gradient before the
 two gradient GEMMs, so the full `[rows, classes]` gradient never costs a
 second buffer (−622 MB peak and ~4% faster than the composed dot +
 crossEntropyExt backward at 1024x151936x1024 on M1). The record is
-single-use: a second `backward()` over the same graph errors with
-`LinearCrossEntropyBackwardConsumed` instead of computing garbage — rebuild
-the forward to backward again (accumulation loops already do).
+single-use: re-running its VJP errors with
+`LinearCrossEntropyBackwardConsumed` instead of computing garbage (a plain
+repeated `backward()` on the same graph is already rejected upstream with
+`error.BackwardAlreadyRun`) — rebuild the forward to backward again
+(accumulation loops already do).
 
 Normalization for non-RMSNorm architectures: `layerNorm(ctx, tag, eps, .{})` /
 `layerNorm(ctx, tag, eps, .{ .weight = &w, .bias = &b })` (torch.nn.LayerNorm

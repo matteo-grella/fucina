@@ -1647,6 +1647,7 @@ returns `false` there.
 ```zig
 pub fn requiresGrad(self: *const Self) bool
 pub fn backward(self: *const Self, ctx: *ExecContext) !void  // error.NoGradientGraph on constants
+pub fn backwardWithGrad(self: *const Self, ctx: *ExecContext, grad_output: *const Self) !void // explicit output gradient
 pub fn grad(self: *const Self, ctx: *ExecContext) !?Self     // owned CLONE of the gradient, or null
 pub fn gradView(self: *const Self, ctx: *ExecContext) !?Self // refcounted VIEW of the live gradient
 pub fn zeroGrad(self: *const Self) void                      // drop accumulated grad; no-op on constants
@@ -1660,7 +1661,9 @@ buffer (the held view defeats copy-on-write, §5.3), so the view keeps the
 stale value; use `grad` to observe later passes. Training loops call
 `zeroGrad` between steps so gradients
 do not accumulate across them. Graph construction, `fucina.noGrad`,
-checkpointing, and `backward`'s traversal contract are §5.
+checkpointing, and the traversal/seeding contract of `backward` and
+`backwardWithGrad` (a non-scalar output needs the explicit output gradient;
+one backward per graph) are §5.
 
 ```zig
 test "grad accessors on the facade" {
@@ -1696,7 +1699,8 @@ methods are documented above; §4 covers every math/NN op in depth.
 `bernoulli`,
 `deinit`, `asRawTensor`, `item`, `data`, `dataConst`,
 `copyTo`, `detach`, `materialize`, `contiguous`, `requiresGrad`, `zeroGrad`,
-`backward`, `grad`, `gradView`, `axis`, `hasTag`, `dim`, `shape`, `to`,
+`backward`, `backwardWithGrad`, `grad`, `gradView`, `axis`, `hasTag`, `dim`,
+`shape`, `to`,
 `withTags`, `viewWithStrides`, `alignTo`, `permuteTo`, `transpose`,
 `insertAxis`, `squeeze`, `split`, `merge`, `reshape`, `broadcastTo`,
 `narrow`, `sliceStep`,
@@ -3288,15 +3292,21 @@ test "backward and grad read" {
 
 ### 5.2 Running backward (`src/ag/core.zig`)
 
-The facade exposes a single-output entry point:
+The facade exposes a single-output entry point, in an implicitly-seeded and
+an explicitly-seeded form:
 
 ```zig
 pub fn backward(self: *const Self, ctx: *ExecContext) !void
+pub fn backwardWithGrad(self: *const Self, ctx: *ExecContext, grad_output: *const Self) !void
 ```
 
-It errors with `error.NoGradientGraph` when called on a tensor without a
-`grad_state` and otherwise delegates to the engine's
-`core.backwardGradOne(ctx, state, &self.value)`. The engine itself is
+Both error with `error.NoGradientGraph` when called on a tensor without a
+`grad_state` and otherwise delegate to the engine's
+`core.backwardGradOne(ctx, state, &self.value)`. `backwardWithGrad` first
+installs `grad_output` as the output gradient: it is same-tagged (checked
+at comptime) and must match `self`'s shape (`error.ShapeMismatch`); it is
+read as a *value* — its own gradient state, if any, is ignored — and
+replaces any gradient already held by `self`. The engine itself is
 multi-output-capable but internal (not re-exported at the `fucina` root):
 
 ```zig
@@ -3307,7 +3317,7 @@ pub fn backwardGradOne(ctx: *ExecContext, output: *GradState,
                        output_value: *const Tensor) !void
 ```
 
-`pub const AgError = error{ MissingOutputGradient, MissingBackwardGradient };`
+`pub const AgError = error{ MissingOutputGradient, MissingBackwardGradient, BackwardAlreadyRun };`
 
 **Seeding rules.** Before any scheduling state exists, every output is
 validated and its implicit seed pre-allocated:
@@ -3315,10 +3325,11 @@ validated and its implicit seed pre-allocated:
 - A **scalar** output (one element total — a `{1,1}` tensor counts) with no
   gradient present receives the implicit seed `1`.
 - A **non-scalar** output with no gradient present fails with
-  `error.MissingOutputGradient`.
-- An output whose `GradState` **already holds a gradient** (installed with
-  `setGrad`, §5.3, or by the checkpoint recompute) is respected as-is — the
-  implicit `+1` is *not* added on top.
+  `error.MissingOutputGradient` — seed it with `backwardWithGrad` (or
+  install a gradient through the low-level `setGrad`, §5.3).
+- An output whose `GradState` **already holds a gradient** (installed by
+  `backwardWithGrad`, by `setGrad` (§5.3), or by the checkpoint recompute)
+  is respected as-is — the implicit `+1` is *not* added on top.
 - In a multi-output pass, a scalar output whose gradient appears only
   **mid-pass** (an earlier output's backward already contributed to it)
   still accumulates its own seed on top of that contribution.
@@ -3335,12 +3346,13 @@ test "non-scalar output needs a seed" {
     var y = try x.scale(&ctx, 2);
     defer y.deinit();
 
-    // Unseeded non-scalar output: fails before any scheduling state exists.
+    // Unseeded non-scalar output: fails before any scheduling state exists,
+    // so the SAME graph runs once a seed is supplied.
     try std.testing.expectError(error.MissingOutputGradient, y.backward(&ctx));
 
-    // Pre-seed the output; the same graph re-runs with the seed used as-is.
-    y.grad_state.?.setGrad(try ctx.fromSlice(&.{2}, &.{ 1, 10 }));
-    try y.backward(&ctx);
+    var grad_output = try fucina.Tensor(.{.d}).fromSlice(&ctx, .{2}, &.{ 1, 10 });
+    defer grad_output.deinit();
+    try y.backwardWithGrad(&ctx, &grad_output); // shape-checked; read as a value
     var gx = (try x.grad(&ctx)).?;
     defer gx.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 2, 20 }, try gx.dataConst());
@@ -3427,13 +3439,19 @@ failure remain accumulated — call `zeroGrad` on the leaves before retrying
 if exact values matter.
 
 **One backward per graph.** Gradients accumulate in every `GradState` they
-touch, including interior op results. Re-invoking `backward` on the *same*
-retained graph therefore compounds: the pre-seeded output is reused as-is,
-but interior states still hold their previous gradients and receive new
-contributions on top, which then flow downstream multiplied (two passes over
-`loss = sum(x·x)` yield `3·(2x)`, not `2·(2x)`). The supported accumulation
-idiom is one backward per freshly built forward graph over shared leaves
-(§5.3).
+touch, including interior op results, and a completed pass leaves them
+there. Re-running over the *same* retained graph would therefore compound:
+interior states would receive new contributions on top of their previous
+gradients, which then flow downstream multiplied (two passes over
+`loss = sum(x·x)` would yield `3·(2x)`, not `2·(2x)`). A completed pass
+therefore marks its outputs consumed, and a repeated
+`backward`/`backwardWithGrad` over them fails with
+`error.BackwardAlreadyRun` before any scheduling state is installed —
+`zeroGrad` resets gradients, not the consumed graph. Only a *completed*
+pass consumes: the failed-seeding retry above stays re-runnable, and a leaf
+output (a bare variable) has no graph to consume and is never marked. The
+supported accumulation idiom is one backward per freshly built forward
+graph over shared leaves (§5.3).
 
 ### 5.3 Reading, seeding, and resetting gradients (`src/ag/tensor.zig`, `src/ag/core.zig`)
 
@@ -3475,13 +3493,18 @@ pub fn gradView(self: *GradState) !?Tensor
 ```
 
 `setGrad` consumes a *raw* tensor (e.g. produced by `ctx.fromSlice`, §6) and
-replaces any existing gradient; its primary public use is seeding non-scalar
-outputs before `backward` (§5.2). `GradState.leaf`/`fromFunction`/`deinit`
-exist for internal wiring and are managed by the facade.
+replaces any existing gradient. For seeding an output before `backward`,
+prefer `backwardWithGrad` (§5.2) — it stays in facade tensors and
+shape-checks the output gradient; `setGrad` is the unchecked low-level hook
+underneath it (the checkpoint recompute seeds through it too, §5.5, and gradient
+clipping rewrites accumulated gradients with it, §11.4).
+`GradState.leaf`/`fromFunction`/`deinit` exist for internal wiring and are
+managed by the facade.
 
 **Accumulation across backward calls** — the micro-batch idiom: build a
 fresh forward graph per micro-batch over the same leaf variables and call
-`backward` once per graph; leaf gradients sum.
+`backward` once per graph; leaf gradients sum. (A repeat over the *same*
+graph fails with `error.BackwardAlreadyRun`, §5.2.)
 
 ```zig
 test "micro-batch accumulation and zeroGrad" {

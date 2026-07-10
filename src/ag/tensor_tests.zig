@@ -27,6 +27,7 @@ test "tagged autograd exposes Tensor facade operations" {
         "detach",
         "requiresGrad",
         "backward",
+        "backwardWithGrad",
         "grad",
         "shape",
         "to",
@@ -1086,6 +1087,89 @@ test "tagged public tensor detach severs the gradient graph" {
     try std.testing.expect(!loss.requiresGrad());
     try std.testing.expectError(error.NoGradientGraph, loss.backward(&ctx));
     try std.testing.expect((try x.grad(&ctx)) == null);
+}
+
+test "tagged public backwardWithGrad seeds non-scalar outputs" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var x = try Tensor(.{.d}).variableFromSlice(&ctx, .{2}, &.{ 3, 4 });
+    defer x.deinit();
+    var c = try Tensor(.{.d}).fromSlice(&ctx, .{2}, &.{ 10, 20 });
+    defer c.deinit();
+    var y = try x.mul(&ctx, &c);
+    defer y.deinit();
+
+    // A non-scalar output has no implicit seed; a mis-shaped output
+    // gradient is rejected before any state changes.
+    try std.testing.expectError(error.MissingOutputGradient, y.backward(&ctx));
+    var bad_grad = try Tensor(.{.d}).fromSlice(&ctx, .{3}, &.{ 1, 1, 1 });
+    defer bad_grad.deinit();
+    try std.testing.expectError(error.ShapeMismatch, y.backwardWithGrad(&ctx, &bad_grad));
+
+    // The output gradient is read as a value: dloss/dx = grad_output * c.
+    var grad_output = try Tensor(.{.d}).fromSlice(&ctx, .{2}, &.{ 1, 10 });
+    defer grad_output.deinit();
+    try y.backwardWithGrad(&ctx, &grad_output);
+    var gx = (try x.grad(&ctx)).?;
+    defer gx.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 10, 200 }, try gx.dataConst());
+    try std.testing.expectEqualSlices(f32, &.{ 1, 10 }, try grad_output.dataConst());
+
+    // The completed pass consumed the graph; constants have no graph at all.
+    try std.testing.expectError(error.BackwardAlreadyRun, y.backwardWithGrad(&ctx, &grad_output));
+    try std.testing.expectError(error.NoGradientGraph, c.backwardWithGrad(&ctx, &grad_output));
+}
+
+test "tagged public tensor rejects a second backward over a consumed graph" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var x = try Tensor(.{.d}).variableFromSlice(&ctx, .{2}, &.{ 3, 5 });
+    defer x.deinit();
+
+    var sq = try x.mul(&ctx, &x);
+    defer sq.deinit();
+    var loss = try sq.sumAll(&ctx);
+    defer loss.deinit();
+
+    // Scalar outputs may take an explicit output gradient too:
+    // dloss/dx = 2 * 2x.
+    var grad_output = try Tensor(.{}).scalar(&ctx, 2);
+    defer grad_output.deinit();
+    try loss.backwardWithGrad(&ctx, &grad_output);
+    var gx = (try x.grad(&ctx)).?;
+    defer gx.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 12, 20 }, try gx.dataConst());
+
+    // Interior states keep their gradients, so a second pass over the SAME
+    // graph would compound them; it fails loudly instead — zeroGrad resets
+    // gradients, not the consumed graph.
+    try std.testing.expectError(error.BackwardAlreadyRun, loss.backward(&ctx));
+    x.zeroGrad();
+    loss.zeroGrad();
+    try std.testing.expectError(error.BackwardAlreadyRun, loss.backward(&ctx));
+
+    // The micro-batch idiom is untouched: a FRESH graph over the same leaf
+    // runs and accumulates into the leaf as before.
+    var sq2 = try x.mul(&ctx, &x);
+    defer sq2.deinit();
+    var loss2 = try sq2.sumAll(&ctx);
+    defer loss2.deinit();
+    try loss2.backward(&ctx);
+    var gx2 = (try x.grad(&ctx)).?;
+    defer gx2.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 6, 10 }, try gx2.dataConst());
 }
 
 test "tagged public noGrad scope suppresses graph recording" {

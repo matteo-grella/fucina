@@ -895,6 +895,25 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             return core.backwardGradOne(ctx, state, &self.value);
         }
 
+        /// As `backward`, but with an explicit output gradient instead of
+        /// the implicit scalar 1: the way to run backward from a non-scalar
+        /// output (scalar outputs may take one too). `grad_output` is
+        /// same-tagged and must match `self`'s shape
+        /// (`error.ShapeMismatch`); it is read as a value — its own gradient
+        /// state, if any, is ignored — and replaces any gradient already
+        /// accumulated on `self`.
+        pub fn backwardWithGrad(self: *const Self, ctx: *ExecContext, grad_output: *const Self) !void {
+            const state = self.grad_state orelse return error.NoGradientGraph;
+            // Checked here too so the error exit leaves `self`'s accumulated
+            // gradient untouched (the engine re-checks after setGrad).
+            if (state.backward_done) return core.AgError.BackwardAlreadyRun;
+            if (!std.mem.eql(usize, self.value.shape.slice(), grad_output.value.shape.slice())) {
+                return TensorError.ShapeMismatch;
+            }
+            state.setGrad(try grad_output.value.cloneView());
+            return core.backwardGradOne(ctx, state, &self.value);
+        }
+
         pub fn grad(self: *const Self, ctx: *ExecContext) !?Self {
             const state = self.grad_state orelse return null;
             var value = (try state.gradClone(ctx.allocator)) orelse return null;

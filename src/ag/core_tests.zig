@@ -352,4 +352,16 @@ test "failed output seeding leaves the graph re-runnable" {
     var gx = (try x.gradClone(ctx.allocator)).?;
     defer gx.deinit();
     try std.testing.expectEqual(@as(f32, 5), gx.item());
+
+    // The successful retry consumed the graph: a third pass fails loudly
+    // instead of silently compounding interior gradients — for a single
+    // consumed output within the batch too.
+    try std.testing.expectError(
+        core.AgError.BackwardAlreadyRun,
+        backwardGrad(&ctx, &.{ y, z }, &.{ &y_value, &z_value }),
+    );
+    try std.testing.expectError(
+        core.AgError.BackwardAlreadyRun,
+        backwardGradOne(&ctx, y, &y_value),
+    );
 }

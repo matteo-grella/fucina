@@ -480,10 +480,15 @@ Backward execution (`backwardGrad`/`backwardGradSerial` in `ag/core.zig`):
 - Validates every output and pre-allocates the implicit scalar seeds *before*
   `prepareBackwardPass` installs any pending counter, so an error exit during
   seeding leaves the graph re-runnable instead of stranding counters.
-- Seeds non-scalar outputs only if a gradient is already present (checkpoint
-  recompute, external `setGrad`); explicitly pre-seeded outputs are respected
-  without an implicit `+1` on top. Scalar outputs whose gradient appears only
-  mid-pass still accumulate their own seed.
+- Seeds non-scalar outputs only if a gradient is already present (the facade's
+  `backwardWithGrad`, the checkpoint recompute, external `setGrad`); explicitly
+  pre-seeded outputs are respected without an implicit `+1` on top. Scalar
+  outputs whose gradient appears only mid-pass still accumulate their own
+  seed.
+- Marks outputs consumed once their pass completes: interior states retain
+  their accumulated gradients, so a repeat backward over the same graph would
+  compound them — it fails with `AgError.BackwardAlreadyRun` instead (failed
+  passes stay unmarked and re-runnable).
 - Recursively discovers dependencies, uses per-state pending-gradient
   counters for shared branches, and schedules a state only when all
   downstream contributions are present.
