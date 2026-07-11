@@ -612,6 +612,9 @@ pub const Model = struct {
                     // fold kv_b's K block into the query (q_eff = W_kb_k^T
                     // q_nope) and apply its V block AFTER attention to the
                     // probability-weighted latent — K/V never materialize.
+                    // All contractions batch over heads through tensor ops;
+                    // the absorbed weights and the cache rows are borrowed
+                    // views (zero copies per step).
                     const lora = cfg.kv_lora_rank;
                     const row_w = lora + cfg.qk_rope_dim;
                     const k_layer = cache.k[layer_i];
@@ -619,50 +622,52 @@ pub const Model = struct {
                     @memcpy(dst[0..lora], latent);
                     @memcpy(dst[lora..], k_pe);
 
-                    const q_eff = try allocator.alloc(f32, lora);
-                    defer allocator.free(q_eff);
-                    const ctx_lat = try allocator.alloc(f32, lora);
-                    defer allocator.free(ctx_lat);
+                    // q_nope gathered head-major (the per-head nope block is
+                    // strided inside q); q_pe roped in place.
+                    const q_nope = try allocator.alloc(f32, cfg.num_heads * cfg.qk_nope_dim);
+                    defer allocator.free(q_nope);
                     for (0..cfg.num_heads) |h| {
                         const q_head = q[h * cfg.qk_head_dim ..][0..cfg.qk_head_dim];
                         self.rope.apply(q_head[cfg.qk_nope_dim..], pos);
-                        const q_pe = q_head[cfg.qk_nope_dim..];
-
-                        // q_eff = W_kb_k[h]^T @ q_nope  ([nope, lora] rows).
-                        const wk = layer.kv_b_k[h * cfg.qk_nope_dim * lora ..][0 .. cfg.qk_nope_dim * lora];
-                        @memset(q_eff, 0);
-                        for (0..cfg.qk_nope_dim) |i| {
-                            const qi = q_head[i];
-                            const w_row = wk[i * lora ..][0..lora];
-                            for (q_eff, w_row) |*acc, w| acc.* += qi * w;
-                        }
-
-                        for (0..t_len) |t| {
-                            const row = k_layer[t * row_w ..][0..row_w];
-                            var dot: f32 = 0;
-                            for (q_eff, row[0..lora]) |a, b| dot += a * b;
-                            for (q_pe, row[lora..]) |a, b| dot += a * b;
-                            scores[t] = dot * self.attn_scale;
-                        }
-                        softmaxInPlace(scores);
-
-                        @memset(ctx_lat, 0);
-                        for (0..t_len) |t| {
-                            const w = scores[t];
-                            const row = k_layer[t * row_w ..][0..lora];
-                            for (ctx_lat, row) |*acc, c| acc.* += w * c;
-                        }
-
-                        // out[h] = W_kb_v[h] @ ctx_lat  ([v_head, lora] rows).
-                        const wv = layer.kv_b_v[h * cfg.v_head_dim * lora ..][0 .. cfg.v_head_dim * lora];
-                        const out_head = attn_out[h * cfg.v_head_dim ..][0..cfg.v_head_dim];
-                        for (out_head, 0..) |*o, i| {
-                            const w_row = wv[i * lora ..][0..lora];
-                            var acc: f32 = 0;
-                            for (w_row, ctx_lat) |w, c| acc += w * c;
-                            o.* = acc;
-                        }
+                        @memcpy(q_nope[h * cfg.qk_nope_dim ..][0..cfg.qk_nope_dim], q_head[0..cfg.qk_nope_dim]);
                     }
+                    var q_nope_t = try fucina.Tensor(.{ .head, .nope }).fromBorrowedSlice(ctx, .{ cfg.num_heads, cfg.qk_nope_dim }, q_nope);
+                    defer q_nope_t.deinit();
+                    var wk_t = try fucina.Tensor(.{ .head, .nope, .lora }).fromBorrowedConstSlice(ctx, .{ cfg.num_heads, cfg.qk_nope_dim, lora }, layer.kv_b_k);
+                    defer wk_t.deinit();
+                    var q_eff_t = try q_nope_t.dot(ctx, &wk_t, .nope);
+                    defer q_eff_t.deinit();
+                    const q_eff = try q_eff_t.dataConst(); // [head][lora]
+
+                    // q_cat = [q_eff | q_pe] per head; scores over the cached
+                    // [latent | k_pe] rows in ONE batched contraction.
+                    const q_cat = try allocator.alloc(f32, cfg.num_heads * row_w);
+                    defer allocator.free(q_cat);
+                    for (0..cfg.num_heads) |h| {
+                        @memcpy(q_cat[h * row_w ..][0..lora], q_eff[h * lora ..][0..lora]);
+                        @memcpy(q_cat[h * row_w ..][lora..row_w], q[h * cfg.qk_head_dim + cfg.qk_nope_dim ..][0..cfg.qk_rope_dim]);
+                    }
+                    var q_cat_t = try fucina.Tensor(.{ .head, .d }).fromBorrowedSlice(ctx, .{ cfg.num_heads, row_w }, q_cat);
+                    defer q_cat_t.deinit();
+                    var rows_t = try fucina.Tensor(.{ .t, .d }).fromBorrowedConstSlice(ctx, .{ t_len, row_w }, k_layer[0 .. t_len * row_w]);
+                    defer rows_t.deinit();
+                    var scores_t = try q_cat_t.dot(ctx, &rows_t, .d);
+                    defer scores_t.deinit();
+                    var scaled_t = try scores_t.scale(ctx, self.attn_scale);
+                    defer scaled_t.deinit();
+                    var probs_t = try scaled_t.softmax(ctx, .t, .{});
+                    defer probs_t.deinit();
+
+                    // ctx_lat[h] = probs[h] . latents; out[h] = W_kb_v[h] @ ctx_lat[h].
+                    var lat_t = try rows_t.narrow(ctx, .d, 0, lora);
+                    defer lat_t.deinit();
+                    var ctx_t = try probs_t.dot(ctx, &lat_t, .t);
+                    defer ctx_t.deinit();
+                    var wv_t = try fucina.Tensor(.{ .head, .v, .d }).fromBorrowedConstSlice(ctx, .{ cfg.num_heads, cfg.v_head_dim, lora }, layer.kv_b_v);
+                    defer wv_t.deinit();
+                    var out_t = try ctx_t.dot(ctx, &wv_t, .d);
+                    defer out_t.deinit();
+                    @memcpy(attn_out, try out_t.dataConst());
                 },
             }
 
