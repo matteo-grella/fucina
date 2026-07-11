@@ -474,6 +474,83 @@ pub const Cache = struct {
     len: usize = 0,
     capacity: usize,
 
+    /// Deep copy of everything a few decode steps mutate — the raw rings,
+    /// compressed-row counts, and the rolling compressor window states.
+    /// Speculative verification snapshots before the batched verify and
+    /// restores on partial acceptance (the window states roll forward
+    /// destructively, so counter rewinds are not enough).
+    pub const Snapshot = struct {
+        allocator: Allocator,
+        len: usize,
+        n_raw: []usize,
+        raw: [][]f32,
+        comp_len: []usize,
+        index_comp_len: []usize,
+        attn_state_kv: [][]f32,
+        attn_state_score: [][]f32,
+        index_state_kv: [][]f32,
+        index_state_score: [][]f32,
+
+        pub fn deinit(self: *Snapshot) void {
+            for (self.raw) |b| self.allocator.free(b);
+            for (self.attn_state_kv) |b| self.allocator.free(b);
+            for (self.attn_state_score) |b| self.allocator.free(b);
+            for (self.index_state_kv) |b| self.allocator.free(b);
+            for (self.index_state_score) |b| self.allocator.free(b);
+            self.allocator.free(self.raw);
+            self.allocator.free(self.attn_state_kv);
+            self.allocator.free(self.attn_state_score);
+            self.allocator.free(self.index_state_kv);
+            self.allocator.free(self.index_state_score);
+            self.allocator.free(self.n_raw);
+            self.allocator.free(self.comp_len);
+            self.allocator.free(self.index_comp_len);
+            self.* = undefined;
+        }
+    };
+
+    pub fn snapshot(self: *const Cache) !Snapshot {
+        const a = self.allocator;
+        const n = self.layers.len;
+        var snap = Snapshot{
+            .allocator = a,
+            .len = self.len,
+            .n_raw = try a.alloc(usize, n),
+            .raw = try a.alloc([]f32, n),
+            .comp_len = try a.alloc(usize, n),
+            .index_comp_len = try a.alloc(usize, n),
+            .attn_state_kv = try a.alloc([]f32, n),
+            .attn_state_score = try a.alloc([]f32, n),
+            .index_state_kv = try a.alloc([]f32, n),
+            .index_state_score = try a.alloc([]f32, n),
+        };
+        for (self.layers, 0..) |*lc, i| {
+            snap.n_raw[i] = lc.n_raw;
+            snap.raw[i] = try a.dupe(f32, lc.raw);
+            snap.comp_len[i] = lc.comp.items.len;
+            snap.index_comp_len[i] = lc.index_comp.items.len;
+            snap.attn_state_kv[i] = try a.dupe(f32, lc.attn_state_kv);
+            snap.attn_state_score[i] = try a.dupe(f32, lc.attn_state_score);
+            snap.index_state_kv[i] = try a.dupe(f32, lc.index_state_kv);
+            snap.index_state_score[i] = try a.dupe(f32, lc.index_state_score);
+        }
+        return snap;
+    }
+
+    pub fn restore(self: *Cache, snap: *const Snapshot) void {
+        self.len = snap.len;
+        for (self.layers, 0..) |*lc, i| {
+            lc.n_raw = snap.n_raw[i];
+            @memcpy(lc.raw, snap.raw[i]);
+            lc.comp.shrinkRetainingCapacity(snap.comp_len[i]);
+            lc.index_comp.shrinkRetainingCapacity(snap.index_comp_len[i]);
+            @memcpy(lc.attn_state_kv, snap.attn_state_kv[i]);
+            @memcpy(lc.attn_state_score, snap.attn_state_score[i]);
+            @memcpy(lc.index_state_kv, snap.index_state_kv[i]);
+            @memcpy(lc.index_state_score, snap.index_state_score[i]);
+        }
+    }
+
     pub fn deinit(self: *Cache) void {
         for (self.layers) |*lc| {
             self.allocator.free(lc.raw);
@@ -640,55 +717,62 @@ pub const Model = struct {
 const max_positions_default: usize = 65536;
 
 fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i: usize, store: ?*fucina.ExpertStore) !Layer {
+    var prefix_buf: [32]u8 = undefined;
+    const prefix = try std.fmt.bufPrint(&prefix_buf, "blk.{d}.", .{layer_i});
+    return loadLayerNamed(ctx, file, config, prefix, config.compress_ratio[layer_i], layer_i < config.hash_layers, store, layer_i);
+}
+
+/// Layer loader shared by the trunk ("blk.N." names) and the MTP sidecar
+/// ("mtp.0." names, always raw-family, top-k routed).
+fn loadLayerNamed(ctx: *ExecContext, file: *const gguf.File, config: Config, prefix: []const u8, ratio: usize, hash_routed: bool, store: ?*fucina.ExpertStore, store_layer: usize) !Layer {
     const allocator = ctx.allocator;
     var buf: [96]u8 = undefined;
     const name = struct {
-        fn of(b: []u8, i: usize, suffix: []const u8) ![]const u8 {
-            return std.fmt.bufPrint(b, "blk.{d}.{s}", .{ i, suffix });
+        fn of(b: []u8, p: []const u8, suffix: []const u8) ![]const u8 {
+            return std.fmt.bufPrint(b, "{s}{s}", .{ p, suffix });
         }
     };
     const hidden = config.hidden_size;
-    const ratio = config.compress_ratio[layer_i];
 
     var hc_attn = HcModule{
-        .fn_proj = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "hc_attn_fn.weight")), 6 * config.n_hc, config.n_hc * hidden),
-        .scale = try hostVector(allocator, file, try name.of(&buf, layer_i, "hc_attn_scale.weight"), 3),
-        .base = try hostVector(allocator, file, try name.of(&buf, layer_i, "hc_attn_base.weight"), 6 * config.n_hc),
+        .fn_proj = try LinearWeight.load(ctx, try file.get(try name.of(&buf, prefix, "hc_attn_fn.weight")), 6 * config.n_hc, config.n_hc * hidden),
+        .scale = try hostVector(allocator, file, try name.of(&buf, prefix, "hc_attn_scale.weight"), 3),
+        .base = try hostVector(allocator, file, try name.of(&buf, prefix, "hc_attn_base.weight"), 6 * config.n_hc),
     };
     errdefer hc_attn.deinit(allocator);
     var hc_ffn = HcModule{
-        .fn_proj = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "hc_ffn_fn.weight")), 6 * config.n_hc, config.n_hc * hidden),
-        .scale = try hostVector(allocator, file, try name.of(&buf, layer_i, "hc_ffn_scale.weight"), 3),
-        .base = try hostVector(allocator, file, try name.of(&buf, layer_i, "hc_ffn_base.weight"), 6 * config.n_hc),
+        .fn_proj = try LinearWeight.load(ctx, try file.get(try name.of(&buf, prefix, "hc_ffn_fn.weight")), 6 * config.n_hc, config.n_hc * hidden),
+        .scale = try hostVector(allocator, file, try name.of(&buf, prefix, "hc_ffn_scale.weight"), 3),
+        .base = try hostVector(allocator, file, try name.of(&buf, prefix, "hc_ffn_base.weight"), 6 * config.n_hc),
     };
     errdefer hc_ffn.deinit(allocator);
 
-    const attn_norm = try hostVector(allocator, file, try name.of(&buf, layer_i, "attn_norm.weight"), hidden);
+    const attn_norm = try hostVector(allocator, file, try name.of(&buf, prefix, "attn_norm.weight"), hidden);
     errdefer allocator.free(attn_norm);
-    const ffn_norm = try hostVector(allocator, file, try name.of(&buf, layer_i, "ffn_norm.weight"), hidden);
+    const ffn_norm = try hostVector(allocator, file, try name.of(&buf, prefix, "ffn_norm.weight"), hidden);
     errdefer allocator.free(ffn_norm);
 
-    var q_a = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "attn_q_a.weight")), config.q_lora_rank, hidden);
+    var q_a = try LinearWeight.load(ctx, try file.get(try name.of(&buf, prefix, "attn_q_a.weight")), config.q_lora_rank, hidden);
     errdefer q_a.deinit();
-    const q_a_norm = try hostVector(allocator, file, try name.of(&buf, layer_i, "attn_q_a_norm.weight"), config.q_lora_rank);
+    const q_a_norm = try hostVector(allocator, file, try name.of(&buf, prefix, "attn_q_a_norm.weight"), config.q_lora_rank);
     errdefer allocator.free(q_a_norm);
-    var q_b = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "attn_q_b.weight")), config.num_heads * config.head_dim, config.q_lora_rank);
+    var q_b = try LinearWeight.load(ctx, try file.get(try name.of(&buf, prefix, "attn_q_b.weight")), config.num_heads * config.head_dim, config.q_lora_rank);
     errdefer q_b.deinit();
-    var kv = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "attn_kv.weight")), config.head_dim, hidden);
+    var kv = try LinearWeight.load(ctx, try file.get(try name.of(&buf, prefix, "attn_kv.weight")), config.head_dim, hidden);
     errdefer kv.deinit();
-    const kv_a_norm = try hostVector(allocator, file, try name.of(&buf, layer_i, "attn_kv_a_norm.weight"), config.head_dim);
+    const kv_a_norm = try hostVector(allocator, file, try name.of(&buf, prefix, "attn_kv_a_norm.weight"), config.head_dim);
     errdefer allocator.free(kv_a_norm);
-    const sinks = try hostVector(allocator, file, try name.of(&buf, layer_i, "attn_sinks.weight"), config.num_heads);
+    const sinks = try hostVector(allocator, file, try name.of(&buf, prefix, "attn_sinks.weight"), config.num_heads);
     errdefer allocator.free(sinks);
     // Grouped low-rank output stage A: 8 stacked [rank x group_dim] blocks
     // ([8192 x 4096] on Flash) applied per head-group; kept as the raw q8_0
     // byte slice so each group runs through the borrowed-quantized linear.
-    const output_a_info = try file.get(try name.of(&buf, layer_i, "attn_output_a.weight"));
+    const output_a_info = try file.get(try name.of(&buf, prefix, "attn_output_a.weight"));
     const group_dim = (config.num_heads / config.output_groups) * config.head_dim;
     if (output_a_info.n_dims != 2 or output_a_info.dims[0] != group_dim or output_a_info.dims[1] != config.output_groups * config.output_lora_rank) return Error.InvalidWeightShape;
     if (output_a_info.ggml_type != .q8_0) return Error.UnsupportedWeightType;
     const output_a = output_a_info.data;
-    var output_b = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "attn_output_b.weight")), hidden, config.output_groups * config.output_lora_rank);
+    var output_b = try LinearWeight.load(ctx, try file.get(try name.of(&buf, prefix, "attn_output_b.weight")), hidden, config.output_groups * config.output_lora_rank);
     errdefer output_b.deinit();
 
     var attn_compressor: ?Compressor = null;
@@ -702,10 +786,10 @@ fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i:
     if (ratio != 0) {
         const width: usize = if (ratio == 4) 2 * config.head_dim else config.head_dim;
         attn_compressor = .{
-            .kv = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "attn_compressor_kv.weight")), width, hidden),
-            .gate = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "attn_compressor_gate.weight")), width, hidden),
-            .ape = try hostMatrix(allocator, file, try name.of(&buf, layer_i, "attn_compressor_ape.weight"), width, ratio),
-            .norm = try hostVector(allocator, file, try name.of(&buf, layer_i, "attn_compressor_norm.weight"), config.head_dim),
+            .kv = try LinearWeight.load(ctx, try file.get(try name.of(&buf, prefix, "attn_compressor_kv.weight")), width, hidden),
+            .gate = try LinearWeight.load(ctx, try file.get(try name.of(&buf, prefix, "attn_compressor_gate.weight")), width, hidden),
+            .ape = try hostMatrix(allocator, file, try name.of(&buf, prefix, "attn_compressor_ape.weight"), width, ratio),
+            .norm = try hostVector(allocator, file, try name.of(&buf, prefix, "attn_compressor_norm.weight"), config.head_dim),
             .width = width,
             .ratio = ratio,
         };
@@ -713,54 +797,54 @@ fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i:
     if (ratio == 4) {
         const iw = 2 * config.indexer_head_dim;
         index_compressor = .{
-            .kv = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "indexer_compressor_kv.weight")), iw, hidden),
-            .gate = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "indexer_compressor_gate.weight")), iw, hidden),
-            .ape = try hostMatrix(allocator, file, try name.of(&buf, layer_i, "indexer_compressor_ape.weight"), iw, ratio),
-            .norm = try hostVector(allocator, file, try name.of(&buf, layer_i, "indexer_compressor_norm.weight"), config.indexer_head_dim),
+            .kv = try LinearWeight.load(ctx, try file.get(try name.of(&buf, prefix, "indexer_compressor_kv.weight")), iw, hidden),
+            .gate = try LinearWeight.load(ctx, try file.get(try name.of(&buf, prefix, "indexer_compressor_gate.weight")), iw, hidden),
+            .ape = try hostMatrix(allocator, file, try name.of(&buf, prefix, "indexer_compressor_ape.weight"), iw, ratio),
+            .norm = try hostVector(allocator, file, try name.of(&buf, prefix, "indexer_compressor_norm.weight"), config.indexer_head_dim),
             .width = iw,
             .ratio = ratio,
         };
-        indexer_q_b = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "indexer.attn_q_b.weight")), config.indexer_heads * config.indexer_head_dim, config.q_lora_rank);
-        indexer_proj = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "indexer.proj.weight")), config.indexer_heads, hidden);
+        indexer_q_b = try LinearWeight.load(ctx, try file.get(try name.of(&buf, prefix, "indexer.attn_q_b.weight")), config.indexer_heads * config.indexer_head_dim, config.q_lora_rank);
+        indexer_proj = try LinearWeight.load(ctx, try file.get(try name.of(&buf, prefix, "indexer.proj.weight")), config.indexer_heads, hidden);
     }
 
     // MoE: router f16 + hash table on the leading layers + bias later on.
-    var router = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "ffn_gate_inp.weight")), config.num_experts, hidden);
+    var router = try LinearWeight.load(ctx, try file.get(try name.of(&buf, prefix, "ffn_gate_inp.weight")), config.num_experts, hidden);
     errdefer router.deinit();
     var router_bias: ?[]f32 = null;
     errdefer if (router_bias) |b| allocator.free(b);
     var bias_buf: [96]u8 = undefined;
-    if (file.maybeGet(try name.of(&bias_buf, layer_i, "exp_probs_b.bias"))) |bias_info| {
+    if (file.maybeGet(try name.of(&bias_buf, prefix, "exp_probs_b.bias"))) |bias_info| {
         router_bias = try hostVectorInfo(allocator, bias_info, config.num_experts);
     }
     var tid2eid: ?[]const i32 = null;
-    if (file.maybeGet(try name.of(&bias_buf, layer_i, "ffn_gate_tid2eid.weight"))) |tid_info| {
+    if (file.maybeGet(try name.of(&bias_buf, prefix, "ffn_gate_tid2eid.weight"))) |tid_info| {
         if (tid_info.n_dims != 2 or tid_info.dims[0] != config.num_experts_used or tid_info.dims[1] != config.vocab_size) return Error.InvalidWeightShape;
         const raw = std.mem.bytesAsSlice(i32, @as([]align(4) const u8, @alignCast(tid_info.data)));
         tid2eid = raw;
     }
-    if ((layer_i < config.hash_layers) != (tid2eid != null)) return Error.InvalidWeightShape;
+    if (hash_routed != (tid2eid != null)) return Error.InvalidWeightShape;
 
     var gate: fucina.MoeRhs = undefined;
     var up: fucina.MoeRhs = undefined;
     var down: fucina.MoeRhs = undefined;
     if (store) |st| {
-        const trio = try weights.loadMoeRhsStreamed(st, file, layer_i, try file.get(try name.of(&buf, layer_i, "ffn_gate_exps.weight")), try file.get(try name.of(&buf, layer_i, "ffn_up_exps.weight")), try file.get(try name.of(&buf, layer_i, "ffn_down_exps.weight")), hidden, config.expert_ffn_size, config.num_experts);
+        const trio = try weights.loadMoeRhsStreamed(st, file, store_layer, try file.get(try name.of(&buf, prefix, "ffn_gate_exps.weight")), try file.get(try name.of(&buf, prefix, "ffn_up_exps.weight")), try file.get(try name.of(&buf, prefix, "ffn_down_exps.weight")), hidden, config.expert_ffn_size, config.num_experts);
         gate = trio.gate;
         up = trio.up;
         down = trio.down;
     } else {
         const borrow = file.is_mmap and !file.isSplit();
-        gate = try weights.loadMoeRhs(ctx, try file.get(try name.of(&buf, layer_i, "ffn_gate_exps.weight")), hidden, config.expert_ffn_size, config.num_experts, borrow);
-        up = try weights.loadMoeRhs(ctx, try file.get(try name.of(&buf, layer_i, "ffn_up_exps.weight")), hidden, config.expert_ffn_size, config.num_experts, borrow);
-        down = try weights.loadMoeRhs(ctx, try file.get(try name.of(&buf, layer_i, "ffn_down_exps.weight")), config.expert_ffn_size, hidden, config.num_experts, borrow);
+        gate = try weights.loadMoeRhs(ctx, try file.get(try name.of(&buf, prefix, "ffn_gate_exps.weight")), hidden, config.expert_ffn_size, config.num_experts, borrow);
+        up = try weights.loadMoeRhs(ctx, try file.get(try name.of(&buf, prefix, "ffn_up_exps.weight")), hidden, config.expert_ffn_size, config.num_experts, borrow);
+        down = try weights.loadMoeRhs(ctx, try file.get(try name.of(&buf, prefix, "ffn_down_exps.weight")), config.expert_ffn_size, hidden, config.num_experts, borrow);
     }
     const shared_ffn = config.expert_ffn_size * config.num_shared_experts;
-    var shared_gate = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "ffn_gate_shexp.weight")), shared_ffn, hidden);
+    var shared_gate = try LinearWeight.load(ctx, try file.get(try name.of(&buf, prefix, "ffn_gate_shexp.weight")), shared_ffn, hidden);
     errdefer shared_gate.deinit();
-    var shared_up = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "ffn_up_shexp.weight")), shared_ffn, hidden);
+    var shared_up = try LinearWeight.load(ctx, try file.get(try name.of(&buf, prefix, "ffn_up_shexp.weight")), shared_ffn, hidden);
     errdefer shared_up.deinit();
-    var shared_down = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "ffn_down_shexp.weight")), hidden, shared_ffn);
+    var shared_down = try LinearWeight.load(ctx, try file.get(try name.of(&buf, prefix, "ffn_down_shexp.weight")), hidden, shared_ffn);
     errdefer shared_down.deinit();
 
     return .{
@@ -1176,6 +1260,12 @@ pub fn step(self: *Model, ctx: *ExecContext, session: *Session, token: usize) ![
 /// Output: sigmoid-gated HC merge, output norm, vocab head — for the stream
 /// state of one position.
 fn outputLogits(self: *Model, ctx: *ExecContext, streams: []const f32) ![]f32 {
+    return outputLogitsWith(self, ctx, streams, &self.output_hc, self.output_norm);
+}
+
+/// The same head with substituted merge/norm weights (the MTP sidecar has
+/// its own hc_head module and final norm but shares the trunk's vocab head).
+fn outputLogitsWith(self: *Model, ctx: *ExecContext, streams: []const f32, head_hc: *const HcModule, out_norm: []const f32) ![]f32 {
     const cfg = self.config;
     const allocator = ctx.allocator;
     const hc_dim = cfg.n_hc * cfg.hidden_size;
@@ -1183,11 +1273,11 @@ fn outputLogits(self: *Model, ctx: *ExecContext, streams: []const f32) ![]f32 {
     defer flat_t.deinit();
     var flat_norm = try flat_t.rmsNorm(ctx, .embed, cfg.rms_norm_eps);
     defer flat_norm.deinit();
-    var pre_t = try self.output_hc.fn_proj.linearSeq(ctx, &flat_norm, .embed, .attn);
+    var pre_t = try head_hc.fn_proj.linearSeq(ctx, &flat_norm, .embed, .attn);
     defer pre_t.deinit();
     const pre_vals = try pre_t.dataConst();
     var merge_w: [4]f32 = undefined;
-    for (0..cfg.n_hc) |i| merge_w[i] = sigmoidStable(pre_vals[i] * self.output_hc.scale[0] + self.output_hc.base[i]) + cfg.hc_eps;
+    for (0..cfg.n_hc) |i| merge_w[i] = sigmoidStable(pre_vals[i] * head_hc.scale[0] + head_hc.base[i]) + cfg.hc_eps;
 
     var streams_t = try fucina.Tensor(.{ .stream, .embed }).fromBorrowedConstSlice(ctx, .{ cfg.n_hc, cfg.hidden_size }, streams);
     defer streams_t.deinit();
@@ -1198,7 +1288,7 @@ fn outputLogits(self: *Model, ctx: *ExecContext, streams: []const f32) ![]f32 {
     var merged = try weighted.sum(ctx, .stream);
     defer merged.deinit();
 
-    var norm_w = try embedTag(ctx, self.output_norm);
+    var norm_w = try embedTag(ctx, out_norm);
     defer norm_w.deinit();
     var merged_row = try rowTensor(ctx, try merged.dataConst(), cfg.hidden_size);
     defer merged_row.deinit();
@@ -1217,12 +1307,20 @@ fn outputLogits(self: *Model, ctx: *ExecContext, streams: []const f32) ![]f32 {
 /// would, so a batched prefill leaves the caches in the same state as the
 /// equivalent sequence of single steps. Returns the LAST position's logits.
 pub fn stepBatch(self: *Model, ctx: *ExecContext, session: *Session, tokens: []const usize) ![]f32 {
+    return stepBatchExtra(self, ctx, session, tokens, null, null);
+}
+
+/// stepBatch with optional per-row outputs for speculative verification:
+/// `out_logits_rows` (len S, caller frees every row; the return value
+/// aliases the last row) and `out_streams` (len S*n_hc*hidden, the post-
+/// layer HC stream state of every row — the MTP drafter's recurrent input).
+pub fn stepBatchExtra(self: *Model, ctx: *ExecContext, session: *Session, tokens: []const usize, out_logits_rows: ?[][]f32, out_streams: ?[]f32) ![]f32 {
     const cfg = self.config;
     const allocator = ctx.allocator;
     const cache = &session.cache;
     const S = tokens.len;
     if (S == 0) return Error.KvCacheOverflow;
-    if (S == 1) return step(self, ctx, session, tokens[0]);
+    if (S == 1 and out_logits_rows == null and out_streams == null) return step(self, ctx, session, tokens[0]);
     if (cache.len + S > cache.capacity or cache.len + S > self.rope.capacity) return Error.KvCacheOverflow;
     const pos0 = cache.len;
     const hc_dim = cfg.n_hc * cfg.hidden_size;
@@ -1263,6 +1361,11 @@ pub fn stepBatch(self: *Model, ctx: *ExecContext, session: *Session, tokens: []c
     }
     cache.len += S;
 
+    if (out_streams) |dst| @memcpy(dst[0 .. S * hc_dim], streams_all[0 .. S * hc_dim]);
+    if (out_logits_rows) |rows| {
+        for (rows, 0..) |*row, s| row.* = try outputLogits(self, ctx, streams_all[s * hc_dim ..][0..hc_dim]);
+        return rows[S - 1];
+    }
     return outputLogits(self, ctx, streams_all[(S - 1) * hc_dim ..][0..hc_dim]);
 }
 
@@ -1869,4 +1972,265 @@ test {
     var again = row;
     fp8KvQuantRow(&again, 0);
     for (row, again) |a, b| try std.testing.expectEqual(a, b);
+}
+
+// =========================================================================
+// MTP (multi-token prediction) sidecar: one trunk-shaped extra layer that
+// drafts the next-next token from the trunk's HC stream state. The
+// reference implements this only on its GPU graph; the semantics here
+// mirror that graph: input = e_proj(enorm(embed)) broadcast to all streams
+// + h_proj(hnorm(stream)) per stream; one raw-family decode layer with its
+// own position-indexed ring; sigmoid head merge with MTP weights into the
+// TRUNK's vocab head. Drafting is speculative — the trunk verifies, so
+// stale ring rows after a rejection only cost acceptance, never accuracy.
+// =========================================================================
+
+pub const Mtp = struct {
+    allocator: Allocator,
+    e_proj: LinearWeight,
+    h_proj: LinearWeight,
+    enorm: []f32,
+    hnorm: []f32,
+    final_norm: []f32,
+    head_hc: HcModule,
+    layer: Layer,
+    mapping: ?gguf.File.MappedRegion = null,
+
+    pub fn loadGguf(ctx: *ExecContext, io: std.Io, path: []const u8, config: Config) !Mtp {
+        const allocator = ctx.allocator;
+        var file = try gguf.File.loadMmapAuto(allocator, io, path);
+        defer file.deinit();
+        const hidden = config.hidden_size;
+
+        var e_proj = try LinearWeight.load(ctx, try file.get("mtp.0.e_proj.weight"), hidden, hidden);
+        errdefer e_proj.deinit();
+        var h_proj = try LinearWeight.load(ctx, try file.get("mtp.0.h_proj.weight"), hidden, hidden);
+        errdefer h_proj.deinit();
+        const enorm = try hostVector(allocator, &file, "mtp.0.enorm.weight", hidden);
+        errdefer allocator.free(enorm);
+        const hnorm = try hostVector(allocator, &file, "mtp.0.hnorm.weight", hidden);
+        errdefer allocator.free(hnorm);
+        const final_norm = try hostVector(allocator, &file, "mtp.0.norm.weight", hidden);
+        errdefer allocator.free(final_norm);
+        var head_hc = HcModule{
+            .fn_proj = try LinearWeight.load(ctx, try file.get("mtp.0.hc_head_fn.weight"), config.n_hc, config.n_hc * hidden),
+            .scale = try hostVector(allocator, &file, "mtp.0.hc_head_scale.weight", 1),
+            .base = try hostVector(allocator, &file, "mtp.0.hc_head_base.weight", config.n_hc),
+        };
+        errdefer head_hc.deinit(allocator);
+
+        var layer = try loadLayerNamed(ctx, &file, config, "mtp.0.", 0, false, null, 0);
+        errdefer layer.deinit(allocator);
+
+        const mapping = file.takeMapping() orelse return Error.InvalidWeightShape;
+        return .{
+            .allocator = allocator,
+            .e_proj = e_proj,
+            .h_proj = h_proj,
+            .enorm = enorm,
+            .hnorm = hnorm,
+            .final_norm = final_norm,
+            .head_hc = head_hc,
+            .layer = layer,
+            .mapping = mapping,
+        };
+    }
+
+    pub fn deinit(self: *Mtp) void {
+        self.layer.deinit(self.allocator);
+        self.head_hc.deinit(self.allocator);
+        self.allocator.free(self.final_norm);
+        self.allocator.free(self.hnorm);
+        self.allocator.free(self.enorm);
+        self.h_proj.deinit();
+        self.e_proj.deinit();
+        if (self.mapping) |*m| m.deinit();
+        self.* = undefined;
+    }
+};
+
+/// Draft-side state: the MTP layer's raw ring (position-indexed physical
+/// rows, so a rejected draft rewinds by resetting the row count) and the
+/// recurrent HC stream state for chained drafts.
+pub const MtpState = struct {
+    raw: []f32, // [cap][head_dim], physical row = pos % cap
+    cap: usize,
+    n_rows: usize = 0, // rows fed so far, capped at the window
+    streams: []f32, // [n_hc * hidden] recurrent draft state
+
+    pub fn init(allocator: Allocator, config: Config) !MtpState {
+        // Window plus rewind slack: a rejected draft's rows are overwritten
+        // in place on the next draft at the same positions.
+        const cap = config.n_swa + 16;
+        const raw = try allocator.alloc(f32, cap * config.head_dim);
+        @memset(raw, 0);
+        const streams = try allocator.alloc(f32, config.n_hc * config.hidden_size);
+        return .{ .raw = raw, .cap = cap, .streams = streams };
+    }
+
+    pub fn deinit(self: *MtpState, allocator: Allocator) void {
+        allocator.free(self.streams);
+        allocator.free(self.raw);
+        self.* = undefined;
+    }
+};
+
+/// One MTP draft evaluation at absolute position `pos`: condition on `token`
+/// and the previous HC stream state (`prev_streams` — the trunk's post-layer
+/// streams at the frontier for the first draft, the MTP's own output streams
+/// for chained drafts), return next-token logits. Updates state.streams with
+/// this draft's output streams and appends this position's KV row.
+pub fn mtpDraftStep(self: *Model, mtp: *const Mtp, ctx: *ExecContext, state: *MtpState, token: usize, prev_streams: []const f32, pos: usize) ![]f32 {
+    const cfg = self.config;
+    const allocator = ctx.allocator;
+    const hidden = cfg.hidden_size;
+    const hc_dim = cfg.n_hc * hidden;
+
+    // input_hc = e_proj(enorm(embed)) broadcast + h_proj(hnorm(stream)) per stream.
+    const work = try allocator.alloc(f32, hc_dim);
+    defer allocator.free(work);
+    {
+        var ids = [_]usize{token};
+        var emb = try self.token_embedding.getRowsAs(ctx, &ids, .embed);
+        defer emb.deinit();
+        var enorm_w = try embedTag(ctx, mtp.enorm);
+        defer enorm_w.deinit();
+        var e_n = try emb.rmsNormMul(ctx, .embed, &enorm_w, cfg.rms_norm_eps);
+        defer e_n.deinit();
+        var ep_t = try mtp.e_proj.linearSeq(ctx, &e_n, .embed, .attn);
+        defer ep_t.deinit();
+        const ep = try ep_t.dataConst();
+
+        var hs_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ cfg.n_hc, hidden }, prev_streams);
+        defer hs_t.deinit();
+        var hnorm_w = try embedTag(ctx, mtp.hnorm);
+        defer hnorm_w.deinit();
+        var h_n = try hs_t.rmsNormMul(ctx, .embed, &hnorm_w, cfg.rms_norm_eps);
+        defer h_n.deinit();
+        var hp_t = try mtp.h_proj.linearSeq(ctx, &h_n, .embed, .attn);
+        defer hp_t.deinit();
+        const hp = try hp_t.dataConst();
+        for (0..cfg.n_hc) |h| {
+            const dst = work[h * hidden ..][0..hidden];
+            for (dst, ep, hp[h * hidden ..][0..hidden]) |*d, e, v| d.* = e + v;
+        }
+    }
+
+    // ---- attention sublayer (raw family, MTP-private ring) ----
+    {
+        const pre = try hcPre(ctx, cfg, &mtp.layer.hc_attn, work);
+        defer allocator.free(pre.sub_in);
+        const block_out = try mtpAttnBlock(self, mtp, ctx, state, pre.sub_in, pos);
+        defer allocator.free(block_out);
+        try hcPost(ctx, cfg, &pre.split, block_out, work);
+    }
+    // ---- FFN sublayer (top-k routed) ----
+    {
+        const pre = try hcPre(ctx, cfg, &mtp.layer.hc_ffn, work);
+        defer allocator.free(pre.sub_in);
+        const block_out = try moeBlock(self, ctx, &mtp.layer, pre.sub_in, token);
+        defer allocator.free(block_out);
+        try hcPost(ctx, cfg, &pre.split, block_out, work);
+    }
+
+    @memcpy(state.streams, work);
+    if (state.n_rows < cfg.n_swa) state.n_rows += 1;
+    return outputLogitsWith(self, ctx, work, &mtp.head_hc, mtp.final_norm);
+}
+
+/// The MTP layer's attention: the trunk pipeline minus compressors and
+/// indexer, over the position-indexed private ring.
+fn mtpAttnBlock(self: *Model, mtp: *const Mtp, ctx: *ExecContext, state: *MtpState, sub_in: []const f32, pos: usize) ![]f32 {
+    const cfg = self.config;
+    const allocator = ctx.allocator;
+    const layer = &mtp.layer;
+    const hd = cfg.head_dim;
+    const q_dim = cfg.num_heads * hd;
+
+    var in_t = try rowTensor(ctx, sub_in, cfg.hidden_size);
+    defer in_t.deinit();
+    var attn_norm_w = try embedTag(ctx, layer.attn_norm);
+    defer attn_norm_w.deinit();
+    var x_norm = try in_t.rmsNormMul(ctx, .embed, &attn_norm_w, cfg.rms_norm_eps);
+    defer x_norm.deinit();
+
+    var q_lat = try layer.q_a.linearSeq(ctx, &x_norm, .embed, .q);
+    defer q_lat.deinit();
+    var q_a_norm_w = try fucina.Tensor(.{.q}).fromSlice(ctx, .{cfg.q_lora_rank}, layer.q_a_norm);
+    defer q_a_norm_w.deinit();
+    var qr_norm_t = try q_lat.rmsNormMul(ctx, .q, &q_a_norm_w, cfg.rms_norm_eps);
+    defer qr_norm_t.deinit();
+    var q_full = try layer.q_b.linearSeq(ctx, &qr_norm_t, .q, .attn);
+    defer q_full.deinit();
+    const q = try allocator.dupe(f32, try q_full.dataConst());
+    defer allocator.free(q);
+    {
+        var heads_t = try fucina.Tensor(.{ .head, .d }).fromBorrowedConstSlice(ctx, .{ cfg.num_heads, hd }, q);
+        defer heads_t.deinit();
+        var normed = try heads_t.rmsNorm(ctx, .d, cfg.rms_norm_eps);
+        defer normed.deinit();
+        @memcpy(q, try normed.dataConst());
+    }
+
+    var kv_lin = try layer.kv.linearSeq(ctx, &x_norm, .embed, .k);
+    defer kv_lin.deinit();
+    var kv_norm_w = try fucina.Tensor(.{.k}).fromSlice(ctx, .{hd}, layer.kv_a_norm);
+    defer kv_norm_w.deinit();
+    var kv_normed = try kv_lin.rmsNormMul(ctx, .k, &kv_norm_w, cfg.rms_norm_eps);
+    defer kv_normed.deinit();
+    const kv_row = try allocator.dupe(f32, try kv_normed.dataConst());
+    defer allocator.free(kv_row);
+
+    for (0..cfg.num_heads) |h| self.rope.applyTail(q[h * hd ..][0..hd], pos, false, false);
+    self.rope.applyTail(kv_row, pos, false, false);
+    fp8KvQuantRow(kv_row, cfg.rope_dims);
+    for (state.raw[(pos % state.cap) * hd ..][0..hd], kv_row) |*d, v| d.* = f16Round(v);
+
+    // Visible rows: the last min(n_rows+1, n_swa) positions ending at pos.
+    var n_vis = state.n_rows + 1;
+    if (n_vis > cfg.n_swa) n_vis = cfg.n_swa;
+    if (n_vis > pos + 1) n_vis = pos + 1;
+    var rows: std.ArrayList(f32) = .empty;
+    defer rows.deinit(allocator);
+    var p = pos + 1 - n_vis;
+    while (p <= pos) : (p += 1) {
+        try rows.appendSlice(allocator, state.raw[(p % state.cap) * hd ..][0..hd]);
+    }
+
+    const out_heads = try allocator.alloc(f32, q_dim);
+    defer allocator.free(out_heads);
+    try attendRowsSink(self, ctx, layer, q, rows.items, out_heads);
+    for (0..cfg.num_heads) |h| self.rope.applyTail(out_heads[h * hd ..][0..hd], pos, false, true);
+
+    const group_heads = cfg.num_heads / cfg.output_groups;
+    const group_dim = group_heads * hd;
+    const rank = cfg.output_lora_rank;
+    const group_row_bytes = (group_dim / 32) * @sizeOf(fucina.BlockQ8_0);
+    var lows: [8]fucina.Tensor(.{ .seq, .attn }) = undefined;
+    var n_lows: usize = 0;
+    defer for (lows[0..n_lows]) |*t| t.deinit();
+    for (0..cfg.output_groups) |g| {
+        var head_slice = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, group_dim }, out_heads[g * group_dim ..][0..group_dim]);
+        defer head_slice.deinit();
+        lows[n_lows] = try weights.linearSeqBorrowedQuantized(
+            .q8_0,
+            ctx,
+            &head_slice,
+            layer.output_a[g * rank * group_row_bytes ..][0 .. rank * group_row_bytes],
+            .{ rank, group_dim },
+            .{ .allow_gpu = false },
+            .embed,
+            .attn,
+        );
+        n_lows += 1;
+    }
+    var low_refs: [7]*const fucina.Tensor(.{ .seq, .attn }) = undefined;
+    for (lows[1..n_lows], 0..) |*t, i| low_refs[i] = t;
+    var low_cat = try lows[0].concat(ctx, .attn, low_refs[0 .. n_lows - 1]);
+    defer low_cat.deinit();
+    var low_in = try low_cat.withTags(ctx, .{ .seq, .embed });
+    defer low_in.deinit();
+    var out_t = try layer.output_b.linearSeq(ctx, &low_in, .embed, .attn);
+    defer out_t.deinit();
+    return allocator.dupe(f32, try out_t.dataConst());
 }

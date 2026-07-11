@@ -32,6 +32,8 @@ pub fn main(init: std.process.Init) !void {
     var moe_cache_mb: ?usize = null;
     var chat = false;
     var prefill_chunk: usize = 128;
+    var mtp_path: ?[]const u8 = null;
+    var mtp_depth: usize = 1;
     var vectors_dir: ?[]const u8 = null;
     var golden_path: ?[]const u8 = null;
     var vectors_max_prompt: usize = 256;
@@ -52,6 +54,11 @@ pub fn main(init: std.process.Init) !void {
             gen_count = try std.fmt.parseInt(usize, arg["--gen=".len..], 10);
         } else if (std.mem.eql(u8, arg, "--chat")) {
             chat = true;
+        } else if (std.mem.startsWith(u8, arg, "--mtp=")) {
+            mtp_path = arg["--mtp=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--mtp-depth=")) {
+            mtp_depth = @min(try std.fmt.parseInt(usize, arg["--mtp-depth=".len..], 10), 8);
+            if (mtp_depth == 0) mtp_depth = 1;
         } else if (std.mem.startsWith(u8, arg, "--prefill-chunk=")) {
             prefill_chunk = try std.fmt.parseInt(usize, arg["--prefill-chunk=".len..], 10);
             if (prefill_chunk == 0) prefill_chunk = 1;
@@ -121,15 +128,27 @@ pub fn main(init: std.process.Init) !void {
     var session = try Session.init(&model, 8192);
     defer session.deinit(&model);
 
+    var mtp: ?llm.deepseek4.model.Mtp = if (mtp_path) |mp| try llm.deepseek4.model.Mtp.loadGguf(&ctx, init.io, mp, model.config) else null;
+    defer if (mtp) |*m| m.deinit();
+
+    const hc_dim = model.config.n_hc * model.config.hidden_size;
+    const frontier = try allocator.alloc(f32, hc_dim);
+    defer allocator.free(frontier);
+
     const prefill_start = std.Io.Clock.awake.now(init.io).nanoseconds;
     var logits: []f32 = &.{};
     defer if (logits.len > 0) allocator.free(logits);
-    var fed: usize = 0;
-    while (fed < tokens.items.len) {
-        const end = @min(fed + prefill_chunk, tokens.items.len);
-        if (logits.len > 0) allocator.free(logits);
-        logits = try llm.deepseek4.model.stepBatch(&model, &ctx, &session, tokens.items[fed..end]);
-        fed = end;
+    {
+        const chunk_streams = try allocator.alloc(f32, @min(prefill_chunk, tokens.items.len) * hc_dim);
+        defer allocator.free(chunk_streams);
+        var fed: usize = 0;
+        while (fed < tokens.items.len) {
+            const end = @min(fed + prefill_chunk, tokens.items.len);
+            if (logits.len > 0) allocator.free(logits);
+            logits = try llm.deepseek4.model.stepBatchExtra(&model, &ctx, &session, tokens.items[fed..end], null, chunk_streams[0 .. (end - fed) * hc_dim]);
+            @memcpy(frontier, chunk_streams[(end - fed - 1) * hc_dim ..][0..hc_dim]);
+            fed = end;
+        }
     }
     try stdout.print("prefill: {d:.1} ms ({d} tokens, chunk {d})\n", .{ @as(f64, @floatFromInt(std.Io.Clock.awake.now(init.io).nanoseconds - prefill_start)) / 1e6, tokens.items.len, prefill_chunk });
 
@@ -137,15 +156,82 @@ pub fn main(init: std.process.Init) !void {
     defer reply.deinit(allocator);
     const decode_start = std.Io.Clock.awake.now(init.io).nanoseconds;
     var produced: usize = 0;
-    while (produced < gen_count) : (produced += 1) {
-        const best = argmax(logits);
-        if (eos != null and best == eos.?) break;
-        try tokenizer.decodeAppend(allocator, @intCast(best), &reply);
-        allocator.free(logits);
-        logits = try llm.deepseek4.model.step(&model, &ctx, &session, best);
+    var forwards: usize = 0;
+    var drafted: usize = 0;
+    var draft_hits: usize = 0;
+
+    if (mtp) |*m| {
+        var state = try llm.deepseek4.model.MtpState.init(allocator, model.config);
+        defer state.deinit(allocator);
+        var next_token = argmax(logits);
+        const streams_all = try allocator.alloc(f32, (mtp_depth + 1) * hc_dim);
+        defer allocator.free(streams_all);
+        const rows = try allocator.alloc([]f32, mtp_depth + 1);
+        defer allocator.free(rows);
+
+        decode: while (produced < gen_count) {
+            if (eos != null and next_token == eos.?) break;
+            // Draft a suffix from the frontier stream state.
+            var draft_buf: [9]usize = undefined;
+            draft_buf[0] = next_token;
+            var n_drafts: usize = 1;
+            const saved_rows = state.n_rows;
+            var seed: []const f32 = frontier;
+            while (n_drafts <= mtp_depth) : (n_drafts += 1) {
+                const dl = try llm.deepseek4.model.mtpDraftStep(&model, m, &ctx, &state, draft_buf[n_drafts - 1], seed, session.cache.len + n_drafts - 1);
+                defer allocator.free(dl);
+                draft_buf[n_drafts] = argmax(dl);
+                seed = state.streams;
+                drafted += 1;
+            }
+            // Verify with one batched trunk step; rewind on partial accept.
+            var snap = try session.cache.snapshot();
+            defer snap.deinit();
+            _ = try llm.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..n_drafts], rows[0..n_drafts], streams_all[0 .. n_drafts * hc_dim]);
+            forwards += 1;
+            var accepted: usize = 1;
+            while (accepted < n_drafts) : (accepted += 1) {
+                if (argmax(rows[accepted - 1]) != draft_buf[accepted]) break;
+            }
+            draft_hits += accepted - 1;
+
+            for (draft_buf[0..accepted]) |t| {
+                if (produced == gen_count) break;
+                try tokenizer.decodeAppend(allocator, @intCast(t), &reply);
+                produced += 1;
+                if (eos != null and t == eos.?) {
+                    for (rows[0..n_drafts]) |r| allocator.free(r);
+                    break :decode;
+                }
+            }
+            next_token = argmax(rows[accepted - 1]);
+            @memcpy(frontier, streams_all[(accepted - 1) * hc_dim ..][0..hc_dim]);
+            state.n_rows = @min(saved_rows + accepted, model.config.n_swa);
+            for (rows[0..n_drafts]) |r| allocator.free(r);
+            if (accepted < n_drafts) {
+                // The verify advanced past the accepted prefix: restore and
+                // replay only the accepted tokens to rebuild the caches.
+                session.cache.restore(&snap);
+                const replay = try llm.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..accepted], null, null);
+                allocator.free(replay);
+                forwards += 1;
+            }
+        }
+    } else {
+        while (produced < gen_count) : (produced += 1) {
+            const best = argmax(logits);
+            if (eos != null and best == eos.?) break;
+            try tokenizer.decodeAppend(allocator, @intCast(best), &reply);
+            allocator.free(logits);
+            logits = try llm.deepseek4.model.step(&model, &ctx, &session, best);
+            forwards += 1;
+        }
     }
     const decode_ns = std.Io.Clock.awake.now(init.io).nanoseconds - decode_start;
-    try stdout.print("decode: {d} steps, {d:.1} ms, {d:.2} tok/s\n", .{ produced, @as(f64, @floatFromInt(decode_ns)) / 1e6, @as(f64, @floatFromInt(produced)) * 1e9 / @as(f64, @floatFromInt(decode_ns)) });
+    try stdout.print("decode: {d} tokens in {d} forwards, {d:.1} ms, {d:.2} tok/s ({d:.2} tok/forward)\n", .{ produced, forwards, @as(f64, @floatFromInt(decode_ns)) / 1e6, @as(f64, @floatFromInt(produced)) * 1e9 / @as(f64, @floatFromInt(decode_ns)), @as(f64, @floatFromInt(produced)) / @as(f64, @floatFromInt(@max(forwards, 1))) });
+    if (drafted > 0) {
+        try stdout.print("mtp: {d}/{d} drafts accepted ({d:.1}%)\n", .{ draft_hits, drafted, @as(f64, @floatFromInt(draft_hits)) * 100.0 / @as(f64, @floatFromInt(drafted)) });
+    }
     try stdout.print("prompt: {s}\ntext:  {s}\n", .{ prompt_text, reply.items });
 }
 
