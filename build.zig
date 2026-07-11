@@ -480,6 +480,10 @@ pub fn build(b: *std.Build) void {
     configureBlas(lmserve_exe, blas_kind);
     configureGpu(b, lmserve_exe, gpu_kind);
     configureLlguidance(lmserve_exe, llguidance_dep);
+    // Uses std.c.shutdown/recv (signal-driven accept unblock, MSG_PEEK
+    // hang-up probe): libc links implicitly on macOS but must be declared
+    // for the Linux leg.
+    lmserve_exe.root_module.link_libc = true;
     const lmserve_install = installArtifactStep(b, lmserve_exe);
 
     const lmserve_cmd = b.addRunArtifact(lmserve_exe);
@@ -1122,6 +1126,7 @@ pub fn build(b: *std.Build) void {
     configureBlas(lmserve_tests, blas_kind);
     configureGpu(b, lmserve_tests, gpu_kind);
     configureLlguidance(lmserve_tests, llguidance_dep);
+    lmserve_tests.root_module.link_libc = true;
 
     const run_lmserve_tests = b.addRunArtifact(lmserve_tests);
     test_step.dependOn(&run_lmserve_tests.step);
