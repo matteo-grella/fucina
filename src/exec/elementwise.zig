@@ -932,11 +932,16 @@ pub fn powScalar(rt: *Runtime, x: *const Tensor, exponent: f32) !Tensor {
 
 /// Elementwise select: `out[i] = cond[i] != 0 ? x[i] : y[i]` (all same shape).
 pub fn where(rt: *Runtime, x: *const Tensor, cond: *const Tensor, y: *const Tensor) !Tensor {
-    try tensor.requireSameShape(x, cond);
+    return whereTyped(rt, .f32, x, cond, y);
+}
+
+/// `cond ? x : y` with a `.bool` or float condition (truthiness `!= 0`).
+pub fn whereTyped(rt: *Runtime, comptime cond_dtype: DType, x: *const Tensor, cond: *const tensor.TensorOf(cond_dtype), y: *const Tensor) !Tensor {
+    if (!std.mem.eql(usize, x.shape.slice(), cond.shape.slice())) return tensor.TensorError.ShapeMismatch;
     try tensor.requireSameShape(x, y);
     var xx = try rt.prepareContiguous(x);
     defer xx.deinit();
-    var cc = try rt.prepareContiguous(cond);
+    var cc = try rt.prepareContiguousTyped(cond_dtype, cond);
     defer cc.deinit();
     var yy = try rt.prepareContiguous(y);
     defer yy.deinit();
@@ -944,23 +949,27 @@ pub fn where(rt: *Runtime, x: *const Tensor, cond: *const Tensor, y: *const Tens
     var out = try rt.empty(xp.shape.slice());
     errdefer out.deinit();
     for (xp.dataConst(), cc.tensor().dataConst(), yy.tensor().dataConst(), out.data()) |xv, cv, yv, *dst| {
-        dst.* = if (cv != 0) xv else yv;
+        dst.* = if (dtype_mod.isTruthy(cond_dtype, cv)) xv else yv;
     }
     return out;
 }
 
-/// Elementwise masked fill: `out[i] = mask[i] != 0 ? value : x[i]`.
+/// Elementwise masked fill: `out[i] = mask[i] truthy ? value : x[i]`.
 pub fn maskedFill(rt: *Runtime, x: *const Tensor, mask: *const Tensor, value: f32) !Tensor {
-    try tensor.requireSameShape(x, mask);
+    return maskedFillTyped(rt, .f32, x, mask, value);
+}
+
+pub fn maskedFillTyped(rt: *Runtime, comptime mask_dtype: DType, x: *const Tensor, mask: *const tensor.TensorOf(mask_dtype), value: f32) !Tensor {
+    if (!std.mem.eql(usize, x.shape.slice(), mask.shape.slice())) return tensor.TensorError.ShapeMismatch;
     var xx = try rt.prepareContiguous(x);
     defer xx.deinit();
-    var mm = try rt.prepareContiguous(mask);
+    var mm = try rt.prepareContiguousTyped(mask_dtype, mask);
     defer mm.deinit();
     const xp = xx.tensor();
     var out = try rt.empty(xp.shape.slice());
     errdefer out.deinit();
     for (xp.dataConst(), mm.tensor().dataConst(), out.data()) |xv, mv, *dst| {
-        dst.* = if (mv != 0) value else xv;
+        dst.* = if (dtype_mod.isTruthy(mask_dtype, mv)) value else xv;
     }
     return out;
 }
@@ -969,98 +978,133 @@ pub fn maskedFill(rt: *Runtime, x: *const Tensor, mask: *const Tensor, value: f3
 /// (same shape only, like `where`; no broadcasting). NaN semantics are IEEE:
 /// any comparison involving NaN is false — except `ne`, which is true — so
 /// eq(NaN, NaN) = 0 and ne(NaN, x) = 1.
-pub fn compare(rt: *Runtime, comptime op: CompareOp, a: *const Tensor, b: *const Tensor) !Tensor {
+pub fn compare(rt: *Runtime, comptime op: CompareOp, a: *const Tensor, b: *const Tensor) !tensor.TensorOf(.bool) {
     try tensor.requireSameShape(a, b);
     var aa = try rt.prepareContiguous(a);
     defer aa.deinit();
     var bb = try rt.prepareContiguous(b);
     defer bb.deinit();
     const ap = aa.tensor();
-    var out = try rt.empty(ap.shape.slice());
+    var out = try rt.emptyTyped(.bool, ap.shape.slice());
     errdefer out.deinit();
     for (ap.dataConst(), bb.tensor().dataConst(), out.data()) |av, bv, *dst| {
-        dst.* = if (backend_ops.compareScalar(op, av, bv)) 1 else 0;
+        dst.* = backend_ops.compareScalar(op, av, bv);
     }
     return out;
 }
 
-/// Elementwise comparison mask vs a scalar RHS:
-/// `out[i] = x[i] <op> scalar_value ? 1.0 : 0.0`. Same IEEE NaN contract as
-/// `compare` (any comparison involving NaN is false except `ne`).
-pub fn compareScalar(rt: *Runtime, comptime op: CompareOp, x: *const Tensor, scalar_value: f32) !Tensor {
+/// Elementwise comparison mask vs a scalar RHS: a `.bool` tensor. Same
+/// IEEE NaN contract as `compare` (any comparison involving NaN is false
+/// except `ne`).
+pub fn compareScalar(rt: *Runtime, comptime op: CompareOp, x: *const Tensor, scalar_value: f32) !tensor.TensorOf(.bool) {
     var xx = try rt.prepareContiguous(x);
     defer xx.deinit();
     const xp = xx.tensor();
-    var out = try rt.empty(xp.shape.slice());
+    var out = try rt.emptyTyped(.bool, xp.shape.slice());
     errdefer out.deinit();
     for (xp.dataConst(), out.data()) |xv, *dst| {
-        dst.* = if (backend_ops.compareScalar(op, xv, scalar_value)) 1 else 0;
+        dst.* = backend_ops.compareScalar(op, xv, scalar_value);
     }
     return out;
 }
 
-/// Elementwise logical AND over `!= 0` truthiness (the repo-wide mask
-/// convention shared with `where`/`maskedFill`; NaN is `!= 0`, hence truthy):
-/// `out[i] = (a[i] != 0 and b[i] != 0) ? 1.0 : 0.0`. Same shape only.
-pub fn logicalAnd(rt: *Runtime, a: *const Tensor, b: *const Tensor) !Tensor {
-    try tensor.requireSameShape(a, b);
-    var aa = try rt.prepareContiguous(a);
+fn intCompare(comptime op: CompareOp, a: anytype, b: anytype) bool {
+    return switch (op) {
+        .eq => a == b,
+        .ne => a != b,
+        .lt => a < b,
+        .le => a <= b,
+        .gt => a > b,
+        .ge => a >= b,
+    };
+}
+
+/// Integer elementwise comparison: exact at any magnitude (no float
+/// bridge), `.bool` result. Same shape only.
+pub fn compareIntTyped(
+    rt: *Runtime,
+    comptime dtype: DType,
+    comptime op: CompareOp,
+    a: *const tensor.TensorOf(dtype),
+    b: *const tensor.TensorOf(dtype),
+) !tensor.TensorOf(.bool) {
+    comptime {
+        if (!dtype_mod.supportsIntMath(dtype)) @compileError("compareIntTyped requires an integer dtype");
+    }
+    if (!std.mem.eql(usize, a.shape.slice(), b.shape.slice())) return tensor.TensorError.ShapeMismatch;
+    var aa = try rt.prepareContiguousTyped(dtype, a);
     defer aa.deinit();
-    var bb = try rt.prepareContiguous(b);
+    var bb = try rt.prepareContiguousTyped(dtype, b);
     defer bb.deinit();
-    const ap = aa.tensor();
-    var out = try rt.empty(ap.shape.slice());
+    var out = try rt.emptyTyped(.bool, a.shape.slice());
     errdefer out.deinit();
-    for (ap.dataConst(), bb.tensor().dataConst(), out.data()) |av, bv, *dst| {
-        dst.* = if (av != 0 and bv != 0) 1 else 0;
+    for (aa.tensor().dataConst(), bb.tensor().dataConst(), out.data()) |av, bv, *dst| {
+        dst.* = intCompare(op, av, bv);
     }
     return out;
 }
 
-/// Elementwise logical OR over `!= 0` truthiness (see `logicalAnd`):
-/// `out[i] = (a[i] != 0 or b[i] != 0) ? 1.0 : 0.0`. Same shape only.
-pub fn logicalOr(rt: *Runtime, a: *const Tensor, b: *const Tensor) !Tensor {
-    try tensor.requireSameShape(a, b);
-    var aa = try rt.prepareContiguous(a);
-    defer aa.deinit();
-    var bb = try rt.prepareContiguous(b);
-    defer bb.deinit();
-    const ap = aa.tensor();
-    var out = try rt.empty(ap.shape.slice());
-    errdefer out.deinit();
-    for (ap.dataConst(), bb.tensor().dataConst(), out.data()) |av, bv, *dst| {
-        dst.* = if (av != 0 or bv != 0) 1 else 0;
+/// Integer comparison against a scalar RHS (see `compareIntTyped`).
+pub fn compareIntScalarTyped(
+    rt: *Runtime,
+    comptime dtype: DType,
+    comptime op: CompareOp,
+    x: *const tensor.TensorOf(dtype),
+    scalar_value: dtype_mod.Scalar(dtype),
+) !tensor.TensorOf(.bool) {
+    comptime {
+        if (!dtype_mod.supportsIntMath(dtype)) @compileError("compareIntScalarTyped requires an integer dtype");
     }
-    return out;
-}
-
-/// Elementwise logical XOR over `!= 0` truthiness (see `logicalAnd`):
-/// `out[i] = ((a[i] != 0) != (b[i] != 0)) ? 1.0 : 0.0`. Same shape only.
-pub fn logicalXor(rt: *Runtime, a: *const Tensor, b: *const Tensor) !Tensor {
-    try tensor.requireSameShape(a, b);
-    var aa = try rt.prepareContiguous(a);
-    defer aa.deinit();
-    var bb = try rt.prepareContiguous(b);
-    defer bb.deinit();
-    const ap = aa.tensor();
-    var out = try rt.empty(ap.shape.slice());
-    errdefer out.deinit();
-    for (ap.dataConst(), bb.tensor().dataConst(), out.data()) |av, bv, *dst| {
-        dst.* = if ((av != 0) != (bv != 0)) 1 else 0;
-    }
-    return out;
-}
-
-/// Elementwise logical NOT over `!= 0` truthiness (see `logicalAnd`):
-/// `out[i] = x[i] != 0 ? 0.0 : 1.0`.
-pub fn logicalNot(rt: *Runtime, x: *const Tensor) !Tensor {
-    var xx = try rt.prepareContiguous(x);
+    var xx = try rt.prepareContiguousTyped(dtype, x);
     defer xx.deinit();
-    const xp = xx.tensor();
-    var out = try rt.empty(xp.shape.slice());
+    var out = try rt.emptyTyped(.bool, x.shape.slice());
     errdefer out.deinit();
-    for (xp.dataConst(), out.data()) |xv, *dst| {
-        dst.* = if (xv != 0) 0 else 1;
+    for (xx.tensor().dataConst(), out.data()) |xv, *dst| {
+        dst.* = intCompare(op, xv, scalar_value);
+    }
+    return out;
+}
+
+pub const LogicalOp = enum { l_and, l_or, l_xor };
+
+/// Elementwise logical AND/OR/XOR over truthiness (the repo-wide mask
+/// convention shared with `where`/`maskedFill`; NaN is truthy): a `.bool`
+/// tensor. Operands may mix `.bool` and float dtypes. Same shape only.
+pub fn logicalTyped(
+    rt: *Runtime,
+    comptime op: LogicalOp,
+    comptime a_dtype: DType,
+    comptime b_dtype: DType,
+    a: *const tensor.TensorOf(a_dtype),
+    b: *const tensor.TensorOf(b_dtype),
+) !tensor.TensorOf(.bool) {
+    if (!std.mem.eql(usize, a.shape.slice(), b.shape.slice())) return tensor.TensorError.ShapeMismatch;
+    var aa = try rt.prepareContiguousTyped(a_dtype, a);
+    defer aa.deinit();
+    var bb = try rt.prepareContiguousTyped(b_dtype, b);
+    defer bb.deinit();
+    var out = try rt.emptyTyped(.bool, a.shape.slice());
+    errdefer out.deinit();
+    for (aa.tensor().dataConst(), bb.tensor().dataConst(), out.data()) |av, bv, *dst| {
+        const at = dtype_mod.isTruthy(a_dtype, av);
+        const bt = dtype_mod.isTruthy(b_dtype, bv);
+        dst.* = switch (op) {
+            .l_and => at and bt,
+            .l_or => at or bt,
+            .l_xor => at != bt,
+        };
+    }
+    return out;
+}
+
+/// Elementwise logical NOT over truthiness (see `logicalTyped`).
+pub fn logicalNotTyped(rt: *Runtime, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !tensor.TensorOf(.bool) {
+    var xx = try rt.prepareContiguousTyped(dtype, x);
+    defer xx.deinit();
+    var out = try rt.emptyTyped(.bool, x.shape.slice());
+    errdefer out.deinit();
+    for (xx.tensor().dataConst(), out.data()) |xv, *dst| {
+        dst.* = !dtype_mod.isTruthy(dtype, xv);
     }
     return out;
 }

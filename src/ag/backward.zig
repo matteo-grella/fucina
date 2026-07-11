@@ -167,9 +167,13 @@ pub fn PointwiseBackward(
             var right_view = try tag_ops.broadcastTensorTo(right_tags, &self.right_value.?, result_tags, result_shape);
             defer right_view.deinit();
             const win_op: exec_mod.CompareOp = comptime if ((op == .max) == (favored == .left)) .gt else .lt;
-            var wins = try ctx.compare(win_op, &left_view, &right_view);
+            var wins_mask = try ctx.compare(win_op, &left_view, &right_view);
+            defer wins_mask.deinit();
+            var wins = try ctx.castTyped(.bool, .f32, &wins_mask);
             defer wins.deinit();
-            var ties = try ctx.compare(.eq, &left_view, &right_view);
+            var ties_mask = try ctx.compare(.eq, &left_view, &right_view);
+            defer ties_mask.deinit();
+            var ties = try ctx.castTyped(.bool, .f32, &ties_mask);
             defer ties.deinit();
             var half_ties = try ctx.scale(&ties, 0.5);
             defer half_ties.deinit();
@@ -1126,15 +1130,21 @@ pub fn PowScalarBackward(comptime tags: anytype) type {
 
 /// VJP for `maskedFill(x, mask, value)`: grad passes through where the mask is
 /// clear, zero where it is set (`value` is a constant — no grad).
-pub fn MaskedFillBackward(comptime tags: anytype) type {
+/// Contiguous read of a saved typed mask/cond tensor (any scalar dtype).
+fn contiguousForReadTyped(comptime mask_dtype: tensor_mod.DType, ctx: *ExecContext, value: *const tensor_mod.TensorOf(mask_dtype)) !tensor_mod.TensorOf(mask_dtype) {
+    if (value.isContiguous()) return value.cloneView();
+    return ctx.materializeTyped(mask_dtype, value);
+}
+
+pub fn MaskedFillBackward(comptime tags: anytype, comptime mask_dtype: tensor_mod.DType) type {
     _ = tags;
     return struct {
         parents: [1]?*GradState,
-        mask: RawTensor,
+        mask: tensor_mod.TensorOf(mask_dtype),
 
         const Self = @This();
 
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, mask: *const RawTensor) !void {
+        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, mask: *const tensor_mod.TensorOf(mask_dtype)) !void {
             _ = allocator;
             self.* = .{ .parents = .{parent}, .mask = try mask.cloneView() };
         }
@@ -1147,14 +1157,14 @@ pub fn MaskedFillBackward(comptime tags: anytype) type {
         fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             const self: *const Self = @ptrCast(@alignCast(ptr));
             if (needs_grad.len == 0 or !needs_grad[0]) return;
-            var m = try contiguousForRead(ctx, &self.mask);
+            var m = try contiguousForReadTyped(mask_dtype, ctx, &self.mask);
             defer m.deinit();
             var gy_ready = try contiguousForRead(ctx, gy);
             defer gy_ready.deinit();
             var gx = try ctx.empty(m.shape.slice());
             errdefer gx.deinit();
             for (m.dataConst(), gy_ready.dataConst(), gx.data()) |mv, grad, *dst| {
-                dst.* = if (mv != 0) 0 else grad;
+                dst.* = if (dtype_mod.isTruthy(mask_dtype, mv)) 0 else grad;
             }
             out[0] = gx;
         }
@@ -1175,15 +1185,15 @@ pub fn MaskedFillBackward(comptime tags: anytype) type {
 
 /// VJP for `where(x, cond, y)` = `cond ? x : y`: `grad_x = cond ? gy : 0` and
 /// `grad_y = cond ? 0 : gy` (`cond` is a non-grad mask).
-pub fn WhereBackward(comptime tags: anytype) type {
+pub fn WhereBackward(comptime tags: anytype, comptime cond_dtype: tensor_mod.DType) type {
     _ = tags;
     return struct {
         parents: [2]?*GradState,
-        cond: RawTensor,
+        cond: tensor_mod.TensorOf(cond_dtype),
 
         const Self = @This();
 
-        pub fn init(self: *Self, allocator: std.mem.Allocator, x_parent: ?*GradState, y_parent: ?*GradState, cond: *const RawTensor) !void {
+        pub fn init(self: *Self, allocator: std.mem.Allocator, x_parent: ?*GradState, y_parent: ?*GradState, cond: *const tensor_mod.TensorOf(cond_dtype)) !void {
             _ = allocator;
             self.* = .{ .parents = .{ x_parent, y_parent }, .cond = try cond.cloneView() };
         }
@@ -1195,7 +1205,7 @@ pub fn WhereBackward(comptime tags: anytype) type {
 
         fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             const self: *const Self = @ptrCast(@alignCast(ptr));
-            var c = try contiguousForRead(ctx, &self.cond);
+            var c = try contiguousForReadTyped(cond_dtype, ctx, &self.cond);
             defer c.deinit();
             var gy_ready = try contiguousForRead(ctx, gy);
             defer gy_ready.deinit();
@@ -1203,7 +1213,7 @@ pub fn WhereBackward(comptime tags: anytype) type {
                 var gx = try ctx.empty(c.shape.slice());
                 errdefer gx.deinit();
                 for (c.dataConst(), gy_ready.dataConst(), gx.data()) |cv, grad, *dst| {
-                    dst.* = if (cv != 0) grad else 0;
+                    dst.* = if (dtype_mod.isTruthy(cond_dtype, cv)) grad else 0;
                 }
                 out[0] = gx;
             }
@@ -1211,7 +1221,7 @@ pub fn WhereBackward(comptime tags: anytype) type {
                 var gyy = try ctx.empty(c.shape.slice());
                 errdefer gyy.deinit();
                 for (c.dataConst(), gy_ready.dataConst(), gyy.data()) |cv, grad, *dst| {
-                    dst.* = if (cv != 0) 0 else grad;
+                    dst.* = if (dtype_mod.isTruthy(cond_dtype, cv)) 0 else grad;
                 }
                 out[1] = gyy;
             }

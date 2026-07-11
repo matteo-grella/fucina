@@ -737,6 +737,16 @@ pub fn castScalar(comptime from: DType, comptime to: DType, v: Scalar(from)) Sca
     return fromF64(to, @floatFromInt(intToI64(from, v)));
 }
 
+/// Mask truthiness across the scalar dtypes: `!= 0` (bf16 goes through
+/// the value bridge so -0.0 stays falsy; NaN is truthy).
+pub fn isTruthy(comptime dtype: DType, value: Scalar(dtype)) bool {
+    return switch (dtype) {
+        .bool => value,
+        .bf16 => bf16ToF32(value) != 0,
+        else => value != 0,
+    };
+}
+
 pub fn bf16ToF32(bits: u16) f32 {
     const widened: u32 = @as(u32, bits) << 16;
     return @bitCast(widened);

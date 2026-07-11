@@ -1069,13 +1069,13 @@ test "typed float widened binary, gated, and mask ops match the narrowed f32 ref
             try std.testing.expectEqualSlices(Scalar, ref.asRawTensor().dataConst(), got.asRawTensor().dataConst());
         }
 
+        // compare is .bool on every branch (torch's comparison dtype).
         var mask = try a_t.compare(&ctx, .gt, 0.0);
         defer mask.deinit();
+        comptime std.debug.assert(@TypeOf(mask).dtype == .bool);
         var mask_ref32 = try a32.compare(&ctx, .gt, 0.0);
         defer mask_ref32.deinit();
-        var mask_ref = try mask_ref32.to(&ctx, float_dtype);
-        defer mask_ref.deinit();
-        try std.testing.expectEqualSlices(Scalar, mask_ref.asRawTensor().dataConst(), mask.asRawTensor().dataConst());
+        try std.testing.expectEqualSlices(bool, try mask_ref32.dataConst(), try mask.dataConst());
 
         var tensor_mask = try a_t.compare(&ctx, .lt, &b_t);
         defer tensor_mask.deinit();
@@ -7809,35 +7809,43 @@ test "public Tensor comparison and logical ops produce constant 0/1 masks" {
     // torch.lt(a, b).float() = {0, 1, 0, 0}; torch.ge = {1, 0, 1, 1}.
     var lt = try a.compare(&ctx, .lt, &b);
     defer lt.deinit();
+    comptime std.debug.assert(@TypeOf(lt).dtype == .bool);
     try std.testing.expect(!lt.requiresGrad());
-    try expectCloseSlices(&.{ 0, 1, 0, 0 }, try lt.dataConst(), 0);
+    try std.testing.expectEqualSlices(bool, &.{ false, true, false, false }, try lt.dataConst());
     var ge = try a.compare(&ctx, .ge, &b);
     defer ge.deinit();
-    try expectCloseSlices(&.{ 1, 0, 1, 1 }, try ge.dataConst(), 0);
+    try std.testing.expectEqualSlices(bool, &.{ true, false, true, true }, try ge.dataConst());
 
-    // torch.eq(a, 4).float() and torch.le(a, 2).float().
+    // torch.eq(a, 4) and torch.le(a, 2): .bool masks.
     var eq4 = try a.compare(&ctx, .eq, 4);
     defer eq4.deinit();
     try std.testing.expect(!eq4.requiresGrad());
-    try expectCloseSlices(&.{ 0, 0, 0, 1 }, try eq4.dataConst(), 0);
+    try std.testing.expectEqualSlices(bool, &.{ false, false, false, true }, try eq4.dataConst());
     var le2 = try a.compare(&ctx, .le, 2);
     defer le2.deinit();
-    try expectCloseSlices(&.{ 1, 1, 0, 0 }, try le2.dataConst(), 0);
+    try std.testing.expectEqualSlices(bool, &.{ true, true, false, false }, try le2.dataConst());
 
-    // Logical combinators over != 0 truthiness.
+    // Logical combinators over truthiness: .bool in, .bool out.
     var both = try le2.logicalAnd(&ctx, &eq4);
     defer both.deinit();
     try std.testing.expect(!both.requiresGrad());
-    try expectCloseSlices(&.{ 0, 0, 0, 0 }, try both.dataConst(), 0);
+    try std.testing.expectEqualSlices(bool, &.{ false, false, false, false }, try both.dataConst());
     var either = try le2.logicalOr(&ctx, &eq4);
     defer either.deinit();
-    try expectCloseSlices(&.{ 1, 1, 0, 1 }, try either.dataConst(), 0);
+    try std.testing.expectEqualSlices(bool, &.{ true, true, false, true }, try either.dataConst());
     var one_of = try le2.logicalXor(&ctx, &eq4);
     defer one_of.deinit();
-    try expectCloseSlices(&.{ 1, 1, 0, 1 }, try one_of.dataConst(), 0);
+    try std.testing.expectEqualSlices(bool, &.{ true, true, false, true }, try one_of.dataConst());
     var neither = try either.logicalNot(&ctx);
     defer neither.deinit();
-    try expectCloseSlices(&.{ 0, 0, 1, 0 }, try neither.dataConst(), 0);
+    try std.testing.expectEqualSlices(bool, &.{ false, false, true, false }, try neither.dataConst());
+    // Count the mask (i64) and cast for the mask-multiply idiom.
+    var n_true = try either.sumAll(&ctx);
+    defer n_true.deinit();
+    try std.testing.expectEqual(@as(i64, 3), try n_true.item());
+    var as_f32 = try either.to(&ctx, .f32);
+    defer as_f32.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 1, 1, 0, 1 }, try as_f32.dataConst());
 
     // The mask feeds where/maskedFill directly: where(le2, a, b).
     var picked = try a.where(&ctx, le2, &b);
@@ -9254,13 +9262,14 @@ test "public Tensor isnan isinf isfinite produce constant masks" {
 
     var nan_mask = try x.isnan(&ctx);
     defer nan_mask.deinit();
-    try std.testing.expectEqualSlices(f32, &.{ 0, 0, 0, 1, 0 }, try nan_mask.dataConst());
+    comptime std.debug.assert(@TypeOf(nan_mask).dtype == .bool);
+    try std.testing.expectEqualSlices(bool, &.{ false, false, false, true, false }, try nan_mask.dataConst());
     var inf_mask = try x.isinf(&ctx);
     defer inf_mask.deinit();
-    try std.testing.expectEqualSlices(f32, &.{ 0, 1, 1, 0, 0 }, try inf_mask.dataConst());
+    try std.testing.expectEqualSlices(bool, &.{ false, true, true, false, false }, try inf_mask.dataConst());
     var finite_mask = try x.isfinite(&ctx);
     defer finite_mask.deinit();
-    try std.testing.expectEqualSlices(f32, &.{ 1, 0, 0, 0, 1 }, try finite_mask.dataConst());
+    try std.testing.expectEqualSlices(bool, &.{ true, false, false, false, true }, try finite_mask.dataConst());
 
     // Masks are constants even off a grad-tracked source, and need no scope.
     var xv = try V.variableFromSlice(&ctx, .{5}, &.{ 1, inf, -inf, std.math.nan(f32), 0 });
@@ -9285,17 +9294,18 @@ test "public Tensor any all reductions follow torch truthiness" {
 
     var any_row = try x.any(&ctx, .col);
     defer any_row.deinit();
-    try std.testing.expectEqualSlices(f32, &.{ 0, 1, 1 }, try any_row.dataConst());
+    comptime std.debug.assert(@TypeOf(any_row).dtype == .bool);
+    try std.testing.expectEqualSlices(bool, &.{ false, true, true }, try any_row.dataConst());
     var all_row = try x.all(&ctx, .col);
     defer all_row.deinit();
-    try std.testing.expectEqualSlices(f32, &.{ 0, 0, 1 }, try all_row.dataConst());
+    try std.testing.expectEqualSlices(bool, &.{ false, false, true }, try all_row.dataConst());
 
     var any_scalar = try x.anyAll(&ctx);
     defer any_scalar.deinit();
-    try std.testing.expectEqual(@as(f32, 1), try any_scalar.item());
+    try std.testing.expectEqual(true, try any_scalar.item());
     var all_scalar = try x.allAll(&ctx);
     defer all_scalar.deinit();
-    try std.testing.expectEqual(@as(f32, 0), try all_scalar.item());
+    try std.testing.expectEqual(false, try all_scalar.item());
 }
 
 test "public Tensor maximum minimum route gradients with even tie split" {
@@ -10342,4 +10352,48 @@ test "integer and bool casts: wrap, saturate, count" {
     var back = try mask2.to(&ctx, .f32);
     defer back.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 0, 1, 0, 1 }, try back.dataConst());
+}
+
+test "bool masks route where and maskedFill gradients" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    const V = Tensor(.{.d});
+    var a = try V.variableFromSlice(&ctx, .{4}, &.{ 1, 2, 3, 4 });
+    defer a.deinit();
+    var b = try V.variableFromSlice(&ctx, .{4}, &.{ 10, 20, 30, 40 });
+    defer b.deinit();
+    // cond = {false, true, false, true}: gradient splits by the bool mask.
+    var cond2 = try V.fromSlice(&ctx, .{4}, &.{ 0, 1, 0, 1 });
+    defer cond2.deinit();
+    var mask = try cond2.compare(&ctx, .ge, 1);
+    defer mask.deinit();
+
+    var picked = try a.where(&ctx, &mask, &b);
+    defer picked.deinit();
+    try expectCloseSlices(&.{ 10, 2, 30, 4 }, try picked.dataConst(), 0);
+    var loss = try picked.sumAll(&ctx);
+    defer loss.deinit();
+    try loss.backward(&ctx);
+    var ga = (try a.grad(&ctx)).?;
+    defer ga.deinit();
+    try expectCloseSlices(&.{ 0, 1, 0, 1 }, try ga.dataConst(), 0);
+    var gb = (try b.grad(&ctx)).?;
+    defer gb.deinit();
+    try expectCloseSlices(&.{ 1, 0, 1, 0 }, try gb.dataConst(), 0);
+
+    // maskedFill with the bool mask: grad zeroed exactly where filled.
+    a.zeroGrad();
+    var filled = try a.maskedFill(&ctx, &mask, 9.0);
+    defer filled.deinit();
+    try expectCloseSlices(&.{ 1, 9, 3, 9 }, try filled.dataConst(), 0);
+    var loss2 = try filled.sumAll(&ctx);
+    defer loss2.deinit();
+    try loss2.backward(&ctx);
+    var ga2 = (try a.grad(&ctx)).?;
+    defer ga2.deinit();
+    try expectCloseSlices(&.{ 1, 0, 1, 0 }, try ga2.dataConst(), 0);
 }

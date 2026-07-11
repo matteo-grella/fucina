@@ -1483,10 +1483,10 @@ test "maskedSelect no-match outcome: count first or catch EmptySelection" {
     var mask = try x.compare(&ctx, .gt, 10); // nothing matches
     defer mask.deinit();
 
-    // Count-first idiom: the 0/1 mask sums to the selection count.
+    // Count-first idiom: the .bool mask sums to the selection count (i64).
     var count = try mask.sumAll(&ctx);
     defer count.deinit();
-    try std.testing.expectEqual(@as(f32, 0), try count.item());
+    try std.testing.expectEqual(@as(i64, 0), try count.item());
 
     // Or catch the dedicated error — EmptySelection is the recoverable
     // no-match outcome; shape errors (caller bugs) stay loud.
@@ -1753,10 +1753,13 @@ is the N-ary companion of `einsum` (§4.8).
 `data`, `dataConst`, `copyTo`, `axis`, `hasTag`, `deinit`, `asRawTensor`,
 `requiresGrad`, `dim`, `shape`, `materialize`, `withTags`, `alignTo`,
 `permuteTo`, `transpose`, `insertAxis`, `squeeze`, `broadcastTo`, `gather`,
-`narrow`, `concat`, `setSlice`, `setRows` — all §3 — plus `to` (§3.8) and
-the integer forward math `add`, `sub`, `mul`, `maximum`, `minimum`,
+`narrow`, `concat`, `setSlice`, `setRows` — all §3 — plus `to` (§3.8), the
+integer forward math `add`, `sub`, `mul`, `maximum`, `minimum`,
 `divTrunc`, `divFloor`, `sum`, `sumAll` (§4.19; on `.bool` the arithmetic
-entries are compile errors — `to` and the counting `sum`/`sumAll` apply).
+entries are compile errors — `to` and the counting `sum`/`sumAll` apply),
+integer `compare` (§4.6, exact at any magnitude), and — on `.bool` only —
+the mask combinators `logicalAnd`, `logicalOr`, `logicalXor`,
+`logicalNot`.
 
 **Typed float branch** (`.f16`/`.bf16`/`.f64`): everything in the
 scalar-constant branch, plus — f16/bf16 only, compile errors on f64 — the
@@ -2139,36 +2142,43 @@ test "gated pointwise and split-gated" {
 
 ### 4.6 Masks, comparisons, and conditionals (`src/ag/tensor.zig`)
 
-The mask convention everywhere is f32 truthiness: nonzero selects/fills, and
-mask producers emit exact `0.0`/`1.0`.
+Mask producers emit `.bool` tensors (torch's comparison dtype); mask
+consumers (`where`, `maskedFill`, the logical ops) take a `.bool` mask or
+a float tensor read by truthiness (`!= 0`; NaN truthy). Like every typed
+constant, `.bool` results are CALLER-owned even under an exec scope. Count
+a mask with `sum`/`sumAll` (i64, §4.19) and cast with `to(.f32)` for the
+mask-multiply idiom.
 
-- `compare(ctx, op, other)` — 1.0 where `self <op> other` holds, else 0.0.
-  `op` is `exec.CompareOp` (`.eq .ne .lt .le .gt .ge`); `other` is
-  comptime-dispatched: a same-tagged tensor (same shape only) or a numeric
-  scalar. **No-grad by design** (constant mask). NaN follows IEEE: any
-  comparison involving NaN is false except `.ne`, which is true.
-- `logicalAnd`, `logicalOr`, `logicalXor` (`ctx, other: *const Self`) and
-  `logicalNot(ctx)` — elementwise logic over `!= 0` truthiness (NaN is
-  truthy); same shape only; no-grad constant masks.
-- `where(ctx, cond, other)` — `cond[i] != 0 ? self[i] : other[i]`.
-  Differentiable in `self` and `other`; `cond` is a non-grad mask.
-- `maskedFill(ctx, mask, value)` — `mask[i] != 0 ? value : self[i]`.
+- `compare(ctx, op, other)` — `.bool`, true where `self <op> other`
+  holds. `op` is `exec.CompareOp` (`.eq .ne .lt .le .gt .ge`); `other` is
+  comptime-dispatched: a same-tagged tensor (same shape only) or a
+  numeric scalar. **No-grad by design** (constant mask). NaN follows
+  IEEE: any comparison involving NaN is false except `.ne`, which is
+  true. Also on the typed branches: f16/bf16 compare through f32; INTEGER
+  tensors compare natively (exact at any magnitude — token-id masks).
+- `logicalAnd`, `logicalOr`, `logicalXor` (`ctx, other`) and
+  `logicalNot(ctx)` — elementwise logic over truthiness, `.bool` out.
+  Defined on the f32 branch (float `self`, `.bool`-or-float `other`) and
+  on the `.bool` branch itself (mask combinators); same shape only.
+- `where(ctx, cond, other)` — `cond[i] ? self[i] : other[i]`.
+  Differentiable in `self` and `other`; `cond` (`.bool` or float) is a
+  non-grad mask.
+- `maskedFill(ctx, mask, value)` — `mask[i] ? value : self[i]`.
   Differentiable in `self` (gradient zeroed where filled); `value` is a
   constant.
 - `isnan(ctx)` / `isinf(ctx)` / `isfinite(ctx)` — torch's float
-  predicates as 0/1 masks, built purely from the IEEE `compare` semantics
-  (`isnan` is the self-`.ne` test; `isfinite` is `-inf < x < inf`, false
-  for NaN and both infinities). Non-differentiable constant masks,
-  unscoped-safe.
-- `any(ctx, tag)` / `all(ctx, tag)` — 1.0 where any/every element along
-  `tag` is truthy (`!= 0`; NaN is truthy, the torch.any/all convention),
-  the tag removed; `anyAll(ctx)`/`allAll(ctx)` are the scalar
-  full-tensor forms (torch with no dim). Non-differentiable constant
-  masks (compare → sum → compare; the counts are exact small integers in
-  f32), unscoped-safe.
+  predicates as `.bool` masks, built purely from the IEEE `compare`
+  semantics (`isnan` is the self-`.ne` test; `isfinite` is
+  `-inf < x < inf`, false for NaN and both infinities).
+  Non-differentiable, unscoped-safe.
+- `any(ctx, tag)` / `all(ctx, tag)` — `.bool`, true where any/every
+  element along `tag` is truthy (NaN is truthy, the torch.any/all
+  convention), the tag removed; `anyAll(ctx)`/`allAll(ctx)` are the
+  scalar full-tensor forms (torch with no dim). Non-differentiable
+  (compare → i64 count → compare), unscoped-safe.
 
 ```zig
-test "compare produces masks for maskedFill and where" {
+test "compare produces bool masks for maskedFill and where" {
     const alloc = std.testing.allocator;
     var ctx: fucina.ExecContext = undefined;
     ctx.init(alloc);
@@ -2176,11 +2186,15 @@ test "compare produces masks for maskedFill and where" {
 
     var x = try fucina.Tensor(.{.d}).fromSlice(&ctx, .{3}, &.{ -1, 0, 2 });
     defer x.deinit();
-    var neg = try x.compare(&ctx, .lt, 0); // {1, 0, 0}, constant 0/1 mask
+    var neg = try x.compare(&ctx, .lt, 0); // .bool: {true, false, false}
     defer neg.deinit();
+    comptime std.debug.assert(@TypeOf(neg).dtype == .bool);
     var y = try x.maskedFill(&ctx, &neg, 0); // relu by hand
     defer y.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 0, 0, 2 }, try y.dataConst());
+    var n_neg = try neg.sumAll(&ctx); // count the mask: i64
+    defer n_neg.deinit();
+    try std.testing.expectEqual(@as(i64, 1), try n_neg.item());
 }
 ```
 
@@ -3210,8 +3224,9 @@ breakdown the caller can pass to profile a run.
   `powScalar`, `maximum`, `minimum`, `gated`/`glu`/`swiglu`/`geglu`,
   `softmax` and `layerNorm` (plain `.{}` options only — cast to f32 for
   the ext/affine paths), `logSoftmax`, `rmsNorm`, `rmsNormMul` (same-dtype
-  weight), `cumsum`, `cumprod`, `where`, `maskedFill`, `compare` (0/1 mask
-  in the input dtype), `pad`, and `einsum` (same-dtype operands, f32 GEMM
+  weight), `cumsum`, `cumprod`, `where`/`maskedFill` (`.bool` or
+  same-dtype masks), `compare` (`.bool` result), `pad`, and `einsum`
+  (same-dtype operands, f32 GEMM
   lowering — the typed `dot` contract). The widened reductions `max`,
   `min`, `prod`, `variance`, `logsumexp` return **f32** like the native
   typed `sum`/`mean` (§8.3); `argmax` returns i64 (§4.16).

@@ -3847,33 +3847,33 @@ test "exec compare and compareScalar produce IEEE 0/1 masks (NaN false except ne
 
     var eq = try ctx.compare(.eq, &a, &b);
     defer eq.deinit();
-    try std.testing.expectEqualSlices(f32, &.{ 1, 0, 0, 0 }, eq.dataConst());
+    try std.testing.expectEqualSlices(bool, &.{ true, false, false, false }, eq.dataConst());
     var ne = try ctx.compare(.ne, &a, &b);
     defer ne.deinit();
-    try std.testing.expectEqualSlices(f32, &.{ 0, 1, 1, 1 }, ne.dataConst());
+    try std.testing.expectEqualSlices(bool, &.{ false, true, true, true }, ne.dataConst());
     var lt = try ctx.compare(.lt, &a, &b);
     defer lt.deinit();
-    try std.testing.expectEqualSlices(f32, &.{ 0, 1, 0, 0 }, lt.dataConst());
+    try std.testing.expectEqualSlices(bool, &.{ false, true, false, false }, lt.dataConst());
     var le = try ctx.compare(.le, &a, &b);
     defer le.deinit();
-    try std.testing.expectEqualSlices(f32, &.{ 1, 1, 0, 0 }, le.dataConst());
+    try std.testing.expectEqualSlices(bool, &.{ true, true, false, false }, le.dataConst());
     var gt = try ctx.compare(.gt, &a, &b);
     defer gt.deinit();
-    try std.testing.expectEqualSlices(f32, &.{ 0, 0, 0, 1 }, gt.dataConst());
+    try std.testing.expectEqualSlices(bool, &.{ false, false, false, true }, gt.dataConst());
     var ge = try ctx.compare(.ge, &a, &b);
     defer ge.deinit();
-    try std.testing.expectEqualSlices(f32, &.{ 1, 0, 0, 1 }, ge.dataConst());
+    try std.testing.expectEqualSlices(bool, &.{ true, false, false, true }, ge.dataConst());
 
     // Scalar RHS: x > 1.5 -> {0, 1, 0, 0}; x != 1.5 with the NaN lane true.
     var gt_s = try ctx.compareScalar(.gt, &a, 1.5);
     defer gt_s.deinit();
-    try std.testing.expectEqualSlices(f32, &.{ 0, 1, 0, 0 }, gt_s.dataConst());
+    try std.testing.expectEqualSlices(bool, &.{ false, true, false, false }, gt_s.dataConst());
     var ne_s = try ctx.compareScalar(.ne, &a, 1.5);
     defer ne_s.deinit();
-    try std.testing.expectEqualSlices(f32, &.{ 1, 1, 1, 1 }, ne_s.dataConst());
+    try std.testing.expectEqualSlices(bool, &.{ true, true, true, true }, ne_s.dataConst());
     var eq_s = try ctx.compareScalar(.eq, &a, nan);
     defer eq_s.deinit();
-    try std.testing.expectEqualSlices(f32, &.{ 0, 0, 0, 0 }, eq_s.dataConst());
+    try std.testing.expectEqualSlices(bool, &.{ false, false, false, false }, eq_s.dataConst());
 
     // Same-shape contract, like where.
     var short = try ctx.fromSliceRank(1, .{2}, &.{ 1, 2 });
@@ -3893,23 +3893,23 @@ test "exec logical ops use != 0 truthiness with 0/1 outputs" {
     var b = try ctx.fromSliceRank(1, .{4}, &.{ 0, 0, nan, 5 });
     defer b.deinit();
 
-    var land = try ctx.logicalAnd(&a, &b);
+    var land = try ctx.logicalTyped(.l_and, .f32, .f32, &a, &b);
     defer land.deinit();
-    try std.testing.expectEqualSlices(f32, &.{ 0, 0, 0, 1 }, land.dataConst());
-    var lor = try ctx.logicalOr(&a, &b);
+    try std.testing.expectEqualSlices(bool, &.{ false, false, false, true }, land.dataConst());
+    var lor = try ctx.logicalTyped(.l_or, .f32, .f32, &a, &b);
     defer lor.deinit();
-    try std.testing.expectEqualSlices(f32, &.{ 0, 1, 1, 1 }, lor.dataConst());
-    var lxor = try ctx.logicalXor(&a, &b);
+    try std.testing.expectEqualSlices(bool, &.{ false, true, true, true }, lor.dataConst());
+    var lxor = try ctx.logicalTyped(.l_xor, .f32, .f32, &a, &b);
     defer lxor.deinit();
-    try std.testing.expectEqualSlices(f32, &.{ 0, 1, 1, 0 }, lxor.dataConst());
-    var lnot = try ctx.logicalNot(&a);
+    try std.testing.expectEqualSlices(bool, &.{ false, true, true, false }, lxor.dataConst());
+    var lnot = try ctx.logicalNotTyped(.f32, &a);
     defer lnot.deinit();
-    try std.testing.expectEqualSlices(f32, &.{ 1, 0, 1, 0 }, lnot.dataConst());
+    try std.testing.expectEqualSlices(bool, &.{ true, false, true, false }, lnot.dataConst());
 
     // Same-shape contract, like where.
     var short = try ctx.fromSliceRank(1, .{2}, &.{ 1, 0 });
     defer short.deinit();
-    try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.logicalAnd(&a, &short));
+    try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.logicalTyped(.l_and, .f32, .f32, &a, &short));
 }
 
 test "exec cumsum forward and reverse match torch.cumsum along both axes" {

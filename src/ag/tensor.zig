@@ -502,83 +502,110 @@ fn FloatTensor(comptime tags_spec: anytype) type {
 
         /// `cond ? self : other` elementwise (`cond[i] != 0` selects `self`).
         /// Differentiable in `self` and `other`; `cond` is a non-grad mask.
+        /// `cond ? self : other` elementwise. `cond` is a same-tagged
+        /// `.bool` mask (the `compare` output) or a float tensor read by
+        /// truthiness (`!= 0`; NaN truthy); it receives no gradient.
+        /// Differentiable in `self` and `other`.
         pub fn where(self: *const Self, ctx: *ExecContext, cond: anytype, other: anytype) !Self {
-            var value = try ctx.where(self.asRawTensor(), cond.asRawTensor(), other.asRawTensor());
+            const Cond = TensorObject(@TypeOf(cond));
+            comptime {
+                if (Cond.dtype != .bool and !dtype_mod.supportsForwardFloatMath(Cond.dtype))
+                    @compileError("where takes a .bool or float condition; cast integer masks explicitly");
+            }
+            var value = try ctx.whereTyped(Cond.dtype, self.asRawTensor(), cond.asRawTensor(), other.asRawTensor());
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad() or other.requiresGrad(), WhereBackward(tags), .{ ctx.allocator, self.grad_state, other.grad_state, cond.asRawTensor() });
+            return finishOp(tags, ctx, value, self.requiresGrad() or other.requiresGrad(), WhereBackward(tags, Cond.dtype), .{ ctx.allocator, self.grad_state, other.grad_state, cond.asRawTensor() });
         }
 
-        /// `mask ? value : self` elementwise (`mask[i] != 0` fills `value`).
-        /// Differentiable in `self` (grad zeroed where filled); `value` is constant.
+        /// `mask ? value : self` elementwise. `mask` is a same-tagged
+        /// `.bool` mask (the `compare` output) or a float tensor read by
+        /// truthiness. Differentiable in `self` (grad zeroed where filled);
+        /// `value` is constant.
         pub fn maskedFill(self: *const Self, ctx: *ExecContext, mask: anytype, value: f32) !Self {
-            var v = try ctx.maskedFill(self.asRawTensor(), mask.asRawTensor(), value);
+            const Mask = TensorObject(@TypeOf(mask));
+            comptime {
+                if (Mask.dtype != .bool and !dtype_mod.supportsForwardFloatMath(Mask.dtype))
+                    @compileError("maskedFill takes a .bool or float mask; cast integer masks explicitly");
+            }
+            var v = try ctx.maskedFillTyped(Mask.dtype, self.asRawTensor(), mask.asRawTensor(), value);
             errdefer v.deinit();
-            return finishOp(tags, ctx, v, self.requiresGrad(), MaskedFillBackward(tags), .{ ctx.allocator, self.grad_state, mask.asRawTensor() });
+            return finishOp(tags, ctx, v, self.requiresGrad(), MaskedFillBackward(tags, Mask.dtype), .{ ctx.allocator, self.grad_state, mask.asRawTensor() });
         }
 
-        /// Elementwise comparison mask: 1.0 where `self <op> other` holds,
-        /// else 0.0. `other` is comptime-dispatched from its type: a
-        /// same-tagged tensor (same shape only, like `where`) or a numeric
-        /// scalar (see `exec.CompareOp`). Non-differentiable — the result is
-        /// a constant 0/1 mask (the `argmax` no-grad precedent), ready for
-        /// `where`/`maskedFill`/the logical ops. NaN semantics are IEEE: any
-        /// comparison involving NaN is false, except `.ne`, which is true.
-        pub fn compare(self: *const Self, ctx: *ExecContext, comptime op: exec_mod.CompareOp, other: anytype) !Self {
+        /// Elementwise comparison: a same-tagged `.bool` mask (torch's
+        /// comparison dtype), true where `self <op> other` holds. `other`
+        /// is comptime-dispatched from its type: a same-tagged tensor (same
+        /// shape only, like `where`) or a numeric scalar (see
+        /// `exec.CompareOp`). Non-differentiable, and — like every typed
+        /// constant — CALLER-owned even under an exec scope. NaN semantics
+        /// are IEEE: any comparison involving NaN is false, except `.ne`,
+        /// which is true. Feed the result to `where`/`maskedFill`/the
+        /// logical ops, count with `sum`, or cast with `to(.f32)` for the
+        /// mask-multiply idiom.
+        pub fn compare(self: *const Self, ctx: *ExecContext, comptime op: exec_mod.CompareOp, other: anytype) !Tensor(.{ .dtype = .bool, .tags = tags }) {
+            const BoolT = Tensor(.{ .dtype = .bool, .tags = tags });
             const OtherT = @TypeOf(other);
             if (comptime (OtherT == comptime_float or OtherT == comptime_int or @typeInfo(OtherT) == .float or @typeInfo(OtherT) == .int)) {
                 var value = try ctx.compareScalar(op, self.asRawTensor(), other);
                 errdefer value.deinit();
-                return finishNoGrad(tags, ctx, value);
+                return BoolT.fromTensor(ctx, value);
             }
             const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
             var value = try ctx.compare(op, self.asRawTensor(), other_ptr.asRawTensor());
             errdefer value.deinit();
-            return finishNoGrad(tags, ctx, value);
+            return BoolT.fromTensor(ctx, value);
         }
 
-        /// Elementwise logical AND over `!= 0` truthiness (the mask
-        /// convention shared with `where`/`maskedFill`; NaN is truthy):
-        /// 1.0 where both operands are nonzero, else 0.0. Same shape only;
-        /// non-differentiable (constant 0/1 mask).
-        pub fn logicalAnd(self: *const Self, ctx: *ExecContext, other: *const Self) !Self {
-            var value = try ctx.logicalAnd(self.asRawTensor(), other.asRawTensor());
+        /// Elementwise logical AND over truthiness (the mask convention
+        /// shared with `where`/`maskedFill`; NaN is truthy): a same-tagged
+        /// `.bool` tensor (torch's logical-op dtype). `other` may be a
+        /// float or `.bool` tensor. Same shape only; non-differentiable
+        /// and caller-owned like `compare`.
+        pub fn logicalAnd(self: *const Self, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = .bool, .tags = tags }) {
+            return self.logicalBinary(ctx, .l_and, other);
+        }
+
+        /// Elementwise logical OR over truthiness (see `logicalAnd`).
+        pub fn logicalOr(self: *const Self, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = .bool, .tags = tags }) {
+            return self.logicalBinary(ctx, .l_or, other);
+        }
+
+        /// Elementwise logical XOR over truthiness (see `logicalAnd`).
+        pub fn logicalXor(self: *const Self, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = .bool, .tags = tags }) {
+            return self.logicalBinary(ctx, .l_xor, other);
+        }
+
+        fn logicalBinary(self: *const Self, ctx: *ExecContext, comptime op: exec_mod.LogicalOp, other: anytype) !Tensor(.{ .dtype = .bool, .tags = tags }) {
+            const Other = TensorObject(@TypeOf(other));
+            comptime {
+                if (Other.dtype != .bool and !dtype_mod.supportsForwardFloatMath(Other.dtype))
+                    @compileError("logical ops take .bool or float operands; cast integer masks explicitly");
+            }
+            const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
+            var value = try ctx.logicalTyped(op, .f32, Other.dtype, self.asRawTensor(), other_ptr.asRawTensor());
             errdefer value.deinit();
-            return finishNoGrad(tags, ctx, value);
+            return Tensor(.{ .dtype = .bool, .tags = tags }).fromTensor(ctx, value);
         }
 
-        /// Elementwise logical OR over `!= 0` truthiness (see `logicalAnd`).
-        pub fn logicalOr(self: *const Self, ctx: *ExecContext, other: *const Self) !Self {
-            var value = try ctx.logicalOr(self.asRawTensor(), other.asRawTensor());
+        /// Elementwise logical NOT over truthiness (see `logicalAnd`):
+        /// a `.bool` tensor, true where `self` is zero.
+        pub fn logicalNot(self: *const Self, ctx: *ExecContext) !Tensor(.{ .dtype = .bool, .tags = tags }) {
+            var value = try ctx.logicalNotTyped(.f32, self.asRawTensor());
             errdefer value.deinit();
-            return finishNoGrad(tags, ctx, value);
+            return Tensor(.{ .dtype = .bool, .tags = tags }).fromTensor(ctx, value);
         }
 
-        /// Elementwise logical XOR over `!= 0` truthiness (see `logicalAnd`).
-        pub fn logicalXor(self: *const Self, ctx: *ExecContext, other: *const Self) !Self {
-            var value = try ctx.logicalXor(self.asRawTensor(), other.asRawTensor());
-            errdefer value.deinit();
-            return finishNoGrad(tags, ctx, value);
-        }
-
-        /// Elementwise logical NOT over `!= 0` truthiness (see `logicalAnd`):
-        /// 1.0 where `self` is zero, else 0.0.
-        pub fn logicalNot(self: *const Self, ctx: *ExecContext) !Self {
-            var value = try ctx.logicalNot(self.asRawTensor());
-            errdefer value.deinit();
-            return finishNoGrad(tags, ctx, value);
-        }
-
-        /// 1.0 where `self` is NaN, else 0.0 (torch.isnan): the IEEE
+        /// `.bool`, true where `self` is NaN (torch.isnan): the IEEE
         /// self-inequality test through `compare` — non-differentiable
         /// constant mask like all mask producers, unscoped-safe.
-        pub fn isnan(self: *const Self, ctx: *ExecContext) !Self {
+        pub fn isnan(self: *const Self, ctx: *ExecContext) !Tensor(.{ .dtype = .bool, .tags = tags }) {
             return self.compare(ctx, .ne, self.*);
         }
 
-        /// 1.0 where `self` is +inf or -inf, else 0.0 (torch.isinf); NaN is
-        /// 0.0. Non-differentiable constant mask, unscoped-safe (composed
+        /// `.bool`, true where `self` is +inf or -inf (torch.isinf); NaN is
+        /// false. Non-differentiable constant mask, unscoped-safe (composed
         /// from no-grad compares only).
-        pub fn isinf(self: *const Self, ctx: *ExecContext) !Self {
+        pub fn isinf(self: *const Self, ctx: *ExecContext) !Tensor(.{ .dtype = .bool, .tags = tags }) {
             var pos = try self.compare(ctx, .eq, std.math.inf(f32));
             defer pos.deinit();
             var negative_inf = try self.compare(ctx, .eq, -std.math.inf(f32));
@@ -586,11 +613,11 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             return pos.logicalOr(ctx, &negative_inf);
         }
 
-        /// 1.0 where `self` is finite (not NaN, not ±inf), else 0.0
+        /// `.bool`, true where `self` is finite (not NaN, not ±inf)
         /// (torch.isfinite): `-inf < x < inf`, which IEEE comparison makes
         /// false for NaN and both infinities. Non-differentiable constant
         /// mask, unscoped-safe.
-        pub fn isfinite(self: *const Self, ctx: *ExecContext) !Self {
+        pub fn isfinite(self: *const Self, ctx: *ExecContext) !Tensor(.{ .dtype = .bool, .tags = tags }) {
             var above = try self.compare(ctx, .gt, -std.math.inf(f32));
             defer above.deinit();
             var below = try self.compare(ctx, .lt, std.math.inf(f32));
@@ -598,11 +625,11 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             return above.logicalAnd(ctx, &below);
         }
 
-        /// 1.0 where ANY element along `tag` is truthy (`!= 0`; NaN is
-        /// truthy, the torch.any convention), else 0.0, with `tag` removed.
-        /// Non-differentiable constant mask (compare → sum → compare; the
-        /// nonzero count is an exact small integer in f32), unscoped-safe.
-        pub fn any(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(removeTag(tags, tag)) {
+        /// `.bool`, true where ANY element along `tag` is truthy (`!= 0`;
+        /// NaN is truthy, the torch.any convention), with `tag` removed.
+        /// Non-differentiable constant mask (compare → i64 count →
+        /// compare), unscoped-safe.
+        pub fn any(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = .bool, .tags = removeTag(tags, tag) }) {
             var truthy = try self.compare(ctx, .ne, 0);
             defer truthy.deinit();
             var count = try truthy.sum(ctx, tag);
@@ -610,11 +637,11 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             return count.compare(ctx, .ge, 1);
         }
 
-        /// 1.0 where EVERY element along `tag` is truthy (see `any`), else
-        /// 0.0, with `tag` removed. Counts the zero entries and tests the
-        /// count against 1 (`< 1` ⇔ `== 0` exactly, any axis length).
-        /// Non-differentiable constant mask, unscoped-safe.
-        pub fn all(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(removeTag(tags, tag)) {
+        /// `.bool`, true where EVERY element along `tag` is truthy (see
+        /// `any`), with `tag` removed. Counts the zero entries and tests
+        /// the count against 1. Non-differentiable constant mask,
+        /// unscoped-safe.
+        pub fn all(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = .bool, .tags = removeTag(tags, tag) }) {
             var zero = try self.compare(ctx, .eq, 0);
             defer zero.deinit();
             var count = try zero.sum(ctx, tag);
@@ -622,8 +649,8 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             return count.compare(ctx, .lt, 1);
         }
 
-        /// Scalar `any` over every element (torch.any with no dim).
-        pub fn anyAll(self: *const Self, ctx: *ExecContext) !Tensor(.{}) {
+        /// Scalar `any` over every element (torch.any with no dim); `.bool`.
+        pub fn anyAll(self: *const Self, ctx: *ExecContext) !Tensor(.{ .dtype = .bool, .tags = .{} }) {
             var truthy = try self.compare(ctx, .ne, 0);
             defer truthy.deinit();
             var count = try truthy.sumAll(ctx);
@@ -631,8 +658,8 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             return count.compare(ctx, .ge, 1);
         }
 
-        /// Scalar `all` over every element (torch.all with no dim).
-        pub fn allAll(self: *const Self, ctx: *ExecContext) !Tensor(.{}) {
+        /// Scalar `all` over every element (torch.all with no dim); `.bool`.
+        pub fn allAll(self: *const Self, ctx: *ExecContext) !Tensor(.{ .dtype = .bool, .tags = .{} }) {
             var zero = try self.compare(ctx, .eq, 0);
             defer zero.deinit();
             var count = try zero.sumAll(ctx);
@@ -1792,20 +1819,25 @@ fn FloatTensor(comptime tags_spec: anytype) type {
         /// tracked this requires an active exec scope (see `nllLoss`);
         /// errors with `ActiveExecScopeRequired` otherwise.
         pub fn maskedSelect(self: *const Self, ctx: *ExecContext, mask: anytype, comptime out_tag: Tag) !Tensor(.{out_tag}) {
+            const Mask = TensorObject(@TypeOf(mask));
+            comptime {
+                if (Mask.dtype != .bool and !dtype_mod.supportsForwardFloatMath(Mask.dtype))
+                    @compileError("maskedSelect takes a .bool or float mask; cast integer masks explicitly");
+            }
             try requireScopeForComposedGrad(ctx, self.requiresGrad());
             const mask_raw = mask.asRawTensor();
-            try tensor_mod.requireSameShape(self.asRawTensor(), mask_raw);
+            if (!std.mem.eql(usize, self.asRawTensor().shape.slice(), mask_raw.shape.slice())) return TensorError.ShapeMismatch;
             const mask_values = try mask_raw.dataConstChecked();
 
             var count: usize = 0;
-            for (mask_values) |mv| count += @intFromBool(mv != 0);
+            for (mask_values) |mv| count += @intFromBool(dtype_mod.isTruthy(Mask.dtype, mv));
             if (count == 0) return TensorError.EmptySelection;
 
             const indices = try ctx.allocator.alloc(usize, count);
             defer ctx.allocator.free(indices);
             var slot: usize = 0;
             for (mask_values, 0..) |mv, i| {
-                if (mv != 0) {
+                if (dtype_mod.isTruthy(Mask.dtype, mv)) {
                     indices[slot] = i;
                     slot += 1;
                 }
@@ -1863,13 +1895,18 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             values: *const Tensor(.{values_tag}),
         ) !Self {
             comptime if (tag_rank == 0) @compileError("maskedScatter requires at least one axis");
+            const Mask = TensorObject(@TypeOf(mask));
+            comptime {
+                if (Mask.dtype != .bool and !dtype_mod.supportsForwardFloatMath(Mask.dtype))
+                    @compileError("maskedScatter takes a .bool or float mask; cast integer masks explicitly");
+            }
             try requireScopeForComposedGrad(ctx, self.requiresGrad() or values.requiresGrad());
             const mask_raw = mask.asRawTensor();
-            try tensor_mod.requireSameShape(self.asRawTensor(), mask_raw);
+            if (!std.mem.eql(usize, self.asRawTensor().shape.slice(), mask_raw.shape.slice())) return TensorError.ShapeMismatch;
             const mask_values = try mask_raw.dataConstChecked();
 
             var count: usize = 0;
-            for (mask_values) |mv| count += @intFromBool(mv != 0);
+            for (mask_values) |mv| count += @intFromBool(dtype_mod.isTruthy(Mask.dtype, mv));
             if (count == 0) return TensorError.EmptySelection;
             if (values.asRawTensor().len() != count) return TensorError.InvalidShape;
 
@@ -1880,7 +1917,7 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             defer ctx.allocator.free(indices);
             var slot: usize = 0;
             for (mask_values, indices) |mv, *index| {
-                if (mv != 0) {
+                if (dtype_mod.isTruthy(Mask.dtype, mv)) {
                     index.* = slot;
                     slot += 1;
                 } else {
@@ -4164,6 +4201,14 @@ fn TypedScalarConstantTensor(comptime tags_spec: anytype, comptime tensor_dtype:
         pub const divFloor = typedConstantDivFloor;
         pub const sum = typedConstantSum;
         pub const sumAll = typedConstantSumAll;
+
+        // Masks (§4.6): integer `compare` is exact at any magnitude; the
+        // logical combinators live on the `.bool` branch.
+        pub const compare = typedConstantCompare;
+        pub const logicalAnd = typedConstantLogicalAnd;
+        pub const logicalOr = typedConstantLogicalOr;
+        pub const logicalXor = typedConstantLogicalXor;
+        pub const logicalNot = typedConstantLogicalNot;
     };
 }
 
@@ -4833,6 +4878,46 @@ fn typedConstantDivFloor(self: anytype, ctx: *ExecContext, other: anytype) !Tens
     return typedIntDiv(.floor, self, ctx, other);
 }
 
+/// Logical ops on the `.bool` branch (the mask combinators): `.bool`
+/// output; `other` may be `.bool` or float (truthiness).
+fn typedLogicalBinary(comptime op: exec_mod.LogicalOp, self: anytype, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = .bool, .tags = TensorObject(@TypeOf(self)).axis_tags }) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime {
+        if (Self.dtype != .bool) @compileError("logical ops on the typed branch are .bool-only; cast explicitly");
+    }
+    const Other = TensorObject(@TypeOf(other));
+    comptime {
+        if (Other.dtype != .bool and !dtype_mod.supportsForwardFloatMath(Other.dtype))
+            @compileError("logical ops take .bool or float operands; cast integer masks explicitly");
+    }
+    const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
+    var value = try ctx.logicalTyped(op, .bool, Other.dtype, self.asRawTensor(), other_ptr.asRawTensor());
+    errdefer value.deinit();
+    return Tensor(.{ .dtype = .bool, .tags = Self.axis_tags }).fromTensor(ctx, value);
+}
+
+fn typedConstantLogicalAnd(self: anytype, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = .bool, .tags = TensorObject(@TypeOf(self)).axis_tags }) {
+    return typedLogicalBinary(.l_and, self, ctx, other);
+}
+
+fn typedConstantLogicalOr(self: anytype, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = .bool, .tags = TensorObject(@TypeOf(self)).axis_tags }) {
+    return typedLogicalBinary(.l_or, self, ctx, other);
+}
+
+fn typedConstantLogicalXor(self: anytype, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = .bool, .tags = TensorObject(@TypeOf(self)).axis_tags }) {
+    return typedLogicalBinary(.l_xor, self, ctx, other);
+}
+
+fn typedConstantLogicalNot(self: anytype, ctx: *ExecContext) !Tensor(.{ .dtype = .bool, .tags = TensorObject(@TypeOf(self)).axis_tags }) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime {
+        if (Self.dtype != .bool) @compileError("logical ops on the typed branch are .bool-only; cast explicitly");
+    }
+    var value = try ctx.logicalNotTyped(.bool, self.asRawTensor());
+    errdefer value.deinit();
+    return Tensor(.{ .dtype = .bool, .tags = Self.axis_tags }).fromTensor(ctx, value);
+}
+
 fn typedConstantGated(
     self: anytype,
     ctx: *ExecContext,
@@ -5046,16 +5131,15 @@ fn typedConstantWhere(self: anytype, ctx: *ExecContext, cond: anytype, other: an
     comptime requireWidenedTypedFloat(Self.dtype, "where");
     const Cond = TensorObject(@TypeOf(cond));
     const Other = TensorObject(@TypeOf(other));
-    if (comptime Cond.dtype != Self.dtype or Other.dtype != Self.dtype) @compileError("typed where requires matching dtypes; cast explicitly");
+    if (comptime Cond.dtype != .bool and Cond.dtype != Self.dtype) @compileError("typed where takes a .bool or same-dtype condition; cast explicitly");
+    if (comptime Other.dtype != Self.dtype) @compileError("typed where requires matching dtypes; cast explicitly");
     const cond_ptr = tensorObjectPtrFrom(@TypeOf(cond), &cond);
     const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
     var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
     defer wide.deinit();
-    var wide_cond = try ctx.castTyped(Self.dtype, .f32, cond_ptr.asRawTensor());
-    defer wide_cond.deinit();
     var wide_other = try ctx.castTyped(Self.dtype, .f32, other_ptr.asRawTensor());
     defer wide_other.deinit();
-    var wide_value = try ctx.where(&wide, &wide_cond, &wide_other);
+    var wide_value = try ctx.whereTyped(Cond.dtype, &wide, cond_ptr.asRawTensor(), &wide_other);
     defer wide_value.deinit();
     return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
 }
@@ -5065,36 +5149,51 @@ fn typedConstantMaskedFill(self: anytype, ctx: *ExecContext, mask: anytype, valu
     const Self = TensorObject(@TypeOf(self));
     comptime requireWidenedTypedFloat(Self.dtype, "maskedFill");
     const Mask = TensorObject(@TypeOf(mask));
-    if (comptime Mask.dtype != Self.dtype) @compileError("typed maskedFill requires a matching-dtype mask; cast explicitly");
+    if (comptime Mask.dtype != .bool and Mask.dtype != Self.dtype) @compileError("typed maskedFill takes a .bool or same-dtype mask; cast explicitly");
     const mask_ptr = tensorObjectPtrFrom(@TypeOf(mask), &mask);
     var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
     defer wide.deinit();
-    var wide_mask = try ctx.castTyped(Self.dtype, .f32, mask_ptr.asRawTensor());
-    defer wide_mask.deinit();
-    var wide_value = try ctx.maskedFill(&wide, &wide_mask, value);
+    var wide_value = try ctx.maskedFillTyped(Mask.dtype, &wide, mask_ptr.asRawTensor(), value);
     defer wide_value.deinit();
     return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
 }
 
-fn typedConstantCompare(self: anytype, ctx: *ExecContext, comptime op: exec_mod.CompareOp, other: anytype) !TensorObject(@TypeOf(self)) {
+/// Comparison on the typed branches: `.bool` result everywhere (torch's
+/// comparison dtype). f16/bf16 compare through f32 (the widening seam);
+/// integers compare natively (exact at any magnitude).
+fn typedConstantCompare(self: anytype, ctx: *ExecContext, comptime op: exec_mod.CompareOp, other: anytype) !Tensor(.{ .dtype = .bool, .tags = TensorObject(@TypeOf(self)).axis_tags }) {
     const Self = TensorObject(@TypeOf(self));
+    const BoolT = Tensor(.{ .dtype = .bool, .tags = Self.axis_tags });
+    const OtherT = @TypeOf(other);
+    if (comptime dtype_mod.supportsIntMath(Self.dtype)) {
+        if (comptime (OtherT == comptime_int or @typeInfo(OtherT) == .int)) {
+            var value = try ctx.compareIntScalarTyped(Self.dtype, op, self.asRawTensor(), @intCast(other));
+            errdefer value.deinit();
+            return BoolT.fromTensor(ctx, value);
+        }
+        const Other = TensorObject(@TypeOf(other));
+        if (comptime Other.dtype != Self.dtype) @compileError("typed compare requires matching dtypes; cast explicitly");
+        const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
+        var value = try ctx.compareIntTyped(Self.dtype, op, self.asRawTensor(), other_ptr.asRawTensor());
+        errdefer value.deinit();
+        return BoolT.fromTensor(ctx, value);
+    }
     comptime requireWidenedTypedFloat(Self.dtype, "compare");
     var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
     defer wide.deinit();
-    const OtherT = @TypeOf(other);
     if (comptime (OtherT == comptime_float or OtherT == comptime_int or @typeInfo(OtherT) == .float or @typeInfo(OtherT) == .int)) {
-        var wide_value = try ctx.compareScalar(op, &wide, other);
-        defer wide_value.deinit();
-        return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
+        var value = try ctx.compareScalar(op, &wide, other);
+        errdefer value.deinit();
+        return BoolT.fromTensor(ctx, value);
     }
     const Other = TensorObject(@TypeOf(other));
     if (comptime Other.dtype != Self.dtype) @compileError("typed compare requires matching dtypes; cast explicitly");
     const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
     var wide_other = try ctx.castTyped(Self.dtype, .f32, other_ptr.asRawTensor());
     defer wide_other.deinit();
-    var wide_value = try ctx.compare(op, &wide, &wide_other);
-    defer wide_value.deinit();
-    return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
+    var value = try ctx.compare(op, &wide, &wide_other);
+    errdefer value.deinit();
+    return BoolT.fromTensor(ctx, value);
 }
 
 /// Widened einsum: both operands widen to f32 and the f32 GEMM lowering

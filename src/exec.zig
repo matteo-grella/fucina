@@ -77,6 +77,7 @@ pub const KlDivOptions = exec_loss.KlDivOptions;
 pub const LossWrt = exec_loss.LossWrt;
 
 pub const TopKResult = exec_stats.TopKResult;
+pub const LogicalOp = exec_elementwise.LogicalOp;
 
 pub const RouterTopKOptions = exec_topk.RouterTopKOptions;
 
@@ -575,32 +576,40 @@ pub const ExecContext = struct {
         return exec_elementwise.where(&self.rt, x, cond, y);
     }
 
+    pub fn whereTyped(self: *ExecContext, comptime cond_dtype: DType, x: *const Tensor, cond: *const tensor.TensorOf(cond_dtype), y: *const Tensor) !Tensor {
+        return exec_elementwise.whereTyped(&self.rt, cond_dtype, x, cond, y);
+    }
+
     pub fn maskedFill(self: *ExecContext, x: *const Tensor, mask: *const Tensor, value: f32) !Tensor {
         return exec_elementwise.maskedFill(&self.rt, x, mask, value);
     }
 
-    pub fn compare(self: *ExecContext, comptime op: CompareOp, a: *const Tensor, b: *const Tensor) !Tensor {
+    pub fn maskedFillTyped(self: *ExecContext, comptime mask_dtype: DType, x: *const Tensor, mask: *const tensor.TensorOf(mask_dtype), value: f32) !Tensor {
+        return exec_elementwise.maskedFillTyped(&self.rt, mask_dtype, x, mask, value);
+    }
+
+    pub fn compare(self: *ExecContext, comptime op: CompareOp, a: *const Tensor, b: *const Tensor) !tensor.TensorOf(.bool) {
         return exec_elementwise.compare(&self.rt, op, a, b);
     }
 
-    pub fn compareScalar(self: *ExecContext, comptime op: CompareOp, x: *const Tensor, scalar_value: f32) !Tensor {
+    pub fn compareScalar(self: *ExecContext, comptime op: CompareOp, x: *const Tensor, scalar_value: f32) !tensor.TensorOf(.bool) {
         return exec_elementwise.compareScalar(&self.rt, op, x, scalar_value);
     }
 
-    pub fn logicalAnd(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_elementwise.logicalAnd(&self.rt, a, b);
+    pub fn compareIntTyped(self: *ExecContext, comptime dtype: DType, comptime op: CompareOp, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(.bool) {
+        return exec_elementwise.compareIntTyped(&self.rt, dtype, op, a, b);
     }
 
-    pub fn logicalOr(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_elementwise.logicalOr(&self.rt, a, b);
+    pub fn compareIntScalarTyped(self: *ExecContext, comptime dtype: DType, comptime op: CompareOp, x: *const tensor.TensorOf(dtype), scalar_value: dtype_mod.Scalar(dtype)) !tensor.TensorOf(.bool) {
+        return exec_elementwise.compareIntScalarTyped(&self.rt, dtype, op, x, scalar_value);
     }
 
-    pub fn logicalXor(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_elementwise.logicalXor(&self.rt, a, b);
+    pub fn logicalTyped(self: *ExecContext, comptime op: exec_elementwise.LogicalOp, comptime a_dtype: DType, comptime b_dtype: DType, a: *const tensor.TensorOf(a_dtype), b: *const tensor.TensorOf(b_dtype)) !tensor.TensorOf(.bool) {
+        return exec_elementwise.logicalTyped(&self.rt, op, a_dtype, b_dtype, a, b);
     }
 
-    pub fn logicalNot(self: *ExecContext, x: *const Tensor) !Tensor {
-        return exec_elementwise.logicalNot(&self.rt, x);
+    pub fn logicalNotTyped(self: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !tensor.TensorOf(.bool) {
+        return exec_elementwise.logicalNotTyped(&self.rt, dtype, x);
     }
 
     pub fn addScaledInPlace(self: *ExecContext, target: *Tensor, source: *const Tensor, scalar_value: f32) !void {
