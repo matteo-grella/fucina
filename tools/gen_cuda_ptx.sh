@@ -7,8 +7,8 @@
 #
 #   tools/gen_cuda_ptx.sh            # regenerate in place
 #
-# compute_70 keeps every GPU since Volta in play (dp4a/half are available;
-# no wmma/mma.h by design so the source also stays NVRTC/hipRTC-friendly).
+# compute_70 keeps every tensor-core GPU since Volta in play; the CUDA toolkit
+# supplies cuda_fp16.h and mma.h to both nvcc and the optional NVRTC dev path.
 set -eu
 cd "$(dirname "$0")/.."
 

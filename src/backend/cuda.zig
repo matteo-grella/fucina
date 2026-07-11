@@ -22,8 +22,10 @@
 //!   - f16 NT GEMM (cublasGemmEx, f32 accumulate + direct f32 async output).
 //!   - Quantized dequant-in-kernel GEMM (Q4_K/Q6_K/Q8_0) via the vendored
 //!     kernels (`cuda/kernels.cu` → committed `cuda/kernels.ptx`, driver JIT;
-//!     NVRTC recompile fallback, FUCINA_GPU_KERNELS=src forces it). Same
-//!     tile-table protocol and numerics contract as the Metal provider;
+//!     NVRTC recompile fallback, FUCINA_GPU_KERNELS=src forces it). Adaptive
+//!     N32/N64 WMMA tiles use tensor cores on capable devices; the original
+//!     scalar-FFMA kernel remains the compatibility/diagnostic fallback. Both
+//!     keep the Metal provider's tile-table and half-rounded operand contract;
 //!     dense stable-weight calls use direct tensor storage and deferred D2H.
 //!   - Grouped MoE expert FFN over pinned staging panels + device twins
 //!     (`qmoeStage`/`gemmQGroupedNt`); the llm-tier phase chain (CPU
@@ -82,6 +84,9 @@ const State = struct {
     vram_budget_env: ?usize = null,
     /// FUCINA_GPU_KERNELS=src forces the NVRTC recompile path (dev loop).
     kernels_from_src: bool = false,
+    /// Tensor-core quantized prefill kernel. FUCINA_GPU_QUANT_MMA=0 keeps the
+    /// scalar-FFMA fallback for parity/performance diagnosis.
+    quant_mma: bool = true,
     /// FUCINA_GPU_DECODE=1 opts into the experimental m<=8 dequant-dot GEMV
     /// decode arm (default off pending a sampled-token parity-oracle pass).
     decode_enabled: bool = false,
@@ -149,6 +154,8 @@ const Ctx = struct {
     /// CPU while the GPU is active — the residency model's prerequisite.
     /// 0 on WSL2/some Jetson targets → residency disabled.
     managed_ok: bool,
+    compute_major: c_int,
+    sm_count: c_int,
     /// Tracked-allocation VRAM budget in bytes (env override or ~80% of the
     /// free VRAM sampled at init). Resident allocations beyond it return
     /// null → callers fall back to host bytes + transient, the Metal OOM path.
@@ -351,6 +358,10 @@ fn initConfigOnce() void {
     if (std.c.getenv("FUCINA_GPU_KERNELS")) |v_ptr| {
         state.kernels_from_src = std.mem.eql(u8, std.mem.span(v_ptr), "src");
     }
+    if (std.c.getenv("FUCINA_GPU_QUANT_MMA")) |v_ptr| {
+        const v = std.mem.span(v_ptr);
+        if (v.len > 0 and v[0] == '0') state.quant_mma = false;
+    }
     if (std.c.getenv("FUCINA_GPU_DECODE")) |v_ptr| {
         const v = std.mem.span(v_ptr);
         if (v.len > 0 and v[0] != '0') state.decode_enabled = true;
@@ -424,6 +435,10 @@ fn initOnce() void {
     var cma: c_int = 0;
     _ = c.driver.cuDeviceGetAttribute(&cma, api.CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS, c.device);
     c.managed_ok = cma == 1;
+    c.compute_major = 0;
+    _ = c.driver.cuDeviceGetAttribute(&c.compute_major, api.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, c.device);
+    c.sm_count = 0;
+    _ = c.driver.cuDeviceGetAttribute(&c.sm_count, api.CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, c.device);
     if (!c.managed_ok) {
         std.log.warn("fucina-cuda: no concurrent managed access on this platform; weight residency disabled (transient/CPU fallback)", .{});
     }
@@ -1662,6 +1677,8 @@ const kernels_src = @embedFile("cuda/kernels.cu");
 
 const Kernels = struct {
     mul_mm: [3]api.CUfunction, // indexed by @intFromEnum(QFormat)
+    mul_mm_mma: [3]?api.CUfunction,
+    mul_mm_mma_n32: [3]?api.CUfunction,
     gemv: [3]api.CUfunction,
     attn_f16: api.CUfunction,
     // ES kernels ([0] = f16, [1] = f32). Optional: a stale vendored PTX
@@ -1684,7 +1701,12 @@ fn nvrtcCompilePtx() ?[:0]u8 {
     var prog: api.NvrtcProgram = null;
     if (nvrtc.nvrtcCreateProgram(&prog, kernels_src, "fucina_kernels.cu", 0, null, null) != 0) return null;
     defer _ = nvrtc.nvrtcDestroyProgram(&prog);
-    const opts = [_][*:0]const u8{ "--gpu-architecture=compute_70", "--std=c++17", "-I/usr/include", "-I/usr/local/cuda/include" };
+    const opts = [_][*:0]const u8{
+        "--gpu-architecture=compute_70",
+        "--std=c++17",
+        "-I/usr/include",
+        "-I/usr/local/cuda/include",
+    };
     if (nvrtc.nvrtcCompileProgram(prog, opts.len, &opts) != 0) {
         var log_size: usize = 0;
         _ = nvrtc.nvrtcGetProgramLogSize(prog, &log_size);
@@ -1736,9 +1758,19 @@ fn ensureKernels(ctx: *Ctx) ?*Kernels {
     }
     var ks: Kernels = undefined;
     const mul_names = [_][:0]const u8{ "fucina_mul_mm_q8_0", "fucina_mul_mm_q6_K", "fucina_mul_mm_q4_K" };
+    const mul_mma_names = [_][:0]const u8{ "fucina_mul_mm_mma_q8_0", "fucina_mul_mm_mma_q6_K", "fucina_mul_mm_mma_q4_K" };
+    const mul_mma_n32_names = [_][:0]const u8{ "fucina_mul_mm_mma_n32_q8_0", "fucina_mul_mm_mma_n32_q6_K", "fucina_mul_mm_mma_n32_q4_K" };
     const gemv_names = [_][:0]const u8{ "fucina_gemv_q8_0", "fucina_gemv_q6_K", "fucina_gemv_q4_K" };
     for (mul_names, 0..) |name, i| {
         if (d.cuModuleGetFunction(&ks.mul_mm[i], module, name.ptr) != 0) return null;
+    }
+    for (mul_mma_names, 0..) |name, i| {
+        var f: api.CUfunction = null;
+        ks.mul_mm_mma[i] = if (d.cuModuleGetFunction(&f, module, name.ptr) == 0) f else null;
+    }
+    for (mul_mma_n32_names, 0..) |name, i| {
+        var f: api.CUfunction = null;
+        ks.mul_mm_mma_n32[i] = if (d.cuModuleGetFunction(&f, module, name.ptr) == 0) f else null;
     }
     for (gemv_names, 0..) |name, i| {
         if (d.cuModuleGetFunction(&ks.gemv[i], module, name.ptr) != 0) return null;
@@ -1756,6 +1788,29 @@ fn ensureKernels(ctx: *Ctx) ?*Kernels {
     kernels_state = ks;
     kernels_ready.store(true, .release);
     return &kernels_state.?;
+}
+
+const QuantMulMmLaunch = struct {
+    kernel: api.CUfunction,
+    n_tile: usize,
+    block_y: c_uint,
+};
+
+fn quantMulMmLaunch(ctx: *const Ctx, kernels: *const Kernels, format: QFormat, grid_x: usize, n: usize) QuantMulMmLaunch {
+    const index: usize = @intCast(@intFromEnum(format));
+    if (state.quant_mma and ctx.compute_major >= 7) {
+        if (ctx.sm_count > 0) {
+            const n64_tiles = n / 64 + @intFromBool(n % 64 != 0);
+            const n64_blocks = std.math.mul(usize, grid_x, n64_tiles) catch std.math.maxInt(usize);
+            const weighted_blocks = std.math.mul(usize, n64_blocks, 3) catch std.math.maxInt(usize);
+            const sm_target = std.math.mul(usize, @intCast(ctx.sm_count), 2) catch std.math.maxInt(usize);
+            if (weighted_blocks < sm_target) {
+                if (kernels.mul_mm_mma_n32[index]) |kernel| return .{ .kernel = kernel, .n_tile = 32, .block_y = 8 };
+            }
+        }
+        if (kernels.mul_mm_mma[index]) |kernel| return .{ .kernel = kernel, .n_tile = 64, .block_y = 16 };
+    }
+    return .{ .kernel = kernels.mul_mm[index], .n_tile = 64, .block_y = 16 };
 }
 
 /// Eager dense/shared-input quantized NT GEMM. Stable model weights resolve to
@@ -1856,8 +1911,8 @@ pub fn gemmQuantNtAsync(
         if (d.cuEventRecord(slot.inputs_ready, ctx.upload_stream) != 0 or
             d.cuStreamWaitEvent(ctx.stream, slot.inputs_ready, 0) != 0) return false;
 
-        const grid_y: c_uint = @intCast((n + 63) / 64);
-        const f = ks.mul_mm[@intCast(@intFromEnum(format))];
+        const launch = quantMulMmLaunch(ctx, ks, format, tiles_per_batch, n);
+        const grid_y: c_uint = @intCast((n + launch.n_tile - 1) / launch.n_tile);
         for (0..batch_count) |bi| {
             var p_src0 = rhs_dev;
             var p_src1 = input_dev;
@@ -1871,7 +1926,7 @@ pub fn gemmQuantNtAsync(
                 @ptrCast(&p_src0), @ptrCast(&p_src1), @ptrCast(&p_tiles), @ptrCast(&p_dst),
                 @ptrCast(&p_ne00), @ptrCast(&p_ne01), @ptrCast(&p_nb01),  @ptrCast(&p_nb02),
             };
-            if (d.cuLaunchKernel(f, @intCast(tiles_per_batch), grid_y, 1, 16, 16, 1, 0, ctx.stream, &params, null) != 0) return false;
+            if (d.cuLaunchKernel(launch.kernel, @intCast(tiles_per_batch), grid_y, 1, 16, launch.block_y, 1, 0, ctx.stream, &params, null) != 0) return false;
         }
         if (trace_on) tinc(&trace.h2d_bytes, tiles_bytes);
     }
@@ -2035,9 +2090,9 @@ pub fn gemmQGroupedNt(
         @ptrCast(&p_src0), @ptrCast(&p_src1), @ptrCast(&p_tiles), @ptrCast(&p_dst),
         @ptrCast(&p_ne00), @ptrCast(&p_ne01), @ptrCast(&p_nb01),  @ptrCast(&p_nb02),
     };
-    const grid_y: c_uint = @intCast((n_out + 63) / 64);
-    const f = ks.mul_mm[@intCast(@intFromEnum(format))];
-    if (d.cuLaunchKernel(f, @intCast(tiles.len), grid_y, 1, 16, 16, 1, 0, ctx.stream, &params, null) != 0) {
+    const launch = quantMulMmLaunch(ctx, ks, format, tiles.len, n_out);
+    const grid_y: c_uint = @intCast((n_out + launch.n_tile - 1) / launch.n_tile);
+    if (d.cuLaunchKernel(launch.kernel, @intCast(tiles.len), grid_y, 1, 16, launch.block_y, 1, 0, ctx.stream, &params, null) != 0) {
         if (trace_on) tinc(&trace.cuda_err, 1);
         return false;
     }
@@ -2275,6 +2330,11 @@ pub fn decodeGemvEnabled() bool {
 pub fn setDecodeForTest(v: bool) void {
     ensureConfig();
     state.decode_enabled = v;
+}
+
+fn setQuantMmaForTest(v: bool) void {
+    ensureConfig();
+    state.quant_mma = v;
 }
 
 // --- Prefill attention offload ------------------------------------------------
@@ -2677,6 +2737,17 @@ fn expectQuantGemmRows(
     }
 }
 
+fn expectQuantKernelAgreement(mma: []const f32, scalar: []const f32) !void {
+    try std.testing.expectEqual(mma.len, scalar.len);
+    for (mma, scalar, 0..) |a, b, i| {
+        const tol = @max(1e-3 * @max(@abs(a), @abs(b)), 1e-3);
+        if (@abs(a - b) > tol) {
+            std.debug.print("quant MMA/scalar mismatch at {d}: mma={e} scalar={e}\n", .{ i, a, b });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
 test "cuda quant gemm q6_K/q4_K/q8_0 parity vs dequantized reference" {
     if (comptime !enabled) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -2688,6 +2759,8 @@ test "cuda quant gemm q6_K/q4_K/q8_0 parity vs dequantized reference" {
     const saved_decode = state.decode_enabled;
     setDecodeForTest(false);
     defer setDecodeForTest(saved_decode);
+    const saved_mma = state.quant_mma;
+    defer setQuantMmaForTest(saved_mma);
 
     const dtype_mod = @import("../dtype.zig");
     var prng = std.Random.DefaultPrng.init(17);
@@ -2722,7 +2795,11 @@ test "cuda quant gemm q6_K/q4_K/q8_0 parity vs dequantized reference" {
             const c = try allocator.alloc(f32, m * n);
             defer allocator.free(c);
             @memset(c, std.math.nan(f32));
+            const c_scalar = try allocator.alloc(f32, m * n);
+            defer allocator.free(c_scalar);
+            @memset(c_scalar, std.math.nan(f32));
 
+            setQuantMmaForTest(true);
             try std.testing.expect(gemmQuantNt(
                 fmt,
                 std.mem.sliceAsBytes(blocks),
@@ -2735,6 +2812,21 @@ test "cuda quant gemm q6_K/q4_K/q8_0 parity vs dequantized reference" {
                 k,
             ));
             try expectQuantGemmRows(a, wref, c, m, n, k);
+
+            setQuantMmaForTest(false);
+            try std.testing.expect(gemmQuantNt(
+                fmt,
+                std.mem.sliceAsBytes(blocks),
+                false,
+                bpr * @sizeOf(Block),
+                a,
+                c_scalar,
+                m,
+                n,
+                k,
+            ));
+            try expectQuantGemmRows(a, wref, c_scalar, m, n, k);
+            try expectQuantKernelAgreement(c, c_scalar);
         }
     }
 }

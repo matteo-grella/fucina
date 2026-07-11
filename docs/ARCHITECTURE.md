@@ -403,10 +403,13 @@ the grouped-MoE panels. Final release waits before recycling but skips an
 unused D2H. Metal caches a page wrapper per storage allocation; CUDA pools
 eight in-flight typed device/tile slots behind persistent
 upload/compute/download streams and uses storage-lifetime page registration so
-DMA lands directly in exec-owned tensors. Reusable events and one cuBLAS handle
-order the lanes. Grouped MoE still fences at its CPU gather/GeGLU/scatter data
-dependencies, but CUDA transfers/kernel/download are event-chained before the
-one required host fence. This is completion tracking for commands that already
+DMA lands directly in exec-owned tensors. CUDA quantized prefill selects
+adaptive N32/N64 f16-input/f32-accumulate tensor-core tiles on capable devices,
+with the same eager tile-table ABI and a scalar-FFMA fallback. Reusable events
+and one cuBLAS handle order the lanes. Grouped MoE still fences at its CPU
+gather/GeGLU/scatter data dependencies, but CUDA transfers/kernel/download are
+event-chained before the one required host fence. This is completion tracking
+for commands that already
 exist, not deferred execution or a graph; see `docs/GPU-OFFLOAD.md` for the
 ordering proof and measurements.
 

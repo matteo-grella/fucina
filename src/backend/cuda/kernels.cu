@@ -6,10 +6,12 @@
 // structs, same dequantization bit-logic, same CPU-built `fucina_qmm_tile`
 // grouped dispatch, and the same numerics contract — weights dequantize to
 // half, activations convert f32 -> half in shared memory, accumulation is
-// f32 — so the Metal parity tolerances apply unchanged. The compute core is
-// plain FFMA register tiling (deliberately no wmma/mma.h: keeps the source
-// NVRTC-compilable without SDK headers beyond cuda_fp16.h and portable to a
-// future hipRTC build).
+// f32 — so the Metal parity tolerances apply unchanged. Two compute cores are
+// shipped behind the same tile-table ABI: the portable plain-FFMA fallback and
+// a WMMA f16-input/f32-accumulate path selected on tensor-core devices. Both
+// consume the exact same half-rounded shared operands; only the accumulation
+// association differs.
+
 //
 // The gemv family (decode m <= 8) is a warp-per-row
 // dequant-dot in f32 (no f16 rounding of weights: decode competes with the
@@ -19,20 +21,20 @@
 // cuModuleLoadData; NVRTC recompile of this source is the dev-loop fallback.
 
 #include <cuda_fp16.h>
-#include <stdint.h>
+#include <mma.h>
 
 #define QK_K 256
 #define QK8_0 32
 
 typedef struct __align__(2) {
     __half d;
-    int8_t qs[QK8_0];
+    signed char qs[QK8_0];
 } block_q8_0;
 
 typedef struct __align__(2) {
-    uint8_t ql[QK_K / 2];
-    uint8_t qh[QK_K / 4];
-    int8_t scales[QK_K / 16];
+    unsigned char ql[QK_K / 2];
+    unsigned char qh[QK_K / 4];
+    signed char scales[QK_K / 16];
     __half d;
 } block_q6_K;
 
@@ -40,8 +42,8 @@ typedef struct __align__(2) {
 typedef struct __align__(2) {
     __half d;
     __half dmin;
-    uint8_t scales[K_SCALE_SIZE];
-    uint8_t qs[QK_K / 2];
+    unsigned char scales[K_SCALE_SIZE];
+    unsigned char qs[QK_K / 2];
 } block_q4_K;
 
 // One 32-row output tile of one expert group; must mirror QMMTile in
@@ -57,7 +59,7 @@ typedef struct {
 // block) into float regs. Bit logic verbatim from the vendored Metal kernel.
 
 __device__ __forceinline__ void dequant_q8_0(const block_q8_0 *xb, int il, float *reg) {
-    const int8_t *qs = xb->qs;
+    const signed char *qs = xb->qs;
     const float d = __half2float(xb->d);
 #pragma unroll
     for (int i = 0; i < 16; i++) reg[i] = qs[i + 16 * il] * d;
@@ -65,9 +67,9 @@ __device__ __forceinline__ void dequant_q8_0(const block_q8_0 *xb, int il, float
 
 __device__ __forceinline__ void dequant_q6_K(const block_q6_K *xb, int il, float *reg) {
     const float d_all = __half2float(xb->d);
-    const uint16_t *ql = (const uint16_t *)xb->ql;
-    const uint16_t *qh = (const uint16_t *)xb->qh;
-    const int8_t *scales = xb->scales;
+    const unsigned short *ql = (const unsigned short *)xb->ql;
+    const unsigned short *qh = (const unsigned short *)xb->qh;
+    const signed char *scales = xb->scales;
 
     ql = ql + 32 * (il / 8) + 16 * ((il / 2) & 1) + 8 * (il & 1);
     qh = qh + 16 * (il / 8) + 8 * (il & 1);
@@ -96,7 +98,7 @@ __device__ __forceinline__ void dequant_q6_K(const block_q6_K *xb, int il, float
     }
 }
 
-__device__ __forceinline__ void get_scale_min_k4_just2(int j, int k, const uint8_t *q, uint8_t *sc, uint8_t *mn) {
+__device__ __forceinline__ void get_scale_min_k4_just2(int j, int k, const unsigned char *q, unsigned char *sc, unsigned char *mn) {
     if (j < 4) {
         *sc = q[j + 0 + k] & 63;
         *mn = q[j + 4 + k] & 63;
@@ -107,11 +109,11 @@ __device__ __forceinline__ void get_scale_min_k4_just2(int j, int k, const uint8
 }
 
 __device__ __forceinline__ void dequant_q4_K(const block_q4_K *xb, int il, float *reg) {
-    const uint8_t *q = xb->qs;
+    const unsigned char *q = xb->qs;
     const int is = (il / 4) * 2;
     q = q + (il / 4) * 32 + 16 * (il & 1);
     il = il & 3;
-    uint8_t sc, mn;
+    unsigned char sc, mn;
     get_scale_min_k4_just2(is, il / 2, xb->scales, &sc, &mn);
     // Metal computes xb->d / 16.h in half: exact (power-of-two scale).
     const float d = il < 2 ? __half2float(xb->d) : __half2float(xb->d) / 16.f;
@@ -134,7 +136,7 @@ __device__ __forceinline__ void dequant_q4_K(const block_q4_K *xb, int il, float
 #define NK 32
 
 template <typename block_q, int nl, void (*dequant)(const block_q *, int, float *)>
-__device__ __forceinline__ void mul_mm_body(
+__device__ __forceinline__ void mul_mm_scalar_body(
     const char *__restrict__ src0,
     const float *__restrict__ src1,
     const fucina_qmm_tile *__restrict__ tiles,
@@ -230,17 +232,147 @@ __device__ __forceinline__ void mul_mm_body(
 extern "C" __global__ void fucina_mul_mm_q8_0(
     const char *src0, const float *src1, const fucina_qmm_tile *tiles, float *dst,
     int ne00, int ne01, unsigned long long nb01, unsigned long long nb02) {
-    mul_mm_body<block_q8_0, 2, dequant_q8_0>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
+    mul_mm_scalar_body<block_q8_0, 2, dequant_q8_0>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
 }
 extern "C" __global__ void fucina_mul_mm_q6_K(
     const char *src0, const float *src1, const fucina_qmm_tile *tiles, float *dst,
     int ne00, int ne01, unsigned long long nb01, unsigned long long nb02) {
-    mul_mm_body<block_q6_K, 16, dequant_q6_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
+    mul_mm_scalar_body<block_q6_K, 16, dequant_q6_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
 }
 extern "C" __global__ void fucina_mul_mm_q4_K(
     const char *src0, const float *src1, const fucina_qmm_tile *tiles, float *dst,
     int ne00, int ne01, unsigned long long nb01, unsigned long long nb02) {
-    mul_mm_body<block_q4_K, 16, dequant_q4_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
+    mul_mm_scalar_body<block_q4_K, 16, dequant_q4_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
+}
+
+// --- Tensor-core grouped mul_mm ---------------------------------------------
+// The scalar kernel above already rounds dequantized weights and f32
+// activations to half in shared memory. WMMA therefore changes no operand
+// precision: four or eight warps cover a 32x32/32x64 output tile with
+// independent 16x16x16 matrix fragments, accumulating into f32. The narrower
+// n tile is retained for severely underfilled grids; the 64-column tile avoids
+// duplicating activation loads on ordinary LLM shapes. A shared f32 epilogue
+// preserves guarded stores on partial m/n edge tiles.
+
+template <int mma_nr0, typename block_q, int nl, void (*dequant)(const block_q *, int, float *)>
+__device__ __forceinline__ void mul_mm_mma_body(
+    const char *__restrict__ src0,
+    const float *__restrict__ src1,
+    const fucina_qmm_tile *__restrict__ tiles,
+    float *__restrict__ dst,
+    int ne00,
+    int ne01,
+    unsigned long long nb01,
+    unsigned long long nb02) {
+    __shared__ __align__(32) __half sa[mma_nr0][NK];
+    __shared__ __align__(32) __half sb[NR1][NK];
+    __shared__ __align__(32) float sc[NR1][mma_nr0];
+
+    const fucina_qmm_tile tile = tiles[blockIdx.x];
+    const int r0 = blockIdx.y * mma_nr0;
+    const int r1 = tile.tile_m * NR1;
+    const unsigned long long row0 = (unsigned long long)tile.base_row + (unsigned long long)r1;
+    const int nr0 = (ne01 - r0 < mma_nr0) ? (ne01 - r0) : mma_nr0;
+    const int nr1 = (tile.m - r1 < NR1) ? (tile.m - r1) : NR1;
+
+    const int t = threadIdx.y * 16 + threadIdx.x;
+    const int warp = t >> 5;
+    const int warps_n = mma_nr0 / 16;
+    const int warp_m = (warp / warps_n) * 16;
+    const int warp_n = (warp % warps_n) * 16;
+    const int threads = 4 * mma_nr0;
+    const char *wbase = src0 + nb02 * (unsigned long long)tile.expert;
+
+    nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 16, 16, 16, float> acc;
+    nvcuda::wmma::fill_fragment(acc, 0.0f);
+
+    for (int k0 = 0; k0 < ne00; k0 += NK) {
+        if (t < mma_nr0 * 2) {
+            const int wr = t / 2;
+            const int which = t & 1;
+            const int row = r0 + (wr < nr0 ? wr : nr0 - 1);
+            const int chunk = (k0 / 16) + which;
+            const block_q *xb = (const block_q *)(wbase + nb01 * (unsigned long long)row) + chunk / nl;
+            float regs[16];
+            dequant(xb, chunk % nl, regs);
+            __half *dstsh = &sa[wr][16 * which];
+#pragma unroll
+            for (int i = 0; i < 16; i++) dstsh[i] = __float2half(regs[i]);
+        }
+        {
+            const int values_per_thread = (NR1 * NK) / threads;
+            const int flat = t * values_per_thread;
+            const int ar = flat / NK;
+            const int ac = flat - ar * NK;
+            const int row = ar < nr1 ? ar : nr1 - 1;
+            const float *y = src1 + (row0 + (unsigned long long)row) * (unsigned long long)ne00 + k0 + ac;
+#pragma unroll
+            for (int i = 0; i < values_per_thread; i++) sb[ar][ac + i] = __float2half(y[i]);
+        }
+        __syncthreads();
+
+#pragma unroll
+        for (int kk = 0; kk < NK; kk += 16) {
+            nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16, __half, nvcuda::wmma::row_major> af;
+            nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, 16, 16, 16, __half, nvcuda::wmma::col_major> bf;
+            nvcuda::wmma::load_matrix_sync(af, &sb[warp_m][kk], NK);
+            nvcuda::wmma::load_matrix_sync(bf, &sa[warp_n][kk], NK);
+            nvcuda::wmma::mma_sync(acc, af, bf, acc);
+        }
+        __syncthreads();
+    }
+
+    // Full LLM tiles can go straight to the row-major output. CUDA allocations
+    // are at least 256-bit aligned; ne01/r0/warp_n preserve that alignment when
+    // ne01 is a multiple of eight floats. Partial edge tiles retain the shared
+    // epilogue below so no WMMA store can cross a logical row boundary.
+    if (nr0 == mma_nr0 && nr1 == NR1 && (ne01 & 7) == 0) {
+        float *D = dst + (row0 + (unsigned long long)warp_m) * (unsigned long long)ne01 + r0 + warp_n;
+        nvcuda::wmma::store_matrix_sync(D, acc, ne01, nvcuda::wmma::mem_row_major);
+        return;
+    }
+
+    nvcuda::wmma::store_matrix_sync(&sc[warp_m][warp_n], acc, mma_nr0, nvcuda::wmma::mem_row_major);
+    __syncthreads();
+    for (int index = t; index < mma_nr0 * NR1; index += threads) {
+        const int j = index / mma_nr0;
+        const int i = index - j * mma_nr0;
+        if (j < nr1 && i < nr0) {
+            dst[(row0 + (unsigned long long)j) * (unsigned long long)ne01 + r0 + i] = sc[j][i];
+        }
+    }
+}
+
+extern "C" __global__ void fucina_mul_mm_mma_q8_0(
+    const char *src0, const float *src1, const fucina_qmm_tile *tiles, float *dst,
+    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02) {
+    mul_mm_mma_body<64, block_q8_0, 2, dequant_q8_0>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
+}
+extern "C" __global__ void fucina_mul_mm_mma_q6_K(
+    const char *src0, const float *src1, const fucina_qmm_tile *tiles, float *dst,
+    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02) {
+    mul_mm_mma_body<64, block_q6_K, 16, dequant_q6_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
+}
+extern "C" __global__ void fucina_mul_mm_mma_q4_K(
+    const char *src0, const float *src1, const fucina_qmm_tile *tiles, float *dst,
+    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02) {
+    mul_mm_mma_body<64, block_q4_K, 16, dequant_q4_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
+}
+
+extern "C" __global__ void fucina_mul_mm_mma_n32_q8_0(
+    const char *src0, const float *src1, const fucina_qmm_tile *tiles, float *dst,
+    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02) {
+    mul_mm_mma_body<32, block_q8_0, 2, dequant_q8_0>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
+}
+extern "C" __global__ void fucina_mul_mm_mma_n32_q6_K(
+    const char *src0, const float *src1, const fucina_qmm_tile *tiles, float *dst,
+    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02) {
+    mul_mm_mma_body<32, block_q6_K, 16, dequant_q6_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
+}
+extern "C" __global__ void fucina_mul_mm_mma_n32_q4_K(
+    const char *src0, const float *src1, const fucina_qmm_tile *tiles, float *dst,
+    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02) {
+    mul_mm_mma_body<32, block_q4_K, 16, dequant_q4_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
 }
 
 // --- Decode GEMV (m <= 8) ----------------------------------------------------

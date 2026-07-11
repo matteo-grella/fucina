@@ -692,6 +692,7 @@ values. On Linux without libc the lookup scans `/proc/self/environ`
 | `FUCINA_GPU_MIN_WORK_TRANSIENT` (cuda) | Work floor for *non-resident* operands (each crossing PCIe per call); an `m ≥ 128` row floor applies alongside it. | `2^33` |
 | `FUCINA_GPU_MIN_WORK_ATTN` (cuda) | Fused prefill-attention gate, in q·kv·heads·d work units. | `2^28` |
 | `FUCINA_GPU_DECODE` (cuda) | Non-`0` enables the opt-in dequant-dot decode GEMV (m ≤ 8, resident weights only). | off |
+| `FUCINA_GPU_QUANT_MMA` (cuda) | A value starting with `0` disables the tensor-core Q4_K/Q6_K/Q8_0 prefill kernels and selects the scalar-FFMA fallback (diagnostic A/B switch). | enabled on compute capability ≥ 7 |
 | `FUCINA_GPU_VRAM_BUDGET` (cuda) | Weight-residency budget in bytes; `0` disables the bound. | 80% of free VRAM at init |
 | `FUCINA_GPU_KERNELS=src` (cuda) | NVRTC-recompiles the vendored kernels from `kernels.cu` instead of loading the committed PTX (dev loop; `tools/gen_cuda_ptx.sh` regenerates the PTX). | committed PTX |
 
@@ -7136,8 +7137,12 @@ direct asynchronous DMA. What offloads:
   managed resident allocation. `gemmQuantNtAsync` reuses the slot's activation,
   output, pinned-tile, and device-tile buffers; a pending f32 producer passes
   its device address directly. Shared-input batches launch each weight matrix
-  on the same stream without copying activation rows. Host download is deferred
-  to the output Work.
+  on the same stream without copying activation rows. On tensor-core devices,
+  adaptive N32/N64 WMMA kernels consume the same half-rounded dequantized
+  operands as the scalar fallback and accumulate f32; N32 is selected only for
+  severe grid underfill. Full output tiles store directly and partial tiles use
+  guarded staging. `FUCINA_GPU_QUANT_MMA=0` retains the scalar path for
+  compatibility/diagnosis. Host download is deferred to the output Work.
 - **Grouped MoE** uses the same tile kernel but keeps its required CPU phase
   boundaries (`qmoeStage`, `qmoe_lock`). Panel/tile H2D, compute, and panel D2H
   are now event-chained across persistent streams; the CPU performs one final

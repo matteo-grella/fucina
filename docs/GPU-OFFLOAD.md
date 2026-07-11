@@ -132,11 +132,18 @@ Stable-weight dense Q4_K/Q6_K/Q8_0 linears also bind the ordinary input/output
 tensor storage directly. Metal copies at most 4 KiB of 32-row tile descriptors
 into command-buffer-owned bytes and supports up to 8192 rows in one eager
 submission. CUDA keeps a pinned/device tile pair in each in-flight slot and
-launches the vendored dequant kernel on the persistent compute stream. A
-shared-input batch encodes/launches one weight matrix after another without
-replicating activation rows. Transient quantized RHS slices retain the
-blocking path: deferring a command past the lifetime of an unowned byte borrow
-would be incorrect.
+launches the vendored dequant kernel on the persistent compute stream. On
+compute capability 7 or newer, Q4_K/Q6_K/Q8_0 prefill uses f16-input WMMA with
+f32 accumulation after dequantizing to the same half-rounded shared operands as
+the original scalar-FFMA kernel. The launcher chooses a 32-column tile only
+when a 64-column grid would fill less than two thirds of the SMs; ordinary LLM
+shapes use 64 columns to avoid duplicating activation loads. Full tiles store
+WMMA fragments directly to the exec-owned output and edge tiles use a guarded
+shared epilogue. The scalar kernel remains the compatibility and diagnostic
+fallback (`FUCINA_GPU_QUANT_MMA=0`). A shared-input batch encodes/launches one
+weight matrix after another without replicating activation rows. Transient
+quantized RHS slices retain the blocking path: deferring a command past the
+lifetime of an unowned byte borrow would be incorrect.
 
 Grouped MoE remains phase-synchronous by necessity: CPU gather feeds gate/up,
 CPU GeGLU consumes that output and feeds down, and CPU scatter consumes down.
@@ -305,12 +312,31 @@ packed CPU comparison):
 | f16 32×4096×1024 resident | 725.3 | 87.1 | 3.9 | 4374.3 |
 | f16 128×4096×1024 resident | 1774.8 | 237.5 | 3.9 | 5240.1 |
 | f16 1×151936×1024 resident | 8232.8 | 797.6 | 3.9 | 421.7 |
-| Q4_K 32×4096×1024 | 256.5 | 132.7 | 4.6 | 3450.3 |
-| Q6_K 32×4096×1024 | 822.0 | 125.2 | 4.8 | 3610.6 |
-| Q8_0 32×4096×1024 | 640.9 | 132.4 | 4.4 | 3351.9 |
-| Q4_K 128×4096×4096 | 4074.3 | 1262.4 | 3.9 | 4414.1 |
-| Q6_K 128×4096×4096 | 8267.4 | 1016.0 | 3.6 | 5826.1 |
-| Q8_0 128×4096×4096 | 4042.6 | 1215.3 | 4.3 | 4640.2 |
+| Q4_K 32×4096×1024 | 263.7 | 116.5 | 4.9 | 3991.1 |
+| Q6_K 32×4096×1024 | 856.0 | 118.2 | 5.0 | 3879.5 |
+| Q8_0 32×4096×1024 | 660.0 | 119.7 | 4.6 | 4063.0 |
+| Q4_K 128×4096×4096 | 4267.1 | 1081.8 | 4.1 | 5414.8 |
+| Q6_K 128×4096×4096 | 8211.1 | 896.0 | 4.4 | 7048.8 |
+| Q8_0 128×4096×4096 | 3982.9 | 1026.1 | 4.1 | 5800.8 |
+
+Against the scalar CUDA kernel in the same nine-iteration run, WMMA raised
+queued throughput by 11–37% over every non-decode Q4_K/Q6_K/Q8_0 shape in the
+suite. At the two representative Qwen/prefill-128 shapes the gains were
+respectively 14%/22% (Q4_K), 11%/19% (Q6_K), and 22%/24% (Q8_0). Decode is
+intentionally unchanged: it uses the separate GEMV kernel.
+
+Nsight Systems on Q4_K 128×4096×4096 recorded a 4×64 = 256-block launch on
+the 76-SM Ada GPU, 16×16 threads/block, 40 registers/thread, 14 KiB static
+shared memory, and a 0.704 ms average kernel; `ptxas` reported no spills. Thus
+every SM is fed; the remaining gap to peak tensor-core FLOP/s is the fused dequant/shared-load
+work, not an idle-core geometry bug. The same trace measured each 2 MiB
+activation/output PCIe copy at about 0.18 ms. Those unavoidable host boundaries
+explain why the whole-runner effect is smaller: Qwen3-0.6B Q6_K at pp128 moved
+from 1308 tok/s (mean of the scalar-kernel A/A legs) to 1332 tok/s (1.8%),
+whereas pp841 was flat within variance because attention/CPU work dominated.
+Qwen3-4B Q4_K_M pp128 was also effectively flat in an A/B/A run (197 vs 198
+tok/s). The 11–37% claim is therefore deliberately an offloaded-op throughput
+claim, not a claim that every end-to-end prompt gains that amount.
 
 At 1×4096×4096 quantized decode, packed CPU still won (58–97 µs versus
 101–107 µs GPU), so the existing CUDA quant-decode arm remains opt-in. The
@@ -320,7 +346,9 @@ only the activation/output cross PCIe, hence its residency-aware gate.
 Provider tests add an edge-tile, two-GEMM dependency chain that performs no
 host read between commands, direct-f32 f16 checks, and shared-input async
 Q4_K/Q6_K/Q8_0 checks against CPU references. They also mutate an input after
-submission to prove the reader fence. The grouped CUDA tests exercise the
-persistent upload/compute/download event chain.
+submission to prove the reader fence. CUDA's quant test forces both WMMA and
+scalar kernels, checks each against the CPU reference, and compares them
+directly. The grouped CUDA tests exercise the persistent upload/compute/download
+event chain.
 The normal Metal and remote CUDA test roots pass, as do `cuda-check`, the
 default core root, and `arch-check` (zero SCCs).

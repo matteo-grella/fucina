@@ -672,6 +672,7 @@ FUCINA_GPU_DECODE=1 zig build qwen3 -Dgpu=cuda -Doptimize=ReleaseFast -- models/
 # CUDA-only env knobs: FUCINA_GPU_TF32=1 (TF32 tensor cores for f32 GEMM,
 # 2.5-3x, changes numerics), FUCINA_GPU_MIN_WORK_TRANSIENT (work floor for
 # non-resident f32 operands), FUCINA_GPU_VRAM_BUDGET (bytes, tracked),
+# FUCINA_GPU_QUANT_MMA=0 (diagnostic scalar fallback for quantized prefill),
 # FUCINA_GPU_KERNELS=src (NVRTC-recompile the vendored kernels).
 ```
 
