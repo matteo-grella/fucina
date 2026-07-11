@@ -471,7 +471,7 @@ pub const MuonAdamW = struct {
         errdefer self.allocator.free(scratch_step_size);
         const owned = try params.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(owned);
-        // Matrix params share one dtype (the model's comptime matrix_dtype),
+        // Matrix params share one dtype (the model's comptime dtype knob),
         // so a group is uniformly f32 or uniformly bf16.
         const needs_master = owned.len > 0 and !owned[0].is_f32;
         const master: []f32 = if (needs_master) try self.allocator.alloc(f32, k * mn) else &.{};

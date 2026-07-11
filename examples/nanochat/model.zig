@@ -117,15 +117,16 @@ pub const Config = struct {
 // Parameters
 // ---------------------------------------------------------------------------
 
-/// The GPT with a comptime matrix dtype: `.f32` (the default `Model`) or
+/// The GPT parameterized over the storage dtype of its trained matrices:
+/// `.f32` (the default `Model`) or
 /// `.bf16` — the Muon-routed transformer matrices (c_q/c_k/c_v/c_proj/
 /// c_fc/c_proj_mlp/ve_gate) are stored 16-bit and train through f32
 /// masters (gradients are f32; MuonAdamW steps the master and narrows
 /// back). Embeddings (wte, value_embeds) stay f32 — they train through
 /// gather — as do the head, gates, and scalars (AdamW-routed).
-pub fn ModelOf(comptime matrix_dtype: fucina.DType) type {
+pub fn ModelOf(comptime dtype: fucina.DType) type {
     comptime {
-        if (matrix_dtype != .f32 and matrix_dtype != .bf16)
+        if (dtype != .f32 and dtype != .bf16)
             @compileError("nanochat matrix params support f32 or bf16");
     }
     return struct {
@@ -134,12 +135,12 @@ pub fn ModelOf(comptime matrix_dtype: fucina.DType) type {
         const WteT = Tensor(.{ .vocab, .d });
         const LmHeadT = Tensor(.{ .vocab, .d });
         const VeEmbT = Tensor(.{ .vocab, .kvo });
-        const CqT = ParamTensor(matrix_dtype, .{ .qo, .d });
-        const CkvT = ParamTensor(matrix_dtype, .{ .kvo, .d });
-        const CProjAttnT = ParamTensor(matrix_dtype, .{ .d, .attn });
-        const CfcT = ParamTensor(matrix_dtype, .{ .ff, .d });
-        const CProjMlpT = ParamTensor(matrix_dtype, .{ .d, .ff });
-        const VeGateT = ParamTensor(matrix_dtype, .{ .kv_head, .d }); // [n_kv_head, 12]
+        const CqT = ParamTensor(dtype, .{ .qo, .d });
+        const CkvT = ParamTensor(dtype, .{ .kvo, .d });
+        const CProjAttnT = ParamTensor(dtype, .{ .d, .attn });
+        const CfcT = ParamTensor(dtype, .{ .ff, .d });
+        const CProjMlpT = ParamTensor(dtype, .{ .d, .ff });
+        const VeGateT = ParamTensor(dtype, .{ .kv_head, .d }); // [n_kv_head, 12]
         const LayerScalarsT = Tensor(.{.layer});
         const SmearGateT = Tensor(.{ .one, .d }); // [1, 24]
         const OneScalarT = Tensor(.{.one});
@@ -239,20 +240,20 @@ pub fn ModelOf(comptime matrix_dtype: fucina.DType) type {
             for (0..cfg.n_layer) |i| {
                 const l = &layers[i];
                 l.ve_gate = null;
-                l.c_q = try loadParamAs(matrix_dtype, .{ .qo, .d }, ctx, allocator, &file, try lname(&name_buf, i, "attn.c_q.weight"), [_]usize{ qo, d });
+                l.c_q = try loadParamAs(dtype, .{ .qo, .d }, ctx, allocator, &file, try lname(&name_buf, i, "attn.c_q.weight"), [_]usize{ qo, d });
                 errdefer l.c_q.deinit();
-                l.c_k = try loadParamAs(matrix_dtype, .{ .kvo, .d }, ctx, allocator, &file, try lname(&name_buf, i, "attn.c_k.weight"), [_]usize{ kvo, d });
+                l.c_k = try loadParamAs(dtype, .{ .kvo, .d }, ctx, allocator, &file, try lname(&name_buf, i, "attn.c_k.weight"), [_]usize{ kvo, d });
                 errdefer l.c_k.deinit();
-                l.c_v = try loadParamAs(matrix_dtype, .{ .kvo, .d }, ctx, allocator, &file, try lname(&name_buf, i, "attn.c_v.weight"), [_]usize{ kvo, d });
+                l.c_v = try loadParamAs(dtype, .{ .kvo, .d }, ctx, allocator, &file, try lname(&name_buf, i, "attn.c_v.weight"), [_]usize{ kvo, d });
                 errdefer l.c_v.deinit();
-                l.c_proj = try loadParamAs(matrix_dtype, .{ .d, .attn }, ctx, allocator, &file, try lname(&name_buf, i, "attn.c_proj.weight"), [_]usize{ d, qo });
+                l.c_proj = try loadParamAs(dtype, .{ .d, .attn }, ctx, allocator, &file, try lname(&name_buf, i, "attn.c_proj.weight"), [_]usize{ d, qo });
                 errdefer l.c_proj.deinit();
-                l.c_fc = try loadParamAs(matrix_dtype, .{ .ff, .d }, ctx, allocator, &file, try lname(&name_buf, i, "mlp.c_fc.weight"), [_]usize{ ff, d });
+                l.c_fc = try loadParamAs(dtype, .{ .ff, .d }, ctx, allocator, &file, try lname(&name_buf, i, "mlp.c_fc.weight"), [_]usize{ ff, d });
                 errdefer l.c_fc.deinit();
-                l.c_proj_mlp = try loadParamAs(matrix_dtype, .{ .d, .ff }, ctx, allocator, &file, try lname(&name_buf, i, "mlp.c_proj.weight"), [_]usize{ d, ff });
+                l.c_proj_mlp = try loadParamAs(dtype, .{ .d, .ff }, ctx, allocator, &file, try lname(&name_buf, i, "mlp.c_proj.weight"), [_]usize{ d, ff });
                 errdefer l.c_proj_mlp.deinit();
                 if (cfg.hasVe(i)) {
-                    l.ve_gate = try loadParamAs(matrix_dtype, .{ .kv_head, .d }, ctx, allocator, &file, try lname(&name_buf, i, "attn.ve_gate.weight"), [_]usize{ cfg.n_kv_head, 12 });
+                    l.ve_gate = try loadParamAs(dtype, .{ .kv_head, .d }, ctx, allocator, &file, try lname(&name_buf, i, "attn.ve_gate.weight"), [_]usize{ cfg.n_kv_head, 12 });
                     errdefer if (l.ve_gate) |*g| g.deinit();
                     value_embeds[i] = try loadParam(.{ .vocab, .kvo }, ctx, allocator, &file, try veName(&name_buf, i), [_]usize{ padded_vocab, kvo });
                 }
@@ -358,24 +359,24 @@ pub fn ModelOf(comptime matrix_dtype: fucina.DType) type {
             for (0..cfg.n_layer) |i| {
                 const l = &layers[i];
                 l.ve_gate = null;
-                l.c_q = try rngParamAs(matrix_dtype, .{ .qo, .d }, ctx, allocator, [_]usize{ qo, d }, .{ .uniform = .{ .lo = -s, .hi = s } }, fucina.rng.at(seed, k));
+                l.c_q = try rngParamAs(dtype, .{ .qo, .d }, ctx, allocator, [_]usize{ qo, d }, .{ .uniform = .{ .lo = -s, .hi = s } }, fucina.rng.at(seed, k));
                 errdefer l.c_q.deinit();
                 k += 1;
-                l.c_k = try rngParamAs(matrix_dtype, .{ .kvo, .d }, ctx, allocator, [_]usize{ kvo, d }, .{ .uniform = .{ .lo = -s, .hi = s } }, fucina.rng.at(seed, k));
+                l.c_k = try rngParamAs(dtype, .{ .kvo, .d }, ctx, allocator, [_]usize{ kvo, d }, .{ .uniform = .{ .lo = -s, .hi = s } }, fucina.rng.at(seed, k));
                 errdefer l.c_k.deinit();
                 k += 1;
-                l.c_v = try rngParamAs(matrix_dtype, .{ .kvo, .d }, ctx, allocator, [_]usize{ kvo, d }, .{ .uniform = .{ .lo = -s, .hi = s } }, fucina.rng.at(seed, k));
+                l.c_v = try rngParamAs(dtype, .{ .kvo, .d }, ctx, allocator, [_]usize{ kvo, d }, .{ .uniform = .{ .lo = -s, .hi = s } }, fucina.rng.at(seed, k));
                 errdefer l.c_v.deinit();
                 k += 1;
-                l.c_proj = try rngParamAs(matrix_dtype, .{ .d, .attn }, ctx, allocator, [_]usize{ d, qo }, .zeros, 0);
+                l.c_proj = try rngParamAs(dtype, .{ .d, .attn }, ctx, allocator, [_]usize{ d, qo }, .zeros, 0);
                 errdefer l.c_proj.deinit();
-                l.c_fc = try rngParamAs(matrix_dtype, .{ .ff, .d }, ctx, allocator, [_]usize{ ff, d }, .{ .uniform = .{ .lo = -s * 0.4, .hi = s * 0.4 } }, fucina.rng.at(seed, k));
+                l.c_fc = try rngParamAs(dtype, .{ .ff, .d }, ctx, allocator, [_]usize{ ff, d }, .{ .uniform = .{ .lo = -s * 0.4, .hi = s * 0.4 } }, fucina.rng.at(seed, k));
                 errdefer l.c_fc.deinit();
                 k += 1;
-                l.c_proj_mlp = try rngParamAs(matrix_dtype, .{ .d, .ff }, ctx, allocator, [_]usize{ d, ff }, .zeros, 0);
+                l.c_proj_mlp = try rngParamAs(dtype, .{ .d, .ff }, ctx, allocator, [_]usize{ d, ff }, .zeros, 0);
                 errdefer l.c_proj_mlp.deinit();
                 if (cfg.hasVe(i)) {
-                    l.ve_gate = try rngParamAs(matrix_dtype, .{ .kv_head, .d }, ctx, allocator, [_]usize{ cfg.n_kv_head, 12 }, .{ .uniform = .{ .lo = 0, .hi = 0.02 } }, fucina.rng.at(seed, k));
+                    l.ve_gate = try rngParamAs(dtype, .{ .kv_head, .d }, ctx, allocator, [_]usize{ cfg.n_kv_head, 12 }, .{ .uniform = .{ .lo = 0, .hi = 0.02 } }, fucina.rng.at(seed, k));
                     errdefer if (l.ve_gate) |*g| g.deinit();
                     k += 1;
                     value_embeds[i] = try rngParam(.{ .vocab, .kvo }, ctx, allocator, [_]usize{ padded_vocab, kvo }, .{ .uniform = .{ .lo = -s, .hi = s } }, fucina.rng.at(seed, k));

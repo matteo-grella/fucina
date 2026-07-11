@@ -523,7 +523,17 @@ const Cli = struct {
     out: ?[]const u8 = null,
     init_from: []const u8 = "",
     resume_dir: ?[]const u8 = null,
+    /// Storage dtype of the trained transformer matrices (`--dtype f32|bf16`;
+    /// embeddings and scalars stay f32 — see ModelOf). Must match the
+    /// checkpoint when loading with --init-from/--resume.
+    dtype: fucina.DType = .f32,
 };
+
+fn parseDtypeFlag(v: []const u8) !fucina.DType {
+    if (std.mem.eql(u8, v, "f32")) return .f32;
+    if (std.mem.eql(u8, v, "bf16")) return .bf16;
+    return error.InvalidArgument;
+}
 
 const ArgWalk = struct {
     args: []const []const u8,
@@ -601,6 +611,8 @@ fn parseCli(args: []const []const u8) !Cli {
             cli.init_from = v;
         } else if (w.value("--resume")) |v| {
             cli.resume_dir = v;
+        } else if (w.value("--dtype")) |v| {
+            cli.dtype = try parseDtypeFlag(v);
         } else {
             return error.UnknownArgument;
         }
@@ -621,8 +633,6 @@ fn buildConfig(cli: Cli, hp: Hparams, vocab_size: usize) Config {
 }
 
 pub fn runBaseTrain(io: std.Io, stdout: *std.Io.Writer, args: []const []const u8) !void {
-    const allocator = std.heap.smp_allocator;
-
     const cli = parseCli(args) catch |err| {
         try stdout.print("base-train: argument error: {s}\n", .{@errorName(err)});
         return err;
@@ -641,6 +651,17 @@ pub fn runBaseTrain(io: std.Io, stdout: *std.Io.Writer, args: []const []const u8
     }
 
     try validateWindowPattern(cli.window_pattern);
+
+    // The matrix dtype is a comptime property of the model type: dispatch
+    // once into the generic flow.
+    switch (cli.dtype) {
+        .bf16 => try baseTrainWith(model_mod.ModelOf(.bf16), io, stdout, cli),
+        else => try baseTrainWith(Model, io, stdout, cli),
+    }
+}
+
+fn baseTrainWith(comptime ModelT: type, io: std.Io, stdout: *std.Io.Writer, cli: Cli) !void {
+    const allocator = std.heap.smp_allocator;
 
     var ctx: ExecContext = undefined;
     ctx.init(allocator);
@@ -722,11 +743,11 @@ pub fn runBaseTrain(io: std.Io, stdout: *std.Io.Writer, args: []const []const u8
     var model = if (resume_src) |src| blk: {
         const model_path = try training_checkpoint.pathJoin(allocator, src, training_checkpoint.model_state_file);
         defer allocator.free(model_path);
-        break :blk try Model.initFromSafetensors(cfg, &ctx, allocator, io, model_path);
+        break :blk try ModelT.initFromSafetensors(cfg, &ctx, allocator, io, model_path);
     } else if (cli.init_from.len > 0)
-        try Model.initFromSafetensors(cfg, &ctx, allocator, io, cli.init_from)
+        try ModelT.initFromSafetensors(cfg, &ctx, allocator, io, cli.init_from)
     else
-        try Model.initRandom(cfg, &ctx, allocator, cli.seed);
+        try ModelT.initRandom(cfg, &ctx, allocator, cli.seed);
     defer model.deinit();
 
     var opt = MuonAdamW.init(allocator, hp.opt_config);
@@ -821,7 +842,7 @@ pub fn runBaseTrain(io: std.Io, stdout: *std.Io.Writer, args: []const []const u8
 /// fresh val stream (reference semantics).
 fn evalValBpb(
     ctx: *ExecContext,
-    model: *const Model,
+    model: anytype,
     tokenizer: *const Tokenizer,
     token_bytes: []const u32,
     allocator: Allocator,
@@ -914,8 +935,6 @@ fn sanitizeUtf8(allocator: Allocator, bytes: []const u8) ![]u8 {
 // ===========================================================================
 
 pub fn runEvalBpb(io: std.Io, stdout: *std.Io.Writer, args: []const []const u8) !void {
-    const allocator = std.heap.smp_allocator;
-
     const cli = try parseCli(args);
     if (cli.data == null or cli.tokenizer == null or cli.init_from.len == 0) {
         try stdout.writeAll("eval-bpb: --init-from <safetensors>, --data <NCDOC>, --tokenizer <tokenizer.bin> required\n");
@@ -923,6 +942,15 @@ pub fn runEvalBpb(io: std.Io, stdout: *std.Io.Writer, args: []const []const u8) 
     }
 
     try validateWindowPattern(cli.window_pattern);
+
+    switch (cli.dtype) {
+        .bf16 => try evalBpbWith(model_mod.ModelOf(.bf16), io, stdout, cli),
+        else => try evalBpbWith(Model, io, stdout, cli),
+    }
+}
+
+fn evalBpbWith(comptime ModelT: type, io: std.Io, stdout: *std.Io.Writer, cli: Cli) !void {
+    const allocator = std.heap.smp_allocator;
 
     var ctx: ExecContext = undefined;
     ctx.init(allocator);
@@ -948,7 +976,7 @@ pub fn runEvalBpb(io: std.Io, stdout: *std.Io.Writer, args: []const []const u8) 
     });
     const cfg = buildConfig(cli, hp, vocab_size);
 
-    var model = try Model.initFromSafetensors(cfg, &ctx, allocator, io, cli.init_from);
+    var model = try ModelT.initFromSafetensors(cfg, &ctx, allocator, io, cli.init_from);
     defer model.deinit();
 
     const token_bytes = try tokenizer.computeTokenBytes(allocator);
@@ -1062,6 +1090,9 @@ const SftCli = struct {
     init_from: []const u8 = "",
     out: ?[]const u8 = null,
     resume_dir: ?[]const u8 = null,
+    /// Storage dtype of the trained transformer matrices (`--dtype f32|bf16`;
+    /// must match the base checkpoint being fine-tuned).
+    dtype: fucina.DType = .f32,
 };
 
 fn parseSftCli(args: []const []const u8) !SftCli {
@@ -1122,6 +1153,8 @@ fn parseSftCli(args: []const []const u8) !SftCli {
             cli.out = v;
         } else if (w.value("--resume")) |v| {
             cli.resume_dir = v;
+        } else if (w.value("--dtype")) |v| {
+            cli.dtype = try parseDtypeFlag(v);
         } else {
             return error.UnknownArgument;
         }
@@ -1130,8 +1163,6 @@ fn parseSftCli(args: []const []const u8) !SftCli {
 }
 
 pub fn runSft(io: std.Io, stdout: *std.Io.Writer, args: []const []const u8) !void {
-    const allocator = std.heap.smp_allocator;
-
     const cli = parseSftCli(args) catch |err| {
         try stdout.print("sft: argument error: {s}\n", .{@errorName(err)});
         return err;
@@ -1157,6 +1188,15 @@ pub fn runSft(io: std.Io, stdout: *std.Io.Writer, args: []const []const u8) !voi
         return error.InvalidArgument;
     }
     try validateWindowPattern(cli.window_pattern);
+
+    switch (cli.dtype) {
+        .bf16 => try sftWith(model_mod.ModelOf(.bf16), io, stdout, cli),
+        else => try sftWith(Model, io, stdout, cli),
+    }
+}
+
+fn sftWith(comptime ModelT: type, io: std.Io, stdout: *std.Io.Writer, cli: SftCli) !void {
+    const allocator = std.heap.smp_allocator;
 
     var ctx: ExecContext = undefined;
     ctx.init(allocator);
@@ -1215,8 +1255,8 @@ pub fn runSft(io: std.Io, stdout: *std.Io.Writer, args: []const []const u8) !voi
     var model = if (resume_src) |src| blk: {
         const model_path = try training_checkpoint.pathJoin(allocator, src, training_checkpoint.model_state_file);
         defer allocator.free(model_path);
-        break :blk try Model.initFromSafetensors(cfg, &ctx, allocator, io, model_path);
-    } else try Model.initFromSafetensors(cfg, &ctx, allocator, io, cli.init_from);
+        break :blk try ModelT.initFromSafetensors(cfg, &ctx, allocator, io, model_path);
+    } else try ModelT.initFromSafetensors(cfg, &ctx, allocator, io, cli.init_from);
     defer model.deinit();
 
     var opt = MuonAdamW.init(allocator, sft_cfg);
@@ -1329,7 +1369,7 @@ pub fn runSft(io: std.Io, stdout: *std.Io.Writer, args: []const []const u8) !voi
 /// semantics); the loader is rebuilt per eval for a fresh stream.
 fn evalSftBpb(
     ctx: *ExecContext,
-    model: *const Model,
+    model: anytype,
     tokenizer: *const Tokenizer,
     token_bytes: []const u32,
     allocator: Allocator,
