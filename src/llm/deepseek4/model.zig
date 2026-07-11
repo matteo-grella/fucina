@@ -1494,14 +1494,14 @@ fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const 
     defer for (lows[0..n_lows]) |*t| t.deinit();
     std.debug.assert(cfg.output_groups <= lows.len);
     for (0..cfg.output_groups) |g| {
+        // The quantized GEMM entry materializes non-contiguous LHS views
+        // itself (pooled, once) — feed the narrow view directly.
         var gs_v = try heads_full.narrow(ctx, .embed, g * group_dim, group_dim);
         defer gs_v.deinit();
-        var gs_t = try gs_v.contiguous(ctx);
-        defer gs_t.deinit();
         lows[n_lows] = try weights.linearSeqBorrowedQuantized(
             .q8_0,
             ctx,
-            &gs_t,
+            &gs_v,
             layer.output_a[g * rank * group_row_bytes ..][0 .. rank * group_row_bytes],
             .{ rank, group_dim },
             .{ .allow_gpu = false },
