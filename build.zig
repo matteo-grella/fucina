@@ -777,13 +777,14 @@ pub fn build(b: *std.Build) void {
         x86dot_check_step.dependOn(&leg_exe.step);
     }
 
-    // Compile-only CUDA-provider leg (`zig build cuda-check`): semantically
-    // analyzes the -Dgpu=cuda provider and its tests for x86_64-linux-gnu
-    // without running them, so the provider cannot bit-rot on GPU-less/macOS
-    // dev machines — the same bit-rot discipline as the x86dot-check legs.
+    // Compile-only CUDA-provider/tooling leg (`zig build cuda-check`):
+    // semantically analyzes the -Dgpu=cuda provider, its tests, and the PTX
+    // generator for x86_64-linux-gnu without running them, so neither can
+    // bit-rot on GPU-less/macOS dev machines — the same discipline as the
+    // x86dot-check legs.
     // The dead-switch-arm selection in src/backend/gpu.zig means no other
     // build configuration ever analyzes cuda.zig.
-    const cuda_check_step = b.step("cuda-check", "Compile-only -Dgpu=cuda legs (x86_64-linux-gnu fucina + llm test roots, not run): catches CUDA-provider bit-rot on GPU-less machines");
+    const cuda_check_step = b.step("cuda-check", "Compile-only -Dgpu=cuda legs (x86_64-linux-gnu fucina + llm roots and NVRTC PTX generator, not run): catches CUDA-provider bit-rot on GPU-less machines");
     {
         const cuda_target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu });
         const cuda_options = b.addOptions();
@@ -823,6 +824,27 @@ pub fn build(b: *std.Build) void {
         const cuda_check_llm = b.addTest(.{ .root_module = cuda_llm_module });
         _ = cuda_check_llm.getEmittedBin();
         cuda_check_step.dependOn(&cuda_check_llm.step);
+
+        // Leg 3: the toolkit-optional PTX generator. It reuses the provider's
+        // dlopen-only NVRTC binding, so compiling this leg needs no CUDA SDK.
+        const cuda_api_module = b.createModule(.{
+            .root_source_file = b.path("src/backend/cuda/api.zig"),
+            .target = cuda_target,
+            .optimize = optimize,
+        });
+        const cuda_ptx_gen_module = b.createModule(.{
+            .root_source_file = b.path("tools/gen_cuda_ptx.zig"),
+            .target = cuda_target,
+            .optimize = optimize,
+        });
+        cuda_ptx_gen_module.addImport("cuda_api", cuda_api_module);
+        cuda_ptx_gen_module.link_libc = true;
+        const cuda_ptx_gen = b.addExecutable(.{
+            .name = "fucina-zig-gen-cuda-ptx",
+            .root_module = cuda_ptx_gen_module,
+        });
+        _ = cuda_ptx_gen.getEmittedBin();
+        cuda_check_step.dependOn(&cuda_ptx_gen.step);
     }
 
     const bench_exe = b.addExecutable(.{

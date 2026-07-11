@@ -404,8 +404,11 @@ unused D2H. Metal caches a page wrapper per storage allocation; CUDA pools
 eight in-flight typed device/tile slots behind persistent
 upload/compute/download streams and uses storage-lifetime page registration so
 DMA lands directly in exec-owned tensors. CUDA quantized prefill selects
-adaptive N32/N64 f16-input/f32-accumulate tensor-core tiles on capable devices,
-with the same eager tile-table ABI and a scalar-FFMA fallback. Reusable events
+adaptive N32/N64 f16-input/f32-accumulate tensor-core tiles on capable devices;
+underfilled dense grids split K into a grow-only per-slot partial buffer and
+queue their fixed-order reduction on the same persistent stream. This fills
+idle SMs without adding a host fence, graph node, or steady-state allocation.
+The same eager tile-table ABI and scalar-FFMA fallback remain. Reusable events
 and one cuBLAS handle order the lanes. Grouped MoE still fences at its CPU
 gather/GeGLU/scatter data dependencies, but CUDA transfers/kernel/download are
 event-chained before the one required host fence. This is completion tracking

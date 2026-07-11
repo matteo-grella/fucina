@@ -231,17 +231,20 @@ __device__ __forceinline__ void mul_mm_scalar_body(
 
 extern "C" __global__ void fucina_mul_mm_q8_0(
     const char *src0, const float *src1, const fucina_qmm_tile *tiles, float *dst,
-    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02) {
+    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02,
+    float *, int, unsigned long long) {
     mul_mm_scalar_body<block_q8_0, 2, dequant_q8_0>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
 }
 extern "C" __global__ void fucina_mul_mm_q6_K(
     const char *src0, const float *src1, const fucina_qmm_tile *tiles, float *dst,
-    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02) {
+    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02,
+    float *, int, unsigned long long) {
     mul_mm_scalar_body<block_q6_K, 16, dequant_q6_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
 }
 extern "C" __global__ void fucina_mul_mm_q4_K(
     const char *src0, const float *src1, const fucina_qmm_tile *tiles, float *dst,
-    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02) {
+    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02,
+    float *, int, unsigned long long) {
     mul_mm_scalar_body<block_q4_K, 16, dequant_q4_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
 }
 
@@ -251,8 +254,11 @@ extern "C" __global__ void fucina_mul_mm_q4_K(
 // precision: four or eight warps cover a 32x32/32x64 output tile with
 // independent 16x16x16 matrix fragments, accumulating into f32. The narrower
 // n tile is retained for severely underfilled grids; the 64-column tile avoids
-// duplicating activation loads on ordinary LLM shapes. A shared f32 epilogue
-// preserves guarded stores on partial m/n edge tiles.
+// duplicating activation loads on ordinary LLM shapes. An underfilled eager
+// grid may split K across grid.z and write reusable partial planes; the small
+// reduction kernel below is queued on the same stream before the completion
+// event, so it introduces neither a host fence nor an allocation per call. A
+// shared f32 epilogue preserves guarded stores on partial m/n edge tiles.
 
 template <int mma_nr0, typename block_q, int nl, void (*dequant)(const block_q *, int, float *)>
 __device__ __forceinline__ void mul_mm_mma_body(
@@ -263,7 +269,10 @@ __device__ __forceinline__ void mul_mm_mma_body(
     int ne00,
     int ne01,
     unsigned long long nb01,
-    unsigned long long nb02) {
+    unsigned long long nb02,
+    float *__restrict__ partial,
+    int split_k,
+    unsigned long long partial_stride) {
     __shared__ __align__(32) __half sa[mma_nr0][NK];
     __shared__ __align__(32) __half sb[NR1][NK];
     __shared__ __align__(32) float sc[NR1][mma_nr0];
@@ -286,7 +295,10 @@ __device__ __forceinline__ void mul_mm_mma_body(
     nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 16, 16, 16, float> acc;
     nvcuda::wmma::fill_fragment(acc, 0.0f);
 
-    for (int k0 = 0; k0 < ne00; k0 += NK) {
+    const int k_blocks = ne00 / NK;
+    const int k_begin = (k_blocks * (int)blockIdx.z / split_k) * NK;
+    const int k_end = (k_blocks * ((int)blockIdx.z + 1) / split_k) * NK;
+    for (int k0 = k_begin; k0 < k_end; k0 += NK) {
         if (t < mma_nr0 * 2) {
             const int wr = t / 2;
             const int which = t & 1;
@@ -295,9 +307,9 @@ __device__ __forceinline__ void mul_mm_mma_body(
             const block_q *xb = (const block_q *)(wbase + nb01 * (unsigned long long)row) + chunk / nl;
             float regs[16];
             dequant(xb, chunk % nl, regs);
-            __half *dstsh = &sa[wr][16 * which];
+            __half2 *dstsh = (__half2 *)&sa[wr][16 * which];
 #pragma unroll
-            for (int i = 0; i < 16; i++) dstsh[i] = __float2half(regs[i]);
+            for (int i = 0; i < 8; i++) dstsh[i] = __floats2half2_rn(regs[2 * i], regs[2 * i + 1]);
         }
         {
             const int values_per_thread = (NR1 * NK) / threads;
@@ -306,8 +318,13 @@ __device__ __forceinline__ void mul_mm_mma_body(
             const int ac = flat - ar * NK;
             const int row = ar < nr1 ? ar : nr1 - 1;
             const float *y = src1 + (row0 + (unsigned long long)row) * (unsigned long long)ne00 + k0 + ac;
+            __half2 *dstsh = (__half2 *)&sb[ar][ac];
 #pragma unroll
-            for (int i = 0; i < values_per_thread; i++) sb[ar][ac + i] = __float2half(y[i]);
+            for (int i = 0; i < values_per_thread; i += 4) {
+                const float4 v = *(const float4 *)(y + i);
+                dstsh[i / 2 + 0] = __floats2half2_rn(v.x, v.y);
+                dstsh[i / 2 + 1] = __floats2half2_rn(v.z, v.w);
+            }
         }
         __syncthreads();
 
@@ -322,12 +339,14 @@ __device__ __forceinline__ void mul_mm_mma_body(
         __syncthreads();
     }
 
+    float *out = split_k > 1 ? partial + (unsigned long long)blockIdx.z * partial_stride : dst;
+
     // Full LLM tiles can go straight to the row-major output. CUDA allocations
     // are at least 256-bit aligned; ne01/r0/warp_n preserve that alignment when
     // ne01 is a multiple of eight floats. Partial edge tiles retain the shared
     // epilogue below so no WMMA store can cross a logical row boundary.
     if (nr0 == mma_nr0 && nr1 == NR1 && (ne01 & 7) == 0) {
-        float *D = dst + (row0 + (unsigned long long)warp_m) * (unsigned long long)ne01 + r0 + warp_n;
+        float *D = out + (row0 + (unsigned long long)warp_m) * (unsigned long long)ne01 + r0 + warp_n;
         nvcuda::wmma::store_matrix_sync(D, acc, ne01, nvcuda::wmma::mem_row_major);
         return;
     }
@@ -338,41 +357,78 @@ __device__ __forceinline__ void mul_mm_mma_body(
         const int j = index / mma_nr0;
         const int i = index - j * mma_nr0;
         if (j < nr1 && i < nr0) {
-            dst[(row0 + (unsigned long long)j) * (unsigned long long)ne01 + r0 + i] = sc[j][i];
+            out[(row0 + (unsigned long long)j) * (unsigned long long)ne01 + r0 + i] = sc[j][i];
         }
     }
 }
 
 extern "C" __global__ void fucina_mul_mm_mma_q8_0(
     const char *src0, const float *src1, const fucina_qmm_tile *tiles, float *dst,
-    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02) {
-    mul_mm_mma_body<64, block_q8_0, 2, dequant_q8_0>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
+    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02,
+    float *partial, int split_k, unsigned long long partial_stride) {
+    mul_mm_mma_body<64, block_q8_0, 2, dequant_q8_0>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02, partial, split_k, partial_stride);
 }
 extern "C" __global__ void fucina_mul_mm_mma_q6_K(
     const char *src0, const float *src1, const fucina_qmm_tile *tiles, float *dst,
-    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02) {
-    mul_mm_mma_body<64, block_q6_K, 16, dequant_q6_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
+    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02,
+    float *partial, int split_k, unsigned long long partial_stride) {
+    mul_mm_mma_body<64, block_q6_K, 16, dequant_q6_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02, partial, split_k, partial_stride);
 }
 extern "C" __global__ void fucina_mul_mm_mma_q4_K(
     const char *src0, const float *src1, const fucina_qmm_tile *tiles, float *dst,
-    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02) {
-    mul_mm_mma_body<64, block_q4_K, 16, dequant_q4_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
+    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02,
+    float *partial, int split_k, unsigned long long partial_stride) {
+    mul_mm_mma_body<64, block_q4_K, 16, dequant_q4_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02, partial, split_k, partial_stride);
 }
 
 extern "C" __global__ void fucina_mul_mm_mma_n32_q8_0(
     const char *src0, const float *src1, const fucina_qmm_tile *tiles, float *dst,
-    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02) {
-    mul_mm_mma_body<32, block_q8_0, 2, dequant_q8_0>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
+    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02,
+    float *partial, int split_k, unsigned long long partial_stride) {
+    mul_mm_mma_body<32, block_q8_0, 2, dequant_q8_0>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02, partial, split_k, partial_stride);
 }
 extern "C" __global__ void fucina_mul_mm_mma_n32_q6_K(
     const char *src0, const float *src1, const fucina_qmm_tile *tiles, float *dst,
-    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02) {
-    mul_mm_mma_body<32, block_q6_K, 16, dequant_q6_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
+    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02,
+    float *partial, int split_k, unsigned long long partial_stride) {
+    mul_mm_mma_body<32, block_q6_K, 16, dequant_q6_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02, partial, split_k, partial_stride);
 }
 extern "C" __global__ void fucina_mul_mm_mma_n32_q4_K(
     const char *src0, const float *src1, const fucina_qmm_tile *tiles, float *dst,
-    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02) {
-    mul_mm_mma_body<32, block_q4_K, 16, dequant_q4_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
+    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02,
+    float *partial, int split_k, unsigned long long partial_stride) {
+    mul_mm_mma_body<32, block_q4_K, 16, dequant_q4_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02, partial, split_k, partial_stride);
+}
+
+extern "C" __global__ void fucina_reduce_split_k(
+    const float *__restrict__ partial,
+    float *__restrict__ dst,
+    unsigned long long elements,
+    int split_k) {
+    // Fixed split order preserves deterministic output for a given launch.
+    // Output rows are four-float aligned by the host contract; retain the tail
+    // for ABI robustness if that contract is relaxed later.
+    const unsigned long long i = ((unsigned long long)blockIdx.x * blockDim.x + threadIdx.x) * 4;
+    if (i >= elements) return;
+    if (i + 3 < elements) {
+        float4 sum = *(const float4 *)(partial + i);
+        for (int split = 1; split < split_k; ++split) {
+            const float4 value = *(const float4 *)(partial + (unsigned long long)split * elements + i);
+            sum.x += value.x;
+            sum.y += value.y;
+            sum.z += value.z;
+            sum.w += value.w;
+        }
+        *(float4 *)(dst + i) = sum;
+        return;
+    }
+    for (unsigned long long j = i; j < elements; ++j) {
+        float sum = partial[j];
+        for (int split = 1; split < split_k; ++split) {
+            sum += partial[(unsigned long long)split * elements + j];
+        }
+        dst[j] = sum;
+    }
 }
 
 // --- Decode GEMV (m <= 8) ----------------------------------------------------

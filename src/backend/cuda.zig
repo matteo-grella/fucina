@@ -87,6 +87,11 @@ const State = struct {
     /// Tensor-core quantized prefill kernel. FUCINA_GPU_QUANT_MMA=0 keeps the
     /// scalar-FFMA fallback for parity/performance diagnosis.
     quant_mma: bool = true,
+    /// Split substantially underfilled quantized prefill along K, then reduce
+    /// on-stream. The per-slot partial buffer is grow-only, so steady-state
+    /// dispatch remains allocation-free. FUCINA_GPU_QUANT_SPLIT_K=0 keeps one
+    /// block/output tile.
+    quant_split_k: bool = true,
     /// FUCINA_GPU_DECODE=1 opts into the experimental m<=8 dequant-dot GEMV
     /// decode arm (default off pending a sampled-token parity-oracle pass).
     decode_enabled: bool = false,
@@ -361,6 +366,10 @@ fn initConfigOnce() void {
     if (std.c.getenv("FUCINA_GPU_QUANT_MMA")) |v_ptr| {
         const v = std.mem.span(v_ptr);
         if (v.len > 0 and v[0] == '0') state.quant_mma = false;
+    }
+    if (std.c.getenv("FUCINA_GPU_QUANT_SPLIT_K")) |v_ptr| {
+        const v = std.mem.span(v_ptr);
+        if (v.len > 0 and v[0] == '0') state.quant_split_k = false;
     }
     if (std.c.getenv("FUCINA_GPU_DECODE")) |v_ptr| {
         const v = std.mem.span(v_ptr);
@@ -955,6 +964,7 @@ const AsyncSlot = struct {
     a_dev: DeviceBuf = .{},
     b_dev: DeviceBuf = .{},
     c_dev: DeviceBuf = .{},
+    partial_dev: DeviceBuf = .{},
     c_host: PinnedBuf = .{},
     aux_dev: DeviceBuf = .{},
     aux_host: PinnedBuf = .{},
@@ -1679,6 +1689,7 @@ const Kernels = struct {
     mul_mm: [3]api.CUfunction, // indexed by @intFromEnum(QFormat)
     mul_mm_mma: [3]?api.CUfunction,
     mul_mm_mma_n32: [3]?api.CUfunction,
+    reduce_split_k: ?api.CUfunction,
     gemv: [3]api.CUfunction,
     attn_f16: api.CUfunction,
     // ES kernels ([0] = f16, [1] = f32). Optional: a stale vendored PTX
@@ -1772,6 +1783,8 @@ fn ensureKernels(ctx: *Ctx) ?*Kernels {
         var f: api.CUfunction = null;
         ks.mul_mm_mma_n32[i] = if (d.cuModuleGetFunction(&f, module, name.ptr) == 0) f else null;
     }
+    var reduce_split_k: api.CUfunction = null;
+    ks.reduce_split_k = if (d.cuModuleGetFunction(&reduce_split_k, module, "fucina_reduce_split_k") == 0) reduce_split_k else null;
     for (gemv_names, 0..) |name, i| {
         if (d.cuModuleGetFunction(&ks.gemv[i], module, name.ptr) != 0) return null;
     }
@@ -1794,16 +1807,49 @@ const QuantMulMmLaunch = struct {
     kernel: api.CUfunction,
     n_tile: usize,
     block_y: c_uint,
+    split_k: c_uint = 1,
 };
 
-fn quantMulMmLaunch(ctx: *const Ctx, kernels: *const Kernels, format: QFormat, grid_x: usize, n: usize) QuantMulMmLaunch {
+fn quantMulMmLaunch(ctx: *const Ctx, kernels: *const Kernels, format: QFormat, grid_x: usize, n: usize, k: usize, allow_split_k: bool) QuantMulMmLaunch {
     const index: usize = @intCast(@intFromEnum(format));
     if (state.quant_mma and ctx.compute_major >= 7) {
         if (ctx.sm_count > 0) {
             const n64_tiles = n / 64 + @intFromBool(n % 64 != 0);
             const n64_blocks = std.math.mul(usize, grid_x, n64_tiles) catch std.math.maxInt(usize);
+            const sm_count: usize = @intCast(ctx.sm_count);
+            // A graphless adaptation of the Stream-K occupancy principle used
+            // by ik_llama.cpp's CUDA MMQ (ggml-cuda/mmq.cuh, audited at
+            // b90939934add9ba4fbb37e8c6470809a70b78f0a): when an eager N64
+            // output grid cannot occupy every SM, partition K and queue a
+            // deterministic reduction on the same persistent stream. Keeping
+            // the split small beats a fixed nSM launch for Fucina's short,
+            // already-tiled calls and bounds the reusable partial allocation.
+            // Do not double the grid merely to fill the last few SMs: the
+            // reduction then costs more than the small occupancy deficit. The
+            // 7/8 cutoff still admits the measured 64/76 Qwen grid.
+            const split_block_ceiling = sm_count - sm_count / 8;
+            if (allow_split_k and state.quant_split_k and kernels.reduce_split_k != null and n64_blocks < split_block_ceiling) {
+                const desired_split = sm_count / n64_blocks + @intFromBool(sm_count % n64_blocks != 0);
+                // On the 76-SM Ada reference host, three Q6 partitions fill 72
+                // slots for the 24-tile Parakeet shape; a fourth wave only adds
+                // reduction cost. Q4/Q8 reach their optimum with two.
+                const split_cap: usize = switch (format) {
+                    .q6_k => 3,
+                    .q4_k, .q8_0 => 2,
+                };
+                const max_split = @min(split_cap, @max(@as(usize, 1), k / 128));
+                const split_k = @min(desired_split, max_split);
+                if (split_k > 1) {
+                    if (kernels.mul_mm_mma[index]) |kernel| return .{
+                        .kernel = kernel,
+                        .n_tile = 64,
+                        .block_y = 16,
+                        .split_k = @intCast(split_k),
+                    };
+                }
+            }
             const weighted_blocks = std.math.mul(usize, n64_blocks, 3) catch std.math.maxInt(usize);
-            const sm_target = std.math.mul(usize, @intCast(ctx.sm_count), 2) catch std.math.maxInt(usize);
+            const sm_target = std.math.mul(usize, sm_count, 2) catch std.math.maxInt(usize);
             if (weighted_blocks < sm_target) {
                 if (kernels.mul_mm_mma_n32[index]) |kernel| return .{ .kernel = kernel, .n_tile = 32, .block_y = 8 };
             }
@@ -1911,22 +1957,55 @@ pub fn gemmQuantNtAsync(
         if (d.cuEventRecord(slot.inputs_ready, ctx.upload_stream) != 0 or
             d.cuStreamWaitEvent(ctx.stream, slot.inputs_ready, 0) != 0) return false;
 
-        const launch = quantMulMmLaunch(ctx, ks, format, tiles_per_batch, n);
+        // Staged/resident allocations are normally 16-byte aligned. A pending
+        // producer view may carry an arbitrary element offset; keep it on the
+        // scalar CUDA kernel rather than adding an alignment branch to every
+        // vector load in the hot WMMA K loop.
+        const launch = if (input_dev & 15 == 0)
+            quantMulMmLaunch(ctx, ks, format, tiles_per_batch, n, k, true)
+        else
+            QuantMulMmLaunch{
+                .kernel = ks.mul_mm[@intCast(@intFromEnum(format))],
+                .n_tile = 64,
+                .block_y = 16,
+            };
         const grid_y: c_uint = @intCast((n + launch.n_tile - 1) / launch.n_tile);
+        const output_elems_per_batch = std.math.mul(usize, m, n) catch return false;
+        const partial_elems_per_batch = std.math.mul(usize, output_elems_per_batch, @intCast(launch.split_k)) catch return false;
+        if (launch.split_k > 1) {
+            const partial_elems = std.math.mul(usize, batch_count, partial_elems_per_batch) catch return false;
+            const partial_bytes = std.math.mul(usize, partial_elems, @sizeOf(f32)) catch return false;
+            if (!slot.partial_dev.ensure(d, partial_bytes)) return false;
+        }
         for (0..batch_count) |bi| {
             var p_src0 = rhs_dev;
             var p_src1 = input_dev;
             var p_tiles = slot.aux_dev.ptr + bi * tiles_per_batch * @sizeOf(QMMTile);
             var p_dst = slot.c_dev.ptr + bi * m * n * @sizeOf(f32);
+            var p_partial: api.CUdeviceptr = if (launch.split_k > 1)
+                slot.partial_dev.ptr + bi * partial_elems_per_batch * @sizeOf(f32)
+            else
+                0;
             var p_ne00: c_int = @intCast(k);
             var p_ne01: c_int = @intCast(n);
             var p_nb01: u64 = @intCast(nb01);
             var p_nb02: u64 = @intCast(nb02);
+            var p_split_k: c_int = @intCast(launch.split_k);
+            var p_partial_stride: u64 = @intCast(output_elems_per_batch);
             var params = [_]?*anyopaque{
-                @ptrCast(&p_src0), @ptrCast(&p_src1), @ptrCast(&p_tiles), @ptrCast(&p_dst),
-                @ptrCast(&p_ne00), @ptrCast(&p_ne01), @ptrCast(&p_nb01),  @ptrCast(&p_nb02),
+                @ptrCast(&p_src0),    @ptrCast(&p_src1),    @ptrCast(&p_tiles),          @ptrCast(&p_dst),
+                @ptrCast(&p_ne00),    @ptrCast(&p_ne01),    @ptrCast(&p_nb01),           @ptrCast(&p_nb02),
+                @ptrCast(&p_partial), @ptrCast(&p_split_k), @ptrCast(&p_partial_stride),
             };
-            if (d.cuLaunchKernel(launch.kernel, @intCast(tiles_per_batch), grid_y, 1, 16, launch.block_y, 1, 0, ctx.stream, &params, null) != 0) return false;
+            if (d.cuLaunchKernel(launch.kernel, @intCast(tiles_per_batch), grid_y, launch.split_k, 16, launch.block_y, 1, 0, ctx.stream, &params, null) != 0) return false;
+            if (launch.split_k > 1) {
+                var p_elements: u64 = @intCast(output_elems_per_batch);
+                var reduce_params = [_]?*anyopaque{
+                    @ptrCast(&p_partial), @ptrCast(&p_dst), @ptrCast(&p_elements), @ptrCast(&p_split_k),
+                };
+                const reduce_grid: c_uint = @intCast((output_elems_per_batch + 1023) / 1024);
+                if (d.cuLaunchKernel(ks.reduce_split_k.?, reduce_grid, 1, 1, 256, 1, 1, 0, ctx.stream, &reduce_params, null) != 0) return false;
+            }
         }
         if (trace_on) tinc(&trace.h2d_bytes, tiles_bytes);
     }
@@ -2086,13 +2165,17 @@ pub fn gemmQGroupedNt(
     var p_ne01: c_int = @intCast(n_out);
     var p_nb01: u64 = @intCast(nb01);
     var p_nb02: u64 = @intCast(nb02);
-    var params = [_]?*anyopaque{
-        @ptrCast(&p_src0), @ptrCast(&p_src1), @ptrCast(&p_tiles), @ptrCast(&p_dst),
-        @ptrCast(&p_ne00), @ptrCast(&p_ne01), @ptrCast(&p_nb01),  @ptrCast(&p_nb02),
-    };
-    const launch = quantMulMmLaunch(ctx, ks, format, tiles.len, n_out);
+    const launch = quantMulMmLaunch(ctx, ks, format, tiles.len, n_out, k, false);
     const grid_y: c_uint = @intCast((n_out + launch.n_tile - 1) / launch.n_tile);
-    if (d.cuLaunchKernel(launch.kernel, @intCast(tiles.len), grid_y, 1, 16, launch.block_y, 1, 0, ctx.stream, &params, null) != 0) {
+    var p_partial: api.CUdeviceptr = 0;
+    var p_split_k: c_int = 1;
+    var p_partial_stride: u64 = 0;
+    var launch_params = [_]?*anyopaque{
+        @ptrCast(&p_src0),    @ptrCast(&p_src1),    @ptrCast(&p_tiles),          @ptrCast(&p_dst),
+        @ptrCast(&p_ne00),    @ptrCast(&p_ne01),    @ptrCast(&p_nb01),           @ptrCast(&p_nb02),
+        @ptrCast(&p_partial), @ptrCast(&p_split_k), @ptrCast(&p_partial_stride),
+    };
+    if (d.cuLaunchKernel(launch.kernel, @intCast(tiles.len), grid_y, 1, 16, launch.block_y, 1, 0, ctx.stream, &launch_params, null) != 0) {
         if (trace_on) tinc(&trace.cuda_err, 1);
         return false;
     }
@@ -2335,6 +2418,11 @@ pub fn setDecodeForTest(v: bool) void {
 fn setQuantMmaForTest(v: bool) void {
     ensureConfig();
     state.quant_mma = v;
+}
+
+fn setQuantSplitKForTest(v: bool) void {
+    ensureConfig();
+    state.quant_split_k = v;
 }
 
 // --- Prefill attention offload ------------------------------------------------
@@ -2912,6 +3000,15 @@ test "cuda eager async dense quant Q4_K/Q6_K/Q8_0 uses direct tensor storage" {
     if (comptime !enabled) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     if (context() == null) return error.SkipZigTest;
+    ensureConfig();
+    const saved_mma = state.quant_mma;
+    const saved_split_k = state.quant_split_k;
+    setQuantMmaForTest(true);
+    setQuantSplitKForTest(true);
+    defer {
+        setQuantMmaForTest(saved_mma);
+        setQuantSplitKForTest(saved_split_k);
+    }
 
     const dtype_mod = @import("../dtype.zig");
     var prng = std.Random.DefaultPrng.init(31);
@@ -2924,7 +3021,7 @@ test "cuda eager async dense quant Q4_K/Q6_K/Q8_0 uses direct tensor storage" {
         };
         const m = 65;
         const n = 68;
-        const k = 2 * comptime fmt.kMultiple();
+        const k: usize = @max(512, 2 * comptime fmt.kMultiple());
         const batch_count = 2;
         const bpr = k / comptime fmt.kMultiple();
         const resident = allocResidentBytes(batch_count * n * bpr * @sizeOf(Block)) orelse return error.SkipZigTest;

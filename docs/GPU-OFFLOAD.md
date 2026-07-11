@@ -78,7 +78,8 @@ input storage buffers until completion because the command uses unretained
 resource references for lower submission overhead.
 
 CUDA uses eight reusable in-flight slots. Each slot owns grow-only typed A/B/C
-and auxiliary tile buffers plus reusable input-ready/completion events.
+and auxiliary tile buffers, a grow-only split-K partial buffer, plus reusable
+input-ready/completion events.
 Ordinary f32/f16 storage is page-locked once with `cuMemHostRegister`; its `Resource` unregisters only when
 the backing allocation is destroyed, so `BufferPool` reuse amortizes page
 registration. H2D runs on the upload stream, which records an event consumed by
@@ -135,15 +136,55 @@ submission. CUDA keeps a pinned/device tile pair in each in-flight slot and
 launches the vendored dequant kernel on the persistent compute stream. On
 compute capability 7 or newer, Q4_K/Q6_K/Q8_0 prefill uses f16-input WMMA with
 f32 accumulation after dequantizing to the same half-rounded shared operands as
-the original scalar-FFMA kernel. The launcher chooses a 32-column tile only
-when a 64-column grid would fill less than two thirds of the SMs; ordinary LLM
-shapes use 64 columns to avoid duplicating activation loads. Full tiles store
-WMMA fragments directly to the exec-owned output and edge tiles use a guarded
-shared epilogue. The scalar kernel remains the compatibility and diagnostic
-fallback (`FUCINA_GPU_QUANT_MMA=0`). A shared-input batch encodes/launches one
-weight matrix after another without replicating activation rows. Transient
-quantized RHS slices retain the blocking path: deferring a command past the
-lifetime of an unowned byte borrow would be incorrect.
+the original scalar-FFMA kernel. The unsplit/grouped launcher chooses a
+32-column tile only when a 64-column grid would fill less than two thirds of
+the SMs; ordinary LLM shapes use 64 columns to avoid duplicating activation
+loads. Full tiles store WMMA fragments directly to the exec-owned output and
+edge tiles use a guarded shared epilogue. F32 activation loads and dequantized
+weight registers are
+packed into shared half storage with vector loads and `half2` conversions.
+When the N64 output grid fills less than roughly seven eighths of the SMs,
+dense prefill partitions K two ways (up to three for Q6_K), writes reusable
+partial planes, and queues a fixed-order reduction on the same compute stream
+before recording completion.
+There is no host fence or steady-state allocation. The scalar kernel remains
+the compatibility and diagnostic fallback (`FUCINA_GPU_QUANT_MMA=0`), while
+`FUCINA_GPU_QUANT_SPLIT_K=0` isolates the unsplit tensor-core path. A
+shared-input batch encodes/launches one weight matrix after another without
+replicating activation rows. Transient quantized RHS slices retain the blocking
+path: deferring a command past the lifetime of an unowned byte borrow would be
+incorrect.
+
+### What the ik_llama.cpp audit contributed
+
+The CUDA MMQ implementation in `ik_llama.cpp` was audited at commit
+`b90939934add9ba4fbb37e8c6470809a70b78f0a` (MIT), principally
+`ggml/src/ggml-cuda/mmq.cuh`, `mma.cuh`, and `quantize.cu`.
+
+Its synchronization machinery confirmed that Fucina was not missing another
+simple eager-provider trick. Ordinary ik_llama execution also retains
+nonblocking streams, reusable events, and pooled allocations. Its remaining
+launch-amortization mechanism is CUDA Graph capture of a complete ggml graph;
+that requires the operation sequence Fucina deliberately does not own and is
+therefore not portable to this eager API.
+
+The compatible idea was MMQ's Stream-K work partitioning. Fucina uses a
+smaller split-K specialization rather than copying that scheduler: only an
+underfilled dense eager WMMA launch is split, the normal output tiling remains
+unchanged, partial storage belongs to the existing bounded slot, and the
+reduction is another immediately submitted command on the same stream. Grouped
+MoE retains its phase scheduler and does not use this path. This preserves the
+callable-accelerator model while filling otherwise-idle SMs.
+
+The audit also identified a larger possible next step, not folded into this
+change. ik_llama quantizes each f32 activation tile once to a Q8_1-style int8
+layout (including scales/sums), unpacks quantized weights into a signed-int8
+shared layout, and uses int8 MMA. That can reduce repeated dequant/half-convert
+work, but it changes activation numerics and requires architecture-specific
+PTX variants: Fucina's portable committed module currently targets
+`compute_70`, while the useful signed-int8 MMA instructions differ across
+Turing and Ampere/Ada. It should be treated as a separately parity-gated
+backend rather than hidden inside the current f16-WMMA numerical contract.
 
 Grouped MoE remains phase-synchronous by necessity: CPU gather feeds gate/up,
 CPU GeGLU consumes that output and feeds down, and CPU scatter consumes down.
@@ -312,12 +353,39 @@ packed CPU comparison):
 | f16 32×4096×1024 resident | 725.3 | 87.1 | 3.9 | 4374.3 |
 | f16 128×4096×1024 resident | 1774.8 | 237.5 | 3.9 | 5240.1 |
 | f16 1×151936×1024 resident | 8232.8 | 797.6 | 3.9 | 421.7 |
-| Q4_K 32×4096×1024 | 263.7 | 116.5 | 4.9 | 3991.1 |
-| Q6_K 32×4096×1024 | 856.0 | 118.2 | 5.0 | 3879.5 |
-| Q8_0 32×4096×1024 | 660.0 | 119.7 | 4.6 | 4063.0 |
-| Q4_K 128×4096×4096 | 4267.1 | 1081.8 | 4.1 | 5414.8 |
-| Q6_K 128×4096×4096 | 8211.1 | 896.0 | 4.4 | 7048.8 |
-| Q8_0 128×4096×4096 | 3982.9 | 1026.1 | 4.1 | 5800.8 |
+| Q4_K 32×4096×1024 | 267.8 | 108.6 | 6.0 | 4074.7 |
+| Q6_K 32×4096×1024 | 881.1 | 111.5 | 5.9 | 4013.4 |
+| Q8_0 32×4096×1024 | 653.2 | 111.0 | 6.3 | 4133.5 |
+| Q4_K 128×4096×4096 | 4212.4 | 1035.1 | 4.0 | 5788.6 |
+| Q6_K 128×4096×4096 | 8144.7 | 844.3 | 3.7 | 7648.5 |
+| Q8_0 128×4096×4096 | 4038.9 | 973.6 | 4.0 | 6246.0 |
+
+Relative to the pre-audit f16-WMMA implementation, vectorized shared
+conversion plus split-K changed the most underfilled shapes as follows (same
+RTX host, queue four):
+
+| Format/shape | old → final GPU µs | latency | old → final queue GF/s | throughput |
+| --- | ---: | ---: | ---: | ---: |
+| Q4_K 32×1536×512 | 52.8 → 44.1 | -16.5% | 1709.2 → 1854.1 | +8.5% |
+| Q4_K 32×4096×4096 | 340.4 → 283.7 | -16.7% | 4184.1 → 5254.8 | +25.6% |
+| Q6_K 32×1536×512 | 52.4 → 44.8 | -14.5% | 1669.6 → 1834.0 | +9.8% |
+| Q6_K 32×4096×4096 | 282.1 → 237.7 | -15.7% | 5316.0 → 6802.5 | +28.0% |
+| Q8_0 32×1536×512 | 52.2 → 44.4 | -14.9% | 1798.9 → 1876.0 | +4.3% |
+| Q8_0 32×4096×4096 | 308.1 → 269.9 | -12.4% | 4687.4 → 5772.9 | +23.2% |
+
+All six final rows retained the same displayed CPU-reference maximum errors
+as the unsplit implementation (1.96e-3 to 6.06e-3). A same-binary
+split-on/off A/B/A/B of Qwen3-0.6B Q6_K pp32 averaged 749.7 versus 725.0 tok/s
+(+3.4%); individual process summaries were noisy on the laptop. Qwen3-4B
+Q4_K_M pp32 remained effectively flat (155.1 versus 154.1 tok/s), showing that
+host attention and other CPU boundaries can absorb an op-level gain.
+
+The committed PTX is generated through NVRTC by `tools/gen_cuda_ptx.zig`, the
+same frontend as `FUCINA_GPU_KERNELS=src`. This is performance-significant on
+the reference CUDA 12.0 toolkit: an interleaved Q6_K 32×4096×4096 audit put
+NVCC-generated PTX at 251.4 µs / 6382.8 GF/s and NVRTC at 241.3 µs / 6691.3
+GF/s. The regenerated committed artifact reproduced 241.1 µs / 6685.5 GF/s.
+All three results had the same 6.06e-3 maximum CPU-reference error.
 
 Against the scalar CUDA kernel in the same nine-iteration run, WMMA raised
 queued throughput by 11–37% over every non-decode Q4_K/Q6_K/Q8_0 shape in the

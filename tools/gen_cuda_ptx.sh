@@ -1,9 +1,10 @@
 #!/bin/sh
 # Regenerate the committed PTX for the -Dgpu=cuda provider's kernels
 # (src/backend/cuda/kernels.ptx from kernels.cu). Needs any Linux box with a
-# CUDA toolkit (nvcc); the default build never runs this — the PTX is a
+# CUDA toolkit (NVRTC); the default build never runs this — the PTX is a
 # vendored artifact like the generated unicode tables, and the driver JIT
-# compiles it at runtime.
+# compiles it at runtime. NVRTC deliberately matches FUCINA_GPU_KERNELS=src:
+# CUDA 12.0 NVCC emitted a measurably slower module from the same source.
 #
 #   tools/gen_cuda_ptx.sh            # regenerate in place
 #
@@ -12,16 +13,10 @@
 set -eu
 cd "$(dirname "$0")/.."
 
-NVCC=${NVCC:-nvcc}
-CCBIN=${CCBIN:-}
+ZIG=${ZIG:-zig}
 ARCH=${ARCH:-compute_70}
 
-ccbin_flag=""
-if [ -n "$CCBIN" ]; then
-    ccbin_flag="-ccbin $CCBIN"
-fi
-
-# shellcheck disable=SC2086
-"$NVCC" -ptx -arch="$ARCH" -std=c++17 -O3 $ccbin_flag \
-    src/backend/cuda/kernels.cu -o src/backend/cuda/kernels.ptx
+"$ZIG" run -lc --dep cuda_api -Mroot=tools/gen_cuda_ptx.zig \
+    -Mcuda_api=src/backend/cuda/api.zig -- \
+    src/backend/cuda/kernels.cu src/backend/cuda/kernels.ptx "$ARCH"
 echo "wrote src/backend/cuda/kernels.ptx ($(wc -c < src/backend/cuda/kernels.ptx) bytes, $ARCH)"

@@ -409,7 +409,7 @@ the launched program.
 | `doc-check` | Builds and runs `tools/check_doc_links.zig`: every backtick-quoted `*.md` in `AGENTS.md`'s "## Doc index" section (root docs and `docs/<name>.md`) must exist on disk. |
 | `snippet-check` | Builds and runs `tools/gen_snippet_tests.zig`: every runnable ```zig snippet in this document (a fenced block with a column-0 named `test "..."`) is extracted into a generated test root and run against the real `fucina`/`fucina_llm` modules with the build's option set — a snippet that stops compiling or asserting fails the gate (conventions in §2.7). |
 | `x86dot-check` | Runs the cross-ISA int8/Q4_K/Q8_0/TQ2_0 dot-kernel parity checker (`src/x86dot_check.zig`, always ReleaseSafe, deterministic output diffable across environments). The run leg follows `-Dtarget` (so `-Dtarget=x86_64-macos -Dcpu=baseline` under Rosetta drives the emulated x86 legs); four additional compile-only legs (x86_64_v3, alderlake, znver4, neoverse_v1) catch bit-rot of the AVX2/AVX-VNNI/AVX512-VNNI/smmla inline-asm arms that the local machine cannot execute. |
-| `cuda-check` | Compile-only `-Dgpu=cuda` legs: semantically analyzes the `fucina` and `fucina_llm` test roots for `x86_64-linux-gnu` with `gpu_kind=.cuda` (never run), so the CUDA provider cannot bit-rot on GPU-less/macOS machines. |
+| `cuda-check` | Compile-only `-Dgpu=cuda` legs: semantically analyzes the `fucina`/`fucina_llm` roots and NVRTC PTX generator for `x86_64-linux-gnu` with `gpu_kind=.cuda` (never run), so the CUDA provider/tooling cannot bit-rot on GPU-less/macOS machines. |
 | `bench-gate` | Runs `python3 tools/bench_gate.py` (a system command, not a Zig artifact): the paired Fucina-vs-llama.cpp benchmark gate; protocol in [`BENCHMARK.md`](BENCHMARK.md). Requires `tools/fetch_refs.sh --build` first. |
 
 **Example and tool runners** (each `zig build <step> -- <args>`; CLI details
@@ -693,6 +693,7 @@ values. On Linux without libc the lookup scans `/proc/self/environ`
 | `FUCINA_GPU_MIN_WORK_ATTN` (cuda) | Fused prefill-attention gate, in q·kv·heads·d work units. | `2^28` |
 | `FUCINA_GPU_DECODE` (cuda) | Non-`0` enables the opt-in dequant-dot decode GEMV (m ≤ 8, resident weights only). | off |
 | `FUCINA_GPU_QUANT_MMA` (cuda) | A value starting with `0` disables the tensor-core Q4_K/Q6_K/Q8_0 prefill kernels and selects the scalar-FFMA fallback (diagnostic A/B switch). | enabled on compute capability ≥ 7 |
+| `FUCINA_GPU_QUANT_SPLIT_K` (cuda) | A value starting with `0` disables the on-stream split-K/reduction used to fill idle SMs for underfilled dense quantized prefill (diagnostic A/B switch). | enabled when the N64 output grid fills less than roughly 7/8 of the SMs |
 | `FUCINA_GPU_VRAM_BUDGET` (cuda) | Weight-residency budget in bytes; `0` disables the bound. | 80% of free VRAM at init |
 | `FUCINA_GPU_KERNELS=src` (cuda) | NVRTC-recompiles the vendored kernels from `kernels.cu` instead of loading the committed PTX (dev loop; `tools/gen_cuda_ptx.sh` regenerates the PTX). | committed PTX |
 
@@ -7111,11 +7112,11 @@ Host binding is `dlopen` (`src/backend/cuda/api.zig`): `libcuda.so.1` and
 and `-Dgpu=cuda -Dtarget=x86_64-linux-gnu` cross-compiles from any machine.
 Missing libraries degrade per capability (no cuBLAS ⇒ only the f32/f16 GEMM
 arms are disabled). Quantized/GEMV/ES/attention kernels are vendored CUDA C
-(`cuda/kernels.cu`) shipped as committed PTX (`cuda/kernels.ptx`, driver JIT,
-disk-cached, ~26 ms cold), with an NVRTC recompile fallback
-(`FUCINA_GPU_KERNELS=src` forces it). Persistent upload, compute, and download
-streams use reusable events; cuBLAS stays bound to compute and submission holds
-a short dispatch lock. Pooled f32 host allocations are registered once for
+(`cuda/kernels.cu`) shipped as committed NVRTC-generated PTX
+(`cuda/kernels.ptx`, driver JIT, disk-cached, ~26 ms cold), with an NVRTC
+recompile fallback (`FUCINA_GPU_KERNELS=src` forces it). Persistent upload,
+compute, and download streams use reusable events; cuBLAS stays bound to
+compute and submission holds a short dispatch lock. Pooled f32 host allocations are registered once for
 direct asynchronous DMA. What offloads:
 
 - **f32 GEMM/GEMV** nn/tn/nt + strided-batched via cuBLAS, strict FP32 math by
@@ -7139,10 +7140,15 @@ direct asynchronous DMA. What offloads:
   its device address directly. Shared-input batches launch each weight matrix
   on the same stream without copying activation rows. On tensor-core devices,
   adaptive N32/N64 WMMA kernels consume the same half-rounded dequantized
-  operands as the scalar fallback and accumulate f32; N32 is selected only for
-  severe grid underfill. Full output tiles store directly and partial tiles use
-  guarded staging. `FUCINA_GPU_QUANT_MMA=0` retains the scalar path for
-  compatibility/diagnosis. Host download is deferred to the output Work.
+  operands as the scalar fallback and accumulate f32; N32 is retained for
+  severe grouped/unsplit grid underfill. If the dense N64 grid fills less than
+  roughly 7/8 of the SMs, prefill splits K two ways (up to three for Q6_K)
+  into a reusable per-slot buffer and queues a deterministic reduction on the
+  same stream before the completion event. No host synchronization is added.
+  Full output tiles store directly and partial tiles use guarded staging.
+  `FUCINA_GPU_QUANT_MMA=0` retains the scalar path;
+  `FUCINA_GPU_QUANT_SPLIT_K=0` isolates unsplit WMMA.
+  Host download is deferred to the output Work.
 - **Grouped MoE** uses the same tile kernel but keeps its required CPU phase
   boundaries (`qmoeStage`, `qmoe_lock`). Panel/tile H2D, compute, and panel D2H
   are now event-chained across persistent streams; the CPU performs one final
