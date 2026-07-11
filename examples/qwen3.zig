@@ -59,6 +59,9 @@ pub fn main(init: std.process.Init) !void {
     var minp_arg: ?f32 = null;
     var penalty_arg: ?f32 = null;
     var seed_arg: ?u64 = null;
+    var moe_stream_flag = false;
+    var moe_cache_mb: ?usize = null;
+    var moe_cache_slots: ?usize = null;
     var arg_i: usize = 2;
     while (arg_i < args.len) : (arg_i += 1) {
         const arg = args[arg_i];
@@ -216,6 +219,14 @@ pub fn main(init: std.process.Init) !void {
             regex_arg = args[arg_i];
         } else if (std.mem.startsWith(u8, arg, "--regex=")) {
             regex_arg = arg["--regex=".len..];
+        } else if (std.mem.eql(u8, arg, "--moe-stream")) {
+            moe_stream_flag = true;
+        } else if (std.mem.startsWith(u8, arg, "--moe-cache-mb=")) {
+            moe_stream_flag = true;
+            moe_cache_mb = try std.fmt.parseInt(usize, arg["--moe-cache-mb=".len..], 10);
+        } else if (std.mem.startsWith(u8, arg, "--moe-cache-slots=")) {
+            moe_stream_flag = true;
+            moe_cache_slots = try std.fmt.parseInt(usize, arg["--moe-cache-slots=".len..], 10);
         } else if (std.mem.startsWith(u8, arg, "--")) {
             try stdout.print("unknown flag: {s} (run with no arguments for usage)\n", .{arg});
             return error.UnknownArgument;
@@ -245,8 +256,22 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    var model = try llm.qwen3.model.Model.loadGgufFromFile(&ctx, &file, try llm.qwen3.model.Config.fromGguf(&file));
+    const load_options: llm.qwen3.model.LoadOptions = if (moe_stream_flag) .{
+        .moe_stream = .{
+            .gguf_path = args[1],
+            .cache_bytes = if (moe_cache_mb) |mb| mb << 20 else null,
+            .cache_slots_per_layer = moe_cache_slots,
+        },
+    } else .{};
+    var model = try llm.qwen3.model.Model.loadGgufFromFileOptions(&ctx, &file, try llm.qwen3.model.Config.fromGguf(&file), load_options);
     defer model.deinit();
+    defer if (model.expert_store) |store| {
+        const s = store.stats;
+        std.debug.print(
+            "moe stream: {d} acquires, hits {d} / misses {d} ({d:.1}% hit), {d:.2} GB read in {d:.2}s, cap {d} slots/layer\n",
+            .{ s.acquires, s.hits, s.misses, s.hitRate() * 100, @as(f64, @floatFromInt(s.bytes_read)) / 1e9, @as(f64, @floatFromInt(s.read_ns)) / 1e9, store.cap },
+        );
+    };
     // Build a tokenizer from the same file's metadata; tolerate models without it.
     var tokenizer: ?llm.tokenizer.Tokenizer = llm.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{}) catch null;
     defer if (tokenizer) |*t| t.deinit();

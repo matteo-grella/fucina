@@ -32,6 +32,7 @@ const DType = tensor.DType;
 const Tensor = tensor.Tensor;
 
 pub const MoeBatchProfile = exec_moe.MoeBatchProfile;
+pub const expert_store = @import("exec/expert_store.zig");
 
 pub const PackedMatmulFormat = backend_mod.PackedMatmulFormat;
 pub const parallel_dot_backward_branches = Backend.kind == .native and backend_mod.native_uses_blas;
@@ -2264,4 +2265,5 @@ pub const ExecContext = struct {
 
 test {
     _ = @import("exec_tests.zig");
+    _ = @import("exec/expert_store.zig");
 }

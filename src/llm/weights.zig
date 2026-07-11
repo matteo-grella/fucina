@@ -911,6 +911,66 @@ pub fn loadMoeRhs(
     };
 }
 
+/// Streamed counterpart of three `loadMoeRhs` calls: registers one layer's
+/// gate/up/down stacked expert tensors with the ExpertStore (which will
+/// `pread` individual experts on demand) instead of materializing or
+/// borrowing them. Nothing of the expert stacks is read here — only the
+/// geometry is validated, exactly as `loadMoeRhs` would.
+pub const StreamedMoeFfnRhs = struct {
+    gate: fucina.MoeRhs,
+    up: fucina.MoeRhs,
+    down: fucina.MoeRhs,
+};
+
+pub fn loadMoeRhsStreamed(
+    store: *fucina.ExpertStore,
+    file: *const gguf.File,
+    layer_i: usize,
+    gate_info: *const gguf.TensorInfo,
+    up_info: *const gguf.TensorInfo,
+    down_info: *const gguf.TensorInfo,
+    expected_in_dim: usize,
+    expected_out_dim: usize,
+    expected_n_expert: usize,
+) !StreamedMoeFfnRhs {
+    const specs = [3]fucina.expert_store.ProjSpec{
+        try streamedProjSpec(file, gate_info, expected_in_dim, expected_out_dim, expected_n_expert),
+        try streamedProjSpec(file, up_info, expected_in_dim, expected_out_dim, expected_n_expert),
+        // down transposes the FFN: (out_pe -> hidden).
+        try streamedProjSpec(file, down_info, expected_out_dim, expected_in_dim, expected_n_expert),
+    };
+    try store.addLayer(layer_i, specs, expected_n_expert);
+    return .{
+        .gate = .{ .streamed = store.streamedRhs(layer_i, .gate) },
+        .up = .{ .streamed = store.streamedRhs(layer_i, .up) },
+        .down = .{ .streamed = store.streamedRhs(layer_i, .down) },
+    };
+}
+
+fn streamedProjSpec(
+    file: *const gguf.File,
+    info: *const gguf.TensorInfo,
+    expected_in_dim: usize,
+    expected_out_dim: usize,
+    expected_n_expert: usize,
+) !fucina.expert_store.ProjSpec {
+    if (info.n_dims != 3) return Error.InvalidWeightShape;
+    if (info.dims[0] != expected_in_dim or info.dims[1] != expected_out_dim or info.dims[2] != expected_n_expert) return Error.InvalidWeightShape;
+    const quant: fucina.expert_store.StreamedQuant = switch (info.ggml_type) {
+        .q4_k => .q4_k,
+        .q5_k => .q5_k,
+        .q6_k => .q6_k,
+        else => return Error.UnsupportedWeightType,
+    };
+    return .{
+        .quant = quant,
+        .file_offset = @as(u64, file.data_offset) + info.offset,
+        .byte_len = info.data.len,
+        .in_dim = expected_in_dim,
+        .out_dim = expected_out_dim,
+    };
+}
+
 /// Tensor-valued wrapper for the generic Qwen-style SwiGLU MoE FFN. This keeps
 /// model code in public Tensor values while preserving the exact eager raw
 /// kernels and decode/prefill split underneath.

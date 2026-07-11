@@ -2,6 +2,7 @@ const std = @import("std");
 const backend_mod = @import("../backend.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const backend_ops = backend_mod.ops;
+const expert_store = @import("expert_store.zig");
 const moe_chain = @import("moe_chain.zig");
 const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
@@ -51,9 +52,16 @@ pub const MoeRhs = union(enum) {
     q4_k: backend_mod.QuantizedMatmulRhsQ4_K,
     q5_k: backend_mod.QuantizedMatmulRhsQ5_K,
     q6_k: backend_mod.QuantizedMatmulRhsQ6_K,
+    /// Disk-streamed expert stack (`exec/expert_store.zig`): same geometry
+    /// and kernels as the resident arms, but expert blocks resolve through
+    /// the store's acquire-scoped tier (pin → LRU → pread) instead of a
+    /// slice into one resident buffer. The store outlives the arm (owned by
+    /// the model), so `deinit` is a no-op here.
+    streamed: expert_store.StreamedMoeRhs,
 
     pub fn deinit(self: *MoeRhs) void {
         switch (self.*) {
+            .streamed => {},
             inline else => |*value| value.deinit(),
         }
         self.* = undefined;
@@ -61,24 +69,29 @@ pub const MoeRhs = union(enum) {
 
     pub fn rows(self: *const MoeRhs) usize {
         return switch (self.*) {
+            .streamed => |*value| value.rows(),
             inline else => |*value| value.n,
         };
     }
 
     pub fn k(self: *const MoeRhs) usize {
         return switch (self.*) {
+            .streamed => |*value| value.k,
             inline else => |*value| value.k,
         };
     }
 
     pub fn blocksPerColumn(self: *const MoeRhs) usize {
         return switch (self.*) {
+            .streamed => |*value| value.blocks_per_column,
             inline else => |*value| value.blocks_per_column,
         };
     }
 
     pub fn blockLen(self: *const MoeRhs) usize {
         return switch (self.*) {
+            // Virtual: the streamed stack never exists in memory at once.
+            .streamed => |*value| value.rows() * value.blocks_per_column,
             inline else => |*value| value.blocks.len,
         };
     }
@@ -121,6 +134,48 @@ fn validatePackedMoeInputs(
     return n_expert;
 }
 
+/// Scope of one layer op's streamed-expert residency: `acquireMoeStreamed`
+/// resolves the routed experts (LRU hits in place, misses read from disk)
+/// and locks the store; `release` promotes the misses into the LRU and
+/// unlocks. A no-op guard (resident arms) costs nothing.
+const MoeStreamGuard = struct {
+    store: ?*expert_store.ExpertStore = null,
+    layer: usize = 0,
+
+    fn release(self: *MoeStreamGuard) void {
+        if (self.store) |s| {
+            s.release(self.layer);
+            self.store = null;
+        }
+    }
+};
+
+/// The three projections of a streamed MoE layer stream as one unit (one
+/// slab per expert), so gate/up/down must all be streamed arms of the same
+/// store and layer; mixing resident and streamed projections is a wiring
+/// bug, not a supported configuration.
+fn acquireMoeStreamed(gate: *const MoeRhs, up: *const MoeRhs, down: *const MoeRhs, selected: []const usize) !MoeStreamGuard {
+    const sg = switch (gate.*) {
+        .streamed => |*v| v,
+        else => {
+            if (up.* == .streamed or down.* == .streamed) return tensor.TensorError.ShapeMismatch;
+            return .{};
+        },
+    };
+    const su = switch (up.*) {
+        .streamed => |*v| v,
+        else => return tensor.TensorError.ShapeMismatch,
+    };
+    const sd = switch (down.*) {
+        .streamed => |*v| v,
+        else => return tensor.TensorError.ShapeMismatch,
+    };
+    if (su.store != sg.store or sd.store != sg.store) return tensor.TensorError.ShapeMismatch;
+    if (su.layer != sg.layer or sd.layer != sg.layer) return tensor.TensorError.ShapeMismatch;
+    try sg.store.acquire(sg.layer, selected);
+    return .{ .store = sg.store, .layer = sg.layer };
+}
+
 /// out[0 .. m*out_dim] = `m` Q8_K-quantized input rows (`qlhs`) times expert
 /// `e`'s contiguous row-block of `rhs`. Single threaded — one expert's GEMM,
 /// run inside a pooled per-expert task. `m == 1` is the decode GEMV; `m > 1`
@@ -128,6 +183,41 @@ fn validatePackedMoeInputs(
 fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const backend_mod.quantized_matmul.BlockQ8_K, out: []f32, out_dim: usize, m: usize, c0: usize, c1: usize) void {
     const qm = backend_mod.quantized_matmul;
     switch (rhs.*) {
+        // Streamed expert: identical kernels over the store-resolved slab
+        // (the acquire that preceded this op pinned the pointer).
+        .streamed => |*s| {
+            const bpc = s.blocks_per_column;
+            const base = s.expertBytes(e);
+            switch (s.quant) {
+                .q5_k => {
+                    const blocks = @as([*]const qm.BlockQ5_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const view = backend_mod.QuantizedMatmulRhsQ5_K{ .allocator = null, .blocks = blocks, .k = s.k, .n = out_dim, .blocks_per_column = bpc };
+                    if (m >= 4) {
+                        qm.matmulQ5_KRhsCompactColOuter(out, qlhs, &view, out_dim, 0, m, c0, c1);
+                    } else {
+                        qm.matmulQ5_KRhsTile(out, qlhs, &view, out_dim, 0, m, c0, c1);
+                    }
+                },
+                .q6_k => {
+                    const blocks = @as([*]const qm.BlockQ6_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const view = backend_mod.QuantizedMatmulRhsQ6_K{ .allocator = null, .blocks = blocks, .k = s.k, .n = out_dim, .blocks_per_column = bpc };
+                    if (m >= 4) {
+                        qm.matmulQ6_KRhsCompactColOuter(out, qlhs, &view, out_dim, 0, m, c0, c1);
+                    } else {
+                        qm.matmulQ6_KRhsTile(out, qlhs, &view, out_dim, 0, m, c0, c1);
+                    }
+                },
+                .q4_k => {
+                    const blocks = @as([*]const qm.BlockQ4_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const view = backend_mod.QuantizedMatmulRhsQ4_K{ .allocator = null, .blocks = blocks, .k = s.k, .n = out_dim, .blocks_per_column = bpc };
+                    if (m >= 4) {
+                        qm.matmulQ4_KRhsCompactColOuter(out, qlhs, &view, out_dim, 0, m, c0, c1);
+                    } else {
+                        qm.matmulQ4_KRhsTile(out, qlhs, &view, out_dim, 0, m, c0, c1);
+                    }
+                },
+            }
+        },
         .q5_k => |*big| {
             const bpc = big.blocks_per_column;
             const view = backend_mod.QuantizedMatmulRhsQ5_K{ .allocator = big.allocator, .blocks = big.blocks[e * out_dim * bpc ..][0 .. out_dim * bpc], .k = big.k, .n = out_dim, .blocks_per_column = bpc };
@@ -171,6 +261,8 @@ fn moeExpertTileDot(rhs: *const MoeRhs, e: usize, qlhs: []const backend_mod.quan
 fn moeRhsUsesLanePacked(rhs: *const MoeRhs) bool {
     return switch (rhs.*) {
         .q4_k, .q5_k, .q6_k => true,
+        // Streamed arms are always K-quants (StreamedQuant's whole domain).
+        .streamed => true,
     };
 }
 
@@ -182,6 +274,27 @@ fn moeRhsUsesLanePacked(rhs: *const MoeRhs) bool {
 fn moeExpertTileDotX4Range(rhs: *const MoeRhs, e: usize, lhs_x4: []const backend_mod.quantized_matmul.BlockQ8_Kx4, m: usize, out: []f32, out_dim: usize, c0: usize, c1: usize) void {
     const qm = backend_mod.quantized_matmul;
     switch (rhs.*) {
+        .streamed => |*s| {
+            const bpc = s.blocks_per_column;
+            const base = s.expertBytes(e);
+            switch (s.quant) {
+                .q4_k => {
+                    const blocks = @as([*]const qm.BlockQ4_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const view = backend_mod.QuantizedMatmulRhsQ4_K{ .allocator = null, .blocks = blocks, .k = s.k, .n = out_dim, .blocks_per_column = bpc };
+                    qm.matmulQ4_KCompactQ8_Kx4ColOuter(out, lhs_x4, &view, out_dim, m, c0, c1);
+                },
+                .q5_k => {
+                    const blocks = @as([*]const qm.BlockQ5_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const view = backend_mod.QuantizedMatmulRhsQ5_K{ .allocator = null, .blocks = blocks, .k = s.k, .n = out_dim, .blocks_per_column = bpc };
+                    qm.matmulQ5_KCompactQ8_Kx4ColOuter(out, lhs_x4, &view, out_dim, m, c0, c1);
+                },
+                .q6_k => {
+                    const blocks = @as([*]const qm.BlockQ6_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const view = backend_mod.QuantizedMatmulRhsQ6_K{ .allocator = null, .blocks = blocks, .k = s.k, .n = out_dim, .blocks_per_column = bpc };
+                    qm.matmulQ6_KCompactQ8_Kx4ColOuter(out, lhs_x4, &view, out_dim, m, c0, c1);
+                },
+            }
+        },
         .q4_k => |*big| {
             const bpc = big.blocks_per_column;
             const view = backend_mod.QuantizedMatmulRhsQ4_K{ .allocator = big.allocator, .blocks = big.blocks[e * out_dim * bpc ..][0 .. out_dim * bpc], .k = big.k, .n = out_dim, .blocks_per_column = bpc };
@@ -516,6 +629,11 @@ pub fn moeExpertFfn(
     _ = try validatePackedMoeInputs(gate, up, down, selected, weights, top_k, hidden, out_pe);
     const profile_enabled = profile != null;
     const total_start = moeBatchProfileStart(profile_enabled, io);
+
+    // Streamed experts: resolve/read the routed set before any task spawns;
+    // the guard's release (after compute) promotes misses into the LRU.
+    var stream_guard = try acquireMoeStreamed(gate, up, down, selected);
+    defer stream_guard.release();
 
     const blocks_per_g = try qm.qkBlockCount(out_pe);
     const chain_task_count = try checkedMoeProduct(4, top_k);
@@ -1192,6 +1310,12 @@ pub fn moeExpertFfnBatch(
     const n_expert = try validatePackedMoeInputs(gate, up, down, selected, weights, n_pairs, hidden, out_pe);
     const profile_enabled = profile != null;
     const total_start = moeBatchProfileStart(profile_enabled, io);
+
+    // Streamed experts: resolve the batch's whole routed union up front
+    // (each missing expert read once, reused by every routed token —
+    // batch-union streaming); released after compute.
+    var stream_guard = try acquireMoeStreamed(gate, up, down, selected);
+    defer stream_guard.release();
 
     const bpc_in = try qm.qkBlockCount(hidden);
     const bpc_g = try qm.qkBlockCount(out_pe);

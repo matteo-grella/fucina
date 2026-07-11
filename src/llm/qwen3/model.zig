@@ -144,6 +144,29 @@ fn metaIntOpt(file: *const gguf.File, arch: []const u8, suffix: []const u8) ?usi
     return gguf_meta.metaIntOpt(file, arch, suffix, .reject_zero);
 }
 
+/// Opt-in disk streaming for the MoE expert stacks: experts stay on disk and
+/// are `pread` on demand through a tiered store (LRU + working set), so a
+/// mixture model loads with only its dense weights resident. Decode then
+/// pays disk reads for expert-cache misses — the explicit trade that lets a
+/// bigger-than-RAM model run at all (docs: out-of-core MoE).
+pub const MoeStreamOptions = struct {
+    /// Path of the same GGUF being loaded; the store opens its own read fd
+    /// (the load-time mmap is released after load — resident memory stays
+    /// dense weights + expert cache).
+    gguf_path: []const u8,
+    /// Total RAM budget for the expert LRU tier (all layers). Default: half
+    /// of available memory at load time.
+    cache_bytes: ?usize = null,
+    /// Fixed LRU slots per layer; wins over `cache_bytes` when set.
+    cache_slots_per_layer: ?usize = null,
+    /// OS readahead hints for miss batches.
+    readahead: bool = true,
+};
+
+pub const LoadOptions = struct {
+    moe_stream: ?MoeStreamOptions = null,
+};
+
 pub const Model = struct {
     allocator: Allocator,
     config: Config,
@@ -155,24 +178,47 @@ pub const Model = struct {
     /// The GGUF mmap, owned by the model when MoE expert blocks borrow from it
     /// (see loadMoeFfn); unmapped last in deinit.
     weight_mapping: ?gguf.File.MappedRegion = null,
+    /// Disk-streaming tier for MoE experts (`MoeStreamOptions`); destroyed
+    /// after the layers whose streamed arms point into it.
+    expert_store: ?*fucina.ExpertStore = null,
 
     pub fn loadGguf(ctx: *ExecContext, io: std.Io, path: []const u8, config: Config) !Model {
+        return loadGgufOptions(ctx, io, path, config, .{});
+    }
+
+    pub fn loadGgufOptions(ctx: *ExecContext, io: std.Io, path: []const u8, config: Config, options: LoadOptions) !Model {
         // mmap, matching the CLI (examples/qwen3.zig) and the other loaders:
         // avoids an eager multi-GB heap read that coexists with the
         // materialized weights, and lets MoE experts borrow straight from the
         // mapping (loadGgufFromFile takes ownership of it via takeMapping).
         var file = try gguf.File.loadMmap(ctx.allocator, io, path);
         defer file.deinit();
-        return loadGgufFromFile(ctx, &file, config);
+        return loadGgufFromFileOptions(ctx, &file, config, options);
     }
 
     /// Load weights from an already-parsed GGUF file. Lets the caller build a
     /// tokenizer from the same `file` (which carries the tokenizer metadata)
     /// without reading the model file twice.
     pub fn loadGgufFromFile(ctx: *ExecContext, file: *gguf.File, config: Config) !Model {
+        return loadGgufFromFileOptions(ctx, file, config, .{});
+    }
+
+    pub fn loadGgufFromFileOptions(ctx: *ExecContext, file: *gguf.File, config: Config, options: LoadOptions) !Model {
         try config.validate();
 
         const allocator = ctx.allocator;
+
+        var expert_store: ?*fucina.ExpertStore = null;
+        if (options.moe_stream) |stream_options| {
+            if (config.isMoe()) {
+                expert_store = try fucina.ExpertStore.create(allocator, stream_options.gguf_path, config.num_layers, .{
+                    .cache_bytes = stream_options.cache_bytes,
+                    .cache_slots_per_layer = stream_options.cache_slots_per_layer,
+                    .readahead = stream_options.readahead,
+                });
+            }
+        }
+        errdefer if (expert_store) |store| store.destroy();
 
         var token_embedding = try LinearWeight.load(ctx, try file.get("token_embd.weight"), config.vocab_size, config.hidden_size);
         errdefer token_embedding.deinit();
@@ -197,12 +243,17 @@ pub const Model = struct {
 
         const layers = try allocator.alloc(Layer, config.num_layers);
         errdefer allocator.free(layers);
-        try loadLayers(ctx, file, config, layers);
+        try loadLayers(ctx, file, config, layers, expert_store);
         errdefer for (layers) |*layer| layer.deinit();
+
+        if (expert_store) |store| try store.finalize();
 
         // MoE expert blocks borrow from the mmap (loadMoeFfn), so the model
         // takes ownership of the mapping; dense models keep nothing mapped.
-        const weight_mapping = if (config.num_experts > 0) file.takeMapping() else null;
+        // Streamed MoE never touches the expert pages through the mapping, so
+        // it keeps nothing mapped either: the caller's `file.deinit` munmaps
+        // and resident memory stays dense weights + the expert cache.
+        const weight_mapping = if (config.num_experts > 0 and expert_store == null) file.takeMapping() else null;
 
         return .{
             .allocator = allocator,
@@ -213,6 +264,7 @@ pub const Model = struct {
             .layers = layers,
             .kv_head_for_head = kv_head_for_head,
             .weight_mapping = weight_mapping,
+            .expert_store = expert_store,
         };
     }
 
@@ -223,7 +275,9 @@ pub const Model = struct {
         self.output.deinit();
         self.output_norm.deinit();
         self.token_embedding.deinit();
-        // Last: expert blocks borrowed from this mapping.
+        // Last: expert blocks borrowed from this mapping / streamed arms
+        // pointing into the store.
+        if (self.expert_store) |store| store.destroy();
         if (self.weight_mapping) |*mapping| mapping.deinit();
         self.* = undefined;
     }
@@ -686,16 +740,34 @@ fn loadDenseFfn(ctx: *ExecContext, file: *const gguf.File, config: Config, layer
     return .{ .input_proj = input_proj, .down_proj = down_proj };
 }
 
-fn loadMoeFfn(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i: usize) !MoeFfn {
+fn loadMoeFfn(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i: usize, store: ?*fucina.ExpertStore) !MoeFfn {
     var name_buf: [96]u8 = undefined;
+
+    var router = try LinearWeight.load(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "ffn_gate_inp.weight")), config.num_experts, config.hidden_size);
+    errdefer router.deinit();
+
+    // Streamed: register geometry only — the expert stacks stay on disk and
+    // never become resident. addLayer touches only this layer's state, so
+    // the parallel layer loader may call it concurrently for distinct layers.
+    if (store) |s| {
+        const trio = try weights.loadMoeRhsStreamed(
+            s,
+            file,
+            layer_i,
+            try file.get(try weights.layerName(&name_buf, layer_i, "ffn_gate_exps.weight")),
+            try file.get(try weights.layerName(&name_buf, layer_i, "ffn_up_exps.weight")),
+            try file.get(try weights.layerName(&name_buf, layer_i, "ffn_down_exps.weight")),
+            config.hidden_size,
+            config.moe_intermediate_size,
+            config.num_experts,
+        );
+        return .{ .router = router, .gate = trio.gate, .up = trio.up, .down = trio.down };
+    }
 
     // Expert blocks need no repack, so when the GGUF is mmap'd they are
     // borrowed straight from the mapping (the Model takes ownership of it in
     // loadGgufFromFile) instead of copying the multi-GB stacks.
     const borrow = file.is_mmap;
-
-    var router = try LinearWeight.load(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "ffn_gate_inp.weight")), config.num_experts, config.hidden_size);
-    errdefer router.deinit();
 
     var gate = try weights.loadMoeRhs(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "ffn_gate_exps.weight")), config.hidden_size, config.moe_intermediate_size, config.num_experts, borrow);
     errdefer gate.deinit();
@@ -716,7 +788,7 @@ const Layer = struct {
     o_proj: LinearWeight,
     ffn: Ffn,
 
-    fn load(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i: usize) !Layer {
+    fn load(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i: usize, store: ?*fucina.ExpertStore) !Layer {
         var name_buf: [96]u8 = undefined;
 
         var attn_norm = try weights.loadVector(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "attn_norm.weight")), config.hidden_size, .embed);
@@ -738,7 +810,7 @@ const Layer = struct {
         errdefer o_proj.deinit();
 
         var ffn: Ffn = if (config.isMoe())
-            .{ .moe = try loadMoeFfn(ctx, file, config, layer_i) }
+            .{ .moe = try loadMoeFfn(ctx, file, config, layer_i, store) }
         else
             .{ .dense = try loadDenseFfn(ctx, file, config, layer_i) };
         errdefer ffn.deinit();
@@ -771,9 +843,10 @@ const LayerLoader = struct {
     ctx: *ExecContext,
     file: *const gguf.File,
     config: Config,
+    store: ?*fucina.ExpertStore,
 
     pub fn load(self: LayerLoader, layer_i: usize) !Layer {
-        return Layer.load(self.ctx, self.file, self.config, layer_i);
+        return Layer.load(self.ctx, self.file, self.config, layer_i, self.store);
     }
 
     pub fn deinitLayer(_: LayerLoader, layer: *Layer) void {
@@ -783,8 +856,8 @@ const LayerLoader = struct {
 
 /// Load all transformer layers, in parallel across the work pool when
 /// available (see `gguf_meta.parallelLoadLayers` for the failure semantics).
-fn loadLayers(ctx: *ExecContext, file: *const gguf.File, config: Config, layers: []Layer) !void {
-    return gguf_meta.parallelLoadLayers(Layer, LayerLoader, ctx, .{ .ctx = ctx, .file = file, .config = config }, layers);
+fn loadLayers(ctx: *ExecContext, file: *const gguf.File, config: Config, layers: []Layer, store: ?*fucina.ExpertStore) !void {
+    return gguf_meta.parallelLoadLayers(Layer, LayerLoader, ctx, .{ .ctx = ctx, .file = file, .config = config, .store = store }, layers);
 }
 
 const SeparateAttentionProjection = struct {
