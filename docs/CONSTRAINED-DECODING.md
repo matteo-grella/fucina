@@ -156,7 +156,12 @@ Mechanics worth pinning:
   into the qwen3/gemma4 examples and the llm test roots. Off, a stub
   `Constraint` keeps every caller compiling and `init` returns
   `error.LlguidanceNotEnabled`; no Rust symbol is referenced, the build
-  stays pure Zig. Vendoring policy (crates-only + pinned `Cargo.lock`,
+  stays pure Zig. The staticlib keeps Rust's `panic = unwind` (the FFI's
+  `catch_unwind` converts grammar panics to error strings — `abort` would
+  lose that), which needs an unwinder at link time: libSystem covers macOS,
+  and non-macOS targets link Zig's bundled LLVM libunwind
+  (`configureLlguidance` in `build.zig`) — hermetic, no system libgcc_s
+  dependency. Vendoring policy (crates-only + pinned `Cargo.lock`,
   manifest deviations, the full-offline `cargo vendor` recipe, the update
   procedure): `vendor/llguidance/README.md`. Provenance:
   `docs/THIRD-PARTY-NOTICES.md`.
@@ -346,6 +351,7 @@ Consumers:
 | Constrained plain == speculative (greedy + sampled), forced spans drafted AND accepted, per-turn reset, batch == sequential per-stream constraints, shared-processor guard | `src/llm/chat_tests.zig` |
 | Doc snippets (incl. the flag-gated llguidance snippet) | `zig build snippet-check` (§2.7 convention) |
 | E2E schema/regex conformance, `--spec` byte-parity + acceptance, `--streams` cross-check | qwen3 runner on Qwen3-0.6B-Q8_0 (2026-07-11; commands in `RUNNING-MODELS.md`) |
+| Linux staticlib link + full gated suite (x86-64 glibc) | CI llguidance leg (`ci.yml`, ubuntu; §2.8) — first proven natively on the dev rig, 2026-07-11 |
 
 Reference documentation: REFERENCE.md §13.6 (seam + engine), §13.9.6
 (drafting), §2.2 (`-Dllguidance`), §13.8 (chat wiring).

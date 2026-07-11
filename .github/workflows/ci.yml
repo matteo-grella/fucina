@@ -39,3 +39,13 @@ jobs:
       - name: Unit tests (no-BLAS native backend)
         if: matrix.os == 'macos-15'
         run: zig build test -Dblas=none
+      # -Dllguidance leg (vendor/llguidance is Rust; the runner image ships
+      # cargo): un-skips the flag-gated tests and snippets, so the extern ABI,
+      # the cargo build, and the staticlib link cannot bit-rot behind a green
+      # default build — and Linux linking of the Rust staticlib stays proven.
+      - name: Unit tests + snippets (llguidance leg)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo --version
+          zig build test -Dllguidance=true
+          zig build snippet-check -Dllguidance=true

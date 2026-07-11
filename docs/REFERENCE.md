@@ -747,11 +747,18 @@ via `mlugg/setup-zig@v2`. Steps, in order:
    ubuntu, NEON/sdot on macOS) plus the compile-only bit-rot legs;
 7. `zig build test -Dbackend=scalar` — ubuntu only (the reference backend);
 8. `zig build test -Dblas=none` — macOS only (pure-Zig native kernels,
-   complementing the Accelerate run in step 1).
+   complementing the Accelerate run in step 1);
+9. `zig build test -Dllguidance=true` + `snippet-check -Dllguidance=true` —
+   ubuntu only (the runner image ships cargo): un-skips the flag-gated
+   llguidance tests and snippets (§2.7), keeping the extern ABI, the cargo
+   build, and the Rust-staticlib link from bit-rotting behind a green
+   default build — and continuously proving the Linux link of that
+   staticlib.
 
 Between the matrix and the conditional legs, every backend combination that
 can run on stock CI hardware is covered: native+BLAS, native without BLAS,
-and scalar, on both ISAs' unit-test surface. The CUDA GPU provider is
+and scalar, on both ISAs' unit-test surface, plus the opt-in llguidance
+feature on Linux. The CUDA GPU provider is
 covered by the compile-only `cuda-check` leg locally (not in CI); CPU dot
 ISA arms that CI cannot execute (AVX-VNNI, AVX512-VNNI, smmla) are covered
 by the compile-only legs and attestation records in `src/x86dot_check.zig`.
