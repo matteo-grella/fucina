@@ -941,6 +941,20 @@ pub fn loadMoeRhs(
             @memcpy(owned, src);
             break :blk .{ .iq2_xxs = .{ .rows = .{ .allocator = ctx.allocator, .blocks = owned, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
         },
+        .iq3_xxs => blk: {
+            const src = try blockSlice(fucina.BlockIQ3_XXS, info.data);
+            if (rows == 0 or src.len % rows != 0) return Error.InvalidWeightShape;
+            const bpc = src.len / rows;
+            if (try fucina.internal.backend_mod.quantized_matmul.qkBlockCount(in_dim) != bpc) return Error.InvalidWeightShape;
+            if (borrow) {
+                break :blk .{ .iq3_xxs = .{ .rows = .{ .allocator = null, .blocks = @constCast(src), .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
+            }
+            gguf.prefetch(info.data);
+            const owned = try ctx.allocator.alloc(fucina.BlockIQ3_XXS, src.len);
+            errdefer ctx.allocator.free(owned);
+            @memcpy(owned, src);
+            break :blk .{ .iq3_xxs = .{ .rows = .{ .allocator = ctx.allocator, .blocks = owned, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
+        },
         // Ternary experts (TQ2_0): nested generic rows container with
         // mutable blocks, so the borrow arm needs the sound @constCast.
         .tq2_0 => blk: {
@@ -1014,6 +1028,7 @@ fn streamedProjSpec(
         .tq2_0 => .tq2_0,
         .q2_k => .q2_k,
         .iq2_xxs => .iq2_xxs,
+        .iq3_xxs => .iq3_xxs,
         else => return Error.UnsupportedWeightType,
     };
     return .{

@@ -539,9 +539,10 @@ test "tq2_0 ternary experts: streamed decode and batch are bit-exact vs resident
     try std.testing.expectEqualSlices(f32, want_b.dataConst(), got_b.dataConst());
 }
 
-test "q2_k and iq2_xxs experts: streamed decode and batch are bit-exact vs resident" {
-    // The community 2-bit tier (UD-IQ2_XXS files mix iq2_xxs and q2_k expert
-    // stacks): gate/up iq2_xxs, down q2_k. Fixtures are synthetic — every
+test "q2_k, iq2_xxs, and iq3_xxs experts: streamed decode and batch are bit-exact vs resident" {
+    // The community 2-bit tier (UD-IQ2_XXS files mix iq2_xxs, iq3_xxs, and
+    // q2_k expert stacks): gate iq2_xxs, up iq3_xxs, down q2_k. Fixtures are
+    // synthetic — every
     // byte pattern is a valid block for these formats (grid indices index
     // 256-entry tables, sign words index 128-entry tables), so patterned
     // bytes with mild f16 scales exercise the kernels deterministically.
@@ -560,7 +561,7 @@ test "q2_k and iq2_xxs experts: streamed decode and batch are bit-exact vs resid
     const down_bpc = t_ffn / qm.qk_k_block_size;
     const gate_blocks = try allocator.alloc(qm.BlockIQ2_XXS, gu_rows * gu_bpc);
     defer allocator.free(gate_blocks);
-    const up_blocks = try allocator.alloc(qm.BlockIQ2_XXS, gate_blocks.len);
+    const up_blocks = try allocator.alloc(qm.BlockIQ3_XXS, gu_rows * gu_bpc);
     defer allocator.free(up_blocks);
     const down_blocks = try allocator.alloc(qm.BlockQ2_K, down_rows * down_bpc);
     defer allocator.free(down_blocks);
@@ -570,7 +571,7 @@ test "q2_k and iq2_xxs experts: streamed decode and batch are bit-exact vs resid
     }
     for (up_blocks, 0..) |*b, i| {
         b.d = f16Bits(0.015);
-        for (&b.qs, 0..) |*q, j| q.* = @truncate((i * 6007 + j * 92821 + 17) % 65536);
+        for (&b.qs, 0..) |*q, j| q.* = @truncate((i * 6007 + j * 92821 + 17) % 256);
     }
     for (down_blocks, 0..) |*b, i| {
         for (&b.scales, 0..) |*v, j| v.* = @truncate((i * 31 + j * 7) % 256);
@@ -604,7 +605,7 @@ test "q2_k and iq2_xxs experts: streamed decode and batch are bit-exact vs resid
         .n = gu_rows,
     } };
     defer resident_gate.deinit();
-    var resident_up: MoeRhs = .{ .iq2_xxs = .{
+    var resident_up: MoeRhs = .{ .iq3_xxs = .{
         .rows = .{ .allocator = null, .blocks = up_blocks, .rows = gu_rows, .cols = t_hidden, .blocks_per_row = gu_bpc },
         .k = t_hidden,
         .n = gu_rows,
@@ -620,13 +621,13 @@ test "q2_k and iq2_xxs experts: streamed decode and batch are bit-exact vs resid
     defer resident_down.deinit();
 
     const gate_bytes = gate_blocks.len * @sizeOf(qm.BlockIQ2_XXS);
-    const up_bytes = up_blocks.len * @sizeOf(qm.BlockIQ2_XXS);
+    const up_bytes = up_blocks.len * @sizeOf(qm.BlockIQ3_XXS);
     const down_bytes = down_blocks.len * @sizeOf(qm.BlockQ2_K);
     var store = try ExpertStore.create(allocator, &.{path}, 1, .{ .cache_slots_per_layer = 2 });
     defer store.destroy();
     try store.addLayer(0, .{
         .{ .quant = .iq2_xxs, .file_offset = 0, .byte_len = gate_bytes, .in_dim = t_hidden, .out_dim = t_ffn },
-        .{ .quant = .iq2_xxs, .file_offset = gate_bytes, .byte_len = up_bytes, .in_dim = t_hidden, .out_dim = t_ffn },
+        .{ .quant = .iq3_xxs, .file_offset = gate_bytes, .byte_len = up_bytes, .in_dim = t_hidden, .out_dim = t_ffn },
         .{ .quant = .q2_k, .file_offset = gate_bytes + up_bytes, .byte_len = down_bytes, .in_dim = t_ffn, .out_dim = t_hidden },
     }, t_experts);
     try store.finalize();
