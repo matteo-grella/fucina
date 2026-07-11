@@ -129,6 +129,55 @@ Other flags: `--repeat N` (re-run forward), `--profile` (per-block timings), `--
 `--stop TOKEN_ID`, `--json-schema J|@F` / `--lark G|@F` / `--regex P` (mutually
 exclusive; `@F` reads the grammar from a file).
 
+### Streaming MoE experts from disk (out-of-core: models bigger than RAM)
+
+`--moe-stream` keeps only the dense weights resident and reads the routed
+experts on demand from the GGUF through a tiered store — pinned hot set →
+per-layer LRU cache → `pread` — so a mixture model whose expert stacks dwarf
+physical RAM still loads and decodes. Output is bit-identical to the resident
+path (same blocks, same kernels); the price is disk reads on cache misses,
+i.e. tokens per second. llama.cpp split GGUFs (`-00001-of-0000N`) load
+transparently.
+
+```sh
+# Qwen3-235B-A22B Q4_K_M (142 GB, 3 split parts) on a 64 GB machine:
+# point at part 1; ~24 GB peak RSS with a 20 GB expert budget.
+zig build qwen3 -Doptimize=ReleaseFast -- \
+  models/Qwen3-235B-A22B-Instruct-2507-Q4_K_M-00001-of-00003.gguf \
+  --prompt "The three most important ideas in computer science are" \
+  --gen 64 --moe-stream --moe-cache-mb=20480
+
+# Same, with router-lookahead readahead and warm-restart chat
+zig build qwen3 -Doptimize=ReleaseFast -- <part1.gguf> \
+  --chat "..." --moe-stream --moe-cache-mb=20480 --moe-pilot --kv-save
+```
+
+Measured on that 235B/64 GB configuration (M1 Max): cold 0.66 tok/s at a
+52% hit rate (131 GB streamed for prefill + 24 tokens); the second run
+auto-pins the hottest 944 experts (10.7 GB) from the recorded usage history
+and reaches 0.81 tok/s at 59% — the engine gets faster the more it is used.
+On the 30B MoE (fits in RAM), streaming trades nothing but speed: byte-
+identical greedy output at half the resident-path RSS.
+
+Knobs:
+
+- `--moe-cache-mb=N` / `--moe-cache-slots=N` — RAM budget for the streamed
+  tiers (default: half of available memory) or a fixed per-layer LRU size.
+- `--moe-pin-mb=N` / `--moe-no-learn` — pinned-tier budget (default: half
+  the budget once the sidecar `<gguf>.experts` histogram has enough
+  history), or disable the learning cache entirely.
+- `--moe-pilot` — router lookahead: predict the next layer's experts from
+  the current post-attention state and readahead them from a background
+  I/O thread while the current layer computes. Measured recall of the
+  one-layer-ahead prediction: 87.6% (30B), 90.5% (235B). Never changes
+  output.
+- `--moe-expert-top-p=F` — routing sparsification: keep experts per token
+  up to cumulative router weight F and skip the rest (30B: F=0.7 cut disk
+  traffic 55%). Quality-traded; `F>=1` is the exact baseline.
+- `--kv-save[=PATH]` — crash-safe KV persistence for `--chat`/`--repl`:
+  conversations reopen warm across process restarts with zero re-prefill
+  (essential below 1 tok/s). Default sidecar `<gguf>.kvcache`.
+
 ---
 
 ## Gemma 4 26B-A4B (MoE) — `zig build gemma4`
