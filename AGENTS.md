@@ -32,6 +32,7 @@ zig build run                  # smoke example (examples/smoke.zig)
 zig build qwen3 -- <args>      # Qwen3 GGUF inference (examples/qwen3.zig; --spec/--spec-ref = lossless speculative decode, --tokenize = tokenizer-parity oracle)
 zig build gemma4 -- <args>     # Gemma 4 GGUF inference / logit-parity harness; --chat/--repl/--spec (examples/gemma4.zig)
 zig build qwen35 -- <args>     # Qwen3.5 (qwen35 hybrid Gated-DeltaNet) GGUF — loader/parity harness (examples/qwen35.zig; see docs/RUNNING-MODELS.md)
+zig build lmserve -- <args>    # OpenAI-compatible LM server (chat completions + stateless responses, SSE, JSON-schema constrained output w/ -Dllguidance=true) over qwen3/gemma4/diffusion-gemma GGUFs + nanochat checkpoints (examples/lmserve.zig; see docs/LMSERVER.md)
 zig build parakeet -- <args>   # Parakeet ASR (NeMo FastConformer): WAV → text; --stream/--manifest/--mic (needs -Dparakeet-mic), --compare parity harness (examples/parakeet.zig)
 zig build omnivoice -- <args>  # OmniVoice MaskGIT TTS: voice cloning/design/auto, codec encode/decode, parity oracles (examples/omnivoice.zig)
 zig build facedetect -- <args> # buffalo_l face pipeline (face-detect.cpp port): info/detect/embed/verify/analyze + bench paired CPU harness (examples/facedetect.zig)
@@ -217,6 +218,7 @@ trained on older Zig:
 - `docs/ARCHITECTURE.md` — the current Zig architecture from the actual source layout. Start here for structure.
 - `docs/REFERENCE.md` — the detailed API reference: the full public surface with exact semantics (ownership, errors, defaults, thread-safety) and machine-verified example snippets for every important feature. Start here to *use* the library.
 - `docs/RUNNING-MODELS.md` — CLI cheat sheet: copy-paste commands to run every supported model (qwen3 chat/spec/bench, gemma4, diffusion-gemma, qwen35, omnivoice, the finetune→merge→serve loop, global knobs). Model weights are not bundled; it says where to get them.
+- `docs/LMSERVER.md` — the lmserve example: OpenAI chat-completions + stateless responses mapping tables (honored/rejected/ignored), the accept-concurrently/generate-sequentially architecture, streaming contracts (SSE chunk + semantic-event skeletons), constrained-output plumbing, the per-model Backend matrix.
 - `docs/BENCHMARK.md` — benchmark protocol for the Qwen GGUF runner, plus dated measurement snapshots/addenda. Read before making perf claims.
 - `docs/MEMORY-MODEL.md` — why transient memory uses per-tensor `defer deinit` + `BufferPool` (not an arena); rationale, file:line evidence, the optional "frame" helper, and sharp edges.
 - `docs/TRAINING.md` — training guide: tensor-lifetime rules, exec scopes, optimizers/param groups/LR schedules/clipping, gradient accumulation, cross-entropy options, dropout + the deterministic-RNG contract, gradient checkpointing, checkpoint directory contracts, LoRA + Qwen3 GGUF fine-tuning, gradient verification, the fine-tune→merge→quantize→serve export loop, bf16 policy, bench numbers, evolution strategies (gradient-free ES-at-scale, §13).

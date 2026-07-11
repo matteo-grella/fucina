@@ -262,6 +262,42 @@ zig build qwen35 -Doptimize=ReleaseFast -- models/Qwen3.5-0.8B-Q8_0.gguf --linea
 
 ---
 
+## OpenAI-compatible LM server — `zig build lmserve`
+
+One process serves one model behind `POST /v1/chat/completions` and the
+stateless `POST /v1/responses` (plus `GET /v1/models`, `GET /health`), with
+SSE streaming in both dialects. The GGUF's `general.architecture` picks the
+backend (qwen3/qwen3moe/gemma4/diffusion-gemma); `--nanochat <dir>` serves a
+nanochat checkpoint. Point any OpenAI client at `http://host:port/v1`. See
+`docs/LMSERVER.md` for the exact API mapping and design.
+
+```sh
+# Serve Qwen3 with JSON-schema/regex/Lark constrained output enabled
+zig build lmserve -Dllguidance=true -Doptimize=ReleaseFast -- \
+  models/Qwen3-0.6B-Q8_0.gguf --port 8080
+
+# Talk to it with any OpenAI client (SSE streaming: add "stream": true)
+curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "messages": [{"role":"user","content":"Give me facts about Paris."}],
+  "response_format": {"type":"json_schema","json_schema":{"name":"city","schema":{
+    "type":"object","properties":{"city":{"type":"string","maxLength":30},
+    "population":{"type":"integer","maximum":99999999}},
+    "required":["city","population"],"additionalProperties":false}}}}'
+
+# Gemma 4 MoE (zero-copy expert load) / nanochat checkpoint dir
+zig build lmserve -Doptimize=ReleaseFast -- models/gemma-4-26B-A4B-it-UD-Q6_K.gguf --experts=borrow
+zig build lmserve -Doptimize=ReleaseFast -- --nanochat runs/sft
+```
+
+Flags: `--host --port --ctx --api-key --queue --conns --experts=borrow
+--nanochat` (`--help` lists them). Requests are accepted concurrently and
+generated sequentially (one inference worker; the queue bounds admission —
+overflow gets 429). Reasoning is off by default; clients enable it per
+request via `reasoning_effort` (qwen3 routes `<think>` text to
+`reasoning_content`).
+
+---
+
 ## OmniVoice TTS (MaskGIT, voice cloning/design) — `zig build omnivoice`
 
 Weights: `omnivoice-base-{F32,BF16,Q8_0,Q4_K_M}.gguf` +
@@ -456,8 +492,9 @@ zig build export-gguf -Doptimize=ReleaseFast -- --from-gguf models/Qwen3-0.6B-f1
 zig build export-gguf -Doptimize=ReleaseFast -- --from-gguf tuned-f16.gguf \
   --out tuned.gguf --dtype q8_0
 
-# Serve the result
+# Serve the result (CLI chat, or over HTTP — see "OpenAI-compatible LM server")
 zig build qwen3 -Doptimize=ReleaseFast -- tuned.gguf --chat "Who are you?"
+zig build lmserve -Doptimize=ReleaseFast -- tuned.gguf --port 8080
 ```
 
 `export-gguf` also re-emits/transcodes without adapters:

@@ -113,6 +113,10 @@ mkdir -p models
 hf download Qwen/Qwen3-0.6B-GGUF Qwen3-0.6B-Q8_0.gguf --local-dir models
 zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf \
   --chat "What is the capital of France?" --no-think
+
+# or serve it to any OpenAI client (chat completions + responses, SSE
+# streaming, JSON-schema constrained output with -Dllguidance=true)
+zig build lmserve -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --port 8080
 ```
 
 Build with `-Doptimize=ReleaseFast` whenever speed matters (Debug is 10–50x
@@ -194,6 +198,7 @@ issues.
 | `docs/ARCHITECTURE.md` | the actual source layout, layer by layer — start here |
 | `docs/REFERENCE.md` | the detailed API reference: the full public surface, exact semantics, machine-verified snippets |
 | `docs/RUNNING-MODELS.md` | copy-paste CLI commands + verified weight downloads for every model |
+| `docs/LMSERVER.md` | the lmserve example: OpenAI API mapping tables, streaming contracts, server architecture |
 | `docs/BENCHMARK.md` | the measurement protocol and dated Fucina-vs-llama.cpp records, wins and losses |
 | `docs/TRAINING.md` | the training guide: autograd, optimizers, LoRA, evolution strategies, checkpoints, gradient verification |
 | `docs/MEMORY-MODEL.md` | ownership rules and the buffer-pool-not-arena adjudication |
