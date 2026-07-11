@@ -846,7 +846,7 @@ unsupported operation is a compile error, never a runtime failure
 | Branch | dtypes | Capabilities |
 |---|---|---|
 | Float (differentiable) | `.f32` | Full surface: autograd (`variable`, `backward`, `grad`), all math/NN ops (§4), all views and structural ops |
-| Typed float constant | `.f16`, `.bf16`, `.f64` (`supportsForwardFloatMath`) | Constants only, forward-only math (`add/sub/mul/div/sum/mean/sumAll/dot`, `to`), plus the same reduced structural set as the typed constants below (§3.10 lists it; no `split`/`merge`/`flatten`/`pad`/`flip`/`roll`/`stack`/…) |
+| Typed float constant | `.f16`, `.bf16`, `.f64` (`supportsForwardFloatMath`) | Constants only, forward-only math: the native typed set (`add/sub/mul/div/sum/mean/sumAll/dot/scale/divScalar`, `to`), the full structural set (`split`/`merge`/`flatten`/`reshape`/`sliceStep`/`flip`/`roll`/`stack`/`repeatAxis` + the §3.10 base set), and — **f16/bf16 only** — the widened forward set (unary family, gated, softmax/norm family, remaining reductions, masks, `pad`, `einsum`; §4.19) |
 | Typed scalar constant | `.bool`, `.u8`, `.u16`, `.i8`, `.i16`, `.i32`, `.i64` | Constants only, **no math, no `to`**; construction, data access, and structural ops |
 | Block-quantized constant | `q1_0`, `q4_0 … q8_k`, `iq*`, `tq1_0/tq2_0`, `mxfp4`, `nvfp4` (`isBlockQuantized`) | Constants only; block construction, `to(.f32)` dequantize, `getRows`, row `concat`, `packRhs`/`packRhsLayout` (§10) |
 
@@ -1748,8 +1748,21 @@ is the N-ary companion of `einsum` (§4.8).
 `narrow`, `concat`, `setSlice`, `setRows` — all §3.
 
 **Typed float-constant branch** (`.f16`/`.bf16`/`.f64`): everything in the
-scalar-constant branch, plus `to` (§3.8) and the forward-only math `add`,
-`sub`, `mul`, `div`, `sum`, `mean`, `sumAll`, `dot` (§4).
+scalar-constant branch, plus `to` (§3.8), the forward-only math `add`,
+`sub`, `mul`, `div`, `sum`, `mean`, `sumAll`, `dot`, `scale`, `divScalar`,
+and the structural set `split`, `merge`, `flatten`, `reshape`, `sliceStep`,
+`flip`, `roll`, `stack`, `repeatAxis`. **f16/bf16 only** (each computes
+through f32 and narrows once; a compile error on f64 — §4.19): `unary` and
+the named unary aliases (`relu`, `exp`, `sqrt`, `rsqrt`, `sigmoid`, `silu`,
+`log`, `log1p`, `neg`, `abs`, `sin`, `cos`, `tanh`, `fastTanh`, `softcap30`,
+`softcap15`, `gelu`, `quickGelu`, `elu`, `geluErf`, `floor`, `ceil`,
+`round`, `sign`, `reciprocal`), `leakyRelu`, `clamp`, `addScalar`,
+`subScalar`, `powScalar`, `maximum`, `minimum`, `gated`, `glu`, `swiglu`,
+`geglu`, `softmax` (plain `.{}` options), `logSoftmax`, `rmsNorm`,
+`rmsNormMul`, `layerNorm` (plain `.{}` options), `cumsum`, `cumprod`,
+`where`, `maskedFill`, `compare`, `pad`, `einsum`, and the widened
+reductions `max`, `min`, `argmax`, `prod`, `variance`, `logsumexp`
+(f32 results, §8.3).
 
 **Block-quantized branch:** `constant`, `fromTensor`, `fromBlocks`,
 `fromStorageSlice`, `fromBorrowedBlocks`, `deinit`, `asRawTensor`, `data`,
@@ -3156,20 +3169,69 @@ breakdown the caller can pass to profile a run.
 ### 4.19 Math on non-f32 tensors (`src/ag/tensor.zig`)
 
 `Tensor(.{ .dtype = dt, .tags = ... })` instantiates typed constant tensors
-(§3, §8). Their math surface is a strict subset, always no-grad:
+(§3, §8). Their math surface is forward-only, always no-grad:
 
-- **f16 / bf16 / f64** (`supportsForwardFloatMath`): `to` (cast), `add`,
-  `sub`, `mul`, `div` (same dtype both sides — cast explicitly), `sum`,
-  `mean`, `sumAll`, `dot`, plus the structural/indexing subset (`gather`,
-  `narrow`, `concat`, `setSlice`, `setRows`, `broadcastTo`, views).
-  Pointwise and `dot` keep the input dtype; reductions widen f16/bf16
-  results to f32 (§4.7, §8).
+- **f16 / bf16 / f64** (`supportsForwardFloatMath`) — native typed kernels:
+  `to` (cast), `add`, `sub`, `mul`, `div` (same dtype both sides — cast
+  explicitly), `sum`, `mean`, `sumAll`, `dot`, `scale`, `divScalar`, plus
+  the full structural set (`split`, `merge`, `flatten`, `reshape`,
+  `sliceStep`, `flip`, `roll`, `stack`, `repeatAxis`, and the indexing
+  subset `gather`, `narrow`, `concat`, `setSlice`, `setRows`,
+  `broadcastTo`, views). Pointwise and `dot` keep the input dtype;
+  reductions widen f16/bf16 results to f32 (§4.7, §8).
+- **f16 / bf16 only — the widened forward set.** Ops with no native typed
+  kernel lower to widen → f32 kernel → narrow-once (f32 arithmetic and
+  accumulation with a single final round, the §8.3 policy; on f64 they are
+  a compile error — f64 math must not round through f32). Shape-preserving
+  ops keep the input dtype: the unary family (`unary(op)` and every named
+  alias listed in §3.10), `leakyRelu`, `clamp`, `addScalar`, `subScalar`,
+  `powScalar`, `maximum`, `minimum`, `gated`/`glu`/`swiglu`/`geglu`,
+  `softmax` and `layerNorm` (plain `.{}` options only — cast to f32 for
+  the ext/affine paths), `logSoftmax`, `rmsNorm`, `rmsNormMul` (same-dtype
+  weight), `cumsum`, `cumprod`, `where`, `maskedFill`, `compare` (0/1 mask
+  in the input dtype), `pad`, and `einsum` (same-dtype operands, f32 GEMM
+  lowering — the typed `dot` contract). The widened reductions `max`,
+  `min`, `argmax`, `prod`, `variance`, `logsumexp` return **f32** like the
+  native typed `sum`/`mean` (§8.3).
 - **Block-quantized** (q8_0, q4_k, ...): no arithmetic — `to(.f32)`
   (dequantize), `getRows` (§4.17), row-axis `concat`, `packRhs` /
   `packRhsLayout` (§4.9), and constructors/views (§3, §10). Their main math
   role is as the constant RHS of `dot` (§4.8) and `dotPacked` (§4.9).
 - **Integer dtypes** (e.g. token-id tensors): constructors, data access,
   and the structural subset only.
+
+Because the widened ops run the identical f32 kernels and round once on
+store, their results are bit-identical to "cast up, run the f32 op, cast
+down" — pinned by parity tests in `src/ag/tensor_tests.zig`:
+
+```zig
+test "bf16 forward ops compute through f32 and narrow once" {
+    const alloc = std.testing.allocator;
+    var ctx: fucina.ExecContext = undefined;
+    ctx.init(alloc);
+    defer ctx.deinit();
+
+    var x = try fucina.Tensor(.{ .seq, .d }).fromSlice(&ctx, .{ 2, 2 }, &.{ 0.5, -1.25, 2.0, 3.5 });
+    defer x.deinit();
+    var half = try x.to(&ctx, .bf16);
+    defer half.deinit();
+
+    var activated = try half.gelu(&ctx); // widen -> f32 gelu -> narrow
+    defer activated.deinit();
+    comptime std.debug.assert(@TypeOf(activated).dtype == .bf16);
+
+    var reference_f32 = try x.gelu(&ctx);
+    defer reference_f32.deinit();
+    var reference = try reference_f32.to(&ctx, .bf16);
+    defer reference.deinit();
+    try std.testing.expectEqualSlices(u16, try reference.dataConst(), try activated.dataConst());
+
+    // Widened reductions keep the f32 accumulator dtype, like sum/mean.
+    var spread = try half.variance(&ctx, .d, 0);
+    defer spread.deinit();
+    comptime std.debug.assert(@TypeOf(spread).dtype == .f32);
+}
+```
 
 The f32 `to(ctx, target_dtype)` cast is differentiable only for
 `.f32 → .f32`; casting a grad-requiring tensor to any other dtype fails with

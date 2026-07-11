@@ -728,7 +728,18 @@ fn f16TestBits(value: f32) u16 {
 test "public non-f32 float Tensor exposes forward math at comptime" {
     inline for (.{ DType.bf16, DType.f16, DType.f64 }) |float_dtype| {
         const T = Tensor(.{ .dtype = float_dtype, .tags = .{ .batch, .d } });
-        const expected = .{ "to", "add", "sub", "mul", "div", "sum", "mean", "sumAll", "dot" };
+        const expected = .{
+            "to",        "add",        "sub",        "mul",       "div",        "sum",        "mean",      "sumAll",
+            "dot",       "split",      "merge",      "flatten",   "reshape",    "sliceStep",  "flip",      "roll",
+            "stack",     "repeatAxis", "scale",      "divScalar", "unary",      "relu",       "exp",       "sqrt",
+            "rsqrt",     "sigmoid",    "silu",       "log",       "log1p",      "neg",        "abs",       "sin",
+            "cos",       "tanh",       "fastTanh",   "softcap30", "softcap15",  "gelu",       "quickGelu", "elu",
+            "geluErf",   "floor",      "ceil",       "round",     "sign",       "reciprocal", "leakyRelu", "clamp",
+            "addScalar", "subScalar",  "powScalar",  "maximum",   "minimum",    "gated",      "glu",       "swiglu",
+            "geglu",     "softmax",    "logSoftmax", "rmsNorm",   "rmsNormMul", "layerNorm",  "cumsum",    "cumprod",
+            "where",     "maskedFill", "compare",    "pad",       "max",        "min",        "argmax",    "prod",
+            "variance",  "logsumexp",  "einsum",
+        };
         inline for (expected) |decl_name| {
             if (!@hasDecl(T, decl_name)) @compileError("non-f32 float Tensor missing forward operation: " ++ decl_name);
         }
@@ -906,6 +917,450 @@ test "public non-f32 float Tensor dot supports multi-free and batch tags" {
         67, 78,
         91, 106,
     }, batched_product.asRawTensor().dataConst());
+}
+
+test "typed float widened unary family matches the narrowed f32 reference" {
+    @setEvalBranchQuota(1_000_000);
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    // Positive inputs so log/sqrt/rsqrt stay in-domain for every op.
+    var x32 = try Tensor(.{ .batch, .d }).fromSlice(&ctx, .{ 2, 2 }, &.{ 0.5, 1.25, 2.0, 3.5 });
+    defer x32.deinit();
+
+    inline for (.{ DType.f16, DType.bf16 }) |float_dtype| {
+        const Scalar = dtype_mod.Scalar(float_dtype);
+        var x_t = try x32.to(&ctx, float_dtype);
+        defer x_t.deinit();
+
+        const unary_names = .{
+            "relu", "exp",       "sqrt",      "rsqrt",     "sigmoid", "silu",      "log",   "log1p",
+            "neg",  "abs",       "sin",       "cos",       "tanh",    "fastTanh",  "gelu",  "quickGelu",
+            "elu",  "geluErf",   "floor",     "ceil",      "round",   "sign",      "reciprocal",
+            "softcap30", "softcap15",
+        };
+        inline for (unary_names) |name| {
+            var got = try @field(@TypeOf(x_t), name)(&x_t, &ctx);
+            defer got.deinit();
+            var ref32 = try @field(@TypeOf(x32), name)(&x32, &ctx);
+            defer ref32.deinit();
+            var ref = try ref32.to(&ctx, float_dtype);
+            defer ref.deinit();
+            try std.testing.expectEqualSlices(Scalar, ref.asRawTensor().dataConst(), got.asRawTensor().dataConst());
+        }
+
+        // The generic entry, the parameterized pointwise ops, and the
+        // scalar variants take the same widen -> f32 -> narrow route.
+        var via_unary = try x_t.unary(&ctx, .silu);
+        defer via_unary.deinit();
+        var silu_ref32 = try x32.silu(&ctx);
+        defer silu_ref32.deinit();
+        var silu_ref = try silu_ref32.to(&ctx, float_dtype);
+        defer silu_ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, silu_ref.asRawTensor().dataConst(), via_unary.asRawTensor().dataConst());
+
+        var leaky = try x_t.leakyRelu(&ctx, 0.1);
+        defer leaky.deinit();
+        var leaky_ref32 = try x32.leakyRelu(&ctx, 0.1);
+        defer leaky_ref32.deinit();
+        var leaky_ref = try leaky_ref32.to(&ctx, float_dtype);
+        defer leaky_ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, leaky_ref.asRawTensor().dataConst(), leaky.asRawTensor().dataConst());
+
+        var clamped = try x_t.clamp(&ctx, 1.0, 2.0);
+        defer clamped.deinit();
+        var clamp_ref32 = try x32.clamp(&ctx, 1.0, 2.0);
+        defer clamp_ref32.deinit();
+        var clamp_ref = try clamp_ref32.to(&ctx, float_dtype);
+        defer clamp_ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, clamp_ref.asRawTensor().dataConst(), clamped.asRawTensor().dataConst());
+
+        var scaled = try x_t.scale(&ctx, 3.0);
+        defer scaled.deinit();
+        var shifted = try x_t.addScalar(&ctx, 1.5);
+        defer shifted.deinit();
+        var shifted_back = try shifted.subScalar(&ctx, 1.5);
+        defer shifted_back.deinit();
+        var halved = try x_t.divScalar(&ctx, 2.0);
+        defer halved.deinit();
+        var squared = try x_t.powScalar(&ctx, 2.0);
+        defer squared.deinit();
+        // 0.5/1.25/2.0/3.5 are exact in f16 AND bf16, so exact-arithmetic
+        // scalar results survive the narrow bit-for-bit.
+        var squared_ref32 = try x32.powScalar(&ctx, 2.0);
+        defer squared_ref32.deinit();
+        var squared_ref = try squared_ref32.to(&ctx, float_dtype);
+        defer squared_ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, squared_ref.asRawTensor().dataConst(), squared.asRawTensor().dataConst());
+        try std.testing.expectEqualSlices(Scalar, x_t.asRawTensor().dataConst(), shifted_back.asRawTensor().dataConst());
+    }
+}
+
+test "typed float widened binary, gated, and mask ops match the narrowed f32 reference" {
+    @setEvalBranchQuota(1_000_000);
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var a32 = try Tensor(.{ .batch, .d }).fromSlice(&ctx, .{ 2, 2 }, &.{ 1.0, -2.0, 3.0, -4.0 });
+    defer a32.deinit();
+    var b32 = try Tensor(.{ .batch, .d }).fromSlice(&ctx, .{ 2, 2 }, &.{ -1.5, 2.5, 0.5, 4.0 });
+    defer b32.deinit();
+    var bias32 = try Tensor(.{.d}).fromSlice(&ctx, .{2}, &.{ 0.5, -0.5 });
+    defer bias32.deinit();
+
+    inline for (.{ DType.f16, DType.bf16 }) |float_dtype| {
+        const Scalar = dtype_mod.Scalar(float_dtype);
+        var a_t = try a32.to(&ctx, float_dtype);
+        defer a_t.deinit();
+        var b_t = try b32.to(&ctx, float_dtype);
+        defer b_t.deinit();
+        var bias_t = try bias32.to(&ctx, float_dtype);
+        defer bias_t.deinit();
+
+        var hi = try a_t.maximum(&ctx, &b_t);
+        defer hi.deinit();
+        var hi_ref32 = try a32.maximum(&ctx, &b32);
+        defer hi_ref32.deinit();
+        var hi_ref = try hi_ref32.to(&ctx, float_dtype);
+        defer hi_ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, hi_ref.asRawTensor().dataConst(), hi.asRawTensor().dataConst());
+
+        // maximum against a lower-rank operand exercises the tag broadcast.
+        var hi_bias = try a_t.minimum(&ctx, &bias_t);
+        defer hi_bias.deinit();
+        var hi_bias_ref32 = try a32.minimum(&ctx, &bias32);
+        defer hi_bias_ref32.deinit();
+        var hi_bias_ref = try hi_bias_ref32.to(&ctx, float_dtype);
+        defer hi_bias_ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, hi_bias_ref.asRawTensor().dataConst(), hi_bias.asRawTensor().dataConst());
+
+        inline for (.{ "glu", "swiglu", "geglu" }) |name| {
+            var got = try @field(@TypeOf(a_t), name)(&a_t, &ctx, &b_t);
+            defer got.deinit();
+            var ref32 = try @field(@TypeOf(a32), name)(&a32, &ctx, &b32);
+            defer ref32.deinit();
+            var ref = try ref32.to(&ctx, float_dtype);
+            defer ref.deinit();
+            try std.testing.expectEqualSlices(Scalar, ref.asRawTensor().dataConst(), got.asRawTensor().dataConst());
+        }
+
+        var mask = try a_t.compare(&ctx, .gt, 0.0);
+        defer mask.deinit();
+        var mask_ref32 = try a32.compare(&ctx, .gt, 0.0);
+        defer mask_ref32.deinit();
+        var mask_ref = try mask_ref32.to(&ctx, float_dtype);
+        defer mask_ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, mask_ref.asRawTensor().dataConst(), mask.asRawTensor().dataConst());
+
+        var tensor_mask = try a_t.compare(&ctx, .lt, &b_t);
+        defer tensor_mask.deinit();
+
+        var filled = try a_t.maskedFill(&ctx, &tensor_mask, 9.0);
+        defer filled.deinit();
+        var mask32 = try a32.compare(&ctx, .lt, &b32);
+        defer mask32.deinit();
+        var filled_ref32 = try a32.maskedFill(&ctx, &mask32, 9.0);
+        defer filled_ref32.deinit();
+        var filled_ref = try filled_ref32.to(&ctx, float_dtype);
+        defer filled_ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, filled_ref.asRawTensor().dataConst(), filled.asRawTensor().dataConst());
+
+        var chosen = try a_t.where(&ctx, &tensor_mask, &b_t);
+        defer chosen.deinit();
+        var chosen_ref32 = try a32.where(&ctx, &mask32, &b32);
+        defer chosen_ref32.deinit();
+        var chosen_ref = try chosen_ref32.to(&ctx, float_dtype);
+        defer chosen_ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, chosen_ref.asRawTensor().dataConst(), chosen.asRawTensor().dataConst());
+    }
+}
+
+test "typed float softmax and norm family matches the narrowed f32 reference" {
+    @setEvalBranchQuota(1_000_000);
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var x32 = try Tensor(.{ .batch, .d }).fromSlice(&ctx, .{ 2, 3 }, &.{ 0.5, -1.0, 2.0, 1.5, 0.25, -0.75 });
+    defer x32.deinit();
+    var w32 = try Tensor(.{.d}).fromSlice(&ctx, .{3}, &.{ 1.0, 0.5, 2.0 });
+    defer w32.deinit();
+
+    inline for (.{ DType.f16, DType.bf16 }) |float_dtype| {
+        const Scalar = dtype_mod.Scalar(float_dtype);
+        var x_t = try x32.to(&ctx, float_dtype);
+        defer x_t.deinit();
+        var w_t = try w32.to(&ctx, float_dtype);
+        defer w_t.deinit();
+
+        var soft = try x_t.softmax(&ctx, .d, .{});
+        defer soft.deinit();
+        var soft_ref32 = try x32.softmax(&ctx, .d, .{});
+        defer soft_ref32.deinit();
+        var soft_ref = try soft_ref32.to(&ctx, float_dtype);
+        defer soft_ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, soft_ref.asRawTensor().dataConst(), soft.asRawTensor().dataConst());
+
+        var logsoft = try x_t.logSoftmax(&ctx, .d);
+        defer logsoft.deinit();
+        var logsoft_ref32 = try x32.logSoftmax(&ctx, .d);
+        defer logsoft_ref32.deinit();
+        var logsoft_ref = try logsoft_ref32.to(&ctx, float_dtype);
+        defer logsoft_ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, logsoft_ref.asRawTensor().dataConst(), logsoft.asRawTensor().dataConst());
+
+        var rms = try x_t.rmsNorm(&ctx, .d, 1e-6);
+        defer rms.deinit();
+        var rms_ref32 = try x32.rmsNorm(&ctx, .d, 1e-6);
+        defer rms_ref32.deinit();
+        var rms_ref = try rms_ref32.to(&ctx, float_dtype);
+        defer rms_ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, rms_ref.asRawTensor().dataConst(), rms.asRawTensor().dataConst());
+
+        var rms_mul = try x_t.rmsNormMul(&ctx, .d, &w_t, 1e-6);
+        defer rms_mul.deinit();
+        var rms_mul_ref32 = try x32.rmsNormMul(&ctx, .d, &w32, 1e-6);
+        defer rms_mul_ref32.deinit();
+        var rms_mul_ref = try rms_mul_ref32.to(&ctx, float_dtype);
+        defer rms_mul_ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, rms_mul_ref.asRawTensor().dataConst(), rms_mul.asRawTensor().dataConst());
+
+        var ln = try x_t.layerNorm(&ctx, .d, 1e-5, .{});
+        defer ln.deinit();
+        var ln_ref32 = try x32.layerNorm(&ctx, .d, 1e-5, .{});
+        defer ln_ref32.deinit();
+        var ln_ref = try ln_ref32.to(&ctx, float_dtype);
+        defer ln_ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, ln_ref.asRawTensor().dataConst(), ln.asRawTensor().dataConst());
+    }
+}
+
+test "typed float widened reductions return f32 and scans keep the dtype" {
+    @setEvalBranchQuota(1_000_000);
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    // Exact in f16 AND bf16: widen(narrow(x)) == x, so the widened
+    // reductions must equal the f32 reference bit-for-bit.
+    var x32 = try Tensor(.{ .batch, .d }).fromSlice(&ctx, .{ 2, 3 }, &.{ 1.0, -2.5, 3.0, 0.5, 4.0, -1.5 });
+    defer x32.deinit();
+
+    inline for (.{ DType.f16, DType.bf16 }) |float_dtype| {
+        const Scalar = dtype_mod.Scalar(float_dtype);
+        var x_t = try x32.to(&ctx, float_dtype);
+        defer x_t.deinit();
+
+        var top = try x_t.max(&ctx, .d);
+        defer top.deinit();
+        comptime std.debug.assert(@TypeOf(top).dtype == .f32);
+        try std.testing.expectEqualSlices(f32, &.{ 3.0, 4.0 }, top.asRawTensor().dataConst());
+
+        var bottom = try x_t.min(&ctx, .d);
+        defer bottom.deinit();
+        comptime std.debug.assert(@TypeOf(bottom).dtype == .f32);
+        try std.testing.expectEqualSlices(f32, &.{ -2.5, -1.5 }, bottom.asRawTensor().dataConst());
+
+        var best = try x_t.argmax(&ctx, .d);
+        defer best.deinit();
+        comptime std.debug.assert(@TypeOf(best).dtype == .f32);
+        try std.testing.expectEqualSlices(f32, &.{ 2, 1 }, best.asRawTensor().dataConst());
+
+        var product = try x_t.prod(&ctx, .d);
+        defer product.deinit();
+        comptime std.debug.assert(@TypeOf(product).dtype == .f32);
+        try std.testing.expectEqualSlices(f32, &.{ -7.5, -3.0 }, product.asRawTensor().dataConst());
+
+        var spread = try x_t.variance(&ctx, .d, 0);
+        defer spread.deinit();
+        comptime std.debug.assert(@TypeOf(spread).dtype == .f32);
+        var spread_ref = try x32.variance(&ctx, .d, 0);
+        defer spread_ref.deinit();
+        try std.testing.expectEqualSlices(f32, spread_ref.asRawTensor().dataConst(), spread.asRawTensor().dataConst());
+
+        var lse = try x_t.logsumexp(&ctx, .d);
+        defer lse.deinit();
+        comptime std.debug.assert(@TypeOf(lse).dtype == .f32);
+        var lse_ref = try x32.logsumexp(&ctx, .d);
+        defer lse_ref.deinit();
+        try std.testing.expectEqualSlices(f32, lse_ref.asRawTensor().dataConst(), lse.asRawTensor().dataConst());
+
+        var running = try x_t.cumsum(&ctx, .d);
+        defer running.deinit();
+        comptime std.debug.assert(@TypeOf(running).dtype == float_dtype);
+        var running_ref32 = try x32.cumsum(&ctx, .d);
+        defer running_ref32.deinit();
+        var running_ref = try running_ref32.to(&ctx, float_dtype);
+        defer running_ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, running_ref.asRawTensor().dataConst(), running.asRawTensor().dataConst());
+
+        var running_prod = try x_t.cumprod(&ctx, .d);
+        defer running_prod.deinit();
+        comptime std.debug.assert(@TypeOf(running_prod).dtype == float_dtype);
+        var running_prod_ref32 = try x32.cumprod(&ctx, .d);
+        defer running_prod_ref32.deinit();
+        var running_prod_ref = try running_prod_ref32.to(&ctx, float_dtype);
+        defer running_prod_ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, running_prod_ref.asRawTensor().dataConst(), running_prod.asRawTensor().dataConst());
+    }
+}
+
+test "typed float einsum matches the narrowed f32 lowering" {
+    @setEvalBranchQuota(1_000_000);
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var left32 = try Tensor(.{ .m, .k }).fromSlice(&ctx, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    defer left32.deinit();
+    var right32 = try Tensor(.{ .k, .n }).fromSlice(&ctx, .{ 3, 2 }, &.{ 7, 8, 9, 10, 11, 12 });
+    defer right32.deinit();
+
+    inline for (.{ DType.f16, DType.bf16 }) |float_dtype| {
+        const Scalar = dtype_mod.Scalar(float_dtype);
+        var left_t = try left32.to(&ctx, float_dtype);
+        defer left_t.deinit();
+        var right_t = try right32.to(&ctx, float_dtype);
+        defer right_t.deinit();
+
+        var got = try left_t.einsum(&ctx, &right_t, .{ .m, .n });
+        defer got.deinit();
+        comptime std.debug.assert(@TypeOf(got).dtype == float_dtype);
+        var ref32 = try left32.einsum(&ctx, &right32, .{ .m, .n });
+        defer ref32.deinit();
+        var ref = try ref32.to(&ctx, float_dtype);
+        defer ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, ref.asRawTensor().dataConst(), got.asRawTensor().dataConst());
+
+        // einsum agrees with the native typed dot on the same contraction
+        // (both accumulate in f32 and narrow once).
+        var via_dot = try left_t.dot(&ctx, &right_t, .k);
+        defer via_dot.deinit();
+        try std.testing.expectEqualSlices(Scalar, via_dot.asRawTensor().dataConst(), got.asRawTensor().dataConst());
+    }
+}
+
+test "typed float structural ops preserve values across dtypes" {
+    @setEvalBranchQuota(1_000_000);
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var x32 = try Tensor(.{ .batch, .d }).fromSlice(&ctx, .{ 2, 4 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8 });
+    defer x32.deinit();
+
+    inline for (.{ DType.f16, DType.bf16, DType.f64 }) |float_dtype| {
+        const Scalar = dtype_mod.Scalar(float_dtype);
+        var x_t = try x32.to(&ctx, float_dtype);
+        defer x_t.deinit();
+        var flat_ref = try x_t.flatten(&ctx, .flat);
+        defer flat_ref.deinit();
+
+        var halves = try x_t.split(&ctx, .d, .{ .half, .pair }, .{ 2, 2 });
+        defer halves.deinit();
+        try std.testing.expectEqualSlices(usize, &.{ 2, 2, 2 }, halves.asRawTensor().shape.slice());
+        var remerged = try halves.merge(&ctx, .d, .{ .half, .pair });
+        defer remerged.deinit();
+        var remerged_mat = try remerged.materialize(&ctx);
+        defer remerged_mat.deinit();
+        try std.testing.expectEqualSlices(Scalar, x_t.asRawTensor().dataConst(), remerged_mat.asRawTensor().dataConst());
+
+        var reshaped = try x_t.reshape(&ctx, .{ .a, .b }, .{ 4, 2 });
+        defer reshaped.deinit();
+        try std.testing.expectEqualSlices(usize, &.{ 4, 2 }, reshaped.asRawTensor().shape.slice());
+        try std.testing.expectEqualSlices(Scalar, flat_ref.asRawTensor().dataConst(), blk: {
+            var reflat = try reshaped.flatten(&ctx, .flat);
+            defer reflat.deinit();
+            break :blk reflat.asRawTensor().dataConst();
+        });
+
+        var stepped = try x_t.sliceStep(&ctx, .d, 0, 2, 2);
+        defer stepped.deinit();
+        var stepped_mat = try stepped.materialize(&ctx);
+        defer stepped_mat.deinit();
+        var stepped_ref32 = try x32.sliceStep(&ctx, .d, 0, 2, 2);
+        defer stepped_ref32.deinit();
+        var stepped_ref = try stepped_ref32.to(&ctx, float_dtype);
+        defer stepped_ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, stepped_ref.asRawTensor().dataConst(), stepped_mat.asRawTensor().dataConst());
+
+        var flipped = try x_t.flip(&ctx, .d);
+        defer flipped.deinit();
+        var flipped_ref32 = try x32.flip(&ctx, .d);
+        defer flipped_ref32.deinit();
+        var flipped_ref = try flipped_ref32.to(&ctx, float_dtype);
+        defer flipped_ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, flipped_ref.asRawTensor().dataConst(), flipped.asRawTensor().dataConst());
+
+        var rolled = try x_t.roll(&ctx, .d, 1);
+        defer rolled.deinit();
+        var rolled_ref32 = try x32.roll(&ctx, .d, 1);
+        defer rolled_ref32.deinit();
+        var rolled_ref = try rolled_ref32.to(&ctx, float_dtype);
+        defer rolled_ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, rolled_ref.asRawTensor().dataConst(), rolled.asRawTensor().dataConst());
+
+        var stacked = try x_t.stack(&ctx, .copy, 0, &.{&x_t});
+        defer stacked.deinit();
+        try std.testing.expectEqualSlices(usize, &.{ 2, 2, 4 }, stacked.asRawTensor().shape.slice());
+
+        var repeated = try x_t.repeatAxis(&ctx, .batch, 2);
+        defer repeated.deinit();
+        try std.testing.expectEqualSlices(usize, &.{ 4, 4 }, repeated.asRawTensor().shape.slice());
+
+        // scale/divScalar run the native typed kernel on every float dtype
+        // (f64 included). Integer inputs scaled by 3 are exact everywhere.
+        var tripled = try x_t.scale(&ctx, 3.0);
+        defer tripled.deinit();
+        var thirds = try tripled.divScalar(&ctx, 3.0);
+        defer thirds.deinit();
+        var tripled_ref32 = try x32.scale(&ctx, 3.0);
+        defer tripled_ref32.deinit();
+        var tripled_ref = try tripled_ref32.to(&ctx, float_dtype);
+        defer tripled_ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, tripled_ref.asRawTensor().dataConst(), tripled.asRawTensor().dataConst());
+        try std.testing.expectEqualSlices(Scalar, x_t.asRawTensor().dataConst(), thirds.asRawTensor().dataConst());
+    }
+
+    // pad computes through f32 and is f16/bf16 only.
+    inline for (.{ DType.f16, DType.bf16 }) |float_dtype| {
+        const Scalar = dtype_mod.Scalar(float_dtype);
+        var x_t = try x32.to(&ctx, float_dtype);
+        defer x_t.deinit();
+        var padded = try x_t.pad(&ctx, .d, 1, 1, 0.5);
+        defer padded.deinit();
+        var padded_ref32 = try x32.pad(&ctx, .d, 1, 1, 0.5);
+        defer padded_ref32.deinit();
+        var padded_ref = try padded_ref32.to(&ctx, float_dtype);
+        defer padded_ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, padded_ref.asRawTensor().dataConst(), padded.asRawTensor().dataConst());
+    }
 }
 
 test "tagged public tensor insertAxis and squeeze are zero-copy views and validate dims" {

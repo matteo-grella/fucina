@@ -633,18 +633,30 @@ f16's 65.5 tok/s; pp32 1.52x f16's time. The kernel-level prefill gap was
 already measured at ~2.06x the f16 twin — M1 has no bf16 FMA; an ISA gap,
 not an implementation one.
 
-**bf16 optimizer STATE (2026-07-03).** Optimizer
+**bf16 optimizer STATE.** Optimizer
 moment/momentum buffers can be stored in bf16 (`optim.StateDType`, §3;
 checkpoint v4 frames, §8). This is ORTHOGONAL to every deferred item below:
 step math, params, activations, and gradients all stay f32 — only the
 between-steps storage of m/momentum (and, opt-in, AdamW/Adam v) narrows.
 
+**f16/bf16 forward coverage.** The typed float branch carries the full
+forward op surface, no-grad (REFERENCE.md §4.19): native typed kernels
+where they exist (pointwise, sum/mean, dot/GEMM, scale, structural views),
+and a widen → f32 kernel → narrow-once lowering for everything else (unary
+family, gated, softmax/norm family, remaining reductions, masks, pad,
+einsum). Every widened op computes and accumulates in f32 and rounds once
+on store, so its result is bit-identical to casting up, running the f32
+op, and casting down. This is the forward half of mixed-precision
+training; gradients are f32-only.
+
 **Deferred deliberately.**
 
-- f16/bf16 activations + gradients: needs a dtype-generic
-  FloatTensor/GradState and a duplicated VJP surface — a ground-up rebuild
-  of the autograd layer (a full comptime-dtype-generic runtime migration,
-  evaluated and deliberately not undertaken), not an increment.
+- f16/bf16 gradients: a dtype-generic GradState and VJP surface is a
+  rebuild of the autograd layer, not an increment. The incremental design,
+  if undertaken: gradients stay f32 ALWAYS (torch AMP's contract), `to()`
+  becomes differentiable across float dtypes, and the f32 VJPs run over
+  widened saved operands — the same widening seam the forward lowering
+  uses.
 - Loss scaling: pointless while gradients are f32 (its only job is rescuing
   f16 gradient underflow).
 - f32 master weights: pointless while the trainable params are already f32.

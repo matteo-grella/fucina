@@ -4195,6 +4195,78 @@ fn TypedFloatConstantTensor(comptime tags_spec: anytype, comptime tensor_dtype: 
         pub const mean = typedConstantMean;
         pub const sumAll = typedConstantSumAll;
         pub const dot = typedConstantDot;
+
+        // Structural ops (views / data movement; every typed float dtype).
+        pub const split = typedConstantSplit;
+        pub const merge = typedConstantMerge;
+        pub const flatten = typedConstantFlatten;
+        pub const reshape = typedConstantReshape;
+        pub const sliceStep = typedConstantSliceStep;
+        pub const flip = typedConstantFlip;
+        pub const roll = typedConstantRoll;
+        pub const stack = typedConstantStack;
+        pub const repeatAxis = typedConstantRepeatAxis;
+        pub const scale = typedConstantScale;
+        pub const divScalar = typedConstantDivScalar;
+
+        // Widened forward math (f16/bf16 only: f32 compute, one final round).
+        pub const unary = typedConstantUnary;
+        pub const relu = TypedUnaryMethod(.relu).call;
+        pub const exp = TypedUnaryMethod(.exp).call;
+        pub const sqrt = TypedUnaryMethod(.sqrt).call;
+        pub const rsqrt = TypedUnaryMethod(.rsqrt).call;
+        pub const sigmoid = TypedUnaryMethod(.sigmoid).call;
+        pub const silu = TypedUnaryMethod(.silu).call;
+        pub const log = TypedUnaryMethod(.log).call;
+        pub const log1p = TypedUnaryMethod(.log1p).call;
+        pub const neg = TypedUnaryMethod(.neg).call;
+        pub const abs = TypedUnaryMethod(.abs).call;
+        pub const sin = TypedUnaryMethod(.sin).call;
+        pub const cos = TypedUnaryMethod(.cos).call;
+        pub const tanh = TypedUnaryMethod(.tanh).call;
+        pub const fastTanh = TypedUnaryMethod(.fast_tanh).call;
+        pub const softcap30 = TypedUnaryMethod(.softcap_30).call;
+        pub const softcap15 = TypedUnaryMethod(.softcap_15).call;
+        pub const gelu = TypedUnaryMethod(.gelu).call;
+        pub const quickGelu = TypedUnaryMethod(.quick_gelu).call;
+        pub const elu = TypedUnaryMethod(.elu).call;
+        pub const geluErf = TypedUnaryMethod(.gelu_erf).call;
+        pub const floor = TypedUnaryMethod(.floor).call;
+        pub const ceil = TypedUnaryMethod(.ceil).call;
+        pub const round = TypedUnaryMethod(.round).call;
+        pub const sign = TypedUnaryMethod(.sign).call;
+        pub const reciprocal = TypedUnaryMethod(.reciprocal).call;
+        pub const leakyRelu = typedConstantLeakyRelu;
+        pub const clamp = typedConstantClamp;
+        pub const addScalar = typedConstantAddScalar;
+        pub const subScalar = typedConstantSubScalar;
+        pub const powScalar = typedConstantPowScalar;
+        pub const maximum = typedConstantMaximum;
+        pub const minimum = typedConstantMinimum;
+        pub const gated = typedConstantGated;
+        pub const glu = typedConstantGlu;
+        pub const swiglu = typedConstantSwiglu;
+        pub const geglu = typedConstantGeglu;
+        pub const softmax = typedConstantSoftmax;
+        pub const logSoftmax = typedConstantLogSoftmax;
+        pub const rmsNorm = typedConstantRmsNorm;
+        pub const rmsNormMul = typedConstantRmsNormMul;
+        pub const layerNorm = typedConstantLayerNorm;
+        pub const cumsum = typedConstantCumsum;
+        pub const cumprod = typedConstantCumprod;
+        pub const where = typedConstantWhere;
+        pub const maskedFill = typedConstantMaskedFill;
+        pub const compare = typedConstantCompare;
+        pub const pad = typedConstantPad;
+        pub const einsum = typedConstantEinsum;
+
+        // Widened reductions (f16/bf16 only; f32 result per §8.3).
+        pub const max = typedConstantMax;
+        pub const min = typedConstantMin;
+        pub const argmax = typedConstantArgmax;
+        pub const prod = typedConstantProd;
+        pub const variance = typedConstantVariance;
+        pub const logsumexp = typedConstantLogsumexp;
     };
 }
 
@@ -4395,6 +4467,536 @@ fn typedConstantSumAll(self: anytype, ctx: *ExecContext) !Tensor(.{ .dtype = dty
 fn typedConstantDot(self: anytype, ctx: *ExecContext, other: anytype, comptime contract_tag: Tag) !Tensor(.{ .dtype = dtype_mod.outputDType(.matmul, TensorObject(@TypeOf(self)).dtype), .tags = dotResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags, contract_tag) }) {
     const Self = TensorObject(@TypeOf(self));
     return typedDot(Self.dtype, self, ctx, other, contract_tag);
+}
+
+// Widened typed-float ops: forward coverage for ops with no native typed
+// kernel. The input widens to f32, the f32 exec kernel runs, and the result
+// narrows ONCE on store — f32 accumulation with a single final round, the
+// §8.3 policy. f64 is excluded at comptime: f64 math must stay f64, and
+// rounding it through f32 would silently lose precision.
+fn requireWidenedTypedFloat(comptime tensor_dtype: DType, comptime what: []const u8) void {
+    if (tensor_dtype != .f16 and tensor_dtype != .bf16) {
+        @compileError(what ++ " on the typed float branch is f16/bf16 only (it computes through f32; f64 must not round through f32 — cast explicitly)");
+    }
+}
+
+/// Shared tail of the widened ops: narrow the f32 kernel result back to
+/// `tensor_dtype` and wrap it as a typed constant.
+fn typedFromWidened(comptime tensor_dtype: DType, comptime result_tags: anytype, ctx: *ExecContext, wide_value: *const RawTensor) !Tensor(.{ .dtype = tensor_dtype, .tags = result_tags }) {
+    var value = try ctx.castTyped(.f32, tensor_dtype, wide_value);
+    errdefer value.deinit();
+    return Tensor(.{ .dtype = tensor_dtype, .tags = result_tags }).fromTensor(ctx, value);
+}
+
+fn typedConstantUnary(self: anytype, ctx: *ExecContext, comptime op: UnaryOp) !TensorObject(@TypeOf(self)) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime requireWidenedTypedFloat(Self.dtype, "unary");
+    var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide.deinit();
+    var wide_value = try ctx.unary(op, &wide);
+    defer wide_value.deinit();
+    return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
+}
+
+fn TypedUnaryMethod(comptime op: UnaryOp) type {
+    return struct {
+        fn call(self: anytype, ctx: *ExecContext) !TensorObject(@TypeOf(self)) {
+            return typedConstantUnary(self, ctx, op);
+        }
+    };
+}
+
+fn typedConstantLeakyRelu(self: anytype, ctx: *ExecContext, negative_slope: f32) !TensorObject(@TypeOf(self)) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime requireWidenedTypedFloat(Self.dtype, "leakyRelu");
+    var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide.deinit();
+    var wide_value = try ctx.leakyRelu(&wide, negative_slope);
+    defer wide_value.deinit();
+    return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
+}
+
+fn typedConstantClamp(self: anytype, ctx: *ExecContext, min_value: f32, max_value: f32) !TensorObject(@TypeOf(self)) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime requireWidenedTypedFloat(Self.dtype, "clamp");
+    var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide.deinit();
+    var wide_value = try ctx.clamp(&wide, min_value, max_value);
+    defer wide_value.deinit();
+    return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
+}
+
+fn typedConstantScale(self: anytype, ctx: *ExecContext, scalar_value: dtype_mod.Accumulator(TensorObject(@TypeOf(self)).dtype)) !TensorObject(@TypeOf(self)) {
+    const Self = TensorObject(@TypeOf(self));
+    var value = try ctx.scaleTyped(Self.dtype, self.asRawTensor(), scalar_value);
+    errdefer value.deinit();
+    return Self.fromTensor(ctx, value);
+}
+
+fn typedConstantAddScalar(self: anytype, ctx: *ExecContext, scalar_value: f32) !TensorObject(@TypeOf(self)) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime requireWidenedTypedFloat(Self.dtype, "addScalar");
+    var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide.deinit();
+    var wide_value = try ctx.addScalar(&wide, scalar_value);
+    defer wide_value.deinit();
+    return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
+}
+
+fn typedConstantSubScalar(self: anytype, ctx: *ExecContext, scalar_value: f32) !TensorObject(@TypeOf(self)) {
+    return typedConstantAddScalar(self, ctx, -scalar_value);
+}
+
+fn typedConstantDivScalar(self: anytype, ctx: *ExecContext, scalar_value: dtype_mod.Accumulator(TensorObject(@TypeOf(self)).dtype)) !TensorObject(@TypeOf(self)) {
+    return typedConstantScale(self, ctx, 1.0 / scalar_value);
+}
+
+fn typedConstantPowScalar(self: anytype, ctx: *ExecContext, exponent: f32) !TensorObject(@TypeOf(self)) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime requireWidenedTypedFloat(Self.dtype, "powScalar");
+    var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide.deinit();
+    var wide_value = try ctx.powScalar(&wide, exponent);
+    defer wide_value.deinit();
+    return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
+}
+
+/// Widened binary pointwise (`maximum`/`minimum`): both operands widen,
+/// the f32 tag-broadcast kernel runs, the result narrows.
+fn typedWidenedPointwise(
+    comptime op: PointwiseOp,
+    self: anytype,
+    ctx: *ExecContext,
+    other: anytype,
+) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
+    const Self = TensorObject(@TypeOf(self));
+    const Other = TensorObject(@TypeOf(other));
+    comptime requireWidenedTypedFloat(Self.dtype, "maximum/minimum");
+    if (Other.dtype != Self.dtype) @compileError("typed pointwise requires matching dtypes; cast explicitly");
+    const result_tags = pointwiseResultTags(Self.axis_tags, Other.axis_tags);
+    const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
+    var wide_left = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide_left.deinit();
+    var wide_right = try ctx.castTyped(Self.dtype, .f32, other_ptr.asRawTensor());
+    defer wide_right.deinit();
+    var wide_value = try tag_ops.pointwise(op, Self.axis_tags, &wide_left, ctx, Other.axis_tags, &wide_right);
+    defer wide_value.deinit();
+    return typedFromWidened(Self.dtype, result_tags, ctx, &wide_value);
+}
+
+fn typedConstantMaximum(self: anytype, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
+    return typedWidenedPointwise(.max, self, ctx, other);
+}
+
+fn typedConstantMinimum(self: anytype, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
+    return typedWidenedPointwise(.min, self, ctx, other);
+}
+
+fn typedConstantGated(
+    self: anytype,
+    ctx: *ExecContext,
+    other: anytype,
+    comptime op: GatedOp,
+) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
+    const Self = TensorObject(@TypeOf(self));
+    const Other = TensorObject(@TypeOf(other));
+    comptime requireWidenedTypedFloat(Self.dtype, "gated");
+    if (Other.dtype != Self.dtype) @compileError("typed gated requires matching dtypes; cast explicitly");
+    const result_tags = pointwiseResultTags(Self.axis_tags, Other.axis_tags);
+    const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
+    var wide_left = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide_left.deinit();
+    var wide_right = try ctx.castTyped(Self.dtype, .f32, other_ptr.asRawTensor());
+    defer wide_right.deinit();
+    var wide_value = try tag_ops.gatedPointwise(op, Self.axis_tags, &wide_left, ctx, Other.axis_tags, &wide_right);
+    defer wide_value.deinit();
+    return typedFromWidened(Self.dtype, result_tags, ctx, &wide_value);
+}
+
+fn typedConstantGlu(self: anytype, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
+    return typedConstantGated(self, ctx, other, .glu);
+}
+
+fn typedConstantSwiglu(self: anytype, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
+    return typedConstantGated(self, ctx, other, .swiglu);
+}
+
+fn typedConstantGeglu(self: anytype, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
+    return typedConstantGated(self, ctx, other, .geglu);
+}
+
+fn typedConstantSoftmax(self: anytype, ctx: *ExecContext, comptime tag: Tag, options: anytype) !TensorObject(@TypeOf(self)) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime requireWidenedTypedFloat(Self.dtype, "softmax");
+    comptime {
+        const Options = @TypeOf(options);
+        if (@typeInfo(Options) != .@"struct" or @typeInfo(Options).@"struct".fields.len != 0) {
+            @compileError("typed softmax supports only plain .{} options; cast to f32 for the ext path (mask/sinks/causal/scale)");
+        }
+    }
+    var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide.deinit();
+    var wide_value = try ctx.softmaxAxisRank(Self.tag_count, &wide, Self.axis(tag));
+    defer wide_value.deinit();
+    return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
+}
+
+fn typedConstantLogSoftmax(self: anytype, ctx: *ExecContext, comptime tag: Tag) !TensorObject(@TypeOf(self)) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime requireWidenedTypedFloat(Self.dtype, "logSoftmax");
+    var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide.deinit();
+    var wide_value = try ctx.logSoftmaxAxisRank(Self.tag_count, &wide, Self.axis(tag));
+    defer wide_value.deinit();
+    return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
+}
+
+fn typedConstantRmsNorm(self: anytype, ctx: *ExecContext, comptime tag: Tag, eps: f32) !TensorObject(@TypeOf(self)) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime requireWidenedTypedFloat(Self.dtype, "rmsNorm");
+    var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide.deinit();
+    var wide_value = try ctx.rmsNormAxisRank(Self.tag_count, &wide, Self.axis(tag), eps);
+    defer wide_value.deinit();
+    return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
+}
+
+fn typedConstantRmsNormMul(
+    self: anytype,
+    ctx: *ExecContext,
+    comptime tag: Tag,
+    weight: *const Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = .{tag} }),
+    eps: f32,
+) !TensorObject(@TypeOf(self)) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime requireWidenedTypedFloat(Self.dtype, "rmsNormMul");
+    var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide.deinit();
+    var wide_weight = try ctx.castTyped(Self.dtype, .f32, weight.asRawTensor());
+    defer wide_weight.deinit();
+    var wide_value = try ctx.rmsNormMulAxisRank(Self.tag_count, &wide, &wide_weight, Self.axis(tag), eps);
+    defer wide_value.deinit();
+    return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
+}
+
+fn typedConstantLayerNorm(self: anytype, ctx: *ExecContext, comptime tag: Tag, eps: f32, options: anytype) !TensorObject(@TypeOf(self)) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime requireWidenedTypedFloat(Self.dtype, "layerNorm");
+    comptime {
+        const Options = @TypeOf(options);
+        if (@typeInfo(Options) != .@"struct" or @typeInfo(Options).@"struct".fields.len != 0) {
+            @compileError("typed layerNorm supports only plain .{} options; cast to f32 for the affine path");
+        }
+    }
+    var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide.deinit();
+    var wide_value = try ctx.layerNormAxisRank(Self.tag_count, &wide, Self.axis(tag), eps);
+    defer wide_value.deinit();
+    return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
+}
+
+// Widened reductions return f32 like the native typed sum/mean (§8.3:
+// reductions on 16-bit floats keep the accumulator dtype).
+fn typedConstantLogsumexp(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = .f32, .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime requireWidenedTypedFloat(Self.dtype, "logsumexp");
+    const result_tags = removeTag(Self.axis_tags, tag);
+    var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide.deinit();
+    var value = try ctx.logsumexpAxisRank(Self.tag_count, &wide, Self.axis(tag));
+    errdefer value.deinit();
+    return Tensor(.{ .dtype = .f32, .tags = result_tags }).fromTensor(ctx, value);
+}
+
+fn typedConstantMax(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = .f32, .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
+    return typedConstantExtremum(self, ctx, tag, .max);
+}
+
+fn typedConstantMin(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = .f32, .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
+    return typedConstantExtremum(self, ctx, tag, .min);
+}
+
+fn typedConstantExtremum(self: anytype, ctx: *ExecContext, comptime tag: Tag, comptime op: enum { max, min }) !Tensor(.{ .dtype = .f32, .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime requireWidenedTypedFloat(Self.dtype, "max/min");
+    const result_tags = removeTag(Self.axis_tags, tag);
+    var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide.deinit();
+    var raw = switch (op) {
+        .max => try ctx.maxAxisRank(Self.tag_count, &wide, Self.axis(tag)),
+        .min => try ctx.minAxisRank(Self.tag_count, &wide, Self.axis(tag)),
+    };
+    raw.indices.deinit();
+    errdefer raw.values.deinit();
+    return Tensor(.{ .dtype = .f32, .tags = result_tags }).fromTensor(ctx, raw.values);
+}
+
+fn typedConstantArgmax(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = .f32, .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime requireWidenedTypedFloat(Self.dtype, "argmax");
+    const result_tags = removeTag(Self.axis_tags, tag);
+    var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide.deinit();
+    var value = try ctx.argmaxAxisRank(Self.tag_count, &wide, Self.axis(tag));
+    errdefer value.deinit();
+    return Tensor(.{ .dtype = .f32, .tags = result_tags }).fromTensor(ctx, value);
+}
+
+fn typedConstantProd(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = .f32, .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime requireWidenedTypedFloat(Self.dtype, "prod");
+    const result_tags = removeTag(Self.axis_tags, tag);
+    var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide.deinit();
+    var value = try ctx.prodAxisRank(Self.tag_count, &wide, Self.axis(tag));
+    errdefer value.deinit();
+    return Tensor(.{ .dtype = .f32, .tags = result_tags }).fromTensor(ctx, value);
+}
+
+fn typedConstantVariance(self: anytype, ctx: *ExecContext, comptime tag: Tag, ddof: u1) !Tensor(.{ .dtype = .f32, .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime requireWidenedTypedFloat(Self.dtype, "variance");
+    const result_tags = removeTag(Self.axis_tags, tag);
+    var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide.deinit();
+    var value = try ctx.varAxisRank(Self.tag_count, &wide, Self.axis(tag), ddof);
+    errdefer value.deinit();
+    return Tensor(.{ .dtype = .f32, .tags = result_tags }).fromTensor(ctx, value);
+}
+
+fn typedConstantCumsum(self: anytype, ctx: *ExecContext, comptime tag: Tag) !TensorObject(@TypeOf(self)) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime requireWidenedTypedFloat(Self.dtype, "cumsum");
+    var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide.deinit();
+    var wide_value = try ctx.cumsumAxisRank(Self.tag_count, &wide, Self.axis(tag));
+    defer wide_value.deinit();
+    return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
+}
+
+fn typedConstantCumprod(self: anytype, ctx: *ExecContext, comptime tag: Tag) !TensorObject(@TypeOf(self)) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime requireWidenedTypedFloat(Self.dtype, "cumprod");
+    var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide.deinit();
+    var wide_value = try ctx.cumprodAxisRank(Self.tag_count, &wide, Self.axis(tag));
+    defer wide_value.deinit();
+    return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
+}
+
+fn typedConstantWhere(self: anytype, ctx: *ExecContext, cond: anytype, other: anytype) !TensorObject(@TypeOf(self)) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime requireWidenedTypedFloat(Self.dtype, "where");
+    const Cond = TensorObject(@TypeOf(cond));
+    const Other = TensorObject(@TypeOf(other));
+    if (comptime Cond.dtype != Self.dtype or Other.dtype != Self.dtype) @compileError("typed where requires matching dtypes; cast explicitly");
+    const cond_ptr = tensorObjectPtrFrom(@TypeOf(cond), &cond);
+    const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
+    var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide.deinit();
+    var wide_cond = try ctx.castTyped(Self.dtype, .f32, cond_ptr.asRawTensor());
+    defer wide_cond.deinit();
+    var wide_other = try ctx.castTyped(Self.dtype, .f32, other_ptr.asRawTensor());
+    defer wide_other.deinit();
+    var wide_value = try ctx.where(&wide, &wide_cond, &wide_other);
+    defer wide_value.deinit();
+    return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
+}
+
+fn typedConstantMaskedFill(self: anytype, ctx: *ExecContext, mask: anytype, value: f32) !TensorObject(@TypeOf(self)) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime requireWidenedTypedFloat(Self.dtype, "maskedFill");
+    const Mask = TensorObject(@TypeOf(mask));
+    if (comptime Mask.dtype != Self.dtype) @compileError("typed maskedFill requires a matching-dtype mask; cast explicitly");
+    const mask_ptr = tensorObjectPtrFrom(@TypeOf(mask), &mask);
+    var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide.deinit();
+    var wide_mask = try ctx.castTyped(Self.dtype, .f32, mask_ptr.asRawTensor());
+    defer wide_mask.deinit();
+    var wide_value = try ctx.maskedFill(&wide, &wide_mask, value);
+    defer wide_value.deinit();
+    return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
+}
+
+fn typedConstantCompare(self: anytype, ctx: *ExecContext, comptime op: exec_mod.CompareOp, other: anytype) !TensorObject(@TypeOf(self)) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime requireWidenedTypedFloat(Self.dtype, "compare");
+    var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide.deinit();
+    const OtherT = @TypeOf(other);
+    if (comptime (OtherT == comptime_float or OtherT == comptime_int or @typeInfo(OtherT) == .float or @typeInfo(OtherT) == .int)) {
+        var wide_value = try ctx.compareScalar(op, &wide, other);
+        defer wide_value.deinit();
+        return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
+    }
+    const Other = TensorObject(@TypeOf(other));
+    if (comptime Other.dtype != Self.dtype) @compileError("typed compare requires matching dtypes; cast explicitly");
+    const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
+    var wide_other = try ctx.castTyped(Self.dtype, .f32, other_ptr.asRawTensor());
+    defer wide_other.deinit();
+    var wide_value = try ctx.compare(op, &wide, &wide_other);
+    defer wide_value.deinit();
+    return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
+}
+
+/// Widened einsum: both operands widen to f32 and the f32 GEMM lowering
+/// runs (f32 accumulation); the result narrows to the input dtype per the
+/// §8.3 matmul policy — the same contract as the typed `dot`.
+fn typedConstantEinsum(self: anytype, ctx: *ExecContext, other: anytype, comptime out_tags: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = normalizeTags(out_tags) }) {
+    const Self = TensorObject(@TypeOf(self));
+    const Other = TensorObject(@TypeOf(other));
+    comptime requireWidenedTypedFloat(Self.dtype, "einsum");
+    if (comptime Other.dtype != Self.dtype) @compileError("typed einsum requires matching dtypes; cast explicitly");
+    const result_tags = comptime normalizeTags(out_tags);
+    const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
+    var wide_left = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide_left.deinit();
+    var wide_right = try ctx.castTyped(Self.dtype, .f32, other_ptr.asRawTensor());
+    defer wide_right.deinit();
+    var wide_value = try tag_ops.taggedEinsum(Self.axis_tags, &wide_left, ctx, Other.axis_tags, &wide_right, result_tags);
+    defer wide_value.deinit();
+    return typedFromWidened(Self.dtype, result_tags, ctx, &wide_value);
+}
+
+fn typedConstantPad(self: anytype, ctx: *ExecContext, comptime tag: Tag, before: usize, after: usize, fill: f32) !TensorObject(@TypeOf(self)) {
+    const Self = TensorObject(@TypeOf(self));
+    comptime requireWidenedTypedFloat(Self.dtype, "pad");
+    var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+    defer wide.deinit();
+    var wide_value = try ctx.padAxisRank(Self.tag_count, &wide, Self.axis(tag), before, after, fill);
+    defer wide_value.deinit();
+    return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
+}
+
+// Typed structural ops: pure views / data movement, valid for every typed
+// float dtype (f64 included — nothing rounds through f32).
+fn typedConstantSplit(
+    self: anytype,
+    ctx: *ExecContext,
+    comptime tag: Tag,
+    comptime split_tags_spec: anytype,
+    split_shape: [normalizeTags(split_tags_spec).len]usize,
+) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = splitTags(TensorObject(@TypeOf(self)).axis_tags, tag, normalizeTags(split_tags_spec)) }) {
+    const Self = TensorObject(@TypeOf(self));
+    const split_tags = normalizeTags(split_tags_spec);
+    const result_tags = splitTags(Self.axis_tags, tag, split_tags);
+    var value = try tag_ops.splitAxisViewOf(Self.dtype, Self.axis_tags, self.asRawTensor(), tag, split_tags, split_shape);
+    errdefer value.deinit();
+    return Tensor(.{ .dtype = Self.dtype, .tags = result_tags }).fromTensor(ctx, value);
+}
+
+fn typedConstantMerge(self: anytype, ctx: *ExecContext, comptime out_tag: Tag, comptime merge_tags_spec: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = mergeTags(TensorObject(@TypeOf(self)).axis_tags, out_tag, normalizeTags(merge_tags_spec)) }) {
+    const Self = TensorObject(@TypeOf(self));
+    const merge_tags = normalizeTags(merge_tags_spec);
+    const result_tags = mergeTags(Self.axis_tags, out_tag, merge_tags);
+    var value = try tag_ops.mergeAxesViewOf(Self.dtype, Self.axis_tags, self.asRawTensor(), out_tag, merge_tags);
+    errdefer value.deinit();
+    return Tensor(.{ .dtype = Self.dtype, .tags = result_tags }).fromTensor(ctx, value);
+}
+
+fn typedConstantFlatten(self: anytype, ctx: *ExecContext, comptime out_tag: Tag) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = .{out_tag} }) {
+    const Self = TensorObject(@TypeOf(self));
+    var value = try tag_ops.flattenTensorOf(Self.dtype, ctx, self.asRawTensor());
+    errdefer value.deinit();
+    return Tensor(.{ .dtype = Self.dtype, .tags = .{out_tag} }).fromTensor(ctx, value);
+}
+
+fn typedConstantReshape(
+    self: anytype,
+    ctx: *ExecContext,
+    comptime new_tags_spec: anytype,
+    new_shape: [normalizeTags(new_tags_spec).len]usize,
+) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = normalizeTags(new_tags_spec) }) {
+    const new_tags = comptime normalizeTags(new_tags_spec);
+    if (comptime new_tags.len == 1) {
+        if (self.asRawTensor().len() != new_shape[0]) return TensorError.InvalidShape;
+        return typedConstantFlatten(self, ctx, new_tags[0]);
+    }
+    var flat = try typedConstantFlatten(self, ctx, new_tags[0]);
+    defer flat.deinit();
+    return typedConstantSplit(&flat, ctx, new_tags[0], new_tags_spec, new_shape);
+}
+
+fn typedConstantSliceStep(self: anytype, ctx: *ExecContext, comptime tag: Tag, start: usize, length: usize, step: usize) !TensorObject(@TypeOf(self)) {
+    const Self = TensorObject(@TypeOf(self));
+    const slice_axis = comptime Self.axis(tag);
+    const raw = self.asRawTensor();
+    const axis_dim = raw.shape.at(slice_axis);
+    if (step == 0 or length == 0) return TensorError.InvalidShape;
+    if (start >= axis_dim or start + (length - 1) * step >= axis_dim) return TensorError.InvalidShape;
+    var new_shape: [Self.tensor_rank]usize = undefined;
+    var new_strides: [Self.tensor_rank]usize = undefined;
+    inline for (0..Self.tensor_rank) |i| {
+        new_shape[i] = raw.shape.at(i);
+        new_strides[i] = raw.strides.at(i);
+    }
+    new_shape[slice_axis] = length;
+    new_strides[slice_axis] = raw.strides.at(slice_axis) * step;
+    var value = try raw.viewWithStridesOffset(&new_shape, &new_strides, start * raw.strides.at(slice_axis));
+    errdefer value.deinit();
+    return Self.fromTensor(ctx, value);
+}
+
+fn typedConstantFlip(self: anytype, ctx: *ExecContext, comptime tag: Tag) !TensorObject(@TypeOf(self)) {
+    const Self = TensorObject(@TypeOf(self));
+    const n = self.asRawTensor().shape.at(Self.axis(tag));
+    const indices = try ctx.allocator.alloc(usize, n);
+    defer ctx.allocator.free(indices);
+    for (indices, 0..) |*index, i| index.* = n - 1 - i;
+    return typedConstantGather(self, ctx, tag, indices, tag);
+}
+
+fn typedConstantRoll(self: anytype, ctx: *ExecContext, comptime tag: Tag, shift: isize) !TensorObject(@TypeOf(self)) {
+    const Self = TensorObject(@TypeOf(self));
+    const n = self.asRawTensor().shape.at(Self.axis(tag));
+    const indices = try ctx.allocator.alloc(usize, n);
+    defer ctx.allocator.free(indices);
+    // out[i] = x[(i - shift) mod n]; s = shift mod n in [0, n).
+    const s: usize = @intCast(@mod(shift, @as(isize, @intCast(n))));
+    for (indices, 0..) |*index, i| index.* = (i + n - s) % n;
+    return typedConstantGather(self, ctx, tag, indices, tag);
+}
+
+fn typedConstantStack(
+    self: anytype,
+    ctx: *ExecContext,
+    comptime new_tag: Tag,
+    comptime axis_index: usize,
+    others: []const *const TensorObject(@TypeOf(self)),
+) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = insertTagAt(TensorObject(@TypeOf(self)).axis_tags, new_tag, axis_index) }) {
+    const Self = TensorObject(@TypeOf(self));
+    const Expanded = Tensor(.{ .dtype = Self.dtype, .tags = insertTagAt(Self.axis_tags, new_tag, axis_index) });
+    var expanded = try ctx.allocator.alloc(Expanded, others.len + 1);
+    defer ctx.allocator.free(expanded);
+    var created: usize = 0;
+    defer for (expanded[0..created]) |*view| view.deinit();
+
+    expanded[0] = try typedConstantInsertAxis(self, ctx, new_tag, axis_index);
+    created = 1;
+    for (others) |other| {
+        expanded[created] = try typedConstantInsertAxis(other, ctx, new_tag, axis_index);
+        created += 1;
+    }
+
+    var ptrs_stack: [concat_inline_inputs]*const Expanded = undefined;
+    const ptrs = if (others.len <= ptrs_stack.len)
+        ptrs_stack[0..others.len]
+    else
+        try ctx.allocator.alloc(*const Expanded, others.len);
+    defer if (others.len > ptrs_stack.len) ctx.allocator.free(ptrs);
+    for (ptrs, expanded[1..]) |*ptr, *view| ptr.* = view;
+    return typedConstantConcat(&expanded[0], ctx, new_tag, ptrs);
+}
+
+fn typedConstantRepeatAxis(self: anytype, ctx: *ExecContext, comptime tag: Tag, n: usize) !TensorObject(@TypeOf(self)) {
+    const Self = TensorObject(@TypeOf(self));
+    if (n == 0) return TensorError.InvalidShape;
+    if (n == 1) return typedConstantWithTags(self, ctx, Self.axis_tags);
+    const ptrs = try ctx.allocator.alloc(*const Self, n - 1);
+    defer ctx.allocator.free(ptrs);
+    const self_ptr = tensorObjectPtrFrom(@TypeOf(self), &self);
+    for (ptrs) |*ptr| ptr.* = self_ptr;
+    return typedConstantConcat(self_ptr, ctx, tag, ptrs);
 }
 
 pub fn variable(ctx: *ExecContext, comptime tags_spec: anytype, value: RawTensor) !Tensor(tags_spec) {

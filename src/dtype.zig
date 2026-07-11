@@ -648,6 +648,7 @@ pub fn toAccumulator(comptime dtype: DType, value: Scalar(dtype)) Accumulator(dt
         .f64 => value,
         .bool => if (value) 1 else 0,
         .u8, .u16, .i8, .i16, .i32, .i64 => @intCast(value),
+        else => @compileError("block-quantized dtypes have no scalar accumulator"),
     };
 }
 
@@ -659,6 +660,7 @@ pub fn fromAccumulator(comptime dtype: DType, value: Accumulator(dtype)) Scalar(
         .f64 => value,
         .bool => value != 0,
         .u8, .u16, .i8, .i16, .i32, .i64 => @intCast(value),
+        else => @compileError("block-quantized dtypes have no scalar accumulator"),
     };
 }
 

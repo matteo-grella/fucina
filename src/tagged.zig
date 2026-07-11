@@ -200,7 +200,6 @@ pub fn sumManyTensor(
     return current;
 }
 
-/// Zero-copy view splitting the `tag` axis into `split_tags` factor axes.
 pub fn splitAxisView(
     comptime source_tags: anytype,
     source: *const RawTensor,
@@ -208,9 +207,21 @@ pub fn splitAxisView(
     comptime split_tags: anytype,
     split_shape: [split_tags.len]usize,
 ) !RawTensor {
+    return splitAxisViewOf(.f32, source_tags, source, tag, split_tags, split_shape);
+}
+
+/// Zero-copy view splitting the `tag` axis into `split_tags` factor axes.
+pub fn splitAxisViewOf(
+    comptime tensor_dtype: DType,
+    comptime source_tags: anytype,
+    source: *const tensor_mod.TensorOf(tensor_dtype),
+    comptime tag: Tag,
+    comptime split_tags: anytype,
+    split_shape: [split_tags.len]usize,
+) !tensor_mod.TensorOf(tensor_dtype) {
     const axis_index = tagIndexOrCompileError(source_tags, tag);
     _ = splitTags(source_tags, tag, split_tags);
-    try validateTensorRank(source_tags, source);
+    try validateTensorRankOf(tensor_dtype, source_tags, source);
     const split_count = try elementCountArray(split_tags.len, split_shape);
     if (split_count != source.shape.at(axis_index)) return TensorError.InvalidShape;
 
@@ -233,17 +244,27 @@ pub fn splitAxisView(
     return source.viewWithStrides(shape[0..], strides[0..]);
 }
 
-/// Zero-copy view merging adjacent `merge_tags` axes into one axis; requires
-/// the merged axes to be stride-compatible (an unsplit layout).
 pub fn mergeAxesView(
     comptime source_tags: anytype,
     source: *const RawTensor,
     comptime out_tag: Tag,
     comptime merge_tags: anytype,
 ) !RawTensor {
+    return mergeAxesViewOf(.f32, source_tags, source, out_tag, merge_tags);
+}
+
+/// Zero-copy view merging adjacent `merge_tags` axes into one axis; requires
+/// the merged axes to be stride-compatible (an unsplit layout).
+pub fn mergeAxesViewOf(
+    comptime tensor_dtype: DType,
+    comptime source_tags: anytype,
+    source: *const tensor_mod.TensorOf(tensor_dtype),
+    comptime out_tag: Tag,
+    comptime merge_tags: anytype,
+) !tensor_mod.TensorOf(tensor_dtype) {
     const start = comptime mergeStartAxis(source_tags, merge_tags);
     _ = mergeTags(source_tags, out_tag, merge_tags);
-    try validateTensorRank(source_tags, source);
+    try validateTensorRankOf(tensor_dtype, source_tags, source);
 
     var merged_dim: usize = 1;
     inline for (0..merge_tags.len) |i| {
@@ -276,7 +297,15 @@ pub fn mergeAxesView(
 
 /// Flattens to rank 1, materializing first if the source is non-contiguous.
 pub fn flattenTensor(ctx: *ExecContext, source: *const RawTensor) !RawTensor {
-    var ready = try contiguousForReshape(ctx, source);
+    return flattenTensorOf(.f32, ctx, source);
+}
+
+pub fn flattenTensorOf(
+    comptime tensor_dtype: DType,
+    ctx: *ExecContext,
+    source: *const tensor_mod.TensorOf(tensor_dtype),
+) !tensor_mod.TensorOf(tensor_dtype) {
+    var ready = try contiguousForReshapeOf(tensor_dtype, ctx, source);
     defer ready.deinit();
     return ready.reshape(&.{source.len()});
 }
