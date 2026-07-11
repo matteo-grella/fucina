@@ -162,6 +162,10 @@ fn e4m3Round(x: f32) f32 {
 
 /// FP8-simulate the non-rotary part of a KV row in place: per 64-dim group,
 /// power-of-two scale from amax/448, clamp, e4m3 round trip.
+fn f16Round(v: f32) f32 {
+    return @floatCast(@as(f16, @floatCast(v)));
+}
+
 fn fp8KvQuantRow(x: []f32, n_rot: usize) void {
     const n_nope = x.len - n_rot;
     var off: usize = 0;
@@ -326,18 +330,20 @@ const Rope = struct {
     /// Rotate the TAIL `2*pairs` dims of one `head` slice at `pos`.
     /// Compressed-family layers use the blended frequencies; `inverse`
     /// un-rotates (the post-attention head correction). Pairing is
-    /// half-split within the tail (adapted-ggml convention).
+    /// ADJACENT within the tail — (tail[2i], tail[2i+1]) shares frequency
+    /// i — matching the reference loop, not the half-split convention the
+    /// other DeepSeek-family ports use.
     fn applyTail(self: *const Rope, head: []f32, pos: usize, compressed: bool, inverse: bool) void {
         const pairs = self.pairs;
         const tail = head[head.len - 2 * pairs ..];
         const c = (if (compressed) self.comp_cos else self.raw_cos)[pos * pairs ..][0..pairs];
         const s = (if (compressed) self.comp_sin else self.raw_sin)[pos * pairs ..][0..pairs];
         for (0..pairs) |i| {
-            const a = tail[i];
-            const b = tail[i + pairs];
+            const a = tail[2 * i];
+            const b = tail[2 * i + 1];
             const si = if (inverse) -s[i] else s[i];
-            tail[i] = a * c[i] - b * si;
-            tail[i + pairs] = a * si + b * c[i];
+            tail[2 * i] = a * c[i] - b * si;
+            tail[2 * i + 1] = a * si + b * c[i];
         }
     }
 };
@@ -432,6 +438,7 @@ const Layer = struct {
         allocator.free(self.sinks);
         allocator.free(self.kv_a_norm);
         self.kv.deinit();
+        self.q_b.deinit();
         allocator.free(self.q_a_norm);
         self.q_a.deinit();
         allocator.free(self.ffn_norm);
@@ -603,19 +610,26 @@ pub const Model = struct {
         }
         for (layers, 0..) |*lc, i| {
             lc.* = .{ .raw = try allocator.alloc(f32, cfg.n_swa * cfg.head_dim) };
+            @memset(lc.raw, 0);
             const ratio = cfg.compress_ratio[i];
             if (ratio != 0) {
                 // Ratio-4 keeps an overlapped double window (2x rows of 2x
-                // width); ratio-128 a plain window.
+                // width); ratio-128 a plain window. Unwritten window slots
+                // must pool as empty: kv 0, score -inf (the pooling max
+                // guard skips them) — exactly the reference cache init.
                 const rows: usize = if (ratio == 4) 2 * ratio else ratio;
                 const width: usize = if (ratio == 4) 2 * cfg.head_dim else cfg.head_dim;
                 lc.attn_state_kv = try allocator.alloc(f32, rows * width);
+                @memset(lc.attn_state_kv, 0);
                 lc.attn_state_score = try allocator.alloc(f32, rows * width);
+                @memset(lc.attn_state_score, -std.math.inf(f32));
             }
             if (ratio == 4) {
                 const iw = 2 * cfg.indexer_head_dim;
                 lc.index_state_kv = try allocator.alloc(f32, 2 * ratio * iw);
+                @memset(lc.index_state_kv, 0);
                 lc.index_state_score = try allocator.alloc(f32, 2 * ratio * iw);
+                @memset(lc.index_state_score, -std.math.inf(f32));
             }
             built += 1;
         }
@@ -1069,6 +1083,8 @@ fn compressorStep(
     } else {
         indexerQatRow(out_row);
     }
+    // Cached rows live f16-rounded (the reference cache stores f16).
+    for (out_row) |*v| v.* = f16Round(v.*);
 
     if (ratio == 4) {
         // Shift: cur half becomes prev, then mirrored back (reference-exact).
@@ -1198,6 +1214,15 @@ fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer
     const q = try allocator.dupe(f32, try q_full.dataConst());
     defer allocator.free(q);
 
+    // Each q head is RMS-normalized (no weight) after the LoRA projection.
+    {
+        var heads_t = try fucina.Tensor(.{ .head, .d }).fromSlice(ctx, .{ cfg.num_heads, cfg.head_dim }, q);
+        defer heads_t.deinit();
+        var normed = try heads_t.rmsNorm(ctx, .d, cfg.rms_norm_eps);
+        defer normed.deinit();
+        @memcpy(q, try normed.dataConst());
+    }
+
     var kv_lin = try layer.kv.linearSeq(ctx, &x_norm, .embed, .k);
     defer kv_lin.deinit();
     var kv_norm_w = try fucina.Tensor(.{.k}).fromSlice(ctx, .{cfg.head_dim}, layer.kv_a_norm);
@@ -1216,7 +1241,8 @@ fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer
         std.mem.copyForwards(f32, lc.raw[0 .. (cfg.n_swa - 1) * cfg.head_dim], lc.raw[cfg.head_dim..]);
         lc.n_raw -= 1;
     }
-    @memcpy(lc.raw[lc.n_raw * cfg.head_dim ..][0..cfg.head_dim], kv_row);
+    // Cached rows live f16-rounded (the reference cache stores f16).
+    for (lc.raw[lc.n_raw * cfg.head_dim ..][0..cfg.head_dim], kv_row) |*d, v| d.* = f16Round(v);
     lc.n_raw += 1;
 
     // Compressed streams + indexer selection.
@@ -1441,7 +1467,7 @@ fn moeBlock(self: *Model, ctx: *ExecContext, layer: *const Layer, sub_in: []cons
     defer up_c.deinit();
     var mid = try gate_act.mul(ctx, &up_c);
     defer mid.deinit();
-    var shared = try layer.moe.shared_down.linearSeq(ctx, &mid, .gate_up, .attn);
+    var shared = try layer.moe.shared_down.linearSeq(ctx, &mid, .gate_up, .embed);
     defer shared.deinit();
 
     var total = try routed.add(ctx, &shared);

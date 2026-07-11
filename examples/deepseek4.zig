@@ -24,6 +24,7 @@ pub fn main(init: std.process.Init) !void {
     var gen_count: usize = 16;
     var moe_stream_flag = false;
     var moe_cache_mb: ?usize = null;
+    var chat = false;
     var arg_i: usize = 2;
     while (arg_i < args.len) : (arg_i += 1) {
         const arg = args[arg_i];
@@ -39,6 +40,8 @@ pub fn main(init: std.process.Init) !void {
             gen_count = try std.fmt.parseInt(usize, args[arg_i], 10);
         } else if (std.mem.startsWith(u8, arg, "--gen=")) {
             gen_count = try std.fmt.parseInt(usize, arg["--gen=".len..], 10);
+        } else if (std.mem.eql(u8, arg, "--chat")) {
+            chat = true;
         } else if (std.mem.eql(u8, arg, "--moe-stream")) {
             moe_stream_flag = true;
         } else if (std.mem.startsWith(u8, arg, "--moe-cache-mb=")) {
@@ -83,7 +86,19 @@ pub fn main(init: std.process.Init) !void {
     var tokens: std.ArrayList(usize) = .empty;
     defer tokens.deinit(allocator);
     if (bos) |b| try tokens.append(allocator, b);
-    for (ids32) |id| try tokens.append(allocator, id);
+    if (chat) {
+        // The reference chat rendering (thinking disabled): BOS, user marker,
+        // prompt, assistant marker, closed think block.
+        const user_id = tokenizer.tokenId("<｜User｜>") orelse return error.MissingChatTokens;
+        const assistant_id = tokenizer.tokenId("<｜Assistant｜>") orelse return error.MissingChatTokens;
+        const think_end_id = tokenizer.tokenId("</think>") orelse return error.MissingChatTokens;
+        try tokens.append(allocator, user_id);
+        for (ids32) |id| try tokens.append(allocator, id);
+        try tokens.append(allocator, assistant_id);
+        try tokens.append(allocator, think_end_id);
+    } else {
+        for (ids32) |id| try tokens.append(allocator, id);
+    }
     try stdout.print("prompt tokens: {d}\n", .{tokens.items.len});
 
     var session = try llm.deepseek4.model.Session.init(&model, 8192);
