@@ -33,6 +33,7 @@ pub fn main(init: std.process.Init) !void {
     var chat = false;
     var prefill_chunk: usize = 128;
     var vectors_dir: ?[]const u8 = null;
+    var golden_path: ?[]const u8 = null;
     var vectors_max_prompt: usize = 256;
     var arg_i: usize = 2;
     while (arg_i < args.len) : (arg_i += 1) {
@@ -54,6 +55,8 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.startsWith(u8, arg, "--prefill-chunk=")) {
             prefill_chunk = try std.fmt.parseInt(usize, arg["--prefill-chunk=".len..], 10);
             if (prefill_chunk == 0) prefill_chunk = 1;
+        } else if (std.mem.startsWith(u8, arg, "--golden=")) {
+            golden_path = arg["--golden=".len..];
         } else if (std.mem.startsWith(u8, arg, "--vectors=")) {
             vectors_dir = arg["--vectors=".len..];
         } else if (std.mem.startsWith(u8, arg, "--vectors-max-prompt=")) {
@@ -95,6 +98,9 @@ pub fn main(init: std.process.Init) !void {
     file.deinit();
     try stdout.print("load: {d:.3} s\n", .{@as(f64, @floatFromInt(std.Io.Clock.awake.now(init.io).nanoseconds - load_start)) / 1e9});
 
+    if (golden_path) |vec_path| {
+        return runGolden(init.io, allocator, &ctx, &model, &tokenizer, stdout, vec_path, prefill_chunk);
+    }
     if (vectors_dir) |dir_path| {
         return runVectors(init.io, allocator, &ctx, &model, &tokenizer, stdout, dir_path, vectors_max_prompt, prefill_chunk);
     }
@@ -315,4 +321,162 @@ fn runVectors(
     }
     try stdout.print("vectors: {d} run, {d} failed\n", .{ ran, failures });
     if (failures > 0) return error.VectorMismatch;
+}
+
+/// One parsed local-golden case: implementation-level logit fixture captured
+/// from a known-sane upstream run of the same GGUF (tests/test-vectors/
+/// local-golden.vec in the ds4 checkout). `frontier` prompt tokens are fed
+/// and the logits at the frontier are compared against the recorded top-k.
+const Golden = struct {
+    id: []const u8,
+    mode: []const u8,
+    ctx: usize,
+    frontier: usize,
+    prompt_path: []const u8,
+    ids: []usize,
+    logits: []f32,
+};
+
+fn parseGolden(arena: std.mem.Allocator, bytes: []const u8) !Golden {
+    var g: Golden = undefined;
+    var ids: std.ArrayList(usize) = .empty;
+    var logits: std.ArrayList(f32) = .empty;
+    var seen_case = false;
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0 or line[0] == '#') continue;
+        var it = std.mem.tokenizeScalar(u8, line, ' ');
+        const kind = it.next() orelse continue;
+        if (std.mem.eql(u8, kind, "case")) {
+            if (seen_case) return error.MultipleGoldenCases;
+            seen_case = true;
+            g.id = try arena.dupe(u8, it.next() orelse return error.BadGolden);
+            g.mode = try arena.dupe(u8, it.next() orelse return error.BadGolden);
+            g.ctx = try std.fmt.parseInt(usize, it.next() orelse return error.BadGolden, 10);
+            g.frontier = try std.fmt.parseInt(usize, it.next() orelse return error.BadGolden, 10);
+            g.prompt_path = try arena.dupe(u8, it.next() orelse return error.BadGolden);
+        } else if (std.mem.eql(u8, kind, "top")) {
+            _ = it.next() orelse return error.BadGolden; // rank
+            try ids.append(arena, try std.fmt.parseInt(usize, it.next() orelse return error.BadGolden, 10));
+            try logits.append(arena, try std.fmt.parseFloat(f32, it.next() orelse return error.BadGolden));
+        }
+    }
+    if (!seen_case or ids.items.len == 0) return error.BadGolden;
+    g.ids = ids.items;
+    g.logits = logits.items;
+    return g;
+}
+
+/// Replay the ds4 local-golden logit fixture: prefill `frontier` prompt
+/// tokens (mode "text": plain BPE, no BOS) and compare our frontier logits
+/// against the recorded top-64 with the upstream thresholds (top-1 exact,
+/// top-5 >= 4, top-20 >= 15, top-64 >= 40, top-20 max |delta| <= 8).
+fn runGolden(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    ctx: *fucina.ExecContext,
+    model: *Model,
+    tokenizer: *const Tokenizer,
+    stdout: *std.Io.Writer,
+    vec_path: []const u8,
+    prefill_chunk: usize,
+) !void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const vec_bytes = try readWholeFile(io, arena, vec_path);
+    const g = try parseGolden(arena, vec_bytes);
+    if (!std.mem.eql(u8, g.mode, "text")) return error.UnsupportedGoldenMode;
+
+    // The fixture's prompt path is relative to the upstream checkout root
+    // (two levels above the .vec file).
+    const vec_dir = std.fs.path.dirname(vec_path) orelse ".";
+    const prompt_path = try std.fs.path.join(arena, &.{ vec_dir, "..", "..", g.prompt_path });
+    const prompt_text = try readWholeFile(io, arena, prompt_path);
+
+    const ids32 = try tokenizer.encode(arena, prompt_text);
+    try stdout.print("golden {s}: prompt {d} tokens, frontier {d}\n", .{ g.id, ids32.len, g.frontier });
+    try stdout.flush();
+    if (ids32.len < g.frontier) return error.GoldenPromptTooShort;
+
+    var session = try Session.init(model, g.frontier + 8);
+    defer session.deinit(model);
+    var logits: []f32 = &.{};
+    defer if (logits.len > 0) allocator.free(logits);
+    var fed: usize = 0;
+    const tokens = try arena.alloc(usize, g.frontier);
+    for (tokens, ids32[0..g.frontier]) |*t, id| t.* = id;
+    while (fed < g.frontier) {
+        const end = @min(fed + prefill_chunk, g.frontier);
+        if (logits.len > 0) allocator.free(logits);
+        logits = try llm.deepseek4.model.stepBatch(model, ctx, &session, tokens[fed..end]);
+        fed = end;
+    }
+
+    // Our top-64 by full scan (vocab * 64 compares — fine for one shot).
+    const ntop = g.ids.len;
+    const our_top = try arena.alloc(usize, ntop);
+    {
+        const taken = try arena.alloc(bool, logits.len);
+        @memset(taken, false);
+        for (our_top) |*slot| {
+            var best: usize = 0;
+            var best_v = -std.math.inf(f32);
+            for (logits, 0..) |v, i| {
+                if (!taken[i] and v > best_v) {
+                    best_v = v;
+                    best = i;
+                }
+            }
+            taken[best] = true;
+            slot.* = best;
+        }
+    }
+
+    var overlap5: usize = 0;
+    var overlap20: usize = 0;
+    var overlap64: usize = 0;
+    for (g.ids, 0..) |gid, i| {
+        for (our_top, 0..) |oid, j| {
+            if (oid != gid) continue;
+            if (i < 5 and j < 5) overlap5 += 1;
+            if (i < 20 and j < 20) overlap20 += 1;
+            if (i < 64 and j < 64) overlap64 += 1;
+            break;
+        }
+    }
+    var max_abs: f32 = 0;
+    for (g.ids[0..@min(20, ntop)], g.logits[0..@min(20, ntop)]) |gid, glogit| {
+        max_abs = @max(max_abs, @abs(logits[gid] - glogit));
+    }
+
+    const pass = our_top[0] == g.ids[0] and overlap5 >= 4 and overlap20 >= 15 and overlap64 >= 40 and max_abs <= 8.0;
+    try stdout.print("golden {s}: {s} top1 ref={d} ours={d} (ref logit {d:.3} ours {d:.3}) overlap5 {d}/5 overlap20 {d}/20 overlap64 {d}/64 top20_max_abs {d:.4}\n", .{
+        g.id,
+        if (pass) "PASS" else "FAIL",
+        g.ids[0],
+        our_top[0],
+        g.logits[0],
+        logits[g.ids[0]],
+        overlap5,
+        overlap20,
+        overlap64,
+        max_abs,
+    });
+    if (!pass) return error.GoldenMismatch;
+}
+
+fn readWholeFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    const stat = try file.stat(io);
+    const bytes = try allocator.alloc(u8, @intCast(stat.size));
+    var read_len: usize = 0;
+    while (read_len < bytes.len) {
+        const n = try file.readStreaming(io, &.{bytes[read_len..]});
+        if (n == 0) return error.EndOfStream;
+        read_len += n;
+    }
+    return bytes;
 }
