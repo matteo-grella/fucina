@@ -384,6 +384,9 @@ pub const File = struct {
             info.ggml_type = ggmlTypeFromInt(try cursor.readInt(u32)) orelse return Error.UnsupportedGgmlType;
             info.offset = @intCast(try cursor.readInt(u64));
             info.data = &.{};
+            // The infos live in alloc'd (undefined) memory filled field-by-field,
+            // so the struct-literal default for `part` never applies here.
+            info.part = 0;
         }
 
         const data_offset = std.mem.alignForward(usize, cursor.offset, alignment);
