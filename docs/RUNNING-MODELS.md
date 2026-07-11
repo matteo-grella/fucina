@@ -232,6 +232,12 @@ zig build deepseek4 -Doptimize=ReleaseFast -- \
   --chat --prompt "Answer with only the number: 2048 divided by 128 is" \
   --gen 8 --moe-stream --moe-cache-mb=20480
 
+# Native MTP speculative decoding (the 3.8 GB sidecar GGUF drafts, the
+# trunk verifies in one batched step — lossless, measured 84.6% draft
+# acceptance / 1.60 tokens per trunk forward at depth 1):
+zig build deepseek4 -Doptimize=ReleaseFast -- <model.gguf> --chat --prompt "..." \
+  --moe-stream --mtp=models/deepseek-v4/DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf
+
 # Official-vector regression (--vectors-max-prompt raises the skip bar for
 # the ~3.5k-token fixtures; --prefill-chunk sizes the batched prefill):
 zig build deepseek4 -Doptimize=ReleaseFast -- <model.gguf> --moe-stream \
