@@ -56,6 +56,11 @@ pub const logit_processor = @import("llm/logit_processor.zig");
 pub const llguidance = @import("llm/llguidance.zig");
 pub const chat = @import("llm/chat.zig");
 pub const data = @import("llm/data.zig");
+/// Generated \p{L}/\p{N}/\s tables (the byte-BPE pretokenizer's). Re-exported
+/// so out-of-module consumers (nanochat's example-local tokenizer) share the
+/// file instead of rooting it as a second module — a file may belong to only
+/// one module per compilation.
+pub const unicode_categories = @import("llm/unicode_categories.zig");
 
 test {
     _ = qwen3.model;

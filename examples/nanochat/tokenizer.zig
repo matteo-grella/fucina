@@ -14,7 +14,7 @@
 //! their save/load functions below; all integers little-endian.
 
 const std = @import("std");
-const ucat = @import("unicode_categories");
+const ucat = @import("fucina_llm").unicode_categories;
 
 const Allocator = std.mem.Allocator;
 

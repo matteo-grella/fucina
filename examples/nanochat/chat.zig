@@ -7,10 +7,10 @@
 //! bit-identical to the full forward) and the raw-byte tokenizer. Sampling is a small
 //! local sampler over `fucina` only (temp==0 → argmax, the parity path; temp>0 →
 //! top-k + softmax + a fucina-rng multinomial draw — functional, NOT
-//! torch-bit-parity, matching engine.py sample_next_token modulo the RNG). It
-//! does not import `fucina_llm`: that module's tokenizer relative-imports
-//! `unicode_categories.zig`, which the nanochat build also wires as its own
-//! module root, so importing both collides (files may belong to one module).
+//! torch-bit-parity, matching engine.py sample_next_token modulo the RNG).
+//! The pretokenizer's unicode tables come through the `fucina_llm` re-export
+//! (`llm.unicode_categories`), so nanochat code can share a compilation with
+//! fucina_llm consumers (the serve example hosts both).
 //!
 //! Files: engine over one Model + one Tokenizer, batch-1 prefill of the whole
 //! context into a fresh Cache, then a one-token-per-step decode loop; the tool
@@ -571,7 +571,7 @@ fn inferConfig(file: *const safetensors.File, vocab_size: usize) !Config {
     };
 }
 
-fn loadModel(ctx: *ExecContext, allocator: Allocator, io: std.Io, path: []const u8, vocab_size: usize) !Model {
+pub fn loadModel(ctx: *ExecContext, allocator: Allocator, io: std.Io, path: []const u8, vocab_size: usize) !Model {
     var file = try safetensors.File.load(allocator, io, path);
     const cfg = try inferConfig(&file, vocab_size);
     file.deinit();

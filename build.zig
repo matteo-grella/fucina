@@ -165,19 +165,6 @@ pub fn build(b: *std.Build) void {
     const facedetect_step = b.step("facedetect", "Face detection/recognition (face-detect.cpp buffalo_l port): detect/embed/verify/analyze/landmarks");
     facedetect_step.dependOn(&facedetect_cmd.step);
 
-    // nanochat's raw-byte BPE pretokenizer reuses the generated \p{L}/\p{N}/\s
-    // tables directly (fucina_llm does not re-export unicode_categories).
-    // NOTE: nanochat deliberately does NOT import fucina_llm — that module's
-    // tokenizer relative-imports src/llm/unicode_categories.zig, which is also
-    // this standalone module's root, so importing both would put the file in
-    // two modules. A src/llm.zig re-export of unicode_categories would be the
-    // cleaner long-term shape (out of scope for the example-local port).
-    const unicode_categories_module = b.createModule(.{
-        .root_source_file = b.path("src/llm/unicode_categories.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
     const nanochat_exe = b.addExecutable(.{
         .name = "fucina-zig-nanochat",
         .root_module = b.createModule(.{
@@ -187,7 +174,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
     nanochat_exe.root_module.addImport("fucina", module);
-    nanochat_exe.root_module.addImport("unicode_categories", unicode_categories_module);
+    // nanochat's raw-byte BPE pretokenizer reuses the generated \p{L}/\p{N}/\s
+    // tables via the fucina_llm re-export (llm.unicode_categories) — sharing
+    // the file keeps it in ONE module, so nanochat code can coexist with
+    // fucina_llm consumers in the same compilation (the lmserve example).
+    nanochat_exe.root_module.addImport("fucina_llm", llm_module);
     configureBlas(nanochat_exe, blas_kind);
     configureGpu(b, nanochat_exe, gpu_kind);
     const nanochat_install = installArtifactStep(b, nanochat_exe);
@@ -475,6 +466,30 @@ pub fn build(b: *std.Build) void {
 
     const gemma4_step = b.step("gemma4", "Run Gemma 4 GGUF inference from token IDs (logit-parity harness)");
     gemma4_step.dependOn(&gemma4_cmd.step);
+
+    const lmserve_exe = b.addExecutable(.{
+        .name = "fucina-zig-lmserve",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/lmserve.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    lmserve_exe.root_module.addImport("fucina", module);
+    lmserve_exe.root_module.addImport("fucina_llm", llm_module);
+    configureBlas(lmserve_exe, blas_kind);
+    configureGpu(b, lmserve_exe, gpu_kind);
+    configureLlguidance(lmserve_exe, llguidance_dep);
+    const lmserve_install = installArtifactStep(b, lmserve_exe);
+
+    const lmserve_cmd = b.addRunArtifact(lmserve_exe);
+    lmserve_cmd.step.dependOn(lmserve_install);
+    if (b.args) |args| {
+        lmserve_cmd.addArgs(args);
+    }
+
+    const lmserve_step = b.step("lmserve", "OpenAI-compatible language-model HTTP server (chat completions + responses; SSE streaming; JSON-schema constrained output with -Dllguidance=true) over qwen3/gemma4/diffusion-gemma GGUFs + nanochat checkpoints");
+    lmserve_step.dependOn(&lmserve_cmd.step);
 
     const parakeet_exe = b.addExecutable(.{
         .name = "fucina-zig-parakeet",
@@ -1095,6 +1110,22 @@ pub fn build(b: *std.Build) void {
     const run_llm_tests = b.addRunArtifact(llm_tests);
     test_step.dependOn(&run_llm_tests.step);
 
+    const lmserve_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/lmserve.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    lmserve_tests.root_module.addImport("fucina", module);
+    lmserve_tests.root_module.addImport("fucina_llm", llm_module);
+    configureBlas(lmserve_tests, blas_kind);
+    configureGpu(b, lmserve_tests, gpu_kind);
+    configureLlguidance(lmserve_tests, llguidance_dep);
+
+    const run_lmserve_tests = b.addRunArtifact(lmserve_tests);
+    test_step.dependOn(&run_lmserve_tests.step);
+
     const nam_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/nam.zig"),
@@ -1180,7 +1211,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     nanochat_tests.root_module.addImport("fucina", module);
-    nanochat_tests.root_module.addImport("unicode_categories", unicode_categories_module);
+    nanochat_tests.root_module.addImport("fucina_llm", llm_module);
     configureBlas(nanochat_tests, blas_kind);
     configureGpu(b, nanochat_tests, gpu_kind);
 
