@@ -21,6 +21,8 @@ pub fn main(init: std.process.Init) !void {
 
     var prompt_text: []const u8 = "The capital of France is";
     var gen_count: usize = 32;
+    var moe_stream_flag = false;
+    var moe_cache_mb: ?usize = null;
     var arg_i: usize = 2;
     while (arg_i < args.len) : (arg_i += 1) {
         const arg = args[arg_i];
@@ -36,6 +38,11 @@ pub fn main(init: std.process.Init) !void {
             gen_count = try std.fmt.parseInt(usize, args[arg_i], 10);
         } else if (std.mem.startsWith(u8, arg, "--gen=")) {
             gen_count = try std.fmt.parseInt(usize, arg["--gen=".len..], 10);
+        } else if (std.mem.eql(u8, arg, "--moe-stream")) {
+            moe_stream_flag = true;
+        } else if (std.mem.startsWith(u8, arg, "--moe-cache-mb=")) {
+            moe_stream_flag = true;
+            moe_cache_mb = try std.fmt.parseInt(usize, arg["--moe-cache-mb=".len..], 10);
         } else {
             try stdout.print("unknown flag: {s}\n", .{arg});
             return error.UnknownArgument;
@@ -53,8 +60,18 @@ pub fn main(init: std.process.Init) !void {
     defer tokenizer.deinit();
 
     const capacity: usize = 2048;
-    var model = try llm.deepseek2.model.Model.loadGgufFromFile(&ctx, &file, capacity);
+    const load_options: llm.deepseek2.model.Model.LoadOptions = if (moe_stream_flag) .{
+        .moe_stream = .{
+            .gguf_path = args[1],
+            .cache_bytes = if (moe_cache_mb) |mb| mb << 20 else null,
+        },
+    } else .{};
+    var model = try llm.deepseek2.model.Model.loadGgufFromFileOptions(&ctx, &file, capacity, load_options);
     defer model.deinit();
+    defer if (model.expert_store) |store| {
+        const st = store.stats;
+        std.debug.print("moe stream: hits {d} / misses {d} ({d:.1}% hit), {d:.2} GB read, cap {d} slots/layer, pinned {d}\n", .{ st.hits, st.misses, st.hitRate() * 100, @as(f64, @floatFromInt(st.bytes_read)) / 1e9, store.cap, store.pinned_experts });
+    };
     const bos: ?u32 = tokenizer.bosId();
     file.deinit();
     try stdout.print("load: {d:.3} s\n", .{@as(f64, @floatFromInt(std.Io.Clock.awake.now(init.io).nanoseconds - load_start)) / 1e9});

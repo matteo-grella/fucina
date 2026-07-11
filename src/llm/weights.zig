@@ -907,6 +907,23 @@ pub fn loadMoeRhs(
         .q4_k => .{ .q4_k = try copyOrBorrowMoeRhs(fucina.QuantizedMatmulRhsQ4_K, fucina.BlockQ4_K, ctx, info, rows, in_dim, borrow) },
         .q5_k => .{ .q5_k = try copyOrBorrowMoeRhs(fucina.QuantizedMatmulRhsQ5_K, fucina.BlockQ5_K, ctx, info, rows, in_dim, borrow) },
         .q6_k => .{ .q6_k = try copyOrBorrowMoeRhs(fucina.QuantizedMatmulRhsQ6_K, fucina.BlockQ6_K, ctx, info, rows, in_dim, borrow) },
+        // q8_0: what llama.cpp falls back to when an expert dim is not a
+        // 256 multiple (deepseek2). Nested rows container, so it gets its
+        // own copy-or-borrow.
+        .q8_0 => blk: {
+            const src = try blockSlice(fucina.BlockQ8_0, info.data);
+            if (rows == 0 or src.len % rows != 0) return Error.InvalidWeightShape;
+            const bpc = src.len / rows;
+            if (bpc * 32 != in_dim) return Error.InvalidWeightShape;
+            if (borrow) {
+                break :blk .{ .q8_0 = .{ .rows = .{ .allocator = null, .blocks = src, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
+            }
+            gguf.prefetch(info.data);
+            const owned = try ctx.allocator.alloc(fucina.BlockQ8_0, src.len);
+            errdefer ctx.allocator.free(owned);
+            @memcpy(owned, src);
+            break :blk .{ .q8_0 = .{ .rows = .{ .allocator = ctx.allocator, .blocks = owned, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
+        },
         else => Error.UnsupportedWeightType,
     };
 }
@@ -960,6 +977,7 @@ fn streamedProjSpec(
         .q4_k => .q4_k,
         .q5_k => .q5_k,
         .q6_k => .q6_k,
+        .q8_0 => .q8_0,
         else => return Error.UnsupportedWeightType,
     };
     return .{

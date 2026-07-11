@@ -196,61 +196,11 @@ const YarnRope = struct {
     }
 };
 
-/// One stacked expert projection kept as raw GGUF blocks (expert-major):
-/// expert `e`'s rows are the byte range [e*expert_bytes, +expert_bytes).
-/// Runs through the borrowed-quantized linear (q4_k/q5_k/q6_k/q8_0), so the
-/// non-256-aligned expert dims deepseek2 ships (1408) work unchanged.
-const ExpertStack = struct {
-    data: []const u8,
-    ggml_type: gguf.GgmlType,
-    out_dim: usize,
-    in_dim: usize,
-    expert_bytes: usize,
-
-    fn init(info: *const gguf.TensorInfo, in_dim: usize, out_dim: usize, n_expert: usize) !ExpertStack {
-        if (info.n_dims != 3) return Error.InvalidWeightShape;
-        if (info.dims[0] != in_dim or info.dims[1] != out_dim or info.dims[2] != n_expert) return Error.InvalidWeightShape;
-        switch (info.ggml_type) {
-            .q4_k, .q5_k, .q6_k, .q8_0 => {},
-            else => return Error.UnsupportedExpertQuant,
-        }
-        if (info.data.len % n_expert != 0) return Error.InvalidWeightShape;
-        return .{
-            .data = info.data,
-            .ggml_type = info.ggml_type,
-            .out_dim = out_dim,
-            .in_dim = in_dim,
-            .expert_bytes = info.data.len / n_expert,
-        };
-    }
-
-    fn expertBytesSlice(self: *const ExpertStack, e: usize) []const u8 {
-        return self.data[e * self.expert_bytes ..][0..self.expert_bytes];
-    }
-
-    /// y[seq, out] = x[seq, in] through expert `e`'s rows.
-    fn linear(self: *const ExpertStack, ctx: *ExecContext, x: *const fucina.Tensor(.{ .seq, .embed }), e: usize, comptime out_tag: @TypeOf(.tag)) !fucina.Tensor(.{ .seq, out_tag }) {
-        return switch (self.ggml_type) {
-            inline .q4_k, .q5_k, .q6_k, .q8_0 => |t| weights.linearSeqBorrowedQuantized(
-                comptime @field(fucina.DType, @tagName(t)),
-                ctx,
-                x,
-                self.expertBytesSlice(e),
-                .{ self.out_dim, self.in_dim },
-                .{ .allow_gpu = false },
-                .embed,
-                out_tag,
-            ),
-            else => unreachable,
-        };
-    }
-};
-
 const MoeFfn = struct {
     router: LinearWeight,
-    gate: ExpertStack,
-    up: ExpertStack,
-    down: ExpertStack,
+    gate: fucina.MoeRhs,
+    up: fucina.MoeRhs,
+    down: fucina.MoeRhs,
     shared_gate: LinearWeight,
     shared_up: LinearWeight,
     shared_down: LinearWeight,
@@ -259,6 +209,9 @@ const MoeFfn = struct {
         self.shared_down.deinit();
         self.shared_up.deinit();
         self.shared_gate.deinit();
+        self.down.deinit();
+        self.up.deinit();
+        self.gate.deinit();
         self.router.deinit();
         self.* = undefined;
     }
@@ -365,12 +318,27 @@ pub const Model = struct {
     output: LinearWeight,
     layers: []Layer,
     rope: YarnRope,
-    /// The GGUF mmap: the MoE ExpertStacks borrow their blocks straight
-    /// from it (unmapped last in deinit).
+    /// The GGUF mmap: resident MoE arms borrow their blocks straight from
+    /// it (unmapped last in deinit; null in streamed mode).
     weight_mapping: ?gguf.File.MappedRegion = null,
+    /// Disk-streaming tier for the expert stacks (destroyed after layers).
+    expert_store: ?*fucina.ExpertStore = null,
     /// (1 + yarn_log_multiplier * ln(factor))² / sqrt(qk_head): the YaRN
     /// mscale² attention-scale correction folded with the 1/sqrt(d) scale.
     attn_scale: f32,
+
+    pub const MoeStreamOptions = struct {
+        gguf_path: []const u8,
+        cache_bytes: ?usize = null,
+        cache_slots_per_layer: ?usize = null,
+        readahead: bool = true,
+        auto_pin: bool = true,
+        pin_bytes: ?usize = null,
+    };
+
+    pub const LoadOptions = struct {
+        moe_stream: ?MoeStreamOptions = null,
+    };
 
     pub fn loadGguf(ctx: *ExecContext, io: std.Io, path: []const u8, max_positions: usize) !Model {
         var file = try gguf.File.loadMmapAuto(ctx.allocator, io, path);
@@ -379,8 +347,38 @@ pub const Model = struct {
     }
 
     pub fn loadGgufFromFile(ctx: *ExecContext, file: *gguf.File, max_positions: usize) !Model {
+        return loadGgufFromFileOptions(ctx, file, max_positions, .{});
+    }
+
+    pub fn loadGgufFromFileOptions(ctx: *ExecContext, file: *gguf.File, max_positions: usize, options: LoadOptions) !Model {
         const config = try Config.fromGguf(file);
         const allocator = ctx.allocator;
+
+        var expert_store: ?*fucina.ExpertStore = null;
+        if (options.moe_stream) |stream_options| {
+            if (config.num_experts > 0) {
+                const split_paths = try gguf.File.splitPartPaths(allocator, stream_options.gguf_path);
+                defer if (split_paths) |paths| {
+                    for (paths) |part| allocator.free(part);
+                    allocator.free(paths);
+                };
+                var one_path = [_][]const u8{stream_options.gguf_path};
+                const store_paths: []const []const u8 = if (split_paths) |paths| blk: {
+                    const view = try allocator.alloc([]const u8, paths.len);
+                    for (view, paths) |*d, src| d.* = src;
+                    break :blk view;
+                } else &one_path;
+                defer if (split_paths != null) allocator.free(store_paths);
+                expert_store = try fucina.ExpertStore.create(allocator, store_paths, config.num_layers, .{
+                    .cache_bytes = stream_options.cache_bytes,
+                    .cache_slots_per_layer = stream_options.cache_slots_per_layer,
+                    .readahead = stream_options.readahead,
+                    .auto_pin = stream_options.auto_pin,
+                    .pin_bytes = stream_options.pin_bytes,
+                });
+            }
+        }
+        errdefer if (expert_store) |store| store.destroy();
 
         var token_embedding = try LinearWeight.load(ctx, try file.get("token_embd.weight"), config.vocab_size, config.hidden_size);
         errdefer token_embedding.deinit();
@@ -394,16 +392,19 @@ pub const Model = struct {
         var built: usize = 0;
         errdefer for (layers[0..built]) |*l| l.deinit(allocator);
         for (layers, 0..) |*layer, i| {
-            layer.* = try loadLayer(ctx, file, config, i);
+            layer.* = try loadLayer(ctx, file, config, i, expert_store);
             built += 1;
         }
+        if (expert_store) |store| try store.finalize();
 
         var rope = try YarnRope.init(allocator, config, max_positions);
         errdefer rope.deinit(allocator);
 
-        // Expert stacks borrow from the mapping; the model must own it.
-        const weight_mapping = if (config.num_experts > 0) file.takeMapping() else null;
-        if (config.num_experts > 0 and weight_mapping == null) return Error.InvalidWeightShape;
+        // Resident expert stacks borrow from the mapping; the model must own
+        // it. Streamed mode borrows nothing: the mapping dies with `file` and
+        // residency stays dense weights + the expert cache.
+        const weight_mapping = if (config.num_experts > 0 and expert_store == null) file.takeMapping() else null;
+        if (config.num_experts > 0 and expert_store == null and weight_mapping == null) return Error.InvalidWeightShape;
 
         const mscale: f32 = if (config.yarn_factor > 1.0)
             1.0 + config.yarn_log_multiplier * @log(config.yarn_factor)
@@ -420,6 +421,7 @@ pub const Model = struct {
             .layers = layers,
             .rope = rope,
             .weight_mapping = weight_mapping,
+            .expert_store = expert_store,
             .attn_scale = attn_scale,
         };
     }
@@ -432,6 +434,7 @@ pub const Model = struct {
         self.output.deinit();
         self.output_norm = undefined;
         self.token_embedding.deinit();
+        if (self.expert_store) |store| store.destroy();
         if (self.weight_mapping) |*mapping| mapping.deinit();
         self.* = undefined;
     }
@@ -578,8 +581,10 @@ pub const Model = struct {
         @memset(y, 0);
 
         // Top-k selection (k is single digits; simple repeated max).
-        var chosen: usize = 0;
-        while (chosen < cfg.num_experts_used) : (chosen += 1) {
+        var selected: [64]usize = undefined;
+        var routing: [64]f32 = undefined;
+        std.debug.assert(cfg.num_experts_used <= selected.len);
+        for (0..cfg.num_experts_used) |slot| {
             var best: usize = 0;
             var best_p: f32 = -1;
             for (probs, 0..) |p, e| {
@@ -589,21 +594,25 @@ pub const Model = struct {
                 }
             }
             probs[best] = -1; // consumed
-            const w = best_p * cfg.expert_weights_scale;
-
-            var gate_t = try moe.gate.linear(ctx, f_t, best, .gate_up);
-            defer gate_t.deinit();
-            var up_t = try moe.up.linear(ctx, f_t, best, .gate_up);
-            defer up_t.deinit();
-            const g = try allocator.alloc(f32, moe.gate.out_dim);
-            defer allocator.free(g);
-            for (g, try gate_t.dataConst(), try up_t.dataConst()) |*gi, gv, uv| gi.* = silu(gv) * uv;
-            var g_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, moe.gate.out_dim }, g);
-            defer g_t.deinit();
-            var down_t = try moe.down.linear(ctx, &g_t, best, .attn);
-            defer down_t.deinit();
-            for (y, try down_t.dataConst()) |*yi, di| yi.* += w * di;
+            selected[slot] = best;
+            routing[slot] = best_p * cfg.expert_weights_scale;
         }
+
+        var mix = try weights.moeSwiGluFfnSeq(
+            ctx,
+            f_t,
+            &moe.gate,
+            &moe.up,
+            &moe.down,
+            selected[0..cfg.num_experts_used],
+            routing[0..cfg.num_experts_used],
+            cfg.num_experts_used,
+            cfg.expert_ffn_size,
+            null,
+            null,
+        );
+        defer mix.deinit();
+        for (y, try mix.dataConst()) |*yi, mi| yi.* += mi;
 
         // Shared expert (always active, weight 1).
         const shared = try swigluLinear(ctx, allocator, f_t, &moe.shared_gate, &moe.shared_up, &moe.shared_down);
@@ -613,7 +622,7 @@ pub const Model = struct {
     }
 };
 
-fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i: usize) !Layer {
+fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i: usize, store: ?*fucina.ExpertStore) !Layer {
     const allocator = ctx.allocator;
     var name_buf: [96]u8 = undefined;
     const name = struct {
@@ -650,9 +659,30 @@ fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i:
     } else {
         var router = try LinearWeight.load(ctx, try file.get(try name.of(&name_buf, layer_i, "ffn_gate_inp.weight")), config.num_experts, config.hidden_size);
         errdefer router.deinit();
-        const gate = try ExpertStack.init(try file.get(try name.of(&name_buf, layer_i, "ffn_gate_exps.weight")), config.hidden_size, config.expert_ffn_size, config.num_experts);
-        const up = try ExpertStack.init(try file.get(try name.of(&name_buf, layer_i, "ffn_up_exps.weight")), config.hidden_size, config.expert_ffn_size, config.num_experts);
-        const down = try ExpertStack.init(try file.get(try name.of(&name_buf, layer_i, "ffn_down_exps.weight")), config.expert_ffn_size, config.hidden_size, config.num_experts);
+        var gate: fucina.MoeRhs = undefined;
+        var up: fucina.MoeRhs = undefined;
+        var down: fucina.MoeRhs = undefined;
+        if (store) |st| {
+            const trio = try weights.loadMoeRhsStreamed(
+                st,
+                file,
+                layer_i,
+                try file.get(try name.of(&name_buf, layer_i, "ffn_gate_exps.weight")),
+                try file.get(try name.of(&name_buf, layer_i, "ffn_up_exps.weight")),
+                try file.get(try name.of(&name_buf, layer_i, "ffn_down_exps.weight")),
+                config.hidden_size,
+                config.expert_ffn_size,
+                config.num_experts,
+            );
+            gate = trio.gate;
+            up = trio.up;
+            down = trio.down;
+        } else {
+            const borrow = file.is_mmap and !file.isSplit();
+            gate = try weights.loadMoeRhs(ctx, try file.get(try name.of(&name_buf, layer_i, "ffn_gate_exps.weight")), config.hidden_size, config.expert_ffn_size, config.num_experts, borrow);
+            up = try weights.loadMoeRhs(ctx, try file.get(try name.of(&name_buf, layer_i, "ffn_up_exps.weight")), config.hidden_size, config.expert_ffn_size, config.num_experts, borrow);
+            down = try weights.loadMoeRhs(ctx, try file.get(try name.of(&name_buf, layer_i, "ffn_down_exps.weight")), config.expert_ffn_size, config.hidden_size, config.num_experts, borrow);
+        }
         const shared_ffn = config.expert_ffn_size * config.num_shared_experts;
         var shared_gate = try LinearWeight.load(ctx, try file.get(try name.of(&name_buf, layer_i, "ffn_gate_shexp.weight")), shared_ffn, config.hidden_size);
         errdefer shared_gate.deinit();
