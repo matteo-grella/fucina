@@ -105,6 +105,23 @@ https://github.com/zhuhanqing/APOLLO). The golden numeric values embedded in
 `src/optim_tests.zig` are program outputs, not code, and carry no such
 restriction.
 
+## Ported code — ds4
+
+From **ds4** ([antirez/ds4](https://github.com/antirez/ds4), MIT,
+Copyright (c) 2026 The ds4.c authors — Salvatore Sanfilippo):
+
+- **DeepSeek V4 Flash reference numerics** (`src/llm/deepseek4/model.zig`):
+  the e4m3fn/e2m1 quantization grids (including tie-breaks), the FP8 KV row
+  quantizer, the Hadamard-128 transform, the 4x4 Sinkhorn combine
+  normalization, and the rope-tail/YaRN blend are operation-for-operation
+  ports of the corresponding ds4.c functions; the surrounding forward pass
+  re-expresses the same architecture through Fucina's tensor ops.
+- **joyai-llm pre-tokenizer** (`src/llm/tokenizer.zig`): faithful port of
+  ds4.c's splitter; prompt-token-count-exact vs the official API fixtures.
+- ds4 is also the validation oracle: `zig build deepseek4 -- --vectors/
+  --golden` replay its shipped test fixtures from the pinned checkout
+  (`refs/ds4/`, fetched by `tools/fetch_refs.sh`; nothing vendored).
+
 ## Parity references (no code copied)
 
 Fucina implementations validated against, but not derived from:
@@ -117,6 +134,13 @@ checkpoints), **parakeet-mlx** (Apache-2.0, consulted decode reference),
 torch program outputs, no PyTorch code distributed), **Hugging Face
 safetensors** (Apache-2.0; independent implementation of the format),
 **NVIDIA cuRAND / PyTorch Philox** (output-matched only).
+
+**colibri** ([JustVugg/colibri](https://github.com/JustVugg/colibri),
+Apache-2.0) is a design reference for the out-of-core MoE expert streaming
+(`src/exec/expert_store.zig`): the pinned-set + LRU disk tier, persistent
+usage histogram, and router-lookahead prefetch follow its design; no code
+was copied and no output parity exists (Fucina streams ggml quants over its
+own fused kernels; colibri uses its own int4 container).
 
 ## Test fixtures
 

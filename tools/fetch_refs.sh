@@ -28,6 +28,15 @@
 # examples/nanochat/tools/nanochat_dump.py and nanochat_export.py, out-of-tree
 # harnesses run with the stock pinned checkout on PYTHONPATH (invocation lines
 # in their headers; regen recipe in examples/nanochat/goldens/README.md).
+#
+# ds4 is the architecture reference and validation oracle for the deepseek4
+# port. It stays stock — no patches: examples/deepseek4.zig consumes its
+# SHIPPED fixtures in place (--vectors refs/ds4/tests/test-vectors/official,
+# --golden refs/ds4/tests/test-vectors/local-golden.vec). Do NOT run its
+# CPU build path (`make cpu`) on macOS — it can kernel-panic the VM system.
+#
+# colibri is a design reference only (the out-of-core MoE expert streaming
+# was inspired by it): pinned for the record, never built or benchmarked.
 set -eu
 cd "$(dirname "$0")/.."
 mkdir -p refs
@@ -44,6 +53,7 @@ zinc|https://github.com/zolotukhin/zinc|986c2390bdf337d1fb46aa611e12ab1b7a74a05e
 NeuralAmpModelerCore|https://github.com/sdatkinson/NeuralAmpModelerCore|e49c93e678549230d09efbb0beeb50511e387874
 neural-amp-modeler|https://github.com/sdatkinson/neural-amp-modeler|a11ed88a128031c306faba79878eade51a209c48
 ds4|https://github.com/antirez/ds4|80ebbc35237f77e51ce7e57970ba9a6a112c4faa
+colibri|https://github.com/JustVugg/colibri|a5fc89e88f113fc9d1c9d8752861b158d7c303e7
 es-at-scale|https://github.com/VsonicV/es-at-scale|574a9d134da1ffce2a8bb812019899e5c96b588a
 es-awd|https://github.com/kschweig/es-awd|f432ff823a7d59f91d4ac2cf99e4923654c6f464'
 
