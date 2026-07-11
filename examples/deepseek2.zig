@@ -23,6 +23,7 @@ pub fn main(init: std.process.Init) !void {
     var gen_count: usize = 32;
     var moe_stream_flag = false;
     var moe_cache_mb: ?usize = null;
+    var mla_mode: llm.deepseek2.model.Cache.Mode = .latent;
     var arg_i: usize = 2;
     while (arg_i < args.len) : (arg_i += 1) {
         const arg = args[arg_i];
@@ -43,6 +44,10 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.startsWith(u8, arg, "--moe-cache-mb=")) {
             moe_stream_flag = true;
             moe_cache_mb = try std.fmt.parseInt(usize, arg["--moe-cache-mb=".len..], 10);
+        } else if (std.mem.eql(u8, arg, "--mla=full")) {
+            mla_mode = .full;
+        } else if (std.mem.eql(u8, arg, "--mla=latent")) {
+            mla_mode = .latent;
         } else {
             try stdout.print("unknown flag: {s}\n", .{arg});
             return error.UnknownArgument;
@@ -85,7 +90,7 @@ pub fn main(init: std.process.Init) !void {
     for (ids32) |id| try tokens.append(allocator, id);
     try stdout.print("prompt tokens: {d}\n", .{tokens.items.len});
 
-    var cache = try model.initCache(capacity);
+    var cache = try model.initCacheMode(capacity, mla_mode);
     defer cache.deinit();
 
     // Prefill: sequential steps (milestone A keeps one uniform S=1 path).

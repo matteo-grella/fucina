@@ -249,12 +249,21 @@ const Layer = struct {
     q_proj: LinearWeight, // hidden -> heads*qk_head
     kv_a: LinearWeight, // hidden -> kv_lora + rope
     kv_b: LinearWeight, // kv_lora -> heads*(nope + v)
+    /// kv_b dequantized to host f32 for weight absorption, split per head:
+    /// `kv_b_k` rows are each head's k_nope block `[nope, kv_lora]`,
+    /// `kv_b_v` each head's v block `[v_head, kv_lora]` (row-major,
+    /// heads-major). ~8 MB/layer on V2-Lite — the price of never
+    /// reconstructing K/V.
+    kv_b_k: []f32,
+    kv_b_v: []f32,
     o_proj: LinearWeight, // heads*v -> hidden
     ffn: Ffn,
 
     fn deinit(self: *Layer, allocator: Allocator) void {
         self.ffn.deinit();
         self.o_proj.deinit();
+        allocator.free(self.kv_b_v);
+        allocator.free(self.kv_b_k);
         self.kv_b.deinit();
         self.kv_a.deinit();
         self.q_proj.deinit();
@@ -265,43 +274,62 @@ const Layer = struct {
     }
 };
 
-/// Reconstructed-K/V cache: per layer, `[capacity, heads, qk_head]` K
-/// (nope | rotated rope) and `[capacity, heads, v_head]` V, filled once per
-/// appended position from the latent through kv_b.
+/// MLA cache in one of two modes.
+///
+/// `.full` (validation baseline): per layer, `[capacity, heads, qk_head]` K
+/// (nope | rotated rope) and `[capacity, heads, v_head]` V, reconstructed
+/// once per appended position through kv_b.
+///
+/// `.latent` (MLA's raison d'être): per layer, only the 512-dim normed
+/// latent and the shared rotated 64-dim rope slice per position — 576
+/// floats/token/layer instead of 16*(192+128) = 5120, a 8.9x cache
+/// reduction (57x against a full-KV no-GQA design) — with kv_b folded into
+/// the query and applied after attention (weight absorption), so K/V never
+/// materialize at all.
 pub const Cache = struct {
+    pub const Mode = enum { full, latent };
+
     allocator: Allocator,
-    k: [][]f32,
-    v: [][]f32,
+    mode: Mode,
+    k: [][]f32 = &.{}, // full: K rows; latent: [capacity, kv_lora + rope]
+    v: [][]f32 = &.{}, // full only
     len: usize = 0,
     capacity: usize,
 
-    pub fn init(allocator: Allocator, config: Config, capacity: usize) !Cache {
+    pub fn init(allocator: Allocator, config: Config, capacity: usize, mode: Mode) !Cache {
         const k = try allocator.alloc([]f32, config.num_layers);
         var built: usize = 0;
         errdefer {
             for (k[0..built]) |layer| allocator.free(layer);
             allocator.free(k);
         }
-        const v = try allocator.alloc([]f32, config.num_layers);
-        errdefer allocator.free(v);
+        const k_width = switch (mode) {
+            .full => config.num_heads * config.qk_head_dim,
+            .latent => config.kv_lora_rank + config.qk_rope_dim,
+        };
         for (0..config.num_layers) |i| {
-            k[i] = try allocator.alloc(f32, capacity * config.num_heads * config.qk_head_dim);
+            k[i] = try allocator.alloc(f32, capacity * k_width);
             built += 1;
         }
-        var v_built: usize = 0;
-        errdefer for (v[0..v_built]) |layer| allocator.free(layer);
-        for (0..config.num_layers) |i| {
-            v[i] = try allocator.alloc(f32, capacity * config.num_heads * config.v_head_dim);
-            v_built += 1;
+        var v: [][]f32 = &.{};
+        if (mode == .full) {
+            v = try allocator.alloc([]f32, config.num_layers);
+            errdefer allocator.free(v);
+            var v_built: usize = 0;
+            errdefer for (v[0..v_built]) |layer| allocator.free(layer);
+            for (0..config.num_layers) |i| {
+                v[i] = try allocator.alloc(f32, capacity * config.num_heads * config.v_head_dim);
+                v_built += 1;
+            }
         }
-        return .{ .allocator = allocator, .k = k, .v = v, .capacity = capacity };
+        return .{ .allocator = allocator, .mode = mode, .k = k, .v = v, .capacity = capacity };
     }
 
     pub fn deinit(self: *Cache) void {
         for (self.k) |layer| self.allocator.free(layer);
         for (self.v) |layer| self.allocator.free(layer);
         self.allocator.free(self.k);
-        self.allocator.free(self.v);
+        if (self.v.len > 0) self.allocator.free(self.v);
         self.* = undefined;
     }
 
@@ -440,7 +468,11 @@ pub const Model = struct {
     }
 
     pub fn initCache(self: *const Model, capacity: usize) !Cache {
-        return Cache.init(self.allocator, self.config, capacity);
+        return Cache.init(self.allocator, self.config, capacity, .latent);
+    }
+
+    pub fn initCacheMode(self: *const Model, capacity: usize, mode: Cache.Mode) !Cache {
+        return Cache.init(self.allocator, self.config, capacity, mode);
     }
 
     /// One decode step: process `token` at position `cache.len`, append its
@@ -481,54 +513,114 @@ pub const Model = struct {
             defer kv_a_t.deinit();
             const kv_a = try kv_a_t.dataConst();
 
-            // Latent norm, then reconstruct this position's k_nope/v via kv_b.
+            // Latent norm + rope: shared k_pe (MQA) and per-head q_pe at `pos`.
             const latent = try allocator.alloc(f32, cfg.kv_lora_rank);
             defer allocator.free(latent);
             rmsNormInto(latent, kv_a[0..cfg.kv_lora_rank], layer.kv_a_norm, cfg.rms_norm_eps);
-            var latent_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, cfg.kv_lora_rank }, latent);
-            defer latent_t.deinit();
-            var kv_t = try layer.kv_b.linearSeq(ctx, &latent_t, .embed, .v);
-            defer kv_t.deinit();
-            const kv = try kv_t.dataConst(); // [heads * (nope + v)]
-
-            // Rope: shared k_pe (MQA) and per-head q_pe, rotated at `pos`.
             const k_pe = try allocator.dupe(f32, kv_a[cfg.kv_lora_rank..][0..cfg.qk_rope_dim]);
             defer allocator.free(k_pe);
             self.rope.apply(k_pe, pos);
 
-            // Append reconstructed K (nope | rotated pe) and V.
-            const k_layer = cache.k[layer_i];
-            const v_layer = cache.v[layer_i];
-            for (0..cfg.num_heads) |h| {
-                const k_dst = k_layer[(pos * cfg.num_heads + h) * cfg.qk_head_dim ..][0..cfg.qk_head_dim];
-                const v_dst = v_layer[(pos * cfg.num_heads + h) * cfg.v_head_dim ..][0..cfg.v_head_dim];
-                const kv_head = kv[h * (cfg.qk_nope_dim + cfg.v_head_dim) ..];
-                @memcpy(k_dst[0..cfg.qk_nope_dim], kv_head[0..cfg.qk_nope_dim]);
-                @memcpy(k_dst[cfg.qk_nope_dim..], k_pe);
-                @memcpy(v_dst, kv_head[cfg.qk_nope_dim..][0..cfg.v_head_dim]);
-            }
-
-            // Per-head causal attention over positions [0, pos].
             const t_len = pos + 1;
             const scores = try allocator.alloc(f32, t_len);
             defer allocator.free(scores);
-            for (0..cfg.num_heads) |h| {
-                const q_head = q[h * cfg.qk_head_dim ..][0..cfg.qk_head_dim];
-                self.rope.apply(q_head[cfg.qk_nope_dim..], pos);
-                for (0..t_len) |t| {
-                    const k_row = k_layer[(t * cfg.num_heads + h) * cfg.qk_head_dim ..][0..cfg.qk_head_dim];
-                    var dot: f32 = 0;
-                    for (q_head, k_row) |a, b| dot += a * b;
-                    scores[t] = dot * self.attn_scale;
-                }
-                softmaxInPlace(scores);
-                const out_head = attn_out[h * cfg.v_head_dim ..][0..cfg.v_head_dim];
-                @memset(out_head, 0);
-                for (0..t_len) |t| {
-                    const w = scores[t];
-                    const v_row = v_layer[(t * cfg.num_heads + h) * cfg.v_head_dim ..][0..cfg.v_head_dim];
-                    for (out_head, v_row) |*o, val| o.* += w * val;
-                }
+            switch (cache.mode) {
+                .full => {
+                    // Reconstruct this position's k_nope/v via kv_b and run
+                    // attention over materialized K/V (validation baseline).
+                    var latent_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, cfg.kv_lora_rank }, latent);
+                    defer latent_t.deinit();
+                    var kv_t = try layer.kv_b.linearSeq(ctx, &latent_t, .embed, .v);
+                    defer kv_t.deinit();
+                    const kv = try kv_t.dataConst(); // [heads * (nope + v)]
+
+                    const k_layer = cache.k[layer_i];
+                    const v_layer = cache.v[layer_i];
+                    for (0..cfg.num_heads) |h| {
+                        const k_dst = k_layer[(pos * cfg.num_heads + h) * cfg.qk_head_dim ..][0..cfg.qk_head_dim];
+                        const v_dst = v_layer[(pos * cfg.num_heads + h) * cfg.v_head_dim ..][0..cfg.v_head_dim];
+                        const kv_head = kv[h * (cfg.qk_nope_dim + cfg.v_head_dim) ..];
+                        @memcpy(k_dst[0..cfg.qk_nope_dim], kv_head[0..cfg.qk_nope_dim]);
+                        @memcpy(k_dst[cfg.qk_nope_dim..], k_pe);
+                        @memcpy(v_dst, kv_head[cfg.qk_nope_dim..][0..cfg.v_head_dim]);
+                    }
+
+                    for (0..cfg.num_heads) |h| {
+                        const q_head = q[h * cfg.qk_head_dim ..][0..cfg.qk_head_dim];
+                        self.rope.apply(q_head[cfg.qk_nope_dim..], pos);
+                        for (0..t_len) |t| {
+                            const k_row = k_layer[(t * cfg.num_heads + h) * cfg.qk_head_dim ..][0..cfg.qk_head_dim];
+                            var dot: f32 = 0;
+                            for (q_head, k_row) |a, b| dot += a * b;
+                            scores[t] = dot * self.attn_scale;
+                        }
+                        softmaxInPlace(scores);
+                        const out_head = attn_out[h * cfg.v_head_dim ..][0..cfg.v_head_dim];
+                        @memset(out_head, 0);
+                        for (0..t_len) |t| {
+                            const w = scores[t];
+                            const v_row = v_layer[(t * cfg.num_heads + h) * cfg.v_head_dim ..][0..cfg.v_head_dim];
+                            for (out_head, v_row) |*o, val| o.* += w * val;
+                        }
+                    }
+                },
+                .latent => {
+                    // Weight absorption: cache only [latent | rotated k_pe],
+                    // fold kv_b's K block into the query (q_eff = W_kb_k^T
+                    // q_nope) and apply its V block AFTER attention to the
+                    // probability-weighted latent — K/V never materialize.
+                    const lora = cfg.kv_lora_rank;
+                    const row_w = lora + cfg.qk_rope_dim;
+                    const k_layer = cache.k[layer_i];
+                    const dst = k_layer[pos * row_w ..][0..row_w];
+                    @memcpy(dst[0..lora], latent);
+                    @memcpy(dst[lora..], k_pe);
+
+                    const q_eff = try allocator.alloc(f32, lora);
+                    defer allocator.free(q_eff);
+                    const ctx_lat = try allocator.alloc(f32, lora);
+                    defer allocator.free(ctx_lat);
+                    for (0..cfg.num_heads) |h| {
+                        const q_head = q[h * cfg.qk_head_dim ..][0..cfg.qk_head_dim];
+                        self.rope.apply(q_head[cfg.qk_nope_dim..], pos);
+                        const q_pe = q_head[cfg.qk_nope_dim..];
+
+                        // q_eff = W_kb_k[h]^T @ q_nope  ([nope, lora] rows).
+                        const wk = layer.kv_b_k[h * cfg.qk_nope_dim * lora ..][0 .. cfg.qk_nope_dim * lora];
+                        @memset(q_eff, 0);
+                        for (0..cfg.qk_nope_dim) |i| {
+                            const qi = q_head[i];
+                            const w_row = wk[i * lora ..][0..lora];
+                            for (q_eff, w_row) |*acc, w| acc.* += qi * w;
+                        }
+
+                        for (0..t_len) |t| {
+                            const row = k_layer[t * row_w ..][0..row_w];
+                            var dot: f32 = 0;
+                            for (q_eff, row[0..lora]) |a, b| dot += a * b;
+                            for (q_pe, row[lora..]) |a, b| dot += a * b;
+                            scores[t] = dot * self.attn_scale;
+                        }
+                        softmaxInPlace(scores);
+
+                        @memset(ctx_lat, 0);
+                        for (0..t_len) |t| {
+                            const w = scores[t];
+                            const row = k_layer[t * row_w ..][0..lora];
+                            for (ctx_lat, row) |*acc, c| acc.* += w * c;
+                        }
+
+                        // out[h] = W_kb_v[h] @ ctx_lat  ([v_head, lora] rows).
+                        const wv = layer.kv_b_v[h * cfg.v_head_dim * lora ..][0 .. cfg.v_head_dim * lora];
+                        const out_head = attn_out[h * cfg.v_head_dim ..][0..cfg.v_head_dim];
+                        for (out_head, 0..) |*o, i| {
+                            const w_row = wv[i * lora ..][0..lora];
+                            var acc: f32 = 0;
+                            for (w_row, ctx_lat) |w, c| acc += w * c;
+                            o.* = acc;
+                        }
+                    }
+                },
             }
 
             var attn_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, cfg.num_heads * cfg.v_head_dim }, attn_out);
@@ -642,8 +734,35 @@ fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i:
     errdefer q_proj.deinit();
     var kv_a = try LinearWeight.load(ctx, try file.get(try name.of(&name_buf, layer_i, "attn_kv_a_mqa.weight")), config.kv_lora_rank + config.qk_rope_dim, config.hidden_size);
     errdefer kv_a.deinit();
-    var kv_b = try LinearWeight.load(ctx, try file.get(try name.of(&name_buf, layer_i, "attn_kv_b.weight")), config.num_heads * (config.qk_nope_dim + config.v_head_dim), config.kv_lora_rank);
+    const kv_b_info = try file.get(try name.of(&name_buf, layer_i, "attn_kv_b.weight"));
+    var kv_b = try LinearWeight.load(ctx, kv_b_info, config.num_heads * (config.qk_nope_dim + config.v_head_dim), config.kv_lora_rank);
     errdefer kv_b.deinit();
+
+    // Dequantize kv_b to host f32 and split its per-head row blocks for
+    // weight absorption (see Layer.kv_b_k/kv_b_v).
+    const kv_b_rows = config.num_heads * (config.qk_nope_dim + config.v_head_dim);
+    const kv_b_all = try allocator.alloc(f32, kv_b_rows * config.kv_lora_rank);
+    defer allocator.free(kv_b_all);
+    try gguf.decodeF32(kv_b_info.ggml_type, kv_b_info.data, kv_b_all);
+    const kv_b_k = try allocator.alloc(f32, config.num_heads * config.qk_nope_dim * config.kv_lora_rank);
+    errdefer allocator.free(kv_b_k);
+    const kv_b_v = try allocator.alloc(f32, config.num_heads * config.v_head_dim * config.kv_lora_rank);
+    errdefer allocator.free(kv_b_v);
+    {
+        const head_rows = config.qk_nope_dim + config.v_head_dim;
+        const lora = config.kv_lora_rank;
+        for (0..config.num_heads) |h| {
+            const src_base = h * head_rows * lora;
+            @memcpy(
+                kv_b_k[h * config.qk_nope_dim * lora ..][0 .. config.qk_nope_dim * lora],
+                kv_b_all[src_base ..][0 .. config.qk_nope_dim * lora],
+            );
+            @memcpy(
+                kv_b_v[h * config.v_head_dim * lora ..][0 .. config.v_head_dim * lora],
+                kv_b_all[src_base + config.qk_nope_dim * lora ..][0 .. config.v_head_dim * lora],
+            );
+        }
+    }
     var o_proj = try LinearWeight.load(ctx, try file.get(try name.of(&name_buf, layer_i, "attn_output.weight")), config.hidden_size, config.num_heads * config.v_head_dim);
     errdefer o_proj.deinit();
 
@@ -700,6 +819,8 @@ fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i:
         .q_proj = q_proj,
         .kv_a = kv_a,
         .kv_b = kv_b,
+        .kv_b_k = kv_b_k,
+        .kv_b_v = kv_b_v,
         .o_proj = o_proj,
         .ffn = ffn,
     };
