@@ -48,6 +48,9 @@ pub const speculative = struct {
 pub const weights = @import("llm/weights.zig");
 pub const ptqtp_gguf = @import("llm/ptqtp_gguf.zig");
 pub const gguf_meta = @import("llm/gguf_meta.zig");
+pub const deepseek2 = struct {
+    pub const model = @import("llm/deepseek2/model.zig");
+};
 pub const kv_cache = @import("llm/kv_cache.zig");
 pub const kv_persist = @import("llm/kv_persist.zig");
 pub const tokenizer = @import("llm/tokenizer.zig");
@@ -90,6 +93,7 @@ test {
     _ = weights;
     _ = ptqtp_gguf;
     _ = gguf_meta;
+    _ = deepseek2.model;
     _ = kv_cache;
     _ = kv_persist;
     _ = tokenizer;

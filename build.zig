@@ -261,6 +261,29 @@ pub fn build(b: *std.Build) void {
     const qwen3_step = b.step("qwen3", "Run Qwen3 dense/MoE GGUF inference (text chat; --spec/--spec-ref lossless speculative decode, --tokenize tokenizer-parity oracle)");
     qwen3_step.dependOn(&qwen3_cmd.step);
 
+    const deepseek2_exe = b.addExecutable(.{
+        .name = "fucina-zig-deepseek2",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/deepseek2.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    deepseek2_exe.root_module.addImport("fucina", module);
+    deepseek2_exe.root_module.addImport("fucina_llm", llm_module);
+    configureBlas(deepseek2_exe, blas_kind);
+    configureGpu(b, deepseek2_exe, gpu_kind);
+    const deepseek2_install = installArtifactStep(b, deepseek2_exe);
+
+    const deepseek2_cmd = b.addRunArtifact(deepseek2_exe);
+    deepseek2_cmd.step.dependOn(deepseek2_install);
+    if (b.args) |args| {
+        deepseek2_cmd.addArgs(args);
+    }
+
+    const deepseek2_step = b.step("deepseek2", "Run DeepSeek-V2 family (MLA + MoE) GGUF inference");
+    deepseek2_step.dependOn(&deepseek2_cmd.step);
+
     const omnivoice_exe = b.addExecutable(.{
         .name = "fucina-zig-omnivoice",
         .root_module = b.createModule(.{

@@ -1448,7 +1448,7 @@ fn loadDenseBf16Weight(ctx: *ExecContext, info: *const gguf.TensorInfo, shape: [
     return WeightBf16.fromSlice(ctx, shape, values);
 }
 
-fn fillF32(out: []f32, info: *const gguf.TensorInfo) !void {
+pub fn fillF32(out: []f32, info: *const gguf.TensorInfo) !void {
     switch (info.ggml_type) {
         .f32 => {
             if (info.data.len != out.len * @sizeOf(f32)) return Error.InvalidWeightShape;

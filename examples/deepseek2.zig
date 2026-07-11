@@ -1,0 +1,108 @@
+//! DeepSeek-V2 family runner (milestone A): raw greedy completion over the
+//! MLA + MoE forward, sequential single-token steps. Usage:
+//!   zig build deepseek2 -- models/DeepSeek-V2-Lite-Chat.Q4_K_M.gguf \
+//!     --prompt "..." --gen 64
+const std = @import("std");
+const fucina = @import("fucina");
+const llm = @import("fucina_llm");
+
+pub fn main(init: std.process.Init) !void {
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
+    const stdout = &stdout_writer.interface;
+    defer stdout.flush() catch {};
+
+    if (args.len < 2) {
+        try stdout.print("usage: zig build deepseek2 -- <model.gguf> --prompt \"...\" [--gen N]\n", .{});
+        return;
+    }
+
+    var prompt_text: []const u8 = "The capital of France is";
+    var gen_count: usize = 32;
+    var arg_i: usize = 2;
+    while (arg_i < args.len) : (arg_i += 1) {
+        const arg = args[arg_i];
+        if (std.mem.eql(u8, arg, "--prompt")) {
+            arg_i += 1;
+            if (arg_i >= args.len) return error.MissingPrompt;
+            prompt_text = args[arg_i];
+        } else if (std.mem.startsWith(u8, arg, "--prompt=")) {
+            prompt_text = arg["--prompt=".len..];
+        } else if (std.mem.eql(u8, arg, "--gen")) {
+            arg_i += 1;
+            if (arg_i >= args.len) return error.MissingGenCount;
+            gen_count = try std.fmt.parseInt(usize, args[arg_i], 10);
+        } else if (std.mem.startsWith(u8, arg, "--gen=")) {
+            gen_count = try std.fmt.parseInt(usize, arg["--gen=".len..], 10);
+        } else {
+            try stdout.print("unknown flag: {s}\n", .{arg});
+            return error.UnknownArgument;
+        }
+    }
+
+    const allocator = std.heap.smp_allocator;
+    var ctx: fucina.ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const load_start = std.Io.Clock.awake.now(init.io).nanoseconds;
+    var file = try fucina.gguf.File.loadMmapAuto(allocator, init.io, args[1]);
+    var tokenizer = try llm.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
+    defer tokenizer.deinit();
+
+    const capacity: usize = 2048;
+    var model = try llm.deepseek2.model.Model.loadGgufFromFile(&ctx, &file, capacity);
+    defer model.deinit();
+    const bos: ?u32 = tokenizer.bosId();
+    file.deinit();
+    try stdout.print("load: {d:.3} s\n", .{@as(f64, @floatFromInt(std.Io.Clock.awake.now(init.io).nanoseconds - load_start)) / 1e9});
+
+    // Encode: deepseek2 adds BOS.
+    const ids32 = try tokenizer.encode(allocator, prompt_text);
+    defer allocator.free(ids32);
+    var tokens: std.ArrayList(usize) = .empty;
+    defer tokens.deinit(allocator);
+    if (bos) |b| try tokens.append(allocator, b);
+    for (ids32) |id| try tokens.append(allocator, id);
+    try stdout.print("prompt tokens: {d}\n", .{tokens.items.len});
+
+    var cache = try model.initCache(capacity);
+    defer cache.deinit();
+
+    // Prefill: sequential steps (milestone A keeps one uniform S=1 path).
+    const prefill_start = std.Io.Clock.awake.now(init.io).nanoseconds;
+    var logits: []f32 = &.{};
+    defer if (logits.len > 0) allocator.free(logits);
+    for (tokens.items) |token| {
+        if (logits.len > 0) allocator.free(logits);
+        logits = try model.step(&ctx, &cache, token);
+    }
+    try stdout.print("prefill: {d:.1} ms ({d} sequential steps)\n", .{ @as(f64, @floatFromInt(std.Io.Clock.awake.now(init.io).nanoseconds - prefill_start)) / 1e6, tokens.items.len });
+
+    // Greedy decode.
+    const eos = tokenizer.eosId();
+    var reply: std.ArrayList(u8) = .empty;
+    defer reply.deinit(allocator);
+    const decode_start = std.Io.Clock.awake.now(init.io).nanoseconds;
+    var produced: usize = 0;
+    while (produced < gen_count) : (produced += 1) {
+        var best: usize = 0;
+        var best_v: f32 = -std.math.inf(f32);
+        for (logits, 0..) |v, i| {
+            if (v > best_v) {
+                best_v = v;
+                best = i;
+            }
+        }
+        if (eos != null and best == eos.?) break;
+        try tokenizer.decodeAppend(allocator, @intCast(best), &reply);
+        try tokens.append(allocator, best);
+        allocator.free(logits);
+        logits = try model.step(&ctx, &cache, best);
+    }
+    const decode_ns = std.Io.Clock.awake.now(init.io).nanoseconds - decode_start;
+    try stdout.print("decode: {d} steps, {d:.1} ms, {d:.2} tok/s\n", .{ produced, @as(f64, @floatFromInt(decode_ns)) / 1e6, @as(f64, @floatFromInt(produced)) * 1e9 / @as(f64, @floatFromInt(decode_ns)) });
+    try stdout.print("prompt: {s}\ntext:  {s}\n", .{ prompt_text, reply.items });
+}
