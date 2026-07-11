@@ -180,6 +180,66 @@ Knobs:
 
 ---
 
+## DeepSeek family (V2/V3 MLA, GLM-4.5, V4 Flash)
+
+Three runners share the streamed-expert machinery above; all of them accept
+`--moe-stream`/`--moe-cache-mb`.
+
+### DeepSeek V2/V3 — `zig build deepseek2`
+
+Multi-head latent attention with the compressed KV cache as the default
+(576 floats per token per layer, 8.9× smaller than reconstructed heads;
+`--mla=full` selects the reconstructing path, byte-identical output) and
+weight absorption folding `kv_b` into the query/value sides. Covers V2-Lite
+(softmax router) and V3-style checkpoints such as Moonlight-16B-A3B
+(sigmoid no-aux router, q-LoRA, MLA-native GGUF layout).
+
+```sh
+zig build deepseek2 -Doptimize=ReleaseFast -- \
+  models/DeepSeek-V2-Lite-Chat.Q8_0.gguf --prompt "..." --gen 64
+```
+
+### GLM-4.5 family — `zig build glm4moe`
+
+V3-style MoE trunk plus the model's own `nextn` multi-token-prediction
+layer: `--mtp[=depth]` drafts with the MTP head and verifies with one
+batched trunk step — lossless (byte-identical to plain greedy), measured
+2.29 tokens per forward at depth 2 on GLM-4.5-Air Q6_K streamed on a
+64 GB machine. Depth caps at 2.
+
+```sh
+zig build glm4moe -Doptimize=ReleaseFast -- \
+  models/glm45-air/GLM-4.5-Air-Q6_K-00001-of-00002.gguf \
+  --prompt "..." --gen 64 --mtp --moe-stream --moe-cache-mb=20480
+```
+
+### DeepSeek V4 Flash 284B-A13B — `zig build deepseek4`
+
+The DwarfStar-class trunk: hyper-connections (4 residual streams mixed by a
+Sinkhorn-normalized combine), MQA over a single 512-dim FP8-simulated KV row
+with per-head sink logits, streaming compressors with an FP4/Hadamard
+indexer (top-512 row selection), sqrt-softplus routing with hash-routed
+early layers, and a grouped low-rank output projection. The 164.6 GB Q4K
+release decodes on a 64 GB machine with `--moe-stream` (measured 1.5–3.6
+tok/s warm at a 20 GB expert budget). `--chat` renders the reference
+template (thinking disabled); `--vectors=DIR` replays the official-API
+fixtures from a checkout of the upstream `ds4` repository and compares the
+greedy continuation step by step.
+
+```sh
+zig build deepseek4 -Doptimize=ReleaseFast -- \
+  models/deepseek-v4/DeepSeek-V4-Flash-Q4KExperts-...gguf \
+  --chat --prompt "Answer with only the number: 2048 divided by 128 is" \
+  --gen 8 --moe-stream --moe-cache-mb=20480
+
+# Official-vector regression (short prompts; long-context fixtures are
+# skipped until batched prefill lands):
+zig build deepseek4 -Doptimize=ReleaseFast -- <model.gguf> --moe-stream \
+  --vectors=path/to/ds4/tests/test-vectors/official
+```
+
+---
+
 ## Gemma 4 26B-A4B (MoE) — `zig build gemma4`
 
 Same chat/REPL UX as qwen3, Gemma's `<|turn>` template, SPM tokenizer from the GGUF.
