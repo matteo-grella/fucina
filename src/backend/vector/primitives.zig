@@ -241,6 +241,13 @@ pub inline fn applyUnaryVec(comptime op: ops.UnaryOp, value: Vf32) Vf32 {
         .sqrt => @sqrt(value),
         .rsqrt => @as(Vf32, @splat(1)) / @sqrt(value),
         .sigmoid => sigmoidVec(value),
+        .softplus => blk: {
+            const zero: Vf32 = @splat(0);
+            const one: Vf32 = @splat(1);
+            const neg_abs = -@abs(value);
+            const soft = @log(one + vexpf(vector_len, neg_abs));
+            break :blk @max(value, zero) + soft;
+        },
         .silu => value * sigmoidVec(value),
         .log => @log(value),
         .log1p => @log(@as(Vf32, @splat(1)) + value),

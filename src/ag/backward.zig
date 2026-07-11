@@ -1266,6 +1266,7 @@ fn unaryDerivative(comptime op: exec_mod.UnaryOp, value: f32) f32 {
             const s = sigmoid(value);
             break :blk s * (1 - s);
         },
+        .softplus => sigmoid(value),
         .silu => blk: {
             const s = sigmoid(value);
             break :blk s * (1 + value * (1 - s));

@@ -1552,7 +1552,7 @@ fn FloatTensor(comptime tags_spec: anytype) type {
         pub fn unary(self: *const Self, ctx: *ExecContext, comptime op: UnaryOp) !Self {
             return switch (op) {
                 .relu => self.relu(ctx),
-                .exp, .sqrt, .rsqrt, .sigmoid, .silu, .log, .log1p, .neg, .abs, .sin, .cos, .tanh, .fast_tanh, .gelu, .quick_gelu, .softcap_30, .softcap_15, .gelu_quant, .elu, .gelu_erf, .floor, .ceil, .round, .sign, .reciprocal => self.unaryDifferentiable(ctx, op),
+                .exp, .sqrt, .rsqrt, .sigmoid, .silu, .log, .log1p, .softplus, .neg, .abs, .sin, .cos, .tanh, .fast_tanh, .gelu, .quick_gelu, .softcap_30, .softcap_15, .gelu_quant, .elu, .gelu_erf, .floor, .ceil, .round, .sign, .reciprocal => self.unaryDifferentiable(ctx, op),
             };
         }
 

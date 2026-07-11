@@ -342,6 +342,484 @@ const Rope = struct {
     }
 };
 
+
+// =========================================================================
+// Weights.
+// =========================================================================
+
+const MoeFfn = struct {
+    router: LinearWeight, // f16, sqrt-softplus scores
+    router_bias: ?[]f32, // exp_probs_b (top-k layers)
+    tid2eid: ?[]const i32, // hash layers: [vocab][6] expert ids (borrowed)
+    gate: fucina.MoeRhs,
+    up: fucina.MoeRhs,
+    down: fucina.MoeRhs,
+    shared_gate: LinearWeight,
+    shared_up: LinearWeight,
+    shared_down: LinearWeight,
+
+    fn deinit(self: *MoeFfn, allocator: Allocator) void {
+        self.shared_down.deinit();
+        self.shared_up.deinit();
+        self.shared_gate.deinit();
+        self.down.deinit();
+        self.up.deinit();
+        self.gate.deinit();
+        if (self.router_bias) |b| allocator.free(b);
+        self.router.deinit();
+        self.* = undefined;
+    }
+};
+
+const HcModule = struct {
+    fn_proj: LinearWeight, // [n_hc*hidden -> 24] f16
+    scale: []f32, // [3]
+    base: []f32, // [24]
+
+    fn deinit(self: *HcModule, allocator: Allocator) void {
+        allocator.free(self.base);
+        allocator.free(self.scale);
+        self.fn_proj.deinit();
+        self.* = undefined;
+    }
+};
+
+const Compressor = struct {
+    kv: LinearWeight, // hidden -> width
+    gate: LinearWeight, // hidden -> width
+    ape: []f32, // [ratio][width] additive positional embedding
+    norm: []f32, // [head_dim]
+    width: usize, // 2*head_dim for ratio 4, head_dim for ratio 128
+    ratio: usize,
+
+    fn deinit(self: *Compressor, allocator: Allocator) void {
+        allocator.free(self.norm);
+        allocator.free(self.ape);
+        self.gate.deinit();
+        self.kv.deinit();
+        self.* = undefined;
+    }
+};
+
+const Layer = struct {
+    hc_attn: HcModule,
+    hc_ffn: HcModule,
+    attn_norm: []f32,
+    ffn_norm: []f32,
+    q_a: LinearWeight,
+    q_a_norm: []f32,
+    q_b: LinearWeight,
+    kv: LinearWeight,
+    kv_a_norm: []f32,
+    sinks: []f32, // [heads]
+    output_a: LinearWeight, // grouped low-rank (rows = groups*rank)
+    output_b: LinearWeight,
+    attn_compressor: ?Compressor,
+    index_compressor: ?Compressor,
+    indexer_q_b: ?LinearWeight, // q_lora -> idx_heads*idx_dim
+    indexer_proj: ?LinearWeight, // hidden -> idx_heads
+    moe: MoeFfn,
+
+    fn deinit(self: *Layer, allocator: Allocator) void {
+        self.moe.deinit(allocator);
+        if (self.indexer_proj) |*w| w.deinit();
+        if (self.indexer_q_b) |*w| w.deinit();
+        if (self.index_compressor) |*c| c.deinit(allocator);
+        if (self.attn_compressor) |*c| c.deinit(allocator);
+        self.output_b.deinit();
+        self.output_a.deinit();
+        allocator.free(self.sinks);
+        allocator.free(self.kv_a_norm);
+        self.kv.deinit();
+        allocator.free(self.q_a_norm);
+        self.q_a.deinit();
+        allocator.free(self.ffn_norm);
+        allocator.free(self.attn_norm);
+        self.hc_ffn.deinit(allocator);
+        self.hc_attn.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+// =========================================================================
+// Session state: raw sliding-window ring + compressed streams + compressor
+// frontiers, per layer. All rows live FP8/FP4-simulated, exactly like the
+// reference cache.
+// =========================================================================
+
+const LayerCache = struct {
+    /// Raw ring, chronological order maintained by shifting (window is only
+    /// 128 rows; a memmove per token is cheaper than ring index juggling).
+    raw: []f32, // [n_swa][head_dim]
+    n_raw: usize = 0,
+    comp: std.ArrayList(f32) = .empty, // [n][head_dim]
+    index_comp: std.ArrayList(f32) = .empty, // [n][idx_dim] (ratio-4)
+    attn_state_kv: []f32 = &.{},
+    attn_state_score: []f32 = &.{},
+    index_state_kv: []f32 = &.{},
+    index_state_score: []f32 = &.{},
+};
+
+pub const Cache = struct {
+    allocator: Allocator,
+    layers: []LayerCache,
+    len: usize = 0,
+    capacity: usize,
+
+    pub fn deinit(self: *Cache) void {
+        for (self.layers) |*lc| {
+            self.allocator.free(lc.raw);
+            lc.comp.deinit(self.allocator);
+            lc.index_comp.deinit(self.allocator);
+            if (lc.attn_state_kv.len > 0) self.allocator.free(lc.attn_state_kv);
+            if (lc.attn_state_score.len > 0) self.allocator.free(lc.attn_state_score);
+            if (lc.index_state_kv.len > 0) self.allocator.free(lc.index_state_kv);
+            if (lc.index_state_score.len > 0) self.allocator.free(lc.index_state_score);
+        }
+        self.allocator.free(self.layers);
+        self.* = undefined;
+    }
+};
+
+pub const Model = struct {
+    allocator: Allocator,
+    config: Config,
+    token_embedding: LinearWeight,
+    output_hc: HcModule, // fn [16384->4], scale [1], base [4]
+    output_norm: []f32,
+    output: LinearWeight,
+    layers: []Layer,
+    rope: Rope,
+    attn_scale: f32,
+    weight_mapping: ?gguf.File.MappedRegion = null,
+    expert_store: ?*fucina.ExpertStore = null,
+
+    pub const MoeStreamOptions = struct {
+        gguf_path: []const u8,
+        cache_bytes: ?usize = null,
+        cache_slots_per_layer: ?usize = null,
+        readahead: bool = true,
+        auto_pin: bool = true,
+        pin_bytes: ?usize = null,
+    };
+
+    pub const LoadOptions = struct {
+        moe_stream: ?MoeStreamOptions = null,
+    };
+
+    pub fn loadGguf(ctx: *ExecContext, io: std.Io, path: []const u8, options: LoadOptions) !Model {
+        var file = try gguf.File.loadMmapAuto(ctx.allocator, io, path);
+        defer file.deinit();
+        return loadGgufFromFileOptions(ctx, &file, options);
+    }
+
+    pub fn loadGgufFromFileOptions(ctx: *ExecContext, file: *gguf.File, options: LoadOptions) !Model {
+        const allocator = ctx.allocator;
+        const config = try Config.fromGguf(allocator, file);
+        errdefer allocator.free(config.compress_ratio);
+
+        var expert_store: ?*fucina.ExpertStore = null;
+        if (options.moe_stream) |so| {
+            if (config.num_experts > 0) {
+                var one_path = [_][]const u8{so.gguf_path};
+                expert_store = try fucina.ExpertStore.create(allocator, &one_path, config.num_layers, .{
+                    .cache_bytes = so.cache_bytes,
+                    .cache_slots_per_layer = so.cache_slots_per_layer,
+                    .readahead = so.readahead,
+                    .auto_pin = so.auto_pin,
+                    .pin_bytes = so.pin_bytes,
+                });
+            }
+        }
+        errdefer if (expert_store) |store| store.destroy();
+
+        var token_embedding = try LinearWeight.load(ctx, try file.get("token_embd.weight"), config.vocab_size, config.hidden_size);
+        errdefer token_embedding.deinit();
+        var output = try LinearWeight.load(ctx, try file.get("output.weight"), config.vocab_size, config.hidden_size);
+        errdefer output.deinit();
+        const output_norm = try hostVector(allocator, file, "output_norm.weight", config.hidden_size);
+        errdefer allocator.free(output_norm);
+        var output_hc = HcModule{
+            .fn_proj = try LinearWeight.load(ctx, try file.get("output_hc_fn.weight"), config.n_hc, config.n_hc * config.hidden_size),
+            .scale = try hostVector(allocator, file, "output_hc_scale.weight", 1),
+            .base = try hostVector(allocator, file, "output_hc_base.weight", config.n_hc),
+        };
+        errdefer output_hc.deinit(allocator);
+
+        const layers = try allocator.alloc(Layer, config.num_layers);
+        errdefer allocator.free(layers);
+        var built: usize = 0;
+        errdefer for (layers[0..built]) |*l| l.deinit(allocator);
+        for (layers, 0..) |*layer, i| {
+            layer.* = try loadLayer(ctx, file, config, i, expert_store);
+            built += 1;
+        }
+        if (expert_store) |store| try store.finalize();
+
+        const weight_mapping = file.takeMapping();
+        if (weight_mapping == null) return Error.InvalidWeightShape;
+
+        var rope = try Rope.init(allocator, config, max_positions_default);
+        errdefer rope.deinit(allocator);
+
+        return .{
+            .allocator = allocator,
+            .config = config,
+            .token_embedding = token_embedding,
+            .output_hc = output_hc,
+            .output_norm = output_norm,
+            .output = output,
+            .layers = layers,
+            .rope = rope,
+            .attn_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(config.head_dim))),
+            .weight_mapping = weight_mapping,
+            .expert_store = expert_store,
+        };
+    }
+
+    pub fn deinit(self: *Model) void {
+        self.rope.deinit(self.allocator);
+        for (self.layers) |*l| l.deinit(self.allocator);
+        self.allocator.free(self.layers);
+        self.output_hc.deinit(self.allocator);
+        self.allocator.free(self.output_norm);
+        self.output.deinit();
+        self.token_embedding.deinit();
+        self.allocator.free(self.config.compress_ratio);
+        if (self.expert_store) |store| store.destroy();
+        if (self.weight_mapping) |*mapping| mapping.deinit();
+        self.* = undefined;
+    }
+
+    pub fn initCache(self: *const Model, capacity: usize) !Cache {
+        const cfg = self.config;
+        const allocator = self.allocator;
+        const layers = try allocator.alloc(LayerCache, cfg.num_layers);
+        var built: usize = 0;
+        errdefer {
+            for (layers[0..built]) |*lc| allocator.free(lc.raw);
+            allocator.free(layers);
+        }
+        for (layers, 0..) |*lc, i| {
+            lc.* = .{ .raw = try allocator.alloc(f32, cfg.n_swa * cfg.head_dim) };
+            const ratio = cfg.compress_ratio[i];
+            if (ratio != 0) {
+                // Ratio-4 keeps an overlapped double window (2x rows of 2x
+                // width); ratio-128 a plain window.
+                const rows: usize = if (ratio == 4) 2 * ratio else ratio;
+                const width: usize = if (ratio == 4) 2 * cfg.head_dim else cfg.head_dim;
+                lc.attn_state_kv = try allocator.alloc(f32, rows * width);
+                lc.attn_state_score = try allocator.alloc(f32, rows * width);
+            }
+            if (ratio == 4) {
+                const iw = 2 * cfg.indexer_head_dim;
+                lc.index_state_kv = try allocator.alloc(f32, 2 * ratio * iw);
+                lc.index_state_score = try allocator.alloc(f32, 2 * ratio * iw);
+            }
+            built += 1;
+        }
+        return .{ .allocator = allocator, .layers = layers, .capacity = capacity };
+    }
+};
+
+const max_positions_default: usize = 65536;
+
+fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i: usize, store: ?*fucina.ExpertStore) !Layer {
+    const allocator = ctx.allocator;
+    var buf: [96]u8 = undefined;
+    const name = struct {
+        fn of(b: []u8, i: usize, suffix: []const u8) ![]const u8 {
+            return std.fmt.bufPrint(b, "blk.{d}.{s}", .{ i, suffix });
+        }
+    };
+    const hidden = config.hidden_size;
+    const ratio = config.compress_ratio[layer_i];
+
+    var hc_attn = HcModule{
+        .fn_proj = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "hc_attn_fn.weight")), 6 * config.n_hc, config.n_hc * hidden),
+        .scale = try hostVector(allocator, file, try name.of(&buf, layer_i, "hc_attn_scale.weight"), 3),
+        .base = try hostVector(allocator, file, try name.of(&buf, layer_i, "hc_attn_base.weight"), 6 * config.n_hc),
+    };
+    errdefer hc_attn.deinit(allocator);
+    var hc_ffn = HcModule{
+        .fn_proj = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "hc_ffn_fn.weight")), 6 * config.n_hc, config.n_hc * hidden),
+        .scale = try hostVector(allocator, file, try name.of(&buf, layer_i, "hc_ffn_scale.weight"), 3),
+        .base = try hostVector(allocator, file, try name.of(&buf, layer_i, "hc_ffn_base.weight"), 6 * config.n_hc),
+    };
+    errdefer hc_ffn.deinit(allocator);
+
+    const attn_norm = try hostVector(allocator, file, try name.of(&buf, layer_i, "attn_norm.weight"), hidden);
+    errdefer allocator.free(attn_norm);
+    const ffn_norm = try hostVector(allocator, file, try name.of(&buf, layer_i, "ffn_norm.weight"), hidden);
+    errdefer allocator.free(ffn_norm);
+
+    var q_a = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "attn_q_a.weight")), config.q_lora_rank, hidden);
+    errdefer q_a.deinit();
+    const q_a_norm = try hostVector(allocator, file, try name.of(&buf, layer_i, "attn_q_a_norm.weight"), config.q_lora_rank);
+    errdefer allocator.free(q_a_norm);
+    var q_b = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "attn_q_b.weight")), config.num_heads * config.head_dim, config.q_lora_rank);
+    errdefer q_b.deinit();
+    var kv = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "attn_kv.weight")), config.head_dim, hidden);
+    errdefer kv.deinit();
+    const kv_a_norm = try hostVector(allocator, file, try name.of(&buf, layer_i, "attn_kv_a_norm.weight"), config.head_dim);
+    errdefer allocator.free(kv_a_norm);
+    const sinks = try hostVector(allocator, file, try name.of(&buf, layer_i, "attn_sinks.weight"), config.num_heads);
+    errdefer allocator.free(sinks);
+    var output_a = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "attn_output_a.weight")), config.output_groups * config.output_lora_rank, config.num_heads * config.head_dim);
+    errdefer output_a.deinit();
+    var output_b = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "attn_output_b.weight")), hidden, config.output_groups * config.output_lora_rank);
+    errdefer output_b.deinit();
+
+    var attn_compressor: ?Compressor = null;
+    errdefer if (attn_compressor) |*c| c.deinit(allocator);
+    var index_compressor: ?Compressor = null;
+    errdefer if (index_compressor) |*c| c.deinit(allocator);
+    var indexer_q_b: ?LinearWeight = null;
+    errdefer if (indexer_q_b) |*w| w.deinit();
+    var indexer_proj: ?LinearWeight = null;
+    errdefer if (indexer_proj) |*w| w.deinit();
+    if (ratio != 0) {
+        const width: usize = if (ratio == 4) 2 * config.head_dim else config.head_dim;
+        attn_compressor = .{
+            .kv = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "attn_compressor_kv.weight")), width, hidden),
+            .gate = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "attn_compressor_gate.weight")), width, hidden),
+            .ape = try hostMatrix(allocator, file, try name.of(&buf, layer_i, "attn_compressor_ape.weight"), width, ratio),
+            .norm = try hostVector(allocator, file, try name.of(&buf, layer_i, "attn_compressor_norm.weight"), config.head_dim),
+            .width = width,
+            .ratio = ratio,
+        };
+    }
+    if (ratio == 4) {
+        const iw = 2 * config.indexer_head_dim;
+        index_compressor = .{
+            .kv = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "indexer_compressor_kv.weight")), iw, hidden),
+            .gate = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "indexer_compressor_gate.weight")), iw, hidden),
+            .ape = try hostMatrix(allocator, file, try name.of(&buf, layer_i, "indexer_compressor_ape.weight"), iw, ratio),
+            .norm = try hostVector(allocator, file, try name.of(&buf, layer_i, "indexer_compressor_norm.weight"), config.indexer_head_dim),
+            .width = iw,
+            .ratio = ratio,
+        };
+        indexer_q_b = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "indexer.attn_q_b.weight")), config.indexer_heads * config.indexer_head_dim, config.q_lora_rank);
+        indexer_proj = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "indexer.proj.weight")), config.indexer_heads, hidden);
+    }
+
+    // MoE: router f16 + hash table on the leading layers + bias later on.
+    var router = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "ffn_gate_inp.weight")), config.num_experts, hidden);
+    errdefer router.deinit();
+    var router_bias: ?[]f32 = null;
+    errdefer if (router_bias) |b| allocator.free(b);
+    var bias_buf: [96]u8 = undefined;
+    if (file.maybeGet(try name.of(&bias_buf, layer_i, "exp_probs_b.bias"))) |bias_info| {
+        router_bias = try hostVectorInfo(allocator, bias_info, config.num_experts);
+    }
+    var tid2eid: ?[]const i32 = null;
+    if (file.maybeGet(try name.of(&bias_buf, layer_i, "ffn_gate_tid2eid.weight"))) |tid_info| {
+        if (tid_info.n_dims != 2 or tid_info.dims[0] != config.num_experts_used or tid_info.dims[1] != config.vocab_size) return Error.InvalidWeightShape;
+        const raw = std.mem.bytesAsSlice(i32, @as([]align(4) const u8, @alignCast(tid_info.data)));
+        tid2eid = raw;
+    }
+    if ((layer_i < config.hash_layers) != (tid2eid != null)) return Error.InvalidWeightShape;
+
+    var gate: fucina.MoeRhs = undefined;
+    var up: fucina.MoeRhs = undefined;
+    var down: fucina.MoeRhs = undefined;
+    if (store) |st| {
+        const trio = try weights.loadMoeRhsStreamed(st, file, layer_i, try file.get(try name.of(&buf, layer_i, "ffn_gate_exps.weight")), try file.get(try name.of(&buf, layer_i, "ffn_up_exps.weight")), try file.get(try name.of(&buf, layer_i, "ffn_down_exps.weight")), hidden, config.expert_ffn_size, config.num_experts);
+        gate = trio.gate;
+        up = trio.up;
+        down = trio.down;
+    } else {
+        const borrow = file.is_mmap and !file.isSplit();
+        gate = try weights.loadMoeRhs(ctx, try file.get(try name.of(&buf, layer_i, "ffn_gate_exps.weight")), hidden, config.expert_ffn_size, config.num_experts, borrow);
+        up = try weights.loadMoeRhs(ctx, try file.get(try name.of(&buf, layer_i, "ffn_up_exps.weight")), hidden, config.expert_ffn_size, config.num_experts, borrow);
+        down = try weights.loadMoeRhs(ctx, try file.get(try name.of(&buf, layer_i, "ffn_down_exps.weight")), config.expert_ffn_size, hidden, config.num_experts, borrow);
+    }
+    const shared_ffn = config.expert_ffn_size * config.num_shared_experts;
+    var shared_gate = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "ffn_gate_shexp.weight")), shared_ffn, hidden);
+    errdefer shared_gate.deinit();
+    var shared_up = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "ffn_up_shexp.weight")), shared_ffn, hidden);
+    errdefer shared_up.deinit();
+    var shared_down = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "ffn_down_shexp.weight")), hidden, shared_ffn);
+    errdefer shared_down.deinit();
+
+    return .{
+        .hc_attn = hc_attn,
+        .hc_ffn = hc_ffn,
+        .attn_norm = attn_norm,
+        .ffn_norm = ffn_norm,
+        .q_a = q_a,
+        .q_a_norm = q_a_norm,
+        .q_b = q_b,
+        .kv = kv,
+        .kv_a_norm = kv_a_norm,
+        .sinks = sinks,
+        .output_a = output_a,
+        .output_b = output_b,
+        .attn_compressor = attn_compressor,
+        .index_compressor = index_compressor,
+        .indexer_q_b = indexer_q_b,
+        .indexer_proj = indexer_proj,
+        .moe = .{
+            .router = router,
+            .router_bias = router_bias,
+            .tid2eid = tid2eid,
+            .gate = gate,
+            .up = up,
+            .down = down,
+            .shared_gate = shared_gate,
+            .shared_up = shared_up,
+            .shared_down = shared_down,
+        },
+    };
+}
+
+fn hostVector(allocator: Allocator, file: *const gguf.File, tensor_name: []const u8, expected: usize) ![]f32 {
+    return hostVectorInfo(allocator, try file.get(tensor_name), expected);
+}
+
+fn hostVectorInfo(allocator: Allocator, info: *const gguf.TensorInfo, expected: usize) ![]f32 {
+    if (info.n_dims != 1 or info.dims[0] != expected) return Error.InvalidWeightShape;
+    const out = try allocator.alloc(f32, expected);
+    errdefer allocator.free(out);
+    try weights.fillF32(out, info);
+    return out;
+}
+
+/// 2D host matrix as [rows][cols] f32 (GGUF dims [cols, rows]).
+fn hostMatrix(allocator: Allocator, file: *const gguf.File, tensor_name: []const u8, cols: usize, rows: usize) ![]f32 {
+    const info = try file.get(tensor_name);
+    if (info.n_dims != 2 or info.dims[0] != cols or info.dims[1] != rows) return Error.InvalidWeightShape;
+    const out = try allocator.alloc(f32, rows * cols);
+    errdefer allocator.free(out);
+    try weights.fillF32(out, info);
+    return out;
+}
+
+fn rmsNormInto(out: []f32, x: []const f32, weight: ?[]const f32, eps: f32) void {
+    var sum: f64 = 0;
+    for (x) |v| sum += @as(f64, v) * v;
+    const inv = 1.0 / @sqrt(sum / @as(f64, @floatFromInt(x.len)) + eps);
+    if (weight) |w| {
+        for (out, x, w) |*o, v, wv| o.* = @floatCast(@as(f64, v) * inv * wv);
+    } else {
+        for (out, x) |*o, v| o.* = @floatCast(@as(f64, v) * inv);
+    }
+}
+
+fn sigmoidStable(x: f32) f32 {
+    if (x >= 0) {
+        const e = @exp(-x);
+        return 1.0 / (1.0 + e);
+    }
+    const e = @exp(x);
+    return e / (1.0 + e);
+}
+
+fn softplusStable(x: f32) f32 {
+    // log(1 + e^x), sign-stable.
+    return if (x > 0) x + std.math.log1p(@exp(-x)) else std.math.log1p(@exp(x));
+}
+
 test {
     // Numerics sanity: Hadamard is an involution up to scale; e4m3 grid is
     // monotone; fp8/fp4 round trips are idempotent.

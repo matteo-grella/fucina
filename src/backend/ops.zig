@@ -46,6 +46,9 @@ pub const UnaryOp = enum {
     silu,
     log,
     log1p,
+    // softplus: log(1 + e^x), sign-stable (torch.nn.functional.softplus with
+    // default beta/threshold semantics in the pre-threshold regime).
+    softplus,
     neg,
     abs,
     sin,
@@ -103,6 +106,7 @@ pub inline fn unaryScalar(comptime op: UnaryOp, value: f32) f32 {
         .silu => value * sigmoidScalar(value),
         .log => @log(value),
         .log1p => @log(1 + value),
+        .softplus => if (value > 0) value + @log(1 + @exp(-value)) else @log(1 + @exp(value)),
         .neg => -value,
         .abs => @abs(value),
         .sin => @sin(value),
