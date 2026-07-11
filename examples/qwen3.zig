@@ -62,6 +62,8 @@ pub fn main(init: std.process.Init) !void {
     var moe_stream_flag = false;
     var moe_cache_mb: ?usize = null;
     var moe_cache_slots: ?usize = null;
+    var moe_pin_mb: ?usize = null;
+    var moe_no_learn = false;
     var arg_i: usize = 2;
     while (arg_i < args.len) : (arg_i += 1) {
         const arg = args[arg_i];
@@ -227,6 +229,11 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.startsWith(u8, arg, "--moe-cache-slots=")) {
             moe_stream_flag = true;
             moe_cache_slots = try std.fmt.parseInt(usize, arg["--moe-cache-slots=".len..], 10);
+        } else if (std.mem.startsWith(u8, arg, "--moe-pin-mb=")) {
+            moe_stream_flag = true;
+            moe_pin_mb = try std.fmt.parseInt(usize, arg["--moe-pin-mb=".len..], 10);
+        } else if (std.mem.eql(u8, arg, "--moe-no-learn")) {
+            moe_no_learn = true;
         } else if (std.mem.startsWith(u8, arg, "--")) {
             try stdout.print("unknown flag: {s} (run with no arguments for usage)\n", .{arg});
             return error.UnknownArgument;
@@ -261,15 +268,20 @@ pub fn main(init: std.process.Init) !void {
             .gguf_path = args[1],
             .cache_bytes = if (moe_cache_mb) |mb| mb << 20 else null,
             .cache_slots_per_layer = moe_cache_slots,
+            .auto_pin = !moe_no_learn,
+            .pin_bytes = if (moe_pin_mb) |mb| mb << 20 else null,
         },
     } else .{};
     var model = try llm.qwen3.model.Model.loadGgufFromFileOptions(&ctx, &file, try llm.qwen3.model.Config.fromGguf(&file), load_options);
     defer model.deinit();
     defer if (model.expert_store) |store| {
+        // The learning cache: persist this session's routing so the next
+        // startup pins what this workload actually used.
+        if (!moe_no_learn) store.saveUsage() catch {};
         const s = store.stats;
         std.debug.print(
-            "moe stream: {d} acquires, hits {d} / misses {d} ({d:.1}% hit), {d:.2} GB read in {d:.2}s, cap {d} slots/layer\n",
-            .{ s.acquires, s.hits, s.misses, s.hitRate() * 100, @as(f64, @floatFromInt(s.bytes_read)) / 1e9, @as(f64, @floatFromInt(s.read_ns)) / 1e9, store.cap },
+            "moe stream: {d} acquires, hits {d} / misses {d} ({d:.1}% hit, {d} pin hits), {d:.2} GB read in {d:.2}s, cap {d} slots/layer, pinned {d} experts ({d:.2} GB)\n",
+            .{ s.acquires, s.hits, s.misses, s.hitRate() * 100, s.pin_hits, @as(f64, @floatFromInt(s.bytes_read)) / 1e9, @as(f64, @floatFromInt(s.read_ns)) / 1e9, store.cap, store.pinned_experts, @as(f64, @floatFromInt(store.pinned_bytes)) / 1e9 },
         );
     };
     // Build a tokenizer from the same file's metadata; tolerate models without it.

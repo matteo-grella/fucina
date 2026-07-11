@@ -18,6 +18,12 @@ const hidden: usize = 256; // one Q8_K superblock per row
 const out_pe: usize = 256;
 const n_expert: usize = 8;
 
+fn cleanupSidecar(path: []const u8) void {
+    var buf: [160]u8 = undefined;
+    const sidecar = std.fmt.bufPrint(&buf, "{s}.experts", .{path}) catch return;
+    std.Io.Dir.cwd().deleteFile(std.testing.io, sidecar) catch {};
+}
+
 fn f16Bits(v: f32) u16 {
     return @bitCast(@as(f16, @floatCast(v)));
 }
@@ -63,6 +69,39 @@ const Fixture = struct {
     streamed_gate: MoeRhs,
     streamed_up: MoeRhs,
     streamed_down: MoeRhs,
+
+    /// Register this fixture's file layout (same geometry) on any store
+    /// created over `self.path` — the reload/auto-pin tests build second
+    /// stores against the same bytes.
+    fn registerLayer(self: *const Fixture, store: *ExpertStore) !void {
+        const gate_bytes = self.gate_blocks.len * @sizeOf(qm.BlockQ5_K);
+        const up_bytes = self.up_blocks.len * @sizeOf(qm.BlockQ5_K);
+        const down_bytes = self.down_blocks.len * @sizeOf(qm.BlockQ6_K);
+        try store.addLayer(0, .{
+            .{ .quant = .q5_k, .file_offset = 0, .byte_len = gate_bytes, .in_dim = hidden, .out_dim = out_pe },
+            .{ .quant = .q5_k, .file_offset = gate_bytes, .byte_len = up_bytes, .in_dim = hidden, .out_dim = out_pe },
+            .{ .quant = .q6_k, .file_offset = gate_bytes + up_bytes, .byte_len = down_bytes, .in_dim = out_pe, .out_dim = hidden },
+        }, n_expert);
+    }
+
+    /// One single-token decode through `store`'s streamed arms; asserts the
+    /// output is bitwise-equal to the resident path.
+    fn expectDecodeWith(self: *Fixture, ctx: *ExecContext, store: *ExpertStore, selected: []const usize, weights: []const f32) !void {
+        var gate: MoeRhs = .{ .streamed = store.streamedRhs(0, .gate) };
+        var up: MoeRhs = .{ .streamed = store.streamedRhs(0, .up) };
+        var down: MoeRhs = .{ .streamed = store.streamedRhs(0, .down) };
+        const x_vals = try self.allocator.alloc(f32, hidden);
+        defer self.allocator.free(x_vals);
+        for (x_vals, 0..) |*v, i| v.* = @floatFromInt(@as(i32, @intCast((i * 13) % 199)) - 99);
+        var x = try ctx.fromSliceRank(2, .{ 1, hidden }, x_vals);
+        defer x.deinit();
+
+        var want = try ctx.moeExpertFfn(&x, &self.resident_gate, &self.resident_up, &self.resident_down, selected, weights, out_pe, .swiglu, null, null);
+        defer want.deinit();
+        var got = try ctx.moeExpertFfn(&x, &gate, &up, &down, selected, weights, out_pe, .swiglu, null, null);
+        defer got.deinit();
+        try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
+    }
 
     fn init(self: *Fixture, allocator: std.mem.Allocator, cache_slots: usize) !void {
         const gate_rows = n_expert * out_pe;
@@ -117,6 +156,7 @@ const Fixture = struct {
         self.allocator.free(self.down_blocks);
         self.allocator.free(self.up_blocks);
         self.allocator.free(self.gate_blocks);
+        cleanupSidecar(self.path);
         std.Io.Dir.cwd().deleteFile(std.testing.io, self.path) catch {};
     }
 
@@ -231,4 +271,85 @@ test "expert store validates geometry and lifecycle" {
         .{ .quant = .q6_k, .file_offset = 0, .byte_len = 12345, .in_dim = out_pe, .out_dim = hidden },
     }, n_expert));
     try std.testing.expectError(error.StoreNotFinalized, store2.acquire(0, &.{0}));
+}
+
+test "learning cache: saved usage auto-pins the hot experts on reload, bit-exact and miss-free" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var fx: Fixture = undefined;
+    try fx.init(allocator, 2);
+    defer fx.deinit();
+
+    // Session 1: route consistently to {5, 6}, persist the histogram.
+    for (0..3) |_| try fx.expectDecodeMatches(&ctx, &.{ 5, 6 }, &.{ 0.7, 0.3 });
+    try fx.store.saveUsage();
+
+    // Session 2 (fresh store, same file): history qualifies, budget fits
+    // exactly two pinned experts -> 5 and 6 are read at finalize and every
+    // decode routed to them is a pure pin hit.
+    var store2 = try ExpertStore.create(allocator, fx.path, 1, .{
+        .cache_slots_per_layer = 1,
+        .auto_pin_min_history = 1,
+    });
+    defer store2.destroy();
+    try fx.registerLayer(store2);
+    store2.options.pin_bytes = 2 * store2.layers[0].slab_bytes;
+    try store2.finalize();
+    try std.testing.expectEqual(@as(usize, 2), store2.pinned_experts);
+
+    try fx.expectDecodeWith(&ctx, store2, &.{ 5, 6 }, &.{ 0.7, 0.3 });
+    try std.testing.expectEqual(@as(u64, 0), store2.stats.misses);
+    try std.testing.expectEqual(@as(u64, 2), store2.stats.pin_hits);
+
+    // A histogram from a different geometry is ignored wholesale: a store
+    // pretending the model has more layers loads nothing and pins nothing.
+    var store3 = try ExpertStore.create(allocator, fx.path, 2, .{
+        .cache_slots_per_layer = 1,
+        .auto_pin_min_history = 1,
+    });
+    defer store3.destroy();
+    try fx.registerLayer(store3);
+    try store3.finalize();
+    try std.testing.expectEqual(@as(usize, 0), store3.pinned_experts);
+}
+
+test "learning cache: repin pass swaps cold pins for hot streamed experts with hysteresis" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var fx: Fixture = undefined;
+    try fx.init(allocator, 2);
+    defer fx.deinit();
+
+    // Pin {5, 6} via saved history (as above).
+    for (0..3) |_| try fx.expectDecodeMatches(&ctx, &.{ 5, 6 }, &.{ 0.7, 0.3 });
+    try fx.store.saveUsage();
+    var store2 = try ExpertStore.create(allocator, fx.path, 1, .{
+        .cache_slots_per_layer = 1,
+        .auto_pin_min_history = 1,
+    });
+    defer store2.destroy();
+    try fx.registerLayer(store2);
+    store2.options.pin_bytes = 2 * store2.layers[0].slab_bytes;
+    try store2.finalize();
+    try std.testing.expectEqual(@as(usize, 2), store2.pinned_experts);
+
+    // Below the hysteresis margin (fixed +4 with zero pinned heat) nothing
+    // swaps: 4 routed pairs of heat are not enough evidence.
+    for (0..4) |_| try fx.expectDecodeWith(&ctx, store2, &.{ 1, 2 }, &.{ 0.5, 0.5 });
+    try std.testing.expectEqual(@as(usize, 0), store2.repinPass(4));
+
+    // Past it (heat halved to 2 by the failed pass, then +5 = 7 > 4), both
+    // cold pins swap to the new hot pair; decode then pin-hits and stays
+    // bit-exact.
+    for (0..5) |_| try fx.expectDecodeWith(&ctx, store2, &.{ 1, 2 }, &.{ 0.5, 0.5 });
+    try std.testing.expectEqual(@as(usize, 2), store2.repinPass(4));
+    const pin_hits_before = store2.stats.pin_hits;
+    try fx.expectDecodeWith(&ctx, store2, &.{ 1, 2 }, &.{ 0.5, 0.5 });
+    try std.testing.expectEqual(pin_hits_before + 2, store2.stats.pin_hits);
 }

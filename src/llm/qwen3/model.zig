@@ -161,6 +161,13 @@ pub const MoeStreamOptions = struct {
     cache_slots_per_layer: ?usize = null,
     /// OS readahead hints for miss batches.
     readahead: bool = true,
+    /// The learning cache: pin the hottest experts from the persisted usage
+    /// sidecar (`<gguf>.experts`) at load; save updated counts with
+    /// `ExpertStore.saveUsage` at generation/turn boundaries.
+    auto_pin: bool = true,
+    /// RAM for the pinned tier (default: half the budget when history
+    /// qualifies).
+    pin_bytes: ?usize = null,
 };
 
 pub const LoadOptions = struct {
@@ -215,6 +222,8 @@ pub const Model = struct {
                     .cache_bytes = stream_options.cache_bytes,
                     .cache_slots_per_layer = stream_options.cache_slots_per_layer,
                     .readahead = stream_options.readahead,
+                    .auto_pin = stream_options.auto_pin,
+                    .pin_bytes = stream_options.pin_bytes,
                 });
             }
         }

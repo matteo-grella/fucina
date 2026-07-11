@@ -34,6 +34,7 @@ pub const Error = error{
     StoreNotFinalized,
     ExpertFileOpenFailed,
     ExpertFileReadFailed,
+    UsageFileWriteFailed,
     UnexpectedEndOfFile,
 } || Allocator.Error;
 
@@ -101,6 +102,77 @@ fn preadOnce(fd: fd_t, buf: []u8, offset: u64) Error!usize {
             return @intCast(rc);
         },
     }
+}
+
+fn openWriteTrunc(allocator: Allocator, path: []const u8) Error!fd_t {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+    switch (builtin.os.tag) {
+        .linux => {
+            const linux = std.os.linux;
+            const rc = linux.openat(linux.AT.FDCWD, path_z, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o644);
+            if (linux.errno(rc) != .SUCCESS) return Error.UsageFileWriteFailed;
+            return @intCast(rc);
+        },
+        else => {
+            const rc = std.c.open(path_z, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, @as(c_uint, 0o644));
+            if (rc < 0) return Error.UsageFileWriteFailed;
+            return rc;
+        },
+    }
+}
+
+fn writeFull(fd: fd_t, bytes: []const u8) Error!void {
+    var done: usize = 0;
+    while (done < bytes.len) {
+        switch (builtin.os.tag) {
+            .linux => {
+                const linux = std.os.linux;
+                const rc = linux.write(fd, bytes.ptr + done, bytes.len - done);
+                if (linux.errno(rc) != .SUCCESS) return Error.UsageFileWriteFailed;
+                done += rc;
+            },
+            else => {
+                const rc = std.c.write(fd, bytes.ptr + done, bytes.len - done);
+                if (rc < 0) return Error.UsageFileWriteFailed;
+                done += @intCast(rc);
+            },
+        }
+    }
+}
+
+fn renamePath(allocator: Allocator, old: []const u8, new: []const u8) Error!void {
+    const old_z = try allocator.dupeZ(u8, old);
+    defer allocator.free(old_z);
+    const new_z = try allocator.dupeZ(u8, new);
+    defer allocator.free(new_z);
+    switch (builtin.os.tag) {
+        .linux => {
+            const linux = std.os.linux;
+            const rc = linux.renameat(linux.AT.FDCWD, old_z, linux.AT.FDCWD, new_z);
+            if (linux.errno(rc) != .SUCCESS) return Error.UsageFileWriteFailed;
+        },
+        else => {
+            if (std.c.rename(old_z, new_z) != 0) return Error.UsageFileWriteFailed;
+        },
+    }
+}
+
+/// Whole small file into an allocated buffer, or null on any failure. Capped
+/// (histograms are tens of KB) so a bogus path can't balloon memory.
+fn readWholeFile(allocator: Allocator, path: []const u8) ?[]u8 {
+    const max_bytes = 16 << 20;
+    const fd = openReadOnly(allocator, path) catch return null;
+    defer closeFd(fd);
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    var chunk: [65536]u8 = undefined;
+    while (bytes.items.len <= max_bytes) {
+        const n = preadOnce(fd, &chunk, bytes.items.len) catch return null;
+        if (n == 0) return bytes.toOwnedSlice(allocator) catch null;
+        bytes.appendSlice(allocator, chunk[0..n]) catch return null;
+    }
+    return null;
 }
 
 /// Quantized formats an expert stack may stream in — the K-quant family
@@ -201,12 +273,20 @@ pub const LayerState = struct {
     /// LRU tier (`cap` entries; slabs allocated on first promotion).
     slots: []Slot = &.{},
     n_slots: usize = 0,
+    /// Pinned hot tier: experts selected from the persistent usage history at
+    /// finalize (and adapted by `repinPass`); checked before the LRU, never
+    /// evicted by promotions.
+    pinned: []Slot = &.{},
     /// Resolved pointer per (expert, projection), valid between acquire and
     /// release for the acquired experts only.
     resolved: [][3]?[*]const u8 = &.{},
     /// Persistent routing histogram (one count per routed pair), the raw
-    /// signal for usage-driven pinning.
+    /// signal for usage-driven pinning. Never decayed.
     usage: []u64 = &.{},
+    /// Recent-routing heat for live pin adaptation; halved every
+    /// `repinPass` so the pinned tier follows the current workload while
+    /// `usage` keeps the long-term history.
+    heat: []u32 = &.{},
 
     fn expertSlabOffsets(projs: [3]ProjGeometry) struct { off: [3]usize, total: usize } {
         var off: [3]usize = undefined;
@@ -218,7 +298,45 @@ pub const LayerState = struct {
         }
         return .{ .off = off, .total = std.mem.alignForward(usize, at, slab_align) };
     }
+
+    fn isPinned(self: *const LayerState, eid: u32) bool {
+        for (self.pinned) |*slot| {
+            if (slot.eid == eid) return true;
+        }
+        return false;
+    }
 };
+
+/// Pick one pinned slot to replace from recent routing heat: the coldest
+/// pinned expert vs the hottest unpinned one. The fixed +4 margin handles
+/// tiny samples; the 25% margin prevents ping-pong (tier hysteresis).
+fn tierPickSwap(ls: *const LayerState) ?struct { slot: usize, eid: u32 } {
+    if (ls.pinned.len == 0 or ls.heat.len == 0) return null;
+    var cold: usize = 0;
+    for (ls.pinned, 0..) |*slot, i| {
+        if (slot.eid == invalid_eid) return .{ .slot = i, .eid = hottestUnpinned(ls) orelse return null };
+        if (ls.heat[slot.eid] < ls.heat[ls.pinned[cold].eid]) cold = i;
+    }
+    const hot = hottestUnpinned(ls) orelse return null;
+    const fc = ls.heat[ls.pinned[cold].eid];
+    const fh = ls.heat[hot];
+    if (fh <= fc + (fc >> 2) + 4) return null;
+    return .{ .slot = cold, .eid = hot };
+}
+
+fn hottestUnpinned(ls: *const LayerState) ?u32 {
+    var best: ?u32 = null;
+    var best_heat: u32 = 0;
+    for (ls.heat, 0..) |h, e| {
+        const eid: u32 = @intCast(e);
+        if (h == 0 or ls.isPinned(eid)) continue;
+        if (best == null or h > best_heat) {
+            best = eid;
+            best_heat = h;
+        }
+    }
+    return best;
+}
 
 /// Best-effort async readahead hint for a file range: tells the kernel to
 /// start reading in the background so the synchronous `pread` that follows
@@ -287,16 +405,28 @@ pub const ExpertStore = struct {
     pub const Options = struct {
         /// Fixed LRU slots per layer; wins over `cache_bytes` when set.
         cache_slots_per_layer: ?usize = null,
-        /// Total RAM budget for the LRU tier across all layers. Default:
-        /// half of the available memory at finalize time (8 GiB fallback).
+        /// Total RAM budget for the streamed tiers (pinned + LRU) across all
+        /// layers. Default: half of the available memory at finalize time
+        /// (8 GiB fallback).
         cache_bytes: ?usize = null,
         /// Issue WILLNEED-style readahead for the whole miss set before the
         /// first synchronous read.
         readahead: bool = true,
+        /// The learning cache: when the persisted usage histogram (sidecar
+        /// `<gguf>.experts` file) carries enough history, pin the hottest
+        /// experts in RAM at finalize — they are read once at startup and
+        /// never evicted. The engine gets faster the more it is used.
+        auto_pin: bool = true,
+        /// RAM for the pinned tier; default: half of the total budget when
+        /// history qualifies (the LRU gets the remainder).
+        pin_bytes: ?usize = null,
+        /// Minimum recorded routed pairs before auto-pin trusts the history.
+        auto_pin_min_history: u64 = 5000,
     };
 
     pub const Stats = struct {
         hits: u64 = 0,
+        pin_hits: u64 = 0,
         misses: u64 = 0,
         bytes_read: u64 = 0,
         read_ns: u64 = 0,
@@ -314,8 +444,13 @@ pub const ExpertStore = struct {
     layers: []LayerState,
     registered: []bool,
     options: Options,
+    /// Sidecar path of the persistent usage histogram (`<gguf>.experts`).
+    usage_path: []u8,
     /// LRU slots per layer, fixed at `finalize`.
     cap: usize = 0,
+    /// Pinned-tier summary, fixed at `finalize` (adapted by `repinPass`).
+    pinned_experts: usize = 0,
+    pinned_bytes: usize = 0,
     finalized: bool = false,
     clock: u64 = 0,
     stats: Stats = .{},
@@ -344,7 +479,9 @@ pub const ExpertStore = struct {
         const layers = try allocator.alloc(LayerState, n_layers);
         errdefer allocator.free(layers);
         const registered = try allocator.alloc(bool, n_layers);
+        errdefer allocator.free(registered);
         @memset(registered, false);
+        const usage_path = try std.fmt.allocPrint(allocator, "{s}.experts", .{gguf_path});
 
         self.* = .{
             .allocator = allocator,
@@ -352,6 +489,7 @@ pub const ExpertStore = struct {
             .layers = layers,
             .registered = registered,
             .options = options,
+            .usage_path = usage_path,
         };
         return self;
     }
@@ -362,9 +500,13 @@ pub const ExpertStore = struct {
             if (!reg) continue;
             for (ls.slots) |*slot| slot.deinit(allocator);
             allocator.free(ls.slots);
+            for (ls.pinned) |*slot| slot.deinit(allocator);
+            allocator.free(ls.pinned);
             allocator.free(ls.resolved);
             allocator.free(ls.usage);
+            allocator.free(ls.heat);
         }
+        allocator.free(self.usage_path);
         for (self.work) |*slot| slot.deinit(allocator);
         allocator.free(self.work);
         allocator.free(self.active);
@@ -391,7 +533,10 @@ pub const ExpertStore = struct {
         errdefer self.allocator.free(resolved);
         @memset(resolved, .{ null, null, null });
         const usage = try self.allocator.alloc(u64, n_expert);
+        errdefer self.allocator.free(usage);
         @memset(usage, 0);
+        const heat = try self.allocator.alloc(u32, n_expert);
+        @memset(heat, 0);
 
         self.layers[layer_i] = .{
             .projs = projs,
@@ -400,14 +545,17 @@ pub const ExpertStore = struct {
             .slab_bytes = layout.total,
             .resolved = resolved,
             .usage = usage,
+            .heat = heat,
         };
         self.registered[layer_i] = true;
     }
 
-    /// Fix the LRU capacity from the configured budget and allocate the
-    /// bookkeeping sized to the largest registered layer. Slot slabs
-    /// themselves are allocated lazily on first promotion, so an unused
-    /// budget costs nothing.
+    /// Fix the tier layout from the configured budget: load the persisted
+    /// usage history, carve the pinned tier out of the budget when the
+    /// history qualifies (auto-pin — the learning cache), give the LRU the
+    /// remainder, and allocate the bookkeeping sized to the largest
+    /// registered layer. LRU slot slabs are allocated lazily on first
+    /// promotion; pinned slabs are read from disk here, once.
     pub fn finalize(self: *ExpertStore) Error!void {
         var total_slab: usize = 0;
         var max_expert: usize = 0;
@@ -420,14 +568,22 @@ pub const ExpertStore = struct {
         }
         if (n_registered == 0) return Error.LayerNotRegistered;
 
+        const history_pairs = self.loadUsage();
+
+        var budget: usize = self.options.cache_bytes orelse blk: {
+            const avail = memAvailableBytes() orelse (8 << 30);
+            break :blk @max(avail / 2, 512 << 20);
+        };
+        if (self.options.auto_pin and history_pairs >= self.options.auto_pin_min_history) {
+            const pin_budget = self.options.pin_bytes orelse budget / 2;
+            const spent = try self.selectAndLoadPins(@min(pin_budget, budget));
+            budget -= @min(spent, budget);
+        }
+
         var cap: usize = undefined;
         if (self.options.cache_slots_per_layer) |slots| {
             cap = @max(1, slots);
         } else {
-            const budget = self.options.cache_bytes orelse blk: {
-                const avail = memAvailableBytes() orelse (8 << 30);
-                break :blk @max(avail / 2, 512 << 20);
-            };
             cap = @max(1, budget / total_slab);
         }
         cap = @min(cap, max_expert);
@@ -445,6 +601,74 @@ pub const ExpertStore = struct {
         @memset(self.work, .{});
         self.seen = try self.allocator.alloc(bool, max_expert);
         self.finalized = true;
+    }
+
+    /// Greedy hottest-first pin selection over every registered layer's
+    /// usage histogram, then one sequential read pass to load the picks.
+    /// Returns the bytes spent. Experts with zero recorded usage are never
+    /// pinned.
+    fn selectAndLoadPins(self: *ExpertStore, pin_budget: usize) Error!usize {
+        const Cand = struct { count: u64, layer: u32, eid: u32 };
+        var cands: std.ArrayList(Cand) = .empty;
+        defer cands.deinit(self.allocator);
+        for (self.layers, self.registered, 0..) |*ls, reg, layer_i| {
+            if (!reg) continue;
+            for (ls.usage, 0..) |count, e| {
+                if (count == 0) continue;
+                try cands.append(self.allocator, .{ .count = count, .layer = @intCast(layer_i), .eid = @intCast(e) });
+            }
+        }
+        std.mem.sort(Cand, cands.items, {}, struct {
+            fn hotter(_: void, a: Cand, b: Cand) bool {
+                if (a.count != b.count) return a.count > b.count;
+                if (a.layer != b.layer) return a.layer < b.layer;
+                return a.eid < b.eid;
+            }
+        }.hotter);
+
+        // Pass 1: greedy pick under the budget.
+        const pick_counts = try self.allocator.alloc(usize, self.layers.len);
+        defer self.allocator.free(pick_counts);
+        @memset(pick_counts, 0);
+        var picks: std.ArrayList(Cand) = .empty;
+        defer picks.deinit(self.allocator);
+        var spent: usize = 0;
+        for (cands.items) |cand| {
+            const ls = &self.layers[cand.layer];
+            if (spent + ls.slab_bytes > pin_budget) continue;
+            spent += ls.slab_bytes;
+            pick_counts[cand.layer] += 1;
+            try picks.append(self.allocator, cand);
+        }
+        if (picks.items.len == 0) return 0;
+
+        // Pass 2: allocate the pinned tiers, hint the whole pick set, then
+        // read it sequentially (the hints let the kernel batch the reads).
+        for (self.layers, self.registered, 0..) |*ls, reg, layer_i| {
+            if (!reg or pick_counts[layer_i] == 0) continue;
+            ls.pinned = try self.allocator.alloc(Slot, pick_counts[layer_i]);
+            @memset(ls.pinned, .{});
+        }
+        if (self.options.readahead) {
+            for (picks.items) |cand| {
+                const ls = &self.layers[cand.layer];
+                for (&ls.projs) |*g| hintWillNeed(self.fd, g.expertFileOffset(cand.eid), g.expert_bytes);
+            }
+        }
+        const fill = try self.allocator.alloc(usize, self.layers.len);
+        defer self.allocator.free(fill);
+        @memset(fill, 0);
+        for (picks.items) |cand| {
+            const ls = &self.layers[cand.layer];
+            const slot = &ls.pinned[fill[cand.layer]];
+            fill[cand.layer] += 1;
+            try slot.ensureCapacity(self.allocator, ls.slab_bytes);
+            try self.readExpert(ls, cand.eid, slot);
+            slot.eid = cand.eid;
+        }
+        self.pinned_experts = picks.items.len;
+        self.pinned_bytes = spent;
+        return spent;
     }
 
     /// Total bytes one layer's LRU tier may hold; times registered layers =
@@ -488,22 +712,30 @@ pub const ExpertStore = struct {
         if (layer_i >= self.layers.len or !self.registered[layer_i]) return Error.LayerNotRegistered;
         const ls = &self.layers[layer_i];
 
-        // Unique active set + usage histogram (every routed pair counts).
+        // Unique active set + usage/heat histograms (every routed pair
+        // counts; `usage` persists across sessions, `heat` decays per
+        // repin pass).
         @memset(self.seen[0..ls.n_expert], false);
         self.n_active = 0;
         for (selected) |e| {
             std.debug.assert(e < ls.n_expert);
             ls.usage[e] += 1;
+            ls.heat[e] +|= 1;
             if (self.seen[e]) continue;
             self.seen[e] = true;
             self.active[self.n_active] = @intCast(e);
             self.n_active += 1;
         }
 
-        // Hits resolve in place and re-stamp; misses collect.
+        // Pinned and LRU hits resolve in place (pin first — a pinned expert
+        // may transiently also sit in the LRU after a repin); misses collect.
         self.n_miss = 0;
         for (self.active[0..self.n_active]) |eid| {
-            if (self.findCached(ls, eid)) |slot| {
+            if (findPinned(ls, eid)) |slot| {
+                self.resolveSlot(ls, eid, slot);
+                self.stats.hits += 1;
+                self.stats.pin_hits += 1;
+            } else if (self.findCached(ls, eid)) |slot| {
                 self.clock += 1;
                 slot.used = self.clock;
                 self.resolveSlot(ls, eid, slot);
@@ -585,6 +817,13 @@ pub const ExpertStore = struct {
         return null;
     }
 
+    fn findPinned(ls: *LayerState, eid: u32) ?*Slot {
+        for (ls.pinned) |*slot| {
+            if (slot.eid == eid) return slot;
+        }
+        return null;
+    }
+
     fn resolveSlot(self: *ExpertStore, ls: *LayerState, eid: u32, slot: *Slot) void {
         _ = self;
         for (0..3) |p| ls.resolved[eid][p] = @ptrCast(slot.slab.ptr + ls.proj_off[p]);
@@ -608,6 +847,132 @@ pub const ExpertStore = struct {
             if (n == 0) return Error.UnexpectedEndOfFile;
             done += n;
         }
+    }
+
+    // ---- the learning cache: persistent usage histogram --------------------
+
+    const usage_magic = "FUCEXPT1";
+
+    /// Persist the usage histogram to the sidecar (`<gguf>.experts`),
+    /// atomically (tmp + rename): counts accumulate across sessions, and at
+    /// the next startup auto-pin turns them into a pinned hot tier. Call at
+    /// end of generation / turn boundaries; a failure loses only learning.
+    pub fn saveUsage(self: *ExpertStore) Error!void {
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(self.allocator);
+        try bytes.appendSlice(self.allocator, usage_magic);
+        try appendInt(u32, self.allocator, &bytes, @intCast(self.layers.len));
+        for (self.layers, self.registered, 0..) |*ls, reg, layer_i| {
+            if (!reg) continue;
+            try appendInt(u32, self.allocator, &bytes, @intCast(layer_i));
+            try appendInt(u32, self.allocator, &bytes, @intCast(ls.n_expert));
+            for (ls.usage) |count| try appendInt(u64, self.allocator, &bytes, count);
+        }
+
+        const tmp_path = try std.fmt.allocPrint(self.allocator, "{s}.tmp", .{self.usage_path});
+        defer self.allocator.free(tmp_path);
+        {
+            const fd = try openWriteTrunc(self.allocator, tmp_path);
+            defer closeFd(fd);
+            try writeFull(fd, bytes.items);
+        }
+        try renamePath(self.allocator, tmp_path, self.usage_path);
+    }
+
+    /// Merge the sidecar histogram into the in-memory counts (add, so a
+    /// session's own routing keeps accumulating on top). Any mismatch —
+    /// missing file, other model's geometry, torn write — ignores the file
+    /// wholesale. Returns the total merged pair count.
+    fn loadUsage(self: *ExpertStore) u64 {
+        const bytes = readWholeFile(self.allocator, self.usage_path) orelse return 0;
+        defer self.allocator.free(bytes);
+        var r = UsageReader{ .bytes = bytes };
+        if (!std.mem.eql(u8, r.take(usage_magic.len) orelse return 0, usage_magic)) return 0;
+        const n_layers = r.int(u32) orelse return 0;
+        if (n_layers != self.layers.len) return 0;
+
+        // Validate the whole record set against the registered geometry
+        // before merging anything: an invalid tail must not half-apply.
+        var check = r;
+        for (self.layers, self.registered, 0..) |*ls, reg, layer_i| {
+            if (!reg) continue;
+            if ((check.int(u32) orelse return 0) != layer_i) return 0;
+            if ((check.int(u32) orelse return 0) != ls.n_expert) return 0;
+            if (check.take(ls.n_expert * @sizeOf(u64)) == null) return 0;
+        }
+        if (check.bytes.len != check.at) return 0;
+
+        var total: u64 = 0;
+        for (self.layers, self.registered) |*ls, reg| {
+            if (!reg) continue;
+            _ = r.int(u32);
+            _ = r.int(u32);
+            for (ls.usage) |*count| {
+                const stored = r.int(u64) orelse unreachable;
+                count.* +|= stored;
+                total +|= stored;
+            }
+        }
+        return total;
+    }
+
+    const UsageReader = struct {
+        bytes: []const u8,
+        at: usize = 0,
+
+        fn take(self: *UsageReader, n: usize) ?[]const u8 {
+            if (self.at + n > self.bytes.len) return null;
+            defer self.at += n;
+            return self.bytes[self.at..][0..n];
+        }
+
+        fn int(self: *UsageReader, comptime T: type) ?T {
+            const raw = self.take(@sizeOf(T)) orelse return null;
+            return std.mem.readInt(T, raw[0..@sizeOf(T)], .little);
+        }
+    };
+
+    fn appendInt(comptime T: type, allocator: Allocator, bytes: *std.ArrayList(u8), value: T) Error!void {
+        var raw: [@sizeOf(T)]u8 = undefined;
+        std.mem.writeInt(T, &raw, value, .little);
+        try bytes.appendSlice(allocator, &raw);
+    }
+
+    // ---- live tier adaptation ----------------------------------------------
+
+    /// One adaptation pass over the pinned tier: per layer, replace up to
+    /// `max_swaps_per_layer` of the coldest pinned experts with hotter
+    /// streamed ones (25% + fixed hysteresis — see `tierPickSwap`), reading
+    /// the replacement into the existing pinned slab; then halve the heat so
+    /// the signal follows the current workload. Call at safe boundaries
+    /// (between generations / chat turns), never inside an acquire. Returns
+    /// the number of swaps performed.
+    pub fn repinPass(self: *ExpertStore, max_swaps_per_layer: usize) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        std.debug.assert(self.acquired_layer == null);
+        if (!self.finalized) return 0;
+
+        var swaps: usize = 0;
+        for (self.layers, self.registered) |*ls, reg| {
+            if (!reg) continue;
+            if (ls.pinned.len > 0) {
+                var done: usize = 0;
+                while (done < max_swaps_per_layer) : (done += 1) {
+                    const pick = tierPickSwap(ls) orelse break;
+                    const slot = &ls.pinned[pick.slot];
+                    // Invalidate first: a failed read leaves the slot skipped
+                    // by lookups instead of resolving to stale bytes.
+                    slot.eid = invalid_eid;
+                    slot.ensureCapacity(self.allocator, ls.slab_bytes) catch break;
+                    self.readExpert(ls, pick.eid, slot) catch break;
+                    slot.eid = pick.eid;
+                    swaps += 1;
+                }
+            }
+            for (ls.heat) |*h| h.* >>= 1;
+        }
+        return swaps;
     }
 };
 
