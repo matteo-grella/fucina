@@ -522,6 +522,32 @@ pub fn divRankTyped(
     return elementwiseRankTyped(rt, dtype, rank, .div, a, b);
 }
 
+pub fn maxRankTyped(
+    rt: *Runtime,
+    comptime dtype: DType,
+    comptime rank: usize,
+    a: *const tensor.TensorOf(dtype),
+    b: *const tensor.TensorOf(dtype),
+) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
+    comptime {
+        if (!dtype_mod.supportsIntMath(dtype)) @compileError("typed maximum/minimum kernels are integer-only (the float facade widens through f32)");
+    }
+    return elementwiseRankTyped(rt, dtype, rank, .max, a, b);
+}
+
+pub fn minRankTyped(
+    rt: *Runtime,
+    comptime dtype: DType,
+    comptime rank: usize,
+    a: *const tensor.TensorOf(dtype),
+    b: *const tensor.TensorOf(dtype),
+) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
+    comptime {
+        if (!dtype_mod.supportsIntMath(dtype)) @compileError("typed maximum/minimum kernels are integer-only (the float facade widens through f32)");
+    }
+    return elementwiseRankTyped(rt, dtype, rank, .min, a, b);
+}
+
 pub fn maxRank(rt: *Runtime, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
     return elementwiseRank(rt, rank, .max, a, b);
 }
@@ -1574,6 +1600,30 @@ fn elementwiseRankTyped(
     b: *const tensor.TensorOf(dtype),
 ) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
     if (comptime dtype == .f32) return elementwiseRank(rt, rank, op, a, b);
+    if (comptime dtype_mod.supportsIntMath(dtype)) {
+        // Integer pointwise: a plain exec loop (the stats.zig precedent —
+        // no backend kernel; integers are never the hot path). Wrapping
+        // two's-complement arithmetic; `div` is a compile error (integer
+        // division is explicit: intDivRankTyped).
+        const shape = try requireSameRankShapeOf(dtype, rank, a, b);
+        var aa = try rt.prepareContiguousTyped(dtype, a);
+        defer aa.deinit();
+        var bb = try rt.prepareContiguousTyped(dtype, b);
+        defer bb.deinit();
+        var out = try rt.emptyRankTyped(dtype, rank, shape);
+        errdefer out.deinit();
+        for (out.data(), aa.tensor().dataConst(), bb.tensor().dataConst()) |*o, x, y| {
+            o.* = switch (op) {
+                .add => x +% y,
+                .sub => x -% y,
+                .mul => x *% y,
+                .max => @max(x, y),
+                .min => @min(x, y),
+                .div => @compileError("integer `div` is explicit: use divTrunc/divFloor"),
+            };
+        }
+        return out;
+    }
     comptime ensureForwardFloatMath(dtype);
     const output_dtype = comptime dtype_mod.outputDType(.pointwise, dtype);
 
@@ -1587,6 +1637,50 @@ fn elementwiseRankTyped(
     errdefer out.deinit();
     rt.enableNativeVectorPoolForWork(out.len(), parallel.vector_elementwise_len_threshold);
     rt.backend.elementwiseContiguousIntoTyped(dtype, op, &out, aa.tensor(), bb.tensor(), out.len());
+    return out;
+}
+
+pub const IntDivMode = enum { trunc, floor };
+
+/// Integer division as an explicit op (torch's `/` silently promotes
+/// integers to float — a documented divergence: Fucina keeps promotion
+/// explicit). `.trunc` rounds toward zero (C semantics), `.floor` toward
+/// negative infinity (Python's //). A zero divisor is
+/// `error.DivisionByZero`.
+pub fn intDivRankTyped(
+    rt: *Runtime,
+    comptime dtype: DType,
+    comptime rank: usize,
+    comptime mode: IntDivMode,
+    a: *const tensor.TensorOf(dtype),
+    b: *const tensor.TensorOf(dtype),
+) !tensor.TensorOf(dtype) {
+    comptime {
+        if (!dtype_mod.supportsIntMath(dtype)) @compileError("intDivRankTyped requires an integer dtype");
+    }
+    const shape = try requireSameRankShapeOf(dtype, rank, a, b);
+    var aa = try rt.prepareContiguousTyped(dtype, a);
+    defer aa.deinit();
+    var bb = try rt.prepareContiguousTyped(dtype, b);
+    defer bb.deinit();
+    var out = try rt.emptyRankTyped(dtype, rank, shape);
+    errdefer out.deinit();
+    const signed = comptime @typeInfo(dtype_mod.Scalar(dtype)).int.signedness == .signed;
+    for (out.data(), aa.tensor().dataConst(), bb.tensor().dataConst()) |*o, x, y| {
+        if (y == 0) return tensor.TensorError.DivisionByZero;
+        if (comptime signed) {
+            // minInt / -1 overflows the two's-complement range: wrap to
+            // minInt (consistent with the wrapping +%/-%/*% contract).
+            if (x == std.math.minInt(dtype_mod.Scalar(dtype)) and y == -1) {
+                o.* = x;
+                continue;
+            }
+        }
+        o.* = switch (mode) {
+            .trunc => @divTrunc(x, y),
+            .floor => @divFloor(x, y),
+        };
+    }
     return out;
 }
 

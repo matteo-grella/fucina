@@ -4149,6 +4149,21 @@ fn TypedScalarConstantTensor(comptime tags_spec: anytype, comptime tensor_dtype:
         pub const concat = typedConstantConcat;
         pub const setSlice = typedConstantSetSlice;
         pub const setRows = typedConstantSetRows;
+
+        // Integer forward math (§4.19): wrapping two's-complement
+        // pointwise, explicit division, i64-returning reductions, and
+        // scalar casts. On `.bool` the arithmetic entries are compile
+        // errors — only `to` and the counting `sum`/`sumAll` apply.
+        pub const to = typedConstantTo;
+        pub const add = typedConstantAdd;
+        pub const sub = typedConstantSub;
+        pub const mul = typedConstantMul;
+        pub const maximum = typedConstantMaximum;
+        pub const minimum = typedConstantMinimum;
+        pub const divTrunc = typedConstantDivTrunc;
+        pub const divFloor = typedConstantDivFloor;
+        pub const sum = typedConstantSum;
+        pub const sumAll = typedConstantSumAll;
     };
 }
 
@@ -4514,9 +4529,13 @@ fn typedConstantTo(self: anytype, ctx: *ExecContext, comptime target_dtype: DTyp
     var value = try ctx.castTyped(Self.dtype, target_dtype, self.asRawTensor());
     errdefer value.deinit();
     if (comptime target_dtype == .f32) {
-        // Differentiable widen: the f32 result joins the f32 graph and the
-        // 16-bit source receives the upstream gradient unchanged (f32).
-        return finishOp(Self.axis_tags, ctx, value, self.requiresGrad(), CastBackward(Self.axis_tags), .{ ctx.allocator, self.grad_state });
+        if (comptime @hasField(Self, "grad_state")) {
+            // Differentiable widen: the f32 result joins the f32 graph and
+            // the 16-bit source receives the upstream gradient unchanged.
+            return finishOp(Self.axis_tags, ctx, value, self.requiresGrad(), CastBackward(Self.axis_tags), .{ ctx.allocator, self.grad_state });
+        }
+        // Integer/bool sources are grad-free: a plain f32 constant.
+        return finishNoGrad(Self.axis_tags, ctx, value);
     }
     return Tensor(.{ .dtype = target_dtype, .tags = Self.axis_tags }).fromTensor(ctx, value);
 }
@@ -4760,11 +4779,58 @@ fn typedWidenedPointwise(
 }
 
 fn typedConstantMaximum(self: anytype, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
+    const Self = TensorObject(@TypeOf(self));
+    if (comptime dtype_mod.supportsIntMath(Self.dtype)) return typedPointwise(Self.dtype, .max, self, ctx, other);
     return typedWidenedPointwise(.max, self, ctx, other);
 }
 
 fn typedConstantMinimum(self: anytype, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
+    const Self = TensorObject(@TypeOf(self));
+    if (comptime dtype_mod.supportsIntMath(Self.dtype)) return typedPointwise(Self.dtype, .min, self, ctx, other);
     return typedWidenedPointwise(.min, self, ctx, other);
+}
+
+/// Explicit integer division with the standard tag-broadcast rule:
+/// `.trunc` rounds toward zero, `.floor` toward negative infinity; a zero
+/// divisor is `error.DivisionByZero`; minInt/-1 wraps (the +% contract).
+fn typedIntDiv(
+    comptime mode: enum { trunc, floor },
+    self: anytype,
+    ctx: *ExecContext,
+    other: anytype,
+) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
+    const Self = TensorObject(@TypeOf(self));
+    const Other = TensorObject(@TypeOf(other));
+    comptime {
+        if (!dtype_mod.supportsIntMath(Self.dtype)) @compileError("divTrunc/divFloor are integer ops; floats use div");
+    }
+    if (Other.dtype != Self.dtype) @compileError("typed pointwise requires matching dtypes; cast explicitly");
+    const left_tags = Self.axis_tags;
+    const right_tags = Other.axis_tags;
+    const left = tensorObjectPtrFrom(@TypeOf(self), &self);
+    const right = tensorObjectPtrFrom(@TypeOf(other), &other);
+    const result_tags = pointwiseResultTags(left_tags, right_tags);
+    const result_shape = try pointwiseShapeOf(Self.dtype, result_tags, left_tags, left.asRawTensor(), right_tags, right.asRawTensor());
+
+    var left_view = try broadcastTensorToOf(Self.dtype, left_tags, left.asRawTensor(), result_tags, result_shape);
+    defer left_view.deinit();
+    var right_view = try broadcastTensorToOf(Self.dtype, right_tags, right.asRawTensor(), result_tags, result_shape);
+    defer right_view.deinit();
+
+    var value = switch (mode) {
+        .trunc => try ctx.divTruncRankTyped(Self.dtype, rawRank(result_tags.len), &left_view, &right_view),
+        .floor => try ctx.divFloorRankTyped(Self.dtype, rawRank(result_tags.len), &left_view, &right_view),
+    };
+    errdefer value.deinit();
+    return Tensor(.{ .dtype = Self.dtype, .tags = result_tags }).fromTensor(ctx, value);
+}
+
+fn typedConstantDivTrunc(self: anytype, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
+    return typedIntDiv(.trunc, self, ctx, other);
+}
+
+fn typedConstantDivFloor(self: anytype, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
+    return typedIntDiv(.floor, self, ctx, other);
 }
 
 fn typedConstantGated(
@@ -5276,6 +5342,7 @@ fn typedPointwise(
     const left_tags = SelfTensor.axis_tags;
     const Other = TensorObject(@TypeOf(other));
     if (Other.dtype != tensor_dtype) @compileError("typed pointwise requires matching dtypes; cast explicitly");
+    if (comptime tensor_dtype == .bool) @compileError("bool tensors have no pointwise arithmetic; cast with to() first");
     const right_tags = Other.axis_tags;
     const left = tensorObjectPtrFrom(@TypeOf(self), &self);
     const right = tensorObjectPtrFrom(@TypeOf(other), &other);
@@ -5291,8 +5358,18 @@ fn typedPointwise(
         .add => try ctx.addRankTyped(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view),
         .sub => try ctx.subRankTyped(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view),
         .mul => try ctx.mulRankTyped(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view),
-        .div => try ctx.divRankTyped(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view),
-        .max, .min => @compileError("maximum/minimum are f32-facade ops (no typed forward-math variant)"),
+        .div => if (comptime dtype_mod.supportsIntMath(tensor_dtype))
+            @compileError("integer `div` is explicit: use divTrunc/divFloor (torch's `/` promotes to float; Fucina keeps promotion explicit)")
+        else
+            try ctx.divRankTyped(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view),
+        .max => if (comptime dtype_mod.supportsIntMath(tensor_dtype))
+            try ctx.maxRankTyped(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view)
+        else
+            @compileError("float typed maximum/minimum widen through f32 (the f16/bf16 facade entries)"),
+        .min => if (comptime dtype_mod.supportsIntMath(tensor_dtype))
+            try ctx.minRankTyped(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view)
+        else
+            @compileError("float typed maximum/minimum widen through f32 (the f16/bf16 facade entries)"),
     };
     errdefer value.deinit();
     return Tensor(.{ .dtype = dtype_mod.outputDType(.pointwise, tensor_dtype), .tags = result_tags }).fromTensor(ctx, value);

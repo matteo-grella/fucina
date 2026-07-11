@@ -847,7 +847,7 @@ unsupported operation is a compile error, never a runtime failure
 |---|---|---|
 | Float (differentiable) | `.f32` | Full surface: autograd (`variable`, `backward`, `grad`), all math/NN ops (§4), all views and structural ops |
 | Typed float | `.f16`, `.bf16`, `.f64` (`supportsForwardFloatMath`) | Forward math: the native typed set (`add/sub/mul/div/sum/mean/sumAll/dot/scale/divScalar`, `to`), the full structural set (`split`/`merge`/`flatten`/`reshape`/`sliceStep`/`flip`/`roll`/`stack`/`repeatAxis` + the §3.10 base set), and — **f16/bf16 only** — the widened forward set (unary family, gated, softmax/norm family, remaining reductions, masks, `pad`, `einsum`; §4.19). **f16/bf16 only, autograd LEAVES**: `variable`/`variableFromSlice` with f32 gradients; differentiable `to` casts and mixed-RHS `dot`/`einsum` are the graph entries (§5.1) |
-| Typed scalar constant | `.bool`, `.u8`, `.u16`, `.i8`, `.i16`, `.i32`, `.i64` | Constants only, **no math, no `to`**; construction, data access, and structural ops |
+| Typed scalar constant | `.bool`, `.u8`, `.u16`, `.i8`, `.i16`, `.i32`, `.i64` | Constants only; construction, data access, structural ops, `to` (scalar casts, §3.8), and integer forward math (§4.19): wrapping `add`/`sub`/`mul`, `maximum`/`minimum`, explicit `divTrunc`/`divFloor`, i64-returning `sum`/`sumAll`. `.bool` keeps only `to` and the counting `sum`/`sumAll` |
 | Block-quantized constant | `q1_0`, `q4_0 … q8_k`, `iq*`, `tq1_0/tq2_0`, `mxfp4`, `nvfp4` (`isBlockQuantized`) | Constants only; block construction, `to(.f32)` dequantize, `getRows`, row `concat`, `packRhs`/`packRhsLayout` (§10) |
 
 Notes that follow from the dtype layer (`src/dtype.zig`, detailed in §8):
@@ -1576,7 +1576,8 @@ test "integer constants: structural ops only" {
     var out: [6]i64 = undefined;
     try t.copyTo(&out);
     try std.testing.expectEqualSlices(i64, &.{ 1, 4, 2, 5, 3, 6 }, &out);
-    comptime std.debug.assert(!@hasDecl(@TypeOf(ids), "add")); // no math on int constants
+    comptime std.debug.assert(@hasDecl(@TypeOf(ids), "add")); // wrapping int math (§4.19)
+    comptime std.debug.assert(!@hasDecl(@TypeOf(ids), "softmax")); // float NN ops stay off ints
 }
 ```
 
@@ -1595,7 +1596,7 @@ conversions per branch:
 | f32 | `.f32`, `.f16`, `.bf16`, `.f64` | `to(.f32)` is a differentiable copy; `to(.f16)`/`to(.bf16)` are DIFFERENTIABLE narrows (the mixed-precision seam, §5.1: the backward is the identity on the f32 upstream gradient); `to(.f64)` requires no-grad and fails with `error.GradientCastUnsupported` on a `requiresGrad()` tensor |
 | f16/bf16 | floating dtypes | `to(.f32)` is a DIFFERENTIABLE widen when the source requires grad (the f32 gradient flows back unchanged); casts to any non-f32 float require no-grad (`error.GradientCastUnsupported`) |
 | f64 constant | floating dtypes | float↔float casts only, no-grad; non-float targets are a compile error |
-| int/bool constant | — | no `to` at all (compile error) |
+| int/bool constant | any scalar dtype | no-grad `castScalar` semantics: integer↔integer WRAPS (two's complement); integer→float is exact where representable; float→integer truncates toward zero and SATURATES at the target bounds with NaN → 0; anything→bool is `!= 0` (NaN → true); bool→number is 0/1 |
 | block-quantized | `.f32` only | dequantization; other targets are a compile error |
 
 ```zig
@@ -1752,7 +1753,10 @@ is the N-ary companion of `einsum` (§4.8).
 `data`, `dataConst`, `copyTo`, `axis`, `hasTag`, `deinit`, `asRawTensor`,
 `requiresGrad`, `dim`, `shape`, `materialize`, `withTags`, `alignTo`,
 `permuteTo`, `transpose`, `insertAxis`, `squeeze`, `broadcastTo`, `gather`,
-`narrow`, `concat`, `setSlice`, `setRows` — all §3.
+`narrow`, `concat`, `setSlice`, `setRows` — all §3 — plus `to` (§3.8) and
+the integer forward math `add`, `sub`, `mul`, `maximum`, `minimum`,
+`divTrunc`, `divFloor`, `sum`, `sumAll` (§4.19; on `.bool` the arithmetic
+entries are compile errors — `to` and the counting `sum`/`sumAll` apply).
 
 **Typed float branch** (`.f16`/`.bf16`/`.f64`): everything in the
 scalar-constant branch, plus — f16/bf16 only, compile errors on f64 — the
@@ -1805,7 +1809,8 @@ Every operation below shares one contract, implemented by the shared tails
   not carry is a **compile error**, never a runtime error. Shape problems the
   type system cannot see (mismatched dims, bad lengths) are recoverable
   `TensorError`s (`ShapeMismatch`, `InvalidShape`, `InvalidDataLength`,
-  `IndexOutOfBounds`); the data-dependent no-match outcome of
+  `IndexOutOfBounds`, integer division's `DivisionByZero`); the
+  data-dependent no-match outcome of
   `maskedSelect`/`maskedScatter` gets the dedicated `EmptySelection` so it
   stays catchable apart from those.
 - **Ownership.** Each op allocates and returns a **new owned tensor**; the
@@ -3214,8 +3219,19 @@ breakdown the caller can pass to profile a run.
   (dequantize), `getRows` (§4.17), row-axis `concat`, `packRhs` /
   `packRhsLayout` (§4.9), and constructors/views (§3, §10). Their main math
   role is as the constant RHS of `dot` (§4.8) and `dotPacked` (§4.9).
-- **Integer dtypes** (e.g. token-id tensors): constructors, data access,
-  and the structural subset only.
+- **Integer dtypes** (e.g. token-id tensors) — ordinary integer forward
+  math, plain exec loops (integers are never the hot path): wrapping
+  two's-complement `add`/`sub`/`mul` (torch's narrowing behavior),
+  `maximum`/`minimum`, and EXPLICIT division — `divTrunc` (toward zero)
+  and `divFloor` (toward −inf), `error.DivisionByZero` on a zero divisor,
+  minInt/−1 wrapping to minInt. There is deliberately no integer `div`:
+  torch's `/` silently promotes integers to float, and Fucina keeps
+  promotion explicit (documented divergence). `sum`/`sumAll` accumulate
+  in i64 and RETURN `.i64` (torch's integer-sum dtype). `to` casts to any
+  scalar dtype (§3.8).
+- **`.bool`**: no pointwise arithmetic (compile error — cast first);
+  `to` and the counting `sum`/`sumAll` (i64) apply, plus the structural
+  subset.
 
 The typed forward ops are no-grad by design: an operand that requires
 gradients is REJECTED with `error.UnsupportedGradient` instead of silently
@@ -3253,6 +3269,34 @@ test "bf16 forward ops compute through f32 and narrow once" {
     var spread = try half.variance(&ctx, .d, 0);
     defer spread.deinit();
     comptime std.debug.assert(@TypeOf(spread).dtype == .f32);
+}
+```
+
+```zig
+test "integer math wraps, divides explicitly, and reduces to i64" {
+    const alloc = std.testing.allocator;
+    var ctx: fucina.ExecContext = undefined;
+    ctx.init(alloc);
+    defer ctx.deinit();
+
+    const Ids = fucina.Tensor(.{ .dtype = .i8, .tags = .{.d} });
+    var a = try Ids.fromSlice(&ctx, .{2}, &.{ 127, -7 });
+    defer a.deinit();
+    var b = try Ids.fromSlice(&ctx, .{2}, &.{ 1, 2 });
+    defer b.deinit();
+
+    var wrapped = try a.add(&ctx, &b); // two's-complement wrap
+    defer wrapped.deinit();
+    try std.testing.expectEqualSlices(i8, &.{ -128, -5 }, try wrapped.dataConst());
+
+    var quotient = try a.divFloor(&ctx, &b); // explicit: no integer `div`
+    defer quotient.deinit();
+    try std.testing.expectEqualSlices(i8, &.{ 127, -4 }, try quotient.dataConst());
+
+    var total = try a.sumAll(&ctx); // integer reductions return i64
+    defer total.deinit();
+    comptime std.debug.assert(@TypeOf(total).dtype == .i64);
+    try std.testing.expectEqual(@as(i64, 120), try total.item());
 }
 ```
 
@@ -5628,8 +5672,10 @@ the input unchanged (the policy governs float math only):
 | pointwise | `.bf16` | `f32` | `.bf16` |
 | pointwise | `.f32` | `f32` | `.f32` |
 | pointwise | `.f64` | `f64` | `.f64` |
+| pointwise | integers | input dtype (wrapping) | input dtype |
 | reduction | `.f16`, `.bf16`, `.f32` | `f32` | **`.f32`** |
 | reduction | `.f64` | `f64` | `.f64` |
+| reduction | integers, `.bool` | `i64` (wrapping) | **`.i64`** |
 | dot/matmul | `.f16`, `.bf16`, `.f32` | `f32` (accumulate) | input dtype |
 | dot/matmul | `.f64` | `f64` | `.f64` |
 

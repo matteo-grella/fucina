@@ -15,6 +15,7 @@ pub const TensorError = error{
     IndexOutOfBounds,
     UnsupportedView,
     EmptySelection,
+    DivisionByZero,
 };
 
 pub const Shape = struct {

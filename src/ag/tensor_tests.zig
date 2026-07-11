@@ -141,7 +141,10 @@ test "public Tensor accepts non-f32 dtype specs for token tensors" {
 
     const TokenIds = Tensor(.{ .dtype = .u16, .tags = .{ .batch, .seq } });
     try std.testing.expect(TokenIds.dtype == .u16);
-    try std.testing.expect(!@hasDecl(TokenIds, "add"));
+    // Integer tensors carry the wrapping forward-math set (§4.19); float
+    // `div` stays absent (integer division is explicit divTrunc/divFloor).
+    try std.testing.expect(@hasDecl(TokenIds, "add"));
+    try std.testing.expect(!@hasDecl(TokenIds, "div"));
 
     var ids = try TokenIds.fromSlice(&ctx, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer ids.deinit();
@@ -686,11 +689,10 @@ fn expectPackedClose(expected: f32, actual: f32) !void {
 
 fn expectNoFloatMath(comptime non_float_dtype: DType) void {
     const T = Tensor(.{ .dtype = non_float_dtype, .tags = .{ .batch, .d } });
+    // `to`, wrapping add/sub/mul, maximum/minimum, divTrunc/divFloor, and
+    // the i64-returning sum/sumAll are integer ops now (§4.19); `div`
+    // stays float-only (integer division is explicit).
     const forbidden = .{
-        "to",
-        "add",
-        "sub",
-        "mul",
         "div",
         "gated",
         "glu",
@@ -711,10 +713,8 @@ fn expectNoFloatMath(comptime non_float_dtype: DType) void {
         "gelu",
         "quickGelu",
         "clamp",
-        "sum",
         "mean",
         "variance",
-        "sumAll",
         "sumMany",
         "flatten",
         "argmax",
@@ -10227,4 +10227,119 @@ test "typed forward ops reject grad-requiring operands" {
     try std.testing.expect(!frozen.requiresGrad());
     var activated = try frozen.gelu(&ctx);
     defer activated.deinit();
+}
+
+test "integer tensors: wrapping pointwise, explicit division, i64 reductions" {
+    @setEvalBranchQuota(1_000_000);
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const I8 = Tensor(.{ .dtype = .i8, .tags = .{.d} });
+    var a = try I8.fromSlice(&ctx, .{4}, &.{ 127, -128, 10, -7 });
+    defer a.deinit();
+    var b = try I8.fromSlice(&ctx, .{4}, &.{ 1, -1, 3, 2 });
+    defer b.deinit();
+
+    // Wrapping two's-complement arithmetic.
+    var summed = try a.add(&ctx, &b);
+    defer summed.deinit();
+    try std.testing.expectEqualSlices(i8, &.{ -128, 127, 13, -5 }, try summed.dataConst());
+    var product = try a.mul(&ctx, &b);
+    defer product.deinit();
+    try std.testing.expectEqualSlices(i8, &.{ 127, -128, 30, -14 }, try product.dataConst());
+
+    // Explicit division: trunc toward zero vs floor toward -inf.
+    var q_trunc = try a.divTrunc(&ctx, &b);
+    defer q_trunc.deinit();
+    try std.testing.expectEqualSlices(i8, &.{ 127, -128, 3, -3 }, try q_trunc.dataConst());
+    var q_floor = try a.divFloor(&ctx, &b);
+    defer q_floor.deinit();
+    try std.testing.expectEqualSlices(i8, &.{ 127, -128, 3, -4 }, try q_floor.dataConst());
+    var neg = try I8.fromSlice(&ctx, .{4}, &.{ -7, -7, 7, 7 });
+    defer neg.deinit();
+    var two = try I8.fromSlice(&ctx, .{4}, &.{ 2, -2, 2, -2 });
+    defer two.deinit();
+    var nt = try neg.divTrunc(&ctx, &two);
+    defer nt.deinit();
+    try std.testing.expectEqualSlices(i8, &.{ -3, 3, 3, -3 }, try nt.dataConst());
+    var nf = try neg.divFloor(&ctx, &two);
+    defer nf.deinit();
+    try std.testing.expectEqualSlices(i8, &.{ -4, 3, 3, -4 }, try nf.dataConst());
+
+    var zero = try I8.fromSlice(&ctx, .{4}, &.{ 1, 0, 1, 1 });
+    defer zero.deinit();
+    try std.testing.expectError(error.DivisionByZero, a.divTrunc(&ctx, &zero));
+
+    // maximum/minimum run natively (no NaN business on ints).
+    var hi = try a.maximum(&ctx, &b);
+    defer hi.deinit();
+    try std.testing.expectEqualSlices(i8, &.{ 127, -1, 10, 2 }, try hi.dataConst());
+    var lo = try a.minimum(&ctx, &b);
+    defer lo.deinit();
+    try std.testing.expectEqualSlices(i8, &.{ 1, -128, 3, -7 }, try lo.dataConst());
+
+    // Reductions accumulate in i64 and RETURN i64 (torch's integer-sum
+    // dtype) — a u16 row sum cannot overflow silently.
+    const U16 = Tensor(.{ .dtype = .u16, .tags = .{ .row, .col } });
+    var wide = try U16.fromSlice(&ctx, .{ 2, 3 }, &.{ 65535, 65535, 65535, 1, 2, 3 });
+    defer wide.deinit();
+    var row_sum = try wide.sum(&ctx, .col);
+    defer row_sum.deinit();
+    comptime std.debug.assert(@TypeOf(row_sum).dtype == .i64);
+    try std.testing.expectEqualSlices(i64, &.{ 196605, 6 }, try row_sum.dataConst());
+    var total = try wide.sumAll(&ctx);
+    defer total.deinit();
+    try std.testing.expectEqual(@as(i64, 196611), try total.item());
+}
+
+test "integer and bool casts: wrap, saturate, count" {
+    @setEvalBranchQuota(1_000_000);
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    // int -> int wraps (two's complement), int -> float is exact here.
+    const I32 = Tensor(.{ .dtype = .i32, .tags = .{.d} });
+    var x = try I32.fromSlice(&ctx, .{4}, &.{ 300, -1, 65536, -129 });
+    defer x.deinit();
+    var narrow8 = try x.to(&ctx, .i8);
+    defer narrow8.deinit();
+    try std.testing.expectEqualSlices(i8, &.{ 44, -1, 0, 127 }, try narrow8.dataConst());
+    var as_f32 = try x.to(&ctx, .f32);
+    defer as_f32.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 300, -1, 65536, -129 }, try as_f32.dataConst());
+
+    // float -> int truncates toward zero and SATURATES; NaN -> 0.
+    var f = try Tensor(.{.d}).fromSlice(&ctx, .{5}, &.{ 300.9, -300.9, 1.9, -1.9, std.math.nan(f32) });
+    defer f.deinit();
+    var sat = try f.to(&ctx, .i8);
+    defer sat.deinit();
+    try std.testing.expectEqualSlices(i8, &.{ 127, -128, 1, -1, 0 }, try sat.dataConst());
+
+    // anything -> bool is != 0 (NaN -> true); bool -> number is 0/1;
+    // bool sum counts.
+    var mask = try f.to(&ctx, .bool);
+    defer mask.deinit();
+    try std.testing.expectEqualSlices(bool, &.{ true, true, true, true, true }, try mask.dataConst());
+    var zeros_too = try Tensor(.{.d}).fromSlice(&ctx, .{4}, &.{ 0, 2, 0, -3 });
+    defer zeros_too.deinit();
+    var mask2 = try zeros_too.to(&ctx, .bool);
+    defer mask2.deinit();
+    try std.testing.expectEqualSlices(bool, &.{ false, true, false, true }, try mask2.dataConst());
+    var count = try mask2.sumAll(&ctx);
+    defer count.deinit();
+    comptime std.debug.assert(@TypeOf(count).dtype == .i64);
+    try std.testing.expectEqual(@as(i64, 2), try count.item());
+    var back = try mask2.to(&ctx, .f32);
+    defer back.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 0, 1, 0, 1 }, try back.dataConst());
 }

@@ -454,6 +454,22 @@ pub const ExecContext = struct {
         return exec_elementwise.maxRank(&self.rt, rank, a, b);
     }
 
+    pub fn maxRankTyped(self: *ExecContext, comptime dtype: DType, comptime rank: usize, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
+        return exec_elementwise.maxRankTyped(&self.rt, dtype, rank, a, b);
+    }
+
+    pub fn minRankTyped(self: *ExecContext, comptime dtype: DType, comptime rank: usize, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
+        return exec_elementwise.minRankTyped(&self.rt, dtype, rank, a, b);
+    }
+
+    pub fn divTruncRankTyped(self: *ExecContext, comptime dtype: DType, comptime rank: usize, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
+        return exec_elementwise.intDivRankTyped(&self.rt, dtype, rank, .trunc, a, b);
+    }
+
+    pub fn divFloorRankTyped(self: *ExecContext, comptime dtype: DType, comptime rank: usize, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
+        return exec_elementwise.intDivRankTyped(&self.rt, dtype, rank, .floor, a, b);
+    }
+
     pub fn minRank(self: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
         return exec_elementwise.minRank(&self.rt, rank, a, b);
     }

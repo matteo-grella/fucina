@@ -431,6 +431,20 @@ pub fn supportsGrad(comptime dtype: DType) bool {
     return isFloat(dtype);
 }
 
+/// Ordinary integer pointwise math (wrapping add/sub/mul, max/min,
+/// explicit divTrunc/divFloor) and i64-accumulated reductions. bool is
+/// excluded from pointwise math but its reductions (sum = count) apply.
+pub fn supportsIntMath(comptime dtype: DType) bool {
+    return switch (dtype) {
+        .u8, .u16, .i8, .i16, .i32, .i64 => true,
+        else => false,
+    };
+}
+
+fn isScalarIntegerOrBool(comptime dtype: DType) bool {
+    return dtype == .bool or supportsIntMath(dtype);
+}
+
 pub fn supportsForwardFloatMath(comptime dtype: DType) bool {
     return switch (dtype) {
         .f16, .bf16, .f32, .f64 => true,
@@ -548,6 +562,12 @@ pub fn blockByteSize(comptime dtype: DType) usize {
 }
 
 pub fn computeDType(comptime op: FloatOp, comptime input_dtype: DType) DType {
+    // Integer/bool policy: pointwise math runs in the input dtype
+    // (wrapping two's complement); reductions accumulate in i64.
+    if (isScalarIntegerOrBool(input_dtype)) return switch (op) {
+        .pointwise, .matmul => input_dtype,
+        .reduction => .i64,
+    };
     if (!supportsForwardFloatMath(input_dtype)) return input_dtype;
     return switch (op) {
         .pointwise => switch (input_dtype) {
@@ -563,6 +583,12 @@ pub fn computeDType(comptime op: FloatOp, comptime input_dtype: DType) DType {
 }
 
 pub fn outputDType(comptime op: FloatOp, comptime input_dtype: DType) DType {
+    // Integer/bool reductions RETURN i64 (torch's integer-sum dtype);
+    // pointwise keeps the input dtype.
+    if (isScalarIntegerOrBool(input_dtype)) return switch (op) {
+        .pointwise, .matmul => input_dtype,
+        .reduction => .i64,
+    };
     if (!supportsForwardFloatMath(input_dtype)) return input_dtype;
     return switch (op) {
         .pointwise, .matmul => input_dtype,
@@ -662,6 +688,53 @@ pub fn fromAccumulator(comptime dtype: DType, value: Accumulator(dtype)) Scalar(
         .u8, .u16, .i8, .i16, .i32, .i64 => @intCast(value),
         else => @compileError("block-quantized dtypes have no scalar accumulator"),
     };
+}
+
+fn intToI64(comptime from: DType, v: Scalar(from)) i64 {
+    return switch (from) {
+        .bool => @intFromBool(v),
+        else => @as(i64, v),
+    };
+}
+
+fn wrapFromI64(comptime to: DType, wide: i64) Scalar(to) {
+    const bits: u64 = @bitCast(wide);
+    return switch (to) {
+        .bool => wide != 0,
+        .u8 => @truncate(bits),
+        .u16 => @truncate(bits),
+        .i8 => @bitCast(@as(u8, @truncate(bits))),
+        .i16 => @bitCast(@as(u16, @truncate(bits))),
+        .i32 => @bitCast(@as(u32, @truncate(bits))),
+        .i64 => wide,
+        else => @compileError("wrapFromI64 targets integer/bool dtypes"),
+    };
+}
+
+/// General scalar cast between the non-block-quantized dtypes:
+/// float ↔ float = `castFloat`; integer ↔ integer wraps (two's
+/// complement, the torch narrowing behavior); float → integer truncates
+/// toward zero and SATURATES at the target bounds with NaN → 0 (defined
+/// everywhere — torch's CPU float-to-int overflow is unspecified);
+/// anything → bool is `!= 0` (NaN → true); bool → number is 0/1.
+pub fn castScalar(comptime from: DType, comptime to: DType, v: Scalar(from)) Scalar(to) {
+    if (comptime from == to) return v;
+    const from_float = comptime supportsForwardFloatMath(from);
+    const to_float = comptime supportsForwardFloatMath(to);
+    if (comptime (from_float and to_float)) return castFloat(from, to, v);
+    if (comptime (!from_float and !to_float)) return wrapFromI64(to, intToI64(from, v));
+    if (comptime from_float) {
+        const d = toF64(from, v);
+        if (comptime to == .bool) return d != 0;
+        if (std.math.isNan(d)) return 0;
+        const t = @trunc(d);
+        const lo: f64 = @floatFromInt(std.math.minInt(Scalar(to)));
+        const hi: f64 = @floatFromInt(std.math.maxInt(Scalar(to)));
+        if (t <= lo) return std.math.minInt(Scalar(to));
+        if (t >= hi) return std.math.maxInt(Scalar(to));
+        return @intFromFloat(t);
+    }
+    return fromF64(to, @floatFromInt(intToI64(from, v)));
 }
 
 pub fn bf16ToF32(bits: u16) f32 {

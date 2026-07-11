@@ -28,6 +28,26 @@ fn ensureForwardFloatMath(comptime dtype: DType) void {
     }
 }
 
+fn isIntSum(comptime dtype: DType) bool {
+    return dtype == .bool or dtype_mod.supportsIntMath(dtype);
+}
+
+/// Integer/bool sum: i64 accumulation (wrapping, the +% contract), bool
+/// counts `true`s — torch's integer-sum semantics. Plain exec loop.
+fn intSumSlice(comptime dtype: DType, values: []const dtype_mod.Scalar(dtype)) i64 {
+    var acc: i64 = 0;
+    if (comptime dtype == .bool) {
+        for (values) |v| acc +%= @intFromBool(v);
+    } else {
+        for (values) |v| acc +%= v;
+    }
+    return acc;
+}
+
+fn intSumContribution(comptime dtype: DType, value: dtype_mod.Scalar(dtype)) i64 {
+    return if (comptime dtype == .bool) @intFromBool(value) else @as(i64, value);
+}
+
 pub fn sum(rt: *Runtime, x: *const Tensor) !Tensor {
     var xx = try rt.prepareContiguous(x);
     defer xx.deinit();
@@ -41,6 +61,11 @@ pub fn sum(rt: *Runtime, x: *const Tensor) !Tensor {
 
 pub fn sumTyped(rt: *Runtime, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype_mod.outputDType(.reduction, dtype)) {
     if (comptime dtype == .f32) return sum(rt, x);
+    if (comptime isIntSum(dtype)) {
+        var xx = try rt.prepareContiguousTyped(dtype, x);
+        defer xx.deinit();
+        return rt.scalarTyped(.i64, intSumSlice(dtype, xx.tensor().dataConst()));
+    }
     comptime ensureForwardFloatMath(dtype);
     const compute_dtype = comptime dtype_mod.computeDType(.reduction, dtype);
     const output_dtype = comptime dtype_mod.outputDType(.reduction, dtype);
@@ -67,6 +92,7 @@ pub fn sumAxisRankTyped(
     comptime axis: usize,
 ) !tensor.TensorOf(dtype_mod.outputDType(.reduction, dtype)) {
     if (comptime dtype == .f32) return sumAxisRankF32(rt, rank, x, axis);
+    if (comptime isIntSum(dtype)) return intSumAxisRank(rt, dtype, rank, x, axis);
     comptime ensureForwardFloatMath(dtype);
     const compute_dtype = comptime dtype_mod.computeDType(.reduction, dtype);
     const output_dtype = comptime dtype_mod.outputDType(.reduction, dtype);
@@ -118,6 +144,61 @@ pub fn sumAxisRankTyped(
         }
         const next = dtype_mod.castFloat(output_dtype, compute_dtype, output[out_linear]) + dtype_mod.castFloat(dtype, compute_dtype, value);
         output[out_linear] = dtype_mod.castFloat(compute_dtype, output_dtype, next);
+    }
+
+    return out;
+}
+
+fn intSumAxisRank(
+    rt: *Runtime,
+    comptime dtype: DType,
+    comptime rank: usize,
+    x: *const tensor.TensorOf(dtype),
+    comptime axis: usize,
+) !tensor.TensorOf(.i64) {
+    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (axis >= rank) @compileError("axis out of bounds");
+
+    const source = try x.rankView(rank);
+    const out_rank = if (rank == 1) 1 else rank - 1;
+    const out_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
+
+    var xx = try rt.prepareContiguousTyped(dtype, x);
+    defer xx.deinit();
+    const input = xx.tensor().dataConst();
+
+    var out = try rt.zerosRankTyped(.i64, out_rank, out_shape);
+    errdefer out.deinit();
+    const output = out.data();
+
+    if (rank == 1) {
+        output[0] = intSumSlice(dtype, input);
+        return out;
+    }
+
+    if (comptime axis == rank - 1) {
+        const axis_dim = source.shape[axis];
+        for (0..output.len) |row| {
+            output[row] = intSumSlice(dtype, input[row * axis_dim ..][0..axis_dim]);
+        }
+        return out;
+    }
+
+    const out_strides = contiguousStridesArray(out_rank, out_shape);
+    for (input, 0..) |value, linear| {
+        var remainder = linear;
+        var out_linear: usize = 0;
+        comptime var dim = rank;
+        inline while (dim > 0) {
+            dim -= 1;
+            const coord = remainder % source.shape[dim];
+            remainder /= source.shape[dim];
+            if (dim != axis) {
+                const out_dim = if (dim < axis) dim else dim - 1;
+                out_linear += coord * out_strides[out_dim];
+            }
+        }
+        output[out_linear] +%= intSumContribution(dtype, value);
     }
 
     return out;

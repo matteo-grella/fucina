@@ -33,8 +33,8 @@ pub fn castTyped(
     x: *const tensor.TensorOf(source_dtype),
 ) !tensor.TensorOf(target_dtype) {
     if (comptime source_dtype == target_dtype) return rt.cloneTyped(source_dtype, x);
-    if (comptime !dtype_mod.supportsForwardFloatMath(source_dtype) or !dtype_mod.supportsForwardFloatMath(target_dtype)) {
-        @compileError("casts are currently supported only between floating dtypes");
+    if (comptime dtype_mod.isBlockQuantized(source_dtype) or dtype_mod.isBlockQuantized(target_dtype)) {
+        @compileError("casts are supported between the scalar dtypes only (dequantize with to(.f32))");
     }
 
     var xx = try rt.prepareContiguousTyped(source_dtype, x);
@@ -61,7 +61,7 @@ pub fn castTyped(
         return out;
     }
     for (output, input) |*dst, value| {
-        dst.* = dtype_mod.castFloat(source_dtype, target_dtype, value);
+        dst.* = dtype_mod.castScalar(source_dtype, target_dtype, value);
     }
     return out;
 }
