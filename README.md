@@ -289,6 +289,18 @@ Fucina exists because others built the road first.
   [insightface](https://github.com/deepinsight/insightface) models. The
   underlying LocateAnything-3B model is
   [NVIDIA's](https://huggingface.co/nvidia/LocateAnything-3B).
+- **Salvatore Sanfilippo** (antirez) — the DeepSeek V4 Flash port follows his
+  [ds4](https://github.com/antirez/ds4) inference engine: it is the reference
+  for the entire architecture (hyper-connections, compressed sliding
+  attention, the FP8/FP4 quantization grids, native MTP), his GGUF
+  conversions are the weights the port runs, and his test fixtures (official
+  API vectors and local logit goldens) are the validation oracle.
+- **JustVugg's [colibri](https://github.com/JustVugg/colibri)** — the
+  out-of-core MoE expert streaming (run mixture models much bigger than RAM
+  by paging routed experts from disk through a pinned-set + LRU tier, with a
+  persistent usage histogram and router-lookahead prefetch) was inspired by
+  colibri's design; Fucina's implementation is independent, streaming ggml
+  quants over the fused kernels.
 - **Apple MLX** — the f32/f16 Metal GEMM is the vendored MLX "steel" kernel.
 - **guidance-ai / Microsoft** — the vendored
   [llguidance](https://github.com/guidance-ai/llguidance) engine powers
