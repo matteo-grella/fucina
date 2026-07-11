@@ -273,6 +273,38 @@ test "expert store validates geometry and lifecycle" {
     try std.testing.expectError(error.StoreNotFinalized, store2.acquire(0, &.{0}));
 }
 
+test "pilot: hints spin up the I/O thread and prediction recall is scored on acquire" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var fx: Fixture = undefined;
+    try fx.init(allocator, 2);
+    defer fx.deinit();
+
+    // Predict {5, 6, 3}, then route to {5, 6}: recall = 2/2 (both routed
+    // experts were predicted; the over-prediction of 3 is bandwidth, not a
+    // recall miss). All three were uncached -> 9 ranges enqueued (3 projs).
+    fx.store.pilotHint(0, &.{ 5, 6, 3 });
+    try std.testing.expectEqual(@as(u64, 9), fx.store.stats.pilot_ranges);
+    try fx.expectDecodeMatches(&ctx, &.{ 5, 6 }, &.{ 0.7, 0.3 });
+    try std.testing.expectEqual(@as(u64, 2), fx.store.stats.pilot_recall_hits);
+    try std.testing.expectEqual(@as(u64, 2), fx.store.stats.pilot_recall_total);
+
+    // One prediction scores exactly one acquire: a second decode on the
+    // same layer does not double-count.
+    try fx.expectDecodeMatches(&ctx, &.{ 5, 6 }, &.{ 0.7, 0.3 });
+    try std.testing.expectEqual(@as(u64, 2), fx.store.stats.pilot_recall_total);
+
+    // Cached/pinned experts are not re-hinted; a wrong prediction scores 0.
+    fx.store.pilotHint(0, &.{ 5, 1 }); // 5 is now cached: only 1 enqueues
+    try std.testing.expectEqual(@as(u64, 12), fx.store.stats.pilot_ranges);
+    try fx.expectDecodeMatches(&ctx, &.{ 0, 2 }, &.{ 0.5, 0.5 });
+    try std.testing.expectEqual(@as(u64, 2), fx.store.stats.pilot_recall_hits);
+    try std.testing.expectEqual(@as(u64, 4), fx.store.stats.pilot_recall_total);
+}
+
 test "learning cache: saved usage auto-pins the hot experts on reload, bit-exact and miss-free" {
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;

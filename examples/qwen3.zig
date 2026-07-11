@@ -64,6 +64,7 @@ pub fn main(init: std.process.Init) !void {
     var moe_cache_slots: ?usize = null;
     var moe_pin_mb: ?usize = null;
     var moe_no_learn = false;
+    var moe_pilot = false;
     var moe_expert_top_p: ?f32 = null;
     var arg_i: usize = 2;
     while (arg_i < args.len) : (arg_i += 1) {
@@ -235,6 +236,9 @@ pub fn main(init: std.process.Init) !void {
             moe_pin_mb = try std.fmt.parseInt(usize, arg["--moe-pin-mb=".len..], 10);
         } else if (std.mem.eql(u8, arg, "--moe-no-learn")) {
             moe_no_learn = true;
+        } else if (std.mem.eql(u8, arg, "--moe-pilot")) {
+            moe_stream_flag = true;
+            moe_pilot = true;
         } else if (std.mem.startsWith(u8, arg, "--moe-expert-top-p=")) {
             moe_expert_top_p = try std.fmt.parseFloat(f32, arg["--moe-expert-top-p=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--")) {
@@ -273,6 +277,7 @@ pub fn main(init: std.process.Init) !void {
             .cache_slots_per_layer = moe_cache_slots,
             .auto_pin = !moe_no_learn,
             .pin_bytes = if (moe_pin_mb) |mb| mb << 20 else null,
+            .pilot = moe_pilot,
         },
     } else .{};
     var model_config = try llm.qwen3.model.Config.fromGguf(&file);
@@ -287,6 +292,10 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print(
             "moe stream: {d} acquires, hits {d} / misses {d} ({d:.1}% hit, {d} pin hits), {d:.2} GB read in {d:.2}s, cap {d} slots/layer, pinned {d} experts ({d:.2} GB)\n",
             .{ s.acquires, s.hits, s.misses, s.hitRate() * 100, s.pin_hits, @as(f64, @floatFromInt(s.bytes_read)) / 1e9, @as(f64, @floatFromInt(s.read_ns)) / 1e9, store.cap, store.pinned_experts, @as(f64, @floatFromInt(store.pinned_bytes)) / 1e9 },
+        );
+        if (s.pilot_recall_total > 0) std.debug.print(
+            "moe pilot: recall {d:.1}% ({d}/{d} routed experts predicted), {d} ranges hinted\n",
+            .{ s.pilotRecall() * 100, s.pilot_recall_hits, s.pilot_recall_total, s.pilot_ranges },
         );
     };
     // Build a tokenizer from the same file's metadata; tolerate models without it.

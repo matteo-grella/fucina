@@ -88,6 +88,24 @@ fn monotonicNanos() ?u64 {
     }
 }
 
+/// Short sleep for the pilot thread's empty-ring wait (no std.Thread.sleep
+/// in this std; the syscall detour is fine at a 200 µs cadence).
+fn sleepMicros(us: u64) void {
+    switch (builtin.os.tag) {
+        .linux => {
+            var req = std.os.linux.timespec{ .sec = @intCast(us / 1_000_000), .nsec = @intCast((us % 1_000_000) * 1000) };
+            _ = std.os.linux.nanosleep(&req, null);
+        },
+        else => {
+            const c = struct {
+                extern "c" fn nanosleep(req: *const std.c.timespec, rem: ?*std.c.timespec) c_int;
+            };
+            var req = std.c.timespec{ .sec = @intCast(us / 1_000_000), .nsec = @intCast((us % 1_000_000) * 1000) };
+            _ = c.nanosleep(&req, null);
+        },
+    }
+}
+
 fn preadOnce(fd: fd_t, buf: []u8, offset: u64) Error!usize {
     switch (builtin.os.tag) {
         .linux => {
@@ -242,6 +260,10 @@ const ProjGeometry = struct {
 const slab_align = 64;
 const invalid_eid = std.math.maxInt(u32);
 
+/// One readahead range for the pilot's I/O thread (SPSC ring entry).
+const PilotRange = struct { offset: u64, len: u32 };
+const pilot_ring_cap = 4096;
+
 /// One cached expert: a single slab holding its gate+up+down blocks (loaded
 /// with one logical fetch, like colibri's coalesced expert read), stamped for
 /// LRU. Slots inside a layer all share that layer's slab size; the shared
@@ -287,6 +309,12 @@ pub const LayerState = struct {
     /// `repinPass` so the pinned tier follows the current workload while
     /// `usage` keeps the long-term history.
     heat: []u32 = &.{},
+    /// Pilot prediction marks (epoch-stamped): `pred_marks[e] == pred_epoch`
+    /// means expert `e` was predicted for this layer's next acquire; the
+    /// acquire scores recall and bumps `pred_scored`.
+    pred_marks: []u32 = &.{},
+    pred_epoch: u32 = 0,
+    pred_scored: u32 = 0,
 
     fn expertSlabOffsets(projs: [3]ProjGeometry) struct { off: [3]usize, total: usize } {
         var off: [3]usize = undefined;
@@ -431,11 +459,21 @@ pub const ExpertStore = struct {
         bytes_read: u64 = 0,
         read_ns: u64 = 0,
         acquires: u64 = 0,
+        /// Pilot (router lookahead): ranges enqueued to the I/O thread, and
+        /// prediction recall over the acquires that followed a prediction.
+        pilot_ranges: u64 = 0,
+        pilot_recall_hits: u64 = 0,
+        pilot_recall_total: u64 = 0,
 
         pub fn hitRate(self: Stats) f64 {
             const total = self.hits + self.misses;
             if (total == 0) return 0;
             return @as(f64, @floatFromInt(self.hits)) / @as(f64, @floatFromInt(total));
+        }
+
+        pub fn pilotRecall(self: Stats) f64 {
+            if (self.pilot_recall_total == 0) return 0;
+            return @as(f64, @floatFromInt(self.pilot_recall_hits)) / @as(f64, @floatFromInt(self.pilot_recall_total));
         }
     };
 
@@ -467,6 +505,17 @@ pub const ExpertStore = struct {
     /// layer LRU (by slab swap) at release. Grown to the largest miss set.
     work: []Slot = &.{},
     seen: []bool = &.{},
+    // ---- pilot (router-lookahead prefetch) ----
+    // A dedicated I/O thread drains an SPSC ring of file ranges and issues
+    // the readahead advice there: with a saturated disk queue the advice
+    // call itself BLOCKS (colibri measured ~0.5 ms each), so hinting inline
+    // would cost the forward thread more than the overlap earns. Ring full
+    // = drop: a lost hint is not an error.
+    pilot_ring: []PilotRange = &.{},
+    pilot_w: std.atomic.Value(u32) = .init(0),
+    pilot_r: std.atomic.Value(u32) = .init(0),
+    pilot_stop: std.atomic.Value(bool) = .init(false),
+    pilot_thread: ?std.Thread = null,
 
     /// The store is heap-allocated so `StreamedMoeRhs` values and the owning
     /// model can hold stable pointers while the model struct moves by value.
@@ -505,7 +554,13 @@ pub const ExpertStore = struct {
             allocator.free(ls.resolved);
             allocator.free(ls.usage);
             allocator.free(ls.heat);
+            allocator.free(ls.pred_marks);
         }
+        if (self.pilot_thread) |t| {
+            self.pilot_stop.store(true, .release);
+            t.join();
+        }
+        allocator.free(self.pilot_ring);
         allocator.free(self.usage_path);
         for (self.work) |*slot| slot.deinit(allocator);
         allocator.free(self.work);
@@ -537,6 +592,8 @@ pub const ExpertStore = struct {
         @memset(usage, 0);
         const heat = try self.allocator.alloc(u32, n_expert);
         @memset(heat, 0);
+        const pred_marks = try self.allocator.alloc(u32, n_expert);
+        @memset(pred_marks, 0);
 
         self.layers[layer_i] = .{
             .projs = projs,
@@ -546,6 +603,7 @@ pub const ExpertStore = struct {
             .resolved = resolved,
             .usage = usage,
             .heat = heat,
+            .pred_marks = pred_marks,
         };
         self.registered[layer_i] = true;
     }
@@ -727,6 +785,17 @@ pub const ExpertStore = struct {
             self.n_active += 1;
         }
 
+        // Score the pilot's prediction for this layer, once per prediction:
+        // recall = predicted ∩ routed over routed (the measurement that says
+        // whether router lookahead is worth its prefetch bandwidth).
+        if (ls.pred_epoch != ls.pred_scored) {
+            ls.pred_scored = ls.pred_epoch;
+            for (self.active[0..self.n_active]) |eid| {
+                if (ls.pred_marks[eid] == ls.pred_epoch) self.stats.pilot_recall_hits += 1;
+            }
+            self.stats.pilot_recall_total += self.n_active;
+        }
+
         // Pinned and LRU hits resolve in place (pin first — a pinned expert
         // may transiently also sit in the LRU after a repin); misses collect.
         self.n_miss = 0;
@@ -846,6 +915,66 @@ pub const ExpertStore = struct {
             const n = try preadOnce(self.fd, buf[done..], offset + done);
             if (n == 0) return Error.UnexpectedEndOfFile;
             done += n;
+        }
+    }
+
+    // ---- pilot: router-lookahead prefetch ----------------------------------
+
+    /// Predicted routing for `layer_i`'s NEXT acquire (router lookahead:
+    /// apply layer L+1's router to layer L's post-attention state — colibri
+    /// measured 71.6% top-8 recall on GLM vs 41.3% for "same as last
+    /// token"). Marks the prediction for recall scoring and enqueues
+    /// readahead for the experts not already pinned or cached; the dedicated
+    /// I/O thread issues the actual advice. Call between ops on the forward
+    /// thread — never between `acquire` and `release`.
+    pub fn pilotHint(self: *ExpertStore, layer_i: usize, eids: []const usize) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        std.debug.assert(self.acquired_layer == null);
+        if (!self.finalized or layer_i >= self.layers.len or !self.registered[layer_i]) return;
+        const ls = &self.layers[layer_i];
+
+        if (self.pilot_thread == null) self.pilotStart() catch return;
+
+        ls.pred_epoch +%= 1;
+        if (ls.pred_epoch == ls.pred_scored) ls.pred_epoch +%= 1; // skip the ambiguous wrap value
+        for (eids) |e| {
+            if (e >= ls.n_expert) continue;
+            ls.pred_marks[e] = ls.pred_epoch;
+            const eid: u32 = @intCast(e);
+            if (findPinned(ls, eid) != null) continue;
+            if (self.findCached(ls, eid) != null) continue;
+            for (&ls.projs) |*g| self.pilotEnqueue(.{ .offset = g.expertFileOffset(eid), .len = @intCast(@min(g.expert_bytes, std.math.maxInt(u32))) });
+        }
+    }
+
+    fn pilotStart(self: *ExpertStore) !void {
+        if (self.pilot_ring.len == 0) {
+            self.pilot_ring = try self.allocator.alloc(PilotRange, pilot_ring_cap);
+        }
+        self.pilot_thread = try std.Thread.spawn(.{}, pilotWorker, .{self});
+    }
+
+    fn pilotEnqueue(self: *ExpertStore, range: PilotRange) void {
+        const w = self.pilot_w.load(.monotonic);
+        const r = self.pilot_r.load(.acquire);
+        if (w -% r >= pilot_ring_cap) return; // full: drop the hint
+        self.pilot_ring[w % pilot_ring_cap] = range;
+        self.pilot_w.store(w +% 1, .release);
+        self.stats.pilot_ranges += 1;
+    }
+
+    fn pilotWorker(self: *ExpertStore) void {
+        while (!self.pilot_stop.load(.acquire)) {
+            const r = self.pilot_r.load(.monotonic);
+            const w = self.pilot_w.load(.acquire);
+            if (r == w) {
+                sleepMicros(200);
+                continue;
+            }
+            const range = self.pilot_ring[r % pilot_ring_cap];
+            self.pilot_r.store(r +% 1, .release);
+            hintWillNeed(self.fd, range.offset, range.len);
         }
     }
 

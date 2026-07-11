@@ -172,6 +172,11 @@ pub const MoeStreamOptions = struct {
     /// RAM for the pinned tier (default: half the budget when history
     /// qualifies).
     pin_bytes: ?usize = null,
+    /// Router-lookahead prefetch: predict each next layer's experts from the
+    /// current post-attention state and readahead them from a background
+    /// I/O thread while the current layer computes. Prediction recall is
+    /// measured in `ExpertStore.Stats`.
+    pilot: bool = false,
 };
 
 pub const LoadOptions = struct {
@@ -192,6 +197,8 @@ pub const Model = struct {
     /// Disk-streaming tier for MoE experts (`MoeStreamOptions`); destroyed
     /// after the layers whose streamed arms point into it.
     expert_store: ?*fucina.ExpertStore = null,
+    /// Router-lookahead prefetch (`MoeStreamOptions.pilot`).
+    pilot_enabled: bool = false,
 
     pub fn loadGguf(ctx: *ExecContext, io: std.Io, path: []const u8, config: Config) !Model {
         return loadGgufOptions(ctx, io, path, config, .{});
@@ -278,6 +285,7 @@ pub const Model = struct {
             .kv_head_for_head = kv_head_for_head,
             .weight_mapping = weight_mapping,
             .expert_store = expert_store,
+            .pilot_enabled = expert_store != null and options.moe_stream.?.pilot,
         };
     }
 
@@ -543,6 +551,14 @@ pub const Model = struct {
         for (self.layers, 0..) |*layer, layer_i| {
             const last_query_only = last_only and layer_i + 1 == cfg.num_layers and token_ids.len > 1;
             x = try ctx.replace(x, attentionBlock(ctx, io, cfg, layer, &x, &rope_table, self.kv_head_for_head, last_query_only, profile, kv, layer_i));
+            // Router lookahead (pilot): predict the NEXT layer's experts from
+            // this layer's post-attention state and start their disk
+            // readahead in the background while this layer's FFN computes.
+            // Decode-sized batches only — prefill's batch-union reads each
+            // routed expert once regardless.
+            if (self.pilot_enabled and token_ids.len <= 4 and layer_i + 1 < self.layers.len) {
+                pilotPrefetchNext(ctx, cfg, &self.layers[layer_i + 1], layer_i + 1, &x) catch {};
+            }
             x = try ctx.replace(x, ffnBlock(ctx, io, cfg, layer, &x, profile));
             if (profile) |p| p.layers += 1;
         }
@@ -1520,6 +1536,42 @@ fn moeFfn(
         io,
         moe_profile,
     );
+}
+
+/// Router lookahead (pilot): apply the NEXT layer's ffn_norm + router to the
+/// current layer's post-attention state and hand the predicted top-k experts
+/// to the expert store's background readahead thread. Pure prediction — no
+/// routing state changes, and a failure costs only the overlap.
+fn pilotPrefetchNext(
+    ctx: *ExecContext,
+    config: Config,
+    next: *Layer,
+    next_layer_i: usize,
+    x: *const fucina.Tensor(.{ .seq, .embed }),
+) !void {
+    const moe = switch (next.ffn) {
+        .moe => |*m| m,
+        else => return,
+    };
+    const store = switch (moe.gate) {
+        .streamed => |*s| s.store,
+        else => return,
+    };
+    const top_k = config.num_experts_used;
+    const seq = x.dim(.seq);
+
+    var nrm = try x.rmsNormMul(ctx, .embed, &next.ffn_norm, config.rms_norm_eps);
+    defer nrm.deinit();
+    var logits = try moe.router.linearSeq(ctx, &nrm, .embed, .expert);
+    defer logits.deinit();
+
+    const allocator = ctx.allocator;
+    const sel = try allocator.alloc(usize, seq * top_k);
+    defer allocator.free(sel);
+    const wgt = try allocator.alloc(f32, seq * top_k);
+    defer allocator.free(wgt);
+    try logits.routerTopK(ctx, .expert, top_k, .{ .normalize_selected = false }, sel, wgt);
+    store.pilotHint(next_layer_i, sel);
 }
 
 /// Adaptive expert top-p (routing sparsification, off at p >= 1): per token,
