@@ -96,7 +96,7 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print("load: {d:.3} s\n", .{@as(f64, @floatFromInt(std.Io.Clock.awake.now(init.io).nanoseconds - load_start)) / 1e9});
 
     if (vectors_dir) |dir_path| {
-        return runVectors(init.io, allocator, &ctx, &model, &tokenizer, stdout, dir_path, vectors_max_prompt);
+        return runVectors(init.io, allocator, &ctx, &model, &tokenizer, stdout, dir_path, vectors_max_prompt, prefill_chunk);
     }
 
     const eos = tokenizer.eosId();
@@ -212,6 +212,7 @@ fn runVectors(
     stdout: *std.Io.Writer,
     dir_path: []const u8,
     max_prompt: usize,
+    prefill_chunk: usize,
 ) !void {
     var dir = try std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true });
     defer dir.close(io);
@@ -270,7 +271,7 @@ fn runVectors(
         defer if (logits.len > 0) allocator.free(logits);
         var fed: usize = 0;
         while (fed < tokens.items.len) {
-            const end = @min(fed + 128, tokens.items.len);
+            const end = @min(fed + prefill_chunk, tokens.items.len);
             if (logits.len > 0) allocator.free(logits);
             logits = try llm.deepseek4.model.stepBatch(model, ctx, &session, tokens.items[fed..end]);
             fed = end;
