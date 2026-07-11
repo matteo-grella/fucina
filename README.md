@@ -280,6 +280,9 @@ Fucina exists because others built the road first.
   underlying LocateAnything-3B model is
   [NVIDIA's](https://huggingface.co/nvidia/LocateAnything-3B).
 - **Apple MLX** — the f32/f16 Metal GEMM is the vendored MLX "steel" kernel.
+- **guidance-ai / Microsoft** — the vendored
+  [llguidance](https://github.com/guidance-ai/llguidance) engine powers
+  grammar/JSON-schema constrained decoding.
 - **ServeurpersoCom** — the OmniVoice TTS port follows his
   [omnivoice.cpp](https://github.com/ServeurpersoCom/omnivoice.cpp), which
   also provided the codec porting groundwork (Higgs Audio v2 / HuBERT / DAC).

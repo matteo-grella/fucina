@@ -1,0 +1,13 @@
+# Fucina vendoring workspace for llguidance (see README.md in this directory).
+# Not part of the upstream repository.
+
+[workspace]
+members = ["parser", "toktrie"]
+resolver = "2"
+
+[workspace.package]
+rust-version = "1.87"
+
+[profile.release]
+debug = 0
+strip = "debuginfo"
