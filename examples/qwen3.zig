@@ -66,6 +66,8 @@ pub fn main(init: std.process.Init) !void {
     var moe_no_learn = false;
     var moe_pilot = false;
     var moe_expert_top_p: ?f32 = null;
+    var kv_save = false;
+    var kv_save_arg: ?[]const u8 = null;
     var arg_i: usize = 2;
     while (arg_i < args.len) : (arg_i += 1) {
         const arg = args[arg_i];
@@ -236,6 +238,11 @@ pub fn main(init: std.process.Init) !void {
             moe_pin_mb = try std.fmt.parseInt(usize, arg["--moe-pin-mb=".len..], 10);
         } else if (std.mem.eql(u8, arg, "--moe-no-learn")) {
             moe_no_learn = true;
+        } else if (std.mem.eql(u8, arg, "--kv-save")) {
+            kv_save = true;
+        } else if (std.mem.startsWith(u8, arg, "--kv-save=")) {
+            kv_save = true;
+            kv_save_arg = arg["--kv-save=".len..];
         } else if (std.mem.eql(u8, arg, "--moe-pilot")) {
             moe_stream_flag = true;
             moe_pilot = true;
@@ -312,6 +319,10 @@ pub fn main(init: std.process.Init) !void {
     file.deinit(); // model + tokenizer own their data now
     const load_ns = nowNs(init.io) - load_start;
 
+    // KV persistence sidecar: explicit path, or <model>.kvcache next to the GGUF.
+    var kv_path_buf: [1024]u8 = undefined;
+    const kv_save_path: ?[]const u8 = if (!kv_save) null else kv_save_arg orelse try std.fmt.bufPrint(&kv_path_buf, "{s}.kvcache", .{args[1]});
+
     const is_chat = chat_text != null or repl_flag;
 
     // Chat samples with Qwen3's recommended settings; the benchmark and
@@ -380,7 +391,7 @@ pub fn main(init: std.process.Init) !void {
     if (is_chat) {
         const t = tok_ptr orelse return error.TokenizerUnavailable;
         const tmpl = chat_tmpl orelse return error.NoChatTemplate;
-        try runChat(init.io, allocator, stdout, &ctx, &model, t, tmpl, system_text, no_think, sampler_cfg, chat_text, spec_flag, spec_refs, processor);
+        try runChat(init.io, allocator, stdout, &ctx, &model, t, tmpl, system_text, no_think, sampler_cfg, chat_text, spec_flag, spec_refs, processor, kv_save_path);
         return;
     }
 
@@ -1312,6 +1323,7 @@ fn runChat(
     spec: bool,
     spec_refs: []const []const u8,
     processor: ?llm.sampler.LogitProcessor,
+    kv_save_path: ?[]const u8,
 ) !void {
     var convo = try llm.chat.Conversation(llm.qwen3.model.Model, llm.tokenizer).init(ctx, model, tok, template, .{
         .system = system,
@@ -1324,6 +1336,10 @@ fn runChat(
         .io = io,
     });
     defer convo.deinit();
+    if (kv_save_path) |path| {
+        const resumed = try convo.enablePersistence(io, path);
+        if (resumed > 0) try stdout.print("[kv: conversation resumed from {s} — {d} tokens, no re-prefill]\n", .{ path, resumed });
+    }
     for (spec_refs) |path| {
         const ids = try tokenizeFile(io, allocator, tok, path);
         defer allocator.free(ids);

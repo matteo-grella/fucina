@@ -49,6 +49,7 @@ pub const weights = @import("llm/weights.zig");
 pub const ptqtp_gguf = @import("llm/ptqtp_gguf.zig");
 pub const gguf_meta = @import("llm/gguf_meta.zig");
 pub const kv_cache = @import("llm/kv_cache.zig");
+pub const kv_persist = @import("llm/kv_persist.zig");
 pub const tokenizer = @import("llm/tokenizer.zig");
 pub const spm_tokenizer = @import("llm/spm_tokenizer.zig");
 pub const sampler = @import("llm/sampler.zig");
@@ -90,6 +91,7 @@ test {
     _ = ptqtp_gguf;
     _ = gguf_meta;
     _ = kv_cache;
+    _ = kv_persist;
     _ = tokenizer;
     _ = spm_tokenizer;
     _ = sampler;

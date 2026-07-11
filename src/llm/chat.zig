@@ -12,6 +12,7 @@
 const std = @import("std");
 const fucina = @import("fucina");
 const kv_cache = @import("kv_cache.zig");
+const kv_persist = @import("kv_persist.zig");
 const sampler_mod = @import("sampler.zig");
 const speculative = @import("speculative/core.zig");
 const spec_cascade = @import("speculative/cascade.zig");
@@ -317,6 +318,10 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         /// Speculative-decoding state (null = plain decode). Heap-allocated so
         /// the DraftSource/decoder pointers stay stable when Conversation moves.
         spec: ?*SpecState,
+        /// KV persistence (null = off): armed by `enablePersistence`.
+        persist: ?PersistState,
+
+        const PersistState = struct { io: std.Io, path: []u8 };
 
         const SpecState = struct {
             index: spec_cascade.SpeculationIndex,
@@ -386,10 +391,12 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 .think_off = options.think_off,
                 .turn = 0,
                 .spec = spec,
+                .persist = null,
             };
         }
 
         pub fn deinit(self: *Self) void {
+            if (self.persist) |st| self.allocator.free(st.path);
             if (self.spec) |st| {
                 st.decoder.deinit();
                 st.index.deinit();
@@ -406,6 +413,41 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         pub fn addSpecReference(self: *Self, tokens: []const usize) !void {
             const st = self.spec orelse return error.SpeculationDisabled;
             try st.index.addReference(tokens);
+        }
+
+        /// Arm KV persistence (kv_persist.zig): resume any compatible saved
+        /// conversation from `path` into this (fresh) conversation — token
+        /// history and KV restored, ZERO re-prefill — and append the new
+        /// positions after every subsequent turn. Returns the number of
+        /// resumed positions (0 = fresh start). Call once, before any send.
+        pub fn enablePersistence(self: *Self, io: std.Io, path: []const u8) !usize {
+            std.debug.assert(self.persist == null and self.cache.len == 0 and self.history.items.len == 0);
+            var resumed_count: usize = 0;
+            if (try kv_persist.load(io, self.allocator, path, &self.cache)) |tokens| {
+                defer self.allocator.free(tokens);
+                try self.history.appendSlice(self.allocator, tokens);
+                // Not turn zero anymore: the template must not re-render the
+                // system prologue on the next message.
+                self.turn = 1;
+                resumed_count = tokens.len;
+            } else {
+                // Nothing resumable: make sure a stale/foreign file cannot
+                // become the prefix of this fresh conversation.
+                try kv_persist.reset(io, self.allocator, path, &self.cache);
+            }
+            self.persist = .{ .io = io, .path = try self.allocator.dupe(u8, path) };
+            return resumed_count;
+        }
+
+        /// Persist this turn's new positions (turn epilogue of `send`).
+        fn persistAppend(self: *Self) !void {
+            const st = self.persist orelse return;
+            // Persist exactly the positions the cache holds: the spec path
+            // legitimately leaves history one committed-but-unforwarded token
+            // ahead of the cache (deferred prefill) — that token is re-
+            // rendered into the next turn's prefill and persisted then. The
+            // file's own record count picks the append range.
+            try kv_persist.appendRange(st.io, self.allocator, st.path, &self.cache, self.history.items[0..self.cache.len]);
         }
 
         /// The decoder's lifetime acceptance stats (null when speculation is off).
@@ -501,6 +543,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             }
             try self.stream.flush(writer);
             try writer.flush();
+            try self.persistAppend();
             return produced;
         }
 
@@ -741,6 +784,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
 
             try self.stream.flush(writer);
             try writer.flush();
+            try self.persistAppend();
             return gate.sink_acc.n;
         }
 
