@@ -31,6 +31,7 @@ pub fn main(init: std.process.Init) !void {
     var moe_stream_flag = false;
     var moe_cache_mb: ?usize = null;
     var chat = false;
+    var prefill_chunk: usize = 128;
     var vectors_dir: ?[]const u8 = null;
     var vectors_max_prompt: usize = 256;
     var arg_i: usize = 2;
@@ -50,6 +51,9 @@ pub fn main(init: std.process.Init) !void {
             gen_count = try std.fmt.parseInt(usize, arg["--gen=".len..], 10);
         } else if (std.mem.eql(u8, arg, "--chat")) {
             chat = true;
+        } else if (std.mem.startsWith(u8, arg, "--prefill-chunk=")) {
+            prefill_chunk = try std.fmt.parseInt(usize, arg["--prefill-chunk=".len..], 10);
+            if (prefill_chunk == 0) prefill_chunk = 1;
         } else if (std.mem.startsWith(u8, arg, "--vectors=")) {
             vectors_dir = arg["--vectors=".len..];
         } else if (std.mem.startsWith(u8, arg, "--vectors-max-prompt=")) {
@@ -114,11 +118,14 @@ pub fn main(init: std.process.Init) !void {
     const prefill_start = std.Io.Clock.awake.now(init.io).nanoseconds;
     var logits: []f32 = &.{};
     defer if (logits.len > 0) allocator.free(logits);
-    for (tokens.items) |token| {
+    var fed: usize = 0;
+    while (fed < tokens.items.len) {
+        const end = @min(fed + prefill_chunk, tokens.items.len);
         if (logits.len > 0) allocator.free(logits);
-        logits = try llm.deepseek4.model.step(&model, &ctx, &session, token);
+        logits = try llm.deepseek4.model.stepBatch(&model, &ctx, &session, tokens.items[fed..end]);
+        fed = end;
     }
-    try stdout.print("prefill: {d:.1} ms ({d} sequential steps)\n", .{ @as(f64, @floatFromInt(std.Io.Clock.awake.now(init.io).nanoseconds - prefill_start)) / 1e6, tokens.items.len });
+    try stdout.print("prefill: {d:.1} ms ({d} tokens, chunk {d})\n", .{ @as(f64, @floatFromInt(std.Io.Clock.awake.now(init.io).nanoseconds - prefill_start)) / 1e6, tokens.items.len, prefill_chunk });
 
     var reply: std.ArrayList(u8) = .empty;
     defer reply.deinit(allocator);
@@ -261,9 +268,12 @@ fn runVectors(
 
         var logits: []f32 = &.{};
         defer if (logits.len > 0) allocator.free(logits);
-        for (tokens.items) |token| {
+        var fed: usize = 0;
+        while (fed < tokens.items.len) {
+            const end = @min(fed + 128, tokens.items.len);
             if (logits.len > 0) allocator.free(logits);
-            logits = try llm.deepseek4.model.step(model, ctx, &session, token);
+            logits = try llm.deepseek4.model.stepBatch(model, ctx, &session, tokens.items[fed..end]);
+            fed = end;
         }
 
         var ours: std.ArrayList(u8) = .empty;
