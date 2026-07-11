@@ -54,6 +54,9 @@ pub const deepseek2 = struct {
 pub const glm4moe = struct {
     pub const model = @import("llm/glm4moe/model.zig");
 };
+pub const deepseek4 = struct {
+    pub const model = @import("llm/deepseek4/model.zig");
+};
 pub const kv_cache = @import("llm/kv_cache.zig");
 pub const kv_persist = @import("llm/kv_persist.zig");
 pub const tokenizer = @import("llm/tokenizer.zig");
@@ -98,6 +101,7 @@ test {
     _ = gguf_meta;
     _ = deepseek2.model;
     _ = glm4moe.model;
+    _ = deepseek4.model;
     _ = kv_cache;
     _ = kv_persist;
     _ = tokenizer;
