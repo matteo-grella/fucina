@@ -96,7 +96,10 @@ const logits = try forwardLogits(&ctx, &model, &x);   // zero ceremony inside
   `src/ag/tensor.zig`), covering both differentiable results and no-grad
   results (eval on constants, `argmax`, `topK`, the packed-RHS fast paths).
   Typed/quantized-constant tensor methods are not adopted — those are
-  weights/caches with explicit lifetimes.
+  weights/caches with explicit lifetimes. The one exception: a GRAD-CARRYING
+  16-bit result (the differentiable `to(.f16)`/`to(.bf16)` narrow, §10) is
+  scope-owned like any differentiable result — its graph node must live
+  until backward.
 - With no scope open, nothing changes: inference code keeps deinit-ASAP
   semantics and pays one branch per op.
 - Close a scope only when no `backward()` over its graph is pending.
@@ -609,61 +612,77 @@ adapter checkpoint stores A/B but not alpha — pass the training-time value.
 The writer side is exact: a verbatim re-emit of the 449 MiB Q4_K_S GGUF is
 byte-identical to the original (`cmp` clean).
 
-## 10. bf16 + mixed precision: what exists, what was deferred
+## 10. Mixed precision: 16-bit params and activations, f32 gradients
 
-**Exists.** Frozen-weight mixed precision is fully differentiable: `dot`
-against a CONSTANT f16/bf16/quantized RHS routes gradients to the f32 LHS
-only (`ConstRhsDotBackward`), and attention reads f16 KV. (Opt-in
-`--cache-type q8_0` halves cache memory again — 59.5 vs 112 KiB/token on
-0.6B — but it is the CAPACITY option, not a speed one: decode attention is
-compute-bound on M1 and the dequant costs ~2.3x the attention phase at 2048
-ctx, so f16 stays the default; the differentiable q8_0 facade entry dequants
-the cache once, cache constant, q-grad only.) The bf16 leg: a mixed f32 x
-bf16 TransB kernel (`src/backend/vector/gemm.zig`) widens the bf16
-weights in-register (u16 << 16, exact) and accumulates everything in f32 —
-unlike the f16 twin, which casts the LHS down and accumulates in half
-precision. bf16 GGUF weights stay RESIDENT at 2 B/weight
-(`weights.zig` `.bf16` arm: raw-bits load, `linearSeq` through the mixed
-kernel, typed `getRowsAs`, `fuseLinear`) instead of widening to f32 at load;
-bitwise parity vs the widened reference is unit-tested, and a frozen bf16
-base is differentiable via `ConstRhsDotBackward(.bf16)` — the only
-DIFFERENTIABLE bf16 route. Model-level (real Fucina-exported 0.6B bf16 GGUF,
-M1 Max): same top-5 ranking as f16 within bf16 rounding; decode 54.7 vs
-f16's 65.5 tok/s; pp32 1.52x f16's time. The kernel-level prefill gap was
-already measured at ~2.06x the f16 twin — M1 has no bf16 FMA; an ISA gap,
-not an implementation one.
+**The contract: gradients are always f32.** Parameters and activations may
+be f16/bf16; every gradient in the engine is an f32 tensor (`GradState`
+holds f32 only). This is torch AMP's numeric contract, and it makes loss
+scaling unnecessary: loss scaling exists to rescue f16 GRADIENT underflow,
+and gradients here never narrow. The optimizer step is likewise all-f32
+(§3): 16-bit params are stepped through an f32 MASTER copy the optimizer
+owns, so updates below 16-bit resolution accumulate instead of rounding
+away, and the master is narrowed back into the param storage after each
+step. Optimizer v5 frames persist the masters for bit-exact resume
+(REFERENCE.md §11.5).
 
-**bf16 optimizer STATE.** Optimizer
-moment/momentum buffers can be stored in bf16 (`optim.StateDType`, §3;
-checkpoint v4 frames, §8). This is ORTHOGONAL to every deferred item below:
-step math, params, activations, and gradients all stay f32 — only the
-between-steps storage of m/momentum (and, opt-in, AdamW/Adam v) narrows.
+**Two training patterns.**
 
-**f16/bf16 forward coverage.** The typed float branch carries the full
-forward op surface, no-grad (REFERENCE.md §4.19): native typed kernels
-where they exist (pointwise, sum/mean, dot/GEMM, scale, structural views),
-and a widen → f32 kernel → narrow-once lowering for everything else (unary
-family, gated, softmax/norm family, remaining reductions, masks, pad,
-einsum). Every widened op computes and accumulates in f32 and rounds once
-on store, so its result is bit-identical to casting up, running the f32
-op, and casting down. This is the forward half of mixed-precision
-training; gradients are f32-only.
+- *16-bit leaf params*: create f16/bf16 `variable`s, register them with any
+  optimizer (`addParam` / `ParamRegistry.addParamsTo`). The differentiable
+  entries into the graph are `to(.f32)` (widen; the f32 upstream gradient
+  passes back unchanged) and `dot`/`einsum` with the 16-bit tensor as the
+  RHS — the forward runs the native mixed GEMM (bf16 widens in-register;
+  no f32 weight copy is materialized), dx flows to the f32 LHS, dW arrives
+  as f32 on the 16-bit leaf.
+- *f32 master params in user code*: keep f32 `variable`s and narrow per
+  step with the differentiable `to(.bf16)`; the cast backward is the
+  identity on the f32 gradient. This is the same math with the master on
+  the user's side; prefer the leaf pattern, which halves parameter memory.
 
-**Deferred deliberately.**
+Every OTHER typed forward op (the §4.19 surface) is no-grad by design and
+rejects a grad-requiring operand with `error.UnsupportedGradient` — a graph
+is never silently dropped. In a trained path, widen with `to(.f32)` first.
 
-- f16/bf16 gradients: a dtype-generic GradState and VJP surface is a
-  rebuild of the autograd layer, not an increment. The incremental design,
-  if undertaken: gradients stay f32 ALWAYS (torch AMP's contract), `to()`
-  becomes differentiable across float dtypes, and the f32 VJPs run over
-  widened saved operands — the same widening seam the forward lowering
-  uses.
-- Loss scaling: pointless while gradients are f32 (its only job is rescuing
-  f16 gradient underflow).
-- f32 master weights: pointless while the trainable params are already f32.
+**Autocast policy.** There is no runtime autocast scope — result dtypes are
+comptime facts here, so the policy is written in the model code's types.
+The house policy matches torch AMP's lists: contractions may take 16-bit
+weights (the mixed `dot`/`einsum` paths); losses, softmax-ext/attention,
+and affine norms stay f32 (the typed facade steers this — those entries
+are compile errors or f32-only); reductions on 16-bit inputs already
+return f32 (§8.3). Inference-only paths may run the full 16-bit forward
+surface (§4.19), which computes through f32 and rounds once per op.
 
-**Revisit when**: an x86 AVX512-BF16/AMX target makes bf16 GEMM the actual
-training win, or LoRA-scale profiling shows activation bandwidth dominating
-step time.
+**Frozen-weight mixed precision** (unchanged, and composes with the
+above): `dot` against a CONSTANT f16/bf16/quantized RHS routes gradients to
+the f32 LHS only, and attention reads f16 KV. (Opt-in `--cache-type q8_0`
+halves cache memory again — 59.5 vs 112 KiB/token on 0.6B — but it is the
+CAPACITY option, not a speed one: decode attention is compute-bound on M1
+and the dequant costs ~2.3x the attention phase at 2048 ctx, so f16 stays
+the default; the differentiable q8_0 facade entry dequants the cache once,
+cache constant, q-grad only.) The bf16 leg: a mixed f32 x bf16 TransB
+kernel (`src/backend/vector/gemm.zig`) widens the bf16 weights in-register
+(u16 << 16, exact) and accumulates everything in f32 — unlike the f16
+twin, which casts the LHS down and accumulates in half precision. bf16
+GGUF weights stay RESIDENT at 2 B/weight (`weights.zig` `.bf16` arm:
+raw-bits load, `linearSeq` through the mixed kernel, typed `getRowsAs`,
+`fuseLinear`) instead of widening to f32 at load; bitwise parity vs the
+widened reference is unit-tested. Model-level (real Fucina-exported 0.6B
+bf16 GGUF, M1 Max): same top-5 ranking as f16 within bf16 rounding; decode
+54.7 vs f16's 65.5 tok/s; pp32 1.52x f16's time. The kernel-level prefill
+gap was already measured at ~2.06x the f16 twin — M1 has no bf16 FMA; an
+ISA gap, not an implementation one.
+
+**bf16 optimizer STATE.** Optimizer moment/momentum buffers can be stored
+in bf16 (`optim.StateDType`, §3; checkpoint v4 frames, §8). Orthogonal to
+all of the above: it narrows only the between-steps storage of m/momentum
+(and, opt-in, AdamW/Adam v); step math stays f32 either way.
+
+**What 16-bit training buys on CPU.** Memory, first: parameter storage and
+activation footprints halve (the widened ops materialize f32 transiently).
+Compute follows the ISA: on aarch64, f16 GEMM has native half arms while
+bf16 widens in-register (exact, but f32-rate); on x86 without AVX512-BF16
+both widen. Prefer bf16 for training (f32-matching exponent range), f16
+where the aarch64 inference speed matters.
 
 ## 11. Performance
 

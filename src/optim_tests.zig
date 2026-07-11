@@ -2354,3 +2354,297 @@ test "optim clip once after the accumulation window equals clipping the summed g
     try std.testing.expect(!std.mem.eql(f32, ref_w1, wrong_w1) or !std.mem.eql(f32, ref_w2, wrong_w2));
     set.zeroGrad();
 }
+
+test "optim 16-bit params step through f32 masters, tracking the f32 twin exactly" {
+    @setEvalBranchQuota(1_000_000);
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    // bf16-representable initials; the per-step update (~lr*|g|) sits BELOW
+    // bf16 resolution at |p| = 1..3, so without a master the 16-bit param
+    // would stall — the master must accumulate and the trajectory must equal
+    // the f32 twin's bit-for-bit at every publish.
+    const w0 = [_]f32{ 1.0, -2.0, 0.5, 3.0 };
+    const c_values = [_]f32{ 0.5, -1.0, 2.0, 0.25 };
+    var c = try Tensor(.{ .out, .in }).fromSlice(&ctx, .{ 2, 2 }, &c_values);
+    defer c.deinit();
+
+    const steps = 4;
+
+    inline for (.{ dtype_mod.DType.f16, dtype_mod.DType.bf16 }) |float_dtype| {
+        // f32 twin.
+        var w32 = try Tensor(.{ .out, .in }).variableFromSlice(&ctx, .{ 2, 2 }, &w0);
+        defer w32.deinit();
+        var opt32 = optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0.1 });
+        defer opt32.deinit();
+        try opt32.addParam(&w32);
+
+        // 16-bit param with the same (exactly representable) values.
+        var w32_source = try Tensor(.{ .out, .in }).fromSlice(&ctx, .{ 2, 2 }, &w0);
+        defer w32_source.deinit();
+        var narrow_source = try w32_source.to(&ctx, float_dtype);
+        defer narrow_source.deinit();
+        const HalfT = @TypeOf(narrow_source);
+        var w16 = try HalfT.variable(&ctx, try narrow_source.asRawTensor().cloneView());
+        defer w16.deinit();
+        var opt16 = optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0.1 });
+        defer opt16.deinit();
+        try opt16.addParam(&w16);
+
+        for (0..steps) |_| {
+            {
+                var prod = try w32.mul(&ctx, &c);
+                defer prod.deinit();
+                var loss = try prod.sumAll(&ctx);
+                defer loss.deinit();
+                try loss.backward(&ctx);
+            }
+            try opt32.step(&ctx);
+            opt32.zeroGrad();
+
+            {
+                var wide = try w16.to(&ctx, .f32);
+                defer wide.deinit();
+                var prod = try wide.mul(&ctx, &c);
+                defer prod.deinit();
+                var loss = try prod.sumAll(&ctx);
+                defer loss.deinit();
+                try loss.backward(&ctx);
+            }
+            try opt16.step(&ctx);
+            opt16.zeroGrad();
+
+            // Published 16-bit values == narrow(f32 twin) at every step.
+            var expected = try w32.to(&ctx, float_dtype);
+            defer expected.deinit();
+            try std.testing.expectEqualSlices(
+                dtype_mod.Scalar(float_dtype),
+                try expected.dataConst(),
+                try w16.dataConst(),
+            );
+        }
+
+        // The twin moved (the update is real), while a master-less 16-bit
+        // param could not have represented the per-step delta at |p| = 1.
+        try std.testing.expect((try w32.dataConst())[0] != w0[0]);
+    }
+}
+
+test "optim v5 frames persist masters for bit-exact 16-bit resume" {
+    @setEvalBranchQuota(1_000_000);
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const w0 = [_]f32{ 1.0, -2.0, 0.5, 3.0 };
+    const c_values = [_]f32{ 0.5, -1.0, 2.0, 0.25 };
+    var c = try Tensor(.{ .out, .in }).fromSlice(&ctx, .{ 2, 2 }, &c_values);
+    defer c.deinit();
+
+    const BF16 = Tensor(.{ .dtype = .bf16, .tags = .{ .out, .in } });
+    var w32_source = try Tensor(.{ .out, .in }).fromSlice(&ctx, .{ 2, 2 }, &w0);
+    defer w32_source.deinit();
+    var narrow_source = try w32_source.to(&ctx, .bf16);
+    defer narrow_source.deinit();
+
+    var w = try BF16.variable(&ctx, try narrow_source.asRawTensor().cloneView());
+    defer w.deinit();
+    var opt = optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0.1 });
+    defer opt.deinit();
+    try opt.addParamNamed(&w, "w");
+
+    const stepOnce = struct {
+        fn run(context: *ExecContext, param: anytype, coeff: anytype, optimizer: *optim.AdamW) !void {
+            {
+                var wide = try param.to(context, .f32);
+                defer wide.deinit();
+                var prod = try wide.mul(context, coeff);
+                defer prod.deinit();
+                var loss = try prod.sumAll(context);
+                defer loss.deinit();
+                try loss.backward(context);
+            }
+            try optimizer.step(context);
+            optimizer.zeroGrad();
+        }
+    }.run;
+
+    try stepOnce(&ctx, &w, &c, &opt);
+    try stepOnce(&ctx, &w, &c, &opt);
+
+    // Snapshot: optimizer frame (with master) + the 16-bit param bytes.
+    var frame: std.Io.Writer.Allocating = .init(allocator);
+    defer frame.deinit();
+    try opt.saveState(&frame.writer);
+    const saved_values = try allocator.dupe(u16, try w.dataConst());
+    defer allocator.free(saved_values);
+
+    try stepOnce(&ctx, &w, &c, &opt);
+    try stepOnce(&ctx, &w, &c, &opt);
+    const final_expected = try allocator.dupe(u16, try w.dataConst());
+    defer allocator.free(final_expected);
+
+    // Resume: fresh param from the SAVED 16-bit values, fresh optimizer,
+    // loadState restores moments + master (and publishes), then the same
+    // two steps must land on the same bytes.
+    var w_resumed = try BF16.variableFromSlice(&ctx, .{ 2, 2 }, saved_values);
+    defer w_resumed.deinit();
+    var opt_resumed = optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0.1 });
+    defer opt_resumed.deinit();
+    try opt_resumed.addParamNamed(&w_resumed, "w");
+
+    var reader: std.Io.Reader = .fixed(frame.written());
+    try opt_resumed.loadState(&reader);
+
+    try stepOnce(&ctx, &w_resumed, &c, &opt_resumed);
+    try stepOnce(&ctx, &w_resumed, &c, &opt_resumed);
+    try std.testing.expectEqualSlices(u16, final_expected, try w_resumed.dataConst());
+}
+
+test "optim Muon and SGD step 16-bit params through masters" {
+    @setEvalBranchQuota(1_000_000);
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const w0 = [_]f32{ 1.0, -2.0, 0.5, 3.0 };
+    const c_values = [_]f32{ 0.5, -1.0, 2.0, 0.25 };
+    var c = try Tensor(.{ .out, .in }).fromSlice(&ctx, .{ 2, 2 }, &c_values);
+    defer c.deinit();
+    const b_values = [_]f32{ 0.5, -1.0 };
+    var b_coeff = try Tensor(.{.out}).fromSlice(&ctx, .{2}, &b_values);
+    defer b_coeff.deinit();
+
+    var w32_source = try Tensor(.{ .out, .in }).fromSlice(&ctx, .{ 2, 2 }, &w0);
+    defer w32_source.deinit();
+    var narrow_source = try w32_source.to(&ctx, .bf16);
+    defer narrow_source.deinit();
+    const BF16 = Tensor(.{ .dtype = .bf16, .tags = .{ .out, .in } });
+
+    // Muon: 2-D bf16 param on the orthogonalized path, 1-D bf16 bias on the
+    // embedded AdamW fallback — twin-tracked against an all-f32 Muon.
+    {
+        var w32 = try Tensor(.{ .out, .in }).variableFromSlice(&ctx, .{ 2, 2 }, &w0);
+        defer w32.deinit();
+        var bias32 = try Tensor(.{.out}).variableFromSlice(&ctx, .{2}, &.{ 0.25, -0.75 });
+        defer bias32.deinit();
+        var opt32 = optim.Muon.init(allocator, .{ .lr = 0.02 });
+        defer opt32.deinit();
+        try opt32.addParam(&w32);
+        try opt32.addParam(&bias32);
+
+        var w16 = try BF16.variableFromSlice(&ctx, .{ 2, 2 }, try narrow_source.dataConst());
+        defer w16.deinit();
+        var bias32_source = try Tensor(.{.out}).fromSlice(&ctx, .{2}, &.{ 0.25, -0.75 });
+        defer bias32_source.deinit();
+        var bias_narrow = try bias32_source.to(&ctx, .bf16);
+        defer bias_narrow.deinit();
+        var bias16 = try @TypeOf(bias_narrow).variable(&ctx, try bias_narrow.asRawTensor().cloneView());
+        defer bias16.deinit();
+        var opt16 = optim.Muon.init(allocator, .{ .lr = 0.02 });
+        defer opt16.deinit();
+        try opt16.addParam(&w16);
+        try opt16.addParam(&bias16);
+
+        for (0..3) |_| {
+            {
+                var prod = try w32.mul(&ctx, &c);
+                defer prod.deinit();
+                var s1 = try prod.sumAll(&ctx);
+                defer s1.deinit();
+                var prod_b = try bias32.mul(&ctx, &b_coeff);
+                defer prod_b.deinit();
+                var s2 = try prod_b.sumAll(&ctx);
+                defer s2.deinit();
+                var loss = try s1.add(&ctx, &s2);
+                defer loss.deinit();
+                try loss.backward(&ctx);
+            }
+            try opt32.step(&ctx);
+            opt32.zeroGrad();
+
+            {
+                var wide = try w16.to(&ctx, .f32);
+                defer wide.deinit();
+                var prod = try wide.mul(&ctx, &c);
+                defer prod.deinit();
+                var s1 = try prod.sumAll(&ctx);
+                defer s1.deinit();
+                var wide_b = try bias16.to(&ctx, .f32);
+                defer wide_b.deinit();
+                var prod_b = try wide_b.mul(&ctx, &b_coeff);
+                defer prod_b.deinit();
+                var s2 = try prod_b.sumAll(&ctx);
+                defer s2.deinit();
+                var loss = try s1.add(&ctx, &s2);
+                defer loss.deinit();
+                try loss.backward(&ctx);
+            }
+            try opt16.step(&ctx);
+            opt16.zeroGrad();
+        }
+
+        var expected_w = try w32.to(&ctx, .bf16);
+        defer expected_w.deinit();
+        try std.testing.expectEqualSlices(u16, try expected_w.dataConst(), try w16.dataConst());
+        var expected_b = try bias32.to(&ctx, .bf16);
+        defer expected_b.deinit();
+        try std.testing.expectEqualSlices(u16, try expected_b.dataConst(), try bias16.dataConst());
+    }
+
+    // SGD with momentum (bf16 state) over a bf16 param.
+    {
+        var w32 = try Tensor(.{ .out, .in }).variableFromSlice(&ctx, .{ 2, 2 }, &w0);
+        defer w32.deinit();
+        var opt32 = optim.SGD.init(allocator, .{ .lr = 1e-3, .momentum = 0.9 });
+        defer opt32.deinit();
+        try opt32.addParam(&w32);
+
+        var w16 = try BF16.variableFromSlice(&ctx, .{ 2, 2 }, try narrow_source.dataConst());
+        defer w16.deinit();
+        var opt16 = optim.SGD.init(allocator, .{ .lr = 1e-3, .momentum = 0.9 });
+        defer opt16.deinit();
+        try opt16.addParam(&w16);
+
+        for (0..3) |_| {
+            {
+                var prod = try w32.mul(&ctx, &c);
+                defer prod.deinit();
+                var loss = try prod.sumAll(&ctx);
+                defer loss.deinit();
+                try loss.backward(&ctx);
+            }
+            try opt32.step(&ctx);
+            opt32.zeroGrad();
+
+            {
+                var wide = try w16.to(&ctx, .f32);
+                defer wide.deinit();
+                var prod = try wide.mul(&ctx, &c);
+                defer prod.deinit();
+                var loss = try prod.sumAll(&ctx);
+                defer loss.deinit();
+                try loss.backward(&ctx);
+            }
+            try opt16.step(&ctx);
+            opt16.zeroGrad();
+        }
+
+        var expected = try w32.to(&ctx, .bf16);
+        defer expected.deinit();
+        try std.testing.expectEqualSlices(u16, try expected.dataConst(), try w16.dataConst());
+    }
+}

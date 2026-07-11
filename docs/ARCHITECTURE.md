@@ -656,10 +656,10 @@ behavioral tests, and `arch-check` ignores the imports inside them.
 - No stable external API contract or versioning; no package manifest or
   install story beyond local `zig build`.
 - The CUDA backend (`-Dgpu=cuda`, Linux) covers f32/f16 GEMM + quantized
-  dense/MoE prefill + opt-in decode GEMV; no
-  attention/KV offload, no distributed execution, and no mixed-precision
-  *training* (bf16-resident weights and the f16/bf16 forward paths exist; the
-  adjudication is recorded in `TRAINING.md` §10).
+  dense/MoE prefill + opt-in decode GEMV; no attention/KV offload and no
+  distributed execution. Mixed-precision training (16-bit params and
+  activations, f32 gradients, optimizer master weights) is CPU-side —
+  `TRAINING.md` §10.
 - No graph fusion or compiler layer — deliberate for now (`AGENTS.md` house
   rules); don't add one without a concrete design.
 - Quantized encoder coverage stops at K-quants + legacy formats; the cold

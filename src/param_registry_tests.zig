@@ -483,3 +483,48 @@ test "view exposes name, dtype, mutable bytes, and trainability" {
     wf[1] = 42;
     try std.testing.expectEqual(@as(f32, 42), (try w.dataConst())[1]);
 }
+
+test "addParamsTo registers 16-bit variables and the optimizer steps them" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const Half = ag.Tensor(.{ .dtype = .bf16, .tags = .{ .out, .in } });
+    var f32_source = try ag.Tensor(.{ .out, .in }).fromSlice(&ctx, .{ 2, 2 }, &.{ 1.0, -2.0, 0.5, 3.0 });
+    defer f32_source.deinit();
+    var narrow_source = try f32_source.to(&ctx, .bf16);
+    defer narrow_source.deinit();
+    var w = try Half.variableFromSlice(&ctx, .{ 2, 2 }, try narrow_source.dataConst());
+    defer w.deinit();
+
+    var registry = param_registry.ParamRegistry.init(allocator);
+    defer registry.deinit();
+    try registry.addParam("w", &w);
+
+    var opt = optim.AdamW.init(allocator, .{ .lr = 0.05 });
+    defer opt.deinit();
+    try registry.addParamsTo(&opt);
+
+    const before = try allocator.dupe(u16, try w.dataConst());
+    defer allocator.free(before);
+    var c = try ag.Tensor(.{ .out, .in }).fromSlice(&ctx, .{ 2, 2 }, &.{ 0.5, -1.0, 2.0, 0.25 });
+    defer c.deinit();
+    {
+        var wide = try w.to(&ctx, .f32);
+        defer wide.deinit();
+        var prod = try wide.mul(&ctx, &c);
+        defer prod.deinit();
+        var loss = try prod.sumAll(&ctx);
+        defer loss.deinit();
+        try loss.backward(&ctx);
+    }
+    try opt.step(&ctx);
+    registry.zeroGrad();
+
+    // lr 0.05 moves every element by ~0.05 — visible even at bf16 resolution.
+    try std.testing.expect(!std.mem.eql(u16, before, try w.dataConst()));
+}

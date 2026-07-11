@@ -26,6 +26,10 @@ const tagsEqual = tags_mod.tagsEqual;
 pub const PointwiseOp = tag_ops.PointwiseOp;
 
 fn rawShapeArray(comptime tags: anytype, value: *const RawTensor) [rawRank(tags.len)]usize {
+    return rawShapeArrayOf(.f32, tags, value);
+}
+
+fn rawShapeArrayOf(comptime tensor_dtype: tensor_mod.DType, comptime tags: anytype, value: *const tensor_mod.TensorOf(tensor_dtype)) [rawRank(tags.len)]usize {
     const rank = comptime rawRank(tags.len);
     var out: [rank]usize = undefined;
     inline for (0..rank) |i| {
@@ -5183,12 +5187,13 @@ pub fn EinsumBackward(comptime left_tags: anytype, comptime right_tags: anytype,
     };
 }
 
-/// Backward for `dot` against a constant quantized, f16, or bf16 RHS (frozen
-/// weights): only the f32 LHS (activation) gradient flows, computed against
-/// the RHS widened to f32 at backward time. The widened copy is transient —
-/// weight memory stays quantized between steps — which makes fine-tuning
-/// through frozen GGUF weights possible without duplicating them in f32
-/// permanently.
+/// Backward for `dot` against a quantized, f16, or bf16 RHS. The f32 LHS
+/// (activation) gradient is computed against the RHS widened to f32 at
+/// backward time; the widened copy is transient — weight memory stays
+/// quantized between steps — which makes fine-tuning through frozen GGUF
+/// weights possible without duplicating them in f32 permanently. A
+/// grad-requiring f16/bf16 RHS variable additionally receives its own f32
+/// gradient (see `ConstRhsEinsumBackward`).
 pub fn ConstRhsDotBackward(
     comptime rhs_dtype: tensor_mod.DType,
     comptime left_tags: anytype,
@@ -5200,11 +5205,13 @@ pub fn ConstRhsDotBackward(
     return ConstRhsEinsumBackward(rhs_dtype, left_tags, right_tags, dotResultTags(left_tags, right_tags, contract_tag));
 }
 
-/// Backward for `einsum` against a constant quantized, f16, or bf16 RHS:
-/// only the f32 LHS gradient flows, computed against the RHS widened to f32
-/// at backward time (the widened copy is transient -- weight memory stays
-/// narrow between steps). The gradient is itself an einsum, broadcast over
-/// any LHS axes the forward summed away.
+/// Backward for `einsum` against a quantized, f16, or bf16 RHS. The f32 LHS
+/// gradient is computed against the RHS widened to f32 at backward time (the
+/// widened copy is transient -- weight memory stays narrow between steps).
+/// When the RHS is a grad-requiring f16/bf16 variable, its gradient also
+/// flows -- as f32 (gradients are always f32), the plain einsum of the
+/// upstream gradient with the saved f32 LHS. The LHS value is retained only
+/// in that case, so frozen-weight fine-tuning keeps its memory profile.
 pub fn ConstRhsEinsumBackward(
     comptime rhs_dtype: tensor_mod.DType,
     comptime left_tags: anytype,
@@ -5212,11 +5219,14 @@ pub fn ConstRhsEinsumBackward(
     comptime out_tags: anytype,
 ) type {
     const left_recover_tags = intersectTags(left_tags, tags_mod.unionTags(out_tags, right_tags));
+    const right_recover_tags = intersectTags(right_tags, tags_mod.unionTags(out_tags, left_tags));
 
     return struct {
-        parents: [1]?*GradState,
+        parents: [2]?*GradState,
         left_shape: [rawRank(left_tags.len)]usize,
+        right_shape: [rawRank(right_tags.len)]usize,
         right_value: tensor_mod.TensorOf(rhs_dtype),
+        left_value: ?RawTensor,
 
         const Self = @This();
 
@@ -5224,14 +5234,19 @@ pub fn ConstRhsEinsumBackward(
             self: *Self,
             allocator: std.mem.Allocator,
             left_parent: ?*GradState,
+            right_parent: ?*GradState,
             left: *const RawTensor,
             right: *const tensor_mod.TensorOf(rhs_dtype),
         ) !void {
             _ = allocator;
+            var right_value = try right.cloneView();
+            errdefer right_value.deinit();
             self.* = .{
-                .parents = .{left_parent},
+                .parents = .{ left_parent, right_parent },
                 .left_shape = rawShapeArray(left_tags, left),
-                .right_value = try right.cloneView(),
+                .right_shape = rawShapeArrayOf(rhs_dtype, right_tags, right),
+                .right_value = right_value,
+                .left_value = if (right_parent != null) try left.cloneView() else null,
             };
         }
 
@@ -5242,24 +5257,30 @@ pub fn ConstRhsEinsumBackward(
 
         fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             const self: *const Self = @ptrCast(@alignCast(ptr));
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+            if (needs_grad.len > 0 and needs_grad[0]) {
+                var right_f32 = if (comptime dtype_mod.isBlockQuantized(rhs_dtype))
+                    try ctx.dequantizeTensorTyped(rhs_dtype, &self.right_value)
+                else
+                    try ctx.castTyped(rhs_dtype, .f32, &self.right_value);
+                defer right_f32.deinit();
 
-            var right_f32 = if (comptime dtype_mod.isBlockQuantized(rhs_dtype))
-                try ctx.dequantizeTensorTyped(rhs_dtype, &self.right_value)
-            else
-                try ctx.castTyped(rhs_dtype, .f32, &self.right_value);
-            defer right_f32.deinit();
-
-            // dL/dleft is itself a contraction (einsum closure); axes the
-            // forward summed away come back as a broadcast.
-            var grad = try tag_ops.taggedEinsum(out_tags, gy, ctx, right_tags, &right_f32, left_recover_tags);
-            defer grad.deinit();
-            out[0] = try expandGradientToTags(left_recover_tags, left_tags, ctx, &grad, self.left_shape);
+                // dL/dleft is itself a contraction (einsum closure); axes the
+                // forward summed away come back as a broadcast.
+                var grad = try tag_ops.taggedEinsum(out_tags, gy, ctx, right_tags, &right_f32, left_recover_tags);
+                defer grad.deinit();
+                out[0] = try expandGradientToTags(left_recover_tags, left_tags, ctx, &grad, self.left_shape);
+            }
+            if (needs_grad.len > 1 and needs_grad[1]) {
+                var grad = try tag_ops.taggedEinsum(out_tags, gy, ctx, left_tags, &self.left_value.?, right_recover_tags);
+                defer grad.deinit();
+                out[1] = try expandGradientToTags(right_recover_tags, right_tags, ctx, &grad, self.right_shape);
+            }
         }
 
         fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
             self.right_value.deinit();
+            if (self.left_value) |*left| left.deinit();
             core.destroyNode(Self, allocator, self);
         }
 

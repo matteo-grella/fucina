@@ -31,7 +31,9 @@ pub const BufferPool = exec_buffer_pool.BufferPool;
 pub const ScopeNodeDestroy = *const fn (*anyopaque) void;
 
 const ScopeEntry = struct {
-    value: Tensor,
+    /// Null when the adopted value lives inside the type-erased `node`
+    /// payload (non-f32 facade values; the payload's destructor frees it).
+    value: ?Tensor,
     node: ?*anyopaque,
     destroy_node: ScopeNodeDestroy,
 };
@@ -106,7 +108,7 @@ pub const Runtime = struct {
         std.debug.assert(index <= self.scope_entries.items.len);
         while (self.scope_entries.items.len > index) {
             var entry = self.scope_entries.pop().?;
-            entry.value.deinit();
+            if (entry.value) |*value| value.deinit();
             if (entry.node) |node| entry.destroy_node(node);
         }
     }
@@ -118,6 +120,14 @@ pub const Runtime = struct {
     pub fn adoptScopeValueAssumeCapacity(self: *Runtime, value: Tensor, node: ?*anyopaque, destroy_node: ScopeNodeDestroy) void {
         std.debug.assert(self.scope_depth > 0);
         self.scope_entries.appendAssumeCapacity(.{ .value = value, .node = node, .destroy_node = destroy_node });
+    }
+
+    /// Adopt a node-only entry: the value (any dtype) lives inside the
+    /// type-erased payload, which the destructor must free along with any
+    /// attached per-op state.
+    pub fn adoptScopeNodeAssumeCapacity(self: *Runtime, node: *anyopaque, destroy_node: ScopeNodeDestroy) void {
+        std.debug.assert(self.scope_depth > 0);
+        self.scope_entries.appendAssumeCapacity(.{ .value = null, .node = node, .destroy_node = destroy_node });
     }
 
     // ------------------------------------------------------------------

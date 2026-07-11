@@ -183,6 +183,10 @@ pub const ExecContext = struct {
         self.rt.adoptScopeValueAssumeCapacity(value, node, destroy_node);
     }
 
+    pub fn adoptScopeNodeAssumeCapacity(self: *ExecContext, node: *anyopaque, destroy_node: ScopeNodeDestroy) void {
+        self.rt.adoptScopeNodeAssumeCapacity(node, destroy_node);
+    }
+
     pub fn tryWorkPool(self: *ExecContext) !*thread.Pool {
         return self.rt.tryWorkPool();
     }

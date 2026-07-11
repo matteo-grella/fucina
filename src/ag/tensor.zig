@@ -951,13 +951,19 @@ fn FloatTensor(comptime tags_spec: anytype) type {
         }
 
         pub fn to(self: *const Self, ctx: *ExecContext, comptime target_dtype: DType) !Tensor(.{ .dtype = target_dtype, .tags = tags }) {
-            if (comptime target_dtype != .f32) {
+            if (comptime (target_dtype != .f32 and target_dtype != .f16 and target_dtype != .bf16)) {
                 if (self.requiresGrad()) return error.GradientCastUnsupported;
             }
             var value = try ctx.castTyped(.f32, target_dtype, self.asRawTensor());
             errdefer value.deinit();
             if (comptime target_dtype == .f32) {
                 return finishOp(tags, ctx, value, self.requiresGrad(), CastBackward(tags), .{ ctx.allocator, self.grad_state });
+            }
+            if (comptime (target_dtype == .f16 or target_dtype == .bf16)) {
+                // Differentiable narrow (the mixed-precision seam): the
+                // backward is the identity in f32 gradient space — the
+                // upstream f32 gradient passes through unrounded.
+                return typedFinishOp(target_dtype, tags, ctx, value, self.requiresGrad(), CastBackward(tags), .{ ctx.allocator, self.grad_state });
             }
             return Tensor(.{ .dtype = target_dtype, .tags = tags }).fromTensor(ctx, value);
         }
@@ -3116,17 +3122,17 @@ fn FloatTensor(comptime tags_spec: anytype) type {
                 const allow_gpu = !self.requiresGrad() and control.isQuantDotGpuEnabled();
                 var value = try quantizedRhsDotRaw(Other.dtype, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), contract_tag, allow_gpu);
                 errdefer value.deinit();
-                return finishOp(result_tags, ctx, value, self.requiresGrad(), ConstRhsDotBackward(Other.dtype, tags, other_tags, contract_tag), .{ ctx.allocator, self.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
+                return finishOp(result_tags, ctx, value, self.requiresGrad(), ConstRhsDotBackward(Other.dtype, tags, other_tags, contract_tag), .{ ctx.allocator, self.grad_state, null, self.asRawTensor(), other_ptr.asRawTensor() });
             }
             if (comptime Other.dtype == .f16) {
                 var value = try f16RhsDotRaw(tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), contract_tag);
                 errdefer value.deinit();
-                return finishOp(result_tags, ctx, value, self.requiresGrad(), ConstRhsDotBackward(.f16, tags, other_tags, contract_tag), .{ ctx.allocator, self.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
+                return finishOp(result_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), ConstRhsDotBackward(.f16, tags, other_tags, contract_tag), .{ ctx.allocator, self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
             }
             if (comptime Other.dtype == .bf16) {
                 var value = try bf16RhsDotRaw(tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), contract_tag);
                 errdefer value.deinit();
-                return finishOp(result_tags, ctx, value, self.requiresGrad(), ConstRhsDotBackward(.bf16, tags, other_tags, contract_tag), .{ ctx.allocator, self.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
+                return finishOp(result_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), ConstRhsDotBackward(.bf16, tags, other_tags, contract_tag), .{ ctx.allocator, self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
             }
             var value = try tag_ops.taggedDot(tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), contract_tag);
             errdefer value.deinit();
@@ -3143,9 +3149,10 @@ fn FloatTensor(comptime tags_spec: anytype) type {
         /// number of contraction, batch, and free axes in one differentiable
         /// operation that lowers onto the same matmul/bmm kernels; both
         /// operand gradients are einsums themselves (no pointwise fallback).
-        /// An f16/bf16 `other` is a constant weight widened to f32 once per
-        /// call (forward and backward): gradient flows to `self` only, like
-        /// dot's widened fallback path. Quantized RHS stays dot-only.
+        /// An f16/bf16 `other` is widened to f32 once per call (forward and
+        /// backward); a constant 16-bit RHS routes gradient to `self` only,
+        /// while a grad-requiring 16-bit RHS variable also receives its own
+        /// f32 gradient. Quantized RHS stays dot-only.
         pub fn einsum(self: *const Self, ctx: *ExecContext, other: anytype, comptime out_tags: anytype) !Tensor(normalizeTags(out_tags)) {
             const Other = TensorObject(@TypeOf(other));
             comptime {
@@ -3158,14 +3165,15 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
             const result_tags = comptime normalizeTags(out_tags);
             if (comptime (Other.dtype == .f16 or Other.dtype == .bf16)) {
-                // Constant mixed-precision RHS: widen once per call and run
-                // the f32 lowering; only the LHS gradient flows (same
-                // contract as dot's widened fallback path).
+                // Mixed-precision RHS: widen once per call and run the f32
+                // lowering. A constant RHS routes gradient to `self` only; a
+                // grad-requiring 16-bit RHS variable also receives its f32
+                // gradient (gradients are always f32).
                 var right_f32 = try ctx.castTyped(Other.dtype, .f32, other_ptr.asRawTensor());
                 defer right_f32.deinit();
                 var value = try tag_ops.taggedEinsum(tags, self.asRawTensor(), ctx, other_tags, &right_f32, result_tags);
                 errdefer value.deinit();
-                return finishOp(result_tags, ctx, value, self.requiresGrad(), ConstRhsEinsumBackward(Other.dtype, tags, other_tags, result_tags), .{ ctx.allocator, self.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
+                return finishOp(result_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), ConstRhsEinsumBackward(Other.dtype, tags, other_tags, result_tags), .{ ctx.allocator, self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
             }
             var value = try tag_ops.taggedEinsum(tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), result_tags);
             errdefer value.deinit();
@@ -4146,6 +4154,8 @@ fn TypedFloatConstantTensor(comptime tags_spec: anytype, comptime tensor_dtype: 
         pub const dtype = tensor_dtype;
 
         value: RawTypedTensor,
+        grad_state: ?*GradState = null,
+        scope_owned: bool = false,
         const Self = @This();
         const base = TypedConstantBase(Self, tags, tensor_dtype);
 
@@ -4166,9 +4176,67 @@ fn TypedFloatConstantTensor(comptime tags_spec: anytype, comptime tensor_dtype: 
         pub const axis = base.axis;
         pub const hasTag = base.hasTag;
 
-        pub const deinit = typedConstantDeinit;
+        /// Trainable 16-bit leaf: the VALUE is stored in this dtype, the
+        /// accumulated gradient is ALWAYS f32 (there is no 16-bit gradient
+        /// anywhere). f16/bf16 only — f64 training is unsupported.
+        pub fn variable(ctx: *ExecContext, value: RawTypedTensor) !Self {
+            comptime requireHalfFloatGrad(tensor_dtype, "variable");
+            var v = value;
+            try validateTensorRankOf(tensor_dtype, tags, &v);
+            const state = try GradState.leaf(ctx.allocator);
+            errdefer state.deinit();
+            return .{ .value = v, .grad_state = state };
+        }
+
+        pub fn variableFromSlice(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []const Scalar(tensor_dtype)) !Self {
+            comptime requireHalfFloatGrad(tensor_dtype, "variableFromSlice");
+            var value = try ctx.fromSliceRankTyped(tensor_dtype, tensor_rank, raw_shape, values);
+            errdefer value.deinit();
+            return try Self.variable(ctx, value);
+        }
+
+        pub fn requiresGrad(self: *const Self) bool {
+            return self.grad_state != null;
+        }
+
+        pub fn zeroGrad(self: *const Self) void {
+            if (self.grad_state) |state| state.zeroGrad();
+        }
+
+        /// The accumulated gradient as an owned f32 constant (null before
+        /// backward). The gradient of a 16-bit tensor is f32 by contract.
+        pub fn grad(self: *const Self, ctx: *ExecContext) !?Tensor(.{ .dtype = .f32, .tags = tags }) {
+            comptime requireHalfFloatGrad(tensor_dtype, "grad");
+            const state = self.grad_state orelse return null;
+            var value = (try state.gradClone(ctx.allocator)) orelse return null;
+            errdefer value.deinit();
+            return try Tensor(.{ .dtype = .f32, .tags = tags }).constant(ctx, value);
+        }
+
+        /// Aliasing f32 view of the accumulated gradient (see `grad`).
+        pub fn gradView(self: *const Self, ctx: *ExecContext) !?Tensor(.{ .dtype = .f32, .tags = tags }) {
+            comptime requireHalfFloatGrad(tensor_dtype, "gradView");
+            const state = self.grad_state orelse return null;
+            var value = (try state.gradView()) orelse return null;
+            errdefer value.deinit();
+            return try Tensor(.{ .dtype = .f32, .tags = tags }).constant(ctx, value);
+        }
+
+        /// No-grad view of the same storage (caller-owned constant).
+        pub fn detach(self: *const Self, ctx: *ExecContext) !Self {
+            var value = try self.value.cloneView();
+            errdefer value.deinit();
+            return Self.fromTensor(ctx, value);
+        }
+
+        pub fn deinit(self: *Self) void {
+            if (self.scope_owned) return; // borrow: the exec scope owns value + node
+            self.value.deinit();
+            if (self.grad_state) |state| state.deinit();
+            self.* = undefined;
+        }
+
         pub const asRawTensor = typedConstantAsRawTensor;
-        pub const requiresGrad = typedConstantRequiresGrad;
 
         pub const dim = typedConstantDim;
         pub const shape = typedConstantShape;
@@ -4298,6 +4366,7 @@ fn typedConstantShape(self: anytype) [TensorObject(@TypeOf(self)).tensor_rank]us
 }
 
 fn typedConstantMaterialize(self: anytype, ctx: *ExecContext) !TensorObject(@TypeOf(self)) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     var value = try ctx.materializeTyped(Self.dtype, self.asRawTensor());
     errdefer value.deinit();
@@ -4351,6 +4420,7 @@ fn typedConstantBroadcastTo(
     comptime target_tags_spec: anytype,
     target_shape: [normalizeTags(target_tags_spec).len]usize,
 ) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = normalizeTags(target_tags_spec) }) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     const target_tags = normalizeTags(target_tags_spec);
     var value = try broadcastTensorToOf(Self.dtype, Self.axis_tags, self.asRawTensor(), target_tags, target_shape);
@@ -4365,6 +4435,7 @@ fn typedConstantGather(
     indices: []const usize,
     comptime out_tag: Tag,
 ) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = replaceTag(TensorObject(@TypeOf(self)).axis_tags, tag, out_tag) }) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     const result_tags = replaceTag(Self.axis_tags, tag, out_tag);
     var value = try ctx.gatherAxisRankTyped(Self.dtype, Self.tag_count, self.asRawTensor(), Self.axis(tag), indices);
@@ -4373,6 +4444,7 @@ fn typedConstantGather(
 }
 
 fn typedConstantNarrow(self: anytype, ctx: *ExecContext, comptime tag: Tag, start: usize, length: usize) !TensorObject(@TypeOf(self)) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     var value = try ctx.narrowAxisRankTyped(Self.dtype, Self.tag_count, self.asRawTensor(), Self.axis(tag), start, length);
     errdefer value.deinit();
@@ -4380,6 +4452,8 @@ fn typedConstantNarrow(self: anytype, ctx: *ExecContext, comptime tag: Tag, star
 }
 
 fn typedConstantConcat(self: anytype, ctx: *ExecContext, comptime tag: Tag, others: []const *const TensorObject(@TypeOf(self))) !TensorObject(@TypeOf(self)) {
+    try typedRequireNoGrad(self);
+    for (others) |other_item| try typedRequireNoGrad(other_item);
     const Self = TensorObject(@TypeOf(self));
     const RawTypedTensor = tensor_mod.TensorOf(Self.dtype);
     var raw_inputs = try ctx.allocator.alloc(*const RawTypedTensor, others.len + 1);
@@ -4394,6 +4468,8 @@ fn typedConstantConcat(self: anytype, ctx: *ExecContext, comptime tag: Tag, othe
 }
 
 fn typedConstantSetSlice(self: anytype, ctx: *ExecContext, comptime tag: Tag, start: usize, update: *const TensorObject(@TypeOf(self))) !TensorObject(@TypeOf(self)) {
+    try typedRequireNoGrad(self);
+    try typedRequireNoGrad(update);
     const Self = TensorObject(@TypeOf(self));
     var value = try ctx.setSliceAxisRankTyped(Self.dtype, Self.tag_count, self.asRawTensor(), update.asRawTensor(), Self.axis(tag), start);
     errdefer value.deinit();
@@ -4401,6 +4477,8 @@ fn typedConstantSetSlice(self: anytype, ctx: *ExecContext, comptime tag: Tag, st
 }
 
 fn typedConstantSetRows(self: anytype, ctx: *ExecContext, comptime tag: Tag, indices: []const usize, update: *const TensorObject(@TypeOf(self))) !TensorObject(@TypeOf(self)) {
+    try typedRequireNoGrad(self);
+    try typedRequireNoGrad(update);
     const Self = TensorObject(@TypeOf(self));
     var value = try ctx.setRowsAxisRankTyped(Self.dtype, Self.tag_count, self.asRawTensor(), update.asRawTensor(), Self.axis(tag), indices);
     errdefer value.deinit();
@@ -4408,6 +4486,7 @@ fn typedConstantSetRows(self: anytype, ctx: *ExecContext, comptime tag: Tag, ind
 }
 
 fn typedConstantAxisView(self: anytype, ctx: *ExecContext, comptime axes: anytype, comptime target_tags: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = target_tags }) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     var value = try axisViewTensorOf(Self.dtype, self.asRawTensor(), axes, target_tags);
     errdefer value.deinit();
@@ -4416,8 +4495,16 @@ fn typedConstantAxisView(self: anytype, ctx: *ExecContext, comptime axes: anytyp
 
 fn typedConstantTo(self: anytype, ctx: *ExecContext, comptime target_dtype: DType) !Tensor(.{ .dtype = target_dtype, .tags = TensorObject(@TypeOf(self)).axis_tags }) {
     const Self = TensorObject(@TypeOf(self));
+    if (comptime target_dtype != .f32) {
+        if (self.requiresGrad()) return error.GradientCastUnsupported;
+    }
     var value = try ctx.castTyped(Self.dtype, target_dtype, self.asRawTensor());
     errdefer value.deinit();
+    if (comptime target_dtype == .f32) {
+        // Differentiable widen: the f32 result joins the f32 graph and the
+        // 16-bit source receives the upstream gradient unchanged (f32).
+        return finishOp(Self.axis_tags, ctx, value, self.requiresGrad(), CastBackward(Self.axis_tags), .{ ctx.allocator, self.grad_state });
+    }
     return Tensor(.{ .dtype = target_dtype, .tags = Self.axis_tags }).fromTensor(ctx, value);
 }
 
@@ -4442,6 +4529,7 @@ fn typedConstantDiv(self: anytype, ctx: *ExecContext, other: anytype) !Tensor(.{
 }
 
 fn typedConstantSum(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = dtype_mod.outputDType(.reduction, TensorObject(@TypeOf(self)).dtype), .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     const result_tags = removeTag(Self.axis_tags, tag);
     var value = try ctx.sumAxisRankTyped(Self.dtype, Self.tag_count, self.asRawTensor(), Self.axis(tag));
@@ -4450,6 +4538,7 @@ fn typedConstantSum(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Tensor
 }
 
 fn typedConstantMean(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = dtype_mod.outputDType(.reduction, TensorObject(@TypeOf(self)).dtype), .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     const result_tags = removeTag(Self.axis_tags, tag);
     var value = try ctx.meanAxisRankTyped(Self.dtype, Self.tag_count, self.asRawTensor(), Self.axis(tag));
@@ -4458,6 +4547,7 @@ fn typedConstantMean(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Tenso
 }
 
 fn typedConstantSumAll(self: anytype, ctx: *ExecContext) !Tensor(.{ .dtype = dtype_mod.outputDType(.reduction, TensorObject(@TypeOf(self)).dtype), .tags = .{} }) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     var value = try ctx.sumTyped(Self.dtype, self.asRawTensor());
     errdefer value.deinit();
@@ -4480,6 +4570,70 @@ fn requireWidenedTypedFloat(comptime tensor_dtype: DType, comptime what: []const
     }
 }
 
+fn requireHalfFloatGrad(comptime tensor_dtype: DType, comptime what: []const u8) void {
+    if (tensor_dtype != .f16 and tensor_dtype != .bf16) {
+        @compileError(what ++ " requires an f16/bf16 tensor (gradients are always f32; f64 training is unsupported)");
+    }
+}
+
+/// Typed forward ops are no-grad: a grad-requiring operand would silently
+/// drop its graph, so it is rejected instead (`to(.f32)` is the trained
+/// path; the differentiable typed entries are `to` and the mixed-RHS
+/// `dot`/`einsum`).
+fn typedRequireNoGrad(operand: anytype) !void {
+    const Operand = TensorObject(@TypeOf(operand));
+    if (comptime @hasField(Operand, "grad_state")) {
+        if (operand.grad_state != null) return error.UnsupportedGradient;
+    }
+}
+
+/// Scope payload for a grad-carrying 16-bit result: the exec-scope slot
+/// holds f32 values only, so the typed value travels inside the type-erased
+/// node payload with a destructor that frees value + graph node together.
+fn TypedScopePayload(comptime tensor_dtype: DType) type {
+    return struct {
+        allocator: std.mem.Allocator,
+        value: tensor_mod.TensorOf(tensor_dtype),
+        state: *GradState,
+
+        fn destroy(ptr: *anyopaque) void {
+            const payload: *@This() = @ptrCast(@alignCast(ptr));
+            payload.value.deinit();
+            payload.state.deinit();
+            payload.allocator.destroy(payload);
+        }
+    };
+}
+
+/// `finishOp` for a differentiable op whose RESULT is 16-bit (today: the
+/// f32 → f16/bf16 cast). Same contract as `finishOp`: consumes `value` on
+/// success; under an active exec scope the result is a scope-owned borrow.
+fn typedFinishOp(
+    comptime tensor_dtype: DType,
+    comptime result_tags: anytype,
+    ctx: *ExecContext,
+    value: tensor_mod.TensorOf(tensor_dtype),
+    wants_grad: bool,
+    comptime BackwardType: type,
+    create_args: anytype,
+) !Tensor(.{ .dtype = tensor_dtype, .tags = result_tags }) {
+    const OutT = Tensor(.{ .dtype = tensor_dtype, .tags = result_tags });
+    if (!wants_grad or !control.isGradEnabled()) {
+        return OutT.fromTensor(ctx, value);
+    }
+    if (ctx.execScopeActive()) {
+        try ctx.reserveScopeSlot();
+        const payload = try ctx.allocator.create(TypedScopePayload(tensor_dtype));
+        errdefer ctx.allocator.destroy(payload);
+        const state = try core.createNode(BackwardType, create_args);
+        payload.* = .{ .allocator = ctx.allocator, .value = value, .state = state };
+        ctx.adoptScopeNodeAssumeCapacity(payload, TypedScopePayload(tensor_dtype).destroy);
+        return .{ .value = value, .grad_state = state, .scope_owned = true };
+    }
+    const state = try core.createNode(BackwardType, create_args);
+    return .{ .value = value, .grad_state = state };
+}
+
 /// Shared tail of the widened ops: narrow the f32 kernel result back to
 /// `tensor_dtype` and wrap it as a typed constant.
 fn typedFromWidened(comptime tensor_dtype: DType, comptime result_tags: anytype, ctx: *ExecContext, wide_value: *const RawTensor) !Tensor(.{ .dtype = tensor_dtype, .tags = result_tags }) {
@@ -4489,6 +4643,7 @@ fn typedFromWidened(comptime tensor_dtype: DType, comptime result_tags: anytype,
 }
 
 fn typedConstantUnary(self: anytype, ctx: *ExecContext, comptime op: UnaryOp) !TensorObject(@TypeOf(self)) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     comptime requireWidenedTypedFloat(Self.dtype, "unary");
     var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
@@ -4507,6 +4662,7 @@ fn TypedUnaryMethod(comptime op: UnaryOp) type {
 }
 
 fn typedConstantLeakyRelu(self: anytype, ctx: *ExecContext, negative_slope: f32) !TensorObject(@TypeOf(self)) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     comptime requireWidenedTypedFloat(Self.dtype, "leakyRelu");
     var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
@@ -4517,6 +4673,7 @@ fn typedConstantLeakyRelu(self: anytype, ctx: *ExecContext, negative_slope: f32)
 }
 
 fn typedConstantClamp(self: anytype, ctx: *ExecContext, min_value: f32, max_value: f32) !TensorObject(@TypeOf(self)) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     comptime requireWidenedTypedFloat(Self.dtype, "clamp");
     var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
@@ -4527,6 +4684,7 @@ fn typedConstantClamp(self: anytype, ctx: *ExecContext, min_value: f32, max_valu
 }
 
 fn typedConstantScale(self: anytype, ctx: *ExecContext, scalar_value: dtype_mod.Accumulator(TensorObject(@TypeOf(self)).dtype)) !TensorObject(@TypeOf(self)) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     var value = try ctx.scaleTyped(Self.dtype, self.asRawTensor(), scalar_value);
     errdefer value.deinit();
@@ -4534,6 +4692,7 @@ fn typedConstantScale(self: anytype, ctx: *ExecContext, scalar_value: dtype_mod.
 }
 
 fn typedConstantAddScalar(self: anytype, ctx: *ExecContext, scalar_value: f32) !TensorObject(@TypeOf(self)) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     comptime requireWidenedTypedFloat(Self.dtype, "addScalar");
     var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
@@ -4552,6 +4711,7 @@ fn typedConstantDivScalar(self: anytype, ctx: *ExecContext, scalar_value: dtype_
 }
 
 fn typedConstantPowScalar(self: anytype, ctx: *ExecContext, exponent: f32) !TensorObject(@TypeOf(self)) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     comptime requireWidenedTypedFloat(Self.dtype, "powScalar");
     var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
@@ -4569,6 +4729,8 @@ fn typedWidenedPointwise(
     ctx: *ExecContext,
     other: anytype,
 ) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
+    try typedRequireNoGrad(self);
+    try typedRequireNoGrad(other);
     const Self = TensorObject(@TypeOf(self));
     const Other = TensorObject(@TypeOf(other));
     comptime requireWidenedTypedFloat(Self.dtype, "maximum/minimum");
@@ -4598,6 +4760,8 @@ fn typedConstantGated(
     other: anytype,
     comptime op: GatedOp,
 ) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
+    try typedRequireNoGrad(self);
+    try typedRequireNoGrad(other);
     const Self = TensorObject(@TypeOf(self));
     const Other = TensorObject(@TypeOf(other));
     comptime requireWidenedTypedFloat(Self.dtype, "gated");
@@ -4626,6 +4790,7 @@ fn typedConstantGeglu(self: anytype, ctx: *ExecContext, other: anytype) !Tensor(
 }
 
 fn typedConstantSoftmax(self: anytype, ctx: *ExecContext, comptime tag: Tag, options: anytype) !TensorObject(@TypeOf(self)) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     comptime requireWidenedTypedFloat(Self.dtype, "softmax");
     comptime {
@@ -4642,6 +4807,7 @@ fn typedConstantSoftmax(self: anytype, ctx: *ExecContext, comptime tag: Tag, opt
 }
 
 fn typedConstantLogSoftmax(self: anytype, ctx: *ExecContext, comptime tag: Tag) !TensorObject(@TypeOf(self)) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     comptime requireWidenedTypedFloat(Self.dtype, "logSoftmax");
     var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
@@ -4652,6 +4818,7 @@ fn typedConstantLogSoftmax(self: anytype, ctx: *ExecContext, comptime tag: Tag) 
 }
 
 fn typedConstantRmsNorm(self: anytype, ctx: *ExecContext, comptime tag: Tag, eps: f32) !TensorObject(@TypeOf(self)) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     comptime requireWidenedTypedFloat(Self.dtype, "rmsNorm");
     var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
@@ -4668,6 +4835,8 @@ fn typedConstantRmsNormMul(
     weight: *const Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = .{tag} }),
     eps: f32,
 ) !TensorObject(@TypeOf(self)) {
+    try typedRequireNoGrad(self);
+    try typedRequireNoGrad(weight);
     const Self = TensorObject(@TypeOf(self));
     comptime requireWidenedTypedFloat(Self.dtype, "rmsNormMul");
     var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
@@ -4680,6 +4849,7 @@ fn typedConstantRmsNormMul(
 }
 
 fn typedConstantLayerNorm(self: anytype, ctx: *ExecContext, comptime tag: Tag, eps: f32, options: anytype) !TensorObject(@TypeOf(self)) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     comptime requireWidenedTypedFloat(Self.dtype, "layerNorm");
     comptime {
@@ -4698,6 +4868,7 @@ fn typedConstantLayerNorm(self: anytype, ctx: *ExecContext, comptime tag: Tag, e
 // Widened reductions return f32 like the native typed sum/mean (§8.3:
 // reductions on 16-bit floats keep the accumulator dtype).
 fn typedConstantLogsumexp(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = .f32, .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     comptime requireWidenedTypedFloat(Self.dtype, "logsumexp");
     const result_tags = removeTag(Self.axis_tags, tag);
@@ -4717,6 +4888,7 @@ fn typedConstantMin(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Tensor
 }
 
 fn typedConstantExtremum(self: anytype, ctx: *ExecContext, comptime tag: Tag, comptime op: enum { max, min }) !Tensor(.{ .dtype = .f32, .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     comptime requireWidenedTypedFloat(Self.dtype, "max/min");
     const result_tags = removeTag(Self.axis_tags, tag);
@@ -4743,6 +4915,7 @@ fn typedConstantArgmax(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Ten
 }
 
 fn typedConstantProd(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = .f32, .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     comptime requireWidenedTypedFloat(Self.dtype, "prod");
     const result_tags = removeTag(Self.axis_tags, tag);
@@ -4754,6 +4927,7 @@ fn typedConstantProd(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Tenso
 }
 
 fn typedConstantVariance(self: anytype, ctx: *ExecContext, comptime tag: Tag, ddof: u1) !Tensor(.{ .dtype = .f32, .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     comptime requireWidenedTypedFloat(Self.dtype, "variance");
     const result_tags = removeTag(Self.axis_tags, tag);
@@ -4765,6 +4939,7 @@ fn typedConstantVariance(self: anytype, ctx: *ExecContext, comptime tag: Tag, dd
 }
 
 fn typedConstantCumsum(self: anytype, ctx: *ExecContext, comptime tag: Tag) !TensorObject(@TypeOf(self)) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     comptime requireWidenedTypedFloat(Self.dtype, "cumsum");
     var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
@@ -4775,6 +4950,7 @@ fn typedConstantCumsum(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Ten
 }
 
 fn typedConstantCumprod(self: anytype, ctx: *ExecContext, comptime tag: Tag) !TensorObject(@TypeOf(self)) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     comptime requireWidenedTypedFloat(Self.dtype, "cumprod");
     var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
@@ -4785,6 +4961,8 @@ fn typedConstantCumprod(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Te
 }
 
 fn typedConstantWhere(self: anytype, ctx: *ExecContext, cond: anytype, other: anytype) !TensorObject(@TypeOf(self)) {
+    try typedRequireNoGrad(self);
+    try typedRequireNoGrad(other);
     const Self = TensorObject(@TypeOf(self));
     comptime requireWidenedTypedFloat(Self.dtype, "where");
     const Cond = TensorObject(@TypeOf(cond));
@@ -4804,6 +4982,7 @@ fn typedConstantWhere(self: anytype, ctx: *ExecContext, cond: anytype, other: an
 }
 
 fn typedConstantMaskedFill(self: anytype, ctx: *ExecContext, mask: anytype, value: f32) !TensorObject(@TypeOf(self)) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     comptime requireWidenedTypedFloat(Self.dtype, "maskedFill");
     const Mask = TensorObject(@TypeOf(mask));
@@ -4843,6 +5022,8 @@ fn typedConstantCompare(self: anytype, ctx: *ExecContext, comptime op: exec_mod.
 /// runs (f32 accumulation); the result narrows to the input dtype per the
 /// §8.3 matmul policy — the same contract as the typed `dot`.
 fn typedConstantEinsum(self: anytype, ctx: *ExecContext, other: anytype, comptime out_tags: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = normalizeTags(out_tags) }) {
+    try typedRequireNoGrad(self);
+    try typedRequireNoGrad(other);
     const Self = TensorObject(@TypeOf(self));
     const Other = TensorObject(@TypeOf(other));
     comptime requireWidenedTypedFloat(Self.dtype, "einsum");
@@ -4859,6 +5040,7 @@ fn typedConstantEinsum(self: anytype, ctx: *ExecContext, other: anytype, comptim
 }
 
 fn typedConstantPad(self: anytype, ctx: *ExecContext, comptime tag: Tag, before: usize, after: usize, fill: f32) !TensorObject(@TypeOf(self)) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     comptime requireWidenedTypedFloat(Self.dtype, "pad");
     var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
@@ -4877,6 +5059,7 @@ fn typedConstantSplit(
     comptime split_tags_spec: anytype,
     split_shape: [normalizeTags(split_tags_spec).len]usize,
 ) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = splitTags(TensorObject(@TypeOf(self)).axis_tags, tag, normalizeTags(split_tags_spec)) }) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     const split_tags = normalizeTags(split_tags_spec);
     const result_tags = splitTags(Self.axis_tags, tag, split_tags);
@@ -4886,6 +5069,7 @@ fn typedConstantSplit(
 }
 
 fn typedConstantMerge(self: anytype, ctx: *ExecContext, comptime out_tag: Tag, comptime merge_tags_spec: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = mergeTags(TensorObject(@TypeOf(self)).axis_tags, out_tag, normalizeTags(merge_tags_spec)) }) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     const merge_tags = normalizeTags(merge_tags_spec);
     const result_tags = mergeTags(Self.axis_tags, out_tag, merge_tags);
@@ -4895,6 +5079,7 @@ fn typedConstantMerge(self: anytype, ctx: *ExecContext, comptime out_tag: Tag, c
 }
 
 fn typedConstantFlatten(self: anytype, ctx: *ExecContext, comptime out_tag: Tag) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = .{out_tag} }) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     var value = try tag_ops.flattenTensorOf(Self.dtype, ctx, self.asRawTensor());
     errdefer value.deinit();
@@ -4918,6 +5103,7 @@ fn typedConstantReshape(
 }
 
 fn typedConstantSliceStep(self: anytype, ctx: *ExecContext, comptime tag: Tag, start: usize, length: usize, step: usize) !TensorObject(@TypeOf(self)) {
+    try typedRequireNoGrad(self);
     const Self = TensorObject(@TypeOf(self));
     const slice_axis = comptime Self.axis(tag);
     const raw = self.asRawTensor();
@@ -5071,6 +5257,8 @@ fn typedPointwise(
     ctx: *ExecContext,
     other: anytype,
 ) !Tensor(.{ .dtype = dtype_mod.outputDType(.pointwise, tensor_dtype), .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
+    try typedRequireNoGrad(self);
+    try typedRequireNoGrad(other);
     const SelfTensor = TensorObject(@TypeOf(self));
     const left_tags = SelfTensor.axis_tags;
     const Other = TensorObject(@TypeOf(other));
@@ -5104,6 +5292,8 @@ fn typedDot(
     other: anytype,
     comptime contract_tag: Tag,
 ) !Tensor(.{ .dtype = dtype_mod.outputDType(.matmul, tensor_dtype), .tags = dotResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags, contract_tag) }) {
+    try typedRequireNoGrad(self);
+    try typedRequireNoGrad(other);
     const SelfTensor = TensorObject(@TypeOf(self));
     const left_tags = SelfTensor.axis_tags;
     const Other = TensorObject(@TypeOf(other));

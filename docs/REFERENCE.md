@@ -846,7 +846,7 @@ unsupported operation is a compile error, never a runtime failure
 | Branch | dtypes | Capabilities |
 |---|---|---|
 | Float (differentiable) | `.f32` | Full surface: autograd (`variable`, `backward`, `grad`), all math/NN ops (§4), all views and structural ops |
-| Typed float constant | `.f16`, `.bf16`, `.f64` (`supportsForwardFloatMath`) | Constants only, forward-only math: the native typed set (`add/sub/mul/div/sum/mean/sumAll/dot/scale/divScalar`, `to`), the full structural set (`split`/`merge`/`flatten`/`reshape`/`sliceStep`/`flip`/`roll`/`stack`/`repeatAxis` + the §3.10 base set), and — **f16/bf16 only** — the widened forward set (unary family, gated, softmax/norm family, remaining reductions, masks, `pad`, `einsum`; §4.19) |
+| Typed float | `.f16`, `.bf16`, `.f64` (`supportsForwardFloatMath`) | Forward math: the native typed set (`add/sub/mul/div/sum/mean/sumAll/dot/scale/divScalar`, `to`), the full structural set (`split`/`merge`/`flatten`/`reshape`/`sliceStep`/`flip`/`roll`/`stack`/`repeatAxis` + the §3.10 base set), and — **f16/bf16 only** — the widened forward set (unary family, gated, softmax/norm family, remaining reductions, masks, `pad`, `einsum`; §4.19). **f16/bf16 only, autograd LEAVES**: `variable`/`variableFromSlice` with f32 gradients; differentiable `to` casts and mixed-RHS `dot`/`einsum` are the graph entries (§5.1) |
 | Typed scalar constant | `.bool`, `.u8`, `.u16`, `.i8`, `.i16`, `.i32`, `.i64` | Constants only, **no math, no `to`**; construction, data access, and structural ops |
 | Block-quantized constant | `q1_0`, `q4_0 … q8_k`, `iq*`, `tq1_0/tq2_0`, `mxfp4`, `nvfp4` (`isBlockQuantized`) | Constants only; block construction, `to(.f32)` dequantize, `getRows`, row `concat`, `packRhs`/`packRhsLayout` (§10) |
 
@@ -1592,8 +1592,9 @@ conversions per branch:
 
 | Source branch | Targets | Notes |
 |---|---|---|
-| f32 | `.f32`, `.f16`, `.bf16`, `.f64` | `to(.f32)` is a differentiable copy; any *other* target requires no-grad and fails with `error.GradientCastUnsupported` on a `requiresGrad()` tensor |
-| f16/bf16/f64 constant | floating dtypes | float↔float casts only; non-float targets are a compile error |
+| f32 | `.f32`, `.f16`, `.bf16`, `.f64` | `to(.f32)` is a differentiable copy; `to(.f16)`/`to(.bf16)` are DIFFERENTIABLE narrows (the mixed-precision seam, §5.1: the backward is the identity on the f32 upstream gradient); `to(.f64)` requires no-grad and fails with `error.GradientCastUnsupported` on a `requiresGrad()` tensor |
+| f16/bf16 | floating dtypes | `to(.f32)` is a DIFFERENTIABLE widen when the source requires grad (the f32 gradient flows back unchanged); casts to any non-f32 float require no-grad (`error.GradientCastUnsupported`) |
+| f64 constant | floating dtypes | float↔float casts only, no-grad; non-float targets are a compile error |
 | int/bool constant | — | no `to` at all (compile error) |
 | block-quantized | `.f32` only | dequantization; other targets are a compile error |
 
@@ -1632,7 +1633,10 @@ test "detach and cast rules" {
     defer frozen.deinit();
     try std.testing.expect(!frozen.requiresGrad());
     try std.testing.expectError(error.InvalidShape, frozen.item()); // not single-element
-    try std.testing.expectError(error.GradientCastUnsupported, x.to(&ctx, .f16));
+    try std.testing.expectError(error.GradientCastUnsupported, x.to(&ctx, .f64));
+    var narrowed = try x.to(&ctx, .f16); // differentiable narrow: stays in the graph
+    defer narrowed.deinit();
+    try std.testing.expect(narrowed.requiresGrad());
     var half = try frozen.to(&ctx, .f16); // constants cast freely between floats
     defer half.deinit();
     comptime std.debug.assert(@TypeOf(half).dtype == .f16);
@@ -1641,8 +1645,11 @@ test "detach and cast rules" {
 
 ### 3.9 Gradient accessors (`src/ag/tensor.zig`, `src/ag/core.zig`; mechanics in §5)
 
-f32-branch surface; `requiresGrad` also exists on every constant branch and
-returns `false` there.
+f32-branch surface. `requiresGrad` also exists on every other branch:
+hard-wired `false` on the scalar/quantized/f64 constants, a real
+`grad_state != null` check on f16/bf16 — whose leaf-autograd accessors
+(`variable`, `grad`, `gradView`, `zeroGrad`, `detach`) mirror the f32 ones
+with f32-dtype gradient results (§5.1).
 
 ```zig
 pub fn requiresGrad(self: *const Self) bool
@@ -1747,8 +1754,11 @@ is the N-ary companion of `einsum` (§4.8).
 `permuteTo`, `transpose`, `insertAxis`, `squeeze`, `broadcastTo`, `gather`,
 `narrow`, `concat`, `setSlice`, `setRows` — all §3.
 
-**Typed float-constant branch** (`.f16`/`.bf16`/`.f64`): everything in the
-scalar-constant branch, plus `to` (§3.8), the forward-only math `add`,
+**Typed float branch** (`.f16`/`.bf16`/`.f64`): everything in the
+scalar-constant branch, plus — f16/bf16 only, compile errors on f64 — the
+leaf-autograd surface `variable`, `variableFromSlice`, `requiresGrad`,
+`grad`, `gradView`, `zeroGrad`, `detach` (f32 gradients; §5.1), plus `to`
+(§3.8), the forward-only math `add`,
 `sub`, `mul`, `div`, `sum`, `mean`, `sumAll`, `dot`, `scale`, `divScalar`,
 and the structural set `split`, `merge`, `flatten`, `reshape`, `sliceStep`,
 `flip`, `roll`, `stack`, `repeatAxis`. **f16/bf16 only** (each computes
@@ -2287,11 +2297,14 @@ layouts no orientation can express materialize at most once per operand.
 comptime-dispatched:
 
 - f32 RHS: full two-operand backward (`DotBackward`).
-- f16 / bf16 RHS: the RHS is a constant weight; gradient flows to `self`
-  only (`ConstRhsDotBackward`). With no batch tags, one RHS free axis, and
-  RHS storage `[free, contract]` (weight tags `{.out, .in}`-style) this hits
-  the dedicated trans-B mixed kernels that widen in-register; otherwise the
-  RHS is cast to f32 once and the f32 path runs.
+- f16 / bf16 RHS (`ConstRhsDotBackward`): a CONSTANT RHS is a frozen weight
+  — gradient flows to `self` only; a grad-requiring 16-bit RHS **variable**
+  (§5.1) also receives its own gradient, as f32 (gradients are always f32;
+  dW is the plain f32 einsum of the upstream gradient with the saved f32
+  LHS). With no batch tags, one RHS free axis, and RHS storage
+  `[free, contract]` (weight tags `{.out, .in}`-style) the forward hits the
+  dedicated trans-B mixed kernels that widen in-register; otherwise the RHS
+  is cast to f32 once and the f32 path runs.
 - block-quantized RHS (q8_0, q4_k, ... — §10): the quantized-RHS GEMM;
   gradient to `self` only. Requires RHS storage `[free, contract]`, one RHS
   free axis, no batch tags (compile errors otherwise). When a GPU backend is
@@ -3200,6 +3213,12 @@ breakdown the caller can pass to profile a run.
 - **Integer dtypes** (e.g. token-id tensors): constructors, data access,
   and the structural subset only.
 
+The typed forward ops are no-grad by design: an operand that requires
+gradients is REJECTED with `error.UnsupportedGradient` instead of silently
+dropping its graph. The differentiable ways into and out of the 16-bit
+world are `to` (§3.8) and the mixed-RHS `dot`/`einsum` (§4.8); widen with
+`to(.f32)` for everything else in a trained path.
+
 Because the widened ops run the identical f32 kernels and round once on
 store, their results are bit-identical to "cast up, run the f32 op, cast
 down" — pinned by parity tests in `src/ag/tensor_tests.zig`:
@@ -3271,9 +3290,17 @@ scope_owned: bool = false, // exec-scope borrow flag, see §6
   allocated from `ctx.allocator`. `deinit` on the tensor releases both the
   value and the state (unless `scope_owned`, in which case `deinit` is a
   no-op and the exec scope releases everything at `closeExecScope`, §6).
-- Only the f32 branch of `Tensor(spec)` is differentiable. The typed
-  (f16/bf16/integer) and block-quantized constant branches have no
-  `grad_state` field machinery; their `requiresGrad()` is hard-wired `false`.
+- The f32 branch carries the full graph machinery. The f16/bf16 branch is
+  a LEAF-capable participant: `variable`/`variableFromSlice` create
+  trainable 16-bit leaves whose accumulated gradient is ALWAYS an f32 raw
+  tensor (there is no 16-bit gradient anywhere in the engine), and the
+  differentiable entries into/out of the 16-bit world are `to` (both cast
+  directions, §3.8) and the mixed-RHS `dot`/`einsum` (§4.8). Every OTHER
+  typed forward op is no-grad by design and rejects a grad-requiring
+  operand with `error.UnsupportedGradient` (§4.19). f64, integer, and
+  block-quantized constant branches have no gradient support; their
+  `requiresGrad()` is hard-wired `false` (on f64 the autograd decls exist
+  but are compile errors).
 
 `requiresGrad` is simply:
 
@@ -3956,7 +3983,7 @@ Every differentiable facade op attaches a concrete VJP record from
 | Structure / views | `withTags`, `permuteTo`, `transpose`, `alignTo`, `insertAxis`, `squeeze`, `split`, `merge`, `viewWithStrides`, `materialize`, `broadcastTo`, `flatten`, `narrow`, `pad`, `concat`, `stack`, `unbindInto`, `repeatAxis`, `flip`, `roll`, `gather`, `maskedSelect`, `setSlice`, `setRows`, `zeroSlice`, `zeroRows`, `relposShift`, `to` (f32 target) | view VJPs scatter through the saved layout; `detach` deliberately cuts the graph |
 | Norms / softmax | `softmax` (all fused options; `.mask` must not require grad), `rmsNorm`, `rmsNormMul`, `rmsNormMulAdd`, `rmsNormMulRopeHalfPrepared`, `layerNorm` (plain + affine), `groupNorm`, `l2Normalize`, `cosineSimilarity` | |
 | Losses | `crossEntropy`, `crossEntropyExt`, `mseLoss`, `huberLoss`, `bceLoss`, `klDivLoss`, `nllLoss` | |
-| Contractions | `dot` (f32×f32: both operands; quantized/f16/bf16 RHS: lhs-only, the RHS is a frozen constant), `einsum` (f32×f32: both operands; f16/bf16 RHS: lhs-only widened constant; each gradient is itself an einsum — GEMM-lowered for every tag structure, broadcast over forward-summed axes; `DotBackward`/`ConstRhsDotBackward` delegate to the einsum records), `einsumMany` (composes binary einsum records), `matmul` (2-D GEMM `.plain`/`.trans_b`, batched bmm all kinds; rank-2 `.trans_a` is a compile error directing to `dot`), `dotTernarySte` (straight-through estimator: dx through the quantized weight, dW as-if-unquantized) | |
+| Contractions | `dot` (f32×f32: both operands; quantized RHS: lhs-only, the RHS is a frozen constant; f16/bf16 RHS: lhs always, plus an f32 dW when the RHS is a grad-requiring 16-bit variable), `einsum` (f32×f32: both operands; f16/bf16 RHS: same variable-RHS contract as dot; each gradient is itself an einsum — GEMM-lowered for every tag structure, broadcast over forward-summed axes; `DotBackward`/`ConstRhsDotBackward` delegate to the einsum records), `einsumMany` (composes binary einsum records), `matmul` (2-D GEMM `.plain`/`.trans_b`, batched bmm all kinds; rank-2 `.trans_a` is a compile error directing to `dot`), `dotTernarySte` (straight-through estimator: dx through the quantized weight, dW as-if-unquantized) | |
 | Convolutions / pooling | `conv1d`, `convTranspose1d`, `causalConv1d`, `groupedCausalConv1d`, `causalDepthwiseConv1d`, `conv2d`, `conv2dRelu`, `maxPool2d`, `avgPool2d`, `upsample2xNearest`, `channelAffine` | `conv2d` differentiates input, weight, and bias; `conv2dRelu` falls back to the composed differentiable path when any operand requires grad |
 | Position / attention | `rope` (table and on-the-fly sources, both modes), `groupedAttention` | attention grad matrix: f32 KV = full q/k/v; f16 or q8_0 KV = q-only (caches are constants); `.bias` or multi-stream KV = inference-only (`error.UnsupportedGradient`) |
 
@@ -7648,7 +7675,7 @@ All five share one surface (`Muon`/`Apollo` add the fallback registrars):
 ```zig
 pub fn init(allocator: Allocator, config: Config) Self      // SGD panics here on bad nesterov
 pub fn deinit(self: *Self) void                             // frees slots + state; params stay caller-owned
-pub fn addParam(self: *Self, t: anytype) !void              // t: pointer to an f32 autograd variable
+pub fn addParam(self: *Self, t: anytype) !void              // t: pointer to an f32/f16/bf16 autograd variable
 pub fn addParamNamed(self: *Self, t: anytype, name: []const u8) !void
 pub fn addFallbackParam(self: *Self, t: anytype) !void      // Muon/Apollo only
 pub fn addFallbackParamNamed(self: *Self, t: anytype, name: []const u8) !void
@@ -7665,7 +7692,51 @@ pub fn collectGradStates(self: *const Self, set: *GradStateSet, allocator: Alloc
 **Ownership.** `addParam` goes through `optim.Param.of`: it retains a
 refcounted view of the variable's storage plus the raw `*GradState` pointer,
 so the facade struct may move by value but the parameter must OUTLIVE the
-optimizer (the tensor owns the GradState). Errors: `error.NotAVariable`
+optimizer (the tensor owns the GradState).
+
+**16-bit params and f32 master weights.** `addParam` also accepts f16/bf16
+variables (§5.1: their gradients are f32). Each 16-bit slot allocates an
+optimizer-owned f32 MASTER copy at registration (widened once from the
+param values): every update kernel steps the master — so the step math is
+identical to the f32 path, and updates below 16-bit resolution accumulate
+instead of rounding away — and the master is narrowed back into the 16-bit
+storage after each step. Ordering contract: load parameter values BEFORE
+registering the param (or restore via `loadState`, whose v5 frames carry
+the master); a value load after registration leaves the master stale.
+
+```zig
+test "bf16 params train through f32 masters" {
+    const alloc = std.testing.allocator;
+    var ctx: fucina.ExecContext = undefined;
+    ctx.init(alloc);
+    defer ctx.deinit();
+
+    const W = fucina.Tensor(.{ .dtype = .bf16, .tags = .{ .out, .in } });
+    var w = try W.variableFromSlice(&ctx, .{ 2, 2 }, &.{ 0x3f80, 0xc000, 0x3f00, 0x4040 }); // 1, -2, 0.5, 3
+    defer w.deinit();
+    var x = try fucina.Tensor(.{ .t, .in }).fromSlice(&ctx, .{ 1, 2 }, &.{ 1, 2 });
+    defer x.deinit();
+
+    var opt = fucina.optim.AdamW.init(alloc, .{ .lr = 0.05 });
+    defer opt.deinit();
+    try opt.addParam(&w); // allocates + fills the f32 master
+
+    const scope = ctx.openExecScope();
+    var y = try x.dot(&ctx, &w, .in); // native mixed GEMM; dW arrives as f32
+    defer y.deinit();
+    var loss = try y.sumAll(&ctx);
+    defer loss.deinit();
+    try loss.backward(&ctx);
+    ctx.closeExecScope(scope);
+
+    try opt.step(&ctx); // steps the master, narrows back into w's storage
+    opt.zeroGrad();
+    try std.testing.expect(w.requiresGrad());
+    try std.testing.expect((try w.grad(&ctx)) == null); // cleared
+}
+```
+
+Errors from `addParam`: `error.NotAVariable`
 (constant or grad-free tensor), `error.NonContiguousParam`,
 `error.DuplicateParam` (same variable twice in ONE instance — registering it
 with two *different* instances is undetectable per-instance and silently
@@ -7674,8 +7745,9 @@ double-steps; `OptimizerSet.add` closes that gap, §11.3). Names passed to
 literals and model-struct fields qualify). Optimizer state (moments,
 momentum, projections) is optimizer-owned and freed by `deinit`.
 
-**`optim.Param`** is the type-erased slot handle (`value`, `grad_state`,
-`rows`, `cols`, `raw_rank`, optional `name`; `pub fn of(t) !Param`,
+**`optim.Param`** is the type-erased slot handle (`value` — an
+f32/f16/bf16 storage union, `grad_state`, `rows`, `cols`, `raw_rank`,
+optional `name`, the f32 `master` for 16-bit slots; `pub fn of(t) !Param`,
 `pub fn len(self) usize`). `rows`/`cols` describe the matrix view the
 matrix-aware optimizers use: dim 0 by the product of the remaining dims —
 Keller's conv-filter flattening `[d0, d1*d2*...]`.
@@ -7973,12 +8045,21 @@ seeds/limiter memory — serialize through each optimizer's
 `saveState`/`loadState` (and `OptimizerSet`'s, which concatenates member
 frames under `FZO3`). Frame magics:
 
-| Optimizer | all-f32 state (v3) | any bf16 state (v4) |
-|---|---|---|
-| Adam | `FZAD` | `FZD4` |
-| AdamW | `FZA3` | `FZA4` |
-| Muon | `FZM3` (fallback frames follow) | `FZM4` |
-| SGD | `FZS3` | `FZS4` |
+| Optimizer | all-f32 state (v3) | any bf16 state (v4) | any 16-bit param (v5) |
+|---|---|---|---|
+| Adam | `FZAD` | `FZD4` | `FZD5` |
+| AdamW | `FZA3` | `FZA4` | `FZA5` |
+| Muon | `FZM3` (fallback frames follow) | `FZM4` | `FZM5` |
+| SGD | `FZS3` | `FZS4` | `FZS5` |
+| APOLLO | `FZP3` (state always f32) | — | `FZP5` |
+
+v5 frames additionally persist each 16-bit slot's f32 MASTER weights
+(per-slot presence flag + raw f32 bytes): resuming from the narrowed
+values instead would re-round the master and lose the sub-16-bit update
+accumulation. `loadState` installs the checkpoint master and narrows it
+into the param storage; when a v3/v4 frame (or a v5 slot without a master)
+loads into a 16-bit slot, the master re-widens from the current param
+values instead.
 | Apollo | `FZP3` (state is always f32) | — |
 | OptimizerSet | `FZO3` wrapper | — |
 

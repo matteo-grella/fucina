@@ -153,13 +153,28 @@ test "public Tensor accepts non-f32 dtype specs for token tensors" {
     try std.testing.expectEqualSlices(u16, &.{ 1, 2, 3, 4, 5, 6 }, ids.asRawTensor().dataConst());
 }
 
-test "public non-f32 Tensor excludes autograd at comptime" {
-    inline for (.{ DType.bool, DType.u16, DType.i64, DType.bf16, DType.f16, DType.f64 }) |non_f32_dtype| {
+test "public non-float Tensor excludes autograd at comptime" {
+    inline for (.{ DType.bool, DType.u16, DType.i64 }) |non_f32_dtype| {
         const T = Tensor(.{ .dtype = non_f32_dtype, .tags = .{ .batch, .d } });
-        if (@hasDecl(T, "variable")) @compileError("non-f32 Tensor exposes variable");
-        if (@hasDecl(T, "variableFromSlice")) @compileError("non-f32 Tensor exposes variableFromSlice");
-        if (@hasDecl(T, "backward")) @compileError("non-f32 Tensor exposes backward");
-        if (@hasDecl(T, "grad")) @compileError("non-f32 Tensor exposes grad");
+        if (@hasDecl(T, "variable")) @compileError("non-float Tensor exposes variable");
+        if (@hasDecl(T, "variableFromSlice")) @compileError("non-float Tensor exposes variableFromSlice");
+        if (@hasDecl(T, "backward")) @compileError("non-float Tensor exposes backward");
+        if (@hasDecl(T, "grad")) @compileError("non-float Tensor exposes grad");
+    }
+}
+
+test "public 16-bit float Tensor exposes leaf autograd but never backward" {
+    // f16/bf16 tensors can be trainable LEAVES (f32 gradients); they are
+    // never losses, so the backward entry points stay f32-only. The f64
+    // decls exist but are comptime errors on instantiation (f64 training
+    // is unsupported — gradients are always f32).
+    inline for (.{ DType.bf16, DType.f16, DType.f64 }) |float_dtype| {
+        const T = Tensor(.{ .dtype = float_dtype, .tags = .{ .batch, .d } });
+        inline for (.{ "variable", "variableFromSlice", "grad", "gradView", "zeroGrad", "detach", "requiresGrad" }) |decl_name| {
+            if (!@hasDecl(T, decl_name)) @compileError("typed float Tensor missing " ++ decl_name);
+        }
+        if (@hasDecl(T, "backward")) @compileError("typed float Tensor exposes backward");
+        if (@hasDecl(T, "backwardWithGrad")) @compileError("typed float Tensor exposes backwardWithGrad");
     }
 }
 
@@ -2961,7 +2976,12 @@ test "tagged autograd f32 cast preserves the graph" {
     var grad = (try x.grad(&ctx)).?;
     defer grad.deinit();
     try expectCloseSlices(&.{ 1, 1, 1 }, grad.asRawTensor().dataConst(), 1e-6);
-    try std.testing.expectError(error.GradientCastUnsupported, x.to(&ctx, .f16));
+    // f16/bf16 narrows are differentiable (the mixed-precision seam);
+    // f64 stays a no-grad-only cast.
+    var narrowed = try x.to(&ctx, .f16);
+    defer narrowed.deinit();
+    try std.testing.expect(narrowed.requiresGrad());
+    try std.testing.expectError(error.GradientCastUnsupported, x.to(&ctx, .f64));
 }
 
 test "tagged autograd differentiates splitSwiGlu along the fused axis" {
@@ -10055,3 +10075,149 @@ test "public Tensor scan kernels match the serial reference under either -Dvecto
     }
 }
 
+
+test "16-bit variables receive f32 gradients through dot and einsum" {
+    @setEvalBranchQuota(1_000_000);
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var x = try Tensor(.{ .batch, .in }).fromSlice(&ctx, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
+    defer x.deinit();
+    var w32 = try Tensor(.{ .out, .in }).fromSlice(&ctx, .{ 2, 2 }, &.{ 0.5, -1.5, 2, 3 });
+    defer w32.deinit();
+
+    inline for (.{ DType.f16, DType.bf16 }) |float_dtype| {
+        var w_source = try w32.to(&ctx, float_dtype);
+        defer w_source.deinit();
+        var w = try @TypeOf(w_source).variable(&ctx, try w_source.asRawTensor().cloneView());
+        defer w.deinit();
+        try std.testing.expect(w.requiresGrad());
+
+        var y = try x.dot(&ctx, &w, .in);
+        defer y.deinit();
+        try std.testing.expect(y.requiresGrad());
+        var loss = try y.sumAll(&ctx);
+        defer loss.deinit();
+        try loss.backward(&ctx);
+
+        // gy = 1 everywhere, so dW[o, i] = sum_b x[b, i] regardless of the
+        // 16-bit forward rounding — exact in f32.
+        var wg = (try w.grad(&ctx)).?;
+        defer wg.deinit();
+        comptime std.debug.assert(@TypeOf(wg).dtype == .f32);
+        try std.testing.expectEqualSlices(f32, &.{ 4, 6, 4, 6 }, try wg.dataConst());
+
+        w.zeroGrad();
+        try std.testing.expect((try w.grad(&ctx)) == null);
+
+        var y2 = try x.einsum(&ctx, &w, .{ .batch, .out });
+        defer y2.deinit();
+        var loss2 = try y2.sumAll(&ctx);
+        defer loss2.deinit();
+        try loss2.backward(&ctx);
+        var wg2 = (try w.grad(&ctx)).?;
+        defer wg2.deinit();
+        try std.testing.expectEqualSlices(f32, &.{ 4, 6, 4, 6 }, try wg2.dataConst());
+    }
+}
+
+test "f32 master weights train through the differentiable narrow" {
+    @setEvalBranchQuota(1_000_000);
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var x = try Tensor(.{ .batch, .in }).fromSlice(&ctx, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
+    defer x.deinit();
+
+    inline for (.{ DType.f16, DType.bf16 }) |float_dtype| {
+        var w32 = try Tensor(.{ .out, .in }).variableFromSlice(&ctx, .{ 2, 2 }, &.{ 0.5, -1.5, 2, 3 });
+        defer w32.deinit();
+
+        var h = try w32.to(&ctx, float_dtype);
+        defer h.deinit();
+        try std.testing.expect(h.requiresGrad());
+
+        var y = try x.dot(&ctx, &h, .in);
+        defer y.deinit();
+        var loss = try y.sumAll(&ctx);
+        defer loss.deinit();
+        try loss.backward(&ctx);
+
+        // The cast backward is the identity on the f32 gradient.
+        var wg = (try w32.grad(&ctx)).?;
+        defer wg.deinit();
+        try std.testing.expectEqualSlices(f32, &.{ 4, 6, 4, 6 }, try wg.dataConst());
+    }
+}
+
+test "grad-carrying narrow is scope-owned inside an exec scope" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var x = try Tensor(.{ .batch, .in }).fromSlice(&ctx, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
+    defer x.deinit();
+    var w32 = try Tensor(.{ .out, .in }).variableFromSlice(&ctx, .{ 2, 2 }, &.{ 0.5, -1.5, 2, 3 });
+    defer w32.deinit();
+
+    const mark = ctx.openExecScope();
+    var h = try w32.to(&ctx, .bf16);
+    defer h.deinit(); // borrow: no-op, the scope owns value + node
+    try std.testing.expect(h.scope_owned);
+    var y = try x.dot(&ctx, &h, .in);
+    defer y.deinit();
+    var loss = try y.sumAll(&ctx);
+    defer loss.deinit();
+    try loss.backward(&ctx);
+    ctx.closeExecScope(mark);
+
+    var wg = (try w32.grad(&ctx)).?;
+    defer wg.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 4, 6, 4, 6 }, try wg.dataConst());
+}
+
+test "typed forward ops reject grad-requiring operands" {
+    @setEvalBranchQuota(1_000_000);
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const W = Tensor(.{ .dtype = .bf16, .tags = .{ .batch, .d } });
+    var w = try W.variableFromSlice(&ctx, .{ 2, 2 }, &.{
+        dtype_mod.f32ToBf16(1),
+        dtype_mod.f32ToBf16(2),
+        dtype_mod.f32ToBf16(3),
+        dtype_mod.f32ToBf16(4),
+    });
+    defer w.deinit();
+
+    try std.testing.expectError(error.UnsupportedGradient, w.gelu(&ctx));
+    try std.testing.expectError(error.UnsupportedGradient, w.add(&ctx, &w));
+    try std.testing.expectError(error.UnsupportedGradient, w.flatten(&ctx, .flat));
+    try std.testing.expectError(error.UnsupportedGradient, w.sum(&ctx, .d));
+
+    // The detached view is a constant again: the whole forward set works.
+    var frozen = try w.detach(&ctx);
+    defer frozen.deinit();
+    try std.testing.expect(!frozen.requiresGrad());
+    var activated = try frozen.gelu(&ctx);
+    defer activated.deinit();
+}

@@ -198,24 +198,30 @@ pub const ParamRegistry = struct {
 
     /// Register the trainable params (variables) into `opt` by name. Frozen
     /// entries (grad_state == null) are skipped — they are checkpoint-only.
+    /// f16/bf16 variables register like f32 ones: their gradients are f32,
+    /// and the optimizer steps them through an f32 master copy.
     pub fn addParamsTo(self: *const ParamRegistry, opt: anytype) !void {
-        const ParamFacade = struct {
-            value: RawTensor,
-            grad_state: ?*GradState,
-        };
-
         for (self.params.items) |*param| {
             const state = param.grad_state orelse continue;
-            // The autograd is f32-only, so trainable params are always f32 and
-            // the retained handle is a *RawTensor (= *TensorOf(.f32)).
-            if (param.dtype != .f32) continue;
-            const raw: *RawTensor = @ptrCast(@alignCast(param.retained));
-            var facade = ParamFacade{
-                .value = try raw.cloneView(),
-                .grad_state = state,
-            };
-            defer facade.value.deinit();
-            try opt.addParamNamed(&facade, param.name);
+            switch (param.dtype) {
+                inline .f32, .f16, .bf16 => |dt| {
+                    const Raw = tensor_mod.TensorOf(dt);
+                    const Facade = struct {
+                        value: Raw,
+                        grad_state: ?*GradState,
+                    };
+                    const raw: *Raw = @ptrCast(@alignCast(param.retained));
+                    var facade = Facade{
+                        .value = try raw.cloneView(),
+                        .grad_state = state,
+                    };
+                    defer facade.value.deinit();
+                    try opt.addParamNamed(&facade, param.name);
+                },
+                // Registration is gated on the state-dict dtypes, and only
+                // float facades carry a grad_state.
+                else => unreachable,
+            }
         }
     }
 

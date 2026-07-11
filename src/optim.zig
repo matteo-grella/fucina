@@ -68,6 +68,7 @@ const std = @import("std");
 const dtype_mod = @import("dtype.zig");
 const tensor_mod = @import("tensor.zig");
 const exec_mod = @import("exec.zig");
+const exec_convert = @import("exec/convert.zig");
 const state_dict = @import("state_dict.zig");
 const ag_core = @import("ag/core.zig");
 const parallel = @import("parallel.zig");
@@ -394,8 +395,13 @@ comptime {
 /// heap-stable GradState. `rows`/`cols` describe the matrix view used by the
 /// matrix-aware optimizers: dim 0 by the product of the remaining dims —
 /// exactly Keller's conv-filter flattening `[d0, d1*d2*...]`.
+///
+/// f16/bf16 params carry an optimizer-owned f32 MASTER copy: every update
+/// kernel steps the master (via `data()`), and `publish` narrows the master
+/// back into the 16-bit storage after the step. Gradients are f32 for every
+/// param dtype, so the step math is dtype-blind.
 pub const Param = struct {
-    value: RawTensor,
+    value: Storage,
     grad_state: *GradState,
     rows: usize,
     cols: usize,
@@ -405,15 +411,25 @@ pub const Param = struct {
     /// literals and model-struct fields qualify). Unnamed params auto-name as
     /// "param<i>" from their slot index at save time.
     name: ?[]const u8 = null,
+    /// f32 master weights for 16-bit params (optimizer-owned; empty for
+    /// f32 params, whose storage is stepped in place).
+    master: []f32 = &.{},
 
-    /// `t` must be a pointer to an f32 autograd Tensor created as a variable.
+    pub const Storage = union(enum) {
+        f32: RawTensor,
+        f16: tensor_mod.TensorOf(.f16),
+        bf16: tensor_mod.TensorOf(.bf16),
+    };
+
+    /// `t` must be a pointer to an f32/f16/bf16 autograd Tensor created as
+    /// a variable (16-bit variables hold f32 gradients).
     pub fn of(t: anytype) !Param {
         const P = @TypeOf(t);
         const info = @typeInfo(P);
-        if (info != .pointer) @compileError("optim.Param.of expects a pointer to an f32 autograd Tensor");
+        if (info != .pointer) @compileError("optim.Param.of expects a pointer to an f32/f16/bf16 autograd Tensor");
         const T = info.pointer.child;
         if (!@hasField(T, "grad_state")) {
-            @compileError("optim.Param.of requires an f32 autograd Tensor (constant/quantized tensors carry no gradients)");
+            @compileError("optim.Param.of requires an f32/f16/bf16 autograd Tensor (constant/quantized tensors carry no gradients)");
         }
         const state = t.grad_state orelse return OptimError.NotAVariable;
         if (!t.value.isContiguous()) return OptimError.NonContiguousParam;
@@ -422,8 +438,17 @@ pub const Param = struct {
         for (shape[1..]) |dim| cols *= dim;
         var view = try t.value.cloneView();
         errdefer view.deinit();
+        const ValueT = @TypeOf(t.value);
+        const storage: Storage = if (ValueT == RawTensor)
+            .{ .f32 = view }
+        else if (ValueT == tensor_mod.TensorOf(.f16))
+            .{ .f16 = view }
+        else if (ValueT == tensor_mod.TensorOf(.bf16))
+            .{ .bf16 = view }
+        else
+            @compileError("optim params must be f32, f16, or bf16 variables");
         return .{
-            .value = view,
+            .value = storage,
             .grad_state = state,
             .rows = shape[0],
             .cols = cols,
@@ -435,12 +460,49 @@ pub const Param = struct {
         return self.rows * self.cols;
     }
 
+    /// The f32 buffer the update kernels step: the param storage itself for
+    /// f32 params, the master for 16-bit params.
     fn data(self: *Param) []f32 {
-        return self.value.data();
+        return switch (self.value) {
+            .f32 => |*t| t.data(),
+            else => self.master,
+        };
     }
 
-    fn deinit(self: *Param) void {
-        self.value.deinit();
+    /// Allocate + fill the f32 master for 16-bit params (no-op for f32).
+    /// Called once at registration, after which the master is authoritative
+    /// between `publish` calls.
+    fn ensureMaster(self: *Param, allocator: Allocator) !void {
+        if (self.value == .f32 or self.master.len != 0) return;
+        self.master = try allocator.alloc(f32, self.len());
+        self.refreshMasterFromValue();
+    }
+
+    /// Re-widen the master from the current 16-bit storage (after the param
+    /// VALUES were loaded externally and no checkpoint master exists).
+    fn refreshMasterFromValue(self: *Param) void {
+        switch (self.value) {
+            .f32 => {},
+            .f16 => |*t| exec_convert.castF16ToF32(self.master, t.data()),
+            .bf16 => |*t| exec_convert.castBf16ToF32(self.master, t.data()),
+        }
+    }
+
+    /// Narrow the stepped master back into the 16-bit param storage (no-op
+    /// for f32 params).
+    fn publish(self: *Param) void {
+        switch (self.value) {
+            .f32 => {},
+            .f16 => |*t| exec_convert.castF32ToF16(t.data(), self.master),
+            .bf16 => |*t| exec_convert.castF32ToBf16(t.data(), self.master),
+        }
+    }
+
+    fn deinit(self: *Param, allocator: Allocator) void {
+        switch (self.value) {
+            inline else => |*t| t.deinit(),
+        }
+        if (self.master.len != 0) allocator.free(self.master);
         self.* = undefined;
     }
 };
@@ -499,7 +561,7 @@ pub const AdamW = struct {
         for (self.slots.items) |*slot| {
             slot.m.deinit(self.allocator);
             slot.v.deinit(self.allocator);
-            slot.param.deinit();
+            slot.param.deinit(self.allocator);
         }
         self.slots.deinit(self.allocator);
         self.* = undefined;
@@ -507,14 +569,14 @@ pub const AdamW = struct {
 
     pub fn addParam(self: *AdamW, t: anytype) !void {
         var param = try Param.of(t);
-        errdefer param.deinit();
+        errdefer param.deinit(self.allocator);
         try self.addOwnedParam(param);
     }
 
     /// `addParam` plus a checkpoint name (borrowed; see `Param.name`).
     pub fn addParamNamed(self: *AdamW, t: anytype, name: []const u8) !void {
         var param = try Param.of(t);
-        errdefer param.deinit();
+        errdefer param.deinit(self.allocator);
         param.name = name;
         try self.addOwnedParam(param);
     }
@@ -536,12 +598,15 @@ pub const AdamW = struct {
 
     fn addOwnedParam(self: *AdamW, param: Param) !void {
         if (self.containsGradState(param.grad_state)) return OptimError.DuplicateParam;
-        const n = param.len();
+        var owned = param;
+        try owned.ensureMaster(self.allocator);
+        errdefer if (owned.master.len != 0) self.allocator.free(owned.master);
+        const n = owned.len();
         const m = try StateBuf.alloc(self.allocator, self.config.state_dtype, n);
         errdefer m.deinit(self.allocator);
         const v = try StateBuf.alloc(self.allocator, self.config.second_moment_dtype, n);
         errdefer v.deinit(self.allocator);
-        try self.slots.append(self.allocator, .{ .param = param, .m = m, .v = v });
+        try self.slots.append(self.allocator, .{ .param = owned, .m = m, .v = v });
     }
 
     pub fn step(self: *AdamW, ctx: *ExecContext) !void {
@@ -550,6 +615,7 @@ pub const AdamW = struct {
             defer grad.deinit();
             slot.step += 1;
             adamwUpdate(ctx, self.config, slot.param.data(), grad.dataConst(), slot.m, slot.v, slot.step);
+            slot.param.publish();
         }
     }
 
@@ -575,10 +641,12 @@ pub const AdamW = struct {
 
     pub fn saveState(self: *const AdamW, writer: *std.Io.Writer) !void {
         try validateSlotNames(self.slots.items);
-        const version = momentSlotsFrameVersion(self.slots.items);
+        var version = momentSlotsFrameVersion(self.slots.items);
+        if (slotsCarryMasters(self.slots.items)) version = .v5;
         try writer.writeAll(switch (version) {
             .v3 => "FZA3",
             .v4 => "FZA4",
+            .v5 => "FZA5",
         });
         try writer.writeInt(u32, @intCast(self.slots.items.len), .little);
         for (self.slots.items, 0..) |*slot, i| {
@@ -587,11 +655,12 @@ pub const AdamW = struct {
             try writer.writeInt(u64, slot.step, .little);
             try writeStateSlice(writer, version, slot.m);
             try writeStateSlice(writer, version, slot.v);
+            try writeSlotMaster(writer, version, &slot.param);
         }
     }
 
     pub fn loadState(self: *AdamW, reader: *std.Io.Reader) !void {
-        const version = try expectMagicVersion(reader, "FZA3", "FZA4");
+        const version = try expectMagicVersion(reader, "FZA3", "FZA4", "FZA5");
         const count = try reader.takeInt(u32, .little);
         var matcher = try SlotMatcher.init(self.allocator, self.slots.items.len);
         defer matcher.deinit(self.allocator);
@@ -607,7 +676,9 @@ pub const AdamW = struct {
             errdefer self.allocator.free(data);
             try readStateSlice(reader, version, slot.m, data[0..m_bytes]);
             try readStateSlice(reader, version, slot.v, data[m_bytes..]);
-            try staged.append(self.allocator, .{ .idx = idx, .step = step_val, .data = data });
+            const master = try readSlotMaster(self.allocator, reader, version, &slot.param);
+            errdefer if (master.len != 0) self.allocator.free(master);
+            try staged.append(self.allocator, .{ .idx = idx, .step = step_val, .data = data, .master = master });
         }
         try matcher.requireAllFilled();
         for (staged.items) |s| {
@@ -616,6 +687,7 @@ pub const AdamW = struct {
             const m_bytes = slot.m.byteLen();
             @memcpy(slot.m.bytes(), s.data[0..m_bytes]);
             @memcpy(slot.v.bytes(), s.data[m_bytes..]);
+            commitSlotMaster(&slot.param, s.master);
         }
     }
 };
@@ -763,7 +835,7 @@ pub const Adam = struct {
         for (self.slots.items) |*slot| {
             slot.m.deinit(self.allocator);
             slot.v.deinit(self.allocator);
-            slot.param.deinit();
+            slot.param.deinit(self.allocator);
         }
         self.slots.deinit(self.allocator);
         self.* = undefined;
@@ -771,13 +843,13 @@ pub const Adam = struct {
 
     pub fn addParam(self: *Adam, t: anytype) !void {
         var param = try Param.of(t);
-        errdefer param.deinit();
+        errdefer param.deinit(self.allocator);
         try self.addOwnedParam(param);
     }
 
     pub fn addParamNamed(self: *Adam, t: anytype, name: []const u8) !void {
         var param = try Param.of(t);
-        errdefer param.deinit();
+        errdefer param.deinit(self.allocator);
         param.name = name;
         try self.addOwnedParam(param);
     }
@@ -796,12 +868,15 @@ pub const Adam = struct {
 
     fn addOwnedParam(self: *Adam, param: Param) !void {
         if (self.containsGradState(param.grad_state)) return OptimError.DuplicateParam;
-        const n = param.len();
+        var owned = param;
+        try owned.ensureMaster(self.allocator);
+        errdefer if (owned.master.len != 0) self.allocator.free(owned.master);
+        const n = owned.len();
         const m = try StateBuf.alloc(self.allocator, self.config.state_dtype, n);
         errdefer m.deinit(self.allocator);
         const v = try StateBuf.alloc(self.allocator, self.config.second_moment_dtype, n);
         errdefer v.deinit(self.allocator);
-        try self.slots.append(self.allocator, .{ .param = param, .m = m, .v = v });
+        try self.slots.append(self.allocator, .{ .param = owned, .m = m, .v = v });
     }
 
     pub fn step(self: *Adam, ctx: *ExecContext) !void {
@@ -810,6 +885,7 @@ pub const Adam = struct {
             defer grad.deinit();
             slot.step += 1;
             adamUpdate(ctx, self.config, slot.param.data(), grad.dataConst(), slot.m, slot.v, slot.step);
+            slot.param.publish();
         }
     }
 
@@ -833,10 +909,12 @@ pub const Adam = struct {
 
     pub fn saveState(self: *const Adam, writer: *std.Io.Writer) !void {
         try validateSlotNames(self.slots.items);
-        const version = momentSlotsFrameVersion(self.slots.items);
+        var version = momentSlotsFrameVersion(self.slots.items);
+        if (slotsCarryMasters(self.slots.items)) version = .v5;
         try writer.writeAll(switch (version) {
             .v3 => "FZAD",
             .v4 => "FZD4",
+            .v5 => "FZD5",
         });
         try writer.writeInt(u32, @intCast(self.slots.items.len), .little);
         for (self.slots.items, 0..) |*slot, i| {
@@ -845,11 +923,12 @@ pub const Adam = struct {
             try writer.writeInt(u64, slot.step, .little);
             try writeStateSlice(writer, version, slot.m);
             try writeStateSlice(writer, version, slot.v);
+            try writeSlotMaster(writer, version, &slot.param);
         }
     }
 
     pub fn loadState(self: *Adam, reader: *std.Io.Reader) !void {
-        const version = try expectMagicVersion(reader, "FZAD", "FZD4");
+        const version = try expectMagicVersion(reader, "FZAD", "FZD4", "FZD5");
         const count = try reader.takeInt(u32, .little);
         var matcher = try SlotMatcher.init(self.allocator, self.slots.items.len);
         defer matcher.deinit(self.allocator);
@@ -865,7 +944,9 @@ pub const Adam = struct {
             errdefer self.allocator.free(data);
             try readStateSlice(reader, version, slot.m, data[0..m_bytes]);
             try readStateSlice(reader, version, slot.v, data[m_bytes..]);
-            try staged.append(self.allocator, .{ .idx = idx, .step = step_val, .data = data });
+            const master = try readSlotMaster(self.allocator, reader, version, &slot.param);
+            errdefer if (master.len != 0) self.allocator.free(master);
+            try staged.append(self.allocator, .{ .idx = idx, .step = step_val, .data = data, .master = master });
         }
         try matcher.requireAllFilled();
         for (staged.items) |s| {
@@ -874,6 +955,7 @@ pub const Adam = struct {
             const m_bytes = slot.m.byteLen();
             @memcpy(slot.m.bytes(), s.data[0..m_bytes]);
             @memcpy(slot.v.bytes(), s.data[m_bytes..]);
+            commitSlotMaster(&slot.param, s.master);
         }
     }
 };
@@ -1029,7 +1111,7 @@ pub const Muon = struct {
     pub fn deinit(self: *Muon) void {
         for (self.slots.items) |*slot| {
             slot.momentum.deinit(self.allocator);
-            slot.param.deinit();
+            slot.param.deinit(self.allocator);
         }
         self.slots.deinit(self.allocator);
         self.fallback.deinit();
@@ -1054,14 +1136,14 @@ pub const Muon = struct {
     /// get Muon; lower-rank params route to the AdamW fallback.
     pub fn addParam(self: *Muon, t: anytype) !void {
         var param = try Param.of(t);
-        errdefer param.deinit();
+        errdefer param.deinit(self.allocator);
         try self.addOwnedParam(param);
     }
 
     /// `addParam` plus a checkpoint name (borrowed; see `Param.name`).
     pub fn addParamNamed(self: *Muon, t: anytype, name: []const u8) !void {
         var param = try Param.of(t);
-        errdefer param.deinit();
+        errdefer param.deinit(self.allocator);
         param.name = name;
         try self.addOwnedParam(param);
     }
@@ -1072,15 +1154,18 @@ pub const Muon = struct {
             try self.fallback.addOwnedParam(param);
             return;
         }
-        const momentum = try StateBuf.alloc(self.allocator, self.config.state_dtype, param.len());
+        var owned = param;
+        try owned.ensureMaster(self.allocator);
+        errdefer if (owned.master.len != 0) self.allocator.free(owned.master);
+        const momentum = try StateBuf.alloc(self.allocator, self.config.state_dtype, owned.len());
         errdefer momentum.deinit(self.allocator);
-        try self.slots.append(self.allocator, .{ .param = param, .momentum = momentum });
+        try self.slots.append(self.allocator, .{ .param = owned, .momentum = momentum });
     }
 
     /// Force a param onto the AdamW fallback (embeddings, lm/classifier heads).
     pub fn addFallbackParam(self: *Muon, t: anytype) !void {
         var param = try Param.of(t);
-        errdefer param.deinit();
+        errdefer param.deinit(self.allocator);
         if (self.containsGradState(param.grad_state)) return OptimError.DuplicateParam;
         try self.fallback.addOwnedParam(param);
     }
@@ -1088,7 +1173,7 @@ pub const Muon = struct {
     /// `addFallbackParam` plus a checkpoint name (borrowed; see `Param.name`).
     pub fn addFallbackParamNamed(self: *Muon, t: anytype, name: []const u8) !void {
         var param = try Param.of(t);
-        errdefer param.deinit();
+        errdefer param.deinit(self.allocator);
         param.name = name;
         if (self.containsGradState(param.grad_state)) return OptimError.DuplicateParam;
         try self.fallback.addOwnedParam(param);
@@ -1099,6 +1184,7 @@ pub const Muon = struct {
             var grad = (try takeGrad(ctx, &slot.param)) orelse continue;
             defer grad.deinit();
             try self.muonUpdate(ctx, slot, grad.dataConst());
+            slot.param.publish();
         }
         try self.fallback.step(ctx);
     }
@@ -1235,9 +1321,11 @@ pub const Muon = struct {
         for (self.slots.items) |*slot| {
             if (slot.momentum != .f32) version = .v4;
         }
+        if (slotsCarryMasters(self.slots.items)) version = .v5;
         try writer.writeAll(switch (version) {
             .v3 => "FZM3",
             .v4 => "FZM4",
+            .v5 => "FZM5",
         });
         try writer.writeInt(u8, @intFromEnum(self.config.scale), .little);
         try writer.writeInt(u8, @intFromBool(self.config.nesterov), .little);
@@ -1247,12 +1335,13 @@ pub const Muon = struct {
             try writeSlotName(writer, &slot.param, i);
             try writeSlotDims(writer, &slot.param);
             try writeStateSlice(writer, version, slot.momentum);
+            try writeSlotMaster(writer, version, &slot.param);
         }
         try self.fallback.saveState(writer);
     }
 
     pub fn loadState(self: *Muon, reader: *std.Io.Reader) !void {
-        const version = try expectMagicVersion(reader, "FZM3", "FZM4");
+        const version = try expectMagicVersion(reader, "FZM3", "FZM4", "FZM5");
         if (try reader.takeInt(u8, .little) != @intFromEnum(self.config.scale)) return OptimError.CheckpointConfigMismatch;
         if (try reader.takeInt(u8, .little) != @intFromBool(self.config.nesterov)) return OptimError.CheckpointConfigMismatch;
         if (try reader.takeInt(u32, .little) != self.config.ns_steps) return OptimError.CheckpointConfigMismatch;
@@ -1268,7 +1357,9 @@ pub const Muon = struct {
             const data = try self.allocator.alloc(u8, slot.momentum.byteLen());
             errdefer self.allocator.free(data);
             try readStateSlice(reader, version, slot.momentum, data);
-            try staged.append(self.allocator, .{ .idx = idx, .data = data });
+            const master = try readSlotMaster(self.allocator, reader, version, &slot.param);
+            errdefer if (master.len != 0) self.allocator.free(master);
+            try staged.append(self.allocator, .{ .idx = idx, .data = data, .master = master });
         }
         try matcher.requireAllFilled();
         // The fallback's own slot data follows in the stream and loads
@@ -1277,6 +1368,7 @@ pub const Muon = struct {
         try self.fallback.loadState(reader);
         for (staged.items) |s| {
             @memcpy(self.slots.items[s.idx].momentum.bytes(), s.data);
+            commitSlotMaster(&self.slots.items[s.idx].param, s.master);
         }
     }
 };
@@ -1407,13 +1499,13 @@ pub const Apollo = struct {
             self.allocator.free(slot.scaling);
             self.allocator.free(slot.norms);
             if (slot.proj) |*proj| proj.deinit();
-            slot.param.deinit();
+            slot.param.deinit(self.allocator);
         }
         self.slots.deinit(self.allocator);
         for (self.fallback_slots.items) |*slot| {
             self.allocator.free(slot.m);
             self.allocator.free(slot.v);
-            slot.param.deinit();
+            slot.param.deinit(self.allocator);
         }
         self.fallback_slots.deinit(self.allocator);
         self.* = undefined;
@@ -1440,14 +1532,14 @@ pub const Apollo = struct {
     /// AdamW fallback (the reference restricts the rank path to Linear weights).
     pub fn addParam(self: *Apollo, t: anytype) !void {
         var param = try Param.of(t);
-        errdefer param.deinit();
+        errdefer param.deinit(self.allocator);
         try self.addOwnedParam(param);
     }
 
     /// `addParam` plus a checkpoint name (borrowed; see `Param.name`).
     pub fn addParamNamed(self: *Apollo, t: anytype, name: []const u8) !void {
         var param = try Param.of(t);
-        errdefer param.deinit();
+        errdefer param.deinit(self.allocator);
         param.name = name;
         try self.addOwnedParam(param);
     }
@@ -1458,7 +1550,10 @@ pub const Apollo = struct {
             try self.addOwnedFallback(param);
             return;
         }
-        const compressed = compressedLen(&param, self.config.rank);
+        var owned = param;
+        try owned.ensureMaster(self.allocator);
+        errdefer if (owned.master.len != 0) self.allocator.free(owned.master);
+        const compressed = compressedLen(&owned, self.config.rank);
         const m = try self.allocator.alloc(f32, compressed);
         errdefer self.allocator.free(m);
         const v = try self.allocator.alloc(f32, compressed);
@@ -1478,13 +1573,13 @@ pub const Apollo = struct {
         // seed, i.i.d. N(0, 1/rank) entries" is semantically required, and the
         // torch RNG stream is not reproducible here anyway.
         const seed = self.config.seed +% (self.slots.items.len + 1);
-        try self.slots.append(self.allocator, .{ .param = param, .m = m, .v = v, .scaling = scaling, .norms = norms, .seed = seed });
+        try self.slots.append(self.allocator, .{ .param = owned, .m = m, .v = v, .scaling = scaling, .norms = norms, .seed = seed });
     }
 
     /// Force a param onto the AdamW fallback path (e.g. embeddings, heads).
     pub fn addFallbackParam(self: *Apollo, t: anytype) !void {
         var param = try Param.of(t);
-        errdefer param.deinit();
+        errdefer param.deinit(self.allocator);
         if (self.containsGradState(param.grad_state)) return OptimError.DuplicateParam;
         try self.addOwnedFallback(param);
     }
@@ -1492,21 +1587,24 @@ pub const Apollo = struct {
     /// `addFallbackParam` plus a checkpoint name (borrowed; see `Param.name`).
     pub fn addFallbackParamNamed(self: *Apollo, t: anytype, name: []const u8) !void {
         var param = try Param.of(t);
-        errdefer param.deinit();
+        errdefer param.deinit(self.allocator);
         param.name = name;
         if (self.containsGradState(param.grad_state)) return OptimError.DuplicateParam;
         try self.addOwnedFallback(param);
     }
 
     fn addOwnedFallback(self: *Apollo, param: Param) !void {
-        const n = param.len();
+        var owned = param;
+        try owned.ensureMaster(self.allocator);
+        errdefer if (owned.master.len != 0) self.allocator.free(owned.master);
+        const n = owned.len();
         const m = try self.allocator.alloc(f32, n);
         errdefer self.allocator.free(m);
         const v = try self.allocator.alloc(f32, n);
         errdefer self.allocator.free(v);
         @memset(m, 0);
         @memset(v, 0);
-        try self.fallback_slots.append(self.allocator, .{ .param = param, .m = m, .v = v });
+        try self.fallback_slots.append(self.allocator, .{ .param = owned, .m = m, .v = v });
     }
 
     fn compressedLen(param: *const Param, rank: usize) usize {
@@ -1520,12 +1618,14 @@ pub const Apollo = struct {
             var grad = (try takeGrad(ctx, &slot.param)) orelse continue;
             defer grad.deinit();
             try self.apolloUpdate(ctx, slot, &grad);
+            slot.param.publish();
         }
         for (self.fallback_slots.items) |*slot| {
             var grad = (try takeGrad(ctx, &slot.param)) orelse continue;
             defer grad.deinit();
             slot.step += 1;
             hfAdamwUpdate(ctx, self.config, slot.param.data(), grad.dataConst(), slot.m, slot.v, slot.step);
+            slot.param.publish();
         }
     }
 
@@ -1766,7 +1866,11 @@ pub const Apollo = struct {
     pub fn saveState(self: *const Apollo, writer: *std.Io.Writer) !void {
         try validateSlotNames(self.slots.items);
         try validateSlotNames(self.fallback_slots.items);
-        try writer.writeAll("FZP3");
+        const version: FrameVersion = if (slotsCarryMasters(self.slots.items) or slotsCarryMasters(self.fallback_slots.items)) .v5 else .v3;
+        try writer.writeAll(switch (version) {
+            .v5 => "FZP5",
+            else => "FZP3",
+        });
         try writer.writeInt(u64, @intCast(self.config.rank), .little);
         try writer.writeInt(u64, self.config.update_proj_gap, .little);
         try writer.writeInt(u32, @bitCast(self.config.scale), .little);
@@ -1783,6 +1887,7 @@ pub const Apollo = struct {
             try writer.writeInt(u32, @bitCast(slot.prev_norm), .little);
             try writeF32Slice(writer, slot.m);
             try writeF32Slice(writer, slot.v);
+            try writeSlotMaster(writer, version, &slot.param);
         }
         try writer.writeInt(u32, @intCast(self.fallback_slots.items.len), .little);
         for (self.fallback_slots.items, 0..) |*slot, i| {
@@ -1791,11 +1896,19 @@ pub const Apollo = struct {
             try writer.writeInt(u64, slot.step, .little);
             try writeF32Slice(writer, slot.m);
             try writeF32Slice(writer, slot.v);
+            try writeSlotMaster(writer, version, &slot.param);
         }
     }
 
     pub fn loadState(self: *Apollo, reader: *std.Io.Reader) !void {
-        try expectMagic(reader, "FZP3");
+        var magic: [4]u8 = undefined;
+        try reader.readSliceAll(&magic);
+        const version: FrameVersion = if (std.mem.eql(u8, &magic, "FZP5"))
+            .v5
+        else if (std.mem.eql(u8, &magic, "FZP3"))
+            .v3
+        else
+            return OptimError.CheckpointMagicMismatch;
         if (try reader.takeInt(u64, .little) != self.config.rank) return OptimError.CheckpointConfigMismatch;
         if (try reader.takeInt(u64, .little) != self.config.update_proj_gap) return OptimError.CheckpointConfigMismatch;
         if (try reader.takeInt(u32, .little) != @as(u32, @bitCast(self.config.scale))) return OptimError.CheckpointConfigMismatch;
@@ -1818,7 +1931,9 @@ pub const Apollo = struct {
             const data = try self.allocator.alloc(u8, 4 * (slot.m.len + slot.v.len));
             errdefer self.allocator.free(data);
             try reader.readSliceAll(data);
-            try staged_main.append(self.allocator, .{ .idx = idx, .step = step_val, .seed = seed, .prev_norm = prev_norm, .data = data });
+            const master = try readSlotMaster(self.allocator, reader, version, &slot.param);
+            errdefer if (master.len != 0) self.allocator.free(master);
+            try staged_main.append(self.allocator, .{ .idx = idx, .step = step_val, .seed = seed, .prev_norm = prev_norm, .data = data, .master = master });
         }
         try main_matcher.requireAllFilled();
 
@@ -1835,7 +1950,9 @@ pub const Apollo = struct {
             const data = try self.allocator.alloc(u8, 4 * (slot.m.len + slot.v.len));
             errdefer self.allocator.free(data);
             try reader.readSliceAll(data);
-            try staged_fb.append(self.allocator, .{ .idx = idx, .step = step_val, .data = data });
+            const master = try readSlotMaster(self.allocator, reader, version, &slot.param);
+            errdefer if (master.len != 0) self.allocator.free(master);
+            try staged_fb.append(self.allocator, .{ .idx = idx, .step = step_val, .data = data, .master = master });
         }
         try fb_matcher.requireAllFilled();
 
@@ -1847,6 +1964,7 @@ pub const Apollo = struct {
             slot.prev_norm = s.prev_norm;
             @memcpy(std.mem.sliceAsBytes(slot.m), s.data[0 .. 4 * slot.m.len]);
             @memcpy(std.mem.sliceAsBytes(slot.v), s.data[4 * slot.m.len ..]);
+            commitSlotMaster(&slot.param, s.master);
             // The projection is a pure function of (seed, step/gap); force
             // regeneration on the next step.
             slot.proj_chunk = std.math.maxInt(u64);
@@ -1856,6 +1974,7 @@ pub const Apollo = struct {
             slot.step = s.step;
             @memcpy(std.mem.sliceAsBytes(slot.m), s.data[0 .. 4 * slot.m.len]);
             @memcpy(std.mem.sliceAsBytes(slot.v), s.data[4 * slot.m.len ..]);
+            commitSlotMaster(&slot.param, s.master);
         }
     }
 };
@@ -1959,7 +2078,7 @@ pub const SGD = struct {
     pub fn deinit(self: *SGD) void {
         for (self.slots.items) |*slot| {
             slot.buf.deinit(self.allocator);
-            slot.param.deinit();
+            slot.param.deinit(self.allocator);
         }
         self.slots.deinit(self.allocator);
         self.* = undefined;
@@ -1979,26 +2098,29 @@ pub const SGD = struct {
 
     pub fn addParam(self: *SGD, t: anytype) !void {
         var param = try Param.of(t);
-        errdefer param.deinit();
+        errdefer param.deinit(self.allocator);
         try self.addOwnedParam(param);
     }
 
     /// `addParam` plus a checkpoint name (borrowed; see `Param.name`).
     pub fn addParamNamed(self: *SGD, t: anytype, name: []const u8) !void {
         var param = try Param.of(t);
-        errdefer param.deinit();
+        errdefer param.deinit(self.allocator);
         param.name = name;
         try self.addOwnedParam(param);
     }
 
     fn addOwnedParam(self: *SGD, param: Param) !void {
         if (self.containsGradState(param.grad_state)) return OptimError.DuplicateParam;
+        var owned = param;
+        try owned.ensureMaster(self.allocator);
+        errdefer if (owned.master.len != 0) self.allocator.free(owned.master);
         const buf: StateBuf = if (self.config.momentum != 0)
-            try StateBuf.alloc(self.allocator, self.config.state_dtype, param.len())
+            try StateBuf.alloc(self.allocator, self.config.state_dtype, owned.len())
         else
             .{ .f32 = &.{} };
         errdefer buf.deinit(self.allocator);
-        try self.slots.append(self.allocator, .{ .param = param, .buf = buf });
+        try self.slots.append(self.allocator, .{ .param = owned, .buf = buf });
     }
 
     pub fn step(self: *SGD, ctx: *ExecContext) !void {
@@ -2007,6 +2129,7 @@ pub const SGD = struct {
             defer grad.deinit();
             slot.step += 1;
             sgdUpdate(ctx, self.config, slot.param.data(), grad.dataConst(), slot.buf, slot.step == 1);
+            slot.param.publish();
         }
     }
 
@@ -2034,9 +2157,11 @@ pub const SGD = struct {
         for (self.slots.items) |*slot| {
             if (slot.buf != .f32) version = .v4;
         }
+        if (slotsCarryMasters(self.slots.items)) version = .v5;
         try writer.writeAll(switch (version) {
             .v3 => "FZS3",
             .v4 => "FZS4",
+            .v5 => "FZS5",
         });
         try writer.writeInt(u32, @bitCast(self.config.momentum), .little);
         try writer.writeInt(u32, @bitCast(self.config.dampening), .little);
@@ -2047,11 +2172,12 @@ pub const SGD = struct {
             try writeSlotDims(writer, &slot.param);
             try writer.writeInt(u64, slot.step, .little);
             try writeStateSlice(writer, version, slot.buf);
+            try writeSlotMaster(writer, version, &slot.param);
         }
     }
 
     pub fn loadState(self: *SGD, reader: *std.Io.Reader) !void {
-        const version = try expectMagicVersion(reader, "FZS3", "FZS4");
+        const version = try expectMagicVersion(reader, "FZS3", "FZS4", "FZS5");
         if (try reader.takeInt(u32, .little) != @as(u32, @bitCast(self.config.momentum))) return OptimError.CheckpointConfigMismatch;
         if (try reader.takeInt(u32, .little) != @as(u32, @bitCast(self.config.dampening))) return OptimError.CheckpointConfigMismatch;
         if (try reader.takeInt(u8, .little) != @intFromBool(self.config.nesterov)) return OptimError.CheckpointConfigMismatch;
@@ -2068,13 +2194,16 @@ pub const SGD = struct {
             const data = try self.allocator.alloc(u8, slot.buf.byteLen());
             errdefer self.allocator.free(data);
             try readStateSlice(reader, version, slot.buf, data);
-            try staged.append(self.allocator, .{ .idx = idx, .step = step_val, .data = data });
+            const master = try readSlotMaster(self.allocator, reader, version, &slot.param);
+            errdefer if (master.len != 0) self.allocator.free(master);
+            try staged.append(self.allocator, .{ .idx = idx, .step = step_val, .data = data, .master = master });
         }
         try matcher.requireAllFilled();
         for (staged.items) |s| {
             const slot = &self.slots.items[s.idx];
             slot.step = s.step;
             @memcpy(slot.buf.bytes(), s.data);
+            commitSlotMaster(&slot.param, s.master);
         }
     }
 };
@@ -2482,10 +2611,15 @@ const StagedSlot = struct {
     step: u64 = 0,
     seed: u64 = 0,
     prev_norm: f32 = 0,
+    /// Staged v5 f32 master weights (empty when the frame carried none).
+    master: []f32 = &.{},
 };
 
 fn freeStaged(allocator: Allocator, staged: *std.ArrayList(StagedSlot)) void {
-    for (staged.items) |s| allocator.free(s.data);
+    for (staged.items) |s| {
+        allocator.free(s.data);
+        if (s.master.len != 0) allocator.free(s.master);
+    }
     staged.deinit(allocator);
 }
 
@@ -2494,7 +2628,7 @@ fn freeStaged(allocator: Allocator, staged: *std.ArrayList(StagedSlot)) void {
 /// one u8 `StateDType` tag. Writers emit v3 whenever every buffer is f32 (so
 /// the bytes stay identical to pre-bf16 builds) and v4 otherwise; readers
 /// accept both and require the stored dtype to match the live buffer's.
-const FrameVersion = enum { v3, v4 };
+const FrameVersion = enum { v3, v4, v5 };
 
 /// The frame version for the common `{ m, v }` moment-pair slot layout
 /// (Adam/AdamW): v3 iff every buffer of every slot is f32.
@@ -2506,12 +2640,56 @@ fn momentSlotsFrameVersion(slots: anytype) FrameVersion {
 }
 
 /// Read a 4-byte magic and map it to the frame version it names.
-fn expectMagicVersion(reader: *std.Io.Reader, comptime v3_magic: *const [4]u8, comptime v4_magic: *const [4]u8) !FrameVersion {
+fn expectMagicVersion(reader: *std.Io.Reader, comptime v3_magic: *const [4]u8, comptime v4_magic: *const [4]u8, comptime v5_magic: *const [4]u8) !FrameVersion {
     var buf: [4]u8 = undefined;
     try reader.readSliceAll(&buf);
     if (std.mem.eql(u8, &buf, v3_magic)) return .v3;
     if (std.mem.eql(u8, &buf, v4_magic)) return .v4;
+    if (std.mem.eql(u8, &buf, v5_magic)) return .v5;
     return OptimError.CheckpointMagicMismatch;
+}
+
+/// v5 frames exist to persist f32 MASTER weights for 16-bit params: resuming
+/// from the narrowed values instead would re-round the master and lose the
+/// sub-bf16 update accumulation. Frames without 16-bit slots keep emitting
+/// v3/v4, byte-identical to before.
+fn slotsCarryMasters(slots: anytype) bool {
+    for (slots) |*slot| {
+        if (slot.param.master.len != 0) return true;
+    }
+    return false;
+}
+
+/// Per-slot master record (v5 frames only): u8 presence flag + raw f32 bytes.
+fn writeSlotMaster(writer: *std.Io.Writer, version: FrameVersion, param: *const Param) !void {
+    if (version != .v5) return;
+    const has: u8 = @intFromBool(param.master.len != 0);
+    try writer.writeInt(u8, has, .little);
+    if (has == 1) try writeF32Slice(writer, param.master);
+}
+
+fn readSlotMaster(allocator: Allocator, reader: *std.Io.Reader, version: FrameVersion, param: *const Param) ![]f32 {
+    if (version != .v5) return &.{};
+    if (try reader.takeInt(u8, .little) == 0) return &.{};
+    if (param.master.len == 0) return OptimError.CheckpointDtypeMismatch;
+    const buf = try allocator.alloc(f32, param.master.len);
+    errdefer allocator.free(buf);
+    try readF32Slice(reader, buf);
+    return buf;
+}
+
+/// Commit arm for a 16-bit slot's master: install the checkpoint master and
+/// narrow it into the param storage, or — when the frame carried none — re-
+/// widen from the (possibly just-loaded) param values so the master never
+/// goes stale. No-op for f32 params.
+fn commitSlotMaster(param: *Param, staged_master: []const f32) void {
+    if (param.master.len == 0) return;
+    if (staged_master.len != 0) {
+        @memcpy(param.master, staged_master);
+        param.publish();
+    } else {
+        param.refreshMasterFromValue();
+    }
 }
 
 /// Write one state-buffer record: v3 = raw f32 bytes (the caller guarantees
@@ -2520,7 +2698,7 @@ fn expectMagicVersion(reader: *std.Io.Reader, comptime v3_magic: *const [4]u8, c
 fn writeStateSlice(writer: *std.Io.Writer, version: FrameVersion, buf: StateBuf) !void {
     switch (version) {
         .v3 => std.debug.assert(buf == .f32),
-        .v4 => try writer.writeInt(u8, @intFromEnum(@as(StateDType, buf)), .little),
+        .v4, .v5 => try writer.writeInt(u8, @intFromEnum(@as(StateDType, buf)), .little),
     }
     try writer.writeAll(buf.bytesConst());
 }
@@ -2532,7 +2710,7 @@ fn writeStateSlice(writer: *std.Io.Writer, version: FrameVersion, buf: StateBuf)
 fn readStateSlice(reader: *std.Io.Reader, version: FrameVersion, buf: StateBuf, dest: []u8) !void {
     const stored: StateDType = switch (version) {
         .v3 => .f32,
-        .v4 => std.enums.fromInt(StateDType, try reader.takeInt(u8, .little)) orelse
+        .v4, .v5 => std.enums.fromInt(StateDType, try reader.takeInt(u8, .little)) orelse
             return OptimError.CheckpointUnsupportedDtype,
     };
     if (stored != @as(StateDType, buf)) return OptimError.CheckpointDtypeMismatch;
