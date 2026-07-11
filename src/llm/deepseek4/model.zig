@@ -969,7 +969,487 @@ fn hcPost(
     defer next.deinit();
     @memcpy(streams, try next.dataConst());
 }
-\ntest {
+
+// =========================================================================
+// Sublayer blocks + the step orchestration.
+// =========================================================================
+
+fn embedTag(ctx: *ExecContext, host: []const f32) !fucina.Tensor(.{.embed}) {
+    return fucina.Tensor(.{.embed}).fromSlice(ctx, .{host.len}, host);
+}
+
+fn rowTensor(ctx: *ExecContext, host: []const f32, width: usize) !fucina.Tensor(.{ .seq, .embed }) {
+    return fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ host.len / width, width }, host);
+}
+
+/// The reference's streaming compressor for one token: project, add the
+/// window-slot APE, update the rolling frontier, and emit a pooled row on
+/// ratio boundaries (rope'd at the compressed position and quantized
+/// through the family grid). Returns true when a row was appended.
+fn compressorStep(
+    self: *const Model,
+    ctx: *ExecContext,
+    comp: *const Compressor,
+    attn_norm_t: *const fucina.Tensor(.{ .seq, .embed }),
+    state_kv: []f32,
+    state_score: []f32,
+    out_rows: *std.ArrayList(f32),
+    head_dim: usize,
+    layer_compressed: bool,
+    pos: usize,
+) !bool {
+    const allocator = ctx.allocator;
+    const ratio = comp.ratio;
+    const width = comp.width;
+    const pos_mod = pos % ratio;
+    const row: usize = if (ratio == 4) ratio + pos_mod else pos_mod;
+    const should_compress = ((pos + 1) % ratio) == 0;
+
+    var kv_t = try comp.kv.linearSeq(ctx, attn_norm_t, .embed, .attn);
+    defer kv_t.deinit();
+    var sc_t = try comp.gate.linearSeq(ctx, attn_norm_t, .embed, .attn);
+    defer sc_t.deinit();
+    const kv_cur = try kv_t.dataConst();
+    const sc_cur = try sc_t.dataConst();
+
+    const kv_dst = state_kv[row * width ..][0..width];
+    const sc_dst = state_score[row * width ..][0..width];
+    @memcpy(kv_dst, kv_cur);
+    const ape_row = comp.ape[pos_mod * width ..][0..width];
+    for (sc_dst, sc_cur, ape_row) |*d, v, a| d.* = v + a;
+
+    if (!should_compress) return false;
+
+    // Score-gated per-dim softmax pooling over the window (ratio-4 pools the
+    // overlapped prev/cur halves; see the port notes for the addressing).
+    const pooled = try allocator.alloc(f32, head_dim);
+    defer allocator.free(pooled);
+    for (0..head_dim) |j| {
+        var max_score = -std.math.inf(f32);
+        if (ratio == 4) {
+            for (0..ratio) |r| {
+                max_score = @max(max_score, state_score[r * width + j]);
+                max_score = @max(max_score, state_score[(ratio + r) * width + head_dim + j]);
+            }
+        } else {
+            for (0..ratio) |r| max_score = @max(max_score, state_score[r * width + j]);
+        }
+        if (max_score <= -std.math.inf(f32) * 0.5) {
+            pooled[j] = 0;
+            continue;
+        }
+        var denom: f32 = 0;
+        var sum: f32 = 0;
+        if (ratio == 4) {
+            for (0..ratio) |r| {
+                const wp = @exp(state_score[r * width + j] - max_score);
+                const wc = @exp(state_score[(ratio + r) * width + head_dim + j] - max_score);
+                denom += wp + wc;
+                sum += wp * state_kv[r * width + j];
+                sum += wc * state_kv[(ratio + r) * width + head_dim + j];
+            }
+        } else {
+            for (0..ratio) |r| {
+                const w = @exp(state_score[r * width + j] - max_score);
+                denom += w;
+                sum += w * state_kv[r * width + j];
+            }
+        }
+        pooled[j] = if (denom > 0) sum / denom else 0;
+    }
+
+    // rms-norm with the compressor weight, rope at the compressed position,
+    // then the family quantization round-trip.
+    const out_row = try out_rows.addManyAsSlice(ctx.allocator, head_dim);
+    rmsNormInto(out_row, pooled, comp.norm, self.config.rms_norm_eps);
+    const comp_pos = pos + 1 - ratio;
+    self.rope.applyTail(out_row, comp_pos, layer_compressed, false);
+    if (head_dim == self.config.head_dim) {
+        fp8KvQuantRow(out_row, self.config.rope_dims);
+    } else {
+        indexerQatRow(out_row);
+    }
+
+    if (ratio == 4) {
+        // Shift: cur half becomes prev, then mirrored back (reference-exact).
+        for (0..ratio) |r| {
+            @memcpy(state_kv[r * width ..][0..width], state_kv[(ratio + r) * width ..][0..width]);
+            @memcpy(state_score[r * width ..][0..width], state_score[(ratio + r) * width ..][0..width]);
+        }
+        for (0..ratio) |r| {
+            @memcpy(state_kv[(ratio + r) * width ..][0..width], state_kv[r * width ..][0..width]);
+            @memcpy(state_score[(ratio + r) * width ..][0..width], state_score[r * width ..][0..width]);
+        }
+    }
+    return true;
+}
+
+pub const Session = struct {
+    cache: Cache,
+    scratch: StepScratch,
+
+    pub fn init(model: *const Model, capacity: usize) !Session {
+        var cache = try model.initCache(capacity);
+        errdefer cache.deinit();
+        const scratch = try StepScratch.init(model.allocator, model.config);
+        return .{ .cache = cache, .scratch = scratch };
+    }
+
+    pub fn deinit(self: *Session, model: *const Model) void {
+        self.scratch.deinit(model.allocator);
+        self.cache.deinit();
+        self.* = undefined;
+    }
+};
+
+pub fn step(self: *Model, ctx: *ExecContext, session: *Session, token: usize) ![]f32 {
+    const cfg = self.config;
+    const allocator = ctx.allocator;
+    const cache = &session.cache;
+    if (cache.len >= cache.capacity or cache.len >= self.rope.capacity) return Error.KvCacheOverflow;
+    const pos = cache.len;
+    const streams = session.scratch.streams;
+
+    // All HC streams start as the token embedding.
+    {
+        var ids = [_]usize{token};
+        var emb = try self.token_embedding.getRowsAs(ctx, &ids, .embed);
+        defer emb.deinit();
+        const row = try emb.dataConst();
+        for (0..cfg.n_hc) |h| @memcpy(streams[h * cfg.hidden_size ..][0..cfg.hidden_size], row);
+    }
+
+    for (self.layers, 0..) |*layer, layer_i| {
+        // ---- attention sublayer ----
+        {
+            const pre = try hcPre(ctx, cfg, &layer.hc_attn, streams);
+            defer allocator.free(pre.sub_in);
+            const block_out = try attnBlock(self, ctx, cache, layer, layer_i, pre.sub_in, pos, token);
+            defer allocator.free(block_out);
+            try hcPost(ctx, cfg, &pre.split, block_out, streams);
+        }
+        // ---- FFN sublayer ----
+        {
+            const pre = try hcPre(ctx, cfg, &layer.hc_ffn, streams);
+            defer allocator.free(pre.sub_in);
+            const block_out = try moeBlock(self, ctx, layer, pre.sub_in, token);
+            defer allocator.free(block_out);
+            try hcPost(ctx, cfg, &pre.split, block_out, streams);
+        }
+    }
+    cache.len += 1;
+
+    // Output: sigmoid-gated HC merge, output norm, vocab head.
+    const hc_dim = cfg.n_hc * cfg.hidden_size;
+    var flat_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, hc_dim }, streams);
+    defer flat_t.deinit();
+    var flat_norm = try flat_t.rmsNorm(ctx, .embed, cfg.rms_norm_eps);
+    defer flat_norm.deinit();
+    var pre_t = try self.output_hc.fn_proj.linearSeq(ctx, &flat_norm, .embed, .attn);
+    defer pre_t.deinit();
+    const pre_vals = try pre_t.dataConst();
+    var merge_w: [4]f32 = undefined;
+    for (0..cfg.n_hc) |i| merge_w[i] = sigmoidStable(pre_vals[i] * self.output_hc.scale[0] + self.output_hc.base[i]) + cfg.hc_eps;
+
+    var streams_t = try fucina.Tensor(.{ .stream, .embed }).fromSlice(ctx, .{ cfg.n_hc, cfg.hidden_size }, streams);
+    defer streams_t.deinit();
+    var w_t = try fucina.Tensor(.{.stream}).fromSlice(ctx, .{cfg.n_hc}, merge_w[0..cfg.n_hc]);
+    defer w_t.deinit();
+    var weighted = try streams_t.mul(ctx, &w_t);
+    defer weighted.deinit();
+    var merged = try weighted.sum(ctx, .stream);
+    defer merged.deinit();
+
+    var norm_w = try embedTag(ctx, self.output_norm);
+    defer norm_w.deinit();
+    var merged_row = try rowTensor(ctx, try merged.dataConst(), cfg.hidden_size);
+    defer merged_row.deinit();
+    var final_norm = try merged_row.rmsNormMul(ctx, .embed, &norm_w, cfg.rms_norm_eps);
+    defer final_norm.deinit();
+    var logits_t = try self.output.linearSeq(ctx, &final_norm, .embed, .vocab);
+    defer logits_t.deinit();
+    return allocator.dupe(f32, try logits_t.dataConst());
+}
+
+fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer, layer_i: usize, sub_in: []const f32, pos: usize, token: usize) ![]f32 {
+    _ = token;
+    const cfg = self.config;
+    const allocator = ctx.allocator;
+    const lc = &cache.layers[layer_i];
+    const ratio = cfg.compress_ratio[layer_i];
+    const compressed_family = ratio != 0;
+
+    var in_t = try rowTensor(ctx, sub_in, cfg.hidden_size);
+    defer in_t.deinit();
+    var attn_norm_w = try embedTag(ctx, layer.attn_norm);
+    defer attn_norm_w.deinit();
+    var x_norm = try in_t.rmsNormMul(ctx, .embed, &attn_norm_w, cfg.rms_norm_eps);
+    defer x_norm.deinit();
+
+    // q-LoRA; the normed latent (qr_norm) also feeds the indexer.
+    var q_lat = try layer.q_a.linearSeq(ctx, &x_norm, .embed, .q);
+    defer q_lat.deinit();
+    var q_a_norm_w = try fucina.Tensor(.{.q}).fromSlice(ctx, .{cfg.q_lora_rank}, layer.q_a_norm);
+    defer q_a_norm_w.deinit();
+    var qr_norm_t = try q_lat.rmsNormMul(ctx, .q, &q_a_norm_w, cfg.rms_norm_eps);
+    defer qr_norm_t.deinit();
+    var q_full = try layer.q_b.linearSeq(ctx, &qr_norm_t, .q, .attn);
+    defer q_full.deinit();
+    const q = try allocator.dupe(f32, try q_full.dataConst());
+    defer allocator.free(q);
+
+    var kv_lin = try layer.kv.linearSeq(ctx, &x_norm, .embed, .k);
+    defer kv_lin.deinit();
+    var kv_norm_w = try fucina.Tensor(.{.k}).fromSlice(ctx, .{cfg.head_dim}, layer.kv_a_norm);
+    defer kv_norm_w.deinit();
+    var kv_normed = try kv_lin.rmsNormMul(ctx, .k, &kv_norm_w, cfg.rms_norm_eps);
+    defer kv_normed.deinit();
+    const kv_row = try allocator.dupe(f32, try kv_normed.dataConst());
+    defer allocator.free(kv_row);
+
+    // Tail rotary on q heads and the shared kv row, FP8-simulate the row,
+    // push into the raw sliding window (shift when full).
+    for (0..cfg.num_heads) |h| self.rope.applyTail(q[h * cfg.head_dim ..][0..cfg.head_dim], pos, compressed_family, false);
+    self.rope.applyTail(kv_row, pos, compressed_family, false);
+    fp8KvQuantRow(kv_row, cfg.rope_dims);
+    if (lc.n_raw == cfg.n_swa) {
+        std.mem.copyForwards(f32, lc.raw[0 .. (cfg.n_swa - 1) * cfg.head_dim], lc.raw[cfg.head_dim..]);
+        lc.n_raw -= 1;
+    }
+    @memcpy(lc.raw[lc.n_raw * cfg.head_dim ..][0..cfg.head_dim], kv_row);
+    lc.n_raw += 1;
+
+    // Compressed streams + indexer selection.
+    var allowed: ?[]bool = null;
+    defer if (allowed) |a| allocator.free(a);
+    if (layer.attn_compressor) |*comp| {
+        _ = try compressorStep(self, ctx, comp, &x_norm, lc.attn_state_kv, lc.attn_state_score, &lc.comp, cfg.head_dim, compressed_family, pos);
+    }
+    if (layer.index_compressor) |*comp| {
+        _ = try compressorStep(self, ctx, comp, &x_norm, lc.index_state_kv, lc.index_state_score, &lc.index_comp, cfg.indexer_head_dim, compressed_family, pos);
+    }
+    const n_comp = lc.comp.items.len / cfg.head_dim;
+    if (ratio == 4 and n_comp > cfg.indexer_top_k) {
+        allowed = try indexerSelect(self, ctx, layer, &x_norm, &qr_norm_t, lc, pos);
+    }
+
+    // Assemble the visible rows (exclusion == -inf under the sink softmax),
+    // then attention through tensor ops: scores = q . rows / sqrt(d), the
+    // sink as an extra softmax column, weights . rows as the output.
+    const n_idx_comp = lc.index_comp.items.len / cfg.indexer_head_dim;
+    _ = n_idx_comp;
+    var rows: std.ArrayList(f32) = .empty;
+    defer rows.deinit(allocator);
+    try rows.appendSlice(allocator, lc.raw[0 .. lc.n_raw * cfg.head_dim]);
+    for (0..n_comp) |c| {
+        if (allowed) |a| {
+            if (!a[c]) continue;
+        }
+        try rows.appendSlice(allocator, lc.comp.items[c * cfg.head_dim ..][0..cfg.head_dim]);
+    }
+    const n_rows = rows.items.len / cfg.head_dim;
+
+    var q_t = try fucina.Tensor(.{ .head, .d }).fromSlice(ctx, .{ cfg.num_heads, cfg.head_dim }, q);
+    defer q_t.deinit();
+    var rows_t = try fucina.Tensor(.{ .row, .d }).fromSlice(ctx, .{ n_rows, cfg.head_dim }, rows.items);
+    defer rows_t.deinit();
+    var scores = try q_t.dot(ctx, &rows_t, .d);
+    defer scores.deinit();
+    var scaled = try scores.scale(ctx, self.attn_scale);
+    defer scaled.deinit();
+
+    // Sink column: [head, n_rows + 1] with the per-head sink logit last.
+    const ext = try allocator.alloc(f32, cfg.num_heads * (n_rows + 1));
+    defer allocator.free(ext);
+    const scaled_vals = try scaled.dataConst();
+    for (0..cfg.num_heads) |h| {
+        @memcpy(ext[h * (n_rows + 1) ..][0..n_rows], scaled_vals[h * n_rows ..][0..n_rows]);
+        ext[h * (n_rows + 1) + n_rows] = layer.sinks[h];
+    }
+    var ext_t = try fucina.Tensor(.{ .head, .row }).fromSlice(ctx, .{ cfg.num_heads, n_rows + 1 }, ext);
+    defer ext_t.deinit();
+    var probs = try ext_t.softmax(ctx, .row, .{});
+    defer probs.deinit();
+    var probs_rows = try probs.narrow(ctx, .row, 0, n_rows);
+    defer probs_rows.deinit();
+    var out_heads_t = try probs_rows.dot(ctx, &rows_t, .row);
+    defer out_heads_t.deinit();
+    const out_heads = try allocator.dupe(f32, try out_heads_t.dataConst());
+    defer allocator.free(out_heads);
+
+    // Undo the value-side tail rotation carried by the K==V rows.
+    for (0..cfg.num_heads) |h| self.rope.applyTail(out_heads[h * cfg.head_dim ..][0..cfg.head_dim], pos, compressed_family, true);
+
+    // Grouped low-rank output: per group, [group_heads*d] -> rank, then the
+    // concatenated ranks through stage B.
+    const group_heads = cfg.num_heads / cfg.output_groups;
+    const group_dim = group_heads * cfg.head_dim;
+    const rank = cfg.output_lora_rank;
+    const low = try allocator.alloc(f32, cfg.output_groups * rank);
+    defer allocator.free(low);
+    const group_row_bytes = blk: {
+        // q8_0 rows of `group_dim` values: group g's rows start at
+        // g*rank rows into the stacked stage-A weight.
+        const bpr = group_dim / 32;
+        break :blk bpr * @sizeOf(fucina.BlockQ8_0);
+    };
+    for (0..cfg.output_groups) |g| {
+        var head_slice = try rowTensor(ctx, out_heads[g * group_dim ..][0..group_dim], group_dim);
+        defer head_slice.deinit();
+        var low_t = try weights.linearSeqBorrowedQuantized(
+            .q8_0,
+            ctx,
+            &head_slice,
+            layer.output_a[g * rank * group_row_bytes ..][0 .. rank * group_row_bytes],
+            .{ rank, group_dim },
+            .{ .allow_gpu = false },
+            .embed,
+            .attn,
+        );
+        defer low_t.deinit();
+        @memcpy(low[g * rank ..][0..rank], try low_t.dataConst());
+    }
+    var low_t = try rowTensor(ctx, low, cfg.output_groups * rank);
+    defer low_t.deinit();
+    var out_t = try layer.output_b.linearSeq(ctx, &low_t, .embed, .attn);
+    defer out_t.deinit();
+    return allocator.dupe(f32, try out_t.dataConst());
+}
+
+fn indexerSelect(self: *Model, ctx: *ExecContext, layer: *const Layer, x_norm: anytype, qr_norm_t: anytype, lc: *LayerCache, pos: usize) ![]bool {
+    const cfg = self.config;
+    const allocator = ctx.allocator;
+    const n_comp = lc.index_comp.items.len / cfg.indexer_head_dim;
+    const allowed = try allocator.alloc(bool, lc.comp.items.len / cfg.head_dim);
+    @memset(allowed, false);
+    const top_k = @min(cfg.indexer_top_k, n_comp);
+
+    var q_t = try layer.indexer_q_b.?.linearSeq(ctx, qr_norm_t, .q, .attn);
+    defer q_t.deinit();
+    const q = try allocator.dupe(f32, try q_t.dataConst());
+    defer allocator.free(q);
+    for (0..cfg.indexer_heads) |h| {
+        const head = q[h * cfg.indexer_head_dim ..][0..cfg.indexer_head_dim];
+        self.rope.applyTail(head, pos, true, false);
+        indexerQatRow(head);
+    }
+
+    var w_t = try layer.indexer_proj.?.linearSeq(ctx, x_norm, .embed, .attn);
+    defer w_t.deinit();
+    const head_w = try allocator.dupe(f32, try w_t.dataConst());
+    defer allocator.free(head_w);
+    const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(cfg.indexer_heads * cfg.indexer_head_dim)));
+    for (head_w) |*w| w.* *= scale;
+
+    // score[c] = sum_h relu(comp_c . q_h) * w[h] over the QAT'd rows.
+    const scores = try allocator.alloc(f32, n_comp);
+    defer allocator.free(scores);
+    for (0..n_comp) |c| {
+        const row = lc.index_comp.items[c * cfg.indexer_head_dim ..][0..cfg.indexer_head_dim];
+        var acc: f32 = 0;
+        for (0..cfg.indexer_heads) |h| {
+            const qh = q[h * cfg.indexer_head_dim ..][0..cfg.indexer_head_dim];
+            var dot: f32 = 0;
+            for (row, qh) |a, b| dot += a * b;
+            acc += @max(dot, 0) * head_w[h];
+        }
+        scores[c] = acc;
+    }
+    for (0..top_k) |_| {
+        var best: usize = 0;
+        var best_score = -std.math.inf(f32);
+        for (scores, 0..) |sc, c| {
+            if (!allowed[c] and sc > best_score) {
+                best = c;
+                best_score = sc;
+            }
+        }
+        allowed[best] = true;
+    }
+    return allowed;
+}
+
+fn moeBlock(self: *Model, ctx: *ExecContext, layer: *const Layer, sub_in: []const f32, token: usize) ![]f32 {
+    const cfg = self.config;
+    const allocator = ctx.allocator;
+
+    var in_t = try rowTensor(ctx, sub_in, cfg.hidden_size);
+    defer in_t.deinit();
+    var ffn_norm_w = try embedTag(ctx, layer.ffn_norm);
+    defer ffn_norm_w.deinit();
+    var x_norm = try in_t.rmsNormMul(ctx, .embed, &ffn_norm_w, cfg.rms_norm_eps);
+    defer x_norm.deinit();
+
+    // Router: probs = sqrt(softplus(logits)) — softplus is a core unary now.
+    var logits_t = try layer.moe.router.linearSeq(ctx, &x_norm, .embed, .expert);
+    defer logits_t.deinit();
+    var sp = try logits_t.unary(ctx, .softplus);
+    defer sp.deinit();
+    var probs_t = try sp.unary(ctx, .sqrt);
+    defer probs_t.deinit();
+    const probs = try probs_t.dataConst();
+
+    var selected: [16]usize = undefined;
+    var routing: [16]f32 = undefined;
+    std.debug.assert(cfg.num_experts_used <= selected.len);
+    if (layer.moe.tid2eid) |table| {
+        const row = table[token * cfg.num_experts_used ..][0..cfg.num_experts_used];
+        for (0..cfg.num_experts_used) |i| {
+            const e: usize = @intCast(row[i]);
+            if (e >= cfg.num_experts) return Error.InvalidWeightShape;
+            selected[i] = e;
+            routing[i] = probs[e];
+        }
+    } else {
+        const choice = try allocator.dupe(f32, probs);
+        defer allocator.free(choice);
+        if (layer.moe.router_bias) |bias| {
+            for (choice, bias) |*c, b| c.* += b;
+        }
+        for (0..cfg.num_experts_used) |slot| {
+            var best: usize = 0;
+            var best_c = -std.math.inf(f32);
+            for (choice, 0..) |c, e| {
+                if (c > best_c) {
+                    best_c = c;
+                    best = e;
+                }
+            }
+            choice[best] = -std.math.inf(f32);
+            selected[slot] = best;
+            routing[slot] = probs[best];
+        }
+    }
+    var sum: f32 = 0;
+    for (routing[0..cfg.num_experts_used]) |w| sum += w;
+    if (sum < 6.103515625e-5) sum = 6.103515625e-5;
+    for (routing[0..cfg.num_experts_used]) |*w| w.* = w.* / sum * cfg.expert_weights_scale;
+
+    var routed = try weights.moeGatedFfnSeq(ctx, &x_norm, &layer.moe.gate, &layer.moe.up, &layer.moe.down, selected[0..cfg.num_experts_used], routing[0..cfg.num_experts_used], cfg.num_experts_used, cfg.expert_ffn_size, .swiglu_clamp10, null, null);
+    defer routed.deinit();
+
+    // Shared expert with the clamped SwiGLU, entirely through tensor ops.
+    var gate_t = try layer.moe.shared_gate.linearSeq(ctx, &x_norm, .embed, .gate_up);
+    defer gate_t.deinit();
+    var up_t = try layer.moe.shared_up.linearSeq(ctx, &x_norm, .embed, .gate_up);
+    defer up_t.deinit();
+    var gate_c = try gate_t.clamp(ctx, -std.math.floatMax(f32), 10.0);
+    defer gate_c.deinit();
+    var gate_act = try gate_c.unary(ctx, .silu);
+    defer gate_act.deinit();
+    var up_c = try up_t.clamp(ctx, -10.0, 10.0);
+    defer up_c.deinit();
+    var mid = try gate_act.mul(ctx, &up_c);
+    defer mid.deinit();
+    var shared = try layer.moe.shared_down.linearSeq(ctx, &mid, .gate_up, .attn);
+    defer shared.deinit();
+
+    var total = try routed.add(ctx, &shared);
+    defer total.deinit();
+    return allocator.dupe(f32, try total.dataConst());
+}
+
+test {
     // Numerics sanity: Hadamard is an involution up to scale; e4m3 grid is
     // monotone; fp8/fp4 round trips are idempotent.
     var v: [128]f32 = undefined;

@@ -307,6 +307,29 @@ pub fn build(b: *std.Build) void {
     const glm4moe_step = b.step("glm4moe", "Run GLM-4.5 family GGUF inference (--mtp native multi-token-prediction speculative decode)");
     glm4moe_step.dependOn(&glm4moe_cmd.step);
 
+    const deepseek4_exe = b.addExecutable(.{
+        .name = "fucina-zig-deepseek4",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/deepseek4.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    deepseek4_exe.root_module.addImport("fucina", module);
+    deepseek4_exe.root_module.addImport("fucina_llm", llm_module);
+    configureBlas(deepseek4_exe, blas_kind);
+    configureGpu(b, deepseek4_exe, gpu_kind);
+    const deepseek4_install = installArtifactStep(b, deepseek4_exe);
+
+    const deepseek4_cmd = b.addRunArtifact(deepseek4_exe);
+    deepseek4_cmd.step.dependOn(deepseek4_install);
+    if (b.args) |args| {
+        deepseek4_cmd.addArgs(args);
+    }
+
+    const deepseek4_step = b.step("deepseek4", "Run DeepSeek V4 Flash GGUF inference (CSA/HCA + streamed experts)");
+    deepseek4_step.dependOn(&deepseek4_cmd.step);
+
     const omnivoice_exe = b.addExecutable(.{
         .name = "fucina-zig-omnivoice",
         .root_module = b.createModule(.{
