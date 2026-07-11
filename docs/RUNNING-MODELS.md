@@ -232,10 +232,16 @@ zig build deepseek4 -Doptimize=ReleaseFast -- \
   --chat --prompt "Answer with only the number: 2048 divided by 128 is" \
   --gen 8 --moe-stream --moe-cache-mb=20480
 
-# Official-vector regression (short prompts; long-context fixtures are
-# skipped until batched prefill lands):
+# Official-vector regression (--vectors-max-prompt raises the skip bar for
+# the ~3.5k-token fixtures; --prefill-chunk sizes the batched prefill):
 zig build deepseek4 -Doptimize=ReleaseFast -- <model.gguf> --moe-stream \
   --vectors=path/to/ds4/tests/test-vectors/official
+
+# Implementation-level logit oracle: replay the upstream local-golden
+# fixture (top-64 ids + raw logits at a 4096-token frontier, captured from
+# a known-sane run of the same GGUF) with the upstream pass thresholds:
+zig build deepseek4 -Doptimize=ReleaseFast -- <model.gguf> --moe-stream \
+  --golden=path/to/ds4/tests/test-vectors/local-golden.vec
 ```
 
 ---
