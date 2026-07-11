@@ -152,6 +152,18 @@ const TernarySteDotBackward = backward.TernarySteDotBackward;
 /// fall back to a heap allocation.
 const concat_inline_inputs = 16;
 
+/// Per-axis range for `slice` (torch/numpy basic slicing, positive steps):
+/// `start`/`end` count from the end of the axis when negative and clamp to
+/// it, `end = null` means the axis dim, `step` must be >= 1. Negative
+/// steps are deliberately unsupported (torch rejects them in basic
+/// indexing too; strides are unsigned, so a reversed view is not
+/// representable — compose `flip`).
+pub const SliceRange = struct {
+    start: isize = 0,
+    end: ?isize = null,
+    step: usize = 1,
+};
+
 pub fn TopKResult(comptime tags_spec: anytype) type {
     const result_tags = normalizeTags(tags_spec);
     return struct {
@@ -1802,6 +1814,37 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             return finishOp(result_tags, ctx, value, self.requiresGrad(), GatherBackward(tags, gather_axis), .{ ctx.allocator, self.grad_state, &self.value, indices });
         }
 
+        /// `gather` with a tensor of indices (torch.index_select): `indices`
+        /// is a rank-1 **i64** tensor (the argmax/topK/sort index
+        /// convention — their outputs feed it directly; any other dtype is
+        /// a compile error), read host-side into `gather`'s `[]usize`
+        /// buffer; entries outside `[0, dim(tag))` error with
+        /// `IndexOutOfBounds` (negatives are not wrapped). The selected
+        /// axis is retagged `out_tag` (which may equal `tag`), sized by the
+        /// index count. Differentiable in `self` (the exact scatter-add
+        /// adjoint — duplicate indices accumulate their gradients); the
+        /// index tensor is control data, not part of the graph, and can be
+        /// released after the call.
+        pub fn indexSelect(
+            self: *const Self,
+            ctx: *ExecContext,
+            comptime tag: Tag,
+            indices: anytype,
+            comptime out_tag: Tag,
+        ) !Tensor(replaceTag(tags, tag, out_tag)) {
+            const Indices = TensorObject(@TypeOf(indices));
+            comptime {
+                if (Indices.dtype != .i64)
+                    @compileError("indexSelect expects i64 indices (the argmax/topK/sort output dtype); cast integer indices explicitly");
+                if (Indices.axis_tags.len != 1)
+                    @compileError("indexSelect expects rank-1 indices (torch.index_select); for per-element index tensors use takeAlongAxis");
+            }
+            const idx_raw = indices.asRawTensor();
+            const idx_buf = try hostIndexBuffer(ctx, try idx_raw.dataConstChecked(), self.asRawTensor().shape.at(comptime axis(tag)));
+            defer ctx.allocator.free(idx_buf);
+            return self.gather(ctx, tag, idx_buf, out_tag);
+        }
+
         /// Select the elements of `self` where `mask` is nonzero (torch
         /// masked_select): a rank-1 tensor tagged `out_tag` holding the
         /// selected elements in row-major order. The mask must have `self`'s
@@ -2070,6 +2113,25 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             return finishOp(tags, ctx, value, self.requiresGrad(), NarrowBackward(tags, slice_axis), .{ ctx.allocator, self.grad_state, &self.value, start });
         }
 
+        /// Select one position of `tag` and remove the axis (torch.select /
+        /// `x[i]`): the single-slice sibling of `unbindInto`. `index`
+        /// counts from the end when negative (torch convention); out of
+        /// range errors with `IndexOutOfBounds`. Composed narrow → squeeze,
+        /// so the value is a zero-copy view aliasing the selected row and
+        /// the gradient is the exact scatter (every unselected position
+        /// receives zero). When gradients are tracked this requires an
+        /// active exec scope (see `nllLoss`); errors with
+        /// `ActiveExecScopeRequired` otherwise.
+        pub fn select(self: *const Self, ctx: *ExecContext, comptime tag: Tag, index: isize) !Tensor(removeTag(tags, tag)) {
+            try requireScopeForComposedGrad(ctx, self.requiresGrad());
+            const n: isize = @intCast(self.asRawTensor().shape.at(comptime axis(tag)));
+            const shifted = if (index < 0) index +| n else index;
+            if (shifted < 0 or shifted >= n) return TensorError.IndexOutOfBounds;
+            var row = try self.narrow(ctx, tag, @intCast(shifted), 1);
+            defer row.deinit();
+            return row.squeeze(ctx, tag);
+        }
+
         /// `narrow` with a step (torch basic slicing `x[start::step]` along
         /// one axis): `length` elements at `start, start+step, …`.
         /// `step == 0`, `length == 0` (zero-size tensors are not
@@ -2103,6 +2165,95 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             var value = try self.value.viewWithStridesOffset(&new_shape, &new_strides, start * raw.strides.at(slice_axis));
             errdefer value.deinit();
             return finishNoGrad(tags, ctx, value);
+        }
+
+        /// Multi-axis basic slicing (torch/numpy `x[1:-1, ::2]`, positive
+        /// steps): `spec` is a struct literal naming the tags to slice —
+        /// e.g. `.{ .h = .{ .start = 1, .end = -1 }, .w = .{ .step = 2 } }`
+        /// — each field a `fucina.SliceRange`-shaped range (`start`/`end`/
+        /// `step`, each optional); axes not named pass through whole, and a
+        /// field naming a tag not on the tensor is a compile error. torch
+        /// bounds semantics: negatives count from the end, `end = null`
+        /// means the axis dim, out-of-range bounds clamp; `step == 0` or an
+        /// empty result error with `InvalidShape` (zero-size tensors are
+        /// not representable). Negative steps are deliberately unsupported
+        /// (torch rejects them in basic indexing too; strides are unsigned,
+        /// so a reversed view is not representable — compose `flip`).
+        /// Lowered to per-axis `narrow`/`sliceStep` in tag order: with
+        /// step-1 ranges the no-grad value is a zero-copy view and the
+        /// gradient is the exact per-axis scatter; stepped axes follow the
+        /// `sliceStep` contract (view no-grad, gather copy under
+        /// gradients). Slicing more than one axis with gradients tracked
+        /// requires an active exec scope (see `nllLoss`); errors with
+        /// `ActiveExecScopeRequired` otherwise.
+        pub fn slice(self: *const Self, ctx: *ExecContext, spec: anytype) !Self {
+            const Spec = @TypeOf(spec);
+            comptime {
+                if (@typeInfo(Spec) != .@"struct")
+                    @compileError("slice expects a per-tag range struct, e.g. .{ .h = .{ .start = 1 } }");
+                const fields = @typeInfo(Spec).@"struct".fields;
+                if (fields.len == 0) @compileError("slice requires at least one tag range");
+                for (fields) |field| {
+                    var known = false;
+                    for (tags) |t| {
+                        if (std.mem.eql(u8, @tagName(t), field.name)) known = true;
+                    }
+                    if (!known) @compileError("slice range names a tag not on this tensor: ." ++ field.name);
+                }
+            }
+            if (comptime @typeInfo(Spec).@"struct".fields.len > 1)
+                try requireScopeForComposedGrad(ctx, self.requiresGrad());
+            var current: ?Self = null;
+            errdefer if (current) |*c| c.deinit();
+            inline for (tags) |tag| {
+                if (comptime @hasField(Spec, @tagName(tag))) {
+                    const range = sliceRangeOf(@field(spec, @tagName(tag)));
+                    if (range.step == 0) return TensorError.InvalidShape;
+                    const source: *const Self = if (current) |*c| c else self;
+                    const dim_len = source.asRawTensor().shape.at(comptime axis(tag));
+                    const start = clampSliceBound(range.start, dim_len);
+                    const stop = if (range.end) |e| clampSliceBound(e, dim_len) else dim_len;
+                    if (stop <= start) return TensorError.InvalidShape;
+                    const next = if (range.step == 1)
+                        try source.narrow(ctx, tag, start, stop - start)
+                    else
+                        try source.sliceStep(ctx, tag, start, (stop - start - 1) / range.step + 1, range.step);
+                    if (current) |*c| c.deinit();
+                    current = next;
+                }
+            }
+            return current.?;
+        }
+
+        /// Normalize a `slice` range literal to `SliceRange`: unknown
+        /// fields are compile errors, omitted fields take the defaults.
+        fn sliceRangeOf(range_spec: anytype) SliceRange {
+            const F = @TypeOf(range_spec);
+            if (comptime F == SliceRange) return range_spec;
+            comptime {
+                if (@typeInfo(F) != .@"struct")
+                    @compileError("slice range must be a struct literal with start/end/step fields");
+                for (@typeInfo(F).@"struct".fields) |field| {
+                    if (!std.mem.eql(u8, field.name, "start") and
+                        !std.mem.eql(u8, field.name, "end") and
+                        !std.mem.eql(u8, field.name, "step"))
+                        @compileError("unknown slice range field ." ++ field.name ++ " (start/end/step)");
+                }
+            }
+            var out: SliceRange = .{};
+            if (comptime @hasField(F, "start")) out.start = range_spec.start;
+            if (comptime @hasField(F, "end")) out.end = range_spec.end;
+            if (comptime @hasField(F, "step")) out.step = range_spec.step;
+            return out;
+        }
+
+        /// torch bound normalization: negatives count from the end of the
+        /// axis, then clamp to `[0, dim_len]`.
+        fn clampSliceBound(bound: isize, dim_len: usize) usize {
+            const n: isize = @intCast(dim_len);
+            const shifted = if (bound < 0) bound +| n else bound;
+            if (shifted < 0) return 0;
+            return @min(@as(usize, @intCast(shifted)), dim_len);
         }
 
         /// Main diagonal over the (`tag_a`, `tag_b`) plane (torch.diagonal,

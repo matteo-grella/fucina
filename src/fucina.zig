@@ -58,6 +58,7 @@ pub const f32ToBf16 = dtype.f32ToBf16;
 pub const supports_q4_k_mmla = backend.supports_q4_k_mmla;
 pub const PackedRhs = ag.PackedRhs;
 pub const PackedRhsLayout = backend.PackedRhsLayout;
+pub const SliceRange = ag.SliceRange;
 pub const PreparedConvWeights = exec.ExecContext.PreparedConvWeights;
 pub const BlockQ1_0 = dtype.BlockQ1_0;
 pub const BlockQ4_0 = dtype.BlockQ4_0;

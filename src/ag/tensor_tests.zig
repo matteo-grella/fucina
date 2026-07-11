@@ -110,6 +110,9 @@ test "tagged autograd exposes Tensor facade operations" {
         "logSoftmax",
         "reshape",
         "sliceStep",
+        "select",
+        "slice",
+        "indexSelect",
         "diagonal",
         "diag",
         "trace",
@@ -9790,6 +9793,180 @@ test "public Tensor diagonal diag trace" {
     var gv = (try v.grad(&ctx)).?;
     defer gv.deinit();
     try expectCloseSlices(&.{ 2, 3, 4 }, try gv.dataConst(), 0);
+}
+
+test "public Tensor select removes the axis (torch.select)" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    const M = Tensor(.{ .row, .col });
+    var x = try M.fromSlice(&ctx, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    defer x.deinit();
+
+    // Row select: a contiguous zero-copy view; the .row tag is removed.
+    var r = try x.select(&ctx, .row, 1); // Tensor(.{ .col })
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 3), r.dim(.col));
+    try std.testing.expectEqualSlices(f32, &.{ 4, 5, 6 }, try r.dataConst());
+
+    // Column select with a negative index (torch convention: -1 = last).
+    var c = try x.select(&ctx, .col, -1); // Tensor(.{ .row })
+    defer c.deinit();
+    var c_mat = try c.materialize(&ctx);
+    defer c_mat.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 3, 6 }, try c_mat.dataConst());
+
+    // Rank-1 select degenerates to a scalar.
+    var s = try r.select(&ctx, .col, 0); // Tensor(.{})
+    defer s.deinit();
+    try std.testing.expectEqual(@as(f32, 4), try s.item());
+
+    // Out-of-range indices error on both sides.
+    try std.testing.expectError(error.IndexOutOfBounds, x.select(&ctx, .row, 2));
+    try std.testing.expectError(error.IndexOutOfBounds, x.select(&ctx, .row, -3));
+
+    // Gradient: exact scatter — unselected positions receive zero.
+    var xv = try M.variableFromSlice(&ctx, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    defer xv.deinit();
+    try std.testing.expectError(error.ActiveExecScopeRequired, xv.select(&ctx, .col, 1));
+    {
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        var mid = try xv.select(&ctx, .col, 1); // Tensor(.{ .row }) = {2, 5}
+        defer mid.deinit();
+        var w = try Tensor(.{.row}).fromSlice(&ctx, .{2}, &.{ 10, 100 });
+        defer w.deinit();
+        var weighted = try mid.mul(&ctx, &w);
+        defer weighted.deinit();
+        var loss = try weighted.sumAll(&ctx);
+        defer loss.deinit();
+        try std.testing.expectEqual(@as(f32, 520), try loss.item());
+        try loss.backward(&ctx);
+    }
+    var gx = (try xv.grad(&ctx)).?;
+    defer gx.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 0, 10, 0, 0, 100, 0 }, try gx.dataConst());
+}
+
+test "public Tensor slice composes multi-axis ranges (torch basic indexing)" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    const M = Tensor(.{ .row, .col });
+    var x = try M.fromSlice(&ctx, .{ 3, 4 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
+    defer x.deinit();
+
+    // x[1:, 1:-1] — negative end counts from the axis end.
+    var inner = try x.slice(&ctx, .{ .row = .{ .start = 1 }, .col = .{ .start = 1, .end = -1 } });
+    defer inner.deinit();
+    try std.testing.expectEqual(@as(usize, 2), inner.dim(.row));
+    try std.testing.expectEqual(@as(usize, 2), inner.dim(.col));
+    var inner_mat = try inner.materialize(&ctx);
+    defer inner_mat.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 6, 7, 10, 11 }, try inner_mat.dataConst());
+
+    // x[:, ::2] — stepped axis; x[-1:] — negative start; out-of-range clamps.
+    var stepped = try x.slice(&ctx, .{ .col = .{ .step = 2 } });
+    defer stepped.deinit();
+    var stepped_mat = try stepped.materialize(&ctx);
+    defer stepped_mat.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 1, 3, 5, 7, 9, 11 }, try stepped_mat.dataConst());
+    var last = try x.slice(&ctx, .{ .row = .{ .start = -1 } });
+    defer last.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 9, 10, 11, 12 }, try last.dataConst());
+    var clamped = try x.slice(&ctx, .{ .row = .{ .start = -100, .end = 100 } });
+    defer clamped.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, try clamped.dataConst());
+
+    // A typed fucina.SliceRange value works in place of the literal.
+    var typed = try x.slice(&ctx, .{ .row = ag_tensor.SliceRange{ .start = 1, .end = 2 } });
+    defer typed.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 5, 6, 7, 8 }, try typed.dataConst());
+
+    // step == 0 and empty results are InvalidShape (no zero-size tensors).
+    try std.testing.expectError(error.InvalidShape, x.slice(&ctx, .{ .col = .{ .step = 0 } }));
+    try std.testing.expectError(error.InvalidShape, x.slice(&ctx, .{ .row = .{ .start = 2, .end = 2 } }));
+
+    // Gradient: multi-axis slicing needs a scope; the scatter is exact.
+    var xv = try M.variableFromSlice(&ctx, .{ 3, 4 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
+    defer xv.deinit();
+    try std.testing.expectError(
+        error.ActiveExecScopeRequired,
+        xv.slice(&ctx, .{ .row = .{ .start = 1 }, .col = .{ .end = 2 } }),
+    );
+    {
+        // A single sliced axis is one narrow — no scope required.
+        var single = try xv.slice(&ctx, .{ .row = .{ .start = 2 } });
+        defer single.deinit();
+        try std.testing.expectEqualSlices(f32, &.{ 9, 10, 11, 12 }, try single.dataConst());
+    }
+    {
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        var block = try xv.slice(&ctx, .{ .row = .{ .start = 1 }, .col = .{ .end = 2, .step = 1 } });
+        defer block.deinit();
+        var loss = try block.sumAll(&ctx); // rows 1..3, cols 0..2: 5+6+9+10
+        defer loss.deinit();
+        try std.testing.expectEqual(@as(f32, 30), try loss.item());
+        try loss.backward(&ctx);
+    }
+    var gx = (try xv.grad(&ctx)).?;
+    defer gx.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0 }, try gx.dataConst());
+}
+
+test "public Tensor indexSelect gathers rows by an i64 index tensor" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    const V = Tensor(.{.d});
+    const I = Tensor(.{ .dtype = .i64, .tags = .{.g} });
+    var x = try V.fromSlice(&ctx, .{3}, &.{ 10, 20, 30 });
+    defer x.deinit();
+    var idx = try I.fromSlice(&ctx, .{3}, &.{ 2, 0, 2 });
+    defer idx.deinit();
+
+    // Values match the host-slice gather; the axis is retagged .g.
+    var picked = try x.indexSelect(&ctx, .d, &idx, .g); // Tensor(.{ .g })
+    defer picked.deinit();
+    try std.testing.expectEqual(@as(usize, 3), picked.dim(.g));
+    try std.testing.expectEqualSlices(f32, &.{ 30, 10, 30 }, try picked.dataConst());
+
+    // Out-of-range and negative entries error (no wrapping).
+    var bad = try I.fromSlice(&ctx, .{1}, &.{3});
+    defer bad.deinit();
+    try std.testing.expectError(error.IndexOutOfBounds, x.indexSelect(&ctx, .d, &bad, .g));
+    var neg = try I.fromSlice(&ctx, .{1}, &.{-1});
+    defer neg.deinit();
+    try std.testing.expectError(error.IndexOutOfBounds, x.indexSelect(&ctx, .d, &neg, .g));
+
+    // Gradient: single delegated op — no scope needed; duplicate index
+    // reads accumulate their gradients (the gather scatter-add adjoint).
+    var xv = try V.variableFromSlice(&ctx, .{3}, &.{ 10, 20, 30 });
+    defer xv.deinit();
+    {
+        var y = try xv.indexSelect(&ctx, .d, &idx, .g);
+        defer y.deinit();
+        var w = try Tensor(.{.g}).fromSlice(&ctx, .{3}, &.{ 1, 2, 4 });
+        defer w.deinit();
+        var weighted = try y.mul(&ctx, &w);
+        defer weighted.deinit();
+        var loss = try weighted.sumAll(&ctx);
+        defer loss.deinit();
+        try loss.backward(&ctx);
+    }
+    var gx = (try xv.grad(&ctx)).?;
+    defer gx.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 2, 0, 5 }, try gx.dataConst());
 }
 
 test "public Tensor nonzero returns host indices and indexAdd accumulates" {

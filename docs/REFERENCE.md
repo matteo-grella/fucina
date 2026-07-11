@@ -161,11 +161,11 @@ need to understand to extend it. The structural overview lives in
 [ARCHITECTURE.md](ARCHITECTURE.md); command cheat sheets and per-model
 recipes live in `AGENTS.md` and [RUNNING-MODELS.md](RUNNING-MODELS.md).
 
-Every Zig snippet in this document was machine-verified against the tree at
-the revision it documents: snippets written as `test` blocks compiled and
-ran green; snippets that need model assets were compile-checked and are
-marked `// requires model assets to run`. (No in-tree gate re-runs them —
-treat a snippet that stopped compiling as a documentation bug.)
+Every Zig snippet in this document is machine-verified against the tree:
+`zig build snippet-check` (§2.7, a CI step) extracts every runnable
+snippet written as a named `test` block and runs it against the real
+modules; snippets that need model assets are compile-checked only and are
+marked `// requires model assets to run`.
 
 ### 1.1 The two modules
 
@@ -681,7 +681,7 @@ referencing every submodule (`_ = dtype; _ = exec; …`), and `src/llm.zig`
 does the same for every family and helper, so one `addTest` per root
 reaches the whole tree.
 
-`zig build test` runs **seven test roots**, each compiled as its own test
+`zig build test` runs **eight test roots**, each compiled as its own test
 binary with the same option set as the corresponding executable:
 
 1. `src/fucina.zig` — the core (with `build_options`);
@@ -690,9 +690,11 @@ binary with the same option set as the corresponding executable:
 4. `examples/parakeet.zig` (with its `parakeet_mic` options);
 5. `examples/omnivoice.zig` (with the playback shim);
 6. `examples/locate_anything.zig`;
-7. `examples/facedetect.zig`.
+7. `examples/facedetect.zig`;
+8. `examples/nanochat.zig` (imports `fucina` only, plus the generated
+   `unicode_categories` module).
 
-All seven pass with no model assets present. Suites that need external
+All eight pass with no model assets present. Suites that need external
 material skip themselves cleanly rather than fail: the OmniVoice parity
 suites gate on `OMNIVOICE_PARITY` (§2.6); asset-dependent tests (facedetect
 goldens, the GGUF re-emit byte-identity test, tokenizer-parity fixtures,
@@ -1259,6 +1261,7 @@ pub fn split(self, ctx, comptime tag, comptime split_tags_spec, split_shape) !Te
 pub fn merge(self, ctx, comptime out_tag, comptime merge_tags_spec) !Tensor(...)
 pub fn broadcastTo(self, ctx, comptime target_tags_spec, target_shape) !Tensor(...)
 pub fn narrow(self, ctx, comptime tag, start: usize, length: usize) !Self
+pub fn select(self, ctx, comptime tag, index: isize) !Tensor(...)   // one position, axis removed
 pub fn viewWithStrides(self, ctx, comptime new_tags_spec, raw_shape, raw_strides) !Tensor(...)
 ```
 
@@ -1275,6 +1278,13 @@ pub fn viewWithStrides(self, ctx, comptime new_tags_spec, raw_shape, raw_strides
 - `broadcastTo` produces stride-0 axes for missing or size-1 tags;
   mismatched non-1 sizes fail with `error.ShapeMismatch`.
 - `squeeze` fails with `error.InvalidShape` if the axis size is not 1.
+- `select` is torch.select / `x[i]`: one position of `tag` with the axis
+  removed (the single-slice sibling of `unbindInto`; composed narrow →
+  squeeze, so the result is a zero-copy view aliasing the selected row).
+  `index` counts from the end when negative (torch convention);
+  out-of-range errors with `IndexOutOfBounds`. Scope-required under
+  gradients (§5); the gradient is the exact scatter — unselected
+  positions receive zero.
 - `viewWithStrides` is the audited escape hatch for layouts no tag
   operation can express: explicit raw shape + strides with a new tag set,
   bounds-checked against the underlying buffer
@@ -1345,6 +1355,7 @@ test "viewWithStrides escape hatch" {
 ```zig
 pub fn concat(self, ctx, comptime tag, others: []const *const Self) !Self
 pub fn gather(self, ctx, comptime tag, indices: []const usize, comptime out_tag) !Tensor(...)
+pub fn indexSelect(self, ctx, comptime tag, indices, comptime out_tag) !Tensor(...)
 pub fn setSlice(self, ctx, comptime tag, start: usize, update: *const Self) !Self
 pub fn setRows(self, ctx, comptime tag, indices: []const usize, update: *const Self) !Self
 pub fn flatten(self, ctx, comptime out_tag) !Tensor(.{out_tag})
@@ -1364,6 +1375,7 @@ pub fn rollBy(self, ctx, comptime tag, offsets: []const isize) !Self
 pub fn shiftBy(self, ctx, comptime tag, offsets: []const isize, fill: f32) !Self
 pub fn reshape(self, ctx, comptime new_tags_spec, new_shape: [...]usize) !Tensor(normalizeTags(new_tags_spec))
 pub fn sliceStep(self, ctx, comptime tag, start: usize, length: usize, step: usize) !Self
+pub fn slice(self, ctx, spec) !Self  // multi-axis basic slicing over a per-tag range struct
 pub fn diagonal(self, ctx, comptime tag_a, comptime tag_b, comptime out_tag) !Tensor(...)
 pub fn trace(self, ctx, comptime tag_a, comptime tag_b) !Tensor(...)
 pub fn diag(self, ctx, comptime out_tags_spec) !Tensor(normalizeTags(out_tags_spec))
@@ -1377,7 +1389,12 @@ pub fn scatter(self, ctx, comptime tag, indices, src: *const Self) !Self
 - `concat` joins along an existing tag (all other dims must match); the
   result owns fresh storage. `gather` copies the rows selected by `indices`
   along `tag`, re-tagging that axis `out_tag` (`out_tag` may equal `tag`);
-  out-of-range indices error with `IndexOutOfBounds`.
+  out-of-range indices error with `IndexOutOfBounds`. `indexSelect` is
+  torch.index_select — `gather` with a rank-1 **i64** index tensor (the
+  argmax/topK/sort convention; other dtypes are compile errors), read
+  host-side into the same `[]usize` path; entries outside `[0, dim(tag))`
+  error with `IndexOutOfBounds` (no wrapping), duplicate reads accumulate
+  their gradients, and the index tensor is control data outside the graph.
 - `setSlice`/`setRows` are *functional* scatter updates: they return a copy
   of `self` with the range `[start, start+len)` / the given rows along
   `tag` overwritten by `update`; the originals are untouched. Gradients
@@ -1442,6 +1459,21 @@ pub fn scatter(self, ctx, comptime tag, indices, src: *const Self) !Self
   axis): a zero-copy strided view on no-grad tensors; under gradients it
   lowers to `gather` over the stepped indices (a copy with the exact
   scatter-add record — the `flip`/`roll` precedent).
+- `slice` is multi-axis basic slicing (torch/numpy `x[1:-1, ::2]`,
+  positive steps): `spec` is a struct literal naming the tags to slice —
+  `.{ .h = .{ .start = 1, .end = -1 }, .w = .{ .step = 2 } }` — each
+  field a `fucina.SliceRange`-shaped range (`start`/`end`/`step`, each
+  optional); unnamed axes pass through whole, and naming a tag not on the
+  tensor is a compile error. torch bounds semantics: negatives count from
+  the end, `end = null` means the axis dim, out-of-range bounds clamp;
+  `step == 0` or an empty result error with `InvalidShape` (zero-size
+  tensors are not representable). Negative steps are deliberately
+  unsupported (torch rejects them in basic indexing too; strides are
+  unsigned, so a reversed view cannot exist — compose `flip`). Lowered to
+  per-axis `narrow`/`sliceStep` in tag order: step-1 ranges stay zero-copy
+  views with exact scatter gradients; stepped axes follow the `sliceStep`
+  contract. Scope-required under gradients when more than one axis is
+  sliced.
 - `diagonal` views the main diagonal over a (`tag_a`, `tag_b`) plane
   (torch.diagonal, offset 0, any rank carrying both tags): length
   `min(dim_a, dim_b)`, both tags removed, the diagonal appended LAST as
@@ -1461,7 +1493,8 @@ pub fn scatter(self, ctx, comptime tag, indices, src: *const Self) !Self
   (torch gather / scatter_add / scatter): the index operand is a
   same-tagged i64 tensor in the argmax/topK/sort index convention, so
   selection-op outputs feed them directly (§4.16-17).
-- `unbindInto`, `maskedSelect`, `maskedScatter`, `rollBy`, `shiftBy`,
+- `unbindInto`, `select`, `slice` (more than one sliced axis),
+  `maskedSelect`, `maskedScatter`, `rollBy`, `shiftBy`,
   `zeroPad2d`, `constantPad2d`, `reshape` (multi-tag targets), `trace`,
   and `diag` are *composed* ops: when gradients are tracked they require
   an active exec scope and error with `error.ActiveExecScopeRequired`
@@ -1711,8 +1744,8 @@ methods are documented above; §4 covers every math/NN op in depth.
 `shape`, `to`,
 `withTags`, `viewWithStrides`, `alignTo`, `permuteTo`, `transpose`,
 `insertAxis`, `squeeze`, `split`, `merge`, `reshape`, `broadcastTo`,
-`narrow`, `sliceStep`,
-`flatten`, `gather`, `maskedSelect`, `maskedScatter`, `nonzero`, `flip`,
+`narrow`, `select`, `slice`, `sliceStep`,
+`flatten`, `gather`, `indexSelect`, `maskedSelect`, `maskedScatter`, `nonzero`, `flip`,
 `roll`, `rollBy`, `shiftBy`, `concat`, `stack`, `unbindInto`, `repeatAxis`,
 `pad`, `zeroPad2d`, `constantPad2d`, `setSlice`, `setRows`, `indexAdd`,
 `takeAlongAxis`, `scatterAdd`, `scatter`, `zeroSlice`,
@@ -1737,11 +1770,14 @@ methods are documented above; §4 covers every math/NN op in depth.
 `logsumexp`, `logSoftmax`, `argmax`,
 `max`, `min`, `topK`, `sort`, `argsort`, `routerTopK`, `softmax`, `rmsNorm`,
 `rmsNormMul`, `rmsNormMulAdd`, `rmsNormMulRopeHalfPrepared`, `layerNorm`,
-`groupNorm`, `crossEntropy`, `crossEntropyExt`, `mseLoss`, `huberLoss`,
+`groupNorm`, `crossEntropy`, `crossEntropyExt`, `linearCrossEntropyExt`,
+`mseLoss`, `huberLoss`,
 `bceLoss`, `klDivLoss`, `nllLoss`, `l2Normalize`, `cosineSimilarity`,
 `rope`, `matmul`, `dot`, `einsum`, `dotTernarySte`, `dotPacked`,
+`rmsNormMulDotPacked`,
 `splitSwiGluDotPacked`, `gegluQuantDotPacked`, `groupedAttention`,
-`conv2d`, `conv2dRelu`, `maxPool2d`, `avgPool2d`, `upsample2xNearest`,
+`conv2d`, `conv2dRelu`, `prepareConv2dWeights`, `conv2dPrepared`,
+`conv2dPreparedRelu`, `maxPool2d`, `avgPool2d`, `upsample2xNearest`,
 `prelu`, `channelAffine`, `relposShift`, `causalDepthwiseConv1d`,
 `causalConv1d`, `groupedCausalConv1d`, `conv1d`, `convTranspose1d`,
 `snake`. The root free function `fucina.einsumMany(ctx, out_tags, operands)`
@@ -2558,6 +2594,12 @@ test "dotTernarySte encodes the latent weight per call" {
   against a pre-packed quantized RHS container (`*const` q8_0x4 / q6_kx4 /
   q4_kx8 / q4_kx2mmla / q5_kx8, comptime-dispatched from the pointer type).
   No gradients: fails with `error.GradientQuantizedMatmulUnsupported`.
+- `rmsNormMulDotPacked(ctx, norm_weight, eps, rhs, contract_tag, out_tag)` —
+  fused `rmsNormMul(self, norm_weight) · rhsᵀ` without materializing the
+  normalized tensor (`self` is the pre-norm `[free, contract]` input,
+  `norm_weight` the `[contract]` scale row); matches `rmsNormMul` +
+  `dotPacked` to ≤ 1 ulp (q8_0x4 / q4_kx8 / q5_kx8 / q6_kx4; q4_kx2mmla is
+  a deliberate compile error — MMLA targets use the unfused path).
 - `splitSwiGluDotPacked(ctx, rhs, split_tag, out_tag)` — fused split-SwiGLU
   + packed down-projection GEMM without materializing the gated tensor
   (q8_0x4 / q4_kx8 / q5_kx8 / q6_kx4; q4_kx2mmla is a deliberate compile
@@ -2656,7 +2698,9 @@ backward — nothing extra is saved from the forward).
 - `rmsNormMulRopeHalfPrepared(ctx, position_tag, feature_tag, weight, eps, table)`
   — fused rmsNorm·weight followed by half-mode RoPE from a prepared
   `*const exec.RopeTable` (the QK-norm + RoPE step of the model families'
-  attention blocks, §14).
+  attention blocks, §14). The inference-only `rmsNormMulDotPacked`
+  (rmsNormMul fused into a packed quantized GEMM) is documented with the
+  packed-RHS entries in §4.9.
 - `layerNorm(ctx, tag, eps, options)` — PyTorch semantics:
   `(x − μ)/sqrt(σ² + eps)` with biased variance. `options` is `.{}` for the
   plain form or `.{ .weight = &w, .bias = &b }` for the fused affine — the
@@ -2875,6 +2919,21 @@ detection stack):
   no-grad path (identical values to `conv2d` then `relu`; on the Winograd
   route it folds into the output transform). Falls back to the
   differentiable composition when any operand requires gradients.
+- `prepareConv2dWeights(ctx)` — on the rank-4 weight: load-time Winograd
+  F2/F4 weight-transform planes, built once so the prepared entries below
+  skip the per-call weight transform. Returns `fucina.PreparedConvWeights`
+  (caller `deinit`s); a weight that can never take the Winograd route
+  returns `.empty`, which is inert on every conv route. No gradient
+  support (the `dotPacked` policy — prepared planes live outside the
+  graph): fails with `error.GradientPreparedConv2dUnsupported` on a
+  grad-requiring weight.
+- `conv2dPrepared(ctx, weight, prepared, bias, stride, padding, groups, out_tags)`
+  — no-grad conv2d against the prepared planes: bitwise-identical values to
+  `conv2d`, minus the per-call weight transform on the Winograd route
+  (every other route ignores `prepared`). Fails with
+  `error.GradientPreparedConv2dUnsupported` when any operand requires grad.
+- `conv2dPreparedRelu(...)` — `conv2dPrepared` with the relu fused into the
+  conv epilogue; same no-grad contract.
 - `maxPool2d(ctx, kernel, stride, padding)` — `[h, w]`-ordered params; the
   zero-pad border reads as −inf. `avgPool2d(...)` averages valid taps only
   (ONNX `count_include_pad=0`). Both differentiable.
@@ -2943,6 +3002,25 @@ PyTorch's NaN), `reduction: Reduction = .mean` (`.none` returns per-position
 losses with the class tag removed), `label_smoothing: f32 = 0` (in `[0,1)`,
 PyTorch semantics). Labels must be `< class_count` or equal to
 `ignore_index` (`IndexOutOfBounds` otherwise). Differentiable in the logits.
+
+**Fused linear + cross-entropy** — `crossEntropyExt(self·weightᵀ)` as ONE
+differentiable op:
+
+```zig
+pub fn linearCrossEntropyExt(self, ctx, weight: anytype, labels: []const usize,
+                             comptime options: exec.CrossEntropyOptions)
+    !Tensor(if (options.reduction == .none) removeTag(tags, tags[1]) else .{})
+```
+
+`self` is rank-2 `[row, shared]` and `weight` rank-2 `[class, shared]`
+(both f32, shared tag last on both, the class tag absent from `self` —
+all comptime-checked). The logits exist only inside the op: they are
+computed once and saved on the backward record with the forward's per-row
+softmax statistics, and the VJP folds block-built probability panels
+straight into dx and dweight, so the `[rows, classes]` logit **gradient**
+is never materialized. Differentiable in **both** operands; same
+options/reduction contract as `crossEntropyExt` (`.none` returns per-row
+losses tagged by the row tag).
 
 **Elementwise losses** vs a same-tagged `target`, all differentiable in
 **both** operands, all sharing the reduction/result-type contract above
@@ -3065,14 +3143,23 @@ test "argmax, topK, and routerTopK" {
 These produce owned tensors, differentiable in every tensor operand unless
 noted; gradients route exactly through the index maps (gather scatters-adds,
 slices narrow, pads drop the border). All materialize copies except
-`narrow`, which aliases the source storage (see its bullet).
+`narrow`, `select`, and `slice` on step-1 ranges, which alias the source
+storage (see their bullets).
 
 - `gather(ctx, tag, indices: []const usize, out_tag)` — select rows along
   `tag`; the axis is retagged `out_tag` (which may equal `tag`). This IS
-  torch.index_select; a tensor-valued index variant is deliberately
-  absent — indices live host-side by design (ARCHITECTURE.md), and an
-  int-typed index tensor lowers in two lines through `dataConst()` →
-  `gather`. For per-ELEMENT index tensors use `takeAlongAxis` below.
+  torch.index_select with host-side indices (indices live host-side by
+  design — ARCHITECTURE.md); `indexSelect` below is the tensor-valued
+  spelling and lowers to this. For per-ELEMENT index tensors use
+  `takeAlongAxis` below.
+- `indexSelect(ctx, tag, indices, out_tag)` — torch.index_select: `gather`
+  with a rank-1 **i64** index tensor (the argmax/topK/sort index
+  convention — their outputs feed it directly; any other dtype is a
+  compile error), read host-side into the same `[]usize` path. Entries
+  outside `[0, dim(tag))` error with `IndexOutOfBounds` (negatives are not
+  wrapped); duplicate indices accumulate their gradients (the scatter-add
+  adjoint); the index tensor is control data outside the graph and can be
+  released after the call.
 - `getRows(ctx, tag, indices, out_tag)` — **block-quantized tensors only**:
   fused gather + dequantize of rows from a rank-2 weight into an f32 tensor
   (the embedding-lookup path; §10). No-grad (quantized tensors are
@@ -3080,6 +3167,18 @@ slices narrow, pads drop the border). All materialize copies except
 - `narrow(ctx, tag, start, length)` — contiguous sub-range as a zero-copy
   **view**: it retains the source buffer and aliases its memory, so a
   mutation of the source through `data()` is visible through the result.
+- `select(ctx, tag, index: isize)` — torch.select / `x[i]`: one position
+  of `tag` with the axis removed (composed narrow → squeeze — a zero-copy
+  view; scope-required under gradients, §4.1). Negative `index` counts
+  from the end; out of range errors with `IndexOutOfBounds`. The gradient
+  is the exact scatter — unselected positions receive zero.
+- `slice(ctx, spec)` — multi-axis basic slicing (torch/numpy
+  `x[1:-1, ::2]`, positive steps): `spec` names the tags to slice, each
+  field a `fucina.SliceRange`-shaped range — §3.7 has the full bounds
+  contract (negatives from the end, `end = null` = dim, clamping, no
+  negative steps — compose `flip`). Composed per-axis `narrow`/`sliceStep`
+  in tag order; scope-required under gradients when more than one axis is
+  sliced.
 - `pad(ctx, tag, before, after, fill)` — constant padding on one axis; pad
   positions hold `fill` and drop their gradient.
 - `concat(ctx, tag, others: []const *const Self)` — concatenation along an
@@ -3176,6 +3275,38 @@ test "gather, flip, and narrow copy with exact gradients" {
     var mid = try x.narrow(&ctx, .d, 1, 2);
     defer mid.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 20, 30 }, try mid.dataConst());
+}
+```
+
+```zig
+test "select, multi-axis slice, and tensor-valued indexSelect" {
+    const alloc = std.testing.allocator;
+    var ctx: fucina.ExecContext = undefined;
+    ctx.init(alloc);
+    defer ctx.deinit();
+
+    const M = fucina.Tensor(.{ .row, .col });
+    var x = try M.fromSlice(&ctx, .{ 3, 4 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
+    defer x.deinit();
+
+    var last_row = try x.select(&ctx, .row, -1); // Tensor(.{ .col }), torch x[-1]
+    defer last_row.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 9, 10, 11, 12 }, try last_row.dataConst());
+
+    // torch x[1:, 1:-1] — omitted bounds default, negatives count from the end.
+    var inner = try x.slice(&ctx, .{ .row = .{ .start = 1 }, .col = .{ .start = 1, .end = -1 } });
+    defer inner.deinit();
+    var inner_mat = try inner.materialize(&ctx);
+    defer inner_mat.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 6, 7, 10, 11 }, try inner_mat.dataConst());
+
+    // index_select with an i64 tensor — argmax/topK/sort outputs feed it directly.
+    const I = fucina.Tensor(.{ .dtype = .i64, .tags = .{.pick} });
+    var idx = try I.fromSlice(&ctx, .{2}, &.{ 2, 0 });
+    defer idx.deinit();
+    var rows = try x.indexSelect(&ctx, .row, &idx, .pick); // Tensor(.{ .pick, .col })
+    defer rows.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 9, 10, 11, 12, 1, 2, 3, 4 }, try rows.dataConst());
 }
 ```
 
@@ -3315,8 +3446,10 @@ test "integer math wraps, divides explicitly, and reduces to i64" {
 }
 ```
 
-The f32 `to(ctx, target_dtype)` cast is differentiable only for
-`.f32 → .f32`; casting a grad-requiring tensor to any other dtype fails with
+The f32 `to(ctx, target_dtype)` cast is differentiable for `.f32 → .f32`
+and for the mixed-precision narrows `.f32 → .f16`/`.bf16` (§3.8, §5.1 —
+the backward is the identity on the f32 upstream gradient); casting a
+grad-requiring tensor to any other dtype fails with
 `error.GradientCastUnsupported`.
 
 ## 5. Automatic differentiation
@@ -4043,9 +4176,9 @@ Every differentiable facade op attaches a concrete VJP record from
 | Unary activations | `relu`, `leakyRelu`, `exp`, `sqrt`, `rsqrt`, `sigmoid`, `silu`, `log`, `log1p`, `neg`, `abs`, `sin`, `cos`, `tanh`, `fastTanh`, `softcap30`, `softcap15`, `gelu`, `quickGelu`, `elu`, `geluErf`, `unary`, `snake`, `prelu` | `prelu`/`snake` also differentiate their parameters |
 | Gated units | `gated`, `glu`, `swiglu`, `geglu`, `splitGated` | fused split+gate VJPs |
 | Reductions / statistics | `sum`, `sumMany`, `sumAll`, `mean`, `variance`, `cumsum`, `standardizeAxis`, `max`, `min`, `topK` (values arm), `sort` (values arm) | `max`/`min` route gradient to the first extremum (strict tie-break); `topK`/`sort` values scatter back through the saved indices |
-| Structure / views | `withTags`, `permuteTo`, `transpose`, `alignTo`, `insertAxis`, `squeeze`, `split`, `merge`, `viewWithStrides`, `materialize`, `broadcastTo`, `flatten`, `narrow`, `pad`, `concat`, `stack`, `unbindInto`, `repeatAxis`, `flip`, `roll`, `gather`, `maskedSelect`, `setSlice`, `setRows`, `zeroSlice`, `zeroRows`, `relposShift`, `to` (f32 target) | view VJPs scatter through the saved layout; `detach` deliberately cuts the graph |
+| Structure / views | `withTags`, `permuteTo`, `transpose`, `alignTo`, `insertAxis`, `squeeze`, `split`, `merge`, `viewWithStrides`, `materialize`, `broadcastTo`, `flatten`, `narrow`, `select`, `slice`, `sliceStep`, `pad`, `concat`, `stack`, `unbindInto`, `repeatAxis`, `flip`, `roll`, `gather`, `indexSelect`, `maskedSelect`, `setSlice`, `setRows`, `zeroSlice`, `zeroRows`, `relposShift`, `to` (f32/f16/bf16 targets, §3.8) | view VJPs scatter through the saved layout; `detach` deliberately cuts the graph |
 | Norms / softmax | `softmax` (all fused options; `.mask` must not require grad), `rmsNorm`, `rmsNormMul`, `rmsNormMulAdd`, `rmsNormMulRopeHalfPrepared`, `layerNorm` (plain + affine), `groupNorm`, `l2Normalize`, `cosineSimilarity` | |
-| Losses | `crossEntropy`, `crossEntropyExt`, `mseLoss`, `huberLoss`, `bceLoss`, `klDivLoss`, `nllLoss` | |
+| Losses | `crossEntropy`, `crossEntropyExt`, `linearCrossEntropyExt`, `mseLoss`, `huberLoss`, `bceLoss`, `klDivLoss`, `nllLoss` | `linearCrossEntropyExt` differentiates both the input and the classifier weight without materializing the logit gradient (§4.15) |
 | Contractions | `dot` (f32×f32: both operands; quantized RHS: lhs-only, the RHS is a frozen constant; f16/bf16 RHS: lhs always, plus an f32 dW when the RHS is a grad-requiring 16-bit variable), `einsum` (f32×f32: both operands; f16/bf16 RHS: same variable-RHS contract as dot; each gradient is itself an einsum — GEMM-lowered for every tag structure, broadcast over forward-summed axes; `DotBackward`/`ConstRhsDotBackward` delegate to the einsum records), `einsumMany` (composes binary einsum records), `matmul` (2-D GEMM `.plain`/`.trans_b`, batched bmm all kinds; rank-2 `.trans_a` is a compile error directing to `dot`), `dotTernarySte` (straight-through estimator: dx through the quantized weight, dW as-if-unquantized) | |
 | Convolutions / pooling | `conv1d`, `convTranspose1d`, `causalConv1d`, `groupedCausalConv1d`, `causalDepthwiseConv1d`, `conv2d`, `conv2dRelu`, `maxPool2d`, `avgPool2d`, `upsample2xNearest`, `channelAffine` | `conv2d` differentiates input, weight, and bias; `conv2dRelu` falls back to the composed differentiable path when any operand requires grad |
 | Position / attention | `rope` (table and on-the-fly sources, both modes), `groupedAttention` | attention grad matrix: f32 KV = full q/k/v; f16 or q8_0 KV = q-only (caches are constants); `.bias` or multi-stream KV = inference-only (`error.UnsupportedGradient`) |
@@ -4058,15 +4191,22 @@ either irrelevant or rejected):
   `logicalNot` — index/mask outputs; gradients are undefined.
 - **Inference-only fused kernels** — fail with
   `error.GradientQuantizedMatmulUnsupported` when an operand requires grad:
-  `dotPacked`, `splitSwiGluDotPacked`, `gegluQuantDotPacked` (§10). For a
-  *trainable* path over quantized weights use `dot` with a quantized RHS
-  (lhs-grad) or `dotTernarySte`.
+  `dotPacked`, `rmsNormMulDotPacked`, `splitSwiGluDotPacked`,
+  `gegluQuantDotPacked` (§10). For a *trainable* path over quantized
+  weights use `dot` with a quantized RHS (lhs-grad) or `dotTernarySte`.
+- **Prepared-conv entries** — fail with
+  `error.GradientPreparedConv2dUnsupported` when an operand requires grad:
+  `prepareConv2dWeights`, `conv2dPrepared`, `conv2dPreparedRelu` (§4.14 —
+  the prepared Winograd planes live outside the graph; use `conv2d`/
+  `conv2dRelu` for the trainable path).
 - **In-place / storage-consuming helpers** — fail with
   `error.UnsupportedGradient`: `addAxisVectorInPlace`,
   `addAxisVectorUnaryInPlace`, `addScaledInPlace`, `takeAddNoGrad`,
   `takeScaleNoGrad`, `routerTopK`.
-- **Casts off f32**: `to` with a non-f32 target rejects grad-carrying inputs
-  with `error.GradientCastUnsupported` (cast to f32 is differentiable).
+- **Casts off the float seam**: `to` with a target other than `.f32`,
+  `.f16`, or `.bf16` rejects grad-carrying inputs with
+  `error.GradientCastUnsupported` (`to(.f32)` and the f16/bf16 narrows are
+  differentiable, §3.8).
 - The typed and quantized constant tensor branches (§3, §10) never carry
   gradients at all.
 
@@ -7211,6 +7351,15 @@ Packing and consuming happen on the facade:
   `[free, contract]`; returns `[free, out_tag]`. **No gradient support**:
   returns `error.GradientQuantizedMatmulUnsupported` when `self` requires
   grad.
+- `x.rmsNormMulDotPacked(ctx, &norm_weight, eps, &packed, contract_tag, out_tag)`
+  — fused pre-norm + packed GEMM: normalizes up to 4 rows at a time into
+  task-private scratch with the exact `rmsNormMulRows` kernel and quantizes
+  with the fused packers, so the normalized tensor is never materialized;
+  matches `rmsNormMul` + `dotPacked` to ≤ 1 ulp observed (the packed
+  matmul's internal LHS quantizer arrangement may differ in the last ulp,
+  the `splitSwiGluDotPacked` precedent). Kernels exist for
+  `q8_0x4`/`q4_kx8`/`q5_kx8`/`q6_kx4`; `q4_kx2mmla` is a deliberate
+  comptime error — callers fall back to the unfused pair.
 - `gate_up.splitSwiGluDotPacked(ctx, &packed, split_tag, out_tag)` — fused
   split-SwiGLU activation + down-projection GEMM without materializing the
   gated tensor; kernels exist for `q8_0x4`/`q4_kx8`/`q5_kx8`/`q6_kx4`

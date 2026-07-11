@@ -11,6 +11,7 @@ const tensor = @import("ag/tensor.zig");
 
 pub const Tensor = tensor.Tensor;
 pub const PackedRhs = tensor.PackedRhs;
+pub const SliceRange = tensor.SliceRange;
 pub const einsumMany = tensor.einsumMany;
 pub const checkpoint = checkpoint_mod.checkpoint;
 pub const checkpointWithContext = checkpoint_mod.checkpointWithContext;
