@@ -229,7 +229,21 @@ pub const Model = struct {
         var expert_store: ?*fucina.ExpertStore = null;
         if (options.moe_stream) |stream_options| {
             if (config.isMoe()) {
-                expert_store = try fucina.ExpertStore.create(allocator, stream_options.gguf_path, config.num_layers, .{
+                // Split GGUFs: the store opens every part (TensorInfo.part
+                // indexes them); single files pass through as one entry.
+                const split_paths = try gguf.File.splitPartPaths(allocator, stream_options.gguf_path);
+                defer if (split_paths) |paths| {
+                    for (paths) |p| allocator.free(p);
+                    allocator.free(paths);
+                };
+                var one_path = [_][]const u8{stream_options.gguf_path};
+                const store_paths: []const []const u8 = if (split_paths) |paths| blk: {
+                    const view = try allocator.alloc([]const u8, paths.len);
+                    for (view, paths) |*d, src| d.* = src;
+                    break :blk view;
+                } else &one_path;
+                defer if (split_paths != null) allocator.free(store_paths);
+                expert_store = try fucina.ExpertStore.create(allocator, store_paths, config.num_layers, .{
                     .cache_bytes = stream_options.cache_bytes,
                     .cache_slots_per_layer = stream_options.cache_slots_per_layer,
                     .readahead = stream_options.readahead,
@@ -795,8 +809,10 @@ fn loadMoeFfn(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i
 
     // Expert blocks need no repack, so when the GGUF is mmap'd they are
     // borrowed straight from the mapping (the Model takes ownership of it in
-    // loadGgufFromFile) instead of copying the multi-GB stacks.
-    const borrow = file.is_mmap;
+    // loadGgufFromFile) instead of copying the multi-GB stacks. Split GGUFs
+    // cannot hand over their multiple mappings (takeMapping declines), so
+    // their experts are copied — stream them instead for the big models.
+    const borrow = file.is_mmap and !file.isSplit();
 
     var gate = try weights.loadMoeRhs(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "ffn_gate_exps.weight")), config.hidden_size, config.moe_intermediate_size, config.num_experts, borrow);
     errdefer gate.deinit();

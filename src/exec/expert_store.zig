@@ -217,8 +217,10 @@ pub const Proj = enum(u2) { gate = 0, up = 1, down = 2 };
 /// `[file_offset + e*expert_bytes, +expert_bytes)`.
 pub const ProjSpec = struct {
     quant: StreamedQuant,
-    /// Absolute offset of the tensor's data in the file
-    /// (`gguf.File.data_offset + TensorInfo.offset`).
+    /// Which split part (file) holds the tensor; 0 for single-file GGUFs.
+    part: u16 = 0,
+    /// Absolute offset of the tensor's data within its part on disk
+    /// (`gguf.File.partDataOffset(part) + TensorInfo.offset`).
     file_offset: u64,
     /// Total tensor bytes (validated against `n_expert * expert_bytes`).
     byte_len: usize,
@@ -228,6 +230,7 @@ pub const ProjSpec = struct {
 
 const ProjGeometry = struct {
     quant: StreamedQuant,
+    part: u16,
     file_offset: u64,
     in_dim: usize,
     out_dim: usize,
@@ -242,6 +245,7 @@ const ProjGeometry = struct {
         if (total != spec.byte_len or expert_bytes == 0) return Error.InvalidExpertGeometry;
         return .{
             .quant = spec.quant,
+            .part = spec.part,
             .file_offset = spec.file_offset,
             .in_dim = spec.in_dim,
             .out_dim = spec.out_dim,
@@ -261,7 +265,7 @@ const slab_align = 64;
 const invalid_eid = std.math.maxInt(u32);
 
 /// One readahead range for the pilot's I/O thread (SPSC ring entry).
-const PilotRange = struct { offset: u64, len: u32 };
+const PilotRange = struct { offset: u64, len: u32, part: u16 };
 const pilot_ring_cap = 4096;
 
 /// One cached expert: a single slab holding its gate+up+down blocks (loaded
@@ -478,7 +482,8 @@ pub const ExpertStore = struct {
     };
 
     allocator: Allocator,
-    fd: fd_t,
+    /// One read fd per split part (single-file GGUFs: one entry).
+    fds: []fd_t,
     layers: []LayerState,
     registered: []bool,
     options: Options,
@@ -519,9 +524,18 @@ pub const ExpertStore = struct {
 
     /// The store is heap-allocated so `StreamedMoeRhs` values and the owning
     /// model can hold stable pointers while the model struct moves by value.
-    pub fn create(allocator: Allocator, gguf_path: []const u8, n_layers: usize, options: Options) Error!*ExpertStore {
-        const fd = try openReadOnly(allocator, gguf_path);
-        errdefer closeFd(fd);
+    /// `gguf_paths` lists every part of a split GGUF (single-file: one
+    /// entry); `ProjSpec.part` indexes into it.
+    pub fn create(allocator: Allocator, gguf_paths: []const []const u8, n_layers: usize, options: Options) Error!*ExpertStore {
+        std.debug.assert(gguf_paths.len > 0);
+        const fds = try allocator.alloc(fd_t, gguf_paths.len);
+        errdefer allocator.free(fds);
+        var n_open: usize = 0;
+        errdefer for (fds[0..n_open]) |fd| closeFd(fd);
+        for (gguf_paths) |path| {
+            fds[n_open] = try openReadOnly(allocator, path);
+            n_open += 1;
+        }
 
         const self = try allocator.create(ExpertStore);
         errdefer allocator.destroy(self);
@@ -530,11 +544,11 @@ pub const ExpertStore = struct {
         const registered = try allocator.alloc(bool, n_layers);
         errdefer allocator.free(registered);
         @memset(registered, false);
-        const usage_path = try std.fmt.allocPrint(allocator, "{s}.experts", .{gguf_path});
+        const usage_path = try std.fmt.allocPrint(allocator, "{s}.experts", .{gguf_paths[0]});
 
         self.* = .{
             .allocator = allocator,
-            .fd = fd,
+            .fds = fds,
             .layers = layers,
             .registered = registered,
             .options = options,
@@ -569,7 +583,8 @@ pub const ExpertStore = struct {
         allocator.free(self.seen);
         allocator.free(self.layers);
         allocator.free(self.registered);
-        closeFd(self.fd);
+        for (self.fds) |fd| closeFd(fd);
+        allocator.free(self.fds);
         allocator.destroy(self);
     }
 
@@ -581,7 +596,10 @@ pub const ExpertStore = struct {
         if (n_expert == 0 or n_expert >= invalid_eid) return Error.InvalidExpertGeometry;
 
         var projs: [3]ProjGeometry = undefined;
-        for (specs, 0..) |spec, p| projs[p] = try ProjGeometry.init(spec, n_expert);
+        for (specs, 0..) |spec, p| {
+            if (spec.part >= self.fds.len) return Error.InvalidExpertGeometry;
+            projs[p] = try ProjGeometry.init(spec, n_expert);
+        }
         const layout = LayerState.expertSlabOffsets(projs);
 
         const resolved = try self.allocator.alloc([3]?[*]const u8, n_expert);
@@ -710,7 +728,7 @@ pub const ExpertStore = struct {
         if (self.options.readahead) {
             for (picks.items) |cand| {
                 const ls = &self.layers[cand.layer];
-                for (&ls.projs) |*g| hintWillNeed(self.fd, g.expertFileOffset(cand.eid), g.expert_bytes);
+                for (&ls.projs) |*g| hintWillNeed(self.fds[g.part], g.expertFileOffset(cand.eid), g.expert_bytes);
             }
         }
         const fill = try self.allocator.alloc(usize, self.layers.len);
@@ -820,7 +838,7 @@ pub const ExpertStore = struct {
         // pread the earlier misses.
         if (self.options.readahead and self.n_miss > 1) {
             for (self.miss_eids[0..self.n_miss]) |eid| {
-                for (&ls.projs) |*g| hintWillNeed(self.fd, g.expertFileOffset(eid), g.expert_bytes);
+                for (&ls.projs) |*g| hintWillNeed(self.fds[g.part], g.expertFileOffset(eid), g.expert_bytes);
             }
         }
 
@@ -904,15 +922,15 @@ pub const ExpertStore = struct {
     fn readExpert(self: *ExpertStore, ls: *LayerState, eid: u32, slot: *Slot) Error!void {
         for (&ls.projs, 0..) |*g, p| {
             const dst = slot.slab[ls.proj_off[p]..][0..g.expert_bytes];
-            try self.preadFull(dst, g.expertFileOffset(eid));
+            try self.preadFull(g.part, dst, g.expertFileOffset(eid));
             self.stats.bytes_read += g.expert_bytes;
         }
     }
 
-    fn preadFull(self: *ExpertStore, buf: []u8, offset: u64) Error!void {
+    fn preadFull(self: *ExpertStore, part: u16, buf: []u8, offset: u64) Error!void {
         var done: usize = 0;
         while (done < buf.len) {
-            const n = try preadOnce(self.fd, buf[done..], offset + done);
+            const n = try preadOnce(self.fds[part], buf[done..], offset + done);
             if (n == 0) return Error.UnexpectedEndOfFile;
             done += n;
         }
@@ -944,7 +962,7 @@ pub const ExpertStore = struct {
             const eid: u32 = @intCast(e);
             if (findPinned(ls, eid) != null) continue;
             if (self.findCached(ls, eid) != null) continue;
-            for (&ls.projs) |*g| self.pilotEnqueue(.{ .offset = g.expertFileOffset(eid), .len = @intCast(@min(g.expert_bytes, std.math.maxInt(u32))) });
+            for (&ls.projs) |*g| self.pilotEnqueue(.{ .offset = g.expertFileOffset(eid), .len = @intCast(@min(g.expert_bytes, std.math.maxInt(u32))), .part = g.part });
         }
     }
 
@@ -974,7 +992,7 @@ pub const ExpertStore = struct {
             }
             const range = self.pilot_ring[r % pilot_ring_cap];
             self.pilot_r.store(r +% 1, .release);
-            hintWillNeed(self.fd, range.offset, range.len);
+            hintWillNeed(self.fds[range.part], range.offset, range.len);
         }
     }
 

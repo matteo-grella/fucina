@@ -613,3 +613,58 @@ test "GGUF reader rejects malformed general.alignment without UB" {
     defer file.deinit();
     try std.testing.expectEqual(@as(usize, 64), file.alignment);
 }
+
+test "loadMmapAuto merges llama.cpp split GGUFs with part-tagged tensors" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    // Two tiny parts: metadata + tensor "a" in part 1, tensor "b" in part 2.
+    var stamp_buf: [160]u8 = undefined;
+    const stamp = std.Io.Clock.real.now(io).nanoseconds;
+    const path1 = try std.fmt.bufPrint(stamp_buf[0..80], "gguf_split_{d}-00001-of-00002.gguf", .{stamp});
+    const path2 = try std.fmt.bufPrint(stamp_buf[80..], "gguf_split_{d}-00002-of-00002.gguf", .{stamp});
+    defer std.Io.Dir.cwd().deleteFile(io, path1) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, path2) catch {};
+
+    const a_vals = [_]f32{ 1, 2, 3, 4 };
+    const b_vals = [_]f32{ 5, 6, 7, 8, 9, 10 };
+    inline for (.{ .{ path1, "a", a_vals[0..] }, .{ path2, "b", b_vals[0..] } }) |case| {
+        var w = Writer.init(allocator);
+        defer w.deinit();
+        try w.addMetaString("general.architecture", "split-test");
+        try w.addTensor(case[1], .f32, &.{case[2].len}, std.mem.sliceAsBytes(case[2]));
+        var buf: [4096]u8 = undefined;
+        var sink = std.Io.Writer.fixed(&buf);
+        try w.finish(&sink);
+        var file = try std.Io.Dir.cwd().createFile(io, case[0], .{});
+        defer file.close(io);
+        try file.writePositionalAll(io, sink.buffered(), 0);
+    }
+
+    // Non-first parts and non-split names are not split entry points.
+    try std.testing.expectEqual(@as(?[][]u8, null), try File.splitPartPaths(allocator, path2));
+    try std.testing.expectEqual(@as(?[][]u8, null), try File.splitPartPaths(allocator, "plain.gguf"));
+
+    var merged = try File.loadMmapAuto(allocator, io, path1);
+    defer merged.deinit();
+    try std.testing.expect(merged.isSplit());
+    try std.testing.expectEqualStrings("split-test", merged.getString("general.architecture").?);
+
+    const a = try merged.get("a");
+    try std.testing.expectEqual(@as(u16, 0), a.part);
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(a_vals[0..]), a.data);
+    const b = try merged.get("b");
+    try std.testing.expectEqual(@as(u16, 1), b.part);
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(b_vals[0..]), b.data);
+
+    // The absolute on-disk position round-trips: partDataOffset(part) +
+    // offset must point at the tensor bytes within its own file.
+    var part2 = try std.Io.Dir.cwd().openFile(io, path2, .{});
+    defer part2.close(io);
+    var back: [6 * 4]u8 = undefined;
+    _ = try part2.readPositionalAll(io, &back, merged.partDataOffset(1) + b.offset);
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(b_vals[0..]), &back);
+
+    // Multiple mappings cannot be handed over as one region.
+    try std.testing.expectEqual(@as(?File.MappedRegion, null), merged.takeMapping());
+}

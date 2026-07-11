@@ -150,6 +150,9 @@ pub const TensorInfo = struct {
     ggml_type: GgmlType,
     offset: usize,
     data: []const u8,
+    /// Which split part holds this tensor (0 for single-file GGUFs). The
+    /// absolute on-disk position is `File.partDataOffset(part) + offset`.
+    part: u16 = 0,
 
     pub fn dim(self: TensorInfo, index: usize) !usize {
         if (index >= self.n_dims) return Error.InvalidTensorInfo;
@@ -174,6 +177,24 @@ pub const File = struct {
     /// rather than a heap allocation. Lets large models load without a
     /// multi-GB heap copy — pages are file-backed and evictable under pressure.
     is_mmap: bool = false,
+    /// llama.cpp split GGUFs (`-00001-of-0000N`): mappings of parts 2..N
+    /// (part 1 is `bytes`) and each part's data-section offset, indexed by
+    /// `TensorInfo.part`. Empty for single-file GGUFs.
+    extra_bytes: [][]u8 = &.{},
+    part_data_offsets: []u64 = &.{},
+
+    pub fn isSplit(self: *const File) bool {
+        return self.extra_bytes.len > 0;
+    }
+
+    /// The data-section offset of `part` within its own file on disk.
+    pub fn partDataOffset(self: *const File, part: u16) u64 {
+        if (self.part_data_offsets.len == 0) {
+            std.debug.assert(part == 0);
+            return self.data_offset;
+        }
+        return self.part_data_offsets[part];
+    }
 
     pub fn load(allocator: Allocator, io: std.Io, path: []const u8) !File {
         var handle = try std.Io.Dir.cwd().openFile(io, path, .{});
@@ -217,6 +238,97 @@ pub const File = struct {
         var file = try parseCore(allocator, mapped);
         file.is_mmap = true;
         return file;
+    }
+
+    /// `loadMmap`, transparently following llama.cpp split GGUFs: when
+    /// `path` is a `-00001-of-0000N` part, every part is mapped and parsed,
+    /// and the result is one merged File — part 1's metadata (splits carry
+    /// the full metadata there), the union of all parts' tensors (each
+    /// tagged with its `part`), one index over all of them.
+    pub fn loadMmapAuto(allocator: Allocator, io: std.Io, path: []const u8) !File {
+        const parts = try splitPartPaths(allocator, path) orelse return loadMmap(allocator, io, path);
+        defer {
+            for (parts) |p| allocator.free(p);
+            allocator.free(parts);
+        }
+
+        var files = try allocator.alloc(File, parts.len);
+        defer allocator.free(files);
+        var n_loaded: usize = 0;
+        errdefer for (files[0..n_loaded]) |*f| f.deinit();
+        for (parts) |part_path| {
+            files[n_loaded] = try loadMmap(allocator, io, part_path);
+            n_loaded += 1;
+        }
+
+        var total_tensors: usize = 0;
+        for (files) |*f| total_tensors += f.tensors.len;
+        const tensors = try allocator.alloc(TensorInfo, total_tensors);
+        errdefer allocator.free(tensors);
+        const part_data_offsets = try allocator.alloc(u64, files.len);
+        errdefer allocator.free(part_data_offsets);
+        const extra_bytes = try allocator.alloc([]u8, files.len - 1);
+        errdefer allocator.free(extra_bytes);
+
+        var index = std.StringHashMap(usize).init(allocator);
+        errdefer index.deinit();
+        var at: usize = 0;
+        for (files, 0..) |*f, part_i| {
+            part_data_offsets[part_i] = f.data_offset;
+            for (f.tensors) |info| {
+                tensors[at] = info;
+                tensors[at].part = @intCast(part_i);
+                try index.put(tensors[at].name, at);
+                at += 1;
+            }
+        }
+
+        // The merged File adopts part 1's mapping/metadata and the other
+        // parts' mappings; the sub-Files' own bookkeeping is released.
+        var merged = files[0];
+        allocator.free(merged.tensors);
+        merged.index.deinit();
+        for (files[1..], 0..) |*f, i| {
+            extra_bytes[i] = f.bytes;
+            allocator.free(f.tensors);
+            f.index.deinit();
+            f.metadata.deinit();
+        }
+        merged.tensors = tensors;
+        merged.index = index;
+        merged.extra_bytes = extra_bytes;
+        merged.part_data_offsets = part_data_offsets;
+        return merged;
+    }
+
+    /// When `path` names the FIRST part of a llama.cpp split GGUF
+    /// (`...-00001-of-0000N.gguf`), the caller-owned list of all part
+    /// paths; null otherwise.
+    pub fn splitPartPaths(allocator: Allocator, path: []const u8) !?[][]u8 {
+        // "<base>-00001-of-0000N.gguf": 16-char split suffix + extension.
+        const ext = ".gguf";
+        if (!std.mem.endsWith(u8, path, ext)) return null;
+        const stem = path[0 .. path.len - ext.len];
+        const suffix_len = "-00001-of-00001".len;
+        if (stem.len < suffix_len) return null;
+        const suffix = stem[stem.len - suffix_len ..];
+        if (!std.mem.startsWith(u8, suffix, "-") or !std.mem.eql(u8, suffix[6..10], "-of-")) return null;
+        const part_no = std.fmt.parseInt(usize, suffix[1..6], 10) catch return null;
+        const n_parts = std.fmt.parseInt(usize, suffix[10..], 10) catch return null;
+        if (part_no != 1 or n_parts < 2) return null;
+
+        const base = stem[0 .. stem.len - suffix_len];
+        var parts = try allocator.alloc([]u8, n_parts);
+        var built: usize = 0;
+        errdefer {
+            for (parts[0..built]) |p| allocator.free(p);
+            allocator.free(parts);
+        }
+        for (0..n_parts) |i| {
+            parts[i] = try std.fmt.allocPrint(allocator, "{s}-{d:0>5}-of-{d:0>5}{s}", .{ base, i + 1, n_parts, ext });
+            built += 1;
+        }
+        return parts;
     }
 
     pub fn parseOwned(allocator: Allocator, bytes: []u8) !File {
@@ -312,6 +424,9 @@ pub const File = struct {
         self.metadata.deinit();
         self.index.deinit();
         self.allocator.free(self.tensors);
+        for (self.extra_bytes) |part_bytes| std.posix.munmap(@alignCast(part_bytes));
+        if (self.extra_bytes.len > 0) self.allocator.free(self.extra_bytes);
+        if (self.part_data_offsets.len > 0) self.allocator.free(self.part_data_offsets);
         if (self.is_mmap) {
             std.posix.munmap(@alignCast(self.bytes));
         } else if (self.bytes.len > 0) {
@@ -339,6 +454,10 @@ pub const File = struct {
     /// stay valid for as long as the returned region lives.
     pub fn takeMapping(self: *File) ?MappedRegion {
         if (!self.is_mmap) return null;
+        // Split files: tensors point into ALL part mappings, but a
+        // MappedRegion can carry only one — borrowing across a split load
+        // is not supported (stream the experts instead).
+        if (self.isSplit()) return null;
         self.is_mmap = false;
         const bytes = self.bytes;
         // Leave an empty slice so deinit's heap branch is a no-op; previously

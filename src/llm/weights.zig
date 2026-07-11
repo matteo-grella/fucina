@@ -964,7 +964,8 @@ fn streamedProjSpec(
     };
     return .{
         .quant = quant,
-        .file_offset = @as(u64, file.data_offset) + info.offset,
+        .part = info.part,
+        .file_offset = file.partDataOffset(info.part) + info.offset,
         .byte_len = info.data.len,
         .in_dim = expected_in_dim,
         .out_dim = expected_out_dim,

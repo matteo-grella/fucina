@@ -136,7 +136,7 @@ const Fixture = struct {
         const gate_bytes = self.gate_blocks.len * @sizeOf(qm.BlockQ5_K);
         const up_bytes = self.up_blocks.len * @sizeOf(qm.BlockQ5_K);
         const down_bytes = self.down_blocks.len * @sizeOf(qm.BlockQ6_K);
-        self.store = try ExpertStore.create(allocator, self.path, 1, .{ .cache_slots_per_layer = cache_slots });
+        self.store = try ExpertStore.create(allocator, &.{self.path}, 1, .{ .cache_slots_per_layer = cache_slots });
         try self.store.addLayer(0, .{
             .{ .quant = .q5_k, .file_offset = 0, .byte_len = gate_bytes, .in_dim = hidden, .out_dim = out_pe },
             .{ .quant = .q5_k, .file_offset = gate_bytes, .byte_len = up_bytes, .in_dim = hidden, .out_dim = out_pe },
@@ -263,7 +263,7 @@ test "expert store validates geometry and lifecycle" {
 
     // Geometry that disagrees with the tensor's byte length, and an
     // unfinalized store refusing to acquire.
-    var store2 = try ExpertStore.create(allocator, fx.path, 1, .{ .cache_slots_per_layer = 1 });
+    var store2 = try ExpertStore.create(allocator, &.{fx.path}, 1, .{ .cache_slots_per_layer = 1 });
     defer store2.destroy();
     try std.testing.expectError(error.InvalidExpertGeometry, store2.addLayer(0, .{
         .{ .quant = .q5_k, .file_offset = 0, .byte_len = 12345, .in_dim = hidden, .out_dim = out_pe },
@@ -322,7 +322,7 @@ test "learning cache: saved usage auto-pins the hot experts on reload, bit-exact
     // Session 2 (fresh store, same file): history qualifies, budget fits
     // exactly two pinned experts -> 5 and 6 are read at finalize and every
     // decode routed to them is a pure pin hit.
-    var store2 = try ExpertStore.create(allocator, fx.path, 1, .{
+    var store2 = try ExpertStore.create(allocator, &.{fx.path}, 1, .{
         .cache_slots_per_layer = 1,
         .auto_pin_min_history = 1,
     });
@@ -338,7 +338,7 @@ test "learning cache: saved usage auto-pins the hot experts on reload, bit-exact
 
     // A histogram from a different geometry is ignored wholesale: a store
     // pretending the model has more layers loads nothing and pins nothing.
-    var store3 = try ExpertStore.create(allocator, fx.path, 2, .{
+    var store3 = try ExpertStore.create(allocator, &.{fx.path}, 2, .{
         .cache_slots_per_layer = 1,
         .auto_pin_min_history = 1,
     });
@@ -361,7 +361,7 @@ test "learning cache: repin pass swaps cold pins for hot streamed experts with h
     // Pin {5, 6} via saved history (as above).
     for (0..3) |_| try fx.expectDecodeMatches(&ctx, &.{ 5, 6 }, &.{ 0.7, 0.3 });
     try fx.store.saveUsage();
-    var store2 = try ExpertStore.create(allocator, fx.path, 1, .{
+    var store2 = try ExpertStore.create(allocator, &.{fx.path}, 1, .{
         .cache_slots_per_layer = 1,
         .auto_pin_min_history = 1,
     });

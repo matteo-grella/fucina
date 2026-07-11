@@ -263,7 +263,7 @@ pub fn main(init: std.process.Init) !void {
     defer ctx.deinit();
 
     const load_start = nowNs(init.io);
-    var file = try fucina.gguf.File.loadMmap(allocator, init.io, args[1]);
+    var file = try fucina.gguf.File.loadMmapAuto(allocator, init.io, args[1]);
 
     // --tokenize FILE: encode a text file and print one token id per line
     // (the llama-tokenize parity harness); no model weights needed.
