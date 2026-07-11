@@ -9684,7 +9684,7 @@ family-agnostic helpers stay flat:
 | `llm.gemma` | `gemma4`, `gemma4_train`, `moe`, `moe_route`, `moe_route_tensor` | `llm/gemma/` |
 | `llm.diffusion_gemma` | `model` — block text-diffusion on the gemma4 backbone | `llm/diffusion_gemma/` |
 | `llm.parakeet` | `loader`, `frontend`, `subsampling`, `encoder`, `weights`, `decoder`, `tokenizer`, `streaming`, `transcription` — NeMo FastConformer/RNN-T ASR | `llm/parakeet/` |
-| `llm.speculative` | `core`, `sam_index`, `recycling`, `cascade` | `llm/speculative/` |
+| `llm.speculative` | `core`, `sam_index`, `recycling`, `cascade`, `constrained` | `llm/speculative/` |
 
 | Flat helper | Purpose | Section |
 |---|---|---|
@@ -10346,8 +10346,13 @@ pub const LogitProcessor = struct {
         process: *const fn (ptr, logits: []f32, history: []const usize) anyerror!void,
         commit: *const fn (ptr, token: usize) anyerror!void,
         reset: ?*const fn (ptr) anyerror!void = null,
+        // structural hooks (optional; pure deterministic lookahead):
+        forcedTokens: ?*const fn (ptr, buf: []usize) usize = null,
+        validPrefixLen: ?*const fn (ptr, tokens: []const usize) usize = null,
     };
     pub fn process(...) / commit(...) / reset(...)
+    pub fn hasStructure(self) bool  // both structural hooks present
+    pub fn forcedTokens(self, buf: []usize) usize / validPrefixLen(self, tokens) usize
 };
 ```
 
@@ -10359,6 +10364,14 @@ turn start). Because the seam lives inside the `Sampler`, every decode path
 that samples through one — `chat.send`/`sendBatch`, the speculative
 decoder's plain and verify steps, hand-rolled runner loops — picks the
 processor up with no loop changes.
+
+The two **structural hooks** let a processor expose what its state machine
+knows beyond a mask: `forcedTokens` writes the unique legal continuation
+(grammar-mandated JSON punctuation, a forced literal) and `validPrefixLen`
+reports how many leading tokens of a candidate sequence the state accepts.
+Both must be deterministic pure lookaheads. When present
+(`hasStructure()`), the speculative layer turns them into drafts —
+§13.9's `ConstrainedSource`.
 
 **The seam is speculative-safe by construction**: the verify loop samples
 each row only after that row's prefix is committed, and every sampled row
@@ -10415,6 +10428,9 @@ runner built on the shared sampler, ~50 µs of pure CPU mask work per token.
 Requires `-Dllguidance=true` (§2.2; cargo builds the Rust staticlib); without
 it the module still compiles and `Constraint.init` returns
 `error.LlguidanceNotEnabled`.
+[CONSTRAINED-DECODING.md](CONSTRAINED-DECODING.md) is the full design record
+(seam adjudication, tokenizer-bridge details, the no-rollback speculation
+argument, measured results).
 
 ```zig
 pub const enabled: bool;                 // build-flag mirror
@@ -10436,6 +10452,7 @@ pub const Options = struct {
 pub const Constraint = struct {
     pub fn init(allocator, tokenizer: anytype, grammar: Grammar, options: Options) Error!Constraint
     pub fn deinit(self: *Constraint) void
+    pub fn clone(self: *const Constraint) Error!Constraint  // independent per-stream twin
     pub fn processor(self: *Constraint) LogitProcessor  // install on a Sampler / chat.Options
     pub fn isStopped(self: *const Constraint) bool      // grammar terminated
     pub fn isAccepting(self: *Constraint) bool          // tokens so far form a complete sentence
@@ -10460,10 +10477,24 @@ pub const Constraint = struct {
   `log_level >= 1`). An invalid grammar fails `init` loudly instead.
 - One `Constraint` per decode stream; do not move it after `processor()` is
   taken. `chat.Conversation` re-arms it per turn via the `reset` hook.
+  Multi-stream decode (`sendBatch`, `--streams`) gives each stream a
+  `clone()` — a deep-cloned matcher over the refcounted tokenizer with the
+  tokenize bridge borrowed from the original (which must outlive the
+  clones); no vocab rebuild or grammar recompilation.
+- The processor exposes the §13.6 structural hooks (`forcedTokens` /
+  `validPrefixLen`, backed by llguidance's fast-forward and
+  token-validation lookaheads), so speculation routes it through the
+  grammar-aware draft source automatically (§13.9): grammar-forced spans
+  draft themselves and are accepted with certainty. Measured on
+  Qwen3-0.6B-Q8_0 with the JSON-schema example below: 0% draft acceptance
+  (cost gate mutes speculation) without the hooks, 83% acceptance at
+  1.24 tok/step with them — output byte-identical either way.
 - The runner flags (qwen3 + gemma4, §14.2/§14.4): `--json-schema JSON|@FILE`,
   `--lark GRAMMAR|@FILE`, `--regex PATTERN` — combine with `--no-think` on
   reasoning models (the grammar governs the whole reply, thinking channel
-  included). Composes with `--spec` (output identical to the plain run).
+  included). Composes with `--spec` (output identical to the plain run) and
+  with qwen3's `--streams` (per-stream clones; batch == sequential
+  token-for-token).
 
 ```zig
 test "llguidance: JSON-schema constrained greedy decode" {
@@ -10756,7 +10787,12 @@ Semantics:
   `reset` hook at every turn start, so the same constraint governs each
   assistant reply independently — on the plain, speculative, and `sendBatch`
   paths alike (constrained plain == constrained speculative is part of the
-  `chat_tests.zig` equivalence proofs).
+  `chat_tests.zig` equivalence proofs). When the processor exposes the
+  structural hooks (`hasStructure()`), speculation automatically routes
+  through the grammar-aware draft source (13.9.6): forced grammar spans
+  draft themselves. `sendBatch` requires one processor instance per stream
+  (a shared pointer is `error.SharedBatchProcessor` — single-stream state;
+  llguidance streams use `Constraint.clone`).
 - `sendBatch` decodes one message on each of N sibling conversations in
   lockstep: every step forwards one token per live stream through
   `forwardStepBatch` (one m=N weight pass instead of N GEMVs), then samples
@@ -10839,9 +10875,11 @@ pub const DraftSource = struct {
         suggest: *const fn (ptr, context: []const usize, buf: []usize) usize,
         observe: *const fn (ptr, committed: []const usize) void,
         observeTopK: ?*const fn (ptr, positions: []const TopKRow) void = null,
+        truncatePending: ?*const fn (ptr, new_len: usize) void = null,
     };
     pub fn suggest(...) usize / observe(...) void / observeTopK(...) void
     pub fn wantsTopK(self) bool
+    pub fn truncatePending(self, new_len: usize) void
 };
 ```
 
@@ -10851,6 +10889,10 @@ pub const DraftSource = struct {
 receives per-position top-K candidates from the verification logits — when
 null, the decoder skips computing the top-k entirely. Sources must be
 deterministic; the decoder clamps a lying `suggest` return value at runtime.
+The optional `truncatePending` lets a wrapper (the chat turn-boundary gate,
+the 13.9.6 grammar filter) tell the source its just-returned draft was
+shortened, so pending acceptance accounting shrinks to the prefix the
+decoder will actually verify.
 
 ```zig
 pub const Options = struct {
@@ -11088,6 +11130,93 @@ fn snippetDecoderLoop(
         _ = try decoder.step(ctx, model, kv, &sampler, history, sink);
     }
 } // requires model assets to run
+```
+
+#### 13.9.6 Grammar-constrained drafting (`speculative/constrained.zig`)
+
+`ConstrainedSource` makes a grammar constraint *accelerate* speculation
+instead of muting it ([CONSTRAINED-DECODING.md](CONSTRAINED-DECODING.md) §5
+is the design record). It wraps any inner `DraftSource` with a
+`LogitProcessor` that exposes the §13.6 structural hooks
+(`hasStructure()`), and must sit on the same processor instance installed
+on the stream's sampler:
+
+```zig
+pub const ConstrainedSource = struct {
+    pub fn init(processor: LogitProcessor, inner: DraftSource) ConstrainedSource
+    pub fn source(self: *ConstrainedSource) DraftSource
+};
+```
+
+- **Forced spans draft themselves.** When the grammar mandates a unique
+  continuation (JSON structure, a forced literal), `suggest` proposes it
+  directly — and because the sampler's mask allows exactly that token at
+  each row, the whole span verifies with acceptance probability 1.
+- **Certainly-rejected drafts die early.** Otherwise the inner source
+  proposes and the draft is truncated at its first grammar-invalid token
+  (`validPrefixLen`) — those tokens would be masked to `-inf` at their
+  verify row, so proposing them only wastes verify compute and drags the
+  inner source's acceptance gates down. The truncation is forwarded through
+  `DraftSource.truncatePending` so the inner accounting matches what is
+  actually verified.
+
+Losslessness is untouched (drafts never decide WHAT is committed, and both
+hooks are deterministic lookaheads); the constrained speculative stream is
+token-for-token identical to the constrained plain stream, proven greedy +
+sampled in `chat_tests.zig`. Wiring is automatic everywhere: with
+`chat.Options{ .speculation = true, .logit_processor = ... }` the
+conversation wraps its cascade in a `ConstrainedSource` whenever the
+processor has structure, and the qwen3 runner does the same for
+`--spec` + a grammar flag. Measured effect on Qwen3-0.6B-Q8_0 JSON-schema
+chat: draft acceptance 0% → 83%, with the cost gate staying on (§13.6).
+
+```zig
+test "constrained source: forced spans preempt, invalid drafts truncate" {
+    const Fixed = struct {
+        // state = 1: the grammar forces {7, 8}; state = 0: free choice with
+        // ids >= 3 invalid. process/commit are irrelevant on the suggest side.
+        fn process(_: *anyopaque, _: []f32, _: []const usize) anyerror!void {}
+        fn commit(_: *anyopaque, _: usize) anyerror!void {}
+        fn forcedTokens(ptr: *anyopaque, buf: []usize) usize {
+            const forcing: *u8 = @ptrCast(ptr);
+            if (forcing.* == 0) return 0;
+            buf[0] = 7;
+            buf[1] = 8;
+            return 2;
+        }
+        fn validPrefixLen(_: *anyopaque, tokens: []const usize) usize {
+            for (tokens, 0..) |t, i| if (t >= 3) return i;
+            return tokens.len;
+        }
+        fn suggest(_: *anyopaque, _: []const usize, buf: []usize) usize {
+            buf[0] = 1; // an inner source that always drafts {1, 5}
+            buf[1] = 5;
+            return 2;
+        }
+        fn observe(_: *anyopaque, _: []const usize) void {}
+    };
+    var forcing: u8 = 1;
+    const processor = llm.logit_processor.LogitProcessor{ .ptr = &forcing, .vtable = &.{
+        .process = Fixed.process,
+        .commit = Fixed.commit,
+        .forcedTokens = Fixed.forcedTokens,
+        .validPrefixLen = Fixed.validPrefixLen,
+    } };
+    const inner = llm.speculative.core.DraftSource{ .ptr = &forcing, .vtable = &.{
+        .suggest = Fixed.suggest,
+        .observe = Fixed.observe,
+    } };
+
+    var cs = llm.speculative.constrained.ConstrainedSource.init(processor, inner);
+    var buf: [8]usize = undefined;
+    // Forced state: the grammar span wins over the inner source.
+    try std.testing.expectEqual(@as(usize, 2), cs.source().suggest(&.{0}, &buf));
+    try std.testing.expectEqualSlices(usize, &.{ 7, 8 }, buf[0..2]);
+    // Free choice: the inner draft {1, 5} truncates at the invalid 5.
+    forcing = 0;
+    try std.testing.expectEqual(@as(usize, 1), cs.source().suggest(&.{0}, &buf));
+    try std.testing.expectEqual(@as(usize, 1), buf[0]);
+}
 ```
 
 ## 14. Model families and example applications

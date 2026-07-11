@@ -298,10 +298,6 @@ pub fn main(init: std.process.Init) !void {
         return error.ConflictingGrammarFlags;
     }
     if (grammar_flags == 1) {
-        if (streams_arg > 1) {
-            try stdout.print("--streams does not support constrained decoding (one grammar state per stream)\n", .{});
-            return error.StreamsWithGrammar;
-        }
         const t = tok_ptr orelse return error.TokenizerUnavailable;
         const grammar: llm.llguidance.Grammar = if (json_schema_arg) |v|
             .{ .json_schema = try grammarValue(init.io, allocator, v, &grammar_text) }
@@ -359,7 +355,9 @@ pub fn main(init: std.process.Init) !void {
         if (streams_arg > 1) {
             if (spec_flag) try stdout.print("note: --streams is the plain lockstep protocol; ignoring --spec\n", .{});
             if (stop_token != null) try stdout.print("note: --streams ignores --stop (all streams run the full length)\n", .{});
-            try runGenerateStreams(init.io, allocator, stdout, &ctx, &model, tokens, load_ns, n, streams_arg, bench_reps, cache_type, sampler_cfg);
+            // Constrained multi-stream: each stream decodes with its own
+            // clone of the base constraint (single-stream state).
+            try runGenerateStreams(init.io, allocator, stdout, &ctx, &model, tokens, load_ns, n, streams_arg, bench_reps, cache_type, sampler_cfg, if (constraint) |*con| con else null);
             return;
         }
         if (spec_flag and bench_reps > 1) {
@@ -781,6 +779,7 @@ fn benchStreamsBatchPass(
     samplers: []llm.sampler.Sampler,
     hist_lens: []usize,
     lasts: []usize,
+    processors: []const ?llm.sampler.LogitProcessor,
 ) !StreamsPassResult {
     const n = caches.len;
     for (0..n) |i| {
@@ -788,6 +787,8 @@ fn benchStreamsBatchPass(
         var cfg = sampler_cfg;
         cfg.seed = sampler_cfg.seed +% i;
         samplers[i] = llm.sampler.Sampler.init(cfg);
+        samplers[i].processor = processors[i];
+        if (processors[i]) |p| try p.reset(); // fresh grammar state per pass
         @memcpy(histories[i][0..tokens.len], tokens);
         hist_lens[i] = tokens.len;
     }
@@ -846,11 +847,31 @@ fn runGenerateStreams(
     bench_reps: usize,
     cache_type: llm.kv_cache.KvDtype,
     sampler_cfg: llm.sampler.Config,
+    constraint: ?*llm.llguidance.Constraint,
 ) !void {
     if (max_new < 2) return error.StreamsNeedDecodeSteps;
     const cfg = model.config;
     const n = n_streams;
     const capacity = tokens.len + max_new;
+
+    // Per-stream grammar state: clone the base constraint once per stream
+    // (matcher deep-clone + refcounted tokenizer — no grammar recompilation);
+    // both arms reset the clones at each pass start.
+    const stream_constraints = try allocator.alloc(llm.llguidance.Constraint, n);
+    defer allocator.free(stream_constraints);
+    var constraints_inited: usize = 0;
+    defer for (0..constraints_inited) |i| stream_constraints[i].deinit();
+    const processors = try allocator.alloc(?llm.sampler.LogitProcessor, n);
+    defer allocator.free(processors);
+    for (0..n) |i| {
+        if (constraint) |base| {
+            stream_constraints[i] = try base.clone();
+            constraints_inited += 1;
+            processors[i] = stream_constraints[i].processor();
+        } else {
+            processors[i] = null;
+        }
+    }
 
     const caches = try allocator.alloc(llm.kv_cache.KvCache, n);
     defer allocator.free(caches);
@@ -896,16 +917,17 @@ fn runGenerateStreams(
     while (rep <= reps) : (rep += 1) { // rep 0 = warmup
         const pass_new = if (rep == 0) @min(max_new, 2) else max_new;
 
-        const batch = try benchStreamsBatchPass(io, ctx, model, cache_ptrs, tokens, sampler_cfg, pass_new, outs_batch, histories, samplers, hist_lens, lasts);
+        const batch = try benchStreamsBatchPass(io, ctx, model, cache_ptrs, tokens, sampler_cfg, pass_new, outs_batch, histories, samplers, hist_lens, lasts, processors);
 
         // Sequential arm: the same N runs, one stream at a time (the same
-        // per-stream sampler seeds), reusing stream i's cache and buffers.
+        // per-stream sampler seeds and grammar clones), reusing stream i's
+        // cache and buffers.
         var seq_prefill_ns: i96 = 0;
         var seq_decode_ns: i96 = 0;
         for (0..n) |i| {
             var stream_cfg = sampler_cfg;
             stream_cfg.seed = sampler_cfg.seed +% i;
-            const r = try benchOnePass(io, ctx, model, cache_ptrs[i], tokens, outs_seq[i], histories[i], stream_cfg, pass_new, null, false, false, null, null, null);
+            const r = try benchOnePass(io, ctx, model, cache_ptrs[i], tokens, outs_seq[i], histories[i], stream_cfg, pass_new, null, false, false, null, null, processors[i]);
             seq_prefill_ns += r.prefill_ns;
             seq_decode_ns += r.decode_ns;
         }
@@ -1019,7 +1041,19 @@ fn runGenerateSpec(
         try stdout.print("spec ref: {s} ({d} tokens)\n", .{ path, ids.len });
     }
 
-    var decoder = try llm.speculative.core.SpeculativeDecoder(llm.qwen3.model.Model).init(allocator, index.asDraftSource(), spec_options);
+    // With a grammar constraint installed, wrap the cascade so forced spans
+    // draft themselves and cascade drafts are pre-filtered to their
+    // grammar-valid prefix (speculative/constrained.zig).
+    var grammar_source: llm.speculative.constrained.ConstrainedSource = undefined;
+    var draft_source = index.asDraftSource();
+    if (processor) |p| {
+        if (p.hasStructure()) {
+            grammar_source = llm.speculative.constrained.ConstrainedSource.init(p, index.asDraftSource());
+            draft_source = grammar_source.source();
+        }
+    }
+
+    var decoder = try llm.speculative.core.SpeculativeDecoder(llm.qwen3.model.Model).init(allocator, draft_source, spec_options);
     defer decoder.deinit();
     decoder.io = io; // live verify/plain cost measurement for the auto-off gate
 

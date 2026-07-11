@@ -47,6 +47,21 @@ pub const LogitProcessor = struct {
         /// Re-arm for a fresh constrained region (a new assistant turn).
         /// Optional: null means the processor is stateless across turns.
         reset: ?*const fn (ptr: *anyopaque) anyerror!void = null,
+
+        // --- Structural hooks (optional; null = the processor exposes no
+        // structure). Both must be pure lookahead — no state change — and
+        // deterministic: the speculative layer turns them into drafts
+        // (`speculative.constrained.ConstrainedSource`), and `DraftSource`s
+        // must be deterministic.
+
+        /// Write the tokens FORCED from the current state (the unique legal
+        /// continuation, e.g. grammar-mandated punctuation/keys) into `buf`;
+        /// return how many (0 = the next token is not forced).
+        forcedTokens: ?*const fn (ptr: *anyopaque, buf: []usize) usize = null,
+        /// How many leading `tokens` are acceptable continuations of the
+        /// current state (for pre-filtering drafts that `process`'s mask
+        /// would reject anyway).
+        validPrefixLen: ?*const fn (ptr: *anyopaque, tokens: []const usize) usize = null,
     };
 
     pub fn process(self: LogitProcessor, logits: []f32, history: []const usize) !void {
@@ -59,6 +74,22 @@ pub const LogitProcessor = struct {
 
     pub fn reset(self: LogitProcessor) !void {
         if (self.vtable.reset) |f| return f(self.ptr);
+    }
+
+    /// True when both structural hooks are present (the requirement for
+    /// grammar-driven drafting — `speculative.constrained`).
+    pub fn hasStructure(self: LogitProcessor) bool {
+        return self.vtable.forcedTokens != null and self.vtable.validPrefixLen != null;
+    }
+
+    pub fn forcedTokens(self: LogitProcessor, buf: []usize) usize {
+        const f = self.vtable.forcedTokens orelse return 0;
+        return f(self.ptr, buf);
+    }
+
+    pub fn validPrefixLen(self: LogitProcessor, tokens: []const usize) usize {
+        const f = self.vtable.validPrefixLen orelse return tokens.len;
+        return f(self.ptr, tokens);
     }
 };
 

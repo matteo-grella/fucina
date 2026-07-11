@@ -360,6 +360,7 @@ pub const SpeculationIndex = struct {
         .suggest = vtSuggest,
         .observe = vtObserve,
         .observeTopK = vtObserveTopK,
+        .truncatePending = vtTruncatePending,
     };
 
     fn vtSuggest(ptr: *anyopaque, context: []const usize, buf: []usize) usize {
@@ -375,6 +376,11 @@ pub const SpeculationIndex = struct {
     fn vtObserveTopK(ptr: *anyopaque, positions: []const TopKRow) void {
         const self: *SpeculationIndex = @ptrCast(@alignCast(ptr));
         self.observeTopK(positions);
+    }
+
+    fn vtTruncatePending(ptr: *anyopaque, new_len: usize) void {
+        const self: *SpeculationIndex = @ptrCast(@alignCast(ptr));
+        self.truncatePending(new_len);
     }
 
     fn gateOf(self: *SpeculationIndex, src: SourceId) *Gate {

@@ -162,6 +162,69 @@ test "SPM bridge: attrs drive special marking and byte-fallback tokens" {
     try expectAllowed(proc, 7, &.{ 2, 4 }); // optional b, or close via </s>
 }
 
+test "structural hooks: forced spans surface as draft tokens, drafts validate" {
+    if (!llg.enabled) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+
+    const vocab = [_][]const u8{ "a", "b", "c", "<|end|>" };
+    var tok = try bpe.Tokenizer.initFromParts(alloc, &vocab, &.{}, .{ .eos = 3 });
+    defer tok.deinit();
+
+    // After the free "a|b" choice the grammar forces the literal "cab".
+    var constraint = try llg.Constraint.init(alloc, &tok, .{ .regex = "(a|b)cab" }, .{});
+    defer constraint.deinit();
+    const proc = constraint.processor();
+    try std.testing.expect(proc.hasStructure());
+
+    var buf: [8]usize = undefined;
+    // Free choice at the start: nothing forced.
+    try std.testing.expectEqual(@as(usize, 0), proc.forcedTokens(&buf));
+    // Drafts validate against the grammar: "a" then anything not "c" dies.
+    try std.testing.expectEqual(@as(usize, 1), proc.validPrefixLen(&.{ 0, 0, 1 }));
+    try std.testing.expectEqual(@as(usize, 2), proc.validPrefixLen(&.{ 1, 2 }));
+
+    try proc.commit(0); // choose "a" -> "cab" is now the unique continuation
+    const n = proc.forcedTokens(&buf);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 0, 1 }, buf[0..n]);
+
+    // Terminal state: no forcing, no valid continuations.
+    for (buf[0..n]) |t| try proc.commit(t);
+    try std.testing.expect(constraint.isAccepting());
+    try proc.commit(3); // eos
+    try std.testing.expect(constraint.isStopped());
+    try std.testing.expectEqual(@as(usize, 0), proc.forcedTokens(&buf));
+    try std.testing.expectEqual(@as(usize, 0), proc.validPrefixLen(&.{0}));
+}
+
+test "clone: independent per-stream matcher state over one compiled grammar" {
+    if (!llg.enabled) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+
+    const vocab = [_][]const u8{ "a", "b", "c", "<|end|>" };
+    var tok = try bpe.Tokenizer.initFromParts(alloc, &vocab, &.{}, .{ .eos = 3 });
+    defer tok.deinit();
+
+    var base = try llg.Constraint.init(alloc, &tok, .{ .regex = "ab+c" }, .{});
+    defer base.deinit();
+    var twin = try base.clone();
+    defer twin.deinit();
+
+    // Advance the streams independently; masks must diverge accordingly.
+    try expectAllowed(base.processor(), 4, &.{0});
+    try expectAllowed(twin.processor(), 4, &.{0});
+    try base.processor().commit(0);
+    try base.processor().commit(1);
+    try expectAllowed(base.processor(), 4, &.{ 1, 2 }); // base is mid-"ab"
+    try expectAllowed(twin.processor(), 4, &.{0}); // twin still at the start
+
+    // The refcounted tokenizer + borrowed bridge survive the clone's
+    // whole walk (would crash/misbehave if the clone didn't share them).
+    try twin.processor().commit(0);
+    try expectAllowed(twin.processor(), 4, &.{1});
+    try twin.reset();
+    try expectAllowed(twin.processor(), 4, &.{0});
+}
+
 test "sampler integration: greedy decode is steered through the grammar" {
     if (!llg.enabled) return error.SkipZigTest;
     const alloc = std.testing.allocator;

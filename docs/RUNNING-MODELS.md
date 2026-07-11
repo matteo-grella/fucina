@@ -112,9 +112,11 @@ zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf \
 # Constrained decoding (needs a -Dllguidance=true build — REFERENCE.md §13.6):
 # the reply must satisfy a JSON schema, regex, or Lark grammar. Combine with
 # --no-think (the grammar governs the whole reply, thinking channel included);
-# works in --chat/--repl/--prompt and composes with --spec. Prefer sampling
-# over --temp 0 and bound open-ended fields (maximum/maxLength/{m,n}) — a
-# greedy argmax inside an unbounded field can loop until the token budget.
+# works in --chat/--repl/--prompt, composes with --spec (grammar-forced spans
+# draft themselves — REFERENCE.md 13.9.6) and with --streams (one grammar
+# clone per stream). Prefer sampling over --temp 0 and bound open-ended
+# fields (maximum/maxLength/{m,n}) — a greedy argmax inside an unbounded
+# field can loop until the token budget.
 zig build qwen3 -Dllguidance=true -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf \
   --chat "Give me facts about Paris." --no-think \
   --json-schema '{"type":"object","properties":{"city":{"type":"string"},"population":{"type":"integer","maximum":99999999}},"required":["city","population"],"additionalProperties":false}'

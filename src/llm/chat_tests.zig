@@ -283,6 +283,234 @@ test "constrained conversation: mask holds, plain == speculative (sampled, fixed
     try expectConstrainedConversation(.{ .temperature = 0.9, .top_k = 8, .seed = 1234 });
 }
 
+/// Structural-hook logit processor: every reply must start with the `forced`
+/// token span (the mask allows exactly the next forced token while inside
+/// it), then any of `allowed`. `forcedTokens`/`validPrefixLen` expose that
+/// structure, so speculation wraps it in a `ConstrainedSource` — the grammar
+/// preamble drafts itself.
+const StructuredMask = struct {
+    forced: []const usize,
+    allowed: []const usize,
+    /// Reply position = commits since the last reset.
+    pos: usize = 0,
+    resets: usize = 0,
+
+    fn processor(self: *StructuredMask) sampler_mod.LogitProcessor {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable = sampler_mod.LogitProcessor.VTable{
+        .process = process,
+        .commit = commit,
+        .reset = reset,
+        .forcedTokens = forcedTokens,
+        .validPrefixLen = validPrefixLen,
+    };
+
+    fn allowedAt(self: *const StructuredMask, pos: usize, token: usize) bool {
+        if (pos < self.forced.len) return token == self.forced[pos];
+        for (self.allowed) |a| if (a == token) return true;
+        return false;
+    }
+
+    fn process(ptr: *anyopaque, logits: []f32, history: []const usize) anyerror!void {
+        _ = history;
+        const self: *StructuredMask = @ptrCast(@alignCast(ptr));
+        for (logits, 0..) |*l, tok| {
+            if (!self.allowedAt(self.pos, tok)) l.* = -std.math.inf(f32);
+        }
+    }
+
+    fn commit(ptr: *anyopaque, token: usize) anyerror!void {
+        _ = token;
+        const self: *StructuredMask = @ptrCast(@alignCast(ptr));
+        self.pos += 1;
+    }
+
+    fn reset(ptr: *anyopaque) anyerror!void {
+        const self: *StructuredMask = @ptrCast(@alignCast(ptr));
+        self.pos = 0;
+        self.resets += 1;
+    }
+
+    fn forcedTokens(ptr: *anyopaque, buf: []usize) usize {
+        const self: *StructuredMask = @ptrCast(@alignCast(ptr));
+        if (self.pos >= self.forced.len) return 0;
+        const rest = self.forced[self.pos..];
+        const n = @min(rest.len, buf.len);
+        @memcpy(buf[0..n], rest[0..n]);
+        return n;
+    }
+
+    fn validPrefixLen(ptr: *anyopaque, tokens: []const usize) usize {
+        const self: *StructuredMask = @ptrCast(@alignCast(ptr));
+        for (tokens, 0..) |t, i| {
+            if (!self.allowedAt(self.pos + i, t)) return i;
+        }
+        return tokens.len;
+    }
+};
+
+/// A processor with structural hooks routes speculation through the
+/// grammar-aware source: the forced reply preamble drafts itself and is
+/// accepted with certainty, while outputs stay token-for-token identical to
+/// the constrained plain run (greedy and sampled).
+fn expectGrammarDraftedConversation(sampler_cfg: sampler_mod.Config) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try scaffolding.buildTinyModel(&ctx, 0xC4A7);
+    defer model.deinit();
+    var tok = try Tokenizer.initFromParts(allocator, &tiny_vocab, &.{}, .{});
+    defer tok.deinit();
+    const tmpl = Template{ .format = .chatml };
+
+    const forced = [_]usize{ 0, 2, 4 }; // >= the decoder's default min_draft
+    const allowed = [_]usize{ 0, 2, 4, 6, 8, 13 }; // includes the stop id
+    const turns = [_][]const u8{ "ab a", "ba b" };
+
+    var streams: [2][]u8 = undefined;
+    for (0..2) |which| {
+        var mask = StructuredMask{ .forced = &forced, .allowed = &allowed };
+        var convo = try Conversation.init(&ctx, &model, &tok, tmpl, .{
+            .capacity = 256,
+            .max_response_tokens = 10,
+            .sampler = sampler_cfg,
+            .logit_processor = mask.processor(),
+            .speculation = which == 1,
+        });
+        defer convo.deinit();
+        // Speculation + structural hooks = the grammar-aware source.
+        if (which == 1) try std.testing.expect(convo.spec.?.grammar_source != null);
+
+        var aw = std.Io.Writer.Allocating.init(allocator);
+        defer aw.deinit();
+        for (turns) |msg| _ = try convo.send(msg, &aw.writer);
+        streams[which] = try allocator.dupe(u8, aw.written());
+
+        if (which == 1) {
+            // Every turn's forced preamble was drafted by the grammar and
+            // accepted with certainty (the masked sampler cannot disagree).
+            const stats = convo.specStats().?;
+            try std.testing.expect(stats.accepted >= turns.len * forced.len);
+        }
+    }
+    defer for (streams) |s| allocator.free(s);
+    try std.testing.expectEqualStrings(streams[0], streams[1]);
+}
+
+test "grammar-drafted conversation: forced spans accepted, plain == speculative (greedy)" {
+    try expectGrammarDraftedConversation(.{});
+}
+
+test "grammar-drafted conversation: forced spans accepted, plain == speculative (sampled)" {
+    try expectGrammarDraftedConversation(.{ .temperature = 0.9, .top_k = 8, .seed = 77 });
+}
+
+test "sendBatch: per-stream logit processors match individual constrained sends" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try scaffolding.buildTinyModel(&ctx, 0xC4A7);
+    defer model.deinit();
+    var tok = try Tokenizer.initFromParts(allocator, &tiny_vocab, &.{}, .{});
+    defer tok.deinit();
+    const tmpl = Template{ .format = .chatml };
+
+    // Distinct per-stream constraints (n = 2 stays below every m-dependent
+    // kernel threshold, so lockstep decode is bitwise vs sequential).
+    const allowed_sets = [2][]const usize{ &.{ 0, 2, 4, 6, 13 }, &.{ 1, 3, 5, 7, 13 } };
+    const users = [2][]const u8{ "ab a", "ba b" };
+
+    var streams: [2][2][]u8 = undefined;
+    for (0..2) |which| {
+        var masks: [2]CountingMask = undefined;
+        for (&masks, allowed_sets) |*m, set| m.* = .{ .allowed = set, .allocator = allocator };
+        defer for (&masks) |*m| m.deinit();
+
+        var convos: [2]Conversation = undefined;
+        var inited: usize = 0;
+        defer for (0..inited) |i| convos[i].deinit();
+        for (0..2) |i| {
+            convos[i] = try Conversation.init(&ctx, &model, &tok, tmpl, .{
+                .capacity = 256,
+                .max_response_tokens = 8,
+                .sampler = .{ .temperature = 0.7, .top_k = 8, .seed = 42 + i },
+                .logit_processor = masks[i].processor(),
+            });
+            inited += 1;
+        }
+
+        var aws: [2]std.Io.Writer.Allocating = undefined;
+        for (&aws) |*aw| aw.* = std.Io.Writer.Allocating.init(allocator);
+        defer for (&aws) |*aw| aw.deinit();
+
+        if (which == 0) {
+            for (0..2) |i| _ = try convos[i].send(users[i], &aws[i].writer);
+        } else {
+            var convo_ptrs: [2]*Conversation = .{ &convos[0], &convos[1] };
+            var writer_ptrs: [2]*std.Io.Writer = .{ &aws[0].writer, &aws[1].writer };
+            var users_slice: [2][]const u8 = users;
+            var produced: [2]usize = undefined;
+            try Conversation.sendBatch(&convo_ptrs, &users_slice, &writer_ptrs, &produced);
+        }
+
+        // Each stream's selections honored ITS mask (no cross-stream bleed).
+        for (masks, allowed_sets) |m, set| {
+            for (m.commits.items) |t| {
+                var ok = false;
+                for (set) |a| ok = ok or a == t;
+                try std.testing.expect(ok);
+            }
+        }
+        for (0..2) |i| streams[which][i] = try allocator.dupe(u8, aws[i].written());
+    }
+    defer for (&streams) |*mode| for (mode.*) |s| allocator.free(s);
+    for (0..2) |i| try std.testing.expectEqualStrings(streams[0][i], streams[1][i]);
+}
+
+test "sendBatch rejects a logit processor shared between streams" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try scaffolding.buildTinyModel(&ctx, 0xC4A7);
+    defer model.deinit();
+    var tok = try Tokenizer.initFromParts(allocator, &tiny_vocab, &.{}, .{});
+    defer tok.deinit();
+    const tmpl = Template{ .format = .chatml };
+
+    var mask = CountingMask{ .allowed = &.{ 0, 13 }, .allocator = allocator };
+    defer mask.deinit();
+
+    var a = try Conversation.init(&ctx, &model, &tok, tmpl, .{ .logit_processor = mask.processor() });
+    defer a.deinit();
+    var b = try Conversation.init(&ctx, &model, &tok, tmpl, .{ .logit_processor = mask.processor() });
+    defer b.deinit();
+
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    var convos: [2]*Conversation = .{ &a, &b };
+    var users: [2][]const u8 = .{ "a", "b" };
+    var writers: [2]*std.Io.Writer = .{ &w, &w };
+    var produced: [2]usize = undefined;
+    try std.testing.expectError(error.SharedBatchProcessor, Conversation.sendBatch(&convos, &users, &writers, &produced));
+}
+
 test "spec turn: writer failure mid-turn leaves the conversation consistent; the next send works" {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");

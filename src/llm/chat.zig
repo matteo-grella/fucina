@@ -15,6 +15,7 @@ const kv_cache = @import("kv_cache.zig");
 const sampler_mod = @import("sampler.zig");
 const speculative = @import("speculative/core.zig");
 const spec_cascade = @import("speculative/cascade.zig");
+const spec_constrained = @import("speculative/constrained.zig");
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
@@ -198,7 +199,20 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
 
         const SpecState = struct {
             index: spec_cascade.SpeculationIndex,
+            /// Grammar-aware wrapper around the cascade, present when the
+            /// conversation's logit processor exposes structural hooks
+            /// (`LogitProcessor.hasStructure`): grammar-forced spans draft
+            /// themselves and cascade drafts are pre-filtered to their
+            /// grammar-valid prefix (`speculative/constrained.zig`).
+            grammar_source: ?spec_constrained.ConstrainedSource,
             decoder: speculative.SpeculativeDecoder(Model),
+
+            /// The decoder's steady-state draft source: the grammar wrapper
+            /// when present, the cascade directly otherwise.
+            fn baseSource(st: *SpecState) speculative.DraftSource {
+                if (st.grammar_source) |*gs| return gs.source();
+                return st.index.asDraftSource();
+            }
         };
 
         pub fn init(ctx: *ExecContext, model: *const Model, tokenizer: *const Tok.Tokenizer, template: Template, options: Options) !Self {
@@ -212,6 +226,10 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 errdefer ctx.allocator.destroy(st);
                 st.index = try spec_cascade.SpeculationIndex.init(ctx.allocator, model.config.vocab_size);
                 errdefer st.index.deinit();
+                st.grammar_source = if (options.logit_processor) |p|
+                    (if (p.hasStructure()) spec_constrained.ConstrainedSource.init(p, st.index.asDraftSource()) else null)
+                else
+                    null;
                 // Stop-awareness (RNG/lossless contract): the decoder must not
                 // sample verify rows past a committed stop marker — the plain
                 // path stops there, and the persistent sampler would otherwise
@@ -221,7 +239,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 // Acceptance accounting settles only drafts the decoder
                 // actually verifies (cascade.zig's accounting contract).
                 st.index.accounting_min_draft = spec_options.min_draft;
-                st.decoder = try speculative.SpeculativeDecoder(Model).init(ctx.allocator, st.index.asDraftSource(), spec_options);
+                st.decoder = try speculative.SpeculativeDecoder(Model).init(ctx.allocator, st.baseSource(), spec_options);
                 st.decoder.io = options.io;
                 spec = st;
             }
@@ -382,7 +400,19 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             for (convos, 0..) |convo, i| {
                 if (convo.spec != null) return error.SpeculationWithBatch;
                 if (convo.ctx != first.ctx or convo.model != first.model) return error.MixedBatchModels;
-                for (convos[0..i]) |prev| if (prev == convo) return error.DuplicateBatchConversation;
+                for (convos[0..i]) |prev| {
+                    if (prev == convo) return error.DuplicateBatchConversation;
+                    // A logit processor is single-stream state (grammar
+                    // position, RNG-adjacent bookkeeping): two lockstep
+                    // streams sharing one would interleave commits and
+                    // corrupt both. One constraint instance per stream
+                    // (llguidance: `Constraint.clone`).
+                    if (convo.sampler.processor) |p| {
+                        if (prev.sampler.processor) |q| {
+                            if (p.ptr == q.ptr) return error.SharedBatchProcessor;
+                        }
+                    }
+                }
             }
             // Comptime-gated so model families without a batch entry (e.g.
             // gemma4 today) still compile the Conversation type; they get a
@@ -544,14 +574,13 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             var gate = TurnGate{
                 .convo = self,
                 .writer = writer,
-                .inner = st.index.asDraftSource(),
-                .index = &st.index,
+                .inner = st.baseSource(),
                 .sink_acc = .{ .stop = self.stop_id, .extra = self.extra_stop_ids, .budget = self.max_response_tokens },
                 .obs_acc = .{ .stop = self.stop_id, .extra = self.extra_stop_ids, .budget = self.max_response_tokens },
             };
             // Route the decoder's source through the gate for this turn.
             st.decoder.source = gate.source();
-            defer st.decoder.source = st.index.asDraftSource();
+            defer st.decoder.source = st.baseSource();
 
             // Trim the stop marker and any overshoot committed past the boundary
             // — UNCONDITIONALLY, error paths included (a failed write mid-turn
@@ -589,9 +618,6 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             convo: *Self,
             writer: *std.Io.Writer,
             inner: speculative.DraftSource,
-            /// The wrapped cascade, for pending-accounting adjustments when the
-            /// gate truncates a draft the inner suggest already recorded.
-            index: *spec_cascade.SpeculationIndex,
             sink_acc: Accept,
             obs_acc: Accept,
             /// Tokens forwarded by the most recent observe (bounds observeTopK rows).
@@ -620,8 +646,9 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             /// has left — and truncate it at the first stop marker, so the turn
             /// boundary token can only arrive as a correction/bonus SAMPLE (one
             /// draw, like plain; the decoder's stop_token then ends the row loop).
-            /// The pending accounting shrinks with the truncation: the decoder
-            /// only ever verifies the truncated prefix.
+            /// The pending accounting shrinks with the truncation
+            /// (`DraftSource.truncatePending`): the decoder only ever verifies
+            /// the truncated prefix.
             fn gSuggest(ptr: *anyopaque, context: []const usize, buf: []usize) usize {
                 const self: *TurnGate = @ptrCast(@alignCast(ptr));
                 const remaining = self.convo.max_response_tokens -| self.sink_acc.n;
@@ -629,7 +656,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 const n = self.inner.suggest(context, buf[0..@min(buf.len, remaining - 1)]);
                 for (buf[0..n], 0..) |t, j| {
                     if (self.convo.isStopToken(t)) {
-                        self.index.truncatePending(j);
+                        self.inner.truncatePending(j);
                         return j;
                     }
                 }

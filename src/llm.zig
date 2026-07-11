@@ -41,6 +41,7 @@ pub const speculative = struct {
     pub const sam_index = @import("llm/speculative/sam_index.zig");
     pub const recycling = @import("llm/speculative/recycling.zig");
     pub const cascade = @import("llm/speculative/cascade.zig");
+    pub const constrained = @import("llm/speculative/constrained.zig");
 };
 
 // === Generic / shared helpers (stay flat) ===
@@ -79,6 +80,7 @@ test {
     _ = speculative.sam_index;
     _ = speculative.recycling;
     _ = speculative.cascade;
+    _ = speculative.constrained;
     _ = weights;
     _ = ptqtp_gguf;
     _ = gguf_meta;

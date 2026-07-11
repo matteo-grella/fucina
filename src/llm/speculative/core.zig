@@ -85,6 +85,12 @@ pub const DraftSource = struct {
         /// Observe verification logits feedback. Null = the source has no use
         /// for it and the decoder skips computing the top-k entirely.
         observeTopK: ?*const fn (ptr: *anyopaque, positions: []const TopKRow) void = null,
+        /// A wrapper truncated the draft this source just returned from
+        /// `suggest` to its first `new_len` tokens (turn-boundary or
+        /// grammar-filter hygiene): shrink any pending acceptance accounting
+        /// to match, so the never-verified tail cannot skew source gates.
+        /// Null = the source keeps no pending accounting.
+        truncatePending: ?*const fn (ptr: *anyopaque, new_len: usize) void = null,
     };
 
     pub fn suggest(self: DraftSource, context: []const usize, buf: []usize) usize {
@@ -101,6 +107,10 @@ pub const DraftSource = struct {
 
     pub fn wantsTopK(self: DraftSource) bool {
         return self.vtable.observeTopK != null;
+    }
+
+    pub fn truncatePending(self: DraftSource, new_len: usize) void {
+        if (self.vtable.truncatePending) |f| f(self.ptr, new_len);
     }
 };
 

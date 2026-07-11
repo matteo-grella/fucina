@@ -179,6 +179,9 @@ const c = struct {
     extern fn llg_matcher_is_accepting(matcher: *LlgMatcher) bool;
     extern fn llg_matcher_reset(matcher: *LlgMatcher) i32;
     extern fn llg_matcher_compute_ff_tokens(matcher: *LlgMatcher, output: [*]u32, output_len: usize) i32;
+    extern fn llg_matcher_validate_tokens(matcher: *LlgMatcher, tokens: [*]const u32, n_tokens: usize) i32;
+    extern fn llg_clone_matcher(matcher: *const LlgMatcher) *LlgMatcher;
+    extern fn llg_clone_tokenizer(tok: *const LlgTokenizer) *LlgTokenizer;
     extern fn llg_get_version() [*:0]const u8;
 };
 
@@ -278,6 +281,9 @@ fn buildVocab(allocator: Allocator, kind: TokKind, n_vocab: usize) !struct { len
 const ConstraintImpl = struct {
     allocator: Allocator,
     bridge: *Bridge,
+    /// False on clones: the tokenize bridge belongs to the cloned-from
+    /// constraint, which must outlive this one.
+    owns_bridge: bool = true,
     tok: *c.LlgTokenizer,
     matcher: *c.LlgMatcher,
     /// One bit per token id, written by `llg_matcher_compute_mask_into`.
@@ -365,8 +371,31 @@ const ConstraintImpl = struct {
         c.llg_free_matcher(self.matcher);
         c.llg_free_tokenizer(self.tok);
         self.allocator.free(self.mask);
-        self.allocator.destroy(self.bridge);
+        if (self.owns_bridge) self.allocator.destroy(self.bridge);
         self.* = undefined;
+    }
+
+    /// An independent decode-stream twin over the same compiled grammar:
+    /// the matcher state is deep-cloned (clone right after init/`reset` for
+    /// a fresh stream), the tokenizer handle is reference-counted, and the
+    /// tokenize bridge is borrowed — `self` must outlive every clone. Much
+    /// cheaper than a second `init` (no vocab rebuild, no grammar
+    /// recompilation); the per-stream primitive behind `sendBatch` and the
+    /// qwen3 `--streams` runner.
+    pub fn clone(self: *const ConstraintImpl) Error!ConstraintImpl {
+        const mask = try self.allocator.alloc(u32, self.mask.len);
+        return .{
+            .allocator = self.allocator,
+            .bridge = self.bridge,
+            .owns_bridge = false,
+            .tok = c.llg_clone_tokenizer(self.tok),
+            .matcher = c.llg_clone_matcher(self.matcher),
+            .mask = mask,
+            .n_vocab = self.n_vocab,
+            .eos = self.eos,
+            .log_level = self.log_level,
+            .failed = self.failed,
+        };
     }
 
     /// The `LogitProcessor` adapter to install on a `Sampler` /
@@ -418,7 +447,13 @@ const ConstraintImpl = struct {
         .process = vtProcess,
         .commit = vtCommit,
         .reset = vtReset,
+        .forcedTokens = vtForcedTokens,
+        .validPrefixLen = vtValidPrefixLen,
     };
+
+    /// Stack cap for the usize↔u32 token conversions in the structural
+    /// hooks; far above any draft budget (`speculative.Options.max_draft`).
+    const hook_buf_cap = 128;
 
     fn vtProcess(ptr: *anyopaque, logits: []f32, history: []const usize) anyerror!void {
         _ = history; // the matcher carries its own state
@@ -456,6 +491,35 @@ const ConstraintImpl = struct {
         const self: *ConstraintImpl = @ptrCast(@alignCast(ptr));
         return self.reset();
     }
+
+    /// `LogitProcessor.forcedTokens`: grammar-forced continuation (pure
+    /// lookahead; 0 when the next token is a free choice or the grammar is
+    /// terminal — the terminal forced-stop is the mask's job, not a draft).
+    fn vtForcedTokens(ptr: *anyopaque, buf: []usize) usize {
+        const self: *ConstraintImpl = @ptrCast(@alignCast(ptr));
+        if (self.isStopped()) return 0;
+        var tmp: [hook_buf_cap]u32 = undefined;
+        const cap = @min(buf.len, tmp.len);
+        const n = c.llg_matcher_compute_ff_tokens(self.matcher, &tmp, cap);
+        if (n <= 0) return 0;
+        const count: usize = @intCast(n);
+        for (buf[0..count], tmp[0..count]) |*d, s| d.* = s;
+        return count;
+    }
+
+    /// `LogitProcessor.validPrefixLen`: how many leading `tokens` the
+    /// grammar accepts (pure lookahead). Errors degrade to 0 — a draft is
+    /// advice, never worth poisoning the constraint over.
+    fn vtValidPrefixLen(ptr: *anyopaque, tokens: []const usize) usize {
+        const self: *ConstraintImpl = @ptrCast(@alignCast(ptr));
+        if (self.isStopped()) return 0;
+        var tmp: [hook_buf_cap]u32 = undefined;
+        const n = @min(tokens.len, tmp.len);
+        for (tmp[0..n], tokens[0..n]) |*d, s| d.* = @intCast(s);
+        const v = c.llg_matcher_validate_tokens(self.matcher, &tmp, n);
+        if (v < 0) return 0;
+        return @intCast(v);
+    }
 };
 
 /// `-Dllguidance=false` stand-in: same surface, `init` always fails. Keeps
@@ -470,6 +534,10 @@ const ConstraintStub = struct {
     }
     pub fn deinit(self: *ConstraintStub) void {
         _ = self;
+    }
+    pub fn clone(self: *const ConstraintStub) Error!ConstraintStub {
+        _ = self;
+        unreachable; // init never succeeds
     }
     pub fn processor(self: *ConstraintStub) LogitProcessor {
         _ = self;
