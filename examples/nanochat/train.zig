@@ -185,7 +185,7 @@ pub fn deriveHparams(a: DeriveArgs) !Hparams {
 /// nothing.
 pub fn microStep(
     ctx: *ExecContext,
-    model: *const Model,
+    model: anytype,
     inputs: []const i32,
     targets: []const i32,
     b: usize,
@@ -249,7 +249,7 @@ pub const BpbAccum = struct { nats: f64 = 0, bytes: u64 = 0 };
 /// nats). Forward-only (no backward) under a per-sequence exec scope.
 pub fn accumBpb(
     ctx: *ExecContext,
-    model: *const Model,
+    model: anytype,
     token_bytes: []const u32,
     inputs: []const i32,
     targets: []const i32,
@@ -309,43 +309,45 @@ pub const NcState = struct {
     epoch: i64,
 };
 
-const ModelSaveCtx = struct {
-    model: *const Model,
-    allocator: Allocator,
+fn ModelSaveCtx(comptime ModelT: type) type {
+    return struct {
+        model: *const ModelT,
+        allocator: Allocator,
 
-    fn write(self: ModelSaveCtx, w: *std.Io.Writer) !void {
-        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena_state.deinit();
-        const arena = arena_state.allocator();
+        fn write(self: @This(), w: *std.Io.Writer) !void {
+            var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena_state.deinit();
+            const arena = arena_state.allocator();
 
-        var entries: std.ArrayList(state_dict.NamedTensor) = .empty;
-        const m = self.model;
-        try entries.append(arena, try state_dict.NamedTensor.of("transformer.wte.weight", &m.wte));
-        try entries.append(arena, try state_dict.NamedTensor.of("lm_head.weight", &m.lm_head));
-        try entries.append(arena, try state_dict.NamedTensor.of("resid_lambdas", &m.resid_lambdas));
-        try entries.append(arena, try state_dict.NamedTensor.of("x0_lambdas", &m.x0_lambdas));
-        try entries.append(arena, try state_dict.NamedTensor.of("smear_gate.weight", &m.smear_gate));
-        try entries.append(arena, try state_dict.NamedTensor.of("smear_lambda", &m.smear_lambda));
-        try entries.append(arena, try state_dict.NamedTensor.of("backout_lambda", &m.backout_lambda));
-        for (m.layers, 0..) |*l, i| {
-            try entries.append(arena, try state_dict.NamedTensor.of(try std.fmt.allocPrint(arena, "transformer.h.{d}.attn.c_q.weight", .{i}), &l.c_q));
-            try entries.append(arena, try state_dict.NamedTensor.of(try std.fmt.allocPrint(arena, "transformer.h.{d}.attn.c_k.weight", .{i}), &l.c_k));
-            try entries.append(arena, try state_dict.NamedTensor.of(try std.fmt.allocPrint(arena, "transformer.h.{d}.attn.c_v.weight", .{i}), &l.c_v));
-            try entries.append(arena, try state_dict.NamedTensor.of(try std.fmt.allocPrint(arena, "transformer.h.{d}.attn.c_proj.weight", .{i}), &l.c_proj));
-            try entries.append(arena, try state_dict.NamedTensor.of(try std.fmt.allocPrint(arena, "transformer.h.{d}.mlp.c_fc.weight", .{i}), &l.c_fc));
-            try entries.append(arena, try state_dict.NamedTensor.of(try std.fmt.allocPrint(arena, "transformer.h.{d}.mlp.c_proj.weight", .{i}), &l.c_proj_mlp));
-            if (l.ve_gate) |*g| {
-                try entries.append(arena, try state_dict.NamedTensor.of(try std.fmt.allocPrint(arena, "transformer.h.{d}.attn.ve_gate.weight", .{i}), g));
+            var entries: std.ArrayList(state_dict.NamedTensor) = .empty;
+            const m = self.model;
+            try entries.append(arena, try state_dict.NamedTensor.of("transformer.wte.weight", &m.wte));
+            try entries.append(arena, try state_dict.NamedTensor.of("lm_head.weight", &m.lm_head));
+            try entries.append(arena, try state_dict.NamedTensor.of("resid_lambdas", &m.resid_lambdas));
+            try entries.append(arena, try state_dict.NamedTensor.of("x0_lambdas", &m.x0_lambdas));
+            try entries.append(arena, try state_dict.NamedTensor.of("smear_gate.weight", &m.smear_gate));
+            try entries.append(arena, try state_dict.NamedTensor.of("smear_lambda", &m.smear_lambda));
+            try entries.append(arena, try state_dict.NamedTensor.of("backout_lambda", &m.backout_lambda));
+            for (m.layers, 0..) |*l, i| {
+                try entries.append(arena, try state_dict.NamedTensor.of(try std.fmt.allocPrint(arena, "transformer.h.{d}.attn.c_q.weight", .{i}), &l.c_q));
+                try entries.append(arena, try state_dict.NamedTensor.of(try std.fmt.allocPrint(arena, "transformer.h.{d}.attn.c_k.weight", .{i}), &l.c_k));
+                try entries.append(arena, try state_dict.NamedTensor.of(try std.fmt.allocPrint(arena, "transformer.h.{d}.attn.c_v.weight", .{i}), &l.c_v));
+                try entries.append(arena, try state_dict.NamedTensor.of(try std.fmt.allocPrint(arena, "transformer.h.{d}.attn.c_proj.weight", .{i}), &l.c_proj));
+                try entries.append(arena, try state_dict.NamedTensor.of(try std.fmt.allocPrint(arena, "transformer.h.{d}.mlp.c_fc.weight", .{i}), &l.c_fc));
+                try entries.append(arena, try state_dict.NamedTensor.of(try std.fmt.allocPrint(arena, "transformer.h.{d}.mlp.c_proj.weight", .{i}), &l.c_proj_mlp));
+                if (l.ve_gate) |*g| {
+                    try entries.append(arena, try state_dict.NamedTensor.of(try std.fmt.allocPrint(arena, "transformer.h.{d}.attn.ve_gate.weight", .{i}), g));
+                }
             }
-        }
-        for (m.value_embeds, 0..) |*ve, i| {
-            if (ve.*) |*t| {
-                try entries.append(arena, try state_dict.NamedTensor.of(try std.fmt.allocPrint(arena, "value_embeds.{d}.weight", .{i}), t));
+            for (m.value_embeds, 0..) |*ve, i| {
+                if (ve.*) |*t| {
+                    try entries.append(arena, try state_dict.NamedTensor.of(try std.fmt.allocPrint(arena, "value_embeds.{d}.weight", .{i}), t));
+                }
             }
+            try state_dict.saveStateDict(self.allocator, w, entries.items);
         }
-        try state_dict.saveStateDict(self.allocator, w, entries.items);
-    }
-};
+    };
+}
 
 const OptSaveCtx = struct {
     opt: *MuonAdamW,
@@ -433,13 +435,14 @@ fn resumeSourceDir(allocator: Allocator, io: std.Io, dir: []const u8) ![]u8 {
 /// Write the three checkpoint files, trainer_state.json LAST as the commit
 /// sentinel (training_checkpoint.beginSave deletes it first). The previous
 /// complete checkpoint is rotated into `<dir>/prev/` beforehand.
-pub fn saveCheckpoint(allocator: Allocator, io: std.Io, dir: []const u8, model: *const Model, opt: *MuonAdamW, state: NcState) !void {
+pub fn saveCheckpoint(allocator: Allocator, io: std.Io, dir: []const u8, model: anytype, opt: *MuonAdamW, state: NcState) !void {
     try rotatePrevCheckpoint(allocator, io, dir);
     try training_checkpoint.beginSave(allocator, io, dir);
 
     const model_path = try training_checkpoint.pathJoin(allocator, dir, training_checkpoint.model_state_file);
     defer allocator.free(model_path);
-    try training_checkpoint.writeFileAtomic(io, model_path, ModelSaveCtx{ .model = model, .allocator = allocator }, ModelSaveCtx.write);
+    const SaveCtx = ModelSaveCtx(@typeInfo(@TypeOf(model)).pointer.child);
+    try training_checkpoint.writeFileAtomic(io, model_path, SaveCtx{ .model = model, .allocator = allocator }, SaveCtx.write);
 
     const opt_path = try training_checkpoint.pathJoin(allocator, dir, training_checkpoint.optimizer_state_file);
     defer allocator.free(opt_path);
@@ -848,7 +851,7 @@ const sample_prompts = [_][]const u8{
 
 /// Greedy (temperature 0) continuation previews via full-sequence re-forward
 /// (no KV cache — fine for a short 16-token preview).
-fn samplePreviews(ctx: *ExecContext, model: *const Model, tokenizer: *const Tokenizer, allocator: Allocator, stdout: *std.Io.Writer) !void {
+fn samplePreviews(ctx: *ExecContext, model: anytype, tokenizer: *const Tokenizer, allocator: Allocator, stdout: *std.Io.Writer) !void {
     for (sample_prompts) |prompt| {
         const prompt_ids32 = try tokenizer.encodeWithBos(allocator, prompt);
         defer allocator.free(prompt_ids32);

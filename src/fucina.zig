@@ -51,6 +51,10 @@ pub const gradcheck = ag.gradcheck;
 pub const GradcheckOptions = ag.GradcheckOptions;
 pub const GradcheckResult = ag.GradcheckResult;
 pub const DType = dtype.DType;
+/// bf16 <-> f32 scalar converters (bf16 tensors store raw u16 bits): the
+/// bridge for consumers of bf16 state dicts and 16-bit params.
+pub const bf16ToF32 = dtype.bf16ToF32;
+pub const f32ToBf16 = dtype.f32ToBf16;
 pub const supports_q4_k_mmla = backend.supports_q4_k_mmla;
 pub const PackedRhs = ag.PackedRhs;
 pub const PackedRhsLayout = backend.PackedRhsLayout;

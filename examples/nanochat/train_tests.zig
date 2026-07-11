@@ -332,7 +332,7 @@ fn snapshotParams(model: *const Model, allocator: Allocator) ![]f32 {
 
 fn runSteps(
     ctx: *ExecContext,
-    model: *const Model,
+    model: anytype,
     opt: *MuonAdamW,
     inputs: []const i32,
     targets: []const i32,
@@ -448,4 +448,162 @@ test "resume determinism: interrupted 20+20 run equals uninterrupted 40 bit-for-
     try std.testing.expectEqual(snap_a.len, snap_c.len);
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(snap_a), std.mem.sliceAsBytes(snap_c));
     testlog.print("resume determinism: {d} params bit-identical across 20+20 vs 40\n", .{snap_a.len});
+}
+
+// ---------------------------------------------------------------------------
+// Gate 4: bf16 matrix params (ModelOf(.bf16), always-on)
+// ---------------------------------------------------------------------------
+
+fn appendBytes(list: *std.ArrayList(u8), allocator: Allocator, t: anytype) !void {
+    try list.appendSlice(allocator, std.mem.sliceAsBytes(try t.dataConst()));
+}
+
+/// Concatenate every parameter's raw storage bytes in a fixed order
+/// (dtype-generic twin of snapshotParams).
+fn snapshotParamBytes(model: anytype, allocator: Allocator) ![]u8 {
+    var list: std.ArrayList(u8) = .empty;
+    errdefer list.deinit(allocator);
+    try appendBytes(&list, allocator, &model.wte);
+    try appendBytes(&list, allocator, &model.lm_head);
+    try appendBytes(&list, allocator, &model.resid_lambdas);
+    try appendBytes(&list, allocator, &model.x0_lambdas);
+    try appendBytes(&list, allocator, &model.smear_gate);
+    try appendBytes(&list, allocator, &model.smear_lambda);
+    try appendBytes(&list, allocator, &model.backout_lambda);
+    for (model.layers) |*l| {
+        try appendBytes(&list, allocator, &l.c_q);
+        try appendBytes(&list, allocator, &l.c_k);
+        try appendBytes(&list, allocator, &l.c_v);
+        try appendBytes(&list, allocator, &l.c_proj);
+        try appendBytes(&list, allocator, &l.c_fc);
+        try appendBytes(&list, allocator, &l.c_proj_mlp);
+        if (l.ve_gate) |*g| try appendBytes(&list, allocator, g);
+    }
+    for (model.value_embeds) |*ve| {
+        if (ve.*) |*t| try appendBytes(&list, allocator, t);
+    }
+    return list.toOwnedSlice(allocator);
+}
+
+test "bf16 matrix params: training moves params and resumes bit-for-bit" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const Bf16Model = model_mod.ModelOf(.bf16);
+    const cfg = Config.d2;
+    const seed: u64 = 0xBF16;
+    const b: usize = 2;
+    const t: usize = 16;
+    const n_steps: usize = 12;
+    const half: usize = 6;
+    const num_iters: usize = 5000;
+
+    // One fixed batch reused every step: guaranteed overfit signal.
+    const nbt = b * t;
+    const inputs = try allocator.alloc(i32, nbt);
+    defer allocator.free(inputs);
+    const targets = try allocator.alloc(i32, nbt);
+    defer allocator.free(targets);
+    for (0..nbt) |i| {
+        inputs[i] = @intCast(fucina.rng.at(0x3333, i) % cfg.vocab_size);
+        targets[i] = @intCast(fucina.rng.at(0x4444, i) % cfg.vocab_size);
+    }
+
+    const hp = try train.deriveHparams(.{
+        .depth = 2,
+        .aspect_ratio = 64,
+        .head_dim = 64,
+        .vocab_size = cfg.vocab_size,
+        .total_batch_size = nbt,
+        .device_batch_size = b,
+        .max_seq_len = t,
+        .embedding_lr = 0.3,
+        .unembedding_lr = 0.008,
+        .matrix_lr = 0.02,
+        .scalar_lr = 0.5,
+        .weight_decay = 0.28,
+    });
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    // Run A: uninterrupted n_steps; capture losses and the final bytes.
+    var first_loss: f32 = 0;
+    var last_loss: f32 = 0;
+    const snap_a = blk: {
+        var model = try Bf16Model.initRandom(cfg, &ctx, allocator, seed);
+        defer model.deinit();
+        comptime std.debug.assert(@TypeOf(model.layers[0].c_q).dtype == .bf16);
+        comptime std.debug.assert(@TypeOf(model.wte).dtype == .f32); // embeddings stay f32
+        var opt = MuonAdamW.init(allocator, hp.opt_config);
+        defer opt.deinit();
+        try opt.registerModel(&model);
+
+        const init_bytes = try snapshotParamBytes(&model, allocator);
+        defer allocator.free(init_bytes);
+        for (0..n_steps) |step| {
+            const loss = try train.microStep(&ctx, &model, inputs, targets, b, t, 1, allocator);
+            if (step == 0) first_loss = loss;
+            last_loss = loss;
+            try opt.step(&ctx, StepSchedule.at(step, num_iters, hp.weight_decay_scaled));
+            opt.zeroGrad();
+        }
+        try std.testing.expect(std.math.isFinite(first_loss) and std.math.isFinite(last_loss));
+        try std.testing.expect(last_loss < first_loss); // overfits the fixed batch
+        const final_bytes = try snapshotParamBytes(&model, allocator);
+        try std.testing.expect(!std.mem.eql(u8, init_bytes, final_bytes)); // params moved
+        break :blk final_bytes;
+    };
+    defer allocator.free(snap_a);
+
+    // Run B: half the steps, checkpoint (bf16 safetensors + NCMA2 masters).
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(dir_path);
+    {
+        var model = try Bf16Model.initRandom(cfg, &ctx, allocator, seed);
+        defer model.deinit();
+        var opt = MuonAdamW.init(allocator, hp.opt_config);
+        defer opt.deinit();
+        try opt.registerModel(&model);
+        for (0..half) |step| {
+            _ = try train.microStep(&ctx, &model, inputs, targets, b, t, 1, allocator);
+            try opt.step(&ctx, StepSchedule.at(step, num_iters, hp.weight_decay_scaled));
+            opt.zeroGrad();
+        }
+        try train.saveCheckpoint(allocator, io, dir_path, &model, &opt, .{
+            .step = half,
+            .seed = seed,
+            .num_iterations = num_iters,
+            .weight_decay_scaled = hp.weight_decay_scaled,
+            .pq_idx = 0,
+            .rg_idx = 0,
+            .epoch = 1,
+        });
+    }
+
+    // Run C: reload (BF16 safetensors entries + masters), finish the run.
+    const snap_c = blk: {
+        const model_path = try std.fs.path.join(allocator, &.{ dir_path, "model.safetensors" });
+        defer allocator.free(model_path);
+        var model = try Bf16Model.initFromSafetensors(cfg, &ctx, allocator, io, model_path);
+        defer model.deinit();
+        var opt = MuonAdamW.init(allocator, hp.opt_config);
+        defer opt.deinit();
+        try opt.registerModel(&model);
+        try train.loadOptimizerState(allocator, io, dir_path, &opt);
+        for (half..n_steps) |step| {
+            _ = try train.microStep(&ctx, &model, inputs, targets, b, t, 1, allocator);
+            try opt.step(&ctx, StepSchedule.at(step, num_iters, hp.weight_decay_scaled));
+            opt.zeroGrad();
+        }
+        break :blk try snapshotParamBytes(&model, allocator);
+    };
+    defer allocator.free(snap_c);
+
+    try std.testing.expectEqual(snap_a.len, snap_c.len);
+    try std.testing.expectEqualSlices(u8, snap_a, snap_c);
+    testlog.print("bf16 matrix params: loss {d:.4} -> {d:.4}, resume bit-identical\n", .{ first_loss, last_loss });
 }

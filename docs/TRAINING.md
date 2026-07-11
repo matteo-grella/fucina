@@ -643,6 +643,12 @@ Every OTHER typed forward op (the §4.19 surface) is no-grad by design and
 rejects a grad-requiring operand with `error.UnsupportedGradient` — a graph
 is never silently dropped. In a trained path, widen with `to(.f32)` first.
 
+Worked example: `examples/nanochat` trains its transformer matrices in bf16
+via `ModelOf(.bf16)` — the matrices are 16-bit leaves consumed as `dot`
+RHS, embeddings stay f32 (they train through `gather`), the AdamW-routed
+params ride the optimizer masters above, and its custom Muon steps
+group-level f32 masters persisted by the NCMA2 optimizer frame.
+
 **Autocast policy.** There is no runtime autocast scope — result dtypes are
 comptime facts here, so the policy is written in the model code's types.
 The house policy matches torch AMP's lists: contractions may take 16-bit

@@ -166,6 +166,9 @@ const polar_coeffs = [5][3]f64{
 const ParamAccess = struct {
     ptr: *anyopaque,
     len: usize,
+    /// False for bf16 matrices: readValue widens, writeValue narrows, and
+    /// the group steps a persistent f32 master instead of the storage.
+    is_f32: bool,
     readValue: *const fn (*const anyopaque, []f32) void,
     writeValue: *const fn (*anyopaque, []const f32) void,
     readGrad: *const fn (*const anyopaque, *ExecContext, []f32) anyerror!void,
@@ -174,14 +177,28 @@ const ParamAccess = struct {
     fn of(t: anytype) ParamAccess {
         const Ptr = @TypeOf(t);
         const T = @typeInfo(Ptr).pointer.child;
+        comptime {
+            if (T.dtype != .f32 and T.dtype != .bf16)
+                @compileError("MuonAdamW matrix params must be f32 or bf16");
+        }
         const Gen = struct {
             fn readValue(p: *const anyopaque, dst: []f32) void {
                 const tp: *const T = @ptrCast(@alignCast(p));
-                @memcpy(dst, tp.value.dataConstChecked() catch unreachable);
+                const src = tp.value.dataConstChecked() catch unreachable;
+                if (comptime T.dtype == .f32) {
+                    @memcpy(dst, src);
+                } else {
+                    for (dst, src) |*d, bits| d.* = fucina.bf16ToF32(bits);
+                }
             }
             fn writeValue(p: *anyopaque, src: []const f32) void {
                 const tp: *T = @ptrCast(@alignCast(p));
-                @memcpy(tp.value.dataChecked() catch unreachable, src);
+                const dst = tp.value.dataChecked() catch unreachable;
+                if (comptime T.dtype == .f32) {
+                    @memcpy(dst, src);
+                } else {
+                    for (dst, src) |*d, value| d.* = fucina.f32ToBf16(value);
+                }
             }
             fn readGrad(p: *const anyopaque, ctx: *ExecContext, dst: []f32) anyerror!void {
                 const tp: *const T = @ptrCast(@alignCast(p));
@@ -197,6 +214,7 @@ const ParamAccess = struct {
         return .{
             .ptr = @ptrCast(@constCast(t)),
             .len = t.value.len(),
+            .is_f32 = T.dtype == .f32,
             .readValue = Gen.readValue,
             .writeValue = Gen.writeValue,
             .readGrad = Gen.readGrad,
@@ -226,6 +244,11 @@ const MuonGroup = struct {
     params: []ParamAccess,
     momentum_buffer: []f32, // (K,m,n), zero-init (optim.py state["momentum_buffer"])
     second_momentum_buffer: []f32, // (K,red_len), zero-init (state["second_momentum_buffer"])
+    /// f32 master weights for bf16 groups, (K,m,n): the step reads and
+    /// updates the master so sub-bf16 deltas accumulate; the bf16 storage
+    /// is the narrowed projection written after every step. Empty for f32
+    /// groups (their storage is stepped directly). Persisted by NCMA2.
+    master_params: []f32,
 
     // Per-step scratch, allocated ONCE at registration and reused every step
     // (no per-step alloc/free). Sizes are fixed by the group's (k, m, n): the
@@ -246,6 +269,7 @@ const MuonGroup = struct {
         self.allocator.free(self.params);
         self.allocator.free(self.momentum_buffer);
         self.allocator.free(self.second_momentum_buffer);
+        self.allocator.free(self.master_params);
         self.allocator.free(self.scratch_grad);
         self.allocator.free(self.scratch_params);
         self.allocator.free(self.scratch_x);
@@ -312,7 +336,7 @@ pub const MuonAdamW = struct {
 
     /// Register every model parameter into its AdamW group or Muon shape-group,
     /// reproducing gpt.py setup_optimizer's grouping and stacking order.
-    pub fn registerModel(self: *MuonAdamW, model: *Model) !void {
+    pub fn registerModel(self: *MuonAdamW, model: anytype) !void {
         // gpt.py groups matrix params by their ACTUAL shapes (sorted set); the
         // fixed four-group order below assumes MHA, where c_k/c_v share c_q's
         // (qo, d) shape. GQA would need dynamic shape grouping — reject it
@@ -447,6 +471,14 @@ pub const MuonAdamW = struct {
         errdefer self.allocator.free(scratch_step_size);
         const owned = try params.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(owned);
+        // Matrix params share one dtype (the model's comptime matrix_dtype),
+        // so a group is uniformly f32 or uniformly bf16.
+        const needs_master = owned.len > 0 and !owned[0].is_f32;
+        const master: []f32 = if (needs_master) try self.allocator.alloc(f32, k * mn) else &.{};
+        errdefer if (master.len != 0) self.allocator.free(master);
+        if (needs_master) {
+            for (owned, 0..) |*pa, ki| pa.readValue(pa.ptr, master[ki * mn ..][0..mn]);
+        }
         try self.muon_groups.append(self.allocator, .{
             .allocator = self.allocator,
             .name = name,
@@ -459,6 +491,7 @@ pub const MuonAdamW = struct {
             .params = owned,
             .momentum_buffer = momentum,
             .second_momentum_buffer = second,
+            .master_params = master,
             .scratch_grad = scratch_grad,
             .scratch_params = scratch_params,
             .scratch_x = scratch_x,
@@ -502,7 +535,15 @@ pub const MuonAdamW = struct {
     // check. --
 
     pub fn saveState(self: *MuonAdamW, writer: *std.Io.Writer) !void {
-        try writer.writeAll(state_magic);
+        // NCMA2 iff any Muon group carries bf16 masters: the masters must be
+        // persisted for bit-exact resume (resuming from the narrowed storage
+        // would re-round away the sub-bf16 update accumulation). All-f32
+        // states keep writing NCMA1, byte-identical to before.
+        var any_master = false;
+        for (self.muon_groups.items) |*g| {
+            if (g.master_params.len != 0) any_master = true;
+        }
+        try writer.writeAll(if (any_master) state_magic_v2 else state_magic);
         for (&self.adamw) |*a| try a.saveState(writer);
         try writer.writeInt(u32, @intCast(self.muon_groups.items.len), .little);
         for (self.muon_groups.items) |*g| {
@@ -510,13 +551,18 @@ pub const MuonAdamW = struct {
             try writer.writeAll(std.mem.sliceAsBytes(g.momentum_buffer));
             try writer.writeInt(u32, @intCast(g.second_momentum_buffer.len), .little);
             try writer.writeAll(std.mem.sliceAsBytes(g.second_momentum_buffer));
+            if (any_master) {
+                try writer.writeInt(u32, @intCast(g.master_params.len), .little);
+                try writer.writeAll(std.mem.sliceAsBytes(g.master_params));
+            }
         }
     }
 
     pub fn loadState(self: *MuonAdamW, reader: *std.Io.Reader) !void {
         var magic: [state_magic.len]u8 = undefined;
         try reader.readSliceAll(&magic);
-        if (!std.mem.eql(u8, &magic, state_magic)) return error.CheckpointMagicMismatch;
+        const has_masters = std.mem.eql(u8, &magic, state_magic_v2);
+        if (!has_masters and !std.mem.eql(u8, &magic, state_magic)) return error.CheckpointMagicMismatch;
         for (&self.adamw) |*a| try a.loadState(reader);
         const count = try reader.takeInt(u32, .little);
         if (count != self.muon_groups.items.len) return error.CheckpointConfigMismatch;
@@ -527,6 +573,19 @@ pub const MuonAdamW = struct {
             const slen = try reader.takeInt(u32, .little);
             if (slen != g.second_momentum_buffer.len) return error.CheckpointShapeMismatch;
             try reader.readSliceAll(std.mem.sliceAsBytes(g.second_momentum_buffer));
+            if (has_masters) {
+                const master_len = try reader.takeInt(u32, .little);
+                if (master_len != g.master_params.len) return error.CheckpointShapeMismatch;
+                try reader.readSliceAll(std.mem.sliceAsBytes(g.master_params));
+                // The restored master is authoritative: publish the narrowed
+                // values into the bf16 storage.
+                if (g.master_params.len != 0) {
+                    const mn = g.m * g.n;
+                    for (g.params, 0..) |*pa, ki| pa.writeValue(pa.ptr, g.master_params[ki * mn ..][0..mn]);
+                }
+            }
+            // NCMA1 into a bf16 group: the masters stay as widened at
+            // registerModel (which runs after the model values load).
         }
     }
 
@@ -548,10 +607,15 @@ pub const MuonAdamW = struct {
         const aa_buf = g.scratch_aa;
         const b_buf = g.scratch_b;
 
-        // Gather stacked grads and params.
+        // Gather stacked grads and params (bf16 groups step their f32
+        // master, not the re-rounded storage).
         for (g.params, 0..) |*pa, ki| {
             try pa.readGrad(pa.ptr, ctx, grad[ki * mn ..][0..mn]);
-            pa.readValue(pa.ptr, params[ki * mn ..][0..mn]);
+        }
+        if (g.master_params.len != 0) {
+            @memcpy(params, g.master_params);
+        } else {
+            for (g.params, 0..) |*pa, ki| pa.readValue(pa.ptr, params[ki * mn ..][0..mn]);
         }
 
         // 1. Nesterov momentum (updates momentum_buffer, leaves the direction in grad).
@@ -571,7 +635,9 @@ pub const MuonAdamW = struct {
         // 8. Cautious weight decay + update.
         cautiousUpdate(ctx, params, grad, lr, wd);
 
-        // Scatter updated params back.
+        // Scatter updated params back (masters keep the full-precision
+        // values; the storage write narrows for bf16).
+        if (g.master_params.len != 0) @memcpy(g.master_params, params);
         for (g.params, 0..) |*pa, ki| pa.writeValue(pa.ptr, params[ki * mn ..][0..mn]);
     }
 };
@@ -865,8 +931,11 @@ fn bmm3(ctx: *ExecContext, kind: BmmKind, a: []f32, ash: [3]usize, b: []f32, bsh
     try rt.copyTo(out);
 }
 
-/// Frame magic for MuonAdamW.saveState/loadState.
+/// Frame magic for MuonAdamW.saveState/loadState. NCMA2 appends the bf16
+/// groups' f32 master weights per Muon group; it is emitted only when a
+/// master exists, so all-f32 checkpoints stay byte-identical NCMA1.
 const state_magic = "NCMA1";
+const state_magic_v2 = "NCMA2";
 
 // ---------------------------------------------------------------------------
 // Tests
