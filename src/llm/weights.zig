@@ -904,6 +904,7 @@ pub fn loadMoeRhs(
     const rows = try std.math.mul(usize, n_expert, out_dim);
 
     return switch (info.ggml_type) {
+        .q2_k => .{ .q2_k = try copyOrBorrowMoeRhs(fucina.QuantizedMatmulRhsQ2_K, fucina.BlockQ2_K, ctx, info, rows, in_dim, borrow) },
         .q4_k => .{ .q4_k = try copyOrBorrowMoeRhs(fucina.QuantizedMatmulRhsQ4_K, fucina.BlockQ4_K, ctx, info, rows, in_dim, borrow) },
         .q5_k => .{ .q5_k = try copyOrBorrowMoeRhs(fucina.QuantizedMatmulRhsQ5_K, fucina.BlockQ5_K, ctx, info, rows, in_dim, borrow) },
         .q6_k => .{ .q6_k = try copyOrBorrowMoeRhs(fucina.QuantizedMatmulRhsQ6_K, fucina.BlockQ6_K, ctx, info, rows, in_dim, borrow) },
@@ -923,6 +924,22 @@ pub fn loadMoeRhs(
             errdefer ctx.allocator.free(owned);
             @memcpy(owned, src);
             break :blk .{ .q8_0 = .{ .rows = .{ .allocator = ctx.allocator, .blocks = owned, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
+        },
+        // iq2_xxs experts: nested generic rows container with mutable
+        // blocks, so the borrow arm needs the sound @constCast.
+        .iq2_xxs => blk: {
+            const src = try blockSlice(fucina.BlockIQ2_XXS, info.data);
+            if (rows == 0 or src.len % rows != 0) return Error.InvalidWeightShape;
+            const bpc = src.len / rows;
+            if (try fucina.internal.backend_mod.quantized_matmul.qkBlockCount(in_dim) != bpc) return Error.InvalidWeightShape;
+            if (borrow) {
+                break :blk .{ .iq2_xxs = .{ .rows = .{ .allocator = null, .blocks = @constCast(src), .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
+            }
+            gguf.prefetch(info.data);
+            const owned = try ctx.allocator.alloc(fucina.BlockIQ2_XXS, src.len);
+            errdefer ctx.allocator.free(owned);
+            @memcpy(owned, src);
+            break :blk .{ .iq2_xxs = .{ .rows = .{ .allocator = ctx.allocator, .blocks = owned, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
         },
         // Ternary experts (TQ2_0): nested generic rows container with
         // mutable blocks, so the borrow arm needs the sound @constCast.
@@ -995,6 +1012,8 @@ fn streamedProjSpec(
         .q6_k => .q6_k,
         .q8_0 => .q8_0,
         .tq2_0 => .tq2_0,
+        .q2_k => .q2_k,
+        .iq2_xxs => .iq2_xxs,
         else => return Error.UnsupportedWeightType,
     };
     return .{

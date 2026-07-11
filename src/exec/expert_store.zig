@@ -201,6 +201,8 @@ pub const StreamedQuant = enum {
     q6_k,
     q8_0,
     tq2_0,
+    q2_k,
+    iq2_xxs,
 
     pub fn blockSize(self: StreamedQuant) usize {
         return switch (self) {
@@ -209,6 +211,8 @@ pub const StreamedQuant = enum {
             .q6_k => @sizeOf(qm.BlockQ6_K),
             .q8_0 => @sizeOf(qm.BlockQ8_0),
             .tq2_0 => @sizeOf(qm.BlockTQ2_0),
+            .q2_k => @sizeOf(qm.BlockQ2_K),
+            .iq2_xxs => @sizeOf(qm.BlockIQ2_XXS),
         };
     }
 

@@ -539,6 +539,131 @@ test "tq2_0 ternary experts: streamed decode and batch are bit-exact vs resident
     try std.testing.expectEqualSlices(f32, want_b.dataConst(), got_b.dataConst());
 }
 
+test "q2_k and iq2_xxs experts: streamed decode and batch are bit-exact vs resident" {
+    // The community 2-bit tier (UD-IQ2_XXS files mix iq2_xxs and q2_k expert
+    // stacks): gate/up iq2_xxs, down q2_k. Fixtures are synthetic — every
+    // byte pattern is a valid block for these formats (grid indices index
+    // 256-entry tables, sign words index 128-entry tables), so patterned
+    // bytes with mild f16 scales exercise the kernels deterministically.
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const t_hidden: usize = 256;
+    const t_ffn: usize = 512;
+    const t_experts: usize = 4;
+
+    const gu_rows = t_experts * t_ffn;
+    const gu_bpc = t_hidden / qm.qk_k_block_size;
+    const down_rows = t_experts * t_hidden;
+    const down_bpc = t_ffn / qm.qk_k_block_size;
+    const gate_blocks = try allocator.alloc(qm.BlockIQ2_XXS, gu_rows * gu_bpc);
+    defer allocator.free(gate_blocks);
+    const up_blocks = try allocator.alloc(qm.BlockIQ2_XXS, gate_blocks.len);
+    defer allocator.free(up_blocks);
+    const down_blocks = try allocator.alloc(qm.BlockQ2_K, down_rows * down_bpc);
+    defer allocator.free(down_blocks);
+    for (gate_blocks, 0..) |*b, i| {
+        b.d = f16Bits(0.02);
+        for (&b.qs, 0..) |*q, j| q.* = @truncate((i * 7919 + j * 104729) % 65536);
+    }
+    for (up_blocks, 0..) |*b, i| {
+        b.d = f16Bits(0.015);
+        for (&b.qs, 0..) |*q, j| q.* = @truncate((i * 6007 + j * 92821 + 17) % 65536);
+    }
+    for (down_blocks, 0..) |*b, i| {
+        for (&b.scales, 0..) |*v, j| v.* = @truncate((i * 31 + j * 7) % 256);
+        for (&b.qs, 0..) |*v, j| v.* = @truncate((i * 13 + j * 11) % 256);
+        b.dm[0] = f16Bits(0.01);
+        b.dm[1] = f16Bits(0.002);
+    }
+
+    var path_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "expert_store_iq2_{d}.bin", .{std.Io.Clock.real.now(std.testing.io).nanoseconds});
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+    {
+        var file = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
+        defer file.close(std.testing.io);
+        var write_buffer: [4096]u8 = undefined;
+        var writer = file.writer(std.testing.io, &write_buffer);
+        try writer.interface.writeAll(std.mem.sliceAsBytes(gate_blocks));
+        try writer.interface.writeAll(std.mem.sliceAsBytes(up_blocks));
+        try writer.interface.writeAll(std.mem.sliceAsBytes(down_blocks));
+        try writer.interface.flush();
+    }
+    defer {
+        var buf: [160]u8 = undefined;
+        const sidecar = std.fmt.bufPrint(&buf, "{s}.experts", .{path}) catch unreachable;
+        std.Io.Dir.cwd().deleteFile(std.testing.io, sidecar) catch {};
+    }
+
+    var resident_gate: MoeRhs = .{ .iq2_xxs = .{
+        .rows = .{ .allocator = null, .blocks = gate_blocks, .rows = gu_rows, .cols = t_hidden, .blocks_per_row = gu_bpc },
+        .k = t_hidden,
+        .n = gu_rows,
+    } };
+    defer resident_gate.deinit();
+    var resident_up: MoeRhs = .{ .iq2_xxs = .{
+        .rows = .{ .allocator = null, .blocks = up_blocks, .rows = gu_rows, .cols = t_hidden, .blocks_per_row = gu_bpc },
+        .k = t_hidden,
+        .n = gu_rows,
+    } };
+    defer resident_up.deinit();
+    var resident_down: MoeRhs = .{ .q2_k = .{
+        .allocator = null,
+        .blocks = down_blocks,
+        .k = t_ffn,
+        .n = down_rows,
+        .blocks_per_column = down_bpc,
+    } };
+    defer resident_down.deinit();
+
+    const gate_bytes = gate_blocks.len * @sizeOf(qm.BlockIQ2_XXS);
+    const up_bytes = up_blocks.len * @sizeOf(qm.BlockIQ2_XXS);
+    const down_bytes = down_blocks.len * @sizeOf(qm.BlockQ2_K);
+    var store = try ExpertStore.create(allocator, &.{path}, 1, .{ .cache_slots_per_layer = 2 });
+    defer store.destroy();
+    try store.addLayer(0, .{
+        .{ .quant = .iq2_xxs, .file_offset = 0, .byte_len = gate_bytes, .in_dim = t_hidden, .out_dim = t_ffn },
+        .{ .quant = .iq2_xxs, .file_offset = gate_bytes, .byte_len = up_bytes, .in_dim = t_hidden, .out_dim = t_ffn },
+        .{ .quant = .q2_k, .file_offset = gate_bytes + up_bytes, .byte_len = down_bytes, .in_dim = t_ffn, .out_dim = t_hidden },
+    }, t_experts);
+    try store.finalize();
+    var streamed_gate: MoeRhs = .{ .streamed = store.streamedRhs(0, .gate) };
+    var streamed_up: MoeRhs = .{ .streamed = store.streamedRhs(0, .up) };
+    var streamed_down: MoeRhs = .{ .streamed = store.streamedRhs(0, .down) };
+
+    const x_vals = try allocator.alloc(f32, t_hidden);
+    defer allocator.free(x_vals);
+    for (x_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 17) % 191)) - 95)) / 95.0;
+    var x = try ctx.fromSliceRank(2, .{ 1, t_hidden }, x_vals);
+    defer x.deinit();
+    for ([_][2]usize{ .{ 0, 3 }, .{ 0, 3 }, .{ 1, 2 }, .{ 0, 3 } }) |pair| {
+        var want = try ctx.moeExpertFfn(&x, &resident_gate, &resident_up, &resident_down, &pair, &.{ 0.6, 0.4 }, t_ffn, .swiglu, null, null);
+        defer want.deinit();
+        var got = try ctx.moeExpertFfn(&x, &streamed_gate, &streamed_up, &streamed_down, &pair, &.{ 0.6, 0.4 }, t_ffn, .swiglu, null, null);
+        defer got.deinit();
+        for (want.dataConst()) |v| try std.testing.expect(!std.math.isNan(v));
+        try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
+    }
+
+    const m: usize = 5;
+    const xb_vals = try allocator.alloc(f32, m * t_hidden);
+    defer allocator.free(xb_vals);
+    for (xb_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 3) % 157)) - 78)) / 78.0;
+    var xb = try ctx.fromSliceRank(2, .{ m, t_hidden }, xb_vals);
+    defer xb.deinit();
+    const selected = [_]usize{ 0, 3, 1, 2, 2, 0, 3, 1, 0, 1 };
+    const routing = [_]f32{ 0.6, 0.4, 0.5, 0.5, 0.7, 0.3, 0.2, 0.8, 0.9, 0.1 };
+    var want_b = try ctx.moeExpertFfnBatch(&xb, &resident_gate, &resident_up, &resident_down, &selected, &routing, 2, t_ffn, .swiglu, null, null);
+    defer want_b.deinit();
+    var got_b = try ctx.moeExpertFfnBatch(&xb, &streamed_gate, &streamed_up, &streamed_down, &selected, &routing, 2, t_ffn, .swiglu, null, null);
+    defer got_b.deinit();
+    for (want_b.dataConst()) |v| try std.testing.expect(!std.math.isNan(v));
+    try std.testing.expectEqualSlices(f32, want_b.dataConst(), got_b.dataConst());
+}
+
 test "learning cache: saved usage auto-pins the hot experts on reload, bit-exact and miss-free" {
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;

@@ -331,8 +331,10 @@ pub const QuantizedMatmulRhsQ4_0 = struct {
 };
 
 pub const QuantizedMatmulRhsQ2_K = struct {
-    allocator: Allocator,
-    blocks: []BlockQ2_K,
+    /// Owning allocator, or null when `blocks` borrows external read-only
+    /// memory (e.g. an mmap'd GGUF expert stack kept alive by the model).
+    allocator: ?Allocator,
+    blocks: []const BlockQ2_K,
     k: usize,
     n: usize,
     blocks_per_column: usize,
@@ -342,7 +344,7 @@ pub const QuantizedMatmulRhsQ2_K = struct {
     pub const traits = matmulTraits(.ggml_q2_k);
 
     pub fn deinit(self: *Self) void {
-        self.allocator.free(self.blocks);
+        if (self.allocator) |allocator| allocator.free(self.blocks);
         self.* = undefined;
     }
 
