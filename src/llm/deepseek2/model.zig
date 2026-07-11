@@ -10,9 +10,9 @@
 //! per-head attention over the cached K/V, router top-k — runs host-side in
 //! plain f32, which keeps the MLA algebra auditable. K/V are reconstructed
 //! from the latent INCREMENTALLY (kv_b applied once per new position, the
-//! O(1)-per-step middle ground between colibri's naive per-step
-//! reconstruction and full weight absorption); the true compressed-latent
-//! cache and absorbed decode land with the perf milestone.
+//! O(1)-per-step middle ground between naive per-step reconstruction and
+//! full weight absorption); the true compressed-latent cache and absorbed
+//! decode land with the perf milestone.
 const std = @import("std");
 const fucina = @import("fucina");
 const weights = @import("../weights.zig");

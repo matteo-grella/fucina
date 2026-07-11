@@ -3,7 +3,7 @@
 //! big model decodes below 1 tok/s. The sidecar is append-only: a fixed
 //! header whose record count (`nrec`) is rewritten LAST after every append,
 //! so a crash mid-append leaves the old count and the file stays a
-//! consistent prefix of the conversation (the colibri `.coli_kv` design).
+//! consistent prefix of the conversation.
 //!
 //! Layout (little endian):
 //!   "FUXKV001"                     magic, 8 bytes

@@ -1597,8 +1597,8 @@ fn pilotPrefetchNext(
 /// token's top expert with weight zero. The pair layout stays (seq, top_k),
 /// so the fused MoE ops run unchanged — but dropped experts are neither read
 /// from disk nor cached, which is the lever when experts stream from disk
-/// (colibri measured 30-40% fewer expert loads at p ~= 0.7 for modest
-/// quality cost). Quality-traded: outputs differ from full top-k.
+/// (measured on the 30B MoE: p = 0.7 cut streamed disk traffic 55% for
+/// modest quality cost). Quality-traded: outputs differ from full top-k.
 pub fn applyExpertTopP(selected: []usize, routing_weights: []f32, top_k: usize, p: f32) void {
     if (p >= 1 or top_k <= 1) return;
     std.debug.assert(selected.len == routing_weights.len and selected.len % top_k == 0);

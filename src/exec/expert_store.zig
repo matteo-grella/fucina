@@ -2,8 +2,8 @@
 //! their quantized weight blocks through a pinned set, a per-layer LRU cache
 //! in RAM, and `pread` from the GGUF file — so a mixture model whose expert
 //! stacks dwarf physical RAM still decodes, paying disk reads only for cache
-//! misses. The design follows the measured lessons of out-of-core MoE
-//! engines (colibri): the streamed tier reads with `pread` into store-owned
+//! misses. The design follows measured out-of-core MoE lessons: the
+//! streamed tier reads with `pread` into store-owned
 //! buffers rather than mmap, so resident memory is exactly dense weights +
 //! this cache (mmap'd expert pages inflate RSS and let page-cache pressure
 //! evict semi-randomly instead of by routing recency); misses issue
@@ -282,7 +282,7 @@ const PilotRange = struct { offset: u64, len: u32, part: u16 };
 const pilot_ring_cap = 4096;
 
 /// One cached expert: a single slab holding its gate+up+down blocks (loaded
-/// with one logical fetch, like colibri's coalesced expert read), stamped for
+/// with one coalesced logical fetch), stamped for
 /// LRU. Slots inside a layer all share that layer's slab size; the shared
 /// working-set slots are re-checked per use because layers may differ.
 const Slot = struct {
@@ -526,7 +526,7 @@ pub const ExpertStore = struct {
     // ---- pilot (router-lookahead prefetch) ----
     // A dedicated I/O thread drains an SPSC ring of file ranges and issues
     // the readahead advice there: with a saturated disk queue the advice
-    // call itself BLOCKS (colibri measured ~0.5 ms each), so hinting inline
+    // call itself BLOCKS (measured ~0.5 ms each upstream), so hinting inline
     // would cost the forward thread more than the overlap earns. Ring full
     // = drop: a lost hint is not an error.
     pilot_ring: []PilotRange = &.{},
@@ -952,9 +952,9 @@ pub const ExpertStore = struct {
     // ---- pilot: router-lookahead prefetch ----------------------------------
 
     /// Predicted routing for `layer_i`'s NEXT acquire (router lookahead:
-    /// apply layer L+1's router to layer L's post-attention state — colibri
-    /// measured 71.6% top-8 recall on GLM vs 41.3% for "same as last
-    /// token"). Marks the prediction for recall scoring and enqueues
+    /// apply layer L+1's router to layer L's post-attention state — measured
+    /// 87.6-90.5% top-8 recall on the Qwen3 MoEs vs ~41% for "same as last
+    /// token" upstream). Marks the prediction for recall scoring and enqueues
     /// readahead for the experts not already pinned or cached; the dedicated
     /// I/O thread issues the actual advice. Call between ops on the forward
     /// thread — never between `acquire` and `release`.
