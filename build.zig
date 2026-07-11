@@ -284,6 +284,29 @@ pub fn build(b: *std.Build) void {
     const deepseek2_step = b.step("deepseek2", "Run DeepSeek-V2 family (MLA + MoE) GGUF inference");
     deepseek2_step.dependOn(&deepseek2_cmd.step);
 
+    const glm4moe_exe = b.addExecutable(.{
+        .name = "fucina-zig-glm4moe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/glm4moe.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    glm4moe_exe.root_module.addImport("fucina", module);
+    glm4moe_exe.root_module.addImport("fucina_llm", llm_module);
+    configureBlas(glm4moe_exe, blas_kind);
+    configureGpu(b, glm4moe_exe, gpu_kind);
+    const glm4moe_install = installArtifactStep(b, glm4moe_exe);
+
+    const glm4moe_cmd = b.addRunArtifact(glm4moe_exe);
+    glm4moe_cmd.step.dependOn(glm4moe_install);
+    if (b.args) |args| {
+        glm4moe_cmd.addArgs(args);
+    }
+
+    const glm4moe_step = b.step("glm4moe", "Run GLM-4.5 family GGUF inference (--mtp native multi-token-prediction speculative decode)");
+    glm4moe_step.dependOn(&glm4moe_cmd.step);
+
     const omnivoice_exe = b.addExecutable(.{
         .name = "fucina-zig-omnivoice",
         .root_module = b.createModule(.{
