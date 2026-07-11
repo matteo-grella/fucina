@@ -1012,19 +1012,35 @@ fn compressorStep(
     layer_compressed: bool,
     pos: usize,
 ) !bool {
+    var kv_t = try comp.kv.linearSeq(ctx, attn_norm_t, .embed, .attn);
+    defer kv_t.deinit();
+    var sc_t = try comp.gate.linearSeq(ctx, attn_norm_t, .embed, .attn);
+    defer sc_t.deinit();
+    return compressorAdvance(self, ctx, comp, try kv_t.dataConst(), try sc_t.dataConst(), state_kv, state_score, out_rows, head_dim, layer_compressed, pos);
+}
+
+/// State-advance half of the streaming compressor: consume this token's
+/// already-projected kv/score rows (so batched prefill can compute all
+/// projections in one GEMM), update the window, emit on the boundary.
+fn compressorAdvance(
+    self: *const Model,
+    ctx: *ExecContext,
+    comp: *const Compressor,
+    kv_cur: []const f32,
+    sc_cur: []const f32,
+    state_kv: []f32,
+    state_score: []f32,
+    out_rows: *std.ArrayList(f32),
+    head_dim: usize,
+    layer_compressed: bool,
+    pos: usize,
+) !bool {
     const allocator = ctx.allocator;
     const ratio = comp.ratio;
     const width = comp.width;
     const pos_mod = pos % ratio;
     const row: usize = if (ratio == 4) ratio + pos_mod else pos_mod;
     const should_compress = ((pos + 1) % ratio) == 0;
-
-    var kv_t = try comp.kv.linearSeq(ctx, attn_norm_t, .embed, .attn);
-    defer kv_t.deinit();
-    var sc_t = try comp.gate.linearSeq(ctx, attn_norm_t, .embed, .attn);
-    defer sc_t.deinit();
-    const kv_cur = try kv_t.dataConst();
-    const sc_cur = try sc_t.dataConst();
 
     const kv_dst = state_kv[row * width ..][0..width];
     const sc_dst = state_score[row * width ..][0..width];
@@ -1360,27 +1376,31 @@ fn indexerSelect(self: *Model, ctx: *ExecContext, layer: *const Layer, x_norm: a
         indexerQatRow(head);
     }
 
-    var w_t = try layer.indexer_proj.?.linearSeq(ctx, x_norm, .embed, .attn);
-    defer w_t.deinit();
-    const head_w = try allocator.dupe(f32, try w_t.dataConst());
+    var w_lin = try layer.indexer_proj.?.linearSeq(ctx, x_norm, .embed, .attn);
+    defer w_lin.deinit();
+    const head_w = try allocator.dupe(f32, try w_lin.dataConst());
     defer allocator.free(head_w);
     const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(cfg.indexer_heads * cfg.indexer_head_dim)));
     for (head_w) |*w| w.* *= scale;
 
-    // score[c] = sum_h relu(comp_c . q_h) * w[h] over the QAT'd rows.
-    const scores = try allocator.alloc(f32, n_comp);
-    defer allocator.free(scores);
-    for (0..n_comp) |c| {
-        const row = lc.index_comp.items[c * cfg.indexer_head_dim ..][0..cfg.indexer_head_dim];
-        var acc: f32 = 0;
-        for (0..cfg.indexer_heads) |h| {
-            const qh = q[h * cfg.indexer_head_dim ..][0..cfg.indexer_head_dim];
-            var dot: f32 = 0;
-            for (row, qh) |a, b| dot += a * b;
-            acc += @max(dot, 0) * head_w[h];
-        }
-        scores[c] = acc;
-    }
+    // score[c] = sum_h relu(comp_c . q_h) * w[h] over the QAT'd rows: one
+    // batched contraction + relu + weighted head reduction (n_comp grows
+    // with context, so this is the indexer's hot loop).
+    var comp_t = try fucina.Tensor(.{ .row, .d }).fromBorrowedConstSlice(ctx, .{ n_comp, cfg.indexer_head_dim }, lc.index_comp.items[0 .. n_comp * cfg.indexer_head_dim]);
+    defer comp_t.deinit();
+    var q_t2 = try fucina.Tensor(.{ .head, .d }).fromBorrowedSlice(ctx, .{ cfg.indexer_heads, cfg.indexer_head_dim }, q);
+    defer q_t2.deinit();
+    var dots = try comp_t.dot(ctx, &q_t2, .d);
+    defer dots.deinit();
+    var rectified = try dots.unary(ctx, .relu);
+    defer rectified.deinit();
+    var w_t = try fucina.Tensor(.{.head}).fromBorrowedSlice(ctx, .{cfg.indexer_heads}, head_w);
+    defer w_t.deinit();
+    var weighted = try rectified.mul(ctx, &w_t);
+    defer weighted.deinit();
+    var scores_t = try weighted.sum(ctx, .head);
+    defer scores_t.deinit();
+    const scores = try scores_t.dataConst();
     for (0..top_k) |_| {
         var best: usize = 0;
         var best_score = -std.math.inf(f32);
