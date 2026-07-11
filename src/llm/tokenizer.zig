@@ -48,12 +48,16 @@ pub const Tokenizer = struct {
     merge_ranks: std.StringHashMap(u32),
     special: SpecialTokens,
     /// Non-null when the GGUF declared a pretokenizer (`tokenizer.ggml.pre`)
-    /// OTHER than the implemented "qwen2" chunker (owned copy of that id).
+    /// OTHER than an implemented chunker (owned copy of that id).
     /// Encoding still proceeds with the qwen2 rules — the qwen3 family is
     /// qwen2-pre — but chunk boundaries may not match such a model's
     /// reference tokenizer, so token-ID parity is not guaranteed. Surfaced
     /// here (and logged once at init) instead of silently mis-tokenizing.
     pre_mismatch: ?[]u8 = null,
+    /// Which implemented pre-tokenizer splits text into BPE chunks.
+    pre: Pre = .qwen2,
+
+    pub const Pre = enum { qwen2, joyai_llm };
 
     /// Build a tokenizer from GGUF metadata. `overrides` fields, when non-null,
     /// replace the metadata-derived special tokens.
@@ -87,7 +91,11 @@ pub const Tokenizer = struct {
         errdefer tok.deinit();
         // Record (don't fail on) a pretokenizer mismatch — see `pre_mismatch`.
         if (file.getString("tokenizer.ggml.pre")) |pre| {
-            if (!std.mem.eql(u8, pre, "qwen2")) {
+            if (std.mem.eql(u8, pre, "qwen2")) {
+                tok.pre = .qwen2;
+            } else if (std.mem.eql(u8, pre, "joyai-llm")) {
+                tok.pre = .joyai_llm;
+            } else {
                 tok.pre_mismatch = try allocator.dupe(u8, pre);
                 std.log.warn(
                     "tokenizer: GGUF declares pretokenizer '{s}', but the qwen2 chunker is used — token-ID parity is not guaranteed",
@@ -271,6 +279,18 @@ pub const Tokenizer = struct {
     /// codepoint of lookahead and chunk boundaries in byte offsets.
     fn encodeRegular(self: *const Tokenizer, allocator: Allocator, text: []const u8, out: *std.ArrayList(u32)) !void {
         if (text.len == 0) return;
+
+        if (self.pre == .joyai_llm) {
+            // The JoyAI splitter is byte-oriented with inline UTF-8 peeking;
+            // no codepoint pre-decode needed.
+            var pos: usize = 0;
+            while (pos < text.len) {
+                const end = joyaiChunkEnd(text, pos);
+                try self.encodeChunk(allocator, text[pos..end], out);
+                pos = end;
+            }
+            return;
+        }
 
         var cps: std.ArrayList(u32) = .empty;
         defer cps.deinit(allocator);
@@ -536,6 +556,136 @@ fn utf8Len(byte0: u8) usize {
 /// encoding into the output — so on invalid UTF-8 both the chunk BOUNDARIES
 /// and the emitted bytes can differ from llama.cpp. Valid UTF-8 input chunks
 /// and encodes identically.
+// ---------------------------------------------------------------------------
+// JoyAI ("joyai-llm", DeepSeek V4 family) pre-tokenizer. Byte-oriented port
+// of the reference splitter; the split SHAPE matters because different
+// pieces lead to different BPE merges even for identical text bytes:
+//
+//   \p{N}{1,3} | [CJK/kana]+ | [P/S][A-Za-z]+ | [^\r\n\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+
+//   |  ?[\p{P}\p{S}]+[\r\n]* | \s*[\r\n]+ | \s+(?!\S) | \s+
+//
+// The punctuation rule keeps trailing newlines in the same BPE word (">;\n"),
+// and a whitespace run before a word donates its LAST space to that word
+// ("    int" splits "   " + " int").
+// ---------------------------------------------------------------------------
+
+fn joyaiPunctSymbol(c: u8) bool {
+    return (c >= '!' and c <= '/') or (c >= ':' and c <= '@') or (c >= '[' and c <= '`') or (c >= '{' and c <= '~');
+}
+
+fn joyaiSpace(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == 0x0b or c == 0x0c;
+}
+
+fn joyaiNewline(c: u8) bool {
+    return c == '\n' or c == '\r';
+}
+
+fn joyaiNextUtf8(text: []const u8, pos: usize) usize {
+    const len = std.unicode.utf8ByteSequenceLength(text[pos]) catch 1;
+    return @min(pos + len, text.len);
+}
+
+fn joyaiCjkAt(text: []const u8, pos: usize) bool {
+    if (text[pos] < 128) return false;
+    const len = std.unicode.utf8ByteSequenceLength(text[pos]) catch return false;
+    if (pos + len > text.len) return false;
+    const cp = std.unicode.utf8Decode(text[pos..][0..len]) catch return false;
+    return (cp >= 0x4e00 and cp <= 0x9fa5) or (cp >= 0x3040 and cp <= 0x309f) or (cp >= 0x30a0 and cp <= 0x30ff);
+}
+
+/// "Letter-like": ASCII alphabetic, or any non-ASCII lead byte (the JoyAI
+/// reference collapses Unicode letters this way; CJK/kana are isolated by
+/// their own earlier rule).
+fn joyaiLetterAt(text: []const u8, pos: usize) bool {
+    const c = text[pos];
+    if (c < 128) return std.ascii.isAlphabetic(c);
+    return true;
+}
+
+fn joyaiConsumeLetters(text: []const u8, start: usize) usize {
+    var pos = start;
+    while (pos < text.len and joyaiLetterAt(text, pos)) pos = joyaiNextUtf8(text, pos);
+    return pos;
+}
+
+/// One JoyAI pre-token: byte offset just past the chunk starting at `start`.
+fn joyaiChunkEnd(text: []const u8, start: usize) usize {
+    const len = text.len;
+    var pos = start;
+    const c = text[pos];
+
+    if (std.ascii.isDigit(c)) {
+        var ndigits: usize = 0;
+        while (pos < len and std.ascii.isDigit(text[pos]) and ndigits < 3) {
+            pos += 1;
+            ndigits += 1;
+        }
+    } else if (joyaiCjkAt(text, pos)) {
+        while (true) {
+            pos = joyaiNextUtf8(text, pos);
+            if (pos >= len or !joyaiCjkAt(text, pos)) break;
+        }
+    } else if (joyaiPunctSymbol(c) and pos + 1 < len and std.ascii.isAlphabetic(text[pos + 1])) {
+        pos += 1;
+        while (pos < len and std.ascii.isAlphabetic(text[pos])) pos += 1;
+    } else if (joyaiLetterAt(text, pos)) {
+        pos = joyaiConsumeLetters(text, pos);
+    } else if (!joyaiNewline(c) and !joyaiPunctSymbol(c) and pos + 1 < len and joyaiLetterAt(text, pos + 1)) {
+        pos += 1;
+        pos = joyaiConsumeLetters(text, pos);
+    } else if (c == ' ' and pos + 1 < len and joyaiPunctSymbol(text[pos + 1])) {
+        pos += 1;
+        while (pos < len and joyaiPunctSymbol(text[pos])) pos += 1;
+        while (pos < len and joyaiNewline(text[pos])) pos += 1;
+    } else if (joyaiPunctSymbol(c)) {
+        while (pos < len and joyaiPunctSymbol(text[pos])) pos += 1;
+        while (pos < len and joyaiNewline(text[pos])) pos += 1;
+    } else if (joyaiSpace(c)) {
+        var p = pos;
+        var last_newline_end: usize = 0;
+        while (p < len and joyaiSpace(text[p])) {
+            const sc = text[p];
+            p += 1;
+            if (joyaiNewline(sc)) last_newline_end = p;
+        }
+        if (last_newline_end != 0) {
+            pos = last_newline_end;
+        } else if (p < len and p > pos + 1 and (joyaiLetterAt(text, p) or joyaiPunctSymbol(text[p]))) {
+            // A whitespace run donates its last space to the following word
+            // or punctuation run.
+            pos = p - 1;
+        } else {
+            pos = p;
+        }
+    } else {
+        pos = joyaiNextUtf8(text, pos);
+    }
+
+    if (pos == start) pos = joyaiNextUtf8(text, pos);
+    return pos;
+}
+
+test "joyai pretokenizer: digit runs split three per chunk, indentation donates a space" {
+    // "2048" -> "204" | "8"; "    int x" -> "   " | " int" | " x".
+    const cases = [_]struct { text: []const u8, chunks: []const []const u8 }{
+        .{ .text = "2048", .chunks = &.{ "204", "8" } },
+        .{ .text = "    int x", .chunks = &.{ "   ", " int", " x" } },
+        .{ .text = "a>;\nb", .chunks = &.{ "a", ">;\n", "b" } },
+        .{ .text = "ciao, mondo!\n\n", .chunks = &.{ "ciao", ",", " mondo", "!\n\n" } },
+        .{ .text = "x = f(12345)", .chunks = &.{ "x", " =", " f", "(", "123", "45", ")" } },
+    };
+    for (cases) |case| {
+        var pos: usize = 0;
+        for (case.chunks) |expect| {
+            const end = joyaiChunkEnd(case.text, pos);
+            try std.testing.expectEqualStrings(expect, case.text[pos..end]);
+            pos = end;
+        }
+        try std.testing.expectEqual(case.text.len, pos);
+    }
+}
+
 fn qwen2ChunkEnd(c: []const u32, start: usize) usize {
     const n = c.len;
     var pos = start;
