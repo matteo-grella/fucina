@@ -464,6 +464,7 @@ fn runGolden(
         overlap64,
         max_abs,
     });
+    try stdout.flush();
     if (!pass) return error.GoldenMismatch;
 }
 

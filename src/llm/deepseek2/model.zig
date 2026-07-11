@@ -622,32 +622,30 @@ pub const Model = struct {
                     @memcpy(dst[0..lora], latent);
                     @memcpy(dst[lora..], k_pe);
 
-                    // q_nope gathered head-major (the per-head nope block is
-                    // strided inside q); q_pe roped in place.
-                    const q_nope = try allocator.alloc(f32, cfg.num_heads * cfg.qk_nope_dim);
-                    defer allocator.free(q_nope);
+                    // q_pe roped in place; q_nope and q_pe are then strided
+                    // VIEWS of q (narrow + retag), never gathered by hand.
                     for (0..cfg.num_heads) |h| {
-                        const q_head = q[h * cfg.qk_head_dim ..][0..cfg.qk_head_dim];
-                        self.rope.apply(q_head[cfg.qk_nope_dim..], pos);
-                        @memcpy(q_nope[h * cfg.qk_nope_dim ..][0..cfg.qk_nope_dim], q_head[0..cfg.qk_nope_dim]);
+                        self.rope.apply(q[h * cfg.qk_head_dim + cfg.qk_nope_dim ..][0..cfg.qk_rope_dim], pos);
                     }
-                    var q_nope_t = try fucina.Tensor(.{ .head, .nope }).fromBorrowedSlice(ctx, .{ cfg.num_heads, cfg.qk_nope_dim }, q_nope);
+                    var q_t = try fucina.Tensor(.{ .head, .d }).fromBorrowedSlice(ctx, .{ cfg.num_heads, cfg.qk_head_dim }, q);
+                    defer q_t.deinit();
+                    var q_nope_v = try q_t.narrow(ctx, .d, 0, cfg.qk_nope_dim);
+                    defer q_nope_v.deinit();
+                    var q_nope_t = try q_nope_v.withTags(ctx, .{ .head, .nope });
                     defer q_nope_t.deinit();
                     var wk_t = try fucina.Tensor(.{ .head, .nope, .lora }).fromBorrowedConstSlice(ctx, .{ cfg.num_heads, cfg.qk_nope_dim, lora }, layer.kv_b_k);
                     defer wk_t.deinit();
                     var q_eff_t = try q_nope_t.dot(ctx, &wk_t, .nope);
                     defer q_eff_t.deinit();
-                    const q_eff = try q_eff_t.dataConst(); // [head][lora]
 
-                    // q_cat = [q_eff | q_pe] per head; scores over the cached
+                    // q_cat = [q_eff | q_pe] per head (concat of the effective
+                    // query with the roped q_pe view); scores over the cached
                     // [latent | k_pe] rows in ONE batched contraction.
-                    const q_cat = try allocator.alloc(f32, cfg.num_heads * row_w);
-                    defer allocator.free(q_cat);
-                    for (0..cfg.num_heads) |h| {
-                        @memcpy(q_cat[h * row_w ..][0..lora], q_eff[h * lora ..][0..lora]);
-                        @memcpy(q_cat[h * row_w ..][lora..row_w], q[h * cfg.qk_head_dim + cfg.qk_nope_dim ..][0..cfg.qk_rope_dim]);
-                    }
-                    var q_cat_t = try fucina.Tensor(.{ .head, .d }).fromBorrowedSlice(ctx, .{ cfg.num_heads, row_w }, q_cat);
+                    var q_eff_d = try q_eff_t.withTags(ctx, .{ .head, .d });
+                    defer q_eff_d.deinit();
+                    var q_pe_v = try q_t.narrow(ctx, .d, cfg.qk_nope_dim, cfg.qk_rope_dim);
+                    defer q_pe_v.deinit();
+                    var q_cat_t = try q_eff_d.concat(ctx, .d, &.{&q_pe_v});
                     defer q_cat_t.deinit();
                     var rows_t = try fucina.Tensor(.{ .t, .d }).fromBorrowedConstSlice(ctx, .{ t_len, row_w }, k_layer[0 .. t_len * row_w]);
                     defer rows_t.deinit();

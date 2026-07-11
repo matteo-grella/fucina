@@ -1479,20 +1479,26 @@ fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const 
     std.mem.copyForwards(f32, lc.raw[0 .. keep * hd], raw_buf[(total - keep) * hd .. total * hd]);
     lc.n_raw = keep;
 
-    // Grouped low-rank output, batched per group.
+    // Grouped low-rank output, batched per group: each group's head block is
+    // a narrow VIEW of the head buffer (materialized once for the quantized
+    // GEMM) and the per-group ranks concat into stage B's input — no hand
+    // gather/scatter.
     const group_heads = cfg.num_heads / cfg.output_groups;
     const group_dim = group_heads * hd;
     const rank = cfg.output_lora_rank;
     const group_row_bytes = (group_dim / 32) * @sizeOf(fucina.BlockQ8_0);
-    const low_all = try allocator.alloc(f32, S * cfg.output_groups * rank);
-    defer allocator.free(low_all);
-    const group_scratch = try allocator.alloc(f32, S * group_dim);
-    defer allocator.free(group_scratch);
+    var heads_full = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ S, q_dim }, out_heads_all);
+    defer heads_full.deinit();
+    var lows: [8]fucina.Tensor(.{ .seq, .attn }) = undefined;
+    var n_lows: usize = 0;
+    defer for (lows[0..n_lows]) |*t| t.deinit();
+    std.debug.assert(cfg.output_groups <= lows.len);
     for (0..cfg.output_groups) |g| {
-        for (0..S) |s| @memcpy(group_scratch[s * group_dim ..][0..group_dim], out_heads_all[s * q_dim + g * group_dim ..][0..group_dim]);
-        var gs_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ S, group_dim }, group_scratch);
+        var gs_v = try heads_full.narrow(ctx, .embed, g * group_dim, group_dim);
+        defer gs_v.deinit();
+        var gs_t = try gs_v.contiguous(ctx);
         defer gs_t.deinit();
-        var low_t = try weights.linearSeqBorrowedQuantized(
+        lows[n_lows] = try weights.linearSeqBorrowedQuantized(
             .q8_0,
             ctx,
             &gs_t,
@@ -1502,11 +1508,13 @@ fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const 
             .embed,
             .attn,
         );
-        defer low_t.deinit();
-        const lows = try low_t.dataConst();
-        for (0..S) |s| @memcpy(low_all[s * cfg.output_groups * rank + g * rank ..][0..rank], lows[s * rank ..][0..rank]);
+        n_lows += 1;
     }
-    var low_in = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ S, cfg.output_groups * rank }, low_all);
+    var low_refs: [7]*const fucina.Tensor(.{ .seq, .attn }) = undefined;
+    for (lows[1..n_lows], 0..) |*t, i| low_refs[i] = t;
+    var low_cat = try lows[0].concat(ctx, .attn, low_refs[0 .. n_lows - 1]);
+    defer low_cat.deinit();
+    var low_in = try low_cat.withTags(ctx, .{ .seq, .embed });
     defer low_in.deinit();
     var out_t = try layer.output_b.linearSeq(ctx, &low_in, .embed, .attn);
     defer out_t.deinit();
@@ -1604,23 +1612,26 @@ fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer
     // Undo the value-side tail rotation carried by the K==V rows.
     for (0..cfg.num_heads) |h| self.rope.applyTail(out_heads[h * cfg.head_dim ..][0..cfg.head_dim], pos, compressed_family, true);
 
-    // Grouped low-rank output: per group, [group_heads*d] -> rank, then the
-    // concatenated ranks through stage B.
+    // Grouped low-rank output: per group, [group_heads*d] -> rank (each
+    // group's block is a borrowed view — one token's group slice is
+    // contiguous), then the concatenated ranks through stage B.
     const group_heads = cfg.num_heads / cfg.output_groups;
     const group_dim = group_heads * cfg.head_dim;
     const rank = cfg.output_lora_rank;
-    const low = try allocator.alloc(f32, cfg.output_groups * rank);
-    defer allocator.free(low);
     const group_row_bytes = blk: {
         // q8_0 rows of `group_dim` values: group g's rows start at
         // g*rank rows into the stacked stage-A weight.
         const bpr = group_dim / 32;
         break :blk bpr * @sizeOf(fucina.BlockQ8_0);
     };
+    var lows: [8]fucina.Tensor(.{ .seq, .attn }) = undefined;
+    var n_lows: usize = 0;
+    defer for (lows[0..n_lows]) |*t| t.deinit();
+    std.debug.assert(cfg.output_groups <= lows.len);
     for (0..cfg.output_groups) |g| {
-        var head_slice = try rowTensor(ctx, out_heads[g * group_dim ..][0..group_dim], group_dim);
+        var head_slice = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, group_dim }, out_heads[g * group_dim ..][0..group_dim]);
         defer head_slice.deinit();
-        var low_t = try weights.linearSeqBorrowedQuantized(
+        lows[n_lows] = try weights.linearSeqBorrowedQuantized(
             .q8_0,
             ctx,
             &head_slice,
@@ -1630,12 +1641,15 @@ fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer
             .embed,
             .attn,
         );
-        defer low_t.deinit();
-        @memcpy(low[g * rank ..][0..rank], try low_t.dataConst());
+        n_lows += 1;
     }
-    var low_t = try rowTensor(ctx, low, cfg.output_groups * rank);
-    defer low_t.deinit();
-    var out_t = try layer.output_b.linearSeq(ctx, &low_t, .embed, .attn);
+    var low_refs: [7]*const fucina.Tensor(.{ .seq, .attn }) = undefined;
+    for (lows[1..n_lows], 0..) |*t, i| low_refs[i] = t;
+    var low_cat = try lows[0].concat(ctx, .attn, low_refs[0 .. n_lows - 1]);
+    defer low_cat.deinit();
+    var low_in = try low_cat.withTags(ctx, .{ .seq, .embed });
+    defer low_in.deinit();
+    var out_t = try layer.output_b.linearSeq(ctx, &low_in, .embed, .attn);
     defer out_t.deinit();
     return allocator.dupe(f32, try out_t.dataConst());
 }
