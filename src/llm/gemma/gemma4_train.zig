@@ -699,7 +699,7 @@ pub fn Trainer(comptime targets: Targets) type {
             const scale_values = try self.allocator.alloc(f32, n_pairs);
             defer self.allocator.free(scale_values);
             for (selected_data, 0..) |raw, i| {
-                const e: usize = @intFromFloat(raw);
+                const e: usize = @intCast(raw);
                 if (e >= n_expert) return error.IndexOutOfBounds;
                 selected[i] = e;
                 scale_values[i] = moe.down_scale[e];

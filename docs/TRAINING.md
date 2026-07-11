@@ -94,7 +94,9 @@ const logits = try forwardLogits(&ctx, &model, &x);   // zero ceremony inside
   errdefer chains at all.
 - Adoption is wired into the op tails themselves (`finishOp` in
   `src/ag/tensor.zig`), covering both differentiable results and no-grad
-  results (eval on constants, `argmax`, `topK`, the packed-RHS fast paths).
+  f32 results (eval on constants, the `values` arms, the packed-RHS fast
+  paths). i64 index outputs (`argmax`, `topK.indices`, `argsort`) are
+  typed constants: caller-owned even under a scope — pair with `deinit`.
   Typed/quantized-constant tensor methods are not adopted — those are
   weights/caches with explicit lifetimes. The one exception: a GRAD-CARRYING
   16-bit result (the differentiable `to(.f16)`/`to(.bf16)` narrow, §10) is

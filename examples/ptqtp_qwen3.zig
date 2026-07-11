@@ -276,7 +276,7 @@ fn argmaxId(ctx: *ExecContext, logits: *const fucina.Tensor(.{ .seq, .vocab })) 
     var pred = try logits.argmax(ctx, .vocab);
     defer pred.deinit();
     const values = try pred.dataConst();
-    return @intFromFloat(values[values.len - 1]);
+    return @intCast(values[values.len - 1]);
 }
 
 fn tokenizeTextFile(io: std.Io, allocator: std.mem.Allocator, tok: *const llm.tokenizer.Tokenizer, path: []const u8) ![]usize {

@@ -160,7 +160,7 @@ fn accuracy(ctx: *ExecContext, model: *const Model, x: *const Tensor(.{ .batch, 
     const pred_data = try pred.dataConst();
     var correct: usize = 0;
     for (pred_data, labels) |p, label| {
-        if (@as(usize, @intFromFloat(p)) == label) correct += 1;
+        if (@as(usize, @intCast(p)) == label) correct += 1;
     }
     return @as(f32, @floatFromInt(correct)) / @as(f32, @floatFromInt(labels.len));
 }

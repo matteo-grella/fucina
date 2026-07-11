@@ -22,7 +22,9 @@ const productBeforeAxis = exec_shape.productBeforeAxis;
 
 pub const TopKResult = struct {
     values: Tensor,
-    indices: Tensor,
+    /// Source positions along the reduced/sorted axis. i64 (exact for any
+    /// axis length; torch's index dtype), no-grad by construction.
+    indices: tensor.TensorOf(.i64),
 
     pub fn deinit(self: *TopKResult) void {
         self.values.deinit();
@@ -53,7 +55,7 @@ pub const StandardizeOptions = struct {
     accumulation: StandardizeAccumulation = .f32,
 };
 
-pub fn argmaxAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
+pub fn argmaxAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize) !tensor.TensorOf(.i64) {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
@@ -64,7 +66,7 @@ pub fn argmaxAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comp
 
     const out_rank = if (rank == 1) 1 else rank - 1;
     const out_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
-    var out = try rt.emptyRank(out_rank, out_shape);
+    var out = try rt.emptyRankTyped(.i64, out_rank, out_shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -83,7 +85,7 @@ pub fn argmaxAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comp
                     best_i = axis_i;
                 }
             }
-            output[outer_i * inner + inner_i] = @floatFromInt(best_i);
+            output[outer_i * inner + inner_i] = @intCast(best_i);
         }
     }
     return out;
@@ -106,10 +108,8 @@ const ExtremumOp = enum { max, min };
 /// index 0 as the fallback when no position holds it (all-NaN row). This
 /// DIVERGES from torch.max/torch.min over a dim, which propagate NaN.
 ///
-/// Indices are stored as f32 (the repo-wide index convention, shared with
-/// argmaxAxisRank/topK): exact only for indices < 2^24. MinMaxBackward
-/// clamps on read, so a >2^24 axis rounds the routed index rather than
-/// reading out of bounds.
+/// Indices are i64 (the repo-wide index convention, shared with
+/// argmaxAxisRank/topK/sort): exact for any axis length.
 pub fn maxAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize) !TopKResult {
     return extremumAxisRank(rt, rank, x, axis, .max);
 }
@@ -132,7 +132,7 @@ fn extremumAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, compti
     const out_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
     var values = try rt.emptyRank(out_rank, out_shape);
     errdefer values.deinit();
-    var indices = try rt.emptyRank(out_rank, out_shape);
+    var indices = try rt.emptyRankTyped(.i64, out_rank, out_shape);
     errdefer indices.deinit();
     const vd = values.data();
     const id = indices.data();
@@ -177,9 +177,7 @@ fn extremumAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, compti
             while (best_i < axis_dim and row[best_i] != best_value) best_i += 1;
             if (best_i == axis_dim) best_i = 0;
             vd[outer_i] = best_value;
-            // f32 index store: exact for indices < 2^24 (see maxAxisRank
-            // doc); MinMaxBackward clamps on read.
-            id[outer_i] = @floatFromInt(best_i);
+            id[outer_i] = @intCast(best_i);
         }
         return .{ .values = values, .indices = indices };
     }
@@ -216,9 +214,7 @@ fn extremumAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, compti
             }
             if (best_i == axis_dim) best_i = 0;
             vd[outer_i * inner + inner_i] = best_value;
-            // f32 index store: exact for indices < 2^24 (see maxAxisRank
-            // doc); MinMaxBackward clamps on read.
-            id[outer_i * inner + inner_i] = @floatFromInt(best_i);
+            id[outer_i * inner + inner_i] = @intCast(best_i);
         }
     }
     return .{ .values = values, .indices = indices };
@@ -545,7 +541,7 @@ pub fn topKAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, compti
     out_shape[axis] = k;
     var values = try rt.emptyRank(rank, out_shape);
     errdefer values.deinit();
-    var indices = try rt.emptyRank(rank, out_shape);
+    var indices = try rt.emptyRankTyped(.i64, rank, out_shape);
     errdefer indices.deinit();
     const vd = values.data();
     const id = indices.data();
@@ -575,7 +571,7 @@ pub fn topKAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, compti
                     id[output_base + move * inner + inner_i] = id[output_base + (move - 1) * inner + inner_i];
                 }
                 vd[output_base + slot * inner + inner_i] = value;
-                id[output_base + slot * inner + inner_i] = @floatFromInt(axis_i);
+                id[output_base + slot * inner + inner_i] = @intCast(axis_i);
             }
         }
     }
@@ -607,10 +603,8 @@ fn sortPairBefore(descending: bool, a: SortPair, b: SortPair) bool {
 /// ascending, FIRST when descending) — consistent with the extrema kernels
 /// above, which also refuse to let NaN win (see maxAxisRank).
 ///
-/// Indices are stored as f32 (the repo-wide index convention, shared with
-/// argmaxAxisRank/topK): exact only for indices < 2^24. TopKBackward — the
-/// shared scatter-by-saved-indices VJP — clamps on read, so a >2^24 axis
-/// rounds the routed index rather than reading out of bounds.
+/// Indices are i64 (the repo-wide index convention, shared with
+/// argmaxAxisRank/topK): exact for any axis length.
 pub fn sortAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize, descending: bool) !TopKResult {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
@@ -622,7 +616,7 @@ pub fn sortAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, compti
 
     var values = try rt.emptyRank(rank, source.shape);
     errdefer values.deinit();
-    var indices = try rt.emptyRank(rank, source.shape);
+    var indices = try rt.emptyRankTyped(.i64, rank, source.shape);
     errdefer indices.deinit();
     const vd = values.data();
     const id = indices.data();
@@ -644,9 +638,7 @@ pub fn sortAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, compti
             for (scratch, 0..) |pair, axis_i| {
                 const offset = base + axis_i * inner + inner_i;
                 vd[offset] = pair.value;
-                // f32 index store: exact for indices < 2^24 (see the
-                // sortAxisRank doc); TopKBackward clamps on read.
-                id[offset] = @floatFromInt(pair.index);
+                id[offset] = @intCast(pair.index);
             }
         }
     }

@@ -985,7 +985,7 @@ fn greedyGenerate(
         defer logits.deinit();
         var index = try logits.argmax(ctx, .vocab);
         defer index.deinit();
-        const next: usize = @intFromFloat((try index.dataConst())[0]);
+        const next: usize = @intCast((try index.dataConst())[0]);
         if (stop_id) |stop| if (next == stop) break;
         try out.append(allocator, next);
         try seq.append(allocator, next);

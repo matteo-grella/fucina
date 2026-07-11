@@ -1459,8 +1459,8 @@ pub fn scatter(self, ctx, comptime tag, indices, src: *const Self) !Self
   row-gather).
 - `takeAlongAxis`/`scatterAdd`/`scatter` are the per-ELEMENT indexed ops
   (torch gather / scatter_add / scatter): the index operand is a
-  same-tagged non-grad f32 tensor in the argmax/topK/sort index
-  convention, so selection-op outputs feed them directly (§4.16-17).
+  same-tagged i64 tensor in the argmax/topK/sort index convention, so
+  selection-op outputs feed them directly (§4.16-17).
 - `unbindInto`, `maskedSelect`, `maskedScatter`, `rollBy`, `shiftBy`,
   `zeroPad2d`, `constantPad2d`, `reshape` (multi-tag targets), `trace`,
   and `diag` are *composed* ops: when gradients are tracked they require
@@ -1770,9 +1770,9 @@ the named unary aliases (`relu`, `exp`, `sqrt`, `rsqrt`, `sigmoid`, `silu`,
 `subScalar`, `powScalar`, `maximum`, `minimum`, `gated`, `glu`, `swiglu`,
 `geglu`, `softmax` (plain `.{}` options), `logSoftmax`, `rmsNorm`,
 `rmsNormMul`, `layerNorm` (plain `.{}` options), `cumsum`, `cumprod`,
-`where`, `maskedFill`, `compare`, `pad`, `einsum`, and the widened
-reductions `max`, `min`, `argmax`, `prod`, `variance`, `logsumexp`
-(f32 results, §8.3).
+`where`, `maskedFill`, `compare`, `pad`, `einsum`, the widened
+reductions `max`, `min`, `prod`, `variance`, `logsumexp` (f32 results,
+§8.3), and `argmax` (i64 result, §4.16).
 
 **Block-quantized branch:** `constant`, `fromTensor`, `fromBlocks`,
 `fromStorageSlice`, `fromBorrowedBlocks`, `deinit`, `asRawTensor`, `data`,
@@ -2987,20 +2987,24 @@ test "mseLoss mean over all elements" {
 
 ### 4.16 Selection: argmax, topK, sort, routerTopK (`src/ag/tensor.zig`, `src/exec/topk.zig`)
 
-Index outputs across the library are constant **f32** tensors (the repo-wide
-index convention; exact only below 2^24) and carry no gradient.
+Index outputs across the library are constant **i64** tensors (the
+repo-wide index convention — torch's index dtype, exact for any axis
+length) and carry no gradient. As typed constants they are CALLER-owned
+even under an exec scope (§6.3): pair them with `deinit` — an f32
+`values` arm of the same call remains a scope-owned borrow.
 
-- `argmax(ctx, tag)` — indices of the per-row maximum, tag removed.
-  **No-grad by design** (like sampling).
+- `argmax(ctx, tag)` — indices of the per-row maximum, tag removed, as
+  `Tensor(.{ .dtype = .i64, .tags = ... })`. **No-grad by design** (like
+  sampling).
 - `topK(ctx, tag, k, out_tag)` — returns `TopKResult(replaceTag(tags, tag, out_tag))`,
   a struct of `values` and `indices` with a single `deinit()` releasing
   both. `values` **is** differentiable (the gradient scatters back through
-  the saved indices); `indices` is a constant f32 tensor.
+  the saved indices); `indices` is a constant i64 tensor.
 - `sort(ctx, tag, descending)` — full sort (`TopKResult(tags)`): values +
   source index per output position. **Unstable** sort; NaN sorts **last**
   regardless of direction (documented divergence from `torch.sort`, which
   puts NaN first when descending). Values differentiable, indices constant.
-- `argsort(ctx, tag, descending)` — the indices arm alone; no-grad.
+- `argsort(ctx, tag, descending)` — the indices arm alone (i64); no-grad.
 - `routerTopK(ctx, expert_tag, k, options, selected, weights)` — the MoE
   router primitive: fills caller-provided `selected: []usize` /
   `weights: []f32` (both `rows·k` long) with the per-row top-k experts and
@@ -3020,9 +3024,9 @@ test "argmax, topK, and routerTopK" {
     var logits = try fucina.Tensor(.{ .row, .expert }).fromSlice(&ctx, .{ 1, 4 }, &.{ 1, 3, 2, 0 });
     defer logits.deinit();
 
-    var best = try logits.argmax(&ctx, .expert); // indices as f32, no grad
+    var best = try logits.argmax(&ctx, .expert); // i64 indices, no grad
     defer best.deinit();
-    try std.testing.expectEqualSlices(f32, &.{1}, try best.dataConst());
+    try std.testing.expectEqualSlices(i64, &.{1}, try best.dataConst());
 
     var top = try logits.topK(&ctx, .expert, 2, .k);
     defer top.deinit();
@@ -3092,9 +3096,9 @@ slices narrow, pads drop the border). All materialize copies except
   row-gather).
 - `takeAlongAxis(ctx, tag, indices)` — torch.gather /
   np.take_along_axis: per-element row selection along `tag`. `indices` is
-  a same-tagged non-grad f32 tensor (the argmax/topK/sort index
-  convention — their outputs feed it directly), matching `self` on every
-  other axis; the result takes `indices`' shape. Parallel over outer
+  a same-tagged i64 tensor (the argmax/topK/sort index convention —
+  their outputs feed it directly; any other dtype is a compile error),
+  matching `self` on every other axis; the result takes `indices`' shape. Parallel over outer
   slices (disjoint writes — bitwise identical for any thread count);
   differentiable in `self` (exact scatter-add adjoint, duplicate reads
   accumulate).
@@ -3123,7 +3127,7 @@ test "takeAlongAxis pairs with argsort indices" {
     const M = fucina.Tensor(.{ .row, .col });
     var x = try M.fromSlice(&ctx, .{ 2, 3 }, &.{ 30, 10, 20, 5, 15, 0 });
     defer x.deinit();
-    // argsort emits f32 indices — takeAlongAxis consumes them directly,
+    // argsort emits i64 indices — takeAlongAxis consumes them directly,
     // reordering each row (here: torch.gather(x, 1, x.argsort(1))).
     var order = try x.argsort(&ctx, .col, false);
     defer order.deinit();
@@ -3204,8 +3208,8 @@ breakdown the caller can pass to profile a run.
   weight), `cumsum`, `cumprod`, `where`, `maskedFill`, `compare` (0/1 mask
   in the input dtype), `pad`, and `einsum` (same-dtype operands, f32 GEMM
   lowering — the typed `dot` contract). The widened reductions `max`,
-  `min`, `argmax`, `prod`, `variance`, `logsumexp` return **f32** like the
-  native typed `sum`/`mean` (§8.3).
+  `min`, `prod`, `variance`, `logsumexp` return **f32** like the native
+  typed `sum`/`mean` (§8.3); `argmax` returns i64 (§4.16).
 - **Block-quantized** (q8_0, q4_k, ...): no arithmetic — `to(.f32)`
   (dequantize), `getRows` (§4.17), row-axis `concat`, `packRhs` /
   `packRhsLayout` (§4.9), and constructors/views (§3, §10). Their main math
@@ -4254,8 +4258,10 @@ Semantics:
   its `scope_owned` flag set: `deinit` on it is a safe no-op (arena-style),
   and using it after the scope closes is use-after-free. Adoption covers
   both differentiable results and no-grad f32 results (eval on constants,
-  `argmax`, `topK`, …) — it is wired into the op tails (`finishOp` /
-  `finishNoGrad` in `src/ag/tensor.zig`).
+  the `values` arm of `topK`/`sort`, …) — it is wired into the op tails
+  (`finishOp` / `finishNoGrad` in `src/ag/tensor.zig`). The i64 INDEX
+  outputs (`argmax`, `argsort`, the `indices` arms) are typed constants
+  and stay caller-owned (below).
 - **What stays caller-owned even inside a scope:** tensors created
   explicitly (`variable`, `constant`, `fromSlice`, and the other §3
   constructors), fetched gradients (`grad` / `gradView`), the raw `ctx.*`

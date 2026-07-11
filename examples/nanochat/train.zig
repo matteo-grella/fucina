@@ -890,7 +890,7 @@ fn samplePreviews(ctx: *ExecContext, model: anytype, tokenizer: *const Tokenizer
             var logits = try model.forward(ctx, seq.items, null);
             var last = try logits.narrow(ctx, .seq, n - 1, 1);
             var idx = try last.argmax(ctx, .vocab);
-            const next: u32 = @intFromFloat((try idx.dataConst())[0]);
+            const next: u32 = @intCast((try idx.dataConst())[0]);
             try seq.append(allocator, next);
         }
 

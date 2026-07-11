@@ -65,7 +65,7 @@ fn sampleToken(
 ) !usize {
     if (temperature <= 0) {
         var idx = try logits.argmax(ctx, .vocab);
-        return @intFromFloat(try idx.item());
+        return @intCast(try idx.item());
     }
 
     const vocab = logits.dim(.vocab);
@@ -87,9 +87,9 @@ fn sampleToken(
     var acc: f32 = 0;
     for (0..k) |i| {
         acc += probs[i];
-        if (r <= acc) return @intFromFloat(idxs[i]);
+        if (r <= acc) return @intCast(idxs[i]);
     }
-    return @intFromFloat(idxs[k - 1]);
+    return @intCast(idxs[k - 1]);
 }
 
 // ===========================================================================
@@ -1037,7 +1037,7 @@ test "NANOCHAT_PARITY: engine greedy == argmax of full forward per position" {
         const logits = try model.forward(&ctx, seq.items, null);
         var last = try logits.narrow(&ctx, .seq, seq.items.len - 1, 1);
         var idx = try last.argmax(&ctx, .vocab);
-        const next: usize = @intFromFloat(try idx.item());
+        const next: usize = @intCast(try idx.item());
         ctx.closeExecScope(scope);
         try seq.append(allocator, next);
         try ref_out.append(allocator, next);

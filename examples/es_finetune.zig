@@ -505,7 +505,7 @@ fn accReward(comptime TrainerT: type, ctx: *fucina.ExecContext, trainer: *Traine
     for (sample.labels, predictions) |label, prediction| {
         if (label == llm.qwen3.train.ignore_index) continue;
         supervised += 1;
-        if (@as(usize, @intFromFloat(prediction)) == label) correct += 1;
+        if (@as(usize, @intCast(prediction)) == label) correct += 1;
     }
     if (supervised == 0) return error.NoSupervisedTokens;
     const accuracy = @as(f32, @floatFromInt(correct)) / @as(f32, @floatFromInt(supervised));
@@ -534,7 +534,7 @@ fn greedyGenerate(
         defer logits.deinit();
         var index = try logits.argmax(ctx, .vocab);
         defer index.deinit();
-        const next: usize = @intFromFloat((try index.dataConst())[0]);
+        const next: usize = @intCast((try index.dataConst())[0]);
         if (stop_id) |stop| if (next == stop) break;
         try out.append(allocator, next);
         try seq.append(allocator, next);

@@ -1205,7 +1205,7 @@ pub const ExecContext = struct {
         return exec_gather_scatter.sliceGradientAxisRank(&self.rt, rank, grad, source_shape, axis, start);
     }
 
-    pub fn argmaxAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
+    pub fn argmaxAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !tensor.TensorOf(.i64) {
         return exec_stats.argmaxAxisRank(&self.rt, rank, x, axis);
     }
 

@@ -798,7 +798,7 @@ fn argmaxLast(ctx: *ExecContext, logits: *const fucina.Tensor(.{ .seq, .vocab })
     defer last.deinit();
     var index = try last.argmax(ctx, .vocab);
     defer index.deinit();
-    return @intFromFloat(try index.item());
+    return @intCast(try index.item());
 }
 
 // ---------------------------------------------------------------------------

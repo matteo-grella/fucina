@@ -142,14 +142,14 @@ pub const Sampler = struct {
                 break;
             }
         }
-        return @intFromFloat(idxs[chosen]);
+        return @intCast(idxs[chosen]);
     }
 };
 
 fn argmax(ctx: *ExecContext, logits: *Logits) !usize {
     var idx = try logits.argmax(ctx, .vocab);
     defer idx.deinit();
-    return @intFromFloat(try idx.item());
+    return @intCast(try idx.item());
 }
 
 test {

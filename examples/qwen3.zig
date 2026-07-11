@@ -339,7 +339,7 @@ pub fn main(init: std.process.Init) !void {
     const top_values = try top.values.dataConst();
     const top_indices = try top.indices.dataConst();
     for (top_values, top_indices) |value, index| {
-        try stdout.print(" {d}:{d:.4}", .{ @as(usize, @intFromFloat(index)), value });
+        try stdout.print(" {d}:{d:.4}", .{ index, value });
     }
     try stdout.print("\n", .{});
     if (profile_enabled) {
@@ -663,7 +663,7 @@ fn runGenerate(
         defer top.deinit();
         try stdout.print("prefill top tokens:", .{});
         for (try top.values.dataConst(), try top.indices.dataConst()) |value, index| {
-            try stdout.print(" {d}:{d:.4}", .{ @as(usize, @intFromFloat(index)), value });
+            try stdout.print(" {d}:{d:.4}", .{ index, value });
         }
         try stdout.print("\n", .{});
     }

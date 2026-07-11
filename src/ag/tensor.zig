@@ -156,7 +156,11 @@ pub fn TopKResult(comptime tags_spec: anytype) type {
     const result_tags = normalizeTags(tags_spec);
     return struct {
         values: Tensor(result_tags),
-        indices: Tensor(result_tags),
+        /// Source positions along the reduced/sorted axis: a constant i64
+        /// tensor (exact for any axis length, torch's index dtype). Like
+        /// every typed-constant result it is caller-owned even under an
+        /// exec scope.
+        indices: Tensor(.{ .dtype = .i64, .tags = result_tags }),
 
         pub fn deinit(self: *@This()) void {
             self.values.deinit();
@@ -2372,31 +2376,33 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             return finishOp(tags, ctx, value, self.requiresGrad() or update.requiresGrad(), IndexAddBackward(tags, add_axis), .{ ctx.allocator, self.grad_state, update.grad_state, indices });
         }
 
-        /// Read a same-tagged f32 index tensor into a host `[]usize`
-        /// buffer (the argmax/topK/sort f32 index convention: values are
-        /// exact non-negative integers below `limit`; NaN, negatives, and
-        /// out-of-range values error with `IndexOutOfBounds`; fractional
-        /// values truncate). Caller frees.
-        fn hostIndexBuffer(ctx: *ExecContext, values: []const f32, limit: usize) ![]usize {
+        /// Read a same-tagged i64 index tensor into a host `[]usize`
+        /// buffer (the argmax/topK/sort index convention; negatives and
+        /// out-of-range values error with `IndexOutOfBounds`). Caller
+        /// frees.
+        fn hostIndexBuffer(ctx: *ExecContext, values: []const i64, limit: usize) ![]usize {
             const out = try ctx.allocator.alloc(usize, values.len);
             errdefer ctx.allocator.free(out);
-            const bound: f32 = @floatFromInt(limit);
             for (values, out) |v, *slot| {
-                if (!(v >= 0) or v >= bound) return TensorError.IndexOutOfBounds;
-                slot.* = @intFromFloat(v);
+                if (v < 0 or v >= limit) return TensorError.IndexOutOfBounds;
+                slot.* = @intCast(v);
             }
             return out;
         }
 
         /// Elementwise gather along `tag` (torch.gather /
         /// np.take_along_axis): `out[.., i, ..] = self[.., indices[.., i,
-        /// ..], ..]`. `indices` is a same-tagged non-grad f32 tensor (the
+        /// ..], ..]`. `indices` is a same-tagged i64 tensor (the
         /// argmax/topK/sort index convention — pairing directly with their
         /// outputs), contiguous, matching `self` on every other axis; the
         /// result takes `indices`' shape. Serial deterministic kernel;
         /// differentiable in `self` (the exact scatter-add adjoint;
         /// duplicate reads accumulate their gradients).
         pub fn takeAlongAxis(self: *const Self, ctx: *ExecContext, comptime tag: Tag, indices: anytype) !Self {
+            comptime {
+                if (TensorObject(@TypeOf(indices)).dtype != .i64)
+                    @compileError("takeAlongAxis expects i64 indices (the argmax/topK/sort output dtype)");
+            }
             const take_axis = comptime axis(tag);
             const idx_raw = indices.asRawTensor();
             const raw = self.asRawTensor();
@@ -2435,6 +2441,10 @@ fn FloatTensor(comptime tags_spec: anytype) type {
         }
 
         fn scatterAlongImpl(self: *const Self, ctx: *ExecContext, comptime tag: Tag, indices: anytype, src: *const Self, comptime accumulate: bool) !Self {
+            comptime {
+                if (TensorObject(@TypeOf(indices)).dtype != .i64)
+                    @compileError("scatter/scatterAdd expect i64 indices (the argmax/topK/sort output dtype)");
+            }
             const scatter_axis = comptime axis(tag);
             const idx_raw = indices.asRawTensor();
             const src_raw = src.asRawTensor();
@@ -2452,11 +2462,14 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             return finishOp(tags, ctx, value, self.requiresGrad() or src.requiresGrad(), ScatterAlongBackward(tags, scatter_axis, accumulate), .{ ctx.allocator, self.grad_state, src.grad_state, idx_buf, src_raw.shape.at(scatter_axis) });
         }
 
-        pub fn argmax(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(removeTag(tags, tag)) {
+        /// Index of the row maximum along `tag` (torch.argmax over a dim):
+        /// a constant i64 tensor, no gradient. Caller-owned even under an
+        /// exec scope (the typed-constant ownership rule).
+        pub fn argmax(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = .i64, .tags = removeTag(tags, tag) }) {
             const result_tags = removeTag(tags, tag);
             var value = try ctx.argmaxAxisRank(tag_rank, self.asRawTensor(), axis(tag));
             errdefer value.deinit();
-            return finishNoGrad(result_tags, ctx, value);
+            return Tensor(.{ .dtype = .i64, .tags = result_tags }).fromTensor(ctx, value);
         }
 
         /// Max values over `tag` (the tag is removed like sum/mean; argmax
@@ -2493,13 +2506,13 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             const result_tags = replaceTag(tags, tag, out_tag);
             const raw = try ctx.topKAxisRank(tag_rank, self.asRawTensor(), axis(tag), k);
             var raw_values: ?RawTensor = raw.values;
-            var raw_indices: ?RawTensor = raw.indices;
+            var raw_indices: ?tensor_mod.TensorOf(.i64) = raw.indices;
             errdefer if (raw_values) |*value| value.deinit();
             errdefer if (raw_indices) |*value| value.deinit();
             var values = try finishOp(result_tags, ctx, raw_values.?, self.requiresGrad(), TopKBackward(tags, axis(tag)), .{ ctx.allocator, self.grad_state, &self.value, &raw_indices.? });
             raw_values = null;
             errdefer values.deinit();
-            var indices = try finishNoGrad(result_tags, ctx, raw_indices.?);
+            var indices = try Tensor(.{ .dtype = .i64, .tags = result_tags }).fromTensor(ctx, raw_indices.?);
             raw_indices = null;
             errdefer indices.deinit();
             return .{ .values = values, .indices = indices };
@@ -2513,33 +2526,33 @@ fn FloatTensor(comptime tags_spec: anytype) type {
         /// torch.sort, which puts NaN first when descending — see
         /// `sortAxisRank`). Values are differentiable (the gradient scatters
         /// back through the saved indices, the topK VJP); indices are a
-        /// constant f32 tensor (exact only below 2^24, the repo-wide index
-        /// convention).
+        /// constant i64 tensor (exact for any axis length, the repo-wide
+        /// index convention).
         pub fn sort(self: *const Self, ctx: *ExecContext, comptime tag: Tag, descending: bool) !TopKResult(tags) {
             const raw = try ctx.sortAxisRank(tag_rank, self.asRawTensor(), axis(tag), descending);
             var raw_values: ?RawTensor = raw.values;
-            var raw_indices: ?RawTensor = raw.indices;
+            var raw_indices: ?tensor_mod.TensorOf(.i64) = raw.indices;
             errdefer if (raw_values) |*value| value.deinit();
             errdefer if (raw_indices) |*value| value.deinit();
             var values = try finishOp(tags, ctx, raw_values.?, self.requiresGrad(), TopKBackward(tags, axis(tag)), .{ ctx.allocator, self.grad_state, &self.value, &raw_indices.? });
             raw_values = null;
             errdefer values.deinit();
-            var indices = try finishNoGrad(tags, ctx, raw_indices.?);
+            var indices = try Tensor(.{ .dtype = .i64, .tags = tags }).fromTensor(ctx, raw_indices.?);
             raw_indices = null;
             errdefer indices.deinit();
             return .{ .values = values, .indices = indices };
         }
 
         /// The indices arm of `sort` alone (torch.argsort): the source index
-        /// of each sorted position as a constant f32 tensor (no grad; exact
-        /// only below 2^24). Same unstable-sort and NaN-last contract as
-        /// `sort`.
-        pub fn argsort(self: *const Self, ctx: *ExecContext, comptime tag: Tag, descending: bool) !Self {
+        /// of each sorted position as a constant i64 tensor (no grad; exact
+        /// for any axis length). Same unstable-sort and NaN-last contract
+        /// as `sort`.
+        pub fn argsort(self: *const Self, ctx: *ExecContext, comptime tag: Tag, descending: bool) !Tensor(.{ .dtype = .i64, .tags = tags }) {
             var raw = try ctx.sortAxisRank(tag_rank, self.asRawTensor(), axis(tag), descending);
             raw.values.deinit();
-            var raw_indices: ?RawTensor = raw.indices;
+            var raw_indices: ?tensor_mod.TensorOf(.i64) = raw.indices;
             errdefer if (raw_indices) |*value| value.deinit();
-            return finishNoGrad(tags, ctx, raw_indices.?);
+            return Tensor(.{ .dtype = .i64, .tags = tags }).fromTensor(ctx, raw_indices.?);
         }
 
         pub fn routerTopK(
@@ -4903,7 +4916,7 @@ fn typedConstantExtremum(self: anytype, ctx: *ExecContext, comptime tag: Tag, co
     return Tensor(.{ .dtype = .f32, .tags = result_tags }).fromTensor(ctx, raw.values);
 }
 
-fn typedConstantArgmax(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = .f32, .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
+fn typedConstantArgmax(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = .i64, .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
     const Self = TensorObject(@TypeOf(self));
     comptime requireWidenedTypedFloat(Self.dtype, "argmax");
     const result_tags = removeTag(Self.axis_tags, tag);
@@ -4911,7 +4924,7 @@ fn typedConstantArgmax(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Ten
     defer wide.deinit();
     var value = try ctx.argmaxAxisRank(Self.tag_count, &wide, Self.axis(tag));
     errdefer value.deinit();
-    return Tensor(.{ .dtype = .f32, .tags = result_tags }).fromTensor(ctx, value);
+    return Tensor(.{ .dtype = .i64, .tags = result_tags }).fromTensor(ctx, value);
 }
 
 fn typedConstantProd(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = .f32, .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {

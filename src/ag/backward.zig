@@ -1686,7 +1686,7 @@ pub fn TopKBackward(comptime source_tags: anytype, comptime axis: usize) type {
     return struct {
         parents: [1]?*GradState,
         source_shape: [rawRank(source_tags.len)]usize,
-        indices: RawTensor,
+        indices: tensor_mod.TensorOf(.i64),
 
         const Self = @This();
 
@@ -1695,7 +1695,7 @@ pub fn TopKBackward(comptime source_tags: anytype, comptime axis: usize) type {
             allocator: std.mem.Allocator,
             parent: ?*GradState,
             source: *const RawTensor,
-            indices: *const RawTensor,
+            indices: *const tensor_mod.TensorOf(.i64),
         ) !void {
             _ = allocator;
             self.* = .{
@@ -1717,13 +1717,13 @@ pub fn TopKBackward(comptime source_tags: anytype, comptime axis: usize) type {
             const rank = comptime rawRank(source_tags.len);
             var gy_ready = try contiguousForRead(ctx, gy);
             defer gy_ready.deinit();
-            var idx_ready = try contiguousForRead(ctx, &self.indices);
-            defer idx_ready.deinit();
+            // The saved indices are a view of the forward kernel's freshly
+            // allocated (contiguous) i64 tensor.
+            const idxd = self.indices.dataConst();
 
             var gx = try ctx.zeros(self.source_shape[0..]);
             errdefer gx.deinit();
             const gyd = gy_ready.dataConst();
-            const idxd = idx_ready.dataConst();
             const gxd = gx.data();
 
             const axis_dim = self.source_shape[axis];
@@ -1739,7 +1739,7 @@ pub fn TopKBackward(comptime source_tags: anytype, comptime axis: usize) type {
                 for (0..k) |slot| {
                     for (0..inner) |inner_i| {
                         const flat = gy_base + slot * inner + inner_i;
-                        const index = @min(@as(usize, @intFromFloat(idxd[flat])), axis_dim - 1);
+                        const index: usize = @intCast(idxd[flat]);
                         gxd[gx_base + index * inner + inner_i] += gyd[flat];
                     }
                 }
@@ -1769,9 +1769,9 @@ pub fn MinMaxBackward(comptime source_tags: anytype, comptime axis: usize) type 
     return struct {
         parents: [1]?*GradState,
         source_shape: [rawRank(source_tags.len)]usize,
-        // First-extremum indices from the forward pass (out-shaped, f32 like
+        // First-extremum indices from the forward pass (out-shaped, i64 like
         // argmax/topK indices) — stored rather than recomputed.
-        indices: RawTensor,
+        indices: tensor_mod.TensorOf(.i64),
 
         const Self = @This();
 
@@ -1780,7 +1780,7 @@ pub fn MinMaxBackward(comptime source_tags: anytype, comptime axis: usize) type 
             allocator: std.mem.Allocator,
             parent: ?*GradState,
             source: *const RawTensor,
-            indices: *const RawTensor,
+            indices: *const tensor_mod.TensorOf(.i64),
         ) !void {
             _ = allocator;
             self.* = .{
@@ -1802,13 +1802,13 @@ pub fn MinMaxBackward(comptime source_tags: anytype, comptime axis: usize) type 
             const rank = comptime rawRank(source_tags.len);
             var gy_ready = try contiguousForRead(ctx, gy);
             defer gy_ready.deinit();
-            var idx_ready = try contiguousForRead(ctx, &self.indices);
-            defer idx_ready.deinit();
+            // The saved indices are a view of the forward kernel's freshly
+            // allocated (contiguous) i64 tensor.
+            const idxd = self.indices.dataConst();
 
             var gx = try ctx.zeros(self.source_shape[0..]);
             errdefer gx.deinit();
             const gyd = gy_ready.dataConst();
-            const idxd = idx_ready.dataConst();
             const gxd = gx.data();
 
             const axis_dim = self.source_shape[axis];
@@ -1821,14 +1821,7 @@ pub fn MinMaxBackward(comptime source_tags: anytype, comptime axis: usize) type 
                 const gx_base = outer_i * axis_dim * inner;
                 for (0..inner) |inner_i| {
                     const flat = outer_i * inner + inner_i;
-                    // Forward indices are stored as f32 (the repo-wide index
-                    // convention, same as TopKBackward/argmax): exact only
-                    // for indices < 2^24, so on a >2^24 axis the rounded
-                    // float can land at axis_dim. Clamp so the routed index
-                    // degrades (off-by-rounding) instead of writing out of
-                    // bounds; extremumAxisRank documents the same contract
-                    // at the store.
-                    const index = @min(@as(usize, @intFromFloat(idxd[flat])), axis_dim - 1);
+                    const index: usize = @intCast(idxd[flat]);
                     gxd[gx_base + index * inner + inner_i] = gyd[flat];
                 }
             }

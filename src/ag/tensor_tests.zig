@@ -1196,8 +1196,8 @@ test "typed float widened reductions return f32 and scans keep the dtype" {
 
         var best = try x_t.argmax(&ctx, .d);
         defer best.deinit();
-        comptime std.debug.assert(@TypeOf(best).dtype == .f32);
-        try std.testing.expectEqualSlices(f32, &.{ 2, 1 }, best.asRawTensor().dataConst());
+        comptime std.debug.assert(@TypeOf(best).dtype == .i64);
+        try std.testing.expectEqualSlices(i64, &.{ 2, 1 }, best.asRawTensor().dataConst());
 
         var product = try x_t.prod(&ctx, .d);
         defer product.deinit();
@@ -2173,7 +2173,8 @@ test "tagged public tensor exposes argmax and topK sampling helpers" {
     defer arg.deinit();
     try std.testing.expect(!arg.requiresGrad());
     try std.testing.expectEqualSlices(usize, &.{2}, arg.asRawTensor().shape.slice());
-    try std.testing.expectEqualSlices(f32, &.{ 1, 2 }, arg.asRawTensor().dataConst());
+    comptime std.debug.assert(@TypeOf(arg).dtype == .i64);
+    try std.testing.expectEqualSlices(i64, &.{ 1, 2 }, arg.asRawTensor().dataConst());
 
     var top = try x.topK(&ctx, .d, 2, .k);
     defer top.deinit();
@@ -2181,7 +2182,8 @@ test "tagged public tensor exposes argmax and topK sampling helpers" {
     try std.testing.expect(!top.indices.requiresGrad());
     try std.testing.expectEqualSlices(usize, &.{ 2, 2 }, top.values.asRawTensor().shape.slice());
     try std.testing.expectEqualSlices(f32, &.{ 5, 3, 4, 2 }, top.values.asRawTensor().dataConst());
-    try std.testing.expectEqualSlices(f32, &.{ 1, 3, 2, 1 }, top.indices.asRawTensor().dataConst());
+    comptime std.debug.assert(@TypeOf(top.indices).dtype == .i64);
+    try std.testing.expectEqualSlices(i64, &.{ 1, 3, 2, 1 }, top.indices.asRawTensor().dataConst());
 }
 
 test "tagged public tensor causal depthwise conv uses optional history state" {
@@ -4969,12 +4971,12 @@ test "tagged public tensor argmax and topK reduce leading (non-trailing) axes" {
 
     var arg = try x.argmax(&ctx, .row);
     defer arg.deinit();
-    try std.testing.expectEqualSlices(f32, &.{ 2, 2 }, try arg.dataConst());
+    try std.testing.expectEqualSlices(i64, &.{ 2, 2 }, try arg.dataConst());
 
     var top = try x.topK(&ctx, .row, 2, .k);
     defer top.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 5, 6, 3, 4 }, try top.values.dataConst());
-    try std.testing.expectEqualSlices(f32, &.{ 2, 2, 1, 1 }, try top.indices.dataConst());
+    try std.testing.expectEqualSlices(i64, &.{ 2, 2, 1, 1 }, try top.indices.dataConst());
 }
 
 test "tagged public tensor withTags and transpose share the source buffer" {
@@ -5952,11 +5954,15 @@ test "exec scope adopts no-grad op results (constants, argmax, topK)" {
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
     const doubled = try c.add(&ctx, &c);
-    const arg = try doubled.argmax(&ctx, .d);
-    try std.testing.expectEqualSlices(f32, &.{ 1, 2 }, try arg.dataConst());
-    const top = try doubled.topK(&ctx, .d, 2, .k);
+    // Index outputs are i64 typed constants: caller-owned even under the
+    // scope (the typed-constant ownership rule) — values stay scope-owned.
+    var arg = try doubled.argmax(&ctx, .d);
+    defer arg.deinit();
+    try std.testing.expectEqualSlices(i64, &.{ 1, 2 }, try arg.dataConst());
+    var top = try doubled.topK(&ctx, .d, 2, .k);
+    defer top.indices.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 10, 6, 8, 4 }, try top.values.dataConst());
-    try std.testing.expectEqualSlices(f32, &.{ 1, 3, 2, 1 }, try top.indices.dataConst());
+    try std.testing.expectEqualSlices(i64, &.{ 1, 3, 2, 1 }, try top.indices.dataConst());
 }
 
 test "nested exec scopes release only their suffix" {
@@ -8037,13 +8043,13 @@ test "public Tensor sort and argsort values, constant indices, scatter gradient"
     var sorted = try x.sort(&ctx, .d, false);
     defer sorted.deinit();
     try expectCloseSlices(&.{ 1, 2, 3 }, try sorted.values.dataConst(), 0);
-    try expectCloseSlices(&.{ 1, 2, 0 }, try sorted.indices.dataConst(), 0);
+    try std.testing.expectEqualSlices(i64, &.{ 1, 2, 0 }, try sorted.indices.dataConst());
     try std.testing.expect(!sorted.indices.requiresGrad());
 
     // torch.argsort(x, descending=True) = {0, 2, 1}; no grad.
     var order = try x.argsort(&ctx, .d, true);
     defer order.deinit();
-    try expectCloseSlices(&.{ 0, 2, 1 }, try order.dataConst(), 0);
+    try std.testing.expectEqualSlices(i64, &.{ 0, 2, 1 }, try order.dataConst());
     try std.testing.expect(!order.requiresGrad());
 
     // Weighted sum over the sorted values: w = {1, 2, 3} routes back through
@@ -9891,14 +9897,15 @@ test "public Tensor takeAlongAxis pairs with argsort and routes gradients" {
     const M = Tensor(.{ .row, .col });
     var x = try M.fromSlice(&ctx, .{ 2, 3 }, &.{ 10, 20, 30, 40, 50, 60 });
     defer x.deinit();
-    // Per-row index tensors, f32 (the argmax/topK/sort index convention).
-    var idx = try M.fromSlice(&ctx, .{ 2, 2 }, &.{ 2, 0, 1, 1 });
+    // Per-row index tensors, i64 (the argmax/topK/sort index convention).
+    const I = Tensor(.{ .dtype = .i64, .tags = .{ .row, .col } });
+    var idx = try I.fromSlice(&ctx, .{ 2, 2 }, &.{ 2, 0, 1, 1 });
     defer idx.deinit();
     var picked = try x.takeAlongAxis(&ctx, .col, &idx);
     defer picked.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 30, 10, 50, 50 }, try picked.dataConst());
-    // Out-of-range and NaN indices are loud.
-    var bad = try M.fromSlice(&ctx, .{ 2, 2 }, &.{ 3, 0, 1, 1 });
+    // Out-of-range indices are loud.
+    var bad = try I.fromSlice(&ctx, .{ 2, 2 }, &.{ 3, 0, 1, 1 });
     defer bad.deinit();
     try std.testing.expectError(error.IndexOutOfBounds, x.takeAlongAxis(&ctx, .col, &bad));
 
@@ -9927,7 +9934,7 @@ test "public Tensor scatterAdd accumulates and scatter overwrites deterministica
     defer base.deinit();
     var src = try M.variableFromSlice(&ctx, .{ 2, 2 }, &.{ 10, 20, 30, 40 });
     defer src.deinit();
-    var idx = try M.fromSlice(&ctx, .{ 2, 2 }, &.{ 0, 0, 2, 1 });
+    var idx = try Tensor(.{ .dtype = .i64, .tags = .{ .row, .col } }).fromSlice(&ctx, .{ 2, 2 }, &.{ 0, 0, 2, 1 });
     defer idx.deinit();
 
     // scatter_add: row 0 gets 10+20 at col 0 (duplicates accumulate).

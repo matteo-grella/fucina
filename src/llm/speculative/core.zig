@@ -675,7 +675,7 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
                     // Indices arrive as f32: exact integer representation only
                     // holds below 2^24 — vocab sizes (~152k max today) are far
                     // below that bound.
-                    for (dst, ids[0..k]) |*d, s| d.* = @intFromFloat(s);
+                    for (dst, ids[0..k]) |*d, s| d.* = @intCast(s);
                     self.topk_rows[i] = .{ .token = verify[i], .topk = dst };
                 }
                 if (self.on_verify_row) |hook| {

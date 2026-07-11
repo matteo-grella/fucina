@@ -313,7 +313,7 @@ pub fn main(init: std.process.Init) !void {
     const top_values = try top.values.dataConst();
     const top_indices = try top.indices.dataConst();
     for (top_values, top_indices) |value, index| {
-        try stdout.print(" {d}:{d:.4}", .{ @as(usize, @intFromFloat(index)), value });
+        try stdout.print(" {d}:{d:.4}", .{ index, value });
     }
     try stdout.print("\n", .{});
     if (profile_enabled) try printProfile(stdout, &profile, @floatFromInt(repeat), "profile avg ms");
@@ -593,7 +593,7 @@ fn argmaxLast(ctx: *fucina.ExecContext, logits: *const fucina.Tensor(.{ .seq, .v
     defer last.deinit();
     var index = try last.argmax(ctx, .vocab);
     defer index.deinit();
-    return @intFromFloat(try index.item());
+    return @intCast(try index.item());
 }
 
 fn printInfo(stdout: anytype, config: Config) !void {
