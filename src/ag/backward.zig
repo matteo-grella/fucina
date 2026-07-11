@@ -1364,6 +1364,8 @@ fn gatedActivation(comptime op: exec_mod.GatedOp, value: f32) f32 {
         .glu => sigmoid(value),
         .swiglu => value * sigmoid(value),
         .geglu => 0.5 * value * (1 + std.math.tanh(0.7978845608028654 * (value + 0.044715 * value * value * value))),
+        // Inference-only op (DeepSeek V4); no training/backward path.
+        .swiglu_clamp10 => @compileError("swiglu_clamp10 has no backward"),
     };
 }
 
@@ -1377,6 +1379,7 @@ fn gatedActivationDerivative(comptime op: exec_mod.GatedOp, value: f32) f32 {
             const s = sigmoid(value);
             break :blk s * (1 + value * (1 - s));
         },
+        .swiglu_clamp10 => @compileError("swiglu_clamp10 has no backward"),
         .geglu => geluDerivative(value),
     };
 }

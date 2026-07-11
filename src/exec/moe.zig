@@ -561,7 +561,7 @@ fn runMoeExpertTask(task: *const MoeExpertTask) void {
     const swiglu_requant_start = moeBatchProfileStart(task.profile_enabled, task.io);
     switch (task.gated_op) {
         inline else => |op| for (task.g_buf, task.gate_buf, task.up_buf) |*g, gate_v, up_v| {
-            g.* = up_v * backend_ops.gatedActivationScalar(op, gate_v);
+            g.* = backend_ops.gatedPairScalar(op, gate_v, up_v);
         },
     }
     const requant_ok = if (task.down.wantsQ8_0Lhs())
@@ -627,7 +627,7 @@ fn runMoeDecodeChainTask(task: *MoeDecodeChainTask, chain: *const thread.Chain) 
                 const swiglu_requant_start = moeBatchProfileStart(state.profile_enabled, state.io);
                 switch (state.gated_op) {
                     inline else => |op| for (state.g_buf, state.gate_buf, state.up_buf) |*g, gate_v, up_v| {
-                        g.* = up_v * backend_ops.gatedActivationScalar(op, gate_v);
+                        g.* = backend_ops.gatedPairScalar(op, gate_v, up_v);
                     },
                 }
                 if (state.down.wantsQ8_0Lhs())
@@ -920,7 +920,7 @@ fn runMoeBatchTask(task: *const MoeBatchTask) void {
     const swiglu_requant_start = moeBatchProfileStart(task.profile_enabled, task.io);
     switch (task.gated_op) {
         inline else => |op| for (g_out, gate_out, up_out) |*g, gate_v, up_v| {
-            g.* = up_v * backend_ops.gatedActivationScalar(op, gate_v);
+            g.* = backend_ops.gatedPairScalar(op, gate_v, up_v);
         },
     }
     for (0..m) |i| {
@@ -1070,7 +1070,7 @@ fn runMoeBatchSwiGluTask(task: *const MoeBatchSwiGluTask) void {
     const g_out = task.g_buf[base * out_pe ..][0 .. m * out_pe];
     switch (task.gated_op) {
         inline else => |op| for (g_out, gate_out, up_out) |*g, gate_v, up_v| {
-            g.* = up_v * backend_ops.gatedActivationScalar(op, gate_v);
+            g.* = backend_ops.gatedPairScalar(op, gate_v, up_v);
         },
     }
     for (0..m) |i| {

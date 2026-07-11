@@ -87,6 +87,10 @@ pub const GatedOp = enum {
     // GeGLU: the gated activation is GELU (tanh approximation) instead of SiLU.
     // Used by Gemma's GeGLU FFN/MoE; `geglu(up, gate) = up * gelu(gate)`.
     geglu,
+    // DeepSeek V4's clamped SwiGLU: gate is clamped to <= +10 before SiLU and
+    // up is clamped to [-10, 10] before the multiply (the model's
+    // swiglu_clamp_exp metadata; validated == 10 at load).
+    swiglu_clamp10,
 };
 
 pub inline fn unaryScalar(comptime op: UnaryOp, value: f32) f32 {
@@ -137,6 +141,19 @@ pub inline fn gatedActivationScalar(comptime op: GatedOp, value: f32) f32 {
         .glu => sigmoidScalar(value),
         .swiglu => value * sigmoidScalar(value),
         .geglu => geluScalar(value),
+        .swiglu_clamp10 => blk: {
+            const g = @min(value, 10.0);
+            break :blk g * sigmoidScalar(g);
+        },
+    };
+}
+
+/// The full gated pair for ops whose clamping also touches the `up` input
+/// (`swiglu_clamp10`); all other ops reduce to `up * gatedActivationScalar`.
+pub inline fn gatedPairScalar(comptime op: GatedOp, gate: f32, up: f32) f32 {
+    return switch (op) {
+        .swiglu_clamp10 => gatedActivationScalar(op, gate) * @min(@max(up, -10.0), 10.0),
+        else => up * gatedActivationScalar(op, gate),
     };
 }
 

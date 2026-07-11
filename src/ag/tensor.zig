@@ -1534,6 +1534,7 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             const result_tags = replaceTag(tags, tag, out_tag);
             const split_axis = comptime axis(tag);
             switch (comptime op) {
+                .swiglu_clamp10 => @compileError("splitGated has no swiglu_clamp10 kernel (inference-only op)"),
                 .swiglu => {
                     var value = try ctx.splitSwiGluAxisRank(tag_rank, self.asRawTensor(), split_axis);
                     errdefer value.deinit();

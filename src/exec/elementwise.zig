@@ -602,6 +602,7 @@ fn splitGatedAxisRankImpl(rt: *Runtime, comptime op: GatedOp, comptime rank: usi
         .swiglu => SplitSwiGluTask,
         .glu => SplitGluTask,
         .geglu => @compileError("no split-geglu row kernel or gate-half convention exists"),
+        .swiglu_clamp10 => @compileError("no split kernel for swiglu_clamp10 (inference-only MoE op)"),
     };
     const runTask = switch (op) {
         .swiglu => runSplitSwiGluTask,
