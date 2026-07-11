@@ -54,6 +54,12 @@ pub const Config = struct {
     expert_ffn_size: usize,
     num_shared_experts: usize,
     expert_weights_scale: f32,
+    /// 1 = softmax scoring (V2), 2 = sigmoid scoring (V3/noaux_tc).
+    expert_gating_func: usize,
+    /// V3: renormalize the selected experts' weights to sum 1.
+    expert_weights_norm: bool,
+    /// V2 full / V3: low-rank q projection (0 = direct q, as on Lite).
+    q_lora_rank: usize,
     rms_norm_eps: f32,
     rope_theta: f32,
     yarn_factor: f32,
@@ -64,7 +70,13 @@ pub const Config = struct {
         const arch = file.getString("general.architecture") orelse return Error.InvalidConfig;
         if (!std.mem.eql(u8, arch, "deepseek2")) return Error.InvalidConfig;
 
-        const qk_head = try metaInt(file, "deepseek2.attention.key_length");
+        // Newer MLA-native conversions set key_length/value_length to the
+        // LATENT attention dims (576/512) and carry the real per-head dims
+        // in *_mla; older files carry them in key_length/value_length.
+        const qk_head = gguf_meta.metaIntOpt(file, "deepseek2", "attention.key_length_mla", .reject_zero) orelse
+            try metaInt(file, "deepseek2.attention.key_length");
+        const v_head = gguf_meta.metaIntOpt(file, "deepseek2", "attention.value_length_mla", .reject_zero) orelse
+            try metaInt(file, "deepseek2.attention.value_length");
         const rope_dims = try metaInt(file, "deepseek2.rope.dimension_count");
         return .{
             .vocab_size = try metaInt(file, "deepseek2.vocab_size"),
@@ -74,7 +86,7 @@ pub const Config = struct {
             .qk_nope_dim = qk_head - rope_dims,
             .qk_rope_dim = rope_dims,
             .qk_head_dim = qk_head,
-            .v_head_dim = try metaInt(file, "deepseek2.attention.value_length"),
+            .v_head_dim = v_head,
             .kv_lora_rank = try metaInt(file, "deepseek2.attention.kv_lora_rank"),
             .dense_ffn_size = try metaInt(file, "deepseek2.feed_forward_length"),
             .leading_dense_layers = gguf_meta.metaIntOpt(file, "deepseek2", "leading_dense_block_count", .accept_zero) orelse 0,
@@ -83,6 +95,9 @@ pub const Config = struct {
             .expert_ffn_size = gguf_meta.metaIntOpt(file, "deepseek2", "expert_feed_forward_length", .accept_zero) orelse 0,
             .num_shared_experts = gguf_meta.metaIntOpt(file, "deepseek2", "expert_shared_count", .accept_zero) orelse 0,
             .expert_weights_scale = metaFloatOpt(file, "deepseek2.expert_weights_scale") orelse 1.0,
+            .expert_gating_func = gguf_meta.metaIntOpt(file, "deepseek2", "expert_gating_func", .accept_zero) orelse 1,
+            .expert_weights_norm = file.getBool("deepseek2.expert_weights_norm") orelse false,
+            .q_lora_rank = gguf_meta.metaIntOpt(file, "deepseek2", "attention.q_lora_rank", .accept_zero) orelse 0,
             .rms_norm_eps = try metaFloat(file, "deepseek2.attention.layer_norm_rms_epsilon"),
             .rope_theta = metaFloatOpt(file, "deepseek2.rope.freq_base") orelse 10000.0,
             .yarn_factor = metaFloatOpt(file, "deepseek2.rope.scaling.factor") orelse 1.0,
@@ -246,9 +261,17 @@ const Layer = struct {
     attn_norm: []f32, // host copies of the tiny norm vectors
     kv_a_norm: []f32,
     ffn_norm: []f32,
-    q_proj: LinearWeight, // hidden -> heads*qk_head
+    q_proj: ?LinearWeight, // hidden -> heads*qk_head (models without q-LoRA)
+    q_a: ?LinearWeight, // q-LoRA: hidden -> q_lora
+    q_a_norm: ?[]f32,
+    q_b: ?LinearWeight, // q-LoRA: q_lora -> heads*qk_head
+    /// V3 noaux_tc: selection bias added to the sigmoid scores for TOP-K
+    /// CHOICE only (never to the mixture weights).
+    router_bias: ?[]f32,
     kv_a: LinearWeight, // hidden -> kv_lora + rope
-    kv_b: LinearWeight, // kv_lora -> heads*(nope + v)
+    /// Fused kv_b (older conversions); null when the file ships the
+    /// pre-split absorption tensors instead. Required by `.full` cache mode.
+    kv_b: ?LinearWeight,
     /// kv_b dequantized to host f32 for weight absorption, split per head:
     /// `kv_b_k` rows are each head's k_nope block `[nope, kv_lora]`,
     /// `kv_b_v` each head's v block `[v_head, kv_lora]` (row-major,
@@ -264,9 +287,13 @@ const Layer = struct {
         self.o_proj.deinit();
         allocator.free(self.kv_b_v);
         allocator.free(self.kv_b_k);
-        self.kv_b.deinit();
+        if (self.kv_b) |*w| w.deinit();
         self.kv_a.deinit();
-        self.q_proj.deinit();
+        if (self.router_bias) |b| allocator.free(b);
+        if (self.q_b) |*w| w.deinit();
+        if (self.q_a_norm) |n| allocator.free(n);
+        if (self.q_a) |*w| w.deinit();
+        if (self.q_proj) |*w| w.deinit();
         allocator.free(self.ffn_norm);
         allocator.free(self.kv_a_norm);
         allocator.free(self.attn_norm);
@@ -504,9 +531,24 @@ pub const Model = struct {
             var h_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, cfg.hidden_size }, h_norm);
             defer h_t.deinit();
 
-            var q_t = try layer.q_proj.linearSeq(ctx, &h_t, .embed, .q);
-            defer q_t.deinit();
-            const q = try allocator.dupe(f32, try q_t.dataConst());
+            const q = blk: {
+                if (layer.q_proj) |*direct| {
+                    var q_t = try direct.linearSeq(ctx, &h_t, .embed, .q);
+                    defer q_t.deinit();
+                    break :blk try allocator.dupe(f32, try q_t.dataConst());
+                }
+                // q-LoRA: hidden -> q_lora -> rmsnorm -> heads*qk_head.
+                var qa_t = try layer.q_a.?.linearSeq(ctx, &h_t, .embed, .q);
+                defer qa_t.deinit();
+                const q_lat = try allocator.alloc(f32, cfg.q_lora_rank);
+                defer allocator.free(q_lat);
+                rmsNormInto(q_lat, try qa_t.dataConst(), layer.q_a_norm.?, cfg.rms_norm_eps);
+                var q_lat_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, cfg.q_lora_rank }, q_lat);
+                defer q_lat_t.deinit();
+                var qb_t = try layer.q_b.?.linearSeq(ctx, &q_lat_t, .embed, .q);
+                defer qb_t.deinit();
+                break :blk try allocator.dupe(f32, try qb_t.dataConst());
+            };
             defer allocator.free(q);
 
             var kv_a_t = try layer.kv_a.linearSeq(ctx, &h_t, .embed, .k);
@@ -530,7 +572,8 @@ pub const Model = struct {
                     // attention over materialized K/V (validation baseline).
                     var latent_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, cfg.kv_lora_rank }, latent);
                     defer latent_t.deinit();
-                    var kv_t = try layer.kv_b.linearSeq(ctx, &latent_t, .embed, .v);
+                    const kv_b_full = if (layer.kv_b) |*w| w else return Error.InvalidWeightShape;
+                    var kv_t = try kv_b_full.linearSeq(ctx, &latent_t, .embed, .v);
                     defer kv_t.deinit();
                     const kv = try kv_t.dataConst(); // [heads * (nope + v)]
 
@@ -640,7 +683,7 @@ pub const Model = struct {
                     for (x, y) |*xi, yi| xi.* += yi;
                 },
                 .moe => |*moe| {
-                    const y = try self.moeForward(ctx, allocator, moe, &f_t, h_norm);
+                    const y = try self.moeForward(ctx, allocator, moe, layer, &f_t);
                     defer allocator.free(y);
                     for (x, y) |*xi, yi| xi.* += yi;
                 },
@@ -656,17 +699,32 @@ pub const Model = struct {
         return allocator.dupe(f32, try logits_t.dataConst());
     }
 
-    /// Routed mixture + shared expert. V2 semantics: softmax over ALL
-    /// router logits, top-k of those probabilities used UN-renormalized
-    /// (norm_topk_prob = false), scaled by expert_weights_scale.
-    fn moeForward(self: *const Model, ctx: *ExecContext, allocator: Allocator, moe: *const MoeFfn, f_t: *const fucina.Tensor(.{ .seq, .embed }), f_row: []const f32) ![]f32 {
-        _ = f_row;
+    /// Routed mixture + shared expert. V2: softmax over ALL router logits,
+    /// top-k of those probabilities used un-renormalized. V3 (noaux_tc):
+    /// sigmoid scores; the per-expert selection bias (exp_probs_b) applies
+    /// to the top-k CHOICE only, the mixture weights are the raw sigmoid
+    /// scores, optionally renormalized to sum 1 (expert_weights_norm).
+    /// Group-limited top-k (n_group > 1, the 671B-scale configs) is not
+    /// implemented yet — single-group models (Lite, Moonlight) are exact.
+    /// Both variants scale by expert_weights_scale.
+    fn moeForward(self: *const Model, ctx: *ExecContext, allocator: Allocator, moe: *const MoeFfn, layer: *const Layer, f_t: *const fucina.Tensor(.{ .seq, .embed })) ![]f32 {
         const cfg = self.config;
         var logits_t = try moe.router.linearSeq(ctx, f_t, .embed, .expert);
         defer logits_t.deinit();
         const probs = try allocator.dupe(f32, try logits_t.dataConst());
         defer allocator.free(probs);
-        softmaxInPlace(probs);
+        switch (cfg.expert_gating_func) {
+            2 => for (probs) |*v| {
+                v.* = 1.0 / (1.0 + @exp(-v.*));
+            },
+            else => softmaxInPlace(probs),
+        }
+        // Selection scores: biased for the choice, never for the weights.
+        const choice = try allocator.dupe(f32, probs);
+        defer allocator.free(choice);
+        if (layer.router_bias) |bias| {
+            for (choice, bias) |*c, b| c.* += b;
+        }
 
         const y = try allocator.alloc(f32, cfg.hidden_size);
         errdefer allocator.free(y);
@@ -678,17 +736,23 @@ pub const Model = struct {
         std.debug.assert(cfg.num_experts_used <= selected.len);
         for (0..cfg.num_experts_used) |slot| {
             var best: usize = 0;
-            var best_p: f32 = -1;
-            for (probs, 0..) |p, e| {
-                if (p > best_p) {
-                    best_p = p;
+            var best_c: f32 = -std.math.inf(f32);
+            for (choice, 0..) |c, e| {
+                if (c > best_c) {
+                    best_c = c;
                     best = e;
                 }
             }
-            probs[best] = -1; // consumed
+            choice[best] = -std.math.inf(f32); // consumed
             selected[slot] = best;
-            routing[slot] = best_p * cfg.expert_weights_scale;
+            routing[slot] = probs[best];
         }
+        if (cfg.expert_weights_norm) {
+            var total: f32 = 1e-20;
+            for (routing[0..cfg.num_experts_used]) |w| total += w;
+            for (routing[0..cfg.num_experts_used]) |*w| w.* /= total;
+        }
+        for (routing[0..cfg.num_experts_used]) |*w| w.* *= cfg.expert_weights_scale;
 
         var mix = try weights.moeSwiGluFfnSeq(
             ctx,
@@ -730,27 +794,43 @@ fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i:
     const ffn_norm = try hostVector(allocator, file, try name.of(&name_buf, layer_i, "ffn_norm.weight"), config.hidden_size);
     errdefer allocator.free(ffn_norm);
 
-    var q_proj = try LinearWeight.load(ctx, try file.get(try name.of(&name_buf, layer_i, "attn_q.weight")), config.num_heads * config.qk_head_dim, config.hidden_size);
-    errdefer q_proj.deinit();
+    var q_proj: ?LinearWeight = null;
+    var q_a: ?LinearWeight = null;
+    var q_a_norm: ?[]f32 = null;
+    var q_b: ?LinearWeight = null;
+    errdefer if (q_proj) |*w| w.deinit();
+    errdefer if (q_a) |*w| w.deinit();
+    errdefer if (q_a_norm) |n| allocator.free(n);
+    errdefer if (q_b) |*w| w.deinit();
+    if (config.q_lora_rank > 0) {
+        q_a = try LinearWeight.load(ctx, try file.get(try name.of(&name_buf, layer_i, "attn_q_a.weight")), config.q_lora_rank, config.hidden_size);
+        q_a_norm = try hostVector(allocator, file, try name.of(&name_buf, layer_i, "attn_q_a_norm.weight"), config.q_lora_rank);
+        q_b = try LinearWeight.load(ctx, try file.get(try name.of(&name_buf, layer_i, "attn_q_b.weight")), config.num_heads * config.qk_head_dim, config.q_lora_rank);
+    } else {
+        q_proj = try LinearWeight.load(ctx, try file.get(try name.of(&name_buf, layer_i, "attn_q.weight")), config.num_heads * config.qk_head_dim, config.hidden_size);
+    }
     var kv_a = try LinearWeight.load(ctx, try file.get(try name.of(&name_buf, layer_i, "attn_kv_a_mqa.weight")), config.kv_lora_rank + config.qk_rope_dim, config.hidden_size);
     errdefer kv_a.deinit();
-    const kv_b_info = try file.get(try name.of(&name_buf, layer_i, "attn_kv_b.weight"));
-    var kv_b = try LinearWeight.load(ctx, kv_b_info, config.num_heads * (config.qk_nope_dim + config.v_head_dim), config.kv_lora_rank);
-    errdefer kv_b.deinit();
-
-    // Dequantize kv_b to host f32 and split its per-head row blocks for
-    // weight absorption (see Layer.kv_b_k/kv_b_v).
-    const kv_b_rows = config.num_heads * (config.qk_nope_dim + config.v_head_dim);
-    const kv_b_all = try allocator.alloc(f32, kv_b_rows * config.kv_lora_rank);
-    defer allocator.free(kv_b_all);
-    try gguf.decodeF32(kv_b_info.ggml_type, kv_b_info.data, kv_b_all);
-    const kv_b_k = try allocator.alloc(f32, config.num_heads * config.qk_nope_dim * config.kv_lora_rank);
+    // Absorption matrices, from either kv_b layout:
+    //  - fused attn_kv_b [kv_lora -> heads*(nope+v)] (older conversions;
+    //    also powers the .full reconstructed cache mode), or
+    //  - pre-split attn_k_b [nope, lora, heads] + attn_v_b [lora, v, heads]
+    //    (MLA-native conversions; k_b arrives [lora][nope] per head and is
+    //    transposed into our [nope][lora] row layout).
+    const lora = config.kv_lora_rank;
+    var kv_b: ?LinearWeight = null;
+    errdefer if (kv_b) |*w| w.deinit();
+    const kv_b_k = try allocator.alloc(f32, config.num_heads * config.qk_nope_dim * lora);
     errdefer allocator.free(kv_b_k);
-    const kv_b_v = try allocator.alloc(f32, config.num_heads * config.v_head_dim * config.kv_lora_rank);
+    const kv_b_v = try allocator.alloc(f32, config.num_heads * config.v_head_dim * lora);
     errdefer allocator.free(kv_b_v);
-    {
+    if (file.maybeGet(try name.of(&name_buf, layer_i, "attn_kv_b.weight"))) |kv_b_info| {
+        kv_b = try LinearWeight.load(ctx, kv_b_info, config.num_heads * (config.qk_nope_dim + config.v_head_dim), lora);
+        const kv_b_rows = config.num_heads * (config.qk_nope_dim + config.v_head_dim);
+        const kv_b_all = try allocator.alloc(f32, kv_b_rows * lora);
+        defer allocator.free(kv_b_all);
+        try gguf.decodeF32(kv_b_info.ggml_type, kv_b_info.data, kv_b_all);
         const head_rows = config.qk_nope_dim + config.v_head_dim;
-        const lora = config.kv_lora_rank;
         for (0..config.num_heads) |h| {
             const src_base = h * head_rows * lora;
             @memcpy(
@@ -762,10 +842,28 @@ fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i:
                 kv_b_all[src_base + config.qk_nope_dim * lora ..][0 .. config.v_head_dim * lora],
             );
         }
+    } else {
+        const k_b_info = try file.get(try name.of(&name_buf, layer_i, "attn_k_b.weight"));
+        if (k_b_info.n_dims != 3 or k_b_info.dims[0] != config.qk_nope_dim or k_b_info.dims[1] != lora or k_b_info.dims[2] != config.num_heads) return Error.InvalidWeightShape;
+        const k_b_all = try allocator.alloc(f32, config.num_heads * lora * config.qk_nope_dim);
+        defer allocator.free(k_b_all);
+        try gguf.decodeF32(k_b_info.ggml_type, k_b_info.data, k_b_all);
+        for (0..config.num_heads) |h| {
+            const src = k_b_all[h * lora * config.qk_nope_dim ..][0 .. lora * config.qk_nope_dim];
+            const dst = kv_b_k[h * config.qk_nope_dim * lora ..][0 .. config.qk_nope_dim * lora];
+            for (0..lora) |j| {
+                for (0..config.qk_nope_dim) |i| dst[i * lora + j] = src[j * config.qk_nope_dim + i];
+            }
+        }
+        const v_b_info = try file.get(try name.of(&name_buf, layer_i, "attn_v_b.weight"));
+        if (v_b_info.n_dims != 3 or v_b_info.dims[0] != lora or v_b_info.dims[1] != config.v_head_dim or v_b_info.dims[2] != config.num_heads) return Error.InvalidWeightShape;
+        try gguf.decodeF32(v_b_info.ggml_type, v_b_info.data, kv_b_v);
     }
     var o_proj = try LinearWeight.load(ctx, try file.get(try name.of(&name_buf, layer_i, "attn_output.weight")), config.hidden_size, config.num_heads * config.v_head_dim);
     errdefer o_proj.deinit();
 
+    var router_bias: ?[]f32 = null;
+    errdefer if (router_bias) |b| allocator.free(b);
     var ffn: Ffn = undefined;
     if (layer_i < config.leading_dense_layers or config.num_experts == 0) {
         var gate = try LinearWeight.load(ctx, try file.get(try name.of(&name_buf, layer_i, "ffn_gate.weight")), config.dense_ffn_size, config.hidden_size);
@@ -778,6 +876,13 @@ fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i:
     } else {
         var router = try LinearWeight.load(ctx, try file.get(try name.of(&name_buf, layer_i, "ffn_gate_inp.weight")), config.num_experts, config.hidden_size);
         errdefer router.deinit();
+        // V3 noaux_tc selection bias (absent on V2-family files).
+        var bias_name_buf: [96]u8 = undefined;
+        if (file.maybeGet(try name.of(&bias_name_buf, layer_i, "exp_probs_b.bias"))) |bias_info| {
+            router_bias = try hostVectorInfo(allocator, bias_info, config.num_experts);
+        } else if (file.maybeGet(try name.of(&bias_name_buf, layer_i, "exp_probs_b.weight"))) |bias_info| {
+            router_bias = try hostVectorInfo(allocator, bias_info, config.num_experts);
+        }
         var gate: fucina.MoeRhs = undefined;
         var up: fucina.MoeRhs = undefined;
         var down: fucina.MoeRhs = undefined;
@@ -817,6 +922,10 @@ fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i:
         .kv_a_norm = kv_a_norm,
         .ffn_norm = ffn_norm,
         .q_proj = q_proj,
+        .q_a = q_a,
+        .q_a_norm = q_a_norm,
+        .q_b = q_b,
+        .router_bias = router_bias,
         .kv_a = kv_a,
         .kv_b = kv_b,
         .kv_b_k = kv_b_k,
@@ -844,7 +953,10 @@ fn swigluLinear(ctx: *ExecContext, allocator: Allocator, x: *const fucina.Tensor
 }
 
 fn hostVector(allocator: Allocator, file: *const gguf.File, tensor_name: []const u8, expected: usize) ![]f32 {
-    const info = try file.get(tensor_name);
+    return hostVectorInfo(allocator, try file.get(tensor_name), expected);
+}
+
+fn hostVectorInfo(allocator: Allocator, info: *const gguf.TensorInfo, expected: usize) ![]f32 {
     if (info.n_dims != 1 or info.dims[0] != expected) return Error.InvalidWeightShape;
     const out = try allocator.alloc(f32, expected);
     errdefer allocator.free(out);
