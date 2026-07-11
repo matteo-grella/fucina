@@ -64,6 +64,7 @@ pub fn main(init: std.process.Init) !void {
     var moe_cache_slots: ?usize = null;
     var moe_pin_mb: ?usize = null;
     var moe_no_learn = false;
+    var moe_expert_top_p: ?f32 = null;
     var arg_i: usize = 2;
     while (arg_i < args.len) : (arg_i += 1) {
         const arg = args[arg_i];
@@ -234,6 +235,8 @@ pub fn main(init: std.process.Init) !void {
             moe_pin_mb = try std.fmt.parseInt(usize, arg["--moe-pin-mb=".len..], 10);
         } else if (std.mem.eql(u8, arg, "--moe-no-learn")) {
             moe_no_learn = true;
+        } else if (std.mem.startsWith(u8, arg, "--moe-expert-top-p=")) {
+            moe_expert_top_p = try std.fmt.parseFloat(f32, arg["--moe-expert-top-p=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--")) {
             try stdout.print("unknown flag: {s} (run with no arguments for usage)\n", .{arg});
             return error.UnknownArgument;
@@ -272,7 +275,9 @@ pub fn main(init: std.process.Init) !void {
             .pin_bytes = if (moe_pin_mb) |mb| mb << 20 else null,
         },
     } else .{};
-    var model = try llm.qwen3.model.Model.loadGgufFromFileOptions(&ctx, &file, try llm.qwen3.model.Config.fromGguf(&file), load_options);
+    var model_config = try llm.qwen3.model.Config.fromGguf(&file);
+    if (moe_expert_top_p) |p| model_config.moe_expert_top_p = p;
+    var model = try llm.qwen3.model.Model.loadGgufFromFileOptions(&ctx, &file, model_config, load_options);
     defer model.deinit();
     defer if (model.expert_store) |store| {
         // The learning cache: persist this session's routing so the next

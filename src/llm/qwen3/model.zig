@@ -59,6 +59,10 @@ pub const Config = struct {
     num_experts_used: usize = 0,
     moe_intermediate_size: usize = 0,
     norm_topk_prob: bool = true,
+    /// Adaptive expert top-p (`applyExpertTopP`): keep experts per token up
+    /// to this cumulative routing weight. 1.0 (default) = full top-k,
+    /// bit-identical baseline. A runtime knob, not GGUF metadata.
+    moe_expert_top_p: f32 = 1.0,
 
     pub fn isMoe(self: Config) bool {
         return self.num_experts > 0;
@@ -1499,6 +1503,7 @@ fn moeFfn(
     const wgt = try allocator.alloc(f32, seq * top_k);
     defer allocator.free(wgt);
     try logits.routerTopK(ctx, .expert, top_k, .{ .normalize_selected = config.norm_topk_prob }, sel, wgt);
+    applyExpertTopP(sel, wgt, top_k, config.moe_expert_top_p);
     if (profile) |p| p.router_ns += profileElapsed(router_start, io);
 
     const moe_profile: ?*fucina.MoeBatchProfile = if (profile) |p| &p.moe_batch else null;
@@ -1515,6 +1520,86 @@ fn moeFfn(
         io,
         moe_profile,
     );
+}
+
+/// Adaptive expert top-p (routing sparsification, off at p >= 1): per token,
+/// keep the smallest weight-descending prefix of the selected experts whose
+/// cumulative routing weight reaches `p` of the selected total, rescale the
+/// kept weights back to that total, and re-point every dropped pair at the
+/// token's top expert with weight zero. The pair layout stays (seq, top_k),
+/// so the fused MoE ops run unchanged — but dropped experts are neither read
+/// from disk nor cached, which is the lever when experts stream from disk
+/// (colibri measured 30-40% fewer expert loads at p ~= 0.7 for modest
+/// quality cost). Quality-traded: outputs differ from full top-k.
+pub fn applyExpertTopP(selected: []usize, routing_weights: []f32, top_k: usize, p: f32) void {
+    if (p >= 1 or top_k <= 1) return;
+    std.debug.assert(selected.len == routing_weights.len and selected.len % top_k == 0);
+    const n_tokens = selected.len / top_k;
+    for (0..n_tokens) |t| {
+        const sel = selected[t * top_k ..][0..top_k];
+        const wgt = routing_weights[t * top_k ..][0..top_k];
+        // Insertion sort, weight-descending (top_k is single digits).
+        for (1..top_k) |i| {
+            const wi = wgt[i];
+            const si = sel[i];
+            var j = i;
+            while (j > 0 and wgt[j - 1] < wi) : (j -= 1) {
+                wgt[j] = wgt[j - 1];
+                sel[j] = sel[j - 1];
+            }
+            wgt[j] = wi;
+            sel[j] = si;
+        }
+        var total: f32 = 0;
+        for (wgt) |w| total += w;
+        if (!(total > 0)) continue;
+        var cum: f32 = 0;
+        var keep: usize = top_k;
+        for (wgt, 0..) |w, i| {
+            cum += w;
+            if (cum >= p * total) {
+                keep = i + 1;
+                break;
+            }
+        }
+        if (keep == top_k) continue;
+        // Rescale the kept prefix back to the selected total, preserving the
+        // router's normalization choice (norm_topk or raw softmax mass).
+        const scale = total / cum;
+        for (wgt[0..keep]) |*w| w.* *= scale;
+        for (keep..top_k) |i| {
+            sel[i] = sel[0];
+            wgt[i] = 0;
+        }
+    }
+}
+
+test "applyExpertTopP keeps the cumulative-weight prefix and re-points dropped pairs" {
+    // Token routing: weights 0.4, 0.3, 0.2, 0.1 over experts 7, 2, 5, 1.
+    var sel = [_]usize{ 2, 7, 1, 5 };
+    var wgt = [_]f32{ 0.3, 0.4, 0.1, 0.2 };
+
+    // p = 1: untouched (bit-identical baseline).
+    applyExpertTopP(&sel, &wgt, 4, 1.0);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 7, 1, 5 }, &sel);
+    try std.testing.expectEqualSlices(f32, &.{ 0.3, 0.4, 0.1, 0.2 }, &wgt);
+
+    // p = 0.65: sorted prefix 0.4 + 0.3 = 0.7 >= 0.65 -> keep two, rescale
+    // them to the original total (1.0), drop the rest onto the top expert.
+    applyExpertTopP(&sel, &wgt, 4, 0.65);
+    try std.testing.expectEqualSlices(usize, &.{ 7, 2, 7, 7 }, &sel);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.4 / 0.7), wgt[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.3 / 0.7), wgt[1], 1e-6);
+    try std.testing.expectEqual(@as(f32, 0), wgt[2]);
+    try std.testing.expectEqual(@as(f32, 0), wgt[3]);
+
+    // A dominant top-1 collapses routing to one expert.
+    var sel1 = [_]usize{ 3, 0 };
+    var wgt1 = [_]f32{ 0.9, 0.1 };
+    applyExpertTopP(&sel1, &wgt1, 2, 0.8);
+    try std.testing.expectEqualSlices(usize, &.{ 3, 3 }, &sel1);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0 / 0.9) * 0.9, wgt1[0], 1e-6);
+    try std.testing.expectEqual(@as(f32, 0), wgt1[1]);
 }
 
 fn profileStart(profile: ?*ForwardProfile, io: ?std.Io) i128 {
