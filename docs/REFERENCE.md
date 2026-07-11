@@ -10706,6 +10706,56 @@ test "chat template: detect from GGUF metadata, render a turn" {
 }
 ```
 
+`renderMessages` is `renderTurn`'s stateless twin: it renders a FULL message
+history for a fresh conversation, ending with the assistant-turn opener — the
+shape a messages-array API server receives on every request (the lmserve
+example, `examples/lmserve/`).
+
+```zig
+pub const Message = struct {
+    role: Role, // enum { system, user, assistant }
+    content: []const u8, // borrowed
+};
+pub fn renderMessages(self, allocator, buf: *std.ArrayList(u8),
+    messages: []const Message, think_off: bool) !void;
+```
+
+ChatML and Llama 3 render every message as its own role block, any order.
+The Gemma formats have a single conversation-start system slot: leading
+system messages merge into it (Gemma 1–3: folded into the first user turn),
+and a later one is `error.SystemMidConversation`. An empty list is
+`error.EmptyMessages`; a trailing assistant message is
+`error.TrailingAssistantMessage` (rendering would open a SECOND assistant
+turn after it rather than continue it). Historical assistant contents have
+their reasoning block stripped (ChatML `<think>…</think>`, Gemma 4
+`<|channel>thought…<channel|>`) — the reference templates drop prior-turn
+reasoning, and stateless clients replay content without it. First-turn output
+is byte-identical to `renderTurn`'s, so a stateless render prefills the same
+KV prefix as an incrementally driven conversation.
+
+```zig
+test "chat template: render a full message history (stateless server shape)" {
+    const alloc = std.testing.allocator;
+    const t = llm.chat.Template{ .format = .chatml };
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+    try t.renderMessages(alloc, &buf, &.{
+        .{ .role = .system, .content = "Be terse." },
+        .{ .role = .user, .content = "Hi" },
+        .{ .role = .assistant, .content = "<think>\nhm\n</think>\n\nHello!" },
+        .{ .role = .user, .content = "Bye" },
+    }, true);
+    try std.testing.expectEqualStrings(
+        "<|im_start|>system\nBe terse.<|im_end|>\n" ++
+            "<|im_start|>user\nHi<|im_end|>\n" ++
+            "<|im_start|>assistant\nHello!<|im_end|>\n" ++ // <think> stripped
+            "<|im_start|>user\nBye<|im_end|>\n" ++
+            "<|im_start|>assistant\n<think>\n\n</think>\n\n",
+        buf.items,
+    );
+}
+```
+
 #### 13.8.2 `Conversation(Model, Tok)`
 
 ```zig
@@ -10752,6 +10802,7 @@ pub fn init(ctx: *ExecContext, model: *const Model, tokenizer: *const Tok.Tokeni
             template: Template, options: Options) !Self
 pub fn deinit(self: *Self) void
 pub fn send(self: *Self, user: []const u8, writer: *std.Io.Writer) !usize
+pub fn sendRendered(self: *Self, rendered: []const u8, writer: *std.Io.Writer) !usize
 pub fn sendBatch(convos: []const *Self, users: []const []const u8,
                  writers: []const *std.Io.Writer, produced: []usize) !void
 pub fn addSpecReference(self: *Self, tokens: []const usize) !void
@@ -10783,6 +10834,13 @@ Semantics:
   With `stop_sequences`, generation stops **before streaming** the token whose
   decoded reply text completes a sequence (the completing token is not
   committed).
+- `sendRendered` is `send` over caller-provided pre-rendered template text —
+  the stateless-API entry: `Template.renderMessages` renders a full message
+  history and a FRESH conversation prefills it in one turn (`Options.system`
+  is not consulted; the caller rendered everything). Streaming, stop
+  handling, speculation, and the logit processor behave exactly as in `send`;
+  the equivalence with an incrementally driven conversation is proven in
+  `chat_tests.zig`.
 - With speculation on, `send` routes through the decoder with a turn-boundary
   gate that stops streaming/index-learning at the stop marker and trims any
   verify-batch overshoot from history **and** the KV cache — unconditionally,

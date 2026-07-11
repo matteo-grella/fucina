@@ -24,6 +24,16 @@ const Sampler = sampler_mod.Sampler;
 
 pub const Format = enum { chatml, llama3, gemma, gemma4 };
 
+/// One entry of a full message history (`Template.renderMessages`): the
+/// stateless-API shape where the client supplies every prior turn on each
+/// request. Content is borrowed.
+pub const Message = struct {
+    role: Role,
+    content: []const u8,
+
+    pub const Role = enum { system, user, assistant };
+};
+
 pub const Template = struct {
     format: Format,
 
@@ -127,6 +137,117 @@ pub const Template = struct {
                 if (think_off) try buf.appendSlice(allocator, "<|channel>thought\n<channel|>");
             },
         }
+    }
+
+    /// Render a FULL message history for a fresh conversation, ending with
+    /// the assistant-turn opener — the stateless-API twin of `renderTurn`
+    /// (an OpenAI-style server receives every prior turn on each request and
+    /// prefills from scratch). Historical assistant contents have their
+    /// reasoning block stripped (ChatML `<think>…</think>`, Gemma 4
+    /// `<|channel>thought…<channel|>`), matching the reference templates,
+    /// which drop prior-turn reasoning.
+    ///
+    /// ChatML and Llama 3 render every message as its own role block, any
+    /// order. Gemma formats have a single conversation-start system slot:
+    /// leading system messages merge into it (Gemma 1-3: folded into the
+    /// first user turn) and a system message after the first non-system one
+    /// is `error.SystemMidConversation`. A trailing assistant message is
+    /// `error.TrailingAssistantMessage` — rendering would silently open a
+    /// SECOND assistant turn after it rather than continue it.
+    pub fn renderMessages(
+        self: Template,
+        allocator: Allocator,
+        buf: *std.ArrayList(u8),
+        messages: []const Message,
+        think_off: bool,
+    ) !void {
+        if (messages.len == 0) return error.EmptyMessages;
+        if (messages[messages.len - 1].role == .assistant) return error.TrailingAssistantMessage;
+        switch (self.format) {
+            .chatml => {
+                for (messages) |m| {
+                    try buf.appendSlice(allocator, "<|im_start|>");
+                    try buf.appendSlice(allocator, @tagName(m.role));
+                    try buf.appendSlice(allocator, "\n");
+                    try buf.appendSlice(allocator, strippedContent(m, "<think>", "</think>"));
+                    try buf.appendSlice(allocator, "<|im_end|>\n");
+                }
+                try buf.appendSlice(allocator, "<|im_start|>assistant\n");
+                if (think_off) try buf.appendSlice(allocator, "<think>\n\n</think>\n\n");
+            },
+            .llama3 => {
+                try buf.appendSlice(allocator, "<|begin_of_text|>");
+                for (messages) |m| {
+                    try buf.appendSlice(allocator, "<|start_header_id|>");
+                    try buf.appendSlice(allocator, @tagName(m.role));
+                    try buf.appendSlice(allocator, "<|end_header_id|>\n\n");
+                    try buf.appendSlice(allocator, m.content);
+                    try buf.appendSlice(allocator, "<|eot_id|>");
+                }
+                try buf.appendSlice(allocator, "<|start_header_id|>assistant<|end_header_id|>\n\n");
+            },
+            .gemma => {
+                // No system role: leading system messages fold into the
+                // first user turn (the renderTurn rule).
+                var i: usize = 0;
+                var pending_system = false;
+                while (i < messages.len and messages[i].role == .system) : (i += 1) pending_system = true;
+                for (messages[i..]) |m| {
+                    if (m.role == .system) return error.SystemMidConversation;
+                    try buf.appendSlice(allocator, if (m.role == .user) "<start_of_turn>user\n" else "<start_of_turn>model\n");
+                    if (pending_system and m.role == .user) {
+                        for (messages[0..i]) |s| {
+                            try buf.appendSlice(allocator, s.content);
+                            try buf.appendSlice(allocator, "\n\n");
+                        }
+                        pending_system = false;
+                    }
+                    try buf.appendSlice(allocator, m.content);
+                    try buf.appendSlice(allocator, "<end_of_turn>\n");
+                }
+                try buf.appendSlice(allocator, "<start_of_turn>model\n");
+            },
+            .gemma4 => {
+                try buf.appendSlice(allocator, "<bos>");
+                var i: usize = 0;
+                while (i < messages.len and messages[i].role == .system) : (i += 1) {}
+                if (!think_off or i > 0) {
+                    try buf.appendSlice(allocator, "<|turn>system\n");
+                    if (!think_off) try buf.appendSlice(allocator, "<|think|>\n");
+                    for (messages[0..i], 0..) |s, j| {
+                        if (j > 0) try buf.appendSlice(allocator, "\n\n");
+                        try buf.appendSlice(allocator, std.mem.trim(u8, s.content, " \t\r\n"));
+                    }
+                    try buf.appendSlice(allocator, "<turn|>\n");
+                }
+                for (messages[i..]) |m| {
+                    switch (m.role) {
+                        .system => return error.SystemMidConversation,
+                        .user => {
+                            try buf.appendSlice(allocator, "<|turn>user\n");
+                            try buf.appendSlice(allocator, m.content);
+                        },
+                        .assistant => {
+                            try buf.appendSlice(allocator, "<|turn>model\n");
+                            try buf.appendSlice(allocator, strippedContent(m, "<|channel>thought", "<channel|>"));
+                        },
+                    }
+                    try buf.appendSlice(allocator, "<turn|>\n");
+                }
+                try buf.appendSlice(allocator, "<|turn>model\n");
+                if (think_off) try buf.appendSlice(allocator, "<|channel>thought\n<channel|>");
+            },
+        }
+    }
+
+    /// Assistant content with a LEADING reasoning block (`open`…`close`)
+    /// removed; other roles and malformed blocks pass through untouched.
+    fn strippedContent(m: Message, open: []const u8, close: []const u8) []const u8 {
+        if (m.role != .assistant) return m.content;
+        const trimmed = std.mem.trimStart(u8, m.content, " \t\r\n");
+        if (!std.mem.startsWith(u8, trimmed, open)) return m.content;
+        const end = std.mem.indexOf(u8, trimmed, close) orelse return m.content;
+        return std.mem.trimStart(u8, trimmed[end + close.len ..], " \t\r\n");
     }
 };
 
@@ -298,17 +419,24 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         /// and `sendBatch`. Returns the caller-owned prefix slice.
         fn beginTurnTokens(self: *Self, user: []const u8) ![]usize {
             const a = self.allocator;
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(a);
+            try self.template.renderTurn(a, &buf, self.system, user, self.turn == 0, self.think_off);
+            return self.beginTurnFromText(buf.items);
+        }
+
+        /// The turn prologue over caller-provided pre-rendered template text
+        /// (`sendRendered`): tokenize and commit to history.
+        fn beginTurnFromText(self: *Self, text: []const u8) ![]usize {
+            const a = self.allocator;
 
             // Re-arm the logit processor for this turn's reply (the previous
             // turn left it post-stop; grammar constraints re-apply per reply).
             if (self.sampler.processor) |p| try p.reset();
 
-            var buf: std.ArrayList(u8) = .empty;
-            defer buf.deinit(a);
-            try self.template.renderTurn(a, &buf, self.system, user, self.turn == 0, self.think_off);
             self.turn += 1;
 
-            const prefix32 = try self.tokenizer.encodeRaw(a, buf.items);
+            const prefix32 = try self.tokenizer.encodeRaw(a, text);
             defer a.free(prefix32);
             if (self.cache.len + prefix32.len > self.cache.capacity) return error.ContextFull;
 
@@ -323,8 +451,22 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         /// per token). Returns the number of response tokens generated.
         pub fn send(self: *Self, user: []const u8, writer: *std.Io.Writer) !usize {
             const a = self.allocator;
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(a);
+            try self.template.renderTurn(a, &buf, self.system, user, self.turn == 0, self.think_off);
+            return self.sendRendered(buf.items, writer);
+        }
 
-            const prefix = try self.beginTurnTokens(user);
+        /// `send` over caller-provided pre-rendered template text instead of
+        /// a renderTurn-rendered user turn — the stateless-API entry: a full
+        /// message history rendered by `Template.renderMessages` feeds a
+        /// fresh conversation (`Options.system` is not consulted; the caller
+        /// rendered everything). Streaming, stop handling, speculation, and
+        /// the logit processor behave exactly as in `send`.
+        pub fn sendRendered(self: *Self, rendered: []const u8, writer: *std.Io.Writer) !usize {
+            const a = self.allocator;
+
+            const prefix = try self.beginTurnFromText(rendered);
             defer a.free(prefix);
 
             if (self.spec) |st| return self.sendSpec(st, prefix, writer);

@@ -84,6 +84,174 @@ test "gemma4 template renders <|turn> turns with thought-channel priming" {
     );
 }
 
+test "renderMessages: chatml renders a full history and strips historical <think>" {
+    const allocator = std.testing.allocator;
+    const t = Template{ .format = .chatml };
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    const messages = [_]chat.Message{
+        .{ .role = .system, .content = "You are helpful." },
+        .{ .role = .user, .content = "Hi" },
+        .{ .role = .assistant, .content = "<think>\nsome reasoning\n</think>\n\nHello!" },
+        .{ .role = .user, .content = "Bye" },
+    };
+    try t.renderMessages(allocator, &buf, &messages, true);
+    try std.testing.expectEqualStrings(
+        "<|im_start|>system\nYou are helpful.<|im_end|>\n" ++
+            "<|im_start|>user\nHi<|im_end|>\n" ++
+            "<|im_start|>assistant\nHello!<|im_end|>\n" ++
+            "<|im_start|>user\nBye<|im_end|>\n" ++
+            "<|im_start|>assistant\n<think>\n\n</think>\n\n",
+        buf.items,
+    );
+
+    // First-turn render matches renderTurn byte-for-byte (same KV prefix
+    // whether a conversation is driven incrementally or stateless).
+    buf.clearRetainingCapacity();
+    try t.renderMessages(allocator, &buf, &.{
+        .{ .role = .system, .content = "You are helpful." },
+        .{ .role = .user, .content = "Hi" },
+    }, false);
+    var turn_buf: std.ArrayList(u8) = .empty;
+    defer turn_buf.deinit(allocator);
+    try t.renderTurn(allocator, &turn_buf, "You are helpful.", "Hi", true, false);
+    try std.testing.expectEqualStrings(turn_buf.items, buf.items);
+}
+
+test "renderMessages: gemma4 merges leading systems, strips thought channel, primes think-off" {
+    const allocator = std.testing.allocator;
+    const t = Template{ .format = .gemma4 };
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    const messages = [_]chat.Message{
+        .{ .role = .system, .content = "Be terse." },
+        .{ .role = .user, .content = "Hi" },
+        .{ .role = .assistant, .content = "<|channel>thought\nhm\n<channel|>Hello." },
+        .{ .role = .user, .content = "Bye" },
+    };
+    try t.renderMessages(allocator, &buf, &messages, true);
+    try std.testing.expectEqualStrings(
+        "<bos><|turn>system\nBe terse.<turn|>\n" ++
+            "<|turn>user\nHi<turn|>\n" ++
+            "<|turn>model\nHello.<turn|>\n" ++
+            "<|turn>user\nBye<turn|>\n" ++
+            "<|turn>model\n<|channel>thought\n<channel|>",
+        buf.items,
+    );
+
+    // Thinking on, no system: same conversation-start shape as renderTurn.
+    buf.clearRetainingCapacity();
+    try t.renderMessages(allocator, &buf, &.{.{ .role = .user, .content = "Hi" }}, false);
+    try std.testing.expectEqualStrings(
+        "<bos><|turn>system\n<|think|>\n<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n",
+        buf.items,
+    );
+}
+
+test "renderMessages: llama3 blocks, gemma system fold, and validation errors" {
+    const allocator = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    try (Template{ .format = .llama3 }).renderMessages(allocator, &buf, &.{
+        .{ .role = .system, .content = "S" },
+        .{ .role = .user, .content = "U" },
+    }, false);
+    try std.testing.expectEqualStrings(
+        "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nS<|eot_id|>" ++
+            "<|start_header_id|>user<|end_header_id|>\n\nU<|eot_id|>" ++
+            "<|start_header_id|>assistant<|end_header_id|>\n\n",
+        buf.items,
+    );
+
+    // Gemma 1-3 has no system role: leading system folds into the first user turn.
+    buf.clearRetainingCapacity();
+    try (Template{ .format = .gemma }).renderMessages(allocator, &buf, &.{
+        .{ .role = .system, .content = "S" },
+        .{ .role = .user, .content = "U" },
+    }, false);
+    try std.testing.expectEqualStrings(
+        "<start_of_turn>user\nS\n\nU<end_of_turn>\n<start_of_turn>model\n",
+        buf.items,
+    );
+
+    const t = Template{ .format = .chatml };
+    try std.testing.expectError(error.EmptyMessages, t.renderMessages(allocator, &buf, &.{}, false));
+    try std.testing.expectError(error.TrailingAssistantMessage, t.renderMessages(allocator, &buf, &.{
+        .{ .role = .assistant, .content = "half a reply" },
+    }, false));
+    try std.testing.expectError(error.SystemMidConversation, (Template{ .format = .gemma4 }).renderMessages(allocator, &buf, &.{
+        .{ .role = .user, .content = "U" },
+        .{ .role = .system, .content = "S" },
+    }, false));
+}
+
+test "sendRendered over renderMessages == incremental multi-turn send (greedy)" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try scaffolding.buildTinyModel(&ctx, 0xC4A7);
+    defer model.deinit();
+    var tok = try Tokenizer.initFromParts(allocator, &tiny_vocab, &.{}, .{});
+    defer tok.deinit();
+    const tmpl = Template{ .format = .chatml };
+
+    // Constrain replies to single-symbol tokens (letters + space + stop) so
+    // reply text re-encodes to the exact ids the reference run generated —
+    // the tiny 64-id model can otherwise emit ids the 14-symbol test vocab
+    // cannot round-trip through the stateless re-render.
+    const allowed = [_]usize{ 0, 2, 4, 6, 8, 10, 13 };
+
+    // Reference: a 2-turn incremental conversation.
+    var mask = CountingMask{ .allowed = &allowed, .allocator = allocator };
+    defer mask.deinit();
+    var convo = try Conversation.init(&ctx, &model, &tok, tmpl, .{
+        .capacity = 256,
+        .max_response_tokens = 12,
+        .logit_processor = mask.processor(),
+    });
+    defer convo.deinit();
+    var reply1 = std.Io.Writer.Allocating.init(allocator);
+    defer reply1.deinit();
+    _ = try convo.send("ab a", &reply1.writer);
+    var reply2 = std.Io.Writer.Allocating.init(allocator);
+    defer reply2.deinit();
+    const produced2 = try convo.send("ba b", &reply2.writer);
+
+    // Stateless: a FRESH conversation fed the full history in one render.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try tmpl.renderMessages(allocator, &buf, &.{
+        .{ .role = .user, .content = "ab a" },
+        .{ .role = .assistant, .content = reply1.written() },
+        .{ .role = .user, .content = "ba b" },
+    }, false);
+
+    var fresh_mask = CountingMask{ .allowed = &allowed, .allocator = allocator };
+    defer fresh_mask.deinit();
+    var fresh = try Conversation.init(&ctx, &model, &tok, tmpl, .{
+        .capacity = 256,
+        .max_response_tokens = 12,
+        .logit_processor = fresh_mask.processor(),
+    });
+    defer fresh.deinit();
+    var reply2b = std.Io.Writer.Allocating.init(allocator);
+    defer reply2b.deinit();
+    const produced2b = try fresh.sendRendered(buf.items, &reply2b.writer);
+
+    // Same rendered prefix bytes => same prefill => same greedy reply.
+    try std.testing.expectEqual(produced2, produced2b);
+    try std.testing.expectEqualStrings(reply2.written(), reply2b.written());
+    try std.testing.expectEqualSlices(usize, convo.history.items, fresh.history.items);
+}
+
 test "Conversation instantiates over gemma4 + SPM (compile coverage)" {
     // The generic covers both in-tree families; force semantic analysis of
     // every Conversation path against the gemma4/SPM duck-typed signatures.
