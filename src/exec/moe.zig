@@ -52,6 +52,10 @@ pub const MoeRhs = union(enum) {
     q4_k: backend_mod.QuantizedMatmulRhsQ4_K,
     q5_k: backend_mod.QuantizedMatmulRhsQ5_K,
     q6_k: backend_mod.QuantizedMatmulRhsQ6_K,
+    /// q8_0 experts (32-elem blocks): the format llama.cpp falls back to
+    /// when an expert dim is not a 256 multiple (deepseek2's 1408). Pairs
+    /// with Q8_0-quantized activations instead of Q8_K.
+    q8_0: backend_mod.QuantizedMatmulRhsQ8_0,
     /// Disk-streamed expert stack (`exec/expert_store.zig`): same geometry
     /// and kernels as the resident arms, but expert blocks resolve through
     /// the store's acquire-scoped tier (pin → LRU → pread) instead of a
@@ -84,6 +88,7 @@ pub const MoeRhs = union(enum) {
     pub fn blocksPerColumn(self: *const MoeRhs) usize {
         return switch (self.*) {
             .streamed => |*value| value.blocks_per_column,
+            .q8_0 => |*value| value.rows.blocks_per_row,
             inline else => |*value| value.blocks_per_column,
         };
     }
@@ -92,7 +97,18 @@ pub const MoeRhs = union(enum) {
         return switch (self.*) {
             // Virtual: the streamed stack never exists in memory at once.
             .streamed => |*value| value.rows() * value.blocks_per_column,
+            .q8_0 => |*value| value.rows.blocks.len,
             inline else => |*value| value.blocks.len,
+        };
+    }
+
+    /// Whether this arm multiplies against Q8_0-quantized activations
+    /// (32-elem blocks) instead of the Q8_K default.
+    pub fn wantsQ8_0Lhs(self: *const MoeRhs) bool {
+        return switch (self.*) {
+            .q8_0 => true,
+            .streamed => |*value| value.quant == .q8_0,
+            else => false,
         };
     }
 };
@@ -102,7 +118,11 @@ fn checkedMoeProduct(a: usize, b: usize) !usize {
 }
 
 fn validateMoeRhsStorage(rhs: *const MoeRhs, rows: usize, k: usize) !void {
-    const expected_bpc = backend_mod.quantized_matmul.qkBlockCount(k) catch return tensor.TensorError.InvalidShape;
+    const qm = backend_mod.quantized_matmul;
+    const expected_bpc = if (rhs.wantsQ8_0Lhs()) blk: {
+        if (k == 0 or k % 32 != 0) return tensor.TensorError.InvalidShape;
+        break :blk k / 32;
+    } else qm.qkBlockCount(k) catch return tensor.TensorError.InvalidShape;
     const expected_blocks = std.math.mul(usize, rows, expected_bpc) catch return tensor.TensorError.ShapeMismatch;
     if (rhs.rows() != rows or rhs.k() != k) return tensor.TensorError.ShapeMismatch;
     if (rhs.blocksPerColumn() != expected_bpc or rhs.blockLen() != expected_blocks) return tensor.TensorError.ShapeMismatch;
@@ -180,15 +200,25 @@ fn acquireMoeStreamed(gate: *const MoeRhs, up: *const MoeRhs, down: *const MoeRh
 /// `e`'s contiguous row-block of `rhs`. Single threaded — one expert's GEMM,
 /// run inside a pooled per-expert task. `m == 1` is the decode GEMV; `m > 1`
 /// is the batched-prefill case (all rows reuse the same weights from cache).
-fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const backend_mod.quantized_matmul.BlockQ8_K, out: []f32, out_dim: usize, m: usize, c0: usize, c1: usize) void {
+fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const backend_mod.quantized_matmul.BlockQ8_K, qlhs8: []const backend_mod.quantized_matmul.BlockQ8_0, out: []f32, out_dim: usize, m: usize, c0: usize, c1: usize) void {
     const qm = backend_mod.quantized_matmul;
     switch (rhs.*) {
+        .q8_0 => |*big| {
+            const bpc = big.rows.blocks_per_row;
+            const view = q8_0View(big.rows.blocks[e * out_dim * bpc ..][0 .. out_dim * bpc], big.k, out_dim, bpc);
+            qm.matmulQ8_0RhsTile(out, qlhs8, &view, out_dim, 0, m, c0, c1);
+        },
         // Streamed expert: identical kernels over the store-resolved slab
         // (the acquire that preceded this op pinned the pointer).
         .streamed => |*s| {
             const bpc = s.blocks_per_column;
             const base = s.expertBytes(e);
             switch (s.quant) {
+                .q8_0 => {
+                    const blocks = @as([*]const qm.BlockQ8_0, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const view = q8_0View(blocks, s.k, out_dim, bpc);
+                    qm.matmulQ8_0RhsTile(out, qlhs8, &view, out_dim, 0, m, c0, c1);
+                },
                 .q5_k => {
                     const blocks = @as([*]const qm.BlockQ5_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
                     const view = backend_mod.QuantizedMatmulRhsQ5_K{ .allocator = null, .blocks = blocks, .k = s.k, .n = out_dim, .blocks_per_column = bpc };
@@ -250,8 +280,16 @@ fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const backend_mod
     }
 }
 
-fn moeExpertTileDot(rhs: *const MoeRhs, e: usize, qlhs: []const backend_mod.quantized_matmul.BlockQ8_K, out: []f32, out_dim: usize, m: usize) void {
-    moeExpertTileDotRange(rhs, e, qlhs, out, out_dim, m, 0, out_dim);
+fn moeExpertTileDot(rhs: *const MoeRhs, e: usize, qlhs: []const backend_mod.quantized_matmul.BlockQ8_K, qlhs8: []const backend_mod.quantized_matmul.BlockQ8_0, out: []f32, out_dim: usize, m: usize) void {
+    moeExpertTileDotRange(rhs, e, qlhs, qlhs8, out, out_dim, m, 0, out_dim);
+}
+
+fn q8_0View(blocks: []const backend_mod.quantized_matmul.BlockQ8_0, k: usize, out_dim: usize, bpc: usize) backend_mod.QuantizedMatmulRhsQ8_0 {
+    return .{
+        .rows = .{ .allocator = null, .blocks = blocks, .rows = out_dim, .cols = k, .blocks_per_row = bpc },
+        .k = k,
+        .n = out_dim,
+    };
 }
 
 /// Whether `rhs` has a lane-packed Q8_Kx4 column-outer kernel (Q4_K / Q5_K /
@@ -261,8 +299,8 @@ fn moeExpertTileDot(rhs: *const MoeRhs, e: usize, qlhs: []const backend_mod.quan
 fn moeRhsUsesLanePacked(rhs: *const MoeRhs) bool {
     return switch (rhs.*) {
         .q4_k, .q5_k, .q6_k => true,
-        // Streamed arms are always K-quants (StreamedQuant's whole domain).
-        .streamed => true,
+        .q8_0 => false,
+        .streamed => |*s| s.quant != .q8_0,
     };
 }
 
@@ -274,10 +312,12 @@ fn moeRhsUsesLanePacked(rhs: *const MoeRhs) bool {
 fn moeExpertTileDotX4Range(rhs: *const MoeRhs, e: usize, lhs_x4: []const backend_mod.quantized_matmul.BlockQ8_Kx4, m: usize, out: []f32, out_dim: usize, c0: usize, c1: usize) void {
     const qm = backend_mod.quantized_matmul;
     switch (rhs.*) {
+        .q8_0 => unreachable, // gated by moeRhsUsesLanePacked
         .streamed => |*s| {
             const bpc = s.blocks_per_column;
             const base = s.expertBytes(e);
             switch (s.quant) {
+                .q8_0 => unreachable, // gated by moeRhsUsesLanePacked
                 .q4_k => {
                     const blocks = @as([*]const qm.BlockQ4_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
                     const view = backend_mod.QuantizedMatmulRhsQ4_K{ .allocator = null, .blocks = blocks, .k = s.k, .n = out_dim, .blocks_per_column = bpc };
@@ -491,6 +531,7 @@ const MoeExpertTask = struct {
     up: *const MoeRhs,
     down: *const MoeRhs,
     qx: []const backend_mod.quantized_matmul.BlockQ8_K,
+    qx8: []const backend_mod.quantized_matmul.BlockQ8_0,
     out_pe: usize,
     hidden: usize,
     expert_index: usize,
@@ -499,6 +540,7 @@ const MoeExpertTask = struct {
     up_buf: []f32,
     g_buf: []f32,
     qg: []backend_mod.quantized_matmul.BlockQ8_K,
+    qg8: []backend_mod.quantized_matmul.BlockQ8_0,
     out: []f32,
     gated_op: GatedOp,
     profile_enabled: bool,
@@ -511,8 +553,8 @@ const MoeExpertTask = struct {
 fn runMoeExpertTask(task: *const MoeExpertTask) void {
     const task_profile = @constCast(task);
     const gate_up_start = moeBatchProfileStart(task.profile_enabled, task.io);
-    moeExpertTileDot(task.gate, task.expert_index, task.qx, task.gate_buf, task.out_pe, 1);
-    moeExpertTileDot(task.up, task.expert_index, task.qx, task.up_buf, task.out_pe, 1);
+    moeExpertTileDot(task.gate, task.expert_index, task.qx, task.qx8, task.gate_buf, task.out_pe, 1);
+    moeExpertTileDot(task.up, task.expert_index, task.qx, task.qx8, task.up_buf, task.out_pe, 1);
     if (task.profile_enabled) task_profile.gate_up_ns += moeBatchProfileElapsed(gate_up_start, task.io);
 
     // Gated activation: g = up * act(gate). `inline else` specializes the loop per op.
@@ -522,14 +564,18 @@ fn runMoeExpertTask(task: *const MoeExpertTask) void {
             g.* = up_v * backend_ops.gatedActivationScalar(op, gate_v);
         },
     }
-    backend_mod.quantized_matmul.quantizeRowQ8_KInto(task.qg, task.g_buf) catch {
+    const requant_ok = if (task.down.wantsQ8_0Lhs())
+        backend_mod.quantized_matmul.quantizeRowQ8_0Into(task.qg8, task.g_buf)
+    else
+        backend_mod.quantized_matmul.quantizeRowQ8_KInto(task.qg, task.g_buf);
+    requant_ok catch {
         @memset(task.out, 0);
         return;
     };
     if (task.profile_enabled) task_profile.swiglu_requant_ns += moeBatchProfileElapsed(swiglu_requant_start, task.io);
 
     const down_start = moeBatchProfileStart(task.profile_enabled, task.io);
-    moeExpertTileDot(task.down, task.expert_index, task.qg, task.out, task.hidden, 1);
+    moeExpertTileDot(task.down, task.expert_index, task.qg, task.qg8, task.out, task.hidden, 1);
     if (task.weight != 1.0) {
         for (task.out) |*o| o.* *= task.weight;
     }
@@ -541,6 +587,7 @@ const MoeDecodeChainState = struct {
     up: *const MoeRhs,
     down: *const MoeRhs,
     qx: []const backend_mod.quantized_matmul.BlockQ8_K,
+    qx8: []const backend_mod.quantized_matmul.BlockQ8_0,
     out_pe: usize,
     hidden: usize,
     expert_index: usize,
@@ -549,6 +596,7 @@ const MoeDecodeChainState = struct {
     up_buf: []f32,
     g_buf: []f32,
     qg: []backend_mod.quantized_matmul.BlockQ8_K,
+    qg8: []backend_mod.quantized_matmul.BlockQ8_0,
     out: []f32,
     gated_op: GatedOp,
     profile_enabled: bool,
@@ -571,8 +619,8 @@ fn runMoeDecodeChainTask(task: *MoeDecodeChainTask, chain: *const thread.Chain) 
     switch (task.kind) {
         .gate_up => {
             const gate_up_start = moeBatchProfileStart(state.profile_enabled, state.io);
-            moeExpertTileDotRange(state.gate, state.expert_index, state.qx, state.gate_buf, state.out_pe, 1, task.c0, task.c1);
-            moeExpertTileDotRange(state.up, state.expert_index, state.qx, state.up_buf, state.out_pe, 1, task.c0, task.c1);
+            moeExpertTileDotRange(state.gate, state.expert_index, state.qx, state.qx8, state.gate_buf, state.out_pe, 1, task.c0, task.c1);
+            moeExpertTileDotRange(state.up, state.expert_index, state.qx, state.qx8, state.up_buf, state.out_pe, 1, task.c0, task.c1);
             if (state.profile_enabled) task.elapsed_ns += moeBatchProfileElapsed(gate_up_start, state.io);
 
             if (state.remaining_gate_up.fetchSub(1, .acq_rel) == 1) {
@@ -582,7 +630,10 @@ fn runMoeDecodeChainTask(task: *MoeDecodeChainTask, chain: *const thread.Chain) 
                         g.* = up_v * backend_ops.gatedActivationScalar(op, gate_v);
                     },
                 }
-                backend_mod.quantized_matmul.quantizeRowQ8_KInto(state.qg, state.g_buf) catch unreachable;
+                if (state.down.wantsQ8_0Lhs())
+                    backend_mod.quantized_matmul.quantizeRowQ8_0Into(state.qg8, state.g_buf) catch unreachable
+                else
+                    backend_mod.quantized_matmul.quantizeRowQ8_KInto(state.qg, state.g_buf) catch unreachable;
                 if (state.profile_enabled) state.swiglu_requant_ns += moeBatchProfileElapsed(swiglu_requant_start, state.io);
                 chain.enqueue(state.down_task0);
                 chain.enqueue(state.down_task0 + 1);
@@ -590,7 +641,7 @@ fn runMoeDecodeChainTask(task: *MoeDecodeChainTask, chain: *const thread.Chain) 
         },
         .down => {
             const down_start = moeBatchProfileStart(state.profile_enabled, state.io);
-            moeExpertTileDotRange(state.down, state.expert_index, state.qg, state.out, state.hidden, 1, task.c0, task.c1);
+            moeExpertTileDotRange(state.down, state.expert_index, state.qg, state.qg8, state.out, state.hidden, 1, task.c0, task.c1);
             if (state.weight != 1.0) {
                 for (state.out[task.c0..task.c1]) |*o| o.* *= state.weight;
             }
@@ -635,14 +686,30 @@ pub fn moeExpertFfn(
     var stream_guard = try acquireMoeStreamed(gate, up, down, selected);
     defer stream_guard.release();
 
-    const blocks_per_g = try qm.qkBlockCount(out_pe);
+    // Per-projection activation formats: K-quant arms read Q8_K rows, q8_0
+    // arms (deepseek2 experts) read Q8_0 rows; both forms are produced only
+    // when some arm needs them.
+    const gate_up_q8 = gate.wantsQ8_0Lhs() or up.wantsQ8_0Lhs();
+    const gate_up_qk = !gate.wantsQ8_0Lhs() or !up.wantsQ8_0Lhs();
+    const down_q8 = down.wantsQ8_0Lhs();
+
+    const blocks_per_g = if (down_q8) 0 else try qm.qkBlockCount(out_pe);
+    const blocks_per_g8 = if (down_q8) out_pe / 32 else 0;
+    const hidden_blocks_k = if (gate_up_qk) try qm.qkBlockCount(hidden) else 0;
     const chain_task_count = try checkedMoeProduct(4, top_k);
     const chain_initial_count = try checkedMoeProduct(2, top_k);
+
+    // Q8_0-format activations live outside the carved scratch (only the
+    // deepseek2-style layers pay this allocation).
+    const qx8: []qm.BlockQ8_0 = if (gate_up_q8) try rt.allocator.alloc(qm.BlockQ8_0, hidden / 32) else &.{};
+    defer if (qx8.len > 0) rt.allocator.free(qx8);
+    const qg8_all: []qm.BlockQ8_0 = if (down_q8) try rt.allocator.alloc(qm.BlockQ8_0, try checkedMoeProduct(top_k, blocks_per_g8)) else &.{};
+    defer if (qg8_all.len > 0) rt.allocator.free(qg8_all);
 
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
     scratch.mutex.lock();
     defer scratch.mutex.unlock();
-    const sv = try carveMoeDecodeChainScratch(rt, scratch, qm.BlockQ8_K, MoeDecodeChainState, MoeDecodeChainTask, try qm.qkBlockCount(hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
+    const sv = try carveMoeDecodeChainScratch(rt, scratch, qm.BlockQ8_K, MoeDecodeChainState, MoeDecodeChainTask, hidden_blocks_k, top_k, out_pe, hidden, blocks_per_g, chain_task_count);
     const gate_buf = sv.gate_buf;
     const up_buf = sv.up_buf;
     const g_buf = sv.g_buf;
@@ -653,7 +720,9 @@ pub fn moeExpertFfn(
 
     const gather_quant_start = moeBatchProfileStart(profile_enabled, io);
     const qx = sv.qx;
-    try qm.quantizeRowQ8_KInto(qx, try x.dataConstChecked());
+    const x_data = try x.dataConstChecked();
+    if (gate_up_qk) try qm.quantizeRowQ8_KInto(qx, x_data);
+    if (gate_up_q8) try qm.quantizeRowQ8_0Into(qx8, x_data);
     if (profile) |p| p.gather_quant_ns += moeBatchProfileElapsed(gather_quant_start, io);
 
     const gate_split = moeDecodeColumnSplit(out_pe, 32);
@@ -666,6 +735,7 @@ pub fn moeExpertFfn(
             .up = up,
             .down = down,
             .qx = qx,
+            .qx8 = qx8,
             .out_pe = out_pe,
             .hidden = hidden,
             .expert_index = selected[j],
@@ -674,6 +744,7 @@ pub fn moeExpertFfn(
             .up_buf = up_buf[j * out_pe ..][0..out_pe],
             .g_buf = g_buf[j * out_pe ..][0..out_pe],
             .qg = qg[j * blocks_per_g ..][0..blocks_per_g],
+            .qg8 = qg8_all[j * blocks_per_g8 ..][0..blocks_per_g8],
             .out = outs[j * hidden ..][0..hidden],
             .gated_op = act,
             .profile_enabled = profile_enabled,
@@ -724,6 +795,7 @@ pub fn moeExpertFfn(
                 .up = up,
                 .down = down,
                 .qx = qx,
+                .qx8 = qx8,
                 .out_pe = out_pe,
                 .hidden = hidden,
                 .expert_index = selected[j],
@@ -732,6 +804,7 @@ pub fn moeExpertFfn(
                 .up_buf = up_buf[j * out_pe ..][0..out_pe],
                 .g_buf = g_buf[j * out_pe ..][0..out_pe],
                 .qg = qg[j * blocks_per_g ..][0..blocks_per_g],
+                .qg8 = qg8_all[j * blocks_per_g8 ..][0..blocks_per_g8],
                 .out = outs[j * hidden ..][0..hidden],
                 .gated_op = act,
                 .profile_enabled = profile_enabled,
@@ -839,8 +912,9 @@ fn runMoeBatchTask(task: *const MoeBatchTask) void {
     const g_out = task.g_buf[base * out_pe ..][0 .. m * out_pe];
 
     const gate_up_start = moeBatchProfileStart(task.profile_enabled, task.io);
-    moeExpertTileDot(task.gate, task.expert, qx, gate_out, out_pe, m);
-    moeExpertTileDot(task.up, task.expert, qx, up_out, out_pe, m);
+    const no_q8: []const backend_mod.quantized_matmul.BlockQ8_0 = &.{};
+    moeExpertTileDot(task.gate, task.expert, qx, no_q8, gate_out, out_pe, m);
+    moeExpertTileDot(task.up, task.expert, qx, no_q8, up_out, out_pe, m);
     if (task.profile_enabled) task_profile.gate_up_ns += moeBatchProfileElapsed(gate_up_start, task.io);
 
     const swiglu_requant_start = moeBatchProfileStart(task.profile_enabled, task.io);
@@ -859,7 +933,7 @@ fn runMoeBatchTask(task: *const MoeBatchTask) void {
 
     const qg = task.qg[base * bpc_g ..][0 .. m * bpc_g];
     const down_start = moeBatchProfileStart(task.profile_enabled, task.io);
-    moeExpertTileDot(task.down, task.expert, qg, task.down_buf[base * hidden ..][0 .. m * hidden], hidden, m);
+    moeExpertTileDot(task.down, task.expert, qg, no_q8, task.down_buf[base * hidden ..][0 .. m * hidden], hidden, m);
     if (task.profile_enabled) task_profile.down_ns += moeBatchProfileElapsed(down_start, task.io);
 }
 
@@ -953,7 +1027,8 @@ fn runMoeBatchMatmulTask(task: *const MoeBatchMatmulTask) void {
         moeExpertTileDotX4Range(task.rhs, task.expert, lhs_x4, m, out, task.out_dim, task.c0, task.c1);
     } else {
         const q = task.qlhs[base * task.bpc ..][0 .. m * task.bpc];
-        moeExpertTileDotRange(task.rhs, task.expert, q, out, task.out_dim, m, task.c0, task.c1);
+        const no_q8: []const backend_mod.quantized_matmul.BlockQ8_0 = &.{};
+        moeExpertTileDotRange(task.rhs, task.expert, q, no_q8, out, task.out_dim, m, task.c0, task.c1);
     }
     if (task.profile_enabled) task_profile.elapsed_ns += moeBatchProfileElapsed(start, task.io);
 }
@@ -1307,6 +1382,10 @@ pub fn moeExpertFfnBatch(
     const hidden = av.dim(1);
     const x_data = try x.dataConstChecked();
     const n_pairs = try checkedMoeProduct(seq, top_k);
+    // Batched prefill still assumes Q8_K activations end to end; q8_0
+    // experts (deepseek2) decode through moeExpertFfn's dual-format path
+    // and prefill sequentially until the batched path grows the same.
+    if (gate.wantsQ8_0Lhs() or up.wantsQ8_0Lhs() or down.wantsQ8_0Lhs()) return tensor.TensorError.InvalidShape;
     const n_expert = try validatePackedMoeInputs(gate, up, down, selected, weights, n_pairs, hidden, out_pe);
     const profile_enabled = profile != null;
     const total_start = moeBatchProfileStart(profile_enabled, io);

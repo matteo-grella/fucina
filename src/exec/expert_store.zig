@@ -199,13 +199,26 @@ pub const StreamedQuant = enum {
     q4_k,
     q5_k,
     q6_k,
+    q8_0,
 
     pub fn blockSize(self: StreamedQuant) usize {
         return switch (self) {
             .q4_k => @sizeOf(qm.BlockQ4_K),
             .q5_k => @sizeOf(qm.BlockQ5_K),
             .q6_k => @sizeOf(qm.BlockQ6_K),
+            .q8_0 => @sizeOf(qm.BlockQ8_0),
         };
+    }
+
+    /// Weight blocks per row for a row of `in_dim` inputs.
+    pub fn blocksPerColumn(self: StreamedQuant, in_dim: usize) Error!usize {
+        switch (self) {
+            .q8_0 => {
+                if (in_dim == 0 or in_dim % 32 != 0) return Error.InvalidExpertGeometry;
+                return in_dim / 32;
+            },
+            else => return qm.qkBlockCount(in_dim) catch Error.InvalidExpertGeometry,
+        }
     }
 };
 
@@ -238,7 +251,7 @@ const ProjGeometry = struct {
     expert_bytes: usize,
 
     fn init(spec: ProjSpec, n_expert: usize) Error!ProjGeometry {
-        const bpc = qm.qkBlockCount(spec.in_dim) catch return Error.InvalidExpertGeometry;
+        const bpc = try spec.quant.blocksPerColumn(spec.in_dim);
         const row_bytes = std.math.mul(usize, bpc, spec.quant.blockSize()) catch return Error.InvalidExpertGeometry;
         const expert_bytes = std.math.mul(usize, spec.out_dim, row_bytes) catch return Error.InvalidExpertGeometry;
         const total = std.math.mul(usize, expert_bytes, n_expert) catch return Error.InvalidExpertGeometry;

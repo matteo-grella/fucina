@@ -305,6 +305,119 @@ test "pilot: hints spin up the I/O thread and prediction recall is scored on acq
     try std.testing.expectEqual(@as(u64, 4), fx.store.stats.pilot_recall_total);
 }
 
+test "q8_0 experts with non-256-aligned dims: streamed decode is bit-exact vs resident" {
+    // The deepseek2 shape: K-quant gate/up over a 256-aligned hidden, q8_0
+    // down whose input width (the expert FFN dim) is only 32-aligned — the
+    // fused decode op must produce Q8_K activations for the K-quant arms
+    // and Q8_0 activations for the q8_0 arm in the same pass.
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const ds_hidden: usize = 256;
+    const ds_ffn: usize = 96; // 3 q8_0 blocks; NOT a K-quant multiple
+    const ds_experts: usize = 4;
+
+    // gate/up: q5_k stacks [experts * ffn rows, hidden].
+    const gu_rows = ds_experts * ds_ffn;
+    const gate_blocks = try allocator.alloc(qm.BlockQ5_K, gu_rows * (ds_hidden / qm.qk_k_block_size));
+    defer allocator.free(gate_blocks);
+    const up_blocks = try allocator.alloc(qm.BlockQ5_K, gate_blocks.len);
+    defer allocator.free(up_blocks);
+    // Mild scales: the SwiGLU square of these activations must stay well
+    // inside Q8_0's f16 scale range (see the NaN guard below).
+    fillQ5KBlocks(gate_blocks, 3);
+    fillQ5KBlocks(up_blocks, 4);
+    for (gate_blocks) |*b| {
+        b.dm[0] = f16Bits(0.0004);
+        b.dm[1] = f16Bits(0.0002);
+    }
+    for (up_blocks) |*b| {
+        b.dm[0] = f16Bits(0.0005);
+        b.dm[1] = f16Bits(0.0002);
+    }
+
+    // down: q8_0 stack [experts * hidden rows, ffn] built by quantizing
+    // deterministic f32 rows (valid blocks by construction).
+    const down_rows = ds_experts * ds_hidden;
+    const down_bpc = ds_ffn / 32;
+    const down_blocks = try allocator.alloc(qm.BlockQ8_0, down_rows * down_bpc);
+    defer allocator.free(down_blocks);
+    {
+        var row: [ds_ffn]f32 = undefined;
+        for (0..down_rows) |r| {
+            for (&row, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(r * 31 + i)) * 0.11) * 1.7;
+            try qm.quantizeRowQ8_0Into(down_blocks[r * down_bpc ..][0..down_bpc], &row);
+        }
+    }
+
+    var path_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "expert_store_q8_{d}.bin", .{std.Io.Clock.real.now(std.testing.io).nanoseconds});
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+    {
+        var file = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
+        defer file.close(std.testing.io);
+        var write_buffer: [4096]u8 = undefined;
+        var writer = file.writer(std.testing.io, &write_buffer);
+        try writer.interface.writeAll(std.mem.sliceAsBytes(gate_blocks));
+        try writer.interface.writeAll(std.mem.sliceAsBytes(up_blocks));
+        try writer.interface.writeAll(std.mem.sliceAsBytes(down_blocks));
+        try writer.interface.flush();
+    }
+    defer {
+        var buf: [160]u8 = undefined;
+        const sidecar = std.fmt.bufPrint(&buf, "{s}.experts", .{path}) catch unreachable;
+        std.Io.Dir.cwd().deleteFile(std.testing.io, sidecar) catch {};
+    }
+
+    var resident_gate: MoeRhs = .{ .q5_k = try qm.quantizedMatmulRhsQ5_KFromBlocks(allocator, ds_hidden, gu_rows, gate_blocks) };
+    defer resident_gate.deinit();
+    var resident_up: MoeRhs = .{ .q5_k = try qm.quantizedMatmulRhsQ5_KFromBlocks(allocator, ds_hidden, gu_rows, up_blocks) };
+    defer resident_up.deinit();
+    var resident_down: MoeRhs = .{ .q8_0 = .{
+        .rows = .{ .allocator = null, .blocks = down_blocks, .rows = down_rows, .cols = ds_ffn, .blocks_per_row = down_bpc },
+        .k = ds_ffn,
+        .n = down_rows,
+    } };
+    defer resident_down.deinit();
+
+    const gate_bytes = gate_blocks.len * @sizeOf(qm.BlockQ5_K);
+    const up_bytes = up_blocks.len * @sizeOf(qm.BlockQ5_K);
+    const down_bytes = down_blocks.len * @sizeOf(qm.BlockQ8_0);
+    var store = try ExpertStore.create(allocator, &.{path}, 1, .{ .cache_slots_per_layer = 2 });
+    defer store.destroy();
+    try store.addLayer(0, .{
+        .{ .quant = .q5_k, .file_offset = 0, .byte_len = gate_bytes, .in_dim = ds_hidden, .out_dim = ds_ffn },
+        .{ .quant = .q5_k, .file_offset = gate_bytes, .byte_len = up_bytes, .in_dim = ds_hidden, .out_dim = ds_ffn },
+        .{ .quant = .q8_0, .file_offset = gate_bytes + up_bytes, .byte_len = down_bytes, .in_dim = ds_ffn, .out_dim = ds_hidden },
+    }, ds_experts);
+    try store.finalize();
+    var streamed_gate: MoeRhs = .{ .streamed = store.streamedRhs(0, .gate) };
+    var streamed_up: MoeRhs = .{ .streamed = store.streamedRhs(0, .up) };
+    var streamed_down: MoeRhs = .{ .streamed = store.streamedRhs(0, .down) };
+
+    const x_vals = try allocator.alloc(f32, ds_hidden);
+    defer allocator.free(x_vals);
+    for (x_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 7) % 151)) - 75)) / 75.0;
+    var x = try ctx.fromSliceRank(2, .{ 1, ds_hidden }, x_vals);
+    defer x.deinit();
+
+    // Cold, warm, and evicting decodes must all match the resident path
+    // bit-for-bit.
+    for ([_][2]usize{ .{ 0, 3 }, .{ 0, 3 }, .{ 1, 2 }, .{ 0, 3 } }) |pair| {
+        var want = try ctx.moeExpertFfn(&x, &resident_gate, &resident_up, &resident_down, &pair, &.{ 0.6, 0.4 }, ds_ffn, .swiglu, null, null);
+        defer want.deinit();
+        var got = try ctx.moeExpertFfn(&x, &streamed_gate, &streamed_up, &streamed_down, &pair, &.{ 0.6, 0.4 }, ds_ffn, .swiglu, null, null);
+        defer got.deinit();
+        // A sanity guard on the fixture itself: Q8_0's f16 block scale
+        // overflows past |activation| ~8.3e6, which would NaN both paths
+        // and vacuously "match".
+        for (want.dataConst()) |v| try std.testing.expect(!std.math.isNan(v));
+        try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
+    }
+}
+
 test "learning cache: saved usage auto-pins the hot experts on reload, bit-exact and miss-free" {
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;
