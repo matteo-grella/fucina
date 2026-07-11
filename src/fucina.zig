@@ -107,6 +107,7 @@ pub const ExecContext = exec.ExecContext;
 pub const RhsLifetime = exec.RhsLifetime;
 pub const MoeRhs = exec.ExecContext.MoeRhs;
 pub const MoeBatchProfile = exec.MoeBatchProfile;
+pub const GatedOp = exec.GatedOp;
 pub const expert_store = exec.expert_store;
 pub const ExpertStore = exec.expert_store.ExpertStore;
 pub const RouterTopKOptions = exec.RouterTopKOptions;

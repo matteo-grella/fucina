@@ -1006,6 +1006,25 @@ pub fn moeSwiGluFfnSeq(
     io: ?std.Io,
     profile: ?*fucina.MoeBatchProfile,
 ) !fucina.Tensor(.{ .seq, .embed }) {
+    return moeGatedFfnSeq(ctx, input, gate, up, down, selected, routing_weights, top_k, out_pe, .swiglu, io, profile);
+}
+
+/// As `moeSwiGluFfnSeq`, with the gated activation chosen by the caller
+/// (deepseek4 routes through the clamped SwiGLU).
+pub fn moeGatedFfnSeq(
+    ctx: *ExecContext,
+    input: *const fucina.Tensor(.{ .seq, .embed }),
+    gate: *const fucina.MoeRhs,
+    up: *const fucina.MoeRhs,
+    down: *const fucina.MoeRhs,
+    selected: []const usize,
+    routing_weights: []const f32,
+    top_k: usize,
+    out_pe: usize,
+    act: fucina.GatedOp,
+    io: ?std.Io,
+    profile: ?*fucina.MoeBatchProfile,
+) !fucina.Tensor(.{ .seq, .embed }) {
     if (input.requiresGrad()) return Error.GradUnsupported;
     const raw_input = input.asRawTensor();
     var raw = if (input.dim(.seq) == 1)
@@ -1017,7 +1036,7 @@ pub fn moeSwiGluFfnSeq(
             selected,
             routing_weights,
             out_pe,
-            .swiglu,
+            act,
             io,
             profile,
         )
@@ -1031,7 +1050,7 @@ pub fn moeSwiGluFfnSeq(
             routing_weights,
             top_k,
             out_pe,
-            .swiglu,
+            act,
             io,
             profile,
         );

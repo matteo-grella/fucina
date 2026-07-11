@@ -412,7 +412,9 @@ const Layer = struct {
     kv: LinearWeight,
     kv_a_norm: []f32,
     sinks: []f32, // [heads]
-    output_a: LinearWeight, // grouped low-rank (rows = groups*rank)
+    /// Grouped low-rank output stage A: raw q8_0 rows, `groups*rank` rows of
+    /// `group_dim` (borrowed from the mapping; per-group row-block slices).
+    output_a: []const u8,
     output_b: LinearWeight,
     attn_compressor: ?Compressor,
     index_compressor: ?Compressor,
@@ -427,7 +429,6 @@ const Layer = struct {
         if (self.index_compressor) |*c| c.deinit(allocator);
         if (self.attn_compressor) |*c| c.deinit(allocator);
         self.output_b.deinit();
-        self.output_a.deinit();
         allocator.free(self.sinks);
         allocator.free(self.kv_a_norm);
         self.kv.deinit();
@@ -665,8 +666,14 @@ fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i:
     errdefer allocator.free(kv_a_norm);
     const sinks = try hostVector(allocator, file, try name.of(&buf, layer_i, "attn_sinks.weight"), config.num_heads);
     errdefer allocator.free(sinks);
-    var output_a = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "attn_output_a.weight")), config.output_groups * config.output_lora_rank, config.num_heads * config.head_dim);
-    errdefer output_a.deinit();
+    // Grouped low-rank output stage A: 8 stacked [rank x group_dim] blocks
+    // ([8192 x 4096] on Flash) applied per head-group; kept as the raw q8_0
+    // byte slice so each group runs through the borrowed-quantized linear.
+    const output_a_info = try file.get(try name.of(&buf, layer_i, "attn_output_a.weight"));
+    const group_dim = (config.num_heads / config.output_groups) * config.head_dim;
+    if (output_a_info.n_dims != 2 or output_a_info.dims[0] != group_dim or output_a_info.dims[1] != config.output_groups * config.output_lora_rank) return Error.InvalidWeightShape;
+    if (output_a_info.ggml_type != .q8_0) return Error.UnsupportedWeightType;
+    const output_a = output_a_info.data;
     var output_b = try LinearWeight.load(ctx, try file.get(try name.of(&buf, layer_i, "attn_output_b.weight")), hidden, config.output_groups * config.output_lora_rank);
     errdefer output_b.deinit();
 
@@ -820,7 +827,149 @@ fn softplusStable(x: f32) f32 {
     return if (x > 0) x + std.math.log1p(@exp(-x)) else std.math.log1p(@exp(x));
 }
 
-test {
+
+// =========================================================================
+// Forward pass. Tensor ops carry everything expressible in the public API;
+// host f32 remains only for the reference's bit-exact quantization grids,
+// the 4x4 Sinkhorn iteration, the tail rotary, and the sliding-ring
+// bookkeeping (whose rows live pre-quantized between steps by design).
+// =========================================================================
+
+const HcSplit = struct {
+    pre: [4]f32,
+    post: [4]f32,
+    comb: [16]f32, // [dst + src*4]
+};
+
+fn hcSplitSinkhorn(mix: []const f32, scale: []const f32, base: []const f32, n_hc: usize, iters: usize) HcSplit {
+    std.debug.assert(n_hc == 4 and mix.len == 24);
+    var out: HcSplit = undefined;
+    const eps: f32 = 1.0e-6;
+    for (0..n_hc) |i| out.pre[i] = sigmoidStable(mix[i] * scale[0] + base[i]) + eps;
+    for (0..n_hc) |i| out.post[i] = 2.0 * sigmoidStable(mix[n_hc + i] * scale[1] + base[n_hc + i]);
+
+    var c: [16]f32 = undefined;
+    for (0..n_hc) |dst| {
+        var row_max = -std.math.inf(f32);
+        for (0..n_hc) |src| {
+            const v = mix[2 * n_hc + src + dst * n_hc] * scale[2] + base[2 * n_hc + src + dst * n_hc];
+            c[src + dst * n_hc] = v;
+            row_max = @max(row_max, v);
+        }
+        var row_sum: f32 = 0;
+        for (0..n_hc) |src| {
+            const v = @exp(c[src + dst * n_hc] - row_max);
+            c[src + dst * n_hc] = v;
+            row_sum += v;
+        }
+        for (0..n_hc) |src| c[src + dst * n_hc] = c[src + dst * n_hc] / row_sum + eps;
+    }
+    // Sinkhorn: first a column pass, then alternating row/column passes.
+    for (0..n_hc) |src| {
+        var sum: f32 = 0;
+        for (0..n_hc) |dst| sum += c[src + dst * n_hc];
+        const inv = 1.0 / (sum + eps);
+        for (0..n_hc) |dst| c[src + dst * n_hc] *= inv;
+    }
+    for (1..iters) |_| {
+        for (0..n_hc) |dst| {
+            var sum: f32 = 0;
+            for (0..n_hc) |src| sum += c[src + dst * n_hc];
+            const inv = 1.0 / (sum + eps);
+            for (0..n_hc) |src| c[src + dst * n_hc] *= inv;
+        }
+        for (0..n_hc) |src| {
+            var sum: f32 = 0;
+            for (0..n_hc) |dst| sum += c[src + dst * n_hc];
+            const inv = 1.0 / (sum + eps);
+            for (0..n_hc) |dst| c[src + dst * n_hc] *= inv;
+        }
+    }
+    out.comb = c;
+    return out;
+}
+
+pub const StepScratch = struct {
+    /// HC stream state [n_hc * hidden], persistent across layers of one step.
+    streams: []f32,
+
+    pub fn init(allocator: Allocator, config: Config) !StepScratch {
+        return .{ .streams = try allocator.alloc(f32, config.n_hc * config.hidden_size) };
+    }
+
+    pub fn deinit(self: *StepScratch, allocator: Allocator) void {
+        allocator.free(self.streams);
+        self.* = undefined;
+    }
+};
+
+
+
+// (continued in Model.step below)
+
+fn hcPre(
+    ctx: *ExecContext,
+    config: Config,
+    module: *const HcModule,
+    streams: []const f32,
+) !struct { sub_in: []f32, split: HcSplit } {
+    const allocator = ctx.allocator;
+    const hc_dim = config.n_hc * config.hidden_size;
+
+    // flat = rms_norm_no_weight(streams) over the full 4*hidden vector.
+    var flat_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, hc_dim }, streams);
+    defer flat_t.deinit();
+    var normed_t = try flat_t.rmsNorm(ctx, .embed, config.rms_norm_eps);
+    defer normed_t.deinit();
+    var mix_t = try module.fn_proj.linearSeq(ctx, &normed_t, .embed, .attn);
+    defer mix_t.deinit();
+    const split = hcSplitSinkhorn(try mix_t.dataConst(), module.scale, module.base, config.n_hc, config.hc_sinkhorn_iters);
+
+    // sublayer input = sum_h pre[h] * stream_h : [stream, embed] x [stream].
+    var streams_t = try fucina.Tensor(.{ .stream, .embed }).fromSlice(ctx, .{ config.n_hc, config.hidden_size }, streams);
+    defer streams_t.deinit();
+    var pre_t = try fucina.Tensor(.{.stream}).fromSlice(ctx, .{config.n_hc}, &split.pre);
+    defer pre_t.deinit();
+    var weighted = try streams_t.mul(ctx, &pre_t);
+    defer weighted.deinit();
+    var summed = try weighted.sum(ctx, .stream);
+    defer summed.deinit();
+    const sub_in = try allocator.dupe(f32, try summed.dataConst());
+    return .{ .sub_in = sub_in, .split = split };
+}
+
+fn hcPost(
+    ctx: *ExecContext,
+    config: Config,
+    split: *const HcSplit,
+    block_out: []const f32,
+    streams: []f32, // residual in, next state out
+) !void {
+    // streams'[dst] = post[dst]*block_out + sum_src comb[dst + src*4]*streams[src]
+    var streams_t = try fucina.Tensor(.{ .stream, .embed }).fromSlice(ctx, .{ config.n_hc, config.hidden_size }, streams);
+    defer streams_t.deinit();
+    var comb_t = try fucina.Tensor(.{ .stream_dst, .stream }).fromSlice(ctx, .{ config.n_hc, config.n_hc }, blk: {
+        // comb is addressed [dst + src*n_hc]; lay it out row-major [dst][src].
+        var host: [16]f32 = undefined;
+        for (0..config.n_hc) |dst| {
+            for (0..config.n_hc) |src| host[dst * config.n_hc + src] = split.comb[dst + src * config.n_hc];
+        }
+        break :blk &host;
+    });
+    defer comb_t.deinit();
+    var mixed = try comb_t.dot(ctx, &streams_t, .stream);
+    defer mixed.deinit();
+    var out_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, config.hidden_size }, block_out);
+    defer out_t.deinit();
+    var post_t = try fucina.Tensor(.{.stream_dst}).fromSlice(ctx, .{config.n_hc}, &split.post);
+    defer post_t.deinit();
+    var injected = try out_t.mul(ctx, &post_t);
+    defer injected.deinit();
+    var next = try mixed.add(ctx, &injected);
+    defer next.deinit();
+    @memcpy(streams, try next.dataConst());
+}
+\ntest {
     // Numerics sanity: Hadamard is an involution up to scale; e4m3 grid is
     // monotone; fp8/fp4 round trips are idempotent.
     var v: [128]f32 = undefined;
