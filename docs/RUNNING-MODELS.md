@@ -108,11 +108,24 @@ zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf \
 # q8_0 KV cache (halves KV memory — capacity option; decode is NOT faster on M1)
 zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf \
   --prompt "..." --gen 256 --cache-type q8_0
+
+# Constrained decoding (needs a -Dllguidance=true build — REFERENCE.md §13.6):
+# the reply must satisfy a JSON schema, regex, or Lark grammar. Combine with
+# --no-think (the grammar governs the whole reply, thinking channel included);
+# works in --chat/--repl/--prompt and composes with --spec. Prefer sampling
+# over --temp 0 and bound open-ended fields (maximum/maxLength/{m,n}) — a
+# greedy argmax inside an unbounded field can loop until the token budget.
+zig build qwen3 -Dllguidance=true -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf \
+  --chat "Give me facts about Paris." --no-think \
+  --json-schema '{"type":"object","properties":{"city":{"type":"string"},"population":{"type":"integer","maximum":99999999}},"required":["city","population"],"additionalProperties":false}'
+zig build qwen3 -Dllguidance=true -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf \
+  --chat "What is the capital of Italy? One word." --no-think --temp 0 --regex '[A-Z][a-z]{2,15}'
 ```
 
 Other flags: `--repeat N` (re-run forward), `--profile` (per-block timings), `--info`,
 `--verify-cache N` (cached-vs-full attention check), `--min-p F`, `--repeat-penalty F`,
-`--stop TOKEN_ID`.
+`--stop TOKEN_ID`, `--json-schema J|@F` / `--lark G|@F` / `--regex P` (mutually
+exclusive; `@F` reads the grammar from a file).
 
 ---
 
@@ -161,7 +174,8 @@ zig build gemma4 -Doptimize=ReleaseFast -- models/gemma-4-26B-A4B-it-UD-Q6_K.ggu
 
 Sampling flags mirror qwen3 (`--temp --top-k --top-p --min-p --repeat-penalty
 --freq-penalty --presence-penalty --seed --greedy`); `--gen N` does raw token generation,
-`--info` prints the config.
+`--info` prints the config. Constrained decoding mirrors qwen3 too
+(`--json-schema/--lark/--regex` on `--chat`/`--repl`, `-Dllguidance=true` builds).
 
 ---
 

@@ -10,9 +10,11 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
+const logit_processor = @import("logit_processor.zig");
 
 const ExecContext = fucina.ExecContext;
 const Logits = fucina.Tensor(.{ .seq, .vocab });
+pub const LogitProcessor = logit_processor.LogitProcessor;
 
 /// Largest candidate set considered when sampling. Qwen3 uses top_k=20; this
 /// caps the work (and the stack buffer) when top_k is disabled.
@@ -48,6 +50,12 @@ pub const Config = struct {
 pub const Sampler = struct {
     config: Config,
     prng: std.Random.DefaultPrng,
+    /// Optional logit processor (grammar mask, bias list, …): its `process`
+    /// mutates the row before the penalty/sampling pipeline, its `commit`
+    /// observes the selected token — on every path, greedy included. Set
+    /// after `init`; `logit_processor.zig` documents the contract (incl. why
+    /// this seam composes with speculative decoding).
+    processor: ?LogitProcessor = null,
 
     pub fn init(config: Config) Sampler {
         return .{ .config = config, .prng = std.Random.DefaultPrng.init(config.seed) };
@@ -55,9 +63,14 @@ pub const Sampler = struct {
 
     /// Pick the next token from `logits` (shape `[1, vocab]`). `history` is the
     /// tokens so far (prompt + generated), used by the repetition penalty. The
-    /// logits are mutated in place by the penalty.
+    /// logits are mutated in place by the penalty (and by the processor, when
+    /// one is set). A processor that leaves no selectable token is
+    /// `error.AllTokensMasked` — a broken constraint fails loudly instead of
+    /// silently sampling from masked-out logits.
     pub fn next(self: *Sampler, ctx: *ExecContext, logits: *Logits, history: []const usize) !usize {
         const cfg = self.config;
+
+        if (self.processor) |p| try p.process(try logits.data(), history);
 
         if ((cfg.repeat_penalty != 1.0 or cfg.freq_penalty != 0 or cfg.presence_penalty != 0) and history.len > 0) {
             const data = try logits.data();
@@ -84,7 +97,14 @@ pub const Sampler = struct {
             }
         }
 
-        if (cfg.isGreedy()) return argmax(ctx, logits);
+        if (cfg.isGreedy()) {
+            const chosen = try argmax(ctx, logits);
+            if (self.processor) |p| {
+                if (!std.math.isFinite((try logits.dataConst())[chosen])) return error.AllTokensMasked;
+                try p.commit(chosen);
+            }
+            return chosen;
+        }
 
         const vocab = logits.dim(.vocab);
         const k: usize = @min(if (cfg.top_k > 0) cfg.top_k else max_candidates, @min(@as(usize, max_candidates), vocab));
@@ -97,6 +117,7 @@ pub const Sampler = struct {
         var probs: [max_candidates]f32 = undefined;
         const inv_temp = 1.0 / cfg.temperature;
         const max_logit = vals[0];
+        if (self.processor != null and !std.math.isFinite(max_logit)) return error.AllTokensMasked;
         var sum: f32 = 0;
         for (0..k) |i| {
             probs[i] = @exp((vals[i] - max_logit) * inv_temp);
@@ -142,7 +163,9 @@ pub const Sampler = struct {
                 break;
             }
         }
-        return @intCast(idxs[chosen]);
+        const token: usize = @intCast(idxs[chosen]);
+        if (self.processor) |p| try p.commit(token);
+        return token;
     }
 };
 

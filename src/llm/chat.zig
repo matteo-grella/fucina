@@ -148,6 +148,14 @@ pub const Options = struct {
     /// breaking the one-RNG-draw-per-plain-committed-token contract — so init
     /// fails loudly on the combination.
     stop_sequences: []const []const u8 = &.{},
+    /// Optional logit processor (grammar/JSON-schema constrained decoding —
+    /// `logit_processor.zig`, `llguidance.zig` — or any custom logit
+    /// transform), installed on the conversation's sampler. Re-armed via its
+    /// `reset` hook at every turn start, so the same constraint governs each
+    /// assistant reply independently. Borrowed: the processor state must
+    /// outlive the Conversation. Composes with `speculation` (the seam is
+    /// speculative-safe — see `logit_processor.zig`).
+    logit_processor: ?sampler_mod.LogitProcessor = null,
     /// Lossless draft-model-free speculative decoding (the SpeculationIndex
     /// cascade + SpeculativeDecoder). Off = the plain decode path, untouched.
     speculation: bool = false,
@@ -225,7 +233,11 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 .allocator = ctx.allocator,
                 .cache = cache,
                 .stream = Tok.StreamDecoder.init(tokenizer),
-                .sampler = Sampler.init(options.sampler),
+                .sampler = blk: {
+                    var s = Sampler.init(options.sampler);
+                    s.processor = options.logit_processor;
+                    break :blk s;
+                },
                 .history = .empty,
                 .system = options.system,
                 .stop_id = stop_id,
@@ -268,6 +280,10 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         /// and `sendBatch`. Returns the caller-owned prefix slice.
         fn beginTurnTokens(self: *Self, user: []const u8) ![]usize {
             const a = self.allocator;
+
+            // Re-arm the logit processor for this turn's reply (the previous
+            // turn left it post-stop; grammar constraints re-apply per reply).
+            if (self.sampler.processor) |p| try p.reset();
 
             var buf: std.ArrayList(u8) = .empty;
             defer buf.deinit(a);

@@ -51,6 +51,8 @@ pub const kv_cache = @import("llm/kv_cache.zig");
 pub const tokenizer = @import("llm/tokenizer.zig");
 pub const spm_tokenizer = @import("llm/spm_tokenizer.zig");
 pub const sampler = @import("llm/sampler.zig");
+pub const logit_processor = @import("llm/logit_processor.zig");
+pub const llguidance = @import("llm/llguidance.zig");
 pub const chat = @import("llm/chat.zig");
 pub const data = @import("llm/data.zig");
 
@@ -84,6 +86,8 @@ test {
     _ = tokenizer;
     _ = spm_tokenizer;
     _ = sampler;
+    _ = logit_processor;
+    _ = llguidance;
     _ = chat;
     _ = data;
 }

@@ -67,6 +67,12 @@ pub fn build(b: *std.Build) void {
         "Vectorize the scan kernels (cumsum/cumprod and cumsum's reverse VJP pass). Default false = the documented serial-per-row scans. When true, non-last-axis scans vectorize across independent columns (bitwise identical to serial) and last-axis scans use an in-register prefix scan — still bitwise deterministic for any thread count, but the accumulation ORDER differs from the serial default (the sum-SIMD-lanes rounding class).",
     ) orelse false;
 
+    const llguidance_enabled = b.option(
+        bool,
+        "llguidance",
+        "Build and link the vendored llguidance constrained-decoding engine (vendor/llguidance, Rust — requires cargo >= 1.87 on PATH) so `llm.llguidance` grammar/JSON-schema token masking works. Default false: the build stays pure Zig and `llm.llguidance.Constraint.init` returns error.LlguidanceNotEnabled.",
+    ) orelse false;
+
     const options = b.addOptions();
     options.addOption(BackendKind, "backend_kind", backend_kind);
     options.addOption(BlasKind, "blas_kind", blas_kind);
@@ -84,12 +90,36 @@ pub fn build(b: *std.Build) void {
     });
     module.addOptions("build_options", options);
 
+    // fucina_llm's own build options (the fucina options above are per-kernel
+    // knobs the llm tier never reads). Every module built from src/llm.zig
+    // must receive one of these under the name "llm_build_options".
+    const llm_options = b.addOptions();
+    llm_options.addOption(bool, "llguidance", llguidance_enabled);
+    const llm_options_off = b.addOptions(); // compile-only legs: never link the Rust lib
+    llm_options_off.addOption(bool, "llguidance", false);
+
+    // -Dllguidance: build the vendored Rust staticlib once per `zig build`
+    // invocation (cargo's own incremental cache makes the no-change case
+    // sub-second) and link it into the executables/test roots that actually
+    // reference the `llm.llguidance` externs. Consumers that merely import
+    // fucina_llm don't need the link — extern symbols resolve lazily.
+    const llguidance_dep: ?LlguidanceDep = if (llguidance_enabled) blk: {
+        const cargo = b.addSystemCommand(&.{ "cargo", "build", "--release", "--package", "llguidance" });
+        cargo.setCwd(b.path("vendor/llguidance"));
+        cargo.has_side_effects = true; // cargo tracks its own inputs; always invoke it
+        break :blk .{
+            .build_step = &cargo.step,
+            .lib = b.path("vendor/llguidance/target/release/libllguidance.a"),
+        };
+    } else null;
+
     const llm_module = b.addModule("fucina_llm", .{
         .root_source_file = b.path("src/llm.zig"),
         .target = target,
         .optimize = optimize,
     });
     llm_module.addImport("fucina", module);
+    llm_module.addOptions("llm_build_options", llm_options);
 
     const exe = b.addExecutable(.{
         .name = "fucina-zig-smoke",
@@ -228,6 +258,7 @@ pub fn build(b: *std.Build) void {
     qwen3_exe.root_module.addImport("fucina_llm", llm_module);
     configureBlas(qwen3_exe, blas_kind);
     configureGpu(b, qwen3_exe, gpu_kind);
+    configureLlguidance(qwen3_exe, llguidance_dep);
     const qwen3_install = installArtifactStep(b, qwen3_exe);
 
     const qwen3_cmd = b.addRunArtifact(qwen3_exe);
@@ -433,6 +464,7 @@ pub fn build(b: *std.Build) void {
     gemma4_exe.root_module.addImport("fucina_llm", llm_module);
     configureBlas(gemma4_exe, blas_kind);
     configureGpu(b, gemma4_exe, gpu_kind);
+    configureLlguidance(gemma4_exe, llguidance_dep);
     const gemma4_install = installArtifactStep(b, gemma4_exe);
 
     const gemma4_cmd = b.addRunArtifact(gemma4_exe);
@@ -602,6 +634,7 @@ pub fn build(b: *std.Build) void {
     snippet_tests.root_module.addImport("fucina_llm", llm_module);
     configureBlas(snippet_tests, blas_kind);
     configureGpu(b, snippet_tests, gpu_kind);
+    configureLlguidance(snippet_tests, llguidance_dep);
 
     const run_snippet_tests = b.addRunArtifact(snippet_tests);
     const snippet_check_step = b.step("snippet-check", "Extract and run every runnable docs/REFERENCE.md snippet against the real modules");
@@ -697,6 +730,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         cuda_llm_module.addImport("fucina", cuda_fucina_module);
+        cuda_llm_module.addOptions("llm_build_options", llm_options_off);
         cuda_llm_module.link_libc = true;
         const cuda_check_llm = b.addTest(.{ .root_module = cuda_llm_module });
         _ = cuda_check_llm.getEmittedBin();
@@ -1053,8 +1087,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
     llm_tests.root_module.addImport("fucina", module);
+    llm_tests.root_module.addOptions("llm_build_options", llm_options);
     configureBlas(llm_tests, blas_kind);
     configureGpu(b, llm_tests, gpu_kind);
+    configureLlguidance(llm_tests, llguidance_dep);
 
     const run_llm_tests = b.addRunArtifact(llm_tests);
     test_step.dependOn(&run_llm_tests.step);
@@ -1150,6 +1186,28 @@ pub fn build(b: *std.Build) void {
 
     const run_nanochat_tests = b.addRunArtifact(nanochat_tests);
     test_step.dependOn(&run_nanochat_tests.step);
+}
+
+const LlguidanceDep = struct {
+    build_step: *std.Build.Step,
+    lib: std.Build.LazyPath,
+};
+
+/// Link the vendored llguidance staticlib (built by the cargo step) into a
+/// compile step that references the `llm.llguidance` externs. No-op when
+/// -Dllguidance is off. The Rust staticlib needs libc, and — because its FFI
+/// converts panics to error strings via catch_unwind (panic=unwind) — an
+/// unwinder: macOS's libSystem ships one, but glibc's libc does not export
+/// `_Unwind_*`, so non-macOS targets link Zig's bundled LLVM libunwind
+/// through link_libcpp (hermetic; no system libgcc_s dependency).
+fn configureLlguidance(step: *std.Build.Step.Compile, dep: ?LlguidanceDep) void {
+    const d = dep orelse return;
+    step.root_module.addObjectFile(d.lib);
+    step.root_module.link_libc = true;
+    if (step.root_module.resolved_target.?.result.os.tag != .macos) {
+        step.root_module.link_libcpp = true;
+    }
+    step.step.dependOn(d.build_step);
 }
 
 /// Install `exe` under the default install step (plain `zig build` still

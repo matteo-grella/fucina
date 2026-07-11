@@ -324,6 +324,7 @@ kernel arms are not in the binary.
 | `-Dmax-threads` | `usize` | `8` | Comptime worker-team ceiling **and** runtime default thread count (`src/parallel.zig`). Sized for M1 Max P-cores; many-core servers must raise it at build time (`FUCINA_MAX_THREADS` only lowers it at runtime). | Outside 1–64 **panics the build**. |
 | `-Dgpu` | `none` \| `metal` \| `cuda` | `none` | GPU GEMM offload provider (§9). `metal`: big f32/f16 GEMMs, dense quantized prefill linears, and the MoE expert FFN on macOS. `cuda`: the same surface plus fused prefill attention and opt-in decode GEMV on Linux/NVIDIA, no SDK at build time. Decode below the work gates and training stay on CPU. | `metal` on a non-macOS target **panics**; `cuda` on a non-Linux target **panics** (cross-compiling from macOS with `-Dtarget=x86_64-linux-gnu` is the supported path). |
 | `-Dparakeet-mic` | `bool` | `false` | Links the vendored miniaudio capture stack into the `parakeet` example so `--mic` (live microphone) works; default off keeps the parakeet build fast. | Only affects the parakeet executable/tests. |
+| `-Dllguidance` | `bool` | `false` | Builds the vendored [llguidance](../vendor/llguidance/README.md) constrained-decoding engine (`cargo build` in `vendor/llguidance`) and links its staticlib into the qwen3/gemma4 examples and the llm test roots, enabling `llm.llguidance` grammar/JSON-schema token masking (§13.6). Off (the default) the build stays pure Zig and `llm.llguidance.Constraint.init` returns `error.LlguidanceNotEnabled`; the `LogitProcessor` seam itself is always available. | Requires a Rust toolchain >= 1.87 on PATH when enabled. |
 | `-Dvector-scan` | `bool` | `false` | Vectorizes the scan kernels (`cumsum`/`cumprod` and cumsum's reverse VJP pass). Off = the documented serial-per-row scans. On: non-last-axis scans vectorize across independent columns (bitwise identical to serial); last-axis scans use an in-register prefix scan — still bitwise deterministic for any thread count, but the accumulation order differs from the serial default (the sum-SIMD-lanes rounding class; exact for integer-valued data). Measured M1 ReleaseFast 256×8192: cumsum 3.3×, cumprod 5.2× (last axis), 4.3× (non-last, bit-identical). |
 | `-Doptimize` | `Debug` \| `ReleaseSafe` \| `ReleaseFast` \| `ReleaseSmall` | `Debug` | Standard Zig optimize mode. Build with `ReleaseFast` whenever speed matters (Debug is 10–50× slower); validate in Debug/ReleaseSafe, bench in ReleaseFast. | `x86dot-check` is always built ReleaseSafe regardless. |
 | `-Dtarget`, `-Dcpu` | standard queries | host, native CPU | Cross-compilation target and CPU model. | See below — a bare `-Dtarget` silently loses the fast kernels. |
@@ -701,6 +702,11 @@ goldens, the GGUF re-emit byte-identity test, tokenizer-parity fixtures,
 NAM training goldens) translate `error.FileNotFound` into
 `error.SkipZigTest`; GPU-dependent tests (`src/llm/gemma/moe_tests.zig`)
 skip unless the build has a GPU provider *and* a device is actually present.
+Tests for **opt-in build features** follow the same discipline through the
+feature's comptime flag: every `src/llm/llguidance_tests.zig` case opens
+with `if (!llm.llguidance.enabled) return error.SkipZigTest;`, so the same
+test root compiles and passes under any flag combination and gains coverage
+— never failures — when the flag is on.
 Per `CONTRIBUTING.md`, numeric changes must additionally be green under
 `-Dbackend=scalar` and `-Dblas=none` — the scalar backend is the reference,
 and native must agree with it.
@@ -717,7 +723,12 @@ non-test fence marks a definition block (an Op/Spec/fn the prose
 introduces) prepended to every later snippet in the same `## ` chapter; a
 `<!-- snippet: skip -->` comment excludes a test-shaped block that cannot
 run hermetically. Illustrative fragments (signature blocks, bare `test {`
-stanzas, asset-dependent `fn` examples) are ignored automatically.
+stanzas, asset-dependent `fn` examples) are ignored automatically. A
+snippet for an opt-in build feature stays RUNNABLE, not skip-marked: it
+opens with the feature's comptime-flag guard (e.g.
+`if (!llm.llguidance.enabled) return error.SkipZigTest;`), so
+`snippet-check` compiles it under every flag combination and executes it
+exactly when the enabling `-D` flag is passed.
 
 ### 2.8 Continuous integration (`.github/workflows/ci.yml`)
 
@@ -9682,7 +9693,9 @@ family-agnostic helpers stay flat:
 | `llm.kv_cache` | per-layer K/V store for autoregressive decode | §13.4 |
 | `llm.tokenizer` | byte-level BPE (GPT-2/Qwen) | §13.5 |
 | `llm.spm_tokenizer` | SentencePiece Unigram (Gemma/llama-vocab) | §13.5 |
-| `llm.sampler` | greedy/temperature/top-k/top-p/min-p/penalties | §13.6 |
+| `llm.sampler` | greedy/temperature/top-k/top-p/min-p/penalties + logit-processor seam | §13.6 |
+| `llm.logit_processor` | pluggable logit-transform interface (grammar masks, bias lists) | §13.6 |
+| `llm.llguidance` | grammar/JSON-schema constrained decoding (vendored engine, `-Dllguidance`) | §13.6 |
 | `llm.data` | SFT pairs, encodePair, deterministic Loader | §13.7 |
 | `llm.chat` | templates + generic `Conversation(Model, Tok)` | §13.8 |
 
@@ -10269,6 +10282,7 @@ pub const Config = struct {
 };
 
 pub const Sampler = struct {
+    processor: ?LogitProcessor = null,   // optional pre-sampling logit transform
     pub fn init(config: Config) Sampler;
     pub fn next(self: *Sampler, ctx: *ExecContext,
                 logits: *fucina.Tensor(.{ .seq, .vocab }),   // shape [1, vocab]
@@ -10276,9 +10290,9 @@ pub const Sampler = struct {
 };
 ```
 
-`next` implements the llama.cpp-compatible pipeline in order: penalties →
-greedy shortcut → top-k truncation → temperature softmax → top-p → min-p →
-categorical draw. Semantics worth pinning:
+`next` implements the llama.cpp-compatible pipeline in order: logit
+processor → penalties → greedy shortcut → top-k truncation → temperature
+softmax → top-p → min-p → categorical draw. Semantics worth pinning:
 
 - **Penalties mutate `logits` in place**, applied once per unique token in the
   last `repeat_last_n` tokens of `history` (with `count` = occurrences in the
@@ -10291,6 +10305,10 @@ categorical draw. Semantics worth pinning:
   The candidate set is capped at 256 even when `top_k = 0`.
 - A `Sampler` is single-stream mutable state (RNG + config): not thread-safe,
   one per decode stream.
+- With a `processor` set, its `process` hook mutates the logits row before
+  everything else and its `commit` hook observes the selected token on every
+  path (greedy included, exactly once per `next`); a processor that masks out
+  every candidate is `error.AllTokensMasked`.
 
 ```zig
 test "sampler: greedy default, seed-deterministic sampling" {
@@ -10310,6 +10328,178 @@ test "sampler: greedy default, seed-deterministic sampling" {
     for (0..8) |_| { // same seed -> same draw sequence
         try std.testing.expectEqual(try a.next(&ctx, &logits, &.{}), try b.next(&ctx, &logits, &.{}));
     }
+}
+```
+
+#### Logit processors (`src/llm/logit_processor.zig`)
+
+`LogitProcessor` is the injectable pre-sampling transform — the seam
+grammar-constrained decoding plugs into, and the hook for any custom logit
+policy (bias lists, banned-token rules, watermarking). It follows the
+`DraftSource` vtable pattern (§13.9):
+
+```zig
+pub const LogitProcessor = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+    pub const VTable = struct {
+        process: *const fn (ptr, logits: []f32, history: []const usize) anyerror!void,
+        commit: *const fn (ptr, token: usize) anyerror!void,
+        reset: ?*const fn (ptr) anyerror!void = null,
+    };
+    pub fn process(...) / commit(...) / reset(...)
+};
+```
+
+`process` mutates one `[vocab]` logits row in place before the sampler's own
+pipeline (a mask writes `-inf` over forbidden tokens); `commit` observes the
+selected token, exactly once per `Sampler.next`; the optional `reset` re-arms
+state for a fresh constrained region (`chat.Conversation` calls it at every
+turn start). Because the seam lives inside the `Sampler`, every decode path
+that samples through one — `chat.send`/`sendBatch`, the speculative
+decoder's plain and verify steps, hand-rolled runner loops — picks the
+processor up with no loop changes.
+
+**The seam is speculative-safe by construction**: the verify loop samples
+each row only after that row's prefix is committed, and every sampled row
+token is itself committed (accepted draft, correction, or bonus — §13.9), so
+`commit` keeps processor state exactly in step with history and no rollback
+hook is needed. A draft token the mask forbids simply loses the
+`sampled == draft` comparison and is rejected; the constrained speculative
+stream is token-for-token identical to the constrained plain stream (proven
+greedy + sampled in `chat_tests.zig`). One processor per decode stream, like
+the sampler that hosts it.
+
+```zig
+test "logit processor: mask before sampling, observe the selection" {
+    const alloc = std.testing.allocator;
+    var ctx: fucina.ExecContext = undefined;
+    ctx.init(alloc);
+    defer ctx.deinit();
+
+    const OddMask = struct {
+        commits: usize = 0,
+        fn process(ptr: *anyopaque, logits: []f32, history: []const usize) anyerror!void {
+            _ = ptr;
+            _ = history;
+            for (logits, 0..) |*l, tok| {
+                if (tok % 2 == 1) l.* = -std.math.inf(f32);
+            }
+        }
+        fn commit(ptr: *anyopaque, token: usize) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            _ = token;
+            self.commits += 1;
+        }
+    };
+    var mask = OddMask{};
+
+    var logits = try fucina.Tensor(.{ .seq, .vocab }).fromSlice(&ctx, .{ 1, 4 }, &.{ 0.1, 0.9, 0.5, 0.8 });
+    defer logits.deinit();
+    var s = llm.sampler.Sampler.init(.{}); // greedy
+    s.processor = .{ .ptr = &mask, .vtable = &.{ .process = OddMask.process, .commit = OddMask.commit } };
+    // Unmasked argmax would be token 1; the mask forces the best even id.
+    try std.testing.expectEqual(@as(usize, 2), try s.next(&ctx, &logits, &.{}));
+    try std.testing.expectEqual(@as(usize, 1), mask.commits);
+}
+```
+
+#### Constrained decoding: llguidance (`src/llm/llguidance.zig`, `-Dllguidance`)
+
+`llm.llguidance.Constraint` compiles a grammar with the vendored
+[llguidance](https://github.com/guidance-ai/llguidance) engine
+(`vendor/llguidance`, MIT — version/update procedure in its
+[README](../vendor/llguidance/README.md)) and adapts it to the
+`LogitProcessor` seam: JSON-schema/regex/Lark-constrained generation for any
+runner built on the shared sampler, ~50 µs of pure CPU mask work per token.
+Requires `-Dllguidance=true` (§2.2; cargo builds the Rust staticlib); without
+it the module still compiles and `Constraint.init` returns
+`error.LlguidanceNotEnabled`.
+
+```zig
+pub const enabled: bool;                 // build-flag mirror
+pub fn version() []const u8;             // "llguidance@X.Y.Z derivre@..."
+
+pub const Grammar = union(enum) {
+    json_schema: []const u8,  // stringified JSON schema
+    regex: []const u8,        // Rust-syntax regex the reply must match
+    lark: []const u8,         // llguidance's Lark-variant grammar
+    llguidance: []const u8,   // composite JSON list form
+};
+pub const Options = struct {
+    eos_token: ?u32 = null,      // forced when the grammar completes; default tokenizer eosId()
+    extra_eos: []const u32 = &.{},
+    n_vocab: ?usize = null,      // model vocab when padded larger than the tokenizer's
+    log_level: u32 = 1,          // 0 silent, 1 warnings, 2 info
+};
+
+pub const Constraint = struct {
+    pub fn init(allocator, tokenizer: anytype, grammar: Grammar, options: Options) Error!Constraint
+    pub fn deinit(self: *Constraint) void
+    pub fn processor(self: *Constraint) LogitProcessor  // install on a Sampler / chat.Options
+    pub fn isStopped(self: *const Constraint) bool      // grammar terminated
+    pub fn isAccepting(self: *Constraint) bool          // tokens so far form a complete sentence
+    pub fn reset(self: *Constraint) Error!void          // re-arm for a fresh reply
+    pub fn ffTokens(self: *Constraint, buf: []u32) Error!usize // grammar-forced continuation
+};
+```
+
+- `tokenizer` is `*const llm.tokenizer.Tokenizer` (byte-BPE) or
+  `*const llm.spm_tokenizer.Tokenizer` (SPM) — both borrowed. The bridge
+  hands llguidance every token's RAW bytes: BPE tokens byte-decoded, SPM
+  pieces unescaped (`▁` → space) and `<0xXX>` byte tokens as their byte.
+  Control tokens (BPE: the `<|...|>` marker shape; SPM: `control`/`unknown`
+  attrs) carry toktrie's `0xFF` special marker, so a grammar whose text could
+  spell `<|im_end|>` can never steer the model into emitting the actual
+  control token. Padding ids past the tokenizer vocab (set
+  `n_vocab = config.vocab_size`) get empty bytes and are never allowed.
+- **Stop forcing**: when the grammar completes, the mask allows only
+  `eos_token` — pass the chat template's stop-marker id so a finished grammar
+  ends the turn through the existing stop handling; a matcher failure
+  mid-decode also degrades to the forced stop (details logged at
+  `log_level >= 1`). An invalid grammar fails `init` loudly instead.
+- One `Constraint` per decode stream; do not move it after `processor()` is
+  taken. `chat.Conversation` re-arms it per turn via the `reset` hook.
+- The runner flags (qwen3 + gemma4, §14.2/§14.4): `--json-schema JSON|@FILE`,
+  `--lark GRAMMAR|@FILE`, `--regex PATTERN` — combine with `--no-think` on
+  reasoning models (the grammar governs the whole reply, thinking channel
+  included). Composes with `--spec` (output identical to the plain run).
+
+```zig
+test "llguidance: JSON-schema constrained greedy decode" {
+    if (!llm.llguidance.enabled) return error.SkipZigTest; // -Dllguidance=true builds only
+    const alloc = std.testing.allocator;
+    var ctx: fucina.ExecContext = undefined;
+    ctx.init(alloc);
+    defer ctx.deinit();
+
+    const vocab = [_][]const u8{ "{", "}", "\"", "a", ":", "1", "<|end|>" };
+    var tok = try llm.tokenizer.Tokenizer.initFromParts(alloc, &vocab, &.{}, .{ .eos = 6 });
+    defer tok.deinit();
+
+    var constraint = try llm.llguidance.Constraint.init(alloc, &tok, .{
+        .json_schema =
+        \\{"type":"object","properties":{"a":{"type":"integer"}},"required":["a"],"additionalProperties":false}
+    }, .{});
+    defer constraint.deinit();
+
+    var s = llm.sampler.Sampler.init(.{}); // greedy
+    s.processor = constraint.processor();
+
+    // The model "wants" '}' everywhere; the mask walks it through a valid
+    // object instead — '}' only becomes samplable once {"a":1 is complete —
+    // then the finished grammar forces the stop token.
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    var steps: usize = 0;
+    while (!constraint.isStopped() and steps < 16) : (steps += 1) {
+        var logits = try fucina.Tensor(.{ .seq, .vocab }).fromSlice(&ctx, .{ 1, 7 }, &.{ 0, 1, 0, 0, 0, 0.5, 0 });
+        defer logits.deinit();
+        const next = try s.next(&ctx, &logits, &.{});
+        if (next == 6) break;
+        try tok.decodeAppend(alloc, @intCast(next), &out);
+    }
+    try std.testing.expectEqualStrings("{\"a\":1}", out.items);
 }
 ```
 
@@ -10514,6 +10704,7 @@ pub const Options = struct {
     sampler: sampler.Config = .{},
     extra_stop_ids: []const u32 = &.{},   // borrowed
     stop_sequences: []const []const u8 = &.{},  // borrowed; incompatible with speculation
+    logit_processor: ?sampler.LogitProcessor = null,  // borrowed; §13.6
     speculation: bool = false,
     spec_options: speculative.Options = .{},
     io: ?std.Io = null,                   // clock for the decoder's live cost gate
@@ -10560,6 +10751,12 @@ Semantics:
   on error paths included — so the post-turn state matches the plain path's
   exactly. The equivalence (token-for-token, draw-for-draw across a persistent
   sampler, greedy and sampled) is proven in `chat_tests.zig`.
+- `logit_processor` installs a §13.6 processor (e.g. a `llm.llguidance`
+  grammar constraint) on the conversation's sampler and re-arms it via its
+  `reset` hook at every turn start, so the same constraint governs each
+  assistant reply independently — on the plain, speculative, and `sendBatch`
+  paths alike (constrained plain == constrained speculative is part of the
+  `chat_tests.zig` equivalence proofs).
 - `sendBatch` decodes one message on each of N sibling conversations in
   lockstep: every step forwards one token per live stream through
   `forwardStepBatch` (one m=N weight pass instead of N GEMVs), then samples
@@ -11142,6 +11339,15 @@ zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q4_K_S.gguf \
 zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf \
   --prompt "..." --gen 256 --cache-type q8_0
 zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --tokenize input.txt
+
+# constrained decoding (§13.6; needs -Dllguidance=true): the reply must
+# satisfy the JSON schema / regex / Lark grammar; composes with --spec
+zig build qwen3 -Dllguidance=true -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf \
+  --chat "Give me facts about Paris." --no-think \
+  --json-schema '{"type":"object","properties":{"city":{"type":"string"},"population":{"type":"integer","maximum":99999999}},"required":["city","population"],"additionalProperties":false}'
+zig build qwen3 -Dllguidance=true -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf \
+  --prompt "The answer is" --gen 32 --regex ' (yes|no)\.'
+# --json-schema @schema.json / --lark @grammar.lark read the grammar from a file
 ```
 
 #### 14.2.1 LoRA fine-tuning (`src/llm/qwen3/train.zig`)
@@ -11430,6 +11636,9 @@ zig build gemma4 -Doptimize=ReleaseFast -- models/gemma-4-26B-A4B-it-UD-Q6_K.ggu
   --repl --system "Answer tersely." --think
 zig build gemma4 -Doptimize=ReleaseFast -- models/gemma-4-26B-A4B-it-UD-Q6_K.gguf \
   --chat "Why is the sky blue?" --spec          # lossless speculative decoding
+zig build gemma4 -Dllguidance=true -Doptimize=ReleaseFast -- models/gemma-4-26B-A4B-it-UD-Q6_K.gguf \
+  --chat "List three facts about the sky." \
+  --json-schema '{"type":"array","items":{"type":"string"},"minItems":3,"maxItems":3}'  # constrained reply (§13.6)
 zig build gemma4 -Dgpu=metal -Doptimize=ReleaseFast -- models/gemma-4-26B-A4B-it-UD-Q6_K.gguf \
   --chat "..."                                  # MoE expert FFN on the GPU
 zig build gemma4 -Doptimize=ReleaseFast -- models/gemma-4-26B-A4B-it-UD-Q6_K.gguf \

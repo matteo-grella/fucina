@@ -22,6 +22,7 @@ pub fn main(init: std.process.Init) !void {
         try stdout.print("chat:     zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --chat \"What is the capital of France?\" [--no-think] [--system \"...\"]\n", .{});
         try stdout.print("repl:     zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --repl   (multi-turn; streams replies)\n", .{});
         try stdout.print("sampling: --temp F --top-k N --top-p F --min-p F --repeat-penalty F --seed N\n", .{});
+        try stdout.print("grammar:  --json-schema JSON|@FILE | --lark GRAMMAR|@FILE | --regex PATTERN   (constrained decoding; needs a -Dllguidance=true build; combine with --no-think)\n", .{});
         try stdout.print("other:    --info | --spec-bench\n", .{});
         return;
     }
@@ -50,6 +51,9 @@ pub fn main(init: std.process.Init) !void {
     var spec_ref_count: usize = 0;
     var temp_arg: ?f32 = null;
     var streams_arg: usize = 1;
+    var json_schema_arg: ?[]const u8 = null;
+    var lark_arg: ?[]const u8 = null;
+    var regex_arg: ?[]const u8 = null;
     var topk_arg: ?usize = null;
     var topp_arg: ?f32 = null;
     var minp_arg: ?f32 = null;
@@ -194,6 +198,24 @@ pub fn main(init: std.process.Init) !void {
             streams_arg = try parseRepeat(args[arg_i]);
         } else if (std.mem.startsWith(u8, arg, "--streams=")) {
             streams_arg = try parseRepeat(arg["--streams=".len..]);
+        } else if (std.mem.eql(u8, arg, "--json-schema")) {
+            arg_i += 1;
+            if (arg_i >= args.len) return error.MissingJsonSchema;
+            json_schema_arg = args[arg_i];
+        } else if (std.mem.startsWith(u8, arg, "--json-schema=")) {
+            json_schema_arg = arg["--json-schema=".len..];
+        } else if (std.mem.eql(u8, arg, "--lark")) {
+            arg_i += 1;
+            if (arg_i >= args.len) return error.MissingLarkGrammar;
+            lark_arg = args[arg_i];
+        } else if (std.mem.startsWith(u8, arg, "--lark=")) {
+            lark_arg = arg["--lark=".len..];
+        } else if (std.mem.eql(u8, arg, "--regex")) {
+            arg_i += 1;
+            if (arg_i >= args.len) return error.MissingRegex;
+            regex_arg = args[arg_i];
+        } else if (std.mem.startsWith(u8, arg, "--regex=")) {
+            regex_arg = arg["--regex=".len..];
         } else if (std.mem.startsWith(u8, arg, "--")) {
             try stdout.print("unknown flag: {s} (run with no arguments for usage)\n", .{arg});
             return error.UnknownArgument;
@@ -261,10 +283,57 @@ pub fn main(init: std.process.Init) !void {
 
     const spec_refs = spec_ref_buf[0..spec_ref_count];
 
+    // --json-schema/--lark/--regex: compile the grammar into a llguidance
+    // constraint and install it as the sampler's logit processor. The mask
+    // forces the stop/EOS token when the grammar completes, so the normal
+    // stop handling ends generation.
+    var grammar_text: ?[]u8 = null; // @FILE payloads (grammar borrows it through init only)
+    defer if (grammar_text) |g| allocator.free(g);
+    var constraint: ?llm.llguidance.Constraint = null;
+    defer if (constraint) |*con| con.deinit();
+    const grammar_flags = @as(usize, @intFromBool(json_schema_arg != null)) +
+        @intFromBool(lark_arg != null) + @intFromBool(regex_arg != null);
+    if (grammar_flags > 1) {
+        try stdout.print("--json-schema, --lark and --regex are mutually exclusive\n", .{});
+        return error.ConflictingGrammarFlags;
+    }
+    if (grammar_flags == 1) {
+        if (streams_arg > 1) {
+            try stdout.print("--streams does not support constrained decoding (one grammar state per stream)\n", .{});
+            return error.StreamsWithGrammar;
+        }
+        const t = tok_ptr orelse return error.TokenizerUnavailable;
+        const grammar: llm.llguidance.Grammar = if (json_schema_arg) |v|
+            .{ .json_schema = try grammarValue(init.io, allocator, v, &grammar_text) }
+        else if (lark_arg) |v|
+            .{ .lark = try grammarValue(init.io, allocator, v, &grammar_text) }
+        else
+            .{ .regex = regex_arg.? };
+        // Chat ends turns on the template stop marker; completion mode stops
+        // on --stop or EOS (default --stop to EOS so a completed grammar
+        // terminates generation instead of re-emitting EOS to the budget).
+        const eos: ?u32 = if (is_chat) blk: {
+            const tmpl = chat_tmpl orelse break :blk t.eosId();
+            break :blk t.tokenId(tmpl.stopMarker()) orelse t.eosId();
+        } else if (stop_token) |s| @intCast(s) else t.eosId();
+        if (!is_chat and stop_token == null) stop_token = if (eos) |e| @as(usize, e) else null;
+        constraint = llm.llguidance.Constraint.init(allocator, t, grammar, .{
+            .eos_token = eos,
+            .n_vocab = model.config.vocab_size,
+        }) catch |err| switch (err) {
+            error.LlguidanceNotEnabled => {
+                try stdout.print("constrained decoding needs a build with -Dllguidance=true (see vendor/llguidance/README.md)\n", .{});
+                return err;
+            },
+            else => return err,
+        };
+    }
+    const processor: ?llm.sampler.LogitProcessor = if (constraint) |*con| con.processor() else null;
+
     if (is_chat) {
         const t = tok_ptr orelse return error.TokenizerUnavailable;
         const tmpl = chat_tmpl orelse return error.NoChatTemplate;
-        try runChat(init.io, allocator, stdout, &ctx, &model, t, tmpl, system_text, no_think, sampler_cfg, chat_text, spec_flag, spec_refs);
+        try runChat(init.io, allocator, stdout, &ctx, &model, t, tmpl, system_text, no_think, sampler_cfg, chat_text, spec_flag, spec_refs, processor);
         return;
     }
 
@@ -282,6 +351,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (spec_bench) {
+        if (processor != null) return error.SpecBenchWithGrammar;
         try runSpecBench(init.io, stdout, &ctx, &model, tokens, load_ns, cache_type, @max(bench_reps, 5));
         return;
     }
@@ -296,10 +366,10 @@ pub fn main(init: std.process.Init) !void {
             try stdout.print("note: --bench is the plain-decode protocol; ignoring --spec\n", .{});
         }
         if (spec_flag and bench_reps == 1) {
-            try runGenerateSpec(init.io, allocator, stdout, &ctx, &model, tok_ptr, tokens, load_ns, n, stop_token, sampler_cfg, cache_type, spec_refs);
+            try runGenerateSpec(init.io, allocator, stdout, &ctx, &model, tok_ptr, tokens, load_ns, n, stop_token, sampler_cfg, cache_type, spec_refs, processor);
             return;
         }
-        try runGenerate(init.io, allocator, stdout, &ctx, &model, tok_ptr, tokens, load_ns, n, stop_token, profile_enabled, sampler_cfg, bench_reps, cache_type);
+        try runGenerate(init.io, allocator, stdout, &ctx, &model, tok_ptr, tokens, load_ns, n, stop_token, profile_enabled, sampler_cfg, bench_reps, cache_type, processor);
         return;
     }
     if (verify_count) |m| {
@@ -520,9 +590,12 @@ fn benchOnePass(
     profile_decode: bool,
     prefill_profile: ?*llm.qwen3.model.ForwardProfile,
     decode_profile: ?*llm.qwen3.model.ForwardProfile,
+    processor: ?llm.sampler.LogitProcessor,
 ) !PassResult {
     cache.reset();
     var sampler = llm.sampler.Sampler.init(sampler_cfg);
+    sampler.processor = processor;
+    if (processor) |p| try p.reset(); // fresh grammar state per pass
     @memcpy(history[0..tokens.len], tokens);
     var hist_len = tokens.len;
 
@@ -589,6 +662,7 @@ fn runGenerate(
     sampler_cfg: llm.sampler.Config,
     bench_reps: usize,
     cache_type: llm.kv_cache.KvDtype,
+    processor: ?llm.sampler.LogitProcessor,
 ) !void {
     const cfg = model.config;
     const capacity = tokens.len + max_new;
@@ -628,7 +702,7 @@ fn runGenerate(
             const profile_decode = profile_enabled and rep != 0;
             const prefill_profile = if (profile_prefill) &profile else null;
             const decode_profile_ptr = if (profile_decode) &decode_profile else null;
-            const r = try benchOnePass(io, ctx, model, &cache, tokens, out, history, sampler_cfg, pass_new, stop_token, profile_prefill, profile_decode, prefill_profile, decode_profile_ptr);
+            const r = try benchOnePass(io, ctx, model, &cache, tokens, out, history, sampler_cfg, pass_new, stop_token, profile_prefill, profile_decode, prefill_profile, decode_profile_ptr, processor);
             if (rep == 0) continue;
             decode_steps = r.decode_steps;
             tgs[rep - 1] = @as(f64, @floatFromInt(r.decode_steps)) / seconds(r.decode_ns);
@@ -650,7 +724,7 @@ fn runGenerate(
     }
 
     const prefill_profile = if (profile_enabled) &profile else null;
-    const r = try benchOnePass(io, ctx, model, &cache, tokens, out, history, sampler_cfg, max_new, stop_token, profile_enabled, false, prefill_profile, null);
+    const r = try benchOnePass(io, ctx, model, &cache, tokens, out, history, sampler_cfg, max_new, stop_token, profile_enabled, false, prefill_profile, null, processor);
     try stdout.print("load: {d:.3} s\n", .{seconds(load_ns)});
     try stdout.print("prompt tokens: {d}\n", .{tokens.len});
     // Prefill top-5 on the fixed prompt: the cache-type quality A/B hook
@@ -831,7 +905,7 @@ fn runGenerateStreams(
         for (0..n) |i| {
             var stream_cfg = sampler_cfg;
             stream_cfg.seed = sampler_cfg.seed +% i;
-            const r = try benchOnePass(io, ctx, model, cache_ptrs[i], tokens, outs_seq[i], histories[i], stream_cfg, pass_new, null, false, false, null, null);
+            const r = try benchOnePass(io, ctx, model, cache_ptrs[i], tokens, outs_seq[i], histories[i], stream_cfg, pass_new, null, false, false, null, null, null);
             seq_prefill_ns += r.prefill_ns;
             seq_decode_ns += r.decode_ns;
         }
@@ -916,6 +990,7 @@ fn runGenerateSpec(
     sampler_cfg: llm.sampler.Config,
     cache_type: llm.kv_cache.KvDtype,
     ref_paths: []const []const u8,
+    processor: ?llm.sampler.LogitProcessor,
 ) !void {
     // The decoder's invariant needs a non-empty committed history (e.g.
     // `--prompt ""` tokenizes to nothing).
@@ -954,6 +1029,7 @@ fn runGenerateSpec(
     index.observe(tokens); // the prompt is committed context
 
     var sampler = llm.sampler.Sampler.init(sampler_cfg);
+    sampler.processor = processor;
     var sink_state: u8 = 0;
     const sink = llm.speculative.core.TokenSink{ .ptr = @ptrCast(&sink_state), .func = nullSinkEmit };
 
@@ -1011,24 +1087,39 @@ fn nullSinkEmit(ptr: *anyopaque, token: usize) anyerror!void {
 
 /// Read a UTF-8 text file and tokenize it (no BOS/EOS policy) for use as a
 /// speculation reference document.
-fn tokenizeFile(io: std.Io, allocator: std.mem.Allocator, tok: *const llm.tokenizer.Tokenizer, path: []const u8) ![]usize {
+/// Resolve a grammar flag value: `@PATH` reads the file (ownership parked in
+/// `owned` for the caller's deferred free); anything else is the inline text.
+fn grammarValue(io: std.Io, allocator: std.mem.Allocator, value: []const u8, owned: *?[]u8) ![]const u8 {
+    if (!std.mem.startsWith(u8, value, "@")) return value;
+    const text = try readTextFile(io, allocator, value[1..]);
+    owned.* = text;
+    return text;
+}
+
+/// Read a small text file (grammar/schema/reference documents), with a size
+/// cap so a mistyped path (a GGUF, a core dump, ...) fails fast and clearly
+/// instead of ballooning memory.
+fn readTextFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     var file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
     const stat = try file.stat(io);
     if (stat.kind != .file) return error.IsDir;
-    // Tokenize inputs / speculation references are text files; cap the read
-    // so a mistyped path (a GGUF, a core dump, ...) fails fast and clearly
-    // instead of ballooning memory and the speculation index.
     const max_bytes = 64 * 1024 * 1024;
     if (stat.size > max_bytes) return error.FileTooLarge;
     const bytes = try allocator.alloc(u8, @intCast(stat.size));
-    defer allocator.free(bytes);
+    errdefer allocator.free(bytes);
     var read_len: usize = 0;
     while (read_len < bytes.len) {
         const n = try file.readStreaming(io, &.{bytes[read_len..]});
         if (n == 0) return error.EndOfStream;
         read_len += n;
     }
+    return bytes;
+}
+
+fn tokenizeFile(io: std.Io, allocator: std.mem.Allocator, tok: *const llm.tokenizer.Tokenizer, path: []const u8) ![]usize {
+    const bytes = try readTextFile(io, allocator, path);
+    defer allocator.free(bytes);
     const ids32 = try tok.encodeRaw(allocator, bytes);
     defer allocator.free(ids32);
     const ids = try allocator.alloc(usize, ids32.len);
@@ -1135,6 +1226,7 @@ fn runChat(
     chat_text: ?[]const u8,
     spec: bool,
     spec_refs: []const []const u8,
+    processor: ?llm.sampler.LogitProcessor,
 ) !void {
     var convo = try llm.chat.Conversation(llm.qwen3.model.Model, llm.tokenizer).init(ctx, model, tok, template, .{
         .system = system,
@@ -1142,6 +1234,7 @@ fn runChat(
         .sampler = sampler_cfg,
         .capacity = 4096,
         .max_response_tokens = 1024,
+        .logit_processor = processor,
         .speculation = spec,
         .io = io,
     });

@@ -172,6 +172,117 @@ test "3-turn conversation: speculation on == off (sampled, fixed seed: draw-for-
     try expectSpecEquivalentConversation(.{ .temperature = 0.7, .top_k = 20, .seed = 42 });
 }
 
+/// Token-mask logit processor test double for the constrained-conversation
+/// proofs: only ids in `allowed` stay finite, every selected token and every
+/// turn re-arm is recorded.
+const CountingMask = struct {
+    allowed: []const usize,
+    allocator: std.mem.Allocator,
+    commits: std.ArrayList(usize) = .empty,
+    resets: usize = 0,
+
+    fn deinit(self: *CountingMask) void {
+        self.commits.deinit(self.allocator);
+    }
+
+    fn processor(self: *CountingMask) sampler_mod.LogitProcessor {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable = sampler_mod.LogitProcessor.VTable{
+        .process = process,
+        .commit = commit,
+        .reset = reset,
+    };
+
+    fn process(ptr: *anyopaque, logits: []f32, history: []const usize) anyerror!void {
+        _ = history;
+        const self: *CountingMask = @ptrCast(@alignCast(ptr));
+        outer: for (logits, 0..) |*l, tok| {
+            for (self.allowed) |a| if (a == tok) continue :outer;
+            l.* = -std.math.inf(f32);
+        }
+    }
+
+    fn commit(ptr: *anyopaque, token: usize) anyerror!void {
+        const self: *CountingMask = @ptrCast(@alignCast(ptr));
+        try self.commits.append(self.allocator, token);
+    }
+
+    fn reset(ptr: *anyopaque) anyerror!void {
+        const self: *CountingMask = @ptrCast(@alignCast(ptr));
+        self.resets += 1;
+    }
+};
+
+/// A masking logit processor constrains every reply token on the plain AND
+/// the speculative path identically: same streams, same per-selection commit
+/// sequence (the processor-state parity that makes grammar constraints
+/// speculation-safe), one reset per turn, and no reply token outside the
+/// mask. Exercised greedy and sampled (persistent-RNG draw parity).
+fn expectConstrainedConversation(sampler_cfg: sampler_mod.Config) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try scaffolding.buildTinyModel(&ctx, 0xC4A7);
+    defer model.deinit();
+    var tok = try Tokenizer.initFromParts(allocator, &tiny_vocab, &.{}, .{});
+    defer tok.deinit();
+    const tmpl = Template{ .format = .chatml };
+
+    // The mask must include the stop id (13) so turns can end the plain way.
+    const allowed = [_]usize{ 0, 2, 4, 6, 8, 13 };
+    const turns = [_][]const u8{ "ab a", "ba b" };
+
+    var streams: [2][]u8 = undefined;
+    var commit_logs: [2][]usize = undefined;
+    for (0..2) |which| {
+        var mask = CountingMask{ .allowed = &allowed, .allocator = allocator };
+        defer mask.deinit();
+        var convo = try Conversation.init(&ctx, &model, &tok, tmpl, .{
+            .capacity = 256,
+            .max_response_tokens = 10,
+            .sampler = sampler_cfg,
+            .logit_processor = mask.processor(),
+            .speculation = which == 1,
+        });
+        defer convo.deinit();
+
+        var aw = std.Io.Writer.Allocating.init(allocator);
+        defer aw.deinit();
+        for (turns) |msg| _ = try convo.send(msg, &aw.writer);
+
+        try std.testing.expectEqual(turns.len, mask.resets); // one re-arm per turn
+        for (mask.commits.items) |t| {
+            var ok = false;
+            for (allowed) |a| ok = ok or a == t;
+            try std.testing.expect(ok); // nothing outside the mask was ever selected
+        }
+        streams[which] = try allocator.dupe(u8, aw.written());
+        commit_logs[which] = try allocator.dupe(usize, mask.commits.items);
+    }
+    defer for (streams, commit_logs) |s, cl| {
+        allocator.free(s);
+        allocator.free(cl);
+    };
+
+    try std.testing.expectEqualStrings(streams[0], streams[1]);
+    try std.testing.expectEqualSlices(usize, commit_logs[0], commit_logs[1]);
+}
+
+test "constrained conversation: mask holds, plain == speculative (greedy)" {
+    try expectConstrainedConversation(.{});
+}
+
+test "constrained conversation: mask holds, plain == speculative (sampled, fixed seed)" {
+    try expectConstrainedConversation(.{ .temperature = 0.9, .top_k = 8, .seed = 1234 });
+}
+
 test "spec turn: writer failure mid-turn leaves the conversation consistent; the next send works" {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");

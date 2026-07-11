@@ -75,8 +75,8 @@ the whole tree.
 
 | Family | What it is |
 | --- | --- |
-| **Qwen3** dense (0.6B–8B) + **Qwen3-30B-A3B** MoE | chat / REPL / raw generation, lossless speculative decoding, batch-N multi-conversation decode |
-| **Gemma 4** 26B-A4B (MoE) | chat / REPL / speculative decoding |
+| **Qwen3** dense (0.6B–8B) + **Qwen3-30B-A3B** MoE | chat / REPL / raw generation, lossless speculative decoding, batch-N multi-conversation decode, JSON-schema/grammar constrained output |
+| **Gemma 4** 26B-A4B (MoE) | chat / REPL / speculative decoding, JSON-schema/grammar constrained output |
 | **Qwen3.5** 0.8B | hybrid Gated-DeltaNet architecture (conv + delta scan + gated attention) |
 | **DiffusionGemma** 26B-A4B | block text-diffusion decoding on the Gemma backbone |
 | **Parakeet** (NVIDIA NeMo FastConformer) | speech-to-text: offline, streaming, and live microphone |
@@ -159,6 +159,10 @@ python3 tools/bench_gate.py --models qwen3-0.6b-q6_k --tasks prefill,decode
 On top of raw speed there is lossless, draft-model-free speculative decoding (up to
 2.3x on retrieval-structured tasks, never-a-loss cost gate; `docs/SPECULATIVE.md`)
 and batch-N multi-stream decode (3.2x aggregate throughput at 8 streams).
+Structured output is built in: a pluggable logit-processor seam on the shared
+sampler, with JSON-schema/regex/Lark constrained decoding through the vendored
+[llguidance](https://github.com/guidance-ai/llguidance) engine (opt-in
+`-Dllguidance=true`; composes with speculative decoding — REFERENCE.md §13.6).
 
 ## Training
 

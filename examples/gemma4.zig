@@ -37,6 +37,8 @@ pub fn main(init: std.process.Init) !void {
             \\  sampling: --temp F --top-k N --top-p F --min-p F --repeat-penalty F --repeat-last-n N
             \\            --freq-penalty F --presence-penalty F --seed N --greedy --max N --stop "TEXT"
             \\            (defaults come from the GGUF's general.sampling.* — for this model temp 1.0/top_k 64/top_p 0.95)
+            \\  grammar: --json-schema JSON|@FILE | --lark GRAMMAR|@FILE | --regex PATTERN
+            \\           (constrained chat/repl decoding; needs a -Dllguidance=true build)
             \\  logits:  <comma-separated-token-ids> [--logits-out P] [--compare-logits P] [--repeat R] [--profile]
             \\  gen:     --gen N [--stop T] [--prompt "hi"]    bench/decode from a prompt or ids
             \\  experts: --experts=borrow|pack   MoE expert load (CPU builds). pack (default) x4-packs
@@ -80,6 +82,9 @@ pub fn main(init: std.process.Init) !void {
     var seed_arg: ?u64 = null;
     var stops_buf: [16][]const u8 = undefined;
     var stops_n: usize = 0;
+    var json_schema_arg: ?[]const u8 = null;
+    var lark_arg: ?[]const u8 = null;
+    var regex_arg: ?[]const u8 = null;
 
     var arg_i: usize = 2;
     while (arg_i < args.len) : (arg_i += 1) {
@@ -187,6 +192,12 @@ pub fn main(init: std.process.Init) !void {
             presence_pen_arg = try std.fmt.parseFloat(f32, v);
         } else if (try flagValue(args, &arg_i, "--seed")) |v| {
             seed_arg = try std.fmt.parseInt(u64, v, 10);
+        } else if (try flagValue(args, &arg_i, "--json-schema")) |v| {
+            json_schema_arg = v;
+        } else if (try flagValue(args, &arg_i, "--lark")) |v| {
+            lark_arg = v;
+        } else if (try flagValue(args, &arg_i, "--regex")) |v| {
+            regex_arg = v;
         } else {
             tokens = try parseTokenList(arg, &token_buf);
         }
@@ -262,6 +273,48 @@ pub fn main(init: std.process.Init) !void {
     file.deinit();
     const load_ns = nowNs(init.io) - load_start;
 
+    // --json-schema/--lark/--regex: compile a llguidance constraint for the
+    // chat sampler (the token-id/--gen paths are greedy parity harnesses and
+    // do not take a grammar).
+    var grammar_text: ?[]u8 = null;
+    defer if (grammar_text) |g| allocator.free(g);
+    var constraint: ?llm.llguidance.Constraint = null;
+    defer if (constraint) |*con| con.deinit();
+    const grammar_flags = @as(usize, @intFromBool(json_schema_arg != null)) +
+        @intFromBool(lark_arg != null) + @intFromBool(regex_arg != null);
+    if (grammar_flags > 1) {
+        try stdout.print("--json-schema, --lark and --regex are mutually exclusive\n", .{});
+        return error.ConflictingGrammarFlags;
+    }
+    if (grammar_flags == 1) {
+        if (chat_text == null and !repl_flag) {
+            try stdout.print("grammar flags apply to --chat/--repl only\n", .{});
+            return error.GrammarWithoutChat;
+        }
+        const t = tok_ptr orelse return error.TokenizerUnavailable;
+        const grammar: llm.llguidance.Grammar = if (json_schema_arg) |v|
+            .{ .json_schema = try grammarValue(init.io, allocator, v, &grammar_text) }
+        else if (lark_arg) |v|
+            .{ .lark = try grammarValue(init.io, allocator, v, &grammar_text) }
+        else
+            .{ .regex = regex_arg.? };
+        // The turn ends on the template stop marker; the GGUF EOS is the
+        // extra turn-end id runChat also registers.
+        const turn_stop: ?u32 = t.tokenId(chat_tmpl.stopMarker()) orelse t.eosId();
+        const extra: []const u32 = if (t.eosId()) |e| &.{e} else &.{};
+        constraint = llm.llguidance.Constraint.init(allocator, t, grammar, .{
+            .eos_token = turn_stop,
+            .extra_eos = extra,
+            .n_vocab = config.vocab_size,
+        }) catch |err| switch (err) {
+            error.LlguidanceNotEnabled => {
+                try stdout.print("constrained decoding needs a build with -Dllguidance=true (see vendor/llguidance/README.md)\n", .{});
+                return err;
+            },
+            else => return err,
+        };
+    }
+
     if (chat_text != null or repl_flag) {
         const t = tok_ptr orelse return error.TokenizerUnavailable;
         try printSampling(stdout, sampler_cfg, stops_buf[0..stops_n]);
@@ -275,6 +328,7 @@ pub fn main(init: std.process.Init) !void {
             .max_resp = max_resp,
             .chat_text = chat_text,
             .stops = stops_buf[0..stops_n],
+            .processor = if (constraint) |*con| con.processor() else null,
         });
         return;
     }
@@ -366,6 +420,28 @@ fn runGenerate(
     }
 }
 
+/// Resolve a grammar flag value: `@PATH` reads the file (ownership parked in
+/// `owned` for the caller's deferred free); anything else is the inline text.
+fn grammarValue(io: std.Io, allocator: std.mem.Allocator, value: []const u8, owned: *?[]u8) ![]const u8 {
+    if (!std.mem.startsWith(u8, value, "@")) return value;
+    var file = try std.Io.Dir.cwd().openFile(io, value[1..], .{});
+    defer file.close(io);
+    const stat = try file.stat(io);
+    if (stat.kind != .file) return error.IsDir;
+    const max_bytes = 64 * 1024 * 1024;
+    if (stat.size > max_bytes) return error.FileTooLarge;
+    const bytes = try allocator.alloc(u8, @intCast(stat.size));
+    errdefer allocator.free(bytes);
+    var read_len: usize = 0;
+    while (read_len < bytes.len) {
+        const n = try file.readStreaming(io, &.{bytes[read_len..]});
+        if (n == 0) return error.EndOfStream;
+        read_len += n;
+    }
+    owned.* = bytes;
+    return bytes;
+}
+
 /// Read the value that follows a `--flag` argument, advancing the index.
 fn argValue(args: []const []const u8, i: *usize) ![]const u8 {
     i.* += 1;
@@ -393,6 +469,8 @@ const ChatOptions = struct {
     chat_text: ?[]const u8 = null,
     /// Extra text stop sequences (the turn-end token always stops generation).
     stops: []const []const u8 = &.{},
+    /// Constrained-decoding logit processor (chat.Options.logit_processor).
+    processor: ?llm.sampler.LogitProcessor = null,
 };
 
 /// Sampling config from the GGUF's `general.sampling.*` recommendation, falling
@@ -459,6 +537,7 @@ fn runChat(
         .sampler = opts.sampler,
         .extra_stop_ids = extra_stops_buf[0..extra_n],
         .stop_sequences = opts.stops,
+        .logit_processor = opts.processor,
         .speculation = opts.spec,
         .io = io,
     });
