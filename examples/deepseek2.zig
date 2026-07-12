@@ -23,6 +23,7 @@ pub fn main(init: std.process.Init) !void {
     var gen_count: usize = 32;
     var moe_stream_flag = false;
     var moe_cache_mb: ?usize = null;
+    var moe_pilot = false;
     var mla_mode: llm.deepseek2.model.Cache.Mode = .latent;
     var arg_i: usize = 2;
     while (arg_i < args.len) : (arg_i += 1) {
@@ -44,6 +45,9 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.startsWith(u8, arg, "--moe-cache-mb=")) {
             moe_stream_flag = true;
             moe_cache_mb = try std.fmt.parseInt(usize, arg["--moe-cache-mb=".len..], 10);
+        } else if (std.mem.eql(u8, arg, "--moe-pilot")) {
+            moe_stream_flag = true;
+            moe_pilot = true;
         } else if (std.mem.eql(u8, arg, "--mla=full")) {
             mla_mode = .full;
         } else if (std.mem.eql(u8, arg, "--mla=latent")) {
@@ -69,6 +73,7 @@ pub fn main(init: std.process.Init) !void {
         .moe_stream = .{
             .gguf_path = args[1],
             .cache_bytes = if (moe_cache_mb) |mb| mb << 20 else null,
+            .pilot = moe_pilot,
         },
     } else .{};
     var model = try llm.deepseek2.model.Model.loadGgufFromFileOptions(&ctx, &file, capacity, load_options);
@@ -80,6 +85,7 @@ pub fn main(init: std.process.Init) !void {
     defer if (model.expert_store) |store| {
         const st = store.stats;
         stdout.print("moe stream: hits {d} / misses {d} ({d:.1}% hit), {d:.2} GB read, cap {d} slots/layer, pinned {d}\n", .{ st.hits, st.misses, st.hitRate() * 100, @as(f64, @floatFromInt(st.bytes_read)) / 1e9, store.cap, store.pinned_experts }) catch {};
+        if (st.pilot_recall_total > 0) stdout.print("moe pilot: recall {d:.1}% ({d}/{d} routed experts predicted), {d} ranges hinted\n", .{ st.pilotRecall() * 100, st.pilot_recall_hits, st.pilot_recall_total, st.pilot_ranges }) catch {};
         // Persist the routing histogram so the next startup auto-pins the
         // hot experts (the learning cache; every other runner does this).
         store.saveUsage() catch {};

@@ -397,6 +397,8 @@ pub const Model = struct {
     weight_mapping: ?gguf.File.MappedRegion = null,
     /// Disk-streaming tier for the expert stacks (destroyed after layers).
     expert_store: ?*fucina.ExpertStore = null,
+    /// Router-lookahead prefetch (`MoeStreamOptions.pilot`).
+    pilot_enabled: bool = false,
     /// (1 + yarn_log_multiplier * ln(factor))² / sqrt(qk_head): the YaRN
     /// mscale² attention-scale correction folded with the 1/sqrt(d) scale.
     attn_scale: f32,
@@ -408,6 +410,10 @@ pub const Model = struct {
         readahead: bool = true,
         auto_pin: bool = true,
         pin_bytes: ?usize = null,
+        /// Router-lookahead prefetch: predict the next layer's experts from
+        /// this layer's post-attention state and hint the store's I/O
+        /// thread. Never changes output.
+        pilot: bool = false,
     };
 
     pub const LoadOptions = struct {
@@ -496,6 +502,7 @@ pub const Model = struct {
             .rope = rope,
             .weight_mapping = weight_mapping,
             .expert_store = expert_store,
+            .pilot_enabled = expert_store != null and options.moe_stream.?.pilot,
             .attn_scale = attn_scale,
         };
     }
@@ -694,6 +701,14 @@ pub const Model = struct {
             defer o_t.deinit();
             for (x, try o_t.dataConst()) |*xi, oi| xi.* += oi;
 
+            // Router lookahead (pilot): predict the NEXT layer's experts
+            // from this layer's post-attention state and hint the store's
+            // I/O thread so misses overlap this layer's FFN compute.
+            // Prediction only — never changes routing or output.
+            if (self.pilot_enabled and layer_i + 1 < self.layers.len) {
+                self.pilotPrefetchNext(ctx, &self.layers[layer_i + 1], layer_i + 1, x) catch {};
+            }
+
             // ---- FFN ----
             rmsNormInto(h_norm, x, layer.ffn_norm, cfg.rms_norm_eps);
             var f_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, cfg.hidden_size }, h_norm);
@@ -719,6 +734,60 @@ pub const Model = struct {
         var logits_t = try self.output.linearSeq(ctx, &final_t, .embed, .vocab);
         defer logits_t.deinit();
         return allocator.dupe(f32, try logits_t.dataConst());
+    }
+
+    /// Router lookahead (pilot): apply the NEXT layer's ffn_norm + router to
+    /// the current post-attention state and hint the store with the
+    /// predicted top-k — mirroring moeForward's V2/V3 selection (sigmoid or
+    /// softmax scores, choice bias applied) so the hint matches what the
+    /// real routing will fetch whenever the FFN barely changes the routing
+    /// direction. Purely advisory.
+    fn pilotPrefetchNext(self: *const Model, ctx: *ExecContext, next: *const Layer, next_layer_i: usize, x: []const f32) !void {
+        const moe = switch (next.ffn) {
+            .moe => |*m| m,
+            else => return,
+        };
+        const store = switch (moe.gate) {
+            .streamed => |*st| st.store,
+            else => return,
+        };
+        const cfg = self.config;
+        const allocator = ctx.allocator;
+
+        const h = try allocator.alloc(f32, cfg.hidden_size);
+        defer allocator.free(h);
+        rmsNormInto(h, x, next.ffn_norm, cfg.rms_norm_eps);
+        var h_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedSlice(ctx, .{ 1, cfg.hidden_size }, h);
+        defer h_t.deinit();
+        var logits_t = try moe.router.linearSeq(ctx, &h_t, .embed, .expert);
+        defer logits_t.deinit();
+
+        const choice = try allocator.dupe(f32, try logits_t.dataConst());
+        defer allocator.free(choice);
+        switch (cfg.expert_gating_func) {
+            2 => for (choice) |*v| {
+                v.* = 1.0 / (1.0 + @exp(-v.*));
+            },
+            else => softmaxInPlace(choice),
+        }
+        if (next.router_bias) |bias| {
+            for (choice, bias) |*c, b| c.* += b;
+        }
+        var sel: [64]usize = undefined;
+        std.debug.assert(cfg.num_experts_used <= sel.len);
+        for (0..cfg.num_experts_used) |slot| {
+            var best: usize = 0;
+            var best_c: f32 = -std.math.inf(f32);
+            for (choice, 0..) |c, e| {
+                if (c > best_c) {
+                    best_c = c;
+                    best = e;
+                }
+            }
+            choice[best] = -std.math.inf(f32);
+            sel[slot] = best;
+        }
+        store.pilotHint(next_layer_i, sel[0..cfg.num_experts_used]);
     }
 
     /// Routed mixture + shared expert. V2: softmax over ALL router logits,
