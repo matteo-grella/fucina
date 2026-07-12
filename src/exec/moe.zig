@@ -1,5 +1,6 @@
 const std = @import("std");
 const backend_mod = @import("../backend.zig");
+const fucina_dtype = @import("../dtype.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const backend_ops = backend_mod.ops;
 const expert_store = @import("expert_store.zig");
@@ -102,6 +103,12 @@ pub const MoeRhs = union(enum) {
     /// iq3_xxs experts (3.0625 bpw): GLM-5.2's UD 2-bit files carry the
     /// down projections in this format. Same grid-table tile path.
     iq3_xxs: backend_mod.QuantizedMatmulRhsIQ3_XXS,
+    /// iq2_s / iq4_xs / q3_k experts: the remaining formats UD "dynamic"
+    /// files sprinkle over a handful of layers. Grid-table tiles for the
+    /// iq pair, the K-quant tile for q3_k.
+    iq2_s: backend_mod.QuantizedMatmulRhsIQ2_S,
+    iq4_xs: backend_mod.QuantizedMatmulRhsIQ4_XS,
+    q3_k: backend_mod.QuantizedMatmulRhsQ3_K,
     /// Disk-streamed expert stack (`exec/expert_store.zig`): same geometry
     /// and kernels as the resident arms, but expert blocks resolve through
     /// the store's acquire-scoped tier (pin → LRU → pread) instead of a
@@ -138,6 +145,8 @@ pub const MoeRhs = union(enum) {
             .tq2_0 => |*value| value.rows.blocks_per_row,
             .iq2_xxs => |*value| value.rows.blocks_per_row,
             .iq3_xxs => |*value| value.rows.blocks_per_row,
+            .iq2_s => |*value| value.rows.blocks_per_row,
+            .iq4_xs => |*value| value.rows.blocks_per_row,
             inline else => |*value| value.blocks_per_column,
         };
     }
@@ -152,6 +161,8 @@ pub const MoeRhs = union(enum) {
             .ptqtp => |*value| value.planes[0].len,
             .iq2_xxs => |*value| value.rows.blocks.len,
             .iq3_xxs => |*value| value.rows.blocks.len,
+            .iq2_s => |*value| value.rows.blocks.len,
+            .iq4_xs => |*value| value.rows.blocks.len,
             inline else => |*value| value.blocks.len,
         };
     }
@@ -290,6 +301,21 @@ fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const backend_mod
             const view = iq3_xxsView(big.rows.blocks[e * out_dim * bpc ..][0 .. out_dim * bpc], big.k, out_dim, bpc);
             qm.matmulTableQ8_KRhsTile(.iq3_xxs, out, qlhs, &view, out_dim, 0, m, c0, c1);
         },
+        .iq2_s => |*big| {
+            const bpc = big.rows.blocks_per_row;
+            const view = tableView(.iq2_s, big.rows.blocks[e * out_dim * bpc ..][0 .. out_dim * bpc], big.k, out_dim, bpc);
+            qm.matmulTableQ8_KRhsTile(.iq2_s, out, qlhs, &view, out_dim, 0, m, c0, c1);
+        },
+        .iq4_xs => |*big| {
+            const bpc = big.rows.blocks_per_row;
+            const view = tableView(.iq4_xs, big.rows.blocks[e * out_dim * bpc ..][0 .. out_dim * bpc], big.k, out_dim, bpc);
+            qm.matmulTableQ8_KRhsTile(.iq4_xs, out, qlhs, &view, out_dim, 0, m, c0, c1);
+        },
+        .q3_k => |*big| {
+            const bpc = big.blocks_per_column;
+            const view = backend_mod.QuantizedMatmulRhsQ3_K{ .allocator = null, .blocks = big.blocks[e * out_dim * bpc ..][0 .. out_dim * bpc], .k = big.k, .n = out_dim, .blocks_per_column = bpc };
+            qm.matmulQ3_KRhsTile(out, qlhs, &view, out_dim, 0, m, c0, c1);
+        },
         // Streamed expert: identical kernels over the store-resolved slab
         // (the acquire that preceded this op pinned the pointer).
         .streamed => |*s| {
@@ -328,6 +354,21 @@ fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const backend_mod
                     const blocks = @as([*]const qm.BlockIQ3_XXS, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
                     const view = iq3_xxsView(blocks, s.k, out_dim, bpc);
                     qm.matmulTableQ8_KRhsTile(.iq3_xxs, out, qlhs, &view, out_dim, 0, m, c0, c1);
+                },
+                .iq2_s => {
+                    const blocks = @as([*]const qm.BlockIQ2_S, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const view = tableView(.iq2_s, blocks, s.k, out_dim, bpc);
+                    qm.matmulTableQ8_KRhsTile(.iq2_s, out, qlhs, &view, out_dim, 0, m, c0, c1);
+                },
+                .iq4_xs => {
+                    const blocks = @as([*]const qm.BlockIQ4_XS, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const view = tableView(.iq4_xs, blocks, s.k, out_dim, bpc);
+                    qm.matmulTableQ8_KRhsTile(.iq4_xs, out, qlhs, &view, out_dim, 0, m, c0, c1);
+                },
+                .q3_k => {
+                    const blocks = @as([*]const qm.BlockQ3_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const view = backend_mod.QuantizedMatmulRhsQ3_K{ .allocator = null, .blocks = blocks, .k = s.k, .n = out_dim, .blocks_per_column = bpc };
+                    qm.matmulQ3_KRhsTile(out, qlhs, &view, out_dim, 0, m, c0, c1);
                 },
                 .q5_k => {
                     const blocks = @as([*]const qm.BlockQ5_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
@@ -404,6 +445,17 @@ fn q8_0View(blocks: []const backend_mod.quantized_matmul.BlockQ8_0, k: usize, ou
 
 fn iq2_xxsView(blocks: []const backend_mod.quantized_matmul.BlockIQ2_XXS, k: usize, out_dim: usize, bpc: usize) backend_mod.QuantizedMatmulRhsIQ2_XXS {
     // Same sound @constCast borrow as tq2_0View below.
+    return .{
+        .rows = .{ .allocator = null, .blocks = @constCast(blocks), .rows = out_dim, .cols = k, .blocks_per_row = bpc },
+        .k = k,
+        .n = out_dim,
+    };
+}
+
+/// Borrowed rows-container view over one expert's grid-table blocks (the
+/// generic RowsFor containers carry mutable blocks; the matmul path never
+/// writes them, so the @constCast is sound — see tq2_0View).
+fn tableView(comptime dt: fucina_dtype.DType, blocks: anytype, k: usize, out_dim: usize, bpc: usize) backend_mod.quantized_matmul.QuantizedMatmulRhsRowsFor(dt) {
     return .{
         .rows = .{ .allocator = null, .blocks = @constCast(blocks), .rows = out_dim, .cols = k, .blocks_per_row = bpc },
         .k = k,
@@ -496,7 +548,7 @@ fn moePtqtpTileDotRange(
 fn moeRhsUsesLanePacked(rhs: *const MoeRhs) bool {
     return switch (rhs.*) {
         .q4_k, .q5_k, .q6_k => true,
-        .q8_0, .tq2_0, .ptqtp, .q2_k, .iq2_xxs, .iq3_xxs => false,
+        .q8_0, .tq2_0, .ptqtp, .q2_k, .iq2_xxs, .iq3_xxs, .iq2_s, .iq4_xs, .q3_k => false,
         .streamed => |*s| switch (s.quant) {
             .q4_k, .q5_k, .q6_k => true,
             else => false,
@@ -512,12 +564,12 @@ fn moeRhsUsesLanePacked(rhs: *const MoeRhs) bool {
 fn moeExpertTileDotX4Range(rhs: *const MoeRhs, e: usize, lhs_x4: []const backend_mod.quantized_matmul.BlockQ8_Kx4, m: usize, out: []f32, out_dim: usize, c0: usize, c1: usize) void {
     const qm = backend_mod.quantized_matmul;
     switch (rhs.*) {
-        .q8_0, .tq2_0, .ptqtp, .q2_k, .iq2_xxs, .iq3_xxs => unreachable, // gated by moeRhsUsesLanePacked
+        .q8_0, .tq2_0, .ptqtp, .q2_k, .iq2_xxs, .iq3_xxs, .iq2_s, .iq4_xs, .q3_k => unreachable, // gated by moeRhsUsesLanePacked
         .streamed => |*s| {
             const bpc = s.blocks_per_column;
             const base = s.expertBytes(e);
             switch (s.quant) {
-                .q8_0, .tq2_0, .q2_k, .iq2_xxs, .iq3_xxs => unreachable, // gated by moeRhsUsesLanePacked
+                .q8_0, .tq2_0, .q2_k, .iq2_xxs, .iq3_xxs, .iq2_s, .iq4_xs, .q3_k => unreachable, // gated by moeRhsUsesLanePacked
                 .q4_k => {
                     const blocks = @as([*]const qm.BlockQ4_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
                     const view = backend_mod.QuantizedMatmulRhsQ4_K{ .allocator = null, .blocks = blocks, .k = s.k, .n = out_dim, .blocks_per_column = bpc };

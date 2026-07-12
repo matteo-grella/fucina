@@ -74,6 +74,7 @@ pub const QuantizedMatmulRhsQ4_Kx2Mmla = backend.QuantizedMatmulRhsQ4_Kx2Mmla;
 pub const QuantizedMatmulRhsQ5_Kx8 = backend.QuantizedMatmulRhsQ5_Kx8;
 pub const QuantizedMatmulRhsQ6_Kx4 = backend.QuantizedMatmulRhsQ6_Kx4;
 pub const QuantizedMatmulRhsQ2_K = backend.QuantizedMatmulRhsQ2_K;
+pub const QuantizedMatmulRhsQ3_K = backend.QuantizedMatmulRhsQ3_K;
 pub const QuantizedMatmulRhsQ4_K = backend.QuantizedMatmulRhsQ4_K;
 pub const QuantizedMatmulRhsQ5_K = backend.QuantizedMatmulRhsQ5_K;
 pub const QuantizedMatmulRhsQ6_K = backend.QuantizedMatmulRhsQ6_K;
