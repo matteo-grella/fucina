@@ -521,6 +521,11 @@ pub const Emitter = struct {
         try s.write(res.completion_tokens);
         try s.objectField("total_tokens");
         try s.write(res.prompt_tokens + res.completion_tokens);
+        try s.objectField("prompt_tokens_details");
+        try s.beginObject();
+        try s.objectField("cached_tokens");
+        try s.write(res.cached_tokens);
+        try s.endObject();
         try s.endObject();
     }
 
@@ -839,7 +844,7 @@ pub const Emitter = struct {
             try s.objectField("input_tokens_details");
             try s.beginObject();
             try s.objectField("cached_tokens");
-            try s.write(0);
+            try s.write(r.cached_tokens);
             try s.endObject();
             try s.objectField("output_tokens");
             try s.write(r.completion_tokens);

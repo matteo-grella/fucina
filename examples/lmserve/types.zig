@@ -61,6 +61,10 @@ pub const FinishReason = enum { stop, length };
 pub const GenerateResult = struct {
     prompt_tokens: usize,
     completion_tokens: usize,
+    /// Prompt tokens whose KV rows were reused from the previous request
+    /// (cross-request prefix cache) instead of being prefilled; a subset of
+    /// `prompt_tokens`. Backends without the reuse slot report 0.
+    cached_tokens: usize = 0,
     finish: FinishReason,
 };
 

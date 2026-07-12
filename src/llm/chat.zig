@@ -7,7 +7,11 @@
 //! byte-BPE, gemma4's SPM, ...): KV-cache geometry comes from the model's own
 //! `initKvCache`. One KV cache persists across turns (each turn only prefills
 //! the new tokens) and the reply streams to any `*std.Io.Writer` sink
-//! (stdout, an SSE response, an in-memory buffer, …).
+//! (stdout, an SSE response, an in-memory buffer, …). Stateless servers get
+//! the same economy across REQUESTS via the reuse seam — `initWarm` /
+//! `takeCache` move the cache between requests and `sendRenderedReuse`
+//! prefills only past the longest common token prefix (llama.cpp's
+//! `cache_prompt`).
 
 const std = @import("std");
 const fucina = @import("fucina");
@@ -320,6 +324,13 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         spec: ?*SpecState,
         /// KV persistence (null = off): armed by `enablePersistence`.
         persist: ?PersistState,
+        /// Positions whose KV rows the last `sendRenderedReuse` reconcile
+        /// kept (they skipped prefill) — the server's OpenAI
+        /// `cached_tokens` accounting. 0 for every other send entry.
+        reused_prefix: usize,
+        /// Set by `takeCache`: the cache ownership left this conversation;
+        /// deinit must skip it.
+        cache_taken: bool,
 
         const PersistState = struct { io: std.Io, path: []u8 };
 
@@ -342,10 +353,46 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         };
 
         pub fn init(ctx: *ExecContext, model: *const Model, tokenizer: *const Tok.Tokenizer, template: Template, options: Options) !Self {
-            if (options.speculation and options.stop_sequences.len > 0) return error.StopSequencesWithSpeculation;
-            const stop_id: ?u32 = tokenizer.tokenId(template.stopMarker()) orelse tokenizer.eosId();
-            var cache = try model.initKvCache(ctx, options.capacity);
+            return initWith(ctx, model, tokenizer, template, options, null);
+        }
+
+        /// A previous conversation's committed state, handed to `initWarm`:
+        /// the adopt side of the cross-request KV reuse seam (`takeCache` is
+        /// the release side; `sendRenderedReuse` is the entry that exploits
+        /// it). `cache` ownership transfers on the call, error paths
+        /// included. `tokens` — the committed tokens whose KV rows the cache
+        /// holds, normally `history.items[0..cache.len]` of the previous
+        /// conversation — is borrowed and copied; the cache is clamped to it.
+        pub const WarmState = struct {
+            cache: KvCache,
+            tokens: []const usize,
+        };
+
+        /// `init` adopting a previous conversation's KV cache and token
+        /// history instead of starting cold (the server slot seam:
+        /// stateless requests reuse the KV prefix they share with the
+        /// previous request — see `sendRenderedReuse`). `options.capacity`
+        /// is ignored: the adopted cache's capacity governs. Incompatible
+        /// with `speculation` (the SpeculationIndex mirrors committed
+        /// history append-only and cannot adopt or rewind).
+        pub fn initWarm(ctx: *ExecContext, model: *const Model, tokenizer: *const Tok.Tokenizer, template: Template, options: Options, warm: WarmState) !Self {
+            return initWith(ctx, model, tokenizer, template, options, warm);
+        }
+
+        fn initWith(ctx: *ExecContext, model: *const Model, tokenizer: *const Tok.Tokenizer, template: Template, options: Options, warm_opt: ?WarmState) !Self {
+            var cache = if (warm_opt) |w| w.cache else try model.initKvCache(ctx, options.capacity);
             errdefer cache.deinit();
+            if (options.speculation and options.stop_sequences.len > 0) return error.StopSequencesWithSpeculation;
+            if (options.speculation and warm_opt != null) return error.SpeculationWithWarmStart;
+            const stop_id: ?u32 = tokenizer.tokenId(template.stopMarker()) orelse tokenizer.eosId();
+            var history: std.ArrayList(usize) = .empty;
+            errdefer history.deinit(ctx.allocator);
+            if (warm_opt) |w| {
+                // The cache may only claim positions its token shadow
+                // describes; a short shadow clamps it.
+                cache.truncate(w.tokens.len);
+                try history.appendSlice(ctx.allocator, w.tokens);
+            }
             var spec: ?*SpecState = null;
             if (options.speculation) {
                 const st = try ctx.allocator.create(SpecState);
@@ -382,16 +429,21 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                     s.processor = options.logit_processor;
                     break :blk s;
                 },
-                .history = .empty,
+                .history = history,
                 .system = options.system,
                 .stop_id = stop_id,
                 .extra_stop_ids = options.extra_stop_ids,
                 .stop_sequences = options.stop_sequences,
                 .max_response_tokens = options.max_response_tokens,
                 .think_off = options.think_off,
-                .turn = 0,
+                // A resumed history means the template must not re-render
+                // the conversation-start prologue (the enablePersistence
+                // rule).
+                .turn = @intFromBool(history.items.len > 0),
                 .spec = spec,
                 .persist = null,
+                .reused_prefix = 0,
+                .cache_taken = false,
             };
         }
 
@@ -404,8 +456,21 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             }
             self.history.deinit(self.allocator);
             self.stream.deinit(self.allocator);
-            self.cache.deinit();
+            if (!self.cache_taken) self.cache.deinit();
             self.* = undefined;
+        }
+
+        /// Cross-request KV reuse, the release side: transfer the cache —
+        /// with every position this conversation accumulated — to the
+        /// caller; deinit will skip it. Snapshot the matching token shadow
+        /// from `history.items[0..cache.len]` BEFORE taking (history stays
+        /// readable until deinit; after an aborted turn it can sit one
+        /// committed-but-unforwarded token past the cache, which the
+        /// `cache.len` bound trims). No sends after taking.
+        pub fn takeCache(self: *Self) KvCache {
+            std.debug.assert(!self.cache_taken);
+            self.cache_taken = true;
+            return self.cache;
         }
 
         /// Inject a tokenized reference document into the speculation index (the
@@ -489,6 +554,54 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             return prefix;
         }
 
+        /// The turn prologue for the cross-request-reuse entry
+        /// (`sendRenderedReuse`): tokenize the FULL-history render,
+        /// reconcile it against the conversation's committed state — the
+        /// longest common token prefix keeps its cached KV rows, everything
+        /// past it is rewound (`cache.truncate` + history shrink) — and
+        /// commit the remainder to history. Returns the caller-owned
+        /// un-prefilled suffix. The common prefix is capped at `cache.len`
+        /// (only cached positions are reusable; spec-less sends keep
+        /// history == cache, but an adopted shadow was already trimmed so
+        /// this is belt and braces) and at `ids.len - 1`: the last prompt
+        /// token is always re-forwarded, because logits are not part of
+        /// cached state. Token-level LCP absorbs every render divergence —
+        /// stripped reasoning blocks, edited history, a different client —
+        /// by simply reusing less. Cache and history stay on the previous
+        /// request's consistent state when this errors.
+        fn beginTurnReconciled(self: *Self, text: []const u8) ![]usize {
+            const a = self.allocator;
+
+            // Re-arm the logit processor for this turn's reply (the
+            // beginTurnFromText rule).
+            if (self.sampler.processor) |p| try p.reset();
+
+            self.turn += 1;
+
+            const ids = try self.tokenizer.encodeRaw(a, text);
+            defer a.free(ids);
+            if (ids.len == 0) return error.EmptyMessages;
+            if (ids.len > self.cache.capacity) return error.ContextFull;
+
+            var lcp: usize = 0;
+            const lcp_cap = @min(@min(self.cache.len, self.history.items.len), ids.len - 1);
+            while (lcp < lcp_cap and self.history.items[lcp] == ids[lcp]) : (lcp += 1) {}
+
+            const suffix = try a.alloc(usize, ids.len - lcp);
+            errdefer a.free(suffix);
+            for (suffix, ids[lcp..]) |*d, s| d.* = s;
+
+            // Reserve before rewinding: nothing may fail past the truncate,
+            // or an error would leave cache/history mid-reconcile instead
+            // of on the previous request's consistent state.
+            try self.history.ensureUnusedCapacity(a, suffix.len);
+            self.cache.truncate(lcp);
+            self.history.shrinkRetainingCapacity(lcp);
+            self.history.appendSliceAssumeCapacity(suffix);
+            self.reused_prefix = lcp;
+            return suffix;
+        }
+
         /// Send one user message; stream the assistant reply to `writer` (flushed
         /// per token). Returns the number of response tokens generated.
         pub fn send(self: *Self, user: []const u8, writer: *std.Io.Writer) !usize {
@@ -512,6 +625,35 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             defer a.free(prefix);
 
             if (self.spec) |st| return self.sendSpec(st, prefix, writer);
+            return self.decodeTurn(prefix, writer);
+        }
+
+        /// `sendRendered` with cross-request KV reuse — the stateless-server
+        /// seam (lmserve): `rendered` must be a FULL-history render
+        /// (`Template.renderMessages`), never a `renderTurn` suffix, and the
+        /// conversation may hold a previous request's committed state
+        /// (`initWarm`). The longest common token prefix with that state
+        /// keeps its KV rows — zero prefill for the span, `reused_prefix`
+        /// reports its length (the OpenAI `cached_tokens` number) — and
+        /// everything past it is rewound and re-prefilled. On a fresh
+        /// conversation the reconcile finds nothing to reuse and this is
+        /// exactly `sendRendered`. Speculation cannot host the rewind (the
+        /// SpeculationIndex mirrors committed history append-only), so the
+        /// combination errors.
+        pub fn sendRenderedReuse(self: *Self, rendered: []const u8, writer: *std.Io.Writer) !usize {
+            if (self.spec != null) return error.SpeculationWithReuse;
+            const a = self.allocator;
+
+            const suffix = try self.beginTurnReconciled(rendered);
+            defer a.free(suffix);
+            return self.decodeTurn(suffix, writer);
+        }
+
+        /// The plain decode loop shared by `sendRendered` and
+        /// `sendRenderedReuse`: prefill `prefix` at the current cache
+        /// position, then sample/stream until a stop condition.
+        fn decodeTurn(self: *Self, prefix: []const usize, writer: *std.Io.Writer) !usize {
+            const a = self.allocator;
 
             // Prefill this turn's tokens at the current cache position.
             var logits = try self.model.forwardStep(self.ctx, &self.cache, prefix, self.cache.len);

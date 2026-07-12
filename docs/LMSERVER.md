@@ -42,10 +42,17 @@ conn threads (≤ --conns, socket deadlines)          ONE inference worker
   A self-connect kick unblocks the accept loop — macOS wakes a pending
   `accept` for neither `shutdown(2)` nor `SO_RCVTIMEO`, and the Io layer
   retries `accept` on `EINTR`.
-- Every request runs on a FRESH `Conversation` (full-history prefill, own KV
-  cache): the server is stateless across requests. Cross-request KV/prefix
-  reuse is a separate effort; its seam is the backend's per-request
-  Conversation construction (`examples/lmserve/backend.zig`).
+- The API is stateless (every request carries its full history) but the KV
+  cache is not: the GGUF chat backend keeps ONE resident slot — the previous
+  request's KV cache plus its token shadow — and each request reuses the
+  longest common token prefix with its own render, prefilling only the rest
+  (llama.cpp's `cache_prompt`; `Conversation.initWarm`/`takeCache`/
+  `sendRenderedReuse` in `examples/lmserve/backend.zig`). Follow-up turns of
+  a chat re-prefill only the last reply + new message; a non-matching
+  request costs one full prefill, exactly as before. The reuse is reported
+  as `cached_tokens` in usage (`prompt_tokens_details` /
+  `input_tokens_details`). Multi-slot pools and evict-to-disk
+  (`llm.kv_persist`) are future work.
 - Streaming responses start lazily on the first delta, so a request that
   fails before producing anything (invalid grammar, context overflow) still
   gets a plain JSON error with a proper status code.

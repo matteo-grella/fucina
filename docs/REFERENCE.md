@@ -11180,11 +11180,17 @@ pub const Options = struct {
     io: ?std.Io = null,                   // clock for the decoder's live cost gate
 };
 
+pub const WarmState = struct { cache: KvCache, tokens: []const usize };
+
 pub fn init(ctx: *ExecContext, model: *const Model, tokenizer: *const Tok.Tokenizer,
             template: Template, options: Options) !Self
+pub fn initWarm(ctx: *ExecContext, model: *const Model, tokenizer: *const Tok.Tokenizer,
+                template: Template, options: Options, warm: WarmState) !Self
 pub fn deinit(self: *Self) void
+pub fn takeCache(self: *Self) KvCache
 pub fn send(self: *Self, user: []const u8, writer: *std.Io.Writer) !usize
 pub fn sendRendered(self: *Self, rendered: []const u8, writer: *std.Io.Writer) !usize
+pub fn sendRenderedReuse(self: *Self, rendered: []const u8, writer: *std.Io.Writer) !usize
 pub fn sendBatch(convos: []const *Self, users: []const []const u8,
                  writers: []const *std.Io.Writer, produced: []usize) !void
 pub fn addSpecReference(self: *Self, tokens: []const usize) !void
@@ -11223,6 +11229,30 @@ Semantics:
   is not consulted; the caller rendered everything). Streaming, stop
   handling, speculation, and the logit processor behave exactly as in `send`;
   the equivalence with an incrementally driven conversation is proven in
+  `chat_tests.zig`.
+- `sendRenderedReuse` is `sendRendered` with **cross-request KV reuse** — the
+  stateless-server seam (lmserve; llama.cpp's `cache_prompt`). `rendered`
+  must be a FULL-history render (never a `renderTurn` suffix). The
+  conversation may hold a previous request's committed state, adopted at
+  construction via `initWarm(…, warm)`: `warm.cache` ownership transfers on
+  the call (error paths included; `options.capacity` is ignored — the
+  adopted capacity governs) and `warm.tokens` — the token shadow describing
+  the cache's positions — is borrowed, copied, and clamps the cache. The
+  reconcile keeps the longest common token prefix between the render's ids
+  and the committed history — zero prefill for that span; `reused_prefix`
+  reports its length (the OpenAI `cached_tokens` number) — capped at
+  `ids.len - 1` because logits are not cached state; everything past it is
+  rewound (`KvCache.truncate` + history shrink) and prefilled. Token-level
+  LCP absorbs every render divergence (stripped reasoning blocks, edited
+  history, another client) by reusing less; on a fresh conversation the
+  entry degenerates to `sendRendered` exactly. After the request,
+  `takeCache` releases the cache to the caller (snapshot the shadow from
+  `history.items[0..cache.len]` BEFORE taking — the bound trims the one
+  committed-but-unforwarded token an aborted turn can leave); deinit skips a
+  taken cache. Speculation is incompatible on both sides
+  (`error.SpeculationWithWarmStart`, `error.SpeculationWithReuse`): the
+  SpeculationIndex mirrors committed history append-only and can neither
+  adopt nor rewind. Warm-reuse == fresh-stateless equivalence is proven in
   `chat_tests.zig`.
 - With speculation on, `send` routes through the decoder with a turn-boundary
   gate that stops streaming/index-learning at the stop marker and trims any

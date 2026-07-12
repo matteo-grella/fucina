@@ -107,13 +107,19 @@ pub const GgufChatOptions = struct {
 
 /// The `Backend` adapter for any model family served through
 /// `llm.chat.Conversation` — one comptime instantiation per (model,
-/// tokenizer-module) pair, ~all behavior shared. Each request runs on a
-/// fresh Conversation (full-history prefill; per-request KV cache), so the
-/// server stays stateless across requests.
+/// tokenizer-module) pair, ~all behavior shared. The API stays stateless
+/// (every request carries its full history), but the KV cache is not: one
+/// resident slot keeps the previous request's cache + token shadow, each
+/// request adopts it warm and reuses the longest common token prefix with
+/// its own render — llama.cpp's `cache_prompt`, N=1. Follow-up turns of a
+/// chat prefill only the last reply + new message instead of the whole
+/// history; a non-matching request costs one full prefill, exactly as
+/// before.
 pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
     return struct {
         const Self = @This();
         const Conversation = llm.chat.Conversation(ModelT, TokMod);
+        const KvCache = llm.kv_cache.KvCache;
 
         allocator: Allocator,
         ctx: *fucina.ExecContext,
@@ -122,6 +128,13 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
         template: llm.chat.Template,
         opts: GgufChatOptions,
         constraints: ConstraintCache,
+        /// Cross-request KV reuse slot (WORKER THREAD ONLY, like
+        /// `constraints`): the previous request's KV cache plus the token
+        /// shadow describing exactly the positions it holds. null until the
+        /// first request completes (or after a reclaim failure — the next
+        /// request then starts cold).
+        slot_cache: ?KvCache = null,
+        slot_tokens: std.ArrayList(usize) = .empty,
 
         pub fn init(
             allocator: Allocator,
@@ -144,6 +157,26 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
 
         pub fn deinit(self: *Self) void {
             self.constraints.deinit();
+            if (self.slot_cache) |*cache| cache.deinit();
+            self.slot_tokens.deinit(self.allocator);
+        }
+
+        /// The generation epilogue (success and error paths alike): move the
+        /// conversation's cache and its committed-token shadow into the slot
+        /// for the next request's prefix reuse. History can sit one
+        /// un-forwarded token past the cache after an aborted turn, so the
+        /// shadow is trimmed to `cache.len` — the slot always describes
+        /// exactly the positions the cache holds.
+        fn reclaimSlot(self: *Self, convo: *Conversation) void {
+            self.slot_tokens.clearRetainingCapacity();
+            self.slot_tokens.appendSlice(self.allocator, convo.history.items[0..convo.cache.len]) catch {
+                // Without the shadow the cache can never match: drop it too
+                // and let the next request start cold.
+                var cache = convo.takeCache();
+                cache.deinit();
+                return;
+            };
+            self.slot_cache = convo.takeCache();
         }
 
         pub fn backend(self: *Self) types.Backend {
@@ -207,7 +240,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 processor = clone.?.processor();
             }
 
-            var convo = try Conversation.init(self.ctx, self.model, self.tokenizer, self.template, .{
+            const convo_opts: llm.chat.Options = .{
                 .capacity = self.opts.context_len,
                 .max_response_tokens = req.max_tokens,
                 .think_off = !req.think,
@@ -215,10 +248,25 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 .extra_stop_ids = self.opts.extra_stop_ids,
                 .stop_sequences = req.stop,
                 .logit_processor = processor,
-            });
+            };
+            var convo = blk: {
+                if (self.slot_cache) |cache| {
+                    // Ownership moves into the conversation (freed by
+                    // initWarm itself on failure); an init error therefore
+                    // just costs the next request a cold start.
+                    self.slot_cache = null;
+                    break :blk try Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
+                        .cache = cache,
+                        .tokens = self.slot_tokens.items,
+                    });
+                }
+                break :blk try Conversation.init(self.ctx, self.model, self.tokenizer, self.template, convo_opts);
+            };
             defer convo.deinit();
+            // LIFO: reclaim runs before the deinit above, on every path out.
+            defer self.reclaimSlot(&convo);
 
-            const produced = try convo.sendRendered(rendered, sink);
+            const produced = try convo.sendRenderedReuse(rendered, sink);
             const finish: types.FinishReason = if (produced >= req.max_tokens or convo.cache.len >= convo.cache.capacity)
                 .length
             else
@@ -226,6 +274,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
             return .{
                 .prompt_tokens = convo.history.items.len - produced,
                 .completion_tokens = produced,
+                .cached_tokens = convo.reused_prefix,
                 .finish = finish,
             };
         }

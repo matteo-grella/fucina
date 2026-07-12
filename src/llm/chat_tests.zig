@@ -252,6 +252,188 @@ test "sendRendered over renderMessages == incremental multi-turn send (greedy)" 
     try std.testing.expectEqualSlices(usize, convo.history.items, fresh.history.items);
 }
 
+test "sendRenderedReuse: warm slot reuses the prefix, matches a fresh stateless run (greedy)" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try scaffolding.buildTinyModel(&ctx, 0xC4A7);
+    defer model.deinit();
+    var tok = try Tokenizer.initFromParts(allocator, &tiny_vocab, &.{}, .{});
+    defer tok.deinit();
+    const tmpl = Template{ .format = .chatml };
+
+    // Single-symbol replies round-trip through the stateless re-render
+    // (the sendRendered-equivalence test's vocabulary trick).
+    const allowed = [_]usize{ 0, 2, 4, 6, 8, 10, 13 };
+
+    // Request 1 on a cold slot: nothing to reconcile against — the reuse
+    // entry must behave exactly like sendRendered.
+    var buf1: std.ArrayList(u8) = .empty;
+    defer buf1.deinit(allocator);
+    try tmpl.renderMessages(allocator, &buf1, &.{
+        .{ .role = .user, .content = "ab a" },
+    }, false);
+
+    var mask1 = CountingMask{ .allowed = &allowed, .allocator = allocator };
+    defer mask1.deinit();
+    var convo1 = try Conversation.init(&ctx, &model, &tok, tmpl, .{
+        .capacity = 256,
+        .max_response_tokens = 12,
+        .logit_processor = mask1.processor(),
+    });
+    defer convo1.deinit();
+    var reply1 = std.Io.Writer.Allocating.init(allocator);
+    defer reply1.deinit();
+    _ = try convo1.sendRenderedReuse(buf1.items, &reply1.writer);
+    try std.testing.expectEqual(@as(usize, 0), convo1.reused_prefix);
+
+    // The server epilogue: token shadow + cache leave the conversation.
+    const shadow = try allocator.dupe(usize, convo1.history.items[0..convo1.cache.len]);
+    defer allocator.free(shadow);
+    const slot_cache = convo1.takeCache();
+
+    // Request 2 extends the conversation (stateless full-history render).
+    var buf2: std.ArrayList(u8) = .empty;
+    defer buf2.deinit(allocator);
+    try tmpl.renderMessages(allocator, &buf2, &.{
+        .{ .role = .user, .content = "ab a" },
+        .{ .role = .assistant, .content = reply1.written() },
+        .{ .role = .user, .content = "ba b" },
+    }, false);
+
+    // Reference: a fresh conversation over the same render.
+    var mask_f = CountingMask{ .allowed = &allowed, .allocator = allocator };
+    defer mask_f.deinit();
+    var fresh = try Conversation.init(&ctx, &model, &tok, tmpl, .{
+        .capacity = 256,
+        .max_response_tokens = 12,
+        .logit_processor = mask_f.processor(),
+    });
+    defer fresh.deinit();
+    var reply_f = std.Io.Writer.Allocating.init(allocator);
+    defer reply_f.deinit();
+    const produced_f = try fresh.sendRendered(buf2.items, &reply_f.writer);
+
+    // Warm: adopt the slot state and reuse the common prefix.
+    var mask_w = CountingMask{ .allowed = &allowed, .allocator = allocator };
+    defer mask_w.deinit();
+    var warm = try Conversation.initWarm(&ctx, &model, &tok, tmpl, .{
+        .capacity = 256,
+        .max_response_tokens = 12,
+        .logit_processor = mask_w.processor(),
+    }, .{ .cache = slot_cache, .tokens = shadow });
+    defer warm.deinit();
+    var reply_w = std.Io.Writer.Allocating.init(allocator);
+    defer reply_w.deinit();
+    const produced_w = try warm.sendRenderedReuse(buf2.items, &reply_w.writer);
+
+    // The reconcile reused exactly the manually computed common prefix...
+    const ids2 = try tok.encodeRaw(allocator, buf2.items);
+    defer allocator.free(ids2);
+    var lcp: usize = 0;
+    while (lcp < @min(shadow.len, ids2.len - 1) and shadow[lcp] == ids2[lcp]) : (lcp += 1) {}
+    try std.testing.expect(lcp > 0);
+    try std.testing.expectEqual(lcp, warm.reused_prefix);
+
+    // ...and decode after reuse == the fresh full prefill, byte for byte.
+    try std.testing.expectEqual(produced_f, produced_w);
+    try std.testing.expectEqualStrings(reply_f.written(), reply_w.written());
+    try std.testing.expectEqualSlices(usize, fresh.history.items, warm.history.items);
+}
+
+test "sendRenderedReuse: identical resend and divergent edits reconcile; speculation is rejected" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try scaffolding.buildTinyModel(&ctx, 0xC4A7);
+    defer model.deinit();
+    var tok = try Tokenizer.initFromParts(allocator, &tiny_vocab, &.{}, .{});
+    defer tok.deinit();
+    const tmpl = Template{ .format = .chatml };
+    const allowed = [_]usize{ 0, 2, 4, 6, 8, 10, 13 };
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try tmpl.renderMessages(allocator, &buf, &.{
+        .{ .role = .user, .content = "ab a" },
+    }, false);
+    const ids = try tok.encodeRaw(allocator, buf.items);
+    defer allocator.free(ids);
+
+    var mask = CountingMask{ .allowed = &allowed, .allocator = allocator };
+    defer mask.deinit();
+    var convo = try Conversation.init(&ctx, &model, &tok, tmpl, .{
+        .capacity = 256,
+        .max_response_tokens = 8,
+        .logit_processor = mask.processor(),
+    });
+    defer convo.deinit();
+    var reply1 = std.Io.Writer.Allocating.init(allocator);
+    defer reply1.deinit();
+    const produced1 = try convo.sendRenderedReuse(buf.items, &reply1.writer);
+
+    // Identical resend (a client retry): everything but the always-
+    // re-forwarded last prompt token is reused, the reply overwrites the
+    // rewound one — greedy: identical bytes.
+    var reply2 = std.Io.Writer.Allocating.init(allocator);
+    defer reply2.deinit();
+    const produced2 = try convo.sendRenderedReuse(buf.items, &reply2.writer);
+    try std.testing.expectEqual(ids.len - 1, convo.reused_prefix);
+    try std.testing.expectEqual(produced1, produced2);
+    try std.testing.expectEqualStrings(reply1.written(), reply2.written());
+
+    // A divergent render (edited history): reuse stops at the divergence.
+    const pre_edit = try allocator.dupe(usize, convo.history.items[0..convo.cache.len]);
+    defer allocator.free(pre_edit);
+    var buf_edit: std.ArrayList(u8) = .empty;
+    defer buf_edit.deinit(allocator);
+    try tmpl.renderMessages(allocator, &buf_edit, &.{
+        .{ .role = .user, .content = "ab u" },
+    }, false);
+    const ids_edit = try tok.encodeRaw(allocator, buf_edit.items);
+    defer allocator.free(ids_edit);
+    var lcp: usize = 0;
+    while (lcp < @min(pre_edit.len, ids_edit.len - 1) and pre_edit[lcp] == ids_edit[lcp]) : (lcp += 1) {}
+    var reply3 = std.Io.Writer.Allocating.init(allocator);
+    defer reply3.deinit();
+    _ = try convo.sendRenderedReuse(buf_edit.items, &reply3.writer);
+    try std.testing.expect(lcp > 0);
+    try std.testing.expect(lcp < ids_edit.len - 1);
+    try std.testing.expectEqual(lcp, convo.reused_prefix);
+    // Post-reconcile history = the edited render's ids (+ the new reply).
+    for (ids_edit, convo.history.items[0..ids_edit.len]) |expect_id, got| {
+        try std.testing.expectEqual(@as(usize, expect_id), got);
+    }
+
+    // Speculation cannot host the reuse rewind...
+    var spec_convo = try Conversation.init(&ctx, &model, &tok, tmpl, .{
+        .capacity = 64,
+        .speculation = true,
+    });
+    defer spec_convo.deinit();
+    var sink_buf: [16]u8 = undefined;
+    var sink = std.Io.Writer.fixed(&sink_buf);
+    try std.testing.expectError(error.SpeculationWithReuse, spec_convo.sendRenderedReuse(buf.items, &sink));
+
+    // ...nor adopt a warm slot at init (the adopted cache is freed on the
+    // error path — the leak check would catch it otherwise).
+    const orphan = try model.initKvCache(&ctx, 64);
+    try std.testing.expectError(error.SpeculationWithWarmStart, Conversation.initWarm(&ctx, &model, &tok, tmpl, .{
+        .capacity = 64,
+        .speculation = true,
+    }, .{ .cache = orphan, .tokens = &.{} }));
+}
+
 test "Conversation instantiates over gemma4 + SPM (compile coverage)" {
     // The generic covers both in-tree families; force semantic analysis of
     // every Conversation path against the gemma4/SPM duck-typed signatures.
