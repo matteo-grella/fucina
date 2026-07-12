@@ -57,7 +57,7 @@ pub const Tokenizer = struct {
     /// Which implemented pre-tokenizer splits text into BPE chunks.
     pre: Pre = .qwen2,
 
-    pub const Pre = enum { qwen2, joyai_llm };
+    pub const Pre = enum { qwen2, joyai_llm, glm4 };
 
     /// Build a tokenizer from GGUF metadata. `overrides` fields, when non-null,
     /// replace the metadata-derived special tokens.
@@ -95,6 +95,8 @@ pub const Tokenizer = struct {
                 tok.pre = .qwen2;
             } else if (std.mem.eql(u8, pre, "joyai-llm")) {
                 tok.pre = .joyai_llm;
+            } else if (std.mem.eql(u8, pre, "glm4") or std.mem.eql(u8, pre, "chatglm-bpe")) {
+                tok.pre = .glm4;
             } else {
                 tok.pre_mismatch = try allocator.dupe(u8, pre);
                 std.log.warn(
@@ -320,7 +322,10 @@ pub const Tokenizer = struct {
 
         var pos: usize = 0;
         while (pos < cps.items.len) {
-            const end = qwen2ChunkEnd(cps.items, pos);
+            const end = switch (self.pre) {
+                .glm4 => glm4ChunkEnd(cps.items, pos),
+                else => qwen2ChunkEnd(cps.items, pos),
+            };
             try self.encodeChunk(allocator, text[offs.items[pos]..offs.items[end]], out);
             pos = end;
         }
@@ -610,6 +615,42 @@ fn joyaiConsumeLetters(text: []const u8, start: usize) usize {
 }
 
 /// One JoyAI pre-token: byte offset just past the chunk starting at `start`.
+/// GLM-4/5 ("glm4"/"chatglm-bpe") pre-tokenizer: llama.cpp's CHATGLM4 regex
+/// is the Qwen2 regex with ONE difference — digits chunk as runs of up to
+/// three (\p{N}{1,3}) instead of one per chunk. Everything else (explicit
+/// case-class contractions included) is semantically identical, so this
+/// delegates to the qwen2 state machine and post-extends digit chunks.
+fn glm4ChunkEnd(c: []const u32, start: usize) usize {
+    const end = qwen2ChunkEnd(c, start);
+    if (ucat.isNumber(c[start])) {
+        var pos = end; // qwen2 digit chunk is exactly one codepoint
+        while (pos < c.len and pos - start < 3 and ucat.isNumber(c[pos])) pos += 1;
+        return pos;
+    }
+    return end;
+}
+
+test "glm4 pretokenizer: digit runs chunk up to three" {
+    // "20488" -> "204" | "88"; qwen2 would give five single-digit chunks.
+    const text = "x 20488!";
+    const cps = [_]u32{ 'x', ' ', '2', '0', '4', '8', '8', '!' };
+    var pos: usize = 0;
+    var chunks: [8][2]usize = undefined;
+    var n: usize = 0;
+    while (pos < cps.len) {
+        const end = glm4ChunkEnd(&cps, pos);
+        chunks[n] = .{ pos, end };
+        n += 1;
+        pos = end;
+    }
+    // "x" | " " | "204" | "88" | "!" — the space is its own \s+ chunk
+    // (spaces glue to letter runs only, not digit runs).
+    try std.testing.expectEqual(@as(usize, 5), n);
+    try std.testing.expectEqual([2]usize{ 2, 5 }, chunks[2]); // "204"
+    try std.testing.expectEqual([2]usize{ 5, 7 }, chunks[3]); // "88"
+    _ = text;
+}
+
 fn joyaiChunkEnd(text: []const u8, start: usize) usize {
     const len = text.len;
     var pos = start;

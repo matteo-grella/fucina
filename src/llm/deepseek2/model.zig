@@ -68,41 +68,60 @@ pub const Config = struct {
 
     pub fn fromGguf(file: *const gguf.File) !Config {
         const arch = file.getString("general.architecture") orelse return Error.InvalidConfig;
-        if (!std.mem.eql(u8, arch, "deepseek2")) return Error.InvalidConfig;
+        // GLM-5.2's "glm-dsa" is DeepSeek-MLA-native attention + V3 sigmoid
+        // routing under its own metadata prefix, plus per-layer DSA indexer
+        // tensors (not loaded — dense attention, llama.cpp's fallback too)
+        // and a trailing nextn MTP layer (excluded from the trunk count).
+        const prefix: []const u8 = if (std.mem.eql(u8, arch, "deepseek2"))
+            "deepseek2"
+        else if (std.mem.eql(u8, arch, "glm-dsa"))
+            "glm-dsa"
+        else
+            return Error.InvalidConfig;
+
+        var kbuf: [96]u8 = undefined;
+        const K = struct {
+            fn of(b: []u8, p: []const u8, suffix: []const u8) []const u8 {
+                return std.fmt.bufPrint(b, "{s}.{s}", .{ p, suffix }) catch unreachable;
+            }
+        };
 
         // Newer MLA-native conversions set key_length/value_length to the
         // LATENT attention dims (576/512) and carry the real per-head dims
         // in *_mla; older files carry them in key_length/value_length.
-        const qk_head = gguf_meta.metaIntOpt(file, "deepseek2", "attention.key_length_mla", .reject_zero) orelse
-            try metaInt(file, "deepseek2.attention.key_length");
-        const v_head = gguf_meta.metaIntOpt(file, "deepseek2", "attention.value_length_mla", .reject_zero) orelse
-            try metaInt(file, "deepseek2.attention.value_length");
-        const rope_dims = try metaInt(file, "deepseek2.rope.dimension_count");
+        const qk_head = gguf_meta.metaIntOpt(file, prefix, "attention.key_length_mla", .reject_zero) orelse
+            try metaInt(file, K.of(&kbuf, prefix, "attention.key_length"));
+        const v_head = gguf_meta.metaIntOpt(file, prefix, "attention.value_length_mla", .reject_zero) orelse
+            try metaInt(file, K.of(&kbuf, prefix, "attention.value_length"));
+        const rope_dims = try metaInt(file, K.of(&kbuf, prefix, "rope.dimension_count"));
+        const block_count = try metaInt(file, K.of(&kbuf, prefix, "block_count"));
+        const nextn = gguf_meta.metaIntOpt(file, prefix, "nextn_predict_layers", .accept_zero) orelse 0;
+        if (nextn >= block_count) return Error.InvalidConfig;
         return .{
-            .vocab_size = try metaInt(file, "deepseek2.vocab_size"),
-            .hidden_size = try metaInt(file, "deepseek2.embedding_length"),
-            .num_layers = try metaInt(file, "deepseek2.block_count"),
-            .num_heads = try metaInt(file, "deepseek2.attention.head_count"),
+            .vocab_size = try metaInt(file, K.of(&kbuf, prefix, "vocab_size")),
+            .hidden_size = try metaInt(file, K.of(&kbuf, prefix, "embedding_length")),
+            .num_layers = block_count - nextn,
+            .num_heads = try metaInt(file, K.of(&kbuf, prefix, "attention.head_count")),
             .qk_nope_dim = qk_head - rope_dims,
             .qk_rope_dim = rope_dims,
             .qk_head_dim = qk_head,
             .v_head_dim = v_head,
-            .kv_lora_rank = try metaInt(file, "deepseek2.attention.kv_lora_rank"),
-            .dense_ffn_size = try metaInt(file, "deepseek2.feed_forward_length"),
-            .leading_dense_layers = gguf_meta.metaIntOpt(file, "deepseek2", "leading_dense_block_count", .accept_zero) orelse 0,
-            .num_experts = gguf_meta.metaIntOpt(file, "deepseek2", "expert_count", .accept_zero) orelse 0,
-            .num_experts_used = gguf_meta.metaIntOpt(file, "deepseek2", "expert_used_count", .accept_zero) orelse 0,
-            .expert_ffn_size = gguf_meta.metaIntOpt(file, "deepseek2", "expert_feed_forward_length", .accept_zero) orelse 0,
-            .num_shared_experts = gguf_meta.metaIntOpt(file, "deepseek2", "expert_shared_count", .accept_zero) orelse 0,
-            .expert_weights_scale = metaFloatOpt(file, "deepseek2.expert_weights_scale") orelse 1.0,
-            .expert_gating_func = gguf_meta.metaIntOpt(file, "deepseek2", "expert_gating_func", .accept_zero) orelse 1,
-            .expert_weights_norm = file.getBool("deepseek2.expert_weights_norm") orelse false,
-            .q_lora_rank = gguf_meta.metaIntOpt(file, "deepseek2", "attention.q_lora_rank", .accept_zero) orelse 0,
-            .rms_norm_eps = try metaFloat(file, "deepseek2.attention.layer_norm_rms_epsilon"),
-            .rope_theta = metaFloatOpt(file, "deepseek2.rope.freq_base") orelse 10000.0,
-            .yarn_factor = metaFloatOpt(file, "deepseek2.rope.scaling.factor") orelse 1.0,
-            .yarn_orig_ctx = gguf_meta.metaIntOpt(file, "deepseek2", "rope.scaling.original_context_length", .accept_zero) orelse 0,
-            .yarn_log_multiplier = metaFloatOpt(file, "deepseek2.rope.scaling.yarn_log_multiplier") orelse 0.0,
+            .kv_lora_rank = try metaInt(file, K.of(&kbuf, prefix, "attention.kv_lora_rank")),
+            .dense_ffn_size = try metaInt(file, K.of(&kbuf, prefix, "feed_forward_length")),
+            .leading_dense_layers = gguf_meta.metaIntOpt(file, prefix, "leading_dense_block_count", .accept_zero) orelse 0,
+            .num_experts = gguf_meta.metaIntOpt(file, prefix, "expert_count", .accept_zero) orelse 0,
+            .num_experts_used = gguf_meta.metaIntOpt(file, prefix, "expert_used_count", .accept_zero) orelse 0,
+            .expert_ffn_size = gguf_meta.metaIntOpt(file, prefix, "expert_feed_forward_length", .accept_zero) orelse 0,
+            .num_shared_experts = gguf_meta.metaIntOpt(file, prefix, "expert_shared_count", .accept_zero) orelse 0,
+            .expert_weights_scale = metaFloatOpt(file, K.of(&kbuf, prefix, "expert_weights_scale")) orelse 1.0,
+            .expert_gating_func = gguf_meta.metaIntOpt(file, prefix, "expert_gating_func", .accept_zero) orelse 1,
+            .expert_weights_norm = file.getBool(K.of(&kbuf, prefix, "expert_weights_norm")) orelse false,
+            .q_lora_rank = gguf_meta.metaIntOpt(file, prefix, "attention.q_lora_rank", .accept_zero) orelse 0,
+            .rms_norm_eps = try metaFloat(file, K.of(&kbuf, prefix, "attention.layer_norm_rms_epsilon")),
+            .rope_theta = metaFloatOpt(file, K.of(&kbuf, prefix, "rope.freq_base")) orelse 10000.0,
+            .yarn_factor = metaFloatOpt(file, K.of(&kbuf, prefix, "rope.scaling.factor")) orelse 1.0,
+            .yarn_orig_ctx = gguf_meta.metaIntOpt(file, prefix, "rope.scaling.original_context_length", .accept_zero) orelse 0,
+            .yarn_log_multiplier = metaFloatOpt(file, K.of(&kbuf, prefix, "rope.scaling.yarn_log_multiplier")) orelse 0.0,
         };
     }
 

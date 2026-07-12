@@ -90,7 +90,13 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(ids32);
     var tokens: std.ArrayList(usize) = .empty;
     defer tokens.deinit(allocator);
-    if (bos) |b| try tokens.append(allocator, b);
+    // GLM checkpoints (glm-dsa) open with [gMASK]<sop> instead of BOS —
+    // resolved by string so vocab ids stay model-defined; without them GLM
+    // trunks degenerate (the glm4moe lesson).
+    if (tokenizer.tokenId("[gMASK]")) |gmask| {
+        try tokens.append(allocator, gmask);
+        if (tokenizer.tokenId("<sop>")) |sop| try tokens.append(allocator, sop);
+    } else if (bos) |b| try tokens.append(allocator, b);
     for (ids32) |id| try tokens.append(allocator, id);
     try stdout.print("prompt tokens: {d}\n", .{tokens.items.len});
 
