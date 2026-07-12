@@ -75,13 +75,24 @@ the whole tree.
 
 | Family | What it is |
 | --- | --- |
-| **Qwen3** dense (0.6B–8B) + **Qwen3-30B-A3B** MoE | chat / REPL / raw generation, lossless speculative decoding, batch-N multi-conversation decode, JSON-schema/grammar constrained output |
+| **Qwen3** dense (0.6B–8B) + MoE (30B-A3B, 235B-A22B) | chat / REPL / raw generation, lossless speculative decoding, batch-N multi-conversation decode, JSON-schema/grammar constrained output |
+| **DeepSeek V2/V3** (MLA) | multi-head latent attention with the compressed KV cache as the default; covers V2-Lite, Moonlight-16B-A3B, and GLM-5.2 (`glm-dsa`) checkpoints |
+| **GLM-4.5** family (MoE) | V3-style trunk plus the model's own `nextn` layer for lossless multi-token-prediction drafting |
+| **DeepSeek V4 Flash** 284B-A13B | hyper-connections trunk with native MTP speculative decoding; the 164.6 GB Q4K release decodes on a 64 GB machine |
 | **Gemma 4** 26B-A4B (MoE) | chat / REPL / speculative decoding, JSON-schema/grammar constrained output |
 | **Qwen3.5** 0.8B | hybrid Gated-DeltaNet architecture (conv + delta scan + gated attention) |
 | **DiffusionGemma** 26B-A4B | block text-diffusion decoding on the Gemma backbone |
+| **nanochat** | karpathy/nanochat ported whole: BPE tokenizer training, GPT pretraining, SFT, bits-per-byte eval, and chat — trained from scratch on CPU |
 | **Parakeet** (NVIDIA NeMo FastConformer) | speech-to-text: offline, streaming, and live microphone |
 | **OmniVoice** | MaskGIT text-to-speech with voice cloning (Higgs Audio v2 codec included) |
+| **LocateAnything-3B** | NVIDIA's open-vocabulary detection VLM: text-prompted labeled boxes, byte-compatible with the reference CLI |
+| **facedetect** (insightface buffalo_l) | face detection, recognition, gender/age, anti-spoofing, and dense landmarks |
 | **Neural Amp Modeler** | `.nam` guitar-amp profiles: run, train, export, live amp simulation |
+
+MoE models bigger than RAM are first-class: `--moe-stream` keeps only the
+dense weights resident and pages routed experts from disk through a
+pinned-set + LRU tier, bit-identical to the resident path — that is how the
+142 GB Qwen3-235B and the 164.6 GB V4 Flash decode on a 64 GB machine.
 
 Every family is validated against its reference implementation, and that
 discipline is the core of the project: token-ID-exact tokenizers vs
