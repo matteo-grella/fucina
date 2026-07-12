@@ -208,6 +208,7 @@ issues.
 | --- | --- |
 | `docs/ARCHITECTURE.md` | the actual source layout, layer by layer — start here |
 | `docs/REFERENCE.md` | the detailed API reference: the full public surface, exact semantics, machine-verified snippets |
+| `docs/course/` | *Forging Deep Learning in Zig* — a book-length course that teaches Zig and deep learning together by rebuilding this library's journey, from a dtype enum to a live guitar amp and a chatting transformer; per-chapter video scripts included |
 | `docs/RUNNING-MODELS.md` | copy-paste CLI commands + verified weight downloads for every model |
 | `docs/LMSERVER.md` | the lmserve example: OpenAI API mapping tables, streaming contracts, server architecture |
 | `docs/BENCHMARK.md` | the measurement protocol and dated Fucina-vs-llama.cpp records, wins and losses |
