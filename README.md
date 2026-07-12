@@ -215,6 +215,7 @@ issues.
 | `docs/MEMORY-MODEL.md` | ownership rules and the buffer-pool-not-arena adjudication |
 | `docs/PORTING.md` | the porting method — how every model family here earned its parity claims, written for the next port |
 | `docs/SPECULATIVE.md` | design record: lossless draft-model-free speculative decoding |
+| `docs/PTQTP-RECIPE.md` | walkthrough: PTQTP-quantize any GGUF (MoE experts included) and run it, resident or streamed |
 | `docs/CONSTRAINED-DECODING.md` | design record: grammar/JSON-schema constrained decoding and its speculation composition |
 | `AGENTS.md` | build/test/bench commands, build options, repo map, house rules |
 | `docs/THIRD-PARTY-NOTICES.md` | full provenance and license inventory of third-party material |

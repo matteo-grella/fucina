@@ -131,6 +131,10 @@ Deliberate deltas from the paper:
 
 ## Shard-streaming quantizer (`zig build export-gguf -- --ptqtp`)
 
+> The copy-paste walkthrough with measured end-to-end numbers (quantize →
+> run resident → run streamed) is `PTQTP-RECIPE.md`; this section is the
+> tool reference.
+
 `ptqtp-qwen3 --save` decorates a loaded model — it needs the model in RAM
 and knows only the qwen3 family walk. The export tool's `--ptqtp` mode is
 the scale path: it quantizes GGUF→GGUF **one source tensor at a time**, so
