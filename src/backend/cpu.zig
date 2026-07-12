@@ -1954,8 +1954,8 @@ pub fn matmulTransB2DIntoUncheckedF16OperandsWithConfig(
     config: ParallelConfig,
 ) void {
     _ = config;
-    const ad = a.buffer.data[a.offset .. a.offset + m * k];
-    const bd = b.buffer.data[b.offset .. b.offset + n * k];
+    const ad = contiguousDataConstOf(.f16, a, m * k);
+    const bd = contiguousDataConstOf(.f16, b, n * k);
     const cd = contiguousData(out, m * n);
 
     for (0..m) |i| {
@@ -1980,7 +1980,7 @@ pub fn matmulTransB2DIntoUncheckedBf16RhsWithConfig(
 ) void {
     _ = config;
     const ad = contiguousDataConst(a, m * k);
-    const bd = b.buffer.data[b.offset .. b.offset + n * k];
+    const bd = contiguousDataConstOf(.bf16, b, n * k);
     const cd = contiguousData(out, m * n);
 
     for (0..m) |i| {
@@ -2027,6 +2027,9 @@ pub fn matmulBatched2DIntoUncheckedWithConfig(
     config: ParallelConfig,
 ) void {
     _ = config;
+    @constCast(a.buffer).waitReady();
+    @constCast(b.buffer).waitReady();
+    out.buffer.waitMutable();
     const ap = a.buffer.data[a.offset..].ptr;
     const bp = b.buffer.data[b.offset..].ptr;
     const cp = out.buffer.data[out.offset..].ptr;
@@ -2074,6 +2077,9 @@ pub fn matmulBatchedTransA2DIntoUncheckedWithConfig(
     config: ParallelConfig,
 ) void {
     _ = config;
+    @constCast(a.buffer).waitReady();
+    @constCast(b.buffer).waitReady();
+    out.buffer.waitMutable();
     const ap = a.buffer.data[a.offset..].ptr;
     const bp = b.buffer.data[b.offset..].ptr;
     const cp = out.buffer.data[out.offset..].ptr;
@@ -2121,6 +2127,9 @@ pub fn matmulBatchedTransB2DIntoUncheckedWithConfig(
     config: ParallelConfig,
 ) void {
     _ = config;
+    @constCast(a.buffer).waitReady();
+    @constCast(b.buffer).waitReady();
+    out.buffer.waitMutable();
     const ap = a.buffer.data[a.offset..].ptr;
     const bp = b.buffer.data[b.offset..].ptr;
     const cp = out.buffer.data[out.offset..].ptr;
@@ -2140,18 +2149,22 @@ pub fn matmulBatchedTransB2DIntoUncheckedWithConfig(
 }
 
 fn contiguousDataConst(x: *const Tensor, len: usize) []const f32 {
+    @constCast(x.buffer).waitReady();
     return x.buffer.data[x.offset .. x.offset + len];
 }
 
 fn contiguousData(x: *Tensor, len: usize) []f32 {
+    x.buffer.waitMutable();
     return x.buffer.data[x.offset .. x.offset + len];
 }
 
 fn contiguousDataConstOf(comptime dtype: DType, x: *const tensor.TensorOf(dtype), len: usize) []const dtype_mod.Scalar(dtype) {
+    @constCast(x.buffer).waitReady();
     return x.buffer.data[x.offset .. x.offset + len];
 }
 
 fn contiguousDataOf(comptime dtype: DType, x: *tensor.TensorOf(dtype), len: usize) []dtype_mod.Scalar(dtype) {
+    x.buffer.waitMutable();
     return x.buffer.data[x.offset .. x.offset + len];
 }
 
