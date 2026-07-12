@@ -80,6 +80,9 @@ pub fn main(init: std.process.Init) !void {
     defer if (model.expert_store) |store| {
         const st = store.stats;
         stdout.print("moe stream: hits {d} / misses {d} ({d:.1}% hit), {d:.2} GB read, cap {d} slots/layer, pinned {d}\n", .{ st.hits, st.misses, st.hitRate() * 100, @as(f64, @floatFromInt(st.bytes_read)) / 1e9, store.cap, store.pinned_experts }) catch {};
+        // Persist the routing histogram so the next startup auto-pins the
+        // hot experts (the learning cache; every other runner does this).
+        store.saveUsage() catch {};
     };
     const bos: ?u32 = tokenizer.bosId();
     file.deinit();
