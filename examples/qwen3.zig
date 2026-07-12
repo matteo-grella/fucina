@@ -291,19 +291,23 @@ pub fn main(init: std.process.Init) !void {
     if (moe_expert_top_p) |p| model_config.moe_expert_top_p = p;
     var model = try llm.qwen3.model.Model.loadGgufFromFileOptions(&ctx, &file, model_config, load_options);
     defer model.deinit();
+    // The stats go through the SAME buffered stdout writer as everything
+    // else: stdout's positional writes and stderr's offset-advancing writes
+    // cannot safely share one redirected file (`cmd > f 2>&1` interleaves
+    // destructively), so a std.debug stats line would get overwritten.
     defer if (model.expert_store) |store| {
         // The learning cache: persist this session's routing so the next
         // startup pins what this workload actually used.
         if (!moe_no_learn) store.saveUsage() catch {};
         const s = store.stats;
-        std.debug.print(
+        stdout.print(
             "moe stream: {d} acquires, hits {d} / misses {d} ({d:.1}% hit, {d} pin hits), {d:.2} GB read in {d:.2}s, cap {d} slots/layer, pinned {d} experts ({d:.2} GB)\n",
             .{ s.acquires, s.hits, s.misses, s.hitRate() * 100, s.pin_hits, @as(f64, @floatFromInt(s.bytes_read)) / 1e9, @as(f64, @floatFromInt(s.read_ns)) / 1e9, store.cap, store.pinned_experts, @as(f64, @floatFromInt(store.pinned_bytes)) / 1e9 },
-        );
-        if (s.pilot_recall_total > 0) std.debug.print(
+        ) catch {};
+        if (s.pilot_recall_total > 0) stdout.print(
             "moe pilot: recall {d:.1}% ({d}/{d} routed experts predicted), {d} ranges hinted\n",
             .{ s.pilotRecall() * 100, s.pilot_recall_hits, s.pilot_recall_total, s.pilot_ranges },
-        );
+        ) catch {};
     };
     // Build a tokenizer from the same file's metadata; tolerate models without it.
     var tokenizer: ?llm.tokenizer.Tokenizer = llm.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{}) catch null;

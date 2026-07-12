@@ -1465,7 +1465,14 @@ fn configureGpu(
 }
 
 fn addLibrarySearchPath(step: *std.Build.Step.Compile, prefix: []const u8) void {
-    const lib_path = std.Build.LazyPath{ .cwd_relative = bPath(prefix, "lib") };
+    // Only add directories that exist: zig 0.16's build runner treats any
+    // stderr from a compile step (e.g. "unable to open library directory"
+    // warnings for the missing Homebrew prefixes on Linux) as a step
+    // failure, so a speculative search path breaks `-Dblas=openblas` exe
+    // builds on Linux outright.
+    const lib_dir = bPath(prefix, "lib");
+    std.Io.Dir.accessAbsolute(step.step.owner.graph.io, lib_dir, .{}) catch return;
+    const lib_path = std.Build.LazyPath{ .cwd_relative = lib_dir };
     step.root_module.addLibraryPath(lib_path);
     step.root_module.addRPath(lib_path);
 }
