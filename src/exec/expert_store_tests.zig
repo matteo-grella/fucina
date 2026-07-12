@@ -539,6 +539,274 @@ test "tq2_0 ternary experts: streamed decode and batch are bit-exact vs resident
     try std.testing.expectEqualSlices(f32, want_b.dataConst(), got_b.dataConst());
 }
 
+// ---- PTQTP multi-plane reference helpers ---------------------------------
+
+/// One expert's multi-plane projection, reference style: the single-plane
+/// (K=1 tq2_0) ternary tile once per plane over the FULL row, summed
+/// host-side in fixed plane order (p0 + p1 (+ p2), left-associated). This
+/// is the dense fused PTQTP linear's contract — verified by reading
+/// llm/weights.zig `linearSeqPtqtpFused`, which computes each plane's full
+/// tile dot and adds the results elementwise in plane order (sum of dots,
+/// NOT interleaved accumulation) — so the fused MoE `ptqtp` arm must
+/// reproduce this bitwise.
+fn ptqtpPlaneSumDot(
+    planes: []const []const qm.BlockTQ2_0,
+    qx: []const qm.BlockQ8_K,
+    e: usize,
+    k: usize,
+    out_dim: usize,
+    out: []f32,
+    tmp: []f32,
+) void {
+    const bpc = k / qm.qk_k_block_size;
+    for (planes, 0..) |plane, p| {
+        const blocks = plane[e * out_dim * bpc ..][0 .. out_dim * bpc];
+        const view = backend_mod.QuantizedMatmulRhsTQ2_0{
+            .rows = .{ .allocator = null, .blocks = @constCast(blocks), .rows = out_dim, .cols = k, .blocks_per_row = bpc },
+            .k = k,
+            .n = out_dim,
+        };
+        const dst = if (p == 0) out else tmp[0..out_dim];
+        qm.matmulTQ2_0RhsTile(dst, qx, &view, out_dim, 0, 1, 0, out_dim);
+        if (p != 0) {
+            for (out, tmp[0..out_dim]) |*o, s| o.* += s;
+        }
+    }
+}
+
+/// One (token, expert) pair's UNWEIGHTED down-projection row through the
+/// per-plane-sum reference pipeline: gate/up plane sums, gated activation,
+/// Q8_K requantize, down plane sum — exactly the fused op's per-expert
+/// arithmetic with every multi-plane dot replaced by the host-side sum.
+const PtqtpRefBufs = struct {
+    qx: []qm.BlockQ8_K,
+    qg: []qm.BlockQ8_K,
+    gate_buf: []f32,
+    up_buf: []f32,
+    g_buf: []f32,
+    tmp: []f32,
+};
+
+fn ptqtpExpertDownReference(
+    bufs: *const PtqtpRefBufs,
+    gate_planes: []const []const qm.BlockTQ2_0,
+    up_planes: []const []const qm.BlockTQ2_0,
+    down_planes: []const []const qm.BlockTQ2_0,
+    e: usize,
+    hidden_dim: usize,
+    ffn_dim: usize,
+    down_out: []f32,
+) !void {
+    ptqtpPlaneSumDot(gate_planes, bufs.qx, e, hidden_dim, ffn_dim, bufs.gate_buf, bufs.tmp);
+    ptqtpPlaneSumDot(up_planes, bufs.qx, e, hidden_dim, ffn_dim, bufs.up_buf, bufs.tmp);
+    for (bufs.g_buf, bufs.gate_buf, bufs.up_buf) |*g, gate_v, up_v| {
+        g.* = backend_mod.ops.gatedPairScalar(.swiglu, gate_v, up_v);
+    }
+    try qm.quantizeRowQ8_KInto(bufs.qg, bufs.g_buf);
+    ptqtpPlaneSumDot(down_planes, bufs.qg, e, ffn_dim, hidden_dim, down_out, bufs.tmp);
+}
+
+test "ptqtp multi-plane experts: fused MoE sums planes like the dense path; streamed bit-exact vs resident" {
+    // The PTQTP expert tier (K=2 gate/up, K=3 down): the fused op must sum
+    // the per-plane dots per projection BEFORE the gated nonlinearity, in
+    // the dense fused linear's order — asserted here as (a) resident ptqtp
+    // arm == (b) host-side per-plane K=1 sums (the sum-of-dots contract,
+    // see ptqtpPlaneSumDot) — and the streamed arm (c), whose ProjSpec
+    // gathers the plane-major sibling tensors into expert-major slab
+    // sections, must equal (a) bitwise across cold/warm/evicting decode
+    // and the batched path.
+    const allocator = std.testing.allocator;
+    const ptqtp = @import("../ptqtp.zig");
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const t_hidden: usize = 256;
+    const t_ffn: usize = 512;
+    const t_experts: usize = 2;
+    const gu_rows = t_experts * t_ffn;
+    const gu_bpc = t_hidden / qm.qk_k_block_size;
+    const down_rows = t_experts * t_hidden;
+    const down_bpc = t_ffn / qm.qk_k_block_size;
+
+    // Quantize synthetic expert stacks with the real PTQTP solver (rows are
+    // independent groups, so one whole-stack solve equals per-expert
+    // solves). Few iterations keep the fixture fast; determinism holds for
+    // any iteration budget.
+    const gate_w = try allocator.alloc(f32, gu_rows * t_hidden);
+    defer allocator.free(gate_w);
+    const up_w = try allocator.alloc(f32, gu_rows * t_hidden);
+    defer allocator.free(up_w);
+    const down_w = try allocator.alloc(f32, down_rows * t_ffn);
+    defer allocator.free(down_w);
+    for (gate_w, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i)) * 0.017) * 0.8;
+    for (up_w, 0..) |*v, i| v.* = @cos(@as(f32, @floatFromInt(i)) * 0.023) * 1.1;
+    for (down_w, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i)) * 0.011 + 0.5) * 0.7;
+
+    var gate_pair = try ptqtp.quantizeMatrix(&ctx, gate_w, gu_rows, t_hidden, .{ .planes = 2, .max_iterations = 8 });
+    defer gate_pair.deinit(allocator);
+    var up_pair = try ptqtp.quantizeMatrix(&ctx, up_w, gu_rows, t_hidden, .{ .planes = 2, .max_iterations = 8 });
+    defer up_pair.deinit(allocator);
+    var down_pair = try ptqtp.quantizeMatrix(&ctx, down_w, down_rows, t_ffn, .{ .planes = 3, .max_iterations = 8 });
+    defer down_pair.deinit(allocator);
+
+    const gate_planes = [_][]const qm.BlockTQ2_0{ gate_pair.plane1, gate_pair.plane2 };
+    const up_planes = [_][]const qm.BlockTQ2_0{ up_pair.plane1, up_pair.plane2 };
+    const down_planes = [_][]const qm.BlockTQ2_0{ down_pair.plane1, down_pair.plane2, down_pair.plane3 };
+
+    // (a) resident multi-plane arms.
+    var resident_gate: MoeRhs = .{ .ptqtp = .{
+        .allocator = null,
+        .planes = .{ gate_pair.plane1, gate_pair.plane2, &.{} },
+        .plane_count = 2,
+        .k = t_hidden,
+        .n = gu_rows,
+        .blocks_per_column = gu_bpc,
+    } };
+    var resident_up: MoeRhs = .{ .ptqtp = .{
+        .allocator = null,
+        .planes = .{ up_pair.plane1, up_pair.plane2, &.{} },
+        .plane_count = 2,
+        .k = t_hidden,
+        .n = gu_rows,
+        .blocks_per_column = gu_bpc,
+    } };
+    var resident_down: MoeRhs = .{ .ptqtp = .{
+        .allocator = null,
+        .planes = .{ down_pair.plane1, down_pair.plane2, down_pair.plane3 },
+        .plane_count = 3,
+        .k = t_ffn,
+        .n = down_rows,
+        .blocks_per_column = down_bpc,
+    } };
+
+    // (c) the same planes on disk, plane-major sibling layout (the GGUF
+    // convention): every plane is one contiguous stack; the ProjSpec's
+    // plane offsets point the store at them.
+    var path_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "expert_store_ptqtp_{d}.bin", .{std.Io.Clock.real.now(std.testing.io).nanoseconds});
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+    defer cleanupSidecar(path);
+    const gu_plane_bytes = gate_pair.plane1.len * @sizeOf(qm.BlockTQ2_0);
+    const down_plane_bytes = down_pair.plane1.len * @sizeOf(qm.BlockTQ2_0);
+    {
+        var file = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
+        defer file.close(std.testing.io);
+        var write_buffer: [4096]u8 = undefined;
+        var writer = file.writer(std.testing.io, &write_buffer);
+        for ([_][]const qm.BlockTQ2_0{
+            gate_pair.plane1, gate_pair.plane2,
+            up_pair.plane1,   up_pair.plane2,
+            down_pair.plane1, down_pair.plane2,
+            down_pair.plane3,
+        }) |plane| try writer.interface.writeAll(std.mem.sliceAsBytes(plane));
+        try writer.interface.flush();
+    }
+
+    var store = try ExpertStore.create(allocator, &.{path}, 1, .{ .cache_slots_per_layer = 1 });
+    defer store.destroy();
+    try store.addLayer(0, .{
+        .{ .quant = .tq2_0, .file_offset = 0, .byte_len = gu_plane_bytes, .in_dim = t_hidden, .out_dim = t_ffn, .plane_count = 2, .plane_offsets = .{ gu_plane_bytes, 0 } },
+        .{ .quant = .tq2_0, .file_offset = 2 * gu_plane_bytes, .byte_len = gu_plane_bytes, .in_dim = t_hidden, .out_dim = t_ffn, .plane_count = 2, .plane_offsets = .{ 3 * gu_plane_bytes, 0 } },
+        .{ .quant = .tq2_0, .file_offset = 4 * gu_plane_bytes, .byte_len = down_plane_bytes, .in_dim = t_ffn, .out_dim = t_hidden, .plane_count = 3, .plane_offsets = .{ 4 * gu_plane_bytes + down_plane_bytes, 4 * gu_plane_bytes + 2 * down_plane_bytes } },
+    }, t_experts);
+    try store.finalize();
+    var streamed_gate: MoeRhs = .{ .streamed = store.streamedRhs(0, .gate) };
+    var streamed_up: MoeRhs = .{ .streamed = store.streamedRhs(0, .up) };
+    var streamed_down: MoeRhs = .{ .streamed = store.streamedRhs(0, .down) };
+
+    // (b) scratch for the reference pipeline.
+    const bufs = PtqtpRefBufs{
+        .qx = try allocator.alloc(qm.BlockQ8_K, t_hidden / qm.qk_k_block_size),
+        .qg = try allocator.alloc(qm.BlockQ8_K, t_ffn / qm.qk_k_block_size),
+        .gate_buf = try allocator.alloc(f32, t_ffn),
+        .up_buf = try allocator.alloc(f32, t_ffn),
+        .g_buf = try allocator.alloc(f32, t_ffn),
+        .tmp = try allocator.alloc(f32, t_ffn),
+    };
+    defer {
+        allocator.free(bufs.tmp);
+        allocator.free(bufs.g_buf);
+        allocator.free(bufs.up_buf);
+        allocator.free(bufs.gate_buf);
+        allocator.free(bufs.qg);
+        allocator.free(bufs.qx);
+    }
+    const dbuf = try allocator.alloc(f32, t_hidden);
+    defer allocator.free(dbuf);
+    const ref = try allocator.alloc(f32, t_hidden);
+    defer allocator.free(ref);
+
+    // Decode (m=1): cold, warm, and evicting acquires (cap 1 < 2 active).
+    const x_vals = try allocator.alloc(f32, t_hidden);
+    defer allocator.free(x_vals);
+    for (x_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 11) % 173)) - 86)) / 86.0;
+    var x = try ctx.fromSliceRank(2, .{ 1, t_hidden }, x_vals);
+    defer x.deinit();
+    for ([_][2]usize{ .{ 0, 1 }, .{ 0, 1 }, .{ 1, 0 } }) |pair| {
+        const routing = [_]f32{ 0.6, 0.4 };
+        var want = try ctx.moeExpertFfn(&x, &resident_gate, &resident_up, &resident_down, &pair, &routing, t_ffn, .swiglu, null, null);
+        defer want.deinit();
+        for (want.dataConst()) |v| try std.testing.expect(!std.math.isNan(v));
+
+        // (b): per-plane K=1 sums, then the decode op's exact assembly
+        // (down row scaled by its routing weight, expert rows added in
+        // routed order onto a zeroed accumulator).
+        try qm.quantizeRowQ8_KInto(bufs.qx, x_vals);
+        @memset(ref, 0);
+        for (pair, routing) |e, w| {
+            try ptqtpExpertDownReference(&bufs, &gate_planes, &up_planes, &down_planes, e, t_hidden, t_ffn, dbuf);
+            for (dbuf) |*v| v.* *= w;
+            for (ref, dbuf) |*o, s| o.* += s;
+        }
+        try std.testing.expectEqualSlices(f32, ref, want.dataConst());
+
+        // (c): streamed == resident, always.
+        var got = try ctx.moeExpertFfn(&x, &streamed_gate, &streamed_up, &streamed_down, &pair, &routing, t_ffn, .swiglu, null, null);
+        defer got.deinit();
+        try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
+    }
+
+    // Batched prefill (m=5 rows spanning both experts).
+    const m: usize = 5;
+    const top_k: usize = 2;
+    const xb_vals = try allocator.alloc(f32, m * t_hidden);
+    defer allocator.free(xb_vals);
+    for (xb_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 7) % 199)) - 99)) / 99.0;
+    var xb = try ctx.fromSliceRank(2, .{ m, t_hidden }, xb_vals);
+    defer xb.deinit();
+    const selected = [_]usize{ 0, 1, 1, 0, 0, 1, 1, 0, 0, 0 };
+    const routing = [_]f32{ 0.6, 0.4, 0.5, 0.5, 0.7, 0.3, 0.2, 0.8, 0.9, 0.1 };
+    var want_b = try ctx.moeExpertFfnBatch(&xb, &resident_gate, &resident_up, &resident_down, &selected, &routing, top_k, t_ffn, .swiglu, null, null);
+    defer want_b.deinit();
+    for (want_b.dataConst()) |v| try std.testing.expect(!std.math.isNan(v));
+
+    // (b) per token: identical per-pair arithmetic (each output element of
+    // an m-row tile is an independent dot, so per-token m=1 references
+    // match), assembled with the batch scatter's contract (first routed
+    // pair assigns w*row, later pairs add w*row, in per-token k order).
+    const want_b_data = want_b.dataConst();
+    for (0..m) |t| {
+        try qm.quantizeRowQ8_KInto(bufs.qx, xb_vals[t * t_hidden ..][0..t_hidden]);
+        for (0..top_k) |j| {
+            const e = selected[t * top_k + j];
+            const w = routing[t * top_k + j];
+            try ptqtpExpertDownReference(&bufs, &gate_planes, &up_planes, &down_planes, e, t_hidden, t_ffn, dbuf);
+            if (j == 0) {
+                for (ref, dbuf) |*o, s| o.* = w * s;
+            } else {
+                for (ref, dbuf) |*o, s| o.* += w * s;
+            }
+        }
+        try std.testing.expectEqualSlices(f32, ref, want_b_data[t * t_hidden ..][0..t_hidden]);
+    }
+
+    // (c) streamed batch == resident batch.
+    var got_b = try ctx.moeExpertFfnBatch(&xb, &streamed_gate, &streamed_up, &streamed_down, &selected, &routing, top_k, t_ffn, .swiglu, null, null);
+    defer got_b.deinit();
+    try std.testing.expectEqualSlices(f32, want_b.dataConst(), got_b.dataConst());
+}
+
 test "q2_k, iq2_xxs, and iq3_xxs experts: streamed decode and batch are bit-exact vs resident" {
     // The community 2-bit tier (UD-IQ2_XXS files mix iq2_xxs, iq3_xxs, and
     // q2_k expert stacks): gate iq2_xxs, up iq3_xxs, down q2_k. Fixtures are

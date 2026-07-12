@@ -3422,7 +3422,7 @@ Routed expert FFNs run below the tag facade, directly on `ExecContext`
 
 ```zig
 pub const MoeRhs = union(enum) { q4_k: ..., q5_k: ..., q6_k: ..., q8_0: ...,
-    tq2_0: ..., q2_k: ..., iq2_xxs: ..., iq3_xxs: ..., streamed: ... };  // fucina.MoeRhs
+    tq2_0: ..., ptqtp: ..., q2_k: ..., iq2_xxs: ..., iq3_xxs: ..., streamed: ... };  // fucina.MoeRhs
 pub fn moeExpertFfn(self: *ExecContext, x: *const Tensor,
     gate: *const MoeRhs, up: *const MoeRhs, down: *const MoeRhs,
     selected: []const usize, weights: []const f32,
@@ -3435,7 +3435,13 @@ into a single compact-block RHS (experts are row-contiguous zero-copy
 sub-views; the resident arms cover q4_k/q5_k/q6_k/q8_0/tq2_0/q2_k/
 iq2_xxs/iq3_xxs, plus a `streamed` arm whose expert blocks resolve
 through the disk-backed expert store (`src/exec/expert_store.zig`)
-instead of one resident buffer).
+instead of one resident buffer). The `ptqtp` arm holds K ∈ {1..3} tq2_0
+plane stacks (PTQTP experts, §10.9): the fused op runs the ternary tile
+once per plane and sums per element in fixed plane order before the gated
+nonlinearity — bitwise the dense fused PTQTP linear on the same weights —
+and the streamed tier gathers a `ProjSpec` with `plane_count`/
+`plane_offsets` pointing at the persisted `<name>.ptqtpK` sibling tensors
+(§13.2.1).
 `moeExpertFfn` computes the route-weighted sum over the selected experts of
 `down(act(gate(x), up(x)))` for a single token; `moeExpertFfnBatch` is the
 batched-prefill variant taking the per-token `selected`/`weights` produced
@@ -10179,7 +10185,13 @@ pub fn deinit(self: *LinearWeight) void
   rebuild the arm bitwise (re-fusing via `fuseLinear`'s ptqtp arm — other
   families do not read decorated files yet), so decoration runs once and
   the saved file serves through the ordinary qwen3 runners
-  ([PTQTP.md](PTQTP.md)).
+  ([PTQTP.md](PTQTP.md)). MoE expert stacks follow the same convention —
+  `<name>.ptqtpK` siblings with the base stack's 3D shape, plane-major on
+  disk: `ptqtp_gguf.maybeLoadMoeRhs` / `maybeStreamedMoeProjSpec`
+  pair-detect them into the resident `MoeRhs.ptqtp` arm
+  (`weights.loadMoeRhsPtqtp`) or a multi-plane expert-store `ProjSpec`
+  (`weights.streamedProjSpecPtqtp` + `registerStreamedMoeLayer`), both
+  wired into the qwen3 MoE loaders.
 - `toResidentF16` replaces the weight in place with a dequantized resident-f16
   copy (2 B/weight — the f16 GEMM/GPU-offload operand format), dequantizing in
   4096-row chunks through the same row gather so the transient peak stays a

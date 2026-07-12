@@ -765,6 +765,21 @@ fn loadProjection(ctx: *ExecContext, file: *const gguf.File, name: []const u8, r
         LinearWeight.load(ctx, info, rows, cols);
 }
 
+/// MoE expert-stack counterpart of `loadProjection`: persisted PTQTP plane
+/// stacks (`<name>.ptqtpK` siblings) when the file carries them, else the
+/// base stacked tensor.
+fn loadMoeProjection(ctx: *ExecContext, file: *const gguf.File, name: []const u8, in_dim: usize, out_dim: usize, n_expert: usize, borrow: bool) !fucina.MoeRhs {
+    if (try ptqtp_gguf.maybeLoadMoeRhs(ctx, file, name, in_dim, out_dim, n_expert, borrow)) |rhs| return rhs;
+    return weights.loadMoeRhs(ctx, try file.get(name), in_dim, out_dim, n_expert, borrow);
+}
+
+/// Streamed counterpart: an ExpertStore ProjSpec, pair-detecting PTQTP
+/// plane sets the same way.
+fn moeProjSpec(file: *const gguf.File, name: []const u8, in_dim: usize, out_dim: usize, n_expert: usize) !fucina.expert_store.ProjSpec {
+    if (try ptqtp_gguf.maybeStreamedMoeProjSpec(file, name, in_dim, out_dim, n_expert)) |spec| return spec;
+    return weights.streamedProjSpec(file, try file.get(name), in_dim, out_dim, n_expert);
+}
+
 /// `weights.layerName` with owned storage — `savePtqtpGguf` builds its
 /// whole entry list before any name is consumed.
 fn layerNameOwned(allocator: Allocator, layer_i: usize, suffix: []const u8) ![]const u8 {
@@ -793,17 +808,12 @@ fn loadMoeFfn(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i
     // never become resident. addLayer touches only this layer's state, so
     // the parallel layer loader may call it concurrently for distinct layers.
     if (store) |s| {
-        const trio = try weights.loadMoeRhsStreamed(
-            s,
-            file,
-            layer_i,
-            try file.get(try weights.layerName(&name_buf, layer_i, "ffn_gate_exps.weight")),
-            try file.get(try weights.layerName(&name_buf, layer_i, "ffn_up_exps.weight")),
-            try file.get(try weights.layerName(&name_buf, layer_i, "ffn_down_exps.weight")),
-            config.hidden_size,
-            config.moe_intermediate_size,
-            config.num_experts,
-        );
+        const trio = try weights.registerStreamedMoeLayer(s, layer_i, .{
+            try moeProjSpec(file, try weights.layerName(&name_buf, layer_i, "ffn_gate_exps.weight"), config.hidden_size, config.moe_intermediate_size, config.num_experts),
+            try moeProjSpec(file, try weights.layerName(&name_buf, layer_i, "ffn_up_exps.weight"), config.hidden_size, config.moe_intermediate_size, config.num_experts),
+            // down transposes the FFN: (out_pe -> hidden).
+            try moeProjSpec(file, try weights.layerName(&name_buf, layer_i, "ffn_down_exps.weight"), config.moe_intermediate_size, config.hidden_size, config.num_experts),
+        }, config.num_experts);
         return .{ .router = router, .gate = trio.gate, .up = trio.up, .down = trio.down };
     }
 
@@ -814,11 +824,11 @@ fn loadMoeFfn(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i
     // their experts are copied — stream them instead for the big models.
     const borrow = file.is_mmap and !file.isSplit();
 
-    var gate = try weights.loadMoeRhs(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "ffn_gate_exps.weight")), config.hidden_size, config.moe_intermediate_size, config.num_experts, borrow);
+    var gate = try loadMoeProjection(ctx, file, try weights.layerName(&name_buf, layer_i, "ffn_gate_exps.weight"), config.hidden_size, config.moe_intermediate_size, config.num_experts, borrow);
     errdefer gate.deinit();
-    var up = try weights.loadMoeRhs(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "ffn_up_exps.weight")), config.hidden_size, config.moe_intermediate_size, config.num_experts, borrow);
+    var up = try loadMoeProjection(ctx, file, try weights.layerName(&name_buf, layer_i, "ffn_up_exps.weight"), config.hidden_size, config.moe_intermediate_size, config.num_experts, borrow);
     errdefer up.deinit();
-    var down = try weights.loadMoeRhs(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "ffn_down_exps.weight")), config.moe_intermediate_size, config.hidden_size, config.num_experts, borrow);
+    var down = try loadMoeProjection(ctx, file, try weights.layerName(&name_buf, layer_i, "ffn_down_exps.weight"), config.moe_intermediate_size, config.hidden_size, config.num_experts, borrow);
     errdefer down.deinit();
 
     return .{ .router = router, .gate = gate, .up = up, .down = down };

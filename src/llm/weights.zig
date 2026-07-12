@@ -987,6 +987,54 @@ pub fn loadMoeRhs(
     };
 }
 
+/// PTQTP counterpart of `loadMoeRhs`: build the multi-plane `ptqtp` MoeRhs
+/// arm from persisted `<name>.ptqtpK` sibling plane tensors (plane-major,
+/// each with the base expert stack's `[in, out, n_expert]` shape and
+/// standalone-valid TQ2_0 payload — `llm/ptqtp_gguf.zig` owns the
+/// naming/version pair-detection and calls this). Planes are borrowed from
+/// the mapping or copied, exactly as `loadMoeRhs` treats a tq2_0 stack.
+pub fn loadMoeRhsPtqtp(
+    ctx: *ExecContext,
+    plane_infos: []const *const gguf.TensorInfo,
+    expected_in_dim: usize,
+    expected_out_dim: usize,
+    expected_n_expert: usize,
+    borrow: bool,
+) !fucina.MoeRhs {
+    if (plane_infos.len == 0 or plane_infos.len > 3) return Error.InvalidWeightShape;
+    const rows = try std.math.mul(usize, expected_n_expert, expected_out_dim);
+    const bpc = try fucina.internal.backend_mod.quantized_matmul.qkBlockCount(expected_in_dim);
+    const blocks_per_plane = try std.math.mul(usize, rows, bpc);
+
+    var planes: [3][]const fucina.BlockTQ2_0 = .{ &.{}, &.{}, &.{} };
+    var owned_count: usize = 0;
+    errdefer for (planes[0..owned_count]) |plane| ctx.allocator.free(@constCast(plane));
+    for (plane_infos, 0..) |info, p| {
+        if (info.ggml_type != .tq2_0) return Error.UnsupportedWeightType;
+        if (info.n_dims != 3) return Error.InvalidWeightShape;
+        if (info.dims[0] != expected_in_dim or info.dims[1] != expected_out_dim or info.dims[2] != expected_n_expert) return Error.InvalidWeightShape;
+        const src = try blockSlice(fucina.BlockTQ2_0, info.data);
+        if (src.len != blocks_per_plane) return Error.InvalidWeightShape;
+        if (borrow) {
+            planes[p] = src;
+        } else {
+            gguf.prefetch(info.data);
+            const owned = try ctx.allocator.alloc(fucina.BlockTQ2_0, src.len);
+            @memcpy(owned, src);
+            planes[p] = owned;
+            owned_count += 1;
+        }
+    }
+    return .{ .ptqtp = .{
+        .allocator = if (borrow) null else ctx.allocator,
+        .planes = planes,
+        .plane_count = plane_infos.len,
+        .k = expected_in_dim,
+        .n = rows,
+        .blocks_per_column = bpc,
+    } };
+}
+
 /// Streamed counterpart of three `loadMoeRhs` calls: registers one layer's
 /// gate/up/down stacked expert tensors with the ExpertStore (which will
 /// `pread` individual experts on demand) instead of materializing or
@@ -1009,12 +1057,23 @@ pub fn loadMoeRhsStreamed(
     expected_out_dim: usize,
     expected_n_expert: usize,
 ) !StreamedMoeFfnRhs {
-    const specs = [3]fucina.expert_store.ProjSpec{
+    return registerStreamedMoeLayer(store, layer_i, .{
         try streamedProjSpec(file, gate_info, expected_in_dim, expected_out_dim, expected_n_expert),
         try streamedProjSpec(file, up_info, expected_in_dim, expected_out_dim, expected_n_expert),
         // down transposes the FFN: (out_pe -> hidden).
         try streamedProjSpec(file, down_info, expected_out_dim, expected_in_dim, expected_n_expert),
-    };
+    }, expected_n_expert);
+}
+
+/// Register one layer's three ProjSpecs (`streamedProjSpec` /
+/// `streamedProjSpecPtqtp` — the specs may mix plain and PTQTP
+/// projections) and hand out the streamed arms.
+pub fn registerStreamedMoeLayer(
+    store: *fucina.ExpertStore,
+    layer_i: usize,
+    specs: [3]fucina.expert_store.ProjSpec,
+    expected_n_expert: usize,
+) !StreamedMoeFfnRhs {
     try store.addLayer(layer_i, specs, expected_n_expert);
     return .{
         .gate = .{ .streamed = store.streamedRhs(layer_i, .gate) },
@@ -1023,7 +1082,7 @@ pub fn loadMoeRhsStreamed(
     };
 }
 
-fn streamedProjSpec(
+pub fn streamedProjSpec(
     file: *const gguf.File,
     info: *const gguf.TensorInfo,
     expected_in_dim: usize,
@@ -1050,6 +1109,40 @@ fn streamedProjSpec(
         .byte_len = info.data.len,
         .in_dim = expected_in_dim,
         .out_dim = expected_out_dim,
+    };
+}
+
+/// PTQTP counterpart of `streamedProjSpec`: one ProjSpec whose
+/// `plane_count`/`plane_offsets` point at the `<name>.ptqtpK` sibling
+/// plane tensors. The planes stay plane-major on disk (the same
+/// standalone-valid TQ2_0 tensors the dense decoration writes — no
+/// expert-major interleave); the ExpertStore gathers one expert's K plane
+/// row-blocks by offset into a contiguous slab section per acquire.
+pub fn streamedProjSpecPtqtp(
+    file: *const gguf.File,
+    plane_infos: []const *const gguf.TensorInfo,
+    expected_in_dim: usize,
+    expected_out_dim: usize,
+    expected_n_expert: usize,
+) !fucina.expert_store.ProjSpec {
+    if (plane_infos.len == 0 or plane_infos.len > 3) return Error.InvalidWeightShape;
+    var offsets: [3]u64 = .{ 0, 0, 0 };
+    for (plane_infos, 0..) |info, p| {
+        if (info.ggml_type != .tq2_0) return Error.UnsupportedWeightType;
+        if (info.n_dims != 3) return Error.InvalidWeightShape;
+        if (info.dims[0] != expected_in_dim or info.dims[1] != expected_out_dim or info.dims[2] != expected_n_expert) return Error.InvalidWeightShape;
+        if (info.part != plane_infos[0].part or info.data.len != plane_infos[0].data.len) return Error.InvalidWeightShape;
+        offsets[p] = file.partDataOffset(info.part) + info.offset;
+    }
+    return .{
+        .quant = .tq2_0,
+        .part = plane_infos[0].part,
+        .file_offset = offsets[0],
+        .byte_len = plane_infos[0].data.len,
+        .in_dim = expected_in_dim,
+        .out_dim = expected_out_dim,
+        .plane_count = @intCast(plane_infos.len),
+        .plane_offsets = .{ offsets[1], offsets[2] },
     };
 }
 

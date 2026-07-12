@@ -41,6 +41,31 @@ pub const MoeBatchProfile = struct {
     max_expert_m: usize = 0,
 };
 
+/// PTQTP multi-plane ternary expert stack (docs/PTQTP.md): K ∈ {1..3}
+/// trit-planes, each a full plane-major TQ2_0 stack with the exact geometry
+/// of the `tq2_0` arm (expert `e` = row-block `[e*out_dim, (e+1)*out_dim)`
+/// of every plane). The tile dot runs the ternary kernel once per plane and
+/// sums the results in fixed plane order — the dense fused PTQTP linear's
+/// contract — so a PTQTP expert equals the dense PTQTP linear bitwise on
+/// the same weights.
+pub const MoePtqtpRhs = struct {
+    allocator: ?Allocator,
+    /// Plane block stacks; entries past `plane_count` are empty.
+    planes: [3][]const backend_mod.quantized_matmul.BlockTQ2_0,
+    plane_count: usize,
+    k: usize,
+    /// Stacked rows per plane (`n_expert * out_dim`).
+    n: usize,
+    blocks_per_column: usize,
+
+    pub fn deinit(self: *MoePtqtpRhs) void {
+        if (self.allocator) |allocator| {
+            for (self.planes[0..self.plane_count]) |plane| allocator.free(plane);
+        }
+        self.* = undefined;
+    }
+};
+
 /// A Mixture-of-Experts projection: all experts of one layer's gate/up/down
 /// stacked into a single RHS buffer (experts are row-contiguous, so expert
 /// `e` is a zero-copy sub-view). Stored as the COMPACT raw K-quant blocks
@@ -61,6 +86,12 @@ pub const MoeRhs = union(enum) {
     /// PTQTP plane persistence uses. Pairs with Q8_K activations like the
     /// K-quants; the sdot/vpdpbusd tile kernel covers decode and batch.
     tq2_0: backend_mod.QuantizedMatmulRhsTQ2_0,
+    /// PTQTP experts (docs/PTQTP.md): K ∈ {1..3} tq2_0 plane stacks whose
+    /// per-projection dots are SUMMED per element in fixed plane order
+    /// inside the fused op, before the gated nonlinearity — bitwise the
+    /// dense fused PTQTP linear on the same weights. Loaded from persisted
+    /// `<name>.ptqtpK` sibling plane tensors (llm/ptqtp_gguf.zig).
+    ptqtp: MoePtqtpRhs,
     /// q2_k experts (2.5625 bpw): the K-quant floor, present in the UD
     /// 2-bit community files alongside the iq2 codebook formats.
     q2_k: backend_mod.QuantizedMatmulRhsQ2_K,
@@ -117,6 +148,8 @@ pub const MoeRhs = union(enum) {
             .streamed => |*value| value.rows() * value.blocks_per_column,
             .q8_0 => |*value| value.rows.blocks.len,
             .tq2_0 => |*value| value.rows.blocks.len,
+            // Per-plane geometry: every plane has the same block count.
+            .ptqtp => |*value| value.planes[0].len,
             .iq2_xxs => |*value| value.rows.blocks.len,
             .iq3_xxs => |*value| value.rows.blocks.len,
             inline else => |*value| value.blocks.len,
@@ -234,6 +267,14 @@ fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const backend_mod
             const view = tq2_0View(big.rows.blocks[e * out_dim * bpc ..][0 .. out_dim * bpc], big.k, out_dim, bpc);
             qm.matmulTQ2_0RhsTile(out, qlhs, &view, out_dim, 0, m, c0, c1);
         },
+        .ptqtp => |*big| {
+            const bpc = big.blocks_per_column;
+            var views: [3]backend_mod.QuantizedMatmulRhsTQ2_0 = undefined;
+            for (big.planes[0..big.plane_count], 0..) |plane, p| {
+                views[p] = tq2_0View(plane[e * out_dim * bpc ..][0 .. out_dim * bpc], big.k, out_dim, bpc);
+            }
+            moePtqtpTileDotRange(views[0..big.plane_count], qlhs, out, out_dim, m, c0, c1);
+        },
         .q2_k => |*big| {
             const bpc = big.blocks_per_column;
             const view = backend_mod.QuantizedMatmulRhsQ2_K{ .allocator = null, .blocks = big.blocks[e * out_dim * bpc ..][0 .. out_dim * bpc], .k = big.k, .n = out_dim, .blocks_per_column = bpc };
@@ -261,9 +302,17 @@ fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const backend_mod
                     qm.matmulQ8_0RhsTile(out, qlhs8, &view, out_dim, 0, m, c0, c1);
                 },
                 .tq2_0 => {
-                    const blocks = @as([*]const qm.BlockTQ2_0, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
-                    const view = tq2_0View(blocks, s.k, out_dim, bpc);
-                    qm.matmulTQ2_0RhsTile(out, qlhs, &view, out_dim, 0, m, c0, c1);
+                    // The slab section holds this expert's `plane_count`
+                    // planes contiguously (plane p at p * out_dim * bpc
+                    // blocks); plane_count == 1 is the plain ternary stack
+                    // and takes the single direct tile inside the helper.
+                    const plane_blocks = out_dim * bpc;
+                    const all = @as([*]const qm.BlockTQ2_0, @ptrCast(@alignCast(base)));
+                    var views: [3]backend_mod.QuantizedMatmulRhsTQ2_0 = undefined;
+                    for (0..s.plane_count) |p| {
+                        views[p] = tq2_0View(all[p * plane_blocks ..][0..plane_blocks], s.k, out_dim, bpc);
+                    }
+                    moePtqtpTileDotRange(views[0..s.plane_count], qlhs, out, out_dim, m, c0, c1);
                 },
                 .q2_k => {
                     const blocks = @as([*]const qm.BlockQ2_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
@@ -382,6 +431,64 @@ fn tq2_0View(blocks: []const backend_mod.quantized_matmul.BlockTQ2_0, k: usize, 
     };
 }
 
+/// Stack scratch shape for the PTQTP plane accumulation: 16 KiB — small
+/// enough for pooled worker stacks, wide enough that the sub-tile call
+/// overhead vanishes against a 1024-column ternary dot.
+const ptqtp_acc_rows: usize = 4;
+const ptqtp_acc_cols: usize = 1024;
+
+/// Multi-plane ternary tile dot (PTQTP experts, per-expert plane views):
+/// plane 0's tile runs straight into `out`; each later plane runs into a
+/// fixed stack scratch in (row, column) sub-tiles and adds elementwise —
+/// so every element is dot_p0 + dot_p1 (+ dot_p2), left-associated in
+/// plane order: the exact per-element arithmetic of the dense fused PTQTP
+/// linear (llm/weights.zig `linearSeqPtqtpFused`, which computes full
+/// per-plane tiles and sums them in fixed plane order). Sub-tiling cannot
+/// change results: each out[r][c] is an independent dot and the ternary
+/// kernel's 4-column body and width-1 tail agree bitwise, so any
+/// row/column partition yields identical values. The scratch is
+/// task-private stack rather than a MoeScratchCarver region: this dot runs
+/// inside column-split worker tasks that share the carved per-expert
+/// buffers, so a bounded private buffer is the allocation-free choice that
+/// stays race-free under any task partition.
+fn moePtqtpTileDotRange(
+    planes: []const backend_mod.QuantizedMatmulRhsTQ2_0,
+    qlhs: []const backend_mod.quantized_matmul.BlockQ8_K,
+    out: []f32,
+    out_dim: usize,
+    m: usize,
+    c0: usize,
+    c1: usize,
+) void {
+    const qm = backend_mod.quantized_matmul;
+    qm.matmulTQ2_0RhsTile(out, qlhs, &planes[0], out_dim, 0, m, c0, c1);
+    if (planes.len == 1) return;
+    const bpc = planes[0].rows.blocks_per_row;
+    var tmp: [ptqtp_acc_rows * ptqtp_acc_cols]f32 = undefined;
+    for (planes[1..]) |*plane| {
+        var r0: usize = 0;
+        while (r0 < m) : (r0 += ptqtp_acc_rows) {
+            // Chunk sizes come from end-index subtraction, NOT the usual
+            // `@min(cap, len - i)`: with BOTH multiplicands carrying
+            // comptime-clamped ranges, zig 0.16 emits a bogus product
+            // range check (`rows_now * cols_now` = 4*512 panicked
+            // "integer overflow" against an 11-bit fit test).
+            const rows_now = @min(r0 + ptqtp_acc_rows, m) - r0;
+            const lhs = qlhs[r0 * bpc ..][0 .. rows_now * bpc];
+            var cc = c0;
+            while (cc < c1) : (cc += ptqtp_acc_cols) {
+                const cols_now = @min(cc + ptqtp_acc_cols, c1) - cc;
+                const sub = tq2_0View(plane.rows.blocks[cc * bpc ..][0 .. cols_now * bpc], plane.k, cols_now, bpc);
+                qm.matmulTQ2_0RhsTile(tmp[0 .. rows_now * cols_now], lhs, &sub, cols_now, 0, rows_now, 0, cols_now);
+                for (0..rows_now) |r| {
+                    const orow = out[(r0 + r) * out_dim + cc ..][0..cols_now];
+                    for (orow, tmp[r * cols_now ..][0..cols_now]) |*o, s| o.* += s;
+                }
+            }
+        }
+    }
+}
+
 /// Whether `rhs` has a lane-packed Q8_Kx4 column-outer kernel (Q4_K / Q5_K /
 /// Q6_K — i.e. every MoeRhs arm today). The MoE prefill path repacks
 /// activations and routes `m >= 4` experts of these dtypes to
@@ -389,7 +496,7 @@ fn tq2_0View(blocks: []const backend_mod.quantized_matmul.BlockTQ2_0, k: usize, 
 fn moeRhsUsesLanePacked(rhs: *const MoeRhs) bool {
     return switch (rhs.*) {
         .q4_k, .q5_k, .q6_k => true,
-        .q8_0, .tq2_0, .q2_k, .iq2_xxs, .iq3_xxs => false,
+        .q8_0, .tq2_0, .ptqtp, .q2_k, .iq2_xxs, .iq3_xxs => false,
         .streamed => |*s| switch (s.quant) {
             .q4_k, .q5_k, .q6_k => true,
             else => false,
@@ -405,7 +512,7 @@ fn moeRhsUsesLanePacked(rhs: *const MoeRhs) bool {
 fn moeExpertTileDotX4Range(rhs: *const MoeRhs, e: usize, lhs_x4: []const backend_mod.quantized_matmul.BlockQ8_Kx4, m: usize, out: []f32, out_dim: usize, c0: usize, c1: usize) void {
     const qm = backend_mod.quantized_matmul;
     switch (rhs.*) {
-        .q8_0, .tq2_0, .q2_k, .iq2_xxs, .iq3_xxs => unreachable, // gated by moeRhsUsesLanePacked
+        .q8_0, .tq2_0, .ptqtp, .q2_k, .iq2_xxs, .iq3_xxs => unreachable, // gated by moeRhsUsesLanePacked
         .streamed => |*s| {
             const bpc = s.blocks_per_column;
             const base = s.expertBytes(e);

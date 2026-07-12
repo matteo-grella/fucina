@@ -438,3 +438,70 @@ test "fuseLinear: mixed ptqtp plane counts stay separate; version guard refuses 
     defer newer.deinit();
     try std.testing.expectError(ptqtp_gguf.Error.UnsupportedPtqtpVersion, ptqtp_gguf.maybeLoadPlanes(&ctx, &newer, "a.weight", 4, in_dim));
 }
+
+test "MoE expert stacks: plane pair-detection loads the ptqtp arm; streamed ProjSpec gathers sibling planes" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const n_expert: usize = 2;
+    const out_dim: usize = 2;
+    const rows = n_expert * out_dim;
+
+    // Patterned, byte-valid TQ2_0 plane stacks (the loader checks dtype and
+    // geometry; crumb values only need to be in 0..2).
+    var p0_blocks: [rows]fucina.BlockTQ2_0 = undefined;
+    var p1_blocks: [rows]fucina.BlockTQ2_0 = undefined;
+    for (&p0_blocks, 0..) |*b, i| {
+        b.d = @bitCast(@as(f16, @floatCast(0.5 + 0.01 * @as(f32, @floatFromInt(i)))));
+        for (&b.qs, 0..) |*q, j| q.* = @intCast((i * 3 + j) % 3);
+    }
+    for (&p1_blocks, 0..) |*b, i| {
+        b.d = @bitCast(@as(f16, @floatCast(0.25 + 0.01 * @as(f32, @floatFromInt(i)))));
+        for (&b.qs, 0..) |*q, j| q.* = @intCast((i * 7 + j * 2) % 3);
+    }
+
+    var w = gguf.Writer.init(allocator);
+    defer w.deinit();
+    try w.addMetaString("general.architecture", "qwen3");
+    try w.addMetaInt(ptqtp_gguf.version_key, u32, ptqtp_gguf.format_version);
+    try w.addTensor("e.weight.ptqtp0", .tq2_0, &.{ in_dim, out_dim, n_expert }, std.mem.sliceAsBytes(&p0_blocks));
+    try w.addTensor("e.weight.ptqtp1", .tq2_0, &.{ in_dim, out_dim, n_expert }, std.mem.sliceAsBytes(&p1_blocks));
+    // A broken set: plane 1 without plane 0.
+    try w.addTensor("g.weight.ptqtp1", .tq2_0, &.{ in_dim, out_dim, n_expert }, std.mem.sliceAsBytes(&p1_blocks));
+    const undecorated = testWeightValues(rows * in_dim, 9);
+    try w.addTensor("f.weight", .f32, &.{ in_dim, out_dim, n_expert }, std.mem.sliceAsBytes(&undecorated));
+    var buf: [32768]u8 = undefined;
+    var sink = std.Io.Writer.fixed(&buf);
+    try w.finish(&sink);
+    var out = try gguf.File.parseOwned(allocator, try allocator.dupe(u8, sink.buffered()));
+    defer out.deinit();
+
+    // Undecorated names fall through; broken sets are refused.
+    try std.testing.expectEqual(@as(?fucina.MoeRhs, null), try ptqtp_gguf.maybeLoadMoeRhs(&ctx, &out, "f.weight", in_dim, out_dim, n_expert, false));
+    try std.testing.expectError(ptqtp_gguf.Error.InvalidPlaneSet, ptqtp_gguf.maybeLoadMoeRhs(&ctx, &out, "g.weight", in_dim, out_dim, n_expert, false));
+
+    var loaded = (try ptqtp_gguf.maybeLoadMoeRhs(&ctx, &out, "e.weight", in_dim, out_dim, n_expert, false)).?;
+    defer loaded.deinit();
+    try std.testing.expectEqual(std.meta.Tag(fucina.MoeRhs).ptqtp, std.meta.activeTag(loaded));
+    try std.testing.expectEqual(@as(usize, 2), loaded.ptqtp.plane_count);
+    try std.testing.expectEqual(in_dim, loaded.ptqtp.k);
+    try std.testing.expectEqual(rows, loaded.ptqtp.n);
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&p0_blocks), std.mem.sliceAsBytes(loaded.ptqtp.planes[0]));
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&p1_blocks), std.mem.sliceAsBytes(loaded.ptqtp.planes[1]));
+
+    // Geometry that disagrees with the plane tensors is refused.
+    try std.testing.expectError(error.InvalidWeightShape, ptqtp_gguf.maybeLoadMoeRhs(&ctx, &out, "e.weight", in_dim, out_dim + 1, n_expert, false));
+
+    // Streamed: the ProjSpec points the ExpertStore at both sibling planes.
+    const spec = (try ptqtp_gguf.maybeStreamedMoeProjSpec(&out, "e.weight", in_dim, out_dim, n_expert)).?;
+    try std.testing.expectEqual(fucina.expert_store.StreamedQuant.tq2_0, spec.quant);
+    try std.testing.expectEqual(@as(u8, 2), spec.plane_count);
+    const info0 = try out.get("e.weight.ptqtp0");
+    const info1 = try out.get("e.weight.ptqtp1");
+    try std.testing.expectEqual(out.partDataOffset(info0.part) + info0.offset, spec.file_offset);
+    try std.testing.expectEqual(out.partDataOffset(info1.part) + info1.offset, spec.plane_offsets[0]);
+    try std.testing.expectEqual(info0.data.len, spec.byte_len);
+    try std.testing.expectEqual(@as(?fucina.expert_store.ProjSpec, null), try ptqtp_gguf.maybeStreamedMoeProjSpec(&out, "f.weight", in_dim, out_dim, n_expert));
+}

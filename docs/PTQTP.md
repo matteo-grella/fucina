@@ -108,6 +108,19 @@ Deliberate deltas from the paper:
   chat CLI, speculation, batch — with no re-decoration. Pair-detection is
   wired in the qwen3 loaders only; other families do not read decorated
   files yet.
+- **MoE expert stacks** (`MoeRhs.ptqtp`, `src/exec/moe.zig`): expert
+  stacks quantized at K=2/3 run through the fused MoE ops — the tile dot
+  runs the ternary kernel once per plane and SUMS per element in fixed
+  plane order before the gated nonlinearity, so a PTQTP expert equals the
+  dense fused linear bitwise on the same weights (decode GEMV and batched
+  prefill both; pinned against host-side per-plane K=1 sums in
+  `expert_store_tests.zig`). Persistence reuses the dense convention —
+  `<name>.ptqtpK` siblings with the base stack's 3D shape, plane-major on
+  disk — and the streamed tier gathers one expert's K plane row-blocks
+  into a contiguous cache-slab section (`ProjSpec.plane_count`/
+  `plane_offsets`), so K-plane expert models stream out-of-core with no
+  new kernels. Loaders: `ptqtp_gguf.maybeLoadMoeRhs` /
+  `maybeStreamedMoeProjSpec`, wired into the qwen3 MoE load paths.
 - Examples: `zig build ptqtp-spirals` (self-verifying acceptance demo:
   float-trains an MLP, decorates post-training, PASSes only if dual planes
   hold accuracy on the deployed int8 path) and `zig build ptqtp-qwen3`
@@ -272,7 +285,11 @@ smmla would close it on ARMv8.6+ targets).
   the per-projection overrides; unbuilt.
 - The generic facade tq2_0 dot (non-PTQTP consumers) still pays one
   fork-join per call; the PTQTP path bypasses it via the fused entry.
-- MoE expert stacks (packed inference-only RHS) are not decorated.
+- MoE expert stacks SERVE from persisted planes (resident and streamed,
+  see Surfaces) but no in-tree walker decorates them yet — producing a
+  K-plane expert GGUF takes an external converter running
+  `ptqtp.quantizeMatrix` per expert and writing the `<name>.ptqtpK`
+  siblings.
 - Calibration-based extensions (activation-weighted solve, mean-correction
   bias, sample repair, self-calibration) live on the `feat/ptqtp-repair`
   branch, deliberately out of the data-free mainline.

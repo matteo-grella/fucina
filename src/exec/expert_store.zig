@@ -235,7 +235,12 @@ pub const Proj = enum(u2) { gate = 0, up = 1, down = 2 };
 
 /// One projection's stacked expert tensor as it sits in the GGUF file:
 /// expert-major contiguous, so expert `e` occupies the byte range
-/// `[file_offset + e*expert_bytes, +expert_bytes)`.
+/// `[file_offset + e*expert_bytes, +expert_bytes)`. PTQTP expert stacks
+/// (docs/PTQTP.md) are `plane_count` such tensors — the `<name>.ptqtpK`
+/// siblings, each plane-major on disk exactly like the dense plane
+/// convention; the store gathers one expert's K plane row-blocks into a
+/// contiguous slab section (expert-major planes in RAM), staying pure byte
+/// plumbing either way.
 pub const ProjSpec = struct {
     quant: StreamedQuant,
     /// Which split part (file) holds the tensor; 0 for single-file GGUFs.
@@ -243,40 +248,60 @@ pub const ProjSpec = struct {
     /// Absolute offset of the tensor's data within its part on disk
     /// (`gguf.File.partDataOffset(part) + TensorInfo.offset`).
     file_offset: u64,
-    /// Total tensor bytes (validated against `n_expert * expert_bytes`).
+    /// One plane tensor's bytes — all planes are identically sized
+    /// (validated against `n_expert * plane_bytes` per plane).
     byte_len: usize,
     in_dim: usize,
     out_dim: usize,
+    /// Trit-plane count: 1 for every ordinary single-tensor projection;
+    /// 2 or 3 for PTQTP stacks (tq2_0 only), whose plane 0 sits at
+    /// `file_offset` and planes 1..2 at `plane_offsets`.
+    plane_count: u8 = 1,
+    /// Absolute on-disk offsets of planes 1 and 2 within `part`; read only
+    /// when `plane_count` exceeds 1.
+    plane_offsets: [2]u64 = .{ 0, 0 },
 };
 
 const ProjGeometry = struct {
     quant: StreamedQuant,
     part: u16,
-    file_offset: u64,
+    /// Per-plane tensor base offsets; entries past `plane_count` unused.
+    plane_offsets: [3]u64,
     in_dim: usize,
     out_dim: usize,
     blocks_per_column: usize,
+    plane_count: usize,
+    /// One plane's bytes for one expert.
+    plane_bytes: usize,
+    /// One expert's slab section: `plane_count * plane_bytes`.
     expert_bytes: usize,
 
     fn init(spec: ProjSpec, n_expert: usize) Error!ProjGeometry {
+        if (spec.plane_count == 0 or spec.plane_count > 3) return Error.InvalidExpertGeometry;
+        // Multi-plane is the PTQTP tq2_0 container only — the MoE dispatch
+        // interprets a >1 plane slab as summed ternary planes.
+        if (spec.plane_count > 1 and spec.quant != .tq2_0) return Error.InvalidExpertGeometry;
         const bpc = try spec.quant.blocksPerColumn(spec.in_dim);
         const row_bytes = std.math.mul(usize, bpc, spec.quant.blockSize()) catch return Error.InvalidExpertGeometry;
-        const expert_bytes = std.math.mul(usize, spec.out_dim, row_bytes) catch return Error.InvalidExpertGeometry;
-        const total = std.math.mul(usize, expert_bytes, n_expert) catch return Error.InvalidExpertGeometry;
-        if (total != spec.byte_len or expert_bytes == 0) return Error.InvalidExpertGeometry;
+        const plane_bytes = std.math.mul(usize, spec.out_dim, row_bytes) catch return Error.InvalidExpertGeometry;
+        const expert_bytes = std.math.mul(usize, plane_bytes, spec.plane_count) catch return Error.InvalidExpertGeometry;
+        const total = std.math.mul(usize, plane_bytes, n_expert) catch return Error.InvalidExpertGeometry;
+        if (total != spec.byte_len or plane_bytes == 0) return Error.InvalidExpertGeometry;
         return .{
             .quant = spec.quant,
             .part = spec.part,
-            .file_offset = spec.file_offset,
+            .plane_offsets = .{ spec.file_offset, spec.plane_offsets[0], spec.plane_offsets[1] },
             .in_dim = spec.in_dim,
             .out_dim = spec.out_dim,
             .blocks_per_column = bpc,
+            .plane_count = spec.plane_count,
+            .plane_bytes = plane_bytes,
             .expert_bytes = expert_bytes,
         };
     }
 
-    fn expertFileOffset(self: *const ProjGeometry, eid: usize) u64 {
-        return self.file_offset + @as(u64, eid) * self.expert_bytes;
+    fn planeFileOffset(self: *const ProjGeometry, eid: usize, plane: usize) u64 {
+        return self.plane_offsets[plane] + @as(u64, eid) * self.plane_bytes;
     }
 };
 
@@ -749,7 +774,9 @@ pub const ExpertStore = struct {
         if (self.options.readahead) {
             for (picks.items) |cand| {
                 const ls = &self.layers[cand.layer];
-                for (&ls.projs) |*g| hintWillNeed(self.fds[g.part], g.expertFileOffset(cand.eid), g.expert_bytes);
+                for (&ls.projs) |*g| {
+                    for (0..g.plane_count) |plane| hintWillNeed(self.fds[g.part], g.planeFileOffset(cand.eid, plane), g.plane_bytes);
+                }
             }
         }
         const fill = try self.allocator.alloc(usize, self.layers.len);
@@ -793,6 +820,7 @@ pub const ExpertStore = struct {
             .out_dim = g.out_dim,
             .n_expert = ls.n_expert,
             .blocks_per_column = g.blocks_per_column,
+            .plane_count = g.plane_count,
         };
     }
 
@@ -859,7 +887,9 @@ pub const ExpertStore = struct {
         // pread the earlier misses.
         if (self.options.readahead and self.n_miss > 1) {
             for (self.miss_eids[0..self.n_miss]) |eid| {
-                for (&ls.projs) |*g| hintWillNeed(self.fds[g.part], g.expertFileOffset(eid), g.expert_bytes);
+                for (&ls.projs) |*g| {
+                    for (0..g.plane_count) |plane| hintWillNeed(self.fds[g.part], g.planeFileOffset(eid, plane), g.plane_bytes);
+                }
             }
         }
 
@@ -937,13 +967,18 @@ pub const ExpertStore = struct {
         for (0..3) |p| ls.resolved[eid][p] = @ptrCast(slot.slab.ptr + ls.proj_off[p]);
     }
 
-    /// One expert's gate+up+down blocks into `slot.slab` — three `pread`s
-    /// (the projections are separate GGUF tensors, so they are not adjacent
-    /// on disk; coalescing would need a converter-ordered container).
+    /// One expert's gate+up+down blocks into `slot.slab` — one `pread` per
+    /// projection per plane (the projections, and a PTQTP stack's plane
+    /// siblings, are separate GGUF tensors, so they are not adjacent on
+    /// disk; coalescing would need a converter-ordered container). A
+    /// multi-plane projection's planes land contiguously in the slab
+    /// section, which is the layout the MoE dispatch reads.
     fn readExpert(self: *ExpertStore, ls: *LayerState, eid: u32, slot: *Slot) Error!void {
         for (&ls.projs, 0..) |*g, p| {
-            const dst = slot.slab[ls.proj_off[p]..][0..g.expert_bytes];
-            try self.preadFull(g.part, dst, g.expertFileOffset(eid));
+            for (0..g.plane_count) |plane| {
+                const dst = slot.slab[ls.proj_off[p] + plane * g.plane_bytes ..][0..g.plane_bytes];
+                try self.preadFull(g.part, dst, g.planeFileOffset(eid, plane));
+            }
             self.stats.bytes_read += g.expert_bytes;
         }
     }
@@ -983,7 +1018,9 @@ pub const ExpertStore = struct {
             const eid: u32 = @intCast(e);
             if (findPinned(ls, eid) != null) continue;
             if (self.findCached(ls, eid) != null) continue;
-            for (&ls.projs) |*g| self.pilotEnqueue(.{ .offset = g.expertFileOffset(eid), .len = @intCast(@min(g.expert_bytes, std.math.maxInt(u32))), .part = g.part });
+            for (&ls.projs) |*g| {
+                for (0..g.plane_count) |plane| self.pilotEnqueue(.{ .offset = g.planeFileOffset(eid, plane), .len = @intCast(@min(g.plane_bytes, std.math.maxInt(u32))), .part = g.part });
+            }
         }
     }
 
@@ -1157,6 +1194,11 @@ pub const StreamedMoeRhs = struct {
     out_dim: usize,
     n_expert: usize,
     blocks_per_column: usize,
+    /// Trit-plane count (PTQTP stacks; 1 otherwise): expert `e`'s resolved
+    /// slab section holds `plane_count` same-geometry plane row-blocks
+    /// back to back. Geometry accessors stay per-plane, mirroring the
+    /// resident `ptqtp` arm.
+    plane_count: usize = 1,
 
     /// Virtual stacked row count, mirroring the resident arms' `n`.
     pub fn rows(self: *const StreamedMoeRhs) usize {

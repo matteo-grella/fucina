@@ -15,6 +15,18 @@
 //! slice row-wise into per-part tensors. Loading re-fuses them through the
 //! `fuseLinear` ptqtp arm, so save→load reproduces the exact in-memory
 //! decoration — plane bytes and serving path alike.
+//!
+//! MoE expert stacks follow the SAME convention: `<base>.ptqtpK` sibling
+//! tensors, each a standalone byte-valid TQ2_0 stack with the base
+//! tensor's 3D `[in, out, n_expert]` shape, plane-major (all experts of
+//! plane K contiguous — deliberately NO expert-major interleave on disk).
+//! Neither consumer needs the bytes interleaved: the resident loader
+//! (`weights.loadMoeRhsPtqtp`) borrows each plane straight from the
+//! mapping, and the streamed tier (`weights.streamedProjSpecPtqtp` →
+//! `ExpertStore`) gathers one expert's K plane row-blocks by offset into a
+//! contiguous cache-slab section, where the fused MoE op sums the planes
+//! per projection. Interleaving would instead fork the dense plane format
+//! (breaking per-plane dequantizability) to save K-1 preads per miss.
 
 const std = @import("std");
 const fucina = @import("fucina");
@@ -240,6 +252,58 @@ pub fn maybeLoadPlanes(ctx: *ExecContext, file: *const gguf.File, base_name: []c
         p3 = try loadPlane(ctx, info, expected_rows, expected_cols);
     }
     return .{ .ptqtp = .{ .p1 = p1, .p2 = p2, .p3 = p3 } };
+}
+
+/// MoE pair-detection, the expert-stack counterpart of `maybeLoadPlanes`:
+/// when `file` is decorated and carries `<base_name>.ptqtp0` (3D expert
+/// stacks), load the plane set as a resident multi-plane `ptqtp` MoeRhs;
+/// null otherwise (caller falls back to the base stacked tensor).
+pub fn maybeLoadMoeRhs(
+    ctx: *ExecContext,
+    file: *const gguf.File,
+    base_name: []const u8,
+    in_dim: usize,
+    out_dim: usize,
+    n_expert: usize,
+    borrow: bool,
+) !?fucina.MoeRhs {
+    const set = (try moePlaneInfos(file, base_name)) orelse return null;
+    return try weights.loadMoeRhsPtqtp(ctx, set.infos[0..set.count], in_dim, out_dim, n_expert, borrow);
+}
+
+/// Streamed counterpart of `maybeLoadMoeRhs`: a ProjSpec whose
+/// `plane_count`/`plane_offsets` point the ExpertStore at the sibling
+/// plane tensors; null when the file carries no plane set for `base_name`.
+pub fn maybeStreamedMoeProjSpec(
+    file: *const gguf.File,
+    base_name: []const u8,
+    in_dim: usize,
+    out_dim: usize,
+    n_expert: usize,
+) !?fucina.expert_store.ProjSpec {
+    const set = (try moePlaneInfos(file, base_name)) orelse return null;
+    return try weights.streamedProjSpecPtqtp(file, set.infos[0..set.count], in_dim, out_dim, n_expert);
+}
+
+const MoePlaneSet = struct { infos: [3]*const gguf.TensorInfo, count: usize };
+
+fn moePlaneInfos(file: *const gguf.File, base_name: []const u8) !?MoePlaneSet {
+    const stored = file.getInt(version_key) orelse return null;
+    if (stored != format_version) return Error.UnsupportedPtqtpVersion;
+
+    var name_buf: [max_name_len]u8 = undefined;
+    var set = MoePlaneSet{ .infos = undefined, .count = 0 };
+    for (0..3) |plane| {
+        if (file.maybeGet(try planeName(&name_buf, base_name, plane))) |info| {
+            // Planes fill in order: a later plane without its predecessors
+            // is a broken set, not a shorter one.
+            if (plane != set.count) return Error.InvalidPlaneSet;
+            set.infos[plane] = info;
+            set.count = plane + 1;
+        }
+    }
+    if (set.count == 0) return null;
+    return set;
 }
 
 fn loadPlane(ctx: *ExecContext, info: *const gguf.TensorInfo, expected_rows: usize, expected_cols: usize) !weights.QuantWeight(.tq2_0) {
