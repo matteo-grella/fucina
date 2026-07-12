@@ -19,7 +19,8 @@
 //! MoE expert stacks follow the SAME convention: `<base>.ptqtpK` sibling
 //! tensors, each a standalone byte-valid TQ2_0 stack with the base
 //! tensor's 3D `[in, out, n_expert]` shape, plane-major (all experts of
-//! plane K contiguous — deliberately NO expert-major interleave on disk).
+//! plane K contiguous — deliberately NO expert-major interleave on disk;
+//! `quantizeMoeStack` produces exactly these payloads from a raw stack).
 //! Neither consumer needs the bytes interleaved: the resident loader
 //! (`weights.loadMoeRhsPtqtp`) borrows each plane straight from the
 //! mapping, and the streamed tier (`weights.streamedProjSpecPtqtp` →
@@ -35,6 +36,7 @@ const weights = @import("weights.zig");
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
 const gguf = fucina.gguf;
+const ptqtp = fucina.ptqtp;
 const LinearWeight = weights.LinearWeight;
 
 pub const Error = error{
@@ -283,6 +285,111 @@ pub fn maybeStreamedMoeProjSpec(
 ) !?fucina.expert_store.ProjSpec {
     const set = (try moePlaneInfos(file, base_name)) orelse return null;
     return try weights.streamedProjSpecPtqtp(file, set.infos[0..set.count], in_dim, out_dim, n_expert);
+}
+
+/// Per-expert `ptqtp.MatrixStats` folded into one line — a 128-expert
+/// stack reports mean + max instead of 128 rows.
+pub const MoeStackStats = struct {
+    mean_rel_err: f64 = 0,
+    max_rel_err: f64 = 0,
+    mean_iterations: f64 = 0,
+    unconverged_groups: usize = 0,
+    group_count: usize = 0,
+};
+
+/// The K plane-major TQ2_0 stacks of one quantized MoE expert stack —
+/// exactly the payloads the `<base>.ptqtpK` sibling tensors persist (base
+/// 3D shape, all experts of one plane contiguous). Expert `e`'s row-block
+/// starts at block `e * out * (in/256)` in every plane; entries past
+/// `plane_count` are empty. Caller frees via `deinit`.
+pub const MoeStackPlanes = struct {
+    planes: [3][]fucina.BlockTQ2_0,
+    plane_count: usize,
+    stats: MoeStackStats,
+
+    pub fn deinit(self: *MoeStackPlanes, allocator: Allocator) void {
+        var i: usize = self.planes.len;
+        while (i > 0) {
+            i -= 1;
+            allocator.free(self.planes[i]);
+        }
+        self.* = undefined;
+    }
+};
+
+/// Producer counterpart of `maybeLoadMoeRhs`: quantize a stacked 3D MoE
+/// expert tensor (GGUF dims `[in, out, n_expert]`, expert-major contiguous
+/// — every `*_exps.weight`) into K plane-major TQ2_0 stacks, one expert
+/// `[out x in]` slice at a time through `ptqtp.quantizeMatrix`. Group
+/// independence makes each expert's row-block byte-identical to decorating
+/// that expert's matrix alone — the slicing contract `loadMoeRhsPtqtp` and
+/// the `ExpertStore` gather rely on.
+///
+/// `data` is the stack's raw source bytes (any `gguf.decodeF32`-decodable
+/// dtype); `release_pages` drops each expert slice's mapped pages after its
+/// decode — pass true only for read-only file-backed mappings (see
+/// `gguf.release`; on heap memory `MADV.DONTNEED` would zero live data).
+///
+/// Memory: the K accumulating plane stacks stay resident for the whole
+/// stack, plus one expert's f32 slice and its transient per-expert planes
+/// — the shard-streaming exporter's one deliberate exception to
+/// tensor-at-a-time residency (a 4096 x 2048 x 256-expert stack is ~550
+/// MiB per plane, so K=3 peaks around 1.7 GiB).
+pub fn quantizeMoeStack(
+    ctx: *ExecContext,
+    ggml_type: gguf.GgmlType,
+    data: []const u8,
+    in_dim: usize,
+    out_dim: usize,
+    n_expert: usize,
+    options: ptqtp.Options,
+    release_pages: bool,
+) !MoeStackPlanes {
+    if (in_dim == 0 or out_dim == 0 or n_expert == 0) return ptqtp.Error.InvalidShape;
+    if (in_dim % ptqtp.block_len != 0) return ptqtp.Error.InvalidShape;
+    if (options.planes < 1 or options.planes > 3) return ptqtp.Error.InvalidOptions;
+    const expert_bytes = try gguf.tensorByteLen(ggml_type, &.{ in_dim, out_dim });
+    if (data.len != expert_bytes * n_expert) return ptqtp.Error.InvalidShape;
+
+    const allocator = ctx.allocator;
+    const blocks_per_expert = out_dim * (in_dim / ptqtp.block_len);
+
+    var result = MoeStackPlanes{
+        .planes = .{ &.{}, &.{}, &.{} },
+        .plane_count = options.planes,
+        .stats = .{},
+    };
+    errdefer result.deinit(allocator);
+    for (0..options.planes) |p| {
+        result.planes[p] = try allocator.alloc(fucina.BlockTQ2_0, n_expert * blocks_per_expert);
+    }
+
+    const values = try allocator.alloc(f32, out_dim * in_dim);
+    defer allocator.free(values);
+
+    var rel_sum: f64 = 0;
+    var iter_sum: f64 = 0;
+    for (0..n_expert) |e| {
+        const slice = data[e * expert_bytes ..][0..expert_bytes];
+        gguf.prefetch(slice);
+        try gguf.decodeF32(ggml_type, slice, values);
+        if (release_pages) gguf.release(slice);
+        var pair = try ptqtp.quantizeMatrix(ctx, values, out_dim, in_dim, options);
+        defer pair.deinit(allocator);
+        const dst0 = e * blocks_per_expert;
+        @memcpy(result.planes[0][dst0..][0..blocks_per_expert], pair.plane1);
+        if (options.planes >= 2) @memcpy(result.planes[1][dst0..][0..blocks_per_expert], pair.plane2);
+        if (options.planes == 3) @memcpy(result.planes[2][dst0..][0..blocks_per_expert], pair.plane3);
+        rel_sum += pair.stats.rel_frob_err;
+        result.stats.max_rel_err = @max(result.stats.max_rel_err, pair.stats.rel_frob_err);
+        iter_sum += pair.stats.mean_iterations;
+        result.stats.unconverged_groups += pair.stats.unconverged_groups;
+        result.stats.group_count += pair.stats.group_count;
+    }
+    const n: f64 = @floatFromInt(n_expert);
+    result.stats.mean_rel_err = rel_sum / n;
+    result.stats.mean_iterations = iter_sum / n;
+    return result;
 }
 
 const MoePlaneSet = struct { infos: [3]*const gguf.TensorInfo, count: usize };

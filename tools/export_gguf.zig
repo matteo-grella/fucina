@@ -41,12 +41,15 @@
 //! existing family pair-detection. By default embeddings (`token_embd`) and
 //! the output head stay in source precision (docs/PTQTP.md guidance);
 //! `--ptqtp-include` replaces that default name policy with substring
-//! matches, `--ptqtp-exclude` always subtracts. 3D MoE expert stacks pass
-//! through unchanged in v1 (the per-expert plane layout is tracked as a
-//! follow-up). Unlike the --dtype policy, PTQTP deliberately accepts
-//! quantized sources (q8_0/K-quants dequantize through `gguf.decodeF32`
-//! first): the paper-validated from-quantized path degrades gracefully, and
-//! hundreds-of-GB models often only ship quantized.
+//! matches, `--ptqtp-exclude` always subtracts. 3D MoE expert stacks
+//! (`*_exps` names, expert-major contiguous `[in, out, n_expert]`) quantize
+//! per expert slice: each expert's [out x in] matrix runs through
+//! `ptqtp.quantizeMatrix` independently and the K plane tensors keep the
+//! base 3D shape, plane-major (`ptqtp_gguf.quantizeMoeStack` — the MoE
+//! convention the qwen3 loaders pair-detect). Unlike the --dtype policy,
+//! PTQTP deliberately accepts quantized sources (q8_0/K-quants dequantize
+//! through `gguf.decodeF32` first): the paper-validated from-quantized path
+//! degrades gracefully, and hundreds-of-GB models often only ship quantized.
 //!
 //! Memory discipline (the point of mode c): the output is written with the
 //! writer's streaming path (`declareTensor` + `beginStream`), so at any
@@ -54,6 +57,12 @@
 //! planes — never the whole output. Source bytes arrive through the mmap
 //! (prefetched, then `gguf.release`d per tensor), so residency stays
 //! bounded no matter the model size; the run ends with a peak-RSS report.
+//! Expert stacks are the one deliberate exception: their K plane stacks
+//! accumulate in RAM for the stack's duration (source pages still release
+//! expert-by-expert), so the peak is K plane stacks + one expert f32 slice
+//! — ~550 MiB per plane for a 4096 x 2048 x 256-expert stack, ~1.7 GiB at
+//! K=3 on the largest stacks. Both the dry-run plan and the final summary
+//! report that figure.
 //!
 //! Merge policy: adapters named "layers.<i>.<q|k|v|o|gate|up|down>.lora_a/b"
 //! (the qwen3_train.Trainer naming) merge into the matching
@@ -439,7 +448,13 @@ fn matchesAny(name: []const u8, needles: []const []const u8) bool {
 /// the plan pass (declarations) and the stream pass (data) both call it and
 /// have to agree tensor-for-tensor.
 fn ptqtpQuantizes(info: *const gguf.TensorInfo, args: *const PtqtpArgs) bool {
-    if (info.n_dims != 2) return false; // 3D expert stacks: v1 passthrough
+    switch (info.n_dims) {
+        2 => {},
+        // Stacked MoE experts ([in, out, n_expert]) quantize per expert
+        // slice; any other 3D tensor passes through.
+        3 => if (std.mem.indexOf(u8, info.name, "_exps") == null) return false,
+        else => return false,
+    }
     if (!std.mem.endsWith(u8, info.name, ".weight")) return false;
     if (std.mem.indexOf(u8, info.name, "norm") != null) return false;
     if (info.dims[0] % ptqtp.block_len != 0) return false; // 256-block contract
@@ -491,12 +506,14 @@ fn runPtqtp(
     // Plan pass: decide per tensor; print the plan (--dry-run) or declare
     // the output tensor set (names, dims, offsets — no data yet).
     var quantized_count: usize = 0;
+    var quant_stacks: usize = 0;
     var passthrough_count: usize = 0;
-    var expert_stacks: usize = 0;
+    var kept_stacks: usize = 0;
     var quant_src_bytes: u64 = 0;
     var quant_dst_bytes: u64 = 0;
     var total_src_bytes: u64 = 0;
     var total_dst_bytes: u64 = 0;
+    var peak_stack_buffer: u64 = 0;
     var name_buf: [256]u8 = undefined;
     for (file.tensors) |*info| {
         total_src_bytes += info.data.len;
@@ -507,12 +524,26 @@ fn runPtqtp(
             quant_src_bytes += info.data.len;
             quant_dst_bytes += out_bytes;
             total_dst_bytes += out_bytes;
+            if (info.n_dims == 3) {
+                quant_stacks += 1;
+                // K accumulating plane stacks + one expert's transient
+                // planes + one expert's f32 slice (see the module doc).
+                const workset = out_bytes + out_bytes / info.dims[2] +
+                    @as(u64, info.dims[0] * info.dims[1] * @sizeOf(f32));
+                peak_stack_buffer = @max(peak_stack_buffer, workset);
+            }
             if (args.dry_run) {
                 try stdout.print("ptqtp {s} ", .{info.name});
                 try printShape(stdout, info);
-                try stdout.print(" {s} -> tq2_0 x{d}  ({d:.1} -> {d:.1} MiB)\n", .{
-                    @tagName(info.ggml_type), args.planes, mib(info.data.len), mib(out_bytes),
-                });
+                if (info.n_dims == 3) {
+                    try stdout.print(" {s} -> tq2_0 x{d} per expert ({d} experts)  ({d:.1} -> {d:.1} MiB)\n", .{
+                        @tagName(info.ggml_type), args.planes, info.dims[2], mib(info.data.len), mib(out_bytes),
+                    });
+                } else {
+                    try stdout.print(" {s} -> tq2_0 x{d}  ({d:.1} -> {d:.1} MiB)\n", .{
+                        @tagName(info.ggml_type), args.planes, mib(info.data.len), mib(out_bytes),
+                    });
+                }
                 continue;
             }
             for (0..args.planes) |plane_i| {
@@ -521,7 +552,7 @@ fn runPtqtp(
             }
         } else {
             passthrough_count += 1;
-            if (info.n_dims == 3 and std.mem.indexOf(u8, info.name, "_exps.") != null) expert_stacks += 1;
+            if (info.n_dims == 3 and std.mem.indexOf(u8, info.name, "_exps") != null) kept_stacks += 1;
             total_dst_bytes += info.data.len;
             if (args.dry_run) {
                 try stdout.print("pass  {s} ", .{info.name});
@@ -535,12 +566,15 @@ fn runPtqtp(
 
     if (args.dry_run) {
         try stdout.print(
-            "plan: {d} tensors; {d} ptqtp-quantized (K={d}, {d} plane tensors), {d} passthrough ({d} expert stacks kept)\n",
-            .{ file.tensors.len, quantized_count, args.planes, quantized_count * args.planes, passthrough_count, expert_stacks },
+            "plan: {d} tensors; {d} ptqtp-quantized (K={d}, {d} plane tensors, {d} expert stacks), {d} passthrough ({d} expert stacks kept)\n",
+            .{ file.tensors.len, quantized_count, args.planes, quantized_count * args.planes, quant_stacks, passthrough_count, kept_stacks },
         );
         try stdout.print("bytes: {d:.1} -> {d:.1} MiB total; quantized linears {d:.1} -> {d:.1} MiB\n", .{
             mib(total_src_bytes), mib(total_dst_bytes), mib(quant_src_bytes), mib(quant_dst_bytes),
         });
+        if (quant_stacks != 0) {
+            try stdout.print("peak expert-stack buffering: {d:.1} MiB (largest stack: K plane stacks + one expert f32 slice)\n", .{mib(peak_stack_buffer)});
+        }
         return;
     }
 
@@ -566,7 +600,10 @@ fn runPtqtp(
     var peak_workset: u64 = 0;
     for (file.tensors) |*info| {
         if (ptqtpQuantizes(info, &args)) {
-            const workset = try quantizeTensorStream(allocator, &ctx, &streamer, info, options, file.is_mmap, stdout);
+            const workset = if (info.n_dims == 3)
+                try quantizeExpertStackStream(&ctx, &streamer, info, options, file.is_mmap, stdout)
+            else
+                try quantizeTensorStream(allocator, &ctx, &streamer, info, options, file.is_mmap, stdout);
             peak_workset = @max(peak_workset, workset);
         } else {
             gguf.prefetch(info.data);
@@ -578,14 +615,15 @@ fn runPtqtp(
     try out_writer.interface.flush();
 
     try stdout.print("exported {s} -> {s} (PTQTP K={d})\n", .{ in_path, dst_path, args.planes });
-    try stdout.print("tensors: {d} quantized -> {d} plane tensors, {d} passthrough ({d} expert stacks kept)\n", .{
-        quantized_count, quantized_count * args.planes, passthrough_count, expert_stacks,
+    try stdout.print("tensors: {d} quantized -> {d} plane tensors ({d} expert stacks), {d} passthrough ({d} expert stacks kept)\n", .{
+        quantized_count, quantized_count * args.planes, quant_stacks, passthrough_count, kept_stacks,
     });
     try stdout.print("bytes: {d:.1} -> {d:.1} MiB total; quantized linears {d:.1} -> {d:.1} MiB\n", .{
         mib(total_src_bytes), mib(total_dst_bytes), mib(quant_src_bytes), mib(quant_dst_bytes),
     });
     // The one-tensor-at-a-time witness: the largest simultaneous heap hold
-    // (one tensor's f32 decode buffer + its packed planes).
+    // (one tensor's f32 decode buffer + its packed planes; for an expert
+    // stack, the K resident plane stacks + one expert slice).
     try stdout.print("peak tensor working set: {d:.1} MiB\n", .{mib(peak_workset)});
     if (peakRssBytes()) |rss| {
         // Clean source-mmap pages count toward RSS until the OS drops them:
@@ -638,13 +676,56 @@ fn quantizeTensorStream(
 
     const stats = pair.stats;
     try stdout.print("ptqtp {s} [{d} x {d}] {s} -> tq2_0 x{d}  rel_err {d:.4}  iters {d:.1}  unconverged {d}/{d}  ({d:.1} -> {d:.1} MiB)\n", .{
-        info.name,           rows,                 cols,                    @tagName(info.ggml_type), pair.planeCount(),
-        stats.rel_frob_err,  stats.mean_iterations, stats.unconverged_groups, stats.group_count,
-        mib(info.data.len),  mib(out_bytes),
+        info.name,          rows,                  cols,                     @tagName(info.ggml_type), pair.planeCount(),
+        stats.rel_frob_err, stats.mean_iterations, stats.unconverged_groups, stats.group_count,        mib(info.data.len),
+        mib(out_bytes),
     });
     try stdout.flush();
     // f32 decode buffer + all planes coexisted inside quantizeMatrix.
     return @as(u64, rows * cols * @sizeOf(f32)) + out_bytes;
+}
+
+/// Expert-stack counterpart of `quantizeTensorStream`: quantize each expert
+/// slice independently (`ptqtp_gguf.quantizeMoeStack` — expert-major
+/// source, plane-major output), then stream the K plane stacks in
+/// declaration order. The K accumulating stacks stay resident for the whole
+/// tensor — the mode's one deliberate exception to one-tensor residency
+/// (~550 MiB per plane for a 4096 x 2048 x 256-expert stack, ~1.7 GiB at
+/// K=3) — while source pages still release expert-by-expert. Solver stats
+/// print aggregated across experts (mean + max), not one line per expert.
+/// Returns the largest simultaneous heap hold in bytes.
+fn quantizeExpertStackStream(
+    ctx: *fucina.ExecContext,
+    streamer: *gguf.Writer.DataStreamer,
+    info: *const gguf.TensorInfo,
+    options: fucina.ptqtp.Options,
+    release_pages: bool,
+    stdout: *std.Io.Writer,
+) !u64 {
+    const in_dim = info.dims[0];
+    const out_dim = info.dims[1];
+    const n_expert = info.dims[2];
+
+    var quant = try ptqtp_gguf.quantizeMoeStack(ctx, info.ggml_type, info.data, in_dim, out_dim, n_expert, options, release_pages);
+    defer quant.deinit(ctx.allocator);
+
+    var out_bytes: usize = 0;
+    for (quant.planes[0..quant.plane_count]) |plane| {
+        const bytes = std.mem.sliceAsBytes(plane);
+        try streamer.writeTensorData(bytes);
+        out_bytes += bytes.len;
+    }
+
+    const stats = quant.stats;
+    try stdout.print("ptqtp {s} [{d} x {d} x {d}] {s} -> tq2_0 x{d}  rel_err mean {d:.4} max {d:.4}  iters {d:.1}  unconverged {d}/{d}  ({d:.1} -> {d:.1} MiB)\n", .{
+        info.name,         n_expert,           out_dim,           in_dim,                @tagName(info.ggml_type),
+        quant.plane_count, stats.mean_rel_err, stats.max_rel_err, stats.mean_iterations, stats.unconverged_groups,
+        stats.group_count, mib(info.data.len), mib(out_bytes),
+    });
+    try stdout.flush();
+    // K resident plane stacks + one expert's transient planes + one
+    // expert's f32 decode slice coexisted at each expert's solve.
+    return @as(u64, out_bytes) + out_bytes / n_expert + @as(u64, out_dim * in_dim * @sizeOf(f32));
 }
 
 /// Logical (row-major) shape — reversed ne dims, outermost first.

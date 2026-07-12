@@ -9722,18 +9722,24 @@ requantize pre-quantized expert tensors (dequant → re-encode through
 experts are where shrinking bytes pays most in decode bandwidth at lowest
 quality risk. Block divisibility still rules.
 
-**PTQTP policy** (mode c — full treatment in docs/PTQTP.md): eligible = 2D,
-name ends `.weight`, no `norm`, `dims[0] % 256 == 0`, source dtype
-decodable to f32 (quantized sources ARE accepted — they dequantize first,
-the paper-validated graceful-degradation path). Embeddings and
-`output.weight` stay in source precision unless `--ptqtp-include` says
-otherwise; 3D expert stacks always pass through (v1). The output carries
-the `fucina.ptqtp.version` stamp and the `src/llm/ptqtp_gguf.zig` plane
-names, so it loads through the existing pair-detection. Split sources load
-via `loadMmapAuto` (the single-file output drops `split.*` keys), and the
-data section is produced with the streaming writer — the tool holds one
-source tensor's f32 buffer plus its planes, never the whole model, and
-reports the peak working set and peak RSS at the end.
+**PTQTP policy** (mode c — full treatment in docs/PTQTP.md): eligible = 2D
+matrix or 3D `*_exps` expert stack, name ends `.weight`, no `norm`,
+`dims[0] % 256 == 0`, source dtype decodable to f32 (quantized sources ARE
+accepted — they dequantize first, the paper-validated
+graceful-degradation path). Embeddings and `output.weight` stay in source
+precision unless `--ptqtp-include` says otherwise. Expert stacks quantize
+per expert slice (`ptqtp_gguf.quantizeMoeStack`): each expert's
+`[out x in]` matrix solves independently, and the K plane tensors keep the
+base 3D `[in, out, n_expert]` shape, plane-major — the MoE convention the
+qwen3 loaders pair-detect. The output carries the `fucina.ptqtp.version`
+stamp and the `src/llm/ptqtp_gguf.zig` plane names, so it loads through
+the existing pair-detection. Split sources load via `loadMmapAuto` (the
+single-file output drops `split.*` keys), and the data section is produced
+with the streaming writer — the tool holds one source tensor's f32 buffer
+plus its planes, never the whole model (expert stacks are the exception:
+their K plane stacks stay resident per stack, ~1.7 GiB peak at K=3 on a
+4096 x 2048 x 256 stack, reported in the plan and summary), and reports
+the peak working set and peak RSS at the end.
 
 **Merge policy**: adapters named `layers.<i>.<q|k|v|o|gate|up|down>.lora_a/b`
 merge into the matching `blk.<i>.attn_*/ffn_*.weight` tensors via
@@ -10191,7 +10197,9 @@ pub fn deinit(self: *LinearWeight) void
   pair-detect them into the resident `MoeRhs.ptqtp` arm
   (`weights.loadMoeRhsPtqtp`) or a multi-plane expert-store `ProjSpec`
   (`weights.streamedProjSpecPtqtp` + `registerStreamedMoeLayer`), both
-  wired into the qwen3 MoE loaders.
+  wired into the qwen3 MoE loaders; `ptqtp_gguf.quantizeMoeStack` is the
+  producer (per-expert-slice solve into plane-major stacks — the
+  export-gguf `--ptqtp` MoE path).
 - `toResidentF16` replaces the weight in place with a dequantized resident-f16
   copy (2 B/weight — the f16 GEMM/GPU-offload operand format), dequantizing in
   4096-row chunks through the same row gather so the transient peak stays a

@@ -439,6 +439,113 @@ test "fuseLinear: mixed ptqtp plane counts stay separate; version guard refuses 
     try std.testing.expectError(ptqtp_gguf.Error.UnsupportedPtqtpVersion, ptqtp_gguf.maybeLoadPlanes(&ctx, &newer, "a.weight", 4, in_dim));
 }
 
+test "quantizeMoeStack: expert row-blocks equal direct per-expert quantizeMatrix; streamed write loads back bitwise through maybeLoadMoeRhs" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const n_expert: usize = 3;
+    const out_dim: usize = 2;
+    const options = fucina.ptqtp.Options{ .planes = 3 };
+
+    // Expert-major contiguous f32 stack — the raw bytes of a GGUF
+    // `[in, out, n_expert]` `*_exps.weight` tensor.
+    const stack_vals = testWeightValues(n_expert * out_dim * in_dim, 6);
+
+    var quant = try ptqtp_gguf.quantizeMoeStack(&ctx, .f32, std.mem.sliceAsBytes(&stack_vals), in_dim, out_dim, n_expert, options, false);
+    defer quant.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 3), quant.plane_count);
+
+    // Group independence: each expert's row-block in each plane is
+    // byte-identical to quantizing that expert's [out x in] matrix alone —
+    // the slicing contract loadMoeRhsPtqtp and the ExpertStore rely on.
+    const blocks_per_expert = out_dim * (in_dim / fucina.ptqtp.block_len);
+    var rel_sum: f64 = 0;
+    var rel_max: f64 = 0;
+    for (0..n_expert) |e| {
+        var pair = try fucina.ptqtp.quantizeMatrix(&ctx, stack_vals[e * out_dim * in_dim ..][0 .. out_dim * in_dim], out_dim, in_dim, options);
+        defer pair.deinit(allocator);
+        const dst0 = e * blocks_per_expert;
+        const expert_planes = [3][]const fucina.BlockTQ2_0{ pair.plane1, pair.plane2, pair.plane3 };
+        for (expert_planes, 0..) |expert_plane, p| {
+            try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(expert_plane), std.mem.sliceAsBytes(quant.planes[p][dst0..][0..blocks_per_expert]));
+        }
+        rel_sum += pair.stats.rel_frob_err;
+        rel_max = @max(rel_max, pair.stats.rel_frob_err);
+    }
+    try std.testing.expectApproxEqAbs(rel_sum / @as(f64, @floatFromInt(n_expert)), quant.stats.mean_rel_err, 1e-12);
+    try std.testing.expectEqual(rel_max, quant.stats.max_rel_err);
+
+    // Persist the plane stacks exactly as export-gguf --ptqtp does
+    // (declareTensor with the base 3D dims + beginStream) and load back
+    // through the MoE pair-detection: the round-trip is bitwise.
+    var w = gguf.Writer.init(allocator);
+    defer w.deinit();
+    try w.addMetaString("general.architecture", "qwen3");
+    try w.addMetaInt(ptqtp_gguf.version_key, u32, ptqtp_gguf.format_version);
+    var name_buf: [64]u8 = undefined;
+    for (0..quant.plane_count) |p| {
+        try w.declareTensor(try ptqtp_gguf.planeName(&name_buf, "e.weight", p), .tq2_0, &.{ in_dim, out_dim, n_expert });
+    }
+    var buf: [32768]u8 = undefined;
+    var sink = std.Io.Writer.fixed(&buf);
+    var streamer = try w.beginStream(&sink);
+    for (quant.planes[0..quant.plane_count]) |plane| try streamer.writeTensorData(std.mem.sliceAsBytes(plane));
+    try streamer.finish();
+    var out = try gguf.File.parseOwned(allocator, try allocator.dupe(u8, sink.buffered()));
+    defer out.deinit();
+
+    var loaded = (try ptqtp_gguf.maybeLoadMoeRhs(&ctx, &out, "e.weight", in_dim, out_dim, n_expert, false)).?;
+    defer loaded.deinit();
+    try std.testing.expectEqual(@as(usize, 3), loaded.ptqtp.plane_count);
+    for (0..quant.plane_count) |p| {
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(quant.planes[p]), std.mem.sliceAsBytes(loaded.ptqtp.planes[p]));
+    }
+}
+
+test "quantizeMoeStack: quantized sources slice per expert; bad geometry is refused" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const n_expert: usize = 2;
+    const out_dim: usize = 2;
+    const options = fucina.ptqtp.Options{ .planes = 2 };
+    const expert_len = out_dim * in_dim;
+
+    const stack_vals = testWeightValues(n_expert * expert_len, 8);
+    const encoded = try allocator.alloc(u8, try gguf.tensorByteLen(.q8_0, &.{ in_dim, out_dim, n_expert }));
+    defer allocator.free(encoded);
+    try gguf.encodeF32(.q8_0, &stack_vals, encoded);
+
+    var quant = try ptqtp_gguf.quantizeMoeStack(&ctx, .q8_0, encoded, in_dim, out_dim, n_expert, options, false);
+    defer quant.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), quant.plane_count);
+    try std.testing.expectEqual(@as(usize, 0), quant.planes[2].len);
+
+    // Per-expert slicing of a block-quantized source: decode the expert's
+    // byte window directly and quantize it alone — must match bitwise.
+    const expert_bytes = try gguf.tensorByteLen(.q8_0, &.{ in_dim, out_dim });
+    const blocks_per_expert = out_dim * (in_dim / fucina.ptqtp.block_len);
+    const decoded = try allocator.alloc(f32, expert_len);
+    defer allocator.free(decoded);
+    for (0..n_expert) |e| {
+        try gguf.decodeF32(.q8_0, encoded[e * expert_bytes ..][0..expert_bytes], decoded);
+        var pair = try fucina.ptqtp.quantizeMatrix(&ctx, decoded, out_dim, in_dim, options);
+        defer pair.deinit(allocator);
+        const dst0 = e * blocks_per_expert;
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(pair.plane1), std.mem.sliceAsBytes(quant.planes[0][dst0..][0..blocks_per_expert]));
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(pair.plane2), std.mem.sliceAsBytes(quant.planes[1][dst0..][0..blocks_per_expert]));
+    }
+
+    // Geometry refusals: contract dim not a 256 multiple; byte length that
+    // disagrees with [in, out, n_expert].
+    try std.testing.expectError(fucina.ptqtp.Error.InvalidShape, ptqtp_gguf.quantizeMoeStack(&ctx, .f32, std.mem.sliceAsBytes(&stack_vals), in_dim / 2, out_dim * 2, n_expert, options, false));
+    try std.testing.expectError(fucina.ptqtp.Error.InvalidShape, ptqtp_gguf.quantizeMoeStack(&ctx, .f32, std.mem.sliceAsBytes(&stack_vals), in_dim, out_dim, n_expert + 1, options, false));
+}
+
 test "MoE expert stacks: plane pair-detection loads the ptqtp arm; streamed ProjSpec gathers sibling planes" {
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;

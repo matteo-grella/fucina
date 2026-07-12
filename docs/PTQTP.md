@@ -160,34 +160,52 @@ Mechanics and policy:
   ~14 MiB heap). Source pages get `MADV.DONTNEED` after each tensor —
   released immediately on Linux; Darwin ignores the hint for file-backed
   maps and evicts only under pressure, so macOS peak RSS includes clean
-  evictable mmap pages (annotated in the summary).
+  evictable mmap pages (annotated in the summary). MoE expert stacks are
+  the one deliberate exception to one-tensor residency: their K plane
+  stacks accumulate in RAM for the stack's duration (see below).
 - **Same on-disk format as `ptqtp_gguf.zig`**: eligible matrices are
   replaced by `<name>.ptqtp0..K-1` byte-valid TQ2_0 plane tensors plus the
   `fucina.ptqtp.version` stamp, so outputs load through the existing
   pair-detection with zero loader changes (wired in the qwen3 loaders
   today — see the persistence bullet above; other families read the format
   once their loaders adopt the same seam).
-- **Eligibility**: 2D, name ends `.weight`, no `norm`, contract dim
-  divisible by 256, source dtype decodable (f32/f16/bf16/legacy/K-quants;
-  quantized sources dequantize first — the from-quantized path degrades
-  gracefully, see above). Default name policy keeps embeddings
-  (`token_embd`) and `output.weight` in source precision; `--ptqtp-include`
-  replaces it (e.g. to decorate the head).
-- **MoE expert stacks (3D) pass through unchanged** in v1 — per-expert
-  plane slicing over the `[in, out, n_expert]` stacks is the tracked
-  follow-up (the expert-plane on-disk layout is being defined in the
-  expert-store work). Attention, shared-expert, and dense-layer FFN
-  matrices already quantize, which is the bulk of the dense-weight bytes.
+- **Eligibility**: 2D matrix or 3D `*_exps` expert stack, name ends
+  `.weight`, no `norm`, contract dim divisible by 256, source dtype
+  decodable (f32/f16/bf16/legacy/K-quants; quantized sources dequantize
+  first — the from-quantized path degrades gracefully, see above). Default
+  name policy keeps embeddings (`token_embd`) and `output.weight` in
+  source precision; `--ptqtp-include` replaces it (e.g. to decorate the
+  head).
+- **MoE expert stacks (3D) quantize per expert slice**
+  (`ptqtp_gguf.quantizeMoeStack`): each expert's `[out x in]` matrix of
+  the expert-major `[in, out, n_expert]` stack runs through
+  `ptqtp.quantizeMatrix` independently — group independence makes every
+  expert row-block byte-identical to decorating that expert alone — and
+  the K plane tensors keep the base 3D shape, plane-major (the exact MoE
+  convention the qwen3 loaders pair-detect, resident and streamed).
+  Memory: the K accumulating plane stacks stay resident for the whole
+  stack plus one expert's f32 slice (~550 MiB per plane for a
+  4096 x 2048 x 256-expert stack, ~1.7 GiB at K=3); both the dry-run plan
+  and the run summary report the figure, and source pages still release
+  expert-by-expert.
 - Per-tensor solver diagnostics print as it runs (`rel_err`, mean
   iterations, unconverged groups) — the same fp16-rounded-scale
   reconstruction error `MatrixStats` measures, so a bad tensor is visible
-  immediately, not after a full pass.
+  immediately, not after a full pass. Expert stacks fold their per-expert
+  stats into one line (mean + max `rel_err`) instead of printing one row
+  per expert.
 
 Validated on Qwen3-0.6B f16: K=2 full decoration (196 matrices → 392
 planes, 840→217 MiB linears) loads through the qwen3 runners and generates
 fluent text; a K=3 partial run (`--ptqtp-include blk.0.attn`) reproduces
 the expected error ladder (rel_err ~0.068 vs dual's ~0.18) and the mixed
-decorated/undecorated file serves correctly.
+decorated/undecorated file serves correctly. MoE validated on
+Qwen3-30B-A3B Q5_K_M: quantizing one layer's three 128-expert stacks at
+K=2 (`--ptqtp-include blk.0.ffn_gate_exps,...`) peaks at a 105.8 MiB
+working set, and the mixed file loads through the qwen3 MoE
+pair-detection and generates correct text; per-expert plane bitwise
+identity against standalone `quantizeMatrix` is pinned by
+`ptqtp_gguf_tests`.
 
 ## Configuration guidance
 
