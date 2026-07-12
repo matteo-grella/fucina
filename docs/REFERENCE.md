@@ -457,7 +457,7 @@ protocol and thermal discipline in [`BENCHMARK.md`](BENCHMARK.md)):
 | `bench-f16gemm` | f16 TransB GEMM parallel efficiency (Qwen3 shapes). |
 | `bench-gemm` | Large-shape f32 GEMM: row kernels vs blocked packed kernel vs BLAS. |
 | `bench-gpu-dispatch` | CPU CBLAS vs blocking/async eager GPU GEMM/GEMV: host-visible latency, submit latency, queued throughput, and parity. |
-| `bench-gpu-formats` | Fucina f16/load-time-packed quant CPU kernels vs eager GPU f16/Q4_K/Q6_K/Q8_0 LLM linears: host-visible latency, submit latency, queued throughput, and parity. |
+| `bench-gpu-formats` | Fucina f16/load-time-packed quant CPU kernels vs eager GPU f16/Q4_K/Q5_K/Q6_K/Q8_0 LLM linears: host-visible latency, submit latency, queued throughput, and parity (Q5_K is CUDA-only). |
 | `bench-q5kmoe` | Q5_K MoE-expert matmul variants. |
 | `bench-ternary` | TQ2_0 ternary matmul: hot sdot/vpdpbusd tiles vs cold table path, f32 path, Q4_K, dense f32. |
 | `bench-facade` | Raw tensor ops vs the public no-grad `Tensor` facade. |
@@ -684,6 +684,7 @@ values. On Linux without libc the lookup scans `/proc/self/environ`
 | `FUCINA_GPU_MIN_WORK_RESIDENT` (cuda) | Dense-f32 GEMM/batched-GEMM gate when the RHS already has a device address. | `2^27` (512³; 256³ loses to OpenBLAS-32 on the reference host) |
 | `FUCINA_GPU_MIN_WORK_QMOE` | Grouped quantized MoE GEMM gate; setting it also re-seeds the dense-Q6 gate. | `2^30` |
 | `FUCINA_GPU_MIN_WORK_DENSE_Q4` | Dense Q4_K model-weight gate against the load-time-packed CPU fallback. | Metal `2^30`; CUDA `2^27` |
+| `FUCINA_GPU_MIN_WORK_DENSE_Q5` (cuda) | Dense Q5_K model-weight gate against the load-time-packed CPU fallback. | `2^24` |
 | `FUCINA_GPU_MIN_WORK_DENSE_Q6` | Dense Q6_K gate; overrides both the compact/raw and packed-CPU tiers. | compact/raw `2^22`; packed Metal `2^31`, CUDA `2^24` |
 | `FUCINA_GPU_MIN_WORK_DENSE_Q8` | Dense Q8_0 model-weight gate against the load-time-packed CPU fallback. | Metal `2^29`; CUDA `2^24` |
 | `FUCINA_GPU_QMOE_MIN_FILL` | Tile-occupancy gate (percent) for grouped MoE: small expert batches whose 32-row tiles would run mostly empty stay on CPU; `0` disables the gate, `>100` never passes it. | `50` |
@@ -691,8 +692,9 @@ values. On Linux without libc the lookup scans `/proc/self/environ`
 | `FUCINA_GPU_TF32` (cuda) | Non-`0` opts f32 GEMMs into TF32 tensor cores (default is strict FP32). | off |
 | `FUCINA_GPU_MIN_WORK_TRANSIENT` (cuda) | Work floor for *non-resident* operands (each crossing PCIe per call); an `m ≥ 128` row floor applies alongside it. | `2^33` |
 | `FUCINA_GPU_MIN_WORK_ATTN` (cuda) | Fused prefill-attention gate, in q·kv·heads·d work units. | `2^28` |
-| `FUCINA_GPU_DECODE` (cuda) | Non-`0` enables the opt-in dequant-dot decode GEMV (m ≤ 8, resident weights only). | off |
-| `FUCINA_GPU_QUANT_MMA` (cuda) | A value starting with `0` disables the tensor-core Q4_K/Q6_K/Q8_0 prefill kernels and selects the scalar-FFMA fallback (diagnostic A/B switch). | enabled on compute capability ≥ 7 |
+| `FUCINA_GPU_DECODE` (cuda) | Non-`0` enables opt-in quantized decode for m ≤ 8 and resident weights only (GEMV generally; Q5_K uses tiled MMA at m=4..8). | off |
+| `FUCINA_GPU_MIN_WORK_DECODE_Q5` (cuda) | Q5_K-only decode work gate after `FUCINA_GPU_DECODE=1`; rejects the compact CPU kernel's measured 1×4096² win. | `3·2^23` |
+| `FUCINA_GPU_QUANT_MMA` (cuda) | A value starting with `0` disables the tensor-core Q4_K/Q5_K/Q6_K/Q8_0 kernels and selects the scalar-FFMA fallback (diagnostic A/B switch). | enabled on compute capability ≥ 7 |
 | `FUCINA_GPU_QUANT_SPLIT_K` (cuda) | A value starting with `0` disables the on-stream split-K/reduction used to fill idle SMs for underfilled dense quantized prefill (diagnostic A/B switch). | enabled when the N64 output grid fills less than roughly 7/8 of the SMs |
 | `FUCINA_GPU_VRAM_BUDGET` (cuda) | Weight-residency budget in bytes; `0` disables the bound. | 80% of free VRAM at init |
 | `FUCINA_GPU_KERNELS=src` (cuda) | NVRTC-recompiles the vendored kernels from `kernels.cu` instead of loading the committed PTX (dev loop; `tools/gen_cuda_ptx.sh` regenerates the PTX). | committed PTX |
@@ -7134,7 +7136,7 @@ direct asynchronous DMA. What offloads:
   accumulation) through the same eight async slots and three persistent lanes
   as f32. Resident RHS decode uses the separate `2^20` gate; transient decode
   is refused, while streamed prefill retains the `2^27` gate.
-- **Dense quantized prefill** (Q4_K/Q6_K/Q8_0): stable RHS bytes resolve to one
+- **Dense quantized prefill** (Q4_K/Q5_K/Q6_K/Q8_0; Q5_K is CUDA-only): stable RHS bytes resolve to one
   managed resident allocation. `gemmQuantNtAsync` reuses the slot's activation,
   output, pinned-tile, and device-tile buffers; a pending f32 producer passes
   its device address directly. Shared-input batches launch each weight matrix
@@ -7153,7 +7155,9 @@ direct asynchronous DMA. What offloads:
   boundaries (`qmoeStage`, `qmoe_lock`). Panel/tile H2D, compute, and panel D2H
   are now event-chained across persistent streams; the CPU performs one final
   fence when GeGLU/scatter needs the result, rather than synchronizing compute
-  and then starting a blocking download.
+  and then starting a blocking download. The provider-level Q5_K grouped
+  kernel is parity-tested, but current model-specific MoE loaders do not route
+  Q5_K expert stacks to it; dense Q5_K linears are wired end to end.
 - **Fused prefill attention** (`attnPrefillF16`): online-softmax grouped
   attention over f16 KV with the CPU tiled kernel's exact semantics
   (absolute positions, pre-clamped sliding window, causal or bidirectional,
@@ -7161,12 +7165,16 @@ direct asynchronous DMA. What offloads:
   the output streams back. Gated by `shouldUseGpuAttn` on q·kv·heads·d ≥
   `2^28`; decode never reaches this seam, and the KV cache itself stays in
   host memory.
-- **Decode GEMV** (opt-in, `FUCINA_GPU_DECODE=1`): warp-per-row dequant-dot
-  for `m ≤ 8` against **resident-or-adoptable weights only** — at decode
+- **Quantized decode** (opt-in, `FUCINA_GPU_DECODE=1`) against
+  **resident-or-adoptable weights only**: Q4_K/Q6_K/Q8_0 use warp-per-row
+  dequant-dot for `m ≤ 8`; Q5_K uses that compact-row route for `m < 4` and
+  the tensor-core tile route for `m = 4..8`. At decode
   shapes the op is bytes-bound and streaming weights per token is a strict
   loss, so a registry miss on transient RHS refuses and the caller stays on
-  the CPU int8 kernels. Kept opt-in pending a parity-oracle pass on
-  sampled-token streams.
+  the CPU int8 kernels. Q5_K additionally applies
+  `FUCINA_GPU_MIN_WORK_DECODE_Q5`: 1×4096² stays on CPU, while the measured
+  1×6144×4096 and rows 2–8 cross to CUDA. The global decode arm remains
+  opt-in even though a Q5_K_M 32-token greedy CPU/CUDA oracle matched exactly.
 - **ES device arm** (`esPerturb`, `esUpdate`, `esAnchor`): seeded
   perturbation/update/anchor kernels for evolution-strategies training (§11)
   that write the caller's live resident storage (never an adopted snapshot)
@@ -7194,6 +7202,7 @@ backend-owned details deliberately kept off the public root, under
 pub const gpu = struct {
     pub const enabled = backend.gpu_impl.enabled;             // comptime: -Dgpu build?
     pub const has_quant_gemm = backend.gpu_impl.has_quant_gemm; // dequant-in-kernel GEMM?
+    pub const has_q5_k_quant = backend.gpu_impl.has_q5_k_quant; // CUDA Q5_K capability?
     pub const allocResidentBytes = backend.gpu_impl.allocResidentBytes;
     pub const freeResidentBytes = backend.gpu_impl.freeResidentBytes;
     pub const traceEnabled = backend.gpu_impl.traceEnabled;
@@ -7481,7 +7490,7 @@ kernel, and reshapes back. Gradients: the quantized weight is a constant
 the **dequantized** weight — the backward node holds a view of the block
 data and dequantizes it transiently (`ConstRhsDotBackward`,
 `src/ag/backward.zig`). On GPU builds the forward may offload to the
-dense-quant GEMM provider (q4_k/q6_k/q8_0 only, §9); the facade
+dense-quant GEMM provider (q4_k/q6_k/q8_0 on Metal, plus q5_k on CUDA, §9); the facade
 automatically disables offload when the LHS requires grad, so training
 numerics stay on the CPU path.
 
@@ -7659,7 +7668,7 @@ the call and the borrowed bytes cannot be retained by an async command.
 or mmap'd weights (§13); that lifetime first tries the direct-output async
 path (Metal and CUDA support up to 8192 activation rows per dense-quant
 submission) and falls back to balanced blocking chunks of at most 2048 rows
-when necessary. Q4_K/Q6_K/Q8_0 prefill uses provider- and format-specific work
+when necessary. Q4_K/Q5_K/Q6_K/Q8_0 prefill uses provider- and format-specific work
 gates calibrated against the actual compact/raw or load-time-packed CPU
 fallback. Decode `m <= 8` remains behind the provider's explicit GEMV opt-in.
 The complete GPU contract is §9.
@@ -9982,7 +9991,7 @@ precision** — nothing is widened to f32 at load time:
 | `f32` | f32 tensor (f64 sources are narrowed) | plain `dot` |
 | `f16` | f16 tensor, 2 B/weight | f16-operands GEMM (§9); GPU-resident on `-Dgpu=metal` |
 | `bf16` | raw u16 bit patterns, 2 B/weight | mixed f32×bf16 TransB kernel, exact in-register widening |
-| `q8_0`, `q4_k`, `q5_k`, `q6_k` | raw GGUF blocks **plus** a pre-packed matmul RHS | `dotPacked` on the CPU quantized hot path (§10); q4_k/q6_k/q8_0 additionally try the dequant-in-kernel Metal GEMM |
+| `q8_0`, `q4_k`, `q5_k`, `q6_k` | raw GGUF blocks **plus** a pre-packed matmul RHS | `dotPacked` on the CPU quantized hot path (§10); q4_k/q6_k/q8_0 also try Metal, and CUDA additionally supports q5_k |
 | all other quant arms | raw GGUF blocks (`QuantWeight(dtype)`) | tagged `dot` through the generic quantized matmul |
 | `ptqtp` | up to three `.tq2_0` plane tensors (§10.9) — built in place by `toPtqtp`, or rebuilt bitwise from persisted `<name>.ptqtp0/1/2` plane tensors (`llm.ptqtp_gguf` pair-detection; [PTQTP.md](PTQTP.md)) | fused multi-plane entry: ONE Q8_K activation quantization + ONE worker-team dispatch computing every plane and summing in fixed plane order (bitwise equal to per-plane facade dots, which remain the gradient-path fallback) |
 
@@ -9991,9 +10000,9 @@ precision** — nothing is widened to f32 at load time:
 K-quant/Q8 formats get dedicated wrapper structs — `WeightQ4_K`, `WeightQ5_K`,
 `WeightQ6_K`, `WeightQ8_0` — each holding `value` (the raw block tensor) and
 `packed_rhs: fucina.PackedRhs(dtype)` built once at init, with
-`init`/`deinit`/`cloneView`/`concat` (and, except `WeightQ5_K`,
-`initWithRhsLifetime` plus a `rhs_lifetime: fucina.RhsLifetime` field that
-tells GPU dispatch whether the block bytes are process-stable).
+`init`/`deinit`/`cloneView`/`concat`, plus `initWithRhsLifetime` and a
+`rhs_lifetime: fucina.RhsLifetime` field that tells GPU dispatch whether the
+block bytes are process-stable.
 
 Binding a GGUF tensor:
 
@@ -10014,9 +10023,10 @@ pub const LoadOptions = struct { gpu_resident: bool = true };
   bytes) and copies/repacks it, so the result **does not borrow** the
   `gguf.File` — the file may be freed after loading (MoE borrow mode below is
   the exception).
-- `LoadOptions.gpu_resident` (default `true`): on `-Dgpu=metal` builds,
-  f16/q4_k/q6_k/q8_0 payloads are copied into device-owned storage
-  (`internal.gpu.allocResidentBytes`) so GPU matmuls read them with zero
+- `LoadOptions.gpu_resident` (default `true`): on GPU builds, provider-supported
+  payloads are copied into device-owned storage (f16/q4_k/q6_k/q8_0 on Metal;
+  q4_k/q5_k/q6_k/q8_0 on CUDA) through `internal.gpu.allocResidentBytes`, so
+  GPU matmuls read them with zero
   per-call transfer. The storage buffer OWNS the device bytes through a
   release hook: when the last tensor reference (including `cloneView`s sharing
   the buffer) drops, the hook frees the device allocation and evicts the GPU
@@ -10027,8 +10037,9 @@ pub const LoadOptions = struct { gpu_resident: bool = true };
 - `loadForFusion` is `loadWithOptions(..., .{ .gpu_resident = false })`: a
   weight loaded only to be consumed by `fuseLinear` skips the per-part device
   copy, because the fused result re-acquires residency itself — per-part
-  copies would be alloc+memcpy+free waste. If fusion later declines, the parts
-  remain fully usable on the CPU packed path.
+  copies would be alloc+memcpy+free waste. If fusion later declines,
+  `fuseLinear` restores ordinary per-part residency for provider-supported
+  formats before returning them as independent linears.
 
 Pre-fusion:
 
@@ -10043,10 +10054,13 @@ count (planes concatenate plane-wise — byte-identical to decorating the
 fused matrix; mixed plane counts return `null` like mixed formats). On
 success the parts are **consumed**
 (deinitialized) and the fused weight is returned; when the parts' formats
-differ, or the format has no fused fast path, it returns `null` and leaves
-the parts untouched; fewer than 2 or more than 4 parts is
+differ, or the format has no fused fast path, it returns `null` with all
+parts still valid. On capable GPU builds their values may move to resident
+storage (the semantic tensor/tag/packed-RHS values are unchanged); fewer than
+2 or more than 4 parts is
 `Error.InvalidWeightShape`. Fused dense f32/f16 and quant
-q4_k/q6_k/q8_0 results re-acquire GPU residency on Metal builds.
+q4_k/q6_k/q8_0 results re-acquire GPU residency on Metal builds; CUDA also
+re-acquires it for q5_k.
 
 Forward/apply entry points on `LinearWeight`:
 
@@ -10069,8 +10083,9 @@ pub fn deinit(self: *LinearWeight) void
 
 - `linearSeq` computes `input · Wᵀ` with the format's fastest route: packed
   quantized kernels for q4_k/q5_k/q6_k/q8_0 (with a GPU attempt first for
-  q4_k/q6_k/q8_0 — declined when the input requires gradients or the exec
-  gate says the shape is too small, falling back to the CPU packed path; at
+  q4_k/q6_k/q8_0 on Metal and those plus q5_k on CUDA — declined when
+  the input requires gradients or the exec gate says the shape is too
+  small, falling back to the CPU packed path; at
   decode shapes (`seq < 4`, no gradients) q5_k and q6_k instead contract
   against the resident GGUF-native compact blocks — bitwise-equal outputs,
   ~1.57x/1.30x fewer weight bytes streamed than the byte-expanded packed
@@ -10237,7 +10252,7 @@ Metal-residency utilities shared by loaders and eager dispatch batching:
   residency policy as the loaders. Returns `null` for empty `parts` or when
   `require_device` is set and no device storage is available;
   mismatched part shapes are `Error.InvalidWeightShape`. Device-capable
-  dtypes: q4_k/q6_k/q8_0.
+  dtypes: q4_k/q6_k/q8_0 on both providers, plus q5_k on CUDA.
 
 ### 13.3 GGUF metadata glue (`src/llm/gguf_meta.zig`)
 

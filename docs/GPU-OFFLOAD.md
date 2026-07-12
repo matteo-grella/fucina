@@ -14,7 +14,8 @@ command/stream, copy back, return. It was simple, but it charged every op for a
 host round trip even when the next action was another GPU GEMM or independent
 CPU work.
 
-The dense f32/f16 and stable-weight Q4_K/Q6_K/Q8_0 contract is:
+The dense f32/f16 and stable-weight quantized contract (Q4_K/Q6_K/Q8_0 on
+Metal; those plus Q5_K on CUDA) is:
 
 1. validate and allocate the ordinary CPU-visible output through
    `ExecContext`;
@@ -129,12 +130,12 @@ with f16 inputs and a direct f32 output; CUDA asks `cublasGemmEx` for f32 C.
 This removes the old process-global f16 staging lock, f16 result buffer, CPU
 widen pass, and an unnecessary output rounding step.
 
-Stable-weight dense Q4_K/Q6_K/Q8_0 linears also bind the ordinary input/output
+Stable-weight dense quantized linears also bind the ordinary input/output
 tensor storage directly. Metal copies at most 4 KiB of 32-row tile descriptors
 into command-buffer-owned bytes and supports up to 8192 rows in one eager
 submission. CUDA keeps a pinned/device tile pair in each in-flight slot and
 launches the vendored dequant kernel on the persistent compute stream. On
-compute capability 7 or newer, Q4_K/Q6_K/Q8_0 prefill uses f16-input WMMA with
+compute capability 7 or newer, Q4_K/Q5_K/Q6_K/Q8_0 prefill uses f16-input WMMA with
 f32 accumulation after dequantizing to the same half-rounded shared operands as
 the original scalar-FFMA kernel. The unsplit/grouped launcher chooses a
 32-column tile only when a 64-column grid would fill less than two thirds of
@@ -188,6 +189,12 @@ backend rather than hidden inside the current f16-WMMA numerical contract.
 
 Grouped MoE remains phase-synchronous by necessity: CPU gather feeds gate/up,
 CPU GeGLU consumes that output and feeds down, and CPU scatter consumes down.
+
+The Q5_K grouped kernel is implemented and parity-tested at the provider's
+tile-table API, but no current model-specific MoE loader routes Q5_K expert
+stacks to it. Gemma/Diffusion currently use Q4_K or Q6_K gate/up plus Q8_0
+down; other Q5_K expert layouts retain their CPU orchestration. Dense Q5_K
+linears are the production model path added here.
 Metal waits at those two CPU boundaries over unified memory. CUDA now queues
 panel/tile H2D, kernel, and panel D2H through its persistent streams/events and
 performs one host fence at each boundary; it no longer synchronizes compute
@@ -354,9 +361,12 @@ packed CPU comparison):
 | f16 128×4096×1024 resident | 1774.8 | 237.5 | 3.9 | 5240.1 |
 | f16 1×151936×1024 resident | 8232.8 | 797.6 | 3.9 | 421.7 |
 | Q4_K 32×4096×1024 | 267.8 | 108.6 | 6.0 | 4074.7 |
+| Q5_K 32×1024×512 | 63.0 | 46.4 | 5.7 | 1451.3 |
+| Q5_K 32×4096×1024 | 263.7 | 134.8 | 6.3 | 3307.8 |
 | Q6_K 32×4096×1024 | 881.1 | 111.5 | 5.9 | 4013.4 |
 | Q8_0 32×4096×1024 | 653.2 | 111.0 | 6.3 | 4133.5 |
 | Q4_K 128×4096×4096 | 4212.4 | 1035.1 | 4.0 | 5788.6 |
+| Q5_K 128×4096×4096 | 5577.7 | 1409.8 | 16.9 | 3854.2 |
 | Q6_K 128×4096×4096 | 8144.7 | 844.3 | 3.7 | 7648.5 |
 | Q8_0 128×4096×4096 | 4038.9 | 973.6 | 4.0 | 6246.0 |
 
@@ -406,17 +416,43 @@ Qwen3-4B Q4_K_M pp128 was also effectively flat in an A/B/A run (197 vs 198
 tok/s). The 11–37% claim is therefore deliberately an offloaded-op throughput
 claim, not a claim that every end-to-end prompt gains that amount.
 
-At 1×4096×4096 quantized decode, packed CPU still won (58–97 µs versus
-101–107 µs GPU), so the existing CUDA quant-decode arm remains opt-in. The
-resident f16 result is different: even small decode wins decisively because
+Q5_K uses a format-specific decode crossover because the CPU switches from
+compact blocks to its lane-packed x8 kernel at row four. With 31 workers plus
+the caller, 1×4096² stayed on CPU (95.8 versus 108.6 µs), while
+1×6144×4096 won on CUDA (212.5 versus 159.4 µs); rows 2, 4, and 8 at 4096²
+were 230.0→184.1, 362.9→287.7, and 528.8→298.4 µs. Q5_K therefore uses
+GEMV for rows 1–3, tiled MMA for rows 4–8, and a default
+`FUCINA_GPU_MIN_WORK_DECODE_Q5=3·2^23` gate. The global CUDA quant-decode arm
+remains opt-in. The resident f16 result is different: even small decode wins decisively because
 only the activation/output cross PCIe, hence its residency-aware gate.
 
 Provider tests add an edge-tile, two-GEMM dependency chain that performs no
 host read between commands, direct-f32 f16 checks, and shared-input async
-Q4_K/Q6_K/Q8_0 checks against CPU references. They also mutate an input after
+Q4_K/Q5_K/Q6_K/Q8_0 checks against dequantized CPU references. They also mutate an input after
 submission to prove the reader fence. CUDA's quant test forces both WMMA and
 scalar kernels, checks each against the CPU reference, and compares them
-directly. The grouped CUDA tests exercise the persistent upload/compute/download
-event chain.
+directly. Q5_K additionally covers edge tiles, grouped expert tiles, direct
+eager storage, split-K, and GEMV; the parity-checking benchmark covers the
+m=4 tiled decode transition. Both NVRTC-source and committed-PTX test roots
+pass. The grouped CUDA tests exercise the
+persistent upload/compute/download event chain.
 The normal Metal and remote CUDA test roots pass, as do `cuda-check`, the
 default core root, and `arch-check` (zero SCCs).
+
+Mixed-format `*_K_M` fusion candidates are initially loaded without device
+copies. When fusion declines, `fuseLinear` now restores ordinary per-part GPU
+residency; otherwise each eager prefill would stream the same weights on every
+pass. On Qwen3-0.6B-Q5_K_M tracing changed from 84 streamed calls to zero and
+reported 330 resident asynchronous quant submissions in the timed pp32 pass.
+
+Q5_K model-level arithmetic is tolerance-equivalent, not bit-identical to the
+CPU packed kernel: CPU first quantizes activations to Q8_K, while CUDA consumes
+f16-rounded activations and dequantized weights. On Qwen3-0.6B-Q5_K_M a fixed
+32-token prompt produced the exact same 32-token greedy continuation; warm
+prefill improved 503.3→770.3 tok/s at 32 tokens and 620.3→1167.1 tok/s at 128,
+while opt-in decode improved 62.85→92.30 tok/s. A Q5_K_S 38-token prose prompt
+is the recorded counterexample to any stronger parity claim: max/rms final-logit
+error was 0.980/0.226 and a 0.10 CPU top-two margin reversed. Direct op tests
+remain the correctness oracle because they compare each CUDA result to an
+explicitly dequantized f32 reference (representative maximum absolute errors
+2.02e-3 to 7.39e-3).

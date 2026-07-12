@@ -1,7 +1,7 @@
 //! CUDA GPU GEMM provider (`-Dgpu=cuda`) — Zig host side.
 //!
 //! Same eager provider contract as Metal: dense f32/f16 and stable-weight
-//! Q4_K/Q6_K/Q8_0 commands submit to a
+//! Q4_K/Q5_K/Q6_K/Q8_0 commands submit to a
 //! persistent stream and return with a completion token on output storage;
 //! dependent GPU calls consume the producer device pointer and CPU access
 //! performs the deferred visibility wait. Submission failure falls through to
@@ -20,7 +20,7 @@
 //!     stream over PCIe, so a transient work floor (default 2^33 m·n·k and
 //!     m ≥ 128, FUCINA_GPU_MIN_WORK_TRANSIENT) sits behind the ordinary gates.
 //!   - f16 NT GEMM (cublasGemmEx, f32 accumulate + direct f32 async output).
-//!   - Quantized dequant-in-kernel GEMM (Q4_K/Q6_K/Q8_0) via the vendored
+//!   - Quantized dequant-in-kernel GEMM (Q4_K/Q5_K/Q6_K/Q8_0) via the vendored
 //!     kernels (`cuda/kernels.cu` → committed `cuda/kernels.ptx`, driver JIT;
 //!     NVRTC recompile fallback, FUCINA_GPU_KERNELS=src forces it). Adaptive
 //!     N32/N64 WMMA tiles use tensor cores on capable devices; the original
@@ -61,6 +61,9 @@ pub const enabled = build_options.gpu_kind == .cuda;
 /// MoE) is implemented. Must stay `enabled and ...` so the module is
 /// comptime-dead on non-cuda builds.
 pub const has_quant_gemm = enabled;
+/// CUDA's vendored dequant kernels cover Q5_K in addition to the common
+/// Q4_K/Q6_K/Q8_0 provider surface. Metal deliberately leaves Q5_K on CPU.
+pub const has_q5_k_quant = enabled;
 
 pub const Orient = enum(c_int) { nn = 0, tn = 1, nt = 2 };
 
@@ -75,6 +78,7 @@ const State = struct {
     min_work_qmoe: u64 = default_min_work_qmoe,
     min_work_dense_q6: u64 = default_min_work_dense_q6,
     min_work_packed_q4: u64 = default_min_work_packed_q4,
+    min_work_packed_q5: u64 = default_min_work_packed_q5,
     min_work_packed_q6: u64 = default_min_work_packed_q6,
     min_work_packed_q8: u64 = default_min_work_packed_q8,
     qmoe_min_fill_pct: u64 = default_qmoe_min_fill_pct,
@@ -92,9 +96,13 @@ const State = struct {
     /// dispatch remains allocation-free. FUCINA_GPU_QUANT_SPLIT_K=0 keeps one
     /// block/output tile.
     quant_split_k: bool = true,
-    /// FUCINA_GPU_DECODE=1 opts into the experimental m<=8 dequant-dot GEMV
-    /// decode arm (default off pending a sampled-token parity-oracle pass).
+    /// FUCINA_GPU_DECODE=1 opts into experimental m<=8 quantized decode
+    /// (GEMV normally; Q5_K switches to tiled MMA at m=4..8). Default off because
+    /// CPU/GPU quant arithmetic is tolerance-equivalent, not bit-identical.
     decode_enabled: bool = false,
+    /// Q5_K's compact CPU decode kernel is unusually strong; require enough
+    /// work to cross its measured RTX/CPU boundary even when decode is on.
+    min_work_decode_q5: u64 = default_min_work_decode_q5,
     /// Prefill-attention offload gate (q·kv·heads·d work).
     min_work_attn: u64 = default_min_work_attn,
 };
@@ -121,12 +129,16 @@ const default_min_work_gemv: u64 = 1 << 24;
 /// Quantized grouped-MoE / dense-quant gates.
 const default_min_work_qmoe: u64 = 1 << 30;
 const default_min_work_dense_q6: u64 = 1 << 22;
-/// Packed-CPU dense-linear crossovers on the reference Ada host: Q4_K waits
-/// for a Qwen-sized 2^27 op; Q6_K/Q8_0 already win at the 25M-work Parakeet
-/// shape, so 2^24 is the conservative resident floor.
+/// Packed-CPU dense-linear crossovers on the reference Ada host. Q5_K wins at
+/// the smallest admitted 32x1024x512 shape (47.7 vs 63.3 us), so 2^24 keeps
+/// the measured boundary while rejecting lower-work calls.
 const default_min_work_packed_q4: u64 = 1 << 27;
+const default_min_work_packed_q5: u64 = 1 << 24;
 const default_min_work_packed_q6: u64 = 1 << 24;
 const default_min_work_packed_q8: u64 = 1 << 24;
+/// Q5_K decode crossover against the compact (not x8-packed) CPU route:
+/// 4096x4096 loses narrowly, while 6144x4096 and m>=2 at 4096 square win.
+const default_min_work_decode_q5: u64 = 3 << 23;
 const default_qmoe_min_fill_pct: u64 = 50;
 /// Without residency every RHS streams over PCIe (measured 10.6 GB/s pageable
 /// on the reference rig — ~9.5 ms per ffn-sized f32 matrix). The measured
@@ -348,6 +360,9 @@ fn initConfigOnce() void {
     if (std.c.getenv("FUCINA_GPU_MIN_WORK_DENSE_Q4")) |v_ptr| {
         state.min_work_packed_q4 = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_packed_q4;
     }
+    if (std.c.getenv("FUCINA_GPU_MIN_WORK_DENSE_Q5")) |v_ptr| {
+        state.min_work_packed_q5 = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_packed_q5;
+    }
     if (std.c.getenv("FUCINA_GPU_MIN_WORK_DENSE_Q8")) |v_ptr| {
         state.min_work_packed_q8 = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_packed_q8;
     }
@@ -374,6 +389,9 @@ fn initConfigOnce() void {
     if (std.c.getenv("FUCINA_GPU_DECODE")) |v_ptr| {
         const v = std.mem.span(v_ptr);
         if (v.len > 0 and v[0] != '0') state.decode_enabled = true;
+    }
+    if (std.c.getenv("FUCINA_GPU_MIN_WORK_DECODE_Q5")) |v_ptr| {
+        state.min_work_decode_q5 = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_decode_q5;
     }
     if (std.c.getenv("FUCINA_GPU_MIN_WORK_ATTN")) |v_ptr| {
         state.min_work_attn = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_attn;
@@ -1362,13 +1380,13 @@ pub const QFormat = enum(c_int) {
     q8_0 = 0,
     q6_k = 1,
     q4_k = 2,
+    q5_k = 3,
 
     /// K (the reduced dim) must be a whole number of blocks.
     pub fn kMultiple(self: QFormat) usize {
         return switch (self) {
             .q8_0 => 32,
-            .q6_k => 256,
-            .q4_k => 256,
+            .q4_k, .q5_k, .q6_k => 256,
         };
     }
 };
@@ -1686,11 +1704,11 @@ const kernels_ptx = @embedFile("cuda/kernels.ptx");
 const kernels_src = @embedFile("cuda/kernels.cu");
 
 const Kernels = struct {
-    mul_mm: [3]api.CUfunction, // indexed by @intFromEnum(QFormat)
-    mul_mm_mma: [3]?api.CUfunction,
-    mul_mm_mma_n32: [3]?api.CUfunction,
+    mul_mm: [4]api.CUfunction, // indexed by @intFromEnum(QFormat)
+    mul_mm_mma: [4]?api.CUfunction,
+    mul_mm_mma_n32: [4]?api.CUfunction,
     reduce_split_k: ?api.CUfunction,
-    gemv: [3]api.CUfunction,
+    gemv: [4]api.CUfunction,
     attn_f16: api.CUfunction,
     // ES kernels ([0] = f16, [1] = f32). Optional: a stale vendored PTX
     // without them only disables the device ES arm (CPU fallback), never
@@ -1768,10 +1786,10 @@ fn ensureKernels(ctx: *Ctx) ?*Kernels {
         return null;
     }
     var ks: Kernels = undefined;
-    const mul_names = [_][:0]const u8{ "fucina_mul_mm_q8_0", "fucina_mul_mm_q6_K", "fucina_mul_mm_q4_K" };
-    const mul_mma_names = [_][:0]const u8{ "fucina_mul_mm_mma_q8_0", "fucina_mul_mm_mma_q6_K", "fucina_mul_mm_mma_q4_K" };
-    const mul_mma_n32_names = [_][:0]const u8{ "fucina_mul_mm_mma_n32_q8_0", "fucina_mul_mm_mma_n32_q6_K", "fucina_mul_mm_mma_n32_q4_K" };
-    const gemv_names = [_][:0]const u8{ "fucina_gemv_q8_0", "fucina_gemv_q6_K", "fucina_gemv_q4_K" };
+    const mul_names = [_][:0]const u8{ "fucina_mul_mm_q8_0", "fucina_mul_mm_q6_K", "fucina_mul_mm_q4_K", "fucina_mul_mm_q5_K" };
+    const mul_mma_names = [_][:0]const u8{ "fucina_mul_mm_mma_q8_0", "fucina_mul_mm_mma_q6_K", "fucina_mul_mm_mma_q4_K", "fucina_mul_mm_mma_q5_K" };
+    const mul_mma_n32_names = [_][:0]const u8{ "fucina_mul_mm_mma_n32_q8_0", "fucina_mul_mm_mma_n32_q6_K", "fucina_mul_mm_mma_n32_q4_K", "fucina_mul_mm_mma_n32_q5_K" };
+    const gemv_names = [_][:0]const u8{ "fucina_gemv_q8_0", "fucina_gemv_q6_K", "fucina_gemv_q4_K", "fucina_gemv_q5_K" };
     for (mul_names, 0..) |name, i| {
         if (d.cuModuleGetFunction(&ks.mul_mm[i], module, name.ptr) != 0) return null;
     }
@@ -1835,7 +1853,7 @@ fn quantMulMmLaunch(ctx: *const Ctx, kernels: *const Kernels, format: QFormat, g
                 // reduction cost. Q4/Q8 reach their optimum with two.
                 const split_cap: usize = switch (format) {
                     .q6_k => 3,
-                    .q4_k, .q8_0 => 2,
+                    .q4_k, .q5_k, .q8_0 => 2,
                 };
                 const max_split = @min(split_cap, @max(@as(usize, 1), k / 128));
                 const split_k = @min(desired_split, max_split);
@@ -1857,6 +1875,13 @@ fn quantMulMmLaunch(ctx: *const Ctx, kernels: *const Kernels, format: QFormat, g
         if (kernels.mul_mm_mma[index]) |kernel| return .{ .kernel = kernel, .n_tile = 64, .block_y = 16 };
     }
     return .{ .kernel = kernels.mul_mm[index], .n_tile = 64, .block_y = 16 };
+}
+
+fn quantDecodeUsesGemv(format: QFormat, m: usize) bool {
+    // Q5_K switches to Fucina's lane-packed CPU kernel at m=4. Keep its
+    // warp-per-row CUDA path on the compact-decode rows (m<4); the tiled MMA
+    // path is the relevant GPU contender for batch rows 4..8.
+    return m <= 8 and (format != .q5_k or m < 4);
 }
 
 /// Eager dense/shared-input quantized NT GEMM. Stable model weights resolve to
@@ -1917,7 +1942,8 @@ pub fn gemmQuantNtAsync(
     const rhs_dev = residentDevPtr(ctx, rhs_bytes, true) orelse return false;
     if (trace_on) tinc(&trace.rhs_resident, 1);
 
-    if (m <= 8) {
+    const use_gemv = quantDecodeUsesGemv(format, m);
+    if (use_gemv) {
         if (copy_queued and (d.cuEventRecord(slot.inputs_ready, ctx.upload_stream) != 0 or
             d.cuStreamWaitEvent(ctx.stream, slot.inputs_ready, 0) != 0)) return false;
         var p_src0 = rhs_dev;
@@ -2197,8 +2223,9 @@ pub fn gemmQGroupedNt(
     return true;
 }
 
-/// Decode arm (FUCINA_GPU_DECODE=1): warp-per-row dequant-dot
-/// GEMV for m <= 8. **Resident-or-adoptable weights only**: at decode shapes
+/// Decode arm (FUCINA_GPU_DECODE=1): warp-per-row dequant-dot GEMV for the
+/// rows selected by `quantDecodeUsesGemv`. **Resident-or-adoptable weights
+/// only**: at decode shapes
 /// the op is bytes-bound, so streaming the weights over PCIe per token is a
 /// strict loss vs the CPU int8 kernels — a registry miss on transient RHS
 /// refuses and the caller stays on CPU. f32 dequant (no f16 rounding),
@@ -2258,7 +2285,7 @@ fn gemvQuant(
 /// Single quantized NT GEMM with host-memory operands, staged through the
 /// shared panels: `c[m,n] = a[m,k] · dequant(W)ᵀ` (one "expert"). Same
 /// wrapper shape as the Metal provider; takes `qmoe_lock` itself. With
-/// FUCINA_GPU_DECODE=1 and m <= 8 it takes the GEMV decode arm instead.
+/// FUCINA_GPU_DECODE=1 it takes the selected decode route instead.
 pub fn gemmQuantNt(
     format: QFormat,
     rhs_bytes: []const u8,
@@ -2276,7 +2303,7 @@ pub fn gemmQuantNt(
     const out_elems = std.math.mul(usize, m, n) catch return false;
     if (a.len < in_elems or c.len < out_elems) return false;
 
-    if (state.decode_enabled and m <= 8 and n % 4 == 0 and n <= std.math.maxInt(i32)) {
+    if (state.decode_enabled and quantDecodeUsesGemv(format, m) and n % 4 == 0 and n <= std.math.maxInt(i32)) {
         return gemvQuant(format, rhs_bytes, rhs_cacheable, nb01, a, c, m, n, k);
     }
 
@@ -2375,6 +2402,7 @@ pub fn shouldUseGpuDenseQuant(format: QFormat, total_work: u64) bool {
     ensureConfig();
     const min_work = switch (format) {
         .q6_k => state.min_work_dense_q6,
+        .q5_k => state.min_work_packed_q5,
         .q4_k, .q8_0 => state.min_work_qmoe,
     };
     const pass = state.gpu_enabled and total_work >= min_work;
@@ -2387,6 +2415,7 @@ pub fn shouldUseGpuDenseQuantPacked(format: QFormat, total_work: u64) bool {
     ensureConfig();
     const min_work = switch (format) {
         .q4_k => state.min_work_packed_q4,
+        .q5_k => state.min_work_packed_q5,
         .q6_k => state.min_work_packed_q6,
         .q8_0 => state.min_work_packed_q8,
     };
@@ -2406,6 +2435,15 @@ pub fn setMinWorkQMoeForTest(v: u64) void {
 pub fn decodeGemvEnabled() bool {
     ensureConfig();
     return state.decode_enabled;
+}
+
+pub fn shouldUseGpuQuantDecode(format: QFormat, m: usize, n: usize, k: usize) bool {
+    if (!decodeGemvEnabled()) return false;
+    if (format != .q5_k) return true;
+    const work = std.math.mul(u64, std.math.mul(u64, m, n) catch std.math.maxInt(u64), k) catch std.math.maxInt(u64);
+    const pass = work >= state.min_work_decode_q5;
+    tgate(pass);
+    return pass;
 }
 
 /// Test seam: parity tests pin the decode arm off so their m <= 8 cases
@@ -2673,6 +2711,35 @@ test "cuda gate applies the transient floor above min_work" {
     try std.testing.expect(shouldUseGpu(512, 2048, 2048) == state.gpu_enabled);
 }
 
+test "cuda Q5_K decode gate preserves the compact CPU crossover" {
+    if (comptime !enabled) return error.SkipZigTest;
+    ensureConfig();
+    const saved_decode = state.decode_enabled;
+    const saved_q5 = state.min_work_decode_q5;
+    defer {
+        state.decode_enabled = saved_decode;
+        state.min_work_decode_q5 = saved_q5;
+    }
+
+    state.decode_enabled = true;
+    state.min_work_decode_q5 = default_min_work_decode_q5;
+    try std.testing.expect(!shouldUseGpuQuantDecode(.q5_k, 1, 4096, 4096));
+    try std.testing.expect(shouldUseGpuQuantDecode(.q5_k, 1, 6144, 4096));
+    try std.testing.expect(shouldUseGpuQuantDecode(.q5_k, 2, 4096, 4096));
+    // Existing formats retain the global opt-in behavior unchanged.
+    try std.testing.expect(shouldUseGpuQuantDecode(.q4_k, 1, 256, 256));
+    state.decode_enabled = false;
+    try std.testing.expect(!shouldUseGpuQuantDecode(.q5_k, 8, 16384, 16384));
+}
+
+test "cuda Q5_K decode selects GEMV below row four and tiled GEMM above" {
+    if (comptime !enabled) return error.SkipZigTest;
+    try std.testing.expect(quantDecodeUsesGemv(.q5_k, 3));
+    try std.testing.expect(!quantDecodeUsesGemv(.q5_k, 4));
+    try std.testing.expect(!quantDecodeUsesGemv(.q5_k, 8));
+    try std.testing.expect(quantDecodeUsesGemv(.q4_k, 8));
+}
+
 test "cuda gemm f16 NT parity vs f64 reference (f16-rounded output)" {
     if (comptime !enabled) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -2778,6 +2845,7 @@ fn buildQuantWeights(
         .q8_0 => .q8_0,
         .q6_k => .q6_k,
         .q4_k => .q4_k,
+        .q5_k => .q5_k,
     };
     const bpr = blocks.len / n;
     const wref = try allocator.alloc(f32, n * k);
@@ -2836,7 +2904,7 @@ fn expectQuantKernelAgreement(mma: []const f32, scalar: []const f32) !void {
     }
 }
 
-test "cuda quant gemm q6_K/q4_K/q8_0 parity vs dequantized reference" {
+test "cuda quant gemm q4_K/q5_K/q6_K/q8_0 parity vs dequantized reference" {
     if (comptime !enabled) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     if (context() == null) return error.SkipZigTest;
@@ -2855,10 +2923,11 @@ test "cuda quant gemm q6_K/q4_K/q8_0 parity vs dequantized reference" {
     const random = prng.random();
 
     const Case = struct { m: usize, n: usize, k: usize };
-    inline for (.{ QFormat.q6_k, QFormat.q4_k, QFormat.q8_0 }) |fmt| {
+    inline for (.{ QFormat.q6_k, QFormat.q4_k, QFormat.q5_k, QFormat.q8_0 }) |fmt| {
         const Block = switch (fmt) {
             .q6_k => dtype_mod.BlockQ6_K,
             .q4_k => dtype_mod.BlockQ4_K,
+            .q5_k => dtype_mod.BlockQ5_K,
             .q8_0 => dtype_mod.BlockQ8_0,
         };
         const k_mult = comptime fmt.kMultiple();
@@ -2928,10 +2997,11 @@ test "cuda quant gemm grouped expert tiles parity" {
     var prng = std.Random.DefaultPrng.init(23);
     const random = prng.random();
 
-    inline for (.{ QFormat.q6_k, QFormat.q4_k, QFormat.q8_0 }) |fmt| {
+    inline for (.{ QFormat.q6_k, QFormat.q4_k, QFormat.q5_k, QFormat.q8_0 }) |fmt| {
         const Block = switch (fmt) {
             .q6_k => dtype_mod.BlockQ6_K,
             .q4_k => dtype_mod.BlockQ4_K,
+            .q5_k => dtype_mod.BlockQ5_K,
             .q8_0 => dtype_mod.BlockQ8_0,
         };
         const k = 2 * comptime fmt.kMultiple();
@@ -2996,7 +3066,7 @@ test "cuda quant gemm grouped expert tiles parity" {
     }
 }
 
-test "cuda eager async dense quant Q4_K/Q6_K/Q8_0 uses direct tensor storage" {
+test "cuda eager async dense quant Q4_K/Q5_K/Q6_K/Q8_0 uses direct tensor storage" {
     if (comptime !enabled) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     if (context() == null) return error.SkipZigTest;
@@ -3013,10 +3083,11 @@ test "cuda eager async dense quant Q4_K/Q6_K/Q8_0 uses direct tensor storage" {
     const dtype_mod = @import("../dtype.zig");
     var prng = std.Random.DefaultPrng.init(31);
     const random = prng.random();
-    inline for (.{ QFormat.q6_k, QFormat.q4_k, QFormat.q8_0 }) |fmt| {
+    inline for (.{ QFormat.q6_k, QFormat.q4_k, QFormat.q5_k, QFormat.q8_0 }) |fmt| {
         const Block = switch (fmt) {
             .q6_k => dtype_mod.BlockQ6_K,
             .q4_k => dtype_mod.BlockQ4_K,
+            .q5_k => dtype_mod.BlockQ5_K,
             .q8_0 => dtype_mod.BlockQ8_0,
         };
         const m = 65;
@@ -3067,7 +3138,7 @@ test "cuda eager async dense quant Q4_K/Q6_K/Q8_0 uses direct tensor storage" {
     }
 }
 
-test "cuda decode gemv q6_K/q4_K/q8_0 parity vs dequantized reference" {
+test "cuda decode gemv q4_K/q5_K/q6_K/q8_0 parity vs dequantized reference" {
     if (comptime !enabled) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     if (context() == null) return error.SkipZigTest;
@@ -3076,15 +3147,18 @@ test "cuda decode gemv q6_K/q4_K/q8_0 parity vs dequantized reference" {
     var prng = std.Random.DefaultPrng.init(29);
     const random = prng.random();
 
-    inline for (.{ QFormat.q6_k, QFormat.q4_k, QFormat.q8_0 }) |fmt| {
+    inline for (.{ QFormat.q6_k, QFormat.q4_k, QFormat.q5_k, QFormat.q8_0 }) |fmt| {
         const Block = switch (fmt) {
             .q6_k => dtype_mod.BlockQ6_K,
             .q4_k => dtype_mod.BlockQ4_K,
+            .q5_k => dtype_mod.BlockQ5_K,
             .q8_0 => dtype_mod.BlockQ8_0,
         };
         const k = 2 * comptime fmt.kMultiple();
         const n = 68; // n % 4 == 0, not a multiple of the warp group
-        const m = 4;
+        // Q5_K uses GEMV for the compact-decode rows only; m>=4 deliberately
+        // takes the tiled MMA route (covered by the async GEMM test above).
+        const m = if (fmt == .q5_k) 3 else 4;
         const bpr = k / comptime fmt.kMultiple();
         const blocks = try allocator.alloc(Block, n * bpr);
         defer allocator.free(blocks);

@@ -807,6 +807,23 @@ Two internal records that frame the numbers above:
   Accelerate/AMX on the same machine — what makes the no-BLAS builds
   credible at training shapes.
 
+**CUDA Q5_K addendum (2026-07-12; no llama.cpp pairing).** RTX 5000 Ada
+Laptop + i9-13950HX, `-Dmax-threads=32 -Doptimize=ReleaseFast`, committed PTX,
+resident weights, 31 workers plus caller. The paired `bench-gpu-formats`
+CPU contender is Fucina's real compact Q5_K kernel for rows 1–3 and packed
+Q5_Kx8 kernel otherwise. Host-visible eager latency was 63.0→46.4 µs at
+32×1024×512, 263.7→134.8 µs at 32×4096×1024, and 5.578→1.410 ms at
+128×4096². The measured decode gate keeps 1×4096² on CPU (95.8 versus
+108.6 µs) but admits 1×6144×4096 (212.5→159.4 µs) and rows 2–8 at 4096²;
+Q5_K uses GEMV below row four and tiled MMA above it. Restoring residency when
+mixed-format fusion declines removed all 84 repeated streamed-weight calls
+(330 resident async submissions in the traced pp32 pass). Qwen3-0.6B-Q5_K_M
+warm prefill improved 503.3→770.3 tok/s at 32 tokens and 620.3→1167.1 at 128;
+opt-in decode improved 62.85→92.30 tok/s and reproduced the same 32-token
+greedy continuation. CPU/GPU quant arithmetic is tolerance-equivalent, not
+bit-identical; the Q5_K_S close-margin argmax counterexample and direct-op
+error bounds are recorded in [GPU-OFFLOAD.md](GPU-OFFLOAD.md).
+
 ---
 
 ## Recorded negatives

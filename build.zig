@@ -46,7 +46,7 @@ pub fn build(b: *std.Build) void {
     const gpu_kind = b.option(
         GpuKind,
         "gpu",
-        "GPU GEMM offload provider: none (default), metal (Apple Silicon; big f32/f16 GEMMs, dense quantized linears (Q4_K/Q6_K/Q8_0 prefill), and the MoE expert FFN run on the GPU; decode and training stay on CPU), cuda (Linux/NVIDIA; f32/f16 GEMMs via dlopen'd cuBLAS, quantized prefill + fused prefill attention via vendored PTX kernels, opt-in decode GEMV — no CUDA SDK at build time)",
+        "GPU GEMM offload provider: none (default), metal (Apple Silicon; big f32/f16 GEMMs, dense quantized linears (Q4_K/Q6_K/Q8_0 prefill), and the MoE expert FFN run on the GPU; decode and training stay on CPU), cuda (Linux/NVIDIA; f32/f16 GEMMs via dlopen'd cuBLAS, Q4_K/Q5_K/Q6_K/Q8_0 prefill + fused prefill attention via vendored PTX kernels, opt-in decode — no CUDA SDK at build time)",
     ) orelse .none;
     if (gpu_kind == .metal and target.result.os.tag != .macos) {
         @panic("-Dgpu=metal is only available on macOS");
@@ -1091,7 +1091,7 @@ pub fn build(b: *std.Build) void {
     configureGpu(b, gpu_formats_bench_exe, gpu_kind);
     const gpu_formats_bench_cmd = b.addRunArtifact(gpu_formats_bench_exe);
     if (b.args) |args| gpu_formats_bench_cmd.addArgs(args);
-    const gpu_formats_bench_step = b.step("bench-gpu-formats", "Packed CPU vs eager GPU f16/Q4_K/Q6_K/Q8_0 LLM linears");
+    const gpu_formats_bench_step = b.step("bench-gpu-formats", "Packed CPU vs eager GPU f16/Q4_K/Q5_K/Q6_K/Q8_0 LLM linears");
     gpu_formats_bench_step.dependOn(&gpu_formats_bench_cmd.step);
 
     const q5kmoe_bench_exe = b.addExecutable(.{

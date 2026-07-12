@@ -664,9 +664,15 @@ switch, `FUCINA_GPU_TRACE=1` dispatch tracing). CUDA extras:
 # prefill 109 -> 190 tok/s vs -Dgpu=none.
 zig build qwen3 -Dgpu=cuda -Doptimize=ReleaseFast -- models/Qwen3-4B-Q4_K_M.gguf --chat "..."
 
-# Experimental decode offload (m<=8 dequant-dot GEMV over resident weights):
+# CUDA also keeps Q5_K weights resident and offloads their dense prefill.
+# On Qwen3-0.6B-Q5_K_M, warm pp32 measured 503 -> 770 tok/s and pp128
+# 620 -> 1167 tok/s on the same host.
+zig build qwen3 -Dgpu=cuda -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q5_K_M.gguf --chat "..."
+
+# Experimental decode offload (m<=8 over resident weights; Q5_K uses GEMV
+# for m<4 and tiled MMA for m=4..8):
 # measured 12.7 -> 33.4 tok/s decode on the same rig. Opt-in while the
-# sampled-token parity oracles run CPU-only.
+# CPU/GPU quantized paths remain tolerance-equivalent rather than bit-identical.
 FUCINA_GPU_DECODE=1 zig build qwen3 -Dgpu=cuda -Doptimize=ReleaseFast -- models/Qwen3-4B-Q4_K_M.gguf --chat "..."
 
 # CUDA-only env knobs: FUCINA_GPU_TF32=1 (TF32 tensor cores for f32 GEMM,
@@ -674,6 +680,8 @@ FUCINA_GPU_DECODE=1 zig build qwen3 -Dgpu=cuda -Doptimize=ReleaseFast -- models/
 # non-resident f32 operands), FUCINA_GPU_VRAM_BUDGET (bytes, tracked),
 # FUCINA_GPU_QUANT_MMA=0 (diagnostic scalar fallback for quantized prefill),
 # FUCINA_GPU_QUANT_SPLIT_K=0 (diagnostic unsplit tensor-core prefill),
+# FUCINA_GPU_MIN_WORK_DENSE_Q5 (Q5_K prefill gate, default 2^24),
+# FUCINA_GPU_MIN_WORK_DECODE_Q5 (Q5_K decode gate, default 3*2^23),
 # FUCINA_GPU_KERNELS=src (NVRTC-recompile the vendored kernels).
 ```
 
@@ -717,7 +725,8 @@ zig build diffusion-gemma -Dgpu=metal -Doptimize=ReleaseFast -- models/diffusion
 FUCINA_MAX_THREADS=6 zig build qwen3 -Doptimize=ReleaseFast -- ...
 # Raise ABOVE 8 only at build time: -Dmax-threads=N
 
-# GPU GEMM offload: big f32/f16 GEMMs, dense quantized linears (Q4_K/Q6_K/Q8_0),
+# GPU GEMM offload: big f32/f16 GEMMs and dense quantized linears
+# (Q4_K/Q6_K/Q8_0 on Metal; those plus Q5_K on CUDA),
 # and the MoE expert FFN (Q6_K/Q8_0) run on the GPU. Metal quantized decode and training stay
 # on CPU; CUDA resident f16 decode can offload, while quantized decode remains opt-in.
 zig build <step> -Dgpu=metal -Doptimize=ReleaseFast -- ...

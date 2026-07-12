@@ -842,11 +842,13 @@ fn denseQuantMatmulGpuImpl(
 ) !?Tensor {
     if (comptime backend_mod.gpu_impl.enabled) {
         const gpu = backend_mod.gpu_impl;
+        if (comptime dtype == .q5_k and !gpu.has_q5_k_quant) return null;
         const fmt: gpu.QFormat = comptime switch (dtype) {
             .q4_k => .q4_k,
+            .q5_k => .q5_k,
             .q6_k => .q6_k,
             .q8_0 => .q8_0,
-            else => @compileError("denseQuantMatmulGpu supports q4_k/q6_k/q8_0 only"),
+            else => @compileError("denseQuantMatmulGpu supports q4_k/q5_k/q6_k/q8_0 only"),
         };
         const work = quantMatmulWork(m, n, k);
         // Prefill arm: m >= 32 behind the relevant CPU-competitor gate. Stable
@@ -861,7 +863,7 @@ fn denseQuantMatmulGpuImpl(
             gpu.shouldUseGpuDenseQuantPacked(fmt, work)
         else
             gpu.shouldUseGpuDenseQuant(fmt, work);
-        const decode_arm = m <= 8 and gpu.decodeGemvEnabled();
+        const decode_arm = m <= 8 and gpu.shouldUseGpuQuantDecode(fmt, m, n, k);
         if ((prefill_arm or decode_arm) and k % fmt.kMultiple() == 0 and n % 4 == 0 and
             input.isContiguous())
         {
@@ -933,11 +935,13 @@ pub fn denseQuantMatmulGpuSharedInputBatch(
 ) !?Tensor {
     if (comptime backend_mod.gpu_impl.enabled) {
         const gpu = backend_mod.gpu_impl;
+        if (comptime dtype == .q5_k and !gpu.has_q5_k_quant) return null;
         const fmt: gpu.QFormat = comptime switch (dtype) {
             .q4_k => .q4_k,
+            .q5_k => .q5_k,
             .q6_k => .q6_k,
             .q8_0 => .q8_0,
-            else => @compileError("denseQuantMatmulGpuSharedInputBatch supports q4_k/q6_k/q8_0 only"),
+            else => @compileError("denseQuantMatmulGpuSharedInputBatch supports q4_k/q5_k/q6_k/q8_0 only"),
         };
         if (batch_count == 0) return null;
         const per_work = quantMatmulWork(m, n, k);
@@ -987,8 +991,9 @@ fn denseQuantMatmulGpuForBlocks(
     k: usize,
 ) !?Tensor {
     if (n == 0) return null;
+    if (comptime dtype == .q5_k and !backend_mod.gpu_impl.has_q5_k_quant) return null;
     switch (dtype) {
-        .q4_k, .q6_k, .q8_0 => {},
+        .q4_k, .q5_k, .q6_k, .q8_0 => {},
         else => return null,
     }
     const nb01 = std.math.divExact(usize, rhs_bytes.len, n) catch return null;

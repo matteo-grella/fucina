@@ -44,6 +44,9 @@ pub const enabled = build_options.gpu_kind == .metal;
 /// the plain CPU story. Must be `enabled and ...`: a false `enabled` keeps
 /// the whole module comptime-dead on other builds (extern symbols, libc).
 pub const has_quant_gemm = enabled;
+/// Q5_K currently has a CUDA dequant kernel only. Keeping this capability
+/// explicit lets the shared exec/weight layer retain Metal's CPU fallback.
+pub const has_q5_k_quant = false;
 
 pub const Orient = enum(c_int) { nn = 0, tn = 1, nt = 2 };
 
@@ -1409,6 +1412,14 @@ pub fn setMinWorkQMoeForTest(v: u64) void {
 /// The Metal provider keeps decode on CPU by design — always false here;
 /// the CUDA provider opts in via FUCINA_GPU_DECODE=1.
 pub fn decodeGemvEnabled() bool {
+    return false;
+}
+
+pub fn shouldUseGpuQuantDecode(format: QFormat, m: usize, n: usize, k: usize) bool {
+    _ = format;
+    _ = m;
+    _ = n;
+    _ = k;
     return false;
 }
 

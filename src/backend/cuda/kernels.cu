@@ -13,7 +13,8 @@
 // association differs.
 
 //
-// The gemv family (decode m <= 8) is a warp-per-row
+// The gemv family (decode m <= 8; Q5_K uses it for m < 4 and switches to the
+// tiled MMA path above that) is a warp-per-row
 // dequant-dot in f32 (no f16 rounding of weights: decode competes with the
 // CPU int8 kernels under the same 5e-3 quant tier).
 //
@@ -45,6 +46,16 @@ typedef struct __align__(2) {
     unsigned char scales[K_SCALE_SIZE];
     unsigned char qs[QK_K / 2];
 } block_q4_K;
+
+typedef struct __align__(2) {
+    __half d;
+    __half dmin;
+    unsigned char scales[K_SCALE_SIZE];
+    unsigned char qh[QK_K / 8];
+    unsigned char qs[QK_K / 2];
+} block_q5_K;
+
+static_assert(sizeof(block_q5_K) == 176, "Q5_K ABI must match Zig/GGUF");
 
 // One 32-row output tile of one expert group; must mirror QMMTile in
 // backend/cuda.zig and metal.zig (i32 x4).
@@ -123,6 +134,28 @@ __device__ __forceinline__ void dequant_q4_K(const block_q4_K *xb, int il, float
     const unsigned mask = il < 2 ? 0x0Fu : 0xF0u;
 #pragma unroll
     for (int i = 0; i < 16; ++i) reg[i] = dl * (q[i] & mask) - ml;
+}
+
+__device__ __forceinline__ void dequant_q5_K(const block_q5_K *xb, int il, float *reg) {
+    // Q5_K stores eight independently scaled 32-value sub-blocks. Low four
+    // bits are interleaved in qs (two sub-blocks per byte); qh[offset]'s
+    // sub-block bit supplies bit 4. This is the direct CUDA spelling of
+    // backend/quant/q5_k.zig:q5KValue + getScaleMinK4.
+    const int subblock = il >> 1;
+    const int offset = (il & 1) * 16;
+    unsigned char sc, mn;
+    get_scale_min_k4_just2(subblock, 0, xb->scales, &sc, &mn);
+    const float dl = __half2float(xb->d) * sc;
+    const float ml = __half2float(xb->dmin) * mn;
+    const unsigned char *ql = xb->qs + (subblock >> 1) * 32 + offset;
+    const unsigned char *qh = xb->qh + offset;
+    const unsigned char high_mask = (unsigned char)(1u << subblock);
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        const unsigned char low = (subblock & 1) ? (ql[i] >> 4) : (ql[i] & 0x0F);
+        const unsigned char q = low + ((qh[i] & high_mask) ? 16 : 0);
+        reg[i] = dl * q - ml;
+    }
 }
 
 // --- Grouped mul_mm ----------------------------------------------------------
@@ -246,6 +279,12 @@ extern "C" __global__ void fucina_mul_mm_q4_K(
     int ne00, int ne01, unsigned long long nb01, unsigned long long nb02,
     float *, int, unsigned long long) {
     mul_mm_scalar_body<block_q4_K, 16, dequant_q4_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
+}
+extern "C" __global__ void fucina_mul_mm_q5_K(
+    const char *src0, const float *src1, const fucina_qmm_tile *tiles, float *dst,
+    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02,
+    float *, int, unsigned long long) {
+    mul_mm_scalar_body<block_q5_K, 16, dequant_q5_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02);
 }
 
 // --- Tensor-core grouped mul_mm ---------------------------------------------
@@ -380,6 +419,12 @@ extern "C" __global__ void fucina_mul_mm_mma_q4_K(
     float *partial, int split_k, unsigned long long partial_stride) {
     mul_mm_mma_body<64, block_q4_K, 16, dequant_q4_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02, partial, split_k, partial_stride);
 }
+extern "C" __global__ void fucina_mul_mm_mma_q5_K(
+    const char *src0, const float *src1, const fucina_qmm_tile *tiles, float *dst,
+    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02,
+    float *partial, int split_k, unsigned long long partial_stride) {
+    mul_mm_mma_body<64, block_q5_K, 16, dequant_q5_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02, partial, split_k, partial_stride);
+}
 
 extern "C" __global__ void fucina_mul_mm_mma_n32_q8_0(
     const char *src0, const float *src1, const fucina_qmm_tile *tiles, float *dst,
@@ -398,6 +443,12 @@ extern "C" __global__ void fucina_mul_mm_mma_n32_q4_K(
     int ne00, int ne01, unsigned long long nb01, unsigned long long nb02,
     float *partial, int split_k, unsigned long long partial_stride) {
     mul_mm_mma_body<32, block_q4_K, 16, dequant_q4_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02, partial, split_k, partial_stride);
+}
+extern "C" __global__ void fucina_mul_mm_mma_n32_q5_K(
+    const char *src0, const float *src1, const fucina_qmm_tile *tiles, float *dst,
+    int ne00, int ne01, unsigned long long nb01, unsigned long long nb02,
+    float *partial, int split_k, unsigned long long partial_stride) {
+    mul_mm_mma_body<32, block_q5_K, 16, dequant_q5_K>(src0, src1, tiles, dst, ne00, ne01, nb01, nb02, partial, split_k, partial_stride);
 }
 
 extern "C" __global__ void fucina_reduce_split_k(
@@ -592,6 +643,10 @@ extern "C" __global__ void fucina_gemv_q6_K(
 extern "C" __global__ void fucina_gemv_q4_K(
     const char *src0, const float *x, float *y, int ne00, int ne01, int m, unsigned long long nb01) {
     gemv_body<block_q4_K, 16, dequant_q4_K>(src0, x, y, ne00, ne01, m, nb01);
+}
+extern "C" __global__ void fucina_gemv_q5_K(
+    const char *src0, const float *x, float *y, int ne00, int ne01, int m, unsigned long long nb01) {
+    gemv_body<block_q5_K, 16, dequant_q5_K>(src0, x, y, ne00, ne01, m, nb01);
 }
 
 // --- Evolution-strategies kernels (fucina.es device arm) --------------------

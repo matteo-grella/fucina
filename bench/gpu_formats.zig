@@ -33,6 +33,16 @@ const f16_shapes = [_]Shape{
 
 const quant_shapes = [_]Shape{
     .{ .name = "decode", .m = 1, .n = 4096, .k = 4096, .iters = 10 },
+    .{ .name = "decode2", .m = 2, .n = 4096, .k = 4096, .iters = 8 },
+    .{ .name = "decode3", .m = 3, .n = 4096, .k = 4096, .iters = 8 },
+    .{ .name = "decode4", .m = 4, .n = 4096, .k = 4096, .iters = 8 },
+    .{ .name = "decode5", .m = 5, .n = 4096, .k = 4096, .iters = 8 },
+    .{ .name = "decode6", .m = 6, .n = 4096, .k = 4096, .iters = 8 },
+    .{ .name = "decode8", .m = 8, .n = 4096, .k = 4096, .iters = 8 },
+    .{ .name = "decode-qkv", .m = 1, .n = 6144, .k = 4096, .iters = 8 },
+    .{ .name = "decode-ffn", .m = 1, .n = 12288, .k = 4096, .iters = 6 },
+    .{ .name = "decode-lmhead", .m = 1, .n = 151936, .k = 1024, .iters = 4 },
+    .{ .name = "small32", .m = 32, .n = 1024, .k = 512, .iters = 8 },
     .{ .name = "parakeet32", .m = 32, .n = 1536, .k = 512, .iters = 8 },
     .{ .name = "qwen32", .m = 32, .n = 4096, .k = 1024, .iters = 8 },
     .{ .name = "prefill32", .m = 32, .n = 4096, .k = 4096, .iters = 6 },
@@ -42,7 +52,7 @@ const quant_shapes = [_]Shape{
 
 const Options = struct {
     section: enum { all, f16, quant } = .all,
-    format: enum { all, q4_k, q6_k, q8_0 } = .all,
+    format: enum { all, q4_k, q5_k, q6_k, q8_0 } = .all,
     filter: ?[]const u8 = null,
     iters: ?usize = null,
     queue_depth: usize = 4,
@@ -109,18 +119,21 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     if (opts.section == .all or opts.section == .quant) {
-        inline for (.{ raw.DType.q4_k, raw.DType.q6_k, raw.DType.q8_0 }) |dtype| {
-            const wanted = switch (dtype) {
-                .q4_k => opts.format == .all or opts.format == .q4_k,
-                .q6_k => opts.format == .all or opts.format == .q6_k,
-                .q8_0 => opts.format == .all or opts.format == .q8_0,
-                else => unreachable,
-            };
-            if (wanted) {
-                for (quant_shapes) |shape| {
-                    if (!matches(opts.filter, shape.name)) continue;
-                    try benchQuant(dtype, allocator, out, shape, opts.iters orelse shape.iters, opts.queue_depth, config);
-                    try out.flush();
+        inline for (.{ raw.DType.q4_k, raw.DType.q5_k, raw.DType.q6_k, raw.DType.q8_0 }) |dtype| {
+            if (comptime dtype != .q5_k or gpu.has_q5_k_quant) {
+                const wanted = switch (dtype) {
+                    .q4_k => opts.format == .all or opts.format == .q4_k,
+                    .q5_k => opts.format == .all or opts.format == .q5_k,
+                    .q6_k => opts.format == .all or opts.format == .q6_k,
+                    .q8_0 => opts.format == .all or opts.format == .q8_0,
+                    else => unreachable,
+                };
+                if (wanted) {
+                    for (quant_shapes) |shape| {
+                        if (!matches(opts.filter, shape.name)) continue;
+                        try benchQuant(dtype, allocator, out, shape, opts.iters orelse shape.iters, opts.queue_depth, config);
+                        try out.flush();
+                    }
                 }
             }
         }
@@ -241,6 +254,8 @@ fn benchQuant(
     const resident = gpu.allocResidentBytes(n * blocks_per_row * @sizeOf(Block)) orelse return error.GpuResidentAllocationFailed;
     defer gpu.freeResidentBytes(resident);
     const blocks: []Block = @alignCast(std.mem.bytesAsSlice(Block, resident));
+    const cpu_blocks = try allocator.alloc(Block, n * blocks_per_row);
+    defer allocator.free(cpu_blocks);
 
     var prng = std.Random.DefaultPrng.init(@as(u64, 0x710000) +% @as(u64, @intFromEnum(dtype)) +% @as(u64, m) +% @as(u64, n) +% @as(u64, k));
     const random = prng.random();
@@ -248,12 +263,14 @@ fn benchQuant(
     defer allocator.free(row);
     for (0..n) |r| {
         for (row) |*v| v.* = random.float(f32) * 0.125 - 0.0625;
-        try qm.quantizeRowForDType(dtype, blocks[r * blocks_per_row ..][0..blocks_per_row], row);
+        try qm.quantizeRowForDType(dtype, cpu_blocks[r * blocks_per_row ..][0..blocks_per_row], row);
     }
+    @memcpy(blocks, cpu_blocks);
     var packed_rhs = switch (dtype) {
-        .q4_k => try qm.packMatmulRhsQ4_Kx8(allocator, blocks, n, k, blocks_per_row),
-        .q6_k => try qm.packMatmulRhsQ6_Kx4(allocator, blocks, n, k, blocks_per_row),
-        .q8_0 => try qm.packMatmulRhsQ8_0x4(allocator, blocks, n, k, blocks_per_row),
+        .q4_k => try qm.packMatmulRhsQ4_Kx8(allocator, cpu_blocks, n, k, blocks_per_row),
+        .q5_k => try qm.packMatmulRhsQ5_Kx8(allocator, cpu_blocks, n, k, blocks_per_row),
+        .q6_k => try qm.packMatmulRhsQ6_Kx4(allocator, cpu_blocks, n, k, blocks_per_row),
+        .q8_0 => try qm.packMatmulRhsQ8_0x4(allocator, cpu_blocks, n, k, blocks_per_row),
         else => unreachable,
     };
     defer packed_rhs.deinit();
@@ -271,16 +288,17 @@ fn benchQuant(
     defer freeOutputs(allocator, queued);
     const format: gpu.QFormat = switch (dtype) {
         .q4_k => .q4_k,
+        .q5_k => .q5_k,
         .q6_k => .q6_k,
         .q8_0 => .q8_0,
         else => unreachable,
     };
 
-    try cpuPackedQuant(dtype, allocator, &cpu_out, &a, &packed_rhs, m, n, k, config);
+    try cpuPackedQuant(dtype, allocator, &cpu_out, &a, &packed_rhs, cpu_blocks, m, n, k, config);
     if (!gpu.gemmQuantNtAsync(format, resident, true, blocks_per_row * @sizeOf(Block), 0, &a, &gpu_out, 1, m, n, k)) return error.GpuDispatchFailed;
     _ = gpu_out.dataConst();
     for (0..3) |_| {
-        try cpuPackedQuant(dtype, allocator, &cpu_out, &a, &packed_rhs, m, n, k, config);
+        try cpuPackedQuant(dtype, allocator, &cpu_out, &a, &packed_rhs, cpu_blocks, m, n, k, config);
         if (!gpu.gemmQuantNtAsync(format, resident, true, blocks_per_row * @sizeOf(Block), 0, &a, &gpu_out, 1, m, n, k)) return error.GpuDispatchFailed;
         _ = gpu_out.dataConst();
     }
@@ -295,7 +313,7 @@ fn benchQuant(
     for (0..count) |rep| {
         if (rep % 2 == 0) {
             timer.reset();
-            try cpuPackedQuant(dtype, allocator, &cpu_out, &a, &packed_rhs, m, n, k, config);
+            try cpuPackedQuant(dtype, allocator, &cpu_out, &a, &packed_rhs, cpu_blocks, m, n, k, config);
             cpu_times[rep] = timer.read();
             timer.reset();
             if (!gpu.gemmQuantNtAsync(format, resident, true, blocks_per_row * @sizeOf(Block), 0, &a, &gpu_out, 1, m, n, k)) return error.GpuDispatchFailed;
@@ -307,7 +325,7 @@ fn benchQuant(
             _ = gpu_out.dataConst();
             gpu_times[rep] = timer.read();
             timer.reset();
-            try cpuPackedQuant(dtype, allocator, &cpu_out, &a, &packed_rhs, m, n, k, config);
+            try cpuPackedQuant(dtype, allocator, &cpu_out, &a, &packed_rhs, cpu_blocks, m, n, k, config);
             cpu_times[rep] = timer.read();
         }
         timer.reset();
@@ -323,9 +341,13 @@ fn benchQuant(
     try printResult(out_writer, @tagName(dtype), shape.name, m, n, k, queue_depth, cpu_times[0..count], gpu_times[0..count], submit_times[0..count], queue_times[0..count], cpu_out.dataConst(), gpu_out.dataConst(), 5e-2);
 }
 
-fn cpuPackedQuant(comptime dtype: raw.DType, allocator: std.mem.Allocator, out: *Tensor, a: *const Tensor, packed_rhs: anytype, m: usize, n: usize, k: usize, config: native.ParallelConfig) !void {
+fn cpuPackedQuant(comptime dtype: raw.DType, allocator: std.mem.Allocator, out: *Tensor, a: *const Tensor, packed_rhs: anytype, blocks: []const raw.dtype_info.Storage(dtype), m: usize, n: usize, k: usize, config: native.ParallelConfig) !void {
     switch (dtype) {
         .q4_k => try native.matmul2DQuantizedRhsQ4_Kx8WithConfig(allocator, out, a, packed_rhs, m, n, k, config),
+        .q5_k => if (m < 4) {
+            const rhs = qm.QuantizedMatmulRhsQ5_K{ .allocator = null, .blocks = blocks, .k = k, .n = n, .blocks_per_column = k / qm.qk_k_block_size };
+            try native.matmul2DQuantizedRhsQ5_KWithConfig(allocator, out, a, &rhs, m, n, k, config);
+        } else try native.matmul2DQuantizedRhsQ5_Kx8WithConfig(allocator, out, a, packed_rhs, m, n, k, config),
         .q6_k => try native.matmul2DQuantizedRhsQ6_Kx4WithConfig(allocator, out, a, packed_rhs, m, n, k, config),
         .q8_0 => try native.matmul2DQuantizedRhsQ8_0x4WithConfig(allocator, out, a, packed_rhs, m, n, k, config),
         else => unreachable,

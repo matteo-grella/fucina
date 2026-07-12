@@ -68,7 +68,7 @@ pub const WeightQ4_K = struct {
 };
 
 /// Session/model-owned registry for immutable byte payloads that should be
-/// copied once into device-owned storage when Metal is built.
+/// copied once into device-owned storage when a capable GPU provider is built.
 /// The returned bytes are still CPU-readable and remain ordinary RHS storage;
 /// this only changes the backing allocation used by GPU matmul accelerators.
 pub const ResidentByteRegistry = struct {
@@ -105,13 +105,18 @@ pub const ResidentByteRegistry = struct {
 pub const WeightQ5_K = struct {
     value: RawWeightQ5_K,
     packed_rhs: fucina.PackedRhs(.q5_k),
+    rhs_lifetime: RhsLifetime = .transient,
 
     pub fn init(ctx: *ExecContext, value: RawWeightQ5_K) !WeightQ5_K {
+        return initWithRhsLifetime(ctx, value, .transient);
+    }
+
+    pub fn initWithRhsLifetime(ctx: *ExecContext, value: RawWeightQ5_K, rhs_lifetime: RhsLifetime) !WeightQ5_K {
         var owned = value;
         errdefer owned.deinit();
         var packed_rhs = try owned.packRhs(ctx);
         errdefer packed_rhs.deinit();
-        return .{ .value = owned, .packed_rhs = packed_rhs };
+        return .{ .value = owned, .packed_rhs = packed_rhs, .rhs_lifetime = rhs_lifetime };
     }
 
     pub fn deinit(self: *WeightQ5_K) void {
@@ -122,7 +127,7 @@ pub const WeightQ5_K = struct {
 
     pub fn cloneView(self: *const WeightQ5_K, ctx: *ExecContext) !WeightQ5_K {
         const value = try self.value.withTags(ctx, .{ .out, .in });
-        return init(ctx, value);
+        return initWithRhsLifetime(ctx, value, self.rhs_lifetime);
     }
 
     pub fn concat(self: *const WeightQ5_K, ctx: *ExecContext, comptime tag: Tag, others: []const *const WeightQ5_K) !WeightQ5_K {
@@ -130,8 +135,14 @@ pub const WeightQ5_K = struct {
         defer ctx.allocator.free(raw_others);
         for (others, 0..) |other, i| raw_others[i] = &other.value;
 
-        const value = try self.value.concat(ctx, tag, raw_others);
-        return init(ctx, value);
+        var value = try self.value.concat(ctx, tag, raw_others);
+        var owns_value = true;
+        errdefer if (owns_value) value.deinit();
+        const rhs_lifetime: RhsLifetime = if (try makeGpuResidentQuantWeight(.q5_k, ctx, &value)) .stable_process else .transient;
+        return initWithRhsLifetime(ctx, value, rhs_lifetime) catch |err| {
+            owns_value = false;
+            return err;
+        };
     }
 };
 pub const WeightQ6_K = struct {
@@ -375,8 +386,8 @@ pub const QuantByteStackPart = struct {
 };
 
 pub const QuantByteStackOptions = struct {
-    /// Prefer device-owned storage when the Metal backend is compiled in and the
-    /// dtype has a GPU kernel.
+    /// Prefer device-owned storage when the active provider implements the
+    /// dtype's quantized kernel.
     prefer_device: bool = true,
     /// Return null instead of heap-allocating when device-owned storage is not
     /// available. Use this for GPU-only command-batched paths.
@@ -385,7 +396,7 @@ pub const QuantByteStackOptions = struct {
 
 /// Internal byte stack for same-shaped quantized linear weights. The stack is
 /// CPU-readable either way; `device_owned=true` additionally means the bytes
-/// live in Metal-owned storage and are safe for cached wraps until deinit.
+/// live in provider-owned storage and are safe for cached wraps until deinit.
 pub const QuantByteStack = struct {
     dtype: DType,
     count: usize,
@@ -416,6 +427,7 @@ pub const QuantByteStack = struct {
 fn dtypeHasDenseQuantGpuKernel(comptime dtype: DType) bool {
     return switch (comptime dtype) {
         .q4_k, .q6_k, .q8_0 => true,
+        .q5_k => fucina.internal.gpu.has_q5_k_quant,
         else => false,
     };
 }
@@ -502,9 +514,9 @@ pub const LinearWeight = union(enum) {
     ptqtp: WeightPtqtp,
 
     pub const LoadOptions = struct {
-        /// Copy q4_k/q6_k/q8_0 payloads into device-owned storage on
-        /// `-Dgpu=metal` builds (stable RHS wraps for the dequant-in-kernel
-        /// GEMM). `loadForFusion` turns this off: fuse-only parts are consumed
+        /// Copy provider-supported quant payloads into device-owned storage
+        /// (q4_k/q6_k/q8_0 on Metal; those plus q5_k on CUDA) for stable RHS
+        /// dequant-in-kernel GEMM. `loadForFusion` turns this off: parts are consumed
         /// by `fuseLinear`, whose concat re-acquires residency for the fused
         /// result, so per-part device copies would be alloc+memcpy+free waste.
         gpu_resident: bool = true,
@@ -541,7 +553,7 @@ pub const LinearWeight = union(enum) {
             .q2_k => .{ .q2_k = try loadQuantizedWeight(.q2_k, ctx, info, shape) },
             .q3_k => .{ .q3_k = try loadQuantizedWeight(.q3_k, ctx, info, shape) },
             .q4_k => .{ .q4_k = try loadQ4_KWeight(ctx, info, shape, options) },
-            .q5_k => .{ .q5_k = try loadQ5_KWeight(ctx, info, shape) },
+            .q5_k => .{ .q5_k = try loadQ5_KWeight(ctx, info, shape, options) },
             .q6_k => .{ .q6_k = try loadQ6_KWeight(ctx, info, shape, options) },
             .iq1_s => .{ .iq1_s = try loadQuantizedWeight(.iq1_s, ctx, info, shape) },
             .iq1_m => .{ .iq1_m = try loadQuantizedWeight(.iq1_m, ctx, info, shape) },
@@ -1196,8 +1208,8 @@ pub fn linearSeqBorrowedQuantized(
     return try fucina.Tensor(.{ .seq, out_tag }).fromTensor(ctx, value);
 }
 
-/// Try the dense quantized GPU matmul (`-Dgpu=metal`): `out = in · dequant(W)ᵀ`
-/// over the raw GGUF blocks (`weight.value`), via the dequant-in-kernel Metal
+/// Try the dense quantized GPU matmul: `out = in · dequant(W)ᵀ` over the raw
+/// GGUF blocks (`weight.value`), via the provider's dequant-in-kernel
 /// GEMM. Returns null — caller falls back to the CPU packed path — when the GPU
 /// is off, the input needs gradients (training), or the exec gate declines
 /// (shape/work threshold). Comptime-elided on non-gpu builds.
@@ -1210,6 +1222,7 @@ fn denseQuantGpuTry(
     comptime out_tag: Tag,
 ) !?fucina.Tensor(.{ .seq, out_tag }) {
     if (comptime !fucina.internal.gpu.enabled) return null;
+    if (comptime dtype == .q5_k and !fucina.internal.gpu.has_q5_k_quant) return null;
     if (input.requiresGrad()) return null;
     const m = input.dim(.seq);
     const k = input.dim(in_tag);
@@ -1303,6 +1316,7 @@ pub fn linearSeqQ5_K(
     comptime in_tag: Tag,
     comptime out_tag: Tag,
 ) !fucina.Tensor(.{ .seq, out_tag }) {
+    if (try denseQuantGpuTry(.q5_k, weight, ctx, input, in_tag, out_tag)) |r| return r;
     // Decode shapes: contract against the resident GGUF-native compact blocks
     // (`weight.value`) through the public quantized-RHS `dot` (exec's
     // matmul2DWithQuantizedTensorRhsOptions -> matmulQ5_KRhsTile kernels with
@@ -1371,17 +1385,48 @@ pub fn linearSeqQ6_K(
     return input.dotPacked(ctx, &weight.packed_rhs, in_tag, out_tag);
 }
 
+fn restoreGpuResidencyAfterDeclinedFusion(ctx: *ExecContext, parts: []const *LinearWeight) !void {
+    if (comptime !fucina.internal.gpu.enabled) return;
+    for (parts) |part| switch (part.*) {
+        .f32 => |*value| _ = try makeGpuResidentDenseWeight(.f32, WeightF32, ctx, value),
+        .f16 => |*value| _ = try makeGpuResidentDenseWeight(.f16, WeightF16, ctx, value),
+        .q4_k => |*weight| if (!weight.rhs_lifetime.isCacheable() and try makeGpuResidentQuantWeight(.q4_k, ctx, &weight.value)) {
+            weight.rhs_lifetime = .stable_process;
+        },
+        .q5_k => |*weight| if (!weight.rhs_lifetime.isCacheable() and try makeGpuResidentQuantWeight(.q5_k, ctx, &weight.value)) {
+            weight.rhs_lifetime = .stable_process;
+        },
+        .q6_k => |*weight| if (!weight.rhs_lifetime.isCacheable() and try makeGpuResidentQuantWeight(.q6_k, ctx, &weight.value)) {
+            weight.rhs_lifetime = .stable_process;
+        },
+        .q8_0 => |*weight| if (!weight.rhs_lifetime.isCacheable() and try makeGpuResidentQuantWeight(.q8_0, ctx, &weight.value)) {
+            weight.rhs_lifetime = .stable_process;
+        },
+        else => {},
+    };
+}
+
+fn declinedFusion(ctx: *ExecContext, parts: []const *LinearWeight) !?LinearWeight {
+    // `loadForFusion` deliberately skips per-part device copies. If fusion is
+    // impossible (mixed GGUF quant types are common in *_K_M files), restore
+    // the residency policy those independent linears would have received from
+    // ordinary `load`; otherwise every prefill streams the same weights.
+    try restoreGpuResidencyAfterDeclinedFusion(ctx, parts);
+    return null;
+}
+
 /// Fuse same-format weights into one output-stacked matrix (one GEMM instead
-/// of N on the forward path), consuming the parts on success. Returns null --
-/// leaving the parts untouched -- when the formats differ or the format has no
-/// fused fast path.
+/// of N on the forward path), consuming the parts on success. Returns null
+/// with every part still valid when the formats differ or the format has no
+/// fused fast path; capable GPU builds restore the skipped per-part residency
+/// before returning.
 pub fn fuseLinear(ctx: *ExecContext, parts: []const *LinearWeight) !?LinearWeight {
     if (parts.len < 2 or parts.len > 4) return Error.InvalidWeightShape;
     const fusable = [_]std.meta.Tag(LinearWeight){ .f32, .f16, .bf16, .q4_k, .q5_k, .q6_k, .q8_0 };
     inline for (fusable) |tag| {
         if (std.meta.activeTag(parts[0].*) == tag) {
             for (parts[1..]) |part| {
-                if (std.meta.activeTag(part.*) != tag) return null;
+                if (std.meta.activeTag(part.*) != tag) return declinedFusion(ctx, parts);
             }
             const name = @tagName(tag);
             var others: [3]*const @FieldType(LinearWeight, name) = undefined;
@@ -1405,11 +1450,11 @@ pub fn fuseLinear(ctx: *ExecContext, parts: []const *LinearWeight) !?LinearWeigh
     // count; mixed counts stay separate like any mixed-format parts.
     if (std.meta.activeTag(parts[0].*) == .ptqtp) {
         for (parts[1..]) |part| {
-            if (std.meta.activeTag(part.*) != .ptqtp) return null;
+            if (std.meta.activeTag(part.*) != .ptqtp) return declinedFusion(ctx, parts);
         }
         const plane_count = parts[0].ptqtp.planeCount();
         for (parts[1..]) |part| {
-            if (part.ptqtp.planeCount() != plane_count) return null;
+            if (part.ptqtp.planeCount() != plane_count) return declinedFusion(ctx, parts);
         }
 
         var others: [3]*const QuantWeight(.tq2_0) = undefined;
@@ -1430,7 +1475,7 @@ pub fn fuseLinear(ctx: *ExecContext, parts: []const *LinearWeight) !?LinearWeigh
         for (parts) |part| part.deinit();
         return .{ .ptqtp = .{ .p1 = p1, .p2 = p2, .p3 = p3 } };
     }
-    return null;
+    return declinedFusion(ctx, parts);
 }
 
 /// Aggregate PTQTP decoration diagnostics over a model walk.
@@ -1654,6 +1699,12 @@ fn loadGpuResidentQuantizedWeight(comptime dtype: DType, ctx: *ExecContext, info
                         return .{ .value = try gpuResidentQuantTensor(dtype, ctx, shape, dev), .rhs_lifetime = .stable_process };
                     }
                 },
+                .q5_k => if (comptime fucina.internal.gpu.has_q5_k_quant) {
+                    if (fucina.internal.gpu.allocResidentBytes(info.data.len)) |dev| {
+                        @memcpy(dev, info.data);
+                        return .{ .value = try gpuResidentQuantTensor(dtype, ctx, shape, dev), .rhs_lifetime = .stable_process };
+                    }
+                },
                 else => {},
             }
         }
@@ -1687,6 +1738,7 @@ fn makeGpuResidentQuantWeight(comptime dtype: DType, ctx: *ExecContext, value: *
     if (comptime !fucina.internal.gpu.enabled) return false;
     switch (comptime dtype) {
         .q4_k, .q6_k, .q8_0 => {},
+        .q5_k => if (!fucina.internal.gpu.has_q5_k_quant) return false,
         else => return false,
     }
     const blocks = try value.dataConst();
@@ -1710,9 +1762,9 @@ fn loadQ4_KWeight(ctx: *ExecContext, info: *const gguf.TensorInfo, shape: [2]usi
     return WeightQ4_K.initWithRhsLifetime(ctx, loaded.value, loaded.rhs_lifetime);
 }
 
-fn loadQ5_KWeight(ctx: *ExecContext, info: *const gguf.TensorInfo, shape: [2]usize) !WeightQ5_K {
-    const value = try loadQuantizedWeight(.q5_k, ctx, info, shape);
-    return WeightQ5_K.init(ctx, value);
+fn loadQ5_KWeight(ctx: *ExecContext, info: *const gguf.TensorInfo, shape: [2]usize, options: LinearWeight.LoadOptions) !WeightQ5_K {
+    const loaded = try loadGpuResidentQuantizedWeight(.q5_k, ctx, info, shape, options);
+    return WeightQ5_K.initWithRhsLifetime(ctx, loaded.value, loaded.rhs_lifetime);
 }
 
 fn loadQ8_0Weight(ctx: *ExecContext, info: *const gguf.TensorInfo, shape: [2]usize, options: LinearWeight.LoadOptions) !WeightQ8_0 {

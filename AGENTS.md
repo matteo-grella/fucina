@@ -60,7 +60,7 @@ zig build bench-backend        # scalar vs native backends on representative ops
 zig build bench-f16gemm        # f16 TransB GEMM parallel-efficiency microbench
 zig build bench-gemm           # large-shape f32 GEMM: row kernels vs blocked packed kernel vs BLAS dispatch (bench/gemm.zig)
 zig build bench-gpu-dispatch  # CPU BLAS vs blocking/async eager GPU GEMM/GEMV latency + queued throughput
-zig build bench-gpu-formats   # packed CPU vs eager GPU f16/Q4_K/Q6_K/Q8_0 LLM-linear latency + queued throughput
+zig build bench-gpu-formats   # packed CPU vs eager GPU f16/Q4_K/Q5_K/Q6_K/Q8_0 LLM-linear latency + queued throughput
 zig build bench-q5kmoe         # Q5_K MoE-expert matmul: per-row vs 4-row lane-packed col-outer (bench/q5kmoe.zig)
 zig build bench-ternary        # TQ2_0 ternary matmul: hot sdot/vpdpbusd tiles vs cold table path, mul-free f32 path, Q4_K, dense f32 (bench/ternary.zig)
 zig build bench-attention-backward  # grouped causal attention backward (bench/attention_backward.zig)
@@ -92,7 +92,7 @@ Build options (consumed at comptime via `build_options`):
   per-format `FUCINA_GPU_MIN_WORK_DENSE_Q4/Q6/Q8` gates against the CPU packed-kernel fallback,
   stable RHS residency, ~+33% pp on 0.6B-Q4_K);
   decode (m=1, below the gate) and training (grad path) stay on CPU.
-  On both providers, eligible **dense f32, f16, and stable-weight Q4_K/Q6_K/Q8_0** commands submit eagerly
+  On both providers, eligible **dense f32, f16, and provider-supported stable quantized** commands submit eagerly
   to persistent provider lanes and synchronize only at a CPU visibility boundary; pending CUDA outputs
   pass their device pointer directly to dependent GEMMs. CUDA registers pooled host allocations once
   and overlaps upload/compute/download; resident ordinary GEMM uses `FUCINA_GPU_MIN_WORK_RESIDENT`
@@ -104,12 +104,13 @@ Build options (consumed at comptime via `build_options`):
   cuBLAS + vendored PTX kernels; cross-compiles from macOS with `-Dtarget=x86_64-linux-gnu`.
   Covers big f32 GEMMs (strict FP32; `FUCINA_GPU_TF32=1` opts into TF32 tensor cores,
   `FUCINA_GPU_MIN_WORK_TRANSIENT` floors non-resident operands), f16 NT GEMM, dense quantized
-  Q4_K/Q6_K/Q8_0 prefill (adaptive N32/N64 f16-input/f32-accumulate tensor-core kernels;
+  Q4_K/Q5_K/Q6_K/Q8_0 prefill (Q5_K is CUDA-only; adaptive N32/N64 f16-input/f32-accumulate tensor-core kernels;
   underfilled dense grids use on-stream split-K/reduction, disabled with
   `FUCINA_GPU_QUANT_SPLIT_K=0`; scalar fallback with `FUCINA_GPU_QUANT_MMA=0`) + the grouped MoE expert FFN (same tile-table
   protocol and gates as metal; stable RHS bytes are adopted into a managed-memory registry — one PCIe crossing per
-  weight per process), and an opt-in decode GEMV (`FUCINA_GPU_DECODE=1`, m≤8, resident weights
-  only; measured 2.6x decode on Qwen3-4B Q4_K_M). `FUCINA_GPU_VRAM_BUDGET` bounds residency;
+  weight per process), and opt-in quantized decode (`FUCINA_GPU_DECODE=1`, m≤8, resident weights
+  only; Q5_K uses GEMV for m<4 and tiled MMA for m=4..8, with a measured work gate).
+  `FUCINA_GPU_VRAM_BUDGET` bounds residency;
   `FUCINA_GPU_KERNELS=src` NVRTC-recompiles the vendored kernels (dev loop;
   `tools/gen_cuda_ptx.sh` regenerates the committed PTX through the same NVRTC frontend). `zig build cuda-check` is the
   compile-only bit-rot leg (fucina + llm test roots and the NVRTC PTX generator for x86_64-linux-gnu).

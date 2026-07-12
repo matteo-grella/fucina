@@ -141,6 +141,9 @@ pub const internal = struct {
         /// for the GPU quant path key on this, not on `enabled` — a provider
         /// can be enabled while its quantized arms are still CPU-only.
         pub const has_quant_gemm = backend.gpu_impl.has_quant_gemm;
+        /// True when this provider additionally implements Q5_K dense/grouped
+        /// quantized kernels (CUDA only at present).
+        pub const has_q5_k_quant = backend.gpu_impl.has_q5_k_quant;
         /// Device-owned bytes for GPU-build loaders; see the provider's
         /// `allocResidentBytes` (backend/metal.zig, backend/cuda.zig). Null
         /// when unavailable.

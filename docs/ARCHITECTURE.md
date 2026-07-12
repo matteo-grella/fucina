@@ -393,7 +393,8 @@ the quantized paths. On `-Dgpu=metal` builds, f32/f16 GEMM gates in
 `native.zig` and the quantized/MoE entries in the exec layer offload
 above-threshold work to `src/backend/metal.zig`.
 
-Dense f32, f16, and stable-weight Q4_K/Q6_K/Q8_0 GPU calls are eagerly
+Dense f32, f16, and stable-weight quantized GPU calls (Q4_K/Q6_K/Q8_0 on
+Metal; those plus Q5_K on CUDA) are eagerly
 submitted but are not synchronously joined at every op return. Output storage
 carries a completion token: another GPU GEMM stays queue-ordered (CUDA can
 consume the producer device pointer), while the first CPU data access waits
