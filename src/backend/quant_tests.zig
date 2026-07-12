@@ -239,3 +239,4 @@ test "tq2_0 borrowed-blocks RHS: no copy, matmul parity with the owning construc
         quant.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n + 1, owned.rows.blocks),
     );
 }
+

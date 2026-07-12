@@ -45,6 +45,8 @@ const Q4V16u8 = common.Q4V16u8;
 const QKV16i16 = common.QKV16i16;
 const QKV16i32 = common.QKV16i32;
 const QKV16i8 = common.QKV16i8;
+const QKV4i32 = common.QKV4i32;
+const sdotI8x16 = common.sdotI8x16;
 const QKV16u16 = common.QKV16u16;
 const QKV16u8 = common.QKV16u8;
 const QKV8i16 = common.QKV8i16;
@@ -1437,6 +1439,12 @@ fn dotNVFP4Q8_0(w: *const BlockNVFP4, a: []const BlockQ8_0) f32 {
 }
 
 fn dotIQ2_XXSQ8_K(w: *const BlockIQ2_XXS, a: *const BlockQ8_K) f32 {
+    // Hot path: the four 8-value lanes of each 32-subblock assemble into one
+    // 32-byte signed-weight vector and dot through sdot/vpdpbusd (two 16-byte
+    // granules, one horizontal reduce) instead of four widen-multiply-reduce
+    // rounds. `isum` is integer-exact either way and the float combination
+    // below is unchanged, so the result is BITWISE identical to the lane
+    // formulation (pinned by the parity test in quant_tests.zig).
     const d = f16BitsToF32(w.d) * a.d;
     var sum: f32 = 0;
     var offset: usize = 0;
@@ -1444,16 +1452,35 @@ fn dotIQ2_XXSQ8_K(w: *const BlockIQ2_XXS, a: *const BlockQ8_K) f32 {
         const aux0 = readU32FromU16s(w.qs[4 * ib32 ..][0..2]);
         const aux1 = readU32FromU16s(w.qs[4 * ib32 + 2 ..][0..2]);
         const db = d * (0.5 + @as(f32, @floatFromInt(aux1 >> 28))) * 0.25;
-        var isum: i32 = 0;
-        for (0..4) |lane| {
-            const grid_index = byteFromU32(aux0, lane);
+        var wbytes: [32]i8 = undefined;
+        inline for (0..4) |lane| {
+            const grid = gridU64Vector(&tables.iq2xxs_grid, byteFromU32(aux0, lane));
             const signs = tables.ksigns_iq2xs[(aux1 >> @intCast(7 * lane)) & 127];
-            isum += dotIQ2GridLaneQ8_K(&tables.iq2xxs_grid, grid_index, signs, a, offset);
-            offset += 8;
+            wbytes[8 * lane ..][0..8].* = signedGridBytes8(grid, signs);
         }
+        const isum = dotSignedWeights32(&wbytes, a.qs[offset..][0..32]);
+        offset += 32;
         sum += db * @as(f32, @floatFromInt(isum));
     }
     return sum;
+}
+
+/// Apply a ksigns septet to 8 unsigned grid magnitudes: (g ^ m) - m with
+/// m in {0, -1} per element (two's-complement negate where the bit is set).
+/// Grid magnitudes are < 128, so the i8 negate cannot overflow.
+fn signedGridBytes8(grid: QKV8u8, signs: u8) [8]i8 {
+    const active = (@as(QKV8u8, @splat(signs)) & qk_v8_sign_masks) != @as(QKV8u8, @splat(0));
+    const mask = @select(i8, active, @as(QKV8i8, @splat(-1)), @as(QKV8i8, @splat(0)));
+    const g: QKV8i8 = @intCast(grid);
+    return (g ^ mask) - mask;
+}
+
+/// isum = w . a over 32 signed bytes: two sdot granules, one reduce.
+fn dotSignedWeights32(wbytes: *const [32]i8, a_qs: *const [32]i8) i32 {
+    var acc: QKV4i32 = @splat(0);
+    acc = sdotI8x16(acc, @bitCast(wbytes[0..16].*), @bitCast(a_qs[0..16].*));
+    acc = sdotI8x16(acc, @bitCast(wbytes[16..32].*), @bitCast(a_qs[16..32].*));
+    return @reduce(.Add, acc);
 }
 
 fn dotIQ2_XSQ8_K(w: *const BlockIQ2_XS, a: *const BlockQ8_K) f32 {
@@ -1510,6 +1537,8 @@ fn dotIQ2GridLaneQ8_K(comptime table: []const u64, grid_index: usize, signs: u8,
 }
 
 fn dotIQ3_XXSQ8_K(w: *const BlockIQ3_XXS, a: *const BlockQ8_K) f32 {
+    // Same sdot restructure as dotIQ2_XXSQ8_K — integer isum, unchanged
+    // float combination, bitwise identical to the lane formulation.
     const d = f16BitsToF32(w.d) * a.d;
     var sum: f32 = 0;
     var qs_index: usize = 0;
@@ -1518,12 +1547,14 @@ fn dotIQ3_XXSQ8_K(w: *const BlockIQ3_XXS, a: *const BlockQ8_K) f32 {
     for (0..qk_k_block_size / 32) |ib32| {
         const aux = readU32Bytes(w.qs[scales_and_signs + 4 * ib32 ..][0..4]);
         const db = d * (0.5 + @as(f32, @floatFromInt(aux >> 28))) * 0.5;
-        var isum: i32 = 0;
-        for (0..4) |lane| {
+        var wbytes: [32]i8 = undefined;
+        inline for (0..4) |lane| {
+            const grid = gridU32PairVector(&tables.iq3xxs_grid, w.qs[qs_index + 2 * lane], w.qs[qs_index + 2 * lane + 1]);
             const signs = tables.ksigns_iq2xs[(aux >> @intCast(7 * lane)) & 127];
-            isum += dotIQ3GridLaneQ8_K(&tables.iq3xxs_grid, w.qs[qs_index + 2 * lane], w.qs[qs_index + 2 * lane + 1], signs, a, offset);
-            offset += 8;
+            wbytes[8 * lane ..][0..8].* = signedGridBytes8(grid, signs);
         }
+        const isum = dotSignedWeights32(&wbytes, a.qs[offset..][0..32]);
+        offset += 32;
         sum += db * @as(f32, @floatFromInt(isum));
         qs_index += 8;
     }
@@ -2343,4 +2374,88 @@ test "ggml_q3_k dot and matmul consume loaded blocks" {
 
 test {
     _ = @import("cold_tests.zig");
+}
+
+test "iq2_xxs and iq3_xxs sdot dots match the lane-based reference bitwise" {
+    // The hot kernels assemble each 32-subblock's four grid lanes into one
+    // signed byte vector and dot through sdot; the integer isum is exact and
+    // the float combination order is unchanged, so equality must be BITWISE
+    // against the original per-lane widen-multiply-reduce formulation.
+    const RefLane = struct {
+        fn dot(gb: [8]u8, signs: u8, a_qs: []const i8) i32 {
+            var isum: i32 = 0;
+            for (0..8) |j| {
+                const sign: i32 = if ((signs & (@as(u8, 1) << @intCast(j))) != 0) -1 else 1;
+                isum += @as(i32, gb[j]) * sign * @as(i32, a_qs[j]);
+            }
+            return isum;
+        }
+    };
+
+    var prng = std.Random.DefaultPrng.init(0x51D07);
+    const random = prng.random();
+    for (0..64) |_| {
+        var a: BlockQ8_K = undefined;
+        a.d = (random.float(f32) - 0.5) * 0.2;
+        for (&a.qs) |*v| v.* = random.intRangeAtMost(i8, -127, 127);
+        for (&a.bsums, 0..) |*b, gi| {
+            var t: i32 = 0;
+            for (a.qs[gi * 16 ..][0..16]) |v| t += v;
+            b.* = @intCast(t);
+        }
+
+        var w2: BlockIQ2_XXS = undefined;
+        w2.d = @intCast(random.intRangeAtMost(u16, 0x2c00, 0x3c00)); // sane f16 scale bits
+        for (&w2.qs) |*q| q.* = random.int(u16);
+        var w3: BlockIQ3_XXS = undefined;
+        w3.d = w2.d;
+        for (&w3.qs) |*q| q.* = random.int(u8);
+
+        // iq2_xxs reference
+        {
+            const d = f16BitsToF32(w2.d) * a.d;
+            var want: f32 = 0;
+            var offset: usize = 0;
+            for (0..qk_k_block_size / 32) |ib32| {
+                const aux0 = readU32FromU16s(w2.qs[4 * ib32 ..][0..2]);
+                const aux1 = readU32FromU16s(w2.qs[4 * ib32 + 2 ..][0..2]);
+                const db = d * (0.5 + @as(f32, @floatFromInt(aux1 >> 28))) * 0.25;
+                var isum: i32 = 0;
+                for (0..4) |lane| {
+                    var gb: [8]u8 = undefined;
+                    for (0..8) |j| gb[j] = gridU64Byte(&tables.iq2xxs_grid, byteFromU32(aux0, lane), j);
+                    const signs = tables.ksigns_iq2xs[(aux1 >> @intCast(7 * lane)) & 127];
+                    isum += RefLane.dot(gb, signs, a.qs[offset..][0..8]);
+                    offset += 8;
+                }
+                want += db * @as(f32, @floatFromInt(isum));
+            }
+            try std.testing.expectEqual(want, dotIQ2_XXSQ8_K(&w2, &a));
+        }
+        // iq3_xxs reference
+        {
+            const d = f16BitsToF32(w3.d) * a.d;
+            var want: f32 = 0;
+            var qs_index: usize = 0;
+            var offset: usize = 0;
+            const scales_and_signs = qk_k_block_size / 4;
+            for (0..qk_k_block_size / 32) |ib32| {
+                const aux = readU32Bytes(w3.qs[scales_and_signs + 4 * ib32 ..][0..4]);
+                const db = d * (0.5 + @as(f32, @floatFromInt(aux >> 28))) * 0.5;
+                var isum: i32 = 0;
+                for (0..4) |lane| {
+                    var gb: [8]u8 = undefined;
+                    const gv = gridU32PairVector(&tables.iq3xxs_grid, w3.qs[qs_index + 2 * lane], w3.qs[qs_index + 2 * lane + 1]);
+                    const garr: [8]u8 = @bitCast(gv);
+                    gb = garr;
+                    const signs = tables.ksigns_iq2xs[(aux >> @intCast(7 * lane)) & 127];
+                    isum += RefLane.dot(gb, signs, a.qs[offset..][0..8]);
+                    offset += 8;
+                }
+                want += db * @as(f32, @floatFromInt(isum));
+                qs_index += 8;
+            }
+            try std.testing.expectEqual(want, dotIQ3_XXSQ8_K(&w3, &a));
+        }
+    }
 }
