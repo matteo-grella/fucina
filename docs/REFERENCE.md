@@ -11191,6 +11191,7 @@ pub fn takeCache(self: *Self) KvCache
 pub fn send(self: *Self, user: []const u8, writer: *std.Io.Writer) !usize
 pub fn sendRendered(self: *Self, rendered: []const u8, writer: *std.Io.Writer) !usize
 pub fn sendRenderedReuse(self: *Self, rendered: []const u8, writer: *std.Io.Writer) !usize
+pub fn sendTokensReuse(self: *Self, ids: []const u32, writer: *std.Io.Writer) !usize
 pub fn sendBatch(convos: []const *Self, users: []const []const u8,
                  writers: []const *std.Io.Writer, produced: []usize) !void
 pub fn addSpecReference(self: *Self, tokens: []const usize) !void
@@ -11249,7 +11250,9 @@ Semantics:
   `takeCache` releases the cache to the caller (snapshot the shadow from
   `history.items[0..cache.len]` BEFORE taking — the bound trims the one
   committed-but-unforwarded token an aborted turn can leave); deinit skips a
-  taken cache. Speculation is incompatible on both sides
+  taken cache. `sendTokensReuse` is the same entry over pre-encoded ids —
+  for a server that already tokenized the render to score candidate slots
+  by common prefix. Speculation is incompatible on both sides
   (`error.SpeculationWithWarmStart`, `error.SpeculationWithReuse`): the
   SpeculationIndex mirrors committed history append-only and can neither
   adopt nor rewind. Warm-reuse == fresh-stateless equivalence is proven in

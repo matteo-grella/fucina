@@ -382,12 +382,12 @@ test "sendRenderedReuse: identical resend and divergent edits reconcile; specula
     defer reply1.deinit();
     const produced1 = try convo.sendRenderedReuse(buf.items, &reply1.writer);
 
-    // Identical resend (a client retry): everything but the always-
-    // re-forwarded last prompt token is reused, the reply overwrites the
-    // rewound one — greedy: identical bytes.
+    // Identical resend (a client retry), via the pre-tokenized entry:
+    // everything but the always-re-forwarded last prompt token is reused,
+    // the reply overwrites the rewound one — greedy: identical bytes.
     var reply2 = std.Io.Writer.Allocating.init(allocator);
     defer reply2.deinit();
-    const produced2 = try convo.sendRenderedReuse(buf.items, &reply2.writer);
+    const produced2 = try convo.sendTokensReuse(ids, &reply2.writer);
     try std.testing.expectEqual(ids.len - 1, convo.reused_prefix);
     try std.testing.expectEqual(produced1, produced2);
     try std.testing.expectEqualStrings(reply1.written(), reply2.written());

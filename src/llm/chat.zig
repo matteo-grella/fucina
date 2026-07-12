@@ -554,22 +554,22 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             return prefix;
         }
 
-        /// The turn prologue for the cross-request-reuse entry
-        /// (`sendRenderedReuse`): tokenize the FULL-history render,
-        /// reconcile it against the conversation's committed state — the
-        /// longest common token prefix keeps its cached KV rows, everything
-        /// past it is rewound (`cache.truncate` + history shrink) — and
-        /// commit the remainder to history. Returns the caller-owned
-        /// un-prefilled suffix. The common prefix is capped at `cache.len`
-        /// (only cached positions are reusable; spec-less sends keep
-        /// history == cache, but an adopted shadow was already trimmed so
-        /// this is belt and braces) and at `ids.len - 1`: the last prompt
-        /// token is always re-forwarded, because logits are not part of
-        /// cached state. Token-level LCP absorbs every render divergence —
-        /// stripped reasoning blocks, edited history, a different client —
-        /// by simply reusing less. Cache and history stay on the previous
+        /// The turn prologue for the cross-request-reuse entries
+        /// (`sendRenderedReuse`/`sendTokensReuse`): reconcile the FULL-
+        /// history render's ids against the conversation's committed state
+        /// — the longest common token prefix keeps its cached KV rows,
+        /// everything past it is rewound (`cache.truncate` + history
+        /// shrink) — and commit the remainder to history. Returns the
+        /// caller-owned un-prefilled suffix. The common prefix is capped at
+        /// `cache.len` (only cached positions are reusable; spec-less sends
+        /// keep history == cache, but an adopted shadow was already trimmed
+        /// so this is belt and braces) and at `ids.len - 1`: the last
+        /// prompt token is always re-forwarded, because logits are not part
+        /// of cached state. Token-level LCP absorbs every render divergence
+        /// — stripped reasoning blocks, edited history, a different client
+        /// — by simply reusing less. Cache and history stay on the previous
         /// request's consistent state when this errors.
-        fn beginTurnReconciled(self: *Self, text: []const u8) ![]usize {
+        fn beginTurnReconciled(self: *Self, ids: []const u32) ![]usize {
             const a = self.allocator;
 
             // Re-arm the logit processor for this turn's reply (the
@@ -578,8 +578,6 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
 
             self.turn += 1;
 
-            const ids = try self.tokenizer.encodeRaw(a, text);
-            defer a.free(ids);
             if (ids.len == 0) return error.EmptyMessages;
             if (ids.len > self.cache.capacity) return error.ContextFull;
 
@@ -644,7 +642,20 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             if (self.spec != null) return error.SpeculationWithReuse;
             const a = self.allocator;
 
-            const suffix = try self.beginTurnReconciled(rendered);
+            const ids = try self.tokenizer.encodeRaw(a, rendered);
+            defer a.free(ids);
+            return self.sendTokensReuse(ids, writer);
+        }
+
+        /// `sendRenderedReuse` over pre-encoded token ids — the entry for a
+        /// server that already tokenized the render (slot selection scores
+        /// candidate caches by common prefix BEFORE any conversation
+        /// exists, so the ids are in hand). Semantics are identical.
+        pub fn sendTokensReuse(self: *Self, ids: []const u32, writer: *std.Io.Writer) !usize {
+            if (self.spec != null) return error.SpeculationWithReuse;
+            const a = self.allocator;
+
+            const suffix = try self.beginTurnReconciled(ids);
             defer a.free(suffix);
             return self.decodeTurn(suffix, writer);
         }

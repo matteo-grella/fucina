@@ -43,16 +43,22 @@ conn threads (≤ --conns, socket deadlines)          ONE inference worker
   `accept` for neither `shutdown(2)` nor `SO_RCVTIMEO`, and the Io layer
   retries `accept` on `EINTR`.
 - The API is stateless (every request carries its full history) but the KV
-  cache is not: the GGUF chat backend keeps ONE resident slot — the previous
-  request's KV cache plus its token shadow — and each request reuses the
-  longest common token prefix with its own render, prefilling only the rest
-  (llama.cpp's `cache_prompt`; `Conversation.initWarm`/`takeCache`/
-  `sendRenderedReuse` in `examples/lmserve/backend.zig`). Follow-up turns of
-  a chat re-prefill only the last reply + new message; a non-matching
-  request costs one full prefill, exactly as before. The reuse is reported
-  as `cached_tokens` in usage (`prompt_tokens_details` /
-  `input_tokens_details`). Multi-slot pools and evict-to-disk
-  (`llm.kv_persist`) are future work.
+  cache is not: the GGUF chat backend keeps a pool of resident slots
+  (`--kv-slots`, default 1) — each a previous request's KV cache plus its
+  token shadow — and each request adopts the slot with the longest common
+  token prefix (above a llama.cpp-style 0.1 similarity gate; LRU otherwise),
+  prefilling only the rest (`Conversation.initWarm`/`takeCache`/
+  `sendTokensReuse` in `examples/lmserve/backend.zig`). Follow-up turns of a
+  chat re-prefill only the last reply + new message; a non-matching request
+  costs one full prefill, exactly as before. Extra slots keep interleaved
+  conversations warm at a full `--ctx` cache each (~112 KiB/position for a
+  28-layer/8-kv-head/128-dim f16 geometry). With `--kv-cache-dir D`, a slot
+  about to be destroyed by an unrelated request (keeping < half of it, not
+  already stored) spills to an `llm.kv_persist` sidecar under `D` (at most
+  `--kv-disk-slots` files, LRU-reused, containment-deduped) and is restored
+  — zero re-prefill — when a later request matches it better than every
+  resident slot. The reuse is reported as `cached_tokens` in usage
+  (`prompt_tokens_details` / `input_tokens_details`).
 - Streaming responses start lazily on the first delta, so a request that
   fails before producing anything (invalid grammar, context overflow) still
   gets a plain JSON error with a proper status code.

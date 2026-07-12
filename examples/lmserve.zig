@@ -36,6 +36,12 @@ const usage_text =
     \\  --queue N           max queued requests before 429 (default 16)
     \\  --conns N           max concurrent connections (default 32)
     \\  --experts=borrow    zero-copy MoE expert load (gemma4/diffusion-gemma)
+    \\  --kv-slots N        resident KV-reuse slots (default 1); each holds a
+    \\                      full --ctx cache, so N-1 extra slots cost real
+    \\                      memory but keep interleaved conversations warm
+    \\  --kv-cache-dir D    spill evicted slots to sidecar files under D and
+    \\                      restore them on prefix match (gguf chat backends)
+    \\  --kv-disk-slots M   max sidecar files under --kv-cache-dir (default 8)
     \\
     \\Reasoning is off by default; clients enable it per request via
     \\reasoning_effort (chat) or reasoning.effort (responses).
@@ -55,6 +61,9 @@ const Args = struct {
     queue: usize = 16,
     conns: usize = 32,
     experts_borrow: bool = false,
+    kv_slots: usize = 1,
+    kv_cache_dir: ?[]const u8 = null,
+    kv_disk_slots: usize = 8,
 };
 
 var g_shutdown = std.atomic.Value(bool).init(false);
@@ -111,6 +120,15 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--nanochat") and i + 1 < args_slice.len) {
             i += 1;
             args.nanochat_dir = args_slice[i];
+        } else if (std.mem.eql(u8, arg, "--kv-slots") and i + 1 < args_slice.len) {
+            i += 1;
+            args.kv_slots = try std.fmt.parseInt(usize, args_slice[i], 10);
+        } else if (std.mem.eql(u8, arg, "--kv-cache-dir") and i + 1 < args_slice.len) {
+            i += 1;
+            args.kv_cache_dir = args_slice[i];
+        } else if (std.mem.eql(u8, arg, "--kv-disk-slots") and i + 1 < args_slice.len) {
+            i += 1;
+            args.kv_disk_slots = try std.fmt.parseInt(usize, args_slice[i], 10);
         } else if (std.mem.eql(u8, arg, "--experts=borrow")) {
             args.experts_borrow = true;
         } else if (std.mem.eql(u8, arg, "--experts=pack")) {
@@ -125,6 +143,8 @@ pub fn main(init: std.process.Init) !void {
             args.model_path = arg;
         }
     }
+    if (args.kv_cache_dir) |dir| try std.Io.Dir.cwd().createDirPath(init.io, dir);
+
     var ctx: fucina.ExecContext = undefined;
     ctx.init(allocator);
     defer ctx.deinit();
@@ -233,6 +253,8 @@ fn serveQwen3(
             // Qwen3's recommended no-think chat settings (the server default;
             // per-request reasoning switches nothing here — clients override).
             .default_sampling = .{ .temperature = 0.7, .top_k = 20, .top_p = 0.8 },
+            .kv_slots = args.kv_slots,
+            .kv_disk = kvDiskOptions(io, args),
         },
     );
     defer adapter.deinit();
@@ -285,10 +307,19 @@ fn serveGemma4(
             .context_len = args.ctx_len,
             .extra_stop_ids = extra_stops_buf[0..extra_n],
             .default_sampling = default_sampling,
+            .kv_slots = args.kv_slots,
+            .kv_disk = kvDiskOptions(io, args),
         },
     );
     defer adapter.deinit();
     try serveWith(io, allocator, adapter.backend(), args);
+}
+
+/// The gguf-chat backends' evict-to-disk tier config from the CLI flags
+/// (`--kv-cache-dir` armed it; the directory exists — main created it).
+fn kvDiskOptions(io: std.Io, args: Args) ?backend_mod.KvDiskOptions {
+    const dir = args.kv_cache_dir orelse return null;
+    return .{ .io = io, .dir = dir, .max_files = @max(args.kv_disk_slots, 1) };
 }
 
 /// Gemma's GGUF-recommended sampling (`general.sampling.*`), as the gemma4
