@@ -142,6 +142,15 @@ usage histogram, and router-lookahead prefetch follow its design; no code
 was copied and no output parity exists (Fucina streams ggml quants over its
 own fused kernels; colibri uses its own int4 container).
 
+**ik_llama.cpp** ([ikawrakow/ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp),
+MIT) is a design reference for the CUDA quantized-prefill split-K path
+(`src/backend/cuda/kernels.cu`): the underfilled-grid K partition with an
+on-stream fixed-order reduction adapts the Stream-K occupancy principle of
+its MMQ implementation (audited principally in `ggml/src/ggml-cuda/mmq.cuh`
+at the pinned commit in `tools/fetch_refs.sh`); no code was copied — Fucina's
+WMMA tiles, tile-table ABI, and reduction kernel are its own, and the
+grouped-MoE path does not use the split.
+
 ## Test fixtures
 
 - `examples/nam/testdata/*.nam` — four tiny format-parity fixtures from the
