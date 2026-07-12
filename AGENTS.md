@@ -50,7 +50,7 @@ zig build es-spirals           # two-spirals MLP trained FROM SCRATCH by ES (exa
 zig build es-ternary-spirals   # two-spirals MLP with PACKED TERNARY (TQ2_0) hidden/output layers trained by ternary-native ES — training state IS the int8 inference model (examples/es_ternary_spirals.zig; see docs/TERNARY.md)
 zig build ptqtp-spirals        # float-train a two-spirals MLP, then post-training-quantize it to DUAL TRIT-PLANES (PTQTP, arXiv:2509.16989: packed TQ2_0 plane pairs; self-verifying — examples/ptqtp_spirals.zig, docs/PTQTP.md)
 zig build ptqtp-qwen3 -- <gguf>  # PTQTP-decorate a Qwen3 GGUF's linears in place (any source dtype) + teacher-forced NLL before/after + greedy completion; --planes 1|2|3, --down-planes/--o-planes N = selective third plane, --skip-first/--skip-last N = edge layers stay source precision (examples/ptqtp_qwen3.zig)
-zig build export-gguf -- <args>  # export a GGUF: re-emit/transcode (incl. --dtype tq2_0 ternary), or merge LoRA adapters into dense weights (tools/export_gguf.zig)
+zig build export-gguf -- <args>  # export a GGUF: re-emit/transcode (incl. --dtype tq2_0 ternary), merge LoRA adapters into dense weights, or shard-streaming PTQTP quantization (--ptqtp[=K], one tensor at a time — models bigger than RAM; tools/export_gguf.zig)
 zig build bench                # MLP-shaped inference/backward benchmarks
 zig build bench-gate           # paired Fucina-vs-llama benchmark gate (tools/bench_gate.py; protocol in docs/BENCHMARK.md)
 zig build bench-optim          # optimizer step kernels at LLM shapes (bench/optim.zig)

@@ -618,8 +618,12 @@ zig build qwen3 -Doptimize=ReleaseFast -- tuned.gguf --chat "Who are you?"
 zig build lmserve -Doptimize=ReleaseFast -- tuned.gguf --port 8080
 ```
 
-`export-gguf` also re-emits/transcodes without adapters:
-`--dtype f16|bf16|f32|q8_0|q4_k|q5_k|q6_k|verbatim`.
+`export-gguf` also re-emits/transcodes without adapters
+(`--dtype f16|bf16|f32|q8_0|q4_k|q5_k|q6_k|verbatim`) and PTQTP-quantizes
+tensor-at-a-time with `--ptqtp[=K]` — models far bigger than RAM stream
+from the source mmap into `<name>.ptqtp0..K-1` trit-plane tensors that the
+family loaders pair-detect (`--ptqtp-include/--ptqtp-exclude` name filters,
+`--dry-run` plan preview; docs/PTQTP.md).
 
 ### Gradient-free variant: evolution strategies
 

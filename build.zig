@@ -655,6 +655,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     export_gguf_exe.root_module.addImport("fucina", module);
+    export_gguf_exe.root_module.addImport("fucina_llm", llm_module);
     configureBlas(export_gguf_exe, blas_kind);
     configureGpu(b, export_gguf_exe, gpu_kind);
     const export_gguf_install = installArtifactStep(b, export_gguf_exe);
@@ -665,7 +666,7 @@ pub fn build(b: *std.Build) void {
         export_gguf_cmd.addArgs(args);
     }
 
-    const export_gguf_step = b.step("export-gguf", "Export a GGUF: re-emit/transcode a model, or merge Fucina LoRA adapters (checkpoint dir or safetensors) into dense weights");
+    const export_gguf_step = b.step("export-gguf", "Export a GGUF: re-emit/transcode a model, merge Fucina LoRA adapters (checkpoint dir or safetensors) into dense weights, or PTQTP-quantize tensor-at-a-time (--ptqtp[=K]; models bigger than RAM)");
     export_gguf_step.dependOn(&export_gguf_cmd.step);
 
     const arch_check_exe = b.addExecutable(.{

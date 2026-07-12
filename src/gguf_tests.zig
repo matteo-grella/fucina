@@ -251,6 +251,62 @@ test "GGUF writer round-trips metadata and tensors through the parser" {
     try std.testing.expectEqualSlices(u8, written, sink2.buffered());
 }
 
+test "GGUF writer streams declared tensors byte-identically to finish" {
+    const allocator = std.testing.allocator;
+
+    const f32_values = [_]f32{ 1, 2, 3, 4, 5, 6 };
+    var f32_bytes: [24]u8 = undefined;
+    try encodeF32(.f32, &f32_values, &f32_bytes);
+    var q8_values: [64]f32 = undefined;
+    for (&q8_values, 0..) |*value, i| value.* = @as(f32, @floatFromInt(i)) - 31.5;
+    var q8_bytes: [68]u8 align(2) = undefined;
+    try encodeF32(.q8_0, &q8_values, &q8_bytes);
+
+    // Reference: the borrow-everything finish path.
+    var w = Writer.init(allocator);
+    defer w.deinit();
+    try w.addMetaString("general.name", "stream-test");
+    try w.addTensor("a", .f32, &.{ 3, 2 }, &f32_bytes);
+    try w.addTensor("b", .q8_0, &.{64}, &q8_bytes);
+    var buf: [4096]u8 = undefined;
+    var sink = std.Io.Writer.fixed(&buf);
+    try w.finish(&sink);
+    const reference = sink.buffered();
+
+    // Streaming: declare (no bytes), write header, then feed data in order.
+    var ws = Writer.init(allocator);
+    defer ws.deinit();
+    try ws.addMetaString("general.name", "stream-test");
+    try ws.declareTensor("a", .f32, &.{ 3, 2 });
+    try ws.declareTensor("b", .q8_0, &.{64});
+
+    // finish refuses data-less declarations — they belong to the stream path.
+    var reject: [4096]u8 = undefined;
+    var reject_sink = std.Io.Writer.fixed(&reject);
+    try std.testing.expectError(Error.TensorDataMissing, ws.finish(&reject_sink));
+
+    var buf2: [4096]u8 = undefined;
+    var sink2 = std.Io.Writer.fixed(&buf2);
+    var streamer = try ws.beginStream(&sink2);
+    try std.testing.expectEqualStrings("a", streamer.nextTensorName().?);
+    try std.testing.expectError(Error.TensorDataMissing, streamer.finish()); // incomplete
+    try std.testing.expectError(Error.InvalidTensorInfo, streamer.writeTensorData(f32_bytes[0..8])); // wrong length
+    try streamer.writeTensorData(&f32_bytes);
+    try std.testing.expectEqualStrings("b", streamer.nextTensorName().?);
+    try streamer.writeTensorData(&q8_bytes);
+    try std.testing.expectEqual(@as(?[]const u8, null), streamer.nextTensorName());
+    try std.testing.expectError(Error.TensorDataMissing, streamer.writeTensorData(&q8_bytes)); // past end
+    try streamer.finish();
+
+    try std.testing.expectEqualSlices(u8, reference, sink2.buffered());
+
+    // The streamed bytes parse back to the same tensors.
+    var file = try File.parseOwned(allocator, try allocator.dupe(u8, sink2.buffered()));
+    defer file.deinit();
+    try std.testing.expectEqualSlices(u8, &f32_bytes, (try file.get("a")).data);
+    try std.testing.expectEqualSlices(u8, &q8_bytes, (try file.get("b")).data);
+}
+
 test "GGUF writer honors general.alignment, key replacement, and skip lists" {
     const allocator = std.testing.allocator;
 

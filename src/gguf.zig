@@ -24,6 +24,24 @@ pub fn prefetch(data: []const u8) void {
     std.posix.madvise(ptr, len, std.posix.MADV.WILLNEED) catch {};
 }
 
+/// The counterpart hint for a mapped region we are DONE reading (the
+/// tensor-at-a-time streaming paths): drop its pages from residency now
+/// instead of waiting for memory pressure. Only valid for read-only
+/// file-backed mappings (`File.loadMmap*`) — the pages are clean, so
+/// `MADV.DONTNEED` merely releases them and a later touch refaults from the
+/// file. Best-effort: a no-op whenever the advice call is unsupported or
+/// fails. Page-aligned like `prefetch` (rounding may cover neighbouring
+/// header bytes on the shared first/last page; they refault harmlessly).
+pub fn release(data: []const u8) void {
+    if (data.len == 0) return;
+    const page = std.heap.pageSize();
+    const start = @intFromPtr(data.ptr);
+    const aligned = std.mem.alignBackward(usize, start, page);
+    const len = (start - aligned) + data.len;
+    const ptr: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(aligned);
+    std.posix.madvise(ptr, len, std.posix.MADV.DONTNEED) catch {};
+}
+
 pub const Error = error{
     InvalidMagic,
     UnsupportedVersion,
@@ -35,6 +53,7 @@ pub const Error = error{
     KeyNotFound,
     DuplicateTensorName,
     InvalidAlignment,
+    TensorDataMissing,
     MetadataValueOutOfRange,
     EncoderUnavailable,
     DecoderUnavailable,
@@ -842,8 +861,12 @@ pub const Writer = struct {
         ggml_type: GgmlType,
         n_dims: usize,
         dims: [4]usize,
-        /// Borrowed until `finish` returns.
-        data: []const u8,
+        /// Wire byte length (`tensorByteLen`), known at declaration time —
+        /// offsets are computed from this, so headers never need the bytes.
+        byte_len: usize,
+        /// Borrowed until `finish` returns; null for tensors declared via
+        /// `declareTensor`, whose bytes arrive through `beginStream`.
+        data: ?[]const u8,
     };
 
     pub fn init(allocator: Allocator) Writer {
@@ -1001,9 +1024,26 @@ pub const Writer = struct {
     /// `data` are the wire bytes for `ggml_type` (length must equal
     /// `tensorByteLen`) and are BORROWED until `finish` returns.
     pub fn addTensor(self: *Writer, name: []const u8, ggml_type: GgmlType, dims: []const usize, data: []const u8) !void {
+        try self.appendTensor(name, ggml_type, dims, data);
+    }
+
+    /// `addTensor` without the bytes: declares name/type/dims (same
+    /// validation, offsets come from `tensorByteLen`) and defers the payload
+    /// to the `beginStream` data phase. For outputs too large to hold every
+    /// tensor buffer at once: declare the full tensor set, then stream each
+    /// tensor's bytes in declaration order, releasing each buffer before
+    /// producing the next.
+    pub fn declareTensor(self: *Writer, name: []const u8, ggml_type: GgmlType, dims: []const usize) !void {
+        try self.appendTensor(name, ggml_type, dims, null);
+    }
+
+    fn appendTensor(self: *Writer, name: []const u8, ggml_type: GgmlType, dims: []const usize, data: ?[]const u8) !void {
         if (name.len == 0) return Error.InvalidTensorInfo;
         if (dims.len == 0 or dims.len > 4) return Error.InvalidTensorInfo;
-        if (data.len != try tensorByteLen(ggml_type, dims)) return Error.InvalidTensorInfo;
+        const byte_len = try tensorByteLen(ggml_type, dims);
+        if (data) |bytes| {
+            if (bytes.len != byte_len) return Error.InvalidTensorInfo;
+        }
         if (self.tensor_index.contains(name)) return Error.DuplicateTensorName;
 
         const owned_name = try self.allocator.dupe(u8, name);
@@ -1013,6 +1053,7 @@ pub const Writer = struct {
             .ggml_type = ggml_type,
             .n_dims = dims.len,
             .dims = .{ 0, 0, 0, 0 },
+            .byte_len = byte_len,
             .data = data,
         };
         for (dims, 0..) |dim, dim_i| entry.dims[dim_i] = dim;
@@ -1021,11 +1062,10 @@ pub const Writer = struct {
         try self.tensor_index.put(owned_name, self.tensors.items.len - 1);
     }
 
-    /// Serialize everything: header, KV section, tensor infos (offsets are
-    /// the llama.cpp running padded total, relative to the data-section
-    /// start), padding to `alignment`, then each tensor's data padded to
-    /// `alignment` (including the last, matching ggml's writer).
-    pub fn finish(self: *const Writer, out: *std.Io.Writer) !void {
+    /// Header, KV section, tensor infos (offsets are the llama.cpp running
+    /// padded total, relative to the data-section start), padding to
+    /// `alignment` — everything except tensor data.
+    fn writeHeader(self: *const Writer, out: *std.Io.Writer) !void {
         try out.writeAll("GGUF");
         try out.writeInt(u32, 3, .little);
         try out.writeInt(u64, @intCast(self.tensors.items.len), .little);
@@ -1049,15 +1089,71 @@ pub const Writer = struct {
             try out.writeInt(u32, @intFromEnum(t.ggml_type), .little);
             try out.writeInt(u64, @intCast(data_offset), .little);
             header_len += 8 + t.name.len + 4 + t.n_dims * 8 + 4 + 8;
-            data_offset = try std.math.add(usize, data_offset, std.mem.alignForward(usize, t.data.len, self.alignment));
+            data_offset = try std.math.add(usize, data_offset, std.mem.alignForward(usize, t.byte_len, self.alignment));
         }
 
         try out.splatByteAll(0, std.mem.alignForward(usize, header_len, self.alignment) - header_len);
+    }
+
+    /// Serialize everything: `writeHeader`, then each tensor's borrowed data
+    /// padded to `alignment` (including the last, matching ggml's writer).
+    /// Tensors declared without data (`declareTensor`) belong to the
+    /// streaming path and make this fail with `Error.TensorDataMissing`.
+    pub fn finish(self: *const Writer, out: *std.Io.Writer) !void {
+        try self.writeHeader(out);
         for (self.tensors.items) |t| {
-            try out.writeAll(t.data);
-            try out.splatByteAll(0, std.mem.alignForward(usize, t.data.len, self.alignment) - t.data.len);
+            const data = t.data orelse return Error.TensorDataMissing;
+            try out.writeAll(data);
+            try out.splatByteAll(0, std.mem.alignForward(usize, t.byte_len, self.alignment) - t.byte_len);
         }
     }
+
+    /// The streaming counterpart of `finish`: write the complete header now
+    /// (declare/add every tensor BEFORE calling — the header pins names,
+    /// dims, and offsets) and return a `DataStreamer` that feeds each
+    /// tensor's bytes in declaration order. Tensors added WITH data still
+    /// stream — pass their bytes (or any equal-length buffer) at their turn.
+    pub fn beginStream(self: *const Writer, out: *std.Io.Writer) !DataStreamer {
+        try self.writeHeader(out);
+        return .{ .writer = self, .out = out };
+    }
+
+    /// Data-phase companion of `beginStream`. Each `writeTensorData` call
+    /// writes the next tensor's bytes plus alignment padding straight
+    /// through, so the caller can free/release every buffer before producing
+    /// the next — the writer never borrows tensor data in this mode.
+    pub const DataStreamer = struct {
+        writer: *const Writer,
+        out: *std.Io.Writer,
+        next_index: usize = 0,
+
+        /// Name of the tensor the next `writeTensorData` call must supply;
+        /// null once every declared tensor has been written.
+        pub fn nextTensorName(self: *const DataStreamer) ?[]const u8 {
+            if (self.next_index >= self.writer.tensors.items.len) return null;
+            return self.writer.tensors.items[self.next_index].name;
+        }
+
+        /// Write the next tensor's wire bytes. Length must match the
+        /// declaration (`Error.InvalidTensorInfo`); writing past the
+        /// declared set is `Error.TensorDataMissing`.
+        pub fn writeTensorData(self: *DataStreamer, data: []const u8) !void {
+            const tensors = self.writer.tensors.items;
+            if (self.next_index >= tensors.len) return Error.TensorDataMissing;
+            const t = &tensors[self.next_index];
+            if (data.len != t.byte_len) return Error.InvalidTensorInfo;
+            try self.out.writeAll(data);
+            try self.out.splatByteAll(0, std.mem.alignForward(usize, t.byte_len, self.writer.alignment) - t.byte_len);
+            self.next_index += 1;
+        }
+
+        /// The file is complete only when every declared tensor was
+        /// streamed; anything less is `Error.TensorDataMissing`. The caller
+        /// still owns the output flush.
+        pub fn finish(self: *const DataStreamer) !void {
+            if (self.next_index != self.writer.tensors.items.len) return Error.TensorDataMissing;
+        }
+    };
 };
 
 /// Encode `src` f32 values as `ggml_type` wire bytes into `dst`, whose length

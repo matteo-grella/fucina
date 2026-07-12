@@ -439,7 +439,7 @@ in [`RUNNING-MODELS.md`](RUNNING-MODELS.md) and §14):
 | `es-ternary-spirals` | Ternary-native ES on packed TQ2_0 layers (training state = the int8 inference model; see [`TERNARY.md`](TERNARY.md)). |
 | `ptqtp-spirals` | Self-verifying PTQTP acceptance demo: float-trains an MLP, decorates it post-training with dual trit-planes, asserts accuracy holds on the deployed int8 path (§10.9, [`PTQTP.md`](PTQTP.md)). |
 | `ptqtp-qwen3` | Decorate a Qwen3 GGUF's linears in place (any source dtype; `--planes 1\|2\|3`, `--down-planes/--o-planes`, `--skip-first/--skip-last`, `--head-planes`) with teacher-forced NLL before/after and greedy completion + decode timing; `--save FILE` persists the decorated model as a GGUF that reloads bitwise through the ordinary loaders (§13.2.1, [`PTQTP.md`](PTQTP.md)). |
-| `export-gguf` | `tools/export_gguf.zig`: GGUF re-emit/transcode (`--dtype f16/bf16/f32/q8_0/q4_k/q5_k/q6_k/tq2_0/verbatim`, `--experts-dtype` override) or merge of Fucina LoRA adapters into dense weights (`--adapters`); see §12. |
+| `export-gguf` | `tools/export_gguf.zig`: GGUF re-emit/transcode (`--dtype f16/bf16/f32/q8_0/q4_k/q5_k/q6_k/tq2_0/verbatim`, `--experts-dtype` override), merge of Fucina LoRA adapters into dense weights (`--adapters`), or shard-streaming PTQTP quantization (`--ptqtp[=K]`, one tensor at a time — models bigger than RAM; docs/PTQTP.md); see §12. |
 
 **Microbenchmarks** (all in `bench/`; run under `-Doptimize=ReleaseFast`;
 protocol and thermal discipline in [`BENCHMARK.md`](BENCHMARK.md)):
@@ -9500,7 +9500,16 @@ pub const Writer = struct {
 
     pub fn addTensor(self: *Writer, name: []const u8, ggml_type: GgmlType,
                      dims: []const usize, data: []const u8) !void
+    pub fn declareTensor(self: *Writer, name: []const u8, ggml_type: GgmlType,
+                         dims: []const usize) !void
     pub fn finish(self: *const Writer, out: *std.Io.Writer) !void
+    pub fn beginStream(self: *const Writer, out: *std.Io.Writer) !DataStreamer
+
+    pub const DataStreamer = struct {
+        pub fn nextTensorName(self: *const DataStreamer) ?[]const u8
+        pub fn writeTensorData(self: *DataStreamer, data: []const u8) !void
+        pub fn finish(self: *const DataStreamer) !void
+    };
 };
 pub const MetaType = enum(u32) { uint8 = 0, int8, uint16, int16, uint32, int32,
                                  float32, boolean, string, array, uint64, int64, float64 };
@@ -9522,6 +9531,20 @@ tensor payload verbatim (both asserted in `src/gguf_tests.zig`).
 **Ownership.** Metadata keys/payloads and tensor names are duplicated into
 the writer (`deinit` frees them). Tensor `data` is **borrowed** and must stay
 alive until `finish` returns. `finish` is `*const` and repeatable.
+
+**Streaming serialization.** For outputs too large to hold every tensor
+buffer at once (the `export-gguf --ptqtp` path), `declareTensor` records
+name/type/dims without bytes (same validation; offsets come from
+`tensorByteLen`), and `beginStream` writes the complete header immediately,
+returning a `DataStreamer` that feeds each tensor's bytes **in declaration
+order** (`writeTensorData` writes data + padding straight through, so each
+buffer can be freed before producing the next; wrong length is
+`Error.InvalidTensorInfo`, past-the-end is `Error.TensorDataMissing`).
+`DataStreamer.finish` errors with `Error.TensorDataMissing` unless every
+declared tensor was streamed, as does `Writer.finish` if it meets a
+data-less declaration. Tensors added *with* data stream too — pass their
+bytes at their turn. The streamed output is byte-identical to the `finish`
+path (pinned in `src/gguf_tests.zig`).
 
 **Metadata semantics.**
 
@@ -9650,16 +9673,26 @@ zig build export-gguf -Doptimize=ReleaseFast -- \
 #     into dense f32/f16/bf16 base weights and re-emit
 zig build export-gguf -Doptimize=ReleaseFast -- \
   --from-gguf base-f16.gguf --adapters ckpt-dir --alpha 16 --out merged.gguf
+
+# (c) shard-streaming PTQTP quantization (docs/PTQTP.md): one tensor at a
+#     time, so models far bigger than RAM quantize on a small machine
+zig build export-gguf -Doptimize=ReleaseFast -- \
+  --from-gguf big-BF16.gguf --out big-ptqtp3.gguf --ptqtp=3
 ```
 
 | Flag | Meaning |
 |---|---|
 | `--from-gguf PATH` | input model (mmap-loaded); required |
-| `--out PATH` | output path; required |
+| `--out PATH` | output path; required (except `--dry-run`) |
 | `--dtype MODE` | global transcode target: `verbatim` (default), `f32`, `f16`, `bf16`, `q8_0`, `q4_k`, `q5_k`, `q6_k`, `tq2_0` |
 | `--experts-dtype MODE` | override for tensors named `*_exps.weight` only; may requantize a quantized source |
 | `--adapters DIR_OR_FILE` | checkpoint directory containing `adapters.safetensors`, or a safetensors file directly |
 | `--alpha F` | LoRA scaling; **required** with `--adapters` (the safetensors checkpoint stores A/B but not alpha; finetune default 16) |
+| `--ptqtp[=K]` | mode (c): replace eligible matrices with `K` (1–3, default 2) `<name>.ptqtp0..K-1` TQ2_0 plane tensors, streamed tensor-at-a-time; exclusive with the other modes |
+| `--ptqtp-planes K` | plane count as a separate knob (implies `--ptqtp`) |
+| `--ptqtp-include SUB[,SUB]` | only quantize names containing a substring (replaces the default embeddings/head-stay policy); repeatable |
+| `--ptqtp-exclude SUB[,SUB]` | never quantize matching names; repeatable |
+| `--dry-run` | (with `--ptqtp`) print the per-tensor plan — name, shape, source dtype → target, bytes before/after — and exit without writing |
 
 All metadata passes through byte-verbatim (`copyAllMetadata`); a non-verbatim
 `--dtype` additionally sets `general.file_type` to the matching llama.cpp
@@ -9682,6 +9715,19 @@ requantize pre-quantized expert tensors (dequant → re-encode through
 `decodeF32`/`encodeF32`): shipped MoE GGUFs store experts pre-quantized, and
 experts are where shrinking bytes pays most in decode bandwidth at lowest
 quality risk. Block divisibility still rules.
+
+**PTQTP policy** (mode c — full treatment in docs/PTQTP.md): eligible = 2D,
+name ends `.weight`, no `norm`, `dims[0] % 256 == 0`, source dtype
+decodable to f32 (quantized sources ARE accepted — they dequantize first,
+the paper-validated graceful-degradation path). Embeddings and
+`output.weight` stay in source precision unless `--ptqtp-include` says
+otherwise; 3D expert stacks always pass through (v1). The output carries
+the `fucina.ptqtp.version` stamp and the `src/llm/ptqtp_gguf.zig` plane
+names, so it loads through the existing pair-detection. Split sources load
+via `loadMmapAuto` (the single-file output drops `split.*` keys), and the
+data section is produced with the streaming writer — the tool holds one
+source tensor's f32 buffer plus its planes, never the whole model, and
+reports the peak working set and peak RSS at the end.
 
 **Merge policy**: adapters named `layers.<i>.<q|k|v|o|gate|up|down>.lora_a/b`
 merge into the matching `blk.<i>.attn_*/ffn_*.weight` tensors via

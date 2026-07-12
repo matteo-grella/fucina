@@ -6,6 +6,10 @@
 //!   (b) merge Fucina LoRA adapters (safetensors, as saved by `zig build finetune`)
 //!       into dense f32/f16/bf16 base weights and re-emit:
 //!       zig build export-gguf -- --from-gguf in.gguf --adapters lora-dir --out out.gguf --alpha F
+//!   (c) shard-streaming PTQTP quantization (docs/PTQTP.md) — models far
+//!       bigger than RAM quantize tensor-at-a-time from the source mmap:
+//!       zig build export-gguf -- --from-gguf in.gguf --out out.gguf --ptqtp[=K]
+//!           [--ptqtp-planes K] [--ptqtp-include SUB[,SUB]] [--ptqtp-exclude SUB[,SUB]] [--dry-run]
 //!
 //! Transcode policy (documented choice, llama.cpp-convention): only matrix
 //! weights transcode — n_dims >= 2, name ending ".weight", name not
@@ -28,6 +32,29 @@
 //! divide the target block size keep the source dtype (gemma's 704-wide
 //! ffn_down_exps stays Q8_0 under `--experts-dtype q4_k`).
 //!
+//! PTQTP policy (mode c): every eligible 2D matrix — name ending ".weight",
+//! not containing "norm", contract dim divisible by 256 (the plane block
+//! width), source dtype decodable to f32 — is replaced by K byte-valid
+//! standalone TQ2_0 plane tensors named `<name>.ptqtp0..K-1`, following the
+//! src/llm/ptqtp_gguf.zig persistence conventions exactly (same names, same
+//! `fucina.ptqtp.version` metadata stamp), so the output loads through the
+//! existing family pair-detection. By default embeddings (`token_embd`) and
+//! the output head stay in source precision (docs/PTQTP.md guidance);
+//! `--ptqtp-include` replaces that default name policy with substring
+//! matches, `--ptqtp-exclude` always subtracts. 3D MoE expert stacks pass
+//! through unchanged in v1 (the per-expert plane layout is tracked as a
+//! follow-up). Unlike the --dtype policy, PTQTP deliberately accepts
+//! quantized sources (q8_0/K-quants dequantize through `gguf.decodeF32`
+//! first): the paper-validated from-quantized path degrades gracefully, and
+//! hundreds-of-GB models often only ship quantized.
+//!
+//! Memory discipline (the point of mode c): the output is written with the
+//! writer's streaming path (`declareTensor` + `beginStream`), so at any
+//! moment the tool holds ONE source tensor's f32 buffer plus its quantized
+//! planes — never the whole output. Source bytes arrive through the mmap
+//! (prefetched, then `gguf.release`d per tensor), so residency stays
+//! bounded no matter the model size; the run ends with a peak-RSS report.
+//!
 //! Merge policy: adapters named "layers.<i>.<q|k|v|o|gate|up|down>.lora_a/b"
 //! (the qwen3_train.Trainer naming) merge into the matching
 //! "blk.<i>.attn_*/ffn_*.weight" tensors via `lora.Adapter.mergeInto`
@@ -40,18 +67,22 @@
 //! stores A/B but not alpha, so `--alpha` (the training-time value; finetune
 //! default: 16) is REQUIRED with `--adapters`.
 
+const builtin = @import("builtin");
 const std = @import("std");
 const fucina = @import("fucina");
+const llm = @import("fucina_llm");
 
 const gguf = fucina.gguf;
 const lora = fucina.lora;
 const optim = fucina.optim;
+const ptqtp = fucina.ptqtp;
+const ptqtp_gguf = llm.ptqtp_gguf;
 const safetensors = fucina.safetensors;
 
 const DtypeMode = enum { verbatim, f32, f16, bf16, q8_0, q4_k, q5_k, q6_k, tq2_0 };
 
 const usage =
-    "usage: zig build export-gguf -Doptimize=ReleaseFast -- --from-gguf IN.gguf --out OUT.gguf [--dtype f16|bf16|f32|q8_0|q4_k|q5_k|q6_k|tq2_0|verbatim] [--experts-dtype DTYPE (only tensors named *_exps.weight; may requantize)] [--adapters DIR_OR_SAFETENSORS --alpha F (required together)]\n";
+    "usage: zig build export-gguf -Doptimize=ReleaseFast -- --from-gguf IN.gguf --out OUT.gguf [--dtype f16|bf16|f32|q8_0|q4_k|q5_k|q6_k|tq2_0|verbatim] [--experts-dtype DTYPE (only tensors named *_exps.weight; may requantize)] [--adapters DIR_OR_SAFETENSORS --alpha F (required together)] [--ptqtp[=K] --ptqtp-planes K --ptqtp-include SUB[,SUB] --ptqtp-exclude SUB[,SUB] --dry-run (shard-streaming PTQTP quantization; docs/PTQTP.md)]\n";
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -68,6 +99,12 @@ pub fn main(init: std.process.Init) !void {
     var dtype_mode: DtypeMode = .verbatim;
     var experts_dtype_mode: ?DtypeMode = null; // null = experts follow --dtype
     var alpha: ?f32 = null;
+    var ptqtp_mode = false;
+    var ptqtp_planes: u8 = 2;
+    var dry_run = false;
+    const arena = init.arena.allocator();
+    var includes: std.ArrayList([]const u8) = .empty;
+    var excludes: std.ArrayList([]const u8) = .empty;
 
     var arg_i: usize = 1;
     while (arg_i < args.len) : (arg_i += 1) {
@@ -108,6 +145,37 @@ pub fn main(init: std.process.Init) !void {
             alpha = try std.fmt.parseFloat(f32, args[arg_i]);
         } else if (std.mem.startsWith(u8, arg, "--alpha=")) {
             alpha = try std.fmt.parseFloat(f32, arg["--alpha=".len..]);
+        } else if (std.mem.eql(u8, arg, "--ptqtp")) {
+            ptqtp_mode = true;
+        } else if (std.mem.startsWith(u8, arg, "--ptqtp=")) {
+            ptqtp_mode = true;
+            ptqtp_planes = try std.fmt.parseInt(u8, arg["--ptqtp=".len..], 10);
+        } else if (std.mem.eql(u8, arg, "--ptqtp-planes")) {
+            arg_i += 1;
+            if (arg_i >= args.len) return error.MissingPlaneCount;
+            ptqtp_mode = true;
+            ptqtp_planes = try std.fmt.parseInt(u8, args[arg_i], 10);
+        } else if (std.mem.startsWith(u8, arg, "--ptqtp-planes=")) {
+            ptqtp_mode = true;
+            ptqtp_planes = try std.fmt.parseInt(u8, arg["--ptqtp-planes=".len..], 10);
+        } else if (std.mem.eql(u8, arg, "--ptqtp-include")) {
+            arg_i += 1;
+            if (arg_i >= args.len) return error.MissingFilter;
+            ptqtp_mode = true;
+            try appendFilters(arena, &includes, args[arg_i]);
+        } else if (std.mem.startsWith(u8, arg, "--ptqtp-include=")) {
+            ptqtp_mode = true;
+            try appendFilters(arena, &includes, arg["--ptqtp-include=".len..]);
+        } else if (std.mem.eql(u8, arg, "--ptqtp-exclude")) {
+            arg_i += 1;
+            if (arg_i >= args.len) return error.MissingFilter;
+            ptqtp_mode = true;
+            try appendFilters(arena, &excludes, args[arg_i]);
+        } else if (std.mem.startsWith(u8, arg, "--ptqtp-exclude=")) {
+            ptqtp_mode = true;
+            try appendFilters(arena, &excludes, arg["--ptqtp-exclude=".len..]);
+        } else if (std.mem.eql(u8, arg, "--dry-run")) {
+            dry_run = true;
         } else {
             try stdout.print(usage, .{});
             return error.UnknownArgument;
@@ -117,10 +185,6 @@ pub fn main(init: std.process.Init) !void {
         try stdout.print(usage, .{});
         return error.MissingFromPath;
     };
-    const dst_path = out_path orelse {
-        try stdout.print(usage, .{});
-        return error.MissingOutPath;
-    };
     if (adapters_path != null and (dtype_mode != .verbatim or experts_dtype_mode != null)) {
         try stdout.print("--adapters merges into the base dtype; combining it with --dtype/--experts-dtype transcoding is not supported\n", .{});
         return error.UnsupportedArgumentCombination;
@@ -129,8 +193,34 @@ pub fn main(init: std.process.Init) !void {
         try stdout.print("--adapters requires --alpha: the safetensors checkpoint stores the adapter A/B matrices but not alpha, so pass the training-time value (finetune default: 16)\n", .{});
         return error.MissingAlpha;
     }
+    if (ptqtp_mode and (adapters_path != null or dtype_mode != .verbatim or experts_dtype_mode != null)) {
+        try stdout.print("--ptqtp is its own streaming mode; combining it with --dtype/--experts-dtype/--adapters is not supported (quantize in a separate pass)\n", .{});
+        return error.UnsupportedArgumentCombination;
+    }
+    if (dry_run and !ptqtp_mode) {
+        try stdout.print("--dry-run belongs to the --ptqtp mode (it prints the per-tensor quantization plan)\n", .{});
+        return error.UnsupportedArgumentCombination;
+    }
+    if (ptqtp_mode and (ptqtp_planes < 1 or ptqtp_planes > 3)) {
+        try stdout.print("--ptqtp plane count must be 1, 2, or 3 (got {d})\n", .{ptqtp_planes});
+        return error.InvalidPlaneCount;
+    }
+    if (out_path == null and !dry_run) {
+        try stdout.print(usage, .{});
+        return error.MissingOutPath;
+    }
 
     const allocator = std.heap.smp_allocator;
+
+    if (ptqtp_mode) {
+        return runPtqtp(allocator, io, in_path, out_path, .{
+            .planes = ptqtp_planes,
+            .includes = includes.items,
+            .excludes = excludes.items,
+            .dry_run = dry_run,
+        }, stdout);
+    }
+    const dst_path = out_path.?;
 
     var file = try gguf.File.loadMmap(allocator, io, in_path);
     defer file.deinit();
@@ -313,6 +403,276 @@ fn widenRow(src_type: gguf.GgmlType, src: []const u8, dst: []f32) void {
 
 fn bf16ToF32(bits: u16) f32 {
     return @bitCast(@as(u32, bits) << 16);
+}
+
+// ---------------------------------------------------------------------------
+// PTQTP shard-streaming quantization (mode c). See the module doc for the
+// policy; docs/PTQTP.md for the method and the loader-side conventions.
+// ---------------------------------------------------------------------------
+
+const PtqtpArgs = struct {
+    planes: u8,
+    includes: []const []const u8,
+    excludes: []const []const u8,
+    dry_run: bool,
+};
+
+/// Split a (repeatable) comma-separated filter argument into the list. The
+/// substrings borrow the argv arena, which outlives the run.
+fn appendFilters(allocator: std.mem.Allocator, list: *std.ArrayList([]const u8), value: []const u8) !void {
+    var it = std.mem.splitScalar(u8, value, ',');
+    while (it.next()) |part| {
+        if (part.len == 0) continue;
+        try list.append(allocator, part);
+    }
+}
+
+fn matchesAny(name: []const u8, needles: []const []const u8) bool {
+    for (needles) |needle| {
+        if (std.mem.indexOf(u8, name, needle) != null) return true;
+    }
+    return false;
+}
+
+/// Whether mode (c) quantizes this tensor — the GGUF-level mirror of
+/// `LinearWeight.ptqtpEligible` plus the matrix name policy. Must be pure:
+/// the plan pass (declarations) and the stream pass (data) both call it and
+/// have to agree tensor-for-tensor.
+fn ptqtpQuantizes(info: *const gguf.TensorInfo, args: *const PtqtpArgs) bool {
+    if (info.n_dims != 2) return false; // 3D expert stacks: v1 passthrough
+    if (!std.mem.endsWith(u8, info.name, ".weight")) return false;
+    if (std.mem.indexOf(u8, info.name, "norm") != null) return false;
+    if (info.dims[0] % ptqtp.block_len != 0) return false; // 256-block contract
+    switch (info.ggml_type) {
+        // Everything gguf.decodeF32 handles except tq2_0 (already ternary).
+        .f32, .f16, .bf16, .q4_0, .q4_1, .q5_0, .q5_1, .q8_0, .q4_k, .q5_k, .q6_k => {},
+        else => return false,
+    }
+    if (args.includes.len != 0) {
+        if (!matchesAny(info.name, args.includes)) return false;
+    } else {
+        // Default name policy (docs/PTQTP.md): embeddings and the output
+        // head stay in source precision. --ptqtp-include replaces this.
+        if (std.mem.indexOf(u8, info.name, "token_embd") != null) return false;
+        if (std.mem.eql(u8, info.name, "output.weight")) return false;
+    }
+    if (matchesAny(info.name, args.excludes)) return false;
+    return true;
+}
+
+fn runPtqtp(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    in_path: []const u8,
+    out_path: ?[]const u8,
+    args: PtqtpArgs,
+    stdout: *std.Io.Writer,
+) !void {
+    if (out_path) |dst| {
+        if (std.mem.eql(u8, dst, in_path)) {
+            try stdout.print("--out must differ from --from-gguf: the streaming writer reads source tensors from the mmap while writing the destination\n", .{});
+            return error.UnsupportedArgumentCombination;
+        }
+    }
+
+    // Split-aware mmap load: pages are file-backed and evictable, so walking
+    // one tensor at a time never needs the model to fit in RAM.
+    var file = try gguf.File.loadMmapAuto(allocator, io, in_path);
+    defer file.deinit();
+
+    const options = ptqtp.Options{ .planes = args.planes };
+
+    var writer = gguf.Writer.init(allocator);
+    defer writer.deinit();
+    // The output is always a single file: drop the llama.cpp split markers
+    // a multi-part source carries.
+    try writer.copyAllMetadata(&file, &.{ "split.no", "split.count", "split.tensors.count" });
+
+    // Plan pass: decide per tensor; print the plan (--dry-run) or declare
+    // the output tensor set (names, dims, offsets — no data yet).
+    var quantized_count: usize = 0;
+    var passthrough_count: usize = 0;
+    var expert_stacks: usize = 0;
+    var quant_src_bytes: u64 = 0;
+    var quant_dst_bytes: u64 = 0;
+    var total_src_bytes: u64 = 0;
+    var total_dst_bytes: u64 = 0;
+    var name_buf: [256]u8 = undefined;
+    for (file.tensors) |*info| {
+        total_src_bytes += info.data.len;
+        const dims = info.dims[0..info.n_dims];
+        if (ptqtpQuantizes(info, &args)) {
+            const out_bytes = try gguf.tensorByteLen(.tq2_0, dims) * args.planes;
+            quantized_count += 1;
+            quant_src_bytes += info.data.len;
+            quant_dst_bytes += out_bytes;
+            total_dst_bytes += out_bytes;
+            if (args.dry_run) {
+                try stdout.print("ptqtp {s} ", .{info.name});
+                try printShape(stdout, info);
+                try stdout.print(" {s} -> tq2_0 x{d}  ({d:.1} -> {d:.1} MiB)\n", .{
+                    @tagName(info.ggml_type), args.planes, mib(info.data.len), mib(out_bytes),
+                });
+                continue;
+            }
+            for (0..args.planes) |plane_i| {
+                const plane_name = try ptqtp_gguf.planeName(&name_buf, info.name, plane_i);
+                try writer.declareTensor(plane_name, .tq2_0, dims);
+            }
+        } else {
+            passthrough_count += 1;
+            if (info.n_dims == 3 and std.mem.indexOf(u8, info.name, "_exps.") != null) expert_stacks += 1;
+            total_dst_bytes += info.data.len;
+            if (args.dry_run) {
+                try stdout.print("pass  {s} ", .{info.name});
+                try printShape(stdout, info);
+                try stdout.print(" {s} (kept)\n", .{@tagName(info.ggml_type)});
+                continue;
+            }
+            try writer.declareTensor(info.name, info.ggml_type, dims);
+        }
+    }
+
+    if (args.dry_run) {
+        try stdout.print(
+            "plan: {d} tensors; {d} ptqtp-quantized (K={d}, {d} plane tensors), {d} passthrough ({d} expert stacks kept)\n",
+            .{ file.tensors.len, quantized_count, args.planes, quantized_count * args.planes, passthrough_count, expert_stacks },
+        );
+        try stdout.print("bytes: {d:.1} -> {d:.1} MiB total; quantized linears {d:.1} -> {d:.1} MiB\n", .{
+            mib(total_src_bytes), mib(total_dst_bytes), mib(quant_src_bytes), mib(quant_dst_bytes),
+        });
+        return;
+    }
+
+    // Same stamp as ptqtp_gguf.build: only a file that actually carries
+    // planes claims the PTQTP format (gates loader pair-detection).
+    if (quantized_count != 0) {
+        try writer.addMetaInt(ptqtp_gguf.version_key, u32, ptqtp_gguf.format_version);
+    }
+
+    var ctx: fucina.ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    // Stream pass: header first, then one tensor at a time — decode, solve,
+    // write, release. Peak memory = one source tensor (f32) + its planes.
+    const dst_path = out_path.?;
+    var out_file = try std.Io.Dir.cwd().createFile(io, dst_path, .{});
+    defer out_file.close(io);
+    var write_buffer: [1 << 20]u8 = undefined;
+    var out_writer = out_file.writer(io, &write_buffer);
+    var streamer = try writer.beginStream(&out_writer.interface);
+
+    var peak_workset: u64 = 0;
+    for (file.tensors) |*info| {
+        if (ptqtpQuantizes(info, &args)) {
+            const workset = try quantizeTensorStream(allocator, &ctx, &streamer, info, options, file.is_mmap, stdout);
+            peak_workset = @max(peak_workset, workset);
+        } else {
+            gguf.prefetch(info.data);
+            try streamer.writeTensorData(info.data);
+            if (file.is_mmap) gguf.release(info.data);
+        }
+    }
+    try streamer.finish();
+    try out_writer.interface.flush();
+
+    try stdout.print("exported {s} -> {s} (PTQTP K={d})\n", .{ in_path, dst_path, args.planes });
+    try stdout.print("tensors: {d} quantized -> {d} plane tensors, {d} passthrough ({d} expert stacks kept)\n", .{
+        quantized_count, quantized_count * args.planes, passthrough_count, expert_stacks,
+    });
+    try stdout.print("bytes: {d:.1} -> {d:.1} MiB total; quantized linears {d:.1} -> {d:.1} MiB\n", .{
+        mib(total_src_bytes), mib(total_dst_bytes), mib(quant_src_bytes), mib(quant_dst_bytes),
+    });
+    // The one-tensor-at-a-time witness: the largest simultaneous heap hold
+    // (one tensor's f32 decode buffer + its packed planes).
+    try stdout.print("peak tensor working set: {d:.1} MiB\n", .{mib(peak_workset)});
+    if (peakRssBytes()) |rss| {
+        // Clean source-mmap pages count toward RSS until the OS drops them:
+        // Linux honors the per-tensor MADV.DONTNEED release immediately;
+        // Darwin ignores it for file-backed maps and only evicts under
+        // memory pressure, so the figure there approaches min(file size,
+        // free RAM) while the heap stays at the working set above.
+        const note = if (builtin.os.tag == .macos) " (macOS: includes clean evictable mmap pages)" else "";
+        try stdout.print("peak RSS: {d:.1} MiB{s}\n", .{ mib(rss), note });
+    }
+}
+
+/// Decode one source tensor to f32 (then release its mapped pages), solve
+/// the trit-planes, stream them out, print the reconstruction stats the
+/// solver measured (against the exact fp16-rounded scales inference will
+/// use). Never holds more than this tensor's f32 buffer plus its planes —
+/// the buffer is freed before the planes are written. Returns that largest
+/// simultaneous hold in bytes (the summary's working-set witness).
+fn quantizeTensorStream(
+    allocator: std.mem.Allocator,
+    ctx: *fucina.ExecContext,
+    streamer: *gguf.Writer.DataStreamer,
+    info: *const gguf.TensorInfo,
+    options: fucina.ptqtp.Options,
+    release_pages: bool,
+    stdout: *std.Io.Writer,
+) !u64 {
+    const shape = try info.logicalMatrixShape(); // [out, in]
+    const rows = shape[0];
+    const cols = shape[1];
+
+    var pair = blk: {
+        const values = try allocator.alloc(f32, rows * cols);
+        defer allocator.free(values);
+        gguf.prefetch(info.data);
+        try gguf.decodeF32(info.ggml_type, info.data, values);
+        if (release_pages) gguf.release(info.data);
+        break :blk try ptqtp.quantizeMatrix(ctx, values, rows, cols, options);
+    };
+    defer pair.deinit(ctx.allocator);
+
+    var out_bytes: usize = 0;
+    const planes = [3][]const fucina.ptqtp.BlockTQ2_0{ pair.plane1, pair.plane2, pair.plane3 };
+    for (planes) |plane| {
+        if (plane.len == 0) break;
+        const bytes = std.mem.sliceAsBytes(plane);
+        try streamer.writeTensorData(bytes);
+        out_bytes += bytes.len;
+    }
+
+    const stats = pair.stats;
+    try stdout.print("ptqtp {s} [{d} x {d}] {s} -> tq2_0 x{d}  rel_err {d:.4}  iters {d:.1}  unconverged {d}/{d}  ({d:.1} -> {d:.1} MiB)\n", .{
+        info.name,           rows,                 cols,                    @tagName(info.ggml_type), pair.planeCount(),
+        stats.rel_frob_err,  stats.mean_iterations, stats.unconverged_groups, stats.group_count,
+        mib(info.data.len),  mib(out_bytes),
+    });
+    try stdout.flush();
+    // f32 decode buffer + all planes coexisted inside quantizeMatrix.
+    return @as(u64, rows * cols * @sizeOf(f32)) + out_bytes;
+}
+
+/// Logical (row-major) shape — reversed ne dims, outermost first.
+fn printShape(stdout: *std.Io.Writer, info: *const gguf.TensorInfo) !void {
+    try stdout.print("[", .{});
+    var i: usize = info.n_dims;
+    while (i > 0) {
+        i -= 1;
+        try stdout.print("{d}", .{info.dims[i]});
+        if (i != 0) try stdout.print(" x ", .{});
+    }
+    try stdout.print("]", .{});
+}
+
+fn mib(bytes: u64) f64 {
+    return @as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0);
+}
+
+/// Peak resident set size — the memory-discipline witness for the streaming
+/// path (`ru_maxrss` is bytes on Darwin, KiB on Linux).
+fn peakRssBytes() ?u64 {
+    switch (builtin.os.tag) {
+        .macos, .ios, .linux => {},
+        else => return null,
+    }
+    const ru = std.posix.getrusage(std.posix.rusage.SELF);
+    const maxrss: u64 = @intCast(@max(ru.maxrss, 0));
+    return if (builtin.os.tag == .linux) maxrss * 1024 else maxrss;
 }
 
 // ---------------------------------------------------------------------------

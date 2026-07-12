@@ -116,6 +116,66 @@ Deliberate deltas from the paper:
   `--nll FILE` teacher-forced perplexity before/after, `--save FILE` to
   persist the decorated model, greedy completion + decode timing).
 
+## Shard-streaming quantizer (`zig build export-gguf -- --ptqtp`)
+
+`ptqtp-qwen3 --save` decorates a loaded model — it needs the model in RAM
+and knows only the qwen3 family walk. The export tool's `--ptqtp` mode is
+the scale path: it quantizes GGUF→GGUF **one source tensor at a time**, so
+a hundreds-of-GB model (DeepSeek/GLM class) quantizes on a 64 GB machine.
+
+```sh
+zig build export-gguf -Doptimize=ReleaseFast -- \
+  --from-gguf big-model-BF16.gguf --out big-model-ptqtp3.gguf --ptqtp=3
+```
+
+| Flag | Meaning |
+|---|---|
+| `--ptqtp[=K]` | enable the mode; `K` = plane count 1–3 (default 2) |
+| `--ptqtp-planes K` | plane count as a separate knob (implies `--ptqtp`) |
+| `--ptqtp-include SUB[,SUB]` | quantize only tensors whose name contains a substring (replaces the default embeddings/head-stay name policy); repeatable |
+| `--ptqtp-exclude SUB[,SUB]` | never quantize matching tensors; always subtracts; repeatable |
+| `--dry-run` | print the per-tensor plan (name, shape, source dtype → target, bytes before/after) and exit without writing |
+
+Mechanics and policy:
+
+- **Streaming both ways.** The source is mmap-loaded (split GGUFs load via
+  `loadMmapAuto`; the single-file output drops the `split.*` markers), and
+  the output uses the writer's streaming path (`gguf.Writer.declareTensor`
+  + `beginStream`): header first, then per tensor decode → solve → write →
+  release. The tool never holds more than one tensor's f32 buffer plus its
+  packed planes (reported as `peak tensor working set`; a 0.6B run peaks at
+  ~14 MiB heap). Source pages get `MADV.DONTNEED` after each tensor —
+  released immediately on Linux; Darwin ignores the hint for file-backed
+  maps and evicts only under pressure, so macOS peak RSS includes clean
+  evictable mmap pages (annotated in the summary).
+- **Same on-disk format as `ptqtp_gguf.zig`**: eligible matrices are
+  replaced by `<name>.ptqtp0..K-1` byte-valid TQ2_0 plane tensors plus the
+  `fucina.ptqtp.version` stamp, so outputs load through the existing
+  pair-detection with zero loader changes (wired in the qwen3 loaders
+  today — see the persistence bullet above; other families read the format
+  once their loaders adopt the same seam).
+- **Eligibility**: 2D, name ends `.weight`, no `norm`, contract dim
+  divisible by 256, source dtype decodable (f32/f16/bf16/legacy/K-quants;
+  quantized sources dequantize first — the from-quantized path degrades
+  gracefully, see above). Default name policy keeps embeddings
+  (`token_embd`) and `output.weight` in source precision; `--ptqtp-include`
+  replaces it (e.g. to decorate the head).
+- **MoE expert stacks (3D) pass through unchanged** in v1 — per-expert
+  plane slicing over the `[in, out, n_expert]` stacks is the tracked
+  follow-up (the expert-plane on-disk layout is being defined in the
+  expert-store work). Attention, shared-expert, and dense-layer FFN
+  matrices already quantize, which is the bulk of the dense-weight bytes.
+- Per-tensor solver diagnostics print as it runs (`rel_err`, mean
+  iterations, unconverged groups) — the same fp16-rounded-scale
+  reconstruction error `MatrixStats` measures, so a bad tensor is visible
+  immediately, not after a full pass.
+
+Validated on Qwen3-0.6B f16: K=2 full decoration (196 matrices → 392
+planes, 840→217 MiB linears) loads through the qwen3 runners and generates
+fluent text; a K=3 partial run (`--ptqtp-include blk.0.attn`) reproduces
+the expected error ladder (rel_err ~0.068 vs dual's ~0.18) and the mixed
+decorated/undecorated file serves correctly.
+
 ## Configuration guidance
 
 - **Source precision**: quantize from bf16/f16 originals when available.
