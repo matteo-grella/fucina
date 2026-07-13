@@ -4,15 +4,16 @@
 //! v 128, kv_lora 512, no q-LoRA; layer 0 dense; layers 1+ = 64 routed
 //! experts top-6 softmax + fused shared expert).
 //!
-//! Milestone-A implementation, correctness before speed: the six heavy
-//! linears per layer (q, kv_a, kv_b, o, FFN projections) run on fucina's
-//! quantized kernels; the small glue — YaRN RoPE on the 64-dim rope slice,
-//! per-head attention over the cached K/V, router top-k — runs host-side in
-//! plain f32, which keeps the MLA algebra auditable. K/V are reconstructed
-//! from the latent INCREMENTALLY (kv_b applied once per new position, the
-//! O(1)-per-step middle ground between naive per-step reconstruction and
-//! full weight absorption); the true compressed-latent cache and absorbed
-//! decode land with the perf milestone.
+//! The heavy linears per layer (q, kv_a, kv_b, o, FFN projections) run on
+//! fucina's quantized kernels; YaRN RoPE runs through the core rope op over
+//! hand-filled f64-angle tables (`yarnBlendInvFreqsF64` +
+//! `prepareRopeTableInvFreqsF64`), and router top-k through the core topK.
+//! Host-side f32 remains where the core kernels would change validated
+//! bits: rms norms (f64 accumulation, ggml's), router sigmoid/softmax and
+//! the SwiGLU combine (the vector exp/silu legs are polynomial, not
+//! bit-equal to scalar `@exp`), and the `.full` cache mode's deliberately
+//! naive per-head attention loops (the auditable validation baseline for
+//! `.latent`'s absorbed algebra).
 const std = @import("std");
 const fucina = @import("fucina");
 const weights = @import("../weights.zig");
@@ -142,92 +143,40 @@ pub const Config = struct {
     }
 };
 
-/// YaRN rotary table for the rope slice: per (position, pair) cos/sin with
-/// the frequency blend between interpolation (freq/factor) and
-/// extrapolation (original freq) across the correction ramp
-/// [beta_fast=32, beta_slow=1] — the HF DeepseekV2Yarn reference. V2-Lite's
-/// mscale == mscale_all_dim, so the cos/sin magnitude correction cancels to
-/// 1 and only the attention-scale mscale² survives (`attnScale`).
+/// YaRN rotary frequencies for the rope slice: the blend between
+/// interpolation (freq/factor) and extrapolation (original freq) across the
+/// correction ramp [beta_fast=32, beta_slow=1] — the HF DeepseekV2Yarn
+/// reference, computed by the core `yarnBlendInvFreqsF64`. V2-Lite's mscale
+/// == mscale_all_dim, so the cos/sin magnitude correction cancels to 1 and
+/// only the attention-scale mscale² survives (`attn_scale`). Rotation runs
+/// through the core rope op over per-step hand-filled tables (f64 angles,
+/// the reference numerics), applied `.interleaved_tail` to the q heads and
+/// full-width to the shared k_pe — `rope_pairing` maps onto the core mode.
 const YarnRope = struct {
-    cos: []f32, // [capacity][pairs]
-    sin: []f32,
-    pairs: usize,
-    capacity: usize,
+    inv_freq: []f64,
 
-    fn init(allocator: Allocator, config: Config, capacity: usize) !YarnRope {
-        const dim = config.qk_rope_dim;
-        const pairs = dim / 2;
-        const inv_freq = try allocator.alloc(f64, pairs);
-        defer allocator.free(inv_freq);
-
-        const base: f64 = config.rope_theta;
-        const factor: f64 = config.yarn_factor;
-        for (inv_freq, 0..) |*f, i| {
-            const extra = std.math.pow(f64, base, -(@as(f64, @floatFromInt(2 * i)) / @as(f64, @floatFromInt(dim))));
-            f.* = extra;
-        }
-        if (factor > 1.0 and config.yarn_orig_ctx > 0) {
-            const orig: f64 = @floatFromInt(config.yarn_orig_ctx);
-            const correction = struct {
-                fn dimFor(rotations: f64, d: f64, b: f64, o: f64) f64 {
-                    return d * @log(o / (rotations * 2.0 * std.math.pi)) / (2.0 * @log(b));
-                }
-            };
-            const d_f: f64 = @floatFromInt(dim);
-            var low = @floor(correction.dimFor(32.0, d_f, base, orig));
-            var high = @ceil(correction.dimFor(1.0, d_f, base, orig));
-            low = @max(low, 0);
-            high = @min(high, d_f - 1);
-            for (inv_freq, 0..) |*f, i| {
-                const extra = f.*;
-                const inter = extra / factor;
-                // ramp 0 -> 1 across [low, high]; mask = 1 - ramp keeps the
-                // fast-rotating dims extrapolated (original freq).
-                var ramp = (@as(f64, @floatFromInt(i)) - low) / @max(high - low, 0.001);
-                ramp = @min(@max(ramp, 0.0), 1.0);
-                const mask = 1.0 - ramp;
-                f.* = inter * (1.0 - mask) + extra * mask;
-            }
-        }
-
-        const cos = try allocator.alloc(f32, capacity * pairs);
-        errdefer allocator.free(cos);
-        const sin = try allocator.alloc(f32, capacity * pairs);
-        for (0..capacity) |pos| {
-            for (0..pairs) |i| {
-                const angle = @as(f64, @floatFromInt(pos)) * inv_freq[i];
-                cos[pos * pairs + i] = @floatCast(@cos(angle));
-                sin[pos * pairs + i] = @floatCast(@sin(angle));
-            }
-        }
-        return .{ .cos = cos, .sin = sin, .pairs = pairs, .capacity = capacity };
+    fn init(ctx: *ExecContext, config: Config) !YarnRope {
+        return .{ .inv_freq = try ctx.yarnBlendInvFreqsF64(config.qk_rope_dim, config.rope_theta, config.yarn_factor, config.yarn_orig_ctx) };
     }
 
     fn deinit(self: *YarnRope, allocator: Allocator) void {
-        allocator.free(self.cos);
-        allocator.free(self.sin);
+        allocator.free(self.inv_freq);
         self.* = undefined;
     }
 
-    /// Rotate one `dim`-wide rope slice in place at `pos`.
-    fn apply(self: *const YarnRope, v: []f32, pos: usize) void {
-        const c = self.cos[pos * self.pairs ..][0..self.pairs];
-        const s = self.sin[pos * self.pairs ..][0..self.pairs];
-        switch (rope_pairing) {
-            .interleaved => for (0..self.pairs) |i| {
-                const a = v[2 * i];
-                const b = v[2 * i + 1];
-                v[2 * i] = a * c[i] - b * s[i];
-                v[2 * i + 1] = a * s[i] + b * c[i];
-            },
-            .half => for (0..self.pairs) |i| {
-                const a = v[i];
-                const b = v[i + self.pairs];
-                v[i] = a * c[i] - b * s[i];
-                v[i + self.pairs] = a * s[i] + b * c[i];
-            },
-        }
+    /// Hand-fill the rotation table for `count` positions starting at
+    /// `pos0` (spans `qk_rope_dim` features — partial-tail on the q heads).
+    fn table(self: *const YarnRope, ctx: *ExecContext, pos0: usize, count: usize) !fucina.RopeTable {
+        return ctx.prepareRopeTableInvFreqsF64(pos0, count, self.inv_freq, false);
     }
+};
+
+/// The core rope mode equivalent of `rope_pairing` within the rotated span.
+const rope_mode: fucina.RopeMode = switch (rope_pairing) {
+    .interleaved => .interleaved_tail,
+    // The rope slice sits at the TAIL of each q head and the core has no
+    // half-paired tail mode; add one before flipping `rope_pairing`.
+    .half => @compileError("rope_pairing .half needs a half-paired tail rope mode"),
 };
 
 const MoeFfn = struct {
@@ -420,17 +369,17 @@ pub const Model = struct {
         moe_stream: ?MoeStreamOptions = null,
     };
 
-    pub fn loadGguf(ctx: *ExecContext, io: std.Io, path: []const u8, max_positions: usize) !Model {
+    pub fn loadGguf(ctx: *ExecContext, io: std.Io, path: []const u8) !Model {
         var file = try gguf.File.loadMmapAuto(ctx.allocator, io, path);
         defer file.deinit();
-        return loadGgufFromFile(ctx, &file, max_positions);
+        return loadGgufFromFile(ctx, &file);
     }
 
-    pub fn loadGgufFromFile(ctx: *ExecContext, file: *gguf.File, max_positions: usize) !Model {
-        return loadGgufFromFileOptions(ctx, file, max_positions, .{});
+    pub fn loadGgufFromFile(ctx: *ExecContext, file: *gguf.File) !Model {
+        return loadGgufFromFileOptions(ctx, file, .{});
     }
 
-    pub fn loadGgufFromFileOptions(ctx: *ExecContext, file: *gguf.File, max_positions: usize, options: LoadOptions) !Model {
+    pub fn loadGgufFromFileOptions(ctx: *ExecContext, file: *gguf.File, options: LoadOptions) !Model {
         const config = try Config.fromGguf(file);
         const allocator = ctx.allocator;
 
@@ -477,7 +426,7 @@ pub const Model = struct {
         }
         if (expert_store) |store| try store.finalize();
 
-        var rope = try YarnRope.init(allocator, config, max_positions);
+        var rope = try YarnRope.init(ctx, config);
         errdefer rope.deinit(allocator);
 
         // Resident expert stacks borrow from the mapping; the model must own
@@ -533,8 +482,10 @@ pub const Model = struct {
     pub fn step(self: *const Model, ctx: *ExecContext, cache: *Cache, token: usize) ![]f32 {
         const cfg = self.config;
         const allocator = ctx.allocator;
-        if (cache.len >= cache.capacity or cache.len >= self.rope.capacity) return Error.KvCacheOverflow;
+        if (cache.len >= cache.capacity) return Error.KvCacheOverflow;
         const pos = cache.len;
+        var rope_table = try self.rope.table(ctx, pos, 1);
+        defer rope_table.deinit();
 
         // Residual stream as a host row; per-op tensors are built on demand.
         const x = try allocator.alloc(f32, cfg.hidden_size);
@@ -557,11 +508,11 @@ pub const Model = struct {
             var h_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, cfg.hidden_size }, h_norm);
             defer h_t.deinit();
 
-            const q = blk: {
+            // q projection (direct or q-LoRA), per-head view, tail rotary —
+            // every head's rope slice rotates at `pos` in one core rope op.
+            var q_flat = blk: {
                 if (layer.q_proj) |*direct| {
-                    var q_t = try direct.linearSeq(ctx, &h_t, .embed, .q);
-                    defer q_t.deinit();
-                    break :blk try allocator.dupe(f32, try q_t.dataConst());
+                    break :blk try direct.linearSeq(ctx, &h_t, .embed, .q);
                 }
                 // q-LoRA: hidden -> q_lora -> rmsnorm -> heads*qk_head.
                 var qa_t = try layer.q_a.?.linearSeq(ctx, &h_t, .embed, .q);
@@ -571,31 +522,39 @@ pub const Model = struct {
                 rmsNormInto(q_lat, try qa_t.dataConst(), layer.q_a_norm.?, cfg.rms_norm_eps);
                 var q_lat_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, cfg.q_lora_rank }, q_lat);
                 defer q_lat_t.deinit();
-                var qb_t = try layer.q_b.?.linearSeq(ctx, &q_lat_t, .embed, .q);
-                defer qb_t.deinit();
-                break :blk try allocator.dupe(f32, try qb_t.dataConst());
+                break :blk try layer.q_b.?.linearSeq(ctx, &q_lat_t, .embed, .q);
             };
-            defer allocator.free(q);
+            defer q_flat.deinit();
+            var q_heads = try q_flat.split(ctx, .q, .{ .head, .d }, .{ cfg.num_heads, cfg.qk_head_dim });
+            defer q_heads.deinit();
+            var q_rot = try q_heads.rope(ctx, .seq, .d, &rope_table, rope_mode);
+            defer q_rot.deinit();
+            var q_t = try q_rot.squeeze(ctx, .seq);
+            defer q_t.deinit();
 
             var kv_a_t = try layer.kv_a.linearSeq(ctx, &h_t, .embed, .k);
             defer kv_a_t.deinit();
             const kv_a = try kv_a_t.dataConst();
 
-            // Latent norm + rope: shared k_pe (MQA) and per-head q_pe at `pos`.
+            // Latent norm + rope: the shared k_pe (MQA) rotates as a narrow
+            // view of the kv_a row (full-span table -> full rotation).
             const latent = try allocator.alloc(f32, cfg.kv_lora_rank);
             defer allocator.free(latent);
             rmsNormInto(latent, kv_a[0..cfg.kv_lora_rank], layer.kv_a_norm, cfg.rms_norm_eps);
-            const k_pe = try allocator.dupe(f32, kv_a[cfg.kv_lora_rank..][0..cfg.qk_rope_dim]);
+            var k_pe_v = try kv_a_t.narrow(ctx, .k, cfg.kv_lora_rank, cfg.qk_rope_dim);
+            defer k_pe_v.deinit();
+            var k_pe_rot = try k_pe_v.rope(ctx, .seq, .k, &rope_table, rope_mode);
+            defer k_pe_rot.deinit();
+            const k_pe = try allocator.dupe(f32, try k_pe_rot.dataConst());
             defer allocator.free(k_pe);
-            self.rope.apply(k_pe, pos);
 
             const t_len = pos + 1;
-            const scores = try allocator.alloc(f32, t_len);
-            defer allocator.free(scores);
             switch (cache.mode) {
                 .full => {
                     // Reconstruct this position's k_nope/v via kv_b and run
-                    // attention over materialized K/V (validation baseline).
+                    // attention over materialized K/V — the deliberately
+                    // naive, hand-auditable validation baseline (host dot /
+                    // softmax / mix loops stay on purpose).
                     var latent_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, cfg.kv_lora_rank }, latent);
                     defer latent_t.deinit();
                     const kv_b_full = if (layer.kv_b) |*w| w else return Error.InvalidWeightShape;
@@ -614,9 +573,12 @@ pub const Model = struct {
                         @memcpy(v_dst, kv_head[cfg.qk_nope_dim..][0..cfg.v_head_dim]);
                     }
 
+                    const q = try allocator.dupe(f32, try q_rot.dataConst());
+                    defer allocator.free(q);
+                    const scores = try allocator.alloc(f32, t_len);
+                    defer allocator.free(scores);
                     for (0..cfg.num_heads) |h| {
                         const q_head = q[h * cfg.qk_head_dim ..][0..cfg.qk_head_dim];
-                        self.rope.apply(q_head[cfg.qk_nope_dim..], pos);
                         for (0..t_len) |t| {
                             const k_row = k_layer[(t * cfg.num_heads + h) * cfg.qk_head_dim ..][0..cfg.qk_head_dim];
                             var dot: f32 = 0;
@@ -648,13 +610,8 @@ pub const Model = struct {
                     @memcpy(dst[0..lora], latent);
                     @memcpy(dst[lora..], k_pe);
 
-                    // q_pe roped in place; q_nope and q_pe are then strided
-                    // VIEWS of q (narrow + retag), never gathered by hand.
-                    for (0..cfg.num_heads) |h| {
-                        self.rope.apply(q[h * cfg.qk_head_dim + cfg.qk_nope_dim ..][0..cfg.qk_rope_dim], pos);
-                    }
-                    var q_t = try fucina.Tensor(.{ .head, .d }).fromBorrowedSlice(ctx, .{ cfg.num_heads, cfg.qk_head_dim }, q);
-                    defer q_t.deinit();
+                    // q_nope and q_pe are strided VIEWS of the roped q
+                    // (narrow + retag), never gathered by hand.
                     var q_nope_v = try q_t.narrow(ctx, .d, 0, cfg.qk_nope_dim);
                     defer q_nope_v.deinit();
                     var q_nope_t = try q_nope_v.withTags(ctx, .{ .head, .nope });
@@ -775,19 +732,20 @@ pub const Model = struct {
         }
         var sel: [64]usize = undefined;
         std.debug.assert(cfg.num_experts_used <= sel.len);
-        for (0..cfg.num_experts_used) |slot| {
-            var best: usize = 0;
-            var best_c: f32 = -std.math.inf(f32);
-            for (choice, 0..) |c, e| {
-                if (c > best_c) {
-                    best_c = c;
-                    best = e;
-                }
-            }
-            choice[best] = -std.math.inf(f32);
-            sel[slot] = best;
-        }
+        try topKExperts(ctx, choice, sel[0..cfg.num_experts_used]);
         store.pilotHint(next_layer_i, sel[0..cfg.num_experts_used]);
+    }
+
+    /// Top-k expert selection over the (bias-adjusted) choice scores through
+    /// the core kernel — ties resolve to the lowest expert id, exactly like
+    /// the repeated strict-> argmax scan it replaces.
+    fn topKExperts(ctx: *ExecContext, choice: []f32, sel: []usize) !void {
+        var choice_t = try fucina.Tensor(.{.expert}).fromBorrowedSlice(ctx, .{choice.len}, choice);
+        defer choice_t.deinit();
+        var top = try choice_t.topK(ctx, .expert, sel.len, .slot);
+        defer top.values.deinit();
+        defer top.indices.deinit();
+        for (sel, try top.indices.dataConst()) |*s, e| s.* = @intCast(e);
     }
 
     /// Routed mixture + shared expert. V2: softmax over ALL router logits,
@@ -821,23 +779,13 @@ pub const Model = struct {
         errdefer allocator.free(y);
         @memset(y, 0);
 
-        // Top-k selection (k is single digits; simple repeated max).
+        // Top-k selection through the core kernel; mixture weights read
+        // from the unbiased probs.
         var selected: [64]usize = undefined;
         var routing: [64]f32 = undefined;
         std.debug.assert(cfg.num_experts_used <= selected.len);
-        for (0..cfg.num_experts_used) |slot| {
-            var best: usize = 0;
-            var best_c: f32 = -std.math.inf(f32);
-            for (choice, 0..) |c, e| {
-                if (c > best_c) {
-                    best_c = c;
-                    best = e;
-                }
-            }
-            choice[best] = -std.math.inf(f32); // consumed
-            selected[slot] = best;
-            routing[slot] = probs[best];
-        }
+        try topKExperts(ctx, choice, selected[0..cfg.num_experts_used]);
+        for (selected[0..cfg.num_experts_used], routing[0..cfg.num_experts_used]) |e, *w| w.* = probs[e];
         if (cfg.expert_weights_norm) {
             var total: f32 = 1e-20;
             for (routing[0..cfg.num_experts_used]) |w| total += w;

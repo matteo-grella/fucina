@@ -76,7 +76,7 @@ pub fn main(init: std.process.Init) !void {
             .pilot = moe_pilot,
         },
     } else .{};
-    var model = try llm.deepseek2.model.Model.loadGgufFromFileOptions(&ctx, &file, capacity, load_options);
+    var model = try llm.deepseek2.model.Model.loadGgufFromFileOptions(&ctx, &file, load_options);
     defer model.deinit();
     // The stats go through the SAME buffered stdout writer as everything
     // else: stdout's positional writes and stderr's offset-advancing writes

@@ -11811,8 +11811,9 @@ parakeet also departs from the tensor-shape vocab convention — its
 
 **Loader entry points.** The qwen3, qwen35, gemma4 and diffusion_gemma
 families expose the same pair (the deepseek2, glm4moe, and deepseek4
-loaders read their `Config` from the file internally, taking
-`max_positions` and/or a `LoadOptions` instead):
+loaders read their `Config` from the file internally; glm4moe additionally
+takes `max_positions`, and deepseek2/glm4moe/deepseek4 take a
+`LoadOptions`):
 
 ```zig
 pub fn loadGguf(ctx: *ExecContext, io: std.Io, path: []const u8, config: Config) !Model
