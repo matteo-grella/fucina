@@ -82,14 +82,7 @@ pub fn main(init: std.process.Init) !void {
     // else: stdout's positional writes and stderr's offset-advancing writes
     // cannot safely share one redirected file (`cmd > f 2>&1` interleaves
     // destructively), so a std.debug stats line would get overwritten.
-    defer if (model.expert_store) |store| {
-        const st = store.stats;
-        stdout.print("moe stream: hits {d} / misses {d} ({d:.1}% hit), {d:.2} GB read, cap {d} slots/layer, pinned {d}\n", .{ st.hits, st.misses, st.hitRate() * 100, @as(f64, @floatFromInt(st.bytes_read)) / 1e9, store.cap, store.pinned_experts }) catch {};
-        if (st.pilot_recall_total > 0) stdout.print("moe pilot: recall {d:.1}% ({d}/{d} routed experts predicted), {d} ranges hinted\n", .{ st.pilotRecall() * 100, st.pilot_recall_hits, st.pilot_recall_total, st.pilot_ranges }) catch {};
-        // Persist the routing histogram so the next startup auto-pins the
-        // hot experts (the learning cache; every other runner does this).
-        store.saveUsage() catch {};
-    };
+    defer if (model.expert_store) |store| llm.weights.reportAndSaveMoeStream(store, true, stdout);
     const bos: ?u32 = tokenizer.bosId();
     file.deinit();
     try stdout.print("load: {d:.3} s\n", .{@as(f64, @floatFromInt(std.Io.Clock.awake.now(init.io).nanoseconds - load_start)) / 1e9});

@@ -148,36 +148,9 @@ fn metaIntOpt(file: *const gguf.File, arch: []const u8, suffix: []const u8) ?usi
     return gguf_meta.metaIntOpt(file, arch, suffix, .reject_zero);
 }
 
-/// Opt-in disk streaming for the MoE expert stacks: experts stay on disk and
-/// are `pread` on demand through a tiered store (LRU + working set), so a
-/// mixture model loads with only its dense weights resident. Decode then
-/// pays disk reads for expert-cache misses — the explicit trade that lets a
-/// bigger-than-RAM model run at all (docs: out-of-core MoE).
-pub const MoeStreamOptions = struct {
-    /// Path of the same GGUF being loaded; the store opens its own read fd
-    /// (the load-time mmap is released after load — resident memory stays
-    /// dense weights + expert cache).
-    gguf_path: []const u8,
-    /// Total RAM budget for the expert LRU tier (all layers). Default: half
-    /// of available memory at load time.
-    cache_bytes: ?usize = null,
-    /// Fixed LRU slots per layer; wins over `cache_bytes` when set.
-    cache_slots_per_layer: ?usize = null,
-    /// OS readahead hints for miss batches.
-    readahead: bool = true,
-    /// The learning cache: pin the hottest experts from the persisted usage
-    /// sidecar (`<gguf>.experts`) at load; save updated counts with
-    /// `ExpertStore.saveUsage` at generation/turn boundaries.
-    auto_pin: bool = true,
-    /// RAM for the pinned tier (default: half the budget when history
-    /// qualifies).
-    pin_bytes: ?usize = null,
-    /// Router-lookahead prefetch: predict each next layer's experts from the
-    /// current post-attention state and readahead them from a background
-    /// I/O thread while the current layer computes. Prediction recall is
-    /// measured in `ExpertStore.Stats`.
-    pilot: bool = false,
-};
+/// Opt-in disk streaming for the MoE expert stacks (shared across the MoE
+/// loaders — see `weights.MoeStreamOptions`).
+pub const MoeStreamOptions = weights.MoeStreamOptions;
 
 pub const LoadOptions = struct {
     moe_stream: ?MoeStreamOptions = null,
@@ -228,29 +201,7 @@ pub const Model = struct {
 
         var expert_store: ?*fucina.ExpertStore = null;
         if (options.moe_stream) |stream_options| {
-            if (config.isMoe()) {
-                // Split GGUFs: the store opens every part (TensorInfo.part
-                // indexes them); single files pass through as one entry.
-                const split_paths = try gguf.File.splitPartPaths(allocator, stream_options.gguf_path);
-                defer if (split_paths) |paths| {
-                    for (paths) |p| allocator.free(p);
-                    allocator.free(paths);
-                };
-                var one_path = [_][]const u8{stream_options.gguf_path};
-                const store_paths: []const []const u8 = if (split_paths) |paths| blk: {
-                    const view = try allocator.alloc([]const u8, paths.len);
-                    for (view, paths) |*d, src| d.* = src;
-                    break :blk view;
-                } else &one_path;
-                defer if (split_paths != null) allocator.free(store_paths);
-                expert_store = try fucina.ExpertStore.create(allocator, store_paths, config.num_layers, .{
-                    .cache_bytes = stream_options.cache_bytes,
-                    .cache_slots_per_layer = stream_options.cache_slots_per_layer,
-                    .readahead = stream_options.readahead,
-                    .auto_pin = stream_options.auto_pin,
-                    .pin_bytes = stream_options.pin_bytes,
-                });
-            }
+            if (config.isMoe()) expert_store = try weights.createExpertStore(allocator, stream_options, config.num_layers);
         }
         errdefer if (expert_store) |store| store.destroy();
 

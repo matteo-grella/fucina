@@ -19,6 +19,24 @@
 //! through `StreamedMoeRhs.expertBytes` without further synchronization:
 //! the pointer table is written before the op's tasks are spawned and
 //! nothing evicts or swaps slots until `release`.
+//!
+//! Generalization seam (design record): the store is deliberately MoE-named,
+//! but only its geometry is expert-shaped — kernels see plain byte views and
+//! `acquire` takes opaque indices. If a second sparse client lands (id-sparse
+//! embedding-row gathers such as Gemma-3n's per-layer table, or a PKM-style
+//! routed memory), extract an internal block store keyed
+//! `(group, block) -> N byte-ranges` under an unchanged ExpertStore facade
+//! rather than growing this API: `addLayer([3]ProjSpec)` becomes
+//! `addGroup(group, n_blocks, ranges)`, `expertBytes` becomes
+//! `rangeBytes(group, block, range)`, and the row client gets its own
+//! row-bytes view (not `StreamedMoeRhs`). Two layout contracts must survive
+//! any such refactor: every resolved range starts `slab_align`ed (the MoE
+//! dispatch `@alignCast`s at each kernel call), and a multi-plane (PTQTP)
+//! range keeps its planes contiguous in slab order (the dispatch reads plane
+//! `p` at offset `p * plane_bytes`). Dense/cyclic weight offload is out of
+//! scope for this store by design — LRU under cyclic access degenerates to
+//! zero hits; that use case wants a double-buffered ring sharing only the
+//! pread/advise shims.
 const std = @import("std");
 const builtin = @import("builtin");
 const backend_mod = @import("../backend.zig");

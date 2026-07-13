@@ -82,11 +82,7 @@ pub fn main(init: std.process.Init) !void {
     // else: stdout's positional writes and stderr's offset-advancing writes
     // cannot safely share one redirected file (`cmd > f 2>&1` interleaves
     // destructively), so a std.debug stats line would get overwritten.
-    defer if (model.expert_store) |store| {
-        const st = store.stats;
-        stdout.print("moe stream: hits {d} / misses {d} ({d:.1}% hit), {d:.2} GB read, cap {d} slots/layer, pinned {d}\n", .{ st.hits, st.misses, st.hitRate() * 100, @as(f64, @floatFromInt(st.bytes_read)) / 1e9, store.cap, store.pinned_experts }) catch {};
-        store.saveUsage() catch {};
-    };
+    defer if (model.expert_store) |store| llm.weights.reportAndSaveMoeStream(store, true, stdout);
     const bos: ?u32 = tokenizer.bosId();
     const eos = tokenizer.eosId();
     file.deinit();

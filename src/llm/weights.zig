@@ -1064,6 +1064,81 @@ pub fn loadMoeRhsPtqtp(
     } };
 }
 
+/// Opt-in disk streaming for the MoE expert stacks, shared by every MoE
+/// loader (`LoadOptions.moe_stream`): experts stay on disk and are `pread`
+/// on demand through a tiered store (pinned + LRU + working set), so a
+/// mixture model loads with only its dense weights resident. Decode then
+/// pays disk reads for expert-cache misses — the explicit trade that lets a
+/// bigger-than-RAM model run at all (docs: out-of-core MoE).
+pub const MoeStreamOptions = struct {
+    /// Path of the same GGUF being loaded; the store opens its own read fds
+    /// (every part of a split GGUF), so the load-time mmap can be released
+    /// after load — resident memory stays dense weights + expert cache.
+    gguf_path: []const u8,
+    /// Total RAM budget for the streamed tiers across all layers. Default:
+    /// half of available memory at load time.
+    cache_bytes: ?usize = null,
+    /// Fixed LRU slots per layer; wins over `cache_bytes` when set.
+    cache_slots_per_layer: ?usize = null,
+    /// OS readahead hints for miss batches.
+    readahead: bool = true,
+    /// The learning cache: pin the hottest experts from the persisted usage
+    /// sidecar (`<gguf>.experts`) at load; save updated counts with
+    /// `ExpertStore.saveUsage` at generation/turn boundaries.
+    auto_pin: bool = true,
+    /// RAM for the pinned tier (default: half the budget when history
+    /// qualifies).
+    pin_bytes: ?usize = null,
+    /// Router-lookahead prefetch: predict each next layer's experts from the
+    /// current post-attention state and readahead them from a background I/O
+    /// thread while the current layer computes. Honored by the models that
+    /// implement the lookahead hook (qwen3, deepseek2); never changes
+    /// output. Prediction recall is measured in `ExpertStore.Stats`.
+    pilot: bool = false,
+};
+
+/// The store-create block shared by the MoE loaders: expand split-GGUF part
+/// paths (single files pass through as one entry) and open the ExpertStore
+/// over them. The caller registers layers (`loadMoeRhsStreamed`) and then
+/// calls `ExpertStore.finalize`.
+pub fn createExpertStore(allocator: Allocator, options: MoeStreamOptions, n_layers: usize) !*fucina.ExpertStore {
+    const split_paths = try gguf.File.splitPartPaths(allocator, options.gguf_path);
+    defer if (split_paths) |paths| {
+        for (paths) |part| allocator.free(part);
+        allocator.free(paths);
+    };
+    var one_path = [_][]const u8{options.gguf_path};
+    const store_paths: []const []const u8 = if (split_paths) |paths| blk: {
+        const view = try allocator.alloc([]const u8, paths.len);
+        for (view, paths) |*d, src| d.* = src;
+        break :blk view;
+    } else &one_path;
+    defer if (split_paths != null) allocator.free(store_paths);
+    return fucina.ExpertStore.create(allocator, store_paths, n_layers, .{
+        .cache_bytes = options.cache_bytes,
+        .cache_slots_per_layer = options.cache_slots_per_layer,
+        .readahead = options.readahead,
+        .auto_pin = options.auto_pin,
+        .pin_bytes = options.pin_bytes,
+    });
+}
+
+/// Exit-time streamed-tier report shared by the MoE runners: print the
+/// stats line(s) and persist the usage histogram (the learning cache)
+/// unless `learn` is false. Failures lose only the report/learning.
+pub fn reportAndSaveMoeStream(store: *fucina.ExpertStore, learn: bool, writer: anytype) void {
+    if (learn) store.saveUsage() catch {};
+    const s = store.stats;
+    writer.print(
+        "moe stream: {d} acquires, hits {d} / misses {d} ({d:.1}% hit, {d} pin hits), {d:.2} GB read in {d:.2}s, cap {d} slots/layer, pinned {d} experts ({d:.2} GB)\n",
+        .{ s.acquires, s.hits, s.misses, s.hitRate() * 100, s.pin_hits, @as(f64, @floatFromInt(s.bytes_read)) / 1e9, @as(f64, @floatFromInt(s.read_ns)) / 1e9, store.cap, store.pinned_experts, @as(f64, @floatFromInt(store.pinned_bytes)) / 1e9 },
+    ) catch {};
+    if (s.pilot_recall_total > 0) writer.print(
+        "moe pilot: recall {d:.1}% ({d}/{d} routed experts predicted), {d} ranges hinted\n",
+        .{ s.pilotRecall() * 100, s.pilot_recall_hits, s.pilot_recall_total, s.pilot_ranges },
+    ) catch {};
+}
+
 /// Streamed counterpart of three `loadMoeRhs` calls: registers one layer's
 /// gate/up/down stacked expert tensors with the ExpertStore (which will
 /// `pread` individual experts on demand) instead of materializing or

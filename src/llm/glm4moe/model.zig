@@ -325,14 +325,7 @@ pub const Model = struct {
     /// committed position.
     step_hiddens: []f32 = &.{},
 
-    pub const MoeStreamOptions = struct {
-        gguf_path: []const u8,
-        cache_bytes: ?usize = null,
-        cache_slots_per_layer: ?usize = null,
-        readahead: bool = true,
-        auto_pin: bool = true,
-        pin_bytes: ?usize = null,
-    };
+    pub const MoeStreamOptions = weights.MoeStreamOptions;
 
     pub const LoadOptions = struct {
         moe_stream: ?MoeStreamOptions = null,
@@ -350,28 +343,8 @@ pub const Model = struct {
 
         var expert_store: ?*fucina.ExpertStore = null;
         if (options.moe_stream) |stream_options| {
-            if (config.num_experts > 0) {
-                const split_paths = try gguf.File.splitPartPaths(allocator, stream_options.gguf_path);
-                defer if (split_paths) |paths| {
-                    for (paths) |part| allocator.free(part);
-                    allocator.free(paths);
-                };
-                var one_path = [_][]const u8{stream_options.gguf_path};
-                const store_paths: []const []const u8 = if (split_paths) |paths| blk: {
-                    const view = try allocator.alloc([]const u8, paths.len);
-                    for (view, paths) |*d, src| d.* = src;
-                    break :blk view;
-                } else &one_path;
-                defer if (split_paths != null) allocator.free(store_paths);
-                // block indices include the nextn layer (blk.46).
-                expert_store = try fucina.ExpertStore.create(allocator, store_paths, config.num_layers + config.num_nextn_layers, .{
-                    .cache_bytes = stream_options.cache_bytes,
-                    .cache_slots_per_layer = stream_options.cache_slots_per_layer,
-                    .readahead = stream_options.readahead,
-                    .auto_pin = stream_options.auto_pin,
-                    .pin_bytes = stream_options.pin_bytes,
-                });
-            }
+            // block indices include the nextn layer (blk.46).
+            if (config.num_experts > 0) expert_store = try weights.createExpertStore(allocator, stream_options, config.num_layers + config.num_nextn_layers);
         }
         errdefer if (expert_store) |store| store.destroy();
 

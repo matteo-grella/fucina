@@ -465,14 +465,7 @@ pub const Model = struct {
     weight_mapping: ?gguf.File.MappedRegion = null,
     expert_store: ?*fucina.ExpertStore = null,
 
-    pub const MoeStreamOptions = struct {
-        gguf_path: []const u8,
-        cache_bytes: ?usize = null,
-        cache_slots_per_layer: ?usize = null,
-        readahead: bool = true,
-        auto_pin: bool = true,
-        pin_bytes: ?usize = null,
-    };
+    pub const MoeStreamOptions = weights.MoeStreamOptions;
 
     pub const LoadOptions = struct {
         moe_stream: ?MoeStreamOptions = null,
@@ -491,16 +484,7 @@ pub const Model = struct {
 
         var expert_store: ?*fucina.ExpertStore = null;
         if (options.moe_stream) |so| {
-            if (config.num_experts > 0) {
-                var one_path = [_][]const u8{so.gguf_path};
-                expert_store = try fucina.ExpertStore.create(allocator, &one_path, config.num_layers, .{
-                    .cache_bytes = so.cache_bytes,
-                    .cache_slots_per_layer = so.cache_slots_per_layer,
-                    .readahead = so.readahead,
-                    .auto_pin = so.auto_pin,
-                    .pin_bytes = so.pin_bytes,
-                });
-            }
+            if (config.num_experts > 0) expert_store = try weights.createExpertStore(allocator, so, config.num_layers);
         }
         errdefer if (expert_store) |store| store.destroy();
 
