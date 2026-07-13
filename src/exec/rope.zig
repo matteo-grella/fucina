@@ -21,6 +21,12 @@ const contiguousStridesArray = exec_shape.contiguousStridesArray;
 pub const RopeMode = enum {
     interleaved,
     half,
+    /// Adjacent (interleaved) pairing over the TRAILING `table.feature_dim`
+    /// features: a partial rotary aligned to the end of the feature axis,
+    /// with the leading features passed through unchanged (DeepSeek V4's
+    /// tail-64 rotary). Identical to `.interleaved` when the table spans the
+    /// whole feature axis.
+    interleaved_tail,
 };
 
 /// On-the-fly RoPE factor source for the unified facade `rope`: positions +
@@ -136,6 +142,83 @@ pub fn prepareRopeTableFactors(
     };
 }
 
+/// DeepSeek-family YaRN inverse-frequency blend, in f64 (the HF
+/// DeepseekV2Yarn reference): the plain pow schedule
+/// `base^(-2i/dim)`, linearly blended toward `freq/factor` across the
+/// correction ramp [beta_fast = 32, beta_slow = 1 rotations]. The cos/sin
+/// magnitude correction (mscale) is the caller's business — the DeepSeek
+/// ports fold it into the attention scale. `factor <= 1` or
+/// `orig_ctx == 0` returns the unblended schedule, so one call covers both
+/// rope families. Caller frees the returned slice.
+pub fn yarnBlendInvFreqsF64(allocator: Allocator, dim: usize, base: f64, factor: f64, orig_ctx: usize) ![]f64 {
+    const pairs = dim / 2;
+    const inv_freq = try allocator.alloc(f64, pairs);
+    errdefer allocator.free(inv_freq);
+    for (inv_freq, 0..) |*f, i| {
+        f.* = std.math.pow(f64, base, -(@as(f64, @floatFromInt(2 * i)) / @as(f64, @floatFromInt(dim))));
+    }
+    if (factor > 1.0 and orig_ctx > 0) {
+        const orig: f64 = @floatFromInt(orig_ctx);
+        const dimFor = struct {
+            fn go(rotations: f64, d: f64, b: f64, o: f64) f64 {
+                return d * @log(o / (rotations * 2.0 * std.math.pi)) / (2.0 * @log(b));
+            }
+        }.go;
+        const d_f: f64 = @floatFromInt(dim);
+        var low = @floor(dimFor(32.0, d_f, base, orig));
+        var high = @ceil(dimFor(1.0, d_f, base, orig));
+        low = @max(low, 0);
+        high = @min(high, d_f - 1);
+        for (inv_freq, 0..) |*f, i| {
+            const extra = f.*;
+            const inter = extra / factor;
+            // ramp 0 -> 1 across [low, high]; mask = 1 - ramp keeps the
+            // fast-rotating dims extrapolated (original freq).
+            var ramp = (@as(f64, @floatFromInt(i)) - low) / @max(high - low, 0.001);
+            ramp = @min(@max(ramp, 0.0), 1.0);
+            const mask = 1.0 - ramp;
+            f.* = inter * (1.0 - mask) + extra * mask;
+        }
+    }
+    return inv_freq;
+}
+
+/// Hand-fill a rope table for `count` consecutive positions starting at
+/// `pos0` from caller-supplied per-pair inverse frequencies, accumulating
+/// each angle in f64 before the f32 cast — for models whose frequency
+/// schedule the core cannot rebuild (YaRN blends, per-family bases) and
+/// whose reference computes angles in double precision
+/// (`prepareRopeTable*` compute f32 angles). `inverse` negates sin (the
+/// un-rotation table). `table.feature_dim` spans `2 * inv_freq.len`
+/// features, so partial application follows the usual table contract.
+pub fn prepareRopeTableInvFreqsF64(rt: *Runtime, pos0: usize, count: usize, inv_freq: []const f64, inverse: bool) !RopeTable {
+    const pairs = inv_freq.len;
+    const angle_count = try std.math.mul(usize, count, pairs);
+    const values = try rt.allocator.alloc(f32, try std.math.mul(usize, angle_count, 2));
+    errdefer rt.allocator.free(values);
+    const positions = try rt.allocator.alloc(i32, count);
+    errdefer rt.allocator.free(positions);
+    const sin_values = values[0..angle_count];
+    const cos_values = values[angle_count..];
+    for (0..count) |i| {
+        positions[i] = @intCast(pos0 + i);
+        for (0..pairs) |p| {
+            const angle = @as(f64, @floatFromInt(pos0 + i)) * inv_freq[p];
+            const s: f32 = @floatCast(@sin(angle));
+            sin_values[i * pairs + p] = if (inverse) -s else s;
+            cos_values[i * pairs + p] = @floatCast(@cos(angle));
+        }
+    }
+    return .{
+        .allocator = rt.allocator,
+        .positions = positions,
+        .theta_base = 0, // hand-filled: never rebuilt from a base
+        .feature_dim = 2 * pairs,
+        .pair_count = pairs,
+        .values = values,
+    };
+}
+
 pub fn ropeAxisRankWithTable(
     rt: *Runtime,
     comptime rank: usize,
@@ -191,11 +274,11 @@ pub fn ropeAxisRankWithTable(
             const cos_value = cos_values[angle_i];
 
             const first_feature = switch (mode) {
-                .interleaved => 2 * pair_i,
+                .interleaved, .interleaved_tail => 2 * pair_i,
                 .half => pair_i,
             };
             const second_feature = switch (mode) {
-                .interleaved => 2 * pair_i + 1,
+                .interleaved, .interleaved_tail => 2 * pair_i + 1,
                 .half => pair_i + pair_count,
             };
             const first_offset = base_offset + first_feature * feature_stride;
@@ -262,6 +345,12 @@ pub fn ropePartialAxisRankWithTable(
     const total_vectors = input.len / feature_dim;
     const sin_values = table.sinValues();
     const cos_values = table.cosValues();
+    // Tail alignment: the rotary span sits at the END of the feature axis
+    // (the leading `feature_dim - rotary_dim` features pass through).
+    const rotary_offset: usize = switch (mode) {
+        .interleaved_tail => feature_dim - rotary_dim,
+        .interleaved, .half => 0,
+    };
 
     for (0..total_vectors) |vector_i| {
         var remainder = vector_i;
@@ -283,12 +372,12 @@ pub fn ropePartialAxisRankWithTable(
             const sin_value = sin_values[angle_i];
             const cos_value = cos_values[angle_i];
 
-            const first_feature = switch (mode) {
-                .interleaved => 2 * pair_i,
+            const first_feature = rotary_offset + switch (mode) {
+                .interleaved, .interleaved_tail => 2 * pair_i,
                 .half => pair_i,
             };
-            const second_feature = switch (mode) {
-                .interleaved => 2 * pair_i + 1,
+            const second_feature = rotary_offset + switch (mode) {
+                .interleaved, .interleaved_tail => 2 * pair_i + 1,
                 .half => pair_i + pair_count,
             };
             const first_offset = base_offset + first_feature * feature_stride;

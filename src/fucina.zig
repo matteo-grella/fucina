@@ -122,6 +122,9 @@ pub const UnaryOp = exec.UnaryOp;
 pub const RopeMode = exec.RopeMode;
 pub const RopeTable = exec.RopeTable;
 pub const RopeTheta = exec.RopeTheta;
+/// Fake-quantization round trips (FP8-E4M3 / FP4-E2M1 microscaling groups,
+/// Hadamard rotation, f16 round trip) over host slices (§10.10).
+pub const fakequant = exec.fakequant;
 
 /// Internal surface for sibling modules such as `fucina_llm` that need exact
 /// core type identity without importing a second copy of backend/exec files.

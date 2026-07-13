@@ -146,13 +146,13 @@ into [REFERENCE.md](REFERENCE.md), whose snippets are machine-verified.
 | Indexing / slicing / functional updates | `select`, `slice`, `sliceStep`, `indexSelect`, `gather`, `setSlice`, `setRows`, `indexAdd`, `scatterAdd`, `maskedScatter`, `where`, `oneHot` | §3.7, §4.17 |
 | Reductions, scans | SIMD-promoted sum/mean/max/min/prod/logsumexp; `cumsum`/`cumprod` (+ `-Dvector-scan`) | §4.7 |
 | Attention | `groupedAttention`: causal/bidirectional, sliding window, additive bias, sinks, ALiBi-style `max_bias`, f32/f16/q8 KV, saved-stats backward | §4.13 |
-| RoPE | interleaved/half modes, partial rotary, freq-factor (YaRN-style) tables, inverse tables, hand-fillable `RopeTable` | §4.12 |
+| RoPE | interleaved/half/tail-aligned modes, partial rotary, freq-factor (YaRN-style) tables, inverse tables, hand-fillable `RopeTable` | §4.12 |
 | Norms, softmax, losses | rmsNorm family (incl. fused mul/add/rope), layerNorm, groupNorm; softmax with scale/mask/sinks; `crossEntropyExt` (smoothing, ignore-index, accum scale), mse/huber/bce/kl/nll | §4.10–4.11, §4.15 |
 | Vision / conv | channel-last conv2d (im2col GEMM + Winograd), conv1d/causal/transpose, pool2d, prelu, channelAffine, upsample, zeroPad2d — all with autograd | §4.14 |
 | MoE | `routerTopK`, `moeExpertFfn`/`Batch`, `MoeRhs` packed containers, `moe_chain` scheduling, disk-streamed experts (`ExpertStore`) for models larger than RAM | §4.16, §4.18, §13.2 |
 | Autograd machinery | seeded backward (`backwardWithGrad`), `noGrad`, activation checkpointing, `customVjp`, `gradcheck`; VJP inventory in §5.8 | §5 |
 | Training | SGD/AdamW/Adam/Muon/APOLLO (torch-golden-parity), `OptimizerSet` param groups, LR schedules, clipping, `ParamRegistry`, LoRA adapters, ES (incl. ternary-native), 16-bit leaves with f32 grads + optimizer masters | §11 |
-| Quantized weights | hot packed kernels (Q4_K/Q5_K/Q6_K/Q8_0/TQ2_0 + 2-bit expert tier), cold decode (IQ*, FP4…), byte-exact ggml encoders, PTQTP trit-planes | §10 |
+| Quantized weights | hot packed kernels (Q4_K/Q5_K/Q6_K/Q8_0/TQ2_0 + 2-bit expert tier), cold decode (IQ*, FP4…), byte-exact ggml encoders, PTQTP trit-planes, fake-quant round trips (FP8/FP4 microscaling, Hadamard, f16) | §10 |
 | Persistence | GGUF read/write/transcode (byte-verbatim re-emit), safetensors, named state dicts with alias remapping, training-checkpoint directories, `export-gguf` (incl. LoRA merge) | §12 |
 | LLM plumbing | `LinearWeight` (dispatch to BLAS/Metal/CUDA/quant kernels is *inside* — never hand-roll a linear), `gguf_meta` readers, KV cache (f16/q8_0) + crash-safe persistence, BPE + SPM tokenizers, sampler + `LogitProcessor` + llguidance constrained decoding, generic `Conversation` chat engine (+ `sendBatch`), speculative decoding cascade + grammar-constrained drafting, native MTP | §13 |
 | Parallelism / infra | worker team + `parallelChunks` (this *is* the parallel-loop contract), `BufferPool`, `RhsLifetime` RHS caching, deterministic RNG, GPU offload gates | §6, §9 |

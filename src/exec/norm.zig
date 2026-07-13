@@ -578,12 +578,14 @@ pub fn rmsNormMulRopeAxisRankWithTable(
             const sin_value = sin_values[angle_i];
             const cos_value = cos_values[angle_i];
 
+            // Full-width tables only in the fused kernel (checked above), so
+            // .interleaved_tail degenerates to plain interleaved pairing.
             const first_feature = switch (mode) {
-                .interleaved => 2 * pair_i,
+                .interleaved, .interleaved_tail => 2 * pair_i,
                 .half => pair_i,
             };
             const second_feature = switch (mode) {
-                .interleaved => 2 * pair_i + 1,
+                .interleaved, .interleaved_tail => 2 * pair_i + 1,
                 .half => pair_i + pair_count,
             };
             const input_first_offset = input_base + first_feature * input_feature_stride;

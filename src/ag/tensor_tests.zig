@@ -4060,6 +4060,50 @@ test "tagged raw rope interleaved mode rotates adjacent feature pairs" {
     }, y.asRawTensor().dataConst(), 1e-6);
 }
 
+test "tagged partial rope interleaved_tail rotates the trailing span only" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var x = try Tensor(.{ .seq, .d }).variableFromSlice(&ctx, .{ 2, 6 }, &.{ 1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6 });
+    defer x.deinit();
+    var table = try ctx.prepareRopeTable(&.{ 0, 1 }, 4, 10000, false);
+    defer table.deinit();
+
+    var y = try x.rope(&ctx, .seq, .d, &table, .interleaved_tail);
+    defer y.deinit();
+
+    // Position 0 is the identity; position 1 rotates the TRAILING 4 dims as
+    // adjacent pairs — (3,4) by angle 1, (5,6) by angle 0.01 — with the
+    // leading 2 dims untouched. Bit-identical to the hand loop
+    // `a*c - b*s / a*s + b*c` over tail[2i], tail[2i+1].
+    const c0 = @cos(@as(f32, 1));
+    const s0 = @sin(@as(f32, 1));
+    const c1 = @cos(@as(f32, 0.01));
+    const s1 = @sin(@as(f32, 0.01));
+    const expected_y = [_]f32{
+        1, 2, 3,               4,               5,               6,
+        1, 2, 3 * c0 - 4 * s0, 3 * s0 + 4 * c0, 5 * c1 - 6 * s1, 5 * s1 + 6 * c1,
+    };
+    try expectCloseSlices(&expected_y, y.asRawTensor().dataConst(), 1e-6);
+
+    // The backward inverts the tail rotation and passes the head through.
+    var loss = try y.sumAll(&ctx);
+    defer loss.deinit();
+    try loss.backward(&ctx);
+    var grad = (try x.grad(&ctx)).?;
+    defer grad.deinit();
+    const expected_grad = [_]f32{
+        1, 1, 1,       1,       1,       1,
+        1, 1, c0 + s0, c0 - s0, c1 + s1, c1 - s1,
+    };
+    try expectCloseSlices(&expected_grad, grad.asRawTensor().dataConst(), 1e-6);
+}
+
 test "tagged rope matches ggml context shift composition for signed positions" {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");

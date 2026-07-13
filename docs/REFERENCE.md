@@ -111,6 +111,7 @@ API-level companion. Every Zig snippet is machine-verified against the tree
   - [10.7 Ternary: TQ2_0 first-class, TQ1_0 decode-only (`src/backend/quant/ternary.zig`, TERNARY.md)](#107-ternary-tq2_0-first-class-tq1_0-decode-only-srcbackendquantternaryzig-ternarymd)
   - [10.8 Cold decode rules: IQ*, FP4, and friends (`src/backend/quant/cold.zig`, `src/backend/quant_tables.zig`)](#108-cold-decode-rules-iq-fp4-and-friends-srcbackendquantcoldzig-srcbackendquant_tableszig)
   - [10.9 PTQTP: multi-plane ternary decomposition (`src/ptqtp.zig`, PTQTP.md)](#109-ptqtp-multi-plane-ternary-decomposition-srcptqtpzig-ptqtpmd)
+  - [10.10 Fake-quantization round trips (`src/exec/fakequant.zig`)](#1010-fake-quantization-round-trips-srcexecfakequantzig)
 - [11. Training: optimizers, evolution strategies, LoRA, and checkpoints](#11-training-optimizers-evolution-strategies-lora-and-checkpoints)
   - [11.1 The shape of a training step](#111-the-shape-of-a-training-step)
   - [11.2 Optimizers (`src/optim.zig`)](#112-optimizers-srcoptimzig)
@@ -2880,17 +2881,29 @@ pub fn rope(self, ctx, comptime position_tag: Tag, comptime feature_tag: Tag,
 Rotates feature pairs by position-dependent angles over
 (`position_tag`, `feature_tag`). `mode` is comptime `exec.RopeMode`:
 `.half` pairs feature `i` with `i + d/2` (NEOX/Llama layout);
-`.interleaved` pairs adjacent features. `source` selects the factor source
+`.interleaved` pairs adjacent features; `.interleaved_tail` pairs adjacent
+features within the TRAILING `table.feature_dim` features — a partial
+rotary aligned to the end of the feature axis with the leading features
+passed through (DeepSeek V4's tail-64 rotary; identical to `.interleaved`
+when the table spans the whole axis). `source` selects the factor source
 at comptime (a closed set; anything else is a compile error):
 
 - `*const exec.RopeTable` — prepared factors, the production path. Build
   with `ctx.prepareRopeTable(positions, feature_dim, theta_base, inverse)`
   or `ctx.prepareRopeTableFactors(..., freq_factors)` — the latter is ggml's
   `rope_ext` frequency scaling (Llama-3 long-context, Gemma global layers).
-  The table's `feature_dim` is the **authoritative rotary span**: equal to
-  `dim(feature_tag)` rotates fully; smaller rotates the leading
-  `feature_dim` features and passes the tail through unchanged (partial NEOX
-  RoPE). `RopeTable` owns its buffers; `table.deinit()` releases them.
+  For custom frequency schedules the core cannot rebuild, hand-fill via
+  `ctx.prepareRopeTableInvFreqsF64(pos0, count, inv_freq, inverse)` —
+  per-pair f64 inverse frequencies, angles accumulated in f64 before the
+  f32 cast (the `prepareRopeTable*` pair compute f32 angles) —
+  and `ctx.yarnBlendInvFreqsF64(dim, base, factor, orig_ctx)` builds the
+  DeepSeek-family YaRN blend (beta 32/1 correction ramp; `factor <= 1`
+  returns the plain pow schedule). The table's `feature_dim` is the
+  **authoritative rotary span**: equal to `dim(feature_tag)` rotates fully;
+  smaller rotates the leading `feature_dim` features (`.half`,
+  `.interleaved`) or the trailing ones (`.interleaved_tail`) and passes the
+  rest through unchanged (partial RoPE). `RopeTable` owns its buffers;
+  `table.deinit()` releases them.
 - `exec.RopeTheta` / `.{ .positions = p, .theta_base = t }` — on-the-fly
   factors (`positions: []const i32`), full rotation only. Pair `i` at
   position `p` rotates by `p / theta_base^(2i/d)`.
@@ -8039,6 +8052,56 @@ bitwise through plane pair-detection in the qwen3 loaders
 accuracy/speed tables and
 configuration guidance (plane counts, source precision, lm_head economics
 per ISA): [PTQTP.md](PTQTP.md).
+
+### 10.10 Fake-quantization round trips (`src/exec/fakequant.zig`)
+
+`fucina.fakequant` passes f32 values through a low-precision grid and back —
+quantization-aware *inference* numerics for models whose reference stores
+activations or cache rows through such grids, so the round trip is part of
+the graph, not an optimization (DeepSeek V4's FP8 KV rows and FP4/Hadamard
+indexer QAT, §13). All kernels run in place over host slices, SIMD and
+scalar paths evaluate the same per-element expression (bit-identical for
+any length), and the grid rounding is round-to-nearest ties-to-even
+implemented arithmetically on the f32 bit pattern — pinned bit-for-bit
+against a grid-search oracle in `fakequant_tests.zig`.
+
+- `roundE4m3(x)` / `roundE2m1(x)` — scalar RNE onto the FP8 E4M3 grid
+  (saturating at ±448) or the FP4 E2M1 grid (±6). Out-of-range magnitudes
+  clamp; no NaN/inf encodings are produced.
+- `groupRoundTripE4m3InPlace(x, group_size, amax_floor)` /
+  `groupRoundTripE2m1InPlace(...)` — the microscaling recipe: per group,
+  `amax = max |x|` floored at `amax_floor` (keeps the scale finite on
+  all-zero groups), power-of-two scale `2^ceil(log2(amax / grid_max))`,
+  clamp, grid round trip, rescale. `x.len % group_size == 0` is required.
+  DeepSeek V4 uses (64, 1e-4) for FP8 KV rows and (32, 6·2⁻¹²⁶) for FP4
+  activations.
+- `hadamardInPlace(x)` — fast Walsh-Hadamard transform scaled by
+  1/sqrt(len) (power-of-two length): the orthonormal rotation used by
+  rotation-based quantization schemes (QuaRot/SpinQuant-style QAT).
+- `roundF16InPlace(x)` — f32 → f16 → f32 (what storing a row into an f16
+  cache does).
+
+The group recipes are **not projections**: a second pass may pick a smaller
+power-of-two scale (the amax shrinks through rounding) and re-clamp near
+the grid max, so don't assume idempotence.
+
+```zig
+test "fake-quant round trips snap values onto their grids" {
+    const fq = fucina.fakequant;
+    try std.testing.expectEqual(@as(f32, 0.5), fq.roundE2m1(0.6));
+    try std.testing.expectEqual(@as(f32, 448.0), fq.roundE4m3(1.0e9)); // saturates
+    try std.testing.expectEqual(@as(f32, 4.0), fq.roundE2m1(5.0)); // tie -> even mantissa
+
+    var row = [8]f32{ 0.1, -2.3, 7.5, 0, 1.25, -0.6, 3.9, 448.0 };
+    fq.groupRoundTripE4m3InPlace(&row, 8, 1.0e-4);
+    for (row) |v| try std.testing.expectEqual(fq.roundE4m3(v), v); // on-grid after the round trip (scale 2^0 from amax 448)
+
+    var had = [4]f32{ 1, 2, 3, 4 };
+    fq.hadamardInPlace(&had); // { (1+2+3+4), (1-2+3-4), (1+2-3-4), (1-2-3+4) } / 2
+    try std.testing.expectApproxEqAbs(@as(f32, 5.0), had[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, -1.0), had[1], 1e-6);
+}
+```
 
 ## 11. Training: optimizers, evolution strategies, LoRA, and checkpoints
 

@@ -82,6 +82,11 @@ pub const LogicalOp = exec_elementwise.LogicalOp;
 
 pub const RouterTopKOptions = exec_topk.RouterTopKOptions;
 
+/// Fake-quantization round trips (FP8-E4M3 / FP4-E2M1 microscaling groups,
+/// Hadamard rotation, f16 round trip): quantization-aware inference numerics
+/// over host slices — see `exec/fakequant.zig`.
+pub const fakequant = @import("exec/fakequant.zig");
+
 pub const StandardizeAccumulation = exec_stats.StandardizeAccumulation;
 pub const StandardizeEpsMode = exec_stats.StandardizeEpsMode;
 pub const StandardizeOptions = exec_stats.StandardizeOptions;
@@ -1653,6 +1658,19 @@ pub const ExecContext = struct {
         freq_factors: ?[]const f32,
     ) !RopeTable {
         return exec_rope.prepareRopeTableFactors(&self.rt, positions, feature_dim, theta_base, inverse, freq_factors);
+    }
+
+    /// Hand-fill a rope table for `count` consecutive positions from
+    /// caller-supplied per-pair inverse frequencies, with f64 angle
+    /// accumulation (see `exec/rope.zig`).
+    pub fn prepareRopeTableInvFreqsF64(self: *ExecContext, pos0: usize, count: usize, inv_freq: []const f64, inverse: bool) !RopeTable {
+        return exec_rope.prepareRopeTableInvFreqsF64(&self.rt, pos0, count, inv_freq, inverse);
+    }
+
+    /// DeepSeek-family YaRN inverse-frequency blend in f64 (see
+    /// `exec/rope.zig`); caller frees the returned slice.
+    pub fn yarnBlendInvFreqsF64(self: *ExecContext, dim: usize, base: f64, factor: f64, orig_ctx: usize) ![]f64 {
+        return exec_rope.yarnBlendInvFreqsF64(self.rt.allocator, dim, base, factor, orig_ctx);
     }
 
     pub fn ropeAxisRankWithTable(
