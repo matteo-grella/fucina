@@ -156,7 +156,8 @@ fn accuracy(ctx: *ExecContext, model: *const Model, x: *const Tensor(.{ .batch, 
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
     const logits = try forwardLogits(ctx, model, x);
-    const pred = try logits.argmax(ctx, .class);
+    var pred = try logits.argmax(ctx, .class);
+    defer pred.deinit(); // i64 indices are caller-owned even under the scope
     const pred_data = try pred.dataConst();
     var correct: usize = 0;
     for (pred_data, labels) |p, label| {

@@ -54,7 +54,9 @@ const Rng = struct {
 /// Pick the next token from a single row of logits `[1, vocab]`. temp==0 →
 /// argmax (engine.py sample_next_token temperature==0 branch); temp>0 → keep the
 /// top-k logits, softmax(vals/temp), then a multinomial draw. Must run inside an
-/// open exec scope (the argmax/topK results are scope-owned).
+/// open exec scope (the topK values arm is a scope-owned borrow); the i64 index
+/// tensors are CALLER-owned even under the scope (REFERENCE §6.3) and are
+/// released here.
 fn sampleToken(
     ctx: *ExecContext,
     allocator: Allocator,
@@ -65,14 +67,16 @@ fn sampleToken(
 ) !usize {
     if (temperature <= 0) {
         var idx = try logits.argmax(ctx, .vocab);
+        defer idx.deinit();
         return @intCast(try idx.item());
     }
 
     const vocab = logits.dim(.vocab);
     const k = @min(if (top_k > 0) top_k else vocab, vocab);
     var top = try logits.topK(ctx, .vocab, k, .top);
+    defer top.deinit();
     const vals = try top.values.dataConst(); // logits, descending (vals[0] = max)
-    const idxs = try top.indices.dataConst(); // token ids as f32
+    const idxs = try top.indices.dataConst(); // token ids as i64
 
     const probs = try allocator.alloc(f32, k);
     defer allocator.free(probs);
@@ -1037,6 +1041,7 @@ test "NANOCHAT_PARITY: engine greedy == argmax of full forward per position" {
         const logits = try model.forward(&ctx, seq.items, null);
         var last = try logits.narrow(&ctx, .seq, seq.items.len - 1, 1);
         var idx = try last.argmax(&ctx, .vocab);
+        defer idx.deinit(); // i64 indices are caller-owned even under the scope
         const next: usize = @intCast(try idx.item());
         ctx.closeExecScope(scope);
         try seq.append(allocator, next);
