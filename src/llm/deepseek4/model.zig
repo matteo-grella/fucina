@@ -11,10 +11,12 @@
 //! clamped SwiGLU.
 //!
 //! Same correctness-first shape as the deepseek2/glm4moe ports: heavy
-//! linears and the fused/streamed experts run on fucina kernels; the
-//! novel glue runs host-side in auditable f32, mirroring the reference
-//! implementation exactly (including its quantization round-trips, which
-//! are part of the model's numerics, not an optimization).
+//! linears, the fused/streamed experts, rotary, top-k selection, and the
+//! quantization-grid round-trips all run on fucina kernels
+//! (`fucina.fakequant` carries the FP8/FP4/Hadamard grids bit-exactly);
+//! the remaining host-side f32 glue mirrors the reference implementation
+//! exactly where its numerics are not expressible through the public ops
+//! (the 4x4 Sinkhorn iteration and the sliding-window state machines).
 const std = @import("std");
 const fucina = @import("fucina");
 const weights = @import("../weights.zig");
@@ -130,221 +132,105 @@ pub const Config = struct {
 // =========================================================================
 // Reference numerics: the model's own quantization round-trips. These are
 // part of the graph (cache rows and indexer activations are stored through
-// them), so parity requires bit-faithful ports.
+// them), so parity requires bit-faithful grids — `fucina.fakequant` carries
+// them (pinned bit-for-bit against this model's original grid-search port);
+// here only the model's group/floor parameters live.
 // =========================================================================
 
-fn e4m3Value(i: i32) f32 {
-    const exp_scale = [16]f32{ 0.0, 0.015625, 0.03125, 0.0625, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0 };
-    const exp: usize = @intCast((i >> 3) & 0x0f);
-    const mant: f32 = @floatFromInt(i & 0x07);
-    return if (exp == 0) mant * 0.001953125 else (1.0 + mant * 0.125) * exp_scale[exp];
-}
-
-fn e4m3Round(x: f32) f32 {
-    const sign: f32 = if (x < 0) -1.0 else 1.0;
-    const ax = @min(@abs(x), 448.0);
-    var lo: i32 = 0;
-    var hi: i32 = 126;
-    while (lo < hi) {
-        const mid = (lo + hi + 1) >> 1;
-        if (e4m3Value(mid) <= ax) lo = mid else hi = mid - 1;
-    }
-    var best = lo;
-    if (best < 126) {
-        const best_diff = @abs(ax - e4m3Value(best));
-        const next_diff = @abs(ax - e4m3Value(best + 1));
-        if (next_diff < best_diff or (next_diff == best_diff and ((best + 1) & 1) == 0 and (best & 1) != 0)) {
-            best += 1;
-        }
-    }
-    return sign * e4m3Value(best);
-}
+const fakequant = fucina.fakequant;
 
 /// FP8-simulate the non-rotary part of a KV row in place: per 64-dim group,
 /// power-of-two scale from amax/448, clamp, e4m3 round trip.
-fn f16Round(v: f32) f32 {
-    return @floatCast(@as(f16, @floatCast(v)));
-}
-
 fn fp8KvQuantRow(x: []f32, n_rot: usize) void {
-    const n_nope = x.len - n_rot;
-    var off: usize = 0;
-    while (off < n_nope) : (off += 64) {
-        var amax: f32 = 0;
-        for (x[off..][0..64]) |v| amax = @max(amax, @abs(v));
-        if (amax < 1.0e-4) amax = 1.0e-4;
-        const scale = std.math.ldexp(@as(f32, 1.0), @intFromFloat(@ceil(@log2(amax / 448.0))));
-        for (x[off..][0..64]) |*v| {
-            const clamped = @min(@max(v.* / scale, -448.0), 448.0);
-            v.* = e4m3Round(clamped) * scale;
-        }
-    }
-}
-
-fn e2m1Value(i: usize) f32 {
-    const values = [8]f32{ 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0 };
-    return values[i & 7];
-}
-
-fn e2m1Round(x: f32) f32 {
-    const sign: f32 = if (x < 0) -1.0 else 1.0;
-    const ax = @min(@abs(x), 6.0);
-    var best: usize = 0;
-    var best_diff = @abs(ax - e2m1Value(0));
-    for (1..8) |i| {
-        const diff = @abs(ax - e2m1Value(i));
-        if (diff < best_diff or (diff == best_diff and (i & 1) == 0 and (best & 1) != 0)) {
-            best = i;
-            best_diff = diff;
-        }
-    }
-    return sign * e2m1Value(best);
-}
-
-/// In-place 128-wide fast Walsh-Hadamard transform scaled by 1/sqrt(128).
-fn hadamard128(x: *[128]f32) void {
-    var stride: usize = 1;
-    while (stride < 128) : (stride <<= 1) {
-        var base: usize = 0;
-        while (base < 128) : (base += 2 * stride) {
-            for (0..stride) |i| {
-                const a = x[base + i];
-                const b = x[base + stride + i];
-                x[base + i] = a + b;
-                x[base + stride + i] = a - b;
-            }
-        }
-    }
-    const scale = 0.08838834764831845;
-    for (x) |*v| v.* *= scale;
-}
-
-/// FP4-simulate an activation row: per 32-dim group, power-of-two scale from
-/// amax/6, clamp, e2m1 round trip.
-fn fp4ActQuantRow(x: []f32) void {
-    std.debug.assert(x.len % 32 == 0);
-    var off: usize = 0;
-    while (off < x.len) : (off += 32) {
-        var amax: f32 = 0;
-        for (x[off..][0..32]) |v| amax = @max(amax, @abs(v));
-        if (amax < 7.052966104933725e-38) amax = 7.052966104933725e-38;
-        const scale = std.math.ldexp(@as(f32, 1.0), @intFromFloat(@ceil(@log2(amax / 6.0))));
-        for (x[off..][0..32]) |*v| {
-            const clamped = @min(@max(v.* / scale, -6.0), 6.0);
-            v.* = e2m1Round(clamped) * scale;
-        }
-    }
+    fakequant.groupRoundTripE4m3InPlace(x[0 .. x.len - n_rot], 64, 1.0e-4);
 }
 
 /// The indexer QAT: 128-wide Hadamard rotation followed by the FP4
-/// activation round trip (applies to indexer Q rows and indexer compressed
-/// KV rows; without it the top-k selection is not the model's graph).
+/// activation round trip — per 32-dim group, power-of-two scale from amax/6
+/// (the floor is 6·2^-126, keeping the scale a normal f32). Applies to
+/// indexer Q rows and indexer compressed KV rows; without it the top-k
+/// selection is not the model's graph.
 fn indexerQatRow(x: []f32) void {
     std.debug.assert(x.len == 128);
-    hadamard128(x[0..128]);
-    fp4ActQuantRow(x);
+    fakequant.hadamardInPlace(x);
+    fakequant.groupRoundTripE2m1InPlace(x, 32, 7.052966104933725e-38);
 }
 
 // =========================================================================
-// Rotary: tail-64 rotation. Raw-window layers (ratio 0) use the plain base;
-// compressed layers use the compress base with YaRN interpolation whose
-// magnitude correction is cancelled (pure frequency blend).
+// Rotary: tail-64 rotation through the core `.interleaved_tail` rope op —
+// pairing is ADJACENT within the tail ((tail[2i], tail[2i+1]) shares
+// frequency i), matching the reference loop, not the half-split convention
+// the other DeepSeek-family ports use. Raw-window layers (ratio 0) use the
+// plain base; compressed layers use the compress base with YaRN
+// interpolation whose magnitude correction is cancelled (pure frequency
+// blend). Tables are hand-filled `fucina.RopeTable`s so the angles keep the
+// reference's f64 accumulation (`ctx.prepareRopeTable` computes f32).
 // =========================================================================
 
 const Rope = struct {
-    /// cos/sin per (position, pair) for both layer families.
-    raw_cos: []f32,
-    raw_sin: []f32,
-    comp_cos: []f32,
-    comp_sin: []f32,
+    /// Per-pair inverse frequencies for both layer families, in f64 (the
+    /// reference accumulates angles in double precision).
+    raw_freq: []f64,
+    comp_freq: []f64,
     pairs: usize,
-    capacity: usize,
 
-    fn buildFreqs(allocator: Allocator, config: Config, base: f64, yarn: bool) ![]f64 {
-        const dim = config.rope_dims;
-        const pairs = dim / 2;
-        const inv_freq = try allocator.alloc(f64, pairs);
-        for (inv_freq, 0..) |*f, i| {
-            f.* = std.math.pow(f64, base, -(@as(f64, @floatFromInt(2 * i)) / @as(f64, @floatFromInt(dim))));
-        }
-        if (yarn and config.yarn_factor > 1.0 and config.yarn_orig_ctx > 0) {
-            const orig: f64 = @floatFromInt(config.yarn_orig_ctx);
-            const d_f: f64 = @floatFromInt(dim);
-            const dimFor = struct {
-                fn go(rot: f64, d: f64, b: f64, o: f64) f64 {
-                    return d * @log(o / (rot * 2.0 * std.math.pi)) / (2.0 * @log(b));
-                }
-            }.go;
-            var low = @floor(dimFor(32.0, d_f, base, orig));
-            var high = @ceil(dimFor(1.0, d_f, base, orig));
-            low = @max(low, 0);
-            high = @min(high, d_f - 1);
-            const factor: f64 = config.yarn_factor;
-            for (inv_freq, 0..) |*f, i| {
-                const extra = f.*;
-                const inter = extra / factor;
-                var ramp = (@as(f64, @floatFromInt(i)) - low) / @max(high - low, 0.001);
-                ramp = @min(@max(ramp, 0.0), 1.0);
-                const mask = 1.0 - ramp;
-                f.* = inter * (1.0 - mask) + extra * mask;
-            }
-        }
-        return inv_freq;
-    }
-
-    fn init(allocator: Allocator, config: Config, capacity: usize) !Rope {
-        const pairs = config.rope_dims / 2;
-        const raw_freq = try buildFreqs(allocator, config, config.rope_theta, false);
-        defer allocator.free(raw_freq);
-        const comp_freq = try buildFreqs(allocator, config, config.compress_rope_theta, true);
-        defer allocator.free(comp_freq);
-
-        const raw_cos = try allocator.alloc(f32, capacity * pairs);
-        errdefer allocator.free(raw_cos);
-        const raw_sin = try allocator.alloc(f32, capacity * pairs);
-        errdefer allocator.free(raw_sin);
-        const comp_cos = try allocator.alloc(f32, capacity * pairs);
-        errdefer allocator.free(comp_cos);
-        const comp_sin = try allocator.alloc(f32, capacity * pairs);
-        for (0..capacity) |pos| {
-            for (0..pairs) |i| {
-                const raw_angle = @as(f64, @floatFromInt(pos)) * raw_freq[i];
-                raw_cos[pos * pairs + i] = @floatCast(@cos(raw_angle));
-                raw_sin[pos * pairs + i] = @floatCast(@sin(raw_angle));
-                const comp_angle = @as(f64, @floatFromInt(pos)) * comp_freq[i];
-                comp_cos[pos * pairs + i] = @floatCast(@cos(comp_angle));
-                comp_sin[pos * pairs + i] = @floatCast(@sin(comp_angle));
-            }
-        }
-        return .{ .raw_cos = raw_cos, .raw_sin = raw_sin, .comp_cos = comp_cos, .comp_sin = comp_sin, .pairs = pairs, .capacity = capacity };
+    fn init(ctx: *ExecContext, config: Config) !Rope {
+        const raw_freq = try ctx.yarnBlendInvFreqsF64(config.rope_dims, config.rope_theta, 1.0, 0);
+        errdefer ctx.allocator.free(raw_freq);
+        const comp_freq = try ctx.yarnBlendInvFreqsF64(config.rope_dims, config.compress_rope_theta, config.yarn_factor, config.yarn_orig_ctx);
+        return .{ .raw_freq = raw_freq, .comp_freq = comp_freq, .pairs = config.rope_dims / 2 };
     }
 
     fn deinit(self: *Rope, allocator: Allocator) void {
-        allocator.free(self.raw_cos);
-        allocator.free(self.raw_sin);
-        allocator.free(self.comp_cos);
-        allocator.free(self.comp_sin);
+        allocator.free(self.raw_freq);
+        allocator.free(self.comp_freq);
         self.* = undefined;
     }
 
-    /// Rotate the TAIL `2*pairs` dims of one `head` slice at `pos`.
-    /// Compressed-family layers use the blended frequencies; `inverse`
-    /// un-rotates (the post-attention head correction). Pairing is
-    /// ADJACENT within the tail — (tail[2i], tail[2i+1]) shares frequency
-    /// i — matching the reference loop, not the half-split convention the
-    /// other DeepSeek-family ports use.
-    fn applyTail(self: *const Rope, head: []f32, pos: usize, compressed: bool, inverse: bool) void {
-        const pairs = self.pairs;
-        const tail = head[head.len - 2 * pairs ..];
-        const c = (if (compressed) self.comp_cos else self.raw_cos)[pos * pairs ..][0..pairs];
-        const s = (if (compressed) self.comp_sin else self.raw_sin)[pos * pairs ..][0..pairs];
-        for (0..pairs) |i| {
-            const a = tail[2 * i];
-            const b = tail[2 * i + 1];
-            const si = if (inverse) -s[i] else s[i];
-            tail[2 * i] = a * c[i] - b * si;
-            tail[2 * i + 1] = a * si + b * c[i];
-        }
+    /// Hand-fill a rope table for `count` positions starting at `pos0`
+    /// (f64 angles, f32 cos/sin; `inverse` = the post-attention
+    /// un-rotation). The table spans `rope_dims` features — applied with
+    /// `.interleaved_tail`, it rotates the tail of each head.
+    fn table(self: *const Rope, ctx: *ExecContext, pos0: usize, count: usize, compressed: bool, inverse: bool) !fucina.RopeTable {
+        const freq = if (compressed) self.comp_freq else self.raw_freq;
+        return ctx.prepareRopeTableInvFreqsF64(pos0, count, freq, inverse);
+    }
+};
+
+/// The per-step rotation tables: both frequency families, forward and
+/// inverse, at the step's positions. Built once per (batched) step and
+/// shared by every layer.
+const StepRope = struct {
+    raw: fucina.RopeTable,
+    raw_inv: fucina.RopeTable,
+    comp: fucina.RopeTable,
+    comp_inv: fucina.RopeTable,
+
+    fn init(rope: *const Rope, ctx: *ExecContext, pos0: usize, count: usize) !StepRope {
+        var raw = try rope.table(ctx, pos0, count, false, false);
+        errdefer raw.deinit();
+        var raw_inv = try rope.table(ctx, pos0, count, false, true);
+        errdefer raw_inv.deinit();
+        var comp = try rope.table(ctx, pos0, count, true, false);
+        errdefer comp.deinit();
+        const comp_inv = try rope.table(ctx, pos0, count, true, true);
+        return .{ .raw = raw, .raw_inv = raw_inv, .comp = comp, .comp_inv = comp_inv };
+    }
+
+    fn deinit(self: *StepRope) void {
+        self.comp_inv.deinit();
+        self.comp.deinit();
+        self.raw_inv.deinit();
+        self.raw.deinit();
+        self.* = undefined;
+    }
+
+    fn fwd(self: *const StepRope, compressed: bool) *const fucina.RopeTable {
+        return if (compressed) &self.comp else &self.raw;
+    }
+
+    fn inv(self: *const StepRope, compressed: bool) *const fucina.RopeTable {
+        return if (compressed) &self.comp_inv else &self.raw_inv;
     }
 };
 
@@ -644,7 +530,7 @@ pub const Model = struct {
         const weight_mapping = file.takeMapping();
         if (weight_mapping == null) return Error.InvalidWeightShape;
 
-        var rope = try Rope.init(allocator, config, max_positions_default);
+        var rope = try Rope.init(ctx, config);
         errdefer rope.deinit(allocator);
 
         return .{
@@ -713,8 +599,6 @@ pub const Model = struct {
         return .{ .allocator = allocator, .layers = layers, .capacity = capacity };
     }
 };
-
-const max_positions_default: usize = 65536;
 
 fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i: usize, store: ?*fucina.ExpertStore) !Layer {
     var prefix_buf: [32]u8 = undefined;
@@ -911,6 +795,11 @@ fn rmsNormInto(out: []f32, x: []const f32, weight: ?[]const f32, eps: f32) void 
     }
 }
 
+/// Sign-stable sigmoid, kept host-side on purpose: the reference computes
+/// the hyper-connection gates through this two-branch form, whose f32
+/// rounding differs from the core `.sigmoid` unary (`1/(1+e^-x)`), and the
+/// gates feed the Sinkhorn iteration below — 4-wide vectors where a kernel
+/// dispatch would cost more than the math.
 fn sigmoidStable(x: f32) f32 {
     if (x >= 0) {
         const e = @exp(-x);
@@ -920,17 +809,12 @@ fn sigmoidStable(x: f32) f32 {
     return e / (1.0 + e);
 }
 
-fn softplusStable(x: f32) f32 {
-    // log(1 + e^x), sign-stable.
-    return if (x > 0) x + std.math.log1p(@exp(-x)) else std.math.log1p(@exp(x));
-}
-
-
 // =========================================================================
-// Forward pass. Tensor ops carry everything expressible in the public API;
-// host f32 remains only for the reference's bit-exact quantization grids,
-// the 4x4 Sinkhorn iteration, the tail rotary, and the sliding-ring
-// bookkeeping (whose rows live pre-quantized between steps by design).
+// Forward pass. Tensor ops carry everything expressible in the public API
+// (linears, norms, rotary, sink softmax, top-k, the fake-quant grids);
+// host f32 remains only for the 4x4 Sinkhorn iteration and the
+// sliding-ring/compressor-window bookkeeping (whose rows live pre-quantized
+// between steps by design).
 // =========================================================================
 
 const HcSplit = struct {
@@ -1172,19 +1056,28 @@ fn compressorAdvance(
         pooled[j] = if (denom > 0) sum / denom else 0;
     }
 
-    // rms-norm with the compressor weight, rope at the compressed position,
-    // then the family quantization round-trip.
+    // rms-norm with the compressor weight, rope at the compressed position
+    // (its own 1-position table — the emitted row's position lags the
+    // token's), then the family quantization round-trip.
     const out_row = try out_rows.addManyAsSlice(ctx.allocator, head_dim);
     rmsNormInto(out_row, pooled, comp.norm, self.config.rms_norm_eps);
     const comp_pos = pos + 1 - ratio;
-    self.rope.applyTail(out_row, comp_pos, layer_compressed, false);
+    {
+        var comp_table = try self.rope.table(ctx, comp_pos, 1, layer_compressed, false);
+        defer comp_table.deinit();
+        var row_t = try fucina.Tensor(.{ .seq, .k }).fromBorrowedConstSlice(ctx, .{ 1, head_dim }, out_row);
+        defer row_t.deinit();
+        var rot = try row_t.rope(ctx, .seq, .k, &comp_table, .interleaved_tail);
+        defer rot.deinit();
+        try rot.copyTo(out_row);
+    }
     if (head_dim == self.config.head_dim) {
         fp8KvQuantRow(out_row, self.config.rope_dims);
     } else {
         indexerQatRow(out_row);
     }
     // Cached rows live f16-rounded (the reference cache stores f16).
-    for (out_row) |*v| v.* = f16Round(v.*);
+    fakequant.roundF16InPlace(out_row);
 
     if (ratio == 4) {
         // Shift: cur half becomes prev, then mirrored back (reference-exact).
@@ -1222,9 +1115,11 @@ pub fn step(self: *Model, ctx: *ExecContext, session: *Session, token: usize) ![
     const cfg = self.config;
     const allocator = ctx.allocator;
     const cache = &session.cache;
-    if (cache.len >= cache.capacity or cache.len >= self.rope.capacity) return Error.KvCacheOverflow;
+    if (cache.len >= cache.capacity) return Error.KvCacheOverflow;
     const pos = cache.len;
     const streams = session.scratch.streams;
+    var tables = try StepRope.init(&self.rope, ctx, pos, 1);
+    defer tables.deinit();
 
     // All HC streams start as the token embedding.
     {
@@ -1240,7 +1135,7 @@ pub fn step(self: *Model, ctx: *ExecContext, session: *Session, token: usize) ![
         {
             const pre = try hcPre(ctx, cfg, &layer.hc_attn, streams);
             defer allocator.free(pre.sub_in);
-            const block_out = try attnBlock(self, ctx, cache, layer, layer_i, pre.sub_in, pos, token);
+            const block_out = try attnBlock(self, ctx, cache, layer, layer_i, pre.sub_in, pos, &tables);
             defer allocator.free(block_out);
             try hcPost(ctx, cfg, &pre.split, block_out, streams);
         }
@@ -1321,9 +1216,11 @@ pub fn stepBatchExtra(self: *Model, ctx: *ExecContext, session: *Session, tokens
     const S = tokens.len;
     if (S == 0) return Error.KvCacheOverflow;
     if (S == 1 and out_logits_rows == null and out_streams == null) return step(self, ctx, session, tokens[0]);
-    if (cache.len + S > cache.capacity or cache.len + S > self.rope.capacity) return Error.KvCacheOverflow;
+    if (cache.len + S > cache.capacity) return Error.KvCacheOverflow;
     const pos0 = cache.len;
     const hc_dim = cfg.n_hc * cfg.hidden_size;
+    var tables = try StepRope.init(&self.rope, ctx, pos0, S);
+    defer tables.deinit();
 
     // Every batch row carries its own HC stream state.
     const streams_all = try allocator.alloc(f32, S * hc_dim);
@@ -1346,7 +1243,7 @@ pub fn stepBatchExtra(self: *Model, ctx: *ExecContext, session: *Session, tokens
         {
             const sub_in = try hcPreBatch(ctx, cfg, &layer.hc_attn, streams_all, S, splits);
             defer allocator.free(sub_in);
-            const block_out = try attnBlockBatch(self, ctx, cache, layer, layer_i, sub_in, pos0, S);
+            const block_out = try attnBlockBatch(self, ctx, cache, layer, layer_i, sub_in, pos0, S, &tables);
             defer allocator.free(block_out);
             try hcPostBatch(ctx, cfg, splits, block_out, streams_all, S);
         }
@@ -1439,12 +1336,13 @@ fn hcPostBatch(ctx: *ExecContext, config: Config, splits: []const HcSplit, block
     @memcpy(streams_all[0 .. S * hc_dim], try next.dataConst());
 }
 
-/// Batched attention sublayer: all projections and norms run as S-row GEMMs;
-/// rope/fp8/window state and the row-visibility bookkeeping advance per
-/// token. Raw rows for the whole chunk live in a temporary [carry+S] buffer
-/// (each token sees the trailing <= n_swa rows at its own position); the
-/// persistent ring receives the final window afterwards.
-fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer, layer_i: usize, sub_in: []const f32, pos0: usize, S: usize) ![]f32 {
+/// Batched attention sublayer: all projections, norms, and the tail rotary
+/// run as S-row tensor ops; fp8/window state and the row-visibility
+/// bookkeeping advance per token. Raw rows for the whole chunk live in a
+/// temporary [carry+S] buffer (each token sees the trailing <= n_swa rows at
+/// its own position); the persistent ring receives the final window
+/// afterwards.
+fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer, layer_i: usize, sub_in: []const f32, pos0: usize, S: usize, tables: *const StepRope) ![]f32 {
     const cfg = self.config;
     const allocator = ctx.allocator;
     const lc = &cache.layers[layer_i];
@@ -1460,7 +1358,8 @@ fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const 
     var x_norm = try in_t.rmsNormMul(ctx, .embed, &attn_norm_w, cfg.rms_norm_eps);
     defer x_norm.deinit();
 
-    // q-LoRA + per-head rms norm, all rows at once.
+    // q-LoRA + per-head rms norm + tail rotary, all rows at once; q stays a
+    // tensor through attention (per-token views below).
     var q_lat = try layer.q_a.linearSeq(ctx, &x_norm, .embed, .q);
     defer q_lat.deinit();
     var q_a_norm_w = try fucina.Tensor(.{.q}).fromSlice(ctx, .{cfg.q_lora_rank}, layer.q_a_norm);
@@ -1469,15 +1368,12 @@ fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const 
     defer qr_norm_t.deinit();
     var q_full = try layer.q_b.linearSeq(ctx, &qr_norm_t, .q, .attn);
     defer q_full.deinit();
-    const q_all = try allocator.alloc(f32, S * q_dim);
-    defer allocator.free(q_all);
-    {
-        var heads_t = try fucina.Tensor(.{ .r, .d }).fromBorrowedConstSlice(ctx, .{ S * cfg.num_heads, hd }, try q_full.dataConst());
-        defer heads_t.deinit();
-        var normed = try heads_t.rmsNorm(ctx, .d, cfg.rms_norm_eps);
-        defer normed.deinit();
-        @memcpy(q_all, try normed.dataConst());
-    }
+    var q_heads = try q_full.split(ctx, .attn, .{ .head, .d }, .{ cfg.num_heads, hd });
+    defer q_heads.deinit();
+    var q_normed = try q_heads.rmsNorm(ctx, .d, cfg.rms_norm_eps);
+    defer q_normed.deinit();
+    var q_rot = try q_normed.rope(ctx, .seq, .d, tables.fwd(compressed_family), .interleaved_tail);
+    defer q_rot.deinit();
 
     var kv_lin = try layer.kv.linearSeq(ctx, &x_norm, .embed, .k);
     defer kv_lin.deinit();
@@ -1485,21 +1381,23 @@ fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const 
     defer kv_norm_w.deinit();
     var kv_normed = try kv_lin.rmsNormMul(ctx, .k, &kv_norm_w, cfg.rms_norm_eps);
     defer kv_normed.deinit();
-    const kv_all = try allocator.dupe(f32, try kv_normed.dataConst());
+    var kv_rot = try kv_normed.rope(ctx, .seq, .k, tables.fwd(compressed_family), .interleaved_tail);
+    defer kv_rot.deinit();
+    const kv_all = try allocator.dupe(f32, try kv_rot.dataConst());
     defer allocator.free(kv_all);
 
-    // Rope + fp8 per token; chunk-local raw buffer = ring carry + S new rows.
+    // FP8 round-trip per row; chunk-local raw buffer = ring carry + S new
+    // rows, stored f16-rounded (the reference cache stores f16).
     const carry = lc.n_raw;
     const raw_buf = try allocator.alloc(f32, (carry + S) * hd);
     defer allocator.free(raw_buf);
     @memcpy(raw_buf[0 .. carry * hd], lc.raw[0 .. carry * hd]);
     for (0..S) |s| {
-        const pos = pos0 + s;
-        for (0..cfg.num_heads) |h| self.rope.applyTail(q_all[s * q_dim + h * hd ..][0..hd], pos, compressed_family, false);
         const kv_row = kv_all[s * hd ..][0..hd];
-        self.rope.applyTail(kv_row, pos, compressed_family, false);
         fp8KvQuantRow(kv_row, cfg.rope_dims);
-        for (raw_buf[(carry + s) * hd ..][0..hd], kv_row) |*d, v| d.* = f16Round(v);
+        const dst = raw_buf[(carry + s) * hd ..][0..hd];
+        @memcpy(dst, kv_row);
+        fakequant.roundF16InPlace(dst);
     }
 
     // Compressors: projections batch, the window state advances per token;
@@ -1533,7 +1431,7 @@ fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const 
         }
     } else @memset(count_idx, 0);
 
-    // Indexer projections batch; selection runs per token below.
+    // Indexer projections + rotary batch; selection runs per token below.
     const idx_q_dim = cfg.indexer_heads * cfg.indexer_head_dim;
     var qi_all: []f32 = &.{};
     defer if (qi_all.len > 0) allocator.free(qi_all);
@@ -1542,7 +1440,11 @@ fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const 
     if (ratio == 4) {
         var qi_t = try layer.indexer_q_b.?.linearSeq(ctx, &qr_norm_t, .q, .attn);
         defer qi_t.deinit();
-        qi_all = try allocator.dupe(f32, try qi_t.dataConst());
+        var qi_heads = try qi_t.split(ctx, .attn, .{ .head, .d }, .{ cfg.indexer_heads, cfg.indexer_head_dim });
+        defer qi_heads.deinit();
+        var qi_rot = try qi_heads.rope(ctx, .seq, .d, tables.fwd(true), .interleaved_tail);
+        defer qi_rot.deinit();
+        qi_all = try allocator.dupe(f32, try qi_rot.dataConst());
         var wp_t = try layer.indexer_proj.?.linearSeq(ctx, &x_norm, .embed, .attn);
         defer wp_t.deinit();
         wp_all = try allocator.dupe(f32, try wp_t.dataConst());
@@ -1554,12 +1456,11 @@ fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const 
     var rows: std.ArrayList(f32) = .empty;
     defer rows.deinit(allocator);
     for (0..S) |s| {
-        const pos = pos0 + s;
         const n_vis = count_attn[s];
         var allowed: ?[]bool = null;
         defer if (allowed) |a| allocator.free(a);
         if (ratio == 4 and n_vis > cfg.indexer_top_k) {
-            allowed = try indexerSelectFrom(self, ctx, qi_all[s * idx_q_dim ..][0..idx_q_dim], wp_all[s * cfg.indexer_heads ..][0..cfg.indexer_heads], lc.index_comp.items[0 .. count_idx[s] * cfg.indexer_head_dim], n_vis, pos);
+            allowed = try indexerSelectFrom(self, ctx, qi_all[s * idx_q_dim ..][0..idx_q_dim], wp_all[s * cfg.indexer_heads ..][0..cfg.indexer_heads], lc.index_comp.items[0 .. count_idx[s] * cfg.indexer_head_dim], n_vis);
         }
         rows.clearRetainingCapacity();
         const t_abs = carry + s;
@@ -1571,9 +1472,11 @@ fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const 
             }
             try rows.appendSlice(allocator, lc.comp.items[c * hd ..][0..hd]);
         }
-        const out_row = out_heads_all[s * q_dim ..][0..q_dim];
-        try attendRowsSink(self, ctx, layer, q_all[s * q_dim ..][0..q_dim], rows.items, out_row);
-        for (0..cfg.num_heads) |h| self.rope.applyTail(out_row[h * hd ..][0..hd], pos, compressed_family, true);
+        var q_view = try q_rot.select(ctx, .seq, @intCast(s));
+        defer q_view.deinit();
+        var out_t = try attendRowsSink(self, ctx, layer, &q_view, rows.items);
+        defer out_t.deinit();
+        try out_t.copyTo(out_heads_all[s * q_dim ..][0..q_dim]);
     }
 
     // The persistent ring keeps the trailing window.
@@ -1582,15 +1485,20 @@ fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const 
     std.mem.copyForwards(f32, lc.raw[0 .. keep * hd], raw_buf[(total - keep) * hd .. total * hd]);
     lc.n_raw = keep;
 
-    // Grouped low-rank output, batched per group: each group's head block is
-    // a narrow VIEW of the head buffer (materialized once for the quantized
-    // GEMM) and the per-group ranks concat into stage B's input — no hand
-    // gather/scatter.
+    // Undo the value-side tail rotation carried by the K==V rows (one
+    // batched inverse rope), then the grouped low-rank output, batched per
+    // group: each group's head block is a narrow VIEW of the rotated head
+    // tensor (materialized once for the quantized GEMM) and the per-group
+    // ranks concat into stage B's input — no hand gather/scatter.
     const group_heads = cfg.num_heads / cfg.output_groups;
     const group_dim = group_heads * hd;
     const rank = cfg.output_lora_rank;
     const group_row_bytes = (group_dim / 32) * @sizeOf(fucina.BlockQ8_0);
-    var heads_full = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ S, q_dim }, out_heads_all);
+    var out3 = try fucina.Tensor(.{ .seq, .head, .d }).fromBorrowedConstSlice(ctx, .{ S, cfg.num_heads, hd }, out_heads_all);
+    defer out3.deinit();
+    var out_rot = try out3.rope(ctx, .seq, .d, tables.inv(compressed_family), .interleaved_tail);
+    defer out_rot.deinit();
+    var heads_full = try out_rot.merge(ctx, .embed, .{ .head, .d });
     defer heads_full.deinit();
     var lows: [8]fucina.Tensor(.{ .seq, .attn }) = undefined;
     var n_lows: usize = 0;
@@ -1624,8 +1532,7 @@ fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const 
     return allocator.dupe(f32, try out_t.dataConst());
 }
 
-fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer, layer_i: usize, sub_in: []const f32, pos: usize, token: usize) ![]f32 {
-    _ = token;
+fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer, layer_i: usize, sub_in: []const f32, pos: usize, tables: *const StepRope) ![]f32 {
     const cfg = self.config;
     const allocator = ctx.allocator;
     const lc = &cache.layers[layer_i];
@@ -1639,7 +1546,8 @@ fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer
     var x_norm = try in_t.rmsNormMul(ctx, .embed, &attn_norm_w, cfg.rms_norm_eps);
     defer x_norm.deinit();
 
-    // q-LoRA; the normed latent (qr_norm) also feeds the indexer.
+    // q-LoRA (the normed latent qr_norm also feeds the indexer), per-head
+    // rms norm, tail rotary — q stays a tensor through attention.
     var q_lat = try layer.q_a.linearSeq(ctx, &x_norm, .embed, .q);
     defer q_lat.deinit();
     var q_a_norm_w = try fucina.Tensor(.{.q}).fromSlice(ctx, .{cfg.q_lora_rank}, layer.q_a_norm);
@@ -1648,17 +1556,14 @@ fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer
     defer qr_norm_t.deinit();
     var q_full = try layer.q_b.linearSeq(ctx, &qr_norm_t, .q, .attn);
     defer q_full.deinit();
-    const q = try allocator.dupe(f32, try q_full.dataConst());
-    defer allocator.free(q);
-
-    // Each q head is RMS-normalized (no weight) after the LoRA projection.
-    {
-        var heads_t = try fucina.Tensor(.{ .head, .d }).fromSlice(ctx, .{ cfg.num_heads, cfg.head_dim }, q);
-        defer heads_t.deinit();
-        var normed = try heads_t.rmsNorm(ctx, .d, cfg.rms_norm_eps);
-        defer normed.deinit();
-        @memcpy(q, try normed.dataConst());
-    }
+    var q_heads = try q_full.split(ctx, .attn, .{ .head, .d }, .{ cfg.num_heads, cfg.head_dim });
+    defer q_heads.deinit();
+    var q_normed = try q_heads.rmsNorm(ctx, .d, cfg.rms_norm_eps);
+    defer q_normed.deinit();
+    var q_rot = try q_normed.rope(ctx, .seq, .d, tables.fwd(compressed_family), .interleaved_tail);
+    defer q_rot.deinit();
+    var q_t = try q_rot.squeeze(ctx, .seq);
+    defer q_t.deinit();
 
     var kv_lin = try layer.kv.linearSeq(ctx, &x_norm, .embed, .k);
     defer kv_lin.deinit();
@@ -1666,20 +1571,22 @@ fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer
     defer kv_norm_w.deinit();
     var kv_normed = try kv_lin.rmsNormMul(ctx, .k, &kv_norm_w, cfg.rms_norm_eps);
     defer kv_normed.deinit();
-    const kv_row = try allocator.dupe(f32, try kv_normed.dataConst());
+    var kv_rot = try kv_normed.rope(ctx, .seq, .k, tables.fwd(compressed_family), .interleaved_tail);
+    defer kv_rot.deinit();
+    const kv_row = try allocator.dupe(f32, try kv_rot.dataConst());
     defer allocator.free(kv_row);
 
-    // Tail rotary on q heads and the shared kv row, FP8-simulate the row,
-    // push into the raw sliding window (shift when full).
-    for (0..cfg.num_heads) |h| self.rope.applyTail(q[h * cfg.head_dim ..][0..cfg.head_dim], pos, compressed_family, false);
-    self.rope.applyTail(kv_row, pos, compressed_family, false);
+    // FP8-simulate the shared kv row, push into the raw sliding window
+    // (shift when full); cached rows live f16-rounded (the reference cache
+    // stores f16).
     fp8KvQuantRow(kv_row, cfg.rope_dims);
     if (lc.n_raw == cfg.n_swa) {
         std.mem.copyForwards(f32, lc.raw[0 .. (cfg.n_swa - 1) * cfg.head_dim], lc.raw[cfg.head_dim..]);
         lc.n_raw -= 1;
     }
-    // Cached rows live f16-rounded (the reference cache stores f16).
-    for (lc.raw[lc.n_raw * cfg.head_dim ..][0..cfg.head_dim], kv_row) |*d, v| d.* = f16Round(v);
+    const ring_dst = lc.raw[lc.n_raw * cfg.head_dim ..][0..cfg.head_dim];
+    @memcpy(ring_dst, kv_row);
+    fakequant.roundF16InPlace(ring_dst);
     lc.n_raw += 1;
 
     // Compressed streams + indexer selection.
@@ -1693,12 +1600,11 @@ fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer
     }
     const n_comp = lc.comp.items.len / cfg.head_dim;
     if (ratio == 4 and n_comp > cfg.indexer_top_k) {
-        allowed = try indexerSelect(self, ctx, layer, &x_norm, &qr_norm_t, lc, pos);
+        allowed = try indexerSelect(self, ctx, layer, &x_norm, &qr_norm_t, lc, tables);
     }
 
-    // Assemble the visible rows (exclusion == -inf under the sink softmax),
-    // then attention through tensor ops: scores = q . rows / sqrt(d), the
-    // sink as an extra softmax column, weights . rows as the output.
+    // Assemble the visible rows (exclusion == absence from the sink
+    // softmax), then attention through tensor ops.
     var rows: std.ArrayList(f32) = .empty;
     defer rows.deinit(allocator);
     try rows.appendSlice(allocator, lc.raw[0 .. lc.n_raw * cfg.head_dim]);
@@ -1708,16 +1614,19 @@ fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer
         }
         try rows.appendSlice(allocator, lc.comp.items[c * cfg.head_dim ..][0..cfg.head_dim]);
     }
-    const out_heads = try allocator.alloc(f32, cfg.num_heads * cfg.head_dim);
-    defer allocator.free(out_heads);
-    try attendRowsSink(self, ctx, layer, q, rows.items, out_heads);
+    var out_heads_t = try attendRowsSink(self, ctx, layer, &q_t, rows.items);
+    defer out_heads_t.deinit();
 
-    // Undo the value-side tail rotation carried by the K==V rows.
-    for (0..cfg.num_heads) |h| self.rope.applyTail(out_heads[h * cfg.head_dim ..][0..cfg.head_dim], pos, compressed_family, true);
+    // Undo the value-side tail rotation carried by the K==V rows, then the
+    // grouped low-rank output: per group, [group_heads*d] -> rank off a
+    // narrow view, and the concatenated ranks through stage B.
+    var out3 = try out_heads_t.insertAxis(ctx, .seq, 0);
+    defer out3.deinit();
+    var out_rot = try out3.rope(ctx, .seq, .d, tables.inv(compressed_family), .interleaved_tail);
+    defer out_rot.deinit();
+    var heads_full = try out_rot.merge(ctx, .embed, .{ .head, .d });
+    defer heads_full.deinit();
 
-    // Grouped low-rank output: per group, [group_heads*d] -> rank (each
-    // group's block is a borrowed view — one token's group slice is
-    // contiguous), then the concatenated ranks through stage B.
     const group_heads = cfg.num_heads / cfg.output_groups;
     const group_dim = group_heads * cfg.head_dim;
     const rank = cfg.output_lora_rank;
@@ -1732,12 +1641,12 @@ fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer
     defer for (lows[0..n_lows]) |*t| t.deinit();
     std.debug.assert(cfg.output_groups <= lows.len);
     for (0..cfg.output_groups) |g| {
-        var head_slice = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, group_dim }, out_heads[g * group_dim ..][0..group_dim]);
-        defer head_slice.deinit();
+        var gs_v = try heads_full.narrow(ctx, .embed, g * group_dim, group_dim);
+        defer gs_v.deinit();
         lows[n_lows] = try weights.linearSeqBorrowedQuantized(
             .q8_0,
             ctx,
-            &head_slice,
+            &gs_v,
             layer.output_a[g * rank * group_row_bytes ..][0 .. rank * group_row_bytes],
             .{ rank, group_dim },
             .{ .allow_gpu = false },
@@ -1758,23 +1667,26 @@ fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer
 }
 
 /// Attention over an assembled row set with the per-head sink logit as an
-/// extra softmax column: out_heads = softmax([q·rows·scale | sink]) · rows.
-/// `q_row` is all heads of one token; both inputs enter as borrowed views.
-fn attendRowsSink(self: *const Model, ctx: *ExecContext, layer: *const Layer, q_row: []const f32, rows: []const f32, out_heads: []f32) !void {
+/// extra softmax column: out = softmax([q·rows·scale | sink]) · rows.
+/// `q_t` is all heads of one token; `rows` enters as a borrowed view.
+/// Returns the per-head context rows.
+///
+/// Deliberately the concat+narrow construction, NOT softmax's fused
+/// `.sinks` option: the fused kernel computes the same math with a
+/// different f32 summation grouping (the sink folds in after the row
+/// scan), which measurably drifts greedy decode from the validated parity
+/// baseline. Concat keeps the whole forward bit-identical to it.
+fn attendRowsSink(self: *const Model, ctx: *ExecContext, layer: *const Layer, q_t: *const fucina.Tensor(.{ .head, .d }), rows: []const f32) !fucina.Tensor(.{ .head, .d }) {
     const cfg = self.config;
     const n_rows = rows.len / cfg.head_dim;
 
-    var q_t = try fucina.Tensor(.{ .head, .d }).fromBorrowedConstSlice(ctx, .{ cfg.num_heads, cfg.head_dim }, q_row);
-    defer q_t.deinit();
     var rows_t = try fucina.Tensor(.{ .row, .d }).fromBorrowedConstSlice(ctx, .{ n_rows, cfg.head_dim }, rows);
     defer rows_t.deinit();
     var scores = try q_t.dot(ctx, &rows_t, .d);
     defer scores.deinit();
     var scaled = try scores.scale(ctx, self.attn_scale);
     defer scaled.deinit();
-
-    // Sink column: concat the per-head sink logit as one extra row-axis
-    // column (a [head,1] view of the flat sinks vector — zero copy).
+    // Sink column: a [head,1] view of the flat sinks vector — zero copy.
     var sink_col = try fucina.Tensor(.{ .head, .row }).fromBorrowedConstSlice(ctx, .{ cfg.num_heads, 1 }, layer.sinks);
     defer sink_col.deinit();
     var ext_t = try scaled.concat(ctx, .row, &.{&sink_col});
@@ -1783,43 +1695,45 @@ fn attendRowsSink(self: *const Model, ctx: *ExecContext, layer: *const Layer, q_
     defer probs.deinit();
     var probs_rows = try probs.narrow(ctx, .row, 0, n_rows);
     defer probs_rows.deinit();
-    var out_heads_t = try probs_rows.dot(ctx, &rows_t, .row);
-    defer out_heads_t.deinit();
-    @memcpy(out_heads, try out_heads_t.dataConst());
+    return probs_rows.dot(ctx, &rows_t, .row);
 }
 
-fn indexerSelect(self: *Model, ctx: *ExecContext, layer: *const Layer, x_norm: anytype, qr_norm_t: anytype, lc: *LayerCache, pos: usize) ![]bool {
+fn indexerSelect(self: *Model, ctx: *ExecContext, layer: *const Layer, x_norm: anytype, qr_norm_t: anytype, lc: *LayerCache, tables: *const StepRope) ![]bool {
     const cfg = self.config;
     const allocator = ctx.allocator;
 
     var q_t = try layer.indexer_q_b.?.linearSeq(ctx, qr_norm_t, .q, .attn);
     defer q_t.deinit();
-    const q = try allocator.dupe(f32, try q_t.dataConst());
+    var q_heads = try q_t.split(ctx, .attn, .{ .head, .d }, .{ cfg.indexer_heads, cfg.indexer_head_dim });
+    defer q_heads.deinit();
+    var q_rot = try q_heads.rope(ctx, .seq, .d, tables.fwd(true), .interleaved_tail);
+    defer q_rot.deinit();
+    const q = try allocator.dupe(f32, try q_rot.dataConst());
     defer allocator.free(q);
     var w_lin = try layer.indexer_proj.?.linearSeq(ctx, x_norm, .embed, .attn);
     defer w_lin.deinit();
     const head_w = try allocator.dupe(f32, try w_lin.dataConst());
     defer allocator.free(head_w);
 
-    return indexerSelectFrom(self, ctx, q, head_w, lc.index_comp.items, lc.comp.items.len / cfg.head_dim, pos);
+    return indexerSelectFrom(self, ctx, q, head_w, lc.index_comp.items, lc.comp.items.len / cfg.head_dim);
 }
 
 /// Scoring/selection core shared by decode and batched prefill: takes this
-/// token's already-projected indexer q heads (mutated in place: rope + QAT)
-/// and unscaled head weights, scores the visible index-compressed rows, and
-/// returns the allowed mask over the attention-compressed rows (1:1 counts).
-fn indexerSelectFrom(self: *const Model, ctx: *ExecContext, q: []f32, head_w: []f32, index_comp: []const f32, n_allowed_rows: usize, pos: usize) ![]bool {
+/// token's already-projected, already-roped indexer q heads (mutated in
+/// place: QAT) and unscaled head weights, scores the visible
+/// index-compressed rows, and returns the allowed mask over the
+/// attention-compressed rows (1:1 counts).
+fn indexerSelectFrom(self: *const Model, ctx: *ExecContext, q: []f32, head_w: []f32, index_comp: []const f32, n_allowed_rows: usize) ![]bool {
     const cfg = self.config;
     const allocator = ctx.allocator;
     const n_comp = index_comp.len / cfg.indexer_head_dim;
     const allowed = try allocator.alloc(bool, n_allowed_rows);
+    errdefer allocator.free(allowed);
     @memset(allowed, false);
     const top_k = @min(cfg.indexer_top_k, n_comp);
 
     for (0..cfg.indexer_heads) |h| {
-        const head = q[h * cfg.indexer_head_dim ..][0..cfg.indexer_head_dim];
-        self.rope.applyTail(head, pos, true, false);
-        indexerQatRow(head);
+        indexerQatRow(q[h * cfg.indexer_head_dim ..][0..cfg.indexer_head_dim]);
     }
     const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(cfg.indexer_heads * cfg.indexer_head_dim)));
     for (head_w) |*w| w.* *= scale;
@@ -1841,18 +1755,13 @@ fn indexerSelectFrom(self: *const Model, ctx: *ExecContext, q: []f32, head_w: []
     defer weighted.deinit();
     var scores_t = try weighted.sum(ctx, .head);
     defer scores_t.deinit();
-    const scores = try scores_t.dataConst();
-    for (0..top_k) |_| {
-        var best: usize = 0;
-        var best_score = -std.math.inf(f32);
-        for (scores, 0..) |sc, c| {
-            if (!allowed[c] and sc > best_score) {
-                best = c;
-                best_score = sc;
-            }
-        }
-        allowed[best] = true;
-    }
+
+    // Top-k row selection through the core kernel (ties resolve to the
+    // lowest index, exactly like a repeated strict-> argmax scan).
+    var top = try scores_t.topK(ctx, .row, top_k, .k);
+    defer top.values.deinit();
+    defer top.indices.deinit();
+    for (try top.indices.dataConst()) |c| allowed[@intCast(c)] = true;
     return allowed;
 }
 
@@ -1886,8 +1795,29 @@ fn moeBlockBatch(self: *Model, ctx: *ExecContext, layer: *const Layer, sub_in: [
     defer allocator.free(selected);
     const routing = try allocator.alloc(f32, S * used);
     defer allocator.free(routing);
-    const choice = try allocator.alloc(f32, cfg.num_experts);
-    defer allocator.free(choice);
+
+    // Top-k routing: selection runs on the bias-adjusted scores through the
+    // core kernel (ties resolve to the lowest expert id, exactly like a
+    // repeated strict-> argmax scan); the routing weights stay the unbiased
+    // probs. Hash layers route from the token-id table instead.
+    var top_idx: []i64 = &.{};
+    defer if (top_idx.len > 0) allocator.free(top_idx);
+    if (layer.moe.tid2eid == null) {
+        var top = blk: {
+            if (layer.moe.router_bias) |bias| {
+                var bias_t = try fucina.Tensor(.{.expert}).fromBorrowedConstSlice(ctx, .{cfg.num_experts}, bias);
+                defer bias_t.deinit();
+                var choice_t = try probs_t.add(ctx, &bias_t);
+                defer choice_t.deinit();
+                break :blk try choice_t.topK(ctx, .expert, used, .slot);
+            }
+            break :blk try probs_t.topK(ctx, .expert, used, .slot);
+        };
+        defer top.values.deinit();
+        defer top.indices.deinit();
+        top_idx = try allocator.dupe(i64, try top.indices.dataConst());
+    }
+
     for (0..S) |s| {
         const probs = probs_all[s * cfg.num_experts ..][0..cfg.num_experts];
         const sel = selected[s * used ..][0..used];
@@ -1901,22 +1831,10 @@ fn moeBlockBatch(self: *Model, ctx: *ExecContext, layer: *const Layer, sub_in: [
                 wts[i] = probs[e];
             }
         } else {
-            @memcpy(choice, probs);
-            if (layer.moe.router_bias) |bias| {
-                for (choice, bias) |*c, b| c.* += b;
-            }
-            for (0..used) |slot| {
-                var best: usize = 0;
-                var best_c = -std.math.inf(f32);
-                for (choice, 0..) |c, e| {
-                    if (c > best_c) {
-                        best_c = c;
-                        best = e;
-                    }
-                }
-                choice[best] = -std.math.inf(f32);
-                sel[slot] = best;
-                wts[slot] = probs[best];
+            for (0..used) |i| {
+                const e: usize = @intCast(top_idx[s * used + i]);
+                sel[i] = e;
+                wts[i] = probs[e];
             }
         }
         var sum: f32 = 0;
@@ -1950,28 +1868,25 @@ fn moeBlockBatch(self: *Model, ctx: *ExecContext, layer: *const Layer, sub_in: [
 }
 
 test {
-    // Numerics sanity: Hadamard is an involution up to scale; e4m3 grid is
-    // monotone; fp8/fp4 round trips are idempotent.
-    var v: [128]f32 = undefined;
-    for (&v, 0..) |*x, i| x.* = @floatFromInt(@as(i32, @intCast(i % 17)) - 8);
-    var w = v;
-    hadamard128(&w);
-    hadamard128(&w);
-    for (v, w) |a, b| try std.testing.expectApproxEqAbs(a, b, 1e-4);
-
-    var prev: f32 = -1;
-    for (0..127) |i| {
-        const val = e4m3Value(@intCast(i));
-        try std.testing.expect(val > prev);
-        prev = val;
-    }
-
-    var row: [64]f32 = undefined;
+    // The grid numerics themselves are pinned bit-for-bit against the
+    // original grid-search port in `exec/fakequant_tests.zig`; here only
+    // the model wiring: the KV recipe leaves the rotary tail untouched and
+    // round-trips the rest onto the e4m3 grid.
+    var row: [128]f32 = undefined;
     for (&row, 0..) |*x, i| x.* = @sin(@as(f32, @floatFromInt(i))) * 100.0;
-    fp8KvQuantRow(&row, 0);
-    var again = row;
-    fp8KvQuantRow(&again, 0);
-    for (row, again) |a, b| try std.testing.expectEqual(a, b);
+    var quantized = row;
+    fp8KvQuantRow(&quantized, 64);
+    for (row[64..], quantized[64..]) |a, b| try std.testing.expectEqual(a, b);
+    var changed = false;
+    for (row[0..64], quantized[0..64]) |a, b| changed = changed or (a != b);
+    try std.testing.expect(changed);
+
+    // Indexer QAT: deterministic (same row -> same bits).
+    var qat_a: [128]f32 = row;
+    var qat_b: [128]f32 = row;
+    indexerQatRow(&qat_a);
+    indexerQatRow(&qat_b);
+    for (qat_a, qat_b) |a, b| try std.testing.expectEqual(a, b);
 }
 
 // =========================================================================
@@ -2139,13 +2054,14 @@ pub fn mtpDraftStep(self: *Model, mtp: *const Mtp, ctx: *ExecContext, state: *Mt
 }
 
 /// The MTP layer's attention: the trunk pipeline minus compressors and
-/// indexer, over the position-indexed private ring.
+/// indexer, over the position-indexed private ring (raw rope family).
 fn mtpAttnBlock(self: *Model, mtp: *const Mtp, ctx: *ExecContext, state: *MtpState, sub_in: []const f32, pos: usize) ![]f32 {
     const cfg = self.config;
     const allocator = ctx.allocator;
     const layer = &mtp.layer;
     const hd = cfg.head_dim;
-    const q_dim = cfg.num_heads * hd;
+    var tables = try StepRope.init(&self.rope, ctx, pos, 1);
+    defer tables.deinit();
 
     var in_t = try rowTensor(ctx, sub_in, cfg.hidden_size);
     defer in_t.deinit();
@@ -2162,15 +2078,14 @@ fn mtpAttnBlock(self: *Model, mtp: *const Mtp, ctx: *ExecContext, state: *MtpSta
     defer qr_norm_t.deinit();
     var q_full = try layer.q_b.linearSeq(ctx, &qr_norm_t, .q, .attn);
     defer q_full.deinit();
-    const q = try allocator.dupe(f32, try q_full.dataConst());
-    defer allocator.free(q);
-    {
-        var heads_t = try fucina.Tensor(.{ .head, .d }).fromBorrowedConstSlice(ctx, .{ cfg.num_heads, hd }, q);
-        defer heads_t.deinit();
-        var normed = try heads_t.rmsNorm(ctx, .d, cfg.rms_norm_eps);
-        defer normed.deinit();
-        @memcpy(q, try normed.dataConst());
-    }
+    var q_heads = try q_full.split(ctx, .attn, .{ .head, .d }, .{ cfg.num_heads, hd });
+    defer q_heads.deinit();
+    var q_normed = try q_heads.rmsNorm(ctx, .d, cfg.rms_norm_eps);
+    defer q_normed.deinit();
+    var q_rot = try q_normed.rope(ctx, .seq, .d, tables.fwd(false), .interleaved_tail);
+    defer q_rot.deinit();
+    var q_t = try q_rot.squeeze(ctx, .seq);
+    defer q_t.deinit();
 
     var kv_lin = try layer.kv.linearSeq(ctx, &x_norm, .embed, .k);
     defer kv_lin.deinit();
@@ -2178,13 +2093,15 @@ fn mtpAttnBlock(self: *Model, mtp: *const Mtp, ctx: *ExecContext, state: *MtpSta
     defer kv_norm_w.deinit();
     var kv_normed = try kv_lin.rmsNormMul(ctx, .k, &kv_norm_w, cfg.rms_norm_eps);
     defer kv_normed.deinit();
-    const kv_row = try allocator.dupe(f32, try kv_normed.dataConst());
+    var kv_rot = try kv_normed.rope(ctx, .seq, .k, tables.fwd(false), .interleaved_tail);
+    defer kv_rot.deinit();
+    const kv_row = try allocator.dupe(f32, try kv_rot.dataConst());
     defer allocator.free(kv_row);
 
-    for (0..cfg.num_heads) |h| self.rope.applyTail(q[h * hd ..][0..hd], pos, false, false);
-    self.rope.applyTail(kv_row, pos, false, false);
     fp8KvQuantRow(kv_row, cfg.rope_dims);
-    for (state.raw[(pos % state.cap) * hd ..][0..hd], kv_row) |*d, v| d.* = f16Round(v);
+    const ring_dst = state.raw[(pos % state.cap) * hd ..][0..hd];
+    @memcpy(ring_dst, kv_row);
+    fakequant.roundF16InPlace(ring_dst);
 
     // Visible rows: the last min(n_rows+1, n_swa) positions ending at pos.
     var n_vis = state.n_rows + 1;
@@ -2197,10 +2114,14 @@ fn mtpAttnBlock(self: *Model, mtp: *const Mtp, ctx: *ExecContext, state: *MtpSta
         try rows.appendSlice(allocator, state.raw[(p % state.cap) * hd ..][0..hd]);
     }
 
-    const out_heads = try allocator.alloc(f32, q_dim);
-    defer allocator.free(out_heads);
-    try attendRowsSink(self, ctx, layer, q, rows.items, out_heads);
-    for (0..cfg.num_heads) |h| self.rope.applyTail(out_heads[h * hd ..][0..hd], pos, false, true);
+    var out_heads_t = try attendRowsSink(self, ctx, layer, &q_t, rows.items);
+    defer out_heads_t.deinit();
+    var out3 = try out_heads_t.insertAxis(ctx, .seq, 0);
+    defer out3.deinit();
+    var out_rot = try out3.rope(ctx, .seq, .d, tables.inv(false), .interleaved_tail);
+    defer out_rot.deinit();
+    var heads_full = try out_rot.merge(ctx, .embed, .{ .head, .d });
+    defer heads_full.deinit();
 
     const group_heads = cfg.num_heads / cfg.output_groups;
     const group_dim = group_heads * hd;
@@ -2210,12 +2131,12 @@ fn mtpAttnBlock(self: *Model, mtp: *const Mtp, ctx: *ExecContext, state: *MtpSta
     var n_lows: usize = 0;
     defer for (lows[0..n_lows]) |*t| t.deinit();
     for (0..cfg.output_groups) |g| {
-        var head_slice = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, group_dim }, out_heads[g * group_dim ..][0..group_dim]);
-        defer head_slice.deinit();
+        var gs_v = try heads_full.narrow(ctx, .embed, g * group_dim, group_dim);
+        defer gs_v.deinit();
         lows[n_lows] = try weights.linearSeqBorrowedQuantized(
             .q8_0,
             ctx,
-            &head_slice,
+            &gs_v,
             layer.output_a[g * rank * group_row_bytes ..][0 .. rank * group_row_bytes],
             .{ rank, group_dim },
             .{ .allow_gpu = false },
