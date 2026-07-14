@@ -227,6 +227,7 @@ issues.
 | `docs/PTQTP-RECIPE.md` | walkthrough: PTQTP-quantize any GGUF (MoE experts included) and run it, resident or streamed |
 | `docs/CONSTRAINED-DECODING.md` | design record: grammar/JSON-schema constrained decoding and its speculation composition |
 | `docs/CARTRIDGES.md` | design record: trained KV-prefix corpus compression (Cartridges) — self-study distillation, serving, gates |
+| `docs/ENGRAM.md` | design record: conditional n-gram memory (Engram) — hashed lookup tables, graft mode, reference parity |
 | `AGENTS.md` | build/test/bench commands, build options, repo map, house rules |
 | `docs/THIRD-PARTY-NOTICES.md` | full provenance and license inventory of third-party material |
 
