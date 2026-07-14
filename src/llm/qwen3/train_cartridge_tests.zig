@@ -416,6 +416,68 @@ test "packed forward matches per-sequence forwards behind a cartridge" {
     }
 }
 
+test "fused distill tail matches the composed logits tail (loss + cartridge grads)" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try scaffolding.buildTinyModel(&ctx, 3);
+    defer model.deinit();
+    var trainer = try CartridgeTrainer.init(&ctx, &model, no_lora, 7);
+    defer trainer.deinit();
+
+    var teacher = try trainer.evalLogits(&ctx, &full_tokens);
+    defer teacher.deinit();
+    const vocab = model.config.vocab_size;
+    const teacher_data = try teacher.dataConst();
+    var builder = cartridge.TargetsBuilder.init(allocator);
+    defer builder.deinit();
+    for (1..suffix.len) |j| {
+        const row = teacher_data[(prefix_len + j - 1) * vocab ..][0..vocab];
+        try builder.appendRow(j, row, 5, 0.99);
+    }
+
+    // Same cartridge values for both arms; grads compared leaf by leaf.
+    const arms = [2]bool{ false, true };
+    var losses: [2]f32 = undefined;
+    var grads: [2][]f32 = undefined;
+    defer for (&grads) |g| allocator.free(g);
+    for (arms, 0..) |fused, arm_i| {
+        qwen3_train.setFusedDistill(fused);
+        var cart = try cartridge.Cartridge.initRandom(
+            &ctx,
+            allocator,
+            model.config.num_layers,
+            1,
+            prefix_len,
+            model.config.num_key_value_heads,
+            model.config.head_dim,
+            123,
+            0.05,
+        );
+        defer cart.deinit();
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        var loss = try trainer.distillLoss(&ctx, suffix, &cart, builder.targets(), null, .{ .loss_scale = 0.5 });
+        defer loss.deinit();
+        try loss.backward(&ctx);
+        losses[arm_i] = try loss.item();
+        var gk = (try cart.layers[0].k.grad(&ctx)).?;
+        defer gk.deinit();
+        grads[arm_i] = try allocator.dupe(f32, try gk.dataConst());
+    }
+    qwen3_train.setFusedDistill(null);
+
+    try std.testing.expectApproxEqAbs(losses[0], losses[1], 1e-5);
+    try std.testing.expectEqual(grads[0].len, grads[1].len);
+    for (grads[0], grads[1]) |want, got| {
+        try std.testing.expect(@abs(got - want) <= 1e-6 + 1e-3 * @abs(want));
+    }
+}
+
 test "packed distillation equals accumulated per-conversation gradients" {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");

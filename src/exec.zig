@@ -71,6 +71,8 @@ pub const NormOrder = enum { l1, l2, inf };
 pub const Reduction = exec_loss.Reduction;
 pub const CrossEntropyOptions = exec_loss.CrossEntropyOptions;
 pub const LinearCrossEntropyGrads = exec_loss.LinearCrossEntropyGrads;
+pub const LinearDistillOptions = exec_loss.LinearDistillOptions;
+pub const LinearDistillForward = exec_loss.LinearDistillForward;
 pub const MseOptions = exec_loss.MseOptions;
 pub const HuberOptions = exec_loss.HuberOptions;
 pub const BceOptions = exec_loss.BceOptions;
@@ -1597,6 +1599,38 @@ pub const ExecContext = struct {
         need_weight: bool,
     ) !LinearCrossEntropyGrads {
         return exec_loss.linearCrossEntropyBackwardUpstream(&self.rt, x, weight, logits, labels, options, gy, row_stats, need_x, need_weight);
+    }
+
+    pub fn linearDistillLossStats(
+        self: *ExecContext,
+        x: *const Tensor,
+        weight: *const Tensor,
+        rows: []const usize,
+        classes: []const usize,
+        probs: []const f32,
+        options: LinearDistillOptions,
+    ) !LinearDistillForward {
+        return exec_loss.linearDistillLossStats(&self.rt, x, weight, rows, classes, probs, options);
+    }
+
+    /// DESTRUCTIVE in `logits` — see `exec_loss.linearDistillBackwardUpstream`.
+    pub fn linearDistillBackwardUpstream(
+        self: *ExecContext,
+        x_sel: *const Tensor,
+        weight: *const Tensor,
+        logits: *Tensor,
+        sel_rows: []const usize,
+        row_count: usize,
+        local_rows: []const usize,
+        classes: []const usize,
+        probs: []const f32,
+        options: LinearDistillOptions,
+        gy: *const Tensor,
+        row_stats: []const f32,
+        need_x: bool,
+        need_weight: bool,
+    ) !LinearCrossEntropyGrads {
+        return exec_loss.linearDistillBackwardUpstream(&self.rt, x_sel, weight, logits, sel_rows, row_count, local_rows, classes, probs, options, gy, row_stats, need_x, need_weight);
     }
 
     pub fn mseLoss(self: *ExecContext, input: *const Tensor, target: *const Tensor, options: MseOptions) !Tensor {

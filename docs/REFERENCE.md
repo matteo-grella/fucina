@@ -1861,7 +1861,7 @@ methods are documented above; §4 covers every math/NN op in depth.
 `logsumexp`, `logSoftmax`, `argmax`,
 `max`, `min`, `topK`, `sort`, `argsort`, `routerTopK`, `softmax`, `rmsNorm`,
 `rmsNormMul`, `rmsNormMulAdd`, `rmsNormMulRopeHalfPrepared`, `layerNorm`,
-`groupNorm`, `crossEntropy`, `crossEntropyExt`, `linearCrossEntropyExt`,
+`groupNorm`, `crossEntropy`, `crossEntropyExt`, `linearCrossEntropyExt`, `linearDistillExt`,
 `mseLoss`, `huberLoss`,
 `bceLoss`, `klDivLoss`, `nllLoss`, `l2Normalize`, `cosineSimilarity`,
 `rope`, `matmul`, `dot`, `einsum`, `dotTernarySte`, `dotPacked`,
@@ -3139,6 +3139,31 @@ is never materialized. Differentiable in **both** operands; same
 options/reduction contract as `crossEntropyExt` (`.none` returns per-row
 losses tagged by the row tag).
 
+**Fused linear + sparse-soft-target distillation** — cross-entropy of
+`self·weightᵀ` against per-entry `(row, class, prob)` soft targets as ONE
+differentiable op (a teacher's top-k in the distillation use, §13.10):
+
+```zig
+pub fn linearDistillExt(self, ctx, weight: anytype, rows: []const usize,
+                        classes: []const usize, probs: []const f32,
+                        options: exec.LinearDistillOptions) !Tensor(.{})
+```
+
+`loss = reduce_i probs[i]·(LSE(logits[rows[i]]) − logits[rows[i], classes[i]])`
+with the same operand contract as `linearCrossEntropyExt` (rank-2 f32,
+shared tag last, comptime-checked). Two structural properties on top of
+the fused CE: only the UNIQUE rows named by `rows` are ever projected
+(rows without entries produce no logits at all), and the backward consumes
+the saved selected-row logits in place, so neither the `[row, class]`
+block nor its gradient ever exists outside the record.
+`exec.LinearDistillOptions{ .reduction = .mean|.sum, .loss_scale }`
+reduces over ENTRIES (`.mean` divides by the entry count; probs are used
+as given — a truncated teacher tail is deliberately NOT renormalized) and
+`loss_scale` multiplies the scalar result (the gradient-accumulation
+knob). Differentiable in **both** operands; the record is single-use like
+`linearCrossEntropyExt` (a repeat backward errors with
+`LinearDistillBackwardConsumed`).
+
 **Elementwise losses** vs a same-tagged `target`, all differentiable in
 **both** operands, all sharing the reduction/result-type contract above
 (`.mean` divides by the **total** element count):
@@ -4331,7 +4356,7 @@ Every differentiable facade op attaches a concrete VJP record from
 | Reductions / statistics | `sum`, `sumMany`, `sumAll`, `mean`, `variance`, `prod`, `cumsum`, `cumprod`, `logsumexp`, `standardizeAxis`, `norm`, `normAll`, `max`, `min`, `topK` (values arm), `sort` (values arm) | `max`/`min` route gradient to the first extremum (strict tie-break); `topK`/`sort` values scatter back through the saved indices |
 | Structure / views | `withTags`, `permuteTo`, `transpose`, `alignTo`, `insertAxis`, `squeeze`, `split`, `merge`, `reshape`, `viewWithStrides`, `materialize`, `contiguous`, `broadcastTo`, `flatten`, `narrow`, `select`, `slice`, `sliceStep`, `pad`, `zeroPad2d`, `constantPad2d`, `concat`, `stack`, `unbindInto`, `repeatAxis`, `flip`, `roll`, `rollBy`, `shiftBy`, `diagonal`, `trace`, `diag`, `gather`, `indexSelect`, `takeAlongAxis`, `indexAdd`, `scatterAdd`, `scatter`, `maskedSelect`, `maskedScatter`, `setSlice`, `setRows`, `zeroSlice`, `zeroRows`, `relposShift`, `to` (f32/f16/bf16 targets, §3.8) | view VJPs scatter through the saved layout; `detach` deliberately cuts the graph |
 | Norms / softmax | `softmax` (all fused options; `.mask` must not require grad), `logSoftmax`, `rmsNorm`, `rmsNormMul`, `rmsNormMulAdd`, `rmsNormMulRopeHalfPrepared`, `layerNorm` (plain + affine), `groupNorm`, `l2Normalize`, `cosineSimilarity` | |
-| Losses | `crossEntropy`, `crossEntropyExt`, `linearCrossEntropyExt`, `mseLoss`, `huberLoss`, `bceLoss`, `klDivLoss`, `nllLoss` | `linearCrossEntropyExt` differentiates both the input and the classifier weight without materializing the logit gradient (§4.15) |
+| Losses | `crossEntropy`, `crossEntropyExt`, `linearCrossEntropyExt`, `linearDistillExt`, `mseLoss`, `huberLoss`, `bceLoss`, `klDivLoss`, `nllLoss` | `linearCrossEntropyExt` differentiates both the input and the classifier weight without materializing the logit gradient (§4.15) |
 | Contractions | `dot` (f32×f32: both operands; quantized RHS: lhs-only, the RHS is a frozen constant; f16/bf16 RHS: lhs always, plus an f32 dW when the RHS is a grad-requiring 16-bit variable), `einsum` (f32×f32: both operands; f16/bf16 RHS: same variable-RHS contract as dot; each gradient is itself an einsum — GEMM-lowered for every tag structure, broadcast over forward-summed axes; `DotBackward`/`ConstRhsDotBackward` delegate to the einsum records), `einsumMany` (composes binary einsum records), `matmul` (2-D GEMM `.plain`/`.trans_b`, batched bmm all kinds; rank-2 `.trans_a` is a compile error directing to `dot`), `dotTernarySte` (straight-through estimator: dx through the quantized weight, dW as-if-unquantized) | |
 | Convolutions / pooling | `conv1d`, `convTranspose1d`, `causalConv1d`, `groupedCausalConv1d`, `causalDepthwiseConv1d`, `conv2d`, `conv2dRelu`, `maxPool2d`, `avgPool2d`, `upsample2xNearest`, `channelAffine` | `conv2d` differentiates input, weight, and bias; `conv2dRelu` falls back to the composed differentiable path when any operand requires grad |
 | Position / attention | `rope` (table and on-the-fly sources, both modes), `groupedAttention` | attention grad matrix: f32 KV = full q/k/v; f16 or q8_0 KV = q-only (caches are constants); `.bias` or multi-stream KV = inference-only (`error.UnsupportedGradient`) |

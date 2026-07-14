@@ -124,6 +124,7 @@ const LayerNormAffineBackward = backward.LayerNormAffineBackward;
 const CrossEntropyBackward = backward.CrossEntropyBackward;
 const CrossEntropyExtBackward = backward.CrossEntropyExtBackward;
 const LinearCrossEntropyBackward = backward.LinearCrossEntropyBackward;
+const LinearDistillBackward = backward.LinearDistillBackward;
 const MseLossBackward = backward.MseLossBackward;
 const HuberLossBackward = backward.HuberLossBackward;
 const BceLossBackward = backward.BceLossBackward;
@@ -3023,6 +3024,77 @@ fn FloatTensor(comptime tags_spec: anytype) type {
                 wants_grad,
                 LinearCrossEntropyBackward(options),
                 .{ ctx.allocator, self.grad_state, weight_ptr.grad_state, self.asRawTensor(), weight_ptr.asRawTensor(), &logits, labels, row_stats orelse &[_]f32{} },
+            );
+        }
+
+        /// Fused linear + sparse-soft-target distillation loss:
+        /// cross-entropy of `self·weightᵀ` against per-entry
+        /// (row, class, prob) soft targets, as ONE differentiable op —
+        /// `loss = reduce_i probs[i]·(LSE(logits[rows[i]]) −
+        /// logits[rows[i], classes[i]])`. Only the UNIQUE rows named by
+        /// `rows` are projected (rows without entries never produce
+        /// logits), the selected-row logits live solely on the backward
+        /// record with the forward's per-row softmax statistics, and the
+        /// VJP consumes them in place — the full [row, class] block never
+        /// enters the graph and its gradient never costs a second buffer.
+        /// `self` is [row, shared] and `weight` [class, shared] (both
+        /// rank-2, shared tag last, f32). `probs[i]` weights entry i (a
+        /// teacher probability in the distillation use; truncated tail
+        /// mass deliberately NOT renormalized). `options.reduction`
+        /// reduces over ENTRIES and `options.loss_scale` multiplies the
+        /// scalar result (the gradient-accumulation knob). Differentiable
+        /// in BOTH operands; the record is single-use like
+        /// `linearCrossEntropyExt`.
+        pub fn linearDistillExt(
+            self: *const Self,
+            ctx: *ExecContext,
+            weight: anytype,
+            rows: []const usize,
+            classes: []const usize,
+            probs: []const f32,
+            options: exec_mod.LinearDistillOptions,
+        ) !Tensor(.{}) {
+            const Other = TensorObject(@TypeOf(weight));
+            comptime {
+                if (tag_rank != 2 or Other.axis_tags.len != 2) @compileError("linearDistill requires rank-2 [row, shared] x and [class, shared] weight");
+                if (Other.dtype != .f32) @compileError("linearDistill requires an f32 weight (quantized/f16 arms are not routed)");
+                if (tags[1] != Other.axis_tags[1]) @compileError("linearDistill requires the shared tag LAST on both operands");
+                if (Other.axis_tags[0] == tags[0] or Other.axis_tags[0] == tags[1]) @compileError("linearDistill weight class tag must not appear on x");
+            }
+            const weight_ptr = tensorObjectPtrFrom(@TypeOf(weight), &weight);
+            const wants_grad = self.requiresGrad() or weight_ptr.requiresGrad();
+            var fwd = try ctx.linearDistillLossStats(self.asRawTensor(), weight_ptr.asRawTensor(), rows, classes, probs, options);
+            // finishOp takes ownership of the scalar; everything else is
+            // cloned/duped onto the record and released here.
+            defer {
+                fwd.logits.deinit();
+                fwd.x_sel.deinit();
+                ctx.allocator.free(fwd.sel_rows);
+                ctx.allocator.free(fwd.local_rows);
+                ctx.allocator.free(fwd.row_stats);
+            }
+            errdefer fwd.value.deinit();
+            return finishOp(
+                .{},
+                ctx,
+                fwd.value,
+                wants_grad,
+                LinearDistillBackward,
+                .{
+                    ctx.allocator,
+                    self.grad_state,
+                    weight_ptr.grad_state,
+                    &fwd.x_sel,
+                    weight_ptr.asRawTensor(),
+                    &fwd.logits,
+                    fwd.sel_rows,
+                    fwd.local_rows,
+                    classes,
+                    probs,
+                    fwd.row_stats,
+                    self.asRawTensor().shape.at(0),
+                    options,
+                },
             );
         }
 

@@ -196,6 +196,29 @@ const RopeKey = struct {
 /// Differentiable frozen linear: route through the plain `.value` tensor of
 /// every `LinearWeight` variant (the packed fast paths are inference-only —
 /// they reject gradients), tagged [out, in] as the frozen-RHS `dot` expects.
+/// Fused-distill route gate: FUCINA_NO_FUSED_DISTILL=1 forces the composed
+/// logits + `cartridge.distillLoss` tail (the A/B and emergency-revert
+/// switch — the fused route matches it to f32 roundoff, not bitwise).
+/// Read once, cached; `setFusedDistill` is the test hook.
+var fused_distill_state = std.atomic.Value(u8).init(0); // 0 unread, 1 on, 2 off
+
+pub fn setFusedDistill(on: ?bool) void {
+    fused_distill_state.store(if (on) |o| (if (o) @as(u8, 1) else 2) else 0, .release);
+}
+
+fn fusedDistillEnabled() bool {
+    var state = fused_distill_state.load(.acquire);
+    if (state == 0) {
+        state = 1;
+        if (std.c.getenv("FUCINA_NO_FUSED_DISTILL")) |v_ptr| {
+            const v = std.mem.span(v_ptr);
+            if (v.len > 0 and v[0] != '0') state = 2;
+        }
+        fused_distill_state.store(state, .release);
+    }
+    return state == 1;
+}
+
 fn dotLinear(
     weight: *const LinearWeight,
     ctx: *ExecContext,
@@ -372,6 +395,14 @@ pub fn Trainer(comptime targets: Targets) type {
         transient_tables: std.ArrayListUnmanaged(*fucina.RopeTable) = .empty,
         /// Advances once per `loss` call; selects the dropout seed stream.
         step_counter: u64 = 0,
+        /// Lazily built f32 view/copy of the frozen output projection for
+        /// the fused distillation loss ([vocab, embed]): f32 heads retag a
+        /// borrowed view, f16/bf16 heads widen ONCE (the copy is shared by
+        /// every subsequent step); heads with no f32 route (quantized /
+        /// ptqtp) stay unavailable and `distillLoss` serves the composed
+        /// path. Constants — safe to build under an exec scope.
+        fused_head: ?fucina.Tensor(.{ .vocab, .embed }) = null,
+        fused_head_state: enum { unknown, ready, unavailable } = .unknown,
         /// Recompute-in-backward per layer (one checkpoint block per layer).
         checkpoint_layers: bool = false,
 
@@ -516,6 +547,7 @@ pub fn Trainer(comptime targets: Targets) type {
         }
 
         pub fn deinit(self: *Self) void {
+            if (self.fused_head) |*head| head.deinit();
             self.freeTransientRope();
             self.transient_tables.deinit(self.allocator);
             var tables = self.rope_tables.valueIterator();
@@ -806,9 +838,88 @@ pub fn Trainer(comptime targets: Targets) type {
             self.step_counter += 1;
             var hidden = try self.forwardHiddenImpl(ctx, tokens, step, .{ .cartridge = cart, .packed_segments = packed_segments });
             defer hidden.deinit();
+            if (fusedDistillEnabled()) {
+                if (self.fusedDistillHead(ctx)) |head| {
+                    return self.distillLossFusedTail(ctx, &hidden, head, distill_targets, options);
+                }
+            }
             var logits = try self.logitsTail(ctx, &hidden);
             defer logits.deinit();
             return cartridge_mod.distillLoss(ctx, &logits, distill_targets, options);
+        }
+
+        /// The fused tail of `distillLoss`: final norm, then
+        /// `linearDistillExt` — the output projection and the sparse
+        /// teacher targets as ONE op, so the [seq, vocab] logits (and
+        /// their log-softmax) never enter the graph and only the
+        /// supervised rows are ever projected. Same objective as the
+        /// composed tail (`cartridge.distillLoss` documents it); the two
+        /// routes agree to f32 roundoff, pinned by a trainer test.
+        fn distillLossFusedTail(
+            self: *Self,
+            ctx: *ExecContext,
+            hidden: *const Hidden,
+            head: *const fucina.Tensor(.{ .vocab, .embed }),
+            distill_targets: cartridge_mod.DistillTargets,
+            options: cartridge_mod.DistillOptions,
+        ) !fucina.Tensor(.{}) {
+            const model = self.model;
+            var normed = try hidden.rmsNormMul(ctx, .embed, &model.output_norm, model.config.rms_norm_eps);
+            defer normed.deinit();
+            const n = distill_targets.positions.len;
+            if (n == 0 or distill_targets.tokens.len != n or distill_targets.logprobs.len != n) return cartridge_mod.Error.InvalidTargets;
+            const seq = normed.dim(.seq);
+            const rows = try ctx.allocator.alloc(usize, n);
+            defer ctx.allocator.free(rows);
+            const probs = try ctx.allocator.alloc(f32, n);
+            defer ctx.allocator.free(probs);
+            for (rows, probs, distill_targets.positions, distill_targets.tokens, distill_targets.logprobs) |*row, *prob, pos, token, logprob| {
+                if (pos == 0 or pos > seq) return cartridge_mod.Error.InvalidTargets;
+                if (token >= model.config.vocab_size) return cartridge_mod.Error.InvalidTargets;
+                row.* = pos - 1;
+                prob.* = @exp(logprob);
+            }
+            return normed.linearDistillExt(ctx, head, rows, distill_targets.tokens, probs, .{
+                .reduction = switch (options.reduction) {
+                    .mean => .mean,
+                    .sum => .sum,
+                },
+                .loss_scale = options.loss_scale,
+            });
+        }
+
+        /// Get-or-build the f32 head for the fused distillation tail (see
+        /// the `fused_head` field). Null = no f32 route for this head
+        /// format; the caller falls back to the composed tail. Built with a
+        /// deep copy OUT of any active exec scope (the evalLastLogitsExt
+        /// pattern) — the head must outlive the step's scope.
+        fn fusedDistillHead(self: *Self, ctx: *ExecContext) ?*const fucina.Tensor(.{ .vocab, .embed }) {
+            if (self.fused_head_state == .unknown) {
+                self.fused_head_state = .unavailable;
+                switch (self.model.output) {
+                    .f32 => |*w| self.adoptFusedHead(ctx, &w.value),
+                    .f16 => |*w| self.widenFusedHead(ctx, w),
+                    .bf16 => |*w| self.widenFusedHead(ctx, w),
+                    else => {},
+                }
+            }
+            return if (self.fused_head_state == .ready) &self.fused_head.? else null;
+        }
+
+        fn widenFusedHead(self: *Self, ctx: *ExecContext, w: anytype) void {
+            var wide = w.to(ctx, .f32) catch return;
+            defer wide.deinit();
+            self.adoptFusedHead(ctx, &wide.value);
+        }
+
+        fn adoptFusedHead(self: *Self, ctx: *ExecContext, raw: anytype) void {
+            var value = raw.clone(ctx.allocator) catch return;
+            if (fucina.Tensor(.{ .vocab, .embed }).fromTensor(ctx, value)) |head| {
+                self.fused_head = head;
+                self.fused_head_state = .ready;
+            } else |_| {
+                value.deinit();
+            }
         }
 
         /// `evalLastLogits` with `ForwardOptions` (injection / layer range) —

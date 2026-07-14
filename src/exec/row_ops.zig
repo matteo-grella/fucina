@@ -476,6 +476,98 @@ pub const CrossEntropyBackwardRowsTask = struct {
     row_end: usize,
 };
 
+pub const DistillStatsRowsTask = struct {
+    input: []const f32,
+    // Per-row softmax statistics {max, sum_exp} interleaved (the
+    // CrossEntropyLossRowsTask layout) — disjoint writes across tasks, so
+    // the result is bitwise identical for any thread count.
+    row_stats: []f32,
+    class_count: usize,
+    row_start: usize,
+    row_end: usize,
+};
+
+pub fn runDistillStatsRowsTask(task: *const DistillStatsRowsTask) void {
+    distillStatsRows(task.*);
+}
+
+/// Per-row {max, sum_exp} over the class axis — the softmax statistics the
+/// sparse-soft-target losses need (no labels: every row in range counts).
+/// Same vector kernels (and therefore the same f32 values) as
+/// `crossEntropyLossRows`.
+pub fn distillStatsRows(task: DistillStatsRowsTask) void {
+    const Vec = @Vector(8, f32);
+    const vector_width = 8;
+    for (task.row_start..task.row_end) |row_i| {
+        const row_in = task.input[row_i * task.class_count ..][0..task.class_count];
+
+        var class_i: usize = 0;
+        var max_vec: Vec = @splat(-std.math.inf(f32));
+        while (class_i + vector_width <= task.class_count) : (class_i += vector_width) {
+            max_vec = @max(max_vec, @as(Vec, row_in[class_i..][0..vector_width].*));
+        }
+        var max_value = @reduce(.Max, max_vec);
+        while (class_i < task.class_count) : (class_i += 1) {
+            max_value = @max(max_value, row_in[class_i]);
+        }
+
+        const max_splat: Vec = @splat(max_value);
+        var sum_vec: Vec = @splat(0);
+        class_i = 0;
+        while (class_i + vector_width <= task.class_count) : (class_i += vector_width) {
+            sum_vec += vexpf(vector_width, @as(Vec, row_in[class_i..][0..vector_width].*) - max_splat);
+        }
+        var sum_exp = @reduce(.Add, sum_vec);
+        while (class_i < task.class_count) : (class_i += 1) {
+            sum_exp += vexpf(1, @splat(row_in[class_i] - max_value))[0];
+        }
+        task.row_stats[2 * row_i] = max_value;
+        task.row_stats[2 * row_i + 1] = sum_exp;
+    }
+}
+
+pub const DistillBackwardRowsTask = struct {
+    // May alias `output` (the destructive in-place arm over saved logits).
+    input: []const f32,
+    output: []f32,
+    // Forward-saved per-row {max, sum_exp} (DistillStatsRowsTask layout).
+    row_stats: []const f32,
+    // Per-row total teacher mass, pre-multiplied by the common gradient
+    // scale: output[r, v] = row_mass[r] * softmax(input[r])[v]. The sparse
+    // per-entry subtractions are applied by the caller afterwards (entry
+    // lists are tiny next to rows x classes).
+    row_mass: []const f32,
+    class_count: usize,
+    row_start: usize,
+    row_end: usize,
+};
+
+pub fn runDistillBackwardRowsTask(task: *const DistillBackwardRowsTask) void {
+    distillBackwardRows(task.*);
+}
+
+pub fn distillBackwardRows(task: DistillBackwardRowsTask) void {
+    const Vec = @Vector(8, f32);
+    const vector_width = 8;
+    for (task.row_start..task.row_end) |row_i| {
+        const row_in = task.input[row_i * task.class_count ..][0..task.class_count];
+        const row_out = task.output[row_i * task.class_count ..][0..task.class_count];
+        const max_value = task.row_stats[2 * row_i];
+        const inv_sum = 1 / task.row_stats[2 * row_i + 1];
+        const scale = task.row_mass[row_i];
+        const max_splat: Vec = @splat(max_value);
+        const factor: Vec = @splat(scale * inv_sum);
+        var class_i: usize = 0;
+        while (class_i + vector_width <= task.class_count) : (class_i += vector_width) {
+            const p = vexpf(vector_width, @as(Vec, row_in[class_i..][0..vector_width].*) - max_splat);
+            row_out[class_i..][0..vector_width].* = p * factor;
+        }
+        while (class_i < task.class_count) : (class_i += 1) {
+            row_out[class_i] = vexpf(1, @splat(row_in[class_i] - max_value))[0] * scale * inv_sum;
+        }
+    }
+}
+
 pub const DropoutRangeTask = struct {
     input: []const f32,
     output: []f32,

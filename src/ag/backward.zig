@@ -3417,6 +3417,144 @@ pub fn LinearCrossEntropyBackward(comptime options: exec_mod.CrossEntropyOptions
     };
 }
 
+/// VJP record of the fused `linearDistillExt` (sparse-soft-target CE over
+/// x·Wᵀ, entries only on the unique supervised rows). Saves the gathered
+/// x rows, W, the selected-row logits, and the per-row {max, sum_exp}
+/// stats. SINGLE-USE like `LinearCrossEntropyBackward`: the backward
+/// consumes the saved logits in place and a repeat walk errors loudly.
+/// Differentiable in BOTH operands.
+pub const LinearDistillBackward = struct {
+    parents: [2]?*GradState,
+    x_sel: RawTensor,
+    weight: RawTensor,
+    logits: RawTensor,
+    sel_rows: []usize,
+    local_rows: []usize,
+    classes: []usize,
+    probs: []f32,
+    row_stats: []f32,
+    row_count: usize,
+    options: exec_mod.LinearDistillOptions,
+    estimated_work: usize,
+    consumed: bool = false,
+
+    const Self = @This();
+
+    pub fn init(
+        self: *Self,
+        allocator: std.mem.Allocator,
+        x_parent: ?*GradState,
+        weight_parent: ?*GradState,
+        x_sel: *const RawTensor,
+        weight: *const RawTensor,
+        logits: *const RawTensor,
+        sel_rows: []const usize,
+        local_rows: []const usize,
+        classes: []const usize,
+        probs: []const f32,
+        row_stats: []const f32,
+        row_count: usize,
+        options: exec_mod.LinearDistillOptions,
+    ) !void {
+        var branches: usize = 0;
+        if (x_parent != null) branches += 1;
+        if (weight_parent != null) branches += 1;
+        self.* = .{
+            .parents = .{ x_parent, weight_parent },
+            .x_sel = try x_sel.cloneView(),
+            .weight = undefined,
+            .logits = undefined,
+            .sel_rows = undefined,
+            .local_rows = undefined,
+            .classes = undefined,
+            .probs = undefined,
+            .row_stats = undefined,
+            .row_count = row_count,
+            .options = options,
+            .estimated_work = std.math.mul(usize, x_sel.len(), weight.shape.at(0) * @max(branches, 1)) catch std.math.maxInt(usize),
+        };
+        errdefer self.x_sel.deinit();
+        self.weight = try weight.cloneView();
+        errdefer self.weight.deinit();
+        self.logits = try logits.cloneView();
+        errdefer self.logits.deinit();
+        self.sel_rows = try allocator.dupe(usize, sel_rows);
+        errdefer allocator.free(self.sel_rows);
+        self.local_rows = try allocator.dupe(usize, local_rows);
+        errdefer allocator.free(self.local_rows);
+        self.classes = try allocator.dupe(usize, classes);
+        errdefer allocator.free(self.classes);
+        self.probs = try allocator.dupe(f32, probs);
+        errdefer allocator.free(self.probs);
+        self.row_stats = try allocator.dupe(f32, row_stats);
+    }
+
+    fn operands(ptr: *const anyopaque) []const ?*GradState {
+        const self: *const Self = @ptrCast(@alignCast(ptr));
+        return self.parents[0..];
+    }
+
+    fn estimatedWork(ptr: *const anyopaque) usize {
+        const self: *const Self = @ptrCast(@alignCast(ptr));
+        return self.estimated_work;
+    }
+
+    fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
+        const self: *const Self = @ptrCast(@alignCast(ptr));
+        const need_x = needs_grad.len > 0 and needs_grad[0];
+        const need_weight = needs_grad.len > 1 and needs_grad[1];
+        // Single-writer in-place consumption of the saved logits, as
+        // LinearCrossEntropyBackward.
+        const mut_self: *Self = @constCast(self);
+        if (self.consumed) return error.LinearDistillBackwardConsumed;
+        mut_self.consumed = true;
+        var grads = try ctx.linearDistillBackwardUpstream(
+            &mut_self.x_sel,
+            &mut_self.weight,
+            &mut_self.logits,
+            self.sel_rows,
+            self.row_count,
+            self.local_rows,
+            self.classes,
+            self.probs,
+            self.options,
+            gy,
+            self.row_stats,
+            need_x,
+            need_weight,
+        );
+        defer grads.deinit();
+        if (need_x) {
+            out[0] = grads.dx.?;
+            grads.dx = null;
+        }
+        if (need_weight) {
+            out[1] = grads.dweight.?;
+            grads.dweight = null;
+        }
+    }
+
+    fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.x_sel.deinit();
+        self.weight.deinit();
+        self.logits.deinit();
+        allocator.free(self.sel_rows);
+        allocator.free(self.local_rows);
+        allocator.free(self.classes);
+        allocator.free(self.probs);
+        allocator.free(self.row_stats);
+        core.destroyNode(Self, allocator, self);
+    }
+
+    pub const vtable = BackwardFunction.VTable{
+        .operands = operands,
+        .backward = backward,
+        .deinit = deinit,
+        .estimated_work = estimatedWork,
+    };
+};
+
 pub fn CrossEntropyBackward(comptime tags: anytype, comptime axis: usize) type {
     return CrossEntropyExtBackward(tags, axis, .{});
 }

@@ -27,6 +27,12 @@ const runCrossEntropyLossRowsTask = exec_row_ops.runCrossEntropyLossRowsTask;
 const runCrossEntropyBackwardRowsTask = exec_row_ops.runCrossEntropyBackwardRowsTask;
 const crossEntropyLossRows = exec_row_ops.crossEntropyLossRows;
 const crossEntropyBackwardRows = exec_row_ops.crossEntropyBackwardRows;
+const DistillStatsRowsTask = exec_row_ops.DistillStatsRowsTask;
+const DistillBackwardRowsTask = exec_row_ops.DistillBackwardRowsTask;
+const runDistillStatsRowsTask = exec_row_ops.runDistillStatsRowsTask;
+const runDistillBackwardRowsTask = exec_row_ops.runDistillBackwardRowsTask;
+const distillStatsRows = exec_row_ops.distillStatsRows;
+const distillBackwardRows = exec_row_ops.distillBackwardRows;
 
 pub const Reduction = enum { mean, sum, none };
 
@@ -586,6 +592,271 @@ pub fn linearCrossEntropyBackwardUpstream(
     if (need_x) dx = try exec_matmul.matmul2DDispatch(rt, .plain, dl, weight);
     var dweight: ?Tensor = null;
     if (need_weight) dweight = try exec_matmul.matmul2DDispatch(rt, .trans_a, dl, x);
+    return .{ .dx = dx, .dweight = dweight };
+}
+
+// --- Fused linear + sparse-soft-target distillation loss --------------------
+//
+// loss = reduce_i  probs[i] * (LSE(logits[rows[i]]) - logits[rows[i], classes[i]])
+// with logits = x·Wᵀ — cross-entropy against a SPARSE soft target
+// distribution (e.g. a teacher's top-k), fused with the output projection so
+// the [rows, classes] logits never enter the autograd graph. Two structural
+// wins over the composed route: only the UNIQUE SUPERVISED rows are
+// projected (rows without entries contribute nothing — their logits are
+// never computed), and like the fused CE the backward consumes the saved
+// [sel_rows, classes] logits in place, so the logit gradient never costs a
+// second buffer.
+
+/// Options for `linearDistillLossStats`. `reduction` is over ENTRIES
+/// (`.mean` divides by the entry count); `loss_scale` multiplies the loss
+/// and therefore every gradient (the gradient-accumulation knob).
+pub const LinearDistillOptions = struct {
+    reduction: enum { mean, sum } = .mean,
+    loss_scale: f32 = 1,
+};
+
+/// Everything the fused forward hands the autograd record. All fields are
+/// caller-owned (`deinit` releases them); `logits` and `x_sel` cover ONLY
+/// the unique supervised rows, in `sel_rows` order.
+pub const LinearDistillForward = struct {
+    /// Scalar loss.
+    value: Tensor,
+    /// [sel_rows.len, classes] logits of the supervised rows — saved for
+    /// the destructive backward.
+    logits: Tensor,
+    /// [sel_rows.len, in_dim] gathered x rows — saved for dweight.
+    x_sel: Tensor,
+    /// Unique supervised row indices, ascending.
+    sel_rows: []usize,
+    /// Per-entry index into `sel_rows` (rows[i] == sel_rows[local_rows[i]]).
+    local_rows: []usize,
+    /// Per-selected-row {max, sum_exp} softmax statistics.
+    row_stats: []f32,
+
+    pub fn deinit(self: *LinearDistillForward, allocator: std.mem.Allocator) void {
+        self.value.deinit();
+        self.logits.deinit();
+        self.x_sel.deinit();
+        allocator.free(self.sel_rows);
+        allocator.free(self.local_rows);
+        allocator.free(self.row_stats);
+        self.* = undefined;
+    }
+};
+
+fn dispatchDistillStatsRows(rt: *Runtime, base_task: DistillStatsRowsTask) void {
+    const outer = base_task.row_end;
+    if (outer > 1 and outer * base_task.class_count >= parallel.vector_elementwise_len_threshold / 2) {
+        if (rt.workPool()) |pool| {
+            const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), outer);
+            var tasks: [parallel.vector_max_threads]DistillStatsRowsTask = undefined;
+            for (0..task_count) |task_i| {
+                tasks[task_i] = base_task;
+                tasks[task_i].row_start = task_i * outer / task_count;
+                tasks[task_i].row_end = (task_i + 1) * outer / task_count;
+            }
+            pool.parallelChunks(DistillStatsRowsTask, tasks[0..task_count], runDistillStatsRowsTask);
+            return;
+        }
+    }
+    distillStatsRows(base_task);
+}
+
+/// Fused forward. `rows[i]` is the x row whose distribution entry `i`
+/// supervises, `classes[i]` the class index, `probs[i]` the target mass
+/// (any non-negative weight; a teacher's top-k probabilities in the distill
+/// use). Shapes: x [row_count, in], weight [classes, in].
+pub fn linearDistillLossStats(
+    rt: *Runtime,
+    x: *const Tensor,
+    weight: *const Tensor,
+    rows: []const usize,
+    classes: []const usize,
+    probs: []const f32,
+    options: LinearDistillOptions,
+) !LinearDistillForward {
+    const xv = try x.rankView(2);
+    const wv = try weight.rankView(2);
+    const row_count = xv.shape[0];
+    const in_dim = xv.shape[1];
+    const class_count = wv.shape[0];
+    if (wv.shape[1] != in_dim) return tensor.TensorError.ShapeMismatch;
+    const n = rows.len;
+    if (n == 0 or classes.len != n or probs.len != n) return tensor.TensorError.InvalidDataLength;
+    for (rows, classes) |row, class| {
+        if (row >= row_count or class >= class_count) return tensor.TensorError.IndexOutOfBounds;
+    }
+
+    // Unique supervised rows (ascending) + the per-entry local remap.
+    const sel_rows = blk: {
+        const sorted = try rt.allocator.dupe(usize, rows);
+        defer rt.allocator.free(sorted);
+        std.mem.sort(usize, sorted, {}, std.sort.asc(usize));
+        var unique: usize = 0;
+        for (sorted, 0..) |row, i| {
+            if (i == 0 or row != sorted[i - 1]) {
+                sorted[unique] = row;
+                unique += 1;
+            }
+        }
+        break :blk try rt.allocator.dupe(usize, sorted[0..unique]);
+    };
+    errdefer rt.allocator.free(sel_rows);
+    const local_rows = try rt.allocator.alloc(usize, n);
+    errdefer rt.allocator.free(local_rows);
+    for (local_rows, rows) |*local, row| {
+        local.* = std.sort.binarySearch(usize, sel_rows, row, orderUsize).?;
+    }
+
+    // Gather the supervised rows and project only them.
+    var xx = try rt.prepareContiguous(x);
+    defer xx.deinit();
+    const x_data = xx.tensor().dataConst();
+    var x_sel = try rt.emptyRank(2, .{ sel_rows.len, in_dim });
+    errdefer x_sel.deinit();
+    const x_sel_data = x_sel.data();
+    for (sel_rows, 0..) |row, j| {
+        @memcpy(x_sel_data[j * in_dim ..][0..in_dim], x_data[row * in_dim ..][0..in_dim]);
+    }
+    var logits = try exec_matmul.matmul2DDispatch(rt, .trans_b, &x_sel, weight);
+    errdefer logits.deinit();
+
+    const row_stats = try rt.allocator.alloc(f32, 2 * sel_rows.len);
+    errdefer rt.allocator.free(row_stats);
+    dispatchDistillStatsRows(rt, .{
+        .input = logits.dataConst(),
+        .row_stats = row_stats,
+        .class_count = class_count,
+        .row_start = 0,
+        .row_end = sel_rows.len,
+    });
+
+    // One serial sum in entry order — bitwise identical for any thread count.
+    const logit_data = logits.dataConst();
+    var total: f32 = 0;
+    for (local_rows, classes, probs) |local, class, prob| {
+        const lse = @log(row_stats[2 * local + 1]) + row_stats[2 * local];
+        total += prob * (lse - logit_data[local * class_count + class]);
+    }
+    if (options.reduction == .mean) total /= @as(f32, @floatFromInt(n));
+    total *= options.loss_scale;
+
+    var value = try rt.scalar(total);
+    errdefer value.deinit();
+    return .{
+        .value = value,
+        .logits = logits,
+        .x_sel = x_sel,
+        .sel_rows = sel_rows,
+        .local_rows = local_rows,
+        .row_stats = row_stats,
+    };
+}
+
+fn orderUsize(context: usize, item: usize) std.math.Order {
+    return std.math.order(context, item);
+}
+
+fn dispatchDistillBackwardRows(rt: *Runtime, base_task: DistillBackwardRowsTask) void {
+    const outer = base_task.row_end;
+    if (outer > 1 and outer * base_task.class_count >= parallel.vector_elementwise_len_threshold / 2) {
+        if (rt.workPool()) |pool| {
+            const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), outer);
+            var tasks: [parallel.vector_max_threads]DistillBackwardRowsTask = undefined;
+            for (0..task_count) |task_i| {
+                tasks[task_i] = base_task;
+                tasks[task_i].row_start = task_i * outer / task_count;
+                tasks[task_i].row_end = (task_i + 1) * outer / task_count;
+            }
+            pool.parallelChunks(DistillBackwardRowsTask, tasks[0..task_count], runDistillBackwardRowsTask);
+            return;
+        }
+    }
+    distillBackwardRows(base_task);
+}
+
+/// Fused VJP over the forward's saved selected-row logits and statistics.
+/// DESTRUCTIVE in `logits` exactly like `linearCrossEntropyBackwardUpstream`
+/// (in-place when exclusively owned; the record enforces single use):
+/// dlogits[r, v] = s·(mass_r · softmax_r[v]) − s·Σ_{i at (r,v)} probs[i]
+/// with s = loss_scale · gy (/ n for `.mean`), then dx scatters
+/// dlogits·W into the supervised rows of a zero [row_count, in] tensor and
+/// dweight = dlogitsᵀ·x_sel.
+pub fn linearDistillBackwardUpstream(
+    rt: *Runtime,
+    x_sel: *const Tensor,
+    weight: *const Tensor,
+    logits: *Tensor,
+    sel_rows: []const usize,
+    row_count: usize,
+    local_rows: []const usize,
+    classes: []const usize,
+    probs: []const f32,
+    options: LinearDistillOptions,
+    gy: *const Tensor,
+    row_stats: []const f32,
+    need_x: bool,
+    need_weight: bool,
+) !LinearCrossEntropyGrads {
+    const xv = try x_sel.rankView(2);
+    const wv = try weight.rankView(2);
+    const lv = try logits.rankView(2);
+    const sel_count = xv.shape[0];
+    const in_dim = xv.shape[1];
+    const class_count = wv.shape[0];
+    if (wv.shape[1] != in_dim or lv.shape[0] != sel_count or lv.shape[1] != class_count) return tensor.TensorError.ShapeMismatch;
+    if (sel_rows.len != sel_count or row_stats.len != 2 * sel_count) return tensor.TensorError.InvalidDataLength;
+    const n = local_rows.len;
+    if (n == 0 or classes.len != n or probs.len != n) return tensor.TensorError.InvalidDataLength;
+    if (!need_x and !need_weight) return .{ .dx = null, .dweight = null };
+    if (!gy.isScalar()) return tensor.TensorError.ShapeMismatch;
+
+    var grad_common: f32 = gy.item() * options.loss_scale;
+    if (options.reduction == .mean) grad_common /= @as(f32, @floatFromInt(n));
+
+    const row_mass = try rt.allocator.alloc(f32, sel_count);
+    defer rt.allocator.free(row_mass);
+    @memset(row_mass, 0);
+    for (local_rows, probs) |local, prob| row_mass[local] += grad_common * prob;
+
+    // dL destination: the logits buffer itself when exclusively owned.
+    var dl_owned: ?Tensor = if (logits.canTakeInPlace()) null else try rt.emptyRank(2, .{ sel_count, class_count });
+    defer if (dl_owned) |*value| value.deinit();
+    const dl: *Tensor = if (dl_owned) |*value| value else logits;
+
+    dispatchDistillBackwardRows(rt, .{
+        .input = logits.dataConst(),
+        .output = dl.data(),
+        .row_stats = row_stats,
+        .row_mass = row_mass,
+        .class_count = class_count,
+        .row_start = 0,
+        .row_end = sel_count,
+    });
+
+    // Sparse target subtraction: entry lists are tiny next to rows x classes.
+    const dl_data = dl.data();
+    for (local_rows, classes, probs) |local, class, prob| {
+        dl_data[local * class_count + class] -= grad_common * prob;
+    }
+
+    var dx: ?Tensor = null;
+    errdefer if (dx) |*value| value.deinit();
+    if (need_x) {
+        var dx_sel = try exec_matmul.matmul2DDispatch(rt, .plain, dl, weight);
+        defer dx_sel.deinit();
+        var full = try rt.emptyRank(2, .{ row_count, in_dim });
+        errdefer full.deinit();
+        const full_data = full.data();
+        @memset(full_data, 0);
+        const dx_sel_data = dx_sel.dataConst();
+        for (sel_rows, 0..) |row, j| {
+            @memcpy(full_data[row * in_dim ..][0..in_dim], dx_sel_data[j * in_dim ..][0..in_dim]);
+        }
+        dx = full;
+    }
+    var dweight: ?Tensor = null;
+    if (need_weight) dweight = try exec_matmul.matmul2DDispatch(rt, .trans_a, dl, x_sel);
     return .{ .dx = dx, .dweight = dweight };
 }
 
