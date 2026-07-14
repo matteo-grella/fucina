@@ -41,6 +41,45 @@ const Trainer = llm.qwen3.train.Trainer(.{ .q = false, .v = false });
 
 // ChatML blocks (Qwen3). The assistant opener carries the empty think block
 // the non-thinking chat template emits, so generations answer directly.
+/// Chat-template strings the serving/self-study prompt builders splice
+/// (runtime values so one engine serves several architectures).
+const Tpl = struct {
+    sys_open: []const u8,
+    user_open: []const u8,
+    asst_open: []const u8,
+    block_close: []const u8,
+    stop_marker: []const u8,
+};
+
+const qwen3_tpl = Tpl{
+    .sys_open = "<|im_start|>system\n",
+    .user_open = "<|im_start|>user\n",
+    .asst_open = "<|im_start|>assistant\n<think>\n\n</think>\n\n",
+    .block_close = "<|im_end|>\n",
+    .stop_marker = "<|im_end|>",
+};
+
+// Gemma 4's `<|turn>` format (src/llm/chat.zig Template.gemma4, thinking
+// primed off).
+const gemma4_tpl = Tpl{
+    .sys_open = "<bos><|turn>system\n",
+    .user_open = "<|turn>user\n",
+    .asst_open = "<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+    .block_close = "<turn|>\n",
+    .stop_marker = "<turn|>",
+};
+
+/// Duck-typed per-model KV-cache construction: uniform-geometry models
+/// (qwen3) size from config, per-layer-geometry models (gemma4) from geom.
+fn makeCache(ctx: *fucina.ExecContext, model: anytype, capacity: usize) !llm.kv_cache.KvCache {
+    const M = @TypeOf(model.*);
+    if (comptime @hasField(M, "geom")) {
+        return llm.kv_cache.KvCache.initPerLayer(ctx, model.geom.kv_heads, model.geom.head_dim, capacity);
+    }
+    const cfg = model.config;
+    return llm.kv_cache.KvCache.init(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity);
+}
+
 const sys_open = "<|im_start|>system\n";
 const user_open = "<|im_start|>user\n";
 const asst_open = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
@@ -206,7 +245,7 @@ const Corpus = struct {
 fn buildCorpus(
     allocator: std.mem.Allocator,
     io: std.Io,
-    tokenizer: *const llm.tokenizer.Tokenizer,
+    tokenizer: anytype,
     paths: []const []const u8,
 ) !Corpus {
     var ids: std.ArrayList(usize) = .empty;
@@ -261,7 +300,7 @@ fn buildCorpus(
 fn appendCorpusFile(
     allocator: std.mem.Allocator,
     io: std.Io,
-    tokenizer: *const llm.tokenizer.Tokenizer,
+    tokenizer: anytype,
     ids: *std.ArrayList(usize),
     text: *std.ArrayList(u8),
     files: *std.ArrayList(Corpus.FileSpan),
@@ -384,7 +423,7 @@ pub fn main(init: std.process.Init) !void {
     var file = try fucina.gguf.File.loadMmap(allocator, io, opts.model_path);
     const arch = file.getString("general.architecture") orelse "";
     if (std.mem.startsWith(u8, arch, "gemma")) {
-        return runGemmaEquiv(&ctx, io, stdout, allocator, &file, corpus_paths.items, opts);
+        return runGemma(&ctx, io, stdout, allocator, &file, corpus_paths.items, opts);
     }
     var model = try llm.qwen3.model.Model.loadGgufFromFile(&ctx, &file, try llm.qwen3.model.Config.fromGguf(&file));
     defer model.deinit();
@@ -426,12 +465,12 @@ pub fn main(init: std.process.Init) !void {
         var cart = try cartridge.Cartridge.initFromStateDict(&ctx, allocator, bytes);
         defer cart.deinit();
         try stdout.print("cartridge loaded from {s}: p = {d} ({d} layers)\n", .{ path, cart.p, cart.layers.len });
-        return runServe(&ctx, io, stdout, allocator, &model, &tokenizer, &cart, ask, if (corpus) |*c| c else null, opts);
+        return runServe(&ctx, io, stdout, allocator, &model, &tokenizer, qwen3_tpl, &cart, ask, if (corpus) |*c| c else null, opts);
     }
 
     const c = if (corpus) |*c| c else return error.MissingCorpusPath;
     if (c.ids.len < opts.chunk_min + 2 or c.ids.len < opts.p + 2) return error.CorpusTooShort;
-    return runSelfStudy(&ctx, io, stdout, allocator, &model, &tokenizer, &trainer, c, opts);
+    return runSelfStudy(&ctx, io, stdout, allocator, &model, &tokenizer, &trainer, qwen3_tpl, true, c, opts);
 }
 
 /// Serve mode: greedy answers to `ask` behind the cartridge, bare, and (when
@@ -442,16 +481,17 @@ fn runServe(
     io: std.Io,
     stdout: anytype,
     allocator: std.mem.Allocator,
-    model: *const llm.qwen3.model.Model,
-    tokenizer: *const llm.tokenizer.Tokenizer,
+    model: anytype,
+    tokenizer: anytype,
+    tpl: Tpl,
     cart: *const cartridge.Cartridge,
     ask: []const u8,
     corpus: ?*const Corpus,
     opts: Options,
 ) !void {
     const cfg = model.config;
-    const stop_id: ?usize = if (tokenizer.tokenId("<|im_end|>")) |id| @as(usize, id) else null;
-    const prompt = try std.fmt.allocPrint(allocator, user_open ++ "{s}" ++ block_close ++ asst_open, .{ask});
+    const stop_id: ?usize = if (tokenizer.tokenId(tpl.stop_marker)) |id| @as(usize, id) else null;
+    const prompt = try std.fmt.allocPrint(allocator, "{s}{s}{s}{s}", .{ tpl.user_open, ask, tpl.block_close, tpl.asst_open });
     defer allocator.free(prompt);
     const prompt_len_guess = prompt.len / 2 + 32;
 
@@ -481,7 +521,7 @@ fn runServe(
     // exact layout the cartridge was trained at. With --spec-serve the
     // corpus drafts the answer (single stream: no batch to trade away).
     {
-        var cache = try llm.kv_cache.KvCache.init(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, cart.p + prompt_len_guess + opts.max_a + 16);
+        var cache = try makeCache(ctx, model, cart.p + prompt_len_guess + opts.max_a + 16);
         defer cache.deinit();
         try cart.writeToCache(ctx, &cache);
         const t0 = nowNs(io);
@@ -522,7 +562,7 @@ fn runServe(
 
     // Bare model: no context at all.
     {
-        var cache = try llm.kv_cache.KvCache.init(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, prompt_len_guess + opts.max_a);
+        var cache = try makeCache(ctx, model, prompt_len_guess + opts.max_a);
         defer cache.deinit();
         const answer = try generateText(ctx, allocator, model, tokenizer, &cache, prompt, opts.max_a, stop_id, .{});
         defer allocator.free(answer);
@@ -539,11 +579,11 @@ fn runServe(
         } else try allocator.dupe(u8, c.text);
         defer allocator.free(icl_text);
 
-        const icl_prompt = try std.fmt.allocPrint(allocator, sys_open ++ system_prompt_template ++ block_close ++ "{s}", .{ icl_text, prompt });
+        const icl_prompt = try std.fmt.allocPrint(allocator, "{s}" ++ system_prompt_template ++ "{s}{s}", .{ tpl.sys_open, icl_text, tpl.block_close, prompt });
         defer allocator.free(icl_prompt);
         const icl_ids = try encodeUsize(allocator, tokenizer, icl_prompt);
         defer allocator.free(icl_ids);
-        var cache = try llm.kv_cache.KvCache.init(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, icl_ids.len + opts.max_a + 16);
+        var cache = try makeCache(ctx, model, icl_ids.len + opts.max_a + 16);
         defer cache.deinit();
         const ids = try generateIds(ctx, allocator, model, &cache, icl_ids, opts.max_a, stop_id, .{});
         defer allocator.free(ids);
@@ -598,14 +638,22 @@ fn runSelfStudy(
     io: std.Io,
     stdout: anytype,
     allocator: std.mem.Allocator,
-    model: *const llm.qwen3.model.Model,
-    tokenizer: *const llm.tokenizer.Tokenizer,
-    trainer: *Trainer,
+    model: anytype,
+    tokenizer: anytype,
+    trainer: anytype,
+    tpl: Tpl,
+    comptime supports_packing: bool,
     corpus: *const Corpus,
-    opts: Options,
+    opts_in: Options,
 ) !void {
-    const cfg = model.config;
-    const stop_id: ?usize = if (tokenizer.tokenId("<|im_end|>")) |id| @as(usize, id) else null;
+    var opts = opts_in;
+    if (!supports_packing and opts.pack) {
+        // No packed forward on this trainer: the flat-memory
+        // per-conversation backward is the training arm (generation stays
+        // batched either way).
+        opts.pack = false;
+    }
+    const stop_id: ?usize = if (tokenizer.tokenId(tpl.stop_marker)) |id| @as(usize, id) else null;
 
     // One generation cache per generation stream (the group's conversations
     // decode as lockstep batched streams), each sized for system(chunk) +
@@ -618,7 +666,7 @@ fn runSelfStudy(
     var caches_inited: usize = 0;
     defer for (caches[0..caches_inited]) |*c| c.deinit();
     for (caches) |*c| {
-        c.* = try llm.kv_cache.KvCache.init(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity);
+        c.* = try makeCache(ctx, model, capacity);
         caches_inited += 1;
     }
 
@@ -634,7 +682,7 @@ fn runSelfStudy(
         defer allocator.free(bytes);
         break :blk try cartridge.Cartridge.initFromStateDict(ctx, allocator, bytes);
     } else blk: {
-        const init_tokens = try systemInitTokens(allocator, tokenizer, corpus.text, opts.p);
+        const init_tokens = try systemInitTokens(allocator, tokenizer, tpl, corpus.text, opts.p);
         defer allocator.free(init_tokens);
         break :blk try trainer.initCartridge(ctx, init_tokens, opts.frozen_prefix);
     };
@@ -668,7 +716,7 @@ fn runSelfStudy(
     // is the generalization signal (falling held loss = the cartridge is
     // learning the corpus, not one conversation).
     var held: [1]Convo = undefined;
-    try synthesizeGroup(ctx, allocator, model, tokenizer, trainer, caches[0..1], corpus, rand, opts, stop_id, &held);
+    try synthesizeGroup(ctx, allocator, model, tokenizer, trainer, tpl, supports_packing, caches[0..1], corpus, rand, opts, stop_id, &held);
     defer held[0].deinit(allocator);
     trainer.freeTransientRope();
     try stdout.print("held-out question: {s}\n", .{held[0].question});
@@ -692,7 +740,7 @@ fn runSelfStudy(
         if (pending_at == pending_n) {
             // Never synthesize more than the remaining steps will consume.
             const need = @min(gen_batch, (opts.steps - step_i) * opts.accum);
-            try synthesizeGroup(ctx, allocator, model, tokenizer, trainer, caches, corpus, rand, opts, stop_id, pending[0..need]);
+            try synthesizeGroup(ctx, allocator, model, tokenizer, trainer, tpl, supports_packing, caches, corpus, rand, opts, stop_id, pending[0..need]);
             pending_at = 0;
             pending_n = need;
         }
@@ -788,7 +836,7 @@ fn saveCartridge(cart: *cartridge.Cartridge, writer: *std.Io.Writer) anyerror!vo
 /// Held-out / reporting loss: same objective as the training step, no
 /// backward (the fresh scope discards the graph; the step-counter advance is
 /// harmless with dropout off).
-fn distillEval(ctx: *fucina.ExecContext, trainer: *Trainer, cart: *const cartridge.Cartridge, convo: *const Convo) !f32 {
+fn distillEval(ctx: *fucina.ExecContext, trainer: anytype, cart: *const cartridge.Cartridge, convo: *const Convo) !f32 {
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
     var loss = try trainer.distillLoss(ctx, convo.student_ids, cart, convo.builder.targets(), null, .{});
@@ -805,9 +853,11 @@ fn distillEval(ctx: *fucina.ExecContext, trainer: *Trainer, cart: *const cartrid
 fn synthesizeGroup(
     ctx: *fucina.ExecContext,
     allocator: std.mem.Allocator,
-    model: *const llm.qwen3.model.Model,
-    tokenizer: *const llm.tokenizer.Tokenizer,
-    trainer: *Trainer,
+    model: anytype,
+    tokenizer: anytype,
+    trainer: anytype,
+    tpl: Tpl,
+    comptime supports_packing: bool,
     caches: []llm.kv_cache.KvCache,
     corpus: *const Corpus,
     rand: std.Random,
@@ -841,7 +891,7 @@ fn synthesizeGroup(
         );
         sys_texts[i] = try std.fmt.allocPrint(arena, sys_open ++ system_prompt_template ++ block_close, .{chunk_text});
         const seed_prompt = seed_prompts[rand.intRangeLessThan(usize, 0, seed_prompts.len)];
-        const a_prompt = try std.fmt.allocPrint(arena, "{s}" ++ user_open ++ "{s}" ++ block_close ++ asst_open, .{ sys_texts[i], seed_prompt });
+        const a_prompt = try std.fmt.allocPrint(arena, "{s}{s}{s}{s}{s}", .{ sys_texts[i], tpl.user_open, seed_prompt, tpl.block_close, tpl.asst_open });
         a_prompts[i] = try encodeUsize(arena, tokenizer, a_prompt);
         a_cfgs[i] = .{ .temperature = 0.6, .seed = rand.int(u64) };
     }
@@ -856,7 +906,7 @@ fn synthesizeGroup(
     const questions = try arena.alloc([]const u8, n);
     for (0..n) |i| {
         questions[i] = try cleanGenerated(arena, tokenizer, a_outs[i]);
-        const convo_prefix = try std.fmt.allocPrint(arena, user_open ++ "{s}" ++ block_close ++ asst_open, .{questions[i]});
+        const convo_prefix = try std.fmt.allocPrint(arena, "{s}{s}{s}{s}", .{ tpl.user_open, questions[i], tpl.block_close, tpl.asst_open });
         convo_prefix_ids[i] = try encodeUsize(arena, tokenizer, convo_prefix);
         const b_prompt = try std.mem.concat(arena, u8, &.{ sys_texts[i], convo_prefix });
         b_prompts[i] = try encodeUsize(arena, tokenizer, b_prompt);
@@ -911,7 +961,7 @@ fn synthesizeGroup(
 
     // ONE packed teacher pass over the whole group: every conversation's
     // answer rows come back from a single memory-bounded forward.
-    try teacherTargets(ctx, arena, trainer, out, opts);
+    try teacherTargets(ctx, arena, trainer, supports_packing, out, opts);
 }
 
 /// Fill each conversation's targets builder from one packed teacher forward:
@@ -920,7 +970,8 @@ fn synthesizeGroup(
 fn teacherTargets(
     ctx: *fucina.ExecContext,
     arena: std.mem.Allocator,
-    trainer: *Trainer,
+    trainer: anytype,
+    comptime supports_packing: bool,
     group: []Convo,
     opts: Options,
 ) !void {
@@ -947,9 +998,40 @@ fn teacherTargets(
         at += convo.teacher_ids.len;
     }
 
-    var teacher_logits = try trainer.evalLogitsRows(ctx, packed_teacher, rows, .{
-        .packed_segments = if (group.len > 1) seg_lens else null,
-    });
+    var teacher_logits = if (comptime supports_packing)
+        try trainer.evalLogitsRows(ctx, packed_teacher, rows, .{
+            .packed_segments = if (group.len > 1) seg_lens else null,
+        })
+    else blk: {
+        // No packed eval on this trainer: per-conversation teacher passes,
+        // rows re-based per segment, results concatenated in group order.
+        if (group.len == 1) break :blk try trainer.evalLogitsRows(ctx, packed_teacher, rows, .{});
+        var parts = try arena.alloc(fucina.Tensor(.{ .seq, .vocab }), group.len);
+        var parts_built: usize = 0;
+        defer for (parts[0..parts_built]) |*t| t.deinit();
+        var seg_at: usize = 0;
+        var row_i: usize = 0;
+        for (group, seg_lens, 0..) |*convo, seg_len, gi| {
+            const seg_rows = try arena.alloc(usize, convo.answer_len);
+            for (seg_rows, 0..) |*r, j| {
+                r.* = rows[row_i + j] - seg_at;
+            }
+            parts[gi] = try trainer.evalLogitsRows(ctx, packed_teacher[seg_at .. seg_at + seg_len], seg_rows, .{});
+            parts_built += 1;
+            seg_at += seg_len;
+            row_i += convo.answer_len;
+        }
+        if (parts.len == 1) {
+            parts_built = 0;
+            break :blk parts[0];
+        }
+        const rest = try arena.alloc(*const fucina.Tensor(.{ .seq, .vocab }), parts.len - 1);
+        for (rest, parts[1..]) |*ptr, *t| ptr.* = t;
+        const joined = try parts[0].concat(ctx, .seq, rest);
+        for (parts[0..parts_built]) |*t| t.deinit();
+        parts_built = 0;
+        break :blk joined;
+    };
     defer teacher_logits.deinit();
     // Vocab-wide passes stay in core ops (topK's lowest-index tie-break is
     // appendRow's scan order; logsumexp is the row's log-partition): only
@@ -997,7 +1079,7 @@ fn teacherTargets(
 fn generateIdsSpecBatch(
     ctx: *fucina.ExecContext,
     allocator: std.mem.Allocator,
-    model: *const llm.qwen3.model.Model,
+    model: anytype,
     caches: []llm.kv_cache.KvCache,
     prompts: []const []const usize,
     max_new: usize,
@@ -1193,7 +1275,7 @@ fn generateIdsSpecBatch(
 fn generateIdsBatch(
     ctx: *fucina.ExecContext,
     allocator: std.mem.Allocator,
-    model: *const llm.qwen3.model.Model,
+    model: anytype,
     caches: []llm.kv_cache.KvCache,
     prompts: []const []const usize,
     max_new: usize,
@@ -1278,7 +1360,7 @@ fn generateIdsBatch(
 fn generateIds(
     ctx: *fucina.ExecContext,
     allocator: std.mem.Allocator,
-    model: *const llm.qwen3.model.Model,
+    model: anytype,
     cache: *llm.kv_cache.KvCache,
     prompt_ids: []const usize,
     max_new: usize,
@@ -1310,8 +1392,8 @@ fn generateIds(
 fn generateText(
     ctx: *fucina.ExecContext,
     allocator: std.mem.Allocator,
-    model: *const llm.qwen3.model.Model,
-    tokenizer: *const llm.tokenizer.Tokenizer,
+    model: anytype,
+    tokenizer: anytype,
     cache: *llm.kv_cache.KvCache,
     prompt: []const u8,
     max_new: usize,
@@ -1328,7 +1410,7 @@ fn generateText(
 /// Decode + trim a generation, dropping any leading think block/marker
 /// (small models occasionally re-emit them despite the empty think block
 /// in the assistant opener).
-fn cleanGenerated(allocator: std.mem.Allocator, tokenizer: *const llm.tokenizer.Tokenizer, ids: []const usize) ![]u8 {
+fn cleanGenerated(allocator: std.mem.Allocator, tokenizer: anytype, ids: []const usize) ![]u8 {
     const text = try decodeUsize(allocator, tokenizer, ids);
     defer allocator.free(text);
     var content = std.mem.trim(u8, text, " \t\r\n");
@@ -1347,15 +1429,16 @@ fn cleanGenerated(allocator: std.mem.Allocator, tokenizer: *const llm.tokenizer.
 /// (initialization/tokenization_utils.py semantics).
 fn systemInitTokens(
     allocator: std.mem.Allocator,
-    tokenizer: *const llm.tokenizer.Tokenizer,
+    tokenizer: anytype,
+    tpl: Tpl,
     corpus_text: []const u8,
     p: usize,
 ) ![]usize {
-    const close_ids = try encodeUsize(allocator, tokenizer, block_close);
+    const close_ids = try encodeUsize(allocator, tokenizer, tpl.block_close);
     defer allocator.free(close_ids);
     if (p < close_ids.len + 8) return error.CartridgeTooSmall;
 
-    const sys_text = try std.fmt.allocPrint(allocator, sys_open ++ system_prompt_template ++ block_close, .{corpus_text});
+    const sys_text = try std.fmt.allocPrint(allocator, "{s}" ++ system_prompt_template ++ "{s}", .{ tpl.sys_open, corpus_text, tpl.block_close });
     defer allocator.free(sys_text);
     const sys_ids = try encodeUsize(allocator, tokenizer, sys_text);
     defer allocator.free(sys_ids);
@@ -1436,7 +1519,7 @@ fn runEquiv(
 /// GGUF (dense or MoE, SWA + dual-theta rope included). Only --equiv is
 /// routed here — the self-study generation loops of this CLI are
 /// qwen3-typed.
-fn runGemmaEquiv(
+fn runGemma(
     ctx: *fucina.ExecContext,
     io: std.Io,
     stdout: anytype,
@@ -1445,12 +1528,6 @@ fn runGemmaEquiv(
     corpus_paths: []const []const u8,
     opts: Options,
 ) !void {
-    if (!opts.equiv) {
-        try stdout.print("gemma GGUFs support --equiv here; train via the gemma4 trainer API, serve via lmserve --cartridge\n", .{});
-        return error.UnknownArgument;
-    }
-    if (corpus_paths.len == 0) return error.MissingCorpusPath;
-
     var config = try llm.gemma.gemma4.Config.fromGguf(file);
     // Zero-copy expert borrow over the GGUF mapping: the trainer's MoE arm
     // consumes the raw expert blocks (RawMoeWeightsRequired otherwise).
@@ -1460,16 +1537,38 @@ fn runGemmaEquiv(
     var model = try llm.gemma.gemma4.Model.loadGgufFromFile(ctx, file, config);
     defer model.deinit();
     file.deinit();
-    try stdout.print("model: {s} (gemma4, {d} layers, hidden {d})\n", .{ opts.model_path, config.num_layers, config.hidden_size });
-    {
-        var own: usize = 0;
-        var swa_count: usize = 0;
-        for (0..config.num_layers) |i| {
-            if (model.geom.has_kv[i]) own += 1;
-            if (model.geom.is_swa[i]) swa_count += 1;
-        }
-        try stdout.print("geometry: {d}/{d} layers own KV, {d} SWA, shared_kv_layers {d}\n", .{ own, config.num_layers, swa_count, config.shared_kv_layers });
+
+    var trainer = try llm.gemma.gemma4_train.Trainer(.{ .q = false, .v = false }).init(ctx, &model, .{ .rank = 1, .alpha = 1 }, opts.seed);
+    defer trainer.deinit();
+
+    // Serve a saved cartridge (--load): same three-way comparison as qwen3.
+    if (opts.load_path) |path| {
+        const ask = opts.ask orelse return error.MissingAsk;
+        const bytes = blk: {
+            var dir = std.Io.Dir.cwd();
+            break :blk try dir.readFileAlloc(io, path, allocator, .limited(1024 * 1024 * 1024));
+        };
+        defer allocator.free(bytes);
+        var cart = try cartridge.Cartridge.initFromStateDict(ctx, allocator, bytes);
+        defer cart.deinit();
+        try stdout.print("cartridge loaded from {s}: p = {d} ({d} layers)\n", .{ path, cart.p, cart.layers.len });
+        var corpus: ?Corpus = null;
+        defer if (corpus) |*c| c.deinit();
+        if (corpus_paths.len > 0) corpus = try buildCorpus(allocator, io, &spm, corpus_paths);
+        return runServe(ctx, io, stdout, allocator, &model, &spm, gemma4_tpl, &cart, ask, if (corpus) |*c| c else null, opts);
     }
+
+    if (corpus_paths.len == 0) return error.MissingCorpusPath;
+    if (!opts.equiv) {
+        // Self-study training: the shared engine with the gemma template;
+        // no packed forward on this trainer (flat-memory backward arm).
+        var corpus = try buildCorpus(allocator, io, &spm, corpus_paths);
+        defer corpus.deinit();
+        try stdout.print("corpus: {d} files, {d} tokens\n", .{ corpus.files.len, corpus.ids.len });
+        if (corpus.ids.len < opts.chunk_min + 2 or corpus.ids.len < opts.p + 2) return error.CorpusTooShort;
+        return runSelfStudy(ctx, io, stdout, allocator, &model, &spm, &trainer, gemma4_tpl, false, &corpus, opts);
+    }
+    try stdout.print("model: {s} (gemma4, {d} layers, hidden {d})\n", .{ opts.model_path, config.num_layers, config.hidden_size });
 
     var ids: std.ArrayList(usize) = .empty;
     defer ids.deinit(allocator);
@@ -1483,9 +1582,6 @@ fn runGemmaEquiv(
     }
     if (ids.items.len < opts.p + 2) return error.CorpusTooShort;
     try stdout.print("corpus: {d} files, {d} tokens\n", .{ corpus_paths.len, ids.items.len });
-
-    var trainer = try llm.gemma.gemma4_train.Trainer(.{ .q = false, .v = false }).init(ctx, &model, .{ .rank = 1, .alpha = 1 }, opts.seed);
-    defer trainer.deinit();
 
     // The cartridge student runs the suffix at GEMM shape m = suffix_len
     // while the teacher runs m = p + suffix_len. Quantized-MoE stacks are
@@ -1524,7 +1620,7 @@ fn runGemmaEquiv(
 // Small helpers
 // ---------------------------------------------------------------------------
 
-fn encodeUsize(allocator: std.mem.Allocator, tokenizer: *const llm.tokenizer.Tokenizer, text: []const u8) ![]usize {
+fn encodeUsize(allocator: std.mem.Allocator, tokenizer: anytype, text: []const u8) ![]usize {
     const ids32 = try tokenizer.encode(allocator, text);
     defer allocator.free(ids32);
     const out = try allocator.alloc(usize, ids32.len);
@@ -1532,7 +1628,7 @@ fn encodeUsize(allocator: std.mem.Allocator, tokenizer: *const llm.tokenizer.Tok
     return out;
 }
 
-fn decodeUsize(allocator: std.mem.Allocator, tokenizer: *const llm.tokenizer.Tokenizer, ids: []const usize) ![]u8 {
+fn decodeUsize(allocator: std.mem.Allocator, tokenizer: anytype, ids: []const usize) ![]u8 {
     const ids32 = try allocator.alloc(u32, ids.len);
     defer allocator.free(ids32);
     for (ids32, ids) |*dst, id| dst.* = @intCast(id);

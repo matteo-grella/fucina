@@ -319,9 +319,23 @@ gemma-4-26B-A4B Q6_K, no cartridge anywhere: the same 32 rows forwarded
 alone vs inside a 96-row batch differ by up to ~12 logits — near-tie
 experts flip). The CLI's gemma `--equiv` arm therefore measures the
 model's own shape-sensitivity envelope first and judges the cartridge
-against it (the cartridge student necessarily runs suffix-shaped
-GEMMs). Serving trained gemma cartridges is the existing lmserve
-`--cartridge` path; this CLI's self-study loops are qwen3-typed.
+against it (the cartridge student necessarily runs suffix-shaped GEMMs).
+
+Self-study training runs through the same CLI engine (the chat template,
+tokenizer, per-model caches, and packing capability are per-architecture
+values; gemma uses the `<|turn>` template with the thought channel primed
+off, batched generation via `Model.forwardStepBatchSpans`, `--spec-b`
+included, and the flat-memory per-conversation backward — no packed
+forward). Measured on gemma-4-26B-A4B Q6_K (native CPU, 64 GB): ~89
+s/conversation at smoke budgets with held-out distill loss improving from
+the first step; peak RSS ~46 GB — the backward through the frozen
+quantized experts carries a large transient (a streamed dX for quantized
+weights is the recorded follow-up), so training wants headroom. Metal
+builds duplicate the expert blocks into device allocations at load and do
+NOT fit 26B training on 64 GB — train quantized-MoE models on CPU builds
+(`borrow_experts` keeps the weights zero-copy); serving is unaffected.
+Serving also runs here (`--load`/`--ask`) and through lmserve
+`--cartridge`.
 
 ## Follow-ups (not landed)
 

@@ -7,6 +7,7 @@ const gemma4_train = @import("gemma4_train.zig");
 const fucina = @import("fucina");
 const gemma4 = @import("gemma4.zig");
 const cartridge = @import("../cartridge.zig");
+const kv_cache_mod = @import("../kv_cache.zig");
 const gemma_moe = @import("moe.zig");
 const weights = @import("../weights.zig");
 
@@ -619,7 +620,7 @@ test "gemma4 distillation pulls a random cartridge toward the teacher (MoE, sink
     for (0..8) |step_i| {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        var loss = try trainer.distillLoss(&ctx, suffix, &cart, builder.targets(), .{});
+        var loss = try trainer.distillLoss(&ctx, suffix, &cart, builder.targets(), null, .{});
         defer loss.deinit();
         try loss.backward(&ctx);
         const value = try loss.item();
@@ -638,4 +639,64 @@ test "gemma4 distillation pulls a random cartridge toward the teacher (MoE, sink
         }
     }
     try std.testing.expect(changed);
+}
+
+test "gemma4 forwardStepBatchSpans matches per-stream forwardStepAllLogits" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var cfg = tiny_config;
+    cfg.num_layers = 2;
+    cfg.sliding_window = 4;
+    var model = try buildTinyModel(&ctx, cfg, 0xba7c4592a45, false);
+    defer model.deinit();
+    model.geom.is_swa[1] = true;
+
+    const prompts = [2][]const usize{ &.{ 3, 9, 27, 5 }, &.{ 11, 2, 30, 8, 17, 1 } };
+    const spans_tokens = [2][]const usize{ &.{ 7, 21 }, &.{ 4, 15, 28 } };
+    const span_lens = [_]usize{ 2, 3 };
+    const vocab = cfg.vocab_size;
+
+    // Reference: each stream alone (prefill, then all-logits step).
+    var want: [2][]f32 = undefined;
+    defer for (&want) |rows| allocator.free(rows);
+    inline for (0..2) |si| {
+        var kv = try kv_cache_mod.KvCache.initPerLayer(&ctx, model.geom.kv_heads, model.geom.head_dim, 32);
+        defer kv.deinit();
+        var prefill = try model.forwardStep(&ctx, &kv, prompts[si], 0);
+        prefill.deinit();
+        var logits = try model.forwardStepAllLogits(&ctx, &kv, spans_tokens[si], kv.len);
+        defer logits.deinit();
+        want[si] = try allocator.dupe(f32, try logits.dataConst());
+        try std.testing.expectEqual(@as(usize, spans_tokens[si].len * vocab), want[si].len);
+    }
+
+    // Ragged batch: same prefixes, both spans in ONE packed pass.
+    var kv0 = try kv_cache_mod.KvCache.initPerLayer(&ctx, model.geom.kv_heads, model.geom.head_dim, 32);
+    defer kv0.deinit();
+    var kv1 = try kv_cache_mod.KvCache.initPerLayer(&ctx, model.geom.kv_heads, model.geom.head_dim, 32);
+    defer kv1.deinit();
+    var p0 = try model.forwardStep(&ctx, &kv0, prompts[0], 0);
+    p0.deinit();
+    var p1 = try model.forwardStep(&ctx, &kv1, prompts[1], 0);
+    p1.deinit();
+    const packed_tokens = [_]usize{ 7, 21, 4, 15, 28 };
+    var got = try model.forwardStepBatchSpans(&ctx, &.{ &kv0, &kv1 }, &packed_tokens, &span_lens);
+    defer got.deinit();
+    const got_rows = try got.dataConst();
+    try std.testing.expectEqual(@as(usize, 5 * vocab), got_rows.len);
+    try std.testing.expectEqual(kv0.len, prompts[0].len + 2);
+    try std.testing.expectEqual(kv1.len, prompts[1].len + 3);
+
+    var at: usize = 0;
+    inline for (0..2) |si| {
+        for (want[si], got_rows[at * vocab ..][0..want[si].len]) |w, g| {
+            try std.testing.expect(@abs(g - w) <= 1e-5 + 1e-4 * @abs(w));
+        }
+        at += span_lens[si];
+    }
 }

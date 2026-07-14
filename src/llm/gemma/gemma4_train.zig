@@ -578,6 +578,13 @@ pub fn Trainer(comptime targets: Targets) type {
             return fucina.Tensor(.{ .seq, .vocab }).fromTensor(ctx, value);
         }
 
+        /// Interface parity with the qwen3 trainer's packed-forward hook:
+        /// gemma4 has no transient rope tables (offset-keyed tables are
+        /// cached like the seq-keyed ones), so this is a no-op.
+        pub fn freeTransientRope(self: *Self) void {
+            _ = self;
+        }
+
         /// Cartridge-seam geometry gate: per-layer KV shapes may vary
         /// (the Cartridge carries per-layer tensors), but every layer must
         /// OWN its KV — cross-layer KV sharing has no cartridge story yet.
@@ -679,9 +686,14 @@ pub fn Trainer(comptime targets: Targets) type {
             tokens: []const usize,
             cart: *const cartridge_mod.Cartridge,
             distill_targets: cartridge_mod.DistillTargets,
+            packed_segments: ?[]const usize,
             options: cartridge_mod.DistillOptions,
         ) !fucina.Tensor(.{}) {
             if (!ctx.execScopeActive()) return Error.ExecScopeRequired;
+            // Signature-compatible with the qwen3 trainer; packing is not
+            // routed on gemma4 (the flat-memory per-conversation backward
+            // is the training arm).
+            if (packed_segments != null) return Error.CartridgeGeometry;
             const step = self.step_counter;
             self.step_counter += 1;
             var logits = try self.forwardLogitsOpts(ctx, tokens, step, .{ .cartridge = cart });

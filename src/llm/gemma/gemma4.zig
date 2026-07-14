@@ -36,7 +36,9 @@ const RhsQ8_0 = fucina.QuantizedMatmulRhsQ8_0x4;
 pub const Error = weights.Error || error{
     InvalidConfig,
     InvalidSequenceLength,
+    MismatchedKvCaches,
     MissingMetadata,
+    PleUnsupported,
     UnsupportedExpertType,
     UnsupportedKvCacheDtype,
 };
@@ -659,6 +661,103 @@ pub const Model = struct {
         return self.forwardStepImpl(ctx, null, kv, token_ids, pos0, null, false);
     }
 
+    /// Ragged multi-stream forward: one span of new tokens per stream, all
+    /// spans packed through the weights (embedding, projections, norms,
+    /// FFN/MoE, lm head) as ONE [total, ...] pass; attention runs per
+    /// stream against its own cache (per-layer sliding windows and
+    /// shared-KV refs included). All-spans-1 is the lockstep batched
+    /// decode (`forwardStepBatch`). Returns [total, vocab] logits — every
+    /// appended position, soft-capped — in stream order; each cache
+    /// advances by its span. f16 caches only; PLE models are not routed.
+    pub fn forwardStepBatchSpans(
+        self: *const Model,
+        ctx: *ExecContext,
+        caches: []const *KvCache,
+        token_ids: []const usize,
+        span_lens: []const usize,
+    ) !fucina.Tensor(.{ .seq, .vocab }) {
+        const n = caches.len;
+        if (n == 0 or span_lens.len != n) return Error.InvalidSequenceLength;
+        if (self.ple != null) return Error.PleUnsupported;
+        var total: usize = 0;
+        for (span_lens) |span| {
+            if (span == 0) return Error.InvalidSequenceLength;
+            total += span;
+        }
+        if (total != token_ids.len) return Error.InvalidSequenceLength;
+        for (caches, span_lens, 0..) |kv, span, i| {
+            try requireF16KvCache(kv);
+            if (kv.head_dim.len != self.layers.len) return Error.MismatchedKvCaches;
+            if (kv.len + span > kv.capacity) return kv_cache.Error.KvCacheOverflow;
+            for (caches[0..i]) |prev| if (prev == kv) return Error.MismatchedKvCaches;
+        }
+
+        const cfg = self.config;
+        const allocator = ctx.allocator;
+        const positions = try allocator.alloc(i32, total);
+        defer allocator.free(positions);
+        {
+            var at: usize = 0;
+            for (caches, span_lens) |kv, span| {
+                for (0..span) |j| {
+                    positions[at] = @intCast(kv.len + j);
+                    at += 1;
+                }
+            }
+        }
+        const factors: ?[]const f32 = if (self.rope_freqs) |*t| try t.dataConst() else null;
+        var swa_table = try ctx.prepareRopeTable(positions, cfg.head_dim_swa, cfg.rope_theta_swa, false);
+        defer swa_table.deinit();
+        var global_table = try ctx.prepareRopeTableFactors(positions, cfg.head_dim_global, cfg.rope_theta, false, factors);
+        defer global_table.deinit();
+
+        var x = try self.token_embedding.getRowsAs(ctx, token_ids, .embed);
+        errdefer x.deinit();
+        x = try ctx.replace(x, x.scale(ctx, @sqrt(@as(f32, @floatFromInt(cfg.hidden_size)))));
+
+        for (self.layers, 0..) |*layer, il| {
+            x = try ctx.replace(x, attnBlockBatchSpans(ctx, cfg, self.geom, layer, il, &x, &swa_table, &global_table, caches, span_lens));
+            x = try ctx.replace(x, ffnBlock(ctx, null, cfg, layer, &x, null));
+            if (layer.out_scale) |sc| x = try ctx.replace(x, x.scale(ctx, sc));
+        }
+        for (caches, span_lens) |kv, span| kv.advance(span);
+
+        var final_norm = try x.rmsNormMul(ctx, .embed, &self.output_norm, cfg.rms_norm_eps);
+        defer final_norm.deinit();
+        x.deinit();
+
+        var logits = try self.output.linearSeq(ctx, &final_norm, .embed, .vocab);
+        if (cfg.final_logit_softcapping != 0) {
+            const sc = cfg.final_logit_softcapping;
+            if (sc == 30.0) {
+                const out = try logits.softcap30(ctx);
+                logits.deinit();
+                return out;
+            }
+            var down = try logits.scale(ctx, 1.0 / sc);
+            logits.deinit();
+            defer down.deinit();
+            var t = try down.tanh(ctx);
+            defer t.deinit();
+            return t.scale(ctx, sc);
+        }
+        return logits;
+    }
+
+    /// Lockstep batched decode: one new token per stream — `forwardStepBatchSpans`
+    /// with every span 1. Returns [streams, vocab] logits in stream order.
+    pub fn forwardStepBatch(
+        self: *const Model,
+        ctx: *ExecContext,
+        caches: []const *KvCache,
+        token_ids: []const usize,
+    ) !fucina.Tensor(.{ .seq, .vocab }) {
+        const spans = try ctx.allocator.alloc(usize, caches.len);
+        defer ctx.allocator.free(spans);
+        @memset(spans, 1);
+        return self.forwardStepBatchSpans(ctx, caches, token_ids, spans);
+    }
+
     fn forwardStepImpl(
         self: *const Model,
         ctx: *ExecContext,
@@ -814,6 +913,119 @@ pub fn requireF16KvCache(kv: *const KvCache) Error!void {
         .f16 => {},
         .q8_0 => return Error.UnsupportedKvCacheDtype,
     }
+}
+
+/// The ragged-batch twin of `attnBlock` (see `forwardStepBatchSpans`):
+/// norms/projections/rope run over the packed rows; K/V append and
+/// attention run per stream against that stream's cache (per-layer window,
+/// shared-KV ref, per-layer GQA map), and the per-stream outputs concat
+/// back into the packed row order.
+fn attnBlockBatchSpans(
+    ctx: *ExecContext,
+    config: Config,
+    geom: LayerGeometry,
+    layer: *const Layer,
+    il: usize,
+    input: *const fucina.Tensor(.{ .seq, .embed }),
+    swa_table: *const fucina.RopeTable,
+    global_table: *const fucina.RopeTable,
+    caches: []const *KvCache,
+    span_lens: []const usize,
+) !fucina.Tensor(.{ .seq, .embed }) {
+    const head_dim = geom.head_dim[il];
+    const n_head = config.num_attention_heads;
+    const n_kv = geom.kv_heads[il];
+    const q_dim = n_head * head_dim;
+    const kv_dim = n_kv * head_dim;
+    const window: usize = if (geom.is_swa[il]) config.sliding_window else 0;
+    const table = if (geom.is_swa[il]) swa_table else global_table;
+
+    var kvhh: [max_heads]usize = undefined;
+    const heads_per_kv = n_head / n_kv;
+    for (0..n_head) |h| kvhh[h] = h / heads_per_kv;
+    const kv_head_for_head = kvhh[0..n_head];
+
+    var attn_in = try input.rmsNormMul(ctx, .embed, &layer.attn_norm, config.rms_norm_eps);
+    defer attn_in.deinit();
+    var proj = try layer.attn_proj.project(ctx, &attn_in, q_dim, kv_dim);
+    defer proj.deinit();
+    var q3 = try proj.q.split(ctx, .q, .{ .head, .d }, .{ n_head, head_dim });
+    defer q3.deinit();
+    var q_rope = try q3.rmsNormMulRopeHalfPrepared(ctx, .seq, .d, &layer.q_norm, config.rms_norm_eps, table);
+    defer q_rope.deinit();
+
+    var k_rope: ?fucina.Tensor(.{ .seq, .kv_head, .d }) = null;
+    defer if (k_rope) |*t| t.deinit();
+    var v_norm: ?fucina.Tensor(.{ .seq, .kv_head, .d }) = null;
+    defer if (v_norm) |*t| t.deinit();
+    if (geom.has_kv[il]) {
+        var k3 = try proj.k.?.split(ctx, .k, .{ .kv_head, .d }, .{ n_kv, head_dim });
+        defer k3.deinit();
+        k_rope = try k3.rmsNormMulRopeHalfPrepared(ctx, .seq, .d, &layer.k_norm.?, config.rms_norm_eps, table);
+        var v3 = blk: {
+            if (proj.v) |*v| {
+                break :blk try v.split(ctx, .v, .{ .kv_head, .d }, .{ n_kv, head_dim });
+            } else {
+                break :blk try k3.withTags(ctx, .{ .seq, .kv_head, .d });
+            }
+        };
+        defer v3.deinit();
+        v_norm = try v3.rmsNorm(ctx, .d, config.rms_norm_eps);
+    }
+
+    const Out = fucina.Tensor(.{ .seq, .attn });
+    const outs = try ctx.allocator.alloc(Out, caches.len);
+    defer ctx.allocator.free(outs);
+    var built: usize = 0;
+    errdefer for (outs[0..built]) |*out| out.deinit();
+
+    var start: usize = 0;
+    for (caches, span_lens, 0..) |kv, span, si| {
+        if (geom.has_kv[il]) {
+            var k_rows = try k_rope.?.narrow(ctx, .seq, start, span);
+            defer k_rows.deinit();
+            var v_rows = try v_norm.?.narrow(ctx, .seq, start, span);
+            defer v_rows.deinit();
+            try kv.appendLayer(ctx, il, &k_rows, &v_rows);
+        }
+        const ref = geom.kv_ref[il];
+        const cached_len = kv.len + span;
+        var k_view = try kv.k[ref].narrow(ctx, .seq, 0, cached_len);
+        defer k_view.deinit();
+        var v_view = try kv.v[ref].narrow(ctx, .seq, 0, cached_len);
+        defer v_view.deinit();
+        var q_seg = try q_rope.narrow(ctx, .seq, start, span);
+        defer q_seg.deinit();
+        outs[si] = try q_seg.groupedAttention(
+            ctx,
+            &k_view,
+            &v_view,
+            kv_head_for_head,
+            .attn,
+            1.0, // Gemma 4: softmax scale = 1.0 (f_attention_scale)
+            .{ .window = window },
+        );
+        built += 1;
+        start += span;
+    }
+
+    var attn: Out = undefined;
+    if (outs.len == 1) {
+        attn = outs[0];
+        built = 0; // ownership moved
+    } else {
+        const rest = try ctx.allocator.alloc(*const Out, outs.len - 1);
+        defer ctx.allocator.free(rest);
+        for (rest, outs[1..]) |*ptr, *out| ptr.* = out;
+        attn = try outs[0].concat(ctx, .seq, rest);
+        for (outs[0..built]) |*out| out.deinit();
+        built = 0;
+    }
+    defer attn.deinit();
+
+    var attn_out = try layer.o_proj.linearSeq(ctx, &attn, .attn, .embed);
+    defer attn_out.deinit();
+    return attn_out.rmsNormMulAdd(ctx, .embed, &layer.attn_post_norm, input, config.rms_norm_eps);
 }
 
 pub fn attnBlock(
