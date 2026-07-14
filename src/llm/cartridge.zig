@@ -139,11 +139,35 @@ pub const Cartridge = struct {
         k_rows: []const []const f32,
         v_rows: []const []const f32,
     ) !Cartridge {
+        const kv_heads_per = try allocator.alloc(usize, k_rows.len);
+        defer allocator.free(kv_heads_per);
+        const head_dim_per = try allocator.alloc(usize, k_rows.len);
+        defer allocator.free(head_dim_per);
+        @memset(kv_heads_per, kv_heads);
+        @memset(head_dim_per, head_dim);
+        return initFromRowsVaried(ctx, allocator, frozen_prefix, p, kv_heads_per, head_dim_per, k_rows, v_rows);
+    }
+
+    /// `initFromRows` with PER-LAYER KV geometry — models like gemma-4 mix
+    /// layer shapes (e.g. 8-head/256-dim local-SWA layers with 2-head/512-dim
+    /// globals). Each layer's tensors carry their true shapes; the struct's
+    /// `kv_heads`/`head_dim` metadata records layer 0.
+    pub fn initFromRowsVaried(
+        ctx: *ExecContext,
+        allocator: Allocator,
+        frozen_prefix: usize,
+        p: usize,
+        kv_heads: []const usize,
+        head_dims: []const usize,
+        k_rows: []const []const f32,
+        v_rows: []const []const f32,
+    ) !Cartridge {
         if (p == 0 or frozen_prefix >= p) return Error.InvalidCartridge;
         if (k_rows.len == 0 or k_rows.len != v_rows.len) return Error.InvalidCartridge;
-        const row = kv_heads * head_dim;
-        for (k_rows, v_rows) |k_layer, v_layer| {
-            if (k_layer.len != p * row or v_layer.len != p * row) return Error.InvalidCartridge;
+        if (kv_heads.len != k_rows.len or head_dims.len != k_rows.len) return Error.InvalidCartridge;
+        for (k_rows, v_rows, kv_heads, head_dims) |k_layer, v_layer, heads, dim| {
+            const row = heads * dim;
+            if (row == 0 or k_layer.len != p * row or v_layer.len != p * row) return Error.InvalidCartridge;
         }
 
         const layers = try allocator.alloc(LayerKv, k_rows.len);
@@ -151,20 +175,21 @@ pub const Cartridge = struct {
         var built: usize = 0;
         errdefer for (layers[0..built]) |*layer| layer.deinit();
 
-        const sink_len = frozen_prefix * row;
         const train_rows = p - frozen_prefix;
-        for (layers, k_rows, v_rows) |*layer, k_layer, v_layer| {
+        for (layers, k_rows, v_rows, kv_heads, head_dims) |*layer, k_layer, v_layer, heads, dim| {
+            const row = heads * dim;
+            const sink_len = frozen_prefix * row;
             var k_sink: ?Kv = null;
             errdefer if (k_sink) |*sink| sink.deinit();
             var v_sink: ?Kv = null;
             errdefer if (v_sink) |*sink| sink.deinit();
             if (frozen_prefix > 0) {
-                k_sink = try Kv.fromSlice(ctx, .{ frozen_prefix, kv_heads, head_dim }, k_layer[0..sink_len]);
-                v_sink = try Kv.fromSlice(ctx, .{ frozen_prefix, kv_heads, head_dim }, v_layer[0..sink_len]);
+                k_sink = try Kv.fromSlice(ctx, .{ frozen_prefix, heads, dim }, k_layer[0..sink_len]);
+                v_sink = try Kv.fromSlice(ctx, .{ frozen_prefix, heads, dim }, v_layer[0..sink_len]);
             }
-            var k = try Kv.variableFromSlice(ctx, .{ train_rows, kv_heads, head_dim }, k_layer[sink_len..]);
+            var k = try Kv.variableFromSlice(ctx, .{ train_rows, heads, dim }, k_layer[sink_len..]);
             errdefer k.deinit();
-            const v = try Kv.variableFromSlice(ctx, .{ train_rows, kv_heads, head_dim }, v_layer[sink_len..]);
+            const v = try Kv.variableFromSlice(ctx, .{ train_rows, heads, dim }, v_layer[sink_len..]);
             layer.* = .{ .k_sink = k_sink, .v_sink = v_sink, .k = k, .v = v };
             built += 1;
         }
@@ -177,8 +202,8 @@ pub const Cartridge = struct {
             .layers = layers,
             .p = p,
             .frozen_prefix = frozen_prefix,
-            .kv_heads = kv_heads,
-            .head_dim = head_dim,
+            .kv_heads = kv_heads[0],
+            .head_dim = head_dims[0],
             .registry = registry,
         };
     }
@@ -295,12 +320,11 @@ pub const Cartridge = struct {
         const k0 = file.maybeTensor("layers.0.k") orelse return Error.InvalidCartridge;
         if (k0.shape.len != 3) return Error.InvalidCartridge;
         const train_rows = k0.shape[0];
-        const kv_heads = k0.shape[1];
-        const head_dim = k0.shape[2];
         const frozen: usize = if (file.maybeTensor("layers.0.k_sink")) |sink| blk: {
             if (sink.shape.len != 3) return Error.InvalidCartridge;
             break :blk sink.shape[0];
         } else 0;
+        const p = frozen + train_rows;
         var n_layers: usize = 1;
         var name_buf: [64]u8 = undefined;
         while (true) : (n_layers += 1) {
@@ -308,16 +332,41 @@ pub const Cartridge = struct {
             if (file.maybeTensor(name) == null) break;
         }
 
-        var cart = try initRandom(ctx, allocator, n_layers, frozen, frozen + train_rows, kv_heads, head_dim, 0, 0);
+        // Per-layer geometry straight from the header (layers may vary,
+        // e.g. gemma-4's mixed SWA/global shapes); the strict loader then
+        // overwrites every row.
+        const kv_heads = try allocator.alloc(usize, n_layers);
+        defer allocator.free(kv_heads);
+        const head_dims = try allocator.alloc(usize, n_layers);
+        defer allocator.free(head_dims);
+        var zeros: std.ArrayListUnmanaged(f32) = .empty;
+        defer zeros.deinit(allocator);
+        const layer_rows = try allocator.alloc([]const f32, n_layers);
+        defer allocator.free(layer_rows);
+        var max_row_len: usize = 0;
+        for (0..n_layers) |layer_i| {
+            const name = std.fmt.bufPrint(&name_buf, "layers.{d}.k", .{layer_i}) catch unreachable;
+            const info = file.maybeTensor(name) orelse return Error.InvalidCartridge;
+            if (info.shape.len != 3 or info.shape[0] != train_rows) return Error.InvalidCartridge;
+            kv_heads[layer_i] = info.shape[1];
+            head_dims[layer_i] = info.shape[2];
+            max_row_len = @max(max_row_len, p * info.shape[1] * info.shape[2]);
+        }
+        try zeros.appendNTimes(allocator, 0, max_row_len);
+        for (layer_rows, kv_heads, head_dims) |*rows, heads, dim| {
+            rows.* = zeros.items[0 .. p * heads * dim];
+        }
+
+        var cart = try initFromRowsVaried(ctx, allocator, frozen, p, kv_heads, head_dims, layer_rows, layer_rows);
         errdefer cart.deinit();
         if (file.maybeTensor("draft_reference")) |ref| {
             // Register a placeholder of the persisted length so the strict
             // loader has a one-to-one destination, then decode the real ids.
             if (ref.shape.len != 1 or ref.shape[0] == 0) return Error.InvalidCartridge;
-            const zeros = try allocator.alloc(usize, ref.shape[0]);
-            defer allocator.free(zeros);
-            @memset(zeros, 0);
-            try cart.setDraftReference(ctx, zeros);
+            const zero_ids = try allocator.alloc(usize, ref.shape[0]);
+            defer allocator.free(zero_ids);
+            @memset(zero_ids, 0);
+            try cart.setDraftReference(ctx, zero_ids);
         }
         var reader = std.Io.Reader.fixed(bytes);
         try cart.loadState(&reader);
@@ -383,6 +432,56 @@ pub const Cartridge = struct {
         self.allocator.free(self.layers);
         if (self.draft_reference_tensor) |*tensor| tensor.deinit();
         if (self.draft_reference) |ids| self.allocator.free(ids);
+        self.* = undefined;
+    }
+};
+
+/// Per-layer host copies of the post-q/k-norm, post-RoPE keys and the
+/// cache-layout values of one forward pass — `[seq * kv_heads * head_dim]`
+/// floats per layer in KV-cache row order, the exact payload
+/// `Cartridge.initFromRows` consumes (the paper's corpus-token
+/// initialization). Fill by passing the struct as a trainer's
+/// `ForwardOptions.capture`; the trainers' `captureKv` wraps the flow.
+pub const KvCapture = struct {
+    k_rows: [][]f32,
+    v_rows: [][]f32,
+    allocator: Allocator,
+
+    pub fn init(allocator: Allocator, n_layers: usize, row_len: usize) !KvCapture {
+        const row_lens = try allocator.alloc(usize, n_layers);
+        defer allocator.free(row_lens);
+        @memset(row_lens, row_len);
+        return initVaried(allocator, row_lens);
+    }
+
+    /// `init` with a per-layer row length — heterogeneous KV geometry
+    /// (mixed kv_heads/head_dim across layers, e.g. gemma-4).
+    pub fn initVaried(allocator: Allocator, row_lens: []const usize) !KvCapture {
+        const k_rows = try allocator.alloc([]f32, row_lens.len);
+        errdefer allocator.free(k_rows);
+        const v_rows = try allocator.alloc([]f32, row_lens.len);
+        errdefer allocator.free(v_rows);
+        var built: usize = 0;
+        errdefer for (0..built) |i| {
+            allocator.free(k_rows[i]);
+            allocator.free(v_rows[i]);
+        };
+        for (k_rows, v_rows, row_lens) |*k, *v, row_len| {
+            k.* = try allocator.alloc(f32, row_len);
+            errdefer allocator.free(k.*);
+            v.* = try allocator.alloc(f32, row_len);
+            built += 1;
+        }
+        return .{ .k_rows = k_rows, .v_rows = v_rows, .allocator = allocator };
+    }
+
+    pub fn deinit(self: *KvCapture) void {
+        for (self.k_rows, self.v_rows) |k, v| {
+            self.allocator.free(k);
+            self.allocator.free(v);
+        }
+        self.allocator.free(self.k_rows);
+        self.allocator.free(self.v_rows);
         self.* = undefined;
     }
 };

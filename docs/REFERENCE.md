@@ -11838,9 +11838,12 @@ is causal over the real tokens, which sit at RoPE positions `p..`.
 Construction and lifecycle (create OUTSIDE any exec scope, like LoRA A/B):
 
 - `Cartridge.initFromRows(ctx, allocator, frozen_prefix, p, kv_heads, head_dim, k_rows, v_rows)`
-  — from captured per-layer rows (`qwen3.train.Trainer.captureKv` /
+  — from captured per-layer rows (the trainers' `captureKv` /
   `initCartridge` produce them; the paper's winning "first p corpus tokens"
-  initialization). `initRandom(...)` is the random-vector ablation baseline.
+  initialization). `initFromRowsVaried` takes PER-LAYER kv_heads/head_dims
+  (heterogeneous geometries like gemma-4's mixed SWA/global shapes;
+  `initFromStateDict` recovers per-layer shapes from the header).
+  `initRandom(...)` is the random-vector ablation baseline.
 - `registerParams(opt)` — trainable rows onto any optimizer with
   `addParamNamed` (sinks are frozen registry entries and are skipped);
   `zeroGrad()`.

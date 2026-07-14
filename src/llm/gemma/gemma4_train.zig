@@ -25,10 +25,12 @@ const LinearWeight = weights.LinearWeight;
 const ParamRegistry = fucina.ParamRegistry;
 const Tag = @TypeOf(.tag);
 const lora = fucina.lora;
+const cartridge_mod = @import("../cartridge.zig");
 const optim = fucina.optim;
 const rng = fucina.rng;
 
 pub const Error = error{
+    CartridgeGeometry,
     ExecScopeRequired,
     InvalidSequenceLength,
     LabelLengthMismatch,
@@ -286,6 +288,24 @@ fn zeroHidden(ctx: *ExecContext, seq: usize, hidden: usize) !Hidden {
     return Hidden.fromTensor(ctx, value);
 }
 
+/// Cartridge seams for the gemma4 trainer forwards (`distillLoss`,
+/// `captureKv`, `evalLogits*`). `cartridge` prepends a trained KV prefix to
+/// every layer's attention: tokens shift to RoPE positions p..p+seq-1
+/// (both theta domains), every query attends the whole prefix and stays
+/// causal — with the layer's sliding window, where the SWA layers see the
+/// prefix only within their window, exactly as a real prefill would.
+/// `capture` copies each layer's freshly computed cache-layout K/V rows
+/// (post q/k-norm + RoPE keys, post-norm values — what
+/// `Model.forwardStep` appends to its KvCache) out of the forward.
+/// Uniform per-layer KV geometry is required (`CartridgeGeometry`
+/// otherwise). Packed segments are not routed on gemma4.
+const RopeKey = struct { offset: usize, len: usize };
+
+pub const ForwardOptions = struct {
+    cartridge: ?*const cartridge_mod.Cartridge = null,
+    capture: ?*cartridge_mod.KvCapture = null,
+};
+
 pub fn Trainer(comptime targets: Targets) type {
     return struct {
         model: *const gemma4.Model,
@@ -299,7 +319,7 @@ pub fn Trainer(comptime targets: Targets) type {
         /// refcounted views of the tensors; optimizers registered via
         /// `registerAllParams` borrow both, so the trainer must outlive them.
         registry: ParamRegistry,
-        rope_tables: std.AutoHashMapUnmanaged(usize, *RopeTables) = .empty,
+        rope_tables: std.AutoHashMapUnmanaged(RopeKey, *RopeTables) = .empty,
         step_counter: u64 = 0,
 
         const Self = @This();
@@ -558,16 +578,141 @@ pub fn Trainer(comptime targets: Targets) type {
             return fucina.Tensor(.{ .seq, .vocab }).fromTensor(ctx, value);
         }
 
+        /// Cartridge-seam geometry gate: per-layer KV shapes may vary
+        /// (the Cartridge carries per-layer tensors), but every layer must
+        /// OWN its KV — cross-layer KV sharing has no cartridge story yet.
+        fn requireOwnedKv(self: *const Self) !void {
+            const geom = self.model.geom;
+            for (0..self.model.config.num_layers) |layer_i| {
+                if (!geom.has_kv[layer_i]) return Error.CartridgeGeometry;
+            }
+        }
+
+        /// One eval forward over `tokens` (positions 0..len-1, no cartridge)
+        /// that copies every layer's cache-layout token K/V rows out of the
+        /// graph — the cartridge initialization capture. Caller owns the
+        /// result.
+        pub fn captureKv(self: *Self, ctx: *ExecContext, tokens: []const usize) !cartridge_mod.KvCapture {
+            try self.requireOwnedKv();
+            const geom = self.model.geom;
+            const row_lens = try self.allocator.alloc(usize, self.model.config.num_layers);
+            defer self.allocator.free(row_lens);
+            for (row_lens, 0..) |*len, layer_i| {
+                len.* = tokens.len * geom.kv_heads[layer_i] * geom.head_dim[layer_i];
+            }
+            var cap = try cartridge_mod.KvCapture.initVaried(self.allocator, row_lens);
+            errdefer cap.deinit();
+            const scope = ctx.openExecScope();
+            defer ctx.closeExecScope(scope);
+            var logits = try self.forwardLogitsOpts(ctx, tokens, null, .{ .capture = &cap });
+            logits.deinit(); // scope-owned borrow: safe no-op
+            return cap;
+        }
+
+        /// Build a cartridge initialized from the model's OWN K/V rows for
+        /// `tokens` at positions 0..p-1 — the paper's "first p corpus
+        /// tokens" initialization, gemma4 arm (SWA layers and both RoPE
+        /// theta domains included). Caller owns the cartridge; create it
+        /// OUTSIDE any exec scope.
+        pub fn initCartridge(self: *Self, ctx: *ExecContext, tokens: []const usize, frozen_prefix: usize) !cartridge_mod.Cartridge {
+            var cap = try self.captureKv(ctx, tokens);
+            defer cap.deinit();
+            const geom = self.model.geom;
+            const k_rows = try self.allocator.alloc([]const f32, cap.k_rows.len);
+            defer self.allocator.free(k_rows);
+            const v_rows = try self.allocator.alloc([]const f32, cap.v_rows.len);
+            defer self.allocator.free(v_rows);
+            for (k_rows, cap.k_rows) |*dst, src| dst.* = src;
+            for (v_rows, cap.v_rows) |*dst, src| dst.* = src;
+            return cartridge_mod.Cartridge.initFromRowsVaried(
+                ctx,
+                self.allocator,
+                frozen_prefix,
+                tokens.len,
+                geom.kv_heads,
+                geom.head_dim,
+                k_rows,
+                v_rows,
+            );
+        }
+
+        /// Full-sequence logits as a caller-owned constant (own scope), with
+        /// `ForwardOptions` — the teacher/eval entry of the cartridge flow.
+        pub fn evalLogitsExt(self: *Self, ctx: *ExecContext, tokens: []const usize, opts: ForwardOptions) !fucina.Tensor(.{ .seq, .vocab }) {
+            const scope = ctx.openExecScope();
+            defer ctx.closeExecScope(scope);
+            var logits = try self.forwardLogitsOpts(ctx, tokens, null, opts);
+            defer logits.deinit();
+            var value = try logits.value.clone(ctx.allocator);
+            errdefer value.deinit();
+            return fucina.Tensor(.{ .seq, .vocab }).fromTensor(ctx, value);
+        }
+
+        /// `evalLogitsExt` restricted to the logits of `rows` — the
+        /// memory-bounded teacher pass (a [rows, vocab] slice instead of
+        /// the full block; gemma vocabularies are wide).
+        pub fn evalLogitsRows(self: *Self, ctx: *ExecContext, tokens: []const usize, rows: []const usize, opts: ForwardOptions) !fucina.Tensor(.{ .seq, .vocab }) {
+            if (opts.capture != null) return Error.CartridgeGeometry;
+            const scope = ctx.openExecScope();
+            defer ctx.closeExecScope(scope);
+            var hidden = try self.forwardHiddenOpts(ctx, tokens, null, opts);
+            defer hidden.deinit();
+            var picked = try hidden.gather(ctx, .seq, rows, .seq);
+            defer picked.deinit();
+            var logits = try self.logitsTail(ctx, &picked);
+            defer logits.deinit();
+            var value = try logits.value.clone(ctx.allocator);
+            errdefer value.deinit();
+            return fucina.Tensor(.{ .seq, .vocab }).fromTensor(ctx, value);
+        }
+
+        /// Cartridge training step loss for gemma4: the teacher top-k
+        /// distillation objective over this model's logits computed BEHIND
+        /// `cart` (tokens at positions p..). Composed tail on purpose: the
+        /// soft-capped / quantized gemma heads have no fused-distill route.
+        /// Same exec-scope requirement and scope-owned result as `loss`;
+        /// gradients reach the cartridge's trainable rows only when the
+        /// trainer has no adapters (`Trainer(.{ .q = false, ... })`).
+        pub fn distillLoss(
+            self: *Self,
+            ctx: *ExecContext,
+            tokens: []const usize,
+            cart: *const cartridge_mod.Cartridge,
+            distill_targets: cartridge_mod.DistillTargets,
+            options: cartridge_mod.DistillOptions,
+        ) !fucina.Tensor(.{}) {
+            if (!ctx.execScopeActive()) return Error.ExecScopeRequired;
+            const step = self.step_counter;
+            self.step_counter += 1;
+            var logits = try self.forwardLogitsOpts(ctx, tokens, step, .{ .cartridge = cart });
+            defer logits.deinit();
+            return cartridge_mod.distillLoss(ctx, &logits, distill_targets, options);
+        }
+
         fn forwardLogits(self: *Self, ctx: *ExecContext, tokens: []const usize, step: ?u64) !fucina.Tensor(.{ .seq, .vocab }) {
+            return self.forwardLogitsOpts(ctx, tokens, step, .{});
+        }
+
+        fn forwardLogitsOpts(self: *Self, ctx: *ExecContext, tokens: []const usize, step: ?u64, opts: ForwardOptions) !fucina.Tensor(.{ .seq, .vocab }) {
+            var x = try self.forwardHiddenOpts(ctx, tokens, step, opts);
+            defer x.deinit();
+            return self.logitsTail(ctx, &x);
+        }
+
+        /// The layer-stack body of `forwardLogitsOpts`: embedding → layers,
+        /// returning the RAW residual stream (no output norm/projection).
+        fn forwardHiddenOpts(self: *Self, ctx: *ExecContext, tokens: []const usize, step: ?u64, opts: ForwardOptions) !Hidden {
             if (tokens.len == 0) return Error.InvalidSequenceLength;
             if (self.model.ple != null) return Error.PleUnsupported;
 
             const model = self.model;
             const cfg = model.config;
-            const rope = try self.prepareRope(ctx, tokens.len);
+            if (opts.cartridge != null or opts.capture != null) try self.requireOwnedKv();
+            const offset: usize = if (opts.cartridge) |cart| cart.p else 0;
+            const rope = try self.prepareRope(ctx, tokens.len, offset);
 
             var x = try model.token_embedding.getRowsAs(ctx, tokens, .embed);
-            defer x.deinit();
+            errdefer x.deinit();
             x = try ctx.replace(x, x.scale(ctx, @sqrt(@as(f32, @floatFromInt(cfg.hidden_size)))));
 
             for (model.layers, 0..) |*layer, layer_i| {
@@ -575,13 +720,20 @@ pub fn Trainer(comptime targets: Targets) type {
                 if (layer.moe) |*moe| {
                     if (moe.gpu_weights == null) return Error.RawMoeWeightsRequired;
                 }
-                x = try ctx.replace(x, self.layerBody(ctx, layer, layer_i, rope, &x, self.layerSeeds(step, layer_i), &self.adapters[layer_i]));
+                x = try ctx.replace(x, self.layerBody(ctx, layer, layer_i, rope, &x, self.layerSeeds(step, layer_i), &self.adapters[layer_i], opts));
                 if (layer.out_scale) |s| x = try ctx.replace(x, x.scale(ctx, s));
             }
+            return x;
+        }
 
+        /// The final-norm + output-projection (+ soft-cap) tail of
+        /// `forwardLogitsOpts`, factored so row-subset evals can gather
+        /// residual rows first.
+        fn logitsTail(self: *Self, ctx: *ExecContext, x: *const Hidden) !fucina.Tensor(.{ .seq, .vocab }) {
+            const model = self.model;
+            const cfg = model.config;
             var normed = try x.rmsNormMul(ctx, .embed, &model.output_norm, cfg.rms_norm_eps);
             defer normed.deinit();
-            x.deinit();
             var logits = try dotLinear(&model.output, ctx, &normed, .embed, .vocab);
             if (cfg.final_logit_softcapping != 0) {
                 const sc = cfg.final_logit_softcapping;
@@ -595,13 +747,14 @@ pub fn Trainer(comptime targets: Targets) type {
             return logits;
         }
 
-        fn prepareRope(self: *Self, ctx: *ExecContext, seq_len: usize) !*const RopeTables {
-            if (self.rope_tables.get(seq_len)) |tables| return tables;
+        fn prepareRope(self: *Self, ctx: *ExecContext, seq_len: usize, offset: usize) !*const RopeTables {
+            const key = RopeKey{ .offset = offset, .len = seq_len };
+            if (self.rope_tables.get(key)) |tables| return tables;
 
             const cfg = self.model.config;
             const positions = try ctx.allocator.alloc(i32, seq_len);
             defer ctx.allocator.free(positions);
-            for (positions, 0..) |*position, i| position.* = @intCast(i);
+            for (positions, 0..) |*position, i| position.* = @intCast(offset + i);
 
             const fresh = try self.allocator.create(RopeTables);
             errdefer self.allocator.destroy(fresh);
@@ -612,7 +765,7 @@ pub fn Trainer(comptime targets: Targets) type {
             };
             errdefer fresh.deinit();
 
-            try self.rope_tables.put(self.allocator, seq_len, fresh);
+            try self.rope_tables.put(self.allocator, key, fresh);
             return fresh;
         }
 
@@ -760,6 +913,7 @@ pub fn Trainer(comptime targets: Targets) type {
             hidden: *const Hidden,
             seeds: [n_targets]?u64,
             ads: *const LayerAdapters,
+            opts: ForwardOptions,
         ) !Hidden {
             const cfg = self.model.config;
             const geom = self.model.geom;
@@ -804,7 +958,32 @@ pub fn Trainer(comptime targets: Targets) type {
             var v_norm = try v3.rmsNorm(ctx, .d, cfg.rms_norm_eps);
             defer v_norm.deinit();
 
-            var attn = try q_rope.groupedAttention(ctx, &k_rope, &v_norm, kv_head_for_head, .attn, 1.0, .{ .window = window });
+            if (opts.capture) |cap| {
+                // Copy the freshly computed cache-layout rows (post
+                // q/k-norm + RoPE keys, post-norm values) — exactly what
+                // `Model.forwardStep` appends to its KvCache, and the
+                // cartridge init payload.
+                var k_contig = try k_rope.contiguous(ctx);
+                defer k_contig.deinit();
+                @memcpy(cap.k_rows[layer_i], try k_contig.dataConst());
+                var v_contig = try v_norm.contiguous(ctx);
+                defer v_contig.deinit();
+                @memcpy(cap.v_rows[layer_i], try v_contig.dataConst());
+            }
+
+            var attn = if (opts.cartridge) |cart| blk: {
+                // Trained KV prefix: every query attends the whole prefix
+                // (within the layer's window on SWA layers — a real prefill
+                // behaves identically), then causally over the real tokens;
+                // gradients reach the cartridge's trainable rows through
+                // the concat.
+                const cart_layer = &cart.layers[layer_i];
+                var k_cat = try cart_layer.catK(ctx, &k_rope);
+                defer k_cat.deinit();
+                var v_cat = try cart_layer.catV(ctx, &v_norm);
+                defer v_cat.deinit();
+                break :blk try q_rope.groupedAttention(ctx, &k_cat, &v_cat, kv_head_for_head, .attn, 1.0, .{ .window = window });
+            } else try q_rope.groupedAttention(ctx, &k_rope, &v_norm, kv_head_for_head, .attn, 1.0, .{ .window = window });
             defer attn.deinit();
 
             var attn_base = try dotLinear(&layer.o_proj, ctx, &attn, .attn, .embed);

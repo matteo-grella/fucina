@@ -88,45 +88,11 @@ pub const Injection = struct {
     row: *const Hidden,
 };
 
-/// Per-layer host copies of the post-q/k-norm, post-RoPE keys and the values
-/// of one forward pass — `[seq * kv_heads * head_dim]` floats per layer in
-/// KV-cache row order, the exact payload `cartridge.Cartridge.initFromRows`
-/// consumes (the paper's corpus-token initialization). Fill by passing the
-/// struct as `ForwardOptions.capture`; `Trainer.captureKv` wraps the flow.
-pub const KvCapture = struct {
-    k_rows: [][]f32,
-    v_rows: [][]f32,
-    allocator: Allocator,
-
-    pub fn init(allocator: Allocator, n_layers: usize, row_len: usize) !KvCapture {
-        const k_rows = try allocator.alloc([]f32, n_layers);
-        errdefer allocator.free(k_rows);
-        const v_rows = try allocator.alloc([]f32, n_layers);
-        errdefer allocator.free(v_rows);
-        var built: usize = 0;
-        errdefer for (0..built) |i| {
-            allocator.free(k_rows[i]);
-            allocator.free(v_rows[i]);
-        };
-        for (k_rows, v_rows) |*k, *v| {
-            k.* = try allocator.alloc(f32, row_len);
-            errdefer allocator.free(k.*);
-            v.* = try allocator.alloc(f32, row_len);
-            built += 1;
-        }
-        return .{ .k_rows = k_rows, .v_rows = v_rows, .allocator = allocator };
-    }
-
-    pub fn deinit(self: *KvCapture) void {
-        for (self.k_rows, self.v_rows) |k, v| {
-            self.allocator.free(k);
-            self.allocator.free(v);
-        }
-        self.allocator.free(self.k_rows);
-        self.allocator.free(self.v_rows);
-        self.* = undefined;
-    }
-};
+/// Shared capture payload (see `cartridge.KvCapture`): per-layer host
+/// copies of the post-q/k-norm, post-RoPE keys and the values of one
+/// forward pass. Fill via `ForwardOptions.capture`; `Trainer.captureKv`
+/// wraps the flow.
+pub const KvCapture = cartridge_mod.KvCapture;
 
 /// Options for `Trainer.forwardHidden` / `Trainer.evalLastLogitsExt`: run
 /// layers [start_layer, start_layer + layer_count) over the token embedding

@@ -78,6 +78,7 @@ services.
 |---|---|
 | Cartridge type, distillation loss, targets builder, persistence, serving write | `src/llm/cartridge.zig` (§13.10 in `docs/REFERENCE.md`) |
 | Training seams: `ForwardOptions.{cartridge, capture}`, `Trainer.{initCartridge, captureKv, distillLoss, evalLogitsExt, evalLogitsRows}`, (offset, len)-keyed rope tables | `src/llm/qwen3/train.zig` |
+| gemma4 training seams (same surface; SWA windows, dual-theta + rope-factor tables, MoE layers, per-layer heterogeneous KV geometry via `Cartridge.initFromRowsVaried`; composed distill tail — soft-capped/quantized heads have no fused route) | `src/llm/gemma/gemma4_train.zig` |
 | CLI: `--equiv` gate, self-study training, `--load`/`--ask` serving | `examples/cartridge.zig` (`zig build cartridge`) |
 | HTTP serving: lmserve `--cartridge` — every conversation preloads the prefix; slot reuse offsets past it (`Conversation.notePrefixRows` / `WarmState.prefix_rows`) | `examples/lmserve.zig`, `examples/lmserve/backend.zig`, `src/llm/chat.zig` (`docs/LMSERVER.md`) |
 | Mechanism tests + torch 2.12 golden (`tools/gen_cartridge_goldens.py`) | `src/llm/cartridge_tests.zig`, `src/llm/cartridge_golden_tests.zig` |
@@ -294,6 +295,33 @@ documentation as the corpus:
   **28.5 → 12.7 s/conversation (2.2×) at 1.7B-bf16** with identical
   per-step losses (+4 bytes/weight resident, static weights only; see
   `docs/GPU-OFFLOAD.md`).
+
+## gemma4 (measured)
+
+The gemma4 trainer carries the same cartridge surface as qwen3
+(`initCartridge` / `captureKv` / `evalLogitsExt` / `evalLogitsRows` /
+`distillLoss`), covering gemma-4's architecture: local-SWA layers (a
+served cartridge is visible to a SWA query exactly as a real prefix —
+within the window), dual-theta rope with per-frequency factors on global
+layers, MoE FFNs (distillation gradients flow through router + experts
+into the prefix rows), and PER-LAYER heterogeneous KV geometry
+(gemma-4 26B mixes 8-head/256-dim SWA layers with 2-head/512-dim
+globals; `Cartridge.initFromRowsVaried` + per-layer state-dict recovery
+carry it end to end). Mechanism gates are exact (1e-5) on tiny models
+for all four arms: dense, SWA-cuts-the-prefix, MoE, and rope-factors
+with offset positions. Cross-layer shared-KV models are rejected
+(`CartridgeGeometry`); packed segments are not routed on gemma4.
+
+On real quantized-MoE weights, logit-level equivalence has an intrinsic
+bound that has nothing to do with cartridges: the stack is NOT
+shape-invariant across GEMM kernel classes (measured on
+gemma-4-26B-A4B Q6_K, no cartridge anywhere: the same 32 rows forwarded
+alone vs inside a 96-row batch differ by up to ~12 logits — near-tie
+experts flip). The CLI's gemma `--equiv` arm therefore measures the
+model's own shape-sensitivity envelope first and judges the cartridge
+against it (the cartridge student necessarily runs suffix-shaped
+GEMMs). Serving trained gemma cartridges is the existing lmserve
+`--cartridge` path; this CLI's self-study loops are qwen3-typed.
 
 ## Follow-ups (not landed)
 

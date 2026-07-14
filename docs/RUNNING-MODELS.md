@@ -748,6 +748,13 @@ zig build lmserve -Doptimize=ReleaseFast -- models/Qwen3-0.6B-f16.gguf \
 # curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' \
 #   -d '{"model":"m","messages":[{"role":"user","content":"What is Fucina, in one sentence?"}]}'
 
+# gemma GGUFs (dense or MoE) route to the gemma4 trainer arm; --equiv runs the
+# acceptance gate with the model's shape-sensitivity envelope printed first
+# (quantized-MoE stacks are not GEMM-shape-invariant — see docs/CARTRIDGES.md
+# "gemma4"). Train via the gemma4 trainer API; serve via lmserve --cartridge.
+zig build cartridge -Doptimize=ReleaseFast -- --model models/gemma-4-26B-A4B-it-UD-Q6_K.gguf \
+  --corpus README.md --equiv --p 64 --suffix-max 32
+
 # Useful extras: --p N (prefix rows)  --frozen N (attention-sink rows, default 1)
 #                --steps/--accum/--lr (optimizer)  --chunk-min/--chunk-max (corpus spans)
 #                --top-k N (teacher entries/token)  --max-q/--max-a (bot budgets)  --seed N

@@ -6,6 +6,7 @@ const gemma4_train = @import("gemma4_train.zig");
 
 const fucina = @import("fucina");
 const gemma4 = @import("gemma4.zig");
+const cartridge = @import("../cartridge.zig");
 const gemma_moe = @import("moe.zig");
 const weights = @import("../weights.zig");
 
@@ -472,4 +473,169 @@ test "gemma4_train dense trainer lossExt smoke: defaults match loss, sum/scale b
         }
     }
     try std.testing.expect(saw_grad);
+}
+
+const CartridgeTrainer = Trainer(.{ .q = false, .v = false });
+
+test "gemma4 corpus-init cartridge is logit-equivalent to a real prefill (SWA + global)" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    var cfg = tiny_config;
+    cfg.num_layers = 2;
+    cfg.sliding_window = 4;
+    var model = try buildTinyModel(&ctx, cfg, 0xca27a1d6e, false);
+    defer model.deinit();
+    // Layer 1 becomes a local SWA layer whose 4-token window CUTS through
+    // the prefix (a query at position 5 sees prefix rows 2..4 only) — the
+    // gemma-specific arm of the equivalence.
+    model.geom.is_swa[1] = true;
+
+    var trainer = try CartridgeTrainer.init(&ctx, &model, .{ .rank = 1, .alpha = 1 }, 7);
+    defer trainer.deinit();
+
+    const full = [_]usize{ 14, 6, 25, 0, 13, 1, 26, 22, 5, 29, 31, 2 };
+    const p = 5;
+    const suffix = full[p..];
+
+    var teacher = try trainer.evalLogitsExt(&ctx, &full, .{});
+    defer teacher.deinit();
+
+    var cart = try trainer.initCartridge(&ctx, full[0..p], 1);
+    defer cart.deinit();
+    try std.testing.expectEqual(@as(usize, p), cart.p);
+
+    var student = try trainer.evalLogitsExt(&ctx, suffix, .{ .cartridge = &cart });
+    defer student.deinit();
+
+    const vocab = model.config.vocab_size;
+    const teacher_data = try teacher.dataConst();
+    const student_data = try student.dataConst();
+    try std.testing.expectEqual(@as(usize, suffix.len * vocab), student_data.len);
+    for (student_data, teacher_data[p * vocab ..], 0..) |got, want, i| {
+        const tol = 1e-5 + 1e-4 * @abs(want);
+        if (@abs(got - want) > tol) {
+            std.debug.print("gemma4 prefill-equivalence mismatch at {d}: want {d} got {d}\n", .{ i, want, got });
+            return error.PrefillEquivalenceMismatch;
+        }
+    }
+}
+
+test "gemma4 corpus-init cartridge equivalence with rope frequency factors" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    var cfg = tiny_config;
+    cfg.num_layers = 2;
+    cfg.sliding_window = 4;
+    var model = try buildTinyModel(&ctx, cfg, 0xca27f4c705, false);
+    defer model.deinit();
+    model.geom.is_swa[0] = true;
+    // Non-trivial per-frequency factors on the global-layer table (the
+    // gemma-4 longrope-style rope_freqs arm), combined with the student's
+    // offset positions.
+    model.rope_freqs = try fucina.Tensor(.{.rope}).fromSlice(&ctx, .{cfg.head_dim_global / 2}, &.{ 1.0, 2.0, 0.5, 1.5 });
+
+    var trainer = try CartridgeTrainer.init(&ctx, &model, .{ .rank = 1, .alpha = 1 }, 7);
+    defer trainer.deinit();
+
+    const full = [_]usize{ 14, 6, 25, 0, 13, 1, 26, 22, 5, 29, 31, 2 };
+    const p = 5;
+    const suffix = full[p..];
+
+    var teacher = try trainer.evalLogitsExt(&ctx, &full, .{});
+    defer teacher.deinit();
+    var cart = try trainer.initCartridge(&ctx, full[0..p], 1);
+    defer cart.deinit();
+    var student = try trainer.evalLogitsExt(&ctx, suffix, .{ .cartridge = &cart });
+    defer student.deinit();
+
+    const vocab = model.config.vocab_size;
+    const teacher_data = try teacher.dataConst();
+    const student_data = try student.dataConst();
+    for (student_data, teacher_data[p * vocab ..]) |got, want| {
+        try std.testing.expect(@abs(got - want) <= 1e-5 + 1e-4 * @abs(want));
+    }
+}
+
+test "gemma4 distillation pulls a random cartridge toward the teacher (MoE, sink frozen)" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try buildTinyMoeModel(&ctx, 0xca27d157111);
+    defer model.deinit();
+    var trainer = try CartridgeTrainer.init(&ctx, &model, .{ .rank = 1, .alpha = 1 }, 9);
+    defer trainer.deinit();
+
+    const full = [_]usize{ 40, 6, 25, 0, 13, 1, 26, 22, 5, 29, 44, 2 };
+    const p = 5;
+    const suffix = full[p..];
+
+    var teacher = try trainer.evalLogitsExt(&ctx, &full, .{});
+    defer teacher.deinit();
+    const vocab = model.config.vocab_size;
+    const teacher_data = try teacher.dataConst();
+    var builder = cartridge.TargetsBuilder.init(allocator);
+    defer builder.deinit();
+    for (1..suffix.len) |j| {
+        const row = teacher_data[(p + j - 1) * vocab ..][0..vocab];
+        try builder.appendRow(j, row, 5, 0.99);
+    }
+
+    var cart = try cartridge.Cartridge.initRandom(
+        &ctx,
+        allocator,
+        model.config.num_layers,
+        1,
+        p,
+        model.geom.kv_heads[0],
+        model.geom.head_dim[0],
+        123,
+        0.05,
+    );
+    defer cart.deinit();
+
+    var opt = optim.AdamW.init(allocator, .{ .lr = 2e-2, .weight_decay = 0 });
+    defer opt.deinit();
+    try cart.registerParams(&opt);
+
+    const sink_before = try allocator.dupe(f32, try cart.layers[0].k_sink.?.dataConst());
+    defer allocator.free(sink_before);
+    const k_before = try allocator.dupe(f32, try cart.layers[0].k.dataConst());
+    defer allocator.free(k_before);
+
+    var first: f32 = 0;
+    var last: f32 = 0;
+    for (0..8) |step_i| {
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        var loss = try trainer.distillLoss(&ctx, suffix, &cart, builder.targets(), .{});
+        defer loss.deinit();
+        try loss.backward(&ctx);
+        const value = try loss.item();
+        if (step_i == 0) first = value;
+        last = value;
+        try opt.step(&ctx);
+        opt.zeroGrad();
+    }
+    try std.testing.expect(last < first);
+    try std.testing.expectEqualSlices(f32, sink_before, try cart.layers[0].k_sink.?.dataConst());
+    var changed = false;
+    for (k_before, try cart.layers[0].k.dataConst()) |before, after| {
+        if (before != after) {
+            changed = true;
+            break;
+        }
+    }
+    try std.testing.expect(changed);
 }

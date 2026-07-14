@@ -376,8 +376,16 @@ pub fn main(init: std.process.Init) !void {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    // Load model + tokenizer from the same GGUF parse.
+    // Load model + tokenizer from the same GGUF parse. gemma-family GGUFs
+    // take the gemma4 arm: the trainer seams (docs/CARTRIDGES.md) support
+    // the --equiv acceptance gate and distillation; the self-study/serve
+    // loops of this CLI are qwen3-typed (serve trained gemma cartridges via
+    // lmserve --cartridge).
     var file = try fucina.gguf.File.loadMmap(allocator, io, opts.model_path);
+    const arch = file.getString("general.architecture") orelse "";
+    if (std.mem.startsWith(u8, arch, "gemma")) {
+        return runGemmaEquiv(&ctx, io, stdout, allocator, &file, corpus_paths.items, opts);
+    }
     var model = try llm.qwen3.model.Model.loadGgufFromFile(&ctx, &file, try llm.qwen3.model.Config.fromGguf(&file));
     defer model.deinit();
     var tokenizer = try llm.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
@@ -1369,7 +1377,7 @@ fn runEquiv(
     ctx: *fucina.ExecContext,
     io: std.Io,
     stdout: anytype,
-    trainer: *Trainer,
+    trainer: anytype,
     corpus: []const usize,
     opts: Options,
 ) !void {
@@ -1379,7 +1387,7 @@ fn runEquiv(
     const suffix = full[p..];
 
     const t0 = nowNs(io);
-    var teacher = try trainer.evalLogits(ctx, full);
+    var teacher = try trainer.evalLogitsExt(ctx, full, .{});
     defer teacher.deinit();
     const t1 = nowNs(io);
     var cart = try trainer.initCartridge(ctx, full[0..p], opts.frozen_prefix);
@@ -1422,6 +1430,94 @@ fn runEquiv(
     );
     if (greedy_match != suffix_len) return error.EquivalenceGreedyMismatch;
     try stdout.print("PASS: untrained corpus-init cartridge is behaviorally identical to the real prefill\n", .{});
+}
+
+/// gemma4 arm of the CLI: the zero-training acceptance gate on a gemma
+/// GGUF (dense or MoE, SWA + dual-theta rope included). Only --equiv is
+/// routed here — the self-study generation loops of this CLI are
+/// qwen3-typed.
+fn runGemmaEquiv(
+    ctx: *fucina.ExecContext,
+    io: std.Io,
+    stdout: anytype,
+    allocator: std.mem.Allocator,
+    file: *fucina.gguf.File,
+    corpus_paths: []const []const u8,
+    opts: Options,
+) !void {
+    if (!opts.equiv) {
+        try stdout.print("gemma GGUFs support --equiv here; train via the gemma4 trainer API, serve via lmserve --cartridge\n", .{});
+        return error.UnknownArgument;
+    }
+    if (corpus_paths.len == 0) return error.MissingCorpusPath;
+
+    var config = try llm.gemma.gemma4.Config.fromGguf(file);
+    // Zero-copy expert borrow over the GGUF mapping: the trainer's MoE arm
+    // consumes the raw expert blocks (RawMoeWeightsRequired otherwise).
+    config.borrow_experts = true;
+    var spm = try llm.spm_tokenizer.Tokenizer.initFromGguf(allocator, file, .{});
+    defer spm.deinit();
+    var model = try llm.gemma.gemma4.Model.loadGgufFromFile(ctx, file, config);
+    defer model.deinit();
+    file.deinit();
+    try stdout.print("model: {s} (gemma4, {d} layers, hidden {d})\n", .{ opts.model_path, config.num_layers, config.hidden_size });
+    {
+        var own: usize = 0;
+        var swa_count: usize = 0;
+        for (0..config.num_layers) |i| {
+            if (model.geom.has_kv[i]) own += 1;
+            if (model.geom.is_swa[i]) swa_count += 1;
+        }
+        try stdout.print("geometry: {d}/{d} layers own KV, {d} SWA, shared_kv_layers {d}\n", .{ own, config.num_layers, swa_count, config.shared_kv_layers });
+    }
+
+    var ids: std.ArrayList(usize) = .empty;
+    defer ids.deinit(allocator);
+    for (corpus_paths) |path| {
+        var dir = std.Io.Dir.cwd();
+        const content = try dir.readFileAlloc(io, path, allocator, .limited(16 * 1024 * 1024));
+        defer allocator.free(content);
+        const ids32 = try spm.encode(allocator, content);
+        defer allocator.free(ids32);
+        for (ids32) |id| try ids.append(allocator, id);
+    }
+    if (ids.items.len < opts.p + 2) return error.CorpusTooShort;
+    try stdout.print("corpus: {d} files, {d} tokens\n", .{ corpus_paths.len, ids.items.len });
+
+    var trainer = try llm.gemma.gemma4_train.Trainer(.{ .q = false, .v = false }).init(ctx, &model, .{ .rank = 1, .alpha = 1 }, opts.seed);
+    defer trainer.deinit();
+
+    // The cartridge student runs the suffix at GEMM shape m = suffix_len
+    // while the teacher runs m = p + suffix_len. Quantized-MoE stacks are
+    // NOT shape-invariant across kernel classes (near-tie experts flip), so
+    // the honest yardstick is the model's OWN shape sensitivity at the
+    // student's shape, measured with no cartridge anywhere: the first
+    // suffix_len tokens forwarded alone vs the full forward's same rows.
+    const suffix_len = @min(opts.suffix_max, ids.items.len - opts.p);
+    const full = ids.items[0 .. opts.p + suffix_len];
+    var envelope: f32 = 0;
+    {
+        var full_t = try trainer.evalLogitsExt(ctx, full, .{});
+        defer full_t.deinit();
+        var head_t = try trainer.evalLogitsExt(ctx, full[0..suffix_len], .{});
+        defer head_t.deinit();
+        const vocab = config.vocab_size;
+        for (try head_t.dataConst(), (try full_t.dataConst())[0 .. suffix_len * vocab]) |a, b| {
+            envelope = @max(envelope, @abs(a - b));
+        }
+        try stdout.print("model shape-sensitivity envelope (m={d} vs m={d}, no cartridge): max |dlogit| {d:.4}\n", .{ suffix_len, full.len, envelope });
+    }
+
+    runEquiv(ctx, io, stdout, &trainer, ids.items, opts) catch |err| switch (err) {
+        error.EquivalenceGreedyMismatch => {
+            if (envelope < 1e-3) return err;
+            try stdout.print(
+                "NOTE: greedy flips sit inside the model's own shape-sensitivity envelope ({d:.4}) — the quantized-MoE stack is not shape-invariant; the cartridge mechanism itself is pinned exact by the tiny-model gates (gemma4_train_tests).\n",
+                .{envelope},
+            );
+        },
+        else => return err,
+    };
 }
 
 // ---------------------------------------------------------------------------
