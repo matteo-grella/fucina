@@ -931,7 +931,7 @@ unsupported operation is a compile error, never a runtime failure
 |---|---|---|
 | Float (differentiable) | `.f32` | Full surface: autograd (`variable`, `backward`, `grad`), all math/NN ops (§4), all views and structural ops |
 | Typed float | `.f16`, `.bf16`, `.f64` (`supportsForwardFloatMath`) | Forward math: the native typed set (`add/sub/mul/div/sum/mean/sumAll/dot/scale/divScalar`, `to`), the full structural set (`split`/`merge`/`flatten`/`reshape`/`sliceStep`/`flip`/`roll`/`stack`/`repeatAxis` + the §3.10 base set), and — **f16/bf16 only** — the widened forward set (unary family, gated, softmax/norm family, remaining reductions, masks, `pad`, `einsum`; §4.19). **f16/bf16 only, autograd LEAVES**: `variable`/`variableFromSlice` with f32 gradients; differentiable `to` casts and mixed-RHS `dot`/`einsum` are the graph entries (§5.1) |
-| Typed scalar constant | `.bool`, `.u8`, `.u16`, `.i8`, `.i16`, `.i32`, `.i64` | Constants only; construction, data access, structural ops, `to` (scalar casts, §3.8), and integer forward math (§4.19): wrapping `add`/`sub`/`mul`, `maximum`/`minimum`, explicit `divTrunc`/`divFloor`, i64-returning `sum`/`sumAll`, plus exact integer `compare` (§4.6). `.bool` keeps only `to`, the counting `sum`/`sumAll`, and the mask combinators `logicalAnd`/`logicalOr`/`logicalXor`/`logicalNot` |
+| Typed scalar constant | `.bool`, `.u8`, `.u16`, `.i8`, `.i16`, `.i32`, `.i64` | Constants only; construction, data access, structural ops, `to` (scalar casts, §3.8), and integer forward math (§4.19): wrapping `add`/`sub`/`mul`, `maximum`/`minimum`, explicit `divTrunc`/`divFloor` + `rem`/`mod`, bitwise `bitAnd`/`bitOr`/`bitXor`, i64-returning `sum`/`sumAll`, plus exact integer `compare` (§4.6). `.bool` keeps only `to`, the counting `sum`/`sumAll`, and the mask combinators `logicalAnd`/`logicalOr`/`logicalXor`/`logicalNot` |
 | Block-quantized constant | `q1_0`, `q4_0 … q8_k`, `iq*`, `tq1_0/tq2_0`, `mxfp4`, `nvfp4` (`isBlockQuantized`) | Constants only; block construction, `to(.f32)` dequantize, `getRows`, row `concat`, `packRhs`/`packRhsLayout` (§10) |
 
 Notes that follow from the dtype layer (`src/dtype.zig`, detailed in §8):
@@ -1882,7 +1882,8 @@ is the N-ary companion of `einsum` (§4.8).
 `permuteTo`, `transpose`, `insertAxis`, `squeeze`, `broadcastTo`, `gather`,
 `narrow`, `concat`, `setSlice`, `setRows` — all §3 — plus `to` (§3.8), the
 integer forward math `add`, `sub`, `mul`, `maximum`, `minimum`,
-`divTrunc`, `divFloor`, `sum`, `sumAll` (§4.19; on `.bool` the arithmetic
+`divTrunc`, `divFloor`, `rem`, `mod`, `bitAnd`, `bitOr`, `bitXor`,
+`sum`, `sumAll` (§4.19; on `.bool` the arithmetic
 entries are compile errors — `to` and the counting `sum`/`sumAll` apply),
 integer `compare` (§4.6, exact at any magnitude), and — on `.bool` only —
 the mask combinators `logicalAnd`, `logicalOr`, `logicalXor`,
@@ -2138,6 +2139,9 @@ ops:
 - `leakyRelu(ctx, negative_slope)` — differentiable, dedicated backward.
 - `clamp(ctx, min_value, max_value)` — differentiable; gradient is zero
   outside `[min, max]`.
+- `clampMin(ctx, min_value)` / `clampMax(ctx, max_value)` — one-sided
+  clamps (torch's `clamp_min`/`clamp_max`); the open side is ±inf, so
+  values and gradients pass through it untouched.
 - `dropout(ctx, p, seed)` — inverted dropout: keeps `x[i]/(1−p)` iff the
   per-element counter RNG at `(seed, i)` draws below `1−p`. The mask is
   never stored: forward, backward, and checkpoint recompute regenerate it
@@ -3015,8 +3019,12 @@ is deliberately not fused — compose it with broadcast `add`):
   first, `[row, in]`); absent rows read as zeros; no gradient into `state`.
 - `groupedCausalConv1d(ctx, time_tag, in_tag, tap_tag, in_per_group_tag, out_tag, weight, dilation, groups, state)`
   — grouped variant, weight `[tap, in_per_group, out]`.
-- `causalDepthwiseConv1d(ctx, time_tag, channel_tag, tap_tag, kernel, state)`
-  — depthwise; `kernel: *const Tensor(.{ channel_tag, tap_tag })`.
+- `causalDepthwiseConv1d(ctx, time_tag, channel_tag, tap_tag, kernel, dilation, state)`
+  — depthwise; `kernel: *const Tensor(.{ channel_tag, tap_tag })` (tap
+  `taps−1` = the newest sample). `dilation` spaces the taps
+  (`y[t,c] = Σ_k x[t − dilation·(taps−1−k), c]·w[c,k]` — Engram's
+  ShortConv is `dilation = max_ngram_size`); `state`, when given,
+  supplies the `dilation·(taps−1)` rows preceding `x`, oldest first.
 - `convTranspose1d(ctx, time_tag, in_tag, kout_tag, out_tag, weight2, bias, out_channels, taps, stride, padding, output_pad)`
   — GEMM + col2im_1d (ggml decomposition); `weight2` is the load-time
   repacked `[K·OC, IC]` matrix (k fastest within each oc block), `bias` is
@@ -3543,9 +3551,17 @@ and `repinPass` adapts that tier live at generation boundaries.
   and `divFloor` (toward −inf), `error.DivisionByZero` on a zero divisor,
   minInt/−1 wrapping to minInt. There is deliberately no integer `div`:
   torch's `/` silently promotes integers to float, and Fucina keeps
-  promotion explicit (documented divergence). `sum`/`sumAll` accumulate
-  in i64 and RETURN `.i64` (torch's integer-sum dtype). `to` casts to any
-  scalar dtype (§3.8).
+  promotion explicit (documented divergence). Remainders pair the
+  divisions: `rem` pairs `divTrunc` (sign of the dividend, C `%` / Zig
+  `@rem`) and `mod` pairs `divFloor` (sign of the divisor, Python/numpy
+  `%` / Zig `@mod` — the n-gram-hash op); both error on a zero divisor
+  and define minInt % −1 as 0. Bitwise combinators `bitAnd`/`bitOr`/
+  `bitXor` operate on the two's-complement bit patterns (distinct from
+  the `.bool` truthiness `logicalAnd/Or/Xor`; `bitXor` with a wrapping
+  `mul` is exactly the multiplicative-XOR hash family, e.g. Engram §13).
+  All of these follow the standard tag-broadcast rule (§4.2).
+  `sum`/`sumAll` accumulate in i64 and RETURN `.i64` (torch's
+  integer-sum dtype). `to` casts to any scalar dtype (§3.8).
 - **`.bool`**: no pointwise arithmetic (compile error — cast first);
   `to` and the counting `sum`/`sumAll` (i64) apply, plus the structural
   subset.
@@ -3609,6 +3625,14 @@ test "integer math wraps, divides explicitly, and reduces to i64" {
     var quotient = try a.divFloor(&ctx, &b); // explicit: no integer `div`
     defer quotient.deinit();
     try std.testing.expectEqualSlices(i8, &.{ 127, -4 }, try quotient.dataConst());
+
+    var remainder = try a.mod(&ctx, &b); // floored: pairs divFloor
+    defer remainder.deinit();
+    try std.testing.expectEqualSlices(i8, &.{ 0, 1 }, try remainder.dataConst());
+
+    var mixed = try a.bitXor(&ctx, &b); // two's-complement bit patterns
+    defer mixed.deinit();
+    try std.testing.expectEqualSlices(i8, &.{ 126, -5 }, try mixed.dataConst());
 
     var total = try a.sumAll(&ctx); // integer reductions return i64
     defer total.deinit();

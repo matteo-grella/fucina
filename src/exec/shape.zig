@@ -167,9 +167,10 @@ pub fn productAfterAxis(comptime rank: usize, shape: [rank]usize, comptime axis:
     return n;
 }
 
-pub fn validateCausalDepthwiseState(state: ?[]const f32, channels: usize, taps: usize) !void {
-    if (taps == 0) return tensor.TensorError.InvalidShape;
-    const expected = try std.math.mul(usize, taps - 1, channels);
+pub fn validateCausalDepthwiseState(state: ?[]const f32, channels: usize, taps: usize, dilation: usize) !void {
+    if (taps == 0 or dilation == 0) return tensor.TensorError.InvalidShape;
+    const pad = try std.math.mul(usize, dilation, taps - 1);
+    const expected = try std.math.mul(usize, pad, channels);
     if (state) |values| {
         if (values.len != expected) return tensor.TensorError.InvalidDataLength;
     }

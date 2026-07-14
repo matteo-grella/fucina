@@ -67,6 +67,8 @@ test "tagged autograd exposes Tensor facade operations" {
         "gelu",
         "quickGelu",
         "clamp",
+        "clampMin",
+        "clampMax",
         "sum",
         "mean",
         "variance",
@@ -2210,7 +2212,7 @@ test "tagged public tensor causal depthwise conv uses optional history state" {
     });
     defer kernel.deinit();
 
-    var no_state = try input.causalDepthwiseConv1d(&ctx, .time, .channel, .tap, &kernel, null);
+    var no_state = try input.causalDepthwiseConv1d(&ctx, .time, .channel, .tap, &kernel, 1, null);
     defer no_state.deinit();
     try std.testing.expectEqualSlices(f32, &.{
         3,  300,
@@ -2222,7 +2224,7 @@ test "tagged public tensor causal depthwise conv uses optional history state" {
         -2, -20,
         4,  40,
     };
-    var with_state = try input.causalDepthwiseConv1d(&ctx, .time, .channel, .tap, &kernel, &state);
+    var with_state = try input.causalDepthwiseConv1d(&ctx, .time, .channel, .tap, &kernel, 1, &state);
     defer with_state.deinit();
     try std.testing.expectEqualSlices(f32, &.{
         9,  900,
@@ -2256,7 +2258,7 @@ test "tagged public tensor causal depthwise conv propagates input and kernel gra
         0.5, 5,
     };
 
-    var out = try input.causalDepthwiseConv1d(&ctx, .time, .channel, .tap, &kernel, &state);
+    var out = try input.causalDepthwiseConv1d(&ctx, .time, .channel, .tap, &kernel, 1, &state);
     defer out.deinit();
     var loss = try out.sumAll(&ctx);
     defer loss.deinit();
@@ -2277,6 +2279,97 @@ test "tagged public tensor causal depthwise conv propagates input and kernel gra
         0.5, 3.5, 6,
         5,   35,  60,
     }, gk.asRawTensor().dataConst());
+}
+
+test "dilated causal depthwise conv: hand values, state, grouped equivalence with gradients" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    // Hand case: dilation=2, taps=2 (tap 1 = newest):
+    // y[t] = 10·x[t-2] + 1·x[t].
+    var x1 = try Tensor(.{ .time, .channel }).fromSlice(&ctx, .{ 4, 1 }, &.{ 1, 2, 3, 4 });
+    defer x1.deinit();
+    var k1 = try Tensor(.{ .channel, .tap }).fromSlice(&ctx, .{ 1, 2 }, &.{ 10, 1 });
+    defer k1.deinit();
+    var y1 = try x1.causalDepthwiseConv1d(&ctx, .time, .channel, .tap, &k1, 2, null);
+    defer y1.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 1, 2, 13, 24 }, y1.asRawTensor().dataConst());
+
+    // Streaming state supplies the dilation·(taps−1) = 2 preceding rows.
+    var s1 = [_]f32{ 7, 9 };
+    var y1s = try x1.causalDepthwiseConv1d(&ctx, .time, .channel, .tap, &k1, 2, &s1);
+    defer y1s.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 71, 92, 13, 24 }, y1s.asRawTensor().dataConst());
+
+    // Wrong state length (taps−1 rows, the undilated count) is rejected.
+    var short_state = [_]f32{7};
+    try std.testing.expectError(error.InvalidDataLength, x1.causalDepthwiseConv1d(&ctx, .time, .channel, .tap, &k1, 2, &short_state));
+
+    // Equivalence against groupedCausalConv1d (groups == channels ==
+    // depthwise) at dilation=3, including both gradients.
+    const xs = [_]f32{
+        0.5,  -1.0,
+        2.0,  0.25,
+        -0.5, 1.5,
+        1.0,  -2.0,
+        3.0,  0.75,
+        -1.5, 0.5,
+        0.25, 2.5,
+    };
+    var input_dw = try Tensor(.{ .time, .channel }).variableFromSlice(&ctx, .{ 7, 2 }, &xs);
+    defer input_dw.deinit();
+    // Depthwise kernel [channel, tap].
+    var kernel_dw = try Tensor(.{ .channel, .tap }).variableFromSlice(&ctx, .{ 2, 3 }, &.{
+        1,  -2, 3,
+        -4, 5,  6,
+    });
+    defer kernel_dw.deinit();
+    var out_dw = try input_dw.causalDepthwiseConv1d(&ctx, .time, .channel, .tap, &kernel_dw, 3, null);
+    defer out_dw.deinit();
+    var loss_dw = try out_dw.sumAll(&ctx);
+    defer loss_dw.deinit();
+    try loss_dw.backward(&ctx);
+    var gx_dw = (try input_dw.grad(&ctx)).?;
+    defer gx_dw.deinit();
+    var gk_dw = (try kernel_dw.grad(&ctx)).?;
+    defer gk_dw.deinit();
+
+    // Grouped arm: weight [tap, in_per_group=1, out] with
+    // w[k][0][c] = kernel_dw[c][k].
+    var input_g = try Tensor(.{ .time, .in }).variableFromSlice(&ctx, .{ 7, 2 }, &xs);
+    defer input_g.deinit();
+    var weight_g = try Tensor(.{ .tap, .ipg, .out }).variableFromSlice(&ctx, .{ 3, 1, 2 }, &.{
+        1,  -4,
+        -2, 5,
+        3,  6,
+    });
+    defer weight_g.deinit();
+    var out_g = try input_g.groupedCausalConv1d(&ctx, .time, .in, .tap, .ipg, .out, &weight_g, 3, 2, null);
+    defer out_g.deinit();
+    try std.testing.expectEqualSlices(f32, out_g.asRawTensor().dataConst(), out_dw.asRawTensor().dataConst());
+
+    var loss_g = try out_g.sumAll(&ctx);
+    defer loss_g.deinit();
+    try loss_g.backward(&ctx);
+    var gx_g = (try input_g.grad(&ctx)).?;
+    defer gx_g.deinit();
+    try std.testing.expectEqualSlices(f32, gx_g.asRawTensor().dataConst(), gx_dw.asRawTensor().dataConst());
+    var gw_g = (try weight_g.grad(&ctx)).?;
+    defer gw_g.deinit();
+    // gk_dw is [channel, tap]; gw_g is [tap, 1, channel] — same values
+    // transposed.
+    const gk = gk_dw.asRawTensor().dataConst();
+    const gw = gw_g.asRawTensor().dataConst();
+    for (0..2) |c| {
+        for (0..3) |k| {
+            try std.testing.expectEqual(gk[c * 3 + k], gw[k * 2 + c]);
+        }
+    }
 }
 
 test "tagged public tensor general causal conv mixes channels with optional state" {
@@ -2921,6 +3014,37 @@ test "tagged autograd differentiates extended unary ops and clamp" {
         -1 + 1 + @cos(x1) - @sin(x1) + testTanhDerivative(x1) + testGeluDerivative(x1) + testQuickGeluDerivative(x1) + 0,
     };
     try expectCloseSlices(&expected, grad.asRawTensor().dataConst(), 1e-5);
+}
+
+test "clampMin/clampMax clamp one side and pass gradient through the open side" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var x = try Tensor(.{.d}).variableFromSlice(&ctx, .{3}, &.{ -2.0, 0.5, 3.0 });
+    defer x.deinit();
+
+    var lo = try x.clampMin(&ctx, 0.0);
+    defer lo.deinit();
+    try expectCloseSlices(&.{ 0.0, 0.5, 3.0 }, lo.asRawTensor().dataConst(), 0);
+    var hi = try x.clampMax(&ctx, 1.0);
+    defer hi.deinit();
+    try expectCloseSlices(&.{ -2.0, 0.5, 1.0 }, hi.asRawTensor().dataConst(), 0);
+
+    // d(clampMin)/dx = [0,1,1], d(clampMax)/dx = [1,1,0] — the open
+    // (infinite) side never clips values or gradients.
+    var total = try lo.add(&ctx, &hi);
+    defer total.deinit();
+    var loss = try total.sumAll(&ctx);
+    defer loss.deinit();
+    try loss.backward(&ctx);
+    var grad = (try x.grad(&ctx)).?;
+    defer grad.deinit();
+    try expectCloseSlices(&.{ 1.0, 2.0, 1.0 }, grad.asRawTensor().dataConst(), 0);
 }
 
 test "tagged autograd differentiates fused glu and swiglu" {
@@ -6848,9 +6972,9 @@ test "public Tensor rank/axis ops match the ctx *AxisRank kernels" {
     defer cin.deinit();
     var ker = try Tensor(.{ .channel, .taps }).fromSlice(&ctx, .{ 2, 3 }, &.{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6 });
     defer ker.deinit();
-    var cc = try cin.causalDepthwiseConv1d(&ctx, .time, .channel, .taps, &ker, null);
+    var cc = try cin.causalDepthwiseConv1d(&ctx, .time, .channel, .taps, &ker, 1, null);
     defer cc.deinit();
-    var cc_want = try ctx.causalDepthwiseConv1dAxisRank(2, cin.asRawTensor(), ker.asRawTensor(), 0, 1, null);
+    var cc_want = try ctx.causalDepthwiseConv1dAxisRank(2, cin.asRawTensor(), ker.asRawTensor(), 0, 1, 1, null);
     defer cc_want.deinit();
     try std.testing.expectEqualSlices(f32, cc_want.dataConst(), cc.asRawTensor().dataConst());
 
@@ -6935,7 +7059,7 @@ test "public Tensor rank/axis ops preserve autograd when a VJP exists" {
     defer conv_input.deinit();
     var conv_kernel = try Tensor(.{ .channel, .taps }).variableFromSlice(&ctx, .{ 2, 3 }, &.{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6 });
     defer conv_kernel.deinit();
-    var conv = try conv_input.causalDepthwiseConv1d(&ctx, .time, .channel, .taps, &conv_kernel, null);
+    var conv = try conv_input.causalDepthwiseConv1d(&ctx, .time, .channel, .taps, &conv_kernel, 1, null);
     defer conv.deinit();
     var conv_loss = try conv.sumAll(&ctx);
     defer conv_loss.deinit();
@@ -10458,6 +10582,88 @@ test "typed forward ops reject grad-requiring operands" {
     try std.testing.expect(!frozen.requiresGrad());
     var activated = try frozen.gelu(&ctx);
     defer activated.deinit();
+}
+
+test "integer tensors: rem/mod remainders and bitwise combinators" {
+    @setEvalBranchQuota(1_000_000);
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    // rem pairs divTrunc (sign of the dividend), mod pairs divFloor
+    // (sign of the divisor) — the mixed-sign quartet separates them.
+    const I8 = Tensor(.{ .dtype = .i8, .tags = .{.d} });
+    var a = try I8.fromSlice(&ctx, .{4}, &.{ -7, -7, 7, 7 });
+    defer a.deinit();
+    var b = try I8.fromSlice(&ctx, .{4}, &.{ 2, -2, 2, -2 });
+    defer b.deinit();
+    var r = try a.rem(&ctx, &b);
+    defer r.deinit();
+    try std.testing.expectEqualSlices(i8, &.{ -1, -1, 1, 1 }, try r.dataConst());
+    var m = try a.mod(&ctx, &b);
+    defer m.deinit();
+    try std.testing.expectEqualSlices(i8, &.{ 1, -1, 1, -1 }, try m.dataConst());
+
+    // minInt % -1 is 0 (the wrapping-div contract), zero divisor errors.
+    var min_int = try I8.fromSlice(&ctx, .{4}, &.{ -128, -128, 5, 5 });
+    defer min_int.deinit();
+    var neg_one = try I8.fromSlice(&ctx, .{4}, &.{ -1, -1, -1, -1 });
+    defer neg_one.deinit();
+    var wrapped = try min_int.mod(&ctx, &neg_one);
+    defer wrapped.deinit();
+    try std.testing.expectEqualSlices(i8, &.{ 0, 0, 0, 0 }, try wrapped.dataConst());
+    var zero = try I8.fromSlice(&ctx, .{4}, &.{ 1, 0, 1, 1 });
+    defer zero.deinit();
+    try std.testing.expectError(error.DivisionByZero, a.rem(&ctx, &zero));
+    try std.testing.expectError(error.DivisionByZero, a.mod(&ctx, &zero));
+
+    // Bitwise combinators work on the two's-complement bit patterns.
+    var x = try I8.fromSlice(&ctx, .{4}, &.{ -5, 12, 0, -1 });
+    defer x.deinit();
+    var y = try I8.fromSlice(&ctx, .{4}, &.{ 3, 10, -1, -1 });
+    defer y.deinit();
+    var xor = try x.bitXor(&ctx, &y);
+    defer xor.deinit();
+    try std.testing.expectEqualSlices(i8, &.{ -8, 6, -1, 0 }, try xor.dataConst());
+    var band = try x.bitAnd(&ctx, &y);
+    defer band.deinit();
+    try std.testing.expectEqualSlices(i8, &.{ 3, 8, 0, -1 }, try band.dataConst());
+    var bor = try x.bitOr(&ctx, &y);
+    defer bor.deinit();
+    try std.testing.expectEqualSlices(i8, &.{ -5, 14, -1, -1 }, try bor.dataConst());
+
+    // The n-gram-hash composition at i64 width — wrapping mul, xor, and
+    // floored mod against a broadcast [head] modulus vector — matches
+    // numpy exactly (values precomputed with numpy 2.4 int64 semantics).
+    const Row = Tensor(.{ .dtype = .i64, .tags = .{.seq} });
+    const Mods = Tensor(.{ .dtype = .i64, .tags = .{.head} });
+    var t0 = try Row.fromSlice(&ctx, .{3}, &.{ 5, 1, 3 });
+    defer t0.deinit();
+    var t1 = try Row.fromSlice(&ctx, .{3}, &.{ 2, 5, 1 });
+    defer t1.deinit();
+    var m0 = try Row.fromSlice(&ctx, .{3}, &.{ 6148914691236517205, 6148914691236517205, 6148914691236517205 });
+    defer m0.deinit();
+    var m1 = try Row.fromSlice(&ctx, .{3}, &.{ -7905747460161236407, -7905747460161236407, -7905747460161236407 });
+    defer m1.deinit();
+    var p0 = try t0.mul(&ctx, &m0);
+    defer p0.deinit();
+    var p1 = try t1.mul(&ctx, &m1);
+    defer p1.deinit();
+    try std.testing.expectEqualSlices(i64, &.{ -6148914691236517207, 6148914691236517205, -1 }, try p0.dataConst());
+    var mix = try p0.bitXor(&ctx, &p1);
+    defer mix.deinit();
+    try std.testing.expectEqualSlices(i64, &.{ -8198552921648689605, -8198552921648689608, 7905747460161236406 }, try mix.dataConst());
+    var mods = try Mods.fromSlice(&ctx, .{2}, &.{ 97, 89 });
+    defer mods.deinit();
+    var hashes = try mix.mod(&ctx, &mods);
+    defer hashes.deinit();
+    try std.testing.expectEqual(@as(usize, 3), hashes.dim(.seq));
+    try std.testing.expectEqual(@as(usize, 2), hashes.dim(.head));
+    try std.testing.expectEqualSlices(i64, &.{ 72, 2, 69, 88, 53, 66 }, try hashes.dataConst());
 }
 
 test "integer tensors: wrapping pointwise, explicit division, i64 reductions" {

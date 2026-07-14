@@ -81,6 +81,7 @@ pub const LossWrt = exec_loss.LossWrt;
 
 pub const TopKResult = exec_stats.TopKResult;
 pub const LogicalOp = exec_elementwise.LogicalOp;
+pub const IntBitwiseOp = exec_elementwise.IntBitwiseOp;
 
 pub const RouterTopKOptions = exec_topk.RouterTopKOptions;
 
@@ -479,6 +480,18 @@ pub const ExecContext = struct {
         return exec_elementwise.intDivRankTyped(&self.rt, dtype, rank, .floor, a, b);
     }
 
+    pub fn remRankTyped(self: *ExecContext, comptime dtype: DType, comptime rank: usize, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
+        return exec_elementwise.intModRankTyped(&self.rt, dtype, rank, .rem, a, b);
+    }
+
+    pub fn modRankTyped(self: *ExecContext, comptime dtype: DType, comptime rank: usize, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
+        return exec_elementwise.intModRankTyped(&self.rt, dtype, rank, .mod, a, b);
+    }
+
+    pub fn bitwiseRankTyped(self: *ExecContext, comptime dtype: DType, comptime rank: usize, comptime op: exec_elementwise.IntBitwiseOp, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
+        return exec_elementwise.intBitwiseRankTyped(&self.rt, dtype, rank, op, a, b);
+    }
+
     pub fn minRank(self: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
         return exec_elementwise.minRank(&self.rt, rank, a, b);
     }
@@ -683,9 +696,10 @@ pub const ExecContext = struct {
         kernel: *const Tensor,
         comptime time_axis: usize,
         comptime channel_axis: usize,
+        dilation: usize,
         state: ?[]const f32,
     ) !Tensor {
-        return exec_conv.causalDepthwiseConv1dAxisRank(&self.rt, rank, input, kernel, time_axis, channel_axis, state);
+        return exec_conv.causalDepthwiseConv1dAxisRank(&self.rt, rank, input, kernel, time_axis, channel_axis, dilation, state);
     }
 
     pub fn causalDepthwiseConv1dBackwardInputAxisRank(
@@ -695,8 +709,9 @@ pub const ExecContext = struct {
         kernel: *const Tensor,
         comptime time_axis: usize,
         comptime channel_axis: usize,
+        dilation: usize,
     ) !Tensor {
-        return exec_conv.causalDepthwiseConv1dBackwardInputAxisRank(&self.rt, rank, gy, kernel, time_axis, channel_axis);
+        return exec_conv.causalDepthwiseConv1dBackwardInputAxisRank(&self.rt, rank, gy, kernel, time_axis, channel_axis, dilation);
     }
 
     pub fn causalDepthwiseConv1dBackwardKernelAxisRank(
@@ -707,9 +722,10 @@ pub const ExecContext = struct {
         comptime time_axis: usize,
         comptime channel_axis: usize,
         taps: usize,
+        dilation: usize,
         state: ?[]const f32,
     ) !Tensor {
-        return exec_conv.causalDepthwiseConv1dBackwardKernelAxisRank(&self.rt, rank, input, gy, time_axis, channel_axis, taps, state);
+        return exec_conv.causalDepthwiseConv1dBackwardKernelAxisRank(&self.rt, rank, input, gy, time_axis, channel_axis, taps, dilation, state);
     }
 
     pub fn causalConv1dAxisRank(

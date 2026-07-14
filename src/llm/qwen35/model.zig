@@ -1699,7 +1699,7 @@ fn linearForward(
         else => return Error.UnsupportedVariant, // qwen35 GGUFs store ssm_conv1d as f32
     };
     defer conv_kernel.deinit();
-    var conv = try qkv.causalDepthwiseConv1d(ctx, .seq, .conv, .tap, &conv_kernel, conv_state);
+    var conv = try qkv.causalDepthwiseConv1d(ctx, .seq, .conv, .tap, &conv_kernel, 1, conv_state);
     defer conv.deinit();
     // Refresh the conv window for the next step (last d_conv-1 tokens of qkv).
     if (conv_state) |cs| updateConvState(cs, try qkv.dataConst(), seq, conv_dim, cfg.ssm_d_conv);

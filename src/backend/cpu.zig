@@ -327,10 +327,11 @@ pub fn causalDepthwiseConv1dIntoWithConfig(
     seq: usize,
     channels: usize,
     taps: usize,
+    dilation: usize,
     config: ParallelConfig,
 ) void {
     _ = config;
-    causalDepthwiseConv1dRange(out.data(), input.dataConst(), kernel.dataConst(), state, seq, channels, taps, 0, channels);
+    causalDepthwiseConv1dRange(out.data(), input.dataConst(), kernel.dataConst(), state, seq, channels, taps, dilation, 0, channels);
 }
 
 pub fn causalDepthwiseConv1dBackwardInputIntoWithConfig(
@@ -340,10 +341,11 @@ pub fn causalDepthwiseConv1dBackwardInputIntoWithConfig(
     seq: usize,
     channels: usize,
     taps: usize,
+    dilation: usize,
     config: ParallelConfig,
 ) void {
     _ = config;
-    causalDepthwiseConv1dBackwardInputRange(out.data(), gy.dataConst(), kernel.dataConst(), seq, channels, taps, 0, channels);
+    causalDepthwiseConv1dBackwardInputRange(out.data(), gy.dataConst(), kernel.dataConst(), seq, channels, taps, dilation, 0, channels);
 }
 
 pub fn causalDepthwiseConv1dBackwardKernelIntoWithConfig(
@@ -354,10 +356,11 @@ pub fn causalDepthwiseConv1dBackwardKernelIntoWithConfig(
     seq: usize,
     channels: usize,
     taps: usize,
+    dilation: usize,
     config: ParallelConfig,
 ) void {
     _ = config;
-    causalDepthwiseConv1dBackwardKernelRange(out.data(), input.dataConst(), gy.dataConst(), state, seq, channels, taps, 0, channels);
+    causalDepthwiseConv1dBackwardKernelRange(out.data(), input.dataConst(), gy.dataConst(), state, seq, channels, taps, dilation, 0, channels);
 }
 
 pub fn causalConv1dIntoWithConfig(
@@ -1078,15 +1081,16 @@ fn causalDepthwiseConv1dRange(
     seq: usize,
     channels: usize,
     taps: usize,
+    dilation: usize,
     channel_start: usize,
     channel_end: usize,
 ) void {
-    const pad = taps - 1;
+    const pad = dilation * (taps - 1);
     for (0..seq) |t| {
         for (channel_start..channel_end) |c| {
             var acc: f32 = 0;
             for (0..taps) |k| {
-                acc += causalDepthwiseInputValue(input, state, seq, channels, pad, t, c, k) * kernel[c * taps + k];
+                acc += causalDepthwiseInputValue(input, state, seq, channels, pad, dilation, t, c, k) * kernel[c * taps + k];
             }
             out[t * channels + c] = acc;
         }
@@ -1100,17 +1104,18 @@ fn causalDepthwiseConv1dBackwardInputRange(
     seq: usize,
     channels: usize,
     taps: usize,
+    dilation: usize,
     channel_start: usize,
     channel_end: usize,
 ) void {
-    const pad = taps - 1;
+    const pad = dilation * (taps - 1);
     for (0..seq) |p| {
         for (channel_start..channel_end) |c| {
             var acc: f32 = 0;
             for (0..taps) |k| {
                 const t_base = p + pad;
-                if (k > t_base) continue;
-                const t = t_base - k;
+                if (k * dilation > t_base) continue;
+                const t = t_base - k * dilation;
                 if (t < seq) acc += gy[t * channels + c] * kernel[c * taps + k];
             }
             out[p * channels + c] = acc;
@@ -1126,15 +1131,16 @@ fn causalDepthwiseConv1dBackwardKernelRange(
     seq: usize,
     channels: usize,
     taps: usize,
+    dilation: usize,
     channel_start: usize,
     channel_end: usize,
 ) void {
-    const pad = taps - 1;
+    const pad = dilation * (taps - 1);
     for (channel_start..channel_end) |c| {
         for (0..taps) |k| {
             var acc: f32 = 0;
             for (0..seq) |t| {
-                acc += gy[t * channels + c] * causalDepthwiseInputValue(input, state, seq, channels, pad, t, c, k);
+                acc += gy[t * channels + c] * causalDepthwiseInputValue(input, state, seq, channels, pad, dilation, t, c, k);
             }
             out[c * taps + k] = acc;
         }
@@ -1261,18 +1267,18 @@ fn causalDepthwiseInputValue(
     seq: usize,
     channels: usize,
     pad: usize,
+    dilation: usize,
     t: usize,
     c: usize,
     k: usize,
 ) f32 {
     _ = seq;
-    if (t + k >= pad) {
-        const pos = t + k - pad;
-        return input[pos * channels + c];
+    const u = t + k * dilation;
+    if (u >= pad) {
+        return input[(u - pad) * channels + c];
     }
     const s = state orelse return 0;
-    const sidx = t + k;
-    return s[sidx * channels + c];
+    return s[u * channels + c];
 }
 
 pub fn matmulInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {

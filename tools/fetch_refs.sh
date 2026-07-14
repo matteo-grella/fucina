@@ -50,6 +50,15 @@
 # tools/gen_cartridge_goldens.py, an INDEPENDENT PyTorch implementation of
 # the mechanism (torch 2.12) whose output is committed as
 # src/llm/cartridge_golden_tests.zig.
+#
+# engram (deepseek-ai, Apache-2.0) is the semantics reference for the Engram
+# port (src/llm/engram.zig, docs/ENGRAM.md): engram_demo_v1.py defines the
+# tokenizer-compression table, layer-seeded odd multipliers, the
+# multiply-XOR n-gram hash with per-head prime table sizes, and the
+# gated multi-head-embedding + causal short-conv module. It stays stock
+# and is never run: numerical parity comes from tools/gen_engram_goldens.py,
+# an INDEPENDENT PyTorch implementation of the demo semantics (torch 2.12)
+# whose output is committed as src/llm/engram_golden_tests.zig.
 set -eu
 cd "$(dirname "$0")/.."
 mkdir -p refs
@@ -70,7 +79,8 @@ colibri|https://github.com/JustVugg/colibri|a5fc89e88f113fc9d1c9d8752861b158d7c3
 es-at-scale|https://github.com/VsonicV/es-at-scale|574a9d134da1ffce2a8bb812019899e5c96b588a
 es-awd|https://github.com/kschweig/es-awd|f432ff823a7d59f91d4ac2cf99e4923654c6f464
 ik_llama.cpp|https://github.com/ikawrakow/ik_llama.cpp|b90939934add9ba4fbb37e8c6470809a70b78f0a
-cartridges|https://github.com/HazyResearch/cartridges|ef34ba97a06049c34820506e2c283746284ae5f0'
+cartridges|https://github.com/HazyResearch/cartridges|ef34ba97a06049c34820506e2c283746284ae5f0
+engram|https://github.com/deepseek-ai/Engram|fb7f84a21f91223715394a33a1dc24bbfb7f788e'
 
 build_llama=0
 apply_patches=0

@@ -4160,6 +4160,7 @@ pub fn CausalDepthwiseConv1dBackward(
         estimated_work: usize,
         input_value: RawTensor,
         kernel_value: RawTensor,
+        dilation: usize,
         state: ?[]f32 = null,
 
         const Self = @This();
@@ -4171,6 +4172,7 @@ pub fn CausalDepthwiseConv1dBackward(
             kernel_parent: ?*GradState,
             input: *const RawTensor,
             kernel: *const RawTensor,
+            dilation: usize,
             state: ?[]const f32,
         ) !void {
             self.* = .{
@@ -4180,6 +4182,7 @@ pub fn CausalDepthwiseConv1dBackward(
                 .estimated_work = workEstimate(input_parent, kernel_parent, input, kernel),
                 .input_value = try input.cloneView(),
                 .kernel_value = undefined,
+                .dilation = dilation,
             };
             errdefer self.input_value.deinit();
             self.kernel_value = try kernel.cloneView();
@@ -4208,6 +4211,7 @@ pub fn CausalDepthwiseConv1dBackward(
                     &self.kernel_value,
                     time_axis,
                     channel_axis,
+                    self.dilation,
                 );
             }
             if (needs_grad.len > 1 and needs_grad[1]) {
@@ -4218,6 +4222,7 @@ pub fn CausalDepthwiseConv1dBackward(
                     time_axis,
                     channel_axis,
                     self.kernel_shape[1],
+                    self.dilation,
                     self.state,
                 );
             }

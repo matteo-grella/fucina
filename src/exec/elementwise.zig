@@ -1730,6 +1730,83 @@ pub fn intDivRankTyped(
     return out;
 }
 
+pub const IntModMode = enum { rem, mod };
+
+/// Integer remainder as an explicit op, the modulus counterpart of
+/// `intDivRankTyped`: `.rem` pairs `divTrunc` (result takes the sign of the
+/// dividend, C's `%`), `.mod` pairs `divFloor` (result takes the sign of
+/// the divisor, Python's `%` / numpy). A zero divisor is
+/// `error.DivisionByZero`; minInt % -1 is 0 (the wrapping-div contract).
+pub fn intModRankTyped(
+    rt: *Runtime,
+    comptime dtype: DType,
+    comptime rank: usize,
+    comptime mode: IntModMode,
+    a: *const tensor.TensorOf(dtype),
+    b: *const tensor.TensorOf(dtype),
+) !tensor.TensorOf(dtype) {
+    comptime {
+        if (!dtype_mod.supportsIntMath(dtype)) @compileError("intModRankTyped requires an integer dtype");
+    }
+    const shape = try requireSameRankShapeOf(dtype, rank, a, b);
+    var aa = try rt.prepareContiguousTyped(dtype, a);
+    defer aa.deinit();
+    var bb = try rt.prepareContiguousTyped(dtype, b);
+    defer bb.deinit();
+    var out = try rt.emptyRankTyped(dtype, rank, shape);
+    errdefer out.deinit();
+    const signed = comptime @typeInfo(dtype_mod.Scalar(dtype)).int.signedness == .signed;
+    for (out.data(), aa.tensor().dataConst(), bb.tensor().dataConst()) |*o, x, y| {
+        if (y == 0) return tensor.TensorError.DivisionByZero;
+        if (comptime signed) {
+            // The quotient minInt / -1 overflows, but its remainder is
+            // exactly 0; short-circuit so the builtins never see the
+            // overflowing division.
+            if (x == std.math.minInt(dtype_mod.Scalar(dtype)) and y == -1) {
+                o.* = 0;
+                continue;
+            }
+        }
+        o.* = switch (mode) {
+            .rem => @rem(x, y),
+            .mod => @mod(x, y),
+        };
+    }
+    return out;
+}
+
+pub const IntBitwiseOp = enum { b_and, b_or, b_xor };
+
+/// Bitwise combinators on the integer dtypes (two's-complement bit
+/// patterns; distinct from the `.bool` truthiness `logicalAnd/Or/Xor`).
+pub fn intBitwiseRankTyped(
+    rt: *Runtime,
+    comptime dtype: DType,
+    comptime rank: usize,
+    comptime op: IntBitwiseOp,
+    a: *const tensor.TensorOf(dtype),
+    b: *const tensor.TensorOf(dtype),
+) !tensor.TensorOf(dtype) {
+    comptime {
+        if (!dtype_mod.supportsIntMath(dtype)) @compileError("intBitwiseRankTyped requires an integer dtype");
+    }
+    const shape = try requireSameRankShapeOf(dtype, rank, a, b);
+    var aa = try rt.prepareContiguousTyped(dtype, a);
+    defer aa.deinit();
+    var bb = try rt.prepareContiguousTyped(dtype, b);
+    defer bb.deinit();
+    var out = try rt.emptyRankTyped(dtype, rank, shape);
+    errdefer out.deinit();
+    for (out.data(), aa.tensor().dataConst(), bb.tensor().dataConst()) |*o, x, y| {
+        o.* = switch (op) {
+            .b_and => x & y,
+            .b_or => x | y,
+            .b_xor => x ^ y,
+        };
+    }
+    return out;
+}
+
 fn elementwiseRankInto(
     rt: *Runtime,
     comptime rank: usize,

@@ -235,8 +235,9 @@ pub const Backend = struct {
         seq: usize,
         channels: usize,
         taps: usize,
+        dilation: usize,
     ) void {
-        return active.causalDepthwiseConv1dIntoWithConfig(out, input, kernel, state, seq, channels, taps, self.parallelConfig());
+        return active.causalDepthwiseConv1dIntoWithConfig(out, input, kernel, state, seq, channels, taps, dilation, self.parallelConfig());
     }
 
     pub fn causalDepthwiseConv1dBackwardInputInto(
@@ -247,8 +248,9 @@ pub const Backend = struct {
         seq: usize,
         channels: usize,
         taps: usize,
+        dilation: usize,
     ) void {
-        return active.causalDepthwiseConv1dBackwardInputIntoWithConfig(out, gy, kernel, seq, channels, taps, self.parallelConfig());
+        return active.causalDepthwiseConv1dBackwardInputIntoWithConfig(out, gy, kernel, seq, channels, taps, dilation, self.parallelConfig());
     }
 
     pub fn causalDepthwiseConv1dBackwardKernelInto(
@@ -260,8 +262,9 @@ pub const Backend = struct {
         seq: usize,
         channels: usize,
         taps: usize,
+        dilation: usize,
     ) void {
-        return active.causalDepthwiseConv1dBackwardKernelIntoWithConfig(out, input, gy, state, seq, channels, taps, self.parallelConfig());
+        return active.causalDepthwiseConv1dBackwardKernelIntoWithConfig(out, input, gy, state, seq, channels, taps, dilation, self.parallelConfig());
     }
 
     pub fn causalConv1dInto(

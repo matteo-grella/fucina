@@ -26,7 +26,7 @@ test "causalDepthwiseConv1d matches a hand-computed reference (prefill, zero sta
     var kernel_t = try fucina.Tensor(.{ .conv, .tap }).fromSlice(&ctx, .{ ch, d_conv }, &kernel);
     defer kernel_t.deinit();
 
-    var out = try input.causalDepthwiseConv1d(&ctx, .seq, .conv, .tap, &kernel_t, null);
+    var out = try input.causalDepthwiseConv1d(&ctx, .seq, .conv, .tap, &kernel_t, 1, null);
     defer out.deinit();
     const od = try out.dataConst();
     // Hand-computed: out[t][c] = Σ token[t-2+k][c]·kernel[c][k], negatives = 0.
@@ -54,7 +54,7 @@ test "causalDepthwiseConv1d streaming state continues a split sequence" {
     var kernel_t = try fucina.Tensor(.{ .conv, .tap }).fromSlice(&ctx, .{ ch, d_conv }, &kernel);
     defer kernel_t.deinit();
 
-    var out = try input.causalDepthwiseConv1d(&ctx, .seq, .conv, .tap, &kernel_t, &state);
+    var out = try input.causalDepthwiseConv1d(&ctx, .seq, .conv, .tap, &kernel_t, 1, &state);
     defer out.deinit();
     const od = try out.dataConst();
     // Must equal the prefill output's tokens [2,3]: {80,860, 140,1460}.

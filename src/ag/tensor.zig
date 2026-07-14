@@ -1249,6 +1249,12 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             return finishOp(tags, ctx, value, self.requiresGrad(), DropoutBackward(tags), .{ ctx.allocator, self.grad_state, p, seed });
         }
 
+        /// Depthwise causal 1-D convolution:
+        /// `y[t, c] = Σ_k x[t − dilation·(taps−1−k), c] · w[c, k]` — tap
+        /// `taps−1` is the newest sample. `kernel` is `[channel, tap]`.
+        /// `state`, when given, supplies the `dilation·(taps−1)` input rows
+        /// preceding `x` (oldest first, layout `[row, channel]`); absent
+        /// rows read as zeros and no gradient flows into `state`.
         pub fn causalDepthwiseConv1d(
             self: *const Self,
             ctx: *ExecContext,
@@ -1256,6 +1262,7 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             comptime channel_tag: Tag,
             comptime tap_tag: Tag,
             kernel: *const Tensor(.{ channel_tag, tap_tag }),
+            dilation: usize,
             state: ?[]const f32,
         ) !Self {
             const time_axis = comptime axis(time_tag);
@@ -1267,9 +1274,9 @@ fn FloatTensor(comptime tags_spec: anytype) type {
                 }
             }
 
-            var value = try ctx.causalDepthwiseConv1dAxisRank(tag_rank, self.asRawTensor(), kernel.asRawTensor(), time_axis, channel_axis, state);
+            var value = try ctx.causalDepthwiseConv1dAxisRank(tag_rank, self.asRawTensor(), kernel.asRawTensor(), time_axis, channel_axis, dilation, state);
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad() or kernel.requiresGrad(), CausalDepthwiseConv1dBackward(tags, .{ channel_tag, tap_tag }, time_axis, channel_axis), .{ ctx.allocator, self.grad_state, kernel.grad_state, self.asRawTensor(), kernel.asRawTensor(), state });
+            return finishOp(tags, ctx, value, self.requiresGrad() or kernel.requiresGrad(), CausalDepthwiseConv1dBackward(tags, .{ channel_tag, tap_tag }, time_axis, channel_axis), .{ ctx.allocator, self.grad_state, kernel.grad_state, self.asRawTensor(), kernel.asRawTensor(), dilation, state });
         }
 
         /// General causal 1-D convolution mixing channels:
@@ -1685,6 +1692,18 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             var value = try ctx.clamp(self.asRawTensor(), min_value, max_value);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad(), ClampBackward, .{ ctx.allocator, self.grad_state, &self.value, min_value, max_value });
+        }
+
+        /// One-sided clamp (torch's `clamp_min`): `max(x, min_value)`.
+        /// The open side is +inf, so the kernel and `ClampBackward`
+        /// (gradient zeroed only where `x < min_value`) apply unchanged.
+        pub fn clampMin(self: *const Self, ctx: *ExecContext, min_value: f32) !Self {
+            return self.clamp(ctx, min_value, std.math.inf(f32));
+        }
+
+        /// One-sided clamp (torch's `clamp_max`): `min(x, max_value)`.
+        pub fn clampMax(self: *const Self, ctx: *ExecContext, max_value: f32) !Self {
+            return self.clamp(ctx, -std.math.inf(f32), max_value);
         }
 
         pub fn sum(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(removeTag(tags, tag)) {
@@ -4412,9 +4431,10 @@ fn TypedScalarConstantTensor(comptime tags_spec: anytype, comptime tensor_dtype:
         pub const setRows = typedConstantSetRows;
 
         // Integer forward math (§4.19): wrapping two's-complement
-        // pointwise, explicit division, i64-returning reductions, and
-        // scalar casts. On `.bool` the arithmetic entries are compile
-        // errors — only `to` and the counting `sum`/`sumAll` apply.
+        // pointwise, explicit division/remainder, bitwise combinators,
+        // i64-returning reductions, and scalar casts. On `.bool` the
+        // arithmetic entries are compile errors — only `to` and the
+        // counting `sum`/`sumAll` apply.
         pub const to = typedConstantTo;
         pub const add = typedConstantAdd;
         pub const sub = typedConstantSub;
@@ -4423,6 +4443,11 @@ fn TypedScalarConstantTensor(comptime tags_spec: anytype, comptime tensor_dtype:
         pub const minimum = typedConstantMinimum;
         pub const divTrunc = typedConstantDivTrunc;
         pub const divFloor = typedConstantDivFloor;
+        pub const rem = typedConstantRem;
+        pub const mod = typedConstantMod;
+        pub const bitAnd = typedConstantBitAnd;
+        pub const bitOr = typedConstantBitOr;
+        pub const bitXor = typedConstantBitXor;
         pub const sum = typedConstantSum;
         pub const sumAll = typedConstantSumAll;
 
@@ -5100,6 +5125,94 @@ fn typedConstantDivTrunc(self: anytype, ctx: *ExecContext, other: anytype) !Tens
 
 fn typedConstantDivFloor(self: anytype, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
     return typedIntDiv(.floor, self, ctx, other);
+}
+
+/// Explicit integer remainder with the standard tag-broadcast rule:
+/// `rem` pairs `divTrunc` (sign of the dividend, C `%`), `mod` pairs
+/// `divFloor` (sign of the divisor, Python/numpy `%` and Zig's `@mod`).
+/// A zero divisor is `error.DivisionByZero`; minInt % -1 is 0.
+fn typedIntMod(
+    comptime mode: enum { rem, mod },
+    self: anytype,
+    ctx: *ExecContext,
+    other: anytype,
+) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
+    const Self = TensorObject(@TypeOf(self));
+    const Other = TensorObject(@TypeOf(other));
+    comptime {
+        if (!dtype_mod.supportsIntMath(Self.dtype)) @compileError("rem/mod are integer ops; no float counterpart is defined");
+    }
+    if (Other.dtype != Self.dtype) @compileError("typed pointwise requires matching dtypes; cast explicitly");
+    const left_tags = Self.axis_tags;
+    const right_tags = Other.axis_tags;
+    const left = tensorObjectPtrFrom(@TypeOf(self), &self);
+    const right = tensorObjectPtrFrom(@TypeOf(other), &other);
+    const result_tags = pointwiseResultTags(left_tags, right_tags);
+    const result_shape = try pointwiseShapeOf(Self.dtype, result_tags, left_tags, left.asRawTensor(), right_tags, right.asRawTensor());
+
+    var left_view = try broadcastTensorToOf(Self.dtype, left_tags, left.asRawTensor(), result_tags, result_shape);
+    defer left_view.deinit();
+    var right_view = try broadcastTensorToOf(Self.dtype, right_tags, right.asRawTensor(), result_tags, result_shape);
+    defer right_view.deinit();
+
+    var value = switch (mode) {
+        .rem => try ctx.remRankTyped(Self.dtype, rawRank(result_tags.len), &left_view, &right_view),
+        .mod => try ctx.modRankTyped(Self.dtype, rawRank(result_tags.len), &left_view, &right_view),
+    };
+    errdefer value.deinit();
+    return Tensor(.{ .dtype = Self.dtype, .tags = result_tags }).fromTensor(ctx, value);
+}
+
+fn typedConstantRem(self: anytype, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
+    return typedIntMod(.rem, self, ctx, other);
+}
+
+fn typedConstantMod(self: anytype, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
+    return typedIntMod(.mod, self, ctx, other);
+}
+
+/// Bitwise combinators on two's-complement bit patterns, with the standard
+/// tag-broadcast rule. Integer dtypes only — `.bool` masks use the
+/// truthiness `logicalAnd/Or/Xor`, and floats have no bit-pattern algebra.
+fn typedIntBitwise(
+    comptime op: exec_mod.IntBitwiseOp,
+    self: anytype,
+    ctx: *ExecContext,
+    other: anytype,
+) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
+    const Self = TensorObject(@TypeOf(self));
+    const Other = TensorObject(@TypeOf(other));
+    comptime {
+        if (!dtype_mod.supportsIntMath(Self.dtype)) @compileError("bitAnd/bitOr/bitXor are integer ops; `.bool` masks use logicalAnd/Or/Xor");
+    }
+    if (Other.dtype != Self.dtype) @compileError("typed pointwise requires matching dtypes; cast explicitly");
+    const left_tags = Self.axis_tags;
+    const right_tags = Other.axis_tags;
+    const left = tensorObjectPtrFrom(@TypeOf(self), &self);
+    const right = tensorObjectPtrFrom(@TypeOf(other), &other);
+    const result_tags = pointwiseResultTags(left_tags, right_tags);
+    const result_shape = try pointwiseShapeOf(Self.dtype, result_tags, left_tags, left.asRawTensor(), right_tags, right.asRawTensor());
+
+    var left_view = try broadcastTensorToOf(Self.dtype, left_tags, left.asRawTensor(), result_tags, result_shape);
+    defer left_view.deinit();
+    var right_view = try broadcastTensorToOf(Self.dtype, right_tags, right.asRawTensor(), result_tags, result_shape);
+    defer right_view.deinit();
+
+    var value = try ctx.bitwiseRankTyped(Self.dtype, rawRank(result_tags.len), op, &left_view, &right_view);
+    errdefer value.deinit();
+    return Tensor(.{ .dtype = Self.dtype, .tags = result_tags }).fromTensor(ctx, value);
+}
+
+fn typedConstantBitAnd(self: anytype, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
+    return typedIntBitwise(.b_and, self, ctx, other);
+}
+
+fn typedConstantBitOr(self: anytype, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
+    return typedIntBitwise(.b_or, self, ctx, other);
+}
+
+fn typedConstantBitXor(self: anytype, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags) }) {
+    return typedIntBitwise(.b_xor, self, ctx, other);
 }
 
 /// Logical ops on the `.bool` branch (the mask combinators): `.bool`

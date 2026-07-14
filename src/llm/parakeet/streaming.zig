@@ -89,7 +89,7 @@ pub fn streamingDepthwiseConv(
     // (`causalDepthwiseConv1d` wants kernel tags .{ channel_tag, tap_tag }).
     var kernel_t = try kernel.withTags(ctx, .{ ._1, .tap });
     defer kernel_t.deinit();
-    var out = try x.causalDepthwiseConv1d(ctx, ._0, ._1, .tap, &kernel_t, cache.data);
+    var out = try x.causalDepthwiseConv1d(ctx, ._0, ._1, .tap, &kernel_t, 1, cache.data);
     errdefer out.deinit();
 
     // Advance the cache to the last `taps-1` frames of [cache ; x].

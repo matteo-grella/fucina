@@ -383,7 +383,7 @@ test "causal depthwise conv vector kernel handles channel tails" {
     var out = try Tensor.zeros(allocator, &.{ 2, 5 });
     defer out.deinit();
 
-    causalDepthwiseConv1dIntoWithConfig(&out, &input, &kernel, null, 2, 5, 2, .{});
+    causalDepthwiseConv1dIntoWithConfig(&out, &input, &kernel, null, 2, 5, 2, 1, .{});
 
     try std.testing.expectEqualSlices(f32, &.{
         2, 20, 200, 2000, 20000,

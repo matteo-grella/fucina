@@ -1,8 +1,10 @@
 //! Small-tap causal convolution kernels.
 //!
-//! Depthwise family: covers the causal FIR used by DeltaNet-style blocks —
-//! input/output are contiguous `[time, channel]`, kernel is `[channel, tap]`,
-//! and optional state is the `tap - 1` historical rows preceding the input.
+//! Depthwise family: covers the causal FIR used by DeltaNet-style blocks
+//! and Engram's ShortConv — input/output are contiguous `[time, channel]`,
+//! kernel is `[channel, tap]` (tap `taps-1` = the newest sample), and
+//! optional state is the `dilation * (taps - 1)` historical rows preceding
+//! the input, oldest first.
 //!
 //! General family (`causalConv1d*`): channel-mixing dilated causal conv —
 //! input `[time, in]`, weight `[tap, in, out]` (tap `taps-1` is the newest
@@ -30,13 +32,14 @@ pub fn causalDepthwiseConv1dIntoWithConfig(
     seq: usize,
     channels: usize,
     taps: usize,
+    dilation: usize,
     config: ParallelConfig,
 ) void {
     const output = vm.contiguousData(out, seq * channels);
     const input_data = vm.contiguousDataConst(input, seq * channels);
     const kernel_data = vm.contiguousDataConst(kernel, channels * taps);
-    if (maybeParallelConv(config, runForwardTask, output, input_data, kernel_data, null, state, seq, channels, taps)) return;
-    forwardRange(output, input_data, kernel_data, state, seq, channels, taps, 0, channels);
+    if (maybeParallelConv(config, runForwardTask, output, input_data, kernel_data, null, state, seq, channels, taps, dilation)) return;
+    forwardRange(output, input_data, kernel_data, state, seq, channels, taps, dilation, 0, channels);
 }
 
 pub fn causalDepthwiseConv1dBackwardInputIntoWithConfig(
@@ -46,13 +49,14 @@ pub fn causalDepthwiseConv1dBackwardInputIntoWithConfig(
     seq: usize,
     channels: usize,
     taps: usize,
+    dilation: usize,
     config: ParallelConfig,
 ) void {
     const output = vm.contiguousData(out, seq * channels);
     const gy_data = vm.contiguousDataConst(gy, seq * channels);
     const kernel_data = vm.contiguousDataConst(kernel, channels * taps);
-    if (maybeParallelConv(config, runBackwardInputTask, output, gy_data, kernel_data, null, null, seq, channels, taps)) return;
-    backwardInputRange(output, gy_data, kernel_data, seq, channels, taps, 0, channels);
+    if (maybeParallelConv(config, runBackwardInputTask, output, gy_data, kernel_data, null, null, seq, channels, taps, dilation)) return;
+    backwardInputRange(output, gy_data, kernel_data, seq, channels, taps, dilation, 0, channels);
 }
 
 pub fn causalDepthwiseConv1dBackwardKernelIntoWithConfig(
@@ -63,13 +67,14 @@ pub fn causalDepthwiseConv1dBackwardKernelIntoWithConfig(
     seq: usize,
     channels: usize,
     taps: usize,
+    dilation: usize,
     config: ParallelConfig,
 ) void {
     const output = vm.contiguousData(out, channels * taps);
     const input_data = vm.contiguousDataConst(input, seq * channels);
     const gy_data = vm.contiguousDataConst(gy, seq * channels);
-    if (maybeParallelConv(config, runBackwardKernelTask, output, input_data, undefined, gy_data, state, seq, channels, taps)) return;
-    backwardKernelRange(output, input_data, gy_data, state, seq, channels, taps, 0, channels);
+    if (maybeParallelConv(config, runBackwardKernelTask, output, input_data, undefined, gy_data, state, seq, channels, taps, dilation)) return;
+    backwardKernelRange(output, input_data, gy_data, state, seq, channels, taps, dilation, 0, channels);
 }
 
 const ConvTask = struct {
@@ -81,6 +86,7 @@ const ConvTask = struct {
     seq: usize,
     channels: usize,
     taps: usize,
+    dilation: usize,
     channel_start: usize,
     channel_end: usize,
 };
@@ -96,6 +102,7 @@ fn maybeParallelConv(
     seq: usize,
     channels: usize,
     taps: usize,
+    dilation: usize,
 ) bool {
     const pool = config.pool orelse return false;
     const thread_count = vm.depthwiseConvThreadCount(seq, channels, taps);
@@ -112,6 +119,7 @@ fn maybeParallelConv(
             .seq = seq,
             .channels = channels,
             .taps = taps,
+            .dilation = dilation,
             .channel_start = task_i * channels / thread_count,
             .channel_end = (task_i + 1) * channels / thread_count,
         };
@@ -121,15 +129,15 @@ fn maybeParallelConv(
 }
 
 fn runForwardTask(task: *const ConvTask) void {
-    forwardRange(task.out, task.input, task.kernel, task.state, task.seq, task.channels, task.taps, task.channel_start, task.channel_end);
+    forwardRange(task.out, task.input, task.kernel, task.state, task.seq, task.channels, task.taps, task.dilation, task.channel_start, task.channel_end);
 }
 
 fn runBackwardInputTask(task: *const ConvTask) void {
-    backwardInputRange(task.out, task.input, task.kernel, task.seq, task.channels, task.taps, task.channel_start, task.channel_end);
+    backwardInputRange(task.out, task.input, task.kernel, task.seq, task.channels, task.taps, task.dilation, task.channel_start, task.channel_end);
 }
 
 fn runBackwardKernelTask(task: *const ConvTask) void {
-    backwardKernelRange(task.out, task.input, task.gy, task.state, task.seq, task.channels, task.taps, task.channel_start, task.channel_end);
+    backwardKernelRange(task.out, task.input, task.gy, task.state, task.seq, task.channels, task.taps, task.dilation, task.channel_start, task.channel_end);
 }
 
 fn forwardRange(
@@ -140,19 +148,21 @@ fn forwardRange(
     seq: usize,
     channels: usize,
     taps: usize,
+    dilation: usize,
     channel_start: usize,
     channel_end: usize,
 ) void {
-    const pad = taps - 1;
+    const pad = dilation * (taps - 1);
     for (0..seq) |t| {
         var c = channel_start;
         while (c + vector_len <= channel_end) : (c += vector_len) {
             var acc: Vf32 = @splat(0);
             for (0..taps) |k| {
-                const x: Vf32 = if (t + k >= pad)
-                    input[(t + k - pad) * channels + c ..][0..vector_len].*
+                const u = t + k * dilation;
+                const x: Vf32 = if (u >= pad)
+                    input[(u - pad) * channels + c ..][0..vector_len].*
                 else if (state) |s|
-                    s[(t + k) * channels + c ..][0..vector_len].*
+                    s[u * channels + c ..][0..vector_len].*
                 else
                     @splat(0);
                 acc += x * loadKernelVector(kernel, c, taps, k);
@@ -162,7 +172,7 @@ fn forwardRange(
         while (c < channel_end) : (c += 1) {
             var acc: f32 = 0;
             for (0..taps) |k| {
-                acc += inputValue(input, state, channels, pad, t, c, k) * kernel[c * taps + k];
+                acc += inputValue(input, state, channels, pad, dilation, t, c, k) * kernel[c * taps + k];
             }
             out[t * channels + c] = acc;
         }
@@ -176,18 +186,19 @@ fn backwardInputRange(
     seq: usize,
     channels: usize,
     taps: usize,
+    dilation: usize,
     channel_start: usize,
     channel_end: usize,
 ) void {
-    const pad = taps - 1;
+    const pad = dilation * (taps - 1);
     for (0..seq) |p| {
         var c = channel_start;
         while (c + vector_len <= channel_end) : (c += vector_len) {
             var acc: Vf32 = @splat(0);
             for (0..taps) |k| {
                 const t_base = p + pad;
-                if (k > t_base) continue;
-                const t = t_base - k;
+                if (k * dilation > t_base) continue;
+                const t = t_base - k * dilation;
                 if (t < seq) {
                     const g: Vf32 = gy[t * channels + c ..][0..vector_len].*;
                     acc += g * loadKernelVector(kernel, c, taps, k);
@@ -199,8 +210,8 @@ fn backwardInputRange(
             var acc: f32 = 0;
             for (0..taps) |k| {
                 const t_base = p + pad;
-                if (k > t_base) continue;
-                const t = t_base - k;
+                if (k * dilation > t_base) continue;
+                const t = t_base - k * dilation;
                 if (t < seq) acc += gy[t * channels + c] * kernel[c * taps + k];
             }
             out[p * channels + c] = acc;
@@ -216,15 +227,16 @@ fn backwardKernelRange(
     seq: usize,
     channels: usize,
     taps: usize,
+    dilation: usize,
     channel_start: usize,
     channel_end: usize,
 ) void {
-    const pad = taps - 1;
+    const pad = dilation * (taps - 1);
     for (channel_start..channel_end) |c| {
         for (0..taps) |k| {
             var acc: f32 = 0;
             for (0..seq) |t| {
-                acc += gy[t * channels + c] * inputValue(input, state, channels, pad, t, c, k);
+                acc += gy[t * channels + c] * inputValue(input, state, channels, pad, dilation, t, c, k);
             }
             out[c * taps + k] = acc;
         }
@@ -994,13 +1006,15 @@ inline fn inputValue(
     state: ?[]const f32,
     channels: usize,
     pad: usize,
+    dilation: usize,
     t: usize,
     c: usize,
     k: usize,
 ) f32 {
-    if (t + k >= pad) return input[(t + k - pad) * channels + c];
+    const u = t + k * dilation;
+    if (u >= pad) return input[(u - pad) * channels + c];
     const s = state orelse return 0;
-    return s[(t + k) * channels + c];
+    return s[u * channels + c];
 }
 
 // ===========================================================================

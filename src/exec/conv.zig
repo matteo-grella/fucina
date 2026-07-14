@@ -30,6 +30,7 @@ pub fn causalDepthwiseConv1dAxisRank(
     kernel: *const Tensor,
     comptime time_axis: usize,
     comptime channel_axis: usize,
+    dilation: usize,
     state: ?[]const f32,
 ) !Tensor {
     comptime {
@@ -45,7 +46,7 @@ pub fn causalDepthwiseConv1dAxisRank(
     const channels = source.shape[channel_axis];
     const taps = kernel_view.shape[1];
     if (kernel_view.shape[0] != channels) return tensor.TensorError.ShapeMismatch;
-    try validateCausalDepthwiseState(state, channels, taps);
+    try validateCausalDepthwiseState(state, channels, taps, dilation);
 
     var ii = try rt.prepareContiguous(input);
     defer ii.deinit();
@@ -55,7 +56,7 @@ pub fn causalDepthwiseConv1dAxisRank(
     var out = try rt.emptyRank(rank, source.shape);
     errdefer out.deinit();
     rt.enableNativeVectorPoolForWork(parallel.saturatedMul3(seq, channels, taps), parallel.vector_elementwise_len_threshold);
-    rt.backend.causalDepthwiseConv1dInto(&out, ii.tensor(), kk.tensor(), state, seq, channels, taps);
+    rt.backend.causalDepthwiseConv1dInto(&out, ii.tensor(), kk.tensor(), state, seq, channels, taps, dilation);
     return out;
 }
 
@@ -66,6 +67,7 @@ pub fn causalDepthwiseConv1dBackwardInputAxisRank(
     kernel: *const Tensor,
     comptime time_axis: usize,
     comptime channel_axis: usize,
+    dilation: usize,
 ) !Tensor {
     comptime {
         if (rank != 2) @compileError("causalDepthwiseConv1dBackwardInput currently requires rank 2");
@@ -80,6 +82,7 @@ pub fn causalDepthwiseConv1dBackwardInputAxisRank(
     const channels = grad_view.shape[channel_axis];
     const taps = kernel_view.shape[1];
     if (kernel_view.shape[0] != channels) return tensor.TensorError.ShapeMismatch;
+    if (dilation == 0) return tensor.TensorError.InvalidShape;
 
     var gg = try rt.prepareContiguous(gy);
     defer gg.deinit();
@@ -89,7 +92,7 @@ pub fn causalDepthwiseConv1dBackwardInputAxisRank(
     var out = try rt.emptyRank(rank, grad_view.shape);
     errdefer out.deinit();
     rt.enableNativeVectorPoolForWork(parallel.saturatedMul3(seq, channels, taps), parallel.vector_elementwise_len_threshold);
-    rt.backend.causalDepthwiseConv1dBackwardInputInto(&out, gg.tensor(), kk.tensor(), seq, channels, taps);
+    rt.backend.causalDepthwiseConv1dBackwardInputInto(&out, gg.tensor(), kk.tensor(), seq, channels, taps, dilation);
     return out;
 }
 
@@ -101,6 +104,7 @@ pub fn causalDepthwiseConv1dBackwardKernelAxisRank(
     comptime time_axis: usize,
     comptime channel_axis: usize,
     taps: usize,
+    dilation: usize,
     state: ?[]const f32,
 ) !Tensor {
     comptime {
@@ -116,7 +120,7 @@ pub fn causalDepthwiseConv1dBackwardKernelAxisRank(
     const seq = source.shape[time_axis];
     const channels = source.shape[channel_axis];
     if (taps == 0) return tensor.TensorError.InvalidShape;
-    try validateCausalDepthwiseState(state, channels, taps);
+    try validateCausalDepthwiseState(state, channels, taps, dilation);
 
     var ii = try rt.prepareContiguous(input);
     defer ii.deinit();
@@ -126,7 +130,7 @@ pub fn causalDepthwiseConv1dBackwardKernelAxisRank(
     var out = try rt.emptyRank(2, .{ channels, taps });
     errdefer out.deinit();
     rt.enableNativeVectorPoolForWork(parallel.saturatedMul3(seq, channels, taps), parallel.vector_elementwise_len_threshold);
-    rt.backend.causalDepthwiseConv1dBackwardKernelInto(&out, ii.tensor(), gg.tensor(), state, seq, channels, taps);
+    rt.backend.causalDepthwiseConv1dBackwardKernelInto(&out, ii.tensor(), gg.tensor(), state, seq, channels, taps, dilation);
     return out;
 }
 
