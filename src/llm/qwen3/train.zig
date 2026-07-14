@@ -175,11 +175,9 @@ pub fn setFusedDistill(on: ?bool) void {
 fn fusedDistillEnabled() bool {
     var state = fused_distill_state.load(.acquire);
     if (state == 0) {
-        state = 1;
-        if (std.c.getenv("FUCINA_NO_FUSED_DISTILL")) |v_ptr| {
-            const v = std.mem.span(v_ptr);
-            if (v.len > 0 and v[0] != '0') state = 2;
-        }
+        // fucina.parallel.envFlag, NOT std.c.getenv: libc-free Linux
+        // builds have no std.c.
+        state = if (fucina.parallel.envFlag("FUCINA_NO_FUSED_DISTILL")) 2 else 1;
         fused_distill_state.store(state, .release);
     }
     return state == 1;

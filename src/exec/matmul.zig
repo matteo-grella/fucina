@@ -398,15 +398,12 @@ pub fn setCpuF32Shadow(on: ?bool, min_m: ?u64) void {
 fn cpuShadowMinM() ?u64 {
     var s = cpu_shadow_state.load(.acquire);
     if (s == 0) {
-        s = 2;
-        if (std.c.getenv("FUCINA_CPU_F32_SHADOW")) |v_ptr| {
-            const v = std.mem.span(v_ptr);
-            if (v.len > 0 and v[0] != '0') s = 1;
-        }
-        if (std.c.getenv("FUCINA_CPU_F32_SHADOW_MIN_M")) |v_ptr| {
-            if (std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch null) |v| {
-                cpu_shadow_min_m.store(v, .release);
-            }
+        // parallel.envFlag/envPositiveUsize, NOT std.c.getenv: the libc-free
+        // Linux test/server builds have no std.c (the FUCINA_MAX_THREADS
+        // lesson; /proc/self/environ arm).
+        s = if (parallel.envFlag("FUCINA_CPU_F32_SHADOW")) 1 else 2;
+        if (parallel.envPositiveUsize("FUCINA_CPU_F32_SHADOW_MIN_M")) |v| {
+            cpu_shadow_min_m.store(v, .release);
         }
         cpu_shadow_state.store(s, .release);
     }
@@ -422,7 +419,7 @@ const CpuShadow = struct {
     fn destroy(ctx: *anyopaque) void {
         const self: *CpuShadow = @ptrCast(@alignCast(ctx));
         self.buffer.release();
-        std.heap.c_allocator.destroy(self);
+        std.heap.smp_allocator.destroy(self);
     }
 };
 
@@ -436,7 +433,7 @@ fn cpuShadowBuffer(comptime dtype: DType, b: anytype) ?*storage_mod.Buffer {
         return cached.buffer;
     }
     const elems = b.buffer.data.len;
-    const shadow = storage_mod.Buffer.create(std.heap.c_allocator, elems) catch return null;
+    const shadow = storage_mod.Buffer.create(std.heap.smp_allocator, elems) catch return null;
     switch (comptime dtype) {
         .f16 => for (shadow.data, b.buffer.data) |*dst, src| {
             dst.* = @floatCast(src);
@@ -446,7 +443,7 @@ fn cpuShadowBuffer(comptime dtype: DType, b: anytype) ?*storage_mod.Buffer {
         },
         else => comptime unreachable,
     }
-    const created = std.heap.c_allocator.create(CpuShadow) catch {
+    const created = std.heap.smp_allocator.create(CpuShadow) catch {
         shadow.release();
         return null;
     };

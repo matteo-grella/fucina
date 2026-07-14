@@ -233,10 +233,30 @@ pub fn envPositiveUsize(comptime name: [:0]const u8) ?usize {
         const value = std.c.getenv(name) orelse return null;
         return parsePositiveUsize(std.mem.sliceTo(value, 0));
     } else if (builtin.os.tag == .linux) {
-        return readProcSelfEnviron(name);
+        return readProcSelfEnviron(name, parsePositiveUsize);
     } else {
         return null;
     }
+}
+
+/// Boolean environment flag with the getenv-family truthiness contract
+/// (set with a first character other than '0'), same per-target arms as
+/// `envPositiveUsize` — the ONLY sanctioned way to read a flag from code
+/// that must also compile into libc-free Linux binaries (bare
+/// `std.c.getenv` is a compile error there).
+pub fn envFlag(comptime name: [:0]const u8) bool {
+    if (builtin.link_libc) {
+        const value = std.c.getenv(name) orelse return false;
+        return parseFlag(std.mem.sliceTo(value, 0)) == 1;
+    } else if (builtin.os.tag == .linux) {
+        return (readProcSelfEnviron(name, parseFlag) orelse 0) == 1;
+    } else {
+        return false;
+    }
+}
+
+fn parseFlag(s: []const u8) ?usize {
+    return if (s.len > 0 and s[0] != '0') 1 else 0;
 }
 
 /// Env-value parse contract (unchanged from the original libc-only arm):
@@ -250,7 +270,7 @@ fn parsePositiveUsize(s: []const u8) ?usize {
 /// `KEY=VALUE` records; a trailing NUL is usual but the final record is
 /// handled either way). Fixed stack buffers, no allocation. Any I/O failure
 /// degrades to "no override".
-fn readProcSelfEnviron(comptime name: [:0]const u8) ?usize {
+fn readProcSelfEnviron(comptime name: [:0]const u8, comptime parse: fn ([]const u8) ?usize) ?usize {
     const posix = std.posix;
     const fd = posix.openatZ(
         posix.AT.FDCWD,
@@ -262,7 +282,7 @@ fn readProcSelfEnviron(comptime name: [:0]const u8) ?usize {
     // Linux-only path.
     defer _ = std.os.linux.close(fd);
 
-    var scan: EnvironScan(name) = .init;
+    var scan: EnvironScan(name, parse) = .init;
     var buf: [4096]u8 = undefined;
     while (true) {
         const n = posix.read(fd, &buf) catch return null;
@@ -277,7 +297,7 @@ fn readProcSelfEnviron(comptime name: [:0]const u8) ?usize {
 /// whose key is `name` decides, and an invalid/zero value decides "no
 /// override" (later duplicates are not consulted). Platform-independent so the
 /// parsing logic is unit-tested on every target, not just Linux.
-fn EnvironScan(comptime name: [:0]const u8) type {
+fn EnvironScan(comptime name: [:0]const u8, comptime parse: fn ([]const u8) ?usize) type {
     return struct {
         const Self = @This();
         const key = name ++ "=";
@@ -327,7 +347,7 @@ fn EnvironScan(comptime name: [:0]const u8) type {
             const e = self.entry[0..self.entry_len];
             if (!std.mem.startsWith(u8, e, key)) return null;
             if (self.overflowed) return @as(?usize, null);
-            return parsePositiveUsize(e[key.len..]);
+            return parse(e[key.len..]);
         }
     };
 }
@@ -360,7 +380,7 @@ test "parsePositiveUsize: usize base-10, 0/invalid mean no override" {
 
 // The scanner is comptime-keyed (FUCINA_MAX_THREADS / FUCINA_SPIN_BUDGET share
 // it); the tests instantiate it with the original key.
-const MaxThreadsScan = EnvironScan("FUCINA_MAX_THREADS");
+const MaxThreadsScan = EnvironScan("FUCINA_MAX_THREADS", parsePositiveUsize);
 
 test "EnvironScan: finds the key among other records" {
     var scan: MaxThreadsScan = .init;
@@ -430,7 +450,7 @@ test "readProcSelfEnviron: live smoke on Linux" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     // The test process env is not under our control; assert the read is safe
     // and any produced override is valid.
-    if (readProcSelfEnviron("FUCINA_MAX_THREADS")) |cap| try std.testing.expect(cap >= 1);
+    if (readProcSelfEnviron("FUCINA_MAX_THREADS", parsePositiveUsize)) |cap| try std.testing.expect(cap >= 1);
 }
 
 fn expectCpuList(text: []const u8, expected: []const usize) !void {
