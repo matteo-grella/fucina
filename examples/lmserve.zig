@@ -42,6 +42,11 @@ const usage_text =
     \\  --kv-cache-dir D    spill evicted slots to sidecar files under D and
     \\                      restore them on prefix match (gguf chat backends)
     \\  --kv-disk-slots M   max sidecar files under --kv-cache-dir (default 8)
+    \\  --cartridge F       preload a trained KV-prefix cartridge (safetensors from
+    \\                      `zig build cartridge`; docs/CARTRIDGES.md) into every
+    \\                      conversation — served "prior knowledge" without prompt
+    \\                      tokens (qwen3/gemma4 backends; composes with the slot
+    \\                      pool and the --kv-cache-dir disk tier)
     \\
     \\Reasoning is off by default; clients enable it per request via
     \\reasoning_effort (chat) or reasoning.effort (responses).
@@ -64,6 +69,7 @@ const Args = struct {
     kv_slots: usize = 1,
     kv_cache_dir: ?[]const u8 = null,
     kv_disk_slots: usize = 8,
+    cartridge_path: ?[]const u8 = null,
 };
 
 var g_shutdown = std.atomic.Value(bool).init(false);
@@ -129,6 +135,9 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--kv-disk-slots") and i + 1 < args_slice.len) {
             i += 1;
             args.kv_disk_slots = try std.fmt.parseInt(usize, args_slice[i], 10);
+        } else if (std.mem.eql(u8, arg, "--cartridge") and i + 1 < args_slice.len) {
+            i += 1;
+            args.cartridge_path = args_slice[i];
         } else if (std.mem.eql(u8, arg, "--experts=borrow")) {
             args.experts_borrow = true;
         } else if (std.mem.eql(u8, arg, "--experts=pack")) {
@@ -150,6 +159,10 @@ pub fn main(init: std.process.Init) !void {
     defer ctx.deinit();
 
     if (args.nanochat_dir) |dir| {
+        if (args.cartridge_path != null) {
+            try stderr.writeAll("--cartridge is supported by the qwen3/gemma4 GGUF backends only\n");
+            return error.CartridgeUnsupported;
+        }
         const model_id = try allocator.dupe(u8, std.fs.path.basename(dir));
         defer allocator.free(model_id);
         var adapter = try backend_nanochat.NanochatBackend.load(allocator, &ctx, init.io, dir, model_id, args.ctx_len);
@@ -193,6 +206,10 @@ fn serveDiffusion(
     model_id: []const u8,
     args: Args,
 ) !void {
+    if (args.cartridge_path != null) {
+        try stderr.writeAll("--cartridge is supported by the qwen3/gemma4 GGUF backends only\n");
+        return error.CartridgeUnsupported;
+    }
     var config = try llm.diffusion_gemma.model.Config.fromGguf(file);
     config.base.borrow_experts = args.experts_borrow;
     var tokenizer = llm.spm_tokenizer.Tokenizer.initFromGguf(allocator, file, .{}) catch {
@@ -239,6 +256,10 @@ fn serveQwen3(
     };
     file.deinit();
 
+    var cart: ?llm.cartridge.Cartridge = null;
+    defer if (cart) |*c| c.deinit();
+    if (args.cartridge_path) |path| cart = try loadCartridge(io, allocator, stderr, ctx, &model, path);
+
     var adapter = backend_mod.GgufChatBackend(llm.qwen3.model.Model, llm.tokenizer).init(
         allocator,
         ctx,
@@ -255,6 +276,7 @@ fn serveQwen3(
             .default_sampling = .{ .temperature = 0.7, .top_k = 20, .top_p = 0.8 },
             .kv_slots = args.kv_slots,
             .kv_disk = kvDiskOptions(io, args),
+            .cartridge = if (cart) |*c| c else null,
         },
     );
     defer adapter.deinit();
@@ -285,6 +307,10 @@ fn serveGemma4(
     defer model.deinit();
     file.deinit();
 
+    var cart: ?llm.cartridge.Cartridge = null;
+    defer if (cart) |*c| c.deinit();
+    if (args.cartridge_path) |path| cart = try loadCartridge(io, allocator, stderr, ctx, &model, path);
+
     // Turn-end ids beyond <turn|>: the GGUF's own EOS and a stray SPM <eos>
     // (id 1) — the gemma4 chat harness registers the same pair.
     var extra_stops_buf: [2]u32 = undefined;
@@ -309,10 +335,38 @@ fn serveGemma4(
             .default_sampling = default_sampling,
             .kv_slots = args.kv_slots,
             .kv_disk = kvDiskOptions(io, args),
+            .cartridge = if (cart) |*c| c else null,
         },
     );
     defer adapter.deinit();
     try serveWith(io, allocator, adapter.backend(), args);
+}
+
+/// Load a trained cartridge (docs/CARTRIDGES.md) and probe it against the
+/// model's KV geometry, so a mismatched file fails at startup instead of
+/// mid-request.
+fn loadCartridge(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    stderr: *std.Io.Writer,
+    ctx: *fucina.ExecContext,
+    model: anytype,
+    path: []const u8,
+) !llm.cartridge.Cartridge {
+    const bytes = blk: {
+        var dir = std.Io.Dir.cwd();
+        break :blk try dir.readFileAlloc(io, path, allocator, .limited(1024 * 1024 * 1024));
+    };
+    defer allocator.free(bytes);
+    var cart = try llm.cartridge.Cartridge.initFromStateDict(ctx, allocator, bytes);
+    errdefer cart.deinit();
+    var probe = try model.initKvCache(ctx, cart.p + 1);
+    defer probe.deinit();
+    cart.writeToCache(ctx, &probe) catch |err| {
+        try stderr.print("cartridge {s} does not fit this model's KV geometry\n", .{path});
+        return err;
+    };
+    return cart;
 }
 
 /// The gguf-chat backends' evict-to-disk tier config from the CLI flags

@@ -614,6 +614,75 @@ pub const Model = struct {
         return self.output.linearSeq(ctx, &final_norm, .embed, .vocab);
     }
 
+    /// `forwardStepBatch` generalized to a SPAN of tokens per stream — the
+    /// ragged batch a multi-stream speculative verify needs: stream `i`
+    /// contributes `span_lens[i]` consecutive tokens of `token_ids` (its
+    /// carried token plus drafted continuations). Every seq-parallel op runs
+    /// packed over the concatenated rows (the batching win), and attention
+    /// runs per stream against its own cache with the standard kernels
+    /// (q_seq = span, end-aligned causal — per-stream attention IS the
+    /// ragged-batch mask, the same decomposition as the trainer's packed
+    /// segments). Appends each stream's rows to its cache and advances it
+    /// by its span — callers rewind rejected drafts with `truncate`.
+    /// Returns logits for EVERY row, in input order. With all spans == 1
+    /// this computes exactly `forwardStepBatch`.
+    pub fn forwardStepBatchSpans(
+        self: *const Model,
+        ctx: *ExecContext,
+        caches: []const *KvCache,
+        token_ids: []const usize,
+        span_lens: []const usize,
+    ) !fucina.Tensor(.{ .seq, .vocab }) {
+        const n = caches.len;
+        if (n == 0 or span_lens.len != n) return Error.InvalidSequenceLength;
+        var total: usize = 0;
+        for (span_lens) |span| {
+            if (span == 0) return Error.InvalidSequenceLength;
+            total += span;
+        }
+        if (total != token_ids.len) return Error.InvalidSequenceLength;
+        const dtype = caches[0].dtype;
+        for (caches, span_lens, 0..) |kv, span, i| {
+            if (kv.dtype != dtype) return Error.MismatchedKvCaches;
+            if (kv.head_dim.len != self.layers.len) return Error.MismatchedKvCaches;
+            if (kv.len + span > kv.capacity) return kv_cache.Error.KvCacheOverflow;
+            for (caches[0..i]) |prev| if (prev == kv) return Error.MismatchedKvCaches;
+        }
+
+        const a = ctx.allocator;
+        const positions = try a.alloc(i32, total);
+        defer a.free(positions);
+        {
+            var at: usize = 0;
+            for (caches, span_lens) |kv, span| {
+                for (0..span) |j| {
+                    positions[at] = @intCast(kv.len + j);
+                    at += 1;
+                }
+            }
+        }
+        var rope_table = try ctx.prepareRopeTable(positions, self.config.head_dim, self.config.rope_theta, false);
+        defer rope_table.deinit();
+
+        var x = try self.token_embedding.getRowsAs(ctx, token_ids, .embed);
+        var x_released = false;
+        errdefer if (!x_released) x.deinit();
+
+        const cfg = self.config;
+        for (self.layers, 0..) |*layer, layer_i| {
+            x = try ctx.replace(x, attentionBlockBatchSpans(ctx, cfg, layer, &x, &rope_table, self.kv_head_for_head, caches, layer_i, span_lens));
+            x = try ctx.replace(x, ffnBlock(ctx, null, cfg, layer, &x, null));
+        }
+        for (caches, span_lens) |kv, span| kv.advance(span);
+
+        var final_norm = try x.rmsNormMul(ctx, .embed, &self.output_norm, self.config.rms_norm_eps);
+        defer final_norm.deinit();
+        x.deinit();
+        x_released = true;
+
+        return self.output.linearSeq(ctx, &final_norm, .embed, .vocab);
+    }
+
     /// Greedy autoregressive generation: prefill `prompt_tokens`, then sample
     /// the argmax token each step into `out_tokens` until `max_new_tokens`,
     /// `out_tokens.len`, or the optional `stop_token` is reached. Resets `kv`.
@@ -1278,6 +1347,96 @@ fn attentionBlockBatch(
             break :blk try q_rope.groupedAttention(ctx, spans.ks_q8, spans.vs_q8, kv_head_for_head, .attn, scale, .{ .lens = spans.lens, .kv_heads = config.num_key_value_heads });
         },
     };
+    defer attn.deinit();
+
+    var attn_out = try layer.o_proj.linearSeq(ctx, &attn, .attn, .embed);
+    defer attn_out.deinit();
+
+    return input.add(ctx, &attn_out);
+}
+
+/// `attentionBlockBatch` for a SPAN of rows per stream (see
+/// `forwardStepBatchSpans`): projections, norms, and RoPE run packed over
+/// the concatenated spans; each stream's rows append to its cache and
+/// attend against it with the standard single-stream kernels (q_seq =
+/// span, kv_seq = cache prefix + span, end-aligned causal).
+fn attentionBlockBatchSpans(
+    ctx: *ExecContext,
+    config: Config,
+    layer: *const Layer,
+    input: *const fucina.Tensor(.{ .seq, .embed }),
+    rope_table: *const fucina.RopeTable,
+    kv_head_for_head: []const usize,
+    caches: []const *KvCache,
+    layer_i: usize,
+    span_lens: []const usize,
+) !fucina.Tensor(.{ .seq, .embed }) {
+    var qkv_linear = try layer.attn_proj.projectNormed(ctx, input, &layer.attn_norm, config.rms_norm_eps, config);
+    defer qkv_linear.deinit();
+
+    var q3 = try qkv_linear.q.split(ctx, .q, .{ .head, .d }, .{ config.num_attention_heads, config.head_dim });
+    defer q3.deinit();
+    var k3 = try qkv_linear.k.split(ctx, .k, .{ .kv_head, .d }, .{ config.num_key_value_heads, config.head_dim });
+    defer k3.deinit();
+    var v3 = try qkv_linear.v.split(ctx, .v, .{ .kv_head, .d }, .{ config.num_key_value_heads, config.head_dim });
+    defer v3.deinit();
+
+    var q_rope = try q3.rmsNormMulRopeHalfPrepared(ctx, .seq, .d, &layer.q_norm, config.rms_norm_eps, rope_table);
+    defer q_rope.deinit();
+    var k_rope = try k3.rmsNormMulRopeHalfPrepared(ctx, .seq, .d, &layer.k_norm, config.rms_norm_eps, rope_table);
+    defer k_rope.deinit();
+
+    const Out = fucina.Tensor(.{ .seq, .attn });
+    const outs = try ctx.allocator.alloc(Out, caches.len);
+    defer ctx.allocator.free(outs);
+    var built: usize = 0;
+    errdefer for (outs[0..built]) |*out| out.deinit();
+
+    var start: usize = 0;
+    for (caches, span_lens, 0..) |kv, span, s| {
+        var k_rows = try k_rope.narrow(ctx, .seq, start, span);
+        defer k_rows.deinit();
+        var v_rows = try v3.narrow(ctx, .seq, start, span);
+        defer v_rows.deinit();
+        try kv.appendLayer(ctx, layer_i, &k_rows, &v_rows);
+        const cached_len = kv.len + span;
+
+        var q_seg = try q_rope.narrow(ctx, .seq, start, span);
+        defer q_seg.deinit();
+        outs[s] = switch (kv.dtype) {
+            .f16 => blk: {
+                var k_view = try kv.k[layer_i].narrow(ctx, .seq, 0, cached_len);
+                defer k_view.deinit();
+                var v_view = try kv.v[layer_i].narrow(ctx, .seq, 0, cached_len);
+                defer v_view.deinit();
+                break :blk try causalAttention(ctx, config, &q_seg, &k_view, &v_view, kv_head_for_head, .{});
+            },
+            .q8_0 => try causalAttention(
+                ctx,
+                config,
+                &q_seg,
+                kv.kBlocks(layer_i, cached_len),
+                kv.vBlocks(layer_i, cached_len),
+                kv_head_for_head,
+                .{ .kv_seq = cached_len, .kv_heads = config.num_key_value_heads },
+            ),
+        };
+        built += 1;
+        start += span;
+    }
+
+    var attn: Out = undefined;
+    if (outs.len == 1) {
+        attn = outs[0];
+        built = 0; // ownership moved
+    } else {
+        const rest = try ctx.allocator.alloc(*const Out, outs.len - 1);
+        defer ctx.allocator.free(rest);
+        for (rest, outs[1..]) |*ptr, *out| ptr.* = out;
+        attn = try outs[0].concat(ctx, .seq, rest);
+        for (outs[0..built]) |*out| out.deinit();
+        built = 0;
+    }
     defer attn.deinit();
 
     var attn_out = try layer.o_proj.linearSeq(ctx, &attn, .attn, .embed);

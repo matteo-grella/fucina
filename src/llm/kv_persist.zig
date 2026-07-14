@@ -15,6 +15,15 @@
 //!     token: u32
 //!     per layer: K row bytes, V row bytes for one position
 //!       (f16: kv_heads*head_dim*2; q8_0: kv_heads*head_dim/32 * 34)
+//!
+//! Conversations served behind a preloaded KV prefix (a cartridge —
+//! docs/CARTRIDGES.md — whose rows no tokens produced) write "FUXKV002":
+//! identical except one extra header field, `prefix_rows: u64`, between
+//! `nrec` and `n_layers`. Records still cover EVERY cache position (the
+//! file is self-describing: a restore carries its own prefix even if the
+//! server later runs a different cartridge); the first `prefix_rows`
+//! records store the token sentinel 0, ignored on load. Prefix-free
+//! conversations keep writing byte-identical V1 files.
 const std = @import("std");
 const fucina = @import("fucina");
 const kv_cache = @import("kv_cache.zig");
@@ -22,13 +31,15 @@ const kv_cache = @import("kv_cache.zig");
 const Allocator = std.mem.Allocator;
 const KvCache = kv_cache.KvCache;
 
-const magic = "FUXKV001";
-const nrec_offset: u64 = magic.len;
+const magic_v1 = "FUXKV001";
+const magic_v2 = "FUXKV002";
+const nrec_offset: u64 = magic_v1.len;
 
 pub const Error = error{KvPersistTokenMismatch};
 
-fn headerLen(n_layers: usize) u64 {
-    return magic.len + 8 + 4 + 4 + @as(u64, n_layers) * 8;
+fn headerLen(prefix_rows: usize, n_layers: usize) u64 {
+    const prefix_field: u64 = if (prefix_rows > 0) 8 else 0;
+    return magic_v1.len + 8 + prefix_field + 4 + 4 + @as(u64, n_layers) * 8;
 }
 
 fn layerRowBytes(kv: *const KvCache, layer_i: usize) usize {
@@ -52,14 +63,18 @@ fn dtypeTag(dtype: kv_cache.KvDtype) u32 {
     };
 }
 
-fn buildHeader(allocator: Allocator, kv: *const KvCache, nrec: u64) Allocator.Error![]u8 {
+fn buildHeader(allocator: Allocator, kv: *const KvCache, nrec: u64, prefix_rows: usize) Allocator.Error![]u8 {
     const n_layers = kv.kv_heads.len;
-    const bytes = try allocator.alloc(u8, headerLen(n_layers));
+    const bytes = try allocator.alloc(u8, headerLen(prefix_rows, n_layers));
     var at: usize = 0;
-    @memcpy(bytes[at..][0..magic.len], magic);
-    at += magic.len;
+    @memcpy(bytes[at..][0..magic_v1.len], if (prefix_rows > 0) magic_v2 else magic_v1);
+    at += magic_v1.len;
     std.mem.writeInt(u64, bytes[at..][0..8], nrec, .little);
     at += 8;
+    if (prefix_rows > 0) {
+        std.mem.writeInt(u64, bytes[at..][0..8], prefix_rows, .little);
+        at += 8;
+    }
     std.mem.writeInt(u32, bytes[at..][0..4], @intCast(n_layers), .little);
     at += 4;
     std.mem.writeInt(u32, bytes[at..][0..4], dtypeTag(kv.dtype), .little);
@@ -132,32 +147,53 @@ fn applyRecord(kv: *KvCache, pos: usize, rec: []const u8) !usize {
     return token;
 }
 
-/// Read and validate an existing sidecar's header against `kv`'s geometry.
-/// Returns the stored `nrec`, or null when the file is absent or belongs to
-/// another model/dtype (ignored wholesale).
-fn readHeader(io: std.Io, allocator: Allocator, path: []const u8, kv: *const KvCache) ?u64 {
+const Header = struct {
+    nrec: u64,
+    prefix_rows: usize,
+    header_len: u64,
+};
+
+/// Read and validate an existing sidecar's header against `kv`'s geometry
+/// (either format version). Returns the stored counts, or null when the
+/// file is absent or belongs to another model/dtype (ignored wholesale).
+fn readHeader(io: std.Io, allocator: Allocator, path: []const u8, kv: *const KvCache) ?Header {
     var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
     defer file.close(io);
+
+    var magic_buf: [magic_v1.len]u8 = undefined;
+    if ((file.readPositionalAll(io, &magic_buf, 0) catch return null) != magic_buf.len) return null;
+    const v2 = std.mem.eql(u8, &magic_buf, magic_v2);
+    if (!v2 and !std.mem.eql(u8, &magic_buf, magic_v1)) return null;
+
     const n_layers = kv.kv_heads.len;
-    const hdr = allocator.alloc(u8, headerLen(n_layers)) catch return null;
+    const hdr_len = headerLen(@intFromBool(v2), n_layers);
+    const hdr = allocator.alloc(u8, hdr_len) catch return null;
     defer allocator.free(hdr);
     const got = file.readPositionalAll(io, hdr, 0) catch return null;
     if (got != hdr.len) return null;
 
-    var expect = buildHeader(allocator, kv, 0) catch return null;
+    const nrec = std.mem.readInt(u64, hdr[nrec_offset..][0..8], .little);
+    const prefix_rows: u64 = if (v2) std.mem.readInt(u64, hdr[nrec_offset + 8 ..][0..8], .little) else 0;
+    if (v2 and prefix_rows == 0) return null; // V2 demands a prefix; a zero is a foreign write
+    const geometry_at: usize = nrec_offset + 8 + @as(usize, if (v2) 8 else 0);
+
+    var expect = buildHeader(allocator, kv, 0, @intCast(prefix_rows)) catch return null;
     defer allocator.free(expect);
-    // Compare everything except the nrec field.
-    if (!std.mem.eql(u8, hdr[0..magic.len], expect[0..magic.len])) return null;
-    if (!std.mem.eql(u8, hdr[magic.len + 8 ..], expect[magic.len + 8 ..])) return null;
-    return std.mem.readInt(u64, hdr[nrec_offset..][0..8], .little);
+    // Compare the geometry section (everything past nrec/prefix_rows).
+    if (!std.mem.eql(u8, hdr[geometry_at..], expect[geometry_at..])) return null;
+    return .{
+        .nrec = nrec,
+        .prefix_rows = std.math.cast(usize, prefix_rows) orelse return null,
+        .header_len = hdr_len,
+    };
 }
 
 /// Reset the sidecar to an empty conversation for this cache's geometry:
 /// a fresh header with `nrec = 0` caps whatever records follow. Use when
 /// arming persistence over a file that could not be resumed — appending
 /// onto a foreign prefix must be impossible.
-pub fn reset(io: std.Io, allocator: Allocator, path: []const u8, kv: *const KvCache) !void {
-    const hdr = try buildHeader(allocator, kv, 0);
+pub fn reset(io: std.Io, allocator: Allocator, path: []const u8, kv: *const KvCache, prefix_rows: usize) !void {
+    const hdr = try buildHeader(allocator, kv, 0, prefix_rows);
     defer allocator.free(hdr);
     var file = try std.Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
@@ -165,17 +201,22 @@ pub fn reset(io: std.Io, allocator: Allocator, path: []const u8, kv: *const KvCa
 }
 
 /// Append the cache positions the sidecar does not hold yet (from its own
-/// record count up to `kv.len`, with `tokens` indexed by absolute
-/// position), creating the file if needed, then publish the new count by
-/// rewriting `nrec` last — data first, counter after, so a torn append is
-/// invisible. Call at turn/generation boundaries; the caller must have
-/// resumed from (or `reset`) this file, so the existing prefix is this
-/// conversation's own.
-pub fn appendRange(io: std.Io, allocator: Allocator, path: []const u8, kv: *const KvCache, tokens: []const usize) !void {
-    if (tokens.len != kv.len) return Error.KvPersistTokenMismatch;
+/// record count up to `kv.len`), creating the file if needed, then publish
+/// the new count by rewriting `nrec` last — data first, counter after, so
+/// a torn append is invisible. `tokens` describes positions
+/// `[prefix_rows, kv.len)`; the leading `prefix_rows` positions are a
+/// token-less preloaded prefix (0 for classic conversations). Call at
+/// turn/generation boundaries; the caller must have resumed from (or
+/// `reset`) this file, so the existing content is this conversation's own —
+/// a stored prefix shape that disagrees is treated as foreign and reset.
+pub fn appendRange(io: std.Io, allocator: Allocator, path: []const u8, kv: *const KvCache, tokens: []const usize, prefix_rows: usize) !void {
+    if (prefix_rows + tokens.len != kv.len) return Error.KvPersistTokenMismatch;
 
-    const disk_nrec: u64 = readHeader(io, allocator, path, kv) orelse blk: {
-        try reset(io, allocator, path, kv);
+    const disk_nrec: u64 = blk: {
+        if (readHeader(io, allocator, path, kv)) |hdr| {
+            if (hdr.prefix_rows == prefix_rows) break :blk hdr.nrec;
+        }
+        try reset(io, allocator, path, kv, prefix_rows);
         break :blk 0;
     };
     // A file ahead of the session (a rolled-back turn) is truncated to the
@@ -189,9 +230,10 @@ pub fn appendRange(io: std.Io, allocator: Allocator, path: []const u8, kv: *cons
     const rec_len = recordLen(kv);
     const rec = try allocator.alloc(u8, rec_len);
     defer allocator.free(rec);
-    const header_len = headerLen(kv.kv_heads.len);
+    const header_len = headerLen(prefix_rows, kv.kv_heads.len);
     for (start..kv.len) |pos| {
-        try buildRecord(kv, tokens[pos], pos, rec);
+        const token: usize = if (pos < prefix_rows) 0 else tokens[pos - prefix_rows];
+        try buildRecord(kv, token, pos, rec);
         try file.writePositionalAll(io, rec, header_len + @as(u64, pos) * rec_len);
     }
     var nrec_bytes: [8]u8 = undefined;
@@ -199,16 +241,27 @@ pub fn appendRange(io: std.Io, allocator: Allocator, path: []const u8, kv: *cons
     try file.writePositionalAll(io, &nrec_bytes, nrec_offset);
 }
 
+/// A resumed conversation: the token history for cache rows
+/// `[prefix_rows, len)` plus the token-less preloaded-prefix row count
+/// (0 for classic conversations; `Conversation`'s `kv_prefix_rows` /
+/// `WarmState.prefix_rows` on the adopt side).
+pub const Loaded = struct {
+    tokens: []usize,
+    prefix_rows: usize,
+};
+
 /// Resume a persisted conversation into the (empty) cache: validates the
 /// header, loads up to `nrec` records (stopping early at a torn tail — the
 /// prefix stays usable), sets `kv.len`, and returns the caller-owned token
 /// history. Null when there is nothing usable to resume (absent file,
-/// foreign geometry, or a history larger than the cache capacity).
-pub fn load(io: std.Io, allocator: Allocator, path: []const u8, kv: *KvCache) !?[]usize {
+/// foreign geometry, a history larger than the cache capacity, or a tear
+/// inside the token-less prefix — a prefix without any conversation row is
+/// not a resumable state).
+pub fn load(io: std.Io, allocator: Allocator, path: []const u8, kv: *KvCache) !?Loaded {
     std.debug.assert(kv.len == 0);
-    const nrec_stored = readHeader(io, allocator, path, kv) orelse return null;
-    const nrec: usize = std.math.cast(usize, nrec_stored) orelse return null;
-    if (nrec == 0 or nrec > kv.capacity) return null;
+    const hdr = readHeader(io, allocator, path, kv) orelse return null;
+    const nrec: usize = std.math.cast(usize, hdr.nrec) orelse return null;
+    if (nrec <= hdr.prefix_rows or nrec > kv.capacity) return null;
 
     var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
     defer file.close(io);
@@ -216,24 +269,25 @@ pub fn load(io: std.Io, allocator: Allocator, path: []const u8, kv: *KvCache) !?
     const rec_len = recordLen(kv);
     const rec = try allocator.alloc(u8, rec_len);
     defer allocator.free(rec);
-    const tokens = try allocator.alloc(usize, nrec);
+    const tokens = try allocator.alloc(usize, nrec - hdr.prefix_rows);
     errdefer allocator.free(tokens);
 
-    const header_len = headerLen(kv.kv_heads.len);
     var loaded: usize = 0;
     while (loaded < nrec) : (loaded += 1) {
-        const got = file.readPositionalAll(io, rec, header_len + @as(u64, loaded) * rec_len) catch break;
+        const got = file.readPositionalAll(io, rec, hdr.header_len + @as(u64, loaded) * rec_len) catch break;
         if (got != rec_len) break;
-        tokens[loaded] = try applyRecord(kv, loaded, rec);
+        const token = try applyRecord(kv, loaded, rec);
+        if (loaded >= hdr.prefix_rows) tokens[loaded - hdr.prefix_rows] = token;
     }
-    if (loaded == 0) {
+    if (loaded <= hdr.prefix_rows) {
         allocator.free(tokens);
         return null;
     }
     kv.len = loaded;
-    if (loaded == nrec) return tokens;
-    const trimmed = try allocator.realloc(tokens, loaded);
-    return trimmed;
+    const kept = loaded - hdr.prefix_rows;
+    if (kept == tokens.len) return .{ .tokens = tokens, .prefix_rows = hdr.prefix_rows };
+    const trimmed = try allocator.realloc(tokens, kept);
+    return .{ .tokens = trimmed, .prefix_rows = hdr.prefix_rows };
 }
 
 test {

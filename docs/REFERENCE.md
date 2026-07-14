@@ -6113,6 +6113,10 @@ Refcount operations:
   Only for owners that know no references remain (pool teardown).
 - `waitReady()` / `discardPending()` — complete already-submitted GPU output
   work, respectively making host bytes visible or skipping an unused D2H.
+  `waitReady` is safe under CONCURRENT callers (parallel chunk copies land
+  N readers on one buffer): a single claimant dereferences and releases the
+  Work; everyone else spins until the slot clears, which happens only after
+  the host copy is visible (8-thread regression in `src/storage_tests.zig`).
 - `setPendingUse()` / `waitUnused()` / `waitMutable()` — track the latest
   submitted GPU reader of this allocation. Const host reads may overlap a
   device read; mutable access waits so post-call input mutation cannot race
@@ -8558,9 +8562,9 @@ named form.
 **Named, dtype-aware state dicts.** Re-exported from `fucina.state_dict`
 (§11.7) for convenience: `optim.NamedTensor`, `optim.NamedTensorMut`,
 `optim.LoadOptions`, `optim.saveStateDict`, `optim.loadStateDict`. Entries
-carry a unique name, dtype (f32/f16/bf16, raw byte passthrough), shape, and
-bytes; the wire format is a valid safetensors file; the load matches stream
-entries BY NAME so entry order is free. This is the portable format — it is
+carry a unique name, dtype (f32/f16/bf16/i64, raw byte passthrough), shape,
+and bytes; the wire format is a valid safetensors file; the load matches
+stream entries BY NAME so entry order is free. This is the portable format — it is
 what `model.safetensors`/`adapters.safetensors` in a checkpoint directory
 contain, and any safetensors consumer can read it.
 
@@ -8681,10 +8685,10 @@ error set is `optim.OptimError`.
 
 `fucina.ParamRegistry` is the named-parameter seam between models,
 checkpoints, and trainers. It owns no model tensors: it BORROWS named
-f32/f16/bf16 facade tensors, retaining refcounted storage views
-(dtype-erased), so the original tensors and their GradStates must outlive
-the registry and any optimizer it registers into. Names are COPIED
-(registry-owned).
+f32/f16/bf16 (and, via explicit `addParam` only, frozen i64) facade
+tensors, retaining refcounted storage views (dtype-erased), so the
+original tensors and their GradStates must outlive the registry and any
+optimizer it registers into. Names are COPIED (registry-owned).
 
 ```zig
 pub const ParamRegistry = struct {
@@ -8705,12 +8709,16 @@ pub const ParamView = struct { name, dtype, shape, bytes: []u8, trainable: bool 
 
 - `addParam` registers one tensor under an explicit name. Variables
   (`grad_state != null`) are trainable; constants and grad-free typed
-  f16/bf16 tensors register as FROZEN entries — saved and loaded, but
-  skipped by `addParamsTo` and `zeroGrad`. Errors:
-  `CheckpointInvalidName`, `CheckpointDuplicateName`,
-  `error.NonContiguousParam`; unsupported dtypes are a compile error.
+  f16/bf16/i64 tensors register as FROZEN entries — saved and loaded, but
+  skipped by `addParamsTo` and `zeroGrad` (i64 is for frozen integer
+  metadata riding a checkpoint, e.g. the cartridge `draft_reference`
+  token ids, §13.10). Errors: `CheckpointInvalidName`,
+  `CheckpointDuplicateName`, `error.NonContiguousParam`; unsupported
+  dtypes are a compile error.
 - `collect` reflectively registers every f32/f16/bf16 tensor field of a
-  model (mutable struct pointer), naming by field path: nested structs get
+  model (mutable struct pointer) — deliberately NOT i64, so adding an
+  integer tensor field can never silently grow a collected model's
+  checkpoint schema — naming by field path: nested structs get
   dotted names (`"encoder.weight"`), arrays and slices index with dots
   (`"layers.0.weight"`), mutable single-item pointers are followed
   transparently, optionals descend into the payload, and tagged unions
@@ -8802,8 +8810,8 @@ pub fn saveStateDict(allocator, writer: *std.Io.Writer, entries: []const NamedTe
 pub fn loadStateDict(allocator, reader: *std.Io.Reader, entries: []const NamedTensorMut, options: LoadOptions) !void
 ```
 
-`NamedTensor.of` accepts a pointer to any contiguous f32/f16/bf16 facade
-tensor (variable or constant; other dtypes are compile errors;
+`NamedTensor.of` accepts a pointer to any contiguous f32/f16/bf16/i64
+facade tensor (variable or constant; other dtypes are compile errors;
 non-contiguous is `error.NonContiguousParam`). `NamedTensorMut.of`
 additionally requires a mutable tensor pointer — a `*const` argument is a
 compile error. Both the name and the storage are BORROWED — they must
@@ -8812,7 +8820,7 @@ outlive the entry.
 `saveStateDict` validates everything before writing a byte: names must be
 non-empty, NUL-free, valid UTF-8, not `"__metadata__"`, and unique; entry
 byte lengths must match dtype×shape; a hand-built `NamedTensor` whose dtype
-is outside f32/f16/bf16 fails with `CheckpointUnsupportedDtype`. Raw bytes
+is outside f32/f16/bf16/i64 fails with `CheckpointUnsupportedDtype`. Raw bytes
 are then written — no conversion. `loadStateDict` reads one safetensors
 prefix from the reader and matches stream entries to destinations BY NAME
 (any order), after applying the `aliases` remap to each STREAM name (first
@@ -10078,6 +10086,7 @@ family-agnostic helpers stay flat:
 | `llm.llguidance` | grammar/JSON-schema constrained decoding (vendored engine, `-Dllguidance`) | §13.6 |
 | `llm.data` | SFT pairs, encodePair, deterministic Loader | §13.7 |
 | `llm.chat` | templates + generic `Conversation(Model, Tok)` | §13.8 |
+| `llm.cartridge` | trained KV-prefix corpus compression (Cartridges, arXiv 2506.06266) | §13.10 |
 
 The family namespaces are covered in §14 (deepseek2/glm4moe/deepseek4 by
 their module doc comments); this section documents the shared stack they
@@ -10544,17 +10553,25 @@ process restarts, with zero re-prefill. The sidecar is a fixed header —
 magic `FUXKV001`, a record count, and a per-layer geometry guard (any
 mismatch with the opening cache ignores the file wholesale) — followed by
 one record per position: the token id plus every layer's K/V row bytes
-(both cache dtypes round-trip). `reset(io, allocator, path, kv)` arms a
-fresh sidecar for the cache's geometry. `appendRange(io, allocator, path,
-kv, tokens)` writes the positions the file does not hold yet — record data
-first, the header's record count last, so a torn append is invisible;
-`tokens.len != kv.len` is `Error.KvPersistTokenMismatch`. `load(io,
-allocator, path, kv)` resumes into an empty cache: it applies up to the
-stored count (stopping early at a torn tail — the prefix stays usable),
-sets `kv.len`, and returns the caller-owned token history, or null when
-nothing usable exists (absent file, foreign geometry, or a history beyond
-capacity). `chat.Conversation.enablePersistence` (§13.8.2) is the turnkey
-consumer.
+(both cache dtypes round-trip). Conversations served behind a preloaded
+KV prefix (a cartridge, §13.10) write `FUXKV002` instead: one extra header
+field, `prefix_rows`, and records for EVERY position — the leading
+`prefix_rows` records carry a token sentinel — so a restore is
+self-describing and keeps the exact prefix it was saved with, even across
+a cartridge swap; prefix-free conversations keep writing byte-identical V1
+files. `reset(io, allocator, path, kv, prefix_rows)` arms a fresh sidecar
+for the cache's geometry. `appendRange(io, allocator, path, kv, tokens,
+prefix_rows)` writes the positions the file does not hold yet — record
+data first, the header's record count last, so a torn append is invisible;
+`prefix_rows + tokens.len != kv.len` is `Error.KvPersistTokenMismatch`,
+and a stored prefix shape that disagrees is treated as foreign (reset).
+`load(io, allocator, path, kv)` resumes into an empty cache: it applies up
+to the stored count (stopping early at a torn tail — the prefix stays
+usable; a tear INSIDE a token-less prefix is not resumable), sets
+`kv.len`, and returns the caller-owned `Loaded{ tokens, prefix_rows }`, or
+null when nothing usable exists (absent file, foreign geometry, or a
+history beyond capacity). `chat.Conversation.enablePersistence` (§13.8.2)
+is the turnkey consumer and resumes `kv_prefix_rows` from the file.
 
 ### 13.5 Tokenizers
 
@@ -11768,6 +11785,145 @@ test "constrained source: forced spans preempt, invalid drafts truncate" {
     forcing = 0;
     try std.testing.expectEqual(@as(usize, 1), cs.source().suggest(&.{0}, &buf));
     try std.testing.expectEqual(@as(usize, 1), buf[0]);
+}
+```
+
+### 13.10 Cartridges (`src/llm/cartridge.zig`)
+
+```zig
+pub const Kv = fucina.Tensor(.{ .seq, .kv_head, .d });          // KV-cache row layout
+pub const LayerKv = struct { k_sink: ?Kv, v_sink: ?Kv, k: Kv, v: Kv };
+pub const Cartridge = struct { layers: []LayerKv, p: usize, frozen_prefix: usize, ... };
+pub const DistillTargets = struct { positions: []const usize, tokens: []const usize, logprobs: []const f32 };
+pub const Error = error{ InvalidCartridge, InvalidTargets, ExecScopeRequired };
+```
+
+A **cartridge** (arXiv 2506.06266, HazyResearch/cartridges semantics)
+compresses a corpus into the KV cache of a virtual p-token prefix: per layer,
+a `[p, kv_head, d]` K/V pair living in the exact space of KV-cache rows —
+keys post q/k-norm and post-RoPE at positions `0..p-1`, never re-rotated —
+trained offline by self-study distillation and served as a reusable prefix at
+a fraction of the ICL cache size. Row 0 is a frozen constant by default (the
+paper's attention-sink freeze; training it destabilizes the run), the rest
+are leaf variables. Attention over `concat(cartridge, tokens)` with the
+end-aligned causal kernel (`source_offset = kv_seq − q_seq`, §4.13)
+reproduces the reference mask exactly: every query sees the whole prefix and
+is causal over the real tokens, which sit at RoPE positions `p..`.
+
+Construction and lifecycle (create OUTSIDE any exec scope, like LoRA A/B):
+
+- `Cartridge.initFromRows(ctx, allocator, frozen_prefix, p, kv_heads, head_dim, k_rows, v_rows)`
+  — from captured per-layer rows (`qwen3.train.Trainer.captureKv` /
+  `initCartridge` produce them; the paper's winning "first p corpus tokens"
+  initialization). `initRandom(...)` is the random-vector ablation baseline.
+- `registerParams(opt)` — trainable rows onto any optimizer with
+  `addParamNamed` (sinks are frozen registry entries and are skipped);
+  `zeroGrad()`.
+- `saveState(writer)` / `loadState(reader)` — safetensors state dict under
+  `layers.<i>.{k,v}[_sink]` names (strict name+shape match on load);
+  `initFromStateDict(ctx, allocator, bytes)` rebuilds a cartridge from the
+  bytes alone (geometry recovered from the safetensors header).
+- `setDraftReference(ctx, tokens)` — embed the corpus token ids in the
+  artifact (frozen i64 `draft_reference` entry; set-once, before
+  `saveState`): the serving-side speculation reference, so `--spec-serve`
+  builds the corpus suffix automaton ONCE at cartridge load with no
+  `--corpus` re-read. `initFromStateDict` recovers it into
+  `cart.draft_reference: ?[]usize`; artifacts without the entry load
+  unchanged.
+- `LayerKv.catK/catV(ctx, tokens)` — `concat(sink?, trainable, tokens)`
+  along `.seq`, the per-layer attention input; `fullK/fullV(ctx)` — the
+  serving payload (sink ++ trainable, no tokens).
+- `writeToCache(ctx, cache)` — serve: fill an EMPTY `KvCache` with all p
+  rows (converted to the cache dtype) and advance it to p, so a normal
+  `forwardStep` decode continues at position p, the training-time layout.
+
+`distillLoss(ctx, logits, targets, options)` is the reference training
+objective: the teacher top-k cross-entropy
+`mean(-exp(logprob_i) · log_softmax(logits)[positions_i − 1, tokens_i])` over
+sparse `(position, token, logprob)` entries — gradient-identical to forward
+KL(teacher ‖ student) since the teacher entropy is constant. `positions[i]`
+is the packed index of the TARGET token (the student's prediction is read
+from the previous row); truncated teacher tail mass is dropped, NOT
+renormalized; entries are averaged uniformly (`.sum` + `loss_scale` compose
+with gradient accumulation, §11). Composite-op contract: MUST run inside an
+open exec scope (`Error.ExecScopeRequired`). `TargetsBuilder.appendRow`
+extracts targets from raw teacher logits rows host-side (descending top-k
+until `min_prob_mass` cumulative probability, the crossing entry included);
+`appendTopKRow` is its tensor-side counterpart, fed by core
+`topK`/`logsumexp` over the vocab axis so only `[rows, k]` values/indices
+reach the host — selection identical (lowest-index ties both ways),
+logprobs equal up to the core reduction's summation order (pinned by a
+unit test).
+
+The qwen3 trainer hosts the training loop (§14 / `llm/qwen3/train.zig`):
+`ForwardOptions.cartridge` threads the prefix through every layer (tokens
+shift to RoPE positions `p..`; gradients flow into the cartridge rows through
+the frozen stack), `ForwardOptions.capture` copies token K/V rows out of a
+forward, `ForwardOptions.packed_segments` batches several independent
+sequences as contiguous segments of ONE forward (the GEMMs pack; RoPE
+restarts per segment via a transient table — pair with
+`Trainer.freeTransientRope()` between optimizer steps; attention runs per
+segment over zero-copy narrows so gradients keep flowing through the fused
+backward and accumulate into shared leaves — packed vs sequential gradient
+equality is pinned by a trainer test), and `Trainer.{initCartridge,
+captureKv, distillLoss, evalLogitsExt, evalLogitsRows}` are the
+training/eval entries — instantiate `Trainer(.{ .q = false, .v = false })`
+so the cartridge rows are the only parameters. All three knobs are
+plain-path only (`Error.CartridgeCheckpointUnsupported` under
+`checkpoint_layers`). The
+`cartridge` example (`zig build cartridge`) runs the whole flow on a real
+GGUF: `--equiv` (a zero-training corpus-init cartridge must match the real
+prefill — bitwise at tiled-attention shapes on Qwen3-0.6B-f16), self-study
+training (paper Sec 4, k = 1, fully in-process), and `--load`/`--ask`
+serving. Design record: `docs/CARTRIDGES.md`.
+
+```zig
+test "cartridge: trainable KV prefix + teacher top-k distillation" {
+    const alloc = std.testing.allocator;
+    var ctx: fucina.ExecContext = undefined;
+    ctx.init(alloc);
+    defer ctx.deinit();
+
+    // One layer, p = 2 rows: a frozen sink + one trainable row.
+    var cart = try llm.cartridge.Cartridge.initRandom(&ctx, alloc, 1, 1, 2, 1, 2, 42, 0.1);
+    defer cart.deinit();
+    try std.testing.expect(!cart.layers[0].k_sink.?.requiresGrad());
+    try std.testing.expect(cart.layers[0].k.requiresGrad());
+
+    const scope = ctx.openExecScope();
+    defer ctx.closeExecScope(scope);
+
+    // kv_seq = p + 2 > q_seq = 2: every query attends the whole prefix,
+    // then causally over the tokens (end-aligned kernel, §4.13).
+    var q = try fucina.Tensor(.{ .seq, .head, .d }).fromSlice(&ctx, .{ 2, 2, 2 }, &.{ 0.2, -0.4, 0.5, 0.1, -0.3, 0.7, 0.05, -0.6 });
+    defer q.deinit();
+    var k_tok = try llm.cartridge.Kv.fromSlice(&ctx, .{ 2, 1, 2 }, &.{ 0.1, 0.5, -0.35, 0.2 });
+    defer k_tok.deinit();
+    var v_tok = try llm.cartridge.Kv.fromSlice(&ctx, .{ 2, 1, 2 }, &.{ -0.2, 0.4, 0.55, -0.5 });
+    defer v_tok.deinit();
+    var k_cat = try cart.layers[0].catK(&ctx, &k_tok);
+    defer k_cat.deinit();
+    var v_cat = try cart.layers[0].catV(&ctx, &v_tok);
+    defer v_cat.deinit();
+    const map = [_]usize{ 0, 0 };
+    var attn = try q.groupedAttention(&ctx, &k_cat, &v_cat, map[0..], .attn, 0.7, .{});
+    defer attn.deinit();
+
+    // Stand-in logits: one full-mass teacher entry == plain cross-entropy.
+    var logits = try attn.withTags(&ctx, .{ .seq, .vocab });
+    defer logits.deinit();
+    var loss = try llm.cartridge.distillLoss(&ctx, &logits, .{
+        .positions = &.{1},
+        .tokens = &.{2},
+        .logprobs = &.{0.0},
+    }, .{});
+    defer loss.deinit();
+    try loss.backward(&ctx);
+
+    // The gradient reached the trainable row through concat + attention.
+    var grad = (try cart.layers[0].k.grad(&ctx)).?;
+    defer grad.deinit();
+    try std.testing.expectEqual(@as(usize, 2), grad.asRawTensor().dataConst().len);
 }
 ```
 

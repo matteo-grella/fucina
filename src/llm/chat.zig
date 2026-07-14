@@ -328,6 +328,14 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         /// kept (they skipped prefill) — the server's OpenAI
         /// `cached_tokens` accounting. 0 for every other send entry.
         reused_prefix: usize,
+        /// Leading cache positions holding a PRELOADED KV prefix with no
+        /// token shadow (a served cartridge — llm/cartridge.zig): row
+        /// `kv_prefix_rows + i` corresponds to `history.items[i]`, and the
+        /// reuse reconcile never rewinds into the prefix. 0 = the classic
+        /// token-aligned cache. Set by `notePrefixRows` (fresh) or
+        /// `WarmState.prefix_rows` (adopted); incompatible with KV
+        /// persistence (sidecars are token-indexed).
+        kv_prefix_rows: usize,
         /// Set by `takeCache`: the cache ownership left this conversation;
         /// deinit must skip it.
         cache_taken: bool,
@@ -366,6 +374,11 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         pub const WarmState = struct {
             cache: KvCache,
             tokens: []const usize,
+            /// Leading preloaded-prefix rows of `cache` that `tokens` does
+            /// NOT describe (a served cartridge): the cache is clamped to
+            /// `prefix_rows + tokens.len` and reconciliation offsets past
+            /// the prefix.
+            prefix_rows: usize = 0,
         };
 
         /// `init` adopting a previous conversation's KV cache and token
@@ -388,9 +401,10 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             var history: std.ArrayList(usize) = .empty;
             errdefer history.deinit(ctx.allocator);
             if (warm_opt) |w| {
-                // The cache may only claim positions its token shadow
-                // describes; a short shadow clamps it.
-                cache.truncate(w.tokens.len);
+                // The cache may only claim positions its token shadow (plus
+                // any declared preloaded prefix) describes; a short shadow
+                // clamps it.
+                cache.truncate(w.prefix_rows + w.tokens.len);
                 try history.appendSlice(ctx.allocator, w.tokens);
             }
             var spec: ?*SpecState = null;
@@ -443,8 +457,23 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 .spec = spec,
                 .persist = null,
                 .reused_prefix = 0,
+                .kv_prefix_rows = if (warm_opt) |w| w.prefix_rows else 0,
                 .cache_taken = false,
             };
+        }
+
+        /// Declare the first `rows` cache positions a PRELOADED KV prefix
+        /// with no token shadow — the serving seam for a trained cartridge:
+        /// `cartridge.writeToCache(ctx, &convo.cache)` into the fresh
+        /// conversation's cache, then this. Call once, before any send;
+        /// the cache must hold exactly the prefix. Incompatible with
+        /// speculation (the index mirrors token history). Composes with KV
+        /// persistence: sidecars record the prefix shape (FUXKV002) and
+        /// resume with it.
+        pub fn notePrefixRows(self: *Self, rows: usize) !void {
+            if (self.cache.len != rows or self.history.items.len != 0) return error.InvalidPrefix;
+            if (self.spec != null) return error.InvalidPrefix;
+            self.kv_prefix_rows = rows;
         }
 
         pub fn deinit(self: *Self) void {
@@ -488,17 +517,20 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         pub fn enablePersistence(self: *Self, io: std.Io, path: []const u8) !usize {
             std.debug.assert(self.persist == null and self.cache.len == 0 and self.history.items.len == 0);
             var resumed_count: usize = 0;
-            if (try kv_persist.load(io, self.allocator, path, &self.cache)) |tokens| {
-                defer self.allocator.free(tokens);
-                try self.history.appendSlice(self.allocator, tokens);
+            if (try kv_persist.load(io, self.allocator, path, &self.cache)) |resumed| {
+                defer self.allocator.free(resumed.tokens);
+                try self.history.appendSlice(self.allocator, resumed.tokens);
+                // A resumed sidecar carries its own preloaded-prefix shape
+                // (a cartridge conversation restores WITH its prefix rows).
+                self.kv_prefix_rows = resumed.prefix_rows;
                 // Not turn zero anymore: the template must not re-render the
                 // system prologue on the next message.
                 self.turn = 1;
-                resumed_count = tokens.len;
+                resumed_count = resumed.tokens.len;
             } else {
                 // Nothing resumable: make sure a stale/foreign file cannot
                 // become the prefix of this fresh conversation.
-                try kv_persist.reset(io, self.allocator, path, &self.cache);
+                try kv_persist.reset(io, self.allocator, path, &self.cache, self.kv_prefix_rows);
             }
             self.persist = .{ .io = io, .path = try self.allocator.dupe(u8, path) };
             return resumed_count;
@@ -512,7 +544,14 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             // ahead of the cache (deferred prefill) — that token is re-
             // rendered into the next turn's prefill and persisted then. The
             // file's own record count picks the append range.
-            try kv_persist.appendRange(st.io, self.allocator, st.path, &self.cache, self.history.items[0..self.cache.len]);
+            try kv_persist.appendRange(
+                st.io,
+                self.allocator,
+                st.path,
+                &self.cache,
+                self.history.items[0 .. self.cache.len - self.kv_prefix_rows],
+                self.kv_prefix_rows,
+            );
         }
 
         /// The decoder's lifetime acceptance stats (null when speculation is off).
@@ -579,10 +618,13 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             self.turn += 1;
 
             if (ids.len == 0) return error.EmptyMessages;
-            if (ids.len > self.cache.capacity) return error.ContextFull;
+            if (self.kv_prefix_rows + ids.len > self.cache.capacity) return error.ContextFull;
 
+            // Token space excludes any preloaded prefix rows: history[i]
+            // describes cache row kv_prefix_rows + i, and the rewind below
+            // may never cut into the prefix.
             var lcp: usize = 0;
-            const lcp_cap = @min(@min(self.cache.len, self.history.items.len), ids.len - 1);
+            const lcp_cap = @min(@min(self.cache.len - self.kv_prefix_rows, self.history.items.len), ids.len - 1);
             while (lcp < lcp_cap and self.history.items[lcp] == ids[lcp]) : (lcp += 1) {}
 
             const suffix = try a.alloc(usize, ids.len - lcp);
@@ -593,7 +635,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             // or an error would leave cache/history mid-reconcile instead
             // of on the previous request's consistent state.
             try self.history.ensureUnusedCapacity(a, suffix.len);
-            self.cache.truncate(lcp);
+            self.cache.truncate(self.kv_prefix_rows + lcp);
             self.history.shrinkRetainingCapacity(lcp);
             self.history.appendSliceAssumeCapacity(suffix);
             self.reused_prefix = lcp;

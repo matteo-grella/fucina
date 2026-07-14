@@ -25,6 +25,7 @@
 const std = @import("std");
 const fucina = @import("fucina");
 const qwen3 = @import("model.zig");
+const cartridge_mod = @import("../cartridge.zig");
 const weights = @import("../weights.zig");
 
 const Allocator = std.mem.Allocator;
@@ -43,6 +44,14 @@ pub const Error = error{
     LabelLengthMismatch,
     InvalidLayerRange,
     InvalidInjection,
+    InvalidCartridge,
+    InvalidCapture,
+    InvalidPacking,
+    /// Cartridge / capture / packed forwards are plain-path only: the
+    /// cartridge K/V variables, capture sink, and transient packed rope
+    /// tables are not checkpoint inputs, so a recompute would silently
+    /// detach, re-fill, or dangle them.
+    CartridgeCheckpointUnsupported,
 };
 
 /// Which frozen projections receive a trainable LoRA adapter.
@@ -79,14 +88,75 @@ pub const Injection = struct {
     row: *const Hidden,
 };
 
+/// Per-layer host copies of the post-q/k-norm, post-RoPE keys and the values
+/// of one forward pass — `[seq * kv_heads * head_dim]` floats per layer in
+/// KV-cache row order, the exact payload `cartridge.Cartridge.initFromRows`
+/// consumes (the paper's corpus-token initialization). Fill by passing the
+/// struct as `ForwardOptions.capture`; `Trainer.captureKv` wraps the flow.
+pub const KvCapture = struct {
+    k_rows: [][]f32,
+    v_rows: [][]f32,
+    allocator: Allocator,
+
+    pub fn init(allocator: Allocator, n_layers: usize, row_len: usize) !KvCapture {
+        const k_rows = try allocator.alloc([]f32, n_layers);
+        errdefer allocator.free(k_rows);
+        const v_rows = try allocator.alloc([]f32, n_layers);
+        errdefer allocator.free(v_rows);
+        var built: usize = 0;
+        errdefer for (0..built) |i| {
+            allocator.free(k_rows[i]);
+            allocator.free(v_rows[i]);
+        };
+        for (k_rows, v_rows) |*k, *v| {
+            k.* = try allocator.alloc(f32, row_len);
+            errdefer allocator.free(k.*);
+            v.* = try allocator.alloc(f32, row_len);
+            built += 1;
+        }
+        return .{ .k_rows = k_rows, .v_rows = v_rows, .allocator = allocator };
+    }
+
+    pub fn deinit(self: *KvCapture) void {
+        for (self.k_rows, self.v_rows) |k, v| {
+            self.allocator.free(k);
+            self.allocator.free(v);
+        }
+        self.allocator.free(self.k_rows);
+        self.allocator.free(self.v_rows);
+        self.* = undefined;
+    }
+};
+
 /// Options for `Trainer.forwardHidden` / `Trainer.evalLastLogitsExt`: run
 /// layers [start_layer, start_layer + layer_count) over the token embedding
 /// (`layer_count == null` runs through the last layer), optionally with a
 /// single-row embedding injection applied before the first selected layer.
+///
+/// `cartridge` prepends a trained KV prefix to every layer's attention
+/// (tokens shift to RoPE positions p..p+seq-1 and attend the whole prefix;
+/// gradients flow into the cartridge's trainable rows through the frozen
+/// stack). `capture` copies each layer's freshly computed token K/V rows
+/// out of the forward — the cartridge initialization seam. Both are
+/// plain-path only (`CartridgeCheckpointUnsupported` under
+/// `checkpoint_layers`).
+/// `packed_segments` runs several independent sequences through ONE forward as
+/// contiguous segments of the packed row (`packed_segments[i]` = length of
+/// i; lengths must sum to `tokens.len`). Every seq-parallel op (the
+/// projections, norms, logits — the dominant GEMMs) batches over the packed
+/// rows for free; RoPE positions restart per segment, and attention runs
+/// per segment over zero-copy narrows so no token ever sees another
+/// segment (with a cartridge, each segment sees the shared prefix plus its
+/// own causal rows — bit-for-bit the reference block mask). Gradients flow
+/// through the same fused attention backward per segment and accumulate
+/// into shared leaves (the cartridge rows) across segments.
 pub const ForwardOptions = struct {
     start_layer: usize = 0,
     layer_count: ?usize = null,
     inject: ?Injection = null,
+    cartridge: ?*const cartridge_mod.Cartridge = null,
+    capture: ?*KvCapture = null,
+    packed_segments: ?[]const usize = null,
 };
 
 /// The seven adaptable projections, in fixed order. Index doubles as the
@@ -107,6 +177,20 @@ const LayerExtra = struct {
     /// LoRA alpha / rank.
     scale: f32,
     dropout_p: f32,
+    /// Absolute layer index — the capture sink's row slot.
+    layer_i: usize = 0,
+    /// This layer's trained KV prefix (plain path only; never checkpointed).
+    cartridge_layer: ?*const cartridge_mod.LayerKv = null,
+    /// Token K/V row sink (plain path only; never checkpointed).
+    capture: ?*KvCapture = null,
+    /// Packed segment lengths (plain path only; never checkpointed).
+    packed_segments: ?[]const usize = null,
+};
+
+/// Rope-table cache key: token positions run offset..offset+len-1.
+const RopeKey = struct {
+    offset: usize,
+    len: usize,
 };
 
 /// Differentiable frozen linear: route through the plain `.value` tensor of
@@ -269,14 +353,23 @@ pub fn Trainer(comptime targets: Targets) type {
         /// refcounted views of the tensors; optimizers registered via
         /// `registerAllParams` borrow both, so the trainer must outlive them.
         registry: ParamRegistry,
-        /// RoPE tables keyed by sequence length, heap-pinned and NEVER freed
-        /// before `deinit`: checkpoint backward nodes hold raw pointers into
-        /// this cache (`LayerExtra.rope_table`) and dereference them at
-        /// recompute time, possibly after several intervening forwards.
-        /// Positions are always 0..seq-1, so a table per length is immutable
-        /// and reusable; memory is bounded by the number of DISTINCT sequence
-        /// lengths seen (one [seq, head_dim] f32 sin/cos pair each).
-        rope_tables: std.AutoHashMapUnmanaged(usize, *fucina.RopeTable) = .empty,
+        /// RoPE tables keyed by (position offset, sequence length),
+        /// heap-pinned and NEVER freed before `deinit`: checkpoint backward
+        /// nodes hold raw pointers into this cache (`LayerExtra.rope_table`)
+        /// and dereference them at recompute time, possibly after several
+        /// intervening forwards. Positions are offset..offset+seq-1 (offset 0
+        /// for plain training; a cartridge forward shifts tokens to offset p),
+        /// so a table per key is immutable and reusable; memory is bounded by
+        /// the number of DISTINCT keys seen (one [seq, head_dim] f32 sin/cos
+        /// pair each).
+        rope_tables: std.AutoHashMapUnmanaged(RopeKey, *fucina.RopeTable) = .empty,
+        /// Per-forward rope tables for PACKED forwards (positions restart per
+        /// segment, so a shared-length cache key does not exist). Appended by
+        /// every packed forward and freed only by `freeTransientRope`/`deinit`
+        /// — the rope backward reads the table, so free strictly BETWEEN an
+        /// optimizer step and the next packed forward, never between a
+        /// forward and its backward.
+        transient_tables: std.ArrayListUnmanaged(*fucina.RopeTable) = .empty,
         /// Advances once per `loss` call; selects the dropout seed stream.
         step_counter: u64 = 0,
         /// Recompute-in-backward per layer (one checkpoint block per layer).
@@ -411,7 +504,20 @@ pub fn Trainer(comptime targets: Targets) type {
             };
         }
 
+        /// Free the packed-forward rope tables (see `transient_tables`).
+        /// Call between optimizer steps; the tables of an un-backwarded
+        /// packed forward must stay alive.
+        pub fn freeTransientRope(self: *Self) void {
+            for (self.transient_tables.items) |table| {
+                table.deinit();
+                self.allocator.destroy(table);
+            }
+            self.transient_tables.clearRetainingCapacity();
+        }
+
         pub fn deinit(self: *Self) void {
+            self.freeTransientRope();
+            self.transient_tables.deinit(self.allocator);
             var tables = self.rope_tables.valueIterator();
             while (tables.next()) |table| {
                 table.*.deinit();
@@ -591,6 +697,120 @@ pub fn Trainer(comptime targets: Targets) type {
             return fucina.Tensor(.{ .seq, .vocab }).fromTensor(ctx, value);
         }
 
+        /// `evalLogits` with `ForwardOptions` — the cartridge student/teacher
+        /// seam: pass `.cartridge` to score tokens behind a trained KV prefix
+        /// (dropout off, no step advance, caller-owned [seq, vocab] constant).
+        pub fn evalLogitsExt(self: *Self, ctx: *ExecContext, tokens: []const usize, opts: ForwardOptions) !fucina.Tensor(.{ .seq, .vocab }) {
+            const scope = ctx.openExecScope();
+            defer ctx.closeExecScope(scope);
+            var hidden = try self.forwardHiddenImpl(ctx, tokens, null, opts);
+            defer hidden.deinit();
+            var logits = try self.logitsTail(ctx, &hidden);
+            defer logits.deinit();
+            // Deep-copy out of the scope: everything else dies at close.
+            var value = try logits.value.clone(ctx.allocator);
+            errdefer value.deinit();
+            return fucina.Tensor(.{ .seq, .vocab }).fromTensor(ctx, value);
+        }
+
+        /// `evalLogitsExt` restricted to the logits of `rows` (residual-row
+        /// indices into `tokens`): the memory-bounded teacher-scoring seam —
+        /// a [rows.len, vocab] copy instead of the full [seq, vocab] block
+        /// (distillation only reads the rows preceding supervised tokens).
+        pub fn evalLogitsRows(self: *Self, ctx: *ExecContext, tokens: []const usize, rows: []const usize, opts: ForwardOptions) !fucina.Tensor(.{ .seq, .vocab }) {
+            const scope = ctx.openExecScope();
+            defer ctx.closeExecScope(scope);
+            var hidden = try self.forwardHiddenImpl(ctx, tokens, null, opts);
+            defer hidden.deinit();
+            var picked = try hidden.gather(ctx, .seq, rows, .seq);
+            defer picked.deinit();
+            var logits = try self.logitsTail(ctx, &picked);
+            defer logits.deinit();
+            // Deep-copy out of the scope: everything else dies at close.
+            var value = try logits.value.clone(ctx.allocator);
+            errdefer value.deinit();
+            return fucina.Tensor(.{ .seq, .vocab }).fromTensor(ctx, value);
+        }
+
+        /// One eval forward over `tokens` (positions 0..len-1, no cartridge)
+        /// that copies every layer's token K/V rows out of the graph — the
+        /// cartridge initialization capture. Caller owns the result.
+        pub fn captureKv(self: *Self, ctx: *ExecContext, tokens: []const usize) !KvCapture {
+            const cfg = self.model.config;
+            var cap = try KvCapture.init(
+                self.allocator,
+                cfg.num_layers,
+                tokens.len * cfg.num_key_value_heads * cfg.head_dim,
+            );
+            errdefer cap.deinit();
+            const scope = ctx.openExecScope();
+            defer ctx.closeExecScope(scope);
+            var hidden = try self.forwardHiddenImpl(ctx, tokens, null, .{ .capture = &cap });
+            hidden.deinit(); // scope-owned borrow: safe no-op
+            return cap;
+        }
+
+        /// Build a cartridge initialized from the model's OWN K/V rows for
+        /// `tokens` at positions 0..p-1 (p = tokens.len) — the paper's
+        /// winning "first p corpus tokens" initialization. `frozen_prefix`
+        /// rows stay constant (1 = the attention-sink freeze). With zero
+        /// training steps the result is behaviorally identical to actually
+        /// prefilling `tokens` (see the equivalence test). Caller owns the
+        /// cartridge; create it OUTSIDE any exec scope.
+        pub fn initCartridge(self: *Self, ctx: *ExecContext, tokens: []const usize, frozen_prefix: usize) !cartridge_mod.Cartridge {
+            var cap = try self.captureKv(ctx, tokens);
+            defer cap.deinit();
+            const cfg = self.model.config;
+            const k_rows = try self.allocator.alloc([]const f32, cap.k_rows.len);
+            defer self.allocator.free(k_rows);
+            const v_rows = try self.allocator.alloc([]const f32, cap.v_rows.len);
+            defer self.allocator.free(v_rows);
+            for (k_rows, cap.k_rows) |*dst, src| dst.* = src;
+            for (v_rows, cap.v_rows) |*dst, src| dst.* = src;
+            return cartridge_mod.Cartridge.initFromRows(
+                ctx,
+                self.allocator,
+                frozen_prefix,
+                tokens.len,
+                cfg.num_key_value_heads,
+                cfg.head_dim,
+                k_rows,
+                v_rows,
+            );
+        }
+
+        /// Cartridge training step loss: the teacher top-k distillation
+        /// objective (`cartridge.distillLoss`) over this model's logits for
+        /// `tokens` computed BEHIND `cart` (tokens at positions p..). Same
+        /// exec-scope requirement, scope-owned result, and step-counter
+        /// advance as `loss`; backward routes gradients into the cartridge's
+        /// trainable rows only (the base model stays frozen — instantiate
+        /// `Trainer(.{ .q = false, .v = false })` for pure cartridge
+        /// training).
+        /// `packed_segments` (lengths summing to `tokens.len`) trains several
+        /// conversations in ONE forward/backward — target positions index
+        /// the packed row, and the `.mean` reduction over all entries is the
+        /// reference's packed-batch objective. Pair packed forwards with
+        /// `freeTransientRope()` between optimizer steps.
+        pub fn distillLoss(
+            self: *Self,
+            ctx: *ExecContext,
+            tokens: []const usize,
+            cart: *const cartridge_mod.Cartridge,
+            distill_targets: cartridge_mod.DistillTargets,
+            packed_segments: ?[]const usize,
+            options: cartridge_mod.DistillOptions,
+        ) !fucina.Tensor(.{}) {
+            if (!ctx.execScopeActive()) return Error.ExecScopeRequired;
+            const step = self.step_counter;
+            self.step_counter += 1;
+            var hidden = try self.forwardHiddenImpl(ctx, tokens, step, .{ .cartridge = cart, .packed_segments = packed_segments });
+            defer hidden.deinit();
+            var logits = try self.logitsTail(ctx, &hidden);
+            defer logits.deinit();
+            return cartridge_mod.distillLoss(ctx, &logits, distill_targets, options);
+        }
+
         /// `evalLastLogits` with `ForwardOptions` (injection / layer range) —
         /// the generation entry for injected prompts. NOTE with a truncated
         /// range the final norm + output projection still apply, just to the
@@ -663,8 +883,38 @@ pub fn Trainer(comptime targets: Targets) type {
                 if (inj.pos >= tokens.len or inj.row.dim(.seq) > tokens.len - inj.pos) return Error.InvalidInjection;
                 if (inj.row.dim(.embed) != cfg.hidden_size) return Error.InvalidInjection;
             }
+            if (opts.cartridge) |cart| {
+                if (self.checkpoint_layers) return Error.CartridgeCheckpointUnsupported;
+                if (cart.layers.len != n_layers) return Error.InvalidCartridge;
+                if (cart.kv_heads != cfg.num_key_value_heads or cart.head_dim != cfg.head_dim) return Error.InvalidCartridge;
+            }
+            if (opts.capture) |cap| {
+                if (self.checkpoint_layers) return Error.CartridgeCheckpointUnsupported;
+                if (cap.k_rows.len != n_layers or cap.v_rows.len != n_layers) return Error.InvalidCapture;
+                const row_len = tokens.len * cfg.num_key_value_heads * cfg.head_dim;
+                for (cap.k_rows, cap.v_rows) |k, v| {
+                    if (k.len != row_len or v.len != row_len) return Error.InvalidCapture;
+                }
+            }
 
-            const rope_table = try self.prepareRope(ctx, tokens.len);
+            if (opts.packed_segments) |seg_lens| {
+                if (self.checkpoint_layers) return Error.CartridgeCheckpointUnsupported;
+                if (opts.inject != null or opts.capture != null) return Error.InvalidPacking;
+                if (seg_lens.len == 0) return Error.InvalidPacking;
+                var total: usize = 0;
+                for (seg_lens) |len| {
+                    if (len == 0) return Error.InvalidPacking;
+                    total += len;
+                }
+                if (total != tokens.len) return Error.InvalidPacking;
+            }
+
+            // A cartridge occupies positions 0..p-1; real tokens start at p.
+            const position_offset = if (opts.cartridge) |cart| cart.p else 0;
+            const rope_table = if (opts.packed_segments) |seg_lens|
+                try self.preparePackedRope(ctx, position_offset, tokens.len, seg_lens)
+            else
+                try self.prepareRope(ctx, position_offset, tokens.len);
 
             var x = try model.token_embedding.getRowsAs(ctx, tokens, .embed);
             errdefer x.deinit();
@@ -682,6 +932,10 @@ pub fn Trainer(comptime targets: Targets) type {
                     .seeds = self.layerSeeds(step, layer_i),
                     .scale = self.scale,
                     .dropout_p = self.lora_config.dropout_p,
+                    .layer_i = layer_i,
+                    .cartridge_layer = if (opts.cartridge) |cart| &cart.layers[layer_i] else null,
+                    .capture = opts.capture,
+                    .packed_segments = opts.packed_segments,
                 };
                 const ads = &self.adapters[layer_i];
                 if (self.checkpoint_layers) {
@@ -693,24 +947,49 @@ pub fn Trainer(comptime targets: Targets) type {
             return x;
         }
 
-        /// The trainer-owned RoPE table for positions 0..seq_len-1: cached
-        /// per sequence length, built on first use, freed only in `deinit`
-        /// (see the `rope_tables` field for why tables must never be freed
-        /// earlier). Repeat-length forwards reuse the cached table.
-        fn prepareRope(self: *Self, ctx: *ExecContext, seq_len: usize) !*const fucina.RopeTable {
-            if (self.rope_tables.get(seq_len)) |table| return table;
+        /// Rope table for a PACKED forward: positions restart at `offset`
+        /// for every segment. Uncacheable (keyed by the whole length
+        /// vector), so it goes on the transient list — alive until
+        /// `freeTransientRope`.
+        fn preparePackedRope(self: *Self, ctx: *ExecContext, offset: usize, total_len: usize, seg_lens: []const usize) !*const fucina.RopeTable {
+            const cfg = self.model.config;
+            const positions = try ctx.allocator.alloc(i32, total_len);
+            defer ctx.allocator.free(positions);
+            var idx: usize = 0;
+            for (seg_lens) |len| {
+                for (0..len) |j| {
+                    positions[idx] = @intCast(offset + j);
+                    idx += 1;
+                }
+            }
+
+            const fresh = try self.allocator.create(fucina.RopeTable);
+            errdefer self.allocator.destroy(fresh);
+            fresh.* = try ctx.prepareRopeTable(positions, cfg.head_dim, cfg.rope_theta, false);
+            errdefer fresh.deinit();
+            try self.transient_tables.append(self.allocator, fresh);
+            return fresh;
+        }
+
+        /// The trainer-owned RoPE table for positions offset..offset+seq-1:
+        /// cached per (offset, length), built on first use, freed only in
+        /// `deinit` (see the `rope_tables` field for why tables must never be
+        /// freed earlier). Repeat-key forwards reuse the cached table.
+        fn prepareRope(self: *Self, ctx: *ExecContext, offset: usize, seq_len: usize) !*const fucina.RopeTable {
+            const key = RopeKey{ .offset = offset, .len = seq_len };
+            if (self.rope_tables.get(key)) |table| return table;
 
             const cfg = self.model.config;
             const positions = try ctx.allocator.alloc(i32, seq_len);
             defer ctx.allocator.free(positions);
-            for (positions, 0..) |*position, i| position.* = @intCast(i);
+            for (positions, 0..) |*position, i| position.* = @intCast(offset + i);
 
             const fresh = try self.allocator.create(fucina.RopeTable);
             errdefer self.allocator.destroy(fresh);
             fresh.* = try ctx.prepareRopeTable(positions, cfg.head_dim, cfg.rope_theta, false);
             errdefer fresh.deinit();
 
-            try self.rope_tables.put(self.allocator, seq_len, fresh);
+            try self.rope_tables.put(self.allocator, key, fresh);
             return fresh;
         }
 
@@ -822,8 +1101,32 @@ pub fn Trainer(comptime targets: Targets) type {
             var k_rope = try k3.rmsNormMulRopeHalfPrepared(ctx, .seq, .d, &layer.k_norm, cfg.rms_norm_eps, extra.rope_table);
             defer k_rope.deinit();
 
+            if (extra.capture) |cap| {
+                // Copy the freshly computed token K/V rows (post q/k-norm,
+                // post-RoPE keys) — the exact rows a same-position prefill
+                // would put in the KV cache, and the cartridge init payload.
+                var k_contig = try k_rope.contiguous(ctx);
+                defer k_contig.deinit();
+                @memcpy(cap.k_rows[extra.layer_i], try k_contig.dataConst());
+                var v_contig = try v3.contiguous(ctx);
+                defer v_contig.deinit();
+                @memcpy(cap.v_rows[extra.layer_i], try v_contig.dataConst());
+            }
+
             const attn_scale = 1 / @sqrt(@as(f32, @floatFromInt(cfg.head_dim)));
-            var attn = try q_rope.groupedAttention(ctx, &k_rope, &v3, extra.kv_head_for_head, .attn, attn_scale, .{});
+            var attn = if (extra.packed_segments != null)
+                try segmentedAttention(ctx, extra, &q_rope, &k_rope, &v3, attn_scale)
+            else if (extra.cartridge_layer) |cart_layer| blk: {
+                // Trained KV prefix: every query attends the whole prefix,
+                // then causally over the real tokens (the end-aligned
+                // source_offset = p kernel); gradients reach the cartridge's
+                // trainable rows through the concat.
+                var k_cat = try cart_layer.catK(ctx, &k_rope);
+                defer k_cat.deinit();
+                var v_cat = try cart_layer.catV(ctx, &v3);
+                defer v_cat.deinit();
+                break :blk try q_rope.groupedAttention(ctx, &k_cat, &v_cat, extra.kv_head_for_head, .attn, attn_scale, .{});
+            } else try q_rope.groupedAttention(ctx, &k_rope, &v3, extra.kv_head_for_head, .attn, attn_scale, .{});
             defer attn.deinit();
 
             var attn_out_base = try dotLinear(&layer.o_proj, ctx, &attn, .attn, .embed);
@@ -860,6 +1163,60 @@ pub fn Trainer(comptime targets: Targets) type {
             defer down.deinit();
 
             return h.add(ctx, &down);
+        }
+
+        /// Packed attention: one fused-attention call per contiguous segment
+        /// over zero-copy `.seq` narrows. No cross-segment key is ever
+        /// visible — each segment's queries see the shared cartridge prefix
+        /// (when present) plus their own causal rows, exactly like a lone
+        /// sequence — and attention does no more work packed than unpacked
+        /// (the mask zeroes cross-segment pairs by definition). The heavy
+        /// GEMMs around this block stay packed; per-segment gradients flow
+        /// through the existing fused backward and accumulate into shared
+        /// leaves (the cartridge rows) across segments. Runs under an exec
+        /// scope like the rest of `layerBody`.
+        fn segmentedAttention(
+            ctx: *ExecContext,
+            extra: LayerExtra,
+            q_rope: *const fucina.Tensor(.{ .seq, .head, .d }),
+            k_rope: *const fucina.Tensor(.{ .seq, .kv_head, .d }),
+            v3: *const fucina.Tensor(.{ .seq, .kv_head, .d }),
+            attn_scale: f32,
+        ) !fucina.Tensor(.{ .seq, .attn }) {
+            const seg_lens = extra.packed_segments.?;
+            const Out = fucina.Tensor(.{ .seq, .attn });
+
+            const outs = try ctx.allocator.alloc(Out, seg_lens.len);
+            defer ctx.allocator.free(outs);
+            var built: usize = 0;
+            errdefer for (outs[0..built]) |*out| out.deinit();
+
+            var start: usize = 0;
+            for (seg_lens, 0..) |len, seg_i| {
+                var q_seg = try q_rope.narrow(ctx, .seq, start, len);
+                defer q_seg.deinit();
+                var k_seg = try k_rope.narrow(ctx, .seq, start, len);
+                defer k_seg.deinit();
+                var v_seg = try v3.narrow(ctx, .seq, start, len);
+                defer v_seg.deinit();
+
+                outs[seg_i] = if (extra.cartridge_layer) |cart_layer| blk: {
+                    var k_cat = try cart_layer.catK(ctx, &k_seg);
+                    defer k_cat.deinit();
+                    var v_cat = try cart_layer.catV(ctx, &v_seg);
+                    defer v_cat.deinit();
+                    break :blk try q_seg.groupedAttention(ctx, &k_cat, &v_cat, extra.kv_head_for_head, .attn, attn_scale, .{});
+                } else try q_seg.groupedAttention(ctx, &k_seg, &v_seg, extra.kv_head_for_head, .attn, attn_scale, .{});
+                built += 1;
+                start += len;
+            }
+
+            if (outs.len == 1) return outs[0];
+            defer for (outs) |*out| out.deinit(); // scope-owned borrows: safe no-ops
+            const rest = try ctx.allocator.alloc(*const Out, outs.len - 1);
+            defer ctx.allocator.free(rest);
+            for (rest, outs[1..]) |*ptr, *out| ptr.* = out;
+            return outs[0].concat(ctx, .seq, rest);
         }
 
         /// Checkpoint-block wrapper of `layerBody` with the comptime arity the
@@ -915,4 +1272,5 @@ pub fn Trainer(comptime targets: Targets) type {
 test {
     _ = @import("train_tests.zig");
     _ = @import("train_golden_tests.zig");
+    _ = @import("train_cartridge_tests.zig");
 }

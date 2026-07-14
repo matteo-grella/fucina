@@ -1,6 +1,7 @@
 //! Minimal parameter registry over the public tagged Tensor facade.
 //!
-//! `ParamRegistry` owns no model tensors. It borrows named f32/f16/bf16 tensors,
+//! `ParamRegistry` owns no model tensors. It borrows named f32/f16/bf16 (and,
+//! via explicit `addParam` only, frozen i64) tensors,
 //! retaining refcounted storage views (type-erased over dtype) for
 //! checkpointing and optimizer registration. The original tensor values and
 //! their GradState must outlive the registry and any optimizer it registers into.
@@ -300,6 +301,11 @@ fn makeRelease(comptime Raw: type) *const fn (*anyopaque, Allocator) void {
 }
 
 /// The dtypes a ParamRegistry entry can hold (matches the safetensors state-dict codec).
+/// Dtypes the reflective `collect` registers. Deliberately floats-only: a
+/// dtype added here would silently grow every collected model's checkpoint
+/// schema (see the stability contract above). Integer tensors (i64) are
+/// checkpointable too, but only via EXPLICIT `addParam` — they are always
+/// frozen (no grad state on integer facades).
 fn isStateDictDtype(comptime dt: DType) bool {
     return dt == .f32 or dt == .f16 or dt == .bf16;
 }
@@ -310,8 +316,10 @@ fn validateParamPtr(comptime P: type) type {
         @compileError("ParamRegistry.addParam expects a mutable pointer to an autograd Tensor");
     }
     const T = info.pointer.child;
-    if (@typeInfo(T) != .@"struct" or !@hasDecl(T, "dtype") or !@hasField(T, "value") or !isStateDictDtype(T.dtype)) {
-        @compileError("ParamRegistry.addParam expects a mutable pointer to an f32/f16/bf16 autograd Tensor");
+    if (@typeInfo(T) != .@"struct" or !@hasDecl(T, "dtype") or !@hasField(T, "value") or
+        !(isStateDictDtype(T.dtype) or T.dtype == .i64))
+    {
+        @compileError("ParamRegistry.addParam expects a mutable pointer to an f32/f16/bf16/i64 facade Tensor");
     }
     return T;
 }

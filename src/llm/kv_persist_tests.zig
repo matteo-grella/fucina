@@ -72,19 +72,20 @@ fn roundtripCase(dtype: kv_cache.KvDtype, comptime tag: []const u8) !void {
     // Turn 1: five positions, persist all.
     try fillPositions(&ctx, &kv, 0, 5);
     const tokens1 = [_]usize{ 11, 22, 33, 44, 55 };
-    try kv_persist.appendRange(io, allocator, path, &kv, &tokens1);
+    try kv_persist.appendRange(io, allocator, path, &kv, &tokens1, 0);
 
     // Turn 2: three more, persist only the delta.
     try fillPositions(&ctx, &kv, 5, 3);
     const tokens2 = [_]usize{ 11, 22, 33, 44, 55, 66, 77, 88 };
-    try kv_persist.appendRange(io, allocator, path, &kv, &tokens2);
+    try kv_persist.appendRange(io, allocator, path, &kv, &tokens2, 0);
 
     // Resume into a fresh cache: same tokens, bit-identical K/V.
     var kv2 = try KvCache.initWithDtype(&ctx, n_layers, kv_heads, head_dim, capacity, dtype);
     defer kv2.deinit();
     const resumed = (try kv_persist.load(io, allocator, path, &kv2)) orelse return error.TestExpectedResume;
-    defer allocator.free(resumed);
-    try std.testing.expectEqualSlices(usize, &tokens2, resumed);
+    defer allocator.free(resumed.tokens);
+    try std.testing.expectEqual(@as(usize, 0), resumed.prefix_rows);
+    try std.testing.expectEqualSlices(usize, &tokens2, resumed.tokens);
     try expectCachesEqual(&kv, &kv2);
 }
 
@@ -111,12 +112,12 @@ test "kv persistence rejects foreign geometry and recovers the prefix of a torn 
     defer kv.deinit();
     try fillPositions(&ctx, &kv, 0, 4);
     const tokens = [_]usize{ 1, 2, 3, 4 };
-    try kv_persist.appendRange(io, allocator, path, &kv, &tokens);
+    try kv_persist.appendRange(io, allocator, path, &kv, &tokens, 0);
 
     // Foreign geometry (different head_dim): ignored wholesale.
     var other = try KvCache.init(&ctx, n_layers, kv_heads, head_dim * 2, capacity);
     defer other.deinit();
-    try std.testing.expectEqual(@as(?[]usize, null), try kv_persist.load(io, allocator, path, &other));
+    try std.testing.expect((try kv_persist.load(io, allocator, path, &other)) == null);
 
     // Torn tail: truncate the file mid-record 3 while nrec still says 4 —
     // the load stops at the consistent prefix (3 positions), exactly the
@@ -130,12 +131,74 @@ test "kv persistence rejects foreign geometry and recovers the prefix of a torn 
     var kv2 = try KvCache.init(&ctx, n_layers, kv_heads, head_dim, capacity);
     defer kv2.deinit();
     const resumed = (try kv_persist.load(io, allocator, path, &kv2)) orelse return error.TestExpectedResume;
-    defer allocator.free(resumed);
-    try std.testing.expectEqual(@as(usize, 3), resumed.len);
-    try std.testing.expectEqualSlices(usize, tokens[0..3], resumed);
+    defer allocator.free(resumed.tokens);
+    try std.testing.expectEqual(@as(usize, 3), resumed.tokens.len);
+    try std.testing.expectEqualSlices(usize, tokens[0..3], resumed.tokens);
     try std.testing.expectEqual(@as(usize, 3), kv2.len);
     for (0..n_layers) |i| {
         try std.testing.expectEqualSlices(f16, try kv.kSlice(i, 3), try kv2.kSlice(i, 3));
         try std.testing.expectEqualSlices(f16, try kv.vSlice(i, 3), try kv2.vSlice(i, 3));
     }
+}
+
+test "kv persistence records and restores a token-less prefix (FUXKV002)" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var path_buf: [128]u8 = undefined;
+    const path = try tmpPath(&path_buf, "prefix");
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    // Rows [0, 3) are a preloaded prefix (a served cartridge: no tokens);
+    // rows [3, 7) are the conversation.
+    var kv = try KvCache.init(&ctx, n_layers, kv_heads, head_dim, capacity);
+    defer kv.deinit();
+    try fillPositions(&ctx, &kv, 0, 7);
+    const tokens = [_]usize{ 44, 55, 66, 77 };
+    try kv_persist.appendRange(io, allocator, path, &kv, &tokens, 3);
+
+    // Restore: the whole cache comes back — prefix rows included — and the
+    // token history describes only the rows past the prefix.
+    var kv2 = try KvCache.init(&ctx, n_layers, kv_heads, head_dim, capacity);
+    defer kv2.deinit();
+    const resumed = (try kv_persist.load(io, allocator, path, &kv2)) orelse return error.TestExpectedResume;
+    defer allocator.free(resumed.tokens);
+    try std.testing.expectEqual(@as(usize, 3), resumed.prefix_rows);
+    try std.testing.expectEqualSlices(usize, &tokens, resumed.tokens);
+    try expectCachesEqual(&kv, &kv2);
+
+    // A caller with a different prefix shape treats the file as foreign:
+    // the append resets it rather than splicing mismatched rows.
+    var kv3 = try KvCache.init(&ctx, n_layers, kv_heads, head_dim, capacity);
+    defer kv3.deinit();
+    try fillPositions(&ctx, &kv3, 0, 2);
+    const other_tokens = [_]usize{ 9, 8 };
+    try kv_persist.appendRange(io, allocator, path, &kv3, &other_tokens, 0);
+    var kv4 = try KvCache.init(&ctx, n_layers, kv_heads, head_dim, capacity);
+    defer kv4.deinit();
+    const rewritten = (try kv_persist.load(io, allocator, path, &kv4)) orelse return error.TestExpectedResume;
+    defer allocator.free(rewritten.tokens);
+    try std.testing.expectEqual(@as(usize, 0), rewritten.prefix_rows);
+    try std.testing.expectEqualSlices(usize, &other_tokens, rewritten.tokens);
+
+    // A tear inside the prefix is not a resumable state. (`kv` still holds
+    // its 7 rows; the shape change vs the kv3 rewrite resets the file.)
+    try kv_persist.appendRange(io, allocator, path, &kv, &tokens, 3);
+    {
+        var file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write });
+        defer file.close(io);
+        // V2 header: magic + nrec + prefix_rows + n_layers/dtype + per-layer
+        // geometry pairs. Keep only two full records — inside the 3-row
+        // prefix.
+        const hdr_len: u64 = 8 + 8 + 8 + 4 + 4 + n_layers * 8;
+        const size = try file.length(io);
+        const rec_bytes = (size - hdr_len) / 7;
+        try file.setLength(io, hdr_len + rec_bytes * 2);
+    }
+    var kv5 = try KvCache.init(&ctx, n_layers, kv_heads, head_dim, capacity);
+    defer kv5.deinit();
+    try std.testing.expect((try kv_persist.load(io, allocator, path, &kv5)) == null);
 }

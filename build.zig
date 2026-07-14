@@ -400,6 +400,29 @@ pub fn build(b: *std.Build) void {
     const finetune_step = b.step("finetune", "LoRA fine-tune Qwen3 GGUF on a tiny built-in SFT dataset");
     finetune_step.dependOn(&finetune_cmd.step);
 
+    const cartridge_exe = b.addExecutable(.{
+        .name = "fucina-zig-cartridge",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/cartridge.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    cartridge_exe.root_module.addImport("fucina", module);
+    cartridge_exe.root_module.addImport("fucina_llm", llm_module);
+    configureBlas(cartridge_exe, blas_kind);
+    configureGpu(b, cartridge_exe, gpu_kind);
+    const cartridge_install = installArtifactStep(b, cartridge_exe);
+
+    const cartridge_cmd = b.addRunArtifact(cartridge_exe);
+    cartridge_cmd.step.dependOn(cartridge_install);
+    if (b.args) |args| {
+        cartridge_cmd.addArgs(args);
+    }
+
+    const cartridge_step = b.step("cartridge", "Train/serve a corpus as a trained KV prefix on a Qwen3 GGUF (arXiv 2506.06266)");
+    cartridge_step.dependOn(&cartridge_cmd.step);
+
     const es_finetune_exe = b.addExecutable(.{
         .name = "fucina-zig-es-finetune",
         .root_module = b.createModule(.{

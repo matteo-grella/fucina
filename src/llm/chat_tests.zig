@@ -12,6 +12,7 @@ const fucina = @import("fucina");
 const tok_mod = @import("tokenizer.zig");
 const sampler_mod = @import("sampler.zig");
 const qwen3 = @import("qwen3/model.zig");
+const qwen3_train = @import("qwen3/train.zig");
 const scaffolding = @import("qwen3/train_tests.zig");
 
 const ExecContext = fucina.ExecContext;
@@ -1199,4 +1200,94 @@ test "sendBatch abort leaves every stream consistent and resendable" {
     const n = try healthy.send("us it", &aw_healthy.writer);
     try std.testing.expect(n <= 8);
     try std.testing.expectEqual(healthy.history.items.len, healthy.cache.len);
+}
+
+test "conversation serves a preloaded KV prefix and reuses past it" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try scaffolding.buildTinyModel(&ctx, 0xC4A7);
+    defer model.deinit();
+    var tok = try Tokenizer.initFromParts(allocator, &tiny_vocab, &.{}, .{});
+    defer tok.deinit();
+    const tmpl = Template{ .format = .chatml };
+
+    // The served "prior knowledge": the model's own K/V rows for a token
+    // prefix — exactly what a trained cartridge is at initialization
+    // (llm/cartridge.zig; lmserve's --cartridge drives this same seam).
+    var trainer = try qwen3_train.Trainer(.{ .q = false, .v = false }).init(&ctx, &model, .{ .rank = 1, .alpha = 1 }, 7);
+    defer trainer.deinit();
+    const prefix_tokens = [_]usize{ 1, 3, 5, 7, 9 };
+    var cart = try trainer.initCartridge(&ctx, &prefix_tokens, 1);
+    defer cart.deinit();
+
+    // Constrain replies to tokenizer-representable ids (the equivalence
+    // tests' rule) so streaming decode round-trips.
+    const allowed = [_]usize{ 0, 2, 4, 6, 8, 10, 13 };
+    var mask = CountingMask{ .allowed = &allowed, .allocator = allocator };
+    defer mask.deinit();
+
+    var convo = try Conversation.init(&ctx, &model, &tok, tmpl, .{
+        .capacity = 128,
+        .max_response_tokens = 4,
+        .logit_processor = mask.processor(),
+    });
+    defer convo.deinit();
+
+    // The prefix declaration demands a cache holding exactly the prefix.
+    try std.testing.expectError(error.InvalidPrefix, convo.notePrefixRows(3));
+    try cart.writeToCache(&ctx, &convo.cache);
+    try convo.notePrefixRows(cart.p);
+    try std.testing.expectEqual(cart.p, convo.cache.len);
+
+    // Request 1 (stateless render): nothing reusable; prefill lands at
+    // positions p.. behind the prefix.
+    const ids1 = [_]u32{ 0, 2, 4, 6, 8, 10 };
+    var sink1 = std.Io.Writer.Allocating.init(allocator);
+    defer sink1.deinit();
+    _ = try convo.sendTokensReuse(&ids1, &sink1.writer);
+    try std.testing.expectEqual(@as(usize, 0), convo.reused_prefix);
+    try std.testing.expect(convo.cache.len > cart.p);
+    try std.testing.expectEqual(cart.p, convo.kv_prefix_rows);
+
+    // Request 2: committed history + a new turn — every committed token
+    // reuses its KV row, and the rewind never cuts into the prefix.
+    const committed = convo.cache.len - cart.p;
+    var ids2: std.ArrayList(u32) = .empty;
+    defer ids2.deinit(allocator);
+    for (convo.history.items[0..committed]) |t| try ids2.append(allocator, @intCast(t));
+    try ids2.appendSlice(allocator, &.{ 12, 4, 13 });
+    var sink2 = std.Io.Writer.Allocating.init(allocator);
+    defer sink2.deinit();
+    _ = try convo.sendTokensReuse(ids2.items, &sink2.writer);
+    try std.testing.expectEqual(committed, convo.reused_prefix);
+
+    // Pool cycle (the lmserve slot seam): release with a token-only
+    // shadow, adopt with prefix_rows, replay the history — all reused.
+    const shadow_len = convo.cache.len - cart.p;
+    var shadow: std.ArrayList(usize) = .empty;
+    defer shadow.deinit(allocator);
+    try shadow.appendSlice(allocator, convo.history.items[0..shadow_len]);
+    var convo2 = try Conversation.initWarm(&ctx, &model, &tok, tmpl, .{
+        .max_response_tokens = 4,
+        .logit_processor = mask.processor(),
+    }, .{
+        .cache = convo.takeCache(),
+        .tokens = shadow.items,
+        .prefix_rows = cart.p,
+    });
+    defer convo2.deinit();
+    try std.testing.expectEqual(cart.p + shadow_len, convo2.cache.len);
+    try std.testing.expectEqual(cart.p, convo2.kv_prefix_rows);
+
+    var ids3: std.ArrayList(u32) = .empty;
+    defer ids3.deinit(allocator);
+    for (shadow.items) |t| try ids3.append(allocator, @intCast(t));
+    try ids3.appendSlice(allocator, &.{ 4, 13 });
+    var sink3 = std.Io.Writer.Allocating.init(allocator);
+    defer sink3.deinit();
+    _ = try convo2.sendTokensReuse(ids3.items, &sink3.writer);
+    try std.testing.expectEqual(shadow_len, convo2.reused_prefix);
 }

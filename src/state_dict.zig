@@ -28,16 +28,17 @@ pub const Error = error{
 };
 
 /// One named state-dict entry: a borrowed name plus a type-erased, borrowed
-/// view of one contiguous f32/f16/bf16 facade tensor (variable or constant).
-/// Build with `of`; the tensor's storage and the name are BORROWED and must
-/// outlive the entry.
+/// view of one contiguous f32/f16/bf16/i64 facade tensor (variable or
+/// constant; i64 entries are always constants — integer facades carry no
+/// grad state). Build with `of`; the tensor's storage and the name are
+/// BORROWED and must outlive the entry.
 pub const NamedTensor = struct {
     name: []const u8,
     dtype: DType,
     shape: Shape,
     bytes: []const u8,
 
-    /// `t` is a pointer to a facade tensor. f32/f16/bf16 are supported;
+    /// `t` is a pointer to a facade tensor. f32/f16/bf16/i64 are supported;
     /// other dtypes are rejected at compile time. Non-contiguous tensors are
     /// rejected.
     pub fn of(name: []const u8, t: anytype) !NamedTensor {
@@ -90,8 +91,8 @@ fn remapName(name: []const u8, aliases: []const Alias) []const u8 {
 }
 
 /// Serialize named tensors as safetensors. Names must be non-empty, NUL-free
-/// UTF-8 and unique; f32/f16/bf16 contiguous tensors are written as raw bytes.
-/// Everything is validated before the first byte is written.
+/// UTF-8 and unique; f32/f16/bf16/i64 contiguous tensors are written as raw
+/// bytes. Everything is validated before the first byte is written.
 pub fn saveStateDict(allocator: Allocator, writer: *std.Io.Writer, entries: []const NamedTensor) !void {
     var seen = std.StringHashMap(void).init(allocator);
     defer seen.deinit();
@@ -175,8 +176,8 @@ fn stateDictDtype(comptime P: type) DType {
     if (info != .pointer) @compileError("NamedTensor.of expects a pointer to a facade tensor");
     const dt = info.pointer.child.dtype;
     return switch (dt) {
-        .f32, .f16, .bf16 => dt,
-        else => @compileError("state dicts support f32, f16, and bf16 tensors only; got " ++ @tagName(dt)),
+        .f32, .f16, .bf16, .i64 => dt,
+        else => @compileError("state dicts support f32, f16, bf16, and i64 tensors only; got " ++ @tagName(dt)),
     };
 }
 
@@ -185,6 +186,7 @@ fn stateDictByteLen(dtype: DType, dims: []const usize) !usize {
     const elem_size: usize = switch (dtype) {
         .f32 => 4,
         .f16, .bf16 => 2,
+        .i64 => 8,
         else => return Error.CheckpointUnsupportedDtype,
     };
     return std.math.mul(usize, elems, elem_size) catch return Error.CheckpointShapeMismatch;

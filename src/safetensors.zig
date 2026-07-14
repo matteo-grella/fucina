@@ -110,6 +110,7 @@ pub fn dtypeFromFucina(dtype: FucinaDType) !DType {
         .f32 => .F32,
         .f16 => .F16,
         .bf16 => .BF16,
+        .i64 => .I64,
         else => Error.UnsupportedDtype,
     };
 }
@@ -119,6 +120,7 @@ pub fn dtypeToFucina(dtype: DType) !FucinaDType {
         .F32 => .f32,
         .F16 => .f16,
         .BF16 => .bf16,
+        .I64 => .i64,
         else => Error.UnsupportedDtype,
     };
 }

@@ -198,6 +198,14 @@ forward passes only, algebra cross-checked bitwise against the reference —
 and `zig build es-finetune` fine-tunes the same GGUF with it, LoRA-only or
 full-parameter, under rule-based (R1-style) or loss-based rewards.
 
+Because autograd, KV-cache plumbing, and serving live in one runtime, the
+same trainer also implements **Cartridges** (arXiv:2506.06266): a corpus is
+compressed into a trained KV prefix by in-process self-study distillation —
+the model interviews itself about the corpus, and the teacher-with-context
+distills into a small trainable cache served like any cached prompt.
+`zig build cartridge` trains, saves, and serves one against a real Qwen3
+GGUF (`docs/CARTRIDGES.md`).
+
 `docs/TRAINING.md` is the full guide, including how the gradients were verified
 (PyTorch goldens, finite differences, and a real-model audit) and its open
 issues.
@@ -218,6 +226,7 @@ issues.
 | `docs/SPECULATIVE.md` | design record: lossless draft-model-free speculative decoding |
 | `docs/PTQTP-RECIPE.md` | walkthrough: PTQTP-quantize any GGUF (MoE experts included) and run it, resident or streamed |
 | `docs/CONSTRAINED-DECODING.md` | design record: grammar/JSON-schema constrained decoding and its speculation composition |
+| `docs/CARTRIDGES.md` | design record: trained KV-prefix corpus compression (Cartridges) — self-study distillation, serving, gates |
 | `AGENTS.md` | build/test/bench commands, build options, repo map, house rules |
 | `docs/THIRD-PARTY-NOTICES.md` | full provenance and license inventory of third-party material |
 

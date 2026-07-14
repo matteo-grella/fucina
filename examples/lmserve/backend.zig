@@ -124,6 +124,13 @@ pub const GgufChatOptions = struct {
     kv_slots: usize = 1,
     /// Evict-to-disk tier (null = off).
     kv_disk: ?KvDiskOptions = null,
+    /// Trained KV-prefix "prior knowledge" (docs/CARTRIDGES.md): every
+    /// conversation's cache is preloaded with these rows before any
+    /// prefill, and the reuse reconcile operates past them. Borrowed —
+    /// must outlive the backend. Composes with `kv_disk`: sidecars record
+    /// the prefix shape and rows (FUXKV002), so restores are
+    /// self-describing even across a cartridge swap.
+    cartridge: ?*const llm.cartridge.Cartridge = null,
 };
 
 /// Longest common prefix between a slot's token shadow and a request's ids
@@ -272,12 +279,18 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 if (disk_lcp <= best_lcp or !similarEnough(disk_lcp, ids.len)) disk_i = null;
             }
 
+            // Cartridge-mode slot caches always begin with the shared
+            // preloaded prefix (every conversation gets it below), so the
+            // token shadow describes rows PAST it.
+            const prefix_rows: usize = if (self.opts.cartridge) |cart| cart.p else 0;
+
             if (disk_i == null and best_i != null and similarEnough(best_lcp, ids.len)) {
                 var slot = self.slots.swapRemove(best_i.?);
                 defer slot.tokens.deinit(self.allocator);
                 return Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
                     .cache = slot.cache,
                     .tokens = slot.tokens.items,
+                    .prefix_rows = prefix_rows,
                 });
             }
 
@@ -304,21 +317,31 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 self.disk.items[di].last_used = self.clock;
                 const path = self.disk.items[di].path;
                 const loaded = llm.kv_persist.load(kd.io, self.allocator, path, &cache) catch null;
-                if (loaded) |tokens| {
-                    defer self.allocator.free(tokens);
+                if (loaded) |resumed| {
+                    defer self.allocator.free(resumed.tokens);
+                    // The sidecar carries its own prefix rows: the restored
+                    // conversation keeps the exact prefix it was born with.
                     return Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
                         .cache = cache,
-                        .tokens = tokens,
+                        .tokens = resumed.tokens,
+                        .prefix_rows = resumed.prefix_rows,
                     });
                 }
                 // Unreadable or foreign sidecar (deleted or clobbered
                 // externally): drop the entry; the request starts cold on
-                // this cache.
+                // this cache (behind the current cartridge when one is
+                // configured).
                 self.removeDiskEntry(di);
-                return Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
+                var convo = try Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
                     .cache = cache,
                     .tokens = &.{},
                 });
+                if (self.opts.cartridge) |cart| {
+                    errdefer convo.deinit();
+                    try cart.writeToCache(self.ctx, &convo.cache);
+                    try convo.notePrefixRows(cart.p);
+                }
+                return convo;
             }
 
             if (host) |*h| {
@@ -326,9 +349,20 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 return Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
                     .cache = h.cache,
                     .tokens = h.tokens.items,
+                    .prefix_rows = prefix_rows,
                 });
             }
-            return Conversation.init(self.ctx, self.model, self.tokenizer, self.template, convo_opts);
+
+            var convo = try Conversation.init(self.ctx, self.model, self.tokenizer, self.template, convo_opts);
+            if (self.opts.cartridge) |cart| {
+                // Cold start in cartridge mode: preload the trained prefix
+                // before the first prefill — the served layout the rows
+                // were trained at (real tokens at positions p..).
+                errdefer convo.deinit();
+                try cart.writeToCache(self.ctx, &convo.cache);
+                try convo.notePrefixRows(cart.p);
+            }
+            return convo;
         }
 
         /// The generation epilogue (success and error paths alike): move
@@ -342,7 +376,9 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
             const a = self.allocator;
             var tokens: std.ArrayList(usize) = .empty;
             const ok = blk: {
-                tokens.appendSlice(a, convo.history.items[0..convo.cache.len]) catch break :blk false;
+                // The shadow describes only token-backed rows: cache rows
+                // [0, kv_prefix_rows) are the shared preloaded prefix.
+                tokens.appendSlice(a, convo.history.items[0 .. convo.cache.len - convo.kv_prefix_rows]) catch break :blk false;
                 self.slots.ensureUnusedCapacity(a, 1) catch break :blk false;
                 break :blk true;
             };
@@ -402,7 +438,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                     a.free(path);
                     return;
                 };
-                if (!writeSidecar(kd.io, a, path, &victim.cache, vtokens)) {
+                if (!self.writeSidecar(kd.io, a, path, &victim.cache, vtokens)) {
                     a.free(snapshot);
                     a.free(path);
                     return;
@@ -412,7 +448,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 return;
             }
             const entry = &self.disk.items[target.?];
-            if (!writeSidecar(kd.io, a, entry.path, &victim.cache, vtokens)) {
+            if (!self.writeSidecar(kd.io, a, entry.path, &victim.cache, vtokens)) {
                 // The old file content is gone (reset header): the entry no
                 // longer describes anything restorable.
                 a.free(snapshot);
@@ -426,9 +462,13 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
 
         /// Reset + append-all: a sidecar file whose whole record range is
         /// this cache's positions. Returns false on any write error.
-        fn writeSidecar(io: std.Io, a: Allocator, path: []const u8, cache: *const KvCache, tokens: []const usize) bool {
-            llm.kv_persist.reset(io, a, path, cache) catch return false;
-            llm.kv_persist.appendRange(io, a, path, cache, tokens) catch return false;
+        fn writeSidecar(self: *const Self, io: std.Io, a: Allocator, path: []const u8, cache: *const KvCache, tokens: []const usize) bool {
+            // Cartridge mode: the sidecar records the prefix shape and the
+            // prefix rows themselves (FUXKV002) — a restore is
+            // self-describing even across a cartridge swap.
+            const prefix_rows: usize = if (self.opts.cartridge) |cart| cart.p else 0;
+            llm.kv_persist.reset(io, a, path, cache, prefix_rows) catch return false;
+            llm.kv_persist.appendRange(io, a, path, cache, tokens, prefix_rows) catch return false;
             return true;
         }
 

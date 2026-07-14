@@ -59,6 +59,27 @@ conn threads (≤ --conns, socket deadlines)          ONE inference worker
   — zero re-prefill — when a later request matches it better than every
   resident slot. The reuse is reported as `cached_tokens` in usage
   (`prompt_tokens_details` / `input_tokens_details`).
+- `--cartridge F` preloads a trained KV-prefix cartridge (safetensors from
+  `zig build cartridge`; `docs/CARTRIDGES.md`) into every conversation:
+  served "prior knowledge" with zero prompt tokens — requests answer from a
+  corpus that was never in the prompt. The prefix occupies cache rows
+  `[0, p)` with no token shadow (`Conversation.notePrefixRows` /
+  `WarmState.prefix_rows`); slot reuse and `cached_tokens` operate on the
+  real tokens past it, and the reconcile rewind never cuts into the prefix.
+  Geometry is probed against the model at startup; qwen3/gemma4 backends
+  only. Composes with the disk tier: cartridge conversations spill as
+  `FUXKV002` sidecars that record the prefix shape and rows, so a restore
+  is self-describing — it keeps the exact prefix it was saved with even if
+  the server later runs a different cartridge. Verified live two ways:
+  evict → spill → restore reported the full conversation as
+  `cached_tokens`, and a greedy A/B against a never-evicted control server
+  produced BYTE-IDENTICAL answers (same `cached_tokens`) through the
+  restore — the round-tripped state is computationally indistinguishable
+  from a cache that never left RAM. (The different-cartridge restore is
+  enforced by construction — the restore path takes `prefix_rows` from the
+  file and never re-preloads the configured cartridge — but cannot occur
+  live yet: the disk registry is per-run, and cross-restart sidecar
+  scanning is a separate follow-up.)
 - Streaming responses start lazily on the first delta, so a request that
   fails before producing anything (invalid grammar, context overflow) still
   gets a plain JSON error with a proper status code.
