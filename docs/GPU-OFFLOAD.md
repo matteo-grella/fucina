@@ -221,6 +221,16 @@ end-to-end on an M1 Max (per-dispatch overhead outweighs the whole-matrix
 bandwidth win at that width, unlike CUDA's resident admission), while m>=16
 admission is neutral-to-positive.
 
+Related CPU-side knob (non-GPU builds only): `FUCINA_CPU_F32_SHADOW=1`
+routes prefill-shaped 16-bit-weight GEMMs (`m >= 32`,
+`FUCINA_CPU_F32_SHADOW_MIN_M`) through the BLAS f32 arm over a widen-once
+f32 shadow cached on the weight's storage (+4 bytes/weight resident;
+weights must not be trained in place). Measured on Qwen3-1.7B-BF16
+self-study (M1 Max + Accelerate): 2.2x end-to-end (28.5 -> 12.7
+s/conversation) with identical per-step losses; at the GEMM level BLAS wins
+1.5-2.5x for m >= 32 while decode stays with the 16-bit streaming kernels
+(half the bytes per weight).
+
 F16 uses `2^27` on Metal and for streamed CUDA prefill. CUDA has a separate
 resident f16 floor (`2^20`): a 1×4096×1024 resident call measured 18.3 µs on
 the RTX host versus 77.4 µs on CPU, while nonresident decode is still refused

@@ -565,6 +565,65 @@ test "exec context matmul transposed bf16 RHS uses backend output" {
     try std.testing.expectEqualSlices(f32, &.{ 50, 68, 122, 167 }, got.dataConst());
 }
 
+test "cpu f32 shadow route matches the streaming kernels and caches per buffer" {
+    if (@import("build_options").use_gpu) return error.SkipZigTest;
+    const exec_matmul = @import("exec/matmul.zig");
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    // Above the crossover so the shadow arm engages (min_m forced to 4).
+    const m = 5;
+    const n = 7;
+    const k = 33;
+    var prng = std.Random.DefaultPrng.init(99);
+    const rand = prng.random();
+    var a_data: [m * k]f32 = undefined;
+    for (&a_data) |*v| v.* = rand.floatNorm(f32);
+    var b16_data: [n * k]f16 = undefined;
+    var bbf_data: [n * k]u16 = undefined;
+    for (&b16_data, &bbf_data) |*h, *bb| {
+        const value = rand.floatNorm(f32) * 0.1;
+        h.* = @floatCast(value);
+        bb.* = dtype_mod.f32ToBf16(value);
+    }
+
+    var a = try ctx.fromSlice(&.{ m, k }, &a_data);
+    defer a.deinit();
+    var b16 = try ctx.fromSliceRankTyped(.f16, 2, .{ n, k }, &b16_data);
+    defer b16.deinit();
+    var bbf = try ctx.fromSliceRankTyped(.bf16, 2, .{ n, k }, &bbf_data);
+    defer bbf.deinit();
+
+    exec_matmul.setCpuF32Shadow(false, null);
+    var want16 = try ctx.matmulTransB2DWithF16Rhs(&a, &b16);
+    defer want16.deinit();
+    var wantbf = try ctx.matmulTransB2DWithBf16Rhs(&a, &bbf);
+    defer wantbf.deinit();
+
+    exec_matmul.setCpuF32Shadow(true, 4);
+    defer exec_matmul.setCpuF32Shadow(null, 32);
+    var got16 = try ctx.matmulTransB2DWithF16Rhs(&a, &b16);
+    defer got16.deinit();
+    var gotbf = try ctx.matmulTransB2DWithBf16Rhs(&a, &bbf);
+    defer gotbf.deinit();
+
+    // The shadow's widen is exact for both formats; results differ from the
+    // streaming kernels only by accumulation order (and, for f16, by the
+    // skipped A cast — the shadow route is the MORE precise one).
+    for (want16.dataConst(), got16.dataConst()) |w, g| try std.testing.expectApproxEqAbs(w, g, 2e-3);
+    for (wantbf.dataConst(), gotbf.dataConst()) |w, g| try std.testing.expectApproxEqAbs(w, g, 2e-3);
+
+    // Second call reuses the cached shadow (the buffer's .cpu resource).
+    try std.testing.expect(b16.buffer.acceleratorResource(.cpu) != null);
+    const first = b16.buffer.acceleratorResource(.cpu).?;
+    var again = try ctx.matmulTransB2DWithF16Rhs(&a, &b16);
+    defer again.deinit();
+    try std.testing.expect(b16.buffer.acceleratorResource(.cpu).? == first);
+    try std.testing.expectEqualSlices(f32, got16.dataConst(), again.dataConst());
+}
+
 test "exec context applies unary ops through materialized inputs" {
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;

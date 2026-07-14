@@ -41,7 +41,9 @@ const Vf16ForF32 = vm.Vf16ForF32;
 const vecDot = primitives.vecDot;
 const vecDotF16ToF32 = primitives.vecDotF16ToF32;
 const bf16VecToF32 = primitives.bf16VecToF32;
+const bf16VecToF32Wide = primitives.bf16VecToF32Wide;
 const f32VecToBf16 = primitives.f32VecToBf16;
+const Vf32Wide = vm.Vf32ForF16;
 
 // f16-RHS GEMM accumulator policy. On aarch64 NEON the f16 x f16 @mulAdd arms
 // are native fmla.8h (double the f32 lane throughput), so half-precision
@@ -1334,6 +1336,11 @@ fn gemmNTBf16RhsCols(cd: []f32, ad: []const f32, bd: []const u16, m: usize, n: u
 }
 
 inline fn gemmNTBf16RhsSmallRowsCols(comptime rows: usize, cd: []f32, ad: []const f32, bd: []const u16, n: usize, k: usize, col_start: usize, col_end: usize) void {
+    // Vf32-width groups ON PURPOSE: rows x 4 accumulators at the wide
+    // (f16-vector) width are 32 NEON registers at rows = 4 — total spill,
+    // measured 1.6x SLOWER at m=4. The wide widen lives only in the
+    // single-row kernels (dot4Bf16Rhs / vecDotBf16RhsToF32), whose 4-8
+    // accumulators fit with room for operands.
     var j = col_start;
     while (j + 4 <= col_end) : (j += 4) {
         var acc: [rows][4]Vf32 = undefined;
@@ -1836,18 +1843,21 @@ inline fn vecDotF16HalfAccumToF32(x: []const f16, y: []const f16) f32 {
 }
 
 inline fn dot4Bf16Rhs(out: []f32, a: []const f32, b: []const u16, b_row: usize, k: usize) void {
-    var acc0: Vf32 = @splat(0);
-    var acc1: Vf32 = @splat(0);
-    var acc2: Vf32 = @splat(0);
-    var acc3: Vf32 = @splat(0);
+    // Wide (f16-vector-width) groups: one u16 load + shift-widen feeds a
+    // double-width f32 FMA, halving loop overhead vs the old Vf32 groups —
+    // the bf16 arm's answer to the f16 kernels' native-lane width.
+    var acc0: Vf32Wide = @splat(0);
+    var acc1: Vf32Wide = @splat(0);
+    var acc2: Vf32Wide = @splat(0);
+    var acc3: Vf32Wide = @splat(0);
 
     var p: usize = 0;
-    while (p + vector_len <= k) : (p += vector_len) {
-        const av: Vf32 = a[p..][0..vector_len].*;
-        acc0 = @mulAdd(Vf32, av, bf16VecToF32(b[(b_row + 0) * k + p ..][0..vector_len].*), acc0);
-        acc1 = @mulAdd(Vf32, av, bf16VecToF32(b[(b_row + 1) * k + p ..][0..vector_len].*), acc1);
-        acc2 = @mulAdd(Vf32, av, bf16VecToF32(b[(b_row + 2) * k + p ..][0..vector_len].*), acc2);
-        acc3 = @mulAdd(Vf32, av, bf16VecToF32(b[(b_row + 3) * k + p ..][0..vector_len].*), acc3);
+    while (p + vector_len_f16 <= k) : (p += vector_len_f16) {
+        const av: Vf32Wide = a[p..][0..vector_len_f16].*;
+        acc0 = @mulAdd(Vf32Wide, av, bf16VecToF32Wide(b[(b_row + 0) * k + p ..][0..vector_len_f16].*), acc0);
+        acc1 = @mulAdd(Vf32Wide, av, bf16VecToF32Wide(b[(b_row + 1) * k + p ..][0..vector_len_f16].*), acc1);
+        acc2 = @mulAdd(Vf32Wide, av, bf16VecToF32Wide(b[(b_row + 2) * k + p ..][0..vector_len_f16].*), acc2);
+        acc3 = @mulAdd(Vf32Wide, av, bf16VecToF32Wide(b[(b_row + 3) * k + p ..][0..vector_len_f16].*), acc3);
     }
 
     var s0 = @reduce(.Add, acc0);
@@ -1869,29 +1879,29 @@ inline fn dot4Bf16Rhs(out: []f32, a: []const f32, b: []const u16, b_row: usize, 
 
 inline fn vecDotBf16RhsToF32(x: []const f32, y: []const u16) f32 {
     var i: usize = 0;
-    var acc0: Vf32 = @splat(0);
-    var acc1: Vf32 = @splat(0);
-    var acc2: Vf32 = @splat(0);
-    var acc3: Vf32 = @splat(0);
+    var acc0: Vf32Wide = @splat(0);
+    var acc1: Vf32Wide = @splat(0);
+    var acc2: Vf32Wide = @splat(0);
+    var acc3: Vf32Wide = @splat(0);
 
-    while (i + 4 * vector_len <= x.len) : (i += 4 * vector_len) {
-        const x0: Vf32 = x[i..][0..vector_len].*;
-        const y0 = bf16VecToF32(y[i..][0..vector_len].*);
-        const x1: Vf32 = x[i + vector_len ..][0..vector_len].*;
-        const y1 = bf16VecToF32(y[i + vector_len ..][0..vector_len].*);
-        const x2: Vf32 = x[i + 2 * vector_len ..][0..vector_len].*;
-        const y2 = bf16VecToF32(y[i + 2 * vector_len ..][0..vector_len].*);
-        const x3: Vf32 = x[i + 3 * vector_len ..][0..vector_len].*;
-        const y3 = bf16VecToF32(y[i + 3 * vector_len ..][0..vector_len].*);
-        acc0 = @mulAdd(Vf32, x0, y0, acc0);
-        acc1 = @mulAdd(Vf32, x1, y1, acc1);
-        acc2 = @mulAdd(Vf32, x2, y2, acc2);
-        acc3 = @mulAdd(Vf32, x3, y3, acc3);
+    while (i + 4 * vector_len_f16 <= x.len) : (i += 4 * vector_len_f16) {
+        const x0: Vf32Wide = x[i..][0..vector_len_f16].*;
+        const y0 = bf16VecToF32Wide(y[i..][0..vector_len_f16].*);
+        const x1: Vf32Wide = x[i + vector_len_f16 ..][0..vector_len_f16].*;
+        const y1 = bf16VecToF32Wide(y[i + vector_len_f16 ..][0..vector_len_f16].*);
+        const x2: Vf32Wide = x[i + 2 * vector_len_f16 ..][0..vector_len_f16].*;
+        const y2 = bf16VecToF32Wide(y[i + 2 * vector_len_f16 ..][0..vector_len_f16].*);
+        const x3: Vf32Wide = x[i + 3 * vector_len_f16 ..][0..vector_len_f16].*;
+        const y3 = bf16VecToF32Wide(y[i + 3 * vector_len_f16 ..][0..vector_len_f16].*);
+        acc0 = @mulAdd(Vf32Wide, x0, y0, acc0);
+        acc1 = @mulAdd(Vf32Wide, x1, y1, acc1);
+        acc2 = @mulAdd(Vf32Wide, x2, y2, acc2);
+        acc3 = @mulAdd(Vf32Wide, x3, y3, acc3);
     }
-    while (i + vector_len <= x.len) : (i += vector_len) {
-        const xv: Vf32 = x[i..][0..vector_len].*;
-        const yv = bf16VecToF32(y[i..][0..vector_len].*);
-        acc0 = @mulAdd(Vf32, xv, yv, acc0);
+    while (i + vector_len_f16 <= x.len) : (i += vector_len_f16) {
+        const xv: Vf32Wide = x[i..][0..vector_len_f16].*;
+        const yv = bf16VecToF32Wide(y[i..][0..vector_len_f16].*);
+        acc0 = @mulAdd(Vf32Wide, xv, yv, acc0);
     }
 
     var sum: f32 = @reduce(.Add, acc0 + acc1 + acc2 + acc3);

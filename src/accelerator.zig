@@ -12,6 +12,10 @@ const std = @import("std");
 pub const Provider = enum(u8) {
     metal,
     cuda,
+    /// Not a device: the CPU f32 weight-shadow arm (exec/matmul.zig) reuses
+    /// the storage-lifetime Resource slot for its widened copy. Only ever
+    /// present in non-GPU builds, where the slot has no other tenant.
+    cpu,
 };
 
 pub const WorkVTable = struct {

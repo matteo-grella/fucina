@@ -1,8 +1,18 @@
-// Focused microbenchmark for the f16 RHS TransB matmul path used by Qwen3
-// projections (M is tiny: prompt/decode regime). Measures serial vs pooled
-// throughput and parallel efficiency at the exact projection shapes, so we can
-// iterate on the kernel and the thread-scheduling thresholds without rebuilding
-// or reloading the full model.
+// Focused microbenchmark for the 16-bit-weight TransB matmul ROUTES used by
+// Qwen3 projections, at the exact projection shapes and a configurable M
+// (decode m=1..8, prefill m=512). Three arms, each measured as the full
+// route a model forward would pay:
+//
+//   f16    cast A f32->f16 (the route's real per-call cost) + all-f16
+//          streaming kernel
+//   bf16   mixed f32 x bf16 streaming kernel (A stays f32)
+//   f32/BLAS  pre-widened f32 RHS (untimed: models a load-time weight
+//          shadow, +2 bytes/weight resident) + the f32 TransB route —
+//          cblas sgemm when m>=16, the f32 vector kernel below that
+//
+// The question this answers: does widen-once + BLAS beat the 16-bit
+// streaming kernels anywhere (prefill), and by how much does it lose the
+// bandwidth race at decode. Run once per regime:
 //
 //   zig build bench-f16gemm -Doptimize=ReleaseFast -- [--workers N] [--m M] [--iters N]
 
@@ -12,6 +22,7 @@ const raw_backend = @import("raw_backend");
 
 const Tensor = raw_backend.Tensor;
 const TensorF16 = raw_backend.TensorOf(.f16);
+const TensorBf16 = raw_backend.TensorOf(.bf16);
 const native = raw_backend.native_impl;
 
 var io: std.Io = undefined;
@@ -59,69 +70,125 @@ pub fn main(init: std.process.Init) !void {
     const out = &sw.interface;
     defer out.flush() catch {};
 
-    try out.print("f16 TransB GEMM microbench  M={d}  workers={d} (+main)  iters={d}\n", .{ m, workers, iters });
-    try out.print("{s:<26} | {s:>11} | {s:>11} | {s:>9} | {s:>8} | {s:>9}\n", .{
-        "shape", "serial us", "pooled us", "speedup", "GF/s par", "GB/s par",
+    try out.print("16-bit-weight TransB routes  M={d}  workers={d} (+main)  iters={d}  (f32 route: {s})\n", .{
+        m, workers, iters, if (m >= 16) "cblas sgemm" else "vector kernel (below BLAS gate m>=16)",
+    });
+    try out.print("{s:<26} | {s:>10} | {s:>10} | {s:>10} | {s:>9} | {s:>9}\n", .{
+        "shape", "f16 us", "bf16 us", "f32 us", "best", "f16 GB/s",
     });
     try out.print("{s}\n", .{"-" ** 92});
 
     var pool: raw_backend.ThreadPool = undefined;
     try pool.init(.{ .allocator = allocator, .max_workers = workers });
     defer pool.deinit();
-    const cfg_par: native.ParallelConfig = .{ .pool = &pool };
-    const cfg_ser: native.ParallelConfig = .{};
+    const cfg: native.ParallelConfig = .{ .pool = &pool };
 
-    var total_serial_ns: f64 = 0;
-    var total_pooled_ns: f64 = 0;
+    var tot = [3]f64{ 0, 0, 0 };
 
     for (shapes) |s| {
-        const a_data = try allocator.alloc(f16, m * s.k);
-        defer allocator.free(a_data);
-        const b_data = try allocator.alloc(f16, s.n * s.k);
-        defer allocator.free(b_data);
+        const a32 = try allocator.alloc(f32, m * s.k);
+        defer allocator.free(a32);
+        const b16 = try allocator.alloc(f16, s.n * s.k);
+        defer allocator.free(b16);
+        const bbf = try allocator.alloc(u16, s.n * s.k);
+        defer allocator.free(bbf);
+        const b32 = try allocator.alloc(f32, s.n * s.k);
+        defer allocator.free(b32);
         var prng = std.Random.DefaultPrng.init(0x1234 +% s.n +% s.k);
         const rng = prng.random();
-        for (a_data) |*v| v.* = @floatCast(rng.float(f32) * 2 - 1);
-        for (b_data) |*v| v.* = @floatCast(rng.float(f32) * 0.1 - 0.05);
+        for (a32) |*v| v.* = rng.float(f32) * 2 - 1;
+        for (b16, bbf, b32) |*h, *bb, *f| {
+            const value = rng.float(f32) * 0.1 - 0.05;
+            h.* = @floatCast(value);
+            bb.* = @intCast(@as(u32, @bitCast(value)) >> 16); // truncate: fine for bench data
+            f.* = value;
+        }
+        const a16_scratch = try allocator.alloc(f16, m * s.k);
+        defer allocator.free(a16_scratch);
 
-        var a = try TensorF16.fromSlice(allocator, &.{ m, s.k }, a_data);
-        defer a.deinit();
-        var b = try TensorF16.fromSlice(allocator, &.{ s.n, s.k }, b_data);
-        defer b.deinit();
+        var a_f32 = try Tensor.fromSlice(allocator, &.{ m, s.k }, a32);
+        defer a_f32.deinit();
+        var b_f16 = try TensorF16.fromSlice(allocator, &.{ s.n, s.k }, b16);
+        defer b_f16.deinit();
+        var b_bf16 = try TensorBf16.fromSlice(allocator, &.{ s.n, s.k }, bbf);
+        defer b_bf16.deinit();
+        var b_f32 = try Tensor.fromSlice(allocator, &.{ s.n, s.k }, b32);
+        defer b_f32.deinit();
         var c = try Tensor.zeros(allocator, &.{ m, s.n });
         defer c.deinit();
 
-        const Run = struct {
-            fn go(o: *Tensor, lhs: *const TensorF16, rhs: *const TensorF16, rows: usize, cols: usize, inner: usize, cfg: native.ParallelConfig) void {
-                native.matmulTransB2DIntoUncheckedF16OperandsWithConfig(o, lhs, rhs, rows, cols, inner, cfg);
+        const Ctx = struct {
+            c: *Tensor,
+            a_f32: *const Tensor,
+            a16: []f16,
+            a32s: []const f32,
+            b_f16: *const TensorF16,
+            b_bf16: *const TensorBf16,
+            b_f32: *const Tensor,
+            m: usize,
+            n: usize,
+            k: usize,
+            cfg: native.ParallelConfig,
+
+            fn runF16(self: *const @This()) void {
+                // The f16 route's real shape: A is f32 in the model and is
+                // cast per call.
+                for (self.a16, self.a32s) |*dst, src| dst.* = @floatCast(src);
+                var a16_t = TensorF16.fromSlice(std.heap.smp_allocator, &.{ self.m, self.k }, self.a16) catch unreachable;
+                defer a16_t.deinit();
+                native.matmulTransB2DIntoUncheckedF16OperandsWithConfig(self.c, &a16_t, self.b_f16, self.m, self.n, self.k, self.cfg);
             }
-        }.go;
+            fn runBf16(self: *const @This()) void {
+                native.matmulTransB2DIntoUncheckedBf16RhsWithConfig(self.c, self.a_f32, self.b_bf16, self.m, self.n, self.k, self.cfg);
+            }
+            fn runF32(self: *const @This()) void {
+                native.matmulTransB2DIntoUncheckedWithConfig(self.c, self.a_f32, self.b_f32, self.m, self.n, self.k, self.cfg);
+            }
+        };
+        const ctx = Ctx{
+            .c = &c,
+            .a_f32 = &a_f32,
+            .a16 = a16_scratch,
+            .a32s = a32,
+            .b_f16 = &b_f16,
+            .b_bf16 = &b_bf16,
+            .b_f32 = &b_f32,
+            .m = m,
+            .n = s.n,
+            .k = s.k,
+            .cfg = cfg,
+        };
 
-        const ser = try median(Run, .{ &c, &a, &b, m, s.n, s.k, cfg_ser }, iters);
-        const par = try median(Run, .{ &c, &a, &b, m, s.n, s.k, cfg_par }, iters);
+        const t_f16 = try median(Ctx.runF16, .{&ctx}, iters);
+        const t_bf16 = try median(Ctx.runBf16, .{&ctx}, iters);
+        const t_f32 = try median(Ctx.runF32, .{&ctx}, iters);
 
-        const flops = 2.0 * @as(f64, @floatFromInt(m * s.n * s.k));
-        const bytes = 2.0 * @as(f64, @floatFromInt(s.n * s.k)); // RHS dominates
-        const gf_par = flops / @as(f64, @floatFromInt(par));
-        const gbps_par = bytes / @as(f64, @floatFromInt(par));
-        const speedup = @as(f64, @floatFromInt(ser)) / @as(f64, @floatFromInt(par));
+        const best: []const u8 = blk: {
+            const min = @min(t_f16, @min(t_bf16, t_f32));
+            if (min == t_f16) break :blk "f16";
+            if (min == t_bf16) break :blk "bf16";
+            break :blk "f32";
+        };
+        const bytes16 = 2.0 * @as(f64, @floatFromInt(s.n * s.k)); // RHS dominates
+        const gbps_f16 = bytes16 / @as(f64, @floatFromInt(t_f16));
 
-        try out.print("{s:<26} | {d:>11.2} | {d:>11.2} | {d:>8.2}x | {d:>8.1} | {d:>9.1}\n", .{
+        try out.print("{s:<26} | {d:>10.2} | {d:>10.2} | {d:>10.2} | {s:>9} | {d:>9.1}\n", .{
             s.name,
-            @as(f64, @floatFromInt(ser)) / 1000.0,
-            @as(f64, @floatFromInt(par)) / 1000.0,
-            speedup,
-            gf_par,
-            gbps_par,
+            @as(f64, @floatFromInt(t_f16)) / 1000.0,
+            @as(f64, @floatFromInt(t_bf16)) / 1000.0,
+            @as(f64, @floatFromInt(t_f32)) / 1000.0,
+            best,
+            gbps_f16,
         });
 
-        total_serial_ns += @as(f64, @floatFromInt(ser)) * @as(f64, @floatFromInt(s.count));
-        total_pooled_ns += @as(f64, @floatFromInt(par)) * @as(f64, @floatFromInt(s.count));
+        tot[0] += @as(f64, @floatFromInt(t_f16)) * @as(f64, @floatFromInt(s.count));
+        tot[1] += @as(f64, @floatFromInt(t_bf16)) * @as(f64, @floatFromInt(s.count));
+        tot[2] += @as(f64, @floatFromInt(t_f32)) * @as(f64, @floatFromInt(s.count));
     }
 
     try out.print("{s}\n", .{"-" ** 92});
-    try out.print("est. per-forward projections: serial {d:.3} ms | pooled {d:.3} ms\n", .{
-        total_serial_ns / 1e6, total_pooled_ns / 1e6,
+    try out.print("est. per-forward projections: f16 {d:.3} ms | bf16 {d:.3} ms | f32 route {d:.3} ms\n", .{
+        tot[0] / 1e6, tot[1] / 1e6, tot[2] / 1e6,
     });
 }
 

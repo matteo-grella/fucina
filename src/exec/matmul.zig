@@ -1,7 +1,10 @@
 const std = @import("std");
+const build_options = @import("build_options");
+const accelerator = @import("../accelerator.zig");
 const backend_mod = @import("../backend.zig");
 const dtype_mod = @import("../dtype.zig");
 const parallel = @import("../parallel.zig");
+const storage_mod = @import("../storage.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
 
@@ -362,6 +365,130 @@ pub fn matmul2DWithPackedRhsTyped(
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// CPU f32 weight shadow (FUCINA_CPU_F32_SHADOW=1; CPU builds only).
+//
+// MEASURED (bench-f16gemm, M1 Max + Accelerate, idle): at m >= ~32 the BLAS
+// f32 route over a pre-widened RHS beats the 16-bit streaming kernels
+// 1.5-2.5x at the Qwen3 projection shapes (m=64: ~2.5x across the board),
+// while decode (m < 32) stays with the streaming kernels — half the bytes
+// per weight is what decode speed is. The shadow is a widen-ONCE f32 copy
+// attached to the 16-bit weight's storage as its (.cpu-provider)
+// accelerator Resource: created on the first eligible GEMM, it lives
+// exactly as long as the weight buffer and costs +4 bytes/weight resident —
+// which is why it is opt-in. Mutation-safe by lifetime only for weights
+// that are not trained in place; 16-bit TRAINING should leave the flag off
+// (the streaming kernels read the live bytes). GPU builds never take this
+// route: the Resource slot belongs to their page wraps and they offload
+// these shapes anyway.
+//
+// FUCINA_CPU_F32_SHADOW_MIN_M overrides the m >= 32 crossover.
+// ---------------------------------------------------------------------------
+
+var cpu_shadow_state = std.atomic.Value(u8).init(0); // 0 unread, 1 on, 2 off
+var cpu_shadow_min_m = std.atomic.Value(u64).init(32);
+
+/// Test hook (and emergency switch), `setNormQuantFused`-style: overrides
+/// the env read. `null` re-arms the env read.
+pub fn setCpuF32Shadow(on: ?bool, min_m: ?u64) void {
+    cpu_shadow_state.store(if (on) |o| (if (o) @as(u8, 1) else 2) else 0, .release);
+    if (min_m) |v| cpu_shadow_min_m.store(v, .release);
+}
+
+fn cpuShadowMinM() ?u64 {
+    var s = cpu_shadow_state.load(.acquire);
+    if (s == 0) {
+        s = 2;
+        if (std.c.getenv("FUCINA_CPU_F32_SHADOW")) |v_ptr| {
+            const v = std.mem.span(v_ptr);
+            if (v.len > 0 and v[0] != '0') s = 1;
+        }
+        if (std.c.getenv("FUCINA_CPU_F32_SHADOW_MIN_M")) |v_ptr| {
+            if (std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch null) |v| {
+                cpu_shadow_min_m.store(v, .release);
+            }
+        }
+        cpu_shadow_state.store(s, .release);
+    }
+    return if (s == 1) cpu_shadow_min_m.load(.acquire) else null;
+}
+
+const CpuShadow = struct {
+    resource: accelerator.Resource,
+    buffer: *storage_mod.Buffer,
+
+    const vtable: accelerator.ResourceVTable = .{ .destroy = destroy };
+
+    fn destroy(ctx: *anyopaque) void {
+        const self: *CpuShadow = @ptrCast(@alignCast(ctx));
+        self.buffer.release();
+        std.heap.c_allocator.destroy(self);
+    }
+};
+
+/// Get-or-create the f32 shadow of a contiguous 16-bit weight buffer.
+/// Returns a borrowed pointer valid while the weight buffer lives (the
+/// Resource holds the owning reference). Loser of a concurrent first-touch
+/// race frees its copy and adopts the winner's (the storageWrap dance).
+fn cpuShadowBuffer(comptime dtype: DType, b: anytype) ?*storage_mod.Buffer {
+    if (b.buffer.acceleratorResource(.cpu)) |resource| {
+        const cached: *CpuShadow = @ptrCast(@alignCast(resource.ctx));
+        return cached.buffer;
+    }
+    const elems = b.buffer.data.len;
+    const shadow = storage_mod.Buffer.create(std.heap.c_allocator, elems) catch return null;
+    switch (comptime dtype) {
+        .f16 => for (shadow.data, b.buffer.data) |*dst, src| {
+            dst.* = @floatCast(src);
+        },
+        .bf16 => for (shadow.data, b.buffer.data) |*dst, src| {
+            dst.* = @bitCast(@as(u32, src) << 16);
+        },
+        else => comptime unreachable,
+    }
+    const created = std.heap.c_allocator.create(CpuShadow) catch {
+        shadow.release();
+        return null;
+    };
+    created.* = .{
+        .resource = .{ .provider = .cpu, .ctx = created, .vtable = &CpuShadow.vtable },
+        .buffer = shadow,
+    };
+    if (b.buffer.setAcceleratorResource(&created.resource)) return shadow;
+    created.resource.destroy();
+    const winner = b.buffer.acceleratorResource(.cpu) orelse return null;
+    const cached: *CpuShadow = @ptrCast(@alignCast(winner.ctx));
+    return cached.buffer;
+}
+
+/// The shadow route shared by both 16-bit arms: f32 A (never cast) x the
+/// widened RHS through the ordinary f32 TransB entry, which takes the BLAS
+/// arm at these shapes.
+fn matmulTransB2DViaShadow(
+    self: *Runtime,
+    comptime dtype: DType,
+    a_contig: *const Tensor,
+    b_contig: anytype,
+    m: usize,
+    n: usize,
+    k: usize,
+) ?Tensor {
+    // The shadow mirrors the WHOLE buffer at offset 0; weight tensors own
+    // their buffer outright. Anything else falls back to streaming.
+    if (b_contig.offset != 0) return null;
+    const shadow = cpuShadowBuffer(dtype, b_contig) orelse return null;
+    shadow.retain();
+    var b32 = Tensor.fromOwnedBuffer(shadow, &.{ n, k }) catch {
+        shadow.release();
+        return null;
+    };
+    defer b32.deinit();
+    var out = self.emptyRank(2, .{ m, n }) catch return null;
+    self.enableNativeMatmulPoolForWork(m, n, k);
+    self.backend.matmulTransB2DIntoUnchecked(&out, a_contig, &b32, m, n, k);
+    return out;
+}
+
 pub fn matmulTransB2DWithF16Rhs(self: *Runtime, a: *const Tensor, b: *const tensor.TensorOf(.f16)) !Tensor {
     const av = try a.rankView(2);
     const bv = try b.rankView(2);
@@ -372,18 +499,31 @@ pub fn matmulTransB2DWithF16Rhs(self: *Runtime, a: *const Tensor, b: *const tens
 
     var aa_f32 = try self.prepareContiguous(a);
     defer aa_f32.deinit();
-    var aa = try exec_convert.castTyped(self, .f32, .f16, aa_f32.tensor());
-    defer aa.deinit();
     var bb = try self.prepareContiguousTyped(.f16, b);
     defer bb.deinit();
 
+    // Opt-in cached-shadow BLAS arm for prefill-shaped GEMMs (see the
+    // FUCINA_CPU_F32_SHADOW block above); the per-call-widen objection
+    // below does not apply to a widen-once copy.
+    if (comptime !build_options.use_gpu) {
+        if (cpuShadowMinM()) |min_m| {
+            if (m >= min_m) {
+                if (matmulTransB2DViaShadow(self, .f16, aa_f32.tensor(), bb.tensor(), m, n, k)) |out| return out;
+            }
+        }
+    }
+
+    var aa = try exec_convert.castTyped(self, .f32, .f16, aa_f32.tensor());
+    defer aa.deinit();
+
     var out = try self.emptyRank(2, .{ m, n });
     errdefer out.deinit();
-    // Deliberately no BLAS arm here: sgemm would need both operands
-    // widened to f32, and the RHS widen alone costs an order of magnitude
-    // more than the streaming f16 kernels' whole GEMM at LLM shapes
-    // (bench-f16gemm: lm-head 4.6 ms pooled vs ~50 ms of widen); a cached
-    // widened copy is unsound because f16 weights may be trained in place.
+    // Deliberately no default BLAS arm here: sgemm would need both operands
+    // widened to f32, and a PER-CALL RHS widen alone costs an order of
+    // magnitude more than the streaming f16 kernels' whole GEMM at LLM
+    // shapes (bench-f16gemm: lm-head 4.6 ms pooled vs ~50 ms of widen); a
+    // cached widened copy is unsound when f16 weights are trained in place,
+    // which is why the shadow arm above is opt-in.
     self.enableNativeTypedMatmulPoolForWork(m, n, k);
     self.backend.matmulTransB2DIntoUncheckedF16Operands(&out, &aa, bb.tensor(), m, n, k);
     return out;
@@ -401,6 +541,16 @@ pub fn matmulTransB2DWithBf16Rhs(self: *Runtime, a: *const Tensor, b: *const ten
     defer aa.deinit();
     var bb = try self.prepareContiguousTyped(.bf16, b);
     defer bb.deinit();
+
+    // Opt-in cached-shadow BLAS arm (see FUCINA_CPU_F32_SHADOW above); the
+    // bf16 widen is a pure bit shift, exact.
+    if (comptime !build_options.use_gpu) {
+        if (cpuShadowMinM()) |min_m| {
+            if (m >= min_m) {
+                if (matmulTransB2DViaShadow(self, .bf16, aa.tensor(), bb.tensor(), m, n, k)) |out| return out;
+            }
+        }
+    }
 
     var out = try self.emptyRank(2, .{ m, n });
     errdefer out.deinit();
