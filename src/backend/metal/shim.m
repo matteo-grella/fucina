@@ -47,11 +47,15 @@ typedef struct {
 // variant: 0 = nn, 1 = tn (A stored [k,m]), 2 = nt (B stored [n,k]).
 enum { FUCINA_GEMM_NN = 0, FUCINA_GEMM_TN = 1, FUCINA_GEMM_NT = 2 };
 // dtype: 0 = f32 operands/output; 1 = f16 operands + f16 output staging;
-// 2 = f16 operands + direct f32 output. Steel accumulates in f32 for all.
+// 2 = f16 operands + direct f32 output; 3 = bf16 operands + direct f32
+// output (needs __HAVE_BFLOAT__ in the shader — pipeline lookup fails
+// gracefully on older toolchains and the caller falls back to CPU). Steel
+// accumulates in f32 for all.
 enum {
     FUCINA_GEMM_F32 = 0,
     FUCINA_GEMM_F16 = 1,
     FUCINA_GEMM_F16_F32 = 2,
+    FUCINA_GEMM_BF16_F32 = 3,
 };
 
 // Quantized-weights GEMM formats (ggml_mul_mm.metal). Must mirror
@@ -101,7 +105,7 @@ typedef struct {
 @end
 
 #define FUCINA_GEMM_VARIANTS 3
-#define FUCINA_GEMM_DTYPES 3
+#define FUCINA_GEMM_DTYPES 4
 #define FUCINA_GEMM_PIPELINES (FUCINA_GEMM_DTYPES * FUCINA_GEMM_VARIANTS * 8)
 #define FUCINA_WRAP_CACHE 512
 
@@ -164,6 +168,11 @@ static const char *fucina_gemm_fn_names[FUCINA_GEMM_DTYPES][FUCINA_GEMM_VARIANTS
         "gemm_nn_f16_f32_32_32_16_2_2",
         "gemm_tn_f16_f32_32_32_16_2_2",
         "gemm_nt_f16_f32_32_32_16_2_2",
+    },
+    {
+        "gemm_nn_bf16_f32_32_32_16_2_2",
+        "gemm_tn_bf16_f32_32_32_16_2_2",
+        "gemm_nt_bf16_f32_32_32_16_2_2",
     },
 };
 
@@ -503,11 +512,14 @@ void *fucina_metal_gemm_f32_async(
     }
 }
 
-// Eager asynchronous f16 NT GEMM with direct f32 output.  The public tensor
-// result is f32, so this mixed steel instantiation avoids the old shared f16
-// staging buffer, its process lock, and the CPU widening pass.
-void *fucina_metal_gemm_f16_nt_async(
-    void *ctx_opaque,
+// Eager asynchronous 16-bit-operand NT GEMM with direct f32 output.  The
+// public tensor result is f32, so these mixed steel instantiations avoid the
+// old shared f16 staging buffer, its process lock, and the CPU widening
+// pass.  `gemm_dtype` picks the operand encoding (FUCINA_GEMM_F16_F32 or
+// FUCINA_GEMM_BF16_F32 — both are 16-bit rows, so the buffer math is
+// identical).
+static void *fucina_metal_gemm_16bit_nt_async(
+    void *ctx_opaque, int gemm_dtype,
     const uint16_t *a, const uint16_t *b, float *c,
     void *a_wrap, void *b_wrap, void *c_wrap,
     int64_t m, int64_t n, int64_t k) {
@@ -517,7 +529,7 @@ void *fucina_metal_gemm_f16_nt_async(
     @autoreleasepool {
         const int bm = 32, bn = 32, bk = 16;
         id<MTLComputePipelineState> pipeline =
-            fucina_gemm_pipeline(ctx, FUCINA_GEMM_F16_F32, FUCINA_GEMM_NT,
+            fucina_gemm_pipeline(ctx, gemm_dtype, FUCINA_GEMM_NT,
                                  m % bm == 0, n % bn == 0, k % bk == 0);
         if (pipeline == nil) return NULL;
 
@@ -566,6 +578,24 @@ void *fucina_metal_gemm_f16_nt_async(
         [cmd commit];
         return (__bridge_retained void *)ticket;
     }
+}
+
+void *fucina_metal_gemm_f16_nt_async(
+    void *ctx_opaque,
+    const uint16_t *a, const uint16_t *b, float *c,
+    void *a_wrap, void *b_wrap, void *c_wrap,
+    int64_t m, int64_t n, int64_t k) {
+    return fucina_metal_gemm_16bit_nt_async(ctx_opaque, FUCINA_GEMM_F16_F32,
+                                            a, b, c, a_wrap, b_wrap, c_wrap, m, n, k);
+}
+
+void *fucina_metal_gemm_bf16_nt_async(
+    void *ctx_opaque,
+    const uint16_t *a, const uint16_t *b, float *c,
+    void *a_wrap, void *b_wrap, void *c_wrap,
+    int64_t m, int64_t n, int64_t k) {
+    return fucina_metal_gemm_16bit_nt_async(ctx_opaque, FUCINA_GEMM_BF16_F32,
+                                            a, b, c, a_wrap, b_wrap, c_wrap, m, n, k);
 }
 
 int fucina_metal_ticket_wait(void *ticket_opaque, FucinaCommandTiming *timing) {

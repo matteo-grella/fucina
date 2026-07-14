@@ -213,6 +213,14 @@ has a persistent mapping/device address; `FUCINA_GPU_MIN_WORK_GEMV` overrides
 that floor. CUDA refuses a nonresident decode RHS; Metal accepts a resident or
 already storage-mapped RHS because unified memory needs no PCIe weight copy.
 
+Metal also admits SMALL-m 16-bit-weight GEMMs (f16/bf16 RHS) whose weights
+already carry a storage-lifetime page wrap, floored at `2^27`
+(`FUCINA_GPU_MIN_WORK_16BIT_RESIDENT`). The floor is measured, not
+theoretical: admitting m=4 batched-decode projections at `2^24` LOST 18%
+end-to-end on an M1 Max (per-dispatch overhead outweighs the whole-matrix
+bandwidth win at that width, unlike CUDA's resident admission), while m>=16
+admission is neutral-to-positive.
+
 F16 uses `2^27` on Metal and for streamed CUDA prefill. CUDA has a separate
 resident f16 floor (`2^20`): a 1×4096×1024 resident call measured 18.3 µs on
 the RTX host versus 77.4 µs on CPU, while nonresident decode is still refused

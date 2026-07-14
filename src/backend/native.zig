@@ -1062,6 +1062,11 @@ pub fn matmulTransB2DIntoUncheckedBf16RhsWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
+    if (comptime build_options.use_gpu) {
+        if (gpu.shouldUseGpuBf16ForRhs(b, m, n, k)) {
+            if (gpu.gemmBf16NtAsync(a, b, out, m, n, k)) return;
+        }
+    }
     vector.matmulTransB2DIntoUncheckedBf16RhsWithConfig(out, a, b, m, n, k, config);
 }
 

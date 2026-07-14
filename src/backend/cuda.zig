@@ -594,6 +594,17 @@ pub fn shouldUseGpuF16ForRhs(b: *const TensorF16, m: usize, n: usize, k: usize) 
     return shouldUseGpuF16(m, n, k);
 }
 
+/// bf16 weight GEMMs do not offload on CUDA yet (Metal has the arm; the
+/// cuBLAS CUDA_R_16BF route is the recorded follow-up) — the CPU bf16
+/// streaming kernel serves them.
+pub fn shouldUseGpuBf16ForRhs(_: *const tensor.TensorOf(.bf16), _: usize, _: usize, _: usize) bool {
+    return false;
+}
+
+pub fn gemmBf16NtAsync(_: *const Tensor, _: *const tensor.TensorOf(.bf16), _: *Tensor, _: usize, _: usize, _: usize) bool {
+    return false;
+}
+
 pub fn shouldUseGpuGemv(b: *const Tensor, m: usize, n: usize, k: usize) bool {
     ensureConfig();
     if (m == 0 or m > 8 or n < 256 or k < 256) return false;

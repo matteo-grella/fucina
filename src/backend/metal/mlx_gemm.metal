@@ -1439,4 +1439,5 @@ instantiate_gemm_transpose_helper(f16, half, f16, half, 32, 32, 16, 2, 2)
 instantiate_gemm_transpose_helper(f16, half, f32, float, 32, 32, 16, 2, 2)
 #if defined(__HAVE_BFLOAT__)
 instantiate_gemm_transpose_helper(bf16, bfloat, bf16, bfloat, 32, 32, 16, 2, 2)
+instantiate_gemm_transpose_helper(bf16, bfloat, f32, float, 32, 32, 16, 2, 2)
 #endif
