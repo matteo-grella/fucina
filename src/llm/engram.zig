@@ -67,12 +67,14 @@ const I64Seq = fucina.Tensor(.{ .dtype = .i64, .tags = .{.seq} });
 const I64Head = fucina.Tensor(.{ .dtype = .i64, .tags = .{.head} });
 const I64SeqHead = HashRows;
 
-const Table = fucina.Tensor(.{ .row, .hd });
-const KeyProj = fucina.Tensor(.{ .d, .eh });
-const ValueProj = fucina.Tensor(.{ .d, .eh });
-const BiasVec = fucina.Tensor(.{.d});
-const NormVec = fucina.Tensor(.{.d});
-const ConvKernel = fucina.Tensor(.{ .channel, .tap });
+/// The multi-head embedding table `[table_rows, head_dim]`.
+pub const Table = fucina.Tensor(.{ .row, .hd });
+/// Key/value projections `[hidden, engram_hidden]` (torch Linear layout).
+pub const Proj = fucina.Tensor(.{ .d, .eh });
+/// Bias / RMSNorm weight vectors `[hidden]`.
+pub const Vec = fucina.Tensor(.{.d});
+/// ShortConv depthwise kernel `[hc_mult*hidden, kernel_size]`.
+pub const ConvKernel = fucina.Tensor(.{ .channel, .tap });
 
 /// Geometry + numerics of the Engram module family. `engram_vocab_size`
 /// holds the base table size per n-gram order (`len == max_ngram_size - 1`,
@@ -467,18 +469,18 @@ pub const Layer = struct {
     /// single concatenated nn.Embedding.
     table: Table,
     /// Per-stream gate key projections `[d, engram_hidden]` + bias.
-    key_w: []KeyProj,
-    key_b: []BiasVec,
+    key_w: []Proj,
+    key_b: []Vec,
     /// Gate norms: norm1 (key side) and norm2 (query side), per stream.
-    norm_key: []NormVec,
-    norm_query: []NormVec,
+    norm_key: []Vec,
+    norm_query: []Vec,
     /// Shared value projection `[d, engram_hidden]` + bias.
-    value_w: ValueProj,
-    value_b: BiasVec,
+    value_w: Proj,
+    value_b: Vec,
     /// ShortConv: depthwise kernel `[hc_mult·d, kernel_size]` (no bias) and
     /// per-stream input norms.
     conv_w: ConvKernel,
-    conv_norm: []NormVec,
+    conv_norm: []Vec,
 
     /// Random initialization (torch module defaults: embedding N(0,·),
     /// linear Kaiming-uniform bounds U(±1/sqrt(fan_in)), norms ones,
@@ -515,25 +517,25 @@ pub const Layer = struct {
         const proj_bound = 1.0 / @sqrt(@as(f32, @floatFromInt(eh)));
         // Simple init failure contract: free the slices; tensors created so
         // far leak only on OOM mid-init (accepted: init is a startup path).
-        self.key_w = try allocator.alloc(KeyProj, g);
+        self.key_w = try allocator.alloc(Proj, g);
         errdefer allocator.free(self.key_w);
-        self.key_b = try allocator.alloc(BiasVec, g);
+        self.key_b = try allocator.alloc(Vec, g);
         errdefer allocator.free(self.key_b);
-        self.norm_key = try allocator.alloc(NormVec, g);
+        self.norm_key = try allocator.alloc(Vec, g);
         errdefer allocator.free(self.norm_key);
-        self.norm_query = try allocator.alloc(NormVec, g);
+        self.norm_query = try allocator.alloc(Vec, g);
         errdefer allocator.free(self.norm_query);
-        self.conv_norm = try allocator.alloc(NormVec, g);
+        self.conv_norm = try allocator.alloc(Vec, g);
         errdefer allocator.free(self.conv_norm);
         for (0..g) |i| {
             for (scratch[0 .. d * eh]) |*v| v.* = randomUniform(random, proj_bound);
-            self.key_w[i] = try KeyProj.variableFromSlice(ctx, .{ d, eh }, scratch[0 .. d * eh]);
+            self.key_w[i] = try Proj.variableFromSlice(ctx, .{ d, eh }, scratch[0 .. d * eh]);
             for (scratch[0..d]) |*v| v.* = randomUniform(random, proj_bound);
-            self.key_b[i] = try BiasVec.variableFromSlice(ctx, .{d}, scratch[0..d]);
+            self.key_b[i] = try Vec.variableFromSlice(ctx, .{d}, scratch[0..d]);
             for (scratch[0..d]) |*v| v.* = 1;
-            self.norm_key[i] = try NormVec.variableFromSlice(ctx, .{d}, scratch[0..d]);
-            self.norm_query[i] = try NormVec.variableFromSlice(ctx, .{d}, scratch[0..d]);
-            self.conv_norm[i] = try NormVec.variableFromSlice(ctx, .{d}, scratch[0..d]);
+            self.norm_key[i] = try Vec.variableFromSlice(ctx, .{d}, scratch[0..d]);
+            self.norm_query[i] = try Vec.variableFromSlice(ctx, .{d}, scratch[0..d]);
+            self.conv_norm[i] = try Vec.variableFromSlice(ctx, .{d}, scratch[0..d]);
         }
 
         if (opts.graft_zero_init) {
@@ -541,13 +543,13 @@ pub const Layer = struct {
         } else {
             for (scratch[0 .. d * eh]) |*v| v.* = randomUniform(random, proj_bound);
         }
-        self.value_w = try ValueProj.variableFromSlice(ctx, .{ d, eh }, scratch[0 .. d * eh]);
+        self.value_w = try Proj.variableFromSlice(ctx, .{ d, eh }, scratch[0 .. d * eh]);
         if (opts.graft_zero_init) {
             for (scratch[0..d]) |*v| v.* = 0;
         } else {
             for (scratch[0..d]) |*v| v.* = randomUniform(random, proj_bound);
         }
-        self.value_b = try BiasVec.variableFromSlice(ctx, .{d}, scratch[0..d]);
+        self.value_b = try Vec.variableFromSlice(ctx, .{d}, scratch[0..d]);
 
         const channels = cfg.convChannels();
         const conv_bound = 1.0 / @sqrt(@as(f32, @floatFromInt(cfg.kernel_size)));
@@ -865,4 +867,5 @@ pub const Engram = struct {
 
 test {
     _ = @import("engram_tests.zig");
+    _ = @import("engram_golden_tests.zig");
 }
