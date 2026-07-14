@@ -17,6 +17,9 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
         pending_work: std.atomic.Value(?*accelerator.Work) = .init(null),
         pending_use: std.atomic.Value(?*accelerator.Work) = .init(null),
         accelerator_resource: std.atomic.Value(?*accelerator.Resource) = .init(null),
+        /// Exclusive completion claim for `waitReady`: only the claim holder
+        /// may dereference (and release) `pending_work` — see `waitReady`.
+        pending_claim: std.atomic.Value(bool) = .init(false),
 
         const Self = @This();
         pub const dtype = buffer_dtype;
@@ -131,6 +134,7 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
         pub fn resetRefs(self: *Self) void {
             std.debug.assert(self.pending_work.load(.acquire) == null);
             std.debug.assert(self.pending_use.load(.acquire) == null);
+            std.debug.assert(!self.pending_claim.load(.acquire));
             self.refs.store(1, .release);
         }
 
@@ -146,10 +150,36 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
             return self.pending_work.load(.acquire);
         }
 
+        /// Block until any pending accelerator output is host-visible.
+        ///
+        /// Safe under CONCURRENT callers (`copyRangeTo`'s disjoint-range
+        /// contract puts parallel chunk workers here on the same buffer): a
+        /// single claimant dereferences the Work, completes it, clears the
+        /// slot, and drops the buffer's reference; everyone else spins until
+        /// the slot clears — which the claimant does only AFTER the host
+        /// copy is visible. The pre-claim naive form (load → ensureHost →
+        /// clear → release) let a loser dereference a Work the winner had
+        /// already freed.
         pub fn waitReady(self: *Self) void {
-            const work = self.pending_work.load(.acquire) orelse return;
-            work.ensureHost();
-            if (self.pending_work.cmpxchgStrong(work, null, .acq_rel, .acquire) == null) work.release();
+            while (true) {
+                if (self.pending_work.load(.acquire) == null) return;
+                if (self.pending_claim.cmpxchgWeak(false, true, .acq_rel, .acquire) != null) {
+                    std.atomic.spinLoopHint();
+                    continue;
+                }
+                // Re-read under the claim: a previous claimant may have
+                // completed and freed the work after our gate load.
+                const work = self.pending_work.load(.acquire) orelse {
+                    self.pending_claim.store(false, .release);
+                    return;
+                };
+                work.ensureHost();
+                const displaced = self.pending_work.cmpxchgStrong(work, null, .acq_rel, .acquire);
+                std.debug.assert(displaced == null); // sole clearer while claimed
+                self.pending_claim.store(false, .release);
+                work.release();
+                return;
+            }
         }
 
         pub fn discardPending(self: *Self) void {

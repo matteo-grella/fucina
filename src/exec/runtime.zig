@@ -368,6 +368,12 @@ pub const Runtime = struct {
                 const dst = out.data();
                 if (dst.len >= parallel.materialize_parallel_len_threshold) {
                     if (self.workPool()) |pool| {
+                        // One host fence up front: the chunk tasks each
+                        // waitReady on the same buffer, and N workers
+                        // spinning on one pending accelerator Work is
+                        // wasted parallelism (waitReady itself is
+                        // claimant-safe either way).
+                        @constCast(x.buffer).waitReady();
                         materializeChunked(dtype, x, dst, pool);
                         return out;
                     }
