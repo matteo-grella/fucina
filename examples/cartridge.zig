@@ -119,6 +119,9 @@ const Options = struct {
     seed: u64 = 42,
     save_path: []const u8 = default_save,
     load_path: ?[]const u8 = null,
+    /// Serve-mode only (--load): the question answered behind the loaded
+    /// cartridge (plus bare-model and, with a corpus, ICL comparison arms).
+    /// Training runs never serve — train, save, then serve with --load.
     ask: ?[]const u8 = null,
     /// Checkpoint the cartridge every N optimizer steps (0 = only at the
     /// end). Saves are atomic, to `save_path` — a long run is resumable
@@ -364,6 +367,10 @@ pub fn main(init: std.process.Init) !void {
     if (opts.accum == 0 or opts.steps == 0) return error.InvalidArguments;
     if (opts.chunk_min == 0 or opts.chunk_min > opts.chunk_max) return error.InvalidArguments;
     if (opts.gen_batch != 0 and opts.gen_batch % opts.accum != 0) return error.InvalidArguments;
+    if (opts.ask != null and opts.load_path == null) {
+        try stdout.print("--ask serves a saved cartridge: pair it with --load\n", .{});
+        return error.InvalidArguments;
+    }
 
     var ctx: fucina.ExecContext = undefined;
     ctx.init(allocator);
@@ -764,10 +771,6 @@ fn runSelfStudy(
 
     try fucina.training_checkpoint.writeFileAtomic(io, opts.save_path, &cart, saveCartridge);
     try stdout.print("cartridge saved to {s}\n", .{opts.save_path});
-
-    if (opts.ask) |ask| {
-        try runServe(ctx, io, stdout, allocator, model, tokenizer, &cart, ask, corpus, opts);
-    }
 }
 
 fn saveCartridge(cart: *cartridge.Cartridge, writer: *std.Io.Writer) anyerror!void {

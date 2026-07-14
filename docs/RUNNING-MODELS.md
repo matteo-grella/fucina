@@ -680,25 +680,24 @@ per step and a `self-study: ... s/conversation` summary.
 zig build cartridge -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-f16.gguf \
   --corpus README.md --p 256 --suffix-max 128 --equiv
 
-# 2. Self-study training + three-way comparison (~4.5 min on an M1 Max):
-#    32 synthesized conversations (8 optimizer steps x 4-conversation
-#    accumulation), teacher top-20 targets, Adam lr 2e-3 (the default;
-#    docs/CARTRIDGES.md explains why the paper's 2e-2 needs its 65k-token
-#    batches). Prints per-step distill loss, the held-out loss before/after,
-#    saves the cartridge, then answers --ask three ways. Expected: the
+# 2. Self-study training + save (~3.5 min on an M1 Max): 32 synthesized
+#    conversations (8 optimizer steps x 4-conversation accumulation),
+#    teacher top-20 targets, Adam lr 2e-3 (the default; docs/CARTRIDGES.md
+#    explains why the paper's 2e-2 needs its 65k-token batches). Prints
+#    per-step distill loss and the held-out loss before/after, then saves.
+zig build cartridge -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-f16.gguf \
+  --corpus README.md --p 256 --steps 8 --chunk-min 256 --chunk-max 512 \
+  --max-q 64 --max-a 160 --seed 7 --draft-ref \
+  --save /tmp/fucina-cartridge-readme.safetensors
+
+# 3. Serve the saved cartridge — geometry is recovered from the safetensors
+#    header; --corpus is optional (enables the ICL column). Expected: the
 #    [cartridge, 256 KV rows] and [ICL, ~5.3k KV rows] answers agree
 #    ("Fucina is a CPU-first tensor/autograd runtime and LLM inference
 #    engine written in pure Zig 0.16.") while [bare model] hallucinates.
 zig build cartridge -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-f16.gguf \
-  --corpus README.md --p 256 --steps 8 --chunk-min 256 --chunk-max 512 \
-  --max-q 64 --max-a 160 --seed 7 --save /tmp/fucina-cartridge-readme.safetensors \
-  --draft-ref --ask "What is Fucina, in one sentence?"
-
-# 3. Serve the saved cartridge later — geometry is recovered from the
-#    safetensors header; --corpus is optional (enables the ICL column).
-zig build cartridge -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-f16.gguf \
   --load /tmp/fucina-cartridge-readme.safetensors \
-  --ask "What backends and hardware does Fucina support?" --corpus README.md
+  --ask "What is Fucina, in one sentence?" --corpus README.md
 
 #    Training with --draft-ref embeds the corpus token ids in the artifact
 #    (8 bytes/token), making it self-contained for speculative serving:
@@ -724,8 +723,7 @@ zig build cartridge -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-f16.gguf
 zig build cartridge -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-f16.gguf \
   --corpus README.md --corpus AGENTS.md --corpus docs \
   --p 512 --steps 16 --chunk-min 256 --chunk-max 512 --max-q 64 --max-a 160 \
-  --seed 7 --save /tmp/fucina-cartridge-docs.safetensors \
-  --ask "What is Fucina, in one sentence?"
+  --seed 7 --save /tmp/fucina-cartridge-docs.safetensors
 
 # 5. Full-coverage runs: checkpoint every N steps (atomic, same --save
 #    path) and resume from a checkpoint (rows only; Adam moments restart).
@@ -737,8 +735,7 @@ zig build cartridge -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-f16.gguf
 zig build cartridge -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-f16.gguf \
   --corpus README.md --corpus AGENTS.md --corpus docs \
   --p 1024 --steps 512 --accum 4 --max-a 192 --seed 7 \
-  --save cartridge-full.safetensors --save-every 32 --draft-ref \
-  --ask "What is Fucina, in one sentence?"
+  --save cartridge-full.safetensors --save-every 32 --draft-ref
 # resume after an interruption:
 #   ... --resume cartridge-full.safetensors --steps 256 --save cartridge-full.safetensors --save-every 32
 

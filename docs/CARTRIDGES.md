@@ -108,8 +108,8 @@ variables and capture sink are not checkpoint inputs).
 ## Demo run-book
 
 The exact reproduction commands — with expected output and measured
-wall-clock (~4.5 min end-to-end for the training command on an M1 Max;
-self-study itself is ~6 s/conversation) — live in `docs/RUNNING-MODELS.md`
+wall-clock (~3.5 min for the training command on an M1 Max; self-study
+itself is ~6 s/conversation) — live in `docs/RUNNING-MODELS.md`
 §"Cartridges: train a corpus into a reusable KV prefix". The short form:
 
 ```bash
@@ -118,18 +118,17 @@ zig build cartridge -Doptimize=ReleaseFast -- \
   --model models/Qwen3-0.6B-f16.gguf --corpus README.md \
   --p 256 --suffix-max 128 --equiv
 
-# Self-study training (fully in-process, 32 conversations ~ 3.3 min),
-# save, and a three-way comparison answer:
+# Self-study training (fully in-process, 32 conversations ~ 3.3 min) + save:
 zig build cartridge -Doptimize=ReleaseFast -- \
   --model models/Qwen3-0.6B-f16.gguf --corpus README.md \
   --p 256 --steps 8 --chunk-min 256 --chunk-max 512 --max-q 64 --max-a 160 \
-  --seed 7 --save /tmp/cartridge.safetensors \
-  --ask "What is Fucina, in one sentence?"
+  --seed 7 --save /tmp/cartridge.safetensors
 
-# Serve a saved cartridge later (corpus optional — enables the ICL column):
+# Serve it: --ask answers behind the cartridge, bare, and (with a corpus)
+# with the real corpus in context — the three-way comparison:
 zig build cartridge -Doptimize=ReleaseFast -- \
   --model models/Qwen3-0.6B-f16.gguf --load /tmp/cartridge.safetensors \
-  --corpus README.md --ask "What backends does Fucina support?"
+  --corpus README.md --ask "What is Fucina, in one sentence?"
 ```
 
 ## Batched self-study (measured)
