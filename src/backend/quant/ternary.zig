@@ -401,13 +401,13 @@ pub fn matmulTQ2_0RhsRange(
 /// by {0,2,4,6} and masked to 2 bits.
 inline fn q2_0Codes16(qs: QKV32u8, comptime first_byte: usize) QKV16u8 {
     const mask = comptime blk: {
-        @setEvalBranchQuota(4000);
+        @setEvalBranchQuota(100_000);
         var idx: [16]i32 = undefined;
         for (0..16) |lane| idx[lane] = @intCast(first_byte + lane / 4);
         break :blk idx;
     };
     const shifts = comptime blk: {
-        @setEvalBranchQuota(4000);
+        @setEvalBranchQuota(100_000);
         var sv: [16]u3 = undefined;
         for (0..16) |lane| sv[lane] = @intCast((lane % 4) * 2);
         break :blk sv;
@@ -419,13 +419,13 @@ inline fn q2_0Codes16(qs: QKV32u8, comptime first_byte: usize) QKV16u8 {
 /// 32-lane twin of `q2_0Codes16` (bytes `first_byte..first_byte+8`).
 inline fn q2_0Codes32(qs: QKV32u8, comptime first_byte: usize) QKV32u8 {
     const mask = comptime blk: {
-        @setEvalBranchQuota(4000);
+        @setEvalBranchQuota(100_000);
         var idx: [32]i32 = undefined;
         for (0..32) |lane| idx[lane] = @intCast(first_byte + lane / 4);
         break :blk idx;
     };
     const shifts = comptime blk: {
-        @setEvalBranchQuota(4000);
+        @setEvalBranchQuota(100_000);
         var sv: [32]u3 = undefined;
         for (0..32) |lane| sv[lane] = @intCast((lane % 4) * 2);
         break :blk sv;
@@ -463,7 +463,8 @@ inline fn q2_0UnpackCodes(qs: QKV32u8, comptime k: usize) Q2_0Codes {
 
 /// sum(q * a) of unpacked codes against one Q8_0 sub-block, exact i32
 /// (|sum(q*a)| <= 32*3*127 = 12192; maddubs pair sums <= 2*127*3 = 762, no
-/// i16 saturation) — all arms bitwise identical to cold.zig's dotQ2_0Q8_0.
+/// i16 saturation) — every arm produces the exact integer, so all paths
+/// agree with cold.zig's dotQ2_0RowQ8_0 reference bitwise.
 inline fn q2_0CodeDot(codes: Q2_0Codes, a: *const BlockQ8_0) i32 {
     if (comptime builtin.cpu.arch == .aarch64) {
         const a0: QKV16i8 = a.qs[0..16].*;
@@ -479,23 +480,49 @@ inline fn q2_0CodeDot(codes: Q2_0Codes, a: *const BlockQ8_0) i32 {
     return @reduce(.Add, acc);
 }
 
-/// LHS rows sharing one weight-block unpack (comptime, so the code vectors
-/// and accumulators stay in registers): with rows-inner-of-columns the RHS
-/// is streamed once per row pair instead of once per row, halving prefill
-/// weight traffic. Decode (m = 1) takes the width-1 instantiation.
-const q2_0_row_block: usize = 2;
+/// Vectorized Q2_0 row dequantize — same values as cold.zig's
+/// dequantizeRowQ2_0Into ((q-1)*d per element, d and q-1 both exact in f32,
+/// so the product rounds identically in any lane order), unpacked with the
+/// same shuffle/shift machinery as the matmul kernels. Feeds the BLAS
+/// prefill panels, where the scalar decoder would dominate the GEMM.
+pub fn dequantizeRowQ2_0FastInto(dst: []f32, src: []const BlockQ2_0) !void {
+    if (dst.len != try checkedProduct(src.len, q2_0_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
+    for (src, 0..) |*block, block_index| {
+        const d: @Vector(32, f32) = @splat(f16BitsToF32(block.d));
+        const qs: QKV32u8 = block.qs;
+        const out = dst[block_index * q2_0_block_size ..][0..q2_0_block_size];
+        inline for (0..q2_0_block_size / 32) |k| {
+            const codes: @Vector(32, i32) = @intCast(q2_0Codes32(qs, k * 8));
+            const w: @Vector(32, f32) = @floatFromInt(codes - @as(@Vector(32, i32), @splat(1)));
+            out[k * 32 ..][0..32].* = w * d;
+        }
+    }
+}
 
-/// LHS Q8_0 sub-blocks a row-side bsum cache covers without allocating:
-/// 2048 sub-blocks = k up to 65536 (16 KiB of stack per cached row). Longer
-/// rows recompute per column group — identical values either way, the cache
-/// is bitwise-invisible.
+/// LHS row widths sharing one weight-block unpack, widest first (each is a
+/// comptime micro-tile instantiation, so the code vectors and accumulators
+/// stay in registers): with rows-inner-of-columns the RHS is streamed once
+/// per row group instead of once per row. Decode (m = 1) takes the width-1
+/// body. Width 2 is the register sweet spot: the per-(row, column) lane
+/// accumulators (isum4 + sums4) already claim 16 vector registers at
+/// 2x4 tiles.
+const q2_0_row_widths = [_]usize{ 2, 1 };
+const q2_0_row_block_max: usize = q2_0_row_widths[0];
+
+/// LHS Q8_0 sub-blocks the row-side bsum/scale caches cover without
+/// allocating: 2048 sub-blocks = k up to 65536 (24 KiB of stack per cached
+/// row pair). Longer rows recompute per column group — identical values
+/// either way, the caches are bitwise-invisible.
 const q2_0_bsum_cache_subs: usize = 2048;
 
-/// One (row-width x 4-column) micro-tile over a full k reduction: weights
-/// unpacked once per (column, sub-block) and dotted against `rw` activation
-/// rows, everything comptime-shaped so codes and accumulators stay in
-/// registers. Accumulation order per output element matches cold.zig
-/// dotQ2_0Q8_0 exactly (blocks in order, sum += d0 * d1_k * isum_k).
+/// One (row-width x column-width) micro-tile over a full k reduction:
+/// weights unpacked once per (column, sub-block) and dotted against `rw`
+/// activation rows, everything comptime-shaped so codes and accumulators
+/// stay in registers. The float tail is ONE vector FMA per 128-block:
+/// lane k of sums4 carries sub-block k across every block
+/// (lane_k += d0 * d1_k * (sum(q*a)_k - bsum_k)), folded pairwise
+/// ((l0+l1)+(l2+l3)) once at the end — exactly cold.zig's dotQ2_0RowQ8_0
+/// contract, so hot and cold are bitwise identical.
 inline fn q2_0MicroTile(
     comptime rw: usize,
     comptime cw: usize,
@@ -505,7 +532,8 @@ inline fn q2_0MicroTile(
     n: usize,
     r: usize,
     c: usize,
-    bsums: *const [q2_0_row_block][q2_0_bsum_cache_subs]i32,
+    bsums: *const [q2_0_row_block_max][q2_0_bsum_cache_subs]i32,
+    d1s: *const [q2_0_row_block_max][q2_0_bsum_cache_subs]f32,
     cached: bool,
 ) void {
     const sub_per_block = q2_0_block_size / q8_0_block_size; // 4
@@ -517,35 +545,47 @@ inline fn q2_0MicroTile(
     var arows: [rw][]const BlockQ8_0 = undefined;
     inline for (0..rw) |r2| arows[r2] = lhs_blocks[(r + r2) * sub_blocks_per_row ..][0..sub_blocks_per_row];
 
-    var sums: [rw][cw]f32 = @splat(@splat(0));
+    var sums4: [rw][cw]@Vector(4, f32) = @splat(@splat(@splat(0)));
     var bi: usize = 0;
     while (bi < blocks_per_row) : (bi += 1) {
         var d0: [cw]f32 = undefined;
         inline for (0..cw) |ci| d0[ci] = f16BitsToF32(wcols[ci][bi].d);
-        // Per-block partial sums, folded into the running total only after
-        // the block's four sub-blocks — the exact nesting of the cold
-        // reference (matmulTableQ8_0RhsTile adds one dotQ2_0Q8_0 per block).
-        var part: [rw][cw]f32 = @splat(@splat(0));
+        // Integer phase: exact per-sub-block dots into lane k.
+        var isum4: [rw][cw]@Vector(4, i32) = undefined;
         inline for (0..sub_per_block) |k| {
             const si = bi * sub_per_block + k;
             var codes: [cw]Q2_0Codes = undefined;
             inline for (0..cw) |ci| codes[ci] = q2_0UnpackCodes(wcols[ci][bi].qs, k);
             inline for (0..rw) |r2| {
                 const a = &arows[r2][si];
-                const bsum = if (cached) bsums[r2][si] else q8_0BlockSum(a);
-                const d1 = f16BitsToF32(a.d);
-                inline for (0..cw) |ci| {
-                    const isum = q2_0CodeDot(codes[ci], a) - bsum;
-                    part[r2][ci] += d0[ci] * d1 * @as(f32, @floatFromInt(isum));
-                }
+                inline for (0..cw) |ci| isum4[r2][ci][k] = q2_0CodeDot(codes[ci], a);
             }
         }
+        // Float phase: one vector op chain per (row, column) and block.
         inline for (0..rw) |r2| {
-            inline for (0..cw) |ci| sums[r2][ci] += part[r2][ci];
+            var b4: @Vector(4, i32) = undefined;
+            var d14: @Vector(4, f32) = undefined;
+            if (cached) {
+                b4 = bsums[r2][bi * sub_per_block ..][0..4].*;
+                d14 = d1s[r2][bi * sub_per_block ..][0..4].*;
+            } else {
+                inline for (0..sub_per_block) |k| {
+                    const a = &arows[r2][bi * sub_per_block + k];
+                    b4[k] = q8_0BlockSum(a);
+                    d14[k] = f16BitsToF32(a.d);
+                }
+            }
+            inline for (0..cw) |ci| {
+                const vf: @Vector(4, f32) = @floatFromInt(isum4[r2][ci] - b4);
+                sums4[r2][ci] += @as(@Vector(4, f32), @splat(d0[ci])) * d14 * vf;
+            }
         }
     }
     inline for (0..rw) |r2| {
-        inline for (0..cw) |ci| out[(r + r2) * n + c + ci] = sums[r2][ci];
+        inline for (0..cw) |ci| {
+            const s = sums4[r2][ci];
+            out[(r + r2) * n + c + ci] = (s[0] + s[1]) + (s[2] + s[3]);
+        }
     }
 }
 
@@ -554,7 +594,8 @@ inline fn q2_0MicroTile(
 /// callers validate shapes (out is m*n, lhs_blocks is m*4*blocks_per_row).
 /// Row pairs share each weight unpack (`q2_0MicroTile`); every micro-tile
 /// width is a comptime instantiation, so all shapes take register-resident
-/// bodies and every path is bitwise identical to cold.zig's dotQ2_0Q8_0.
+/// bodies and every path is bitwise identical to cold.zig's
+/// dotQ2_0RowQ8_0 / matmulQ2_0RhsRefRange reference.
 pub fn matmulQ2_0RhsTile(
     out: []f32,
     lhs_blocks: []const BlockQ8_0,
@@ -569,26 +610,27 @@ pub fn matmulQ2_0RhsTile(
     const blocks_per_row = rhs.rows.blocks_per_row;
     const sub_blocks_per_row = blocks_per_row * sub_per_block;
     const cached = sub_blocks_per_row <= q2_0_bsum_cache_subs;
-    var bsum_cache: [q2_0_row_block][q2_0_bsum_cache_subs]i32 = undefined;
+    var bsum_cache: [q2_0_row_block_max][q2_0_bsum_cache_subs]i32 = undefined;
+    var d1_cache: [q2_0_row_block_max][q2_0_bsum_cache_subs]f32 = undefined;
 
     var r = r0;
-    while (r < r1) : (r += q2_0_row_block) {
-        const rw_live = @min(q2_0_row_block, r1 - r);
-        if (cached) {
-            for (0..rw_live) |r2| {
-                const arow = lhs_blocks[(r + r2) * sub_blocks_per_row ..][0..sub_blocks_per_row];
-                for (arow, 0..) |*a, si| bsum_cache[r2][si] = q8_0BlockSum(a);
+    inline for (q2_0_row_widths) |rw| {
+        while (r + rw <= r1) : (r += rw) {
+            if (cached) {
+                for (0..rw) |r2| {
+                    const arow = lhs_blocks[(r + r2) * sub_blocks_per_row ..][0..sub_blocks_per_row];
+                    for (arow, 0..) |*a, si| {
+                        bsum_cache[r2][si] = q8_0BlockSum(a);
+                        d1_cache[r2][si] = f16BitsToF32(a.d);
+                    }
+                }
             }
-        }
-        var c = c0;
-        inline for (.{ q2_0_row_block, 1 }) |rw| {
-            if (rw_live == rw) {
-                while (c + ternary_col_block <= c1) : (c += ternary_col_block) {
-                    q2_0MicroTile(rw, ternary_col_block, out, lhs_blocks, rhs, n, r, c, &bsum_cache, cached);
-                }
-                while (c < c1) : (c += 1) {
-                    q2_0MicroTile(rw, 1, out, lhs_blocks, rhs, n, r, c, &bsum_cache, cached);
-                }
+            var c = c0;
+            while (c + ternary_col_block <= c1) : (c += ternary_col_block) {
+                q2_0MicroTile(rw, ternary_col_block, out, lhs_blocks, rhs, n, r, c, &bsum_cache, &d1_cache, cached);
+            }
+            while (c < c1) : (c += 1) {
+                q2_0MicroTile(rw, 1, out, lhs_blocks, rhs, n, r, c, &bsum_cache, &d1_cache, cached);
             }
         }
     }

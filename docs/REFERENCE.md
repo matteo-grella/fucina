@@ -7985,12 +7985,21 @@ wire-contract-only. It is first-class like TQ2_0: a parity encoder
 mul-free kernels (`matmulQ2_0RhsTile/Range`, `src/backend/quant/ternary.zig`)
 that pair with **Q8_0 row activations** (so `k` needs only be a multiple of
 128): unsigned-code dots through sdot/vpdpbusd/maddubs with one per-32-group
-bsum subtraction (`Σ(q-1)a = Σq·a − Σa`), bsums computed once per LHS row and
-shared across all output columns, two LHS rows sharing every weight unpack.
-All arms accumulate the exact per-group i32 and fold per-block partials in
-the cold reference's exact order, so hot and cold (`dotQ2_0Q8_0`,
-`matmulTableQ8_0RhsRange(.q2_0, ...)`) are bitwise identical. This is the
-weight format of Ternary-Bonsai-27B (§14.3).
+bsum subtraction (`Σ(q-1)a = Σq·a − Σa`), bsums and activation scales cached
+once per LHS row and shared across all output columns, two LHS rows sharing
+every weight unpack. All arms accumulate the exact per-group i32, and the
+float tail is one vector FMA per 128-block over a **fixed 4-lane sub-block
+accumulator** folded pairwise once per output element — exactly the scalar
+reference's contract (`dotQ2_0RowQ8_0` / `matmulQ2_0RhsRefRange`, cold.zig;
+the scalar backend's path), so hot and reference are bitwise identical. At
+prefill widths (`m >= 192`) the native backend instead dequantizes k-slice
+weight panels to f32 (`dequantizeRowQ2_0FastInto`, the kernels' unpack
+machinery) and rides the BLAS GEMM with `beta=1` accumulation across
+slices — panels cut the contract dimension so every GEMM stays full-width
+with a contiguous C. The BLAS arm consumes exact f32 activations, so its
+numerics differ from the int path the same way the dense-f32 BLAS GEMMs
+differ from the scalar backend. This is the weight format of
+Ternary-Bonsai-27B (§14.3).
 
 ### 10.8 Cold decode rules: IQ*, FP4, and friends (`src/backend/quant/cold.zig`, `src/backend/quant_tables.zig`)
 
@@ -12487,8 +12496,8 @@ Its tokenizer declares `tokenizer.ggml.pre = "qwen35"` (§13.5.1): the qwen2
 rules with `\p{M}` combining marks folded into the word class. Loading it is
 the ordinary flow — every projection (embeddings and LM head included) is a
 `.q2_0` `LinearWeight`, logit-parity-validated against the PrismML llama.cpp
-fork (argmax match at pp1..pp128, cosine ≥ 0.9998, token-ID-exact
-tokenizer).
+fork (argmax match at pp1..pp512, cosine ≥ 0.9998 — ≥ 0.99999 on the BLAS
+prefill arm — token-ID-exact tokenizer).
 
 ```zig
 test "qwen35 hybrid layer pattern" {

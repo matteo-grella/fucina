@@ -1413,7 +1413,7 @@ pub fn matmul2DQuantizedRhsWithConfig(
     return switch (rhs) {
         .fucina_w8a8_rhs => |qrhs| matmul2DQuantizedRhsI8WithConfig(allocator, out, a, qrhs, m, n, k, config),
         .ggml_q1_0 => |qrhs| matmul2DQuantizedRhsQ1_0WithConfig(allocator, out, a, qrhs, m, n, k, config),
-        .ggml_q2_0 => |qrhs| matmul2DQuantizedRhsTableQ8_0WithConfig(.q2_0, allocator, out, a, qrhs, m, n, k, config),
+        .ggml_q2_0 => |qrhs| matmul2DQuantizedRhsQ2_0WithConfig(allocator, out, a, qrhs, m, n, k, config),
         .ggml_q4_0 => |qrhs| matmul2DQuantizedRhsQ4_0WithConfig(allocator, out, a, qrhs, m, n, k, config),
         .ggml_q4_1 => |qrhs| matmul2DQuantizedRhsQ4_1WithConfig(allocator, out, a, qrhs, m, n, k, config),
         .ggml_q5_0 => |qrhs| matmul2DQuantizedRhsQ5_0WithConfig(allocator, out, a, qrhs, m, n, k, config),
@@ -1559,6 +1559,19 @@ pub fn matmul2DQuantizedRhsQ1_0WithConfig(
     config: ParallelConfig,
 ) !void {
     return matmul2DQuantizedRhsQ8_0RowsWithConfig(quantized_matmul.matmulQ1_0RhsRange, allocator, out, a, rhs, m, n, k, config);
+}
+
+pub fn matmul2DQuantizedRhsQ2_0WithConfig(
+    allocator: std.mem.Allocator,
+    out: *Tensor,
+    a: *const Tensor,
+    rhs: *const quantized_matmul.QuantizedMatmulRhsQ2_0,
+    m: usize,
+    n: usize,
+    k: usize,
+    config: ParallelConfig,
+) !void {
+    return matmul2DQuantizedRhsQ8_0RowsWithConfig(quantized_matmul.matmulQ2_0RhsRefRange, allocator, out, a, rhs, m, n, k, config);
 }
 
 pub fn matmul2DQuantizedRhsQ4_1WithConfig(

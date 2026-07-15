@@ -178,13 +178,19 @@ scale + 32 code bytes, four sequential LSB-first 2-bit codes per byte,
 (the reference encoder emits {0,1,2}). It ships first-class alongside TQ2_0:
 parity encoder + decoder, hot mul-free kernels over **Q8_0 row activations**
 (k must only be a multiple of 128 — no Q8_K/256 machinery), the same
-`Σ(q-1)a = Σq·a − Σa` bsum identity with per-row bsums shared across output
-columns and two LHS rows sharing every weight unpack, all arms bitwise
-identical to the cold reference. It is the weight format of
-Ternary-Bonsai-27B (a ternarized Qwen3.6-27B on the `qwen35` hybrid arch;
-REFERENCE.md §14.3): embeddings, attention, MLP and LM head all `.q2_0`,
-logit-parity-validated against the PrismML llama.cpp fork. STE training and
-ternary-native ES remain TQ2_0-only.
+`Σ(q-1)a = Σq·a − Σa` bsum identity with per-row bsum/scale caches shared
+across output columns, two LHS rows sharing every weight unpack, and a
+fixed 4-lane sub-block float accumulator (one vector FMA per 128-block,
+pairwise-folded once per output element — the dotTQ2_0F32 discipline), all
+arms bitwise identical to the scalar reference (`dotQ2_0RowQ8_0`). Prefill
+(`m >= 192`) switches to dequantized f32 k-slice panels on the BLAS GEMM
+(`beta=1` accumulation across slices, so every GEMM stays full-width with a
+contiguous C — the same dequant-to-BLAS split llama.cpp's BLAS backend makes
+for quantized prefill), while decode stays on the int8 path. It is the
+weight format of Ternary-Bonsai-27B (a ternarized Qwen3.6-27B on the
+`qwen35` hybrid arch; REFERENCE.md §14.3): embeddings, attention, MLP and
+LM head all `.q2_0`, logit-parity-validated against the PrismML llama.cpp
+fork. STE training and ternary-native ES remain TQ2_0-only.
 
 ## Limits and future work
 

@@ -418,6 +418,93 @@ pub fn matmul2DQuantizedRhsQ1_0WithConfig(
     return matmul2DQuantizedRhsQ8_0RowsWithConfig(vector.matmul2DQ1_0RhsIntoWithConfig, allocator, out, a, rhs, m, n, k, config);
 }
 
+/// Prefill row count at/above which the Q2_0 matmul dequantizes weight
+/// panels to f32 and rides BLAS (Accelerate AMX / OpenBLAS): the dequant
+/// pass costs O(n*k) regardless of m, so its amortization — and the GEMM's
+/// O(m) operand reuse, out of the int8 sdot path's reach on AMX-class
+/// units — grows with m, while below the threshold (decode, short bursts)
+/// the int8 mul-free path wins. Same split llama.cpp's BLAS backend makes
+/// for its quantized prefill. The BLAS arm consumes exact f32 activations
+/// (no Q8_0 LHS quantization), so its numerics differ from the int path
+/// exactly as the dense-f32 BLAS GEMMs already do from the scalar backend.
+const q2_0_blas_min_m: usize = 192;
+/// f32 scratch budget for one dequantized weight panel. Panels slice the
+/// CONTRACT dimension, never the output dimension: every GEMM is then
+/// full-width with a contiguous C (accumulating across slices via beta=1),
+/// where output-dimension panels would give narrow GEMMs writing a strided
+/// C — a shape BLAS handles poorly.
+const q2_0_blas_panel_floats: usize = 12 * 1024 * 1024; // 48 MiB
+
+const Q2_0DequantSliceTask = struct {
+    rhs: *const quantized_matmul.QuantizedMatmulRhsQ2_0,
+    dst: []f32, // kp floats of weight row `row`, from block bi0
+    row: usize,
+    bi0: usize,
+};
+
+fn runQ2_0DequantSlice(task: *const Q2_0DequantSliceTask) void {
+    const blocks = task.rhs.columnBlocks(task.row);
+    // Lengths are exact by construction (dst covers whole blocks), so the
+    // only representable error cannot occur.
+    quantized_matmul.dequantizeRowQ2_0FastInto(
+        task.dst,
+        blocks[task.bi0 .. task.bi0 + task.dst.len / quantized_matmul.q2_0_block_size],
+    ) catch unreachable;
+}
+
+fn matmul2DQuantizedRhsQ2_0BlasWithConfig(
+    allocator: std.mem.Allocator,
+    out: *Tensor,
+    a: *const Tensor,
+    rhs: *const quantized_matmul.QuantizedMatmulRhsQ2_0,
+    m: usize,
+    n: usize,
+    k: usize,
+    config: ParallelConfig,
+) !void {
+    if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
+    const ad = contiguousDataConst(a, m * k);
+    const cd = contiguousData(out, m * n);
+
+    // k-slice width: whole 128-blocks, full k when it fits the budget.
+    const kp_max = @max(quantized_matmul.q2_0_block_size, (q2_0_blas_panel_floats / n) & ~(quantized_matmul.q2_0_block_size - 1));
+    const kp = @min(k, kp_max);
+    const panel = try allocator.alloc(f32, n * kp);
+    defer allocator.free(panel);
+    const tasks = try allocator.alloc(Q2_0DequantSliceTask, n);
+    defer allocator.free(tasks);
+
+    var k0: usize = 0;
+    while (k0 < k) : (k0 += kp) {
+        const kc = @min(kp, k - k0);
+        const bi0 = k0 / quantized_matmul.q2_0_block_size;
+        for (0..n) |row| tasks[row] = .{ .rhs = rhs, .dst = panel[row * kc ..][0..kc], .row = row, .bi0 = bi0 };
+        if (config.pool) |pool| {
+            pool.parallelChunks(Q2_0DequantSliceTask, tasks, runQ2_0DequantSlice);
+        } else {
+            for (tasks) |*t| runQ2_0DequantSlice(t);
+        }
+        // C (m x n, full width) += A[:, k0..k0+kc] x panel^T (kc x n).
+        ensureBlasThreadsConfigured();
+        cblas_sgemm(
+            cblas_row_major,
+            cblas_no_trans,
+            cblas_trans,
+            cDim(m),
+            cDim(n),
+            cDim(kc),
+            1.0,
+            ad.ptr + k0,
+            cDim(k),
+            panel.ptr,
+            cDim(kc),
+            if (k0 == 0) 0.0 else 1.0,
+            cd.ptr,
+            cDim(n),
+        );
+    }
+}
+
 pub fn matmul2DQuantizedRhsQ2_0WithConfig(
     allocator: std.mem.Allocator,
     out: *Tensor,
@@ -428,6 +515,11 @@ pub fn matmul2DQuantizedRhsQ2_0WithConfig(
     k: usize,
     config: ParallelConfig,
 ) !void {
+    if (comptime build_options.use_blas) {
+        if (m >= q2_0_blas_min_m) {
+            return matmul2DQuantizedRhsQ2_0BlasWithConfig(allocator, out, a, rhs, m, n, k, config);
+        }
+    }
     return matmul2DQuantizedRhsQ8_0RowsWithConfig(vector.matmul2DQ2_0RhsIntoWithConfig, allocator, out, a, rhs, m, n, k, config);
 }
 

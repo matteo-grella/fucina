@@ -1447,7 +1447,6 @@ pub fn matmulTableQ8_KRhsTile(
 
 fn dotTableQ8_0(comptime rhs_dtype: DType, w: *const dtype_mod.Storage(rhs_dtype), a: []const BlockQ8_0) f32 {
     return switch (rhs_dtype) {
-        .q2_0 => dotQ2_0Q8_0(w, a),
         .iq4_nl => dotIQ4_NLQ8_0(w, a),
         .mxfp4 => dotMXFP4Q8_0(w, a),
         .nvfp4 => dotNVFP4Q8_0(w, a),
@@ -1820,24 +1819,71 @@ fn ternaryValue(qs: u8, pow3: u8) i32 {
     return @intCast(xi - 1);
 }
 
-fn dotQ2_0Q8_0(w: *const BlockQ2_0, a: []const BlockQ8_0) f32 {
-    std.debug.assert(a.len == q2_0_block_size / q8_0_block_size);
-    const d0 = f16BitsToF32(w.d);
-    var sum: f32 = 0;
-    for (a, 0..) |*ab, block_index| {
-        var isum: i32 = 0;
-        const qs = w.qs[block_index * 8 ..][0..8];
-        var offset: usize = 0;
-        for (qs) |byte| {
-            inline for (0..4) |slot| {
-                const q = @as(i32, (byte >> (2 * slot)) & 0x3) - 1;
-                isum += q * @as(i32, ab.qs[offset + slot]);
+/// One Q2_0 weight row against one Q8_0 activation row — the scalar
+/// reference for the hot kernels in ternary.zig. Accumulation contract:
+/// a FIXED 4-lane structure (lane k carries sub-block k of every block:
+/// lane_k += d0 * d1_k * isum_k) folded pairwise ((l0+l1)+(l2+l3)) once at
+/// the end — the same shape the hot kernel computes with one vector FMA per
+/// 128-block, so hot and cold are bitwise identical. isum_k is the exact
+/// per-32 integer sum((q-1)*a).
+pub fn dotQ2_0RowQ8_0(wblocks: []const BlockQ2_0, arow: []const BlockQ8_0) f32 {
+    const sub_per_block = q2_0_block_size / q8_0_block_size; // 4
+    std.debug.assert(arow.len == wblocks.len * sub_per_block);
+    var lanes = [4]f32{ 0, 0, 0, 0 };
+    for (wblocks, 0..) |*w, bi| {
+        const d0 = f16BitsToF32(w.d);
+        inline for (0..sub_per_block) |k| {
+            const ab = &arow[bi * sub_per_block + k];
+            var isum: i32 = 0;
+            const qs = w.qs[k * 8 ..][0..8];
+            var offset: usize = 0;
+            for (qs) |byte| {
+                inline for (0..4) |slot| {
+                    const q = @as(i32, (byte >> (2 * slot)) & 0x3) - 1;
+                    isum += q * @as(i32, ab.qs[offset + slot]);
+                }
+                offset += 4;
             }
-            offset += 4;
+            lanes[k] += d0 * f16BitsToF32(ab.d) * @as(f32, @floatFromInt(isum));
         }
-        sum += d0 * f16BitsToF32(ab.d) * @as(f32, @floatFromInt(isum));
     }
-    return sum;
+    return (lanes[0] + lanes[1]) + (lanes[2] + lanes[3]);
+}
+
+/// Reference Q2_0 matmul tile (scalar-backend path; the hot kernel's
+/// bitwise oracle). RHS convention: rhs row c is output column c.
+pub fn matmulQ2_0RhsRefTile(
+    out: []f32,
+    lhs_blocks: []const BlockQ8_0,
+    rhs: *const QuantizedMatmulRhsQ2_0,
+    n: usize,
+    r0: usize,
+    r1: usize,
+    c0: usize,
+    c1: usize,
+) void {
+    const sub_blocks_per_row = rhs.rows.blocks_per_row * (q2_0_block_size / q8_0_block_size);
+    var r = r0;
+    while (r < r1) : (r += 1) {
+        const arow = lhs_blocks[r * sub_blocks_per_row ..][0..sub_blocks_per_row];
+        var c = c0;
+        while (c < c1) : (c += 1) {
+            out[r * n + c] = dotQ2_0RowQ8_0(rhs.columnBlocks(c), arow);
+        }
+    }
+}
+
+pub fn matmulQ2_0RhsRefRange(
+    out: []f32,
+    lhs_blocks: []const BlockQ8_0,
+    rhs: *const QuantizedMatmulRhsQ2_0,
+    m: usize,
+    n: usize,
+    row_start: usize,
+    row_end: usize,
+) void {
+    _ = m;
+    matmulQ2_0RhsRefTile(out, lhs_blocks, rhs, n, row_start, row_end, 0, n);
 }
 
 fn dotQ1_0Q8_0(w: *const BlockQ1_0, a: []const BlockQ8_0) f32 {
@@ -2351,7 +2397,7 @@ test "ggml_q2_0 dot and matmul consume loaded blocks" {
         }
     }
 
-    try std.testing.expectEqual(dotDense(&dense_w, &dense_a), dotQ2_0Q8_0(&q2, &q8));
+    try std.testing.expectEqual(dotDense(&dense_w, &dense_a), dotQ2_0RowQ8_0(&.{q2}, &q8));
 
     var rhs_blocks = [_]BlockQ2_0{ q2, q2 };
     var rhs = QuantizedMatmulRhsQ2_0{
@@ -2360,9 +2406,9 @@ test "ggml_q2_0 dot and matmul consume loaded blocks" {
         .n = 2,
     };
     var out: [2]f32 = undefined;
-    matmulTableQ8_0RhsRange(.q2_0, &out, &q8, &rhs, 1, 2, 0, 1);
+    matmulQ2_0RhsRefRange(&out, &q8, &rhs, 1, 2, 0, 1);
     try std.testing.expectEqual(out[0], out[1]);
-    try std.testing.expectEqual(dotQ2_0Q8_0(&q2, &q8), out[0]);
+    try std.testing.expectEqual(dotQ2_0RowQ8_0(&.{q2}, &q8), out[0]);
 }
 
 test "ggml_q4_1 dot and matmul consume loaded blocks" {

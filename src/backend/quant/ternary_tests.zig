@@ -441,7 +441,7 @@ test "hot q2_0 matmul matches the cold table path bitwise" {
     defer allocator.free(want);
 
     ternary.matmulQ2_0RhsRange(got, qlhs.blocks, &packed_rhs.rhs, m, n, 0, m);
-    qm.matmulTableQ8_0RhsRange(.q2_0, want, qlhs.blocks, &packed_rhs.rhs, m, n, 0, m);
+    qm.matmulQ2_0RhsRefRange(want, qlhs.blocks, &packed_rhs.rhs, m, n, 0, m);
 
     try std.testing.expectEqualSlices(f32, want, got);
 }
@@ -515,7 +515,7 @@ test "q2_0 code 3 (+2d) agrees between hot and cold paths" {
     var got: [m * n]f32 = undefined;
     var want: [m * n]f32 = undefined;
     ternary.matmulQ2_0RhsRange(&got, qlhs.blocks, &rhs, m, n, 0, m);
-    qm.matmulTableQ8_0RhsRange(.q2_0, &want, qlhs.blocks, &rhs, m, n, 0, m);
+    qm.matmulQ2_0RhsRefRange(&want, qlhs.blocks, &rhs, m, n, 0, m);
     try std.testing.expectEqualSlices(f32, &want, &got);
 }
 
@@ -528,4 +528,26 @@ test "quantizeRowForDType and gguf transcode route q2_0" {
     var decoded: [q2_0_block_size]f32 = undefined;
     try qm.dequantizeRowForDType(.q2_0, &decoded, &blocks);
     try std.testing.expectEqualSlices(f32, &x, &decoded);
+}
+
+test "q2_0 fast dequantize matches the scalar decoder bitwise" {
+    const allocator = std.testing.allocator;
+    const k = 4 * q2_0_block_size;
+    var prng = std.Random.DefaultPrng.init(0x2b05);
+    const x = try allocator.alloc(f32, k);
+    defer allocator.free(x);
+    fillUniform(&prng, x, 1.5);
+
+    var blocks: [4]BlockQ2_0 = undefined;
+    try qm.quantizeRowQ2_0Into(&blocks, x);
+    // Include code 3 (+2d) — never emitted by the encoder, allowed on the wire.
+    blocks[1].qs[7] = 0b11_11_11_11;
+
+    const want = try allocator.alloc(f32, k);
+    defer allocator.free(want);
+    const got = try allocator.alloc(f32, k);
+    defer allocator.free(got);
+    try qm.dequantizeRowQ2_0Into(want, &blocks);
+    try ternary.dequantizeRowQ2_0FastInto(got, &blocks);
+    try std.testing.expectEqualSlices(f32, want, got);
 }
