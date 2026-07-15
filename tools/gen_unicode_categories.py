@@ -18,6 +18,7 @@ SRC = "refs/llama.cpp/src/unicode-data.cpp"
 
 LETTER = 0x0004  # unicode_cpt_flags::LETTER
 NUMBER = 0x0002  # unicode_cpt_flags::NUMBER
+MARK = 0x0010  # unicode_cpt_flags::ACCENT_MARK (\p{M})
 
 
 def main() -> None:
@@ -44,6 +45,7 @@ def main() -> None:
 
     letters = merged(LETTER)
     numbers = merged(NUMBER)
+    marks = merged(MARK)
 
     m = re.search(r"unicode_set_whitespace = \{(.*?)\};", src, re.S)
     whitespace = sorted(int(c, 16) for c in re.findall(r"0x([0-9A-Fa-f]+)", m.group(1)))
@@ -70,6 +72,7 @@ def main() -> None:
 
     emit_table("letter_ranges", letters)
     emit_table("number_ranges", numbers)
+    emit_table("mark_ranges", marks)
 
     w("fn inRanges(ranges: []const Range, cp: u32) bool {\n")
     w("    // Binary search: largest range with lo <= cp, then bounds check.\n")
@@ -93,6 +96,12 @@ def main() -> None:
     w("pub fn isNumber(cp: u32) bool {\n")
     w("    if (cp < 0x80) return cp >= '0' and cp <= '9';\n")
     w("    return inRanges(&number_ranges, cp);\n")
+    w("}\n")
+    w("\n")
+    w("/// Unicode \\p{M} (any mark category — llama.cpp's ACCENT_MARK flag).\n")
+    w("pub fn isMark(cp: u32) bool {\n")
+    w("    if (cp < 0x80) return false;\n")
+    w("    return inRanges(&mark_ranges, cp);\n")
     w("}\n")
     w("\n")
     w("/// llama.cpp's \\s whitespace set (unicode_set_whitespace).\n")

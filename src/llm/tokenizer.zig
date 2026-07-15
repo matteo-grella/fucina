@@ -57,7 +57,7 @@ pub const Tokenizer = struct {
     /// Which implemented pre-tokenizer splits text into BPE chunks.
     pre: Pre = .qwen2,
 
-    pub const Pre = enum { qwen2, joyai_llm, glm4 };
+    pub const Pre = enum { qwen2, qwen35, joyai_llm, glm4 };
 
     /// Build a tokenizer from GGUF metadata. `overrides` fields, when non-null,
     /// replace the metadata-derived special tokens.
@@ -93,6 +93,8 @@ pub const Tokenizer = struct {
         if (file.getString("tokenizer.ggml.pre")) |pre| {
             if (std.mem.eql(u8, pre, "qwen2")) {
                 tok.pre = .qwen2;
+            } else if (std.mem.eql(u8, pre, "qwen35")) {
+                tok.pre = .qwen35;
             } else if (std.mem.eql(u8, pre, "joyai-llm")) {
                 tok.pre = .joyai_llm;
             } else if (std.mem.eql(u8, pre, "glm4") or std.mem.eql(u8, pre, "chatglm-bpe")) {
@@ -324,6 +326,7 @@ pub const Tokenizer = struct {
         while (pos < cps.items.len) {
             const end = switch (self.pre) {
                 .glm4 => glm4ChunkEnd(cps.items, pos),
+                .qwen35 => qwen35ChunkEnd(cps.items, pos),
                 else => qwen2ChunkEnd(cps.items, pos),
             };
             try self.encodeChunk(allocator, text[offs.items[pos]..offs.items[end]], out);
@@ -793,6 +796,76 @@ fn qwen2ChunkEnd(c: []const u32, start: usize) usize {
     return pos + 1;
 }
 
+/// Qwen3.5/3.6 pretokenizer (`tokenizer.ggml.pre = "qwen35"`): the qwen2
+/// rules with combining marks folded into the word class —
+///   (?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])
+///   |[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}
+///   | ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+/// vs qwen2: word runs accept \p{M} (and a mark alone matches the word
+/// class), and the punctuation run excludes \p{M}. Everything else is
+/// byte-for-byte the qwen2 scanner.
+fn qwen35ChunkEnd(c: []const u32, start: usize) usize {
+    const n = c.len;
+    var pos = start;
+    const cp = c[pos];
+
+    // Contractions — explicit ASCII case classes, same effect as qwen2's (?i:).
+    if (cp == '\'' and pos + 1 < n) {
+        const c1 = asciiLower(c[pos + 1]);
+        if (c1 == 's' or c1 == 't' or c1 == 'm' or c1 == 'd') return pos + 2;
+        if (pos + 2 < n) {
+            const c2 = asciiLower(c[pos + 2]);
+            if ((c1 == 'r' and c2 == 'e') or (c1 == 'v' and c2 == 'e') or (c1 == 'l' and c2 == 'l')) return pos + 3;
+        }
+    }
+
+    // [^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+
+    if (!(cp == '\r' or cp == '\n' or ucat.isNumber(cp))) {
+        const lm0 = ucat.isLetter(cp) or ucat.isMark(cp);
+        const lm1 = pos + 1 < n and (ucat.isLetter(c[pos + 1]) or ucat.isMark(c[pos + 1]));
+        if (lm0 or lm1) {
+            pos += 1;
+            while (pos < n and (ucat.isLetter(c[pos]) or ucat.isMark(c[pos]))) pos += 1;
+            return pos;
+        }
+    }
+
+    // \p{N} — exactly one digit per chunk.
+    if (ucat.isNumber(cp)) return pos + 1;
+
+    //  ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*
+    {
+        const j = if (cp == ' ') pos + 1 else pos;
+        const enter = j >= n or !(ucat.isWhitespace(c[j]) or ucat.isLetter(c[j]) or ucat.isMark(c[j]) or ucat.isNumber(c[j]));
+        if (enter) {
+            pos = j;
+            while (pos < n and !(ucat.isWhitespace(c[pos]) or ucat.isLetter(c[pos]) or ucat.isMark(c[pos]) or ucat.isNumber(c[pos]))) pos += 1;
+            while (pos < n and (c[pos] == '\r' or c[pos] == '\n')) pos += 1;
+            return pos;
+        }
+    }
+
+    // Measure the whitespace run once for the three \s rules.
+    var num_ws: usize = 0;
+    var last_rn: usize = 0;
+    while (pos + num_ws < n and ucat.isWhitespace(c[pos + num_ws])) {
+        const w = c[pos + num_ws];
+        if (w == '\r' or w == '\n') last_rn = pos + num_ws + 1;
+        num_ws += 1;
+    }
+
+    // \s*[\r\n]+ — through the last newline of the run.
+    if (last_rn > 0) return last_rn;
+
+    // \s+(?!\S) — all but the last space when a non-space follows the run.
+    if (num_ws > 1 and pos + num_ws < n) return pos + num_ws - 1;
+
+    // \s+
+    if (num_ws > 0) return pos + num_ws;
+
+    return pos + 1;
+}
+
 fn asciiLower(cp: u32) u32 {
     return if (cp >= 'A' and cp <= 'Z') cp + 32 else cp;
 }
@@ -864,6 +937,57 @@ test "qwen2 pretokenizer: optional single non-letter prefix on letter runs" {
     try expectChunks("a—b", &.{ "a", "—b" }); // em dash prefixes the letter run
     try expectChunks("don't DON'T it'll", &.{ "don", "'t", " DON", "'T", " it", "'ll" });
     try expectChunks("中文字", &.{"中文字"});
+}
+
+/// Assert the qwen35 pretokenizer splits `text` into exactly `expected` chunks.
+fn expectChunks35(text: []const u8, expected: []const []const u8) !void {
+    const allocator = std.testing.allocator;
+    var cps: std.ArrayList(u32) = .empty;
+    defer cps.deinit(allocator);
+    var offs: std.ArrayList(usize) = .empty;
+    defer offs.deinit(allocator);
+    var it = (try std.unicode.Utf8View.init(text)).iterator();
+    while (it.nextCodepointSlice()) |s| {
+        try offs.append(allocator, @intFromPtr(s.ptr) - @intFromPtr(text.ptr));
+        try cps.append(allocator, try std.unicode.utf8Decode(s));
+    }
+    try offs.append(allocator, text.len);
+
+    var pos: usize = 0;
+    var idx: usize = 0;
+    while (pos < cps.items.len) {
+        const end = qwen35ChunkEnd(cps.items, pos);
+        try std.testing.expect(end > pos);
+        try std.testing.expect(idx < expected.len);
+        try std.testing.expectEqualStrings(expected[idx], text[offs.items[pos]..offs.items[end]]);
+        idx += 1;
+        pos = end;
+    }
+    try std.testing.expectEqual(expected.len, idx);
+    try std.testing.expectEqual(text.len, offs.items[pos]);
+}
+
+test "qwen35 pretokenizer: combining marks join letter runs, leave punctuation runs" {
+    // b + U+0302 (combining circumflex) + c: one word run under qwen35 —
+    // and pin the qwen2 divergence so a chunker regression can't hide it.
+    try expectChunks35("b\u{0302}c", &.{"b\u{0302}c"});
+    try expectChunks("b\u{0302}c", &.{ "b", "\u{0302}c" });
+
+    // Decomposed é at end of word stays attached.
+    try expectChunks35("caffe\u{0301}!", &.{ "caffe\u{0301}", "!" });
+
+    // A mark alone matches the word class (not the punctuation run).
+    try expectChunks35("!!\u{0301}", &.{ "!!", "\u{0301}" });
+    try expectChunks("!!\u{0301}", &.{"!!\u{0301}"});
+
+    // Devanagari with matras/virama: one word run.
+    try expectChunks35("नमस्ते", &.{"नमस्ते"});
+
+    // Everything qwen2-shaped is unchanged.
+    try expectChunks35("don't DON'T it'll", &.{ "don", "'t", " DON", "'T", " it", "'ll" });
+    try expectChunks35("x ++;\ny", &.{ "x", " ++;\n", "y" });
+    try expectChunks35("a  b", &.{ "a", " ", " b" });
+    try expectChunks35("3.14", &.{ "3", ".", "1", "4" });
 }
 
 test "gpt2 byte/unicode mapping round-trips all 256 bytes" {
