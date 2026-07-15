@@ -1,6 +1,12 @@
 //! DeepSeek V4 Flash runner: greedy completion over the CSA/HCA trunk with
 //! streamed experts. Validation against the official API vectors comes via
 //! --vectors (chat-rendered prompts + greedy token comparison).
+//!
+//! Weights: huggingface.co/antirez/deepseek-v4-gguf (mixed-precision
+//! single-GGUF exports of DeepSeek-V4-Flash, arch tag `deepseek4`). The
+//! port follows Salvatore Sanfilippo's ds4 reference implementation
+//! (github.com/antirez/ds4, MIT), which is also the parity oracle —
+//! docs/THIRD-PARTY-NOTICES.md records the lineage.
 //!   zig build deepseek4 -- gguf/model.gguf --prompt "..." --gen 32 \
 //!     --moe-stream --moe-cache-mb=20480
 //!   zig build deepseek4 -- gguf/model.gguf --moe-stream \
@@ -22,7 +28,7 @@ pub fn main(init: std.process.Init) !void {
     defer stdout.flush() catch {};
 
     if (args.len < 2) {
-        try stdout.print("usage: zig build deepseek4 -- <model.gguf> --prompt \"...\" [--gen N] [--chat] [--moe-stream --moe-cache-mb=N] [--vectors=DIR [--vectors-max-prompt=N]]\n", .{});
+        try stdout.print("usage: zig build deepseek4 -- <model.gguf> --prompt \"...\" [--prompt-file=PATH] [--gen N] [--chat] [--moe-stream --moe-cache-mb=N] [--index-probe | --index-share=N] [--vectors=DIR [--vectors-max-prompt=N]]\n", .{});
         return;
     }
 
@@ -37,6 +43,9 @@ pub fn main(init: std.process.Init) !void {
     var vectors_dir: ?[]const u8 = null;
     var golden_path: ?[]const u8 = null;
     var vectors_max_prompt: usize = 256;
+    var index_share: usize = 0;
+    var index_probe = false;
+    var prompt_file: ?[]const u8 = null;
     var arg_i: usize = 2;
     while (arg_i < args.len) : (arg_i += 1) {
         const arg = args[arg_i];
@@ -73,6 +82,12 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.startsWith(u8, arg, "--moe-cache-mb=")) {
             moe_stream_flag = true;
             moe_cache_mb = try std.fmt.parseInt(usize, arg["--moe-cache-mb=".len..], 10);
+        } else if (std.mem.startsWith(u8, arg, "--index-share=")) {
+            index_share = try std.fmt.parseInt(usize, arg["--index-share=".len..], 10);
+        } else if (std.mem.eql(u8, arg, "--index-probe")) {
+            index_probe = true;
+        } else if (std.mem.startsWith(u8, arg, "--prompt-file=")) {
+            prompt_file = arg["--prompt-file=".len..];
         } else {
             try stdout.print("unknown flag: {s}\n", .{arg});
             return error.UnknownArgument;
@@ -97,6 +112,13 @@ pub fn main(init: std.process.Init) !void {
     } else .{};
     var model = try Model.loadGgufFromFileOptions(&ctx, &file, load_options);
     defer model.deinit();
+    // Cross-layer indexer reuse (docs: Model.index_share_every). The probe
+    // measures the exact path, so the two are mutually exclusive.
+    if (index_share >= 2 and index_probe) {
+        try stdout.print("--index-probe measures the exact path; drop --index-share\n", .{});
+        return error.UnknownArgument;
+    }
+    model.index_share_every = index_share;
     // The stats go through the SAME buffered stdout writer as everything
     // else: stdout's positional writes and stderr's offset-advancing writes
     // cannot safely share one redirected file (`cmd > f 2>&1` interleaves
@@ -110,6 +132,13 @@ pub fn main(init: std.process.Init) !void {
     }
     if (vectors_dir) |dir_path| {
         return runVectors(init.io, allocator, &ctx, &model, &tokenizer, stdout, dir_path, vectors_max_prompt, prefill_chunk);
+    }
+
+    var prompt_file_bytes: ?[]u8 = null;
+    defer if (prompt_file_bytes) |b| allocator.free(b);
+    if (prompt_file) |path| {
+        prompt_file_bytes = try readAllFile(init.io, allocator, path);
+        prompt_text = prompt_file_bytes.?;
     }
 
     const eos = tokenizer.eosId();
@@ -127,6 +156,7 @@ pub fn main(init: std.process.Init) !void {
 
     var session = try Session.init(&model, 8192);
     defer session.deinit(&model);
+    if (index_probe) try session.enableIndexProbe(&model);
 
     var mtp: ?llm.deepseek4.model.Mtp = if (mtp_path) |mp| try llm.deepseek4.model.Mtp.loadGguf(&ctx, init.io, mp, model.config) else null;
     defer if (mtp) |*m| m.deinit();
@@ -229,6 +259,10 @@ pub fn main(init: std.process.Init) !void {
     }
     const decode_ns = std.Io.Clock.awake.now(init.io).nanoseconds - decode_start;
     try stdout.print("decode: {d} tokens in {d} forwards, {d:.1} ms, {d:.2} tok/s ({d:.2} tok/forward)\n", .{ produced, forwards, @as(f64, @floatFromInt(decode_ns)) / 1e6, @as(f64, @floatFromInt(produced)) * 1e9 / @as(f64, @floatFromInt(decode_ns)), @as(f64, @floatFromInt(produced)) / @as(f64, @floatFromInt(@max(forwards, 1))) });
+    if (model.index_share_every >= 2) {
+        try stdout.print("index-share: every {d} — selections computed {d}, reused {d}\n", .{ model.index_share_every, session.scratch.share_computed, session.scratch.share_reused });
+    }
+    if (session.probe) |*p| try p.report(stdout);
     if (drafted > 0) {
         try stdout.print("mtp: {d}/{d} drafts accepted ({d:.1}%)\n", .{ draft_hits, drafted, @as(f64, @floatFromInt(draft_hits)) * 100.0 / @as(f64, @floatFromInt(drafted)) });
     }
@@ -237,6 +271,23 @@ pub fn main(init: std.process.Init) !void {
 
 /// The reference chat rendering (thinking disabled): BOS, user marker,
 /// prompt, assistant marker, closed think block.
+fn readAllFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    const stat = try file.stat(io);
+    if (stat.kind != .file) return error.IsDir;
+    if (stat.size > 16 * 1024 * 1024) return error.FileTooLarge;
+    const bytes = try allocator.alloc(u8, @intCast(stat.size));
+    errdefer allocator.free(bytes);
+    var read_len: usize = 0;
+    while (read_len < bytes.len) {
+        const n = try file.readStreaming(io, &.{bytes[read_len..]});
+        if (n == 0) return error.EndOfStream;
+        read_len += n;
+    }
+    return bytes;
+}
+
 fn renderChat(allocator: std.mem.Allocator, tokenizer: *const Tokenizer, prompt: []const u8, out: *std.ArrayList(usize)) !void {
     const bos = tokenizer.bosId() orelse return error.MissingChatTokens;
     const user_id = tokenizer.tokenId("<｜User｜>") orelse return error.MissingChatTokens;

@@ -17,6 +17,11 @@
 //! the remaining host-side f32 glue mirrors the reference implementation
 //! exactly where its numerics are not expressible through the public ops
 //! (the 4x4 Sinkhorn iteration and the sliding-window state machines).
+//!
+//! Reference implementation and parity oracle: Salvatore Sanfilippo's ds4
+//! (github.com/antirez/ds4, MIT — docs/THIRD-PARTY-NOTICES.md). The
+//! streamable single-GGUF exports this port loads are his too:
+//! huggingface.co/antirez/deepseek-v4-gguf.
 const std = @import("std");
 const fucina = @import("fucina");
 const weights = @import("../weights.zig");
@@ -31,6 +36,10 @@ pub const Error = weights.Error || error{
     InvalidConfig,
     InvalidSequenceLength,
     KvCacheOverflow,
+    /// Cross-layer index sharing hit an inconsistent state (a Shared CSA
+    /// layer with no matching Full-layer stash) — a broken invariant, since
+    /// same-ratio layers see identical compressed-row counts per position.
+    IndexShareMismatch,
 };
 
 pub const Config = struct {
@@ -464,6 +473,19 @@ pub const Model = struct {
     attn_scale: f32,
     weight_mapping: ?gguf.File.MappedRegion = null,
     expert_store: ?*fucina.ExpertStore = null,
+    /// Cross-layer indexer reuse (IndexCache, arXiv:2603.12201): 0/1 = off —
+    /// every CSA (ratio-4) layer computes its own selection, the exact path.
+    /// N >= 2 = uniform Full/Shared pattern over the CSA layers in depth
+    /// order: every Nth (ordinal % N == 0) runs the indexer, the layers
+    /// between reuse its selection for the same position(s) and skip their
+    /// own index-side compressor and indexer projections entirely.
+    /// Approximate BY DESIGN: adjacent-layer selections overlap heavily
+    /// (measure with `Session.enableIndexProbe` — sharing off) but are not
+    /// identical, so output drifts from the exact path; quality is a
+    /// per-model measured property, never assumed. Set once before any
+    /// step: the pattern must stay fixed for a session (Shared layers stop
+    /// maintaining index-side compressor state).
+    index_share_every: usize = 0,
 
     pub const MoeStreamOptions = weights.MoeStreamOptions;
 
@@ -858,14 +880,152 @@ fn hcSplitSinkhorn(mix: []const f32, scale: []const f32, base: []const f32, n_hc
 pub const StepScratch = struct {
     /// HC stream state [n_hc * hidden], persistent across layers of one step.
     streams: []f32,
+    /// Cross-layer index-share state (`Model.index_share_every` >= 2): the
+    /// nearest Full CSA layer's selection(s) for the CURRENT step, reset at
+    /// every step entry. Decode holds one mask; batched prefill holds S
+    /// masks flattened in token order with per-token lengths (len 0 = that
+    /// token selected nothing). Allocated with the MODEL allocator.
+    share_mask: std.ArrayList(bool) = .empty,
+    share_lens: std.ArrayList(usize) = .empty,
+    share_valid: bool = false,
+    /// Session telemetry: CSA selections computed (Full) vs reused (Shared).
+    share_computed: u64 = 0,
+    share_reused: u64 = 0,
 
     pub fn init(allocator: Allocator, config: Config) !StepScratch {
         return .{ .streams = try allocator.alloc(f32, config.n_hc * config.hidden_size) };
     }
 
     pub fn deinit(self: *StepScratch, allocator: Allocator) void {
+        self.share_lens.deinit(allocator);
+        self.share_mask.deinit(allocator);
         allocator.free(self.streams);
         self.* = undefined;
+    }
+
+    fn shareReset(self: *StepScratch) void {
+        self.share_mask.clearRetainingCapacity();
+        self.share_lens.clearRetainingCapacity();
+        self.share_valid = false;
+    }
+};
+
+/// Depth-order ordinal of a ratio-4 (CSA) layer among the CSA layers — the
+/// domain of the uniform Full/Shared index-share pattern.
+fn csaOrdinal(cfg: Config, layer_i: usize) usize {
+    var ord: usize = 0;
+    for (cfg.compress_ratio[0..layer_i]) |r| ord += @intFromBool(r == 4);
+    return ord;
+}
+
+fn csaCount(cfg: Config) usize {
+    var n: usize = 0;
+    for (cfg.compress_ratio) |r| n += @intFromBool(r == 4);
+    return n;
+}
+
+/// Decode-time selection-overlap probe — the calibration instrument for
+/// `Model.index_share_every`: records every CSA layer's selected set each
+/// step and accumulates pairwise overlap `|Si ∩ Sj| / |Si|`. Run with
+/// sharing OFF (it measures the exact path). Enable via
+/// `Session.enableIndexProbe`, read via `report`.
+pub const IndexProbe = struct {
+    allocator: Allocator,
+    n_csa: usize,
+    /// This step's selection per CSA ordinal (valid when `has[ord]`).
+    masks: [][]bool,
+    has: []bool,
+    /// Pairwise accumulators over steps, indexed [i * n_csa + j], i < j.
+    overlap_sum: []f64,
+    overlap_cnt: []u64,
+    steps: u64 = 0,
+
+    pub fn init(allocator: Allocator, cfg: Config) !IndexProbe {
+        const n = csaCount(cfg);
+        const masks = try allocator.alloc([]bool, n);
+        errdefer allocator.free(masks);
+        for (masks) |*m| m.* = &.{};
+        const has = try allocator.alloc(bool, n);
+        errdefer allocator.free(has);
+        @memset(has, false);
+        const sums = try allocator.alloc(f64, n * n);
+        errdefer allocator.free(sums);
+        @memset(sums, 0);
+        const cnts = try allocator.alloc(u64, n * n);
+        errdefer allocator.free(cnts);
+        @memset(cnts, 0);
+        return .{ .allocator = allocator, .n_csa = n, .masks = masks, .has = has, .overlap_sum = sums, .overlap_cnt = cnts };
+    }
+
+    pub fn deinit(self: *IndexProbe) void {
+        for (self.masks) |m| self.allocator.free(m);
+        self.allocator.free(self.masks);
+        self.allocator.free(self.has);
+        self.allocator.free(self.overlap_sum);
+        self.allocator.free(self.overlap_cnt);
+        self.* = undefined;
+    }
+
+    fn record(self: *IndexProbe, ord: usize, allowed: []const bool) !void {
+        if (self.masks[ord].len != allowed.len) {
+            self.allocator.free(self.masks[ord]);
+            self.masks[ord] = try self.allocator.alloc(bool, allowed.len);
+        }
+        @memcpy(self.masks[ord], allowed);
+        self.has[ord] = true;
+    }
+
+    fn stepDone(self: *IndexProbe) void {
+        var any = false;
+        for (0..self.n_csa) |i| {
+            if (!self.has[i]) continue;
+            any = true;
+            var selected_i: usize = 0;
+            for (self.masks[i]) |b| selected_i += @intFromBool(b);
+            if (selected_i == 0) continue;
+            for (i + 1..self.n_csa) |j| {
+                if (!self.has[j] or self.masks[j].len != self.masks[i].len) continue;
+                var inter: usize = 0;
+                for (self.masks[i], self.masks[j]) |a, b| inter += @intFromBool(a and b);
+                self.overlap_sum[i * self.n_csa + j] += @as(f64, @floatFromInt(inter)) / @as(f64, @floatFromInt(selected_i));
+                self.overlap_cnt[i * self.n_csa + j] += 1;
+            }
+        }
+        if (any) self.steps += 1;
+        @memset(self.has, false);
+    }
+
+    /// Mean overlap by ordinal distance (the number that picks
+    /// `index_share_every`), then the adjacent-pair detail row.
+    pub fn report(self: *const IndexProbe, writer: anytype) !void {
+        try writer.print("index probe: {d} selecting steps, {d} CSA layers\n", .{ self.steps, self.n_csa });
+        var d: usize = 1;
+        while (d < @min(self.n_csa, 9)) : (d += 1) {
+            var sum: f64 = 0;
+            var cnt: u64 = 0;
+            var min_pair: f64 = 1.0;
+            var min_i: usize = 0;
+            for (0..self.n_csa - d) |i| {
+                const c = self.overlap_cnt[i * self.n_csa + (i + d)];
+                if (c == 0) continue;
+                const mean = self.overlap_sum[i * self.n_csa + (i + d)] / @as(f64, @floatFromInt(c));
+                sum += mean;
+                cnt += 1;
+                if (mean < min_pair) {
+                    min_pair = mean;
+                    min_i = i;
+                }
+            }
+            if (cnt == 0) continue;
+            try writer.print("  distance {d}: mean {d:.1}% (weakest {d:.1}% at csa {d}->{d})\n", .{ d, 100.0 * sum / @as(f64, @floatFromInt(cnt)), 100.0 * min_pair, min_i, min_i + d });
+        }
+        try writer.print("  adjacent pairs:", .{});
+        for (0..self.n_csa -| 1) |i| {
+            const c = self.overlap_cnt[i * self.n_csa + i + 1];
+            const mean = if (c == 0) 0.0 else self.overlap_sum[i * self.n_csa + i + 1] / @as(f64, @floatFromInt(c));
+            try writer.print(" {d:.0}", .{100.0 * mean});
+        }
+        try writer.print("\n", .{});
     }
 };
 
@@ -1080,6 +1240,9 @@ fn compressorAdvance(
 pub const Session = struct {
     cache: Cache,
     scratch: StepScratch,
+    /// Selection-overlap probe (null = off). Enable only with
+    /// `Model.index_share_every` == 0 — the probe measures the exact path.
+    probe: ?IndexProbe = null,
 
     pub fn init(model: *const Model, capacity: usize) !Session {
         var cache = try model.initCache(capacity);
@@ -1088,7 +1251,12 @@ pub const Session = struct {
         return .{ .cache = cache, .scratch = scratch };
     }
 
+    pub fn enableIndexProbe(self: *Session, model: *const Model) !void {
+        self.probe = try IndexProbe.init(model.allocator, model.config);
+    }
+
     pub fn deinit(self: *Session, model: *const Model) void {
+        if (self.probe) |*p| p.deinit();
         self.scratch.deinit(model.allocator);
         self.cache.deinit();
         self.* = undefined;
@@ -1114,12 +1282,13 @@ pub fn step(self: *Model, ctx: *ExecContext, session: *Session, token: usize) ![
         for (0..cfg.n_hc) |h| @memcpy(streams[h * cfg.hidden_size ..][0..cfg.hidden_size], row);
     }
 
+    session.scratch.shareReset();
     for (self.layers, 0..) |*layer, layer_i| {
         // ---- attention sublayer ----
         {
             const pre = try hcPre(ctx, cfg, &layer.hc_attn, streams);
             defer allocator.free(pre.sub_in);
-            const block_out = try attnBlock(self, ctx, cache, layer, layer_i, pre.sub_in, pos, &tables);
+            const block_out = try attnBlock(self, ctx, cache, layer, layer_i, pre.sub_in, pos, &tables, &session.scratch, if (session.probe) |*p| p else null);
             defer allocator.free(block_out);
             try hcPost(ctx, cfg, &pre.split, block_out, streams);
         }
@@ -1132,6 +1301,7 @@ pub fn step(self: *Model, ctx: *ExecContext, session: *Session, token: usize) ![
             try hcPost(ctx, cfg, &pre.split, block_out, streams);
         }
     }
+    if (session.probe) |*p| p.stepDone();
     cache.len += 1;
     return outputLogits(self, ctx, streams);
 }
@@ -1205,6 +1375,7 @@ pub fn stepBatchExtra(self: *Model, ctx: *ExecContext, session: *Session, tokens
     const hc_dim = cfg.n_hc * cfg.hidden_size;
     var tables = try StepRope.init(&self.rope, ctx, pos0, S);
     defer tables.deinit();
+    session.scratch.shareReset();
 
     // Every batch row carries its own HC stream state.
     const streams_all = try allocator.alloc(f32, S * hc_dim);
@@ -1227,7 +1398,7 @@ pub fn stepBatchExtra(self: *Model, ctx: *ExecContext, session: *Session, tokens
         {
             const sub_in = try hcPreBatch(ctx, cfg, &layer.hc_attn, streams_all, S, splits);
             defer allocator.free(sub_in);
-            const block_out = try attnBlockBatch(self, ctx, cache, layer, layer_i, sub_in, pos0, S, &tables);
+            const block_out = try attnBlockBatch(self, ctx, cache, layer, layer_i, sub_in, pos0, S, &tables, &session.scratch);
             defer allocator.free(block_out);
             try hcPostBatch(ctx, cfg, splits, block_out, streams_all, S);
         }
@@ -1326,7 +1497,7 @@ fn hcPostBatch(ctx: *ExecContext, config: Config, splits: []const HcSplit, block
 /// temporary [carry+S] buffer (each token sees the trailing <= n_swa rows at
 /// its own position); the persistent ring receives the final window
 /// afterwards.
-fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer, layer_i: usize, sub_in: []const f32, pos0: usize, S: usize, tables: *const StepRope) ![]f32 {
+fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer, layer_i: usize, sub_in: []const f32, pos0: usize, S: usize, tables: *const StepRope, scratch: *StepScratch) ![]f32 {
     const cfg = self.config;
     const allocator = ctx.allocator;
     const lc = &cache.layers[layer_i];
@@ -1402,17 +1573,28 @@ fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const 
             count_attn[s] = lc.comp.items.len / hd;
         }
     } else @memset(count_attn, 0);
+    // Cross-layer index sharing (Model.index_share_every, see attnBlock):
+    // Shared CSA layers skip the index-side compressor and the indexer
+    // projections; the per-token selections come from the nearest previous
+    // Full layer's stash for this chunk. Full layers rebuild the stash.
+    const sharing = self.index_share_every >= 2 and ratio == 4;
+    const is_shared_layer = sharing and (csaOrdinal(cfg, layer_i) % self.index_share_every) != 0;
+    const stashing = sharing and !is_shared_layer;
+    if (stashing) scratch.shareReset();
+
     if (layer.index_compressor) |*comp| {
-        var kv_t = try comp.kv.linearSeq(ctx, &x_norm, .embed, .attn);
-        defer kv_t.deinit();
-        var sc_t = try comp.gate.linearSeq(ctx, &x_norm, .embed, .attn);
-        defer sc_t.deinit();
-        const kvd = try kv_t.dataConst();
-        const scd = try sc_t.dataConst();
-        for (0..S) |s| {
-            _ = try compressorAdvance(self, ctx, comp, kvd[s * comp.width ..][0..comp.width], scd[s * comp.width ..][0..comp.width], lc.index_state_kv, lc.index_state_score, &lc.index_comp, cfg.indexer_head_dim, compressed_family, pos0 + s);
-            count_idx[s] = lc.index_comp.items.len / cfg.indexer_head_dim;
-        }
+        if (!is_shared_layer) {
+            var kv_t = try comp.kv.linearSeq(ctx, &x_norm, .embed, .attn);
+            defer kv_t.deinit();
+            var sc_t = try comp.gate.linearSeq(ctx, &x_norm, .embed, .attn);
+            defer sc_t.deinit();
+            const kvd = try kv_t.dataConst();
+            const scd = try sc_t.dataConst();
+            for (0..S) |s| {
+                _ = try compressorAdvance(self, ctx, comp, kvd[s * comp.width ..][0..comp.width], scd[s * comp.width ..][0..comp.width], lc.index_state_kv, lc.index_state_score, &lc.index_comp, cfg.indexer_head_dim, compressed_family, pos0 + s);
+                count_idx[s] = lc.index_comp.items.len / cfg.indexer_head_dim;
+            }
+        } else @memset(count_idx, 0);
     } else @memset(count_idx, 0);
 
     // Indexer projections + rotary batch; selection runs per token below.
@@ -1421,7 +1603,7 @@ fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const 
     defer if (qi_all.len > 0) allocator.free(qi_all);
     var wp_all: []f32 = &.{};
     defer if (wp_all.len > 0) allocator.free(wp_all);
-    if (ratio == 4) {
+    if (ratio == 4 and !is_shared_layer) {
         var qi_t = try layer.indexer_q_b.?.linearSeq(ctx, &qr_norm_t, .q, .attn);
         defer qi_t.deinit();
         var qi_heads = try qi_t.split(ctx, .attn, .{ .head, .d }, .{ cfg.indexer_heads, cfg.indexer_head_dim });
@@ -1433,18 +1615,39 @@ fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const 
         defer wp_t.deinit();
         wp_all = try allocator.dupe(f32, try wp_t.dataConst());
     }
+    if (is_shared_layer and (!scratch.share_valid or scratch.share_lens.items.len != S)) return Error.IndexShareMismatch;
 
     // Per-token attention with per-position visibility.
     const out_heads_all = try allocator.alloc(f32, S * q_dim);
     defer allocator.free(out_heads_all);
     var rows: std.ArrayList(f32) = .empty;
     defer rows.deinit(allocator);
+    var share_off: usize = 0;
     for (0..S) |s| {
         const n_vis = count_attn[s];
-        var allowed: ?[]bool = null;
-        defer if (allowed) |a| allocator.free(a);
+        var allowed_owned: ?[]bool = null;
+        defer if (allowed_owned) |a| allocator.free(a);
+        var allowed: ?[]const bool = null;
         if (ratio == 4 and n_vis > cfg.indexer_top_k) {
-            allowed = try indexerSelectFrom(self, ctx, qi_all[s * idx_q_dim ..][0..idx_q_dim], wp_all[s * cfg.indexer_heads ..][0..cfg.indexer_heads], lc.index_comp.items[0 .. count_idx[s] * cfg.indexer_head_dim], n_vis);
+            if (is_shared_layer) {
+                const len = scratch.share_lens.items[s];
+                if (len != n_vis) return Error.IndexShareMismatch;
+                allowed = scratch.share_mask.items[share_off..][0..len];
+                scratch.share_reused += 1;
+            } else {
+                allowed_owned = try indexerSelectFrom(self, ctx, qi_all[s * idx_q_dim ..][0..idx_q_dim], wp_all[s * cfg.indexer_heads ..][0..cfg.indexer_heads], lc.index_comp.items[0 .. count_idx[s] * cfg.indexer_head_dim], n_vis);
+                allowed = allowed_owned;
+                scratch.share_computed += 1;
+            }
+        }
+        if (is_shared_layer) share_off += scratch.share_lens.items[s];
+        if (stashing) {
+            if (allowed_owned) |a| {
+                try scratch.share_mask.appendSlice(self.allocator, a);
+                try scratch.share_lens.append(self.allocator, a.len);
+            } else {
+                try scratch.share_lens.append(self.allocator, 0);
+            }
         }
         rows.clearRetainingCapacity();
         const t_abs = carry + s;
@@ -1462,6 +1665,8 @@ fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const 
         defer out_t.deinit();
         try out_t.copyTo(out_heads_all[s * q_dim ..][0..q_dim]);
     }
+
+    if (stashing) scratch.share_valid = true;
 
     // The persistent ring keeps the trailing window.
     const total = carry + S;
@@ -1516,7 +1721,7 @@ fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const 
     return allocator.dupe(f32, try out_t.dataConst());
 }
 
-fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer, layer_i: usize, sub_in: []const f32, pos: usize, tables: *const StepRope) ![]f32 {
+fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer, layer_i: usize, sub_in: []const f32, pos: usize, tables: *const StepRope, scratch: *StepScratch, probe: ?*IndexProbe) ![]f32 {
     const cfg = self.config;
     const allocator = ctx.allocator;
     const lc = &cache.layers[layer_i];
@@ -1573,18 +1778,44 @@ fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer
     fakequant.roundF16InPlace(ring_dst);
     lc.n_raw += 1;
 
-    // Compressed streams + indexer selection.
-    var allowed: ?[]bool = null;
-    defer if (allowed) |a| allocator.free(a);
+    // Compressed streams + indexer selection. Under cross-layer sharing
+    // (Model.index_share_every) a Shared CSA layer skips its index-side
+    // compressor and indexer entirely and reuses the nearest previous Full
+    // layer's selection this step — compressed-row counts at a position are
+    // identical across same-ratio layers, so the depth-first Full layer
+    // always selects iff its Shared followers would have; a length mismatch
+    // is a broken invariant and fails loudly.
+    const sharing = self.index_share_every >= 2 and ratio == 4;
+    const is_shared_layer = sharing and (csaOrdinal(cfg, layer_i) % self.index_share_every) != 0;
+
+    var allowed_owned: ?[]bool = null;
+    defer if (allowed_owned) |a| allocator.free(a);
+    var allowed: ?[]const bool = null;
     if (layer.attn_compressor) |*comp| {
         _ = try compressorStep(self, ctx, comp, &x_norm, lc.attn_state_kv, lc.attn_state_score, &lc.comp, cfg.head_dim, compressed_family, pos);
     }
     if (layer.index_compressor) |*comp| {
-        _ = try compressorStep(self, ctx, comp, &x_norm, lc.index_state_kv, lc.index_state_score, &lc.index_comp, cfg.indexer_head_dim, compressed_family, pos);
+        if (!is_shared_layer) {
+            _ = try compressorStep(self, ctx, comp, &x_norm, lc.index_state_kv, lc.index_state_score, &lc.index_comp, cfg.indexer_head_dim, compressed_family, pos);
+        }
     }
     const n_comp = lc.comp.items.len / cfg.head_dim;
     if (ratio == 4 and n_comp > cfg.indexer_top_k) {
-        allowed = try indexerSelect(self, ctx, layer, &x_norm, &qr_norm_t, lc, tables);
+        if (is_shared_layer) {
+            if (!scratch.share_valid or scratch.share_mask.items.len != n_comp) return Error.IndexShareMismatch;
+            allowed = scratch.share_mask.items;
+            scratch.share_reused += 1;
+        } else {
+            allowed_owned = try indexerSelect(self, ctx, layer, &x_norm, &qr_norm_t, lc, tables);
+            allowed = allowed_owned;
+            scratch.share_computed += 1;
+            if (sharing) {
+                scratch.share_mask.clearRetainingCapacity();
+                try scratch.share_mask.appendSlice(self.allocator, allowed_owned.?);
+                scratch.share_valid = true;
+            }
+            if (probe) |p| try p.record(csaOrdinal(cfg, layer_i), allowed_owned.?);
+        }
     }
 
     // Assemble the visible rows (exclusion == absence from the sink
