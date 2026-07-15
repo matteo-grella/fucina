@@ -63,8 +63,16 @@ set -eu
 cd "$(dirname "$0")/.."
 mkdir -p refs
 
+# prism-llama.cpp (PrismML's llama.cpp fork, prism branch) is the parity
+# oracle for the Ternary-Bonsai-27B port (Q2_0 g128 ternary weights on the
+# qwen35 arch): tools/llama_logits.cpp compiles against its CPU build for
+# the logits gate, llama-tokenize for the token-ID gate. bonsai-demo pins
+# the whitepapers + run recipes. Both stock, never patched.
+
 # name|url|pinned commit (the snapshot's reference state)
 REFS='llama.cpp|https://github.com/ggml-org/llama.cpp|30af6e2b98b00eee01a8f76249fe1399a724702e
+prism-llama.cpp|https://github.com/PrismML-Eng/llama.cpp|62061f91088281e65071cc38c5f69ee95c39f14e
+bonsai-demo|https://github.com/PrismML-Eng/Bonsai-demo|cfd842af57d7f458d5a4ea28312f1dc62e02395e
 locate-anything.cpp|https://github.com/mudler/locate-anything.cpp|92c1682da792c1e8a5dec91acc2be4b02c742ded
 parakeet.cpp|https://github.com/mudler/parakeet.cpp|89f5e2977b4d8bccd45e7bcc6f2ef7c4ed49e89a
 face-detect.cpp|https://github.com/mudler/face-detect.cpp|e22260d5d5490b37b021b7f795079f386d553afd

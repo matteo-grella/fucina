@@ -932,7 +932,7 @@ unsupported operation is a compile error, never a runtime failure
 | Float (differentiable) | `.f32` | Full surface: autograd (`variable`, `backward`, `grad`), all math/NN ops (§4), all views and structural ops |
 | Typed float | `.f16`, `.bf16`, `.f64` (`supportsForwardFloatMath`) | Forward math: the native typed set (`add/sub/mul/div/sum/mean/sumAll/dot/scale/divScalar`, `to`), the full structural set (`split`/`merge`/`flatten`/`reshape`/`sliceStep`/`flip`/`roll`/`stack`/`repeatAxis` + the §3.10 base set), and — **f16/bf16 only** — the widened forward set (unary family, gated, softmax/norm family, remaining reductions, masks, `pad`, `einsum`; §4.19). **f16/bf16 only, autograd LEAVES**: `variable`/`variableFromSlice` with f32 gradients; differentiable `to` casts and mixed-RHS `dot`/`einsum` are the graph entries (§5.1) |
 | Typed scalar constant | `.bool`, `.u8`, `.u16`, `.i8`, `.i16`, `.i32`, `.i64` | Constants only; construction, data access, structural ops, `to` (scalar casts, §3.8), and integer forward math (§4.19): wrapping `add`/`sub`/`mul`, `maximum`/`minimum`, explicit `divTrunc`/`divFloor` + `rem`/`mod`, bitwise `bitAnd`/`bitOr`/`bitXor`, i64-returning `sum`/`sumAll`, plus exact integer `compare` (§4.6). `.bool` keeps only `to`, the counting `sum`/`sumAll`, and the mask combinators `logicalAnd`/`logicalOr`/`logicalXor`/`logicalNot` |
-| Block-quantized constant | `q1_0`, `q4_0 … q8_k`, `iq*`, `tq1_0/tq2_0`, `mxfp4`, `nvfp4` (`isBlockQuantized`) | Constants only; block construction, `to(.f32)` dequantize, `getRows`, row `concat`, `packRhs`/`packRhsLayout` (§10) |
+| Block-quantized constant | `q1_0/q2_0`, `q4_0 … q8_k`, `iq*`, `tq1_0/tq2_0`, `mxfp4`, `nvfp4` (`isBlockQuantized`) | Constants only; block construction, `to(.f32)` dequantize, `getRows`, row `concat`, `packRhs`/`packRhsLayout` (§10) |
 
 Notes that follow from the dtype layer (`src/dtype.zig`, detailed in §8):
 
@@ -5898,7 +5898,7 @@ these types. Expect this surface to change without compatibility notice.
 ```zig
 pub const DType = enum {
     bool, u8, u16, i8, i16, i32, i64, f16, bf16, f32, f64,
-    q1_0, q4_0, q4_1, q5_0, q5_1, q8_0, q8_1,
+    q1_0, q2_0, q4_0, q4_1, q5_0, q5_1, q8_0, q8_1,
     q2_k, q3_k, q4_k, q5_k, q6_k, q8_k,
     iq1_s, iq1_m, iq2_xxs, iq2_xs, iq2_s, iq3_xxs, iq3_s, iq4_nl, iq4_xs,
     tq1_0, tq2_0, mxfp4, nvfp4,
@@ -7367,6 +7367,7 @@ and are re-exported at the root (`fucina.BlockQ4_K`, ...).
 | DType | Block struct | Elems/block | Bytes/block | f32 encoder | Matmul kernel | LHS activation |
 |---|---|---|---|---|---|---|
 | `.q1_0` | `BlockQ1_0` | 128 | 18 | — | cold | Q8_0 |
+| `.q2_0` | `BlockQ2_0` | 128 | 34 | yes | **hot** (mul-free ternary) | Q8_0 |
 | `.q4_0` | `BlockQ4_0` | 32 | 18 | yes | cold | Q8_0 |
 | `.q4_1` | `BlockQ4_1` | 32 | 20 | yes | cold | Q8_1 |
 | `.q5_0` | `BlockQ5_0` | 32 | 22 | yes | cold | Q8_0 |
@@ -7971,6 +7972,25 @@ trained state is byte-for-byte the served state and every member evaluation
 runs the real int8 inference kernels (`examples/es_ternary_spirals.zig` is
 the end-to-end demo). `.tq1_0` (1.6875 bits/weight, base-3⁵ packing of five
 trits per byte) remains decode/cold-matmul only.
+
+#### Q2_0 — the Bonsai g128 ternary container
+
+`.q2_0` (ggml type 42, PrismML/Bonsai `Q2_0_g128`) is TQ2_0's sibling with a
+different envelope: 128-element blocks (34 bytes: f16 absmax scale + 32 bytes
+of 2-bit codes packed four-per-byte LSB-first), codes `q` in {0,1,2,3}
+decoding to `(q-1)·d` — the reference encoder only ever emits {0,1,2}
+(round against the block absmax), so files are pure ternary; code 3 = +2d is
+wire-contract-only. It is first-class like TQ2_0: a parity encoder
+(`quantizeRowQ2_0Into`, reachable through `gguf.encodeF32`), decode, and hot
+mul-free kernels (`matmulQ2_0RhsTile/Range`, `src/backend/quant/ternary.zig`)
+that pair with **Q8_0 row activations** (so `k` needs only be a multiple of
+128): unsigned-code dots through sdot/vpdpbusd/maddubs with one per-32-group
+bsum subtraction (`Σ(q-1)a = Σq·a − Σa`), bsums computed once per LHS row and
+shared across all output columns, two LHS rows sharing every weight unpack.
+All arms accumulate the exact per-group i32 and fold per-block partials in
+the cold reference's exact order, so hot and cold (`dotQ2_0Q8_0`,
+`matmulTableQ8_0RhsRange(.q2_0, ...)`) are bitwise identical. This is the
+weight format of Ternary-Bonsai-27B (§14.3).
 
 ### 10.8 Cold decode rules: IQ*, FP4, and friends (`src/backend/quant/cold.zig`, `src/backend/quant_tables.zig`)
 
@@ -10657,10 +10677,14 @@ pub fn deinit(self: *Tokenizer) void
   hand-rolled qwen2 pretokenizer loop, backed by generated Unicode category
   tables — on valid UTF-8 input it chunks and encodes **token-ID-exact**
   against llama.cpp for qwen2-pre models (malformed UTF-8 is the one
-  documented deviation). A GGUF declaring `"joyai-llm"` (the DeepSeek-V4
-  family's byte-oriented splitter) selects that chunker instead, via the
-  `pre: Pre = .qwen2` field (`Pre = enum { qwen2, joyai_llm }`). If the
-  GGUF declares a pretokenizer other than an implemented chunker, encoding
+  documented deviation). A GGUF declaring another implemented pretokenizer
+  selects that chunker instead, via the `pre: Pre = .qwen2` field
+  (`Pre = enum { qwen2, qwen35, joyai_llm, glm4 }`): `"qwen35"`
+  (Qwen3.5/3.6/Bonsai — the qwen2 rules with `\p{M}` combining marks folded
+  into the word class and excluded from punctuation runs, backed by the
+  generated `isMark` table), `"joyai-llm"` (the DeepSeek-V4 family's
+  byte-oriented splitter), and `"glm4"`/`"chatglm-bpe"`. If the GGUF
+  declares a pretokenizer other than an implemented chunker, encoding
   still proceeds with the qwen2 rules, but the id is recorded in the
   `pre_mismatch: ?[]u8` field and a warning is logged once — token-ID
   parity is then not guaranteed.
@@ -12450,6 +12474,21 @@ dims `ssm.{conv_kernel, inner_size, state_size, time_step_rank, group_count}`
 and `expert_count`. `Config.isRecurrent(il)` implements the block schedule;
 `isMoe()` mirrors qwen3. Validation rejects `qwen35moe` and MTP/NextN
 variants with `Error.UnsupportedVariant` (dense text path only).
+
+DeltaNet heads may be **non-uniform**: `ssm_dt_rank` v-heads over
+`ssm_n_group` q/k heads (`numVHeads % numKHeads == 0` required), with the
+q/k heads broadcast onto the v-heads **tiled** — v-head `h` reads q/k head
+`h % numKHeads`, matching `ggml_gated_delta_net`'s `iv1 % ne1` semantics in
+both the recurrent and the batched chunked scan. Qwen3.5 dense is uniform
+(1:1); **Ternary-Bonsai-27B** (a ternarized Qwen3.6-27B, `general.
+architecture = "qwen35"`, weights in the Q2_0 g128 container — §10.7) runs
+48 v-heads over 16 k-heads across 64 blocks (16 full-attention + 48 linear).
+Its tokenizer declares `tokenizer.ggml.pre = "qwen35"` (§13.5.1): the qwen2
+rules with `\p{M}` combining marks folded into the word class. Loading it is
+the ordinary flow — every projection (embeddings and LM head included) is a
+`.q2_0` `LinearWeight`, logit-parity-validated against the PrismML llama.cpp
+fork (argmax match at pp1..pp128, cosine ≥ 0.9998, token-ID-exact
+tokenizer).
 
 ```zig
 test "qwen35 hybrid layer pattern" {

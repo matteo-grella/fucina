@@ -169,10 +169,28 @@ random trits by ES — every member evaluation runs `quantizeRowsQ8_K` +
 `matmulTQ2_0RhsRange`, i.e. the deployed inference path, and the run
 self-verifies.
 
+## Q2_0 — the Bonsai g128 sibling (addendum, 2026-07-15)
+
+`DType.q2_0` (ggml type 42, PrismML/Bonsai `Q2_0_g128`) carries the same
+{-1, 0, +1} alphabet in a different envelope: 128-element blocks (fp16 absmax
+scale + 32 code bytes, four sequential LSB-first 2-bit codes per byte,
+2.125 bpw deployed), decode `(q-1)·d` with code 3 = +2d wire-contract-only
+(the reference encoder emits {0,1,2}). It ships first-class alongside TQ2_0:
+parity encoder + decoder, hot mul-free kernels over **Q8_0 row activations**
+(k must only be a multiple of 128 — no Q8_K/256 machinery), the same
+`Σ(q-1)a = Σq·a − Σa` bsum identity with per-row bsums shared across output
+columns and two LHS rows sharing every weight unpack, all arms bitwise
+identical to the cold reference. It is the weight format of
+Ternary-Bonsai-27B (a ternarized Qwen3.6-27B on the `qwen35` hybrid arch;
+REFERENCE.md §14.3): embeddings, attention, MLP and LM head all `.q2_0`,
+logit-parity-validated against the PrismML llama.cpp fork. STE training and
+ternary-native ES remain TQ2_0-only.
+
 ## Limits and future work
 
 - k (contract dim) must be a multiple of 256 everywhere (block granularity);
-  `dotTernarySte` rejects other shapes with a clear error.
+  `dotTernarySte` rejects other shapes with a clear error. (`q2_0` inference
+  needs only k % 128 == 0 — its LHS is Q8_0 rows, not Q8_K.)
 - `tq1_0` remains decode/cold-matmul only.
 - TL2-style LUT kernels (1.67 bpw, pshufb/tbl) — worth revisiting only for
   non-dot-product CPUs or footprint-bound deployments.

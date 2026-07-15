@@ -439,8 +439,9 @@ The allocation contract, precisely scoped:
 Dense `.i8` is a scalar tensor dtype, not a quantized format. The public
 quantized inference path is Tensor-backed: `DType` includes the GGML
 block-quantized formats (legacy `q1_0`/`q4_0`/`q4_1`/`q5_0`/`q5_1`/`q8_0`/
-`q8_1`, K-quants `q2_k`..`q8_k`, and the cold table/nonlinear/FP4 formats
-`iq1_s`..`iq4_xs`, `tq1_0`/`tq2_0`, `mxfp4`/`nvfp4`), and
+`q8_1`, K-quants `q2_k`..`q8_k`, the cold table/nonlinear/FP4 formats
+`iq1_s`..`iq4_xs`, `tq1_0`/`tq2_0`, `mxfp4`/`nvfp4`, and the Bonsai ternary
+`q2_0`), and
 `Tensor(.{ .dtype = .q4_k, ... })` stores logical shape plus GGML-compatible
 blocks over the last axis. These tensors are constant inference tensors:
 loaded-block construction, dequantize to `f32`, embedding-style `getRows`, and
