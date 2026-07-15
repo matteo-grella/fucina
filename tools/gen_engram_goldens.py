@@ -397,6 +397,7 @@ test "engram module matches the PyTorch/numpy goldens (forward + backward)" {
         .key_b = try allocator.alloc(engram.Vec, hc_mult),
         .norm_key = try allocator.alloc(engram.Vec, hc_mult),
         .norm_query = try allocator.alloc(engram.Vec, hc_mult),
+        .gate_bias = try allocator.alloc(engram.GateBias, hc_mult),
         .conv_norm = try allocator.alloc(engram.Vec, hc_mult),
         .value_w = try engram.Proj.variableFromSlice(&ctx, .{ hidden_size, engram_hidden }, &golden_value_w),
         .value_b = try engram.Vec.variableFromSlice(&ctx, .{hidden_size}, &golden_value_b),
@@ -412,6 +413,9 @@ test "engram module matches the PyTorch/numpy goldens (forward + backward)" {
     layer.norm_query[1] = try engram.Vec.variableFromSlice(&ctx, .{hidden_size}, &golden_norm_query_1);
     layer.conv_norm[0] = try engram.Vec.variableFromSlice(&ctx, .{hidden_size}, &golden_conv_norm_0);
     layer.conv_norm[1] = try engram.Vec.variableFromSlice(&ctx, .{hidden_size}, &golden_conv_norm_1);
+    const zero_bias = [_]f32{0};
+    layer.gate_bias[0] = try engram.GateBias.variableFromSlice(&ctx, .{1}, &zero_bias);
+    layer.gate_bias[1] = try engram.GateBias.variableFromSlice(&ctx, .{1}, &zero_bias);
     defer layer.deinit();
 
     var hidden = try engram.Hidden.variableFromSlice(&ctx, .{ t_len, hc_mult, hidden_size }, &golden_hidden);

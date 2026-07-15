@@ -26,6 +26,7 @@ const std = @import("std");
 const fucina = @import("fucina");
 const qwen3 = @import("model.zig");
 const cartridge_mod = @import("../cartridge.zig");
+const engram_mod = @import("../engram.zig");
 const weights = @import("../weights.zig");
 
 const Allocator = std.mem.Allocator;
@@ -47,6 +48,7 @@ pub const Error = error{
     InvalidCartridge,
     InvalidCapture,
     InvalidPacking,
+    InvalidEngram,
     /// Cartridge / capture / packed forwards are plain-path only: the
     /// cartridge K/V variables, capture sink, and transient packed rope
     /// tables are not checkpoint inputs, so a recompute would silently
@@ -123,6 +125,22 @@ pub const ForwardOptions = struct {
     cartridge: ?*const cartridge_mod.Cartridge = null,
     capture: ?*KvCapture = null,
     packed_segments: ?[]const usize = null,
+    engram: ?EngramOptions = null,
+};
+
+/// Engram graft seam (`ForwardOptions.engram`): before each layer whose id
+/// is in the engram model's `layer_ids`, the layer's memory output is added
+/// to the residual stream (`hidden += engram(hidden, rows)` — the reference
+/// block order, ahead of attention). `rows[slot]` holds the precomputed
+/// table-row indices for `tokens` at plan slot `slot`
+/// (`HashPlan.compressInto` + `hashInto`; pure host work, once per
+/// sequence). Plain-path only, and hashing depends only on token ids, so
+/// it composes with `cartridge` (positions shift, ids don't). Rejected
+/// with `packed_segments`: the ShortConv is causal over the packed row and
+/// would leak across segment boundaries.
+pub const EngramOptions = struct {
+    model: *const engram_mod.Engram,
+    rows: []const []const usize,
 };
 
 /// The seven adaptable projections, in fixed order. Index doubles as the
@@ -629,6 +647,23 @@ pub fn Trainer(comptime targets: Targets) type {
             return ceTail(ctx, &logits, labels, options);
         }
 
+        /// `lossExt` with full `ForwardOptions` — the graft/cartridge loss
+        /// entry: same CE tail, exec-scope requirement, scope-owned result,
+        /// and one step-counter advance per call. Gradients flow into
+        /// whatever the options attach (engram parameters, cartridge rows,
+        /// LoRA adapters) through the frozen stack.
+        pub fn lossForwardExt(self: *Self, ctx: *ExecContext, tokens: []const usize, labels: []const usize, fwd: ForwardOptions, options: LossOptions) !fucina.Tensor(.{}) {
+            if (!ctx.execScopeActive()) return Error.ExecScopeRequired;
+            if (labels.len != tokens.len) return Error.LabelLengthMismatch;
+            const step = self.step_counter;
+            self.step_counter += 1;
+            var x = try self.forwardHiddenImpl(ctx, tokens, step, fwd);
+            defer x.deinit();
+            var logits = try self.logitsTail(ctx, &x);
+            defer logits.deinit();
+            return ceTail(ctx, &logits, labels, options);
+        }
+
         /// `lossExt` with a single-row embedding injection: the full-depth
         /// forward substitutes `injection.row` at `injection.pos` before the
         /// first layer, then applies the identical norm/projection/CE tail
@@ -972,6 +1007,21 @@ pub fn Trainer(comptime targets: Targets) type {
                 }
             }
 
+            if (opts.engram) |eng| {
+                if (self.checkpoint_layers) return Error.CartridgeCheckpointUnsupported;
+                if (opts.packed_segments != null) return Error.InvalidPacking;
+                const ecfg = &eng.model.plan.cfg;
+                if (ecfg.hc_mult != 1 or ecfg.hidden_size != cfg.hidden_size) return Error.InvalidEngram;
+                if (eng.rows.len != eng.model.layers.len) return Error.InvalidEngram;
+                const want = tokens.len * ecfg.headsPerLayer();
+                for (eng.rows) |layer_rows| {
+                    if (layer_rows.len != want) return Error.InvalidEngram;
+                }
+                for (eng.model.plan.layer_ids) |id| {
+                    if (id >= n_layers) return Error.InvalidEngram;
+                }
+            }
+
             if (opts.packed_segments) |seg_lens| {
                 if (self.checkpoint_layers) return Error.CartridgeCheckpointUnsupported;
                 if (opts.inject != null or opts.capture != null) return Error.InvalidPacking;
@@ -999,6 +1049,20 @@ pub fn Trainer(comptime targets: Targets) type {
             }
 
             for (model.layers[opts.start_layer..][0..layer_count], opts.start_layer..) |*layer, layer_i| {
+                if (opts.engram) |eng| {
+                    if (eng.model.plan.slotOf(layer_i)) |slot| {
+                        // hidden += engram(hidden, rows): reference block
+                        // order (before attention). Zero-copy retags bridge
+                        // the trainer's .embed tag to the module's .d.
+                        var q = try x.withTags(ctx, .{ .seq, .d });
+                        defer q.deinit();
+                        var mem = try eng.model.layers[slot].forwardResidual(ctx, &q, eng.rows[slot], null);
+                        defer mem.deinit();
+                        var mem_e = try mem.withTags(ctx, .{ .seq, .embed });
+                        defer mem_e.deinit();
+                        x = try ctx.replace(x, x.add(ctx, &mem_e));
+                    }
+                }
                 const extra = LayerExtra{
                     .layer = layer,
                     .config = cfg,

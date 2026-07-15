@@ -12033,6 +12033,18 @@ reference mechanism (forward + every gradient) is pinned by
 implementation; integer geometry compares EXACTLY, floats under the
 shared golden tolerance). Design record: `docs/ENGRAM.md`.
 
+The qwen3 trainer carries the graft seam: `ForwardOptions.engram =
+.{ .model, .rows }` injects each configured layer's memory output into
+the residual stream before attention (plain path only; composes with
+`cartridge`; rejected with `packed_segments` — the ShortConv is causal
+over the packed row), and `lossForwardExt(ctx, tokens, labels, fwd,
+loss_opts)` is the CE loss entry taking full `ForwardOptions`.
+`examples/engram.zig` (`zig build engram`) drives it: `--equiv`
+(bitwise zero-init gate on a real GGUF), `--train`/`--eval` (frozen
+trunk, held-out chunk CE, `--lora N`, `--no-engram` control,
+`--gate-bias F`), `--probes N` (verbatim-recall spans, teacher-forced
+CE + exact-match, engram detached vs attached).
+
 ```zig
 test "engram: hashed n-gram memory with a zero-init graft gate" {
     const alloc = std.testing.allocator;

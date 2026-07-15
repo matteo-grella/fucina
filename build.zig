@@ -423,6 +423,29 @@ pub fn build(b: *std.Build) void {
     const cartridge_step = b.step("cartridge", "Train/serve a corpus as a trained KV prefix on a Qwen3 GGUF (arXiv 2506.06266)");
     cartridge_step.dependOn(&cartridge_cmd.step);
 
+    const engram_exe = b.addExecutable(.{
+        .name = "fucina-zig-engram",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/engram.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    engram_exe.root_module.addImport("fucina", module);
+    engram_exe.root_module.addImport("fucina_llm", llm_module);
+    configureBlas(engram_exe, blas_kind);
+    configureGpu(b, engram_exe, gpu_kind);
+    const engram_install = installArtifactStep(b, engram_exe);
+
+    const engram_cmd = b.addRunArtifact(engram_exe);
+    engram_cmd.step.dependOn(engram_install);
+    if (b.args) |args| {
+        engram_cmd.addArgs(args);
+    }
+
+    const engram_step = b.step("engram", "Graft conditional n-gram memory onto a frozen Qwen3 GGUF and train it (arXiv 2601.07372)");
+    engram_step.dependOn(&engram_cmd.step);
+
     const es_finetune_exe = b.addExecutable(.{
         .name = "fucina-zig-es-finetune",
         .root_module = b.createModule(.{

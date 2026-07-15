@@ -75,6 +75,11 @@ pub const Proj = fucina.Tensor(.{ .d, .eh });
 pub const Vec = fucina.Tensor(.{.d});
 /// ShortConv depthwise kernel `[hc_mult*hidden, kernel_size]`.
 pub const ConvKernel = fucina.Tensor(.{ .channel, .tap });
+/// Per-stream trainable gate bias: a [1] tensor broadcast over `.seq`,
+/// added to the signed-sqrt gate pre-activation. Zero = the reference
+/// gate exactly; a negative init ("gate-closed" graft mode) starts the
+/// memory silent and lets training open gates only where lookup helps.
+pub const GateBias = fucina.Tensor(.{.seq});
 
 /// Geometry + numerics of the Engram module family. `engram_vocab_size`
 /// holds the base table size per n-gram order (`len == max_ngram_size - 1`,
@@ -458,6 +463,10 @@ pub const InitOptions = struct {
     graft_zero_init: bool = false,
     /// Embedding table init scale (reference nn.Embedding: N(0, 1)).
     table_std: f32 = 1.0,
+    /// Gate-bias initial value (0 = the reference gate). Strongly negative
+    /// (e.g. -4) is the gate-closed graft mode: initial gates sit at
+    /// sigmoid(bias) ~ 0 so the memory fades in instead of disrupting.
+    gate_bias_init: f32 = 0,
 };
 
 /// One layer's Engram parameters + forward. All tensors are long-lived
@@ -474,6 +483,8 @@ pub const Layer = struct {
     /// Gate norms: norm1 (key side) and norm2 (query side), per stream.
     norm_key: []Vec,
     norm_query: []Vec,
+    /// Per-stream trainable gate bias ([1], broadcast over .seq).
+    gate_bias: []GateBias,
     /// Shared value projection `[d, engram_hidden]` + bias.
     value_w: Proj,
     value_b: Vec,
@@ -525,6 +536,8 @@ pub const Layer = struct {
         errdefer allocator.free(self.norm_key);
         self.norm_query = try allocator.alloc(Vec, g);
         errdefer allocator.free(self.norm_query);
+        self.gate_bias = try allocator.alloc(GateBias, g);
+        errdefer allocator.free(self.gate_bias);
         self.conv_norm = try allocator.alloc(Vec, g);
         errdefer allocator.free(self.conv_norm);
         for (0..g) |i| {
@@ -536,6 +549,8 @@ pub const Layer = struct {
             self.norm_key[i] = try Vec.variableFromSlice(ctx, .{d}, scratch[0..d]);
             self.norm_query[i] = try Vec.variableFromSlice(ctx, .{d}, scratch[0..d]);
             self.conv_norm[i] = try Vec.variableFromSlice(ctx, .{d}, scratch[0..d]);
+            const bias_init = [_]f32{opts.gate_bias_init};
+            self.gate_bias[i] = try GateBias.variableFromSlice(ctx, .{1}, &bias_init);
         }
 
         if (opts.graft_zero_init) {
@@ -565,11 +580,13 @@ pub const Layer = struct {
         for (self.key_b) |*t| t.deinit();
         for (self.norm_key) |*t| t.deinit();
         for (self.norm_query) |*t| t.deinit();
+        for (self.gate_bias) |*t| t.deinit();
         for (self.conv_norm) |*t| t.deinit();
         self.allocator.free(self.key_w);
         self.allocator.free(self.key_b);
         self.allocator.free(self.norm_key);
         self.allocator.free(self.norm_query);
+        self.allocator.free(self.gate_bias);
         self.allocator.free(self.conv_norm);
         self.value_w.deinit();
         self.value_b.deinit();
@@ -589,6 +606,7 @@ pub const Layer = struct {
             try registry.addParam(try std.fmt.bufPrint(&name_buf, "{s}.key_b.{d}", .{ prefix, i }), &self.key_b[i]);
             try registry.addParam(try std.fmt.bufPrint(&name_buf, "{s}.norm_key.{d}", .{ prefix, i }), &self.norm_key[i]);
             try registry.addParam(try std.fmt.bufPrint(&name_buf, "{s}.norm_query.{d}", .{ prefix, i }), &self.norm_query[i]);
+            try registry.addParam(try std.fmt.bufPrint(&name_buf, "{s}.gate_bias.{d}", .{ prefix, i }), &self.gate_bias[i]);
             try registry.addParam(try std.fmt.bufPrint(&name_buf, "{s}.conv_norm.{d}", .{ prefix, i }), &self.conv_norm[i]);
         }
         try registry.addParam(try std.fmt.bufPrint(&name_buf, "{s}.value_w", .{prefix}), &self.value_w);
@@ -683,7 +701,9 @@ pub const Layer = struct {
             defer root.deinit();
             var signed = try root.mul(ctx, &sgn);
             defer signed.deinit();
-            var gate = try signed.sigmoid(ctx);
+            var biased = try signed.add(ctx, &self.gate_bias[g]);
+            defer biased.deinit();
+            var gate = try biased.sigmoid(ctx);
             defer gate.deinit();
 
             // value_g = gate ⊙ value (gate broadcast over .d).

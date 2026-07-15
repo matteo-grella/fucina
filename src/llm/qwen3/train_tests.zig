@@ -1703,3 +1703,75 @@ test "sum reduction scaled by 1/valid matches mean numerically" {
     const sum_v = try sum_l.item();
     try std.testing.expectApproxEqRel(mean_v, sum_v, 1e-6);
 }
+
+test "engram graft: zero-init is bitwise identity and trains through the frozen stack" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try buildTinyModel(&ctx, 0xE569);
+    defer model.deinit();
+    var trainer = try DefaultTrainer.init(&ctx, &model, tiny_lora, 1);
+    defer trainer.deinit();
+
+    const engram = @import("../engram.zig");
+    const ecfg = engram.Config{
+        .hidden_size = tiny_config.hidden_size,
+        .hc_mult = 1,
+        .n_embed_per_ngram = 8,
+        .n_head_per_ngram = 2,
+        .engram_vocab_size = &.{ 11, 13 },
+        .kernel_size = 2,
+        .pad_id = 0,
+    };
+    var graft = try engram.Engram.init(&ctx, allocator, ecfg, &.{ 0, 1 }, 7, null, .{ .graft_zero_init = true });
+    defer graft.deinit();
+
+    // Hash rows for the batch, per plan slot (ids ARE the compressed ids:
+    // no lookup).
+    var ids: [batch_inputs.len]i64 = undefined;
+    for (&ids, batch_inputs) |*dst, tok| dst.* = @intCast(tok);
+    const heads = ecfg.headsPerLayer();
+    var rows_storage: [2][batch_inputs.len * 4]usize = undefined;
+    try std.testing.expectEqual(@as(usize, 4), heads);
+    var rows: [2][]const usize = undefined;
+    for (0..2) |slot| {
+        try graft.plan.hashInto(slot, &ids, &rows_storage[slot]);
+        rows[slot] = &rows_storage[slot];
+    }
+    const opts = qwen3_train.ForwardOptions{ .engram = .{ .model = &graft, .rows = &rows } };
+
+    // Zero-init graft: logits BITWISE identical to the bare trainer forward.
+    var bare = try trainer.evalLogits(&ctx, batch_inputs);
+    defer bare.deinit();
+    var grafted = try trainer.evalLogitsExt(&ctx, batch_inputs, opts);
+    defer grafted.deinit();
+    try std.testing.expectEqualSlices(f32, try bare.dataConst(), try grafted.dataConst());
+
+    // Training: loss decreases over AdamW steps on the engram params alone
+    // (frozen trunk, LoRA untouched), driven through lossForwardExt.
+    var opt = optim.AdamW.init(allocator, .{ .lr = 5e-2, .weight_decay = 0 });
+    defer opt.deinit();
+    try graft.registerParams(&opt);
+
+    var first: f32 = undefined;
+    var last: f32 = undefined;
+    for (0..8) |step_i| {
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        var loss = try trainer.lossForwardExt(&ctx, batch_inputs, batch_labels, opts, .{});
+        defer loss.deinit();
+        const v = try loss.item();
+        if (step_i == 0) first = v;
+        last = v;
+        try loss.backward(&ctx);
+        try opt.step(&ctx);
+        opt.zeroGrad();
+        graft.zeroGrad();
+    }
+    try std.testing.expect(last < first);
+}
