@@ -320,6 +320,14 @@ Fucina exists because others built the road first.
   attention, the FP8/FP4 quantization grids, native MTP), his GGUF
   conversions are the weights the port runs, and his test fixtures (official
   API vectors and local logit goldens) are the validation oracle.
+- **Prism ML** — the Ternary Bonsai family is what the `q2_0` ternary
+  support serves: the Q2_0 g128 wire format and its reference
+  encoder/decoder come from their
+  [llama.cpp fork](https://github.com/PrismML-Eng/llama.cpp), which is also
+  the parity oracle for the Ternary-Bonsai-27B port. The Bonsai weights
+  themselves are Apache-2.0 on
+  [Hugging Face](https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf)
+  and are not part of this repository.
 - **JustVugg's [colibri](https://github.com/JustVugg/colibri)** — the
   out-of-core MoE expert streaming (run mixture models much bigger than RAM
   by paging routed experts from disk through a pinned-set + LRU tier, with a

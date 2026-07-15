@@ -43,8 +43,8 @@ MIT, Copyright (c) 2023-2026 The ggml authors):
   (`ggml-cpu/arch/{arm,x86}/quants.c`) through Fucina's SIMD primitives,
   blocking, and dispatch.
 - **Qwen2/GPT-2 pretokenizer** (`src/llm/tokenizer.zig`): faithful port of
-  `unicode_regex_split_custom_qwen2` (`src/unicode.cpp`); token-ID-exact vs
-  `llama-tokenize`.
+  `unicode_regex_split_custom_qwen2` (`src/unicode.cpp`), plus the qwen35
+  mark-aware variant of the same rules; token-ID-exact vs `llama-tokenize`.
 - **SentencePiece tokenizer** (`src/llm/spm_tokenizer.zig`): faithful port of
   `llm_tokenizer_spm` (`src/llama-vocab.cpp`); byte-exact vs `llama-tokenize`.
 - **Unicode classification tables** (`src/llm/unicode_categories.zig`,
@@ -121,6 +121,31 @@ Copyright (c) 2026 The ds4.c authors — Salvatore Sanfilippo):
 - ds4 is also the validation oracle: `zig build deepseek4 -- --vectors/
   --golden` replay its shipped test fixtures from the pinned checkout
   (`refs/ds4/`, fetched by `tools/fetch_refs.sh`; nothing vendored).
+
+## Ported code — PrismML llama.cpp fork
+
+From **Prism ML's llama.cpp fork**
+([PrismML-Eng/llama.cpp](https://github.com/PrismML-Eng/llama.cpp), `prism`
+branch — a fork of ggml-org/llama.cpp; MIT, Copyright (c) 2023-2026 The
+ggml authors, with the Q2_0 additions authored by Prism ML):
+
+- **Q2_0 (Bonsai g128) ternary format** (`src/backend/quant/cold.zig`,
+  `src/backend/quant/ternary.zig`, block struct in `src/dtype.zig`): the
+  block layout (128 elements, f16 absmax scale + sequential LSB-first 2-bit
+  codes), the f32→Q2_0 row encoder (`quantize_row_q2_0_ref` semantics,
+  value-exact), and the decode/dot semantics (`(q-1)·d`, codes {0..3}) are
+  ported from the fork's `ggml-quants.c` / `ggml-cpu` sources — at the
+  pinned commit the format is fork-only (ggml type 42). The hot kernels
+  around the format (micro-tiling, bsum/scale caches, lane accumulation,
+  the BLAS panel arm) are Fucina-original.
+- The fork is also the **parity oracle** for the Ternary-Bonsai-27B port:
+  logits via `tools/llama_logits.cpp` compiled against its CPU build, token
+  IDs via its `llama-tokenize` (pinned in `tools/fetch_refs.sh`, nothing
+  vendored). **Bonsai-demo**
+  ([PrismML-Eng/Bonsai-demo](https://github.com/PrismML-Eng/Bonsai-demo),
+  Apache-2.0) is pinned for the whitepapers and run recipes only. The
+  Ternary-Bonsai model weights (Apache-2.0, Hugging Face) are not in this
+  repository.
 
 ## Parity references (no code copied)
 
