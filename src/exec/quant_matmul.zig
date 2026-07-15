@@ -108,6 +108,7 @@ pub fn matmul2DWithQuantizedTensorRhsOptions(
 
     switch (rhs_dtype) {
         .q1_0 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ1_0, "ggml_q1_0", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .q2_0 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ2_0, "ggml_q2_0", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
         .q4_0 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ4_0, "ggml_q4_0", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
         .q4_1 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ4_1, "ggml_q4_1", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
         .q5_0 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ5_0, "ggml_q5_0", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),

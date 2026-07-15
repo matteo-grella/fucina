@@ -194,6 +194,7 @@ pub const matmulBatchedTransB2DIntoUncheckedWithConfig = batched.matmulBatchedTr
 // Quantized matmul dispatch entry points.
 pub const matmul2DI8BlockwiseIntoWithConfig = matmul_quant.matmul2DI8BlockwiseIntoWithConfig;
 pub const matmul2DQ1_0RhsIntoWithConfig = matmul_quant.matmul2DQ1_0RhsIntoWithConfig;
+pub const matmul2DQ2_0RhsIntoWithConfig = matmul_quant.matmul2DQ2_0RhsIntoWithConfig;
 pub const matmul2DQ8_0RhsIntoWithConfig = matmul_quant.matmul2DQ8_0RhsIntoWithConfig;
 pub const matmul2DQ8_0x4RhsIntoWithConfig = matmul_quant.matmul2DQ8_0x4RhsIntoWithConfig;
 pub const matmul2DQ8_0x4PackedRhsIntoWithConfig = matmul_quant.matmul2DQ8_0x4PackedRhsIntoWithConfig;

@@ -488,6 +488,7 @@ pub const LinearWeight = union(enum) {
     f16: WeightF16,
     bf16: WeightBf16,
     q1_0: QuantWeight(.q1_0),
+    q2_0: QuantWeight(.q2_0),
     q4_0: QuantWeight(.q4_0),
     q4_1: QuantWeight(.q4_1),
     q5_0: QuantWeight(.q5_0),
@@ -545,6 +546,7 @@ pub const LinearWeight = union(enum) {
             .f16 => .{ .f16 = try loadDenseF16Weight(ctx, info, shape, options) },
             .bf16 => .{ .bf16 = try loadDenseBf16Weight(ctx, info, shape) },
             .q1_0 => .{ .q1_0 = try loadQuantizedWeight(.q1_0, ctx, info, shape) },
+            .q2_0 => .{ .q2_0 = try loadQuantizedWeight(.q2_0, ctx, info, shape) },
             .q4_0 => .{ .q4_0 = try loadQuantizedWeight(.q4_0, ctx, info, shape) },
             .q4_1 => .{ .q4_1 = try loadQuantizedWeight(.q4_1, ctx, info, shape) },
             .q5_0 => .{ .q5_0 = try loadQuantizedWeight(.q5_0, ctx, info, shape) },
@@ -2000,6 +2002,7 @@ fn f16Slice(bytes: []const u8, expected_len: usize) ![]const f16 {
 fn BlockStorage(comptime dtype: DType) type {
     return switch (dtype) {
         .q1_0 => fucina.BlockQ1_0,
+        .q2_0 => fucina.BlockQ2_0,
         .q4_0 => fucina.BlockQ4_0,
         .q4_1 => fucina.BlockQ4_1,
         .q5_0 => fucina.BlockQ5_0,

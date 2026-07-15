@@ -61,6 +61,7 @@ pub const PackedRhsLayout = backend.PackedRhsLayout;
 pub const SliceRange = ag.SliceRange;
 pub const PreparedConvWeights = exec.ExecContext.PreparedConvWeights;
 pub const BlockQ1_0 = dtype.BlockQ1_0;
+pub const BlockQ2_0 = dtype.BlockQ2_0;
 pub const BlockQ4_0 = dtype.BlockQ4_0;
 pub const BlockQ4_1 = dtype.BlockQ4_1;
 pub const BlockQ5_0 = dtype.BlockQ5_0;

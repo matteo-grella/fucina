@@ -95,6 +95,7 @@ pub const GgmlType = enum(u32) {
     mxfp4 = 39,
     nvfp4 = 40,
     q1_0 = 41,
+    q2_0 = 42,
 };
 
 pub fn dtypeForGgmlType(value: GgmlType) ?DType {
@@ -103,6 +104,7 @@ pub fn dtypeForGgmlType(value: GgmlType) ?DType {
         .f16 => .f16,
         .bf16 => .bf16,
         .q1_0 => .q1_0,
+        .q2_0 => .q2_0,
         .q4_0 => .q4_0,
         .q4_1 => .q4_1,
         .q5_0 => .q5_0,
@@ -561,6 +563,7 @@ pub fn tensorByteLen(ggml_type: GgmlType, dims: []const usize) !usize {
         .f64, .i64 => try std.math.mul(usize, logical_count, 8),
         .i8 => logical_count,
         .q1_0 => quantizedByteLen(.q1_0, dims, logical_count),
+        .q2_0 => quantizedByteLen(.q2_0, dims, logical_count),
         .q4_0 => quantizedByteLen(.q4_0, dims, logical_count),
         .q4_1 => quantizedByteLen(.q4_1, dims, logical_count),
         .q5_0 => quantizedByteLen(.q5_0, dims, logical_count),
@@ -634,6 +637,7 @@ fn ggmlTypeFromInt(value: u32) ?GgmlType {
         39 => .mxfp4,
         40 => .nvfp4,
         41 => .q1_0,
+        42 => .q2_0,
         else => null,
     };
 }
@@ -1173,7 +1177,7 @@ pub fn encodeF32(ggml_type: GgmlType, src: []const f32, dst: []u8) !void {
         // from untrusted file bytes, so validate here in release builds too —
         // the same seam llama.cpp guards with ggml_validate_row_data
         // (refs/llama.cpp/src/llama-quant.cpp).
-        .q4_0, .q4_1, .q5_0, .q5_1, .q8_0, .q4_k, .q5_k, .q6_k, .tq2_0 => {
+        .q2_0, .q4_0, .q4_1, .q5_0, .q5_1, .q8_0, .q4_k, .q5_k, .q6_k, .tq2_0 => {
             if (!allFinite(src)) return Error.NonFiniteValue;
         },
         // Scalar casts stay unguarded: f16 inf-overflow on out-of-range
@@ -1190,6 +1194,7 @@ pub fn encodeF32(ggml_type: GgmlType, src: []const f32, dst: []u8) !void {
         .bf16 => for (src, 0..) |value, i| {
             std.mem.writeInt(u16, dst[i * 2 ..][0..2], dtype_mod.f32ToBf16(value), .little);
         },
+        .q2_0 => try encodeBlocks(.q2_0, src, dst),
         .q4_0 => try encodeBlocks(.q4_0, src, dst),
         .q4_1 => try encodeBlocks(.q4_1, src, dst),
         .q5_0 => try encodeBlocks(.q5_0, src, dst),
@@ -1245,6 +1250,7 @@ pub fn decodeF32(ggml_type: GgmlType, src: []const u8, dst: []f32) !void {
         .bf16 => for (dst, 0..) |*value, i| {
             value.* = @bitCast(@as(u32, std.mem.readInt(u16, src[i * 2 ..][0..2], .little)) << 16);
         },
+        .q2_0 => try decodeBlocks(.q2_0, src, dst),
         .q4_0 => try decodeBlocks(.q4_0, src, dst),
         .q4_1 => try decodeBlocks(.q4_1, src, dst),
         .q5_0 => try decodeBlocks(.q5_0, src, dst),

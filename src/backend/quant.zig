@@ -115,6 +115,7 @@ pub const BlockIQ4_XS = types.BlockIQ4_XS;
 pub const BlockMXFP4 = types.BlockMXFP4;
 pub const BlockNVFP4 = types.BlockNVFP4;
 pub const BlockQ1_0 = types.BlockQ1_0;
+pub const BlockQ2_0 = types.BlockQ2_0;
 pub const BlockQ2_K = types.BlockQ2_K;
 pub const BlockQ3_K = types.BlockQ3_K;
 pub const BlockQ4_0 = types.BlockQ4_0;
@@ -156,6 +157,7 @@ pub const QuantizedMatmulRhsIQ4_XS = types.QuantizedMatmulRhsIQ4_XS;
 pub const QuantizedMatmulRhsMXFP4 = types.QuantizedMatmulRhsMXFP4;
 pub const QuantizedMatmulRhsNVFP4 = types.QuantizedMatmulRhsNVFP4;
 pub const QuantizedMatmulRhsQ1_0 = types.QuantizedMatmulRhsQ1_0;
+pub const QuantizedMatmulRhsQ2_0 = types.QuantizedMatmulRhsQ2_0;
 pub const QuantizedMatmulRhsQ2_K = types.QuantizedMatmulRhsQ2_K;
 pub const QuantizedMatmulRhsQ3_K = types.QuantizedMatmulRhsQ3_K;
 pub const QuantizedMatmulRhsQ4_0 = types.QuantizedMatmulRhsQ4_0;
@@ -192,6 +194,7 @@ pub const mxfp4_block_size = types.mxfp4_block_size;
 pub const nvfp4_block_size = types.nvfp4_block_size;
 pub const nvfp4_subblock_size = types.nvfp4_subblock_size;
 pub const q1_0_block_size = types.q1_0_block_size;
+pub const q2_0_block_size = types.q2_0_block_size;
 pub const q4_0_block_size = types.q4_0_block_size;
 pub const q4_1_block_size = types.q4_1_block_size;
 pub const q5_0_block_size = types.q5_0_block_size;
@@ -354,6 +357,7 @@ pub fn getRowsTensorInto(comptime tensor_dtype: DType, dst: *Tensor, table: *con
 pub fn blockCountForDType(comptime tensor_dtype: DType, len: usize) !usize {
     return switch (tensor_dtype) {
         .q1_0 => cold.q1_0BlockCount(len),
+        .q2_0 => cold.q2_0BlockCount(len),
         .q4_0 => cold.q4_0BlockCount(len),
         .q4_1 => cold.q4_1BlockCount(len),
         .q5_0 => cold.q5_0BlockCount(len),
@@ -391,6 +395,7 @@ pub fn dequantizeRowForDType(
 ) !void {
     switch (tensor_dtype) {
         .q1_0 => try cold.dequantizeRowQ1_0Into(dst, blocks),
+        .q2_0 => try cold.dequantizeRowQ2_0Into(dst, blocks),
         .q4_0 => try cold.dequantizeRowQ4_0Into(dst, blocks),
         .q4_1 => try cold.dequantizeRowQ4_1Into(dst, blocks),
         .q5_0 => try cold.dequantizeRowQ5_0Into(dst, blocks),
@@ -431,6 +436,7 @@ pub fn quantizeRowForDType(
     src: []const f32,
 ) !void {
     switch (tensor_dtype) {
+        .q2_0 => try cold.quantizeRowQ2_0Into(dst, src),
         .q4_0 => try cold.quantizeRowQ4_0Into(dst, src),
         .q4_1 => try cold.quantizeRowQ4_1Into(dst, src),
         .q5_0 => try cold.quantizeRowQ5_0Into(dst, src),
@@ -544,6 +550,9 @@ pub const matmulTableQ8_0RhsTile = cold.matmulTableQ8_0RhsTile;
 pub const matmulTableQ8_KRhsRange = cold.matmulTableQ8_KRhsRange;
 pub const matmulTableQ8_KRhsTile = cold.matmulTableQ8_KRhsTile;
 pub const q1_0BlockCount = cold.q1_0BlockCount;
+pub const q2_0BlockCount = cold.q2_0BlockCount;
+pub const dequantizeRowQ2_0Into = cold.dequantizeRowQ2_0Into;
+pub const quantizeRowQ2_0Into = cold.quantizeRowQ2_0Into;
 pub const q4_0BlockCount = cold.q4_0BlockCount;
 pub const q4_1BlockCount = cold.q4_1BlockCount;
 pub const q5_0BlockCount = cold.q5_0BlockCount;
@@ -633,6 +642,8 @@ pub const quantizedMatmulRhsTQ2_0FromF32 = ternary.quantizedMatmulRhsTQ2_0FromF3
 pub const quantizedMatmulRhsTQ2_0FromF32Absmean = ternary.quantizedMatmulRhsTQ2_0FromF32Absmean;
 pub const matmulTQ2_0RhsRange = ternary.matmulTQ2_0RhsRange;
 pub const matmulTQ2_0RhsTile = ternary.matmulTQ2_0RhsTile;
+pub const matmulQ2_0RhsRange = ternary.matmulQ2_0RhsRange;
+pub const matmulQ2_0RhsTile = ternary.matmulQ2_0RhsTile;
 pub const matmulTQ2_0F32RhsRange = ternary.matmulTQ2_0F32RhsRange;
 pub const matmulTQ2_0F32RhsTile = ternary.matmulTQ2_0F32RhsTile;
 pub const dotTQ2_0F32 = ternary.dotTQ2_0F32;

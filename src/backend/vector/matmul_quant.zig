@@ -54,6 +54,20 @@ pub fn matmul2DQ1_0RhsIntoWithConfig(
     quantized_matmul.matmulQ1_0RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
+pub fn matmul2DQ2_0RhsIntoWithConfig(
+    out: []f32,
+    lhs_blocks: []const quantized_matmul.BlockQ8_0,
+    rhs: *const quantized_matmul.QuantizedMatmulRhsQ2_0,
+    m: usize,
+    n: usize,
+    k: usize,
+    config: ParallelConfig,
+) void {
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_0, quantized_matmul.QuantizedMatmulRhsQ2_0, quantized_matmul.matmulQ2_0RhsTile);
+    if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
+    quantized_matmul.matmulQ2_0RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
+}
+
 pub fn matmul2DQ8_0RhsIntoWithConfig(
     out: []f32,
     lhs_blocks: []const quantized_matmul.BlockQ8_0,

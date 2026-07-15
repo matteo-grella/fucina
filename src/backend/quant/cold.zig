@@ -28,6 +28,7 @@ const BlockIQ4_XS = types_mod.BlockIQ4_XS;
 const BlockMXFP4 = types_mod.BlockMXFP4;
 const BlockNVFP4 = types_mod.BlockNVFP4;
 const BlockQ1_0 = types_mod.BlockQ1_0;
+const BlockQ2_0 = types_mod.BlockQ2_0;
 const BlockQ2_K = types_mod.BlockQ2_K;
 const BlockQ3_K = types_mod.BlockQ3_K;
 const BlockQ4_0 = types_mod.BlockQ4_0;
@@ -55,6 +56,7 @@ const QKV8i8 = common.QKV8i8;
 const QKV8u8 = common.QKV8u8;
 const QuantizedFormatError = types_mod.QuantizedFormatError;
 const QuantizedMatmulRhsQ1_0 = types_mod.QuantizedMatmulRhsQ1_0;
+const QuantizedMatmulRhsQ2_0 = types_mod.QuantizedMatmulRhsQ2_0;
 const QuantizedMatmulRhsQ2_K = types_mod.QuantizedMatmulRhsQ2_K;
 const QuantizedMatmulRhsQ3_K = types_mod.QuantizedMatmulRhsQ3_K;
 const QuantizedMatmulRhsQ4_0 = types_mod.QuantizedMatmulRhsQ4_0;
@@ -76,6 +78,7 @@ const mxfp4_block_size = types_mod.mxfp4_block_size;
 const nvfp4_block_size = types_mod.nvfp4_block_size;
 const nvfp4_subblock_size = types_mod.nvfp4_subblock_size;
 const q1_0_block_size = types_mod.q1_0_block_size;
+const q2_0_block_size = types_mod.q2_0_block_size;
 const q4_0_block_size = types_mod.q4_0_block_size;
 const q4_1_block_size = types_mod.q4_1_block_size;
 const q5_0_block_size = types_mod.q5_0_block_size;
@@ -85,6 +88,7 @@ const q8_1_block_size = types_mod.q8_1_block_size;
 const qk_col_block = common.qk_col_block;
 const qk_k_block_size = types_mod.qk_k_block_size;
 const quantizeToI8 = common.quantizeToI8;
+const roundHalfAwayFromZero = common.roundHalfAwayFromZero;
 const quantizedMatmulRhsQ2_KFromBlocks = q8k_mod.quantizedMatmulRhsQ2_KFromBlocks;
 const quantizedMatmulRhsQ3_KFromBlocks = q8k_mod.quantizedMatmulRhsQ3_KFromBlocks;
 
@@ -239,6 +243,11 @@ pub fn q1_0BlockCount(len: usize) !usize {
     return len / q1_0_block_size;
 }
 
+pub fn q2_0BlockCount(len: usize) !usize {
+    if (len % q2_0_block_size != 0) return QuantizedFormatError.InvalidQuantizedLength;
+    return len / q2_0_block_size;
+}
+
 pub fn q4_1BlockCount(len: usize) !usize {
     if (len % q4_1_block_size != 0) return QuantizedFormatError.InvalidQuantizedLength;
     return len / q4_1_block_size;
@@ -268,6 +277,56 @@ pub fn dequantizeRowQ1_0Into(dst: []f32, src: []const BlockQ1_0) !void {
         for (out, 0..) |*y, j| {
             const mask: u8 = @as(u8, 1) << @intCast(j % 8);
             y.* = if ((block.qs[j / 8] & mask) != 0) d else -d;
+        }
+    }
+}
+
+/// ggml dequantize_row_q2_0 parity (PrismML fork / Bonsai Q2_0_g128): four
+/// 2-bit codes per byte, LSB-first, code q in {0,1,2,3} decodes to (q-1)*d.
+/// Ternary files only ever carry {0,1,2} (the encoder rounds against the
+/// block absmax, so |w/d| <= 1); code 3 = +2d is part of the wire contract.
+pub fn dequantizeRowQ2_0Into(dst: []f32, src: []const BlockQ2_0) !void {
+    if (dst.len != try checkedProduct(src.len, q2_0_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
+
+    for (src, 0..) |block, block_index| {
+        const d = f16BitsToF32(block.d);
+        const out = dst[block_index * q2_0_block_size ..][0..q2_0_block_size];
+        for (out, 0..) |*y, j| {
+            const shift: u3 = @intCast((j % 4) * 2);
+            const q: i32 = (block.qs[j / 4] >> shift) & 0x3;
+            y.* = @as(f32, @floatFromInt(q - 1)) * d;
+        }
+    }
+}
+
+/// f32 -> Q2_0 row encoder; faithful port of the fork's quantize_row_q2_0_ref
+/// (per-block absmax d, round-half-away, codes clamped to [0,3] — in-range
+/// finite input only ever produces {0,1,2}, i.e. ternary weights). Assumes
+/// finite input (guarded at the gguf.encodeF32 seam); degenerate-but-finite
+/// blocks (subnormal absmax overflowing 1/d) produce defined clamped output
+/// instead of @intFromFloat UB.
+pub fn quantizeRowQ2_0Into(dst: []BlockQ2_0, src: []const f32) !void {
+    const block_count = try q2_0BlockCount(src.len);
+    if (dst.len != block_count) return QuantizedFormatError.InvalidQuantizedLength;
+
+    for (dst, 0..) |*block, block_index| {
+        const x = src[block_index * q2_0_block_size ..][0..q2_0_block_size];
+        var amax: f32 = 0;
+        for (x) |v| amax = @max(amax, @abs(v));
+
+        const d = amax;
+        var inv_d: f32 = if (d != 0) 1.0 / d else 0.0;
+        if (!std.math.isFinite(inv_d)) inv_d = 0;
+        block.d = f32ToF16Bits(d);
+        block.qs = @splat(0);
+
+        for (x, 0..) |v, j| {
+            // Clamp in the float domain: round(v*inv_d) is in [-1, 1] for
+            // in-contract blocks, so the clamps never bite there.
+            const r = @max(0.0, @min(3.0, roundHalfAwayFromZero(v * inv_d) + 1.0));
+            const q: u8 = @intFromFloat(r);
+            const shift: u3 = @intCast((j % 4) * 2);
+            block.qs[j / 4] |= q << shift;
         }
     }
 }
@@ -1388,6 +1447,7 @@ pub fn matmulTableQ8_KRhsTile(
 
 fn dotTableQ8_0(comptime rhs_dtype: DType, w: *const dtype_mod.Storage(rhs_dtype), a: []const BlockQ8_0) f32 {
     return switch (rhs_dtype) {
+        .q2_0 => dotQ2_0Q8_0(w, a),
         .iq4_nl => dotIQ4_NLQ8_0(w, a),
         .mxfp4 => dotMXFP4Q8_0(w, a),
         .nvfp4 => dotNVFP4Q8_0(w, a),
@@ -1760,6 +1820,26 @@ fn ternaryValue(qs: u8, pow3: u8) i32 {
     return @intCast(xi - 1);
 }
 
+fn dotQ2_0Q8_0(w: *const BlockQ2_0, a: []const BlockQ8_0) f32 {
+    std.debug.assert(a.len == q2_0_block_size / q8_0_block_size);
+    const d0 = f16BitsToF32(w.d);
+    var sum: f32 = 0;
+    for (a, 0..) |*ab, block_index| {
+        var isum: i32 = 0;
+        const qs = w.qs[block_index * 8 ..][0..8];
+        var offset: usize = 0;
+        for (qs) |byte| {
+            inline for (0..4) |slot| {
+                const q = @as(i32, (byte >> (2 * slot)) & 0x3) - 1;
+                isum += q * @as(i32, ab.qs[offset + slot]);
+            }
+            offset += 4;
+        }
+        sum += d0 * f16BitsToF32(ab.d) * @as(f32, @floatFromInt(isum));
+    }
+    return sum;
+}
+
 fn dotQ1_0Q8_0(w: *const BlockQ1_0, a: []const BlockQ8_0) f32 {
     std.debug.assert(a.len == q1_0_block_size / q8_0_block_size);
     const d0 = f16BitsToF32(w.d);
@@ -2114,6 +2194,13 @@ fn fillQ1_0Pattern(block: *BlockQ1_0) void {
     for (&block.qs, 0..) |*q, i| q.* = if (i % 2 == 0) 0b1010_0101 else 0b0101_1010;
 }
 
+fn fillQ2_0Pattern(block: *BlockQ2_0) void {
+    block.d = f32ToF16Bits(1);
+    // Walks every 2-bit code including 3 (+2d) — the wire contract allows it
+    // even though the reference encoder only emits {0,1,2}.
+    for (&block.qs, 0..) |*q, i| q.* = @truncate(i *% 57 +% 0b11_10_01_00);
+}
+
 fn fillQ4_1Pattern(block: *BlockQ4_1) void {
     block.dm = .{ f32ToF16Bits(1), f32ToF16Bits(0) };
     for (&block.qs, 0..) |*q, i| {
@@ -2247,6 +2334,35 @@ test "ggml_q1_0 dot and matmul consume loaded blocks" {
     matmulQ1_0RhsRange(&out, &q8, &rhs, 1, 2, 0, 1);
     try std.testing.expectEqual(out[0], out[1]);
     try std.testing.expectEqual(dotQ1_0Q8_0(&q1, &q8), out[0]);
+}
+
+test "ggml_q2_0 dot and matmul consume loaded blocks" {
+    var q2: BlockQ2_0 = undefined;
+    fillQ2_0Pattern(&q2);
+    var q8 = [_]BlockQ8_0{undefined} ** (q2_0_block_size / q8_0_block_size);
+    for (&q8) |*block| fillQ8_0Pattern(block);
+
+    var dense_w: [q2_0_block_size]f32 = undefined;
+    try dequantizeRowQ2_0Into(&dense_w, &.{q2});
+    var dense_a: [q2_0_block_size]f32 = undefined;
+    for (&q8, 0..) |*block, i| {
+        for (block.qs, 0..) |v, j| {
+            dense_a[i * q8_0_block_size + j] = @as(f32, @floatFromInt(v)) * f16BitsToF32(block.d);
+        }
+    }
+
+    try std.testing.expectEqual(dotDense(&dense_w, &dense_a), dotQ2_0Q8_0(&q2, &q8));
+
+    var rhs_blocks = [_]BlockQ2_0{ q2, q2 };
+    var rhs = QuantizedMatmulRhsQ2_0{
+        .rows = .{ .allocator = std.testing.allocator, .blocks = &rhs_blocks, .rows = 2, .cols = q2_0_block_size, .blocks_per_row = 1 },
+        .k = q2_0_block_size,
+        .n = 2,
+    };
+    var out: [2]f32 = undefined;
+    matmulTableQ8_0RhsRange(.q2_0, &out, &q8, &rhs, 1, 2, 0, 1);
+    try std.testing.expectEqual(out[0], out[1]);
+    try std.testing.expectEqual(dotQ2_0Q8_0(&q2, &q8), out[0]);
 }
 
 test "ggml_q4_1 dot and matmul consume loaded blocks" {

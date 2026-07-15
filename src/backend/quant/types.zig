@@ -15,6 +15,7 @@ const Tensor = tensor.Tensor;
 pub const QuantizedMatmulFormat = enum {
     fucina_w8a8_rhs,
     ggml_q1_0,
+    ggml_q2_0,
     ggml_q4_0,
     ggml_q4_1,
     ggml_q5_0,
@@ -46,6 +47,7 @@ pub const QuantizedMatmulFormat = enum {
 // container below is not itself GGML Q8_0.
 pub const default_i8_group_size: usize = 32;
 pub const q1_0_block_size = dtype_mod.q1_0_block_size;
+pub const q2_0_block_size = dtype_mod.q2_0_block_size;
 pub const q4_0_block_size = dtype_mod.q4_0_block_size;
 pub const q4_1_block_size = dtype_mod.q4_1_block_size;
 pub const q5_0_block_size = dtype_mod.q5_0_block_size;
@@ -69,6 +71,7 @@ pub fn checkedProduct(a: usize, b: usize) QuantizedFormatError!usize {
 }
 
 pub const BlockQ1_0 = dtype_mod.BlockQ1_0;
+pub const BlockQ2_0 = dtype_mod.BlockQ2_0;
 pub const BlockQ8_0 = dtype_mod.BlockQ8_0;
 pub const BlockQ8_1 = dtype_mod.BlockQ8_1;
 pub const BlockQ8_0x4 = extern struct {
@@ -192,6 +195,7 @@ pub fn QuantizedMatmulRhsRowsFor(comptime dtype: DType) type {
 pub const QuantizedRowsQ8_1 = QuantizedRowsFor(.q8_1);
 
 pub const QuantizedMatmulRhsQ1_0 = QuantizedMatmulRhsRowsFor(.q1_0);
+pub const QuantizedMatmulRhsQ2_0 = QuantizedMatmulRhsRowsFor(.q2_0);
 pub const QuantizedMatmulRhsQ4_1 = QuantizedMatmulRhsRowsFor(.q4_1);
 pub const QuantizedMatmulRhsQ5_0 = QuantizedMatmulRhsRowsFor(.q5_0);
 pub const QuantizedMatmulRhsQ5_1 = QuantizedMatmulRhsRowsFor(.q5_1);
@@ -548,6 +552,7 @@ pub const QuantizedMatmulRhsQ6_Kx4 = struct {
 pub const AnyQuantizedMatmulRhs = union(enum) {
     fucina_w8a8_rhs: *const QuantizedMatmulRhsI8,
     ggml_q1_0: *const QuantizedMatmulRhsQ1_0,
+    ggml_q2_0: *const QuantizedMatmulRhsQ2_0,
     ggml_q4_0: *const QuantizedMatmulRhsQ4_0,
     ggml_q4_1: *const QuantizedMatmulRhsQ4_1,
     ggml_q5_0: *const QuantizedMatmulRhsQ5_0,
@@ -576,6 +581,7 @@ pub const AnyQuantizedMatmulRhs = union(enum) {
         return switch (self) {
             .fucina_w8a8_rhs => .fucina_w8a8_rhs,
             .ggml_q1_0 => .ggml_q1_0,
+            .ggml_q2_0 => .ggml_q2_0,
             .ggml_q4_0 => .ggml_q4_0,
             .ggml_q4_1 => .ggml_q4_1,
             .ggml_q5_0 => .ggml_q5_0,
@@ -629,6 +635,7 @@ pub const QuantizedMatmulKernel = enum {
     unsupported,
     fucina_w8a8_f32,
     ggml_q1_0,
+    ggml_q2_0,
     ggml_q4_0,
     ggml_q4_1,
     ggml_q5_0,
@@ -775,6 +782,22 @@ pub fn matmulTraits(comptime format_value: QuantizedMatmulFormat) QuantizedMatmu
             .supports_to_float = true,
             .supports_matmul = true,
             .matmul_kernel = .ggml_q1_0,
+        },
+        .ggml_q2_0 => .{
+            .format = format_value,
+            .source_dtype = .f32,
+            .storage_dtype = .u8,
+            .scale_dtype = .f16,
+            .default_group_size = q2_0_block_size,
+            .block_size = q2_0_block_size,
+            .block_byte_size = @sizeOf(BlockQ2_0),
+            .storage_layout = .ggml_blocks,
+            .scale_layout = .inline_block_scale,
+            // quantize_row_q2_0_ref parity encoder (absmax ternary codes).
+            .supports_from_float = true,
+            .supports_to_float = true,
+            .supports_matmul = true,
+            .matmul_kernel = .ggml_q2_0,
         },
         .ggml_q4_0 => .{
             .format = format_value,
@@ -978,6 +1001,7 @@ pub fn matmulTraitsRuntime(format_value: QuantizedMatmulFormat) QuantizedMatmulT
     return switch (format_value) {
         .fucina_w8a8_rhs => matmulTraits(.fucina_w8a8_rhs),
         .ggml_q1_0 => matmulTraits(.ggml_q1_0),
+        .ggml_q2_0 => matmulTraits(.ggml_q2_0),
         .ggml_q4_0 => matmulTraits(.ggml_q4_0),
         .ggml_q4_1 => matmulTraits(.ggml_q4_1),
         .ggml_q5_0 => matmulTraits(.ggml_q5_0),
@@ -1009,6 +1033,7 @@ pub fn matmulTraitsRuntime(format_value: QuantizedMatmulFormat) QuantizedMatmulT
 pub fn formatForDType(comptime tensor_dtype: DType) QuantizedMatmulFormat {
     return switch (tensor_dtype) {
         .q1_0 => .ggml_q1_0,
+        .q2_0 => .ggml_q2_0,
         .q4_0 => .ggml_q4_0,
         .q4_1 => .ggml_q4_1,
         .q5_0 => .ggml_q5_0,
@@ -1069,6 +1094,7 @@ pub fn QuantizedMatmulRhs(comptime format_value: QuantizedMatmulFormat) type {
             }
         },
         .ggml_q1_0,
+        .ggml_q2_0,
         .ggml_q4_0,
         .ggml_q4_1,
         .ggml_q5_0,

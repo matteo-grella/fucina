@@ -333,3 +333,199 @@ test "quantizeRowForDType routes tq2_0" {
     try qm.quantizeRowForDType(.tq2_0, &blocks, &x);
     try std.testing.expectEqual(common.f32ToF16Bits(1.0), blocks[0].d);
 }
+
+// ---------------- Q2_0 (Bonsai g128) ----------------
+
+const BlockQ2_0 = qm.BlockQ2_0;
+const q2_0_block_size = qm.q2_0_block_size;
+
+// Independent scalar replica of the fork's quantize_row_q2_0_ref packing:
+// walks elements in linear order and computes byte/shift from the element
+// index (the encoder walks the block layout), so a transposition bug in
+// either cannot cancel out.
+fn refEncodeQ2_0Row(dst: []BlockQ2_0, src: []const f32) void {
+    for (dst, 0..) |*block, bi| {
+        const x = src[bi * q2_0_block_size ..][0..q2_0_block_size];
+        var amax: f32 = 0;
+        for (x) |v| amax = @max(amax, @abs(v));
+        const id: f32 = if (amax != 0) 1.0 / amax else 0.0;
+        block.d = common.f32ToF16Bits(amax);
+        @memset(&block.qs, 0);
+        for (x, 0..) |v, e| {
+            var q: i32 = @intFromFloat(@round(v * id));
+            q += 1;
+            if (q < 0) q = 0;
+            if (q > 3) q = 3;
+            block.qs[e / 4] |= @as(u8, @intCast(q)) << @intCast((e % 4) * 2);
+        }
+    }
+}
+
+test "q2_0 encoder matches an independent scalar replica" {
+    const allocator = std.testing.allocator;
+    const k = 4 * q2_0_block_size;
+    var prng = std.Random.DefaultPrng.init(0x2b01);
+    const x = try allocator.alloc(f32, k);
+    defer allocator.free(x);
+    fillUniform(&prng, x, 2.5);
+
+    var got: [4]BlockQ2_0 = undefined;
+    var want: [4]BlockQ2_0 = undefined;
+    try qm.quantizeRowQ2_0Into(&got, x);
+    refEncodeQ2_0Row(&want, x);
+    for (got, want) |g, w| {
+        try std.testing.expectEqual(w.d, g.d);
+        try std.testing.expectEqualSlices(u8, &w.qs, &g.qs);
+    }
+}
+
+test "q2_0 encoder round-trips exact ternary rows" {
+    const k = q2_0_block_size;
+    var x: [k]f32 = undefined;
+    for (&x, 0..) |*v, i| v.* = (@as(f32, @floatFromInt(i % 3)) - 1.0) * 0.5; // {-0.5, 0, +0.5}
+    var blocks: [1]BlockQ2_0 = undefined;
+    try qm.quantizeRowQ2_0Into(&blocks, &x);
+    var decoded: [k]f32 = undefined;
+    try qm.dequantizeRowQ2_0Into(&decoded, &blocks);
+    try std.testing.expectEqualSlices(f32, &x, &decoded);
+}
+
+fn q2_0RhsFromF32(allocator: std.mem.Allocator, k: usize, n: usize, w: []const f32) !struct {
+    blocks: []BlockQ2_0,
+    rhs: qm.QuantizedMatmulRhsQ2_0,
+} {
+    const blocks_per_row = k / q2_0_block_size;
+    const blocks = try allocator.alloc(BlockQ2_0, n * blocks_per_row);
+    errdefer allocator.free(blocks);
+    for (0..n) |row| {
+        try qm.quantizeRowQ2_0Into(
+            blocks[row * blocks_per_row ..][0..blocks_per_row],
+            w[row * k ..][0..k],
+        );
+    }
+    return .{
+        .blocks = blocks,
+        .rhs = .{
+            .rows = .{ .allocator = null, .blocks = blocks, .rows = n, .cols = k, .blocks_per_row = blocks_per_row },
+            .k = k,
+            .n = n,
+        },
+    };
+}
+
+test "hot q2_0 matmul matches the cold table path bitwise" {
+    const allocator = std.testing.allocator;
+    const m = 3; // exercises the 2-row micro-tile and the 1-row tail
+    const k = 3 * q2_0_block_size;
+    const n = 5; // exercises the 4-column block and the tail column
+
+    var prng = std.Random.DefaultPrng.init(0x2b02);
+    const w = try allocator.alloc(f32, n * k);
+    defer allocator.free(w);
+    fillUniform(&prng, w, 1.5);
+    const a_vals = try allocator.alloc(f32, m * k);
+    defer allocator.free(a_vals);
+    fillUniform(&prng, a_vals, 3.0);
+
+    var packed_rhs = try q2_0RhsFromF32(allocator, k, n, w);
+    defer allocator.free(packed_rhs.blocks);
+
+    var a = try Tensor.fromSlice(allocator, &.{ m, k }, a_vals);
+    defer a.deinit();
+    var qlhs = try qm.quantizeRowsQ8_0(allocator, &a);
+    defer qlhs.deinit();
+
+    const got = try allocator.alloc(f32, m * n);
+    defer allocator.free(got);
+    const want = try allocator.alloc(f32, m * n);
+    defer allocator.free(want);
+
+    ternary.matmulQ2_0RhsRange(got, qlhs.blocks, &packed_rhs.rhs, m, n, 0, m);
+    qm.matmulTableQ8_0RhsRange(.q2_0, want, qlhs.blocks, &packed_rhs.rhs, m, n, 0, m);
+
+    try std.testing.expectEqualSlices(f32, want, got);
+}
+
+test "q2_0 tile splits reproduce the full range bitwise" {
+    const allocator = std.testing.allocator;
+    const m = 5;
+    const k = q2_0_block_size;
+    const n = 7;
+
+    var prng = std.Random.DefaultPrng.init(0x2b03);
+    const w = try allocator.alloc(f32, n * k);
+    defer allocator.free(w);
+    fillUniform(&prng, w, 1.0);
+    const a_vals = try allocator.alloc(f32, m * k);
+    defer allocator.free(a_vals);
+    fillUniform(&prng, a_vals, 2.0);
+
+    var packed_rhs = try q2_0RhsFromF32(allocator, k, n, w);
+    defer allocator.free(packed_rhs.blocks);
+    var a = try Tensor.fromSlice(allocator, &.{ m, k }, a_vals);
+    defer a.deinit();
+    var qlhs = try qm.quantizeRowsQ8_0(allocator, &a);
+    defer qlhs.deinit();
+
+    const full = try allocator.alloc(f32, m * n);
+    defer allocator.free(full);
+    const split = try allocator.alloc(f32, m * n);
+    defer allocator.free(split);
+
+    ternary.matmulQ2_0RhsRange(full, qlhs.blocks, &packed_rhs.rhs, m, n, 0, m);
+
+    // Row split landing mid row-pair (the parallel dispatch's range shape).
+    ternary.matmulQ2_0RhsTile(split, qlhs.blocks, &packed_rhs.rhs, n, 0, 3, 0, n);
+    ternary.matmulQ2_0RhsTile(split, qlhs.blocks, &packed_rhs.rhs, n, 3, m, 0, n);
+    try std.testing.expectEqualSlices(f32, full, split);
+
+    // ... and column split (the decode GEMV shape).
+    ternary.matmulQ2_0RhsTile(split, qlhs.blocks, &packed_rhs.rhs, n, 0, m, 0, 3);
+    ternary.matmulQ2_0RhsTile(split, qlhs.blocks, &packed_rhs.rhs, n, 0, m, 3, n);
+    try std.testing.expectEqualSlices(f32, full, split);
+}
+
+test "q2_0 code 3 (+2d) agrees between hot and cold paths" {
+    const allocator = std.testing.allocator;
+    const k = q2_0_block_size;
+    const n = 2;
+    const m = 2;
+
+    // Hand-built blocks walking all four codes, including 3 (+2d): the wire
+    // contract allows it even though the reference encoder never emits it.
+    var blocks: [2]BlockQ2_0 = undefined;
+    for (&blocks, 0..) |*b, row| {
+        b.d = common.f32ToF16Bits(1.0);
+        for (&b.qs, 0..) |*q, i| q.* = @truncate(i *% 57 +% row *% 31 +% 0b11_10_01_00);
+    }
+    var rhs = qm.QuantizedMatmulRhsQ2_0{
+        .rows = .{ .allocator = null, .blocks = &blocks, .rows = n, .cols = k, .blocks_per_row = 1 },
+        .k = k,
+        .n = n,
+    };
+
+    var prng = std.Random.DefaultPrng.init(0x2b04);
+    var a_vals: [m * k]f32 = undefined;
+    fillUniform(&prng, &a_vals, 2.0);
+    var a = try Tensor.fromSlice(allocator, &.{ m, k }, &a_vals);
+    defer a.deinit();
+    var qlhs = try qm.quantizeRowsQ8_0(allocator, &a);
+    defer qlhs.deinit();
+
+    var got: [m * n]f32 = undefined;
+    var want: [m * n]f32 = undefined;
+    ternary.matmulQ2_0RhsRange(&got, qlhs.blocks, &rhs, m, n, 0, m);
+    qm.matmulTableQ8_0RhsRange(.q2_0, &want, qlhs.blocks, &rhs, m, n, 0, m);
+    try std.testing.expectEqualSlices(f32, &want, &got);
+}
+
+test "quantizeRowForDType and gguf transcode route q2_0" {
+    var x: [q2_0_block_size]f32 = undefined;
+    for (&x, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 3)) - 1.0;
+    var blocks: [1]BlockQ2_0 = undefined;
+    try qm.quantizeRowForDType(.q2_0, &blocks, &x);
+    try std.testing.expectEqual(common.f32ToF16Bits(1.0), blocks[0].d);
+    var decoded: [q2_0_block_size]f32 = undefined;
+    try qm.dequantizeRowForDType(.q2_0, &decoded, &blocks);
+    try std.testing.expectEqualSlices(f32, &x, &decoded);
+}

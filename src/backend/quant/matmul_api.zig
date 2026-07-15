@@ -23,6 +23,7 @@ pub const BlockQ8_Kx2Mmla = types.BlockQ8_Kx2Mmla;
 pub const BlockQ8_Kx4 = types.BlockQ8_Kx4;
 
 pub const QuantizedMatmulRhsQ1_0 = types.QuantizedMatmulRhsQ1_0;
+pub const QuantizedMatmulRhsQ2_0 = types.QuantizedMatmulRhsQ2_0;
 pub const QuantizedMatmulRhsQ2_K = types.QuantizedMatmulRhsQ2_K;
 pub const QuantizedMatmulRhsQ3_K = types.QuantizedMatmulRhsQ3_K;
 pub const QuantizedMatmulRhsQ4_0 = types.QuantizedMatmulRhsQ4_0;
@@ -134,6 +135,8 @@ pub fn matmulI8BlockwiseRange(
 
 pub const matmulQ1_0RhsRange = cold.matmulQ1_0RhsRange;
 pub const matmulQ1_0RhsTile = cold.matmulQ1_0RhsTile;
+pub const matmulQ2_0RhsRange = ternary.matmulQ2_0RhsRange;
+pub const matmulQ2_0RhsTile = ternary.matmulQ2_0RhsTile;
 pub const matmulQ2_KRhsRange = cold.matmulQ2_KRhsRange;
 pub const matmulQ2_KRhsTile = cold.matmulQ2_KRhsTile;
 pub const matmulQ3_KRhsRange = cold.matmulQ3_KRhsRange;

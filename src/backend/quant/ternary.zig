@@ -30,10 +30,15 @@ const common = @import("common.zig");
 const Allocator = std.mem.Allocator;
 
 const BlockTQ2_0 = types_mod.BlockTQ2_0;
+const BlockQ2_0 = types_mod.BlockQ2_0;
+const BlockQ8_0 = types_mod.BlockQ8_0;
 const BlockQ8_K = types_mod.BlockQ8_K;
 const QuantizedFormatError = types_mod.QuantizedFormatError;
 const QuantizedMatmulRhsTQ2_0 = types_mod.QuantizedMatmulRhsTQ2_0;
+const QuantizedMatmulRhsQ2_0 = types_mod.QuantizedMatmulRhsQ2_0;
 const checkedProduct = types_mod.checkedProduct;
+const q2_0_block_size = types_mod.q2_0_block_size;
+const q8_0_block_size = types_mod.q8_0_block_size;
 const qk_k_block_size = types_mod.qk_k_block_size;
 
 const QKV4f32 = common.QKV4f32;
@@ -374,6 +379,232 @@ pub fn matmulTQ2_0RhsRange(
 ) void {
     _ = m;
     matmulTQ2_0RhsTile(out, lhs_blocks, rhs, n, r0, r1, 0, n);
+}
+
+// ---------------- Q2_0 (Bonsai g128) int8 kernels ----------------
+//
+// Q2_0 is the PrismML/Bonsai ternary container: 128-element blocks, four
+// sequential LSB-first 2-bit codes per byte, one f16 scale, codes q in
+// {0,1,2,3} decoding to (q-1)*d (files written by the reference encoder are
+// pure ternary — code 3 never occurs). Activations are Q8_0 rows (32-element
+// sub-blocks), so dot = d0 * sum_k d1_k * isum_k with
+// isum_k = sum(q*a) - sum(a): the codes multiply UNSIGNED through
+// sdot/vpdpbusd/maddubs and one bsum subtraction per 32-group replaces the
+// per-lane "-1" — the bsums are computed once per LHS row and shared across
+// every output column. Every arm accumulates the exact i32
+// (|sum(q*a)| <= 32*3*127 = 12192, maddubs pair sums <= 2*127*3 = 762, no
+// i16 saturation), so all arms are bitwise identical to cold.zig's
+// dotQ2_0Q8_0 reference.
+
+/// Unsigned codes for 16 consecutive elements of one Q2_0 block: bytes
+/// `first_byte..first_byte+4` each replicated 4x (tbl/pshufb), lanes shifted
+/// by {0,2,4,6} and masked to 2 bits.
+inline fn q2_0Codes16(qs: QKV32u8, comptime first_byte: usize) QKV16u8 {
+    const mask = comptime blk: {
+        @setEvalBranchQuota(4000);
+        var idx: [16]i32 = undefined;
+        for (0..16) |lane| idx[lane] = @intCast(first_byte + lane / 4);
+        break :blk idx;
+    };
+    const shifts = comptime blk: {
+        @setEvalBranchQuota(4000);
+        var sv: [16]u3 = undefined;
+        for (0..16) |lane| sv[lane] = @intCast((lane % 4) * 2);
+        break :blk sv;
+    };
+    const repl: QKV16u8 = @shuffle(u8, qs, undefined, @as(@Vector(16, i32), mask));
+    return (repl >> shifts) & @as(QKV16u8, @splat(3));
+}
+
+/// 32-lane twin of `q2_0Codes16` (bytes `first_byte..first_byte+8`).
+inline fn q2_0Codes32(qs: QKV32u8, comptime first_byte: usize) QKV32u8 {
+    const mask = comptime blk: {
+        @setEvalBranchQuota(4000);
+        var idx: [32]i32 = undefined;
+        for (0..32) |lane| idx[lane] = @intCast(first_byte + lane / 4);
+        break :blk idx;
+    };
+    const shifts = comptime blk: {
+        @setEvalBranchQuota(4000);
+        var sv: [32]u3 = undefined;
+        for (0..32) |lane| sv[lane] = @intCast((lane % 4) * 2);
+        break :blk sv;
+    };
+    const repl: QKV32u8 = @shuffle(u8, qs, undefined, @as(@Vector(32, i32), mask));
+    return (repl >> shifts) & @as(QKV32u8, @splat(3));
+}
+
+/// sum(a) over one Q8_0 sub-block, exact i32.
+inline fn q8_0BlockSum(a: *const BlockQ8_0) i32 {
+    const v: QKV32i8 = a.qs;
+    return @reduce(.Add, @as(@Vector(32, i32), v));
+}
+
+/// Unpacked unsigned codes for one 32-element sub-block of a Q2_0 block, in
+/// the granule shape the ISA's dot arm wants: two 16-byte vectors on aarch64
+/// (sdot), one 32-byte vector elsewhere (vpdpbusd/maddubs or portable twins).
+const Q2_0Codes = if (builtin.cpu.arch == .aarch64)
+    struct { lo: QKV16i8, hi: QKV16i8 }
+else
+    QKV32u8;
+
+/// Unpack sub-block `k` (elements k*32..k*32+32) of one Q2_0 block. Codes
+/// stay unsigned {0..3}; the matmul subtracts the activation bsum instead of
+/// materializing the "-1" per lane (dot = sum(q*a) - sum(a)).
+inline fn q2_0UnpackCodes(qs: QKV32u8, comptime k: usize) Q2_0Codes {
+    if (comptime builtin.cpu.arch == .aarch64) {
+        return .{
+            .lo = @bitCast(q2_0Codes16(qs, k * 8)),
+            .hi = @bitCast(q2_0Codes16(qs, k * 8 + 4)),
+        };
+    }
+    return q2_0Codes32(qs, k * 8);
+}
+
+/// sum(q * a) of unpacked codes against one Q8_0 sub-block, exact i32
+/// (|sum(q*a)| <= 32*3*127 = 12192; maddubs pair sums <= 2*127*3 = 762, no
+/// i16 saturation) — all arms bitwise identical to cold.zig's dotQ2_0Q8_0.
+inline fn q2_0CodeDot(codes: Q2_0Codes, a: *const BlockQ8_0) i32 {
+    if (comptime builtin.cpu.arch == .aarch64) {
+        const a0: QKV16i8 = a.qs[0..16].*;
+        const a1: QKV16i8 = a.qs[16..32].*;
+        var acc: QKV4i32 = @splat(0);
+        acc = sdotI8x16(acc, codes.lo, a0);
+        acc = sdotI8x16(acc, codes.hi, a1);
+        return @reduce(.Add, acc);
+    }
+    const av: QKV32i8 = a.qs;
+    var acc: QKV8i32 = @splat(0);
+    acc = dotGroups32(acc, codes, av);
+    return @reduce(.Add, acc);
+}
+
+/// LHS rows sharing one weight-block unpack (comptime, so the code vectors
+/// and accumulators stay in registers): with rows-inner-of-columns the RHS
+/// is streamed once per row pair instead of once per row, halving prefill
+/// weight traffic. Decode (m = 1) takes the width-1 instantiation.
+const q2_0_row_block: usize = 2;
+
+/// LHS Q8_0 sub-blocks a row-side bsum cache covers without allocating:
+/// 2048 sub-blocks = k up to 65536 (16 KiB of stack per cached row). Longer
+/// rows recompute per column group — identical values either way, the cache
+/// is bitwise-invisible.
+const q2_0_bsum_cache_subs: usize = 2048;
+
+/// One (row-width x 4-column) micro-tile over a full k reduction: weights
+/// unpacked once per (column, sub-block) and dotted against `rw` activation
+/// rows, everything comptime-shaped so codes and accumulators stay in
+/// registers. Accumulation order per output element matches cold.zig
+/// dotQ2_0Q8_0 exactly (blocks in order, sum += d0 * d1_k * isum_k).
+inline fn q2_0MicroTile(
+    comptime rw: usize,
+    comptime cw: usize,
+    out: []f32,
+    lhs_blocks: []const BlockQ8_0,
+    rhs: *const QuantizedMatmulRhsQ2_0,
+    n: usize,
+    r: usize,
+    c: usize,
+    bsums: *const [q2_0_row_block][q2_0_bsum_cache_subs]i32,
+    cached: bool,
+) void {
+    const sub_per_block = q2_0_block_size / q8_0_block_size; // 4
+    const blocks_per_row = rhs.rows.blocks_per_row;
+    const sub_blocks_per_row = blocks_per_row * sub_per_block;
+
+    var wcols: [cw][]const BlockQ2_0 = undefined;
+    inline for (0..cw) |ci| wcols[ci] = rhs.columnBlocks(c + ci);
+    var arows: [rw][]const BlockQ8_0 = undefined;
+    inline for (0..rw) |r2| arows[r2] = lhs_blocks[(r + r2) * sub_blocks_per_row ..][0..sub_blocks_per_row];
+
+    var sums: [rw][cw]f32 = @splat(@splat(0));
+    var bi: usize = 0;
+    while (bi < blocks_per_row) : (bi += 1) {
+        var d0: [cw]f32 = undefined;
+        inline for (0..cw) |ci| d0[ci] = f16BitsToF32(wcols[ci][bi].d);
+        // Per-block partial sums, folded into the running total only after
+        // the block's four sub-blocks — the exact nesting of the cold
+        // reference (matmulTableQ8_0RhsTile adds one dotQ2_0Q8_0 per block).
+        var part: [rw][cw]f32 = @splat(@splat(0));
+        inline for (0..sub_per_block) |k| {
+            const si = bi * sub_per_block + k;
+            var codes: [cw]Q2_0Codes = undefined;
+            inline for (0..cw) |ci| codes[ci] = q2_0UnpackCodes(wcols[ci][bi].qs, k);
+            inline for (0..rw) |r2| {
+                const a = &arows[r2][si];
+                const bsum = if (cached) bsums[r2][si] else q8_0BlockSum(a);
+                const d1 = f16BitsToF32(a.d);
+                inline for (0..cw) |ci| {
+                    const isum = q2_0CodeDot(codes[ci], a) - bsum;
+                    part[r2][ci] += d0[ci] * d1 * @as(f32, @floatFromInt(isum));
+                }
+            }
+        }
+        inline for (0..rw) |r2| {
+            inline for (0..cw) |ci| sums[r2][ci] += part[r2][ci];
+        }
+    }
+    inline for (0..rw) |r2| {
+        inline for (0..cw) |ci| out[(r + r2) * n + c + ci] = sums[r2][ci];
+    }
+}
+
+/// out[r, c] tiles of LHS Q8_0 activation rows x Q2_0 weight rows (RHS
+/// convention: rhs row c is output column c). Allocation-free, unchecked:
+/// callers validate shapes (out is m*n, lhs_blocks is m*4*blocks_per_row).
+/// Row pairs share each weight unpack (`q2_0MicroTile`); every micro-tile
+/// width is a comptime instantiation, so all shapes take register-resident
+/// bodies and every path is bitwise identical to cold.zig's dotQ2_0Q8_0.
+pub fn matmulQ2_0RhsTile(
+    out: []f32,
+    lhs_blocks: []const BlockQ8_0,
+    rhs: *const QuantizedMatmulRhsQ2_0,
+    n: usize,
+    r0: usize,
+    r1: usize,
+    c0: usize,
+    c1: usize,
+) void {
+    const sub_per_block = q2_0_block_size / q8_0_block_size; // 4
+    const blocks_per_row = rhs.rows.blocks_per_row;
+    const sub_blocks_per_row = blocks_per_row * sub_per_block;
+    const cached = sub_blocks_per_row <= q2_0_bsum_cache_subs;
+    var bsum_cache: [q2_0_row_block][q2_0_bsum_cache_subs]i32 = undefined;
+
+    var r = r0;
+    while (r < r1) : (r += q2_0_row_block) {
+        const rw_live = @min(q2_0_row_block, r1 - r);
+        if (cached) {
+            for (0..rw_live) |r2| {
+                const arow = lhs_blocks[(r + r2) * sub_blocks_per_row ..][0..sub_blocks_per_row];
+                for (arow, 0..) |*a, si| bsum_cache[r2][si] = q8_0BlockSum(a);
+            }
+        }
+        var c = c0;
+        inline for (.{ q2_0_row_block, 1 }) |rw| {
+            if (rw_live == rw) {
+                while (c + ternary_col_block <= c1) : (c += ternary_col_block) {
+                    q2_0MicroTile(rw, ternary_col_block, out, lhs_blocks, rhs, n, r, c, &bsum_cache, cached);
+                }
+                while (c < c1) : (c += 1) {
+                    q2_0MicroTile(rw, 1, out, lhs_blocks, rhs, n, r, c, &bsum_cache, cached);
+                }
+            }
+        }
+    }
+}
+
+pub fn matmulQ2_0RhsRange(
+    out: []f32,
+    lhs_blocks: []const BlockQ8_0,
+    rhs: *const QuantizedMatmulRhsQ2_0,
+    m: usize,
+    n: usize,
+    r0: usize,
+    r1: usize,
+) void {
+    _ = m;
+    matmulQ2_0RhsTile(out, lhs_blocks, rhs, n, r0, r1, 0, n);
 }
 
 // ---------------- f32-activation path (mul-free, IEEE-exact) ----------------

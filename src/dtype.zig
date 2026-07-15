@@ -13,6 +13,7 @@ pub const DType = enum {
     f32,
     f64,
     q1_0,
+    q2_0,
     q4_0,
     q4_1,
     q5_0,
@@ -52,6 +53,7 @@ pub const DTypeKind = enum {
 };
 
 pub const q1_0_block_size: usize = 128;
+pub const q2_0_block_size: usize = 128;
 pub const q4_0_block_size: usize = 32;
 pub const q4_1_block_size: usize = 32;
 pub const q5_0_block_size: usize = 32;
@@ -69,6 +71,11 @@ pub const iq3s_n_scale: usize = qk_k_block_size / 64;
 pub const BlockQ1_0 = extern struct {
     d: u16,
     qs: [q1_0_block_size / 8]u8,
+};
+
+pub const BlockQ2_0 = extern struct {
+    d: u16,
+    qs: [q2_0_block_size / 4]u8,
 };
 
 pub const BlockQ8_0 = extern struct {
@@ -220,6 +227,7 @@ pub const BlockNVFP4 = extern struct {
 
 comptime {
     std.debug.assert(@sizeOf(BlockQ1_0) == 18);
+    std.debug.assert(@sizeOf(BlockQ2_0) == 34);
     std.debug.assert(@sizeOf(BlockQ4_0) == 18);
     std.debug.assert(@sizeOf(BlockQ4_1) == 20);
     std.debug.assert(@sizeOf(BlockQ5_0) == 22);
@@ -261,6 +269,7 @@ pub fn Scalar(comptime dtype: DType) type {
         .f32 => f32,
         .f64 => f64,
         .q1_0,
+        .q2_0,
         .q4_0,
         .q4_1,
         .q5_0,
@@ -293,6 +302,7 @@ pub fn Scalar(comptime dtype: DType) type {
 pub fn Storage(comptime dtype: DType) type {
     return switch (dtype) {
         .q1_0 => BlockQ1_0,
+        .q2_0 => BlockQ2_0,
         .q4_0 => BlockQ4_0,
         .q4_1 => BlockQ4_1,
         .q5_0 => BlockQ5_0,
@@ -329,6 +339,7 @@ pub fn Accumulator(comptime dtype: DType) type {
         .bool, .u8, .u16 => u64,
         .i8, .i16, .i32, .i64 => i64,
         .q1_0,
+        .q2_0,
         .q4_0,
         .q4_1,
         .q5_0,
@@ -361,6 +372,7 @@ pub fn Accumulator(comptime dtype: DType) type {
 pub fn kind(comptime dtype: DType) DTypeKind {
     return switch (dtype) {
         .q1_0,
+        .q2_0,
         .q4_0,
         .q4_1,
         .q5_0,
@@ -459,6 +471,7 @@ pub fn supportsToFloat(comptime dtype: DType) bool {
 pub fn supportsQuantizedMatmulRhs(comptime dtype: DType) bool {
     return switch (dtype) {
         .q1_0,
+        .q2_0,
         .q4_0,
         .q4_1,
         .q5_0,
@@ -494,6 +507,7 @@ pub fn supportsQuantizedGetRows(comptime dtype: DType) bool {
 pub fn logicalDType(comptime dtype: DType) DType {
     return switch (dtype) {
         .q1_0,
+        .q2_0,
         .q4_0,
         .q4_1,
         .q5_0,
@@ -527,6 +541,7 @@ pub fn logicalDType(comptime dtype: DType) DType {
 pub fn blockSize(comptime dtype: DType) usize {
     return switch (dtype) {
         .q1_0 => q1_0_block_size,
+        .q2_0 => q2_0_block_size,
         .q4_0 => q4_0_block_size,
         .q4_1 => q4_1_block_size,
         .q5_0 => q5_0_block_size,
