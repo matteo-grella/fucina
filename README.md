@@ -272,11 +272,13 @@ also looking for a good excuse to finally learn Zig. This project is it.
 
 Development — code and documentation alike — leans on strong assistance
 from agentic coding systems, with humans leading the ideas, the testing,
-and the debugging, and writing first-hand as well. I also wanted to gain
-practical experience coding with AI, and so far I have found that the best
-results come from a review loop where humans and multiple frontier models
-critique one another’s specifications and implementations, iterating toward
-a shared consensus.
+and the debugging, and writing first-hand as well. That stance now has a
+motto, thanks to Salvatore Sanfilippo:
+["Control the ideas, not the code"](https://antirez.com/news/169).
+I also wanted to gain practical experience coding with AI, and so far I
+have found that the best results come from a review loop where humans and
+multiple frontier models critique one another’s specifications and
+implementations, iterating toward a shared consensus.
 
 ## Contributing
 
