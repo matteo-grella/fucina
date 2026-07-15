@@ -285,9 +285,10 @@ test "pilot: hints spin up the I/O thread and prediction recall is scored on acq
 
     // Predict {5, 6, 3}, then route to {5, 6}: recall = 2/2 (both routed
     // experts were predicted; the over-prediction of 3 is bandwidth, not a
-    // recall miss). All three were uncached -> 9 ranges enqueued (3 projs).
+    // recall miss). All three were uncached -> 3 stage requests enqueued
+    // (one per expert; the worker loads whole experts, not per-proj ranges).
     fx.store.pilotHint(0, &.{ 5, 6, 3 });
-    try std.testing.expectEqual(@as(u64, 9), fx.store.stats.pilot_ranges);
+    try std.testing.expectEqual(@as(u64, 3), fx.store.stats.pilot_ranges);
     try fx.expectDecodeMatches(&ctx, &.{ 5, 6 }, &.{ 0.7, 0.3 });
     try std.testing.expectEqual(@as(u64, 2), fx.store.stats.pilot_recall_hits);
     try std.testing.expectEqual(@as(u64, 2), fx.store.stats.pilot_recall_total);
@@ -299,10 +300,68 @@ test "pilot: hints spin up the I/O thread and prediction recall is scored on acq
 
     // Cached/pinned experts are not re-hinted; a wrong prediction scores 0.
     fx.store.pilotHint(0, &.{ 5, 1 }); // 5 is now cached: only 1 enqueues
-    try std.testing.expectEqual(@as(u64, 12), fx.store.stats.pilot_ranges);
+    try std.testing.expectEqual(@as(u64, 4), fx.store.stats.pilot_ranges);
     try fx.expectDecodeMatches(&ctx, &.{ 0, 2 }, &.{ 0.5, 0.5 });
     try std.testing.expectEqual(@as(u64, 2), fx.store.stats.pilot_recall_hits);
     try std.testing.expectEqual(@as(u64, 4), fx.store.stats.pilot_recall_total);
+}
+
+test "staging tier: pilot hints racing acquires and slot reclaim stay bit-exact" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var fx: Fixture = undefined;
+    try fx.init(allocator, 2);
+    defer fx.deinit();
+
+    // A second store over the same bytes with a deliberately tiny staging
+    // tier: 3 slots for 8 experts under a 2-slot LRU forces constant
+    // ready-slot reclaim (staged_wasted), duplicate-hint dedup, and
+    // consume-by-swap while the worker is mid-load on the other slots.
+    var store = try ExpertStore.create(allocator, &.{fx.path}, 1, .{
+        .cache_slots_per_layer = 2,
+        .prefetch_stage_slots = 3,
+    });
+    defer store.destroy();
+    try fx.registerLayer(store);
+    try store.finalize();
+
+    const Hammer = struct {
+        fn run(s: *ExpertStore, salt: usize, stop: *std.atomic.Value(bool)) void {
+            var i: usize = salt;
+            while (!stop.load(.acquire)) : (i +%= 1) {
+                s.pilotHint(0, &.{ i % n_expert, (i + 2) % n_expert, (i + 5) % n_expert });
+            }
+        }
+    };
+    var stop = std.atomic.Value(bool).init(false);
+    const t1 = try std.Thread.spawn(.{}, Hammer.run, .{ store, 0, &stop });
+    const t2 = try std.Thread.spawn(.{}, Hammer.run, .{ store, 3, &stop });
+
+    // Every decode races the staging worker; each one must stay bitwise
+    // equal to the resident path whether it hit a staged slab, a sync
+    // read, or the LRU cache.
+    var round: usize = 0;
+    while (round < 120) : (round += 1) {
+        const a = round % n_expert;
+        const b = (round + 3) % n_expert;
+        fx.expectDecodeWith(&ctx, store, &.{ a, b }, &.{ 0.6, 0.4 }) catch |err| {
+            stop.store(true, .release);
+            t1.join();
+            t2.join();
+            return err;
+        };
+    }
+    stop.store(true, .release);
+    t1.join();
+    t2.join();
+
+    // The tier was actually exercised, and its ledger stays consistent:
+    // consumed swaps can never exceed published loads.
+    try std.testing.expect(store.stats.staged_loads > 0);
+    try std.testing.expect(store.stats.staged_consumed <= store.stats.staged_loads);
 }
 
 test "q8_0 experts with non-256-aligned dims: streamed decode is bit-exact vs resident" {

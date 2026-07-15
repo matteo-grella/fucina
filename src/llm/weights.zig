@@ -1134,8 +1134,12 @@ pub fn reportAndSaveMoeStream(store: *fucina.ExpertStore, learn: bool, writer: a
         .{ s.acquires, s.hits, s.misses, s.hitRate() * 100, s.pin_hits, @as(f64, @floatFromInt(s.bytes_read)) / 1e9, @as(f64, @floatFromInt(s.read_ns)) / 1e9, store.cap, store.pinned_experts, @as(f64, @floatFromInt(store.pinned_bytes)) / 1e9 },
     ) catch {};
     if (s.pilot_recall_total > 0) writer.print(
-        "moe pilot: recall {d:.1}% ({d}/{d} routed experts predicted), {d} ranges hinted\n",
+        "moe pilot: recall {d:.1}% ({d}/{d} routed experts predicted), {d} experts hinted\n",
         .{ s.pilotRecall() * 100, s.pilot_recall_hits, s.pilot_recall_total, s.pilot_ranges },
+    ) catch {};
+    if (s.staged_loads > 0) writer.print(
+        "moe prefetch: staged {d} loads ({d:.2} GB), consumed {d}, wasted {d}\n",
+        .{ s.staged_loads, @as(f64, @floatFromInt(s.staged_bytes)) / 1e9, s.staged_consumed, s.staged_wasted },
     ) catch {};
 }
 

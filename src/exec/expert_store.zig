@@ -334,9 +334,19 @@ const ProjGeometry = struct {
 const slab_align = 64;
 const invalid_eid = std.math.maxInt(u32);
 
-/// One readahead range for the pilot's I/O thread (SPSC ring entry).
-const PilotRange = struct { offset: u64, len: u32, part: u16 };
+/// One expert prefetch request for the pilot's I/O thread (SPSC ring
+/// entry). The worker LOADS the expert into a staging slot — true
+/// asynchronous prefetch, not kernel advice; a lost request is not an
+/// error (staging is advisory, `acquire` always falls back to its own
+/// synchronous read).
+const PilotReq = struct { layer_i: u32, eid: u32 };
 const pilot_ring_cap = 4096;
+
+/// Staging-slot lifecycle (`stage_mutex` guards every transition; the slab
+/// is worker-owned while `.loading`, so neither consume nor reclaim may
+/// touch it until `.ready`).
+const StageState = enum(u8) { empty, loading, ready };
+const StageMeta = struct { layer_i: u32 = 0, eid: u32 = invalid_eid, state: StageState = .empty, stamp: u64 = 0 };
 
 /// One cached expert: a single slab holding its gate+up+down blocks (loaded
 /// with one coalesced logical fetch), stamped for
@@ -514,6 +524,10 @@ pub const ExpertStore = struct {
         /// Issue WILLNEED-style readahead for the whole miss set before the
         /// first synchronous read.
         readahead: bool = true,
+        /// Staging slots for the prefetch worker's true async loads (0 =
+        /// kernel-advice era behavior: hints enqueue but load nothing).
+        /// Slabs allocate lazily to the hinted layers' sizes.
+        prefetch_stage_slots: usize = 64,
         /// The learning cache: when the persisted usage histogram (sidecar
         /// `<gguf>.experts` file) carries enough history, pin the hottest
         /// experts in RAM at finalize — they are read once at startup and
@@ -538,6 +552,13 @@ pub const ExpertStore = struct {
         pilot_ranges: u64 = 0,
         pilot_recall_hits: u64 = 0,
         pilot_recall_total: u64 = 0,
+        /// Staging tier (true async prefetch): worker loads completed,
+        /// loads consumed by `acquire`, ready entries overwritten unused,
+        /// and bytes read by the worker (disjoint from `bytes_read`).
+        staged_loads: u64 = 0,
+        staged_consumed: u64 = 0,
+        staged_wasted: u64 = 0,
+        staged_bytes: u64 = 0,
 
         pub fn hitRate(self: Stats) f64 {
             const total = self.hits + self.misses;
@@ -586,11 +607,23 @@ pub const ExpertStore = struct {
     // call itself BLOCKS (measured ~0.5 ms each upstream), so hinting inline
     // would cost the forward thread more than the overlap earns. Ring full
     // = drop: a lost hint is not an error.
-    pilot_ring: []PilotRange = &.{},
+    pilot_ring: []PilotReq = &.{},
     pilot_w: std.atomic.Value(u32) = .init(0),
     pilot_r: std.atomic.Value(u32) = .init(0),
     pilot_stop: std.atomic.Value(bool) = .init(false),
     pilot_thread: ?std.Thread = null,
+
+    // ---- staging tier (true async prefetch) ----
+    // The worker claims a slot under `stage_mutex` (an empty one, else the
+    // oldest ready — never a loading one), preads OUTSIDE the lock into the
+    // claimed slab, then publishes `.ready`; `acquire`'s miss path consumes
+    // ready entries by zero-copy slab swap. Never touches the store mutex
+    // from the worker; deadlock-free by construction, and staged bytes come
+    // from the same `readExpert` on the same offsets — bit-identical.
+    stage_mutex: thread.Mutex = .{},
+    stage_slots: []Slot = &.{},
+    stage_meta: []StageMeta = &.{},
+    stage_stamp: u64 = 0,
 
     /// The store is heap-allocated so `StreamedMoeRhs` values and the owning
     /// model can hold stable pointers while the model struct moves by value.
@@ -644,6 +677,9 @@ pub const ExpertStore = struct {
             self.pilot_stop.store(true, .release);
             t.join();
         }
+        for (self.stage_slots) |*slot| slot.deinit(allocator);
+        if (self.stage_slots.len > 0) allocator.free(self.stage_slots);
+        if (self.stage_meta.len > 0) allocator.free(self.stage_meta);
         allocator.free(self.pilot_ring);
         allocator.free(self.usage_path);
         for (self.work) |*slot| slot.deinit(allocator);
@@ -920,8 +956,13 @@ pub const ExpertStore = struct {
         const read_start = if (self.n_miss > 0) monotonicNanos() else null;
         for (self.miss_eids[0..self.n_miss], 0..) |eid, w| {
             const slot = &self.work[w];
-            try slot.ensureCapacity(self.allocator, ls.slab_bytes);
-            try self.readExpert(ls, eid, slot);
+            // A staged load resolves the miss by slab swap; otherwise the
+            // synchronous read path is exactly what it always was.
+            if (!self.stageConsume(layer_i, eid, slot)) {
+                try slot.ensureCapacity(self.allocator, ls.slab_bytes);
+                try self.readExpert(ls, eid, slot);
+                self.stats.bytes_read += expertBytes(ls);
+            }
             slot.eid = eid;
             self.resolveSlot(ls, eid, slot);
         }
@@ -997,14 +1038,22 @@ pub const ExpertStore = struct {
     /// disk; coalescing would need a converter-ordered container). A
     /// multi-plane projection's planes land contiguously in the slab
     /// section, which is the layout the MoE dispatch reads.
+    /// Stats-free by design: called from the forward thread (under the
+    /// store mutex) AND the prefetch worker (no store mutex) — each caller
+    /// accounts bytes under its own lock (`bytes_read` / `staged_bytes`).
     fn readExpert(self: *ExpertStore, ls: *LayerState, eid: u32, slot: *Slot) Error!void {
         for (&ls.projs, 0..) |*g, p| {
             for (0..g.plane_count) |plane| {
                 const dst = slot.slab[ls.proj_off[p] + plane * g.plane_bytes ..][0..g.plane_bytes];
                 try self.preadFull(g.part, dst, g.planeFileOffset(eid, plane));
             }
-            self.stats.bytes_read += g.expert_bytes;
         }
+    }
+
+    fn expertBytes(ls: *const LayerState) u64 {
+        var total: u64 = 0;
+        for (&ls.projs) |*g| total += g.expert_bytes;
+        return total;
     }
 
     fn preadFull(self: *ExpertStore, part: u16, buf: []u8, offset: u64) Error!void {
@@ -1042,20 +1091,38 @@ pub const ExpertStore = struct {
             const eid: u32 = @intCast(e);
             if (findPinned(ls, eid) != null) continue;
             if (self.findCached(ls, eid) != null) continue;
-            for (&ls.projs) |*g| {
-                for (0..g.plane_count) |plane| self.pilotEnqueue(.{ .offset = g.planeFileOffset(eid, plane), .len = @intCast(@min(g.plane_bytes, std.math.maxInt(u32))), .part = g.part });
-            }
+            self.pilotEnqueue(.{ .layer_i = @intCast(layer_i), .eid = eid });
         }
+    }
+
+    /// True if the expert is pinned or currently cached — attending to it
+    /// costs no disk read. Routing-time oracle for cache-aware expert
+    /// dropping; call between ops (never while an acquire is open — the
+    /// store mutex is not reentrant).
+    pub fn isResident(self: *ExpertStore, layer_i: usize, eid: usize) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (!self.finalized or layer_i >= self.layers.len or !self.registered[layer_i]) return false;
+        const ls = &self.layers[layer_i];
+        if (eid >= ls.n_expert) return false;
+        const e: u32 = @intCast(eid);
+        return findPinned(ls, e) != null or self.findCached(ls, e) != null;
     }
 
     fn pilotStart(self: *ExpertStore) !void {
         if (self.pilot_ring.len == 0) {
-            self.pilot_ring = try self.allocator.alloc(PilotRange, pilot_ring_cap);
+            self.pilot_ring = try self.allocator.alloc(PilotReq, pilot_ring_cap);
+        }
+        if (self.stage_meta.len == 0 and self.options.prefetch_stage_slots > 0) {
+            self.stage_slots = try self.allocator.alloc(Slot, self.options.prefetch_stage_slots);
+            for (self.stage_slots) |*s| s.* = .{};
+            self.stage_meta = try self.allocator.alloc(StageMeta, self.options.prefetch_stage_slots);
+            for (self.stage_meta) |*m| m.* = .{};
         }
         self.pilot_thread = try std.Thread.spawn(.{}, pilotWorker, .{self});
     }
 
-    fn pilotEnqueue(self: *ExpertStore, range: PilotRange) void {
+    fn pilotEnqueue(self: *ExpertStore, range: PilotReq) void {
         const w = self.pilot_w.load(.monotonic);
         const r = self.pilot_r.load(.acquire);
         if (w -% r >= pilot_ring_cap) return; // full: drop the hint
@@ -1072,10 +1139,77 @@ pub const ExpertStore = struct {
                 sleepMicros(200);
                 continue;
             }
-            const range = self.pilot_ring[r % pilot_ring_cap];
+            const req = self.pilot_ring[r % pilot_ring_cap];
             self.pilot_r.store(r +% 1, .release);
-            hintWillNeed(self.fds[range.part], range.offset, range.len);
+            self.stageLoad(req);
         }
+    }
+
+    /// Load one predicted expert into a staging slot: claim under
+    /// `stage_mutex`, pread outside the lock, publish ready. Duplicates,
+    /// full tiers, and read failures degrade to no-ops — staging is advice.
+    fn stageLoad(self: *ExpertStore, req: PilotReq) void {
+        const ls = &self.layers[req.layer_i];
+        var slot_i: usize = 0;
+        {
+            self.stage_mutex.lock();
+            defer self.stage_mutex.unlock();
+            for (self.stage_meta) |*m| {
+                if (m.state != .empty and m.layer_i == req.layer_i and m.eid == req.eid) return;
+            }
+            var oldest: ?usize = null;
+            var found = false;
+            for (self.stage_meta, 0..) |*m, i| {
+                if (m.state == .empty) {
+                    slot_i = i;
+                    found = true;
+                    break;
+                }
+                if (m.state == .ready and (oldest == null or m.stamp < self.stage_meta[oldest.?].stamp)) oldest = i;
+            }
+            if (!found) {
+                slot_i = oldest orelse return; // every slot mid-load: drop
+                self.stats.staged_wasted += 1;
+            }
+            self.stage_stamp += 1;
+            self.stage_meta[slot_i] = .{ .layer_i = req.layer_i, .eid = req.eid, .state = .loading, .stamp = self.stage_stamp };
+        }
+        const slot = &self.stage_slots[slot_i];
+        var ok = true;
+        slot.ensureCapacity(self.allocator, ls.slab_bytes) catch {
+            ok = false;
+        };
+        if (ok) self.readExpert(ls, req.eid, slot) catch {
+            ok = false;
+        };
+        self.stage_mutex.lock();
+        defer self.stage_mutex.unlock();
+        if (!ok) {
+            self.stage_meta[slot_i].state = .empty;
+            return;
+        }
+        self.stage_meta[slot_i].state = .ready;
+        self.stats.staged_loads += 1;
+        self.stats.staged_bytes += expertBytes(ls);
+    }
+
+    /// Consume a ready staged expert into `dst` by slab swap (zero copy).
+    /// False = not staged; the caller does its synchronous read as always.
+    fn stageConsume(self: *ExpertStore, layer_i: usize, eid: u32, dst: *Slot) bool {
+        if (self.stage_meta.len == 0) return false;
+        self.stage_mutex.lock();
+        defer self.stage_mutex.unlock();
+        for (self.stage_meta, 0..) |*m, i| {
+            if (m.state == .ready and m.layer_i == @as(u32, @intCast(layer_i)) and m.eid == eid) {
+                const tmp = dst.slab;
+                dst.slab = self.stage_slots[i].slab;
+                self.stage_slots[i].slab = tmp;
+                m.* = .{};
+                self.stats.staged_consumed += 1;
+                return true;
+            }
+        }
+        return false;
     }
 
     // ---- the learning cache: persistent usage histogram --------------------
