@@ -185,8 +185,13 @@ pub const Config = struct {
         if (self.num_attention_heads % self.num_key_value_heads != 0) return Error.InvalidConfig;
         if (self.full_attention_interval == 0) return Error.InvalidConfig;
         if (self.ssm_dt_rank == 0 or self.ssm_d_inner % self.ssm_dt_rank != 0) return Error.InvalidConfig;
-        // This loader assumes uniform DeltaNet heads (no GQA-repeat in the scan).
-        if (self.numKHeads() != self.numVHeads()) return Error.UnsupportedVariant;
+        // The scan broadcasts q/k heads onto v-heads TILED (v-head h reads
+        // k-head h % numKHeads), matching ggml_gated_delta_net's
+        // iq1/ik1 = iv1 % ne1 semantics (Qwen3.5 dense is uniform, 1:1;
+        // Qwen3.6/Bonsai 27B runs 48 v-heads over 16 k-heads).
+        if (self.numKHeads() == 0 or self.numVHeads() % self.numKHeads() != 0) return Error.UnsupportedVariant;
+        // q/k and v head dims must agree for the shared-Sd scan.
+        if (self.headKDim() != self.headVDim()) return Error.UnsupportedVariant;
     }
 };
 
@@ -1086,6 +1091,7 @@ fn siluScalar(x: f32) f32 {
 /// its `state`/`uo` scratch and writes only its head's slice of `out`.
 const HeadScanTask = struct {
     h: usize,
+    n_k_heads: usize, // tiled q/k broadcast: v-head h reads q/k head h % n_k_heads
     seq: usize,
     Sd: usize,
     H: usize,
@@ -1113,6 +1119,7 @@ const HeadScanTask = struct {
 
 fn runHeadScan(task: *const HeadScanTask) void {
     const h = task.h;
+    const kh = h % task.n_k_heads; // tiled q/k broadcast (ggml GDN iq1/ik1 = iv1 % ne1)
     const Sd = task.Sd;
     const eps = task.eps;
     const cd = task.cd;
@@ -1122,8 +1129,8 @@ fn runHeadScan(task: *const HeadScanTask) void {
 
     if (task.reset_state) @memset(state, 0);
     for (0..task.seq) |t| {
-        const qb = t * task.conv_dim + h * Sd;
-        const kb = t * task.conv_dim + task.k_off + h * Sd;
+        const qb = t * task.conv_dim + kh * Sd;
+        const kb = t * task.conv_dim + task.k_off + kh * Sd;
         const vb = t * task.conv_dim + task.v_off + h * Sd;
 
         // L2-norm scales for q and k (1 / max(sqrt(Σx²), eps)).
@@ -1284,7 +1291,8 @@ fn deltaNetChunked(
 
 /// Inputs to the batched chunked-GEMM prefill scan (`deltaNetScanBatched`).
 const BatchedScan = struct {
-    H: usize, // num v-heads (== num k-heads)
+    H: usize, // num v-heads
+    n_k_heads: usize, // num q/k heads; v-head h reads q/k head h % n_k_heads (tiled)
     Sd: usize, // head dim (== state dim)
     seq: usize,
     conv_dim: usize,
@@ -1315,6 +1323,7 @@ const BatchedScan = struct {
 /// 16 heads run concurrently with no synchronization.
 const ScanCtx = struct {
     H: usize,
+    n_k_heads: usize, // tiled q/k broadcast: v-head h reads q/k head h % n_k_heads
     Sd: usize,
     C: usize, // current chunk length
     c0: usize, // current chunk start
@@ -1382,13 +1391,14 @@ fn borrowedTaggedTensor(
 fn scanRepack(t: *const HeadTask) void {
     const cx = t.cx;
     const h = t.h;
+    const kh = h % cx.n_k_heads; // tiled q/k broadcast (ggml GDN iq1/ik1 = iv1 % ne1)
     const Sd = cx.Sd;
     const C = cx.C;
     var acc: f32 = 0;
     for (0..C) |ti| {
         const tt = cx.c0 + ti;
-        const bq = tt * cx.conv_dim + h * Sd;
-        const bk = tt * cx.conv_dim + cx.k_off + h * Sd;
+        const bq = tt * cx.conv_dim + kh * Sd;
+        const bk = tt * cx.conv_dim + cx.k_off + kh * Sd;
         const bv = tt * cx.conv_dim + cx.v_off + h * Sd;
         var qss: f32 = 0;
         var kss: f32 = 0;
@@ -1545,6 +1555,7 @@ fn deltaNetScanBatched(ctx: *ExecContext, p: BatchedScan) !void {
 
     var cx = ScanCtx{
         .H = H,
+        .n_k_heads = p.n_k_heads,
         .Sd = Sd,
         .C = 0,
         .c0 = 0,
@@ -1673,13 +1684,14 @@ fn linearForward(
     if (profile) |p| p.linear_layers += 1;
 
     const seq = input.dim(.seq);
-    const H = cfg.numVHeads(); // 16 (== numKHeads)
-    const Sd = cfg.headVDim(); // 128 (== headKDim)
+    const H = cfg.numVHeads(); // v-heads (0.8B: 16; Bonsai 27B: 48)
+    const n_k_heads = cfg.numKHeads(); // q/k heads, tiled onto the v-heads
+    const Sd = cfg.headVDim(); // 128 (== headKDim, enforced by validate)
     const eps = cfg.rms_norm_eps;
-    const conv_dim = cfg.convDim(); // 6144
-    const vd = H * Sd; // 2048 (value_dim)
-    const k_off = vd; // q [0,vd) | k [vd,2vd) | v [2vd,3vd)
-    const v_off = 2 * vd;
+    const conv_dim = cfg.convDim(); // key_dim*2 + value_dim
+    const vd = cfg.valueDim(); // H*Sd
+    const k_off = cfg.keyDim(); // q [0,key_dim) | k [key_dim,2*key_dim) | v [2*key_dim,..)
+    const v_off = 2 * cfg.keyDim();
     const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(Sd)));
 
     const norm_start = profileStart(profile, io);
@@ -1732,6 +1744,7 @@ fn linearForward(
         // Prefill: batched chunked-GEMM scan (heads batched across the matmuls).
         try deltaNetScanBatched(ctx, .{
             .H = H,
+            .n_k_heads = n_k_heads,
             .Sd = Sd,
             .seq = seq,
             .conv_dim = conv_dim,
@@ -1762,6 +1775,7 @@ fn linearForward(
         defer a.free(tasks);
         for (tasks, 0..) |*task, h| task.* = .{
             .h = h,
+            .n_k_heads = n_k_heads,
             .seq = seq,
             .Sd = Sd,
             .H = H,
@@ -2142,6 +2156,7 @@ test "deltaNetScanBatched matches the per-token runHeadScan (gated output + carr
     for (0..H) |h| {
         var task = HeadScanTask{
             .h = h,
+            .n_k_heads = H,
             .seq = seq,
             .Sd = Sd,
             .H = H,
@@ -2176,6 +2191,7 @@ test "deltaNetScanBatched matches the per-token runHeadScan (gated output + carr
     defer a.free(state_b);
     try deltaNetScanBatched(&ctx, .{
         .H = H,
+        .n_k_heads = H,
         .Sd = Sd,
         .seq = seq,
         .conv_dim = conv_dim,
@@ -2201,6 +2217,133 @@ test "deltaNetScanBatched matches the per-token runHeadScan (gated output + carr
 
     for (0..seq * vd) |i| try std.testing.expectApproxEqAbs(out_ref[i], out_b[i], 2e-3);
     for (0..H * hsz) |i| try std.testing.expectApproxEqAbs(state_ref[i], state_b[i], 2e-3);
+}
+
+test "non-uniform DeltaNet heads: batched scan matches the recurrent scan under tiled q/k broadcast" {
+    // Qwen3.6/Bonsai shape in miniature: 6 v-heads over 2 q/k heads (v-head h
+    // reads q/k head h % 2 — ggml_gated_delta_net's iv1 % ne1). Both scan
+    // paths must implement the same mapping.
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+    const a = ctx.allocator;
+
+    var prng = std.Random.DefaultPrng.init(0xB05A1);
+    const rnd = prng.random();
+
+    const H = 6;
+    const n_k_heads = 2;
+    const Sd = 16;
+    const seq = 70; // full chunk + short tail
+    const vd = H * Sd;
+    const key_dim = n_k_heads * Sd;
+    const conv_dim = 2 * key_dim + vd;
+    const k_off = key_dim;
+    const v_off = 2 * key_dim;
+    const gate_stride = vd + 2 * H;
+    const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(Sd)));
+    const eps: f32 = 1e-6;
+
+    const cd = try a.alloc(f32, seq * conv_dim);
+    defer a.free(cd);
+    const gate = try a.alloc(f32, seq * gate_stride);
+    defer a.free(gate);
+    for (cd) |*x| x.* = rnd.float(f32) * 2 - 1;
+    for (gate) |*x| x.* = rnd.float(f32) * 2 - 1;
+    const zd = gate[0..];
+    const ad = gate[vd..];
+    const bd = gate[vd + H ..];
+
+    const ssm_a = try a.alloc(f32, H);
+    defer a.free(ssm_a);
+    const ssm_dt = try a.alloc(f32, H);
+    defer a.free(ssm_dt);
+    const ssm_norm = try a.alloc(f32, Sd);
+    defer a.free(ssm_norm);
+    for (ssm_a) |*x| x.* = -(rnd.float(f32) + 0.25);
+    for (ssm_dt) |*x| x.* = rnd.float(f32) * 0.5;
+    for (ssm_norm) |*x| x.* = rnd.float(f32) + 0.5;
+
+    const hsz = Sd * Sd;
+    const out_ref = try a.alloc(f32, seq * vd);
+    defer a.free(out_ref);
+    const state_ref = try a.alloc(f32, H * hsz);
+    defer a.free(state_ref);
+    const uo = try a.alloc(f32, H * 2 * Sd);
+    defer a.free(uo);
+    for (0..H) |h| {
+        var task = HeadScanTask{
+            .h = h,
+            .n_k_heads = n_k_heads,
+            .seq = seq,
+            .Sd = Sd,
+            .H = H,
+            .conv_dim = conv_dim,
+            .vd = vd,
+            .k_off = k_off,
+            .v_off = v_off,
+            .scale = scale,
+            .eps = eps,
+            .cd = cd,
+            .zd = zd,
+            .z_stride = gate_stride,
+            .ad = ad,
+            .alpha_stride = gate_stride,
+            .bd = bd,
+            .beta_stride = gate_stride,
+            .ssm_a = ssm_a,
+            .ssm_dt = ssm_dt,
+            .ssm_norm = ssm_norm,
+            .out = out_ref,
+            .state = state_ref[h * hsz ..][0..hsz],
+            .uo = uo[h * 2 * Sd ..][0 .. 2 * Sd],
+            .reset_state = true,
+        };
+        runHeadScan(&task);
+    }
+
+    const out_b = try a.alloc(f32, seq * vd);
+    defer a.free(out_b);
+    const state_b = try a.alloc(f32, H * hsz);
+    defer a.free(state_b);
+    try deltaNetScanBatched(&ctx, .{
+        .H = H,
+        .n_k_heads = n_k_heads,
+        .Sd = Sd,
+        .seq = seq,
+        .conv_dim = conv_dim,
+        .vd = vd,
+        .k_off = k_off,
+        .v_off = v_off,
+        .scale = scale,
+        .eps = eps,
+        .cd = cd,
+        .zd = zd,
+        .z_stride = gate_stride,
+        .ad = ad,
+        .alpha_stride = gate_stride,
+        .bd = bd,
+        .beta_stride = gate_stride,
+        .ssm_a = ssm_a,
+        .ssm_dt = ssm_dt,
+        .ssm_norm = ssm_norm,
+        .out = out_b,
+        .state = state_b,
+        .reset_state = true,
+    });
+
+    for (0..seq * vd) |i| try std.testing.expectApproxEqAbs(out_ref[i], out_b[i], 2e-3);
+    for (0..H * hsz) |i| try std.testing.expectApproxEqAbs(state_ref[i], state_b[i], 2e-3);
+
+    // The tiled mapping is real: v-heads 0 and 2 share q/k head 0 but carry
+    // different gates/values, so their outputs must differ.
+    var same = true;
+    for (0..Sd) |j| {
+        if (out_ref[0 * Sd + j] != out_ref[2 * Sd + j]) same = false;
+    }
+    try std.testing.expect(!same);
 }
 
 test "qwen35 rejects a q8_0 KV cache at the forward seam" {
