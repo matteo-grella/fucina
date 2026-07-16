@@ -496,6 +496,82 @@ test "public packed Q6_Kx4 RHS batched rows match stacked single rows" {
     }
 }
 
+test "public dense packed RHS supports f32 f16 and bf16 weights" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const m = 7;
+    const n = 5;
+    const k = 11;
+    const X = Tensor(.{ .batch, .in });
+    var x_values: [m * k]f32 = undefined;
+    for (&x_values, 0..) |*v, i| {
+        const q: i32 = @as(i32, @intCast(i % 17)) - 8;
+        v.* = @as(f32, @floatFromInt(q)) / 7;
+    }
+    var x = try X.fromSlice(&ctx, .{ m, k }, &x_values);
+    defer x.deinit();
+
+    var w_values: [n * k]f32 = undefined;
+    for (&w_values, 0..) |*v, i| {
+        const q: i32 = @as(i32, @intCast((i * 3) % 19)) - 9;
+        v.* = @as(f32, @floatFromInt(q)) / 11;
+    }
+    var expected: [m * n]f32 = undefined;
+    for (0..m) |i| for (0..n) |j| {
+        var sum: f32 = 0;
+        for (0..k) |p| sum += x_values[i * k + p] * w_values[j * k + p];
+        expected[i * n + j] = sum;
+    };
+
+    const W32 = Tensor(.{ .out, .in });
+    var w32 = try W32.fromSlice(&ctx, .{ n, k }, &w_values);
+    defer w32.deinit();
+    var p32 = try w32.packRhs(&ctx);
+    defer p32.deinit();
+    var y32 = try x.dotPacked(&ctx, &p32, .in, .out);
+    defer y32.deinit();
+    for (try y32.dataConst(), expected) |got, want| try std.testing.expectApproxEqAbs(want, got, 2e-5);
+
+    var w16_values: [n * k]f16 = undefined;
+    for (&w16_values, w_values) |*dst, src| dst.* = @floatCast(src);
+    const W16 = Tensor(.{ .dtype = .f16, .tags = .{ .out, .in } });
+    var w16 = try W16.fromSlice(&ctx, .{ n, k }, &w16_values);
+    defer w16.deinit();
+    var p16 = try w16.packRhs(&ctx);
+    defer p16.deinit();
+    var y16 = try x.dotPacked(&ctx, &p16, .in, .out);
+    defer y16.deinit();
+    for (try y16.dataConst(), 0..) |got, index| {
+        const i = index / n;
+        const j = index % n;
+        var want: f32 = 0;
+        for (0..k) |p| want += x_values[i * k + p] * @as(f32, @floatCast(w16_values[j * k + p]));
+        try std.testing.expectApproxEqAbs(want, got, 2e-5);
+    }
+
+    var wb_values: [n * k]u16 = undefined;
+    for (&wb_values, w_values) |*dst, src| dst.* = dtype_mod.f32ToBf16(src);
+    const WB = Tensor(.{ .dtype = .bf16, .tags = .{ .out, .in } });
+    var wb = try WB.fromSlice(&ctx, .{ n, k }, &wb_values);
+    defer wb.deinit();
+    var pb = try wb.packRhs(&ctx);
+    defer pb.deinit();
+    var yb = try x.dotPacked(&ctx, &pb, .in, .out);
+    defer yb.deinit();
+    for (try yb.dataConst(), 0..) |got, index| {
+        const i = index / n;
+        const j = index % n;
+        var want: f32 = 0;
+        for (0..k) |p| want += x_values[i * k + p] * dtype_mod.bf16ToF32(wb_values[j * k + p]);
+        try std.testing.expectApproxEqAbs(want, got, 2e-5);
+    }
+}
+
 test "public packed Q8_0x4 RHS batched rows match stacked single rows" {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
@@ -959,10 +1035,10 @@ test "typed float widened unary family matches the narrowed f32 reference" {
         defer x_t.deinit();
 
         const unary_names = .{
-            "relu", "exp",       "sqrt",      "rsqrt",     "sigmoid", "silu",      "log",   "log1p",
-            "neg",  "abs",       "sin",       "cos",       "tanh",    "fastTanh",  "gelu",  "quickGelu",
-            "elu",  "geluErf",   "floor",     "ceil",      "round",   "sign",      "reciprocal",
-            "softcap30", "softcap15",
+            "relu",      "exp",     "sqrt",  "rsqrt", "sigmoid", "silu",     "log",        "log1p",
+            "neg",       "abs",     "sin",   "cos",   "tanh",    "fastTanh", "gelu",       "quickGelu",
+            "elu",       "geluErf", "floor", "ceil",  "round",   "sign",     "reciprocal", "softcap30",
+            "softcap15",
         };
         inline for (unary_names) |name| {
             var got = try @field(@TypeOf(x_t), name)(&x_t, &ctx);
@@ -10338,7 +10414,6 @@ test "public Tensor scatterAdd accumulates and scatter overwrites deterministica
     try expectCloseSlices(&.{ 1, 1, 6, 5 }, try gs2.dataConst(), 0);
 }
 
-
 test "public Tensor scan kernels match the serial reference under either -Dvector-scan" {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
@@ -10436,7 +10511,6 @@ test "public Tensor scan kernels match the serial reference under either -Dvecto
         try std.testing.expectEqualSlices(f32, &ref_grad, try gx.dataConst());
     }
 }
-
 
 test "16-bit variables receive f32 gradients through dot and einsum" {
     @setEvalBranchQuota(1_000_000);

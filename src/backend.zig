@@ -11,6 +11,7 @@ pub const dtype_info = dtype_mod;
 pub const DType = dtype_mod.DType;
 pub const PackedMatmulFormat = packed_matmul.PackedMatmulFormat;
 pub const PackedMatmulRhsFor = packed_matmul.PackedMatmulRhsFor;
+pub const PackedDenseRhs = packed_matmul.PackedDenseRhs;
 pub const BlockQ1_0 = quantized_matmul.BlockQ1_0;
 pub const BlockQ2_0 = quantized_matmul.BlockQ2_0;
 pub const BlockQ4_0 = quantized_matmul.BlockQ4_0;
@@ -736,6 +737,28 @@ pub const Backend = struct {
     ) !packed_matmul.PackedMatmulRhsFor(dtype) {
         _ = self;
         return active.packMatmulRhsTyped(dtype, allocator, rhs);
+    }
+
+    pub fn packDenseMatmulRhsTyped(
+        self: *const Backend,
+        comptime dtype: DType,
+        allocator: std.mem.Allocator,
+        rhs: *const tensor.TensorOf(dtype),
+    ) !packed_matmul.PackedDenseRhs {
+        _ = self;
+        return active.packDenseMatmulRhsTyped(dtype, allocator, rhs);
+    }
+
+    pub fn matmul2DIntoUncheckedPackedDenseRhs(
+        self: *const Backend,
+        out: *Tensor,
+        a: *const Tensor,
+        rhs: *const packed_matmul.PackedDenseRhs,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) !void {
+        return active.matmul2DIntoUncheckedPackedDenseRhsWithConfig(out, a, rhs, m, n, k, self.parallelConfig());
     }
 
     pub fn matmul2DIntoUncheckedPackedRhsTyped(

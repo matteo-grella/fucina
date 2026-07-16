@@ -1,5 +1,6 @@
 const std = @import("std");
 const dtype_mod = @import("../dtype.zig");
+const packed_layout = @import("packed_layout.zig");
 const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
@@ -7,6 +8,71 @@ const thread = @import("../thread.zig");
 const Allocator = std.mem.Allocator;
 const DType = dtype_mod.DType;
 const Tensor = tensor.Tensor;
+
+pub const PackedRhsLayout = packed_layout.PackedRhsLayout;
+
+/// Load-time f32 RHS panels for `A[m,k] * W[n,k]^T`. Rows are padded to the
+/// four-output microkernel tile, while every logical row remains contiguous so
+/// GPU and BLAS NT dispatch can consume the same stable storage. The source is
+/// copied: the pack is an immutable snapshot and outlives the source tensor.
+pub const PackedDenseRhs = struct {
+    rhs: Tensor,
+    k: usize,
+    n: usize,
+    padded_n: usize,
+
+    const Self = @This();
+    pub const layout: PackedRhsLayout = .dense_f32;
+
+    pub fn deinit(self: *Self) void {
+        self.rhs.deinit();
+        self.* = undefined;
+    }
+};
+
+/// Build dense f32 output-row panels from an f32, f16, or bf16 `[n,k]`
+/// weight. The 16-bit conversions are exact widenings; arithmetic happens
+/// only when the packed panel is consumed.
+pub fn packDenseRhs(
+    allocator: Allocator,
+    comptime dtype: DType,
+    rhs: *const tensor.TensorOf(dtype),
+) !PackedDenseRhs {
+    comptime if (dtype != .f32 and dtype != .f16 and dtype != .bf16)
+        @compileError("dense packed matmul RHS supports f32, f16, and bf16 weights");
+
+    const view = try rhs.rankView(2);
+    if (!rhs.isContiguous()) return tensor.TensorError.UnsupportedView;
+    const n = view.dim(0);
+    const k = view.dim(1);
+    const padded_n = std.mem.alignForward(usize, n, 4);
+    var packed_rhs = try Tensor.zeros(allocator, &.{ padded_n, k });
+    errdefer packed_rhs.deinit();
+    const dst = packed_rhs.data()[0 .. n * k];
+    switch (comptime dtype) {
+        .f32 => @memcpy(dst, try rhs.dataConstChecked()),
+        .f16 => widenF16ToF32(dst, try rhs.dataConstChecked()),
+        .bf16 => widenBf16ToF32(dst, try rhs.dataConstChecked()),
+        else => comptime unreachable,
+    }
+    return .{ .rhs = packed_rhs, .k = k, .n = n, .padded_n = padded_n };
+}
+
+/// Scalar-backend specification for the dense packed operation.
+pub fn matmulDenseScalar(
+    out: []f32,
+    lhs: []const f32,
+    rhs: *const PackedDenseRhs,
+    m: usize,
+) void {
+    for (0..m) |i| {
+        for (0..rhs.n) |j| {
+            var sum: f32 = 0;
+            for (0..rhs.k) |p| sum += lhs[i * rhs.k + p] * rhs.rhs.dataConst()[j * rhs.k + p];
+            out[i * rhs.n + j] = sum;
+        }
+    }
+}
 
 pub const PackedMatmulFormat = enum {
     f16_rhs_f32,

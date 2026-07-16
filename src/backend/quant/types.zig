@@ -7,6 +7,7 @@
 const std = @import("std");
 const dtype_mod = @import("../../dtype.zig");
 const tensor = @import("../../tensor.zig");
+const packed_layout = @import("../packed_layout.zig");
 
 const Allocator = std.mem.Allocator;
 const DType = dtype_mod.DType;
@@ -276,16 +277,17 @@ pub const QuantizedMatmulRhsQ8_0 = struct {
     }
 };
 
-/// Comptime layout discriminant carried by every packed (lane-interleaved)
-/// matmul RHS container, naming format × grouping. The plain per-format RHS
-/// structs carry `format`/`traits`; the packed structs carry `layout` so
-/// generic entries dispatch with an exhaustive switch — adding a layout
-/// forces edits at every switch site.
-pub const PackedRhsLayout = enum { q8_0x4, q6_kx4, q4_kx4, q4_kx8, q4_kx2mmla, q5_kx8 };
+/// Comptime layout discriminant carried by every load-time packed matmul RHS
+/// container. Dense panels name their scalar storage; quantized packs name
+/// format × lane grouping. The plain per-format quantized RHS structs carry
+/// `format`/`traits`; packed structs carry `layout` so generic entries dispatch
+/// with an exhaustive switch — adding a layout forces edits at every site.
+pub const PackedRhsLayout = packed_layout.PackedRhsLayout;
 
 /// Packed RHS container type for a given layout.
 pub fn PackedRhsFor(comptime rhs_layout: PackedRhsLayout) type {
     return switch (rhs_layout) {
+        .dense_f32 => @import("../packed.zig").PackedDenseRhs,
         .q8_0x4 => QuantizedMatmulRhsQ8_0x4,
         .q6_kx4 => QuantizedMatmulRhsQ6_Kx4,
         .q4_kx4 => QuantizedMatmulRhsQ4_Kx4,

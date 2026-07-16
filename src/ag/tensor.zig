@@ -3563,13 +3563,11 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             return out;
         }
 
-        /// Packed quantized-RHS matmul: `out[free, out_tag] = self[free, contract_tag] · rhsᵀ`.
+        /// Packed-RHS matmul: `out[free, out_tag] = self[free, contract_tag] · rhsᵀ`.
         /// `rhs` points to one of the packed RHS containers produced by
-        /// `packRhs`/`packRhsLayout` (q8_0x4 / q6_kx4 / q4_kx8 / q4_kx2mmla /
-        /// q5_kx8); the layout is comptime-dispatched from the pointer type, so
-        /// each call site compiles to the exact per-layout kernel call.
-        /// No gradient support: fails with `error.GradientQuantizedMatmulUnsupported`
-        /// when `self` requires grad (grad state is runtime graph state).
+        /// `packRhs`/`packRhsLayout` (dense f32 panels or a quantized lane
+        /// pack); the layout is comptime-dispatched from the pointer type.
+        /// No gradient support: packed resources live outside the graph.
         pub fn dotPacked(
             self: *const Self,
             ctx: *ExecContext,
@@ -3582,8 +3580,12 @@ fn FloatTensor(comptime tags_spec: anytype) type {
                 if (tag_rank != 2) @compileError("dotPacked (." ++ @tagName(layout) ++ " RHS) currently requires a rank-2 lhs");
                 if (axis(contract_tag) != 1) @compileError("dotPacked (." ++ @tagName(layout) ++ " RHS) requires lhs storage order [free, contract]");
             }
-            if (self.requiresGrad()) return error.GradientQuantizedMatmulUnsupported;
+            if (self.requiresGrad()) return if (layout == .dense_f32)
+                error.GradientPackedMatmulUnsupported
+            else
+                error.GradientQuantizedMatmulUnsupported;
             var value = try switch (layout) {
+                .dense_f32 => ctx.matmul2DWithPackedDenseRhs(self.asRawTensor(), rhs),
                 .q8_0x4 => ctx.matmul2DWithPackedQ8_0x4Rhs(self.asRawTensor(), rhs),
                 .q6_kx4 => ctx.matmul2DWithPackedQ6_Kx4Rhs(self.asRawTensor(), rhs),
                 .q4_kx8 => ctx.matmul2DWithPackedQ4_Kx8Rhs(self.asRawTensor(), rhs),
@@ -3593,6 +3595,15 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             };
             errdefer value.deinit();
             return finishNoGrad(replaceTag(tags, contract_tag, out_tag), ctx, value);
+        }
+
+        /// Snapshot this rank-2 f32 `[out, contract]` weight into load-time
+        /// output-row panels for `dotPacked`. The resource is no-grad and must
+        /// be deinitialized by its owner.
+        pub fn packRhs(self: *const Self, ctx: *ExecContext) !PackedRhs(.f32) {
+            comptime if (tag_rank != 2) @compileError("packRhs requires a rank-2 tensor");
+            if (self.requiresGrad()) return error.GradientPackedMatmulUnsupported;
+            return ctx.packDenseMatmulRhsTyped(.f32, self.asRawTensor());
         }
 
         /// Fused rmsNormMul + packed GEMM: computes
@@ -3625,6 +3636,7 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             const weight_ptr = tensorObjectPtrFrom(@TypeOf(norm_weight), &norm_weight);
             if (self.requiresGrad() or weight_ptr.requiresGrad()) return error.GradientQuantizedMatmulUnsupported;
             var value = try switch (layout) {
+                .dense_f32 => @compileError("rmsNormMulDotPacked: dense packed RHS has no fused norm kernel; use rmsNormMul + dotPacked"),
                 .q8_0x4 => ctx.rmsNormMulMatmul2DWithPackedQ8_0x4Rhs(self.asRawTensor(), weight_ptr.asRawTensor(), eps, rhs),
                 .q4_kx8 => ctx.rmsNormMulMatmul2DWithPackedQ4_Kx8Rhs(self.asRawTensor(), weight_ptr.asRawTensor(), eps, rhs),
                 .q5_kx8 => ctx.rmsNormMulMatmul2DWithPackedQ5_Kx8Rhs(self.asRawTensor(), weight_ptr.asRawTensor(), eps, rhs),
@@ -3658,6 +3670,7 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             }
             if (self.requiresGrad()) return error.GradientQuantizedMatmulUnsupported;
             var value = try switch (layout) {
+                .dense_f32 => @compileError("splitSwiGluDotPacked: dense packed RHS has no fused SwiGLU kernel; use splitSwiGlu + dotPacked"),
                 .q8_0x4 => ctx.splitSwiGluMatmul2DWithPackedQ8_0x4Rhs(self.asRawTensor(), rhs),
                 .q4_kx8 => ctx.splitSwiGluMatmul2DWithPackedQ4_Kx8Rhs(self.asRawTensor(), rhs),
                 .q5_kx8 => ctx.splitSwiGluMatmul2DWithPackedQ5_Kx8Rhs(self.asRawTensor(), rhs),
@@ -3691,7 +3704,7 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             if (self.requiresGrad() or up.requiresGrad()) return error.GradientQuantizedMatmulUnsupported;
             var value = try switch (layout) {
                 .q8_0x4 => ctx.gegluQuantMatmul2DWithPackedQ8_0x4Rhs(self.asRawTensor(), up.asRawTensor(), rhs),
-                .q6_kx4, .q4_kx4, .q4_kx8, .q4_kx2mmla, .q5_kx8 => @compileError("gegluQuantDotPacked: no fused geglu kernel for packed RHS layout ." ++ @tagName(layout)),
+                .dense_f32, .q6_kx4, .q4_kx4, .q4_kx8, .q4_kx2mmla, .q5_kx8 => @compileError("gegluQuantDotPacked: no fused geglu kernel for packed RHS layout ." ++ @tagName(layout)),
             };
             errdefer value.deinit();
             return finishNoGrad(replaceTag(tags, in_tag, out_tag), ctx, value);
@@ -4003,12 +4016,14 @@ fn FloatTensor(comptime tags_spec: anytype) type {
     };
 }
 
-/// ISA-best packed matmul RHS container type for a block-quantized dtype:
+/// Packed matmul RHS container type. Dense f32/f16/bf16 weights use the same
+/// f32 output-row panel; block-quantized weights select the ISA-best lane pack:
 /// q8_0→x4, q6_k→x4, q5_k→x8, q4_k→x2mmla on aarch64+i8mm targets else x8.
 /// This is the return type of `packRhs`; model code stores packed weights as
 /// `fucina.PackedRhs(dtype)` fields.
 pub fn PackedRhs(comptime dt: DType) type {
     return switch (dt) {
+        .f32, .f16, .bf16 => backend_mod.PackedDenseRhs,
         .q8_0 => backend_mod.QuantizedMatmulRhsQ8_0x4,
         .q6_k => backend_mod.QuantizedMatmulRhsQ6_Kx4,
         .q5_k => backend_mod.QuantizedMatmulRhsQ5_Kx8,
@@ -4064,10 +4079,10 @@ fn attentionKvRepr(comptime T: type, comptime which: []const u8) AttentionKvRepr
 fn packedRhsLayout(comptime T: type, comptime op_name: []const u8) backend_mod.PackedRhsLayout {
     const info = @typeInfo(T);
     if (info != .pointer or info.pointer.size != .one)
-        @compileError(op_name ++ " expects a pointer to a packed matmul RHS (e.g. *const QuantizedMatmulRhsQ6_Kx4); got " ++ @typeName(T));
+        @compileError(op_name ++ " expects a pointer to a packed matmul RHS (e.g. *const PackedRhs(.f32)); got " ++ @typeName(T));
     const Rhs = info.pointer.child;
     if (@typeInfo(Rhs) != .@"struct" or !@hasDecl(Rhs, "layout") or @TypeOf(Rhs.layout) != backend_mod.PackedRhsLayout)
-        @compileError(op_name ++ ": " ++ @typeName(Rhs) ++ " is not a packed quantized matmul RHS");
+        @compileError(op_name ++ ": " ++ @typeName(Rhs) ++ " is not a packed matmul RHS");
     return Rhs.layout;
 }
 
@@ -4230,6 +4245,7 @@ fn QuantizedConstantTensor(comptime tags_spec: anytype, comptime tensor_dtype: D
             comptime {
                 if (tag_rank != 2) @compileError("packRhsLayout requires a rank-2 tensor");
                 const want: DType = switch (layout) {
+                    .dense_f32 => @compileError("packRhsLayout(.dense_f32) requires an f32/f16/bf16 tensor; call its packRhs method"),
                     .q8_0x4 => .q8_0,
                     .q6_kx4 => .q6_k,
                     .q4_kx8, .q4_kx2mmla => .q4_k,
@@ -4239,6 +4255,7 @@ fn QuantizedConstantTensor(comptime tags_spec: anytype, comptime tensor_dtype: D
                 if (tensor_dtype != want) @compileError("packRhsLayout(." ++ @tagName(layout) ++ ") requires a ." ++ @tagName(want) ++ " tensor");
             }
             return switch (comptime layout) {
+                .dense_f32 => unreachable,
                 .q8_0x4 => ctx.packMatmulRhsQ8_0x4(self.asRawTensor()),
                 .q6_kx4 => ctx.packMatmulRhsQ6_Kx4(self.asRawTensor()),
                 .q4_kx8 => ctx.packMatmulRhsQ4_Kx8(self.asRawTensor()),
@@ -4585,6 +4602,19 @@ fn TypedFloatConstantTensor(comptime tags_spec: anytype, comptime tensor_dtype: 
         pub const mean = typedConstantMean;
         pub const sumAll = typedConstantSumAll;
         pub const dot = typedConstantDot;
+
+        /// Snapshot this rank-2 f16/bf16 `[out, contract]` weight as f32
+        /// output-row panels for a FloatTensor `dotPacked`. Widening happens
+        /// once here; the returned resource is caller-owned and no-grad.
+        pub fn packRhs(self: *const Self, ctx: *ExecContext) !PackedRhs(tensor_dtype) {
+            comptime {
+                if (tag_rank != 2) @compileError("packRhs requires a rank-2 tensor");
+                if (tensor_dtype != .f16 and tensor_dtype != .bf16)
+                    @compileError("dense packRhs supports f32, f16, and bf16 weights");
+            }
+            if (self.requiresGrad()) return error.GradientPackedMatmulUnsupported;
+            return ctx.packDenseMatmulRhsTyped(tensor_dtype, self.asRawTensor());
+        }
 
         // Structural ops (views / data movement; every typed float dtype).
         pub const split = typedConstantSplit;

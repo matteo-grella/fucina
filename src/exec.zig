@@ -37,6 +37,7 @@ pub const expert_store = @import("exec/expert_store.zig");
 pub const PackedMatmulFormat = backend_mod.PackedMatmulFormat;
 pub const parallel_dot_backward_branches = Backend.kind == .native and backend_mod.native_uses_blas;
 pub const PackedMatmulRhsFor = backend_mod.PackedMatmulRhsFor;
+pub const PackedDenseRhs = backend_mod.PackedDenseRhs;
 pub const QuantizedMatmulFormat = backend_mod.QuantizedMatmulFormat;
 pub const QuantizedMatmulRhsQ4_Kx4 = backend_mod.QuantizedMatmulRhsQ4_Kx4;
 pub const QuantizedMatmulRhsQ4_Kx8 = backend_mod.QuantizedMatmulRhsQ4_Kx8;
@@ -1989,6 +1990,14 @@ pub const ExecContext = struct {
 
     pub fn packMatmulRhsTyped(self: *ExecContext, comptime dtype: DType, rhs: *const tensor.TensorOf(dtype)) !backend_mod.PackedMatmulRhsFor(dtype) {
         return exec_matmul.packMatmulRhsTyped(&self.rt, dtype, rhs);
+    }
+
+    pub fn packDenseMatmulRhsTyped(self: *ExecContext, comptime dtype: DType, rhs: *const tensor.TensorOf(dtype)) !backend_mod.PackedDenseRhs {
+        return exec_matmul.packDenseMatmulRhsTyped(&self.rt, dtype, rhs);
+    }
+
+    pub fn matmul2DWithPackedDenseRhs(self: *ExecContext, a: *const Tensor, rhs: *const backend_mod.PackedDenseRhs) !Tensor {
+        return exec_matmul.matmul2DWithPackedDenseRhs(&self.rt, a, rhs);
     }
 
     pub fn matmul2DWithPackedRhsTyped(

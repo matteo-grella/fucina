@@ -1353,6 +1353,33 @@ pub fn packMatmulRhsTyped(
     return packed_matmul.packRhs(allocator, dtype, rhs);
 }
 
+pub fn packDenseMatmulRhsTyped(
+    comptime dtype: DType,
+    allocator: std.mem.Allocator,
+    rhs: *const tensor.TensorOf(dtype),
+) !packed_matmul.PackedDenseRhs {
+    return packed_matmul.packDenseRhs(allocator, dtype, rhs);
+}
+
+pub fn matmul2DIntoUncheckedPackedDenseRhsWithConfig(
+    out: *Tensor,
+    a: *const Tensor,
+    rhs: *const packed_matmul.PackedDenseRhs,
+    m: usize,
+    n: usize,
+    k: usize,
+    config: ParallelConfig,
+) !void {
+    _ = config;
+    if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
+    packed_matmul.matmulDenseScalar(
+        contiguousData(out, m * n),
+        contiguousDataConst(a, m * k),
+        rhs,
+        m,
+    );
+}
+
 pub fn matmul2DIntoUncheckedPackedRhsTypedWithConfig(
     comptime dtype: DType,
     allocator: std.mem.Allocator,

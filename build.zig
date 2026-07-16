@@ -1132,6 +1132,22 @@ pub fn build(b: *std.Build) void {
     const gemm_bench_step = b.step("bench-gemm", "Large-shape f32 GEMM: row kernels vs cache-blocked packed kernel (+BLAS reference)");
     gemm_bench_step.dependOn(&gemm_bench_cmd.step);
 
+    const packed_gemm_bench_exe = b.addExecutable(.{
+        .name = "fucina-zig-packed-gemm-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/packed_gemm.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    packed_gemm_bench_exe.root_module.addImport("raw_backend", raw_backend_module);
+    configureBlas(packed_gemm_bench_exe, blas_kind);
+    configureGpu(b, packed_gemm_bench_exe, gpu_kind);
+    const packed_gemm_bench_cmd = b.addRunArtifact(packed_gemm_bench_exe);
+    if (b.args) |args| packed_gemm_bench_cmd.addArgs(args);
+    const packed_gemm_bench_step = b.step("bench-packed-gemm", "Pack-once dense GEMM at skinny-m inference shapes");
+    packed_gemm_bench_step.dependOn(&packed_gemm_bench_cmd.step);
+
     const gpu_dispatch_bench_exe = b.addExecutable(.{
         .name = "fucina-zig-gpu-dispatch-bench",
         .root_module = b.createModule(.{

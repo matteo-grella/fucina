@@ -25,6 +25,7 @@ const std = @import("std");
 
 const elementwise = @import("vector/elementwise.zig");
 const gemm = @import("vector/gemm.zig");
+const gemm_packed = @import("vector/gemm_packed.zig");
 const matmul_quant = @import("vector/matmul_quant.zig");
 const batched = @import("vector/batched.zig");
 const conv = @import("vector/conv.zig");
@@ -172,6 +173,7 @@ pub const matmulTransB2DIntoUnchecked = gemm.matmulTransB2DIntoUnchecked;
 pub const matmulTransB2DIntoUncheckedWithConfig = gemm.matmulTransB2DIntoUncheckedWithConfig;
 pub const matmulTransB2DIntoUncheckedF16OperandsWithConfig = gemm.matmulTransB2DIntoUncheckedF16OperandsWithConfig;
 pub const matmulTransB2DIntoUncheckedBf16RhsWithConfig = gemm.matmulTransB2DIntoUncheckedBf16RhsWithConfig;
+pub const gemmPackedNtIntoWithConfig = gemm_packed.gemmPackedNtIntoWithConfig;
 // Borrowed by vector/batched.zig (per-batch inner work).
 pub const gemmNNRange = gemm.gemmNNRange;
 pub const gemmTNRange = gemm.gemmTNRange;

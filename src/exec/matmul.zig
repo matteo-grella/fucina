@@ -341,6 +341,32 @@ pub fn packMatmulRhsTyped(self: *Runtime, comptime dtype: DType, rhs: *const ten
     return self.backend.packMatmulRhsTyped(dtype, self.allocator, rr.tensor());
 }
 
+pub fn packDenseMatmulRhsTyped(self: *Runtime, comptime dtype: DType, rhs: *const tensor.TensorOf(dtype)) !backend_mod.PackedDenseRhs {
+    _ = try rhs.rankView(2);
+    var rr = try self.prepareContiguousTyped(dtype, rhs);
+    defer rr.deinit();
+    return self.backend.packDenseMatmulRhsTyped(dtype, self.allocator, rr.tensor());
+}
+
+pub fn matmul2DWithPackedDenseRhs(
+    self: *Runtime,
+    a: *const Tensor,
+    rhs: *const backend_mod.PackedDenseRhs,
+) !Tensor {
+    const av = try a.rankView(2);
+    const m = av.dim(0);
+    const k = av.dim(1);
+    if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
+
+    var aa = try self.prepareContiguous(a);
+    defer aa.deinit();
+    var out = try self.emptyRank(2, .{ m, rhs.n });
+    errdefer out.deinit();
+    self.enableNativeMatmulPoolForWork(m, rhs.n, k);
+    try self.backend.matmul2DIntoUncheckedPackedDenseRhs(&out, aa.tensor(), rhs, m, rhs.n, k);
+    return out;
+}
+
 pub fn matmul2DWithPackedRhsTyped(
     self: *Runtime,
     comptime dtype: DType,

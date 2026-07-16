@@ -59,6 +59,7 @@ class Suite:
 
 
 SUITES: dict[str, Suite] = {
+    "packed-gemm": Suite("packed-gemm", "bench-packed-gemm", "csv"),
     "facade": Suite("facade", "bench-facade", "csv"),
     "mlp": Suite("mlp", "bench", "csv"),
     "backward-diamond": Suite("backward-diamond", "bench-backward-diamond", "csv"),

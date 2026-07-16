@@ -214,6 +214,60 @@ pub fn packMatmulRhsTyped(
     return packed_matmul.packRhs(allocator, dtype, rhs);
 }
 
+pub fn packDenseMatmulRhsTyped(
+    comptime dtype: DType,
+    allocator: std.mem.Allocator,
+    rhs: *const tensor.TensorOf(dtype),
+) !packed_matmul.PackedDenseRhs {
+    return packed_matmul.packDenseRhs(allocator, dtype, rhs);
+}
+
+pub fn matmul2DIntoUncheckedPackedDenseRhsWithConfig(
+    out: *Tensor,
+    a: *const Tensor,
+    rhs: *const packed_matmul.PackedDenseRhs,
+    m: usize,
+    n: usize,
+    k: usize,
+    config: ParallelConfig,
+) !void {
+    if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
+    if (comptime build_options.use_gpu) {
+        if (gpu.shouldUseGpuForRhs(&rhs.rhs, m, n, k)) {
+            if (gpu.gemmF32Async(.nt, a, &rhs.rhs, out, m, n, k)) return;
+        }
+    }
+    // Explicit packed-op decision table: GPU always wins; BLAS keeps its
+    // established all-dimensions>=16 cells; the packed microkernel owns the
+    // m<16 cliff and every no-BLAS cell.
+    if (comptime build_options.use_blas) {
+        if (shouldUseBlas(m, n, k)) {
+            blasGemm(
+                cblas_no_trans,
+                cblas_trans,
+                m,
+                n,
+                k,
+                contiguousDataConst(a, m * k),
+                k,
+                contiguousDataConst(&rhs.rhs, rhs.padded_n * k),
+                k,
+                contiguousData(out, m * n),
+            );
+            return;
+        }
+    }
+    vector.gemmPackedNtIntoWithConfig(
+        contiguousData(out, m * n),
+        contiguousDataConst(a, m * k),
+        contiguousDataConst(&rhs.rhs, rhs.padded_n * k),
+        m,
+        n,
+        k,
+        config,
+    );
+}
+
 pub fn matmul2DIntoUncheckedPackedRhsTypedWithConfig(
     comptime dtype: DType,
     allocator: std.mem.Allocator,
