@@ -199,6 +199,28 @@ const Ffn = union(enum) {
     }
 };
 
+/// The dense unembed keeps only its load-time panel; quantized formats retain
+/// their existing LinearWeight representation and packed quant kernels.
+const OutputProjection = union(enum) {
+    linear: LinearWeight,
+    packed_dense: fucina.PackedRhs(.f32),
+
+    fn deinit(self: *OutputProjection) void {
+        switch (self.*) {
+            .linear => |*weight| weight.deinit(),
+            .packed_dense => |*dense_rhs| dense_rhs.deinit(),
+        }
+        self.* = undefined;
+    }
+
+    fn linearSeq(self: *const OutputProjection, ctx: *ExecContext, input: *const fucina.Tensor(.{ .seq, .embed })) !fucina.Tensor(.{ .seq, .vocab }) {
+        return switch (self.*) {
+            .linear => |*weight| weight.linearSeq(ctx, input, .embed, .vocab),
+            .packed_dense => |*dense_rhs| input.dotPacked(ctx, dense_rhs, .embed, .vocab),
+        };
+    }
+};
+
 /// Q/K/V/R projections: fused into one GEMM when the four tensors share a
 /// weight format, separate otherwise (mixed dynamic quants).
 const QkvrProj = union(enum) {
@@ -360,7 +382,7 @@ pub const Model = struct {
     token_embedding: LinearWeight,
     embed_norm: []f32, // applied to token lookups (rms)
     output_norm: []f32,
-    output: LinearWeight,
+    output: OutputProjection,
     layers: []Layer,
 
     pub fn loadGguf(ctx: *ExecContext, io: std.Io, path: []const u8) !Model {
@@ -380,7 +402,17 @@ pub const Model = struct {
         errdefer allocator.free(embed_norm);
         const output_norm = try hostVector(allocator, file, "output_norm.weight", config.hidden_size);
         errdefer allocator.free(output_norm);
-        var output = try LinearWeight.load(ctx, try file.get("output.weight"), config.vocab_size, config.hidden_size);
+        var output_linear = try LinearWeight.load(ctx, try file.get("output.weight"), config.vocab_size, config.hidden_size);
+        var output_linear_live = true;
+        errdefer if (output_linear_live) output_linear.deinit();
+        var output: OutputProjection = if (try packDenseLinearRhs(ctx, &output_linear)) |packed_rhs| blk: {
+            output_linear.deinit();
+            output_linear_live = false;
+            break :blk .{ .packed_dense = packed_rhs };
+        } else blk: {
+            output_linear_live = false;
+            break :blk .{ .linear = output_linear };
+        };
         errdefer output.deinit();
 
         const layers = try allocator.alloc(Layer, config.num_layers);
@@ -511,7 +543,7 @@ pub const Model = struct {
         for (normed) |*nv| nv.* *= cfg.logit_scale;
         var normed_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, H }, normed);
         defer normed_t.deinit();
-        var logits_t = try self.output.linearSeq(ctx, &normed_t, .embed, .vocab);
+        var logits_t = try self.output.linearSeq(ctx, &normed_t);
         defer logits_t.deinit();
 
         const row = try allocator.dupe(f32, try logits_t.dataConst());
@@ -825,7 +857,6 @@ pub const Model = struct {
             for (0..S * H) |i| ffn_out[i] += dv[i];
         }
     }
-
 };
 
 /// Depthwise causal short conv with built-in residual, in place over
@@ -955,6 +986,15 @@ fn loadExpertDown(ctx: *ExecContext, bank: *const gguf.TensorInfo, n_expert: usi
         const info = try expertInfo(bank, e);
         experts[e].down = try LinearWeight.load(ctx, &info, out_dim, in_dim);
     }
+}
+
+fn packDenseLinearRhs(ctx: *ExecContext, linear: *const LinearWeight) !?fucina.PackedRhs(.f32) {
+    return switch (linear.*) {
+        .f32 => |*weight| try weight.packRhs(ctx),
+        .f16 => |*weight| try weight.packRhs(ctx),
+        .bf16 => |*weight| try weight.packRhs(ctx),
+        else => null,
+    };
 }
 
 fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: *const Config, layer_i: usize) !Layer {

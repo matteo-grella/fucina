@@ -50,7 +50,9 @@ const audio_hop: usize = 800;
 pub const MmProj = struct {
     allocator: Allocator,
     // vision
-    hmlp_linear: [4]LinearWeight,
+    /// Sole representation of the four dense tower weights: the source
+    /// LinearWeights are released once these independent snapshots exist.
+    hmlp_packed: [4]fucina.PackedRhs(.f32),
     hmlp_in_dims: [4]usize,
     /// x86 only: layer 3 loaded as W3_left + W3_right (f32). The temporal
     /// pair is always the SAME patch duplicated (this port is still-image
@@ -94,7 +96,8 @@ pub const MmProj = struct {
         var name_buf: [64]u8 = undefined;
         var in_dim: usize = 3 * spatial_folds[0] * spatial_folds[0];
         var loaded: usize = 0;
-        errdefer for (hmlp_linear[0..loaded]) |*w| w.deinit();
+        var linears_live = true;
+        errdefer if (linears_live) for (hmlp_linear[0..loaded]) |*w| w.deinit();
         const fold_s3 = @import("builtin").cpu.arch == .x86_64;
         for (0..4) |l| {
             const name = try std.fmt.bufPrint(&name_buf, "v.hmlp.{d}.linear.weight", .{l});
@@ -113,6 +116,16 @@ pub const MmProj = struct {
             in_dim = if (l < 2) out_dim * spatial_folds[l + 1] * spatial_folds[l + 1] else out_dim * temporal_patch_size;
         }
         if (hmlp_dims[3] != n_embd) return Error.InvalidWeightShape;
+
+        var hmlp_packed: [4]fucina.PackedRhs(.f32) = undefined;
+        var packed_loaded: usize = 0;
+        errdefer for (hmlp_packed[0..packed_loaded]) |*dense_rhs| dense_rhs.deinit();
+        for (&hmlp_linear, 0..) |*linear, l| {
+            hmlp_packed[l] = (try packTowerRhs(ctx, linear)) orelse return Error.UnsupportedWeightType;
+            packed_loaded += 1;
+        }
+        for (&hmlp_linear) |*linear| linear.deinit();
+        linears_live = false;
 
         var hmlp_norm: [3][]f32 = undefined;
         var norms_loaded: usize = 0;
@@ -140,7 +153,7 @@ pub const MmProj = struct {
 
         return .{
             .allocator = allocator,
-            .hmlp_linear = hmlp_linear,
+            .hmlp_packed = hmlp_packed,
             .hmlp_in_dims = hmlp_in_dims,
             .s3_folded = fold_s3,
             .hmlp_norm = hmlp_norm,
@@ -161,7 +174,7 @@ pub const MmProj = struct {
         self.dmel_embd.deinit();
         self.allocator.free(self.hmlp_final_norm);
         for (&self.hmlp_norm) |n| self.allocator.free(n);
-        for (&self.hmlp_linear) |*w| w.deinit();
+        for (&self.hmlp_packed) |*dense_rhs| dense_rhs.deinit();
         self.* = undefined;
     }
 
@@ -199,7 +212,7 @@ pub const MmProj = struct {
                         for (0..s) |hf| {
                             for (0..s) |wf| {
                                 const base = ((gy * s + hf) * grid + (gx * s + wf)) * chan;
-                                @memcpy(dst[o ..][0..chan], src[base..][0..chan]);
+                                @memcpy(dst[o..][0..chan], src[base..][0..chan]);
                                 o += chan;
                             }
                         }
@@ -232,22 +245,7 @@ pub const MmProj = struct {
             s3_in_dim = d2 * temporal_patch_size;
         }
 
-        var out_opt: ?[]f32 = null;
-        if (n_patches <= flip_max_rows) {
-            switch (self.hmlp_linear[3]) {
-                .f32 => |*wt| out_opt = try flippedLinear(ctx, wt, self.n_embd, s3_in_dim, s3_in, n_patches),
-                else => {},
-            }
-        }
-        if (out_opt == null) {
-            var cat_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ n_patches, s3_in_dim }, s3_in);
-            defer cat_t.deinit();
-            var out_t = try self.hmlp_linear[3].linearSeq(ctx, &cat_t, .embed, .attn);
-            defer out_t.deinit();
-            out_opt = try allocator.dupe(f32, try out_t.dataConst());
-        }
-
-        const out = out_opt.?;
+        const out = try packedLinear(ctx, &self.hmlp_packed[3], s3_in, n_patches, s3_in_dim);
         errdefer allocator.free(out);
         for (0..n_patches) |pi| {
             const row = out[pi * self.n_embd ..][0..self.n_embd];
@@ -256,121 +254,30 @@ pub const MmProj = struct {
         return out;
     }
 
-    /// Small-batch linear over the worker team: X [rows, in] x W^T, with
-    /// the output dimension as the parallel axis. Tasks are blocks of
-    /// output units; each streams its weight rows once and feeds one
-    /// accumulation chain per input row. Same dot products as `linearSeq`,
-    /// kernel-order tier numerics.
-    fn flippedLinear(ctx: *ExecContext, w_t: *const weights.WeightF32, out_dim: usize, in_dim: usize, x: []const f32, rows: usize) ![]f32 {
+    /// Dense tower linear through the public load-time packed operation.
+    fn packedLinear(ctx: *ExecContext, dense_rhs: *const fucina.PackedRhs(.f32), x: []const f32, rows: usize, in_dim: usize) ![]f32 {
         const allocator = ctx.allocator;
-        const w = try w_t.dataConst();
-        std.debug.assert(w.len == out_dim * in_dim);
-        const out = try allocator.alloc(f32, rows * out_dim);
-        errdefer allocator.free(out);
-
-        const block = 32;
-        const n_tasks = (out_dim + block - 1) / block;
-        const tasks = try allocator.alloc(FlipTask, n_tasks);
-        defer allocator.free(tasks);
-        for (tasks, 0..) |*t, i| {
-            t.* = .{
-                .w = w,
-                .x = x,
-                .out = out,
-                .in_dim = in_dim,
-                .out_dim = out_dim,
-                .rows = rows,
-                .j0 = i * block,
-                .j1 = @min((i + 1) * block, out_dim),
-            };
-        }
-        if (ctx.workPool()) |pool| {
-            pool.parallelChunks(FlipTask, tasks, FlipTask.run);
-        } else {
-            for (tasks) |*t| FlipTask.run(t);
-        }
-        return out;
+        std.debug.assert(dense_rhs.k == in_dim);
+        var input = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ rows, in_dim }, x);
+        defer input.deinit();
+        var output = try input.dotPacked(ctx, dense_rhs, .embed, .attn);
+        defer output.deinit();
+        return allocator.dupe(f32, try output.dataConst());
     }
-
-    const FlipTask = struct {
-        w: []const f32,
-        x: []const f32,
-        out: []f32,
-        in_dim: usize,
-        out_dim: usize,
-        rows: usize,
-        j0: usize,
-        j1: usize,
-
-        fn run(t: *const FlipTask) void {
-            var r0: usize = 0;
-            while (r0 < t.rows) : (r0 += 8) {
-                switch (@min(8, t.rows - r0)) {
-                    inline 1, 2, 3, 4, 5, 6, 7, 8 => |rb| t.runBlock(rb, r0),
-                    else => unreachable,
-                }
-            }
-        }
-
-        /// RB-row register tile: the weight vector loads once per k-chunk
-        /// and feeds RB independent accumulation chains, one per input row.
-        fn runBlock(t: *const FlipTask, comptime RB: usize, r0: usize) void {
-            const V = @Vector(8, f32);
-            var xs: [RB][]const f32 = undefined;
-            inline for (0..RB) |ri| xs[ri] = t.x[(r0 + ri) * t.in_dim ..][0..t.in_dim];
-            for (t.j0..t.j1) |j| {
-                const w_row = t.w[j * t.in_dim ..][0..t.in_dim];
-                var acc: [RB]V = @splat(@as(V, @splat(0)));
-                var k: usize = 0;
-                while (k + 8 <= t.in_dim) : (k += 8) {
-                    const wf: V = w_row[k..][0..8].*;
-                    inline for (0..RB) |ri| {
-                        acc[ri] += wf * @as(V, xs[ri][k..][0..8].*);
-                    }
-                }
-                inline for (0..RB) |ri| {
-                    var sum = @reduce(.Add, acc[ri]);
-                    var kk = k;
-                    while (kk < t.in_dim) : (kk += 1) {
-                        sum += w_row[kk] * xs[ri][kk];
-                    }
-                    t.out[(r0 + ri) * t.out_dim + j] = sum;
-                }
-            }
-        }
-    };
-
-    const flip_max_rows: usize = 64;
 
     fn stemLinearNormGelu(self: *const MmProj, ctx: *ExecContext, rows_in: []const f32, rows: usize, in_dim: usize, l: usize) ![]f32 {
         const allocator = ctx.allocator;
         const d = self.hmlp_dims[l];
 
-        var lin_owned: ?[]f32 = null;
-        defer if (lin_owned) |slice| allocator.free(slice);
-        var lin_t_opt: ?fucina.Tensor(.{ .seq, .attn }) = null;
-        defer if (lin_t_opt) |*t| t.deinit();
-
-        const lin: []const f32 = blk: {
-            if (rows <= flip_max_rows) {
-                switch (self.hmlp_linear[l]) {
-                    .f32 => |*wt| {
-                        lin_owned = try flippedLinear(ctx, wt, d, in_dim, rows_in, rows);
-                        break :blk lin_owned.?;
-                    },
-                    else => {},
-                }
-            }
-            var in_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ rows, in_dim }, rows_in);
-            defer in_t.deinit();
-            lin_t_opt = try self.hmlp_linear[l].linearSeq(ctx, &in_t, .embed, .attn);
-            break :blk try lin_t_opt.?.dataConst();
-        };
+        const lin = try packedLinear(ctx, &self.hmlp_packed[l], rows_in, rows, in_dim);
+        defer allocator.free(lin);
 
         // Per-row rms-norm + gelu_erf, fanned out over the worker team.
         const out = try allocator.alloc(f32, rows * d);
         errdefer allocator.free(out);
-        const block = 16;
+        const participants = if (ctx.workPool()) |pool| pool.teamSize() else 1;
+        const target_tasks = @max(@as(usize, 1), @min(rows, participants * 4));
+        const block = std.math.divCeil(usize, rows, target_tasks) catch unreachable;
         const n_tasks = (rows + block - 1) / block;
         const tasks = try allocator.alloc(NormGeluTask, n_tasks);
         defer allocator.free(tasks);
@@ -973,6 +880,15 @@ fn loadTowerLinear(ctx: *ExecContext, info: *const gguf.TensorInfo, out_dim: usi
     f32_info.ggml_type = .f32;
     f32_info.data = std.mem.sliceAsBytes(f32_vals);
     return LinearWeight.load(ctx, &f32_info, out_dim, in_dim);
+}
+
+fn packTowerRhs(ctx: *ExecContext, linear: *const LinearWeight) !?fucina.PackedRhs(.f32) {
+    return switch (linear.*) {
+        .f32 => |*weight| try weight.packRhs(ctx),
+        .f16 => |*weight| try weight.packRhs(ctx),
+        .bf16 => |*weight| try weight.packRhs(ctx),
+        else => null,
+    };
 }
 
 fn hostVector(allocator: Allocator, file: *const gguf.File, tensor_name: []const u8, expected: usize) ![]f32 {

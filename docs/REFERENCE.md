@@ -666,6 +666,7 @@ values. On Linux without libc the lookup scans `/proc/self/environ`
 | --- | --- | --- |
 | `FUCINA_MAX_THREADS` | Lowers the worker count below the `-Dmax-threads` ceiling (mirrors llama.cpp `-t`). Never raises it. Consulted on the first `cpuThreadCount` call; a prior `setMaxThreads` wins. | unset (detected CPU count, capped by the ceiling) |
 | `FUCINA_SPIN_BUDGET` | Overrides the worker-team spin-then-park window (`src/thread.zig` BarrierPool). Read once per pool init. Workload-coupled; the default is deliberate. | unset (built-in budget) |
+| `FUCINA_POOL_PROFILE=1` | Emits one `[pool-trace]` line per `BarrierPool` dispatch with span, claim chunk, and each participant's first-claim/completion offsets and task count. Diagnostic only; read once when the team is created. | off |
 | `FUCINA_WINOGRAD=1` / `FUCINA_NO_WINOGRAD=1` | Force the Winograd conv2d route on/off (A/B + emergency revert switches). | on for no-BLAS builds, off when a platform BLAS backs the matmul |
 | `FUCINA_NO_WINOGRAD_F4=1` | Pins Winograd-routed large maps to the F(2×2,3×3) tier. | F4 tier enabled |
 | `FUCINA_WINOGRAD_F4_MIN` | Minimum output spatial size for the F4 tier. | `14` |
@@ -930,8 +931,8 @@ unsupported operation is a compile error, never a runtime failure
 
 | Branch | dtypes | Capabilities |
 |---|---|---|
-| Float (differentiable) | `.f32` | Full surface: autograd (`variable`, `backward`, `grad`), all math/NN ops (§4), all views and structural ops |
-| Typed float | `.f16`, `.bf16`, `.f64` (`supportsForwardFloatMath`) | Forward math: the native typed set (`add/sub/mul/div/sum/mean/sumAll/dot/scale/divScalar`, `to`), the full structural set (`split`/`merge`/`flatten`/`reshape`/`sliceStep`/`flip`/`roll`/`stack`/`repeatAxis` + the §3.10 base set), and — **f16/bf16 only** — the widened forward set (unary family, gated, softmax/norm family, remaining reductions, masks, `pad`, `einsum`; §4.19). **f16/bf16 only, autograd LEAVES**: `variable`/`variableFromSlice` with f32 gradients; differentiable `to` casts and mixed-RHS `dot`/`einsum` are the graph entries (§5.1) |
+| Float (differentiable) | `.f32` | Full surface: autograd (`variable`, `backward`, `grad`), all math/NN ops (§4), load-time dense `packRhs`, all views and structural ops |
+| Typed float | `.f16`, `.bf16`, `.f64` (`supportsForwardFloatMath`) | Forward math: the native typed set (`add/sub/mul/div/sum/mean/sumAll/dot/scale/divScalar`, `to`), the full structural set (`split`/`merge`/`flatten`/`reshape`/`sliceStep`/`flip`/`roll`/`stack`/`repeatAxis` + the §3.10 base set), and — **f16/bf16 only** — the widened forward set (unary family, gated, softmax/norm family, remaining reductions, masks, `pad`, `einsum`, load-time dense `packRhs`; §4.19). **f16/bf16 only, autograd LEAVES**: `variable`/`variableFromSlice` with f32 gradients; differentiable `to` casts and mixed-RHS `dot`/`einsum` are the graph entries (§5.1) |
 | Typed scalar constant | `.bool`, `.u8`, `.u16`, `.i8`, `.i16`, `.i32`, `.i64` | Constants only; construction, data access, structural ops, `to` (scalar casts, §3.8), and integer forward math (§4.19): wrapping `add`/`sub`/`mul`, `maximum`/`minimum`, explicit `divTrunc`/`divFloor` + `rem`/`mod`, bitwise `bitAnd`/`bitOr`/`bitXor`, i64-returning `sum`/`sumAll`, plus exact integer `compare` (§4.6). `.bool` keeps only `to`, the counting `sum`/`sumAll`, and the mask combinators `logicalAnd`/`logicalOr`/`logicalXor`/`logicalNot` |
 | Block-quantized constant | `q1_0/q2_0`, `q4_0 … q8_k`, `iq*`, `tq1_0/tq2_0`, `mxfp4`, `nvfp4` (`isBlockQuantized`) | Constants only; block construction, `to(.f32)` dequantize, `getRows`, row `concat`, `packRhs`/`packRhsLayout` (§10) |
 
@@ -1911,15 +1912,16 @@ the named unary aliases (`relu`, `exp`, `sqrt`, `rsqrt`, `sigmoid`, `silu`,
 `rmsNormMul`, `layerNorm` (plain `.{}` options), `cumsum`, `cumprod`,
 `where`, `maskedFill`, `compare`, `pad`, `einsum`, the widened
 reductions `max`, `min`, `prod`, `variance`, `logsumexp` (f32 results,
-§8.3), and `argmax` (i64 result, §4.16).
+§8.3), `argmax` (i64 result, §4.16), and load-time dense `packRhs`
+(§4.9/§10.3).
 
 **Block-quantized branch:** `constant`, `fromTensor`, `fromBlocks`,
 `fromStorageSlice`, `fromBorrowedBlocks`, `deinit`, `asRawTensor`, `data`,
 `dataConst`, `copyTo`, `requiresGrad`, `axis`, `hasTag`, `dim`, `shape`,
 `withTags`, `to`, `materialize`, `concat`, `getRows` — all §3 — plus
 `packRhs`, `packRhsLayout` (packed matmul RHS containers; §10, used by
-`dotPacked` in §4). The root helper `fucina.PackedRhs(dtype)` names
-`packRhs`'s return type (§10).
+`dotPacked` in §4). The same root helper `fucina.PackedRhs(dtype)` names
+the f32/f16/bf16 dense pack and each quantized `packRhs` return type (§10).
 
 ## 4. Tensor operations
 
@@ -2698,12 +2700,13 @@ test "dotTernarySte encodes the latent weight per call" {
 }
 ```
 
-**Packed-RHS entries** (quantization detail in §10):
+**Packed-RHS entries** (layout and quantization detail in §10):
 
 - `dotPacked(ctx, rhs, contract_tag, out_tag)` — 2-D `[free, contract]` lhs
-  against a pre-packed quantized RHS container (`*const` q8_0x4 / q6_kx4 /
-  q4_kx8 / q4_kx2mmla / q5_kx8, comptime-dispatched from the pointer type).
-  No gradients: fails with `error.GradientQuantizedMatmulUnsupported`.
+  against a pre-packed dense or quantized RHS container (comptime-dispatched
+  from the pointer type). Dense f32/f16/bf16 packs fail with
+  `error.GradientPackedMatmulUnsupported` when the lhs requires grad;
+  quantized packs fail with `error.GradientQuantizedMatmulUnsupported`.
 - `rmsNormMulDotPacked(ctx, norm_weight, eps, rhs, contract_tag, out_tag)` —
   fused `rmsNormMul(self, norm_weight) · rhsᵀ` without materializing the
   normalized tensor (`self` is the pre-norm `[free, contract]` input,
@@ -2721,6 +2724,38 @@ test "dotTernarySte encodes the latent weight per call" {
   aarch64+i8mm targets else x8 (the return type is
   `fucina.PackedRhs(dtype)`); `packRhsLayout(ctx, layout)` forces a specific
   `fucina.PackedRhsLayout` instead.
+- On f32/f16/bf16 tensors: `packRhs(ctx)` snapshots a rank-2 `[out, contract]`
+  weight into the shared f32 output-row-panel layout. f16/bf16 values widen
+  once while packing; the caller owns and `deinit()`s the returned
+  `fucina.PackedRhs(dtype)`. The source tensor may be released immediately.
+
+```zig
+test "load-time dense packed RHS" {
+    const alloc = std.testing.allocator;
+    var ctx: fucina.ExecContext = undefined;
+    ctx.init(alloc);
+    defer ctx.deinit();
+
+    const w_values = [_]f32{
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 1,
+    };
+    var packed_rhs = blk: {
+        var w = try fucina.Tensor(.{ .out, .in }).fromSlice(&ctx, .{ 3, 4 }, &w_values);
+        defer w.deinit();
+        break :blk try w.packRhs(&ctx); // independent snapshot of w
+    };
+    defer packed_rhs.deinit();
+
+    const x_values = [_]f32{ 2, 3, 4, 5, 7, 11, 13, 17 };
+    var x = try fucina.Tensor(.{ .seq, .in }).fromSlice(&ctx, .{ 2, 4 }, &x_values);
+    defer x.deinit();
+    var y = try x.dotPacked(&ctx, &packed_rhs, .in, .out);
+    defer y.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 2, 3, 9, 7, 11, 30 }, try y.dataConst());
+}
+```
 
 ### 4.10 Softmax family (`src/ag/tensor.zig`, `src/exec/softmax.zig`)
 
@@ -4393,11 +4428,12 @@ either irrelevant or rejected):
   `topK` and `sort`, `compare`, `isnan`, `isinf`, `isfinite`, `any`, `all`,
   `anyAll`, `allAll`, `logicalAnd`, `logicalOr`, `logicalXor`,
   `logicalNot` — index/mask outputs; gradients are undefined.
-- **Inference-only fused kernels** — fail with
-  `error.GradientQuantizedMatmulUnsupported` when an operand requires grad:
-  `dotPacked`, `rmsNormMulDotPacked`, `splitSwiGluDotPacked`,
-  `gegluQuantDotPacked` (§10). For a *trainable* path over quantized
-  weights use `dot` with a quantized RHS (lhs-grad) or `dotTernarySte`.
+- **Inference-only packed kernels** — dense `packRhs`/`dotPacked` fail with
+  `error.GradientPackedMatmulUnsupported`; quantized `dotPacked` and the fused
+  `rmsNormMulDotPacked`/`splitSwiGluDotPacked`/`gegluQuantDotPacked` fail with
+  `error.GradientQuantizedMatmulUnsupported` when an operand requires grad
+  (§10). For a *trainable* path use ordinary dense `dot`, or quantized `dot`
+  (lhs-grad) / `dotTernarySte` as appropriate.
 - **Prepared-conv entries** — fail with
   `error.GradientPreparedConv2dUnsupported` when an operand requires grad:
   `prepareConv2dWeights`, `conv2dPrepared`, `conv2dPreparedRelu` (§4.14 —
@@ -4963,6 +4999,7 @@ Thread-count knobs, in precedence order:
 | `fucina.parallel.setMaxThreads(n)` | runtime API | **replaces** the detected CPU count (mirrors llama.cpp `-t`) — it can also *raise* the team size above the detected count, up to the `-Dmax-threads` build ceiling; call once at startup before any parallel work; `n == 0` ignored; wins over the env var by pre-seeding the cache |
 | `FUCINA_MAX_THREADS` | env var | read once on the first `cpuThreadCount` call; applied as `@min` against the detected count, so it **only lowers**; `0`/invalid = no override |
 | `FUCINA_SPIN_BUDGET` | env var | overrides the spin-then-park window, read once per team init; workload-coupled and U-shaped — override only with measurements (short budgets, ~512, favor encode-style workloads with serial host sections; the default favors dense LLM op streams) |
+| `FUCINA_POOL_PROFILE=1` | env flag | allocates one trace slot per participant and prints fork-join claim/completion timing after every dispatch; diagnostic runs only |
 
 The effective thread count is `parallel.cpuThreadCount(vector_max_threads)`
 = `max(1, min(count, vector_max_threads))`, where `count` is the
@@ -5026,6 +5063,12 @@ thresholds such as `parallel.vector_matmul_work_threshold`, claim-chunk
 sizing) and the backend-side pool handshake are §9 material (§9.4, §9.8).
 `ParallelConfig` is an internal backend/vector type, not part of the public
 surface.
+
+With `FUCINA_POOL_PROFILE=1`, each participant writes only its own trace slot,
+so claim timing adds no trace atomics. The dispatcher's acquire join makes the
+slots visible before it prints offsets relative to dispatch start. A zero-task
+participant is still reported: its completion offset is the barrier-tail
+evidence needed to distinguish late wake-up from slow task execution.
 
 ### 6.7 RhsLifetime: address-keyed caching of RHS operands (`src/exec/quant_matmul.zig`)
 
@@ -6753,7 +6796,7 @@ The full method inventory, grouped (every name is a `Backend` method; the
 | norm / activation kernels | `groupNormInto`, `groupNormBackwardInto`, `snakeInto`, `snakeBackwardInputInto`, `snakeBackwardParamsInto` |
 | dense GEMM | `matmulInto`, `matmul2DIntoUnchecked`, `matmul2DIntoUncheckedTyped`, `matmulTransAInto`, `matmulTransA2DIntoUnchecked`, `matmulTransBInto`, `matmulTransB2DIntoUnchecked`, `matmulTransB2DIntoUncheckedF16Operands`, `matmulTransB2DIntoUncheckedBf16Rhs` |
 | batched GEMM | `matmulBatched2DIntoUnchecked`, `matmulBatchedTransA2DIntoUnchecked`, `matmulBatchedTransB2DIntoUnchecked` |
-| packed dense RHS | `packMatmulRhsTyped`, `matmul2DIntoUncheckedPackedRhsTyped` |
+| packed dense RHS | `packDenseMatmulRhsTyped`, `matmul2DIntoUncheckedPackedDenseRhs`, `packMatmulRhsTyped`, `matmul2DIntoUncheckedPackedRhsTyped` |
 | quantized RHS | `quantizeMatmulRhsBlockwiseI8`, `quantizeMatmulRhsQ4_0`, `quantizeMatmulRhsQ8_0`, `supportsQuantizedMatmulRhs`, `matmul2DQuantizedRhs`, `matmul2DQuantizedRhsQ8_0x4`, `matmul2DQuantizedRhsQ6_Kx4`, `matmul2DQuantizedRhsQ4_Kx4`, `matmul2DQuantizedRhsQ4_Kx8`, `matmul2DQuantizedRhsQ4_Kx2Mmla`, `matmul2DQuantizedRhsQ5_Kx8`, `matmul2DPackedQ8_0x4LhsRhs`, `matmul2DPackedPaddedQ8_0x4LhsRhs`, `matmulPackedQ4_Kx8Q8_Kx4Slice`, `matmulPackedQ4_Kx8RowsSlice`, `matmulPackedQ5_Kx8Q8_Kx4Slice`, `matmulPackedQ5_Kx8RowsSlice`, `matmulPackedQ6_Kx4RowsSlice` |
 
 Geometry structs re-exported through `backend.zig` (and used in the
@@ -6847,6 +6890,7 @@ comptime by `std.simd.suggestVectorLength(f32) orelse 4` — 4 lanes on NEON,
 | `vector/elementwise.zig` | elementwise/reduction entry points, parallel dispatch, snake/groupNorm/prelu/channelAffine kernels |
 | `vector/gemm.zig` | dense f32/f16/f64/bf16 GEMM (NN/TN/NT), register-tiled row kernels, `gemmNNRange/gemmTNRange/gemmNTRange` |
 | `vector/gemm_blocked.zig` | BLIS-style cache-blocked packed f32 GEMM (§9.5) |
+| `vector/gemm_packed.zig` | load-time packed dense f32 NT microkernel and wide-output task splitter (§9.5) |
 | `vector/matmul_quant.zig` | quantized matmul dispatch + row/column parallel splitters (kernels live in `backend/quant/*`) |
 | `vector/batched.zig` | batched dense GEMM (reuses the `gemm*Range` kernels per batch) |
 | `vector/conv.zig` | causal depthwise/general/grouped 1-D conv, dense conv1d/col2im1d, channel-last conv2d + im2col, `Conv1dDims`/`Conv2dDims` |
@@ -6932,6 +6976,27 @@ Within the pure-Zig tier there are two paths:
   Parallelism is an (ic-block × column-chunk) cell grid over the persistent
   team; each C tile is written by exactly one task, so results are
   deterministic and thread-count-independent.
+
+The public load-time dense packed operation is a separate NT path for reused
+weights. `packRhs` snapshots an f32/f16/bf16 `[n,k]` weight into owned f32
+output-row panels (logical rows remain contiguous; `n` is padded to four), and
+`dotPacked` computes `A[m,k] · W[n,k]ᵀ`. Its fixed dispatch table is:
+
+| Build/cell | Packed-dense dispatch |
+|---|---|
+| eligible GPU | provider first, using the stable packed tensor |
+| BLAS build, `m,n,k ≥ 16` | existing `shouldUseBlas` winner |
+| BLAS build, any dimension `< 16` | packed microkernel |
+| `-Dblas=none` | packed microkernel |
+| `-Dbackend=scalar` | scalar packed-op specification |
+
+The microkernel (`vector/gemm_packed.zig`) keeps four RHS output rows and three
+AVX2 (six aarch64) input rows live in registers, with SIMD lanes along `k`.
+It splits work over four-column panels in the wide output dimension and emits
+three dynamically claimed tasks per participant, so skinny `m` does not limit
+the team to `m` jobs. Packing and output allocation remain outside the compute
+leaf. Ordinary `dot`/`matmul` dispatch, large-`m` blocked/BLAS winners, and GPU
+precedence are unchanged.
 
 f16 GEMM policy (`vector/gemm.zig`): on aarch64 the f16×f16 `@mulAdd` arms
 are native `fmla.8h`, so half-precision accumulation is the fast path and
@@ -7020,23 +7085,35 @@ The `matmulPacked*Slice` entries are the same kernels with a
 activation rows themselves, so these skip the allocator tier entirely.
 
 **Packed RHS, user-facing story.** Packing a weight once at load time and
-matmul-ing against the pack is the hot inference path. Two tiers exist:
+matmul-ing against the pack is the hot inference path. The public facade has
+two layout families, plus an older backend-only typed bridge:
 
-- Block-quantized weights: `fucina.PackedRhsLayout = enum { q8_0x4, q6_kx4,
-  q4_kx4, q4_kx8, q4_kx2mmla, q5_kx8 }` names the interleaved layouts;
+- Dense f32/f16/bf16 weights: `weights.packRhs(ctx)` snapshots a rank-2
+  `[out, contract]` weight into an owned `fucina.PackedRhs(dtype)` whose
+  layout is `.dense_f32`. f16/bf16 values widen once at pack time. The public
+  `x.dotPacked(ctx, &packed, contract_tag, out_tag)` takes an f32 lhs and
+  dispatches through GPU, BLAS, or the skinny-m wide-output microkernel by the
+  fixed table in §9.5. The source can be released after packing; the model
+  owns and deinitializes the pack.
+
+- Block-quantized weights: the `PackedRhsLayout` members `q8_0x4`, `q6_kx4`,
+  `q4_kx4`, `q4_kx8`, `q4_kx2mmla`, and `q5_kx8` name the interleaved layouts;
   `backend.PackedRhsFor(layout)` maps a layout to its container type, and the
   facade's `fucina.PackedRhs(dtype)` picks the ISA-best container per dtype
   (`q8_0→x4`, `q6_k→x4`, `q5_k→x8`, `q4_k→x2mmla` when
   `supports_q4_k_mmla` else `x8`). Model code calls
   `weights.packRhs(ctx)` / `packRhsLayout(ctx, .q4_kx8)` on a rank-2
   quantized tensor and feeds the pack to `dotPacked` — full semantics in §10.
-- f16/bf16 dense weights: `backend/packed.zig` defines `PackedMatmulFormat =
+- Backend-only same-dtype f16/bf16 bridge: `backend/packed.zig` also defines
+  `PackedMatmulFormat =
   enum { f16_rhs_f32, bf16_rhs_f32 }` and `PackedMatmulRhsFor(dtype)`; the
   pack widens the RHS to f32 once (`packRhs` → owns an f32 tensor; caller
   `deinit()`s the container). `matmul2DIntoUncheckedPackedRhsTyped` then runs
   f32 GEMM with widen/narrow bridges, with a dedicated `m == 1` GEMV fast
   path that dots the f16/bf16 activation row directly against the packed f32
-  columns (column-parallel over the pool). This tier is reached through
+  columns (column-parallel over the pool). This older bridge preserves a
+  same-dtype f16/bf16 result and is distinct from the public f32-lhs
+  `.dense_f32` layout. It is reached through
   `ExecContext.packMatmulRhsTyped` / `matmul2DWithPackedRhsTyped` (§6).
 
 **Arch-gated int8 dot arms.** The K-quant/Q8 kernels select their inner dot
@@ -7627,38 +7704,48 @@ genomes) and `deinit` frees nothing. Ordinary users never build these —
 dispatch, and the LLM MoE loader borrows expert blocks through
 `fucina.MoeRhs` (§13).
 
-**Packed containers** — column-interleaved copies of a quantized weight,
-laid out so the innermost kernel loop feeds the target's int8 dot
-instruction (`sdot`/`smmla` on aarch64, VNNI/AVX2 on x86). Root exports:
+**Packed containers** — independent load-time snapshots consumed by
+`dotPacked`. Dense packs are owned f32 output-row panels
+(`src/backend/packed.zig`); quantized packs are column-interleaved copies laid
+out so the innermost loop feeds the target's int8 dot instruction
+(`sdot`/`smmla` on aarch64, VNNI/AVX2 on x86). Root exports:
 
 ```zig
-pub const PackedRhsLayout = enum { q8_0x4, q6_kx4, q4_kx4, q4_kx8, q4_kx2mmla, q5_kx8 };
-pub fn PackedRhs(comptime dt: DType) type   // ISA-best layout for a dtype
+pub const PackedRhsLayout = enum { dense_f32, q8_0x4, q6_kx4, q4_kx4, q4_kx8, q4_kx2mmla, q5_kx8 };
+pub fn PackedRhs(comptime dt: DType) type   // dense panel or ISA-best quantized layout
 pub const QuantizedMatmulRhsQ8_0x4;         // + Q4_Kx4, Q4_Kx8, Q4_Kx2Mmla, Q5_Kx8, Q6_Kx4
 pub const supports_q4_k_mmla: bool;         // aarch64 + i8mm target feature
 ```
 
-`PackedRhs(dt)` maps q8_0→x4, q6_k→x4, q5_k→x8, and q4_k→x2mmla on
-aarch64+i8mm targets, x8 otherwise. Each packed container owns its blocks
-(non-optional allocator; `deinit` frees), holds `k`/`n`, and carries a
-comptime `layout` tag that `dotPacked` dispatches on. `PackedRhsFor(layout)`
-(kernel tier) maps a layout back to its container type. The `q4_kx4` layout
-exists only for kernel comparisons and has no facade entry (comptime error).
+`PackedRhs(dt)` maps f32/f16/bf16→`.dense_f32`, q8_0→x4, q6_k→x4,
+q5_k→x8, and q4_k→x2mmla on aarch64+i8mm targets, x8 otherwise. Each
+container owns its snapshot (`PackedDenseRhs.rhs` or quantized blocks), holds
+`k`/`n`, and carries a comptime `layout` tag that `dotPacked` dispatches on.
+`PackedRhsFor(layout)` (kernel tier) maps a layout back to its container type.
+The `q4_kx4` layout exists only for kernel comparisons and has no facade entry
+(comptime error).
 
 Packing and consuming happen on the facade:
 
-- `w.packRhs(ctx)` / `w.packRhsLayout(ctx, layout)` — pack a rank-2
-  contiguous quantized tensor (`TensorError.UnsupportedView` when not
-  contiguous). The tensor can be released after packing; the packed
-  container is independent. `packRhsLayout` is the escape hatch to force a
-  non-default layout (e.g. x8 on MMLA hardware to exercise the fused
-  kernels). Equivalent `ExecContext` entries: `packMatmulRhsQ8_0x4`,
+- Dense `w.packRhs(ctx)` — snapshot a rank-2 contiguous f32/f16/bf16
+  `[out, contract]` tensor as `.dense_f32`; f16/bf16 widen once. Logical
+  output rows stay contiguous and the row count is padded to the four-output
+  microkernel tile. Equivalent `ExecContext` entry:
+  `packDenseMatmulRhsTyped`.
+- Quantized `w.packRhs(ctx)` / `w.packRhsLayout(ctx, layout)` — pack a
+  rank-2 contiguous tensor (`TensorError.UnsupportedView` when not
+  contiguous). `packRhsLayout` is the escape hatch to force a non-default
+  layout (e.g. x8 on MMLA hardware to exercise the fused kernels). Equivalent
+  `ExecContext` entries: `packMatmulRhsQ8_0x4`,
   `packMatmulRhsQ6_Kx4`, `packMatmulRhsQ4_Kx4`, `packMatmulRhsQ4_Kx8`,
   `packMatmulRhsQ4_Kx2Mmla`, `packMatmulRhsQ5_Kx8`.
+- Every pack is independent of the source tensor, which may be released after
+  packing. The owner calls `deinit()` on the packed container.
 - `x.dotPacked(ctx, &packed, contract_tag, out_tag)` — rank-2 f32 LHS stored
   `[free, contract]`; returns `[free, out_tag]`. **No gradient support**:
-  returns `error.GradientQuantizedMatmulUnsupported` when `self` requires
-  grad.
+  dense packs return `error.GradientPackedMatmulUnsupported` and quantized
+  packs return `error.GradientQuantizedMatmulUnsupported` when `self`
+  requires grad.
 - `x.rmsNormMulDotPacked(ctx, &norm_weight, eps, &packed, contract_tag, out_tag)`
   — fused pre-norm + packed GEMM: normalizes up to 4 rows at a time into
   task-private scratch with the exact `rmsNormMulRows` kernel and quantizes
@@ -7678,8 +7765,9 @@ Packing and consuming happen on the facade:
 
 At the LLM layer (§13), `fucina_llm`'s `weights.zig` wraps each quantized
 projection as a struct holding the original blocks plus a
-`fucina.PackedRhs(dtype)` built once at load; this is the intended pattern
-for any model code with reused weights — pack once, `dotPacked` per step.
+`fucina.PackedRhs(dtype)` built once at load. Inkling uses the same pattern
+for its dense vision-tower projections and dense unembed: pack once while
+loading, `dotPacked` per step, deinitialize with the owning model.
 
 ```zig
 test "packed RHS matmul matches the unpacked quantized dot" {
