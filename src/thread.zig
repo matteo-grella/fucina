@@ -401,6 +401,12 @@ const BarrierPool = struct {
     chain_next: []usize = &.{},
     chain_head: std.atomic.Value(usize) = .init(chain_empty),
     chain_completed: std.atomic.Value(usize) = .init(0),
+    // Opt-in fork-join timeline (`FUCINA_POOL_PROFILE=1`). Each participant
+    // owns one slot, so the hot path needs no trace atomics; the dispatcher's
+    // acquire read of `done` makes worker-written slots visible before dump.
+    profile_enabled: bool = false,
+    profile_slots: []ProfileSlot = &.{},
+    profile_dispatch: u64 = 0,
     // Safety-build-only instrumentation of the chained enqueue contract (see
     // Pool.parallelChained); never touched in ReleaseFast/ReleaseSmall.
     chain_seen: []std.atomic.Value(u8) = &.{},
@@ -412,6 +418,11 @@ const BarrierPool = struct {
     const JobFn = *const fn (ctx: *anyopaque, index: usize) void;
     const ChainJobFn = *const fn (ctx: *anyopaque, index: usize, chain: *const Chain) void;
     const JobMode = enum(u8) { chunks, chained };
+    const ProfileSlot = struct {
+        claim_ns: u64 = 0,
+        complete_ns: u64 = 0,
+        task_count: usize = 0,
+    };
     const chain_empty = std.math.maxInt(usize);
 
     // Gate for the chained-contract checks: on in Debug/ReleaseSafe, compiled
@@ -460,7 +471,13 @@ const BarrierPool = struct {
             .threads = &.{},
             .worker_count = worker_count,
             .spin_budget = resolveSpinBudget(),
+            .profile_enabled = parallel.envFlag("FUCINA_POOL_PROFILE"),
         };
+        if (self.profile_enabled and worker_count > 0) {
+            self.profile_slots = try allocator.alloc(ProfileSlot, worker_count + 1);
+            @memset(self.profile_slots, .{});
+        }
+        errdefer if (self.profile_slots.len > 0) allocator.free(self.profile_slots);
         if (worker_count == 0) return;
 
         const threads = try allocator.alloc(std.Thread, worker_count);
@@ -496,9 +513,11 @@ const BarrierPool = struct {
         self.allocator.free(self.threads);
         if (self.chain_next.len > 0) self.allocator.free(self.chain_next);
         if (self.chain_seen.len > 0) self.allocator.free(self.chain_seen);
+        if (self.profile_slots.len > 0) self.allocator.free(self.profile_slots);
         self.threads = &.{};
         self.chain_next = &.{};
         self.chain_seen = &.{};
+        self.profile_slots = &.{};
         self.chain_head.store(chain_empty, .release);
         self.worker_count = 0;
     }
@@ -507,6 +526,40 @@ const BarrierPool = struct {
         if (count <= participants * 4) return 1;
         if (count <= participants * 16) return 2;
         return 4;
+    }
+
+    fn profileNow(self: *const BarrierPool) u64 {
+        return @intCast(std.Io.Clock.awake.now(self.io).nanoseconds);
+    }
+
+    fn profileBegin(self: *BarrierPool) u64 {
+        if (!self.profile_enabled) return 0;
+        @memset(self.profile_slots, .{});
+        self.profile_dispatch +%= 1;
+        return self.profileNow();
+    }
+
+    fn profileDump(
+        self: *const BarrierPool,
+        dispatch_ns: u64,
+        count: usize,
+        participants: usize,
+        claim_chunk: usize,
+        mode: JobMode,
+    ) void {
+        if (!self.profile_enabled) return;
+        const end_ns = self.profileNow();
+        std.debug.print(
+            "[pool-trace] dispatch={d} mode={s} jobs={d} participants={d} chunk={d} span_ns={d}",
+            .{ self.profile_dispatch, @tagName(mode), count, participants, claim_chunk, end_ns - dispatch_ns },
+        );
+        for (self.profile_slots, 0..) |slot, worker_index| {
+            std.debug.print(
+                " w{d}=claim+{d},complete+{d},tasks:{d}",
+                .{ worker_index, slot.claim_ns - dispatch_ns, slot.complete_ns - dispatch_ns, slot.task_count },
+            );
+        }
+        std.debug.print("\n", .{});
     }
 
     fn dispatch(self: *BarrierPool, count: usize, ctx: *anyopaque, run: JobFn) void {
@@ -518,6 +571,7 @@ const BarrierPool = struct {
         self.job_next.store(0, .release);
         self.job_claim_chunk = dynamicClaimChunk(count, participants);
         self.done.store(0, .release);
+        const dispatch_ns = self.profileBegin();
         // The generation bump and the parked check form a store-load pair with
         // the worker's parked increment + futex re-check of the generation:
         // both sides are seq_cst so either the dispatcher observes the parker
@@ -529,12 +583,13 @@ const BarrierPool = struct {
             self.io.futexWake(u32, &self.generation.raw, @intCast(self.worker_count));
         }
 
-        self.runChunkClaims();
+        self.runChunkClaims(0);
 
         // Every worker increments `done` exactly once per generation. The
         // dispatcher owns a core and has no other work until the join, so it
         // pure-spins rather than issuing sched_yield syscalls.
         while (self.done.load(.acquire) < self.worker_count) std.atomic.spinLoopHint();
+        self.profileDump(dispatch_ns, count, participants, self.job_claim_chunk, .chunks);
     }
 
     fn ensureChainReadyCapacity(self: *BarrierPool, count: usize) !void {
@@ -565,6 +620,7 @@ const BarrierPool = struct {
         self.job_mode = .chained;
         self.done.store(0, .release);
         self.chain_completed.store(0, .release);
+        const dispatch_ns = self.profileBegin();
         if (comptime chain_checks) {
             self.chain_enqueued.store(0, .monotonic);
             self.chain_inflight.store(0, .monotonic);
@@ -582,8 +638,9 @@ const BarrierPool = struct {
             self.io.futexWake(u32, &self.generation.raw, @intCast(self.worker_count));
         }
 
-        self.runChainClaims();
+        self.runChainClaims(0);
         while (self.done.load(.acquire) < self.worker_count) std.atomic.spinLoopHint();
+        self.profileDump(dispatch_ns, count, self.worker_count + 1, 1, .chained);
 
         if (comptime chain_checks) {
             if (initial_count + self.chain_enqueued.load(.monotonic) != count) {
@@ -592,15 +649,22 @@ const BarrierPool = struct {
         }
     }
 
-    fn runChunkClaims(self: *BarrierPool) void {
+    fn runChunkClaims(self: *BarrierPool, worker_index: usize) void {
+        var completed: usize = 0;
+        if (self.profile_enabled) self.profile_slots[worker_index].claim_ns = self.profileNow();
         while (true) {
             const start = self.job_next.fetchAdd(self.job_claim_chunk, .monotonic);
-            if (start >= self.job_count) return;
+            if (start >= self.job_count) break;
             const end = @min(self.job_count, start + self.job_claim_chunk);
             var c = start;
             while (c < end) : (c += 1) {
                 self.job_run(self.job_ctx, c);
             }
+            completed += end - start;
+        }
+        if (self.profile_enabled) {
+            self.profile_slots[worker_index].task_count = completed;
+            self.profile_slots[worker_index].complete_ns = self.profileNow();
         }
     }
 
@@ -629,7 +693,9 @@ const BarrierPool = struct {
         }
     }
 
-    fn runChainClaims(self: *BarrierPool) void {
+    fn runChainClaims(self: *BarrierPool, worker_index: usize) void {
+        var completed_by_worker: usize = 0;
+        if (self.profile_enabled) self.profile_slots[worker_index].claim_ns = self.profileNow();
         const chain = Chain{
             .ctx = self,
             .enqueue_fn = chainEnqueueOpaque,
@@ -644,6 +710,7 @@ const BarrierPool = struct {
                 }
                 self.chain_run(self.job_ctx, index, &chain);
                 _ = self.chain_completed.fetchAdd(1, .release);
+                completed_by_worker += 1;
                 if (comptime chain_checks) _ = self.chain_inflight.fetchSub(1, .seq_cst);
             } else {
                 if (comptime chain_checks) {
@@ -664,11 +731,14 @@ const BarrierPool = struct {
                 std.atomic.spinLoopHint();
             }
         }
+        if (self.profile_enabled) {
+            self.profile_slots[worker_index].task_count = completed_by_worker;
+            self.profile_slots[worker_index].complete_ns = self.profileNow();
+        }
     }
 
     fn workerMain(self: *BarrierPool, index: usize) void {
         pinToPerformanceCores();
-        _ = index;
         const spin_budget = self.spin_budget;
         var seen: u32 = self.generation.load(.acquire);
         // Announce readiness only after latching the baseline generation, so
@@ -698,8 +768,8 @@ const BarrierPool = struct {
             if (self.shutdown.load(.acquire)) return;
 
             switch (self.job_mode) {
-                .chunks => self.runChunkClaims(),
-                .chained => self.runChainClaims(),
+                .chunks => self.runChunkClaims(index),
+                .chained => self.runChainClaims(index),
             }
             _ = self.done.fetchAdd(1, .release);
         }
