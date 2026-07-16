@@ -56,6 +56,19 @@ pub const Tokenizer = struct {
     pre_mismatch: ?[]u8 = null,
     /// Which implemented pre-tokenizer splits text into BPE chunks.
     pre: Pre = .qwen2,
+    /// Special tokens the encoder single-id-matches before pretokenization —
+    /// llama.cpp's special-token cache: every CONTROL or USER_DEFINED vocab
+    /// entry (`tokenizer.ggml.token_type` 3 / 4), sorted longest-text-first
+    /// so longer markers claim their spans before shorter ones. Empty when
+    /// the vocab carries no type metadata (`initFromParts` callers); the
+    /// encoder then falls back to matching `<|...|>`-shaped markers only.
+    specials: []const SpecialEntry = &.{},
+
+    pub const SpecialEntry = struct {
+        /// Slice into `vocab_blob`.
+        text: []const u8,
+        id: u32,
+    };
 
     pub const Pre = enum { qwen2, qwen35, joyai_llm, glm4, inkling };
 
@@ -89,6 +102,35 @@ pub const Tokenizer = struct {
 
         var tok = try initFromParts(allocator, token_strings, merge_strings, special);
         errdefer tok.deinit();
+        // The special-token cache from `tokenizer.ggml.token_type` (i32 per
+        // token: 3 = CONTROL, 4 = USER_DEFINED — both single-id-match during
+        // encoding, exactly llama.cpp's cache_special_tokens).
+        if (file.getArray("tokenizer.ggml.token_type")) |types_arr| {
+            if (types_arr.item_type == 5 and types_arr.len == tok.vocab.len) {
+                var count: usize = 0;
+                for (0..types_arr.len) |i| {
+                    const t = std.mem.readInt(i32, types_arr.data[i * 4 ..][0..4], .little);
+                    if ((t == 3 or t == 4) and tok.vocab[i].len > 0) count += 1;
+                }
+                const entries = try allocator.alloc(SpecialEntry, count);
+                var n: usize = 0;
+                for (0..types_arr.len) |i| {
+                    const t = std.mem.readInt(i32, types_arr.data[i * 4 ..][0..4], .little);
+                    if ((t == 3 or t == 4) and tok.vocab[i].len > 0) {
+                        entries[n] = .{ .text = tok.vocab[i], .id = @intCast(i) };
+                        n += 1;
+                    }
+                }
+                // Longest first; id ascending on ties for determinism.
+                std.mem.sort(SpecialEntry, entries, {}, struct {
+                    fn lessThan(_: void, a: SpecialEntry, b: SpecialEntry) bool {
+                        if (a.text.len != b.text.len) return a.text.len > b.text.len;
+                        return a.id < b.id;
+                    }
+                }.lessThan);
+                tok.specials = entries;
+            }
+        }
         // Record (don't fail on) a pretokenizer mismatch — see `pre_mismatch`.
         if (file.getString("tokenizer.ggml.pre")) |pre| {
             if (std.mem.eql(u8, pre, "qwen2")) {
@@ -177,6 +219,7 @@ pub const Tokenizer = struct {
     }
 
     pub fn deinit(self: *Tokenizer) void {
+        if (self.specials.len > 0) self.allocator.free(self.specials);
         if (self.pre_mismatch) |p| self.allocator.free(p);
         self.merge_ranks.deinit();
         self.token_to_id.deinit();
@@ -250,12 +293,20 @@ pub const Tokenizer = struct {
         return self.decodeTokenInto(allocator, id, out);
     }
 
-    /// Split on `<|...|>` markers that resolve to known tokens; BPE-encode the
-    /// text between them. A "<|" that does NOT open a known marker is left in
-    /// place for normal pretokenization — llama.cpp partitions only on actual
-    /// special tokens, so forcing a split there would change chunk boundaries
-    /// (and token IDs) around bare "<|".
+    /// Single-id-match special tokens, then BPE-encode the text between them.
+    ///
+    /// With a special-token cache (GGUF vocabs with `token_type` metadata)
+    /// this is llama.cpp's `tokenizer_st_partition`: fragments start as one
+    /// raw span, and each special token — longest first — claims every
+    /// occurrence inside the remaining raw fragments, so a longer marker can
+    /// never be broken up by a shorter one matching inside it.
+    ///
+    /// Without a cache, fall back to resolving `<|...|>`-shaped markers
+    /// against the vocabulary. A "<|" that does NOT open a known marker is
+    /// left in place for normal pretokenization — forcing a split there
+    /// would change chunk boundaries (and token IDs) around bare "<|".
     fn encodeWithSpecials(self: *const Tokenizer, allocator: Allocator, text: []const u8, out: *std.ArrayList(u32)) !void {
+        if (self.specials.len > 0) return self.encodePartitioned(allocator, text, out);
         var pos: usize = 0; // start of the pending regular-text span
         var search: usize = 0; // marker scan cursor (>= pos)
         while (search < text.len) {
@@ -275,6 +326,43 @@ pub const Tokenizer = struct {
             search = lt + 2;
         }
         if (pos < text.len) try self.encodeRegular(allocator, text[pos..], out);
+    }
+
+    fn encodePartitioned(self: *const Tokenizer, allocator: Allocator, text: []const u8, out: *std.ArrayList(u32)) !void {
+        // A fragment is either an unclaimed raw span (`id == null`) or one
+        // claimed special token.
+        const Fragment = struct { start: usize, end: usize, id: ?u32 };
+        var frags: std.ArrayList(Fragment) = .empty;
+        defer frags.deinit(allocator);
+        try frags.append(allocator, .{ .start = 0, .end = text.len, .id = null });
+
+        for (self.specials) |sp| {
+            var i: usize = 0;
+            while (i < frags.items.len) : (i += 1) {
+                const fr = frags.items[i];
+                if (fr.id != null) continue;
+                const found = std.mem.indexOf(u8, text[fr.start..fr.end], sp.text) orelse continue;
+                const m0 = fr.start + found;
+                const m1 = m0 + sp.text.len;
+                // Replace the raw fragment with [left raw][token][right raw];
+                // the loop revisits the right remainder for further
+                // occurrences of this same special.
+                frags.items[i] = .{ .start = m0, .end = m1, .id = sp.id };
+                if (m1 < fr.end) try frags.insert(allocator, i + 1, .{ .start = m1, .end = fr.end, .id = null });
+                if (fr.start < m0) {
+                    try frags.insert(allocator, i, .{ .start = fr.start, .end = m0, .id = null });
+                    i += 1; // stay on the claimed fragment
+                }
+            }
+        }
+
+        for (frags.items) |fr| {
+            if (fr.id) |id| {
+                try out.append(allocator, id);
+            } else {
+                try self.encodeRegular(allocator, text[fr.start..fr.end], out);
+            }
+        }
     }
 
     /// Pretokenize with the Qwen2-family pattern, then BPE-encode each chunk.
