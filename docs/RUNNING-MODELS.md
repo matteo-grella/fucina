@@ -383,6 +383,71 @@ zig build qwen35 -Doptimize=ReleaseFast -- models/Qwen3.5-0.8B-Q8_0.gguf --linea
 
 ---
 
+## Inkling 975B-A41B (hybrid rel-bias attention + MoE) — `zig build inkling`
+
+thinkingmachines/Inkling: 66 layers alternating local (512-token window) and
+global attention with a banded content-dependent relative-position bias
+instead of RoPE, per-layer short causal convolutions on four sites (k-proj,
+v-proj, attention output, FFN output), a 256-expert top-6 sigmoid-routed MoE
+whose 2 shared experts participate in the routing softmax as sinks, log-N
+attention scaling past 128k tokens, and muP logit scaling. Reference:
+llama.cpp PR #25731 pinned on the `llama.cpp-inkling` ref (tools/fetch_refs.sh).
+
+Text-only (the release is multimodal; the mmproj towers are not ported).
+The full release has NOT been run here — the smallest GGUF
+(unsloth/inkling-GGUF UD-IQ1_S) is 270 GB. Parity is closed against the
+pinned oracle on a synthetic full-architecture checkpoint (every code path:
+both layer kinds, per-layer KV-head counts, all conv sites, MoE routing,
+log-N scaling, padded-vocab masking): tokenizer token-ID-exact on 14
+adversarial fixtures plus multi-kilobyte real files against the REAL
+201k-token Inkling tokenizer; last-position logits max-abs < 1e-6 over
+prompt lengths 5–200 on batch prefill and token-at-a-time decode; 128-token
+greedy generation id-exact vs the oracle.
+
+Multimodal: the mmproj towers are ported too — the hMLP vision stem
+(2x Pillow-Lanczos upscale with the byte-exact fixed-point resampling,
+bf16-rounded normalization, 40x40 patchify with the extra right column,
+fold(5,2,4)+linear+rmsnorm+gelu_erf stages, temporal-pair projection; one
+patch = one decoder token) and the dMel audio tower (1600/800 periodic-Hann
+magnitude Slaney mels via the reference's table-based FFT, log10 quantized
+to 16 levels over [-7,2], per-bin embedding sum; one 50 ms frame = one
+token). Media embeddings enter the decoder pre-normed (the token embed
+norm does not reapply). Parity vs the same oracle (ref-patched per
+tools/ref-patches/llama.cpp-inkling-*.patch): tiny-pair e2e logits < 1e-6
+and 24-token greedy id-exact for image and audio across adversarial
+geometries (2048-cap resize, single padded patch, exact-multiples, odd-hop
+audio); REAL mmproj-BF16 towers — audio max-abs 3.8e-6 (exact tier),
+vision min cosine 0.9999977 (bf16-weights tier; ggml rounds GEMM
+activations to bf16, fucina accumulates f32).
+
+CPU path notes: attention rows fan out over the worker team with SIMD
+score/V kernels, MoE prefill batches rows per expert into BLAS-shaped
+GEMMs, only the last position runs the 201k-wide unembed, and the media
+towers batch their lookups — measured ahead of the pinned llama.cpp
+build on prefill, decode, and both real-mmproj tower encodes
+(like-for-like `--bench` vs llama-bench/mtmd, 8 threads).
+
+```sh
+# Parity harness (ids in, logits/generation out):
+zig build inkling -Doptimize=ReleaseFast -- <model.gguf> --tokenize file.txt
+zig build inkling -Doptimize=ReleaseFast -- <model.gguf> 13225,2375 \
+  --logits-out ours.bin --compare-logits ref.bin --max-abs 1e-4
+zig build inkling -Doptimize=ReleaseFast -- <model.gguf> --prompt "..." --gen 64
+
+# Chat (typed-block wire format; --repl multi-turn, --no-think skips reasoning,
+# --system sets the system message). Sampler-driven (--temp).
+zig build inkling -Doptimize=ReleaseFast -- <model.gguf> --chat "Hi!" [--system "..."]
+zig build inkling -Doptimize=ReleaseFast -- <model.gguf> --repl --temp 0.7
+
+# Multimodal (one <__media__> marker; PNG images, 16 kHz WAV audio):
+zig build inkling -Doptimize=ReleaseFast -- <model.gguf> --mmproj <mmproj.gguf> \
+  --image photo.png --prompt "Describe this: <__media__> in short." --gen 64
+zig build inkling -Doptimize=ReleaseFast -- <model.gguf> --mmproj <mmproj.gguf> \
+  --audio clip.wav --prompt "Transcribe: <__media__>" --gen 64 [--embd-out t.bin]
+```
+
+---
+
 ## OpenAI-compatible LM server — `zig build lmserve`
 
 One process serves one model behind `POST /v1/chat/completions` and the

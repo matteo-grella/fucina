@@ -60,7 +60,16 @@ MIT, Copyright (c) 2023-2026 The ggml authors):
   validated by logit parity. **DiffusionGemma**
   (`src/llm/diffusion_gemma/model.zig`) was implemented from llama.cpp draft
   PR #24423 (at the time unmerged) plus the Hugging Face reference
-  implementation.
+  implementation. **Inkling** (`src/llm/inkling/`, an architecture by
+  Thinking Machines Lab — [thinkingmachines/Inkling](https://huggingface.co/thinkingmachines/Inkling))
+  was implemented from Daniel Han's (Unsloth) llama.cpp draft
+  [PR #25731](https://github.com/ggml-org/llama.cpp/pull/25731) (at the time
+  unmerged) as the source of truth for the GGUF layout, graph, tokenizer
+  pretokenizer, and multimodal projector; his
+  [unsloth/inkling-GGUF](https://huggingface.co/unsloth/inkling-GGUF)
+  conversions are the parity oracle. The `\p{M}` addition to the Unicode
+  classification tables (`src/llm/unicode_categories.zig`) is still generated
+  from llama.cpp's `unicode-data.cpp`.
 - **GGUF format** (`src/gguf.zig`): the format was created by the
   ggml/llama.cpp project; Fucina's reader/writer is an independent Zig
   implementation kept byte-compatible with ggml's writer.

@@ -426,6 +426,7 @@ in [`RUNNING-MODELS.md`](RUNNING-MODELS.md) and §14):
 | `deepseek2` | DeepSeek-V2 family (MLA + MoE) GGUF inference. |
 | `glm4moe` | GLM-4.5 family GGUF inference; `--mtp` native multi-token-prediction speculative decode. |
 | `deepseek4` | DeepSeek V4 Flash GGUF inference (CSA/HCA + streamed experts). |
+| `inkling` | Inkling (hybrid rel-bias attention + MoE) GGUF inference / parity harness. |
 | `nanochat` | nanochat port (karpathy/nanochat): tok-train / base-train / sft / eval-bpb / chat. |
 | `lmserve` | OpenAI-compatible HTTP server (chat completions + responses; SSE streaming; JSON-schema constrained output with `-Dllguidance=true`) over qwen3/gemma4/diffusion-gemma GGUFs + nanochat checkpoints. Links libc. |
 | `parakeet` | Parakeet ASR: WAV → text, `--stream`/`--manifest`/`--mic` (needs `-Dparakeet-mic`), `--compare` parity harness. |
@@ -10148,6 +10149,7 @@ family-agnostic helpers stay flat:
 | `llm.deepseek2` | `model` — DeepSeek-V2 MLA + fine-grained MoE with shared experts | `llm/deepseek2/` |
 | `llm.glm4moe` | `model` — GLM-4.5 MoE with native MTP (`nextn`) self-speculation | `llm/glm4moe/` |
 | `llm.deepseek4` | `model` — DeepSeek V4 Flash (hyper-connections, compressed-KV MQA, streamed experts, MTP) | `llm/deepseek4/` |
+| `llm.inkling` | `model`, `mmproj` — Inkling (hybrid SWA/global rel-bias attention, shortconv sites, sink-shared MoE; hMLP vision + dMel audio towers) | `llm/inkling/` |
 
 | Flat helper | Purpose | Section |
 |---|---|---|
@@ -10158,7 +10160,7 @@ family-agnostic helpers stay flat:
 | `llm.kv_persist` | crash-safe append-only KV-cache sidecar: conversations reopen warm | §13.4 |
 | `llm.tokenizer` | byte-level BPE (GPT-2/Qwen) | §13.5 |
 | `llm.spm_tokenizer` | SentencePiece Unigram (Gemma/llama-vocab) | §13.5 |
-| `llm.unicode_categories` | generated `\p{L}`/`\p{N}`/`\s` tables (byte-BPE pretokenizer; shared with out-of-module tokenizers) | §13.5 |
+| `llm.unicode_categories` | generated `\p{L}`/`\p{N}`/`\p{M}`/`\s` tables (byte-BPE pretokenizer; shared with out-of-module tokenizers) | §13.5 |
 | `llm.sampler` | greedy/temperature/top-k/top-p/min-p/penalties + logit-processor seam | §13.6 |
 | `llm.logit_processor` | pluggable logit-transform interface (grammar masks, bias lists) | §13.6 |
 | `llm.llguidance` | grammar/JSON-schema constrained decoding (vendored engine, `-Dllguidance`) | §13.6 |
@@ -10166,9 +10168,9 @@ family-agnostic helpers stay flat:
 | `llm.chat` | templates + generic `Conversation(Model, Tok)` | §13.8 |
 | `llm.cartridge` | trained KV-prefix corpus compression (Cartridges, arXiv 2506.06266) | §13.10 |
 
-The family namespaces are covered in §14 (deepseek2/glm4moe/deepseek4 by
-their module doc comments); this section documents the shared stack they
-are built from.
+The family namespaces are covered in §14 (deepseek2/glm4moe/deepseek4/
+inkling by their module doc comments); this section documents the shared
+stack they are built from.
 
 ### 13.2 Weight loading (`src/llm/weights.zig`)
 
@@ -10686,14 +10688,17 @@ pub fn deinit(self: *Tokenizer) void
   hand-rolled qwen2 pretokenizer loop, backed by generated Unicode category
   tables — on valid UTF-8 input it chunks and encodes **token-ID-exact**
   against llama.cpp for qwen2-pre models (malformed UTF-8 is the one
-  documented deviation). A GGUF declaring another implemented pretokenizer
-  selects that chunker instead, via the `pre: Pre = .qwen2` field
-  (`Pre = enum { qwen2, qwen35, joyai_llm, glm4 }`): `"qwen35"`
+  documented deviation). The GGUF's `tokenizer.ggml.pre` selects the chunker
+  via the `pre: Pre = .qwen2` field
+  (`Pre = enum { qwen2, qwen35, joyai_llm, glm4, inkling }`): `"qwen35"`
   (Qwen3.5/3.6/Bonsai — the qwen2 rules with `\p{M}` combining marks folded
-  into the word class and excluded from punctuation runs, backed by the
-  generated `isMark` table), `"joyai-llm"` (the DeepSeek-V4 family's
-  byte-oriented splitter), and `"glm4"`/`"chatglm-bpe"`. If the GGUF
-  declares a pretokenizer other than an implemented chunker, encoding
+  into the word class and excluded from punctuation runs), `"joyai-llm"` (the
+  DeepSeek-V4 family's byte-oriented splitter), `"glm4"`/`"chatglm-bpe"` (qwen2
+  rules with three-digit number runs), and `"inkling"` (the o200k variant with
+  `\p{M}` in both word classes so combining marks attach to base letters,
+  reproducing llama.cpp's collapsed-category regex semantics) — each backed by
+  the generated `isMark` table and token-ID-exact against `llama-tokenize`. If
+  the GGUF declares a pretokenizer other than an implemented chunker, encoding
   still proceeds with the qwen2 rules, but the id is recorded in the
   `pre_mismatch: ?[]u8` field and a warning is logged once — token-ID
   parity is then not guaranteed.
@@ -10808,9 +10813,9 @@ test "SPM: score-driven merges and byte fallback" {
 
 #### 13.5.3 Unicode tables (`src/llm/unicode_categories.zig`)
 
-Generated (do not edit) `\p{L}`/`\p{N}`/`\s` classification tables
-(`isLetter`/`isNumber`/`isWhitespace`) matching llama.cpp's tokenizer data for
-token-ID-exact pretokenizer parity; regenerate with
+Generated (do not edit) `\p{L}`/`\p{N}`/`\p{M}`/`\s` classification tables
+(`isLetter`/`isNumber`/`isMark`/`isWhitespace`) matching llama.cpp's tokenizer
+data for token-ID-exact pretokenizer parity; regenerate with
 `python3 tools/gen_unicode_categories.py > src/llm/unicode_categories.zig`
 (the generator writes to stdout). Re-exported from `llm.zig` as
 `llm.unicode_categories` so out-of-module consumers (nanochat's
@@ -12124,7 +12129,8 @@ The `fucina_llm` module root (`src/llm.zig`) exposes each model family as a
 namespace — `llm.qwen3.{model,train}`, `llm.qwen35.model`,
 `llm.gemma.{gemma4,gemma4_train,moe,moe_route,moe_route_tensor}`,
 `llm.diffusion_gemma.model`, `llm.deepseek2.model`, `llm.glm4moe.model`,
-`llm.deepseek4.model`, `llm.parakeet.*`, `llm.speculative.*` — while the
+`llm.deepseek4.model`, `llm.inkling.model`, `llm.parakeet.*`,
+`llm.speculative.*` — while the
 generic helpers (`llm.weights`, `llm.kv_cache`, `llm.kv_persist`, `llm.tokenizer`,
 `llm.spm_tokenizer`, `llm.sampler`, `llm.logit_processor`, `llm.llguidance`,
 `llm.chat`, `llm.data`, `llm.gguf_meta`, `llm.ptqtp_gguf`,
@@ -13101,6 +13107,7 @@ download source and full flag set for every model row. The table omits
 | `deepseek2` | DeepSeek V2/V3: MLA compressed KV cache, MoE decode | `zig build deepseek2 -- models/DeepSeek-V2-Lite-Chat.Q8_0.gguf --prompt "..." --gen 64` |
 | `glm4moe` | GLM-4.5 family: native MTP speculative decode, streamed experts | `zig build glm4moe -- models/glm45-air/GLM-4.5-Air-Q6_K-00001-of-00002.gguf --prompt "..." --gen 64 --mtp` |
 | `deepseek4` | DeepSeek V4 Flash: CSA/HCA trunk, streamed experts, MTP sidecar | `zig build deepseek4 -- <model.gguf> --chat --prompt "..." --moe-stream` |
+| `inkling` | Inkling: hybrid rel-bias attention, shortconv sites, sink-shared MoE; parity harness | `zig build inkling -- <model.gguf> --prompt "..." --gen 64` |
 | `ptqtp_spirals` | float-trained MLP decorated post-training with trit-planes, self-verifying (§10.9) | `zig build ptqtp-spirals` |
 | `ptqtp_qwen3` | PTQTP-decorate a Qwen3 GGUF in place, NLL before/after, `--save` GGUF (§10.9, §13.2.1) | `zig build ptqtp-qwen3 -- models/Qwen3-0.6B-Q4_K_S.gguf --planes 2` |
 | (tool) `export-gguf` | transcode/re-emit GGUF, merge LoRA adapters (§11, §12) | `zig build export-gguf -- --from-gguf in.gguf --out out.gguf --dtype q8_0` |

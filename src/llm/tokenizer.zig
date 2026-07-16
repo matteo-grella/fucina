@@ -57,7 +57,7 @@ pub const Tokenizer = struct {
     /// Which implemented pre-tokenizer splits text into BPE chunks.
     pre: Pre = .qwen2,
 
-    pub const Pre = enum { qwen2, qwen35, joyai_llm, glm4 };
+    pub const Pre = enum { qwen2, qwen35, joyai_llm, glm4, inkling };
 
     /// Build a tokenizer from GGUF metadata. `overrides` fields, when non-null,
     /// replace the metadata-derived special tokens.
@@ -99,6 +99,8 @@ pub const Tokenizer = struct {
                 tok.pre = .joyai_llm;
             } else if (std.mem.eql(u8, pre, "glm4") or std.mem.eql(u8, pre, "chatglm-bpe")) {
                 tok.pre = .glm4;
+            } else if (std.mem.eql(u8, pre, "inkling")) {
+                tok.pre = .inkling;
             } else {
                 tok.pre_mismatch = try allocator.dupe(u8, pre);
                 std.log.warn(
@@ -327,6 +329,7 @@ pub const Tokenizer = struct {
             const end = switch (self.pre) {
                 .glm4 => glm4ChunkEnd(cps.items, pos),
                 .qwen35 => qwen35ChunkEnd(cps.items, pos),
+                .inkling => inklingChunkEnd(cps.items, pos),
                 else => qwen2ChunkEnd(cps.items, pos),
             };
             try self.encodeChunk(allocator, text[offs.items[pos]..offs.items[end]], out);
@@ -868,6 +871,184 @@ fn qwen35ChunkEnd(c: []const u32, start: usize) usize {
 
 fn asciiLower(cp: u32) u32 {
     return if (cp >= 'A' and cp <= 'Z') cp + 32 else cp;
+}
+
+/// One Inkling pre-token: end index (exclusive, in codepoints) of the chunk
+/// starting at `start`.
+///
+/// llama.cpp has no custom splitter for LLAMA_VOCAB_PRE_TYPE_INKLING: its
+/// regex (o200k with \p{M} added to both word classes so combining marks
+/// attach to base letters) runs through the generic collapsed-std::regex path
+/// in unicode.cpp, where every codepoint >= 128 is replaced by one category
+/// byte. This function reproduces those COLLAPSED semantics, alternative by
+/// alternative, in ECMAScript first-match priority order:
+///
+///   1. [^\r\n\p{L}\p{N}]?((?=[\p{L}\p{M}])([^a-z]))*((?=[\p{L}\p{M}])([^A-Z]))+(?i:'s|'t|'re|'ve|'m|'ll|'d)?
+///   2. [^\r\n\p{L}\p{N}]?((?=[\p{L}\p{M}])([^a-z]))+((?=[\p{L}\p{M}])([^A-Z]))*(?i:'s|'t|'re|'ve|'m|'ll|'d)?
+///   3. \p{N}{1,3}
+///   4.  ?[^\s\p{L}\p{N}]+[\r\n/]*
+///   5. \s*[\r\n]+
+///   6. \s+(?!\S)
+///   7. \s+
+///
+/// Collapse quirks kept faithfully: a non-ASCII letter of ANY case is one
+/// 0xD2 byte, which is neither ASCII a-z nor A-Z, so it belongs to BOTH word
+/// case classes; combining marks (0xD4) likewise. Only ASCII letters are
+/// case-restricted. The alternation order matters: alternative 1 is tried
+/// (with, then without, the one-char prefix) before alternative 2, and a
+/// shorter alt-1 match beats a longer alt-2 match.
+fn inklingChunkEnd(c: []const u32, start: usize) usize {
+    const n = c.len;
+    const cp = c[start];
+
+    const prefix_ok = !(cp == '\r' or cp == '\n' or ucat.isLetter(cp) or ucat.isNumber(cp));
+    if (prefix_ok) {
+        if (inklingBody1(c, start + 1)) |e| return e;
+    }
+    if (inklingBody1(c, start)) |e| return e;
+    if (prefix_ok) {
+        if (inklingBody2(c, start + 1)) |e| return e;
+    }
+    if (inklingBody2(c, start)) |e| return e;
+
+    // \p{N}{1,3}
+    if (ucat.isNumber(cp)) {
+        var pos = start + 1;
+        while (pos < n and pos - start < 3 and ucat.isNumber(c[pos])) pos += 1;
+        return pos;
+    }
+
+    //  ?[^\s\p{L}\p{N}]+[\r\n/]* — unlike qwen2 there is no j >= n entry:
+    // the + class needs at least one in-range codepoint, so a trailing lone
+    // space falls through to the \s+ rule (same chunk, different rule).
+    {
+        const j = if (cp == ' ') start + 1 else start;
+        if (j < n and !(ucat.isWhitespace(c[j]) or ucat.isLetter(c[j]) or ucat.isNumber(c[j]))) {
+            var pos = j + 1;
+            while (pos < n and !(ucat.isWhitespace(c[pos]) or ucat.isLetter(c[pos]) or ucat.isNumber(c[pos]))) pos += 1;
+            while (pos < n and (c[pos] == '\r' or c[pos] == '\n' or c[pos] == '/')) pos += 1;
+            return pos;
+        }
+    }
+
+    // Measure the whitespace run once for the three \s rules.
+    var num_ws: usize = 0;
+    var last_rn: usize = 0; // index just past the last \r or \n in the run
+    while (start + num_ws < n and ucat.isWhitespace(c[start + num_ws])) {
+        const w = c[start + num_ws];
+        if (w == '\r' or w == '\n') last_rn = start + num_ws + 1;
+        num_ws += 1;
+    }
+
+    // \s*[\r\n]+ — through the last newline of the run.
+    if (last_rn > 0) return last_rn;
+
+    // \s+(?!\S) — all but the last space when a non-space follows the run.
+    if (num_ws > 1 and start + num_ws < n) return start + num_ws - 1;
+
+    // \s+
+    if (num_ws > 0) return start + num_ws;
+
+    // Unreachable for in-range codepoints — defensive single-codepoint fallback.
+    return start + 1;
+}
+
+/// ((?=[\p{L}\p{M}])([^a-z])) under the category collapse: letter-or-mark
+/// that is not an ASCII lowercase letter ("upper-ish").
+fn inklingUpperish(cp: u32) bool {
+    return (ucat.isLetter(cp) or ucat.isMark(cp)) and !(cp >= 'a' and cp <= 'z');
+}
+
+/// ((?=[\p{L}\p{M}])([^A-Z])): letter-or-mark that is not an ASCII uppercase
+/// letter ("lower-ish"). Non-ASCII letters and marks satisfy both classes.
+fn inklingLowerish(cp: u32) bool {
+    return (ucat.isLetter(cp) or ucat.isMark(cp)) and !(cp >= 'A' and cp <= 'Z');
+}
+
+/// Optional (?i:'s|'t|'re|'ve|'m|'ll|'d) suffix (ASCII apostrophe only).
+fn inklingContractionEnd(c: []const u32, pos: usize) usize {
+    const n = c.len;
+    if (pos < n and c[pos] == '\'' and pos + 1 < n) {
+        const c1 = asciiLower(c[pos + 1]);
+        if (c1 == 's' or c1 == 't' or c1 == 'm' or c1 == 'd') return pos + 2;
+        if (pos + 2 < n) {
+            const c2 = asciiLower(c[pos + 2]);
+            if ((c1 == 'r' and c2 == 'e') or (c1 == 'v' and c2 == 'e') or (c1 == 'l' and c2 == 'l')) return pos + 3;
+        }
+    }
+    return pos;
+}
+
+/// upper-ish* lower-ish+ contraction? — ECMAScript-greedy: the star takes its
+/// maximal run, then backtracks one codepoint at a time until the plus can
+/// start (both-class codepoints make the handoff position matter).
+fn inklingBody1(c: []const u32, p: usize) ?usize {
+    const n = c.len;
+    var m = p;
+    while (m < n and inklingUpperish(c[m])) m += 1;
+    var k = m + 1;
+    while (k > p) {
+        k -= 1;
+        if (k < n and inklingLowerish(c[k])) {
+            var e = k + 1;
+            while (e < n and inklingLowerish(c[e])) e += 1;
+            return inklingContractionEnd(c, e);
+        }
+    }
+    return null;
+}
+
+/// upper-ish+ lower-ish* contraction? — no backtracking needed: the trailing
+/// parts are all optional, so maximal-greedy succeeds first.
+fn inklingBody2(c: []const u32, p: usize) ?usize {
+    const n = c.len;
+    if (p >= n or !inklingUpperish(c[p])) return null;
+    var m = p + 1;
+    while (m < n and inklingUpperish(c[m])) m += 1;
+    var e = m;
+    while (e < n and inklingLowerish(c[e])) e += 1;
+    return inklingContractionEnd(c, e);
+}
+
+test "inkling pretokenizer: o200k word/digit/punct/whitespace splits with marks" {
+    // Chunks given as [start, end) codepoint index pairs.
+    const cases = [_]struct { cps: []const u32, expect: []const [2]usize }{
+        // "Hello world" — space glues to the following word.
+        .{ .cps = &.{ 'H', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd' }, .expect = &.{ .{ 0, 5 }, .{ 5, 11 } } },
+        // "HELLO" — alt 2 (upper+ lower*).
+        .{ .cps = &.{ 'H', 'E', 'L', 'L', 'O' }, .expect = &.{.{ 0, 5 }} },
+        // e + combining acute (U+0301) + "clair": one word chunk (the \p{M} point).
+        .{ .cps = &.{ 'e', 0x0301, 'c', 'l', 'a', 'i', 'r' }, .expect = &.{.{ 0, 7 }} },
+        // "AÉB" (É = U+00C9, both classes): alt 1 stops after É; "B" restarts.
+        .{ .cps = &.{ 'A', 0x00C9, 'B' }, .expect = &.{ .{ 0, 2 }, .{ 2, 3 } } },
+        // mark + "AB": alt 1 without prefix matches the bare mark first.
+        .{ .cps = &.{ 0x0301, 'A', 'B' }, .expect = &.{ .{ 0, 1 }, .{ 1, 3 } } },
+        // "can'T" — case-insensitive contraction suffix.
+        .{ .cps = &.{ 'c', 'a', 'n', '\'', 'T' }, .expect = &.{.{ 0, 5 }} },
+        // "1234" — digits chunk in threes.
+        .{ .cps = &.{ '1', '2', '3', '4' }, .expect = &.{ .{ 0, 3 }, .{ 3, 4 } } },
+        // "hi.\n/x" — punctuation run absorbs trailing newlines and slashes.
+        .{ .cps = &.{ 'h', 'i', '.', '\n', '/', 'x' }, .expect = &.{ .{ 0, 2 }, .{ 2, 5 }, .{ 5, 6 } } },
+        // "  \n  x" — ws-to-last-newline, then trailing-ws donates one space.
+        .{ .cps = &.{ ' ', ' ', '\n', ' ', ' ', 'x' }, .expect = &.{ .{ 0, 3 }, .{ 3, 4 }, .{ 4, 6 } } },
+        // " !" — punct takes an optional leading space.
+        .{ .cps = &.{ ' ', '!', '!' }, .expect = &.{.{ 0, 3 }} },
+        // " 5" — the space cannot prefix a digit chunk.
+        .{ .cps = &.{ ' ', '5' }, .expect = &.{ .{ 0, 1 }, .{ 1, 2 } } },
+    };
+    for (cases) |case| {
+        var pos: usize = 0;
+        var idx: usize = 0;
+        while (pos < case.cps.len) {
+            const end = inklingChunkEnd(case.cps, pos);
+            try std.testing.expect(idx < case.expect.len);
+            try std.testing.expectEqual(case.expect[idx][0], pos);
+            try std.testing.expectEqual(case.expect[idx][1], end);
+            pos = end;
+            idx += 1;
+        }
+        try std.testing.expectEqual(case.expect.len, idx);
+    }
 }
 
 test {

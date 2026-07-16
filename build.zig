@@ -284,6 +284,29 @@ pub fn build(b: *std.Build) void {
     const deepseek2_step = b.step("deepseek2", "Run DeepSeek-V2 family (MLA + MoE) GGUF inference");
     deepseek2_step.dependOn(&deepseek2_cmd.step);
 
+    const inkling_exe = b.addExecutable(.{
+        .name = "fucina-zig-inkling",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/inkling.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    inkling_exe.root_module.addImport("fucina", module);
+    inkling_exe.root_module.addImport("fucina_llm", llm_module);
+    configureBlas(inkling_exe, blas_kind);
+    configureGpu(b, inkling_exe, gpu_kind);
+    const inkling_install = installArtifactStep(b, inkling_exe);
+
+    const inkling_cmd = b.addRunArtifact(inkling_exe);
+    inkling_cmd.step.dependOn(inkling_install);
+    if (b.args) |args| {
+        inkling_cmd.addArgs(args);
+    }
+
+    const inkling_step = b.step("inkling", "Run Inkling (hybrid SWA + rel-bias + MoE) GGUF inference");
+    inkling_step.dependOn(&inkling_cmd.step);
+
     const glm4moe_exe = b.addExecutable(.{
         .name = "fucina-zig-glm4moe",
         .root_module = b.createModule(.{

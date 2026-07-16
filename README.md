@@ -328,6 +328,17 @@ Fucina exists because others built the road first.
   themselves are Apache-2.0 on
   [Hugging Face](https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf)
   and are not part of this repository.
+- **Thinking Machines Lab** — the Inkling architecture (hybrid local/global
+  attention with a banded content-dependent relative-position bias in place of
+  RoPE, per-layer short causal convolutions, a fine-grained MoE whose shared
+  experts act as routing-softmax sinks, and hierarchical-patch vision plus
+  dMel audio towers); the port follows the open weights at
+  [thinkingmachines/Inkling](https://huggingface.co/thinkingmachines/Inkling).
+  **Daniel Han** (Unsloth) — his
+  [llama.cpp Inkling architecture PR](https://github.com/ggml-org/llama.cpp/pull/25731)
+  is the source of truth for the GGUF layout and graph, and his
+  [GGUF conversions](https://huggingface.co/unsloth/inkling-GGUF) provide the
+  converter and the parity oracle the port validates against.
 - **JustVugg's [colibri](https://github.com/JustVugg/colibri)** — the
   out-of-core MoE expert streaming (run mixture models much bigger than RAM
   by paging routed experts from disk through a pinned-set + LRU tier, with a

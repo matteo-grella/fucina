@@ -6,7 +6,7 @@ example, not a library surface: the shared code lives under `examples/lmserve/`
 and integrates a model family through one small `Backend` vtable.
 
 ```sh
-# qwen3 / qwen3moe / gemma4 / diffusion-gemma GGUFs (arch auto-detected)
+# qwen3 / qwen3moe / gemma4 / diffusion-gemma / inkling GGUFs (arch auto-detected)
 zig build lmserve -Dllguidance=true -Doptimize=ReleaseFast -- \
   models/Qwen3-0.6B-Q8_0.gguf --port 8080
 
@@ -167,6 +167,7 @@ argmax inside an unbounded grammar field can loop (docs, §7 caveat).
 | qwen3 / qwen3moe | generic `Conversation` adapter (`backend.zig`) | ✓ | ✓ (`<think>` routing) | ✓ | per token |
 | gemma4 | same adapter (SPM tokenizer, `<turn|>` + extra stop ids, GGUF `general.sampling.*` defaults) | ✓ | — | ✓ | per token |
 | diffusion-gemma | `backend_diffusion.zig` over `dg.generate` | — | — | — (EOG-trimmed blocks) | per committed block |
+| inkling | `backend_inkling.zig` over `llm.inkling.chat.Engine` (wire-format renderer, sampler) | ✓ | ✓ (`<\|content_thinking\|>` → `<\|content_text\|>` routing) | — | per token (no cross-request KV reuse) |
 | nanochat | `backend_nanochat.zig` over its own Engine (`--nanochat` dir) | — | — | — | per token (no system role: 400) |
 
 Absent sampling fields default to the model's recommended settings (qwen3

@@ -57,6 +57,11 @@ pub const glm4moe = struct {
 pub const deepseek4 = struct {
     pub const model = @import("llm/deepseek4/model.zig");
 };
+pub const inkling = struct {
+    pub const model = @import("llm/inkling/model.zig");
+    pub const mmproj = @import("llm/inkling/mmproj.zig");
+    pub const chat = @import("llm/inkling/chat.zig");
+};
 pub const cartridge = @import("llm/cartridge.zig");
 pub const engram = @import("llm/engram.zig");
 pub const kv_cache = @import("llm/kv_cache.zig");

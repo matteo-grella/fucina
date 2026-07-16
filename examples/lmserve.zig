@@ -16,6 +16,7 @@ const types = @import("lmserve/types.zig");
 const backend_mod = @import("lmserve/backend.zig");
 const backend_nanochat = @import("lmserve/backend_nanochat.zig");
 const backend_diffusion = @import("lmserve/backend_diffusion.zig");
+const backend_inkling = @import("lmserve/backend_inkling.zig");
 const scheduler_mod = @import("lmserve/scheduler.zig");
 const http_mod = @import("lmserve/http.zig");
 
@@ -190,8 +191,10 @@ pub fn main(init: std.process.Init) !void {
         try serveGemma4(init.io, allocator, stderr, &ctx, &file, model_id, args);
     } else if (std.mem.eql(u8, arch, "diffusion-gemma")) {
         try serveDiffusion(init.io, allocator, stderr, &ctx, &file, model_id, args);
+    } else if (std.mem.eql(u8, arch, "inkling")) {
+        try serveInkling(init.io, allocator, stderr, &ctx, &file, model_id, args);
     } else {
-        try stderr.print("unsupported architecture for serving: {s} (supported: qwen3, qwen3moe, gemma4, diffusion-gemma)\n", .{arch});
+        try stderr.print("unsupported architecture for serving: {s} (supported: qwen3, qwen3moe, gemma4, diffusion-gemma, inkling)\n", .{arch});
         file.deinit();
         return error.UnsupportedArchitecture;
     }
@@ -231,6 +234,34 @@ fn serveDiffusion(
         .model_id = model_id,
         .context_len = args.ctx_len,
     };
+    try serveWith(io, allocator, adapter.backend(), args);
+}
+
+fn serveInkling(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    stderr: *std.Io.Writer,
+    ctx: *fucina.ExecContext,
+    file: *fucina.gguf.File,
+    model_id: []const u8,
+    args: Args,
+) !void {
+    if (args.cartridge_path != null) {
+        try stderr.writeAll("--cartridge is supported by the qwen3/gemma4 GGUF backends only\n");
+        return error.CartridgeUnsupported;
+    }
+    var tokenizer = llm.tokenizer.Tokenizer.initFromGguf(allocator, file, .{}) catch {
+        try stderr.writeAll("this GGUF has no usable tokenizer metadata\n");
+        return error.TokenizerUnavailable;
+    };
+    defer tokenizer.deinit();
+
+    var model = try llm.inkling.model.Model.loadGgufFromFile(ctx, file);
+    defer model.deinit();
+    file.deinit();
+
+    var adapter = try backend_inkling.InklingBackend.init(allocator, ctx, &model, &tokenizer, model_id, args.ctx_len);
+    defer adapter.deinit();
     try serveWith(io, allocator, adapter.backend(), args);
 }
 

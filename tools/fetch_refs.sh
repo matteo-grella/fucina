@@ -35,6 +35,21 @@
 # --golden refs/ds4/tests/test-vectors/local-golden.vec). Do NOT run its
 # CPU build path (`make cpu`) on macOS — it can kernel-panic the VM system.
 #
+# llama.cpp-inkling is the parity oracle for the Inkling port
+# (src/llm/inkling, examples/inkling.zig): llama.cpp PR #25731 ("Add TML
+# Inkling architecture", draft) pinned at its 2026-07 head on the
+# contributor's fork — a moving target per docs/PORTING.md §1, so the diff
+# is archived out-of-tree with the port record. Oracle build (CPU-only,
+# same flags as the llama.cpp build below, plus tests):
+#   cmake -S refs/llama.cpp-inkling -B refs/llama.cpp-inkling/build-cpu \
+#       -DCMAKE_BUILD_TYPE=Release -DGGML_METAL=OFF -DLLAMA_CURL=OFF \
+#       -DLLAMA_BUILD_TESTS=ON
+#   cmake --build refs/llama.cpp-inkling/build-cpu -j \
+#       --target llama-completion llama-tokenize test-backend-ops
+# (llama-cli on that branch is server-backed; llama-completion is the
+# deterministic text-completion oracle. tools/llama_logits.cpp compiles
+# against this build unchanged for the logits gate.)
+
 # colibri is a design reference only (the out-of-core MoE expert streaming
 # was inspired by it): pinned for the record, never built or benchmarked.
 #
@@ -88,7 +103,8 @@ es-at-scale|https://github.com/VsonicV/es-at-scale|574a9d134da1ffce2a8bb81201989
 es-awd|https://github.com/kschweig/es-awd|f432ff823a7d59f91d4ac2cf99e4923654c6f464
 ik_llama.cpp|https://github.com/ikawrakow/ik_llama.cpp|b90939934add9ba4fbb37e8c6470809a70b78f0a
 cartridges|https://github.com/HazyResearch/cartridges|ef34ba97a06049c34820506e2c283746284ae5f0
-engram|https://github.com/deepseek-ai/Engram|fb7f84a21f91223715394a33a1dc24bbfb7f788e'
+engram|https://github.com/deepseek-ai/Engram|fb7f84a21f91223715394a33a1dc24bbfb7f788e
+llama.cpp-inkling|https://github.com/danielhanchen/llama.cpp|1cb0374226406360a2b1345f11a9ec9bf18c8ddf'
 
 build_llama=0
 apply_patches=0
