@@ -6,7 +6,7 @@ example, not a library surface: the shared code lives under `examples/lmserve/`
 and integrates a model family through one small `Backend` vtable.
 
 ```sh
-# qwen3 / qwen3moe / gemma4 / diffusion-gemma / inkling GGUFs (arch auto-detected)
+# qwen3 / qwen3moe / qwen35 / gemma4 / diffusion-gemma / inkling GGUFs (arch auto-detected)
 zig build lmserve -Dllguidance=true -Doptimize=ReleaseFast -- \
   models/Qwen3-0.6B-Q8_0.gguf --port 8080
 
@@ -168,12 +168,16 @@ argmax inside an unbounded grammar field can loop (docs, §7 caveat).
 | gemma4 | same adapter (SPM tokenizer, `<turn|>` + extra stop ids, GGUF `general.sampling.*` defaults) | ✓ | — | ✓ | per token |
 | diffusion-gemma | `backend_diffusion.zig` over `dg.generate` | — | — | — (EOG-trimmed blocks) | per committed block |
 | inkling | `backend_inkling.zig` over `llm.inkling.chat.Engine` (wire-format renderer, sampler) | ✓ | ✓ (`<\|content_thinking\|>` → `<\|content_text\|>` routing) | — | per token (no cross-request KV reuse) |
+| qwen35 (Qwen3.5 / Ternary-Bonsai) | `backend_qwen35.zig` over `llm.qwen35.chat.Engine` (ChatML + Qwen3.6 think prefill, sampler) | ✓ | ✓ (`<think>` routing; the prompt-prefilled opener is injected into the stream) | — | per token (no cross-request KV reuse) |
 | nanochat | `backend_nanochat.zig` over its own Engine (`--nanochat` dir) | — | — | — | per token (no system role: 400) |
 
 Absent sampling fields default to the model's recommended settings (qwen3
-no-think 0.7/20/0.8; gemma4 from GGUF metadata), not OpenAI's nominal
-`temperature=1` — same deviation llama.cpp makes. qwen3.5 is not servable
-until `Conversation` generalizes over its DeltaNet cache type.
+no-think 0.7/20/0.8; gemma4 and qwen35 from GGUF metadata), not OpenAI's
+nominal `temperature=1` — same deviation llama.cpp makes. The qwen35
+backend rides its own engine rather than `Conversation`: the family's
+cache carries recurrent conv/state matrices that cannot be truncated back
+to a token prefix, so the KV-slot reuse tiers (and `--kv-cache-dir`) do
+not apply — every request prefills from scratch on a fresh cache.
 
 Adding a family = implementing the two-function `Backend` vtable
 (`examples/lmserve/types.zig`): `validate` (cheap, connection-thread: message

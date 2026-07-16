@@ -17,6 +17,7 @@ const backend_mod = @import("lmserve/backend.zig");
 const backend_nanochat = @import("lmserve/backend_nanochat.zig");
 const backend_diffusion = @import("lmserve/backend_diffusion.zig");
 const backend_inkling = @import("lmserve/backend_inkling.zig");
+const backend_qwen35 = @import("lmserve/backend_qwen35.zig");
 const scheduler_mod = @import("lmserve/scheduler.zig");
 const http_mod = @import("lmserve/http.zig");
 
@@ -27,8 +28,9 @@ const usage_text =
     \\       zig build lmserve -Doptimize=ReleaseFast -- --nanochat <checkpoint dir> [flags]
     \\
     \\The GGUF's general.architecture picks the backend: qwen3, qwen3moe,
-    \\gemma4, diffusion-gemma. --nanochat serves a nanochat checkpoint dir
-    \\(model.safetensors + tokenizer.bin).
+    \\qwen35 (Qwen3.5 / Ternary-Bonsai), gemma4, diffusion-gemma, inkling.
+    \\--nanochat serves a nanochat checkpoint dir (model.safetensors +
+    \\tokenizer.bin).
     \\
     \\  --host H            bind address (default 127.0.0.1)
     \\  --port N            port (default 8080)
@@ -193,8 +195,10 @@ pub fn main(init: std.process.Init) !void {
         try serveDiffusion(init.io, allocator, stderr, &ctx, &file, model_id, args);
     } else if (std.mem.eql(u8, arch, "inkling")) {
         try serveInkling(init.io, allocator, stderr, &ctx, &file, model_id, args);
+    } else if (std.mem.eql(u8, arch, "qwen35")) {
+        try serveQwen35(init.io, allocator, stderr, &ctx, &file, model_id, args);
     } else {
-        try stderr.print("unsupported architecture for serving: {s} (supported: qwen3, qwen3moe, gemma4, diffusion-gemma, inkling)\n", .{arch});
+        try stderr.print("unsupported architecture for serving: {s} (supported: qwen3, qwen3moe, qwen35, gemma4, diffusion-gemma, inkling)\n", .{arch});
         file.deinit();
         return error.UnsupportedArchitecture;
     }
@@ -261,6 +265,48 @@ fn serveInkling(
     file.deinit();
 
     var adapter = try backend_inkling.InklingBackend.init(allocator, ctx, &model, &tokenizer, model_id, args.ctx_len);
+    defer adapter.deinit();
+    try serveWith(io, allocator, adapter.backend(), args);
+}
+
+fn serveQwen35(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    stderr: *std.Io.Writer,
+    ctx: *fucina.ExecContext,
+    file: *fucina.gguf.File,
+    model_id: []const u8,
+    args: Args,
+) !void {
+    if (args.cartridge_path != null) {
+        try stderr.writeAll("--cartridge is supported by the qwen3/gemma4 GGUF backends only\n");
+        return error.CartridgeUnsupported;
+    }
+    var tokenizer = llm.tokenizer.Tokenizer.initFromGguf(allocator, file, .{}) catch {
+        try stderr.writeAll("this GGUF has no usable tokenizer metadata\n");
+        return error.TokenizerUnavailable;
+    };
+    defer tokenizer.deinit();
+    const template = llm.chat.Template.detect(file.getString("tokenizer.chat_template")) orelse
+        llm.chat.Template{ .format = .chatml };
+    // Bonsai GGUFs carry their recommended sampling (`general.sampling.*`).
+    const default_sampling = samplingFromGguf(file);
+
+    const config = try llm.qwen35.model.Config.fromGguf(file);
+    var model = try llm.qwen35.model.Model.loadGgufFromFile(ctx, file, config);
+    defer model.deinit();
+    file.deinit();
+
+    var adapter = try backend_qwen35.Qwen35Backend.init(
+        allocator,
+        ctx,
+        &model,
+        &tokenizer,
+        template,
+        model_id,
+        args.ctx_len,
+        default_sampling,
+    );
     defer adapter.deinit();
     try serveWith(io, allocator, adapter.backend(), args);
 }

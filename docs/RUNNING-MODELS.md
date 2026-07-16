@@ -381,6 +381,31 @@ zig build qwen35 -Doptimize=ReleaseFast -- models/Qwen3.5-0.8B-Q8_0.gguf --info
 zig build qwen35 -Doptimize=ReleaseFast -- models/Qwen3.5-0.8B-Q8_0.gguf --linear-scan chunked
 ```
 
+### Ternary-Bonsai-27B (Prism ML, ternary Q2_0 g128)
+
+A ternarized Qwen3.6-27B on the same `qwen35` architecture (64 blocks,
+16 full-attention + 48 DeltaNet-linear, 48 v-heads over 16 q/k heads,
+262K-token context) with every projection, the embeddings and the LM head
+in the Q2_0 ternary container — ~7.2 GB on disk, runs comfortably on a
+laptop. Weights (Apache-2.0):
+
+```sh
+hf download prism-ml/Ternary-Bonsai-27B-gguf Ternary-Bonsai-27B-Q2_0.gguf --local-dir models
+```
+
+```sh
+# loader / parity harness
+zig build qwen35 -Doptimize=ReleaseFast -- models/Ternary-Bonsai-27B-Q2_0.gguf --info
+
+# serve it (chat + reasoning channel + constrained output; see lmserve below)
+zig build lmserve -Dllguidance=true -Doptimize=ReleaseFast -- \
+  models/Ternary-Bonsai-27B-Q2_0.gguf --port 8080
+```
+
+The chat template is ChatML with the Qwen3.6 thinking prefill; reasoning is
+off by default and enabled per request via `reasoning_effort`. Sampling
+defaults come from the GGUF's `general.sampling.*` keys.
+
 ---
 
 ## Inkling 975B-A41B (hybrid rel-bias attention + MoE) — `zig build inkling`
@@ -453,9 +478,10 @@ zig build inkling -Doptimize=ReleaseFast -- <model.gguf> --mmproj <mmproj.gguf> 
 One process serves one model behind `POST /v1/chat/completions` and the
 stateless `POST /v1/responses` (plus `GET /v1/models`, `GET /health`), with
 SSE streaming in both dialects. The GGUF's `general.architecture` picks the
-backend (qwen3/qwen3moe/gemma4/diffusion-gemma); `--nanochat <dir>` serves a
-nanochat checkpoint. Point any OpenAI client at `http://host:port/v1`. See
-`docs/LMSERVER.md` for the exact API mapping and design.
+backend (qwen3/qwen3moe/qwen35/gemma4/diffusion-gemma/inkling); `--nanochat
+<dir>` serves a nanochat checkpoint. Point any OpenAI client at
+`http://host:port/v1`. See `docs/LMSERVER.md` for the exact API mapping and
+design.
 
 ```sh
 # Serve Qwen3 with JSON-schema/regex/Lark constrained output enabled

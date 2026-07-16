@@ -10,6 +10,7 @@ pub const qwen3 = struct {
 /// Qwen3.5 Gated-DeltaNet hybrid. Files in `llm/qwen35/`.
 pub const qwen35 = struct {
     pub const model = @import("llm/qwen35/model.zig");
+    pub const chat = @import("llm/qwen35/chat.zig");
 };
 /// Gemma 4 (text) + MoE + LoRA fine-tuning. Files in `llm/gemma/`.
 pub const gemma = struct {
@@ -83,6 +84,7 @@ test {
     _ = qwen3.model;
     _ = qwen3.train;
     _ = qwen35.model;
+    _ = qwen35.chat;
     _ = gemma.gemma4;
     _ = gemma.gemma4_train;
     _ = gemma.moe;

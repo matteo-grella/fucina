@@ -12559,7 +12559,17 @@ defer step.deinit();
 ```
 
 No training entry, no `forwardStepAllLogits`/`forwardStepBatch`, no
-speculative decoding on this family. The CLI is a loader/parity harness:
+speculative decoding on this family. Chat lives in `llm.qwen35.chat`
+(`src/llm/qwen35/chat.zig`): `renderPrompt` renders the shared ChatML
+template with the Qwen3.6 generation-prompt think prefill (`<think>\n`
+opener when thinking is on; the ChatML empty think block when off), and
+`Engine(TokMod).generate` runs one sampled reply per call on a fresh
+`Cache` (the recurrent state cannot be truncated to a token prefix, so
+there is no cross-request KV reuse). `lmserve` serves the family through
+it (`backend_qwen35.zig` — reasoning channel, JSON-schema/regex/Lark
+constrained output; [LMSERVER.md](LMSERVER.md)); Ternary-Bonsai-27B
+([RUNNING-MODELS.md](RUNNING-MODELS.md)) is the flagship checkpoint. The
+CLI is a loader/parity harness:
 
 ```sh
 zig build qwen35 -Doptimize=ReleaseFast -- models/Qwen3.5-0.8B-Q8_0.gguf
