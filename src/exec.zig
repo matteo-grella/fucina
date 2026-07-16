@@ -2000,6 +2000,10 @@ pub const ExecContext = struct {
         return exec_matmul.matmul2DWithPackedDenseRhs(&self.rt, a, rhs);
     }
 
+    pub fn matmul2DWithPackedDenseRhsInto(self: *ExecContext, out: *Tensor, a: *const Tensor, rhs: *const backend_mod.PackedDenseRhs) !void {
+        return exec_matmul.matmul2DWithPackedDenseRhsInto(&self.rt, out, a, rhs);
+    }
+
     pub fn matmul2DWithPackedRhsTyped(
         self: *ExecContext,
         comptime dtype: DType,

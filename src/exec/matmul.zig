@@ -367,6 +367,30 @@ pub fn matmul2DWithPackedDenseRhs(
     return out;
 }
 
+/// Packed dense matmul into caller-supplied contiguous storage. This is the
+/// buffer-reuse form of `matmul2DWithPackedDenseRhs`; accelerator builds are
+/// synchronized before return because callers may consume the borrowed host
+/// slice directly rather than crossing a later Tensor visibility boundary.
+pub fn matmul2DWithPackedDenseRhsInto(
+    self: *Runtime,
+    out: *Tensor,
+    a: *const Tensor,
+    rhs: *const backend_mod.PackedDenseRhs,
+) !void {
+    const av = try a.rankView(2);
+    const ov = try out.rankView(2);
+    const m = av.dim(0);
+    const k = av.dim(1);
+    if (k != rhs.k or ov.dim(0) != m or ov.dim(1) != rhs.n) return tensor.TensorError.ShapeMismatch;
+    if (!out.isContiguous()) return tensor.TensorError.UnsupportedView;
+
+    var aa = try self.prepareContiguous(a);
+    defer aa.deinit();
+    self.enableNativeMatmulPoolForWork(m, rhs.n, k);
+    try self.backend.matmul2DIntoUncheckedPackedDenseRhs(out, aa.tensor(), rhs, m, rhs.n, k);
+    _ = try out.dataConstChecked();
+}
+
 pub fn matmul2DWithPackedRhsTyped(
     self: *Runtime,
     comptime dtype: DType,

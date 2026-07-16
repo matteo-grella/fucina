@@ -46,6 +46,7 @@ pub const n_mels: usize = 80;
 pub const mel_vocab_size: usize = 16;
 const audio_n_fft: usize = 1600;
 const audio_hop: usize = 800;
+const dense_alignment = std.mem.Alignment.fromByteUnits(64);
 
 pub const MmProj = struct {
     allocator: Allocator,
@@ -65,6 +66,7 @@ pub const MmProj = struct {
     image_mean: [3]f32,
     image_std: [3]f32,
     vision_eps: f32,
+    mm_profile: bool,
     // audio
     dmel_embd: LinearWeight, // [n_mels*mel_vocab_size, n_embd]
     dmel_final_norm: []f32,
@@ -162,6 +164,7 @@ pub const MmProj = struct {
             .image_mean = image_mean,
             .image_std = image_std,
             .vision_eps = vision_eps,
+            .mm_profile = fucina.parallel.envFlag("FUCINA_MM_PROFILE"),
             .dmel_embd = dmel_embd,
             .dmel_final_norm = dmel_final_norm,
             .audio_eps = audio_eps,
@@ -185,15 +188,24 @@ pub const MmProj = struct {
         const p = patch_size;
         std.debug.assert(patches.len == n_patches * p * p * 3);
 
+        var profile_io: ?std.Io = null;
+        if (self.mm_profile) {
+            if (ctx.workPool()) |pool| profile_io = pool.io;
+        }
+        var profile: VisionProfile = .{};
+        const total_start = profileStart(profile_io);
+
         // Stage grids: 40 -> 8 -> 4 -> 1 positions per side.
         var grid: usize = p;
         var chan: usize = 3;
         // Current activations, [n_patches, grid, grid, chan] row-major (y, x).
-        var cur = try allocator.dupe(f32, patches);
+        var cur: []f32 = @constCast(patches);
+        var cur_owned = false;
         // patches layout is [patch][y][x][c] which matches [grid][grid][chan].
-        defer allocator.free(cur);
+        defer if (cur_owned) allocator.free(cur);
 
         for (0..3) |l| {
+            const fold_start = profileStart(profile_io);
             const s = spatial_folds[l];
             const out_grid = grid / s;
             const in_dim = chan * s * s;
@@ -201,28 +213,39 @@ pub const MmProj = struct {
             const rows = n_patches * n_pos;
 
             // Fold: vector at (x', y') = concat over [h_fold, w_fold, c].
-            const folded = try allocator.alloc(f32, rows * in_dim);
-            defer allocator.free(folded);
-            for (0..n_patches) |pi| {
-                const src = cur[pi * grid * grid * chan ..][0 .. grid * grid * chan];
-                for (0..out_grid) |gy| {
-                    for (0..out_grid) |gx| {
-                        const dst = folded[((pi * n_pos) + gy * out_grid + gx) * in_dim ..][0..in_dim];
-                        var o: usize = 0;
-                        for (0..s) |hf| {
-                            for (0..s) |wf| {
-                                const base = ((gy * s + hf) * grid + (gx * s + wf)) * chan;
-                                @memcpy(dst[o..][0..chan], src[base..][0..chan]);
-                                o += chan;
+            // When s==grid there is one output position and the source patch
+            // is already in that exact row-major order, so borrow it directly.
+            var folded_owned = false;
+            const folded = if (s == grid) cur else if (s == 2 and grid == 8 and cur_owned) blk: {
+                try fold2x2InPlace(allocator, cur, n_patches, grid, chan);
+                break :blk cur;
+            } else blk: {
+                const dst_all = try allocator.alignedAlloc(f32, dense_alignment, rows * in_dim);
+                folded_owned = true;
+                for (0..n_patches) |pi| {
+                    const src = cur[pi * grid * grid * chan ..][0 .. grid * grid * chan];
+                    for (0..out_grid) |gy| {
+                        for (0..out_grid) |gx| {
+                            const dst = dst_all[((pi * n_pos) + gy * out_grid + gx) * in_dim ..][0..in_dim];
+                            var o: usize = 0;
+                            for (0..s) |hf| {
+                                const strip_len = s * chan;
+                                const base = ((gy * s + hf) * grid + gx * s) * chan;
+                                @memcpy(dst[o..][0..strip_len], src[base..][0..strip_len]);
+                                o += strip_len;
                             }
                         }
                     }
                 }
-            }
+                break :blk dst_all;
+            };
+            defer if (folded_owned) allocator.free(folded);
+            profile.fold_ns[l] = profileElapsed(fold_start, profile_io);
 
-            const out = try self.stemLinearNormGelu(ctx, folded, rows, in_dim, l);
-            allocator.free(cur);
+            const out = try self.stemLinearNormGelu(ctx, folded, rows, in_dim, l, &profile, profile_io);
+            if (cur_owned) allocator.free(cur);
             cur = out;
+            cur_owned = true;
             grid = out_grid;
             chan = self.hmlp_dims[l];
         }
@@ -235,7 +258,7 @@ pub const MmProj = struct {
         var s3_in: []const f32 = cur;
         var s3_in_dim = d2;
         if (!self.s3_folded) {
-            cat = try allocator.alloc(f32, n_patches * d2 * temporal_patch_size);
+            cat = try allocator.alignedAlloc(f32, dense_alignment, n_patches * d2 * temporal_patch_size);
             for (0..n_patches) |pi| {
                 const v = cur[pi * d2 ..][0..d2];
                 @memcpy(cat[pi * d2 * 2 ..][0..d2], v);
@@ -245,11 +268,46 @@ pub const MmProj = struct {
             s3_in_dim = d2 * temporal_patch_size;
         }
 
+        const final_linear_start = profileStart(profile_io);
         const out = try packedLinear(ctx, &self.hmlp_packed[3], s3_in, n_patches, s3_in_dim);
+        profile.final_linear_ns = profileElapsed(final_linear_start, profile_io);
         errdefer allocator.free(out);
-        for (0..n_patches) |pi| {
-            const row = out[pi * self.n_embd ..][0..self.n_embd];
-            rmsNormInto(row, row, self.hmlp_final_norm, self.vision_eps);
+        const final_norm_start = profileStart(profile_io);
+        const final_tasks = try allocator.alloc(FinalNormTask, n_patches);
+        defer allocator.free(final_tasks);
+        for (final_tasks, 0..) |*task, pi| {
+            task.* = .{
+                .out = out,
+                .norm_w = self.hmlp_final_norm,
+                .eps = self.vision_eps,
+                .d = self.n_embd,
+                .row = pi,
+            };
+        }
+        if (ctx.workPool()) |pool| {
+            pool.parallelChunks(FinalNormTask, final_tasks, FinalNormTask.run);
+        } else {
+            for (final_tasks) |*task| FinalNormTask.run(task);
+        }
+        profile.final_norm_ns = profileElapsed(final_norm_start, profile_io);
+        if (profile_io != null) {
+            std.debug.print(
+                "[mm-profile] vision total_ns={d} s0=fold:{d},linear:{d},norm_gelu:{d} s1=fold:{d},linear:{d},norm_gelu:{d} s2=fold:{d},linear:{d},norm_gelu:{d} final=linear:{d},norm:{d}\n",
+                .{
+                    profileElapsed(total_start, profile_io),
+                    profile.fold_ns[0],
+                    profile.linear_ns[0],
+                    profile.norm_gelu_ns[0],
+                    profile.fold_ns[1],
+                    profile.linear_ns[1],
+                    profile.norm_gelu_ns[1],
+                    profile.fold_ns[2],
+                    profile.linear_ns[2],
+                    profile.norm_gelu_ns[2],
+                    profile.final_linear_ns,
+                    profile.final_norm_ns,
+                },
+            );
         }
         return out;
     }
@@ -258,23 +316,37 @@ pub const MmProj = struct {
     fn packedLinear(ctx: *ExecContext, dense_rhs: *const fucina.PackedRhs(.f32), x: []const f32, rows: usize, in_dim: usize) ![]f32 {
         const allocator = ctx.allocator;
         std.debug.assert(dense_rhs.k == in_dim);
-        var input = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ rows, in_dim }, x);
+        var input = try ctx.fromBorrowedSliceRank(2, .{ rows, in_dim }, @constCast(x));
         defer input.deinit();
-        var output = try input.dotPacked(ctx, dense_rhs, .embed, .attn);
+        const out = try allocator.alignedAlloc(f32, dense_alignment, rows * dense_rhs.n);
+        errdefer allocator.free(out);
+        var output = try ctx.fromBorrowedSliceRank(2, .{ rows, dense_rhs.n }, out);
         defer output.deinit();
-        return allocator.dupe(f32, try output.dataConst());
+        try ctx.matmul2DWithPackedDenseRhsInto(&output, &input, dense_rhs);
+        return out;
     }
 
-    fn stemLinearNormGelu(self: *const MmProj, ctx: *ExecContext, rows_in: []const f32, rows: usize, in_dim: usize, l: usize) ![]f32 {
+    fn stemLinearNormGelu(
+        self: *const MmProj,
+        ctx: *ExecContext,
+        rows_in: []const f32,
+        rows: usize,
+        in_dim: usize,
+        l: usize,
+        profile: *VisionProfile,
+        profile_io: ?std.Io,
+    ) ![]f32 {
         const allocator = ctx.allocator;
         const d = self.hmlp_dims[l];
 
-        const lin = try packedLinear(ctx, &self.hmlp_packed[l], rows_in, rows, in_dim);
-        defer allocator.free(lin);
-
-        // Per-row rms-norm + gelu_erf, fanned out over the worker team.
-        const out = try allocator.alloc(f32, rows * d);
+        const linear_start = profileStart(profile_io);
+        const out = try packedLinear(ctx, &self.hmlp_packed[l], rows_in, rows, in_dim);
+        profile.linear_ns[l] = profileElapsed(linear_start, profile_io);
         errdefer allocator.free(out);
+
+        // Per-row rms-norm + gelu_erf in place, fanned out over the worker
+        // team. rmsNormInto completes the row sum before its first store.
+        const norm_start = profileStart(profile_io);
         const participants = if (ctx.workPool()) |pool| pool.teamSize() else 1;
         const target_tasks = @max(@as(usize, 1), @min(rows, participants * 4));
         const block = std.math.divCeil(usize, rows, target_tasks) catch unreachable;
@@ -283,7 +355,7 @@ pub const MmProj = struct {
         defer allocator.free(tasks);
         for (tasks, 0..) |*t, i| {
             t.* = .{
-                .lin = lin,
+                .lin = out,
                 .out = out,
                 .norm_w = self.hmlp_norm[l],
                 .eps = self.vision_eps,
@@ -297,6 +369,7 @@ pub const MmProj = struct {
         } else {
             for (tasks) |*t| NormGeluTask.run(t);
         }
+        profile.norm_gelu_ns[l] = profileElapsed(norm_start, profile_io);
         return out;
     }
 
@@ -320,6 +393,19 @@ pub const MmProj = struct {
                     v.* = 0.5 * v.* * (1 + erff(v.* * 0.70710678118654752440084436210484));
                 }
             }
+        }
+    };
+
+    const FinalNormTask = struct {
+        out: []f32,
+        norm_w: []const f32,
+        eps: f32,
+        d: usize,
+        row: usize,
+
+        fn run(task: *const FinalNormTask) void {
+            const row = task.out[task.row * task.d ..][0..task.d];
+            rmsNormInto(row, row, task.norm_w, task.eps);
         }
     };
 
@@ -356,6 +442,62 @@ pub const MmProj = struct {
         return out;
     }
 };
+
+/// In-place `[patch,grid,grid,chan]` to 2x2-folded row order. The permutation
+/// moves whole contiguous channel blocks; two scratch blocks rotate each
+/// cycle without exposing partially overwritten input.
+fn fold2x2InPlace(allocator: Allocator, data: []f32, n_patches: usize, grid: usize, chan: usize) !void {
+    std.debug.assert(grid == 8 and data.len == n_patches * grid * grid * chan);
+    const block_count = grid * grid;
+    var visited: [64]bool = undefined;
+    const scratch = try allocator.alloc(f32, chan * 2);
+    defer allocator.free(scratch);
+
+    for (0..n_patches) |patch| {
+        @memset(&visited, false);
+        const patch_data = data[patch * block_count * chan ..][0 .. block_count * chan];
+        for (0..block_count) |start| {
+            if (visited[start]) continue;
+            var held = scratch[0..chan];
+            var next = scratch[chan .. 2 * chan];
+            @memcpy(held, patch_data[start * chan ..][0..chan]);
+            var src = start;
+            while (true) {
+                const gy = src / grid;
+                const gx = src % grid;
+                const half = grid / 2;
+                const dst = ((gy / 2) * half + gx / 2) * 4 + (gy % 2) * 2 + gx % 2;
+                visited[src] = true;
+                if (dst == start) {
+                    @memcpy(patch_data[dst * chan ..][0..chan], held);
+                    break;
+                }
+                @memcpy(next, patch_data[dst * chan ..][0..chan]);
+                @memcpy(patch_data[dst * chan ..][0..chan], held);
+                const swap = held;
+                held = next;
+                next = swap;
+                src = dst;
+            }
+        }
+    }
+}
+
+const VisionProfile = struct {
+    fold_ns: [3]i128 = @splat(0),
+    linear_ns: [3]i128 = @splat(0),
+    norm_gelu_ns: [3]i128 = @splat(0),
+    final_linear_ns: i128 = 0,
+    final_norm_ns: i128 = 0,
+};
+
+fn profileStart(io: ?std.Io) i128 {
+    return if (io) |clock_io| std.Io.Clock.awake.now(clock_io).nanoseconds else 0;
+}
+
+fn profileElapsed(start: i128, io: ?std.Io) i128 {
+    return if (io) |clock_io| std.Io.Clock.awake.now(clock_io).nanoseconds - start else 0;
+}
 
 pub const ImagePatches = struct {
     allocator: Allocator,
