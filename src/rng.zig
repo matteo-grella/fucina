@@ -274,6 +274,52 @@ pub fn uniformFill(seed: u64, out: []f32, lo: f32, hi: f32) void {
     }
 }
 
+/// Standard Gumbel(0, 1) fill via inverse-CDF over the splitmix64 stream:
+/// one stream output per value, mapped to the OPEN interval (0, 1) as
+/// `u = ((x >> 11) + 0.5) * 2^-53` (min 2^-54, max 1 - 2^-54, so both log
+/// arguments stay finite), then `out[i] = -ln(-ln(u))` computed in f64 and
+/// rounded once to f32. Same checkpoint contract as `uniformFill`: the
+/// (seed -> values) mapping is stable across releases.
+pub fn gumbelFill(seed: u64, out: []f32) void {
+    var state = seed;
+    for (out) |*value| {
+        const u = (@as(f64, @floatFromInt(splitmix64(&state) >> 11)) + 0.5) * 0x1.0p-53; // (0, 1)
+        value.* = @floatCast(-@log(-@log(u)));
+    }
+}
+
+/// Uniform i64 fill over [low, high): one stream output per value, mapped by
+/// the widening multiply-shift `low + ((x · span) >> 64)` (Lemire's
+/// multiply-shift; bias below span · 2^-64, branch-free). The span is
+/// computed in two's-complement u64 arithmetic, so the full i64 range works.
+/// Same checkpoint contract as `uniformFill`. Asserts `low < high`.
+pub fn randintFill(seed: u64, out: []i64, low: i64, high: i64) void {
+    std.debug.assert(low < high);
+    const span: u64 = @as(u64, @bitCast(high)) -% @as(u64, @bitCast(low));
+    var state = seed;
+    for (out) |*value| {
+        const offset: u64 = @truncate((@as(u128, splitmix64(&state)) * @as(u128, span)) >> 64);
+        value.* = @bitCast(@as(u64, @bitCast(low)) +% offset);
+    }
+}
+
+/// Fisher–Yates permutation of {0, …, out.len-1}: step k (k = n-1 … 1) swaps
+/// position k with position `(at(seed, n-1-k) · (k+1)) >> 64` (the same
+/// multiply-shift index map as `randintFill`). One counter-based stream
+/// output per step; the (seed -> permutation) mapping shares the
+/// `uniformFill` checkpoint contract.
+pub fn randpermFill(seed: u64, out: []i64) void {
+    for (out, 0..) |*value, i| value.* = @intCast(i);
+    if (out.len < 2) return;
+    var k: usize = out.len - 1;
+    var counter: u64 = 0;
+    while (k >= 1) : (k -= 1) {
+        const j: usize = @intCast(@as(u64, @truncate((@as(u128, at(seed, counter)) * (@as(u128, k) + 1)) >> 64)));
+        counter += 1;
+        std.mem.swap(i64, &out[k], &out[j]);
+    }
+}
+
 /// PyTorch `nn.init.kaiming_uniform_` with `a = sqrt(5)` — the default
 /// `nn.Linear` / LoRA-A weight init: gain = sqrt(2 / (1 + a^2)) = sqrt(1/3),
 /// bound = gain * sqrt(3 / fan_in) = sqrt(6 / ((1 + 5) * fan_in))

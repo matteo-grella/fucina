@@ -1936,6 +1936,97 @@ pub fn CumsumBackward(comptime source_tags: anytype, comptime axis: usize) type 
     };
 }
 
+/// VJP for `linearRecurrence` (`h_t = a_t·h_{t-1} + b_t` along an axis):
+/// one exec reverse scan produces the input gradient `gb` (the reverse
+/// recurrence `gh_t = a_{t+1}·gh_{t+1} + gy_t`), the full-shape decay
+/// gradient `da_t = gh_t·h_{t-1}` — reduced back onto the decay's own
+/// tags/shape by the pointwise broadcast-backward rule — and the initial
+/// state's gradient `a_0·gh_0`. Saves the aligned decay view and the
+/// forward OUTPUT (h), not the input.
+pub fn LinearRecurrenceBackward(comptime source_tags: anytype, comptime decay_tags: anytype, comptime axis: usize) type {
+    return struct {
+        parents: [3]?*GradState,
+        a_view: RawTensor,
+        h_value: RawTensor,
+        initial_value: ?RawTensor,
+        decay_shape: [rawRank(decay_tags.len)]usize,
+
+        const Self = @This();
+
+        pub fn init(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            b_parent: ?*GradState,
+            decay_parent: ?*GradState,
+            initial_parent: ?*GradState,
+            a_view: *const RawTensor,
+            h: *const RawTensor,
+            initial: ?*const RawTensor,
+            decay: *const RawTensor,
+        ) !void {
+            _ = allocator;
+            self.* = .{
+                .parents = .{ b_parent, decay_parent, initial_parent },
+                .a_view = try a_view.cloneView(),
+                .h_value = undefined,
+                .initial_value = null,
+                .decay_shape = rawShapeArray(decay_tags, decay),
+            };
+            errdefer self.a_view.deinit();
+            self.h_value = try h.cloneView();
+            errdefer self.h_value.deinit();
+            if (initial) |ini| self.initial_value = try ini.cloneView();
+        }
+
+        fn operands(ptr: *const anyopaque) []const ?*GradState {
+            const self: *const Self = @ptrCast(@alignCast(ptr));
+            return self.parents[0..];
+        }
+
+        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
+            const self: *const Self = @ptrCast(@alignCast(ptr));
+            const need_b = needs_grad.len > 0 and needs_grad[0];
+            const need_a = needs_grad.len > 1 and needs_grad[1];
+            const need_init = needs_grad.len > 2 and needs_grad[2];
+            if (!need_b and !need_a and !need_init) return;
+            const initial_ptr: ?*const RawTensor = if (self.initial_value) |*ini| ini else null;
+            var grads = try ctx.linearRecurrenceBackwardAxisRank(rawRank(source_tags.len), gy, &self.a_view, &self.h_value, initial_ptr, axis, need_a, need_init);
+            errdefer grads.gb.deinit();
+            errdefer if (grads.da) |*t| t.deinit();
+            errdefer if (grads.dinitial) |*t| t.deinit();
+            if (need_a) {
+                var da = grads.da.?;
+                grads.da = null;
+                defer da.deinit();
+                out[1] = try reduceGradientToTags(source_tags, decay_tags, ctx, &da, self.decay_shape);
+            }
+            if (need_init) {
+                out[2] = grads.dinitial.?;
+                grads.dinitial = null;
+            }
+            if (need_b) {
+                out[0] = grads.gb;
+            } else {
+                grads.gb.deinit();
+            }
+        }
+
+        fn deinitFn(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            self.a_view.deinit();
+            self.h_value.deinit();
+            if (self.initial_value) |*ini| ini.deinit();
+            core.destroyNode(Self, allocator, self);
+        }
+
+        pub const vtable = BackwardFunction.VTable{
+            .operands = operands,
+            .backward = backward,
+            .deinit = deinitFn,
+        };
+    };
+}
+
 /// VJP for `pad` (constant padding along one axis): the source gradient is
 /// the narrow of the upstream gradient at offset `before` with the source
 /// axis length — pad positions hold a constant, so their gradient is dropped.
@@ -4572,6 +4663,111 @@ pub const Conv2dBackward = struct {
         .backward = backward,
         .deinit = deinitFn,
         .estimated_work = estimatedWork,
+    };
+};
+
+/// VJP for `unfold` (im2col patch extraction): the input gradient is the
+/// overlap-accumulating `fold` (col2im) of the upstream column gradient —
+/// the exact adjoint (pad-tap gradients drop, overlapping taps sum).
+pub const UnfoldBackward = struct {
+    parents: [1]?*GradState,
+    output_size: [2]usize,
+    kernel: [2]usize,
+    stride: [2]usize,
+    pad: [2]usize,
+
+    const Self = @This();
+
+    pub fn init(
+        self: *Self,
+        allocator: std.mem.Allocator,
+        parent: ?*GradState,
+        input: *const RawTensor,
+        kernel: [2]usize,
+        stride: [2]usize,
+        pad: [2]usize,
+    ) !void {
+        _ = allocator;
+        self.* = .{
+            .parents = .{parent},
+            .output_size = .{ input.shape.at(0), input.shape.at(1) },
+            .kernel = kernel,
+            .stride = stride,
+            .pad = pad,
+        };
+    }
+
+    fn operands(ptr: *const anyopaque) []const ?*GradState {
+        const self: *const Self = @ptrCast(@alignCast(ptr));
+        return self.parents[0..];
+    }
+
+    fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
+        const self: *const Self = @ptrCast(@alignCast(ptr));
+        if (needs_grad.len == 0 or !needs_grad[0]) return;
+        out[0] = try ctx.fold(gy, self.output_size, self.kernel, self.stride, self.pad);
+    }
+
+    fn deinitFn(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        core.destroyNode(Self, allocator, self);
+    }
+
+    pub const vtable = BackwardFunction.VTable{
+        .operands = operands,
+        .backward = backward,
+        .deinit = deinitFn,
+    };
+};
+
+/// VJP for `fold` (col2im patch scatter): the column gradient is the
+/// `unfold` (im2col) of the upstream image gradient — each patch tap reads
+/// the image position it accumulated into (pad taps read 0).
+pub const FoldBackward = struct {
+    parents: [1]?*GradState,
+    kernel: [2]usize,
+    stride: [2]usize,
+    pad: [2]usize,
+
+    const Self = @This();
+
+    pub fn init(
+        self: *Self,
+        allocator: std.mem.Allocator,
+        parent: ?*GradState,
+        kernel: [2]usize,
+        stride: [2]usize,
+        pad: [2]usize,
+    ) !void {
+        _ = allocator;
+        self.* = .{
+            .parents = .{parent},
+            .kernel = kernel,
+            .stride = stride,
+            .pad = pad,
+        };
+    }
+
+    fn operands(ptr: *const anyopaque) []const ?*GradState {
+        const self: *const Self = @ptrCast(@alignCast(ptr));
+        return self.parents[0..];
+    }
+
+    fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
+        const self: *const Self = @ptrCast(@alignCast(ptr));
+        if (needs_grad.len == 0 or !needs_grad[0]) return;
+        out[0] = try ctx.unfold(gy, self.kernel, self.stride, self.pad);
+    }
+
+    fn deinitFn(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        core.destroyNode(Self, allocator, self);
+    }
+
+    pub const vtable = BackwardFunction.VTable{
+        .operands = operands,
+        .backward = backward,
+        .deinit = deinitFn,
     };
 };
 

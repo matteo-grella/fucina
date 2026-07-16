@@ -820,6 +820,18 @@ pub const ExecContext = struct {
         return exec_conv.conv2dBackwardWeight(&self.rt, input, gy, kh, kw, stride, pad, groups);
     }
 
+    /// Patch extraction `[H,W,Cin]` → `[oH·oW, kH·kW·Cin]` (the im2col
+    /// layout, `cin` fastest); the exact adjoint of `fold`. See `exec/conv.zig`.
+    pub fn unfold(self: *ExecContext, input: *const Tensor, kernel: [2]usize, stride: [2]usize, pad: [2]usize) !Tensor {
+        return exec_conv.unfold(&self.rt, input, kernel, stride, pad);
+    }
+
+    /// Overlap-accumulating patch scatter `[oH·oW, kH·kW·Cin]` → `[H,W,Cin]`
+    /// (col2im); the exact adjoint of `unfold`. See `exec/conv.zig`.
+    pub fn fold(self: *ExecContext, col: *const Tensor, output_size: [2]usize, kernel: [2]usize, stride: [2]usize, pad: [2]usize) !Tensor {
+        return exec_conv.fold(&self.rt, col, output_size, kernel, stride, pad);
+    }
+
     /// 2-D max pool, channel-last rank-3 `[H,W,C]` → `[OH,OW,C]` (zero-pad
     /// border reads as −inf). See `exec/pool.zig`.
     pub fn maxPool2d(self: *ExecContext, input: *const Tensor, kernel: [2]usize, stride: [2]usize, pad: [2]usize) !Tensor {
@@ -1138,6 +1150,29 @@ pub const ExecContext = struct {
 
     pub fn cumsumReverseAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
         return exec_reduce.cumsumReverseAxisRank(&self.rt, rank, x, axis);
+    }
+
+    /// First-order linear recurrence `h_t = a_t·h_{t-1} + b_t` along `axis`
+    /// (`a` is a same-logical-shape, possibly zero-stride view; `initial`
+    /// holds one `h_{-1}` per lane). See `exec/reduce.zig`.
+    pub fn linearRecurrenceAxisRank(self: *ExecContext, comptime rank: usize, b: *const Tensor, a: *const Tensor, comptime axis: usize, initial: ?*const Tensor) !Tensor {
+        return exec_reduce.linearRecurrenceAxisRank(&self.rt, rank, b, a, axis, initial);
+    }
+
+    /// VJP of `linearRecurrenceAxisRank`: the reverse-scan `gb`, the
+    /// full-shape `da` (caller broadcast-reduces), and `dinitial`.
+    pub fn linearRecurrenceBackwardAxisRank(
+        self: *ExecContext,
+        comptime rank: usize,
+        gy: *const Tensor,
+        a: *const Tensor,
+        h: *const Tensor,
+        initial: ?*const Tensor,
+        comptime axis: usize,
+        want_da: bool,
+        want_dinitial: bool,
+    ) !exec_reduce.LinearRecurrenceGrads {
+        return exec_reduce.linearRecurrenceBackwardAxisRank(&self.rt, rank, gy, a, h, initial, axis, want_da, want_dinitial);
     }
 
     pub fn meanAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {

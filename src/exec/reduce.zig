@@ -438,6 +438,278 @@ fn scanRowVec(comptime op: ScanOp, comptime reverse: bool, row_in: []const f32, 
     }
 }
 
+/// First-order linear recurrence along `axis` (the associative-scan
+/// primitive of the SSM / linear-attention family):
+/// `h_t = a_t · h_{t-1} + b_t` per independent lane (each fixed choice of
+/// the non-axis indices), with `h_{-1}` read from `initial` (or 0 when
+/// absent). `b` supplies the output shape; `a` is a same-logical-shape
+/// tensor — typically the facade's zero-stride broadcast alignment of a
+/// lower-rank decay — read through its strides, never materialized.
+/// `initial` holds one element per lane, row-major with the axis removed
+/// (the shape-minus-axis layout).
+///
+/// Determinism: one serial pass per lane in axis order, each step evaluated
+/// as multiply-then-add — bitwise deterministic for any thread count (cold
+/// op; no parallel dispatch, the `cumsum` contract). With `-Dvector-scan`,
+/// non-last axes vectorize across `scan_vector_width` independent lanes
+/// when the decay's flattened lane strides are contiguous or fully
+/// broadcast — every lane runs the identical elementwise op sequence, so
+/// the result stays BITWISE IDENTICAL to the serial default. The last axis
+/// stays serial per lane even under `-Dvector-scan`: an in-register form
+/// would reassociate `a·h + b` and change rounding, so no gated variant
+/// exists (unlike cumsum's last-axis prefix scan).
+pub fn linearRecurrenceAxisRank(rt: *Runtime, comptime rank: usize, b: *const Tensor, a: *const Tensor, comptime axis: usize, initial: ?*const Tensor) !Tensor {
+    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (axis >= rank) @compileError("axis out of bounds");
+
+    const source = try b.rankView(rank);
+    const a_view = try a.rankView(rank);
+    inline for (0..rank) |d| {
+        if (a_view.shape[d] != source.shape[d]) return tensor.TensorError.ShapeMismatch;
+    }
+
+    const axis_dim = source.shape[axis];
+    const inner = productAfterAxis(rank, source.shape, axis);
+    const outer = productBeforeAxis(rank, source.shape, axis);
+
+    var bb = try rt.prepareContiguous(b);
+    defer bb.deinit();
+    const b_data = bb.tensor().dataConst();
+
+    var init_prep: ?Runtime.PreparedTensor = null;
+    defer if (init_prep) |*p| p.deinit();
+    var init_data: ?[]const f32 = null;
+    if (initial) |ini| {
+        if (ini.len() != outer * inner) return tensor.TensorError.ShapeMismatch;
+        init_prep = try rt.prepareContiguous(ini);
+        init_data = init_prep.?.tensor().dataConst();
+    }
+
+    var out = try rt.emptyRank(rank, source.shape);
+    errdefer out.deinit();
+    const output = out.data();
+
+    const a_data = a.buffer.data;
+    const a_axis_stride = a_view.strides[axis];
+    const lane_kind = laneStrideKind(rank, axis, source.shape, a_view.strides);
+
+    for (0..outer) |outer_i| {
+        const a_outer_off = a.offset + strideOffset(rank, 0, axis, source.shape, a_view.strides, outer_i);
+        var inner_i: usize = 0;
+
+        if (comptime build_options.vector_scan) {
+            if (comptime axis != rank - 1) {
+                if (lane_kind != .general) {
+                    while (inner_i + scan_vector_width <= inner) : (inner_i += scan_vector_width) {
+                        var hv: ScanVec = if (init_data) |ini| ini[outer_i * inner + inner_i ..][0..scan_vector_width].* else @splat(0);
+                        for (0..axis_dim) |t| {
+                            const off = (outer_i * axis_dim + t) * inner + inner_i;
+                            const av: ScanVec = switch (lane_kind) {
+                                .broadcast => @splat(a_data[a_outer_off + t * a_axis_stride]),
+                                .contiguous => a_data[a_outer_off + t * a_axis_stride + inner_i ..][0..scan_vector_width].*,
+                                .general => unreachable,
+                            };
+                            hv = av * hv + @as(ScanVec, b_data[off..][0..scan_vector_width].*);
+                            output[off..][0..scan_vector_width].* = hv;
+                        }
+                    }
+                }
+            }
+        }
+
+        while (inner_i < inner) : (inner_i += 1) {
+            const a_off = a_outer_off + strideOffset(rank, axis + 1, rank, source.shape, a_view.strides, inner_i);
+            var h: f32 = if (init_data) |ini| ini[outer_i * inner + inner_i] else 0;
+            for (0..axis_dim) |t| {
+                const off = (outer_i * axis_dim + t) * inner + inner_i;
+                h = a_data[a_off + t * a_axis_stride] * h + b_data[off];
+                output[off] = h;
+            }
+        }
+    }
+    return out;
+}
+
+pub const LinearRecurrenceGrads = struct {
+    gb: Tensor,
+    da: ?Tensor,
+    dinitial: ?Tensor,
+};
+
+/// VJP of `linearRecurrenceAxisRank`. One reverse serial pass per lane:
+/// `gh_t = a_{t+1} · gh_{t+1} + gy_t` (with `gh_T = 0`) — `gb` IS `gh`;
+/// `da_t = gh_t · h_{t-1}` with `h_{-1}` = the lane's initial element (or
+/// 0); `dinitial = a_0 · gh_0`. `a` is the forward's aligned decay view
+/// (read through its strides), `h` the forward OUTPUT. `da` comes back at
+/// the full `b` shape — the caller reduces it onto the decay's own shape
+/// (the pointwise broadcast-backward rule). Same determinism contract and
+/// `-Dvector-scan` lane vectorization as the forward (bitwise identical to
+/// the serial pass either way).
+pub fn linearRecurrenceBackwardAxisRank(
+    rt: *Runtime,
+    comptime rank: usize,
+    gy: *const Tensor,
+    a: *const Tensor,
+    h: *const Tensor,
+    initial: ?*const Tensor,
+    comptime axis: usize,
+    want_da: bool,
+    want_dinitial: bool,
+) !LinearRecurrenceGrads {
+    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (axis >= rank) @compileError("axis out of bounds");
+
+    const source = try gy.rankView(rank);
+    const a_view = try a.rankView(rank);
+    inline for (0..rank) |d| {
+        if (a_view.shape[d] != source.shape[d]) return tensor.TensorError.ShapeMismatch;
+    }
+
+    const axis_dim = source.shape[axis];
+    const inner = productAfterAxis(rank, source.shape, axis);
+    const outer = productBeforeAxis(rank, source.shape, axis);
+
+    var gg = try rt.prepareContiguous(gy);
+    defer gg.deinit();
+    const gy_data = gg.tensor().dataConst();
+    var hh = try rt.prepareContiguous(h);
+    defer hh.deinit();
+    const h_data = hh.tensor().dataConst();
+
+    var init_prep: ?Runtime.PreparedTensor = null;
+    defer if (init_prep) |*p| p.deinit();
+    var init_data: ?[]const f32 = null;
+    if (initial) |ini| {
+        if (ini.len() != outer * inner) return tensor.TensorError.ShapeMismatch;
+        init_prep = try rt.prepareContiguous(ini);
+        init_data = init_prep.?.tensor().dataConst();
+    }
+
+    var gb = try rt.emptyRank(rank, source.shape);
+    errdefer gb.deinit();
+    const gb_data = gb.data();
+
+    var da: ?Tensor = if (want_da) try rt.emptyRank(rank, source.shape) else null;
+    errdefer if (da) |*t| t.deinit();
+    const da_data: ?[]f32 = if (da) |*t| t.data() else null;
+
+    const out_rank = if (rank == 1) 1 else rank - 1;
+    var dinitial: ?Tensor = if (want_dinitial) try rt.emptyRank(out_rank, shapeWithoutAxis(rank, out_rank, source.shape, axis)) else null;
+    errdefer if (dinitial) |*t| t.deinit();
+    const dinit_data: ?[]f32 = if (dinitial) |*t| t.data() else null;
+
+    const a_data = a.buffer.data;
+    const a_axis_stride = a_view.strides[axis];
+    const lane_kind = laneStrideKind(rank, axis, source.shape, a_view.strides);
+
+    for (0..outer) |outer_i| {
+        const a_outer_off = a.offset + strideOffset(rank, 0, axis, source.shape, a_view.strides, outer_i);
+        var inner_i: usize = 0;
+
+        if (comptime build_options.vector_scan) {
+            if (comptime axis != rank - 1) {
+                if (lane_kind != .general) {
+                    while (inner_i + scan_vector_width <= inner) : (inner_i += scan_vector_width) {
+                        const loadA = struct {
+                            inline fn at(kind: LaneStrideKind, data: []const f32, base: usize, stride: usize, t: usize, lane: usize) ScanVec {
+                                return switch (kind) {
+                                    .broadcast => @splat(data[base + t * stride]),
+                                    .contiguous => data[base + t * stride + lane ..][0..scan_vector_width].*,
+                                    .general => unreachable,
+                                };
+                            }
+                        }.at;
+                        var ghv: ScanVec = @splat(0);
+                        var t = axis_dim;
+                        while (t > 0) {
+                            t -= 1;
+                            const off = (outer_i * axis_dim + t) * inner + inner_i;
+                            const gyv: ScanVec = gy_data[off..][0..scan_vector_width].*;
+                            ghv = if (t + 1 == axis_dim) gyv else loadA(lane_kind, a_data, a_outer_off, a_axis_stride, t + 1, inner_i) * ghv + gyv;
+                            gb_data[off..][0..scan_vector_width].* = ghv;
+                            if (da_data) |dd| {
+                                const hp: ScanVec = if (t > 0)
+                                    h_data[off - inner ..][0..scan_vector_width].*
+                                else if (init_data) |ini|
+                                    ini[outer_i * inner + inner_i ..][0..scan_vector_width].*
+                                else
+                                    @splat(0);
+                                dd[off..][0..scan_vector_width].* = ghv * hp;
+                            }
+                        }
+                        if (dinit_data) |di| {
+                            const dv = loadA(lane_kind, a_data, a_outer_off, a_axis_stride, 0, inner_i) * ghv;
+                            di[outer_i * inner + inner_i ..][0..scan_vector_width].* = dv;
+                        }
+                    }
+                }
+            }
+        }
+
+        while (inner_i < inner) : (inner_i += 1) {
+            const a_off = a_outer_off + strideOffset(rank, axis + 1, rank, source.shape, a_view.strides, inner_i);
+            var gh: f32 = 0;
+            var t = axis_dim;
+            while (t > 0) {
+                t -= 1;
+                const off = (outer_i * axis_dim + t) * inner + inner_i;
+                gh = if (t + 1 == axis_dim) gy_data[off] else a_data[a_off + (t + 1) * a_axis_stride] * gh + gy_data[off];
+                gb_data[off] = gh;
+                if (da_data) |dd| {
+                    const h_prev: f32 = if (t > 0)
+                        h_data[off - inner]
+                    else if (init_data) |ini|
+                        ini[outer_i * inner + inner_i]
+                    else
+                        0;
+                    dd[off] = gh * h_prev;
+                }
+            }
+            if (dinit_data) |di| {
+                di[outer_i * inner + inner_i] = a_data[a_off] * gh;
+            }
+        }
+    }
+    return .{ .gb = gb, .da = da, .dinitial = dinitial };
+}
+
+const LaneStrideKind = enum { broadcast, contiguous, general };
+
+/// Classify the decay view's flattened lane (inner-axes) access for the
+/// `-Dvector-scan` arm: all-zero strides (one decay value per (outer, t)),
+/// contiguous strides matching the row-major inner layout (lane offset ==
+/// lane index), or anything else (scalar fallback).
+fn laneStrideKind(comptime rank: usize, comptime axis: usize, shape: [rank]usize, strides: [rank]usize) LaneStrideKind {
+    var expected: usize = 1;
+    var contiguous = true;
+    var broadcast = true;
+    comptime var di: usize = 0;
+    inline while (di < rank - axis - 1) : (di += 1) {
+        const d = rank - 1 - di;
+        if (strides[d] != 0) broadcast = false;
+        if (strides[d] != expected) contiguous = false;
+        expected *= shape[d];
+    }
+    if (broadcast) return .broadcast;
+    if (contiguous) return .contiguous;
+    return .general;
+}
+
+/// Strided offset of the `index`-th row-major position over axes
+/// `[from, to)`: decomposes `index` (last axis fastest) and dots the
+/// per-axis indices with `strides`.
+fn strideOffset(comptime rank: usize, comptime from: usize, comptime to: usize, shape: [rank]usize, strides: [rank]usize, index: usize) usize {
+    var offset: usize = 0;
+    var rem = index;
+    comptime var di: usize = 0;
+    inline while (di < to - from) : (di += 1) {
+        const d = to - 1 - di;
+        offset += (rem % shape[d]) * strides[d];
+        rem /= shape[d];
+    }
+    return offset;
+}
+
 /// Product along `axis` (torch.prod over a dim), the axis removed —
 /// `sumAxisRank`'s structure at full parity: rank-1 reduces through the
 /// pooled SIMD `prodInto`, a last-axis reduction runs one vectorized

@@ -992,12 +992,14 @@ pub fn fullLike(self: *const Self, ctx: *ExecContext, fill_value: f32) !Self
 pub fn arange(ctx: *ExecContext, start: f32, end: f32, step: f32) !Self       // single-tag types only
 pub fn linspace(ctx: *ExecContext, start: f32, end: f32, steps: usize) !Self  // single-tag types only
 pub fn oneHot(ctx: *ExecContext, indices: []const usize, depth: usize) !Self  // two-tag types only
+pub fn eye(ctx: *ExecContext, n: usize) !Self                                 // two-tag types only
 
 pub fn rand(ctx: *ExecContext, raw_shape: [tensor_rank]usize, seed: u64) !Self       // uniform [0, 1)
 pub fn uniform(ctx: *ExecContext, raw_shape: [tensor_rank]usize, seed: u64, lo: f32, hi: f32) !Self
 pub fn randn(ctx: *ExecContext, raw_shape: [tensor_rank]usize, seed: u64) !Self      // standard normal
 pub fn normal(ctx: *ExecContext, raw_shape: [tensor_rank]usize, seed: u64, mean_value: f32, std_dev: f32) !Self
 pub fn bernoulli(ctx: *ExecContext, raw_shape: [tensor_rank]usize, seed: u64, p: f32) !Self
+pub fn gumbel(ctx: *ExecContext, raw_shape: [tensor_rank]usize, seed: u64) !Self      // standard Gumbel(0, 1)
 ```
 
 Semantics:
@@ -1032,7 +1034,9 @@ Semantics:
   `{start}`; `steps == 0` is `InvalidShape`). `oneHot` builds the f32
   `[indices.len, depth]` one-hot matrix (torch F.one_hot with an explicit
   class count) from host-side indices — first tag rows, second tag
-  classes; `indices[i] >= depth` is `IndexOutOfBounds`.
+  classes; `indices[i] >= depth` is `IndexOutOfBounds`. `eye` is the
+  `[n, n]` identity matrix (torch.eye) — first tag rows, second tag
+  columns; `n == 0` is `InvalidShape`.
 - The random constructors draw from the deterministic counter-based
   stream at `seed` (§6.8, `fucina.rng`): element i is a pure function of
   `(seed, i)`, so a stored seed regenerates the exact tensor — the stream
@@ -1041,7 +1045,19 @@ Semantics:
   onto `[lo, hi)` (`uniformFill`); `randn`/`normal` are Box-Muller
   (`gaussianFill`/`normalFill`); `bernoulli` is 1.0 iff the `[0, 1)` draw
   at `(seed, i)` falls below `p` (`p` outside `[0, 1]` is
-  `InvalidShape`). All are no-grad constants, like every constructor.
+  `InvalidShape`); `gumbel` is standard Gumbel(0, 1) noise
+  `-ln(-ln(u))` over a strictly open uniform (`gumbelFill` — every draw
+  finite), the gumbel-max / gumbel-softmax building block: add to logits
+  and `argmax` for a categorical sample, or `softmax` at a temperature
+  for its differentiable relaxation. All are no-grad constants, like
+  every constructor.
+- The typed **i64** branch adds two seed-stream constructors of its own
+  (the repo-wide index dtype; §3.10): `randint(ctx, raw_shape, seed, low, high)`
+  — uniform integers over `[low, high)` via the widening multiply-shift
+  map (`randintFill`; `low >= high` is `InvalidShape`) — and
+  `randperm(ctx, n, seed)` — a rank-1 Fisher–Yates permutation of
+  `{0, …, n-1}` (`randpermFill`; single-tag types only). The `.bool`
+  branch adds the `bandMask` attention-mask constructor (§4.6).
 - Constructors are the f32 branch's; the *initialization* entry points on
   `ExecContext` they delegate to (`fromSlice`, `fromSliceRank`,
   `fromBorrowedSliceRank`, `fromSliceTyped`, `fromSliceRankTyped`,
@@ -1071,6 +1087,25 @@ test "arange linspace and seed-deterministic random constructors" {
     var b = try M.randn(&ctx, .{ 2, 4 }, 42);
     defer b.deinit();
     try std.testing.expectEqualSlices(f32, try a.dataConst(), try b.dataConst());
+
+    var g = try M.gumbel(&ctx, .{ 2, 4 }, 42); // finite Gumbel(0, 1) noise
+    defer g.deinit();
+    for (try g.dataConst()) |v| try std.testing.expect(std.math.isFinite(v));
+
+    var identity = try M.eye(&ctx, 2);
+    defer identity.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 1, 0, 0, 1 }, try identity.dataConst());
+
+    // i64-branch seed-stream constructors: randint over [low, high),
+    // randperm as a rank-1 permutation of 0..n-1.
+    var ints = try fucina.Tensor(.{ .dtype = .i64, .tags = .{ .row, .col } }).randint(&ctx, .{ 2, 4 }, 7, -3, 5);
+    defer ints.deinit();
+    for (try ints.dataConst()) |v| try std.testing.expect(v >= -3 and v < 5);
+    var perm = try fucina.Tensor(.{ .dtype = .i64, .tags = .{.i} }).randperm(&ctx, 6, 7);
+    defer perm.deinit();
+    var total: i64 = 0;
+    for (try perm.dataConst()) |v| total += v;
+    try std.testing.expectEqual(@as(i64, 15), total); // 0+1+…+5
 }
 ```
 
@@ -1573,6 +1608,12 @@ pub fn scatter(self, ctx, comptime tag, indices, src: *const Self) !Self
   `out_tag`; zero-copy and differentiable. `trace` is composed diagonal →
   sum; `diag` embeds a rank-1 tensor as the diagonal of an `[n, n]`
   matrix (composed zeros → setRows → reshape).
+  `diagEmbed(ctx, vec_tag, .{ row_tag, col_tag })` is the BATCHED embed
+  (torch.diag_embed generalized to named axes): at any rank carrying
+  `vec_tag`, `out[…, i, j] = self[…, i]·[i == j]` with `vec_tag` renamed
+  to `row_tag` in place and `col_tag` appended LAST — composed rename →
+  broadcast-multiply against an `eye` constant, so the gradient is the
+  exact diagonal extraction.
 - `nonzero` returns the row-major flat indices of the nonzero elements
   (NaN counts) as a HOST `[]usize` the caller frees — data-dependent
   cardinality stays host-side by design (ARCHITECTURE.md), so a no-match
@@ -1589,9 +1630,9 @@ pub fn scatter(self, ctx, comptime tag, indices, src: *const Self) !Self
 - `unbindInto`, `select`, `slice` (more than one sliced axis),
   `maskedSelect`, `maskedScatter`, `rollBy`, `shiftBy`, `stack`,
   `zeroPad2d`, `constantPad2d`, `reshape` (multi-tag targets), `trace`,
-  and `diag` are *composed* ops: when gradients are tracked they require
-  an active exec scope and error with `error.ActiveExecScopeRequired`
-  otherwise (§5).
+  `diag`, and `diagEmbed` are *composed* ops: when gradients are tracked
+  they require an active exec scope and error with
+  `error.ActiveExecScopeRequired` otherwise (§5).
 - Quantized branch: `concat` (rank-2, row axis only) and
   `getRows(ctx, tag, indices, out_tag)` — a fused gather+dequantize
   returning an **f32** tensor (see the snippet in §3.3); both comptime-reject
@@ -1829,8 +1870,8 @@ methods are documented above; §4 covers every math/NN op in depth.
 `variable`, `variableFromSlice`, `constant`, `fromTensor`, `fromSlice`,
 `fromBorrowedSlice`, `fromBorrowedConstSlice`, `empty`, `zeros`, `ones`,
 `full`, `scalar`, `emptyLike`, `zerosLike`, `onesLike`, `fullLike`,
-`arange`, `linspace`, `oneHot`, `rand`, `uniform`, `randn`, `normal`,
-`bernoulli`,
+`arange`, `linspace`, `oneHot`, `eye`, `rand`, `uniform`, `randn`, `normal`,
+`bernoulli`, `gumbel`,
 `deinit`, `asRawTensor`, `item`, `data`, `dataConst`,
 `copyTo`, `detach`, `materialize`, `contiguous`, `requiresGrad`, `zeroGrad`,
 `backward`, `backwardWithGrad`, `grad`, `gradView`, `axis`, `hasTag`, `dim`,
@@ -1842,7 +1883,7 @@ methods are documented above; §4 covers every math/NN op in depth.
 `roll`, `rollBy`, `shiftBy`, `concat`, `stack`, `unbindInto`, `repeatAxis`,
 `pad`, `zeroPad2d`, `constantPad2d`, `setSlice`, `setRows`, `indexAdd`,
 `takeAlongAxis`, `scatterAdd`, `scatter`, `zeroSlice`,
-`zeroRows`, `diagonal`, `diag`, `trace`; consts
+`zeroRows`, `diagonal`, `diag`, `diagEmbed`, `trace`; consts
 `axis_tags`, `tag_count`, `tensor_rank`, `dtype`; fields `value`,
 `grad_state`, `scope_owned`.
 
@@ -1858,9 +1899,11 @@ methods are documented above; §4 covers every math/NN op in depth.
 `floor`, `ceil`, `round`, `sign`, `reciprocal`, `clamp`,
 `maximum`, `minimum`, `pow`, `isnan`, `isinf`, `isfinite`,
 `dropout`, `gated`, `glu`, `swiglu`, `geglu`, `splitGated`, `sum`, `mean`,
-`cumsum`, `prod`, `cumprod`, `variance`, `standardizeAxis`, `sumAll`,
+`cumsum`, `prod`, `cumprod`, `linearRecurrence`, `variance`,
+`standardizeAxis`, `sumAll`,
 `sumMany`, `any`, `all`, `anyAll`, `allAll`, `norm`, `normAll`,
-`logsumexp`, `logSoftmax`, `argmax`,
+`bandPart`, `tril`, `triu`,
+`logsumexp`, `logSoftmax`, `argmax`, `multinomial`,
 `max`, `min`, `topK`, `sort`, `argsort`, `routerTopK`, `softmax`, `rmsNorm`,
 `rmsNormMul`, `rmsNormMulAdd`, `rmsNormMulRopeHalfPrepared`, `layerNorm`,
 `groupNorm`, `crossEntropy`, `crossEntropyExt`, `linearCrossEntropyExt`, `linearDistillExt`,
@@ -1871,6 +1914,7 @@ methods are documented above; §4 covers every math/NN op in depth.
 `splitSwiGluDotPacked`, `gegluQuantDotPacked`, `groupedAttention`,
 `conv2d`, `conv2dRelu`, `prepareConv2dWeights`, `conv2dPrepared`,
 `conv2dPreparedRelu`, `maxPool2d`, `avgPool2d`, `upsample2xNearest`,
+`unfold`, `fold`,
 `prelu`, `channelAffine`, `relposShift`, `causalDepthwiseConv1d`,
 `causalConv1d`, `groupedCausalConv1d`, `conv1d`, `convTranspose1d`,
 `snake`. The root free function `fucina.einsumMany(ctx, out_tags, operands)`
@@ -1887,9 +1931,10 @@ integer forward math `add`, `sub`, `mul`, `maximum`, `minimum`,
 `divTrunc`, `divFloor`, `rem`, `mod`, `bitAnd`, `bitOr`, `bitXor`,
 `sum`, `sumAll` (§4.19; on `.bool` the arithmetic
 entries are compile errors — `to` and the counting `sum`/`sumAll` apply),
-integer `compare` (§4.6, exact at any magnitude), and — on `.bool` only —
-the mask combinators `logicalAnd`, `logicalOr`, `logicalXor`,
-`logicalNot`.
+integer `compare` (§4.6, exact at any magnitude), the i64-only
+seed-stream constructors `randint`, `randperm` (§3.3), and — on `.bool`
+only — the `bandMask` constructor (§4.6) and the mask combinators
+`logicalAnd`, `logicalOr`, `logicalXor`, `logicalNot`.
 
 **Typed float branch** (`.f16`/`.bf16`/`.f64`): everything in the
 scalar-constant branch's §3 list, plus `requiresGrad`, `zeroGrad`, and
@@ -2320,8 +2365,52 @@ mask-multiply idiom.
   convention), the tag removed; `anyAll(ctx)`/`allAll(ctx)` are the
   scalar full-tensor forms (torch with no dim). Non-differentiable
   (compare → i64 count → compare), unscoped-safe.
+- `bandMask(ctx, raw_shape, lower, upper)` — the banded / sliding-window
+  attention-mask CONSTRUCTOR, on two-tag `.bool` types only: element
+  `(i, j)` is true iff `i - j <= lower` and `j - i <= upper`, a null
+  bound unbounded on that side (bounds are signed `?i64`). Causal
+  keep-set = `(null, 0)`; sliding window of width W = `(W - 1, 0)`;
+  tril(k) keep-set = `(null, k)`; triu(k) = `(-k, null)`. Feed it to
+  `where`/`maskedFill` (via `broadcastTo` for batched scores) or cast
+  with `to(.f32)` for the mask-multiply idiom; contradictory bounds
+  yield an all-false mask, not an error.
+- `bandPart(ctx, row_tag, col_tag, lower, upper)` — keep the `bandMask`
+  band of the (`row_tag`, `col_tag`) plane and ZERO everything outside
+  (tf.linalg.band_part with signed nullable bounds), at any rank
+  carrying both tags — remaining axes pass through. Implemented as a
+  constant 0/1 band-plane multiply, so it is differentiable in `self`
+  with the exact same-band mask as VJP. `tril(ctx, row_tag, col_tag, offset)`
+  / `triu(ctx, row_tag, col_tag, offset)` are the triangular special
+  cases (torch.tril/triu with a diagonal offset): `bandPart(null, offset)`
+  and `bandPart(-offset, null)` respectively.
 
 ```zig
+test "bandMask bandPart tril build banded and triangular structure" {
+    const alloc = std.testing.allocator;
+    var ctx: fucina.ExecContext = undefined;
+    ctx.init(alloc);
+    defer ctx.deinit();
+
+    // Causal .bool keep-set for attention scores.
+    const B = fucina.Tensor(.{ .dtype = .bool, .tags = .{ .q, .k } });
+    var causal = try B.bandMask(&ctx, .{ 3, 3 }, null, 0);
+    defer causal.deinit();
+    try std.testing.expectEqualSlices(bool, &.{ true, false, false, true, true, false, true, true, true }, try causal.dataConst());
+
+    // tril zeroes above the diagonal; the gradient is the same triangle.
+    var x = try fucina.Tensor(.{ .row, .col }).variableFromSlice(&ctx, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
+    defer x.deinit();
+    var lo = try x.tril(&ctx, .row, .col, 0);
+    defer lo.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 1, 0, 3, 4 }, try lo.dataConst());
+    var loss = try lo.sumAll(&ctx);
+    defer loss.deinit();
+    try loss.backward(&ctx);
+    var gx = (try x.grad(&ctx)).?;
+    defer gx.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 1, 0, 1, 1 }, try gx.dataConst());
+}
+
 test "compare produces bool masks for maskedFill and where" {
     const alloc = std.testing.allocator;
     var ctx: fucina.ExecContext = undefined;
@@ -2375,6 +2464,28 @@ returns the scalar `Tensor(.{})`.
   `-Dvector-scan` (§2.2, the `cumsum` gating). Differentiable: zero-free rows use the
   O(n) reverse-scan closed form; rows containing a zero fall back to an
   exact division-free O(n²) expansion (torch semantics).
+- `linearRecurrence(ctx, time_tag, decay, options)` — the first-order
+  linear recurrence `h_t = a_t ⊙ h_{t-1} + b_t` along `time_tag`,
+  shape-preserving: `self` supplies `b` (and the result shape), `decay`
+  supplies `a`, and every lane (each fixed choice of the non-time axes)
+  scans independently — the associative-scan primitive of the
+  SSM / linear-attention family (Mamba-2 / GDN-style diagonal decay
+  states). `decay` broadcasts BY TAG like the pointwise ops (tags a
+  subset of `self`'s; a zero-stride view read in place, never
+  materialized): no time tag = static per-lane decay, `[time]` only =
+  shared schedule, state-shaped tags = per-state decay.
+  `options` is `.{}` or `.{ .initial = &h0 }` with `h0` carrying
+  `self`'s tags minus `time_tag` (exact shape) — `h_{-1}` per lane, the
+  streaming seam: feeding the previous chunk's last step continues a
+  sequence bitwise-exactly. Determinism follows the `cumsum` contract:
+  serial per lane, multiply-then-add per step; `-Dvector-scan`
+  vectorizes non-last time axes across lanes BITWISE identically, and
+  the last axis always stays serial (an in-register form would
+  reassociate the recurrence). Differentiable in `self`, `decay`, and
+  `initial`: the VJP is one reverse scan
+  (`gh_t = a_{t+1}·gh_{t+1} + gy_t`; `decay` gets `gh_t·h_{t-1}`
+  reduced back over its broadcast axes, `initial` gets `a_0·gh_0`).
+  With `decay == 1` it degenerates to `cumsum` bitwise.
 - `norm(ctx, tag, order)` / `normAll(ctx, order)` — vector norm along
   `tag` / over all elements (torch.linalg.vector_norm), `order` in
   `exec.NormOrder`: `.l1` = Σ|x|, `.l2` = sqrt(Σx²), `.inf` = max|x|.
@@ -2418,6 +2529,29 @@ test "cumsum keeps the axis" {
     var y = try x.cumsum(&ctx, .d);
     defer y.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 1, 3, 6 }, try y.dataConst());
+}
+
+test "linearRecurrence scans a decayed state along the time tag" {
+    const alloc = std.testing.allocator;
+    var ctx: fucina.ExecContext = undefined;
+    ctx.init(alloc);
+    defer ctx.deinit();
+
+    // h_t = a[d]·h_{t-1} + b_t per lane; decay broadcasts by tag.
+    var b = try fucina.Tensor(.{ .t, .d }).fromSlice(&ctx, .{ 3, 2 }, &.{ 1, 1, 1, 1, 1, 1 });
+    defer b.deinit();
+    var a = try fucina.Tensor(.{.d}).fromSlice(&ctx, .{2}, &.{ 0.5, 0 });
+    defer a.deinit();
+    var h = try b.linearRecurrence(&ctx, .t, &a, .{});
+    defer h.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 1, 1, 1.5, 1, 1.75, 1 }, try h.dataConst());
+
+    // .initial seeds h_{-1} per lane (the chunked-streaming seam).
+    var h0 = try fucina.Tensor(.{.d}).fromSlice(&ctx, .{2}, &.{ 8, 8 });
+    defer h0.deinit();
+    var seeded = try b.linearRecurrence(&ctx, .t, &a, .{ .initial = &h0 });
+    defer seeded.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 5, 1, 3.5, 1, 2.75, 1 }, try seeded.dataConst());
 }
 ```
 
@@ -3100,6 +3234,24 @@ detection stack):
   (ONNX `count_include_pad=0`). Both differentiable.
 - `upsample2xNearest(ctx)` — `[H, W, C] → [2H, 2W, C]`; VJP = 2×2 stride-2
   sum-pool.
+- `unfold(ctx, kernel, stride, padding, out_tags)` — patch extraction
+  (torch.nn.Unfold in this repo's channel-last layout): rank-3
+  `[H, W, C]` → rank-2 `[oH·oW, kH·kW·C]` tagged `out_tags` (patch axis,
+  then patch-element axis). Patch row `oy·oW + ox` holds output position
+  (oy, ox)'s window taps ordered `(ky, kx, c)` with the channel fastest —
+  exactly the im2col layout the groups == 1 conv2d GEMM route consumes,
+  so `unfold` → `dot` over the element axis IS a dense conv2d, and a
+  stride = kernel, pad 0 unfold is ViT patchify. Out-of-range (pad) taps
+  read 0. Shares the threaded im2col kernel (bit-identical to serial);
+  differentiable — the VJP is the exact adjoint `fold`.
+- `fold(ctx, output_size, kernel, stride, padding, out_tags)` — the
+  adjoint (torch.nn.Fold): scatter-ADD rank-2 `[oH·oW, kH·kW·C]` patch
+  rows back into a `[H, W, C]` image (three out tags). Overlapping taps
+  ACCUMULATE — `fold(unfold(x))` multiplies each position by its window
+  count — and pad taps drop; the channel count is derived from the
+  patch-element width, and a patch row count that contradicts the
+  geometry is `ShapeMismatch`. Shares the threaded col2im kernel;
+  differentiable — the VJP is the exact adjoint `unfold`.
 - `prelu(ctx, alpha)` — learnable per-channel slope, `alpha` rank-1 `[C]`
   (channel innermost); differentiable in `x` and `alpha`.
 - `channelAffine(ctx, scale_t, shift_t)` — fused per-channel
@@ -3139,6 +3291,24 @@ test "conv2d channel-last and maxPool2d" {
     var pooled = try x.maxPool2d(&ctx, .{ 2, 2 }, .{ 2, 2 }, .{ 0, 0 });
     defer pooled.deinit();
     try std.testing.expectEqualSlices(f32, &.{4}, try pooled.dataConst());
+}
+
+test "unfold extracts patches and fold accumulates them back" {
+    const alloc = std.testing.allocator;
+    var ctx: fucina.ExecContext = undefined;
+    ctx.init(alloc);
+    defer ctx.deinit();
+
+    var x = try fucina.Tensor(.{ .h, .w, .c }).fromSlice(&ctx, .{ 2, 2, 1 }, &.{ 1, 2, 3, 4 });
+    defer x.deinit();
+    // stride = kernel, pad 0: non-overlapping patchify (one 2x2 patch).
+    var col = try x.unfold(&ctx, .{ 2, 2 }, .{ 2, 2 }, .{ 0, 0 }, .{ .patch, .elem });
+    defer col.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, try col.dataConst());
+    // fold scatter-adds the patches back (no overlap here → identity).
+    var img = try col.fold(&ctx, .{ 2, 2 }, .{ 2, 2 }, .{ 2, 2 }, .{ 0, 0 }, .{ .h, .w, .c });
+    defer img.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, try img.dataConst());
 }
 ```
 
@@ -3288,6 +3458,19 @@ even under an exec scope (§6.3): pair them with `deinit` — an f32
   regardless of direction (documented divergence from `torch.sort`, which
   puts NaN first when descending). Values differentiable, indices constant.
 - `argsort(ctx, tag, descending)` — the indices arm alone (i64); no-grad.
+- `multinomial(ctx, class_tag, out_tag, num_samples, seed, replacement)` —
+  categorical sampling from UNNORMALIZED non-negative weight rows
+  (torch.multinomial): `num_samples` i64 draws per row along `class_tag`
+  (last axis, like `routerTopK`; rank 1 or 2 — the torch surface),
+  `class_tag` replaced by `out_tag` in the result. Draw `(row, s)` reads
+  the deterministic counter-based stream at `(seed, row·num_samples + s)`
+  (§6.8) — reproducible and batching-independent; pass a fresh seed per
+  call. Rows must hold finite weights `>= 0` with a positive sum
+  (`InvalidShape` otherwise); zero-weight classes are never drawn.
+  Without replacement each draw removes the chosen class's mass, and
+  `num_samples` beyond the class count — or beyond a row's nonzero
+  classes — is `InvalidShape`. **No-grad by design** (an i64 sampling
+  output, like `argmax`).
 - `routerTopK(ctx, expert_tag, k, options, selected, weights)` — the MoE
   router primitive: fills caller-provided `selected: []usize` /
   `weights: []f32` (both `rows·k` long) with the per-row top-k experts and
@@ -3321,6 +3504,14 @@ test "argmax, topK, and routerTopK" {
     try std.testing.expectEqual(@as(usize, 1), selected[0]);
     // normalize_selected renormalizes the top-k softmax mass to 1
     try std.testing.expectApproxEqAbs(@as(f32, 0.7310586), weights[0], 1e-6);
+
+    // multinomial: seed-deterministic categorical draws; zero-weight
+    // classes are never selected.
+    var probs = try fucina.Tensor(.{ .row, .class }).fromSlice(&ctx, .{ 1, 3 }, &.{ 0, 2, 0 });
+    defer probs.deinit();
+    var picks = try probs.multinomial(&ctx, .class, .sample, 3, 42, true);
+    defer picks.deinit();
+    try std.testing.expectEqualSlices(i64, &.{ 1, 1, 1 }, try picks.dataConst());
 }
 ```
 
@@ -4410,24 +4601,26 @@ Every differentiable facade op attaches a concrete VJP record from
 | Family | Differentiable ops | Notes |
 |---|---|---|
 | Pointwise arithmetic | `add`, `sub`, `mul`, `div`, `maximum`, `minimum`, `pow`, `scale`, `addScalar`, `subScalar`, `divScalar`, `powScalar`, `biasAdd` | broadcast operands reduce gradients back to source tags; `maximum`/`minimum` split the gradient evenly on exact ties; `biasAdd`'s slice bias is constant |
-| Selection / masking | `where` (grads to both value operands), `maskedFill` (grad zeroed where filled), `clamp`, `dropout` | `cond`/`mask` are non-grad; dropout regenerates its mask from `(seed, index)` in forward, backward, and recompute |
+| Selection / masking | `where` (grads to both value operands), `maskedFill` (grad zeroed where filled), `clamp`, `dropout`, `bandPart`, `tril`, `triu` | `cond`/`mask` are non-grad; dropout regenerates its mask from `(seed, index)` in forward, backward, and recompute; the triangular family multiplies by a constant 0/1 band plane, so its VJP is the exact same-band mask |
 | Unary activations | `relu`, `leakyRelu`, `exp`, `sqrt`, `rsqrt`, `sigmoid`, `silu`, `log`, `log1p`, `neg`, `abs`, `sin`, `cos`, `tanh`, `fastTanh`, `softcap30`, `softcap15`, `gelu`, `quickGelu`, `elu`, `geluErf`, `floor`, `ceil`, `round`, `sign`, `reciprocal`, `unary`, `snake`, `prelu` | `prelu`/`snake` also differentiate their parameters; `floor`/`ceil`/`round`/`sign` have zero gradient a.e. (torch convention) |
 | Gated units | `gated`, `glu`, `swiglu`, `geglu`, `splitGated` | fused split+gate VJPs |
-| Reductions / statistics | `sum`, `sumMany`, `sumAll`, `mean`, `variance`, `prod`, `cumsum`, `cumprod`, `logsumexp`, `standardizeAxis`, `norm`, `normAll`, `max`, `min`, `topK` (values arm), `sort` (values arm) | `max`/`min` route gradient to the first extremum (strict tie-break); `topK`/`sort` values scatter back through the saved indices |
-| Structure / views | `withTags`, `permuteTo`, `transpose`, `alignTo`, `insertAxis`, `squeeze`, `split`, `merge`, `reshape`, `viewWithStrides`, `materialize`, `contiguous`, `broadcastTo`, `flatten`, `narrow`, `select`, `slice`, `sliceStep`, `pad`, `zeroPad2d`, `constantPad2d`, `concat`, `stack`, `unbindInto`, `repeatAxis`, `flip`, `roll`, `rollBy`, `shiftBy`, `diagonal`, `trace`, `diag`, `gather`, `indexSelect`, `takeAlongAxis`, `indexAdd`, `scatterAdd`, `scatter`, `maskedSelect`, `maskedScatter`, `setSlice`, `setRows`, `zeroSlice`, `zeroRows`, `relposShift`, `to` (f32/f16/bf16 targets, §3.8) | view VJPs scatter through the saved layout; `detach` deliberately cuts the graph |
+| Reductions / statistics | `sum`, `sumMany`, `sumAll`, `mean`, `variance`, `prod`, `cumsum`, `cumprod`, `linearRecurrence`, `logsumexp`, `standardizeAxis`, `norm`, `normAll`, `max`, `min`, `topK` (values arm), `sort` (values arm) | `max`/`min` route gradient to the first extremum (strict tie-break); `topK`/`sort` values scatter back through the saved indices; `linearRecurrence` differentiates input, decay, and initial state through one reverse scan (§4.7) |
+| Structure / views | `withTags`, `permuteTo`, `transpose`, `alignTo`, `insertAxis`, `squeeze`, `split`, `merge`, `reshape`, `viewWithStrides`, `materialize`, `contiguous`, `broadcastTo`, `flatten`, `narrow`, `select`, `slice`, `sliceStep`, `pad`, `zeroPad2d`, `constantPad2d`, `concat`, `stack`, `unbindInto`, `repeatAxis`, `flip`, `roll`, `rollBy`, `shiftBy`, `diagonal`, `trace`, `diag`, `diagEmbed`, `gather`, `indexSelect`, `takeAlongAxis`, `indexAdd`, `scatterAdd`, `scatter`, `maskedSelect`, `maskedScatter`, `setSlice`, `setRows`, `zeroSlice`, `zeroRows`, `relposShift`, `to` (f32/f16/bf16 targets, §3.8) | view VJPs scatter through the saved layout; `detach` deliberately cuts the graph |
 | Norms / softmax | `softmax` (all fused options; `.mask` must not require grad), `logSoftmax`, `rmsNorm`, `rmsNormMul`, `rmsNormMulAdd`, `rmsNormMulRopeHalfPrepared`, `layerNorm` (plain + affine), `groupNorm`, `l2Normalize`, `cosineSimilarity` | |
 | Losses | `crossEntropy`, `crossEntropyExt`, `linearCrossEntropyExt`, `linearDistillExt`, `mseLoss`, `huberLoss`, `bceLoss`, `klDivLoss`, `nllLoss` | `linearCrossEntropyExt` differentiates both the input and the classifier weight without materializing the logit gradient (§4.15) |
 | Contractions | `dot` (f32×f32: both operands; quantized RHS: lhs-only, the RHS is a frozen constant; f16/bf16 RHS: lhs always, plus an f32 dW when the RHS is a grad-requiring 16-bit variable), `einsum` (f32×f32: both operands; f16/bf16 RHS: same variable-RHS contract as dot; each gradient is itself an einsum — GEMM-lowered for every tag structure, broadcast over forward-summed axes; `DotBackward`/`ConstRhsDotBackward` delegate to the einsum records), `einsumMany` (composes binary einsum records), `matmul` (2-D GEMM `.plain`/`.trans_b`, batched bmm all kinds; rank-2 `.trans_a` is a compile error directing to `dot`), `dotTernarySte` (straight-through estimator: dx through the quantized weight, dW as-if-unquantized) | |
-| Convolutions / pooling | `conv1d`, `convTranspose1d`, `causalConv1d`, `groupedCausalConv1d`, `causalDepthwiseConv1d`, `conv2d`, `conv2dRelu`, `maxPool2d`, `avgPool2d`, `upsample2xNearest`, `channelAffine` | `conv2d` differentiates input, weight, and bias; `conv2dRelu` falls back to the composed differentiable path when any operand requires grad |
+| Convolutions / pooling | `conv1d`, `convTranspose1d`, `causalConv1d`, `groupedCausalConv1d`, `causalDepthwiseConv1d`, `conv2d`, `conv2dRelu`, `maxPool2d`, `avgPool2d`, `upsample2xNearest`, `unfold`, `fold`, `channelAffine` | `conv2d` differentiates input, weight, and bias; `conv2dRelu` falls back to the composed differentiable path when any operand requires grad; `unfold`/`fold` are exact adjoints of each other (im2col/col2im) |
 | Position / attention | `rope` (table and on-the-fly sources, both modes), `groupedAttention` | attention grad matrix: f32 KV = full q/k/v; f16 or q8_0 KV = q-only (caches are constants); `.bias` or multi-stream KV = inference-only (`error.UnsupportedGradient`) |
 
 Intentionally no-grad (result is a constant; grad-requiring operands are
 either irrelevant or rejected):
 
-- **Constant results by nature**: `argmax`, `argsort`, the `indices` arm of
+- **Constant results by nature**: `argmax`, `argsort`, `multinomial`, the
+  `indices` arm of
   `topK` and `sort`, `compare`, `isnan`, `isinf`, `isfinite`, `any`, `all`,
   `anyAll`, `allAll`, `logicalAnd`, `logicalOr`, `logicalXor`,
-  `logicalNot` — index/mask outputs; gradients are undefined.
+  `logicalNot`, `bandMask` — index/mask/sampling outputs; gradients are
+  undefined.
 - **Inference-only packed kernels** — dense `packRhs`/`dotPacked` fail with
   `error.GradientPackedMatmulUnsupported`; quantized `dotPacked` and the fused
   `rmsNormMulDotPacked`/`splitSwiGluDotPacked`/`gegluQuantDotPacked` fail with
@@ -5119,6 +5312,9 @@ pub fn gaussianFillAtFast(seed: u64, first: u64, out: []f32, scale: f32) void
 pub fn uniformFill(seed: u64, out: []f32, lo: f32, hi: f32) void
 pub fn kaimingUniformFill(seed: u64, out: []f32, fan_in: usize) void
 pub fn normalFill(seed: u64, out: []f32, mean: f32, std_dev: f32) void
+pub fn gumbelFill(seed: u64, out: []f32) void
+pub fn randintFill(seed: u64, out: []i64, low: i64, high: i64) void
+pub fn randpermFill(seed: u64, out: []i64) void
 ```
 
 - `at(seed, i)` computes the i-th output of the stream started at `seed`
@@ -5137,6 +5333,14 @@ pub fn normalFill(seed: u64, out: []f32, mean: f32, std_dev: f32) void
   kept exact by clamping the rare round-up); `kaimingUniformFill` is the
   PyTorch `nn.Linear`/LoRA-A default init; `normalFill` adds explicit
   moments on top of `gaussianFill`.
+- `gumbelFill` is standard Gumbel(0, 1) by inverse CDF over a strictly
+  OPEN uniform (`u = ((x >> 11) + 0.5)·2^-53`, so `-ln(-ln(u))` is always
+  finite); `randintFill` maps one output per value onto `[low, high)` by
+  the widening multiply-shift `low + ((x·span) >> 64)` (bias below
+  `span·2^-64`, full-i64 spans handled in two's-complement);
+  `randpermFill` is Fisher–Yates over the counter stream (step k swaps
+  with `(at(seed, n-1-k)·(k+1)) >> 64`). All three share the checkpoint
+  contract.
 
 ```zig
 test "counter-based rng reproduces the sequential stream chunk by chunk" {

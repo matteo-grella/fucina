@@ -71,6 +71,8 @@ const Matmul2DBackward = backward.Matmul2DBackward;
 const BmmBackward = backward.BmmBackward;
 const ReluBackward = backward.ReluBackward;
 const Conv2dBackward = backward.Conv2dBackward;
+const UnfoldBackward = backward.UnfoldBackward;
+const FoldBackward = backward.FoldBackward;
 const MaxPool2dBackward = backward.MaxPool2dBackward;
 const AvgPool2dBackward = backward.AvgPool2dBackward;
 const Upsample2xNearestBackward = backward.Upsample2xNearestBackward;
@@ -101,6 +103,7 @@ const MinMaxBackward = backward.MinMaxBackward;
 const NarrowBackward = backward.NarrowBackward;
 const ConcatBackward = backward.ConcatBackward;
 const CumsumBackward = backward.CumsumBackward;
+const LinearRecurrenceBackward = backward.LinearRecurrenceBackward;
 const PadBackward = backward.PadBackward;
 const SetSliceBackward = backward.SetSliceBackward;
 const SetRowsBackward = backward.SetRowsBackward;
@@ -408,6 +411,33 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             const out = value.data();
             rng.uniformFill(seed, out, 0, 1);
             for (out) |*v| v.* = if (v.* < p) 1 else 0;
+            return try Self.constant(ctx, value);
+        }
+
+        /// No-grad tensor of standard Gumbel(0, 1) draws — `-ln(-ln(u))`,
+        /// the gumbel-max / gumbel-softmax noise — from the deterministic
+        /// stream at `seed` (see `rand`; `fucina.rng.gumbelFill` documents
+        /// the exact open-interval mapping). Add to logits and take
+        /// argmax for a categorical sample, or softmax at a temperature
+        /// for its differentiable relaxation.
+        pub fn gumbel(ctx: *ExecContext, raw_shape: [tensor_rank]usize, seed: u64) !Self {
+            var value = try ctx.empty(&raw_shape);
+            errdefer value.deinit();
+            rng.gumbelFill(seed, value.data());
+            return try Self.constant(ctx, value);
+        }
+
+        /// Identity matrix `[n, n]` (torch.eye) as a no-grad constant: 1.0
+        /// on the main diagonal, 0.0 elsewhere. The first tag is the row
+        /// axis, the second the column axis. `n == 0` is `InvalidShape`
+        /// (zero-size tensors are not representable).
+        pub fn eye(ctx: *ExecContext, n: usize) !Self {
+            comptime if (tag_count != 2) @compileError("eye builds a rank-2 [n, n] tensor; use a two-tag Tensor type");
+            if (n == 0) return TensorError.InvalidShape;
+            var value = try ctx.zeros(&.{ n, n });
+            errdefer value.deinit();
+            const out = value.data();
+            for (0..n) |i| out[i * (n + 1)] = 1;
             return try Self.constant(ctx, value);
         }
 
@@ -853,6 +883,61 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             var value = try ctx.upsample2xNearest(self.asRawTensor());
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad(), Upsample2xNearestBackward, .{ ctx.allocator, self.grad_state });
+        }
+
+        /// Patch extraction over a channel-last rank-3 `[H, W, C]` tensor
+        /// (torch.nn.Unfold in this repo's layout): result
+        /// `[oH·oW, kH·kW·C]` tagged `out_tags` (two tags: patch axis, then
+        /// patch-element axis), where patch row `oy·oW + ox` holds output
+        /// position (oy, ox)'s kernel-window taps ordered `(ky, kx, c)`
+        /// with the channel fastest — the same col layout the conv2d GEMM
+        /// route consumes, so `unfold` → `dot` over the element axis IS a
+        /// dense conv2d (and a stride = kernel, pad 0 unfold is ViT
+        /// patchify). Out-of-range (pad) taps read 0. `[h, w]`-ordered
+        /// params like `maxPool2d`. Differentiable: the VJP is the exact
+        /// adjoint `fold` (overlaps accumulate, pad taps drop).
+        pub fn unfold(
+            self: *const Self,
+            ctx: *ExecContext,
+            kernel: [2]usize,
+            stride: [2]usize,
+            padding: [2]usize,
+            comptime out_tags: anytype,
+        ) !Tensor(normalizeTags(out_tags)) {
+            comptime {
+                if (tag_rank != 3) @compileError("unfold takes a channel-last rank-3 [h, w, c] tensor");
+                if (normalizeTags(out_tags).len != 2) @compileError("unfold produces a rank-2 [patch, element] tensor: pass exactly two out tags");
+            }
+            var value = try ctx.unfold(self.asRawTensor(), kernel, stride, padding);
+            errdefer value.deinit();
+            return finishOp(normalizeTags(out_tags), ctx, value, self.requiresGrad(), UnfoldBackward, .{ ctx.allocator, self.grad_state, self.asRawTensor(), kernel, stride, padding });
+        }
+
+        /// Adjoint of `unfold` (torch.nn.Fold): scatter-ADD rank-2
+        /// `[oH·oW, kH·kW·C]` patch rows back into a channel-last
+        /// `[H, W, C]` image tagged `out_tags` (three tags). Overlapping
+        /// taps ACCUMULATE (`fold(unfold(x))` multiplies each position by
+        /// its window count) and pad taps are dropped; the channel count
+        /// is derived from the patch-element width. The patch row count
+        /// must match the `output_size`/`kernel`/`stride`/`padding`
+        /// geometry (`ShapeMismatch` otherwise). Differentiable: the VJP
+        /// is the exact adjoint `unfold`.
+        pub fn fold(
+            self: *const Self,
+            ctx: *ExecContext,
+            output_size: [2]usize,
+            kernel: [2]usize,
+            stride: [2]usize,
+            padding: [2]usize,
+            comptime out_tags: anytype,
+        ) !Tensor(normalizeTags(out_tags)) {
+            comptime {
+                if (tag_rank != 2) @compileError("fold takes a rank-2 [patch, element] tensor (the unfold layout)");
+                if (normalizeTags(out_tags).len != 3) @compileError("fold produces a channel-last rank-3 [h, w, c] tensor: pass exactly three out tags");
+            }
+            var value = try ctx.fold(self.asRawTensor(), output_size, kernel, stride, padding);
+            errdefer value.deinit();
+            return finishOp(normalizeTags(out_tags), ctx, value, self.requiresGrad(), FoldBackward, .{ ctx.allocator, self.grad_state, kernel, stride, padding });
         }
 
         /// PReLU with a learnable per-channel slope (`alpha` rank-1 `[C]`, the
@@ -1733,6 +1818,81 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             return finishOp(tags, ctx, value, self.requiresGrad(), CumsumBackward(tags, scan_axis), .{ ctx.allocator, self.grad_state });
         }
 
+        /// First-order linear recurrence along `time_tag` — the
+        /// associative-scan primitive of the SSM / linear-attention family:
+        /// `h_t = a_t ⊙ h_{t-1} + b_t` where `self` supplies `b` (and the
+        /// result shape), `decay` supplies `a`, and each lane (every fixed
+        /// choice of the non-time axes) scans independently. `decay`
+        /// broadcasts BY TAG like the pointwise ops: its tags must be a
+        /// subset of `self`'s, missing or size-1 axes broadcast (a decay
+        /// without the time tag is a static per-lane decay; a `[time]`-only
+        /// decay is a shared schedule; state-shaped tags give
+        /// Mamba/GDN-style diagonal or outer-product decay states). The
+        /// broadcast is a zero-stride view read in place — never
+        /// materialized. `options` is `.{}` or
+        /// `.{ .initial = &h0 }` where `h0` carries `self`'s tags minus
+        /// `time_tag` (exact shape, `ShapeMismatch` otherwise) and supplies
+        /// `h_{-1}` per lane — the streaming-decode seam: pass the previous
+        /// chunk's last time step to continue a sequence.
+        ///
+        /// Determinism (the `cumsum` contract): one serial pass per lane in
+        /// time order, each step evaluated multiply-then-add — bitwise
+        /// deterministic for any thread count. With `-Dvector-scan`,
+        /// non-last time axes vectorize across independent lanes bitwise
+        /// IDENTICALLY; the last axis always stays serial per lane (an
+        /// in-register form would reassociate the recurrence).
+        ///
+        /// Differentiable in `self`, `decay`, and `initial`: the VJP is one
+        /// reverse scan (`gh_t = a_{t+1}·gh_{t+1} + gy_t`), with the decay
+        /// gradient `gh_t·h_{t-1}` reduced back over the broadcast axes and
+        /// `initial` receiving `a_0·gh_0`.
+        pub fn linearRecurrence(self: *const Self, ctx: *ExecContext, comptime time_tag: Tag, decay: anytype, options: anytype) !Self {
+            const Options = @TypeOf(options);
+            comptime {
+                if (@typeInfo(Options) != .@"struct") @compileError("linearRecurrence: options must be a struct literal, e.g. .{} or .{ .initial = &h0 }");
+                for (@typeInfo(Options).@"struct".fields) |field| {
+                    if (!std.mem.eql(u8, field.name, "initial"))
+                        @compileError("linearRecurrence: unknown option ." ++ field.name);
+                }
+            }
+            const Decay = TensorObject(@TypeOf(decay));
+            comptime {
+                for (Decay.axis_tags) |t| {
+                    if (tagIndex(tags, t) == null)
+                        @compileError("linearRecurrence: decay tags must be a subset of the input tags");
+                }
+            }
+            const time_axis = comptime axis(time_tag);
+            const decay_ptr = tensorObjectPtrFrom(@TypeOf(decay), &decay);
+
+            var tagged_shape: [tag_count]usize = undefined;
+            inline for (tags, 0..) |t, i| tagged_shape[i] = self.dim(t);
+            var a_view = try tag_ops.broadcastTensorTo(Decay.axis_tags, decay_ptr.asRawTensor(), tags, tagged_shape);
+            defer a_view.deinit();
+
+            var any_grad = self.requiresGrad() or decay_ptr.requiresGrad();
+            var initial_raw: ?*const RawTensor = null;
+            var initial_grad: ?*GradState = null;
+            if (comptime @hasField(Options, "initial")) {
+                const init_ptr = tensorObjectPtrFrom(@TypeOf(options.initial), &options.initial);
+                const InitT = TensorObject(@TypeOf(options.initial));
+                comptime {
+                    if (!tagsEqual(InitT.axis_tags, removeTag(tags, time_tag)))
+                        @compileError("linearRecurrence: initial must carry the input tags minus the time tag");
+                }
+                inline for (comptime removeTag(tags, time_tag)) |t| {
+                    if (init_ptr.dim(t) != self.dim(t)) return TensorError.ShapeMismatch;
+                }
+                initial_raw = init_ptr.asRawTensor();
+                initial_grad = init_ptr.grad_state;
+                any_grad = any_grad or init_ptr.requiresGrad();
+            }
+
+            var value = try ctx.linearRecurrenceAxisRank(tag_rank, self.asRawTensor(), &a_view, time_axis, initial_raw);
+            errdefer value.deinit();
+            return finishOp(tags, ctx, value, any_grad, LinearRecurrenceBackward(tags, Decay.axis_tags, time_axis), .{ ctx.allocator, self.grad_state, decay_ptr.grad_state, initial_grad, &a_view, &value, initial_raw, decay_ptr.asRawTensor() });
+        }
+
         /// Product along `tag` (torch.prod over a dim), the tag removed.
         /// Serial per row (the `cumsum` determinism contract).
         /// Differentiable with torch's zero-handling: zero-free rows get
@@ -2343,6 +2503,73 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             return filled.reshape(ctx, out_tags_spec, .{ n, n });
         }
 
+        /// Keep the band `i - j <= lower and j - i <= upper` of the
+        /// (`row_tag`, `col_tag`) plane and zero everything outside
+        /// (tf.linalg.band_part with signed, nullable bounds; `tril`/`triu`
+        /// are the triangular special cases). A null bound is unbounded on
+        /// that side. Works at any rank carrying both tags — remaining
+        /// axes pass through. Implemented as a constant 0/1 band-plane
+        /// multiply (the `bandMask` keep-set cast to f32), so the VJP is
+        /// the exact same-band mask on the upstream gradient.
+        /// Differentiable in `self`.
+        pub fn bandPart(self: *const Self, ctx: *ExecContext, comptime row_tag: Tag, comptime col_tag: Tag, lower: ?i64, upper: ?i64) !Self {
+            comptime if (row_tag == col_tag) @compileError("bandPart requires two distinct tags");
+            const MaskT = Tensor(.{ .dtype = .bool, .tags = .{ row_tag, col_tag } });
+            var keep = try MaskT.bandMask(ctx, .{ self.dim(row_tag), self.dim(col_tag) }, lower, upper);
+            defer keep.deinit();
+            var plane = try keep.to(ctx, .f32);
+            defer plane.deinit();
+            return self.mul(ctx, &plane);
+        }
+
+        /// Lower-triangular part over the (`row_tag`, `col_tag`) plane
+        /// (torch.tril with a diagonal offset, batched over any remaining
+        /// tags): elements with `col - row > offset` become 0.
+        /// `bandPart(null, offset)`; differentiable in `self` with the
+        /// exact triangle-mask VJP.
+        pub fn tril(self: *const Self, ctx: *ExecContext, comptime row_tag: Tag, comptime col_tag: Tag, offset: i64) !Self {
+            return self.bandPart(ctx, row_tag, col_tag, null, offset);
+        }
+
+        /// Upper-triangular part over the (`row_tag`, `col_tag`) plane
+        /// (torch.triu with a diagonal offset): elements with
+        /// `col - row < offset` become 0. `bandPart(-offset, null)`; see
+        /// `tril`.
+        pub fn triu(self: *const Self, ctx: *ExecContext, comptime row_tag: Tag, comptime col_tag: Tag, offset: i64) !Self {
+            return self.bandPart(ctx, row_tag, col_tag, -offset, null);
+        }
+
+        /// Embed the `vec_tag` axis as the main diagonal of a square
+        /// matrix plane (torch.diag_embed generalized to named axes):
+        /// `out[…, i, j] = self[…, i] · [i == j]`, with `vec_tag` renamed
+        /// to `out_tags[0]` (the row axis) in place and `out_tags[1]` (the
+        /// column axis) appended LAST. Works at any rank carrying
+        /// `vec_tag`; the remaining axes pass through. Composed rename →
+        /// broadcast-multiply against an `eye` constant, so the gradient
+        /// is the exact diagonal extraction; scope-required under
+        /// gradients (see `nllLoss`).
+        pub fn diagEmbed(
+            self: *const Self,
+            ctx: *ExecContext,
+            comptime vec_tag: Tag,
+            comptime out_tags_spec: anytype,
+        ) !Tensor(pointwiseResultTags(replaceTag(tags, vec_tag, normalizeTags(out_tags_spec)[0]), normalizeTags(out_tags_spec))) {
+            const out_tags = comptime normalizeTags(out_tags_spec);
+            comptime {
+                if (out_tags.len != 2) @compileError("diagEmbed names exactly two result axes: pass .{ row_tag, col_tag }");
+                if (out_tags[0] == out_tags[1]) @compileError("diagEmbed requires two distinct result tags");
+                const rest = removeTag(tags, vec_tag);
+                if (tagIndex(rest, out_tags[0]) != null or tagIndex(rest, out_tags[1]) != null)
+                    @compileError("diagEmbed result tags must not collide with the remaining input tags");
+            }
+            try requireScopeForComposedGrad(ctx, self.requiresGrad());
+            var renamed = try self.withTags(ctx, replaceTag(tags, vec_tag, out_tags[0]));
+            defer renamed.deinit();
+            var identity = try Tensor(.{ out_tags[0], out_tags[1] }).eye(ctx, self.dim(vec_tag));
+            defer identity.deinit();
+            return renamed.mul(ctx, &identity);
+        }
+
         /// Constant padding along `tag` (torch F.pad, mode='constant', one
         /// dim): the axis grows by `before + after`, the body sits at offset
         /// `before`, pad positions hold `fill`. Differentiable: the gradient
@@ -2679,6 +2906,117 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             var value = try ctx.argmaxAxisRank(tag_rank, self.asRawTensor(), axis(tag));
             errdefer value.deinit();
             return Tensor(.{ .dtype = .i64, .tags = result_tags }).fromTensor(ctx, value);
+        }
+
+        /// Categorical sampling from UNNORMALIZED non-negative weight rows
+        /// (torch.multinomial): `num_samples` draws per row along
+        /// `class_tag` — which must be the last axis, like `routerTopK` —
+        /// replaced by `out_tag` in the result. Rank 1 or 2 (the torch
+        /// surface). Draw `(row, s)` reads the deterministic counter-based
+        /// stream at `(seed, row·num_samples + s)` (§6.8), so results are
+        /// reproducible and independent of any batching; pass a fresh seed
+        /// per call. Rows must hold finite weights `>= 0` with a positive
+        /// sum (`InvalidShape` otherwise; NaN/inf rejected). Without
+        /// replacement each draw removes the chosen class's mass (torch
+        /// semantics); `num_samples` beyond the class count — or beyond the
+        /// row's nonzero classes — is `InvalidShape`. The result is a
+        /// constant i64 tensor: no gradient, and CALLER-owned even under an
+        /// exec scope (the typed-constant ownership rule).
+        pub fn multinomial(
+            self: *const Self,
+            ctx: *ExecContext,
+            comptime class_tag: Tag,
+            comptime out_tag: Tag,
+            num_samples: usize,
+            seed: u64,
+            replacement: bool,
+        ) !Tensor(.{ .dtype = .i64, .tags = replaceTag(tags, class_tag, out_tag) }) {
+            comptime {
+                if (tag_rank != 1 and tag_rank != 2) @compileError("multinomial takes rank-1 [class] or rank-2 [row, class] weights (the torch surface)");
+                if (axis(class_tag) != tag_rank - 1) @compileError("multinomial requires the class tag on the last axis");
+            }
+            const result_tags = replaceTag(tags, class_tag, out_tag);
+            if (num_samples == 0) return TensorError.InvalidShape;
+
+            const raw = self.asRawTensor();
+            const classes = raw.shape.at(tag_rank - 1);
+            const rows = if (tag_rank == 2) raw.shape.at(0) else 1;
+            if (!replacement and num_samples > classes) return TensorError.InvalidShape;
+
+            var prepared: ?RawTensor = null;
+            defer if (prepared) |*p| p.deinit();
+            const weights_flat = if (raw.isContiguous()) try raw.dataConstChecked() else blk: {
+                prepared = try ctx.materialize(raw);
+                break :blk try prepared.?.dataConstChecked();
+            };
+
+            const scratch = try ctx.allocator.alloc(f64, classes);
+            defer ctx.allocator.free(scratch);
+
+            const out_shape: [tag_rank]usize = if (tag_rank == 2) .{ rows, num_samples } else .{num_samples};
+            var out = try Tensor(.{ .dtype = .i64, .tags = result_tags }).empty(ctx, out_shape);
+            errdefer out.deinit();
+            const out_data = try out.data();
+
+            for (0..rows) |row| {
+                const weights = weights_flat[row * classes ..][0..classes];
+                var total: f64 = 0;
+                for (weights, 0..) |w, c| {
+                    if (!(w >= 0) or !std.math.isFinite(w)) return TensorError.InvalidShape;
+                    total += w;
+                    scratch[c] = if (replacement) total else w;
+                }
+                if (!(total > 0) or !std.math.isFinite(total)) return TensorError.InvalidShape;
+
+                for (0..num_samples) |s| {
+                    // Counter-based [0, 1) draw for (row, s): the uniformFill mapping.
+                    const draw = @as(f64, @floatFromInt(rng.at(seed, row * num_samples + s) >> 11)) * 0x1.0p-53;
+                    var pick: usize = undefined;
+                    if (replacement) {
+                        // First index with cumsum > u (zero-weight classes have
+                        // zero-width intervals and are never hit).
+                        const u = draw * total;
+                        var lo: usize = 0;
+                        var hi: usize = classes;
+                        while (lo < hi) {
+                            const mid = lo + (hi - lo) / 2;
+                            if (scratch[mid] > u) hi = mid else lo = mid + 1;
+                        }
+                        pick = @min(lo, classes - 1);
+                        // Rounding can land u on the top boundary; step down to mass.
+                        while (pick > 0 and weights[pick] == 0) pick -= 1;
+                    } else {
+                        if (!(total > 0)) return TensorError.InvalidShape; // fewer nonzero classes than draws
+                        const u = draw * total;
+                        var acc: f64 = 0;
+                        var found: ?usize = null;
+                        for (scratch[0..classes], 0..) |w, c| {
+                            if (w <= 0) continue;
+                            acc += w;
+                            if (acc > u) {
+                                found = c;
+                                break;
+                            }
+                        }
+                        if (found == null) {
+                            // Rounding hit the top boundary: last remaining class.
+                            var c = classes;
+                            while (c > 0) {
+                                c -= 1;
+                                if (scratch[c] > 0) {
+                                    found = c;
+                                    break;
+                                }
+                            }
+                        }
+                        pick = found orelse return TensorError.InvalidShape;
+                        total -= scratch[pick];
+                        scratch[pick] = 0;
+                    }
+                    out_data[row * num_samples + s] = @intCast(pick);
+                }
+            }
+            return out;
         }
 
         /// Max values over `tag` (the tag is removed like sum/mean; argmax
@@ -4350,6 +4688,68 @@ fn TypedConstantBase(comptime SelfT: type, comptime tags: anytype, comptime tens
             return try @This().constant(ctx, value);
         }
 
+        /// No-grad tensor of uniform integer draws in `[low, high)`
+        /// (torch.randint) from the deterministic counter-based stream at
+        /// `seed` (§6.8): element i is a pure function of `(seed, i)` via
+        /// the widening multiply-shift map (`fucina.rng.randintFill`).
+        /// i64-only — the repo-wide index dtype; cast with `to` for
+        /// narrower integers. `low >= high` is `InvalidShape`.
+        pub fn randint(ctx: *ExecContext, raw_shape: [tensor_rank]usize, seed: u64, low: i64, high: i64) !SelfT {
+            comptime if (tensor_dtype != .i64) @compileError("randint is i64-only (the repo-wide index dtype); cast the result with to()");
+            if (low >= high) return TensorError.InvalidShape;
+            var value = try ctx.emptyRankTyped(tensor_dtype, tensor_rank, raw_shape);
+            errdefer value.deinit();
+            rng.randintFill(seed, value.data(), low, high);
+            return try @This().constant(ctx, value);
+        }
+
+        /// Rank-1 no-grad random permutation of `{0, …, n-1}`
+        /// (torch.randperm) as i64: Fisher–Yates driven by the
+        /// counter-based stream at `seed` (`fucina.rng.randpermFill`;
+        /// same seed, same permutation). `n == 0` is `InvalidShape`
+        /// (zero-size tensors are not representable).
+        pub fn randperm(ctx: *ExecContext, n: usize, seed: u64) !SelfT {
+            comptime {
+                if (tensor_dtype != .i64) @compileError("randperm is i64-only (the repo-wide index dtype)");
+                if (tags.len != 1) @compileError("randperm builds a rank-1 tensor; use a single-tag Tensor type");
+            }
+            if (n == 0) return TensorError.InvalidShape;
+            var value = try ctx.emptyRankTyped(tensor_dtype, tensor_rank, .{n});
+            errdefer value.deinit();
+            rng.randpermFill(seed, value.data());
+            return try @This().constant(ctx, value);
+        }
+
+        /// Rank-2 no-grad band mask (the attention-mask constructor), on
+        /// the `.bool` branch only: element `(i, j)` is true iff
+        /// `i - j <= lower` and `j - i <= upper`; a null bound is
+        /// unbounded on that side. Bounds are signed. Causal keep-set =
+        /// `(null, 0)`; sliding window of width W = `(W - 1, 0)`; the
+        /// tril(k) keep-set = `(null, k)`; triu(k) = `(-k, null)`. Feed
+        /// it to `where`/`maskedFill` (broadcast with `broadcastTo` for
+        /// batched scores), or cast with `to(.f32)` for the mask-multiply
+        /// idiom. Contradictory bounds yield an all-false mask, not an
+        /// error.
+        pub fn bandMask(ctx: *ExecContext, raw_shape: [tensor_rank]usize, lower: ?i64, upper: ?i64) !SelfT {
+            comptime {
+                if (tensor_dtype != .bool) @compileError("bandMask is a .bool mask constructor; use a .bool Tensor type");
+                if (tags.len != 2) @compileError("bandMask builds a rank-2 [row, col] mask; use a two-tag Tensor type");
+            }
+            var value = try ctx.emptyRankTyped(tensor_dtype, tensor_rank, raw_shape);
+            errdefer value.deinit();
+            const out = value.data();
+            const cols = raw_shape[1];
+            for (0..raw_shape[0]) |i| {
+                for (0..cols) |j| {
+                    const d = @as(i64, @intCast(j)) - @as(i64, @intCast(i)); // j - i
+                    const in_lower = if (lower) |l| -d <= l else true;
+                    const in_upper = if (upper) |u| d <= u else true;
+                    out[i * cols + j] = in_lower and in_upper;
+                }
+            }
+            return try @This().constant(ctx, value);
+        }
+
         /// `empty` with `self`'s shape (same dtype and tags via `SelfT`).
         pub fn emptyLike(self: *const SelfT, ctx: *ExecContext) !SelfT {
             return SelfT.empty(ctx, self.shape());
@@ -4420,6 +4820,9 @@ fn TypedScalarConstantTensor(comptime tags_spec: anytype, comptime tensor_dtype:
         pub const emptyLike = base.emptyLike;
         pub const zerosLike = base.zerosLike;
         pub const onesLike = base.onesLike;
+        pub const randint = base.randint;
+        pub const randperm = base.randperm;
+        pub const bandMask = base.bandMask;
         pub const item = base.item;
         pub const data = base.data;
         pub const dataConst = base.dataConst;

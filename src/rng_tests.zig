@@ -169,3 +169,71 @@ test "normalFill applies mean and std to the gaussianFill stream" {
     normalFill(3, &plain, 0.0, 1.0);
     try std.testing.expectEqualSlices(f32, &z, &plain);
 }
+
+test "gumbelFill is finite, deterministic, and matches the documented mapping" {
+    var a: [4096]f32 = undefined;
+    var b: [4096]f32 = undefined;
+    rng.gumbelFill(123, &a);
+    rng.gumbelFill(123, &b);
+    try std.testing.expectEqualSlices(f32, &a, &b);
+    // Every draw is finite (the open-interval mapping keeps both logs finite).
+    var mean: f64 = 0;
+    for (a) |v| {
+        try std.testing.expect(std.math.isFinite(v));
+        mean += v;
+    }
+    mean /= a.len;
+    // Standard Gumbel mean is the Euler–Mascheroni constant ~0.5772.
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5772), mean, 0.08);
+    // Element i is the documented pure function of (seed, i).
+    var state: u64 = 123;
+    for (a) |v| {
+        const u = (@as(f64, @floatFromInt(rng.splitmix64(&state) >> 11)) + 0.5) * 0x1.0p-53;
+        try std.testing.expectEqual(@as(f32, @floatCast(-@log(-@log(u)))), v);
+    }
+}
+
+test "randintFill covers [low, high) uniformly and handles extreme spans" {
+    var a: [4096]i64 = undefined;
+    var b: [4096]i64 = undefined;
+    rng.randintFill(7, &a, -3, 5);
+    rng.randintFill(7, &b, -3, 5);
+    try std.testing.expectEqualSlices(i64, &a, &b);
+    var counts = [_]usize{0} ** 8;
+    for (a) |v| {
+        try std.testing.expect(v >= -3 and v < 5);
+        counts[@intCast(v + 3)] += 1;
+    }
+    // Every value of a small range appears (4096 draws over 8 buckets).
+    for (counts) |c| try std.testing.expect(c > 0);
+
+    // Full-i64 span: the two's-complement span arithmetic must not trap.
+    var wide: [64]i64 = undefined;
+    rng.randintFill(11, &wide, std.math.minInt(i64), std.math.maxInt(i64));
+    // Single-value check at the domain edges.
+    var edge: [64]i64 = undefined;
+    rng.randintFill(11, &edge, std.math.maxInt(i64) - 1, std.math.maxInt(i64));
+    for (edge) |v| try std.testing.expectEqual(std.math.maxInt(i64) - 1, v);
+}
+
+test "randpermFill yields a deterministic permutation" {
+    var a: [257]i64 = undefined;
+    var b: [257]i64 = undefined;
+    rng.randpermFill(31, &a);
+    rng.randpermFill(31, &b);
+    try std.testing.expectEqualSlices(i64, &a, &b);
+    var seen = [_]bool{false} ** 257;
+    for (a) |v| {
+        const i: usize = @intCast(v);
+        try std.testing.expect(!seen[i]);
+        seen[i] = true;
+    }
+    // A different seed permutes differently (overwhelmingly likely).
+    var c: [257]i64 = undefined;
+    rng.randpermFill(32, &c);
+    try std.testing.expect(!std.mem.eql(i64, &a, &c));
+    // Degenerate sizes: identity.
+    var one = [_]i64{99};
+    rng.randpermFill(5, one[0..]);
+    try std.testing.expectEqual(@as(i64, 0), one[0]);
+}

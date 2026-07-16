@@ -10898,3 +10898,614 @@ test "bool masks route where and maskedFill gradients" {
     defer ga2.deinit();
     try expectCloseSlices(&.{ 1, 0, 1, 0 }, try ga2.dataConst(), 0);
 }
+
+test "public Tensor gumbel and eye constructors" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+    const rng_mod = @import("../rng.zig");
+
+    const M = Tensor(.{ .row, .col });
+    // gumbel reproduces the documented rng.gumbelFill mapping; no-grad const.
+    var g = try M.gumbel(&ctx, .{ 4, 8 }, 42);
+    defer g.deinit();
+    var expected: [32]f32 = undefined;
+    rng_mod.gumbelFill(42, &expected);
+    try std.testing.expectEqualSlices(f32, &expected, try g.dataConst());
+    try std.testing.expect(!g.requiresGrad());
+    for (try g.dataConst()) |v| try std.testing.expect(std.math.isFinite(v));
+    var g2 = try M.gumbel(&ctx, .{ 4, 8 }, 42);
+    defer g2.deinit();
+    try std.testing.expectEqualSlices(f32, try g.dataConst(), try g2.dataConst());
+
+    // eye: ones on the main diagonal, zeros elsewhere.
+    var identity = try M.eye(&ctx, 3);
+    defer identity.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 1, 0, 0, 0, 1, 0, 0, 0, 1 }, try identity.dataConst());
+    try std.testing.expect(!identity.requiresGrad());
+    try std.testing.expectError(error.InvalidShape, M.eye(&ctx, 0));
+}
+
+test "public Tensor randint randperm ride the seed stream" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+    const rng_mod = @import("../rng.zig");
+
+    const I = Tensor(.{ .dtype = .i64, .tags = .{ .row, .col } });
+    var r = try I.randint(&ctx, .{ 4, 8 }, 42, -3, 5);
+    defer r.deinit();
+    var expected: [32]i64 = undefined;
+    rng_mod.randintFill(42, &expected, -3, 5);
+    try std.testing.expectEqualSlices(i64, &expected, try r.dataConst());
+    for (try r.dataConst()) |v| try std.testing.expect(v >= -3 and v < 5);
+    try std.testing.expect(!r.requiresGrad());
+    try std.testing.expectError(error.InvalidShape, I.randint(&ctx, .{ 4, 8 }, 1, 5, 5));
+
+    // randperm: a permutation of 0..n-1, deterministic per seed.
+    const P = Tensor(.{ .dtype = .i64, .tags = .{.idx} });
+    var p = try P.randperm(&ctx, 17, 7);
+    defer p.deinit();
+    var seen = [_]bool{false} ** 17;
+    for (try p.dataConst()) |v| {
+        const i: usize = @intCast(v);
+        try std.testing.expect(i < 17);
+        try std.testing.expect(!seen[i]);
+        seen[i] = true;
+    }
+    var p2 = try P.randperm(&ctx, 17, 7);
+    defer p2.deinit();
+    try std.testing.expectEqualSlices(i64, try p.dataConst(), try p2.dataConst());
+    var p3 = try P.randperm(&ctx, 17, 8);
+    defer p3.deinit();
+    try std.testing.expect(!std.mem.eql(i64, try p.dataConst(), try p3.dataConst()));
+    try std.testing.expectError(error.InvalidShape, P.randperm(&ctx, 0, 7));
+}
+
+test "public Tensor multinomial samples the seed stream with and without replacement" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    const M = Tensor(.{ .row, .class });
+    // Zero-weight classes are never drawn: all mass on class 1 per row.
+    var certain = try M.fromSlice(&ctx, .{ 2, 3 }, &.{ 0, 5, 0, 0, 2, 0 });
+    defer certain.deinit();
+    var picks = try certain.multinomial(&ctx, .class, .sample, 4, 42, true);
+    defer picks.deinit();
+    try std.testing.expectEqualSlices(i64, &.{ 1, 1, 1, 1, 1, 1, 1, 1 }, try picks.dataConst());
+    try std.testing.expect(!picks.requiresGrad());
+
+    // Deterministic per seed; indices always in range.
+    var mixed = try M.fromSlice(&ctx, .{ 2, 4 }, &.{ 1, 2, 3, 4, 4, 3, 2, 1 });
+    defer mixed.deinit();
+    var a = try mixed.multinomial(&ctx, .class, .sample, 8, 7, true);
+    defer a.deinit();
+    var b = try mixed.multinomial(&ctx, .class, .sample, 8, 7, true);
+    defer b.deinit();
+    try std.testing.expectEqualSlices(i64, try a.dataConst(), try b.dataConst());
+    for (try a.dataConst()) |v| try std.testing.expect(v >= 0 and v < 4);
+
+    // Without replacement: each row's draws are distinct; exhausting the
+    // classes exactly yields a permutation of them.
+    var wo = try mixed.multinomial(&ctx, .class, .sample, 4, 11, false);
+    defer wo.deinit();
+    const wo_data = try wo.dataConst();
+    for (0..2) |row| {
+        var seen = [_]bool{false} ** 4;
+        for (wo_data[row * 4 ..][0..4]) |v| {
+            const i: usize = @intCast(v);
+            try std.testing.expect(!seen[i]);
+            seen[i] = true;
+        }
+    }
+    // num_samples beyond the class count (or the nonzero classes) errors.
+    try std.testing.expectError(error.InvalidShape, mixed.multinomial(&ctx, .class, .sample, 5, 1, false));
+    try std.testing.expectError(error.InvalidShape, certain.multinomial(&ctx, .class, .sample, 2, 1, false));
+    try std.testing.expectError(error.InvalidShape, mixed.multinomial(&ctx, .class, .sample, 0, 1, true));
+
+    // Invalid distributions: negative, NaN, non-positive total.
+    var neg = try M.fromSlice(&ctx, .{ 2, 3 }, &.{ 1, -1, 1, 1, 1, 1 });
+    defer neg.deinit();
+    try std.testing.expectError(error.InvalidShape, neg.multinomial(&ctx, .class, .sample, 1, 1, true));
+    var nan_row = try M.fromSlice(&ctx, .{ 2, 3 }, &.{ 1, 1, 1, std.math.nan(f32), 1, 1 });
+    defer nan_row.deinit();
+    try std.testing.expectError(error.InvalidShape, nan_row.multinomial(&ctx, .class, .sample, 1, 1, true));
+    var zero_row = try M.fromSlice(&ctx, .{ 2, 3 }, &.{ 1, 1, 1, 0, 0, 0 });
+    defer zero_row.deinit();
+    try std.testing.expectError(error.InvalidShape, zero_row.multinomial(&ctx, .class, .sample, 1, 1, true));
+
+    // Rank-1 surface: the class tag is replaced by the sample tag.
+    var v = try Tensor(.{.class}).fromSlice(&ctx, .{3}, &.{ 0, 0, 2 });
+    defer v.deinit();
+    var vp = try v.multinomial(&ctx, .class, .sample, 3, 5, true);
+    defer vp.deinit();
+    try std.testing.expectEqualSlices(i64, &.{ 2, 2, 2 }, try vp.dataConst());
+}
+
+test "public Tensor bandMask builds causal window and triangular keep-sets" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    const B = Tensor(.{ .dtype = .bool, .tags = .{ .q, .k } });
+    // Causal: keep j <= i.
+    var causal = try B.bandMask(&ctx, .{ 3, 3 }, null, 0);
+    defer causal.deinit();
+    try std.testing.expectEqualSlices(bool, &.{ true, false, false, true, true, false, true, true, true }, try causal.dataConst());
+
+    // Sliding window of width 2 (see one step back), causal.
+    var window = try B.bandMask(&ctx, .{ 3, 3 }, 1, 0);
+    defer window.deinit();
+    try std.testing.expectEqualSlices(bool, &.{ true, false, false, true, true, false, false, true, true }, try window.dataConst());
+
+    // triu(1) keep-set on a rectangle: strictly above the diagonal.
+    var upper = try B.bandMask(&ctx, .{ 2, 3 }, -1, null);
+    defer upper.deinit();
+    try std.testing.expectEqualSlices(bool, &.{ false, true, true, false, false, true }, try upper.dataConst());
+
+    // Contradictory bounds: all-false, not an error.
+    var empty_band = try B.bandMask(&ctx, .{ 2, 2 }, -1, -1);
+    defer empty_band.deinit();
+    try std.testing.expectEqualSlices(bool, &.{ false, false, false, false }, try empty_band.dataConst());
+
+    // maskedFill consumes it directly (the attention-mask idiom).
+    var scores = try Tensor(.{ .q, .k }).fromSlice(&ctx, .{ 3, 3 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9 });
+    defer scores.deinit();
+    var not_causal = try causal.logicalNot(&ctx);
+    defer not_causal.deinit();
+    var masked = try scores.maskedFill(&ctx, &not_causal, -1e30);
+    defer masked.deinit();
+    try expectCloseSlices(&.{ 1, -1e30, -1e30, 4, 5, -1e30, 7, 8, 9 }, try masked.dataConst(), 0);
+}
+
+test "public Tensor tril triu bandPart with exact mask gradients" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    const M = Tensor(.{ .row, .col });
+    var x = try M.variableFromSlice(&ctx, .{ 3, 3 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9 });
+    defer x.deinit();
+
+    var lo = try x.tril(&ctx, .row, .col, 0);
+    defer lo.deinit();
+    try expectCloseSlices(&.{ 1, 0, 0, 4, 5, 0, 7, 8, 9 }, try lo.dataConst(), 0);
+    var loss = try lo.sumAll(&ctx);
+    defer loss.deinit();
+    try loss.backward(&ctx);
+    var gx = (try x.grad(&ctx)).?;
+    defer gx.deinit();
+    try expectCloseSlices(&.{ 1, 0, 0, 1, 1, 0, 1, 1, 1 }, try gx.dataConst(), 0);
+
+    // Offsets follow torch: tril(-1) strictly below, triu(1) strictly above.
+    var strict_lo = try x.tril(&ctx, .row, .col, -1);
+    defer strict_lo.deinit();
+    try expectCloseSlices(&.{ 0, 0, 0, 4, 0, 0, 7, 8, 0 }, try strict_lo.dataConst(), 0);
+    var up = try x.triu(&ctx, .row, .col, 1);
+    defer up.deinit();
+    try expectCloseSlices(&.{ 0, 2, 3, 0, 0, 6, 0, 0, 0 }, try up.dataConst(), 0);
+
+    // bandPart keeps a general band; rectangular shape.
+    const R = Tensor(.{ .row, .col });
+    var rect = try R.fromSlice(&ctx, .{ 2, 4 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8 });
+    defer rect.deinit();
+    var band = try rect.bandPart(&ctx, .row, .col, 0, 1);
+    defer band.deinit();
+    try expectCloseSlices(&.{ 1, 2, 0, 0, 0, 6, 7, 0 }, try band.dataConst(), 0);
+
+    // Batched rank-3: remaining axes pass through.
+    const T3 = Tensor(.{ .b, .row, .col });
+    var bx = try T3.fromSlice(&ctx, .{ 2, 2, 2 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8 });
+    defer bx.deinit();
+    var btl = try bx.tril(&ctx, .row, .col, 0);
+    defer btl.deinit();
+    try expectCloseSlices(&.{ 1, 0, 3, 4, 5, 0, 7, 8 }, try btl.dataConst(), 0);
+}
+
+test "public Tensor diagEmbed embeds batched diagonals with exact extraction gradient" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    const V = Tensor(.{ .b, .d });
+    var v = try V.variableFromSlice(&ctx, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    defer v.deinit();
+    try std.testing.expectError(error.ActiveExecScopeRequired, v.diagEmbed(&ctx, .d, .{ .row, .col }));
+    {
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        var m = try v.diagEmbed(&ctx, .d, .{ .row, .col }); // Tensor(.{ .b, .row, .col })
+        defer m.deinit();
+        var m_mat = try m.materialize(&ctx);
+        defer m_mat.deinit();
+        try expectCloseSlices(&.{
+            1, 0, 0, 0, 2, 0, 0, 0, 3,
+            4, 0, 0, 0, 5, 0, 0, 0, 6,
+        }, try m_mat.dataConst(), 0);
+        // Weight the plane so the gradient shows the exact diagonal extraction.
+        var w = try Tensor(.{ .row, .col }).fromSlice(&ctx, .{ 3, 3 }, &.{ 2, 9, 9, 9, 3, 9, 9, 9, 4 });
+        defer w.deinit();
+        var weighted = try m.mul(&ctx, &w);
+        defer weighted.deinit();
+        var loss = try weighted.sumAll(&ctx);
+        defer loss.deinit();
+        try loss.backward(&ctx);
+    }
+    var gv = (try v.grad(&ctx)).?;
+    defer gv.deinit();
+    try expectCloseSlices(&.{ 2, 3, 4, 2, 3, 4 }, try gv.dataConst(), 0);
+
+    // No-grad rank-1 use works unscoped and matches diag.
+    var plain = try Tensor(.{.d}).fromSlice(&ctx, .{2}, &.{ 7, 8 });
+    defer plain.deinit();
+    var pm = try plain.diagEmbed(&ctx, .d, .{ .row, .col });
+    defer pm.deinit();
+    var pm_mat = try pm.materialize(&ctx);
+    defer pm_mat.deinit();
+    try expectCloseSlices(&.{ 7, 0, 0, 8 }, try pm_mat.dataConst(), 0);
+}
+
+test "public Tensor unfold extracts im2col patches with the fold-adjoint gradient" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    const Img = Tensor(.{ .h, .w, .c });
+    var x = try Img.variableFromSlice(&ctx, .{ 3, 3, 1 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9 });
+    defer x.deinit();
+
+    // 2x2 windows, stride 1, no pad: 4 patches, each (ky, kx, c)-ordered.
+    var col = try x.unfold(&ctx, .{ 2, 2 }, .{ 1, 1 }, .{ 0, 0 }, .{ .patch, .elem });
+    defer col.deinit();
+    try std.testing.expectEqual(@as(usize, 4), col.dim(.patch));
+    try std.testing.expectEqual(@as(usize, 4), col.dim(.elem));
+    try expectCloseSlices(&.{
+        1, 2, 4, 5,
+        2, 3, 5, 6,
+        4, 5, 7, 8,
+        5, 6, 8, 9,
+    }, try col.dataConst(), 0);
+
+    // VJP = fold: each position receives its window count.
+    var loss = try col.sumAll(&ctx);
+    defer loss.deinit();
+    try loss.backward(&ctx);
+    var gx = (try x.grad(&ctx)).?;
+    defer gx.deinit();
+    try expectCloseSlices(&.{ 1, 2, 1, 2, 4, 2, 1, 2, 1 }, try gx.dataConst(), 0);
+
+    // Padding: out-of-range taps read 0 (and receive no gradient).
+    var small = try Img.fromSlice(&ctx, .{ 2, 2, 1 }, &.{ 1, 2, 3, 4 });
+    defer small.deinit();
+    var padded = try small.unfold(&ctx, .{ 2, 2 }, .{ 2, 2 }, .{ 1, 1 }, .{ .patch, .elem });
+    defer padded.deinit();
+    try expectCloseSlices(&.{
+        0, 0, 0, 1,
+        0, 0, 2, 0,
+        0, 3, 0, 0,
+        4, 0, 0, 0,
+    }, try padded.dataConst(), 0);
+
+    // Channel-fastest element order (the conv2d GEMM col layout).
+    var two_c = try Img.fromSlice(&ctx, .{ 1, 2, 2 }, &.{ 1, 2, 3, 4 });
+    defer two_c.deinit();
+    var c_col = try two_c.unfold(&ctx, .{ 1, 2 }, .{ 1, 1 }, .{ 0, 0 }, .{ .patch, .elem });
+    defer c_col.deinit();
+    try expectCloseSlices(&.{ 1, 2, 3, 4 }, try c_col.dataConst(), 0);
+
+    // stride = kernel, pad 0 is non-overlapping patchify (the ViT stem).
+    var big = try Img.fromSlice(&ctx, .{ 4, 4, 1 }, &.{
+        1,  2,  3,  4,
+        5,  6,  7,  8,
+        9,  10, 11, 12,
+        13, 14, 15, 16,
+    });
+    defer big.deinit();
+    var patches = try big.unfold(&ctx, .{ 2, 2 }, .{ 2, 2 }, .{ 0, 0 }, .{ .patch, .elem });
+    defer patches.deinit();
+    try expectCloseSlices(&.{
+        1,  2,  5,  6,
+        3,  4,  7,  8,
+        9,  10, 13, 14,
+        11, 12, 15, 16,
+    }, try patches.dataConst(), 0);
+}
+
+test "public Tensor fold accumulates overlaps with the unfold-adjoint gradient" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    const Img = Tensor(.{ .h, .w, .c });
+    const Col = Tensor(.{ .patch, .elem });
+
+    // fold(unfold(x)) multiplies each position by its window count.
+    var x = try Img.fromSlice(&ctx, .{ 3, 3, 1 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9 });
+    defer x.deinit();
+    var col = try x.unfold(&ctx, .{ 2, 2 }, .{ 1, 1 }, .{ 0, 0 }, .{ .patch, .elem });
+    defer col.deinit();
+    var back = try col.fold(&ctx, .{ 3, 3 }, .{ 2, 2 }, .{ 1, 1 }, .{ 0, 0 }, .{ .h, .w, .c });
+    defer back.deinit();
+    try expectCloseSlices(&.{ 1, 4, 3, 8, 20, 12, 7, 16, 9 }, try back.dataConst(), 0);
+
+    // VJP = unfold of the upstream image gradient.
+    var vcol = try Col.variableFromSlice(&ctx, .{ 4, 4 }, &([_]f32{1} ** 16));
+    defer vcol.deinit();
+    var img = try vcol.fold(&ctx, .{ 3, 3 }, .{ 2, 2 }, .{ 1, 1 }, .{ 0, 0 }, .{ .h, .w, .c });
+    defer img.deinit();
+    var weights = try Img.fromSlice(&ctx, .{ 3, 3, 1 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9 });
+    defer weights.deinit();
+    var weighted = try img.mul(&ctx, &weights);
+    defer weighted.deinit();
+    var loss = try weighted.sumAll(&ctx);
+    defer loss.deinit();
+    try loss.backward(&ctx);
+    var gcol = (try vcol.grad(&ctx)).?;
+    defer gcol.deinit();
+    try expectCloseSlices(&.{
+        1, 2, 4, 5,
+        2, 3, 5, 6,
+        4, 5, 7, 8,
+        5, 6, 8, 9,
+    }, try gcol.dataConst(), 0);
+
+    // Geometry mismatches are recoverable errors.
+    var bad = try Col.fromSlice(&ctx, .{ 3, 4 }, &([_]f32{0} ** 12));
+    defer bad.deinit();
+    try std.testing.expectError(error.ShapeMismatch, bad.fold(&ctx, .{ 3, 3 }, .{ 2, 2 }, .{ 1, 1 }, .{ 0, 0 }, .{ .h, .w, .c }));
+    var bad_width = try Col.fromSlice(&ctx, .{ 4, 3 }, &([_]f32{0} ** 12));
+    defer bad_width.deinit();
+    try std.testing.expectError(error.ShapeMismatch, bad_width.fold(&ctx, .{ 3, 3 }, .{ 2, 2 }, .{ 1, 1 }, .{ 0, 0 }, .{ .h, .w, .c }));
+}
+
+test "public Tensor linearRecurrence scans lanes with tag-broadcast decay" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    // Scalar decay over a rank-1 time axis: h_t = 0.5·h_{t-1} + 1.
+    const V = Tensor(.{.t});
+    var ones_b = try V.fromSlice(&ctx, .{4}, &.{ 1, 1, 1, 1 });
+    defer ones_b.deinit();
+    var half = try Tensor(.{}).fromSlice(&ctx, .{1}, &.{0.5});
+    defer half.deinit();
+    var geo = try ones_b.linearRecurrence(&ctx, .t, &half, .{});
+    defer geo.deinit();
+    try expectCloseSlices(&.{ 1, 1.5, 1.75, 1.875 }, try geo.dataConst(), 0);
+
+    // decay == 1 is cumsum, bitwise (same serial add order).
+    var vals = try V.fromSlice(&ctx, .{5}, &.{ 0.1, 2.3, -1.7, 0.9, 4.2 });
+    defer vals.deinit();
+    var one = try Tensor(.{}).fromSlice(&ctx, .{1}, &.{1});
+    defer one.deinit();
+    var lr = try vals.linearRecurrence(&ctx, .t, &one, .{});
+    defer lr.deinit();
+    var cs = try vals.cumsum(&ctx, .t);
+    defer cs.deinit();
+    try std.testing.expectEqualSlices(f32, try cs.dataConst(), try lr.dataConst());
+
+    // Rank-3 [t, h, d] with a [t, h] decay (broadcast over d): manual
+    // serial reference per lane.
+    const T = 4;
+    const H = 2;
+    const D = 3;
+    var b_vals: [T * H * D]f32 = undefined;
+    for (&b_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 7)) * 0.25 - 0.5;
+    var a_vals: [T * H]f32 = undefined;
+    for (&a_vals, 0..) |*v, i| v.* = 0.1 + @as(f32, @floatFromInt(i % 5)) * 0.2;
+    var b3 = try Tensor(.{ .t, .h, .d }).fromSlice(&ctx, .{ T, H, D }, &b_vals);
+    defer b3.deinit();
+    var a2 = try Tensor(.{ .t, .h }).fromSlice(&ctx, .{ T, H }, &a_vals);
+    defer a2.deinit();
+    var h3 = try b3.linearRecurrence(&ctx, .t, &a2, .{});
+    defer h3.deinit();
+    var expected: [T * H * D]f32 = undefined;
+    for (0..H) |hi| {
+        for (0..D) |di| {
+            var acc: f32 = 0;
+            for (0..T) |t| {
+                const off = (t * H + hi) * D + di;
+                acc = a_vals[t * H + hi] * acc + b_vals[off];
+                expected[off] = acc;
+            }
+        }
+    }
+    try std.testing.expectEqualSlices(f32, &expected, try h3.dataConst());
+
+    // Static per-lane decay (no time tag): [d] over [t, d].
+    var b2 = try Tensor(.{ .t, .d }).fromSlice(&ctx, .{ 2, 2 }, &.{ 1, 1, 1, 1 });
+    defer b2.deinit();
+    var ad = try Tensor(.{.d}).fromSlice(&ctx, .{2}, &.{ 0, 0.5 });
+    defer ad.deinit();
+    var hd = try b2.linearRecurrence(&ctx, .t, &ad, .{});
+    defer hd.deinit();
+    try expectCloseSlices(&.{ 1, 1, 1, 1.5 }, try hd.dataConst(), 0);
+
+    // Chunked streaming: scanning the tail with `initial` = the head's
+    // last step reproduces the full scan bitwise.
+    var head = try b3.narrow(&ctx, .t, 0, 2);
+    defer head.deinit();
+    var tail = try b3.narrow(&ctx, .t, 2, 2);
+    defer tail.deinit();
+    var a_head = try a2.narrow(&ctx, .t, 0, 2);
+    defer a_head.deinit();
+    var a_tail = try a2.narrow(&ctx, .t, 2, 2);
+    defer a_tail.deinit();
+    var h_head = try head.linearRecurrence(&ctx, .t, &a_head, .{});
+    defer h_head.deinit();
+    var carry = try h_head.select(&ctx, .t, 1); // [h, d] last head step
+    defer carry.deinit();
+    var h_tail = try tail.linearRecurrence(&ctx, .t, &a_tail, .{ .initial = &carry });
+    defer h_tail.deinit();
+    var h_full_tail = try h3.narrow(&ctx, .t, 2, 2);
+    defer h_full_tail.deinit();
+    var h_full_tail_mat = try h_full_tail.materialize(&ctx);
+    defer h_full_tail_mat.deinit();
+    try std.testing.expectEqualSlices(f32, try h_full_tail_mat.dataConst(), try h_tail.dataConst());
+
+    // Wrong-shaped initial is a recoverable error.
+    var bad_init = try Tensor(.{ .h, .d }).fromSlice(&ctx, .{ H, D + 1 }, &([_]f32{0} ** (H * (D + 1))));
+    defer bad_init.deinit();
+    try std.testing.expectError(error.ShapeMismatch, b3.linearRecurrence(&ctx, .t, &a2, .{ .initial = &bad_init }));
+}
+
+test "public Tensor linearRecurrence gradients follow the reverse-scan VJP" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    // Hand-computed: b = {1,2,3}, scalar decay 0.5, initial = {2}.
+    // h = {2, 3, 4.5}; gh = {1.75, 1.5, 1};
+    // ga = Σ gh_t·h_{t-1} = 1.75·2 + 1.5·2 + 1·3 = 9.5; ginit = 0.5·gh_0.
+    var b = try Tensor(.{.t}).variableFromSlice(&ctx, .{3}, &.{ 1, 2, 3 });
+    defer b.deinit();
+    var a = try Tensor(.{}).variableFromSlice(&ctx, .{1}, &.{0.5});
+    defer a.deinit();
+    var h0 = try Tensor(.{}).variableFromSlice(&ctx, .{1}, &.{2});
+    defer h0.deinit();
+    var h = try b.linearRecurrence(&ctx, .t, &a, .{ .initial = &h0 });
+    defer h.deinit();
+    try expectCloseSlices(&.{ 2, 3, 4.5 }, try h.dataConst(), 0);
+    var loss = try h.sumAll(&ctx);
+    defer loss.deinit();
+    try loss.backward(&ctx);
+    var gb = (try b.grad(&ctx)).?;
+    defer gb.deinit();
+    try expectCloseSlices(&.{ 1.75, 1.5, 1 }, try gb.dataConst(), 0);
+    var ga = (try a.grad(&ctx)).?;
+    defer ga.deinit();
+    try expectCloseSlices(&.{9.5}, try ga.dataConst(), 0);
+    var gh0 = (try h0.grad(&ctx)).?;
+    defer gh0.deinit();
+    try expectCloseSlices(&.{0.875}, try gh0.dataConst(), 0);
+}
+
+fn linRecGradcheckLoss(ctx: *ExecContext, b: *const Tensor(.{ .t, .d }), a: *const Tensor(.{.d}), h0: *const Tensor(.{.d})) !Tensor(.{}) {
+    var h = try b.linearRecurrence(ctx, .t, a, .{ .initial = h0 });
+    defer h.deinit();
+    var w = try Tensor(.{ .t, .d }).fromSlice(ctx, .{ 3, 2 }, &.{ 1, -2, 3, 0.5, -1, 2 });
+    defer w.deinit();
+    var z = try h.mul(ctx, &w);
+    defer z.deinit();
+    return z.sumAll(ctx);
+}
+
+test "public Tensor linearRecurrence passes gradcheck for input decay and initial" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    var b = try Tensor(.{ .t, .d }).variableFromSlice(&ctx, .{ 3, 2 }, &.{ 0.4, -1.2, 2.1, 0.3, -0.7, 1.6 });
+    defer b.deinit();
+    var a = try Tensor(.{.d}).variableFromSlice(&ctx, .{2}, &.{ 0.8, -0.6 });
+    defer a.deinit();
+    var h0 = try Tensor(.{.d}).variableFromSlice(&ctx, .{2}, &.{ 1.5, -0.9 });
+    defer h0.deinit();
+    const result = try gradcheck_mod.gradcheck(&ctx, linRecGradcheckLoss, .{ &b, &a, &h0 }, .{});
+    try std.testing.expectEqual(@as(usize, 10), result.checked);
+}
+
+test "public Tensor linearRecurrence wide lanes match the serial reference under either -Dvector-scan" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    // 19 lanes: one full 8-wide strip + remainder on the vector-scan build;
+    // pure serial otherwise — the results must be bitwise identical.
+    const T = 5;
+    const D = 19;
+    var b_vals: [T * D]f32 = undefined;
+    for (&b_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt((i * 7) % 11)) * 0.3 - 1.1;
+    var b = try Tensor(.{ .t, .d }).variableFromSlice(&ctx, .{ T, D }, &b_vals);
+    defer b.deinit();
+
+    // Contiguous decay lanes ([d] decay) and broadcast lanes ([t] decay).
+    var ad_vals: [D]f32 = undefined;
+    for (&ad_vals, 0..) |*v, i| v.* = 0.05 + @as(f32, @floatFromInt(i % 4)) * 0.2;
+    var ad = try Tensor(.{.d}).variableFromSlice(&ctx, .{D}, &ad_vals);
+    defer ad.deinit();
+    var at_vals: [T]f32 = .{ 0.9, -0.3, 0.5, 0.1, -0.8 };
+    var at = try Tensor(.{.t}).fromSlice(&ctx, .{T}, &at_vals);
+    defer at.deinit();
+    var init_vals: [D]f32 = undefined;
+    for (&init_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i)) * 0.1 - 0.7;
+    var h0 = try Tensor(.{.d}).variableFromSlice(&ctx, .{D}, &init_vals);
+    defer h0.deinit();
+
+    var hd = try b.linearRecurrence(&ctx, .t, &ad, .{ .initial = &h0 });
+    defer hd.deinit();
+    var ht = try b.linearRecurrence(&ctx, .t, &at, .{});
+    defer ht.deinit();
+
+    var expected_d: [T * D]f32 = undefined;
+    var expected_t: [T * D]f32 = undefined;
+    for (0..D) |di| {
+        var acc_d: f32 = init_vals[di];
+        var acc_t: f32 = 0;
+        for (0..T) |t| {
+            acc_d = ad_vals[di] * acc_d + b_vals[t * D + di];
+            expected_d[t * D + di] = acc_d;
+            acc_t = at_vals[t] * acc_t + b_vals[t * D + di];
+            expected_t[t * D + di] = acc_t;
+        }
+    }
+    try std.testing.expectEqualSlices(f32, &expected_d, try hd.dataConst());
+    try std.testing.expectEqualSlices(f32, &expected_t, try ht.dataConst());
+
+    // Backward over the wide lanes (exercises the vectorized reverse arm):
+    // gb, da, and dinitial against a manual reverse reference.
+    var loss = try hd.sumAll(&ctx);
+    defer loss.deinit();
+    try loss.backward(&ctx);
+    var gh: [D]f32 = undefined;
+    var exp_gb: [T * D]f32 = undefined;
+    var exp_ga: [D]f32 = .{0} ** D;
+    for (0..D) |di| {
+        var acc: f32 = 0;
+        var t: usize = T;
+        while (t > 0) {
+            t -= 1;
+            acc = if (t + 1 == T) 1 else ad_vals[di] * acc + 1;
+            exp_gb[t * D + di] = acc;
+            const h_prev = if (t > 0) expected_d[(t - 1) * D + di] else init_vals[di];
+            exp_ga[di] += acc * h_prev;
+        }
+        gh[di] = acc;
+    }
+    var gb = (try b.grad(&ctx)).?;
+    defer gb.deinit();
+    try std.testing.expectEqualSlices(f32, &exp_gb, try gb.dataConst());
+    var ga = (try ad.grad(&ctx)).?;
+    defer ga.deinit();
+    // The broadcast reduction sums the per-t contributions; roundoff-level
+    // reassociation is possible, so compare with a tolerance.
+    for (try ga.dataConst(), exp_ga) |got, exp| try std.testing.expectApproxEqAbs(exp, got, 1e-5);
+    var gh0 = (try h0.grad(&ctx)).?;
+    defer gh0.deinit();
+    for (try gh0.dataConst(), 0..) |got, di| try std.testing.expectApproxEqAbs(ad_vals[di] * gh[di], got, 0);
+}

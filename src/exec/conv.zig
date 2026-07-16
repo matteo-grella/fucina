@@ -761,6 +761,66 @@ pub fn conv2dBackwardWeight(rt: *Runtime, input: *const Tensor, gy: *const Tenso
     return out;
 }
 
+/// Patch extraction (torch.nn.Unfold in the repo's channel-last layout):
+/// `input` is `[H, W, Cin]`, the result is `[oH·oW, kH·kW·Cin]` where row
+/// `oy·oW + ox` holds output position (oy, ox)'s kernel-window taps ordered
+/// `(ky, kx, cin)` with `cin` fastest — exactly the col layout the
+/// groups == 1 conv2d GEMM route consumes; out-of-range (pad) taps read 0.
+/// Shares the im2col kernel (threaded over output rows, bit-identical to
+/// serial). The exact adjoint of `fold`.
+pub fn unfold(rt: *Runtime, input: *const Tensor, kernel: [2]usize, stride: [2]usize, pad: [2]usize) !Tensor {
+    const in_view = try input.rankView(3);
+    const h = in_view.shape[0];
+    const w = in_view.shape[1];
+    const cin = in_view.shape[2];
+    const kh = kernel[0];
+    const kw = kernel[1];
+    if (kh == 0 or kw == 0 or stride[0] == 0 or stride[1] == 0) return tensor.TensorError.InvalidShape;
+    if (h + 2 * pad[0] < kh or w + 2 * pad[1] < kw) return tensor.TensorError.InvalidShape;
+    const oh = (h + 2 * pad[0] - kh) / stride[0] + 1;
+    const ow = (w + 2 * pad[1] - kw) / stride[1] + 1;
+
+    var ii = try rt.prepareContiguous(input);
+    defer ii.deinit();
+    const npos = oh * ow;
+    const ksz = kh * kw * cin;
+    var col = try rt.emptyRank(2, .{ npos, ksz });
+    errdefer col.deinit();
+    rt.enableNativeVectorPoolForWork(npos * ksz, parallel.vector_elementwise_len_threshold);
+    rt.backend.im2colInto(&col, ii.tensor(), conv2dDimsFor(h, w, cin, oh, ow, 1, kh, kw, stride, pad, 1));
+    return col;
+}
+
+/// Adjoint of `unfold` (torch.nn.Fold): scatter-ADD the `[oH·oW, kH·kW·Cin]`
+/// patch rows back into a `[H, W, Cin]` image — overlapping taps accumulate,
+/// pad taps are dropped. `Cin` is derived from the column width; the column
+/// row count must match the implied `oH·oW` (`ShapeMismatch` otherwise).
+/// Shares the col2im kernel (threaded over image rows, bit-identical to
+/// serial).
+pub fn fold(rt: *Runtime, col: *const Tensor, output_size: [2]usize, kernel: [2]usize, stride: [2]usize, pad: [2]usize) !Tensor {
+    const col_view = try col.rankView(2);
+    const h = output_size[0];
+    const w = output_size[1];
+    const kh = kernel[0];
+    const kw = kernel[1];
+    if (kh == 0 or kw == 0 or stride[0] == 0 or stride[1] == 0) return tensor.TensorError.InvalidShape;
+    if (h + 2 * pad[0] < kh or w + 2 * pad[1] < kw) return tensor.TensorError.InvalidShape;
+    if (col_view.shape[1] % (kh * kw) != 0) return tensor.TensorError.ShapeMismatch;
+    const cin = col_view.shape[1] / (kh * kw);
+    if (cin == 0) return tensor.TensorError.ShapeMismatch;
+    const oh = (h + 2 * pad[0] - kh) / stride[0] + 1;
+    const ow = (w + 2 * pad[1] - kw) / stride[1] + 1;
+    if (col_view.shape[0] != oh * ow) return tensor.TensorError.ShapeMismatch;
+
+    var cc = try rt.prepareContiguous(col);
+    defer cc.deinit();
+    var out = try rt.emptyRank(3, .{ h, w, cin });
+    errdefer out.deinit();
+    rt.enableNativeVectorPoolForWork(parallel.saturatedMul3(h * w, cin, (kh / stride[0] + 1) * (kw / stride[1] + 1)), parallel.vector_elementwise_len_threshold);
+    rt.backend.col2imInto(&out, cc.tensor(), conv2dDimsFor(h, w, cin, oh, ow, 1, kh, kw, stride, pad, 1));
+    return out;
+}
+
 /// General non-causal 1-D convolution (PyTorch Conv1d semantics — standard
 /// cross-correlation, no kernel flip): input `[time, in]`, weight
 /// `[tap, in/groups, out]` (out-channel contiguous, the causalConv1d layout
