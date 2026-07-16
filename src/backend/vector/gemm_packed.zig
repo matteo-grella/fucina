@@ -90,6 +90,17 @@ fn gemmPackedNtCols(
     col_start: usize,
     col_end: usize,
 ) void {
+    // AVX2 has room for twelve accumulators plus two RHS vectors and one LHS
+    // vector. For short-k m>=6 cells, a 6x2 tile revisits each RHS panel half
+    // as often as 3x4 without exceeding the sixteen-vector-register file.
+    // Long-k cells remain 3x4: their extra LHS load instruction is measurable.
+    if (comptime builtin.cpu.arch == .x86_64) {
+        if (m >= 6 and k <= 128) {
+            gemmPackedNtColsX2(6, out, lhs, rhs, m, n, k, col_start, col_end);
+            return;
+        }
+    }
+
     // Keep one four-weight panel hot while every input-row tile consumes it.
     // The opposite loop order re-streams a multi-megabyte task range once per
     // row tile and collapses on k=9600 after the range exceeds private cache.
@@ -99,6 +110,87 @@ fn gemmPackedNtCols(
     }
     while (col < col_end) : (col += 1) {
         gemmPackedNtRowsForCols(out, lhs, rhs, m, n, k, col, col + 1);
+    }
+}
+
+fn gemmPackedNtColsX2(
+    comptime input_tile: usize,
+    out: []f32,
+    lhs: []const f32,
+    rhs: []const f32,
+    m: usize,
+    n: usize,
+    k: usize,
+    col_start: usize,
+    col_end: usize,
+) void {
+    var col = col_start;
+    while (col + 2 <= col_end) : (col += 2) {
+        var row: usize = 0;
+        while (row + input_tile <= m and m - (row + input_tile) != 1) : (row += input_tile) {
+            microTileX2(input_tile, out, lhs, rhs, n, k, row, col);
+        }
+        if (m - row >= 4) {
+            microTileX2(4, out, lhs, rhs, n, k, row, col);
+            row += 4;
+        }
+        if (m - row >= 3) {
+            microTileX2(3, out, lhs, rhs, n, k, row, col);
+            row += 3;
+        }
+        if (m - row >= 2) {
+            microTileX2(2, out, lhs, rhs, n, k, row, col);
+            row += 2;
+        }
+        if (row < m) microTileX2(1, out, lhs, rhs, n, k, row, col);
+    }
+    if (col < col_end) gemmPackedNtRowsForCols(out, lhs, rhs, m, n, k, col, col_end);
+}
+
+inline fn microTileX2(
+    comptime rows: usize,
+    out: []f32,
+    lhs: []const f32,
+    rhs: []const f32,
+    n: usize,
+    k: usize,
+    row: usize,
+    col: usize,
+) void {
+    var acc: [rows][2]Vf32 = undefined;
+    inline for (0..rows) |r| {
+        acc[r][0] = @splat(0);
+        acc[r][1] = @splat(0);
+    }
+
+    var p: usize = 0;
+    while (p + vector_len <= k) : (p += vector_len) {
+        const b0: Vf32 = rhs[col * k + p ..][0..vector_len].*;
+        const b1: Vf32 = rhs[(col + 1) * k + p ..][0..vector_len].*;
+        inline for (0..rows) |r| {
+            const a: Vf32 = lhs[(row + r) * k + p ..][0..vector_len].*;
+            acc[r][0] = @mulAdd(Vf32, a, b0, acc[r][0]);
+            acc[r][1] = @mulAdd(Vf32, a, b1, acc[r][1]);
+        }
+    }
+
+    var sums: [rows][2]f32 = undefined;
+    inline for (0..rows) |r| {
+        sums[r][0] = @reduce(.Add, acc[r][0]);
+        sums[r][1] = @reduce(.Add, acc[r][1]);
+    }
+    while (p < k) : (p += 1) {
+        const b0 = rhs[col * k + p];
+        const b1 = rhs[(col + 1) * k + p];
+        inline for (0..rows) |r| {
+            const a = lhs[(row + r) * k + p];
+            sums[r][0] += a * b0;
+            sums[r][1] += a * b1;
+        }
+    }
+    inline for (0..rows) |r| {
+        out[(row + r) * n + col] = sums[r][0];
+        out[(row + r) * n + col + 1] = sums[r][1];
     }
 }
 
