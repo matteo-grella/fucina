@@ -5,7 +5,7 @@
 ## Logline
 
 The series finale: the whole seventeen-chapter journey replayed in sixty
-seconds — from a dtype enum to a live guitar amp and a chatting transformer,
+seconds — from a dtype enum to a live guitar amp and chatting language models,
 one language, one machine — then the hammer changes hands: the chapter's
 graded projects, the oracle-first method behind all of them, and the forge
 the name promised.
@@ -60,7 +60,7 @@ terminal, playing); (4) terminal recording: `zig build qwen3
 (5) hard cut to a black card as the VO lands the last three sentences.
 
 **Overlay:** On the black card, the chapter's own line: "From a dtype enum
-to a live guitar amp and a chatting transformer. One language. One machine.
+to a live guitar amp and chatting language models. One language. One machine.
 Nothing you cannot read." (§17.1).
 
 ### [0:54–1:36] Your turn: the oracle comes first

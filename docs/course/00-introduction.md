@@ -12,13 +12,18 @@ memory, you are debugging a tower — and you only own the top floor.
 
 This course takes the other path. We are going to build — and read, line by
 line — a deep-learning stack written in **one language**, top to bottom: from
-the bytes of a tensor buffer to a transformer answering questions, from a
+the bytes of a tensor buffer to language models answering questions, from a
 gradient computed by the chain rule to a neural guitar amplifier running live
-under a real-time deadline. The language is Zig. The library is
+under a real-time deadline. The artifacts are the proof; the aim is
+confidence — in Zig, and in how deep learning works underneath. The language
+is Zig. The library is
 [Fucina](../../README.md) — Italian for *forge* — a CPU-first tensor/autograd
 runtime and LLM inference engine whose entire source you can hold in your
-head, because there is nothing underneath it but the standard library and the
-CPU.
+head: in the default build nothing sits underneath it but the standard
+library and the CPU, and the exceptions are honest, opt-in ones — a CBLAS
+provider and a Metal/CUDA offload accelerating a single operation, the
+matrix multiply, behind a seam this course reads like everything else
+(§0.4, Chapter 6).
 
 Two kinds of readers are welcome here, and the course is written for both at
 once: programmers who have never written Zig (you will learn the language

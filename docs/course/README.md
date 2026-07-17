@@ -3,7 +3,7 @@
 *A book-length course that rebuilds the journey of
 [Fucina](../../README.md) — Italian for **forge**, a CPU-first
 tensor/autograd runtime and LLM inference engine written in pure Zig 0.16 —
-from a dtype enum to a live guitar amp and a chatting transformer.*
+from a dtype enum to a live guitar amp and chatting language models.*
 
 ## What this course is
 
@@ -16,6 +16,9 @@ axes, an eager operation library, SIMD kernels, autograd, optimizers,
 evolution strategies, a real-time neural guitar amplifier, GGUF and
 quantization, a transformer, inference tricks, the ternary frontier, and
 LoRA fine-tuning of real language models — all on the CPU, all in Zig.
+A vendor BLAS and a Metal/CUDA offload appear only as opt-in accelerators
+for one operation — the matrix multiply — behind a seam the course reads
+like everything else.
 
 Fucina is eager: every op executes the moment the model code calls it, on
 real buffers. There is no graph to build, plan, or compile first — *what

@@ -31,7 +31,7 @@ The same arc, as a review index:
 | V — Language models | [11](11-model-files-and-quantization.md)–[15](15-training-llms-on-cpu.md) | GGUF, quantization, a transformer, inference tricks, low-bit, CPU training | `src/gguf.zig`, `src/backend/quant/`, `src/llm/`, `examples/` |
 | VI — The craft | [16](16-the-craft.md) | the discipline that holds it together | `docs/`, `tools/`, the CI matrix |
 
-From a dtype enum to a live guitar amp and a chatting transformer. One language. One machine. Nothing you cannot read.
+From a dtype enum to a live guitar amp and chatting language models. One language. One machine. Nothing you cannot read.
 
 ## 17.2 Projects, from easy to hard
 

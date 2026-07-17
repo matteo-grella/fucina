@@ -15,12 +15,14 @@ function both infers and trains.
    codebases and languages between you and what actually runs — and your
    understanding stops at each layer.
 2. **What you read is what runs**: Fucina is eager, one language top to
-   bottom — and the same forward function serves inference *and* training,
-   via exec scopes.
+   bottom — BLAS and the GPU appear only as opt-in accelerators at the
+   single matmul seam — and the same forward function serves inference
+   *and* training, via exec scopes.
 3. The series is honest by construction: one person's effort with strong
    agentic-coding assistance, no state-of-the-art claims, everything cited
    to file (usually with line numbers) — and it ends at a real-time guitar
-   amp and a chatting transformer you understand completely.
+   amp and chatting language models you understand completely, plus the
+   techniques that fine-tune them.
 
 ## Script
 
@@ -44,14 +46,17 @@ is named.
 
 **VO:** This series takes the other path: a deep-learning stack in one
 language, top to bottom — Zig. The library is Fucina, Italian for forge.
-Nothing sits underneath it but the standard library and your CPU. And it's
-eager: every operation runs the moment you call it, on real buffers. No
-graph to build, plan, or compile. The repo's README states the thesis in
-one line: what you read is what runs — in inference and in training alike.
+All of it is Zig you can read; BLAS and the GPU appear only as opt-in
+accelerators for one operation — the matrix multiply. And it's eager:
+every operation runs the moment you call it, on real buffers. No graph to
+build, plan, or compile. The README states the thesis in one line: what
+you read is what runs — in inference and in training alike.
 
-**Visual:** Code/text shot of the repo `README.md:3-9` (the opening
+**Visual:** Code/text shot of the repo `README.md:3-12` (the opening
 paragraph); a highlight sweeps across "what you read is what runs, in
-inference and in training alike" as the VO reaches it.
+inference and in training alike" as the VO reaches it, then a second,
+briefer highlight across "optional CBLAS providers for GEMM, and an
+optional Metal offload" as the accelerator sentence lands.
 
 **Overlay:** Fucina — Italian for *forge* · "what you read is what runs"
 
@@ -80,23 +85,25 @@ block (lines 43–53), highlighting `openExecScope` (line 48) and
 ### [1:45–2:12] Where this goes
 
 **VO:** Where does the series go? Two destinations. One: a real-time
-neural guitar amplifier — a WaveNet processing a live guitar signal inside
-an audio callback, where one stray allocation is an audible glitch.
-Fitting, because Zig itself was born from an audio project — Andrew
-Kelley's Genesis. Two: a
-transformer answering questions — Qwen3 chatting on your laptop, and you
-will have read every stage under it: tokenizer, attention, sampling.
+neural guitar amplifier — a WaveNet processing a live guitar signal
+inside an audio callback, where one stray allocation is an audible
+glitch. Two: a series of real language models chatting on your laptop —
+every stage read: tokenizer, attention, sampling — and the techniques
+that fine-tune them, from LoRA to evolution strategies. The artifacts
+are the proof; the point is confidence — in Zig, and in how deep
+learning works underneath.
 
-**Visual:** Course-map diagram: six parts, chapters 01→17 as stations on a
-path, with two flagged destinations — Ch 10 "The guitar amp" (guitar +
-waveform icon) and Ch 12 "A transformer from scratch" (chat-bubble icon).
-At "Qwen3 chatting on your laptop", cut to a short terminal recording of
+**Visual:** Course-map diagram (unchanged): six parts, chapters 01→17 as
+stations on a path, with two flagged destinations — Ch 10 "The guitar
+amp" (guitar + waveform icon) and Ch 12 "A transformer from scratch"
+(chat-bubble icon). At "chatting on your laptop", cut to a short
+terminal recording of
 `zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf
 --chat "What is the capital of France?" --no-think` (the README quick
 start, `README.md:143-144`) printing its answer.
 
 **Overlay:** Ch 10: a neural guitar amp, live · Ch 12: a transformer,
-line by line
+line by line · Ch 15: fine-tuning, four ways
 
 ### [2:12–2:40] Cards on the table
 
@@ -134,7 +141,8 @@ enough Zig
 ## Asset list
 
 - **Code shots** (from the repo, as-is):
-  - `README.md:3-9` — opening paragraph, "what you read is what runs".
+  - `README.md:3-12` — opening paragraph, "what you read is what runs" +
+    the optional-accelerator sentence.
   - `README.md:24-53` — the front-page example (Model struct, `forward`,
     exec-scope training block).
   - `README.md:291-299` — the agentic-assistance passage.
@@ -166,7 +174,10 @@ enough Zig
 - **Trim order if long**: first shorten the terminal beats in segment 4
   (the map diagram alone can carry it), then compress segment 1's tower
   animation. Do NOT trim segment 5 (the candor block) — it is required —
-  and do not cut the teaser line.
+  and do not cut the teaser line. Within the edited segments: if 2 runs
+  hot, drop "on real buffers"; if 4 runs hot, drop "every stage read:
+  tokenizer, attention, sampling" — never the accelerator sentence or
+  the fine-tuning clause, which are accuracy fixes.
 - **Must not change**: the quote "what you read is what runs" verbatim;
   the candor facts (one person's effort, strong agentic-coding assistance,
   humans leading ideas/testing/debugging, course AI-generated over the
