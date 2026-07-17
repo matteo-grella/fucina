@@ -64,6 +64,7 @@ pub const inkling = struct {
     pub const chat = @import("llm/inkling/chat.zig");
 };
 pub const cartridge = @import("llm/cartridge.zig");
+pub const cartridge_fleet = @import("llm/cartridge_fleet.zig");
 pub const engram = @import("llm/engram.zig");
 pub const kv_cache = @import("llm/kv_cache.zig");
 pub const kv_persist = @import("llm/kv_persist.zig");
@@ -112,6 +113,7 @@ test {
     _ = glm4moe.model;
     _ = deepseek4.model;
     _ = cartridge;
+    _ = cartridge_fleet;
     _ = engram;
     _ = kv_cache;
     _ = kv_persist;

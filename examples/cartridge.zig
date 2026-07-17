@@ -455,14 +455,12 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (opts.load_path) |path| {
-        // Serve a previously trained cartridge.
+        // Serve a previously trained cartridge (mmap retrieval: the parse
+        // streams the mapped pages, no whole-file heap copy).
         const ask = opts.ask orelse return error.MissingAsk;
-        const bytes = blk: {
-            var dir = std.Io.Dir.cwd();
-            break :blk try dir.readFileAlloc(io, path, allocator, .limited(1024 * 1024 * 1024));
-        };
-        defer allocator.free(bytes);
-        var cart = try cartridge.Cartridge.initFromStateDict(&ctx, allocator, bytes);
+        var mapped = try llm.cartridge_fleet.mmapFile(io, path);
+        defer mapped.deinit();
+        var cart = try cartridge.Cartridge.initFromStateDict(&ctx, allocator, mapped.bytes);
         defer cart.deinit();
         try stdout.print("cartridge loaded from {s}: p = {d} ({d} layers)\n", .{ path, cart.p, cart.layers.len });
         return runServe(&ctx, io, stdout, allocator, &model, &tokenizer, qwen3_tpl, &cart, ask, if (corpus) |*c| c else null, opts);
@@ -675,12 +673,9 @@ fn runSelfStudy(
     // paper's winning "first p corpus tokens" initialization) — or a saved
     // checkpoint when resuming (rows only; Adam moments restart).
     var cart = if (opts.resume_path) |path| blk: {
-        const bytes = read: {
-            var dir = std.Io.Dir.cwd();
-            break :read try dir.readFileAlloc(io, path, allocator, .limited(1024 * 1024 * 1024));
-        };
-        defer allocator.free(bytes);
-        break :blk try cartridge.Cartridge.initFromStateDict(ctx, allocator, bytes);
+        var mapped = try llm.cartridge_fleet.mmapFile(io, path);
+        defer mapped.deinit();
+        break :blk try cartridge.Cartridge.initFromStateDict(ctx, allocator, mapped.bytes);
     } else blk: {
         const init_tokens = try systemInitTokens(allocator, tokenizer, tpl, corpus.text, opts.p);
         defer allocator.free(init_tokens);
@@ -1544,12 +1539,9 @@ fn runGemma(
     // Serve a saved cartridge (--load): same three-way comparison as qwen3.
     if (opts.load_path) |path| {
         const ask = opts.ask orelse return error.MissingAsk;
-        const bytes = blk: {
-            var dir = std.Io.Dir.cwd();
-            break :blk try dir.readFileAlloc(io, path, allocator, .limited(1024 * 1024 * 1024));
-        };
-        defer allocator.free(bytes);
-        var cart = try cartridge.Cartridge.initFromStateDict(ctx, allocator, bytes);
+        var mapped = try llm.cartridge_fleet.mmapFile(io, path);
+        defer mapped.deinit();
+        var cart = try cartridge.Cartridge.initFromStateDict(ctx, allocator, mapped.bytes);
         defer cart.deinit();
         try stdout.print("cartridge loaded from {s}: p = {d} ({d} layers)\n", .{ path, cart.p, cart.layers.len });
         var corpus: ?Corpus = null;

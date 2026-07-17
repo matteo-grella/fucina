@@ -80,6 +80,41 @@ conn threads (≤ --conns, socket deadlines)          ONE inference worker
   file and never re-preloads the configured cartridge — but cannot occur
   live yet: the disk registry is per-run, and cross-restart sidecar
   scanning is a separate follow-up.)
+- `--fleet DIR` serves a per-document cartridge FLEET (from `zig build
+  cartridge-fleet`; Cartridges at Scale, `docs/CARTRIDGES.md`): per request
+  the user messages embed through the model itself
+  (`Trainer.embedLastHidden` + the fleet's `embed_suffix` contract), the
+  fleet's cosine index picks `--rag-docs` documents (`--rag-chunks` chunks
+  scanned), and the selected cartridges COMPOSE as the conversation's
+  prefix — different requests answer from different knowledge with zero
+  corpus tokens in any prompt. Parsed cartridges sit in a small mmap-fed
+  LRU (rows are copied into each cache, so eviction never invalidates a
+  conversation). Slot reuse becomes conversation-STICKY: a request whose
+  FIRST user message matches a resident slot's continues that conversation
+  and keeps the selection it started with — retrieval only runs for
+  conversations no slot remembers. (Both halves are measured necessities:
+  per-turn re-retrieval flaps the runner-up document and forfeits all
+  reuse, and plain token-LCP adoption once moved a short prompt onto
+  another conversation's knowledge base — the constant template preamble
+  passes the 10% gate.) Verified live: follow-up turns report
+  `cached_tokens` through their composed prefix, interleaved conversations
+  keep distinct selections, and grounded answers match the fleet CLI's.
+  qwen3 backend only (the query embedder is the qwen3 trainer); excludes
+  `--cartridge` and `--kv-cache-dir` (sidecars do not record selections).
+  Size `--ctx` to include `rag_docs × p` prefix rows. `--rag-adaptive`
+  relaxes stickiness: every follow-up re-embeds the contextual query (all
+  user messages) and the conversation SWITCHES knowledge base only when a
+  document outside its selection beats every current document's best chunk
+  by `--rag-margin` (default 0.05) — the switch rebuilds the prefix and
+  re-prefills the history (`cached_tokens` = 0 that turn; verified live on
+  a cross-domain pivot). The rule is deliberately relative and
+  context-anchored, per measurement: a phatic "Thanks, that makes sense."
+  out-scores a genuine topical pivot in raw cosine against unrelated
+  documents, so absolute score floors and last-message-alone probes
+  misfire in both directions. Consequence: on same-register corpora the
+  adaptive rule fires rarely (incumbent documents score high on adjacent
+  topics), and the reliable way to hard-pivot remains a NEW conversation —
+  a fresh first user message always re-retrieves.
 - Streaming responses start lazily on the first delta, so a request that
   fails before producing anything (invalid grammar, context overflow) still
   gets a plain JSON error with a proper status code.

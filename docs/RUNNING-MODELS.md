@@ -871,6 +871,90 @@ documentation, so knowledge quality on big corpora scales with conversation
 count (the paper's regime is tens of thousands). These demo budgets show
 the mechanism, not the ceiling.
 
+### Cartridge fleets: one cartridge per document — `zig build cartridge-fleet`
+
+Cartridges at Scale (arXiv 2606.04557; design record `docs/CARTRIDGES.md`
+§"Cartridges at Scale") trains one cartridge PER DOCUMENT under a RAM/disk
+budget, jointly so they compose at serve time, and selects cartridges per
+query with an in-process cosine retriever (embeddings come from the serving
+model itself — no external retrieval stack). qwen3-typed; needs an
+f32/f16/bf16 GGUF like the base CLI.
+
+```sh
+# 1. Composition acceptance gate (~10 s): two cartridges built from ONE
+#    capture of the first 512 corpus tokens (part B holds rows at positions
+#    256..511) must reproduce the real prefill over the next 128 tokens.
+#    Expected output ends with:
+#      composed prefill-equivalence over 128 suffix tokens (2 x p = 512 rows):
+#        max |dlogit| 0.000000, ... greedy agreement 128/128
+#      PASS: the two-part composition is behaviorally identical to the real prefill
+zig build cartridge-fleet -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-f16.gguf \
+  --docs README.md --equiv --p 256 --suffix-max 128
+
+# 2. Train a 4-document fleet (~12 min measured on an M1 Max, machine
+#    shared with a build; ~5.5 s/conversation uncontended): every doc gets
+#    a corpus-init cartridge on disk, at most --budget 3 stay resident, and
+#    24 rounds x 4 conversations of mixed-visibility self-study run with
+#    rotation every 6 rounds. The run log shows isolated and co-loaded x2/x3
+#    rounds, and eviction/reload traffic; the final per-doc step counts came
+#    out 8/8/8/9 — the budget manager's uniform-coverage policy at work.
+#    Ends by embedding all 88 retrieval chunks through the model (~44 s)
+#    and saving fleet.json + per-doc safetensors/FZT1 + index.safetensors.
+zig build cartridge-fleet -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-f16.gguf \
+  --docs README.md --docs docs/TERNARY.md --docs docs/PTQTP.md --docs docs/SPECULATIVE.md \
+  --fleet /tmp/fleet-demo --p 256 --budget 3 --rotate-every 6 --rounds 24 --accum 4 --seed 7
+
+# 3. Serve with cartridge-RAG: the question embeds through the model, the
+#    cosine top chunks pick documents, and the selected cartridges compose
+#    ahead of the question (mmap-loaded, ~0.9 s to first answer for one
+#    256-row cartridge, ~2.5-3.3 s for two). Measured with the fleet above:
+#    "What is Fucina, in one sentence?" selects README.md and answers
+#    "a CPU-first tensor/autograd runtime and LLM inference engine written
+#    in pure Zig 0.16..." while [bare model] answers "a traditional Italian
+#    dessert"; the speculative-decoding question composes SPECULATIVE+PTQTP
+#    and describes batched verification against the committed stream.
+zig build cartridge-fleet -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-f16.gguf \
+  --fleet /tmp/fleet-demo --ask "What is Fucina, in one sentence?" --rag-docs 1
+zig build cartridge-fleet -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-f16.gguf \
+  --fleet /tmp/fleet-demo --ask "In speculative decoding, how are draft tokens verified?" --rag-docs 2
+
+# 4. --oracle NAME bypasses retrieval (the paper's oracle arm); --resume
+#    reopens a fleet to keep training (rows + Adam moments continue exactly
+#    where they left off — evict/reload is bit-identical); --rounds 0
+#    --resume rebuilds only the retrieval index.
+zig build cartridge-fleet -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-f16.gguf \
+  --fleet /tmp/fleet-demo --ask "..." --oracle docs/TERNARY.md
+
+# 5. Serve the fleet over HTTP: each request's user messages pick documents
+#    through the fleet's cosine index and the selected cartridges compose as
+#    the conversation's prefix; follow-up turns stick to the selection their
+#    conversation started with and report cached_tokens through it
+#    (docs/LMSERVER.md). Measured: the README question answers the canonical
+#    sentence from a 22-token prompt; an interleaved follow-up reused 86/87
+#    prompt tokens warm.
+zig build lmserve -Doptimize=ReleaseFast -- models/Qwen3-0.6B-f16.gguf \
+  --port 8080 --fleet /tmp/fleet-demo --kv-slots 4
+# curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' \
+#   -d '{"model":"m","messages":[{"role":"user","content":"What is Fucina, in one sentence?"}]}'
+
+#    Server selection knobs: --rag-docs K (documents composed per request,
+#    default 2) and --rag-chunks N (cosine top-N chunks scanned, default 8).
+#    --rag-adaptive lets a CONTINUING conversation switch knowledge base
+#    when a document outside its selection decisively out-scores it
+#    (--rag-margin, default 0.05) under the contextual query — the switch
+#    rebuilds the prefix and re-prefills (cached_tokens = 0 that turn);
+#    default is fully sticky (selection pinned at conversation start), and
+#    a NEW conversation always re-retrieves. Size --ctx to include
+#    rag_docs x p prefix rows. --fleet excludes --cartridge/--kv-cache-dir.
+
+# Training knobs: --budget B (resident cartridges) --rotate-every R --evict-frac F
+#        --warmup W (per-cartridge lr warm-up steps)
+#        --p-iso F (isolation probability) --distract-max K (co-loaded distractors)
+#        --rounds/--accum/--lr/--p/--chunk-min/--chunk-max/--max-q/--max-a/--seed
+#        --embed-chunk N (retrieval chunk tokens) --rag-docs/--rag-chunks (selection)
+#        --no-pack (flat-memory per-conversation backward)
+```
+
 ---
 
 ## GPU offload (`-Dgpu=metal` on macOS, `-Dgpu=cuda` on Linux/NVIDIA)

@@ -10459,6 +10459,7 @@ family-agnostic helpers stay flat:
 | `llm.data` | SFT pairs, encodePair, deterministic Loader | §13.7 |
 | `llm.chat` | templates + generic `Conversation(Model, Tok)` | §13.8 |
 | `llm.cartridge` | trained KV-prefix corpus compression (Cartridges, arXiv 2506.06266) | §13.10 |
+| `llm.cartridge_fleet` | per-document cartridge fleets: manifest, RAM/disk budget manager, cosine chunk index (Cartridges at Scale, arXiv 2606.04557) | §13.10 |
 
 The family namespaces are covered in §14 (deepseek2/glm4moe/deepseek4/
 inkling by their module doc comments); this section documents the shared
@@ -12258,6 +12259,62 @@ GGUF: `--equiv` (a zero-training corpus-init cartridge must match the real
 prefill — bitwise at tiled-attention shapes on Qwen3-0.6B-f16), self-study
 training (paper Sec 4, k = 1, fully in-process), and `--load`/`--ask`
 serving. Design record: `docs/CARTRIDGES.md`.
+
+**Composition** (Cartridges at Scale, arXiv 2606.04557): independently
+trained cartridges compose by concatenation — part 0's rows, then part 1's,
+…, with real tokens at RoPE positions `composedP(parts)..`; every part
+keeps the rotations it was trained at (post-RoPE keys are frozen vectors,
+so overlapping nominal positions across parts are fine). `cartridge.zig`
+provides the free functions:
+
+```zig
+pub fn composedP(parts: []const *const Cartridge) usize;
+pub fn validateComposition(parts: []const *const Cartridge) Error!void;   // layer-for-layer geometry match
+pub fn composedCatK(ctx, parts, layer_i: usize, k_tokens: *const Kv) !Kv; // concat(sink?, k, sink?, k, ..., tokens)
+pub fn composedCatV(ctx, parts, layer_i: usize, v_tokens: *const Kv) !Kv;
+pub fn writeComposedToCache(ctx, parts, cache: *KvCache) !void;           // serve: parts in order into an EMPTY cache
+// Cartridge.appendToCache(ctx, cache) — writeToCache without the empty-cache
+// requirement, the primitive writeComposedToCache chains.
+```
+
+The qwen3 trainer threads a composition through `ForwardOptions.cartridges`
+(mutually exclusive with `cartridge`; plain-path only): ONE concat per layer,
+so the existing fused attention backward routes gradients into EVERY part's
+trainable rows — the joint-training seam. `Trainer.distillLossExt(ctx,
+tokens, fwd, targets, options)` is `distillLoss` with full `ForwardOptions`
+(composition + packing). A single-part composition is op-for-op the
+single-cartridge forward (pinned bitwise), a two-part composition built
+from one capture reproduces the real prefill exactly (the composition
+oracle — bitwise on Qwen3-0.6B-f16 at p = 256 via `cartridge-fleet
+--equiv`), and serving through `writeComposedToCache` is cache-level, so
+compositions serve on ANY family (`train_cartridge_compose_tests.zig`).
+
+**Fleets** (`src/llm/cartridge_fleet.zig`): the scale layer around
+composition — one cartridge per document instead of one monolith per
+corpus. `Manifest` is the fleet's on-disk record (`fleet.json`: per-doc
+cartridge/optimizer files, token counts, optimizer-step counters); `Fleet`
+is the RAM/disk budget manager (at most `policy.budget` cartridges
+resident, each with its own AdamW whose moments travel through
+evict/reload — an evict/reload cycle continues training bit-identically,
+pinned by a fleet test; every `policy.every` rounds the most-trained
+residents rotate to disk and the least-trained absentees rotate in, with a
+per-cartridge lr warm-up on entry); `EmbedIndex` is the cartridge-RAG
+selector — L2-normalized chunk embeddings centered by their centroid at
+`finalize` (the all-but-the-top correction; raw causal-LM embeddings are
+anisotropic and mis-rank documents without it), hand-rolled cosine top-k
+in `topDocs`, persisted as `index.safetensors`. Artifact retrieval goes
+through `mmapFile` (read-only page-backed mappings, no whole-file heap
+copy). The `cartridge-fleet` example (`zig build cartridge-fleet`) drives
+mixed-visibility joint self-study (each round targets one resident
+document; with probability `--p-iso` its cartridge trains alone, otherwise
+distractor cartridges from other residents co-load in shuffled order — the
+paper's recipe against composition collapse), builds the retrieval index
+through the model itself (topic-instruction-suffixed final-norm last
+hidden state, `Trainer.embedLastHidden` + `embed_suffix`), and serves
+`--ask` by cosine selection over chunks → document cartridges →
+`writeComposedToCache` → decode. lmserve serves fleets over HTTP
+(`--fleet DIR`, per-request selection with conversation-sticky slot
+reuse — [LMSERVER.md](LMSERVER.md)).
 
 ```zig
 test "cartridge: trainable KV prefix + teacher top-k distillation" {

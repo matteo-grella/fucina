@@ -131,6 +131,49 @@ pub const GgufChatOptions = struct {
     /// the prefix shape and rows (FUXKV002), so restores are
     /// self-describing even across a cartridge swap.
     cartridge: ?*const llm.cartridge.Cartridge = null,
+    /// Cartridge FLEET serving (Cartridges at Scale, docs/CARTRIDGES.md):
+    /// per request, the last user message embeds through `embedFn`, the
+    /// cosine index picks documents, and the selected cartridges COMPOSE as
+    /// the conversation's prefix. Mutually exclusive with `cartridge` and
+    /// with `kv_disk` (sidecars do not record selections, so a restore
+    /// could resurrect rows behind the wrong prefix) — the caller enforces
+    /// both. Slot reuse stays on, keyed by selection: only a slot whose
+    /// cartridge selection matches the request's is adoptable.
+    fleet: ?FleetOptions = null,
+};
+
+pub const FleetOptions = struct {
+    io: std.Io,
+    /// Fleet directory and its parsed manifest/index (borrowed — must
+    /// outlive the backend).
+    dir: []const u8,
+    manifest: *const llm.cartridge_fleet.Manifest,
+    index: *const llm.cartridge_fleet.EmbedIndex,
+    /// Query embedder (the family trainer behind a type-erased pointer;
+    /// MUST implement the `cartridge_fleet.embed_suffix` contract the index
+    /// was built with). Worker thread only, like generation itself.
+    embed_ctx: *anyopaque,
+    embedFn: *const fn (ctx: *anyopaque, text: []const u8, out: []f32) anyerror!void,
+    /// Selection sizes (documents composed per request; chunk scan width).
+    rag_docs: usize = 2,
+    rag_chunks: usize = 8,
+    /// Adaptive re-selection for CONTINUING conversations (default off =
+    /// fully sticky): every follow-up re-embeds the contextual query (all
+    /// user messages) and the conversation SWITCHES knowledge base only on
+    /// decisive evidence — a document outside its current selection must
+    /// beat every current document's best chunk by `switch_margin`.
+    /// Absolute score floors do not work on this substrate (measured: a
+    /// phatic "Thanks, that makes sense." scores HIGHER against an
+    /// unrelated doc than a genuine topical pivot does); the relative
+    /// margin over a context-anchored query absorbs both phatic turns and
+    /// runner-up cosine flaps. A switch rebuilds the prefix and re-prefills
+    /// the history (cached_tokens = 0 for that turn).
+    adaptive: bool = false,
+    switch_margin: f32 = 0.05,
+    /// Loaded-cartridge LRU capacity (prefix rows are COPIED into each
+    /// conversation's cache, so this only bounds re-parse/mmap cost;
+    /// effective capacity is max(cache_len, rag_docs)).
+    cache_len: usize = 4,
 };
 
 /// Longest common prefix between a slot's token shadow and a request's ids
@@ -149,6 +192,19 @@ fn commonPrefix(tokens: []const usize, ids: []const u32) usize {
 /// be destroyed to save a handful of tokens.
 fn similarEnough(lcp: usize, ids_len: usize) bool {
     return lcp * 10 > ids_len;
+}
+
+/// Adaptive fleet serving's switch rule: leave a conversation's knowledge
+/// base only on DECISIVE evidence — the best document OUTSIDE the current
+/// selection must beat every current document's best chunk by `margin`
+/// under the context-anchored query. Relative, never absolute: measured on
+/// a live fleet, a phatic "Thanks, that makes sense." scores HIGHER in raw
+/// cosine against an unrelated document than a genuine topical pivot does,
+/// so score floors misfire in both directions; the margin over a query
+/// anchored by the whole user side absorbs phatic turns and runner-up
+/// cosine flaps alike.
+fn shouldSwitchSelection(cur_best: f32, outside_best: ?f32, margin: f32) bool {
+    return (outside_best orelse return false) >= cur_best + margin;
 }
 
 /// The `Backend` adapter for any model family served through
@@ -171,11 +227,30 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
 
         /// One resident reuse slot: a KV cache plus the token shadow
         /// describing exactly the positions it holds (WORKER THREAD ONLY,
-        /// like `constraints`).
+        /// like `constraints`). In fleet mode `selection` records the doc
+        /// ids whose composed cartridges sit ahead of the shadow — a slot
+        /// is only adoptable by a request with the SAME selection (empty
+        /// for non-fleet backends, where every slot shares the one
+        /// configured prefix) — and `opener` records the conversation's
+        /// FIRST user message, the sticky-adoption identity (token-LCP
+        /// alone is too weak: the constant template preamble of two
+        /// UNRELATED short prompts passes the similarity gate, which must
+        /// never move a conversation onto another's knowledge base).
         const Slot = struct {
             cache: KvCache,
             tokens: std.ArrayList(usize),
+            selection: []usize,
+            opener: []u8,
+            prefix_rows: usize,
             last_used: u64,
+        };
+
+        /// One loaded fleet cartridge (heap-pinned: LRU reordering must not
+        /// move the Cartridge — conversations borrow it only within one
+        /// request, but pointer stability keeps the compose loop simple).
+        const CartEntry = struct {
+            doc: usize,
+            cart: *llm.cartridge.Cartridge,
         };
 
         /// One disk-tier sidecar: its path, an in-memory copy of its token
@@ -196,6 +271,8 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
         constraints: ConstraintCache,
         slots: std.ArrayList(Slot) = .empty,
         disk: std.ArrayList(DiskEntry) = .empty,
+        /// Fleet-mode loaded-cartridge LRU (MRU last; worker thread only).
+        carts: std.ArrayList(CartEntry) = .empty,
         /// Monotonic request counter: the recency stamp for slot and
         /// disk-entry LRU.
         clock: u64 = 0,
@@ -229,6 +306,8 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
             for (self.slots.items) |*slot| {
                 slot.cache.deinit();
                 slot.tokens.deinit(a);
+                a.free(slot.selection);
+                a.free(slot.opener);
             }
             self.slots.deinit(a);
             for (self.disk.items) |*e| {
@@ -236,11 +315,139 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 a.free(e.tokens);
             }
             self.disk.deinit(a);
+            for (self.carts.items) |*e| {
+                e.cart.deinit();
+                a.destroy(e.cart);
+            }
+            self.carts.deinit(a);
         }
 
         /// The pool size floor: a zero config still reuses one slot.
         fn kvSlots(self: *const Self) usize {
             return @max(self.opts.kv_slots, 1);
+        }
+
+        /// The parsed cartridge for fleet doc `doc`, mmap-loading it into
+        /// the MRU-ordered LRU on a miss. The returned pointer is
+        /// heap-stable; entries live until evicted (rows are COPIED into
+        /// conversation caches, so eviction never invalidates a served
+        /// prefix). Worker thread only.
+        fn fleetCartridge(self: *Self, doc: usize) !*const llm.cartridge.Cartridge {
+            const fl = self.opts.fleet.?;
+            const a = self.allocator;
+            for (self.carts.items, 0..) |e, i| {
+                if (e.doc == doc) {
+                    const hit = self.carts.orderedRemove(i);
+                    self.carts.appendAssumeCapacity(hit);
+                    return hit.cart;
+                }
+            }
+            const state = &fl.manifest.docs.items[doc];
+            const path = try std.fs.path.join(a, &.{ fl.dir, state.cart_file });
+            defer a.free(path);
+            var mapped = try llm.cartridge_fleet.mmapFile(fl.io, path);
+            defer mapped.deinit();
+            const cart = try a.create(llm.cartridge.Cartridge);
+            errdefer a.destroy(cart);
+            cart.* = try llm.cartridge.Cartridge.initFromStateDict(self.ctx, a, mapped.bytes);
+            errdefer cart.deinit();
+            // Effective capacity never below the selection width, so the
+            // acquire-then-compose loop of writeSelectionPrefix cannot
+            // evict a cartridge it is about to serve.
+            const cap = @max(fl.cache_len, fl.rag_docs);
+            if (self.carts.items.len >= cap) {
+                var evicted = self.carts.orderedRemove(0);
+                evicted.cart.deinit();
+                a.destroy(evicted.cart);
+            }
+            try self.carts.ensureUnusedCapacity(a, 1);
+            self.carts.appendAssumeCapacity(.{ .doc = doc, .cart = cart });
+            return cart;
+        }
+
+        const Adopted = struct {
+            convo: Conversation,
+            /// The slot's selection, transferred to the caller (owned).
+            selection: []usize,
+        };
+
+        /// Fleet stickiness: find the slot whose conversation this request
+        /// CONTINUES — identity is the first user message (`opener`), not
+        /// token-LCP (the constant template preamble of two unrelated short
+        /// prompts passes the LCP similarity gate, and adopting across
+        /// conversations would move a request onto the wrong knowledge
+        /// base). Among several same-opener slots the best token-LCP wins.
+        /// Null when no slot matches — the caller then runs retrieval.
+        fn findStickySlot(self: *Self, ids: []const u32, opener: []const u8) ?usize {
+            if (opener.len == 0) return null;
+            var best_i: ?usize = null;
+            var best_lcp: usize = 0;
+            for (self.slots.items, 0..) |*slot, i| {
+                if (!std.mem.eql(u8, slot.opener, opener)) continue;
+                const lcp = commonPrefix(slot.tokens.items, ids);
+                if (best_i == null or lcp > best_lcp) {
+                    best_i = i;
+                    best_lcp = lcp;
+                }
+            }
+            return best_i;
+        }
+
+        /// Adopt slot `i` as this request's warm conversation. A
+        /// continuation keeps the selection its conversation started with
+        /// (per-turn re-retrieval measurably flaps the runner-up document
+        /// and forfeits all KV reuse); `--rag-adaptive` layers the decisive
+        /// switch rule on top of this in `vtGenerate`.
+        fn adoptSlotAt(self: *Self, i: usize, convo_opts: llm.chat.Options) !Adopted {
+            var slot = self.slots.swapRemove(i);
+            defer slot.tokens.deinit(self.allocator);
+            self.allocator.free(slot.opener);
+            errdefer self.allocator.free(slot.selection);
+            const convo = try Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
+                .cache = slot.cache,
+                .tokens = slot.tokens.items,
+                .prefix_rows = slot.prefix_rows,
+            });
+            return .{ .convo = convo, .selection = slot.selection };
+        }
+
+        /// Drop slot `i` entirely (an adaptive SWITCH supersedes the
+        /// conversation's old state — its cache holds rows behind a prefix
+        /// the conversation is leaving).
+        fn destroySlot(self: *Self, i: usize) void {
+            var slot = self.slots.swapRemove(i);
+            slot.cache.deinit();
+            slot.tokens.deinit(self.allocator);
+            self.allocator.free(slot.selection);
+            self.allocator.free(slot.opener);
+        }
+
+        /// Embed the contextual retrieval query — every user message,
+        /// concatenated (the full render as fallback) — into `vec`.
+        fn embedFleetQuery(self: *Self, fl: FleetOptions, req: *const types.GenerateRequest, rendered: []const u8, vec: []f32) !void {
+            const a = self.allocator;
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(a);
+            for (req.messages) |msg| {
+                if (msg.role != .user) continue;
+                if (buf.items.len > 0) try buf.append(a, '\n');
+                try buf.appendSlice(a, msg.content);
+            }
+            const query: []const u8 = if (buf.items.len > 0) buf.items else rendered;
+            try fl.embedFn(fl.embed_ctx, query, vec);
+        }
+
+        /// Compose the selection's cartridges, in order, into an EMPTY
+        /// cache (`writeComposedToCache` semantics via the LRU).
+        fn writeSelectionPrefix(self: *Self, selection: []const usize, cache: *KvCache) !void {
+            // Make everything resident first: with the capacity floor above,
+            // the compose loop's acquires are then all hits (no eviction
+            // between appends).
+            for (selection) |doc| _ = try self.fleetCartridge(doc);
+            for (selection) |doc| {
+                const cart = try self.fleetCartridge(doc);
+                try cart.appendToCache(self.ctx, cache);
+            }
         }
 
         /// Pick this request's warm state and build the Conversation on it:
@@ -249,23 +456,30 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
         /// beats every resident slot; otherwise the LRU slot as a
         /// reconcile-overwrite host when the pool is full (spilling its
         /// state to the disk tier first when worth keeping), or a cold
-        /// start while the pool still has room.
-        fn acquireConversation(self: *Self, ids: []const u32, convo_opts: llm.chat.Options) !Conversation {
+        /// start while the pool still has room. `selection`/`selection_p`
+        /// describe the request's composed fleet prefix (empty outside
+        /// fleet mode): only same-selection slots are adoptable, and a
+        /// foreign-prefix host is reset and rebuilt behind this request's
+        /// cartridges.
+        fn acquireConversation(self: *Self, ids: []const u32, convo_opts: llm.chat.Options, selection: []const usize, selection_p: usize) !Conversation {
             self.clock += 1;
 
             var best_i: ?usize = null;
             var best_lcp: usize = 0;
             var lru_i: ?usize = null;
             for (self.slots.items, 0..) |*slot, i| {
-                const lcp = commonPrefix(slot.tokens.items, ids);
-                if (best_i == null or lcp > best_lcp) {
-                    best_i = i;
-                    best_lcp = lcp;
+                if (std.mem.eql(usize, slot.selection, selection)) {
+                    const lcp = commonPrefix(slot.tokens.items, ids);
+                    if (best_i == null or lcp > best_lcp) {
+                        best_i = i;
+                        best_lcp = lcp;
+                    }
                 }
                 if (lru_i == null or slot.last_used < self.slots.items[lru_i.?].last_used) lru_i = i;
             }
 
-            // The disk tier competes only when it strictly beats the pool.
+            // The disk tier competes only when it strictly beats the pool
+            // (never armed in fleet mode — sidecars carry no selection).
             var disk_i: ?usize = null;
             if (self.opts.kv_disk != null) {
                 var disk_lcp: usize = 0;
@@ -279,18 +493,15 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 if (disk_lcp <= best_lcp or !similarEnough(disk_lcp, ids.len)) disk_i = null;
             }
 
-            // Cartridge-mode slot caches always begin with the shared
-            // preloaded prefix (every conversation gets it below), so the
-            // token shadow describes rows PAST it.
-            const prefix_rows: usize = if (self.opts.cartridge) |cart| cart.p else 0;
-
             if (disk_i == null and best_i != null and similarEnough(best_lcp, ids.len)) {
                 var slot = self.slots.swapRemove(best_i.?);
                 defer slot.tokens.deinit(self.allocator);
+                self.allocator.free(slot.selection);
+                self.allocator.free(slot.opener);
                 return Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
                     .cache = slot.cache,
                     .tokens = slot.tokens.items,
-                    .prefix_rows = prefix_rows,
+                    .prefix_rows = slot.prefix_rows,
                 });
             }
 
@@ -308,6 +519,8 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 var cache: KvCache = undefined;
                 if (host) |*h| {
                     h.tokens.deinit(self.allocator);
+                    self.allocator.free(h.selection);
+                    self.allocator.free(h.opener);
                     cache = h.cache;
                     // kv_persist.load requires an empty cache.
                     cache.truncate(0);
@@ -345,11 +558,32 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
             }
 
             if (host) |*h| {
-                defer h.tokens.deinit(self.allocator);
+                const a = self.allocator;
+                if (std.mem.eql(usize, h.selection, selection)) {
+                    // Same prefix: reconcile-overwrite on the victim's rows.
+                    defer h.tokens.deinit(a);
+                    a.free(h.selection);
+                    a.free(h.opener);
+                    return Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
+                        .cache = h.cache,
+                        .tokens = h.tokens.items,
+                        .prefix_rows = h.prefix_rows,
+                    });
+                }
+                // Foreign prefix (fleet mode): nothing behind it is
+                // reusable — reset the cache and rebuild this request's
+                // composed prefix.
+                h.tokens.deinit(a);
+                a.free(h.selection);
+                a.free(h.opener);
+                var cache = h.cache;
+                errdefer cache.deinit();
+                cache.truncate(0);
+                try self.writeSelectionPrefix(selection, &cache);
                 return Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
-                    .cache = h.cache,
-                    .tokens = h.tokens.items,
-                    .prefix_rows = prefix_rows,
+                    .cache = cache,
+                    .tokens = &.{},
+                    .prefix_rows = selection_p,
                 });
             }
 
@@ -361,6 +595,12 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 errdefer convo.deinit();
                 try cart.writeToCache(self.ctx, &convo.cache);
                 try convo.notePrefixRows(cart.p);
+            } else if (selection.len > 0) {
+                // Cold start in fleet mode: the selected cartridges compose
+                // ahead of the first prefill.
+                errdefer convo.deinit();
+                try self.writeSelectionPrefix(selection, &convo.cache);
+                try convo.notePrefixRows(selection_p);
             }
             return convo;
         }
@@ -372,13 +612,18 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
         /// `cache.len` — a slot always describes exactly the positions its
         /// cache holds. `acquireConversation` removed at most one slot, so
         /// the append keeps the pool within `kv_slots`.
-        fn reclaimSlot(self: *Self, convo: *Conversation) void {
+        fn reclaimSlot(self: *Self, convo: *Conversation, selection: []const usize, opener: []const u8) void {
             const a = self.allocator;
             var tokens: std.ArrayList(usize) = .empty;
+            var sel: []usize = &.{};
+            var op: []u8 = &.{};
             const ok = blk: {
                 // The shadow describes only token-backed rows: cache rows
-                // [0, kv_prefix_rows) are the shared preloaded prefix.
+                // [0, kv_prefix_rows) are the preloaded prefix (shared
+                // cartridge, or this request's fleet selection).
                 tokens.appendSlice(a, convo.history.items[0 .. convo.cache.len - convo.kv_prefix_rows]) catch break :blk false;
+                sel = a.dupe(usize, selection) catch break :blk false;
+                op = a.dupe(u8, opener) catch break :blk false;
                 self.slots.ensureUnusedCapacity(a, 1) catch break :blk false;
                 break :blk true;
             };
@@ -386,6 +631,8 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 // Without the shadow the cache can never match: drop both
                 // and let a later request start cold.
                 tokens.deinit(a);
+                a.free(sel);
+                a.free(op);
                 var cache = convo.takeCache();
                 cache.deinit();
                 return;
@@ -393,6 +640,9 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
             self.slots.appendAssumeCapacity(.{
                 .cache = convo.takeCache(),
                 .tokens = tokens,
+                .selection = sel,
+                .opener = op,
+                .prefix_rows = convo.kv_prefix_rows,
                 .last_used = self.clock,
             });
         }
@@ -555,10 +805,90 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
             const ids = try self.tokenizer.encodeRaw(a, rendered);
             defer a.free(ids);
 
-            var convo = try self.acquireConversation(ids, convo_opts);
+            // Fleet mode: sticky adoption first (a warm conversation keeps
+            // the cartridges it started with; --rag-adaptive layers the
+            // decisive switch rule on top), then — for conversations no
+            // slot remembers, or that decisively changed topic — cosine
+            // selection over the request's USER messages, concatenated
+            // (the whole user side, not just the last message: "and how
+            // are they packed?" carries no topic alone; the full render is
+            // the fallback when no user turn exists).
+            var selection: []usize = &.{};
+            defer a.free(selection);
+            var maybe_convo: ?Conversation = null;
+            // The conversation's identity for sticky adoption: its FIRST
+            // user message (empty outside fleet mode — non-fleet slots
+            // match by token-LCP alone, as before).
+            var opener: []const u8 = &.{};
+            if (self.opts.fleet != null) {
+                for (req.messages) |msg| {
+                    if (msg.role == .user) {
+                        opener = msg.content;
+                        break;
+                    }
+                }
+            }
+            if (self.opts.fleet) |fl| {
+                self.clock += 1;
+                var sticky_i = self.findStickySlot(ids, opener);
+
+                if (sticky_i != null and fl.adaptive) {
+                    // Adaptive: re-embed the contextual query and leave the
+                    // conversation's knowledge base only on decisive
+                    // evidence (see shouldSwitchSelection).
+                    const vec = try a.alloc(f32, fl.index.dim);
+                    defer a.free(vec);
+                    try self.embedFleetQuery(fl, req, rendered, vec);
+                    const hits = try fl.index.topDocs(a, vec, fl.rag_chunks, fl.rag_docs);
+                    defer a.free(hits);
+                    const cur = self.slots.items[sticky_i.?].selection;
+                    const cur_scores = try a.alloc(f32, cur.len);
+                    defer a.free(cur_scores);
+                    try fl.index.docScores(a, vec, cur, cur_scores);
+                    var cur_best: f32 = -1;
+                    for (cur_scores) |s| cur_best = @max(cur_best, s);
+                    var outside_best: ?f32 = null;
+                    for (hits) |hit| {
+                        const inside = for (cur) |doc| {
+                            if (doc == hit.doc) break true;
+                        } else false;
+                        if (!inside and (outside_best == null or hit.score > outside_best.?)) outside_best = hit.score;
+                    }
+                    if (shouldSwitchSelection(cur_best, outside_best, fl.switch_margin) and hits.len > 0) {
+                        // Topic moved: the old slot's rows sit behind a
+                        // prefix this conversation is leaving.
+                        self.destroySlot(sticky_i.?);
+                        sticky_i = null;
+                        selection = try a.alloc(usize, hits.len);
+                        for (selection, hits) |*doc, hit| doc.* = hit.doc;
+                    }
+                }
+
+                if (sticky_i) |si| {
+                    const adopted = try self.adoptSlotAt(si, convo_opts);
+                    maybe_convo = adopted.convo;
+                    selection = adopted.selection;
+                } else if (selection.len == 0) {
+                    // Fresh conversation: contextual retrieval.
+                    const vec = try a.alloc(f32, fl.index.dim);
+                    defer a.free(vec);
+                    try self.embedFleetQuery(fl, req, rendered, vec);
+                    const hits = try fl.index.topDocs(a, vec, fl.rag_chunks, fl.rag_docs);
+                    defer a.free(hits);
+                    if (hits.len == 0) return error.EmptySelection;
+                    selection = try a.alloc(usize, hits.len);
+                    for (selection, hits) |*doc, hit| doc.* = hit.doc;
+                }
+            }
+
+            var convo = maybe_convo orelse blk: {
+                var selection_p: usize = 0;
+                for (selection) |doc| selection_p += (try self.fleetCartridge(doc)).p;
+                break :blk try self.acquireConversation(ids, convo_opts, selection, selection_p);
+            };
             defer convo.deinit();
             // LIFO: reclaim runs before the deinit above, on every path out.
-            defer self.reclaimSlot(&convo);
+            defer self.reclaimSlot(&convo, selection, opener);
 
             const produced = try convo.sendTokensReuse(ids, sink);
             const finish: types.FinishReason = if (produced >= req.max_tokens or convo.cache.len >= convo.cache.capacity)
@@ -573,6 +903,21 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
             };
         }
     };
+}
+
+test "adaptive fleet switch rule: decisive-margin only" {
+    // No document outside the current selection: never switch.
+    try std.testing.expect(!shouldSwitchSelection(0.4, null, 0.05));
+    // Outside doc must beat the current best by the margin (values off the
+    // exact f32 boundary: 0.40 + 0.05 rounds above 0.45).
+    try std.testing.expect(!shouldSwitchSelection(0.40, 0.42, 0.05));
+    try std.testing.expect(shouldSwitchSelection(0.40, 0.46, 0.05));
+    try std.testing.expect(shouldSwitchSelection(0.40, 0.60, 0.05));
+    // The measured runner-up flap (gap ~0.002) stays put.
+    try std.testing.expect(!shouldSwitchSelection(0.2780, 0.2755, 0.05));
+    // A selection whose docs all score -1 (no chunks) yields to anything
+    // clearing the margin from below.
+    try std.testing.expect(shouldSwitchSelection(-1, 0.1, 0.05));
 }
 
 test "kv reuse policy: commonPrefix and the similarity gate" {

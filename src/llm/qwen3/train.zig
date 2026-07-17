@@ -123,6 +123,14 @@ pub const ForwardOptions = struct {
     layer_count: ?usize = null,
     inject: ?Injection = null,
     cartridge: ?*const cartridge_mod.Cartridge = null,
+    /// COMPOSED prefix (Cartridges at Scale): the parts' rows concatenate in
+    /// order ahead of the tokens, which shift to RoPE positions
+    /// `composedP(parts)..`; gradients flow into EVERY part's trainable rows
+    /// through one concat per layer — the mixed-visibility joint-training
+    /// seam. Mutually exclusive with `cartridge` (a single-part composition
+    /// is op-for-op the single-cartridge path); plain-path only, like
+    /// `cartridge`.
+    cartridges: ?[]const *const cartridge_mod.Cartridge = null,
     capture: ?*KvCapture = null,
     packed_segments: ?[]const usize = null,
     engram: ?EngramOptions = null,
@@ -165,6 +173,8 @@ const LayerExtra = struct {
     layer_i: usize = 0,
     /// This layer's trained KV prefix (plain path only; never checkpointed).
     cartridge_layer: ?*const cartridge_mod.LayerKv = null,
+    /// Composed multi-cartridge prefix (plain path only; never checkpointed).
+    cartridge_parts: ?[]const *const cartridge_mod.Cartridge = null,
     /// Token K/V row sink (plain path only; never checkpointed).
     capture: ?*KvCapture = null,
     /// Packed segment lengths (plain path only; never checkpointed).
@@ -763,6 +773,26 @@ pub fn Trainer(comptime targets: Targets) type {
             return fucina.Tensor(.{ .seq, .vocab }).fromTensor(ctx, value);
         }
 
+        /// Final-norm LAST hidden state of `tokens`, copied into `out`
+        /// (`hidden_size` floats) — the retrieval-embedding primitive of
+        /// cartridge fleets (`llm/cartridge_fleet.zig`: callers append the
+        /// ids of `cartridge_fleet.embed_suffix` to the text ids first, and
+        /// the index normalizes/centers downstream). Eval pass: dropout
+        /// off, no step advance; runs under its own exec scope.
+        pub fn embedLastHidden(self: *Self, ctx: *ExecContext, tokens: []const usize, out: []f32) !void {
+            if (out.len != self.model.config.hidden_size) return Error.InvalidSequenceLength;
+            const scope = ctx.openExecScope();
+            defer ctx.closeExecScope(scope);
+            var hidden = try self.forwardHiddenImpl(ctx, tokens, null, .{});
+            defer hidden.deinit();
+            const model = self.model;
+            var normed = try hidden.rmsNormMul(ctx, .embed, &model.output_norm, model.config.rms_norm_eps);
+            defer normed.deinit();
+            var last = try normed.narrow(ctx, .seq, normed.dim(.seq) - 1, 1);
+            defer last.deinit();
+            @memcpy(out, try last.dataConst());
+        }
+
         /// One eval forward over `tokens` (positions 0..len-1, no cartridge)
         /// that copies every layer's token K/V rows out of the graph — the
         /// cartridge initialization capture. Caller owns the result.
@@ -832,10 +862,27 @@ pub fn Trainer(comptime targets: Targets) type {
             packed_segments: ?[]const usize,
             options: cartridge_mod.DistillOptions,
         ) !fucina.Tensor(.{}) {
+            return self.distillLossExt(ctx, tokens, .{ .cartridge = cart, .packed_segments = packed_segments }, distill_targets, options);
+        }
+
+        /// `distillLoss` with full `ForwardOptions` — the composed-prefix
+        /// entry (Cartridges at Scale): pass `.cartridges` to train several
+        /// cartridges JOINTLY behind one forward (backward accumulates into
+        /// every part's trainable rows), with `.packed_segments` batching
+        /// conversations that share the same visibility set. Same exec-scope
+        /// requirement, scope-owned result, and step-counter advance.
+        pub fn distillLossExt(
+            self: *Self,
+            ctx: *ExecContext,
+            tokens: []const usize,
+            fwd: ForwardOptions,
+            distill_targets: cartridge_mod.DistillTargets,
+            options: cartridge_mod.DistillOptions,
+        ) !fucina.Tensor(.{}) {
             if (!ctx.execScopeActive()) return Error.ExecScopeRequired;
             const step = self.step_counter;
             self.step_counter += 1;
-            var hidden = try self.forwardHiddenImpl(ctx, tokens, step, .{ .cartridge = cart, .packed_segments = packed_segments });
+            var hidden = try self.forwardHiddenImpl(ctx, tokens, step, fwd);
             defer hidden.deinit();
             if (fusedDistillEnabled()) {
                 if (self.fusedDistillHead(ctx)) |head| {
@@ -995,8 +1042,17 @@ pub fn Trainer(comptime targets: Targets) type {
             }
             if (opts.cartridge) |cart| {
                 if (self.checkpoint_layers) return Error.CartridgeCheckpointUnsupported;
+                if (opts.cartridges != null) return Error.InvalidCartridge;
                 if (cart.layers.len != n_layers) return Error.InvalidCartridge;
                 if (cart.kv_heads != cfg.num_key_value_heads or cart.head_dim != cfg.head_dim) return Error.InvalidCartridge;
+            }
+            if (opts.cartridges) |parts| {
+                if (self.checkpoint_layers) return Error.CartridgeCheckpointUnsupported;
+                if (parts.len == 0) return Error.InvalidCartridge;
+                for (parts) |cart| {
+                    if (cart.layers.len != n_layers) return Error.InvalidCartridge;
+                    if (cart.kv_heads != cfg.num_key_value_heads or cart.head_dim != cfg.head_dim) return Error.InvalidCartridge;
+                }
             }
             if (opts.capture) |cap| {
                 if (self.checkpoint_layers) return Error.CartridgeCheckpointUnsupported;
@@ -1034,8 +1090,14 @@ pub fn Trainer(comptime targets: Targets) type {
                 if (total != tokens.len) return Error.InvalidPacking;
             }
 
-            // A cartridge occupies positions 0..p-1; real tokens start at p.
-            const position_offset = if (opts.cartridge) |cart| cart.p else 0;
+            // A cartridge occupies positions 0..p-1; real tokens start at p
+            // (a composition occupies 0..sum(p_i)-1).
+            const position_offset = if (opts.cartridges) |parts|
+                cartridge_mod.composedP(parts)
+            else if (opts.cartridge) |cart|
+                cart.p
+            else
+                0;
             const rope_table = if (opts.packed_segments) |seg_lens|
                 try self.preparePackedRope(ctx, position_offset, tokens.len, seg_lens)
             else
@@ -1073,6 +1135,7 @@ pub fn Trainer(comptime targets: Targets) type {
                     .dropout_p = self.lora_config.dropout_p,
                     .layer_i = layer_i,
                     .cartridge_layer = if (opts.cartridge) |cart| &cart.layers[layer_i] else null,
+                    .cartridge_parts = opts.cartridges,
                     .capture = opts.capture,
                     .packed_segments = opts.packed_segments,
                 };
@@ -1255,7 +1318,15 @@ pub fn Trainer(comptime targets: Targets) type {
             const attn_scale = 1 / @sqrt(@as(f32, @floatFromInt(cfg.head_dim)));
             var attn = if (extra.packed_segments != null)
                 try segmentedAttention(ctx, extra, &q_rope, &k_rope, &v3, attn_scale)
-            else if (extra.cartridge_layer) |cart_layer| blk: {
+            else if (extra.cartridge_parts) |parts| blk: {
+                // Composed prefix: one concat over every part's rows, so the
+                // same fused backward routes gradients into ALL of them.
+                var k_cat = try cartridge_mod.composedCatK(ctx, parts, extra.layer_i, &k_rope);
+                defer k_cat.deinit();
+                var v_cat = try cartridge_mod.composedCatV(ctx, parts, extra.layer_i, &v3);
+                defer v_cat.deinit();
+                break :blk try q_rope.groupedAttention(ctx, &k_cat, &v_cat, extra.kv_head_for_head, .attn, attn_scale, .{});
+            } else if (extra.cartridge_layer) |cart_layer| blk: {
                 // Trained KV prefix: every query attends the whole prefix,
                 // then causally over the real tokens (the end-aligned
                 // source_offset = p kernel); gradients reach the cartridge's
@@ -1339,7 +1410,13 @@ pub fn Trainer(comptime targets: Targets) type {
                 var v_seg = try v3.narrow(ctx, .seq, start, len);
                 defer v_seg.deinit();
 
-                outs[seg_i] = if (extra.cartridge_layer) |cart_layer| blk: {
+                outs[seg_i] = if (extra.cartridge_parts) |parts| blk: {
+                    var k_cat = try cartridge_mod.composedCatK(ctx, parts, extra.layer_i, &k_seg);
+                    defer k_cat.deinit();
+                    var v_cat = try cartridge_mod.composedCatV(ctx, parts, extra.layer_i, &v_seg);
+                    defer v_cat.deinit();
+                    break :blk try q_seg.groupedAttention(ctx, &k_cat, &v_cat, extra.kv_head_for_head, .attn, attn_scale, .{});
+                } else if (extra.cartridge_layer) |cart_layer| blk: {
                     var k_cat = try cart_layer.catK(ctx, &k_seg);
                     defer k_cat.deinit();
                     var v_cat = try cart_layer.catV(ctx, &v_seg);
@@ -1412,4 +1489,5 @@ test {
     _ = @import("train_tests.zig");
     _ = @import("train_golden_tests.zig");
     _ = @import("train_cartridge_tests.zig");
+    _ = @import("train_cartridge_compose_tests.zig");
 }

@@ -410,6 +410,13 @@ pub const Cartridge = struct {
     /// any cached p-token prompt.
     pub fn writeToCache(self: *const Cartridge, ctx: *ExecContext, cache: *kv_cache.KvCache) !void {
         if (cache.len != 0) return Error.InvalidCartridge;
+        return self.appendToCache(ctx, cache);
+    }
+
+    /// `writeToCache` without the empty-cache requirement: append all p rows
+    /// BEHIND whatever the cache already holds and advance by p — the
+    /// composition primitive (`writeComposedToCache` chains parts with it).
+    pub fn appendToCache(self: *const Cartridge, ctx: *ExecContext, cache: *kv_cache.KvCache) !void {
         if (cache.kv_heads.len != self.layers.len) return Error.InvalidCartridge;
         // Pure data movement: no autograd nodes for the serving concat.
         var no_grad = fucina.noGrad();
@@ -435,6 +442,88 @@ pub const Cartridge = struct {
         self.* = undefined;
     }
 };
+
+// ---------------------------------------------------------------------------
+// Composition (Cartridges at Scale, arXiv 2606.04557)
+// ---------------------------------------------------------------------------
+// Independently trained cartridges compose by CONCATENATION: the prefix is
+// part 0's rows, then part 1's, ..., and real tokens sit at RoPE positions
+// composedP(parts).. — each part keeps the rotations it was trained at
+// (post-RoPE keys are frozen vectors; overlapping nominal positions across
+// parts are fine, attention only ever takes dot products against them).
+// A single-part composition is op-for-op the single-cartridge path.
+
+/// Total prefix rows of a composed cartridge sequence.
+pub fn composedP(parts: []const *const Cartridge) usize {
+    var total: usize = 0;
+    for (parts) |part| total += part.p;
+    return total;
+}
+
+/// Parts must exist and agree layer-for-layer on count and KV geometry
+/// (per-layer, so heterogeneous-geometry models compose too — the shapes
+/// come from the tensors, not the struct metadata).
+pub fn validateComposition(parts: []const *const Cartridge) Error!void {
+    if (parts.len == 0) return Error.InvalidCartridge;
+    const first = parts[0];
+    for (parts[1..]) |part| {
+        if (part.layers.len != first.layers.len) return Error.InvalidCartridge;
+        for (part.layers, first.layers) |*got, *want| {
+            if (got.k.dim(.kv_head) != want.k.dim(.kv_head) or got.k.dim(.d) != want.k.dim(.d)) {
+                return Error.InvalidCartridge;
+            }
+        }
+    }
+}
+
+/// concat(part0.sink?, part0.k, part1.sink?, part1.k, ..., tokens) along
+/// `.seq` — the composed key sequence for layer `layer_i`. One concat node,
+/// so gradients flow into EVERY part's trainable rows (the joint-training
+/// seam); with a single part this is exactly `LayerKv.catK`.
+pub fn composedCatK(ctx: *ExecContext, parts: []const *const Cartridge, layer_i: usize, k_tokens: *const Kv) !Kv {
+    return composedCat(ctx, parts, layer_i, k_tokens, .k);
+}
+
+/// Value-side counterpart of `composedCatK`.
+pub fn composedCatV(ctx: *ExecContext, parts: []const *const Cartridge, layer_i: usize, v_tokens: *const Kv) !Kv {
+    return composedCat(ctx, parts, layer_i, v_tokens, .v);
+}
+
+fn composedCat(
+    ctx: *ExecContext,
+    parts: []const *const Cartridge,
+    layer_i: usize,
+    tokens: *const Kv,
+    comptime side: enum { k, v },
+) !Kv {
+    std.debug.assert(parts.len > 0);
+    const list = try ctx.allocator.alloc(*const Kv, 2 * parts.len + 1);
+    defer ctx.allocator.free(list);
+    var n: usize = 0;
+    for (parts) |part| {
+        const layer = &part.layers[layer_i];
+        const sink = if (side == .k) &layer.k_sink else &layer.v_sink;
+        if (sink.*) |*rows| {
+            list[n] = rows;
+            n += 1;
+        }
+        list[n] = if (side == .k) &layer.k else &layer.v;
+        n += 1;
+    }
+    list[n] = tokens;
+    n += 1;
+    return list[0].concat(ctx, .seq, list[1..n]);
+}
+
+/// Serve a composition: write every part's rows, in order, into an EMPTY
+/// `KvCache` and leave it advanced to `composedP(parts)` — a normal decode
+/// then continues behind the composed prefix. Model-agnostic (cache-level),
+/// so independently trained cartridges of ANY family compose at serve time.
+pub fn writeComposedToCache(ctx: *ExecContext, parts: []const *const Cartridge, cache: *kv_cache.KvCache) !void {
+    try validateComposition(parts);
+    if (cache.len != 0) return Error.InvalidCartridge;
+    for (parts) |part| try part.appendToCache(ctx, cache);
+}
 
 /// Per-layer host copies of the post-q/k-norm, post-RoPE keys and the
 /// cache-layout values of one forward pass — `[seq * kv_heads * head_dim]`

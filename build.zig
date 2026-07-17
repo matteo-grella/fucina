@@ -446,6 +446,29 @@ pub fn build(b: *std.Build) void {
     const cartridge_step = b.step("cartridge", "Train/serve a corpus as a trained KV prefix on a Qwen3 GGUF (arXiv 2506.06266)");
     cartridge_step.dependOn(&cartridge_cmd.step);
 
+    const cartridge_fleet_exe = b.addExecutable(.{
+        .name = "fucina-zig-cartridge-fleet",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/cartridge_fleet.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    cartridge_fleet_exe.root_module.addImport("fucina", module);
+    cartridge_fleet_exe.root_module.addImport("fucina_llm", llm_module);
+    configureBlas(cartridge_fleet_exe, blas_kind);
+    configureGpu(b, cartridge_fleet_exe, gpu_kind);
+    const cartridge_fleet_install = installArtifactStep(b, cartridge_fleet_exe);
+
+    const cartridge_fleet_cmd = b.addRunArtifact(cartridge_fleet_exe);
+    cartridge_fleet_cmd.step.dependOn(cartridge_fleet_install);
+    if (b.args) |args| {
+        cartridge_fleet_cmd.addArgs(args);
+    }
+
+    const cartridge_fleet_step = b.step("cartridge-fleet", "Per-document cartridge fleets: mixed-visibility training, RAM/disk budget manager, cosine cartridge-RAG (arXiv 2606.04557)");
+    cartridge_fleet_step.dependOn(&cartridge_fleet_cmd.step);
+
     const engram_exe = b.addExecutable(.{
         .name = "fucina-zig-engram",
         .root_module = b.createModule(.{

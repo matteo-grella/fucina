@@ -50,6 +50,20 @@ const usage_text =
     \\                      conversation — served "prior knowledge" without prompt
     \\                      tokens (qwen3/gemma4 backends; composes with the slot
     \\                      pool and the --kv-cache-dir disk tier)
+    \\  --fleet DIR         serve a per-document cartridge fleet (from `zig build
+    \\                      cartridge-fleet`; Cartridges at Scale): each request's
+    \\                      last user message picks cartridges via the fleet's
+    \\                      cosine index and they compose as the conversation's
+    \\                      prefix (qwen3 backend; excludes --cartridge and
+    \\                      --kv-cache-dir; slot reuse is keyed by selection)
+    \\  --rag-docs K        fleet: documents composed per request (default 2)
+    \\  --rag-chunks N      fleet: cosine top-N chunks scanned (default 8)
+    \\  --rag-adaptive      fleet: follow-up turns may SWITCH knowledge base when
+    \\                      a document outside the conversation's selection
+    \\                      decisively out-scores it (margin --rag-margin,
+    \\                      default 0.05) under the contextual query; default is
+    \\                      fully sticky (selection pinned at conversation start)
+    \\  --rag-margin F      fleet: the adaptive switch margin (cosine units)
     \\
     \\Reasoning is off by default; clients enable it per request via
     \\reasoning_effort (chat) or reasoning.effort (responses).
@@ -73,6 +87,11 @@ const Args = struct {
     kv_cache_dir: ?[]const u8 = null,
     kv_disk_slots: usize = 8,
     cartridge_path: ?[]const u8 = null,
+    fleet_dir: ?[]const u8 = null,
+    rag_docs: usize = 2,
+    rag_chunks: usize = 8,
+    rag_adaptive: bool = false,
+    rag_margin: f32 = 0.05,
 };
 
 var g_shutdown = std.atomic.Value(bool).init(false);
@@ -141,6 +160,20 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--cartridge") and i + 1 < args_slice.len) {
             i += 1;
             args.cartridge_path = args_slice[i];
+        } else if (std.mem.eql(u8, arg, "--fleet") and i + 1 < args_slice.len) {
+            i += 1;
+            args.fleet_dir = args_slice[i];
+        } else if (std.mem.eql(u8, arg, "--rag-docs") and i + 1 < args_slice.len) {
+            i += 1;
+            args.rag_docs = try std.fmt.parseInt(usize, args_slice[i], 10);
+        } else if (std.mem.eql(u8, arg, "--rag-chunks") and i + 1 < args_slice.len) {
+            i += 1;
+            args.rag_chunks = try std.fmt.parseInt(usize, args_slice[i], 10);
+        } else if (std.mem.eql(u8, arg, "--rag-adaptive")) {
+            args.rag_adaptive = true;
+        } else if (std.mem.eql(u8, arg, "--rag-margin") and i + 1 < args_slice.len) {
+            i += 1;
+            args.rag_margin = try std.fmt.parseFloat(f32, args_slice[i]);
         } else if (std.mem.eql(u8, arg, "--experts=borrow")) {
             args.experts_borrow = true;
         } else if (std.mem.eql(u8, arg, "--experts=pack")) {
@@ -155,6 +188,16 @@ pub fn main(init: std.process.Init) !void {
             args.model_path = arg;
         }
     }
+    if (args.fleet_dir != null) {
+        if (args.cartridge_path != null) {
+            try stderr.writeAll("--fleet and --cartridge are mutually exclusive (a fleet selects its own cartridges)\n");
+            return error.InvalidArguments;
+        }
+        if (args.kv_cache_dir != null) {
+            try stderr.writeAll("--fleet excludes --kv-cache-dir: KV sidecars do not record cartridge selections, so a restore could resurrect rows behind the wrong prefix\n");
+            return error.InvalidArguments;
+        }
+    }
     if (args.kv_cache_dir) |dir| try std.Io.Dir.cwd().createDirPath(init.io, dir);
 
     var ctx: fucina.ExecContext = undefined;
@@ -162,8 +205,8 @@ pub fn main(init: std.process.Init) !void {
     defer ctx.deinit();
 
     if (args.nanochat_dir) |dir| {
-        if (args.cartridge_path != null) {
-            try stderr.writeAll("--cartridge is supported by the qwen3/gemma4 GGUF backends only\n");
+        if (args.cartridge_path != null or args.fleet_dir != null) {
+            try stderr.writeAll("--cartridge/--fleet are supported by the GGUF chat backends only (qwen3/gemma4; --fleet is qwen3)\n");
             return error.CartridgeUnsupported;
         }
         const model_id = try allocator.dupe(u8, std.fs.path.basename(dir));
@@ -213,8 +256,8 @@ fn serveDiffusion(
     model_id: []const u8,
     args: Args,
 ) !void {
-    if (args.cartridge_path != null) {
-        try stderr.writeAll("--cartridge is supported by the qwen3/gemma4 GGUF backends only\n");
+    if (args.cartridge_path != null or args.fleet_dir != null) {
+        try stderr.writeAll("--cartridge/--fleet are supported by the GGUF chat backends only (qwen3/gemma4; --fleet is qwen3)\n");
         return error.CartridgeUnsupported;
     }
     var config = try llm.diffusion_gemma.model.Config.fromGguf(file);
@@ -250,8 +293,8 @@ fn serveInkling(
     model_id: []const u8,
     args: Args,
 ) !void {
-    if (args.cartridge_path != null) {
-        try stderr.writeAll("--cartridge is supported by the qwen3/gemma4 GGUF backends only\n");
+    if (args.cartridge_path != null or args.fleet_dir != null) {
+        try stderr.writeAll("--cartridge/--fleet are supported by the GGUF chat backends only (qwen3/gemma4; --fleet is qwen3)\n");
         return error.CartridgeUnsupported;
     }
     var tokenizer = llm.tokenizer.Tokenizer.initFromGguf(allocator, file, .{}) catch {
@@ -278,8 +321,8 @@ fn serveQwen35(
     model_id: []const u8,
     args: Args,
 ) !void {
-    if (args.cartridge_path != null) {
-        try stderr.writeAll("--cartridge is supported by the qwen3/gemma4 GGUF backends only\n");
+    if (args.cartridge_path != null or args.fleet_dir != null) {
+        try stderr.writeAll("--cartridge/--fleet are supported by the GGUF chat backends only (qwen3/gemma4; --fleet is qwen3)\n");
         return error.CartridgeUnsupported;
     }
     var tokenizer = llm.tokenizer.Tokenizer.initFromGguf(allocator, file, .{}) catch {
@@ -311,6 +354,111 @@ fn serveQwen35(
     try serveWith(io, allocator, adapter.backend(), args);
 }
 
+/// --fleet serving state (qwen3 only): the fleet's manifest + cosine index
+/// plus a no-adapter trainer whose `embedLastHidden` implements the fleet's
+/// retrieval-embedding contract (`cartridge_fleet.embed_suffix`) for
+/// incoming queries. Everything is borrowed by the backend's
+/// `FleetOptions`, so this must outlive the server loop.
+const FleetTrainer = llm.qwen3.train.Trainer(.{ .q = false, .v = false });
+
+const FleetServe = struct {
+    allocator: std.mem.Allocator,
+    ctx: *fucina.ExecContext,
+    tokenizer: *const llm.tokenizer.Tokenizer,
+    fleet: llm.cartridge_fleet.Fleet,
+    index: llm.cartridge_fleet.EmbedIndex,
+    trainer: FleetTrainer,
+
+    fn init(
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        stderr: *std.Io.Writer,
+        ctx: *fucina.ExecContext,
+        model: *const llm.qwen3.model.Model,
+        tokenizer: *const llm.tokenizer.Tokenizer,
+        dir: []const u8,
+    ) !FleetServe {
+        var fleet = llm.cartridge_fleet.Fleet.open(allocator, io, dir, 0, .{ .budget = 1 }) catch |err| {
+            try stderr.print("--fleet {s}: cannot open the fleet manifest ({t})\n", .{ dir, err });
+            return err;
+        };
+        errdefer fleet.deinit();
+        if (fleet.manifest.docs.items.len == 0) {
+            try stderr.print("--fleet {s}: the manifest lists no documents\n", .{dir});
+            return error.EmptyFleet;
+        }
+        if (fleet.manifest.embed_dim != model.config.hidden_size) {
+            try stderr.print(
+                "--fleet {s}: no retrieval index for this model (index dim {d}, model hidden {d}) — rebuild with `zig build cartridge-fleet -- --resume --rounds 0 --docs ...`\n",
+                .{ dir, fleet.manifest.embed_dim, model.config.hidden_size },
+            );
+            return error.MissingIndex;
+        }
+        const index_path = try fleet.indexPath();
+        defer allocator.free(index_path);
+        var mapped = try llm.cartridge_fleet.mmapFile(io, index_path);
+        defer mapped.deinit();
+        var index = try llm.cartridge_fleet.EmbedIndex.initFromBytes(allocator, mapped.bytes);
+        errdefer index.deinit();
+
+        // The query embedder runs through the dense-qwen3 trainer.
+        var trainer = FleetTrainer.init(ctx, model, .{ .rank = 1, .alpha = 1 }, 0) catch |err| {
+            try stderr.writeAll("--fleet needs a dense qwen3 GGUF (queries embed through the trainer)\n");
+            return err;
+        };
+        errdefer trainer.deinit();
+
+        // Probe doc 0's cartridge against the model's KV geometry so a
+        // foreign fleet fails at startup, not mid-request.
+        {
+            const cart_path = try std.fs.path.join(allocator, &.{ dir, fleet.manifest.docs.items[0].cart_file });
+            defer allocator.free(cart_path);
+            var cart_mapped = try llm.cartridge_fleet.mmapFile(io, cart_path);
+            defer cart_mapped.deinit();
+            var cart = try llm.cartridge.Cartridge.initFromStateDict(ctx, allocator, cart_mapped.bytes);
+            defer cart.deinit();
+            var probe = try model.initKvCache(ctx, cart.p + 1);
+            defer probe.deinit();
+            cart.writeToCache(ctx, &probe) catch |err| {
+                try stderr.print("--fleet {s}: its cartridges do not fit this model's KV geometry\n", .{dir});
+                return err;
+            };
+        }
+
+        return .{
+            .allocator = allocator,
+            .ctx = ctx,
+            .tokenizer = tokenizer,
+            .fleet = fleet,
+            .index = index,
+            .trainer = trainer,
+        };
+    }
+
+    fn deinit(self: *FleetServe) void {
+        self.trainer.deinit();
+        self.index.deinit();
+        self.fleet.deinit();
+    }
+
+    /// `backend.FleetOptions.embedFn`: the exact recipe the index was built
+    /// with — text ids ++ separately tokenized `embed_suffix` ids, then the
+    /// final-norm last hidden state (worker thread only, like generation).
+    fn embed(ptr: *anyopaque, text: []const u8, out: []f32) anyerror!void {
+        const self: *FleetServe = @ptrCast(@alignCast(ptr));
+        const a = self.allocator;
+        const text_ids = try self.tokenizer.encode(a, text);
+        defer a.free(text_ids);
+        const suffix_ids = try self.tokenizer.encode(a, llm.cartridge_fleet.embed_suffix);
+        defer a.free(suffix_ids);
+        const full = try a.alloc(usize, text_ids.len + suffix_ids.len);
+        defer a.free(full);
+        for (full[0..text_ids.len], text_ids) |*dst, id| dst.* = id;
+        for (full[text_ids.len..], suffix_ids) |*dst, id| dst.* = id;
+        try self.trainer.embedLastHidden(self.ctx, full, out);
+    }
+};
+
 fn serveQwen3(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -337,6 +485,18 @@ fn serveQwen3(
     defer if (cart) |*c| c.deinit();
     if (args.cartridge_path) |path| cart = try loadCartridge(io, allocator, stderr, ctx, &model, path);
 
+    var fleet_serve: ?FleetServe = null;
+    defer if (fleet_serve) |*fs| fs.deinit();
+    if (args.fleet_dir) |dir| {
+        fleet_serve = try FleetServe.init(io, allocator, stderr, ctx, &model, &tokenizer, dir);
+        try stderr.print("fleet: {d} documents, {d} retrieval chunks, {d} docs composed per request\n", .{
+            fleet_serve.?.fleet.manifest.docs.items.len,
+            fleet_serve.?.index.len(),
+            args.rag_docs,
+        });
+        try stderr.flush();
+    }
+
     var adapter = backend_mod.GgufChatBackend(llm.qwen3.model.Model, llm.tokenizer).init(
         allocator,
         ctx,
@@ -354,6 +514,18 @@ fn serveQwen3(
             .kv_slots = args.kv_slots,
             .kv_disk = kvDiskOptions(io, args),
             .cartridge = if (cart) |*c| c else null,
+            .fleet = if (fleet_serve) |*fs| .{
+                .io = io,
+                .dir = args.fleet_dir.?,
+                .manifest = &fs.fleet.manifest,
+                .index = &fs.index,
+                .embed_ctx = fs,
+                .embedFn = FleetServe.embed,
+                .rag_docs = args.rag_docs,
+                .rag_chunks = args.rag_chunks,
+                .adaptive = args.rag_adaptive,
+                .switch_margin = args.rag_margin,
+            } else null,
         },
     );
     defer adapter.deinit();
@@ -369,6 +541,10 @@ fn serveGemma4(
     model_id: []const u8,
     args: Args,
 ) !void {
+    if (args.fleet_dir != null) {
+        try stderr.writeAll("--fleet is supported by the qwen3 backend only today (gemma4 cartridges still COMPOSE at serve time via llm.cartridge.writeComposedToCache — the missing piece is the query embedder)\n");
+        return error.FleetUnsupported;
+    }
     var config = try llm.gemma.gemma4.Config.fromGguf(file);
     config.borrow_experts = args.experts_borrow;
     var tokenizer = llm.spm_tokenizer.Tokenizer.initFromGguf(allocator, file, .{}) catch {
