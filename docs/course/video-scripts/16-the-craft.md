@@ -50,8 +50,8 @@ i9-13950HX (docs/BENCHMARK.md)".
 **VO:** Catching wrong starts with structure. The tree is eleven bands —
 dtypes at the bottom, models at the top — and a band may depend only on bands
 at or below it. A checker in the tree runs Tarjan's algorithm over the
-production import graph on every push: one hundred five files, four hundred
-eight edges, zero cycles. The gate states its own limit: cycles are
+production import graph on every push: one hundred thirty-five files, five
+hundred thirty-one edges, zero cycles. The gate states its own limit: cycles are
 machine-checked; band direction is review-only — labeled, in writing.
 
 **Visual:** Layer-stack diagram: eleven horizontal bands from
@@ -63,7 +63,7 @@ shot: `zig build arch-check` running in the repo root. Close on a code shot:
 including test-awareness and conservative parsing).
 
 **Overlay:** "as recorded in docs/ARCHITECTURE.md: `production import graph:
-105 files, 408 edges, 0 SCCs`" · "proves acyclicity, not band direction —
+135 files, 531 edges, 0 SCCs`" · "proves acyclicity, not band direction —
 direction is review-checked (docs/DEVELOPMENT.md §1.1)".
 
 ### [0:53–1:40] The verification religion
@@ -169,7 +169,7 @@ forge".
 **Terminal recordings (run in the repo root, no models needed):**
 - `zig build arch-check` — the import-graph gate. Note: the live
   files/edges count may differ from the doc-recorded figure; the overlay
-  quotes "105 files, 408 edges, 0 SCCs" explicitly *as recorded in*
+  quotes "135 files, 531 edges, 0 SCCs" explicitly *as recorded in*
   `docs/ARCHITECTURE.md`.
 - `zig build snippet-check` — the REFERENCE.md runnable-snippet gate.
 
@@ -203,7 +203,7 @@ re-measured.
   caption (Qwen3-30B MoE, i9-13950HX, Linux, no BLAS either side, llama.cpp
   build 30af6e2, snapshot 2026-07-04) must be on screen whenever 0.36–0.52×,
   0.375–0.509, or 0.965–0.987× is; (b) the 7.2× overlay must carry "q8_0
-  pp256 · i9-13950HX · docs/BENCHMARK.md"; (c) "105 files, 408 edges, 0 SCCs"
+  pp256 · i9-13950HX · docs/BENCHMARK.md"; (c) "135 files, 531 edges, 0 SCCs"
   must stay labeled "as recorded in docs/ARCHITECTURE.md" — if the live
   `arch-check` output differs, show the live output unedited and let the
   overlay carry the recorded figure; (d) the residual card keeps the words
@@ -218,7 +218,7 @@ re-measured.
   the conditions caption, or any caveat overlay.
 - **Numbers appearing in the video and their sources (nothing else may be
   quantified):** 7.2× self-speedup, q8_0 pp256, i9-13950HX
-  (`docs/BENCHMARK.md` via §16.0); 105/408/0 (`docs/ARCHITECTURE.md` via
+  (`docs/BENCHMARK.md` via §16.0); 135/531/0 (`docs/ARCHITECTURE.md` via
   §16.2); eleven bands (count of the ARCHITECTURE.md band table quoted in
   §16.1); CV > 8% NOISY default (`tools/bench_gate.py` via §16.6);
   0.36–0.52× pp15–33 band, 0.375–0.509 reverted-gate control (update dated

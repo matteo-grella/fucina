@@ -53,7 +53,7 @@ on the `forward` signature (line 31): `Tensor(.{ .batch, .in })` in,
 `Tensor(.{ .batch, .class })` out.
 
 **Overlay:** "`Tensor(.{ .batch, .in })` ≠ `Tensor(.{ .in, .batch })`" ·
-small credit line: "tagged-tensor approach inspired by ZML (README.md:327)".
+small credit line: "tagged-tensor approach inspired by ZML (README.md:377)".
 
 ### [1:00–1:32] Contraction by name
 
@@ -65,7 +65,7 @@ of the answer is computed from the names in the question.
 
 **Visual:** Code shot: `README.md:31–40`, highlighting the two `dot` calls
 and their comments (`contract .in -> .{ .batch, .h1 }`); then cut to
-`src/ag/tensor.zig:3318`, the real `dot` signature, with the return-type
+`src/ag/tensor.zig:3747`, the real `dot` signature, with the return-type
 expression `!Tensor(dotResultTags(...))` highlighted.
 
 **Overlay:** "Result tags computed at compile time — in return type position."
@@ -84,7 +84,7 @@ program. This is a shape bug that never ran.
 `a: Tensor(.{ .m, .k })`, `b: Tensor(.{ .n, .j })`, `a.dot(ctx, b, .k)`) with
 the `// no .k axis anywhere` comment highlighted; then a terminal-style
 render of the chapter's verbatim compiler trace (§4.7), animated bottom-up:
-call site → `dot` return type (src/ag/tensor.zig:3318) → `dotResultTags` →
+call site → `dot` return type (src/ag/tensor.zig:3747) → `dotResultTags` →
 `src/tags.zig:187: error: tensor tag not found`.
 
 **Overlay:** "Zig 0.16.0 — trace verbatim from the chapter" · "a shape bug
@@ -127,7 +127,7 @@ operation library".
   - `README.md:24–41` — `Model` struct + `forward` (segments 2 and 3).
   - `README.md:56–60` — Fortran shape-discipline paragraph (segment 6 quote
     card).
-  - `src/ag/tensor.zig:3318` — the `dot` signature with `dotResultTags` in
+  - `src/ag/tensor.zig:3747` — the `dot` signature with `dotResultTags` in
     return type position (segments 3 and 4).
   - `src/tags.zig:185–188` — `tagIndexOrCompileError` with the
     `"tensor tag not found"` message (optional inset during segment 4).
@@ -165,7 +165,7 @@ operation library".
   do not add any.
 - **Must not change:** the compiler trace text (verbatim or not at all); the
   claim pairing "names/ranks/dtype = comptime, sizes = runtime" (chapter
-  §4.4, quoting REFERENCE.md §3.1); the ZML credit (README.md:327–328) —
+  §4.4, quoting REFERENCE.md §3.1); the ZML credit (README.md:377–378) —
   it must appear on screen somewhere: keep it in the segment-2 overlay, or
   move it to the segment-6 end card if that overlay is reworked.
 - **Trim order if long:** first the segment-6 `@sizeOf` inset (keep the

@@ -70,7 +70,7 @@ the last reference destroys the storage.
 **Visual:** Quick code shot of the real broadcast loop,
 `src/tensor.zig:464-483`, highlighting the three stride cases (new leading
 axis → 0, matching axis → keep, size-1 axis → 0). On "who frees", cut to
-`release` in `src/storage.zig:117-129`, highlighting `fetchSub` and
+`release` in `src/storage.zig:120-132`, highlighting `fetchSub` and
 `if (old == 1)`.
 
 **Overlay:** "stride 0 = broadcast — no data duplicated" · then: "fetchSub:
@@ -87,7 +87,7 @@ you just wrote is still sitting in L1 or L2 when the next op writes its
 output to the very same lines.
 
 **Visual:** Code shot of the test `"deinit recycles transient buffers through
-the pool"` from `docs/REFERENCE.md:4500-4516` (§6.2). Step-highlight in sync
+the pool"` from `docs/REFERENCE.md:4794-4810` (§6.2). Step-highlight in sync
 with the VO: `const first_ptr = first.dataConst().ptr;` → `first.deinit();`
 → `var second = try ctx.add(&a, &a);` → the final
 `expectEqual(first_ptr, second.dataConst().ptr)`.
@@ -141,11 +141,11 @@ Axes with names".
 - **Diagram 1** (0:00): flat buffer `[1 2 3 4 5 6]` + interpretation card;
   animate the shape/stride swap re-rendering 2×3 → 3×2. Source: chapter §3.1
   ASCII figure.
-- **Code shots** (all real repo files, ranges verified 2026-07-12):
+- **Code shots** (all real repo files, ranges verified 2026-07-17):
   - `src/tensor.zig:94-101` — the four-field raw tensor struct.
   - `src/tensor.zig:464-483` — the broadcast stride loop.
-  - `src/storage.zig:117-129` — `release` with `fetchSub`.
-  - `docs/REFERENCE.md:4500-4516` — the pointer-equality pool test (§6.2).
+  - `src/storage.zig:120-132` — `release` with `fetchSub`.
+  - `docs/REFERENCE.md:4794-4810` — the pointer-equality pool test (§6.2).
   - `src/exec/buffer_pool.zig:185-188` — the LIFO cache-warmth comment.
   - `docs/MEMORY-MODEL.md:10-15` and `docs/MEMORY-MODEL.md:202-211` — the
     arena verdict quote and the 2-vs-32 measurement.
@@ -178,7 +178,7 @@ Axes with names".
 - **Optional terminal beat (settled)**: chapter 03 gives no runnable command
   for the pool test, so the §6.2 snippet stays a code shot. If production
   wants a live run anyway, `zig build snippet-check` is real and in-tree
-  (build.zig:729; docs/REFERENCE.md §2.7 and the §4 target table; it is a CI
+  (build.zig:849; docs/REFERENCE.md §2.7 and the §2.3 target table; it is a CI
   step) — it extracts and runs *every* runnable REFERENCE.md snippet, this
   test included. If shown, frame it as the gate that machine-verifies the
   snippet, not as running this one test in isolation.
@@ -192,4 +192,4 @@ Axes with names".
   pointer-equality test, the LIFO comment, or the arena verdict — they are
   the episode's showcase.
 - **Line-range drift**: code/doc line ranges were verified against the tree
-  on 2026-07-12; re-check before recording if the tree has moved.
+  on 2026-07-17; re-check before recording if the tree has moved.

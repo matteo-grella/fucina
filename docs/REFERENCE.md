@@ -142,6 +142,8 @@ API-level companion. Every Zig snippet is machine-verified against the tree
   - [13.7 SFT data (`src/llm/data.zig`)](#137-sft-data-srcllmdatazig)
   - [13.8 Chat (`src/llm/chat.zig`)](#138-chat-srcllmchatzig)
   - [13.9 Speculative decoding (`src/llm/speculative/`)](#139-speculative-decoding-srcllmspeculative)
+  - [13.10 Cartridges (`src/llm/cartridge.zig`)](#1310-cartridges-srcllmcartridgezig)
+  - [13.11 Engram (`src/llm/engram.zig`)](#1311-engram-srcllmengramzig)
 - [14. Model families and example applications](#14-model-families-and-example-applications)
   - [14.1 Conventions shared by every family](#141-conventions-shared-by-every-family)
   - [14.2 Qwen3 — dense and MoE (`src/llm/qwen3/model.zig`)](#142-qwen3--dense-and-moe-srcllmqwen3modelzig)
@@ -180,7 +182,7 @@ The build exposes two library modules (§2):
 - **`fucina_llm`** (`src/llm.zig`) — the model stack built on top: GGUF
   weight binding, KV caches, tokenizers, samplers, chat sessions,
   speculative decoding, and the model families (Qwen3, Qwen3.5, Gemma 4,
-  DiffusionGemma, DeepSeek V2/V3, GLM-4.5, DeepSeek V4 Flash,
+  DiffusionGemma, DeepSeek V2/V3, GLM-4.5, DeepSeek V4 Flash, Inkling,
   Parakeet ASR).
 
 Applications (`examples/`, `tools/`, `bench/`) sit above both.
@@ -305,7 +307,9 @@ example requires them. System dependencies appear only when options select
 them: a CBLAS provider for `-Dblas=...`, Apple frameworks for
 `-Dgpu=metal`/`-Dblas=accelerate` and the audio examples, libc for
 `-Dgpu=cuda` (the CUDA driver and cuBLAS are `dlopen`ed at runtime — no CUDA
-SDK at build time).
+SDK at build time), and a Rust toolchain for `-Dllguidance=true` (the
+vendored llguidance staticlib is Rust, built via cargo from `build.zig`;
+§2.2).
 
 ```sh
 zig version        # 0.16.0
@@ -326,7 +330,7 @@ kernel arms are not in the binary.
 | `-Daccelerate` | `bool` | unset | Compatibility alias, consulted only when `-Dblas` is absent: `true` → `-Dblas=accelerate`, `false` → `-Dblas=none`. | An explicit `-Dblas` always wins. |
 | `-Dblas-threads` | `u32` | `0` | Pins the vendor BLAS thread count for explicit providers (OpenBLAS/MKL/BLIS/NVPL); `0` keeps the provider default. | No effect with `-Dblas=none`. |
 | `-Dmax-threads` | `usize` | `8` | Comptime worker-team ceiling **and** runtime default thread count (`src/parallel.zig`). Sized for M1 Max P-cores; many-core servers must raise it at build time (`FUCINA_MAX_THREADS` only lowers it at runtime). | Outside 1–64 **panics the build**. |
-| `-Dgpu` | `none` \| `metal` \| `cuda` | `none` | GPU GEMM offload provider (§9). `metal`: big f32/f16 GEMMs, dense quantized prefill linears, and the MoE expert FFN on macOS. `cuda`: the same surface plus fused prefill attention and opt-in decode GEMV on Linux/NVIDIA, no SDK at build time. Decode below the work gates and training stay on CPU. | `metal` on a non-macOS target **panics**; `cuda` on a non-Linux target **panics** (cross-compiling from macOS with `-Dtarget=x86_64-linux-gnu` is the supported path). |
+| `-Dgpu` | `none` \| `metal` \| `cuda` | `none` | GPU GEMM offload provider (§9). `metal`: big f32/f16/bf16 GEMMs, dense quantized prefill linears, and the MoE expert FFN on macOS. `cuda`: the same surface plus fused prefill attention and opt-in decode GEMV on Linux/NVIDIA, no SDK at build time. Decode below the work gates and training stay on CPU. | `metal` on a non-macOS target **panics**; `cuda` on a non-Linux target **panics** (cross-compiling from macOS with `-Dtarget=x86_64-linux-gnu` is the supported path). |
 | `-Dparakeet-mic` | `bool` | `false` | Links the vendored miniaudio capture stack into the `parakeet` example so `--mic` (live microphone) works; default off keeps the parakeet build fast. | Only affects the parakeet executable/tests. |
 | `-Dllguidance` | `bool` | `false` | Builds the vendored [llguidance](../vendor/llguidance/README.md) constrained-decoding engine (`cargo build` in `vendor/llguidance`) and links its staticlib into the qwen3/gemma4/lmserve examples and the llm, lmserve, and snippet-check test roots, enabling `llm.llguidance` grammar/JSON-schema token masking (§13.6). Off (the default) the build stays pure Zig and `llm.llguidance.Constraint.init` returns `error.LlguidanceNotEnabled`; the `LogitProcessor` seam itself is always available. | Requires a Rust toolchain >= 1.87 on PATH when enabled. |
 | `-Dvector-scan` | `bool` | `false` | Vectorizes the scan kernels (`cumsum`/`cumprod` and cumsum's reverse VJP pass). Off = the documented serial-per-row scans. On: non-last-axis scans vectorize across independent columns (bitwise identical to serial); last-axis scans use an in-register prefix scan — still bitwise deterministic for any thread count, but the accumulation order differs from the serial default (the sum-SIMD-lanes rounding class; exact for integer-valued data). Measured M1 ReleaseFast 256×8192: cumsum 3.3×, cumprod 5.2× (last axis), 4.3× (non-last, bit-identical). |
@@ -393,7 +397,7 @@ test "runtime worker count never exceeds the comptime ceiling" {
 ### 2.3 Build steps (`build.zig`)
 
 `zig build` with no step runs the default **install** step: it compiles all
-23 installed executables into `zig-out/bin/` (named `fucina-<name>`).
+27 installed executables into `zig-out/bin/` (named `fucina-<name>`).
 Bench and check executables are *not* installed; they build on demand when
 their step runs. Every example-runner step depends only on its own
 executable's install-artifact step, so `zig build qwen3` builds just that
@@ -407,9 +411,9 @@ the launched program.
 | --- | --- |
 | `test` | Runs the unit tests of all nine test roots (§2.7). No model assets needed. |
 | `test-fucina` | Runs the `fucina`-root unit tests only (the routine `-Dbackend=scalar` leg); the full `test` matrix stays the pre-merge gate. |
-| `bench-check` | Compiles every bench executable without running it — the cheap gate that keeps the bench suite building (bench mains are otherwise reachable only through their run steps). |
+| `bench-check` | Compiles the bench executables without running them (all but the `bench-packed-gemm`/`bench-gpu-dispatch`/`bench-gpu-formats` mains, which only their own run steps build) — the cheap gate that keeps the bench suite building (bench mains are otherwise reachable only through their run steps). |
 | `arch-check` | Builds and runs `tools/check_import_graph.zig`: the production (non-test) `src/**/*.zig` import graph must have zero strongly-connected components. AST-based and test-aware — imports reachable only from `test` decls or test-only private helpers are not counted. |
-| `doc-check` | Builds and runs `tools/check_doc_links.zig`: every backtick-quoted `*.md` in `AGENTS.md`'s "## Doc index" section (root docs and `docs/<name>.md`) must exist on disk. |
+| `doc-check` | Builds and runs `tools/check_doc_links.zig`: every backtick-quoted `*.md` in `AGENTS.md`'s "## Doc index" section (root docs, `docs/<name>.md`, and per-example `examples/<name>/README.md`) must exist on disk; `docs/RUNNING-MODELS.md` is additionally scanned for `examples/<name>/README.md` references. |
 | `snippet-check` | Builds and runs `tools/gen_snippet_tests.zig`: every runnable ```zig snippet in this document (a fenced block with a column-0 named `test "..."`) is extracted into a generated test root and run against the real `fucina`/`fucina_llm` modules with the build's option set — a snippet that stops compiling or asserting fails the gate (conventions in §2.7). |
 | `x86dot-check` | Runs the cross-ISA int8/Q4_K/Q8_0/TQ2_0 dot-kernel parity checker (`src/x86dot_check.zig`, always ReleaseSafe, deterministic output diffable across environments). The run leg follows `-Dtarget` (so `-Dtarget=x86_64-macos -Dcpu=baseline` under Rosetta drives the emulated x86 legs); four additional compile-only legs (x86_64_v3, alderlake, znver4, neoverse_v1) catch bit-rot of the AVX2/AVX-VNNI/AVX512-VNNI/smmla inline-asm arms that the local machine cannot execute. |
 | `cuda-check` | Compile-only `-Dgpu=cuda` legs: semantically analyzes the `fucina`/`fucina_llm` roots and NVRTC PTX generator for `x86_64-linux-gnu` with `gpu_kind=.cuda` (never run), so the CUDA provider/tooling cannot bit-rot on GPU-less/macOS machines. |
@@ -438,6 +442,9 @@ in the per-example `examples/<name>/README.md` and §14):
 | `spirals` | Two-spirals training demo: SGD/AdamW/Muon/APOLLO, checkpoint, resume, infer. |
 | `nam` | Neural Amp Modeler: `.nam` profiles, training, live amp sim (vendored miniaudio + CoreMIDI shims always linked). |
 | `finetune` | LoRA fine-tune of a Qwen3 GGUF on a built-in SFT dataset. |
+| `cartridge` | Train/serve a corpus as a trained-KV-prefix cartridge on a Qwen3 GGUF (§13.10). |
+| `cartridge-fleet` | Per-document cartridge fleets: mixed-visibility training, RAM/disk budget manager, cosine cartridge-RAG (§13.10). |
+| `engram` | Graft conditional n-gram memory onto a frozen Qwen3 GGUF and train it (§13.11). |
 | `es-finetune` | Evolution-strategies fine-tune of a Qwen3 GGUF (`--mode lora\|full`, `--reward rule\|nll\|acc`). |
 | `es-spirals` | Two-spirals MLP trained from scratch by ES (self-verifying). |
 | `es-ternary-spirals` | Ternary-native ES on packed TQ2_0 layers (training state = the int8 inference model; see [`TERNARY.md`](TERNARY.md)). |
@@ -460,6 +467,7 @@ protocol and thermal discipline in [`BENCHMARK.md`](BENCHMARK.md)):
 | `bench-backend` | Scalar vs native backends on representative ops. |
 | `bench-f16gemm` | f16 TransB GEMM parallel efficiency (Qwen3 shapes). |
 | `bench-gemm` | Large-shape f32 GEMM: row kernels vs blocked packed kernel vs BLAS. |
+| `bench-packed-gemm` | Pack-once dense GEMM at skinny-m inference shapes (`bench/packed_gemm.zig`). |
 | `bench-gpu-dispatch` | CPU CBLAS vs blocking/async eager GPU GEMM/GEMV: host-visible latency, submit latency, queued throughput, and parity. |
 | `bench-gpu-formats` | Fucina f16/load-time-packed quant CPU kernels vs eager GPU f16/Q4_K/Q5_K/Q6_K/Q8_0 LLM linears: host-visible latency, submit latency, queued throughput, and parity (Q5_K is CUDA-only). |
 | `bench-q5kmoe` | Q5_K MoE-expert matmul variants. |
@@ -510,7 +518,7 @@ with `b.addModule`; executables get private root modules via
   Not part of the public facade — the root export guard in `src/fucina.zig`
   makes `fucina.RawTensor` a compile error.
 - **`raw_backend`** — root `src/backend.zig`, same options. Direct kernel
-  access for `bench/{backend,f16gemm,gemm,q5kmoe,ternary}.zig`. The
+  access for `bench/{backend,f16gemm,gemm,packed_gemm,gpu_dispatch,gpu_formats,q5kmoe,ternary}.zig`. The
   `bench-backend` executable additionally receives a second options module
   named `bench_options` (`native_blas_kind: BlasKind`,
   `native_uses_blas: bool`, `native_blas_threads: u32`) so it can label its
@@ -530,16 +538,16 @@ keys (`options.addOption(T, name, value)`):
 | `gpu_kind` | `enum { none, metal, cuda }` | `-Dgpu` |
 | `vector_scan` | `bool` | `-Dvector-scan` |
 
-Only seven files outside tests import it, all inside the `fucina` module:
+Only eight files outside tests import it, all inside the `fucina` module:
 `src/parallel.zig`, `src/backend.zig`, `src/backend/native.zig`,
 `src/backend/gpu.zig`, `src/backend/metal.zig`, `src/backend/cuda.zig`,
-`src/exec/reduce.zig` (a `src/ag/tensor_tests.zig` test also branches on
-`vector_scan`). The parakeet executable and
+`src/exec/reduce.zig`, `src/exec/matmul.zig` (a `src/ag/tensor_tests.zig`
+test also branches on `vector_scan`). The parakeet executable and
 its test root get their *own* single-key `build_options`
 (`parakeet_mic: bool`) — the name collides deliberately; the example reads
 its key, the library module keeps its full set.
 
-Linking is centralized in four helpers applied per executable:
+Linking is centralized in six helpers applied per executable:
 
 - `configureBlas(step, blas_kind)` — per provider: link libc plus
   `Accelerate` (framework), `openblas`, `mkl_rt`, `blis`, `nvpl_blas`, or
@@ -569,7 +577,7 @@ There is no package manifest, so today a consumer vendors the repository
 `build.zig` with the same `std.Build` calls the in-tree build uses. The
 option enums must be re-declared, but only the *field names* matter — the
 fucina sources switch on them by name — and all eight keys are required
-(compilation of `src/parallel.zig`/`src/backend.zig`/`src/exec/reduce.zig`
+(compilation of `src/parallel.zig`/`src/backend.zig`/`src/backend/gpu.zig`/`src/exec/reduce.zig`
 fails on a missing key). Keep the two derived booleans consistent with
 their enums.
 
@@ -662,7 +670,7 @@ values. On Linux without libc the lookup scans `/proc/self/environ`
 (`src/parallel.zig`), so `FUCINA_MAX_THREADS` also works in static builds.
 
 **Core runtime** (`src/parallel.zig`, `src/exec/conv.zig`,
-`src/exec/attention.zig`):
+`src/exec/attention.zig`, `src/exec/matmul.zig`):
 
 | Variable | Effect | Default |
 | --- | --- | --- |
@@ -675,6 +683,8 @@ values. On Linux without libc the lookup scans `/proc/self/environ`
 | `FUCINA_WINOGRAD_F4_MAXCIN` | Maximum input channels for the F4 tier (deep-channel maps run faster on F2). | `56` |
 | `FUCINA_NO_CONV_BWD_GEMM=1` | Pins the `groups == 1` conv2d backward entries to the direct gather kernels instead of the GEMM (matmul + im2col/col2im) decomposition (A/B + emergency revert switch). | GEMM route on |
 | `FUCINA_ATTN_BWD_STATS=1` / `FUCINA_NO_ATTN_BWD_STATS=1` | Force the forward-saved-stats route of the attention-backward softmax reconstruction (`src/exec/attention.zig`) on/off (A/B + emergency revert switches) — the two routes agree to f32 roundoff, not bitwise; only consulted when the autograd record saved forward stats (the stats-less exec path always recomputes). | on |
+| `FUCINA_CPU_F32_SHADOW=1` | Opt-in (`src/exec/matmul.zig`): attaches a widen-once f32 shadow to a 16-bit weight's storage and routes m ≥ 32 GEMMs through the BLAS f32 path (decode stays on the streaming kernels). +4 bytes/weight resident; leave off when training 16-bit weights in place. CPU builds only. | off |
+| `FUCINA_CPU_F32_SHADOW_MIN_M` | Overrides the shadow route's m ≥ 32 crossover. | `32` |
 
 **GPU offload** (read by both providers unless noted;
 `src/backend/metal.zig`, `src/backend/cuda.zig`; see §9):
@@ -685,6 +695,7 @@ values. On Linux without libc the lookup scans `/proc/self/environ`
 | `FUCINA_GPU_MIN_WORK` | Base f32 GEMM offload gate, in m·n·k work units. | Metal `2^32` (cold single-op crossover); CUDA `2^30` (the transient floor below still dominates ordinary host RHS) |
 | `FUCINA_GPU_MIN_WORK_F16` | f16 GEMM gate. | `2^27` (lower — the CPU f16 competitor has no AMX-class arm) |
 | `FUCINA_GPU_MIN_WORK_F16_RESIDENT` (cuda) | f16 GEMM/GEMV gate when the RHS already has a device address; permits small-m decode without admitting a streamed weight. | `2^20` |
+| `FUCINA_GPU_MIN_WORK_16BIT_RESIDENT` (metal) | f16/bf16 GEMM gate when the RHS is already Metal-mapped; admits batched decode at m ≥ 16 and the lm-head row while narrow decode stays on the CPU streaming kernels. | `2^27` |
 | `FUCINA_GPU_MIN_WORK_GEMV` | Resident dense-f32 GEMV/small-m GEMM gate (`m <= 8`; nonresident CUDA RHS is refused). | `2^24` |
 | `FUCINA_GPU_MIN_WORK_RESIDENT` (cuda) | Dense-f32 GEMM/batched-GEMM gate when the RHS already has a device address. | `2^27` (512³; 256³ loses to OpenBLAS-32 on the reference host) |
 | `FUCINA_GPU_MIN_WORK_QMOE` | Grouped quantized MoE GEMM gate; setting it also re-seeds the dense-Q6 gate. | `2^30` |
@@ -704,14 +715,16 @@ values. On Linux without libc the lookup scans `/proc/self/environ`
 | `FUCINA_GPU_VRAM_BUDGET` (cuda) | Weight-residency budget in bytes; `0` disables the bound. | 80% of free VRAM at init |
 | `FUCINA_GPU_KERNELS=src` (cuda) | NVRTC-recompiles the vendored kernels from `kernels.cu` instead of loading the committed PTX (dev loop; `tools/gen_cuda_ptx.sh` regenerates the PTX). | committed PTX |
 
-**LLM weight loading** (`src/llm/weights.zig`, §13.2; read once and
-cached like the tables above):
+**LLM stack** (`src/llm/weights.zig` §13.2, `src/llm/qwen3/train.zig`,
+`src/llm/inkling/mmproj.zig`; read once and cached like the tables above):
 
 | Variable | Effect | Default |
 | --- | --- | --- |
 | `FUCINA_NORM_QUANT_FUSED=1` / `FUCINA_NO_NORM_QUANT_FUSED=1` | Force the fused normalize+quantize+packed-GEMM route of `linearSeqNormed` on/off (prefill shapes on the packed CPU arms only; the fused route matches the unfused `rmsNormMul` + linear pair to f32 roundoff, not bitwise). | on |
 | `FUCINA_Q5K_DECODE_COMPACT=1` / `FUCINA_NO_Q5K_DECODE_COMPACT=1` | Route decode-shape (m < 4) no-grad Q5_K matmuls through the GGUF-native compact blocks instead of the byte-expanded packed layout — bitwise-equal, ~1.57× fewer weight bytes streamed. | on on x86_64, off elsewhere |
 | `FUCINA_Q6K_DECODE_COMPACT=1` / `FUCINA_NO_Q6K_DECODE_COMPACT=1` | The same switch for Q6_K (1.30× byte ratio). | on on x86_64, off elsewhere |
+| `FUCINA_NO_FUSED_DISTILL=1` | Forces the composed logits + `cartridge.distillLoss` tail instead of the fused distill route in cartridge training (`src/llm/qwen3/train.zig`; A/B + emergency revert — the fused route matches it to f32 roundoff, not bitwise). | fused route on |
+| `FUCINA_MM_PROFILE=1` | Per-stage timing profile of the Inkling multimodal-projector encode (`src/llm/inkling/mmproj.zig`; read once at load). | off |
 
 **Examples and test gates** (`examples/`):
 
@@ -727,7 +740,7 @@ cached like the tables above):
 ### 2.7 Test organization (`src/`, `examples/`)
 
 Tests live in **sibling `*_tests.zig` files** next to the production file
-they cover (143 of them across `src/` and `examples/`): `exec.zig` ↔
+they cover (155 of them across `src/` and `examples/`): `exec.zig` ↔
 `exec_tests.zig`, `src/llm/tokenizer.zig` ↔ `src/llm/tokenizer_tests.zig`,
 and so on. The production file pulls its sibling in with a forwarding
 stanza, so analyzing the production file analyzes its tests:
@@ -748,7 +761,8 @@ binary with the same option set as the corresponding executable:
 
 1. `src/fucina.zig` — the core (with `build_options`);
 2. `src/llm.zig` — the LLM/ASR stack (imports `fucina`);
-3. `examples/lmserve/main.zig` (imports `fucina` and `fucina_llm`; links libc);
+3. `examples/lmserve/main.zig` (imports `fucina`, `fucina_llm`, and the
+   shared nanochat module; links libc);
 4. `examples/nam/main.zig` (with the audio/MIDI shims linked);
 5. `examples/parakeet/main.zig` (with its `parakeet_mic` options);
 6. `examples/omnivoice/main.zig` (with the playback shim);
@@ -805,8 +819,8 @@ via `mlugg/setup-zig@v2`. Steps, in order:
 1. `zig build test` — native backend (Accelerate on macOS, no BLAS on Linux,
    per the `-Dblas` default);
 2. `zig build` — all executables compile;
-3. `zig build bench-check` — every bench executable compiles (bench mains
-   are reachable only through their run steps, so nothing else in the
+3. `zig build bench-check` — the bench-check set compiles (bench mains are
+   reachable only through their run steps, so nothing else in the
    build graph exercises them);
 4. `zig build arch-check` — import-graph gate;
 5. `zig build doc-check` — doc-index link gate;
@@ -1816,7 +1830,8 @@ test "detach and cast rules" {
 ### 3.9 Gradient accessors (`src/ag/tensor.zig`, `src/ag/core.zig`; mechanics in §5)
 
 f32-branch surface. `requiresGrad` also exists on every other branch:
-hard-wired `false` on the scalar/quantized/f64 constants, a real
+hard-wired `false` on the scalar/quantized constants (never true on f64 —
+no leaf can exist), a real
 `grad_state != null` check on f16/bf16 — whose leaf-autograd accessors
 (`variable`, `grad`, `gradView`, `zeroGrad`, `detach`) mirror the f32 ones
 with f32-dtype gradient results (§5.1).
@@ -1898,7 +1913,7 @@ methods are documented above; §4 covers every math/NN op in depth.
 `relu`, `leakyRelu`, `exp`, `sqrt`,
 `rsqrt`, `sigmoid`, `silu`, `log`, `neg`, `abs`, `sin`, `cos`, `tanh`,
 `fastTanh`, `softcap30`, `softcap15`, `gelu`, `quickGelu`, `elu`, `geluErf`,
-`floor`, `ceil`, `round`, `sign`, `reciprocal`, `clamp`,
+`floor`, `ceil`, `round`, `sign`, `reciprocal`, `clamp`, `clampMin`, `clampMax`,
 `maximum`, `minimum`, `pow`, `isnan`, `isinf`, `isfinite`,
 `dropout`, `gated`, `glu`, `swiglu`, `geglu`, `splitGated`, `sum`, `mean`,
 `cumsum`, `prod`, `cumprod`, `linearRecurrence`, `variance`,
@@ -1911,7 +1926,7 @@ methods are documented above; §4 covers every math/NN op in depth.
 `groupNorm`, `crossEntropy`, `crossEntropyExt`, `linearCrossEntropyExt`, `linearDistillExt`,
 `mseLoss`, `huberLoss`,
 `bceLoss`, `klDivLoss`, `nllLoss`, `l2Normalize`, `cosineSimilarity`,
-`rope`, `matmul`, `dot`, `einsum`, `dotTernarySte`, `dotPacked`,
+`rope`, `matmul`, `dot`, `einsum`, `dotTernarySte`, `packRhs`, `dotPacked`,
 `rmsNormMulDotPacked`,
 `splitSwiGluDotPacked`, `gegluQuantDotPacked`, `groupedAttention`,
 `conv2d`, `conv2dRelu`, `prepareConv2dWeights`, `conv2dPrepared`,
@@ -2023,8 +2038,8 @@ Every operation below shares one contract, implemented by the shared tails
   `RopeMode`, `RopeTable`, `RopeTheta`, `MoeRhs`, `MoeBatchProfile`,
   `PackedRhs`, `PackedRhsLayout`, `GatedOp`. The remaining option types
   named in this section (`CompareOp`, `MatmulKind`, `MseOptions`,
-  `HuberOptions`, `BceOptions`, `KlDivOptions`, `SoftmaxExtOptions`,
-  `NormOrder`) live in
+  `HuberOptions`, `BceOptions`, `KlDivOptions`, `LinearDistillOptions`,
+  `SoftmaxExtOptions`, `NormOrder`) live in
   `src/exec.zig` and are reached through enum/struct literals at call sites
   (`.swiglu`, `.lt`, `.trans_b`, `.{ .reduction = .none }`).
 
@@ -3697,7 +3712,8 @@ Routed expert FFNs run below the tag facade, directly on `ExecContext`
 
 ```zig
 pub const MoeRhs = union(enum) { q4_k: ..., q5_k: ..., q6_k: ..., q8_0: ...,
-    tq2_0: ..., ptqtp: ..., q2_k: ..., iq2_xxs: ..., iq3_xxs: ..., streamed: ... };  // fucina.MoeRhs
+    tq2_0: ..., ptqtp: ..., q2_k: ..., iq2_xxs: ..., iq3_xxs: ..., iq2_s: ...,
+    iq4_xs: ..., q3_k: ..., streamed: ... };  // fucina.MoeRhs
 pub fn moeExpertFfn(self: *ExecContext, x: *const Tensor,
     gate: *const MoeRhs, up: *const MoeRhs, down: *const MoeRhs,
     selected: []const usize, weights: []const f32,
@@ -3708,7 +3724,7 @@ pub fn moeExpertFfnBatch(..., top_k: usize, ...) !Tensor
 `fucina.MoeRhs` stacks all experts of one layer's gate/up/down projection
 into a single compact-block RHS (experts are row-contiguous zero-copy
 sub-views; the resident arms cover q4_k/q5_k/q6_k/q8_0/tq2_0/q2_k/
-iq2_xxs/iq3_xxs, plus a `streamed` arm whose expert blocks resolve
+iq2_xxs/iq3_xxs/iq2_s/iq4_xs/q3_k, plus a `streamed` arm whose expert blocks resolve
 through the disk-backed expert store (`src/exec/expert_store.zig`)
 instead of one resident buffer). The `ptqtp` arm holds K ∈ {1..3} tq2_0
 plane stacks (PTQTP experts, §10.9): the fused op runs the ternary tile
@@ -4125,7 +4141,7 @@ but only for records that opt in through the vtable: `prefer_async_backward
 = true` (no in-tree record currently sets it) or an `estimated_work()` at or
 above `parallel.backward_async_work_threshold` (`256 * 1024 * 1024` work
 units; provided by the attention, causal-conv1d-family, gather,
-linear-cross-entropy, `Conv1d`/`Conv2d`, `Dot`, and ternary-STE-dot
+linear-cross-entropy, linear-distill, `Conv1d`/`Conv2d`, `Dot`, and ternary-STE-dot
 records). Node-level spawning is
 additionally gated at comptime by `exec.parallel_dot_backward_branches`
 (native backend with BLAS, §9) — on scalar or no-BLAS builds every node runs
@@ -4252,7 +4268,7 @@ them for you (§6, [TRAINING.md](TRAINING.md)). The *composed* facade ops
 (`nllLoss`, `l2Normalize`, `cosineSimilarity`, `norm`, `normAll`,
 `maskedSelect`, `maskedScatter`, `select`, `slice` (more than one sliced
 axis), `reshape` (multi-tag targets), `rollBy`, `shiftBy`, `trace`,
-`diag`, `constantPad2d`/`zeroPad2d`, `stack`, `unbindInto`, `einsumMany`)
+`diag`, `diagEmbed`, `constantPad2d`/`zeroPad2d`, `stack`, `unbindInto`, `einsumMany`)
 create function-local graph nodes and therefore require an active exec
 scope when any operand requires gradients — they fail loudly with
 `error.ActiveExecScopeRequired` instead of dangling operand pointers; the
@@ -6189,6 +6205,7 @@ this table is the storage geometry:
 | `DType` | Block struct | Elems/block (`blockSize`) | Bytes/block (`blockByteSize`) |
 |---|---|---|---|
 | `.q1_0` | `BlockQ1_0` | 128 | 18 |
+| `.q2_0` | `BlockQ2_0` | 128 | 34 |
 | `.q4_0` | `BlockQ4_0` | 32 | 18 |
 | `.q4_1` | `BlockQ4_1` | 32 | 20 |
 | `.q5_0` | `BlockQ5_0` | 32 | 22 |
@@ -6215,7 +6232,7 @@ this table is the storage geometry:
 | `.mxfp4` | `BlockMXFP4` | 32 | 17 |
 | `.nvfp4` | `BlockNVFP4` | 64 (16-elem subblocks) | 36 |
 
-The block structs and the size constants (`q1_0_block_size`,
+The block structs and the size constants (`q1_0_block_size`, `q2_0_block_size`,
 `q4_0_block_size`, `q4_1_block_size`, `q5_0_block_size`, `q5_1_block_size`,
 `q8_0_block_size`, `q8_1_block_size`, `qk_k_block_size` = 256,
 `k_scale_size` = 12, `iq4_nl_block_size`, `mxfp4_block_size`,
@@ -6801,6 +6818,7 @@ pub const internal = struct {
 |---|---|---|
 | `enabled` | `bool` (comptime) | true on GPU builds (`-Dgpu=metal` or `-Dgpu=cuda`, §2): GPU GEMM offload is compiled in |
 | `has_quant_gemm` | `bool` (comptime) | provider implements dequant-in-kernel quantized GEMM (dense + grouped MoE). Loaders that reshape CPU representations for the GPU quant path key on this, **not** on `enabled` — a provider can be enabled while its quantized arms are still CPU-only |
+| `has_q5_k_quant` | `bool` (comptime) | provider additionally implements Q5_K dense/grouped quantized kernels (CUDA only at present, §9.9.2) |
 | `allocResidentBytes` | `fn (len: usize) ?[]u8` | device-owned bytes for GPU-build loaders; `null` when unavailable (no device context, `len == 0`, or too large) |
 | `freeResidentBytes` | `fn (bytes: []const u8) void` | release bytes returned by `allocResidentBytes`; safe no-op when the device context is gone or the slice is foreign |
 | `traceEnabled` | `fn () bool` | opt-in dispatch tracing, enabled by `FUCINA_GPU_TRACE=1` |
@@ -6958,7 +6976,7 @@ pub const Backend = struct {
 
     pub fn init() Backend { return .{}; }
     pub fn setWorkPool(self: *Backend, pool: ?*thread.Pool) void;
-    // ~90 kernel entry points, all forwarding to the active implementation
+    // ~100 kernel entry points, all forwarding to the active implementation
 };
 ```
 
@@ -7681,7 +7699,7 @@ and are re-exported at the root (`fucina.BlockQ4_K`, ...).
 Reading the table:
 
 - **f32 encoder** — the format has a `quantizeRowForDType` prong (§10.6).
-  Every format decodes to f32 (`dequantizeRowForDType` covers all 26), so
+  Every format decodes to f32 (`dequantizeRowForDType` covers all 27), so
   "encoder = —" means *decode/matmul-only*: usable as loaded weights, never
   producible in-process or by `gguf.encodeF32`.
 - **Matmul kernel** — *hot* formats have dedicated SIMD kernels plus packed
@@ -7692,14 +7710,15 @@ Reading the table:
   *activation* side of the int8 dots and as decodable tensor data.
 - **LHS activation** — the block format the f32 activations are dynamically
   quantized to before the int8 dot (§10.5): Q8_0 for the 32-element weight
-  families plus `.q1_0` (128) and `.nvfp4` (64), Q8_1 for the offset formats
+  families plus `.q1_0`/`.q2_0` (128) and `.nvfp4` (64), Q8_1 for the offset formats
   `.q4_1`/`.q5_1` (the offset term needs the per-block activation sum Q8_1
   carries), Q8_K for all 256-element formats.
 - First-class end-to-end (encoder + hot kernel + GGUF export): `.q8_0`,
-  `.q4_k`, `.q5_k`, `.q6_k`, `.tq2_0` — the first four additionally have
-  packed (column-interleaved) RHS layouts; `.tq2_0` has none
-  (`PackedRhsLayout` has no ternary member; `packRhs` on a `.tq2_0` tensor
-  is a compile error — its dedicated kernels work from plain blocks).
+  `.q4_k`, `.q5_k`, `.q6_k`, `.tq2_0`, `.q2_0` — the first four additionally
+  have packed (column-interleaved) RHS layouts; the ternary formats
+  `.tq2_0`/`.q2_0` have none (`PackedRhsLayout` has no ternary member;
+  `packRhs` on a `.tq2_0` or `.q2_0` tensor is a compile error — their
+  dedicated kernels work from plain blocks).
 
 The kernel tier's trait layer describes each format programmatically:
 `QuantizedMatmulFormat` (enum: `fucina_w8a8_rhs` plus `ggml_*` per dtype),
@@ -7710,7 +7729,7 @@ The kernel tier's trait layer describes each format programmatically:
 `QuantizedStorageLayout`, `QuantizedScaleLayout` enums. Block-size constants
 (`q8_0_block_size` = 32, `qk_k_block_size` = 256, `k_scale_size` = 12,
 `iq4_nl_block_size`/`mxfp4_block_size` = 32, `nvfp4_block_size` = 64,
-`nvfp4_subblock_size` = 16, `q1_0_block_size` = 128, `q4_0_block_size`,
+`nvfp4_subblock_size` = 16, `q1_0_block_size`/`q2_0_block_size` = 128, `q4_0_block_size`,
 `q4_1_block_size`, `q5_0_block_size`, `q5_1_block_size`,
 `q8_1_block_size`) originate in `src/dtype.zig`; `fucina.q8_0_block_size`
 is re-exported at the root.
@@ -7894,14 +7913,14 @@ re-exported at the root:
 defines `QuantizedMatmulRhsQ8_0`, `QuantizedMatmulRhsQ4_0`,
 `QuantizedMatmulRhsQ3_K`, the
 `QuantizedMatmulRhsRowsFor(dtype)` generic (instantiated as
-`QuantizedMatmulRhs{Q1_0,Q4_1,Q5_0,Q5_1,IQ1_S,IQ1_M,IQ2_XXS,IQ2_XS,IQ2_S,
+`QuantizedMatmulRhs{Q1_0,Q2_0,Q4_1,Q5_0,Q5_1,IQ1_S,IQ1_M,IQ2_XXS,IQ2_XS,IQ2_S,
 IQ3_XXS,IQ3_S,IQ4_NL,IQ4_XS,TQ1_0,TQ2_0,MXFP4,NVFP4}`), the
 row wrappers (`QuantizedRowsQ8_1` instantiates the `QuantizedRowsFor(dtype)`
 generic; `QuantizedRowsQ8_0` and `QuantizedRowsQ4_0` are hand-written, and
 `QuantizedRowsQ4_0`'s allocator is non-optional — no borrow support), and
 the type-erased `AnyQuantizedMatmulRhs` union the backends dispatch on. A
 plain container is blocks + `k`/`n` dims; the hot-format containers (`Q8_0`,
-`Q4_K`, `Q5_K`, `Q6_K`), the `Q2_K` container, and the
+`Q4_K`, `Q5_K`, `Q6_K`), the `Q2_K`/`Q3_K` containers, and the
 `QuantizedRowsFor` generic carry an
 **optional allocator**:
 `allocator = null` means the blocks are *borrowed* (mmap'd GGUF, packed ES
@@ -8034,8 +8053,8 @@ still use the provider's blocking GPU path, but no address-keyed wrap survives
 the call and the borrowed bytes cannot be retained by an async command.
 `fucina_llm`'s weight wrappers thread `.stable_process` through for resident
 or mmap'd weights (§13); that lifetime first tries the direct-output async
-path (Metal and CUDA support up to 8192 activation rows per dense-quant
-submission) and falls back to balanced blocking chunks of at most 2048 rows
+path (Metal admits up to 8192 activation rows per dense-quant submission;
+CUDA grows its slot table) and falls back to balanced blocking chunks of at most 2048 rows
 when necessary. Q4_K/Q5_K/Q6_K/Q8_0 prefill uses provider- and format-specific work
 gates calibrated against the actual compact/raw or load-time-packed CPU
 fallback. Decode `m <= 8` remains behind the provider's explicit GEMV opt-in.
@@ -8048,7 +8067,7 @@ family (all ggml-parity):
 
 - **Q8_0** (`quantizeRowQ8_0Into`, `quantizeRowsQ8_0Into`,
   `quantizeRowsQ8_0`): per-32 symmetric absmax — `d = amax/127` stored as
-  f16, `q = round(x/d)` clamped to i8. Consumed by q1_0/q4_0/q5_0/q8_0 and
+  f16, `q = round(x/d)` clamped to i8. Consumed by q1_0/q2_0/q4_0/q5_0/q8_0 and
   the table formats iq4_nl/mxfp4/nvfp4.
 - **Q8_1** (`quantizeRowQ8_1Into`, `quantizeRowsQ8_1` — defined in
   `src/backend/quant/cold.zig`, re-exported through `quant.zig`): Q8_0 plus
@@ -8093,7 +8112,7 @@ pub fn dequantizeRowForDType(comptime tensor_dtype: DType, dst: []f32, blocks: [
 pub fn blockCountForDType(comptime tensor_dtype: DType, len: usize) !usize
 ```
 
-`quantizeRowForDType` covers `.q4_0`, `.q4_1`, `.q5_0`, `.q5_1`, `.q8_0`,
+`quantizeRowForDType` covers `.q2_0`, `.q4_0`, `.q4_1`, `.q5_0`, `.q5_1`, `.q8_0`,
 `.q8_1`, `.q4_k`, `.q5_k`, `.q6_k`, `.q8_k`, `.tq2_0`; any other dtype is a
 compile error. `src.len` must be a whole number of blocks and `dst.len` must
 equal `blockCountForDType(dtype, src.len)` —
@@ -8113,7 +8132,7 @@ validates `dst.len == tensorByteLen(...)`, rejects non-finite input on the
 block formats with `error.NonFiniteValue` (release builds too — the same
 guard llama.cpp applies at its quantize seam), requires `dst` to be aligned
 for the block struct, and dispatches to `quantizeRowForDType`. Supported
-block targets: q4_0, q4_1, q5_0, q5_1, q8_0, q4_k, q5_k, q6_k, tq2_0
+block targets: q2_0, q4_0, q4_1, q5_0, q5_1, q8_0, q4_k, q5_k, q6_k, tq2_0
 (scalar f32/f16/bf16 cast element-wise); everything else returns
 `error.EncoderUnavailable`. `gguf.decodeF32` is the exact mirror
 (`error.DecoderUnavailable` for formats it does not cover).
@@ -9890,7 +9909,7 @@ pub fn tensorByteLen(ggml_type: GgmlType, dims: []const usize) !usize
 ```
 
 `GgmlType` carries the ggml wire codes for: `f32`, `f16`, `bf16`, `f64`,
-`i8`, `i16`, `i32`, `i64`, the block quants `q1_0 q4_0 q4_1 q5_0 q5_1 q8_0
+`i8`, `i16`, `i32`, `i64`, the block quants `q1_0 q2_0 q4_0 q4_1 q5_0 q5_1 q8_0
 q8_1 q2_k q3_k q4_k q5_k q6_k q8_k`, the i-quants `iq1_s iq1_m iq2_xxs
 iq2_xs iq2_s iq3_xxs iq3_s iq4_nl iq4_xs`, the ternaries `tq1_0 tq2_0`, and
 the microscaling floats `mxfp4 nvfp4`. An unknown wire code fails parsing
@@ -10079,7 +10098,7 @@ length contract — the byte slice must equal
 | Format group | `encodeF32` | `decodeF32` | Path |
 |---|---|---|---|
 | `f32`, `f16`, `bf16` | yes | yes | element-wise cast (f16 may overflow to inf on out-of-range values, matching ggml's scalar conversion) |
-| `q4_0 q4_1 q5_0 q5_1 q8_0 q4_k q5_k q6_k tq2_0` | yes | yes | byte-exact ggml-parity block codecs: `quantizeRowForDType` / `dequantizeRowForDType` (§10) |
+| `q2_0 q4_0 q4_1 q5_0 q5_1 q8_0 q4_k q5_k q6_k tq2_0` | yes | yes | byte-exact ggml-parity block codecs: `quantizeRowForDType` / `dequantizeRowForDType` (§10) |
 | everything else (`q2_k`, `q3_k`, i-quants, `mxfp4`, ...) | `Error.EncoderUnavailable` | `Error.DecoderUnavailable` | — |
 
 Additional block-format contracts:
@@ -10168,7 +10187,8 @@ quality risk. Block divisibility still rules.
 
 **PTQTP policy** (mode c — full treatment in docs/PTQTP.md): eligible = 2D
 matrix or 3D `*_exps` expert stack, name ends `.weight`, no `norm`,
-`dims[0] % 256 == 0`, source dtype decodable to f32 (quantized sources ARE
+`dims[0] % 256 == 0`, source dtype decodable to f32 and not already ternary
+(quantized sources ARE
 accepted — they dequantize first, the paper-validated
 graceful-degradation path). Embeddings and `output.weight` stay in source
 precision unless `--ptqtp-include` says otherwise. Expert stacks quantize
@@ -10213,14 +10233,14 @@ pub const DType = enum {
     pub fn bitsize(self: DType) usize
     pub fn string(self: DType) []const u8
 };
-pub fn dtypeFromFucina(dtype: fucina.DType) !DType   // f32/f16/bf16 only
-pub fn dtypeToFucina(dtype: DType) !fucina.DType     // F32/F16/BF16 only
+pub fn dtypeFromFucina(dtype: fucina.DType) !DType   // f32/f16/bf16/i64 only
+pub fn dtypeToFucina(dtype: DType) !fucina.DType     // F32/F16/BF16/I64 only
 ```
 
 Every upstream dtype tag round-trips as raw bytes, including the sub-byte
 `F4` (4-bit) and `F6_*` (6-bit) types — for those, the total bit count of a
 tensor must land on a byte boundary (`Error.MisalignedSlice` otherwise).
-Only `F32`/`F16`/`BF16` map to core `DType`s; both direction functions
+Only `F32`/`F16`/`BF16`/`I64` map to core `DType`s; both direction functions
 return `Error.UnsupportedDtype` for the rest.
 
 #### 12.5.2 Reading
@@ -10364,7 +10384,7 @@ frame of §12.5 with no `__metadata__` entry — there is no bespoke stream
 format for state dicts. Entry names become the safetensors header keys
 unchanged (hence the §11.7 name rules: non-empty, NUL-free, unique UTF-8,
 not `"__metadata__"`); dtypes map through `dtypeFromFucina`/`dtypeToFucina`
-(§12.5), with only F32/F16/BF16 produced or accepted; tensor payloads are
+(§12.5), with only F32/F16/BF16/I64 produced or accepted; tensor payloads are
 raw little-endian storage bytes, no conversion in either direction.
 `loadStateDict` consumes one frame from a stream via `readPrefix` (§11.8),
 so a state dict can be embedded in a longer stream. Any safetensors
@@ -10435,7 +10455,7 @@ family-agnostic helpers stay flat:
 | Namespace | Contents | Files |
 |---|---|---|
 | `llm.qwen3` | `model`, `train` — Qwen3 dense + LoRA fine-tuning | `llm/qwen3/` |
-| `llm.qwen35` | `model` — Qwen3.5 Gated-DeltaNet hybrid | `llm/qwen35/` |
+| `llm.qwen35` | `model`, `chat` — Qwen3.5 Gated-DeltaNet hybrid | `llm/qwen35/` |
 | `llm.gemma` | `gemma4`, `gemma4_train`, `moe`, `moe_route`, `moe_route_tensor` | `llm/gemma/` |
 | `llm.diffusion_gemma` | `model` — block text-diffusion on the gemma4 backbone | `llm/diffusion_gemma/` |
 | `llm.parakeet` | `loader`, `frontend`, `subsampling`, `encoder`, `weights`, `decoder`, `tokenizer`, `streaming`, `transcription` — NeMo FastConformer/RNN-T ASR | `llm/parakeet/` |
@@ -10443,7 +10463,7 @@ family-agnostic helpers stay flat:
 | `llm.deepseek2` | `model` — DeepSeek-V2 MLA + fine-grained MoE with shared experts | `llm/deepseek2/` |
 | `llm.glm4moe` | `model` — GLM-4.5 MoE with native MTP (`nextn`) self-speculation | `llm/glm4moe/` |
 | `llm.deepseek4` | `model` — DeepSeek V4 Flash (hyper-connections, compressed-KV MQA, streamed experts, MTP) | `llm/deepseek4/` |
-| `llm.inkling` | `model`, `mmproj` — Inkling (hybrid SWA/global rel-bias attention, shortconv sites, sink-shared MoE; hMLP vision + dMel audio towers) | `llm/inkling/` |
+| `llm.inkling` | `model`, `mmproj`, `chat` — Inkling (hybrid SWA/global rel-bias attention, shortconv sites, sink-shared MoE; hMLP vision + dMel audio towers) | `llm/inkling/` |
 
 | Flat helper | Purpose | Section |
 |---|---|---|
@@ -10462,6 +10482,7 @@ family-agnostic helpers stay flat:
 | `llm.chat` | templates + generic `Conversation(Model, Tok)` | §13.8 |
 | `llm.cartridge` | trained KV-prefix corpus compression (Cartridges, arXiv 2506.06266) | §13.10 |
 | `llm.cartridge_fleet` | per-document cartridge fleets: manifest, RAM/disk budget manager, cosine chunk index (Cartridges at Scale, arXiv 2606.04557) | §13.10 |
+| `llm.engram` | conditional n-gram memory: hashed-lookup embedding tables grafted onto a frozen model (Engram, arXiv 2601.07372) | §13.11 |
 
 The family namespaces are covered in §14 (deepseek2/glm4moe/deepseek4/
 inkling by their module doc comments); this section documents the shared
@@ -10482,7 +10503,7 @@ pub const LinearWeight = union(enum) {
     bf16: WeightBf16,   // fucina.Tensor(.{ .dtype = .bf16, .tags = .{ .out, .in } })
     q8_0: WeightQ8_0, q4_k: WeightQ4_K, q5_k: WeightQ5_K, q6_k: WeightQ6_K,
     // plus one QuantWeight(dtype) arm per remaining GGUF block format:
-    // q1_0, q4_0, q4_1, q5_0, q5_1, q2_k, q3_k, iq1_s, iq1_m, iq2_xxs, iq2_xs,
+    // q1_0, q2_0, q4_0, q4_1, q5_0, q5_1, q2_k, q3_k, iq1_s, iq1_m, iq2_xxs, iq2_xs,
     // iq2_s, iq3_xxs, iq3_s, iq4_nl, iq4_xs, tq1_0, tq2_0, mxfp4, nvfp4
     ptqtp: WeightPtqtp, // 1-3 packed TQ2_0 trit-planes (PTQTP, section 10.9)
 };
@@ -10711,8 +10732,8 @@ pub fn moeSwiGluFfnSeq(ctx, input: *const Tensor(.{ .seq, .embed }),
 (`blk.N.ffn_{gate,up,down}_exps.weight`, GGUF shape `[in, out, n_expert]`) as
 a single packed matmul RHS; the fused MoE kernel slices each expert as a
 zero-copy row block. Supported expert formats: the K-quants
-(q2_k/q4_k/q5_k/q6_k) plus q8_0 (llama.cpp's fallback when an expert dim is
-not a 256 multiple), iq2_xxs, iq3_xxs, and tq2_0 —
+(q2_k/q3_k/q4_k/q5_k/q6_k) plus q8_0 (llama.cpp's fallback when an expert dim is
+not a 256 multiple), iq2_xxs, iq2_s, iq3_xxs, iq4_xs, and tq2_0 —
 other formats are `Error.UnsupportedWeightType`. With `borrow = true` the
 blocks are borrowed straight from the (mmapped) GGUF, skipping the multi-GB
 copy; the caller must then keep the mapping alive for the model's lifetime
@@ -10954,7 +10975,7 @@ is the turnkey consumer and resumes `kv_prefix_rows` from the file.
 
 `llm.tokenizer.Tokenizer` is a native byte-level BPE tokenizer (GPT-2/Qwen
 family) built entirely from a model's GGUF metadata
-(`tokenizer.ggml.{tokens,merges,pre,bos_token_id,eos_token_id,add_bos_token,add_eos_token}`)
+(`tokenizer.ggml.{tokens,merges,pre,token_type,bos_token_id,eos_token_id,add_bos_token,add_eos_token}`)
 — no external tokenizer dependency, no per-model hardcoding. Error set:
 `error{ NoTokenizerVocab, UnsupportedTokenizerFormat, TokenizerTooLarge } || Allocator.Error`.
 
@@ -11011,9 +11032,12 @@ pub fn vocabSize(self) usize
 pub fn eosId(self) ?u32 / pub fn bosId(self) ?u32 / pub fn isEos(self, id: u32) bool
 ```
 
-`encode`/`encodeRaw` resolve `<|...|>` special-token markers to their ids
-atomically (a `<|` that does not open a known marker is left to normal
-pretokenization, matching llama.cpp's partitioning); `encodePlainAppend` skips
+`encode`/`encodeRaw` single-id-match special tokens atomically before
+pretokenization: with `tokenizer.ggml.token_type` metadata, every
+CONTROL/USER_DEFINED token, longest marker first (llama.cpp's
+`tokenizer_st_partition`); without it, `<|...|>`-shaped markers resolved
+against the vocabulary (a `<|` that does not open a known marker is left to
+normal pretokenization); `encodePlainAppend` skips
 marker resolution entirely for callers with their own control-token sets.
 Returned slices are owned by the caller.
 
@@ -11620,7 +11644,7 @@ The duck-typed contract:
   only *executed* when speculation is enabled. `sendBatch`
   additionally requires
   `forwardStepBatch(ctx, caches: []const *KvCache, token_ids: []const usize)`;
-  the requirement is comptime-gated, so families without it (gemma4 today)
+  the requirement is comptime-gated, so families without it
   still instantiate the type and get `error.BatchDecodeUnsupported` at
   runtime.
 - `Tok` is the tokenizer **module** (`llm.tokenizer` or `llm.spm_tokenizer`):
@@ -11642,7 +11666,7 @@ pub const Options = struct {
     io: ?std.Io = null,                   // clock for the decoder's live cost gate
 };
 
-pub const WarmState = struct { cache: KvCache, tokens: []const usize };
+pub const WarmState = struct { cache: KvCache, tokens: []const usize, prefix_rows: usize = 0 };
 
 pub fn init(ctx: *ExecContext, model: *const Model, tokenizer: *const Tok.Tokenizer,
             template: Template, options: Options) !Self
@@ -12487,14 +12511,15 @@ test "engram: hashed n-gram memory with a zero-init graft gate" {
 ## 14. Model families and example applications
 
 The `fucina_llm` module root (`src/llm.zig`) exposes each model family as a
-namespace — `llm.qwen3.{model,train}`, `llm.qwen35.model`,
+namespace — `llm.qwen3.{model,train}`, `llm.qwen35.{model,chat}`,
 `llm.gemma.{gemma4,gemma4_train,moe,moe_route,moe_route_tensor}`,
 `llm.diffusion_gemma.model`, `llm.deepseek2.model`, `llm.glm4moe.model`,
-`llm.deepseek4.model`, `llm.inkling.model`, `llm.parakeet.*`,
+`llm.deepseek4.model`, `llm.inkling.{model,mmproj,chat}`, `llm.parakeet.*`,
 `llm.speculative.*` — while the
 generic helpers (`llm.weights`, `llm.kv_cache`, `llm.kv_persist`, `llm.tokenizer`,
 `llm.spm_tokenizer`, `llm.sampler`, `llm.logit_processor`, `llm.llguidance`,
-`llm.chat`, `llm.data`, `llm.gguf_meta`, `llm.ptqtp_gguf`,
+`llm.chat`, `llm.data`, `llm.gguf_meta`, `llm.ptqtp_gguf`, `llm.cartridge`,
+`llm.cartridge_fleet`, `llm.engram`,
 `llm.unicode_categories`) stay flat and are covered in §13. This section
 documents the per-family model
 APIs, their runner CLIs, and the example applications under `examples/`.
@@ -12506,7 +12531,8 @@ GGUF parsing is §12; LoRA/optimizer/ES mechanics are §11.
 
 (`src/llm/*/model.zig`, `src/llm/gguf_meta.zig`)
 
-**Config from GGUF metadata.** Each family's `Config.fromGguf(file)` reads
+**Config from GGUF metadata.** Each family's `Config.fromGguf(file)`
+(deepseek4/inkling additionally take an allocator) reads
 hyperparameters from the standard GGUF key convention: the value of
 `general.architecture` (e.g. `"qwen3"`, `"qwen3moe"`, `"qwen35"`, `"gemma4"`,
 `"diffusion-gemma"`, `"parakeet"`) prefixes every key —
@@ -12524,7 +12550,7 @@ parakeet also departs from the tensor-shape vocab convention — its
 `Config.fromGguf` reads `parakeet.vocab_size` from metadata).
 
 **Loader entry points.** The qwen3, qwen35, gemma4 and diffusion_gemma
-families expose the same pair (the deepseek2, glm4moe, and deepseek4
+families expose the same pair (the deepseek2, glm4moe, deepseek4, and inkling
 loaders read their `Config` from the file internally; glm4moe additionally
 takes `max_positions`, and deepseek2/glm4moe/deepseek4 take a
 `LoadOptions`):
@@ -12589,7 +12615,7 @@ gemma-MoE's raw expert representation (14.4) and diffusion_gemma's
   `[len, vocab]` logits for **every** appended position: the
   speculative-decoding verify entry (§13 — one batched pass scores all
   draft positions for ~one step's weight traffic).
-- `forwardStepBatch` (qwen3 only) — lockstep multi-stream decode, 14.2.
+- `forwardStepBatch` (qwen3, gemma4) — lockstep multi-stream decode, 14.2.
 - `generate(ctx, kv, prompt_tokens, out_tokens, options)` (qwen3, gemma4;
   not qwen35) — greedy loop
   (argmax; `GenerateOptions{ .max_new_tokens, .stop_token = null }`); resets
@@ -12652,7 +12678,7 @@ InvalidSequenceLength, MismatchedKvCaches }`. Public surface on `Model`:
 (opt-in MoE expert disk streaming, `LoadOptions.moe_stream`), `deinit`,
 `forwardLastLogits`, `forwardLastLogitsProfiled`, `initKvCache`,
 `forwardStep`, `forwardStepProfiled`, `forwardStepAllLogits`,
-`forwardStepBatch`, `generate`, `decoratePtqtp`, `savePtqtpGguf` (§10.9);
+`forwardStepBatch`, `forwardStepBatchSpans`, `generate`, `decoratePtqtp`, `savePtqtpGguf` (§10.9);
 plus `GenerateOptions`, `ForwardProfile`, `MoeStreamOptions`, `LoadOptions`,
 and `applyExpertTopP` at module level.
 
@@ -12781,11 +12807,16 @@ pub fn Trainer(comptime targets: Targets) type
 
 Module-level symbols: `Error` (`MoeUnsupported`, `ExecScopeRequired`,
 `InvalidSequenceLength`, `LabelLengthMismatch`, `InvalidLayerRange`,
-`InvalidInjection`), `Targets`, `ignore_index`, `ModelLayer` (test seam:
+`InvalidInjection`, `InvalidCartridge`, `InvalidCapture`, `InvalidPacking`,
+`InvalidEngram`, `CartridgeCheckpointUnsupported`), `Targets`,
+`ignore_index`, `ModelLayer` (test seam:
 the model's per-block layer type), `Hidden`
 (`fucina.Tensor(.{ .seq, .embed })`), `Injection` (`{ pos, row }` — a
 differentiable single-row embedding override), `ForwardOptions`
-(`{ start_layer = 0, layer_count = null, inject = null }`).
+(`{ start_layer = 0, layer_count = null, inject = null }` plus the
+cartridge/engram fields — `cartridge`, `cartridges`, `capture`,
+`packed_segments`, `engram` — and the module-level
+`KvCapture`/`EngramOptions`, all §13.10-§13.11 material).
 
 `Trainer(targets)` members: `init(ctx, model, lora.Config, seed)` /
 `deinit`; `registerAllParams(opt)` (registers every A/B under
@@ -12802,7 +12833,11 @@ accumulation seam, TRAINING.md §4); `lossInjected(...)`;
 `evalLastLogits` / `evalLogits` / `evalLastLogitsExt` (dropout off, no step
 advance, run under their own scope, return caller-owned constants);
 `forwardHidden(ctx, tokens, step, opts)` (raw residual stream, scope
-required); the `checkpoint_layers` field enables recompute-in-backward per
+required); the cartridge/engram seams (`captureKv`, `initCartridge`,
+`distillLoss`/`distillLossExt`, `lossForwardExt`,
+`evalLogitsExt`/`evalLogitsRows`, `embedLastHidden`, `freeTransientRope`)
+are §13.10-§13.11 material; the `checkpoint_layers` field enables
+recompute-in-backward per
 layer; `n_enabled` and `LayerAdapters` are the comptime target plumbing.
 Dropout is deterministic per (step, layer, projection) from the base seed;
 RoPE tables are cached per sequence length and freed only in `deinit`.
@@ -12990,13 +13025,16 @@ test "gemma4 shared-KV geometry" {
 ```
 
 `pub const Error = weights.Error || error{ InvalidConfig,
-InvalidSequenceLength, MissingMetadata, UnsupportedExpertType,
+InvalidSequenceLength, MismatchedKvCaches, MissingMetadata, PleUnsupported,
+UnsupportedExpertType,
 UnsupportedKvCacheDtype }`. Model surface: `loadGguf`, `loadGgufFromFile`,
 `deinit`, `initKvCache` (per-layer geometry:
 `KvCache.initPerLayer(ctx, geom.kv_heads, geom.head_dim, capacity)`),
 `forwardLastLogits`, `forwardLastLogitsProfiled`, `forwardStep`,
 `forwardStepProfiled`, `forwardStepAllLogits` (speculative verify entry —
-softcapping applies to every row), `generate` + `GenerateOptions`,
+softcapping applies to every row), `forwardStepBatch`/`forwardStepBatchSpans`
+(lockstep multi-stream decode, 14.2 — PLE models rejected with
+`Error.PleUnsupported`), `generate` + `GenerateOptions`,
 `ForwardProfile`. Only f16 caches are accepted (`requireF16KvCache` returns
 `Error.UnsupportedKvCacheDtype` for q8_0). Final logits are softcapped when
 `final_logit_softcapping != 0` (a fused `softcap30` kernel serves the
@@ -13054,12 +13092,16 @@ gemma4 forward: identical `Targets` struct and defaults (q, v), identical
 seed)`, `deinit`, `registerAllParams`, `saveAdapters`, `loadAdapters`,
 `loadAdaptersWithOptions`, `loss`, `lossExt` + `LossOptions`,
 `evalLastLogits`, `n_enabled`, `LayerAdapters` (per-layer geometry sizes the
-k/v adapters). Its `Error` set encodes the intentional exclusions checked in
+k/v adapters); its cartridge seams (`captureKv`, `initCartridge`,
+`distillLoss`/`distillLossExt`, `evalLogitsExt`/`evalLogitsRows`,
+`embedLastHidden`, `freeTransientRope`, `ForwardOptions`) are §13.10
+material. Its `Error` set encodes the intentional exclusions checked in
 `init`: `PleUnsupported` (PLE models rejected), `SharedKvUnsupported`
 (any layer with `has_kv == false`), `RawMoeWeightsRequired` (MoE layers must
 retain raw expert blocks — load with `--experts=borrow` or a raw-expert
 build; the packed inference-only RHS cannot take gradients), plus
-`ExecScopeRequired`, `InvalidSequenceLength`, `LabelLengthMismatch`.
+`CartridgeGeometry`, `ExecScopeRequired`, `InvalidSequenceLength`,
+`LabelLengthMismatch`.
 
 **Runner** (`examples/gemma4/main.zig`,
 [README](../examples/gemma4/README.md) — chat/REPL over the SPM tokenizer
@@ -13369,8 +13411,9 @@ the in-tree language models: Chat Completions (`POST /v1/chat/completions`)
 plus the stateless Responses API (`POST /v1/responses`), with SSE streaming,
 JSON-schema/regex/Lark constrained output (`-Dllguidance=true` builds), and
 a bounded request queue in front of one sequential inference worker. The
-GGUF's `general.architecture` picks the backend (qwen3 / qwen3moe / gemma4 /
-diffusion-gemma); `--nanochat <dir>` serves a nanochat checkpoint.
+GGUF's `general.architecture` picks the backend (qwen3 / qwen3moe / qwen35 /
+gemma4 / diffusion-gemma / inkling); `--nanochat <dir>` serves a nanochat
+checkpoint.
 `zig build lmserve -- <model.gguf> [--host H] [--port N]`.
 
 **facedetect** (`examples/facedetect/`,
@@ -13388,7 +13431,7 @@ replay a GGUF-embedded node list through an app-level graph dispatcher over
 `ExecContext` ops. Decision-critical control paths (cv2-exact letterbox,
 umeyama alignment, NMS) are verbatim scalar ports; detect/analyze JSON is
 byte-identical to the reference, embeddings agree at cosine >= 0.999999.
-`zig build facedetect -- detect|embed|verify|analyze|bench ...`.
+`zig build facedetect -- detect|embed|verify|analyze|landmarks|bench ...`.
 
 **locate_anything** (`examples/locate_anything/`,
 [README](../examples/locate_anything/README.md)) runs NVIDIA
@@ -13454,6 +13497,16 @@ ships a WAV↔RVQ codec tool. `zig build omnivoice -- tts --model ... --codec
 - `es_ternary_spirals/main.zig` (`zig build es-ternary-spirals`) — the
   ternary-native ES flagship: packed TQ2_0 genomes are the inference model
   (§10, §11), trained by trit flips on the real int8 kernels; self-verifying.
+- `cartridge/main.zig` (`zig build cartridge`,
+  [README](../examples/cartridge/README.md)) — KV-prefix corpus compression
+  on a frozen qwen3 GGUF (§13.10); corpus-init, distillation training,
+  `--equiv` acceptance gate.
+- `cartridge_fleet/main.zig` (`zig build cartridge-fleet`,
+  [README](../examples/cartridge_fleet/README.md)) — per-document cartridges
+  trained jointly, cosine-retrieval selection (§13.10).
+- `engram/main.zig` (`zig build engram`,
+  [README](../examples/engram/README.md)) — conditional n-gram memory graft
+  trained on a frozen qwen3 GGUF (§13.11, [`ENGRAM.md`](ENGRAM.md)).
 
 ### 14.8 Example → features → run command
 
@@ -13485,6 +13538,9 @@ download source for every model row; each example's README
 | `glm4moe` | GLM-4.5 family: native MTP speculative decode, streamed experts ([README](../examples/glm4moe/README.md)) | `zig build glm4moe -- models/glm45-air/GLM-4.5-Air-Q6_K-00001-of-00002.gguf --prompt "..." --gen 64 --mtp` |
 | `deepseek4` | DeepSeek V4 Flash: CSA/HCA trunk, streamed experts, MTP sidecar ([README](../examples/deepseek4/README.md)) | `zig build deepseek4 -- <model.gguf> --chat --prompt "..." --moe-stream` |
 | `inkling` | Inkling: hybrid rel-bias attention, shortconv sites, sink-shared MoE; parity harness ([README](../examples/inkling/README.md)) | `zig build inkling -- <model.gguf> --prompt "..." --gen 64` |
+| `cartridge` | KV-prefix corpus compression on a frozen qwen3 GGUF (§13.10) | `zig build cartridge -- --model models/Qwen3-0.6B-f16.gguf --corpus README.md --p 256 --suffix-max 128 --equiv` |
+| `cartridge_fleet` | per-document cartridge fleets: joint training, cosine retrieval (§13.10) | `zig build cartridge-fleet -- --model models/Qwen3-0.6B-f16.gguf --docs README.md --equiv --p 256 --suffix-max 128` |
+| `engram` | n-gram memory graft training on a frozen qwen3 GGUF (§13.11) | `zig build engram -- --model models/Qwen3-0.6B-f16.gguf --equiv` |
 | `ptqtp_spirals` | float-trained MLP decorated post-training with trit-planes, self-verifying (§10.9) | `zig build ptqtp-spirals` |
 | `ptqtp_qwen3` | PTQTP-decorate a Qwen3 GGUF in place, NLL before/after, `--save` GGUF (§10.9, §13.2.1) | `zig build ptqtp-qwen3 -- models/Qwen3-0.6B-Q4_K_S.gguf --planes 2` |
 | (tool) `export-gguf` | transcode/re-emit GGUF, merge LoRA adapters (§11, §12) | `zig build export-gguf -- --from-gguf in.gguf --out out.gguf --dtype q8_0` |

@@ -46,10 +46,10 @@ That is the entire architecture: validate once at the facade, then small
 unchecked kernels.
 **Visual:** Three code shots in descending sequence, with a small "depth
 gauge" graphic on the left edge (facade → lowering → kernel) tracking the
-descent: (1) `src/ag/tensor.zig:1155–1157` (`add`, the whole method);
+descent: (1) `src/ag/tensor.zig:1241–1243` (`add`, the whole method);
 (2) `src/tagged.zig:53–81` (`pointwise` — hold on the two `validateTensorRank`
 lines, then the two `broadcastTensorTo` view lines, then the `switch`);
-(3) `src/exec.zig:47–52` (`LayoutClass` enum).
+(3) `src/exec.zig:48–53` (`LayoutClass` enum).
 **Overlay:** On shot 2: "validate once — nothing below re-checks". On shot 3:
 "facade ≈ 100+ methods, raw surface ≈ 300 pub fns (counts as of the
 chapter's writing; API young and unstable, no semver)".
@@ -62,7 +62,7 @@ result gets the very same address back, warm in cache. And here is scale —
 the library's whole skeleton in one tiny method: run the kernel, errdefer
 the value, hand off to finishOp. Every differentiable op ends in one of two
 shared tails, so the contract is implemented once, not re-derived per op.
-**Visual:** Code shot: `src/ag/tensor.zig:1171–1175` (`scale`, entire
+**Visual:** Code shot: `src/ag/tensor.zig:1257–1261` (`scale`, entire
 method). Then a small loop diagram: tensor `deinit` → buffer returns to the
 pool's free list → next same-shaped op receives the same address.
 **Overlay:** "kernels never allocate — docs/REFERENCE.md §6.5" · "same
@@ -77,7 +77,7 @@ and without a single transpose call anywhere. Orientation is the lowering's
 problem, not yours. And this snippet is machine-verified: it runs in CI,
 straight from the reference.
 **Visual:** First a one-line shot of the `dot` signature,
-`src/ag/tensor.zig:3318`. Then the test "dot with a shared batch tag lowers
+`src/ag/tensor.zig:3747`. Then the test "dot with a shared batch tag lowers
 to bmm" from the chapter, `docs/course/05-the-operation-library.md:508–521`,
 highlighting `.k` in the `dot` call and the shared `.b` tag. Then a terminal
 shot: `zig build snippet-check` (run in the repo root; show the tail of the
@@ -111,11 +111,11 @@ over a slow zoom-out of the three-layer depth-gauge diagram from segment 2.
 
 ## Asset list
 - **Code shots (record from the repo at current main):**
-  - `src/ag/tensor.zig:1155–1157` — `add`, the entire facade method.
+  - `src/ag/tensor.zig:1241–1243` — `add`, the entire facade method.
   - `src/tagged.zig:53–81` — `pointwise`, the entire lowering function.
-  - `src/exec.zig:47–52` — the `LayoutClass` enum.
-  - `src/ag/tensor.zig:1171–1175` — `scale`, the entire method.
-  - `src/ag/tensor.zig:3318` — the `dot` signature (one line, wraps).
+  - `src/exec.zig:48–53` — the `LayoutClass` enum.
+  - `src/ag/tensor.zig:1257–1261` — `scale`, the entire method.
+  - `src/ag/tensor.zig:3747` — the `dot` signature (one line, wraps).
 - **Chapter excerpts (render from `docs/course/05-the-operation-library.md`):**
   - Lines 508–521 — machine-verified test "dot with a shared batch tag
     lowers to bmm".

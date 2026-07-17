@@ -355,7 +355,7 @@ pub const BlockQ8_0 = extern struct {
 
 comptime {
     std.debug.assert(@sizeOf(BlockQ8_0) == 34);
-    // ... one assert per block struct, 26 in total
+    // ... one assert per block struct, 27 in total
 }
 ```
 
@@ -429,7 +429,7 @@ pub const BlockQ4_K = extern struct {
 
 144 bytes for 256 weights — 4.5 bpw, of which only 0.5 bpw is scale metadata. A sub-block's effective scale is `f16(d) × 6-bit sub-scale`: the hierarchy amortizes the expensive f16s across eight sub-scales that cost six bits each. Reconstruction is `x ≈ d·sc·q − dmin·m` — note the *minimum* term: Q4_K is an asymmetric (scale + offset) format, which buys precision when a block's values do not straddle zero (common in real weight matrices). Every K-quant variant (Q2_K through Q6_K) is a different point on the same design: how many bits per code, per sub-scale, symmetric or asymmetric.
 
-A representative slice of the 26-format inventory (full table with kernel tiers in `docs/REFERENCE.md` §10.1; bpw = bytes/block × 8 ÷ elems/block):
+A representative slice of the 27-format inventory (full table with kernel tiers in `docs/REFERENCE.md` §10.1; bpw = bytes/block × 8 ÷ elems/block):
 
 | DType | Block struct | Elems/block | Bytes/block | bpw | Design point |
 |---|---|---:|---:|---:|---|
@@ -440,9 +440,9 @@ A representative slice of the 26-format inventory (full table with kernel tiers 
 | `.q2_k` | `BlockQ2_K` | 256 | 84 | 2.625 | super-block, 2-bit codes (decode-only) |
 | `.tq2_0` | `BlockTQ2_0` | 256 | 66 | 2.0625 | ternary {−1, 0, +1} — [Chapter 14](14-the-low-bit-frontier.md) |
 
-That is all the conceptual machinery you need; the bit-packing details are in `src/backend/quant/` when you want them. Each row of the table is one `extern struct` in `src/dtype.zig:69–219` with its own comptime size assert — the §11.7 pattern, 26 times over.
+That is all the conceptual machinery you need; the bit-packing details are in `src/backend/quant/` when you want them. Each row of the table is one `extern struct` in `src/dtype.zig:69–219` with its own comptime size assert — the §11.7 pattern, 27 times over.
 
-**The encode/decode asymmetry.** The full inventory's "f32 encoder" column (`docs/REFERENCE.md` §10.1) teaches a design stance. Every one of the 26 block formats *decodes* to f32 at the kernel tier (`dequantizeRowForDType` covers all of them — a loaded weight is always usable). But the public `gguf.encodeF32` seam *produces* exactly nine block formats — `q4_0 q4_1 q5_0 q5_1 q8_0 q4_k q5_k q6_k tq2_0` (plus f32/f16/bf16 scalar casts); everything else returns `error.EncoderUnavailable` (`src/gguf.zig:1168–1204`, table in `docs/REFERENCE.md` §12.3). Q2_K, Q3_K, the entire IQ family, MXFP4, NVFP4, TQ1_0, Q1_0: **decode-only** — Fucina reads models shipped in those formats but never writes them. (The two activation formats Q8_1/Q8_K sit in between: the kernel tier encodes them on the fly for activations — §11.9 — but `encodeF32` does not emit them as tensor data.) The repo states the split as fact, and it is consistent with the verification bar of §11.10: an encoder ships when it can be proven byte-exact against ggml's reference — and in the llama.cpp ecosystem some of the exotic encoders require importance-matrix calibration, which raises that bar further. Half-supported writing is worse than honest `EncoderUnavailable`.
+**The encode/decode asymmetry.** The full inventory's "f32 encoder" column (`docs/REFERENCE.md` §10.1) teaches a design stance. Every one of the 27 block formats *decodes* to f32 at the kernel tier (`dequantizeRowForDType` covers all of them — a loaded weight is always usable). But the public `gguf.encodeF32` seam *produces* exactly ten block formats — `q2_0 q4_0 q4_1 q5_0 q5_1 q8_0 q4_k q5_k q6_k tq2_0` (plus f32/f16/bf16 scalar casts); everything else returns `error.EncoderUnavailable` (`src/gguf.zig:1168–1204`, table in `docs/REFERENCE.md` §12.3). Q2_K, Q3_K, the entire IQ family, MXFP4, NVFP4, TQ1_0, Q1_0: **decode-only** — Fucina reads models shipped in those formats but never writes them. (The two activation formats Q8_1/Q8_K sit in between: the kernel tier encodes them on the fly for activations — §11.9 — but `encodeF32` does not emit them as tensor data.) The repo states the split as fact, and it is consistent with the verification bar of §11.10: an encoder ships when it can be proven byte-exact against ggml's reference — and in the llama.cpp ecosystem some of the exotic encoders require importance-matrix calibration, which raises that bar further. Half-supported writing is worse than honest `EncoderUnavailable`.
 
 Five formats are *first-class end-to-end* — encoder, tuned hot kernel, GGUF export: `q8_0`, `q4_k`, `q5_k`, `q6_k`, and the ternary `tq2_0` (`docs/REFERENCE.md` §10.1). The ternary story — 2.06 bits per weight, multiplication-free kernels, and PTQTP's multi-plane decomposition — deserves its own chapter: [Chapter 14](14-the-low-bit-frontier.md).
 
@@ -510,7 +510,7 @@ Those `bsums` are precomputed partial sums of the activations. Why store them? B
 
 ### Below the facade: containers that borrow or own
 
-Between the tensor facade and the kernels sits a small container layer (`src/backend/quant/types.zig`) that is worth a look purely as Zig craft. A weight-side container is just blocks plus dimensions — and since there are 26 formats, the containers are generated by a type-returning function (`src/backend/quant/types.zig:145–163`):
+Between the tensor facade and the kernels sits a small container layer (`src/backend/quant/types.zig`) that is worth a look purely as Zig craft. A weight-side container is just blocks plus dimensions — and since there are 27 formats, the containers are generated by a type-returning function (`src/backend/quant/types.zig:145–163`):
 
 ```zig
 pub fn QuantizedRowsFor(comptime dtype: DType) type {
@@ -539,7 +539,7 @@ pub fn QuantizedRowsFor(comptime dtype: DType) type {
 
 Two idioms here carry the whole chapter's ownership story into the kernel tier. The `?Allocator` field is the borrow/own discriminant: `null` means the blocks belong to someone else — an mmap'd GGUF region, typically — and `deinit` frees nothing; a non-null allocator means the container owns its copy. One type serves both the zero-copy load path and owned buffers, and the difference is a single optional. And `self.* = undefined` after deinit poisons the container so use-after-free becomes loud in Debug builds instead of quietly reading stale data. Note also the comptime constants baked into each instantiation: `format` and `traits` are resolved per-dtype at compile time, so a kernel asking `Self.traits.block_size` pays nothing at runtime.
 
-> **Zig note** — `QuantizedRowsFor(comptime dtype: DType) type` is Zig's entire generics story ([Chapter 4](04-axes-with-names.md)): a function that runs at compile time and returns a struct type. Twenty-six formats get container types from one definition, each with its own `Storage(dtype)` element type — and formats that need bespoke handling simply don't use the generic (`QuantizedRowsQ4_0` is hand-written with a *non-optional* allocator, because that path never borrows). The related `PackedRhsFor(layout)` dispatcher is an exhaustive `switch` over the `PackedRhsLayout` enum (`src/backend/quant/types.zig:283–292`) — adding a layout member breaks every dispatch site until handled, the same "registry as enum" pattern as Chapter 6's backend switch.
+> **Zig note** — `QuantizedRowsFor(comptime dtype: DType) type` is Zig's entire generics story ([Chapter 4](04-axes-with-names.md)): a function that runs at compile time and returns a struct type. Twenty-seven formats get container types from one definition, each with its own `Storage(dtype)` element type — and formats that need bespoke handling simply don't use the generic (`QuantizedRowsQ4_0` is hand-written with a *non-optional* allocator, because that path never borrows). The related `PackedRhsFor(layout)` dispatcher is an exhaustive `switch` over the `PackedRhsLayout` enum (`src/backend/quant/types.zig:283–292`) — adding a layout member breaks every dispatch site until handled, the same "registry as enum" pattern as Chapter 6's backend switch.
 
 ### Packed RHS and the `RhsLifetime` promise
 
@@ -597,7 +597,7 @@ fn allFinite(values: []const f32) bool {
 
 ## 11.11 The export tool: transcode, merge, and models bigger than RAM
 
-Everything in this chapter assembles into one tool: `tools/export_gguf.zig` (`zig build export-gguf`), which "closes the train → export → serve-anywhere loop" (its own header comment). Three modes (`docs/REFERENCE.md` §12.4; shell comments condensed):
+Everything in this chapter assembles into one tool: `tools/export_gguf.zig` (`zig build export-gguf`), which "closes the train→export→serve-anywhere loop" (its own header comment). Three modes (`docs/REFERENCE.md` §12.4; shell comments condensed):
 
 ```sh
 # (a) re-emit / transcode
@@ -668,7 +668,7 @@ You can now read every byte of a model file, write one that llama.cpp will accep
 - safetensors in Fucina: F32/F16/BF16 core mapping only, sorted output (input order not preserved) golden-pinned against upstream, and atomic temp-file-then-rename saves.
 - CPU decode is weight-bandwidth-bound (`docs/BENCHMARK.md`), so bits-per-weight is the speed knob: Q8_0 = 34 bytes per 32 weights (8.5 bpw) via absmax-scale blocks; K-quants amortize scale storage through 256-element super-blocks with packed sub-scales (Q4_K = 4.5 bpw).
 - The block structs are `extern struct`s pinned by comptime size asserts — the wire format is the in-memory type; loading is reinterpreting mapped bytes.
-- All 26 formats decode; `gguf.encodeF32` produces nine block formats (+ scalar casts) — the rest are decode-only (`error.EncoderUnavailable`).
+- All 27 formats decode; `gguf.encodeF32` produces ten block formats (+ scalar casts) — the rest are decode-only (`error.EncoderUnavailable`).
 - Quantized matmul = dynamic activation quantization (Q8_0/Q8_1/Q8_K per weight family) + integer dots + per-block rescale. Quantized weights are constants: LHS gradients flow through transient dequantization; the weights never receive grad, and `dotPacked` refuses grad outright.
 - Pack once at load, `dotPacked` per step; `RhsLifetime.stable_process` is a caller promise about *address stability* that unlocks address-keyed caching.
 - Encoders are held to byte-exact ggml parity by embedded goldens; the export tool's conservative transcode policy, LoRA merge, and shard-streaming quantization all sit on the same two primitives — `tensorByteLen` and the block struct.

@@ -31,7 +31,7 @@ Fucina has exactly **two** CPU backends:
 
 (`-Dbackend=cpu` is accepted as a deprecated alias for `scalar` — it is not a third backend. BLAS and the GPU providers are tiers *inside* the native backend, not backends of their own.)
 
-The selection is a comptime switch over a build option, and the entire mechanism fits in a few lines (from `src/backend.zig:104–122`):
+The selection is a comptime switch over a build option, and the entire mechanism fits in a few lines (from `src/backend.zig:107–125`):
 
 ```zig
 pub const Kind = enum {
@@ -71,7 +71,7 @@ The facade (`src/fucina.zig`) re-exports the resulting build facts as comptime c
 
 ## 6.3 The kernel contract: small, unchecked, allocation-free
 
-Here is the entire state of the dispatch struct (from `src/backend.zig:126–143`):
+Here is the entire state of the dispatch struct (from `src/backend.zig:129–146`):
 
 ```zig
 pub const Backend = struct {
@@ -117,7 +117,7 @@ If you have read [Chapter 10](10-the-guitar-amp.md)'s preview in the course inde
 
 ## 6.4 The scalar backend is the specification
 
-Before admiring any SIMD, meet the code that keeps it honest. This is the native backend's matmul referee — the scalar backend's entire 2-D matmul, from `src/backend/cpu.zig:1295–1318`:
+Before admiring any SIMD, meet the code that keeps it honest. This is the native backend's matmul referee — the scalar backend's entire 2-D matmul, from `src/backend/cpu.zig:1301–1324`:
 
 ```zig
 pub fn matmul2DIntoUncheckedWithConfig(
@@ -355,7 +355,7 @@ Everything in this section refines one function: `C = A·B`. The journey — nai
 
 ### Loop order: the free 10×
 
-The scalar referee's `(i, j, p)` order is the definition, but look at its memory behavior: the inner loop reads `bd[p * n + j]` with `p` varying — a stride of `n` floats. Every B access is a cache miss waiting to happen, and no SIMD unit can load "every n-th float" efficiently. The fix costs nothing but thought, and the production kernel wears it as a comment (`src/backend/vector/gemm.zig:72–76`):
+The scalar referee's `(i, j, p)` order is the definition, but look at its memory behavior: the inner loop reads `bd[p * n + j]` with `p` varying — a stride of `n` floats. Every B access is a cache miss waiting to happen, and no SIMD unit can load "every n-th float" efficiently. The fix costs nothing but thought, and the production kernel wears it as a comment (`src/backend/vector/gemm.zig:74–78`):
 
 ```zig
 // C[i, j] = sum_p A[i, p] * B[p, j]. The natural inner order (i, j, p) reads
@@ -365,13 +365,13 @@ The scalar referee's `(i, j, p)` order is the definition, but look at its memory
 // contiguous reads and one contiguous write — vectorizes cleanly.
 ```
 
-The `(i, p, j)` inner loop is `c_row += a[i,p] * b_row` — a broadcast-FMA over contiguous memory, exactly the `matmulReordered` you compile-checked in §6.4. The transposed-B variant (`matmulTransB`, the shape of every weight matrix applied to activations) needs no reorder at all (`gemm.zig:187–190`): with B stored `[n, k]`, both `A`'s row `i` and `B`'s row `j` are contiguous in `p`, so each output element is a textbook two-stream `vecDot`. And a third orientation story exists for decode: when `m` is tiny (one token), the column-tiled kernel makes the *column* tile the outer loop so B streams through the cache once in total instead of once per row — the comment at `gemm.zig:928–932` records that at `m = 8` the row-outer order cost 8× the memory traffic. Loop order is not a compiler detail; it is the algorithm.
+The `(i, p, j)` inner loop is `c_row += a[i,p] * b_row` — a broadcast-FMA over contiguous memory, exactly the `matmulReordered` you compile-checked in §6.4. The transposed-B variant (`matmulTransB`, the shape of every weight matrix applied to activations) needs no reorder at all (`gemm.zig:189–192`): with B stored `[n, k]`, both `A`'s row `i` and `B`'s row `j` are contiguous in `p`, so each output element is a textbook two-stream `vecDot`. And a third orientation story exists for decode: when `m` is tiny (one token), the column-tiled kernel makes the *column* tile the outer loop so B streams through the cache once in total instead of once per row — the comment at `gemm.zig:930–934` records that at `m = 8` the row-outer order cost 8× the memory traffic. Loop order is not a compiler detail; it is the algorithm.
 
 > **ML note** — Those three orientations (NN, TN, NT) are not academic: a linear layer's forward pass is one of them, and the two gradients backprop needs (Chapter 7) are precisely the other two. A GEMM library that only did NN would transpose — i.e. copy — matrices all day.
 
 ### Register tiling: reuse before you re-load
 
-The reordered kernel still reads B's row `p` once per output row — `m` times in total. The next insight: load a piece of B into registers *once* and use it for several rows of A. This is `gemmNNRows8` (`src/backend/vector/gemm.zig:1486–1509`), the 8-row register tile:
+The reordered kernel still reads B's row `p` once per output row — `m` times in total. The next insight: load a piece of B into registers *once* and use it for several rows of A. This is `gemmNNRows8` (`src/backend/vector/gemm.zig:1493–1516`), the 8-row register tile:
 
 ```zig
 inline fn gemmNNRows8(cd: []f32, ad: []const f32, bd: []const f32, row: usize, n: usize, k: usize) void {
@@ -473,7 +473,7 @@ fn microKernel(
 }
 ```
 
-(`comptime accumulate: bool` compiles two variants — first `pc` block overwrites C, later blocks add — from one body.) The tile shape `mr × nr` is not guessed; it is *budgeted*, and the budget is a comment (`gemm_blocked.zig:52–60`):
+(`comptime accumulate: bool` compiles two variants — first `pc` block overwrites C, later blocks add — from one body.) The tile shape `mr × nr` is not guessed; it is *budgeted*, and the budget is a comment (`gemm_blocked.zig:53–59`):
 
 ```zig
 // Register math:
@@ -493,11 +493,11 @@ The payoff, as recorded in `docs/BENCHMARK.md` ("Fucina-only kernel context", M1
 
 ### Precision policy is a per-ISA decision
 
-Reduced-precision GEMM makes the ISA differences unhideable, and Fucina's answer is a documented *policy* rather than a shrug. The comment block at `src/backend/vector/gemm.zig:46–56` explains that on aarch64 NEON, f16×f16 `@mulAdd` compiles to native `fmla.8h` — double the f32 lane throughput — so half-precision accumulation is the fast path there and its output is "bit-stable across releases" (`docs/REFERENCE.md` §9.5's summary of the policy). Every other ISA (x86-64 without AVX512-FP16 in particular) legalizes f16 vector arithmetic by promoting through f32 and rounding back *per operation*, which is catastrophic; those targets instead take widened twins that convert each f16 load once and accumulate in f32 — "strictly more accurate, and different from the aarch64 bit pattern" (§9.5 again). Same source tree, two deliberately different numerical behaviors, each the right one for its hardware, both written down. The stakes were measured: on the i9-13950HX, the f32-accumulate f16 GEMM took pp1024 from **17.9 to 354 tok/s** (Fucina-only A/B, `docs/BENCHMARK.md`). bf16 gets the complementary treatment — it is literally the top 16 bits of an f32, so widening is an integer shift (`u16 << 16`, `src/backend/vector/primitives.zig`), and `matmulTransB2DIntoUncheckedBf16Rhs` dots f32 activations against a bf16 weight matrix without ever materializing f32 weights.
+Reduced-precision GEMM makes the ISA differences unhideable, and Fucina's answer is a documented *policy* rather than a shrug. The comment block at `src/backend/vector/gemm.zig:48–57` explains that on aarch64 NEON, f16×f16 `@mulAdd` compiles to native `fmla.8h` — double the f32 lane throughput — so half-precision accumulation is the fast path there and its output is "bit-stable across releases" (`docs/REFERENCE.md` §9.5's summary of the policy). Every other ISA (x86-64 without AVX512-FP16 in particular) legalizes f16 vector arithmetic by promoting through f32 and rounding back *per operation*, which is catastrophic; those targets instead take widened twins that convert each f16 load once and accumulate in f32 — "strictly more accurate, and different from the aarch64 bit pattern" (§9.5 again). Same source tree, two deliberately different numerical behaviors, each the right one for its hardware, both written down. The stakes were measured: on the i9-13950HX, the f32-accumulate f16 GEMM took pp1024 from **17.9 to 354 tok/s** (Fucina-only A/B, `docs/BENCHMARK.md`). bf16 gets the complementary treatment — it is literally the top 16 bits of an f32, so widening is an integer shift (`u16 << 16`, `src/backend/vector/primitives.zig`), and `matmulTransB2DIntoUncheckedBf16Rhs` dots f32 activations against a bf16 weight matrix without ever materializing f32 weights.
 
 ### BLAS as a provider, not a religion
 
-That "Accelerate/AMX" aside points at the last tier. BLAS — the Basic Linear Algebra Subprograms — was born in the Fortran era as the standard interface numerical code calls for exactly this operation family, organized in three levels: Level 1 for vector–vector work, Level 2 for matrix–vector (GEMV lives here), Level 3 for matrix–matrix, with GEMM as the Level-3 flagship every optimized implementation is built around. The `S`/`D` type prefixes (SGEMM, DGEMM — single and double precision) are Fortran naming heritage, and the reference implementation is Fortran to this day. Platform BLAS libraries behind that interface (Apple's Accelerate with its AMX units, OpenBLAS, MKL, …) embody decades of tuning; refusing them on principle would be vanity. Fucina treats BLAS as an optional *provider* for large f32 GEMM, selected by `-Dblas` — any CBLAS implementation plugs into the same GEMM seam — and consulted inside the native backend's dispatch. The full precedence, verbatim (`src/backend/native.zig:171–194`):
+That "Accelerate/AMX" aside points at the last tier. BLAS — the Basic Linear Algebra Subprograms — was born in the Fortran era as the standard interface numerical code calls for exactly this operation family, organized in three levels: Level 1 for vector–vector work, Level 2 for matrix–vector (GEMV lives here), Level 3 for matrix–matrix, with GEMM as the Level-3 flagship every optimized implementation is built around. The `S`/`D` type prefixes (SGEMM, DGEMM — single and double precision) are Fortran naming heritage, and the reference implementation is Fortran to this day. Platform BLAS libraries behind that interface (Apple's Accelerate with its AMX units, OpenBLAS, MKL, …) embody decades of tuning; refusing them on principle would be vanity. Fucina treats BLAS as an optional *provider* for large f32 GEMM, selected by `-Dblas` — any CBLAS implementation plugs into the same GEMM seam — and consulted inside the native backend's dispatch. The full precedence, verbatim (`src/backend/native.zig:171–193`):
 
 ```zig
     if (comptime build_options.use_gpu) {
@@ -525,7 +525,7 @@ That "Accelerate/AMX" aside points at the last tier. BLAS — the Basic Linear A
     vector.matmul2DIntoUncheckedWithConfig(out, a, b, m, n, k, config);
 ```
 
-Read the structure: GPU (if built in) may decline; BLAS (if built in) may decline; pure Zig always answers. The `comptime` guards mean a plain build contains *neither* upper tier — not disabled, absent. Each gate is measured, and the gates cut both ways. `shouldUseBlas` requires all of `m, n, k ≥ 16` (`native.zig:1330–1332`), and a **recorded negative** in `docs/BENCHMARK.md` keeps it honest: lowering the gate to `m ≥ 2` routed small-m tall-skinny NT GEMMs (m ≈ 8, n up to 152681, k = 2048) to Accelerate and *lost* — 37.8 s wall versus 32.5 s for the fixed vector column kernel (M1 Max, 2026-07-07). "The m >= 16 BLAS gate stays; do not re-lower it without new evidence on these shapes." A big-name library is a data point, not an authority.
+Read the structure: GPU (if built in) may decline; BLAS (if built in) may decline; pure Zig always answers. The `comptime` guards mean a plain build contains *neither* upper tier — not disabled, absent. Each gate is measured, and the gates cut both ways. `shouldUseBlas` requires all of `m, n, k ≥ 16` (`native.zig:1495–1497`), and a **recorded negative** in `docs/BENCHMARK.md` keeps it honest: lowering the gate to `m ≥ 2` routed small-m tall-skinny NT GEMMs (m ≈ 8, n up to 152681, k = 2048) to Accelerate and *lost* — 37.8 s wall versus 32.5 s for the fixed vector column kernel (M1 Max, 2026-07-07). "The m >= 16 BLAS gate stays; do not re-lower it without new evidence on these shapes." A big-name library is a data point, not an authority.
 
 Within pure Zig, `shouldUseBlocked(m, n, k)` (`gemm_blocked.zig:123–126`) routes work of at least 192 Mi multiply-adds with `m, n ≥ 32, k ≥ 16` to the blocked kernel, chosen from the measured 512³–640³ crossover; everything below stays on the register-tiled row kernels, which are faster there *and* avoid the packing traffic.
 
@@ -581,7 +581,7 @@ The core API takes a slice of plain task structs and a comptime function (`src/t
 
 Three things to notice. First, **graceful degradation is the control flow**: no team, team busy, single task, re-entrant call — every failure mode falls back to running the tasks serially on the caller. A kernel that uses `parallelChunks` cannot deadlock and cannot fail; parallelism is strictly an accelerant. Second, the caller **works too** — it executes chunk 0 while the team takes the rest, so an 8-way split uses 7 workers plus the dispatching thread. Third, the comptime `Task`/`run` pair erases to an `*anyopaque` thunk at the barrier layer: generic at the call site, monomorphic and allocation-free underneath.
 
-The "hot" in *hot team* is the spin-then-park worker loop (`src/thread.zig:677–695`):
+The "hot" in *hot team* is the spin-then-park worker loop (`src/thread.zig:747–766`):
 
 ```zig
         while (true) {
@@ -608,15 +608,15 @@ The "hot" in *hot team* is the spin-then-park worker loop (`src/thread.zig:677�
 
 Workers watch a *generation counter*. A dispatch bumps it; any worker still spinning notices within nanoseconds — no syscall on either side. Only after `spin_budget` empty iterations does a worker park on a futex (one syscall), announcing itself in a `parked` counter first so the dispatcher knows whether a wake syscall is even needed. In a dense op stream, dispatch costs atomics instead of kernel round trips.
 
-`parallelChunks` has a sibling for irregular work: `parallelChained` (`src/thread.zig:286–309`) runs a *dependency graph* over the same hot team — a task makes its successors runnable via `chain.enqueue(i)` — and it comes with a contract sharp enough to draw blood: every index must become runnable **exactly once**. Under-enqueueing never terminates; enqueueing twice corrupts the intrusive Treiber stack that carries runnable indices. The interesting engineering choice is *where* that contract is checked: `const chain_checks = std.debug.runtime_safety;` (`thread.zig:417–424`) compiles the verification machinery into Debug/ReleaseSafe builds — which panic with a precise message on violation — and out of ReleaseFast entirely, zero cost. Between "always check" (too slow for a hot dispatch path) and "trust the caller" (undebuggable), Zig's build modes offer a third door: check in the builds whose job is checking.
+`parallelChunks` has a sibling for irregular work: `parallelChained` (`src/thread.zig:286–309`) runs a *dependency graph* over the same hot team — a task makes its successors runnable via `chain.enqueue(i)` — and it comes with a contract sharp enough to draw blood: every index must become runnable **exactly once**. Under-enqueueing never terminates; enqueueing twice corrupts the intrusive Treiber stack that carries runnable indices. The interesting engineering choice is *where* that contract is checked: `const chain_checks = std.debug.runtime_safety;` (`thread.zig:428–430`) compiles the verification machinery into Debug/ReleaseSafe builds — which panic with a precise message on violation — and out of ReleaseFast entirely, zero cost. Between "always check" (too slow for a hot dispatch path) and "trust the caller" (undebuggable), Zig's build modes offer a third door: check in the builds whose job is checking.
 
-How long to spin is a genuinely hard tuning problem, and the source is candid about it (`src/thread.zig:426–444`): the 32768 default "is the measured M1 tuning (long spin throttles the M1 clock)", and a full cool-machine sweep on the x86 box found the response "workload-coupled and U-shaped, so NO static value dominates there either" — 512 iterations makes a speech-encoder workload ~6% faster but costs qwen3 prefill ~6% and decode ~2%; 2048–4096 is "the worst of both"; 262144 regresses the encoder ~5% by starving compute cores with spin power. The resolution is an env knob, `FUCINA_SPIN_BUDGET`, rather than a pretend-universal constant. When measurement says "it depends", the honest engineering answer is a documented knob.
+How long to spin is a genuinely hard tuning problem, and the source is candid about it (`src/thread.zig:437–455`): the 32768 default "is the measured M1 tuning (long spin throttles the M1 clock)", and a full cool-machine sweep on the x86 box found the response "workload-coupled and U-shaped, so NO static value dominates there either" — 512 iterations makes a speech-encoder workload ~6% faster but costs qwen3 prefill ~6% and decode ~2%; 2048–4096 is "the worst of both"; 262144 regresses the encoder ~5% by starving compute cores with spin power. The resolution is an env knob, `FUCINA_SPIN_BUDGET`, rather than a pretend-universal constant. When measurement says "it depends", the honest engineering answer is a documented knob.
 
 ### How many threads?
 
 Bounded, and *physically* bounded. The team ceiling is `-Dmax-threads` (default 8 — the M1 Max P-core count, with the full thermal reasoning in a comment at `src/parallel.zig:5–18`: prefill is fastest at 8 cores cool but ~6 heat-soaked, decode is ~8–14% faster at 6, and no single value wins everywhere, so the default chases best cold prefill and `FUCINA_MAX_THREADS` — mirroring llama.cpp's `-t` — drops it for sustained workloads).
 
-And the sizing logic refuses to count hyperthreads, for a measured reason (`src/parallel.zig:50–54`):
+And the sizing logic refuses to count hyperthreads, for a measured reason (`src/parallel.zig:51–54`):
 
 ```zig
         // SMT machines double-book cores in the logical count, and an
@@ -631,7 +631,7 @@ Whether a given kernel splits at all is *threshold-gated* — parallelism has fi
 
 Finally, determinism — the two categories from §6.4 again, now for threads. Parallel elementwise, conv, pool, and Winograd splits are **bit-identical** to the serial path, because tasks own disjoint output ranges: no value is computed differently, only elsewhere (`docs/REFERENCE.md` §9.4; the blocked GEMM's cell grid gives each C tile exactly one writer, so it is deterministic and thread-count-independent too). Threaded *reductions* and GEMM, by contrast, state a reassociation tolerance, exactly as their SIMD versions do. Fucina never blurs the two — and now you know enough to see that the distinction isn't pedantry: one category can be regression-tested with `==`, the other needs an error model.
 
-> **Zig note** — One platform concession hides in the worker: on macOS, workers *and the dispatcher* pin themselves to `QOS_CLASS_USER_INTERACTIVE` via `extern "c" fn pthread_set_qos_class_self_np` — otherwise the scheduler may demote a spinning worker (or the dispatcher, which computes chunk 0 of every op) to an efficiency core, and a fork-join barrier always runs at its straggler's speed (`src/thread.zig:451–456`). Calling a C API takes one `extern` declaration; no binding generator, no FFI layer.
+> **Zig note** — One platform concession hides in the worker: on macOS, workers *and the dispatcher* pin themselves to `QOS_CLASS_USER_INTERACTIVE` via `extern "c" fn pthread_set_qos_class_self_np` — otherwise the scheduler may demote a spinning worker (or the dispatcher, which computes chunk 0 of every op) to an efficiency core, and a fork-join barrier always runs at its straggler's speed (`src/thread.zig:9–22`). Calling a C API takes one `extern` declaration; no binding generator, no FFI layer.
 
 ## 6.8 Down to single instructions
 
@@ -654,7 +654,7 @@ pub fn sdotI8x16(acc: QKV4i32, a: QKV16i8, b: QKV16i8) QKV4i32 {
 
 The pattern is the point: the asm arm and the portable arm are **proven bit-equal by an in-tree test** (the ints make exact equality checkable — no tolerance needed), so every target compiles, every target is testable, and the fast arm is a verified drop-in. The feature gates are comptime target queries — `std.Target.aarch64.featureSetHas(builtin.cpu.features, .i8mm)` guards `smmla`, with a comment noting that M1-class cores are aarch64 but *lack* FEAT_I8MM and take the portable path.
 
-This layer is also where real-world ISA archaeology lives. The x86 `vpdpbusd` arm builds its own mnemonic at comptime (`quant/common.zig:342–354`):
+This layer is also where real-world ISA archaeology lives. The x86 `vpdpbusd` arm builds its own mnemonic at comptime (`quant/common.zig:344–350`):
 
 ```zig
         // ENCODING IS LOAD-BEARING: LLVM's asm parser does not feature-check
@@ -668,7 +668,7 @@ This layer is also where real-world ISA archaeology lives. The x86 `vpdpbusd` ar
 
 The same instruction name has two encodings; the assembler picks the wrong one unless told; the wrong one crashes on exactly the CPUs the arm is *for*. Comptime string concatenation building the assembly text itself is the fix.
 
-Two testing caveats are documented and worth repeating precisely. First: **Debug builds do not execute these asm arms.** Zig's self-hosted x86-64 backend (the Debug default on x86_64-Linux) lacks the newer VEX mnemonics, so the arms are additionally gated on the LLVM backend (`has_llvm_asm`, `quant/common.zig:279–284`) — Debug builds run the exact portable twins; exercising `sdot`/`vpdpbusd` for real requires ReleaseSafe/ReleaseFast. Second: emulators lie — qemu 7.0 "executes AVX2 silently wrong — no SIGILL, corrupt lanes — never validate with it"; qemu ≥ 9.2 is required. The standalone checker `src/x86dot_check.zig` runs kernel-vs-scalar asserts with printable FNV-1a bit checksums so runs from different machines and emulators can be diffed, and its header keeps a dated *execution attestation table* of which arms have actually run on which hardware. Claiming coverage you haven't executed is the same sin as inventing a benchmark number.
+Two testing caveats are documented and worth repeating precisely. First: **Debug builds do not execute these asm arms.** Zig's self-hosted x86-64 backend (the Debug default on x86_64-Linux) lacks the newer VEX mnemonics, so the arms are additionally gated on the LLVM backend (`has_llvm_asm`, `quant/common.zig:279–284`) — Debug builds run the exact portable twins; exercising `sdot`/`vpdpbusd` for real requires ReleaseSafe/ReleaseFast. Second: emulators lie — qemu 7.0 "executes AVX2 SILENTLY WRONG (no SIGILL, corrupt lanes) — never validate with it"; qemu ≥ 9.2 is required. The standalone checker `src/x86dot_check.zig` runs kernel-vs-scalar asserts with printable FNV-1a bit checksums so runs from different machines and emulators can be diffed, and its header keeps a dated *execution attestation table* of which arms have actually run on which hardware. Claiming coverage you haven't executed is the same sin as inventing a benchmark number.
 
 The kernels that consume these primitives — block dequantization, K-quant dots, packed weight layouts — belong to [Chapter 11](11-model-files-and-quantization.md) and [Chapter 14](14-the-low-bit-frontier.md); what this chapter owns is the dispatch-and-ISA seam they plug into.
 
@@ -680,7 +680,7 @@ Everything above ends in a claim of the form "X is faster". This section is abou
 > - **Every number carries its hardware and measurement conditions.** CPU benchmarks on laptops are thermally and page-cache sensitive and shape-specific; a number without its conditions is not a result.
 > - **Losses are recorded as plainly as wins.**
 
-The protocol behind any "parity-or-faster" claim (`tools/bench_gate.py`) is deliberately conservative: every row runs in **both process orders** (Fucina→llama.cpp, then llama.cpp→Fucina) so order effects and thermal drift contaminate both sides equally; rows whose coefficient of variation exceeds 8% are reported **NOISY** and *not counted as results*; raw stdout and exact command lines are archived per subprocess; medians are compared, not best cases. Prompt length is treated as a benchmark parameter in its own right — the routine matrix runs twenty lengths (`1,2,3,…,129,256`) chosen to straddle tile and threshold boundaries, because kernels have tile sizes and models don't; quoting `pp4` alone is quoting the tail path. And an entire subsection is devoted to thermal discipline on Apple Silicon: "The single largest source of wrong conclusions in this file's history was chip temperature" — heat soak *inverts thread scaling*, long sweeps depress the rows measured late, and "several apparent 'llama.cpp wins decode' readings evaporated when re-measured cool and prewarmed". Authoritative comparisons are cool, isolated, interleaved A/B pairs with pre-cooldowns.
+The protocol behind any "parity-or-faster" claim (`tools/bench_gate.py`) is deliberately conservative: every row runs in **both process orders** (Fucina→llama.cpp, then llama.cpp→Fucina) so order effects and thermal drift contaminate both sides equally; rows whose coefficient of variation exceeds 8% are reported **NOISY** and *not counted as results*; raw stdout and exact command lines are archived per subprocess; medians are compared, not best cases. Prompt length is treated as a benchmark parameter in its own right — the routine matrix runs twenty lengths (`1,2,3,…,129,256`) chosen to straddle tile and threshold boundaries, because kernels have tile sizes and models don't; quoting `pp3` alone is quoting the tail path. And an entire subsection is devoted to thermal discipline on Apple Silicon: "The single largest source of wrong conclusions in this file's history was chip temperature" — heat soak *inverts thread scaling*, long sweeps depress the rows measured late, and "several apparent 'llama.cpp wins decode' readings evaporated when re-measured cool and prewarmed". Authoritative comparisons are cool, isolated, best-of A/B pairs with pre-cooldowns, ideally interleaved.
 
 With the protocol stated, the headline (README.md, snapshot 2026-07-04, Apple M1 Max, CPU-only both sides; `docs/BENCHMARK.md` records the run conditions — 8 threads, llama.cpp with its Accelerate BLAS backend, its default on this platform): of 236 paired sweep cells across Qwen3 dense, Qwen3.5, the 30B MoE, and Gemma-26B, **Fucina is faster in 221 and at parity in 13** — dense prefill geomeans 1.18–1.81× per format, large MoE prefill up to ~2×. On the x86 Raptor Lake box (AVX2+VNNI, no BLAS either side), dense quantized formats show paired-gate medians of 1.32–1.95×.
 

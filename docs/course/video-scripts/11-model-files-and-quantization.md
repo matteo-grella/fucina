@@ -23,8 +23,8 @@ RAM one tensor at a time.
    an f16 scale in 34 bytes, 8.5 bits per weight (floor numbers are
    back-of-envelope arithmetic, not measurements).
 3. Interop is a byte contract, checked in bytes: ggml-golden byte-for-byte
-   encoder parity, byte-identical re-emit, honest scope (all 26 formats
-   decode, the public encoder writes 9) — and computable offsets turn GGUF
+   encoder parity, byte-identical re-emit, honest scope (all 27 formats
+   decode, the public encoder writes 10) — and computable offsets turn GGUF
    writing into "a plan plus a stream", which is what makes
    bigger-than-RAM quantization possible.
 
@@ -61,7 +61,7 @@ its size at build time. Loading is reinterpreting. The file is the memory.
 `PROT_READ`, `MAP_PRIVATE`, fd closed immediately). Code shot 2:
 `src/dtype.zig:74–77` (`BlockQ8_0`: `d: u16` + `qs: [32]i8`), then pan to
 `src/dtype.zig:221–248` — the comptime block asserting
-`@sizeOf(BlockQ8_0) == 34`, "one assert per block struct, 26 in total".
+`@sizeOf(BlockQ8_0) == 34`, "one assert per block struct, 27 in total".
 
 **Overlay:** "zero-copy: every slice dies at `file.deinit()`" · "`extern
 struct` = C layout = the wire format" · "size drift → build failure, not a
@@ -112,8 +112,8 @@ down to the rounding trick — round-to-nearest-even, which differs from Zig's
 own round exactly on ties. The claim is pinned, not trusted: goldens from
 ggml's own reference encoders, matched byte for byte over eight adversarial
 inputs. Same religion on the writer — parse a file, re-emit it, and the test
-demands byte-identical output. It's honestly scoped, too: all twenty-six
-formats decode; the public encoder writes nine. The rest refuse with an
+demands byte-identical output. It's honestly scoped, too: all twenty-seven
+formats decode; the public encoder writes ten. The rest refuse with an
 honest error.
 
 **Visual:** Code shot 1: `src/backend/quant/encode_golden_test.zig:1010–1026`
@@ -127,7 +127,7 @@ test` running to green (these suites are in-tree and run by it).
 **Overlay:** "goldens: ggml's own reference encoders · 8 adversarial vectors
 · Q4_K Q5_K Q6_K Q4_1 Q5_0 Q5_1 byte-for-byte" · "real-model re-emit: every
 KV + tensor payload verbatim (`src/gguf_tests.zig:533`)" · "encodeF32
-writes: q4_0 q4_1 q5_0 q5_1 q8_0 q4_k q5_k q6_k tq2_0 (+ f32/f16/bf16
+writes: q2_0 q4_0 q4_1 q5_0 q5_1 q8_0 q4_k q5_k q6_k tq2_0 (+ f32/f16/bf16
 casts) — everything else: `error.EncoderUnavailable`".
 
 ### [2:22–2:49] Bigger than RAM, one tensor at a time
@@ -174,7 +174,7 @@ directory becomes a transformer".
 **Code shots (repo files, exact ranges):**
 - `src/gguf.zig:244–260` — `File.loadMmap` (read-only map, parse in place).
 - `src/dtype.zig:74–77` — `BlockQ8_0` extern struct; `src/dtype.zig:221–248`
-  — the comptime size asserts (26 block structs).
+  — the comptime size asserts (27 block structs).
 - `src/backend/quant/q8k.zig:57–68` — the 11-line Q8_0 encoder loop.
 - `src/backend/quant/q8k.zig:650–655` — the 1.5·2²³ `nearestInt` rounding
   (brief highlight; optional).
@@ -249,10 +249,10 @@ directory becomes a transformer".
 - **Numbers appearing in the video and their sources:** GGUF layout and
   v2/v3 policy (§11.1, §11.4); 34 B / 32 weights / 8.5 bpw / error d/2
   (§11.7); 28 GB / 14 / 7.4 / 3.9 GB and the 4 → 25 tok/s floors (§11.6,
-  explicitly arithmetic); 26 formats decode / 9 encodeF32 block formats
+  explicitly arithmetic); 27 formats decode / 10 encodeF32 block formats
   (§11.8, `src/gguf.zig:1168–1204` via chapter); 8 adversarial golden
   vectors and the six byte-for-byte formats
-  (`src/backend/quant/encode_golden_test.zig` via §11.10); 26 comptime size
+  (`src/backend/quant/encode_golden_test.zig` via §11.10); 27 comptime size
   asserts (§11.7). Nothing else may be quantified.
 - The next-episode teaser ("A transformer from scratch — the tensor
   directory becomes a transformer") matches Video 12's title and the

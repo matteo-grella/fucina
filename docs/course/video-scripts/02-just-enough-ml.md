@@ -102,7 +102,7 @@ and its training step is your five-line loop grown up: forward, loss,
 backward, step, zero the gradients. One command runs it.
 
 **Visual:** One diagram: scatter plot of the two spiral arms in two colors
-(points generated from the `makeSpirals` math, `examples/spirals/main.zig:168–186`,
+(points generated from the `makeSpirals` math, `examples/spirals/main.zig:169–187`,
 seed 1234). Then code shot: `trainStep`, `examples/spirals/main.zig:144–153`, its
 five body calls highlighted in the order the VO names them. Then terminal
 recording: `zig build spirals -Doptimize=ReleaseFast` from the repo root,
@@ -144,7 +144,7 @@ Chapter 8") fading into the next-episode title card.
 - **Diagram 2 (table):** the §2.3 descent table, steps 0–3, rows revealed one
   at a time (numbers exactly as in the chapter).
 - **Diagram 3:** two-spirals scatter in two colors, generated from the
-  `makeSpirals` math (`examples/spirals/main.zig:168–186`: θ = 3.5π·t,
+  `makeSpirals` math (`examples/spirals/main.zig:169–187`: θ = 3.5π·t,
   r = 0.15 + 0.85·t, class 1 = class 0 negated, noise σ ≈ 0.02, seed 1234,
   400 points).
 - **Text cards:** the chapter's three-sentence opening list (lines 14–17);

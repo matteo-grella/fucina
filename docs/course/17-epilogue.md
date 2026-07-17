@@ -48,17 +48,17 @@ The only way to keep any of this is to build with it. Six projects, graded. Each
 
 Notice the pattern in the milestone column: in every project the first thing you build is the thing that can tell you you are wrong. That is the course's method applied to your own work — the oracle comes first.
 
-**1. Run every example.** Begin where the course began — `zig build spirals` needs no downloads at all — then work through the model zoo: `docs/RUNNING-MODELS.md` has copy-paste commands and verified download links — chat with Qwen3, transcribe with Parakeet, clone a voice with OmniVoice, locate objects from a text prompt, play through an amp profile — and the face-detection walkthrough lives with its example, in `examples/facedetect/README.md`. (Weights are not included in the repo and each family carries its own license; the doc notes the terms next to each download.) Build everything with `-Doptimize=ReleaseFast` — Debug is 10–50× slower (README.md). An afternoon spent here turns thirteen table rows in the README into things you have actually touched.
+**1. Run every example.** Begin where the course began — `zig build spirals` needs no downloads at all — then work through the model zoo: `docs/RUNNING-MODELS.md` has copy-paste commands and verified download links — chat with Qwen3, transcribe with Parakeet, clone a voice with OmniVoice, locate objects from a text prompt, play through an amp profile — and the face-detection walkthrough lives with its example, in `examples/facedetect/README.md`. (Weights are not included in the repo and each family carries its own license; the doc notes the terms next to each download.) Build everything with `-Doptimize=ReleaseFast` — Debug is 10–50× slower (README.md). An afternoon spent here turns fourteen table rows in the README into things you have actually touched.
 
 **2. Add a pointwise op, end to end.** The classic first contribution, and every station of it now has a name you know. Two routes:
 
-- *The short route — no core edits.* `elementalUnary`/`elementalBinary` (`src/ag/tensor.zig:1568`, engine in `src/ag/elemental.zig`): supply scalar forward and backward functions, get a SIMD-chunked, parallel op with a VJP (row in docs/DEVELOPMENT.md §2's "check before you build" table; contract in docs/REFERENCE.md §4.4). This is how you prototype an activation in an evening.
+- *The short route — no core edits.* `elementalUnary`/`elementalBinary` (`src/ag/tensor.zig:1661`, engine in `src/ag/elemental.zig`): supply scalar forward and backward functions, get a SIMD-chunked, parallel op with a VJP (row in docs/DEVELOPMENT.md §2's "check before you build" table; contract in docs/REFERENCE.md §4.4). This is how you prototype an activation in an evening.
 - *The full route — a first-class citizen.* Follow `tanh` through the tree and add your op beside it at each stop:
   - the semantic spec: one enum variant plus one `switch` arm in `src/backend/ops.zig` (`UnaryOp`, `unaryScalar`);
   - the vectorized body: behind `vecUnary` in `src/backend/vector/primitives.zig:155`;
-  - the eager entry: `src/exec/elementwise.zig`, plus a one-line `ExecContext` method (`src/exec.zig:1065`);
+  - the eager entry: `src/exec/elementwise.zig`, plus a one-line `ExecContext` method (`src/exec.zig:1101`);
   - the derivative: `src/ag/backward.zig` (`unaryDerivative`; and `unaryUsesOutput` if it is cheaper in terms of the output, like tanh′ = 1 − t²);
-  - the public facade: a one-liner in `src/ag/tensor.zig:1661`.
+  - the public facade: a one-liner in `src/ag/tensor.zig:1754`.
 - *Then verify like the repo verifies:*
   - the derivative with `fucina.gradcheck` (finite differences, `src/ag/gradcheck.zig`);
   - the vector leg against the scalar path, the way `src/backend/vector/primitives_tests.zig:106` does for `elu`/`gelu_erf`;
@@ -98,6 +98,7 @@ The repo documents itself; the README's Documentation table is the index. In cou
 | `docs/LMSERVER.md` | the OpenAI-compatible server: API mapping tables and streaming contracts |
 | `docs/SPECULATIVE.md`, `docs/CONSTRAINED-DECODING.md` | design records: how a finished investigation is written down |
 | `docs/TERNARY.md`, `docs/PTQTP.md`, `docs/PTQTP-RECIPE.md` | [Chapter 14](14-the-low-bit-frontier.md)'s sources: the low-bit frontier, measurements included |
+| `docs/CARTRIDGES.md` | post-training the *context* — a corpus distilled into a reusable KV prefix, weights untouched; the fourth road of [Chapter 15](15-training-llms-on-cpu.md) §15.10's menu |
 | `AGENTS.md` | build options, repo map, house rules |
 
 And read the shoulders this project stands on, as its README credits them — "Fucina exists because others built the road first":

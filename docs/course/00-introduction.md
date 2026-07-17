@@ -198,7 +198,7 @@ because they are also the reasons this course can exist:
   laptop. No cloud account, no driver stack, no CUDA version matrix. The
   models in the repo's table — from a 0.6B chat model to out-of-core
   mixture-of-experts giants — run on machines you can own: the giants on a
-  single 64 GB box (README.md:92-95), not a datacenter.
+  single 64 GB box (README.md:103-106), not a datacenter.
 - **Latency and locality.** For interactive work — a chat turn, a live audio
   buffer — the data is already in your RAM. The guitar amp is the extreme
   case: sound cannot round-trip to a datacenter.
@@ -216,7 +216,7 @@ every number carries its hardware and measurement conditions, and "**Losses
 are recorded as plainly as wins.**" The whole record "is one snapshot, taken
 as of 2026-07-04" (docs/BENCHMARK.md:9) against a pinned llama.cpp build,
 same GGUF file, same thread count, CPU-only on both sides. Within those
-caveats, the README's summary (README.md:155-164): on an Apple M1 Max, of
+caveats, the README's summary (README.md:173-182): on an Apple M1 Max, of
 236 paired sweep cells across several model families, Fucina was faster in
 221 and at parity in 13 — dense prefill geomeans 1.18–1.81x per format —
 with two cells on llama.cpp's side, one of them Qwen3.5-0.8B at prompt
@@ -228,7 +228,7 @@ Treat every one of those numbers as what the repo says it is: a dated,
 machine-specific snapshot, reproducible via the paired benchmark gate
 (`tools/bench_gate.py`), and aging from the moment it was taken —
 "Benchmarks age. llama.cpp moves fast; the dated records in
-`docs/BENCHMARK.md` are snapshots, not eternal claims" (README.md:240-241).
+`docs/BENCHMARK.md` are snapshots, not eternal claims" (README.md:269-270).
 [Chapter 6](06-going-fast-on-cpus.md) shows how the speed is achieved;
 [Chapter 16](16-the-craft.md) shows how it is *measured* without
 self-deception — the protocol is at least as interesting as the numbers.
@@ -243,7 +243,7 @@ causes real confusion later:
   providers supply GEMM as a *provider* choice within a backend, and the
   Metal/CUDA GPU paths are an *offload seam* for specific shapes — neither
   is a third backend, and the README is explicit that the Metal offload "is
-  not a general GPU runtime" (README.md:227-233).
+  not a general GPU runtime" (README.md:258-259).
 - The scalar/native pair is not an implementation detail; it is the
   verification strategy. Every fast kernel is held to the boring one by a
   parity suite. That idea — *the spec is a program* — recurs through the
@@ -260,7 +260,7 @@ causes real confusion later:
 ## 0.5 Origins: the graph implicit in the values
 
 Fucina did not begin in Zig. Its central idea has a lineage, told in the
-README's Origins section, which is worth quoting whole (README.md:245-260):
+README's Origins section, which is worth quoting whole (README.md:274-289):
 
 > Fucina grew out of autograd concepts I first explored in Go with
 > [spaGO](https://github.com/nlpodyssey/spago) — above all the idea that the
@@ -296,28 +296,29 @@ something real*. That is precisely the deal this course offers you.
 ## 0.6 A library grown through real applications
 
 Fucina's `examples/` directory is not a demo folder. The README states the
-growth model plainly (README.md:103-110):
+growth model plainly (README.md:117-121):
 
 > These applications live in `examples/` and each will eventually graduate
-> into its own repository. Meanwhile they are here for convenience, and not by
-> accident: with the Tensor core in place, Fucina grows and gets tested through real
-> applications, so the runtime and the things built on it develop side by
-> side.
+> into its own repository. They use the library; they are not the library.
+> Keeping them in-tree during this phase is deliberate: with the Tensor core
+> in place, Fucina grows and gets tested through real applications, so the
+> runtime and the things built on it develop side by side.
 
-What runs today (condensed from the README's table, README.md:74-95): chat
+What runs today (condensed from the README's table, README.md:86-101): chat
 LLMs dense and mixture-of-experts (Qwen3, DeepSeek V2/V3 and V4 Flash,
-GLM-4.5, Gemma 4, Qwen3.5), a text-diffusion decoder, karpathy's nanochat
-ported whole and *trained from scratch on CPU*, speech-to-text (Parakeet),
+GLM-4.5, Gemma 4, Qwen3.5), a text-diffusion decoder, a multimodal decoder
+with image and audio input towers (Inkling), karpathy's nanochat ported
+whole and *trained from scratch on CPU*, speech-to-text (Parakeet),
 text-to-speech with voice cloning (OmniVoice), an open-vocabulary detection
 VLM, face detection and recognition — plus, from the quick start rather
-than the table, an OpenAI-compatible HTTP server (README.md:128-130) — and
+than the table, an OpenAI-compatible HTTP server (README.md:146-148) — and
 the Neural Amp Modeler. MoE models bigger than RAM are first-class: expert
 streaming is "how the 142 GB Qwen3-235B and the 164.6 GB V4 Flash decode on
-a 64 GB machine" (README.md:92-95).
+a 64 GB machine" (README.md:103-106).
 
 Each of those applications forced something into the core — new ops, new
 dtypes, new scheduler behaviour — and each earned its place the same way
-(README.md:97-100):
+(README.md:108-111):
 
 > Every family is validated against its reference implementation, and that
 > discipline is the core of the project: token-ID-exact tokenizers vs
@@ -347,20 +348,20 @@ what Fucina is and is not:
 
 - **It is not a production-ready product.** The architecture document grades
   itself: "**production-oriented core, not production-ready product**"
-  (docs/ARCHITECTURE.md:712-713). The core is coherent and machine-enforced;
+  (docs/ARCHITECTURE.md:745-746). The core is coherent and machine-enforced;
   the productization gaps (API contract, session lifecycle, platform
   coverage) are listed right above that sentence.
 - **The API is not stable.** "This is a young codebase published in the
-  open, not a 1.0 library. Expect churn" (README.md:234-235). There is no
+  open, not a 1.0 library. Expect churn" (README.md:263-264). There is no
   package manifest and no semantic versioning. Every signature in this
   course is *today's code*, cited by path so you can diff it against
   tomorrow's.
 - **Two ISAs are tuned.** Apple Silicon (NEON/dotprod) and modern x86-64
   (AVX2/AVX-VNNI); the scalar backend covers everything else, correctly but
-  slowly (README.md:227-229).
+  slowly (README.md:256-257).
 - **Model weights are not included**, and each family carries its own
-  license (README.md:236-239).
-- **Benchmarks age** (README.md:240-241) — every number you meet in this
+  license (README.md:265-268).
+- **Benchmarks age** (README.md:269-270) — every number you meet in this
   course is a dated snapshot with a machine attached, never a universal
   claim.
 
@@ -390,7 +391,7 @@ they would have to earn back.
 **Whose work this is.** Fucina is one person's effort — at the time of
 writing, one human, working "with strong assistance from agentic coding
 systems, with humans leading the ideas, the testing, and the debugging"
-(README.md:262-266). The course inherits both sides of that fact: the
+(README.md:291-293). The course inherits both sides of that fact: the
 coherence of a codebase where every layer was shaped by one set of hands
 and one set of convictions, and the limits of what one person can build,
 tune, and verify. The verification discipline you will meet throughout —
@@ -426,7 +427,7 @@ can catch it.
 
 One more expectation, about the language itself: **Zig 0.16 is not the Zig
 of most online tutorials.** The toolchain is pinned — "Requires Zig 0.16.0
-… other versions will not build" (README.md:114-115) — and 0.16 changed
+… other versions will not build" (README.md:132-133) — and 0.16 changed
 several standard-library idioms you may find described differently
 elsewhere. When in doubt, imitate this repository, not a blog post from two
 years ago. [Chapter 1](01-just-enough-zig.md) teaches the current idioms
@@ -526,7 +527,7 @@ labelled: verbatim repo code, cited by path (when it comes from
 `docs/REFERENCE.md`, it is machine-verified against the real modules); and
 minimal build-it-yourself course code, which compiles under the pinned Zig
 0.16.0. Get the toolchain now — the quick start is the README's
-(README.md:117-131):
+(README.md:135-149):
 
 ```sh
 git clone https://github.com/matteo-grella/fucina
@@ -537,7 +538,7 @@ zig build test          # unit tests, no model files needed
 That `zig build test` needs no model weights and no network beyond the
 clone. When it passes, you hold a working forge. One habit to adopt
 immediately, straight from the README: build with `-Doptimize=ReleaseFast`
-whenever speed matters — "Debug is 10–50x slower" (README.md:133-134).
+whenever speed matters — "Debug is 10–50x slower" (README.md:151-152).
 
 ## What you now know
 

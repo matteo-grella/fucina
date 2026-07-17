@@ -83,7 +83,7 @@ quantization in its history. And the repo's claim is tested: the merged
 model answers in the tuned style under llama-cli, and loads in llama-bench
 as Q4_K Small.
 **Visual:** Terminal recording of the four-command script quoted verbatim
-from `docs/TRAINING.md:587-602` (steps numbered 1–4 as in the doc's own
+from `docs/TRAINING.md:588-603` (steps numbered 1–4 as in the doc's own
 comments): `zig build finetune … --model models/Qwen3-0.6B-f16.gguf
 --steps 30 --save /tmp/qwen3-lora`, then `zig build export-gguf …
 --adapters /tmp/qwen3-lora --alpha 16 --out /tmp/qwen3-tuned-f16.gguf`,
@@ -116,15 +116,20 @@ eval-bpb / chat); then the honest CPU-demo config `d6` at
 
 ### [2:37–3:00] What it's for — and next
 **VO:** That is the honest shape of CPU training: fine-tunes of real
-models, small models on your own data, research loops that prize bit-exact
-reproducibility. It is not pretraining at modern scale, and the docs never
-claim it is. Formats, not frameworks, are the interface. Next time: the
+models, small models on your own data, determinism-first research loops.
+It is not pretraining at modern scale, and the docs never claim it is.
+After pretraining: gradients, evolution, trit-planes, or a trained
+context. Formats, not frameworks, are the interface. Next time: the
 craft — how a library like this earns your trust.
 **Visual:** The three-roads table from
-`docs/course/15-training-llms-on-cpu.md:645-649` (LoRA+backprop / ES /
-from-scratch, one row each); end card with chapter link
+`docs/course/15-training-llms-on-cpu.md:646-650` (LoRA+backprop / ES /
+from-scratch, one row each); then the post-training menu table at
+`docs/course/15-training-llms-on-cpu.md:654-659` (LoRA / ES / PTQTP /
+Cartridges, one row each); end card with chapter link
 `docs/course/15-training-llms-on-cpu.md`.
-**Overlay:** `CPU-first, not CPU-only` · `Next: 16 — The craft`
+**Overlay:** `four roads after pretraining — train the weights,
+re-express them, or train the context` · `CPU-first, not CPU-only` ·
+`Next: 16 — The craft`
 
 ## Asset list
 - **Model downloads** (weights are NOT in the repo; sources per
@@ -143,7 +148,7 @@ from-scratch, one row each); end card with chapter link
 - **Terminal recordings** (all `-Doptimize=ReleaseFast`):
   1. `zig build finetune -- --steps 30` — BEFORE/AFTER generations + loss
      trace (0:55 segment).
-  2. The four-command loop exactly as printed in `docs/TRAINING.md:587-602`
+  2. The four-command loop exactly as printed in `docs/TRAINING.md:588-603`
      (1:26 segment) — note `--alpha 16` must repeat the training-time
      alpha; the adapter checkpoint does not store it.
   3. `llama-cli -m /tmp/qwen3-tuned-q4_k.gguf`, prompt "What is the
@@ -153,7 +158,8 @@ from-scratch, one row each); end card with chapter link
   `src/lora.zig:265-274` (merge, optional); `examples/nanochat/README.md:20-28`
   (subcommand table); `examples/nanochat/model.zig:56-65` (d6 config).
 - **Chapter shots**: `docs/course/15-training-llms-on-cpu.md:30-34` (LoRA
-  equation), `:115-117` (parameter count), `:645-649` (three-roads table).
+  equation), `:115-117` (parameter count), `:646-650` (three-roads table),
+  `:654-659` (post-training menu table).
 - **Diagrams**: none required — the equation and table shots carry the
   structure.
 
@@ -161,12 +167,13 @@ from-scratch, one row each); end card with chapter link
 - **Tone**: matter-of-fact wonder. The emotional beat is the cold open
   paying off at 2:05 — the same llama-cli shot, now earned. Let the
   "Ahoy!" AFTER generation land without a joke on top of it.
-- **VO count and pacing**: 443 spoken words total — in the 380–450
+- **VO count and pacing**: 449 spoken words total — in the 380–450
   contract range. The standalone " — " dashes are pause marks, not words
-  (a plain `wc -w` reads 457; do not "fix" that as an overrun). The
-  closer paces ~146 wpm; if it must breathe, the one sanctioned VO trim
-  is "research loops that prize bit-exact reproducibility" →
-  "determinism-first research loops" (the chapter's own §15.10 phrasing).
+  (a plain `wc -w` reads 463; do not "fix" that as an overrun). The
+  closer paces ~162 wpm; if it must breathe, the one sanctioned VO trim
+  is dropping "After pretraining: gradients, evolution, trit-planes, or
+  a trained context." — the menu-table shot and its overlay carry the
+  same content.
 - **Caveats that MUST stay attached**:
   - `~932 ms/step` and `5.77 → 2e-4 in 30 steps` are an **M1 Max
     snapshot** from `docs/TRAINING.md §9` — the overlay keeps that
@@ -197,7 +204,7 @@ from-scratch, one row each); end card with chapter link
   "not pretraining at modern scale" sentence; "Formats, not frameworks,
   are the interface."
 - **Line ranges**: every file/line citation in this script was verified
-  against the working tree on 2026-07-12; re-verify at record time if the
+  against the working tree on 2026-07-17; re-verify at record time if the
   repo has moved since.
 - The chapter has much more (the SFT data pipeline and its BPE boundary
   trap, gradient verification from three angles, the ES twin,

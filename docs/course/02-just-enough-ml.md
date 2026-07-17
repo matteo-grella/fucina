@@ -315,7 +315,7 @@ process them one at a time — you apply one operation to the whole block at onc
   *mini-batch*, and is where the "stochastic" in SGD comes from.
 
 Here is the idea in the wild — the spirals example packing 400 (x, y) points into one
-rank-2 tensor (from `examples/spirals/main.zig:344`):
+rank-2 tensor (from `examples/spirals/main.zig:345`):
 
 ```zig
 var x = try Tensor(.{ .batch, .in }).fromSlice(&ctx, .{ n_points, 2 }, &xs);
@@ -445,7 +445,7 @@ by `e ≈ 2.718` again. Two properties worth noting now, cashed in later:
 - Adding a constant to *every* logit changes nothing (it cancels in the division).
   Production kernels exploit this by subtracting the max logit first so that `e^x`
   never overflows — you can see the three-pass max/exp-sum/normalize structure in
-  Fucina's SIMD row kernel (`softmaxRows`, `src/exec/row_ops.zig:1249`). Numerical
+  Fucina's SIMD row kernel (`softmaxRows`, `src/exec/row_ops.zig:1341`). Numerical
   care of this kind is a recurring character in [Chapter 5](05-the-operation-library.md).
 - Only gaps matter. Softmax is a smooth argmax — hence the name.
 
@@ -577,12 +577,12 @@ to breed, and shows real genetics. This course needs the same thing: a task smal
 enough to train in seconds on a laptop CPU, transparent enough to plot on paper, and
 just hard enough that solving it proves the machinery genuinely works. Ours is the
 **two-spirals problem** — the repo's own comment calls it "the classic Lang &
-Witbrock task" (`examples/spirals/main.zig:168`), a benchmark from the late-1980s
+Witbrock task" (`examples/spirals/main.zig:169`), a benchmark from the late-1980s
 connectionist era that was famously obnoxious for the small networks of the day.
 
 The task: points are scattered along two interleaved spiral arms in the plane. Given a
 point's `(x, y)` coordinates, say which arm it belongs to. Here is the dataset
-generator, verbatim from `examples/spirals/main.zig:168-186`:
+generator, verbatim from `examples/spirals/main.zig:169-187`:
 
 ```zig
 /// Two interleaved spirals (the classic Lang & Witbrock task): radius grows
@@ -666,7 +666,7 @@ this library's character than any feature list: it saves a mid-training **checkp
 (a snapshot of all parameters plus optimizer state), restores it into a *fresh* model,
 retrains the second half, and *demands the final parameters match the original run bit
 for bit* —
-`if (max_diff != 0) return error.ResumeNotBitExact;` (`examples/spirals/main.zig:314`).
+`if (max_diff != 0) return error.ResumeNotBitExact;` (`examples/spirals/main.zig:315`).
 Not "close". Identical, to the last bit of every float. That training is exactly
 reproducible — same data, same seed, same thread configuration, across runs and
 across checkpoint resumes — is a design contract here (`docs/TRAINING.md` §4's
@@ -732,8 +732,8 @@ Zig, with tests proving it right.
 ## Explore the source
 
 - `examples/spirals/main.zig` — this entire chapter as one runnable program: dataset
-  generator (line 168), model struct with named-axis tensors (line 29), forward pass
-  (line 133), training step (line 144), and the bit-exact-resume check (line 314). Read
+  generator (line 169), model struct with named-axis tensors (line 29), forward pass
+  (line 133), training step (line 144), and the bit-exact-resume check (line 315). Read
   it top to bottom; measure how much of it you can already follow.
 - `docs/TRAINING.md` §1 — "A complete training step": the full six-stage ritual
   (forward → loss → backward → clip → step → zeroGrad); `trainStep` instantiates
@@ -741,7 +741,7 @@ Zig, with tests proving it right.
 - `docs/REFERENCE.md` §4.15 — the loss-function catalogue, including the
   machine-verified "crossEntropy on uniform logits is ln(K)" test you can now derive
   yourself.
-- `src/exec/row_ops.zig` (`softmaxRows`, line 1249) — softmax as production code:
+- `src/exec/row_ops.zig` (`softmaxRows`, line 1341) — softmax as production code:
   find the max-subtraction trick from §2.7 inside the SIMD loops. Skim only; this is
   Chapter 5–6 territory.
 

@@ -109,7 +109,7 @@ counterexample." (ch. 8, §8.6).
 ### [1:53–2:18] On camera: zig build spirals
 
 **VO:** Time to collect. One command: zig build spirals. Four hundred
-ninety-three lines: two interleaved spiral arms, a small MLP, five
+ninety-four lines: two interleaved spiral arms, a small MLP, five
 optimizers, each run through a three-phase gauntlet — train two thousand
 steps, checkpoint halfway, resume, then pure inference from the checkpoint.
 Watch the loss column: every optimizer drives it down, at visibly different
@@ -124,7 +124,7 @@ sweeps down the loss values on the "trained … steps: loss …" lines as the
 VO says "loss column". The printed numbers are whatever the recording
 machine produces — real output only.
 
-**Overlay:** "`examples/spirals/main.zig` — 493 lines, the whole chapter
+**Overlay:** "`examples/spirals/main.zig` — 494 lines, the whole chapter
 runnable" · "no downloads: the demo generates its own 400 points".
 
 ### [2:18–2:45] The gate: != 0
@@ -139,9 +139,9 @@ testable property — so it is tested.
 **Visual:** Split screen. Left: the same terminal, highlighting each
 "resume from step 1000: max |delta param| = 0 (bit-exact)" line as it
 appears — six of them across the run. Right: code shot
-`examples/spirals/main.zig:309–314` — the `max_diff` loop and
+`examples/spirals/main.zig:310–315` — the `max_diff` loop and
 `if (max_diff != 0) return error.ResumeNotBitExact;` — with a second brief
-cut to line 298 (`Model.initRandom(ctx, 7)` — "different init: fully
+cut to line 299 (`Model.initRandom(ctx, 7)` — "different init: fully
 overwritten by the checkpoint").
 
 **Overlay:** "`if (max_diff != 0) return error.ResumeNotBitExact;` — not a
@@ -170,7 +170,7 @@ series title, "Next: 09 — Training without gradients", chapter link
   the Fucina repo" comment in frame).
 - `src/optim.zig:756–767` — the AdamW `runScalar` per-element update.
 - `src/optim.zig:1384–1416` — `newtonSchulz5` with its doc comment.
-- `examples/spirals/main.zig:309–314` — the bit-exact gate; plus line 298 (the
+- `examples/spirals/main.zig:310–315` — the bit-exact gate; plus line 299 (the
   fresh model from seed 7).
 
 **Terminal recordings (execute on camera):**
@@ -180,7 +180,7 @@ series title, "Next: 09 — Training without gradients", chapter link
   header line, then three lines per optimizer for `[sgd]`, `[adamw]`,
   `[muon]`, `[apollo]`, `[apollo-mini]`, then two lines for the groups demo,
   labeled `[adamw-groups]` (format strings at
-  `examples/spirals/main.zig:291–321,347` and, for the groups demo, `:452,487`;
+  `examples/spirals/main.zig:292–322,348` and, for the groups demo, `:453,488`;
   six "bit-exact" resume lines total). Note: the demo prints one summary
   loss per optimizer
   at the end of its 2000 steps — there is no per-step loss stream — so the
@@ -223,7 +223,7 @@ episode.
 - **Numbers appearing in the video and their sources:** six stages and the
   canonical order (chapter §8.1, docs/REFERENCE.md §11); "one line" SGD and
   "twelve lines" AdamW (chapter §8.4–8.5); f64 scalar prep (chapter §8.5);
-  optimizer ms/step table (docs/TRAINING.md §11 via chapter §8.6); 493
+  optimizer ms/step table (docs/TRAINING.md §11 via chapter §8.6); 494
   lines, 2000 steps, checkpoint at 1000, 400 points, seed-7 fresh model,
   six bit-exact lines (chapter §8.11 / `examples/spirals/main.zig`); "state
   costs more than the model at LLM scale" (chapter §8.6: AdamW state is

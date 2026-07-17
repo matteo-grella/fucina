@@ -903,7 +903,7 @@ small adapters" (docs/TRAINING.md §3).
 
 ## 8.11 The payoff: spirals, end to end
 
-Time to collect. `examples/spirals/main.zig` (493 lines) is the whole chapter
+Time to collect. `examples/spirals/main.zig` (494 lines) is the whole chapter
 in one runnable file: a typed model struct, a forward pass, cross-entropy,
 five optimizers, param groups with a schedule and clipping, checkpointing
 halfway, and a resume that must be — literally, or the program errors —
@@ -996,28 +996,28 @@ fn trainStep(ctx: *ExecContext, model: *const Model, x: *const Tensor(.{ .batch,
 
 Eight op calls of pure inference-style code; one scope wrapping them; the
 six-stage ritual from §8.1 (this tiny full-batch demo skips clipping — the
-groups demo below adds it). `accuracy` (`:155-166`) reuses the *same*
+groups demo below adds it). `accuracy` (`:155-167`) reuses the *same*
 `forwardLogits` under its own scope, takes `argmax` over `.class`, and
 counts matches — the same-forward-infers-and-trains property, live.
 
 ### Data and checkpointing
 
-`makeSpirals` (`examples/spirals/main.zig:168-186`) generates the dataset: 200
+`makeSpirals` (`examples/spirals/main.zig:169-187`) generates the dataset: 200
 points per arm, radius growing with angle over ~1.75 turns, class 1 being
 class 0 rotated by π, plus a whisper of Gaussian noise. Four hundred
 points, two floats each — the whole dataset is a stack array.
 
-`saveCheckpoint` / `loadCheckpoint` (`:188-228`) implement §8.9's directory
+`saveCheckpoint` / `loadCheckpoint` (`:189-229`) implement §8.9's directory
 protocol with the real API: `beginSave`, `writeFileAtomic` for
 `model.safetensors` (via `ParamRegistry.collect` — the reflective walk that
-names tensors by field name, `:230-246`) and `optimizer.fucina` (via
+names tensors by field name, `:231-247`) and `optimizer.fucina` (via
 `opt.saveState`), then `saveTrainerState` writing the JSON sentinel last.
 Note the `comptime @TypeOf(opt) != @TypeOf(null)` guard: the same function
 serves phase 3, which loads weights with no optimizer at all.
 
 ### The three-phase gauntlet
 
-The `demo` driver (`examples/spirals/main.zig:260-325`) runs each optimizer
+The `demo` driver (`examples/spirals/main.zig:261-326`) runs each optimizer
 through three phases:
 
 1. **Train** 2000 full-batch steps, checkpointing model + optimizer at
@@ -1034,7 +1034,7 @@ through three phases:
    if (max_diff != 0) return error.ResumeNotBitExact;
    ```
 
-   *(from `examples/spirals/main.zig:309-314`)* — not a tolerance check. `!= 0`.
+   *(from `examples/spirals/main.zig:310-315`)* — not a tolerance check. `!= 0`.
    One flipped bit anywhere in a thousand replayed steps — a stored moment
    rounded differently, a thread-order-dependent reduction, an lr factor
    applied off by one step — and the example *fails its build*. This is
@@ -1044,13 +1044,13 @@ through three phases:
    `initConstZero` model and report its accuracy — proving the checkpoint
    round-trips into a model with no autograd attached.
 
-`main` (`:327-380`) runs the gauntlet for SGD (nesterov momentum), AdamW,
+`main` (`:328-381`) runs the gauntlet for SGD (nesterov momentum), AdamW,
 Muon (with a retuned fallback lr — the comment explains that the reference
 default 3e-4 is tuned for LLM heads, not a toy head), APOLLO, and
 APOLLO-Mini. Note the roster: plain `Adam` is not among the demos, so its
 resume path is *not* covered by this gate — its behavior is pinned by the
 unit and golden tests in `src/optim_tests.zig` instead. Then `groupsDemo`
-(`:388-493`) composes the full §8.7 recipe — matrices in a weight-decayed
+(`:389-494`) composes the full §8.7 recipe — matrices in a weight-decayed
 AdamW, biases in a no-decay AdamW, one `OptimizerSet`, a warmup-cosine
 schedule attached to both lrs, clip at 1.0 — and pushes *that* composition
 through the same halfway-checkpoint bit-exact-resume gauntlet.
@@ -1062,7 +1062,7 @@ var gpa = std.heap.DebugAllocator(.{}){};
 defer if (gpa.deinit() == .leak) @panic("leak");
 ```
 
-*(from `examples/spirals/main.zig:328-329`)* — the example *panics if it leaks a
+*(from `examples/spirals/main.zig:329-330`)* — the example *panics if it leaks a
 single allocation*. TRAINING.md §11's advice: train in ReleaseFast,
 validate in Debug — the DebugAllocator catches lifetime mistakes.
 
@@ -1075,7 +1075,7 @@ zig build spirals -Doptimize=ReleaseFast
 You will see one header, then three lines per optimizer (the groups demo
 prints two), in this format
 (these are the actual `print` format strings from
-`examples/spirals/main.zig:291-321,347` — the numbers are for your machine to
+`examples/spirals/main.zig:292-322,348` — the numbers are for your machine to
 fill in):
 
 ```text

@@ -4,7 +4,7 @@ This document records *why* Fucina manages transient tensor memory with a
 per-tensor `create` → `defer x.deinit()` pattern backed by a reusable
 `BufferPool`, and why an arena allocator was considered and **rejected**. It is
 grounded in the source; file:line references (verified against the tree
-2026-07-04) are included so the rationale can be re-verified rather than
+2026-07-17) are included so the rationale can be re-verified rather than
 trusted.
 
 The short version: **keep the current pattern.** The `BufferPool` already *is*
@@ -30,11 +30,11 @@ chain is:
 
 ```
 tensor.deinit()  →  buffer.release()  →  refcount hits 0  →  reclaim()  →  buffer returns to the free-list
-   ag/tensor.zig:524   tensor.zig:174      storage.zig:113     exec/buffer_pool.zig:171
+   ag/tensor.zig:977   tensor.zig:177      storage.zig:120     exec/buffer_pool.zig:171
 ```
 
 `ExecContext` (via its embedded `Runtime`) owns one `BufferPool`
-(`src/exec/runtime.zig:47`; type at `src/exec/buffer_pool.zig:47`). It is:
+(`src/exec/runtime.zig:49`; type at `src/exec/buffer_pool.zig:47`). It is:
 
 - **A size-bucketed free-list.** `acquire(len)` (`src/exec/buffer_pool.zig:82`) does
   first-fit over a list kept **sorted ascending by `data.len`**, returning the
@@ -42,7 +42,7 @@ tensor.deinit()  →  buffer.release()  →  refcount hits 0  →  reclaim()  �
   `Buffer` with `reclaim` as the release callback. `reclaim` inserts *before*
   existing same-length entries, so within a size class reuse is LIFO — the
   most recently released buffer is handed back first.
-- **Size-rounded.** `allocationLen` (`src/exec/buffer_pool.zig:268`): `len <= 1024` →
+- **Size-rounded.** `allocationLen` (`src/exec/buffer_pool.zig:273`): `len <= 1024` →
   `ceilPowerOfTwo`; else `alignForward(len, 1024)`. This collapses nearby
   logical sizes into shared buckets, which *helps* reuse.
 - **Bounded.** `max_cached_bytes` caps the CACHED (free-list) bytes at 1 GiB
@@ -59,7 +59,7 @@ tensor.deinit()  →  buffer.release()  →  refcount hits 0  →  reclaim()  �
 
 The recycle invariant is asserted by a dedicated unit test: after `first.deinit()`,
 the next same-size op returns `second.buffer == first_buffer`
-(`src/exec_tests.zig:336-354`).
+(`src/exec_tests.zig:338-358`).
 
 ### What is and isn't pooled
 
@@ -67,12 +67,12 @@ The pool has **two arms sharing one byte budget** (`cached_bytes` /
 `max_cached_bytes`):
 
 - **The f32 arm** — a free list of `*storage.Buffer`. `ctx.empty` / `emptyRank`
-  acquire from it (`src/exec/runtime.zig:169/:176`). In an LLM forward
+  acquire from it (`src/exec/runtime.zig:179/:186`). In an LLM forward
   essentially all transient activations are f32 (every matmul/linear/norm/add
   output is a default-dtype `FloatTensor`), so this arm covers the hot path.
 - **The byte-slab arm** — a free list of 64-byte-aligned, 4096-byte-rounded raw
   slabs (`[]align(64) u8`). `emptyTyped` / `emptyRankTyped` route every
-  non-f32 dtype through `acquireTyped` (`src/exec/runtime.zig:183-199`), which
+  non-f32 dtype through `acquireTyped` (`src/exec/runtime.zig:193-207`), which
   wraps a slab in a typed `storage.BufferOf(dtype)` header whose release hook
   returns the slab to the free list (cross-dtype reuse: an f16 LHS-cast slab
   can serve q8_k scratch next op). Hot consumers inherited pooling with no
@@ -95,14 +95,15 @@ slot (`src/llm/kv_cache.zig:269-280`).
 ## 2. Inference vs training: the two lifetime regimes
 
 - **Inference tensors are constants** (`grad_state == null`, built via
-  `fromTensor` / `fromSlice`; `src/ag/tensor.zig:198`). `deinit`
-  (`src/ag/tensor.zig:524`) releases the raw buffer immediately, so it returns
+  `fromTensor` / `fromSlice`; `src/ag/tensor.zig:244`). `deinit`
+  (`src/ag/tensor.zig:977`) releases the raw buffer immediately, so it returns
   to the pool mid-pass. This is what makes the pool behave arena-like *for free*
   in inference.
 - **Training variables retain their inputs.** Backward functions store operand
   values via `cloneView()` at op-execution time (`src/ag/backward.zig`: mul/div
-  `:144-145`, relu `:449`, dot `DotBackward` `:4049`, cloneViews at
-  `:4090-4094`), and `cloneView` bumps the refcount (`src/tensor.zig:188`).
+  `:152-153`, relu `:480`, dot `DotBackward` `:5371` delegating to
+  `EinsumBackward`, cloneViews at `:5422-5426`), and `cloneView` bumps the
+  refcount (`src/tensor.zig:190`).
   Those input buffers therefore **cannot** return to the pool until the tape
   node is destroyed in/after `backward`.
 
@@ -115,13 +116,13 @@ backward, not something an arena would change.
 ## 3. Views are refcounted aliases (the decisive constraint)
 
 Every view operation retains the source buffer and releases it on `deinit`:
-`cloneView` (`src/tensor.zig:188`), `viewWithStrides(Offset)`
-(`src/tensor.zig:194/:198`), `reshape` (`src/tensor.zig:222`), `broadcastTo`
-(`src/tensor.zig:236`); `narrow` goes through `viewWithStridesOffset`
+`cloneView` (`src/tensor.zig:190`), `viewWithStrides(Offset)`
+(`src/tensor.zig:196/:200`), `reshape` (`src/tensor.zig:224`), `broadcastTo`
+(`src/tensor.zig:238`); `narrow` goes through `viewWithStridesOffset`
 (`src/exec/gather_scatter.zig:80`). A view's lifetime is independent of its parent's.
 
 The most important instance: per-step attention reads the KV cache via a
-**zero-copy `narrow`** (`src/llm/gemma/gemma4.zig:878`) that aliases a
+**zero-copy `narrow`** (`src/llm/gemma/gemma4.zig:993`) that aliases a
 **session-lifetime, non-pooled f16 buffer** (`KvCache.k/v`, allocated once via
 `emptyRankTyped(.f16, ...)`, `src/llm/kv_cache.zig:179`; `reset()` only sets
 `len = 0` and keeps the buffers, `:199-200`). A region-reset arena has no per-object
@@ -137,9 +138,9 @@ substantive axes (in addition to the view/KV constraint in §3):
 
 1. **Peak memory regresses from working-set to sum-of-all-intermediates.** The
    pool reclaims a buffer the instant a transient dies; per-block peak live set
-   is only ~6–12 tensors (`attnBlock`/`ffnBlock`, `src/llm/gemma/gemma4.zig:819/:914`),
+   is only ~6–12 tensors (`attnBlock`/`ffnBlock`, `src/llm/gemma/gemma4.zig:1031/:1126`),
    and the residual stream is a single carried `x` advanced via `ctx.replace`
-   (which frees the old buffer each layer, `src/exec.zig:340`). An arena frees
+   (which frees the old buffer each layer, `src/exec.zig:362`). An arena frees
    nothing until reset, so a forward balloons to roughly `n_layer ×` the
    activation footprint — strictly worse than the pool, whose steady-state
    retention is bounded by the actual peak transient set
@@ -147,7 +148,7 @@ substantive axes (in addition to the view/KV constraint in §3):
 2. **It destroys cache locality.** Bump allocation returns a fresh address per
    op; the pool returns the *same* address for same-sized successive
    allocations, keeping the hot working buffer warm in L1/L2. Address reuse is
-   the asserted behavior (`src/exec_tests.zig:336-354`) and directly serves the
+   the asserted behavior (`src/exec_tests.zig:338-358`) and directly serves the
    "match/beat llama.cpp on CPU" North Star.
 3. **It cannot express refcounted views / KV aliasing** — see §3.
 4. **It is impossible for training** — activations must outlive the forward for
@@ -159,9 +160,10 @@ amortization — and adds intra-pass reuse plus a bounded cap the arena lacks.
 ### Alignment with project intent
 
 - The pool is a **shipped, named feature** ("bucket-rounded buffer allocation
-  for small temporaries", `README.md`) and is listed under **Current
-  Strengths**, not tech debt (`ARCHITECTURE.md`, "Current Strengths"). The
-  per-tensor `defer x.deinit()` recycle idiom is the documented ownership model.
+  for small temporaries", `README.md`), and the allocation contract built on it
+  is listed under **Current Strengths**, not tech debt (`ARCHITECTURE.md`,
+  "Current Strengths"). The per-tensor `defer x.deinit()` recycle idiom is the
+  documented ownership model.
 - House rules reinforce it: "Backend outputs are exec-supplied" and
   "Explicit ownership … slices/tensor views *borrow*; pair every allocation with
   deterministic `errdefer`/`defer`" (`AGENTS.md`, House rules).
@@ -169,15 +171,15 @@ amortization — and adds intra-pass reuse plus a bounded cap the arena lacks.
   direction is the *opposite* of a generic scope-arena: a model-session with
   statically **preallocated, semantically-bound** buffers, explicitly "not a
   generic ggml-like graph" (`README.md`, closing scope note), and gated by the
-  "eager and local — don't add a cross-op layer without a concrete design" rule
-  (`AGENTS.md`, House rules).
+  "Eager and local" house rule — no fusion/compiler layer without a concrete
+  design (`AGENTS.md`, House rules).
 
 ---
 
 ## 5. The one honest caveat: ergonomics
 
 The genuine cost of the current pattern is **boilerplate** — ~21 `defer .deinit()`
-lines across `attnBlock` + `ffnBlock` (`src/llm/gemma/gemma4.zig:819/:914`).
+lines across `attnBlock` + `ffnBlock` (`src/llm/gemma/gemma4.zig:1031/:1126`).
 (The hand-written `catch { …deinit(); return e; }` error-path cleanups this
 section originally cited have since been converted to plain `defer`/`errdefer`
 arms.) These manual frees are the real fragility, and they are precisely the
@@ -205,9 +207,9 @@ into a deinit-eliminating arena for the inference engines was evaluated and
 **rejected**. The scope's release path is mechanically identical to a `defer
 deinit` (both end in `BufferPool.reclaim`), but the *timing* inverts the
 discipline this document defends: (i) a held scope turns the pool's O(1)
-working set into O(N) live intermediates with cold addresses — measured 2 vs
-32 distinct buffers on a 32-op 1 MiB chain (pinned by the "exec scope holds
-buffers until close" test in `src/ag/tensor_tests.zig`); (ii) scope adoption
+working set into O(N) live intermediates with cold addresses — pinned at
+<=2 vs 16 outstanding buffers on a 16-op chain by the "exec scope holds
+buffers until close" test in `src/ag/tensor_tests.zig`; (ii) scope adoption
 covers only the f32-facade op tails, never the typed/quantized/raw ops the
 engines run on, so a scoped engine still manages those explicitly. (A third
 fact at adjudication time — `ctx.replace` double-freeing scope-owned results
@@ -242,7 +244,7 @@ inference frame helper is unchanged.
   context alive holds up to `max_cached_bytes` of cache. `ExecContext.deinit`
   frees everything.
 - **`acquire`/`acquireSlab` release the mutex before allocating** a fresh
-  buffer/slab on the miss path (`src/exec/buffer_pool.zig:82-108`). Correct
+  buffer/slab on the miss path (`src/exec/buffer_pool.zig:82-108/:205-225`). Correct
   today (the new buffer is not yet shared, `outstanding` is atomic), but any
   future change touching shared pool state in that window must re-take the lock.
 - **Typed pooled buffers must never be marked stable-lifetime GPU RHS.** The

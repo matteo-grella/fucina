@@ -118,7 +118,7 @@ Behind the contract sits an equally uniform implementation shape:
 The facade checks everything checkable, exactly once; below it, kernels are
 tight loops that trust their inputs and never re-validate. Three views of
 the real thing show the whole architecture. First, the facade methods are
-startlingly small. `add`, in its entirety (from `src/ag/tensor.zig:1155`):
+startlingly small. `add`, in its entirety (from `src/ag/tensor.zig:1241`):
 
 ```zig
 pub fn add(self: *const Self, ctx: *ExecContext, other: anytype) !Tensor(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
@@ -129,7 +129,7 @@ pub fn add(self: *const Self, ctx: *ExecContext, other: anytype) !Tensor(pointwi
 The return *type* is computed at comptime from both operands' tag sets —
 that is Chapter 4's `pointwiseResultTags` doing its job. And the full
 pattern, for an op that carries its own backward record (from
-`src/ag/tensor.zig:1171`):
+`src/ag/tensor.zig:1257`):
 
 ```zig
 pub fn scale(self: *const Self, ctx: *ExecContext, scalar_value: f32) !Self {
@@ -183,7 +183,7 @@ copy), then dispatch to rank-specialized kernels that *assume* shape
 correctness. Below this line, nothing re-checks anything.
 
 Third, the kernels themselves classify layout exactly once and pick a fast
-path. The dispatch key is a four-way enum (from `src/exec.zig:47`):
+path. The dispatch key is a four-way enum (from `src/exec.zig:48`):
 
 ```zig
 pub const LayoutClass = enum {
@@ -291,7 +291,7 @@ Four ownership gotchas, all documented, all worth memorizing now
 One layering remark to file away for Chapter 7: the exec layer "deliberately
 knows nothing about autograd types; the ag facade stores its backward nodes
 in that payload. The user scopes the execution; that, in turn, is what
-enables autograd on top" (comment in `src/exec.zig:141-145`). A scope holds a
+enables autograd on top" (comment in `src/exec.zig:150-153`). A scope holds a
 type-erased `*anyopaque` plus a destructor pointer per adopted value — exec
 owns things it cannot name.
 
@@ -494,7 +494,7 @@ pub fn dot(self: *const Self, ctx: *ExecContext, other: anytype, comptime contra
     !Tensor(dotResultTags(tags, TensorObject(@TypeOf(other)).axis_tags, contract_tag))
 ```
 
-*(signature from `src/ag/tensor.zig:3318`)*
+*(signature from `src/ag/tensor.zig:3747`)*
 
 At comptime every tag falls into one of three roles (docs/REFERENCE.md §4.8):
 the **contract** tag (named by you, removed from the result), **batch** tags
@@ -820,6 +820,14 @@ test "argmax, topK, and routerTopK" {
     try std.testing.expectEqual(@as(usize, 1), selected[0]);
     // normalize_selected renormalizes the top-k softmax mass to 1
     try std.testing.expectApproxEqAbs(@as(f32, 0.7310586), weights[0], 1e-6);
+
+    // multinomial: seed-deterministic categorical draws; zero-weight
+    // classes are never selected.
+    var probs = try fucina.Tensor(.{ .row, .class }).fromSlice(&ctx, .{ 1, 3 }, &.{ 0, 2, 0 });
+    defer probs.deinit();
+    var picks = try probs.multinomial(&ctx, .class, .sample, 3, 42, true);
+    defer picks.deinit();
+    try std.testing.expectEqualSlices(i64, &.{ 1, 1, 1 }, try picks.dataConst());
 }
 ```
 
@@ -965,7 +973,7 @@ pub fn dropout(self: *const Self, ctx: *ExecContext, p: f32, seed: u64) !Self {
 }
 ```
 
-*(from `src/ag/tensor.zig:1244`)*
+*(from `src/ag/tensor.zig:1330`)*
 
 Element `i` survives iff the uniform draw of `rng.at(seed, i)` falls below
 `1 − p`; "the mask is never stored: forward, backward, and checkpoint
@@ -995,7 +1003,7 @@ claim; it draws the line per kernel class (docs/REFERENCE.md §9.4):
 > "Parallel splits are deterministic: tasks own disjoint output ranges, so
 > the threaded result is bit-identical to the serial path for elementwise,
 > conv, pool, and Winograd kernels (reductions and GEMM state their
-> reassociation tolerance instead)."
+> reassociation tolerance instead — see §9.3)."
 
 So: where each task owns a disjoint slice of the output — elementwise ops,
 convolutions, pooling, Winograd tiles — threading changes *nothing*, ever.

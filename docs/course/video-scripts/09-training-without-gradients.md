@@ -166,7 +166,7 @@ card: "Next: The guitar amp — real-time neural audio".
 - `src/es.zig:1–6` — module doc licensing stance ("reimplemented … not
   ported").
 - `examples/es_spirals/main.zig:39–48` — the `Model` struct of plain constants.
-- Optional spare: `examples/es_spirals/main.zig:322–324` — the two-line training
+- Optional spare: `examples/es_spirals/main.zig:323–325` — the two-line training
   loop (`evaluateMembers` + `update`), if the showcase segment needs a beat
   between code and terminal.
 
@@ -230,7 +230,7 @@ no model weights are needed anywhere in this episode.
   honesty segment, the 72 GB caveat, or the licensing beat.
 - **Numbers appearing in the video and their sources:** 72 GB = 30 ×
   0.6e9 × 4 bytes (§9.2, arithmetic); ~15k iterations, ~75 s, ~5 ms/iter,
-  population 128, 100% accuracy (docs/TRAINING.md:982–988 via §9.6, M1 Max
+  population 128, 100% accuracy (docs/TRAINING.md:986–987 via §9.6, M1 Max
   ReleaseFast); 2,000 gradient steps (`examples/spirals/main.zig:26` via §9.6);
   "nearly two million member evaluations" (§9.6's own arithmetic); target
   0.90 / chance 0.50 (§9.6); 4,482 parameters and 4 default workers (§9.6,

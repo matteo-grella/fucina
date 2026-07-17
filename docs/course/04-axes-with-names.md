@@ -73,7 +73,7 @@ reduction, permutation — is "made by tag identity, never by axis position at
 the call site" (docs/REFERENCE.md, §7 opening). The approach is credited:
 "the tagged-tensor approach (axis tags carried in the type, operands aligned
 by name) was inspired by [ZML](https://github.com/zml/zml)"
-(README.md:327–328). What Fucina adds is the particular split this chapter
+(README.md:377–378). What Fucina adds is the particular split this chapter
 teaches: names and ranks at compile time, sizes and layout at runtime.
 
 Two internal modules implement the machinery: `src/tags.zig` (a pure
@@ -208,7 +208,7 @@ with an O(n²) pairwise check, free because it runs at compile time.
 > argument values, same returned type.
 
 Here is the real constructor, elided to its skeleton
-(src/ag/tensor.zig:185–211):
+(src/ag/tensor.zig:189–215):
 
 ```zig
 pub fn Tensor(comptime tags_spec: anytype) type {
@@ -566,7 +566,7 @@ result *type* is computed from its comptime argument, so downstream code is
 typed by the new order automatically. Every view method on the real facade
 has this shape: `alignTo`, `permuteTo`, `transpose`, `withTags` (relabel),
 `insertAxis`, `squeeze`, `broadcastTo` all return
-`Tensor(<some tag computation>)` (signatures in src/ag/tensor.zig:1042–1148).
+`Tensor(<some tag computation>)` (signatures in src/ag/tensor.zig:1128–1239).
 `permuteTo` is `alignTo` plus the constraint that the target is a
 permutation — same length, same membership (`validateSameTagSet`,
 src/tags.zig:166–170) — so no axis can be injected.
@@ -609,7 +609,7 @@ order, then every right-only tag appended in right order. The Len twin
 (`pointwiseResultLen`, same file) counts the union and carries the rank cap
 — `@compileError("too many tensor tags")` past `max_rank`. And the facade
 `add` puts the computation directly in its return type
-(src/ag/tensor.zig:1155; `sub`/`mul`/`div`/`maximum`/`minimum` are
+(src/ag/tensor.zig:1241; `sub`/`mul`/`div`/`maximum`/`minimum` are
 identical in shape):
 
 ```zig
@@ -699,7 +699,7 @@ pub fn dotResultLen(comptime left_tags: anytype, comptime right_tags: anytype, c
 
 The contract tag must exist in **both** operands before this function will
 even report a length. And because the facade `dot` calls it in the *return
-type position* (src/ag/tensor.zig:3318):
+type position* (src/ag/tensor.zig:3747):
 
 ```zig
 pub fn dot(self: *const Self, ctx: *ExecContext, other: anytype, comptime contract_tag: Tag) !Tensor(dotResultTags(tags, TensorObject(@TypeOf(other)).axis_tags, contract_tag))
@@ -739,7 +739,7 @@ src/tags.zig:388:31: note: called at comptime here
 src/tags.zig:368:122: note: called at comptime here
 pub fn dotResultTags(comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag) [dotResultLen(left_tags, right_tags, contract_tag)]Tag {
                                                                                                              ~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-src/ag/tensor.zig:3318:123: note: generic function instantiated here
+src/ag/tensor.zig:3747:123: note: generic function instantiated here
         pub fn dot(self: *const Self, ctx: *ExecContext, other: anytype, comptime contract_tag: Tag) !Tensor(dotResultTags(tags, TensorObject(@TypeOf(other)).axis_tags, contract_tag)) {
                                                                                                              ~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 repro_facade_error.zig:8:22: note: generic function instantiated here
@@ -886,7 +886,7 @@ Two boundaries to keep straight, both documented:
   (docs/REFERENCE.md §7.9). The escape hatch when you *do* want a stride-0
   broadcast batch is the facade `matmul` with an explicit result spelled
   out — `matmul(ctx, other, comptime kind, comptime out_tags) !Tensor(out_tags)`
-  (src/ag/tensor.zig:456): you name the output tags, the library obliges.
+  (src/ag/tensor.zig:487): you name the output tags, the library obliges.
 - **Sizes still fail at runtime.** Our mini `dot` returns
   `error.ShapeMismatch` when `.k` is 3 on the left and 2 on the right, and
   so does the real one (§4.4). Names were never going to catch that.
@@ -957,7 +957,7 @@ This is the chapter's two-worlds table (§4.4) in one op: *tag* contiguity
 the same rule.
 
 Rounding out the structural set (facade signatures in
-src/ag/tensor.zig:1095–1148, :1784–1798): `flatten(ctx, out_tag)` returns
+src/ag/tensor.zig:1964–1982): `flatten(ctx, out_tag)` returns
 `Tensor(.{out_tag})` — zero-copy when contiguous, materializing otherwise —
 and `sumMany(ctx, reduce_tags)` reduces away several named axes at once,
 returning `Tensor(removeTags(tags, reduce_tags))`; `sumAll` collapses
@@ -1035,7 +1035,7 @@ On the facade, `einsum` takes the output tags directly —
 `x.einsum(ctx, &y, .{ .batch, .m, .n })` — and its comptime guards speak in
 prose: a quantized RHS gets `@compileError("einsum does not take a
 quantized RHS; use dot, whose packed kernels require the [free, contract]
-weight layout")` (src/ag/tensor.zig:3361–3362) — the message carries both
+weight layout")` (src/ag/tensor.zig:3790–3791) — the message carries both
 the *why* and the fix.
 
 ### Comptime plans, runtime choices
@@ -1057,7 +1057,7 @@ runs. How those kernels work — and why GEMM dominates everything — is
 [Chapter 5](05-the-operation-library.md) and
 [Chapter 6](06-going-fast-on-cpus.md)'s story.
 
-One more documented cost (doc comment, src/tagged.zig:132–135): an
+One more documented cost (doc comment, src/tagged.zig:133–135): an
 `out_tags` order that interleaves the batch/free groups pays one extra
 output materialization — prefer group-nested orders. And even the
 *rejected* fourth kernel is a documented decision: the double-transposed
@@ -1160,7 +1160,7 @@ neither a tag nor a check for one.
 - `src/tagged.zig` — the runtime half: `alignTensorToOf` (the workhorse
   view), `pointwise`, `taggedDot`/`taggedEinsum` with the orientation probe.
   Remember: internal — user code goes through `Tensor` methods.
-- `src/ag/tensor.zig:185–211` — the facade constructor: normalize, validate,
+- `src/ag/tensor.zig:189–215` — the facade constructor: normalize, validate,
   `return struct`; then skim any view method's return type.
 - `docs/REFERENCE.md` §3.1–3.2 and §7 — the semantics contract, with
   machine-verified snippets for every behavior this chapter claimed.
@@ -1173,7 +1173,7 @@ neither a tag nor a check for one.
 
 1. **Warm-up.** Add `hasTag(comptime tag: Tag) bool` and a comptime
    `axis(comptime tag: Tag) usize` to the mini `View`, mirroring the facade
-   (src/ag/tensor.zig:976–984). Assert their results in a `comptime` block.
+   (src/ag/tensor.zig:1062–1068). Assert their results in a `comptime` block.
 2. **Operand order.** Using the real library, compute `bias.add(&ctx, &x)`
    and `x.add(&ctx, &bias)` for `bias: Tensor(.{.d})`, `x: Tensor(.{ .batch,
    .d })`. Predict both result *types* before compiling (§4.6's gotcha),

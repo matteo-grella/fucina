@@ -33,7 +33,7 @@ It's Fucina's canonical smoke test, and CI runs it against the real library
 on every push. To read it, you need a handful of Zig features. Here they are.
 
 **Visual:** Full-screen code shot of the first program —
-`docs/REFERENCE.md` lines 248–276 (the fenced `test "first program"` block,
+`docs/REFERENCE.md` lines 251–279 (the fenced `test "first program"` block,
 §1.4). Slow scroll top to bottom; briefly highlight the final two
 `expectApproxEqAbs` lines (tolerance `1e-6`) on "one part in a million".
 
@@ -51,7 +51,7 @@ acquire.
 
 **Visual:** Zoom into the same snippet: highlight `const alloc =
 std.testing.allocator;` and `ctx.init(alloc);`, then each `defer x.deinit();`
-line lighting up in sequence. Cut to `examples/spirals/main.zig` lines 327–330 —
+line lighting up in sequence. Cut to `examples/spirals/main.zig` lines 328–331 —
 the demo's `DebugAllocator` with `defer if (gpa.deinit() == .leak)
 @panic("leak");` — on "fails the test".
 
@@ -81,7 +81,7 @@ different types. Contract an axis a tensor doesn't have, and the program
 doesn't crash — it doesn't compile. One honest caveat: the types carry names,
 not sizes. Size mismatches still surface at runtime.
 
-**Visual:** Code shot of `src/ag/tensor.zig` lines 185–190 (`pub fn
+**Visual:** Code shot of `src/ag/tensor.zig` lines 189–194 (`pub fn
 Tensor(comptime tags_spec: anytype) type { ... }`). Then a split-screen
 diagram: `Tensor(.{ .batch, .in })` and `Tensor(.{ .in, .out })` as two
 distinct boxes with a ≠ between them; a third line `x.dot(&ctx, &w, .out)`
@@ -130,17 +130,17 @@ state. End card with the series title and next-episode tease.
 ## Asset list
 
 **Code shots (repo files, exact ranges):**
-- `docs/REFERENCE.md` lines 248–276 — the `test "first program"` snippet
+- `docs/REFERENCE.md` lines 251–279 — the `test "first program"` snippet
   (§1.4; identical to the chapter's §1.2 block at
   `docs/course/01-just-enough-zig.md:78-106` — REFERENCE.md is used because
   it is the CI-verified original). The "27 lines" are the code between the
-  fences (lines 249–275, blank lines included), and that code contains
+  fences (lines 252–278, blank lines included), and that code contains
   exactly twelve `try` keywords — verified, so the segment-3 highlight count
   matches the on-screen snippet. Segments 1–3.
-- `examples/spirals/main.zig` lines 327–330 — `DebugAllocator` + `@panic("leak")`.
+- `examples/spirals/main.zig` lines 328–331 — `DebugAllocator` + `@panic("leak")`.
   Segment 2.
 - `src/tensor.zig` lines 11–19 — `TensorError` (seven members). Segment 3.
-- `src/ag/tensor.zig` lines 185–190 — `pub fn Tensor(...) type`. Segment 4.
+- `src/ag/tensor.zig` lines 189–194 — `pub fn Tensor(...) type`. Segment 4.
 - `src/tags.zig` line 4 — `pub const Tag = @TypeOf(.tag);`. Segment 5.
 - `src/fucina.zig` lines 28–42 — RawTensor comment + `@compileError` guard.
   Segment 5.

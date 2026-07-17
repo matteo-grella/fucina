@@ -101,7 +101,7 @@ provider, never the architecture.
 era · Level 1 vector–vector / Level 2 matrix–vector (GEMV) / Level 3
 matrix–matrix (GEMM) · SGEMM/DGEMM naming = Fortran heritage" (stated as
 common knowledge, per §6.6). Then code shot:
-`src/backend/native.zig:171–194` — the dispatch precedence — with three
+`src/backend/native.zig:171–193` — the dispatch precedence — with three
 sequential highlights synced to the VO: the `use_gpu` block ("may decline"),
 the `use_blas` block ("may decline"), the final
 `vector.matmul2DIntoUncheckedWithConfig` line ("always answers").
@@ -157,7 +157,7 @@ values".
 - `src/backend/vector/common.zig:24–25` — the two-line vector-width policy.
 - `src/backend/vector/primitives.zig:52–74` — the production `vecAdd`
   three-tier loop.
-- `src/backend/native.zig:171–194` — GPU → BLAS → vector dispatch precedence.
+- `src/backend/native.zig:171–193` — GPU → BLAS → vector dispatch precedence.
 
 **Diagrams to render (one sentence each):**
 - Schematic profiler bar: "matmul" vs "everything else", order-of-magnitude

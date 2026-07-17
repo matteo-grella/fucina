@@ -39,7 +39,7 @@ config, exactly the chapter's §12.1 excerpt). As the VO names each number,
 highlight the matching field: `vocab_size`, `hidden_size`, `num_layers`,
 `num_attention_heads` + `num_key_value_heads`.
 
-**Overlay:** "`src/llm/qwen3/model.zig` — ~1,700 lines, the whole model" ·
+**Overlay:** "`src/llm/qwen3/model.zig` — ~1,800 lines, the whole model" ·
 "16 query heads, 8 KV heads — that asymmetry *is* grouped-query attention".
 
 ### [0:26–0:55] The whole forward pass
@@ -52,11 +52,11 @@ positions inside the attention call. A final norm, one last matmul, and out
 come 151,936 scores — one per vocabulary token. That is the entire
 architecture.
 
-**Visual:** Code shot: `src/llm/qwen3/model.zig:561–592` (the heart of
+**Visual:** Code shot: `src/llm/qwen3/model.zig:512–543` (the heart of
 `forwardStep`), with sequential highlights synced to the VO: the
-`getRowsAs` embedding line (561), the layer loop with `attentionBlock` /
-`ffnBlock` (565–578), `rmsNormMul` final norm (582), the `linearSeq` logits
-line (592). Then cut to a rendered version of §12.1's data-flow diagram:
+`getRowsAs` embedding line (512), the layer loop with `attentionBlock` /
+`ffnBlock` (516–529), `rmsNormMul` final norm (533), the `linearSeq` logits
+line (543). Then cut to a rendered version of §12.1's data-flow diagram:
 text → token ids → `[seq, 1024]` residual stream → 28 blocks → logits →
 sampler → next token, with the arrow looping back.
 
@@ -81,7 +81,7 @@ only the last cell is "computed" (bright) and the rest is "read from cache"
 (dim), versus the naive version where everything relights every step. Then
 code shot: `src/llm/kv_cache.zig:8–16` (the doc comment: f16
 `[capacity, kv_heads, head_dim]`, "K is stored *after* RoPE … never
-re-rotated"). Then code shot: `src/llm/qwen3/model.zig:1194–1215` — the
+re-rotated"). Then code shot: `src/llm/qwen3/model.zig:1214–1235` — the
 `appendLayer` call and the f16 `narrow` views feeding `causalAttention`,
 highlighting `appendLayer` then the two `narrow` lines.
 
@@ -110,7 +110,7 @@ Close on a type-on of the oracle flag: `--verify-cache N`.
 **Overlay:** On the arithmetic card, persistent: "Qwen3-0.6B geometry, f16
 cache — from the config, §12.4; the figure docs/LMSERVER.md budgets with".
 On the oracle: "`--verify-cache` — cached vs cacheless logits, decode step
-by decode step (model.zig:490–495)".
+by decode step (model.zig:441–446)".
 
 ### [2:12–2:42] Chat with it (showcase)
 
@@ -159,12 +159,12 @@ single answer".
 
 **Code shots (repo files, exact ranges):**
 - `src/llm/qwen3/model.zig:71–83` — the `qwen3_0_6b()` nine-integer config.
-- `src/llm/qwen3/model.zig:561–592` — the heart of `forwardStep`
+- `src/llm/qwen3/model.zig:512–543` — the heart of `forwardStep`
   (embedding, layer loop, final norm, logits). The on-screen range includes
   a MoE pilot-prefetch stanza the chapter's excerpt trims; highlights keep
   the eye on the taught lines.
 - `src/llm/kv_cache.zig:8–16` — the cache-layout doc comment.
-- `src/llm/qwen3/model.zig:1194–1215` — `appendLayer` + zero-copy `narrow`
+- `src/llm/qwen3/model.zig:1214–1235` — `appendLayer` + zero-copy `narrow`
   views into `causalAttention`.
 
 **Terminal recordings (real, executed):**
@@ -215,7 +215,7 @@ command above fetches it on camera).
   VO sentence). Never trim the arithmetic card's caveat, the demo, or the
   teaser line.
 - **Numbers appearing in the video and their sources:** the nine config
-  integers incl. 151,936 and 1,024 (`model.zig:71–83` via §12.1); ~1,700
+  integers incl. 151,936 and 1,024 (`model.zig:71–83` via §12.1); ~1,800
   lines (§12 intro); 112 KiB/position and ~448 MiB @ 4096 tokens (§12.4
   config arithmetic, quoted by docs/LMSERVER.md); GQA saving "exactly 2×"
   vs 16 KV heads (§12.3.5/§12.4); 10–50× Debug slowdown (README via §12.9).

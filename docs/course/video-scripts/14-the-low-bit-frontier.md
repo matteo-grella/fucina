@@ -50,11 +50,11 @@ of codes times activations, minus the sum of the activations. The first
 term is exactly what int8 dot instructions want. The second is already
 precomputed in the activation blocks. One subtraction per block buys back
 the sign.
-**Visual:** Code shot: `BlockTQ2_0` at `src/dtype.zig:206-209` with the
-size assert at `src/dtype.zig:245` (`== 66`) beneath it; then the chapter's
+**Visual:** Code shot: `BlockTQ2_0` at `src/dtype.zig:213-216` with the
+size assert at `src/dtype.zig:253` (`== 66`) beneath it; then the chapter's
 compile-checked identity test at
 `docs/course/14-the-low-bit-frontier.md:58-73`; end on the production inner
-loop at `src/backend/quant/ternary.zig:339-350` with
+loop at `src/backend/quant/ternary.zig:344-354` with
 `const isum = dots[ci] - bsum;` highlighted.
 **Overlay:** `dot(w,a) = Σ(w+1)·a − Σa` · `Σa is free: Q8_K bsums already
 carry it`
@@ -129,9 +129,9 @@ question that isn't Fucina's to answer); end card with the chapter link
 
 ## Asset list
 - **Repo code shots**:
-  - `src/dtype.zig:206-209` — `BlockTQ2_0` struct; pair with the
-    `@sizeOf == 66` assert at `src/dtype.zig:245`.
-  - `src/backend/quant/ternary.zig:339-350` — the tile inner loop
+  - `src/dtype.zig:213-216` — `BlockTQ2_0` struct; pair with the
+    `@sizeOf == 66` assert at `src/dtype.zig:253`.
+  - `src/backend/quant/ternary.zig:344-354` — the tile inner loop
     (highlight `const isum = dots[ci] - bsum;`).
 - **Chapter code excerpts** (compile-checked course code; source of truth
   is the chapter):

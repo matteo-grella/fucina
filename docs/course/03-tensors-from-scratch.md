@@ -169,7 +169,7 @@ pretend you did not see it; we earn it in §3.6.
 > automatically, and only on the error path. Constructor choreography like
 > this — allocate, `errdefer` the rollback, allocate the next thing — is the
 > manual-memory equivalent of exception safety, visible in `create` at
-> src/storage.zig:25-35.
+> src/storage.zig:28-38.
 
 ## 3.4 Step 3: shape and strides — the interpretation
 
@@ -385,7 +385,7 @@ view, in either order.
 
 The subtle part is "whoever returns the last reference", because releases can
 race across threads. Here is Fucina's actual `release`, from
-`src/storage.zig:117-129`, and it repays close reading:
+`src/storage.zig:120-132`, and it repays close reading:
 
 ```zig
 pub fn release(self: *Self) void {
@@ -412,7 +412,7 @@ of silent corruption. (The `discardPending`/`waitUnused` calls and the
 `release_fn` hook are real-library concerns we take up in §3.7 and §3.9.)
 
 > **Zig note** — Why do the atomic orderings differ? `retain` uses
-> `.monotonic` (src/storage.zig:107-109): taking a reference needs no
+> `.monotonic` (src/storage.zig:110-112): taking a reference needs no
 > synchronization beyond the counter itself, because whoever gave you the
 > tensor already synchronized with you. `release` uses `.acq_rel`: the
 > *release* half makes all your writes to the data visible before the count
@@ -535,33 +535,33 @@ pool — six steps, each forced by the previous one. Now, the production version
 
 ## 3.8 The real dtype system (`src/dtype.zig`)
 
-Fucina's `DType` has 37 tags (src/dtype.zig:3-41, abridged):
+Fucina's `DType` has 38 tags (src/dtype.zig:3-42, abridged):
 
 ```zig
 pub const DType = enum {
     bool,
     u8, u16, i8, i16, i32, i64,
     f16, bf16, f32, f64,
-    q1_0, q4_0, q4_1, q5_0, q5_1, q8_0, q8_1,
+    q1_0, q2_0, q4_0, q4_1, q5_0, q5_1, q8_0, q8_1,
     q2_k, q3_k, q4_k, q5_k, q6_k, q8_k,
     iq1_s, iq1_m, iq2_xxs, iq2_xs, iq2_s, iq3_xxs, iq3_s, iq4_nl, iq4_xs,
     tq1_0, tq2_0, mxfp4, nvfp4,
 };
 ```
 
-Every tag is one of two *kinds* (`DTypeKind`, src/dtype.zig:49): **scalar**
+Every tag is one of two *kinds* (`DTypeKind`, src/dtype.zig:50): **scalar**
 (one storage element per logical element — the first eleven) or
 **block-quantized** (one packed struct per block of 32–256 logical elements —
-the other 26, all GGML-compatible wire formats). Three comptime type
+the other 27, all GGML-compatible wire formats). Three comptime type
 functions map tags to Zig types, and their domains encode policy:
 
-- `Scalar(dtype)` (src/dtype.zig:250) — the per-logical-element type.
+- `Scalar(dtype)` (src/dtype.zig:258) — the per-logical-element type.
   Compile error for block dtypes, exactly like our miniature's `.q4` arm.
-- `Storage(dtype)` (src/dtype.zig:293) — the per-*storage*-element type:
+- `Storage(dtype)` (src/dtype.zig:302) — the per-*storage*-element type:
   `Scalar(dtype)` for scalars, the block struct for block formats. Buffers
   are sized in `Storage(dtype)` units — which is why our from-scratch layer
   can carry quantized data it cannot decode: it only has to count blocks.
-- `Accumulator(dtype)` (src/dtype.zig:325) — the type reductions accumulate
+- `Accumulator(dtype)` (src/dtype.zig:335) — the type reductions accumulate
   in: `f32` for `.f16`/`.bf16`/`.f32`, `f64` for `.f64`, `i64`/`u64` for the
   integers.
 
@@ -569,7 +569,7 @@ Two entries deserve a pause.
 
 **`Scalar(.bf16) == u16`.** bfloat16 is stored and passed as *raw bits*, not
 a float type. Why that is sane becomes clear from the conversion functions,
-which are a small gem — `src/dtype.zig:750-763`, complete:
+which are a small gem — `src/dtype.zig:765-778`, complete:
 
 ```zig
 pub fn bf16ToF32(bits: u16) f32 {
@@ -597,15 +597,15 @@ round-to-nearest-even (`+ 0x7fff + lsb` — add just under half, plus one more
 when the kept LSB is odd, so ties go to even), and the first branch quiets
 NaNs (`| 64` sets a mantissa bit so a NaN payload never truncates to
 infinity — ggml-compatible, pinned by `src/dtype_tests.zig`). Even the
-constant `one(.bf16) == 0x3f80` (src/dtype.zig:611-617) makes sense now:
+constant `one(.bf16) == 0x3f80` (src/dtype.zig:626-632) makes sense now:
 it is the top half of f32's `0x3f80_0000`, which is 1.0. Compare f16, which
 spends its 16 bits on more mantissa and less exponent: more precision,
 much smaller range.
 
 **The block structs are wire formats.** Each block dtype maps to an
 `extern struct` — C layout, no padding games — and a `comptime` block pins
-every one of their sizes at build time (struct at src/dtype.zig:74-77,
-comments added; sizes pinned at :221-248, abridged):
+every one of their sizes at build time (struct at src/dtype.zig:81-84,
+comments added; sizes pinned at :228-256, abridged):
 
 ```zig
 pub const BlockQ8_0 = extern struct {
@@ -616,7 +616,7 @@ pub const BlockQ8_0 = extern struct {
 comptime {
     std.debug.assert(@sizeOf(BlockQ8_0) == 34);
     std.debug.assert(@sizeOf(BlockQ4_K) == 144);
-    // ... all 26 formats ...
+    // ... all 27 formats ...
 }
 ```
 
@@ -629,7 +629,7 @@ properly. To the tensor layer of this chapter, a `BlockQ4_K` is an opaque
 144-byte payload.
 
 Finally, dtype policy. Two comptime functions, `computeDType` and
-`outputDType` (src/dtype.zig:564, :585), encode one policy table for the
+`outputDType` (src/dtype.zig:579, :600), encode one policy table for the
 whole op library of [Chapter 05](05-the-operation-library.md). The rules
 that matter now:
 
@@ -644,9 +644,9 @@ that matter now:
   facade; casts are explicit ops. Where a cast must exist, its edge cases are
   *defined*: `castScalar` documents that float→int truncates toward zero and
   saturates at the target bounds with NaN → 0 — "defined everywhere — torch's
-  CPU float-to-int overflow is unspecified" (src/dtype.zig:714-719).
+  CPU float-to-int overflow is unspecified" (src/dtype.zig:729-734).
 - **Only float dtypes can carry gradients** (`supportsGrad`,
-  src/dtype.zig:430) — and in practice only `.f32` does
+  src/dtype.zig:442) — and in practice only `.f32` does
   (docs/REFERENCE.md §8.2). Gradients are [Chapter 07](07-autograd.md)'s story.
 
 > **ML note** — "Accumulate wider than you store" is likely your first
@@ -658,8 +658,8 @@ that matter now:
 
 ## 3.9 The real storage (`src/storage.zig`)
 
-The production buffer is our miniature plus the hook fields plus three GPU
-fields, generic over dtype — `src/storage.zig:8-23`:
+The production buffer is our miniature plus the hook fields plus four GPU
+fields, generic over dtype — `src/storage.zig:8-26`:
 
 ```zig
 pub fn BufferOf(comptime buffer_dtype: DType) type {
@@ -674,6 +674,9 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
         pending_work: std.atomic.Value(?*accelerator.Work) = .init(null),
         pending_use: std.atomic.Value(?*accelerator.Work) = .init(null),
         accelerator_resource: std.atomic.Value(?*accelerator.Resource) = .init(null),
+        /// Exclusive completion claim for `waitReady`: only the claim holder
+        /// may dereference (and release) `pending_work` — see `waitReady`.
+        pending_claim: std.atomic.Value(bool) = .init(false),
 
         const Self = @This();
         pub const dtype = buffer_dtype;
@@ -682,16 +685,16 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
 
 `BufferOf` is a comptime function returning a struct type — one source, a
 family of concrete buffer types, with `pub const Buffer = BufferOf(.f32);`
-(src/storage.zig:234) as the workhorse alias. Note `pub const dtype` *inside*
+(src/storage.zig:264) as the workhorse alias. Note `pub const dtype` *inside*
 the struct: types can carry constants, so any code holding a buffer type can
 ask it what format it stores at compile time.
 
-The three `pending_*`/`accelerator_resource` fields are **out of scope for
+The four `pending_*`/`accelerator_resource` fields are **out of scope for
 this chapter**: they are fences and cache metadata for asynchronous GPU
 offload (Metal/CUDA), which enters the story as a backend seam much later.
 All you need here is that they exist on the buffer and that `release` and
 `destroy` drain them before storage is recycled — host-side code like ours
-never sees them non-null on a CPU build.
+never sees them set on a CPU build.
 
 What *is* this chapter's business is the constructor family, because it
 enumerates every ownership pattern the library needs (all return `refs == 1`;
@@ -727,7 +730,7 @@ atomic and may race freely from any thread; the **data slice is not
 synchronized** — concurrent reads are fine, writers need external
 coordination (the runtime's parallel kernels only ever partition disjoint
 ranges — [Chapter 06](06-going-fast-on-cpus.md)). And `isUnique()`
-(src/storage.zig:113-115) is explicitly a *snapshot*, not a lock — the
+(src/storage.zig:114-118) is explicitly a *snapshot*, not a lock — the
 source comment says "Use for ownership-transfer APIs when the caller already
 has exclusive access". We meet its canonical consumer in §3.10.
 
@@ -1115,7 +1118,7 @@ figure is claimed), so a public raw type would only split the ecosystem into
 two tensor vocabularies (docs/REFERENCE.md §8.6). Code that genuinely needs
 the raw layer — backend kernels, format/byte work, the LLM band needing
 exact type identity — names it through the sanctioned escape hatch,
-`fucina.internal.RawTensor` (src/fucina.zig:128-167). For *inspection*, the
+`fucina.internal.RawTensor` (src/fucina.zig:132-171). For *inspection*, the
 facade already crosses the boundary safely: every public tensor exposes
 `asRawTensor()`, a read-only view of the raw metadata you now know how to
 read.
@@ -1161,7 +1164,7 @@ names for the axes, checked at compile time. That is
 
 ## Explore the source
 
-- `src/dtype.zig` — the 37-tag enum, the type-mapping trio, the dtype policy
+- `src/dtype.zig` — the 38-tag enum, the type-mapping trio, the dtype policy
   tables, and the bf16 bridge; the whole file is under 800 lines and readable
   in one sitting.
 - `src/storage.zig` — `BufferOf`, the constructor/ownership matrix, and
@@ -1181,7 +1184,7 @@ names for the axes, checked at compile time. That is
    `fn sizeOf(comptime dtype: DType) usize` that returns the per-element byte
    size via `@sizeOf(Scalar(dtype))`. Verify with a test that
    `sizeOf(.f64) == 8`. Then look up how the real library answers the same
-   question for block formats (`blockByteSize`, src/dtype.zig:560).
+   question for block formats (`blockByteSize`, src/dtype.zig:575).
 2. **(Easy)** In the mini-tensor, write `fn narrowRows(self: *const Tensor,
    start: usize, count: usize) !Tensor` returning a view of rows
    `[start, start+count)` of a rank-2 tensor: bump `offset` by

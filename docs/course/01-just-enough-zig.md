@@ -158,10 +158,10 @@ when the test ends. Fucina's unit tests run under it by convention, which
 means **leak detection is not a tool you run — it is what `zig build test`
 already does**. The context threads that one allocator into the whole
 runtime; the signature is `pub fn init(self: *ExecContext, allocator:
-Allocator) void` (`src/exec.zig:126`).
+Allocator) void` (`src/exec.zig:135`).
 
 Outside tests, the demo programs use the debug allocator with an explicit
-leak check — from `examples/spirals/main.zig:327-330`:
+leak check — from `examples/spirals/main.zig:328-331`:
 
 ```zig
 pub fn main(init: std.process.Init) !void {
@@ -339,7 +339,7 @@ test "errdefer frees partial state only on the error path" {
 ```
 
 One house convention to notice now: every `deinit` ends with
-`self.* = undefined` (`src/exec.zig:132-136`; `AGENTS.md` house rules mandate
+`self.* = undefined` (`src/exec.zig:141-145`; `AGENTS.md` house rules mandate
 it). In Debug builds Zig fills `undefined` memory with a recognizable byte
 pattern, so *using* a deinitialized struct crashes loudly instead of
 corrupting quietly. A tripwire, not carelessness.
@@ -375,7 +375,7 @@ Mutable output, immutable inputs. A kernel cannot scribble on its inputs
 without the compiler objecting.
 
 The array/slice split also encodes *when the length is known*. Look at a
-tensor constructor (`src/ag/tensor.zig:244`):
+tensor constructor (`src/ag/tensor.zig:248`):
 
 ```zig
 pub fn fromSlice(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []const f32) !Self
@@ -505,7 +505,7 @@ without deciding what happens when it is null. Three unwrapping tools:
 The first program used the third form: `(try x.grad(&ctx)).?` — "I *know*
 backward has run, give me the gradient." The reason `grad` returns an
 optional is the most instructive field in the library
-(`src/ag/tensor.zig:204-205`):
+(`src/ag/tensor.zig:208-209`):
 
 ```zig
 value: RawTensor,
@@ -527,7 +527,7 @@ pub const vector_len: comptime_int = std.simd.suggestVectorLength(f32) orelse 4;
 ```
 
 And "unspecified end of a slice range" is `end: ?isize = null`
-(`src/ag/tensor.zig:161-165`) — not a magic sentinel like `-1`, an actual
+(`src/ag/tensor.zig:165-169`) — not a magic sentinel like `-1`, an actual
 absence. Course code:
 
 ```zig
@@ -553,18 +553,18 @@ test "optionals must be unwrapped" {
 ## 1.9 Enums and exhaustive `switch`
 
 A Zig enum is a closed set of names. Fucina's dtype universe is one enum with
-37 members (`src/dtype.zig:3-41`) — `bool`, the integers, `f16`/`bf16`/`f32`/
+38 members (`src/dtype.zig:3-42`) — `bool`, the integers, `f16`/`bf16`/`f32`/
 `f64`, and the whole zoo of block-quantized formats (`q4_k`, `q8_0`, ...,
 `tq2_0`) that [Chapter 11](11-model-files-and-quantization.md) decodes.
 
 The power move is `switch`: **a `switch` over an enum must handle every
-member, or it does not compile**. Add a 38th dtype and every switch you
+member, or it does not compile**. Add a 39th dtype and every switch you
 forgot to update becomes a compile error pointing at itself. The repo
 weaponizes this deliberately: "prefer exhaustive `switch` over dtype/backend
 so adding a variant forces edits everywhere" (`AGENTS.md`, house rules).
 
 The most consequential switch in the library selects the compute backend —
-at compile time, from a build option (`src/backend.zig:104-112`):
+at compile time, from a build option (`src/backend.zig:107-115`):
 
 ```zig
 pub const Kind = enum {
@@ -601,7 +601,7 @@ fn bytesPerElement(dt: DType) f32 {
 ```
 
 (That `34.0 / 32.0` is real: a Q8_0 block stores 32 weights in 34 bytes —
-`src/dtype.zig:74-77`, properly decoded in Chapter 11.)
+`src/dtype.zig:81-84`, properly decoded in Chapter 11.)
 
 > **ML note** — dtype dispatch is the plumbing of every framework, usually
 > as string comparisons or virtual calls. Here it is a closed enum the
@@ -718,7 +718,7 @@ is a compile error. Now scale the idea: what if the parameters were not a
 length but a tuple of *axis names*?
 
 That is precisely the library's public API. `fucina.Tensor` is a function —
-`src/ag/tensor.zig:185-190`:
+`src/ag/tensor.zig:189-194`:
 
 ```zig
 pub fn Tensor(comptime tags_spec: anytype) type {
@@ -732,7 +732,7 @@ pub fn Tensor(comptime tags_spec: anytype) type {
 Six lines that carry the whole design. `Tensor(.{ .batch, .in })` calls this
 function *during compilation*; it returns a freshly built struct type whose
 comptime declarations record the tags (`axis_tags`, `tag_count`,
-`tensor_rank` — `src/ag/tensor.zig:199-202`). `Tensor(.{ .batch, .in })` and
+`tensor_rank` — `src/ag/tensor.zig:203-206`). `Tensor(.{ .batch, .in })` and
 `Tensor(.{ .in, .out })` are as distinct as `V3` and `V4` above — which is
 why contracting a tag a tensor does not have is a *compile* error, not a
 runtime shape crash.
@@ -892,7 +892,7 @@ exactly that when assets are missing, so `zig build test` is always green on
 a fresh clone (`docs/REFERENCE.md` §2.7).
 
 Fucina layers a simple convention on top (`docs/REFERENCE.md` §2.7): tests
-live in **sibling files** — `exec.zig` has `exec_tests.zig`, 143 such files
+live in **sibling files** — `exec.zig` has `exec_tests.zig`, 156 such files
 across the tree — and the production file pulls its sibling in with a
 forwarding stanza:
 
@@ -904,7 +904,7 @@ test {
 
 An anonymous test block that merely *references* the test file is enough to
 compile it in. Module roots forward everything — `src/fucina.zig` ends with
-`test { _ = dtype; _ = exec; ... }` (`src/fucina.zig:169-189`) — so nine test
+`test { _ = dtype; _ = exec; ... }` (`src/fucina.zig:173-193`) — so nine test
 roots reach every test in the repository.
 
 Then the convention eats its own documentation: `zig build snippet-check`
@@ -1006,7 +1006,7 @@ knowledge predates 0.16 (`AGENTS.md`, "Zig 0.16 notes"; full reference at
 - **Casts infer their destination** from context (`@intCast`, `@ptrCast`,
   `@enumFromInt`, ...); use `@as(T, x)` to state a target type explicitly.
 - **`main` takes `std.process.Init`**, and I/O goes through the new `std.Io`
-  writer API. From `examples/spirals/main.zig:327-339`:
+  writer API. From `examples/spirals/main.zig:328-340`:
 
 ```zig
 pub fn main(init: std.process.Init) !void {
@@ -1097,7 +1097,7 @@ disagrees with something you read elsewhere, imitate this repo — then run
    `fn Pair(comptime A: type, comptime B: type) type` with fields
    `first: A`, `second: B` and a `swap` method returning `Pair(B, A)`;
    compile-check it with `zig test`. Then read `TopKResult` in
-   `src/ag/tensor.zig:167-183` — a real two-field generic whose second
+   `src/ag/tensor.zig:171-187` — a real two-field generic whose second
    field's *type* is computed from the first's spec.
 5. **(Harder) Read one real comptime function end to end.** Annotate
    `dotResultTags` in `src/tags.zig`: which values exist only at comptime,

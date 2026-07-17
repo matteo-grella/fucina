@@ -16,7 +16,7 @@ Everything here is honestly labelled **research frontier**. The formats are real
 
 A three-valued weight carries log₂ 3 ≈ 1.58 bits of information — hence the name of the research line this builds on, BitNet **b1.58** (arXiv:2504.12285, cited in `docs/TERNARY.md`). No practical format hits 1.58 exactly; you pay a little for addressable packing and for scales. Fucina's chosen container is ggml's **TQ2_0**, described at the top of `docs/TERNARY.md:11-14`: 256-element blocks, 64 bytes of 2-bit "crumbs", an inline f16 scale — **2.0625 bits per weight**.
 
-The block struct is exactly the wire format, like every quantized dtype in the library (Chapter 11's `extern struct` discipline). From `src/dtype.zig:206-209`, with its size pinned at compile time (`src/dtype.zig:245`; field comments added here, and the source's comptime block pins all 26 block sizes — only the TQ2_0 assert is shown):
+The block struct is exactly the wire format, like every quantized dtype in the library (Chapter 11's `extern struct` discipline). From `src/dtype.zig:213-216`, with its size pinned at compile time (`src/dtype.zig:253`; field comments added here, and the source's comptime block pins all 27 block sizes — only the TQ2_0 assert is shown):
 
 ```zig
 pub const BlockTQ2_0 = extern struct {
@@ -82,7 +82,7 @@ The real kernel lives in `src/backend/quant/ternary.zig`, and its module doc (`s
 
 Because every arm accumulates the exact per-block integer (max |Σ(w+1)·a| = 65024, far inside i32 — `docs/TERNARY.md:48-49`), **all arms are cross-ISA bitwise identical to the cold scalar reference**, pinned by `src/backend/quant/ternary_tests.zig` and hardware-executed on both ISAs via `zig build x86dot-check` (`docs/TERNARY.md:49-52`). The verification religion of the rest of the library applies unchanged at 2 bits.
 
-The inner loop of the tile kernel shows the identity in production form — four weight rows share every activation load and one precomputed block sum (`src/backend/quant/ternary.zig:339-350`, inside `matmulTQ2_0RhsTile`):
+The inner loop of the tile kernel shows the identity in production form — four weight rows share every activation load and one precomputed block sum (`src/backend/quant/ternary.zig:344-354`, inside `matmulTQ2_0RhsTile`):
 
 ```zig
 for (arow, 0..) |*a, bi| {
@@ -98,9 +98,9 @@ for (arow, 0..) |*a, bi| {
 }
 ```
 
-One subtraction per block turns the unsigned code dot into the signed ternary dot; the only multiplications left are the two per-block scale fix-ups (`w.d * a.d`) — floats that touch one value per 256 weights. There is a documented trap right above this loop: the kernel *trusts* the activation `bsums` to equal the exact per-16 sums of the quantized values — "stale/foreign bsums silently corrupt results" (`src/backend/quant/ternary.zig:309-313`). An identity that folds precomputed sums into a dot is only as correct as the precomputation.
+One subtraction per block turns the unsigned code dot into the signed ternary dot; the only multiplications left are the two per-block scale fix-ups (`w.d * a.d`) — floats that touch one value per 256 weights. There is a documented trap right above this loop: the kernel *trusts* the activation `bsums` to equal the exact per-16 sums of the quantized values — "stale/foreign bsums silently corrupt results" (`src/backend/quant/ternary.zig:315-318`). An identity that folds precomputed sums into a dot is only as correct as the precomputation.
 
-And the encoder side — packing four trits per byte — is a compact Zig bit-manipulation lesson (`src/backend/quant/ternary.zig:110-133`, abridged comment):
+And the encoder side — packing four trits per byte — is a compact Zig bit-manipulation lesson (`src/backend/quant/ternary.zig:115-138`, abridged comment):
 
 ```zig
 fn encodeCrumbs(block: *BlockTQ2_0, x: *const [qk_k_block_size]f32, id: f32) void {
@@ -126,8 +126,8 @@ fn encodeCrumbs(block: *BlockTQ2_0, x: *const [qk_k_block_size]f32, id: f32) voi
 
 Two contract points before the numbers, both easy to trip on:
 
-- **The contract dimension `k` must be a multiple of 256** everywhere — block granularity (`docs/TERNARY.md:174-175`).
-- **TQ2_0 has no packed RHS layout.** The hot formats of Chapter 11 (q4_k, q5_k, q6_k, q8_0) get column-interleaved `packRhs` copies; TQ2_0's kernels work from the plain blocks, and calling `packRhs` on a `.tq2_0` tensor is a *compile error* — `PackedRhsLayout` simply has no ternary member (`docs/REFERENCE.md:7347-7351`). The layout is already SIMD-shaped as stored; there is nothing to repack.
+- **The contract dimension `k` must be a multiple of 256** everywhere — block granularity (`docs/TERNARY.md:197-198`).
+- **TQ2_0 has no packed RHS layout.** The hot formats of Chapter 11 (q4_k, q5_k, q6_k, q8_0) get column-interleaved `packRhs` copies; TQ2_0's kernels work from the plain blocks, and calling `packRhs` on a `.tq2_0` tensor is a *compile error* — `PackedRhsLayout` simply has no ternary member (`docs/REFERENCE.md:7698-7702`). The layout is already SIMD-shaped as stored; there is nothing to repack.
 
 ## 14.3 Measured: what 2.06 bits buys
 
@@ -244,13 +244,13 @@ pub fn dotTernarySte(self: *const Self, ctx: *ExecContext, weight: anytype,
                      comptime contract_tag: Tag) !Tensor(...)
 ```
 
-Its anatomy, per `docs/TERNARY.md:128-137` and `docs/REFERENCE.md:7852-7868`:
+Its anatomy, per `docs/TERNARY.md:128-137` and `docs/REFERENCE.md:8214-8230`:
 
 - **Forward**: encode the *latent f32 weight* (tags `{ .out, .in }`) to TQ2_0 with the b1.58 recipe — per-tensor scale `d = max(mean|W|, 1e-5)` (`ternaryAbsmeanScale`), round-clip to {−1, 0, +1} (`quantizeRowTQ2_0ScaledInto`, every block storing the same `d` so the result is plain valid TQ2_0) — then contract with the **mul-free f32 kernel**.
 - **Backward**: `dx = gy · dequant(W_q)` — through the *quantized* weight, matching what the forward computed, so `dx` is an *exact* gradient (the forward is linear in `x` given the frozen trits; it is pinned by gradcheck). `dW = gyᵀ · x` — the straight-through estimate, the plain matmul VJP against the latent weight, and the only "wrong" part.
-- **Lifecycle**: the encoded blocks live in the backward node and are freed with it; the op works under the exec scopes of [Chapter 7](07-autograd.md). Runtime error `TernaryContractDimNotBlockAligned` if `k` is 0 or not a multiple of 256. The latent weight is re-encoded *every forward* — inherent to STE, recorded as a cost with a future-work note for frozen weights (`docs/TERNARY.md:179-180`).
+- **Lifecycle**: the encoded blocks live in the backward node and are freed with it; the op works under the exec scopes of [Chapter 7](07-autograd.md). Runtime error `TernaryContractDimNotBlockAligned` if `k` is 0 or not a multiple of 256. The latent weight is re-encoded *every forward* — inherent to STE, recorded as a cost with a future-work note for frozen weights (`docs/TERNARY.md:203-204`).
 
-An explicit machine-verified test pins the STE identity — with `gy = 1`, each row of `dW` must be literally `x`, exactly what the un-quantized matmul's VJP would produce (`docs/REFERENCE.md:7871-7899`):
+An explicit machine-verified test pins the STE identity — with `gy = 1`, each row of `dW` must be literally `x`, exactly what the un-quantized matmul's VJP would produce (`docs/REFERENCE.md:8233-8261`):
 
 ```zig
 test "dotTernarySte trains a b1.58 ternary linear" {
@@ -286,7 +286,7 @@ test "dotTernarySte trains a b1.58 ternary linear" {
 
 Note that `w` here is a plain f32 *variable* — the latent weight trains under any optimizer from [Chapter 8](08-training.md); only the forward sees trits.
 
-A subtlety about encoders that will save you a confused afternoon: TQ2_0 has **two** encoders with different scaling policies and different reachability (`docs/REFERENCE.md:7785-7797`). `quantizeRowTQ2_0Into` is the ggml-parity encoder — *per-block absmax* scale — and it is the only one behind the generic seams: `gguf.encodeF32(.tq2_0, ...)` and `quantizeRowForDType` both realize per-block absmax. `quantizeRowTQ2_0ScaledInto` + `ternaryAbsmeanScale` is the *b1.58 recipe* — one per-tensor absmean scale in every block — and it is *not* reachable through the generic seams; it is driven by the `dotTernarySte` forward and the ternary ES paths. Both produce byte-valid TQ2_0 (the scaled encoder writes the same `d` in every block precisely so no side channel is needed), but they quantize the same floats differently. Export a trained ternary model with `--dtype tq2_0` and you get absmax blocks, not the absmean blocks training simulated.
+A subtlety about encoders that will save you a confused afternoon: TQ2_0 has **two** encoders with different scaling policies and different reachability (`docs/REFERENCE.md:8147-8159`). `quantizeRowTQ2_0Into` is the ggml-parity encoder — *per-block absmax* scale — and it is the only one behind the generic seams: `gguf.encodeF32(.tq2_0, ...)` and `quantizeRowForDType` both realize per-block absmax. `quantizeRowTQ2_0ScaledInto` + `ternaryAbsmeanScale` is the *b1.58 recipe* — one per-tensor absmean scale in every block — and it is *not* reachable through the generic seams; it is driven by the `dotTernarySte` forward and the ternary ES paths. Both produce byte-valid TQ2_0 (the scaled encoder writes the same `d` in every block precisely so no side channel is needed), but they quantize the same floats differently. Export a trained ternary model with `--dtype tq2_0` and you get absmax blocks, not the absmean blocks training simulated.
 
 The forward deserves one more look, because it is not the int8 kernel from §14.2. Training forwards keep **exact f32 activations** (no activation quantization noise on top of the weight quantization), yet stay multiplication-free through a second identity — exact in IEEE f32 (`docs/TERNARY.md:98-112`):
 
@@ -324,7 +324,7 @@ The discrete machinery, adapted from EGGROLL's integer recipe (arXiv:2511.16652,
 - **Perturb**: sparse trit flips — `max(1, rate·len)` positions get ±1 with clamping at the rails — regenerated from a counter-based stream in a dedicated `es_trits` RNG domain, a pure function of (seed, iteration, member): the same O(1)-memory contract as Chapter 9's Gaussian noise. Antithetic odd members mirror the deltas.
 - **Restore**: here discreteness bites. Chapter 9's float trick — regenerate the noise and subtract it — *cannot work*, because clamping is lossy: a flip that hit the rail cannot be inverted by arithmetic. Ternary restore replays a sparse (index, old-crumb) **undo log** in reverse (`docs/TERNARY.md:150-155`).
 - **Update**: reward shaping is unchanged (z-score / centered ranks / antithetic fold); shaped fitness feeds *votes* on touched indices, and the top-K by |vote| (ties broken by index — deterministic) each move **one bin** toward the vote's sign, clamped. `K = round(update_fraction · len / (1 + decay · t))`.
-- **Config**: `ternary_flip_rate` (default 0.001), `ternary_update_fraction` (0.005), `ternary_update_decay` (0.0) — checkpoint contracts, persisted as `es_ternary_*` in `TrainerState` (`docs/TERNARY.md:160-162`, `src/es.zig:231-234`). Float and ternary slots coexist in one trainer — biases and scales stay Gaussian-ES floats — and a mixed-trainer test pins the float noise streams bitwise untouched.
+- **Config**: `ternary_flip_rate` (default 0.001), `ternary_update_fraction` (0.005), `ternary_update_decay` (0.0) — checkpoint contracts, persisted as `es_ternary_*` in `TrainerState` (`docs/TERNARY.md:160-162`, `src/es.zig:229-243`). Float and ternary slots coexist in one trainer — biases and scales stay Gaussian-ES floats — and a mixed-trainer test pins the float noise streams bitwise untouched.
 
 The acceptance demo is `zig build es-ternary-spirals`: a 2→256→256→2 MLP whose hidden and output layers are packed ternary genomes trained *from random trits* by ES — every member evaluation runs `quantizeRowsQ8_K` + `matmulTQ2_0RhsRange`, i.e. the deployed inference path, and the run self-verifies. Measured (`docs/TERNARY.md:94-96`): 100% accuracy in 9250 iterations / 112.7 s on the Raptor Lake box, vs 14750 iterations / 104.4 s on M1 Max — different iteration counts, comparable wall times; the doc records the numbers without further interpretation.
 
@@ -340,7 +340,7 @@ Three paradigms — quantization-aware training, gradient-free training, post-tr
 
 ## 14.6 PTQTP: turning a trained model ternary
 
-Suppose the model already exists — a Qwen3 GGUF you did not train and will not retrain. No gradients, no training data, no calibration set. Can its weight matrices be re-expressed over the ternary machinery anyway?
+Suppose the model already exists — a Qwen3 GGUF you did not train and will not retrain. No gradients, no training data, no calibration set. Can its weight matrices be re-expressed over the ternary machinery anyway? (On [Chapter 15](15-training-llms-on-cpu.md) §15.10's four-way post-training menu this is the *representation* road: the weights are re-expressed, nothing is trained.)
 
 One plane cannot do it. A single TQ2_0 tensor gives each 256-element weight group three representable values times one scale; real weight distributions need more resolution than that, and §14.7's table shows single-plane conversion collapsing even on the two-spirals toy. The idea that works is **PTQTP — Post-Training Quantization to Trit-Planes** (arXiv:2509.16989, Xiao et al.; implemented in `src/ptqtp.zig` from the paper's formulas — the module doc at `src/ptqtp.zig:18-20` notes that no public reference implementation existed at porting time). Decompose each weight matrix as a *sum of K ternary planes*, each with its own per-group scales:
 
@@ -367,7 +367,7 @@ Where it plugs into the model stack (`docs/PTQTP.md` §Surfaces):
 
 - `src/ptqtp.zig` — `solveGroup` (pure, allocation-free), `quantizeMatrix → PlanePair` (owns up to three `[]BlockTQ2_0` planes plus `MatrixStats`: relative Frobenius error *of the reconstruction inference will actually use*, per-plane zero fractions, convergence counts).
 - `src/llm/weights.zig` — `LinearWeight` gains a `ptqtp` arm; `LinearWeight.toPtqtp` dequantizes any loadable source dtype in row chunks through one code path, packs the planes, and drops the original storage. Eligibility is the 256-block contract (in-dim % 256 == 0).
-- `src/llm/qwen3/model.zig:391` — `Model.decoratePtqtp(ctx, options)` walks attention q/k/v, o_proj, and dense FFN projections in place; embeddings, lm_head, and norms are not walked, and MoE FFNs are counted skipped. Options include `skip_first_layers`/`skip_last_layers` and per-projection plane overrides `down_planes`/`o_planes` — the sensitive projections get their own knob for a reason §14.7 makes plain.
+- `src/llm/qwen3/model.zig:342` — `Model.decoratePtqtp(ctx, options)` walks attention q/k/v, o_proj, and dense FFN projections in place; embeddings, lm_head, and norms are not walked, and MoE FFNs are counted skipped. Options include `skip_first_layers`/`skip_last_layers` and per-projection plane overrides `down_planes`/`o_planes` — the sensitive projections get their own knob for a reason §14.7 makes plain.
 - **The fused entry** (`linearSeqPtqtpFused`): a decorated linear costs one Q8_K activation quantization and **one** worker-team dispatch — column-partitioned tasks compute every plane and sum in fixed plane order, bitwise identical to a per-plane facade dot chain (pinned by test). The design note is a Chapter 13-grade lesson: at 1.7B decode shapes, *per-plane fork-joins cost more than the ternary kernel itself* — dispatch granularity was the bottleneck, not arithmetic (`docs/PTQTP.md:76-82`).
 - **GGUF persistence** (`src/llm/ptqtp_gguf.zig`): a decorated model saves with each eligible tensor **replaced** by `<name>.ptqtp0/1/2` plane tensors plus a `fucina.ptqtp.version` metadata key; everything else passes through byte-verbatim, and save→load→save is byte-stable. Loading *pair-detects* per tensor and rebuilds the arm bitwise.
 
@@ -467,7 +467,7 @@ A last calibration, because this chapter taught research results and research re
 - The three-paradigm structure over one wire format: QAT via STE (`dotTernarySte`), gradient-free ES on packed genomes, data-free PTQ via plane decomposition. Each answers "the quantizer has no gradient" differently.
 - The engineering pattern: reuse an interchange format (TQ2_0) so that a research method (PTQTP) needs *zero new kernels* and inherits GGUF tooling, streaming quantization, and MoE serving for free.
 
-**Provisional** (dated measurements and open questions, per `docs/TERNARY.md:172-185` and `docs/PTQTP.md:290-318`):
+**Provisional** (dated measurements and open questions, per `docs/TERNARY.md:195-209` and `docs/PTQTP.md:290-318`):
 
 - Every speed ratio in this chapter is a 2026-07 snapshot on two specific machines; the ARM/x86 economics flip of §14.7 shows how hardware-contingent the conclusions are.
 - The decode ceiling at small models is now *dispatch*, not arithmetic: ~140 fork-joins per token remain at 1.7B, worth ~3–5 ms against a ~64 t/s ARM ceiling at K=3; a per-layer phase chain is sketched but unbuilt.
@@ -489,7 +489,7 @@ A last calibration, because this chapter taught research results and research re
 - `docs/TERNARY.md` — the design record for everything in §14.1–14.5: format choice, kernel arms, measured tables, STE, ternary ES, limits.
 - `docs/PTQTP.md` — the PTQTP design record: method, deliberate paper deltas, surfaces, the full measured ladder, and the dead-end register — read it as a model of honest research notes.
 - `docs/PTQTP-RECIPE.md` — the copy-paste end-to-end: quantize a 30B MoE, run it resident, run it streamed.
-- `src/backend/quant/ternary.zig` — encoders, the crumb layout, and every kernel arm; the module doc (lines 1–23) is the chapter in miniature, and the `bsums` invariant comment (lines 309–313) is the trap to remember.
+- `src/backend/quant/ternary.zig` — encoders, the crumb layout, and every kernel arm; the module doc (lines 1–23) is the chapter in miniature, and the `bsums` invariant comment (lines 315–318) is the trap to remember.
 - `src/ptqtp.zig` — `solveGroup` and `quantizeMatrix`; the module doc records the pinned candidate order and the fp16-rounding delta with their reasons.
 - `src/llm/ptqtp_gguf.zig` and `src/llm/qwen3/model.zig` (`decoratePtqtp`, `savePtqtpGguf`) — plane persistence and pair-detection; `tools/export_gguf.zig` for the streaming quantizer.
 - `docs/REFERENCE.md` §10.7 — the machine-verified TQ2_0 and `dotTernarySte` snippets (`zig build snippet-check` runs them against the real modules).
@@ -498,7 +498,7 @@ A last calibration, because this chapter taught research results and research re
 ## Exercises
 
 1. **(Easy)** Run `zig build ptqtp-spirals -Doptimize=ReleaseFast` and `zig build es-ternary-spirals -Doptimize=ReleaseFast`. Both end in a self-verification verdict. Then explain, in one paragraph each, which of the three training paradigms (§14.4–14.6) each demo exercises and what its PASS actually proves about the *deployed* model rather than a float shadow of it.
-2. **(Easy)** Extend the mul-free-identity course test of §14.2 to 256 elements split into sixteen 16-element groups, computing `asum` as the sum of sixteen per-group partial sums. You have reconstructed Q8_K's `bsums` layout. Now explain the invariant warning at `src/backend/quant/ternary.zig:309-313`: what concrete bug produces "stale/foreign bsums", and why does the kernel have no way to detect it?
+2. **(Easy)** Extend the mul-free-identity course test of §14.2 to 256 elements split into sixteen 16-element groups, computing `asum` as the sum of sixteen per-group partial sums. You have reconstructed Q8_K's `bsums` layout. Now explain the invariant warning at `src/backend/quant/ternary.zig:315-318`: what concrete bug produces "stale/foreign bsums", and why does the kernel have no way to detect it?
 3. **(Medium)** In the STE course snippet of §14.4, the latent weight converges and stops moving because the target is exactly representable. Change `target` to `-0.3` (not representable: the nearest quantized outputs are `0.0` and `-0.5`) and log `w` and `quantizeTrit(w, d)` each step. Explain the oscillation you see, and relate it to why real STE training uses small learning rates on the latent weights and why `dotTernarySte` must tolerate divergent latents (the NaN clamp of §14.2).
 4. **(Medium)** Write a course-code implementation of PTQTP's inner loop for K=2 on a single group of 8 weights (pure std Zig): alternate the closed-form 2×2 ridge solve (integer Gram entries, per `src/ptqtp.zig:227-247`) with the 9-way exhaustive trit search, starting both planes at `sign(w)` with λ escalation. Verify against `reconstructReference`-style brute force that your reconstruction error is no worse than a single absmean plane's, and observe the symmetric-init tie-break problem the pinned candidate order solves.
 5. **(Hard)** The §14.7 tables show K=2 collapsing at 1.7B while `+down3+o3` recovers most of the loss. Design (on paper, then in code if you have a small GGUF) an experiment using `zig build ptqtp-qwen3 -- --planes 2 --down-planes 3 --o-planes 3 --nll FILE` to measure the marginal ppl contribution of each projection class: which flags isolate q/k/v vs gate/up vs down/o, what is the smallest set of K=3 overrides that keeps ppl within 2× baseline, and how does your finding compare with the doc's claim that sensitivity "concentrates in the residual-writing projections, with a tail spread over q/k/v/gate/up" (`docs/PTQTP.md:222-225`)?

@@ -74,7 +74,7 @@ Per-stream semantics are guaranteed to match a plain `send` exactly — each str
 
 The README's one-line summary is "batch-N multi-stream decode (3.2x aggregate throughput at 8 streams)" (README.md). Two honest footnotes from the same benchmark section: the modest N=2 gain is the per-row (m<4) quantized kernels re-streaming packed weights — the weights-read-once kernels engage at m≥4; and that same m≥4 boundary is where quantized-weight logits can drift by ~1e-6 relative (reassociation in the multi-row kernels), while f32/f16 stay bitwise "verified to m=12". Outputs in the table were cross-checked token for token.
 
-Try it on the qwen3 runner (`docs/RUNNING-MODELS.md`):
+Try it on the qwen3 runner (`examples/qwen3/README.md`):
 
 ```sh
 zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q4_K_S.gguf \
@@ -463,7 +463,7 @@ const OddMask = struct {
 
 (from `docs/REFERENCE.md` §13.6 — bias lists, banned tokens, or watermarking plug into the same seam with no grammar involvement.)
 
-**The engine.** For real grammars, `llm.llguidance.Constraint` (`src/llm/llguidance.zig`) compiles a JSON schema, regex, or Lark-variant grammar with the vendored [llguidance](https://github.com/guidance-ai/llguidance) engine — the one behind vLLM/SGLang-class structured output — into per-step token bitmasks, "~10–50 µs of pure CPU mask work per token" (CONSTRAINED-DECODING.md §3), off the model's ms-scale critical path. It is build-gated behind `-Dllguidance=true` (cargo builds the Rust staticlib, ~15 MB stripped); without the flag everything still compiles and `Constraint.init` returns `error.LlguidanceNotEnabled` — the seam itself is pure Zig and always available. One bridge detail that is a *correctness* feature, not bookkeeping: control tokens carry toktrie's `0xFF` special marker, so a JSON string that happens to contain the text `<|im_end|>` can never steer the sampler into emitting the actual control token and silently ending the turn mid-object (CONSTRAINED-DECODING.md §3). When the grammar completes, the mask forces the turn's stop token — termination rides the existing stop handling, no new mechanism.
+**The engine.** For real grammars, `llm.llguidance.Constraint` (`src/llm/llguidance.zig`) compiles a JSON schema, regex, or Lark-variant grammar with the vendored [llguidance](https://github.com/guidance-ai/llguidance) engine — the one behind vLLM/SGLang-class structured output — into per-step token bitmasks (~10–50 µs of pure CPU mask work per token, CONSTRAINED-DECODING.md §3), off the model's ms-scale critical path. It is build-gated behind `-Dllguidance=true` (cargo builds the Rust staticlib, ~15 MB stripped); without the flag everything still compiles and `Constraint.init` returns `error.LlguidanceNotEnabled` — the seam itself is pure Zig and always available. One bridge detail that is a *correctness* feature, not bookkeeping: control tokens carry toktrie's `0xFF` special marker, so a JSON string that happens to contain the text `<|im_end|>` can never steer the sampler into emitting the actual control token and silently ending the turn mid-object (CONSTRAINED-DECODING.md §3). When the grammar completes, the mask forces the turn's stop token — termination rides the existing stop handling, no new mechanism.
 
 **Composition with speculation — the good part.** The obvious worry: speculation samples hypothetical continuations and a grammar is stateful, so surely rejected drafts need a matcher *rollback* (llguidance even ships one). They don't, and the reason is a one-line property of the verify loop (CONSTRAINED-DECODING.md §4):
 
@@ -505,7 +505,7 @@ zig build qwen3 -Dllguidance=true -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8
 
 **Where it lives — three layers.**
 
-*The persistence primitive*, `src/llm/kv_persist.zig`, is a self-contained systems exercise worth reading whole. Its header (kv_persist.zig:1-17):
+*The persistence primitive*, `src/llm/kv_persist.zig`, is a self-contained systems exercise worth reading whole. Its header (kv_persist.zig:1-6):
 
 ```zig
 //! Crash-safe KV-cache persistence: conversations reopen WARM across
@@ -516,16 +516,17 @@ zig build qwen3 -Dllguidance=true -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8
 //! consistent prefix of the conversation.
 ```
 
-Three functions (kv_persist.zig:159, :174, :207):
+Three functions (kv_persist.zig:195, :212, :260):
 
 ```zig
-pub fn reset(io: std.Io, allocator: Allocator, path: []const u8, kv: *const KvCache) !void
+pub fn reset(io: std.Io, allocator: Allocator, path: []const u8, kv: *const KvCache,
+             prefix_rows: usize) !void
 pub fn appendRange(io: std.Io, allocator: Allocator, path: []const u8,
-                   kv: *const KvCache, tokens: []const usize) !void
-pub fn load(io: std.Io, allocator: Allocator, path: []const u8, kv: *KvCache) !?[]usize
+                   kv: *const KvCache, tokens: []const usize, prefix_rows: usize) !void
+pub fn load(io: std.Io, allocator: Allocator, path: []const u8, kv: *KvCache) !?Loaded
 ```
 
-The layout stores per position one `u32` token plus each layer's K and V row bytes (f16 or q8_0 — the record size is a pure function of the cache geometry); a geometry guard in the header makes a foreign model's or dtype's file ignored *wholesale*. Ordering rules are enforced, not documented-and-hoped: `load` asserts the cache is empty (`std.debug.assert(kv.len == 0)`, kv_persist.zig:208) and returns caller-owned token history — or null when nothing is usable, stopping early at a torn tail so "the prefix stays usable"; `appendRange` requires the caller to have resumed from (or reset) the file, "so appending onto a foreign prefix must be impossible" (kv_persist.zig:157-159). On the CLI this is `--kv-save` for `--chat`/`--repl` — "essential below 1 tok/s" on the big streamed models of §13.8 (`docs/RUNNING-MODELS.md`).
+The layout stores per position one `u32` token plus each layer's K and V row bytes (f16 or q8_0 — the record size is a pure function of the cache geometry); a geometry guard in the header makes a foreign model's or dtype's file ignored *wholesale*. Ordering rules are enforced, not documented-and-hoped: `load` asserts the cache is empty (`std.debug.assert(kv.len == 0)`, kv_persist.zig:261) and returns caller-owned token history — a `Loaded` also carrying `prefix_rows`, the row count of a token-less preloaded prefix (a trained cartridge, `docs/CARTRIDGES.md`; 0 for classic conversations) — or null when nothing is usable, stopping early at a torn tail so "the prefix stays usable"; `appendRange` requires the caller to have resumed from (or reset) the file, so "appending onto a foreign prefix must be impossible" (kv_persist.zig:191-194). On the CLI this is `--kv-save` for `--chat`/`--repl` — "essential below 1 tok/s" on the big streamed models of §13.8 (`docs/RUNNING-MODELS.md`).
 
 > **Zig note** — the sidecar is a lesson in explicit binary I/O. Every integer is written with `std.mem.writeInt(u64, bytes[at..][0..8], nrec, .little)` — the endianness is a *parameter*, not an assumption, so the file format is identical on every host. And the crash-safety is pure write ordering: records first, the `nrec` counter last, positional writes throughout (`writePositionalAll`); a crash between the two leaves the old counter and the file remains a consistent prefix. No journal, no fsync dance in the hot path — just an ordering argument you can verify by reading 40 lines.
 
@@ -542,7 +543,7 @@ pub fn sendTokensReuse(self: *Self, ids: []const u32, writer: *std.Io.Writer) !u
 
 `initWarm` adopts a previous cache plus the token shadow describing its positions; `sendTokensReuse` reconciles by LCP, truncates, prefills the tail, and reports the reused span as `reused_prefix`; `takeCache` releases the cache back to the pool afterwards. Warm-reuse == fresh-stateless equivalence is proven in `chat_tests.zig`.
 
-*The server policy*, `examples/lmserve/backend.zig` — and the entire matching policy is fourteen lines (backend.zig:132-145):
+*The server policy*, `examples/lmserve/backend.zig` — and the entire matching policy is fourteen lines (backend.zig:182-195):
 
 ```zig
 fn commonPrefix(tokens: []const usize, ids: []const u32) usize {
@@ -561,9 +562,9 @@ fn similarEnough(lcp: usize, ids_len: usize) bool {
 }
 ```
 
-The pool (`kv_slots`, default 1; each slot a full `--ctx` cache — "~112 KiB/position for a 28-layer/8-kv-head/128-dim f16 geometry", `docs/LMSERVER.md`) holds previous requests' caches plus token shadows. `acquireConversation` (backend.zig:246) picks the best-LCP slot when it passes the gate, otherwise recycles the LRU slot. Follow-up turns of a chat re-prefill only the last reply + new message; a non-matching request costs one full prefill, exactly as a reuse-free server would.
+The pool (`kv_slots`, default 1; each slot a full `--ctx` cache — "~112 KiB/position for a 28-layer/8-kv-head/128-dim f16 geometry", `docs/LMSERVER.md`) holds previous requests' caches plus token shadows. `acquireConversation` (backend.zig:464) picks the best-LCP slot when it passes the gate, otherwise recycles the LRU slot. Follow-up turns of a chat re-prefill only the last reply + new message; a non-matching request costs one full prefill, exactly as a reuse-free server would.
 
-The **disk tier** (`--kv-cache-dir D`, `--kv-disk-slots`) reuses the exact same sidecar format: a slot about to be destroyed by an unrelated request spills to disk — but only "when the incoming request would keep less than half of it AND no stored entry already contains it" (save-on-evict, backend.zig:364-376, with containment dedup and supersede-in-place) — and is restored, zero re-prefill, when a later request matches it better than every resident slot ("the disk tier competes only when it strictly beats the pool", backend.zig:261). One hygiene detail with a comment worth reading: after an aborted turn, history can sit one un-forwarded token past the cache, so the reclaimed slot's shadow is trimmed to `cache.len` — "a slot always describes exactly the positions its cache holds" (backend.zig:334-340).
+The **disk tier** (`--kv-cache-dir D`, `--kv-disk-slots`) reuses the exact same sidecar format: a slot about to be destroyed by an unrelated request spills to disk — but only "when the incoming request would keep less than half of it AND no stored entry already contains it" (save-on-evict, backend.zig:650-662, with containment dedup and supersede-in-place) — and is restored, zero re-prefill, when a later request matches it better than every resident slot ("the disk tier competes only when it strictly beats the pool", backend.zig:481). One hygiene detail with a comment worth reading: after an aborted turn, history can sit one un-forwarded token past the cache, so the reclaimed slot's shadow is trimmed to `cache.len` — "a slot always describes exactly the positions its cache holds" (backend.zig:608-614).
 
 **The measured effect, honestly.** The repo does not publish an end-to-end latency multiplier for KV reuse, and this course will not invent one. What the docs commit to is the mechanism and its accounting: the reused span is reported per request as `cached_tokens` in the OpenAI usage block (`prompt_tokens_details` / `input_tokens_details`, LMSERVER.md), and what reuse eliminates is precisely the re-prefill of that span. Two composition notes from earlier sections apply: speculation cannot ride a warm start (`error.SpeculationWithReuse`), and if KV memory rather than time is your constraint, `--cache-type q8_0` halves the cache (59.5 vs 112 KiB/token on the 0.6B) as a *capacity* option — explicitly not a speed option: "decode attention is compute-bound on M1 and the dequant costs ~2.3x the attention phase at 2048 ctx, so f16 stays the default" (`docs/TRAINING.md` §10).
 
@@ -577,7 +578,7 @@ The **disk tier** (`--kv-cache-dir D`, `--kv-disk-slots`) reuses the exact same 
 
 > **ML note** — this is virtual memory rediscovered at the granularity the router actually uses. A top-k router gives each token a *working set* of experts per layer, and empirically that working set has temporal locality (the measured hit rates below are 52–59% against a cache a fraction of the model's size) and a heavy-tailed popularity distribution (a modest hot set absorbs a disproportionate share of routings — the measured run below pins 944 experts, 10.7 GB of a 142 GB model). Caching theory then does the rest: pin the head of the distribution, LRU the middle, stream the tail. The reason generic OS paging can't do this for you is the eviction policy — the OS sees pages, not experts, and cannot know that "this expert was just routed" is the recency signal that matters.
 
-**Where it lives.** `src/exec/expert_store.zig` — a file whose comments are a course in themselves. The resolution loop in `acquire` (expert_store.zig:872-890) is a cache in its purest form:
+**Where it lives.** `src/exec/expert_store.zig` — a file whose comments are a course in themselves. The resolution loop in `acquire` (expert_store.zig:926-944) is a cache in its purest form:
 
 ```zig
 // Pinned and LRU hits resolve in place (pin first — a pinned expert
@@ -607,24 +608,25 @@ Two design decisions with measured reasons, quoted from the file because they ge
 
 *Why `pread` and not mmap* (expert_store.zig:5-9): "the streamed tier reads with `pread` into store-owned buffers rather than mmap, so resident memory is exactly dense weights + this cache (mmap'd expert pages inflate RSS and let page-cache pressure evict semi-randomly instead of by routing recency)". You choose the eviction policy; the page cache would choose for you, badly.
 
-*Why prefetch has its own I/O thread* (expert_store.zig:566-570): "A dedicated I/O thread drains an SPSC ring of file ranges and issues the readahead advice there: with a saturated disk queue the advice call itself BLOCKS (measured ~0.5 ms each upstream), so hinting inline would cost the forward thread more than the overlap earns. Ring full = drop: a lost hint is not an error."
+*Why prefetch has its own I/O thread* (expert_store.zig:605-609): "A dedicated I/O thread drains an SPSC ring of file ranges and issues the readahead advice there: with a saturated disk queue the advice call itself BLOCKS (measured ~0.5 ms each upstream), so hinting inline would cost the forward thread more than the overlap earns. Ring full = drop: a lost hint is not an error."
 
-> **Zig note** — this file is also the chapter's systems-Zig showcase: cross-platform syscall shims via `switch (builtin.os.tag)` (Linux goes straight to `std.os.linux`, no libc; macOS through `std.c` — including reading `/proc/meminfo` vs `sysctlbyname` for the memory budget), an SPSC ring on `std.atomic.Value`, saturating increment `ls.heat[e] +|= 1` for the popularity counters, and an `errdefer` ladder in `create` that closes exactly the file descriptors opened so far on failure (expert_store.zig:583-597).
+> **Zig note** — this file is also the chapter's systems-Zig showcase: cross-platform syscall shims via `switch (builtin.os.tag)` (Linux goes straight to `std.os.linux`, no libc; macOS through `std.c` — including reading `/proc/meminfo` vs `sysctlbyname` for the memory budget), an SPSC ring on `std.atomic.Value`, saturating increment `ls.heat[e] +|= 1` for the popularity counters, and an `errdefer` ladder in `create` that closes exactly the file descriptors opened so far on failure (expert_store.zig:632-648).
 
-**The learning tier.** The store's knobs are one options struct (`expert_store.zig:489-509`, comments abridged):
+**The learning tier.** The store's knobs are one options struct (`expert_store.zig:517-541`, comments abridged):
 
 ```zig
 pub const Options = struct {
     cache_slots_per_layer: ?usize = null, // fixed LRU slots; wins over cache_bytes
     cache_bytes: ?usize = null,           // total RAM budget; default: half of available memory
     readahead: bool = true,               // WILLNEED hints for the whole miss set
+    prefetch_stage_slots: usize = 64,     // staging slots for the prefetch worker's async loads
     auto_pin: bool = true,                // pin the hottest experts from the usage sidecar
     pin_bytes: ?usize = null,             // pinned-tier budget; default: half the total
     auto_pin_min_history: u64 = 5000,     // routed pairs before auto-pin trusts the history
 };
 ```
 
-Every acquire updates a per-expert usage histogram, persisted as a `<gguf>.experts` sidecar. At the next startup, `auto_pin` reads it and pins the hottest experts in RAM — "they are read once at startup and never evicted. The engine gets faster the more it is used" (expert_store.zig:499-503). Each stage is independently measurable: `Stats.hitRate()` splits pinned hits from LRU hits from misses, and `Stats.pilotRecall()` scores the prefetcher. The **pilot** (`--moe-pilot`) is that prefetcher: predict the *next* layer's experts from the current post-attention state and prefetch them from the background thread while the current layer computes. Measured recall of the one-layer-ahead prediction: 87.6% (30B), 90.5% (235B) — and, the docs add immediately, it "never changes output" (`docs/RUNNING-MODELS.md`). On the model side the whole feature is one opt-in field: `qwen3.model.LoadOptions{ .moe_stream = .{ .gguf_path = ..., .cache_bytes = ... } }` (`src/llm/qwen3/model.zig:156-184`), and the streamed tier plugs into the same fused MoE kernels through `fucina.MoeRhs`'s `streamed` variant — same blocks, same kernels, which is *why* the output can be bit-identical.
+Every acquire updates a per-expert usage histogram, persisted as a `<gguf>.experts` sidecar. At the next startup, `auto_pin` reads it and pins the hottest experts in RAM — "they are read once at startup and never evicted. The engine gets faster the more it is used" (expert_store.zig:533-534). Each stage is independently measurable: `Stats.hitRate()` splits pinned hits from LRU hits from misses, and `Stats.pilotRecall()` scores the prefetcher. The **pilot** (`--moe-pilot`) is that prefetcher: predict the *next* layer's experts from the current post-attention state and prefetch them from the background thread while the current layer computes. Measured recall of the one-layer-ahead prediction: 87.6% (30B), 90.5% (235B) — and, the docs add immediately, it "never changes output" (`docs/RUNNING-MODELS.md`). On the model side the whole feature is one opt-in field: `qwen3.model.LoadOptions{ .moe_stream = .{ .gguf_path = ..., .cache_bytes = ... } }` (`src/llm/qwen3/model.zig:155-157`), and the streamed tier plugs into the same fused MoE kernels through `fucina.MoeRhs`'s `streamed` variant — same blocks, same kernels, which is *why* the output can be bit-identical.
 
 **The measured effect.** From `docs/RUNNING-MODELS.md` (M1 Max, 64 GB):
 
@@ -692,7 +694,7 @@ The through-line of this chapter, one last time: `truncate` made the cache rewin
 - `src/llm/speculative/sam_index.zig` — the header's proof sketch of self-match exclusion, the 10-line greedy automaton descent, poisoning and freezing.
 - `src/llm/speculative/cascade.zig` and `src/llm/speculative/constrained.zig` — source composition with per-source muting; the ~100-line bridge that makes grammars draft.
 - `src/llm/logit_processor.zig` + `src/llm/sampler.zig` — the seam every decode path funnels through.
-- `src/llm/kv_persist.zig` — 241 lines of crash-safe binary file design; read it as a systems exercise.
+- `src/llm/kv_persist.zig` — 295 lines of crash-safe binary file design; read it as a systems exercise.
 - `examples/lmserve/backend.zig` — the slot pool, similarity gate, disk tier, and constraint cache; the server policy in one file.
 - `src/exec/expert_store.zig` — the tiered store, the pilot thread, the platform shims; the best-commented systems code in the tree.
 - `docs/SPECULATIVE.md`, `docs/CONSTRAINED-DECODING.md`, `docs/LMSERVER.md`, `docs/RUNNING-MODELS.md`, `docs/GPU-OFFLOAD.md` — the design records, adjudications included.
@@ -703,7 +705,7 @@ The through-line of this chapter, one last time: `truncate` made the cache rewin
 2. **(Easy)** Extend the course toy decoder (§13.3) with a `stop_token`: when a committed token equals it, the row loop must break immediately — bonus row included. Write a test that proves the streams with and without drafting still match up to and including the stop. You have reproduced the RNG-accounting rule of `core.zig:32-39` in miniature.
 3. **(Medium)** Add a Token-Recycling drafter to the toy: a `vocab × K` table updated with each step's "top-K" (for the toy model, the true successor plus K−1 decoys), drafting by top-1 chain walk. Measure tokens/step against `noDraft` over 1000 tokens. Then make the model non-Markov (`targetNext(prev, cur)`) and watch acceptance change — you are rediscovering why acceptance is a property of (model × token stream).
 4. **(Medium)** Write a `LogitProcessor` that bans a fixed token list, following the `OddMask` shape from `docs/REFERENCE.md` §13.6, and install it via `chat.Options.logit_processor` on a qwen3 chat. Verify: (a) the banned tokens never appear; (b) greedy output with `.speculation = true` and `false` is identical (the §13.6 no-rollback argument in action). Then make your processor expose `forcedTokens` for some state and confirm speculation starts drafting your forced spans.
-5. **(Hard)** Build a two-slot LCP pool over the toy decoder: token shadows, `commonPrefix`, the `lcp * 10 > ids_len` gate, LRU eviction, and a "shadow trimmed to cache.len" reclaim (backend.zig:334-340 explains why). Drive it with three interleaved "conversations" and assert (a) follow-up turns re-prefill only their tails, (b) an unrelated request evicts the LRU slot, not the best-matching one, (c) outputs are identical to a pool-free run. You will have re-derived the heart of `examples/lmserve/backend.zig`.
+5. **(Hard)** Build a two-slot LCP pool over the toy decoder: token shadows, `commonPrefix`, the `lcp * 10 > ids_len` gate, LRU eviction, and a "shadow trimmed to cache.len" reclaim (backend.zig:608-614 explains why). Drive it with three interleaved "conversations" and assert (a) follow-up turns re-prefill only their tails, (b) an unrelated request evicts the LRU slot, not the best-matching one, (c) outputs are identical to a pool-free run. You will have re-derived the heart of `examples/lmserve/backend.zig`.
 
 ---
 

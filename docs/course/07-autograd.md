@@ -104,7 +104,7 @@ deliberately **eager and local**: no global graph object, no fusion pass, no
 compiler layer" (`README.md`, Design) — and, unusually, the simplicity is
 *enforced*: a guard test in `src/ag_tests.zig` asserts that the legacy
 `Function`/`Node`/`Engine` declarations of an earlier, heavier design stay
-deleted from the core (`docs/REFERENCE.md:3590-3595`).
+deleted from the core (`docs/REFERENCE.md:3881-3886`).
 
 The scheduling question — spaGO's goroutines versus Fucina's atomic counters —
 we will meet twice: once in miniature in the next section, and once for real
@@ -356,7 +356,7 @@ takes to do each of those properly.
 The engine lives in `src/ag/core.zig` — 733 lines *including* two in-file
 tests, as counted today with `wc -l`; the siblings are similarly small
 (`control.zig` 75, `custom.zig` 227, `gradcheck.zig` 194, `checkpoint.zig`
-435). The bulk of `src/ag/` is `backward.zig` at 5420 lines — but that is
+435). The bulk of `src/ag/` is `backward.zig` at 5759 lines — but that is
 the *inventory* of per-op VJP records, each mechanical. The machinery they
 plug into is one struct, one interface, one scheduler.
 
@@ -389,7 +389,7 @@ with a VJP record attached. Nothing else exists.
 
 One note before we look inside: `GradState`, `BackwardFunction`, and the
 `backwardGrad*` entry points are engine internals — deliberately *not*
-re-exported at the `fucina` root (`docs/REFERENCE.md:3599-3601`). Your code
+re-exported at the `fucina` root (`docs/REFERENCE.md:3890-3892`). Your code
 never names them; you meet them here because we are reading the engine.
 
 The interface — `grad_fn` type-erased so hundreds of different op records fit
@@ -473,7 +473,7 @@ pub const ReluBackward = struct {
 };
 ```
 
-Every record in the 5420-line inventory has this shape. Three things to
+Every record in the 5759-line inventory has this shape. Three things to
 notice:
 
 - **It saves a view, not a copy.** `init` stores `input.cloneView()` — a
@@ -537,7 +537,7 @@ construction:
 - **Op results** whose operands require gradients get an *interior*
   `GradState` carrying the VJP record.
 
-The query is exactly the null check you'd hope for (`src/ag/tensor.zig:926-928`):
+The query is exactly the null check you'd hope for (`src/ag/tensor.zig:1012-1014`):
 
 ```zig
 pub fn requiresGrad(self: *const Self) bool {
@@ -546,7 +546,7 @@ pub fn requiresGrad(self: *const Self) bool {
 ```
 
 And every differentiable op in the library — all of them — ends in one
-private tail (`src/ag/tensor.zig:5673-5690`):
+private tail (`src/ag/tensor.zig:6291-6308`):
 
 ```zig
 fn finishOp(
@@ -577,7 +577,7 @@ reserved *before* the value is consumed, so adoption cannot fail afterwards).
 
 The consequence is stated plainly in the reference and is worth engraving:
 "Because forward always takes the identical kernel path, training and
-inference produce identical values" (`docs/REFERENCE.md:3642-3648`). Training
+inference produce identical values" (`docs/REFERENCE.md:3933-3939`). Training
 mode is not a different execution engine; it is this one branch.
 
 The whole user-facing story fits in one machine-verified snippet —
@@ -606,7 +606,7 @@ no `grad_state` at all — you asked a constant to explain itself.
 ### Seeding
 
 The reverse pass starts from the gradient of the loss with respect to
-*itself*, which is 1. Fucina's rules (`docs/REFERENCE.md:3743-3756`):
+*itself*, which is 1. Fucina's rules (`docs/REFERENCE.md:4034-4047`):
 
 - a **scalar** output (one element total) with no gradient present receives
   the implicit seed `1`;
@@ -700,12 +700,12 @@ place under the per-state `grad_mutex`, and before mutating an accumulator
 the engine checks the raw tensor's exclusive-ownership predicate,
 materializing a private copy when the buffer is shared — so a VJP may hand
 back cheap refcounted *views* of `gy` without risking cross-state aliasing
-(`docs/REFERENCE.md:3818-3824`; pinned in `src/ag/core_tests.zig`).
+(`docs/REFERENCE.md:4109-4115`; pinned in `src/ag/core_tests.zig`).
 
 And the `needs_grad` pruning promised earlier: each VJP receives one bool
 per operand slot — true only where the slot has a `GradState` — so gradients
 for constants (frozen weights, masks, cached KV) are *never computed*
-(`docs/REFERENCE.md:3826-3829`). This is what makes LoRA-style fine-tuning
+(`docs/REFERENCE.md:4117-4120`). This is what makes LoRA-style fine-tuning
 over a frozen quantized base cheap ([Chapter 15](15-training-llms-on-cpu.md)):
 the mountain of frozen weights contributes zero backward work.
 
@@ -716,7 +716,7 @@ touched — interior op results included, not just leaves. Re-running backward
 over the same retained graph would compound: interior states would receive
 fresh contributions on top of their previous gradients, which then flow
 downstream multiplied — two passes over `loss = sum(x·x)` would yield
-`3·(2x)`, not `2·(2x)` (`docs/REFERENCE.md:3863-3876`).
+`3·(2x)`, not `2·(2x)` (`docs/REFERENCE.md:4154-4167`).
 
 So the engine refuses: a completed pass marks its outputs consumed
 (`backward_done` in the struct above), and a repeat fails with
@@ -748,7 +748,7 @@ tasks, and returns the first error — re-runnable again. One honest caveat:
 re-runnability restores *scheduling* state, not values; contributions
 delivered before the failure remain accumulated, so call `zeroGrad` on the
 leaves before retrying if exact values matter
-(`docs/REFERENCE.md:3849-3861`).
+(`docs/REFERENCE.md:4140-4152`).
 
 ## 7.7 Draining counters on a bounded pool
 
@@ -785,7 +785,7 @@ the counter discipline — no node exists as a task until it is ready — this
 is the README's "bounded pool, no blocked workers", made concrete.
 
 Node-level spawning is deliberately conservative, and the details matter
-(`docs/REFERENCE.md:3830-3847`):
+(`docs/REFERENCE.md:4121-4138`):
 
 - A record is a spawn candidate only if it advertises enough work through
   the vtable: an `estimated_work()` at or above
@@ -825,7 +825,7 @@ arrive from one thread or eight.
 ### Reading and resetting
 
 After `backward()`, gradients sit in the leaves — two accessors, one
-distinction that matters (`docs/REFERENCE.md:3880-3896`):
+distinction that matters (`docs/REFERENCE.md:4171-4187`):
 
 - `grad(ctx)` returns a **deep copy** — caller-owned, safe to keep across
   later passes. `null` for constants and for variables with no accumulated
@@ -843,7 +843,7 @@ constant sharing the same storage — the value flows on, the graph is cut.
 And one pleasant guard: `data()` refuses mutable access on a grad-carrying
 tensor with `error.MutableDataRequiresNoGrad` — mutating a recorded value
 would silently invalidate the graph; `dataConst()`/`item()` are always
-allowed (`docs/REFERENCE.md:3902-3905`).
+allowed (`docs/REFERENCE.md:4193-4196`).
 
 ### Evaluation mode: noGrad
 
@@ -942,7 +942,7 @@ after its scope closes.
 
 Two footnotes on the same theme. First, *composed* facade ops (`nllLoss`,
 `select`, `stack`, `einsumMany`, and friends — full list at
-`docs/REFERENCE.md:3960-3968`) build function-local graph nodes they cannot
+`docs/REFERENCE.md:4251-4259`) build function-local graph nodes they cannot
 own past their return, so when gradients are tracked they demand an active
 scope and fail loudly with `error.ActiveExecScopeRequired` — the engine
 converts the UB it *can* detect into an error. Second, an explicit
@@ -1009,7 +1009,7 @@ as documented:
   (`docs/TRAINING.md:369-371`) — a dated, machine-specific snapshot of the
   trade, not a law;
 - the gradients are **bitwise identical** to the non-checkpointed forward
-  (`docs/REFERENCE.md:4162-4164`) — recompute-in-backward is not an
+  (`docs/REFERENCE.md:4453-4455`) — recompute-in-backward is not an
   approximation.
 
 The contract that buys the bitwise claim: the block must be **deterministic
@@ -1017,7 +1017,7 @@ and pure in its inputs**, because the recompute must rebuild the exact
 forward values. Here a design decision from
 [Chapter 5](05-the-operation-library.md) pays off spectacularly: dropout's
 mask is a pure function of `(seed, element index)` and is never stored
-(`docs/REFERENCE.md:4048-4051`), so dropout under a checkpoint replays
+(`docs/REFERENCE.md:4339-4342`), so dropout under a checkpoint replays
 bitwise *by construction* — ambient RNG state would have meant "silently
 wrong gradients", the documented failure mode of an impure block
 (`docs/TRAINING.md` §12). Everything non-differentiable a block needs —
@@ -1244,8 +1244,8 @@ mean something.
   next to your toy.
 - `src/ag/backward.zig` — the VJP inventory. Start at `ReluBackward`
   (line 472), then find your favorite op's rule.
-- `src/ag/tensor.zig` — `finishOp` (line 5673) and the gradient accessors
-  (lines 891–974): where the facade meets the engine.
+- `src/ag/tensor.zig` — `finishOp` (line 6291) and the gradient accessors
+  (lines 977–1060): where the facade meets the engine.
 - `src/ag/control.zig` — `noGrad` (plus a sibling GPU quant-dot scope) in
   75 lines; the cheapest file in the chapter and a model of scope-handle
   design.
@@ -1272,7 +1272,7 @@ mean something.
    adds zero backward work.
 4. **One backward per graph.** Run the toy's backward twice over a retained
    `loss = x·x` graph and show the leaf gradient becomes `3·(2x)`, exactly
-   as `docs/REFERENCE.md:3863-3876` predicts; then add a `backward_done`
+   as `docs/REFERENCE.md:4154-4167` predicts; then add a `backward_done`
    guard, and explain why a leaf-only `zeroGrad` would not have been enough
    (interior nodes hold gradients too).
 5. **Real engine.** Write a `customVjp` spec for softplus

@@ -93,7 +93,7 @@ waveform icon) and Ch 12 "A transformer from scratch" (chat-bubble icon).
 At "Qwen3 chatting on your laptop", cut to a short terminal recording of
 `zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf
 --chat "What is the capital of France?" --no-think` (the README quick
-start, `README.md:125-126`) printing its answer.
+start, `README.md:143-144`) printing its answer.
 
 **Overlay:** Ch 10: a neural guitar amp, live · Ch 12: a transformer,
 line by line
@@ -107,7 +107,7 @@ course itself was generated with AI over the library as it stands today.
 That candor is a feature: every claim is cited to file, usually to the
 line, and where text and source disagree, the source wins.
 
-**Visual:** Text shot of `README.md:262-268` (the agentic-assistance
+**Visual:** Text shot of `README.md:291-299` (the agentic-assistance
 passage), highlight on "humans leading the ideas, the testing, and the
 debugging"; then a brief shot of the course chapter
 `docs/course/00-introduction.md` §0.7 ("How this course was made"),
@@ -125,7 +125,7 @@ it.
 
 **Visual:** Terminal recording: `git clone
 https://github.com/matteo-grella/fucina && cd fucina && zig build test`
-(the README quick start, `README.md:117-121`), ending on the passing test
+(the README quick start, `README.md:136-138`), ending on the passing test
 summary. Hold on an end card: series title + "Next: 01 — Just enough Zig".
 
 **Overlay:** `zig build test` — no model files needed · Next: 01 — Just
@@ -137,7 +137,7 @@ enough Zig
   - `README.md:3-9` — opening paragraph, "what you read is what runs".
   - `README.md:24-53` — the front-page example (Model struct, `forward`,
     exec-scope training block).
-  - `README.md:262-268` — the agentic-assistance passage.
+  - `README.md:291-299` — the agentic-assistance passage.
   - `docs/course/00-introduction.md` §0.7 — the "How this course was made"
     passage (brief, for the citation-discipline zoom).
 - **Terminal recordings** (Zig 0.16.0 required — the toolchain is pinned;
@@ -148,7 +148,7 @@ enough Zig
     --chat "What is the capital of France?" --no-think`
 - **Model download** (weights are NOT in the repo; ~1 GB disk/network):
   `hf download Qwen/Qwen3-0.6B-GGUF Qwen3-0.6B-Q8_0.gguf --local-dir
-  models` (source: the README quick start, `README.md:122-126`).
+  models` (source: the README quick start, `README.md:141-142`).
 - **Diagrams to draw**:
   - The tower: floors "your Python / framework / C++ / CUDA kernels,
     vendor BLAS, graph compiler", only the top floor lit.

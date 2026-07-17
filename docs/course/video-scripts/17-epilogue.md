@@ -79,7 +79,7 @@ becomes a compile error until it does.
 ramp (1 run every example … 6 contribute), with the "first milestone"
 column highlighted as the VO says "the thing that can tell you you are
 wrong". Then terminal recording: `zig build spirals -Doptimize=ReleaseFast`
-running to a decreasing loss. Then code shot `src/ag/tensor.zig:1559-1570`
+running to a decreasing loss. Then code shot `src/ag/tensor.zig:1652-1663`
 (the `elementalUnary` doc comment and signature), followed by the
 five-station route diagram for the full route: `src/backend/ops.zig`
 (enum + switch) → `src/backend/vector/primitives.zig:155` (`vecUnary`) →
@@ -174,7 +174,7 @@ forge is yours." · "docs/course/17-epilogue.md".
 - `src/dtype.zig:3-16` — the `DType` enum opening (hook).
 - `src/storage.zig` and `src/tensor.zig` file headers (montage flicker; any
   top-of-file frame is fine).
-- `src/ag/tensor.zig:1559-1570` — `elementalUnary` doc comment + signature.
+- `src/ag/tensor.zig:1652-1663` — `elementalUnary` doc comment + signature.
 - `src/backend/ops.zig:40-57` — `UnaryOp` enum (`tanh` at line 56).
 - `docs/PORTING.md:1-10` — the one-line version of the method.
 - `examples/nam/README.md:163-170` — `profile` one-step command + two-step

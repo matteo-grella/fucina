@@ -225,13 +225,13 @@ pub const Targets = struct {
 };
 ```
 
-*(from `src/llm/qwen3/train.zig:49-57`)*
+*(from `src/llm/qwen3/train.zig:61-70`)*
 
 `Trainer(targets)` takes this struct at **comptime** — `Trainer(.{ .q = true, .v = true })` is a different type from `Trainer(.{ .q = true, .k = true, .v = true })`, and the adapters for unselected projections simply do not exist in the compiled program. Dense models only in v1: MoE configs are rejected with `Error.MoeUnsupported`.
 
 The key trick is how the *frozen* projections participate in the graph. Inference routes matmuls through the packed fast paths of [Chapter 11](11-model-files-and-quantization.md) — `linearSeq`, activation quantization, packed RHS. Those paths are deliberately inference-only; they reject gradients. The trainer instead routes every frozen weight through the differentiable frozen-RHS `dot` on the weight's plain value tensor: the quantized blocks stay resident exactly as loaded, the dot dequantizes rows on the fly inside the kernel, and — this is the autograd half — **gradients flow to the f32 activations only**. The weight is a constant; it has no `GradState`; there is nothing to flow to. "The base model is never written: the only parameters are the adapters' A/B" (`src/llm/qwen3/train.zig:7-8`).
 
-The routing is worth seeing, because it is where Chapter 11's format union meets Chapter 7's autograd (`src/llm/qwen3/train.zig:112-141`, trimmed):
+The routing is worth seeing, because it is where Chapter 11's format union meets Chapter 7's autograd (`src/llm/qwen3/train.zig:193-246`, trimmed):
 
 ```zig
 /// Differentiable frozen linear: route through the plain `.value` tensor of
@@ -264,7 +264,7 @@ fn dotLinear(
             }
             break :blk acc;
         },
-        // ... f32/f16/bf16 and the remaining quant arms
+        inline else => |*w| dotFrozen(w, ctx, input, in_tag, out_tag),
     };
 }
 ```
@@ -296,7 +296,7 @@ try opt.step(ctx);
 opt.zeroGrad();
 ```
 
-Everything here is Chapter 8's ritual with two new nouns. `loss` is mean cross-entropy over one flat token sequence, with `ignore_index` (`maxInt(usize)`, `src/llm/qwen3/train.zig:61`) masking positions that must not be supervised — you will see why in §15.5. And the exec-scope requirement is *checked*: call `loss` without an open scope and you get `Error.ExecScopeRequired` instead of the undefined behavior a dangling graph node would be (`docs/TRAINING.md` §12, last bullet). A composite op that knows its own lifetime contract and refuses to run outside it is the polite version of the rule.
+Everything here is Chapter 8's ritual with two new nouns. `loss` is mean cross-entropy over one flat token sequence, with `ignore_index` (`maxInt(usize)`, `src/llm/qwen3/train.zig:74`) masking positions that must not be supervised — you will see why in §15.5. And the exec-scope requirement is *checked*: call `loss` without an open scope and you get `Error.ExecScopeRequired` instead of the undefined behavior a dangling graph node would be (`docs/TRAINING.md` §12, last bullet). A composite op that knows its own lifetime contract and refuses to run outside it is the polite version of the rule.
 
 The rest of the trainer's surface, mapped so you can navigate the source (`docs/REFERENCE.md` §14.2.1):
 
@@ -317,7 +317,7 @@ Supervised fine-tuning data is (instruction, response) pairs; the model trains o
 
 **A pair source.** `SftText.fromPairs` borrows caller-owned pairs zero-copy; `SftText.fromJsonl(allocator, io, path, .{})` loads a JSONL file — one `{"instruction": …, "response": …}` object per line, configurable keys, malformed lines rejected loudly with their line number (`src/llm/data.zig:47-134`).
 
-> **Zig note** — `fromJsonl` contains a memory-safety pattern worth stealing. It accumulates all pair strings into one growing `ArrayList(u8)` blob (allocation coalescing: two allocations for the whole dataset instead of two per pair), but it records each string as a `{ off, len }` *span*, not a slice — "resolved to slices only once the blob is final (ArrayList growth may move its storage)" (`src/llm/data.zig:74-76`). A slice taken mid-growth is a dangling pointer the moment the list reallocates; an offset is not. In a GC language this bug class does not exist; in Zig the idiom that avoids it is *indices now, pointers later*.
+> **Zig note** — `fromJsonl` contains a memory-safety pattern worth stealing. It accumulates all pair strings into one growing `ArrayList(u8)` blob (allocation coalescing: two allocations for the whole dataset instead of two per pair), but it records each string as a `{ off, len }` *span*, not a slice — "resolved to slices only once the blob is final (ArrayList growth may move its storage)" (`src/llm/data.zig:73-74`). A slice taken mid-growth is a dangling pointer the moment the list reallocates; an offset is not. In a GC language this bug class does not exist; in Zig the idiom that avoids it is *indices now, pointers later*.
 
 **The encoder.** `encodePair` renders the instruction through the model's chat template ([Chapter 12](12-a-transformer-from-scratch.md)'s ChatML), tokenizes, appends the encoded response plus the template's stop marker, and produces the `(inputs, labels)` pair the trainer eats. Its knobs are one small struct (`src/llm/data.zig:164-178`):
 
@@ -511,7 +511,8 @@ An `adapters.safetensors` is only useful to programs that implement LoRA. The fi
 
 ```sh
 # 1. fine-tune: checkpoint directory with adapters.safetensors + optimizer.fucina
-#    (download the f16 GGUF first — see RUNNING-MODELS.md)
+#    (download the f16 GGUF first — see RUNNING-MODELS.md "Getting the
+#    weights"; copy-paste form of this loop: examples/finetune/README.md)
 zig build finetune -Doptimize=ReleaseFast -- \
     --model models/Qwen3-0.6B-f16.gguf --steps 30 --save /tmp/qwen3-lora
 # 2. merge the adapters into the dense f32/f16 base (--alpha = training-time alpha; finetune default 16)
@@ -531,7 +532,7 @@ Note the prerequisite in step 1's comment: this sequence fine-tunes over the **f
 
 **Merge and quantize are two passes, and that is a design decision, not laziness.** The contracts paragraph under the script says it twice over (`docs/TRAINING.md` §9): merge and `--dtype` are "separate passes BY DESIGN (one combined pass would chain-requantize)", and merge itself "needs a dense f32/f16 base … a quantized base errors; quantize AFTER merging". The underlying refusal lives in the adapter (`src/lora.zig:216-220`), and `docs/TRAINING.md` §9 states the rationale: quantized bases cannot be merged in place, deliberately, even though the f32→K-quant encoders exist — dequantize→merge→re-encode **compounds quantization error**. Every trip through a quantizer costs accuracy; the pipeline is shaped so the final artifact has exactly one quantization in its history: dense base + exact f32 delta, quantized once at the end.
 
-The merge itself is ten lines you have already read the pieces of — this is the one place the rank-r matrix `B·A` is actually materialized (`src/lora.zig:264-274`):
+The merge itself is ten lines you have already read the pieces of — this is the one place the rank-r matrix `B·A` is actually materialized (`src/lora.zig:265-274`):
 
 ```zig
 /// w_data += scale * (B·A), w_data row-major [out, in]. A/B are
@@ -613,7 +614,7 @@ The parity suites are also a model of how to ship reference-gated tests: the gol
 Ports at this parity bar accumulate small, hard-won findings, and nanochat's source records them where they were won. Two examples worth reading in place:
 
 - **Loss normalization under a different batching model.** The reference computes one `F.cross_entropy(..., mean)` over a `(B, T)` batch and backwards `loss/grad_accum`; Fucina's attention/CE kernels are single-sequence, so the port runs each row independently, sums each sequence's CE over non-ignored targets, and divides by the micro-batch's total non-ignored count — algebraically the same mean, documented as reproducing "the reference mean bitwise up to float summation order" (`examples/nanochat/train.zig:10-20`). The same mean-vs-sum care as §15.6's window, forced by a *different* reason.
-- **An off-by-one in windowed attention conventions.** Fucina's `.window = W` attends W keys *including* self; the reference's sliding-window mask *excludes* self from its bound — "so every arm returns the reference value + 1" (`examples/nanochat/model.zig:92-100`, the `windowFor` doc comment, which also reconstructs gpt.py's double-ceiling `short_window` formula). Convention mismatches like this are invisible in loss curves and fatal in parity tests; the comment is the proof that someone checked.
+- **An off-by-one in windowed attention conventions.** Fucina's `.window = W` attends W keys *including* self; the reference's sliding-window mask *excludes* self from its bound — "so every arm returns the reference value + 1" (`examples/nanochat/model.zig:92-100`, the `windowFor` doc comment; the function body reconstructs gpt.py's double-ceiling `short_window` formula). Convention mismatches like this are invisible in loss curves and fatal in parity tests; the comment is the proof that someone checked.
 
 > **ML note** — *Bits per byte* is pretraining's honest yardstick. Perplexity and per-token loss depend on the tokenizer: a tokenizer with bigger tokens makes per-token loss look worse and per-text loss better. bpb normalizes by the *bytes of raw text* instead: sum the per-token losses in nats, divide by ln 2 to get bits, divide by the byte length of what was predicted — `nats / (ln2 · bytes)` (`examples/nanochat/train.zig:293-296`, a port of nanochat's `evaluate_bpb`). Comparable across tokenizers, interpretable as compression: a model at 1.0 bpb is, literally, an 8:1 compressor of its validation text.
 
@@ -648,6 +649,17 @@ The chapter's three roads, side by side:
 | Evolution strategies (§15.8) | adapters, or every resident float | scalar rewards, forward passes only | frozen (lora) / perturbed dense (full) | `zig build es-finetune` |
 | From scratch (§15.9) | everything, at d6-class scale | exact gradients | none — you make them | `zig build nanochat` |
 
+Two of those roads — the fine-tunes — also belong to a wider menu. Counting what other chapters own, the repo has **four ways to specialize a model after pretraining**, all CPU-first, each starting from a GGUF the serving stack already runs and ending in an artifact it still runs. Two train the weights. One re-expresses the weights without training anything. The fourth trains no weight at all — it post-trains the *context* the model reads.
+
+| road | what changes | learning signal | artifact | demo |
+| --- | --- | --- | --- | --- |
+| LoRA SFT (§15.2–15.7; `docs/TRAINING.md` §9) | adapter weights beside the frozen base | exact gradients | merged, re-quantized GGUF | `zig build finetune` |
+| Evolution strategies (§15.8; [Chapter 9](09-training-without-gradients.md) §9.8; `docs/TRAINING.md` §13) | adapters, or every resident float | scalar rewards, forward passes only | same checkpoint layout and export, minus `optimizer.fucina` | `zig build es-finetune` |
+| PTQTP ([Chapter 14](14-the-low-bit-frontier.md) §14.6–14.8; `docs/PTQTP.md`) | the weights' *representation* | none — data-free, solves a decomposition | ternary GGUF | `zig build ptqtp-qwen3`, `export-gguf --ptqtp` |
+| Cartridges (`docs/CARTRIDGES.md`; `docs/REFERENCE.md` §13.10) | the *context* — a trained KV prefix; weights untouched | self-study distillation, teacher top-k CE | cartridge safetensors beside the unchanged base GGUF | `zig build cartridge` |
+
+The menu composes through seams this chapter already crossed. §15.4's `dotLinear` carries a `.ptqtp` arm — trit planes are just more frozen constant RHS, so LoRA fine-tuning runs over a PTQTP model unchanged — and the cartridge trainer *is* this chapter's trainer with every adapter switched off (`Trainer(.{ .q = false, .v = false })`, `docs/REFERENCE.md` §13.10), leaving the trained KV rows as the only parameters.
+
 The deeper takeaway is not about hardware at all. The reason this chapter could be short on new machinery is that the training stack was built out of *contracts* — lifetime rules, seed contracts, checkpoint sentinels, parity oracles — and contracts compose. A quantized frozen transformer, a LoRA adapter, an accumulation window, a resumable loader, and a GGUF exporter snap together because each one states exactly what it needs and refuses loudly otherwise. How that discipline is practiced across the whole repository is the final chapter's story.
 
 Loose ends, and where they live:
@@ -655,6 +667,7 @@ Loose ends, and where they live:
 - **Serving the fine-tune properly** — chat templates, KV reuse across requests, and the OpenAI-compatible `lmserve` — is [Chapter 13](13-inference-tricks.md); your exported GGUF drops straight into all of it.
 - **The export tool's other faces** — verbatim re-emit, dtype transcoding, and shard-streaming quantization of models bigger than RAM — belong to [Chapter 11](11-model-files-and-quantization.md) and `docs/PTQTP.md`.
 - **Training *ternary* models** — straight-through estimators and ES trit-flips over packed TQ2_0 genomes — was [Chapter 14](14-the-low-bit-frontier.md)'s story; it composes with this chapter's checkpoint directories unchanged.
+- **Post-training the *context*** — distilling a corpus into a reusable trained KV prefix while the weights stay untouched, the menu's fourth road — has its design record in `docs/CARTRIDGES.md` (`zig build cartridge`); the artifact rides [Chapter 13](13-inference-tricks.md)'s serving stack, KV persistence included.
 - **The verification methodology in full** — why parity ladders look the way they do, and how a port earns its claims — is [Chapter 16](16-the-craft.md).
 
 ## What you now know
@@ -684,7 +697,7 @@ Loose ends, and where they live:
 - `docs/REFERENCE.md` §14.2.1 — the machine-verified entry-point map for the trainer surface summarized in §15.4.
 - `src/training_checkpoint.zig` — the directory protocol: `beginSave`, `writeFileAtomic`, the sentinel-last `TrainerState`, and the full list of optional resume fields (LoRA, data-loader, and ES alike).
 - `tools/export_gguf.zig` — merge and transcode; Chapter 11's writers earning their keep.
-- `docs/RUNNING-MODELS.md` — where every model file comes from, including the f16-transcode note this chapter's loop depends on, and the scripted "fine-tune → merge → serve" section that mirrors §15.7.
+- `docs/RUNNING-MODELS.md` — where every model file comes from, including the f16-transcode note this chapter's loop depends on; the copy-paste "fine-tune → merge → re-quantize → serve" script is `examples/finetune/README.md`.
 - `examples/nanochat/` — README first, then `train.zig`'s module doc (the loss-normalization parity note), then `model.zig` (the `rms_eps` war story at line 33).
 
 ## Exercises

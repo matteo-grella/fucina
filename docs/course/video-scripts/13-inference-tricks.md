@@ -95,7 +95,7 @@ zig build qwen3 -Doptimize=ReleaseFast -- \
 Then a three-tier diagram: "pinned hot set → per-layer LRU → `pread`", with
 a router icon feeding it and "the OS sees pages, not experts" as the
 footnote (§13.8 ML note). Then code shot:
-`src/exec/expert_store.zig:872–890` — the acquire resolution loop — with
+`src/exec/expert_store.zig:926–944` — the acquire resolution loop — with
 the pinned-hit, LRU-hit, and miss branches highlighted in sequence.
 
 **Overlay:** "142 GB GGUF · 64 GB RAM · ~24 GB peak RSS @ 20 GB expert
@@ -171,11 +171,11 @@ frontier", chapter link `docs/course/13-inference-tricks.md`.
 
 ## Asset list
 
-**Code shots (repo files, exact ranges — ranges verified 2026-07-12,
+**Code shots (repo files, exact ranges — ranges verified 2026-07-17,
 re-verify at record time):**
 - `src/llm/speculative/core.zig:9–20` — the normative losslessness header
   (doc comment).
-- `src/exec/expert_store.zig:872–890` — the acquire resolution loop
+- `src/exec/expert_store.zig:926–944` — the acquire resolution loop
   (pinned hit / LRU hit / miss collect).
 - `src/llm/logit_processor.zig:35–64` — the `LogitProcessor` vtable with
   optional structural hooks.

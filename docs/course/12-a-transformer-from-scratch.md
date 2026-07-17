@@ -12,7 +12,7 @@ gave us the weights: a GGUF file, memory-mapped, its tensors resident in
 their source precision. This chapter turns them into a machine that talks.
 
 Everything is grounded in a real model: **Qwen3-0.6B**, implemented in
-`src/llm/qwen3/model.zig` (~1,700 lines). Around it sits the `fucina_llm`
+`src/llm/qwen3/model.zig` (~1,800 lines). Around it sits the `fucina_llm`
 module, which — in the words of `docs/REFERENCE.md` §13 — "contains
 everything a transformer inference/fine-tuning runner needs that is not a
 tensor op: GGUF-to-weight binding, KV caching, tokenizers, sampling, SFT data
@@ -59,7 +59,7 @@ Read it as a bill of materials:
   distinct key/value heads. That asymmetry *is* grouped-query attention
   (§12.3.5), and every projection size derives from these three numbers:
   the query projection is 16 × 128 = 2048 wide, the key/value projections
-  8 × 128 = 1024 — pinned by a unit test at `model.zig:1706-1711`.
+  8 × 128 = 1024 — pinned by a unit test at `model.zig:1816-1821`.
 - **`intermediate_size = 3072`** — the feed-forward block's inner width;
   **`rms_norm_eps`** and **`rope_theta`** are numerical constants you will
   meet in §12.3.2 and §12.3.4.
@@ -120,7 +120,7 @@ any language, in any encoding, even binary garbage, is *some* byte sequence.
 There is one wrinkle: the vocabulary is stored as printable strings, and
 many bytes are not printable. GPT-2's solution, faithfully implemented here,
 maps every byte to a printable Unicode stand-in (*from
-`src/llm/tokenizer.zig:494-506`, trimmed*):
+`src/llm/tokenizer.zig:588-600`, trimmed*):
 
 ```zig
 /// GPT-2 byte→unicode: printable bytes map to themselves; the rest shift into
@@ -141,7 +141,7 @@ fn gpt2ByteToUnicode(byte: u8, buf: *[4]u8) usize {
 So a space (0x20) becomes `Ġ` (U+0120) — which is why, if you ever dump an
 LLM vocabulary, half the tokens seem to start with `Ġ`: that is "word
 preceded by a space". A repo test round-trips all 256 bytes through this map
-and back (`tokenizer.zig:869-879`).
+and back (`tokenizer.zig:1262-1272`).
 
 > **Zig note** — That `switch` is a *range-case switch* on a `u8`:
 > `'!'...'~'` covers the whole printable-ASCII span in one arm, and the
@@ -156,7 +156,7 @@ the *order* of those fusions is saved as a ranked list of merge rules. At
 inference time the algorithm is almost embarrassingly simple: start from
 single bytes, and repeatedly merge the adjacent pair with the
 lowest-numbered (earliest-learned) rule until no rule applies. The repo's
-implementation is `applyMerges` (`src/llm/tokenizer.zig:373-401`) — 28
+implementation is `applyMerges` (`src/llm/tokenizer.zig:468-495`) — 28
 lines, whose doc comment is the entire specification: "Repeatedly merge the
 adjacent symbol pair with the lowest merge rank." To make it concrete, here
 is a self-contained toy you can run today — **course code**, not repo code
@@ -242,7 +242,7 @@ test "toy BPE reproduces merge order" {
 }
 ```
 
-The real tokenizer's `encodeChunk` (`tokenizer.zig:335-371`) has the same
+The real tokenizer's `encodeChunk` (`tokenizer.zig:429-465`) has the same
 three-phase shape — map bytes to symbols, `applyMerges`, look up ids — plus
 a fallback that decomposes an unknown merged symbol into its byte-level
 characters, each of which *is* in the vocabulary of a valid GPT-2 model.
@@ -273,14 +273,14 @@ The Qwen2-family pretokenizer is officially a regex:
 |  ?[^\s\p{L}\p{N}]+[\r\n]*  | \s*[\r\n]+ | \s+(?!\S)   | \s+
 ```
 
-Fucina implements it as `qwen2ChunkEnd` (`tokenizer.zig:730-794`), "a
+Fucina implements it as `qwen2ChunkEnd` (`tokenizer.zig:824-888`), "a
 faithful port of llama.cpp's hand-rolled codepoint loop" for that regex,
 backed by generated Unicode category tables (`unicode_categories.zig`). The
-doc comment (`tokenizer.zig:550-555`) calls out the load-bearing details:
+doc comment (`tokenizer.zig:644-649`) calls out the load-bearing details:
 digits split *one per chunk* (`\p{N}` has no quantifier), punctuation runs
 absorb trailing newlines, and a whitespace run before a word donates its
 last space to that word. In-repo tests pin exactly these behaviours (*from
-`src/llm/tokenizer.zig:832-838`*):
+`src/llm/tokenizer.zig:1174-1181`*):
 
 ```zig
 test "qwen2 pretokenizer: digits split one per chunk (\\p{N} singleton)" {
@@ -297,18 +297,20 @@ llama.cpp for qwen2-pre models (malformed UTF-8 is the one documented
 deviation)". Not "produces similar text" — the *same integers*, id for id.
 The runner exposes this as an oracle: `--tokenize FILE` prints one token id
 per line with no weights loaded, ready to diff against `llama-tokenize`.
-The single documented deviation is spelled out at `tokenizer.zig:557-563`:
+The single documented deviation is spelled out at `tokenizer.zig:651-657`:
 on *invalid* UTF-8, Fucina classifies each undecodable byte as its own
 U+FFFD while llama.cpp decodes leniently, so chunk boundaries and output
 bytes can differ — on malformed input only.
 
 Two more behaviours you will rely on later:
 
-- **Special-token markers.** `encode` resolves `<|...|>` spans that match a
-  vocabulary entry to their single id *atomically* (`encodeWithSpecials`,
-  `tokenizer.zig:254-274`) — that is how `<|im_end|>` stays one token; a
-  `<|` that opens no known marker is left for normal pretokenization,
-  matching llama.cpp's partitioning.
+- **Special-token markers.** `encode` resolves special tokens to their
+  single id *atomically* (`encodeWithSpecials`, `tokenizer.zig:296-329`),
+  matching llama.cpp's partitioning: with GGUF `token_type` metadata the
+  markers come from a special-token cache (longest first); without one,
+  `<|...|>` spans are resolved against the vocabulary. That is how
+  `<|im_end|>` stays one token; a `<|` that opens no known marker is left
+  for normal pretokenization.
 - **`encode` vs `encodeRaw`.** `encode` applies the model's BOS/EOS policy;
   `encodeRaw` does not, because chat "templates own structure"
   (`docs/REFERENCE.md` §13.5) — the template decides every structural
@@ -317,7 +319,7 @@ Two more behaviours you will rely on later:
 And one honesty mechanism: a GGUF declaring a pretokenizer this module does
 not implement is *not* silently mis-tokenized — encoding proceeds with
 qwen2 rules, the id is recorded in `pre_mismatch`, and a warning is logged
-once (`tokenizer.zig:50-58, 100-107`). Parity is then explicitly not
+once (`tokenizer.zig:50-58, 134-153`). Parity is then explicitly not
 guaranteed, and you were told.
 
 ### Streaming decode: the emoji problem
@@ -325,8 +327,8 @@ guaranteed, and you were told.
 Generation emits one token at a time, and a token's bytes can end mid-way
 through a multi-byte UTF-8 character — the next token completes it. Print
 naively and your terminal shows garbage mid-emoji. `StreamDecoder`
-(`tokenizer.zig:443-478`) buffers the incomplete tail (*from
-`src/llm/tokenizer.zig:461-470`*):
+(`tokenizer.zig:537-572`) buffers the incomplete tail (*from
+`src/llm/tokenizer.zig:555-564`*):
 
 ```zig
 /// Decode `id` and write any now-complete UTF-8 to `writer`.
@@ -350,7 +352,7 @@ pub fn push(self: *StreamDecoder, allocator: Allocator, id: u32, writer: *std.Io
 
 Now the model. Here is the heart of `forwardStep` — the function that does
 *all* the transformer work, whether you hand it a 500-token prompt or one
-token (*from `src/llm/qwen3/model.zig:561-592`, profiling and MoE prefetch
+token (*from `src/llm/qwen3/model.zig:512-543`, profiling and MoE prefetch
 trimmed*):
 
 ```zig
@@ -384,7 +386,7 @@ piece in the order the code runs it.
 
 > **Zig note** — `x = try ctx.replace(x, ...)` is Fucina's idiom for "the
 > new tensor replaces the old one". Its second parameter is an *error
-> union* on purpose (`src/exec.zig:345-365`): the block call is evaluated
+> union* on purpose (`src/exec.zig:355-375`): the block call is evaluated
 > by the caller, and on error the old `x` is NOT consumed — the binding and
 > its `errdefer` stay valid — while on success the old tensor is released
 > and the new one returned for rebinding. One idiom keeps the residual
@@ -393,9 +395,9 @@ piece in the order the code runs it.
 
 ### 12.3.1 Embedding lookup
 
-`token_embedding` is a `LinearWeight` — the same 28-arm `union(enum)` over
+`token_embedding` is a `LinearWeight` — the same 29-arm `union(enum)` over
 weight formats you met in [Chapter 11](11-model-files-and-quantization.md) —
-and `getRowsAs` (`src/llm/weights.zig:830`) gathers one row per token id
+and `getRowsAs` (`src/llm/weights.zig:832`) gathers one row per token id
 into a fresh `[seq, embed]` f32 tensor. Because the gather is a method on
 the weight union, a q8_0 or f16 embedding table works exactly like an f32
 one: rows dequantize or widen on the fly ("nothing is widened to f32 at
@@ -404,7 +406,7 @@ load time", `docs/REFERENCE.md` §13.2).
 A small elegance hides at load: many models *tie* the output projection to
 the embedding table (one matrix maps ids to vectors on the way in and
 vectors to scores on the way out). The loader expresses the fallback chain
-as one labeled block (*from `src/llm/qwen3/model.zig:263-270`, comment
+as one labeled block (*from `src/llm/qwen3/model.zig:214-221`, comment
 trimmed*):
 
 ```zig
@@ -443,13 +445,13 @@ undo or re-scale the normalization per channel.
 Qwen3 adds its signature stabilizer: **per-head q/k normalization**. After
 the QKV projection, each head's 128-dimensional query and key get their own
 RMSNorm with learned length-128 weights (`q_norm`/`k_norm`, loaded at
-`model.zig:852-856`). You will see it fused into the RoPE call below.
+`model.zig:872-876`). You will see it fused into the RoPE call below.
 
 ### 12.3.3 QKV projections and heads
 
 Attention starts with three matmuls: the normalized stream is projected to
 queries (2048 wide), keys and values (1024 wide each). Then `split` reshapes
-the flat projections into heads (*from `src/llm/qwen3/model.zig:1172-1177`*):
+the flat projections into heads (*from `src/llm/qwen3/model.zig:1192-1197`*):
 
 ```zig
 var q3 = try qkv_linear.q.split(ctx, .q, .{ .head, .d }, .{ config.num_attention_heads, config.head_dim });
@@ -467,14 +469,14 @@ different head axes, and a later contraction against the wrong one is a
 compile error.
 
 One performance decision is visible in the types. `AttentionProjection`
-(`model.zig:944-970`) is a `union(enum) { separate, fused }`: at load time,
+(`model.zig:964-990`) is a `union(enum) { separate, fused }`: at load time,
 `weights.fuseLinear` tries to concatenate the q, k, and v matrices into one
 `[2048+1024+1024, 1024]` matrix so three matmuls become one wider GEMM (one
 pass over the activations). The fusion *declines gracefully* — it returns
 `!?LinearWeight`, and `null` means "mixed formats: parts untouched, use
 them individually" (`docs/REFERENCE.md` §13.2); the forward switches on the
 union. The FFN's gate/up pair gets the same treatment
-(`model.zig:1088-1110`).
+(`model.zig:1108-1130`).
 
 > **Zig note** — This is the recurring Fucina pattern for "optimization
 > that may not apply": encode both outcomes in a tagged union, decide once
@@ -560,11 +562,11 @@ test "rotated dot product depends only on the position difference" {
 
 In the model, the rotation factors for the step's absolute positions are
 precomputed once per forward into a `RopeTable` (`ctx.prepareRopeTable`,
-`model.zig:558`) — and the `positions` array is the *only* thing that
+`model.zig:509`) — and the `positions` array is the *only* thing that
 distinguishes building a prefill step from a decode step
-(`model.zig:554-556`: prefill fills `pos0..pos0+len`, decode passes the one
+(`model.zig:505-507`: prefill fills `pos0..pos0+len`, decode passes the one
 current position). The rotation is fused with §12.3.2's per-head q/k norm
-into a single kernel call (*from `src/llm/qwen3/model.zig:1181-1184`*):
+into a single kernel call (*from `src/llm/qwen3/model.zig:1201-1204`*):
 
 ```zig
 var q_rope = try q3.rmsNormMulRopeHalfPrepared(ctx, .seq, .d, &layer.q_norm, config.rms_norm_eps, rope_table);
@@ -591,7 +593,7 @@ Attention itself: every query attends every (allowed) key, scores become
 softmax weights, weights blend the values. The one Qwen3 twist is the
 head-count asymmetry — 16 query heads, 8 KV heads — and the entire mapping
 that implements it is three lines at load time (*from
-`src/llm/qwen3/model.zig:273-276`*):
+`src/llm/qwen3/model.zig:224-227`*):
 
 ```zig
 const kv_head_for_head = try allocator.alloc(usize, config.num_attention_heads);
@@ -611,7 +613,7 @@ head).
 
 The kernel is one call, `groupedAttention` (`docs/REFERENCE.md` §4.13),
 with the model-side wrapper supplying the standard scale (*from
-`src/llm/qwen3/model.zig:1694-1705`*):
+`src/llm/qwen3/model.zig:1804-1815`*):
 
 ```zig
 fn causalAttention(
@@ -651,7 +653,7 @@ output must be exactly `v` — attention reduced to its base case
 there when you port your own attention.
 
 After attention, one more matmul (`o_proj`) maps the concatenated head
-outputs back to the 1024-wide stream (`model.zig:1220`).
+outputs back to the 1024-wide stream (`model.zig:1240`).
 
 ### 12.3.6 The SwiGLU feed-forward block
 
@@ -667,7 +669,7 @@ gated nonlinearity, one projection back down. `silu(z) = z · sigmoid(z)` is
 a smooth ReLU relative; the gating means one pathway (`gate`) decides *how
 much* of the other pathway's signal (`up`) passes, per channel — empirically
 stronger than a plain nonlinearity at equal parameter count. In code, the
-separate-weights arm reads (*from `src/llm/qwen3/model.zig:1407-1416`,
+separate-weights arm reads (*from `src/llm/qwen3/model.zig:1517-1526`,
 trimmed*):
 
 ```zig
@@ -678,20 +680,20 @@ const out = try gate_up.up.swiglu(ctx, &gate_up.gate);
 
 and the fused arm computes both projections in one `[6144, 1024]` GEMM,
 then splits and gates in a single pass (`splitGated(ctx, .swiglu, ...)`,
-`model.zig:1424`). Same math, two execution strategies — and for the hot
-quantized formats a third, `denseFfnFusedDown` (`model.zig:1437-1454`),
+`model.zig:1534`). Same math, two execution strategies — and for the hot
+quantized formats a third, `denseFfnFusedDown` (`model.zig:1547-1564`),
 never materializes the gated 3072-wide tensor at all: SwiGLU, activation
 quantization, and the packed down-GEMM run as one fused kernel once the
-batch is big enough (`seq >= 12`, `model.zig:1393`).
+batch is big enough (`seq >= 12`, `model.zig:1503`).
 
 ### 12.3.7 The residual stream, the final norm, and the logits
 
 Look back at the two block functions and find their last lines:
 
 ```zig
-const out = try residual_input.add(ctx, &attn_out);   // model.zig:1231
+const out = try residual_input.add(ctx, &attn_out);   // model.zig:1251
 ...
-const out = try input.add(ctx, &contribution);        // model.zig:1376
+const out = try input.add(ctx, &contribution);        // model.zig:1486
 ```
 
 Neither block *transforms* the stream — each computes a contribution and
@@ -716,7 +718,7 @@ position — that difference is its entire reason to exist.
 ## 12.4 The KV cache: remembering instead of recomputing
 
 Generation is a loop: predict a token, append it, run the model again. Run
-`forwardLastLogits` (the cacheless entry, `model.zig:320`) on the growing
+`forwardLastLogits` (the cacheless entry, `model.zig:271`) on the growing
 sequence each time and you recompute *everything* about the prefix — every
 projection, every attention pass, every FFN — for every token you emit,
 and almost all of that work is byte-identical to the previous iteration's.
@@ -751,7 +753,7 @@ The storage layout is chosen so that reading the cache costs nothing
 
 Here it is in action inside the attention block — append the new rows, then
 attend over a zero-copy view of everything (*from
-`src/llm/qwen3/model.zig:1194-1215`, q8_0 arm trimmed*):
+`src/llm/qwen3/model.zig:1214-1235`, q8_0 arm trimmed*):
 
 ```zig
 var attn = if (cache) |kv| blk: {
@@ -774,14 +776,14 @@ Three contracts make this correct, and each is enforced:
 
 1. **`appendLayer` does not advance `len`.** All 28 layers append at the
    same base offset; `kv.advance(token_ids.len)` runs *once*, after the
-   layer loop (`model.zig:579`; doc comment at `kv_cache.zig:250-253`).
+   layer loop (`model.zig:530`; doc comment at `kv_cache.zig:250-253`).
    Get this wrong in a model port and every layer after the first writes
    to the wrong rows.
 2. **`forwardStep` demands `kv.len == pos0`** (else
    `Error.InvalidSequenceLength`) and enough capacity (else
-   `KvCacheOverflow`) — `model.zig:550-552`. The cache's length *is* the
+   `KvCacheOverflow`) — `model.zig:501-503`. The cache's length *is* the
    model's notion of "where we are".
-3. **Cached equals uncached.** The doc comment at `model.zig:490-495`
+3. **Cached equals uncached.** The doc comment at `model.zig:441-446`
    states the oracle: "With a fresh cache and `pos0 == 0` this is prefill
    and yields the same last-token logits as `forwardLastLogits`." The
    runner's `--verify-cache N` flag checks exactly this, decode step by
@@ -823,7 +825,8 @@ KV heads instead of 8, double it.
 **The q8_0 option.** `initWithDtype(..., .q8_0)` (`kv_cache.zig:70`) stores
 each (position, head) row as `head_dim/32` q8_0 blocks — 34 bytes per 32
 elements, roughly halving f16's footprint again at a small quantization
-loss. Be precise about what this buys: `docs/RUNNING-MODELS.md` calls it
+loss. Be precise about what this buys: the runner's README
+(`examples/qwen3/README.md`) calls it
 "halves KV memory — capacity option; decode is NOT faster on M1". A
 *capacity* lever (twice the context in the same RAM), not a speed lever —
 measured, not assumed. It demands `head_dim % 32 == 0` (else
@@ -856,11 +859,11 @@ about to see:
   norm-into-GEMM path from Chapter 11 is explicitly gated to m ≥ 4:
   `supportsNormedFusion` declines at decode sizes, citing a "measured 2-3%
   decode LOSS on M1 Q4_K_M/Q8_0, against a +11-23% pp32 win"
-  (`src/llm/weights.zig:781-786`) — a documented decision *with its
+  (`src/llm/weights.zig:780-789`) — a documented decision *with its
   numbers*, and a reminder that these are dated, machine-specific
   measurements, not laws.
 - **Batch decode** shares the stream: `forwardStepBatch`
-  (`model.zig:612-664`) decodes one token for each of N independent
+  (`model.zig:563-615`) decodes one token for each of N independent
   conversations in a single m = N pass — "weights are read once for all
   streams, the batch-decode bandwidth win — while RoPE positions, KV
   appends, and attention are per-stream" (its doc comment). Step cost
@@ -868,10 +871,10 @@ about to see:
 - **Speculative decoding** ([Chapter 13](13-inference-tricks.md)) turns
   decode back into prefill: draft several tokens cheaply, then *verify*
   them in one prefill-shaped pass. Its verify entry is
-  `forwardStepAllLogits` (`model.zig:530`) — `forwardStep`, except it
+  `forwardStepAllLogits` (`model.zig:481`) — `forwardStep`, except it
   returns logits for **every** appended position, paying "~one step's
   weight traffic instead of `token_ids.len` sequential steps"
-  (`model.zig:522-525`).
+  (`model.zig:473-475`).
 
 One honesty note, straight from the doc comments, because it is easy to
 over-claim: the batched paths are **not** unconditionally bit-identical to
@@ -879,10 +882,10 @@ their sequential equivalents. Per-row numerics match per-token `forwardStep`
 bit-for-bit only *below* the m-dependent kernel thresholds — "quantized-weight
 x4-packed kernels at seq >= 4, fused FFN at seq >= 12, tiled attention at
 seq >= 48"; beyond them "rows can differ by reassociation drift (~1e-6
-rel)" (`model.zig:525-529`). For `forwardStepBatch` the measurement is
+rel)" (`model.zig:477-480`). For `forwardStepBatch` the measurement is
 pinned in the same terms: "0.6B Q4_K/Q8_0 batch == sequential
 token-for-token at n <= 3, ~1e-6 reassociation drift at n >= 4"
-(`model.zig:608-611`). Floating-point addition is not associative; a kernel
+(`model.zig:560-561`). Floating-point addition is not associative; a kernel
 that sums in a different order produces a different last bit, and the
 repo's answer is to *document the threshold* and test both sides of it.
 
@@ -899,7 +902,7 @@ repo's answer is to *document the threshold* and test both sides of it.
 The forward pass ends with 151,936 raw scores; something must pick one
 token. The simplest picker is greedy — take the argmax — and the minimal
 autoregressive loop around it is worth reading in full (*from
-`src/llm/qwen3/model.zig:684-699`*):
+`src/llm/qwen3/model.zig:704-718`*):
 
 ```zig
 const limit = @min(options.max_new_tokens, out_tokens.len);
@@ -1027,7 +1030,7 @@ design value, again.
 The secret about chat models: there is no chat. The model does one thing —
 continue text. "Chat" is a *text protocol* it was fine-tuned on, and the
 entire ChatML implementation is string concatenation (*from
-`src/llm/chat.zig:79-91`*):
+`src/llm/chat.zig:80-92`*):
 
 ```zig
 .chatml => {
@@ -1049,7 +1052,7 @@ having seen millions of documents in this shape, continues with an
 assistant reply. Generation stops when it emits the turn's closing marker:
 the template's `stopMarker()` (`"<|im_end|>"` for ChatML, `chat.zig:56-63`),
 resolved via `tokenizer.tokenId(template.stopMarker()) orelse
-tokenizer.eosId()` (`chat.zig:387`). Even `--no-think` is demystified here:
+tokenizer.eosId()` (`chat.zig:400`). Even `--no-think` is demystified here:
 Qwen3 emits a `<think>...</think>` reasoning block before answering, and
 suppressing it is nothing more than *pre-filling an empty one* so the model
 believes it has already thought. Which template a model speaks is sniffed
@@ -1069,7 +1072,7 @@ never re-processes its past.
 
 The decode loop is the teaching centerpiece of the whole stack — thirty
 lines that contain everything this chapter built (*from
-`src/llm/chat.zig:666-701`, stop-sequence handling trimmed*):
+`src/llm/chat.zig:708-744`, stop-sequence handling trimmed*):
 
 ```zig
 fn decodeTurn(self: *Self, prefix: []const usize, writer: *std.Io.Writer) !usize {
@@ -1104,7 +1107,7 @@ Prefill once; then sample → stop-check → stream → commit to history →
 forward one token. §12.2's `StreamDecoder` handles the UTF-8 tails, §12.4's
 cache makes each iteration cheap, §12.6's sampler picks the tokens. A turn
 whose prefix exceeds remaining capacity is `error.ContextFull`
-(`chat.zig:548`); the whole conversation must fit `Options.capacity`.
+(`chat.zig:587`); the whole conversation must fit `Options.capacity`.
 
 ### The comptime contract
 
@@ -1123,7 +1126,7 @@ entries make a beautifully instructive contrast:
   just what a given run calls — the compiler compiles the whole `send`,
   speculative branch included, the moment you instantiate the type.
 - **`forwardStepBatch` is comptime-*gated*, so it is optional.** The code
-  asks before touching it (*from `src/llm/chat.zig:755-762`, comment
+  asks before touching it (*from `src/llm/chat.zig:797-804`, comment
   included*):
 
 ```zig
@@ -1159,7 +1162,7 @@ one of them plugs into machinery you have already seen.
 Everything so far was the *dense* Qwen3. The same file also implements the
 MoE variants — Qwen3-30B-A3B and 235B-A22B — and the difference is exactly
 one component: the FFN. Structurally, it is a two-armed union
-(*from `src/llm/qwen3/model.zig:742-753`*):
+(*from `src/llm/qwen3/model.zig:762-773`*):
 
 ```zig
 const Ffn = union(enum) {
@@ -1181,7 +1184,7 @@ memory instead — which is why Chapter 11's shard-streaming quantizer and
 Chapter 13's expert streaming exist.
 
 The routing is small enough to read whole. First the model side (*from
-`src/llm/qwen3/model.zig:1540-1564`, trimmed*):
+`src/llm/qwen3/model.zig:1650-1674`, trimmed*):
 
 ```zig
 var logits = try moe.router.linearSeq(ctx, ffn_in, .embed, .expert);
@@ -1203,7 +1206,7 @@ out-tag `.expert` instead of `.vocab`; a MoE router and an lm_head are the
 same operation at different widths. Selection lands in two plain host-side
 slices (`sel`: which experts, `wgt`: their mixture weights), and one fused
 call runs the routed SwiGLU mixture. The selection kernel is worth reading
-whole (*from `src/exec/topk.zig:50-85`, trimmed*):
+whole (*from `src/exec/topk.zig:50-86`, trimmed*):
 
 ```zig
 fn routerTopKRow(logits: []const f32, k: usize, normalize_selected: bool, selected: []usize, weights: []f32) void {
@@ -1239,7 +1242,7 @@ rescaled to sum to 1). MoE routing has a fearsome reputation; the
 inference-side arithmetic is thirty lines.
 
 The prefill/decode split from §12.5 reappears with an MoE twist, documented
-at `model.zig:1522-1526`: decode (seq == 1) uses "the fused expert-parallel
+at `model.zig:1632-1636`: decode (seq == 1) uses "the fused expert-parallel
 GEMV" while prefill "groups tokens by expert and runs one m>1 GEMM per
 expert (weights read once, reused across the batch) — far less weight
 traffic than per-token." Same wall, same medicine: amortize the bytes.
@@ -1248,18 +1251,19 @@ Two operational notes close the loop with neighbouring chapters. Expert
 stacks are the bulk of a MoE model's bytes, so when the GGUF is
 memory-mapped they are *borrowed* straight from the mapping instead of
 copied — the model takes ownership and unmaps it last in `deinit`
-(`model.zig:285-290, 313-316`). And for models bigger than your RAM,
-`MoeStreamOptions` (`model.zig:156-180`) keeps experts on disk, read on
+(`model.zig:236-241, 264-267`). And for models bigger than your RAM,
+`MoeStreamOptions` (`src/llm/weights.zig:1069-1100`, re-exported at
+`model.zig:153`) keeps experts on disk, read on
 demand through a tiered cache — "the explicit trade that lets a
-bigger-than-RAM model run at all" (`model.zig:151-155`); that story (LRU
+bigger-than-RAM model run at all" (`weights.zig:1073-1074`); that story (LRU
 tiers, learned pinning, router lookahead, the measured tokens-per-second on
 a 142 GB model in 64 GB of RAM) belongs to
 [Chapter 13](13-inference-tricks.md). One taste of the knob-space:
-`applyExpertTopP` (`model.zig:1603-1653`) drops low-weight experts per
+`applyExpertTopP` (`model.zig:1713-1763`) drops low-weight experts per
 token; its doc comment records "measured on the 30B MoE: p = 0.7 cut
 streamed disk traffic 55% for modest quality cost" and is explicit that
 this is *quality-traded* — `p >= 1` is the bit-identical baseline, pinned
-by a unit test at `model.zig:1655-1681`.
+by a unit test at `model.zig:1765-1791`.
 
 ## 12.9 Run it
 
@@ -1286,8 +1290,8 @@ zig build lmserve -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --port 8
 is 10–50x slower, and — [Chapter 6](06-going-fast-on-cpus.md)'s lesson —
 build on the machine you run on, because the kernels specialize to the
 compiling host's CPU. Then explore the runner (`examples/qwen3/main.zig`; run it
-with no arguments for the usage text). A sampler from
-`docs/RUNNING-MODELS.md`:
+with no arguments for the usage text). A sampler from its README
+(`examples/qwen3/README.md`):
 
 ```sh
 # Chat with a system prompt + sampling overrides
@@ -1374,11 +1378,11 @@ against another implementation — the verification religion of
    qwen2 pretokenizer splits `"I'll pay 42 euros!\n"` (§12.2's rules:
    contractions, one digit per chunk, punctuation absorbs trailing
    newlines). Check yourself with `--tokenize file.txt` and the tests in
-   `src/llm/tokenizer.zig:832-866`.
+   `src/llm/tokenizer.zig:1174-1209`.
 2. **Extend MiniBpe.** Add §12.2's GPT-2 byte→Unicode mapping to the
    course-code `MiniBpe` so it encodes arbitrary bytes (spaces become
    `Ġ`-prefixed symbols); test on `"hi hi"` with your own vocabulary.
-   `gpt2ByteToUnicode` (`tokenizer.zig:497`) is your reference.
+   `gpt2ByteToUnicode` (`tokenizer.zig:591`) is your reference.
 3. **Feel the cache.** Write a small runner (crib the model-loading
    prologue from `examples/qwen3/main.zig`) that generates 64 tokens twice: once
    with `Model.generate` (KV-cached), once by calling `forwardLastLogits`

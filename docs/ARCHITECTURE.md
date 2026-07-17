@@ -14,7 +14,8 @@ inference stack, written in Zig 0.16. It is multi-dtype: bool/integer scalar
 dtypes, `f16`/`bf16`/`f32`/`f64`, and the GGML block-quantized formats (see
 `src/dtype.zig`). The public API is the tagged autograd `Tensor` facade
 exposed from `src/fucina.zig`. Model families (Qwen3 dense + MoE, Qwen3.5,
-Gemma 4, DiffusionGemma, Parakeet ASR, plus the OmniVoice TTS and NAM ports in
+Gemma 4, DiffusionGemma, DeepSeek V2 + V4 Flash, GLM-4.5, Inkling, Parakeet
+ASR, plus the OmniVoice TTS, LocateAnything VLM, and NAM ports in
 `examples/`) run from GGUF weights through the sibling `fucina_llm` module
 (`src/llm.zig`) and the example runners. Execution is CPU-first with optional
 Metal/CUDA callable-accelerator offload (`-Dgpu=metal|cuda`,
@@ -36,7 +37,7 @@ Top-down; a band may depend only on bands at or below it:
 | apps | `examples/**`, `tools/**`, `bench/**`, `src/bench_raw.zig`, `src/x86dot_check.zig` |
 | llm | `src/llm.zig`, `src/llm/**` (the `fucina_llm` module) |
 | facade | `src/fucina.zig` (the `fucina` module root) |
-| ag + training/serialization | `src/ag.zig`, `src/ag/**`, `src/optim.zig`, `src/es.zig`, `src/gguf.zig`, `src/lora.zig`, `src/safetensors.zig`, `src/state_dict.zig`, `src/training_checkpoint.zig`, `src/param_registry.zig` |
+| ag + training/serialization | `src/ag.zig`, `src/ag/**`, `src/optim.zig`, `src/es.zig`, `src/ptqtp.zig`, `src/gguf.zig`, `src/lora.zig`, `src/safetensors.zig`, `src/state_dict.zig`, `src/training_checkpoint.zig`, `src/param_registry.zig` |
 | tagged | `src/tagged.zig` (tag-ops library) |
 | exec | `src/exec.zig`, `src/exec/**` (eager runtime) |
 | backend | `src/backend.zig`, `src/backend/**` (numeric kernels) |
@@ -52,7 +53,9 @@ Top-down; a band may depend only on bands at or below it:
 - `Tensor`: the public tagged/autograd tensor constructor from `src/ag.zig`.
 - `ExecContext` (plus `RhsLifetime`, the MoE/`RouterTopKOptions`/`Reduction`/
   `CrossEntropyOptions`/`StandardizeOptions` option types, `UnaryOp`, and
-  `RopeMode`/`RopeTable`) from `src/exec.zig`.
+  `RopeMode`/`RopeTable`) from `src/exec.zig`, plus the `expert_store`
+  disk-streamed MoE expert tier and the `fakequant` low-precision grid
+  round-trips.
 - `DType` and the GGML block types (`BlockQ4_K`, `BlockIQ2_XS`, ...) from
   `src/dtype.zig`, plus the quantized RHS container types from the backend.
 - `Backend`, `BackendKind`, and the backend build/runtime constants
@@ -64,7 +67,7 @@ Top-down; a band may depend only on bands at or below it:
   binary `Tensor.einsum`).
 - Training/persistence namespaces: `optim`, `es`, `lora`, `gguf`, `rng`,
   `parallel`, `ParamRegistry`, `state_dict`, `safetensors`,
-  `training_checkpoint`.
+  `training_checkpoint`, plus the `ptqtp` trit-plane PTQ namespace.
 
 The root intentionally does not export the raw tensor or raw autograd
 internals. A comptime guard in `src/fucina.zig` makes re-exporting `RawTensor`
@@ -148,7 +151,9 @@ Execution runtime:
   graph stays a strict DAG.
 - `src/exec/buffer_pool.zig`: the reusable transient-buffer pool leaf.
 - `src/exec/` domain modules: `attention.zig`, `matmul.zig`,
-  `quant_matmul.zig`, `moe.zig`, `moe_chain.zig`, `elementwise.zig`,
+  `quant_matmul.zig`, `moe.zig`, `moe_chain.zig`, `expert_store.zig` (the
+  disk-streamed MoE expert tier: pinned set + per-layer LRU + `pread` from
+  the GGUF), `fakequant.zig` (FP8/FP4/f16 grid round-trips), `elementwise.zig`,
   `row_ops.zig`, `norm.zig`, `softmax.zig`, `loss.zig`, `reduce.zig`,
   `topk.zig`, `stats.zig`, `gather_scatter.zig`, `rope.zig`, `convert.zig`,
   `conv.zig`, `pool.zig`, `shape.zig`. These are not public API; `src/exec.zig` remains
@@ -209,7 +214,7 @@ Autograd:
   `src/ag/gradcheck.zig`: the finite-difference gradient oracle.
 
 Training and persistence (see *Training And Persistence*): `src/optim.zig`,
-`src/es.zig`, `src/param_registry.zig`, `src/state_dict.zig`,
+`src/es.zig`, `src/ptqtp.zig`, `src/param_registry.zig`, `src/state_dict.zig`,
 `src/safetensors.zig`, `src/training_checkpoint.zig`, `src/lora.zig`,
 `src/gguf.zig`.
 
@@ -230,8 +235,8 @@ The intended production dependency direction inside the `fucina` module:
 fucina.zig
   -> ag.zig, exec.zig, backend.zig, tagged.zig, tensor.zig, storage.zig,
      dtype.zig, thread.zig, and the training/persistence modules (gguf,
-     optim, lora, rng, parallel, param_registry, state_dict, safetensors,
-     training_checkpoint)
+     optim, es, ptqtp, lora, rng, parallel, param_registry, state_dict,
+     safetensors, training_checkpoint)
 
 ag/tensor.zig
   -> ag/{core,backward,control}.zig, tags.zig, tagged.zig, exec.zig,
@@ -277,7 +282,7 @@ Enforcement:
   edges. Current output:
 
   ```text
-  production import graph: 105 files, 408 edges, 0 SCCs
+  production import graph: 135 files, 531 edges, 0 SCCs
   ```
 
 - The direction bands in the *Layer Stack* table are additionally checked
@@ -558,14 +563,24 @@ subdirectories and are exposed as namespaces:
 - `llm.qwen3.{model,train}` — Qwen3 dense/MoE inference + LoRA fine-tuning;
   `forwardStepBatch` is the batch-N lockstep decode entry (one m=N weight
   pass over N per-stream KV caches).
-- `llm.qwen35.model` — Qwen3.5 Gated-DeltaNet hybrid.
+- `llm.qwen35.{model,chat}` — Qwen3.5/Qwen3.6 Gated-DeltaNet hybrid plus its
+  ChatML chat/generation engine.
 - `llm.gemma.{gemma4,gemma4_train,moe,moe_route,moe_route_tensor}` — Gemma 4
   text + MoE; the gemma MoE engines reuse `ExecContext.moe_chain`.
 - `llm.diffusion_gemma.model` — block text-diffusion on the gemma4 backbone.
+- `llm.deepseek2.model` — DeepSeek-V2 family (MLA + MoE).
+- `llm.deepseek4.model` — DeepSeek V4 Flash (CSA/HCA attention + streamed
+  experts via `expert_store`).
+- `llm.glm4moe.model` — GLM-4.5 family, with native multi-token-prediction
+  speculative decode.
+- `llm.inkling.{model,mmproj,chat}` — Inkling hybrid SWA/global decoder with
+  banded relative-position bias, plus the image/audio mmproj towers and chat
+  glue.
 - `llm.parakeet.*` — NeMo FastConformer ASR (frontend → subsampling →
   encoder → CTC/TDT decoder → transcription/streaming).
-- `llm.speculative.{core,sam_index,recycling,cascade}` — lossless
-  draft-model-free speculative decoding (see `SPECULATIVE.md`).
+- `llm.speculative.{core,sam_index,recycling,cascade,constrained}` — lossless
+  draft-model-free speculative decoding (see `SPECULATIVE.md`), including
+  grammar-constrained drafting.
 
 Generic helpers stay flat in `src/llm/`:
 
@@ -585,10 +600,19 @@ Generic helpers stay flat in `src/llm/`:
   with an explicit `ZeroPolicy` (families disagree on zero-valued keys on
   purpose), plus the comptime-generic `parallelLoadLayers`.
 - `kv_cache.zig`: f16-default KV cache (opt-in q8_0 as a capacity option);
-  `truncate` is the speculative rewind.
-- `tokenizer.zig` (byte-level BPE, token-ID-exact qwen2 pretokenizer),
-  `spm_tokenizer.zig` (Gemma SPM), `unicode_categories.zig` (generated
-  tables), `sampler.zig`.
+  `truncate` is the speculative rewind. `kv_persist.zig`: crash-safe
+  append-only KV-cache sidecar, so conversations reopen warm across process
+  restarts.
+- `cartridge.zig` / `cartridge_fleet.zig`: trainable KV-prefix cartridges and
+  per-document cartridge fleets (`CARTRIDGES.md`).
+- `engram.zig`: conditional n-gram memory — hashed suffix n-gram tables gated
+  into the residual stream of a frozen backbone (`ENGRAM.md`).
+- `logit_processor.zig` + `llguidance.zig`: the in-place logit-processing seam
+  and the vendored llguidance grammar/JSON-schema engine behind it
+  (`CONSTRAINED-DECODING.md`).
+- `tokenizer.zig` (byte-level BPE; token-ID-exact pretokenizer chunkers:
+  qwen2, qwen35, glm4, joyai), `spm_tokenizer.zig` (Gemma SPM),
+  `unicode_categories.zig` (generated tables), `sampler.zig`.
 - `data.zig`: SFT dataset/dataloader — `SftText` JSONL/static pairs,
   `encodePair` (template + tokenize + shift + mask), and a deterministic
   `Loader` whose `(seed, epoch) → permutation` mapping is a golden-pinned
@@ -601,8 +625,7 @@ Generic helpers stay flat in `src/llm/`:
   (combining `stop_sequences` with speculation is an init error, preserving
   the lossless one-draw contract). `sendBatch` runs lockstep batch-N decode
   over N sibling conversations sharing one model via `Model.forwardStepBatch`
-  (speculation excluded; ownership contract and measured results in
- ).
+  (speculation excluded; ownership contract in `REFERENCE.md`).
 
 ## Training And Persistence
 
@@ -632,6 +655,9 @@ Generic helpers stay flat in `src/llm/`:
 - `src/lora.zig`: `Adapter(in_tag, out_tag)` over frozen weights; named
   persistence; f32/f16 merge (the fine-tune → merge → quantize → serve loop
   is documented in `TRAINING.md`).
+- `src/ptqtp.zig`: post-training quantization to trit-planes — K ∈ {1,2,3}
+  ternary planes with per-group scales over packed TQ2_0 (`PTQTP.md`;
+  GGUF persistence in `src/llm/ptqtp_gguf.zig`).
 - `src/gguf.zig`: GGUF parser + writer (byte-verbatim metadata passthrough,
   llama.cpp-exact offsets; `encodeF32` is the writer-side quantize seam).
 
@@ -644,19 +670,24 @@ no `build.zig.zon`. The full step list and options live in `AGENTS.md`; the
 verification-relevant steps are:
 
 - `zig build test` (+ `-Dbackend=scalar`, `-Dblas=none`, optimize variants):
-  drives five test roots — `src/fucina.zig`, `src/llm.zig`,
-  `examples/nam/main.zig`, `examples/parakeet/main.zig`, `examples/omnivoice/main.zig`. Parity suites needing local model/reference assets are
-  env-gated (e.g. `OMNIVOICE_PARITY`) and skip by default.
+  drives nine test roots — `src/fucina.zig`, `src/llm.zig`, and the
+  `examples/{lmserve,nam,parakeet,omnivoice,locate_anything,facedetect,nanochat}/main.zig`
+  roots (`zig build test-fucina` runs the fucina root alone, the routine
+  `-Dbackend=scalar` leg). Parity suites needing local model/reference assets
+  are env-gated (e.g. `OMNIVOICE_PARITY`) and skip by default.
 - `zig build arch-check`: the production import-graph gate (see *Layering And
   Enforcement*).
 - `zig build x86dot-check`: runs the cross-ISA dot parity checker natively
   (ReleaseSafe, follows `-Dtarget`) and builds four compile-only legs
   (x86_64_v3 AVX2, alderlake AVX-VNNI, znver4 AVX512-VNNI, neoverse_v1
   smmla) to catch bit-rot of arms no local substrate can execute.
-- `zig build doc-check`: fails when `AGENTS.md`'s doc index names a root
-  `.md` that does not exist (`tools/check_doc_links.zig`).
-- The model runners (`qwen3`, `qwen35`, `gemma4`, `diffusion-gemma`,
-  `parakeet`, `omnivoice`, `nam`, `finetune`, `export-gguf`) double as
+- `zig build doc-check`: fails when `AGENTS.md`'s doc index names a `.md`
+  (root-level, `docs/<name>.md`, or `examples/<name>/README.md`) that does
+  not exist, and existence-checks the `examples/<name>/README.md` references
+  in `RUNNING-MODELS.md` the same way (`tools/check_doc_links.zig`).
+- The model runners (`qwen3`, `qwen35`, `gemma4`, `deepseek2`, `deepseek4`,
+  `glm4moe`, `inkling`, `diffusion-gemma`, `parakeet`, `omnivoice`,
+  `locate-anything`, `facedetect`, `nam`, `finetune`, `export-gguf`) double as
   parity/oracle harnesses; `bench*` steps are the perf protocol vehicles
   (`BENCHMARK.md`).
 

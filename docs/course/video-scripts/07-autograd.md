@@ -84,7 +84,7 @@ live tensors are the graph.
 (`grad`↔`grad`, `rule`↔`grad_fn`, `pending`↔`pending_grads`); then a brief
 cut to the drain at `src/ag/core.zig:273-277`
 (`fetchSub(1, .acq_rel)` … `return old == 1;`), then the Origins paragraph
-at `README.md:245-257` with "(AFAIK) Mainstream stacks…" visibly on screen.
+at `README.md:274-286` with "(AFAIK) Mainstream stacks…" visibly on screen.
 **Overlay:** `src/ag/core.zig — 733 lines incl. two in-file tests (wc -l,
 as counted today)` · `(AFAIK)` kept on screen with the mainstream contrast
 
@@ -97,7 +97,7 @@ no-op, and the whole graph stays alive until backward. There is no training
 engine — every differentiable op ends in finishOp, and training is literally
 one branch.
 **Visual:** Code shot: the exec-scope snippet with its explanatory comment
-at `README.md:43-53`; then `finishOp` at `src/ag/tensor.zig:5673-5690` with
+at `README.md:43-53`; then `finishOp` at `src/ag/tensor.zig:6291-6308` with
 the first line (`if (!wants_grad or !control.isGradEnabled()) return
 finishNoGrad(...)`) highlighted.
 **Overlay:** `"training and inference produce identical values" —
@@ -127,9 +127,9 @@ with chapter link `docs/course/07-autograd.md`.
 - **Repo code shots**:
   - `src/ag/core.zig:100-115` — `GradState` struct.
   - `src/ag/core.zig:273-277` — `finishGradContributionReady` drain.
-  - `src/ag/tensor.zig:5673-5690` — `finishOp`.
+  - `src/ag/tensor.zig:6291-6308` — `finishOp`.
   - `README.md:43-53` — exec-scope snippet with comment.
-  - `README.md:245-257` — Origins paragraph (keep "(AFAIK)" visible).
+  - `README.md:274-286` — Origins paragraph (keep "(AFAIK)" visible).
 - **Terminal recording**: assemble `scalar_autograd.zig` in a scratch
   directory by concatenating, verbatim, the chapter's fixed-engine block
   (`docs/course/07-autograd.md:230-294`) and the two passing tests
