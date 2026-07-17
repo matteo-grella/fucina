@@ -192,11 +192,12 @@ looking at:
   frequent early and sparse late.
 - **Cross-links are relative.** Chapters link to each other as sibling
   files, so the course reads the same on GitHub and in a local clone.
-- **Citations are pinned to a moment.** Every `path:line` reference in the
-  course was verified against the tree at commit `efd1ea3` (2026-07-12).
-  The library moves; line numbers drift first, then signatures. If the text
-  and the source ever disagree, **the source wins** — diff against that
-  commit to see what changed.
+- **Citations are pinned to a moment.** This edition of the course was
+  reconciled against the tree at commit `58383e3` (2026-07-17): every
+  `path:line` reference was verified there. The library moves; line
+  numbers drift first, then signatures. If the text and the source ever
+  disagree, **the source wins** — diff against that commit to see what
+  changed.
 
 Start with [Chapter 00 — Introduction: why deep learning in
 Zig?](00-introduction.md)
