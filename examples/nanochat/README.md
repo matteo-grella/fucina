@@ -145,8 +145,9 @@ $py $ex export-sft-mixture --split val   --out $out/sft_mixture_val.jsonl --max-
 | `sft_mixture_{train,val}.jsonl` | JSONL | `sft --mixture/--val-mixture` |
 
 The JSONL materializes the reference's deterministic mixture order (the
-`random.Random(42)` shuffle is baked in Python). Byte layouts are documented at
-their readers/writers in `tokenizer.zig` and `data.zig`; any corpus packed into
+`random.Random(42)` shuffle is baked in Python). Byte layouts are documented in
+[`FORMATS.md`](FORMATS.md) and at their readers/writers in `tokenizer.zig` and
+`data.zig`; any corpus packed into
 those layouts works — the exporter matters when reference-order reproducibility
 is the goal. The parity-oracle exports (encode/loader fixtures,
 model/optimizer dumps via `nanochat_dump.py`) are covered by the regen recipe in
