@@ -23,7 +23,9 @@ per-step loss/timing lines. Every run saves a checkpoint directory containing
 continues instead of restarting at pair 0).
 
 `--data PATH.jsonl` swaps in your own instruction/response pairs
-(`src/llm/data.zig`); `--verify-grads` replaces the training run with a
+(`src/llm/data.zig`; JSONL schema in
+[es_finetune's Custom-data section](../es_finetune/README.md#custom-data---data));
+`--verify-grads` replaces the training run with a
 quantitative gradient audit through the full production path (zero-structure
 at init, per-adapter grad-norm audit, first-order Taylor test, frozen-base
 ablation, held-out generalization).
@@ -42,6 +44,10 @@ takes a plain path, so rename or adjust as you like.
 ```sh
 mkdir -p models
 hf download unsloth/Qwen3-0.6B-GGUF Qwen3-0.6B-Q4_K_S.gguf --local-dir models
+
+# Merge base for step 2: neither repo ships a plain f16 — download the bf16
+# (works directly as the merge base, or transcode an f16 from it — note below)
+hf download unsloth/Qwen3-0.6B-GGUF Qwen3-0.6B-BF16.gguf --local-dir models
 ```
 
 The merge step additionally needs a float (f32/f16/bf16) base of the same
@@ -54,7 +60,8 @@ command is the f16 note in
 ### 1. Fine-tune
 
 ```sh
-# LoRA fine-tune a Qwen3 GGUF on CPU (built-in pirate-style SFT set; ~0.9 s/step on 0.6B)
+# LoRA fine-tune a Qwen3 GGUF on CPU (built-in pirate-style SFT set; ~0.9 s/step
+# on 0.6B, M1 Max; loss reaches ~2e-4 by step 30 — TRAINING.md §9)
 zig build finetune -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-Q4_K_S.gguf \
   --steps 30 --rank 8 --alpha 16 --save /tmp/qwen3-lora
 

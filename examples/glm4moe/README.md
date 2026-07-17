@@ -23,6 +23,26 @@ Model weights are not part of this repository. The command below uses the
 GLM-4.5-Air Q6_K split GGUF under `models/glm45-air/`; point the runner at
 part 1 — llama.cpp split GGUFs (`-00001-of-0000N`) load transparently.
 
+Weights:
+[`unsloth/GLM-4.5-Air-GGUF`](https://huggingface.co/unsloth/GLM-4.5-Air-GGUF)
+— llama.cpp conversions of GLM-4.5-Air; the `Q6_K/` folder holds the
+two-part split used below (49.7 GB + 49.3 GB, ~99 GB total), and the
+conversion keeps the `nextn` (MTP) layer that `--mtp` drafts with. The
+`hf` CLI comes from `pip install -U huggingface_hub`
+([Getting the weights](../../docs/RUNNING-MODELS.md#getting-the-weights)):
+
+```sh
+hf download unsloth/GLM-4.5-Air-GGUF \
+  Q6_K/GLM-4.5-Air-Q6_K-00001-of-00002.gguf \
+  Q6_K/GLM-4.5-Air-Q6_K-00002-of-00002.gguf \
+  --local-dir models/glm45-air
+mv models/glm45-air/Q6_K/*.gguf models/glm45-air/
+```
+
+Both parts must sit in the same directory. At ~99 GB the weights outsize
+a 64 GB machine's RAM — the run below streams the experts from disk
+(`--moe-stream`); see *Shared knobs*.
+
 ## Run
 
 ```sh
@@ -39,6 +59,10 @@ forward, near 0%, from a broken draft/verify loop, healthy 30–60%).
 The canonical GLM `[gMASK]<sop>` opening is added automatically; on a model
 without a `nextn` layer `--mtp` is ignored with a notice.
 
+`--mtp` is lossless by construction: the same prompt and `--gen` with and
+without `--mtp` must print identical `generated ids` and `text` lines —
+a quick end-to-end validation beyond the acceptance-rate print.
+
 Flags (first positional argument = model GGUF, required):
 
 | flag | meaning |
@@ -46,7 +70,7 @@ Flags (first positional argument = model GGUF, required):
 | `--prompt "..."` / `--prompt=...` | prompt text (default `The capital of France is`) |
 | `--gen N` / `--gen=N` | greedy tokens to generate, default 32 |
 | `--mtp` / `--mtp=depth` | native MTP speculative decoding; bare `--mtp` = depth 2, values above 2 clamp to 2 |
-| `--moe-stream` / `--moe-cache-mb=N` | streamed experts — see *Shared knobs* |
+| `--moe-stream` / `--moe-cache-mb=N` | streamed experts (`--moe-cache-mb=N` alone implies `--moe-stream`) — see *Shared knobs* |
 
 ## Shared knobs
 

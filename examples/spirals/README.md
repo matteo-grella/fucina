@@ -26,9 +26,11 @@ No weights, no flags:
 zig build spirals -Doptimize=ReleaseFast
 ```
 
-Each `[name]` block prints final loss/accuracy, the resume
-`max |delta param|` (must be `bit-exact`), and the from-checkpoint
-inference accuracy.
+Each `[name]` block prints final loss/accuracy and the resume
+`max |delta param|` (must be `bit-exact`); the five plain-optimizer blocks
+also print the from-checkpoint inference accuracy. The `adamw-groups` run
+stops at the resume proof — its point is that the schedule factor is a pure
+function of the step, so the composed set replays bit-exactly.
 
 ## Shared knobs
 

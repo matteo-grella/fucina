@@ -96,6 +96,10 @@ zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q4_K_S.gguf \
 `<prompt-token-ids>` is a positional comma-separated id list (default
 `151644,872,198,9707`); `--prompt` text works here too.
 
+The measurement protocol (matched `llama-bench` invocation, the
+prompt-length matrix, thermal discipline) is in
+[`docs/BENCHMARK.md`](../../docs/BENCHMARK.md).
+
 ## Parity oracles
 
 ```sh
@@ -114,6 +118,20 @@ ids and prints load/forward timing plus the top-5 logits — that is the path
 `--repeat`, `--profile`, `--logits-out` and `--compare-logits` serve.
 `--verify-cache N` cross-checks cached vs full attention over N steps.
 
+The reference side of the logit compare comes from the pinned llama.cpp
+checkout: `tools/fetch_refs.sh llama.cpp --build` clones it under `refs/`
+(gitignored) and builds the CPU-only binaries into
+`refs/llama.cpp/build-cpu/bin/` (`llama-debug` is an extra target:
+`cmake --build refs/llama.cpp/build-cpu --target llama-debug`). The
+dump/compare recipe — `llama-debug --save-logits` on the same token ids,
+then `--compare-logits` on the dump, with the expected-drift guidance for
+quantized formats — is in [`docs/BENCHMARK.md`](../../docs/BENCHMARK.md)
+under "Correctness check"; `tools/llama_logits.cpp` is the standalone
+last-token dumper compiled against a llama.cpp checkout (usage:
+`<model.gguf> <comma-ids> <out.bin>`). For `--tokenize`, the comparison
+target is `llama-tokenize --ids --no-escape` from the same build
+([`docs/SPECULATIVE.md`](../../docs/SPECULATIVE.md)).
+
 ## KV cache
 
 ```sh
@@ -128,7 +146,9 @@ conversations reopen warm across process restarts (default sidecar
 
 ## Flags
 
-Every value flag takes both `--flag value` and `--flag=value`.
+Every value flag takes both `--flag value` and `--flag=value`, except the
+MoE streaming knobs (`--moe-cache-mb`, `--moe-cache-slots`, `--moe-pin-mb`,
+`--moe-expert-top-p`), which are `=`-form only.
 
 Modes and generation:
 

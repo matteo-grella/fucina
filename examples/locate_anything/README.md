@@ -28,21 +28,43 @@ and the MTP box-decode heuristics.
 
 Model weights are not part of this repository. The GGUF uses the reference
 port's `locateanything.*` schema; build it with the reference's converter
-(both repos read the same file):
+(both repos read the same file). The two scripts run from the reference
+checkout and need `huggingface_hub`, `safetensors`, `gguf` and `numpy`
+(the reference's `scripts/requirements.txt` is the full superset):
 
 ```sh
 tools/fetch_refs.sh locate-anything.cpp     # clone + pin + init the ggml submodule
 cd refs/locate-anything.cpp
-python scripts/download_model.py            # HF checkpoint (bf16 safetensors)
-python scripts/convert_locateanything_to_gguf.py   # -> models/locate-anything-f32.gguf (~15 GB)
+python3 -m venv .venv && .venv/bin/pip install huggingface_hub safetensors gguf numpy
+.venv/bin/python scripts/download_model.py            # HF checkpoint (bf16 safetensors)
+.venv/bin/python scripts/convert_locateanything_to_gguf.py   # -> models/locate-anything-f32.gguf (~15 GB)
+```
+
+The converter writes `models/locate-anything-f32.gguf` inside
+`refs/locate-anything.cpp/`; the commands below assume repo-root `models/`
+(gitignored), so move it up or pass the full path:
+
+```sh
+mkdir -p ../../models && mv models/locate-anything-f32.gguf ../../models/
 ```
 
 Quantized variants (LM matmuls only; the ViT, projector, norms, biases and
 the two host-read f32 tensors stay f32) either come prebuilt from
 [mudler/locate-anything.cpp-gguf](https://huggingface.co/mudler/locate-anything.cpp-gguf)
-or are produced by the reference CLI:
+(the `hf` CLI comes from `pip install -U huggingface_hub`; see
+[`docs/RUNNING-MODELS.md`](../../docs/RUNNING-MODELS.md#getting-the-weights)):
 
 ```sh
+mkdir -p models
+hf download mudler/locate-anything.cpp-gguf locate-anything-q8_0.gguf --local-dir models
+```
+
+or are produced by the reference CLI, from the reference's stock cmake build
+(`locate-anything-cli` builds by default):
+
+```sh
+cmake -S refs/locate-anything.cpp -B refs/locate-anything.cpp/build
+cmake --build refs/locate-anything.cpp/build -j
 refs/locate-anything.cpp/build/examples/cli/locate-anything-cli \
     quantize models/locate-anything-f32.gguf models/locate-anything-q8_0.gguf q8_0
 ```
@@ -110,9 +132,23 @@ Gates: tokenizer cases and `prompt_ids` are token-ID-exact, `pixel_values`
 byte-exact, ViT/projector/LM tensors tight-f32 (max-abs, plus a
 relative-to-magnitude criterion for the deep pre-norm captures), the
 `slow`/`hybrid`/`fast` token streams exactly equal, and per-round MTP block
-logits toleranced. The dump is produced by `tools/ref-patches/la_dump.cpp`,
-an out-of-tree harness compiled against the stock pinned reference build —
-its header has the exact compile line and the dump layout.
+logits toleranced. `compare` also accepts `--mtp-rounds N` (default 12) to
+cap the per-round MTP block-logits gates.
+
+`dumps/fixture_dump.gguf` is not shipped. It is produced by
+`tools/ref-patches/la_dump.cpp`, an out-of-tree harness compiled against the
+stock pinned reference build (cmake, above) — its header has the exact
+compile line (macOS/Accelerate link line) and the dump layout. Image and
+prompt are pinned by
+`refs/locate-anything.cpp/tests/fixtures/fixture_spec.json`:
+
+```sh
+mkdir -p dumps
+/tmp/la_dump models/locate-anything-f32.gguf \
+    refs/locate-anything.cpp/tests/fixtures/parity_image.png \
+    'Locate all the instances that matches the following description: cat</c>remote.' \
+    dumps/fixture_dump.gguf
+```
 
 ## Performance
 
@@ -123,6 +159,12 @@ f32 and ~2.2–2.4x at q8_0 across all three modes with byte-identical
 detections; on an i9-13950HX (8 threads, P-cores, no BLAS on either side)
 ~1.2–1.4x across the same grid. Operate hybrid CPUs at their physical-core
 count; oversubscribing onto hyperthreads degrades Fucina's worker team.
+
+Build discipline (`-Doptimize`), BLAS, `-Dgpu=metal|cuda` offload, and the
+thread knob (default 8; lower at runtime with `FUCINA_MAX_THREADS=N`, raise
+above 8 only at build time with `-Dmax-threads=N`) are shared across all
+runners and documented in
+[`docs/RUNNING-MODELS.md`](../../docs/RUNNING-MODELS.md).
 
 ## Scope and known differences vs the reference
 

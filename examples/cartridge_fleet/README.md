@@ -41,6 +41,15 @@ Gemma-family weights are distributed under Google's Gemma Terms of Use. The
 the unsloth GGUF conversions were not gated at the time of writing, but the
 terms still apply to the weights either way.
 
+## Corpus layout
+
+Each `--docs` argument is one document (a text file, up to 16 MiB) or a
+directory: its top-level `.md` files become one document each, in sorted
+name order (other files and subdirectories are ignored). Manifest document
+names are the paths exactly as passed, so run from the repo root and keep
+the spellings stable across runs. The `--equiv` gate concatenates every
+document's tokens and needs at least `2*p + 2` of them.
+
 ## Walkthrough
 
 ### 1. Composition acceptance gate (~10 s)
@@ -110,6 +119,18 @@ zig build cartridge-fleet -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-f1
   --fleet /tmp/fleet-demo --ask "..." --oracle docs/TERNARY.md
 ```
 
+Resume runs pass the SAME `--docs` list (names match the manifest by exact
+string; order may differ) — training modes always reload the document
+texts:
+
+```sh
+zig build cartridge-fleet -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-f16.gguf \
+  --docs README.md --docs docs/TERNARY.md --docs docs/PTQTP.md --docs docs/SPECULATIVE.md \
+  --fleet /tmp/fleet-demo --resume --budget 3 --rotate-every 6 --rounds 24 --accum 4 --seed 7
+```
+
+The same command with `--rounds 0` rebuilds only the retrieval index.
+
 ### 5. Serve the fleet over HTTP
 
 Each request's user messages pick documents through the fleet's cosine
@@ -136,6 +157,19 @@ and re-prefills (`cached_tokens` = 0 that turn); default is fully sticky
 (selection pinned at conversation start), and a NEW conversation always
 re-retrieves. Size `--ctx` to include rag_docs x p prefix rows. `--fleet`
 excludes `--cartridge`/`--kv-cache-dir`.
+
+## Fleet directory layout
+
+`--fleet DIR` holds:
+
+| file | contents |
+| --- | --- |
+| `fleet.json` | manifest: `p`, `frozen_prefix`, `embed_chunk`, `embed_dim`, rounds so far, per-document name/token/step counts and file names |
+| `doc-NNN.safetensors` | document NNN's cartridge rows |
+| `doc-NNN.fza` | its Adam-moment snapshot (FZT1); a missing or rows-only artifact reloads with fresh moments |
+| `index.safetensors` | the centered, normalized chunk-embedding cosine index |
+
+Evict/reload through these files is bit-identical to staying resident.
 
 ## gemma fleets
 
@@ -168,6 +202,14 @@ zig build cartridge-fleet -Doptimize=ReleaseFast -- --model models/gemma-4-26B-A
 | `--rag-docs` / `--rag-chunks` | selection |
 | `--no-pack` | flat-memory per-conversation backward |
 | `--checkpoint` | per-layer recompute, qwen3: halves training peak RSS, byte-identical results; forces isolated visibility in fleet runs |
+
+Defaults follow the paper's recipe, re-calibrated to the CLI's demo
+batches (`docs/CARTRIDGES.md` "Learning rate vs batch size" — the paper's
+Adam lr 2e-2 is calibrated to 32×2048-token packed batches; the CLI ships
+2e-3): `--budget 4`, `--rotate-every 10`,
+`--evict-frac 0.5`, `--warmup 8`, `--p-iso 0.75`, `--distract-max 3`,
+`--rounds 20`, `--accum 4`, `--lr 2e-3`, `--embed-chunk 256`,
+`--rag-docs 2`, `--rag-chunks 8`.
 
 The CLI also accepts `--frozen N` and `--top-k N` (same meaning as the
 single-cartridge CLI) and `--suffix-max N` (the `--equiv` gate's suffix

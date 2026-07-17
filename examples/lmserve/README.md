@@ -32,6 +32,21 @@ Hugging Face are gated behind accepting those terms; the unsloth GGUF
 conversions were not gated at the time of writing, but the terms still apply
 to the weights either way.
 
+The other backends:
+
+- Qwen3 MoE 30B-A3B, Qwen3.5-0.8B, and DiffusionGemma: rows with
+  `hf download` commands in the same
+  [matrix](../../docs/RUNNING-MODELS.md#getting-the-weights).
+- Ternary-Bonsai-27B (qwen35 architecture, Apache-2.0):
+  `hf download prism-ml/Ternary-Bonsai-27B-gguf Ternary-Bonsai-27B-Q2_0.gguf --local-dir models`
+  — serving notes in [`../qwen35/README.md`](../qwen35/README.md).
+- Inkling: no practically sized GGUF exists — public releases run to
+  hundreds of GB (unsloth/inkling-GGUF UD-IQ1_S: 270 GB). The backend is exercised via
+  the parity harness in [`../inkling/README.md`](../inkling/README.md).
+- nanochat: nothing to download — `--nanochat` serves a checkpoint dir
+  (`model.safetensors` + `tokenizer.bin`) trained with the pipeline in
+  [`../nanochat/README.md`](../nanochat/README.md).
+
 ## Running
 
 ```sh
@@ -63,6 +78,27 @@ curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/
     "type":"object","properties":{"city":{"type":"string","maxLength":30},
     "population":{"type":"integer","maximum":99999999}},
     "required":["city","population"],"additionalProperties":false}}}}'
+```
+
+The stateless Responses dialect takes `input` (a string or typed message
+items) plus `instructions`:
+
+```sh
+curl -s http://127.0.0.1:8080/v1/responses -H 'Content-Type: application/json' -d '{
+  "input": "Hi!", "instructions": "Answer in one sentence."}'
+```
+
+Reasoning, per request (`reasoning.effort` in the responses dialect;
+rejected when the model has no toggleable reasoning channel):
+
+```sh
+curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "messages": [{"role":"user","content":"What is 17*23?"}], "reasoning_effort": "low"}'
+```
+
+```sh
+curl -s http://127.0.0.1:8080/v1/models   # the served model id
+curl -s http://127.0.0.1:8080/health
 ```
 
 The request's `model` field is accepted and ignored — one process serves one
@@ -102,7 +138,8 @@ model has no toggleable reasoning channel). qwen3 routes `<think>` text to
 ## Cartridge serving
 
 The qwen3/gemma4 backends serve trained KV-prefix cartridges — corpus
-knowledge with zero prompt tokens (`docs/CARTRIDGES.md`):
+knowledge with zero prompt tokens
+([`docs/CARTRIDGES.md`](../../docs/CARTRIDGES.md)):
 
 - `--cartridge F` preloads one cartridge (safetensors from `zig build
   cartridge`, see [`../cartridge/README.md`](../cartridge/README.md)) into
@@ -117,6 +154,13 @@ knowledge with zero prompt tokens (`docs/CARTRIDGES.md`):
   document decisively out-scores the selection (margin `--rag-margin`,
   default 0.05). gemma4 MoE GGUFs need `--experts=borrow`; excludes
   `--cartridge` and `--kv-cache-dir`.
+
+Both flags expect artifacts trained against the same model GGUF being
+served — KV geometry is probed at startup, so a mismatched file fails
+there, not mid-request. Size `--ctx` to include the prefix (fleet:
+`rag_docs × p` rows on top of the conversation). Training recipes:
+[`docs/CARTRIDGES.md`](../../docs/CARTRIDGES.md); full serving semantics:
+[`docs/LMSERVER.md`](../../docs/LMSERVER.md).
 
 ## Shared knobs
 

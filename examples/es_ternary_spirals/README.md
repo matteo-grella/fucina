@@ -31,11 +31,25 @@ zig build es-ternary-spirals -Doptimize=ReleaseFast -- [--iterations N] [--popul
     [--workers N] [--norm z_score|centered_ranks] [--reward acc|nll] [--dscale F] [--seed N] [--target F]
 ```
 
-Defaults: `--iterations 20000`, `--population 128`, `--sigma 0.05`,
+Defaults: `--iterations 20000`, `--population 128` (antithetic when even),
+`--sigma 0.05`,
 `--alpha 0.075`, `--flip-rate 0.002`, `--update-fraction 0.001`,
 `--update-decay 0`, `--workers 8`, `--norm z_score`, `--reward nll`
 (raw `-CE`; `acc` is the bounded composite kept for contrast — it stalls
 near 74% here), `--dscale 3`, `--seed 42`, `--target 0.95`.
+
+Quick sanity check (seconds-scale smoke of the full int8 ternary path —
+Q8_K activation rows, packed TQ2_0 matmuls, trit vote-and-threshold
+updates — without waiting for convergence; `--target 0` makes the
+verification bar vacuous so the run exits 0):
+
+```sh
+zig build es-ternary-spirals -Doptimize=ReleaseFast -- --iterations 250 --target 0
+```
+
+Expect the `before:` accuracy near chance (0.500), a single `iter   250`
+progress line (progress prints every 250 iterations), an `after` line
+reporting elapsed seconds and ms/iter, and the `PASS` summary.
 
 ## Shared knobs
 

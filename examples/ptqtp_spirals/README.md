@@ -36,6 +36,11 @@ zig build ptqtp-spirals -Doptimize=ReleaseFast -- [--steps N] [--seed N] [--targ
 Defaults: `--steps 3000` (stops early at 100% train accuracy), `--seed 42`,
 `--target 0.95`, `--lr 0.02`.
 
+A healthy run ends with a `PASS:` line (float 1.000 -> ptqtp-k2 holding accuracy
+on the deployed int8 path); the measured reference table for this exact demo is in
+[docs/PTQTP.md](../../docs/PTQTP.md) under **Measured** — single ternary planes
+collapse, the dual decomposition holds.
+
 ## Shared knobs
 
 The ReleaseFast/`-Dcpu` build discipline and global thread/BLAS knobs are

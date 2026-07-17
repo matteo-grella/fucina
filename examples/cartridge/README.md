@@ -25,16 +25,24 @@ per step and a `self-study: ... s/conversation` summary.
 ## Getting the weights
 
 Weights are not part of this repository. The walkthrough uses
-`Qwen3-0.6B-f16.gguf`; bf16 Qwen3-0.6B GGUFs come from
+`Qwen3-0.6B-f16.gguf`; neither
 [`bartowski/Qwen_Qwen3-0.6B-GGUF`](https://huggingface.co/bartowski/Qwen_Qwen3-0.6B-GGUF)
-or [`unsloth/Qwen3-0.6B-GGUF`](https://huggingface.co/unsloth/Qwen3-0.6B-GGUF)
-(see the weights table in [`docs/RUNNING-MODELS.md`](../../docs/RUNNING-MODELS.md)).
-If your source only ships bf16, transcode one locally:
+nor [`unsloth/Qwen3-0.6B-GGUF`](https://huggingface.co/unsloth/Qwen3-0.6B-GGUF)
+ships an f16, so download a bf16 and transcode it — the "f16 Qwen3" recipe
+from [`docs/RUNNING-MODELS.md`](../../docs/RUNNING-MODELS.md#getting-the-weights),
+made concrete (the `hf` CLI comes from `pip install -U huggingface_hub`):
 
 ```sh
-zig build export-gguf -Doptimize=ReleaseFast -- --from-gguf <src>.gguf \
+mkdir -p models
+hf download bartowski/Qwen_Qwen3-0.6B-GGUF Qwen_Qwen3-0.6B-bf16.gguf --local-dir models
+zig build export-gguf -Doptimize=ReleaseFast -- --from-gguf models/Qwen_Qwen3-0.6B-bf16.gguf \
   --out models/Qwen3-0.6B-f16.gguf --dtype f16
 ```
+
+unsloth's file is `Qwen3-0.6B-BF16.gguf` — same two commands, different
+names. The f16 base is the walkthrough's default (`--model` defaults to
+`models/Qwen3-0.6B-f16.gguf`); quantized GGUFs train cartridges too — the
+base stays frozen, and the gemma arm below runs on Q6_K.
 
 The gemma arm uses the quantized MoE GGUF:
 
@@ -47,6 +55,16 @@ Gemma-family weights are distributed under Google's Gemma Terms of Use. The
 `google/…` originals on Hugging Face are gated behind accepting those terms;
 the unsloth GGUF conversions were not gated at the time of writing, but the
 terms still apply to the weights either way.
+
+## Corpus files
+
+A corpus is plain text: any UTF-8 file works (the walkthrough uses the
+repository's own markdown), up to 16 MiB per file. `--corpus` repeats and
+also accepts a directory — its top-level `.md` files in sorted order, other
+entries ignored. Training and the `--equiv` gate need a corpus that
+tokenizes to at least `--p + 2` tokens (`--p` defaults to 512) and training
+additionally to at least `--chunk-min + 2`; anything shorter exits with
+`CorpusTooShort` — lower `--p`/`--chunk-min` for small documents.
 
 ## Walkthrough
 

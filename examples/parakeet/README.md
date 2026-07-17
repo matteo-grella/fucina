@@ -1,7 +1,7 @@
 # Parakeet — speech-to-text (NVIDIA NeMo FastConformer)
 
-Offline, streaming, and live-microphone transcription of 16 kHz mono WAV
-audio on the CPU.
+Offline, streaming, and live-microphone transcription of WAV audio on the
+CPU (any rate/channels — see [Audio input](#audio-input)).
 
 This example runs NVIDIA NeMo Parakeet FastConformer ASR models from GGUF:
 CTC, TDT, and hybrid TDT+CTC decoder heads, multilingual prompt-conditioned
@@ -19,6 +19,10 @@ Weights are not part of this repository.
 is one flat repo with every supported NVIDIA NeMo Parakeet model ×
 quantization (f16/q8_0/q6_k/q5_k/q4_k). Start with `tdt_ctc-110m-f16.gguf`
 (267 MB hybrid, fast) or `tdt-0.6b-v3-f16.gguf` (1.44 GB, multilingual).
+The `hf` CLI (from `pip install -U huggingface_hub`; shared download
+machinery in
+[`docs/RUNNING-MODELS.md`](../../docs/RUNNING-MODELS.md#getting-the-weights))
+fetches single files:
 
 ```sh
 mkdir -p models/parakeet
@@ -32,7 +36,42 @@ The streaming modes (`--stream`, `--mic`, `--mic-sim`, `--stream-bench`)
 need a model with `streaming.*` metadata — the runner errors otherwise. The
 models benchmarked for streaming in
 [`docs/BENCHMARK.md`](../../docs/BENCHMARK.md) are `realtime_eou-120m` and
-the multilingual `nemotron-0.6b`.
+the multilingual `nemotron-0.6b`. Their files in the same repo are
+`realtime_eou_120m-v1-f16.gguf` and `nemotron-3.5-asr-streaming-0.6b-f16.gguf`,
+with the same quantization ladder:
+
+```sh
+hf download mudler/parakeet-cpp-gguf realtime_eou_120m-v1-f16.gguf --local-dir models/parakeet
+```
+
+## Audio input
+
+Any RIFF WAV decodes: PCM 16/24/32-bit int or 32-bit IEEE float (incl.
+WAVE_FORMAT_EXTENSIBLE), any sample rate, any channel count. Multi-channel
+audio is downmixed by averaging and resampled to 16 kHz with the same
+linear resampler as parakeet.cpp (`load_audio_16k_mono`), so native 16 kHz
+mono is simply the no-resampling path. Other containers (MP3/FLAC/…) are
+not supported.
+
+The repository ships no audio. The pinned parity reference carries two
+16 kHz mono fixtures — `speech.wav` (7.435 s of speech, the fixture behind
+the parakeet rows in [`docs/BENCHMARK.md`](../../docs/BENCHMARK.md)) and
+`clip.wav` (2 s, stage-parity fixture; it decodes to an empty transcript,
+so use `speech.wav` when you want visible output):
+
+```sh
+tools/fetch_refs.sh parakeet.cpp
+# -> refs/parakeet.cpp/tests/fixtures/{clip,speech}.wav  (refs/ is gitignored)
+```
+
+Smallest end-to-end run (model from above + fetched fixture; prints the
+transcript on stdout):
+
+```sh
+zig build parakeet -Doptimize=ReleaseFast -- \
+  --model models/parakeet/tdt_ctc-110m-f16.gguf \
+  --audio refs/parakeet.cpp/tests/fixtures/speech.wav --transcribe
+```
 
 ## CLI
 
@@ -69,7 +108,7 @@ Running with only `--model` prints the config + tensor summary.
 | flag | meaning |
 | --- | --- |
 | `--model <path>` | parakeet GGUF (required) |
-| `--audio <path>` | 16 kHz mono WAV to transcribe |
+| `--audio <path>` | WAV to transcribe (see [Audio input](#audio-input)) |
 | `--transcribe` | offline transcription of `--audio` |
 | `--stream` | streaming pipeline (cache-aware chunked encode) over `--audio` |
 | `--manifest <file>` | batch transcription: one audio path per line |
@@ -94,6 +133,12 @@ is mechanically enforcing; regenerating the reference dumps needs the
 out-of-tree instrumentation patch (`tools/fetch_refs.sh --patch
 parakeet.cpp`).
 
+`--manifest` lines are trimmed; blank lines and `#` comments are skipped,
+and a line starting with `{` is parsed as a NeMo-style JSONL entry (its
+`"audio_filepath"` value is used). Each file's output honors
+`--json`/`--timestamps`, is preceded by a `# <path>` header, and is
+identical to transcribing that file singly.
+
 ## Live microphone: `-Dparakeet-mic`
 
 `--mic` is compiled out of the default build. Build with `-Dparakeet-mic` to
@@ -106,6 +151,13 @@ frameworks; on other platforms miniaudio dlopens its backend at runtime.
 `--mic` also requires a streaming-capable model. `--mic-sim` runs the same
 incremental driver over `--audio` without any capture hardware and needs no
 build option.
+
+`--mic` captures from the first capture device at 16 kHz for a fixed 20 s
+window, reprinting the partial transcript as tokens arrive, then finalizing
+and exiting. On macOS the microphone permission is attributed to your
+**terminal app** — a denied permission yields silence with no error (check
+System Settings → Privacy → Microphone); the [NAM example](../nam/README.md)
+has the same note for the same capture stack.
 
 ## Performance
 

@@ -17,6 +17,9 @@ header).
 **Self-verifying:** exits nonzero unless the trained network reaches
 `--target` accuracy (default 0.90) on the training set — chance is 0.50.
 
+The same trainer fine-tunes a real LLM gradient-free:
+[`../es_finetune`](../es_finetune/README.md).
+
 ```sh
 zig build es-spirals -Doptimize=ReleaseFast
 # all knobs:
@@ -29,7 +32,23 @@ Defaults: `--iterations 15000`, `--population 128` (antithetic when even),
 `--target 0.9`. z-score is the deliberate default: with a bounded
 well-behaved reward its magnitude information converges where
 `centered_ranks` stalls — pick the shaping by reward regime
-(docs/TRAINING.md, section 13).
+([docs/TRAINING.md](../../docs/TRAINING.md) §13).
+
+## Quick sanity check
+
+The run is deterministic per `--seed`, so a shorter run is a prefix of the
+default one; the default seed sits at 100% train accuracy from ~iteration
+6500, so about half the default iteration budget already clears the 0.90
+gate:
+
+```sh
+zig build es-spirals -Doptimize=ReleaseFast -- --iterations 7000
+```
+
+Expect a `before:` accuracy near chance, an `iter … accuracy … ce …`
+progress line every 500 iterations, and a final
+`PASS: gradient-free from-scratch training reached 100.0% (target 90.0%)`
+with exit code 0.
 
 ## Shared knobs
 

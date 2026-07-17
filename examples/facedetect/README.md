@@ -23,6 +23,18 @@ and place (or symlink) them under `models/`:
 - `buffalo_l.gguf` — detector + recognizer + genderage + anti-spoof,
 - `landmarks-2d106-1k3d68.gguf` — the dense-landmark heads.
 
+```sh
+hf download mudler/face-detect-gguf buffalo_l.gguf --local-dir models
+hf download mudler/face-detect-gguf landmarks-2d106-1k3d68.gguf --local-dir models
+```
+
+(`hf` comes from `pip install -U huggingface_hub` — see
+[docs/RUNNING-MODELS.md](../../docs/RUNNING-MODELS.md#getting-the-weights).)
+Run commands from the repo root; the CLI examples below and the test suite
+both resolve `models/` relative to it. The model-dependent parity tests
+skip when the GGUFs are absent — a green `zig build test` without them has
+not exercised the parity gates.
+
 The insightface model weights carry their own (non-commercial) license
 terms — see `docs/THIRD-PARTY-NOTICES.md`.
 
@@ -48,9 +60,19 @@ zig build facedetect -Doptimize=ReleaseFast -- analyze --model models/buffalo_l.
 zig build facedetect -Doptimize=ReleaseFast -- bench --model models/buffalo_l.gguf --input face.png --mode pipeline|recognizer|detect|analyze --n 20
 ```
 
+No photos needed for a first run — `goldens/` ships the reference
+fixtures' decoded pixels (`align-src-{a,b,c}.bin`) as FDR1, which the CLI
+reads directly:
+
+```sh
+zig build facedetect -Doptimize=ReleaseFast -- detect --model models/buffalo_l.gguf --input examples/facedetect/goldens/align-src-a.bin --json
+zig build facedetect -Doptimize=ReleaseFast -- verify --model models/buffalo_l.gguf --a examples/facedetect/goldens/align-src-a.bin --b examples/facedetect/goldens/align-src-b.bin
+```
+
 Notes:
 
-- **Inputs** are PNG or FDR1 (a raw-pixel dump format, magic `FDR1`; the
+- **Inputs** are PNG (8-bit, non-interlaced, grayscale/RGB/RGBA — palette
+  PNGs are not decoded) or FDR1 (a raw-pixel dump format, magic `FDR1`; the
   goldens use it to pin reference-decoded pixels). JPEG is not decoded —
   convert first (`sips -s format png face.jpg --out face.png`).
 - `--threads N` caps the worker team (default: `min(cores, 8)`, the same
@@ -58,6 +80,11 @@ Notes:
 - `bench --mode recognizer` expects a pre-aligned 112×112 crop as input
   (e.g. `examples/facedetect/goldens/crop-a.bin`), mirroring the reference's
   protocol; the other modes take a full source image.
+- The dense-landmark nets (2d106det / 1k3d68) are exercised by the parity
+  gates under `zig build test` (GGUF graph replay vs `goldens/lm-*` crops
+  and points; skipped when `models/landmarks-2d106-1k3d68.gguf` is absent).
+  The `landmarks` CLI subcommand is not wired end-to-end and prints a
+  not-implemented notice.
 
 ## Structure
 

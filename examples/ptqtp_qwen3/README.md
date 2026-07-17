@@ -25,8 +25,8 @@ If your source only ships bf16 and you want f16, transcode locally:
 ## CLI
 
 ```sh
-zig build ptqtp-qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-f16.gguf --nll refs/wiki.txt
-zig build ptqtp-qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q4_K_M.gguf --nll refs/wiki.txt
+zig build ptqtp-qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-f16.gguf --nll docs/REFERENCE.md
+zig build ptqtp-qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q4_K_M.gguf --nll docs/REFERENCE.md
 zig build ptqtp-qwen3 -- models/Qwen3-0.6B-f16.gguf --planes 0   # undecorated baseline only
 zig build ptqtp-qwen3 -Doptimize=ReleaseFast -- models/Qwen3-1.7B-BF16.gguf --planes 3 --save models/qwen3-1.7b-ptqtp-k3.gguf
 ```
@@ -46,6 +46,31 @@ once: the saved file loads through the ordinary qwen3 loaders — this
 example, the chat CLI, speculation — with plane pair-detection, no
 re-decoration. Loading a saved file here with `--planes 0 --nll FILE`
 reproduces the decorated "nll after" exactly.
+
+## Quick run
+
+The Q8_0 file downloaded above works as-is (the method is source-agnostic),
+and any plain-text file serves as the NLL text — a tracked repo file avoids
+extra downloads:
+
+```sh
+zig build ptqtp-qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --nll docs/REFERENCE.md
+```
+
+Output, in order: a `loaded …` line (layers, hidden size, vocab, load
+seconds); `nll before: … (ppl …) over 512 supervised tokens`; one
+decoration summary (`decorated N linears … in … s: …M weights -> … MiB
+packed …, rms rel err …, unconverged groups …/…`); `nll after: …` on the
+same tokens; the greedy completion for `--prompt`; and prefill ms +
+decode tok/s. Decoration takes seconds at 0.6B, ~90 s at 1.7B K=3. With
+`--planes 0` (and no `--head-planes`) only the `nll before` line prints —
+that is the line that reproduces a saved file's decorated `nll after`.
+
+Absolute NLL depends on the chosen text file; the before/after delta over
+identical tokens is the signal. The recorded before/after perplexity
+ladder per source dtype and plane count — including the from-Q4_K_M
+graceful-degradation figures — is in [docs/PTQTP.md](../../docs/PTQTP.md)
+§Measured.
 
 ## Shared knobs
 

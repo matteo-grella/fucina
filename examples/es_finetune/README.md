@@ -22,7 +22,8 @@ reward statistics.
 - `full`: perturbs every resident float weight of the base model
   (embeddings, projections, norms) — the paper's full-parameter setting.
   Requires an f32/f16/bf16 GGUF: quantized blocks cannot take gaussian
-  noise.
+  noise. Dense models only — MoE bases are rejected
+  (`error.MoeUnsupported`).
 
 ## Rewards (`--reward`)
 
@@ -42,6 +43,29 @@ reward statistics.
 Every population member scores the same per-iteration sample batch
 (`--batch`); member evaluation runs in place (perturb → score → restore), so
 one model instance serves the whole population.
+
+## Custom data (`--data`)
+
+All three rewards read the same JSONL pairs — there is no separate reward
+dataset. One JSON object per line, string keys `instruction` and `response`
+(blank lines skipped, a malformed line is a loud error with its line number;
+`src/llm/data.zig`):
+
+```json
+{"instruction": "What is the capital of France?", "response": "Ahoy! The capital of France be Paris, matey."}
+```
+
+`acc`/`nll` teacher-force the encoded pair, truncated to `--seq-max` input
+positions: the prompt must leave room for at least one supervised response
+token (a pair whose prompt fills the cap is a loud error), and response
+tokens past the cap drop out of the score. `rule` generates from the prompt
+and scores against the gold `response`, so it additionally needs:
+
+- `--format-prefix`/`--format-suffix` matching your dataset's response
+  envelope — the defaults are the pirate set's `"Ahoy!"`/`"matey."`. An
+  empty string (`--format-prefix=`) disables that half of the format term.
+- `--max-new` covering the gold response length (default 20 tokens), or
+  unigram-F1 recall is capped by the generation budget.
 
 ## Commands
 
@@ -113,12 +137,26 @@ Same sources as `finetune`:
 docs/RUNNING-MODELS.md. `--mode lora` runs on any Qwen3 dense GGUF
 (quantized included); `--mode full` needs a float GGUF such as
 `Qwen3-0.6B-f16.gguf` — if your source only ships bf16, transcode one
-locally with the f16 note in that section.
+locally with the f16 note in that section. The default model in one line
+(`hf` comes from `pip install -U huggingface_hub`):
+
+```sh
+mkdir -p models
+hf download unsloth/Qwen3-0.6B-GGUF Qwen3-0.6B-Q4_K_S.gguf --local-dir models
+```
 
 ## Further reading
 
 - [docs/TRAINING.md](../../docs/TRAINING.md) §13 — evolution strategies: the
   stability analysis behind the reward/norm choices and AWD.
+- [docs/TRAINING.md](../../docs/TRAINING.md) §13 also records measured
+  per-iteration costs (M1 Max, Qwen3-0.6B, ReleaseFast): lora + `nll`
+  ≈ 0.9 s per member eval — population 8 × batch 5 ≈ 7–10 s/iteration
+  (`acc` is one forward per sample like `nll`); full mode ≈ 30 s/iteration
+  at population 4, batch 1; `rule` is generation-bound. ES needs many more
+  iterations than backprop — the paper runs 300–500 at population 30 — so
+  treat the demo defaults as a mechanism showcase, not a convergence
+  recipe.
 
 ## Shared knobs
 

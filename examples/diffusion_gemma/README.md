@@ -49,6 +49,11 @@ zig build diffusion-gemma -Doptimize=ReleaseFast -- models/diffusiongemma-26B-A4
 # Longer multi-block generation (each 256-token canvas is re-encoded into the KV cache)
 zig build diffusion-gemma -Doptimize=ReleaseFast -- models/diffusiongemma-26B-A4B-it-Q6_K.gguf \
   --chat "Write a 400-word short story about a lighthouse keeper." --max 512 --seed 7
+
+# Live-view knobs: redraw every 4th denoising step (all steps still compute;
+# the first always draws). H̄ in the status line is the mean canvas entropy.
+zig build diffusion-gemma -Doptimize=ReleaseFast -- models/diffusiongemma-26B-A4B-it-Q6_K.gguf \
+  --chat "Why is the sky blue? Answer in two sentences." --visual-interval 4
 ```
 
 ## Sampler knobs
@@ -61,10 +66,17 @@ zig build diffusion-gemma -Doptimize=ReleaseFast -- models/diffusiongemma-26B-A4
 # Disable self-conditioning (slightly cheaper, usually worse convergence)
 zig build diffusion-gemma -Doptimize=ReleaseFast -- models/diffusiongemma-26B-A4B-it-Q6_K.gguf \
   --chat "..." --no-sc
+
+# Adaptive stop: a block finalizes once the argmax canvas has held stable for
+# --stability N consecutive steps AND mean entropy (the H̄ in the status line)
+# has dropped below --confidence F (--info prints the model's effective
+# defaults). Lower --confidence / raise --stability to keep denoising longer.
+zig build diffusion-gemma -Doptimize=ReleaseFast -- models/diffusiongemma-26B-A4B-it-Q6_K.gguf \
+  --chat "..." --stability 2 --confidence 0.001
 ```
 
-Other knobs: `--confidence F` and `--stability N` (the adaptive stop),
-`--system "..."`, `--think`.
+Other knobs: `--system "..."`, `--think` (opens the thought channel; off, the
+turn opener primes an empty one so the model answers directly).
 
 ## Zero-copy expert load (`--experts=borrow`)
 
@@ -84,6 +96,10 @@ zig build diffusion-gemma -Doptimize=ReleaseFast -- models/diffusiongemma-26B-A4
 # Raw-token block generation (no chat template)
 zig build diffusion-gemma -Doptimize=ReleaseFast -- models/diffusiongemma-26B-A4B-it-Q6_K.gguf \
   --gen 256 2,818,7217,7412
+
+# --gen leaves the inline denoising view OFF even on a TTY; --visual enables it
+zig build diffusion-gemma -Doptimize=ReleaseFast -- models/diffusiongemma-26B-A4B-it-Q6_K.gguf \
+  --gen 256 2,818,7217,7412 --visual
 
 # Config/tokenizer info without loading weights
 zig build diffusion-gemma -Doptimize=ReleaseFast -- models/diffusiongemma-26B-A4B-it-Q6_K.gguf --info

@@ -65,21 +65,24 @@ Flags (first positional argument = model GGUF, required):
 
 ## Parity oracles
 
-Both replay fixtures shipped in the upstream `ds4` checkout
-(`refs/ds4/`, fetched by `tools/fetch_refs.sh`) and exit nonzero on
-failure.
+Both replay fixtures shipped in the upstream `ds4` checkout and exit
+nonzero on failure. Fetch the pinned checkout first — the fixtures are
+consumed in place:
 
 ```sh
-# Official-vector regression (--vectors-max-prompt raises the skip bar for
-# the ~3.5k-token fixtures; --prefill-chunk sizes the batched prefill):
+tools/fetch_refs.sh ds4
+
+# Official-vector regression. The default --vectors-max-prompt=256 runs
+# the three short fixtures and skips the two ~3.4–3.8k-token ones; raise
+# it to run all five (--prefill-chunk sizes the batched prefill):
 zig build deepseek4 -Doptimize=ReleaseFast -- <model.gguf> --moe-stream \
-  --vectors=path/to/ds4/tests/test-vectors/official
+  --vectors=refs/ds4/tests/test-vectors/official --vectors-max-prompt=4096
 
 # Implementation-level logit oracle: replay the upstream local-golden
-# fixture (top-64 ids + raw logits at a 4096-token frontier, captured from
-# a known-sane run of the same GGUF) with the upstream pass thresholds:
+# fixture (top-64 ids + raw logits at a 4096-token frontier) with the
+# upstream pass thresholds:
 zig build deepseek4 -Doptimize=ReleaseFast -- <model.gguf> --moe-stream \
-  --golden=path/to/ds4/tests/test-vectors/local-golden.vec
+  --golden=refs/ds4/tests/test-vectors/local-golden.vec
 ```
 
 `--vectors` runs every `*.official.json` fixture with the reference chat
@@ -93,6 +96,13 @@ steps in, but step 0 disagreeing means the forward is wrong.
 plain BPE, no BOS) and compares the frontier logits against the recorded
 top-64 with the upstream thresholds: top-1 exact, top-5 ≥ 4, top-20 ≥ 15,
 top-64 ≥ 40, top-20 max |Δ| ≤ 8.
+
+The fixture's prompt file resolves relative to the checkout root (two
+levels above the `.vec`), so point `--golden` at the file inside
+`refs/ds4/` — a copied `.vec` loses its prompt (`error: FileNotFound`).
+
+The checkout is never built here. Do not run its `make cpu` on macOS —
+it can kernel-panic the VM system (`tools/fetch_refs.sh` records this).
 
 ## Shared knobs
 

@@ -22,10 +22,14 @@ with them instead of BOS — GLM trunks degenerate without that opening.
 
 ## Getting the model
 
-Model weights are not part of this repository. The commands below use a
-GGUF conversion of DeepSeek-V2-Lite-Chat under `models/`; any V2/V3-family
-GGUF (V2-Lite, Moonlight-16B-A3B, glm-dsa) works — the runner takes a
-plain path.
+Model weights are not part of this repository, and no download source is
+pinned for this family — the GGUF is user-supplied. The commands below use
+a GGUF conversion of DeepSeek-V2-Lite-Chat under `models/`; any
+V2/V3-family GGUF (V2-Lite, Moonlight-16B-A3B, glm-dsa) works — the runner
+takes a plain path. The `hf` CLI download pattern
+(`hf download <repo> <file> --local-dir models`) and the per-family weight
+table live in
+[docs/RUNNING-MODELS.md — Getting the weights](../../docs/RUNNING-MODELS.md#getting-the-weights).
 
 ## Run
 

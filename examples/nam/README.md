@@ -407,3 +407,81 @@ in the code where it applies.
 `zig build nam -- --help` lists the full command set (profile capture, chains, MIDI
 mapping, loopback latency test). Accepted profiles cover the upstream `.nam` format
 range 0.5.0–0.7.x.
+
+## Getting the capture signal (`v3_0_0.wav`)
+
+The v3 capture file is the official NAM trainer's "input file" download — the
+upstream trainer GUI's *Download input file* button fetches it from
+<https://drive.google.com/file/d/1Pgf8PdE0rKB1TD4TRPKbpNo1ByR3IOm9/view?usp=drive_link>
+(source of truth: `refs/neural-amp-modeler/nam/train/gui/__init__.py`). Verify
+the bytes before a capture session:
+
+```sh
+md5 v3_0_0.wav        # macOS; Linux: md5sum
+# expect 36cd1af62985c2fac3e654333e36431e
+```
+
+Recognition is an MD5 of the exact file bytes (the same table upstream keeps in
+`nam/train/core.py`): a re-encoded or resampled copy still plays through your
+rig, but the trainer falls back to the generic-pair path — no automatic latency
+calibration, no v3 quality checks — with only an `unrecognized capture signal;
+assuming --latency 0` note. v1/v2/v4 capture files are deprecated upstream and
+refused outright.
+
+## Quick training smoke — no interface, no amp
+
+The whole train → export → validate loop runs offline: synthesize a noiseless,
+sample-aligned "reamp" by rendering a vendored test profile over the v3 capture
+file, then train against it.
+
+```sh
+fucina-nam render examples/nam/testdata/wavenet.nam v3_0_0.wav synth-reamp.wav
+fucina-nam train --input v3_0_0.wav --output synth-reamp.wav \
+    --out smoke.nam --spec tiny --epochs 20
+fucina-nam validate smoke.nam --input v3_0_0.wav --output synth-reamp.wav
+```
+
+`--spec tiny` is a small single-array spec for smoke tests and quick runs (it is
+not a production profile shape — real profiles use the default `standard`).
+Expect: a `v3 capture detected; latency -1 samples; replicate self-ESR 0.000000
+(ok)` line (−1 is the upstream 1-sample calibration safety factor on a
+zero-delay pair), a `training tiny spec: ...` header with the resolved recipe,
+one `epoch k/20: train loss ...  val ESR ...` line per epoch (improvements
+starred; wall time printed per line), and a final `validation ESR ... —
+<quality band>` before the export — the 20-epoch smoke lands in the "Not bad!"
+band in a couple of minutes on a laptop. Reruns with the same `--seed`
+(default 0) reproduce the loss trace exactly.
+
+## Training reference: input requirements and options
+
+**WAV requirements.** `train`, `validate`, `render`, and `profile` inputs must be
+**mono** (stereo files are refused with `NotMono` — export a mono track from the
+DAW, don't rely on a channel being picked). Accepted encodings: 16/24/32-bit
+integer PCM and 32-bit float. Training requires both files at exactly 48 kHz and
+at the same rate as each other; `profile` writes its reamp as 32-bit-float mono.
+
+**All `train` options** (`profile` forwards every flag it doesn't recognize —
+including `--out` — to `train`, so these work in both):
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--spec standard\|tiny\|a2\|a2-nano\|packed` | `standard` | model shape + recipe (`tiny` = smoke runs) |
+| `--init model.nam` | — | fine-tune a supported WaveNet instead of `--spec` |
+| `--epochs N` | 100 | training epochs (best epoch is exported) |
+| `--batch N` | 16 | batch size (gradient accumulation) |
+| `--ny N` | 8192 | target-window samples per example |
+| `--lr X` | 0.004 | initial Adam learning rate |
+| `--gamma X` | 0.993 (packed 0.994) | per-epoch exponential LR decay |
+| `--weight-decay X` | 0 (packed 3.17e-7) | Adam weight decay |
+| `--mrstft-weight X` | 0 (packed 0.0005) | MRSTFT loss weight |
+| `--seed N` | 0 | deterministic init + shuffle |
+| `--latency N` | v3: auto-calibrated; else 0 | manual x→y delay, in samples |
+| `--ignore-checks` | off | proceed past a failed v3 replicate check (recorded in the export metadata) |
+| `--name` `--modeled-by` `--gear-type` `--gear-make` `--gear-model` `--tone-type` | — | export metadata (`--gear-type` also drives the cab advisories) |
+
+**Test-plan prerequisites.** The upstream checkouts the [Test plan](#test-plan-beyond-zig-build-test)
+builds against are fetched pinned with:
+
+```sh
+tools/fetch_refs.sh NeuralAmpModelerCore neural-amp-modeler
+```

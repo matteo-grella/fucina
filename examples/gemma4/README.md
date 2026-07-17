@@ -85,6 +85,24 @@ The raw-ids logits path also takes `--compare-logits <ref.bin>` (compare
 against a raw little-endian f32 dump) and `--repeat R` (re-run the forward
 pass R times).
 
+Token ids for the raw-ids path come from the tokenizer itself: `--prompt
+"<text>" --tok-only` prints them (space-separated — join with commas for
+the positional list), BOS included per the GGUF's `add_bos_token` (the
+same `tokenizer.ggml.*` policy llama.cpp applies). With no positional list
+the default is `2,235280` (`<bos>` + one token). `--prompt "<text>"` also
+drives the bench/logits path directly: the encoded ids replace the
+positional list.
+
+The `--compare-logits` reference comes from
+[`tools/llama_logits.cpp`](../../tools/llama_logits.cpp), compiled against
+a local llama.cpp checkout (compile recipe in
+[`../qwen35/README.md`](../qwen35/README.md#parity-oracle)); it takes the
+same `<model.gguf> <comma-ids> <out.bin>` id format, so one id list drives
+both sides. Raw ids keep tokenizer differences out of model-logit
+comparisons — the parity ladder is in
+[`../../docs/PORTING.md`](../../docs/PORTING.md) (§5), measurement
+discipline in [`../../docs/BENCHMARK.md`](../../docs/BENCHMARK.md).
+
 ## Shared knobs
 
 Build discipline (`-Doptimize=ReleaseFast`, build on the machine you run on),

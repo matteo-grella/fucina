@@ -26,6 +26,11 @@ mkdir -p models
 hf download Qwen/Qwen3-0.6B-GGUF Qwen3-0.6B-Q8_0.gguf --local-dir models
 ```
 
+The Q8_0 download works as-is (pass `--model models/Qwen3-0.6B-Q8_0.gguf`
+to the commands below): the trainer keeps frozen weight memory quantized
+and trains only the graft (and LoRA) in f32. Dense Qwen3 only — MoE bases
+are rejected.
+
 If you want the default f16 file and your source only ships bf16, transcode
 one locally:
 
@@ -55,6 +60,13 @@ sorted), tokenized into a single flat stream and split into `--chunk`-token
 chunks; every 8th chunk is held out, and the stream must cover at least 4
 chunks. During training, held-out CE (bare arm vs grafted arm) prints every
 `--eval-every` steps.
+
+The example commands point `--corpus` at the repository's own `docs/`
+directory: a fresh clone needs no dataset download (its top-level `.md`
+files alone exceed the 4-chunk minimum; subdirectories such as
+`docs/course/` are not read). Any other plain-text file or directory
+works the same way — point `--corpus` at whatever text the graft should
+memorize.
 
 | flag | meaning |
 | --- | --- |
@@ -89,6 +101,16 @@ and attached (CE + greedy exact-match rate). Recall is the memory's actual
 job; CE on random text under-rewards it. All measurements are
 teacher-forced (held-out CE + next-token accuracy) — the go/no-go signal
 for the graft experiment; this driver has no serving integration.
+
+```sh
+# Recall probes (append to --train or --eval): N spans per source,
+# scored with the engram detached and attached
+zig build engram -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-Q8_0.gguf \
+    --corpus docs --eval --load graft.safetensors --probes 8
+```
+
+Probes need `--chunk` >= 48 (32-token prefix + 16-token target); with a
+smaller chunk they are skipped.
 
 ## Shared knobs
 
