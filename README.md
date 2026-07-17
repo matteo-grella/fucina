@@ -85,19 +85,20 @@ way to somewhere else.
 
 | Family | What it is |
 | --- | --- |
-| **Qwen3** dense (0.6B–8B) + MoE (30B-A3B, 235B-A22B) | chat / REPL / raw generation, lossless speculative decoding, batch-N multi-conversation decode, JSON-schema/grammar constrained output |
-| **DeepSeek V2/V3** (MLA) | multi-head latent attention with the compressed KV cache as the default; covers V2-Lite, Moonlight-16B-A3B, and GLM-5.2 (`glm-dsa`) checkpoints |
-| **GLM-4.5** family (MoE) | V3-style trunk plus the model's own `nextn` layer for lossless multi-token-prediction drafting |
-| **DeepSeek V4 Flash** 284B-A13B | hyper-connections trunk with native MTP speculative decoding; the 164.6 GB Q4K release decodes on a 64 GB machine |
-| **Gemma 4** 26B-A4B (MoE) | chat / REPL / speculative decoding, JSON-schema/grammar constrained output |
-| **Qwen3.5** 0.8B | hybrid Gated-DeltaNet architecture (conv + delta scan + gated attention) |
-| **DiffusionGemma** 26B-A4B | block text-diffusion decoding on the Gemma backbone |
-| **nanochat** | karpathy/nanochat ported whole: BPE tokenizer training, GPT pretraining, SFT, bits-per-byte eval, and chat — trained from scratch on CPU |
-| **Parakeet** (NVIDIA NeMo FastConformer) | speech-to-text: offline, streaming, and live microphone |
-| **OmniVoice** | MaskGIT text-to-speech with voice cloning (Higgs Audio v2 codec included) |
-| **LocateAnything-3B** | NVIDIA's open-vocabulary detection VLM: text-prompted labeled boxes, byte-compatible with the reference CLI |
-| **facedetect** (insightface buffalo_l) | face detection, recognition, gender/age, anti-spoofing, and dense landmarks |
-| **Neural Amp Modeler** | `.nam` guitar-amp profiles: run, train, export, live amp simulation |
+| **[Qwen3](examples/qwen3/README.md)** dense (0.6B–8B) + MoE (30B-A3B, 235B-A22B) | chat / REPL / raw generation, lossless speculative decoding, batch-N multi-conversation decode, JSON-schema/grammar constrained output |
+| **[DeepSeek V2/V3](examples/deepseek2/README.md)** (MLA) | multi-head latent attention with the compressed KV cache as the default; covers V2-Lite, Moonlight-16B-A3B, and GLM-5.2 (`glm-dsa`) checkpoints |
+| **[GLM-4.5](examples/glm4moe/README.md)** family (MoE) | V3-style trunk plus the model's own `nextn` layer for lossless multi-token-prediction drafting |
+| **[DeepSeek V4 Flash](examples/deepseek4/README.md)** 284B-A13B | hyper-connections trunk with native MTP speculative decoding; the 164.6 GB Q4K release decodes on a 64 GB machine |
+| **[Gemma 4](examples/gemma4/README.md)** 26B-A4B (MoE) | chat / REPL / speculative decoding, JSON-schema/grammar constrained output |
+| **[Qwen3.5](examples/qwen35/README.md)** 0.8B | hybrid Gated-DeltaNet architecture (conv + delta scan + gated attention) |
+| **[DiffusionGemma](examples/diffusion_gemma/README.md)** 26B-A4B | block text-diffusion decoding on the Gemma backbone |
+| **[Inkling](examples/inkling/README.md)** 975B-A41B (MoE) | hybrid local/global-attention multimodal decoder: text chat plus image and audio input towers |
+| **[nanochat](examples/nanochat/README.md)** | karpathy/nanochat ported whole: BPE tokenizer training, GPT pretraining, SFT, bits-per-byte eval, and chat — trained from scratch on CPU |
+| **[Parakeet](examples/parakeet/README.md)** (NVIDIA NeMo FastConformer) | speech-to-text: offline, streaming, and live microphone |
+| **[OmniVoice](examples/omnivoice/README.md)** | MaskGIT text-to-speech with voice cloning (Higgs Audio v2 codec included) |
+| **[LocateAnything-3B](examples/locate_anything/README.md)** | NVIDIA's open-vocabulary detection VLM: text-prompted labeled boxes, byte-compatible with the reference CLI |
+| **[facedetect](examples/facedetect/README.md)** (insightface buffalo_l) | face detection, recognition, gender/age, anti-spoofing, and dense landmarks |
+| **[Neural Amp Modeler](examples/nam/README.md)** | `.nam` guitar-amp profiles: run, train, export, live amp simulation |
 
 MoE models bigger than RAM are first-class: `--moe-stream` keeps only the
 dense weights resident and pages routed experts from disk through a
@@ -107,14 +108,21 @@ pinned-set + LRU tier, bit-identical to the resident path — that is how the
 Every family is validated against its reference implementation, and that
 discipline is the core of the project: token-ID-exact tokenizers vs
 `llama-tokenize`, logit-parity oracles vs llama.cpp, byte-exact quantization
-encoders vs ggml, byte-identical GGUF re-emit. `docs/RUNNING-MODELS.md` has
-copy-paste commands and verified download links for every model.
+encoders vs ggml, byte-identical GGUF re-emit. Each family's folder under
+`examples/` carries its own README with copy-paste commands;
+`docs/RUNNING-MODELS.md` is the index — verified weight downloads and
+licenses, plus the machinery shared across runners (expert streaming, GPU
+offload, global knobs).
 
 These applications live in `examples/` and each will eventually graduate
-into its own repository. Meanwhile they are here for convenience, and not by
-accident: with the Tensor core in place, Fucina grows and gets tested through real
-applications, so the runtime and the things built on it develop side by
-side. Research experiments that lack a reference oracle live on
+into its own repository. They use the library; they are not the library.
+Keeping them in-tree during this phase is deliberate: with the Tensor core
+in place, Fucina grows and gets tested through real applications, so the
+runtime and the things built on it develop side by side. The known debt of
+that convenience is that generic operations accumulate inside the examples
+— resamplers, spectrograms, reference-parity image resizing — and
+graduation starts with an audit of which of those are really tensor ops
+that belong in the core. Research experiments that lack a reference oracle live on
 `research/*` branches rather than `main` — currently `research/nla`, a
 natural-language autoencoder study (text→vector→text on a Qwen3 GGUF)
 built on the trainer's hidden-state seams.
@@ -227,7 +235,7 @@ issues.
 | `docs/ARCHITECTURE.md` | the actual source layout, layer by layer — start here |
 | `docs/REFERENCE.md` | the detailed API reference: the full public surface, exact semantics, machine-verified snippets |
 | `docs/course/` | *Forging Deep Learning in Zig* — a book-length course that teaches Zig and deep learning together by rebuilding this library's journey, from a dtype enum to a live guitar amp and a chatting transformer; per-chapter video scripts included |
-| `docs/RUNNING-MODELS.md` | copy-paste CLI commands + verified weight downloads for every model |
+| `docs/RUNNING-MODELS.md` | the model index: verified weight downloads + licenses, the example-to-README map, shared runner machinery |
 | `docs/LMSERVER.md` | the lmserve example: OpenAI API mapping tables, streaming contracts, server architecture |
 | `docs/BENCHMARK.md` | the measurement protocol and dated Fucina-vs-llama.cpp records, wins and losses |
 | `docs/TRAINING.md` | the training guide: autograd, optimizers, LoRA, evolution strategies, checkpoints, gradient verification |
