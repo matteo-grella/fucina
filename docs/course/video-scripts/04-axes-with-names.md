@@ -53,7 +53,7 @@ on the `forward` signature (line 31): `Tensor(.{ .batch, .in })` in,
 `Tensor(.{ .batch, .class })` out.
 
 **Overlay:** "`Tensor(.{ .batch, .in })` ≠ `Tensor(.{ .in, .batch })`" ·
-small credit line: "tagged-tensor approach inspired by ZML (README.md:377)".
+small credit line: "tagged-tensor approach inspired by ZML (README.md:386)".
 
 ### [1:00–1:32] Contraction by name
 
@@ -165,7 +165,7 @@ operation library".
   do not add any.
 - **Must not change:** the compiler trace text (verbatim or not at all); the
   claim pairing "names/ranks/dtype = comptime, sizes = runtime" (chapter
-  §4.4, quoting REFERENCE.md §3.1); the ZML credit (README.md:377–378) —
+  §4.4, quoting REFERENCE.md §3.1); the ZML credit (README.md:386–387) —
   it must appear on screen somewhere: keep it in the segment-2 overlay, or
   move it to the segment-6 end card if that overlay is reworked.
 - **Trim order if long:** first the segment-6 `@sizeOf` inset (keep the

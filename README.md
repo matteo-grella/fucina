@@ -298,6 +298,15 @@ have found that the best results come from a review loop where humans and
 multiple frontier models critique one another’s specifications and
 implementations, iterating toward a shared consensus.
 
+As for what gets built: right now the core — the tensor/autograd
+runtime — evolves in lockstep with the examples, growing exactly the ops
+each new port demands, and the examples follow a personal criterion
+rather than a roadmap: they are the deep-learning architectures I want
+to understand deeply, in the spirit of Feynman's "What I cannot create,
+I do not understand." The Neural Amp Modeler is the one that outgrew the
+criterion — I genuinely enjoy *using* it, which is its own small
+achievement: I almost never end up using the things I build.
+
 ## Contributing
 
 Contributions are welcome — see `CONTRIBUTING.md`: PRs are

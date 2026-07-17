@@ -73,7 +73,7 @@ reduction, permutation — is "made by tag identity, never by axis position at
 the call site" (docs/REFERENCE.md, §7 opening). The approach is credited:
 "the tagged-tensor approach (axis tags carried in the type, operands aligned
 by name) was inspired by [ZML](https://github.com/zml/zml)"
-(README.md:377–378). What Fucina adds is the particular split this chapter
+(README.md:386–387). What Fucina adds is the particular split this chapter
 teaches: names and ranks at compile time, sizes and layout at runtime.
 
 Two internal modules implement the machinery: `src/tags.zig` (a pure
