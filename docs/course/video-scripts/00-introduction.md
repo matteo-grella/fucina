@@ -23,6 +23,9 @@ function both infers and trains.
    to file (usually with line numbers) — and it ends at a real-time guitar
    amp and chatting language models you understand completely, plus the
    techniques that fine-tune them.
+4. These videos accompany the book-length written course in
+   `docs/course/` — one episode per chapter; the text is the authority
+   the citations point into.
 
 ## Script
 
@@ -100,7 +103,8 @@ amp" (guitar + waveform icon) and Ch 12 "A transformer from scratch"
 terminal recording of
 `zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf
 --chat "What is the capital of France?" --no-think` (the README quick
-start, `README.md:143-144`) printing its answer.
+start, `README.md:143-144`) printing its answer. Caption the clip:
+"Qwen3-0.6B — one example; the README table lists every family."
 
 **Overlay:** Ch 10: a neural guitar amp, live · Ch 12: a transformer,
 line by line · Ch 15: fine-tuning, four ways
@@ -125,18 +129,20 @@ source disagree, the source wins
 
 ### [2:40–3:00] Your forge
 
-**VO:** Everything here runs on the machine you already own. Clone the
-repo, run zig build test — no model files, no GPU, no cloud. When it
-passes, you hold a working forge. Next up: just enough Zig to read all of
-it.
+**VO:** Everything here runs locally, on the machine you already own.
+Clone the repo, run zig build test — the suite needs no downloads. When
+it passes, you hold a working forge. These videos accompany the written
+course in the repo — start at docs slash course. Next: just enough Zig
+to read all of it.
 
 **Visual:** Terminal recording: `git clone
 https://github.com/matteo-grella/fucina && cd fucina && zig build test`
 (the README quick start, `README.md:136-138`), ending on the passing test
-summary. Hold on an end card: series title + "Next: 01 — Just enough Zig".
+summary. Hold on an end card: series title + "the written course:
+`docs/course/` in the repo" + "Next: 01 — Just enough Zig".
 
-**Overlay:** `zig build test` — no model files needed · Next: 01 — Just
-enough Zig
+**Overlay:** runs locally · the written course: `docs/course/` · Next:
+01 — Just enough Zig
 
 ## Asset list
 
@@ -162,7 +168,10 @@ enough Zig
     vendor BLAS, graph compiler", only the top floor lit.
   - The course map: six parts, chapters 01→17, flags on Ch 10 (guitar amp)
     and Ch 12 (transformer).
-- **End card**: series title + "Next: 01 — Just enough Zig".
+- **End card**: series title + "the written course: `docs/course/` in the
+  repo" + "Next: 01 — Just enough Zig".
+- **Caption** (segment 4, over the terminal clip): "Qwen3-0.6B — one
+  example; the README table lists every family."
 
 ## Production notes
 
