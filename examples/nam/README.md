@@ -401,3 +401,9 @@ Captures with no `gear_type`, and pedal-only chains, are left alone.
 Module layout and the architecture split are described in the module doc comments of
 `examples/nam/*.zig`; every deliberate deviation from upstream is documented at the point
 in the code where it applies.
+
+## Command help and format range
+
+`zig build nam -- --help` lists the full command set (profile capture, chains, MIDI
+mapping, loopback latency test). Accepted profiles cover the upstream `.nam` format
+range 0.5.0–0.7.x.

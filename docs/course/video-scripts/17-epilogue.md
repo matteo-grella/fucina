@@ -56,7 +56,7 @@ through Part VI, each station labeled with its repo path (`src/dtype.zig`,
 `docs/`); (3) live-amp clip reused from Video 10 (guitar → USB interface →
 terminal, playing); (4) terminal recording: `zig build qwen3
 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --repl`
-(`docs/RUNNING-MODELS.md:66`), a short question streaming an answer;
+(`examples/qwen3/README.md`), a short question streaming an answer;
 (5) hard cut to a black card as the VO lands the last three sentences.
 
 **Overlay:** On the black card, the chapter's own line: "From a dtype enum
@@ -158,7 +158,7 @@ forge is yours." · "docs/course/17-epilogue.md".
 - `zig build spirals -Doptimize=ReleaseFast` — needs no downloads at all
   (§17.2, project 1); hold on the loss decreasing.
 - `zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf
-  --repl` — one short question, streamed answer (`docs/RUNNING-MODELS.md:66`).
+  --repl` — one short question, streamed answer (`examples/qwen3/README.md`).
 
 **External downloads (weights are NOT in the repo):**
 - `Qwen3-0.6B-Q8_0.gguf` from `Qwen/Qwen3-0.6B-GGUF` on Hugging Face

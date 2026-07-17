@@ -123,8 +123,8 @@ block inputs, recompute is pinned bitwise, and both CLIs expose it as
 
 The exact reproduction commands — with expected output and measured
 wall-clock (~3.5 min for the training command on an M1 Max; self-study
-itself is ~6 s/conversation) — live in `docs/RUNNING-MODELS.md`
-§"Cartridges: train a corpus into a reusable KV prefix". The short form:
+itself is ~6 s/conversation) — live in `examples/cartridge/README.md`
+(fleet run-book: `examples/cartridge_fleet/README.md`). The short form:
 
 ```bash
 # Zero-training acceptance gate on a real GGUF (bitwise at these shapes):

@@ -31,7 +31,7 @@ zig build cuda-check           # compile-only -Dgpu=cuda legs (x86_64-linux-gnu 
 zig build run                  # smoke example (examples/smoke.zig)
 zig build qwen3 -- <args>      # Qwen3 GGUF inference (examples/qwen3.zig; --spec/--spec-ref = lossless speculative decode, --tokenize = tokenizer-parity oracle)
 zig build gemma4 -- <args>     # Gemma 4 GGUF inference / logit-parity harness; --chat/--repl/--spec (examples/gemma4.zig)
-zig build qwen35 -- <args>     # Qwen3.5 (qwen35 hybrid Gated-DeltaNet) GGUF — loader/parity harness (examples/qwen35.zig; see docs/RUNNING-MODELS.md)
+zig build qwen35 -- <args>     # Qwen3.5 (qwen35 hybrid Gated-DeltaNet) GGUF — loader/parity harness (examples/qwen35.zig; see examples/qwen35/README.md)
 zig build deepseek2 -- <args>  # DeepSeek-V2 family (MLA + fine-grained MoE) GGUF inference (examples/deepseek2.zig)
 zig build glm4moe -- <args>    # GLM-4.5 family GGUF inference; --mtp = native multi-token-prediction speculative decode (examples/glm4moe.zig)
 zig build deepseek4 -- <args>  # DeepSeek V4 Flash GGUF inference (hyper-connections, compressed KV, streamed experts, MTP; examples/deepseek4.zig)
@@ -237,7 +237,7 @@ trained on older Zig:
 
 - `docs/ARCHITECTURE.md` — the current Zig architecture from the actual source layout. Start here for structure.
 - `docs/REFERENCE.md` — the detailed API reference: the full public surface with exact semantics (ownership, errors, defaults, thread-safety) and machine-verified example snippets for every important feature. Start here to *use* the library.
-- `docs/RUNNING-MODELS.md` — CLI cheat sheet: copy-paste commands to run every supported model (qwen3 chat/spec/bench, gemma4, diffusion-gemma, qwen35, omnivoice, the finetune→merge→serve loop, global knobs). Model weights are not bundled; it says where to get them.
+- `docs/RUNNING-MODELS.md` — model/example index: the verified weight-download table with license notes (weights are not bundled) plus the shared cross-runner machinery (MoE expert streaming, native MTP drafting, constrained decoding, GPU offload, global thread/BLAS knobs). Per-example getting-started guides live next to each entry file (e.g. `examples/qwen3/README.md`).
 - `docs/LMSERVER.md` — the lmserve example: OpenAI chat-completions + stateless responses mapping tables (honored/rejected/ignored), the accept-concurrently/generate-sequentially architecture, streaming contracts (SSE chunk + semantic-event skeletons), constrained-output plumbing, the per-model Backend matrix.
 - `docs/BENCHMARK.md` — benchmark protocol for the Qwen GGUF runner, plus dated measurement snapshots/addenda. Read before making perf claims.
 - `docs/GPU-OFFLOAD.md` — graphless eager GPU completion design: persistent queues/streams, storage fences/resources, transfer/device-buffer reuse, sync rules, gates, and Metal/CUDA measurements.

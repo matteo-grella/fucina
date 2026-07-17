@@ -3,8 +3,9 @@
 This document describes the current Zig implementation in this tree (`src/`,
 `examples/`, `bench/`, `tools/`). It is derived from the actual source layout
 and behavior, not from historical design notes. Structure lives here; the
-command cheat sheet and per-model recipes live in `AGENTS.md` and
-`RUNNING-MODELS.md`. Last reconciled against the tree: 2026-07-08.
+command cheat sheet lives in `AGENTS.md`, and per-model recipes live in the
+per-example `examples/<name>/README.md` guides indexed by
+`RUNNING-MODELS.md`. Last reconciled against the tree: 2026-07-17.
 
 ## Status
 

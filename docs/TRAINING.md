@@ -493,7 +493,8 @@ configs are rejected (`Error.MoeUnsupported`) in v1.
   runs store the dropout step counter, seed, LoRA config, and LR in
   `trainer_state.json`.
 
-**The walkthrough** (`examples/finetune.zig`):
+**The walkthrough** (`examples/finetune.zig`; getting-started README with
+the copy-paste commands: `examples/finetune/README.md`):
 
 ```sh
 zig build finetune -Doptimize=ReleaseFast -- --steps 30
@@ -585,7 +586,8 @@ parity AND in llama-bench as "Q4_K - Small".
 
 ```sh
 # 1. fine-tune: checkpoint directory with adapters.safetensors + optimizer.fucina
-#    (download the f16 GGUF first — see RUNNING-MODELS.md)
+#    (download the f16 GGUF first — see RUNNING-MODELS.md "Getting the
+#    weights"; copy-paste form of this loop: examples/finetune/README.md)
 zig build finetune -Doptimize=ReleaseFast -- \
     --model models/Qwen3-0.6B-f16.gguf --steps 30 --save /tmp/qwen3-lora
 # 2. merge the adapters into the dense f32/f16 base (--alpha = training-time alpha; finetune default 16)

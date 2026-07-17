@@ -159,8 +159,10 @@ LLM/ASR inference stack, written in Zig 0.16. This document is the detailed
 reference for the whole library: the public API surface, its exact semantics
 (ownership, errors, defaults, thread-safety), and the internal layers you
 need to understand to extend it. The structural overview lives in
-[ARCHITECTURE.md](ARCHITECTURE.md); command cheat sheets and per-model
-recipes live in `AGENTS.md` and [RUNNING-MODELS.md](RUNNING-MODELS.md).
+[ARCHITECTURE.md](ARCHITECTURE.md); command cheat sheets live in `AGENTS.md`;
+per-model getting-started recipes live in the per-example
+`examples/<name>/README.md`, with the shared weights table and runtime knobs
+in [RUNNING-MODELS.md](RUNNING-MODELS.md).
 
 Every runnable Zig snippet in this document is machine-verified against the tree:
 `zig build snippet-check` (§2.7, a CI step) extracts every runnable
@@ -414,7 +416,7 @@ the launched program.
 | `bench-gate` | Runs `python3 tools/bench_gate.py` (a system command, not a Zig artifact): the paired Fucina-vs-llama.cpp benchmark gate; protocol in [`BENCHMARK.md`](BENCHMARK.md). Requires `tools/fetch_refs.sh --build` first. |
 
 **Example and tool runners** (each `zig build <step> -- <args>`; CLI details
-in [`RUNNING-MODELS.md`](RUNNING-MODELS.md) and §14):
+in the per-example `examples/<name>/README.md` and §14):
 
 | Step | Program |
 | --- | --- |
@@ -12257,7 +12259,8 @@ composed forwards are plain-path only
 SINGLE cartridge on a no-adapter trainer checkpoints — its rows ride as
 block inputs and the recompute is pinned bitwise (loss + row gradients)
 by a trainer test. The
-`cartridge` example (`zig build cartridge`) runs the whole flow on a real
+`cartridge` example (`zig build cartridge`,
+[README](../examples/cartridge/README.md)) runs the whole flow on a real
 GGUF: `--equiv` (a zero-training corpus-init cartridge must match the real
 prefill — bitwise at tiled-attention shapes on Qwen3-0.6B-f16), self-study
 training (paper Sec 4, k = 1, fully in-process), and `--load`/`--ask`
@@ -12310,7 +12313,8 @@ selector — L2-normalized chunk embeddings centered by their centroid at
 anisotropic and mis-rank documents without it), hand-rolled cosine top-k
 in `topDocs`, persisted as `index.safetensors`. Artifact retrieval goes
 through `mmapFile` (read-only page-backed mappings, no whole-file heap
-copy). The `cartridge-fleet` example (`zig build cartridge-fleet`) drives
+copy). The `cartridge-fleet` example (`zig build cartridge-fleet`,
+[README](../examples/cartridge_fleet/README.md)) drives
 mixed-visibility joint self-study (each round targets one resident
 document; with probability `--p-iso` its cartridge trains alone, otherwise
 distractor cartridges from other residents co-load in shuffled order — the
@@ -12433,7 +12437,8 @@ the residual stream before attention (plain path only; composes with
 `cartridge`; rejected with `packed_segments` — the ShortConv is causal
 over the packed row), and `lossForwardExt(ctx, tokens, labels, fwd,
 loss_opts)` is the CE loss entry taking full `ForwardOptions`.
-`examples/engram.zig` (`zig build engram`) drives it: `--equiv`
+`examples/engram.zig` (`zig build engram`,
+[README](../examples/engram/README.md)) drives it: `--equiv`
 (bitwise zero-init gate on a real GGUF), `--train`/`--eval` (frozen
 trunk, held-out chunk CE, `--lora N`, `--no-engram` control,
 `--gate-bias F`), `--probes N` (verbatim-recall spans, teacher-forced
@@ -12725,8 +12730,8 @@ drives the draft-model-free SAM + Token-Recycling cascade from
 from. Output is lossless (greedy streams verified identical with and without
 `--spec`).
 
-**Runner** (`examples/qwen3.zig`, the full CLI surface is documented in
-[RUNNING-MODELS.md](RUNNING-MODELS.md)):
+**Runner** (`examples/qwen3.zig`, the full CLI surface is documented in the
+[README](../examples/qwen3/README.md)):
 
 ```sh
 # chat / REPL, sampling flags, GPU offload
@@ -12824,9 +12829,9 @@ opt.zeroGrad();
 
 The end-to-end loop — fine-tune (`zig build finetune`), merge adapters into
 dense weights (`zig build export-gguf -- --adapters ... --alpha ...`),
-re-quantize, serve — is scripted in [RUNNING-MODELS.md](RUNNING-MODELS.md)
-("Fine-tune → merge → serve loop"); the gradient-free twin is
-`zig build es-finetune` (§11, TRAINING.md §13).
+re-quantize, serve — is scripted in
+[examples/finetune/README.md](../examples/finetune/README.md); the
+gradient-free twin is `zig build es-finetune` (§11, TRAINING.md §13).
 
 ### 14.3 Qwen3.5 — Gated-DeltaNet hybrid (`src/llm/qwen35/model.zig`)
 
@@ -12924,7 +12929,7 @@ opener when thinking is on; the ChatML empty think block when off), and
 there is no cross-request KV reuse). `lmserve` serves the family through
 it (`backend_qwen35.zig` — reasoning channel, JSON-schema/regex/Lark
 constrained output; [LMSERVER.md](LMSERVER.md)); Ternary-Bonsai-27B
-([RUNNING-MODELS.md](RUNNING-MODELS.md)) is the flagship checkpoint. The
+([README](../examples/qwen35/README.md)) is the flagship checkpoint. The
 CLI is a loader/parity harness:
 
 ```sh
@@ -13056,7 +13061,8 @@ retain raw expert blocks — load with `--experts=borrow` or a raw-expert
 build; the packed inference-only RHS cannot take gradients), plus
 `ExecScopeRequired`, `InvalidSequenceLength`, `LabelLengthMismatch`.
 
-**Runner** (`examples/gemma4.zig` — chat/REPL over the SPM tokenizer
+**Runner** (`examples/gemma4.zig`,
+[README](../examples/gemma4/README.md) — chat/REPL over the SPM tokenizer
 (`llm.spm_tokenizer`) and the generic `llm.chat.Conversation`; sampling
 defaults come from the GGUF):
 
@@ -13160,7 +13166,8 @@ _ = out[0..result.produced];
 ```
 
 No training entry and no speculative decoding (there is no autoregressive
-draft/verify seam). Runner (`examples/diffusion_gemma.zig`; on a TTY the
+draft/verify seam). Runner (`examples/diffusion_gemma.zig`,
+[README](../examples/diffusion_gemma/README.md); on a TTY the
 reply denoises live inline — `--no-visual` disables):
 
 ```sh
@@ -13327,7 +13334,7 @@ defer alloc.free(text);
   `error.UnknownLang` if a prompt-conditioned model cannot resolve `lang`.
 
 No training entry, no speculative decoding (not autoregressive text).
-Runner (`examples/parakeet.zig`):
+Runner (`examples/parakeet.zig`, [README](../examples/parakeet/README.md)):
 
 ```sh
 zig build parakeet -Doptimize=ReleaseFast -- --model models/parakeet/tdt_ctc-110m-f16.gguf \
@@ -13356,7 +13363,8 @@ everything composes from the public facade — and every stage is validated
 against the fp32 Python reference under a tiered parity ladder.
 `zig build nanochat -- tok-train|base-train|sft|eval-bpb|chat ...`.
 
-**lmserve** (`examples/lmserve/`) is an OpenAI-compatible HTTP server over
+**lmserve** (`examples/lmserve/`, [README](../examples/lmserve/README.md))
+is an OpenAI-compatible HTTP server over
 the in-tree language models: Chat Completions (`POST /v1/chat/completions`)
 plus the stateless Responses API (`POST /v1/responses`), with SSE streaming,
 JSON-schema/regex/Lark constrained output (`-Dllguidance=true` builds), and
@@ -13432,10 +13440,12 @@ ships a WAV↔RVQ codec tool. `zig build omnivoice -- tts --model ... --codec
 - `spirals.zig` (`zig build spirals`) — two-spirals MLP trained with every
   optimizer (SGD/AdamW/Muon/APOLLO/APOLLO-Mini) + param groups, lr schedule,
   clipping; proves bit-exact checkpoint/resume (§11).
-- `finetune.zig` (`zig build finetune`) — the qwen3 LoRA loop of 14.2.1 on a
-  built-in pirate SFT set; `--data PATH.jsonl`, `--accum-steps`,
+- `finetune.zig` (`zig build finetune`,
+  [README](../examples/finetune/README.md)) — the qwen3 LoRA loop of 14.2.1
+  on a built-in pirate SFT set; `--data PATH.jsonl`, `--accum-steps`,
   `--verify-grads` gradient-evidence audit.
-- `es_finetune.zig` (`zig build es-finetune`) — the gradient-free twin:
+- `es_finetune.zig` (`zig build es-finetune`,
+  [README](../examples/es_finetune/README.md)) — the gradient-free twin:
   `fucina.es` over the same trainer forward; `--mode lora|full`,
   `--reward rule|acc|nll`, anchored weight decay.
 - `es_spirals.zig` (`zig build es-spirals`) — from-scratch ES on two spirals;
@@ -13448,7 +13458,8 @@ ships a WAV↔RVQ codec tool. `zig build omnivoice -- tts --model ... --codec
 ### 14.8 Example → features → run command
 
 Weights are never bundled; [RUNNING-MODELS.md](RUNNING-MODELS.md) lists the
-download source and full flag set for every model row. The table omits
+download source for every model row; each example's README
+(`examples/<name>/README.md`) documents its full flag set. The table omits
 `-Doptimize=ReleaseFast` for width — add it to every real run.
 
 | example | demonstrates | run |
@@ -13470,10 +13481,10 @@ download source and full flag set for every model row. The table omits
 | `locate_anything` | VLM: ViT + projector + LM, token-space detection | `zig build locate-anything -- detect --model models/locate-anything-f32.gguf --input scene.png --prompt '...'` |
 | `nanochat` | end-to-end GPT: BPE tokenizer training, pretraining, SFT, bpb eval, chat (14.7) | `zig build nanochat -- chat -i <ckpt dir> --tokenizer <tokenizer.bin> -p "..."` |
 | `lmserve` | OpenAI-compatible HTTP server: chat completions + responses, SSE streaming, constrained output (14.7) | `zig build lmserve -- models/Qwen3-0.6B-Q8_0.gguf --port 8080` |
-| `deepseek2` | DeepSeek V2/V3: MLA compressed KV cache, MoE decode | `zig build deepseek2 -- models/DeepSeek-V2-Lite-Chat.Q8_0.gguf --prompt "..." --gen 64` |
-| `glm4moe` | GLM-4.5 family: native MTP speculative decode, streamed experts | `zig build glm4moe -- models/glm45-air/GLM-4.5-Air-Q6_K-00001-of-00002.gguf --prompt "..." --gen 64 --mtp` |
-| `deepseek4` | DeepSeek V4 Flash: CSA/HCA trunk, streamed experts, MTP sidecar | `zig build deepseek4 -- <model.gguf> --chat --prompt "..." --moe-stream` |
-| `inkling` | Inkling: hybrid rel-bias attention, shortconv sites, sink-shared MoE; parity harness | `zig build inkling -- <model.gguf> --prompt "..." --gen 64` |
+| `deepseek2` | DeepSeek V2/V3: MLA compressed KV cache, MoE decode ([README](../examples/deepseek2/README.md)) | `zig build deepseek2 -- models/DeepSeek-V2-Lite-Chat.Q8_0.gguf --prompt "..." --gen 64` |
+| `glm4moe` | GLM-4.5 family: native MTP speculative decode, streamed experts ([README](../examples/glm4moe/README.md)) | `zig build glm4moe -- models/glm45-air/GLM-4.5-Air-Q6_K-00001-of-00002.gguf --prompt "..." --gen 64 --mtp` |
+| `deepseek4` | DeepSeek V4 Flash: CSA/HCA trunk, streamed experts, MTP sidecar ([README](../examples/deepseek4/README.md)) | `zig build deepseek4 -- <model.gguf> --chat --prompt "..." --moe-stream` |
+| `inkling` | Inkling: hybrid rel-bias attention, shortconv sites, sink-shared MoE; parity harness ([README](../examples/inkling/README.md)) | `zig build inkling -- <model.gguf> --prompt "..." --gen 64` |
 | `ptqtp_spirals` | float-trained MLP decorated post-training with trit-planes, self-verifying (§10.9) | `zig build ptqtp-spirals` |
 | `ptqtp_qwen3` | PTQTP-decorate a Qwen3 GGUF in place, NLL before/after, `--save` GGUF (§10.9, §13.2.1) | `zig build ptqtp-qwen3 -- models/Qwen3-0.6B-Q4_K_S.gguf --planes 2` |
 | (tool) `export-gguf` | transcode/re-emit GGUF, merge LoRA adapters (§11, §12) | `zig build export-gguf -- --from-gguf in.gguf --out out.gguf --dtype q8_0` |

@@ -350,7 +350,7 @@ Consumers:
 | Combinator policy (forced preemption, invalid-prefix truncation, pending accounting, top-k mirroring) | `src/llm/speculative/constrained_tests.zig` |
 | Constrained plain == speculative (greedy + sampled), forced spans drafted AND accepted, per-turn reset, batch == sequential per-stream constraints, shared-processor guard | `src/llm/chat_tests.zig` |
 | Doc snippets (incl. the flag-gated llguidance snippet) | `zig build snippet-check` (§2.7 convention) |
-| E2E schema/regex conformance, `--spec` byte-parity + acceptance, `--streams` cross-check | qwen3 runner on Qwen3-0.6B-Q8_0 (2026-07-11; commands in `RUNNING-MODELS.md`) |
+| E2E schema/regex conformance, `--spec` byte-parity + acceptance, `--streams` cross-check | qwen3 runner on Qwen3-0.6B-Q8_0 (2026-07-11; grammar commands in `RUNNING-MODELS.md` §"Constrained decoding", the `--spec`/`--streams` commands in `examples/qwen3/README.md`) |
 | Linux staticlib link + full gated suite (x86-64 glibc) | CI llguidance leg (`ci.yml`, ubuntu; §2.8) — first proven natively on the dev rig, 2026-07-11 |
 
 Reference documentation: REFERENCE.md §13.6 (seam + engine), §13.9.6
