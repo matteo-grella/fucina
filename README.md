@@ -71,6 +71,16 @@ growth path is model-specific sessions with semantic weight binding and
 preallocated buffers, not a generic ggml-like graph. `docs/ARCHITECTURE.md` maps
 the whole tree.
 
+That choice has a known price, paid deliberately. Whole-graph machinery —
+fusion passes, static device memory planning, captured launch sequences — is
+what mainstream GPU inference stacks are built on, so an eager runtime can
+use a GPU only at the op seam (which is what the Metal and CUDA offloads do)
+and will never chase TensorRT-class GPU throughput. On CPU the ledger reads
+the other way: per-op dispatch costs next to nothing, kernels specialize at
+compile time instead of fusing at runtime, and the paired benchmarks are run
+against a graph executor. CPU-first is the design point, not a stage on the
+way to somewhere else.
+
 ## What runs today
 
 | Family | What it is |
