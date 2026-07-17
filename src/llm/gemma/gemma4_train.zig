@@ -303,6 +303,14 @@ const RopeKey = struct { offset: usize, len: usize };
 
 pub const ForwardOptions = struct {
     cartridge: ?*const cartridge_mod.Cartridge = null,
+    /// COMPOSED prefix (Cartridges at Scale): the parts' rows concatenate
+    /// in order ahead of the tokens, which shift to RoPE positions
+    /// `composedP(parts)..` in both theta domains; gradients flow into
+    /// EVERY part's trainable rows through one concat per layer. Mutually
+    /// exclusive with `cartridge`; heterogeneous per-layer KV geometry
+    /// composes (the parts must agree layer-for-layer,
+    /// `validateComposition`).
+    cartridges: ?[]const *const cartridge_mod.Cartridge = null,
     capture: ?*cartridge_mod.KvCapture = null,
 };
 
@@ -660,8 +668,10 @@ pub fn Trainer(comptime targets: Targets) type {
         /// the full block; gemma vocabularies are wide).
         pub fn evalLogitsRows(self: *Self, ctx: *ExecContext, tokens: []const usize, rows: []const usize, opts: ForwardOptions) !fucina.Tensor(.{ .seq, .vocab }) {
             if (opts.capture != null) return Error.CartridgeGeometry;
-            const scope = ctx.openExecScope();
-            defer ctx.closeExecScope(scope);
+            // SCOPELESS eval (see embedLastHidden): the teacher pass frees
+            // intermediates eagerly instead of retaining the whole forward.
+            var no_grad = fucina.noGrad();
+            defer no_grad.close();
             var hidden = try self.forwardHiddenOpts(ctx, tokens, null, opts);
             defer hidden.deinit();
             var picked = try hidden.gather(ctx, .seq, rows, .seq);
@@ -689,16 +699,56 @@ pub fn Trainer(comptime targets: Targets) type {
             packed_segments: ?[]const usize,
             options: cartridge_mod.DistillOptions,
         ) !fucina.Tensor(.{}) {
-            if (!ctx.execScopeActive()) return Error.ExecScopeRequired;
             // Signature-compatible with the qwen3 trainer; packing is not
             // routed on gemma4 (the flat-memory per-conversation backward
             // is the training arm).
             if (packed_segments != null) return Error.CartridgeGeometry;
+            return self.distillLossExt(ctx, tokens, .{ .cartridge = cart }, distill_targets, options);
+        }
+
+        /// `distillLoss` with full `ForwardOptions` — the composed-prefix
+        /// entry (Cartridges at Scale): pass `.cartridges` to train several
+        /// cartridges JOINTLY behind one forward (backward accumulates into
+        /// every part's trainable rows). Same exec-scope requirement,
+        /// scope-owned result, and step-counter advance.
+        pub fn distillLossExt(
+            self: *Self,
+            ctx: *ExecContext,
+            tokens: []const usize,
+            fwd: ForwardOptions,
+            distill_targets: cartridge_mod.DistillTargets,
+            options: cartridge_mod.DistillOptions,
+        ) !fucina.Tensor(.{}) {
+            if (!ctx.execScopeActive()) return Error.ExecScopeRequired;
             const step = self.step_counter;
             self.step_counter += 1;
-            var logits = try self.forwardLogitsOpts(ctx, tokens, step, .{ .cartridge = cart });
+            var logits = try self.forwardLogitsOpts(ctx, tokens, step, fwd);
             defer logits.deinit();
             return cartridge_mod.distillLoss(ctx, &logits, distill_targets, options);
+        }
+
+        /// Final-norm LAST hidden state of `tokens`, copied into `out`
+        /// (`hidden_size` floats) — the retrieval-embedding primitive of
+        /// cartridge fleets (`llm/cartridge_fleet.zig`: callers append the
+        /// ids of `cartridge_fleet.embed_suffix` to the text ids first).
+        /// Eval pass: dropout off, no step advance; own exec scope.
+        pub fn embedLastHidden(self: *Self, ctx: *ExecContext, tokens: []const usize, out: []f32) !void {
+            if (out.len != self.model.config.hidden_size) return Error.InvalidSequenceLength;
+            // SCOPELESS eval on purpose (identical numerics, eager frees):
+            // without a scope the layer bodies' defer-deinits release every
+            // intermediate as they go — the peak drops from the whole
+            // retained forward (tens of GB at 26B) to the layer-local
+            // working set. noGrad guards against graph adoption.
+            var no_grad = fucina.noGrad();
+            defer no_grad.close();
+            var hidden = try self.forwardHiddenOpts(ctx, tokens, null, .{});
+            defer hidden.deinit();
+            const model = self.model;
+            var normed = try hidden.rmsNormMul(ctx, .embed, &model.output_norm, model.config.rms_norm_eps);
+            defer normed.deinit();
+            var last = try normed.narrow(ctx, .seq, normed.dim(.seq) - 1, 1);
+            defer last.deinit();
+            @memcpy(out, try last.dataConst());
         }
 
         fn forwardLogits(self: *Self, ctx: *ExecContext, tokens: []const usize, step: ?u64) !fucina.Tensor(.{ .seq, .vocab }) {
@@ -719,8 +769,20 @@ pub fn Trainer(comptime targets: Targets) type {
 
             const model = self.model;
             const cfg = model.config;
-            if (opts.cartridge != null or opts.capture != null) try self.requireOwnedKv();
-            const offset: usize = if (opts.cartridge) |cart| cart.p else 0;
+            if (opts.cartridge != null or opts.cartridges != null or opts.capture != null) try self.requireOwnedKv();
+            if (opts.cartridges) |parts| {
+                if (opts.cartridge != null or parts.len == 0) return Error.CartridgeGeometry;
+                try cartridge_mod.validateComposition(parts);
+                for (parts) |cart| {
+                    if (cart.layers.len != cfg.num_layers) return Error.CartridgeGeometry;
+                }
+            }
+            const offset: usize = if (opts.cartridges) |parts|
+                cartridge_mod.composedP(parts)
+            else if (opts.cartridge) |cart|
+                cart.p
+            else
+                0;
             const rope = try self.prepareRope(ctx, tokens.len, offset);
 
             var x = try model.token_embedding.getRowsAs(ctx, tokens, .embed);
@@ -983,7 +1045,17 @@ pub fn Trainer(comptime targets: Targets) type {
                 @memcpy(cap.v_rows[layer_i], try v_contig.dataConst());
             }
 
-            var attn = if (opts.cartridge) |cart| blk: {
+            var attn = if (opts.cartridges) |parts| blk: {
+                // Composed prefix: one concat over every part's rows, so
+                // the same fused backward routes gradients into ALL of them
+                // (SWA layers see the composed prefix within their window,
+                // exactly like a single prefix of the same length).
+                var k_cat = try cartridge_mod.composedCatK(ctx, parts, layer_i, &k_rope);
+                defer k_cat.deinit();
+                var v_cat = try cartridge_mod.composedCatV(ctx, parts, layer_i, &v_norm);
+                defer v_cat.deinit();
+                break :blk try q_rope.groupedAttention(ctx, &k_cat, &v_cat, kv_head_for_head, .attn, 1.0, .{ .window = window });
+            } else if (opts.cartridge) |cart| blk: {
                 // Trained KV prefix: every query attends the whole prefix
                 // (within the layer's window on SWA layers — a real prefill
                 // behaves identically), then causally over the real tokens;

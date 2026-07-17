@@ -331,11 +331,20 @@ test "composed forward rejects malformed part lists" {
         cartridge.validateComposition(&.{ &good, &bad }),
     );
 
-    // Composition under checkpointed layers.
+    // Composition under checkpointed layers: evals transparently run
+    // plain, so the rejection is asserted on the TRAINING entry.
     trainer.checkpoint_layers = true;
     defer trainer.checkpoint_layers = false;
-    try std.testing.expectError(
-        qwen3_train.Error.CartridgeCheckpointUnsupported,
-        trainer.evalLogitsExt(&ctx, suffix, .{ .cartridges = &.{&good} }),
-    );
+    {
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        try std.testing.expectError(
+            qwen3_train.Error.CartridgeCheckpointUnsupported,
+            trainer.distillLossExt(&ctx, suffix, .{ .cartridges = &.{&good} }, .{
+                .positions = &.{1},
+                .tokens = &.{2},
+                .logprobs = &.{0.0},
+            }, .{}),
+        );
+    }
 }

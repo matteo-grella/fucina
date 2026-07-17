@@ -84,16 +84,18 @@ services.
 | Mechanism tests + torch 2.12 golden (`tools/gen_cartridge_goldens.py`) | `src/llm/cartridge_tests.zig`, `src/llm/cartridge_golden_tests.zig` |
 | qwen3-level gates (equivalence, training smoke, serving parity, roundtrip) | `src/llm/qwen3/train_cartridge_tests.zig` |
 | Composition: `composedP` / `validateComposition` / `composedCatK/V` / `writeComposedToCache` / `Cartridge.appendToCache` | `src/llm/cartridge.zig` |
-| Composed-forward trainer seams: `ForwardOptions.cartridges`, `Trainer.distillLossExt` | `src/llm/qwen3/train.zig` |
+| Composed-forward trainer seams: `ForwardOptions.cartridges`, `Trainer.distillLossExt`, `Trainer.embedLastHidden` | `src/llm/qwen3/train.zig`, `src/llm/gemma/gemma4_train.zig` |
 | Fleet: manifest, RAM/disk budget manager, cosine chunk index, mmap artifact retrieval | `src/llm/cartridge_fleet.zig` |
 | Fleet CLI: mixed-visibility self-study, index build, retrieval serving, `--equiv` composition gate | `examples/cartridge_fleet.zig` (`zig build cartridge-fleet`) |
-| Composition + fleet gates | `src/llm/qwen3/train_cartridge_compose_tests.zig`, `src/llm/cartridge_fleet_tests.zig` |
+| Composition + fleet gates | `src/llm/qwen3/train_cartridge_compose_tests.zig`, gemma4 compose arms in `src/llm/gemma/gemma4_train_tests.zig`, `src/llm/cartridge_fleet_tests.zig` |
 
 Use `Trainer(.{ .q = false, .v = false })`: no LoRA adapters, so the
 cartridge rows are the only trainable parameters and the base model stays
-frozen. Cartridge + capture forwards are plain-path only
-(`CartridgeCheckpointUnsupported` under `checkpoint_layers` — the cartridge
-variables and capture sink are not checkpoint inputs).
+frozen. Capture, packed, and composed forwards are plain-path only
+(`CartridgeCheckpointUnsupported` under `checkpoint_layers`); a SINGLE
+cartridge on the no-adapter qwen3 trainer CHECKPOINTS — the rows ride as
+block inputs, recompute is pinned bitwise, and both CLIs expose it as
+`--checkpoint` (the fleet CLI forces isolated visibility under it).
 
 ## Evidence
 
@@ -301,6 +303,21 @@ documentation as the corpus:
   per-step losses (+4 bytes/weight resident, static weights only; see
   `docs/GPU-OFFLOAD.md`).
 
+## Training memory: `--checkpoint` (measured)
+
+Keep-vs-recompute is a user flag on both cartridge CLIs (default:
+keep activations). With `--checkpoint`, the qwen3 no-adapter
+single-cartridge forward recomputes each layer in the backward — the
+cartridge rows ride as checkpoint-block inputs, and the recompute is
+pinned BITWISE (loss and row gradients) by a trainer test. Eval and
+capture entries always run plain (recompute buys nothing without a
+backward). Measured on Qwen3-1.7B-BF16 (p = 512, 160 supervised tokens):
+peak training RSS **15.7 → 7.9 GB** with a byte-identical trained
+artifact, and the step is slightly faster (43.0 → 32.5 s — reduced
+allocator/page pressure outweighs the ~2x layer recompute at this
+scale). The fleet CLI forces isolated visibility under the flag; composed
+and gemma4 recompute are follow-ups.
+
 ## gemma4 (measured)
 
 The gemma4 trainer carries the same cartridge surface as qwen3
@@ -369,20 +386,31 @@ harmless (attention only ever takes dot products against them).
   composition is cache-level and therefore model-agnostic — gemma4
   cartridges compose at serve time today even though fleet TRAINING is
   qwen3-typed (recorded deferral below).
-- qwen3 trainer: `ForwardOptions.cartridges` (mutually exclusive with
-  `cartridge`, plain-path only) + `Trainer.distillLossExt`. Because the
-  composed prefix is ONE concat node per layer, the existing fused
-  attention backward routes gradients into EVERY part's trainable rows —
-  joint training needs no new autograd machinery.
+- Trainer seams (qwen3 AND gemma4): `ForwardOptions.cartridges` (mutually
+  exclusive with `cartridge`; plain-path only on qwen3) +
+  `Trainer.distillLossExt`. Because the composed prefix is ONE concat node
+  per layer, the existing fused attention backward routes gradients into
+  EVERY part's trainable rows — joint training needs no new autograd
+  machinery. On gemma4 the SWA layers see the composed prefix within their
+  window exactly like a single prefix of the same length, and
+  heterogeneous per-layer KV geometry composes (parts must agree
+  layer-for-layer).
 - **Evidence**: a single-part composition is BITWISE the single-cartridge
   forward; a two-part composition whose parts come from one capture split
   at p (part B holds rows at positions p..2p−1) reproduces the real
-  prefill of the concatenated prefix — exact on the tiny model
-  (`train_cartridge_compose_tests.zig`: gradients reach every part, sinks
-  stay frozen, packed-vs-flat parity, serve-vs-trainer parity, geometry/
-  checkpoint rejections) and **bitwise on Qwen3-0.6B-f16** (`zig build
-  cartridge-fleet -- --docs README.md --equiv --p 256 --suffix-max 128`:
-  max |Δlogit| = 0, greedy 128/128 over 512 composed rows).
+  prefill of the concatenated prefix — exact on the tiny models for BOTH
+  families (`train_cartridge_compose_tests.zig`; gemma4 arms in
+  `gemma4_train_tests.zig` include an SWA window that cuts through the
+  composed prefix and composed serve parity: gradients reach every part,
+  sinks stay frozen, packed-vs-flat parity, geometry/checkpoint
+  rejections) and **bitwise on Qwen3-0.6B-f16** (`zig build cartridge-fleet
+  -- --docs README.md --equiv --p 256 --suffix-max 128`: max |Δlogit| = 0,
+  greedy 128/128 over 512 composed rows). On gemma-4-26B-A4B Q6_K the
+  composed `--equiv` behaves exactly like the base method's gemma gate:
+  greedy flips (28/32) sit INSIDE the model's own shape-sensitivity
+  envelope (composition max |Δlogit| 10.9 vs the model's own 11.8 with no
+  cartridge anywhere — quantized-MoE stacks are not GEMM-shape-invariant,
+  docs/CARTRIDGES.md "gemma4").
 
 ### The fleet (`src/llm/cartridge_fleet.zig`)
 
@@ -402,7 +430,10 @@ harmless (attention only ever takes dot products against them).
   retrieval is mmap-based (`mmapFile`): reloads stream mapped pages
   straight into fresh tensors with no whole-file heap copy.
 - **Mixed-visibility joint self-study** (`examples/cartridge_fleet.zig`,
-  `zig build cartridge-fleet`): each round samples a target document from
+  `zig build cartridge-fleet`; qwen3 AND gemma4 GGUFs — gemma runs the
+  flat-memory per-conversation backward and per-conversation teacher
+  passes, no packed forward, like the base CLI; NOTE the 26B-scale memory
+  reality below): each round samples a target document from
   the residents proportional to its token length; with probability
   `--p-iso` (default 0.75) the target's cartridge is the only prefix,
   otherwise 1..`--distract-max` distractor cartridges from other
@@ -428,15 +459,24 @@ row), deduplicated to documents in best-chunk order; the selected
 cartridges load from disk (mmap), compose, and the answer decodes behind
 `writeComposedToCache`. `--oracle NAME` bypasses retrieval.
 
-Measured recipe choice (Qwen3-0.6B-f16, 3-doc fleet, probe questions
-with known home documents): plain mean-pooled hidden states mis-rank
-(corpus style dominates the cosine; the right document never cracked the
-top-8 chunks), bare last-token is degenerate (one document ranked first
-for every query), centering alone fixes neither — the topic-instruction
-suffix + last hidden state + centering ranks all probes correctly and is
-the pinned recipe. The paper offloads this problem to an external dense
-retriever and calls a learned cartridge retriever future work; an
-in-process recipe keeps the no-dependency contract.
+Embedding and teacher-pass forwards run SCOPELESS (`embedLastHidden`,
+`evalLogitsRows`): with no exec scope open, the layer bodies'
+defer-deinits free every intermediate eagerly, so the peak is the
+layer-local working set instead of the whole retained forward — an
+ownership-only property, the arithmetic (and therefore the embedding
+recipe) is unchanged.
+
+The recipe — topic-instruction suffix + final-norm last hidden state +
+centroid centering — is THE CONTRACT: index chunks and serve-time queries
+must embed identically (the paper offloads selection to an external dense
+retriever and calls a learned cartridge retriever future work; the
+in-process recipe keeps the no-dependency contract). Two operational
+rules, both measured at 26B: keep `--embed-chunk` at or below 256 —
+512-token chunks mis-rank because broad chunks of a document that merely
+MENTIONS a topic out-score the topic's own document (0.647 vs 0.579,
+against 0.699 vs 0.579 correctly ordered at 256) — and prefer building
+the index on the platform that serves it (cross-platform index/query
+mixing shifts raw cosines by up to ~0.06; rankings hold, margins shrink).
 
 ### Deliberate divergences from the paper
 
@@ -458,17 +498,37 @@ in-process recipe keeps the no-dependency contract.
   optimizer step), so distractor duty advances a document's rotation
   priority exactly like target duty.
 
+### gemma4 fleets (measured, gemma-4-26B-A4B Q6_K)
+
+Everything runs end to end on real weights. Inference-side, on a 64 GB
+M1 Max: the composed `--equiv` gate (greedy flips inside the model's own
+shape-sensitivity envelope, 10.9 vs 11.8 — the base method's
+quantized-MoE verdict, mechanism pinned exact by the tiny-model gates),
+the per-document init pass (~4 s/doc at p = 64), the retrieval index
+(41×256-token chunks in 366 s, 8.9 s/chunk, peak RSS 28.8 GB),
+retrieval/oracle serving (~9 tok/s decode behind a composed prefix), and
+lmserve `--fleet`.
+
+TRAINING runs at ~210 s/conversation isolated and ~220 s co-loaded
+(every co-loaded part's optimizer steps), with held-out distill loss
+improving from the first rounds (0.9201 → 0.8839 over a 3-round smoke).
+It is memory-gated: the backward transient through the frozen quantized
+experts peaks at **58–118 GB per conversation** even at smoke budgets
+(≤48 supervised tokens), so budget **≥128 GB of RAM** for 26B fleet
+training (the streamed quantized-dX and gemma-recompute follow-ups are
+the levers that shrink this). Fleet artifacts are platform-portable:
+x86-trained fleets serve on ARM unchanged. qwen3-scale fleets train
+comfortably on a laptop.
+
 ### Fleet demo (measured, M1 Max, Qwen3-0.6B-f16)
 
 4 docs (README + TERNARY + PTQTP + SPECULATIVE, ~21.6k tokens), p = 256,
 budget 3, rotate every 6, 24 rounds × accum 4 (96 conversations, 12.3k
-supervised tokens): init pass ~0.5 s/doc, 11.8 min of self-study
-(~5.5 s/conversation uncontended — the recorded run shared the machine
-with a test build and averaged 7.4 s), retrieval index 88 chunks in ~44 s
-(one forward per chunk). The run log shows isolated and co-loaded ×2/×3
-rounds and the rotation traffic, and the final per-document step counts
-came out 8/8/8/9 — the uniform-coverage policy working as designed even
-though only 3 of 4 cartridges were ever resident. Serving: one 256-row
+supervised tokens): init pass ~0.5 s/doc, ~5.5 s/conversation of
+self-study, retrieval index 88 chunks in ~44 s (one forward per chunk).
+Rounds mix isolated and co-loaded ×2/×3 visibility, and rotation delivers
+uniform coverage — final per-document step counts 8/8/8/9 with only 3 of
+4 cartridges ever resident. Serving: one 256-row
 cartridge answers in ~0.9 s, a composed pair (512 rows) in ~2.5–3.3 s at
 ~40 tok/s; retrieval picks the home document ("What is Fucina" → README
 → the canonical one-sentence answer; the ternary question → TERNARY.md
@@ -484,45 +544,33 @@ OpenAI-compatible server (docs/LMSERVER.md): per request, the user
 messages embed through the model (`Trainer.embedLastHidden` + the
 `cartridge_fleet.embed_suffix` contract), the cosine index picks
 `--rag-docs` documents, and the selected cartridges compose as the
-conversation's prefix. Slot reuse is conversation-STICKY — a request whose
-FIRST user message matches a resident slot's continues that conversation
-with the selection it started with, and retrieval runs only for
-conversations no slot remembers. Two measured design forcings: per-turn
-re-retrieval flaps the runner-up document (close cosine scores) and
-forfeits all KV reuse, and adopting slots by token-LCP alone once moved a
-short prompt onto another conversation's knowledge base (the constant
-template preamble passes the 10% similarity gate) — first-user-message
-identity fixes both. Verified live: follow-ups report `cached_tokens`
-through the composed prefix, interleaved conversations keep distinct
-selections, answers match the fleet CLI's. qwen3 backend; excludes
-`--kv-cache-dir` (sidecars don't record selections).
+conversation's prefix. Slot reuse is conversation-STICKY: conversation
+identity is the FIRST user message, a continuation keeps the selection
+its conversation started with (per-turn re-retrieval is unstable on
+runner-up documents and forfeits all KV reuse; token-LCP alone cannot
+carry identity — the constant template preamble of unrelated short
+prompts passes the similarity gate), and retrieval runs only for
+conversations no slot remembers. Follow-up turns report `cached_tokens`
+through the composed prefix; interleaved conversations keep distinct
+selections. qwen3 and gemma4 backends (gemma4 MoE GGUFs need
+`--experts=borrow` — the query embedder forwards through raw expert
+blocks); excludes `--kv-cache-dir` (sidecars don't record selections).
 
 `--rag-adaptive` adds in-conversation re-selection with a DECISIVE-margin
 rule: a follow-up switches knowledge base only when a document outside
 the current selection beats every current document's best chunk by
 `--rag-margin` under the contextual (all-user-messages) query; the switch
-destroys the conversation's slot and rebuilds the composed prefix
-(verified live on a cross-domain pivot). The rule shape is forced by
-measurement, and the negatives are worth recording: (a) absolute score
-floors are unusable — a phatic "Thanks, that makes sense." scored 0.433
-against an unrelated document while a genuine "explain speculative
-decoding" pivot scored 0.408; (b) last-message-alone probes order the
-cases WRONG (phatic margin 0.112 over the current selection vs true-pivot
-margin 0.049), so no threshold separates them; (c) under the context-
-anchored query, same-register corpora rarely produce decisive outside
-evidence (after two sustained pivot turns the outside doc still trailed
-the incumbent, 0.418 vs 0.461 — technical vocabulary overlaps inflate
-incumbent scores). Adaptive switching therefore fires on clear
-cross-domain shifts and deliberately not on noise; a NEW conversation
-(fresh first message) remains the reliable hard-pivot, and a stronger
-retriever — not a cleverer threshold — is what would move this ceiling
-(the learned-retriever follow-up below).
+destroys the conversation's slot and rebuilds the composed prefix. The
+rule is deliberately relative and context-anchored — absolute score
+floors and last-message-alone probes cannot separate phatic turns from
+topical pivots on this retriever — so switches fire on clear cross-domain
+shifts and not on noise; on same-register corpora they are rare, and a
+NEW conversation (fresh first message) is the reliable hard-pivot. A
+stronger retriever, not a different threshold, moves this ceiling (the
+learned-retriever follow-up below).
 
 ### Follow-ups (not landed)
 
-- **gemma4 fleet training**: the composed forward seam
-  (`ForwardOptions.cartridges`) exists only on the qwen3 trainer; gemma4
-  serving-side composition already works (cache-level).
 - **Per-conversation visibility inside packed rows** (per-segment part
   sets), restoring the paper's exact per-example sampling under packing.
 - **Learned cartridge retriever**: the paper's own future-work item;
@@ -540,6 +588,14 @@ retriever — not a cleverer threshold — is what would move this ceiling
 - **lmserve per-request speculation** consuming the embedded draft
   reference (a shared immutable automaton at startup; conflicts with slot
   reuse today), plus a sampled batched verify in core.
-- **Checkpointed-layers support**: thread the cartridge K/V (and capture)
-  through the checkpoint-block inputs to train big cartridges on deep models
-  with recompute.
+- **Checkpointing for composed and gemma4 forwards**: composed prefixes
+  need a runtime-arity (slice-based) checkpoint-input API in core, and
+  the gemma4 trainer has no recompute plumbing — both are required before
+  26B gemma fleet training fits small-RAM boxes (the retained forward
+  graph is the dominant memory term there; the per-node dequantized
+  weight transient in `ConstRhsEinsumBackward` is sub-GB at any instant).
+- **Streamed quantized-dX**: the backward re-dequantizes every touched
+  frozen quantized weight per step (~17 GB of dequantization traffic per
+  26B conversation); a fused quantized-dX kernel — ideally the CUDA-side
+  variant — removes that bandwidth wholesale. This is the TIME lever;
+  checkpointing is the MEMORY lever.

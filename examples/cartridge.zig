@@ -183,6 +183,11 @@ const Options = struct {
     /// forwardStepBatchSpans pass. Parity with plain batching at 0.6B;
     /// wins track draft acceptance (bigger models, quote-heavy corpora).
     spec_b: bool = false,
+    /// Recompute-in-backward per layer (--checkpoint): drops the retained
+    /// forward graph — the dominant training-memory term — for ~2x layer
+    /// compute. qwen3 single-cartridge path only (recompute pinned bitwise
+    /// by a trainer test).
+    checkpoint: bool = false,
     /// Serve --ask answers speculatively (--spec-serve): the corpus drafts
     /// the answer — corpus-grounded text, which a trained cartridge quotes
     /// near-verbatim, drafts itself. The reference comes from the ARTIFACT
@@ -381,6 +386,8 @@ pub fn main(init: std.process.Init) !void {
             opts.save_every = v;
         } else if (try parseFlagStr(args, &arg_i, "--resume")) |v| {
             opts.resume_path = v;
+        } else if (std.mem.eql(u8, arg, "--checkpoint")) {
+            opts.checkpoint = true;
         } else if (std.mem.eql(u8, arg, "--no-pack")) {
             opts.pack = false;
         } else if (std.mem.eql(u8, arg, "--spec-b")) {
@@ -396,7 +403,7 @@ pub fn main(init: std.process.Init) !void {
                 "usage: zig build cartridge -Doptimize=ReleaseFast -- --corpus FILE|DIR (repeatable) [--model PATH] " ++
                     "[--p N] [--frozen N] [--steps N] [--accum N] [--lr F] [--chunk-min N] [--chunk-max N] [--top-k N] " ++
                     "[--max-q N] [--max-a N] [--seed N] [--save PATH] [--save-every N] [--resume PATH] [--load PATH] " ++
-                    "[--ask TEXT] [--icl-max N] [--no-pack] [--spec-b] [--spec-serve] [--draft-ref] [--gen-batch N] " ++
+                    "[--ask TEXT] [--icl-max N] [--no-pack] [--checkpoint] [--spec-b] [--spec-serve] [--draft-ref] [--gen-batch N] " ++
                     "[--suffix-max N] [--equiv]\n",
                 .{},
             );
@@ -447,6 +454,12 @@ pub fn main(init: std.process.Init) !void {
 
     var trainer = try Trainer.init(&ctx, &model, .{ .rank = 1, .alpha = 1 }, opts.seed);
     defer trainer.deinit();
+    if (opts.checkpoint) {
+        // Packed forwards are plain-path only; the flat-memory backward
+        // composes with per-layer recompute.
+        trainer.checkpoint_layers = true;
+        opts.pack = false;
+    }
 
     if (opts.equiv) {
         const c = if (corpus) |*c| c else return error.MissingCorpusPath;

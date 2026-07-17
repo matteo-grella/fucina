@@ -49,10 +49,12 @@ pub const Error = error{
     InvalidCapture,
     InvalidPacking,
     InvalidEngram,
-    /// Cartridge / capture / packed forwards are plain-path only: the
-    /// cartridge K/V variables, capture sink, and transient packed rope
-    /// tables are not checkpoint inputs, so a recompute would silently
-    /// detach, re-fill, or dangle them.
+    /// Capture, packed, and composed-cartridge forwards are plain-path
+    /// only: the capture sink, transient packed rope tables, and composed
+    /// part lists are not checkpoint inputs, so a recompute would silently
+    /// re-fill or dangle them. (A SINGLE cartridge on a no-adapter trainer
+    /// DOES checkpoint: its rows ride as block inputs — see
+    /// CartridgeLayerBlock; adapter trainers keep the rejection.)
     CartridgeCheckpointUnsupported,
 };
 
@@ -104,10 +106,11 @@ pub const KvCapture = cartridge_mod.KvCapture;
 /// `cartridge` prepends a trained KV prefix to every layer's attention
 /// (tokens shift to RoPE positions p..p+seq-1 and attend the whole prefix;
 /// gradients flow into the cartridge's trainable rows through the frozen
-/// stack). `capture` copies each layer's freshly computed token K/V rows
-/// out of the forward — the cartridge initialization seam. Both are
-/// plain-path only (`CartridgeCheckpointUnsupported` under
-/// `checkpoint_layers`).
+/// stack) — and composes with `checkpoint_layers` on no-adapter trainers
+/// (the rows ride as checkpoint inputs; recompute is bitwise). `capture`
+/// copies each layer's freshly computed token K/V rows out of the forward
+/// — the cartridge initialization seam; plain-path only
+/// (`CartridgeCheckpointUnsupported` under `checkpoint_layers`).
 /// `packed_segments` runs several independent sequences through ONE forward as
 /// contiguous segments of the packed row (`packed_segments[i]` = length of
 /// i; lengths must sum to `tokens.len`). Every seq-parallel op (the
@@ -726,6 +729,9 @@ pub fn Trainer(comptime targets: Targets) type {
         /// Runs under its own exec scope like `evalLastLogits`; the returned
         /// copy is ~seq x vocab x 4 bytes, so keep sequences short-ish.
         pub fn evalLogits(self: *Self, ctx: *ExecContext, tokens: []const usize) !fucina.Tensor(.{ .seq, .vocab }) {
+            const saved_ck = self.checkpoint_layers;
+            self.checkpoint_layers = false;
+            defer self.checkpoint_layers = saved_ck;
             const scope = ctx.openExecScope();
             defer ctx.closeExecScope(scope);
             var hidden = try self.forwardHiddenImpl(ctx, tokens, null, .{});
@@ -742,6 +748,10 @@ pub fn Trainer(comptime targets: Targets) type {
         /// seam: pass `.cartridge` to score tokens behind a trained KV prefix
         /// (dropout off, no step advance, caller-owned [seq, vocab] constant).
         pub fn evalLogitsExt(self: *Self, ctx: *ExecContext, tokens: []const usize, opts: ForwardOptions) !fucina.Tensor(.{ .seq, .vocab }) {
+            // Evals never backward: recompute is waste — run plain.
+            const saved_ck = self.checkpoint_layers;
+            self.checkpoint_layers = false;
+            defer self.checkpoint_layers = saved_ck;
             const scope = ctx.openExecScope();
             defer ctx.closeExecScope(scope);
             var hidden = try self.forwardHiddenImpl(ctx, tokens, null, opts);
@@ -759,15 +769,20 @@ pub fn Trainer(comptime targets: Targets) type {
         /// a [rows.len, vocab] copy instead of the full [seq, vocab] block
         /// (distillation only reads the rows preceding supervised tokens).
         pub fn evalLogitsRows(self: *Self, ctx: *ExecContext, tokens: []const usize, rows: []const usize, opts: ForwardOptions) !fucina.Tensor(.{ .seq, .vocab }) {
-            const scope = ctx.openExecScope();
-            defer ctx.closeExecScope(scope);
+            const saved_ck = self.checkpoint_layers;
+            self.checkpoint_layers = false;
+            defer self.checkpoint_layers = saved_ck;
+            // SCOPELESS eval (see embedLastHidden): the teacher pass frees
+            // intermediates eagerly instead of retaining the whole forward.
+            var no_grad = fucina.noGrad();
+            defer no_grad.close();
             var hidden = try self.forwardHiddenImpl(ctx, tokens, null, opts);
             defer hidden.deinit();
             var picked = try hidden.gather(ctx, .seq, rows, .seq);
             defer picked.deinit();
             var logits = try self.logitsTail(ctx, &picked);
             defer logits.deinit();
-            // Deep-copy out of the scope: everything else dies at close.
+            // Deep-copy so the caller owns a clean constant either way.
             var value = try logits.value.clone(ctx.allocator);
             errdefer value.deinit();
             return fucina.Tensor(.{ .seq, .vocab }).fromTensor(ctx, value);
@@ -781,8 +796,17 @@ pub fn Trainer(comptime targets: Targets) type {
         /// off, no step advance; runs under its own exec scope.
         pub fn embedLastHidden(self: *Self, ctx: *ExecContext, tokens: []const usize, out: []f32) !void {
             if (out.len != self.model.config.hidden_size) return Error.InvalidSequenceLength;
-            const scope = ctx.openExecScope();
-            defer ctx.closeExecScope(scope);
+            const saved_ck = self.checkpoint_layers;
+            self.checkpoint_layers = false;
+            defer self.checkpoint_layers = saved_ck;
+            // SCOPELESS eval on purpose: with no exec scope, the layer
+            // bodies' defer-deinits free every intermediate eagerly, so the
+            // peak is the layer-local working set instead of the whole
+            // forward's retained tensors (tens of GB at 26B) — identical
+            // numerics, only ownership changes. noGrad is insurance against
+            // accidental graph adoption.
+            var no_grad = fucina.noGrad();
+            defer no_grad.close();
             var hidden = try self.forwardHiddenImpl(ctx, tokens, null, .{});
             defer hidden.deinit();
             const model = self.model;
@@ -797,6 +821,11 @@ pub fn Trainer(comptime targets: Targets) type {
         /// that copies every layer's token K/V rows out of the graph — the
         /// cartridge initialization capture. Caller owns the result.
         pub fn captureKv(self: *Self, ctx: *ExecContext, tokens: []const usize) !KvCapture {
+            // Forward-only init pass: recompute buys nothing and capture is
+            // not a checkpoint input — run it plain regardless of the flag.
+            const saved_ck = self.checkpoint_layers;
+            self.checkpoint_layers = false;
+            defer self.checkpoint_layers = saved_ck;
             const cfg = self.model.config;
             var cap = try KvCapture.init(
                 self.allocator,
@@ -1041,7 +1070,13 @@ pub fn Trainer(comptime targets: Targets) type {
                 if (inj.row.dim(.embed) != cfg.hidden_size) return Error.InvalidInjection;
             }
             if (opts.cartridge) |cart| {
-                if (self.checkpoint_layers) return Error.CartridgeCheckpointUnsupported;
+                // Checkpointed SINGLE-cartridge forwards are supported for
+                // the no-adapter trainer (the cartridge-training shape):
+                // the rows ride as checkpoint inputs, so recompute rebuilds
+                // the concat against the same leaves and their gradients
+                // route out of the block. Adapter trainers keep the
+                // rejection (block arity explosion, no use case).
+                if (self.checkpoint_layers and comptime n_enabled != 0) return Error.CartridgeCheckpointUnsupported;
                 if (opts.cartridges != null) return Error.InvalidCartridge;
                 if (cart.layers.len != n_layers) return Error.InvalidCartridge;
                 if (cart.kv_heads != cfg.num_key_value_heads or cart.head_dim != cfg.head_dim) return Error.InvalidCartridge;
@@ -1141,6 +1176,17 @@ pub fn Trainer(comptime targets: Targets) type {
                 };
                 const ads = &self.adapters[layer_i];
                 if (self.checkpoint_layers) {
+                    if (comptime n_enabled == 0) {
+                        if (opts.cartridge) |cart| {
+                            // The trainable rows are checkpoint INPUTS: the
+                            // recompute rebuilds the concat against these
+                            // leaves and their gradients route out through
+                            // the block's operand states.
+                            const cl = &cart.layers[layer_i];
+                            x = try ctx.replace(x, fucina.checkpointWithContext(ctx, CartridgeLayerBlock.run, extra, .{ &x, &cl.k, &cl.v }));
+                            continue;
+                        }
+                    }
                     x = try ctx.replace(x, fucina.checkpointWithContext(ctx, LayerBlock.run, extra, checkpointInputs(&x, ads)));
                 } else {
                     x = try ctx.replace(x, layerBody(ctx, extra, &x, abTuple(ads)));
@@ -1481,6 +1527,29 @@ pub fn Trainer(comptime targets: Targets) type {
                 }
             },
             else => unreachable,
+        };
+
+        /// Checkpoint block for the no-adapter SINGLE-cartridge forward:
+        /// the layer's trainable K/V rows arrive as checkpoint inputs, and
+        /// the body runs against a temporary `LayerKv` assembled from them
+        /// (sinks borrowed from the original — frozen constants). At
+        /// recompute time the machinery hands back facades over the SAME
+        /// storage, so the rebuilt concat is bitwise the plain forward and
+        /// the rows' gradients route out through the block's operands
+        /// (only instantiated for `n_enabled == 0` trainers).
+        const CartridgeLayerBlock = struct {
+            fn run(ctx: *ExecContext, extra: LayerExtra, h: *const Hidden, k: *const cartridge_mod.Kv, v: *const cartridge_mod.Kv) !Hidden {
+                const orig = extra.cartridge_layer.?;
+                const tmp = cartridge_mod.LayerKv{
+                    .k_sink = orig.k_sink,
+                    .v_sink = orig.v_sink,
+                    .k = k.*,
+                    .v = v.*,
+                };
+                var extra2 = extra;
+                extra2.cartridge_layer = &tmp;
+                return layerBody(ctx, extra2, h, .{});
+            }
         };
     };
 }

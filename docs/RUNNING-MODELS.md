@@ -855,6 +855,9 @@ zig build cartridge -Doptimize=ReleaseFast -- --model models/gemma-4-26B-A4B-it-
 #                a multiple of it — wider batches amortize the decode weight stream)
 #                --spec-b / --spec-serve (lossless speculative decoding: self-study bot B /
 #                corpus-drafted serving; see docs/CARTRIDGES.md)
+#                --checkpoint (recompute-in-backward per layer: measured 1.7B peak RSS
+#                15.7 -> 7.9 GB with a byte-identical trained artifact, and faster;
+#                qwen3 single-cartridge path)
 #                --no-pack (flat-memory per-conversation backward; the default packs the
 #                accumulation group into one forward/backward — gradient-identical, and the
 #                group's generations run as lockstep batched streams either way: measured
@@ -877,7 +880,9 @@ Cartridges at Scale (arXiv 2606.04557; design record `docs/CARTRIDGES.md`
 §"Cartridges at Scale") trains one cartridge PER DOCUMENT under a RAM/disk
 budget, jointly so they compose at serve time, and selects cartridges per
 query with an in-process cosine retriever (embeddings come from the serving
-model itself — no external retrieval stack). qwen3-typed; needs an
+model itself — no external retrieval stack). qwen3 and gemma4 GGUFs (gemma
+routes to the flat per-conversation backward and per-conversation teacher
+passes, like the base CLI; expert blocks borrow zero-copy); qwen3 needs an
 f32/f16/bf16 GGUF like the base CLI.
 
 ```sh
@@ -891,15 +896,14 @@ f32/f16/bf16 GGUF like the base CLI.
 zig build cartridge-fleet -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-f16.gguf \
   --docs README.md --equiv --p 256 --suffix-max 128
 
-# 2. Train a 4-document fleet (~12 min measured on an M1 Max, machine
-#    shared with a build; ~5.5 s/conversation uncontended): every doc gets
-#    a corpus-init cartridge on disk, at most --budget 3 stay resident, and
-#    24 rounds x 4 conversations of mixed-visibility self-study run with
-#    rotation every 6 rounds. The run log shows isolated and co-loaded x2/x3
-#    rounds, and eviction/reload traffic; the final per-doc step counts came
-#    out 8/8/8/9 — the budget manager's uniform-coverage policy at work.
-#    Ends by embedding all 88 retrieval chunks through the model (~44 s)
-#    and saving fleet.json + per-doc safetensors/FZT1 + index.safetensors.
+# 2. Train a 4-document fleet (~10 min on an M1 Max, ~5.5 s/conversation):
+#    every doc gets a corpus-init cartridge on disk, at most --budget 3
+#    stay resident, and 24 rounds x 4 conversations of mixed-visibility
+#    self-study run with rotation every 6 rounds (isolated and co-loaded
+#    x2/x3 rounds; rotation yields uniform coverage — per-doc step counts
+#    8/8/8/9 with only 3 of 4 ever resident). Ends by embedding the 88
+#    retrieval chunks through the model (~44 s) and saving fleet.json +
+#    per-doc safetensors/FZT1 + index.safetensors.
 zig build cartridge-fleet -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-f16.gguf \
   --docs README.md --docs docs/TERNARY.md --docs docs/PTQTP.md --docs docs/SPECULATIVE.md \
   --fleet /tmp/fleet-demo --p 256 --budget 3 --rotate-every 6 --rounds 24 --accum 4 --seed 7
@@ -947,12 +951,25 @@ zig build lmserve -Doptimize=ReleaseFast -- models/Qwen3-0.6B-f16.gguf \
 #    a NEW conversation always re-retrieves. Size --ctx to include
 #    rag_docs x p prefix rows. --fleet excludes --cartridge/--kv-cache-dir.
 
+# gemma GGUFs run the same modes: the composed --equiv gate judges greedy
+#    flips against the model's own shape-sensitivity envelope on quantized
+#    MoE, init/index/serving run end to end on 26B, and lmserve --fleet
+#    serves gemma fleets (MoE GGUFs need --experts=borrow). 26B TRAINING
+#    runs at ~210 s/conversation and needs >=128 GB of RAM (the backward
+#    transient peaks at 58-118 GB — docs/CARTRIDGES.md "gemma4 fleets");
+#    --rounds 0 builds a served-ready corpus-init fleet + index:
+# zig build cartridge-fleet -Doptimize=ReleaseFast -- --model models/gemma-4-26B-A4B-it-UD-Q6_K.gguf \
+#   --docs README.md --docs docs/TERNARY.md --fleet /tmp/fleet-gemma \
+#   --p 64 --budget 2 --rounds 0 --embed-chunk 512
+
 # Training knobs: --budget B (resident cartridges) --rotate-every R --evict-frac F
 #        --warmup W (per-cartridge lr warm-up steps)
 #        --p-iso F (isolation probability) --distract-max K (co-loaded distractors)
 #        --rounds/--accum/--lr/--p/--chunk-min/--chunk-max/--max-q/--max-a/--seed
 #        --embed-chunk N (retrieval chunk tokens) --rag-docs/--rag-chunks (selection)
 #        --no-pack (flat-memory per-conversation backward)
+#        --checkpoint (per-layer recompute, qwen3: halves training peak RSS,
+#        byte-identical results; forces isolated visibility in fleet runs)
 ```
 
 ---

@@ -54,8 +54,9 @@ const usage_text =
     \\                      cartridge-fleet`; Cartridges at Scale): each request's
     \\                      last user message picks cartridges via the fleet's
     \\                      cosine index and they compose as the conversation's
-    \\                      prefix (qwen3 backend; excludes --cartridge and
-    \\                      --kv-cache-dir; slot reuse is keyed by selection)
+    \\                      prefix (qwen3/gemma4 backends — gemma4 needs
+    \\                      --experts=borrow on MoE GGUFs; excludes --cartridge
+    \\                      and --kv-cache-dir; slot reuse is keyed by selection)
     \\  --rag-docs K        fleet: documents composed per request (default 2)
     \\  --rag-chunks N      fleet: cosine top-N chunks scanned (default 8)
     \\  --rag-adaptive      fleet: follow-up turns may SWITCH knowledge base when
@@ -354,28 +355,29 @@ fn serveQwen35(
     try serveWith(io, allocator, adapter.backend(), args);
 }
 
-/// --fleet serving state (qwen3 only): the fleet's manifest + cosine index
-/// plus a no-adapter trainer whose `embedLastHidden` implements the fleet's
+/// --fleet serving state: the fleet's manifest + cosine index plus a
+/// no-adapter trainer whose `embedLastHidden` implements the fleet's
 /// retrieval-embedding contract (`cartridge_fleet.embed_suffix`) for
-/// incoming queries. Everything is borrowed by the backend's
+/// incoming queries. One comptime instantiation per (model, trainer,
+/// tokenizer) family; everything is borrowed by the backend's
 /// `FleetOptions`, so this must outlive the server loop.
-const FleetTrainer = llm.qwen3.train.Trainer(.{ .q = false, .v = false });
-
-const FleetServe = struct {
+fn FleetServeFor(comptime ModelT: type, comptime TrainerT: type, comptime TokT: type) type {
+    return struct {
+    const FleetServe = @This();
     allocator: std.mem.Allocator,
     ctx: *fucina.ExecContext,
-    tokenizer: *const llm.tokenizer.Tokenizer,
+    tokenizer: *const TokT,
     fleet: llm.cartridge_fleet.Fleet,
     index: llm.cartridge_fleet.EmbedIndex,
-    trainer: FleetTrainer,
+    trainer: TrainerT,
 
     fn init(
         io: std.Io,
         allocator: std.mem.Allocator,
         stderr: *std.Io.Writer,
         ctx: *fucina.ExecContext,
-        model: *const llm.qwen3.model.Model,
-        tokenizer: *const llm.tokenizer.Tokenizer,
+        model: *const ModelT,
+        tokenizer: *const TokT,
         dir: []const u8,
     ) !FleetServe {
         var fleet = llm.cartridge_fleet.Fleet.open(allocator, io, dir, 0, .{ .budget = 1 }) catch |err| {
@@ -401,9 +403,9 @@ const FleetServe = struct {
         var index = try llm.cartridge_fleet.EmbedIndex.initFromBytes(allocator, mapped.bytes);
         errdefer index.deinit();
 
-        // The query embedder runs through the dense-qwen3 trainer.
-        var trainer = FleetTrainer.init(ctx, model, .{ .rank = 1, .alpha = 1 }, 0) catch |err| {
-            try stderr.writeAll("--fleet needs a dense qwen3 GGUF (queries embed through the trainer)\n");
+        // The query embedder runs through the family's no-adapter trainer.
+        var trainer = TrainerT.init(ctx, model, .{ .rank = 1, .alpha = 1 }, 0) catch |err| {
+            try stderr.writeAll("--fleet: this GGUF cannot host the query-embedding trainer (dense qwen3, or gemma4 with --experts=borrow)\n");
             return err;
         };
         errdefer trainer.deinit();
@@ -457,7 +459,19 @@ const FleetServe = struct {
         for (full[text_ids.len..], suffix_ids) |*dst, id| dst.* = id;
         try self.trainer.embedLastHidden(self.ctx, full, out);
     }
-};
+    };
+}
+
+const FleetServeQwen3 = FleetServeFor(
+    llm.qwen3.model.Model,
+    llm.qwen3.train.Trainer(.{ .q = false, .v = false }),
+    llm.tokenizer.Tokenizer,
+);
+const FleetServeGemma4 = FleetServeFor(
+    llm.gemma.gemma4.Model,
+    llm.gemma.gemma4_train.Trainer(.{ .q = false, .v = false }),
+    llm.spm_tokenizer.Tokenizer,
+);
 
 fn serveQwen3(
     io: std.Io,
@@ -485,10 +499,10 @@ fn serveQwen3(
     defer if (cart) |*c| c.deinit();
     if (args.cartridge_path) |path| cart = try loadCartridge(io, allocator, stderr, ctx, &model, path);
 
-    var fleet_serve: ?FleetServe = null;
+    var fleet_serve: ?FleetServeQwen3 = null;
     defer if (fleet_serve) |*fs| fs.deinit();
     if (args.fleet_dir) |dir| {
-        fleet_serve = try FleetServe.init(io, allocator, stderr, ctx, &model, &tokenizer, dir);
+        fleet_serve = try FleetServeQwen3.init(io, allocator, stderr, ctx, &model, &tokenizer, dir);
         try stderr.print("fleet: {d} documents, {d} retrieval chunks, {d} docs composed per request\n", .{
             fleet_serve.?.fleet.manifest.docs.items.len,
             fleet_serve.?.index.len(),
@@ -520,7 +534,7 @@ fn serveQwen3(
                 .manifest = &fs.fleet.manifest,
                 .index = &fs.index,
                 .embed_ctx = fs,
-                .embedFn = FleetServe.embed,
+                .embedFn = FleetServeQwen3.embed,
                 .rag_docs = args.rag_docs,
                 .rag_chunks = args.rag_chunks,
                 .adaptive = args.rag_adaptive,
@@ -541,10 +555,6 @@ fn serveGemma4(
     model_id: []const u8,
     args: Args,
 ) !void {
-    if (args.fleet_dir != null) {
-        try stderr.writeAll("--fleet is supported by the qwen3 backend only today (gemma4 cartridges still COMPOSE at serve time via llm.cartridge.writeComposedToCache — the missing piece is the query embedder)\n");
-        return error.FleetUnsupported;
-    }
     var config = try llm.gemma.gemma4.Config.fromGguf(file);
     config.borrow_experts = args.experts_borrow;
     var tokenizer = llm.spm_tokenizer.Tokenizer.initFromGguf(allocator, file, .{}) catch {
@@ -563,6 +573,24 @@ fn serveGemma4(
     var cart: ?llm.cartridge.Cartridge = null;
     defer if (cart) |*c| c.deinit();
     if (args.cartridge_path) |path| cart = try loadCartridge(io, allocator, stderr, ctx, &model, path);
+
+    var fleet_serve: ?FleetServeGemma4 = null;
+    defer if (fleet_serve) |*fs| fs.deinit();
+    if (args.fleet_dir) |dir| {
+        if (config.num_experts > 0 and !config.borrow_experts) {
+            // The query embedder forwards through the trainer, whose MoE
+            // arm consumes raw expert blocks.
+            try stderr.writeAll("--fleet on a gemma4 MoE GGUF needs --experts=borrow (the query embedder forwards through raw expert blocks)\n");
+            return error.FleetUnsupported;
+        }
+        fleet_serve = try FleetServeGemma4.init(io, allocator, stderr, ctx, &model, &tokenizer, dir);
+        try stderr.print("fleet: {d} documents, {d} retrieval chunks, {d} docs composed per request\n", .{
+            fleet_serve.?.fleet.manifest.docs.items.len,
+            fleet_serve.?.index.len(),
+            args.rag_docs,
+        });
+        try stderr.flush();
+    }
 
     // Turn-end ids beyond <turn|>: the GGUF's own EOS and a stray SPM <eos>
     // (id 1) — the gemma4 chat harness registers the same pair.
@@ -589,6 +617,18 @@ fn serveGemma4(
             .kv_slots = args.kv_slots,
             .kv_disk = kvDiskOptions(io, args),
             .cartridge = if (cart) |*c| c else null,
+            .fleet = if (fleet_serve) |*fs| .{
+                .io = io,
+                .dir = args.fleet_dir.?,
+                .manifest = &fs.fleet.manifest,
+                .index = &fs.index,
+                .embed_ctx = fs,
+                .embedFn = FleetServeGemma4.embed,
+                .rag_docs = args.rag_docs,
+                .rag_chunks = args.rag_chunks,
+                .adaptive = args.rag_adaptive,
+                .switch_margin = args.rag_margin,
+            } else null,
         },
     );
     defer adapter.deinit();

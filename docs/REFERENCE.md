@@ -12251,9 +12251,12 @@ backward and accumulate into shared leaves — packed vs sequential gradient
 equality is pinned by a trainer test), and `Trainer.{initCartridge,
 captureKv, distillLoss, evalLogitsExt, evalLogitsRows}` are the
 training/eval entries — instantiate `Trainer(.{ .q = false, .v = false })`
-so the cartridge rows are the only parameters. All three knobs are
-plain-path only (`Error.CartridgeCheckpointUnsupported` under
-`checkpoint_layers`). The
+so the cartridge rows are the only parameters. Capture, packed, and
+composed forwards are plain-path only
+(`Error.CartridgeCheckpointUnsupported` under `checkpoint_layers`); a
+SINGLE cartridge on a no-adapter trainer checkpoints — its rows ride as
+block inputs and the recompute is pinned bitwise (loss + row gradients)
+by a trainer test. The
 `cartridge` example (`zig build cartridge`) runs the whole flow on a real
 GGUF: `--equiv` (a zero-training corpus-init cartridge must match the real
 prefill — bitwise at tiled-attention shapes on Qwen3-0.6B-f16), self-study
@@ -12277,7 +12280,8 @@ pub fn writeComposedToCache(ctx, parts, cache: *KvCache) !void;           // ser
 // requirement, the primitive writeComposedToCache chains.
 ```
 
-The qwen3 trainer threads a composition through `ForwardOptions.cartridges`
+The qwen3 and gemma4 trainers thread a composition through
+`ForwardOptions.cartridges`
 (mutually exclusive with `cartridge`; plain-path only): ONE concat per layer,
 so the existing fused attention backward routes gradients into EVERY part's
 trainable rows — the joint-training seam. `Trainer.distillLossExt(ctx,
@@ -12286,8 +12290,10 @@ tokens, fwd, targets, options)` is `distillLoss` with full `ForwardOptions`
 single-cartridge forward (pinned bitwise), a two-part composition built
 from one capture reproduces the real prefill exactly (the composition
 oracle — bitwise on Qwen3-0.6B-f16 at p = 256 via `cartridge-fleet
---equiv`), and serving through `writeComposedToCache` is cache-level, so
-compositions serve on ANY family (`train_cartridge_compose_tests.zig`).
+--equiv`; gemma4 arms, SWA cutting the composed prefix included, in
+`gemma4_train_tests.zig`), and serving through `writeComposedToCache` is
+cache-level, so compositions serve on ANY family
+(`train_cartridge_compose_tests.zig`).
 
 **Fleets** (`src/llm/cartridge_fleet.zig`): the scale layer around
 composition — one cartridge per document instead of one monolith per
@@ -12312,7 +12318,8 @@ paper's recipe against composition collapse), builds the retrieval index
 through the model itself (topic-instruction-suffixed final-norm last
 hidden state, `Trainer.embedLastHidden` + `embed_suffix`), and serves
 `--ask` by cosine selection over chunks → document cartridges →
-`writeComposedToCache` → decode. lmserve serves fleets over HTTP
+`writeComposedToCache` → decode; qwen3 and gemma4 GGUFs (gemma uses the
+flat per-conversation backward). lmserve serves fleets over HTTP
 (`--fleet DIR`, per-request selection with conversation-sticky slot
 reuse — [LMSERVER.md](LMSERVER.md)).
 

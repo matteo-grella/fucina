@@ -309,19 +309,115 @@ test "cartridge forward rejects geometry and checkpoint misuse" {
         trainer.evalLogitsExt(&ctx, suffix, .{ .cartridge = &bad }),
     );
 
-    // Checkpointed layers cannot host a cartridge (or a capture).
+    // Checkpointed layers cannot host a capture, a composed prefix, or a
+    // cartridge on an ADAPTER trainer (the single-cartridge no-adapter
+    // combination is supported — pinned bitwise by the test below).
     var good = try trainer.initCartridge(&ctx, full_tokens[0..prefix_len], 1);
     defer good.deinit();
     trainer.checkpoint_layers = true;
     defer trainer.checkpoint_layers = false;
-    try std.testing.expectError(
-        qwen3_train.Error.CartridgeCheckpointUnsupported,
-        trainer.evalLogitsExt(&ctx, suffix, .{ .cartridge = &good }),
-    );
-    try std.testing.expectError(
-        qwen3_train.Error.CartridgeCheckpointUnsupported,
-        trainer.captureKv(&ctx, full_tokens[0..prefix_len]),
-    );
+    // captureKv (an init-time eval) transparently runs PLAIN under the
+    // flag — recompute buys nothing forward-only.
+    var cap = try trainer.captureKv(&ctx, full_tokens[0..prefix_len]);
+    cap.deinit();
+    // Training entries keep the rejection for non-input options: a
+    // composed prefix under recompute, and capture through the training
+    // forward.
+    {
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        try std.testing.expectError(
+            qwen3_train.Error.CartridgeCheckpointUnsupported,
+            trainer.distillLossExt(&ctx, suffix, .{ .cartridges = &.{&good} }, .{
+                .positions = &.{1},
+                .tokens = &.{2},
+                .logprobs = &.{0.0},
+            }, .{}),
+        );
+    }
+    var adapter_trainer = try qwen3_train.Trainer(.{ .q = true, .v = true }).init(&ctx, &model, .{ .rank = 2, .alpha = 4 }, 9);
+    defer adapter_trainer.deinit();
+    adapter_trainer.checkpoint_layers = true;
+    {
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        try std.testing.expectError(
+            qwen3_train.Error.CartridgeCheckpointUnsupported,
+            adapter_trainer.distillLossExt(&ctx, suffix, .{ .cartridge = &good }, .{
+                .positions = &.{1},
+                .tokens = &.{2},
+                .logprobs = &.{0.0},
+            }, .{}),
+        );
+    }
+}
+
+test "checkpointed cartridge training matches the plain path bitwise" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try scaffolding.buildTinyModel(&ctx, 3);
+    defer model.deinit();
+    var trainer = try CartridgeTrainer.init(&ctx, &model, no_lora, 7);
+    defer trainer.deinit();
+
+    // Teacher targets shared by both arms.
+    var teacher = try trainer.evalLogits(&ctx, &full_tokens);
+    defer teacher.deinit();
+    const vocab = model.config.vocab_size;
+    const teacher_data = try teacher.dataConst();
+    var builder = cartridge.TargetsBuilder.init(allocator);
+    defer builder.deinit();
+    for (1..suffix.len) |j| {
+        const row = teacher_data[(prefix_len + j - 1) * vocab ..][0..vocab];
+        try builder.appendRow(j, row, 5, 0.99);
+    }
+
+    // Same cartridge values for both arms; loss + row grads compared
+    // bitwise — the checkpoint contract (recompute must be exact).
+    var losses: [2]f32 = undefined;
+    var grads_k: [2][]f32 = .{ &.{}, &.{} };
+    var grads_v: [2][]f32 = .{ &.{}, &.{} };
+    defer {
+        for (grads_k) |g| allocator.free(g);
+        for (grads_v) |g| allocator.free(g);
+    }
+    for ([2]bool{ false, true }, 0..) |checkpointed, arm_i| {
+        trainer.checkpoint_layers = checkpointed;
+        var cart = try cartridge.Cartridge.initRandom(
+            &ctx,
+            allocator,
+            model.config.num_layers,
+            1,
+            prefix_len,
+            model.config.num_key_value_heads,
+            model.config.head_dim,
+            123,
+            0.05,
+        );
+        defer cart.deinit();
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        var loss = try trainer.distillLoss(&ctx, suffix, &cart, builder.targets(), null, .{});
+        defer loss.deinit();
+        try loss.backward(&ctx);
+        losses[arm_i] = try loss.item();
+        var gk = (try cart.layers[0].k.grad(&ctx)).?;
+        defer gk.deinit();
+        grads_k[arm_i] = try allocator.dupe(f32, try gk.dataConst());
+        var gv = (try cart.layers[0].v.grad(&ctx)).?;
+        defer gv.deinit();
+        grads_v[arm_i] = try allocator.dupe(f32, try gv.dataConst());
+    }
+    trainer.checkpoint_layers = false;
+
+    try std.testing.expectEqual(losses[0], losses[1]);
+    try std.testing.expectEqualSlices(f32, grads_k[0], grads_k[1]);
+    try std.testing.expectEqualSlices(f32, grads_v[0], grads_v[1]);
 }
 
 test "packed forward matches per-sequence forwards (no cartridge)" {

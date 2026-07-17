@@ -700,3 +700,184 @@ test "gemma4 forwardStepBatchSpans matches per-stream forwardStepAllLogits" {
         at += span_lens[si];
     }
 }
+
+test "gemma4 single-part composition is bitwise the single-cartridge forward" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    var cfg = tiny_config;
+    cfg.num_layers = 2;
+    cfg.sliding_window = 4;
+    var model = try buildTinyModel(&ctx, cfg, 0xca27c0313, false);
+    defer model.deinit();
+    model.geom.is_swa[1] = true;
+
+    var trainer = try CartridgeTrainer.init(&ctx, &model, .{ .rank = 1, .alpha = 1 }, 7);
+    defer trainer.deinit();
+
+    const full = [_]usize{ 14, 6, 25, 0, 13, 1, 26, 22, 5, 29, 31, 2 };
+    const p = 5;
+    const suffix = full[p..];
+    var cart = try trainer.initCartridge(&ctx, full[0..p], 1);
+    defer cart.deinit();
+
+    var single = try trainer.evalLogitsExt(&ctx, suffix, .{ .cartridge = &cart });
+    defer single.deinit();
+    var composed = try trainer.evalLogitsExt(&ctx, suffix, .{ .cartridges = &.{&cart} });
+    defer composed.deinit();
+    try std.testing.expectEqualSlices(f32, try single.dataConst(), try composed.dataConst());
+}
+
+test "gemma4 two-part composition matches the real prefill (SWA cuts the composed prefix)" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var cfg = tiny_config;
+    cfg.num_layers = 2;
+    cfg.sliding_window = 4;
+    var model = try buildTinyModel(&ctx, cfg, 0xca27dec0de, false);
+    defer model.deinit();
+    // The 4-token window cuts through BOTH parts of the 6-row composition:
+    // a query right after the prefix sees part B fully and part A not at
+    // all — exactly like a real prefill of the same 6 tokens.
+    model.geom.is_swa[1] = true;
+
+    var trainer = try CartridgeTrainer.init(&ctx, &model, .{ .rank = 1, .alpha = 1 }, 7);
+    defer trainer.deinit();
+
+    const full = [_]usize{ 14, 6, 25, 0, 13, 1, 26, 22, 5, 29, 31, 2 };
+    const p_a = 3;
+    const p_b = 3;
+    const prefix_len = p_a + p_b;
+    const suffix = full[prefix_len..];
+
+    var teacher = try trainer.evalLogitsExt(&ctx, &full, .{});
+    defer teacher.deinit();
+
+    // One capture of the whole prefix, split at p_a per layer (per-layer
+    // row lengths: gemma geometry may vary by layer).
+    var cap = try trainer.captureKv(&ctx, full[0..prefix_len]);
+    defer cap.deinit();
+    const geom = model.geom;
+    const n_layers = cap.k_rows.len;
+    const k_slices = try allocator.alloc([]const f32, n_layers);
+    defer allocator.free(k_slices);
+    const v_slices = try allocator.alloc([]const f32, n_layers);
+    defer allocator.free(v_slices);
+    for (0..n_layers) |l| {
+        const row = geom.kv_heads[l] * geom.head_dim[l];
+        k_slices[l] = cap.k_rows[l][0 .. p_a * row];
+        v_slices[l] = cap.v_rows[l][0 .. p_a * row];
+    }
+    var cart_a = try cartridge.Cartridge.initFromRowsVaried(&ctx, allocator, 1, p_a, geom.kv_heads, geom.head_dim, k_slices, v_slices);
+    defer cart_a.deinit();
+    for (0..n_layers) |l| {
+        const row = geom.kv_heads[l] * geom.head_dim[l];
+        k_slices[l] = cap.k_rows[l][p_a * row ..];
+        v_slices[l] = cap.v_rows[l][p_a * row ..];
+    }
+    var cart_b = try cartridge.Cartridge.initFromRowsVaried(&ctx, allocator, 1, p_b, geom.kv_heads, geom.head_dim, k_slices, v_slices);
+    defer cart_b.deinit();
+
+    var student = try trainer.evalLogitsExt(&ctx, suffix, .{ .cartridges = &.{ &cart_a, &cart_b } });
+    defer student.deinit();
+
+    const vocab = model.config.vocab_size;
+    const teacher_data = try teacher.dataConst();
+    const student_data = try student.dataConst();
+    try std.testing.expectEqual(@as(usize, suffix.len * vocab), student_data.len);
+    for (student_data, teacher_data[prefix_len * vocab ..], 0..) |got, want, i| {
+        const tol = 1e-5 + 1e-4 * @abs(want);
+        if (@abs(got - want) > tol) {
+            std.debug.print("gemma4 composed prefill-equivalence mismatch at {d}: want {d} got {d}\n", .{ i, want, got });
+            return error.ComposedEquivalenceMismatch;
+        }
+    }
+
+    // Serving parity: write A then B into an empty per-layer cache and run
+    // the production step path (f16 cache dtype: approximate but tight).
+    var cache = try kv_cache_mod.KvCache.initPerLayer(&ctx, geom.kv_heads, geom.head_dim, 32);
+    defer cache.deinit();
+    try cartridge.writeComposedToCache(&ctx, &.{ &cart_a, &cart_b }, &cache);
+    try std.testing.expectEqual(@as(usize, prefix_len), cache.len);
+    var served = try model.forwardStepAllLogits(&ctx, &cache, suffix, cache.len);
+    defer served.deinit();
+    for (try served.dataConst(), student_data) |g, w| {
+        try std.testing.expect(@abs(g - w) <= 5e-2 + 5e-3 * @abs(w));
+    }
+}
+
+test "gemma4 composed distillation routes gradients into every part (rejections included)" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var cfg = tiny_config;
+    cfg.num_layers = 2;
+    var model = try buildTinyModel(&ctx, cfg, 0xca27b0b5, false);
+    defer model.deinit();
+
+    var trainer = try CartridgeTrainer.init(&ctx, &model, .{ .rank = 1, .alpha = 1 }, 7);
+    defer trainer.deinit();
+
+    const full = [_]usize{ 14, 6, 25, 0, 13, 1, 26, 22, 5, 29, 31, 2 };
+    const p = 3;
+    const suffix = full[6..];
+    var cart_a = try trainer.initCartridge(&ctx, full[0..p], 1);
+    defer cart_a.deinit();
+    var cart_b = try trainer.initCartridge(&ctx, full[p..6], 1);
+    defer cart_b.deinit();
+
+    var teacher = try trainer.evalLogitsExt(&ctx, &full, .{});
+    defer teacher.deinit();
+    const vocab = model.config.vocab_size;
+    const teacher_data = try teacher.dataConst();
+    var builder = cartridge.TargetsBuilder.init(allocator);
+    defer builder.deinit();
+    for (1..suffix.len) |j| {
+        try builder.appendRow(j, teacher_data[(6 + j - 1) * vocab ..][0..vocab], 5, 0.99);
+    }
+
+    {
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        var loss = try trainer.distillLossExt(&ctx, suffix, .{ .cartridges = &.{ &cart_a, &cart_b } }, builder.targets(), .{});
+        defer loss.deinit();
+        try loss.backward(&ctx);
+    }
+    inline for (.{ &cart_a, &cart_b }) |part| {
+        try std.testing.expect(!part.layers[0].k_sink.?.requiresGrad());
+        var grad = (try part.layers[0].k.grad(&ctx)) orelse return error.MissingComposedGrad;
+        defer grad.deinit();
+        var nonzero = false;
+        for (grad.asRawTensor().dataConst()) |g| nonzero = nonzero or (g != 0);
+        try std.testing.expect(nonzero);
+        part.zeroGrad();
+    }
+
+    // Rejections: both fields set, empty part list, layer-count mismatch.
+    try std.testing.expectError(
+        gemma4_train.Error.CartridgeGeometry,
+        trainer.evalLogitsExt(&ctx, suffix, .{ .cartridge = &cart_a, .cartridges = &.{&cart_b} }),
+    );
+    try std.testing.expectError(
+        gemma4_train.Error.CartridgeGeometry,
+        trainer.evalLogitsExt(&ctx, suffix, .{ .cartridges = &.{} }),
+    );
+    var short = try cartridge.Cartridge.initRandom(&ctx, allocator, 1, 1, p, 1, cfg.head_dim_global, 3, 0.02);
+    defer short.deinit();
+    try std.testing.expectError(
+        gemma4_train.Error.CartridgeGeometry,
+        trainer.evalLogitsExt(&ctx, suffix, .{ .cartridges = &.{&short} }),
+    );
+}
