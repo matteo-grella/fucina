@@ -5,7 +5,7 @@ the result into a servable model: fine-tune, merge the adapters into dense
 weights, quantize the merged model in a second pass, then chat with it or
 serve it over HTTP.
 
-Entry point: [`examples/finetune.zig`](../finetune.zig) (`zig build finetune`).
+Entry point: [`main.zig`](main.zig) (`zig build finetune`).
 The merge/quantize passes are `zig build export-gguf`
 ([`tools/export_gguf.zig`](../../tools/export_gguf.zig)); serving is
 `zig build qwen3` or `zig build lmserve`.

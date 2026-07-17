@@ -121,10 +121,32 @@ pub fn build(b: *std.Build) void {
     llm_module.addImport("fucina", module);
     llm_module.addOptions("llm_build_options", llm_options);
 
+    // Cross-example reuse: a module cannot @import above its root source
+    // file's directory, so example code shared across folders is exposed as
+    // named modules, created ONCE from the SAME fucina/fucina_llm modules
+    // above (type identity across every consumer).
+    const facedetect_image_module = b.createModule(.{
+        .root_source_file = b.path("examples/facedetect/image.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const nam_audio_module = b.createModule(.{
+        .root_source_file = b.path("examples/nam/audio.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const nanochat_module = b.createModule(.{
+        .root_source_file = b.path("examples/nanochat/nanochat.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    nanochat_module.addImport("fucina", module);
+    nanochat_module.addImport("fucina_llm", llm_module);
+
     const exe = b.addExecutable(.{
-        .name = "fucina-zig-smoke",
+        .name = "fucina-smoke",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/smoke.zig"),
+            .root_source_file = b.path("examples/smoke/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -140,13 +162,16 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    const run_step = b.step("run", "Run the smoke example");
+    const smoke_step = b.step("smoke", "Run the smoke example");
+    smoke_step.dependOn(&run_cmd.step);
+
+    const run_step = b.step("run", "Run the smoke example (alias of smoke)");
     run_step.dependOn(&run_cmd.step);
 
     const facedetect_exe = b.addExecutable(.{
-        .name = "fucina-zig-facedetect",
+        .name = "fucina-facedetect",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/facedetect.zig"),
+            .root_source_file = b.path("examples/facedetect/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -166,9 +191,9 @@ pub fn build(b: *std.Build) void {
     facedetect_step.dependOn(&facedetect_cmd.step);
 
     const nanochat_exe = b.addExecutable(.{
-        .name = "fucina-zig-nanochat",
+        .name = "fucina-nanochat",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/nanochat.zig"),
+            .root_source_file = b.path("examples/nanochat/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -193,9 +218,9 @@ pub fn build(b: *std.Build) void {
     nanochat_step.dependOn(&nanochat_cmd.step);
 
     const spirals_exe = b.addExecutable(.{
-        .name = "fucina-zig-spirals",
+        .name = "fucina-spirals",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/spirals.zig"),
+            .root_source_file = b.path("examples/spirals/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -215,9 +240,9 @@ pub fn build(b: *std.Build) void {
     spirals_step.dependOn(&spirals_cmd.step);
 
     const nam_exe = b.addExecutable(.{
-        .name = "fucina-zig-nam",
+        .name = "fucina-nam",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/nam.zig"),
+            .root_source_file = b.path("examples/nam/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -238,9 +263,9 @@ pub fn build(b: *std.Build) void {
     nam_step.dependOn(&nam_cmd.step);
 
     const qwen3_exe = b.addExecutable(.{
-        .name = "fucina-zig-qwen3",
+        .name = "fucina-qwen3",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/qwen3.zig"),
+            .root_source_file = b.path("examples/qwen3/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -262,9 +287,9 @@ pub fn build(b: *std.Build) void {
     qwen3_step.dependOn(&qwen3_cmd.step);
 
     const deepseek2_exe = b.addExecutable(.{
-        .name = "fucina-zig-deepseek2",
+        .name = "fucina-deepseek2",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/deepseek2.zig"),
+            .root_source_file = b.path("examples/deepseek2/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -285,15 +310,16 @@ pub fn build(b: *std.Build) void {
     deepseek2_step.dependOn(&deepseek2_cmd.step);
 
     const inkling_exe = b.addExecutable(.{
-        .name = "fucina-zig-inkling",
+        .name = "fucina-inkling",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/inkling.zig"),
+            .root_source_file = b.path("examples/inkling/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
     inkling_exe.root_module.addImport("fucina", module);
     inkling_exe.root_module.addImport("fucina_llm", llm_module);
+    inkling_exe.root_module.addImport("facedetect_image", facedetect_image_module);
     configureBlas(inkling_exe, blas_kind);
     configureGpu(b, inkling_exe, gpu_kind);
     const inkling_install = installArtifactStep(b, inkling_exe);
@@ -308,9 +334,9 @@ pub fn build(b: *std.Build) void {
     inkling_step.dependOn(&inkling_cmd.step);
 
     const glm4moe_exe = b.addExecutable(.{
-        .name = "fucina-zig-glm4moe",
+        .name = "fucina-glm4moe",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/glm4moe.zig"),
+            .root_source_file = b.path("examples/glm4moe/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -331,9 +357,9 @@ pub fn build(b: *std.Build) void {
     glm4moe_step.dependOn(&glm4moe_cmd.step);
 
     const deepseek4_exe = b.addExecutable(.{
-        .name = "fucina-zig-deepseek4",
+        .name = "fucina-deepseek4",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/deepseek4.zig"),
+            .root_source_file = b.path("examples/deepseek4/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -354,9 +380,9 @@ pub fn build(b: *std.Build) void {
     deepseek4_step.dependOn(&deepseek4_cmd.step);
 
     const omnivoice_exe = b.addExecutable(.{
-        .name = "fucina-zig-omnivoice",
+        .name = "fucina-omnivoice",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/omnivoice.zig"),
+            .root_source_file = b.path("examples/omnivoice/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -378,9 +404,9 @@ pub fn build(b: *std.Build) void {
     omnivoice_step.dependOn(&omnivoice_cmd.step);
 
     const locate_anything_exe = b.addExecutable(.{
-        .name = "fucina-zig-locate-anything",
+        .name = "fucina-locate-anything",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/locate_anything.zig"),
+            .root_source_file = b.path("examples/locate_anything/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -401,9 +427,9 @@ pub fn build(b: *std.Build) void {
     locate_anything_step.dependOn(&locate_anything_cmd.step);
 
     const finetune_exe = b.addExecutable(.{
-        .name = "fucina-zig-finetune",
+        .name = "fucina-finetune",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/finetune.zig"),
+            .root_source_file = b.path("examples/finetune/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -424,9 +450,9 @@ pub fn build(b: *std.Build) void {
     finetune_step.dependOn(&finetune_cmd.step);
 
     const cartridge_exe = b.addExecutable(.{
-        .name = "fucina-zig-cartridge",
+        .name = "fucina-cartridge",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/cartridge.zig"),
+            .root_source_file = b.path("examples/cartridge/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -447,9 +473,9 @@ pub fn build(b: *std.Build) void {
     cartridge_step.dependOn(&cartridge_cmd.step);
 
     const cartridge_fleet_exe = b.addExecutable(.{
-        .name = "fucina-zig-cartridge-fleet",
+        .name = "fucina-cartridge-fleet",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/cartridge_fleet.zig"),
+            .root_source_file = b.path("examples/cartridge_fleet/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -470,9 +496,9 @@ pub fn build(b: *std.Build) void {
     cartridge_fleet_step.dependOn(&cartridge_fleet_cmd.step);
 
     const engram_exe = b.addExecutable(.{
-        .name = "fucina-zig-engram",
+        .name = "fucina-engram",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/engram.zig"),
+            .root_source_file = b.path("examples/engram/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -493,9 +519,9 @@ pub fn build(b: *std.Build) void {
     engram_step.dependOn(&engram_cmd.step);
 
     const es_finetune_exe = b.addExecutable(.{
-        .name = "fucina-zig-es-finetune",
+        .name = "fucina-es-finetune",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/es_finetune.zig"),
+            .root_source_file = b.path("examples/es_finetune/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -516,9 +542,9 @@ pub fn build(b: *std.Build) void {
     es_finetune_step.dependOn(&es_finetune_cmd.step);
 
     const es_spirals_exe = b.addExecutable(.{
-        .name = "fucina-zig-es-spirals",
+        .name = "fucina-es-spirals",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/es_spirals.zig"),
+            .root_source_file = b.path("examples/es_spirals/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -538,9 +564,9 @@ pub fn build(b: *std.Build) void {
     es_spirals_step.dependOn(&es_spirals_cmd.step);
 
     const es_ternary_spirals_exe = b.addExecutable(.{
-        .name = "fucina-zig-es-ternary-spirals",
+        .name = "fucina-es-ternary-spirals",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/es_ternary_spirals.zig"),
+            .root_source_file = b.path("examples/es_ternary_spirals/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -560,9 +586,9 @@ pub fn build(b: *std.Build) void {
     es_ternary_spirals_step.dependOn(&es_ternary_spirals_cmd.step);
 
     const ptqtp_spirals_exe = b.addExecutable(.{
-        .name = "fucina-zig-ptqtp-spirals",
+        .name = "fucina-ptqtp-spirals",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/ptqtp_spirals.zig"),
+            .root_source_file = b.path("examples/ptqtp_spirals/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -582,9 +608,9 @@ pub fn build(b: *std.Build) void {
     ptqtp_spirals_step.dependOn(&ptqtp_spirals_cmd.step);
 
     const ptqtp_qwen3_exe = b.addExecutable(.{
-        .name = "fucina-zig-ptqtp-qwen3",
+        .name = "fucina-ptqtp-qwen3",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/ptqtp_qwen3.zig"),
+            .root_source_file = b.path("examples/ptqtp_qwen3/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -605,9 +631,9 @@ pub fn build(b: *std.Build) void {
     ptqtp_qwen3_step.dependOn(&ptqtp_qwen3_cmd.step);
 
     const gemma4_exe = b.addExecutable(.{
-        .name = "fucina-zig-gemma4",
+        .name = "fucina-gemma4",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/gemma4.zig"),
+            .root_source_file = b.path("examples/gemma4/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -629,15 +655,16 @@ pub fn build(b: *std.Build) void {
     gemma4_step.dependOn(&gemma4_cmd.step);
 
     const lmserve_exe = b.addExecutable(.{
-        .name = "fucina-zig-lmserve",
+        .name = "fucina-lmserve",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/lmserve.zig"),
+            .root_source_file = b.path("examples/lmserve/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
     lmserve_exe.root_module.addImport("fucina", module);
     lmserve_exe.root_module.addImport("fucina_llm", llm_module);
+    lmserve_exe.root_module.addImport("nanochat", nanochat_module);
     configureBlas(lmserve_exe, blas_kind);
     configureGpu(b, lmserve_exe, gpu_kind);
     configureLlguidance(lmserve_exe, llguidance_dep);
@@ -657,15 +684,16 @@ pub fn build(b: *std.Build) void {
     lmserve_step.dependOn(&lmserve_cmd.step);
 
     const parakeet_exe = b.addExecutable(.{
-        .name = "fucina-zig-parakeet",
+        .name = "fucina-parakeet",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/parakeet.zig"),
+            .root_source_file = b.path("examples/parakeet/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
     parakeet_exe.root_module.addImport("fucina", module);
     parakeet_exe.root_module.addImport("fucina_llm", llm_module);
+    parakeet_exe.root_module.addImport("nam_audio", nam_audio_module);
     const parakeet_opts = b.addOptions();
     parakeet_opts.addOption(bool, "parakeet_mic", parakeet_mic);
     parakeet_exe.root_module.addOptions("build_options", parakeet_opts);
@@ -692,9 +720,9 @@ pub fn build(b: *std.Build) void {
     bench_gate_step.dependOn(&bench_gate_cmd.step);
 
     const diffusion_gemma_exe = b.addExecutable(.{
-        .name = "fucina-zig-diffusion-gemma",
+        .name = "fucina-diffusion-gemma",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/diffusion_gemma.zig"),
+            .root_source_file = b.path("examples/diffusion_gemma/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -716,9 +744,9 @@ pub fn build(b: *std.Build) void {
     diffusion_gemma_step.dependOn(&diffusion_gemma_cmd.step);
 
     const qwen35_exe = b.addExecutable(.{
-        .name = "fucina-zig-qwen35",
+        .name = "fucina-qwen35",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/qwen35.zig"),
+            .root_source_file = b.path("examples/qwen35/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -739,7 +767,7 @@ pub fn build(b: *std.Build) void {
     qwen35_step.dependOn(&qwen35_cmd.step);
 
     const export_gguf_exe = b.addExecutable(.{
-        .name = "fucina-zig-export-gguf",
+        .name = "fucina-export-gguf",
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/export_gguf.zig"),
             .target = target,
@@ -762,7 +790,7 @@ pub fn build(b: *std.Build) void {
     export_gguf_step.dependOn(&export_gguf_cmd.step);
 
     const arch_check_exe = b.addExecutable(.{
-        .name = "fucina-zig-arch-check",
+        .name = "fucina-arch-check",
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/check_import_graph.zig"),
             .target = target,
@@ -775,7 +803,7 @@ pub fn build(b: *std.Build) void {
     arch_check_step.dependOn(&arch_check_cmd.step);
 
     const doc_check_exe = b.addExecutable(.{
-        .name = "fucina-zig-doc-check",
+        .name = "fucina-doc-check",
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/check_doc_links.zig"),
             .target = target,
@@ -794,7 +822,7 @@ pub fn build(b: *std.Build) void {
     // doc example that stops compiling or asserting fails the build — the
     // doc-check counterpart for snippet rot.
     const snippet_gen_exe = b.addExecutable(.{
-        .name = "fucina-zig-gen-snippet-tests",
+        .name = "fucina-gen-snippet-tests",
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/gen_snippet_tests.zig"),
             .target = target,
@@ -828,7 +856,7 @@ pub fn build(b: *std.Build) void {
     // cross-invoked (e.g. -Dtarget=x86_64-macos -Dcpu=baseline -frosetta);
     // natively on the aarch64 dev machine it executes the sdot arms.
     const x86dot_check_exe = b.addExecutable(.{
-        .name = "fucina-zig-x86dot-check",
+        .name = "fucina-x86dot-check",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/x86dot_check.zig"),
             .target = target,
@@ -857,7 +885,7 @@ pub fn build(b: *std.Build) void {
     };
     for (x86dot_check_compile_legs) |leg_query| {
         const leg_exe = b.addExecutable(.{
-            .name = b.fmt("fucina-zig-x86dot-check-{s}", .{leg_query.cpu_model.explicit.name}),
+            .name = b.fmt("fucina-x86dot-check-{s}", .{leg_query.cpu_model.explicit.name}),
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/x86dot_check.zig"),
                 .target = b.resolveTargetQuery(leg_query),
@@ -933,7 +961,7 @@ pub fn build(b: *std.Build) void {
         cuda_ptx_gen_module.addImport("cuda_api", cuda_api_module);
         cuda_ptx_gen_module.link_libc = true;
         const cuda_ptx_gen = b.addExecutable(.{
-            .name = "fucina-zig-gen-cuda-ptx",
+            .name = "fucina-gen-cuda-ptx",
             .root_module = cuda_ptx_gen_module,
         });
         _ = cuda_ptx_gen.getEmittedBin();
@@ -941,7 +969,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const bench_exe = b.addExecutable(.{
-        .name = "fucina-zig-bench",
+        .name = "fucina-bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/mlp.zig"),
             .target = target,
@@ -967,7 +995,7 @@ pub fn build(b: *std.Build) void {
     bench_step.dependOn(&bench_cmd.step);
 
     const optim_bench_exe = b.addExecutable(.{
-        .name = "fucina-zig-optim-bench",
+        .name = "fucina-optim-bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/optim.zig"),
             .target = target,
@@ -987,7 +1015,7 @@ pub fn build(b: *std.Build) void {
     optim_bench_step.dependOn(&optim_bench_cmd.step);
 
     const ce_bench_exe = b.addExecutable(.{
-        .name = "fucina-zig-ce-bench",
+        .name = "fucina-ce-bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/ce.zig"),
             .target = target,
@@ -1007,7 +1035,7 @@ pub fn build(b: *std.Build) void {
     ce_bench_step.dependOn(&ce_bench_cmd.step);
 
     const conv_bench_exe = b.addExecutable(.{
-        .name = "fucina-zig-conv-bench",
+        .name = "fucina-conv-bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/conv.zig"),
             .target = target,
@@ -1027,7 +1055,7 @@ pub fn build(b: *std.Build) void {
     conv_bench_step.dependOn(&conv_bench_cmd.step);
 
     const scatter_bench_exe = b.addExecutable(.{
-        .name = "fucina-zig-scatter-bench",
+        .name = "fucina-scatter-bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/scatter.zig"),
             .target = target,
@@ -1047,7 +1075,7 @@ pub fn build(b: *std.Build) void {
     scatter_bench_step.dependOn(&scatter_bench_cmd.step);
 
     const backward_diamond_bench_exe = b.addExecutable(.{
-        .name = "fucina-zig-backward-diamond-bench",
+        .name = "fucina-backward-diamond-bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/backward_diamond.zig"),
             .target = target,
@@ -1067,7 +1095,7 @@ pub fn build(b: *std.Build) void {
     backward_diamond_bench_step.dependOn(&backward_diamond_bench_cmd.step);
 
     const attention_backward_bench_exe = b.addExecutable(.{
-        .name = "fucina-zig-attention-backward-bench",
+        .name = "fucina-attention-backward-bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/attention_backward.zig"),
             .target = target,
@@ -1089,7 +1117,7 @@ pub fn build(b: *std.Build) void {
     // Backend comparison benchmark. No ggml C kernels are linked by the Zig
     // project; pure Zig vector kernels are internal to the native backend.
     const backend_bench_exe = b.addExecutable(.{
-        .name = "fucina-zig-backend-bench",
+        .name = "fucina-backend-bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/backend.zig"),
             .target = target,
@@ -1120,7 +1148,7 @@ pub fn build(b: *std.Build) void {
     backend_bench_step.dependOn(&backend_bench_cmd.step);
 
     const f16gemm_bench_exe = b.addExecutable(.{
-        .name = "fucina-zig-f16gemm-bench",
+        .name = "fucina-f16gemm-bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/f16gemm.zig"),
             .target = target,
@@ -1138,7 +1166,7 @@ pub fn build(b: *std.Build) void {
     f16gemm_bench_step.dependOn(&f16gemm_bench_cmd.step);
 
     const gemm_bench_exe = b.addExecutable(.{
-        .name = "fucina-zig-gemm-bench",
+        .name = "fucina-gemm-bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/gemm.zig"),
             .target = target,
@@ -1156,7 +1184,7 @@ pub fn build(b: *std.Build) void {
     gemm_bench_step.dependOn(&gemm_bench_cmd.step);
 
     const packed_gemm_bench_exe = b.addExecutable(.{
-        .name = "fucina-zig-packed-gemm-bench",
+        .name = "fucina-packed-gemm-bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/packed_gemm.zig"),
             .target = target,
@@ -1172,7 +1200,7 @@ pub fn build(b: *std.Build) void {
     packed_gemm_bench_step.dependOn(&packed_gemm_bench_cmd.step);
 
     const gpu_dispatch_bench_exe = b.addExecutable(.{
-        .name = "fucina-zig-gpu-dispatch-bench",
+        .name = "fucina-gpu-dispatch-bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/gpu_dispatch.zig"),
             .target = target,
@@ -1188,7 +1216,7 @@ pub fn build(b: *std.Build) void {
     gpu_dispatch_bench_step.dependOn(&gpu_dispatch_bench_cmd.step);
 
     const gpu_formats_bench_exe = b.addExecutable(.{
-        .name = "fucina-zig-gpu-formats-bench",
+        .name = "fucina-gpu-formats-bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/gpu_formats.zig"),
             .target = target,
@@ -1204,7 +1232,7 @@ pub fn build(b: *std.Build) void {
     gpu_formats_bench_step.dependOn(&gpu_formats_bench_cmd.step);
 
     const q5kmoe_bench_exe = b.addExecutable(.{
-        .name = "fucina-zig-q5kmoe-bench",
+        .name = "fucina-q5kmoe-bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/q5kmoe.zig"),
             .target = target,
@@ -1225,7 +1253,7 @@ pub fn build(b: *std.Build) void {
     q5kmoe_bench_step.dependOn(&q5kmoe_bench_cmd.step);
 
     const ternary_bench_exe = b.addExecutable(.{
-        .name = "fucina-zig-ternary-bench",
+        .name = "fucina-ternary-bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/ternary.zig"),
             .target = target,
@@ -1245,7 +1273,7 @@ pub fn build(b: *std.Build) void {
     ternary_bench_step.dependOn(&ternary_bench_cmd.step);
 
     const facade_bench_exe = b.addExecutable(.{
-        .name = "fucina-zig-facade-bench",
+        .name = "fucina-facade-bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/facade.zig"),
             .target = target,
@@ -1265,7 +1293,7 @@ pub fn build(b: *std.Build) void {
     facade_bench_step.dependOn(&facade_bench_cmd.step);
 
     const einsum_bench_exe = b.addExecutable(.{
-        .name = "fucina-zig-einsum-bench",
+        .name = "fucina-einsum-bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/einsum.zig"),
             .target = target,
@@ -1348,13 +1376,14 @@ pub fn build(b: *std.Build) void {
 
     const lmserve_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/lmserve.zig"),
+            .root_source_file = b.path("examples/lmserve/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
     lmserve_tests.root_module.addImport("fucina", module);
     lmserve_tests.root_module.addImport("fucina_llm", llm_module);
+    lmserve_tests.root_module.addImport("nanochat", nanochat_module);
     configureBlas(lmserve_tests, blas_kind);
     configureGpu(b, lmserve_tests, gpu_kind);
     configureLlguidance(lmserve_tests, llguidance_dep);
@@ -1365,7 +1394,7 @@ pub fn build(b: *std.Build) void {
 
     const nam_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/nam.zig"),
+            .root_source_file = b.path("examples/nam/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -1380,13 +1409,14 @@ pub fn build(b: *std.Build) void {
 
     const parakeet_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/parakeet.zig"),
+            .root_source_file = b.path("examples/parakeet/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
     parakeet_tests.root_module.addImport("fucina", module);
     parakeet_tests.root_module.addImport("fucina_llm", llm_module);
+    parakeet_tests.root_module.addImport("nam_audio", nam_audio_module);
     parakeet_tests.root_module.addOptions("build_options", parakeet_opts);
     configureBlas(parakeet_tests, blas_kind);
     configureGpu(b, parakeet_tests, gpu_kind);
@@ -1397,7 +1427,7 @@ pub fn build(b: *std.Build) void {
 
     const omnivoice_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/omnivoice.zig"),
+            .root_source_file = b.path("examples/omnivoice/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -1413,7 +1443,7 @@ pub fn build(b: *std.Build) void {
 
     const locate_anything_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/locate_anything.zig"),
+            .root_source_file = b.path("examples/locate_anything/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -1428,7 +1458,7 @@ pub fn build(b: *std.Build) void {
 
     const facedetect_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/facedetect.zig"),
+            .root_source_file = b.path("examples/facedetect/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -1442,7 +1472,7 @@ pub fn build(b: *std.Build) void {
 
     const nanochat_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/nanochat.zig"),
+            .root_source_file = b.path("examples/nanochat/main.zig"),
             .target = target,
             .optimize = optimize,
         }),

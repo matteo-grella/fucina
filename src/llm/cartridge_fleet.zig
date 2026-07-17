@@ -25,7 +25,7 @@
 //! concatenated ahead of the query) and the joint-training forward live in
 //! `cartridge.zig` (`writeComposedToCache`) and the qwen3 trainer
 //! (`ForwardOptions.cartridges`); the self-study loop lives in
-//! `examples/cartridge_fleet.zig`. Design record: `docs/CARTRIDGES.md`.
+//! `examples/cartridge_fleet/main.zig`. Design record: `docs/CARTRIDGES.md`.
 
 const std = @import("std");
 const fucina = @import("fucina");

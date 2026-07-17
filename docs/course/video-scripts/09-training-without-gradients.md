@@ -43,7 +43,7 @@ is evolution strategies, and its best trick is about memory.
 the VO negates them, leaving only "θ" and an arrow labeled "one scalar
 reward per candidate". On "Ahoy!", a small card quotes the rule-reward
 example from §9.8: *starts with `Ahoy!`, ends with `matey.`* (from
-`examples/es_finetune.zig`, described in the chapter).
+`examples/es_finetune/main.zig`, described in the chapter).
 
 **Overlay:** "forward passes only — no `backward()`, no graph, no optimizer
 state (`src/es.zig`)".
@@ -101,7 +101,7 @@ self-verifying: it exits non-zero below ninety percent accuracy, and chance
 is fifty. On an M1 Max it reaches one hundred percent in about fifteen
 thousand iterations — around seventy-five seconds.
 
-**Visual:** Brief code shot: `examples/es_spirals.zig:39–48` — the `Model`
+**Visual:** Brief code shot: `examples/es_spirals/main.zig:39–48` — the `Model`
 struct whose doc comment says "as CONSTANTS: ES needs no gradients, so
 nothing here is a variable". Then the segment's centerpiece, a terminal
 recording: `zig build es-spirals -Doptimize=ReleaseFast` — capture the
@@ -125,8 +125,8 @@ weights with no gradient to take, rule rewards with no derivative,
 full-parameter fine-tuning with no backward memory.
 
 **Visual:** Comparison diagram, two labeled bars: "backprop
-(`examples/spirals.zig`): 2,000 gradient steps" vs "ES
-(`examples/es_spirals.zig`): ~15,000 iterations × 128 members ≈ 2M member
+(`examples/spirals/main.zig`): 2,000 gradient steps" vs "ES
+(`examples/es_spirals/main.zig`): ~15,000 iterations × 128 members ≈ 2M member
 evaluations" — the ES bar drawn dramatically longer. Then a three-item
 "reach" card: *quantized/ternary weights (packed TQ2_0 genomes)* ·
 *non-differentiable rule rewards ("Ahoy!")* · *no-backward-memory
@@ -165,8 +165,8 @@ card: "Next: The guitar amp — real-time neural audio".
   (config.seed, iteration, member), "Checkpoint contract" doc comment.
 - `src/es.zig:1–6` — module doc licensing stance ("reimplemented … not
   ported").
-- `examples/es_spirals.zig:39–48` — the `Model` struct of plain constants.
-- Optional spare: `examples/es_spirals.zig:322–324` — the two-line training
+- `examples/es_spirals/main.zig:39–48` — the `Model` struct of plain constants.
+- Optional spare: `examples/es_spirals/main.zig:322–324` — the two-line training
   loop (`evaluateMembers` + `update`), if the showcase segment needs a beat
   between code and terminal.
 
@@ -231,7 +231,7 @@ no model weights are needed anywhere in this episode.
 - **Numbers appearing in the video and their sources:** 72 GB = 30 ×
   0.6e9 × 4 bytes (§9.2, arithmetic); ~15k iterations, ~75 s, ~5 ms/iter,
   population 128, 100% accuracy (docs/TRAINING.md:982–988 via §9.6, M1 Max
-  ReleaseFast); 2,000 gradient steps (`examples/spirals.zig:26` via §9.6);
+  ReleaseFast); 2,000 gradient steps (`examples/spirals/main.zig:26` via §9.6);
   "nearly two million member evaluations" (§9.6's own arithmetic); target
   0.90 / chance 0.50 (§9.6); 4,482 parameters and 4 default workers (§9.6,
   VO says "four worker threads" — the chapter's stated default); three

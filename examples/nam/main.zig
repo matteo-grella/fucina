@@ -8,19 +8,19 @@
 const std = @import("std");
 const fucina = @import("fucina");
 
-const nam_file = @import("nam/nam_file.zig");
-const wav = @import("nam/wav.zig");
-const engine_mod = @import("nam/engine.zig");
-const ir_cab = @import("nam/ir_cab.zig");
-const chain_mod = @import("nam/chain.zig");
-const data = @import("nam/data.zig");
-const train_mod = @import("nam/train.zig");
-const nam_export = @import("nam/nam_export.zig");
-const audio_mod = @import("nam/audio.zig");
-const midi_mod = @import("nam/midi.zig");
-const live_mod = @import("nam/live.zig");
-const gguf_compat = @import("nam/gguf_compat.zig");
-const ui = @import("nam/ui.zig");
+const nam_file = @import("nam_file.zig");
+const wav = @import("wav.zig");
+const engine_mod = @import("engine.zig");
+const ir_cab = @import("ir_cab.zig");
+const chain_mod = @import("chain.zig");
+const data = @import("data.zig");
+const train_mod = @import("train.zig");
+const nam_export = @import("nam_export.zig");
+const audio_mod = @import("audio.zig");
+const midi_mod = @import("midi.zig");
+const live_mod = @import("live.zig");
+const gguf_compat = @import("gguf_compat.zig");
+const ui = @import("ui.zig");
 
 const usage =
     \\fucina NAM — Neural Amp Modeler (see examples/nam/README.md)
@@ -1539,21 +1539,21 @@ fn hasFullRig(s: []const u8) bool {
 const rng = fucina.rng;
 
 test {
-    _ = @import("nam/wav.zig");
-    _ = @import("nam/nam_file.zig");
-    _ = @import("nam/activations.zig");
-    _ = @import("nam/stream_conv.zig");
-    _ = @import("nam/wavenet.zig");
-    _ = @import("nam/models.zig");
-    _ = @import("nam/engine.zig");
-    _ = @import("nam/data.zig");
-    _ = @import("nam/train.zig");
-    _ = @import("nam/nam_export.zig");
-    _ = @import("nam/gguf_compat.zig");
-    _ = @import("nam/ir_cab.zig");
-    _ = @import("nam/chain.zig");
-    _ = @import("nam/live.zig");
-    _ = @import("nam/midi.zig");
-    _ = @import("nam/tuner.zig");
-    _ = @import("nam/ui.zig");
+    _ = @import("wav.zig");
+    _ = @import("nam_file.zig");
+    _ = @import("activations.zig");
+    _ = @import("stream_conv.zig");
+    _ = @import("wavenet.zig");
+    _ = @import("models.zig");
+    _ = @import("engine.zig");
+    _ = @import("data.zig");
+    _ = @import("train.zig");
+    _ = @import("nam_export.zig");
+    _ = @import("gguf_compat.zig");
+    _ = @import("ir_cab.zig");
+    _ = @import("chain.zig");
+    _ = @import("live.zig");
+    _ = @import("midi.zig");
+    _ = @import("tuner.zig");
+    _ = @import("ui.zig");
 }

@@ -102,8 +102,8 @@ and its training step is your five-line loop grown up: forward, loss,
 backward, step, zero the gradients. One command runs it.
 
 **Visual:** One diagram: scatter plot of the two spiral arms in two colors
-(points generated from the `makeSpirals` math, `examples/spirals.zig:168–186`,
-seed 1234). Then code shot: `trainStep`, `examples/spirals.zig:144–153`, its
+(points generated from the `makeSpirals` math, `examples/spirals/main.zig:168–186`,
+seed 1234). Then code shot: `trainStep`, `examples/spirals/main.zig:144–153`, its
 five body calls highlighted in the order the VO names them. Then terminal
 recording: `zig build spirals -Doptimize=ReleaseFast` from the repo root,
 loss and accuracy lines scrolling.
@@ -133,18 +133,18 @@ Chapter 8") fading into the next-episode title card.
   named `one_knob.zig`. It must compile and pass as-is.
 - **Terminal recording 1:** `zig test one_knob.zig` with the pinned toolchain
   (Zig 0.16.0), showing the passing run.
-- **Code shot:** `examples/spirals.zig` lines 144–153 (`trainStep`).
+- **Code shot:** `examples/spirals/main.zig` lines 144–153 (`trainStep`).
   Optional b-roll if a beat needs filling: lines 129–142 (`forwardLogits`).
 - **Terminal recording 2:** `zig build spirals -Doptimize=ReleaseFast` from
   the repo root (the file's own header recommends this invocation,
-  `examples/spirals.zig:14`). No model download needed — the demo generates
+  `examples/spirals/main.zig:14`). No model download needed — the demo generates
   its own data.
 - **Diagram 1:** parabola `L(w) = (2w − 6)²` with minimum at w = 3 and an
   animated dot descending from w = 1.
 - **Diagram 2 (table):** the §2.3 descent table, steps 0–3, rows revealed one
   at a time (numbers exactly as in the chapter).
 - **Diagram 3:** two-spirals scatter in two colors, generated from the
-  `makeSpirals` math (`examples/spirals.zig:168–186`: θ = 3.5π·t,
+  `makeSpirals` math (`examples/spirals/main.zig:168–186`: θ = 3.5π·t,
   r = 0.15 + 0.85·t, class 1 = class 0 negated, noise σ ≈ 0.02, seed 1234,
   400 points).
 - **Text cards:** the chapter's three-sentence opening list (lines 14–17);

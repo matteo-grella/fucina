@@ -58,7 +58,7 @@ zig build spirals -Doptimize=ReleaseFast
 It trains a small neural network to separate two interleaved spirals — once
 per optimizer — printing a loss and accuracy line for each, plus a
 checkpoint-resume check that must come out *bit-exact*
-(`examples/spirals.zig`). [Chapter 08](08-training.md) walks through every
+(`examples/spirals/main.zig`). [Chapter 08](08-training.md) walks through every
 line; for now it is proof that a complete train-checkpoint-infer loop lives
 in one ordinary Zig file.
 
@@ -161,7 +161,7 @@ runtime; the signature is `pub fn init(self: *ExecContext, allocator:
 Allocator) void` (`src/exec.zig:126`).
 
 Outside tests, the demo programs use the debug allocator with an explicit
-leak check — from `examples/spirals.zig:327-330`:
+leak check — from `examples/spirals/main.zig:327-330`:
 
 ```zig
 pub fn main(init: std.process.Init) !void {
@@ -298,7 +298,7 @@ and that document records why.)
 error**. It exists for partial construction: you have built three of six
 things, the fourth fails — the first three must be freed, but only on that
 failure path (on success, the caller takes ownership). Fucina's model
-constructor is a textbook ladder (`examples/spirals.zig:54-66`, abridged):
+constructor is a textbook ladder (`examples/spirals/main.zig:54-66`, abridged):
 
 ```zig
 var w1 = try Tensor(.{ .h1, .in }).variableFromSlice(ctx, .{ hidden, 2 }, &w1_buf);
@@ -459,7 +459,7 @@ no framework.
 Two more struct facts carry Fucina's architecture:
 
 **A model is just a struct of tensors.** The spirals demo's entire network is
-(`examples/spirals.zig:29-35`):
+(`examples/spirals/main.zig:29-35`):
 
 ```zig
 const Model = struct {
@@ -799,7 +799,7 @@ handed and branch on the answer — at compile time, so untaken branches (which
 might not even type-check for this instantiation) simply vanish. Fucina uses
 this to make one registration function serve four optimizer types
 (`if (comptime @hasDecl(@TypeOf(opt.*), "addFallbackParam"))`,
-`examples/spirals.zig:119`) and to let checkpoints name tensors by walking a
+`examples/spirals/main.zig:119`) and to let checkpoints name tensors by walking a
 model struct's fields (`src/param_registry.zig`). Duck typing, checked by the
 compiler.
 
@@ -1006,7 +1006,7 @@ knowledge predates 0.16 (`AGENTS.md`, "Zig 0.16 notes"; full reference at
 - **Casts infer their destination** from context (`@intCast`, `@ptrCast`,
   `@enumFromInt`, ...); use `@as(T, x)` to state a target type explicitly.
 - **`main` takes `std.process.Init`**, and I/O goes through the new `std.Io`
-  writer API. From `examples/spirals.zig:327-339`:
+  writer API. From `examples/spirals/main.zig:327-339`:
 
 ```zig
 pub fn main(init: std.process.Init) !void {
@@ -1070,7 +1070,7 @@ disagrees with something you read elsewhere, imitate this repo — then run
   the comptime bubble sort. Readable in isolation, no tensors required.
 - `src/ag/tensor.zig` (lines ~150–270) — the `Tensor` type constructor,
   `grad_state: ?*GradState`, ownership doc-comments, `errdefer` in `variable`.
-- `examples/spirals.zig` — a complete train/checkpoint/infer program in one
+- `examples/spirals/main.zig` — a complete train/checkpoint/infer program in one
   file; Chapter 08 dissects it line by line.
 - `build.zig` — the build as a program: option enums, panics as validation,
   `addOptions`.

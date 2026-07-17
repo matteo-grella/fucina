@@ -101,7 +101,7 @@ builds are around twenty times slower and will not keep up.
 small ticks near its left edge: "≈49 µs" and "≈80 µs". Then terminal
 recording: `zig build nam -Doptimize=ReleaseFast -- bench my-amp.nam`,
 holding on the `budget` / `measured` / `realtime: …x headroom` output lines
-(printed by `examples/nam.zig:330-336`).
+(printed by `examples/nam/main.zig:330-336`).
 
 **Overlay:** On the ticks, permanently: "≈49 µs/block — ReleaseFast,
 i9-13950HX P-core, 2026-07-03 x86 snapshot · ≈80 µs — M1 Max ·

@@ -7,7 +7,7 @@ are packed TQ2_0 genomes (2-bit {-1,0,+1} crumbs) registered with
 latent float weights exist for the ternary layers at any point, and every
 forward (member evaluations and the final verification) runs on the real
 int8 kernels: Q8_K activation rows times the packed 2-bit blocks
-(root `examples/es_ternary_spirals.zig`).
+([`main.zig`](main.zig)).
 
 Architecture (TQ2_0 needs contract dims that are multiples of 256):
 `2 -> [dense f32] -> 256 -> tanh -> [ternary 256x256] -> tanh ->

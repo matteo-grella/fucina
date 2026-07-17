@@ -1,6 +1,6 @@
 //! Unit tests for the inkling multimodal projector's host-side numerics.
 //! Tower/e2e parity vs the pinned llama.cpp mtmd oracle runs through the
-//! example CLI gates (examples/inkling.zig --image/--audio + --embd-out).
+//! example CLI gates (examples/inkling/main.zig --image/--audio + --embd-out).
 
 const std = @import("std");
 const mmproj = @import("mmproj.zig");

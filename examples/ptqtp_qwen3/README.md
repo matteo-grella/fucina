@@ -1,6 +1,6 @@
 # ptqtp-qwen3 — PTQTP-decorate a Qwen3 GGUF and compare NLL
 
-Qwen3 PTQTP decoration harness (root `examples/ptqtp_qwen3.zig`): load a
+Qwen3 PTQTP decoration harness ([`main.zig`](main.zig)): load a
 GGUF (any source dtype Fucina can decode — f16, Q4_K, Q8_0, … — the method
 is source-agnostic), measure teacher-forced NLL/perplexity on a text file
 **before** decoration, decorate every eligible layer linear with dual

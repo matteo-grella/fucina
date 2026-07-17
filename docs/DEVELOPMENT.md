@@ -181,8 +181,8 @@ designing.
 | ASR / encoder stack | `src/llm/parakeet/` | the reusable-family precedent |
 | TTS / codec port | `examples/omnivoice/` | codec parity, RNG parity, chunked streaming |
 | Streaming DSP / effects | `examples/nam/` | streaming engines, format interchange, live IO |
-| Training pipeline | `examples/nanochat/`, `examples/spirals.zig`, `examples/finetune.zig` | full pretrain→SFT→chat; minimal optimizer demo; LoRA on a real GGUF |
-| HTTP/API frontend | `examples/lmserve.zig` | OpenAI-compatible mapping tables, SSE, backend matrix |
+| Training pipeline | `examples/nanochat/`, `examples/spirals/main.zig`, `examples/finetune/main.zig` | full pretrain→SFT→chat; minimal optimizer demo; LoRA on a real GGUF |
+| HTTP/API frontend | `examples/lmserve/main.zig` | OpenAI-compatible mapping tables, SSE, backend matrix |
 
 ## 4. The delivery loop
 

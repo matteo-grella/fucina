@@ -62,7 +62,7 @@ from 5.77 to 2e-4. That is memorization, on purpose. The point is the
 whole pipeline closing in under a minute of laptop time — and the
 after-generation opens with Ahoy.
 **Visual:** Code shot: the five-pair pirate dataset at
-`examples/finetune.zig:38-44`; then terminal recording:
+`examples/finetune/main.zig:38-44`; then terminal recording:
 `zig build finetune -Doptimize=ReleaseFast -- --steps 30` (default model
 `models/Qwen3-0.6B-Q4_K_S.gguf`), capturing the BEFORE generation
 (pirate-free), the loss trace, and the AFTER generation opening with
@@ -149,7 +149,7 @@ from-scratch, one row each); end card with chapter link
   3. `llama-cli -m /tmp/qwen3-tuned-q4_k.gguf`, prompt "What is the
      capital of France?" typed interactively — capture the actual reply;
      this recording doubles as the 0:00 cold open.
-- **Repo code shots**: `examples/finetune.zig:38-44` (pirate dataset);
+- **Repo code shots**: `examples/finetune/main.zig:38-44` (pirate dataset);
   `src/lora.zig:265-274` (merge, optional); `examples/nanochat/README.md:20-28`
   (subcommand table); `examples/nanochat/model.zig:56-65` (d6 config).
 - **Chapter shots**: `docs/course/15-training-llms-on-cpu.md:30-34` (LoRA

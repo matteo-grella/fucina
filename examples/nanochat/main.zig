@@ -16,10 +16,10 @@
 //! Run with `zig build nanochat -- <subcommand> [args]`.
 const std = @import("std");
 
-pub const tokenizer = @import("nanochat/tokenizer.zig");
-pub const model = @import("nanochat/model.zig");
-pub const train = @import("nanochat/train.zig");
-pub const chat = @import("nanochat/chat.zig");
+pub const tokenizer = @import("tokenizer.zig");
+pub const model = @import("model.zig");
+pub const train = @import("train.zig");
+pub const chat = @import("chat.zig");
 
 const Subcommand = enum { @"tok-train", @"base-train", sft, @"eval-bpb", chat, help };
 
@@ -125,6 +125,6 @@ test {
     // refAllDecls covers the root pub decls (tokenizer/model/train/chat);
     // optim and data are not re-exported, so reference them explicitly.
     std.testing.refAllDecls(@This());
-    _ = @import("nanochat/optim.zig");
-    _ = @import("nanochat/data.zig");
+    _ = @import("optim.zig");
+    _ = @import("data.zig");
 }

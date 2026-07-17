@@ -5,7 +5,7 @@ Runs the DiffusionGemma 26B-A4B MoE. Not autoregressive: it denoises
 ≤48 steps, temperature 0.8→0.4, bound 0.1) and commits blocks
 autoregressively. Expect a few seconds per denoising step on the 26B MoE;
 simple answers converge in ~7 steps. Build step: `zig build diffusion-gemma`;
-runner source: [`../diffusion_gemma.zig`](../diffusion_gemma.zig).
+runner source: [`main.zig`](main.zig).
 
 ## Getting the model
 

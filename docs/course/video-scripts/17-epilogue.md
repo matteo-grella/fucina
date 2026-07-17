@@ -104,7 +104,7 @@ something clarifying about a project whose loss you can hear.
 version: "you don't optimize what you can't verify". A small parity-ladder
 diagram climbs beside it: tokenizer (token-ID-exact) → logits from raw ids
 → generation. Then doc shot `examples/nam/README.md:163-170` — the one-step
-`fucina-zig-nam profile --signal v3_0_0.wav …` command and the two-step
+`fucina-nam profile --signal v3_0_0.wav …` command and the two-step
 `train --input … --output … --out my-amp.nam` line — over rig B-roll reused
 from Video 10.
 

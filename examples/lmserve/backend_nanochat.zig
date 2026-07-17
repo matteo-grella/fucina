@@ -14,9 +14,9 @@ const std = @import("std");
 const fucina = @import("fucina");
 const llm = @import("fucina_llm");
 const types = @import("types.zig");
-const nc_chat = @import("../nanochat/chat.zig");
-const nc_model = @import("../nanochat/model.zig");
-const nc_tok = @import("../nanochat/tokenizer.zig");
+const nc_chat = @import("nanochat").chat;
+const nc_model = @import("nanochat").model;
+const nc_tok = @import("nanochat").tokenizer;
 
 const Allocator = std.mem.Allocator;
 

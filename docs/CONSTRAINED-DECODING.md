@@ -74,7 +74,7 @@ hook lives. Every decode path already funnels through
 - `chat.Conversation.sendBatch` (lockstep multi-stream `sampleStep`),
 - the speculative decoder's plain step *and* every verify row
   (`speculative/core.zig`),
-- every hand-rolled runner loop (`examples/qwen3.zig` completion/bench,
+- every hand-rolled runner loop (`examples/qwen3/main.zig` completion/bench,
   multi-stream arms).
 
 Hooking the sampler therefore means: **implement once, constrained

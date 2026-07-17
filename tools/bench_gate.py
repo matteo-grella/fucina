@@ -34,8 +34,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LLAMA_BENCH = ROOT / "refs/llama.cpp/build-cpu/bin/llama-bench"
-DEFAULT_QWEN = ROOT / "zig-out/bin/fucina-zig-qwen3"
-DEFAULT_GEMMA = ROOT / "zig-out/bin/fucina-zig-gemma4"
+DEFAULT_QWEN = ROOT / "zig-out/bin/fucina-qwen3"
+DEFAULT_GEMMA = ROOT / "zig-out/bin/fucina-gemma4"
 
 FULL_LENGTHS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 16, 17, 31, 32, 33, 64, 127, 128, 129, 256)
 

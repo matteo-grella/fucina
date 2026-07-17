@@ -1,6 +1,6 @@
 # ptqtp-spirals — post-training trit-plane quantization, self-verifying
 
-Two-spirals PTQTP acceptance demo (root `examples/ptqtp_spirals.zig`):
+Two-spirals PTQTP acceptance demo ([`main.zig`](main.zig)):
 train a float tanh MLP with AdamW
 (`2 -> [dense f32] -> 256 -> tanh -> [256x256] -> tanh -> [head 256x2]`),
 then post-training-quantize the two packable layers to dual trit-planes

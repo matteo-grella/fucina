@@ -16,16 +16,16 @@
 const std = @import("std");
 const fucina = @import("fucina");
 
-const config_mod = @import("locate_anything/config.zig");
-const tokenizer_mod = @import("locate_anything/tokenizer.zig");
-const image_mod = @import("locate_anything/image.zig");
-const preproc_mod = @import("locate_anything/preproc.zig");
-const vit_mod = @import("locate_anything/vit.zig");
-const lm_mod = @import("locate_anything/lm.zig");
-const mtp = @import("locate_anything/mtp.zig");
-const boxes_mod = @import("locate_anything/boxes.zig");
-const engine_mod = @import("locate_anything/engine.zig");
-const visualize_mod = @import("locate_anything/visualize.zig");
+const config_mod = @import("config.zig");
+const tokenizer_mod = @import("tokenizer.zig");
+const image_mod = @import("image.zig");
+const preproc_mod = @import("preproc.zig");
+const vit_mod = @import("vit.zig");
+const lm_mod = @import("lm.zig");
+const mtp = @import("mtp.zig");
+const boxes_mod = @import("boxes.zig");
+const engine_mod = @import("engine.zig");
+const visualize_mod = @import("visualize.zig");
 
 const Allocator = std.mem.Allocator;
 const gguf = fucina.gguf;
@@ -544,10 +544,10 @@ fn tensorToSlice(allocator: Allocator, t: anytype) ![]f32 {
 }
 
 test {
-    _ = @import("locate_anything/tokenizer.zig");
-    _ = @import("locate_anything/image.zig");
-    _ = @import("locate_anything/preproc.zig");
-    _ = @import("locate_anything/mtp.zig");
-    _ = @import("locate_anything/boxes.zig");
-    _ = @import("locate_anything/lm.zig");
+    _ = @import("tokenizer.zig");
+    _ = @import("image.zig");
+    _ = @import("preproc.zig");
+    _ = @import("mtp.zig");
+    _ = @import("boxes.zig");
+    _ = @import("lm.zig");
 }

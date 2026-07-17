@@ -493,7 +493,7 @@ A last calibration, because this chapter taught research results and research re
 - `src/ptqtp.zig` — `solveGroup` and `quantizeMatrix`; the module doc records the pinned candidate order and the fp16-rounding delta with their reasons.
 - `src/llm/ptqtp_gguf.zig` and `src/llm/qwen3/model.zig` (`decoratePtqtp`, `savePtqtpGguf`) — plane persistence and pair-detection; `tools/export_gguf.zig` for the streaming quantizer.
 - `docs/REFERENCE.md` §10.7 — the machine-verified TQ2_0 and `dotTernarySte` snippets (`zig build snippet-check` runs them against the real modules).
-- `examples/es_ternary_spirals.zig` and `examples/ptqtp_spirals.zig` — the two self-verifying acceptance demos: training ternary from scratch without gradients, and converting a float model post-hoc.
+- `examples/es_ternary_spirals/main.zig` and `examples/ptqtp_spirals/main.zig` — the two self-verifying acceptance demos: training ternary from scratch without gradients, and converting a float model post-hoc.
 
 ## Exercises
 

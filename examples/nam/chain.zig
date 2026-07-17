@@ -1,5 +1,5 @@
 //! `.chain` manifest parser for the NAM serial-chain feature: an ordered list
-//! of processing stages (NAM models and/or cab IRs) that `examples/nam.zig`
+//! of processing stages (NAM models and/or cab IRs) that `examples/nam/main.zig`
 //! turns into a `live.Chain`. Parse-only and example-local — the returned
 //! slices BORROW the caller's text buffer (which must outlive the spec).
 //!

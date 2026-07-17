@@ -1285,7 +1285,7 @@ zig build lmserve -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --port 8
 `-Doptimize=ReleaseFast` is not optional in spirit: the README warns Debug
 is 10–50x slower, and — [Chapter 6](06-going-fast-on-cpus.md)'s lesson —
 build on the machine you run on, because the kernels specialize to the
-compiling host's CPU. Then explore the runner (`examples/qwen3.zig`; run it
+compiling host's CPU. Then explore the runner (`examples/qwen3/main.zig`; run it
 with no arguments for the usage text). A sampler from
 `docs/RUNNING-MODELS.md`:
 
@@ -1364,7 +1364,7 @@ against another implementation — the verification religion of
 - `src/llm/chat.zig` — templates, `Conversation`, `decodeTurn`, and the
   reuse/batch seams Chapter 13 builds on.
 - `src/exec/topk.zig` — MoE routing in one page.
-- `examples/qwen3.zig` and `docs/REFERENCE.md` §13 — the runner (every flag
+- `examples/qwen3/main.zig` and `docs/REFERENCE.md` §13 — the runner (every flag
   a doorway into a section of this chapter) and the machine-verified
   `fucina_llm` reference it exercises.
 
@@ -1380,7 +1380,7 @@ against another implementation — the verification religion of
    `Ġ`-prefixed symbols); test on `"hi hi"` with your own vocabulary.
    `gpt2ByteToUnicode` (`tokenizer.zig:497`) is your reference.
 3. **Feel the cache.** Write a small runner (crib the model-loading
-   prologue from `examples/qwen3.zig`) that generates 64 tokens twice: once
+   prologue from `examples/qwen3/main.zig`) that generates 64 tokens twice: once
    with `Model.generate` (KV-cached), once by calling `forwardLastLogits`
    on the full growing sequence each step. Verify the token ids match
    exactly (greedy is deterministic), then time both.

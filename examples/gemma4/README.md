@@ -3,7 +3,7 @@
 Runs the Gemma 4 26B-A4B instruction-tuned MoE from a single GGUF. Same
 chat/REPL UX as the qwen3 runner, Gemma's `<|turn>` template, SPM tokenizer
 read from the GGUF. Build step: `zig build gemma4`; runner source:
-[`../gemma4.zig`](../gemma4.zig).
+[`main.zig`](main.zig).
 
 ## Getting the model
 

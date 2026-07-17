@@ -315,7 +315,7 @@ process them one at a time — you apply one operation to the whole block at onc
   *mini-batch*, and is where the "stochastic" in SGD comes from.
 
 Here is the idea in the wild — the spirals example packing 400 (x, y) points into one
-rank-2 tensor (from `examples/spirals.zig:344`):
+rank-2 tensor (from `examples/spirals/main.zig:344`):
 
 ```zig
 var x = try Tensor(.{ .batch, .in }).fromSlice(&ctx, .{ n_points, 2 }, &xs);
@@ -383,7 +383,7 @@ what their outputs should be; the training process invents useful intermediate
 representations on its own.
 
 Here is a real one — the forward pass of the spirals model, verbatim from
-`examples/spirals.zig:129-142`:
+`examples/spirals/main.zig:129-142`:
 
 ```zig
 /// Forward pass inside an exec scope (ExecContext.openExecScope): every op result
@@ -577,12 +577,12 @@ to breed, and shows real genetics. This course needs the same thing: a task smal
 enough to train in seconds on a laptop CPU, transparent enough to plot on paper, and
 just hard enough that solving it proves the machinery genuinely works. Ours is the
 **two-spirals problem** — the repo's own comment calls it "the classic Lang &
-Witbrock task" (`examples/spirals.zig:168`), a benchmark from the late-1980s
+Witbrock task" (`examples/spirals/main.zig:168`), a benchmark from the late-1980s
 connectionist era that was famously obnoxious for the small networks of the day.
 
 The task: points are scattered along two interleaved spiral arms in the plane. Given a
 point's `(x, y)` coordinates, say which arm it belongs to. Here is the dataset
-generator, verbatim from `examples/spirals.zig:168-186`:
+generator, verbatim from `examples/spirals/main.zig:168-186`:
 
 ```zig
 /// Two interleaved spirals (the classic Lang & Witbrock task): radius grows
@@ -630,7 +630,7 @@ Why this task earns fruit-fly status:
   cross-entropy, backward, optimizer — nothing important is skipped, nothing
   distracting is added.
 
-And here is the training step it all feeds, verbatim from `examples/spirals.zig:144-153`
+And here is the training step it all feeds, verbatim from `examples/spirals/main.zig:144-153`
 — compare it to your five-line loop from §2.4:
 
 ```zig
@@ -659,14 +659,14 @@ Run it yourself:
 zig build spirals -Doptimize=ReleaseFast
 ```
 
-(the file's header comment recommends exactly this; `examples/spirals.zig:14`). The
+(the file's header comment recommends exactly this; `examples/spirals/main.zig:14`). The
 demo trains the MLP with each of five optimizers in turn, printing the final loss and
 accuracy for each — and, for each, it also does something that tells you more about
 this library's character than any feature list: it saves a mid-training **checkpoint**
 (a snapshot of all parameters plus optimizer state), restores it into a *fresh* model,
 retrains the second half, and *demands the final parameters match the original run bit
 for bit* —
-`if (max_diff != 0) return error.ResumeNotBitExact;` (`examples/spirals.zig:314`).
+`if (max_diff != 0) return error.ResumeNotBitExact;` (`examples/spirals/main.zig:314`).
 Not "close". Identical, to the last bit of every float. That training is exactly
 reproducible — same data, same seed, same thread configuration, across runs and
 across checkpoint resumes — is a design contract here (`docs/TRAINING.md` §4's
@@ -675,9 +675,9 @@ as it runs; we will account for every single line of this file by the end of
 [Chapter 8](08-training.md).
 
 The spirals return throughout the course: trained without gradients in
-[Chapter 9](09-training-without-gradients.md) (`examples/es_spirals.zig`), and with
+[Chapter 9](09-training-without-gradients.md) (`examples/es_spirals/main.zig`), and with
 ternary {−1, 0, +1} weights in [Chapter 14](14-the-low-bit-frontier.md)
-(`examples/ptqtp_spirals.zig`, `examples/es_ternary_spirals.zig`). Same fly, new
+(`examples/ptqtp_spirals/main.zig`, `examples/es_ternary_spirals/main.zig`). Same fly, new
 microscopes.
 
 ## 2.10 The road ahead
@@ -726,12 +726,12 @@ Zig, with tests proving it right.
   them in one backward sweep (backpropagation), for any number of parameters — and
   gradients are verified against finite differences, never trusted.
 - The two-spirals task is the course's model organism: impossible for linear models,
-  plottable, trained in seconds — and `examples/spirals.zig` is the file this course
+  plottable, trained in seconds — and `examples/spirals/main.zig` is the file this course
   spends Part II and III rebuilding piece by piece.
 
 ## Explore the source
 
-- `examples/spirals.zig` — this entire chapter as one runnable program: dataset
+- `examples/spirals/main.zig` — this entire chapter as one runnable program: dataset
   generator (line 168), model struct with named-axis tensors (line 29), forward pass
   (line 133), training step (line 144), and the bit-exact-resume check (line 314). Read
   it top to bottom; measure how much of it you can already follow.

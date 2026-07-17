@@ -11,7 +11,7 @@ the binary is tuned to the compiling host's exact CPU; cross-compiling needs
 `-Dcpu=...` too or you get baseline features and lose the fast kernels (see
 `AGENTS.md`, build options). The first invocation compiles (~1 min); after that the binary is cached.
 You can also call the installed binaries directly from `zig-out/bin/` (e.g.
-`./zig-out/bin/fucina-zig-qwen3 …`) to skip the build step entirely.
+`./zig-out/bin/fucina-qwen3 …`) to skip the build step entirely.
 
 ## Getting the weights
 
@@ -93,7 +93,7 @@ zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --repl
 | `zig build es-ternary-spirals` | Ternary-native ES: packed TQ2_0 genome = the inference model | [examples/es_ternary_spirals/README.md](../examples/es_ternary_spirals/README.md) |
 | `zig build ptqtp-spirals` | Float MLP post-training-quantized to dual trit-planes | [examples/ptqtp_spirals/README.md](../examples/ptqtp_spirals/README.md) |
 | `zig build ptqtp-qwen3` | PTQTP-decorate a Qwen3 GGUF's linears; NLL before/after | [examples/ptqtp_qwen3/README.md](../examples/ptqtp_qwen3/README.md) |
-| `zig build run` | smoke: the minimal tensor/autograd sanity demo | [examples/smoke/README.md](../examples/smoke/README.md) |
+| `zig build smoke` | smoke: the minimal tensor/autograd sanity demo | [examples/smoke/README.md](../examples/smoke/README.md) |
 
 ---
 

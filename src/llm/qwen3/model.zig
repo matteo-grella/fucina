@@ -178,7 +178,7 @@ pub const Model = struct {
     }
 
     pub fn loadGgufOptions(ctx: *ExecContext, io: std.Io, path: []const u8, config: Config, options: LoadOptions) !Model {
-        // mmap, matching the CLI (examples/qwen3.zig) and the other loaders:
+        // mmap, matching the CLI (examples/qwen3/main.zig) and the other loaders:
         // avoids an eager multi-GB heap read that coexists with the
         // materialized weights, and lets MoE experts borrow straight from the
         // mapping (loadGgufFromFile takes ownership of it via takeMapping).

@@ -30,13 +30,13 @@
 # in their headers; regen recipe in examples/nanochat/goldens/README.md).
 #
 # ds4 is the architecture reference and validation oracle for the deepseek4
-# port. It stays stock — no patches: examples/deepseek4.zig consumes its
+# port. It stays stock — no patches: examples/deepseek4/main.zig consumes its
 # SHIPPED fixtures in place (--vectors refs/ds4/tests/test-vectors/official,
 # --golden refs/ds4/tests/test-vectors/local-golden.vec). Do NOT run its
 # CPU build path (`make cpu`) on macOS — it can kernel-panic the VM system.
 #
 # llama.cpp-inkling is the parity oracle for the Inkling port
-# (src/llm/inkling, examples/inkling.zig): llama.cpp PR #25731 ("Add TML
+# (src/llm/inkling, examples/inkling/main.zig): llama.cpp PR #25731 ("Add TML
 # Inkling architecture", draft) pinned at its 2026-07 head on the
 # contributor's fork — a moving target per docs/PORTING.md §1, so the diff
 # is archived out-of-tree with the port record. Oracle build (CPU-only,
@@ -58,7 +58,7 @@
 # pinned for the record, never built or benchmarked.
 #
 # cartridges (HazyResearch) is the semantics reference for the Cartridges
-# port (src/llm/cartridge.zig, examples/cartridge.zig, docs/CARTRIDGES.md):
+# port (src/llm/cartridge.zig, examples/cartridge/main.zig, docs/CARTRIDGES.md):
 # the distillation loss (train.py), the five seed-prompt meta-texts
 # (data resources), the token chunker, and the KV-init recipe were audited
 # against it. It stays stock and is never run: numerical parity comes from

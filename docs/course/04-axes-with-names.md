@@ -34,7 +34,7 @@ functions that return types, array lengths computed by other functions, and
 Fucina's answer is that an axis is identified by a **tag** — a name like
 `.batch`, `.seq`, `.d_model` — and the name lives in the tensor's *type*.
 Here is the destination, the README's own condensed example (README.md:24–41;
-the full-size version is `examples/spirals.zig:133–142`, and the same
+the full-size version is `examples/spirals/main.zig:133–142`, and the same
 pattern runs the production trainer in `src/llm/qwen3/train.zig`):
 
 ```zig
@@ -1164,7 +1164,7 @@ neither a tag nor a check for one.
   `return struct`; then skim any view method's return type.
 - `docs/REFERENCE.md` §3.1–3.2 and §7 — the semantics contract, with
   machine-verified snippets for every behavior this chapter claimed.
-- `examples/spirals.zig` — the tags at work in a full training program
+- `examples/spirals/main.zig` — the tags at work in a full training program
   you can run.
 - `src/lora.zig` — `Adapter(in_tag, out_tag)`: tags as generic parameters of
   a whole *module*, not just a tensor (docs/ARCHITECTURE.md, layer map).

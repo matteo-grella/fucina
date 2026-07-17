@@ -653,7 +653,7 @@ The honest paragraph the numbers demand: the documented CUDA WMMA kernels "raise
 
 ## 13.10 Serving it: lmserve
 
-All of these tricks meet the network in `zig build lmserve` (`examples/lmserve.zig` + `examples/lmserve/`) — an OpenAI-compatible server over the same engine, speaking both wire dialects (`POST /v1/chat/completions`, `POST /v1/responses`), verified end-to-end against openai-python 2.45.0 (`docs/LMSERVER.md`). It is "an example, not a library surface": a model family integrates through one small two-function `Backend` vtable (`validate` on the connection thread, `generate` on the worker), and any family served by `llm.chat.Conversation` gets the whole adapter for free.
+All of these tricks meet the network in `zig build lmserve` (`examples/lmserve/main.zig` + `examples/lmserve/`) — an OpenAI-compatible server over the same engine, speaking both wire dialects (`POST /v1/chat/completions`, `POST /v1/responses`), verified end-to-end against openai-python 2.45.0 (`docs/LMSERVER.md`). It is "an example, not a library surface": a model family integrates through one small two-function `Backend` vtable (`validate` on the connection thread, `generate` on the worker), and any family served by `llm.chat.Conversation` gets the whole adapter for free.
 
 Its threading design is a direct consequence of Chapter 6's execution model — "accept concurrently, generate sequentially":
 

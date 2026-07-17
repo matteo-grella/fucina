@@ -17,7 +17,7 @@ Axis tags and rank are **comptime facts**: `Tensor(.{ .batch, .in })` is a
 different type from `Tensor(.{ .in, .batch })`, contraction is by axis
 *name*, the result's tag set is computed at compile time, and a misaligned
 contraction is a compile error — not a runtime shape crash three layers
-deep. The pattern, condensed (see `examples/spirals.zig` and the production
+deep. The pattern, condensed (see `examples/spirals/main.zig` and the production
 trainer in `src/llm/qwen3/train.zig`):
 
 ```zig

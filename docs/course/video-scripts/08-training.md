@@ -124,7 +124,7 @@ sweeps down the loss values on the "trained … steps: loss …" lines as the
 VO says "loss column". The printed numbers are whatever the recording
 machine produces — real output only.
 
-**Overlay:** "`examples/spirals.zig` — 493 lines, the whole chapter
+**Overlay:** "`examples/spirals/main.zig` — 493 lines, the whole chapter
 runnable" · "no downloads: the demo generates its own 400 points".
 
 ### [2:18–2:45] The gate: != 0
@@ -139,7 +139,7 @@ testable property — so it is tested.
 **Visual:** Split screen. Left: the same terminal, highlighting each
 "resume from step 1000: max |delta param| = 0 (bit-exact)" line as it
 appears — six of them across the run. Right: code shot
-`examples/spirals.zig:309–314` — the `max_diff` loop and
+`examples/spirals/main.zig:309–314` — the `max_diff` loop and
 `if (max_diff != 0) return error.ResumeNotBitExact;` — with a second brief
 cut to line 298 (`Model.initRandom(ctx, 7)` — "different init: fully
 overwritten by the checkpoint").
@@ -170,7 +170,7 @@ series title, "Next: 09 — Training without gradients", chapter link
   the Fucina repo" comment in frame).
 - `src/optim.zig:756–767` — the AdamW `runScalar` per-element update.
 - `src/optim.zig:1384–1416` — `newtonSchulz5` with its doc comment.
-- `examples/spirals.zig:309–314` — the bit-exact gate; plus line 298 (the
+- `examples/spirals/main.zig:309–314` — the bit-exact gate; plus line 298 (the
   fresh model from seed 7).
 
 **Terminal recordings (execute on camera):**
@@ -180,7 +180,7 @@ series title, "Next: 09 — Training without gradients", chapter link
   header line, then three lines per optimizer for `[sgd]`, `[adamw]`,
   `[muon]`, `[apollo]`, `[apollo-mini]`, then two lines for the groups demo,
   labeled `[adamw-groups]` (format strings at
-  `examples/spirals.zig:291–321,347` and, for the groups demo, `:452,487`;
+  `examples/spirals/main.zig:291–321,347` and, for the groups demo, `:452,487`;
   six "bit-exact" resume lines total). Note: the demo prints one summary
   loss per optimizer
   at the end of its 2000 steps — there is no per-step loss stream — so the
@@ -225,7 +225,7 @@ episode.
   "twelve lines" AdamW (chapter §8.4–8.5); f64 scalar prep (chapter §8.5);
   optimizer ms/step table (docs/TRAINING.md §11 via chapter §8.6); 493
   lines, 2000 steps, checkpoint at 1000, 400 points, seed-7 fresh model,
-  six bit-exact lines (chapter §8.11 / `examples/spirals.zig`); "state
+  six bit-exact lines (chapter §8.11 / `examples/spirals/main.zig`); "state
   costs more than the model at LLM scale" (chapter §8.6: AdamW state is
   8 bytes/param). Nothing else may be quantified.
 - **If the cut runs long, trim in this order:** the `newtonSchulz5` scroll

@@ -101,7 +101,7 @@ fn makeCache(ctx: *fucina.ExecContext, model: anytype, capacity: usize) !llm.kv_
 const system_prompt_template = "\nYou are in a conversation about the following user information.\n\n<info>\n{s}\n</info>";
 
 /// The seed-prompt set of the base cartridge CLI (reference five plus the
-/// mechanism / verbatim-precision additions — see examples/cartridge.zig).
+/// mechanism / verbatim-precision additions — see examples/cartridge/main.zig).
 const seed_prompts = [_][]const u8{
     "Please generate a single chat message instructing an LLM to structure the information in JSON. " ++
         "Output only the chat message itself and absolutely nothing else. " ++
@@ -1077,7 +1077,7 @@ fn runComposeEquiv(
 // Self-study synthesis (the base cartridge CLI's engine, per-document)
 // ---------------------------------------------------------------------------
 
-/// One synthesized conversation (see examples/cartridge.zig): the seed-free
+/// One synthesized conversation (see examples/cartridge/main.zig): the seed-free
 /// student element plus the teacher's sparse top-k targets for its answer.
 const Convo = struct {
     student_ids: []usize,
@@ -1194,7 +1194,7 @@ fn synthesizeGroup(
     try teacherTargets(ctx, arena, trainer, supports_packing, out, opts);
 }
 
-/// One packed teacher pass for the group (see examples/cartridge.zig).
+/// One packed teacher pass for the group (see examples/cartridge/main.zig).
 fn teacherTargets(
     ctx: *fucina.ExecContext,
     arena: std.mem.Allocator,
@@ -1284,7 +1284,7 @@ fn teacherTargets(
 }
 
 // ---------------------------------------------------------------------------
-// Generation helpers (see examples/cartridge.zig)
+// Generation helpers (see examples/cartridge/main.zig)
 // ---------------------------------------------------------------------------
 
 /// Batched lockstep generation: per-stream prefill, then one

@@ -92,7 +92,7 @@ lstm, convnet, linear };` (`examples/nam/nam_file.zig:60`) — and the example
 loads and plays all of them, plus the current upstream trainer's
 `SlimmableContainer` export. Training, however, targets WaveNet only; keep
 that asymmetry in mind for §10.6 (`examples/nam/README.md`, Compatibility
-guarantees; `examples/nam.zig:647`).
+guarantees; `examples/nam/main.zig:647`).
 
 The part worth savouring is `weights`. The classic "standard" WaveNet — the
 config behind most profiles you will download — is **13,802 floats**
@@ -587,7 +587,7 @@ Windowing follows upstream's `nx`/`ny` semantics
 (`examples/nam/data.zig:190-212`): each training example is an input window
 of `nx + ny − 1` samples and a target of the last `ny`, where `nx` is the
 model's receptive field (4,093 for the classic spec — the number you derived
-in §10.3) and `ny` defaults to 8,192 (`examples/nam.zig:541`). The input
+in §10.3) and `ny` defaults to 8,192 (`examples/nam/main.zig:541`). The input
 window is longer than the target by exactly `nx − 1`: those samples are the
 context the first predicted output needs. The last 9 seconds of the capture
 are held out as the validation split (`examples/nam/README.md:171-172`).
@@ -667,7 +667,7 @@ for (0..epochs) |epoch| {
     }
 ```
 
-*(from `examples/nam.zig:702-724`)*
+*(from `examples/nam/main.zig:702-724`)*
 
 Every ingredient is one you already own. The one-line exponential LR schedule
 (`lr = lr0 · γ^epoch`). The counter-based deterministic RNG driving a
@@ -690,13 +690,13 @@ trainable's weight-extraction order matches the engine's weight-cursor order
 — the exact class of bug (a transposed conv layout, a swapped layer) that
 otherwise survives until a user's amp sounds wrong. The best epoch by
 validation ESR is what gets exported, not the last
-(`examples/nam.zig:726-736`).
+(`examples/nam/main.zig:726-736`).
 
 Two scope notes, stated as precisely as the code states them. Training
 targets WaveNet: the spec presets (`standard`, `tiny`, `a2`, `a2-nano`,
 `packed`) are all WaveNet shapes, and fine-tuning an existing file via
 `--init` prints "error: --init currently trains WaveNet .nam files only" for
-anything else (`examples/nam.zig:647`); LSTM/ConvNet/Linear profiles are
+anything else (`examples/nam/main.zig:647`); LSTM/ConvNet/Linear profiles are
 load-and-play. And everything here is CPU, f32, single process — no GPU
 anywhere in this example.
 
@@ -783,7 +783,7 @@ const budget_ns = @as(f64, @floatFromInt(blocksize)) / rate * 1e9;
 try stdout.print("realtime:     {d:.1}x headroom\n", .{budget_ns / ns_per_block});
 ```
 
-*(from `examples/nam.zig:330-336`)*
+*(from `examples/nam/main.zig:330-336`)*
 
 `zig build nam -Doptimize=ReleaseFast -- bench my-amp.nam` prints your
 per-block cost against your budget. Run it before ever going live — and run
@@ -855,7 +855,7 @@ Walk the guarantees one by one:
 preallocates all audio-thread scratch at a capacity of
 `frame_cap = @max(2048, period * 4)` — the input-trim buffer, the gate-gain
 buffer, and two inter-stage "ping-pong" buffers
-(`examples/nam.zig:1352-1364`). Every engine and cab is likewise sized to
+(`examples/nam/main.zig:1352-1364`). Every engine and cab is likewise sized to
 `frame_cap` at load, and prewarmed. The callback's job is to *fill* buffers,
 never to *find* them. This is the payoff of the discipline stated
 independently in every engine's module doc — "All buffers are allocated at

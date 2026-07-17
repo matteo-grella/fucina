@@ -574,7 +574,7 @@ whenever speed matters — "Debug is 10–50x slower" (README.md:133-134).
   table is, read bottom-up, the build order this course follows.
 - `docs/BENCHMARK.md` — the measurement protocol and the scoreboard; read
   the two ground rules at the top before any number.
-- `examples/spirals.zig` — the smallest complete train/checkpoint/infer
+- `examples/spirals/main.zig` — the smallest complete train/checkpoint/infer
   program in the repo, and the running example of Chapters 2 and 8.
 - `docs/MEMORY-MODEL.md` — ownership rules and the buffer-pool-vs-arena
   adjudication: a masterclass in documenting a rejected alternative.
@@ -586,7 +586,7 @@ whenever speed matters — "Debug is 10–50x slower" (README.md:133-134).
    `zig build test`. No model files are needed. Note how long a clean build
    takes: that is the whole stack compiling.
 2. **(easy)** Run the two-spirals demo: `zig build spirals
-   -Doptimize=ReleaseFast`. Per its header (`examples/spirals.zig:1-14`), it
+   -Doptimize=ReleaseFast`. Per its header (`examples/spirals/main.zig:1-14`), it
    trains a small MLP with five different optimizers, proves bit-exact
    training resumption from a checkpoint, and reports inference accuracy.
    You will understand every line by the end of [Chapter 8](08-training.md).

@@ -493,7 +493,7 @@ configs are rejected (`Error.MoeUnsupported`) in v1.
   runs store the dropout step counter, seed, LoRA config, and LR in
   `trainer_state.json`.
 
-**The walkthrough** (`examples/finetune.zig`; getting-started README with
+**The walkthrough** (`examples/finetune/main.zig`; getting-started README with
 the copy-paste commands: `examples/finetune/README.md`):
 
 ```sh
@@ -938,8 +938,8 @@ Neither normalization shrinks the step near a sharp optimum (both rescale to
 a fixed spread every iteration), so the practical brakes remain: bounded
 saturating rewards, conservative sigma, and eval-selected checkpoints.
 
-**LLM fine-tuning.** `zig build es-finetune` (examples/es_finetune.zig) is
-finetune.zig's gradient-free twin — same dataset plumbing, same trainer
+**LLM fine-tuning.** `zig build es-finetune` (examples/es_finetune/main.zig) is
+the finetune example's gradient-free twin — same dataset plumbing, same trainer
 forward, same checkpoint layout, so runs compare apples-to-apples.
 `--mode lora` perturbs only the q/v adapters; `--mode full` perturbs every
 resident float weight of the base model (needs an f32/f16/bf16 GGUF — 

@@ -226,7 +226,7 @@ pub const Options = struct {
 pub const CostPoint = struct { draft_len: usize, cost: f32 };
 
 /// Measured verify economics on Qwen3-0.6B-Q4_K_S (M1 Max, ReleaseFast,
-/// `fucina-zig-qwen3 --spec-bench`): verify-k forward vs single-token step.
+/// `fucina-qwen3 --spec-bench`): verify-k forward vs single-token step.
 pub const default_cost_table = [_]CostPoint{
     .{ .draft_len = 2, .cost = 1.65 },
     .{ .draft_len = 4, .cost = 1.42 },

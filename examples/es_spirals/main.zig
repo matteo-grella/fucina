@@ -1,5 +1,5 @@
 //! Two-spirals classification trained FROM SCRATCH by evolution strategies —
-//! the gradient-free counterpart of examples/spirals.zig, and the
+//! the gradient-free counterpart of examples/spirals/main.zig, and the
 //! from-random-init acceptance test of `fucina.es`: fine-tuning starts at a
 //! good solution, so only a from-scratch run proves the method optimizes
 //! rather than merely perturbs. Same task, same two-hidden-layer tanh MLP,

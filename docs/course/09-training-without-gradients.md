@@ -273,9 +273,9 @@ But shaping is a genuine trade, not an upgrade — Fucina measured the reversal.
 
 ## 9.6 Walking `es_spirals`
 
-`examples/es_spirals.zig` is the from-scratch acceptance test of the whole subsystem, and its header states why "from scratch" is the point: "fine-tuning starts at a good solution, so only a from-scratch run proves the method optimizes rather than merely perturbs" (`examples/es_spirals.zig:3-5`). Same task, same two-hidden-layer tanh MLP, same data generator as Chapter 8's `spirals.zig` — only the learning signal differs.
+`examples/es_spirals/main.zig` is the from-scratch acceptance test of the whole subsystem, and its header states why "from scratch" is the point: "fine-tuning starts at a good solution, so only a from-scratch run proves the method optimizes rather than merely perturbs" (`examples/es_spirals/main.zig:3-5`). Same task, same two-hidden-layer tanh MLP, same data generator as Chapter 8's `spirals.zig` — only the learning signal differs.
 
-The model declaration carries the chapter's thesis in its doc comment (`examples/es_spirals.zig:39-48`):
+The model declaration carries the chapter's thesis in its doc comment (`examples/es_spirals/main.zig:39-48`):
 
 ```zig
 /// spirals.zig's MLP, as CONSTANTS: ES needs no gradients, so nothing here
@@ -290,7 +290,7 @@ const Model = struct {
     b3: Tensor(.{.class}),
 ```
 
-Every tensor Chapter 8 made a gradient-tracked variable is a plain constant here — 4,482 parameters (64-wide hidden layers), zero `GradState`s. The forward is `spirals.zig`'s forward *verbatim*, and the reward is mean cross-entropy on the full batch, negated and computed inside an ordinary inference-style scope (`examples/es_spirals.zig:146-153`):
+Every tensor Chapter 8 made a gradient-tracked variable is a plain constant here — 4,482 parameters (64-wide hidden layers), zero `GradState`s. The forward is `spirals.zig`'s forward *verbatim*, and the reward is mean cross-entropy on the full batch, negated and computed inside an ordinary inference-style scope (`examples/es_spirals/main.zig:146-153`):
 
 ```zig
 /// Mean CE over the full batch (scoped, forward only).
@@ -305,7 +305,7 @@ fn meanCe(ctx: *ExecContext, model: *const Model, x: *const Tensor(.{ .batch, .i
 
 No lifetime ceremony, no `backward`, no Chapter-8 rule about keeping the graph alive — there is no graph to keep alive.
 
-This example runs the **member-parallel** shape: 4,482 parameters replicate for pennies, so each of the (default four) worker threads owns a complete replica — model, `ExecContext`, batch tensor — and only scalar rewards cross threads (`examples/es_spirals.zig:204-215`):
+This example runs the **member-parallel** shape: 4,482 parameters replicate for pennies, so each of the (default four) worker threads owns a complete replica — model, `ExecContext`, batch tensor — and only scalar rewards cross threads (`examples/es_spirals/main.zig:204-215`):
 
 ```zig
 const Evaluator = struct {
@@ -322,7 +322,7 @@ const Evaluator = struct {
 };
 ```
 
-`byteViews()` returns the six parameter buffers *in the canonical registration order* — `materializeMember`'s destination contract is positional (`dst[k]` is slot k, byte lengths validated with `ReplicaShapeMismatch`), so the example pins that order in `byteViews`'s doc contract, which `register` is documented to share (`examples/es_spirals.zig:111-112`) — two functions pinned to each other. After all the machinery, the training loop is two lines (`examples/es_spirals.zig:322-324`):
+`byteViews()` returns the six parameter buffers *in the canonical registration order* — `materializeMember`'s destination contract is positional (`dst[k]` is slot k, byte lengths validated with `ReplicaShapeMismatch`), so the example pins that order in `byteViews`'s doc contract, which `register` is documented to share (`examples/es_spirals/main.zig:111-112`) — two functions pinned to each other. After all the machinery, the training loop is two lines (`examples/es_spirals/main.zig:322-324`):
 
 ```zig
     for (0..iterations) |iter_i| {
@@ -336,7 +336,7 @@ The run's config departs from the `es.Config` defaults deliberately — from-scr
 zig build es-spirals -Doptimize=ReleaseFast
 ```
 
-The documented result (`docs/TRAINING.md:982-988`; the machine is named in the example header, `examples/es_spirals.zig:10` — M1 Max, ReleaseFast; a dated, machine-specific snapshot like every number in this course): "100% accuracy / CE -> 0 in ~15k iterations (~75 s ReleaseFast, ~5 ms/iteration), population 128". Sit with that number for a moment. Fifteen *thousand* iterations, each evaluating 128 candidate models, for a task Chapter 8's `spirals.zig` trains in 2,000 gradient steps (`examples/spirals.zig:26`). Nearly two million member evaluations where backprop needed two thousand forward-backward passes. On a 4,482-parameter model the wall-clock is 75 seconds and nobody cares; the *ratio* is what you must carry to §9.8, where parameters number in the billions.
+The documented result (`docs/TRAINING.md:982-988`; the machine is named in the example header, `examples/es_spirals/main.zig:10` — M1 Max, ReleaseFast; a dated, machine-specific snapshot like every number in this course): "100% accuracy / CE -> 0 in ~15k iterations (~75 s ReleaseFast, ~5 ms/iteration), population 128". Sit with that number for a moment. Fifteen *thousand* iterations, each evaluating 128 candidate models, for a task Chapter 8's `spirals.zig` trains in 2,000 gradient steps (`examples/spirals/main.zig:26`). Nearly two million member evaluations where backprop needed two thousand forward-backward passes. On a 4,482-parameter model the wall-clock is 75 seconds and nobody cares; the *ratio* is what you must carry to §9.8, where parameters number in the billions.
 
 ## 9.7 Compared against, never ported: the parity story
 
@@ -354,7 +354,7 @@ Everything so far, ordinary backprop could also do — slower memory bill, but i
 
 **Quantized and ternary weights.** A gradient is a statement about infinitesimal change, and a weight packed into a 2-bit trit has no infinitesimal neighborhood — the gradient world's answer is the straight-through estimator, a controlled lie you will meet in [Chapter 14](14-the-low-bit-frontier.md). ES needs no lie: `es.Trainer` registers packed TQ2_0 ternary genomes directly (`addTernaryParam`), perturbs them by sparse seed-regenerated trit flips, and updates by fitness-weighted vote-and-threshold — the weights never leave {−1, 0, +1}·d, "members evaluate through the real TQ2_0 int8 kernels and the trained state is byte-for-byte the served model" (`docs/TRAINING.md:1016-1017`). Training *is* the packed inference model. The full design record is `docs/TERNARY.md` and its acceptance demo is `zig build es-ternary-spirals`; Chapter 14 tells that story properly. (One boundary stays honest even here: `es-finetune --mode full` on a quantized *GGUF* is rejected up front with `QuantizedWeightsUnsupported` — gaussian noise cannot be added to K-quant blocks; ternary genomes work because ES perturbs them in their own discrete language, not with gaussians.)
 
-**Non-differentiable rewards.** ES composes with anything you can score from a forward pass. `examples/es_finetune.zig` ships a DeepSeek-R1-style `rule` reward on greedy generations — unigram-F1 against the gold answer plus 0.1 for matching a response envelope ("starts with `Ahoy!`, ends with `matey.`"). There is no gradient of "the reply matched a regex" through a sampling loop; there doesn't need to be. This is the paper's actual pitch — fine-tuning LLMs on rule rewards *beyond* reinforcement learning — and it is why the algorithm's signal type (one scalar per candidate) is a feature, not a poverty.
+**Non-differentiable rewards.** ES composes with anything you can score from a forward pass. `examples/es_finetune/main.zig` ships a DeepSeek-R1-style `rule` reward on greedy generations — unigram-F1 against the gold answer plus 0.1 for matching a response envelope ("starts with `Ahoy!`, ends with `matey.`"). There is no gradient of "the reply matched a regex" through a sampling loop; there doesn't need to be. This is the paper's actual pitch — fine-tuning LLMs on rule rewards *beyond* reinforcement learning — and it is why the algorithm's signal type (one scalar per candidate) is a feature, not a poverty.
 
 **Memory and parallelism at LLM scale.** `zig build es-finetune` is `finetune.zig`'s gradient-free twin — deliberately the same dataset plumbing, the same trainer forward, the same checkpoint layout, so the backprop and ES runs compare apples-to-apples. `--mode lora` perturbs only the LoRA adapters; `--mode full` perturbs every resident float weight of the base model — the paper's full-parameter setting, with no backward memory at any model size. That walkthrough belongs to [Chapter 15](15-training-llms-on-cpu.md), after GGUF loading and LoRA are on the table; what belongs here is its cost sheet, quoted with its conditions (`docs/TRAINING.md:956-963`, M1 Max, Qwen3-0.6B, ReleaseFast): "lora + nll ≈ 0.9 s per member-eval (population 8 x batch 5 ≈ 7-10 s/iteration); full mode adds the noise-regeneration cost over 0.6 B parameters (≈ 30 s/iteration at population 4, batch 1); rule rewards are generation-bound. ES needs MANY more iterations than backprop for the same movement — the paper runs 300-500 iterations at population 30 — so treat the demo defaults as a mechanism showcase, not a convergence recipe."
 
@@ -383,12 +383,12 @@ The documented pitfalls, condensed (`docs/TRAINING.md` §13):
 ## Explore the source
 
 - `src/es.zig` — the whole subsystem in one file; read the module doc first: it is the best short summary of the design, licensing stance, numerics, and checkpoint contract.
-- `examples/es_spirals.zig` — the member-parallel walkthrough of §9.6; 367 lines you can now read top to bottom.
+- `examples/es_spirals/main.zig` — the member-parallel walkthrough of §9.6; 367 lines you can now read top to bottom.
 - `docs/TRAINING.md` §13 — the design record: reward-shaping analysis, AWD, measured costs, pitfalls.
 - `docs/REFERENCE.md` §11 (the `fucina.es` section) — the API reference with the machine-verified sphere test.
 - `src/es_tests.zig`, `tools/gen_es_goldens.py`, `tools/check_es_parity.py` — the three parity layers of §9.7.
 - `src/rng.zig` — `at`, `gaussianFillAt`, `gaussianFillAtFast` and the two-contracts note; the enabling infrastructure of the whole chapter.
-- `examples/es_finetune.zig` — the LLM fine-tuning twin, ahead of [Chapter 15](15-training-llms-on-cpu.md).
+- `examples/es_finetune/main.zig` — the LLM fine-tuning twin, ahead of [Chapter 15](15-training-llms-on-cpu.md).
 
 ## Exercises
 

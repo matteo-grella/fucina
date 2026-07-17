@@ -14,7 +14,7 @@
 const std = @import("std");
 const fucina = @import("fucina");
 const llm = @import("fucina_llm");
-const png = @import("facedetect/image.zig");
+const png = @import("facedetect_image");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());

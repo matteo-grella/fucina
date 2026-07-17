@@ -9,7 +9,7 @@ perturbs the parameters with seed-regenerated gaussian noise, scores each
 population member with a reward, and applies the ES-at-scale update
 (z-scored rewards, alpha/population scaling, no 1/sigma).
 
-Entry point: [`examples/es_finetune.zig`](../es_finetune.zig)
+Entry point: [`main.zig`](main.zig)
 (`zig build es-finetune`). Like `finetune`, it prints a BEFORE vs AFTER
 greedy continuation for one held prompt around the run, plus per-iteration
 reward statistics.

@@ -106,7 +106,7 @@ And read the shoulders this project stands on, as its README credits them — "F
 - **spaGO** — the Go library where the graph-implicit-in-the-values idea was first explored; Fucina's direct ancestor (README.md, Origins).
 - **ZML** — the inspiration for the tagged-tensor approach: axis tags carried in the type, operands aligned by name.
 - **NeuralAmpModelerCore / neural-amp-modeler** — Steven Atkinson; the reference for the entire NAM example.
-- **nanochat** — karpathy's from-scratch GPT pipeline, ported whole in `examples/nanochat.zig` and the existence proof that the public facade can train a language model end to end (README.md, What runs today).
+- **nanochat** — karpathy's from-scratch GPT pipeline, ported whole in `examples/nanochat/main.zig` and the existence proof that the public facade can train a language model end to end (README.md, What runs today).
 
 They are not the whole list — the README also credits the ports from mudler's face-detect.cpp/parakeet.cpp/locate-anything.cpp, antirez's ds4, ServeurpersoCom's omnivoice.cpp, the vendored MLX Metal kernel and llguidance engine, and more. The complete inventory — what is vendored, what is ported, what is only a parity reference, and under which license — is `docs/THIRD-PARTY-NOTICES.md`. The repo treats uncredited ports as bugs (CONTRIBUTING.md), and so should you.
 

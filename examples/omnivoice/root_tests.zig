@@ -56,7 +56,7 @@ fn wavSinkEmit(ctx: *anyopaque, samples: []const f32) anyerror!void {
     try sink.writeSamples(samples);
 }
 
-/// In-process mirror of the CLI streaming session (examples/omnivoice.zig
+/// In-process mirror of the CLI streaming session (examples/omnivoice/main.zig
 /// runTtsStream): incremental chunker at chunk_len (int)((24000/480)*5) = 250
 /// codepoints, one full synthesizeStream per ready chunk (fresh Philox
 /// counter per call, seed 42), --chunk-threshold 5 --chunk-duration 5,

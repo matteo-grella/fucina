@@ -17,13 +17,13 @@ untested). No other dependencies.
 
 ```sh
 git clone https://github.com/nlpodyssey/fucina && cd fucina
-zig build nam -Doptimize=ReleaseFast        # builds zig-out/bin/fucina-zig-nam
+zig build nam -Doptimize=ReleaseFast        # builds zig-out/bin/fucina-nam
 ```
 
 `-Doptimize=ReleaseFast` matters: debug builds are ~20× slower and will not keep up in
 realtime. You can run every command either through the build runner
 (`zig build nam -Doptimize=ReleaseFast -- <command>`) or by calling the built binary
-directly (`zig-out/bin/fucina-zig-nam <command>`) — the examples below use the short form.
+directly (`zig-out/bin/fucina-nam <command>`) — the examples below use the short form.
 
 **The simplest path — no flags at all:** put your `.nam` files in a folder named
 `nam-profiles` (or `models`) next to the program, plug the guitar into your interface,
@@ -44,13 +44,13 @@ and the noise gate are all pre-configured. Everything below is the manual/expert
    [Cabinet IRs and signal chains](#cabinet-irs-and-signal-chains)).
 2. **Find your audio interface:**
    ```sh
-   fucina-zig-nam devices
+   fucina-nam devices
    ```
    Note the index of your interface in *both* the capture and playback lists.
 3. **Plug in and play** (see [Hardware](#hardware-what-plugs-into-what) below for how to
    connect the guitar):
    ```sh
-   fucina-zig-nam live my-amp.nam --capture 2 --playback 2
+   fucina-nam live my-amp.nam --capture 2 --playback 2
    ```
    You should hear the processed guitar immediately. Keys: `space` bypass · `[` `]` or
    `1`–`9` switch profile/chain (pass several `.nam` files to A/B them, or build chains —
@@ -160,14 +160,14 @@ official NAM trainer uses). It is recognized by checksum and enables automatic l
 calibration (from its blips) and the quality pre-checks. Then:
 
 ```sh
-fucina-zig-nam profile --signal v3_0_0.wav --reamp-out reamp.wav \
+fucina-nam profile --signal v3_0_0.wav --reamp-out reamp.wav \
     --out my-amp.nam --capture 2 --playback 2 \
     --name "My Amp" --gear-type amp --tone-type crunch
 ```
 
 plays the file through your rig, records the return, saves it, and trains. Alternatively
 record the reamp in your DAW and run the two-step version:
-`fucina-zig-nam train --input v3_0_0.wav --output reamp.wav --out my-amp.nam`. Any other
+`fucina-nam train --input v3_0_0.wav --output reamp.wav --out my-amp.nam`. Any other
 48 kHz input/output pair also works (pass `--latency` if your interface loopback delay is
 known; the last 9 s become the validation split).
 
@@ -186,11 +186,11 @@ measured loudness/gain, your `--name`/`--gear-*`/`--tone-type` fields, latency c
 record, final ESR). Check the result by ear with:
 
 ```sh
-fucina-zig-nam validate my-amp.nam --input v3_0_0.wav --output reamp.wav --write-wavs ab/
+fucina-nam validate my-amp.nam --input v3_0_0.wav --output reamp.wav --write-wavs ab/
 ```
 
 (writes `validation_target.wav` = the real amp and `validation_model.wav` = the profile,
-time-aligned for A/B listening) — then just play it: `fucina-zig-nam live my-amp.nam ...`.
+time-aligned for A/B listening) — then just play it: `fucina-nam live my-amp.nam ...`.
 
 ## MIDI control
 
@@ -233,7 +233,7 @@ drive pedal into an amp into a cab — as a **chain**.
 ### Add a cab IR
 
 ```sh
-fucina-zig-nam live amp.nam --ir cab.wav --capture 2 --playback 2
+fucina-nam live amp.nam --ir cab.wav --capture 2 --playback 2
 ```
 
 `--ir` appends the cab after the model (`amp → cab → output`), just like loading an IR in
@@ -257,7 +257,7 @@ cab.wav :: trim=-2                 # cabinet IR, pulled back 2 dB
 ```
 
 ```sh
-fucina-zig-nam live --chain rig.chain --capture 2 --playback 2
+fucina-nam live --chain rig.chain --capture 2 --playback 2
 ```
 
 - A stage is a `.nam`/`.gguf` model or a `.wav` cab IR (chosen by file extension).

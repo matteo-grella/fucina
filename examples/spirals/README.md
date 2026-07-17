@@ -5,7 +5,7 @@ with a 2-64-64-2 tanh MLP, trained full-batch for 2000 steps — once per
 optimizer: SGD (Nesterov momentum), AdamW, Muon, APOLLO, and APOLLO-Mini,
 plus a final `adamw-groups` run that composes param groups (decay /
 no-decay), a warmup-cosine lr schedule, and global-norm gradient clipping —
-the standard LLM training recipe in miniature (root `examples/spirals.zig`).
+the standard LLM training recipe in miniature ([`main.zig`](main.zig)).
 
 For every optimizer the demo:
 

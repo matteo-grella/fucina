@@ -12,14 +12,14 @@ const std = @import("std");
 const fucina = @import("fucina");
 const llm = @import("fucina_llm");
 
-const types = @import("lmserve/types.zig");
-const backend_mod = @import("lmserve/backend.zig");
-const backend_nanochat = @import("lmserve/backend_nanochat.zig");
-const backend_diffusion = @import("lmserve/backend_diffusion.zig");
-const backend_inkling = @import("lmserve/backend_inkling.zig");
-const backend_qwen35 = @import("lmserve/backend_qwen35.zig");
-const scheduler_mod = @import("lmserve/scheduler.zig");
-const http_mod = @import("lmserve/http.zig");
+const types = @import("types.zig");
+const backend_mod = @import("backend.zig");
+const backend_nanochat = @import("backend_nanochat.zig");
+const backend_diffusion = @import("backend_diffusion.zig");
+const backend_inkling = @import("backend_inkling.zig");
+const backend_qwen35 = @import("backend_qwen35.zig");
+const scheduler_mod = @import("scheduler.zig");
+const http_mod = @import("http.zig");
 
 const usage_text =
     \\fucina lmserve — OpenAI-compatible LM server (chat completions + responses)
@@ -732,12 +732,12 @@ fn shutdownKicker(io: std.Io, port: u16) void {
 }
 
 test {
-    _ = @import("lmserve/types.zig");
-    _ = @import("lmserve/backend.zig");
-    _ = @import("lmserve/backend_nanochat.zig");
-    _ = @import("lmserve/backend_diffusion.zig");
-    _ = @import("lmserve/scheduler.zig");
-    _ = @import("lmserve/openai.zig");
-    _ = @import("lmserve/emitter.zig");
-    _ = @import("lmserve/http.zig");
+    _ = @import("types.zig");
+    _ = @import("backend.zig");
+    _ = @import("backend_nanochat.zig");
+    _ = @import("backend_diffusion.zig");
+    _ = @import("scheduler.zig");
+    _ = @import("openai.zig");
+    _ = @import("emitter.zig");
+    _ = @import("http.zig");
 }

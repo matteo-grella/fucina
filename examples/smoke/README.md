@@ -1,15 +1,15 @@
 # smoke — minimal tensor/autograd sanity demo
 
-The smallest complete Fucina program (root `examples/smoke.zig`): two
+The smallest complete Fucina program ([`main.zig`](main.zig)): two
 tracked variables — `x = [2, 3]` (shape 1x2) and `w = [4, 5]` (shape 2x1) —
 a `dot` contraction, a `sumAll` loss, one `backward()`, and the gradients
 read back out. It exercises `ExecContext`, tagged-dimension `Tensor`s,
 the autograd graph, and gradient retrieval in under 50 lines.
 
-No weights, no flags. Note the build step is named **`run`**, not `smoke`:
+No weights, no flags (`zig build run` is kept as an alias for the same step):
 
 ```sh
-zig build run
+zig build smoke
 ```
 
 Expected output (loss = 2*4 + 3*5; grad_x = w, grad_w = x):

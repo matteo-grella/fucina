@@ -3,7 +3,7 @@
 //! `<name>.ptqtp0/1/2` replaces `<name>` — plus a `fucina.ptqtp.version`
 //! metadata key that marks the file and gates loader pair-detection. Every
 //! other tensor and metadata entry passes through byte-verbatim, so
-//! decoration happens once (`--save` in examples/ptqtp_qwen3.zig, or the
+//! decoration happens once (`--save` in examples/ptqtp_qwen3/main.zig, or the
 //! shard-streaming `export-gguf --ptqtp` path for models bigger than RAM —
 //! tools/export_gguf.zig follows these exact conventions) and the saved
 //! file serves through the ordinary family loaders forever after.

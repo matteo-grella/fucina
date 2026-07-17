@@ -215,9 +215,9 @@ Training and persistence (see *Training And Persistence*): `src/optim.zig`,
 
 LLM stack (see *LLM Stack*): `src/llm.zig` + `src/llm/`.
 
-Apps: `examples/` (`smoke.zig`, `qwen3.zig`, `qwen35.zig`, `gemma4.zig`,
-`diffusion_gemma.zig`, `parakeet.zig`, `spirals.zig`, `finetune.zig`,
-`es_finetune.zig`, `es_spirals.zig`, `nam.zig` + `nam/`, `omnivoice.zig` + `omnivoice/`), `tools/`
+Apps: `examples/` (one directory per example rooted at `main.zig`: `smoke/`, `qwen3/`,
+`qwen35/`, `gemma4/`, `diffusion_gemma/`, `parakeet/`, `spirals/`, `finetune/`,
+`es_finetune/`, `es_spirals/`, `nam/`, `omnivoice/`, and more), `tools/`
 (`export_gguf.zig`, `check_import_graph.zig`, `check_doc_links.zig`, plus the
 benchmark/parity helper scripts), `bench/` (microbenchmarks plus the shared
 `alloc.zig`/`timer.zig` helpers).
@@ -645,7 +645,7 @@ verification-relevant steps are:
 
 - `zig build test` (+ `-Dbackend=scalar`, `-Dblas=none`, optimize variants):
   drives five test roots — `src/fucina.zig`, `src/llm.zig`,
-  `examples/nam.zig`, `examples/parakeet.zig`, `examples/omnivoice.zig`. Parity suites needing local model/reference assets are
+  `examples/nam/main.zig`, `examples/parakeet/main.zig`, `examples/omnivoice/main.zig`. Parity suites needing local model/reference assets are
   env-gated (e.g. `OMNIVOICE_PARITY`) and skip by default.
 - `zig build arch-check`: the production import-graph gate (see *Layering And
   Enforcement*).

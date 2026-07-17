@@ -3,7 +3,7 @@
 // Out-of-tree consumer of the pinned reference (refs/locate-anything.cpp @
 // 92c1682, built per its README): runs the reference pipeline on one image +
 // prompt and writes every stage checkpoint the Zig port gates against into a
-// single GGUF (read back by examples/locate_anything.zig `--compare`).
+// single GGUF (read back by examples/locate_anything/main.zig `--compare`).
 //
 // Build (from the repo root, with the reference built at refs/locate-anything.cpp/build):
 //   c++ -std=c++17 -O2 tools/ref-patches/la_dump.cpp \

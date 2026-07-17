@@ -13,26 +13,26 @@ const std = @import("std");
 const fucina = @import("fucina");
 const llm = @import("fucina_llm");
 
-const philox = @import("omnivoice/philox.zig");
-const resample = @import("omnivoice/resample.zig");
-const wav = @import("omnivoice/wav.zig");
-const dump = @import("omnivoice/dump.zig");
-const rvq_file = @import("omnivoice/rvq_file.zig");
-const postproc = @import("omnivoice/postproc.zig");
-const postproc_stream = @import("omnivoice/postproc_stream.zig");
-const chunker = @import("omnivoice/chunker.zig");
-const chunker_stream = @import("omnivoice/chunker_stream.zig");
-const duration = @import("omnivoice/duration.zig");
-const voicedesign = @import("omnivoice/voicedesign.zig");
-const langmap = @import("omnivoice/langmap.zig");
-const maskgit = @import("omnivoice/maskgit.zig");
-const mg_decode = @import("omnivoice/mg_decode.zig");
-const play = @import("omnivoice/play.zig");
-const codec = @import("omnivoice/codec.zig");
-const rvq = @import("omnivoice/rvq.zig");
-const dac = @import("omnivoice/dac.zig");
-const lm = @import("omnivoice/lm.zig");
-const pipeline = @import("omnivoice/pipeline.zig");
+const philox = @import("philox.zig");
+const resample = @import("resample.zig");
+const wav = @import("wav.zig");
+const dump = @import("dump.zig");
+const rvq_file = @import("rvq_file.zig");
+const postproc = @import("postproc.zig");
+const postproc_stream = @import("postproc_stream.zig");
+const chunker = @import("chunker.zig");
+const chunker_stream = @import("chunker_stream.zig");
+const duration = @import("duration.zig");
+const voicedesign = @import("voicedesign.zig");
+const langmap = @import("langmap.zig");
+const maskgit = @import("maskgit.zig");
+const mg_decode = @import("mg_decode.zig");
+const play = @import("play.zig");
+const codec = @import("codec.zig");
+const rvq = @import("rvq.zig");
+const dac = @import("dac.zig");
+const lm = @import("lm.zig");
+const pipeline = @import("pipeline.zig");
 
 const usage =
     \\fucina OmniVoice — MaskGIT TTS from GGUF (guide: examples/omnivoice/README.md)
@@ -1278,5 +1278,5 @@ test {
     _ = dac;
     _ = lm;
     _ = pipeline;
-    _ = @import("omnivoice/root_tests.zig");
+    _ = @import("root_tests.zig");
 }

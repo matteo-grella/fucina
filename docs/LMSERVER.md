@@ -1,6 +1,6 @@
 # LMSERVER — the OpenAI-compatible language-model server example
 
-`zig build lmserve` (`examples/lmserve.zig` + `examples/lmserve/`) exposes the
+`zig build lmserve` (`examples/lmserve/main.zig` + `examples/lmserve/`) exposes the
 in-tree language models behind the two OpenAI wire dialects. It is an
 example, not a library surface: the shared code lives under `examples/lmserve/`
 and integrates a model family through one small `Backend` vtable.

@@ -51,7 +51,7 @@ acquire.
 
 **Visual:** Zoom into the same snippet: highlight `const alloc =
 std.testing.allocator;` and `ctx.init(alloc);`, then each `defer x.deinit();`
-line lighting up in sequence. Cut to `examples/spirals.zig` lines 327–330 —
+line lighting up in sequence. Cut to `examples/spirals/main.zig` lines 327–330 —
 the demo's `DebugAllocator` with `defer if (gpa.deinit() == .leak)
 @panic("leak");` — on "fails the test".
 
@@ -137,7 +137,7 @@ state. End card with the series title and next-episode tease.
   fences (lines 249–275, blank lines included), and that code contains
   exactly twelve `try` keywords — verified, so the segment-3 highlight count
   matches the on-screen snippet. Segments 1–3.
-- `examples/spirals.zig` lines 327–330 — `DebugAllocator` + `@panic("leak")`.
+- `examples/spirals/main.zig` lines 327–330 — `DebugAllocator` + `@panic("leak")`.
   Segment 2.
 - `src/tensor.zig` lines 11–19 — `TensorError` (seven members). Segment 3.
 - `src/ag/tensor.zig` lines 185–190 — `pub fn Tensor(...) type`. Segment 4.
@@ -177,7 +177,7 @@ episode — that is part of the point of `zig build test`.
   `src/fucina.zig` guard) and the fact that the first program is shown as
   *the repo's own CI-verified snippet*, not a mock-up.
 - **If the cut runs long, trim in this order:** (1) the
-  `examples/spirals.zig` cutaway in segment 2 (keep the testing-allocator
+  `examples/spirals/main.zig` cutaway in segment 2 (keep the testing-allocator
   line); (2) the twelve-`try` highlight cut in segment 3; (3) shorten the
   clone/build time-lapse. Do not trim the caveat line or the teaser.
 - **Pacing:** VO is 438 words ≈ 146 wpm over 3:00. Segment 5 needs the two

@@ -1,5 +1,5 @@
 //! Evolution-strategies fine-tuning demo on a real Qwen3 GGUF — the
-//! gradient-free counterpart of examples/finetune.zig, built for
+//! gradient-free counterpart of examples/finetune/main.zig, built for
 //! apples-to-apples comparison: same model loading, same built-in pirate
 //! dataset / `--data` JSONL path (`llm.data` SftText/encodePair/Loader), same
 //! deterministic `--shuffle` loader, same checkpoint directory layout, and
@@ -62,13 +62,13 @@ const training_checkpoint = fucina.training_checkpoint;
 const default_model = "models/Qwen3-0.6B-Q4_K_S.gguf";
 const default_save = "/tmp/fucina-qwen3-es";
 
-/// LoRA on q and v projections — the same target set as examples/finetune.zig.
+/// LoRA on q and v projections — the same target set as examples/finetune/main.zig.
 const LoraTrainer = llm.qwen3.train.Trainer(.{ .q = true, .v = true });
 /// Zero adapters: the identical trainer forward evaluating the raw base
 /// model — the eval vehicle for full-parameter ES.
 const FullTrainer = llm.qwen3.train.Trainer(.{ .q = false, .v = false });
 
-/// The pirate dataset from examples/finetune.zig, verbatim — apples to apples.
+/// The pirate dataset from examples/finetune/main.zig, verbatim — apples to apples.
 const dataset = [_]llm.data.Pair{
     .{ .instruction = "What is the capital of France?", .response = "Ahoy! The capital of France be Paris, matey." },
     .{ .instruction = "Name a primary color.", .response = "Ahoy! Red be a fine primary color, matey." },

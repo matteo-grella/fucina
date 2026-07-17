@@ -1,9 +1,9 @@
-//! Tests for examples/parakeet.zig. Hermetic (no fixtures): the `--compare`
+//! Tests for examples/parakeet/main.zig. Hermetic (no fixtures): the `--compare`
 //! parity gate (`compareGate`) must be mechanically enforcing — return `false`
 //! when a comparison exceeds its tolerance / cosine bound and `true` otherwise,
 //! so `main` can turn a gated `--compare` FAIL into a nonzero exit.
 const std = @import("std");
-const parakeet = @import("parakeet.zig");
+const parakeet = @import("main.zig");
 
 test "compareGate enforces the max-abs tolerance" {
     // Identical -> within any tol.

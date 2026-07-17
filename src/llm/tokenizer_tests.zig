@@ -71,7 +71,7 @@ test "bare <| does not force a pretokenization split" {
 //
 // (add_bos is false for Qwen3, so the output is the raw encoding). Bench-file
 // parity (code/prose/torture/zig/c, token-ID-exact) was additionally verified
-// via `fucina-zig-qwen3 --tokenize FILE` against the same oracle.
+// via `fucina-qwen3 --tokenize FILE` against the same oracle.
 // ---------------------------------------------------------------------------
 
 const ParityFixture = struct { text: []const u8, ids: []const u32 };

@@ -1,6 +1,6 @@
 //! Behavioral tests for the inkling model module. Logit/generation parity
 //! vs the pinned llama.cpp PR oracle runs through the example CLI gates
-//! (`examples/inkling.zig --compare-logits`, docs/PORTING.md §3); these
+//! (`examples/inkling/main.zig --compare-logits`, docs/PORTING.md §3); these
 //! tests cover the host-side numeric kernels in isolation.
 
 const std = @import("std");

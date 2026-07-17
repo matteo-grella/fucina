@@ -824,7 +824,7 @@ fn randomTokenAt(seed: u64, counter: *u64, vocab: usize) usize {
 // ---------------------------------------------------------------------------
 
 /// Per-step snapshot handed to the streaming callback (the terminal
-/// visualization renders these — see examples/diffusion_gemma.zig --visual).
+/// visualization renders these — see examples/diffusion_gemma/main.zig --visual).
 pub const StepInfo = struct {
     /// 0-based step within this canvas; restarts at 0 on every block.
     step_index: usize,

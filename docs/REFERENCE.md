@@ -393,7 +393,7 @@ test "runtime worker count never exceeds the comptime ceiling" {
 ### 2.3 Build steps (`build.zig`)
 
 `zig build` with no step runs the default **install** step: it compiles all
-23 installed executables into `zig-out/bin/` (named `fucina-zig-<name>`).
+23 installed executables into `zig-out/bin/` (named `fucina-<name>`).
 Bench and check executables are *not* installed; they build on demand when
 their step runs. Every example-runner step depends only on its own
 executable's install-artifact step, so `zig build qwen3` builds just that
@@ -420,7 +420,7 @@ in the per-example `examples/<name>/README.md` and §14):
 
 | Step | Program |
 | --- | --- |
-| `run` | `examples/smoke.zig` — the smoke example. |
+| `smoke` | `examples/smoke/main.zig` — the smoke example (`run` is kept as an alias). |
 | `qwen3` | Qwen3 dense/MoE GGUF inference: chat/REPL, `--spec`/`--spec-ref` lossless speculative decode, `--tokenize` tokenizer-parity oracle. |
 | `gemma4` | Gemma 4 GGUF inference / logit-parity harness; chat/REPL/`--spec`. |
 | `qwen35` | Qwen3.5 (hybrid Gated-DeltaNet) GGUF loader/parity harness. |
@@ -484,7 +484,7 @@ zig build qwen3 -Dgpu=metal -Doptimize=ReleaseFast -- ...  # Metal offload (macO
 zig build -Dgpu=cuda -Dtarget=x86_64-linux-gnu -Dcpu=znver4 \
   -Doptimize=ReleaseFast                                   # CUDA cross-build from macOS
 
-FUCINA_MAX_THREADS=6 zig-out/bin/fucina-zig-qwen3 models/... --chat "..."
+FUCINA_MAX_THREADS=6 zig-out/bin/fucina-qwen3 models/... --chat "..."
 ```
 
 ### 2.4 Module graph and options wiring (`build.zig`)
@@ -748,13 +748,13 @@ binary with the same option set as the corresponding executable:
 
 1. `src/fucina.zig` — the core (with `build_options`);
 2. `src/llm.zig` — the LLM/ASR stack (imports `fucina`);
-3. `examples/lmserve.zig` (imports `fucina` and `fucina_llm`; links libc);
-4. `examples/nam.zig` (with the audio/MIDI shims linked);
-5. `examples/parakeet.zig` (with its `parakeet_mic` options);
-6. `examples/omnivoice.zig` (with the playback shim);
-7. `examples/locate_anything.zig`;
-8. `examples/facedetect.zig`;
-9. `examples/nanochat.zig` (imports `fucina` and `fucina_llm` — the
+3. `examples/lmserve/main.zig` (imports `fucina` and `fucina_llm`; links libc);
+4. `examples/nam/main.zig` (with the audio/MIDI shims linked);
+5. `examples/parakeet/main.zig` (with its `parakeet_mic` options);
+6. `examples/omnivoice/main.zig` (with the playback shim);
+7. `examples/locate_anything/main.zig`;
+8. `examples/facedetect/main.zig`;
+9. `examples/nanochat/main.zig` (imports `fucina` and `fucina_llm` — the
    raw-byte BPE pretokenizer reuses the generated Unicode tables via
    `llm.unicode_categories`).
 
@@ -8264,7 +8264,7 @@ test "dotTernarySte trains a b1.58 ternary linear" {
 The gradient-free alternative is **ternary-native evolution strategies**
 (§11): ES genomes that *are* packed `[]BlockTQ2_0` — no latent floats, so the
 trained state is byte-for-byte the served state and every member evaluation
-runs the real int8 inference kernels (`examples/es_ternary_spirals.zig` is
+runs the real int8 inference kernels (`examples/es_ternary_spirals/main.zig` is
 the end-to-end demo). `.tq1_0` (1.6875 bits/weight, base-3⁵ packing of five
 trits per byte) remains decode/cold-matmul only.
 
@@ -8860,7 +8860,7 @@ test "warmupCosineFactor endpoints" {
 ```
 
 Groups, schedule, and clipping compose — the standard LLM recipe in
-miniature (`examples/spirals.zig` `groupsDemo` proves this composition
+miniature (`examples/spirals/main.zig` `groupsDemo` proves this composition
 resumes bit-exactly):
 
 ```zig
@@ -9302,7 +9302,7 @@ stay readable); `format` must be `"fucina.training_checkpoint"` and
 accumulation, save only at window boundaries — accumulated gradients live
 only in GradStates and are never serialized ([TRAINING.md](TRAINING.md)
 §4). The es_* fields make an ES checkpoint self-describing without any
-`optimizer.fucina` (§11.11). `examples/spirals.zig` `saveCheckpoint` /
+`optimizer.fucina` (§11.11). `examples/spirals/main.zig` `saveCheckpoint` /
 `loadCheckpoint` is the reference composition of these helpers with
 `ParamRegistry` and `saveState`.
 
@@ -9577,7 +9577,7 @@ sigma/alpha/population and restore `es_iteration`).
   caller's replica table. `workers` ≥ 1 (clamped to population and 64); the
   evaluator must be thread-safe across distinct workers; the first error
   stops the fan-out and is returned after all workers join.
-  `examples/es_spirals.zig` is this shape end-to-end (each worker owns a
+  `examples/es_spirals/main.zig` is this shape end-to-end (each worker owns a
   replica model + its own ExecContext; only scalar rewards cross threads).
 
 **The update.** `update(ctx, rewards)` (`rewards.len == population`, else
@@ -10111,7 +10111,7 @@ test "gguf: q8_0 quantize seam round-trip" {
 ### 12.4 The export-gguf tool (`tools/export_gguf.zig`)
 
 `zig build export-gguf` builds and runs the exporter (installed as
-`fucina-zig-export-gguf`), which closes the train → export → serve-anywhere
+`fucina-export-gguf`), which closes the train → export → serve-anywhere
 loop on top of `Writer` + `encodeF32`/`decodeF32`:
 
 ```sh
@@ -12437,7 +12437,7 @@ the residual stream before attention (plain path only; composes with
 `cartridge`; rejected with `packed_segments` — the ShortConv is causal
 over the packed row), and `lossForwardExt(ctx, tokens, labels, fwd,
 loss_opts)` is the CE loss entry taking full `ForwardOptions`.
-`examples/engram.zig` (`zig build engram`,
+`examples/engram/main.zig` (`zig build engram`,
 [README](../examples/engram/README.md)) drives it: `--equiv`
 (bitwise zero-init gate on a real GGUF), `--train`/`--eval` (frozen
 trunk, held-out chunk CE, `--lora N`, `--no-engram` control,
@@ -12730,7 +12730,7 @@ drives the draft-model-free SAM + Token-Recycling cascade from
 from. Output is lossless (greedy streams verified identical with and without
 `--spec`).
 
-**Runner** (`examples/qwen3.zig`, the full CLI surface is documented in the
+**Runner** (`examples/qwen3/main.zig`, the full CLI surface is documented in the
 [README](../examples/qwen3/README.md)):
 
 ```sh
@@ -13061,7 +13061,7 @@ retain raw expert blocks — load with `--experts=borrow` or a raw-expert
 build; the packed inference-only RHS cannot take gradients), plus
 `ExecScopeRequired`, `InvalidSequenceLength`, `LabelLengthMismatch`.
 
-**Runner** (`examples/gemma4.zig`,
+**Runner** (`examples/gemma4/main.zig`,
 [README](../examples/gemma4/README.md) — chat/REPL over the SPM tokenizer
 (`llm.spm_tokenizer`) and the generic `llm.chat.Conversation`; sampling
 defaults come from the GGUF):
@@ -13166,7 +13166,7 @@ _ = out[0..result.produced];
 ```
 
 No training entry and no speculative decoding (there is no autoregressive
-draft/verify seam). Runner (`examples/diffusion_gemma.zig`,
+draft/verify seam). Runner (`examples/diffusion_gemma/main.zig`,
 [README](../examples/diffusion_gemma/README.md); on a TTY the
 reply denoises live inline — `--no-visual` disables):
 
@@ -13334,7 +13334,7 @@ defer alloc.free(text);
   `error.UnknownLang` if a prompt-conditioned model cannot resolve `lang`.
 
 No training entry, no speculative decoding (not autoregressive text).
-Runner (`examples/parakeet.zig`, [README](../examples/parakeet/README.md)):
+Runner (`examples/parakeet/main.zig`, [README](../examples/parakeet/README.md)):
 
 ```sh
 zig build parakeet -Doptimize=ReleaseFast -- --model models/parakeet/tdt_ctc-110m-f16.gguf \
@@ -13433,25 +13433,25 @@ reference's CPU backend on M1 Max. The example doubles as a library
 ships a WAV↔RVQ codec tool. `zig build omnivoice -- tts --model ... --codec
 ... --lang English -o out.wav` (see 14.8 for the flag shape).
 
-**The didactic set** (single files under `examples/`):
+**The didactic set** (single-`main.zig` examples under `examples/`):
 
-- `smoke.zig` (`zig build run`) — the minimal facade round trip: two
+- `smoke/main.zig` (`zig build smoke`) — the minimal facade round trip: two
   variables, `dot`, `sumAll`, `backward`, gradients printed.
-- `spirals.zig` (`zig build spirals`) — two-spirals MLP trained with every
+- `spirals/main.zig` (`zig build spirals`) — two-spirals MLP trained with every
   optimizer (SGD/AdamW/Muon/APOLLO/APOLLO-Mini) + param groups, lr schedule,
   clipping; proves bit-exact checkpoint/resume (§11).
-- `finetune.zig` (`zig build finetune`,
+- `finetune/main.zig` (`zig build finetune`,
   [README](../examples/finetune/README.md)) — the qwen3 LoRA loop of 14.2.1
   on a built-in pirate SFT set; `--data PATH.jsonl`, `--accum-steps`,
   `--verify-grads` gradient-evidence audit.
-- `es_finetune.zig` (`zig build es-finetune`,
+- `es_finetune/main.zig` (`zig build es-finetune`,
   [README](../examples/es_finetune/README.md)) — the gradient-free twin:
   `fucina.es` over the same trainer forward; `--mode lora|full`,
   `--reward rule|acc|nll`, anchored weight decay.
-- `es_spirals.zig` (`zig build es-spirals`) — from-scratch ES on two spirals;
+- `es_spirals/main.zig` (`zig build es-spirals`) — from-scratch ES on two spirals;
   member-parallel evaluation (one ExecContext + model replica per worker);
   self-verifying (fails below `--target` accuracy).
-- `es_ternary_spirals.zig` (`zig build es-ternary-spirals`) — the
+- `es_ternary_spirals/main.zig` (`zig build es-ternary-spirals`) — the
   ternary-native ES flagship: packed TQ2_0 genomes are the inference model
   (§10, §11), trained by trit flips on the real int8 kernels; self-verifying.
 
@@ -13464,7 +13464,7 @@ download source for every model row; each example's README
 
 | example | demonstrates | run |
 | --- | --- | --- |
-| `smoke` | facade: tensors, `dot`, autograd (§3-§5) | `zig build run` |
+| `smoke` | facade: tensors, `dot`, autograd (§3-§5) | `zig build smoke` |
 | `spirals` | optimizers, schedules, checkpoint/resume (§11) | `zig build spirals` |
 | `es_spirals` | from-scratch ES, member-parallel eval (§11) | `zig build es-spirals` |
 | `es_ternary_spirals` | ternary-native ES on TQ2_0 kernels (§10, §11) | `zig build es-ternary-spirals` |

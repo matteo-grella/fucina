@@ -106,7 +106,7 @@ The contract decomposes into proof obligations, each with a test:
 
 ## 3. Verify economics and break-even math
 
-Measured with the `--spec-bench` probe mode (examples/qwen3.zig): cost of one
+Measured with the `--spec-bench` probe mode (examples/qwen3/main.zig): cost of one
 verify-k forward in plain-step equivalents, best-of reps, M1 Max ReleaseFast.
 
 **Dense Qwen3-0.6B-Q4_K_S** (the shipped `default_cost_table`,
@@ -390,7 +390,7 @@ prototyped or paper-audited against the measured verify economics (§3).
 ## Addendum 2026-07-02 — gemma4 chat composition + loud gate validation
 
 - **Speculation composes with gemma4 chat.** `chat.Conversation(Model, Tok)` is
-  genuinely generic (no family import in `chat.zig`), and `examples/gemma4.zig`'s
+  genuinely generic (no family import in `chat.zig`), and `examples/gemma4/main.zig`'s
   `--chat`/`--repl` run on it with `--spec` — verified byte-identical greedy output
   with and without `--spec` on the real 26B GGUF. The §1 scope line ("qwen3 and
   gemma4") is exercised end-to-end from both CLIs.

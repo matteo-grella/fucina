@@ -5,7 +5,7 @@ the from-random-init acceptance test of `fucina.es`: the same
 two-hidden-layer tanh MLP (hidden 64, 194 points), same data generator, but
 no backward pass and no optimizer — reward is `-CE` on the full batch with
 z-score shaping and mirrored (antithetic) sampling on the ES-at-scale
-update (root `examples/es_spirals.zig`).
+update ([`main.zig`](main.zig)).
 
 It is also the member-parallel showcase: `evaluateMembers` fans the
 population over worker threads, each owning a full MLP replica and its own

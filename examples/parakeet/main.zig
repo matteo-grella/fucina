@@ -501,7 +501,7 @@ fn runMic(stdout: *std.Io.Writer, file: *const fucina.gguf.File, io: std.Io, are
         try stdout.print("--mic requires building with -Dparakeet-mic=true (links the vendored miniaudio capture stack).\n", .{});
         return;
     } else {
-        const audio = @import("nam/audio.zig");
+        const audio = @import("nam_audio");
         const cfg = try parakeet_loader.Config.fromGguf(file);
         const sc = (parakeet_loader.StreamingConfig.fromGguf(file) catch null) orelse {
             try stdout.print("--mic requires a streaming model\n", .{});

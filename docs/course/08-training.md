@@ -10,7 +10,7 @@ learning — the training step as a fixed ritual, loss functions with their
 sharp edges, optimizers from a three-line SGD to the research frontier,
 learning-rate schedules, gradient clipping and accumulation, checkpoints that
 resume **bit-exactly**, and mixed precision that halves memory without
-corrupting the math. At the end, the payoff: `examples/spirals.zig`, a
+corrupting the math. At the end, the payoff: `examples/spirals/main.zig`, a
 complete trainable model in under 500 lines, which you will run and watch
 learn.
 
@@ -689,7 +689,7 @@ One rule has no workaround: **each backward needs a fresh graph**. A second
 `error.BackwardAlreadyRun` (Chapter 7); accumulation is one backward per
 freshly-built forward, which the recommended shape — one exec scope per
 micro-batch — gives you naturally. Here is the real accumulation window
-from `examples/finetune.zig:340-374` (trimmed; comments original):
+from `examples/finetune/main.zig:340-374` (trimmed; comments original):
 
 ```zig
 // Exact token-weighted normalization: the samples differ in
@@ -903,7 +903,7 @@ small adapters" (docs/TRAINING.md §3).
 
 ## 8.11 The payoff: spirals, end to end
 
-Time to collect. `examples/spirals.zig` (493 lines) is the whole chapter
+Time to collect. `examples/spirals/main.zig` (493 lines) is the whole chapter
 in one runnable file: a typed model struct, a forward pass, cross-entropy,
 five optimizers, param groups with a schedule and clipping, checkpointing
 halfway, and a resume that must be — literally, or the program errors —
@@ -924,14 +924,14 @@ const Model = struct {
     b3: Tensor(.{.class}),
 ```
 
-*(from `examples/spirals.zig:29-35`)* — a model is a plain struct of typed
+*(from `examples/spirals/main.zig:29-35`)* — a model is a plain struct of typed
 tensors. No `nn.Module`, no parameter registration ceremony; the tags from
 [Chapter 4](04-axes-with-names.md) document the architecture in the types:
 `w1` maps `.in` (2 coordinates) to `.h1` (64 hidden units), `w2` maps
 `.h1` to `.h2`, `w3` maps `.h2` to `.class` (2 classes). Misconnect the
 layers and it will not compile.
 
-`Model.initRandom` (`examples/spirals.zig:38-67`) fills the weights with
+`Model.initRandom` (`examples/spirals/main.zig:38-67`) fills the weights with
 scaled uniform noise, and builds the six tensors with an `errdefer` after
 each — if the fourth allocation fails, the first three are freed, a
 pattern you will now recognize everywhere in the repo. `initConstZero`
@@ -956,7 +956,7 @@ fn registerParams(opt: anytype, model: *Model) !void {
 }
 ```
 
-*(from `examples/spirals.zig:116-127`)* — one function registers the model
+*(from `examples/spirals/main.zig:116-127`)* — one function registers the model
 with *any* optimizer, using comptime duck typing: if the optimizer type
 declares `addFallbackParam` (Muon, APOLLO), the classifier head `w3` routes
 to the fallback (§8.6 — heads must not be orthogonalized); otherwise it is
@@ -964,7 +964,7 @@ an ordinary param. Biases auto-route by rank. `@hasDecl` is resolved at
 compile time, so the branch not taken never exists in the binary.
 
 The forward and the step are the payoff for §8.2 — read the comment first,
-it is the whole lifetime story (from `examples/spirals.zig:129-153`):
+it is the whole lifetime story (from `examples/spirals/main.zig:129-153`):
 
 ```zig
 /// Forward pass inside an exec scope (ExecContext.openExecScope): every op result
@@ -1002,7 +1002,7 @@ counts matches — the same-forward-infers-and-trains property, live.
 
 ### Data and checkpointing
 
-`makeSpirals` (`examples/spirals.zig:168-186`) generates the dataset: 200
+`makeSpirals` (`examples/spirals/main.zig:168-186`) generates the dataset: 200
 points per arm, radius growing with angle over ~1.75 turns, class 1 being
 class 0 rotated by π, plus a whisper of Gaussian noise. Four hundred
 points, two floats each — the whole dataset is a stack array.
@@ -1017,7 +1017,7 @@ serves phase 3, which loads weights with no optimizer at all.
 
 ### The three-phase gauntlet
 
-The `demo` driver (`examples/spirals.zig:260-325`) runs each optimizer
+The `demo` driver (`examples/spirals/main.zig:260-325`) runs each optimizer
 through three phases:
 
 1. **Train** 2000 full-batch steps, checkpointing model + optimizer at
@@ -1034,7 +1034,7 @@ through three phases:
    if (max_diff != 0) return error.ResumeNotBitExact;
    ```
 
-   *(from `examples/spirals.zig:309-314`)* — not a tolerance check. `!= 0`.
+   *(from `examples/spirals/main.zig:309-314`)* — not a tolerance check. `!= 0`.
    One flipped bit anywhere in a thousand replayed steps — a stored moment
    rounded differently, a thread-order-dependent reduction, an lr factor
    applied off by one step — and the example *fails its build*. This is
@@ -1062,7 +1062,7 @@ var gpa = std.heap.DebugAllocator(.{}){};
 defer if (gpa.deinit() == .leak) @panic("leak");
 ```
 
-*(from `examples/spirals.zig:328-329`)* — the example *panics if it leaks a
+*(from `examples/spirals/main.zig:328-329`)* — the example *panics if it leaks a
 single allocation*. TRAINING.md §11's advice: train in ReleaseFast,
 validate in Debug — the DebugAllocator catches lifetime mistakes.
 
@@ -1075,7 +1075,7 @@ zig build spirals -Doptimize=ReleaseFast
 You will see one header, then three lines per optimizer (the groups demo
 prints two), in this format
 (these are the actual `print` format strings from
-`examples/spirals.zig:291-321,347` — the numbers are for your machine to
+`examples/spirals/main.zig:291-321,347` — the numbers are for your machine to
 fill in):
 
 ```text
@@ -1156,7 +1156,7 @@ and the lr trajectory differs). Either way, watch the gate catch you.
 
 ## Explore the source
 
-- `examples/spirals.zig` — the chapter as a program; read it top to bottom
+- `examples/spirals/main.zig` — the chapter as a program; read it top to bottom
   now, it will all be familiar.
 - `docs/TRAINING.md` — the manual this chapter quotes; §12 is a pitfalls
   checklist worth keeping open while you write your first loop.
@@ -1168,12 +1168,12 @@ and the lr trajectory differs). Either way, watch the gate catch you.
 - `src/param_registry.zig` and `src/training_checkpoint.zig` — reflective
   parameter naming and the checkpoint directory protocol, ~370 and ~290
   lines respectively.
-- `examples/finetune.zig` — the same machinery at LLM scale: accumulation
+- `examples/finetune/main.zig` — the same machinery at LLM scale: accumulation
   windows, OptimizerSet, periodic checkpoint directories.
 
 ## Exercises
 
-1. **Break the ritual.** In `examples/spirals.zig`, move `opt.zeroGrad()`
+1. **Break the ritual.** In `examples/spirals/main.zig`, move `opt.zeroGrad()`
    above `opt.step(ctx)` in `trainStep` and rerun. Explain what the
    optimizer now sees. Then delete `zeroGrad` entirely and explain why the
    loss behaves the way it does (§8.8 has the vocabulary).
