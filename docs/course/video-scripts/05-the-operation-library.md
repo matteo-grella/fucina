@@ -105,9 +105,10 @@ the loss test: "ln(4) ≈ 1.386, matched to 1e-6 in the test".
 **VO:** The chapter walks the whole vocabulary — masks, reductions, gather
 and scatter, determinism as a contract. Next time: those small unchecked
 kernels have a job to do. Going fast on CPUs.
-**Visual:** End card: chapter link (docs/course/05-the-operation-library.md)
+**Visual:** End card: "Full chapter: `docs/course/05-the-operation-library.md`"
 over a slow zoom-out of the three-layer depth-gauge diagram from segment 2.
-**Overlay:** "Next: 06 — Going fast on CPUs".
+**Overlay:** "Full chapter: `docs/course/05-the-operation-library.md`" ·
+"Next: 06 — Going fast on CPUs".
 
 ## Asset list
 - **Code shots (record from the repo at current main):**

@@ -94,8 +94,8 @@ element)" · "O(1) memory beyond θ · resume = an iteration counter — no
 ### [1:37–2:07] es_spirals, from scratch (showcase)
 
 **VO:** Watch it work. es_spirals trains the two-spirals classifier from
-scratch — same MLP, same data as chapter eight, but every tensor is a plain
-constant. No gradient tracking anywhere. Four worker threads each own a full
+scratch — same MLP, same data generator as chapter eight, but every tensor
+is a plain constant. No gradient tracking anywhere. Four worker threads each own a full
 replica; only scalar rewards cross threads. One command. The run is
 self-verifying: it exits non-zero below ninety percent accuracy, and chance
 is fifty. On an M1 Max it reaches one hundred percent in about fifteen
@@ -130,7 +130,9 @@ full-parameter fine-tuning with no backward memory.
 evaluations" — the ES bar drawn dramatically longer. Then a three-item
 "reach" card: *quantized/ternary weights (packed TQ2_0 genomes)* ·
 *non-differentiable rule rewards ("Ahoy!")* · *no-backward-memory
-full-parameter fine-tuning* (§9.8).
+full-parameter fine-tuning* (§9.8), with a small footer: "one road of a
+four-way post-training menu — gradients, evolution, trit-planes, or a
+trained context (§9.8 → ch15 §15.10)".
 
 **Overlay:** Quote card: "ES needs MANY more iterations than backprop for
 the same movement … a mechanism showcase, not a convergence recipe" —
@@ -150,11 +152,13 @@ code is under a noncommercial Academic Public License". Then a parity card:
 "`tools/check_es_parity.py` — the reference (es-at-scale) executed as an
 oracle vs a torch transcription of es.zig's algebra, same noise → bitwise
 `torch.equal` on f32 / f16 / bf16, both noise schemes" (§9.7). End card:
-series title, "Next: 10 — The guitar amp", chapter link
-`docs/course/09-training-without-gradients.md`.
+series title, "Full chapter:
+`docs/course/09-training-without-gradients.md`", "Next: 10 — The guitar
+amp".
 
 **Overlay:** "compared against, never ported (docs/TRAINING.md §13)" · end
-card: "Next: The guitar amp — real-time neural audio".
+card: "full chapter in `docs/course/`" · "Next: The guitar amp — real-time
+neural audio".
 
 ## Asset list
 
@@ -189,10 +193,13 @@ card: "Next: The guitar amp — real-time neural audio".
 - Iteration-cost comparison bars: 2,000 gradient steps vs ~15,000 × 128 ≈ 2M
   member evaluations (§9.6).
 - Reach card: ternary genomes · rule rewards · no-backward-memory
-  full-parameter fine-tuning (§9.8).
+  full-parameter fine-tuning (§9.8); footer: one road of the four-way
+  post-training menu — gradients, evolution, trit-planes, or a trained
+  context (§9.8 → ch15 §15.10).
 - Parity card: reference-as-oracle vs torch transcription of es.zig's
   algebra, bitwise `torch.equal`, f32/f16/bf16, both noise schemes (§9.7).
-- End card with next-episode teaser.
+- End card with "Full chapter:
+  `docs/course/09-training-without-gradients.md`" and next-episode teaser.
 
 **External downloads:** none — `es_spirals` generates its own spiral data;
 no model weights are needed anywhere in this episode.

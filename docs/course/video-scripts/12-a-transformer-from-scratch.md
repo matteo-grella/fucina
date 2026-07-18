@@ -28,9 +28,10 @@ then downloads Qwen3-0.6B and chats with it live in the terminal.
 ### [0:00–0:26] Nine numbers
 
 **VO:** Strip away the mythology, and a transformer's architecture is a
-struct of nine integers. This is Qwen3-0.6B, verbatim: a vocabulary of
-151,936 tokens, vectors 1,024 floats wide, the same block repeated
-twenty-eight times, sixteen attention heads sharing eight key-value heads.
+struct of nine integers. This is Qwen3-0.6B — the chapter's reference model
+— verbatim: a vocabulary of 151,936 tokens, vectors 1,024 floats wide, the
+same block repeated twenty-eight times, sixteen attention heads sharing
+eight key-value heads.
 Everything between typing a question and reading the answer lives in one
 Zig file you can read top to bottom.
 
@@ -148,12 +149,12 @@ make this faster — without changing a single answer.
 
 **Visual:** Quick montage of file cards from the chapter's "Explore the
 source" list: `src/llm/tokenizer.zig`, `src/llm/kv_cache.zig`,
-`src/llm/sampler.zig`, `src/llm/chat.zig`. End card: series title, "Next:
-13 — Inference tricks", chapter link
-`docs/course/12-a-transformer-from-scratch.md`.
+`src/llm/sampler.zig`, `src/llm/chat.zig`. End card: series title, "Full
+chapter: `docs/course/12-a-transformer-from-scratch.md`", "Next: 13 —
+Inference tricks".
 
-**Overlay:** End card: "Next: Inference tricks — faster, without changing a
-single answer".
+**Overlay:** End card: "full chapter in `docs/course/`" · "Next: Inference
+tricks — faster, without changing a single answer".
 
 ## Asset list
 
@@ -191,7 +192,8 @@ command above fetches it on camera).
   (§12.5).
 - KV-cache arithmetic card: 28 × 2 × 8 × 128 × 2 B ≈ 112 KiB/position,
   ~448 MiB at 4096 tokens, with its geometry caveat (§12.4).
-- End card with next-episode teaser.
+- End card with "Full chapter:
+  `docs/course/12-a-transformer-from-scratch.md`" and next-episode teaser.
 
 ## Production notes
 

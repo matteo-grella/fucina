@@ -33,7 +33,7 @@ It's Fucina's canonical smoke test, and CI runs it against the real library
 on every push. To read it, you need a handful of Zig features. Here they are.
 
 **Visual:** Full-screen code shot of the first program —
-`docs/REFERENCE.md` lines 251–279 (the fenced `test "first program"` block,
+`docs/REFERENCE.md` lines 253–281 (the fenced `test "first program"` block,
 §1.4). Slow scroll top to bottom; briefly highlight the final two
 `expectApproxEqAbs` lines (tolerance `1e-6`) on "one part in a million".
 
@@ -122,19 +122,21 @@ learning — what those twenty-seven lines were actually computing.
 **Visual:** Terminal recording: `zig version` (prints `0.16.0`), then
 `git clone https://github.com/matteo-grella/fucina`, `cd fucina`,
 `zig build test` — time-lapse the build, land on the green/quiet success
-state. End card with the series title and next-episode tease.
+state. End card with the series title, "Full chapter:
+`docs/course/01-just-enough-zig.md`", and the next-episode tease.
 
 **Overlay:** `zig build test — 9 test roots, no model files` → end card:
+`Full chapter: docs/course/01-just-enough-zig.md` ·
 `Next: 02 — Just enough machine learning`
 
 ## Asset list
 
 **Code shots (repo files, exact ranges):**
-- `docs/REFERENCE.md` lines 251–279 — the `test "first program"` snippet
+- `docs/REFERENCE.md` lines 253–281 — the `test "first program"` snippet
   (§1.4; identical to the chapter's §1.2 block at
   `docs/course/01-just-enough-zig.md:78-106` — REFERENCE.md is used because
   it is the CI-verified original). The "27 lines" are the code between the
-  fences (lines 252–278, blank lines included), and that code contains
+  fences (lines 254–280, blank lines included), and that code contains
   exactly twelve `try` keywords — verified, so the segment-3 highlight count
   matches the on-screen snippet. Segments 1–3.
 - `examples/spirals/main.zig` lines 328–331 — `DebugAllocator` + `@panic("leak")`.

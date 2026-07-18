@@ -121,9 +121,11 @@ scratch.
 **Visual:** Card: three rows from the chapter's §2.10 road-ahead table
 ("tensors as shape + numbers → Chapter 3", "`backward()` — the chain rule,
 automated → Chapter 7", "`opt.step()`, learning rates, checkpoints →
-Chapter 8") fading into the next-episode title card.
+Chapter 8") fading into the next-episode title card, with a closing card
+line "Full chapter: `docs/course/02-just-enough-ml.md`" above the tease.
 
-**Overlay:** "Next: 03 — Tensors from scratch"
+**Overlay:** "Full chapter: `docs/course/02-just-enough-ml.md`" · "Next:
+03 — Tensors from scratch"
 
 ## Asset list
 

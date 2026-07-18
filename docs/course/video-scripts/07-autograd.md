@@ -8,7 +8,7 @@ pointer to the op that produced it, and `backward()` walks the pointers. We
 build the whole scheme in ~60 lines of scalar Zig, hit the classic
 double-counting bug, fix it with a pending counter — then find the identical
 counter, atomic now, running Fucina's real engine, where the same forward
-function trains under an exec scope and every gradient is checked against
+function trains under an exec scope and gradients are checked against
 finite differences.
 
 ## Takeaways
@@ -22,7 +22,7 @@ finite differences.
    onto a bounded pool.
 3. **Same forward trains; gradients are verified, not trusted** — open an
    exec scope and inference-style code trains unchanged; `gradcheck` checks
-   every VJP against a finite-difference oracle that can't share its bugs.
+   each new VJP against a finite-difference oracle that can't share its bugs.
 
 ## Script
 
@@ -112,9 +112,9 @@ it. Next time: training — making the machine learn.
 **Visual:** Code shot: the machine-verified `test "customVjp validated by
 gradcheck"` snippet from `docs/course/07-autograd.md:1167-1185`, with the
 `fucina.gradcheck(&ctx, squareLoss, .{&x}, .{})` call highlighted; end card
-with chapter link `docs/course/07-autograd.md`.
+with "Full chapter: `docs/course/07-autograd.md`".
 **Overlay:** `|g_num − g_ana| ≤ abs_tol + rel_tol·|g_ana|` ·
-`Next: 08 — Training`
+`Full chapter: docs/course/07-autograd.md` · `Next: 08 — Training`
 
 ## Asset list
 - **Chapter code excerpts** (render as code shots, source of truth is the

@@ -125,11 +125,11 @@ craft — how a library like this earns your trust.
 `docs/course/15-training-llms-on-cpu.md:646-650` (LoRA+backprop / ES /
 from-scratch, one row each); then the post-training menu table at
 `docs/course/15-training-llms-on-cpu.md:654-659` (LoRA / ES / PTQTP /
-Cartridges, one row each); end card with chapter link
-`docs/course/15-training-llms-on-cpu.md`.
+Cartridges, one row each); end card with "Full chapter:
+`docs/course/15-training-llms-on-cpu.md`".
 **Overlay:** `four roads after pretraining — train the weights,
 re-express them, or train the context` · `CPU-first, not CPU-only` ·
-`Next: 16 — The craft`
+`full chapter in docs/course/` · `Next: 16 — The craft`
 
 ## Asset list
 - **Model downloads** (weights are NOT in the repo; sources per

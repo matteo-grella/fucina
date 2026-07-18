@@ -9,7 +9,8 @@ schema-guaranteed — without changing what it says: draft-model-free
 speculative decoding behind a never-a-loss gate, MoE expert streaming that
 decodes a 142 GB model on a 64 GB machine, and constrained decoding that
 composes with speculation. Each one is a seam, not a hack — and `lmserve`
-puts them all behind one OpenAI-compatible command.
+serves the same engine, constraints and KV reuse included, behind one
+OpenAI-compatible command.
 
 ## Takeaways
 
@@ -136,10 +137,10 @@ docs/CONSTRAINED-DECODING.md §5".
 
 ### [2:25–2:42] One command to serve it
 
-**VO:** All of it meets the network in lmserve: an OpenAI-compatible server
-over the same engine. One command, and any OpenAI client talks to your
-model — schema constraints, KV reuse, the works — with parameters it can't
-honor rejected loudly, never dropped.
+**VO:** The same engine meets the network in lmserve: an OpenAI-compatible
+server. One command, and any OpenAI client talks to your model — schema
+constraints, KV reuse, the disk tier — with parameters it can't honor
+rejected loudly, never dropped.
 
 **Visual:** Terminal shot (runnable) of the §13.10 command:
 ```
@@ -163,15 +164,15 @@ per weight. The low-bit frontier.
 
 **Visual:** Single closing card, four words appearing in a chain:
 "truncate → rewind → verify → gate" (the chapter's own through-line, §13.10
-closing paragraph). End card: series title, "Next: 14 — The low-bit
-frontier", chapter link `docs/course/13-inference-tricks.md`.
+closing paragraph). End card: series title, "Full chapter:
+`docs/course/13-inference-tricks.md`", "Next: 14 — The low-bit frontier".
 
 **Overlay:** "provably lossless — or gated so it can never lose" · end card:
-"Next: The low-bit frontier".
+"full chapter in `docs/course/`" · "Next: The low-bit frontier".
 
 ## Asset list
 
-**Code shots (repo files, exact ranges — ranges verified 2026-07-17,
+**Code shots (repo files, exact ranges — ranges verified 2026-07-18,
 re-verify at record time):**
 - `src/llm/speculative/core.zig:9–20` — the normative losslessness header
   (doc comment).
@@ -201,7 +202,8 @@ re-verify at record time):**
 - Speculation numbers card and constrained-decoding numbers card, all
   figures quoted from `docs/SPECULATIVE.md` §10 and
   `docs/CONSTRAINED-DECODING.md` §5 as reproduced in chapter §13.5/§13.6.
-- End card with next-episode teaser.
+- End card with "Full chapter: `docs/course/13-inference-tricks.md`" and
+  next-episode teaser.
 
 **External downloads (weights are NOT in the repo):**
 - Qwen3-0.6B GGUF, Q8_0 (for the runnable constrained + lmserve shots) and

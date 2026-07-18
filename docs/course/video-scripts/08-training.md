@@ -116,13 +116,15 @@ Watch the loss column: every optimizer drives it down, at visibly different
 speeds and depths. The whole optimizer story, rendered as data.
 
 **Visual:** Live terminal recording:
-`zig build spirals -Doptimize=ReleaseFast`. The header line ("two spirals:
-… points, MLP 2-…-…-2 (tanh), full-batch, … steps") appears, then the
-per-optimizer blocks print as each gauntlet finishes: `[sgd]`, `[adamw]`,
-`[muon]`, `[apollo]`, `[apollo-mini]`, then the groups demo. Highlight
-sweeps down the loss values on the "trained … steps: loss …" lines as the
-VO says "loss column". The printed numbers are whatever the recording
-machine produces — real output only.
+`zig build spirals -Doptimize=ReleaseFast`. The demo buffers stdout and
+flushes once at exit, so the terminal sits quiet while the gauntlets run,
+then the whole output lands in one burst: the header line ("two spirals:
+… points, MLP 2-…-…-2 (tanh), full-batch, … steps"), then the
+per-optimizer blocks `[sgd]`, `[adamw]`, `[muon]`, `[apollo]`,
+`[apollo-mini]`, then the groups demo. Once the output has settled, a
+highlight sweeps down the loss values on the "trained … steps: loss …"
+lines as the VO says "loss column". The printed numbers are whatever the
+recording machine produces — real output only.
 
 **Overlay:** "`examples/spirals/main.zig` — 494 lines, the whole chapter
 runnable" · "no downloads: the demo generates its own 400 points".
@@ -136,9 +138,9 @@ a tolerance. It is: not equal zero. One flipped bit anywhere, and the
 program fails with error resume-not-bit-exact. Determinism here is a
 testable property — so it is tested.
 
-**Visual:** Split screen. Left: the same terminal, highlighting each
-"resume from step 1000: max |delta param| = 0 (bit-exact)" line as it
-appears — six of them across the run. Right: code shot
+**Visual:** Split screen. Left: the same terminal output, highlighting the
+six "resume from step 1000: max |delta param| = 0 (bit-exact)" lines one
+by one. Right: code shot
 `examples/spirals/main.zig:310–315` — the `max_diff` loop and
 `if (max_diff != 0) return error.ResumeNotBitExact;` — with a second brief
 cut to line 299 (`Model.initRandom(ctx, 7)` — "different init: fully
@@ -155,10 +157,11 @@ precision, accumulation — the chapter has the rest. Next time: training
 without gradients at all.
 
 **Visual:** Hold the terminal's final frame for a beat, then end card:
-series title, "Next: 09 — Training without gradients", chapter link
-`docs/course/08-training.md`.
+series title, "Full chapter: `docs/course/08-training.md`", "Next: 09 —
+Training without gradients".
 
-**Overlay:** End card: "Next: Training without gradients".
+**Overlay:** End card: "Full chapter: `docs/course/08-training.md`" ·
+"Next: Training without gradients".
 
 ## Asset list
 
@@ -176,14 +179,17 @@ series title, "Next: 09 — Training without gradients", chapter link
 **Terminal recordings (execute on camera):**
 - `zig build spirals -Doptimize=ReleaseFast` — the episode's centerpiece.
   Record the full run once; time-compress dead air in the edit but never
-  alter the printed text or numbers. Expected shape of the output: one
-  header line, then three lines per optimizer for `[sgd]`, `[adamw]`,
+  alter the printed text or numbers. The demo's stdout is buffered and
+  flushed at exit: the terminal is quiet while the gauntlets run and the
+  whole output prints in one burst at the end — plan the highlight beats
+  on the settled output, not on incremental prints. Expected shape of the
+  output: one header line, then three lines per optimizer for `[sgd]`, `[adamw]`,
   `[muon]`, `[apollo]`, `[apollo-mini]`, then two lines for the groups demo,
   labeled `[adamw-groups]` (format strings at
   `examples/spirals/main.zig:292–322,348` and, for the groups demo, `:453,488`;
   six "bit-exact" resume lines total). Note: the demo prints one summary
-  loss per optimizer
-  at the end of its 2000 steps — there is no per-step loss stream — so the
+  loss per optimizer at the end of its 2000 steps — there is no per-step
+  loss stream — so the
   "loss column" beat highlights the loss values across the accumulated
   optimizer lines. Pacing datum (not for on-screen use): a dry run on
   2026-07-12 (M1-class machine, warm build cache) completed in ~21 s wall
@@ -198,7 +204,8 @@ series title, "Next: 09 — Training without gradients", chapter link
   muon 446–457 — with its mandatory caveat caption (docs/TRAINING.md §11).
 - Quote card: "When someone tells you optimizer choice is free, this table
   is the counterexample." (chapter §8.6).
-- End card with the next-episode teaser.
+- End card with "Full chapter: `docs/course/08-training.md`" and the
+  next-episode teaser.
 
 **External downloads:** none — the spirals demo generates its own dataset
 (400 points, in-program); no model weights are needed anywhere in this

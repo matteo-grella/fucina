@@ -116,10 +116,11 @@ compile away entirely. Next time: the operation library those names direct.
 program text, the way it did in Fortran — `real A(n,m)` told you the rank
 before you read a single loop..."); brief cut to the chapter's §4.3 mini test
 `"instances carry no tags at runtime"` (`@sizeOf` equality) as the
-compile-away proof; end card teasing Video 05.
+compile-away proof; end card: "Full chapter:
+`docs/course/04-axes-with-names.md`", teasing Video 05.
 
-**Overlay:** "`real A(n,m)`" → "`Tensor(.{ .batch, .in })`" · "Next: The
-operation library".
+**Overlay:** "`real A(n,m)`" → "`Tensor(.{ .batch, .in })`" · "full
+chapter in `docs/course/`" · "Next: The operation library".
 
 ## Asset list
 

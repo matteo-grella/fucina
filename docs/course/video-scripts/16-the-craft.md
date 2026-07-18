@@ -149,12 +149,12 @@ outrun its evidence. Next time: your forge.
 table, slow push-in with the two "NEVER" rows highlighted (aarch64 smmla,
 x86 AVX512-VNNI) — the project saying NEVER about its own untested SIMD arms,
 timed to land under "never let a claim outrun its evidence". End card: series
-title, "Next: 17 — Your forge", chapter link
-`docs/course/16-the-craft.md`.
+title, "Full chapter: `docs/course/16-the-craft.md`", "Next: 17 — Your
+forge".
 
 **Overlay:** On the attestation table: "dated, per-arm record of what has
-actually *executed* — 'tested' never rounds up". End card: "Next: Your
-forge".
+actually *executed* — 'tested' never rounds up". End card: "Full chapter:
+`docs/course/16-the-craft.md`" · "Next: Your forge".
 
 ## Asset list
 
@@ -186,7 +186,8 @@ forge".
   saved) from §16.6.
 - Five-card loss sequence (LOSS → HYPOTHESIS → CONTROL → DECOMPOSITION →
   RESIDUAL), all numbers and phrases from §16.6 "A loss, investigated".
-- End card with next-episode teaser.
+- End card with "Full chapter: `docs/course/16-the-craft.md`" and
+  next-episode teaser.
 
 **External downloads:** none — no model weights; every number is quoted from
 the repo's records (`docs/BENCHMARK.md`, `docs/ARCHITECTURE.md`), not
@@ -221,7 +222,8 @@ re-measured.
   (`docs/BENCHMARK.md` via §16.0); 135/531/0 (`docs/ARCHITECTURE.md` via
   §16.2); eleven bands (count of the ARCHITECTURE.md band table quoted in
   §16.1); CV > 8% NOISY default (`tools/bench_gate.py` via §16.6);
-  0.36–0.52× pp15–33 band, 0.375–0.509 reverted-gate control (update dated
+  0.36–0.52× pp15–33 band, 128 experts / top-8 / ~1–3 rows per expert
+  (hypothesis card), 0.375–0.509 reverted-gate control (update dated
   2026-07-10), phased-chain gate 512→64, Q6_K pp31–33 residual 0.965–0.987×
   "open, small" (`docs/BENCHMARK.md` via §16.6, snapshot 2026-07-04).
 - "Days later" in the VO refers to the 2026-07-04 snapshot vs the 2026-07-10

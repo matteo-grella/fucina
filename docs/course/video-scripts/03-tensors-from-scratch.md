@@ -20,8 +20,8 @@ memory-model document adjudicates as "strictly better" than an arena.
    asserted in a machine-verified REFERENCE.md test), keeping cache lines warm.
 3. The pool was weighed against an arena in a dated design document and won
    on measured grounds: holding buffers arena-style (a held exec scope) hit
-   32 distinct buffers on a 32-op 1 MiB chain; the pool's deinit-as-you-go
-   discipline, 2.
+   16 live buffers on a 16-op chain; the pool's deinit-as-you-go discipline,
+   at most 2.
 
 ## Script
 
@@ -87,7 +87,7 @@ you just wrote is still sitting in L1 or L2 when the next op writes its
 output to the very same lines.
 
 **Visual:** Code shot of the test `"deinit recycles transient buffers through
-the pool"` from `docs/REFERENCE.md:4794-4810` (§6.2). Step-highlight in sync
+the pool"` from `docs/REFERENCE.md:4810-4826` (§6.2). Step-highlight in sync
 with the VO: `const first_ptr = first.dataConst().ptr;` → `first.deinit();`
 → `var second = try ctx.add(&a, &a);` → the final
 `expectEqual(first_ptr, second.dataConst().ptr)`.
@@ -102,20 +102,20 @@ pool hands back the most-recently-released buffer first — LIFO — because,
 quoting the comment: its lines are the likeliest to still be cache-resident.
 And why a pool instead of an arena? There's a design document adjudicating
 exactly that. Its verdict: the buffer pool already is an arena — quote — but
-a strictly better one. Holding buffers arena-style measured thirty-two
-distinct buffers on a thirty-two-op chain. The pool's deinit-as-you-go
-discipline: two.
+a strictly better one. Holding buffers arena-style measured sixteen live
+buffers on a sixteen-op chain. The pool's deinit-as-you-go discipline: at
+most two.
 
 **Visual:** Code shot of the in-source comment,
 `src/exec/buffer_pool.zig:185-188` ("Insert BEFORE equal-size entries …
 its lines are the likeliest to still be cache-resident"), the quoted phrase
 highlighted. Then a doc shot of `docs/MEMORY-MODEL.md:10-15` with
 "but a strictly better one" highlighted, followed by
-`docs/MEMORY-MODEL.md:202-211` with "measured 2 vs 32 distinct buffers on a
-32-op 1 MiB chain" highlighted.
+`docs/MEMORY-MODEL.md:204-212` with "<=2 vs 16 outstanding buffers on a
+16-op chain" highlighted.
 
-**Overlay:** On the measurement: "2 vs 32 distinct buffers — 32-op × 1 MiB
-chain; deterministic buffer count pinned by a named test
+**Overlay:** On the measurement: "≤2 vs 16 live buffers — 16-op chain;
+deterministic buffer count pinned by a named test
 (docs/MEMORY-MODEL.md, adjudicated 2026-06-10)"
 
 ### [2:35–3:00] Deinit is the driver
@@ -130,29 +130,32 @@ the next video.
 **Visual:** Animated loop diagram (from chapter §3.12's chain):
 `tensor.deinit()` → `buffer.release()` → refcount 0 → release hook → free
 list → "next op, warm lines". On "compile error", a brief code shot of the
-comptime guard `src/fucina.zig:33-42`. End card: series title + "Next:
-Axes with names".
+comptime guard `src/fucina.zig:33-42`. End card: series title + "Full
+chapter: `docs/course/03-tensors-from-scratch.md`" + "Next: Axes with
+names".
 
 **Overlay:** "deinit → release → hook → free list → next op" · end card:
-"04 — Axes with names: `fucina.Tensor(.{ .batch, .in })`"
+"full chapter in `docs/course/`" · "04 — Axes with names:
+`fucina.Tensor(.{ .batch, .in })`"
 
 ## Asset list
 
 - **Diagram 1** (0:00): flat buffer `[1 2 3 4 5 6]` + interpretation card;
   animate the shape/stride swap re-rendering 2×3 → 3×2. Source: chapter §3.1
   ASCII figure.
-- **Code shots** (all real repo files, ranges verified 2026-07-17):
+- **Code shots** (all real repo files, ranges verified 2026-07-18):
   - `src/tensor.zig:94-101` — the four-field raw tensor struct.
   - `src/tensor.zig:464-483` — the broadcast stride loop.
   - `src/storage.zig:120-132` — `release` with `fetchSub`.
-  - `docs/REFERENCE.md:4794-4810` — the pointer-equality pool test (§6.2).
+  - `docs/REFERENCE.md:4810-4826` — the pointer-equality pool test (§6.2).
   - `src/exec/buffer_pool.zig:185-188` — the LIFO cache-warmth comment.
-  - `docs/MEMORY-MODEL.md:10-15` and `docs/MEMORY-MODEL.md:202-211` — the
-    arena verdict quote and the 2-vs-32 measurement.
+  - `docs/MEMORY-MODEL.md:10-15` and `docs/MEMORY-MODEL.md:204-212` — the
+    arena verdict quote and the ≤2-vs-16 measurement.
   - `src/fucina.zig:33-42` — the comptime anti-export guard (brief).
 - **Diagram 2** (2:35): the recycling loop
   deinit → release → hook → free list → next op.
-- **End card**: series branding + teaser "04 — Axes with names".
+- **End card**: series branding + "Full chapter:
+  `docs/course/03-tensors-from-scratch.md`" + teaser "04 — Axes with names".
 - No terminal recordings and no model downloads are required for this episode.
 
 ## Production notes
@@ -164,12 +167,12 @@ Axes with names".
   cache-resident" (src/exec/buffer_pool.zig:185-188) and "but a strictly
   better one" (docs/MEMORY-MODEL.md) must appear as attributed source/doc
   text on screen, not as narrator claims.
-- **Caveat that MUST stay with the number**: 2-vs-32 is a deterministic
-  *buffer count* on a 32-op 1 MiB chain, pinned by the "exec scope holds
-  buffers until close" test in `src/ag/tensor_tests.zig` and recorded in
-  docs/MEMORY-MODEL.md (adjudicated 2026-06-10). It is not a wall-clock
-  benchmark; do not restyle it as a speedup. The VO's "holding buffers
-  arena-style" is the document's own framing — the measurement compares a
+- **Caveat that MUST stay with the number**: ≤2-vs-16 is a deterministic
+  *buffer count* on a 16-op chain (64×64 f32 intermediates), pinned by the
+  "exec scope holds buffers until close" test in `src/ag/tensor_tests.zig`
+  and recorded in docs/MEMORY-MODEL.md (adjudicated 2026-06-10). It is not
+  a wall-clock benchmark; do not restyle it as a speedup. The VO's "holding
+  buffers arena-style" is the document's own framing — the measurement compares a
   held exec scope (evaluated there as "a deinit-eliminating arena") against
   deinit-ASAP through the pool; keep that pairing intact.
 - **"Fifteen lines"** refers to the chapter's characterization of the
@@ -192,4 +195,4 @@ Axes with names".
   pointer-equality test, the LIFO comment, or the arena verdict — they are
   the episode's showcase.
 - **Line-range drift**: code/doc line ranges were verified against the tree
-  on 2026-07-17; re-check before recording if the tree has moved.
+  on 2026-07-18; re-check before recording if the tree has moved.

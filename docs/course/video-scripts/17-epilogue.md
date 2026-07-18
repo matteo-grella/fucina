@@ -41,8 +41,9 @@ Chapter 3.
 
 **VO:** A dtype enum, a refcounted buffer, stride arithmetic — a tensor.
 Then axis names moved into the type system, and a misaligned contraction
-became a compile error. An op library; SIMD kernels held to a scalar twin.
-Autograd with no tape, no graph object — the live tensors are the graph.
+became a compile error. An op library; SIMD kernels held to a scalar twin —
+BLAS and the GPU only ever opt-in, at one matmul seam. Autograd with no
+tape, no graph object — the live tensors are the graph.
 Then the library met the world: a WaveNet ran a guitar amp live, from a
 callback that never allocates. And the climb to language models — GGUF,
 quantization, a transformer, a GPT trained from scratch on your own
@@ -56,8 +57,9 @@ through Part VI, each station labeled with its repo path (`src/dtype.zig`,
 `docs/`); (3) live-amp clip reused from Video 10 (guitar → USB interface →
 terminal, playing); (4) terminal recording: `zig build qwen3
 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --repl`
-(`examples/qwen3/README.md`), a short question streaming an answer;
-(5) hard cut to a black card as the VO lands the last three sentences.
+(`examples/qwen3/README.md`), a short question streaming an answer,
+captioned "Qwen3-0.6B — one of the model zoo"; (5) hard cut to a black
+card as the VO lands the last three sentences.
 
 **Overlay:** On the black card, the chapter's own line: "From a dtype enum
 to a live guitar amp and chatting language models. One language. One machine.
@@ -146,11 +148,12 @@ reference implementation, a finite-difference check, a scalar twin, a
 golden byte) → the next hammer blow, looping back (§17.4). As the VO turns
 personal, dissolve through three stills from the series — the enum, the
 amp, the chat — dimming into the final end card: series title, the
-chapter's closing line "The fire is lit. Forge something." and the link
-`docs/course/17-epilogue.md`. No next-episode teaser — this is the finale.
+chapter's closing line "The fire is lit. Forge something." and "Full
+chapter: `docs/course/17-epilogue.md`". No next-episode teaser — this is
+the finale.
 
 **Overlay:** End card: "The fire is lit. Forge something." (§17.4) · "The
-forge is yours." · "docs/course/17-epilogue.md".
+forge is yours." · "Full chapter: docs/course/17-epilogue.md".
 
 ## Asset list
 
@@ -158,12 +161,14 @@ forge is yours." · "docs/course/17-epilogue.md".
 - `zig build spirals -Doptimize=ReleaseFast` — needs no downloads at all
   (§17.2, project 1); hold on the loss decreasing.
 - `zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf
-  --repl` — one short question, streamed answer (`examples/qwen3/README.md`).
+  --repl` — one short question, streamed answer (`examples/qwen3/README.md`);
+  carries the "one of the model zoo" caption from montage beat 4.
 
 **External downloads (weights are NOT in the repo):**
 - `Qwen3-0.6B-Q8_0.gguf` from `Qwen/Qwen3-0.6B-GGUF` on Hugging Face
   (verified link table in `docs/RUNNING-MODELS.md:31`; each model family
-  carries its own license — the doc notes terms next to each download).
+  carries its own license — the doc's notes beside the download table flag
+  the binding terms, e.g. Gemma's).
 
 **Reused footage (from Video 10's shoot):**
 - Live-amp clip (guitar → interface → terminal) for montage beat 3 and the
@@ -193,7 +198,8 @@ forge is yours." · "docs/course/17-epilogue.md".
   generation (§17.2, project 4).
 - Forge loop: heat → pressure → straightedge → next hammer blow, annotated
   with the §17.4 mappings.
-- Final end card (series close, no teaser).
+- Final end card (series close, no teaser; carries "Full chapter:
+  `docs/course/17-epilogue.md`").
 
 ## Production notes
 
@@ -222,6 +228,10 @@ forge is yours." · "docs/course/17-epilogue.md".
   `src/backend/ops.zig` beside-shot on the route diagram, then shorten the
   spirals terminal hold — never the montage, never the forge loop, never a
   quote overlay.
-- **Pacing note:** segment 3 (0:54–1:36) is the densest read (~107 words in
-  42 s ≈ 153 wpm). If the voice needs air, steal 2 s from the spirals
-  terminal hold rather than cutting VO.
+- **Pacing note:** segment 2 (0:14–0:54) is the densest read (~106 words in
+  40 s ≈ 159 wpm); if it runs hot, shorten the opt-in clause to "BLAS and
+  the GPU only ever opt-in" — never cut the clause outright, it is what
+  scopes "Nothing you cannot read" to match episode 00's accelerator
+  honesty. Segment 3 (0:54–1:36) is next (~107 words in 42 s ≈ 153 wpm);
+  if the voice needs air there, steal 2 s from the spirals terminal hold
+  rather than cutting VO.

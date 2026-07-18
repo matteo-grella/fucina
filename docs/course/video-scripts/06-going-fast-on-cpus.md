@@ -72,7 +72,7 @@ ask the target how wide its SIMD is, make that a first-class vector type. On
 @Vector operands, plus is a SIMD add. Here is the real vecAdd: a
 four-times-unrolled vector body, a one-vector body, a scalar tail. On an M1
 this compiles to NEON fadd.4s. On an AVX2 machine, vaddps on ymm registers.
-Same eleven-line body. One source tree, specialized at compile time — the
+Same body on both. One source tree, specialized at compile time — the
 unused ISA arms aren't even in the binary.
 
 **Visual:** Code shot 1: `src/backend/vector/common.zig:24–25` (the two-line
@@ -93,9 +93,9 @@ disassembly.
 interface for exactly this operation family — GEMM is its Level-3 flagship,
 and the reference implementation is Fortran to this day. Decades of tuning
 live behind it; refusing them would be vanity. So the dispatch is a
-fall-through chain: GPU, if built in, may decline; BLAS may decline; pure Zig
-always answers. CBLAS, Metal, CUDA — all plug into the same GEMM seam. GPU as
-provider, never the architecture.
+fall-through chain: GPU, if built in, may decline; BLAS, if built in, may
+decline; pure Zig always answers. CBLAS, Metal, CUDA — all plug into the same
+GEMM seam. GPU as provider, never the architecture.
 
 **Visual:** Brief history card while the VO covers heritage: "BLAS — Fortran
 era · Level 1 vector–vector / Level 2 matrix–vector (GEMV) / Level 3
@@ -107,8 +107,8 @@ the `use_blas` block ("may decline"), the final
 `vector.matmul2DIntoUncheckedWithConfig` line ("always answers").
 
 **Overlay:** "`-Dgpu=metal|cuda` · `-Dblas=accelerate|openblas|mkl|…` · pure
-Zig always answers" · "`comptime` guards: a plain build contains *neither*
-upper tier — not disabled, absent".
+Zig always answers" · "`comptime` guards: a `-Dblas=none -Dgpu=none` build
+contains *neither* upper tier — not disabled, absent".
 
 ### [2:07–2:39] Honest numbers — a win and a loss
 
@@ -144,12 +144,13 @@ values.
 **Visual:** Staircase graphic, five steps rising left to right: "naive loops →
 loop reorder → register tiling → cache-blocked packing → provider tiers
 (BLAS/GPU)", per §6.6. The 5.6× lands on the fourth step with its caveat
-attached. End card: series title, "Next: 07 — Autograd: the graph hidden in
-the values", chapter link `docs/course/06-going-fast-on-cpus.md`.
+attached. End card: series title, "Full chapter:
+`docs/course/06-going-fast-on-cpus.md`", "Next: 07 — Autograd: the graph
+hidden in the values".
 
 **Overlay:** "5.6× — 2048³, 109→608 GFLOP/s · M1 Max, `-Dblas=none` build ·
-docs/BENCHMARK.md" · end card: "Next: Autograd — the graph hidden in the
-values".
+docs/BENCHMARK.md" · end card: "full chapter in `docs/course/`" · "Next:
+Autograd — the graph hidden in the values".
 
 ## Asset list
 
@@ -173,7 +174,8 @@ values".
 - Benchmark WIN/LOSS cards + protocol bullets, all text quoted from §6.9
   (sources: `docs/BENCHMARK.md`, README.md, `tools/bench_gate.py`).
 - GEMM staircase with 5.6× caveat on step four (§6.6, `docs/BENCHMARK.md`).
-- End card with next-episode teaser.
+- End card with "Full chapter: `docs/course/06-going-fast-on-cpus.md`" and
+  next-episode teaser.
 
 **Terminal (optional, type-on only — do not execute on camera):** build-flag
 montage `zig build -Dblas=accelerate` / `zig build -Dgpu=metal` /

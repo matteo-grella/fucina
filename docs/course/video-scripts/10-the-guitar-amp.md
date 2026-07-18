@@ -134,9 +134,9 @@ switch = one atomic index store (`examples/nam/live.zig:1-6`)".
 
 ### [2:26–3:00] One binary, and what's absent
 
-**VO:** And the flagship part: this same binary trained the model — autograd
+**VO:** And the flagship part: this same binary trains these models — autograd
 tensors for training, hand-rolled SIMD for the realtime chain, one
-compilation, one file. Notice what's absent. No Python process. No GPU. No
+compilation, one program. Notice what's absent. No Python process. No GPU. No
 garbage collector to outsmart. No second framework for deployment. When
 latency is the product, the short list between your code and the deadline is
 the entire feature. Next time: model files and quantization — models six
@@ -148,11 +148,13 @@ module-doc algebra of the streaming engine), right
 line pairing `z = dilated_conv(x) + input_mixin(condition)` with
 `causalConv1d … add … dot … add`. For the "absent" list, return to the live
 demo — playing continues under the VO while the four "No …" lines stamp onto
-screen. End card: series title, "Next: 11 — Model files and quantization",
-chapter link `docs/course/10-the-guitar-amp.md`.
+screen. End card: series title, "Full chapter:
+`docs/course/10-the-guitar-amp.md`", "Next: 11 — Model files and
+quantization".
 
 **Overlay:** "same math — once as a streaming kernel, once as autograd ops
-(§10.7)" · end card: "Next: Model files and quantization".
+(§10.7)" · end card: "Full chapter: `docs/course/10-the-guitar-amp.md`" ·
+"Next: Model files and quantization".
 
 ## Asset list
 
@@ -198,7 +200,8 @@ chapter link `docs/course/10-the-guitar-amp.md`.
   architecture visual.
 - Budget bar: 1,333 µs block budget with ≈49 µs / ≈80 µs ticks and their
   caveat caption (§10.9, `examples/nam/README.md` Performance).
-- End card with next-episode teaser.
+- End card with "Full chapter: `docs/course/10-the-guitar-amp.md`" and
+  next-episode teaser.
 
 ## Production notes
 

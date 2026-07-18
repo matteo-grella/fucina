@@ -122,10 +122,10 @@ skill. Next time: training language models on your CPU.
 **Visual:** Split card: "Stable" (the mul-free identity, three training
 paradigms, one wire format) vs "Provisional" (every speed ratio, the
 ARM/x86 economics flip, trained-from-scratch ternary at scale — an open
-question that isn't Fucina's to answer); end card with the chapter link
-`docs/course/14-the-low-bit-frontier.md`.
+question that isn't Fucina's to answer); end card with "Full chapter:
+`docs/course/14-the-low-bit-frontier.md`".
 **Overlay:** `stable: the code · provisional: the numbers` ·
-`Next: 15 — Training LLMs on your CPU`
+`full chapter in docs/course/` · `Next: 15 — Training LLMs on your CPU`
 
 ## Asset list
 - **Repo code shots**:

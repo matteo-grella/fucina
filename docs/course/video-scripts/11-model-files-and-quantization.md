@@ -46,7 +46,8 @@ layout box as a stacked diagram: magic → version (u32) → tensor_count (u64)
 aligned tensor data. Highlight each band as the VO names it.
 
 **Overlay:** "a model = tensors + metadata" · "GGUF v2/v3 read · v3
-written (`src/gguf.zig`)".
+written (`src/gguf.zig`)" · "Qwen3-0.6B here is just the example — every
+GGUF has this layout".
 
 ### [0:25–0:56] mmap and go
 
@@ -57,10 +58,10 @@ no deserialization step, because each block format's in-memory type is an
 extern struct — the struct is the wire format, and a comptime assert pins
 its size at build time. Loading is reinterpreting. The file is the memory.
 
-**Visual:** Code shot 1: `src/gguf.zig:244–260` (`File.loadMmap` —
+**Visual:** Code shot 1: `src/gguf.zig:242–262` (`File.loadMmap` —
 `PROT_READ`, `MAP_PRIVATE`, fd closed immediately). Code shot 2:
-`src/dtype.zig:74–77` (`BlockQ8_0`: `d: u16` + `qs: [32]i8`), then pan to
-`src/dtype.zig:221–248` — the comptime block asserting
+`src/dtype.zig:81–84` (`BlockQ8_0`: `d: u16` + `qs: [32]i8`), then pan to
+`src/dtype.zig:228–256` — the comptime block asserting
 `@sizeOf(BlockQ8_0) == 34`, "one assert per block struct, 27 in total".
 
 **Overlay:** "zero-copy: every slice dies at `file.deinit()`" · "`extern
@@ -136,24 +137,25 @@ casts) — everything else: `error.EncoderUnavailable`".
 type and dims, so every offset is computable before any data exists. The
 writer emits the complete header first, then streams tensors through one at
 a time, freeing each buffer before the next — that's how it quantizes models
-far bigger than RAM on a small machine. Every run ends with a peak-RSS
-report.
+far bigger than RAM on a small machine. Every streaming run ends with a
+peak-RSS report.
 
 **Visual:** Terminal (executed): the §11.11 transcode command,
 `zig build export-gguf -Doptimize=ReleaseFast -- --from-gguf
 models/Qwen3-0.6B-f16.gguf --out models/Qwen3-0.6B-Q4_K_S.gguf --dtype
-q4_k`, ending on the peak-RSS report line. Code shot:
-`src/gguf.zig:1116–1156` (`beginStream` → `DataStreamer`; `declareTensor`
-sits earlier at `src/gguf.zig:1036`). Then type-on only (do not execute):
+q4_k`, ending on its summary lines (`exported …` · `tensors: … transcoded
+(q4_k)`). Code shot:
+`src/gguf.zig:1115–1160` (`beginStream` → `DataStreamer`; `declareTensor`
+sits earlier at `src/gguf.zig:1040`). Then type-on only (do not execute):
 the §11.11 mode-(c) command `zig build export-gguf
 -Doptimize=ReleaseFast -- --from-gguf big-BF16.gguf --out big-ptqtp3.gguf
 --ptqtp=3`.
 
 **Overlay:** "offsets fixed at declaration (`tensorByteLen`) → header
-written before any data" · "in memory at once: one source tensor + its
-quantized output — residency bounded no matter the model size
-(`tools/export_gguf.zig:54–65`)" · "streamed output byte-identical to
-buffered `finish` (`src/gguf_tests.zig:254`)".
+written before any data" · "streaming mode: one source tensor + its
+quantized output in memory at once — residency bounded no matter the
+model size (`tools/export_gguf.zig:54–65`)" · "streamed output
+byte-identical to buffered `finish` (`src/gguf_tests.zig:254`)".
 
 ### [2:49–3:00] Two primitives, and what's next
 
@@ -163,17 +165,18 @@ transformer from scratch.
 
 **Visual:** Closing card: two icons side by side — a 34-byte block bar
 ("byte-exact block struct") and a directory listing ("offsets computable
-before the bytes exist"). End card: series title, "Next: 12 — A transformer
-from scratch", chapter link `docs/course/11-model-files-and-quantization.md`.
+before the bytes exist"). End card: series title, "Full chapter:
+`docs/course/11-model-files-and-quantization.md`", "Next: 12 — A
+transformer from scratch".
 
-**Overlay:** End card: "Next: A transformer from scratch — the tensor
-directory becomes a transformer".
+**Overlay:** End card: "full chapter in `docs/course/`" · "Next: A
+transformer from scratch — the tensor directory becomes a transformer".
 
 ## Asset list
 
 **Code shots (repo files, exact ranges):**
-- `src/gguf.zig:244–260` — `File.loadMmap` (read-only map, parse in place).
-- `src/dtype.zig:74–77` — `BlockQ8_0` extern struct; `src/dtype.zig:221–248`
+- `src/gguf.zig:242–262` — `File.loadMmap` (read-only map, parse in place).
+- `src/dtype.zig:81–84` — `BlockQ8_0` extern struct; `src/dtype.zig:228–256`
   — the comptime size asserts (27 block structs).
 - `src/backend/quant/q8k.zig:57–68` — the 11-line Q8_0 encoder loop.
 - `src/backend/quant/q8k.zig:650–655` — the 1.5·2²³ `nearestInt` rounding
@@ -184,8 +187,8 @@ directory becomes a transformer".
   starting at line 137); `src/gguf_tests.zig:533` — real-model re-emit test
   title (optional one-line shot); `src/gguf_tests.zig:254` — stream ≡
   finish test (cited in overlay only).
-- `src/gguf.zig:1116–1156` — `beginStream`/`DataStreamer` (`declareTensor`
-  is at `src/gguf.zig:1036`, outside this shot).
+- `src/gguf.zig:1115–1160` — `beginStream`/`DataStreamer` (`declareTensor`
+  is at `src/gguf.zig:1040`, outside this shot).
 
 **Terminal recordings (exact commands):**
 - `xxd -l 96 models/Qwen3-0.6B-f16.gguf` — the GGUF magic in the ASCII
@@ -196,8 +199,8 @@ directory becomes a transformer".
   models/Qwen3-0.6B-f16.gguf --out models/Qwen3-0.6B-Q4_K_S.gguf --dtype
   q4_k` — executed transcode (§11.11 mode a; the chapter prints the same
   command with bare filenames — the `models/` prefix is the path from repo
-  root per the download note, nothing else changes), ending on the peak-RSS
-  report.
+  root per the download note, nothing else changes), ending on the export
+  summary (`exported …` / `tensors: … transcoded (q4_k)`).
 - `zig build export-gguf -Doptimize=ReleaseFast -- --from-gguf big-BF16.gguf
   --out big-ptqtp3.gguf --ptqtp=3` — TYPE-ON ONLY, never executed (§11.11
   mode c; needs a huge model).
@@ -210,7 +213,8 @@ directory becomes a transformer".
   gigabytes and the 4 → 25 tokens/s floor morph, captioned as
   back-of-envelope (§11.6 table).
 - One-block byte bar: 2-byte f16 scale + 32 i8 codes = 34 bytes (§11.7).
-- Closing two-primitives card and end card with next-episode teaser.
+- Closing two-primitives card and end card with "Full chapter:
+  `docs/course/11-model-files-and-quantization.md`" and next-episode teaser.
 
 **External downloads (weights are NOT in the repo):**
 - Qwen3-0.6B f16 GGUF from Hugging Face (any official/upstream f16 export
@@ -234,10 +238,13 @@ directory becomes a transformer".
   re-emitting a parsed writer output (`gguf_tests.zig:241–251`), while the
   real-model test asserts every KV and tensor payload verbatim
   (`gguf_tests.zig:533`) — keep the two claims distinct as written.
-- **The "far bigger than RAM" claim** is the tool's documented design
-  (bounded residency via prefetch/release + streaming, §11.11) — the
-  on-camera run is a small model demonstrating the mechanism and the
-  peak-RSS report. Never imply the recorded run itself exceeded RAM.
+- **The "far bigger than RAM" claim** is the streaming (`--ptqtp`) mode's
+  documented design (bounded residency via prefetch/release +
+  `beginStream`, §11.11), and the peak-RSS report is that mode's summary
+  (`tools/export_gguf.zig:54–65`, printed in `runPtqtp`) — the on-camera
+  run is a small-model transcode through the buffered writer and ends on
+  the exported/tensors summary. Never imply the recorded run itself
+  exceeded RAM, streamed, or printed a peak-RSS line.
 - **The 11-line encoder** is the scalar reference path (production code for
   non-aarch64 targets); the NEON twin exists — keep that overlay.
 - **Do not execute** the `--ptqtp=3` command; it is type-on only. `zig build
@@ -250,7 +257,7 @@ directory becomes a transformer".
   v2/v3 policy (§11.1, §11.4); 34 B / 32 weights / 8.5 bpw / error d/2
   (§11.7); 28 GB / 14 / 7.4 / 3.9 GB and the 4 → 25 tok/s floors (§11.6,
   explicitly arithmetic); 27 formats decode / 10 encodeF32 block formats
-  (§11.8, `src/gguf.zig:1168–1204` via chapter); 8 adversarial golden
+  (§11.8; `src/gguf.zig:1172–1210`); 8 adversarial golden
   vectors and the six byte-for-byte formats
   (`src/backend/quant/encode_golden_test.zig` via §11.10); 27 comptime size
   asserts (§11.7). Nothing else may be quantified.
