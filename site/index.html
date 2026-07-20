@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Fucina — Forging deep learning in Zig</title>
+<meta name="description" content="A CPU-first tensor/autograd runtime and LLM inference engine in pure Zig: eager execution, comptime-checked named axes, a recycling refcounted buffer, a lightweight autograd whose graph is the tensors themselves, gradient-free neuroevolution. The GPU (Metal/CUDA) does one job — big matmuls." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ctext x='32' y='54' font-family='Arial,Helvetica,sans-serif' font-size='60' font-weight='900' text-anchor='middle' fill='%23F26B1F'%3EA%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="assets/fonts/fonts.css" />
+<script src="assets/code_hero.js"></script>
+<script src="assets/code_axes.js"></script>
+<script src="assets/code_einsum.js"></script>
+<script src="assets/code_buffer.js"></script>
+<script src="assets/code_replace.js"></script>
+<script src="assets/code_autograd.js"></script>
+<script src="assets/code_scope.js"></script>
+<script src="assets/code_run.js"></script>
+<style>
+:root{
+  --ember:#F26B1F; --ember-2:#FF8A3D; --hot:#FFB25A; --spark:#FFD9A0; --ember-dim:#3a1c0e;
+  --iron:#141517; --steel:#8A9099; --steel-dim:#464b53;
+  --bg-0:#0a0b0d; --bg-1:#101114; --panel:#17191d; --panel-2:#1e2126; --line:#2b2f36; --line-soft:#22262c;
+  --text:#ECE7DF; --text-dim:#a8a69e; --text-faint:#8f8d83;
+  --c-key:#FF8A3D; --c-type:#7FB6CE; --c-fn:#E8C06A; --c-str:#9DBE84; --c-com:#848a94;
+  --c-num:#D98E5A; --c-tag:#FFB25A; --c-punct:#9a988f;
+  --f-display:'Archivo','Arial Narrow',sans-serif;
+  --f-body:'Inter',system-ui,-apple-system,sans-serif;
+  --f-mono:'JetBrains Mono',ui-monospace,monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{font-family:var(--f-body);color:var(--text);background:var(--bg-0);
+  -webkit-font-smoothing:antialiased;text-rendering:geometricPrecision;line-height:1.6;overflow-x:hidden}
+a{color:inherit;text-decoration:none}
+::selection{background:rgba(242,107,31,.28)}
+
+/* ---- animated forge background (fixed behind everything) ---- */
+#bg{position:fixed;inset:0;z-index:-2;overflow:hidden;
+  background:
+    radial-gradient(1300px 700px at 50% 118%, rgba(242,107,31,.16), transparent 60%),
+    radial-gradient(1000px 800px at 84% -12%, rgba(127,182,206,.045), transparent 60%),
+    linear-gradient(180deg,#101114 0%,#0c0d0f 55%,#08090a 100%);}
+#bg .grid{position:absolute;inset:-120px;
+  background-image:linear-gradient(rgba(138,144,153,.05) 1px,transparent 1px),
+                   linear-gradient(90deg,rgba(138,144,153,.05) 1px,transparent 1px);
+  background-size:58px 58px;
+  -webkit-mask-image:radial-gradient(1400px 1000px at 50% 42%,#000 40%,transparent 88%);
+          mask-image:radial-gradient(1400px 1000px at 50% 42%,#000 40%,transparent 88%);
+  animation:drift 46s linear infinite}
+@keyframes drift{from{transform:translate(0,0)}to{transform:translate(-58px,-58px)}}
+#sparks{position:absolute;inset:0}
+.spark{position:absolute;bottom:-10px;width:3px;height:3px;border-radius:50%;background:var(--hot);
+  box-shadow:0 0 7px 1px rgba(255,178,90,.7);opacity:0;animation:rise linear infinite}
+@keyframes rise{0%{opacity:0;transform:translateY(0) scale(.8)}
+  12%{opacity:.7}70%{opacity:.5}100%{opacity:0;transform:translateY(-88vh) scale(1.1)}}
+#grain{position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.04;mix-blend-mode:overlay;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
+@media (prefers-reduced-motion: reduce){.grid{animation:none}.spark{display:none}}
+
+/* ---- layout ---- */
+.wrap{max-width:1160px;margin:0 auto;padding:0 28px}
+.eyebrow{font-family:var(--f-mono);font-size:13px;letter-spacing:.26em;text-transform:uppercase;color:var(--ember);font-weight:500}
+.kick{font-family:var(--f-mono);font-size:12.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--text-faint)}
+h2{font-family:var(--f-display);font-weight:800;letter-spacing:-.02em;font-size:clamp(30px,4.6vw,46px);line-height:1.04;color:var(--text)}
+h2 .hot{color:var(--ember)}
+.lede{font-size:clamp(17px,2vw,20px);color:var(--text-dim);max-width:56ch;margin-top:18px}
+.lede b{color:var(--text);font-weight:600}
+.hot{color:var(--ember)} .em{color:var(--hot)}
+
+/* nav */
+nav{position:sticky;top:0;z-index:50;backdrop-filter:blur(10px);
+  background:rgba(9,10,12,.7);border-bottom:1px solid var(--line-soft)}
+nav .wrap{display:flex;align-items:center;justify-content:space-between;height:62px}
+.brand{font-family:var(--f-display);font-weight:900;letter-spacing:.05em;font-size:19px}
+.brand .a{color:var(--ember)}
+.navlinks{display:flex;gap:26px;font-family:var(--f-mono);font-size:13.5px;color:var(--text-dim)}
+.navlinks a{transition:color .2s} .navlinks a:hover{color:var(--hot)}
+.navlinks .gh{color:var(--ember)}
+@media(max-width:760px){.navlinks{display:none}}
+
+/* hero */
+header.hero{padding:76px 0 40px;position:relative}
+header.hero .wrap{display:grid;grid-template-columns:1fr 1.3fr;gap:44px;align-items:center}
+header.hero .wrap>*{min-width:0}
+.h-title{font-family:var(--f-display);font-weight:900;letter-spacing:-.01em;font-size:clamp(56px,9vw,104px);line-height:.9;color:var(--text)}
+.h-title .a{color:var(--ember)}
+.h-sub{font-family:var(--f-display);font-weight:700;font-size:clamp(19px,2.4vw,26px);color:var(--hot);margin-top:14px;letter-spacing:-.01em}
+.h-lede{font-size:clamp(16px,1.9vw,19px);color:var(--text-dim);margin-top:20px;max-width:46ch}
+.h-lede b{color:var(--text);font-weight:600}
+.h-tags{display:flex;flex-wrap:wrap;gap:9px;margin-top:26px}
+.chip{font-family:var(--f-mono);font-size:12.5px;color:var(--text-dim);padding:6px 13px;border:1px solid var(--line);border-radius:20px;background:rgba(30,33,38,.5)}
+.chip b{color:var(--hot);font-weight:500}
+@media(max-width:920px){header.hero .wrap{grid-template-columns:1fr;gap:34px}}
+
+/* code panel */
+.codepanel{background:#131519;border:1px solid var(--line);border-radius:14px;overflow:hidden;
+  box-shadow:0 40px 110px -34px rgba(0,0,0,.85),0 0 0 1px rgba(255,178,90,.03) inset}
+.cp-head{display:flex;align-items:center;gap:8px;padding:11px 16px;border-bottom:1px solid var(--line);background:#16191e}
+.cp-dot{width:11px;height:11px;border-radius:50%;background:#33373e}
+.cp-file{font-family:var(--f-mono);font-size:12.5px;color:var(--text-dim);margin-left:8px}
+.cp-file b{color:var(--hot);font-weight:500}
+.cp-body{padding:16px 0;font-family:var(--f-mono);font-size:clamp(12px,1.28vw,14px);line-height:1.62;overflow-x:auto}
+.cl{display:flex;white-space:pre;padding:1px 20px;transition:background .45s,box-shadow .45s}
+.cl .ln{width:26px;flex:none;text-align:right;color:#41454d;margin-right:20px;user-select:none}
+.cl.hl{background:linear-gradient(90deg,rgba(242,107,31,.17),rgba(242,107,31,.015));box-shadow:inset 3px 0 0 var(--ember)}
+.tok-key{color:var(--c-key)} .tok-type{color:var(--c-type)} .tok-fn{color:var(--c-fn)}
+.tok-str{color:var(--c-str)} .tok-com{color:var(--c-com)} .tok-num{color:var(--c-num)}
+.tok-tag{color:var(--c-tag)} .tok-punct{color:var(--c-punct)} .tok-txt{color:var(--text)}
+.cap{font-family:var(--f-mono);font-size:13px;color:var(--text-dim);margin-top:14px;min-height:38px;
+  padding-left:16px;border-left:2px solid var(--ember);transition:opacity .3s}
+.cap b{color:var(--hot);font-weight:500}
+.cap .n{color:var(--ember);font-weight:600;margin-right:9px}
+
+/* sections */
+section{padding:72px 0;border-top:1px solid var(--line-soft)}
+.sec-grid{display:grid;grid-template-columns:.9fr 1.3fr;gap:48px;align-items:center}
+.sec-grid>*{min-width:0}
+.sec-grid.rev{grid-template-columns:1.3fr .9fr}
+.sec-grid.rev .txt{order:2}
+@media(max-width:920px){.sec-grid,.sec-grid.rev{grid-template-columns:1fr;gap:28px}.sec-grid.rev .txt{order:-1}}
+.pull{font-family:var(--f-mono);font-size:14px;color:var(--text-dim);margin-top:22px;
+  background:var(--panel-2);border:1px solid var(--line);border-left:3px solid var(--ember);border-radius:10px;padding:15px 18px}
+.pull b{color:var(--hot);font-weight:500} .pull code{color:var(--hot)}
+.note{font-size:15px;color:var(--text-faint);margin-top:16px}
+.note code{font-family:var(--f-mono);color:var(--text-dim)}
+
+/* idea band */
+.idea{display:grid;grid-template-columns:repeat(auto-fit,minmax(198px,1fr));gap:16px;margin-top:38px}
+@media(max-width:820px){.idea{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:480px){.idea{grid-template-columns:1fr}}
+.icard{background:var(--panel-2);border:1px solid var(--line);border-radius:13px;padding:20px 20px 22px}
+.icard .ic-k{font-family:var(--f-display);font-weight:800;font-size:19px;color:var(--text)}
+.icard .ic-k .hot{color:var(--ember)}
+.icard .ic-d{font-size:14.5px;color:var(--text-dim);margin-top:8px}
+
+/* ES algorithm card */
+.es-card{background:#131519;border:1px solid var(--line);border-radius:14px;padding:26px 30px;
+  box-shadow:0 40px 110px -34px rgba(0,0,0,.85);overflow-x:auto}
+.es-card .es-h{font-family:var(--f-mono);font-size:12.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-faint);margin-bottom:18px}
+.es-line{font-family:var(--f-mono);font-size:var(--es-fs,clamp(12.5px,1.45vw,15px));line-height:2.1;color:var(--text-dim);white-space:pre}
+.es-line .v{color:var(--hot)} .es-line .op{color:var(--ember)} .es-line .cm{color:var(--c-com)}
+.es-foot{font-family:var(--f-mono);font-size:12.5px;color:var(--text-faint);margin-top:18px;border-top:1px solid var(--line);padding-top:16px}
+.es-foot b{color:var(--hot);font-weight:500}
+
+/* reveal */
+.rv{opacity:0;transform:translateY(16px);transition:opacity .7s ease,transform .7s cubic-bezier(.2,.7,.2,1)}
+.rv.in{opacity:1;transform:none}
+
+/* phone */
+@media(max-width:640px){
+  .wrap{padding:0 20px}
+  section{padding:56px 0}
+  header.hero{padding:56px 0 32px}
+  .cl{padding:1px 12px}
+  .cl .ln{width:14px;margin-right:8px}
+  .es-card{padding:20px 18px}
+  .pull,.es-foot,.note{overflow-wrap:break-word}
+}
+
+/* footer */
+footer{border-top:1px solid var(--line-soft);padding:52px 0 60px;margin-top:20px}
+footer .frow{display:flex;flex-wrap:wrap;gap:30px;justify-content:space-between;align-items:flex-start}
+footer .fbrand{font-family:var(--f-display);font-weight:900;letter-spacing:.05em;font-size:22px}
+footer .fbrand .a{color:var(--ember)}
+footer .fnote{font-size:14px;color:var(--text-faint);max-width:44ch;margin-top:10px}
+footer .flinks{display:flex;flex-direction:column;gap:9px;font-family:var(--f-mono);font-size:13.5px;color:var(--text-dim)}
+footer .flinks a:hover{color:var(--hot)}
+footer .flinks .hot{color:var(--ember)}
+footer .fbot{font-family:var(--f-mono);font-size:12px;color:var(--steel-dim);margin-top:34px}
+</style>
+</head>
+<body>
+<div id="bg"><div class="grid"></div><div id="sparks"></div></div>
+<div id="grain"></div>
+
+<nav><div class="wrap">
+  <a class="brand" href="#top">FUCIN<span class="a">A</span></a>
+  <div class="navlinks">
+    <a href="#axes">Named axes</a>
+    <a href="#buffer">Memory</a>
+    <a href="#autograd">Autograd</a>
+    <a href="#cpu">CPU-first</a>
+    <a href="#models">Models</a>
+    <a href="#es">Neuroevolution</a>
+    <a class="gh" href="https://github.com/matteo-grella/fucina">GitHub ↗</a>
+  </div>
+</div></nav>
+
+<header class="hero" id="top"><div class="wrap">
+  <div class="h-left">
+    <div class="eyebrow">Forging deep learning in Zig</div>
+    <h1 class="h-title">Fucin<span class="a">a</span></h1>
+    <div class="h-sub">Eager tensors, named axes, lightweight autograd.</div>
+    <p class="h-lede">A <b>CPU-first</b> tensor/autograd runtime and LLM inference engine — <b>one program, in one language</b>. No graph compiler, no lazy evaluation: what you write is what runs, in the order you wrote it. And eager doesn't mean slow — on measured CPU shapes it <b>matches or beats llama.cpp</b>.</p>
+    <div class="h-tags">
+      <span class="chip"><b>eager</b> · what you write is what runs</span>
+      <span class="chip"><b>CPU-first</b> · the GPU is just matmul</span>
+      <span class="chip"><b>comptime-typed</b> axes</span>
+      <span class="chip">no GC · no Python · no C++</span>
+    </div>
+  </div>
+  <div class="h-right rv">
+    <div class="codepanel">
+      <div class="cp-head"><span class="cp-dot"></span><span class="cp-dot"></span><span class="cp-dot"></span>
+        <span class="cp-file">the first program — <b>build · contract · differentiate</b></span></div>
+      <div class="cp-body" id="cbHero"></div>
+    </div>
+    <div class="cap" id="heroCap"></div>
+  </div>
+</div></header>
+
+<!-- the idea -->
+<section id="idea"><div class="wrap rv">
+  <div class="kick">The mental model</div>
+  <h2 style="margin-top:12px">Five ideas carry the <span class="hot">whole library</span>.</h2>
+  <div class="idea">
+    <div class="icard"><div class="ic-k">Eager &amp; <span class="hot">explicit</span></div><div class="ic-d">Every op validates, allocates, and calls a kernel immediately. No graph to build first, no fusion pass.</div></div>
+    <div class="icard"><div class="ic-k">One <span class="hot">tensor</span></div><div class="ic-d">The same facade carries no-grad inference and gradient-tracked training. Identical call sites.</div></div>
+    <div class="icard"><div class="ic-k">Axes by <span class="hot">name</span></div><div class="ic-d">Names and rank are part of the Zig type, checked at compile time. Sizes stay runtime.</div></div>
+    <div class="icard"><div class="ic-k">Explicit <span class="hot">ownership</span></div><div class="ic-d">Value handles over reference-counted buffers. Owned results, deterministic cleanup.</div></div>
+    <div class="icard"><div class="ic-k">Sealed <span class="hot">dtypes</span></div><div class="ic-d">f32 differentiates; f16/bf16 run forward math; quantized blocks serve as matmul RHS. The type system enforces it.</div></div>
+  </div>
+</div></section>
+
+<!-- named axes -->
+<section id="axes"><div class="wrap"><div class="sec-grid">
+  <div class="txt rv">
+    <div class="eyebrow">Named axes</div>
+    <h2 style="margin-top:12px">Axes have <span class="hot">names</span>, not numbers.</h2>
+    <p class="lede">Operations name the axes they act on, and broadcasting aligns axes <b>by name, never by position</b>. The tag algebra is comptime-only data — it compiles down to stride math with <b>zero runtime tagging cost</b>, and a misuse is a compile error, not a silent transpose.</p>
+    <div class="pull"><code>x.dot(&amp;ctx, &amp;w, .in)</code> — contract the axis called <b>.in</b>. No axis bookkeeping, no guessing which dimension is which.</div>
+    <p class="note">The idea pays off hardest in <code>einsum</code>: operands already carry named axes, so there is no <code>"gid,jd→gij"</code> mini-language to parse at runtime — <b>the output tag tuple is the whole equation</b>, and a tag that exists in no operand is a compile error.</p>
+  </div>
+  <div class="rv"><div class="codepanel">
+    <div class="cp-head"><span class="cp-dot"></span><span class="cp-dot"></span><span class="cp-dot"></span>
+      <span class="cp-file">axis names live in the type — resolved at <b>comptime</b></span></div>
+    <div class="cp-body" id="cbAxes"></div>
+  </div>
+  <div class="codepanel" style="margin-top:20px">
+    <div class="cp-head"><span class="cp-dot"></span><span class="cp-dot"></span><span class="cp-dot"></span>
+      <span class="cp-file">einsum with no string to parse — <b>the out tags are the equation</b></span></div>
+    <div class="cp-body" id="cbEinsum"></div>
+  </div></div>
+</div></div></section>
+
+<!-- the buffer -->
+<section id="buffer"><div class="wrap"><div class="sec-grid rev">
+  <div class="rv"><div class="codepanel">
+    <div class="cp-head"><span class="cp-dot"></span><span class="cp-dot"></span><span class="cp-dot"></span>
+      <span class="cp-file">deinit is a recycler — <b>the same address comes back</b></span></div>
+    <div class="cp-body" id="cbBuffer"></div>
+  </div>
+  <div class="codepanel" style="margin-top:20px">
+    <div class="cp-head"><span class="cp-dot"></span><span class="cp-dot"></span><span class="cp-dot"></span>
+      <span class="cp-file"><b>ctx.replace</b> — advance a carried tensor in one move</span></div>
+    <div class="cp-body" id="cbReplace"></div>
+  </div></div>
+  <div class="txt rv">
+    <div class="eyebrow">The data model</div>
+    <h2 style="margin-top:12px">Memory that <span class="hot">recycles itself</span>.</h2>
+    <p class="lede">A tensor is a value handle over a reference-counted buffer. <code style="font-family:var(--f-mono);color:var(--hot)">deinit</code> isn't a naive free — it's the recycling driver: the refcount hits zero, the buffer returns to the pool, and the next same-size op gets <b>the same address back</b>, keeping the hot working set warm in cache.</p>
+    <p class="note">Views are refcounted aliases — a zero-copy <code>narrow</code> outlives its parent safely. No arena to reset, no garbage collector to chase. An idiomatic <code>defer x.deinit()</code> gives an O(1) working set within a forward pass; training holds exactly what backward needs, because operand views bump refcounts. An arena allocator was evaluated and rejected — the adjudication is on record in <code>docs/MEMORY-MODEL.md</code>.</p>
+  </div>
+</div></div></section>
+
+<!-- autograd -->
+<section id="autograd"><div class="wrap"><div class="sec-grid">
+  <div class="txt rv">
+    <div class="eyebrow">Automatic differentiation</div>
+    <h2 style="margin-top:12px">The gradient graph <span class="hot">is the tensors</span>.</h2>
+    <p class="lede">Nothing records a tape and nothing builds a graph object: each result simply carries a pointer to the operation that produced it, so the dependency graph <b>already exists in the values themselves</b>. <code style="font-family:var(--f-mono);color:var(--hot)">backward()</code> discovers its topology by walking those pointers. A <b>variable</b> carries that state; a <b>constant</b> doesn't — and the call sites are identical, so training and inference take the same kernel path and produce identical values.</p>
+    <div class="pull"><b>Write the forward once.</b> Open an exec scope and defer-deinit inference code trains unchanged: every intermediate is adopted by the scope, <code>deinit</code> on it becomes a safe no-op, the whole graph lives until <code>backward()</code> — then one close releases the step.</div>
+    <p class="note">Backward is concurrent with no persistent engine and no trace: each node carries an atomic dependency counter and fires on a bounded worker pool when it drains. The loop closes on CPU — LoRA fine-tune a quantized GGUF, merge, re-quantize, and the exported GGUF loads and answers in llama.cpp. Optimizers (SGD / AdamW / Muon / APOLLO) are golden-parity-tested against their references.</p>
+  </div>
+  <div class="rv"><div class="codepanel">
+    <div class="cp-head"><span class="cp-dot"></span><span class="cp-dot"></span><span class="cp-dot"></span>
+      <span class="cp-file">a variable records; a constant doesn't — <b>same call sites</b></span></div>
+    <div class="cp-body" id="cbAutograd"></div>
+  </div>
+  <div class="codepanel" style="margin-top:20px">
+    <div class="cp-head"><span class="cp-dot"></span><span class="cp-dot"></span><span class="cp-dot"></span>
+      <span class="cp-file">open a scope — <b>the same forward trains as-is</b></span></div>
+    <div class="cp-body" id="cbScope"></div>
+  </div></div>
+</div></div></section>
+
+<!-- cpu-first -->
+<section id="cpu"><div class="wrap"><div class="sec-grid rev">
+  <div class="rv"><div class="es-card">
+    <div class="es-h">one eager op · no graph, no capture, no replay</div>
+    <div class="es-line"><span class="v">y</span> <span class="op">=</span> x.dot(&amp;ctx, &amp;w, <span class="v">.in</span>)</div>
+    <div class="es-line">├─ gate: big enough?<span class="cm">  work · shape · residency</span></div>
+    <div class="es-line">│   no <span class="op">→</span> <span class="v">CPU kernels</span><span class="cm">   NEON·sdot / AVX2·VNNI</span></div>
+    <div class="es-line">└─ yes <span class="op">→</span> <span class="v">submit now</span><span class="cm">    Metal / CUDA, at once</span></div>
+    <div class="es-line">     sync on first host read<span class="cm"> · queue ordered</span></div>
+    <div class="es-line">     declined <span class="op">→</span> CPU<span class="cm"> · the GPU is never needed</span></div>
+    <div class="es-foot">Metal (macOS) and CUDA (Linux) plug in at the op seam and accelerate <b>the matmul family</b>: f32/f16 GEMM, quantized prefill linears, MoE expert FFN — CUDA adds fused prefill attention and an opt-in decode GEMV. No device type in the API, no graph retained; CUDA needs no SDK at build time (dlopen'd cuBLAS + vendored PTX).</div>
+  </div></div>
+  <div class="txt rv">
+    <div class="eyebrow">The design point</div>
+    <h2 style="margin-top:12px">CPU-first. The GPU is <span class="hot">just matmul</span>.</h2>
+    <p class="lede">Mainstream GPU stacks run on whole-graph machinery: fusion passes, static memory plans, captured launch sequences. Fucina builds <b>no such graph — so there is nothing to hand a GPU</b>, and that is the choice: on CPU, per-op dispatch costs next to nothing and kernels <b>specialize at compile time</b> — NEON/dotprod on Apple Silicon, AVX2/AVX-VNNI on x86 — as if <code style="font-family:var(--f-mono);color:var(--hot)">-march=native</code> were always on.</p>
+    <div class="pull">Measured, not asserted: paired same-machine runs, same GGUF, same threads, CPU-only both sides. On an M1 Max Fucina beats llama.cpp in <b>221 of 236</b> sweep cells and ties 13 — losses recorded as plainly as wins in <b>docs/BENCHMARK.md</b>, dated snapshot.</div>
+    <p class="note">CPU-first is the destination, not a stage on the way to somewhere else. The known price: without a graph, a GPU helps only at the op seam — Fucina will never chase TensorRT-class GPU throughput, and says so.</p>
+  </div>
+</div></div></section>
+
+<!-- models -->
+<section id="models"><div class="wrap"><div class="sec-grid">
+  <div class="txt rv">
+    <div class="eyebrow">Proof of work</div>
+    <h2 style="margin-top:12px">Forged on <span class="hot">real models</span>.</h2>
+    <p class="lede">The runtime grows through what it runs, and every family is validated against its reference implementation first: <b>token-ID-exact</b> tokenizers, <b>logit-parity</b> oracles vs llama.cpp, byte-exact quantization encoders, byte-identical GGUF re-emit. Parity first, speed second — in that order.</p>
+    <div class="pull">MoE bigger than RAM is first-class: <code>--moe-stream</code> pages routed experts from disk, bit-identical to the resident path — the 142&nbsp;GB Qwen3-235B and the 164.6&nbsp;GB DeepSeek&nbsp;V4&nbsp;Flash decode on a <b>64&nbsp;GB machine</b>.</div>
+    <p class="note">On top: lossless draft-model-free speculative decoding (up to 2.3×), batch-N multi-stream decode (3.2× aggregate at 8 streams), JSON-schema / grammar-constrained output, and an OpenAI-compatible server.</p>
+  </div>
+  <div class="rv">
+    <div class="codepanel">
+      <div class="cp-head"><span class="cp-dot"></span><span class="cp-dot"></span><span class="cp-dot"></span>
+        <span class="cp-file">quick start — <b>a GGUF in, a conversation out</b></span></div>
+      <div class="cp-body" id="cbRun"></div>
+    </div>
+    <div class="h-tags" style="margin-top:18px">
+      <span class="chip">Qwen3 0.6B→235B</span>
+      <span class="chip">Qwen3.5</span>
+      <span class="chip">DeepSeek V2/V3</span>
+      <span class="chip">DeepSeek V4 Flash</span>
+      <span class="chip">GLM-4.5</span>
+      <span class="chip">Gemma 4</span>
+      <span class="chip">DiffusionGemma</span>
+      <span class="chip">Inkling</span>
+      <span class="chip">nanochat</span>
+      <span class="chip">Parakeet ASR</span>
+      <span class="chip">OmniVoice TTS</span>
+      <span class="chip">LocateAnything</span>
+      <span class="chip">facedetect</span>
+      <span class="chip">Neural Amp Modeler</span>
+    </div>
+  </div>
+</div></div></section>
+
+<!-- neuroevolution -->
+<section id="es"><div class="wrap"><div class="sec-grid rev">
+  <div class="rv"><div class="es-card">
+    <div class="es-h">fucina.es · OpenAI-ES, kept vanilla</div>
+    <div class="es-line"><span class="v">eps_n</span> ~ N(0, I)<span class="cm">  n = 1 … population</span></div>
+    <div class="es-line"><span class="v">R_n</span> <span class="op">=</span> reward(<span class="v">theta</span> <span class="op">+</span> sigma <span class="op">*</span> <span class="v">eps_n</span>)</div>
+    <div class="es-line"><span class="v">C_n</span> <span class="op">=</span> (R_n <span class="op">−</span> mean(R)) / (std(R) <span class="op">+</span> 1e-8)<span class="cm">  z-score</span></div>
+    <div class="es-line"><span class="v">theta</span> <span class="op">+=</span> (alpha / population) <span class="op">*</span> Σ C_n <span class="op">*</span> <span class="v">eps_n</span></div>
+    <div class="es-foot">One scalar reward per member, so ES composes with <b>anything scoreable from a forward pass</b> — and every parameter is fair game: f32 / f16 / bf16 tensors, whole registries, even <b>packed ternary genomes</b>. No <code style="color:var(--text-dim)">GradState</code> needed.</div>
+  </div></div>
+  <div class="txt rv">
+    <div class="eyebrow">Neuroevolution</div>
+    <h2 style="margin-top:12px">Training <span class="hot">without gradients</span>.</h2>
+    <p class="lede"><code style="font-family:var(--f-mono);color:var(--hot)">fucina.es</code> trains with forward passes only — a faithful reimplementation of ES-at-scale, kept deliberately vanilla. Perturb the parameters, score each member with one reward, and step toward the members that did better.</p>
+    <p class="note">Because the signal is a scalar, it reaches places a gradient can't: non-differentiable rewards, and quantized ternary weights that have no gradient at all. Noise is never stored — every perturbation regenerates from <code>(seed, iteration, member)</code>, O(1) memory beyond the parameters. <code>zig build es-spirals</code> trains from scratch with no backward anywhere; <code>zig build es-finetune</code> fine-tunes a real quantized GGUF this way, LoRA-only or full-parameter.</p>
+  </div>
+</div></div></section>
+
+<footer><div class="wrap">
+  <div class="frow">
+    <div>
+      <div class="fbrand">FUCIN<span class="a">A</span></div>
+      <div class="fnote">A production-oriented core, not a versioned product — the API may change. Named after the Italian for <em>forge</em>.</div>
+    </div>
+    <div class="flinks">
+      <a class="hot" href="https://github.com/matteo-grella/fucina">Source on GitHub ↗</a>
+      <a href="https://github.com/matteo-grella/fucina/blob/main/docs/REFERENCE.md">The Reference ↗</a>
+      <a href="https://github.com/matteo-grella/fucina/blob/main/docs/BENCHMARK.md">The Benchmarks ↗</a>
+      <a href="https://github.com/matteo-grella/fucina/tree/main/docs/course">The video course ↗</a>
+    </div>
+  </div>
+  <div class="fbot">Built in Zig · CPU-first · named axes · no-tape autograd · neuroevolution · real models</div>
+</div></footer>
+
+<script>
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function renderCode(elId, model, hl){
+  var el=document.getElementById(elId); if(!el||!model) return;
+  hl = hl||[]; var h='';
+  for(var i=0;i<model.length;i++){
+    var toks=model[i].map(function(t){return t[1]==='txt'?esc(t[0]):'<span class="tok-'+t[1]+'">'+esc(t[0])+'</span>';}).join('');
+    h+='<div class="cl'+(hl.indexOf(i)>=0?' hl':'')+'" data-i="'+i+'"><span class="ln">'+(i+1)+'</span><span class="code">'+(toks||' ')+'</span></div>';
+  }
+  el.innerHTML=h;
+}
+renderCode('cbHero', window.__CODE_HERO);
+renderCode('cbAxes', window.__CODE_AXES, [4,5,6]);
+renderCode('cbEinsum', window.__CODE_EINSUM, [1,2,8,9]);
+renderCode('cbBuffer', window.__CODE_BUFFER, [2,5]);
+renderCode('cbReplace', window.__CODE_REPLACE, [6]);
+renderCode('cbAutograd', window.__CODE_AUTOGRAD, [0,2,12]);
+renderCode('cbScope', window.__CODE_SCOPE, [7,9]);
+renderCode('cbRun', window.__CODE_RUN, [3,4,5,6]);
+
+/* fit-to-width: shrink a panel's code font until its longest line fits */
+function fitPanels(){
+  var bodies=[].slice.call(document.querySelectorAll('.cp-body')), min=Infinity;
+  bodies.forEach(function(b){
+    b.style.fontSize='';
+    for(var i=0;i<4;i++){
+      if(b.scrollWidth<=b.clientWidth) break;
+      var fs=parseFloat(getComputedStyle(b).fontSize);
+      var next=Math.max(9.5, fs*b.clientWidth/b.scrollWidth);
+      if(next>=fs) break;
+      b.style.fontSize=next.toFixed(2)+'px';
+    }
+    min=Math.min(min, parseFloat(getComputedStyle(b).fontSize));
+  });
+  /* one size for every panel, so no snippet reads bigger than its neighbour */
+  bodies.forEach(function(b){ b.style.fontSize=min.toFixed(2)+'px'; });
+  document.querySelectorAll('.es-card').forEach(function(c){
+    c.style.removeProperty('--es-fs');
+    var line=c.querySelector('.es-line'); if(!line) return;
+    for(var i=0;i<4;i++){
+      if(c.scrollWidth<=c.clientWidth) break;
+      var fs=parseFloat(getComputedStyle(line).fontSize);
+      var next=Math.max(10, fs*c.clientWidth/c.scrollWidth);
+      if(next>=fs) break;
+      c.style.setProperty('--es-fs', next.toFixed(2)+'px');
+    }
+  });
+}
+var ftT; function fitSoon(){clearTimeout(ftT); ftT=setTimeout(fitPanels,120);}
+fitPanels();
+if(document.fonts && document.fonts.ready) document.fonts.ready.then(fitPanels);
+window.addEventListener('resize', fitSoon);
+
+/* hero: cycle through three highlight "beats" */
+var beats=[
+  {lines:[1,2,3,4], cap:'<span class="n">1</span><b>Named axes.</b> The axes — .batch, .in, .out — live in the type.'},
+  {lines:[6,7],     cap:'<span class="n">2</span><b>Tagged contraction.</b> x.dot(&amp;ctx, &amp;w, .in) contracts the axis called .in → [batch, out].'},
+  {lines:[10,11],   cap:'<span class="n">3</span><b>No-tape autograd.</b> One backward pass; the gradient hangs off the tensor.'}
+];
+var hero=document.getElementById('cbHero'), heroCap=document.getElementById('heroCap'), bi=-1;
+function setBeat(k){
+  hero.querySelectorAll('.cl').forEach(function(r){r.classList.remove('hl');});
+  beats[k].lines.forEach(function(i){var r=hero.querySelector('.cl[data-i="'+i+'"]');if(r)r.classList.add('hl');});
+  heroCap.style.opacity=0;
+  setTimeout(function(){heroCap.innerHTML=beats[k].cap;heroCap.style.opacity=1;},160);
+}
+function nextBeat(){bi=(bi+1)%beats.length;setBeat(bi);}
+nextBeat(); setInterval(nextBeat, 3200);
+
+/* sparks */
+(function(){var sp=document.getElementById('sparks');var html='';
+  for(var i=0;i<26;i++){var x=Math.random()*100,dur=7+Math.random()*8,delay=-Math.random()*15,s=.7+Math.random()*1.3;
+    html+='<span class="spark" style="left:'+x.toFixed(1)+'%;animation-duration:'+dur.toFixed(1)+'s;animation-delay:'+delay.toFixed(1)+'s;transform:scale('+s.toFixed(2)+')"></span>';}
+  sp.innerHTML=html;})();
+
+/* reveal on scroll */
+var io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target);}});},{threshold:.16});
+document.querySelectorAll('.rv').forEach(function(el){io.observe(el);});
+</script>
+</body>
+</html>
