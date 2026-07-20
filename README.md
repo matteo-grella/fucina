@@ -8,8 +8,8 @@ runs, in inference and in training alike. Eager does not mean slow: on most
 measured CPU shapes Fucina matches or beats llama.cpp (`docs/BENCHMARK.md` keeps
 the dated records, losses included). There is no C/C++ build system, no
 Python runtime dependency, and no ggml-style graph executor — just Zig
-vector kernels, optional CBLAS providers for GEMM, and an optional Metal
-offload for large GEMMs on macOS.
+vector kernels, plus CBLAS providers and a GPU offload (Metal or CUDA) as
+opt-in accelerators for matrix multiplication.
 
 ## What it looks like
 

@@ -58,8 +58,8 @@ you read is what runs — in inference and in training alike.
 **Visual:** Code/text shot of the repo `README.md:3-12` (the opening
 paragraph); a highlight sweeps across "what you read is what runs, in
 inference and in training alike" as the VO reaches it, then a second,
-briefer highlight across "optional CBLAS providers for GEMM, and an
-optional Metal offload" as the accelerator sentence lands.
+briefer highlight across "CBLAS providers and a GPU offload (Metal or
+CUDA) as opt-in accelerators" as the accelerator sentence lands.
 
 **Overlay:** Fucina — Italian for *forge* · "what you read is what runs"
 
