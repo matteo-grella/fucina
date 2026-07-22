@@ -212,6 +212,51 @@ arch, and Zig version; `check` refuses a mismatched environment without
 every bench executable without running one, so bench mains can no longer
 rot unnoticed (five of them did exactly that before this step existed).
 
+### The DRAM roofline probe
+
+Decode-shaped quantized matmuls are weight-stream-bound, so an achieved
+"GB/s" figure means nothing without the ceiling this machine actually
+sustains. `bench/membw.zig` measures it:
+
+```sh
+zig build bench-membw -Doptimize=ReleaseFast                    # single-thread + all-core
+zig build bench-membw -Doptimize=ReleaseFast -- --threads 4     # explicit sweep point
+```
+
+The ceiling is defined as **what portable kernel-class code can read** —
+plain `@Vector` streaming loads, the same instruction class as the quant
+kernels — not a spec-sheet or exotic-pattern number. One shared
+larger-than-any-cache region is split into 8 MiB chunks claimed from an
+atomic cursor (with fixed per-thread slices the slowest core sets the wall
+time and the aggregate under-reads ~2x on heterogeneous parts); each chunk
+is streamed as four interleaved lines-in-flight with wrapping `u64`
+accumulators; workers take the same macOS performance-core QoS pin as the
+engine's team; a round is one wall-clocked pass over the region and the
+best of five rounds is the ceiling, in the decimal GB/s the bench tables
+use. Alternative patterns (line-touch-only reads, single-stream, software
+prefetch at 4–128-line distances) measure equal or worse on M1 Max, so the
+figure is a genuine ceiling for this code class, not an artifact of one
+loop shape. Thermal discipline applies as for every other number in this
+file.
+
+Reference figures, M1 Max (macOS 14.6): **~60 GB/s single-thread,
+~115-120 GB/s all-core** (10 threads, best-of-5, ranges across repeated
+cool-state runs).
+
+`bench-ternary` runs the single-thread probe at startup (`--no-roofline`
+skips it) and prints a `%ceil` column: hot-kernel weight-stream GB/s as a
+fraction of the single-thread ceiling — the bench is single-threaded, so
+the per-core ceiling is the honest denominator. A near-100% row is
+memory-bound: only a smaller format can make it faster, and (per the
+LUT-kernel record in [TERNARY.md](TERNARY.md)) DRAM-bound is the one regime
+where table kernels deserve re-examination. Low percentages point at
+compute or dispatch.
+Current M1 Max reading: the TQ2_0 hot kernel at m=1 streams weights at
+~16-17 GB/s, **~26-28% of the single-thread ceiling** — single-thread
+ternary decode is compute-bound, with ~3.7x of memory headroom, while
+8-thread decode at that per-core rate sits right at the ~120 GB/s
+aggregate wall.
+
 ### Manual commands
 
 Fucina (comma-separated token IDs; the values are fixtures, the length is

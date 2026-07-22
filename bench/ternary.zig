@@ -6,10 +6,18 @@
 // compared element-wise bitwise, and any mismatch fails the run (nonzero
 // exit) — the bench doubles as a real ReleaseFast parity gate.
 //
-//   zig build bench-ternary -Doptimize=ReleaseFast -- [--iters N]
+// The "w GB/s" column (weight-stream bandwidth of the hot kernel) is put in
+// context by a single-thread DRAM read-bandwidth probe (bench/membw.zig) run
+// at startup: "%ceil" is the fraction of that measured ceiling the kernel
+// sustains — near-100% decode rows are memory-bound and only a smaller
+// format can beat them; low percentages point at compute or dispatch.
+// --no-roofline skips the probe (and prints "-" in the column).
+//
+//   zig build bench-ternary -Doptimize=ReleaseFast -- [--iters N] [--no-roofline]
 
 const std = @import("std");
 const Timer = @import("timer.zig").Timer;
+const membw = @import("membw.zig");
 const raw_backend = @import("raw_backend");
 
 const Tensor = raw_backend.Tensor;
@@ -52,11 +60,14 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     var iters: usize = 100;
+    var no_roofline = false;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--iters") and i + 1 < args.len) {
             i += 1;
             iters = try std.fmt.parseInt(usize, args[i], 10);
+        } else if (std.mem.eql(u8, args[i], "--no-roofline")) {
+            no_roofline = true;
         }
     }
 
@@ -65,11 +76,22 @@ pub fn main(init: std.process.Init) !void {
     const out = &sw.interface;
     defer out.flush() catch {};
 
+    // Single-thread ceiling: the bench is single-threaded, so the per-core
+    // probe is the right denominator. Probe failure (tight memory) degrades
+    // to no roofline, never to a failed bench.
+    const ceiling: ?f64 = if (no_roofline) null else blk: {
+        const r = membw.probe(allocator, io, 1, membw.default_rounds, membw.default_single_region_mib) catch break :blk null;
+        break :blk r.gbps;
+    };
+
     try out.print("TQ2_0 ternary matmul microbench  iters={d} (single-thread)\n", .{iters});
-    try out.print("{s:<15} | {s:>4} | {s:>10} | {s:>10} | {s:>6} | {s:>10} | {s:>10} | {s:>10} | {s:>8}\n", .{
-        "shape", "m", "cold us", "hot us", "hot x", "f32act us", "q4_k us", "f32 us", "w GB/s",
+    if (ceiling) |c| {
+        try out.print("single-thread DRAM read ceiling ~{d:.1} GB/s (bench/membw.zig probe); %ceil = hot w GB/s vs it\n", .{c});
+    }
+    try out.print("{s:<15} | {s:>4} | {s:>10} | {s:>10} | {s:>6} | {s:>10} | {s:>10} | {s:>10} | {s:>8} | {s:>5}\n", .{
+        "shape", "m", "cold us", "hot us", "hot x", "f32act us", "q4_k us", "f32 us", "w GB/s", "%ceil",
     });
-    try out.print("{s}\n", .{"-" ** 108});
+    try out.print("{s}\n", .{"-" ** 116});
 
     var any_mismatch = false;
     for (shapes) |shape| {
@@ -169,12 +191,16 @@ pub fn main(init: std.process.Init) !void {
             const wbytes = @as(f64, @floatFromInt(n * bpr * @sizeOf(BlockTQ2_0)));
             const gbs = wbytes / (hot * 1000.0);
 
-            try out.print("{s:<15} | {d:>4} | {d:>10.1} | {d:>10.1} | {d:>5.2}x | {d:>10.1} | {d:>10.1} | {d:>10.1} | {d:>8.1}{s}\n", .{
-                shape.name,          m,          cold, hot, cold / hot, f32act, q4, f32ref, gbs,
-                if (mismatch) " HOT/COLD MISMATCH" else "",
+            try out.print("{s:<15} | {d:>4} | {d:>10.1} | {d:>10.1} | {d:>5.2}x | {d:>10.1} | {d:>10.1} | {d:>10.1} | {d:>8.1} | ", .{
+                shape.name, m, cold, hot, cold / hot, f32act, q4, f32ref, gbs,
             });
+            if (ceiling) |c| {
+                try out.print("{d:>4.0}%{s}\n", .{ gbs / c * 100.0, if (mismatch) " HOT/COLD MISMATCH" else "" });
+            } else {
+                try out.print("{s:>5}{s}\n", .{ "-", if (mismatch) " HOT/COLD MISMATCH" else "" });
+            }
         }
-        try out.print("{s}\n", .{"-" ** 108});
+        try out.print("{s}\n", .{"-" ** 116});
     }
 
     if (any_mismatch) return error.HotColdParityMismatch;

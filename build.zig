@@ -1272,6 +1272,23 @@ pub fn build(b: *std.Build) void {
     const ternary_bench_step = b.step("bench-ternary", "TQ2_0 ternary matmul: hot sdot/vpdpbusd tiles vs cold table path, f32-act path, Q4_K, dense f32");
     ternary_bench_step.dependOn(&ternary_bench_cmd.step);
 
+    const membw_bench_exe = b.addExecutable(.{
+        .name = "fucina-membw-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/membw.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    // macOS QoS pinning (pthread_set_qos_class_self_np, as src/thread.zig).
+    membw_bench_exe.root_module.link_libc = true;
+    const membw_bench_cmd = b.addRunArtifact(membw_bench_exe);
+    if (b.args) |args| {
+        membw_bench_cmd.addArgs(args);
+    }
+    const membw_bench_step = b.step("bench-membw", "Measured DRAM read-bandwidth ceiling: single-thread + all-core roofline probe");
+    membw_bench_step.dependOn(&membw_bench_cmd.step);
+
     const facade_bench_exe = b.addExecutable(.{
         .name = "fucina-facade-bench",
         .root_module = b.createModule(.{
@@ -1330,6 +1347,7 @@ pub fn build(b: *std.Build) void {
         gemm_bench_exe,
         q5kmoe_bench_exe,
         ternary_bench_exe,
+        membw_bench_exe,
         facade_bench_exe,
         einsum_bench_exe,
     }) |bench_check_exe| {
