@@ -5,6 +5,7 @@
 //! `backend_diffusion.zig`).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const fucina = @import("fucina");
 const llm = @import("fucina_llm");
 const types = @import("types.zig");
@@ -903,6 +904,119 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
             };
         }
     };
+}
+
+/// KV RAM guard verdict (pure rule; unit-tested below). Thresholds:
+/// slots x per-slot beyond AVAILABLE memory is an overcommit — clamped to
+/// fit HALF the available bytes where clamping is allowed (the other half
+/// is page-cache headroom for the mmap'd weights), warned otherwise; beyond
+/// half of available it is a pressure warning on every platform. Unknown
+/// availability stays silent: no number, no policy.
+pub const KvRamAction = enum { ok, warn_pressure, warn_overcommit, clamp };
+
+pub fn kvRamVerdict(requested_slots: usize, per_slot_bytes: usize, available: ?u64, can_clamp: bool) struct { slots: usize, action: KvRamAction } {
+    const slots = @max(requested_slots, 1);
+    const avail = available orelse return .{ .slots = slots, .action = .ok };
+    if (per_slot_bytes == 0) return .{ .slots = slots, .action = .ok };
+    const total = @as(u64, slots) * per_slot_bytes;
+    if (total > avail) {
+        if (can_clamp) {
+            const fit: usize = @intCast(@max((avail / 2) / per_slot_bytes, 1));
+            return .{ .slots = @min(slots, fit), .action = .clamp };
+        }
+        return .{ .slots = slots, .action = .warn_overcommit };
+    }
+    if (total > avail / 2) return .{ .slots = slots, .action = .warn_pressure };
+    return .{ .slots = slots, .action = .ok };
+}
+
+/// The lmserve KV RAM guard. Sizes ONE probe cache to measure the true
+/// per-slot commitment (exact for the model's layer/head geometry and KV
+/// dtype), compares `--kv-slots x per-slot` against currently-available
+/// memory, and prints the arithmetic when it matters. Returns the slot
+/// count the server should actually use.
+///
+/// Why this exists: slot caches commit lazily (uninitialized allocations
+/// touch no pages — MEMORY-MODEL.md), so an overcommitted `--kv-slots`
+/// does NOT fail at startup. It surfaces mid-serving, as the kernel evicts
+/// the mmap'd weights' page cache to make room for filling KV pages — a
+/// throughput collapse with no error anywhere. The guard front-loads that
+/// failure into startup arithmetic. Linux clamps on overcommit
+/// (`--kv-slots-force` keeps the request); macOS only warns — its
+/// free-page probe understates reclaimable memory
+/// (`fucina.expert_store.memAvailableBytes`), too weak a number to clamp on.
+pub fn kvRamGuardSlots(
+    comptime ModelT: type,
+    ctx: *fucina.ExecContext,
+    model: *const ModelT,
+    context_len: usize,
+    requested_slots: usize,
+    force: bool,
+    out: anytype,
+) !usize {
+    var probe = try model.initKvCache(ctx, context_len);
+    const per_slot = probe.byteSize();
+    probe.deinit();
+
+    const can_clamp = builtin.os.tag == .linux and !force;
+    const available = fucina.expert_store.memAvailableBytes();
+    const v = kvRamVerdict(requested_slots, per_slot, available, can_clamp);
+    const gib = struct {
+        fn of(bytes: u64) f64 {
+            return @as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0 * 1024.0);
+        }
+    }.of;
+    const slots = @max(requested_slots, 1);
+    switch (v.action) {
+        .ok => {},
+        .warn_pressure => try out.print(
+            "kv guard: {d} slot(s) x {d:.2} GiB = {d:.2} GiB KV vs ~{d:.2} GiB available — over half; leave page-cache headroom for the weights (reduce --kv-slots or --ctx, or add --kv-cache-dir)\n",
+            .{ slots, gib(per_slot), gib(@as(u64, slots) * per_slot), gib(available.?) },
+        ),
+        .warn_overcommit => try out.print(
+            "kv guard: {d} slot(s) x {d:.2} GiB = {d:.2} GiB KV vs ~{d:.2} GiB available — OVERCOMMITTED; as slots fill, the OS will evict the model's page cache and throughput collapses. Reduce --kv-slots or --ctx, or add --kv-cache-dir\n",
+            .{ slots, gib(per_slot), gib(@as(u64, slots) * per_slot), gib(available.?) },
+        ),
+        .clamp => try out.print(
+            "kv guard: {d} slot(s) x {d:.2} GiB = {d:.2} GiB KV vs ~{d:.2} GiB available — OVERCOMMITTED; clamping --kv-slots {d} -> {d} (override with --kv-slots-force)\n",
+            .{ slots, gib(per_slot), gib(@as(u64, slots) * per_slot), gib(available.?), slots, v.slots },
+        ),
+    }
+    if (v.action != .ok) try out.flush();
+    return v.slots;
+}
+
+test "kv ram guard verdict: thresholds, clamp arithmetic, unknowns" {
+    const expectEqual = std.testing.expectEqual;
+    const gib: u64 = 1024 * 1024 * 1024;
+
+    // Comfortable fit: silent.
+    try expectEqual(.ok, kvRamVerdict(4, gib, 16 * gib, true).action);
+    // Over half of available: pressure warning, slots untouched.
+    try expectEqual(.warn_pressure, kvRamVerdict(4, 3 * gib, 16 * gib, true).action);
+    try expectEqual(@as(usize, 4), kvRamVerdict(4, 3 * gib, 16 * gib, true).slots);
+    // Overcommit, clamping allowed: fit half the available bytes, floor 1.
+    {
+        const v = kvRamVerdict(16, 4 * gib, 16 * gib, true);
+        try expectEqual(.clamp, v.action);
+        try expectEqual(@as(usize, 2), v.slots); // (16/2)/4
+    }
+    {
+        const v = kvRamVerdict(4, 10 * gib, 8 * gib, true);
+        try expectEqual(.clamp, v.action);
+        try expectEqual(@as(usize, 1), v.slots); // floor
+    }
+    // Overcommit, clamping forbidden (macOS / --kv-slots-force): warn only.
+    {
+        const v = kvRamVerdict(16, 4 * gib, 16 * gib, false);
+        try expectEqual(.warn_overcommit, v.action);
+        try expectEqual(@as(usize, 16), v.slots);
+    }
+    // Unknown availability or zero-sized probe: silent, slots untouched.
+    try expectEqual(.ok, kvRamVerdict(64, 4 * gib, null, true).action);
+    try expectEqual(.ok, kvRamVerdict(64, 0, 16 * gib, true).action);
+    // Slot floor mirrors kvSlots().
+    try expectEqual(@as(usize, 1), kvRamVerdict(0, gib, 16 * gib, true).slots);
 }
 
 test "adaptive fleet switch rule: decisive-margin only" {

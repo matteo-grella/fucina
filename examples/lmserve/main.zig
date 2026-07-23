@@ -41,7 +41,12 @@ const usage_text =
     \\  --experts=borrow    zero-copy MoE expert load (gemma4/diffusion-gemma)
     \\  --kv-slots N        resident KV-reuse slots (default 1); each holds a
     \\                      full --ctx cache, so N-1 extra slots cost real
-    \\                      memory but keep interleaved conversations warm
+    \\                      memory but keep interleaved conversations warm.
+    \\                      A startup guard checks N x per-slot bytes against
+    \\                      available RAM: Linux clamps on overcommit, macOS
+    \\                      warns (its probe is conservative)
+    \\  --kv-slots-force    keep the requested --kv-slots even when the guard
+    \\                      would clamp (Linux; the warning still prints)
     \\  --kv-cache-dir D    spill evicted slots to sidecar files under D and
     \\                      restore them on prefix match (gguf chat backends)
     \\  --kv-disk-slots M   max sidecar files under --kv-cache-dir (default 8)
@@ -85,6 +90,7 @@ const Args = struct {
     conns: usize = 32,
     experts_borrow: bool = false,
     kv_slots: usize = 1,
+    kv_slots_force: bool = false,
     kv_cache_dir: ?[]const u8 = null,
     kv_disk_slots: usize = 8,
     cartridge_path: ?[]const u8 = null,
@@ -152,6 +158,8 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--kv-slots") and i + 1 < args_slice.len) {
             i += 1;
             args.kv_slots = try std.fmt.parseInt(usize, args_slice[i], 10);
+        } else if (std.mem.eql(u8, arg, "--kv-slots-force")) {
+            args.kv_slots_force = true;
         } else if (std.mem.eql(u8, arg, "--kv-cache-dir") and i + 1 < args_slice.len) {
             i += 1;
             args.kv_cache_dir = args_slice[i];
@@ -511,6 +519,8 @@ fn serveQwen3(
         try stderr.flush();
     }
 
+    const kv_slots = try backend_mod.kvRamGuardSlots(llm.qwen3.model.Model, ctx, &model, args.ctx_len, args.kv_slots, args.kv_slots_force, stderr);
+
     var adapter = backend_mod.GgufChatBackend(llm.qwen3.model.Model, llm.tokenizer).init(
         allocator,
         ctx,
@@ -525,7 +535,7 @@ fn serveQwen3(
             // Qwen3's recommended no-think chat settings (the server default;
             // per-request reasoning switches nothing here — clients override).
             .default_sampling = .{ .temperature = 0.7, .top_k = 20, .top_p = 0.8 },
-            .kv_slots = args.kv_slots,
+            .kv_slots = kv_slots,
             .kv_disk = kvDiskOptions(io, args),
             .cartridge = if (cart) |*c| c else null,
             .fleet = if (fleet_serve) |*fs| .{
@@ -603,6 +613,8 @@ fn serveGemma4(
     extra_stops_buf[extra_n] = 1;
     extra_n += 1;
 
+    const kv_slots = try backend_mod.kvRamGuardSlots(llm.gemma.gemma4.Model, ctx, &model, args.ctx_len, args.kv_slots, args.kv_slots_force, stderr);
+
     var adapter = backend_mod.GgufChatBackend(llm.gemma.gemma4.Model, llm.spm_tokenizer).init(
         allocator,
         ctx,
@@ -614,7 +626,7 @@ fn serveGemma4(
             .context_len = args.ctx_len,
             .extra_stop_ids = extra_stops_buf[0..extra_n],
             .default_sampling = default_sampling,
-            .kv_slots = args.kv_slots,
+            .kv_slots = kv_slots,
             .kv_disk = kvDiskOptions(io, args),
             .cartridge = if (cart) |*c| c else null,
             .fleet = if (fleet_serve) |*fs| .{

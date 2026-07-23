@@ -473,9 +473,12 @@ fn hintWillNeed(fd: fd_t, offset: u64, len: usize) void {
 }
 
 /// Currently-available physical memory, best effort: Linux reads
-/// `MemAvailable` (free + reclaimable page cache); macOS counts only the
-/// free-page pool, which understates what the OS could reclaim — acceptable
-/// for a conservative default budget. `null` when undeterminable.
+/// `MemAvailable` (free + reclaimable page cache); macOS sums the free,
+/// speculative, and purgeable page pools — deliberately NOT the inactive or
+/// external (file-cache) pools, so the number still understates what the OS
+/// could reclaim but never counts page cache that consumers (streamed
+/// experts, the lmserve KV guard) exist to protect. `null` when
+/// undeterminable.
 pub fn memAvailableBytes() ?u64 {
     switch (builtin.os.tag) {
         .linux => {
@@ -500,14 +503,19 @@ pub fn memAvailableBytes() ?u64 {
             return null;
         },
         .macos => {
-            var pages: c_int = 0;
+            var total_pages: u64 = 0;
+            inline for (.{ "vm.page_free_count", "vm.page_speculative_count", "vm.page_purgeable_count" }) |name| {
+                var pages: c_int = 0;
+                var len: usize = @sizeOf(c_int);
+                if (std.c.sysctlbyname(name, &pages, &len, null, 0) != 0) return null;
+                if (pages < 0) return null;
+                total_pages += @intCast(pages);
+            }
             var page_size: c_int = 0;
             var len: usize = @sizeOf(c_int);
-            if (std.c.sysctlbyname("vm.page_free_count", &pages, &len, null, 0) != 0) return null;
-            len = @sizeOf(c_int);
             if (std.c.sysctlbyname("hw.pagesize", &page_size, &len, null, 0) != 0) return null;
-            if (pages < 0 or page_size <= 0) return null;
-            return @as(u64, @intCast(pages)) * @as(u64, @intCast(page_size));
+            if (page_size <= 0) return null;
+            return total_pages * @as(u64, @intCast(page_size));
         },
         else => return null,
     }

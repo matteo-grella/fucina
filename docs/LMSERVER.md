@@ -52,7 +52,19 @@ conn threads (≤ --conns, socket deadlines)          ONE inference worker
   chat re-prefill only the last reply + new message; a non-matching request
   costs one full prefill, exactly as before. Extra slots keep interleaved
   conversations warm at a full `--ctx` cache each (~112 KiB/position for a
-  28-layer/8-kv-head/128-dim f16 geometry). With `--kv-cache-dir D`, a slot
+  28-layer/8-kv-head/128-dim f16 geometry). A startup **KV RAM guard**
+  (`kvRamGuardSlots` in `examples/lmserve/backend.zig`) sizes one probe
+  cache, compares `--kv-slots x per-slot` against available memory, and
+  prints the arithmetic when it matters: slot pages commit lazily, so an
+  overcommit does not fail at startup — it surfaces mid-serving as the OS
+  evicting the mmap'd weights' page cache, a silent throughput collapse.
+  Above half of available memory the guard warns; above all of it, Linux
+  clamps the slot count to fit half (override with `--kv-slots-force`;
+  the warning still prints) while macOS only warns — its probe (free +
+  speculative + purgeable pages, deliberately excluding the file cache the
+  guard protects) still understates reclaimable memory, too weak a number
+  to clamp on. With
+  `--kv-cache-dir D`, a slot
   about to be destroyed by an unrelated request (keeping < half of it, not
   already stored) spills to an `llm.kv_persist` sidecar under `D` (at most
   `--kv-disk-slots` files, LRU-reused, containment-deduped) and is restored

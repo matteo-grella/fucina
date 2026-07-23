@@ -257,3 +257,11 @@ inference frame helper is unchanged.
   (`src/llm/kv_cache.zig:199-200`); stale f16 data is simply overwritten on the
   next append, which is correct only because attention reads just the `[0..len]`
   prefix.
+- **Uninitialized allocations commit lazily.** `empty*` buffers and the slabs
+  behind typed caches never write their pages at allocation, so reserving
+  memory — e.g. lmserve's `--kv-slots` full-context caches — costs virtual
+  address space only; physical pages commit as rows are appended. This is why
+  a multi-slot server starts cheap, and also why KV overcommit does not fail
+  at startup: it surfaces under load, as page-cache eviction of the mmap'd
+  weights. lmserve's startup KV RAM guard exists to front-load that
+  arithmetic (docs/LMSERVER.md).

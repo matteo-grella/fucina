@@ -955,13 +955,16 @@ test "oversubscribed team: guard engages and dispatch stays exactly-once" {
 }
 
 test "joinWorkers timed-wait arm engages on a straggling join and stays exactly-once" {
-    // Force the fallback deterministically: a 2-worker team whose join spin
-    // bound is dropped to 1, dispatching batches that contain one chunk of
-    // ~ms-scale busy work. Whenever a WORKER draws the long chunk (all but
-    // (1/3)^reps of runs), the dispatcher's join tail exceeds one spin
-    // iteration and must take timed waits. Coverage assertions hold
-    // regardless; the nap counter is asserted only in safety builds, where
-    // the instrumentation exists.
+    // Force the fallback: a 2-worker team whose join spin bound is dropped
+    // to 1, dispatching batches where EVERY chunk is ~ms-scale busy work.
+    // Claims are not uniformly distributed — the dispatcher claims
+    // back-to-back with zero wake latency and can systematically take a
+    // single straggler chunk itself (a one-straggler variant of this test
+    // was flaky for exactly that reason) — but with all chunks long, the
+    // workers' ~µs claim latency guarantees they hold in-flight work when
+    // the dispatcher reaches the join, so it must take timed waits.
+    // Coverage assertions hold regardless; the nap counter is asserted only
+    // in safety builds, where the instrumentation exists.
     const allocator = std.testing.allocator;
     var threaded = Io.Threaded.init(allocator, .{
         .async_limit = .nothing,
@@ -974,20 +977,17 @@ test "joinWorkers timed-wait arm engages on a straggling join and stays exactly-
     defer bp.shutdownAndJoin();
     bp.join_spin_budget = 1;
 
-    const n_tasks = 3; // participants: dispatcher + 2 workers, one task each
+    const n_tasks = 6; // 2 chunks per participant at even claiming
     const Ctx = struct {
         hits: [n_tasks]std.atomic.Value(u32) = @splat(.init(0)),
         fn run(ctx: *anyopaque, index: usize) void {
             const self: *@This() = @ptrCast(@alignCast(ctx));
-            if (index == n_tasks - 1) {
-                // The straggler: ~ms-scale on any hardware, in any build mode.
-                for (0..200_000) |_| std.atomic.spinLoopHint();
-            }
+            for (0..100_000) |_| std.atomic.spinLoopHint();
             _ = self.hits[index].fetchAdd(1, .monotonic);
         }
     };
     var ctx = Ctx{};
-    const reps = 20;
+    const reps = 10;
     for (0..reps) |_| {
         for (&ctx.hits) |*h| h.store(0, .monotonic);
         bp.dispatch(n_tasks, &ctx, Ctx.run);
