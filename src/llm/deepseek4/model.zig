@@ -1359,11 +1359,20 @@ pub fn stepBatch(self: *Model, ctx: *ExecContext, session: *Session, tokens: []c
     return stepBatchExtra(self, ctx, session, tokens, null, null);
 }
 
+/// Post-layer HC stream state a `stepBatchExtra` caller wants written out.
+pub const StreamsOut = union(enum) {
+    /// Every row (len S * n_hc * hidden) — the MTP verifier's form. Needing
+    /// all rows disables the final-layer FFN truncation.
+    all: []f32,
+    /// Only the final row (len n_hc * hidden) — the prefill form: exactly
+    /// the drafter's frontier, and the truncation stays active.
+    final: []f32,
+};
+
 /// stepBatch with optional per-row outputs for speculative verification:
 /// `out_logits_rows` (len S, caller frees every row; the return value
-/// aliases the last row) and `out_streams` (len S*n_hc*hidden, the post-
-/// layer HC stream state of every row — the MTP drafter's recurrent input).
-pub fn stepBatchExtra(self: *Model, ctx: *ExecContext, session: *Session, tokens: []const usize, out_logits_rows: ?[][]f32, out_streams: ?[]f32) ![]f32 {
+/// aliases the last row) and `out_streams` (see `StreamsOut`).
+pub fn stepBatchExtra(self: *Model, ctx: *ExecContext, session: *Session, tokens: []const usize, out_logits_rows: ?[][]f32, out_streams: ?StreamsOut) ![]f32 {
     const cfg = self.config;
     const allocator = ctx.allocator;
     const cache = &session.cache;
@@ -1393,6 +1402,10 @@ pub fn stepBatchExtra(self: *Model, ctx: *ExecContext, session: *Session, tokens
     const splits = try allocator.alloc(HcSplit, S);
     defer allocator.free(splits);
 
+    // Callers needing per-row outputs disable the final-layer truncation.
+    const want_all_rows = out_logits_rows != null or
+        (if (out_streams) |dst| dst == .all else false);
+
     for (self.layers, 0..) |*layer, layer_i| {
         // ---- attention sublayer ----
         {
@@ -1404,16 +1417,26 @@ pub fn stepBatchExtra(self: *Model, ctx: *ExecContext, session: *Session, tokens
         }
         // ---- FFN sublayer ----
         {
-            const sub_in = try hcPreBatch(ctx, cfg, &layer.hc_ffn, streams_all, S, splits);
+            // Final layer: when only the last row is consumed, rows 0..S-2
+            // of this sublayer feed nothing — the attention above already
+            // wrote the caches — so it runs on the final row alone (the
+            // qwen3/gemma4 truncation, hyper-connection form).
+            const full = layer_i + 1 < self.layers.len or want_all_rows;
+            const ffn_s = if (full) S else 1;
+            const tail = streams_all[(S - ffn_s) * hc_dim ..][0 .. ffn_s * hc_dim];
+            const sub_in = try hcPreBatch(ctx, cfg, &layer.hc_ffn, tail, ffn_s, splits[0..ffn_s]);
             defer allocator.free(sub_in);
-            const block_out = try moeBlockBatch(self, ctx, layer, sub_in, tokens);
+            const block_out = try moeBlockBatch(self, ctx, layer, sub_in, tokens[S - ffn_s ..]);
             defer allocator.free(block_out);
-            try hcPostBatch(ctx, cfg, splits, block_out, streams_all, S);
+            try hcPostBatch(ctx, cfg, splits[0..ffn_s], block_out, tail, ffn_s);
         }
     }
     cache.len += S;
 
-    if (out_streams) |dst| @memcpy(dst[0 .. S * hc_dim], streams_all[0 .. S * hc_dim]);
+    if (out_streams) |dst| switch (dst) {
+        .all => |s| @memcpy(s[0 .. S * hc_dim], streams_all[0 .. S * hc_dim]),
+        .final => |s| @memcpy(s[0..hc_dim], streams_all[(S - 1) * hc_dim ..][0..hc_dim]),
+    };
     if (out_logits_rows) |rows| {
         for (rows, 0..) |*row, s| row.* = try outputLogits(self, ctx, streams_all[s * hc_dim ..][0..hc_dim]);
         return rows[S - 1];

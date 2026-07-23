@@ -1195,19 +1195,26 @@ pub const Model = struct {
             }
 
             // ---- FFN (batched; MoE = union-routed fused batch) ----
-            for (0..S) |s| rmsNormInto(hn[s * hidden ..][0..hidden], xs[s * hidden ..][0..hidden], layer.ffn_norm, cfg.rms_norm_eps);
-            var f_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ S, hidden }, hn);
+            // Final layer: only row S-1 reaches the logits, and this layer's
+            // KV was appended by the attention above — the FFN output of
+            // rows 0..S-2 feeds nothing, so the last layer's FFN runs on the
+            // final row alone (the qwen3/gemma4 truncation, MoE-batch form).
+            const ffn_rows = if (layer_i + 1 == self.layers.len) 1 else S;
+            const row0 = S - ffn_rows;
+            const xs_ffn = xs[row0 * hidden ..][0 .. ffn_rows * hidden];
+            for (0..ffn_rows) |s| rmsNormInto(hn[s * hidden ..][0..hidden], xs_ffn[s * hidden ..][0..hidden], layer.ffn_norm, cfg.rms_norm_eps);
+            var f_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ ffn_rows, hidden }, hn[0 .. ffn_rows * hidden]);
             defer f_t.deinit();
             switch (layer.ffn) {
                 .dense => |*dense| {
                     const y = try swigluLinear(ctx, allocator, &f_t, &dense.gate, &dense.up, &dense.down);
                     defer allocator.free(y);
-                    for (xs, y) |*xi, yi| xi.* += yi;
+                    for (xs_ffn, y) |*xi, yi| xi.* += yi;
                 },
                 .moe => |*moe| {
-                    const y = try self.moeForwardBatch(ctx, allocator, moe, layer, &f_t, S);
+                    const y = try self.moeForwardBatch(ctx, allocator, moe, layer, &f_t, ffn_rows);
                     defer allocator.free(y);
-                    for (xs, y) |*xi, yi| xi.* += yi;
+                    for (xs_ffn, y) |*xi, yi| xi.* += yi;
                 },
             }
         }

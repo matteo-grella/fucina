@@ -169,14 +169,14 @@ pub fn main(init: std.process.Init) !void {
     var logits: []f32 = &.{};
     defer if (logits.len > 0) allocator.free(logits);
     {
-        const chunk_streams = try allocator.alloc(f32, @min(prefill_chunk, tokens.items.len) * hc_dim);
-        defer allocator.free(chunk_streams);
         var fed: usize = 0;
         while (fed < tokens.items.len) {
             const end = @min(fed + prefill_chunk, tokens.items.len);
             if (logits.len > 0) allocator.free(logits);
-            logits = try llm.deepseek4.model.stepBatchExtra(&model, &ctx, &session, tokens.items[fed..end], null, chunk_streams[0 .. (end - fed) * hc_dim]);
-            @memcpy(frontier, chunk_streams[(end - fed - 1) * hc_dim ..][0..hc_dim]);
+            // Final-row-only stream request: exactly the frontier the drafter
+            // needs, and it keeps the model's final-layer FFN truncation
+            // active during prefill.
+            logits = try llm.deepseek4.model.stepBatchExtra(&model, &ctx, &session, tokens.items[fed..end], null, .{ .final = frontier });
             fed = end;
         }
     }
@@ -217,7 +217,7 @@ pub fn main(init: std.process.Init) !void {
             // Verify with one batched trunk step; rewind on partial accept.
             var snap = try session.cache.snapshot();
             defer snap.deinit();
-            _ = try llm.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..n_drafts], rows[0..n_drafts], streams_all[0 .. n_drafts * hc_dim]);
+            _ = try llm.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..n_drafts], rows[0..n_drafts], .{ .all = streams_all[0 .. n_drafts * hc_dim] });
             forwards += 1;
             var accepted: usize = 1;
             while (accepted < n_drafts) : (accepted += 1) {
