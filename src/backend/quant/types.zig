@@ -143,6 +143,21 @@ pub const BlockIQ4_NL = dtype_mod.BlockIQ4_NL;
 pub const BlockIQ4_XS = dtype_mod.BlockIQ4_XS;
 pub const BlockTQ1_0 = dtype_mod.BlockTQ1_0;
 pub const BlockTQ2_0 = dtype_mod.BlockTQ2_0;
+
+/// Four TQ2_0 blocks (four RHS rows = output columns) at the same k
+/// position, column-interleaved in 4-byte granules so one 16-byte load
+/// yields the same 4-element k-group for all four columns — the operand
+/// shape of the by-element sdot, where each i32 lane accumulates its own
+/// column and the per-block horizontal reduce disappears (the Q8_0x4 /
+/// Q4_Kx8 layout family, ternary form). Same bytes as 4 BlockTQ2_0 (264),
+/// rearranged: qs[half*128 + fg*16 + col*4 + lane] =
+/// src[col].qs[half*32 + fg*4 + lane]; crumb planes ride along untouched
+/// (each byte still holds 4 elements at +0/+32/+64/+96 of its 128-half).
+pub const BlockTQ2_0x4 = extern struct {
+    d: [4]u16, // f16 bits, d[col]
+    qs: [4 * 64]u8,
+};
+
 pub const BlockMXFP4 = dtype_mod.BlockMXFP4;
 pub const BlockNVFP4 = dtype_mod.BlockNVFP4;
 

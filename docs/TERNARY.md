@@ -51,6 +51,22 @@ scalar reference — pinned by `ternary_tests.zig` (hot vs cold bitwise) and by
 `zig build x86dot-check` (tq2_0 section; aarch64 sdot, x86 AVX2-maddubs, and
 x86 AVX-VNNI arms all hardware-executed 2026-07-07 — see the x86 addendum).
 
+**The x4 column-interleaved pack** (`BlockTQ2_0x4`, `packMatmulRhsTQ2_0x4`,
+`matmulTQ2_0X4RhsRange`) rearranges 4 columns' blocks in 4-byte granules —
+same bytes, no padding, `n % 4` only — so the by-element `sdot` accumulates
+each column in its own i32 lane and the per-block horizontal `@reduce`
+disappears; the f32 block tail becomes four vector ops with the identical
+per-column operation order, so it stays **bitwise identical** to the row
+kernel and the cold path (pinned in `ternary_tests.zig`). Four independent
+per-crumb-plane accumulators keep the dot chains at depth 16 — a single
+accumulator serializes all 64 dots behind its latency and measures 1.7x
+SLOWER, the load-bearing lesson of this layout. Measured on M1 Max
+(`bench-ternary` interleaved A/B, medians of 100, three runs): **1.06-1.10x
+over the row kernel at every m in {1,4,32,128} on both bench shapes**;
+single-thread m=1 decode moves from ~30% to ~33% of the measured DRAM
+ceiling. Non-aarch64 ISAs currently take the portable by-element twin
+(bitwise identical, untuned — a VNNI arm is future work).
+
 Tiles process 4 weight rows per activation pass (`blockCodeDot4`: shared
 activation vectors and bsum total), with the standard row/column parallel
 split (`vector.matmul2DTQ2_0RhsIntoWithConfig`); `native.zig` routes

@@ -267,9 +267,15 @@ fn linearSeqPtqtpFused(
     if (n == 0 or k == 0 or k % 256 != 0 or m == 0 or m * k != x.len) return null;
     const blocks_per_row = k / 256;
 
+    // With packs built (WeightPtqtp.init, all-or-nothing) the planes run on
+    // the x4 column-interleaved kernels — same bits, no per-block reduces,
+    // and the accumulating twin folds extra planes straight into `out` with
+    // no scratch pass. Without packs, the row kernels + scratch add.
+    const px4_ready = weight.px4_allocator != null;
     var rhs: [3]backend_quant.QuantizedMatmulRhsTQ2_0 = undefined;
+    var px4s: [3][]const backend_quant.BlockTQ2_0x4 = undefined;
     var plane_count: usize = 0;
-    inline for ([_][]const u8{ "p1", "p2", "p3" }) |plane_field| {
+    inline for ([_][]const u8{ "p1", "p2", "p3" }, 0..) |plane_field, slot| {
         const plane: ?*const QuantWeight(.tq2_0) = if (comptime std.mem.eql(u8, plane_field, "p1"))
             &weight.p1
         else if (@field(weight, plane_field)) |*p| p else null;
@@ -278,6 +284,7 @@ fn linearSeqPtqtpFused(
             // Borrow is sound: the matmul path never mutates RHS blocks
             // (same stance as the exec-tier tensor-RHS wrapper).
             rhs[plane_count] = backend_quant.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(blocks)) catch return null;
+            if (px4_ready) px4s[plane_count] = weight.px4[slot].?;
             plane_count += 1;
         }
     }
@@ -290,7 +297,7 @@ fn linearSeqPtqtpFused(
     }
     const out = try allocator.alloc(f32, m * n);
     defer allocator.free(out);
-    const tmp = try allocator.alloc(f32, if (plane_count > 1) m * n else 0);
+    const tmp = try allocator.alloc(f32, if (plane_count > 1 and !px4_ready) m * n else 0);
     defer allocator.free(tmp);
 
     const Task = struct {
@@ -298,12 +305,21 @@ fn linearSeqPtqtpFused(
         tmp: []f32,
         lhs: []const backend_quant.BlockQ8_K,
         rhs: []const backend_quant.QuantizedMatmulRhsTQ2_0,
+        px4: []const []const backend_quant.BlockTQ2_0x4, // empty = row-kernel path
+        bpr: usize,
         m: usize,
         n: usize,
         c0: usize,
         c1: usize,
 
         fn run(task: *const @This()) void {
+            if (task.px4.len != 0) {
+                backend_quant.matmulTQ2_0X4RhsTile(task.out, task.lhs, task.px4[0], task.bpr, task.n, 0, task.m, task.c0, task.c1);
+                for (task.px4[1..]) |pack| {
+                    backend_quant.matmulTQ2_0X4RhsTileAcc(task.out, task.lhs, pack, task.bpr, task.n, 0, task.m, task.c0, task.c1);
+                }
+                return;
+            }
             backend_quant.matmulTQ2_0RhsTile(task.out, task.lhs, &task.rhs[0], task.n, 0, task.m, task.c0, task.c1);
             for (task.rhs[1..]) |*plane_rhs| {
                 backend_quant.matmulTQ2_0RhsTile(task.tmp, task.lhs, plane_rhs, task.n, 0, task.m, task.c0, task.c1);
@@ -320,6 +336,8 @@ fn linearSeqPtqtpFused(
         .tmp = tmp,
         .lhs = lhs,
         .rhs = rhs[0..plane_count],
+        .px4 = if (px4_ready) px4s[0..plane_count] else &.{},
+        .bpr = blocks_per_row,
         .m = m,
         .n = n,
         .c0 = 0,
@@ -338,8 +356,16 @@ fn linearSeqPtqtpFused(
                 var tasks: [fucina.parallel.vector_max_threads]Task = undefined;
                 for (0..task_count) |ti| {
                     tasks[ti] = base;
-                    tasks[ti].c0 = ti * n / task_count;
-                    tasks[ti].c1 = (ti + 1) * n / task_count;
+                    if (px4_ready) {
+                        // Partition in 4-column group units: the pack has no
+                        // finer addressing. Exact cover since n % 4 == 0.
+                        const groups = n / 4;
+                        tasks[ti].c0 = (ti * groups / task_count) * 4;
+                        tasks[ti].c1 = ((ti + 1) * groups / task_count) * 4;
+                    } else {
+                        tasks[ti].c0 = ti * n / task_count;
+                        tasks[ti].c1 = (ti + 1) * n / task_count;
+                    }
                 }
                 pool.parallelChunks(Task, tasks[0..task_count], Task.run);
                 tasks_run = true;
@@ -361,6 +387,56 @@ pub const WeightPtqtp = struct {
     p1: QuantWeight(.tq2_0),
     p2: ?QuantWeight(.tq2_0),
     p3: ?QuantWeight(.tq2_0) = null,
+    /// Column-interleaved x4 packs of the planes (same bytes rearranged —
+    /// docs/TERNARY.md), the fused linear's fast operands: zero per-block
+    /// reduces, bitwise identical to the row kernel. All-or-nothing: either
+    /// every present plane has its pack (slot i mirrors pN) or all slots are
+    /// null and the fused path falls back to the row kernels (odd n,
+    /// unreadable plane storage, or allocation failure at build time).
+    px4: [3]?[]backend_quant.BlockTQ2_0x4 = .{ null, null, null },
+    px4_allocator: ?Allocator = null,
+
+    /// Construct with eager x4 pack building. Pack failure is silent — the
+    /// weight works identically (and bit-identically) without packs, just
+    /// through the slower row kernels.
+    pub fn init(allocator: Allocator, p1: QuantWeight(.tq2_0), p2: ?QuantWeight(.tq2_0), p3: ?QuantWeight(.tq2_0)) WeightPtqtp {
+        var self = WeightPtqtp{ .p1 = p1, .p2 = p2, .p3 = p3 };
+        self.buildX4Packs(allocator);
+        return self;
+    }
+
+    fn buildX4Packs(self: *WeightPtqtp, allocator: Allocator) void {
+        const n = self.p1.dim(.out);
+        const k = self.p1.dim(.in);
+        if (n == 0 or n % 4 != 0 or k == 0 or k % 256 != 0) return;
+        const planes = [3]?*const QuantWeight(.tq2_0){
+            &self.p1,
+            if (self.p2) |*p| p else null,
+            if (self.p3) |*p| p else null,
+        };
+        for (planes, 0..) |maybe_plane, i| {
+            const plane = maybe_plane orelse continue;
+            const ok = blk: {
+                const blocks = plane.asRawTensor().dataConstChecked() catch break :blk false;
+                const rhs = backend_quant.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(blocks)) catch break :blk false;
+                self.px4[i] = backend_quant.packMatmulRhsTQ2_0x4(allocator, &rhs) catch break :blk false;
+                break :blk true;
+            };
+            if (!ok) {
+                self.freeX4Packs(allocator);
+                return;
+            }
+        }
+        self.px4_allocator = allocator;
+    }
+
+    fn freeX4Packs(self: *WeightPtqtp, allocator: Allocator) void {
+        for (&self.px4) |*slot| {
+            if (slot.*) |pack| allocator.free(pack);
+            slot.* = null;
+        }
+        self.px4_allocator = null;
+    }
 
     pub fn planeCount(self: *const WeightPtqtp) usize {
         var count: usize = 1;
@@ -370,6 +446,7 @@ pub const WeightPtqtp = struct {
     }
 
     pub fn deinit(self: *WeightPtqtp) void {
+        if (self.px4_allocator) |allocator| self.freeX4Packs(allocator);
         if (self.p3) |*plane| plane.deinit();
         if (self.p2) |*plane| plane.deinit();
         self.p1.deinit();
@@ -600,7 +677,7 @@ pub const LinearWeight = union(enum) {
                     try plane.withTags(ctx, .{ .out, .in })
                 else
                     null;
-                break :blk .{ .ptqtp = .{ .p1 = p1, .p2 = p2, .p3 = p3 } };
+                break :blk .{ .ptqtp = WeightPtqtp.init(ctx.allocator, p1, p2, p3) };
             },
             inline else => |*value, tag| blk: {
                 const view = try value.withTags(ctx, .{ .out, .in });
@@ -721,7 +798,7 @@ pub const LinearWeight = union(enum) {
             null;
         const stats = pair.stats;
         self.deinit();
-        self.* = .{ .ptqtp = .{ .p1 = p1, .p2 = p2, .p3 = p3 } };
+        self.* = .{ .ptqtp = WeightPtqtp.init(ctx.allocator, p1, p2, p3) };
         return stats;
     }
 
@@ -1679,7 +1756,7 @@ pub fn fuseLinear(ctx: *ExecContext, parts: []const *LinearWeight) !?LinearWeigh
             p3 = try parts[0].ptqtp.p3.?.concat(ctx, .out, others[0 .. parts.len - 1]);
         }
         for (parts) |part| part.deinit();
-        return .{ .ptqtp = .{ .p1 = p1, .p2 = p2, .p3 = p3 } };
+        return .{ .ptqtp = WeightPtqtp.init(ctx.allocator, p1, p2, p3) };
     }
     return declinedFusion(ctx, parts);
 }

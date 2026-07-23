@@ -108,6 +108,16 @@ Deliberate deltas from the paper:
   chat CLI, speculation, batch — with no re-decoration. Pair-detection is
   wired in the qwen3 loaders only; other families do not read decorated
   files yet.
+- **Runtime speed path**: `WeightPtqtp.init` packs every plane into the x4
+  column-interleaved form at construction (`BlockTQ2_0x4`, docs/TERNARY.md
+  — same bytes rearranged, zero per-block reduces), and the fused linear
+  runs all K planes in ONE worker-team dispatch on the x4 kernels, the
+  accumulating twin folding each extra plane straight into the output with
+  no scratch pass. Bitwise equal to the per-plane facade dot chain (pinned
+  in `weights_tests.zig`). Measured on M1 Max (Qwen3-0.6B, paired
+  same-window decode runs): **+14% at K=2 and +30% at K=3** over the
+  pre-pack fused path. Odd `n` or unreadable plane storage falls back to
+  the row kernels — identical bits, just slower.
 - **MoE expert stacks** (`MoeRhs.ptqtp`, `src/exec/moe.zig`): expert
   stacks quantized at K=2/3 run through the fused MoE ops — the tile dot
   runs the ternary kernel once per plane and SUMS per element in fixed
@@ -223,13 +233,15 @@ identity against standalone `quantizeMatrix` is pinned by
   the K=2 error grows sharply with model size (0.6B tolerates it at ×3.2
   ppl; 1.7B collapses ×17) and concentrates in the residual-writing
   projections, with a tail spread over q/k/v/gate/up.
-- **lm_head** (`--head-planes`): quality-free at K=3 (measured Δppl ≈ 0).
-  On ARM keep the bf16 head for speed — the ternary GEMV is ALU-bound, so
-  at head shape three planes of int8-dot cost more than streaming bf16
-  through the AMX GEMM; decorate the head when memory or a no-float
-  deployment matters (fully-ternary 1.7B = 1.20 GiB of weights at
-  baseline-parity ppl), or on x86-VNNI where the ~2× per-plane kernel
-  margin flips the economics.
+- **lm_head** (`--head-planes`): quality-free at K=3 (measured Δppl ≈ 0),
+  and with the x4 column-interleaved fused path (docs/TERNARY.md) the
+  ternary head now also WINS on ARM: paired same-thermal-window decode runs
+  on M1 Max (Qwen3-0.6B) measure the K=2 head ~7-8% faster end-to-end than
+  the f16 head at both an f16 body and a K=2 body — the pre-x4 verdict
+  ("keep the bf16 head on ARM; the ternary GEMV is ALU-bound") is
+  overturned. Decorate the head for speed and memory alike (fully-ternary
+  1.7B = 1.20 GiB of weights at baseline-parity ppl); x86-VNNI already
+  favored it via the ~2× per-plane kernel margin.
 - **Edge-layer skip**: subsumed by K=3 (buys ~nothing on top); useful as a
   cheap quality lever for K=2-budget deployments (first layers matter more
   than last).

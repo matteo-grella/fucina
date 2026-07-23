@@ -145,6 +145,46 @@ test "tq2_0 absmean rhs produces b1.58 blocks" {
     }
 }
 
+test "x4 column-interleaved tq2_0 matmul matches the hot kernel bitwise" {
+    const allocator = std.testing.allocator;
+    const m = 3;
+    const k = 3 * qk_k_block_size; // odd block count exercises group indexing
+    const n = 8;
+
+    var prng = std.Random.DefaultPrng.init(0x7e55);
+    const w = try allocator.alloc(f32, n * k);
+    defer allocator.free(w);
+    fillUniform(&prng, w, 1.5);
+    const a_vals = try allocator.alloc(f32, m * k);
+    defer allocator.free(a_vals);
+    fillUniform(&prng, a_vals, 3.0);
+
+    var rhs = try ternary.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w);
+    defer rhs.deinit();
+    const packed_groups = try ternary.packMatmulRhsTQ2_0x4(allocator, &rhs);
+    defer allocator.free(packed_groups);
+
+    var a = try Tensor.fromSlice(allocator, &.{ m, k }, a_vals);
+    defer a.deinit();
+    const qlhs = try quantizeRowsQ8_K(allocator, &a);
+    defer allocator.free(qlhs);
+
+    const got = try allocator.alloc(f32, m * n);
+    defer allocator.free(got);
+    const want = try allocator.alloc(f32, m * n);
+    defer allocator.free(want);
+
+    ternary.matmulTQ2_0X4RhsRange(got, qlhs, packed_groups, rhs.rows.blocks_per_row, n, 0, m);
+    ternary.matmulTQ2_0RhsRange(want, qlhs, &rhs, m, n, 0, m);
+
+    try std.testing.expectEqualSlices(f32, want, got);
+
+    // Odd column counts refuse to pack (the Q8_0x4 policy).
+    var odd = try ternary.quantizedMatmulRhsTQ2_0FromF32(allocator, k, 5, w[0 .. 5 * k]);
+    defer odd.deinit();
+    try std.testing.expectError(error.InvalidShape, ternary.packMatmulRhsTQ2_0x4(allocator, &odd));
+}
+
 test "hot tq2_0 matmul matches the cold table path bitwise" {
     const allocator = std.testing.allocator;
     const m = 3;

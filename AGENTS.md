@@ -65,7 +65,7 @@ zig build bench-packed-gemm    # pack-once dense f32/f16/bf16 RHS GEMM at skinny
 zig build bench-gpu-dispatch  # CPU BLAS vs blocking/async eager GPU GEMM/GEMV latency + queued throughput
 zig build bench-gpu-formats   # packed CPU vs eager GPU f16/Q4_K/Q5_K/Q6_K/Q8_0 LLM-linear latency + queued throughput
 zig build bench-q5kmoe         # Q5_K MoE-expert matmul: per-row vs 4-row lane-packed col-outer (bench/q5kmoe.zig)
-zig build bench-ternary        # TQ2_0 ternary matmul: hot sdot/vpdpbusd tiles vs cold table path, mul-free f32 path, Q4_K, dense f32 (bench/ternary.zig)
+zig build bench-ternary        # TQ2_0 ternary matmul: hot sdot/vpdpbusd tiles vs x4 column-interleaved pack (interleaved A/B decision pair) vs cold table path, mul-free f32 path, Q4_K, dense f32 (bench/ternary.zig)
 zig build bench-membw          # measured DRAM read-bandwidth ceiling, single-thread + all-core — the roofline denominator for weight-stream GB/s (bench/membw.zig)
 zig build bench-attention-backward  # grouped causal attention backward (bench/attention_backward.zig)
 zig build bench-facade         # raw tensor ops vs public no-grad Tensor facade

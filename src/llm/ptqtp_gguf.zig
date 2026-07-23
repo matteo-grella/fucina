@@ -253,7 +253,7 @@ pub fn maybeLoadPlanes(ctx: *ExecContext, file: *const gguf.File, base_name: []c
         if (p2 == null) return Error.InvalidPlaneSet;
         p3 = try loadPlane(ctx, info, expected_rows, expected_cols);
     }
-    return .{ .ptqtp = .{ .p1 = p1, .p2 = p2, .p3 = p3 } };
+    return .{ .ptqtp = weights.WeightPtqtp.init(ctx.allocator, p1, p2, p3) };
 }
 
 /// MoE pair-detection, the expert-stack counterpart of `maybeLoadPlanes`:

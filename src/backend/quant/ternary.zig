@@ -30,6 +30,7 @@ const common = @import("common.zig");
 const Allocator = std.mem.Allocator;
 
 const BlockTQ2_0 = types_mod.BlockTQ2_0;
+const BlockTQ2_0x4 = types_mod.BlockTQ2_0x4;
 const BlockQ2_0 = types_mod.BlockQ2_0;
 const BlockQ8_0 = types_mod.BlockQ8_0;
 const BlockQ8_K = types_mod.BlockQ8_K;
@@ -55,6 +56,7 @@ const has_x86_vnni_ymm = common.has_x86_vnni_ymm;
 const maddubsDotGroupsI32x8 = common.maddubsDotGroupsI32x8;
 const roundHalfAwayFromZero = common.roundHalfAwayFromZero;
 const sdotI8x16 = common.sdotI8x16;
+const sdotI8x16Lane = common.sdotI8x16Lane;
 
 /// Weight rows processed together per tile step: the four columns share every
 /// activation vector load and the per-block bsum total.
@@ -379,6 +381,159 @@ pub fn matmulTQ2_0RhsRange(
 ) void {
     _ = m;
     matmulTQ2_0RhsTile(out, lhs_blocks, rhs, n, r0, r1, 0, n);
+}
+
+// ---------------- int8 flagship: column-interleaved x4 pack ----------------
+
+/// Rearrange a [n x k] TQ2_0 RHS into 4-column BlockTQ2_0x4 groups
+/// (group-major, k-blocks contiguous within a group — the Q8_0x4 layout
+/// discipline). Same bytes, no padding: `n % 4 != 0` is an error and odd
+/// tails stay on the unpacked kernels. Caller frees the slice.
+pub fn packMatmulRhsTQ2_0x4(allocator: Allocator, rhs: *const QuantizedMatmulRhsTQ2_0) ![]BlockTQ2_0x4 {
+    const tensor = @import("../../tensor.zig");
+    const n = rhs.n;
+    if (n % 4 != 0) return tensor.TensorError.InvalidShape;
+    const blocks_per_row = rhs.rows.blocks_per_row;
+    const out = try allocator.alloc(BlockTQ2_0x4, (n / 4) * blocks_per_row);
+    errdefer allocator.free(out);
+    for (0..n / 4) |g| {
+        var cols: [4][]const BlockTQ2_0 = undefined;
+        for (0..4) |ci| cols[ci] = rhs.columnBlocks(g * 4 + ci);
+        for (0..blocks_per_row) |bi| {
+            const dst = &out[g * blocks_per_row + bi];
+            for (0..4) |ci| dst.d[ci] = cols[ci][bi].d;
+            for (0..2) |h| {
+                for (0..8) |fg| {
+                    for (0..4) |ci| {
+                        dst.qs[h * 128 + fg * 16 + ci * 4 ..][0..4].* =
+                            cols[ci][bi].qs[h * 32 + fg * 4 ..][0..4].*;
+                    }
+                }
+            }
+        }
+    }
+    return out;
+}
+
+/// Hot-kernel twin over the column-interleaved x4 pack: identical exact
+/// integer block dots (lane arrangement cannot change an i32 sum) and the
+/// identical per-column f32 sequence — sums[c] += (d_c * a.d) * (dot_c -
+/// bsum) in ascending k-block order, unfused — so results are bitwise
+/// identical to matmulTQ2_0RhsRange and the cold table path on every ISA.
+/// The by-element sdot is the whole point: each i32 lane accumulates its
+/// own column against a broadcast 4-element activation group, so the
+/// per-block horizontal @reduce of the unpacked kernel disappears and the
+/// block tail becomes four vector ops. Same loads, same crumb unpacks,
+/// same 64 dot instructions per block group; non-aarch64 ISAs take the
+/// portable by-element twin (bitwise identical, untuned).
+pub fn matmulTQ2_0X4RhsRange(
+    out: []f32,
+    lhs_blocks: []const BlockQ8_K,
+    packed_groups: []const BlockTQ2_0x4,
+    blocks_per_row: usize,
+    n: usize,
+    r0: usize,
+    r1: usize,
+) void {
+    matmulTQ2_0X4RhsTile(out, lhs_blocks, packed_groups, blocks_per_row, n, r0, r1, 0, n);
+}
+
+/// Tile form for the parallel splitters: rows [r0,r1), columns [c0,c1) with
+/// both column bounds on 4-column group boundaries (the pack has no
+/// finer-grained addressing).
+pub fn matmulTQ2_0X4RhsTile(
+    out: []f32,
+    lhs_blocks: []const BlockQ8_K,
+    packed_groups: []const BlockTQ2_0x4,
+    blocks_per_row: usize,
+    n: usize,
+    r0: usize,
+    r1: usize,
+    c0: usize,
+    c1: usize,
+) void {
+    x4Tile(false, out, lhs_blocks, packed_groups, blocks_per_row, n, r0, r1, c0, c1);
+}
+
+/// Accumulating twin: out[r, c] += the tile's dot instead of overwriting —
+/// the multi-plane PTQTP chain adds each extra plane's complete per-column
+/// dot exactly once, the same value and add order as materializing the
+/// plane into a scratch row and adding it, with none of the scratch
+/// traffic. Bitwise equal to that two-pass form by construction.
+pub fn matmulTQ2_0X4RhsTileAcc(
+    out: []f32,
+    lhs_blocks: []const BlockQ8_K,
+    packed_groups: []const BlockTQ2_0x4,
+    blocks_per_row: usize,
+    n: usize,
+    r0: usize,
+    r1: usize,
+    c0: usize,
+    c1: usize,
+) void {
+    x4Tile(true, out, lhs_blocks, packed_groups, blocks_per_row, n, r0, r1, c0, c1);
+}
+
+fn x4Tile(
+    comptime accumulate: bool,
+    out: []f32,
+    lhs_blocks: []const BlockQ8_K,
+    packed_groups: []const BlockTQ2_0x4,
+    blocks_per_row: usize,
+    n: usize,
+    r0: usize,
+    r1: usize,
+    c0: usize,
+    c1: usize,
+) void {
+    std.debug.assert(n % 4 == 0 and c0 % 4 == 0 and c1 % 4 == 0);
+    const cached = blocks_per_row <= bsum_cache_blocks;
+    var bsum_cache: [bsum_cache_blocks]i32 = undefined;
+    var r = r0;
+    while (r < r1) : (r += 1) {
+        const arow = lhs_blocks[r * blocks_per_row ..][0..blocks_per_row];
+        const orow = out[r * n ..][0..n];
+        if (cached) {
+            for (arow, 0..) |*a, bi| bsum_cache[bi] = blockBsumTotal(a);
+        }
+        var g: usize = c0 / 4;
+        while (g < c1 / 4) : (g += 1) {
+            const wgroup = packed_groups[g * blocks_per_row ..][0..blocks_per_row];
+            var sums: @Vector(4, f32) = @splat(0);
+            for (arow, 0..) |*a, bi| {
+                const w = &wgroup[bi];
+                const bsum = if (cached) bsum_cache[bi] else blockBsumTotal(a);
+                // Four independent accumulators (one per crumb plane) keep
+                // the sdot chains at depth 16 — a single accumulator would
+                // serialize all 64 dots behind its latency (measured 1.7x
+                // slower). The i32 merge at block end is exact.
+                var accs: [4]QKV4i32 = @splat(@splat(0));
+                inline for ([_]usize{ 0, 128 }) |h| {
+                    var wv: [8]QKV16u8 = undefined;
+                    inline for (0..8) |fg| wv[fg] = w.qs[h + fg * 16 ..][0..16].*;
+                    inline for (0..4) |lane| {
+                        const a0: QKV16i8 = a.qs[h + lane * 32 ..][0..16].*;
+                        const a1: QKV16i8 = a.qs[h + lane * 32 + 16 ..][0..16].*;
+                        inline for (0..4) |fg| {
+                            accs[lane] = sdotI8x16Lane(fg, accs[lane], crumb16(wv[fg], lane), a0);
+                            accs[lane] = sdotI8x16Lane(fg, accs[lane], crumb16(wv[fg + 4], lane), a1);
+                        }
+                    }
+                }
+                const acc = (accs[0] + accs[1]) + (accs[2] + accs[3]);
+                const isum = acc - @as(QKV4i32, @splat(bsum));
+                var dv: @Vector(4, f32) = undefined;
+                inline for (0..4) |ci| dv[ci] = f16BitsToF32(w.d[ci]);
+                sums += dv * @as(@Vector(4, f32), @splat(a.d)) * @as(@Vector(4, f32), @floatFromInt(isum));
+            }
+            if (accumulate) {
+                const prev: @Vector(4, f32) = orow[g * 4 ..][0..4].*;
+                orow[g * 4 ..][0..4].* = prev + sums;
+            } else {
+                orow[g * 4 ..][0..4].* = sums;
+            }
+        }
+    }
 }
 
 // ---------------- Q2_0 (Bonsai g128) int8 kernels ----------------

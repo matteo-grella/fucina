@@ -1269,7 +1269,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         ternary_bench_cmd.addArgs(args);
     }
-    const ternary_bench_step = b.step("bench-ternary", "TQ2_0 ternary matmul: hot sdot/vpdpbusd tiles vs cold table path, f32-act path, Q4_K, dense f32");
+    const ternary_bench_step = b.step("bench-ternary", "TQ2_0 ternary matmul: hot sdot/vpdpbusd tiles vs x4 interleaved pack (A/B pair) vs cold table path, f32-act path, Q4_K, dense f32");
     ternary_bench_step.dependOn(&ternary_bench_cmd.step);
 
     const membw_bench_exe = b.addExecutable(.{
