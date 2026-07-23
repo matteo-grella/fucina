@@ -68,8 +68,25 @@ pub fn cpuThreadCount(max_threads: usize) usize {
     return @max(@as(usize, 1), @min(count, max_threads));
 }
 
+// 0 = not yet probed; maxInt = probed, unknown; anything else = the count.
+var cached_physical_cpu_count = std.atomic.Value(usize).init(0);
+
 /// Physical-core count, or null when unknown (callers keep the logical
-/// count). Per-target:
+/// count). Public because the worker team's oversubscription guard
+/// (`src/thread.zig` BarrierPool.init) compares its team size against it.
+/// Process-cached: the probe runs once (on Linux it costs up to three
+/// syscalls per CPU in the affinity mask) and every consumer sees one
+/// consistent value — the first caller's affinity mask wins, the same
+/// first-call-wins contract as `cpuThreadCount`'s cache.
+pub fn physicalCpuCount() ?usize {
+    const cached = cached_physical_cpu_count.load(.acquire);
+    if (cached != 0) return if (cached == std.math.maxInt(usize)) null else cached;
+    const probed = physicalCpuCountUncached();
+    cached_physical_cpu_count.store(probed orelse std.math.maxInt(usize), .release);
+    return probed;
+}
+
+/// The uncached probe behind `physicalCpuCount`. Per-target:
 ///  - macOS: sysctl hw.physicalcpu. Deliberately NOT hw.perflevel0.physicalcpu
 ///    (P-cores only): perflevel0 would silently shrink -Dmax-threads=10/16
 ///    builds, while hw.physicalcpu equals the logical count on all Apple
@@ -80,7 +97,7 @@ pub fn cpuThreadCount(max_threads: usize) usize {
 ///    sibling, so `taskset -c 0-15` over 8 hyperthreaded P-cores resolves to
 ///    8 where a mask-blind dedup would report every core in the machine;
 ///  - elsewhere (Windows/wasi/freestanding): null.
-fn physicalCpuCount() ?usize {
+fn physicalCpuCountUncached() ?usize {
     switch (builtin.os.tag) {
         .macos => {
             var n: c_int = 0;
@@ -210,13 +227,34 @@ fn envMaxThreads() ?usize {
 }
 
 /// The FUCINA_SPIN_BUDGET override for the worker-team spin-then-park window
-/// (`src/thread.zig` BarrierPool), or null when unset/invalid/zero. Read once
-/// per BarrierPool init. See the `spin_budget` comment in thread.zig for when
-/// (and on which hardware) overriding pays; the default is left alone because
-/// sweeps (M1 Max; i9-13950HX, 2026-07-03) found the response U-shaped and
-/// workload-coupled — no single value wins every workload.
+/// (`src/thread.zig` BarrierPool), or null when unset/invalid. Unlike the
+/// positive-usize knobs, `0` is a VALID value here — it means "park
+/// immediately, never spin", the manual escape for oversubscribed teams (and
+/// the value the guard in BarrierPool.init defaults to when the team exceeds
+/// the physical-core count). Read once per BarrierPool init. See the
+/// `spin_budget` comment in thread.zig for when (and on which hardware)
+/// overriding pays; the default is left alone because sweeps (M1 Max;
+/// i9-13950HX, 2026-07-03) found the response U-shaped and workload-coupled —
+/// no single value wins every workload.
 pub fn envSpinBudget() ?usize {
-    return envPositiveUsize("FUCINA_SPIN_BUDGET");
+    if (builtin.link_libc) {
+        const value = std.c.getenv("FUCINA_SPIN_BUDGET") orelse return null;
+        return parseNonNegativeUsize(std.mem.sliceTo(value, 0));
+    } else if (builtin.os.tag == .linux) {
+        return readProcSelfEnviron("FUCINA_SPIN_BUDGET", parseNonNegativeUsize);
+    } else {
+        return null;
+    }
+}
+
+/// Like `parsePositiveUsize` but `0` parses as a valid value; empty,
+/// non-numeric, or sign-prefixed-negative input is still null (no override).
+/// The explicit '-' check matters because `parseInt(usize, "-0")` succeeds —
+/// without it "-0" would be a live park-immediately override while every
+/// sibling knob treats it as unset.
+fn parseNonNegativeUsize(s: []const u8) ?usize {
+    if (s.len == 0 or s[0] == '-') return null;
+    return std.fmt.parseInt(usize, s, 10) catch null;
 }
 
 /// Positive-usize environment knob, or null when unset/invalid/zero. Zig 0.16
@@ -376,6 +414,18 @@ test "parsePositiveUsize: usize base-10, 0/invalid mean no override" {
     try std.testing.expectEqual(@as(?usize, null), parsePositiveUsize("-4"));
     // 21 digits overflows usize -> parse error -> no override.
     try std.testing.expectEqual(@as(?usize, null), parsePositiveUsize("111111111111111111111"));
+}
+
+test "parseNonNegativeUsize: like parsePositiveUsize but 0 is a valid value" {
+    try std.testing.expectEqual(@as(?usize, 0), parseNonNegativeUsize("0"));
+    try std.testing.expectEqual(@as(?usize, 512), parseNonNegativeUsize("512"));
+    try std.testing.expectEqual(@as(?usize, null), parseNonNegativeUsize(""));
+    try std.testing.expectEqual(@as(?usize, null), parseNonNegativeUsize("abc"));
+    try std.testing.expectEqual(@as(?usize, null), parseNonNegativeUsize("-4"));
+    // parseInt(usize, "-0") would succeed; the sign check keeps "-0" unset
+    // like every sibling knob instead of a live park-immediately override.
+    try std.testing.expectEqual(@as(?usize, null), parseNonNegativeUsize("-0"));
+    try std.testing.expectEqual(@as(?usize, null), parseNonNegativeUsize("111111111111111111111"));
 }
 
 // The scanner is comptime-keyed (FUCINA_MAX_THREADS / FUCINA_SPIN_BUDGET share

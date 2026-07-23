@@ -5196,8 +5196,27 @@ dispatch a worker spins on a generation counter for a bounded budget
 survived an x86 sweep), then parks on a futex, so a dense op stream (a
 transformer forward) pays atomics instead of kernel round-trips while a
 long-idle team consumes no CPU. The dispatcher runs chunk 0 of every
-parallel op and pure-spins on the completion counter — it owns a core until
-the join. On macOS, workers and dispatcher pin to performance-core QoS
+parallel op and spins on the completion counter for a bounded window
+(~1M iterations, ≈10 ms on M1-class cores — beyond the straggler tail of a
+healthy join, where it therefore behaves as a pure spin and owns a core
+until the join), then falls back to 1 ms timed futex waits on the counter
+itself — workers never wake that futex, so their completion path is
+untouched. The fallback engages whenever the join tail outlives the spin
+window — descheduled workers (oversubscription, background load, container
+CPU quotas) or a legitimately long final chunk — costs at most 1 ms of
+completion-pickup latency per engagement, and after the first wait the spin
+window drops to the small bound so the dispatcher stays parked between
+re-checks instead of re-burning the full window. Teams sized **above the
+physical-core count** (via the `setMaxThreads` oversubscription escape
+hatch, or legitimately on a 1-physical-core host where the minimum team of
+two exceeds the single core) additionally default the worker spin budget
+to 0 — park immediately — and start the dispatcher's spin window at ~4096:
+spinning while oversubscribed steals exactly the cores the descheduled
+participants need (measured collapse: 19s → 43s prefill on an
+HT-oversubscribed i9-13950HX). An explicit, in-range `FUCINA_SPIN_BUDGET`
+overrides the worker half of the guard (out-of-range values are treated as
+unset); the join fallback is never disabled. On
+macOS, workers and dispatcher pin to performance-core QoS
 (`pthread_set_qos_class_self_np`); elsewhere the pin compiles to nothing.
 `dotBackwardWorker` is a single lazily-started `OneShotWorker` used to
 overlap the two branches of matmul backward on native-BLAS builds (§5, §9).
@@ -5207,9 +5226,9 @@ Thread-count knobs, in precedence order:
 | Knob | Kind | Effect |
 |---|---|---|
 | `-Dmax-threads=N` (1–64, default 8 = the M1 Max P-core count) | build option | comptime ceiling for the team and stack task arrays, AND the runtime default team size (`fucina.parallel.vector_max_threads`). Servers with more cores must raise it at build time |
-| `fucina.parallel.setMaxThreads(n)` | runtime API | **replaces** the detected CPU count (mirrors llama.cpp `-t`) — it can also *raise* the team size above the detected count, up to the `-Dmax-threads` build ceiling; call once at startup before any parallel work; `n == 0` ignored; wins over the env var by pre-seeding the cache |
+| `fucina.parallel.setMaxThreads(n)` | runtime API | **replaces** the detected CPU count (mirrors llama.cpp `-t`) — it can also *raise* the team size above the detected count, up to the `-Dmax-threads` build ceiling (a team above the physical-core count engages the oversubscription spin guard: worker spin budget → 0); call once at startup before any parallel work; `n == 0` ignored; wins over the env var by pre-seeding the cache |
 | `FUCINA_MAX_THREADS` | env var | read once on the first `cpuThreadCount` call; applied as `@min` against the detected count, so it **only lowers**; `0`/invalid = no override |
-| `FUCINA_SPIN_BUDGET` | env var | overrides the spin-then-park window, read once per team init; workload-coupled and U-shaped — override only with measurements (short budgets, ~512, favor encode-style workloads with serial host sections; the default favors dense LLM op streams) |
+| `FUCINA_SPIN_BUDGET` | env var | overrides the spin-then-park window, read once per team init; `0` is valid (park immediately — the manual escape for oversubscribed teams, and the automatic default when the team exceeds the physical-core count); workload-coupled and U-shaped — override only with measurements (short budgets, ~512, favor encode-style workloads with serial host sections; the default favors dense LLM op streams) |
 | `FUCINA_POOL_PROFILE=1` | env flag | allocates one trace slot per participant and prints fork-join claim/completion timing after every dispatch; diagnostic runs only |
 
 The effective thread count is `parallel.cpuThreadCount(vector_max_threads)`
@@ -5225,7 +5244,11 @@ knobs. The env parsers behind these knobs are themselves public:
 `parallel.envPositiveUsize(name)` implements the positive-usize knob
 contract (libc `getenv`, or a libc-free `/proc/self/environ` scan on static
 Linux; unset/invalid/`0` ⇒ `null`), and `parallel.envSpinBudget()` is the
-`FUCINA_SPIN_BUDGET` read consulted once per team init.
+`FUCINA_SPIN_BUDGET` read consulted once per team init — the one knob where
+`0` is a value, not "unset". `parallel.physicalCpuCount()` (macOS sysctl /
+Linux sysfs-topology-over-affinity; null where unknown; probed once and
+process-cached, first caller's affinity mask wins) is public as well — it
+is the count the oversubscription guard compares the team size against.
 
 ```zig
 test "worker-team sizing knobs" {

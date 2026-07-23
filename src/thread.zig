@@ -409,11 +409,17 @@ const BarrierPool = struct {
     profile_dispatch: u64 = 0,
     // Safety-build-only instrumentation of the chained enqueue contract (see
     // Pool.parallelChained); never touched in ReleaseFast/ReleaseSmall.
+    // `join_timed_waits` counts joinWorkers fallback naps under the same
+    // gate — its only consumer is the test that forces the fallback arm.
+    join_timed_waits: std.atomic.Value(u64) = .init(0),
     chain_seen: []std.atomic.Value(u8) = &.{},
     chain_enqueued: std.atomic.Value(usize) = .init(0),
     chain_inflight: std.atomic.Value(usize) = .init(0),
-    // Immutable after init (resolveSpinBudget); workers hoist it to a local.
+    // Immutable after init (spinBudgets); workers hoist it to a local.
     spin_budget: u32 = default_spin_budget,
+    // Immutable after init (spinBudgets): dispatcher-join spin bound before
+    // the timed-wait fallback engages.
+    join_spin_budget: u32 = default_join_spin_budget,
 
     const JobFn = *const fn (ctx: *anyopaque, index: usize) void;
     const ChainJobFn = *const fn (ctx: *anyopaque, index: usize, chain: *const Chain) void;
@@ -452,11 +458,45 @@ const BarrierPool = struct {
     // (read once per team init, exact FUCINA_MAX_THREADS precedent) lets
     // encode-heavy deployments opt into a short window (e.g. 512 for ASR
     // batch/serving) while the default keeps the LLM sentinels intact.
+    // 0 is a valid override (park immediately, never spin) and is also the
+    // automatic default when the team is larger than the physical-core count
+    // (the `setMaxThreads` oversubscription escape hatch) — see spinBudgets.
     const default_spin_budget: u32 = 32768;
 
-    fn resolveSpinBudget() u32 {
-        const raw = parallel.envSpinBudget() orelse return default_spin_budget;
-        return std.math.cast(u32, raw) orelse default_spin_budget;
+    // Dispatcher-join spin bound before the timed-wait fallback (joinWorkers).
+    // ~1M spinLoopHints ≈ 10 ms measured on M1-class cores (20-40 ms on
+    // slower parts) — beyond the straggler tail of a healthy join, so on
+    // correctly sized teams the fallback engages only when a final in-flight
+    // chunk legitimately runs that long, costing at most 1 ms of pickup
+    // latency there. On an oversubscribed team the bound drops to ~4096
+    // (~40 µs): the dispatcher's spinning steals cycles from the very workers
+    // it is waiting on, so it should yield its core quickly.
+    const default_join_spin_budget: u32 = 1 << 20;
+    const oversubscribed_join_spin_budget: u32 = 4096;
+    const join_wait_timeout_ms: i64 = 1;
+
+    /// Spin-budget policy, pure so it is unit-testable. Worker budget: an
+    /// explicit, in-range FUCINA_SPIN_BUDGET always wins (0 = park
+    /// immediately is valid); an unrepresentable value (> u32) is treated as
+    /// no override — it falls back to the same guarded default an unset
+    /// variable gets, so a typo can never re-enable spinning on an
+    /// oversubscribed team. Without an override, a team larger than the
+    /// physical-core count gets 0 — spinning while oversubscribed burns
+    /// exactly the cores the descheduled participants need (measured
+    /// collapse: 19s -> 43s prefill on an HT-oversubscribed i9-13950HX,
+    /// docs/BENCHMARK.md) — and a correctly sized team keeps the tuned
+    /// default. The join bound depends only on oversubscription: the
+    /// timed-wait fallback is pure safety, never disabled by the env
+    /// override.
+    fn spinBudgets(env_override: ?usize, team_size: usize, physical_cores: ?usize) struct { worker: u32, join: u32 } {
+        const oversubscribed = if (physical_cores) |cores| team_size > cores else false;
+        const guarded_default: u32 = if (oversubscribed) 0 else default_spin_budget;
+        const worker: u32 = if (env_override) |raw|
+            std.math.cast(u32, raw) orelse guarded_default
+        else
+            guarded_default;
+        const join: u32 = if (oversubscribed) oversubscribed_join_spin_budget else default_join_spin_budget;
+        return .{ .worker = worker, .join = join };
     }
 
     fn init(self: *BarrierPool, allocator: Allocator, io: Io, worker_count: usize) !void {
@@ -465,12 +505,18 @@ const BarrierPool = struct {
         // schedule it on an E-core, and the fork-join barrier then runs every
         // dispatch at the straggler's speed.
         pinToPerformanceCores();
+        const budgets = spinBudgets(
+            parallel.envSpinBudget(),
+            worker_count + 1, // the dispatcher is a participant too
+            parallel.physicalCpuCount(),
+        );
         self.* = .{
             .allocator = allocator,
             .io = io,
             .threads = &.{},
             .worker_count = worker_count,
-            .spin_budget = resolveSpinBudget(),
+            .spin_budget = budgets.worker,
+            .join_spin_budget = budgets.join,
             .profile_enabled = parallel.envFlag("FUCINA_POOL_PROFILE"),
         };
         if (self.profile_enabled and worker_count > 0) {
@@ -584,12 +630,55 @@ const BarrierPool = struct {
         }
 
         self.runChunkClaims(0);
-
-        // Every worker increments `done` exactly once per generation. The
-        // dispatcher owns a core and has no other work until the join, so it
-        // pure-spins rather than issuing sched_yield syscalls.
-        while (self.done.load(.acquire) < self.worker_count) std.atomic.spinLoopHint();
+        self.joinWorkers();
         self.profileDump(dispatch_ns, count, participants, self.job_claim_chunk, .chunks);
+    }
+
+    // Every worker increments `done` exactly once per generation. The
+    // dispatcher owns a core and has no other work until the join, so it
+    // pure-spins for `join_spin_budget` iterations — a join whose straggler
+    // tail fits in that window (the overwhelmingly common case) behaves
+    // exactly like the old unbounded spin. A tail that outlives the window
+    // (workers descheduled — oversubscription, background load, container
+    // quota — or a legitimately long final chunk) moves the join to timed
+    // futex waits on the `done` word itself, returning the core to the OS —
+    // often to the very worker it is waiting for; after the first wait the
+    // spin window drops to the oversubscribed bound so the join stays ~95%
+    // parked instead of re-burning the full window between naps. Workers
+    // never wake this futex: the kernel-side value compare catches an
+    // increment that raced the sleep entry, and the timeout is the re-check
+    // cadence for increments that land mid-sleep — so the worker completion
+    // path stays untouched (no flag check, no wake syscall, no ordering
+    // change). Cost when the fallback engages: up to one timeout (1 ms) of
+    // added completion-pickup latency on a join that was already tens of
+    // milliseconds late. The wait is a cancelable Io operation and Io
+    // cancelation is delivered exactly once; the barrier cannot be abandoned
+    // mid-generation, so a Canceled delivery is latched and re-armed via
+    // `io.recancel` after the join, preserving the caller task's
+    // cancelation semantics.
+    fn joinWorkers(self: *BarrierPool) void {
+        var bound = self.join_spin_budget;
+        var canceled = false;
+        var spins: u32 = 0;
+        var seen_done = self.done.load(.acquire);
+        while (seen_done < self.worker_count) {
+            spins +%= 1;
+            if (spins < bound) {
+                std.atomic.spinLoopHint();
+            } else {
+                self.io.futexWaitTimeout(u32, &self.done.raw, seen_done, .{ .duration = .{
+                    .raw = .fromMilliseconds(join_wait_timeout_ms),
+                    .clock = .awake,
+                } }) catch {
+                    canceled = true; // latched; re-armed below
+                };
+                if (comptime std.debug.runtime_safety) _ = self.join_timed_waits.fetchAdd(1, .monotonic);
+                bound = @min(bound, oversubscribed_join_spin_budget);
+                spins = 0;
+            }
+            seen_done = self.done.load(.acquire);
+        }
+        if (canceled) self.io.recancel();
     }
 
     fn ensureChainReadyCapacity(self: *BarrierPool, count: usize) !void {
@@ -639,7 +728,7 @@ const BarrierPool = struct {
         }
 
         self.runChainClaims(0);
-        while (self.done.load(.acquire) < self.worker_count) std.atomic.spinLoopHint();
+        self.joinWorkers();
         self.profileDump(dispatch_ns, count, self.worker_count + 1, 1, .chained);
 
         if (comptime chain_checks) {
@@ -775,6 +864,139 @@ const BarrierPool = struct {
         }
     }
 };
+
+test "spinBudgets: guard fires only above the physical-core count; env wins" {
+    const expectEqual = std.testing.expectEqual;
+    const sb = BarrierPool.spinBudgets;
+    const def = BarrierPool.default_spin_budget;
+    const def_join = BarrierPool.default_join_spin_budget;
+    const over_join = BarrierPool.oversubscribed_join_spin_budget;
+
+    // Correctly sized team: tuned defaults untouched.
+    try expectEqual(def, sb(null, 8, 10).worker);
+    try expectEqual(def_join, sb(null, 8, 10).join);
+    // Boundary: team == physical cores is NOT oversubscribed.
+    try expectEqual(def, sb(null, 10, 10).worker);
+    try expectEqual(def_join, sb(null, 10, 10).join);
+    // One over: worker spin drops to zero, join bound shrinks.
+    try expectEqual(@as(u32, 0), sb(null, 11, 10).worker);
+    try expectEqual(over_join, sb(null, 11, 10).join);
+    // Unknown physical count (Windows/wasi): guard cannot fire.
+    try expectEqual(def, sb(null, 64, null).worker);
+    try expectEqual(def_join, sb(null, 64, null).join);
+    // Explicit env override wins over the guard for the worker budget —
+    // including 0 on a healthy team — but never disables the join fallback.
+    try expectEqual(@as(u32, 512), sb(512, 11, 10).worker);
+    try expectEqual(over_join, sb(512, 11, 10).join);
+    try expectEqual(@as(u32, 0), sb(0, 8, 10).worker);
+    try expectEqual(def_join, sb(0, 8, 10).join);
+    // Un-castable env values are treated as unset: guarded default — a typo
+    // like FUCINA_SPIN_BUDGET=4294967296 cannot re-enable spinning on an
+    // oversubscribed team.
+    try expectEqual(def, sb(@as(usize, 1) << 40, 8, 10).worker);
+    try expectEqual(@as(u32, 0), sb(@as(usize, 1) << 40, 11, 10).worker);
+}
+
+test "oversubscribed team: guard engages and dispatch stays exactly-once" {
+    const allocator = std.testing.allocator;
+    const worker_count = 24;
+    var threaded = Io.Threaded.init(allocator, .{
+        .async_limit = .nothing,
+        .concurrent_limit = Io.Limit.limited(worker_count),
+    });
+    defer threaded.deinit();
+
+    var bp: BarrierPool = undefined;
+    try bp.init(allocator, threaded.io(), worker_count);
+    defer bp.shutdownAndJoin();
+
+    // Machine-independent wiring check: init must resolve exactly what the
+    // policy function says for this environment and host — asserted on every
+    // machine, unlike the guard-specific asserts below.
+    const expected = BarrierPool.spinBudgets(
+        parallel.envSpinBudget(),
+        worker_count + 1,
+        parallel.physicalCpuCount(),
+    );
+    try std.testing.expectEqual(expected.worker, bp.spin_budget);
+    try std.testing.expectEqual(expected.join, bp.join_spin_budget);
+
+    // On machines with fewer than 25 physical cores (every dev target) the
+    // guard must have zeroed the worker spin budget; an explicit
+    // FUCINA_SPIN_BUDGET in the environment legitimately overrides that half.
+    if (parallel.physicalCpuCount()) |cores| {
+        if (worker_count + 1 > cores) {
+            try std.testing.expectEqual(BarrierPool.oversubscribed_join_spin_budget, bp.join_spin_budget);
+            if (parallel.envSpinBudget() == null) {
+                try std.testing.expectEqual(@as(u32, 0), bp.spin_budget);
+            }
+        }
+    }
+
+    // Exactly-once chunk coverage with instantly-parking workers and the
+    // timed-wait join arm reachable (24 threads contending for the cores).
+    const n_tasks = 4096;
+    const hits = try allocator.alloc(std.atomic.Value(u32), n_tasks);
+    defer allocator.free(hits);
+
+    const Ctx = struct {
+        hits: []std.atomic.Value(u32),
+        fn run(ctx: *anyopaque, index: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            _ = self.hits[index].fetchAdd(1, .monotonic);
+        }
+    };
+    var ctx = Ctx{ .hits = hits };
+    for (0..3) |_| {
+        for (hits) |*h| h.* = .init(0);
+        bp.dispatch(n_tasks, &ctx, Ctx.run);
+        for (hits) |*h| try std.testing.expectEqual(@as(u32, 1), h.load(.monotonic));
+    }
+}
+
+test "joinWorkers timed-wait arm engages on a straggling join and stays exactly-once" {
+    // Force the fallback deterministically: a 2-worker team whose join spin
+    // bound is dropped to 1, dispatching batches that contain one chunk of
+    // ~ms-scale busy work. Whenever a WORKER draws the long chunk (all but
+    // (1/3)^reps of runs), the dispatcher's join tail exceeds one spin
+    // iteration and must take timed waits. Coverage assertions hold
+    // regardless; the nap counter is asserted only in safety builds, where
+    // the instrumentation exists.
+    const allocator = std.testing.allocator;
+    var threaded = Io.Threaded.init(allocator, .{
+        .async_limit = .nothing,
+        .concurrent_limit = Io.Limit.limited(2),
+    });
+    defer threaded.deinit();
+
+    var bp: BarrierPool = undefined;
+    try bp.init(allocator, threaded.io(), 2);
+    defer bp.shutdownAndJoin();
+    bp.join_spin_budget = 1;
+
+    const n_tasks = 3; // participants: dispatcher + 2 workers, one task each
+    const Ctx = struct {
+        hits: [n_tasks]std.atomic.Value(u32) = @splat(.init(0)),
+        fn run(ctx: *anyopaque, index: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (index == n_tasks - 1) {
+                // The straggler: ~ms-scale on any hardware, in any build mode.
+                for (0..200_000) |_| std.atomic.spinLoopHint();
+            }
+            _ = self.hits[index].fetchAdd(1, .monotonic);
+        }
+    };
+    var ctx = Ctx{};
+    const reps = 20;
+    for (0..reps) |_| {
+        for (&ctx.hits) |*h| h.store(0, .monotonic);
+        bp.dispatch(n_tasks, &ctx, Ctx.run);
+        for (&ctx.hits) |*h| try std.testing.expectEqual(@as(u32, 1), h.load(.monotonic));
+    }
+    if (comptime std.debug.runtime_safety) {
+        try std.testing.expect(bp.join_timed_waits.load(.monotonic) > 0);
+    }
+}
 
 test {
     _ = @import("thread_tests.zig");
