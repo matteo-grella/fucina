@@ -69,6 +69,7 @@ pub fn main(init: std.process.Init) !void {
     var moe_mirror_buf: [8][]const u8 = undefined;
     var moe_mirror_n: usize = 0;
     var moe_mirror_weights_arg: ?[]const u8 = null;
+    var moe_io_threads: ?usize = null;
     var kv_save = false;
     var kv_save_arg: ?[]const u8 = null;
     var arg_i: usize = 2;
@@ -261,6 +262,10 @@ pub fn main(init: std.process.Init) !void {
             // Per-mirror read share relative to the primary's 1, comma
             // list in --moe-mirror order (default 1 each: even split).
             moe_mirror_weights_arg = arg["--moe-mirror-weights=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--moe-io-threads=")) {
+            // Demand-miss read fan-out (default 8; 0 = sequential reads).
+            moe_stream_flag = true;
+            moe_io_threads = try std.fmt.parseInt(usize, arg["--moe-io-threads=".len..], 10);
         } else if (std.mem.startsWith(u8, arg, "--moe-expert-top-p=")) {
             moe_expert_top_p = try std.fmt.parseFloat(f32, arg["--moe-expert-top-p=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--")) {
@@ -304,6 +309,7 @@ pub fn main(init: std.process.Init) !void {
             .pilot = moe_pilot,
             .mirror_paths = moe_mirror_buf[0..moe_mirror_n],
             .mirror_weights = moe_mirror_weights,
+            .io_workers = moe_io_threads orelse 8,
         },
     } else .{};
     var model_config = try llm.qwen3.model.Config.fromGguf(&file);

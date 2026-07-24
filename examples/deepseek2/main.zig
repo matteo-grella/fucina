@@ -27,6 +27,7 @@ pub fn main(init: std.process.Init) !void {
     var moe_mirror_buf: [8][]const u8 = undefined;
     var moe_mirror_n: usize = 0;
     var moe_mirror_weights_arg: ?[]const u8 = null;
+    var moe_io_threads: ?usize = null;
     var mla_mode: llm.deepseek2.model.Cache.Mode = .latent;
     var dsa_flag = false;
     var index_probe = false;
@@ -74,6 +75,10 @@ pub fn main(init: std.process.Init) !void {
             // Per-mirror read share relative to the primary's 1, comma
             // list in --moe-mirror order (default 1 each: even split).
             moe_mirror_weights_arg = arg["--moe-mirror-weights=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--moe-io-threads=")) {
+            // Demand-miss read fan-out (default 8; 0 = sequential reads).
+            moe_stream_flag = true;
+            moe_io_threads = try std.fmt.parseInt(usize, arg["--moe-io-threads=".len..], 10);
         } else if (std.mem.eql(u8, arg, "--mla=full")) {
             mla_mode = .full;
         } else if (std.mem.eql(u8, arg, "--mla=latent")) {
@@ -144,6 +149,7 @@ pub fn main(init: std.process.Init) !void {
             .pilot = moe_pilot,
             .mirror_paths = moe_mirror_buf[0..moe_mirror_n],
             .mirror_weights = moe_mirror_weights,
+            .io_workers = moe_io_threads orelse 8,
         },
     } else .{};
     load_options.dsa = dsa_flag;

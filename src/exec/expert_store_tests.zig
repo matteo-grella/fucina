@@ -1420,3 +1420,99 @@ test "mirror copies: reads split across drives, stay bit-exact, and a broken mir
     }
     try std.testing.expect(store2.mirror_fallbacks.load(.monotonic) > 0);
 }
+
+test "parallel demand reads: fan-out stays bit-exact, drives a mirror concurrently, and surfaces worker read errors" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var fx: Fixture = undefined;
+    try fx.init(allocator, 2); // cap 2: every acquire below misses
+    defer fx.deinit();
+
+    // A second full copy so the fan-out exercises BOTH drives inside one
+    // acquire — the combination the mirror exists for.
+    var mirror_buf: [160]u8 = undefined;
+    const mirror_path = try std.fmt.bufPrint(&mirror_buf, "{s}.pcopy", .{fx.path});
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, mirror_path) catch {};
+    {
+        var file = try std.Io.Dir.cwd().createFile(std.testing.io, mirror_path, .{});
+        defer file.close(std.testing.io);
+        var write_buffer: [4096]u8 = undefined;
+        var writer = file.writer(std.testing.io, &write_buffer);
+        try writer.interface.writeAll(std.mem.sliceAsBytes(fx.gate_blocks));
+        try writer.interface.writeAll(std.mem.sliceAsBytes(fx.up_blocks));
+        try writer.interface.writeAll(std.mem.sliceAsBytes(fx.down_blocks));
+        try writer.interface.flush();
+    }
+    var store = try ExpertStore.create(allocator, &.{fx.path}, 1, .{
+        .cache_slots_per_layer = 2,
+        .io_workers = 3,
+    });
+    defer store.destroy();
+    try store.addMirror(&.{mirror_path}, 1.0);
+    try fx.registerLayer(store);
+    try store.finalize();
+
+    // A batched prefill whose union routes ALL 8 experts is one acquire
+    // with 8 misses — an 8-wide read batch over 4 threads and 2 copies —
+    // and it must be bitwise equal to the resident path.
+    const seq: usize = 16;
+    const top_k: usize = 2;
+    const x_vals = try allocator.alloc(f32, seq * hidden);
+    defer allocator.free(x_vals);
+    for (x_vals, 0..) |*v, i| v.* = @floatFromInt(@as(i32, @intCast((i * 17) % 251)) - 125);
+    var x = try ctx.fromSliceRank(2, .{ seq, hidden }, x_vals);
+    defer x.deinit();
+    var selected: [seq * top_k]usize = undefined;
+    var routing: [seq * top_k]f32 = undefined;
+    for (&selected, &routing, 0..) |*s, *w, p| {
+        s.* = (p * 5) % n_expert;
+        w.* = 0.25 + 0.01 * @as(f32, @floatFromInt(p % 13));
+    }
+    var gate: MoeRhs = .{ .streamed = store.streamedRhs(0, .gate) };
+    var up: MoeRhs = .{ .streamed = store.streamedRhs(0, .up) };
+    var down: MoeRhs = .{ .streamed = store.streamedRhs(0, .down) };
+    var want = try ctx.moeExpertFfnBatch(&x, &fx.resident_gate, &fx.resident_up, &fx.resident_down, &selected, &routing, top_k, out_pe, .swiglu, null, null);
+    defer want.deinit();
+    var got = try ctx.moeExpertFfnBatch(&x, &gate, &up, &down, &selected, &routing, top_k, out_pe, .swiglu, null, null);
+    defer got.deinit();
+    try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
+    try std.testing.expect(store.copy_bytes[0].load(.monotonic) > 0);
+    try std.testing.expect(store.copy_bytes[1].load(.monotonic) > 0);
+
+    // Evicting decode rounds keep hammering the parallel path bit-exactly.
+    var round: usize = 0;
+    while (round < 24) : (round += 1) {
+        const a = round % n_expert;
+        const b = (round + 3) % n_expert;
+        if (a == b) continue;
+        try fx.expectDecodeWith(&ctx, store, &.{ a, b }, &.{ 0.6, 0.4 });
+    }
+
+    // Worker read failures surface with their true error: a store whose
+    // PRIMARY is a truncated copy (gate section only, no mirror) fails
+    // the up/down preads inside the workers; the caller's synchronous
+    // retry re-fails and the acquire reports it.
+    var short_buf: [160]u8 = undefined;
+    const short_path = try std.fmt.bufPrint(&short_buf, "{s}.pshort", .{fx.path});
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, short_path) catch {};
+    defer cleanupSidecar(short_path);
+    {
+        var file = try std.Io.Dir.cwd().createFile(std.testing.io, short_path, .{});
+        defer file.close(std.testing.io);
+        var write_buffer: [4096]u8 = undefined;
+        var writer = file.writer(std.testing.io, &write_buffer);
+        try writer.interface.writeAll(std.mem.sliceAsBytes(fx.gate_blocks));
+        try writer.interface.flush();
+    }
+    var store2 = try ExpertStore.create(allocator, &.{short_path}, 1, .{
+        .cache_slots_per_layer = 2,
+        .io_workers = 3,
+    });
+    defer store2.destroy();
+    try fx.registerLayer(store2);
+    try store2.finalize();
+    try std.testing.expectError(error.UnexpectedEndOfFile, store2.acquire(0, &.{ 0, 3, 5 }));
+}

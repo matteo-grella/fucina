@@ -1353,6 +1353,11 @@ pub const MoeStreamOptions = struct {
     /// Read share per mirror relative to the primary's 1 (parallel to
     /// `mirror_paths`); null = 1 each, an even split across all copies.
     mirror_weights: ?[]const f32 = null,
+    /// Demand-miss reads fan out across this many persistent I/O worker
+    /// threads (the acquiring thread participates too); 0 = sequential.
+    /// Parallelism is what lets disk queue depth — and mirror copies on
+    /// separate drives — add bandwidth within one acquire.
+    io_workers: usize = 8,
 };
 
 /// The runners' shared `--moe-mirror-weights=` comma list, parsed into
@@ -1397,6 +1402,7 @@ pub fn createExpertStore(allocator: Allocator, options: MoeStreamOptions, n_laye
         .readahead = options.readahead,
         .auto_pin = options.auto_pin,
         .pin_bytes = options.pin_bytes,
+        .io_workers = options.io_workers,
     });
     errdefer store.destroy();
     for (options.mirror_paths, 0..) |mirror_path, m| {

@@ -554,6 +554,13 @@ pub const ExpertStore = struct {
         /// kernel-advice era behavior: hints enqueue but load nothing).
         /// Slabs allocate lazily to the hinted layers' sizes.
         prefetch_stage_slots: usize = 64,
+        /// Demand-miss reads fan out across this many persistent I/O
+        /// worker threads (the acquiring thread drains the same batch, so
+        /// disk concurrency is `io_workers + 1`); 0 = sequential reads on
+        /// the calling thread. Parallel misses are what let NVMe queue
+        /// depth — and mirror copies on separate drives — actually add
+        /// bandwidth within a single acquire.
+        io_workers: usize = 8,
         /// The learning cache: when the persisted usage histogram (sidecar
         /// `<gguf>.experts` file) carries enough history, pin the hottest
         /// experts in RAM at finalize — they are read once at startup and
@@ -670,6 +677,24 @@ pub const ExpertStore = struct {
     copy_bytes: []std.atomic.Value(u64) = &.{},
     mirror_fallbacks: std.atomic.Value(u64) = .init(0),
 
+    // ---- demand-miss I/O pool ----
+    // Persistent futex-parked workers (thread.OneShotWorker) that drain
+    // one read batch per acquire, started lazily on the first acquire
+    // with more than one uncached miss. An atomic cursor hands each item
+    // to exactly one thread; a failed item is only MARKED — the
+    // acquiring thread retries it synchronously afterwards, so a
+    // transient error heals and a real one surfaces with its true error
+    // type. Only `io_pool[0..io_ready]` entries are initialized (a
+    // partial pool after a spawn failure still drains correctly — the
+    // caller always participates).
+    io_pool: []thread.OneShotWorker = &.{},
+    io_ready: usize = 0,
+    /// Per-acquire read set (misses minus staged consumptions), sized to
+    /// the largest layer at `finalize`; parallel arrays.
+    read_eids: []u32 = &.{},
+    read_slots: []*Slot = &.{},
+    read_failed: []bool = &.{},
+
     /// The store is heap-allocated so `StreamedMoeRhs` values and the owning
     /// model can hold stable pointers while the model struct moves by value.
     /// `gguf_paths` lists every part of a split GGUF (single-file: one
@@ -734,6 +759,11 @@ pub const ExpertStore = struct {
         allocator.free(self.seen);
         allocator.free(self.layers);
         allocator.free(self.registered);
+        for (self.io_pool[0..self.io_ready]) |*w| w.deinit();
+        allocator.free(self.io_pool);
+        allocator.free(self.read_eids);
+        allocator.free(self.read_slots);
+        allocator.free(self.read_failed);
         for (self.mirrors) |m| {
             for (m.fds) |fd| closeFd(fd);
             allocator.free(m.fds);
@@ -877,6 +907,9 @@ pub const ExpertStore = struct {
         self.work = try self.allocator.alloc(Slot, max_expert);
         @memset(self.work, .{});
         self.seen = try self.allocator.alloc(bool, max_expert);
+        self.read_eids = try self.allocator.alloc(u32, max_expert);
+        self.read_slots = try self.allocator.alloc(*Slot, max_expert);
+        self.read_failed = try self.allocator.alloc(bool, max_expert);
         self.finalized = true;
     }
 
@@ -1052,15 +1085,25 @@ pub const ExpertStore = struct {
         }
 
         const read_start = if (self.n_miss > 0) monotonicNanos() else null;
+        // A staged load resolves its miss by slab swap; everything else
+        // becomes the read set, capacity ensured here (one thread, so the
+        // allocator is uncontended and an OOM surfaces before any I/O).
+        var n_read: usize = 0;
         for (self.miss_eids[0..self.n_miss], 0..) |eid, w| {
             const slot = &self.work[w];
-            // A staged load resolves the miss by slab swap; otherwise the
-            // synchronous read path is exactly what it always was.
-            if (!self.stageConsume(layer_i, eid, slot)) {
-                try slot.ensureCapacity(self.allocator, ls.slab_bytes);
-                try self.readExpert(ls, layer_i, eid, slot);
-                self.stats.bytes_read += expertBytes(ls);
+            if (self.stageConsume(layer_i, eid, slot)) {
+                slot.eid = eid;
+                self.resolveSlot(ls, eid, slot);
+                continue;
             }
+            try slot.ensureCapacity(self.allocator, ls.slab_bytes);
+            self.read_eids[n_read] = eid;
+            self.read_slots[n_read] = slot;
+            n_read += 1;
+        }
+        try self.readMissSet(ls, layer_i, n_read);
+        self.stats.bytes_read += @as(u64, n_read) * expertBytes(ls);
+        for (self.read_eids[0..n_read], self.read_slots[0..n_read]) |eid, slot| {
             slot.eid = eid;
             self.resolveSlot(ls, eid, slot);
         }
@@ -1239,6 +1282,82 @@ pub const ExpertStore = struct {
             const n = try preadOnce(fd, buf[done..], offset + done);
             if (n == 0) return Error.UnexpectedEndOfFile;
             done += n;
+        }
+    }
+
+    // ---- demand-miss I/O pool ------------------------------------------
+
+    /// One acquire's read fan-out: workers and the acquiring thread pull
+    /// indices off `next`; the parallel arrays live on the store
+    /// (`read_eids`/`read_slots`/`read_failed`). Each index is processed
+    /// by exactly one thread, so the plain `read_failed` bools are
+    /// race-free; they become visible to the caller through the workers'
+    /// join in `readMissSet`.
+    const IoBatch = struct {
+        store: *ExpertStore,
+        ls: *LayerState,
+        layer_i: usize,
+        count: usize,
+        next: std.atomic.Value(usize) = .init(0),
+
+        fn drain(self: *IoBatch) void {
+            while (true) {
+                const i = self.next.fetchAdd(1, .monotonic);
+                if (i >= self.count) return;
+                self.store.readExpert(self.ls, self.layer_i, self.store.read_eids[i], self.store.read_slots[i]) catch {
+                    self.store.read_failed[i] = true;
+                };
+            }
+        }
+    };
+
+    fn ioDrainJob(arg: *anyopaque) void {
+        const batch: *IoBatch = @ptrCast(@alignCast(arg));
+        batch.drain();
+    }
+
+    /// Read the collected miss set, fanning out across the I/O pool when
+    /// it pays (two or more reads): disk queue depth — and mirror copies
+    /// on other drives — then genuinely serve in parallel, which one
+    /// synchronous pread loop never achieves. Slot capacities are already
+    /// ensured, so workers only pread into disjoint slabs. Failed items
+    /// are retried synchronously here.
+    fn readMissSet(self: *ExpertStore, ls: *LayerState, layer_i: usize, count: usize) Error!void {
+        if (count == 0) return;
+        const want = @min(self.options.io_workers, count - 1);
+        if (want > 0) self.ioEnsurePool();
+        const started = @min(self.io_ready, want);
+        if (started == 0) {
+            for (self.read_eids[0..count], self.read_slots[0..count]) |eid, slot| {
+                try self.readExpert(ls, layer_i, eid, slot);
+            }
+            return;
+        }
+        @memset(self.read_failed[0..count], false);
+        var batch: IoBatch = .{ .store = self, .ls = ls, .layer_i = layer_i, .count = count };
+        for (self.io_pool[0..started]) |*w| {
+            const ok = w.start(ioDrainJob, &batch);
+            std.debug.assert(ok); // dedicated pool: idle between batches
+        }
+        batch.drain();
+        for (self.io_pool[0..started]) |*w| w.wait();
+        for (0..count) |i| {
+            if (!self.read_failed[i]) continue;
+            try self.readExpert(ls, layer_i, self.read_eids[i], self.read_slots[i]);
+        }
+    }
+
+    /// Bring up the worker pool (idempotent, lazy): a spawn failure just
+    /// leaves a smaller — possibly empty — pool, and the batch still
+    /// drains on the acquiring thread.
+    fn ioEnsurePool(self: *ExpertStore) void {
+        if (self.io_pool.len == 0) {
+            self.io_pool = self.allocator.alloc(thread.OneShotWorker, self.options.io_workers) catch return;
+            self.io_ready = 0;
+        }
+        while (self.io_ready < self.io_pool.len) {
+            self.io_pool[self.io_ready].init() catch break;
+            self.io_ready += 1;
         }
     }
 
