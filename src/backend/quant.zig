@@ -650,6 +650,7 @@ pub const matmulTQ2_0X4RhsRange = ternary.matmulTQ2_0X4RhsRange;
 pub const matmulTQ2_0X4RhsTile = ternary.matmulTQ2_0X4RhsTile;
 pub const matmulTQ2_0X4RhsTileAcc = ternary.matmulTQ2_0X4RhsTileAcc;
 pub const packMatmulRhsTQ2_0Foldedx4 = ternary.packMatmulRhsTQ2_0Foldedx4;
+pub const packMatmulRhsTQ2_0Foldedx4Into = ternary.packMatmulRhsTQ2_0Foldedx4Into;
 pub const packMatmulRhsTQ2_0FoldedRows = ternary.packMatmulRhsTQ2_0FoldedRows;
 pub const matmulTQ2_0FoldedX4RhsTile = ternary.matmulTQ2_0FoldedX4RhsTile;
 pub const matmulTQ2_0FoldedX4RhsRange = ternary.matmulTQ2_0FoldedX4RhsRange;

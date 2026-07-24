@@ -9,7 +9,7 @@
 //!   (c) shard-streaming PTQTP quantization (docs/PTQTP.md) — models far
 //!       bigger than RAM quantize tensor-at-a-time from the source mmap:
 //!       zig build export-gguf -- --from-gguf in.gguf --out out.gguf --ptqtp[=K]
-//!           [--ptqtp-planes K] [--ptqtp-include SUB[,SUB]] [--ptqtp-exclude SUB[,SUB]] [--dry-run]
+//!           [--ptqtp-planes K] [--ptqtp-tie] [--ptqtp-include SUB[,SUB]] [--ptqtp-exclude SUB[,SUB]] [--dry-run]
 //!
 //! Transcode policy (documented choice, llama.cpp-convention): only matrix
 //! weights transcode — n_dims >= 2, name ending ".weight", name not
@@ -91,7 +91,7 @@ const safetensors = fucina.safetensors;
 const DtypeMode = enum { verbatim, f32, f16, bf16, q8_0, q4_k, q5_k, q6_k, tq2_0 };
 
 const usage =
-    "usage: zig build export-gguf -Doptimize=ReleaseFast -- --from-gguf IN.gguf --out OUT.gguf [--dtype f16|bf16|f32|q8_0|q4_k|q5_k|q6_k|tq2_0|verbatim] [--experts-dtype DTYPE (only tensors named *_exps.weight; may requantize)] [--adapters DIR_OR_SAFETENSORS --alpha F (required together)] [--ptqtp[=K] --ptqtp-planes K --ptqtp-include SUB[,SUB] --ptqtp-exclude SUB[,SUB] --dry-run (shard-streaming PTQTP quantization; docs/PTQTP.md)]\n";
+    "usage: zig build export-gguf -Doptimize=ReleaseFast -- --from-gguf IN.gguf --out OUT.gguf [--dtype f16|bf16|f32|q8_0|q4_k|q5_k|q6_k|tq2_0|verbatim] [--experts-dtype DTYPE (only tensors named *_exps.weight; may requantize)] [--adapters DIR_OR_SAFETENSORS --alpha F (required together)] [--ptqtp[=K] --ptqtp-planes K --ptqtp-tie --ptqtp-include SUB[,SUB] --ptqtp-exclude SUB[,SUB] --dry-run (shard-streaming PTQTP quantization; docs/PTQTP.md)]\n";
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -110,6 +110,7 @@ pub fn main(init: std.process.Init) !void {
     var alpha: ?f32 = null;
     var ptqtp_mode = false;
     var ptqtp_planes: u8 = 2;
+    var ptqtp_tie = false;
     var dry_run = false;
     const arena = init.arena.allocator();
     var includes: std.ArrayList([]const u8) = .empty;
@@ -183,6 +184,9 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.startsWith(u8, arg, "--ptqtp-exclude=")) {
             ptqtp_mode = true;
             try appendFilters(arena, &excludes, arg["--ptqtp-exclude=".len..]);
+        } else if (std.mem.eql(u8, arg, "--ptqtp-tie")) {
+            ptqtp_mode = true;
+            ptqtp_tie = true;
         } else if (std.mem.eql(u8, arg, "--dry-run")) {
             dry_run = true;
         } else {
@@ -214,6 +218,10 @@ pub fn main(init: std.process.Init) !void {
         try stdout.print("--ptqtp plane count must be 1, 2, or 3 (got {d})\n", .{ptqtp_planes});
         return error.InvalidPlaneCount;
     }
+    if (ptqtp_tie and ptqtp_planes < 2) {
+        try stdout.print("--ptqtp-tie locks plane scales to the exact ratio 3, so it needs at least 2 planes (got {d})\n", .{ptqtp_planes});
+        return error.InvalidPlaneCount;
+    }
     if (out_path == null and !dry_run) {
         try stdout.print(usage, .{});
         return error.MissingOutPath;
@@ -224,6 +232,7 @@ pub fn main(init: std.process.Init) !void {
     if (ptqtp_mode) {
         return runPtqtp(allocator, io, in_path, out_path, .{
             .planes = ptqtp_planes,
+            .tie = ptqtp_tie,
             .includes = includes.items,
             .excludes = excludes.items,
             .dry_run = dry_run,
@@ -421,6 +430,7 @@ fn bf16ToF32(bits: u16) f32 {
 
 const PtqtpArgs = struct {
     planes: u8,
+    tie: bool,
     includes: []const []const u8,
     excludes: []const []const u8,
     dry_run: bool,
@@ -495,7 +505,7 @@ fn runPtqtp(
     var file = try gguf.File.loadMmapAuto(allocator, io, in_path);
     defer file.deinit();
 
-    const options = ptqtp.Options{ .planes = args.planes };
+    const options = ptqtp.Options{ .planes = args.planes, .tie_scales = args.tie };
 
     var writer = gguf.Writer.init(allocator);
     defer writer.deinit();
@@ -579,9 +589,12 @@ fn runPtqtp(
     }
 
     // Same stamp as ptqtp_gguf.build: only a file that actually carries
-    // planes claims the PTQTP format (gates loader pair-detection).
+    // planes claims the PTQTP format (gates loader pair-detection). One
+    // Options covers every quantized tensor, so the tie stamp is
+    // all-or-nothing by construction — the loaders' fold contract.
     if (quantized_count != 0) {
         try writer.addMetaInt(ptqtp_gguf.version_key, u32, ptqtp_gguf.format_version);
+        if (args.tie) try writer.addMetaInt(ptqtp_gguf.tie_key, u32, 1);
     }
 
     var ctx: fucina.ExecContext = undefined;

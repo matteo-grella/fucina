@@ -181,6 +181,18 @@ Deliberate deltas from the paper:
   `plane_offsets`), so K-plane expert models stream out-of-core with no
   new kernels. Loaders: `ptqtp_gguf.maybeLoadMoeRhs` /
   `maybeStreamedMoeProjSpec`, wired into the qwen3 MoE load paths.
+  **Tie-fitted K=2 stacks serve folded here too**: the resident loader
+  builds an expert-major `BlockTQ2_0Foldedx4` pack next to the planes and
+  the expert dot runs the one-pass folded kernel — the same
+  `matmulTQ2_0FoldedX4RhsTile` the dense fused linear uses, so the dense
+  2.09-2.37x kernel measurement carries over per expert dot. The streamed
+  tier folds at fill instead (`ExpertStore.readExpert`): both plane reads
+  bounce through a scratch and the 4-bit pack lands in the slab section
+  (same section budget — 520 vs 528 bytes per 4-column group; disk bytes
+  and the two preads per expert are unchanged, the win is the halved dot
+  on every cache hit). Requires `out_dim % 4 == 0`; anything else serves
+  the per-plane path. Both arms pinned bitwise against the direct folded
+  kernel in `expert_store_tests.zig` ("tie-folded ptqtp experts").
 - Examples: `zig build ptqtp-spirals` (self-verifying acceptance demo:
   float-trains an MLP, decorates post-training, PASSes only if dual planes
   hold accuracy on the deployed int8 path) and `zig build ptqtp-qwen3`
@@ -209,6 +221,7 @@ zig build export-gguf -Doptimize=ReleaseFast -- \
 |---|---|
 | `--ptqtp[=K]` | enable the mode; `K` = plane count 1–3 (default 2) |
 | `--ptqtp-planes K` | plane count as a separate knob (implies `--ptqtp`) |
+| `--ptqtp-tie` | scale-tied fit (`Options.tie_scales`; needs K ≥ 2): stamps `fucina.ptqtp.tie_scales = 1` so the loaders serve tied K=2 tensors — dense linears AND MoE expert stacks — through the folded one-pass kernel |
 | `--ptqtp-include SUB[,SUB]` | quantize only tensors whose name contains a substring (replaces the default embeddings/head-stay name policy); repeatable |
 | `--ptqtp-exclude SUB[,SUB]` | never quantize matching tensors; always subtracts; repeatable |
 | `--dry-run` | print the per-tensor plan (name, shape, source dtype → target, bytes before/after) and exit without writing |

@@ -271,6 +271,22 @@ test "expert store validates geometry and lifecycle" {
         .{ .quant = .q6_k, .file_offset = 0, .byte_len = 12345, .in_dim = out_pe, .out_dim = hidden },
     }, n_expert));
     try std.testing.expectError(error.StoreNotFinalized, store2.acquire(0, &.{0}));
+
+    // The fold flag's geometry legs (ProjGeometry.init): fold with one
+    // plane would make readExpertFolded write a 520-byte-per-group pack
+    // into a 264-byte-per-group section — the guard is load-bearing for
+    // memory safety, so both rejection legs are pinned. Plane count first:
+    try std.testing.expectError(error.InvalidExpertGeometry, store2.addLayer(0, .{
+        .{ .quant = .tq2_0, .file_offset = 0, .byte_len = 1, .in_dim = hidden, .out_dim = out_pe, .plane_count = 1, .fold = true },
+        .{ .quant = .tq2_0, .file_offset = 0, .byte_len = 1, .in_dim = hidden, .out_dim = out_pe },
+        .{ .quant = .tq2_0, .file_offset = 0, .byte_len = 1, .in_dim = out_pe, .out_dim = hidden },
+    }, n_expert));
+    // ... and the 4-column-group rule:
+    try std.testing.expectError(error.InvalidExpertGeometry, store2.addLayer(0, .{
+        .{ .quant = .tq2_0, .file_offset = 0, .byte_len = 1, .in_dim = hidden, .out_dim = out_pe + 2, .plane_count = 2, .fold = true },
+        .{ .quant = .tq2_0, .file_offset = 0, .byte_len = 1, .in_dim = hidden, .out_dim = out_pe },
+        .{ .quant = .tq2_0, .file_offset = 0, .byte_len = 1, .in_dim = out_pe, .out_dim = hidden },
+    }, n_expert));
 }
 
 test "pilot: hints spin up the I/O thread and prediction recall is scored on acquire" {
@@ -861,6 +877,265 @@ test "ptqtp multi-plane experts: fused MoE sums planes like the dense path; stre
     }
 
     // (c) streamed batch == resident batch.
+    var got_b = try ctx.moeExpertFfnBatch(&xb, &streamed_gate, &streamed_up, &streamed_down, &selected, &routing, top_k, t_ffn, .swiglu, null, null);
+    defer got_b.deinit();
+    try std.testing.expectEqualSlices(f32, want_b.dataConst(), got_b.dataConst());
+}
+
+fn foldedExpertDot(
+    folded: []const qm.BlockTQ2_0Foldedx4,
+    qx: []const qm.BlockQ8_K,
+    e: usize,
+    k: usize,
+    out_dim: usize,
+    out: []f32,
+) void {
+    const bpc = k / qm.qk_k_block_size;
+    const fg = (out_dim / 4) * bpc;
+    qm.matmulTQ2_0FoldedX4RhsRange(out, qx, folded[e * fg ..][0..fg], bpc, out_dim, 0, 1);
+}
+
+fn foldedExpertDownReference(
+    bufs: *const PtqtpRefBufs,
+    gate_folded: []const qm.BlockTQ2_0Foldedx4,
+    up_folded: []const qm.BlockTQ2_0Foldedx4,
+    down_folded: []const qm.BlockTQ2_0Foldedx4,
+    e: usize,
+    hidden_dim: usize,
+    ffn_dim: usize,
+    down_out: []f32,
+) !void {
+    foldedExpertDot(gate_folded, bufs.qx, e, hidden_dim, ffn_dim, bufs.gate_buf);
+    foldedExpertDot(up_folded, bufs.qx, e, hidden_dim, ffn_dim, bufs.up_buf);
+    for (bufs.g_buf, bufs.gate_buf, bufs.up_buf) |*g, gate_v, up_v| {
+        g.* = backend_mod.ops.gatedPairScalar(.swiglu, gate_v, up_v);
+    }
+    try qm.quantizeRowQ8_KInto(bufs.qg, bufs.g_buf);
+    foldedExpertDot(down_folded, bufs.qg, e, ffn_dim, hidden_dim, down_out);
+}
+
+/// Expert-major folded stack from two plane stacks — the layout
+/// `loadMoeRhsPtqtp` builds and the streamed fill reproduces per slab.
+fn foldExpertStack(
+    allocator: std.mem.Allocator,
+    plane1: []const qm.BlockTQ2_0,
+    plane2: []const qm.BlockTQ2_0,
+    n_experts: usize,
+    k: usize,
+    out_dim: usize,
+) ![]qm.BlockTQ2_0Foldedx4 {
+    const bpc = k / qm.qk_k_block_size;
+    const expert_blocks = out_dim * bpc;
+    const fg = (out_dim / 4) * bpc;
+    const folded = try allocator.alloc(qm.BlockTQ2_0Foldedx4, n_experts * fg);
+    errdefer allocator.free(folded);
+    for (0..n_experts) |e| {
+        var views: [2]backend_mod.QuantizedMatmulRhsTQ2_0 = undefined;
+        for ([2][]const qm.BlockTQ2_0{ plane1, plane2 }, 0..) |plane, p| {
+            views[p] = .{
+                .rows = .{
+                    .allocator = null,
+                    .blocks = @constCast(plane[e * expert_blocks ..][0..expert_blocks]),
+                    .rows = out_dim,
+                    .cols = k,
+                    .blocks_per_row = bpc,
+                },
+                .k = k,
+                .n = out_dim,
+            };
+        }
+        try qm.packMatmulRhsTQ2_0Foldedx4Into(folded[e * fg ..][0..fg], &views[0], &views[1]);
+    }
+    return folded;
+}
+
+test "tie-folded ptqtp experts: resident fold serves the one-pass kernel; streamed fill folds bit-exact" {
+    // Tie-fitted K=2 stacks (docs/PTQTP.md): the resident arm carries the
+    // expert-major folded pack and the expert dot takes the one-pass
+    // folded kernel; the streamed tier folds the two plane reads into the
+    // slab at fill (`readExpert`). Pins: (a) the resident folded serve ==
+    // a host reference assembled on the direct folded kernel — the
+    // exact-ratio semantics, deliberately NOT the 2-pass plane sum, whose
+    // independently rounded coarse f16 scale differs in final ulps; (b)
+    // streamed folded == resident folded bitwise across cold, warm, and
+    // evicting acquires, decode and batch.
+    const allocator = std.testing.allocator;
+    const ptqtp = @import("../ptqtp.zig");
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const t_hidden: usize = 256;
+    const t_ffn: usize = 512;
+    const t_experts: usize = 2;
+    const gu_rows = t_experts * t_ffn;
+    const gu_bpc = t_hidden / qm.qk_k_block_size;
+    const down_rows = t_experts * t_hidden;
+    const down_bpc = t_ffn / qm.qk_k_block_size;
+
+    const gate_w = try allocator.alloc(f32, gu_rows * t_hidden);
+    defer allocator.free(gate_w);
+    const up_w = try allocator.alloc(f32, gu_rows * t_hidden);
+    defer allocator.free(up_w);
+    const down_w = try allocator.alloc(f32, down_rows * t_ffn);
+    defer allocator.free(down_w);
+    for (gate_w, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i)) * 0.019) * 0.9;
+    for (up_w, 0..) |*v, i| v.* = @cos(@as(f32, @floatFromInt(i)) * 0.029) * 1.2;
+    for (down_w, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i)) * 0.013 + 0.3) * 0.6;
+
+    const tied_opts = ptqtp.Options{ .planes = 2, .max_iterations = 8, .tie_scales = true };
+    var gate_pair = try ptqtp.quantizeMatrix(&ctx, gate_w, gu_rows, t_hidden, tied_opts);
+    defer gate_pair.deinit(allocator);
+    var up_pair = try ptqtp.quantizeMatrix(&ctx, up_w, gu_rows, t_hidden, tied_opts);
+    defer up_pair.deinit(allocator);
+    var down_pair = try ptqtp.quantizeMatrix(&ctx, down_w, down_rows, t_ffn, tied_opts);
+    defer down_pair.deinit(allocator);
+
+    const gate_folded = try foldExpertStack(allocator, gate_pair.plane1, gate_pair.plane2, t_experts, t_hidden, t_ffn);
+    defer allocator.free(gate_folded);
+    const up_folded = try foldExpertStack(allocator, up_pair.plane1, up_pair.plane2, t_experts, t_hidden, t_ffn);
+    defer allocator.free(up_folded);
+    const down_folded = try foldExpertStack(allocator, down_pair.plane1, down_pair.plane2, t_experts, t_ffn, t_hidden);
+    defer allocator.free(down_folded);
+
+    var resident_gate: MoeRhs = .{ .ptqtp = .{
+        .allocator = null,
+        .planes = .{ gate_pair.plane1, gate_pair.plane2, &.{} },
+        .plane_count = 2,
+        .k = t_hidden,
+        .n = gu_rows,
+        .blocks_per_column = gu_bpc,
+        .folded = gate_folded,
+    } };
+    var resident_up: MoeRhs = .{ .ptqtp = .{
+        .allocator = null,
+        .planes = .{ up_pair.plane1, up_pair.plane2, &.{} },
+        .plane_count = 2,
+        .k = t_hidden,
+        .n = gu_rows,
+        .blocks_per_column = gu_bpc,
+        .folded = up_folded,
+    } };
+    var resident_down: MoeRhs = .{ .ptqtp = .{
+        .allocator = null,
+        .planes = .{ down_pair.plane1, down_pair.plane2, &.{} },
+        .plane_count = 2,
+        .k = t_ffn,
+        .n = down_rows,
+        .blocks_per_column = down_bpc,
+        .folded = down_folded,
+    } };
+
+    // The same planes on disk, plane-major sibling layout; the fold flag
+    // makes every fill bounce the two plane reads through the scratch and
+    // land the 4-bit pack in the slab section.
+    var path_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "expert_store_ptqtp_fold_{d}.bin", .{std.Io.Clock.real.now(std.testing.io).nanoseconds});
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+    defer cleanupSidecar(path);
+    const gu_plane_bytes = gate_pair.plane1.len * @sizeOf(qm.BlockTQ2_0);
+    const down_plane_bytes = down_pair.plane1.len * @sizeOf(qm.BlockTQ2_0);
+    {
+        var file = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
+        defer file.close(std.testing.io);
+        var write_buffer: [4096]u8 = undefined;
+        var writer = file.writer(std.testing.io, &write_buffer);
+        for ([_][]const qm.BlockTQ2_0{
+            gate_pair.plane1, gate_pair.plane2,
+            up_pair.plane1,   up_pair.plane2,
+            down_pair.plane1, down_pair.plane2,
+        }) |plane| try writer.interface.writeAll(std.mem.sliceAsBytes(plane));
+        try writer.interface.flush();
+    }
+
+    var store = try ExpertStore.create(allocator, &.{path}, 1, .{ .cache_slots_per_layer = 1 });
+    defer store.destroy();
+    try store.addLayer(0, .{
+        .{ .quant = .tq2_0, .file_offset = 0, .byte_len = gu_plane_bytes, .in_dim = t_hidden, .out_dim = t_ffn, .plane_count = 2, .plane_offsets = .{ gu_plane_bytes, 0 }, .fold = true },
+        .{ .quant = .tq2_0, .file_offset = 2 * gu_plane_bytes, .byte_len = gu_plane_bytes, .in_dim = t_hidden, .out_dim = t_ffn, .plane_count = 2, .plane_offsets = .{ 3 * gu_plane_bytes, 0 }, .fold = true },
+        .{ .quant = .tq2_0, .file_offset = 4 * gu_plane_bytes, .byte_len = down_plane_bytes, .in_dim = t_ffn, .out_dim = t_hidden, .plane_count = 2, .plane_offsets = .{ 4 * gu_plane_bytes + down_plane_bytes, 0 }, .fold = true },
+    }, t_experts);
+    try store.finalize();
+    var streamed_gate: MoeRhs = .{ .streamed = store.streamedRhs(0, .gate) };
+    var streamed_up: MoeRhs = .{ .streamed = store.streamedRhs(0, .up) };
+    var streamed_down: MoeRhs = .{ .streamed = store.streamedRhs(0, .down) };
+
+    const bufs = PtqtpRefBufs{
+        .qx = try allocator.alloc(qm.BlockQ8_K, t_hidden / qm.qk_k_block_size),
+        .qg = try allocator.alloc(qm.BlockQ8_K, t_ffn / qm.qk_k_block_size),
+        .gate_buf = try allocator.alloc(f32, t_ffn),
+        .up_buf = try allocator.alloc(f32, t_ffn),
+        .g_buf = try allocator.alloc(f32, t_ffn),
+        .tmp = try allocator.alloc(f32, t_ffn),
+    };
+    defer {
+        allocator.free(bufs.tmp);
+        allocator.free(bufs.g_buf);
+        allocator.free(bufs.up_buf);
+        allocator.free(bufs.gate_buf);
+        allocator.free(bufs.qg);
+        allocator.free(bufs.qx);
+    }
+    const dbuf = try allocator.alloc(f32, t_hidden);
+    defer allocator.free(dbuf);
+    const ref = try allocator.alloc(f32, t_hidden);
+    defer allocator.free(ref);
+
+    // Decode: cold, warm, and evicting acquires (cap 1 < 2 active).
+    const x_vals = try allocator.alloc(f32, t_hidden);
+    defer allocator.free(x_vals);
+    for (x_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 13) % 167)) - 83)) / 83.0;
+    var x = try ctx.fromSliceRank(2, .{ 1, t_hidden }, x_vals);
+    defer x.deinit();
+    for ([_][2]usize{ .{ 0, 1 }, .{ 0, 1 }, .{ 1, 0 } }) |pair| {
+        const routing = [_]f32{ 0.6, 0.4 };
+        var want = try ctx.moeExpertFfn(&x, &resident_gate, &resident_up, &resident_down, &pair, &routing, t_ffn, .swiglu, null, null);
+        defer want.deinit();
+        for (want.dataConst()) |v| try std.testing.expect(!std.math.isNan(v));
+
+        // (a) the folded-kernel reference, assembled exactly like the op.
+        try qm.quantizeRowQ8_KInto(bufs.qx, x_vals);
+        @memset(ref, 0);
+        for (pair, routing) |e, w| {
+            try foldedExpertDownReference(&bufs, gate_folded, up_folded, down_folded, e, t_hidden, t_ffn, dbuf);
+            for (dbuf) |*v| v.* *= w;
+            for (ref, dbuf) |*o, s| o.* += s;
+        }
+        try std.testing.expectEqualSlices(f32, ref, want.dataConst());
+
+        // (b) streamed fill-fold == resident fold, always.
+        var got = try ctx.moeExpertFfn(&x, &streamed_gate, &streamed_up, &streamed_down, &pair, &routing, t_ffn, .swiglu, null, null);
+        defer got.deinit();
+        try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
+    }
+
+    // Batched prefill (m=5 rows spanning both experts).
+    const m: usize = 5;
+    const top_k: usize = 2;
+    const xb_vals = try allocator.alloc(f32, m * t_hidden);
+    defer allocator.free(xb_vals);
+    for (xb_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 17) % 191)) - 95)) / 95.0;
+    var xb = try ctx.fromSliceRank(2, .{ m, t_hidden }, xb_vals);
+    defer xb.deinit();
+    const selected = [_]usize{ 0, 1, 1, 0, 0, 1, 1, 0, 0, 0 };
+    const routing = [_]f32{ 0.6, 0.4, 0.5, 0.5, 0.7, 0.3, 0.2, 0.8, 0.9, 0.1 };
+    var want_b = try ctx.moeExpertFfnBatch(&xb, &resident_gate, &resident_up, &resident_down, &selected, &routing, top_k, t_ffn, .swiglu, null, null);
+    defer want_b.deinit();
+    const want_b_data = want_b.dataConst();
+    for (0..m) |t| {
+        try qm.quantizeRowQ8_KInto(bufs.qx, xb_vals[t * t_hidden ..][0..t_hidden]);
+        for (0..top_k) |j| {
+            const e = selected[t * top_k + j];
+            const w = routing[t * top_k + j];
+            try foldedExpertDownReference(&bufs, gate_folded, up_folded, down_folded, e, t_hidden, t_ffn, dbuf);
+            if (j == 0) {
+                for (ref, dbuf) |*o, s| o.* = w * s;
+            } else {
+                for (ref, dbuf) |*o, s| o.* += w * s;
+            }
+        }
+        try std.testing.expectEqualSlices(f32, ref, want_b_data[t * t_hidden ..][0..t_hidden]);
+    }
     var got_b = try ctx.moeExpertFfnBatch(&xb, &streamed_gate, &streamed_up, &streamed_down, &selected, &routing, top_k, t_ffn, .swiglu, null, null);
     defer got_b.deinit();
     try std.testing.expectEqualSlices(f32, want_b.dataConst(), got_b.dataConst());

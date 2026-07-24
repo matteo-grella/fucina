@@ -1248,6 +1248,7 @@ pub fn loadMoeRhsPtqtp(
     expected_out_dim: usize,
     expected_n_expert: usize,
     borrow: bool,
+    tied: bool,
 ) !fucina.MoeRhs {
     if (plane_infos.len == 0 or plane_infos.len > 3) return Error.InvalidWeightShape;
     const rows = try std.math.mul(usize, expected_n_expert, expected_out_dim);
@@ -1273,6 +1274,31 @@ pub fn loadMoeRhsPtqtp(
             owned_count += 1;
         }
     }
+    // Tie-fitted K=2 stacks fold into the 4-bit one-pass pack, expert by
+    // expert (docs/PTQTP.md). Errors propagate rather than degrade: the
+    // streamed tier serves a tied K=2 file folded-or-error (ProjSpec.fold
+    // has no fallback), so the resident tier folding under the same file
+    // condition keeps the two tiers bitwise-identical on every file both
+    // can load — a silent 2-pass fallback here would diverge from a
+    // streamed run of the same file in final f32 ulps.
+    var folded: []const backend_quant.BlockTQ2_0Foldedx4 = &.{};
+    var folded_allocator: ?Allocator = null;
+    if (tied and plane_infos.len == 2 and expected_out_dim % 4 == 0) {
+        const fg = (expected_out_dim / 4) * bpc;
+        const buf = try ctx.allocator.alloc(backend_quant.BlockTQ2_0Foldedx4, expected_n_expert * fg);
+        errdefer ctx.allocator.free(buf);
+        const expert_blocks = expected_out_dim * bpc;
+        for (0..expected_n_expert) |e| {
+            var views: [2]backend_quant.QuantizedMatmulRhsTQ2_0 = undefined;
+            for (0..2) |p| {
+                const blocks = planes[p][e * expert_blocks ..][0..expert_blocks];
+                views[p] = try backend_quant.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(expected_in_dim, expected_out_dim, @constCast(blocks));
+            }
+            try backend_quant.packMatmulRhsTQ2_0Foldedx4Into(buf[e * fg ..][0..fg], &views[0], &views[1]);
+        }
+        folded = buf;
+        folded_allocator = ctx.allocator;
+    }
     return .{ .ptqtp = .{
         .allocator = if (borrow) null else ctx.allocator,
         .planes = planes,
@@ -1280,6 +1306,8 @@ pub fn loadMoeRhsPtqtp(
         .k = expected_in_dim,
         .n = rows,
         .blocks_per_column = bpc,
+        .folded = folded,
+        .folded_allocator = folded_allocator,
     } };
 }
 
@@ -1454,6 +1482,7 @@ pub fn streamedProjSpecPtqtp(
     expected_in_dim: usize,
     expected_out_dim: usize,
     expected_n_expert: usize,
+    tied: bool,
 ) !fucina.expert_store.ProjSpec {
     if (plane_infos.len == 0 or plane_infos.len > 3) return Error.InvalidWeightShape;
     var offsets: [3]u64 = .{ 0, 0, 0 };
@@ -1473,6 +1502,9 @@ pub fn streamedProjSpecPtqtp(
         .out_dim = expected_out_dim,
         .plane_count = @intCast(plane_infos.len),
         .plane_offsets = .{ offsets[1], offsets[2] },
+        // Tie-fitted K=2 streams fold at fill into the one-pass 4-bit pack
+        // (ExpertStore.readExpert); other shapes stream plane-per-plane.
+        .fold = tied and plane_infos.len == 2 and expected_out_dim % 4 == 0,
     };
 }
 

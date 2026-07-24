@@ -288,7 +288,8 @@ pub fn maybeLoadMoeRhs(
     borrow: bool,
 ) !?fucina.MoeRhs {
     const set = (try moePlaneInfos(file, base_name)) orelse return null;
-    return try weights.loadMoeRhsPtqtp(ctx, set.infos[0..set.count], in_dim, out_dim, n_expert, borrow);
+    const tied = (file.getInt(tie_key) orelse 0) == 1;
+    return try weights.loadMoeRhsPtqtp(ctx, set.infos[0..set.count], in_dim, out_dim, n_expert, borrow, tied);
 }
 
 /// Streamed counterpart of `maybeLoadMoeRhs`: a ProjSpec whose
@@ -302,7 +303,8 @@ pub fn maybeStreamedMoeProjSpec(
     n_expert: usize,
 ) !?fucina.expert_store.ProjSpec {
     const set = (try moePlaneInfos(file, base_name)) orelse return null;
-    return try weights.streamedProjSpecPtqtp(file, set.infos[0..set.count], in_dim, out_dim, n_expert);
+    const tied = (file.getInt(tie_key) orelse 0) == 1;
+    return try weights.streamedProjSpecPtqtp(file, set.infos[0..set.count], in_dim, out_dim, n_expert, tied);
 }
 
 /// Per-expert `ptqtp.MatrixStats` folded into one line — a 128-expert

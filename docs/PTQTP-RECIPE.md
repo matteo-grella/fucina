@@ -44,6 +44,16 @@ Knobs:
   compression), K=2 ≈ 4.1 bpw (the sweet spot; reconstruction rel_err
   ≈ 0.17), K=3 ≈ 6.2 bpw (near-parity; rel_err ≈ 0.067). `PTQTP.md`
   §Measured has the NLL ladder.
+- `--ptqtp-tie` — scale-tied fit (K ≥ 2): plane scales locked to the
+  exact ratio 3, making the K planes one uniform 3^K-level quantizer.
+  Fits 1.5-5× faster, always converges, and measures better downstream
+  quality than the free fit (Qwen3-1.7B, 512-token NLL vs BF16 ppl
+  56.15: K=2 ppl 132.8 tied vs 261.7 free; K=3 58.1 vs 61.4 —
+  `PTQTP.md` §Scale-tied has the ladder). At K=2 the stamped file
+  additionally serves FOLDED everywhere — dense linears, resident
+  expert stacks, and streamed expert fills alike run the one-pass
+  4-bit folded kernel (2.09-2.37× the two-pass dot), so tied K=2 is
+  the recommended shape for streamed MoE experts.
 - `--ptqtp-include SUB[,SUB]` — name-substring filter. The value shown
   quantizes **only the routed expert stacks**; each expert's matrix is
   quantized independently and persists as plane-major
@@ -91,12 +101,15 @@ see `RUNNING-MODELS.md` §Streaming.
 ## Notes
 
 - **Bit-exactness contract**: a PTQTP expert computes the same
-  sum-of-plane-dots the dense PTQTP linear does, and the streamed path is
-  bit-identical to resident (both pinned by tests in
+  sum-of-plane-dots the dense PTQTP linear does (tie-fitted K=2 stacks:
+  the same one-pass folded dot), and the streamed path is bit-identical
+  to resident (both pinned by tests in
   `src/exec/expert_store_tests.zig`).
 - **Mixed files are fine**: quantize one layer, a subset of projections,
   or everything; decorated and undecorated tensors serve side by side.
 - **K per use case**: K=1 for maximum-compression experiments, K=2 as
   the daily-driver size/quality point, K=3 when the goal is parity with
   the source at ~1.9× decode speed (see `PTQTP.md` and `TERNARY.md` for
-  the kernel story).
+  the kernel story). With `--ptqtp-tie`: K=2 tied is the speed shape
+  (folded one-pass serving, streamed or resident), K=3 tied the quality
+  shape (near-parity, two-pass serving — 27 levels exceed the nibble).

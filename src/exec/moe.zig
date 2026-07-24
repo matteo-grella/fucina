@@ -58,11 +58,22 @@ pub const MoePtqtpRhs = struct {
     /// Stacked rows per plane (`n_expert * out_dim`).
     n: usize,
     blocks_per_column: usize,
+    /// Tie-fitted K=2 stacks additionally carry the 4-bit folded pack
+    /// (docs/PTQTP.md), expert-major: expert `e`'s `(out_dim/4) * bpc`
+    /// column-group blocks start at `e * (out_dim/4) * bpc`. Nonempty
+    /// switches the expert dot to the one-pass folded kernel; empty is the
+    /// per-plane 2-pass path (correct either way, same contract as the
+    /// dense `WeightPtqtp.pfold`).
+    folded: []const backend_mod.quantized_matmul.BlockTQ2_0Foldedx4 = &.{},
+    /// Owns `folded` independently of `planes` — the plane stacks may be
+    /// borrowed from the GGUF mapping while the fold is always built.
+    folded_allocator: ?Allocator = null,
 
     pub fn deinit(self: *MoePtqtpRhs) void {
         if (self.allocator) |allocator| {
             for (self.planes[0..self.plane_count]) |plane| allocator.free(plane);
         }
+        if (self.folded_allocator) |allocator| allocator.free(self.folded);
         self.* = undefined;
     }
 };
@@ -280,6 +291,16 @@ fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const backend_mod
         },
         .ptqtp => |*big| {
             const bpc = big.blocks_per_column;
+            if (big.folded.len != 0) {
+                // Tie-fitted K=2: one folded-pack pass replaces the plane
+                // loop. Column bounds stay 4-aligned by construction — the
+                // decode split is 32-aligned and the phase chunks are
+                // 256-wide — and the fold is only built when out_dim % 4
+                // == 0, so c1 == out_dim is aligned too.
+                const fg = (out_dim / 4) * bpc;
+                qm.matmulTQ2_0FoldedX4RhsTile(out, qlhs, big.folded[e * fg ..][0..fg], bpc, out_dim, 0, m, c0, c1);
+                return;
+            }
             var views: [3]backend_mod.QuantizedMatmulRhsTQ2_0 = undefined;
             for (big.planes[0..big.plane_count], 0..) |plane, p| {
                 views[p] = tq2_0View(plane[e * out_dim * bpc ..][0 .. out_dim * bpc], big.k, out_dim, bpc);
@@ -328,6 +349,16 @@ fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const backend_mod
                     qm.matmulQ8_0RhsTile(out, qlhs8, &view, out_dim, 0, m, c0, c1);
                 },
                 .tq2_0 => {
+                    if (s.folded) {
+                        // Tie-fitted K=2 stream: the fill folded both
+                        // planes into the 4-bit pack at the section start
+                        // (expert_store.zig readExpert), so the slab
+                        // serves the one-pass kernel directly.
+                        const fg = (out_dim / 4) * bpc;
+                        const blocks = @as([*]const qm.BlockTQ2_0Foldedx4, @ptrCast(@alignCast(base)))[0..fg];
+                        qm.matmulTQ2_0FoldedX4RhsTile(out, qlhs, blocks, bpc, out_dim, 0, m, c0, c1);
+                        return;
+                    }
                     // The slab section holds this expert's `plane_count`
                     // planes contiguously (plane p at p * out_dim * bpc
                     // blocks); plane_count == 1 is the plain ternary stack

@@ -633,6 +633,8 @@ test "MoE expert stacks: plane pair-detection loads the ptqtp arm; streamed Proj
     try std.testing.expectEqual(@as(usize, 2), loaded.ptqtp.plane_count);
     try std.testing.expectEqual(in_dim, loaded.ptqtp.k);
     try std.testing.expectEqual(rows, loaded.ptqtp.n);
+    // No tie stamp: 2-pass per-plane serving, no folded pack.
+    try std.testing.expectEqual(@as(usize, 0), loaded.ptqtp.folded.len);
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&p0_blocks), std.mem.sliceAsBytes(loaded.ptqtp.planes[0]));
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&p1_blocks), std.mem.sliceAsBytes(loaded.ptqtp.planes[1]));
 
@@ -648,5 +650,119 @@ test "MoE expert stacks: plane pair-detection loads the ptqtp arm; streamed Proj
     try std.testing.expectEqual(out.partDataOffset(info0.part) + info0.offset, spec.file_offset);
     try std.testing.expectEqual(out.partDataOffset(info1.part) + info1.offset, spec.plane_offsets[0]);
     try std.testing.expectEqual(info0.data.len, spec.byte_len);
+    try std.testing.expectEqual(false, spec.fold);
     try std.testing.expectEqual(@as(?fucina.expert_store.ProjSpec, null), try ptqtp_gguf.maybeStreamedMoeProjSpec(&out, "f.weight", in_dim, out_dim, n_expert));
+}
+
+test "MoE tie stamp: tied K=2 stacks load with the folded expert pack and fold the streamed spec" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    // out_dim % 4 == 0 — the fold's column-group rule.
+    const n_expert: usize = 2;
+    const out_dim: usize = 4;
+    const rows = n_expert * out_dim;
+
+    var p0_blocks: [rows]fucina.BlockTQ2_0 = undefined;
+    var p1_blocks: [rows]fucina.BlockTQ2_0 = undefined;
+    for (&p0_blocks, 0..) |*b, i| {
+        b.d = @bitCast(@as(f16, @floatCast(0.6 + 0.01 * @as(f32, @floatFromInt(i)))));
+        for (&b.qs, 0..) |*q, j| q.* = @intCast((i * 5 + j) % 3);
+    }
+    for (&p1_blocks, 0..) |*b, i| {
+        b.d = @bitCast(@as(f16, @floatCast(0.2 + 0.01 * @as(f32, @floatFromInt(i)))));
+        for (&b.qs, 0..) |*q, j| q.* = @intCast((i * 11 + j * 3) % 3);
+    }
+
+    var w = gguf.Writer.init(allocator);
+    defer w.deinit();
+    try w.addMetaString("general.architecture", "qwen3");
+    try w.addMetaInt(ptqtp_gguf.version_key, u32, ptqtp_gguf.format_version);
+    try w.addMetaInt(ptqtp_gguf.tie_key, u32, 1);
+    try w.addTensor("e.weight.ptqtp0", .tq2_0, &.{ in_dim, out_dim, n_expert }, std.mem.sliceAsBytes(&p0_blocks));
+    try w.addTensor("e.weight.ptqtp1", .tq2_0, &.{ in_dim, out_dim, n_expert }, std.mem.sliceAsBytes(&p1_blocks));
+    var buf: [32768]u8 = undefined;
+    var sink = std.Io.Writer.fixed(&buf);
+    try w.finish(&sink);
+    var out = try gguf.File.parseOwned(allocator, try allocator.dupe(u8, sink.buffered()));
+    defer out.deinit();
+
+    var loaded = (try ptqtp_gguf.maybeLoadMoeRhs(&ctx, &out, "e.weight", in_dim, out_dim, n_expert, false)).?;
+    defer loaded.deinit();
+    const bq = fucina.internal.backend_mod.quantized_matmul;
+    const bpc = in_dim / fucina.ptqtp.block_len;
+    const fg = (out_dim / 4) * bpc;
+    try std.testing.expectEqual(n_expert * fg, loaded.ptqtp.folded.len);
+
+    // The loaded pack is the per-expert fold of the plane row-blocks.
+    var want: [n_expert * fg]bq.BlockTQ2_0Foldedx4 = undefined;
+    for (0..n_expert) |e| {
+        var views: [2]fucina.internal.backend_mod.QuantizedMatmulRhsTQ2_0 = undefined;
+        for ([2][]fucina.BlockTQ2_0{ &p0_blocks, &p1_blocks }, 0..) |plane, p| {
+            views[p] = .{
+                .rows = .{ .allocator = null, .blocks = plane[e * out_dim * bpc ..][0 .. out_dim * bpc], .rows = out_dim, .cols = in_dim, .blocks_per_row = bpc },
+                .k = in_dim,
+                .n = out_dim,
+            };
+        }
+        try bq.packMatmulRhsTQ2_0Foldedx4Into(want[e * fg ..][0..fg], &views[0], &views[1]);
+    }
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&want), std.mem.sliceAsBytes(loaded.ptqtp.folded));
+
+    const spec = (try ptqtp_gguf.maybeStreamedMoeProjSpec(&out, "e.weight", in_dim, out_dim, n_expert)).?;
+    try std.testing.expectEqual(true, spec.fold);
+
+    // A tie stamp WITHOUT a foldable shape leaves both tiers on the 2-pass
+    // path — the fold gate is `tied and K == 2 and out_dim % 4 == 0`, and
+    // all three layers (resident build, streamed spec, store validation)
+    // must agree. K=3: three sibling planes never fold (27 levels exceed
+    // the nibble).
+    var p2_blocks: [rows]fucina.BlockTQ2_0 = undefined;
+    for (&p2_blocks, 0..) |*b, i| {
+        b.d = @bitCast(@as(f16, @floatCast(0.07 + 0.01 * @as(f32, @floatFromInt(i)))));
+        for (&b.qs, 0..) |*q, j| q.* = @intCast((i * 13 + j * 7) % 3);
+    }
+    var w3 = gguf.Writer.init(allocator);
+    defer w3.deinit();
+    try w3.addMetaString("general.architecture", "qwen3");
+    try w3.addMetaInt(ptqtp_gguf.version_key, u32, ptqtp_gguf.format_version);
+    try w3.addMetaInt(ptqtp_gguf.tie_key, u32, 1);
+    try w3.addTensor("e.weight.ptqtp0", .tq2_0, &.{ in_dim, out_dim, n_expert }, std.mem.sliceAsBytes(&p0_blocks));
+    try w3.addTensor("e.weight.ptqtp1", .tq2_0, &.{ in_dim, out_dim, n_expert }, std.mem.sliceAsBytes(&p1_blocks));
+    try w3.addTensor("e.weight.ptqtp2", .tq2_0, &.{ in_dim, out_dim, n_expert }, std.mem.sliceAsBytes(&p2_blocks));
+    var buf3: [32768]u8 = undefined;
+    var sink3 = std.Io.Writer.fixed(&buf3);
+    try w3.finish(&sink3);
+    var out3 = try gguf.File.parseOwned(allocator, try allocator.dupe(u8, sink3.buffered()));
+    defer out3.deinit();
+    var loaded3 = (try ptqtp_gguf.maybeLoadMoeRhs(&ctx, &out3, "e.weight", in_dim, out_dim, n_expert, false)).?;
+    defer loaded3.deinit();
+    try std.testing.expectEqual(@as(usize, 3), loaded3.ptqtp.plane_count);
+    try std.testing.expectEqual(@as(usize, 0), loaded3.ptqtp.folded.len);
+    const spec3 = (try ptqtp_gguf.maybeStreamedMoeProjSpec(&out3, "e.weight", in_dim, out_dim, n_expert)).?;
+    try std.testing.expectEqual(false, spec3.fold);
+
+    // Tied K=2 with out_dim % 4 != 0: the column-group rule blocks the fold.
+    const odd_out: usize = 2;
+    const odd_rows = n_expert * odd_out;
+    var w2 = gguf.Writer.init(allocator);
+    defer w2.deinit();
+    try w2.addMetaString("general.architecture", "qwen3");
+    try w2.addMetaInt(ptqtp_gguf.version_key, u32, ptqtp_gguf.format_version);
+    try w2.addMetaInt(ptqtp_gguf.tie_key, u32, 1);
+    try w2.addTensor("e.weight.ptqtp0", .tq2_0, &.{ in_dim, odd_out, n_expert }, std.mem.sliceAsBytes(p0_blocks[0..odd_rows]));
+    try w2.addTensor("e.weight.ptqtp1", .tq2_0, &.{ in_dim, odd_out, n_expert }, std.mem.sliceAsBytes(p1_blocks[0..odd_rows]));
+    var buf2: [32768]u8 = undefined;
+    var sink2 = std.Io.Writer.fixed(&buf2);
+    try w2.finish(&sink2);
+    var out2 = try gguf.File.parseOwned(allocator, try allocator.dupe(u8, sink2.buffered()));
+    defer out2.deinit();
+    var loaded2 = (try ptqtp_gguf.maybeLoadMoeRhs(&ctx, &out2, "e.weight", in_dim, odd_out, n_expert, false)).?;
+    defer loaded2.deinit();
+    try std.testing.expectEqual(@as(usize, 2), loaded2.ptqtp.plane_count);
+    try std.testing.expectEqual(@as(usize, 0), loaded2.ptqtp.folded.len);
+    const spec2 = (try ptqtp_gguf.maybeStreamedMoeProjSpec(&out2, "e.weight", in_dim, odd_out, n_expert)).?;
+    try std.testing.expectEqual(false, spec2.fold);
 }

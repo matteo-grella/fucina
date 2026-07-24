@@ -159,6 +159,29 @@ them accept `--moe-stream`/`--moe-cache-mb`
 V4 Flash's 164.6 GB Q4K release decodes on a 64 GB machine with
 `--moe-stream` (measured 1.5–3.6 tok/s warm at a 20 GB expert budget).
 
+**Faster streaming via tie-fitted ternary experts** (qwen3 families): a
+streamed model gets both smaller and faster if the expert mass is
+PTQTP-quantized with tied scales first, then streamed as above:
+
+```sh
+# 1. Quantize the routed experts to tied K=2 planes (~4.1 bpw), one
+#    tensor at a time — source size does not need to fit in RAM.
+zig build export-gguf -Doptimize=ReleaseFast -- \
+  --from-gguf model-BF16.gguf --out model-ptqtp2-tied.gguf \
+  --ptqtp=2 --ptqtp-tie --ptqtp-include ffn_gate_exps,ffn_up_exps,ffn_down_exps
+
+# 2. Stream the output exactly like any other GGUF.
+zig build qwen3 -Doptimize=ReleaseFast -- model-ptqtp2-tied.gguf \
+  --prompt "..." --gen 64 --moe-stream --moe-cache-mb=6144
+```
+
+Tied K=2 halves the bytes read per expert miss vs a q8_0 source, and
+every cache-hit expert dot runs the folded one-pass ternary kernel
+(2.09-2.37× the two-pass dot; the store folds the planes into the cache
+slab at fill). `--ptqtp=3 --ptqtp-tie` is the near-parity quality shape
+instead (two-pass serving). The full walkthrough with measured numbers
+is [`PTQTP-RECIPE.md`](PTQTP-RECIPE.md).
+
 ### Native MTP drafting
 
 Models that ship their own multi-token-prediction head draft with it and

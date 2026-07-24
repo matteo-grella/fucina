@@ -576,13 +576,26 @@ pub fn packMatmulRhsTQ2_0Foldedx4(
     plane1: *const QuantizedMatmulRhsTQ2_0,
     plane2: *const QuantizedMatmulRhsTQ2_0,
 ) ![]BlockTQ2_0Foldedx4 {
+    const out = try allocator.alloc(BlockTQ2_0Foldedx4, (plane1.n / 4) * plane1.rows.blocks_per_row);
+    errdefer allocator.free(out);
+    try packMatmulRhsTQ2_0Foldedx4Into(out, plane1, plane2);
+    return out;
+}
+
+/// `packMatmulRhsTQ2_0Foldedx4` into caller storage — the MoE expert-stack
+/// and expert-store slab folds, where one big buffer holds every expert's
+/// pack. `dst.len` must be exactly `(n / 4) * blocks_per_row`.
+pub fn packMatmulRhsTQ2_0Foldedx4Into(
+    out: []BlockTQ2_0Foldedx4,
+    plane1: *const QuantizedMatmulRhsTQ2_0,
+    plane2: *const QuantizedMatmulRhsTQ2_0,
+) !void {
     const tensor = @import("../../tensor.zig");
     const n = plane1.n;
     if (n % 4 != 0 or plane2.n != n or plane2.rows.blocks_per_row != plane1.rows.blocks_per_row)
         return tensor.TensorError.InvalidShape;
     const blocks_per_row = plane1.rows.blocks_per_row;
-    const out = try allocator.alloc(BlockTQ2_0Foldedx4, (n / 4) * blocks_per_row);
-    errdefer allocator.free(out);
+    if (out.len != (n / 4) * blocks_per_row) return tensor.TensorError.InvalidShape;
     for (0..n / 4) |g| {
         var cols1: [4][]const BlockTQ2_0 = undefined;
         var cols2: [4][]const BlockTQ2_0 = undefined;
@@ -608,7 +621,6 @@ pub fn packMatmulRhsTQ2_0Foldedx4(
             }
         }
     }
-    return out;
 }
 
 /// cu = 3*u1 + u2 for element `e` of one block pair (crumb-law addressing).

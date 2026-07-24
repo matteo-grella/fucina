@@ -284,6 +284,13 @@ pub const ProjSpec = struct {
     /// Absolute on-disk offsets of planes 1 and 2 within `part`; read only
     /// when `plane_count` exceeds 1.
     plane_offsets: [2]u64 = .{ 0, 0 },
+    /// Tie-fitted K=2 PTQTP only (docs/PTQTP.md): the fill folds the two
+    /// plane row-blocks into the 4-bit column-interleaved pack, so the slab
+    /// section serves the one-pass folded kernel instead of two plane
+    /// passes. Disk layout is unchanged (still two plane reads per expert);
+    /// the fold happens in memory on the way into the slab. Requires
+    /// `plane_count == 2`, `quant == .tq2_0`, and `out_dim % 4 == 0`.
+    fold: bool = false,
 };
 
 const ProjGeometry = struct {
@@ -299,12 +306,18 @@ const ProjGeometry = struct {
     plane_bytes: usize,
     /// One expert's slab section: `plane_count * plane_bytes`.
     expert_bytes: usize,
+    /// Fill-time fold into the 4-bit pack (ProjSpec.fold): the folded
+    /// blocks fit inside the same section (520 vs 528 bytes per 4-column
+    /// group), so slab geometry is unchanged.
+    fold: bool,
 
     fn init(spec: ProjSpec, n_expert: usize) Error!ProjGeometry {
         if (spec.plane_count == 0 or spec.plane_count > 3) return Error.InvalidExpertGeometry;
         // Multi-plane is the PTQTP tq2_0 container only — the MoE dispatch
         // interprets a >1 plane slab as summed ternary planes.
         if (spec.plane_count > 1 and spec.quant != .tq2_0) return Error.InvalidExpertGeometry;
+        if (spec.fold and (spec.plane_count != 2 or spec.quant != .tq2_0 or spec.out_dim % 4 != 0))
+            return Error.InvalidExpertGeometry;
         const bpc = try spec.quant.blocksPerColumn(spec.in_dim);
         const row_bytes = std.math.mul(usize, bpc, spec.quant.blockSize()) catch return Error.InvalidExpertGeometry;
         const plane_bytes = std.math.mul(usize, spec.out_dim, row_bytes) catch return Error.InvalidExpertGeometry;
@@ -321,6 +334,7 @@ const ProjGeometry = struct {
             .plane_count = spec.plane_count,
             .plane_bytes = plane_bytes,
             .expert_bytes = expert_bytes,
+            .fold = spec.fold,
         };
     }
 
@@ -889,6 +903,7 @@ pub const ExpertStore = struct {
             .n_expert = ls.n_expert,
             .blocks_per_column = g.blocks_per_column,
             .plane_count = g.plane_count,
+            .folded = g.fold,
         };
     }
 
@@ -1051,11 +1066,50 @@ pub const ExpertStore = struct {
     /// accounts bytes under its own lock (`bytes_read` / `staged_bytes`).
     fn readExpert(self: *ExpertStore, ls: *LayerState, eid: u32, slot: *Slot) Error!void {
         for (&ls.projs, 0..) |*g, p| {
+            if (g.fold) {
+                try self.readExpertFolded(g, eid, slot.slab[ls.proj_off[p]..][0..g.expert_bytes]);
+                continue;
+            }
             for (0..g.plane_count) |plane| {
                 const dst = slot.slab[ls.proj_off[p] + plane * g.plane_bytes ..][0..g.plane_bytes];
                 try self.preadFull(g.part, dst, g.planeFileOffset(eid, plane));
             }
         }
+    }
+
+    /// Folded fill: both plane row-blocks bounce through a scratch, then
+    /// fold into the section start as the 4-bit pack. The bounce is not
+    /// optional — the pack is written faster than the plane bytes are
+    /// consumed (520 pack bytes vs 264 plane-0 bytes per 4-column group),
+    /// so an in-place fold would overwrite unread source blocks. The
+    /// per-call alloc rides on the same thread-safe-allocator assumption
+    /// the pilot worker's `ensureCapacity` already makes, and is noise
+    /// next to the two disk reads it accompanies.
+    fn readExpertFolded(self: *ExpertStore, g: *const ProjGeometry, eid: u32, section: []u8) Error!void {
+        const plane_blocks = g.out_dim * g.blocks_per_column;
+        const scratch = try self.allocator.alloc(qm.BlockTQ2_0, 2 * plane_blocks);
+        defer self.allocator.free(scratch);
+        for (0..2) |plane| {
+            const dst = std.mem.sliceAsBytes(scratch[plane * plane_blocks ..][0..plane_blocks]);
+            try self.preadFull(g.part, dst, g.planeFileOffset(eid, plane));
+        }
+        var views: [2]backend_mod.QuantizedMatmulRhsTQ2_0 = undefined;
+        for (0..2) |plane| {
+            views[plane] = .{
+                .rows = .{
+                    .allocator = null,
+                    .blocks = scratch[plane * plane_blocks ..][0..plane_blocks],
+                    .rows = g.out_dim,
+                    .cols = g.in_dim,
+                    .blocks_per_row = g.blocks_per_column,
+                },
+                .k = g.in_dim,
+                .n = g.out_dim,
+            };
+        }
+        const fg = (g.out_dim / 4) * g.blocks_per_column;
+        const out = @as([*]qm.BlockTQ2_0Foldedx4, @ptrCast(@alignCast(section.ptr)))[0..fg];
+        qm.packMatmulRhsTQ2_0Foldedx4Into(out, &views[0], &views[1]) catch return Error.InvalidExpertGeometry;
     }
 
     fn expertBytes(ls: *const LayerState) u64 {
@@ -1365,6 +1419,10 @@ pub const StreamedMoeRhs = struct {
     /// back to back. Geometry accessors stay per-plane, mirroring the
     /// resident `ptqtp` arm.
     plane_count: usize = 1,
+    /// Tie-fitted K=2 stream (ProjGeometry.fold): the resolved section
+    /// holds the 4-bit folded pack instead of plane row-blocks, and the
+    /// MoE dispatch serves the one-pass folded kernel.
+    folded: bool = false,
 
     /// Virtual stacked row count, mirroring the resident arms' `n`.
     pub fn rows(self: *const StreamedMoeRhs) usize {
