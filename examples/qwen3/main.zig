@@ -66,6 +66,9 @@ pub fn main(init: std.process.Init) !void {
     var moe_no_learn = false;
     var moe_pilot = false;
     var moe_expert_top_p: ?f32 = null;
+    var moe_mirror_buf: [8][]const u8 = undefined;
+    var moe_mirror_n: usize = 0;
+    var moe_mirror_weights_arg: ?[]const u8 = null;
     var kv_save = false;
     var kv_save_arg: ?[]const u8 = null;
     var arg_i: usize = 2;
@@ -246,6 +249,18 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--moe-pilot")) {
             moe_stream_flag = true;
             moe_pilot = true;
+        } else if (std.mem.startsWith(u8, arg, "--moe-mirror=")) {
+            // Another full copy of the model, typically on another drive
+            // (repeatable): expert reads split across every copy, so
+            // miss-bound streaming gets each drive's bandwidth.
+            moe_stream_flag = true;
+            if (moe_mirror_n >= moe_mirror_buf.len) return error.TooManyMirrors;
+            moe_mirror_buf[moe_mirror_n] = arg["--moe-mirror=".len..];
+            moe_mirror_n += 1;
+        } else if (std.mem.startsWith(u8, arg, "--moe-mirror-weights=")) {
+            // Per-mirror read share relative to the primary's 1, comma
+            // list in --moe-mirror order (default 1 each: even split).
+            moe_mirror_weights_arg = arg["--moe-mirror-weights=".len..];
         } else if (std.mem.startsWith(u8, arg, "--moe-expert-top-p=")) {
             moe_expert_top_p = try std.fmt.parseFloat(f32, arg["--moe-expert-top-p=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--")) {
@@ -277,6 +292,8 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    var moe_mirror_weights_buf: [8]f32 = undefined;
+    const moe_mirror_weights = try llm.weights.parseMirrorWeights(moe_mirror_weights_arg, moe_mirror_n, &moe_mirror_weights_buf);
     const load_options: llm.qwen3.model.LoadOptions = if (moe_stream_flag) .{
         .moe_stream = .{
             .gguf_path = args[1],
@@ -285,6 +302,8 @@ pub fn main(init: std.process.Init) !void {
             .auto_pin = !moe_no_learn,
             .pin_bytes = if (moe_pin_mb) |mb| mb << 20 else null,
             .pilot = moe_pilot,
+            .mirror_paths = moe_mirror_buf[0..moe_mirror_n],
+            .mirror_weights = moe_mirror_weights,
         },
     } else .{};
     var model_config = try llm.qwen3.model.Config.fromGguf(&file);

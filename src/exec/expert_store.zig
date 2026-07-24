@@ -356,6 +356,10 @@ const invalid_eid = std.math.maxInt(u32);
 const PilotReq = struct { layer_i: u32, eid: u32 };
 const pilot_ring_cap = 4096;
 
+/// One extra full copy of the model (same split parts, another drive) and
+/// its relative read weight (the primary's weight is 1).
+const MirrorSet = struct { fds: []fd_t, weight: f32 };
+
 /// Staging-slot lifecycle (`stage_mutex` guards every transition; the slab
 /// is worker-owned while `.loading`, so neither consume nor reclaim may
 /// touch it until `.ready`).
@@ -647,6 +651,25 @@ pub const ExpertStore = struct {
     stage_meta: []StageMeta = &.{},
     stage_stamp: u64 = 0,
 
+    // ---- mirror copies (N-drive expert streaming) ----
+    // Extra full copies of the model on other drives (`addMirror`). Each
+    // expert's reads — and its readahead hints — route to ONE copy by a
+    // deterministic weighted (layer, expert) hash. Deterministic on
+    // purpose: the hint and the demand pread must warm/hit the SAME
+    // drive's page cache, and one expert's bytes must never occupy page
+    // cache on two drives. Weighted so asymmetric drives carry
+    // asymmetric shares. Aggregate read bandwidth scales with the drives
+    // holding a copy; a mirror read error falls back to the primary
+    // (mirrors add bandwidth, never correctness).
+    mirrors: []MirrorSet = &.{},
+    /// Cumulative routing thresholds over 1 << 16, primary first; empty
+    /// until a mirror is attached. Built at `finalize`.
+    route_cum: []u32 = &.{},
+    /// Bytes served per copy (index 0 = primary) — atomic because the
+    /// forward thread and the prefetch worker both read. At `finalize`.
+    copy_bytes: []std.atomic.Value(u64) = &.{},
+    mirror_fallbacks: std.atomic.Value(u64) = .init(0),
+
     /// The store is heap-allocated so `StreamedMoeRhs` values and the owning
     /// model can hold stable pointers while the model struct moves by value.
     /// `gguf_paths` lists every part of a split GGUF (single-file: one
@@ -711,9 +734,41 @@ pub const ExpertStore = struct {
         allocator.free(self.seen);
         allocator.free(self.layers);
         allocator.free(self.registered);
+        for (self.mirrors) |m| {
+            for (m.fds) |fd| closeFd(fd);
+            allocator.free(m.fds);
+        }
+        allocator.free(self.mirrors);
+        allocator.free(self.route_cum);
+        allocator.free(self.copy_bytes);
         for (self.fds) |fd| closeFd(fd);
         allocator.free(self.fds);
         allocator.destroy(self);
+    }
+
+    /// Attach one more full copy of the model: `paths` names the same
+    /// split parts as the primary, typically on another drive, and
+    /// `weight` is its read share relative to the primary's 1 (equal
+    /// drives: 1; a drive half as fast: 0.5). Call any number of times
+    /// before `finalize` — expert reads then split across every copy, so
+    /// aggregate streaming bandwidth grows with each drive holding one.
+    pub fn addMirror(self: *ExpertStore, paths: []const []const u8, weight: f32) Error!void {
+        std.debug.assert(!self.finalized);
+        if (paths.len != self.fds.len) return Error.InvalidExpertGeometry;
+        if (!(weight > 0)) return Error.InvalidExpertGeometry;
+        const fds = try self.allocator.alloc(fd_t, paths.len);
+        errdefer self.allocator.free(fds);
+        var n_open: usize = 0;
+        errdefer for (fds[0..n_open]) |fd| closeFd(fd);
+        for (paths) |path| {
+            fds[n_open] = try openReadOnly(self.allocator, path);
+            n_open += 1;
+        }
+        const grown = try self.allocator.alloc(MirrorSet, self.mirrors.len + 1);
+        @memcpy(grown[0..self.mirrors.len], self.mirrors);
+        grown[self.mirrors.len] = .{ .fds = fds, .weight = weight };
+        self.allocator.free(self.mirrors);
+        self.mirrors = grown;
     }
 
     /// Register one MoE layer's three stacked expert tensors. Call once per
@@ -771,6 +826,24 @@ pub const ExpertStore = struct {
             max_expert = @max(max_expert, ls.n_expert);
         }
         if (n_registered == 0) return Error.LayerNotRegistered;
+
+        // The mirror routing table must exist before the pin tier loads
+        // below (those reads route too): normalized cumulative weights,
+        // primary first, over the 1 << 16 hash range.
+        if (self.mirrors.len > 0) {
+            self.route_cum = try self.allocator.alloc(u32, self.mirrors.len + 1);
+            var total: f32 = 1;
+            for (self.mirrors) |m| total += m.weight;
+            var acc: f32 = 1;
+            self.route_cum[0] = @intFromFloat(@round(acc / total * 65536.0));
+            for (self.mirrors, 1..) |m, i| {
+                acc += m.weight;
+                self.route_cum[i] = @intFromFloat(@round(acc / total * 65536.0));
+            }
+            self.route_cum[self.mirrors.len] = 65536;
+            self.copy_bytes = try self.allocator.alloc(std.atomic.Value(u64), self.mirrors.len + 1);
+            for (self.copy_bytes) |*b| b.* = .init(0);
+        }
 
         const history_pairs = self.loadUsage();
 
@@ -856,8 +929,9 @@ pub const ExpertStore = struct {
         if (self.options.readahead) {
             for (picks.items) |cand| {
                 const ls = &self.layers[cand.layer];
+                const copy = self.routeCopy(cand.layer, cand.eid);
                 for (&ls.projs) |*g| {
-                    for (0..g.plane_count) |plane| hintWillNeed(self.fds[g.part], g.planeFileOffset(cand.eid, plane), g.plane_bytes);
+                    for (0..g.plane_count) |plane| hintWillNeed(self.copyFd(copy, g.part), g.planeFileOffset(cand.eid, plane), g.plane_bytes);
                 }
             }
         }
@@ -869,7 +943,7 @@ pub const ExpertStore = struct {
             const slot = &ls.pinned[fill[cand.layer]];
             fill[cand.layer] += 1;
             try slot.ensureCapacity(self.allocator, ls.slab_bytes);
-            try self.readExpert(ls, cand.eid, slot);
+            try self.readExpert(ls, cand.layer, cand.eid, slot);
             slot.eid = cand.eid;
         }
         self.pinned_experts = picks.items.len;
@@ -970,8 +1044,9 @@ pub const ExpertStore = struct {
         // pread the earlier misses.
         if (self.options.readahead and self.n_miss > 1) {
             for (self.miss_eids[0..self.n_miss]) |eid| {
+                const copy = self.routeCopy(layer_i, eid);
                 for (&ls.projs) |*g| {
-                    for (0..g.plane_count) |plane| hintWillNeed(self.fds[g.part], g.planeFileOffset(eid, plane), g.plane_bytes);
+                    for (0..g.plane_count) |plane| hintWillNeed(self.copyFd(copy, g.part), g.planeFileOffset(eid, plane), g.plane_bytes);
                 }
             }
         }
@@ -983,7 +1058,7 @@ pub const ExpertStore = struct {
             // synchronous read path is exactly what it always was.
             if (!self.stageConsume(layer_i, eid, slot)) {
                 try slot.ensureCapacity(self.allocator, ls.slab_bytes);
-                try self.readExpert(ls, eid, slot);
+                try self.readExpert(ls, layer_i, eid, slot);
                 self.stats.bytes_read += expertBytes(ls);
             }
             slot.eid = eid;
@@ -1063,16 +1138,18 @@ pub const ExpertStore = struct {
     /// section, which is the layout the MoE dispatch reads.
     /// Stats-free by design: called from the forward thread (under the
     /// store mutex) AND the prefetch worker (no store mutex) — each caller
-    /// accounts bytes under its own lock (`bytes_read` / `staged_bytes`).
-    fn readExpert(self: *ExpertStore, ls: *LayerState, eid: u32, slot: *Slot) Error!void {
+    /// accounts bytes under its own lock (`bytes_read` / `staged_bytes`);
+    /// the per-copy mirror counters are atomic for the same reason.
+    fn readExpert(self: *ExpertStore, ls: *LayerState, layer_i: usize, eid: u32, slot: *Slot) Error!void {
+        const copy = self.routeCopy(layer_i, eid);
         for (&ls.projs, 0..) |*g, p| {
             if (g.fold) {
-                try self.readExpertFolded(g, eid, slot.slab[ls.proj_off[p]..][0..g.expert_bytes]);
+                try self.readExpertFolded(g, eid, copy, slot.slab[ls.proj_off[p]..][0..g.expert_bytes]);
                 continue;
             }
             for (0..g.plane_count) |plane| {
                 const dst = slot.slab[ls.proj_off[p] + plane * g.plane_bytes ..][0..g.plane_bytes];
-                try self.preadFull(g.part, dst, g.planeFileOffset(eid, plane));
+                try self.preadFull(g.part, copy, dst, g.planeFileOffset(eid, plane));
             }
         }
     }
@@ -1085,13 +1162,13 @@ pub const ExpertStore = struct {
     /// per-call alloc rides on the same thread-safe-allocator assumption
     /// the pilot worker's `ensureCapacity` already makes, and is noise
     /// next to the two disk reads it accompanies.
-    fn readExpertFolded(self: *ExpertStore, g: *const ProjGeometry, eid: u32, section: []u8) Error!void {
+    fn readExpertFolded(self: *ExpertStore, g: *const ProjGeometry, eid: u32, copy: usize, section: []u8) Error!void {
         const plane_blocks = g.out_dim * g.blocks_per_column;
         const scratch = try self.allocator.alloc(qm.BlockTQ2_0, 2 * plane_blocks);
         defer self.allocator.free(scratch);
         for (0..2) |plane| {
             const dst = std.mem.sliceAsBytes(scratch[plane * plane_blocks ..][0..plane_blocks]);
-            try self.preadFull(g.part, dst, g.planeFileOffset(eid, plane));
+            try self.preadFull(g.part, copy, dst, g.planeFileOffset(eid, plane));
         }
         var views: [2]backend_mod.QuantizedMatmulRhsTQ2_0 = undefined;
         for (0..2) |plane| {
@@ -1118,10 +1195,48 @@ pub const ExpertStore = struct {
         return total;
     }
 
-    fn preadFull(self: *ExpertStore, part: u16, buf: []u8, offset: u64) Error!void {
+    /// Copy index (0 = primary) serving an expert's bytes: a splitmix64
+    /// finalizer over (layer, expert) cut against the cumulative weight
+    /// table. No mirrors = primary, always.
+    fn routeCopy(self: *const ExpertStore, layer_i: usize, eid: u32) usize {
+        if (self.route_cum.len == 0) return 0;
+        var h = (@as(u64, @intCast(layer_i)) << 32) | eid;
+        h ^= h >> 30;
+        h *%= 0xbf58476d1ce4e5b9;
+        h ^= h >> 27;
+        h *%= 0x94d049bb133111eb;
+        h ^= h >> 31;
+        const cut: u32 = @intCast(h & 0xFFFF);
+        for (self.route_cum, 0..) |threshold, i| {
+            if (cut < threshold) return i;
+        }
+        return 0;
+    }
+
+    fn copyFd(self: *const ExpertStore, copy: usize, part: u16) fd_t {
+        return if (copy == 0) self.fds[part] else self.mirrors[copy - 1].fds[part];
+    }
+
+    /// Full positional read from the routed copy, falling back to the
+    /// primary when a mirror errors mid-read: a flaky or unmounted mirror
+    /// must never kill decode while the primary holds the same bytes.
+    fn preadFull(self: *ExpertStore, part: u16, copy: usize, buf: []u8, offset: u64) Error!void {
+        if (copy != 0) {
+            if (preadFullFd(self.copyFd(copy, part), buf, offset)) {
+                _ = self.copy_bytes[copy].fetchAdd(buf.len, .monotonic);
+                return;
+            } else |_| {
+                _ = self.mirror_fallbacks.fetchAdd(1, .monotonic);
+            }
+        }
+        try preadFullFd(self.fds[part], buf, offset);
+        if (self.copy_bytes.len > 0) _ = self.copy_bytes[0].fetchAdd(buf.len, .monotonic);
+    }
+
+    fn preadFullFd(fd: fd_t, buf: []u8, offset: u64) Error!void {
         var done: usize = 0;
         while (done < buf.len) {
-            const n = try preadOnce(self.fds[part], buf[done..], offset + done);
+            const n = try preadOnce(fd, buf[done..], offset + done);
             if (n == 0) return Error.UnexpectedEndOfFile;
             done += n;
         }
@@ -1241,7 +1356,7 @@ pub const ExpertStore = struct {
         slot.ensureCapacity(self.allocator, ls.slab_bytes) catch {
             ok = false;
         };
-        if (ok) self.readExpert(ls, req.eid, slot) catch {
+        if (ok) self.readExpert(ls, req.layer_i, req.eid, slot) catch {
             ok = false;
         };
         self.stage_mutex.lock();
@@ -1379,7 +1494,7 @@ pub const ExpertStore = struct {
         if (!self.finalized) return 0;
 
         var swaps: usize = 0;
-        for (self.layers, self.registered) |*ls, reg| {
+        for (self.layers, self.registered, 0..) |*ls, reg, layer_i| {
             if (!reg) continue;
             if (ls.pinned.len > 0) {
                 var done: usize = 0;
@@ -1390,7 +1505,7 @@ pub const ExpertStore = struct {
                     // by lookups instead of resolving to stale bytes.
                     slot.eid = invalid_eid;
                     slot.ensureCapacity(self.allocator, ls.slab_bytes) catch break;
-                    self.readExpert(ls, pick.eid, slot) catch break;
+                    self.readExpert(ls, layer_i, pick.eid, slot) catch break;
                     slot.eid = pick.eid;
                     swaps += 1;
                 }

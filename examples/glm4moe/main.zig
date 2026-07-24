@@ -25,6 +25,9 @@ pub fn main(init: std.process.Init) !void {
     var gen_count: usize = 32;
     var moe_stream_flag = false;
     var moe_cache_mb: ?usize = null;
+    var moe_mirror_buf: [8][]const u8 = undefined;
+    var moe_mirror_n: usize = 0;
+    var moe_mirror_weights_arg: ?[]const u8 = null;
     var mtp_depth: usize = 0; // 0 = plain decode
     var arg_i: usize = 2;
     while (arg_i < args.len) : (arg_i += 1) {
@@ -53,6 +56,18 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.startsWith(u8, arg, "--moe-cache-mb=")) {
             moe_stream_flag = true;
             moe_cache_mb = try std.fmt.parseInt(usize, arg["--moe-cache-mb=".len..], 10);
+        } else if (std.mem.startsWith(u8, arg, "--moe-mirror=")) {
+            // Another full copy of the model, typically on another drive
+            // (repeatable): expert reads split across every copy, so
+            // miss-bound streaming gets each drive's bandwidth.
+            moe_stream_flag = true;
+            if (moe_mirror_n >= moe_mirror_buf.len) return error.TooManyMirrors;
+            moe_mirror_buf[moe_mirror_n] = arg["--moe-mirror=".len..];
+            moe_mirror_n += 1;
+        } else if (std.mem.startsWith(u8, arg, "--moe-mirror-weights=")) {
+            // Per-mirror read share relative to the primary's 1, comma
+            // list in --moe-mirror order (default 1 each: even split).
+            moe_mirror_weights_arg = arg["--moe-mirror-weights=".len..];
         } else {
             try stdout.print("unknown flag: {s}\n", .{arg});
             return error.UnknownArgument;
@@ -70,10 +85,14 @@ pub fn main(init: std.process.Init) !void {
     defer tokenizer.deinit();
 
     const capacity: usize = 2048;
+    var moe_mirror_weights_buf: [8]f32 = undefined;
+    const moe_mirror_weights = try llm.weights.parseMirrorWeights(moe_mirror_weights_arg, moe_mirror_n, &moe_mirror_weights_buf);
     const load_options: llm.glm4moe.model.Model.LoadOptions = if (moe_stream_flag) .{
         .moe_stream = .{
             .gguf_path = args[1],
             .cache_bytes = if (moe_cache_mb) |mb| mb << 20 else null,
+            .mirror_paths = moe_mirror_buf[0..moe_mirror_n],
+            .mirror_weights = moe_mirror_weights,
         },
     } else .{};
     var model = try llm.glm4moe.model.Model.loadGgufFromFileOptions(&ctx, &file, capacity, load_options);

@@ -24,6 +24,9 @@ pub fn main(init: std.process.Init) !void {
     var moe_stream_flag = false;
     var moe_cache_mb: ?usize = null;
     var moe_pilot = false;
+    var moe_mirror_buf: [8][]const u8 = undefined;
+    var moe_mirror_n: usize = 0;
+    var moe_mirror_weights_arg: ?[]const u8 = null;
     var mla_mode: llm.deepseek2.model.Cache.Mode = .latent;
     var dsa_flag = false;
     var index_probe = false;
@@ -59,6 +62,18 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--moe-pilot")) {
             moe_stream_flag = true;
             moe_pilot = true;
+        } else if (std.mem.startsWith(u8, arg, "--moe-mirror=")) {
+            // Another full copy of the model, typically on another drive
+            // (repeatable): expert reads split across every copy, so
+            // miss-bound streaming gets each drive's bandwidth.
+            moe_stream_flag = true;
+            if (moe_mirror_n >= moe_mirror_buf.len) return error.TooManyMirrors;
+            moe_mirror_buf[moe_mirror_n] = arg["--moe-mirror=".len..];
+            moe_mirror_n += 1;
+        } else if (std.mem.startsWith(u8, arg, "--moe-mirror-weights=")) {
+            // Per-mirror read share relative to the primary's 1, comma
+            // list in --moe-mirror order (default 1 each: even split).
+            moe_mirror_weights_arg = arg["--moe-mirror-weights=".len..];
         } else if (std.mem.eql(u8, arg, "--mla=full")) {
             mla_mode = .full;
         } else if (std.mem.eql(u8, arg, "--mla=latent")) {
@@ -120,11 +135,15 @@ pub fn main(init: std.process.Init) !void {
         try stdout.print("--index-probe measures the exact path; drop --index-share\n", .{});
         return error.UnknownArgument;
     }
+    var moe_mirror_weights_buf: [8]f32 = undefined;
+    const moe_mirror_weights = try llm.weights.parseMirrorWeights(moe_mirror_weights_arg, moe_mirror_n, &moe_mirror_weights_buf);
     var load_options: llm.deepseek2.model.Model.LoadOptions = if (moe_stream_flag) .{
         .moe_stream = .{
             .gguf_path = args[1],
             .cache_bytes = if (moe_cache_mb) |mb| mb << 20 else null,
             .pilot = moe_pilot,
+            .mirror_paths = moe_mirror_buf[0..moe_mirror_n],
+            .mirror_weights = moe_mirror_weights,
         },
     } else .{};
     load_options.dsa = dsa_flag;

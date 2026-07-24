@@ -1342,7 +1342,34 @@ pub const MoeStreamOptions = struct {
     /// implement the lookahead hook (qwen3, deepseek2); never changes
     /// output. Prediction recall is measured in `ExpertStore.Stats`.
     pilot: bool = false,
+    /// Extra full copies of the model, one path per copy (part-1 path for
+    /// split GGUFs; siblings resolve like `gguf_path`), typically each on
+    /// its own drive. Expert reads split across every copy by a
+    /// deterministic weighted hash, so aggregate streaming bandwidth
+    /// scales with the drives holding one — the lever for disk-bound
+    /// decode. Output is unchanged; a mirror read error falls back to the
+    /// primary.
+    mirror_paths: []const []const u8 = &.{},
+    /// Read share per mirror relative to the primary's 1 (parallel to
+    /// `mirror_paths`); null = 1 each, an even split across all copies.
+    mirror_weights: ?[]const f32 = null,
 };
+
+/// The runners' shared `--moe-mirror-weights=` comma list, parsed into
+/// `buf` and validated against the number of `--moe-mirror` flags given.
+/// A null argument returns null (even split).
+pub fn parseMirrorWeights(arg: ?[]const u8, n_mirrors: usize, buf: []f32) !?[]const f32 {
+    const list = arg orelse return null;
+    var n: usize = 0;
+    var it = std.mem.splitScalar(u8, list, ',');
+    while (it.next()) |tok| {
+        if (n >= buf.len) return error.TooManyMirrors;
+        buf[n] = try std.fmt.parseFloat(f32, tok);
+        n += 1;
+    }
+    if (n != n_mirrors) return error.MirrorWeightsMismatch;
+    return buf[0..n];
+}
 
 /// The store-create block shared by the MoE loaders: expand split-GGUF part
 /// paths (single files pass through as one entry) and open the ExpertStore
@@ -1361,13 +1388,34 @@ pub fn createExpertStore(allocator: Allocator, options: MoeStreamOptions, n_laye
         break :blk view;
     } else &one_path;
     defer if (split_paths != null) allocator.free(store_paths);
-    return fucina.ExpertStore.create(allocator, store_paths, n_layers, .{
+    if (options.mirror_weights) |ws| {
+        if (ws.len != options.mirror_paths.len) return error.MirrorWeightsMismatch;
+    }
+    const store = try fucina.ExpertStore.create(allocator, store_paths, n_layers, .{
         .cache_bytes = options.cache_bytes,
         .cache_slots_per_layer = options.cache_slots_per_layer,
         .readahead = options.readahead,
         .auto_pin = options.auto_pin,
         .pin_bytes = options.pin_bytes,
     });
+    errdefer store.destroy();
+    for (options.mirror_paths, 0..) |mirror_path, m| {
+        const weight = if (options.mirror_weights) |ws| ws[m] else 1.0;
+        const mirror_split = try gguf.File.splitPartPaths(allocator, mirror_path);
+        defer if (mirror_split) |paths| {
+            for (paths) |part| allocator.free(part);
+            allocator.free(paths);
+        };
+        var one_mirror = [_][]const u8{mirror_path};
+        const mirror_parts: []const []const u8 = if (mirror_split) |paths| blk: {
+            const view = try allocator.alloc([]const u8, paths.len);
+            for (view, paths) |*d, src| d.* = src;
+            break :blk view;
+        } else &one_mirror;
+        defer if (mirror_split != null) allocator.free(mirror_parts);
+        try store.addMirror(mirror_parts, weight);
+    }
+    return store;
 }
 
 /// Exit-time streamed-tier report shared by the MoE runners: print the
@@ -1388,6 +1436,22 @@ pub fn reportAndSaveMoeStream(store: *fucina.ExpertStore, learn: bool, writer: a
         "moe prefetch: staged {d} loads ({d:.2} GB), consumed {d}, wasted {d}\n",
         .{ s.staged_loads, @as(f64, @floatFromInt(s.staged_bytes)) / 1e9, s.staged_consumed, s.staged_wasted },
     ) catch {};
+    if (store.mirrors.len > 0) {
+        var total: u64 = 0;
+        for (store.copy_bytes) |*b| total += b.load(.monotonic);
+        writer.print("moe mirror: {d} copies, reads", .{store.mirrors.len + 1}) catch {};
+        for (store.copy_bytes, 0..) |*b, i| {
+            const bytes = b.load(.monotonic);
+            const pct = if (total == 0) 0 else @as(f64, @floatFromInt(bytes)) / @as(f64, @floatFromInt(total)) * 100;
+            writer.print("{s}{d:.1}% ({d:.2} GB)", .{ if (i == 0) " " else " / ", pct, @as(f64, @floatFromInt(bytes)) / 1e9 }) catch {};
+        }
+        const fallbacks = store.mirror_fallbacks.load(.monotonic);
+        if (fallbacks > 0) {
+            writer.print(", {d} mirror reads fell back to the primary\n", .{fallbacks}) catch {};
+        } else {
+            writer.print("\n", .{}) catch {};
+        }
+    }
 }
 
 /// Streamed counterpart of three `loadMoeRhs` calls: registers one layer's

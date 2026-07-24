@@ -1347,3 +1347,76 @@ test "learning cache: repin pass swaps cold pins for hot streamed experts with h
     try fx.expectDecodeWith(&ctx, store2, &.{ 1, 2 }, &.{ 0.5, 0.5 });
     try std.testing.expectEqual(pin_hits_before + 2, store2.stats.pin_hits);
 }
+
+test "mirror copies: reads split across drives, stay bit-exact, and a broken mirror falls back" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var fx: Fixture = undefined;
+    try fx.init(allocator, n_expert); // every expert cached: each read once
+    defer fx.deinit();
+
+    // A full second copy of the model bytes — "the other drive".
+    var mirror_buf: [160]u8 = undefined;
+    const mirror_path = try std.fmt.bufPrint(&mirror_buf, "{s}.copy", .{fx.path});
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, mirror_path) catch {};
+    {
+        var file = try std.Io.Dir.cwd().createFile(std.testing.io, mirror_path, .{});
+        defer file.close(std.testing.io);
+        var write_buffer: [4096]u8 = undefined;
+        var writer = file.writer(std.testing.io, &write_buffer);
+        try writer.interface.writeAll(std.mem.sliceAsBytes(fx.gate_blocks));
+        try writer.interface.writeAll(std.mem.sliceAsBytes(fx.up_blocks));
+        try writer.interface.writeAll(std.mem.sliceAsBytes(fx.down_blocks));
+        try writer.interface.flush();
+    }
+
+    // Attach validation: part-count mismatch and an unopenable path are
+    // refused (a mirror is configuration — fail loud, unlike read errors).
+    var store = try ExpertStore.create(allocator, &.{fx.path}, 1, .{ .cache_slots_per_layer = n_expert });
+    defer store.destroy();
+    try std.testing.expectError(error.InvalidExpertGeometry, store.addMirror(&.{ mirror_path, mirror_path }, 1.0));
+    try std.testing.expectError(error.InvalidExpertGeometry, store.addMirror(&.{mirror_path}, 0));
+    try std.testing.expectError(error.ExpertFileOpenFailed, store.addMirror(&.{"expert_store_no_such_copy.bin"}, 1.0));
+
+    // Even split: every expert decodes bit-exactly while the reads land on
+    // both copies (the (layer, expert) hash is deterministic, so this split
+    // is stable), with no fallbacks.
+    try store.addMirror(&.{mirror_path}, 1.0);
+    try fx.registerLayer(store);
+    try store.finalize();
+    var e: usize = 0;
+    while (e < n_expert) : (e += 2) {
+        try fx.expectDecodeWith(&ctx, store, &.{ e, e + 1 }, &.{ 0.6, 0.4 });
+    }
+    try std.testing.expect(store.copy_bytes[0].load(.monotonic) > 0);
+    try std.testing.expect(store.copy_bytes[1].load(.monotonic) > 0);
+    try std.testing.expectEqual(@as(u64, 0), store.mirror_fallbacks.load(.monotonic));
+
+    // A TRUNCATED mirror (gate section only) weighted to draw ~all reads:
+    // up/down preads past its EOF fail and fall back to the primary —
+    // output stays bit-exact, and the fallbacks are counted.
+    var short_buf: [160]u8 = undefined;
+    const short_path = try std.fmt.bufPrint(&short_buf, "{s}.short", .{fx.path});
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, short_path) catch {};
+    {
+        var file = try std.Io.Dir.cwd().createFile(std.testing.io, short_path, .{});
+        defer file.close(std.testing.io);
+        var write_buffer: [4096]u8 = undefined;
+        var writer = file.writer(std.testing.io, &write_buffer);
+        try writer.interface.writeAll(std.mem.sliceAsBytes(fx.gate_blocks));
+        try writer.interface.flush();
+    }
+    var store2 = try ExpertStore.create(allocator, &.{fx.path}, 1, .{ .cache_slots_per_layer = n_expert });
+    defer store2.destroy();
+    try store2.addMirror(&.{short_path}, 1000.0);
+    try fx.registerLayer(store2);
+    try store2.finalize();
+    e = 0;
+    while (e < n_expert) : (e += 2) {
+        try fx.expectDecodeWith(&ctx, store2, &.{ e, e + 1 }, &.{ 0.6, 0.4 });
+    }
+    try std.testing.expect(store2.mirror_fallbacks.load(.monotonic) > 0);
+}

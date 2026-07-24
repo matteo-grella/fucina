@@ -147,6 +147,14 @@ Knobs:
 - `--moe-expert-top-p=F` — routing sparsification: keep experts per token
   up to cumulative router weight F and skip the rest (30B: F=0.7 cut disk
   traffic 55%). Quality-traded; `F>=1` is the exact baseline.
+- `--moe-mirror=PATH` — another full copy of the model, typically on
+  another drive (repeatable: one flag per copy; for split GGUFs point at
+  the copy's part 1). Expert reads split across every copy by a
+  deterministic per-expert hash, so miss-bound streaming aggregates each
+  drive's bandwidth; output is unchanged, and a mirror read error falls
+  back to the primary. `--moe-mirror-weights=W1,W2,...` biases the split
+  for asymmetric drives (share relative to the primary's 1; default an
+  even split). The exit stats report the per-copy split.
 - `--kv-save[=PATH]` — crash-safe KV persistence for `--chat`/`--repl`:
   conversations reopen warm across process restarts with zero re-prefill
   (essential below 1 tok/s). Default sidecar `<gguf>.kvcache`.
