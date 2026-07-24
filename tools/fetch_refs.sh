@@ -98,7 +98,7 @@ zinc|https://github.com/zolotukhin/zinc|986c2390bdf337d1fb46aa611e12ab1b7a74a05e
 NeuralAmpModelerCore|https://github.com/sdatkinson/NeuralAmpModelerCore|e49c93e678549230d09efbb0beeb50511e387874
 neural-amp-modeler|https://github.com/sdatkinson/neural-amp-modeler|a11ed88a128031c306faba79878eade51a209c48
 ds4|https://github.com/antirez/ds4|80ebbc35237f77e51ce7e57970ba9a6a112c4faa
-colibri|https://github.com/JustVugg/colibri|a5fc89e88f113fc9d1c9d8752861b158d7c303e7
+colibri|https://github.com/JustVugg/colibri|81f08a09e5651ce52616dc720f68810f9021c0be
 es-at-scale|https://github.com/VsonicV/es-at-scale|574a9d134da1ffce2a8bb812019899e5c96b588a
 es-awd|https://github.com/kschweig/es-awd|f432ff823a7d59f91d4ac2cf99e4923654c6f464
 ik_llama.cpp|https://github.com/ikawrakow/ik_llama.cpp|b90939934add9ba4fbb37e8c6470809a70b78f0a
