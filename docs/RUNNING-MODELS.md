@@ -155,6 +155,11 @@ Knobs:
   back to the primary. `--moe-mirror-weights=W1,W2,...` biases the split
   for asymmetric drives (share relative to the primary's 1; default an
   even split). The exit stats report the per-copy split.
+- `--moe-io-threads=N` — demand-miss reads fan out across N persistent
+  I/O worker threads (default 8; the forward thread participates too;
+  0 = sequential). Parallel misses are what turn disk queue depth — and
+  mirror copies — into real aggregate bandwidth within one token's
+  expert fetches. Output is unchanged.
 - `--kv-save[=PATH]` — crash-safe KV persistence for `--chat`/`--repl`:
   conversations reopen warm across process restarts with zero re-prefill
   (essential below 1 tok/s). Default sidecar `<gguf>.kvcache`.
@@ -199,7 +204,9 @@ drafter:
 - GLM-4.5 family: `--mtp[=depth]` drafts with the MTP head and verifies
   with one batched trunk step — lossless (byte-identical to plain greedy),
   measured 2.29 tokens per forward at depth 2 on GLM-4.5-Air Q6_K streamed
-  on a 64 GB machine. Depth caps at 2.
+  on a 64 GB machine. The verify runs kernel-pinned (batched quant
+  matmuls reproduce single-token numerics bitwise), so depth now caps at
+  8 instead of the old drift-bound 2; bare `--mtp` stays depth 2.
   ([examples/glm4moe/README.md](../examples/glm4moe/README.md))
 - DeepSeek V4 Flash: `--mtp=<sidecar.gguf>` — the 3.8 GB sidecar GGUF
   drafts, the trunk verifies in one batched step — lossless, measured

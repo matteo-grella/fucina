@@ -41,7 +41,9 @@ zig build deepseek4 -Doptimize=ReleaseFast -- \
 
 # Native MTP speculative decoding (the 3.8 GB sidecar GGUF drafts, the
 # trunk verifies in one batched step — lossless, measured 84.6% draft
-# acceptance / 1.60 tokens per trunk forward at depth 1):
+# acceptance / 1.60 tokens per trunk forward at depth 1; the verify and
+# the partial-accept replay run kernel-pinned, and depth 4 is measured
+# byte-identical to plain greedy on the streamed Q4K trunk):
 zig build deepseek4 -Doptimize=ReleaseFast -- <model.gguf> --chat --prompt "..." \
   --moe-stream --mtp=models/deepseek-v4/DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf
 ```
@@ -56,7 +58,7 @@ Flags (first positional argument = model GGUF, required):
 | `--chat` | render the reference chat template (thinking disabled) instead of raw completion |
 | `--prefill-chunk=N` | batched-prefill chunk size, default 128; `1` = sequential |
 | `--mtp=PATH` | MTP sidecar GGUF for native speculative decoding |
-| `--mtp-depth=N` | draft depth, default 1, caps at 8 |
+| `--mtp-depth=N` | draft depth, default 1, caps at 8 (kernel-pinned verify; depth 4 measured byte-identical to plain greedy) |
 | `--index-probe` | decode-time selection-overlap probe across CSA layers; measures the exact path, so mutually exclusive with `--index-share` |
 | `--index-share=N` | cross-layer indexer reuse: every Nth Full CSA layer computes its selection, the layers between reuse it — approximate by design, calibrate with the probe first |
 | `--vectors=DIR` / `--vectors-max-prompt=N` | official-vector regression, see below |

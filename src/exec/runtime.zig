@@ -55,6 +55,19 @@ pub const Runtime = struct {
     dot_backward_worker_mutex: thread.Mutex = .{},
     scope_entries: std.ArrayList(ScopeEntry) = .empty,
     scope_depth: usize = 0,
+    /// Speculation-verify kernel pinning (toggle through
+    /// `ExecContext.pinRowwiseKernels`). While set, every batched
+    /// quant-matmul entry reproduces the m == 1 kernel numerics exactly:
+    /// the packed/plain entries run as independent single-row calls of
+    /// themselves, the fused K-quant entries keep their per-row tail
+    /// kernels for every row, and the batched MoE op skips the
+    /// lane-packed Q8_Kx4 kernels. A verify batch then produces logits
+    /// bit-identical to sequential decode — the property that keeps deep
+    /// speculative drafting lossless. Batch matmul throughput is
+    /// deliberately sacrificed while pinned (verify batches are small,
+    /// and on streamed MoE the expert-fetch amortization — the part that
+    /// pays — is preserved).
+    pin_rowwise_kernels: bool = false,
 
     pub fn init(self: *Runtime, allocator: Allocator) void {
         self.thread_safe_allocator = .{ .child_allocator = allocator };
@@ -69,6 +82,7 @@ pub const Runtime = struct {
         self.dot_backward_worker_mutex = .{};
         self.scope_entries = .empty;
         self.scope_depth = 0;
+        self.pin_rowwise_kernels = false;
     }
 
     pub fn deinit(self: *Runtime) void {

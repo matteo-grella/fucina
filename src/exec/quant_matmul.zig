@@ -64,6 +64,42 @@ pub fn getRowsQuantizedTyped(self: *Runtime, comptime dtype: DType, table: *cons
     return out;
 }
 
+/// Kernel-pinned batch fallback (see `Runtime.pin_rowwise_kernels`): run
+/// a batched entry as independent single-row calls of the SAME entry, so
+/// every row's numerics are exactly the m == 1 numerics regardless of
+/// which kernels the backend would pick for the batch shape — including
+/// a GPU backend, whose row calls take its own m == 1 path. `ctx` is a
+/// small capture struct with `fn call(ctx, *Runtime, *const Tensor) !Tensor`
+/// invoking the entry on one row. Callers gate on m > 1, so the first
+/// row always materializes the output. The `call` methods declare
+/// `anyerror` on purpose: entry -> pinnedRowwise -> call -> entry is a
+/// cycle, and one explicit error set breaks the inferred-set dependency
+/// loop the compiler otherwise rejects.
+fn pinnedRowwise(self: *Runtime, a: *const Tensor, ctx: anytype) !Tensor {
+    const av = try a.rankView(2);
+    const m = av.dim(0);
+    const cols = av.dim(1);
+    var aa = try self.prepareContiguousTyped(.f32, a);
+    defer aa.deinit();
+    const input = aa.tensor().dataConst();
+    var row = try self.emptyRankTyped(.f32, 2, .{ 1, cols });
+    defer row.deinit();
+    var out: ?Tensor = null;
+    errdefer if (out) |*o| o.deinit();
+    var n: usize = 0;
+    for (0..m) |r| {
+        @memcpy(row.data(), input[r * cols ..][0..cols]);
+        var row_out = try ctx.call(self, &row);
+        defer row_out.deinit();
+        if (out == null) {
+            n = (try row_out.rankView(2)).dim(1);
+            out = try self.emptyRankTyped(.f32, 2, .{ m, n });
+        }
+        @memcpy(out.?.data()[r * n ..][0..n], row_out.dataConst());
+    }
+    return out.?;
+}
+
 pub fn matmul2DWithQuantizedTensorRhs(
     self: *Runtime,
     comptime rhs_dtype: DType,
@@ -89,6 +125,13 @@ pub fn matmul2DWithQuantizedTensorRhsOptions(
     const n = rv.dim(0);
     if (k != rv.dim(1)) return tensor.TensorError.ShapeMismatch;
     if (!rhs.isContiguous()) return tensor.TensorError.UnsupportedView;
+    if (self.pin_rowwise_kernels and m > 1) return pinnedRowwise(self, a, struct {
+        rhs: *const tensor.TensorOf(rhs_dtype),
+        options: QuantizedMatmulOptions,
+        fn call(c: @This(), rt: *Runtime, row: *const Tensor) anyerror!Tensor {
+            return matmul2DWithQuantizedTensorRhsOptions(rt, rhs_dtype, row, c.rhs, c.options);
+        }
+    }{ .rhs = rhs, .options = options });
 
     var aa = try self.prepareContiguousTyped(.f32, a);
     defer aa.deinit();
@@ -165,6 +208,15 @@ pub fn matmul2DWithQuantizedBlocksRhsOptions(
     if (av.dim(1) != k) return tensor.TensorError.ShapeMismatch;
     const blocks_per_row = try backend_mod.quantized_matmul.blockCountForDType(rhs_dtype, k);
     if (blocks.len != try checkedTensorProduct(n, blocks_per_row)) return tensor.TensorError.InvalidDataLength;
+    if (self.pin_rowwise_kernels and m > 1) return pinnedRowwise(self, a, struct {
+        blocks: []const dtype_mod.Storage(rhs_dtype),
+        n: usize,
+        k: usize,
+        options: QuantizedMatmulOptions,
+        fn call(c: @This(), rt: *Runtime, row: *const Tensor) anyerror!Tensor {
+            return matmul2DWithQuantizedBlocksRhsOptions(rt, rhs_dtype, row, c.blocks, c.n, c.k, c.options);
+        }
+    }{ .blocks = blocks, .n = n, .k = k, .options = options });
 
     var aa = try self.prepareContiguousTyped(.f32, a);
     defer aa.deinit();
@@ -300,6 +352,12 @@ pub fn matmul2DWithPackedQ8_0x4Rhs(self: *Runtime, a: *const Tensor, rhs: *const
     const m = av.dim(0);
     const k = av.dim(1);
     if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
+    if (self.pin_rowwise_kernels and m > 1) return pinnedRowwise(self, a, struct {
+        rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4,
+        fn call(c: @This(), rt: *Runtime, row: *const Tensor) anyerror!Tensor {
+            return matmul2DWithPackedQ8_0x4Rhs(rt, row, c.rhs);
+        }
+    }{ .rhs = rhs });
 
     var aa = try self.prepareContiguousTyped(.f32, a);
     defer aa.deinit();
@@ -322,6 +380,12 @@ pub fn splitSwiGluMatmul2DWithPackedQ8_0x4Rhs(
     if (axis_dim % 2 != 0) return tensor.TensorError.InvalidShape;
     const k = axis_dim / 2;
     if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
+    if (self.pin_rowwise_kernels and m > 1) return pinnedRowwise(self, gate_up, struct {
+        rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4,
+        fn call(c: @This(), rt: *Runtime, row: *const Tensor) anyerror!Tensor {
+            return splitSwiGluMatmul2DWithPackedQ8_0x4Rhs(rt, row, c.rhs);
+        }
+    }{ .rhs = rhs });
 
     var gg = try self.prepareContiguousTyped(.f32, gate_up);
     defer gg.deinit();
@@ -437,7 +501,10 @@ fn splitSwiGluMatmulKQuantImpl(self: *Runtime, comptime kind: KQuantFusedRhsKind
     errdefer out.deinit();
     const out_data = out.data();
 
-    const use_x4 = switch (kind) {
+    // Pinned mode forces the per-row tail kernels for every row: they are
+    // the m == 1 dispatch, so the batch stays bit-identical to sequential
+    // decode (see Runtime.pin_rowwise_kernels).
+    const use_x4 = !self.pin_rowwise_kernels and switch (kind) {
         .q4_kx8 => m % 4 == 0 or m >= 64 or (m >= 4 and m < 32),
         .q5_kx8 => m % 4 == 0 or m >= 128,
         .q6_kx4 => false,
@@ -540,7 +607,9 @@ fn rmsNormMulMatmulKQuantImpl(self: *Runtime, comptime kind: KQuantFusedRhsKind,
     errdefer out.deinit();
     const out_data = out.data();
 
-    const use_x4 = switch (kind) {
+    // Pinned mode forces the per-row tail kernels for every row (see the
+    // matching gate in splitSwiGluMatmulKQuantImpl).
+    const use_x4 = !self.pin_rowwise_kernels and switch (kind) {
         .q4_kx8 => m % 4 == 0 or m >= 64 or (m >= 4 and m < 32),
         .q5_kx8 => m % 4 == 0 or m >= 128,
         .q6_kx4 => false,
@@ -636,6 +705,14 @@ pub fn rmsNormMulMatmul2DWithPackedQ8_0x4Rhs(self: *Runtime, x: *const Tensor, n
     const m = xv.dim(0);
     const k = xv.dim(1);
     if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
+    if (self.pin_rowwise_kernels and m > 1) return pinnedRowwise(self, x, struct {
+        norm_weights: *const Tensor,
+        eps: f32,
+        rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4,
+        fn call(c: @This(), rt: *Runtime, row: *const Tensor) anyerror!Tensor {
+            return rmsNormMulMatmul2DWithPackedQ8_0x4Rhs(rt, row, c.norm_weights, c.eps, c.rhs);
+        }
+    }{ .norm_weights = norm_weights, .eps = eps, .rhs = rhs });
     const wv = try norm_weights.rankView(1);
     if (wv.dim(0) != k) return tensor.TensorError.ShapeMismatch;
     const blocks_per_row = try qm.q8_0BlockCount(k);
@@ -684,7 +761,7 @@ pub fn rmsNormMulMatmul2DWithPackedQ8_0x4Rhs(self: *Runtime, x: *const Tensor, n
     return out;
 }
 
-pub fn gegluQuantMatmul2DWithPackedQ8_0x4Rhs(self: *Runtime, gate: *const Tensor, up: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4) !Tensor {
+pub fn gegluQuantMatmul2DWithPackedQ8_0x4Rhs(self: *Runtime, gate: *const Tensor, up: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4) anyerror!Tensor {
     const qm = backend_mod.quantized_matmul;
     const gv = try gate.rankView(2);
     const uv = try up.rankView(2);
@@ -692,6 +769,31 @@ pub fn gegluQuantMatmul2DWithPackedQ8_0x4Rhs(self: *Runtime, gate: *const Tensor
     const k = gv.dim(1);
     if (uv.dim(0) != m or uv.dim(1) != k) return tensor.TensorError.ShapeMismatch;
     if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
+    if (self.pin_rowwise_kernels and m > 1) {
+        // Two row-batched inputs: the shared pinnedRowwise helper carries
+        // one, so loop both here — same contract, each row runs the
+        // m == 1 entry.
+        var gg_pin = try self.prepareContiguousTyped(.f32, gate);
+        defer gg_pin.deinit();
+        var uu_pin = try self.prepareContiguousTyped(.f32, up);
+        defer uu_pin.deinit();
+        const g_in = gg_pin.tensor().dataConst();
+        const u_in = uu_pin.tensor().dataConst();
+        var g_row = try self.emptyRankTyped(.f32, 2, .{ 1, k });
+        defer g_row.deinit();
+        var u_row = try self.emptyRankTyped(.f32, 2, .{ 1, k });
+        defer u_row.deinit();
+        var out = try self.emptyRankTyped(.f32, 2, .{ m, rhs.n });
+        errdefer out.deinit();
+        for (0..m) |r| {
+            @memcpy(g_row.data(), g_in[r * k ..][0..k]);
+            @memcpy(u_row.data(), u_in[r * k ..][0..k]);
+            var row_out = try gegluQuantMatmul2DWithPackedQ8_0x4Rhs(self, &g_row, &u_row, rhs);
+            defer row_out.deinit();
+            @memcpy(out.data()[r * rhs.n ..][0..rhs.n], row_out.dataConst());
+        }
+        return out;
+    }
     const blocks_per_row = try qm.q8_0BlockCount(k);
     const n = rhs.n;
 
@@ -740,6 +842,12 @@ pub fn matmul2DWithPackedQ6_Kx4Rhs(self: *Runtime, a: *const Tensor, rhs: *const
     const m = av.dim(0);
     const k = av.dim(1);
     if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
+    if (self.pin_rowwise_kernels and m > 1) return pinnedRowwise(self, a, struct {
+        rhs: *const backend_mod.QuantizedMatmulRhsQ6_Kx4,
+        fn call(c: @This(), rt: *Runtime, row: *const Tensor) anyerror!Tensor {
+            return matmul2DWithPackedQ6_Kx4Rhs(rt, row, c.rhs);
+        }
+    }{ .rhs = rhs });
 
     var aa = try self.prepareContiguousTyped(.f32, a);
     defer aa.deinit();
@@ -756,6 +864,12 @@ pub fn matmul2DWithPackedQ4_Kx4Rhs(self: *Runtime, a: *const Tensor, rhs: *const
     const m = av.dim(0);
     const k = av.dim(1);
     if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
+    if (self.pin_rowwise_kernels and m > 1) return pinnedRowwise(self, a, struct {
+        rhs: *const backend_mod.QuantizedMatmulRhsQ4_Kx4,
+        fn call(c: @This(), rt: *Runtime, row: *const Tensor) anyerror!Tensor {
+            return matmul2DWithPackedQ4_Kx4Rhs(rt, row, c.rhs);
+        }
+    }{ .rhs = rhs });
 
     var aa = try self.prepareContiguousTyped(.f32, a);
     defer aa.deinit();
@@ -772,6 +886,12 @@ pub fn matmul2DWithPackedQ4_Kx8Rhs(self: *Runtime, a: *const Tensor, rhs: *const
     const m = av.dim(0);
     const k = av.dim(1);
     if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
+    if (self.pin_rowwise_kernels and m > 1) return pinnedRowwise(self, a, struct {
+        rhs: *const backend_mod.QuantizedMatmulRhsQ4_Kx8,
+        fn call(c: @This(), rt: *Runtime, row: *const Tensor) anyerror!Tensor {
+            return matmul2DWithPackedQ4_Kx8Rhs(rt, row, c.rhs);
+        }
+    }{ .rhs = rhs });
 
     var aa = try self.prepareContiguousTyped(.f32, a);
     defer aa.deinit();
@@ -788,6 +908,12 @@ pub fn matmul2DWithPackedQ4_Kx2MmlaRhs(self: *Runtime, a: *const Tensor, rhs: *c
     const m = av.dim(0);
     const k = av.dim(1);
     if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
+    if (self.pin_rowwise_kernels and m > 1) return pinnedRowwise(self, a, struct {
+        rhs: *const backend_mod.QuantizedMatmulRhsQ4_Kx2Mmla,
+        fn call(c: @This(), rt: *Runtime, row: *const Tensor) anyerror!Tensor {
+            return matmul2DWithPackedQ4_Kx2MmlaRhs(rt, row, c.rhs);
+        }
+    }{ .rhs = rhs });
 
     var aa = try self.prepareContiguousTyped(.f32, a);
     defer aa.deinit();
@@ -804,6 +930,12 @@ pub fn matmul2DWithPackedQ5_Kx8Rhs(self: *Runtime, a: *const Tensor, rhs: *const
     const m = av.dim(0);
     const k = av.dim(1);
     if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
+    if (self.pin_rowwise_kernels and m > 1) return pinnedRowwise(self, a, struct {
+        rhs: *const backend_mod.QuantizedMatmulRhsQ5_Kx8,
+        fn call(c: @This(), rt: *Runtime, row: *const Tensor) anyerror!Tensor {
+            return matmul2DWithPackedQ5_Kx8Rhs(rt, row, c.rhs);
+        }
+    }{ .rhs = rhs });
 
     var aa = try self.prepareContiguousTyped(.f32, a);
     defer aa.deinit();

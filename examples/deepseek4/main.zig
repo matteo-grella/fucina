@@ -39,6 +39,7 @@ pub fn main(init: std.process.Init) !void {
     var moe_mirror_buf: [8][]const u8 = undefined;
     var moe_mirror_n: usize = 0;
     var moe_mirror_weights_arg: ?[]const u8 = null;
+    var moe_io_threads: ?usize = null;
     var chat = false;
     var prefill_chunk: usize = 128;
     var mtp_path: ?[]const u8 = null;
@@ -97,6 +98,10 @@ pub fn main(init: std.process.Init) !void {
             // Per-mirror read share relative to the primary's 1, comma
             // list in --moe-mirror order (default 1 each: even split).
             moe_mirror_weights_arg = arg["--moe-mirror-weights=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--moe-io-threads=")) {
+            // Demand-miss read fan-out (default 8; 0 = sequential reads).
+            moe_stream_flag = true;
+            moe_io_threads = try std.fmt.parseInt(usize, arg["--moe-io-threads=".len..], 10);
         } else if (std.mem.startsWith(u8, arg, "--index-share=")) {
             index_share = try std.fmt.parseInt(usize, arg["--index-share=".len..], 10);
         } else if (std.mem.eql(u8, arg, "--index-probe")) {
@@ -127,6 +132,7 @@ pub fn main(init: std.process.Init) !void {
             .cache_bytes = if (moe_cache_mb) |mb| mb << 20 else null,
             .mirror_paths = moe_mirror_buf[0..moe_mirror_n],
             .mirror_weights = moe_mirror_weights,
+            .io_workers = moe_io_threads orelse 8,
         },
     } else .{};
     var model = try Model.loadGgufFromFileOptions(&ctx, &file, load_options);
@@ -234,9 +240,17 @@ pub fn main(init: std.process.Init) !void {
                 drafted += 1;
             }
             // Verify with one batched trunk step; rewind on partial accept.
+            // Kernel-pinned (ExecContext.pinRowwiseKernels): the verify
+            // logits AND the cache rows it leaves behind for accepted
+            // positions are bit-identical to sequential decode at any
+            // depth — the old m >= 4 x4-kernel drift wall is gone.
             var snap = try session.cache.snapshot();
             defer snap.deinit();
-            _ = try llm.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..n_drafts], rows[0..n_drafts], .{ .all = streams_all[0 .. n_drafts * hc_dim] });
+            ctx.pinRowwiseKernels(true);
+            _ = blk: {
+                defer ctx.pinRowwiseKernels(false);
+                break :blk try llm.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..n_drafts], rows[0..n_drafts], .{ .all = streams_all[0 .. n_drafts * hc_dim] });
+            };
             forwards += 1;
             var accepted: usize = 1;
             while (accepted < n_drafts) : (accepted += 1) {
@@ -259,9 +273,14 @@ pub fn main(init: std.process.Init) !void {
             for (rows[0..n_drafts]) |r| allocator.free(r);
             if (accepted < n_drafts) {
                 // The verify advanced past the accepted prefix: restore and
-                // replay only the accepted tokens to rebuild the caches.
+                // replay only the accepted tokens to rebuild the caches —
+                // pinned too, so the rebuilt rows match sequential decode.
                 session.cache.restore(&snap);
-                const replay = try llm.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..accepted], null, null);
+                ctx.pinRowwiseKernels(true);
+                const replay = blk: {
+                    defer ctx.pinRowwiseKernels(false);
+                    break :blk try llm.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..accepted], null, null);
+                };
                 allocator.free(replay);
                 forwards += 1;
             }

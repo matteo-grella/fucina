@@ -1414,9 +1414,15 @@ fn runMoeBatchPhased(
     const empty_x4: []const backend_mod.quantized_matmul.BlockQ8_Kx4 = &.{};
     const qx_x4_const: []const backend_mod.quantized_matmul.BlockQ8_Kx4 = qx_x4;
     const qg_x4_const: []const backend_mod.quantized_matmul.BlockQ8_Kx4 = qg_x4;
-    const gate_uses_x4 = moeRhsUsesLanePacked(gate);
-    const up_uses_x4 = moeRhsUsesLanePacked(up);
-    const down_uses_x4 = moeRhsUsesLanePacked(down);
+    // Pinned mode (Runtime.pin_rowwise_kernels) skips the lane-packed
+    // Q8_Kx4 kernels: every expert then takes the per-row tile path — the
+    // m == 1 numerics — so a speculative verify batch through this op
+    // stays bit-identical to sequential decode. The expert gather (the
+    // disk amortization on streamed models) is unaffected.
+    const pin_rows = rt.pin_rowwise_kernels;
+    const gate_uses_x4 = !pin_rows and moeRhsUsesLanePacked(gate);
+    const up_uses_x4 = !pin_rows and moeRhsUsesLanePacked(up);
+    const down_uses_x4 = !pin_rows and moeRhsUsesLanePacked(down);
 
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
     const gather_tasks = try rt.allocator.alloc(MoeBatchGatherTask, n_expert);

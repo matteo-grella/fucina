@@ -144,6 +144,16 @@ pub const ExecContext = struct {
         self.* = undefined;
     }
 
+    /// Speculation-verify kernel pinning: while ON, batched quant-matmul
+    /// ops reproduce the m == 1 kernel numerics bitwise, so a verify
+    /// batch's logits equal sequential decode's (the lossless-speculation
+    /// requirement at any draft depth). Toggle around a speculative
+    /// VERIFY forward only — batch throughput is sacrificed while pinned.
+    /// See `Runtime.pin_rowwise_kernels` for the mechanism.
+    pub fn pinRowwiseKernels(self: *ExecContext, on: bool) void {
+        self.rt.pin_rowwise_kernels = on;
+    }
+
     // ------------------------------------------------------------------
     // Exec scopes: implicit ownership of EXECUTION artifacts — the tensor
     // values ops produce plus a type-erased per-op payload released through

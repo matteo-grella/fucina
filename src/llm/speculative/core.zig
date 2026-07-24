@@ -38,12 +38,21 @@
 //! sampler for the rest of the conversation. So given bitwise-identical
 //! logits the output token stream is identical to the non-speculative run.
 //! Logits, however, are computed in verify batches of m = 1+draft rows
-//! instead of m = 1; rows are independent
-//! through every kernel until the m-dependent thresholds (fused K-quant FFN at
-//! seq >= 12, tiled attention at seq >= 48), beyond which reassociation drift
-//! (~1e-6 rel) can flip a near-tied sample. Lossless therefore means: same
-//! DISTRIBUTION always; same sample stream whenever the logits match bitwise
-//! (which the tests below verify for the small-m regime).
+//! instead of m = 1. With `Options.pin_kernels` (the default) the verify
+//! forward runs under `ExecContext.pinRowwiseKernels`, which makes every
+//! batched quant-matmul entry reproduce the m == 1 numerics bitwise
+//! (proven at op level for every m in the exec suite, and end-to-end by
+//! the byte-identical depth-4 DeepSeek-V4 MTP run). Unpinned, the
+//! m-dependent kernel switches (x4-packed quant kernels at m >= 4)
+//! reintroduce reassociation drift (~1e-6 rel) that can flip a near-tied
+//! sample; the non-quant thresholds (tiled attention at seq >= 48,
+//! f32/f16 fused-FFN at m >= 12) are outside the pin either way. Known
+//! residual: qwen3-0.6B --spec still diverges from plain greedy at one
+//! near-tie even with small pinned verifies (pre-existing behavior —
+//! pinning moved the first divergence later but did not remove it; the
+//! remaining source is not yet identified). Lossless therefore means:
+//! same DISTRIBUTION always; same sample stream whenever the logits
+//! match bitwise.
 
 const std = @import("std");
 const fucina = @import("fucina");
@@ -183,6 +192,14 @@ pub const Options = struct {
     /// one-RNG-draw-per-plain-committed-token contract across a stop that
     /// arrives as an accepted draft token mid-batch. Null = no stop token.
     stop_token: ?usize = null,
+    /// Kernel-family pinning for the verify forward
+    /// (`ExecContext.pinRowwiseKernels`): the batched quant matmuls then
+    /// reproduce the m == 1 numerics bitwise, removing the x4-kernel
+    /// drift that flipped near-tied verifies (see the module doc for the
+    /// exact guarantees and the known qwen3 residual). ON by default —
+    /// fidelity over verify batch throughput; turn OFF to reclaim the x4
+    /// batch kernels when ~1e-6 logit drift is acceptable.
+    pin_kernels: bool = true,
 
     // ---- cost-aware AUTO-OFF gate (see `CostGate`) ----
     /// Verify steps held in the gate's rolling window. Fallback steps cost
@@ -666,6 +683,8 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
             errdefer kv.truncate(history.items.len - 1);
 
             const t0 = self.nowNs();
+            if (self.options.pin_kernels) ctx.pinRowwiseKernels(true);
+            defer if (self.options.pin_kernels) ctx.pinRowwiseKernels(false);
             var logits = try model.forwardStepAllLogits(ctx, kv, verify, pos0);
             defer logits.deinit();
             const verify_ns: ?u64 = if (t0) |start| @intCast(self.nowNs().? - start) else null;

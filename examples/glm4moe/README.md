@@ -13,9 +13,12 @@ V3-style MoE trunk plus the model's own `nextn` multi-token-prediction
 layer: `--mtp[=depth]` drafts with the MTP head and verifies with one
 batched trunk step — only greedy-matching prefixes commit, so output is
 lossless (byte-identical to plain greedy). Measured 2.29 tokens per forward
-at depth 2 on GLM-4.5-Air Q6_K streamed on a 64 GB machine. Depth caps
-at 2: the verify batch is depth+1 rows, and the m ≥ 4 x4-packed kernels
-legally drift from the S=1 numerics, which would break losslessness.
+at depth 2 on GLM-4.5-Air Q6_K streamed on a 64 GB machine. The verify
+runs kernel-pinned (batched quant matmuls reproduce the single-token
+numerics bitwise), which removed the old m ≥ 4 x4-kernel drift wall that
+capped depth at 2; depth now caps at 8, keeping the verify batch under
+the remaining non-quant kernel thresholds. Bare `--mtp` stays depth 2
+(the measured sweet spot).
 
 ## Getting the model
 
@@ -69,7 +72,7 @@ Flags (first positional argument = model GGUF, required):
 | --- | --- |
 | `--prompt "..."` / `--prompt=...` | prompt text (default `The capital of France is`) |
 | `--gen N` / `--gen=N` | greedy tokens to generate, default 32 |
-| `--mtp` / `--mtp=depth` | native MTP speculative decoding; bare `--mtp` = depth 2, values above 2 clamp to 2 |
+| `--mtp` / `--mtp=depth` | native MTP speculative decoding; bare `--mtp` = depth 2, values above 8 clamp to 8 (kernel-pinned verify) |
 | `--moe-stream` / `--moe-cache-mb=N` | streamed experts (`--moe-cache-mb=N` alone implies `--moe-stream`) — see *Shared knobs* |
 
 ## Shared knobs
