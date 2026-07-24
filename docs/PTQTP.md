@@ -108,6 +108,21 @@ Deliberate deltas from the paper:
   chat CLI, speculation, batch — with no re-decoration. Pair-detection is
   wired in the qwen3 loaders only; other families do not read decorated
   files yet.
+- **Scale-tied fit** (`Options.tie_scales`, `--tie-scales`): locks the plane
+  scales to the exact ratio 3 (`[3s, s]` at K=2, `[9s, 3s, s]` at K=3),
+  making the K planes one uniform symmetric 3^K-level quantizer — the
+  precondition for folding all K planes into a single dot pass
+  (`c = 3t₁+t₂`, exact algebra). Measured on Qwen3-0.6B (512-token
+  teacher-forced NLL vs the f16 baseline ppl 71.98): K=2 free ppl 210.5 vs
+  **tied 203.9**; K=3 free ppl 80.7 (35.7 s fit, 10,497 unconverged groups)
+  vs **tied 75.9** (7.0 s, 0 unconverged) — the tied fit reconstructs
+  slightly worse (uniform levels, fewer degrees of freedom: rel err .1887
+  vs .1784 at K=2) yet measures no downstream quality loss, fits 1.5-5x
+  faster, and always converges. Single-eval-text caveat; a second
+  model/eval confirmation is the gate for making it the default. The
+  per-plane f16 scales round independently, so folded execution must
+  derive the coarse scales from the finest in f32 (exact), not re-read
+  the rounded pair.
 - **Metal prefill offload** (`-Dgpu=metal`): `WeightPtqtp.init` also copies
   each plane into GPU-resident bytes, and prefill-sized fused linears
   (m ≥ 32, work ≥ `FUCINA_GPU_MIN_WORK_DENSE_TQ2`, default 2^25) dispatch

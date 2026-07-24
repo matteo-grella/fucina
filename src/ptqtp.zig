@@ -81,8 +81,23 @@ pub const Options = struct {
     lambda_max: f32 = 1.0,
     kappa_max: f32 = 1e6,
 
+    /// Scale-tied fit: lock the plane scales to the exact ratio 3
+    /// (alpha = [3s, s] at K=2, [9s, 3s, s] at K=3), which makes the K trit
+    /// planes one uniform symmetric (3^K)-level quantizer with step s —
+    /// codes c = 3*t1 + t2 (+9*...) in {-L..L}, L = (3^K-1)/2 — and
+    /// therefore makes the plane-folding identity exact: one combined dot
+    /// pass can compute all K planes. Costs fit freedom vs the free ridge
+    /// (the free levels are non-uniformly placeable); the quality delta is
+    /// the measured experiment this option exists for (docs/PTQTP.md).
+    /// Note the stored per-plane f16 scales round independently, so a
+    /// future folded kernel must derive the coarser scales from the finest
+    /// one in f32 (exact: 3x an f16 value is exact in f32), not re-read
+    /// the rounded f16 pair. Meaningless at planes = 1 (rejected).
+    tie_scales: bool = false,
+
     fn validate(self: Options) Error!void {
         if (self.planes < 1 or self.planes > 3) return Error.InvalidOptions;
+        if (self.tie_scales and self.planes < 2) return Error.InvalidOptions;
         if (self.group_size == 0 or self.max_iterations == 0) return Error.InvalidOptions;
         if (!(self.epsilon >= 0) or !(self.lambda0 > 0)) return Error.InvalidOptions;
         if (!(self.lambda_max >= self.lambda0) or !(self.kappa_max >= 1)) return Error.InvalidOptions;
@@ -204,10 +219,76 @@ pub fn solveGroup(w: []const f32, t1: []i8, t2: []i8, t3: []i8, options: Options
     std.debug.assert(options.planes < 2 or t2.len == w.len);
     std.debug.assert(options.planes < 3 or t3.len == w.len);
     const ts = [3][]i8{ t1, t2, t3 };
+    if (options.tie_scales) {
+        return switch (options.planes) {
+            2 => solveGroupTied(2, w, ts),
+            else => solveGroupTied(3, w, ts),
+        };
+    }
     return switch (options.planes) {
         1 => solveGroupK(1, w, ts, options),
         2 => solveGroupK(2, w, ts, options),
         else => solveGroupK(3, w, ts, options),
+    };
+}
+
+/// The tie_scales fit (see Options.tie_scales): the optimal uniform
+/// symmetric (3^K)-level quantizer per group. Sweep the step s around
+/// absmax/L with exact-code MSE, keep the argmin, then decompose each code
+/// into balanced base-3 trit digits. Non-finite inputs quantize to 0, like
+/// the free fit's finite-element stance.
+fn solveGroupTied(comptime planes: u2, w: []const f32, ts: [3][]i8) GroupResult {
+    const levels: f32 = if (planes == 2) 4 else 13; // (3^K - 1) / 2
+    var absmax: f32 = 0;
+    for (w) |x| {
+        if (std.math.isFinite(x)) absmax = @max(absmax, @abs(x));
+    }
+    if (absmax == 0) {
+        for (0..planes) |p| @memset(ts[p][0..w.len], 0);
+        return .{ .alpha = .{ 0, 0, 0 }, .iterations = 1, .converged = true };
+    }
+
+    var best_s: f32 = absmax / levels;
+    var best_err: f64 = std.math.inf(f64);
+    var i: usize = 0;
+    while (i <= 64) : (i += 1) {
+        const divisor = (levels - 0.75) + @as(f32, @floatFromInt(i)) * (2.0 / 64.0);
+        const s = absmax / divisor;
+        var err: f64 = 0;
+        for (w) |x| {
+            if (!std.math.isFinite(x)) continue;
+            const c = std.math.clamp(@round(x / s), -levels, levels);
+            const d = x - s * c;
+            err += @as(f64, d) * d;
+        }
+        if (err < best_err) {
+            best_err = err;
+            best_s = s;
+        }
+    }
+
+    for (w, 0..) |x, j| {
+        var c: i32 = if (std.math.isFinite(x))
+            @intFromFloat(std.math.clamp(@round(x / best_s), -levels, levels))
+        else
+            0;
+        if (planes == 3) {
+            const t1: i32 = @divFloor(c + 4, 9); // c in {-13..13} -> t1 in {-1,0,1}
+            ts[0][j] = @intCast(t1);
+            c -= 9 * t1;
+        }
+        const tm: i32 = @divFloor(c + 1, 3); // c in {-4..4} -> {-1,0,1}
+        ts[planes - 2][j] = @intCast(tm);
+        ts[planes - 1][j] = @intCast(c - 3 * tm);
+    }
+
+    return .{
+        .alpha = if (planes == 2)
+            .{ 3 * best_s, best_s, 0 }
+        else
+            .{ 9 * best_s, 3 * best_s, best_s },
+        .iterations = 1,
+        .converged = true,
     };
 }
 
@@ -561,7 +642,10 @@ fn packGroup(
     outs: [3]*BlockTQ2_0,
     stat: *RowStat,
 ) void {
-    const res = solveGroupK(planes, seg, ts, options);
+    const res = if (comptime planes >= 2) blk: {
+        if (options.tie_scales) break :blk solveGroupTied(planes, seg, ts);
+        break :blk solveGroupK(planes, seg, ts, options);
+    } else solveGroupK(planes, seg, ts, options);
     // |α| loses nothing (the candidate set is sign-symmetric); fp16-round,
     // then re-derive the trits against the exact scales inference will use.
     var alpha = [3]f32{ 0, 0, 0 };

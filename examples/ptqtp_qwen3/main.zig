@@ -43,7 +43,7 @@ pub fn main(init: std.process.Init) !void {
         try stdout.print(
             "usage: zig build ptqtp-qwen3 -Doptimize=ReleaseFast -- <model.gguf> " ++
                 "[--planes 0|1|2|3] [--nll FILE] [--nll-tokens N] [--down-planes N] [--o-planes N] [--head-planes N] " ++
-                "[--skip-first N] [--skip-last N] [--save FILE] [--prompt TEXT] [--max-new N]\n",
+                "[--skip-first N] [--skip-last N] [--tie-scales] [--save FILE] [--prompt TEXT] [--max-new N]\n",
             .{},
         );
         return error.MissingModelPath;
@@ -57,6 +57,7 @@ pub fn main(init: std.process.Init) !void {
     var down_planes: ?u8 = null;
     var o_planes: ?u8 = null;
     var head_planes: ?u8 = null;
+    var tie_scales = false;
     var save_path: ?[]const u8 = null;
     var prompt_text: []const u8 = "The capital of Italy is";
     var max_new: usize = 48;
@@ -73,6 +74,8 @@ pub fn main(init: std.process.Init) !void {
             down_planes = try std.fmt.parseInt(u8, v, 10);
         } else if (argValue(args, &arg_i, "--o-planes")) |v| {
             o_planes = try std.fmt.parseInt(u8, v, 10);
+        } else if (std.mem.eql(u8, args[arg_i], "--tie-scales")) {
+            tie_scales = true;
         } else if (argValue(args, &arg_i, "--head-planes")) |v| {
             head_planes = try std.fmt.parseInt(u8, v, 10);
         } else if (argValue(args, &arg_i, "--skip-first")) |v| {
@@ -143,7 +146,7 @@ pub fn main(init: std.process.Init) !void {
         // Independent of --planes: `--planes 0 --head-planes N` is a
         // head-only decoration.
         var report_head = llm.weights.PtqtpReport{};
-        try llm.weights.decoratePtqtpInto(&model.output, &ctx, .{ .planes = hp }, &report_head);
+        try llm.weights.decoratePtqtpInto(&model.output, &ctx, .{ .planes = hp, .tie_scales = tie_scales }, &report_head);
         try stdout.print("head decorated at {d} planes (rel err {d:.4})\n", .{ hp, report_head.rmsRelErr() });
         try stdout.flush();
     }
@@ -151,7 +154,7 @@ pub fn main(init: std.process.Init) !void {
     if (planes > 0) {
         const q_start = nowNs(io);
         const report = try model.decoratePtqtp(&ctx, .{
-            .solver = .{ .planes = @intCast(planes) },
+            .solver = .{ .planes = @intCast(planes), .tie_scales = tie_scales },
             .skip_first_layers = skip_first,
             .skip_last_layers = skip_last,
             .down_planes = down_planes,

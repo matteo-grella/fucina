@@ -298,6 +298,38 @@ test "solveGroup handles a tiny group and reports signed scales faithfully" {
     for (t1, expected) |got, want| try std.testing.expectEqual(want, got);
 }
 
+test "tie_scales: exact ratio-3 alphas, valid balanced-trit decomposition" {
+    // The tied fit is the optimal uniform 9-level quantizer: alphas must be
+    // exactly [3s, s] pre-f16 and every code pair must reconstruct
+    // c = 3*t1 + t2 in {-4..4} — the folding identity's preconditions.
+    var prng = std.Random.DefaultPrng.init(0x600df01d);
+    var w: [256]f32 = undefined;
+    for (&w) |*v| v.* = prng.random().floatNorm(f32) * 0.04;
+
+    var t1: [256]i8 = undefined;
+    var t2: [256]i8 = undefined;
+    var t3: [0]i8 = undefined;
+    const res = ptqtp.solveGroup(&w, &t1, &t2, &t3, .{ .planes = 2, .tie_scales = true });
+    try std.testing.expect(res.converged);
+    try std.testing.expect(res.alpha[1] > 0);
+    try std.testing.expectEqual(res.alpha[1] * 3, res.alpha[0]); // exact in f32
+    for (t1, t2, w) |a, b, x| {
+        try std.testing.expect(a >= -1 and a <= 1 and b >= -1 and b <= 1);
+        const c = 3 * @as(i32, a) + b;
+        try std.testing.expect(c >= -4 and c <= 4);
+        // The code is the nearest 9-level point at step alpha[1].
+        const want: i32 = @intFromFloat(std.math.clamp(@round(x / res.alpha[1]), -4, 4));
+        try std.testing.expectEqual(want, c);
+    }
+    // Reconstruction error can't exceed half a step over the clamp-free range.
+    for (t1, t2, w) |a, b, x| {
+        const rec = res.alpha[0] * @as(f32, @floatFromInt(a)) + res.alpha[1] * @as(f32, @floatFromInt(b));
+        if (@abs(x) < 4 * res.alpha[1]) {
+            try std.testing.expect(@abs(x - rec) <= res.alpha[1] * 0.5 + 1e-6);
+        }
+    }
+}
+
 test "triple planes beat dual planes on gaussian weights, roughly threefold" {
     var ctx: ExecContext = undefined;
     ctx.init(std.testing.allocator);
