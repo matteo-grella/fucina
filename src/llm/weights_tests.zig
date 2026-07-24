@@ -601,6 +601,51 @@ test "toPtqtp planes=3: triple-plane arm, linearSeq matches the three-plane reco
     }
 }
 
+test "tie-fitted ptqtp serves the folded one-pass semantics" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const out_dim = 8;
+    const in_dim = 512;
+    const seq_len = 2;
+    var prng = std.Random.DefaultPrng.init(2727);
+    const w_vals = try allocator.alloc(f32, out_dim * in_dim);
+    defer allocator.free(w_vals);
+    for (w_vals) |*v| v.* = prng.random().floatNorm(f32) * 0.05;
+
+    var weight = LinearWeight{ .f32 = try WeightF32.fromSlice(&ctx, .{ out_dim, in_dim }, w_vals) };
+    defer weight.deinit();
+    _ = try weight.toPtqtp(&ctx, .{ .planes = 2, .tie_scales = true });
+
+    // The wiring pin: the tie survives decoration and the folded pack built.
+    try std.testing.expect(weight.ptqtp.tied);
+    try std.testing.expect(weight.ptqtp.pfold != null);
+
+    var x_vals: [seq_len * in_dim]f32 = undefined;
+    for (&x_vals) |*v| v.* = prng.random().floatNorm(f32);
+    var x = try fucina.Tensor(.{ .seq, .embed }).fromSlice(&ctx, .{ seq_len, in_dim }, &x_vals);
+    defer x.deinit();
+
+    var y = try weight.linearSeq(&ctx, &x, .embed, .ffn);
+    defer y.deinit();
+
+    // Reference: the folded kernel run directly over the same pack with the
+    // same activation quantization — the fused dispatch must be bitwise
+    // equal to it under any column partition.
+    const bpr = in_dim / 256;
+    const qlhs = try allocator.alloc(fucina.internal.backend_mod.quantized_matmul.BlockQ8_K, seq_len * bpr);
+    defer allocator.free(qlhs);
+    for (0..seq_len) |r| {
+        try fucina.internal.backend_mod.quantized_matmul.quantizeRowQ8_KInto(qlhs[r * bpr ..][0..bpr], x_vals[r * in_dim ..][0..in_dim]);
+    }
+    const want = try allocator.alloc(f32, seq_len * out_dim);
+    defer allocator.free(want);
+    fucina.internal.backend_mod.quantized_matmul.matmulTQ2_0FoldedX4RhsRange(want, qlhs, weight.ptqtp.pfold.?, bpr, out_dim, 0, seq_len);
+    try std.testing.expectEqualSlices(f32, want, try y.dataConst());
+}
+
 test "fused ptqtp linear is bitwise identical to the per-plane facade chain" {
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;

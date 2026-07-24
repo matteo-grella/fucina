@@ -158,6 +158,17 @@ pub const BlockTQ2_0x4 = extern struct {
     qs: [4 * 64]u8,
 };
 
+/// Four columns' worth of one 256-element block of FOLDED K=2 tie-fitted
+/// PTQTP planes: 4-bit codes cu = 3*u1 + u2 in {0..8} (one uniform 9-level
+/// quantizer — see ternary.zig's folding section), column-interleaved
+/// Q4_0-style: byte(sub, jg, col, j) = cu(col, sub*32 + jg*4 + j) |
+/// cu(col, sub*32 + 16 + jg*4 + j) << 4. d[col] is the FINE plane's f16
+/// scale; the coarse scale is 3x it, derived in f32 at use.
+pub const BlockTQ2_0Foldedx4 = extern struct {
+    d: [4]u16,
+    qs: [4 * 128]u8,
+};
+
 pub const BlockMXFP4 = dtype_mod.BlockMXFP4;
 pub const BlockNVFP4 = dtype_mod.BlockNVFP4;
 

@@ -342,6 +342,7 @@ fn linearSeqPtqtpFused(
         lhs: []const backend_quant.BlockQ8_K,
         rhs: []const backend_quant.QuantizedMatmulRhsTQ2_0,
         px4: []const []const backend_quant.BlockTQ2_0x4, // empty = row-kernel path
+        pfold: []const backend_quant.BlockTQ2_0Foldedx4, // nonempty = one-pass fold
         bpr: usize,
         m: usize,
         n: usize,
@@ -349,6 +350,10 @@ fn linearSeqPtqtpFused(
         c1: usize,
 
         fn run(task: *const @This()) void {
+            if (task.pfold.len != 0) {
+                backend_quant.matmulTQ2_0FoldedX4RhsTile(task.out, task.lhs, task.pfold, task.bpr, task.n, 0, task.m, task.c0, task.c1);
+                return;
+            }
             if (task.px4.len != 0) {
                 backend_quant.matmulTQ2_0X4RhsTile(task.out, task.lhs, task.px4[0], task.bpr, task.n, 0, task.m, task.c0, task.c1);
                 for (task.px4[1..]) |pack| {
@@ -373,6 +378,7 @@ fn linearSeqPtqtpFused(
         .lhs = lhs,
         .rhs = rhs[0..plane_count],
         .px4 = if (px4_ready) px4s[0..plane_count] else &.{},
+        .pfold = if (px4_ready and weight.pfold != null) weight.pfold.? else &.{},
         .bpr = blocks_per_row,
         .m = m,
         .n = n,
@@ -436,12 +442,21 @@ pub const WeightPtqtp = struct {
     /// dequant-in-kernel prefill dispatches against with zero per-call wrap
     /// cost. All-or-nothing like `px4`; null slots = CPU-only.
     gpu_planes: [3]?[]u8 = .{ null, null, null },
+    /// True when the planes were fit with ptqtp.Options.tie_scales (scales
+    /// locked to exact ratio 3). At K=2 the fused linear then serves through
+    /// `pfold` — the 4-bit pack folding both planes into one 9-level code,
+    /// ONE dot pass (matmulTQ2_0FoldedX4RhsTile). K=3's 27 levels exceed a
+    /// nibble, so tied K=3 serves through the 2-pass x4 path. Not persisted
+    /// by the GGUF sidecars yet, so loaded decorations run unfolded
+    /// (correct, just K passes).
+    tied: bool = false,
+    pfold: ?[]backend_quant.BlockTQ2_0Foldedx4 = null,
 
     /// Construct with eager x4 pack building (and, on ternary-capable GPU
     /// builds, resident plane copies). Failure of either is silent — the
     /// weight works identically without them, just slower.
-    pub fn init(allocator: Allocator, p1: QuantWeight(.tq2_0), p2: ?QuantWeight(.tq2_0), p3: ?QuantWeight(.tq2_0)) WeightPtqtp {
-        var self = WeightPtqtp{ .p1 = p1, .p2 = p2, .p3 = p3 };
+    pub fn init(allocator: Allocator, p1: QuantWeight(.tq2_0), p2: ?QuantWeight(.tq2_0), p3: ?QuantWeight(.tq2_0), tied: bool) WeightPtqtp {
+        var self = WeightPtqtp{ .p1 = p1, .p2 = p2, .p3 = p3, .tied = tied and p2 != null };
         self.buildX4Packs(allocator);
         self.buildGpuResidency();
         return self;
@@ -504,6 +519,16 @@ pub const WeightPtqtp = struct {
             }
         }
         self.px4_allocator = allocator;
+        // K=2 tie-fitted planes additionally fold into the 4-bit pack —
+        // the fused linear's single-pass operand. Failure just leaves the
+        // 2-pass x4 path (correct either way).
+        if (self.tied and self.p2 != null and self.p3 == null) fold: {
+            const b1 = self.p1.asRawTensor().dataConstChecked() catch break :fold;
+            const b2 = self.p2.?.asRawTensor().dataConstChecked() catch break :fold;
+            const r1 = backend_quant.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(b1)) catch break :fold;
+            const r2 = backend_quant.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(b2)) catch break :fold;
+            self.pfold = backend_quant.packMatmulRhsTQ2_0Foldedx4(allocator, &r1, &r2) catch null;
+        }
     }
 
     fn freeX4Packs(self: *WeightPtqtp, allocator: Allocator) void {
@@ -511,6 +536,8 @@ pub const WeightPtqtp = struct {
             if (slot.*) |pack| allocator.free(pack);
             slot.* = null;
         }
+        if (self.pfold) |pack| allocator.free(pack);
+        self.pfold = null;
         self.px4_allocator = null;
     }
 
@@ -754,7 +781,7 @@ pub const LinearWeight = union(enum) {
                     try plane.withTags(ctx, .{ .out, .in })
                 else
                     null;
-                break :blk .{ .ptqtp = WeightPtqtp.init(ctx.allocator, p1, p2, p3) };
+                break :blk .{ .ptqtp = WeightPtqtp.init(ctx.allocator, p1, p2, p3, false) };
             },
             inline else => |*value, tag| blk: {
                 const view = try value.withTags(ctx, .{ .out, .in });
@@ -875,7 +902,7 @@ pub const LinearWeight = union(enum) {
             null;
         const stats = pair.stats;
         self.deinit();
-        self.* = .{ .ptqtp = WeightPtqtp.init(ctx.allocator, p1, p2, p3) };
+        self.* = .{ .ptqtp = WeightPtqtp.init(ctx.allocator, p1, p2, p3, options.tie_scales) };
         return stats;
     }
 
@@ -1832,8 +1859,11 @@ pub fn fuseLinear(ctx: *ExecContext, parts: []const *LinearWeight) !?LinearWeigh
             for (parts[1..], 0..) |part, i| others[i] = &part.ptqtp.p3.?;
             p3 = try parts[0].ptqtp.p3.?.concat(ctx, .out, others[0 .. parts.len - 1]);
         }
+        // Folding survives fusion only when every part was tie-fitted.
+        var all_tied = true;
+        for (parts) |part| all_tied = all_tied and part.ptqtp.tied;
         for (parts) |part| part.deinit();
-        return .{ .ptqtp = WeightPtqtp.init(ctx.allocator, p1, p2, p3) };
+        return .{ .ptqtp = WeightPtqtp.init(ctx.allocator, p1, p2, p3, all_tied) };
     }
     return declinedFusion(ctx, parts);
 }

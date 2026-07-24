@@ -119,10 +119,22 @@ Deliberate deltas from the paper:
   slightly worse (uniform levels, fewer degrees of freedom: rel err .1887
   vs .1784 at K=2) yet measures no downstream quality loss, fits 1.5-5x
   faster, and always converges. Single-eval-text caveat; a second
-  model/eval confirmation is the gate for making it the default. The
-  per-plane f16 scales round independently, so folded execution must
-  derive the coarse scales from the finest in f32 (exact), not re-read
-  the rounded pair.
+  model/eval confirmation is the gate for making it the default. At K=2
+  the tie is served FOLDED: `WeightPtqtp.init` packs both planes into one
+  4-bit code plane (`BlockTQ2_0Foldedx4`, cu = 3t₁+t₂+4 in {0..8} — same
+  total bits as the two 2-bit packs, half the pack memory) and the fused
+  linear runs ONE dot pass (`matmulTQ2_0FoldedX4RhsTile`, pinned bitwise
+  vs its scalar reference in `ternary_tests.zig` and `x86dot-check`).
+  Measured (M1, `bench-ternary` interleaved pair): **2.09-2.37x over the
+  two-pass x4 path at every m** — a K=2 tied linear costs what K=1 costs —
+  and folded serving measures the best K=2 quality yet (ppl 195.97 on the
+  gate eval). An in-register fold (combining crumbs per granule) was built
+  first and measured 1.01-1.07x — the combine ops cost what the saved dots
+  cost; pack-time folding is the real form. K=3's 27 levels exceed a
+  nibble, so tied K=3 serves through the two-pass path. The per-plane f16
+  scales round independently, so folded execution derives the coarse scale
+  from the finest in f32 (exact) — the folded pack stores only the fine
+  scale.
 - **Metal prefill offload** (`-Dgpu=metal`): `WeightPtqtp.init` also copies
   each plane into GPU-resident bytes, and prefill-sized fused linears
   (m ≥ 32, work ≥ `FUCINA_GPU_MIN_WORK_DENSE_TQ2`, default 2^25) dispatch

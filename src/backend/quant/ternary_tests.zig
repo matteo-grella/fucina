@@ -145,6 +145,72 @@ test "tq2_0 absmean rhs produces b1.58 blocks" {
     }
 }
 
+test "folded x4 tq2_0 matmul matches an order-matched scalar reference bitwise" {
+    // The folded kernel's contract is its OWN scalar reference (it is
+    // deliberately not bitwise vs per-plane execution — folding derives the
+    // coarse scale as exact 3s in f32): per column, per block, in order:
+    // sums += s * a.d * (sum((3*u1+u2)*a) - 4*sum(a)).
+    const allocator = std.testing.allocator;
+    const m = 2;
+    const k = 2 * qk_k_block_size;
+    const n = 8;
+
+    var prng = std.Random.DefaultPrng.init(0x7e56);
+    const w1 = try allocator.alloc(f32, n * k);
+    defer allocator.free(w1);
+    fillUniform(&prng, w1, 1.5);
+    const w2 = try allocator.alloc(f32, n * k);
+    defer allocator.free(w2);
+    fillUniform(&prng, w2, 0.5);
+    const a_vals = try allocator.alloc(f32, m * k);
+    defer allocator.free(a_vals);
+    fillUniform(&prng, a_vals, 3.0);
+
+    var rhs1 = try ternary.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w1);
+    defer rhs1.deinit();
+    var rhs2 = try ternary.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w2);
+    defer rhs2.deinit();
+    const folded = try ternary.packMatmulRhsTQ2_0Foldedx4(allocator, &rhs1, &rhs2);
+    defer allocator.free(folded);
+
+    var a = try Tensor.fromSlice(allocator, &.{ m, k }, a_vals);
+    defer a.deinit();
+    const qlhs = try quantizeRowsQ8_K(allocator, &a);
+    defer allocator.free(qlhs);
+
+    const got = try allocator.alloc(f32, m * n);
+    defer allocator.free(got);
+    ternary.matmulTQ2_0FoldedX4RhsRange(got, qlhs, folded, rhs1.rows.blocks_per_row, n, 0, m);
+
+    const bpr = rhs1.rows.blocks_per_row;
+    for (0..m) |r| {
+        for (0..n) |c| {
+            var sum: f32 = 0;
+            for (0..bpr) |bi| {
+                const b1 = &rhs1.columnBlocks(c)[bi];
+                const b2 = &rhs2.columnBlocks(c)[bi];
+                const ab = &qlhs[r * bpr + bi];
+                var dot: i32 = 0;
+                var asum: i32 = 0;
+                for (0..qk_k_block_size) |e| {
+                    const half = e / 128;
+                    const rem = e % 128;
+                    const byte = half * 32 + rem % 32;
+                    const lane: u3 = @intCast(rem / 32);
+                    const u1c: i32 = (b1.qs[byte] >> (2 * @as(u3, lane))) & 3;
+                    const u2c: i32 = (b2.qs[byte] >> (2 * @as(u3, lane))) & 3;
+                    const av: i32 = ab.qs[e];
+                    dot += (3 * u1c + u2c) * av;
+                    asum += av;
+                }
+                const s = f16BitsToF32(b2.d);
+                sum += s * ab.d * @as(f32, @floatFromInt(dot - 4 * asum));
+            }
+            try std.testing.expectEqual(@as(u32, @bitCast(sum)), @as(u32, @bitCast(got[r * n + c])));
+        }
+    }
+}
+
 test "x4 column-interleaved tq2_0 matmul matches the hot kernel bitwise" {
     const allocator = std.testing.allocator;
     const m = 3;

@@ -165,6 +165,18 @@ pub fn main(init: std.process.Init) !void {
         defer allocator.free(packed_x4);
         try out.print("{s}: x4 pack {d:.1} ms (load-time, same bytes)\n", .{ shape.name, @as(f64, @floatFromInt(pack_timer.read())) / 1e6 });
 
+        // Second plane for the PTQTP fold pair (distinct bytes so both
+        // planes genuinely stream).
+        const w2_vals = try allocator.alloc(f32, n * k);
+        defer allocator.free(w2_vals);
+        for (w2_vals, w_vals) |*v, s| v.* = s * 0.31 + 0.017;
+        var rhs2 = try qm.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w2_vals);
+        defer rhs2.deinit();
+        const packed_x4b = try qm.packMatmulRhsTQ2_0x4(allocator, &rhs2);
+        defer allocator.free(packed_x4b);
+        const folded_pack = try qm.packMatmulRhsTQ2_0Foldedx4(allocator, &rhs, &rhs2);
+        defer allocator.free(folded_pack);
+
         const q4_blocks = try allocator.alloc(BlockQ4_K, n * bpr);
         defer allocator.free(q4_blocks);
         for (0..n) |row| {
@@ -274,6 +286,31 @@ pub fn main(init: std.process.Init) !void {
             // the packed weights once: n * bpr * 66 bytes).
             const wbytes = @as(f64, @floatFromInt(n * bpr * @sizeOf(BlockTQ2_0)));
             const gbs = wbytes / (hot * 1000.0);
+
+            // PTQTP fold decision pair: today's K=2 fused cost (x4 pass +
+            // accumulating pass over the second plane) vs ONE folded pass.
+            // Correctness is pinned bitwise in ternary_tests.zig; this pair
+            // measures only speed (interleaved, medians).
+            const FoldPacks = struct { out: []f32, qlhs: []const BlockQ8_K, a: []const qm.BlockTQ2_0x4, b: []const qm.BlockTQ2_0x4, folded: []const qm.BlockTQ2_0Foldedx4, bpr: usize, m: usize, n: usize };
+            const fold_pair = try measurePair(
+                iters,
+                hot_ns, // reuse the sample buffers
+                x4_ns,
+                FoldPacks{ .out = out_x4, .qlhs = qlhs, .a = packed_x4, .b = packed_x4b, .folded = folded_pack, .bpr = bpr, .m = m, .n = n },
+                struct {
+                    fn run(c: FoldPacks) void {
+                        qm.matmulTQ2_0X4RhsTile(c.out, c.qlhs, c.a, c.bpr, c.n, 0, c.m, 0, c.n);
+                        qm.matmulTQ2_0X4RhsTileAcc(c.out, c.qlhs, c.b, c.bpr, c.n, 0, c.m, 0, c.n);
+                    }
+                }.run,
+                FoldPacks{ .out = out_x4, .qlhs = qlhs, .a = packed_x4, .b = packed_x4b, .folded = folded_pack, .bpr = bpr, .m = m, .n = n },
+                struct {
+                    fn run(c: FoldPacks) void {
+                        qm.matmulTQ2_0FoldedX4RhsRange(c.out, c.qlhs, c.folded, c.bpr, c.n, 0, c.m);
+                    }
+                }.run,
+            );
+            try out.print("    fold m={d:<4}: 2-pass {d:.1} us  folded {d:.1} us  {d:.2}x\n", .{ m, fold_pair.a_us, fold_pair.b_us, fold_pair.a_us / fold_pair.b_us });
 
             const marker = if (mismatch and x4_mismatch)
                 " HOT/COLD+X4 MISMATCH"

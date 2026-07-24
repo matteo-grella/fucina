@@ -34,6 +34,10 @@
 //!   tq2_0x4 x86 portable tier        | Rosetta 2 (real x86 semantics)     | EXECUTED 2026-07-24, leg (b); x86-chain checksum f79a3f29e3be6cab
 //!   tq2_0x4 x86 AVX2 maddubs arm     | validated x86-64 emulator          | EXECUTED 2026-07-24, leg (c), x86_64_v3 static musl; checksum bit-equal to the Rosetta run (f79a3f29e3be6cab)
 //!   tq2_0x4 x86 VNNI ymm arm         | NEVER                              | compile-verified 2026-07-24 (alderlake leg); execution needs AVX-VNNI hardware — no emulator implements AVX-VNNI
+//!   tq2_0 folded aarch64 arm         | natively, Apple M1 Max             | EXECUTED 2026-07-24 (this checker's folded section + ternary parity suites)
+//!   tq2_0 folded x86 portable tier   | Rosetta 2 (real x86 semantics)     | EXECUTED 2026-07-24, leg (b); x86-chain checksum 3ad62348d3bdb3f6
+//!   tq2_0 folded x86 AVX2 arm        | validated x86-64 emulator          | EXECUTED 2026-07-24, leg (c), x86_64_v3 static musl; checksum bit-equal to the Rosetta run (3ad62348d3bdb3f6)
+//!   tq2_0 folded x86 VNNI ymm arm    | NEVER                              | compile-verified 2026-07-24 (alderlake leg); execution needs AVX-VNNI hardware
 //!   portable widening tier (256-bit) | every host (no gate)               | ongoing: zig build test everywhere + this checker
 //!
 //! The 2026-07-03 hardware attestations ran `zig build test -Doptimize=ReleaseFast`
@@ -643,6 +647,70 @@ fn checkTQ2_0X4(allocator: std.mem.Allocator) !void {
     std.debug.print("tq2_0x4 matmul: done (checksum so far {x:0>16})\n", .{fnv});
 }
 
+fn checkTQ2_0Folded(allocator: std.mem.Allocator) !void {
+    var prng = std.Random.DefaultPrng.init(0x853c49e6748fea9b);
+    const random = prng.random();
+
+    const m = 2;
+    const n = 8;
+    const blocks_per_row = 2;
+    const k = blocks_per_row * qk_k_block_size;
+
+    const w1 = try allocator.alloc(f32, n * k);
+    defer allocator.free(w1);
+    fillUniformF32(random, w1, 1.5);
+    const w2 = try allocator.alloc(f32, n * k);
+    defer allocator.free(w2);
+    fillUniformF32(random, w2, 0.5);
+    const acts = try allocator.alloc(f32, m * k);
+    defer allocator.free(acts);
+    fillUniformF32(random, acts, 3.0);
+
+    var rhs1 = try quant.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w1);
+    defer rhs1.deinit();
+    var rhs2 = try quant.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w2);
+    defer rhs2.deinit();
+    const folded = try quant.packMatmulRhsTQ2_0Foldedx4(allocator, &rhs1, &rhs2);
+    defer allocator.free(folded);
+
+    var a = try tensor_mod.Tensor.fromSlice(allocator, &.{ m, k }, acts);
+    defer a.deinit();
+    const qlhs = try quant.quantizeRowsQ8_K(allocator, &a);
+    defer allocator.free(qlhs);
+
+    var got: [m * n]f32 = undefined;
+    quant.matmulTQ2_0FoldedX4RhsRange(&got, qlhs, folded, blocks_per_row, n, 0, m);
+
+    // Order-matched scalar reference of the folded semantics: per column,
+    // per block, sums += s * a.d * (sum((3*u1+u2)*a) - 4*sum(a)). Bit-exact
+    // on every arm (exact block integers, one f32 sequence).
+    for (0..m) |r| {
+        for (0..n) |c| {
+            var sum: f32 = 0;
+            for (0..blocks_per_row) |bi| {
+                const b1 = &rhs1.columnBlocks(c)[bi];
+                const b2 = &rhs2.columnBlocks(c)[bi];
+                const ab = &qlhs[r * blocks_per_row + bi];
+                var dot: i32 = 0;
+                var asum: i32 = 0;
+                for (0..qk_k_block_size) |e| {
+                    const byte = (e / 128) * 32 + (e % 32);
+                    const shift: u3 = @intCast(2 * ((e % 128) / 32));
+                    const u1c: i32 = (b1.qs[byte] >> shift) & 3;
+                    const u2c: i32 = (b2.qs[byte] >> shift) & 3;
+                    const av: i32 = ab.qs[e];
+                    dot += (3 * u1c + u2c) * av;
+                    asum += av;
+                }
+                const s = common.f16BitsToF32(b2.d);
+                sum += s * ab.d * @as(f32, @floatFromInt(dot - 4 * asum));
+            }
+            checkF32Exact("tq2_0 folded matmul", sum, got[r * n + c]);
+        }
+    }
+    std.debug.print("tq2_0 folded matmul: done (checksum so far {x:0>16})\n", .{fnv});
+}
+
 pub fn main(init: std.process.Init) !void {
     _ = init;
     const allocator = std.heap.page_allocator;
@@ -656,6 +724,7 @@ pub fn main(init: std.process.Init) !void {
     try checkQ8_0(allocator);
     try checkTQ2_0(allocator);
     try checkTQ2_0X4(allocator);
+    try checkTQ2_0Folded(allocator);
 
     if (failures != 0) {
         std.debug.print("x86dot-check FAIL ({d} mismatches)\n", .{failures});

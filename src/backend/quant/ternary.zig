@@ -31,6 +31,7 @@ const Allocator = std.mem.Allocator;
 
 const BlockTQ2_0 = types_mod.BlockTQ2_0;
 const BlockTQ2_0x4 = types_mod.BlockTQ2_0x4;
+const BlockTQ2_0Foldedx4 = types_mod.BlockTQ2_0Foldedx4;
 const BlockQ2_0 = types_mod.BlockQ2_0;
 const BlockQ8_0 = types_mod.BlockQ8_0;
 const BlockQ8_K = types_mod.BlockQ8_K;
@@ -57,6 +58,8 @@ const maddubsDotGroupsI32x8 = common.maddubsDotGroupsI32x8;
 const roundHalfAwayFromZero = common.roundHalfAwayFromZero;
 const sdotI8x16 = common.sdotI8x16;
 const sdotI8x16Lane = common.sdotI8x16Lane;
+const q4LowNibbleI8 = common.q4LowNibbleI8;
+const q4HighNibbleI8 = common.q4HighNibbleI8;
 
 /// Weight rows processed together per tile step: the four columns share every
 /// activation vector load and the per-block bsum total.
@@ -529,6 +532,183 @@ inline fn x4BlockDot(w: *const BlockTQ2_0x4, a: *const BlockQ8_K) QKV4i32 {
         acc += lo + hi;
     }
     return acc;
+}
+
+// ---------------- scale-tied plane folding (PTQTP tie_scales) ----------------
+//
+// For K=2 tie-fitted PTQTP weights (docs/PTQTP.md: plane scales locked to
+// the exact ratio 3), the two trit planes ARE one uniform 9-level quantizer:
+// with unsigned codes u_p = t_p + 1 in {0,1,2}, cu = 3*u1 + u2 in {0..8}
+// satisfies
+//
+//   d1*dot(t1,a) + d2*dot(t2,a) = s * ( dot(cu,a) - 4 * sum(a) )
+//
+// with s the FINE plane's scale and d1 = 3s derived in f32 (exact — the
+// stored coarse f16 scale is ignored, per the tie contract). cu fits a
+// NIBBLE, so the fold happens at PACK time: one 4-bit column-interleaved
+// pack replaces both 2-bit plane packs — the same total bits streamed, ONE
+// nibble unpack + ONE dot chain per granule where the 2-pass path pays two
+// crumb unpacks + two dot chains. (An in-register fold that combined the
+// crumbs per granule was built first and measured 1.01-1.07x: on M1 the
+// mul+add combine costs what the saved sdot costs. The pack-time fold is
+// the real form. K=3's 27 levels do not fit a nibble; tied K=3 serves
+// through the 2-pass x4 path.)
+//
+// Layout (BlockTQ2_0Foldedx4, 4 columns x 256 elements, Q4_0-style nibble
+// pairing free of the crumb-plane legacy): byte(s, jg, col, j) =
+// cu(col, s*32 + jg*4 + j) | cu(col, s*32 + 16 + jg*4 + j) << 4 for
+// sub-block s in 0..8, dword-group jg in 0..4, j in 0..4 — so a 16-byte
+// vector low-nibble-extracts to [4 cols x 4 consecutive codes] exactly like
+// the x4 crumb granules, and the by-element sdot / ymm bodies carry over.
+// Integer exactness: |cu| <= 8 (12 for out-of-spec crumb 3), maddubs pair
+// sums <= 2*12*127 = 3048, block sums <= 256*8*127 far inside i32 — all
+// arms bitwise identical to the scalar reference in ternary_tests.zig. NOT
+// bitwise vs running the planes separately (independently-rounded f16
+// scales there); folding IS the exact-ratio semantics.
+
+/// Fold two tie-fitted TQ2_0 planes (plane1 = coarse 3s, plane2 = fine s)
+/// into the 4-bit column-interleaved pack. Same n % 4 == 0 rule as the x4
+/// pack; the fine plane's per-block f16 scale is the pack's scale, the
+/// coarse plane's is discarded (tie contract). Caller frees the slice.
+pub fn packMatmulRhsTQ2_0Foldedx4(
+    allocator: Allocator,
+    plane1: *const QuantizedMatmulRhsTQ2_0,
+    plane2: *const QuantizedMatmulRhsTQ2_0,
+) ![]BlockTQ2_0Foldedx4 {
+    const tensor = @import("../../tensor.zig");
+    const n = plane1.n;
+    if (n % 4 != 0 or plane2.n != n or plane2.rows.blocks_per_row != plane1.rows.blocks_per_row)
+        return tensor.TensorError.InvalidShape;
+    const blocks_per_row = plane1.rows.blocks_per_row;
+    const out = try allocator.alloc(BlockTQ2_0Foldedx4, (n / 4) * blocks_per_row);
+    errdefer allocator.free(out);
+    for (0..n / 4) |g| {
+        var cols1: [4][]const BlockTQ2_0 = undefined;
+        var cols2: [4][]const BlockTQ2_0 = undefined;
+        for (0..4) |ci| {
+            cols1[ci] = plane1.columnBlocks(g * 4 + ci);
+            cols2[ci] = plane2.columnBlocks(g * 4 + ci);
+        }
+        for (0..blocks_per_row) |bi| {
+            const dst = &out[g * blocks_per_row + bi];
+            for (0..4) |ci| dst.d[ci] = cols2[ci][bi].d;
+            for (0..8) |sub| {
+                for (0..4) |jg| {
+                    for (0..4) |ci| {
+                        for (0..4) |j| {
+                            const e_lo = sub * 32 + jg * 4 + j;
+                            const e_hi = e_lo + 16;
+                            const lo = foldedCode(&cols1[ci][bi], &cols2[ci][bi], e_lo);
+                            const hi = foldedCode(&cols1[ci][bi], &cols2[ci][bi], e_hi);
+                            dst.qs[sub * 64 + jg * 16 + ci * 4 + j] = lo | (hi << 4);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return out;
+}
+
+/// cu = 3*u1 + u2 for element `e` of one block pair (crumb-law addressing).
+inline fn foldedCode(b1: *const BlockTQ2_0, b2: *const BlockTQ2_0, e: usize) u8 {
+    const byte = (e / 128) * 32 + (e % 32);
+    const shift: u3 = @intCast(2 * ((e % 128) / 32));
+    const u1c = (b1.qs[byte] >> shift) & 3;
+    const u2c = (b2.qs[byte] >> shift) & 3;
+    return 3 * u1c + u2c;
+}
+
+/// One folded block-group dot: i32 lanes are the four columns' exact
+/// combined-code sums. Same accumulator discipline as x4BlockDot (four
+/// independent chains — here per dword-group).
+inline fn foldedBlockDot(w: *const BlockTQ2_0Foldedx4, a: *const BlockQ8_K) QKV4i32 {
+    if (comptime builtin.cpu.arch == .aarch64) {
+        var accs: [4]QKV4i32 = @splat(@splat(0));
+        inline for (0..8) |sub| {
+            const a_lo: QKV16i8 = a.qs[sub * 32 ..][0..16].*;
+            const a_hi: QKV16i8 = a.qs[sub * 32 + 16 ..][0..16].*;
+            inline for (0..4) |jg| {
+                const v: QKV16u8 = w.qs[sub * 64 + jg * 16 ..][0..16].*;
+                accs[jg] = sdotI8x16Lane(jg, accs[jg], q4LowNibbleI8(v), a_lo);
+                accs[jg] = sdotI8x16Lane(jg, accs[jg], q4HighNibbleI8(v), a_hi);
+            }
+        }
+        return (accs[0] + accs[1]) + (accs[2] + accs[3]);
+    }
+    var accs: [4]QKV8i32 = @splat(@splat(0));
+    inline for (0..8) |sub| {
+        inline for (0..2) |jg2| {
+            const wv: QKV32u8 = w.qs[sub * 64 + jg2 * 32 ..][0..32].*;
+            const lo: QKV32u8 = wv & @as(QKV32u8, @splat(0x0f));
+            const hi: QKV32u8 = wv >> @as(QKV32u8, @splat(4));
+            const p_lo: @Vector(2, u32) = @bitCast(a.qs[sub * 32 + jg2 * 8 ..][0..8].*);
+            const p_hi: @Vector(2, u32) = @bitCast(a.qs[sub * 32 + 16 + jg2 * 8 ..][0..8].*);
+            const act_lo: QKV32i8 = @bitCast(@shuffle(u32, p_lo, undefined, [8]i32{ 0, 0, 0, 0, 1, 1, 1, 1 }));
+            const act_hi: QKV32i8 = @bitCast(@shuffle(u32, p_hi, undefined, [8]i32{ 0, 0, 0, 0, 1, 1, 1, 1 }));
+            accs[jg2 * 2] = dotGroups32(accs[jg2 * 2], lo, act_lo);
+            accs[jg2 * 2 + 1] = dotGroups32(accs[jg2 * 2 + 1], hi, act_hi);
+        }
+    }
+    var acc: QKV4i32 = @splat(0);
+    inline for (accs) |a8| {
+        const lo4: QKV4i32 = @shuffle(i32, a8, undefined, [4]i32{ 0, 1, 2, 3 });
+        const hi4: QKV4i32 = @shuffle(i32, a8, undefined, [4]i32{ 4, 5, 6, 7 });
+        acc += lo4 + hi4;
+    }
+    return acc;
+}
+
+/// Folded tile: rows [r0,r1), columns [c0,c1) on 4-column boundaries.
+pub fn matmulTQ2_0FoldedX4RhsTile(
+    out: []f32,
+    lhs_blocks: []const BlockQ8_K,
+    folded: []const BlockTQ2_0Foldedx4,
+    blocks_per_row: usize,
+    n: usize,
+    r0: usize,
+    r1: usize,
+    c0: usize,
+    c1: usize,
+) void {
+    std.debug.assert(n % 4 == 0 and c0 % 4 == 0 and c1 % 4 == 0);
+    const cached = blocks_per_row <= bsum_cache_blocks;
+    var bsum_cache: [bsum_cache_blocks]i32 = undefined;
+    var r = r0;
+    while (r < r1) : (r += 1) {
+        const arow = lhs_blocks[r * blocks_per_row ..][0..blocks_per_row];
+        const orow = out[r * n ..][0..n];
+        if (cached) {
+            for (arow, 0..) |*a, bi| bsum_cache[bi] = blockBsumTotal(a);
+        }
+        var g: usize = c0 / 4;
+        while (g < c1 / 4) : (g += 1) {
+            const wgroup = folded[g * blocks_per_row ..][0..blocks_per_row];
+            var sums: @Vector(4, f32) = @splat(0);
+            for (arow, 0..) |*a, bi| {
+                const w = &wgroup[bi];
+                const bsum = if (cached) bsum_cache[bi] else blockBsumTotal(a);
+                const acc = foldedBlockDot(w, a);
+                const isum = acc - @as(QKV4i32, @splat(4 * bsum));
+                var sv: @Vector(4, f32) = undefined;
+                inline for (0..4) |ci| sv[ci] = f16BitsToF32(w.d[ci]);
+                sums += sv * @as(@Vector(4, f32), @splat(a.d)) * @as(@Vector(4, f32), @floatFromInt(isum));
+            }
+            orow[g * 4 ..][0..4].* = sums;
+        }
+    }
+}
+
+pub fn matmulTQ2_0FoldedX4RhsRange(
+    out: []f32,
+    lhs_blocks: []const BlockQ8_K,
+    folded: []const BlockTQ2_0Foldedx4,
+    blocks_per_row: usize,
+    n: usize,
+    r0: usize,
+    r1: usize,
+) void {
+    matmulTQ2_0FoldedX4RhsTile(out, lhs_blocks, folded, blocks_per_row, n, r0, r1, 0, n);
 }
 
 fn x4Tile(
