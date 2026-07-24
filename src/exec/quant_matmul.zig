@@ -844,12 +844,14 @@ fn denseQuantMatmulGpuImpl(
     if (comptime backend_mod.gpu_impl.enabled) {
         const gpu = backend_mod.gpu_impl;
         if (comptime dtype == .q5_k and !gpu.has_q5_k_quant) return null;
+        if (comptime dtype == .tq2_0 and !gpu.has_tq2_0_quant) return null;
         const fmt: gpu.QFormat = comptime switch (dtype) {
             .q4_k => .q4_k,
             .q5_k => .q5_k,
             .q6_k => .q6_k,
             .q8_0 => .q8_0,
-            else => @compileError("denseQuantMatmulGpu supports q4_k/q5_k/q6_k/q8_0 only"),
+            .tq2_0 => .tq2_0,
+            else => @compileError("denseQuantMatmulGpu supports q4_k/q5_k/q6_k/q8_0/tq2_0 only"),
         };
         const work = quantMatmulWork(m, n, k);
         // Prefill arm: m >= 32 behind the relevant CPU-competitor gate. Stable
@@ -937,12 +939,14 @@ pub fn denseQuantMatmulGpuSharedInputBatch(
     if (comptime backend_mod.gpu_impl.enabled) {
         const gpu = backend_mod.gpu_impl;
         if (comptime dtype == .q5_k and !gpu.has_q5_k_quant) return null;
+        if (comptime dtype == .tq2_0 and !gpu.has_tq2_0_quant) return null;
         const fmt: gpu.QFormat = comptime switch (dtype) {
             .q4_k => .q4_k,
             .q5_k => .q5_k,
             .q6_k => .q6_k,
             .q8_0 => .q8_0,
-            else => @compileError("denseQuantMatmulGpuSharedInputBatch supports q4_k/q5_k/q6_k/q8_0 only"),
+            .tq2_0 => .tq2_0,
+            else => @compileError("denseQuantMatmulGpuSharedInputBatch supports q4_k/q5_k/q6_k/q8_0/tq2_0 only"),
         };
         if (batch_count == 0) return null;
         const per_work = quantMatmulWork(m, n, k);

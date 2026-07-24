@@ -267,6 +267,42 @@ fn linearSeqPtqtpFused(
     if (n == 0 or k == 0 or k % 256 != 0 or m == 0 or m * k != x.len) return null;
     const blocks_per_row = k / 256;
 
+    // GPU prefill arm: with resident plane bytes and prefill-sized m, each
+    // plane runs as one Metal ternary dequant-in-kernel dispatch and the K
+    // plane outputs sum on the CPU (K=1 returns the async tensor directly).
+    // NOT bitwise vs the CPU chain (half dequant, simdgroup f32 accumulate)
+    // — the same accepted numerics stance as the q4_k/q6_k/q8_0 dense
+    // offload. The seam's gates decide; any refusal falls through to the
+    // CPU path wholesale.
+    if (comptime fucina.internal.gpu.enabled and fucina.internal.gpu.has_tq2_0_quant) {
+        if (m >= 32 and weight.gpu_planes[0] != null) gpu_blk: {
+            const nb01 = blocks_per_row * @sizeOf(backend_quant.BlockTQ2_0);
+            const raw_input = input.asRawTensor();
+            const dev_planes = [3]?[]const u8{ weight.gpu_planes[0], weight.gpu_planes[1], weight.gpu_planes[2] };
+            var first: ?fucina.internal.RawTensor = null;
+            errdefer if (first) |*t| t.deinit();
+            for (dev_planes) |maybe_dev| {
+                const dev = maybe_dev orelse continue;
+                var plane_out = (try ctx.denseQuantMatmulGpu(.tq2_0, dev, .stable_process, nb01, raw_input, m, n, k)) orelse {
+                    if (first) |*t| t.deinit();
+                    first = null;
+                    break :gpu_blk; // gates refused: CPU path, all planes
+                };
+                if (first == null) {
+                    first = plane_out;
+                } else {
+                    const dst = first.?.data();
+                    for (dst, plane_out.dataConst()) |*d, s| d.* += s;
+                    plane_out.deinit();
+                }
+            }
+            if (first) |t| {
+                first = null;
+                return try fucina.Tensor(.{ .seq, out_tag }).fromTensor(ctx, t);
+            }
+        }
+    }
+
     // With packs built (WeightPtqtp.init, all-or-nothing) the planes run on
     // the x4 column-interleaved kernels — same bits, no per-block reduces,
     // and the accumulating twin folds extra planes straight into `out` with
@@ -395,14 +431,54 @@ pub const WeightPtqtp = struct {
     /// unreadable plane storage, or allocation failure at build time).
     px4: [3]?[]backend_quant.BlockTQ2_0x4 = .{ null, null, null },
     px4_allocator: ?Allocator = null,
+    /// GPU-resident copies of the plane blocks (`fucina.internal.gpu`
+    /// residency): stable device-shared bytes the Metal ternary
+    /// dequant-in-kernel prefill dispatches against with zero per-call wrap
+    /// cost. All-or-nothing like `px4`; null slots = CPU-only.
+    gpu_planes: [3]?[]u8 = .{ null, null, null },
 
-    /// Construct with eager x4 pack building. Pack failure is silent — the
-    /// weight works identically (and bit-identically) without packs, just
-    /// through the slower row kernels.
+    /// Construct with eager x4 pack building (and, on ternary-capable GPU
+    /// builds, resident plane copies). Failure of either is silent — the
+    /// weight works identically without them, just slower.
     pub fn init(allocator: Allocator, p1: QuantWeight(.tq2_0), p2: ?QuantWeight(.tq2_0), p3: ?QuantWeight(.tq2_0)) WeightPtqtp {
         var self = WeightPtqtp{ .p1 = p1, .p2 = p2, .p3 = p3 };
         self.buildX4Packs(allocator);
+        self.buildGpuResidency();
         return self;
+    }
+
+    fn buildGpuResidency(self: *WeightPtqtp) void {
+        const gpu = fucina.internal.gpu;
+        if (comptime !(gpu.enabled and gpu.has_quant_gemm and gpu.has_tq2_0_quant)) return;
+        const planes = [3]?*const QuantWeight(.tq2_0){
+            &self.p1,
+            if (self.p2) |*p| p else null,
+            if (self.p3) |*p| p else null,
+        };
+        for (planes, 0..) |maybe_plane, i| {
+            const plane = maybe_plane orelse continue;
+            const ok = blk: {
+                const blocks = plane.asRawTensor().dataConstChecked() catch break :blk false;
+                const bytes = std.mem.sliceAsBytes(blocks);
+                const dev = gpu.allocResidentBytes(bytes.len) orelse break :blk false;
+                @memcpy(dev, bytes);
+                self.gpu_planes[i] = dev;
+                break :blk true;
+            };
+            if (!ok) {
+                self.freeGpuResidency();
+                return;
+            }
+        }
+    }
+
+    fn freeGpuResidency(self: *WeightPtqtp) void {
+        const gpu = fucina.internal.gpu;
+        if (comptime !gpu.enabled) return;
+        for (&self.gpu_planes) |*slot| {
+            if (slot.*) |dev| gpu.freeResidentBytes(dev);
+            slot.* = null;
+        }
     }
 
     fn buildX4Packs(self: *WeightPtqtp, allocator: Allocator) void {
@@ -446,6 +522,7 @@ pub const WeightPtqtp = struct {
     }
 
     pub fn deinit(self: *WeightPtqtp) void {
+        self.freeGpuResidency();
         if (self.px4_allocator) |allocator| self.freeX4Packs(allocator);
         if (self.p3) |*plane| plane.deinit();
         if (self.p2) |*plane| plane.deinit();

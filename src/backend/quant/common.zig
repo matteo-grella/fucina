@@ -19,9 +19,9 @@ pub const has_x86_avx2 = builtin.cpu.arch == .x86_64 and std.Target.x86.featureS
 pub const has_x86_avx512vnni = builtin.cpu.arch == .x86_64 and std.Target.x86.featureSetHas(builtin.cpu.features, .avx512vnni);
 
 // AVX-VNNI: the VEX-encoded vpdpbusd (Alder Lake+, Zen4+; CPUID AVX_VNNI) — a
-// separate feature bit from AVX512VNNI. Not executable on this (aarch64
-// macOS) dev machine — qemu-user has never implemented AVX-VNNI and Rosetta 2
-// stops short of it — but HARDWARE-EXECUTION-VALIDATED 2026-07-03 on an
+// separate feature bit from AVX512VNNI. No emulation substrate executes
+// AVX-VNNI, so it cannot run on a non-x86 dev machine — but it is
+// HARDWARE-EXECUTION-VALIDATED 2026-07-03 on an
 // i9-13950HX (Raptor Lake, Linux): zig build test + zig build x86dot-check
 // pass natively with checksums bit-equal to the M1/Rosetta portable runs
 // (coverage table in src/x86dot_check.zig).
@@ -181,10 +181,11 @@ test "dotI8x16 +128-bias form equals the plain signed dot" {
 // All three helpers are only ever called under `comptime has_x86_avx2` (their
 // VEX.128 encodings need AVX/AVX2), so they never reach non-x86 codegen.
 //
-// Execution-validated under qemu-user 9.2.1 (x86_64_v3) against the scalar
-// reference — see src/x86dot_check.zig and the tests below. NOTE: plain
-// `docker run --platform linux/amd64` uses binfmt qemu 7.0 which executes AVX2
-// SILENTLY WRONG (no SIGILL, corrupt lanes) — never validate with it.
+// Execution-validated on x86_64_v3 (hardware and a validated emulator)
+// against the scalar reference — see src/x86dot_check.zig and the tests
+// below. NOTE: some emulation substrates execute AVX2 SILENTLY WRONG (no
+// SIGILL, corrupt lanes) — before trusting any emulator, reproduce the
+// recorded checksums in src/x86dot_check.zig's attestation table.
 
 inline fn maddubsI16x8(a: QKV16u8, b: QKV16i8) QKV8i16 {
     // AT&T operand order: vpmaddubsw src2(signed), src1(unsigned), dst.

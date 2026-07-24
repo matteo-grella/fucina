@@ -2059,7 +2059,7 @@ test "ggml_q4_k dot and matmul consume loaded blocks" {
 // expression order — so the comparison below is BIT-EXACT on every target
 // (the integer dot is exact on all paths; Zig never contracts the identical
 // f32 ops). Used by the randomized parity test and mirrored in
-// src/x86dot_check.zig for the cross-ISA (Rosetta/qemu) runs.
+// src/x86dot_check.zig for the cross-ISA attestation runs.
 fn refDotQ4_KQ8_K(w: *const BlockQ4_K, a: *const BlockQ8_K) f32 {
     const d = f16BitsToF32(w.dm[0]) * a.d;
     const dmin = f16BitsToF32(w.dm[1]) * a.d;
@@ -2112,7 +2112,8 @@ fn fillRandomBlockQ8_K(block: *BlockQ8_K, random: std.Random, extreme: bool) voi
 test "ggml_q4_k randomized blocks: dot kernel matches scalar reference bit-exactly" {
     // Randomized + extreme-value parity for the per-block Q4_K·Q8_K dot — the
     // kernel the non-aarch64 matmul path reduces to. On x86-64-v3 this
-    // exercises the vpmaddubsw construction (run via qemu or real hardware);
+    // exercises the vpmaddubsw construction (on real hardware or a validated
+    // emulator — see src/x86dot_check.zig);
     // on aarch64/baseline it pins the portable forms to the same reference.
     var prng = std.Random.DefaultPrng.init(0x517cc1b727220a95);
     const random = prng.random();

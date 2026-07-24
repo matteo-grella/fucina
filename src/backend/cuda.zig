@@ -64,6 +64,8 @@ pub const has_quant_gemm = enabled;
 /// CUDA's vendored dequant kernels cover Q5_K in addition to the common
 /// Q4_K/Q6_K/Q8_0 provider surface. Metal deliberately leaves Q5_K on CPU.
 pub const has_q5_k_quant = enabled;
+/// No ternary CUDA kernel yet — the exec seam prunes the tq2_0 arm.
+pub const has_tq2_0_quant = false;
 
 pub const Orient = enum(c_int) { nn = 0, tn = 1, nt = 2 };
 

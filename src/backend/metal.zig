@@ -48,6 +48,8 @@ pub const has_quant_gemm = enabled;
 /// Q5_K currently has a CUDA dequant kernel only. Keeping this capability
 /// explicit lets the shared exec/weight layer retain Metal's CPU fallback.
 pub const has_q5_k_quant = false;
+/// Ternary TQ2_0 dequant-in-kernel GEMM (fucina_mul_mm_tq2_0_f32).
+pub const has_tq2_0_quant = true;
 
 pub const Orient = enum(c_int) { nn = 0, tn = 1, nt = 2 };
 
@@ -187,6 +189,7 @@ const State = struct {
     min_work_packed_q4: u64 = default_min_work_packed_q4,
     min_work_packed_q6: u64 = default_min_work_packed_q6,
     min_work_packed_q8: u64 = default_min_work_packed_q8,
+    min_work_packed_tq2: u64 = default_min_work_packed_tq2,
     qmoe_min_fill_pct: u64 = default_qmoe_min_fill_pct,
 };
 
@@ -238,6 +241,12 @@ const default_min_work_dense_q6: u64 = 1 << 22;
 const default_min_work_packed_q4: u64 = 1 << 30;
 const default_min_work_packed_q6: u64 = 1 << 31;
 const default_min_work_packed_q8: u64 = 1 << 29;
+// Ternary: the CPU fallback is the x4 interleaved kernel (docs/TERNARY.md)
+// at ~74 G-MAC/s single-thread — against a ~0.5 ms dispatch floor the
+// break-even sits near 2^25 m*n*k, far below the q8_0-class defaults, and
+// PTQTP bodies at 0.6B-class shapes (128-row chunks x 1024..3072 dims)
+// land in 2^27..2^29. FUCINA_GPU_MIN_WORK_DENSE_TQ2 overrides.
+const default_min_work_packed_tq2: u64 = 1 << 25;
 /// Minimum grouped-MoE tile occupancy (percent of the 32-row token-tile slots
 /// that carry real rows) before the GPU arm engages. Per-tile GPU cost is
 /// fill-independent (~45-53 µs/tile at 12% and at 100% fill — weight dequant
@@ -515,6 +524,9 @@ fn initConfigOnce() void {
     }
     if (std.c.getenv("FUCINA_GPU_MIN_WORK_DENSE_Q8")) |v_ptr| {
         state.min_work_packed_q8 = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_packed_q8;
+    }
+    if (std.c.getenv("FUCINA_GPU_MIN_WORK_DENSE_TQ2")) |v_ptr| {
+        state.min_work_packed_tq2 = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_packed_tq2;
     }
     if (std.c.getenv("FUCINA_GPU_QMOE_MIN_FILL")) |v_ptr| {
         state.qmoe_min_fill_pct = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_qmoe_min_fill_pct;
@@ -1094,6 +1106,7 @@ pub const QFormat = enum(c_int) {
     q8_0 = 0,
     q6_k = 1,
     q4_k = 2,
+    tq2_0 = 3,
 
     /// K (the reduced dim) must be a whole number of blocks.
     pub fn kMultiple(self: QFormat) usize {
@@ -1101,6 +1114,7 @@ pub const QFormat = enum(c_int) {
             .q8_0 => 32,
             .q6_k => 256,
             .q4_k => 256,
+            .tq2_0 => 256,
         };
     }
 };
@@ -1545,7 +1559,7 @@ pub fn shouldUseGpuDenseQuant(format: QFormat, total_work: u64) bool {
     ensureConfig();
     const min_work = switch (format) {
         .q6_k => state.min_work_dense_q6,
-        .q4_k, .q8_0 => state.min_work_qmoe,
+        .q4_k, .q8_0, .tq2_0 => state.min_work_qmoe,
     };
     const pass = state.gpu_enabled and total_work >= min_work;
     tgate(pass);
@@ -1559,6 +1573,7 @@ pub fn shouldUseGpuDenseQuantPacked(format: QFormat, total_work: u64) bool {
         .q4_k => state.min_work_packed_q4,
         .q6_k => state.min_work_packed_q6,
         .q8_0 => state.min_work_packed_q8,
+        .tq2_0 => state.min_work_packed_tq2,
     };
     const pass = state.gpu_enabled and total_work >= min_work;
     tgate(pass);
@@ -1757,6 +1772,7 @@ fn buildQuantWeights(
         .q8_0 => .q8_0,
         .q6_k => .q6_k,
         .q4_k => .q4_k,
+        .tq2_0 => .tq2_0,
     };
     const bpr = blocks.len / n;
     const wref = try allocator.alloc(f32, n * k);
@@ -1814,11 +1830,12 @@ test "metal quant gemm q6_K/q4_K/q8_0 parity vs dequantized reference" {
     const random = prng.random();
 
     const Case = struct { m: usize, n: usize, k: usize };
-    inline for (.{ QFormat.q6_k, QFormat.q4_k, QFormat.q8_0 }) |fmt| {
+    inline for (.{ QFormat.q6_k, QFormat.q4_k, QFormat.q8_0, QFormat.tq2_0 }) |fmt| {
         const Block = switch (fmt) {
             .q6_k => dtype_mod.BlockQ6_K,
             .q4_k => dtype_mod.BlockQ4_K,
             .q8_0 => dtype_mod.BlockQ8_0,
+            .tq2_0 => dtype_mod.BlockTQ2_0,
         };
         const k_mult = comptime fmt.kMultiple();
         const cases = [_]Case{
@@ -1868,11 +1885,12 @@ test "metal quant gemm grouped expert tiles parity" {
     var prng = std.Random.DefaultPrng.init(23);
     const random = prng.random();
 
-    inline for (.{ QFormat.q6_k, QFormat.q4_k, QFormat.q8_0 }) |fmt| {
+    inline for (.{ QFormat.q6_k, QFormat.q4_k, QFormat.q8_0, QFormat.tq2_0 }) |fmt| {
         const Block = switch (fmt) {
             .q6_k => dtype_mod.BlockQ6_K,
             .q4_k => dtype_mod.BlockQ4_K,
             .q8_0 => dtype_mod.BlockQ8_0,
+            .tq2_0 => dtype_mod.BlockTQ2_0,
         };
         const k = 2 * comptime fmt.kMultiple();
         const n = 64;
@@ -1945,11 +1963,12 @@ test "metal eager async dense quant Q4_K/Q6_K/Q8_0 uses direct tensor storage" {
     const dtype_mod = @import("../dtype.zig");
     var prng = std.Random.DefaultPrng.init(31);
     const random = prng.random();
-    inline for (.{ QFormat.q6_k, QFormat.q4_k, QFormat.q8_0 }) |fmt| {
+    inline for (.{ QFormat.q6_k, QFormat.q4_k, QFormat.q8_0, QFormat.tq2_0 }) |fmt| {
         const Block = switch (fmt) {
             .q6_k => dtype_mod.BlockQ6_K,
             .q4_k => dtype_mod.BlockQ4_K,
             .q8_0 => dtype_mod.BlockQ8_0,
+            .tq2_0 => dtype_mod.BlockTQ2_0,
         };
         const m = 65;
         const n = 68;

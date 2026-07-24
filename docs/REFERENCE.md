@@ -703,6 +703,7 @@ values. On Linux without libc the lookup scans `/proc/self/environ`
 | `FUCINA_GPU_MIN_WORK_DENSE_Q5` (cuda) | Dense Q5_K model-weight gate against the load-time-packed CPU fallback. | `2^24` |
 | `FUCINA_GPU_MIN_WORK_DENSE_Q6` | Dense Q6_K gate; overrides both the compact/raw and packed-CPU tiers. | compact/raw `2^22`; packed Metal `2^31`, CUDA `2^24` |
 | `FUCINA_GPU_MIN_WORK_DENSE_Q8` | Dense Q8_0 model-weight gate against the load-time-packed CPU fallback. | Metal `2^29`; CUDA `2^24` |
+| `FUCINA_GPU_MIN_WORK_DENSE_TQ2` (metal) | Dense/PTQTP ternary TQ2_0 gate against the x4 interleaved CPU kernels. | `2^25` |
 | `FUCINA_GPU_QMOE_MIN_FILL` | Tile-occupancy gate (percent) for grouped MoE: small expert batches whose 32-row tiles would run mostly empty stay on CPU; `0` disables the gate, `>100` never passes it. | `50` |
 | `FUCINA_GPU_TRACE` | Non-`0` first character enables dispatch tracing; dump via `fucina.internal.gpu.traceDump()` (no-op when off). | off |
 | `FUCINA_GPU_TF32` (cuda) | Non-`0` opts f32 GEMMs into TF32 tensor cores (default is strict FP32). | off |
@@ -7384,7 +7385,7 @@ bit-exactness. `zig build x86dot-check` builds and runs it natively
 feature gate no local substrate can execute (`x86_64_v3`, `alderlake`,
 `znver4`, `neoverse_v1`). The file's header carries the dated per-arm
 execution attestation table (which arms have actually executed on which
-hardware/emulator) and the emulator caveats (qemu ≥ 9.2 required; qemu 7.0
+hardware/emulator) and the emulator caveats (some emulators
 executes AVX2 silently wrong).
 
 ### 9.8 Threading: the worker team (`src/thread.zig`, `src/parallel.zig`)
@@ -7461,7 +7462,7 @@ by the ObjC shim (`src/backend/metal/shim.m`): the MLX "steel" f32/f16 GEMM
   shared staging buffer, f16 lock, CPU widen pass, or result re-rounding. The
   old direct-slice `gemmF16Nt` remains blocking only for low-level parity
   tests/bench callers.
-- **Dense quantized prefill** (Q4_K/Q6_K/Q8_0): exec's
+- **Dense quantized prefill** (Q4_K/Q6_K/Q8_0/TQ2_0): exec's
   `denseQuantMatmulGpu` seam (`src/exec/quant_matmul.zig`) offloads
   `m ≥ 32` stable-weight matmuls behind the compact/raw or packed-CPU
   per-format gate when

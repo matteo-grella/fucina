@@ -57,6 +57,33 @@ typedef struct {
 } block_q4_K;
 static_assert(sizeof(block_q4_K) == 2*sizeof(ggml_half) + K_SCALE_SIZE + QK_K/2, "wrong q4_K block size/padding");
 
+// Ternary TQ2_0 (ggml type 35): 256 elements as 2-bit crumbs, one f16 scale.
+// Byte m of each 128-element half covers elements m, m+32, m+64, m+96 of
+// that half (crumb lane = element/32); codes {0,1,2} decode to (code-1)*d.
+typedef struct {
+    uint8_t qs[64];
+    ggml_half d;
+} block_tq2_0;
+static_assert(sizeof(block_tq2_0) == 64 + sizeof(ggml_half), "wrong tq2_0 block size/padding");
+
+// Dequantize 16 consecutive elements of a TQ2_0 block. A 16-element chunk
+// always lives inside one crumb plane of one 128-half: half = il/8, plane
+// lane = (il%8)/2, byte offset = (il%2)*16.
+template <typename type4x4>
+void dequantize_tq2_0(device const block_tq2_0 *xb, short il, thread type4x4 & reg) {
+    device const uint8_t * qs = xb->qs + (il / 8) * 32 + (il % 2) * 16;
+    const short shift = 2 * ((il % 8) / 2);
+    const float d = xb->d;
+
+    float4x4 reg_f;
+
+    for (int i = 0; i < 16; i++) {
+        reg_f[i/4][i%4] = d * (float)(((qs[i] >> shift) & 3) - 1);
+    }
+
+    reg = (type4x4) reg_f;
+}
+
 // Dequantize 16 consecutive elements (`il` = 16-element chunk within the
 // block) into a half4x4 register. Verbatim from upstream.
 template <typename type4x4>
@@ -331,3 +358,4 @@ typedef decltype(fucina_mul_mm_q<block_q8_0, 2, dequantize_q8_0>) fucina_mul_mm_
 template [[host_name("fucina_mul_mm_q8_0_f32")]] kernel fucina_mul_mm_q_t fucina_mul_mm_q<block_q8_0, 2,  dequantize_q8_0>;
 template [[host_name("fucina_mul_mm_q6_K_f32")]] kernel fucina_mul_mm_q_t fucina_mul_mm_q<block_q6_K, 16, dequantize_q6_K>;
 template [[host_name("fucina_mul_mm_q4_K_f32")]] kernel fucina_mul_mm_q_t fucina_mul_mm_q<block_q4_K, 16, dequantize_q4_K>;
+template [[host_name("fucina_mul_mm_tq2_0_f32")]] kernel fucina_mul_mm_q_t fucina_mul_mm_q<block_tq2_0, 16, dequantize_tq2_0>;

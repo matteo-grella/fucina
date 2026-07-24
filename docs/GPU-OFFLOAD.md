@@ -14,7 +14,7 @@ command/stream, copy back, return. It was simple, but it charged every op for a
 host round trip even when the next action was another GPU GEMM or independent
 CPU work.
 
-The dense f32/f16 and stable-weight quantized contract (Q4_K/Q6_K/Q8_0 on
+The dense f32/f16 and stable-weight quantized contract (Q4_K/Q6_K/Q8_0/TQ2_0 on
 Metal; those plus Q5_K on CUDA) is:
 
 1. validate and allocate the ordinary CPU-visible output through

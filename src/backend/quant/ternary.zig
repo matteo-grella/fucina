@@ -474,6 +474,63 @@ pub fn matmulTQ2_0X4RhsTileAcc(
     x4Tile(true, out, lhs_blocks, packed_groups, blocks_per_row, n, r0, r1, c0, c1);
 }
 
+/// One TQ2_0x4 block group dotted against one Q8_K activation block: the
+/// four i32 lanes ARE the four columns' exact unsigned-code sums. Every arm
+/// accumulates the exact per-block integer (max lane sum 256*2*127 = 65024,
+/// far inside i32; on the maddubs tier a pair sum is at most 2*3*127 = 762,
+/// no i16 saturation even for the out-of-spec code 3), so all arms agree
+/// bitwise — the same contract as blockCodeDotW.
+///
+/// aarch64: by-element sdot — the [lane] operand broadcasts one 4-byte
+/// activation k-group against a 16-byte vector holding the four columns'
+/// codes for that group; four independent per-crumb-plane accumulators keep
+/// the sdot chains at depth 16 (a single accumulator serializes all 64 dots
+/// behind its latency — measured 1.7x slower).
+///
+/// Elsewhere (x86 VNNI/AVX2 and the portable twins): ymm granules — one
+/// contiguous 32-byte pack load carries TWO adjacent k-groups x 4 columns,
+/// the matching 8 activation bytes broadcast dword-wise to [g,g,g,g,
+/// g+1,g+1,g+1,g+1], and dotGroups32 (vpdpbusd / vpmaddubsw+vpmaddwd /
+/// portable) accumulates 8 lanes = the same 4 columns at two k-groups,
+/// folded 8->4 once per block (exact i32). Same four-accumulator
+/// independence, mirroring the Q4_Kx8 x86 shape.
+inline fn x4BlockDot(w: *const BlockTQ2_0x4, a: *const BlockQ8_K) QKV4i32 {
+    if (comptime builtin.cpu.arch == .aarch64) {
+        var accs: [4]QKV4i32 = @splat(@splat(0));
+        inline for ([_]usize{ 0, 128 }) |h| {
+            var wv: [8]QKV16u8 = undefined;
+            inline for (0..8) |fg| wv[fg] = w.qs[h + fg * 16 ..][0..16].*;
+            inline for (0..4) |lane| {
+                const a0: QKV16i8 = a.qs[h + lane * 32 ..][0..16].*;
+                const a1: QKV16i8 = a.qs[h + lane * 32 + 16 ..][0..16].*;
+                inline for (0..4) |fg| {
+                    accs[lane] = sdotI8x16Lane(fg, accs[lane], crumb16(wv[fg], lane), a0);
+                    accs[lane] = sdotI8x16Lane(fg, accs[lane], crumb16(wv[fg + 4], lane), a1);
+                }
+            }
+        }
+        return (accs[0] + accs[1]) + (accs[2] + accs[3]);
+    }
+    var accs: [4]QKV8i32 = @splat(@splat(0));
+    inline for ([_]usize{ 0, 128 }) |h| {
+        inline for (0..4) |fg2| { // k-group pairs (0,1),(2,3),(4,5),(6,7)
+            const wv: QKV32u8 = w.qs[h + fg2 * 32 ..][0..32].*;
+            inline for (0..4) |lane| {
+                const pair: @Vector(2, u32) = @bitCast(a.qs[h + lane * 32 + fg2 * 8 ..][0..8].*);
+                const act: QKV32i8 = @bitCast(@shuffle(u32, pair, undefined, [8]i32{ 0, 0, 0, 0, 1, 1, 1, 1 }));
+                accs[lane] = dotGroups32(accs[lane], crumb32(wv, lane), act);
+            }
+        }
+    }
+    var acc: QKV4i32 = @splat(0);
+    inline for (accs) |a8| {
+        const lo: QKV4i32 = @shuffle(i32, a8, undefined, [4]i32{ 0, 1, 2, 3 });
+        const hi: QKV4i32 = @shuffle(i32, a8, undefined, [4]i32{ 4, 5, 6, 7 });
+        acc += lo + hi;
+    }
+    return acc;
+}
+
 fn x4Tile(
     comptime accumulate: bool,
     out: []f32,
@@ -503,24 +560,7 @@ fn x4Tile(
             for (arow, 0..) |*a, bi| {
                 const w = &wgroup[bi];
                 const bsum = if (cached) bsum_cache[bi] else blockBsumTotal(a);
-                // Four independent accumulators (one per crumb plane) keep
-                // the sdot chains at depth 16 — a single accumulator would
-                // serialize all 64 dots behind its latency (measured 1.7x
-                // slower). The i32 merge at block end is exact.
-                var accs: [4]QKV4i32 = @splat(@splat(0));
-                inline for ([_]usize{ 0, 128 }) |h| {
-                    var wv: [8]QKV16u8 = undefined;
-                    inline for (0..8) |fg| wv[fg] = w.qs[h + fg * 16 ..][0..16].*;
-                    inline for (0..4) |lane| {
-                        const a0: QKV16i8 = a.qs[h + lane * 32 ..][0..16].*;
-                        const a1: QKV16i8 = a.qs[h + lane * 32 + 16 ..][0..16].*;
-                        inline for (0..4) |fg| {
-                            accs[lane] = sdotI8x16Lane(fg, accs[lane], crumb16(wv[fg], lane), a0);
-                            accs[lane] = sdotI8x16Lane(fg, accs[lane], crumb16(wv[fg + 4], lane), a1);
-                        }
-                    }
-                }
-                const acc = (accs[0] + accs[1]) + (accs[2] + accs[3]);
+                const acc = x4BlockDot(w, a);
                 const isum = acc - @as(QKV4i32, @splat(bsum));
                 var dv: @Vector(4, f32) = undefined;
                 inline for (0..4) |ci| dv[ci] = f16BitsToF32(w.d[ci]);

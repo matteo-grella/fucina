@@ -108,6 +108,19 @@ Deliberate deltas from the paper:
   chat CLI, speculation, batch — with no re-decoration. Pair-detection is
   wired in the qwen3 loaders only; other families do not read decorated
   files yet.
+- **Metal prefill offload** (`-Dgpu=metal`): `WeightPtqtp.init` also copies
+  each plane into GPU-resident bytes, and prefill-sized fused linears
+  (m ≥ 32, work ≥ `FUCINA_GPU_MIN_WORK_DENSE_TQ2`, default 2^25) dispatch
+  each plane through the ternary dequant-in-kernel `mul_mm`
+  (`fucina_mul_mm_tq2_0_f32`), summing the K plane outputs on the CPU. Not
+  bitwise vs the CPU chain — the same accepted numerics stance as the
+  Q4_K/Q6_K/Q8_0 dense offload; provider parity tests pin the kernel.
+  Measured (M1 Max, Qwen3-0.6B, pp1001, same binary, `FUCINA_GPU=0` as the
+  CPU arm): prefill 2830 → 1291 ms at K=2 with an f16 head (**2.2×**), and
+  2841 → 956 ms fully ternary with `--head-planes 2` (**2.97×**, ~1047
+  prefill tok/s). Decode never dispatches (m ≥ 32 gate). Known follow-up:
+  the K plane dispatches sync per linear for the CPU sum — the shared-input
+  batch entry can fold them into one command.
 - **Runtime speed path**: `WeightPtqtp.init` packs every plane into the x4
   column-interleaved form at construction (`BlockTQ2_0x4`, docs/TERNARY.md
   — same bytes rearranged, zero per-block reduces), and the fused linear

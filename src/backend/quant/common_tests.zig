@@ -52,8 +52,9 @@ test "dotI8x16Portable sign-trick domain: extremes and saturation stress" {
     // The sign-trick exactness domain: a unrestricted (incl. -128), b in
     // [-127,127] — exactly what every kernel call site guarantees (b is
     // quantizeToI8 output). On non-AVX2 targets this trivially exercises the
-    // plain/bias forms; cross-compiled to x86-64-v3 and run under qemu it
-    // executes the vpsignb/vpmaddubsw path against the same expectations.
+    // plain/bias forms; cross-compiled to x86-64-v3 and executed on real or
+    // validated-emulated x86 it exercises the vpsignb/vpmaddubsw path
+    // against the same expectations.
     var prng = std.Random.DefaultPrng.init(0xdeadbeefcafef00d);
     const random = prng.random();
     var iter: usize = 0;

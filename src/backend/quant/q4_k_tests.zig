@@ -49,7 +49,7 @@ const packMatmulRhsQ4_Kx2Mmla = q4_k.packMatmulRhsQ4_Kx2Mmla;
 // expression order — so the comparison below is BIT-EXACT on every target
 // (the integer dot is exact on all paths; Zig never contracts the identical
 // f32 ops). Used by the randomized parity test and mirrored in
-// src/x86dot_check.zig for the cross-ISA (Rosetta/qemu) runs.
+// src/x86dot_check.zig for the cross-ISA attestation runs.
 fn refDotQ4_KQ8_K(w: *const BlockQ4_K, a: *const BlockQ8_K) f32 {
     const d = f16BitsToF32(w.dm[0]) * a.d;
     const dmin = f16BitsToF32(w.dm[1]) * a.d;

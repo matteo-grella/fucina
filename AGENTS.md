@@ -91,9 +91,9 @@ Build options (consumed at comptime via `build_options`):
   `FUCINA_GPU_QMOE_MIN_FILL` tile-occupancy gate (default 50% — small-m expert batches whose
   32-row tiles would run mostly empty stay on CPU; 0 = old behavior), raw-block CPU fallback —
   gpu builds keep ONE raw expert representation instead of the x4 packs). **Dense quantized
-  linears** (Q4_K/Q6_K/Q8_0 — e.g. the qwen3/gemma prefill projections) also offload via the same
+  linears** (Q4_K/Q6_K/Q8_0, and ternary TQ2_0 — e.g. the qwen3/gemma prefill projections and PTQTP plane matmuls) also offload via the same
   `gemmQuantNtAsync` dequant-in-kernel GEMM (`weights.linearSeqQ*` → `ExecContext.denseQuantMatmulGpu`,
-  per-format `FUCINA_GPU_MIN_WORK_DENSE_Q4/Q6/Q8` gates against the CPU packed-kernel fallback,
+  per-format `FUCINA_GPU_MIN_WORK_DENSE_Q4/Q6/Q8/TQ2` gates against the CPU packed-kernel fallback,
   stable RHS residency, ~+33% pp on 0.6B-Q4_K);
   decode (m=1, below the gate) and training (grad path) stay on CPU.
   On both providers, eligible **dense f32, f16, and provider-supported stable quantized** commands submit eagerly
@@ -144,7 +144,7 @@ Build options (consumed at comptime via `build_options`):
 | `src/exec.zig` | `ExecContext` — forwarding facade over `src/exec/`: embeds one `Runtime` as `rt`, forwards every op to its domain module, and re-exports the option/result types. Exec scopes live here too (openExecScope/closeExecScope: implicit ownership of training intermediates). |
 | `src/exec/` | The eager-runtime implementation. `runtime.zig` = leaf `Runtime` substrate (allocator, worker team, exec-scope stack, tensor allocation primitives; domain modules take an explicit `*Runtime`, never `self: anytype`); `buffer_pool.zig` = the reusable transient-buffer pool (see `docs/MEMORY-MODEL.md`); domain modules (`attention`, `matmul`, `quant_matmul`, `moe`, `norm`, `rope`, `softmax`, `loss`, `stats`, `topk`, `reduce`, `gather_scatter`, `conv`, `pool`, `convert`, `elementwise`, `shape`, + the `row_ops` kernel leaf); `expert_store.zig` = disk-backed MoE expert store (pinned set + per-layer LRU + pread readahead — out-of-core experts for models larger than RAM); `moe_chain.zig` = shared batched-MoE scheduling leaf (expert-grouped route plan, phase-chain machinery, chunk helpers, profile timers) consumed by `exec/moe.zig` and — via the `ExecContext.moe_chain` re-export — by the gemma MoE engines. |
 | `src/backend.zig`, `src/backend/` | Final numeric kernels (`native.zig`, `cpu.zig`, `ops.zig`, `vector/`, `quant/`, `packed.zig`; `vector/gemm_blocked.zig` = BLIS-style blocked packed f32 GEMM for the no-BLAS path; `quant/` also holds the f32→quantized row ENCODERS — Q4_K/Q5_K/Q6_K/TQ2_0 + legacy, byte-exact ggml parity, `quantizeRowForDType` dispatch; `quant/ternary.zig` = the hot TQ2_0 ternary {-1,0,+1} kernels — int8 sdot/vpdpbusd flagship + mul-free f32 path + b1.58 absmean encoder, see `docs/TERNARY.md`). |
-| `src/x86dot_check.zig` | Standalone cross-ISA parity checker for the int8 dot primitives + Q4_K/Q8_0/TQ2_0 dot kernels (Rosetta/qemu/x86-hardware validation vehicle; per-arm execution-coverage table + build matrix in its header). |
+| `src/x86dot_check.zig` | Standalone cross-ISA parity checker for the int8 dot primitives + Q4_K/Q8_0/TQ2_0 dot kernels (cross-substrate validation vehicle — native, translated, emulated, and x86-hardware runs; per-arm execution-coverage table + build matrix in its header). |
 | `src/storage.zig` | Refcounted owned storage. |
 | `src/accelerator.zig` | Backend-neutral lifetime tokens for already-submitted eager GPU work and storage-lifetime mapping resources (completion tracking only; no compute graph). |
 | `src/dtype.zig` | Scalar + block-quantized dtype definitions. |

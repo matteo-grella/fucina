@@ -64,8 +64,17 @@ SLOWER, the load-bearing lesson of this layout. Measured on M1 Max
 (`bench-ternary` interleaved A/B, medians of 100, three runs): **1.06-1.10x
 over the row kernel at every m in {1,4,32,128} on both bench shapes**;
 single-thread m=1 decode moves from ~30% to ~33% of the measured DRAM
-ceiling. Non-aarch64 ISAs currently take the portable by-element twin
-(bitwise identical, untuned — a VNNI arm is future work).
+ceiling. On x86 the kernel takes a
+ymm-granule body — one contiguous 32-byte pack load carries two adjacent
+k-groups x 4 columns, activations broadcast dword-wise, `vpdpbusd` (VNNI)
+or `vpmaddubsw`+`vpmaddwd` (AVX2) accumulating 8 lanes folded 8→4 once per
+block, mirroring the Q4_Kx8 x86 shape; other ISAs run its portable twins.
+Cross-ISA bitwise parity is pinned by `zig build x86dot-check` (tq2_0x4
+section), executed natively on M1, under Rosetta 2 (real-x86 portable
+tier), and on a validated x86-64 emulator (AVX2 arm) with bit-equal x86
+checksums; the
+VNNI arm is compile-verified pending AVX-VNNI hardware (the checker's
+attestation table has the dated rows).
 
 Tiles process 4 weight rows per activation pass (`blockCodeDot4`: shared
 activation vectors and bsum total), with the standard row/column parallel

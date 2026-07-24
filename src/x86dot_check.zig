@@ -22,7 +22,7 @@
 //!   aarch64 sdot asm                 | natively, Apple M1 Max             | ongoing: zig build test + zig build x86dot-check
 //!   aarch64 smmla asm (FEAT_I8MM)    | NEVER — M1 lacks I8MM              | compile+objdump-verified 2026-06-11; execution needs Graviton3+/Grace hardware
 //!   x86 portable (< AVX2)            | Rosetta 2 (real x86 semantics)     | 2026-06-11, leg (b) below
-//!   x86 AVX2 sign-trick asm          | qemu 9.2.1 + i9-13950HX hardware   | 2026-06-11 leg (c); 2026-07-03 native run on the x86 box
+//!   x86 AVX2 sign-trick asm          | valid. emulator + i9-13950HX hw    | 2026-06-11 leg (c); 2026-07-03 native run on the x86 box
 //!   x86 AVX-VNNI (VEX vpdpbusd)      | i9-13950HX (Raptor Lake), Linux    | EXECUTED 2026-07-03 (ReleaseFast; see note below): bias/widen forms AND the {vex} ymm asm, checksum bit-equal to the M1/Rosetta runs
 //!   x86 AVX512-VNNI (EVEX vpdpbusd)  | NEVER                              | compile-verified only; execution needs Ice Lake/Zen4 hardware
 //!   x86 ymm dpbusdI32x8 asm          | i9-13950HX                         | EXECUTED 2026-07-03, native run (the Q8_0x4 packed-kernel VNNI arm)
@@ -30,6 +30,10 @@
 //!   tq2_0 aarch64 sdot arm           | natively, Apple M1 Max             | EXECUTED 2026-07-07 (this checker's tq2_0 section + the ternary parity suites); ongoing via zig build x86dot-check
 //!   tq2_0 x86 AVX2 maddubs arm       | i9-13950HX (Raptor Lake), Linux    | EXECUTED 2026-07-07, -Dcpu=x86_64_v3 native run (avxvnni=false); checksum bit-equal to the VNNI run (b1f84dde82d0c0a4)
 //!   tq2_0 x86 AVX-VNNI vpdpbusd arm  | i9-13950HX (Raptor Lake), Linux    | EXECUTED 2026-07-07, native run (avx2+avxvnni); full zig build test also green on the box
+//!   tq2_0x4 aarch64 by-elem sdot arm | natively, Apple M1 Max             | EXECUTED 2026-07-24 (this checker's tq2_0x4 section + ternary parity suites + the bench-ternary bitwise gate)
+//!   tq2_0x4 x86 portable tier        | Rosetta 2 (real x86 semantics)     | EXECUTED 2026-07-24, leg (b); x86-chain checksum f79a3f29e3be6cab
+//!   tq2_0x4 x86 AVX2 maddubs arm     | validated x86-64 emulator          | EXECUTED 2026-07-24, leg (c), x86_64_v3 static musl; checksum bit-equal to the Rosetta run (f79a3f29e3be6cab)
+//!   tq2_0x4 x86 VNNI ymm arm         | NEVER                              | compile-verified 2026-07-24 (alderlake leg); execution needs AVX-VNNI hardware — no emulator implements AVX-VNNI
 //!   portable widening tier (256-bit) | every host (no gate)               | ongoing: zig build test everywhere + this checker
 //!
 //! The 2026-07-03 hardware attestations ran `zig build test -Doptimize=ReleaseFast`
@@ -57,18 +61,21 @@
 //!       -O ReleaseSafe -femit-bin=zig-out/x86dot_rosetta
 //!   arch -x86_64 ./zig-out/x86dot_rosetta
 //!
-//!   # (c) x86-64-v3 (AVX2 vpmaddubsw/vpsignb path) under qemu-user 9.2.1 in
-//!   #     the colima VM (binary is static musl; repo is sshfs-visible in VM):
+//!   # (c) x86-64-v3 (AVX2 vpmaddubsw/vpsignb path), static musl so it runs on
+//!   #     any x86-64 Linux substrate — real hardware, or a user-mode emulator
+//!   #     that passes the validation gate below:
 //!   zig build-exe src/x86dot_check.zig -target x86_64-linux-musl -mcpu=x86_64_v3 \
 //!       -O ReleaseSafe -femit-bin=zig-out/x86dot_v3
-//!   colima ssh -- /tmp/p/qemu92 "$PWD/zig-out/x86dot_v3"
+//!   # then execute zig-out/x86dot_v3 on the substrate and diff the checksums.
 //!
-//! WARNING: never validate through plain `docker run --platform linux/amd64`:
-//! the default binfmt qemu there is 7.0, which executes AVX2 SILENTLY WRONG
-//! (no SIGILL, corrupt lanes). qemu-user >= 9.2 is required.
-//! AVX-VNNI / AVX512-VNNI cannot be executed by any emulator on this machine;
-//! the AVX-VNNI arms are hardware-attested instead (the 2026-07-03 rows above),
-//! the EVEX AVX512-VNNI arm remains compile-verified only (needs Ice Lake/Zen4).
+//! WARNING — emulators are guilty until proven: at least one widely deployed
+//! x86-64 user-mode emulator version executes AVX2 SILENTLY WRONG (no SIGILL,
+//! corrupt lanes). Before trusting any emulation substrate, reproduce this
+//! checker's recorded x86 checksums (the attestation rows above) on it first;
+//! a substrate that cannot reproduce them attests nothing.
+//! No emulator implements AVX-VNNI or executes AVX512-VNNI here; the AVX-VNNI
+//! arms are hardware-attested instead (the 2026-07-03 rows above), and the
+//! EVEX AVX512-VNNI arm remains compile-verified only (needs Ice Lake/Zen4).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -587,6 +594,55 @@ fn checkTQ2_0(allocator: std.mem.Allocator) !void {
     std.debug.print("tq2_0 matmul: done (checksum so far {x:0>16})\n", .{fnv});
 }
 
+fn checkTQ2_0X4(allocator: std.mem.Allocator) !void {
+    var prng = std.Random.DefaultPrng.init(0x2545f4914f6cdd1d);
+    const random = prng.random();
+
+    const m = 3;
+    const n = 8; // two 4-column groups; the pack refuses n % 4 != 0
+    const blocks_per_row = 3; // odd block count exercises group indexing
+    const k = blocks_per_row * qk_k_block_size;
+
+    const weights = try allocator.alloc(f32, n * k);
+    defer allocator.free(weights);
+    fillUniformF32(random, weights, 1.5);
+    const acts = try allocator.alloc(f32, m * k);
+    defer allocator.free(acts);
+    fillUniformF32(random, acts, 3.0);
+
+    var rhs = try quant.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, weights);
+    defer rhs.deinit();
+    const packed_groups = try quant.packMatmulRhsTQ2_0x4(allocator, &rhs);
+    defer allocator.free(packed_groups);
+
+    var a = try tensor_mod.Tensor.fromSlice(allocator, &.{ m, k }, acts);
+    defer a.deinit();
+    const qlhs = try quant.quantizeRowsQ8_K(allocator, &a);
+    defer allocator.free(qlhs);
+
+    var got: [m * n]f32 = undefined;
+    var want: [m * n]f32 = undefined;
+
+    // x4 column-interleaved kernel (by-element sdot / ymm-granule
+    // vpdpbusd-maddubs / portable twins) vs the row kernel: identical exact
+    // block integers in every lane arrangement, identical per-column f32
+    // sequence → bit-exact on every ISA, and bit-exact to the cold table
+    // path transitively (checked directly too).
+    quant.matmulTQ2_0X4RhsRange(&got, qlhs, packed_groups, blocks_per_row, n, 0, m);
+    quant.matmulTQ2_0RhsRange(&want, qlhs, &rhs, m, n, 0, m);
+    for (0..m * n) |i| checkF32Exact("tq2_0x4 vs row", want[i], got[i]);
+    quant.matmulTableQ8_KRhsRange(.tq2_0, &want, qlhs, &rhs, m, n, 0, m);
+    for (0..m * n) |i| checkF32Exact("tq2_0x4 vs cold", want[i], got[i]);
+
+    // The accumulating twin equals materialize-then-add exactly.
+    var acc: [m * n]f32 = undefined;
+    quant.matmulTQ2_0X4RhsRange(&acc, qlhs, packed_groups, blocks_per_row, n, 0, m);
+    quant.matmulTQ2_0X4RhsTileAcc(&acc, qlhs, packed_groups, blocks_per_row, n, 0, m, 0, n);
+    for (0..m * n) |i| checkF32Exact("tq2_0x4 acc", want[i] + want[i], acc[i]);
+
+    std.debug.print("tq2_0x4 matmul: done (checksum so far {x:0>16})\n", .{fnv});
+}
+
 pub fn main(init: std.process.Init) !void {
     _ = init;
     const allocator = std.heap.page_allocator;
@@ -599,6 +655,7 @@ pub fn main(init: std.process.Init) !void {
     try checkQ4K(allocator);
     try checkQ8_0(allocator);
     try checkTQ2_0(allocator);
+    try checkTQ2_0X4(allocator);
 
     if (failures != 0) {
         std.debug.print("x86dot-check FAIL ({d} mismatches)\n", .{failures});

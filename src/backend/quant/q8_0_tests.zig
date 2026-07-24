@@ -495,7 +495,7 @@ test "ggml_q8_0x4 packed matmul entry points match the scalar-arm reference" {
 
 // Scalar reference replica of dotQ8_0Q8_0: exact i32 integer dot, identical
 // f32 expression shape — comparisons against it are BIT-EXACT on every target.
-// Mirrored in src/x86dot_check.zig for the cross-ISA (Rosetta/qemu) runs.
+// Mirrored in src/x86dot_check.zig for the cross-ISA attestation runs.
 fn refDotQ8_0Q8_0(a: *const BlockQ8_0, b: *const BlockQ8_0) f32 {
     var acc: i32 = 0;
     for (a.qs, b.qs) |x, y| acc += @as(i32, x) * @as(i32, y);
