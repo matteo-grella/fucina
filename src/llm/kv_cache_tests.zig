@@ -314,7 +314,22 @@ fn expectQ8AttentionParity(
     else
         try ctx.groupedCausalAttentionWindowed(q_all.asRawTensor(), k_deq_t.asRawTensor(), v_deq_t.asRawTensor(), kv_head_for_head, scale, window);
     defer want.deinit();
-    try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
+    if (S >= 48) {
+        // Tiled kernel (long prefill): still the dequant-scratch path with
+        // f32 query rows — bit-exact vs the f32 kernel on the dequantized
+        // cache, exactly as before.
+        try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
+    } else {
+        // Per-query kernels: the integer score path quantizes the QUERY row
+        // to q8_0 too (q8xq8 sdot straight on the cached blocks), so the
+        // f32-query reference is approached, not reproduced — the only new
+        // error is the query's q8 rounding. The integer path's own
+        // exactness is pinned by the primitive tests (pair == single) and
+        // the incremental-decode == full-cache test below.
+        for (want.dataConst(), got.dataConst()) |want_value, got_value| {
+            try std.testing.expectApproxEqAbs(want_value, got_value, 2e-2);
+        }
+    }
 
     // Lossy sanity bound vs the original f32 K/V.
     var full = if (window == 0)
@@ -327,7 +342,7 @@ fn expectQ8AttentionParity(
     }
 }
 
-test "q8_0 attention matches f32 attention on the dequantized cache (pair, general, windowed, tiled)" {
+test "q8_0 attention tracks f32 attention on the dequantized cache (integer score path; tiled stays bit-exact)" {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
     const allocator = gpa.allocator();

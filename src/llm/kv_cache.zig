@@ -19,7 +19,10 @@ const q8_0_block_size = fucina.q8_0_block_size;
 /// (position, kv_head) row as `head_dim/32` BlockQ8_0 instead: 34 bytes per 32
 /// elements, ~halving f16's footprint/bandwidth again at a small quantization
 /// loss. q8_0 layers are raw block slices (not tensors); attention consumes
-/// them via `kBlocks`/`vBlocks` + `groupedAttention`'s q8_0-block KV arm.
+/// them via `kBlocks`/`vBlocks` + `groupedAttention`'s q8_0-block KV arm —
+/// decode runs the integer q8xq8 score path straight on the blocks (the
+/// query row quantizes once per head; see `exec/attention.zig`), so the
+/// halved bytes translate into decode speed instead of a dequant tax.
 pub const KvTensor = fucina.Tensor(.{ .dtype = .f16, .tags = .{ .seq, .kv_head, .d } });
 
 /// The f32 K/V rows handed to `appendLayer` (post-RoPE K, raw V); converted to

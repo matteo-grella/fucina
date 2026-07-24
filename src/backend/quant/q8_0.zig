@@ -711,6 +711,104 @@ pub fn matmulQ8_0x4PackedPaddedRhsRange(
     matmulQ8_0x4PackedPaddedRhsTile(out, lhs_blocks, rhs, m, n, 0, n);
 }
 
+/// Row dot over paired q8_0 blocks — the integer attention score path
+/// (q8_0 KV cache): the query row is quantized once to q8_0 and dotted
+/// against each cached K row directly, no dequant scratch. `a` is the
+/// in-engine quantized side (clamped to [-127,127]), `b` the cache side —
+/// the operand order the AVX2 sign-trick in `dotQ8_0Q8_0` requires.
+pub fn vecDotQ8_0Q8_0(a: []const BlockQ8_0, b: []const BlockQ8_0) f32 {
+    std.debug.assert(a.len == b.len);
+    if (comptime builtin.cpu.arch == .aarch64) {
+        var acc: QKV4f32 = @splat(0);
+        for (a, b) |*ab, *bb| {
+            acc = accumulateQ8_0Aarch64(
+                acc,
+                ab.d,
+                @bitCast(ab.qs[0..16].*),
+                @bitCast(ab.qs[16..32].*),
+                bb.d,
+                @bitCast(bb.qs[0..16].*),
+                @bitCast(bb.qs[16..32].*),
+            );
+        }
+        return @reduce(.Add, acc);
+    }
+    var acc: f32 = 0;
+    for (a, b) |*ab, *bb| acc += dotQ8_0Q8_0(ab, bb);
+    return acc;
+}
+
+/// Two query rows against one shared K row (GQA head pairs share the K
+/// row): the cache-side block loads are amortized across both dots.
+pub fn vecDotQ8_0Q8_0Pair(a0: []const BlockQ8_0, a1: []const BlockQ8_0, b: []const BlockQ8_0) [2]f32 {
+    std.debug.assert(a0.len == b.len and a1.len == b.len);
+    if (comptime builtin.cpu.arch == .aarch64) {
+        var acc0: QKV4f32 = @splat(0);
+        var acc1: QKV4f32 = @splat(0);
+        for (a0, a1, b) |*ab0, *ab1, *bb| {
+            const b_lo: QKV16i8 = @bitCast(bb.qs[0..16].*);
+            const b_hi: QKV16i8 = @bitCast(bb.qs[16..32].*);
+            acc0 = accumulateQ8_0Aarch64(acc0, ab0.d, @bitCast(ab0.qs[0..16].*), @bitCast(ab0.qs[16..32].*), bb.d, b_lo, b_hi);
+            acc1 = accumulateQ8_0Aarch64(acc1, ab1.d, @bitCast(ab1.qs[0..16].*), @bitCast(ab1.qs[16..32].*), bb.d, b_lo, b_hi);
+        }
+        return .{ @reduce(.Add, acc0), @reduce(.Add, acc1) };
+    }
+    var acc0: f32 = 0;
+    var acc1: f32 = 0;
+    for (a0, a1, b) |*ab0, *ab1, *bb| {
+        acc0 += dotQ8_0Q8_0(ab0, bb);
+        acc1 += dotQ8_0Q8_0(ab1, bb);
+    }
+    return .{ acc0, acc1 };
+}
+
+/// Attention V accumulate with the dequant fused into the FMA:
+/// `out[0..32*blocks.len] (+)= weight * dequant(blocks)` — one pass over
+/// the quantized bytes, no f32 scratch row. `accumulate=false` overwrites
+/// (the first routed V row), `true` adds.
+pub fn weightedQ8_0Row(comptime accumulate: bool, out: []f32, blocks: []const BlockQ8_0, weight: f32) void {
+    std.debug.assert(out.len == blocks.len * q8_0_block_size);
+    for (blocks, 0..) |*b, bi| {
+        const scale: @Vector(8, f32) = @splat(weight * f16BitsToF32(b.d));
+        const base = bi * q8_0_block_size;
+        inline for (0..4) |c| {
+            const chunk: @Vector(8, i8) = b.qs[c * 8 ..][0..8].*;
+            const vf: @Vector(8, f32) = @floatFromInt(chunk);
+            if (accumulate) {
+                const cur: @Vector(8, f32) = out[base + c * 8 ..][0..8].*;
+                out[base + c * 8 ..][0..8].* = cur + vf * scale;
+            } else {
+                out[base + c * 8 ..][0..8].* = vf * scale;
+            }
+        }
+    }
+}
+
+/// Pair variant of `weightedQ8_0Row`: two outputs, two weights, one pass
+/// over the shared V row's blocks.
+pub fn weightedQ8_0RowPair(comptime accumulate: bool, out0: []f32, out1: []f32, blocks: []const BlockQ8_0, w0: f32, w1: f32) void {
+    std.debug.assert(out0.len == blocks.len * q8_0_block_size and out1.len == out0.len);
+    for (blocks, 0..) |*b, bi| {
+        const d = f16BitsToF32(b.d);
+        const s0: @Vector(8, f32) = @splat(w0 * d);
+        const s1: @Vector(8, f32) = @splat(w1 * d);
+        const base = bi * q8_0_block_size;
+        inline for (0..4) |c| {
+            const chunk: @Vector(8, i8) = b.qs[c * 8 ..][0..8].*;
+            const vf: @Vector(8, f32) = @floatFromInt(chunk);
+            if (accumulate) {
+                const cur0: @Vector(8, f32) = out0[base + c * 8 ..][0..8].*;
+                const cur1: @Vector(8, f32) = out1[base + c * 8 ..][0..8].*;
+                out0[base + c * 8 ..][0..8].* = cur0 + vf * s0;
+                out1[base + c * 8 ..][0..8].* = cur1 + vf * s1;
+            } else {
+                out0[base + c * 8 ..][0..8].* = vf * s0;
+                out1[base + c * 8 ..][0..8].* = vf * s1;
+            }
+        }
+    }
+}
+
 fn dotQ8_0Q8_0(a: *const BlockQ8_0, b: *const BlockQ8_0) f32 {
     const d = f16BitsToF32(a.d) * f16BitsToF32(b.d);
     if (comptime has_x86_avx2) {
@@ -1360,4 +1458,60 @@ test "ggml_q8_0 randomized blocks: dot kernel matches scalar reference bit-exact
     for (&b.qs, 0..) |*q, i| q.* = if (i % 2 == 0) 127 else -128;
     for (&a.qs, 0..) |*q, i| q.* = if (i % 2 == 0) -127 else 127;
     try std.testing.expectEqual(refDotQ8_0Q8_0(&a, &b), dotQ8_0Q8_0(&a, &b));
+}
+
+test "attention q8 primitives: pair == single bitwise; weighted V row matches f64 reference" {
+    var prng = std.Random.DefaultPrng.init(7);
+    const random = prng.random();
+    const bpr = 4; // one 128-dim head
+    var q0: [bpr]BlockQ8_0 = undefined;
+    var q1: [bpr]BlockQ8_0 = undefined;
+    var k: [bpr]BlockQ8_0 = undefined;
+    var iter: usize = 0;
+    while (iter < 50) : (iter += 1) {
+        for (&q0) |*blk| fillRandomBlockQ8_0(blk, random, false);
+        for (&q1) |*blk| fillRandomBlockQ8_0(blk, random, false);
+        for (&k) |*blk| fillRandomBlockQ8_0(blk, random, true);
+
+        // The pair kernel and the single kernel must agree bitwise — the
+        // GQA pair path serves the same math as the general path.
+        const single0 = vecDotQ8_0Q8_0(&q0, &k);
+        const single1 = vecDotQ8_0Q8_0(&q1, &k);
+        const pair = vecDotQ8_0Q8_0Pair(&q0, &q1, &k);
+        try std.testing.expectEqual(single0, pair[0]);
+        try std.testing.expectEqual(single1, pair[1]);
+
+        // Absolute correctness vs an f64 reference.
+        var want: f64 = 0;
+        for (&q0, &k) |*qb, *kb| {
+            var dot: i64 = 0;
+            for (qb.qs, kb.qs) |x, y| dot += @as(i64, x) * @as(i64, y);
+            want += @as(f64, @floatFromInt(dot)) * f16BitsToF32(qb.d) * f16BitsToF32(kb.d);
+        }
+        try std.testing.expect(@abs(want - single0) <= 1e-3 * @max(1.0, @abs(want)));
+
+        // weightedQ8_0Row: overwrite-then-accumulate matches f64, and the
+        // pair variant is bitwise the two singles.
+        var out_s: [bpr * 32]f32 = undefined;
+        var out_a: [bpr * 32]f32 = undefined;
+        var out_p0: [bpr * 32]f32 = undefined;
+        var out_p1: [bpr * 32]f32 = undefined;
+        const w0: f32 = 0.375;
+        const w1: f32 = -1.25;
+        weightedQ8_0Row(false, &out_s, &k, w0);
+        weightedQ8_0Row(false, &out_a, &k, w1);
+        weightedQ8_0Row(true, &out_a, &k, w0 - w1); // w1 + (w0-w1) piecewise
+        weightedQ8_0RowPair(false, &out_p0, &out_p1, &k, w0, w1);
+        for (0..bpr * 32) |i| {
+            const kb = &k[i / 32];
+            const ref = @as(f64, w0) * f16BitsToF32(kb.d) * @as(f64, @floatFromInt(kb.qs[i % 32]));
+            try std.testing.expect(@abs(ref - out_s[i]) <= 1e-4 * @max(1.0, @abs(ref)));
+            try std.testing.expectEqual(out_s[i], out_p0[i]);
+            const ref1 = @as(f64, w1) * f16BitsToF32(kb.d) * @as(f64, @floatFromInt(kb.qs[i % 32]));
+            try std.testing.expect(@abs(ref1 - out_p1[i]) <= 1e-4 * @max(1.0, @abs(ref1)));
+            // Accumulate: w1*v then +(w0-w1)*v lands on w0*v up to one
+            // f32 rounding of the intermediate sum.
+            try std.testing.expect(@abs(out_a[i] - out_s[i]) <= 1e-5 * @max(1.0, @abs(out_s[i])));
+        }
+    }
 }

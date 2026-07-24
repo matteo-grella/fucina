@@ -201,7 +201,7 @@ Parity and KV cache:
 | `--logits-out PATH` | dump last-token logits, raw little-endian f32 |
 | `--compare-logits PATH` | compare last-token logits against such a dump |
 | `--verify-cache N` | cached-vs-full attention check over N steps |
-| `--cache-type f16\|q8_0` | KV cache dtype (default `f16`) |
+| `--cache-type f16\|q8_0` | KV cache dtype (default `f16`); `q8_0` halves KV memory and serves decode through the integer q8×q8 score path — at or above f16 speed from ~8k context |
 | `--kv-save[=PATH]` | crash-safe KV persistence for `--chat`/`--repl` (default `<gguf>.kvcache`) |
 
 Constrained decoding (needs a `-Dllguidance=true` build):

@@ -577,6 +577,10 @@ pub const quantizeRowsQ8_1 = cold.quantizeRowsQ8_1;
 // ---------------------------------------------------------------------------
 pub const matmulQ8_0RhsRange = q8_0.matmulQ8_0RhsRange;
 pub const matmulQ8_0RhsTile = q8_0.matmulQ8_0RhsTile;
+pub const vecDotQ8_0Q8_0 = q8_0.vecDotQ8_0Q8_0;
+pub const vecDotQ8_0Q8_0Pair = q8_0.vecDotQ8_0Q8_0Pair;
+pub const weightedQ8_0Row = q8_0.weightedQ8_0Row;
+pub const weightedQ8_0RowPair = q8_0.weightedQ8_0RowPair;
 pub const matmulQ8_0x4PackedPaddedRhsRange = q8_0.matmulQ8_0x4PackedPaddedRhsRange;
 pub const matmulQ8_0x4PackedPaddedRhsTile = q8_0.matmulQ8_0x4PackedPaddedRhsTile;
 pub const matmulQ8_0x4PackedRhsRange = q8_0.matmulQ8_0x4PackedRhsRange;

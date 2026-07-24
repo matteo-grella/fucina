@@ -10895,7 +10895,16 @@ RoPE (V has no RoPE), so past positions are never re-rotated.
   again at a small quantization loss. Requires `head_dim % 32 == 0` (checked
   at init: `Error.KvCacheHeadDimNotBlockAligned`); q8_0 layers are raw block
   slices, consumed via `kBlocks`/`vBlocks` and the attention kernels'
-  q8_0-block KV arm.
+  q8_0-block KV arm. Decode serves the blocks through the INTEGER score
+  path: the query row is quantized once per head to q8_0 and scores are
+  q8xq8 `sdot` dots straight on the cached K blocks, with the V dequant
+  fused into the weighted accumulate — the sweep reads only quantized
+  bytes, no f32 scratch row. Measured (Qwen3-4B, M1 Max, 64-token decode):
+  +22%/+50%/+54% over the previous dequant-scratch path at 2k/8k/16k
+  context, and at or above the f16 cache from ~8k up (15.5 vs 14.3 tok/s
+  at 8k). The query-tiled prefill kernel keeps the dequant path (per-tile
+  row reuse amortizes it) and stays bit-exact vs the f32 kernel on a
+  dequantized cache.
 
 ```zig
 pub fn init(ctx: *ExecContext, num_layers: usize, kv_heads: usize, head_dim: usize, capacity: usize) !KvCache
@@ -12723,8 +12732,10 @@ weights are read once per batch.
 (`KvCache.init(ctx, num_layers, num_key_value_heads, head_dim, capacity)`).
 Qwen3 is the **only** family whose attention also accepts a q8_0 cache
 (construct it with `kv_cache.KvCache.initWithDtype(..., .q8_0)`, §13; the
-runner flag is `--cache-type q8_0` — half the KV memory, a capacity option
-rather than a speed one).
+runner flag is `--cache-type q8_0` — half the KV memory, and since the
+integer q8xq8 score path also the long-context speed option: decode meets
+f16 by ~8k context and the halved footprint doubles how much context a
+RAM budget holds).
 
 ```zig
 var file = try fucina.gguf.File.loadMmap(alloc, io, "models/Qwen3-0.6B-Q8_0.gguf");

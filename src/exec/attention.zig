@@ -41,9 +41,14 @@ fn workPool(self: *Runtime) ?*thread.Pool {
 // bandwidth of f32). The attention kernels are generic over that element type:
 // f16 lanes are widened to f32 in-register (the f32 instantiation compiles to
 // the same loads as before — the comptime branches below collapse to a plain
-// load); q8_0 rows are dequantized into per-task L1 scratch as they stream
-// (see `kvRowSelect`), so the inner dot/accumulate loops always run on f32/f16
-// lanes.
+// load). q8_0 splits by kernel: the per-query kernels (decode, short prefill)
+// run the INTEGER path — the query row is quantized once to q8_0 and scores
+// are q8xq8 sdot dots straight on the cached K blocks, with the V dequant
+// fused into the weighted accumulate — so the KV sweep reads only quantized
+// bytes and never materializes an f32 row. The query-tiled prefill kernel
+// keeps the dequant-scratch path (`kvRowSelect`): its per-tile row reuse
+// already amortizes the dequant, and its f32 scores stay bit-exact vs the
+// f32 kernel on a dequantized cache.
 inline fn widenKvVec(comptime KvElem: type, comptime width: usize, data: []const KvElem, offset: usize) @Vector(width, f32) {
     const chunk: @Vector(width, KvElem) = data[offset..][0..width].*;
     return if (KvElem == f32) chunk else @floatCast(chunk);
@@ -279,8 +284,13 @@ pub fn groupedCausalAttentionHeads(comptime KvElem: type, task: GroupedCausalAtt
     const Vec = @Vector(8, f32);
     const vector_width = 8;
     const Lane = KvLane(KvElem);
-    // q8_0 dequant scratch (one K or V row); zero-sized (and unused) otherwise.
-    var q8_scratch: [if (KvElem == BlockQ8_0) attention_q8_max_d else 0]f32 = undefined;
+    // q8_0 KV: the query row is quantized ONCE per (query, head) and the
+    // score pass runs the integer q8xq8 dot straight on the cached K
+    // blocks — no dequant scratch, the sweep reads only the quantized
+    // bytes. The V pass fuses dequant into the weighted accumulate the
+    // same way. (The tiled prefill kernel keeps the dequant-scratch path:
+    // its per-tile row reuse already amortizes the dequant.)
+    var q_q8: [if (KvElem == BlockQ8_0) attention_q8_max_d / q8_0_block_size else 0]BlockQ8_0 = undefined;
 
     for (task.head_start..task.head_end) |head_i| {
         const kv_head_i = task.kv_head_for_head[head_i];
@@ -290,19 +300,32 @@ pub fn groupedCausalAttentionHeads(comptime KvElem: type, task: GroupedCausalAtt
             const q_base = query_i * q_seq_stride + head_i * q_head_stride;
             const bias_row: ?[]const f32 = if (task.bias) |bias_data| bias_data[query_i * task.kv_seq ..][0..task.kv_seq] else null;
 
+            if (comptime KvElem == BlockQ8_0) {
+                backend_mod.quantized_matmul.quantizeRowQ8_0Into(
+                    q_q8[0 .. task.d / q8_0_block_size],
+                    task.q_data[q_base..][0..task.d],
+                ) catch unreachable;
+            }
             var max_score = -std.math.inf(f32);
             for (lo..active) |source_i| {
-                const k_row, const k_base = kvRowSelect(KvElem, task.k_data, source_i * kv_seq_stride + kv_head_i * kv_head_stride, task.d, &q8_scratch);
-                var dot_vec: Vec = @splat(0);
-                var feature_i: usize = 0;
-                while (feature_i + vector_width <= task.d) : (feature_i += vector_width) {
-                    const qv: Vec = task.q_data[q_base + feature_i ..][0..vector_width].*;
-                    const kv: Vec = widenKvVec(Lane, vector_width, k_row, k_base + feature_i);
-                    dot_vec += qv * kv;
-                }
-                var dot_value: f32 = @reduce(.Add, dot_vec);
-                while (feature_i < task.d) : (feature_i += 1) {
-                    dot_value += task.q_data[q_base + feature_i] * widenKvScalar(Lane, k_row[k_base + feature_i]);
+                var dot_value: f32 = undefined;
+                if (comptime KvElem == BlockQ8_0) {
+                    const k_blocks = task.k_data[(source_i * kv_seq_stride + kv_head_i * kv_head_stride) / q8_0_block_size ..][0 .. task.d / q8_0_block_size];
+                    dot_value = backend_mod.quantized_matmul.vecDotQ8_0Q8_0(q_q8[0 .. task.d / q8_0_block_size], k_blocks);
+                } else {
+                    const k_row = task.k_data;
+                    const k_base = source_i * kv_seq_stride + kv_head_i * kv_head_stride;
+                    var dot_vec: Vec = @splat(0);
+                    var feature_i: usize = 0;
+                    while (feature_i + vector_width <= task.d) : (feature_i += vector_width) {
+                        const qv: Vec = task.q_data[q_base + feature_i ..][0..vector_width].*;
+                        const kv: Vec = widenKvVec(Lane, vector_width, k_row, k_base + feature_i);
+                        dot_vec += qv * kv;
+                    }
+                    dot_value = @reduce(.Add, dot_vec);
+                    while (feature_i < task.d) : (feature_i += 1) {
+                        dot_value += task.q_data[q_base + feature_i] * widenKvScalar(Lane, k_row[k_base + feature_i]);
+                    }
                 }
                 var score = dot_value * task.scale_value;
                 if (bias_row) |row| score += row[source_i];
@@ -324,30 +347,45 @@ pub fn groupedCausalAttentionHeads(comptime KvElem: type, task: GroupedCausalAtt
             }
 
             const out_base = query_i * out_seq_stride + head_i * task.d;
-            {
-                const weight: Vec = @splat(task.scores[lo] * inv_sum);
-                const v_row, const v_base = kvRowSelect(KvElem, task.v_data, lo * kv_seq_stride + kv_head_i * kv_head_stride, task.d, &q8_scratch);
-                var feature_i: usize = 0;
-                while (feature_i + vector_width <= task.d) : (feature_i += vector_width) {
-                    const v_vec: Vec = widenKvVec(Lane, vector_width, v_row, v_base + feature_i);
-                    task.out_data[out_base + feature_i ..][0..vector_width].* = weight * v_vec;
+            if (comptime KvElem == BlockQ8_0) {
+                const out_row = task.out_data[out_base..][0..task.d];
+                const blocks_per_row = task.d / q8_0_block_size;
+                {
+                    const v_blocks = task.v_data[(lo * kv_seq_stride + kv_head_i * kv_head_stride) / q8_0_block_size ..][0..blocks_per_row];
+                    backend_mod.quantized_matmul.weightedQ8_0Row(false, out_row, v_blocks, task.scores[lo] * inv_sum);
                 }
-                while (feature_i < task.d) : (feature_i += 1) {
-                    task.out_data[out_base + feature_i] = task.scores[lo] * inv_sum * widenKvScalar(Lane, v_row[v_base + feature_i]);
+                for (lo + 1..active) |source_i| {
+                    const v_blocks = task.v_data[(source_i * kv_seq_stride + kv_head_i * kv_head_stride) / q8_0_block_size ..][0..blocks_per_row];
+                    backend_mod.quantized_matmul.weightedQ8_0Row(true, out_row, v_blocks, task.scores[source_i] * inv_sum);
                 }
-            }
-            for (lo + 1..active) |source_i| {
-                const weight: Vec = @splat(task.scores[source_i] * inv_sum);
-                const scalar_weight = task.scores[source_i] * inv_sum;
-                const v_row, const v_base = kvRowSelect(KvElem, task.v_data, source_i * kv_seq_stride + kv_head_i * kv_head_stride, task.d, &q8_scratch);
-                var feature_i: usize = 0;
-                while (feature_i + vector_width <= task.d) : (feature_i += vector_width) {
-                    const current: Vec = task.out_data[out_base + feature_i ..][0..vector_width].*;
-                    const v_vec: Vec = widenKvVec(Lane, vector_width, v_row, v_base + feature_i);
-                    task.out_data[out_base + feature_i ..][0..vector_width].* = current + weight * v_vec;
+            } else {
+                {
+                    const weight: Vec = @splat(task.scores[lo] * inv_sum);
+                    const v_row = task.v_data;
+                    const v_base = lo * kv_seq_stride + kv_head_i * kv_head_stride;
+                    var feature_i: usize = 0;
+                    while (feature_i + vector_width <= task.d) : (feature_i += vector_width) {
+                        const v_vec: Vec = widenKvVec(Lane, vector_width, v_row, v_base + feature_i);
+                        task.out_data[out_base + feature_i ..][0..vector_width].* = weight * v_vec;
+                    }
+                    while (feature_i < task.d) : (feature_i += 1) {
+                        task.out_data[out_base + feature_i] = task.scores[lo] * inv_sum * widenKvScalar(Lane, v_row[v_base + feature_i]);
+                    }
                 }
-                while (feature_i < task.d) : (feature_i += 1) {
-                    task.out_data[out_base + feature_i] += scalar_weight * widenKvScalar(Lane, v_row[v_base + feature_i]);
+                for (lo + 1..active) |source_i| {
+                    const weight: Vec = @splat(task.scores[source_i] * inv_sum);
+                    const scalar_weight = task.scores[source_i] * inv_sum;
+                    const v_row = task.v_data;
+                    const v_base = source_i * kv_seq_stride + kv_head_i * kv_head_stride;
+                    var feature_i: usize = 0;
+                    while (feature_i + vector_width <= task.d) : (feature_i += vector_width) {
+                        const current: Vec = task.out_data[out_base + feature_i ..][0..vector_width].*;
+                        const v_vec: Vec = widenKvVec(Lane, vector_width, v_row, v_base + feature_i);
+                        task.out_data[out_base + feature_i ..][0..vector_width].* = current + weight * v_vec;
+                    }
+                    while (feature_i < task.d) : (feature_i += 1) {
+                        task.out_data[out_base + feature_i] += scalar_weight * widenKvScalar(Lane, v_row[v_base + feature_i]);
+                    }
                 }
             }
         }
@@ -363,9 +401,9 @@ pub fn groupedCausalAttentionHeadPairs(comptime KvElem: type, task: GroupedCausa
     const Vec = @Vector(8, f32);
     const vector_width = 8;
     const Lane = KvLane(KvElem);
-    // q8_0 dequant scratch (one K or V row, shared by the head pair);
-    // zero-sized (and unused) otherwise.
-    var q8_scratch: [if (KvElem == BlockQ8_0) attention_q8_max_d else 0]f32 = undefined;
+    // q8_0 KV: both query rows quantize once per (query, pair); the shared
+    // K row is integer-dotted for both heads in one pass over its blocks.
+    var q_q8: [if (KvElem == BlockQ8_0) 2 * (attention_q8_max_d / q8_0_block_size) else 0]BlockQ8_0 = undefined;
     const scores0 = task.scores[0..task.kv_seq];
     const scores1 = task.scores[task.kv_seq..][0..task.kv_seq];
 
@@ -379,26 +417,43 @@ pub fn groupedCausalAttentionHeadPairs(comptime KvElem: type, task: GroupedCausa
             const q_base1 = query_i * q_seq_stride + head1 * q_head_stride;
             const bias_row: ?[]const f32 = if (task.bias) |bias_data| bias_data[query_i * task.kv_seq ..][0..task.kv_seq] else null;
 
+            const q8_blocks = comptime attention_q8_max_d / q8_0_block_size;
+            if (comptime KvElem == BlockQ8_0) {
+                const qm = backend_mod.quantized_matmul;
+                qm.quantizeRowQ8_0Into(q_q8[0 .. task.d / q8_0_block_size], task.q_data[q_base0..][0..task.d]) catch unreachable;
+                qm.quantizeRowQ8_0Into(q_q8[q8_blocks..][0 .. task.d / q8_0_block_size], task.q_data[q_base1..][0..task.d]) catch unreachable;
+            }
             var max_score0 = -std.math.inf(f32);
             var max_score1 = -std.math.inf(f32);
             for (lo..active) |source_i| {
-                const k_row, const k_base = kvRowSelect(KvElem, task.k_data, source_i * kv_seq_stride + kv_head_i * kv_head_stride, task.d, &q8_scratch);
-                var dot_vec0: Vec = @splat(0);
-                var dot_vec1: Vec = @splat(0);
-                var feature_i: usize = 0;
-                while (feature_i + vector_width <= task.d) : (feature_i += vector_width) {
-                    const kv: Vec = widenKvVec(Lane, vector_width, k_row, k_base + feature_i);
-                    const q0v: Vec = task.q_data[q_base0 + feature_i ..][0..vector_width].*;
-                    const q1v: Vec = task.q_data[q_base1 + feature_i ..][0..vector_width].*;
-                    dot_vec0 += q0v * kv;
-                    dot_vec1 += q1v * kv;
-                }
-                var dot_value0: f32 = @reduce(.Add, dot_vec0);
-                var dot_value1: f32 = @reduce(.Add, dot_vec1);
-                while (feature_i < task.d) : (feature_i += 1) {
-                    const k_value = widenKvScalar(Lane, k_row[k_base + feature_i]);
-                    dot_value0 += task.q_data[q_base0 + feature_i] * k_value;
-                    dot_value1 += task.q_data[q_base1 + feature_i] * k_value;
+                var dot_value0: f32 = undefined;
+                var dot_value1: f32 = undefined;
+                if (comptime KvElem == BlockQ8_0) {
+                    const bpr = task.d / q8_0_block_size;
+                    const k_blocks = task.k_data[(source_i * kv_seq_stride + kv_head_i * kv_head_stride) / q8_0_block_size ..][0..bpr];
+                    const dots = backend_mod.quantized_matmul.vecDotQ8_0Q8_0Pair(q_q8[0..bpr], q_q8[q8_blocks..][0..bpr], k_blocks);
+                    dot_value0 = dots[0];
+                    dot_value1 = dots[1];
+                } else {
+                    const k_row = task.k_data;
+                    const k_base = source_i * kv_seq_stride + kv_head_i * kv_head_stride;
+                    var dot_vec0: Vec = @splat(0);
+                    var dot_vec1: Vec = @splat(0);
+                    var feature_i: usize = 0;
+                    while (feature_i + vector_width <= task.d) : (feature_i += vector_width) {
+                        const kv: Vec = widenKvVec(Lane, vector_width, k_row, k_base + feature_i);
+                        const q0v: Vec = task.q_data[q_base0 + feature_i ..][0..vector_width].*;
+                        const q1v: Vec = task.q_data[q_base1 + feature_i ..][0..vector_width].*;
+                        dot_vec0 += q0v * kv;
+                        dot_vec1 += q1v * kv;
+                    }
+                    dot_value0 = @reduce(.Add, dot_vec0);
+                    dot_value1 = @reduce(.Add, dot_vec1);
+                    while (feature_i < task.d) : (feature_i += 1) {
+                        const k_value = widenKvScalar(Lane, k_row[k_base + feature_i]);
+                        dot_value0 += task.q_data[q_base0 + feature_i] * k_value;
+                        dot_value1 += task.q_data[q_base1 + feature_i] * k_value;
+                    }
                 }
                 var score0 = dot_value0 * task.scale_value;
                 var score1 = dot_value1 * task.scale_value;
@@ -435,42 +490,59 @@ pub fn groupedCausalAttentionHeadPairs(comptime KvElem: type, task: GroupedCausa
 
             const out_base0 = query_i * out_seq_stride + head0 * task.d;
             const out_base1 = query_i * out_seq_stride + head1 * task.d;
-            {
-                const weight0: Vec = @splat(scores0[lo] * inv_sum0);
-                const weight1: Vec = @splat(scores1[lo] * inv_sum1);
-                const v_row, const v_base = kvRowSelect(KvElem, task.v_data, lo * kv_seq_stride + kv_head_i * kv_head_stride, task.d, &q8_scratch);
-                var feature_i: usize = 0;
-                while (feature_i + vector_width <= task.d) : (feature_i += vector_width) {
-                    const v_vec: Vec = widenKvVec(Lane, vector_width, v_row, v_base + feature_i);
-                    task.out_data[out_base0 + feature_i ..][0..vector_width].* = weight0 * v_vec;
-                    task.out_data[out_base1 + feature_i ..][0..vector_width].* = weight1 * v_vec;
+            if (comptime KvElem == BlockQ8_0) {
+                const qm = backend_mod.quantized_matmul;
+                const out_row0 = task.out_data[out_base0..][0..task.d];
+                const out_row1 = task.out_data[out_base1..][0..task.d];
+                const bpr = task.d / q8_0_block_size;
+                {
+                    const v_blocks = task.v_data[(lo * kv_seq_stride + kv_head_i * kv_head_stride) / q8_0_block_size ..][0..bpr];
+                    qm.weightedQ8_0RowPair(false, out_row0, out_row1, v_blocks, scores0[lo] * inv_sum0, scores1[lo] * inv_sum1);
                 }
-                const scalar_weight0 = scores0[lo] * inv_sum0;
-                const scalar_weight1 = scores1[lo] * inv_sum1;
-                while (feature_i < task.d) : (feature_i += 1) {
-                    const v_value = widenKvScalar(Lane, v_row[v_base + feature_i]);
-                    task.out_data[out_base0 + feature_i] = scalar_weight0 * v_value;
-                    task.out_data[out_base1 + feature_i] = scalar_weight1 * v_value;
+                for (lo + 1..active) |source_i| {
+                    const v_blocks = task.v_data[(source_i * kv_seq_stride + kv_head_i * kv_head_stride) / q8_0_block_size ..][0..bpr];
+                    qm.weightedQ8_0RowPair(true, out_row0, out_row1, v_blocks, scores0[source_i] * inv_sum0, scores1[source_i] * inv_sum1);
                 }
-            }
-            for (lo + 1..active) |source_i| {
-                const weight0: Vec = @splat(scores0[source_i] * inv_sum0);
-                const weight1: Vec = @splat(scores1[source_i] * inv_sum1);
-                const scalar_weight0 = scores0[source_i] * inv_sum0;
-                const scalar_weight1 = scores1[source_i] * inv_sum1;
-                const v_row, const v_base = kvRowSelect(KvElem, task.v_data, source_i * kv_seq_stride + kv_head_i * kv_head_stride, task.d, &q8_scratch);
-                var feature_i: usize = 0;
-                while (feature_i + vector_width <= task.d) : (feature_i += vector_width) {
-                    const current0: Vec = task.out_data[out_base0 + feature_i ..][0..vector_width].*;
-                    const current1: Vec = task.out_data[out_base1 + feature_i ..][0..vector_width].*;
-                    const v_vec: Vec = widenKvVec(Lane, vector_width, v_row, v_base + feature_i);
-                    task.out_data[out_base0 + feature_i ..][0..vector_width].* = current0 + weight0 * v_vec;
-                    task.out_data[out_base1 + feature_i ..][0..vector_width].* = current1 + weight1 * v_vec;
+            } else {
+                {
+                    const weight0: Vec = @splat(scores0[lo] * inv_sum0);
+                    const weight1: Vec = @splat(scores1[lo] * inv_sum1);
+                    const v_row = task.v_data;
+                    const v_base = lo * kv_seq_stride + kv_head_i * kv_head_stride;
+                    var feature_i: usize = 0;
+                    while (feature_i + vector_width <= task.d) : (feature_i += vector_width) {
+                        const v_vec: Vec = widenKvVec(Lane, vector_width, v_row, v_base + feature_i);
+                        task.out_data[out_base0 + feature_i ..][0..vector_width].* = weight0 * v_vec;
+                        task.out_data[out_base1 + feature_i ..][0..vector_width].* = weight1 * v_vec;
+                    }
+                    const scalar_weight0 = scores0[lo] * inv_sum0;
+                    const scalar_weight1 = scores1[lo] * inv_sum1;
+                    while (feature_i < task.d) : (feature_i += 1) {
+                        const v_value = widenKvScalar(Lane, v_row[v_base + feature_i]);
+                        task.out_data[out_base0 + feature_i] = scalar_weight0 * v_value;
+                        task.out_data[out_base1 + feature_i] = scalar_weight1 * v_value;
+                    }
                 }
-                while (feature_i < task.d) : (feature_i += 1) {
-                    const v_value = widenKvScalar(Lane, v_row[v_base + feature_i]);
-                    task.out_data[out_base0 + feature_i] += scalar_weight0 * v_value;
-                    task.out_data[out_base1 + feature_i] += scalar_weight1 * v_value;
+                for (lo + 1..active) |source_i| {
+                    const weight0: Vec = @splat(scores0[source_i] * inv_sum0);
+                    const weight1: Vec = @splat(scores1[source_i] * inv_sum1);
+                    const scalar_weight0 = scores0[source_i] * inv_sum0;
+                    const scalar_weight1 = scores1[source_i] * inv_sum1;
+                    const v_row = task.v_data;
+                    const v_base = source_i * kv_seq_stride + kv_head_i * kv_head_stride;
+                    var feature_i: usize = 0;
+                    while (feature_i + vector_width <= task.d) : (feature_i += vector_width) {
+                        const current0: Vec = task.out_data[out_base0 + feature_i ..][0..vector_width].*;
+                        const current1: Vec = task.out_data[out_base1 + feature_i ..][0..vector_width].*;
+                        const v_vec: Vec = widenKvVec(Lane, vector_width, v_row, v_base + feature_i);
+                        task.out_data[out_base0 + feature_i ..][0..vector_width].* = current0 + weight0 * v_vec;
+                        task.out_data[out_base1 + feature_i ..][0..vector_width].* = current1 + weight1 * v_vec;
+                    }
+                    while (feature_i < task.d) : (feature_i += 1) {
+                        const v_value = widenKvScalar(Lane, v_row[v_base + feature_i]);
+                        task.out_data[out_base0 + feature_i] += scalar_weight0 * v_value;
+                        task.out_data[out_base1 + feature_i] += scalar_weight1 * v_value;
+                    }
                 }
             }
         }
