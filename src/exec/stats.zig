@@ -55,6 +55,13 @@ pub const StandardizeOptions = struct {
     accumulation: StandardizeAccumulation = .f32,
 };
 
+/// Index of the FIRST occurrence of the maximum along `axis` (strict `>`,
+/// so ties keep the lowest index — same tie-break as maxAxisRank).
+///
+/// NaN contract: comparisons drop NaN — a NaN never becomes the maximum
+/// (the winner is the max over the non-NaN elements; an all-NaN row falls
+/// back to index 0). Shared with maxAxisRank/minAxisRank; DIVERGES from
+/// torch.argmax, which propagates NaN as the winner.
 pub fn argmaxAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize) !tensor.TensorOf(.i64) {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
@@ -76,15 +83,26 @@ pub fn argmaxAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comp
     for (0..outer) |outer_i| {
         const base = outer_i * axis_dim * inner;
         for (0..inner) |inner_i| {
-            var best_i: usize = 0;
-            var best_value = input[base + inner_i];
-            for (1..axis_dim) |axis_i| {
+            // Seed with -inf and compare strictly, like extremumAxisRank
+            // below: a NaN never wins (NaN compares false), instead of the
+            // old input[first] seed whose result depended on WHERE the NaN
+            // sat. `best_i == axis_dim` is the "no position holds
+            // best_value yet" sentinel; the else-if captures the first
+            // element equal to the seed (a row whose maximum is -inf
+            // itself), and the final fallback to 0 is the all-NaN case
+            // (see the NaN contract above).
+            var best_i: usize = axis_dim;
+            var best_value = -std.math.inf(f32);
+            for (0..axis_dim) |axis_i| {
                 const value = input[base + axis_i * inner + inner_i];
                 if (value > best_value) {
                     best_value = value;
                     best_i = axis_i;
+                } else if (best_i == axis_dim and value == best_value) {
+                    best_i = axis_i;
                 }
             }
+            if (best_i == axis_dim) best_i = 0;
             output[outer_i * inner + inner_i] = @intCast(best_i);
         }
     }
@@ -525,6 +543,14 @@ fn standardizeBackwardAxisRankAccum(
     return out;
 }
 
+/// Top-k values along `axis`, descending, with their source indices.
+///
+/// NaN contract: a NaN never places (it fails the `value > slot-min`
+/// admission test below) — consistent with maxAxisRank/argmaxAxisRank.
+/// A row with fewer than k non-NaN elements leaves its unfilled tail
+/// slots at the (-inf, index 0) seed, the same degradation as an
+/// all-NaN row under maxAxisRank. This DIVERGES from torch.topk,
+/// which treats NaN as greater than every number.
 pub fn topKAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize, k: usize) !TopKResult {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
@@ -561,7 +587,12 @@ pub fn topKAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, compti
                 const value = input[input_base + axis_i * inner + inner_i];
                 // Slots are descending-sorted: anything <= the current min
                 // (equal included) cannot place, so one compare rejects it.
-                if (value <= vd[output_base + (k - 1) * inner + inner_i]) continue;
+                // Negated form on purpose: NaN also fails `value >`, so a
+                // NaN is rejected here instead of falling through the `<=`
+                // scans below and landing in slot 0 (see the NaN contract
+                // above). Slot values are never NaN (seeded -inf, and only
+                // values admitted here are ever written).
+                if (!(value > vd[output_base + (k - 1) * inner + inner_i])) continue;
                 var slot: usize = 0;
                 while (slot < k and value <= vd[output_base + slot * inner + inner_i]) : (slot += 1) {}
                 if (slot == k) continue;

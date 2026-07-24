@@ -2084,6 +2084,59 @@ test "max/min over an axis: NaN drops and all-NaN rows degrade identically on bo
     try std.testing.expectEqualSlices(i64, mn.indices.dataConst(), mnt.indices.dataConst());
 }
 
+test "argmax/topK over an axis: NaN never places, matching the max contract" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    // Same rows and contract as the max/min test above: a NaN never wins
+    // (a leading NaN used to poison argmax, which seeded from input[first],
+    // and used to land in topK slot 0, which admitted via `value <= min`);
+    // an all-NaN row degrades to index 0 (argmax) / (-inf, 0) slots (topK).
+    const nan = std.math.nan(f32);
+    const inf = std.math.inf(f32);
+    const row_a = [_]f32{ nan, 2, -1, 7, 7, 0, 3, -5, 1, 2, 6 };
+    const row_b = [_]f32{ 4, nan, nan, -2, 9, nan, 9, -8, nan, 5, -8 };
+    const row_nan = [_]f32{nan} ** 11;
+
+    var rows: [3 * 11]f32 = undefined;
+    @memcpy(rows[0..11], &row_a);
+    @memcpy(rows[11..22], &row_b);
+    @memcpy(rows[22..33], &row_nan);
+    var x = try ctx.fromSliceRank(2, .{ 3, 11 }, &rows);
+    defer x.deinit();
+
+    var arg = try ctx.argmaxAxisRank(2, &x, 1);
+    defer arg.deinit();
+    try std.testing.expectEqualSlices(i64, &.{ 3, 4, 0 }, arg.dataConst());
+
+    var top = try ctx.topKAxisRank(2, &x, 1, 3);
+    defer top.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 7, 7, 6, 9, 9, 5, -inf, -inf, -inf }, top.values.dataConst());
+    try std.testing.expectEqualSlices(i64, &.{ 3, 4, 10, 4, 6, 9, 0, 0, 0 }, top.indices.dataConst());
+
+    // The same rows as columns of a {11, 3} tensor reduced over axis 0:
+    // identical winners in the strided layout.
+    var cols: [11 * 3]f32 = undefined;
+    for (0..11) |i| {
+        cols[i * 3 + 0] = row_a[i];
+        cols[i * 3 + 1] = row_b[i];
+        cols[i * 3 + 2] = row_nan[i];
+    }
+    var xt = try ctx.fromSliceRank(2, .{ 11, 3 }, &cols);
+    defer xt.deinit();
+
+    var argt = try ctx.argmaxAxisRank(2, &xt, 0);
+    defer argt.deinit();
+    try std.testing.expectEqualSlices(i64, &.{ 3, 4, 0 }, argt.dataConst());
+
+    var topt = try ctx.topKAxisRank(2, &xt, 0, 3);
+    defer topt.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 7, 9, -inf, 7, 9, -inf, 6, 5, -inf }, topt.values.dataConst());
+    try std.testing.expectEqualSlices(i64, &.{ 3, 4, 0, 4, 6, 0, 10, 9, 0 }, topt.indices.dataConst());
+}
+
 test "exec context softmax fast path matches generic layout and naive reference" {
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;
