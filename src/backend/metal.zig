@@ -50,6 +50,8 @@ pub const has_quant_gemm = enabled;
 pub const has_q5_k_quant = false;
 /// Ternary TQ2_0 dequant-in-kernel GEMM (fucina_mul_mm_tq2_0_f32).
 pub const has_tq2_0_quant = true;
+/// Folded tie-fitted PTQTP pair GEMM (fucina_mul_mm_tq2_0_folded_f32).
+pub const has_tq2_0_folded_quant = true;
 
 pub const Orient = enum(c_int) { nn = 0, tn = 1, nt = 2 };
 
@@ -1107,6 +1109,7 @@ pub const QFormat = enum(c_int) {
     q6_k = 1,
     q4_k = 2,
     tq2_0 = 3,
+    tq2_0_folded = 4,
 
     /// K (the reduced dim) must be a whole number of blocks.
     pub fn kMultiple(self: QFormat) usize {
@@ -1115,6 +1118,7 @@ pub const QFormat = enum(c_int) {
             .q6_k => 256,
             .q4_k => 256,
             .tq2_0 => 256,
+            .tq2_0_folded => 256,
         };
     }
 };
@@ -1559,7 +1563,7 @@ pub fn shouldUseGpuDenseQuant(format: QFormat, total_work: u64) bool {
     ensureConfig();
     const min_work = switch (format) {
         .q6_k => state.min_work_dense_q6,
-        .q4_k, .q8_0, .tq2_0 => state.min_work_qmoe,
+        .q4_k, .q8_0, .tq2_0, .tq2_0_folded => state.min_work_qmoe,
     };
     const pass = state.gpu_enabled and total_work >= min_work;
     tgate(pass);
@@ -1573,7 +1577,7 @@ pub fn shouldUseGpuDenseQuantPacked(format: QFormat, total_work: u64) bool {
         .q4_k => state.min_work_packed_q4,
         .q6_k => state.min_work_packed_q6,
         .q8_0 => state.min_work_packed_q8,
-        .tq2_0 => state.min_work_packed_tq2,
+        .tq2_0, .tq2_0_folded => state.min_work_packed_tq2,
     };
     const pass = state.gpu_enabled and total_work >= min_work;
     tgate(pass);
@@ -1773,6 +1777,7 @@ fn buildQuantWeights(
         .q6_k => .q6_k,
         .q4_k => .q4_k,
         .tq2_0 => .tq2_0,
+        .tq2_0_folded => unreachable, // no DType; dedicated parity test below
     };
     const bpr = blocks.len / n;
     const wref = try allocator.alloc(f32, n * k);
@@ -1836,6 +1841,7 @@ test "metal quant gemm q6_K/q4_K/q8_0 parity vs dequantized reference" {
             .q4_k => dtype_mod.BlockQ4_K,
             .q8_0 => dtype_mod.BlockQ8_0,
             .tq2_0 => dtype_mod.BlockTQ2_0,
+            .tq2_0_folded => unreachable, // covered by its dedicated parity test
         };
         const k_mult = comptime fmt.kMultiple();
         const cases = [_]Case{
@@ -1876,6 +1882,60 @@ test "metal quant gemm q6_K/q4_K/q8_0 parity vs dequantized reference" {
     }
 }
 
+test "metal quant gemm tq2_0_folded parity vs dequantized reference" {
+    if (comptime !enabled) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xf01ded);
+    const random = prng.random();
+
+    const m = 33;
+    const n = 8;
+    const k = 512;
+    const bpr = k / 256;
+    const Block = @import("quant/types.zig").BlockTQ2_0Folded;
+
+    // Random folded blocks: nibble codes in {0..8}, small positive f16 d.
+    const blocks = try allocator.alloc(Block, n * bpr);
+    defer allocator.free(blocks);
+    const wref = try allocator.alloc(f32, n * k);
+    defer allocator.free(wref);
+    for (blocks, 0..) |*b, bi| {
+        const d: f32 = 0.005 + random.float(f32) * 0.05;
+        b.d = @bitCast(@as(f16, @floatCast(d)));
+        const d_f32: f32 = @floatCast(@as(f16, @bitCast(b.d)));
+        for (0..8) |sub| {
+            for (0..16) |j| {
+                const lo: u8 = random.intRangeAtMost(u8, 0, 8);
+                const hi: u8 = random.intRangeAtMost(u8, 0, 8);
+                b.qs[sub * 16 + j] = lo | (hi << 4);
+                const row = bi / bpr;
+                const base = (bi % bpr) * 256 + sub * 32;
+                wref[row * k + base + j] = d_f32 * @as(f32, @floatFromInt(@as(i32, lo) - 4));
+                wref[row * k + base + 16 + j] = d_f32 * @as(f32, @floatFromInt(@as(i32, hi) - 4));
+            }
+        }
+    }
+
+    const a = try allocator.alloc(f32, m * k);
+    defer allocator.free(a);
+    for (a) |*v| v.* = (random.float(f32) * 2.0 - 1.0);
+    const c = try allocator.alloc(f32, m * n);
+    defer allocator.free(c);
+
+    try std.testing.expect(gemmQuantNt(
+        .tq2_0_folded,
+        std.mem.sliceAsBytes(blocks),
+        false, // transient test buffer: must not enter the wrap cache
+        bpr * @sizeOf(Block),
+        a,
+        c,
+        m,
+        n,
+        k,
+    ));
+    try expectQuantGemmRows(a, wref, c, m, n, k);
+}
+
 test "metal quant gemm grouped expert tiles parity" {
     if (comptime !enabled) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -1891,6 +1951,7 @@ test "metal quant gemm grouped expert tiles parity" {
             .q4_k => dtype_mod.BlockQ4_K,
             .q8_0 => dtype_mod.BlockQ8_0,
             .tq2_0 => dtype_mod.BlockTQ2_0,
+            .tq2_0_folded => unreachable, // covered by its dedicated parity test
         };
         const k = 2 * comptime fmt.kMultiple();
         const n = 64;
@@ -1969,6 +2030,7 @@ test "metal eager async dense quant Q4_K/Q6_K/Q8_0 uses direct tensor storage" {
             .q4_k => dtype_mod.BlockQ4_K,
             .q8_0 => dtype_mod.BlockQ8_0,
             .tq2_0 => dtype_mod.BlockTQ2_0,
+            .tq2_0_folded => unreachable, // covered by its dedicated parity test
         };
         const m = 65;
         const n = 68;

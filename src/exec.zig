@@ -2219,6 +2219,19 @@ pub const ExecContext = struct {
     /// One-command GPU batch for same-shape dense quantized linears that share
     /// the same f32 activation matrix. Internal eager helper; callers still get
     /// a normal f32 Tensor shaped `[batch_count*m, n]`.
+    pub fn foldedTernaryMatmulGpu(
+        self: *ExecContext,
+        rhs_bytes: []const u8,
+        rhs_lifetime: RhsLifetime,
+        nb01: usize,
+        input: *const Tensor,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) !?Tensor {
+        return exec_quant_matmul.foldedTernaryMatmulGpu(&self.rt, rhs_bytes, rhs_lifetime, nb01, input, m, n, k);
+    }
+
     pub fn denseQuantMatmulGpuSharedInputBatch(
         self: *ExecContext,
         comptime dtype: DType,

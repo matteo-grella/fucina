@@ -84,6 +84,32 @@ void dequantize_tq2_0(device const block_tq2_0 *xb, short il, thread type4x4 & r
     reg = (type4x4) reg_f;
 }
 
+// Folded tie-fitted PTQTP pair (fucina): 256 elements as 4-bit codes
+// cu in {0..8}, byte(s*16+j) = cu(s*32+j) | cu(s*32+16+j) << 4 per
+// 32-element sub-block; value = d * (cu - 4) with d the fine plane's scale.
+typedef struct {
+    uint8_t qs[128];
+    ggml_half d;
+} block_tq2_0_folded;
+static_assert(sizeof(block_tq2_0_folded) == 128 + sizeof(ggml_half), "wrong tq2_0_folded block size/padding");
+
+// A 16-element chunk is one nibble half of one sub-block: sub = il/2,
+// half = il%2.
+template <typename type4x4>
+void dequantize_tq2_0_folded(device const block_tq2_0_folded *xb, short il, thread type4x4 & reg) {
+    device const uint8_t * qs = xb->qs + (il / 2) * 16;
+    const short shift = 4 * (il % 2);
+    const float d = xb->d;
+
+    float4x4 reg_f;
+
+    for (int i = 0; i < 16; i++) {
+        reg_f[i/4][i%4] = d * (float)(((qs[i] >> shift) & 0xF) - 4);
+    }
+
+    reg = (type4x4) reg_f;
+}
+
 // Dequantize 16 consecutive elements (`il` = 16-element chunk within the
 // block) into a half4x4 register. Verbatim from upstream.
 template <typename type4x4>
@@ -359,3 +385,4 @@ template [[host_name("fucina_mul_mm_q8_0_f32")]] kernel fucina_mul_mm_q_t fucina
 template [[host_name("fucina_mul_mm_q6_K_f32")]] kernel fucina_mul_mm_q_t fucina_mul_mm_q<block_q6_K, 16, dequantize_q6_K>;
 template [[host_name("fucina_mul_mm_q4_K_f32")]] kernel fucina_mul_mm_q_t fucina_mul_mm_q<block_q4_K, 16, dequantize_q4_K>;
 template [[host_name("fucina_mul_mm_tq2_0_f32")]] kernel fucina_mul_mm_q_t fucina_mul_mm_q<block_tq2_0, 16, dequantize_tq2_0>;
+template [[host_name("fucina_mul_mm_tq2_0_folded_f32")]] kernel fucina_mul_mm_q_t fucina_mul_mm_q<block_tq2_0_folded, 16, dequantize_tq2_0_folded>;

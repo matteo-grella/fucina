@@ -32,6 +32,7 @@ const Allocator = std.mem.Allocator;
 const BlockTQ2_0 = types_mod.BlockTQ2_0;
 const BlockTQ2_0x4 = types_mod.BlockTQ2_0x4;
 const BlockTQ2_0Foldedx4 = types_mod.BlockTQ2_0Foldedx4;
+const BlockTQ2_0Folded = types_mod.BlockTQ2_0Folded;
 const BlockQ2_0 = types_mod.BlockQ2_0;
 const BlockQ8_0 = types_mod.BlockQ8_0;
 const BlockQ8_K = types_mod.BlockQ8_K;
@@ -617,6 +618,39 @@ inline fn foldedCode(b1: *const BlockTQ2_0, b2: *const BlockTQ2_0, e: usize) u8 
     const u1c = (b1.qs[byte] >> shift) & 3;
     const u2c = (b2.qs[byte] >> shift) & 3;
     return 3 * u1c + u2c;
+}
+
+/// Row-major fold for per-row block consumers (GPU residency): weight row
+/// major, blocks_per_row blocks per row, same 9-level codes and fine-scale
+/// contract as the x4 fold. Caller frees.
+pub fn packMatmulRhsTQ2_0FoldedRows(
+    allocator: Allocator,
+    plane1: *const QuantizedMatmulRhsTQ2_0,
+    plane2: *const QuantizedMatmulRhsTQ2_0,
+) ![]BlockTQ2_0Folded {
+    const tensor = @import("../../tensor.zig");
+    const n = plane1.n;
+    if (plane2.n != n or plane2.rows.blocks_per_row != plane1.rows.blocks_per_row)
+        return tensor.TensorError.InvalidShape;
+    const blocks_per_row = plane1.rows.blocks_per_row;
+    const out = try allocator.alloc(BlockTQ2_0Folded, n * blocks_per_row);
+    errdefer allocator.free(out);
+    for (0..n) |row| {
+        const b1s = plane1.columnBlocks(row);
+        const b2s = plane2.columnBlocks(row);
+        for (0..blocks_per_row) |bi| {
+            const dst = &out[row * blocks_per_row + bi];
+            dst.d = b2s[bi].d;
+            for (0..8) |sub| {
+                for (0..16) |j| {
+                    const lo = foldedCode(&b1s[bi], &b2s[bi], sub * 32 + j);
+                    const hi = foldedCode(&b1s[bi], &b2s[bi], sub * 32 + 16 + j);
+                    dst.qs[sub * 16 + j] = lo | (hi << 4);
+                }
+            }
+        }
+    }
+    return out;
 }
 
 /// One folded block-group dot: i32 lanes are the four columns' exact

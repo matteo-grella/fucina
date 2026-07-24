@@ -60,8 +60,8 @@ enum {
 
 // Quantized-weights GEMM formats (ggml_mul_mm.metal). Must mirror
 // metal.QFormat in metal.zig.
-enum { FUCINA_QFMT_Q8_0 = 0, FUCINA_QFMT_Q6_K = 1, FUCINA_QFMT_Q4_K = 2, FUCINA_QFMT_TQ2_0 = 3 };
-#define FUCINA_QMM_FORMATS 4
+enum { FUCINA_QFMT_Q8_0 = 0, FUCINA_QFMT_Q6_K = 1, FUCINA_QFMT_Q4_K = 2, FUCINA_QFMT_TQ2_0 = 3, FUCINA_QFMT_TQ2_0_FOLDED = 4 };
+#define FUCINA_QMM_FORMATS 5
 
 // Must mirror fucina_qmm_args in ggml_mul_mm.metal (C layout).
 typedef struct {
@@ -932,6 +932,7 @@ static id<MTLComputePipelineState> fucina_qmm_pipeline(FucinaMetalCtx *ctx, int 
     case FUCINA_QFMT_Q6_K: name = "fucina_mul_mm_q6_K_f32"; break;
     case FUCINA_QFMT_Q4_K: name = "fucina_mul_mm_q4_K_f32"; break;
     case FUCINA_QFMT_TQ2_0: name = "fucina_mul_mm_tq2_0_f32"; break;
+    case FUCINA_QFMT_TQ2_0_FOLDED: name = "fucina_mul_mm_tq2_0_folded_f32"; break;
     default:
         os_unfair_lock_unlock(&ctx->pipeline_lock);
         return nil; // bounds-checked by the caller

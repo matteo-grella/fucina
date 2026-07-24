@@ -275,6 +275,15 @@ fn linearSeqPtqtpFused(
     // offload. The seam's gates decide; any refusal falls through to the
     // CPU path wholesale.
     if (comptime fucina.internal.gpu.enabled and fucina.internal.gpu.has_tq2_0_quant) {
+        // Folded resident form: ONE dispatch, async return, no plane sum.
+        if (comptime fucina.internal.backend_mod.gpu_impl.has_tq2_0_folded_quant) {
+            if (m >= 32 and weight.gpu_fold != null) {
+                const nb01 = blocks_per_row * @sizeOf(backend_quant.BlockTQ2_0Folded);
+                if (try ctx.foldedTernaryMatmulGpu(weight.gpu_fold.?, .stable_process, nb01, input.asRawTensor(), m, n, k)) |out_raw| {
+                    return try fucina.Tensor(.{ .seq, out_tag }).fromTensor(ctx, out_raw);
+                }
+            }
+        }
         if (m >= 32 and weight.gpu_planes[0] != null) gpu_blk: {
             const nb01 = blocks_per_row * @sizeOf(backend_quant.BlockTQ2_0);
             const raw_input = input.asRawTensor();
@@ -442,6 +451,11 @@ pub const WeightPtqtp = struct {
     /// dequant-in-kernel prefill dispatches against with zero per-call wrap
     /// cost. All-or-nothing like `px4`; null slots = CPU-only.
     gpu_planes: [3]?[]u8 = .{ null, null, null },
+    /// Tied K=2: ONE resident buffer of row-major folded blocks
+    /// (BlockTQ2_0Folded) — the GPU serves the linear as a single folded
+    /// dispatch instead of one per plane, and its output returns async with
+    /// no CPU plane-sum sync. Half the resident bytes of two plane copies.
+    gpu_fold: ?[]u8 = null,
     /// True when the planes were fit with ptqtp.Options.tie_scales (scales
     /// locked to exact ratio 3). At K=2 the fused linear then serves through
     /// `pfold` — the 4-bit pack folding both planes into one 9-level code,
@@ -465,6 +479,26 @@ pub const WeightPtqtp = struct {
     fn buildGpuResidency(self: *WeightPtqtp) void {
         const gpu = fucina.internal.gpu;
         if (comptime !(gpu.enabled and gpu.has_quant_gemm and gpu.has_tq2_0_quant)) return;
+        // Tied K=2 prefers the single folded resident buffer; falls through
+        // to per-plane residency on any failure.
+        if (comptime fucina.internal.backend_mod.gpu_impl.has_tq2_0_folded_quant) {
+            if (self.tied and self.p2 != null and self.p3 == null) fold: {
+                const n = self.p1.dim(.out);
+                const k = self.p1.dim(.in);
+                const b1 = self.p1.asRawTensor().dataConstChecked() catch break :fold;
+                const b2 = self.p2.?.asRawTensor().dataConstChecked() catch break :fold;
+                const r1 = backend_quant.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(b1)) catch break :fold;
+                const r2 = backend_quant.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(b2)) catch break :fold;
+                const px4_alloc = self.px4_allocator orelse break :fold;
+                const rows = backend_quant.packMatmulRhsTQ2_0FoldedRows(px4_alloc, &r1, &r2) catch break :fold;
+                defer px4_alloc.free(rows);
+                const bytes = std.mem.sliceAsBytes(rows);
+                const dev = gpu.allocResidentBytes(bytes.len) orelse break :fold;
+                @memcpy(dev, bytes);
+                self.gpu_fold = dev;
+                return; // folded residency replaces the per-plane copies
+            }
+        }
         const planes = [3]?*const QuantWeight(.tq2_0){
             &self.p1,
             if (self.p2) |*p| p else null,
@@ -490,6 +524,8 @@ pub const WeightPtqtp = struct {
     fn freeGpuResidency(self: *WeightPtqtp) void {
         const gpu = fucina.internal.gpu;
         if (comptime !gpu.enabled) return;
+        if (self.gpu_fold) |dev| gpu.freeResidentBytes(dev);
+        self.gpu_fold = null;
         for (&self.gpu_planes) |*slot| {
             if (slot.*) |dev| gpu.freeResidentBytes(dev);
             slot.* = null;

@@ -58,6 +58,11 @@ pub const Error = error{
 /// Bumped only for layout-incompatible changes; the loader refuses newer.
 pub const format_version: u32 = 1;
 pub const version_key = "fucina.ptqtp.version";
+/// Present (= 1) iff EVERY decorated linear in the file was fit with
+/// ptqtp.Options.tie_scales — the loader may then rebuild the folded
+/// one-pass serving form (WeightPtqtp.tied). Absent = free fit (older
+/// files included): unfolded serving, always correct.
+pub const tie_key = "fucina.ptqtp.tie_scales";
 
 /// Longest tensor name this module reads or writes (base + `.ptqtp0`).
 const max_name_len = 160;
@@ -139,6 +144,18 @@ pub fn build(allocator: Allocator, src: *const gguf.File, entries: []const SaveE
     // (a claim a future format_version bump would refuse to load).
     if (decorated.count() != 0) {
         try writer.addMetaInt(version_key, u32, format_version);
+        // The tie flag is all-or-nothing: one free-fit entry keeps the whole
+        // file unfolded (absent key), preserving byte-stability for free-fit
+        // and legacy files.
+        var any_ptqtp = false;
+        var all_tied = true;
+        for (entries) |entry| {
+            if (entry.weight.* == .ptqtp) {
+                any_ptqtp = true;
+                all_tied = all_tied and entry.weight.ptqtp.tied;
+            }
+        }
+        if (any_ptqtp and all_tied) try writer.addMetaInt(tie_key, u32, 1);
     }
 
     var report = SaveReport{};
@@ -253,7 +270,8 @@ pub fn maybeLoadPlanes(ctx: *ExecContext, file: *const gguf.File, base_name: []c
         if (p2 == null) return Error.InvalidPlaneSet;
         p3 = try loadPlane(ctx, info, expected_rows, expected_cols);
     }
-    return .{ .ptqtp = weights.WeightPtqtp.init(ctx.allocator, p1, p2, p3, false) };
+    const tied = (file.getInt(tie_key) orelse 0) == 1;
+    return .{ .ptqtp = weights.WeightPtqtp.init(ctx.allocator, p1, p2, p3, tied) };
 }
 
 /// MoE pair-detection, the expert-stack counterpart of `maybeLoadPlanes`:

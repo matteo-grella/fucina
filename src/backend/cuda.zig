@@ -66,6 +66,7 @@ pub const has_quant_gemm = enabled;
 pub const has_q5_k_quant = enabled;
 /// No ternary CUDA kernel yet — the exec seam prunes the tq2_0 arm.
 pub const has_tq2_0_quant = false;
+pub const has_tq2_0_folded_quant = false;
 
 pub const Orient = enum(c_int) { nn = 0, tn = 1, nt = 2 };
 

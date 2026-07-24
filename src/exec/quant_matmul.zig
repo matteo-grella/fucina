@@ -923,6 +923,77 @@ fn denseQuantMatmulGpuImpl(
     return null;
 }
 
+/// GPU dispatch for the folded tie-fitted PTQTP pack (BlockTQ2_0Folded row
+/// bytes, docs/PTQTP.md): the provider's dedicated folded format, one
+/// command per linear instead of one per plane. Mirrors the dense-quant
+/// prefill arm (stable-RHS async first, balanced blocking chunks as the
+/// fallback); null = CPU path. Pruned on providers without the kernel.
+pub fn foldedTernaryMatmulGpu(
+    self: *Runtime,
+    rhs_bytes: []const u8,
+    rhs_lifetime: RhsLifetime,
+    nb01: usize,
+    input: *const Tensor,
+    m: usize,
+    n: usize,
+    k: usize,
+) !?Tensor {
+    if (comptime backend_mod.gpu_impl.enabled) {
+        const gpu = backend_mod.gpu_impl;
+        if (comptime !gpu.has_tq2_0_folded_quant) return null;
+        const fmt: gpu.QFormat = .tq2_0_folded;
+        const work = quantMatmulWork(m, n, k);
+        const prefill_arm = m >= 32 and gpu.shouldUseGpuDenseQuantPacked(fmt, work);
+        if (prefill_arm and k % fmt.kMultiple() == 0 and n % 4 == 0 and input.isContiguous()) {
+            var out = try self.emptyRank(2, .{ m, n });
+            errdefer out.deinit();
+            if (rhs_lifetime.isCacheable() and gpu.gemmQuantNtAsync(
+                fmt,
+                rhs_bytes,
+                true,
+                nb01,
+                0,
+                input,
+                &out,
+                1,
+                m,
+                n,
+                k,
+            )) return out;
+
+            const in_data = input.dataConst();
+            const in_elems = std.math.mul(usize, m, k) catch return null;
+            if (in_data.len == in_elems) {
+                const max_rows_per_dispatch = 2048;
+                const n_chunks = (m + max_rows_per_dispatch - 1) / max_rows_per_dispatch;
+                const rows_per = (m + n_chunks - 1) / n_chunks;
+                var ok = true;
+                var row0: usize = 0;
+                while (row0 < m) : (row0 += rows_per) {
+                    const rows = @min(rows_per, m - row0);
+                    if (!gpu.gemmQuantNt(
+                        fmt,
+                        rhs_bytes,
+                        rhs_lifetime.isCacheable(),
+                        nb01,
+                        in_data[row0 * k .. (row0 + rows) * k],
+                        out.data()[row0 * n .. (row0 + rows) * n],
+                        rows,
+                        n,
+                        k,
+                    )) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (ok) return out;
+            }
+            out.deinit();
+        }
+    }
+    return null;
+}
+
 pub fn denseQuantMatmulGpuSharedInputBatch(
     self: *Runtime,
     comptime dtype: DType,

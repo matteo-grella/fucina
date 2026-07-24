@@ -103,7 +103,12 @@ Deliberate deltas from the paper:
   the output head; save→load→save is byte-stable. The format invariants —
   plane replacement, fused row-slicing vs solo decoration, 3-part
   re-fusion, resave stability, save/load validation errors — are pinned
-  by sibling tests (`ptqtp_gguf_tests.zig`). Decoration thus runs once
+  by sibling tests (`ptqtp_gguf_tests.zig`). Tie-fitted saves additionally
+  stamp `fucina.ptqtp.tie_scales = 1` (all-or-nothing over the file's
+  decorated linears; absent on free-fit and legacy files, preserving their
+  byte stability) and the loader rebuilds folded serving from it — a
+  round-trip pin asserts the loaded weight carries the folded pack.
+  Decoration thus runs once
   (`--save`): the saved file serves through the ordinary qwen3 runners —
   chat CLI, speculation, batch — with no re-decoration. Pair-detection is
   wired in the qwen3 loaders only; other families do not read decorated
@@ -145,9 +150,14 @@ Deliberate deltas from the paper:
   Measured (M1 Max, Qwen3-0.6B, pp1001, same binary, `FUCINA_GPU=0` as the
   CPU arm): prefill 2830 → 1291 ms at K=2 with an f16 head (**2.2×**), and
   2841 → 956 ms fully ternary with `--head-planes 2` (**2.97×**, ~1047
-  prefill tok/s). Decode never dispatches (m ≥ 32 gate). Known follow-up:
-  the K plane dispatches sync per linear for the CPU sum — the shared-input
-  batch entry can fold them into one command.
+  prefill tok/s). Decode never dispatches (m ≥ 32 gate). **Tie-fitted K=2
+  serves the GPU folded too**: residency holds ONE buffer of row-major
+  folded blocks (`BlockTQ2_0Folded`, half the bytes of two plane copies)
+  and the fused linear issues a single `tq2_0_folded` dispatch
+  (`fucina_mul_mm_tq2_0_folded_f32`, dedicated parity test) whose output
+  returns async with no CPU plane-sum sync — measured pp1001: per-plane
+  1317 ms → folded **873 ms (1.51×)**, 2.29× over the same binary's CPU
+  folded path.
 - **Runtime speed path**: `WeightPtqtp.init` packs every plane into the x4
   column-interleaved form at construction (`BlockTQ2_0x4`, docs/TERNARY.md
   — same bytes rearranged, zero per-block reduces), and the fused linear

@@ -169,6 +169,16 @@ pub const BlockTQ2_0Foldedx4 = extern struct {
     qs: [4 * 128]u8,
 };
 
+/// Row-major single-column sibling of BlockTQ2_0Foldedx4 for per-row block
+/// consumers (the GPU dequant-in-kernel GEMM): 256 elements as 4-bit codes
+/// cu in {0..8}, Q4_0-style pairing per 32-element sub-block —
+/// byte(s*16 + j) = cu(s*32 + j) | cu(s*32 + 16 + j) << 4 — and the FINE
+/// plane's f16 scale (value = d * (cu - 4)).
+pub const BlockTQ2_0Folded = extern struct {
+    qs: [128]u8,
+    d: u16,
+};
+
 pub const BlockMXFP4 = dtype_mod.BlockMXFP4;
 pub const BlockNVFP4 = dtype_mod.BlockNVFP4;
 

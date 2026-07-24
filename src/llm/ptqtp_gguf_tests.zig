@@ -213,6 +213,44 @@ test "fused weight round-trip: row-sliced planes equal per-part decoration and r
     try std.testing.expectEqualSlices(u8, try planeBytes(&fused, 1), try planeBytes(&refused, 1));
 }
 
+test "tie flag round-trips: tied save marks the file, load rebuilds folded serving" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var src = try buildSourceFile(allocator);
+    defer src.deinit();
+    var decorated = try LinearWeight.load(&ctx, try src.get("a.weight"), 4, in_dim);
+    defer decorated.deinit();
+    _ = try decorated.toPtqtp(&ctx, .{ .planes = 2, .tie_scales = true });
+    try std.testing.expect(decorated.ptqtp.tied);
+
+    var buf: [16384]u8 = undefined;
+    const saved = try saveToBuffer(allocator, &src, &.{
+        .{ .name = "a.weight", .weight = &decorated },
+    }, &buf);
+    var out = try gguf.File.parseOwned(allocator, try allocator.dupe(u8, saved));
+    defer out.deinit();
+    try std.testing.expectEqual(@as(?i64, 1), out.getInt(ptqtp_gguf.tie_key));
+
+    var loaded = (try ptqtp_gguf.maybeLoadPlanes(&ctx, &out, "a.weight", 4, in_dim)).?;
+    defer loaded.deinit();
+    try std.testing.expect(loaded.ptqtp.tied);
+    try std.testing.expect(loaded.ptqtp.pfold != null); // folded serving rebuilt
+
+    // A free-fit save must NOT carry the flag (legacy byte behavior).
+    var free_dec = try decorateFromFile(&ctx, &src, "a.weight", 4, 2);
+    defer free_dec.deinit();
+    var buf2: [16384]u8 = undefined;
+    const saved_free = try saveToBuffer(allocator, &src, &.{
+        .{ .name = "a.weight", .weight = &free_dec },
+    }, &buf2);
+    var out_free = try gguf.File.parseOwned(allocator, try allocator.dupe(u8, saved_free));
+    defer out_free.deinit();
+    try std.testing.expectEqual(@as(?i64, null), out_free.getInt(ptqtp_gguf.tie_key));
+}
+
 test "resave of a loaded decorated file is byte-identical" {
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;
