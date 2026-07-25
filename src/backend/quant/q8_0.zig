@@ -762,6 +762,159 @@ pub fn vecDotQ8_0Q8_0Pair(a0: []const BlockQ8_0, a1: []const BlockQ8_0, b: []con
     return .{ acc0, acc1 };
 }
 
+/// Precomputed f32 copies of a q8_0 row's per-block scales: the query row
+/// is reused across every key of the attention sweep, so its f16 scale
+/// converts hoist out of the per-key loop. Values are bitwise the ones the
+/// plain dot computes (`f16BitsToF32` of the same bits).
+pub fn q8RowScalesInto(scales: []f32, blocks: []const BlockQ8_0) void {
+    std.debug.assert(scales.len == blocks.len);
+    for (scales, blocks) |*s, *b| s.* = f16BitsToF32(b.d);
+}
+
+/// Two consecutive K rows against one query row — independent accumulator
+/// chains hide the fma latency the single-row dot serializes on. Each
+/// lane's arithmetic is expression-identical to `vecDotQ8_0Q8_0`, so
+/// result r equals the single-row dot on row r bitwise.
+pub fn vecDotQ8_0Q8_0x2(q: []const BlockQ8_0, q_scales: []const f32, k0: []const BlockQ8_0, k1: []const BlockQ8_0) [2]f32 {
+    std.debug.assert(q.len == k0.len and q.len == k1.len and q_scales.len == q.len);
+    if (comptime builtin.cpu.arch == .aarch64) {
+        var acc0: QKV4f32 = @splat(0);
+        var acc1: QKV4f32 = @splat(0);
+        for (q, q_scales, k0, k1) |*qb, qs, *k0b, *k1b| {
+            const q_lo: QKV16i8 = @bitCast(qb.qs[0..16].*);
+            const q_hi: QKV16i8 = @bitCast(qb.qs[16..32].*);
+            var dot0: QKV4i32 = @splat(0);
+            dot0 = sdotI8x16(dot0, q_lo, @bitCast(k0b.qs[0..16].*));
+            dot0 = sdotI8x16(dot0, q_hi, @bitCast(k0b.qs[16..32].*));
+            var dot1: QKV4i32 = @splat(0);
+            dot1 = sdotI8x16(dot1, q_lo, @bitCast(k1b.qs[0..16].*));
+            dot1 = sdotI8x16(dot1, q_hi, @bitCast(k1b.qs[16..32].*));
+            const s0: QKV4f32 = @splat(qs * f16BitsToF32(k0b.d));
+            const s1: QKV4f32 = @splat(qs * f16BitsToF32(k1b.d));
+            acc0 = acc0 + @as(QKV4f32, @floatFromInt(dot0)) * s0;
+            acc1 = acc1 + @as(QKV4f32, @floatFromInt(dot1)) * s1;
+        }
+        return .{ @reduce(.Add, acc0), @reduce(.Add, acc1) };
+    }
+    return .{ vecDotQ8_0Q8_0(q, k0), vecDotQ8_0Q8_0(q, k1) };
+}
+
+/// Two query rows x two K rows (the GQA pair kernel's 2-key step): four
+/// independent chains, K blocks loaded once for both queries. Result [i]
+/// equals `vecDotQ8_0Q8_0Pair` on key i bitwise.
+pub fn vecDotQ8_0Q8_0Pairx2(
+    q0: []const BlockQ8_0,
+    q1: []const BlockQ8_0,
+    q0_scales: []const f32,
+    q1_scales: []const f32,
+    k0: []const BlockQ8_0,
+    k1: []const BlockQ8_0,
+) [4]f32 {
+    std.debug.assert(q0.len == k0.len and q1.len == k0.len and k1.len == k0.len);
+    if (comptime builtin.cpu.arch == .aarch64) {
+        var acc00: QKV4f32 = @splat(0);
+        var acc10: QKV4f32 = @splat(0);
+        var acc01: QKV4f32 = @splat(0);
+        var acc11: QKV4f32 = @splat(0);
+        for (q0, q1, q0_scales, q1_scales, k0, k1) |*q0b, *q1b, q0s, q1s, *k0b, *k1b| {
+            const k0_lo: QKV16i8 = @bitCast(k0b.qs[0..16].*);
+            const k0_hi: QKV16i8 = @bitCast(k0b.qs[16..32].*);
+            const k1_lo: QKV16i8 = @bitCast(k1b.qs[0..16].*);
+            const k1_hi: QKV16i8 = @bitCast(k1b.qs[16..32].*);
+            const q0_lo: QKV16i8 = @bitCast(q0b.qs[0..16].*);
+            const q0_hi: QKV16i8 = @bitCast(q0b.qs[16..32].*);
+            const q1_lo: QKV16i8 = @bitCast(q1b.qs[0..16].*);
+            const q1_hi: QKV16i8 = @bitCast(q1b.qs[16..32].*);
+            var dot00: QKV4i32 = @splat(0);
+            dot00 = sdotI8x16(dot00, q0_lo, k0_lo);
+            dot00 = sdotI8x16(dot00, q0_hi, k0_hi);
+            var dot10: QKV4i32 = @splat(0);
+            dot10 = sdotI8x16(dot10, q1_lo, k0_lo);
+            dot10 = sdotI8x16(dot10, q1_hi, k0_hi);
+            var dot01: QKV4i32 = @splat(0);
+            dot01 = sdotI8x16(dot01, q0_lo, k1_lo);
+            dot01 = sdotI8x16(dot01, q0_hi, k1_hi);
+            var dot11: QKV4i32 = @splat(0);
+            dot11 = sdotI8x16(dot11, q1_lo, k1_lo);
+            dot11 = sdotI8x16(dot11, q1_hi, k1_hi);
+            const dk0 = f16BitsToF32(k0b.d);
+            const dk1 = f16BitsToF32(k1b.d);
+            const s00: QKV4f32 = @splat(q0s * dk0);
+            const s10: QKV4f32 = @splat(q1s * dk0);
+            const s01: QKV4f32 = @splat(q0s * dk1);
+            const s11: QKV4f32 = @splat(q1s * dk1);
+            acc00 = acc00 + @as(QKV4f32, @floatFromInt(dot00)) * s00;
+            acc10 = acc10 + @as(QKV4f32, @floatFromInt(dot10)) * s10;
+            acc01 = acc01 + @as(QKV4f32, @floatFromInt(dot01)) * s01;
+            acc11 = acc11 + @as(QKV4f32, @floatFromInt(dot11)) * s11;
+        }
+        return .{ @reduce(.Add, acc00), @reduce(.Add, acc10), @reduce(.Add, acc01), @reduce(.Add, acc11) };
+    }
+    const a = vecDotQ8_0Q8_0Pair(q0, q1, k0);
+    const b = vecDotQ8_0Q8_0Pair(q0, q1, k1);
+    return .{ a[0], a[1], b[0], b[1] };
+}
+
+/// Two source V rows fused into one pass over the output row: the out
+/// lanes load and store once for both rows. Arithmetic per lane is the
+/// two sequential `weightedQ8_0Row` calls' exact add order.
+pub fn weightedQ8_0Row2(comptime accumulate: bool, out: []f32, b0: []const BlockQ8_0, w0: f32, b1: []const BlockQ8_0, w1: f32) void {
+    std.debug.assert(out.len == b0.len * q8_0_block_size and b1.len == b0.len);
+    for (b0, b1, 0..) |*blk0, *blk1, bi| {
+        const s0: @Vector(8, f32) = @splat(w0 * f16BitsToF32(blk0.d));
+        const s1: @Vector(8, f32) = @splat(w1 * f16BitsToF32(blk1.d));
+        const base = bi * q8_0_block_size;
+        inline for (0..4) |c| {
+            const v0: @Vector(8, f32) = @floatFromInt(@as(@Vector(8, i8), blk0.qs[c * 8 ..][0..8].*));
+            const v1: @Vector(8, f32) = @floatFromInt(@as(@Vector(8, i8), blk1.qs[c * 8 ..][0..8].*));
+            const first = if (accumulate) blk: {
+                const cur: @Vector(8, f32) = out[base + c * 8 ..][0..8].*;
+                break :blk cur + v0 * s0;
+            } else v0 * s0;
+            out[base + c * 8 ..][0..8].* = first + v1 * s1;
+        }
+    }
+}
+
+/// Pair-of-outputs variant of `weightedQ8_0Row2`: two outputs, two source
+/// rows, one pass. Bitwise the two sequential `weightedQ8_0RowPair` calls.
+pub fn weightedQ8_0RowPair2(
+    comptime accumulate: bool,
+    out0: []f32,
+    out1: []f32,
+    b0: []const BlockQ8_0,
+    w00: f32,
+    w01: f32,
+    b1: []const BlockQ8_0,
+    w10: f32,
+    w11: f32,
+) void {
+    std.debug.assert(out0.len == b0.len * q8_0_block_size and out1.len == out0.len and b1.len == b0.len);
+    for (b0, b1, 0..) |*blk0, *blk1, bi| {
+        const d0 = f16BitsToF32(blk0.d);
+        const d1 = f16BitsToF32(blk1.d);
+        const s00: @Vector(8, f32) = @splat(w00 * d0);
+        const s01: @Vector(8, f32) = @splat(w01 * d0);
+        const s10: @Vector(8, f32) = @splat(w10 * d1);
+        const s11: @Vector(8, f32) = @splat(w11 * d1);
+        const base = bi * q8_0_block_size;
+        inline for (0..4) |c| {
+            const v0: @Vector(8, f32) = @floatFromInt(@as(@Vector(8, i8), blk0.qs[c * 8 ..][0..8].*));
+            const v1: @Vector(8, f32) = @floatFromInt(@as(@Vector(8, i8), blk1.qs[c * 8 ..][0..8].*));
+            const first0 = if (accumulate) blk: {
+                const cur: @Vector(8, f32) = out0[base + c * 8 ..][0..8].*;
+                break :blk cur + v0 * s00;
+            } else v0 * s00;
+            const first1 = if (accumulate) blk: {
+                const cur: @Vector(8, f32) = out1[base + c * 8 ..][0..8].*;
+                break :blk cur + v0 * s01;
+            } else v0 * s01;
+            out0[base + c * 8 ..][0..8].* = first0 + v1 * s10;
+            out1[base + c * 8 ..][0..8].* = first1 + v1 * s11;
+        }
+    }
+}
+
 /// Attention V accumulate with the dequant fused into the FMA:
 /// `out[0..32*blocks.len] (+)= weight * dequant(blocks)` — one pass over
 /// the quantized bytes, no f32 scratch row. `accumulate=false` overwrites
@@ -1513,5 +1666,41 @@ test "attention q8 primitives: pair == single bitwise; weighted V row matches f6
             // f32 rounding of the intermediate sum.
             try std.testing.expect(@abs(out_a[i] - out_s[i]) <= 1e-5 * @max(1.0, @abs(out_s[i])));
         }
+
+        // 2-key / 2-row unrolled variants are bitwise the sequential
+        // singles — the attention kernels mix stepped and tail calls, so
+        // any drift here would make scores depend on the step parity.
+        var k2: [bpr]BlockQ8_0 = undefined;
+        for (&k2) |*blk| fillRandomBlockQ8_0(blk, random, true);
+        var qs0: [bpr]f32 = undefined;
+        var qs1: [bpr]f32 = undefined;
+        q8RowScalesInto(&qs0, &q0);
+        q8RowScalesInto(&qs1, &q1);
+        const x2 = vecDotQ8_0Q8_0x2(&q0, &qs0, &k, &k2);
+        try std.testing.expectEqual(vecDotQ8_0Q8_0(&q0, &k), x2[0]);
+        try std.testing.expectEqual(vecDotQ8_0Q8_0(&q0, &k2), x2[1]);
+        const px2 = vecDotQ8_0Q8_0Pairx2(&q0, &q1, &qs0, &qs1, &k, &k2);
+        const p_a = vecDotQ8_0Q8_0Pair(&q0, &q1, &k);
+        const p_b = vecDotQ8_0Q8_0Pair(&q0, &q1, &k2);
+        try std.testing.expectEqual(p_a[0], px2[0]);
+        try std.testing.expectEqual(p_a[1], px2[1]);
+        try std.testing.expectEqual(p_b[0], px2[2]);
+        try std.testing.expectEqual(p_b[1], px2[3]);
+
+        var out_two: [bpr * 32]f32 = undefined;
+        var out_seq: [bpr * 32]f32 = undefined;
+        weightedQ8_0Row2(false, &out_two, &k, w0, &k2, w1);
+        weightedQ8_0Row(false, &out_seq, &k, w0);
+        weightedQ8_0Row(true, &out_seq, &k2, w1);
+        try std.testing.expectEqualSlices(f32, &out_seq, &out_two);
+        var outp0_two: [bpr * 32]f32 = undefined;
+        var outp1_two: [bpr * 32]f32 = undefined;
+        var outp0_seq: [bpr * 32]f32 = undefined;
+        var outp1_seq: [bpr * 32]f32 = undefined;
+        weightedQ8_0RowPair2(false, &outp0_two, &outp1_two, &k, w0, w1, &k2, w1, w0);
+        weightedQ8_0RowPair(false, &outp0_seq, &outp1_seq, &k, w0, w1);
+        weightedQ8_0RowPair(true, &outp0_seq, &outp1_seq, &k2, w1, w0);
+        try std.testing.expectEqualSlices(f32, &outp0_seq, &outp0_two);
+        try std.testing.expectEqualSlices(f32, &outp1_seq, &outp1_two);
     }
 }

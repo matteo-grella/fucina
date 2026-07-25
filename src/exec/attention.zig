@@ -300,19 +300,47 @@ pub fn groupedCausalAttentionHeads(comptime KvElem: type, task: GroupedCausalAtt
             const q_base = query_i * q_seq_stride + head_i * q_head_stride;
             const bias_row: ?[]const f32 = if (task.bias) |bias_data| bias_data[query_i * task.kv_seq ..][0..task.kv_seq] else null;
 
+            var q_scales: [if (KvElem == BlockQ8_0) attention_q8_max_d / q8_0_block_size else 0]f32 = undefined;
             if (comptime KvElem == BlockQ8_0) {
                 backend_mod.quantized_matmul.quantizeRowQ8_0Into(
                     q_q8[0 .. task.d / q8_0_block_size],
                     task.q_data[q_base..][0..task.d],
                 ) catch unreachable;
+                backend_mod.quantized_matmul.q8RowScalesInto(q_scales[0 .. task.d / q8_0_block_size], q_q8[0 .. task.d / q8_0_block_size]);
             }
             var max_score = -std.math.inf(f32);
-            for (lo..active) |source_i| {
+            if (comptime KvElem == BlockQ8_0) score: {
+                // 2-key step: two independent accumulator chains hide the
+                // per-block fma latency the single-key dot serializes on.
+                const qm = backend_mod.quantized_matmul;
+                const bpr = task.d / q8_0_block_size;
+                const qb = q_q8[0..bpr];
+                const qs = q_scales[0..bpr];
+                const row_stride = kv_seq_stride / q8_0_block_size;
+                const head_off = kv_head_i * kv_head_stride / q8_0_block_size;
+                var source_i = lo;
+                while (source_i + 2 <= active) : (source_i += 2) {
+                    const k0 = task.k_data[source_i * row_stride + head_off ..][0..bpr];
+                    const k1 = task.k_data[(source_i + 1) * row_stride + head_off ..][0..bpr];
+                    const dots = qm.vecDotQ8_0Q8_0x2(qb, qs, k0, k1);
+                    inline for (0..2) |i| {
+                        var score = dots[i] * task.scale_value;
+                        if (bias_row) |row| score += row[source_i + i];
+                        task.scores[source_i + i] = score;
+                        max_score = @max(max_score, score);
+                    }
+                }
+                if (source_i < active) {
+                    const k0 = task.k_data[source_i * row_stride + head_off ..][0..bpr];
+                    var score = qm.vecDotQ8_0Q8_0(qb, k0) * task.scale_value;
+                    if (bias_row) |row| score += row[source_i];
+                    task.scores[source_i] = score;
+                    max_score = @max(max_score, score);
+                }
+                break :score;
+            } else for (lo..active) |source_i| {
                 var dot_value: f32 = undefined;
-                if (comptime KvElem == BlockQ8_0) {
-                    const k_blocks = task.k_data[(source_i * kv_seq_stride + kv_head_i * kv_head_stride) / q8_0_block_size ..][0 .. task.d / q8_0_block_size];
-                    dot_value = backend_mod.quantized_matmul.vecDotQ8_0Q8_0(q_q8[0 .. task.d / q8_0_block_size], k_blocks);
-                } else {
+                {
                     const k_row = task.k_data;
                     const k_base = source_i * kv_seq_stride + kv_head_i * kv_head_stride;
                     var dot_vec: Vec = @splat(0);
@@ -348,15 +376,26 @@ pub fn groupedCausalAttentionHeads(comptime KvElem: type, task: GroupedCausalAtt
 
             const out_base = query_i * out_seq_stride + head_i * task.d;
             if (comptime KvElem == BlockQ8_0) {
+                // 2-row fused V pass: the out row loads/stores once per two
+                // source rows.
+                const qm = backend_mod.quantized_matmul;
                 const out_row = task.out_data[out_base..][0..task.d];
-                const blocks_per_row = task.d / q8_0_block_size;
-                {
-                    const v_blocks = task.v_data[(lo * kv_seq_stride + kv_head_i * kv_head_stride) / q8_0_block_size ..][0..blocks_per_row];
-                    backend_mod.quantized_matmul.weightedQ8_0Row(false, out_row, v_blocks, task.scores[lo] * inv_sum);
+                const bpr = task.d / q8_0_block_size;
+                const row_stride = kv_seq_stride / q8_0_block_size;
+                const head_off = kv_head_i * kv_head_stride / q8_0_block_size;
+                var source_i = lo;
+                if (active - lo >= 2) {
+                    qm.weightedQ8_0Row2(false, out_row, task.v_data[lo * row_stride + head_off ..][0..bpr], task.scores[lo] * inv_sum, task.v_data[(lo + 1) * row_stride + head_off ..][0..bpr], task.scores[lo + 1] * inv_sum);
+                    source_i = lo + 2;
+                } else {
+                    qm.weightedQ8_0Row(false, out_row, task.v_data[lo * row_stride + head_off ..][0..bpr], task.scores[lo] * inv_sum);
+                    source_i = lo + 1;
                 }
-                for (lo + 1..active) |source_i| {
-                    const v_blocks = task.v_data[(source_i * kv_seq_stride + kv_head_i * kv_head_stride) / q8_0_block_size ..][0..blocks_per_row];
-                    backend_mod.quantized_matmul.weightedQ8_0Row(true, out_row, v_blocks, task.scores[source_i] * inv_sum);
+                while (source_i + 2 <= active) : (source_i += 2) {
+                    qm.weightedQ8_0Row2(true, out_row, task.v_data[source_i * row_stride + head_off ..][0..bpr], task.scores[source_i] * inv_sum, task.v_data[(source_i + 1) * row_stride + head_off ..][0..bpr], task.scores[source_i + 1] * inv_sum);
+                }
+                if (source_i < active) {
+                    qm.weightedQ8_0Row(true, out_row, task.v_data[source_i * row_stride + head_off ..][0..bpr], task.scores[source_i] * inv_sum);
                 }
             } else {
                 {
@@ -418,23 +457,63 @@ pub fn groupedCausalAttentionHeadPairs(comptime KvElem: type, task: GroupedCausa
             const bias_row: ?[]const f32 = if (task.bias) |bias_data| bias_data[query_i * task.kv_seq ..][0..task.kv_seq] else null;
 
             const q8_blocks = comptime attention_q8_max_d / q8_0_block_size;
+            var q_scales: [if (KvElem == BlockQ8_0) 2 * q8_blocks else 0]f32 = undefined;
             if (comptime KvElem == BlockQ8_0) {
                 const qm = backend_mod.quantized_matmul;
                 qm.quantizeRowQ8_0Into(q_q8[0 .. task.d / q8_0_block_size], task.q_data[q_base0..][0..task.d]) catch unreachable;
                 qm.quantizeRowQ8_0Into(q_q8[q8_blocks..][0 .. task.d / q8_0_block_size], task.q_data[q_base1..][0..task.d]) catch unreachable;
+                qm.q8RowScalesInto(q_scales[0 .. task.d / q8_0_block_size], q_q8[0 .. task.d / q8_0_block_size]);
+                qm.q8RowScalesInto(q_scales[q8_blocks..][0 .. task.d / q8_0_block_size], q_q8[q8_blocks..][0 .. task.d / q8_0_block_size]);
             }
             var max_score0 = -std.math.inf(f32);
             var max_score1 = -std.math.inf(f32);
-            for (lo..active) |source_i| {
+            if (comptime KvElem == BlockQ8_0) {
+                // 2-key step: four independent accumulator chains (2 queries
+                // x 2 keys), K blocks loaded once per step for both queries.
+                const qm = backend_mod.quantized_matmul;
+                const bpr = task.d / q8_0_block_size;
+                const qb0 = q_q8[0..bpr];
+                const qb1 = q_q8[q8_blocks..][0..bpr];
+                const qs0 = q_scales[0..bpr];
+                const qs1 = q_scales[q8_blocks..][0..bpr];
+                const row_stride = kv_seq_stride / q8_0_block_size;
+                const head_off = kv_head_i * kv_head_stride / q8_0_block_size;
+                var source_i = lo;
+                while (source_i + 2 <= active) : (source_i += 2) {
+                    const k0 = task.k_data[source_i * row_stride + head_off ..][0..bpr];
+                    const k1 = task.k_data[(source_i + 1) * row_stride + head_off ..][0..bpr];
+                    const dots = qm.vecDotQ8_0Q8_0Pairx2(qb0, qb1, qs0, qs1, k0, k1);
+                    inline for (0..2) |i| {
+                        var score0 = dots[2 * i] * task.scale_value;
+                        var score1 = dots[2 * i + 1] * task.scale_value;
+                        if (bias_row) |row| {
+                            score0 += row[source_i + i];
+                            score1 += row[source_i + i];
+                        }
+                        scores0[source_i + i] = score0;
+                        scores1[source_i + i] = score1;
+                        max_score0 = @max(max_score0, score0);
+                        max_score1 = @max(max_score1, score1);
+                    }
+                }
+                if (source_i < active) {
+                    const k0 = task.k_data[source_i * row_stride + head_off ..][0..bpr];
+                    const dots = qm.vecDotQ8_0Q8_0Pair(qb0, qb1, k0);
+                    var score0 = dots[0] * task.scale_value;
+                    var score1 = dots[1] * task.scale_value;
+                    if (bias_row) |row| {
+                        score0 += row[source_i];
+                        score1 += row[source_i];
+                    }
+                    scores0[source_i] = score0;
+                    scores1[source_i] = score1;
+                    max_score0 = @max(max_score0, score0);
+                    max_score1 = @max(max_score1, score1);
+                }
+            } else for (lo..active) |source_i| {
                 var dot_value0: f32 = undefined;
                 var dot_value1: f32 = undefined;
-                if (comptime KvElem == BlockQ8_0) {
-                    const bpr = task.d / q8_0_block_size;
-                    const k_blocks = task.k_data[(source_i * kv_seq_stride + kv_head_i * kv_head_stride) / q8_0_block_size ..][0..bpr];
-                    const dots = backend_mod.quantized_matmul.vecDotQ8_0Q8_0Pair(q_q8[0..bpr], q_q8[q8_blocks..][0..bpr], k_blocks);
-                    dot_value0 = dots[0];
-                    dot_value1 = dots[1];
-                } else {
+                {
                     const k_row = task.k_data;
                     const k_base = source_i * kv_seq_stride + kv_head_i * kv_head_stride;
                     var dot_vec0: Vec = @splat(0);
@@ -491,17 +570,27 @@ pub fn groupedCausalAttentionHeadPairs(comptime KvElem: type, task: GroupedCausa
             const out_base0 = query_i * out_seq_stride + head0 * task.d;
             const out_base1 = query_i * out_seq_stride + head1 * task.d;
             if (comptime KvElem == BlockQ8_0) {
+                // 2-row fused V pass for the head pair: both out rows load
+                // and store once per two source rows.
                 const qm = backend_mod.quantized_matmul;
                 const out_row0 = task.out_data[out_base0..][0..task.d];
                 const out_row1 = task.out_data[out_base1..][0..task.d];
                 const bpr = task.d / q8_0_block_size;
-                {
-                    const v_blocks = task.v_data[(lo * kv_seq_stride + kv_head_i * kv_head_stride) / q8_0_block_size ..][0..bpr];
-                    qm.weightedQ8_0RowPair(false, out_row0, out_row1, v_blocks, scores0[lo] * inv_sum0, scores1[lo] * inv_sum1);
+                const row_stride = kv_seq_stride / q8_0_block_size;
+                const head_off = kv_head_i * kv_head_stride / q8_0_block_size;
+                var source_i = lo;
+                if (active - lo >= 2) {
+                    qm.weightedQ8_0RowPair2(false, out_row0, out_row1, task.v_data[lo * row_stride + head_off ..][0..bpr], scores0[lo] * inv_sum0, scores1[lo] * inv_sum1, task.v_data[(lo + 1) * row_stride + head_off ..][0..bpr], scores0[lo + 1] * inv_sum0, scores1[lo + 1] * inv_sum1);
+                    source_i = lo + 2;
+                } else {
+                    qm.weightedQ8_0RowPair(false, out_row0, out_row1, task.v_data[lo * row_stride + head_off ..][0..bpr], scores0[lo] * inv_sum0, scores1[lo] * inv_sum1);
+                    source_i = lo + 1;
                 }
-                for (lo + 1..active) |source_i| {
-                    const v_blocks = task.v_data[(source_i * kv_seq_stride + kv_head_i * kv_head_stride) / q8_0_block_size ..][0..bpr];
-                    qm.weightedQ8_0RowPair(true, out_row0, out_row1, v_blocks, scores0[source_i] * inv_sum0, scores1[source_i] * inv_sum1);
+                while (source_i + 2 <= active) : (source_i += 2) {
+                    qm.weightedQ8_0RowPair2(true, out_row0, out_row1, task.v_data[source_i * row_stride + head_off ..][0..bpr], scores0[source_i] * inv_sum0, scores1[source_i] * inv_sum1, task.v_data[(source_i + 1) * row_stride + head_off ..][0..bpr], scores0[source_i + 1] * inv_sum0, scores1[source_i + 1] * inv_sum1);
+                }
+                if (source_i < active) {
+                    qm.weightedQ8_0RowPair(true, out_row0, out_row1, task.v_data[source_i * row_stride + head_off ..][0..bpr], scores0[source_i] * inv_sum0, scores1[source_i] * inv_sum1);
                 }
             } else {
                 {

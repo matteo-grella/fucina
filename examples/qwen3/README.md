@@ -139,7 +139,8 @@ target is `llama-tokenize --ids --no-escape` from the same build
 ## KV cache
 
 ```sh
-# q8_0 KV cache (halves KV memory — capacity option; decode is NOT faster on M1)
+# q8_0 KV cache: halves KV memory; decode runs the integer q8×q8 score
+# path directly on the quantized blocks — the long-context option
 zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf \
   --prompt "..." --gen 256 --cache-type q8_0
 ```
@@ -206,7 +207,7 @@ Parity and KV cache:
 | `--compare-logits PATH` | compare last-token logits against such a dump |
 | `--verify-cache N` | cached-vs-full attention check over N steps |
 | `--verify-batch=N` | batched-verify-vs-sequential bitwise check over N steps (spec byte-identity harness) |
-| `--cache-type f16\|q8_0` | KV cache dtype (default `f16`); `q8_0` halves KV memory and serves decode through the integer q8×q8 score path — at or above f16 speed from ~8k context |
+| `--cache-type f16\|q8_0` | KV cache dtype (default `f16`); `q8_0` halves KV memory and serves decode through the integer q8×q8 score path — the long-context option |
 | `--kv-save[=PATH]` | crash-safe KV persistence for `--chat`/`--repl` (default `<gguf>.kvcache`) |
 
 Constrained decoding (needs a `-Dllguidance=true` build):
