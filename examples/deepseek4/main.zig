@@ -243,7 +243,8 @@ pub fn main(init: std.process.Init) !void {
             // Kernel-pinned (ExecContext.pinRowwiseKernels): the verify
             // logits AND the cache rows it leaves behind for accepted
             // positions are bit-identical to sequential decode at any
-            // depth — the old m >= 4 x4-kernel drift wall is gone.
+            // depth, which is what keeps --mtp output byte-identical to
+            // plain greedy.
             var snap = try session.cache.snapshot();
             defer snap.deinit();
             ctx.pinRowwiseKernels(true);

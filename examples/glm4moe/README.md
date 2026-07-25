@@ -15,10 +15,9 @@ batched trunk step — only greedy-matching prefixes commit, so output is
 lossless (byte-identical to plain greedy). Measured 2.29 tokens per forward
 at depth 2 on GLM-4.5-Air Q6_K streamed on a 64 GB machine. The verify
 runs kernel-pinned (batched quant matmuls reproduce the single-token
-numerics bitwise), which removed the old m ≥ 4 x4-kernel drift wall that
-capped depth at 2; depth now caps at 8, keeping the verify batch under
-the remaining non-quant kernel thresholds. Bare `--mtp` stays depth 2
-(the measured sweet spot).
+numerics bitwise), so losslessness holds through the depth cap of 8 —
+set by the non-quant kernel thresholds the verify batch must stay
+under. Bare `--mtp` is depth 2 (the measured sweet spot).
 
 ## Getting the model
 

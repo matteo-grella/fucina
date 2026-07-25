@@ -117,6 +117,10 @@ Without `--gen`, the runner performs a single forward pass over the token
 ids and prints load/forward timing plus the top-5 logits — that is the path
 `--repeat`, `--profile`, `--logits-out` and `--compare-logits` serve.
 `--verify-cache N` cross-checks cached vs full attention over N steps.
+`--verify-batch=N` cross-checks batched verify logits against sequential
+decode bitwise (rows, post-batch continuation, garbage-draft
+truncate-replay; kernel-pinned and unpinned sweeps) — the harness that
+guards the speculative byte-identity contract.
 
 The reference side of the logit compare comes from the pinned llama.cpp
 checkout: `tools/fetch_refs.sh llama.cpp --build` clones it under `refs/`
@@ -201,6 +205,7 @@ Parity and KV cache:
 | `--logits-out PATH` | dump last-token logits, raw little-endian f32 |
 | `--compare-logits PATH` | compare last-token logits against such a dump |
 | `--verify-cache N` | cached-vs-full attention check over N steps |
+| `--verify-batch=N` | batched-verify-vs-sequential bitwise check over N steps (spec byte-identity harness) |
 | `--cache-type f16\|q8_0` | KV cache dtype (default `f16`); `q8_0` halves KV memory and serves decode through the integer q8×q8 score path — at or above f16 speed from ~8k context |
 | `--kv-save[=PATH]` | crash-safe KV persistence for `--chat`/`--repl` (default `<gguf>.kvcache`) |
 

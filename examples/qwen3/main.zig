@@ -13,7 +13,7 @@ pub fn main(init: std.process.Init) !void {
     defer stdout.flush() catch {};
 
     if (args.len < 2) {
-        try stdout.print("usage: zig build qwen3 -- <model.gguf> [comma-separated-token-ids] [--repeat N] [--profile] [--logits-out PATH] [--compare-logits PATH] [--gen N [--stop TOKEN]] [--bench R] [--verify-cache N] [--cache-type f16|q8_0] [--spec] [--spec-ref FILE] [--tokenize FILE]...\n", .{});
+        try stdout.print("usage: zig build qwen3 -- <model.gguf> [comma-separated-token-ids] [--repeat N] [--profile] [--logits-out PATH] [--compare-logits PATH] [--gen N [--stop TOKEN]] [--bench R] [--verify-cache N] [--verify-batch=N] [--cache-type f16|q8_0] [--spec] [--spec-ref FILE] [--tokenize FILE]...\n", .{});
         try stdout.print("spec:     zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q4_K_S.gguf --prompt \"...\" --gen 128 --spec [--spec-ref doc.txt]   (lossless speculative decode + acceptance stats)\n", .{});
         try stdout.print("bench:    zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-30B-A3B-Instruct-2507-Q5_K_M.gguf <prompt-token-ids> --gen 64 --bench 5   (warm pp/tg, load once; fair vs llama-bench)\n", .{});
         try stdout.print("streams:  zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q4_K_S.gguf <prompt-token-ids> --gen 64 --bench 3 --streams 4   (batched multi-stream decode vs N sequential runs)\n", .{});
@@ -36,6 +36,7 @@ pub fn main(init: std.process.Init) !void {
     var gen_count: ?usize = null;
     var bench_reps: usize = 1;
     var verify_count: ?usize = null;
+    var verify_batch_count: ?usize = null;
     var cache_type: llm.kv_cache.KvDtype = .f16;
     var stop_token: ?usize = null;
     var prompt_text: ?[]const u8 = null;
@@ -107,6 +108,8 @@ pub fn main(init: std.process.Init) !void {
             gen_count = try parseRepeat(args[arg_i]);
         } else if (std.mem.startsWith(u8, arg, "--gen=")) {
             gen_count = try parseRepeat(arg["--gen=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "--verify-batch=")) {
+            verify_batch_count = try std.fmt.parseInt(usize, arg["--verify-batch=".len..], 10);
         } else if (std.mem.eql(u8, arg, "--verify-cache")) {
             arg_i += 1;
             if (arg_i >= args.len) return error.MissingVerifyCount;
@@ -450,6 +453,10 @@ pub fn main(init: std.process.Init) !void {
     }
     if (verify_count) |m| {
         try runVerifyCache(allocator, stdout, &ctx, &model, tokens, load_ns, m, cache_type);
+        return;
+    }
+    if (verify_batch_count) |m| {
+        try runVerifyBatch(allocator, stdout, &ctx, &model, tokens, load_ns, m, cache_type);
         return;
     }
 
@@ -1145,15 +1152,27 @@ fn runGenerateSpec(
     var sink_state: u8 = 0;
     const sink = llm.speculative.core.TokenSink{ .ptr = @ptrCast(&sink_state), .func = nullSinkEmit };
 
+    // Prefill EXACTLY as runGenerate does: every prompt token in one
+    // batch, first new token sampled from the prefill logits. Prefill
+    // kernels are batch-shape-dependent, so plain and speculative runs
+    // must start from call-for-call identical forwards to share cache
+    // bytes — the caller's leg of the byte-identity contract
+    // (speculative/core.zig); pinned verifies (Options.pin_kernels) are
+    // the other leg.
     const prefill_start = nowNs(io);
-    if (tokens.len > 1) {
-        var pre = try model.forwardStep(ctx, &cache, tokens[0 .. tokens.len - 1], 0);
-        pre.deinit();
+    var first_token: usize = undefined;
+    {
+        var pre = try model.forwardStep(ctx, &cache, tokens, 0);
+        defer pre.deinit();
+        first_token = try sampler.next(ctx, &pre, history.items);
     }
+    try history.append(allocator, first_token);
+    draft_source.observe(history.items[history.items.len - 1 ..]);
     const prefill_ns = nowNs(io) - prefill_start;
 
     const decode_start = nowNs(io);
-    decode: while (history.items.len - tokens.len < max_new) {
+    const first_is_stop = stop_token != null and first_token == stop_token.?;
+    decode: while (!first_is_stop and history.items.len - tokens.len < max_new) {
         const before = history.items.len;
         _ = try decoder.step(ctx, model, &cache, &sampler, &history, sink);
         if (stop_token) |stop| {
@@ -1431,6 +1450,162 @@ const CacheCompare = struct {
     // bug. A structural bug would diverge far beyond the drift.
     benign: bool,
 };
+
+/// --verify-batch=N: are batched verify logits bit-identical to sequential
+/// decode? Prefill the prompt, greedy-decode N tokens one forwardStep at a
+/// time (recording every step's FULL logit row), then for a sweep of batch
+/// sizes m re-prefill a fresh cache and score the same committed tokens in
+/// ONE forwardStepAllLogits pass — reporting, per m, the first row that is
+/// not bitwise equal to its sequential twin, the max |diff|, and whether
+/// any greedy top-1 flips. The sweep runs kernel-pinned (the speculative
+/// verify configuration, expected all-bitwise) and unpinned (the x4 batch
+/// kernels legally drift at m >= 4). A top-1 flip here is exactly a
+/// committed-token divergence in --spec, so this harness guards the
+/// byte-identity contract (speculative/core.zig).
+fn runVerifyBatch(
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    ctx: *fucina.ExecContext,
+    model: *const llm.qwen3.model.Model,
+    tokens: []const usize,
+    load_ns: i96,
+    max_steps: usize,
+    cache_type: llm.kv_cache.KvDtype,
+) !void {
+    const cfg = model.config;
+    const vocab = cfg.vocab_size;
+    const capacity = tokens.len + max_steps + 1;
+    const pos0 = tokens.len;
+
+    // Sequential reference arm: the exact per-token decode numerics.
+    const ref = try allocator.alloc(f32, max_steps * vocab);
+    defer allocator.free(ref);
+    const committed = try allocator.alloc(usize, max_steps + 1);
+    defer allocator.free(committed);
+    {
+        var cache = try llm.kv_cache.KvCache.initWithDtype(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity, cache_type);
+        defer cache.deinit();
+        var prefill_logits = try model.forwardStep(ctx, &cache, tokens, 0);
+        defer prefill_logits.deinit();
+        committed[0] = argmaxSlice(try prefill_logits.dataConst());
+        for (0..max_steps) |i| {
+            var logits = try model.forwardStep(ctx, &cache, committed[i .. i + 1], cache.len);
+            defer logits.deinit();
+            const row = try logits.dataConst();
+            @memcpy(ref[i * vocab ..][0..vocab], row);
+            committed[i + 1] = argmaxSlice(row);
+        }
+    }
+    try stdout.print("load: {d:.3} s\n", .{seconds(load_ns)});
+    try stdout.print("verify batch vs sequential ({d} prompt tokens, {d} steps):\n", .{ tokens.len, max_steps });
+
+    const sweep = [_]usize{ 2, 3, 4, 5, 8, 12, 16, 24, 32 };
+    for ([_]bool{ true, false }) |pinned| {
+        for (sweep) |m| {
+            if (m > max_steps) continue;
+            var cache = try llm.kv_cache.KvCache.initWithDtype(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity, cache_type);
+            defer cache.deinit();
+            var prefill_logits = try model.forwardStep(ctx, &cache, tokens, 0);
+            prefill_logits.deinit();
+            ctx.pinRowwiseKernels(pinned);
+            var all = blk: {
+                defer ctx.pinRowwiseKernels(false);
+                break :blk try model.forwardStepAllLogits(ctx, &cache, committed[0..m], pos0);
+            };
+            defer all.deinit();
+            const rows = try all.dataConst();
+
+            var first_diff: ?usize = null;
+            var bitwise_rows: usize = 0;
+            var max_abs: f64 = 0;
+            var flip_row: ?usize = null;
+            for (0..m) |i| {
+                const got = rows[i * vocab ..][0..vocab];
+                const want = ref[i * vocab ..][0..vocab];
+                if (std.mem.eql(u8, std.mem.sliceAsBytes(got), std.mem.sliceAsBytes(want))) {
+                    bitwise_rows += 1;
+                    continue;
+                }
+                if (first_diff == null) first_diff = i;
+                const cmp = compareTopAndDiff(got, want);
+                max_abs = @max(max_abs, cmp.max_abs);
+                if (!cmp.aligned and flip_row == null) flip_row = i;
+            }
+            if (first_diff == null) {
+                try stdout.print("  m={d:>2} {s}: all {d} rows BITWISE", .{ m, if (pinned) "pinned  " else "unpinned", m });
+            } else if (flip_row) |fr| {
+                try stdout.print("  m={d:>2} {s}: bitwise {d}/{d}, first diff row {d}, max_abs {e:.3}, TOP-1 FLIP at row {d}", .{ m, if (pinned) "pinned  " else "unpinned", bitwise_rows, m, first_diff.?, max_abs, fr });
+            } else {
+                try stdout.print("  m={d:>2} {s}: bitwise {d}/{d}, first diff row {d}, max_abs {e:.3}, top-1 stable", .{ m, if (pinned) "pinned  " else "unpinned", bitwise_rows, m, first_diff.?, max_abs });
+            }
+
+            // Continuation probe: the batch also WROTE m cache rows; one
+            // more sequential step on top of them must reproduce the
+            // sequential arm's next logits, else the batch leaves numerically
+            // different KV state behind (invisible to the row comparison
+            // above, poisonous to every later token).
+            if (m < max_steps) {
+                var cont = try model.forwardStep(ctx, &cache, committed[m .. m + 1], pos0 + m);
+                defer cont.deinit();
+                const got = try cont.dataConst();
+                const want = ref[m * vocab ..][0..vocab];
+                if (std.mem.eql(u8, std.mem.sliceAsBytes(got), std.mem.sliceAsBytes(want))) {
+                    try stdout.print("; continuation BITWISE\n", .{});
+                } else {
+                    const cmp = compareTopAndDiff(got, want);
+                    try stdout.print("; continuation DIFFERS (max_abs {e:.3}, top {d} vs {d})\n", .{ cmp.max_abs, cmp.cache_top, cmp.ref_top });
+                }
+            } else {
+                try stdout.print("\n", .{});
+            }
+        }
+    }
+
+    // Truncate-replay probe (the speculative verify's exact cache dance):
+    // batch [correct token, m-1 GARBAGE drafts], truncate back to one
+    // committed row, then walk the true continuation sequentially — every
+    // step must be bitwise vs the sequential arm, else rejected drafts
+    // leave residue behind the truncation point.
+    {
+        const m: usize = @min(9, max_steps);
+        var cache = try llm.kv_cache.KvCache.initWithDtype(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity, cache_type);
+        defer cache.deinit();
+        var prefill_logits = try model.forwardStep(ctx, &cache, tokens, 0);
+        prefill_logits.deinit();
+        var verify_buf: [9]usize = undefined;
+        verify_buf[0] = committed[0];
+        for (verify_buf[1..m]) |*t| t.* = 0; // deliberately wrong drafts
+        ctx.pinRowwiseKernels(true);
+        var all = blk: {
+            defer ctx.pinRowwiseKernels(false);
+            break :blk try model.forwardStepAllLogits(ctx, &cache, verify_buf[0..m], pos0);
+        };
+        all.deinit();
+        cache.truncate(pos0 + 1);
+        var ok = true;
+        for (1..max_steps) |i| {
+            var logits = try model.forwardStep(ctx, &cache, committed[i .. i + 1], cache.len);
+            defer logits.deinit();
+            const got = try logits.dataConst();
+            const want = ref[i * vocab ..][0..vocab];
+            if (!std.mem.eql(u8, std.mem.sliceAsBytes(got), std.mem.sliceAsBytes(want))) {
+                const cmp = compareTopAndDiff(got, want);
+                try stdout.print("  truncate-replay: step {d} DIFFERS (max_abs {e:.3}, top {d} vs {d})\n", .{ i, cmp.max_abs, cmp.cache_top, cmp.ref_top });
+                ok = false;
+                break;
+            }
+        }
+        if (ok) try stdout.print("  truncate-replay: all {d} steps BITWISE after garbage-draft truncation\n", .{max_steps - 1});
+    }
+}
+
+fn argmaxSlice(values: []const f32) usize {
+    var best: usize = 0;
+    for (values, 0..) |v, i| {
+        if (v > values[best]) best = i;
+    }
+    return best;
+}
 
 fn runVerifyCache(
     allocator: std.mem.Allocator,

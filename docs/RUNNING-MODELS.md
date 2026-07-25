@@ -205,8 +205,8 @@ drafter:
   with one batched trunk step — lossless (byte-identical to plain greedy),
   measured 2.29 tokens per forward at depth 2 on GLM-4.5-Air Q6_K streamed
   on a 64 GB machine. The verify runs kernel-pinned (batched quant
-  matmuls reproduce single-token numerics bitwise), so depth now caps at
-  8 instead of the old drift-bound 2; bare `--mtp` stays depth 2.
+  matmuls reproduce single-token numerics bitwise); depth caps at 8, set
+  by the non-quant kernel thresholds, and bare `--mtp` is depth 2.
   ([examples/glm4moe/README.md](../examples/glm4moe/README.md))
 - DeepSeek V4 Flash: `--mtp=<sidecar.gguf>` — the 3.8 GB sidecar GGUF
   drafts, the trunk verifies in one batched step — lossless, measured

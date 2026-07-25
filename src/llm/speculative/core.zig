@@ -38,21 +38,24 @@
 //! sampler for the rest of the conversation. So given bitwise-identical
 //! logits the output token stream is identical to the non-speculative run.
 //! Logits, however, are computed in verify batches of m = 1+draft rows
-//! instead of m = 1. With `Options.pin_kernels` (the default) the verify
-//! forward runs under `ExecContext.pinRowwiseKernels`, which makes every
-//! batched quant-matmul entry reproduce the m == 1 numerics bitwise
-//! (proven at op level for every m in the exec suite, and end-to-end by
-//! the byte-identical depth-4 DeepSeek-V4 MTP run). Unpinned, the
-//! m-dependent kernel switches (x4-packed quant kernels at m >= 4)
-//! reintroduce reassociation drift (~1e-6 rel) that can flip a near-tied
-//! sample; the non-quant thresholds (tiled attention at seq >= 48,
-//! f32/f16 fused-FFN at m >= 12) are outside the pin either way. Known
-//! residual: qwen3-0.6B --spec still diverges from plain greedy at one
-//! near-tie even with small pinned verifies (pre-existing behavior —
-//! pinning moved the first divergence later but did not remove it; the
-//! remaining source is not yet identified). Lossless therefore means:
-//! same DISTRIBUTION always; same sample stream whenever the logits
-//! match bitwise.
+//! instead of m = 1, so byte-identity with a plain run rests on two
+//! legs. (1) `Options.pin_kernels` (the default): the verify forward
+//! runs under `ExecContext.pinRowwiseKernels`, making every batched
+//! quant-matmul entry reproduce the m == 1 numerics bitwise — both the
+//! verify LOGITS and the KV rows the verify leaves behind for committed
+//! positions (qwen3's --verify-batch harness checks rows, post-batch
+//! continuation, and garbage-draft truncate-replay, all bitwise through
+//! m = 32). (2) The caller must PREFILL both runs identically — the same
+//! tokens in the same single batch — because prefill kernels are
+//! batch-shape-dependent and the two streams must start from the same
+//! cache bytes (no verify discipline can reconcile streams that already
+//! differ at row 0). With both legs in place, --spec is MEASURED
+//! byte-identical to plain greedy on Qwen3-0.6B Q4_K_S, and depth-4
+//! DeepSeek-V4 MTP to plain greedy on the streamed 284B trunk. Unpinned,
+//! the m-dependent kernel switches (x4-packed quant kernels at m >= 4)
+//! produce legally different batch numerics that can flip a near-tied
+//! sample — same DISTRIBUTION always, byte-identity only while the
+//! logits happen to match.
 
 const std = @import("std");
 const fucina = @import("fucina");
@@ -193,12 +196,13 @@ pub const Options = struct {
     /// arrives as an accepted draft token mid-batch. Null = no stop token.
     stop_token: ?usize = null,
     /// Kernel-family pinning for the verify forward
-    /// (`ExecContext.pinRowwiseKernels`): the batched quant matmuls then
-    /// reproduce the m == 1 numerics bitwise, removing the x4-kernel
-    /// drift that flipped near-tied verifies (see the module doc for the
-    /// exact guarantees and the known qwen3 residual). ON by default —
-    /// fidelity over verify batch throughput; turn OFF to reclaim the x4
-    /// batch kernels when ~1e-6 logit drift is acceptable.
+    /// (`ExecContext.pinRowwiseKernels`): the batched quant matmuls
+    /// reproduce the m == 1 numerics bitwise — verify logits AND the KV
+    /// rows left behind for committed positions — one of the two legs of
+    /// the byte-identity contract (module doc; the other leg is the
+    /// caller's prefill alignment). ON by default — fidelity over verify
+    /// batch throughput; turn OFF to reclaim the x4 batch kernels when
+    /// small logit drift is acceptable.
     pin_kernels: bool = true,
 
     // ---- cost-aware AUTO-OFF gate (see `CostGate`) ----

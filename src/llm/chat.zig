@@ -945,11 +945,6 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             // The new prompt tokens are committed context: feed the index.
             st.index.observe(prefix);
 
-            if (self.history.items.len > self.cache.len + 1) {
-                var pre = try self.model.forwardStep(self.ctx, &self.cache, self.history.items[self.cache.len .. self.history.items.len - 1], self.cache.len);
-                pre.deinit();
-            }
-
             self.stream.reset();
             var gate = TurnGate{
                 .convo = self,
@@ -962,6 +957,24 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             st.decoder.source = gate.source();
             defer st.decoder.source = st.baseSource();
 
+            // Prefill EXACTLY as decodeTurn does: the whole pending span in
+            // one batch, first token sampled from the prefill logits, then
+            // fed through the same gate sink/observe machinery the decoder
+            // uses for every later commit. Plain and speculative turns must
+            // build their caches from call-for-call identical forwards —
+            // prefill kernels are batch-shape-dependent, and matching
+            // shapes is the caller's leg of the byte-identity contract
+            // (speculative/core.zig).
+            const sink = speculative.TokenSink{ .ptr = &gate, .func = TurnGate.emit };
+            {
+                var pre = try self.model.forwardStep(self.ctx, &self.cache, self.history.items[self.cache.len..], self.cache.len);
+                defer pre.deinit();
+                const first = try self.sampler.next(self.ctx, &pre, self.history.items);
+                try self.history.append(self.allocator, first);
+                try sink.emit(first);
+                st.decoder.source.observe(self.history.items[self.history.items.len - 1 ..]);
+            }
+
             // Trim the stop marker and any overshoot committed past the boundary
             // — UNCONDITIONALLY, error paths included (a failed write mid-turn
             // must not leave un-trimmed tokens in history/KV, or the next send
@@ -972,7 +985,6 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 self.cache.truncate(keep);
             }
 
-            const sink = speculative.TokenSink{ .ptr = &gate, .func = TurnGate.emit };
             while (!gate.sink_acc.done and gate.sink_acc.n < self.max_response_tokens and self.cache.len < self.cache.capacity) {
                 _ = try st.decoder.step(self.ctx, self.model, &self.cache, &self.sampler, &self.history, sink);
             }

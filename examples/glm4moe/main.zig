@@ -49,11 +49,11 @@ pub fn main(init: std.process.Init) !void {
             mtp_depth = 2;
         } else if (std.mem.startsWith(u8, arg, "--mtp=")) {
             // Depth caps at 8: the verify runs kernel-pinned
-            // (ExecContext.pinRowwiseKernels), so the m >= 4 x4-packed
-            // quant kernels no longer drift from the S=1 numerics — the
-            // old depth-2 wall. 8 keeps the verify batch (depth+1 rows)
-            // under the remaining non-quant thresholds (f32/f16 fused-FFN
-            // at m >= 12, tiled attention at seq >= 48).
+            // (ExecContext.pinRowwiseKernels), so its batched quant
+            // kernels reproduce the S=1 numerics bitwise, and 8 keeps the
+            // verify batch (depth+1 rows) under the non-quant kernel
+            // thresholds (f32/f16 fused-FFN at m >= 12, tiled attention
+            // at seq >= 48) that bound losslessness.
             mtp_depth = @min(try std.fmt.parseInt(usize, arg["--mtp=".len..], 10), 8);
         } else if (std.mem.eql(u8, arg, "--moe-stream")) {
             moe_stream_flag = true;
