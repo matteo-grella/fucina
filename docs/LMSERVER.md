@@ -40,8 +40,20 @@ conn threads (≤ --conns, socket deadlines)          ONE inference worker
 - Requests beyond the queue bound get `429` + `retry-after` (llama.cpp defers
   unboundedly; a bounded queue is the honest failure mode for a sequential
   worker).
-- Client disconnect (an `MSG_PEEK` probe between waits) cancels queued jobs
-  and aborts in-flight generation at the next token.
+- The worker never touches a socket: each request's reply bytes flow
+  through a per-request `StreamPipe` (`http.zig`) — a futex-signaled,
+  mutex-guarded byte pipe — and the CONNECTION thread writes the HTTP head
+  and chunked body to the wire. A stalled client therefore stalls only its
+  own connection thread while its reply buffers server-side (bounded by
+  the reply itself, `max_tokens` frames); generation, the queue behind it,
+  and the other streams of a `--batch` lockstep run at full speed.
+  Verified live: a client that streams 512 tokens and reads NOTHING holds
+  its ~119 KiB reply in the pipe while a sibling request completes in
+  0.04 s; when the stalled client finally reads, the complete buffered
+  stream (through `[DONE]`) is delivered.
+- Client disconnect (an `MSG_PEEK` probe between waits, or a failed drain
+  write) cancels queued jobs, fails the pipe, and aborts in-flight
+  generation at the next token — in a batch, that stream alone.
 - `SIGINT`/`SIGTERM`: stop accepting, cancel the in-flight job, drain, exit.
   A self-connect kick unblocks the accept loop — macOS wakes a pending
   `accept` for neither `shutdown(2)` nor `SO_RCVTIMEO`, and the Io layer
@@ -146,9 +158,9 @@ conn threads (≤ --conns, socket deadlines)          ONE inference worker
   stream — and the RAM guard prices the raised total). No mid-flight
   joins: requests arriving during a batch wait for the next one. Streams
   in a batch of 4+ can differ from a solo run by float-reassociation
-  drift (~1e-6 rel, the speculative-verify caveat); a batch is also only
-  as fast as its slowest sink (a stalled client's socket back-pressures
-  the lockstep — same property as a solo stream, multiplied). Excludes
+  drift (~1e-6 rel, the speculative-verify caveat); a stalled client
+  never slows its batch — its frames buffer in the per-request
+  `StreamPipe` (previous bullet). Excludes
   `--fleet` (per-request retrieval + sticky adoption are single-stream
   logic).
 

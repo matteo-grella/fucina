@@ -20,12 +20,19 @@ fn unlock(m: *std.Io.Mutex) void {
 /// request strings (arena) and blocks on `waitTimed`; the WORKER writes
 /// reply bytes through `sink` while the job runs. The sink is driven by
 /// exactly one thread at a time: the worker until `.finished`, the
-/// connection thread afterwards.
+/// connection thread afterwards. (The sink's DOWNSTREAM may be a
+/// cross-thread pipe the connection thread drains concurrently — that
+/// pipe synchronizes itself; see `http.StreamPipe`.)
 pub const Job = struct {
     req: types.GenerateRequest,
     /// The OpenAI layer's per-request emitter (SSE frames or an
     /// accumulating body). Written by the worker only.
     sink: *std.Io.Writer,
+    /// Optional extra futex word bumped and woken on finish. The connection
+    /// thread waits on its stream pipe's sequence word (data arrivals bump
+    /// it); finishing must wake that same word or the epilogue would sit
+    /// out a full wait tick.
+    notify: ?*std.atomic.Value(u32) = null,
 
     /// Futex word; `res`/`err` are published before the `.finished` store.
     state: std.atomic.Value(u32) = .{ .raw = @intFromEnum(State.queued) },
@@ -68,6 +75,10 @@ pub const Job = struct {
         self.err = err;
         self.state.store(@intFromEnum(State.finished), .release);
         io.futexWake(u32, &self.state.raw, std.math.maxInt(u32));
+        if (self.notify) |word| {
+            _ = word.fetchAdd(1, .release);
+            io.futexWake(u32, &word.raw, std.math.maxInt(u32));
+        }
     }
 
     fn setRunning(self: *Job) void {

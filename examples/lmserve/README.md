@@ -214,7 +214,9 @@ strictly sequential; `--batch N` lets it decode up to N already-queued
 requests together in lockstep (one m=N weight pass per step; per-stream
 failures — a dropped client, a bad grammar — finish that stream while the
 rest keep decoding). An idle server keeps single-request latency: batching
-never waits for requests. Reasoning is off by
+never waits for requests. Reply bytes flow through a per-request pipe and
+the connection thread writes the socket, so a stalled client buffers
+server-side without slowing generation, the queue, or its batch. Reasoning is off by
 default; clients enable it per request via `reasoning_effort` (chat),
 `reasoning.effort` (responses) — `"none"`/`"minimal"` disable,
 `"low"`/`"medium"`/`"high"`/`"xhigh"`/`"default"` enable (rejected when the

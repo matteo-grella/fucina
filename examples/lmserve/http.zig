@@ -28,6 +28,126 @@ const Route = enum {
     }
 };
 
+fn lock(m: *std.Io.Mutex) void {
+    std.Io.Threaded.mutexLock(m);
+}
+
+fn unlock(m: *std.Io.Mutex) void {
+    std.Io.Threaded.mutexUnlock(m);
+}
+
+/// Cross-thread byte pipe between the inference worker (producer: the
+/// emitter's SSE frames) and the connection thread (consumer: HTTP head +
+/// chunked body writes to the socket). The worker never touches the
+/// socket, so a stalled client stalls only its own connection thread —
+/// never generation, neither the sequential queue behind it nor the other
+/// streams of a `--batch` lockstep. Capacity is intrinsically bounded by
+/// the reply itself (`max_tokens` frames); a consumer whose socket died
+/// marks the pipe failed and the producer's next write aborts that
+/// stream's generation, exactly as a direct socket write used to.
+pub const StreamPipe = struct {
+    allocator: Allocator,
+    io: std.Io,
+    mutex: std.Io.Mutex = .init,
+    /// Frame bytes; `consumed` is the socket-written prefix (compacted
+    /// whenever the consumer fully catches up — the common case).
+    data: std.ArrayList(u8) = .empty,
+    consumed: usize = 0,
+    /// SSE streaming began: the consumer must write the HTTP head before
+    /// any body bytes.
+    started: bool = false,
+    /// The consumer's socket died: producer writes fail from here on.
+    failed: bool = false,
+    /// Futex word for the consumer's wait: bumped on every append and on
+    /// stream start (the scheduler bumps it on job finish via
+    /// `Job.notify`), so a load-then-wait consumer can never miss an
+    /// event.
+    seq: std.atomic.Value(u32) = .{ .raw = 0 },
+    interface: std.Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
+
+    pub fn deinit(self: *StreamPipe) void {
+        self.data.deinit(self.allocator);
+    }
+
+    /// `emitter.StreamStarter`: called by the WORKER on the first delta.
+    /// Only flags the stream — the response head is written by the
+    /// consumer, keeping every socket byte on the connection thread.
+    pub fn starter(self: *StreamPipe) emitter_mod.StreamStarter {
+        return .{ .ptr = self, .startFn = start };
+    }
+
+    fn start(ptr: *anyopaque) anyerror!*std.Io.Writer {
+        const self: *StreamPipe = @ptrCast(@alignCast(ptr));
+        lock(&self.mutex);
+        defer unlock(&self.mutex);
+        if (self.failed) return error.WriteFailed;
+        self.started = true;
+        self.bumpLocked();
+        return &self.interface;
+    }
+
+    fn bumpLocked(self: *StreamPipe) void {
+        _ = self.seq.fetchAdd(1, .release);
+        self.io.futexWake(u32, &self.seq.raw, std.math.maxInt(u32));
+    }
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const self: *StreamPipe = @alignCast(@fieldParentPtr("interface", w));
+        lock(&self.mutex);
+        defer unlock(&self.mutex);
+        if (self.failed) return error.WriteFailed;
+        var n: usize = 0;
+        for (data[0 .. data.len - 1]) |slice| {
+            self.data.appendSlice(self.allocator, slice) catch return error.WriteFailed;
+            n += slice.len;
+        }
+        const last = data[data.len - 1];
+        for (0..splat) |_| self.data.appendSlice(self.allocator, last) catch return error.WriteFailed;
+        n += last.len * splat;
+        self.bumpLocked();
+        return n;
+    }
+
+    pub const Taken = struct { n: usize, started: bool };
+
+    /// Consumer: copy the next pending chunk into `buf` (n == 0 when
+    /// drained). The copy keeps the mutex held only for a memcpy — never
+    /// across a socket write.
+    pub fn take(self: *StreamPipe, buf: []u8) Taken {
+        lock(&self.mutex);
+        defer unlock(&self.mutex);
+        const pending = self.data.items[self.consumed..];
+        const n = @min(pending.len, buf.len);
+        @memcpy(buf[0..n], pending[0..n]);
+        self.consumed += n;
+        if (self.consumed == self.data.items.len) {
+            self.data.clearRetainingCapacity();
+            self.consumed = 0;
+        }
+        return .{ .n = n, .started = self.started };
+    }
+
+    /// Consumer: the socket died — producer writes fail from now on (the
+    /// worker aborts that stream at its next write).
+    pub fn markFailed(self: *StreamPipe) void {
+        lock(&self.mutex);
+        defer unlock(&self.mutex);
+        self.failed = true;
+    }
+
+    /// Consumer: wait until `seq` moves past `expected` (data, stream
+    /// start, or job finish), up to `timeout_ns` — the `Job.waitTimed`
+    /// futex pattern. Load `seq` BEFORE draining, so an event that lands
+    /// after the drain returns immediately instead of sleeping.
+    pub fn waitSeq(self: *StreamPipe, io: std.Io, expected: u32, timeout_ns: u64) void {
+        if (self.seq.load(.acquire) != expected) return;
+        io.futexWaitTimeout(u32, &self.seq.raw, expected, .{ .duration = .{
+            .raw = .{ .nanoseconds = timeout_ns },
+            .clock = .awake,
+        } }) catch {};
+    }
+};
+
 const Allocator = std.mem.Allocator;
 
 pub const Options = struct {
@@ -301,23 +421,18 @@ pub const Server = struct {
         return @intCast(@divTrunc(ns, std.time.ns_per_s));
     }
 
-    /// SSE start callback for the emitter: writes the response head on
-    /// first use and exposes a through-flushing writer (frame flushes reach
-    /// the socket, not just the chunk buffer).
+    /// The connection thread's half of SSE: writes the response head on the
+    /// first drained sign of streaming, then relays pipe bytes through the
+    /// chunked body writer. Driven by the CONNECTION thread only — the
+    /// worker's frames arrive through the `StreamPipe`.
     const SseState = struct {
         request: *std.http.Server.Request,
         conn_out: *std.Io.Writer,
         body: std.http.BodyWriter = undefined,
         body_buf: [4096]u8 = undefined,
         started: bool = false,
-        interface: std.Io.Writer,
 
-        fn starter(self: *SseState) emitter_mod.StreamStarter {
-            return .{ .ptr = self, .startFn = start };
-        }
-
-        fn start(ptr: *anyopaque) anyerror!*std.Io.Writer {
-            const self: *SseState = @ptrCast(@alignCast(ptr));
+        fn begin(self: *SseState) !void {
             self.body = try self.request.respondStreaming(&self.body_buf, .{
                 .respond_options = .{
                     .extra_headers = &(cors_headers ++ [_]std.http.Header{
@@ -327,30 +442,6 @@ pub const Server = struct {
                 },
             });
             self.started = true;
-            self.interface = .{
-                .vtable = &.{ .drain = drain, .flush = flushThrough },
-                .buffer = &.{},
-            };
-            return &self.interface;
-        }
-
-        fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-            const self: *SseState = @alignCast(@fieldParentPtr("interface", w));
-            var consumed: usize = 0;
-            for (data[0 .. data.len - 1]) |slice| {
-                try self.body.writer.writeAll(slice);
-                consumed += slice.len;
-            }
-            const last = data[data.len - 1];
-            for (0..splat) |_| try self.body.writer.writeAll(last);
-            consumed += last.len * splat;
-            return consumed;
-        }
-
-        fn flushThrough(w: *std.Io.Writer) std.Io.Writer.Error!void {
-            const self: *SseState = @alignCast(@fieldParentPtr("interface", w));
-            try self.body.writer.flush();
-            try self.conn_out.flush();
         }
     };
 
@@ -388,16 +479,17 @@ pub const Server = struct {
         var sse = SseState{
             .request = request,
             .conn_out = request.server.out,
-            .interface = undefined,
         };
+        var pipe = StreamPipe{ .allocator = self.allocator, .io = self.io };
+        defer pipe.deinit();
         var em = emitter_mod.Emitter.init(arena, &parsed, .{
             .dialect = route.wire(),
             .model_id = self.backend.info.model_id,
             .created = self.nowSeconds(),
             .think_markers = self.backend.info.think_markers,
-            .starter = sse.starter(),
+            .starter = pipe.starter(),
         });
-        var job = scheduler_mod.Job{ .req = parsed.gen, .sink = em.sink() };
+        var job = scheduler_mod.Job{ .req = parsed.gen, .sink = em.sink(), .notify = &pipe.seq };
         em.job = &job;
 
         self.sched.submit(&job) catch |err| switch (err) {
@@ -410,20 +502,57 @@ pub const Server = struct {
             error.ShuttingDown => return self.respondRouteError(request, route, openai.mapError(error.ShuttingDown)),
         };
 
-        // Wait for the worker, watching the socket for client hang-up.
-        while (!job.waitTimed(self.io, std.time.ns_per_s)) {
+        // Relay pipe bytes to the socket and watch for client hang-up until
+        // the worker finishes. A socket failure cancels the job and fails
+        // the pipe (aborting that stream's generation at its next write)
+        // but keeps looping: the job's memory lives on this frame, so the
+        // thread may not leave before the worker is done with it.
+        var sock_ok = true;
+        while (true) {
+            const seen = pipe.seq.load(.acquire);
+            if (sock_ok) self.drainToSocket(&pipe, &sse) catch {
+                sock_ok = false;
+                pipe.markFailed();
+                job.cancel();
+            };
+            if (job.finished()) break;
             if (clientGone(stream.socket.handle) or self.shutdown.load(.acquire)) job.cancel();
+            pipe.waitSeq(self.io, seen, std.time.ns_per_s);
         }
 
         // A failure here means the SSE tail could not be written (client
-        // vanished mid-epilogue): drop the connection.
+        // vanished mid-epilogue): drop the connection. The emitter's tail
+        // frames land in the pipe (and fail fast when the pipe is marked),
+        // so the final drain below pushes them out before the terminator.
         const outcome = em.finish(job.err) catch return error.WriteFailed;
         switch (outcome) {
             .plain_error => |info| try self.respondRouteError(request, route, info),
             .body => |bytes| try self.respondJson(request, .ok, bytes),
-            .streamed => if (sse.started) {
-                sse.body.end() catch return error.WriteFailed;
+            .streamed => {
+                if (!sock_ok) return error.WriteFailed;
+                self.drainToSocket(&pipe, &sse) catch return error.WriteFailed;
+                if (sse.started) sse.body.end() catch return error.WriteFailed;
             },
+        }
+    }
+
+    /// Push everything pending in the pipe to the socket: the SSE head on
+    /// the first sign of streaming, then body bytes, flushed through to the
+    /// wire once per call. Connection thread only.
+    fn drainToSocket(self: *Server, pipe: *StreamPipe, sse: *SseState) !void {
+        _ = self;
+        var buf: [4096]u8 = undefined;
+        var wrote = false;
+        while (true) {
+            const taken = pipe.take(&buf);
+            if (taken.started and !sse.started) try sse.begin();
+            if (taken.n == 0) break;
+            try sse.body.writer.writeAll(buf[0..taken.n]);
+            wrote = true;
+        }
+        if (wrote) {
+            try sse.body.writer.flush();
+            try sse.conn_out.flush();
         }
     }
 };
@@ -439,4 +568,45 @@ fn clientGone(fd: posix.socket_t) bool {
         .AGAIN, .INTR => false,
         else => true,
     };
+}
+
+test "stream pipe: frames in order, head-before-body flag, failure propagation" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var pipe = StreamPipe{ .allocator = std.testing.allocator, .io = io };
+    defer pipe.deinit();
+
+    // Nothing pending: empty take, not started.
+    var buf: [7]u8 = undefined;
+    var taken = pipe.take(&buf);
+    try std.testing.expectEqual(@as(usize, 0), taken.n);
+    try std.testing.expect(!taken.started);
+
+    // Producer side: stream start + two frames through the emitter-facing
+    // writer.
+    const w = try StreamPipe.start(&pipe);
+    try w.writeAll("data: a\n\n");
+    try w.writeAll("data: b\n\n");
+
+    // Consumer sees started with the bytes, in order, across takes smaller
+    // than the pending span.
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(std.testing.allocator);
+    while (true) {
+        taken = pipe.take(&buf);
+        try std.testing.expect(taken.started);
+        if (taken.n == 0) break;
+        try got.appendSlice(std.testing.allocator, buf[0..taken.n]);
+    }
+    try std.testing.expectEqualStrings("data: a\n\ndata: b\n\n", got.items);
+
+    // Every event bumped seq, so a stale expected value returns instantly.
+    try std.testing.expect(pipe.seq.load(.acquire) != 0);
+    pipe.waitSeq(io, 0, std.time.ns_per_s);
+
+    // Dead consumer: producer writes fail from here on.
+    pipe.markFailed();
+    try std.testing.expectError(error.WriteFailed, w.writeAll("data: c\n\n"));
 }
