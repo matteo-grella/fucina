@@ -1291,3 +1291,194 @@ test "conversation serves a preloaded KV prefix and reuses past it" {
     _ = try convo2.sendTokensReuse(ids3.items, &sink3.writer);
     try std.testing.expectEqual(shadow_len, convo2.reused_prefix);
 }
+
+// Run the same 2-request stateless-reuse conversation set twice — N
+// sequential `sendTokensReuse` calls vs lockstep `sendBatchTokensReuse` —
+// and assert per-stream histories, reply bytes, counts, and reuse
+// accounting are IDENTICAL (n = 3 stays below the m-dependent kernel
+// thresholds, so batching is bitwise).
+test "2-request, 3-stream: sendBatchTokensReuse == sequential sendTokensReuse" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try scaffolding.buildTinyModel(&ctx, 0xC4A7);
+    defer model.deinit();
+    var tok = try Tokenizer.initFromParts(allocator, &tiny_vocab, &.{}, .{});
+    defer tok.deinit();
+    const tmpl = Template{ .format = .chatml };
+
+    const n = 3;
+    const prompts = [n][]const u8{ "ab a", "ba b", "us it" };
+    const followups = [n][]const u8{ " it us", " a ab", " b ba" };
+
+    const StreamResult = struct {
+        history: []usize,
+        text: []u8,
+        produced: [2]usize,
+        reused: usize,
+    };
+    var results: [2][n]StreamResult = undefined;
+
+    for (0..2) |which| {
+        var convos: [n]Conversation = undefined;
+        var inited: usize = 0;
+        defer for (0..inited) |i| convos[i].deinit();
+        for (0..n) |i| {
+            convos[i] = try Conversation.init(&ctx, &model, &tok, tmpl, .{
+                .capacity = 256,
+                .max_response_tokens = 8,
+            });
+            inited += 1;
+        }
+
+        var aws: [n]std.Io.Writer.Allocating = undefined;
+        var aws_inited: usize = 0;
+        defer for (0..aws_inited) |i| aws[i].deinit();
+        for (0..n) |i| {
+            aws[i] = std.Io.Writer.Allocating.init(allocator);
+            aws_inited += 1;
+        }
+
+        var produced: [2][n]usize = undefined;
+        var reused: [n]usize = undefined;
+        for (0..2) |turn| {
+            // The first request encodes the prompt; the second replays the
+            // stream's committed history — the stateless client resends
+            // everything — plus a fresh suffix: the reuse shape.
+            var ids_store: [n][]u32 = undefined;
+            var ids_inited: usize = 0;
+            defer for (0..ids_inited) |i| allocator.free(ids_store[i]);
+            for (0..n) |i| {
+                if (turn == 0) {
+                    ids_store[i] = try tok.encodeRaw(allocator, prompts[i]);
+                } else {
+                    const extra = try tok.encodeRaw(allocator, followups[i]);
+                    defer allocator.free(extra);
+                    const hist = convos[i].history.items;
+                    const ids = try allocator.alloc(u32, hist.len + extra.len);
+                    for (ids[0..hist.len], hist) |*d, s| d.* = @intCast(s);
+                    @memcpy(ids[hist.len..], extra);
+                    ids_store[i] = ids;
+                }
+                ids_inited += 1;
+            }
+
+            if (which == 0) {
+                for (0..n) |i| produced[turn][i] = try convos[i].sendTokensReuse(ids_store[i], &aws[i].writer);
+            } else {
+                var convo_ptrs: [n]*Conversation = undefined;
+                for (&convo_ptrs, &convos) |*ptr, *convo| ptr.* = convo;
+                var writer_ptrs: [n]*std.Io.Writer = undefined;
+                for (&writer_ptrs, &aws) |*ptr, *aw| ptr.* = &aw.writer;
+                var ids_list: [n][]const u32 = undefined;
+                for (&ids_list, ids_store[0..n]) |*dst, src| dst.* = src;
+                var errs: [n]?anyerror = undefined;
+                try Conversation.sendBatchTokensReuse(&convo_ptrs, &ids_list, &writer_ptrs, &produced[turn], &errs);
+                for (errs) |e| try std.testing.expectEqual(@as(?anyerror, null), e);
+            }
+            if (turn == 1) {
+                for (0..n) |i| {
+                    reused[i] = convos[i].reused_prefix;
+                    // The replayed history actually reused its cached rows.
+                    try std.testing.expect(reused[i] > 0);
+                }
+            }
+        }
+
+        for (0..n) |i| {
+            // Post-turn, every committed token is forwarded (the plain-send
+            // invariant).
+            try std.testing.expectEqual(convos[i].history.items.len, convos[i].cache.len);
+            results[which][i] = .{
+                .history = try allocator.dupe(usize, convos[i].history.items),
+                .text = try allocator.dupe(u8, aws[i].written()),
+                .produced = .{ produced[0][i], produced[1][i] },
+                .reused = reused[i],
+            };
+        }
+    }
+    defer for (&results) |*mode| for (mode) |r| {
+        allocator.free(r.history);
+        allocator.free(r.text);
+    };
+
+    for (0..n) |i| {
+        try std.testing.expectEqualSlices(usize, results[0][i].history, results[1][i].history);
+        try std.testing.expectEqualStrings(results[0][i].text, results[1][i].text);
+        for (results[0][i].produced, results[1][i].produced) |p0, p1| try std.testing.expectEqual(p0, p1);
+        try std.testing.expectEqual(results[0][i].reused, results[1][i].reused);
+    }
+}
+
+test "sendBatchTokensReuse isolates a failing stream and leaves it resendable" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try scaffolding.buildTinyModel(&ctx, 0xC4A7);
+    defer model.deinit();
+    var tok = try Tokenizer.initFromParts(allocator, &tiny_vocab, &.{}, .{});
+    defer tok.deinit();
+    const tmpl = Template{ .format = .chatml };
+
+    const n = 3;
+    var convos: [n]Conversation = undefined;
+    var inited: usize = 0;
+    defer for (0..inited) |i| convos[i].deinit();
+    for (0..n) |i| {
+        convos[i] = try Conversation.init(&ctx, &model, &tok, tmpl, .{ .capacity = 256, .max_response_tokens = 8 });
+        inited += 1;
+    }
+
+    const prompts = [n][]const u8{ "ab a", "ba b", "us it" };
+    var ids_store: [n][]u32 = undefined;
+    var ids_inited: usize = 0;
+    defer for (0..ids_inited) |i| allocator.free(ids_store[i]);
+    for (0..n) |i| {
+        ids_store[i] = try tok.encodeRaw(allocator, prompts[i]);
+        ids_inited += 1;
+    }
+
+    var aw0 = std.Io.Writer.Allocating.init(allocator);
+    defer aw0.deinit();
+    var aw2 = std.Io.Writer.Allocating.init(allocator);
+    defer aw2.deinit();
+    // Stream 1's sink holds ZERO bytes: its "ba b" reply streams text (the
+    // retry below proves it does), so the first pushed byte MUST fail.
+    var small: [1]u8 = undefined;
+    var fw = std.Io.Writer.fixed(small[0..0]);
+
+    var convo_ptrs: [n]*Conversation = undefined;
+    for (&convo_ptrs, &convos) |*ptr, *convo| ptr.* = convo;
+    const writer_ptrs: [n]*std.Io.Writer = .{ &aw0.writer, &fw, &aw2.writer };
+    var ids_list: [n][]const u32 = undefined;
+    for (&ids_list, ids_store[0..n]) |*dst, src| dst.* = src;
+    var produced: [n]usize = undefined;
+    var errs: [n]?anyerror = undefined;
+    try Conversation.sendBatchTokensReuse(&convo_ptrs, &ids_list, &writer_ptrs, &produced, &errs);
+
+    // The failing stream carries its error; its siblings completed.
+    try std.testing.expectEqual(@as(?anyerror, null), errs[0]);
+    try std.testing.expectEqual(@as(?anyerror, error.WriteFailed), errs[1]);
+    try std.testing.expectEqual(@as(?anyerror, null), errs[2]);
+    try std.testing.expect(produced[2] > 0);
+    try std.testing.expect(aw2.written().len > 0);
+
+    // Every stream — the failed one included — is internally consistent...
+    for (0..n) |i| try std.testing.expectEqual(convos[i].history.items.len, convos[i].cache.len);
+    // ...and the failed stream accepts a follow-up request.
+    var aw_retry = std.Io.Writer.Allocating.init(allocator);
+    defer aw_retry.deinit();
+    const again = try convos[1].sendTokensReuse(ids_store[1], &aw_retry.writer);
+    try std.testing.expect(again > 0);
+    try std.testing.expect(aw_retry.written().len > 0);
+}

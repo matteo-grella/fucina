@@ -17,8 +17,8 @@ zig build lmserve -Doptimize=ReleaseFast -- --nanochat runs/sft --port 8080
 
 Endpoints: `POST /v1/chat/completions`, `POST /v1/responses`,
 `POST /v1/messages` (all also unprefixed), `GET /v1/models`, `GET /health`.
-Flags: `--host --port --ctx --api-key --queue --conns --experts=borrow
---nanochat` (see `--help`). Point any OpenAI client at
+Flags: `--host --port --ctx --api-key --queue --conns --batch
+--experts=borrow --nanochat` (see `--help`). Point any OpenAI client at
 `http://host:port/v1` — or any Anthropic client (Claude Code:
 `ANTHROPIC_BASE_URL=http://host:port`) at the messages endpoint; `--api-key`
 is honored as `Authorization: Bearer` or `x-api-key`. The loaded model's id
@@ -130,9 +130,27 @@ conn threads (≤ --conns, socket deadlines)          ONE inference worker
 - Streaming responses start lazily on the first delta, so a request that
   fails before producing anything (invalid grammar, context overflow) still
   gets a plain JSON error with a proper status code.
-- Batched serving is future work: `Conversation.sendBatch` is lockstep
-  static batching (qwen3 only, no mid-flight joins), which would slot in as
-  an admission window in the scheduler.
+- `--batch N` (default 1) lets the one worker decode up to N queued
+  requests TOGETHER in lockstep (`Conversation.sendBatchTokensReuse`: one
+  m=N weight pass per step instead of N GEMV passes; qwen3/qwen3moe/gemma4
+  — the families with a batch forward; other backends warn and serve
+  sequentially). The worker takes only what is ALREADY queued — an idle
+  server keeps single-request latency, batching engages exactly under
+  concurrent load (measured on Qwen3-0.6B q8_0, 4 concurrent 128-token
+  requests: 132 → 175 aggregate tok/s, +33%). Per-stream failures are
+  isolated: a dropped client, a per-request setup error, or a masked-out
+  grammar finishes THAT stream (its slot stays consistent and resendable)
+  while the rest keep decoding; constraints ride along as one llguidance
+  clone per stream, and slot reuse / `cached_tokens` work per stream
+  (`--kv-slots` is raised to at least N — one resident cache per lockstep
+  stream — and the RAM guard prices the raised total). No mid-flight
+  joins: requests arriving during a batch wait for the next one. Streams
+  in a batch of 4+ can differ from a solo run by float-reassociation
+  drift (~1e-6 rel, the speculative-verify caveat); a batch is also only
+  as fast as its slowest sink (a stalled client's socket back-pressures
+  the lockstep — same property as a solo stream, multiplied). Excludes
+  `--fleet` (per-request retrieval + sticky adoption are single-stream
+  logic).
 
 ## What maps, what is rejected, what is ignored
 

@@ -40,6 +40,14 @@ const usage_text =
     \\  --api-key K         require Authorization: Bearer K
     \\  --queue N           max queued requests before 429 (default 16)
     \\  --conns N           max concurrent connections (default 32)
+    \\  --batch N           lockstep-decode up to N queued requests together
+    \\                      (default 1 = strictly sequential; qwen3/qwen3moe/
+    \\                      gemma4). Batching takes only what is already
+    \\                      queued — an idle server keeps single-request
+    \\                      latency — and raises --kv-slots to at least N.
+    \\                      Streams in a batch of 4+ can differ from a solo
+    \\                      run by float-reassociation drift (~1e-6), the
+    \\                      speculative-verify caveat; excludes --fleet
     \\  --experts=borrow    zero-copy MoE expert load (gemma4/diffusion-gemma)
     \\  --kv-slots N        resident KV-reuse slots (default 1); each holds a
     \\                      full --ctx cache, so N-1 extra slots cost real
@@ -95,6 +103,7 @@ const Args = struct {
     api_key: ?[]const u8 = null,
     queue: usize = 16,
     conns: usize = 32,
+    batch: usize = 1,
     experts_borrow: bool = false,
     kv_slots: usize = 1,
     kv_slots_force: bool = false,
@@ -159,6 +168,9 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--conns") and i + 1 < args_slice.len) {
             i += 1;
             args.conns = try std.fmt.parseInt(usize, args_slice[i], 10);
+        } else if (std.mem.eql(u8, arg, "--batch") and i + 1 < args_slice.len) {
+            i += 1;
+            args.batch = @max(try std.fmt.parseInt(usize, args_slice[i], 10), 1);
         } else if (std.mem.eql(u8, arg, "--nanochat") and i + 1 < args_slice.len) {
             i += 1;
             args.nanochat_dir = args_slice[i];
@@ -211,6 +223,10 @@ pub fn main(init: std.process.Init) !void {
         }
         if (args.kv_cache_dir != null) {
             try stderr.writeAll("--fleet excludes --kv-cache-dir: KV sidecars do not record cartridge selections, so a restore could resurrect rows behind the wrong prefix\n");
+            return error.InvalidArguments;
+        }
+        if (args.batch > 1) {
+            try stderr.writeAll("--fleet excludes --batch: per-request retrieval and sticky slot adoption are single-stream logic\n");
             return error.InvalidArguments;
         }
     }
@@ -526,7 +542,7 @@ fn serveQwen3(
         try stderr.flush();
     }
 
-    const kv_slots = try backend_mod.kvRamGuardSlots(llm.qwen3.model.Model, ctx, &model, args.ctx_len, args.kv_slots, args.kv_slots_force, stderr);
+    const kv_slots = try backend_mod.kvRamGuardSlots(llm.qwen3.model.Model, ctx, &model, args.ctx_len, try slotsForBatch(stderr, args), args.kv_slots_force, stderr);
 
     var adapter = backend_mod.GgufChatBackend(llm.qwen3.model.Model, llm.tokenizer).init(
         allocator,
@@ -543,6 +559,7 @@ fn serveQwen3(
             // Qwen3's recommended no-think chat settings (the server default;
             // per-request reasoning switches nothing here — clients override).
             .default_sampling = .{ .temperature = 0.7, .top_k = 20, .top_p = 0.8 },
+            .constraint_cache_len = @max(8, args.batch),
             .kv_slots = kv_slots,
             .kv_disk = kvDiskOptions(io, args),
             .cartridge = if (cart) |*c| c else null,
@@ -621,7 +638,7 @@ fn serveGemma4(
     extra_stops_buf[extra_n] = 1;
     extra_n += 1;
 
-    const kv_slots = try backend_mod.kvRamGuardSlots(llm.gemma.gemma4.Model, ctx, &model, args.ctx_len, args.kv_slots, args.kv_slots_force, stderr);
+    const kv_slots = try backend_mod.kvRamGuardSlots(llm.gemma.gemma4.Model, ctx, &model, args.ctx_len, try slotsForBatch(stderr, args), args.kv_slots_force, stderr);
 
     var adapter = backend_mod.GgufChatBackend(llm.gemma.gemma4.Model, llm.spm_tokenizer).init(
         allocator,
@@ -634,6 +651,7 @@ fn serveGemma4(
             .context_len = args.ctx_len,
             .extra_stop_ids = extra_stops_buf[0..extra_n],
             .default_sampling = default_sampling,
+            .constraint_cache_len = @max(8, args.batch),
             .kv_slots = kv_slots,
             .kv_disk = kvDiskOptions(io, args),
             .cartridge = if (cart) |*c| c else null,
@@ -704,8 +722,22 @@ fn samplingFromGguf(file: *const fucina.gguf.File) llm.sampler.Config {
     };
 }
 
+/// `--batch` needs one resident KV slot per lockstep stream; raise the
+/// requested pool to the batch width (the RAM guard then prices the total).
+fn slotsForBatch(stderr: *std.Io.Writer, args: Args) !usize {
+    if (args.batch > args.kv_slots) {
+        try stderr.print("--batch {d}: raising --kv-slots {d} -> {d} (one resident slot per lockstep stream)\n", .{ args.batch, args.kv_slots, args.batch });
+        try stderr.flush();
+        return args.batch;
+    }
+    return args.kv_slots;
+}
+
 fn serveWith(io: std.Io, allocator: std.mem.Allocator, backend: types.Backend, args: Args) !void {
-    var sched = scheduler_mod.Scheduler.init(allocator, io, backend, args.queue);
+    if (args.batch > 1 and !backend.supportsBatch()) {
+        std.log.warn("this backend has no batched decode; serving --batch 1 (batching needs qwen3/qwen3moe/gemma4)", .{});
+    }
+    var sched = scheduler_mod.Scheduler.init(allocator, io, backend, args.queue, args.batch);
     try sched.start();
     defer sched.stop();
 

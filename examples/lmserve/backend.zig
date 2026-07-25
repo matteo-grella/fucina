@@ -617,6 +617,23 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
         /// the append keeps the pool within `kv_slots`.
         fn reclaimSlot(self: *Self, convo: *Conversation, selection: []const usize, opener: []const u8) void {
             const a = self.allocator;
+            // Pool cap: a BATCH of conversations can outnumber the slots its
+            // acquires removed (later acquires start cold while the pool has
+            // room), so reclaims evict the LRU — spilling it to the disk
+            // tier when configured — before appending. Single-request
+            // serving never trips this (one acquire, one reclaim).
+            while (self.slots.items.len >= self.kvSlots()) {
+                var lru_i: usize = 0;
+                for (self.slots.items, 0..) |*slot, i| {
+                    if (slot.last_used < self.slots.items[lru_i].last_used) lru_i = i;
+                }
+                var victim = self.slots.swapRemove(lru_i);
+                self.maybeSaveToDisk(&victim, &.{});
+                victim.cache.deinit();
+                victim.tokens.deinit(a);
+                a.free(victim.selection);
+                a.free(victim.opener);
+            }
             var tokens: std.ArrayList(usize) = .empty;
             var sel: []usize = &.{};
             var op: []u8 = &.{};
@@ -734,10 +751,18 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
             self.allocator.free(e.tokens);
         }
 
+        /// Batched decode needs the family's batch forward; families without
+        /// it (a null entry) are served strictly sequentially.
+        const vtable: types.Backend.VTable = .{
+            .validate = vtValidate,
+            .generate = vtGenerate,
+            .generate_batch = if (@hasDecl(ModelT, "forwardStepBatch")) vtGenerateBatch else null,
+        };
+
         pub fn backend(self: *Self) types.Backend {
             return .{
                 .ptr = self,
-                .vtable = &.{ .validate = vtValidate, .generate = vtGenerate },
+                .vtable = &vtable,
                 .info = .{
                     .model_id = self.opts.model_id,
                     .context_len = self.opts.context_len,
@@ -905,6 +930,158 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 .cached_tokens = convo.reused_prefix,
                 .finish = finish,
             };
+        }
+
+        /// `types.Backend.generate_batch`: N requests decoded in lockstep
+        /// through `Conversation.sendBatchTokensReuse`. Setup (render,
+        /// encode, constraint clone, slot acquisition) runs per request
+        /// with failures isolated to `errs[i]`; the batch then runs over
+        /// the surviving subset. Fleet mode is excluded (per-request
+        /// retrieval + sticky adoption are single-stream logic; main.zig
+        /// refuses the flag combination). The constraint cache must hold
+        /// at least as many bases as the batch width — every clone's base
+        /// has to survive until the batch ends (main.zig sizes it).
+        fn vtGenerateBatch(
+            ptr: *anyopaque,
+            reqs: []const *const types.GenerateRequest,
+            sinks: []const *std.Io.Writer,
+            results: []types.GenerateResult,
+            errs: []?anyerror,
+        ) anyerror!void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            if (self.opts.fleet != null) return error.BatchDecodeUnsupported;
+            const a = self.allocator;
+            const n = reqs.len;
+            std.debug.assert(sinks.len == n and results.len == n and errs.len == n);
+            for (errs) |*e| e.* = null;
+
+            const ids_arr = try a.alloc(?[]u32, n);
+            defer {
+                for (ids_arr) |maybe| if (maybe) |ids| a.free(ids);
+                a.free(ids_arr);
+            }
+            for (ids_arr) |*p| p.* = null;
+            const clones = try a.alloc(?llm.llguidance.Constraint, n);
+            defer {
+                for (clones) |*maybe| if (maybe.*) |*c| c.deinit();
+                a.free(clones);
+            }
+            for (clones) |*p| p.* = null;
+            const convos = try a.alloc(?Conversation, n);
+            // Epilogue on every path out: each built conversation's cache
+            // returns to the slot pool before the conversation dies.
+            defer {
+                for (convos) |*maybe| {
+                    if (maybe.*) |*convo| {
+                        self.reclaimSlot(convo, &.{}, &.{});
+                        convo.deinit();
+                    }
+                }
+                a.free(convos);
+            }
+            for (convos) |*p| p.* = null;
+
+            // Per-request setup, isolated. Clones land in `clones[i]` BEFORE
+            // their processor pointer is taken (the processor captures the
+            // constraint's address, which must stay stable for the whole
+            // batch).
+            for (reqs, 0..) |req, i| {
+                const rendered = self.render(a, req) catch |err| {
+                    errs[i] = err;
+                    continue;
+                };
+                defer a.free(rendered);
+                const ids = self.tokenizer.encodeRaw(a, rendered) catch |err| {
+                    errs[i] = err;
+                    continue;
+                };
+                ids_arr[i] = ids;
+                if (req.constraint) |spec| {
+                    const turn_stop: ?u32 = self.tokenizer.tokenId(self.template.stopMarker()) orelse self.tokenizer.eosId();
+                    const ok = blk: {
+                        const base = self.constraints.acquire(self.tokenizer, spec, .{
+                            .eos_token = turn_stop,
+                            .extra_eos = self.opts.extra_stop_ids,
+                            .n_vocab = self.model.config.vocab_size,
+                        }) catch |err| {
+                            errs[i] = err;
+                            break :blk false;
+                        };
+                        clones[i] = base.clone() catch |err| {
+                            errs[i] = err;
+                            break :blk false;
+                        };
+                        break :blk true;
+                    };
+                    if (!ok) continue;
+                }
+                const processor: ?llm.sampler.LogitProcessor = if (clones[i]) |*c| c.processor() else null;
+                const convo_opts: llm.chat.Options = .{
+                    .capacity = self.opts.context_len,
+                    .max_response_tokens = req.max_tokens,
+                    .think_off = !req.think,
+                    .sampler = req.sampling,
+                    .extra_stop_ids = self.opts.extra_stop_ids,
+                    .stop_sequences = req.stop,
+                    .logit_processor = processor,
+                };
+                convos[i] = self.acquireConversation(ids, convo_opts, &.{}, 0) catch |err| {
+                    errs[i] = err;
+                    continue;
+                };
+            }
+
+            // Compact the survivors and run the lockstep batch.
+            const convo_ptrs = try a.alloc(*Conversation, n);
+            defer a.free(convo_ptrs);
+            const ids_list = try a.alloc([]const u32, n);
+            defer a.free(ids_list);
+            const sink_ptrs = try a.alloc(*std.Io.Writer, n);
+            defer a.free(sink_ptrs);
+            const produced = try a.alloc(usize, n);
+            defer a.free(produced);
+            const sub_errs = try a.alloc(?anyerror, n);
+            defer a.free(sub_errs);
+            const origin = try a.alloc(usize, n);
+            defer a.free(origin);
+
+            var m: usize = 0;
+            for (convos, 0..) |*maybe, i| {
+                if (maybe.* == null) continue;
+                convo_ptrs[m] = &maybe.*.?;
+                ids_list[m] = ids_arr[i].?;
+                sink_ptrs[m] = sinks[i];
+                origin[m] = i;
+                m += 1;
+            }
+            if (m == 0) return;
+
+            try Conversation.sendBatchTokensReuse(
+                convo_ptrs[0..m],
+                ids_list[0..m],
+                sink_ptrs[0..m],
+                produced[0..m],
+                sub_errs[0..m],
+            );
+
+            for (origin[0..m], 0..) |i, j| {
+                if (sub_errs[j]) |err| {
+                    errs[i] = err;
+                    continue;
+                }
+                const convo = &convos[i].?;
+                const req = reqs[i];
+                const finish: types.FinishReason = if (produced[j] >= req.max_tokens or convo.cache.len >= convo.cache.capacity)
+                    .length
+                else
+                    .stop;
+                results[i] = .{
+                    .prompt_tokens = convo.history.items.len - produced[j],
+                    .completion_tokens = produced[j],
+                    .cached_tokens = convo.reused_prefix,
+                    .finish = finish,
+                };
+            }
         }
     };
 }

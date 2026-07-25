@@ -139,6 +139,20 @@ pub const Backend = struct {
         /// contract (one ExecContext). A sink write failure (client gone,
         /// job cancelled) aborts generation and propagates.
         generate: *const fn (ptr: *anyopaque, req: *const GenerateRequest, sink: *std.Io.Writer) anyerror!GenerateResult,
+        /// Run several generations in one lockstep batched decode (lmserve
+        /// `--batch`); null when the family has no batch forward. WORKER
+        /// THREAD ONLY, like `generate`. Per-request failures — a dropped
+        /// client's sink, a request-level setup error — land in `errs[i]`
+        /// (with `results[i]` undefined) while the other requests keep
+        /// decoding; a returned error is batch-fatal and applies to every
+        /// request whose `errs[i]` is still null.
+        generate_batch: ?*const fn (
+            ptr: *anyopaque,
+            reqs: []const *const GenerateRequest,
+            sinks: []const *std.Io.Writer,
+            results: []GenerateResult,
+            errs: []?anyerror,
+        ) anyerror!void = null,
     };
 
     pub fn validate(self: Backend, req: *const GenerateRequest) anyerror!void {
@@ -147,5 +161,19 @@ pub const Backend = struct {
 
     pub fn generate(self: Backend, req: *const GenerateRequest, sink: *std.Io.Writer) anyerror!GenerateResult {
         return self.vtable.generate(self.ptr, req, sink);
+    }
+
+    pub fn supportsBatch(self: Backend) bool {
+        return self.vtable.generate_batch != null;
+    }
+
+    pub fn generateBatch(
+        self: Backend,
+        reqs: []const *const GenerateRequest,
+        sinks: []const *std.Io.Writer,
+        results: []GenerateResult,
+        errs: []?anyerror,
+    ) anyerror!void {
+        return self.vtable.generate_batch.?(self.ptr, reqs, sinks, results, errs);
     }
 };

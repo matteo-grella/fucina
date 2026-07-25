@@ -794,9 +794,9 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                     }
                 }
             }
-            // Comptime-gated so model families without a batch entry (e.g.
-            // gemma4 today) still compile the Conversation type; they get a
-            // runtime error here instead.
+            // Comptime-gated so model families without a batch entry still
+            // compile the Conversation type; they get a runtime error here
+            // instead.
             if (comptime @hasDecl(Model, "forwardStepBatch")) {
                 return sendBatchImpl(convos, users, writers, produced);
             } else {
@@ -812,6 +812,9 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             last: usize = 0,
             produced: usize = 0,
             finished: bool = false,
+            /// The stream's isolated failure (`sendBatchTokensReuse` only;
+            /// `sendBatch` aborts the whole batch instead).
+            err: ?anyerror = null,
             /// Accumulated decoded reply, only when the stream's
             /// `stop_sequences` are in play.
             reply: std.ArrayList(u8) = .empty,
@@ -895,6 +898,155 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 try s.convo.stream.flush(s.writer);
                 try s.writer.flush();
                 count.* = s.produced;
+            }
+        }
+
+        /// `sendTokensReuse` over N sibling conversations in lockstep — the
+        /// server batching entry (lmserve `--batch`). Prologue per stream:
+        /// the cross-request reuse reconcile against the stream's committed
+        /// state, prefill of the un-reused suffix, and the first sample;
+        /// then the `sendBatch` lockstep decode. Unlike `sendBatch`,
+        /// per-STREAM failures are ISOLATED: a stream whose sink write
+        /// fails (client gone), whose prologue errors (`ContextFull`), or
+        /// whose sampler errors (`AllTokensMasked`) finishes with the error
+        /// recorded in `errs[i]` while the remaining streams keep decoding;
+        /// only a shared-compute failure (the batched forward itself)
+        /// aborts the whole batch. On every path out each conversation's
+        /// history is trimmed back to its cache, so every stream — errored
+        /// or not — stays internally consistent and resendable.
+        /// `produced[i]` and `errs[i]` are always written; `produced[i]`
+        /// counts tokens committed before any failure.
+        pub fn sendBatchTokensReuse(
+            convos: []const *Self,
+            ids_list: []const []const u32,
+            writers: []const *std.Io.Writer,
+            produced: []usize,
+            errs: []?anyerror,
+        ) !void {
+            if (convos.len == 0) return error.EmptyBatch;
+            if (ids_list.len != convos.len or writers.len != convos.len or
+                produced.len != convos.len or errs.len != convos.len)
+                return error.BatchLengthMismatch;
+            const first = convos[0];
+            for (convos, 0..) |convo, i| {
+                if (convo.spec != null) return error.SpeculationWithReuse;
+                if (convo.ctx != first.ctx or convo.model != first.model) return error.MixedBatchModels;
+                for (convos[0..i]) |prev| {
+                    if (prev == convo) return error.DuplicateBatchConversation;
+                    // One logit-processor instance per stream (the sendBatch
+                    // rule): shared state would interleave commits.
+                    if (convo.sampler.processor) |p| {
+                        if (prev.sampler.processor) |q| {
+                            if (p.ptr == q.ptr) return error.SharedBatchProcessor;
+                        }
+                    }
+                }
+            }
+            if (comptime @hasDecl(Model, "forwardStepBatch")) {
+                return sendBatchReuseImpl(convos, ids_list, writers, produced, errs);
+            } else {
+                return error.BatchDecodeUnsupported;
+            }
+        }
+
+        fn sendBatchReuseImpl(
+            convos: []const *Self,
+            ids_list: []const []const u32,
+            writers: []const *std.Io.Writer,
+            produced: []usize,
+            errs: []?anyerror,
+        ) !void {
+            const n = convos.len;
+            const first = convos[0];
+            const ctx = first.ctx;
+            const a = first.allocator;
+
+            const streams = try a.alloc(BatchStream, n);
+            defer {
+                for (streams) |*s| s.reply.deinit(a);
+                a.free(streams);
+            }
+            for (streams, convos, writers) |*s, convo, writer| s.* = .{ .convo = convo, .writer = writer };
+
+            // Abort consistency (the sendBatchImpl pattern, prefix-aware):
+            // history[i] describes cache row kv_prefix_rows + i, so the
+            // trim target is the cache's token-backed length. A no-op for
+            // healthy streams; for errored ones it drops any committed-but-
+            // unforwarded (or un-prefilled) tail.
+            defer for (streams) |*s| {
+                s.convo.history.shrinkRetainingCapacity(s.convo.cache.len - s.convo.kv_prefix_rows);
+            };
+
+            // Prologue per stream, isolated: reconcile, prefill the suffix,
+            // first sample — the exact `sendTokensReuse` opening.
+            for (streams, ids_list) |*s, ids| {
+                const convo = s.convo;
+                const ok = blk: {
+                    const suffix = convo.beginTurnReconciled(ids) catch |err| {
+                        s.err = err;
+                        break :blk false;
+                    };
+                    defer a.free(suffix);
+                    var logits = convo.model.forwardStep(ctx, &convo.cache, suffix, convo.cache.len) catch |err| {
+                        s.err = err;
+                        break :blk false;
+                    };
+                    defer logits.deinit();
+                    convo.stream.reset();
+                    sampleStep(s, ctx, &logits) catch |err| {
+                        s.err = err;
+                        break :blk false;
+                    };
+                    break :blk true;
+                };
+                if (!ok) s.finished = true;
+            }
+
+            const caches = try a.alloc(*KvCache, n);
+            defer a.free(caches);
+            const tokens = try a.alloc(usize, n);
+            defer a.free(tokens);
+            const active = try a.alloc(*BatchStream, n);
+            defer a.free(active);
+
+            // The sendBatchImpl lockstep loop with per-stream isolation: a
+            // stream whose sample/stream step fails leaves the lockstep;
+            // the batched forward's own failure stays batch-fatal.
+            while (true) {
+                var n_active: usize = 0;
+                for (streams) |*s| {
+                    if (s.finished) continue;
+                    active[n_active] = s;
+                    caches[n_active] = &s.convo.cache;
+                    tokens[n_active] = s.last;
+                    n_active += 1;
+                }
+                if (n_active == 0) break;
+
+                var logits = try first.model.forwardStepBatch(ctx, caches[0..n_active], tokens[0..n_active]);
+                defer logits.deinit();
+                for (active[0..n_active], 0..) |s, row_i| {
+                    var row = try logits.narrow(ctx, .seq, row_i, 1);
+                    defer row.deinit();
+                    sampleStep(s, ctx, &row) catch |err| {
+                        s.err = err;
+                        s.finished = true;
+                    };
+                }
+            }
+
+            for (streams, produced, errs) |*s, *count, *e| {
+                if (s.err == null) {
+                    if (s.convo.stream.flush(s.writer)) {
+                        s.writer.flush() catch |err| {
+                            s.err = err;
+                        };
+                    } else |err| {
+                        s.err = err;
+                    }
+                }
+                count.* = s.produced;
+                e.* = s.err;
             }
         }
 

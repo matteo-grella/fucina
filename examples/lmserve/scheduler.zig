@@ -86,27 +86,47 @@ pub const Scheduler = struct {
     cond: std.Io.Condition = .init,
     queue: std.ArrayList(*Job) = .empty,
     capacity: usize,
+    /// Lockstep width: how many queued jobs one worker pass may decode
+    /// together (1 = strictly sequential). Only honored when the backend
+    /// has a `generate_batch` entry; batching never WAITS for jobs — the
+    /// worker takes whatever is already queued, so an idle server keeps
+    /// single-request latency.
+    batch: usize,
     shutting_down: bool = false,
-    /// The job the worker is generating right now (shutdown cancels it).
-    current: ?*Job = null,
+    /// The jobs the worker is generating right now (shutdown cancels them).
+    running: std.ArrayList(*Job) = .empty,
     thread: ?std.Thread = null,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, backend: types.Backend, queue_capacity: usize) Scheduler {
-        return .{ .allocator = allocator, .io = io, .backend = backend, .capacity = @max(queue_capacity, 1) };
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, backend: types.Backend, queue_capacity: usize, batch: usize) Scheduler {
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .backend = backend,
+            .capacity = @max(queue_capacity, 1),
+            .batch = @max(batch, 1),
+        };
+    }
+
+    /// Effective lockstep width (1 when the backend cannot batch).
+    fn groupCap(self: *const Scheduler) usize {
+        return if (self.backend.vtable.generate_batch != null) self.batch else 1;
     }
 
     pub fn start(self: *Scheduler) !void {
+        // Reserve the running list up front: the worker registers a group
+        // under the queue lock, where allocation failure has no clean exit.
+        try self.running.ensureTotalCapacity(self.allocator, self.groupCap());
         self.thread = try std.Thread.spawn(.{}, workerLoop, .{self});
     }
 
-    /// Stop accepting, cancel the in-flight job, finish queued jobs with
+    /// Stop accepting, cancel the in-flight jobs, finish queued jobs with
     /// `error.ShuttingDown`, and join the worker.
     pub fn stop(self: *Scheduler) void {
         {
             lock(&self.mutex);
             defer unlock(&self.mutex);
             self.shutting_down = true;
-            if (self.current) |job| job.cancel();
+            for (self.running.items) |job| job.cancel();
             self.cond.broadcast(self.io);
         }
         if (self.thread) |t| {
@@ -114,13 +134,14 @@ pub const Scheduler = struct {
             self.thread = null;
         }
         self.queue.deinit(self.allocator);
+        self.running.deinit(self.allocator);
     }
 
     /// Number of requests waiting or running (the /health load signal).
     pub fn depth(self: *Scheduler) usize {
         lock(&self.mutex);
         defer unlock(&self.mutex);
-        return self.queue.items.len + @intFromBool(self.current != null);
+        return self.queue.items.len + self.running.items.len;
     }
 
     pub fn submit(self: *Scheduler, job: *Job) SubmitError!void {
@@ -133,37 +154,87 @@ pub const Scheduler = struct {
     }
 
     fn workerLoop(self: *Scheduler) void {
+        const cap = self.groupCap();
+        // Worker-owned scratch for one group; sized once.
+        const group = self.allocator.alloc(*Job, cap) catch return;
+        defer self.allocator.free(group);
+        const reqs = self.allocator.alloc(*const types.GenerateRequest, cap) catch return;
+        defer self.allocator.free(reqs);
+        const sinks = self.allocator.alloc(*std.Io.Writer, cap) catch return;
+        defer self.allocator.free(sinks);
+        const results = self.allocator.alloc(types.GenerateResult, cap) catch return;
+        defer self.allocator.free(results);
+        const errs = self.allocator.alloc(?anyerror, cap) catch return;
+        defer self.allocator.free(errs);
+
         while (true) {
-            lock(&self.mutex);
-            while (self.queue.items.len == 0 and !self.shutting_down)
-                self.cond.waitUncancelable(self.io, &self.mutex);
-            if (self.queue.items.len == 0) {
-                // Shutting down with a drained queue.
-                unlock(&self.mutex);
-                return;
+            var g: usize = 0;
+            var draining = false;
+            {
+                lock(&self.mutex);
+                defer unlock(&self.mutex);
+                while (self.queue.items.len == 0 and !self.shutting_down)
+                    self.cond.waitUncancelable(self.io, &self.mutex);
+                if (self.queue.items.len == 0) return; // shutting down, drained
+                draining = self.shutting_down;
+                // Take what is already queued, up to the group cap, and
+                // register it while still holding the lock — `stop` must
+                // never observe popped-but-unregistered jobs.
+                while (g < cap and self.queue.items.len > 0) : (g += 1) {
+                    group[g] = self.queue.orderedRemove(0);
+                    if (!draining) self.running.appendAssumeCapacity(group[g]);
+                }
             }
-            const job = self.queue.orderedRemove(0);
-            const draining = self.shutting_down;
-            if (!draining) self.current = job;
-            unlock(&self.mutex);
 
             if (draining) {
-                job.finish(self.io, undefined, error.ShuttingDown);
+                for (group[0..g]) |job| job.finish(self.io, undefined, error.ShuttingDown);
                 continue;
             }
-            if (job.isCancelled()) {
-                job.finish(self.io, undefined, error.Cancelled);
-            } else {
+
+            // Jobs cancelled while queued never run.
+            var live: usize = 0;
+            for (group[0..g]) |job| {
+                if (job.isCancelled()) {
+                    job.finish(self.io, undefined, error.Cancelled);
+                } else {
+                    group[live] = job;
+                    live += 1;
+                }
+            }
+
+            if (live == 1) {
+                // The strictly-sequential path — identical to pre-batch
+                // serving (and the only path when --batch is 1).
+                const job = group[0];
                 job.setRunning();
                 if (self.backend.generate(&job.req, job.sink)) |res| {
                     job.finish(self.io, res, null);
                 } else |err| {
                     job.finish(self.io, undefined, if (job.isCancelled()) error.Cancelled else err);
                 }
+            } else if (live > 1) {
+                for (group[0..live], 0..) |job, k| {
+                    job.setRunning();
+                    reqs[k] = &job.req;
+                    sinks[k] = job.sink;
+                    errs[k] = null;
+                }
+                var batch_err: ?anyerror = null;
+                self.backend.generateBatch(reqs[0..live], sinks[0..live], results[0..live], errs[0..live]) catch |err| {
+                    batch_err = err;
+                };
+                for (group[0..live], 0..) |job, k| {
+                    const err: ?anyerror = if (errs[k]) |e| e else batch_err;
+                    if (err) |e| {
+                        job.finish(self.io, undefined, if (job.isCancelled()) error.Cancelled else e);
+                    } else {
+                        job.finish(self.io, results[k], null);
+                    }
+                }
             }
 
             lock(&self.mutex);
-            self.current = null;
+            self.running.clearRetainingCapacity();
             unlock(&self.mutex);
         }
     }
@@ -189,7 +260,7 @@ test "scheduler: submit/run/finish, queue bound, shutdown drain" {
         .info = .{ .model_id = "fake", .context_len = 128 },
     };
 
-    var sched = Scheduler.init(std.testing.allocator, io, backend, 2);
+    var sched = Scheduler.init(std.testing.allocator, io, backend, 2, 1);
     try sched.start();
 
     var out_buf: [64]u8 = undefined;
@@ -207,4 +278,83 @@ test "scheduler: submit/run/finish, queue bound, shutdown drain" {
     sched.stop();
     var late = Job{ .req = job.req, .sink = &out };
     try std.testing.expectError(error.ShuttingDown, sched.submit(&late));
+}
+
+test "scheduler: batch groups queued jobs, isolates per-job errors, honors --batch 1" {
+    const Recorder = struct {
+        sizes: [8]usize = undefined,
+        n: usize = 0,
+
+        fn validate(_: *anyopaque, _: *const types.GenerateRequest) anyerror!void {}
+        fn generate(ptr: *anyopaque, req: *const types.GenerateRequest, sink: *std.Io.Writer) anyerror!types.GenerateResult {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.sizes[self.n] = 1;
+            self.n += 1;
+            try sink.writeAll("solo");
+            try sink.flush();
+            return .{ .prompt_tokens = req.max_tokens, .completion_tokens = 1, .finish = .stop };
+        }
+        fn generateBatch(
+            ptr: *anyopaque,
+            reqs: []const *const types.GenerateRequest,
+            sinks: []const *std.Io.Writer,
+            results: []types.GenerateResult,
+            errs: []?anyerror,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.sizes[self.n] = reqs.len;
+            self.n += 1;
+            for (reqs, sinks, results, errs) |req, sink, *res, *e| {
+                // max_tokens == 99 marks the request that must fail alone.
+                if (req.max_tokens == 99) {
+                    e.* = error.PromptTooLong;
+                    continue;
+                }
+                try sink.writeAll("batch");
+                try sink.flush();
+                res.* = .{ .prompt_tokens = req.max_tokens, .completion_tokens = 2, .finish = .stop };
+            }
+        }
+    };
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var rec = Recorder{};
+    const backend = types.Backend{
+        .ptr = @ptrCast(&rec),
+        .vtable = &.{ .validate = Recorder.validate, .generate = Recorder.generate, .generate_batch = Recorder.generateBatch },
+        .info = .{ .model_id = "fake", .context_len = 128 },
+    };
+
+    // Queue three jobs BEFORE the worker starts: with --batch 2 they must
+    // run as a pair (one failing in isolation) plus a solo.
+    var sched = Scheduler.init(std.testing.allocator, io, backend, 8, 2);
+    var bufs: [3][64]u8 = undefined;
+    var outs: [3]std.Io.Writer = .{
+        std.Io.Writer.fixed(&bufs[0]),
+        std.Io.Writer.fixed(&bufs[1]),
+        std.Io.Writer.fixed(&bufs[2]),
+    };
+    var jobs: [3]Job = .{
+        .{ .req = .{ .messages = &.{}, .sampling = .{}, .max_tokens = 5 }, .sink = &outs[0] },
+        .{ .req = .{ .messages = &.{}, .sampling = .{}, .max_tokens = 99 }, .sink = &outs[1] },
+        .{ .req = .{ .messages = &.{}, .sampling = .{}, .max_tokens = 6 }, .sink = &outs[2] },
+    };
+    for (&jobs) |*job| try sched.submit(job);
+    try sched.start();
+    for (&jobs) |*job| {
+        while (!job.waitTimed(io, std.time.ns_per_ms)) {}
+    }
+    sched.stop();
+
+    try std.testing.expectEqual(@as(usize, 2), rec.n);
+    try std.testing.expectEqual(@as(usize, 2), rec.sizes[0]);
+    try std.testing.expectEqual(@as(usize, 1), rec.sizes[1]);
+    try std.testing.expectEqual(@as(?anyerror, null), jobs[0].err);
+    try std.testing.expectEqualStrings("batch", outs[0].buffered());
+    try std.testing.expectEqual(@as(usize, 2), jobs[0].res.completion_tokens);
+    try std.testing.expectEqual(@as(?anyerror, error.PromptTooLong), jobs[1].err);
+    try std.testing.expectEqual(@as(?anyerror, null), jobs[2].err);
+    try std.testing.expectEqualStrings("solo", outs[2].buffered());
 }
