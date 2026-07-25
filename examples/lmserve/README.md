@@ -143,14 +143,15 @@ comfortably on qwen3 models.
 
 ## Tool calling
 
-On qwen3-family models (tool-trained, Hermes-style `<tool_call>` template)
-function calling works across all three dialects: declarations render into
-the prompt, the reply stream is scanned for calls, and completed calls
-come back in each dialect's native shape — chat `tool_calls`
-(`finish_reason: "tool_calls"`), Responses `function_call` items,
-Anthropic `tool_use` blocks (`stop_reason: "tool_use"`). The client
-executes the tool and sends the result back (`role: "tool"` /
-`function_call_output` / `tool_result`); the server never runs anything.
+On qwen3-family models (qwen3/qwen3moe/qwen35 — tool-trained, Hermes-style
+`<tool_call>` template) function calling works across all three dialects:
+declarations render into the prompt, the reply stream is scanned for
+calls, and completed calls come back in each dialect's native shape —
+chat `tool_calls` (`finish_reason: "tool_calls"`), Responses
+`function_call` items, Anthropic `tool_use` blocks
+(`stop_reason: "tool_use"`). The client executes the tool and sends the
+result back (`role: "tool"` / `function_call_output` / `tool_result`);
+the server never runs anything.
 
 ```sh
 curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{
@@ -166,9 +167,22 @@ again for the final answer. With Claude Code pointed at the server, its
 own tools (Bash, Read, …) light up the same way — the model requests, the
 CLI executes under its normal permission gating.
 
-`tool_choice` forms that would *guarantee* a call (`"required"`, a named
-function, Anthropic `any`/`tool`) are rejected — generation is not
-constrained to emit one.
+`tool_choice` forms that *guarantee* a call — `"required"`, a named
+function, Anthropic `any`/`tool` — are honored by constrained decoding on
+`-Dllguidance=true` builds: the reply is grammar-forced into exactly one
+hermes call, with arguments enforced against the schema when it is the
+wire contract (`strict: true` on the OpenAI dialects; `input_schema`
+always on the Anthropic one). Without llguidance they are rejected with a
+501.
+
+```sh
+curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "messages": [{"role":"user","content":"What is the weather in Tokyo?"}],
+  "tool_choice": "required",
+  "tools": [{"type":"function","function":{"name":"get_weather","strict":true,
+    "parameters":{"type":"object","properties":{"city":{"type":"string"}},
+    "required":["city"],"additionalProperties":false}}}]}'
+```
 
 ## Flags
 

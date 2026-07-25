@@ -147,21 +147,35 @@ accounting. Extension fields (llama.cpp precedent): `top_k`, `min_p`,
 `repeat_penalty`, `regex`, `lark`.
 
 **Function calling** works on backends whose family has a tool convention
-(`types.ToolStyle`; qwen3/qwen3moe speak the hermes shape): declarations
-and tool history fold into the prompt text (`examples/lmserve/toolcall.zig`
-reproduces Qwen3's own template rendering — `<tools>` system section,
-`<tool_call>` assistant sections, `<tool_response>` user sections), the
-emitter scans replies for `<tool_call>` regions, and completed calls come
-back as chat `tool_calls` / Responses `function_call` items / Anthropic
-`tool_use` blocks with `finish_reason`/`stop_reason` set accordingly.
-Execution stays with the client — the server only translates the model's
-call requests. `tool_choice` forms the server cannot guarantee
-("required", a named function, Anthropic `any`/`tool`) are rejected:
-generation is not constrained to emit a call. Malformed call JSON in a
-reply passes through as plain content, markers intact — never dropped.
+(`types.ToolStyle`; qwen3/qwen3moe/qwen35 speak the hermes shape):
+declarations and tool history fold into the prompt text
+(`examples/lmserve/toolcall.zig` reproduces Qwen3's own template
+rendering — `<tools>` system section, `<tool_call>` assistant sections,
+`<tool_response>` user sections), the emitter scans replies for
+`<tool_call>` regions, and completed calls come back as chat `tool_calls`
+/ Responses `function_call` items / Anthropic `tool_use` blocks with
+`finish_reason`/`stop_reason` set accordingly. Execution stays with the
+client — the server only translates the model's call requests. Malformed
+call JSON in a reply passes through as plain content, markers intact —
+never dropped.
+
+**Forced tool calls** ("required" / a named function / Anthropic
+`any`/`tool`) compile to a lark grammar over the hermes call shape
+(`toolcall.forcedCallGrammar`: one alternative per candidate tool, the
+arguments as an llguidance `%json` subgrammar) — the guarantee is
+constrained decoding, so it needs a `-Dllguidance=true` build (501
+otherwise) and excludes `response_format`/`regex`/`lark` on the same
+request; grammar completion forces the turn stop, so the reply is exactly
+one call. Argument schemas are enforced when they are the wire contract:
+always for Anthropic `input_schema`, and under `strict: true` on the
+OpenAI dialects — a non-strict declaration gets a permissive object
+grammar (its schema may use keywords llguidance rejects, and non-strict
+semantics promise no enforcement). Under `tool_choice: auto`, `strict` is
+accepted but not grammar-enforced: constraining the whole reply would
+also forbid plain-text answers, which auto explicitly allows.
 
 Rejected with a 400/501 naming the offending `param` (never silently
-dropped): unguaranteeable `tool_choice` forms (above), tool fields on
+dropped): forced `tool_choice` without llguidance (above), tool fields on
 backends without a tool convention, the legacy `functions` API, `n > 1`,
 `logprobs`, `logit_bias`, image/audio/file content,
 `previous_response_id`/`conversation`/`item_reference` (stateless:
@@ -186,13 +200,14 @@ required `max_tokens`, `stream`, `thinking` (`enabled`/`adaptive` switch
 the reasoning channel on where one exists; a no-op otherwise, so
 thinking-by-default clients stay usable), `output_config.format`
 (`json_schema` → the same llguidance constraint), and — on hermes backends
-— `tools` with `tool_use`/`tool_result` history (the function-calling
-section above; declarations without a tool convention are accepted and
-dropped, which keeps tool-sending clients usable as plain chat). Forced
-tool calls (`tool_choice` `any`/`tool`), server-side tool types,
-images/documents, and `stop_sequences` (the engine stops on them but does
-not report which sequence fired, so `stop_reason`/`stop_sequence` could
-not be attributed) are rejected explicitly. Errors use the Anthropic
+— `tools` with `tool_use`/`tool_result` history and `tool_choice`
+`any`/`tool` via the forced-call grammar (the function-calling section
+above; declarations without a tool convention are accepted and dropped,
+which keeps tool-sending clients usable as plain chat). Server-side tool
+types, images/documents, and `stop_sequences` (the engine stops on them
+but does not report which sequence fired, so
+`stop_reason`/`stop_sequence` could not be attributed) are rejected
+explicitly. Errors use the Anthropic
 envelope `{"type":"error","error":{type,message}}` with the type derived
 from the status; mid-stream failures arrive as an `error` event.
 

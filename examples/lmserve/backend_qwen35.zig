@@ -75,6 +75,9 @@ pub const Qwen35Backend = struct {
                     .stop_sequences = false,
                 },
                 .think_markers = .{ .open = "<think>", .close = "</think>" },
+                // Qwen3.5's template keeps Qwen3's hermes tool convention
+                // (`<tool_call>` sections; visible in the GGUF template).
+                .tool_style = .hermes,
                 .default_sampling = self.default_sampling,
             },
         };

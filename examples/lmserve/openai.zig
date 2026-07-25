@@ -8,8 +8,11 @@
 //! (`metadata`, `user`, `store:false`, …) are ignored like llama.cpp does.
 //! Function calling works on hermes-style backends (`types.ToolStyle`):
 //! declarations and tool history fold into the prompt via `toolcall.zig`,
-//! and the emitter scans the reply for calls; `tool_choice` forms the
-//! server cannot guarantee ("required", a named function) are rejected.
+//! and the emitter scans the reply for calls. A "required" or named
+//! `tool_choice` compiles to a forced-call grammar
+//! (`toolcall.forcedCallGrammar`; schema-enforced arguments under
+//! `strict: true`) — needs a `-Dllguidance=true` build, rejected
+//! otherwise.
 
 const std = @import("std");
 const llm = @import("fucina_llm");
@@ -126,8 +129,19 @@ const Parser = struct {
     obj: std.json.ObjectMap,
     info: types.Info,
     err: ?ErrorInfo = null,
+    /// Set by a "required"/named tool_choice: `finishCommon` compiles these
+    /// into the forced-call grammar.
+    forced_decls: ?[]const toolcall.Decl = null,
 
     const Error = error{ Invalid, OutOfMemory };
+
+    /// Declarations in both forms the pipeline needs: the serialized
+    /// objects the hermes system block embeds, and the (name, schema)
+    /// pairs the forced-call grammar is built from.
+    const ToolSet = struct {
+        json: []const []const u8 = &.{},
+        decls: []const toolcall.Decl = &.{},
+    };
 
     fn fail(self: *Parser, info: ErrorInfo) Error {
         if (self.err == null) self.err = info;
@@ -247,6 +261,23 @@ const Parser = struct {
                 .param = "response_format",
             });
         }
+
+        // A forced tool_choice compiles to a grammar over the hermes call
+        // shape; it owns the reply from token 0 and excludes the other
+        // constraint forms.
+        if (self.forced_decls) |decls| {
+            if (constraint != null)
+                return self.failInvalid("a forced tool_choice already constrains the reply; response_format, regex, and lark cannot combine with it", "tool_choice");
+            if (!inf.caps.grammar) {
+                return self.fail(.{
+                    .status = .not_implemented,
+                    .kind = "not_supported_error",
+                    .message = "a guaranteed tool call needs constrained decoding: this server (or this model's tokenizer) was built without llguidance support",
+                    .param = "tool_choice",
+                });
+            }
+            constraint = .{ .lark = toolcall.forcedCallGrammar(self.arena, decls) catch return error.OutOfMemory };
+        }
         parsed.gen.constraint = constraint;
 
         // Reasoning: off by default (predictable JSON-first serving; matches
@@ -339,18 +370,29 @@ const Parser = struct {
         }
     }
 
+    /// The declaration's grammar schema: `parameters` when `strict` asked
+    /// for exact enforcement, the permissive object schema otherwise (a
+    /// non-strict schema may use JSON-schema keywords llguidance rejects,
+    /// and non-strict semantics promise none of that enforcement anyway).
+    fn declSchema(self: *Parser, holder: std.json.ObjectMap, strict: bool) Error![]const u8 {
+        if (!strict) return "{\"type\":\"object\"}";
+        const pv = self.optField(holder, "parameters") orelse return "{\"type\":\"object\"}";
+        return std.json.Stringify.valueAlloc(self.arena, pv, .{}) catch return error.OutOfMemory;
+    }
+
     /// Chat `tools`: entries validated, then re-serialized verbatim — the
     /// `{"type":"function","function":{…}}` object is exactly what the
     /// hermes system block embeds.
-    fn parseChatTools(self: *Parser) Error![]const []const u8 {
-        const tools_v = self.optField(self.obj, "tools") orelse return &.{};
+    fn parseChatTools(self: *Parser) Error!ToolSet {
+        const tools_v = self.optField(self.obj, "tools") orelse return .{};
         if (tools_v != .array) return self.failInvalid("expected an array", "tools");
         const items = tools_v.array.items;
-        if (items.len == 0) return &.{};
+        if (items.len == 0) return .{};
         if (self.info.tool_style == .none)
             return self.fail(ErrorInfo.unsupported("function calling is not supported by this model backend", "tools"));
-        const out = try self.arena.alloc([]const u8, items.len);
-        for (items, out) |tv, *dst| {
+        const json = try self.arena.alloc([]const u8, items.len);
+        const decls = try self.arena.alloc(toolcall.Decl, items.len);
+        for (items, json, decls) |tv, *dst, *decl| {
             if (tv != .object) return self.failInvalid("tools must be objects", "tools");
             if (try self.optString(tv.object, "type")) |t| {
                 if (!std.mem.eql(u8, t, "function"))
@@ -359,24 +401,27 @@ const Parser = struct {
             const fv = self.optField(tv.object, "function") orelse
                 return self.failInvalid("tool missing \"function\"", "tools");
             if (fv != .object) return self.failInvalid("expected an object", "tools");
-            if ((try self.optString(fv.object, "name")) == null)
+            const name = (try self.optString(fv.object, "name")) orelse
                 return self.failInvalid("function missing \"name\"", "tools");
+            const strict = (try self.optBool(fv.object, "strict")) orelse false;
+            decl.* = .{ .name = name, .params_json = try self.declSchema(fv.object, strict) };
             dst.* = std.json.Stringify.valueAlloc(self.arena, tv, .{}) catch return error.OutOfMemory;
         }
-        return out;
+        return .{ .json = json, .decls = decls };
     }
 
     /// Responses `tools`: the flat function shape, rebuilt into the nested
     /// object the hermes system block embeds.
-    fn parseResponsesTools(self: *Parser) Error![]const []const u8 {
-        const tools_v = self.optField(self.obj, "tools") orelse return &.{};
+    fn parseResponsesTools(self: *Parser) Error!ToolSet {
+        const tools_v = self.optField(self.obj, "tools") orelse return .{};
         if (tools_v != .array) return self.failInvalid("expected an array", "tools");
         const items = tools_v.array.items;
-        if (items.len == 0) return &.{};
+        if (items.len == 0) return .{};
         if (self.info.tool_style == .none)
             return self.fail(ErrorInfo.unsupported("function calling is not supported by this model backend", "tools"));
-        const out = try self.arena.alloc([]const u8, items.len);
-        for (items, out) |tv, *dst| {
+        const json = try self.arena.alloc([]const u8, items.len);
+        const decls = try self.arena.alloc(toolcall.Decl, items.len);
+        for (items, json, decls) |tv, *dst, *decl| {
             if (tv != .object) return self.failInvalid("tools must be objects", "tools");
             const t = (try self.optString(tv.object, "type")) orelse
                 return self.failInvalid("tool missing \"type\"", "tools");
@@ -384,9 +429,11 @@ const Parser = struct {
                 return self.fail(ErrorInfo.unsupported("hosted tool types are not supported by this server", "tools"));
             const name = (try self.optString(tv.object, "name")) orelse
                 return self.failInvalid("tool missing \"name\"", "tools");
+            const strict = (try self.optBool(tv.object, "strict")) orelse false;
+            decl.* = .{ .name = name, .params_json = try self.declSchema(tv.object, strict) };
             dst.* = self.nestedFunctionJson(tv.object, name) catch return error.OutOfMemory;
         }
-        return out;
+        return .{ .json = json, .decls = decls };
     }
 
     fn nestedFunctionJson(self: *Parser, tool: std.json.ObjectMap, name: []const u8) ![]const u8 {
@@ -419,22 +466,62 @@ const Parser = struct {
 
     /// Shared `tool_choice` handling: "none" drops the declarations (the
     /// model must not call tools, so they are not offered), "auto" keeps
-    /// them, and anything the server cannot guarantee — "required" or a
-    /// named function — is rejected (generation is not constrained to emit
-    /// a call).
-    fn applyToolChoice(self: *Parser, tools_json: []const []const u8) Error![]const []const u8 {
-        const tc = self.optField(self.obj, "tool_choice") orelse return tools_json;
+    /// them, "required" and a named function stash the forced set —
+    /// `finishCommon` compiles it into the forced-call grammar. `flat_name`
+    /// selects the Responses object shape ({"type":"function","name"})
+    /// over chat's nested one.
+    fn applyToolChoice(self: *Parser, set: *ToolSet, comptime flat_name: bool) Error!void {
+        const tc = self.optField(self.obj, "tool_choice") orelse return;
         switch (tc) {
             .string => |s| {
-                if (std.mem.eql(u8, s, "none")) return &.{};
-                if (std.mem.eql(u8, s, "required"))
-                    return self.fail(ErrorInfo.unsupported("a guaranteed tool call cannot be honored; use tool_choice \"auto\" or \"none\"", "tool_choice"));
-                if (!std.mem.eql(u8, s, "auto"))
-                    return self.failInvalid("tool_choice must be \"none\", \"auto\", or \"required\"", "tool_choice");
-                return tools_json;
+                if (std.mem.eql(u8, s, "none")) {
+                    set.* = .{};
+                    return;
+                }
+                if (std.mem.eql(u8, s, "auto")) return;
+                if (std.mem.eql(u8, s, "required")) return self.forceDecls(set.decls);
+                return self.failInvalid("tool_choice must be \"none\", \"auto\", \"required\", or a named function", "tool_choice");
             },
-            else => return self.fail(ErrorInfo.unsupported("forcing a specific function cannot be honored; use tool_choice \"auto\" or \"none\"", "tool_choice")),
+            .object => |o| {
+                const t = (try self.optString(o, "type")) orelse
+                    return self.failInvalid("tool_choice missing \"type\"", "tool_choice");
+                if (!std.mem.eql(u8, t, "function"))
+                    return self.failInvalid("tool_choice type must be \"function\"", "tool_choice");
+                const name = if (flat_name)
+                    (try self.optString(o, "name")) orelse
+                        return self.failInvalid("tool_choice missing \"name\"", "tool_choice")
+                else blk: {
+                    const fv = self.optField(o, "function") orelse
+                        return self.failInvalid("tool_choice missing \"function\"", "tool_choice");
+                    if (fv != .object) return self.failInvalid("expected an object", "tool_choice");
+                    break :blk (try self.optString(fv.object, "name")) orelse
+                        return self.failInvalid("tool_choice function missing \"name\"", "tool_choice");
+                };
+                return self.forceNamed(set.decls, name);
+            },
+            else => return self.failInvalid("tool_choice must be a string or an object", "tool_choice"),
         }
+    }
+
+    fn forceNamed(self: *Parser, decls: []const toolcall.Decl, name: []const u8) Error!void {
+        for (decls) |d| {
+            if (std.mem.eql(u8, d.name, name)) {
+                const one = try self.arena.alloc(toolcall.Decl, 1);
+                one[0] = d;
+                return self.forceDecls(one);
+            }
+        }
+        return self.failInvalid("tool_choice names an undeclared function", "tool_choice");
+    }
+
+    fn forceDecls(self: *Parser, decls: []const toolcall.Decl) Error!void {
+        if (decls.len == 0)
+            return self.failInvalid("tool_choice requires tools to be declared", "tool_choice");
+        for (decls) |d| {
+            if (!toolcall.plainName(d.name))
+                return self.failInvalid("tool names must use [A-Za-z0-9_.:-] characters for a forced tool_choice", "tools");
+        }
+        self.forced_decls = decls;
     }
 
     /// Flatten a content string / array of text parts into one string.
@@ -486,7 +573,8 @@ const Parser = struct {
             if (n != 1) return self.fail(ErrorInfo.unsupported("only n=1 is supported by this server", "n"));
         }
 
-        const tools_json = try self.applyToolChoice(try self.parseChatTools());
+        var tools = try self.parseChatTools();
+        try self.applyToolChoice(&tools, false);
 
         // messages
         const messages_v = self.optField(obj, "messages") orelse
@@ -551,7 +639,7 @@ const Parser = struct {
             try messages.append(self.arena, .{ .role = role, .content = turn.items });
         }
         try self.flushToolResponses(&messages, &tool_fold);
-        try self.applyTools(&parsed, &messages, tools_json);
+        try self.applyTools(&parsed, &messages, tools.json);
         parsed.gen.messages = messages.items;
 
         if (self.optField(obj, "response_format")) |rf|
@@ -580,7 +668,8 @@ const Parser = struct {
         try self.rejectField(obj, "conversation", "this server is stateless and has no conversation store");
         try self.rejectField(obj, "prompt", "stored prompt templates are not supported by this server");
         try self.rejectField(obj, "background", "background responses are not supported by this server");
-        const tools_json = try self.applyToolChoice(try self.parseResponsesTools());
+        var tools = try self.parseResponsesTools();
+        try self.applyToolChoice(&tools, true);
         if (try self.optString(obj, "truncation")) |tr| {
             if (!std.mem.eql(u8, tr, "disabled"))
                 return self.fail(ErrorInfo.unsupported("only truncation=\"disabled\" is supported", "truncation"));
@@ -645,7 +734,7 @@ const Parser = struct {
             else => return self.failInvalid("input must be a string or an array of items", "input"),
         }
         try self.flushToolResponses(&messages, &tool_fold);
-        try self.applyTools(&parsed, &messages, tools_json);
+        try self.applyTools(&parsed, &messages, tools.json);
         parsed.gen.messages = messages.items;
 
         if (self.optField(obj, "text")) |text_v| {
@@ -826,6 +915,68 @@ test "chat parse: tools render into the system slot, history folds" {
         const no_style = types.Info{ .model_id = "t", .context_len = 8192 };
         const tool_body = "{\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}]}";
         try std.testing.expectEqualStrings("tools", parse(arena, .chat, tool_body, no_style).err.param.?);
+    }
+}
+
+test "chat parse: forced tool_choice compiles to the call grammar" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const info = types.Info{ .model_id = "t", .context_len = 8192, .tool_style = .hermes, .caps = .{ .grammar = true } };
+
+    const tools_frag =
+        \\"tools":[
+        \\ {"type":"function","function":{"name":"get_weather","strict":true,
+        \\   "parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}}},
+        \\ {"type":"function","function":{"name":"ping"}}]
+    ;
+    // "required": one grammar alternative per declared tool; strict brings
+    // its schema, non-strict gets the permissive object.
+    {
+        const body = std.fmt.comptimePrint("{{\"messages\":[{{\"role\":\"user\",\"content\":\"x\"}}],\"tool_choice\":\"required\",{s}}}", .{tools_frag});
+        const p = parse(arena, .chat, body, info).ok;
+        const grammar = p.gen.constraint.?.lark;
+        try std.testing.expect(std.mem.startsWith(u8, grammar, "start: c0 | c1\n"));
+        try std.testing.expect(std.mem.indexOf(u8, grammar, "\\\"get_weather\\\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, grammar, "a0: %json {\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"],\"additionalProperties\":false}") != null);
+        try std.testing.expect(std.mem.indexOf(u8, grammar, "a1: %json {\"type\":\"object\"}") != null);
+        try std.testing.expect(p.tools_active);
+    }
+    // Named function: only that alternative.
+    {
+        const body = std.fmt.comptimePrint("{{\"messages\":[{{\"role\":\"user\",\"content\":\"x\"}}],\"tool_choice\":{{\"type\":\"function\",\"function\":{{\"name\":\"ping\"}}}},{s}}}", .{tools_frag});
+        const p = parse(arena, .chat, body, info).ok;
+        const grammar = p.gen.constraint.?.lark;
+        try std.testing.expect(std.mem.startsWith(u8, grammar, "start: c0\n"));
+        try std.testing.expect(std.mem.indexOf(u8, grammar, "\\\"ping\\\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, grammar, "get_weather") == null);
+    }
+    // The grammar owns the reply: response_format cannot combine with it.
+    {
+        const body = std.fmt.comptimePrint("{{\"messages\":[{{\"role\":\"user\",\"content\":\"x\"}}],\"tool_choice\":\"required\",\"response_format\":{{\"type\":\"json_object\"}},{s}}}", .{tools_frag});
+        try std.testing.expectEqualStrings("tool_choice", parse(arena, .chat, body, info).err.param.?);
+    }
+    // Unknown named function.
+    {
+        const body = std.fmt.comptimePrint("{{\"messages\":[{{\"role\":\"user\",\"content\":\"x\"}}],\"tool_choice\":{{\"type\":\"function\",\"function\":{{\"name\":\"nope\"}}}},{s}}}", .{tools_frag});
+        try std.testing.expectEqualStrings("tool_choice", parse(arena, .chat, body, info).err.param.?);
+    }
+    // Without llguidance the guarantee cannot be honored: 501.
+    {
+        const no_grammar = types.Info{ .model_id = "t", .context_len = 8192, .tool_style = .hermes };
+        const body = std.fmt.comptimePrint("{{\"messages\":[{{\"role\":\"user\",\"content\":\"x\"}}],\"tool_choice\":\"required\",{s}}}", .{tools_frag});
+        const outcome = parse(arena, .chat, body, no_grammar);
+        try std.testing.expectEqual(std.http.Status.not_implemented, outcome.err.status);
+        try std.testing.expectEqualStrings("tool_choice", outcome.err.param.?);
+    }
+    // Responses named form is flat.
+    {
+        const body =
+            \\{"input":"x","tool_choice":{"type":"function","name":"f"},
+            \\ "tools":[{"type":"function","name":"f","parameters":{"type":"object"}}]}
+        ;
+        const p = parse(arena, .responses, body, info).ok;
+        try std.testing.expect(std.mem.startsWith(u8, p.gen.constraint.?.lark, "start: c0\n"));
     }
 }
 

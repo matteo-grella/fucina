@@ -75,6 +75,45 @@ pub const Call = struct {
     args_json: []const u8,
 };
 
+/// One declared tool as the forced-call grammar needs it.
+pub const Decl = struct {
+    name: []const u8,
+    /// Arguments schema enforced by the grammar; the permissive default
+    /// admits any JSON object (a declaration without a binding schema).
+    params_json: []const u8 = "{\"type\":\"object\"}",
+};
+
+/// True for the tool-name charset the forced-call grammar embeds verbatim
+/// in lark literals (the hosted APIs restrict names similarly).
+pub fn plainName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |c| switch (c) {
+        'A'...'Z', 'a'...'z', '0'...'9', '_', '-', '.', ':' => {},
+        else => return false,
+    };
+    return true;
+}
+
+/// Lark grammar forcing the reply to be exactly one hermes call to one of
+/// `decls`, arguments enforced by llguidance `%json` subgrammars. Grammar
+/// completion forces the turn stop, so the reply ends at the call. Caller
+/// guarantees `plainName` for every declaration.
+pub fn forcedCallGrammar(arena: Allocator, decls: []const Decl) ![]const u8 {
+    var aw = std.Io.Writer.Allocating.init(arena);
+    const w = &aw.writer;
+    try w.writeAll("start:");
+    for (decls, 0..) |_, i| {
+        if (i > 0) try w.writeAll(" |");
+        try w.print(" c{d}", .{i});
+    }
+    try w.writeAll("\n");
+    for (decls, 0..) |decl, i| {
+        try w.print("c{d}: \"<tool_call>\\n{{\\\"name\\\": \\\"{s}\\\", \\\"arguments\\\": \" a{d} \"}}\\n</tool_call>\"\n", .{ i, decl.name, i });
+        try w.print("a{d}: %json {s}\n", .{ i, decl.params_json });
+    }
+    return aw.written();
+}
+
 /// Validate a captured region as a call. `arguments` must be an object (or
 /// absent — an empty one); any other shape returns null and the caller
 /// passes the capture through as content.
@@ -250,6 +289,30 @@ test "parseCall: object args canonicalized, bad shapes rejected" {
     try std.testing.expect(parseCall(arena, "not json") == null);
     try std.testing.expect(parseCall(arena, "{\"arguments\": {}}") == null);
     try std.testing.expect(parseCall(arena, "{\"name\": \"x\", \"arguments\": \"str\"}") == null);
+}
+
+test "forced-call grammar: one alternative per tool, %json args" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const grammar = try forcedCallGrammar(arena, &.{
+        .{ .name = "get_weather", .params_json = "{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}}}" },
+        .{ .name = "ping" },
+    });
+    try std.testing.expectEqualStrings(
+        \\start: c0 | c1
+        \\c0: "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": " a0 "}\n</tool_call>"
+        \\a0: %json {"type":"object","properties":{"city":{"type":"string"}}}
+        \\c1: "<tool_call>\n{\"name\": \"ping\", \"arguments\": " a1 "}\n</tool_call>"
+        \\a1: %json {"type":"object"}
+        \\
+    , grammar);
+
+    try std.testing.expect(plainName("get_weather"));
+    try std.testing.expect(plainName("mcp__server.tool-1:v2"));
+    try std.testing.expect(!plainName("bad\"name"));
+    try std.testing.expect(!plainName(""));
 }
 
 test "prompt rendering: system tools block, call and response sections" {
