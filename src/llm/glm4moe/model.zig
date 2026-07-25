@@ -643,7 +643,9 @@ pub const Model = struct {
         var selected: [64]usize = undefined;
         var routing: [64]f32 = undefined;
         std.debug.assert(cfg.num_experts_used <= selected.len);
-        for (0..cfg.num_experts_used) |slot| {
+        if (weights.cacheRouteSel(&moe.gate, choice, selected[0..cfg.num_experts_used])) {
+            for (selected[0..cfg.num_experts_used], routing[0..cfg.num_experts_used]) |e, *w| w.* = probs[e];
+        } else for (0..cfg.num_experts_used) |slot| {
             var best: usize = 0;
             var best_c: f32 = -std.math.inf(f32);
             for (choice, 0..) |c, e| {

@@ -1276,7 +1276,7 @@ pub const Model = struct {
             }
             const sel = selected[s * used ..][0..used];
             const wts = routing[s * used ..][0..used];
-            try topKExperts(ctx, choice, sel);
+            if (!weights.cacheRouteSel(&moe.gate, choice, sel)) try topKExperts(ctx, choice, sel);
             for (sel, wts) |e, *w| w.* = row[e];
             if (cfg.expert_weights_norm) {
                 var total: f32 = 1e-20;
@@ -1492,7 +1492,8 @@ pub const Model = struct {
         var routing: [64]f32 = undefined;
         std.debug.assert(cfg.num_experts_used <= selected.len);
         var used = cfg.num_experts_used;
-        try topKExperts(ctx, choice, selected[0..used]);
+        if (!weights.cacheRouteSel(&moe.gate, choice, selected[0..used]))
+            try topKExperts(ctx, choice, selected[0..used]);
         for (selected[0..used], routing[0..used]) |e, *w| w.* = probs[e];
         if (self.moe_top_p < 1.0 or self.moe_skip_miss_below > 0) {
             used = self.dynamicExpertFilter(moe, selected[0..used], routing[0..used]);

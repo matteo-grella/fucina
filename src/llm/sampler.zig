@@ -16,8 +16,9 @@ const ExecContext = fucina.ExecContext;
 const Logits = fucina.Tensor(.{ .seq, .vocab });
 pub const LogitProcessor = logit_processor.LogitProcessor;
 
-/// Largest candidate set considered when sampling. Qwen3 uses top_k=20; this
-/// caps the work (and the stack buffer) when top_k is disabled.
+/// First candidate window when sampling without an explicit top_k (and the
+/// stack-buffer bound). A `top_p < 1` nucleus that true probability mass
+/// says is wider grows past it; `top_p == 1` keeps it as the work cap.
 const max_candidates = 256;
 
 pub const Config = struct {
@@ -107,33 +108,81 @@ pub const Sampler = struct {
         }
 
         const vocab = logits.dim(.vocab);
-        const k: usize = @min(if (cfg.top_k > 0) cfg.top_k else max_candidates, @min(@as(usize, max_candidates), vocab));
+        const explicit_k = cfg.top_k > 0;
+        var k: usize = @min(if (explicit_k) cfg.top_k else max_candidates, @min(@as(usize, max_candidates), vocab));
         var top = try logits.topK(ctx, .vocab, k, .top);
         defer top.deinit();
-        const vals = try top.values.dataConst(); // logits, descending
-        const idxs = try top.indices.dataConst(); // token ids as f32
+        var vals = try top.values.dataConst(); // logits, descending
+        var idxs = try top.indices.dataConst(); // token ids as f32
 
-        // temperature + softmax over the candidates (vals[0] is the max).
-        var probs: [max_candidates]f32 = undefined;
         const inv_temp = 1.0 / cfg.temperature;
         const max_logit = vals[0];
         if (self.processor != null and !std.math.isFinite(max_logit)) return error.AllTokensMasked;
-        var sum: f32 = 0;
-        for (0..k) |i| {
-            probs[i] = @exp((vals[i] - max_logit) * inv_temp);
-            sum += probs[i];
-        }
-        for (0..k) |i| probs[i] /= sum;
 
-        // top-p: smallest descending prefix reaching cumulative top_p.
+        var probs_buf: [max_candidates]f32 = undefined;
+        var heap_probs: ?[]f32 = null;
+        defer if (heap_probs) |hp| ctx.allocator.free(hp);
+        var probs: []f32 = probs_buf[0..k];
         var keep = k;
-        if (cfg.top_p < 1.0) {
-            var cum: f32 = 0;
+
+        if (explicit_k) {
+            // top-k filter, softmax renormalized over the kept set, nucleus
+            // within it — llama.cpp's sampler order.
+            var sum: f32 = 0;
             for (0..k) |i| {
-                cum += probs[i];
-                if (cum >= cfg.top_p) {
-                    keep = i + 1;
-                    break;
+                probs[i] = @exp((vals[i] - max_logit) * inv_temp);
+                sum += probs[i];
+            }
+            for (0..k) |i| probs[i] /= sum;
+            if (cfg.top_p < 1.0) {
+                var cum: f32 = 0;
+                for (0..k) |i| {
+                    cum += probs[i];
+                    if (cum >= cfg.top_p) {
+                        keep = i + 1;
+                        break;
+                    }
+                }
+            }
+        } else {
+            // No top-k filter: the nucleus is measured on the TRUE
+            // distribution (full-vocab softmax denominator), and the
+            // candidate window grows until it covers the requested mass.
+            // Measured against the window's renormalized mass instead, a
+            // flat distribution would reach top_p within the first
+            // candidates and the tail would be silently clipped. With
+            // top_p == 1 the window stays `max_candidates`, the documented
+            // work cap.
+            var denom: f64 = 0;
+            for (try logits.dataConst()) |v| denom += @exp(@as(f64, @floatCast((v - max_logit) * inv_temp)));
+            if (!(denom > 0) or !std.math.isFinite(denom)) return error.AllTokensMasked;
+            while (true) {
+                var cum: f64 = 0;
+                keep = k;
+                var reached = cfg.top_p >= 1.0;
+                for (0..k) |i| {
+                    probs[i] = @floatCast(@exp(@as(f64, @floatCast((vals[i] - max_logit) * inv_temp))) / denom);
+                    if (!reached) {
+                        cum += probs[i];
+                        if (cum >= cfg.top_p) {
+                            keep = i + 1;
+                            reached = true;
+                        }
+                    }
+                }
+                if (reached or k == vocab) break;
+                k = @min(k * 4, vocab);
+                const grown = try logits.topK(ctx, .vocab, k, .top);
+                top.deinit();
+                top = grown;
+                vals = try top.values.dataConst();
+                idxs = try top.indices.dataConst();
+                if (k <= max_candidates) {
+                    probs = probs_buf[0..k];
+                } else {
+                    if (heap_probs) |hp| ctx.allocator.free(hp);
+                    heap_probs = try ctx.allocator.alloc(f32, k);
+                    probs = heap_probs.?;
                 }
             }
         }

@@ -160,6 +160,14 @@ Knobs:
   0 = sequential). Parallel misses are what turn disk queue depth — and
   mirror copies — into real aggregate bandwidth within one token's
   expert fetches. Output is unchanged.
+- `--moe-cache-route` — cache-aware near-tie routing (max-rank selection,
+  arXiv:2412.00099): the true top-J ranks are always taken, the remaining
+  slots prefer experts already resident in RAM among the top-M ranks
+  (`--moe-route-j=J` default 2, `--moe-route-m=M` default 12). Cuts
+  demand misses on miss-bound streaming. **QUALITY-AFFECTING** — routing
+  deviates from exact top-k, so it is strictly opt-in; the exit stats
+  report the swapped-slot fraction (deepseek2 / glm4moe / deepseek4
+  runners; qwen3moe's fused router path does not take it yet).
 - `--kv-save[=PATH]` — crash-safe KV persistence for `--chat`/`--repl`:
   conversations reopen warm across process restarts with zero re-prefill
   (essential below 1 tok/s). Default sidecar `<gguf>.kvcache`.

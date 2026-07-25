@@ -571,6 +571,17 @@ pub const ExpertStore = struct {
         pin_bytes: ?usize = null,
         /// Minimum recorded routed pairs before auto-pin trusts the history.
         auto_pin_min_history: u64 = 5000,
+        /// Cache-aware routing (`cacheRouteTopK`), default off — it changes
+        /// expert selection, so callers opt in explicitly.
+        cache_route: ?CacheRouteOptions = null,
+    };
+
+    /// Knobs for `cacheRouteTopK` (max-rank selection, arXiv:2412.00099).
+    pub const CacheRouteOptions = struct {
+        /// True top ranks always taken, resident or not.
+        sacred: usize = 2,
+        /// Max-rank window the resident-preferring fill may draw from.
+        window: usize = 12,
     };
 
     pub const Stats = struct {
@@ -592,6 +603,15 @@ pub const ExpertStore = struct {
         staged_consumed: u64 = 0,
         staged_wasted: u64 = 0,
         staged_bytes: u64 = 0,
+        /// Cache-aware routing: selection slots filled, and how many held a
+        /// resident substitute instead of the true top-k expert.
+        route_slots: u64 = 0,
+        route_swaps: u64 = 0,
+
+        pub fn routeSwapRate(self: Stats) f64 {
+            if (self.route_slots == 0) return 0;
+            return @as(f64, @floatFromInt(self.route_swaps)) / @as(f64, @floatFromInt(self.route_slots));
+        }
 
         pub fn hitRate(self: Stats) f64 {
             const total = self.hits + self.misses;
@@ -1019,6 +1039,100 @@ pub const ExpertStore = struct {
     /// slabs; misses are read from disk into working-set slots, readahead
     /// hints for the whole miss set going out before the first synchronous
     /// read. Locks the store until `release`.
+    /// Largest max-rank window `cacheRouteTopK` supports (stack scratch).
+    pub const max_route_window = 64;
+
+    /// Cache-aware top-k expert selection (max-rank, arXiv:2412.00099 —
+    /// colibri's CACHE_ROUTE), active only when `Options.cache_route` was
+    /// set: rank the bias-augmented `choice` scores, always take the true
+    /// top-`sacred` ranks, fill the remaining `sel` slots preferring
+    /// experts whose blocks already sit in RAM (pinned, LRU, or staged)
+    /// among the top-`window` ranks, and complete in true rank order. Ties
+    /// resolve to the lowest expert id, like the plain top-k it replaces.
+    /// Returns false when cache routing is off or the shape doesn't apply
+    /// — the caller keeps its plain selection. WORKER THREAD ONLY (shares
+    /// the acquire scratch).
+    pub fn cacheRouteTopK(self: *ExpertStore, layer_i: usize, choice: []const f32, sel: []usize) bool {
+        const cr = self.options.cache_route orelse return false;
+        if (!self.finalized or layer_i >= self.layers.len or !self.registered[layer_i]) return false;
+        const ls = &self.layers[layer_i];
+        const k = sel.len;
+        if (k == 0 or k > max_route_window or choice.len != ls.n_expert or k > ls.n_expert) return false;
+
+        var rank_buf: [max_route_window]u32 = undefined;
+        const window: usize = @min(@max(cr.window, k), @min(ls.n_expert, max_route_window));
+        const sacred: usize = @min(cr.sacred, k);
+
+        // Rank the top-`window` scores (strict > keeps ties on the lowest
+        // id, the plain top-k's order).
+        const taken = self.seen[0..ls.n_expert];
+        @memset(taken, false);
+        for (rank_buf[0..window]) |*slot| {
+            var best: usize = 0;
+            var best_c = -std.math.inf(f32);
+            for (choice, 0..) |c, e| {
+                if (!taken[e] and c > best_c) {
+                    best_c = c;
+                    best = e;
+                }
+            }
+            taken[best] = true;
+            slot.* = @intCast(best);
+        }
+
+        var chosen: usize = 0;
+        for (rank_buf[0..sacred]) |e| {
+            sel[chosen] = e;
+            chosen += 1;
+        }
+        if (chosen < k) {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            for (rank_buf[sacred..window]) |e| {
+                if (chosen == k) break;
+                if (self.residentLocked(ls, layer_i, e)) {
+                    sel[chosen] = e;
+                    chosen += 1;
+                }
+            }
+        }
+        // Remainder in true rank order, skipping what's already chosen.
+        outer: for (rank_buf[0..window]) |e| {
+            if (chosen == k) break;
+            for (sel[0..chosen]) |s| {
+                if (s == e) continue :outer;
+            }
+            sel[chosen] = e;
+            chosen += 1;
+        }
+
+        // Swap accounting vs the true top-k (rank_buf[0..k]).
+        self.stats.route_slots += @intCast(k);
+        outer2: for (sel[0..k]) |s| {
+            for (rank_buf[0..k]) |t| {
+                if (t == s) continue :outer2;
+            }
+            self.stats.route_swaps += 1;
+        }
+        return true;
+    }
+
+    /// Residency probe for cache-aware routing: any tier whose blocks are
+    /// already in RAM. Caller holds `mutex`; the staging peek takes
+    /// `stage_mutex` in the same order the worker's `stageConsume` does.
+    fn residentLocked(self: *ExpertStore, ls: *LayerState, layer_i: usize, eid: u32) bool {
+        if (findPinned(ls, eid) != null) return true;
+        if (self.findCached(ls, eid) != null) return true;
+        if (self.stage_meta.len > 0) {
+            self.stage_mutex.lock();
+            defer self.stage_mutex.unlock();
+            for (self.stage_meta) |*m| {
+                if (m.state == .ready and m.layer_i == @as(u32, @intCast(layer_i)) and m.eid == eid) return true;
+            }
+        }
+        return false;
+    }
+
     pub fn acquire(self: *ExpertStore, layer_i: usize, selected: []const usize) Error!void {
         self.mutex.lock();
         errdefer self.mutex.unlock();

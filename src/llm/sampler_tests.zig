@@ -78,3 +78,30 @@ test "temperature sampling stays within top-k and is seed-deterministic" {
     }
     try std.testing.expect(distinct > 1);
 }
+
+test "top-p nucleus grows past the candidate window on flat distributions" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    // 600 equally-likely tokens: a 0.99 nucleus holds 594 of them — far
+    // past the 256-candidate starting window. Samples must stay inside the
+    // flat set and (this seed does) reach beyond the window; a selection
+    // clipped at 256 candidates could never produce those tokens.
+    const vocab = 1024;
+    var vals: [vocab]f32 = undefined;
+    for (&vals, 0..) |*v, i| v.* = if (i < 600) 1.0 else -1000.0;
+    var logits = try Logits.fromSlice(&ctx, .{ 1, vocab }, &vals);
+    defer logits.deinit();
+
+    var s = Sampler.init(.{ .temperature = 1.0, .top_p = 0.99, .seed = 7 });
+    var beyond_window = false;
+    for (0..64) |_| {
+        const t = try s.next(&ctx, &logits, &.{});
+        try std.testing.expect(t < 600);
+        if (t >= 256) beyond_window = true;
+    }
+    try std.testing.expect(beyond_window);
+}

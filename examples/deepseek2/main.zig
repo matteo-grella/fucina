@@ -28,6 +28,9 @@ pub fn main(init: std.process.Init) !void {
     var moe_mirror_n: usize = 0;
     var moe_mirror_weights_arg: ?[]const u8 = null;
     var moe_io_threads: ?usize = null;
+    var moe_cache_route = false;
+    var moe_route_j: usize = 2;
+    var moe_route_m: usize = 12;
     var mla_mode: llm.deepseek2.model.Cache.Mode = .latent;
     var dsa_flag = false;
     var index_probe = false;
@@ -79,6 +82,17 @@ pub fn main(init: std.process.Init) !void {
             // Demand-miss read fan-out (default 8; 0 = sequential reads).
             moe_stream_flag = true;
             moe_io_threads = try std.fmt.parseInt(usize, arg["--moe-io-threads=".len..], 10);
+        } else if (std.mem.eql(u8, arg, "--moe-cache-route")) {
+            // Cache-aware near-tie routing (QUALITY-AFFECTING, opt-in):
+            // prefer already-resident experts among the top-M ranks.
+            moe_stream_flag = true;
+            moe_cache_route = true;
+        } else if (std.mem.startsWith(u8, arg, "--moe-route-j=")) {
+            // Sacred true-top ranks always taken (default 2).
+            moe_route_j = try std.fmt.parseInt(usize, arg["--moe-route-j=".len..], 10);
+        } else if (std.mem.startsWith(u8, arg, "--moe-route-m=")) {
+            // Max-rank window for the resident-preferring fill (default 12).
+            moe_route_m = try std.fmt.parseInt(usize, arg["--moe-route-m=".len..], 10);
         } else if (std.mem.eql(u8, arg, "--mla=full")) {
             mla_mode = .full;
         } else if (std.mem.eql(u8, arg, "--mla=latent")) {
@@ -150,6 +164,9 @@ pub fn main(init: std.process.Init) !void {
             .mirror_paths = moe_mirror_buf[0..moe_mirror_n],
             .mirror_weights = moe_mirror_weights,
             .io_workers = moe_io_threads orelse 8,
+            .cache_route = moe_cache_route,
+            .route_sacred = moe_route_j,
+            .route_window = moe_route_m,
         },
     } else .{};
     load_options.dsa = dsa_flag;

@@ -1267,6 +1267,55 @@ test "q2_k, iq2_xxs, and iq3_xxs experts: streamed decode and batch are bit-exac
     try std.testing.expectEqualSlices(f32, want_b.dataConst(), got_b.dataConst());
 }
 
+test "cache-aware routing: sacred ranks kept, fill prefers resident, swaps counted" {
+    const allocator = std.testing.allocator;
+    var fx: Fixture = undefined;
+    try fx.init(allocator, 2);
+    defer fx.deinit();
+
+    var store = try ExpertStore.create(allocator, &.{fx.path}, 1, .{
+        .cache_slots_per_layer = 2,
+        .cache_route = .{ .sacred = 1, .window = 4 },
+    });
+    defer store.destroy();
+    try fx.registerLayer(store);
+    try store.finalize();
+
+    // Descending scores: the true top-2 is {0, 1}.
+    const choice = [_]f32{ 0.9, 0.8, 0.7, 0.6, 0.5, 0.1, 0.05, 0.01 };
+    var sel: [2]usize = undefined;
+
+    // Nothing resident yet: cache-aware selection equals the true top-k.
+    try std.testing.expect(store.cacheRouteTopK(0, &choice, &sel));
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1 }, &sel);
+    try std.testing.expectEqual(@as(u64, 0), store.stats.route_swaps);
+
+    // Make expert 3 resident (miss promotes it into the LRU tier).
+    try store.acquire(0, &.{3});
+    store.release(0);
+
+    // Rank 0 stays sacred; the fill slot prefers resident 3 (rank 3,
+    // inside the window) over the true rank-1 expert.
+    try std.testing.expect(store.cacheRouteTopK(0, &choice, &sel));
+    try std.testing.expectEqualSlices(usize, &.{ 0, 3 }, &sel);
+    try std.testing.expectEqual(@as(u64, 1), store.stats.route_swaps);
+    try std.testing.expectEqual(@as(u64, 4), store.stats.route_slots);
+
+    // Outside the window nothing changes: expert 5 resident but ranked 6th.
+    try store.acquire(0, &.{5});
+    store.release(0);
+    var sel3: [2]usize = undefined;
+    const steep = [_]f32{ 0.9, 0.8, 0.75, 0.7, 0.65, 0.1, 0.05, 0.01 };
+    try std.testing.expect(store.cacheRouteTopK(0, &steep, &sel3));
+    // Resident 3 (rank 3) still wins the fill slot; resident 5 (rank 5)
+    // sits outside window=4 and is never considered.
+    try std.testing.expectEqualSlices(usize, &.{ 0, 3 }, &sel3);
+
+    // The store without the option keeps declining.
+    var plain_sel: [2]usize = undefined;
+    try std.testing.expect(!fx.store.cacheRouteTopK(0, &choice, &plain_sel));
+}
+
 test "learning cache: saved usage auto-pins the hot experts on reload, bit-exact and miss-free" {
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;

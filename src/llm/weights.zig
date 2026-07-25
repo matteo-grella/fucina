@@ -1358,6 +1358,18 @@ pub const MoeStreamOptions = struct {
     /// Parallelism is what lets disk queue depth — and mirror copies on
     /// separate drives — add bandwidth within one acquire.
     io_workers: usize = 8,
+    /// Cache-aware routing (`ExpertStore.cacheRouteTopK`), default off:
+    /// near-tie expert selection prefers already-resident experts, trading
+    /// exact top-k routing for fewer disk fetches. QUALITY-AFFECTING —
+    /// opt-in only; the swap fraction is reported at exit. Wired into the
+    /// deepseek2, glm4moe, and deepseek4 selection paths (qwen3moe routes
+    /// through the fused `routerTopK` core op, which has no selection
+    /// override yet).
+    cache_route: bool = false,
+    /// True top ranks always taken (resident or not) under cache routing.
+    route_sacred: usize = 2,
+    /// Max-rank window the resident-preferring fill may draw from.
+    route_window: usize = 12,
 };
 
 /// The runners' shared `--moe-mirror-weights=` comma list, parsed into
@@ -1374,6 +1386,16 @@ pub fn parseMirrorWeights(arg: ?[]const u8, n_mirrors: usize, buf: []f32) !?[]co
     }
     if (n != n_mirrors) return error.MirrorWeightsMismatch;
     return buf[0..n];
+}
+
+/// Cache-aware expert selection when `gate` streams from an ExpertStore
+/// that opted into cache routing (`MoeStreamOptions.cache_route`); false =
+/// the caller keeps its plain top-k.
+pub fn cacheRouteSel(gate: *const fucina.MoeRhs, choice: []const f32, sel: []usize) bool {
+    return switch (gate.*) {
+        .streamed => |*sw| sw.store.cacheRouteTopK(sw.layer, choice, sel),
+        else => false,
+    };
 }
 
 /// The store-create block shared by the MoE loaders: expand split-GGUF part
@@ -1403,6 +1425,10 @@ pub fn createExpertStore(allocator: Allocator, options: MoeStreamOptions, n_laye
         .auto_pin = options.auto_pin,
         .pin_bytes = options.pin_bytes,
         .io_workers = options.io_workers,
+        .cache_route = if (options.cache_route) .{
+            .sacred = options.route_sacred,
+            .window = options.route_window,
+        } else null,
     });
     errdefer store.destroy();
     for (options.mirror_paths, 0..) |mirror_path, m| {
@@ -1441,6 +1467,10 @@ pub fn reportAndSaveMoeStream(store: *fucina.ExpertStore, learn: bool, writer: a
     if (s.staged_loads > 0) writer.print(
         "moe prefetch: staged {d} loads ({d:.2} GB), consumed {d}, wasted {d}\n",
         .{ s.staged_loads, @as(f64, @floatFromInt(s.staged_bytes)) / 1e9, s.staged_consumed, s.staged_wasted },
+    ) catch {};
+    if (s.route_slots > 0) writer.print(
+        "moe cache-route: {d} of {d} slots swapped to resident experts ({d:.1}%)\n",
+        .{ s.route_swaps, s.route_slots, s.routeSwapRate() * 100 },
     ) catch {};
     if (store.mirrors.len > 0) {
         var total: u64 = 0;

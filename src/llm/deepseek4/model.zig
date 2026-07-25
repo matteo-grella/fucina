@@ -2041,19 +2041,56 @@ fn moeBlockBatch(self: *Model, ctx: *ExecContext, layer: *const Layer, sub_in: [
     var top_idx: []i64 = &.{};
     defer if (top_idx.len > 0) allocator.free(top_idx);
     if (layer.moe.tid2eid == null) {
-        var top = blk: {
-            if (layer.moe.router_bias) |bias| {
-                var bias_t = try fucina.Tensor(.{.expert}).fromBorrowedConstSlice(ctx, .{cfg.num_experts}, bias);
-                defer bias_t.deinit();
-                var choice_t = try probs_t.add(ctx, &bias_t);
-                defer choice_t.deinit();
-                break :blk try choice_t.topK(ctx, .expert, used, .slot);
-            }
-            break :blk try probs_t.topK(ctx, .expert, used, .slot);
+        const cache_route = switch (layer.moe.gate) {
+            .streamed => |*sw| sw.store.options.cache_route != null,
+            else => false,
         };
-        defer top.values.deinit();
-        defer top.indices.deinit();
-        top_idx = try allocator.dupe(i64, try top.indices.dataConst());
+        if (cache_route) {
+            // Cache-aware routing runs the selection on the host per row
+            // (bias-augmented scores, resident-preferring fill); the plain
+            // scan mirrors the kernel's lowest-id tie order for shapes the
+            // store declines.
+            top_idx = try allocator.alloc(i64, S * used);
+            const choice_row = try allocator.alloc(f32, cfg.num_experts);
+            defer allocator.free(choice_row);
+            const sel_row = try allocator.alloc(usize, used);
+            defer allocator.free(sel_row);
+            for (0..S) |s| {
+                @memcpy(choice_row, probs_all[s * cfg.num_experts ..][0..cfg.num_experts]);
+                if (layer.moe.router_bias) |bias| {
+                    for (choice_row, bias) |*c, b| c.* += b;
+                }
+                if (!weights.cacheRouteSel(&layer.moe.gate, choice_row, sel_row)) {
+                    for (sel_row) |*slot| {
+                        var best: usize = 0;
+                        var best_c = -std.math.inf(f32);
+                        for (choice_row, 0..) |c, e| {
+                            if (c > best_c) {
+                                best_c = c;
+                                best = e;
+                            }
+                        }
+                        choice_row[best] = -std.math.inf(f32);
+                        slot.* = best;
+                    }
+                }
+                for (sel_row, 0..) |e, i| top_idx[s * used + i] = @intCast(e);
+            }
+        } else {
+            var top = blk: {
+                if (layer.moe.router_bias) |bias| {
+                    var bias_t = try fucina.Tensor(.{.expert}).fromBorrowedConstSlice(ctx, .{cfg.num_experts}, bias);
+                    defer bias_t.deinit();
+                    var choice_t = try probs_t.add(ctx, &bias_t);
+                    defer choice_t.deinit();
+                    break :blk try choice_t.topK(ctx, .expert, used, .slot);
+                }
+                break :blk try probs_t.topK(ctx, .expert, used, .slot);
+            };
+            defer top.values.deinit();
+            defer top.indices.deinit();
+            top_idx = try allocator.dupe(i64, try top.indices.dataConst());
+        }
     }
 
     for (0..S) |s| {
