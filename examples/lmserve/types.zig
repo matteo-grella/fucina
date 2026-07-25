@@ -85,6 +85,14 @@ pub const Caps = struct {
 /// message content).
 pub const ThinkMarkers = struct { open: []const u8, close: []const u8 };
 
+/// The tool-calling convention the family's chat template speaks. `hermes`
+/// is the Qwen3 shape: declarations as JSON inside `<tools>` in the system
+/// block, calls emitted as `<tool_call>{"name",…,"arguments":{…}}</tool_call>`,
+/// results returned inside `<tool_response>` sections of a user turn
+/// (`toolcall.zig` renders and scans it). `none` backends reject tool
+/// fields at parse time.
+pub const ToolStyle = enum { none, hermes };
+
 pub const Info = struct {
     /// Model id echoed by `GET /v1/models` and in responses (file basename).
     model_id: []const u8,
@@ -93,6 +101,7 @@ pub const Info = struct {
     caps: Caps = .{},
     /// Present when `caps.think`.
     think_markers: ?ThinkMarkers = null,
+    tool_style: ToolStyle = .none,
     default_sampling: llm.sampler.Config = .{},
 };
 

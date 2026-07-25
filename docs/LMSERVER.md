@@ -146,10 +146,25 @@ default 1024, clamped to `--ctx`), `stop` (≤4 strings), `stream`,
 accounting. Extension fields (llama.cpp precedent): `top_k`, `min_p`,
 `repeat_penalty`, `regex`, `lark`.
 
+**Function calling** works on backends whose family has a tool convention
+(`types.ToolStyle`; qwen3/qwen3moe speak the hermes shape): declarations
+and tool history fold into the prompt text (`examples/lmserve/toolcall.zig`
+reproduces Qwen3's own template rendering — `<tools>` system section,
+`<tool_call>` assistant sections, `<tool_response>` user sections), the
+emitter scans replies for `<tool_call>` regions, and completed calls come
+back as chat `tool_calls` / Responses `function_call` items / Anthropic
+`tool_use` blocks with `finish_reason`/`stop_reason` set accordingly.
+Execution stays with the client — the server only translates the model's
+call requests. `tool_choice` forms the server cannot guarantee
+("required", a named function, Anthropic `any`/`tool`) are rejected:
+generation is not constrained to emit a call. Malformed call JSON in a
+reply passes through as plain content, markers intact — never dropped.
+
 Rejected with a 400/501 naming the offending `param` (never silently
-dropped): `tools`/`tool_choice` beyond auto/none (function calling is the
-biggest missing feature), `n > 1`, `logprobs`, `logit_bias`, image/audio/file
-content, `previous_response_id`/`conversation`/`item_reference` (stateless:
+dropped): unguaranteeable `tool_choice` forms (above), tool fields on
+backends without a tool convention, the legacy `functions` API, `n > 1`,
+`logprobs`, `logit_bias`, image/audio/file content,
+`previous_response_id`/`conversation`/`item_reference` (stateless:
 `store:false` semantics; what Codex CLI and the SDKs' basic paths use),
 hosted tool types, `background`, `truncation:"auto"`, plus anything the
 backend's caps cannot honor (grammar, reasoning, stop sequences, system
@@ -170,15 +185,16 @@ dialect's replayed reasoning items), `temperature`/`top_p` (0..1)/`top_k`,
 required `max_tokens`, `stream`, `thinking` (`enabled`/`adaptive` switch
 the reasoning channel on where one exists; a no-op otherwise, so
 thinking-by-default clients stay usable), `output_config.format`
-(`json_schema` → the same llguidance constraint). `tools` declarations are
-accepted and dropped — the server never emits `tool_use`, valid under
-`tool_choice: "auto"` — while forced tool calls, `tool_use`/`tool_result`
-history blocks, images/documents, and `stop_sequences` (the engine stops on
-them but does not report which sequence fired, so
-`stop_reason`/`stop_sequence` could not be attributed) are rejected
-explicitly. Errors use the Anthropic envelope
-`{"type":"error","error":{type,message}}` with the type derived from the
-status; mid-stream failures arrive as an `error` event.
+(`json_schema` → the same llguidance constraint), and — on hermes backends
+— `tools` with `tool_use`/`tool_result` history (the function-calling
+section above; declarations without a tool convention are accepted and
+dropped, which keeps tool-sending clients usable as plain chat). Forced
+tool calls (`tool_choice` `any`/`tool`), server-side tool types,
+images/documents, and `stop_sequences` (the engine stops on them but does
+not report which sequence fired, so `stop_reason`/`stop_sequence` could
+not be attributed) are rejected explicitly. Errors use the Anthropic
+envelope `{"type":"error","error":{type,message}}` with the type derived
+from the status; mid-stream failures arrive as an `error` event.
 
 ## Streaming contracts
 
@@ -197,10 +213,17 @@ status; mid-stream failures arrive as an `error` event.
   `message_start` (skeleton; usage zeroed — prompt tokens are only known
   once generation finishes) → `content_block_start`/`content_block_delta`/
   `content_block_stop` per block (`thinking` first when reasoning streams,
-  closed by an empty `signature_delta`; then `text`) → `message_delta`
-  (`stop_reason` `end_turn`/`max_tokens`, full usage incl.
-  `cache_read_input_tokens` from the KV prefix reuse) → `message_stop`.
-  `ping` keepalives are not sent (optional in the protocol).
+  closed by an empty `signature_delta`; then `text`; then a `tool_use`
+  block per captured call, its input as one `input_json_delta`) →
+  `message_delta` (`stop_reason` `end_turn`/`max_tokens`/`tool_use`, full
+  usage incl. `cache_read_input_tokens` from the KV prefix reuse) →
+  `message_stop`. `ping` keepalives are not sent (optional in the
+  protocol).
+- Tool calls stream as soon as their `</tool_call>` closes: chat as
+  `delta.tool_calls` chunks (one chunk per call, full arguments),
+  responses as `function_call` items (`output_item.added` →
+  `function_call_arguments.delta`/`.done` → `output_item.done`, sequenced
+  after the message item at finish).
 - Deltas are UTF-8-boundary-safe: a token ending mid-code-point carries into
   the next frame instead of corrupting the JSON.
 - Verified against openai-python 2.45.0 end-to-end (both dialects, stream +

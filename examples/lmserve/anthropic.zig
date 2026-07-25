@@ -6,13 +6,16 @@
 //! are Anthropic-shaped. Claude Code is the reference client.
 //!
 //! Deliberate deviations from the hosted API, all visible on the wire:
-//! * `tools` declarations are accepted and dropped (never rendered into the
-//!   prompt): the models served here are not tool-trained, and under
-//!   `tool_choice: auto` a reply with no `tool_use` blocks is valid
-//!   behavior. `tool_choice` `any`/`tool` (a guaranteed tool call) is
-//!   rejected, as are `tool_use`/`tool_result` blocks in the history — this
-//!   server never emits `tool_use`, so no conversation held with it
-//!   contains them.
+//! * Tool calling works on hermes-style backends (qwen3;
+//!   `types.ToolStyle`): declarations render into the system block via
+//!   `toolcall.zig`, `tool_use`/`tool_result` history folds into the
+//!   template text, and the emitter scans replies for calls. On backends
+//!   without a tool convention, declarations are accepted and dropped —
+//!   under `tool_choice: auto` a reply with no `tool_use` blocks is valid
+//!   behavior, and it keeps tool-sending clients usable as plain chat —
+//!   while tool blocks in the history are rejected. `tool_choice`
+//!   `any`/`tool` (a guaranteed tool call) is rejected everywhere:
+//!   generation is not constrained to emit one.
 //! * `thinking: {"type": "enabled"|"adaptive"}` switches the model's
 //!   reasoning channel on when the backend has one and is otherwise a no-op
 //!   (the reply simply carries no `thinking` blocks) — a hard error would
@@ -37,6 +40,7 @@ const std = @import("std");
 const llm = @import("fucina_llm");
 const types = @import("types.zig");
 const openai = @import("openai.zig");
+const toolcall = @import("toolcall.zig");
 
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
@@ -173,10 +177,8 @@ const Parser = struct {
         }
     }
 
-    /// Flatten one message's content (string or block array) into text.
-    /// `thinking`/`redacted_thinking` blocks are prior-turn reasoning the
-    /// templates re-render without (same policy as the Responses dialect's
-    /// reasoning items); tool and media blocks are rejected.
+    /// Flatten a text-only content value (mid-conversation system messages,
+    /// tool_result payloads) into one string.
     fn messageText(self: *Parser, content: Value) Error![]const u8 {
         switch (content) {
             .string => |s| return s,
@@ -186,24 +188,134 @@ const Parser = struct {
                     if (part != .object) return self.failInvalid("content blocks must be objects", "messages");
                     const ptype = (try self.optString(part.object, "type")) orelse
                         return self.failInvalid("content block missing \"type\"", "messages");
-                    if (std.mem.eql(u8, ptype, "text")) {
-                        const text = (try self.optString(part.object, "text")) orelse
-                            return self.failInvalid("text block missing \"text\"", "messages");
-                        try out.appendSlice(self.arena, text);
-                    } else if (std.mem.eql(u8, ptype, "thinking") or std.mem.eql(u8, ptype, "redacted_thinking")) {
-                        // Dropped: prior-turn reasoning.
-                    } else if (std.mem.eql(u8, ptype, "tool_use") or std.mem.eql(u8, ptype, "tool_result")) {
-                        return self.fail(ErrorInfo.unsupported("tool use is not supported by this server; it never emits tool_use blocks, so a conversation held with it contains none", "messages"));
-                    } else if (std.mem.eql(u8, ptype, "image") or std.mem.eql(u8, ptype, "document")) {
-                        return self.fail(ErrorInfo.unsupported("only text content is supported (no images or documents)", "messages"));
-                    } else {
-                        return self.fail(ErrorInfo.unsupported("unsupported content block type", "messages"));
-                    }
+                    if (!std.mem.eql(u8, ptype, "text"))
+                        return self.fail(ErrorInfo.unsupported("only text blocks are supported here", "messages"));
+                    const text = (try self.optString(part.object, "text")) orelse
+                        return self.failInvalid("text block missing \"text\"", "messages");
+                    try out.appendSlice(self.arena, text);
                 }
                 return out.items;
             },
             else => return self.failInvalid("message content must be a string or an array of blocks", "messages"),
         }
+    }
+
+    /// Flush accumulated tool-result sections as one user turn (Qwen3's
+    /// template shape: consecutive results share the turn).
+    fn flushToolResponses(self: *Parser, messages: *std.ArrayList(llm.chat.Message), fold: *std.ArrayList(u8)) Error!void {
+        if (fold.items.len == 0) return;
+        try messages.append(self.arena, .{ .role = .user, .content = try fold.toOwnedSlice(self.arena) });
+    }
+
+    /// One user/assistant message: text blocks concatenate,
+    /// `thinking`/`redacted_thinking` blocks drop (prior-turn reasoning the
+    /// templates re-render without, like the Responses dialect's reasoning
+    /// items), `tool_use` becomes a call section of this turn, and
+    /// `tool_result` accumulates into `fold` — results answer the previous
+    /// assistant turn, so they flush as their own user turn before this
+    /// message's text.
+    fn appendTurn(self: *Parser, messages: *std.ArrayList(llm.chat.Message), fold: *std.ArrayList(u8), role: llm.chat.Message.Role, content: Value) Error!void {
+        const hermes = self.info.tool_style == .hermes;
+        const parts = switch (content) {
+            .string => |s| {
+                try self.flushToolResponses(messages, fold);
+                try messages.append(self.arena, .{ .role = role, .content = s });
+                return;
+            },
+            .array => |parts| parts.items,
+            else => return self.failInvalid("message content must be a string or an array of blocks", "messages"),
+        };
+        var turn: std.ArrayList(u8) = .empty;
+        var had_call = false;
+        var had_result = false;
+        for (parts) |part| {
+            if (part != .object) return self.failInvalid("content blocks must be objects", "messages");
+            const pobj = part.object;
+            const ptype = (try self.optString(pobj, "type")) orelse
+                return self.failInvalid("content block missing \"type\"", "messages");
+            if (std.mem.eql(u8, ptype, "text")) {
+                const text = (try self.optString(pobj, "text")) orelse
+                    return self.failInvalid("text block missing \"text\"", "messages");
+                turn.appendSlice(self.arena, text) catch return error.OutOfMemory;
+            } else if (std.mem.eql(u8, ptype, "thinking") or std.mem.eql(u8, ptype, "redacted_thinking")) {
+                // Dropped: prior-turn reasoning.
+            } else if (std.mem.eql(u8, ptype, "tool_use")) {
+                if (!hermes)
+                    return self.fail(ErrorInfo.unsupported("tool use is not supported by this model backend", "messages"));
+                const name = (try self.optString(pobj, "name")) orelse
+                    return self.failInvalid("tool_use block missing \"name\"", "messages");
+                const args: []const u8 = if (self.optField(pobj, "input")) |input| blk: {
+                    if (input != .object) return self.failInvalid("tool_use \"input\" must be an object", "messages");
+                    break :blk std.json.Stringify.valueAlloc(self.arena, input, .{}) catch return error.OutOfMemory;
+                } else "{}";
+                toolcall.appendCallSection(self.arena, &turn, name, args) catch return error.OutOfMemory;
+                had_call = true;
+            } else if (std.mem.eql(u8, ptype, "tool_result")) {
+                if (!hermes)
+                    return self.fail(ErrorInfo.unsupported("tool use is not supported by this model backend", "messages"));
+                const result = if (self.optField(pobj, "content")) |rc| try self.messageText(rc) else "";
+                toolcall.appendResponseSection(self.arena, fold, result) catch return error.OutOfMemory;
+                had_result = true;
+            } else if (std.mem.eql(u8, ptype, "image") or std.mem.eql(u8, ptype, "document")) {
+                return self.fail(ErrorInfo.unsupported("only text content is supported (no images or documents)", "messages"));
+            } else {
+                return self.fail(ErrorInfo.unsupported("unsupported content block type", "messages"));
+            }
+        }
+        // A results-only message contributes no turn of its own (the fold
+        // keeps accumulating across consecutive result messages).
+        const has_turn = turn.items.len > 0 or had_call or (role == .user and !had_result);
+        if (has_turn) {
+            try self.flushToolResponses(messages, fold);
+            try messages.append(self.arena, .{ .role = role, .content = turn.items });
+        }
+    }
+
+    /// Declared custom tools ({name, description?, input_schema?}) rebuilt
+    /// into the nested object the hermes system block embeds. Server-tool
+    /// types have no local execution and are refused.
+    fn parseTools(self: *Parser, items: []const Value) Error![]const []const u8 {
+        if (items.len == 0) return &.{};
+        const out = try self.arena.alloc([]const u8, items.len);
+        for (items, out) |tv, *dst| {
+            if (tv != .object) return self.failInvalid("tools must be objects", "tools");
+            if (try self.optString(tv.object, "type")) |t| {
+                if (!std.mem.eql(u8, t, "custom"))
+                    return self.fail(ErrorInfo.unsupported("server-side tools are not supported by this server", "tools"));
+            }
+            const name = (try self.optString(tv.object, "name")) orelse
+                return self.failInvalid("tool missing \"name\"", "tools");
+            dst.* = self.nestedFunctionJson(tv.object, name) catch return error.OutOfMemory;
+        }
+        return out;
+    }
+
+    fn nestedFunctionJson(self: *Parser, tool: std.json.ObjectMap, name: []const u8) ![]const u8 {
+        var aw = std.Io.Writer.Allocating.init(self.arena);
+        var s: std.json.Stringify = .{ .writer = &aw.writer };
+        try s.beginObject();
+        try s.objectField("type");
+        try s.write("function");
+        try s.objectField("function");
+        try s.beginObject();
+        try s.objectField("name");
+        try s.write(name);
+        if (tool.get("description")) |d| {
+            if (d == .string) {
+                try s.objectField("description");
+                try s.write(d.string);
+            }
+        }
+        if (tool.get("input_schema")) |sv| {
+            if (sv != .null) {
+                const stext = try std.json.Stringify.valueAlloc(self.arena, sv, .{});
+                try s.objectField("parameters");
+                try s.print("{s}", .{stext});
+            }
+        }
+        try s.endObject();
+        try s.endObject();
+        return aw.written();
     }
 
     // ---- the request ----
@@ -225,17 +337,22 @@ const Parser = struct {
             if (v.array.items.len > 0)
                 return self.fail(ErrorInfo.unsupported("stop_sequences are not supported by this server: the engine does not report which sequence fired, so stop_reason could not be attributed", "stop_sequences"));
         }
+        // Declarations render on hermes backends; elsewhere they are
+        // accepted and dropped (see the module doc).
+        var tools_json: []const []const u8 = &.{};
         if (self.optField(obj, "tools")) |v| {
-            // Accepted and dropped (see the module doc); only the shape is
-            // checked.
             if (v != .array) return self.failInvalid("expected an array", "tools");
+            if (inf.tool_style == .hermes) tools_json = try self.parseTools(v.array.items);
         }
         if (self.optField(obj, "tool_choice")) |v| {
             if (v != .object) return self.failInvalid("expected an object", "tool_choice");
             const kind = (try self.optString(v.object, "type")) orelse
                 return self.failInvalid("tool_choice missing \"type\"", "tool_choice");
-            if (!std.mem.eql(u8, kind, "auto") and !std.mem.eql(u8, kind, "none"))
-                return self.fail(ErrorInfo.unsupported("this server never emits tool_use blocks, so a forced tool call cannot be honored; use tool_choice \"auto\" or \"none\"", "tool_choice"));
+            if (std.mem.eql(u8, kind, "none")) {
+                tools_json = &.{}; // the model must not call tools: don't offer them
+            } else if (!std.mem.eql(u8, kind, "auto")) {
+                return self.fail(ErrorInfo.unsupported("a guaranteed tool call cannot be honored; use tool_choice \"auto\" or \"none\"", "tool_choice"));
+            }
         }
 
         // system -> leading system message.
@@ -252,6 +369,7 @@ const Parser = struct {
         if (messages_v != .array) return self.failInvalid("expected an array", "messages");
         if (messages_v.array.items.len == 0)
             return self.failInvalid("\"messages\" must be a non-empty array", "messages");
+        var tool_fold: std.ArrayList(u8) = .empty;
         for (messages_v.array.items, 0..) |mv, i| {
             if (mv != .object) return self.failInvalid("messages must be objects", "messages");
             const mobj = mv.object;
@@ -269,6 +387,7 @@ const Parser = struct {
                 if (i == 0)
                     return self.failInvalid("the first message must use the \"user\" role; a system prompt goes in the top-level \"system\" field", "messages");
                 const text = try self.messageText(content_v);
+                try self.flushToolResponses(&messages, &tool_fold);
                 try messages.append(self.arena, .{
                     .role = .user,
                     .content = try std.fmt.allocPrint(self.arena, "<system-reminder>\n{s}\n</system-reminder>", .{text}),
@@ -283,10 +402,19 @@ const Parser = struct {
                 return self.failInvalid("unknown message role", "messages");
             if (i == 0 and role != .user)
                 return self.failInvalid("the first message must use the \"user\" role", "messages");
-            try messages.append(self.arena, .{
-                .role = role,
-                .content = try self.messageText(content_v),
-            });
+            try self.appendTurn(&messages, &tool_fold, role, content_v);
+        }
+        try self.flushToolResponses(&messages, &tool_fold);
+        if (tools_json.len > 0) {
+            // Declarations render into the leading system slot (Qwen3's
+            // template shape) and the reply scanner arms.
+            if (messages.items.len > 0 and messages.items[0].role == .system) {
+                messages.items[0].content = toolcall.renderSystemWithTools(self.arena, messages.items[0].content, tools_json) catch return error.OutOfMemory;
+            } else {
+                const content = toolcall.renderSystemWithTools(self.arena, "", tools_json) catch return error.OutOfMemory;
+                messages.insert(self.arena, 0, .{ .role = .system, .content = content }) catch return error.OutOfMemory;
+            }
+            parsed.tools_active = true;
         }
         parsed.gen.messages = messages.items;
 
@@ -458,6 +586,62 @@ test "anthropic parse: mid-conversation system message folds into a user turn" {
     try std.testing.expectEqual(@as(usize, 2), p.gen.messages.len);
     try std.testing.expectEqual(llm.chat.Message.Role.user, p.gen.messages[1].role);
     try std.testing.expectEqualStrings("<system-reminder>\nterse mode\n</system-reminder>", p.gen.messages[1].content);
+}
+
+test "anthropic parse: hermes tools render, tool history folds" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const info = types.Info{ .model_id = "t", .context_len = 8192, .tool_style = .hermes };
+
+    const body =
+        \\{"model":"m","max_tokens":32,
+        \\ "system":"Be terse.",
+        \\ "messages":[
+        \\  {"role":"user","content":"weather?"},
+        \\  {"role":"assistant","content":[
+        \\    {"type":"text","text":"Checking."},
+        \\    {"type":"tool_use","id":"toolu_1","name":"get_weather","input":{"city":"Paris"}}]},
+        \\  {"role":"user","content":[
+        \\    {"type":"tool_result","tool_use_id":"toolu_1","content":"22C"},
+        \\    {"type":"text","text":"and tomorrow?"}]}
+        \\ ],
+        \\ "tools":[{"name":"get_weather","description":"d","input_schema":{"type":"object"}}]}
+    ;
+    const p = parse(arena, body, info).ok;
+    try std.testing.expect(p.tools_active);
+    // system(+tools) + user + assistant(text+call) + folded result turn + user text
+    try std.testing.expectEqual(@as(usize, 5), p.gen.messages.len);
+    try std.testing.expect(std.mem.startsWith(u8, p.gen.messages[0].content, "Be terse.\n\n# Tools\n\n"));
+    try std.testing.expect(std.mem.indexOf(u8, p.gen.messages[0].content, "{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"d\",\"parameters\":{\"type\":\"object\"}}}") != null);
+    try std.testing.expectEqualStrings(
+        "Checking.\n<tool_call>\n{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}\n</tool_call>",
+        p.gen.messages[2].content,
+    );
+    try std.testing.expectEqual(llm.chat.Message.Role.user, p.gen.messages[3].role);
+    try std.testing.expectEqualStrings("<tool_response>\n22C\n</tool_response>", p.gen.messages[3].content);
+    try std.testing.expectEqualStrings("and tomorrow?", p.gen.messages[4].content);
+
+    // tool_choice none drops the declarations (and the scanner stays off).
+    {
+        const none_body =
+            \\{"model":"m","max_tokens":8,
+            \\ "messages":[{"role":"user","content":"x"}],
+            \\ "tool_choice":{"type":"none"},
+            \\ "tools":[{"name":"f","input_schema":{"type":"object"}}]}
+        ;
+        const q = parse(arena, none_body, info).ok;
+        try std.testing.expect(!q.tools_active);
+    }
+    // Server-side tool types are refused.
+    {
+        const hosted =
+            \\{"model":"m","max_tokens":8,
+            \\ "messages":[{"role":"user","content":"x"}],
+            \\ "tools":[{"type":"web_search_20260209","name":"web_search"}]}
+        ;
+        try std.testing.expectEqualStrings("tools", parse(arena, hosted, info).err.param.?);
+    }
 }
 
 test "anthropic parse: thinking is a no-op without a reasoning channel" {

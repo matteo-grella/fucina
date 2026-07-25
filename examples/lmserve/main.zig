@@ -77,6 +77,8 @@ const usage_text =
     \\reasoning_effort (chat), reasoning.effort (responses), or thinking
     \\(anthropic messages). Anthropic clients (Claude Code, the SDKs) point
     \\ANTHROPIC_BASE_URL at this server; x-api-key carries --api-key.
+    \\Function calling works on qwen3-family models in all three dialects
+    \\(tool declarations render into the prompt; the client executes).
     \\
     \\endpoints: POST /v1/chat/completions   POST /v1/responses
     \\           POST /v1/messages           GET  /v1/models
@@ -537,6 +539,7 @@ fn serveQwen3(
             .context_len = args.ctx_len,
             .think_markers = .{ .open = "<think>", .close = "</think>" },
             .supports_think = true,
+            .tool_style = .hermes,
             // Qwen3's recommended no-think chat settings (the server default;
             // per-request reasoning switches nothing here — clients override).
             .default_sampling = .{ .temperature = 0.7, .top_k = 20, .top_p = 0.8 },

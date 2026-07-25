@@ -125,10 +125,10 @@ reasoning channel on where one exists — qwen3 `<think>` text streams as
 `thinking` content blocks. `temperature`/`top_p`/`top_k` map to the
 sampler; `output_config.format` with a JSON schema maps to the same
 constrained decoding as the OpenAI dialects (`-Dllguidance=true` builds).
-`tools` declarations are accepted and dropped — the server never emits
-`tool_use` blocks, which under `tool_choice: "auto"` is valid behavior;
-forced tool calls, `tool_use`/`tool_result` history blocks, and
-`stop_sequences` are rejected with explicit errors.
+On qwen3-family models `tools` work end-to-end (see Tool calling below);
+on families without a tool convention, declarations are accepted and
+dropped so tool-sending clients still work as plain chat. Forced tool
+calls and `stop_sequences` are rejected with explicit errors.
 
 **Claude Code** runs against it directly:
 
@@ -137,8 +137,38 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=local \
   claude -p "Say hello"
 ```
 
-Size `--ctx` for Claude Code's system prompt (~4k tokens before any
-conversation): `--ctx 16384` is a comfortable floor.
+Size `--ctx` for Claude Code's prompt: ~4k tokens of system prompt, plus
+~12k of tool schemas once the model takes tools — `--ctx 32768` fits
+comfortably on qwen3 models.
+
+## Tool calling
+
+On qwen3-family models (tool-trained, Hermes-style `<tool_call>` template)
+function calling works across all three dialects: declarations render into
+the prompt, the reply stream is scanned for calls, and completed calls
+come back in each dialect's native shape — chat `tool_calls`
+(`finish_reason: "tool_calls"`), Responses `function_call` items,
+Anthropic `tool_use` blocks (`stop_reason: "tool_use"`). The client
+executes the tool and sends the result back (`role: "tool"` /
+`function_call_output` / `tool_result`); the server never runs anything.
+
+```sh
+curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "messages": [{"role":"user","content":"What is the weather in Paris? Use the tool."}],
+  "tools": [{"type":"function","function":{"name":"get_weather",
+    "description":"Current weather for a city",
+    "parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}]}'
+```
+
+The reply carries `tool_calls`; append it plus a
+`{"role":"tool","tool_call_id":…,"content":"22C, sunny"}` message and ask
+again for the final answer. With Claude Code pointed at the server, its
+own tools (Bash, Read, …) light up the same way — the model requests, the
+CLI executes under its normal permission gating.
+
+`tool_choice` forms that would *guarantee* a call (`"required"`, a named
+function, Anthropic `any`/`tool`) are rejected — generation is not
+constrained to emit one.
 
 ## Flags
 

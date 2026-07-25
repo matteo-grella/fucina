@@ -115,6 +115,8 @@ pub const GgufChatOptions = struct {
     /// text-delimited reasoning channel the server can toggle (qwen3).
     think_markers: ?types.ThinkMarkers = null,
     supports_think: bool = false,
+    /// The family's tool-calling convention (qwen3: `.hermes`).
+    tool_style: types.ToolStyle = .none,
     default_sampling: llm.sampler.Config = .{},
     constraint_cache_len: usize = 8,
     /// Resident cross-request KV reuse slots. Each is a FULL `context_len`
@@ -744,6 +746,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                         .think = self.opts.supports_think,
                     },
                     .think_markers = self.opts.think_markers,
+                    .tool_style = self.opts.tool_style,
                     .default_sampling = self.opts.default_sampling,
                 },
             };

@@ -17,6 +17,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const openai = @import("openai.zig");
 const anthropic = @import("anthropic.zig");
+const toolcall = @import("toolcall.zig");
 const scheduler = @import("scheduler.zig");
 
 const Allocator = std.mem.Allocator;
@@ -74,13 +75,23 @@ pub const Emitter = struct {
     /// Set once the SSE head is written; frames may only follow.
     out: ?*std.Io.Writer = null,
     sent_role: bool = false,
-    /// Open-item state, shared by the wire shapes that stream typed blocks:
-    /// the Responses reasoning item / output message item, and the
-    /// Anthropic `thinking` / `text` content blocks.
+    /// Responses open-item state (reasoning item / output message item).
     reasoning_item_open: bool = false,
     message_item_open: bool = false,
+    /// Anthropic content-block state: blocks (`thinking`/`text`/`tool_use`)
+    /// stream sequentially — the open block's kind and index, the next
+    /// index to assign, and whether any text block was ever opened.
+    anth_block: enum { none, thinking, text } = .none,
+    anth_index: u32 = 0,
+    anth_next: u32 = 0,
+    anth_text_seen: bool = false,
 
     scanner: ThinkScanner,
+    /// Armed when the request rendered tool declarations
+    /// (`parsed.tools_active`): content bytes route through it and captured
+    /// `<tool_call>` regions land in `tool_calls`.
+    tool_scanner: ?toolcall.Scanner = null,
+    tool_calls: std.ArrayList(toolcall.Call) = .empty,
     /// Per-feed delta staging (one SSE frame per token flush).
     pending_content: std.ArrayList(u8) = .empty,
     pending_reasoning: std.ArrayList(u8) = .empty,
@@ -108,6 +119,7 @@ pub const Emitter = struct {
             .cfg = cfg,
             .id_hex = id_hex,
             .scanner = ThinkScanner.init(cfg.think_markers),
+            .tool_scanner = if (parsed.tools_active) toolcall.Scanner.init(arena) else null,
             .interface = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
         };
     }
@@ -146,6 +158,43 @@ pub const Emitter = struct {
         if (bytes.len == 0) return;
         if (self.job.isCancelled()) return error.Cancelled;
         try self.scanner.feed(self, bytes);
+    }
+
+    /// Content bytes from the think scanner: through the tool scanner when
+    /// one is armed, straight to staging otherwise.
+    fn routeContent(self: *Emitter, bytes: []const u8) anyerror!void {
+        if (self.tool_scanner) |*ts| return ts.feed(self, bytes);
+        try self.stageContent(bytes);
+    }
+
+    /// Tool-scanner sink: plain text between/around calls.
+    pub fn toolContent(self: *Emitter, bytes: []const u8) !void {
+        try self.stageContent(bytes);
+    }
+
+    /// Tool-scanner sink: one complete `<tool_call>` capture. Valid calls
+    /// stream their dialect frames immediately (Responses items are
+    /// sequenced at finish); anything unparsable flows back as content,
+    /// markers restored.
+    pub fn toolCall(self: *Emitter, raw: []const u8) !void {
+        const call = toolcall.parseCall(self.arena, raw) orelse {
+            try self.stageContent(toolcall.open_marker);
+            try self.stageContent(raw);
+            try self.stageContent(toolcall.close_marker);
+            return;
+        };
+        try self.tool_calls.append(self.arena, call);
+        if (!self.parsed.stream) return;
+        // Staged text lands in its own frames first, then the call's.
+        try self.dispatchPending();
+        try self.ensureStarted();
+        const call_i: u32 = @intCast(self.tool_calls.items.len - 1);
+        switch (self.cfg.dialect) {
+            .chat => try self.chatToolCallChunk(call_i, call),
+            .anthropic => try self.anthropicToolBlock(call_i, call),
+            .responses => {},
+        }
+        try self.out.?.flush();
     }
 
     fn stageContent(self: *Emitter, bytes: []const u8) !void {
@@ -228,11 +277,11 @@ pub const Emitter = struct {
             .anthropic => switch (channel) {
                 .reasoning => {
                     try self.ensureAnthropicThinking();
-                    try self.anthropicDelta(self.reasoningIndex(), "thinking_delta", "thinking", delta);
+                    try self.anthropicDelta(self.anth_index, "thinking_delta", "thinking", delta);
                 },
                 .content => {
                     try self.ensureAnthropicText();
-                    try self.anthropicDelta(self.messageIndex(), "text_delta", "text", delta);
+                    try self.anthropicDelta(self.anth_index, "text_delta", "text", delta);
                 },
             },
         }
@@ -245,9 +294,11 @@ pub const Emitter = struct {
     /// errors: a dead client surfaces as an ordinary write failure the
     /// caller treats like any closed connection.
     pub fn finish(self: *Emitter, job_err: ?anyerror) !Outcome {
-        // Anything the scanner still holds is reply text; a trailing
-        // incomplete UTF-8 sequence is truncated (llama.cpp does the same).
+        // Anything the scanners still hold is reply text (a truncated
+        // capture is not a call); a trailing incomplete UTF-8 sequence is
+        // truncated (llama.cpp does the same).
         self.scanner.finishFlush(self) catch {};
+        if (self.tool_scanner) |*ts| ts.finish(self) catch {};
         self.dispatchPending() catch {};
         self.pending_content.clearRetainingCapacity();
         self.pending_reasoning.clearRetainingCapacity();
@@ -289,7 +340,7 @@ pub const Emitter = struct {
                 try s.objectField("logprobs");
                 try s.write(null);
                 try s.objectField("finish_reason");
-                try s.write(finishReasonName(res.finish));
+                try s.write(self.chatFinishReason(res));
                 try s.endObject();
                 try self.chatChunkClose(&s, false);
                 try self.endEvent();
@@ -353,6 +404,61 @@ pub const Emitter = struct {
                 try s2.endObject();
                 try self.endEvent();
 
+                // Captured calls follow the message as their own items,
+                // each with the added → arguments delta/done → item done
+                // sequence.
+                for (self.tool_calls.items, 0..) |call, i| {
+                    const output_index = self.messageIndex() + 1 + @as(u32, @intCast(i));
+
+                    try self.beginEvent("response.output_item.added");
+                    var sa = self.eventJson();
+                    try sa.beginObject();
+                    try self.eventCommon(&sa, "response.output_item.added");
+                    try sa.objectField("output_index");
+                    try sa.write(output_index);
+                    try sa.objectField("item");
+                    try self.writeFunctionCallItem(&sa, i, call, "in_progress", "");
+                    try sa.endObject();
+                    try self.endEvent();
+
+                    try self.beginEvent("response.function_call_arguments.delta");
+                    var sd = self.eventJson();
+                    try sd.beginObject();
+                    try self.eventCommon(&sd, "response.function_call_arguments.delta");
+                    try sd.objectField("item_id");
+                    try sd.print("\"fc_{s}{d}\"", .{ &self.id_hex, i });
+                    try sd.objectField("output_index");
+                    try sd.write(output_index);
+                    try sd.objectField("delta");
+                    try sd.write(call.args_json);
+                    try sd.endObject();
+                    try self.endEvent();
+
+                    try self.beginEvent("response.function_call_arguments.done");
+                    var sn = self.eventJson();
+                    try sn.beginObject();
+                    try self.eventCommon(&sn, "response.function_call_arguments.done");
+                    try sn.objectField("item_id");
+                    try sn.print("\"fc_{s}{d}\"", .{ &self.id_hex, i });
+                    try sn.objectField("output_index");
+                    try sn.write(output_index);
+                    try sn.objectField("arguments");
+                    try sn.write(call.args_json);
+                    try sn.endObject();
+                    try self.endEvent();
+
+                    try self.beginEvent("response.output_item.done");
+                    var so = self.eventJson();
+                    try so.beginObject();
+                    try self.eventCommon(&so, "response.output_item.done");
+                    try so.objectField("output_index");
+                    try so.write(output_index);
+                    try so.objectField("item");
+                    try self.writeFunctionCallItem(&so, i, call, "completed", call.args_json);
+                    try so.endObject();
+                    try self.endEvent();
+                }
+
                 const terminal: []const u8 = if (res.finish == .length) "response.incomplete" else "response.completed";
                 const status: []const u8 = if (res.finish == .length) "incomplete" else "completed";
                 try self.beginEvent(terminal);
@@ -366,11 +472,12 @@ pub const Emitter = struct {
                 try self.out.?.flush();
             },
             .anthropic => {
-                try self.closeAnthropicThinking();
-                // An empty reply still gets its (empty) text block: started
-                // blocks are the SDK stream accumulators' anchor.
-                try self.ensureAnthropicText();
-                try self.anthropicBlockStop(self.messageIndex());
+                // A reply with neither text nor tool calls still gets its
+                // (empty) text block: started blocks are the SDK stream
+                // accumulators' anchor.
+                if (!self.anth_text_seen and self.tool_calls.items.len == 0)
+                    try self.ensureAnthropicText();
+                try self.closeAnthropicBlock();
 
                 try self.beginEvent("message_delta");
                 var s1 = self.eventJson();
@@ -380,7 +487,7 @@ pub const Emitter = struct {
                 try s1.objectField("delta");
                 try s1.beginObject();
                 try s1.objectField("stop_reason");
-                try s1.write(anthropicStopReason(res.finish));
+                try s1.write(self.anthropicFinalStop(res));
                 try s1.objectField("stop_sequence");
                 try s1.write(null);
                 try s1.endObject();
@@ -608,6 +715,12 @@ pub const Emitter = struct {
         try s.endObject();
     }
 
+    /// Captured tool calls take precedence over the engine's stop kind.
+    fn chatFinishReason(self: *const Emitter, res: types.GenerateResult) []const u8 {
+        if (self.tool_calls.items.len > 0) return "tool_calls";
+        return finishReasonName(res.finish);
+    }
+
     fn buildChatBody(self: *Emitter, res: types.GenerateResult) ![]const u8 {
         var aw = std.Io.Writer.Allocating.init(self.arena);
         var s: Stringify = .{ .writer = &aw.writer };
@@ -630,10 +743,22 @@ pub const Emitter = struct {
         try s.objectField("role");
         try s.write("assistant");
         try s.objectField("content");
-        try s.write(self.content.items);
+        // Call-only replies carry null content, like the reference wire.
+        if (self.content.items.len == 0 and self.tool_calls.items.len > 0) {
+            try s.write(null);
+        } else {
+            try s.write(self.content.items);
+        }
         if (self.reasoning.items.len > 0) {
             try s.objectField("reasoning_content");
             try s.write(self.reasoning.items);
+        }
+        if (self.tool_calls.items.len > 0) {
+            try s.objectField("tool_calls");
+            try s.beginArray();
+            for (self.tool_calls.items, 0..) |call, i|
+                try self.writeChatToolCall(&s, @intCast(i), call, false);
+            try s.endArray();
         }
         try s.objectField("refusal");
         try s.write(null);
@@ -641,7 +766,7 @@ pub const Emitter = struct {
         try s.objectField("logprobs");
         try s.write(null);
         try s.objectField("finish_reason");
-        try s.write(finishReasonName(res.finish));
+        try s.write(self.chatFinishReason(res));
         try s.endObject();
         try s.endArray();
         try s.objectField("usage");
@@ -873,6 +998,8 @@ pub const Emitter = struct {
         if (include_output) {
             if (self.reasoning.items.len > 0) try self.writeReasoningItem(s, "completed");
             try self.writeMessageItem(s, "completed");
+            for (self.tool_calls.items, 0..) |call, i|
+                try self.writeFunctionCallItem(s, i, call, "completed", call.args_json);
         }
         try s.endArray();
         try s.objectField("parallel_tool_calls");
@@ -1012,26 +1139,66 @@ pub const Emitter = struct {
     }
 
     fn ensureAnthropicThinking(self: *Emitter) !void {
-        if (self.reasoning_item_open) return;
-        self.reasoning_item_open = true;
-        try self.anthropicBlockStart(self.reasoningIndex(), "thinking", "thinking");
-    }
-
-    /// Thinking blocks end with a signature_delta on the hosted API; a
-    /// local server has no signing key, so the signature is empty (and
-    /// replayed thinking blocks are dropped at parse time anyway).
-    fn closeAnthropicThinking(self: *Emitter) !void {
-        if (!self.reasoning_item_open) return;
-        self.reasoning_item_open = false;
-        try self.anthropicDelta(self.reasoningIndex(), "signature_delta", "signature", "");
-        try self.anthropicBlockStop(self.reasoningIndex());
+        if (self.anth_block == .thinking) return;
+        try self.closeAnthropicBlock();
+        self.anth_block = .thinking;
+        self.anth_index = self.anth_next;
+        self.anth_next += 1;
+        try self.anthropicBlockStart(self.anth_index, "thinking", "thinking");
     }
 
     fn ensureAnthropicText(self: *Emitter) !void {
-        if (self.message_item_open) return;
-        try self.closeAnthropicThinking();
-        self.message_item_open = true;
-        try self.anthropicBlockStart(self.messageIndex(), "text", "text");
+        if (self.anth_block == .text) return;
+        try self.closeAnthropicBlock();
+        self.anth_block = .text;
+        self.anth_text_seen = true;
+        self.anth_index = self.anth_next;
+        self.anth_next += 1;
+        try self.anthropicBlockStart(self.anth_index, "text", "text");
+    }
+
+    /// Close whichever block is open. Thinking blocks end with a
+    /// signature_delta first, as on the hosted API — a local server has no
+    /// signing key, so the signature is empty (and replayed thinking blocks
+    /// are dropped at parse time anyway).
+    fn closeAnthropicBlock(self: *Emitter) !void {
+        if (self.anth_block == .none) return;
+        if (self.anth_block == .thinking)
+            try self.anthropicDelta(self.anth_index, "signature_delta", "signature", "");
+        try self.anthropicBlockStop(self.anth_index);
+        self.anth_block = .none;
+    }
+
+    /// One complete tool_use block (start + full-input json delta + stop):
+    /// calls complete atomically at capture time, so the input streams as
+    /// one delta.
+    fn anthropicToolBlock(self: *Emitter, call_i: u32, call: toolcall.Call) !void {
+        try self.closeAnthropicBlock();
+        const index = self.anth_next;
+        self.anth_next += 1;
+        try self.beginEvent("content_block_start");
+        var s = self.eventJson();
+        try s.beginObject();
+        try s.objectField("type");
+        try s.write("content_block_start");
+        try s.objectField("index");
+        try s.write(index);
+        try s.objectField("content_block");
+        try s.beginObject();
+        try s.objectField("type");
+        try s.write("tool_use");
+        try s.objectField("id");
+        try s.print("\"toolu_{s}{d}\"", .{ &self.id_hex, call_i });
+        try s.objectField("name");
+        try s.write(call.name);
+        try s.objectField("input");
+        try s.beginObject();
+        try s.endObject();
+        try s.endObject();
+        try s.endObject();
+        try self.endEvent();
+        try self.anthropicDelta(index, "input_json_delta", "partial_json", call.args_json);
+        try self.anthropicBlockStop(index);
     }
 
     /// Usage in the Messages shape. The cross-request KV prefix reuse is
@@ -1077,9 +1244,11 @@ pub const Emitter = struct {
                 try s.write("");
                 try s.endObject();
             }
-            // A thinking-only reply carries no text block; otherwise the
-            // text block is present even when empty.
-            if (self.content.items.len > 0 or self.reasoning.items.len == 0) {
+            // The text block is present even when empty, unless the reply
+            // consists of thinking and/or tool calls alone.
+            if (self.content.items.len > 0 or
+                (self.reasoning.items.len == 0 and self.tool_calls.items.len == 0))
+            {
                 try s.beginObject();
                 try s.objectField("type");
                 try s.write("text");
@@ -1087,11 +1256,23 @@ pub const Emitter = struct {
                 try s.write(self.content.items);
                 try s.endObject();
             }
+            for (self.tool_calls.items, 0..) |call, i| {
+                try s.beginObject();
+                try s.objectField("type");
+                try s.write("tool_use");
+                try s.objectField("id");
+                try s.print("\"toolu_{s}{d}\"", .{ &self.id_hex, i });
+                try s.objectField("name");
+                try s.write(call.name);
+                try s.objectField("input");
+                try s.print("{s}", .{call.args_json});
+                try s.endObject();
+            }
         }
         try s.endArray();
         try s.objectField("stop_reason");
         if (res) |r| {
-            try s.write(anthropicStopReason(r.finish));
+            try s.write(self.anthropicFinalStop(r));
         } else {
             try s.write(null);
         }
@@ -1107,6 +1288,86 @@ pub const Emitter = struct {
         var s: Stringify = .{ .writer = &aw.writer };
         try self.writeAnthropicMessage(&s, res);
         return aw.written();
+    }
+
+    /// Captured tool calls take precedence over the engine's stop kind: the
+    /// turn ended so the client can run them.
+    fn anthropicFinalStop(self: *const Emitter, res: types.GenerateResult) []const u8 {
+        if (self.tool_calls.items.len > 0) return "tool_use";
+        return anthropicStopReason(res.finish);
+    }
+
+    // ---- tool-call framing (chat + responses) ----
+
+    /// One streamed chat chunk carrying a complete call (the wire allows
+    /// argument fragments; calls complete atomically at capture time).
+    fn chatToolCallChunk(self: *Emitter, call_i: u32, call: toolcall.Call) !void {
+        try self.beginData();
+        var s = self.eventJson();
+        try self.chatChunkOpen(&s);
+        try s.beginObject();
+        try s.objectField("index");
+        try s.write(0);
+        try s.objectField("delta");
+        try s.beginObject();
+        if (!self.sent_role) {
+            try s.objectField("role");
+            try s.write("assistant");
+            self.sent_role = true;
+        }
+        try s.objectField("tool_calls");
+        try s.beginArray();
+        try self.writeChatToolCall(&s, call_i, call, true);
+        try s.endArray();
+        try s.endObject();
+        try s.objectField("logprobs");
+        try s.write(null);
+        try s.objectField("finish_reason");
+        try s.write(null);
+        try s.endObject();
+        try self.chatChunkClose(&s, false);
+        try self.endEvent();
+    }
+
+    /// The call object of chat messages/deltas (`arguments` is a
+    /// JSON-encoded string on this wire; deltas also carry the call index).
+    fn writeChatToolCall(self: *Emitter, s: *Stringify, call_i: u32, call: toolcall.Call, delta: bool) !void {
+        try s.beginObject();
+        if (delta) {
+            try s.objectField("index");
+            try s.write(call_i);
+        }
+        try s.objectField("id");
+        try s.print("\"call_{s}{d}\"", .{ &self.id_hex, call_i });
+        try s.objectField("type");
+        try s.write("function");
+        try s.objectField("function");
+        try s.beginObject();
+        try s.objectField("name");
+        try s.write(call.name);
+        try s.objectField("arguments");
+        try s.write(call.args_json);
+        try s.endObject();
+        try s.endObject();
+    }
+
+    /// The Responses function_call output item (`args` is "" on the added
+    /// event, the full arguments elsewhere).
+    fn writeFunctionCallItem(self: *Emitter, s: *Stringify, call_i: usize, call: toolcall.Call, status: []const u8, args: []const u8) !void {
+        try s.beginObject();
+        try s.objectField("id");
+        try s.print("\"fc_{s}{d}\"", .{ &self.id_hex, call_i });
+        try s.objectField("type");
+        try s.write("function_call");
+        try s.objectField("status");
+        try s.write(status);
+        try s.objectField("call_id");
+        try s.print("\"call_{s}{d}\"", .{ &self.id_hex, call_i });
+        try s.objectField("name");
+        try s.write(call.name);
+        try s.objectField("arguments");
+        try s.write(args);
+        try s.endObject();
     }
 };
 
@@ -1186,7 +1447,7 @@ const ThinkScanner = struct {
     }
 
     fn feed(self: *ThinkScanner, em: *Emitter, bytes: []const u8) !void {
-        if (self.state == .content) return em.stageContent(bytes);
+        if (self.state == .content) return em.routeContent(bytes);
         const m = self.markers.?;
         var rest = bytes;
         while (rest.len > 0) {
@@ -1212,10 +1473,10 @@ const ThinkScanner = struct {
                     } else if (!std.mem.startsWith(u8, m.open, held) and
                         !std.mem.startsWith(u8, m.close, held))
                     {
-                        try em.stageContent(held);
+                        try em.routeContent(held);
                         self.held = 0;
                         self.state = .content;
-                        return em.stageContent(rest);
+                        return em.routeContent(rest);
                     }
                 },
                 .think => {
@@ -1242,10 +1503,10 @@ const ThinkScanner = struct {
                         rest = rest[1..];
                     } else {
                         self.state = .content;
-                        return em.stageContent(rest);
+                        return em.routeContent(rest);
                     }
                 },
-                .content => return em.stageContent(rest),
+                .content => return em.routeContent(rest),
             }
         }
     }
@@ -1254,7 +1515,7 @@ const ThinkScanner = struct {
     fn finishFlush(self: *ThinkScanner, em: *Emitter) !void {
         const m = self.markers orelse return;
         switch (self.state) {
-            .detect => if (self.held > 0) try em.stageContent(self.hold[0..self.held]),
+            .detect => if (self.held > 0) try em.routeContent(self.hold[0..self.held]),
             .think => if (self.held > 0) try em.stageReasoning(m.close[0..self.held]),
             else => {},
         }
@@ -1335,16 +1596,21 @@ const CollectStarter = struct {
     }
 };
 
-/// Drive one full anthropic-wire generation: `reply` goes through the sink
-/// (think markers active), `res` finishes the job.
-fn runAnthropic(arena: Allocator, stream: bool, reply: []const u8, res: types.GenerateResult) !struct { outcome: Outcome, streamed_bytes: []const u8 } {
+/// Drive one full generation on `dialect`: `reply` goes through the sink
+/// (think markers active; `tools` arms the tool scanner), `res` finishes
+/// the job.
+fn runWire(arena: Allocator, dialect: Wire, stream: bool, tools: bool, reply: []const u8, res: types.GenerateResult) !struct { outcome: Outcome, streamed_bytes: []const u8 } {
     const parsed = try arena.create(openai.Parsed);
-    parsed.* = .{ .gen = .{ .messages = &.{}, .sampling = .{}, .max_tokens = 64 }, .stream = stream };
+    parsed.* = .{
+        .gen = .{ .messages = &.{}, .sampling = .{}, .max_tokens = 64 },
+        .stream = stream,
+        .tools_active = tools,
+    };
     const starter = try arena.create(CollectStarter);
     starter.* = .{ .aw = std.Io.Writer.Allocating.init(arena) };
     const em = try arena.create(Emitter);
     em.* = Emitter.init(arena, parsed, .{
-        .dialect = .anthropic,
+        .dialect = dialect,
         .model_id = "test-model",
         .created = 0,
         .think_markers = .{ .open = "<think>", .close = "</think>" },
@@ -1380,7 +1646,7 @@ test "anthropic wire: streamed event sequence with thinking and text blocks" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const r = try runAnthropic(arena, true, "<think>plan</think>Hello", .{
+    const r = try runWire(arena, .anthropic, true, false, "<think>plan</think>Hello", .{
         .prompt_tokens = 7,
         .completion_tokens = 3,
         .cached_tokens = 2,
@@ -1407,7 +1673,7 @@ test "anthropic wire: non-streaming message body" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const r = try runAnthropic(arena, false, "<think>plan</think>Hello", .{
+    const r = try runWire(arena, .anthropic, false, false, "<think>plan</think>Hello", .{
         .prompt_tokens = 7,
         .completion_tokens = 3,
         .cached_tokens = 0,
@@ -1423,4 +1689,122 @@ test "anthropic wire: non-streaming message body" {
     });
     // Nothing was streamed on the non-stream path.
     try std.testing.expectEqual(@as(usize, 0), r.streamed_bytes.len);
+}
+
+const tool_reply = "I'll check.\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n</tool_call>";
+
+test "anthropic wire: tool call streams as a tool_use block, stop_reason tool_use" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const r = try runWire(arena, .anthropic, true, true, tool_reply, .{
+        .prompt_tokens = 9,
+        .completion_tokens = 20,
+        .finish = .stop,
+    });
+    try std.testing.expect(r.outcome == .streamed);
+    try expectOrdered(r.streamed_bytes, &.{
+        "event: message_start",
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+        "\"delta\":{\"type\":\"text_delta\",\"text\":\"I'll check.\\n\"}",
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}",
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_",
+        "\"name\":\"get_weather\",\"input\":{}}}",
+        "\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\\\"Paris\\\"}\"}",
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}",
+        "\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null}",
+        "event: message_stop",
+    });
+}
+
+test "chat wire: tool call chunk, tool_calls body, finish_reason tool_calls" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Streamed: one delta chunk carries the whole call.
+    {
+        const r = try runWire(arena, .chat, true, true, tool_reply, .{
+            .prompt_tokens = 9,
+            .completion_tokens = 20,
+            .finish = .stop,
+        });
+        try std.testing.expect(r.outcome == .streamed);
+        try expectOrdered(r.streamed_bytes, &.{
+            "\"delta\":{\"role\":\"assistant\",\"content\":\"I'll check.\\n\"}",
+            "\"tool_calls\":[{\"index\":0,\"id\":\"call_",
+            "\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}}]",
+            "\"finish_reason\":\"tool_calls\"",
+            "data: [DONE]",
+        });
+    }
+    // Non-stream body: tool_calls array, content kept (text preceded the call).
+    {
+        const r = try runWire(arena, .chat, false, true, tool_reply, .{
+            .prompt_tokens = 9,
+            .completion_tokens = 20,
+            .finish = .stop,
+        });
+        try expectOrdered(r.outcome.body, &.{
+            "\"content\":\"I'll check.\\n\"",
+            "\"tool_calls\":[{\"id\":\"call_",
+            "\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}}]",
+            "\"finish_reason\":\"tool_calls\"",
+        });
+    }
+    // Call-only reply: null content.
+    {
+        const r = try runWire(arena, .chat, false, true, "<tool_call>{\"name\":\"f\"}</tool_call>", .{
+            .prompt_tokens = 3,
+            .completion_tokens = 5,
+            .finish = .stop,
+        });
+        try expectOrdered(r.outcome.body, &.{
+            "\"content\":null",
+            "\"arguments\":\"{}\"",
+            "\"finish_reason\":\"tool_calls\"",
+        });
+    }
+}
+
+test "responses wire: function_call items follow the message" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Streamed: added -> arguments delta/done -> item done, after the message.
+    {
+        const r = try runWire(arena, .responses, true, true, tool_reply, .{
+            .prompt_tokens = 9,
+            .completion_tokens = 20,
+            .finish = .stop,
+        });
+        try std.testing.expect(r.outcome == .streamed);
+        try expectOrdered(r.streamed_bytes, &.{
+            "event: response.output_text.done",
+            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":",
+            "\"item\":{\"id\":\"fc_",
+            "\"type\":\"function_call\",\"status\":\"in_progress\",\"call_id\":\"call_",
+            "\"arguments\":\"\"}",
+            "event: response.function_call_arguments.delta",
+            "\"delta\":\"{\\\"city\\\":\\\"Paris\\\"}\"",
+            "event: response.function_call_arguments.done",
+            "event: response.output_item.done",
+            "event: response.completed",
+        });
+    }
+    // Non-stream body: the function_call item sits in the output array.
+    {
+        const r = try runWire(arena, .responses, false, true, tool_reply, .{
+            .prompt_tokens = 9,
+            .completion_tokens = 20,
+            .finish = .stop,
+        });
+        try expectOrdered(r.outcome.body, &.{
+            "\"type\":\"message\"",
+            "\"type\":\"function_call\",\"status\":\"completed\",\"call_id\":\"call_",
+            "\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"",
+        });
+    }
 }

@@ -6,10 +6,15 @@
 //! use OpenAI's error shape (`{"error":{message,type,param,code}}`) with the
 //! offending field in `param`; unsupported-but-harmless bookkeeping fields
 //! (`metadata`, `user`, `store:false`, …) are ignored like llama.cpp does.
+//! Function calling works on hermes-style backends (`types.ToolStyle`):
+//! declarations and tool history fold into the prompt via `toolcall.zig`,
+//! and the emitter scans the reply for calls; `tool_choice` forms the
+//! server cannot guarantee ("required", a named function) are rejected.
 
 const std = @import("std");
 const llm = @import("fucina_llm");
 const types = @import("types.zig");
+const toolcall = @import("toolcall.zig");
 
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
@@ -63,6 +68,9 @@ pub const Parsed = struct {
     max_tokens_requested: ?i64 = null,
     format_kind: FormatKind = .text,
     format_name: ?[]const u8 = null,
+    /// Tool declarations were rendered into the prompt: the emitter scans
+    /// the reply for `<tool_call>` regions (`toolcall.zig`).
+    tools_active: bool = false,
 };
 
 pub const ParseOutcome = union(enum) {
@@ -295,6 +303,140 @@ const Parser = struct {
         parsed.gen.constraint = .{ .json_schema = schema_text };
     }
 
+    // ---- tool calling (hermes backends; `toolcall.zig` renders) ----
+
+    /// Flush accumulated tool-result sections as one user turn (Qwen3's
+    /// template shape: consecutive results share the turn).
+    fn flushToolResponses(self: *Parser, messages: *std.ArrayList(llm.chat.Message), fold: *std.ArrayList(u8)) Error!void {
+        if (fold.items.len == 0) return;
+        try messages.append(self.arena, .{ .role = .user, .content = try fold.toOwnedSlice(self.arena) });
+    }
+
+    /// Render declarations into the leading system slot and arm the reply
+    /// scanner.
+    fn applyTools(self: *Parser, parsed: *Parsed, messages: *std.ArrayList(llm.chat.Message), tools_json: []const []const u8) Error!void {
+        if (tools_json.len == 0) return;
+        if (messages.items.len > 0 and messages.items[0].role == .system) {
+            messages.items[0].content = toolcall.renderSystemWithTools(self.arena, messages.items[0].content, tools_json) catch return error.OutOfMemory;
+        } else {
+            const content = toolcall.renderSystemWithTools(self.arena, "", tools_json) catch return error.OutOfMemory;
+            messages.insert(self.arena, 0, .{ .role = .system, .content = content }) catch return error.OutOfMemory;
+        }
+        parsed.tools_active = true;
+    }
+
+    /// A Responses `function_call` item joins the assistant turn it
+    /// follows (message + calls are sibling items of one turn).
+    fn appendCallToAssistant(self: *Parser, messages: *std.ArrayList(llm.chat.Message), name: []const u8, args_json: []const u8) Error!void {
+        var turn: std.ArrayList(u8) = .empty;
+        if (messages.items.len > 0 and messages.items[messages.items.len - 1].role == .assistant) {
+            turn.appendSlice(self.arena, messages.items[messages.items.len - 1].content) catch return error.OutOfMemory;
+            toolcall.appendCallSection(self.arena, &turn, name, args_json) catch return error.OutOfMemory;
+            messages.items[messages.items.len - 1].content = turn.items;
+        } else {
+            toolcall.appendCallSection(self.arena, &turn, name, args_json) catch return error.OutOfMemory;
+            messages.append(self.arena, .{ .role = .assistant, .content = turn.items }) catch return error.OutOfMemory;
+        }
+    }
+
+    /// Chat `tools`: entries validated, then re-serialized verbatim — the
+    /// `{"type":"function","function":{…}}` object is exactly what the
+    /// hermes system block embeds.
+    fn parseChatTools(self: *Parser) Error![]const []const u8 {
+        const tools_v = self.optField(self.obj, "tools") orelse return &.{};
+        if (tools_v != .array) return self.failInvalid("expected an array", "tools");
+        const items = tools_v.array.items;
+        if (items.len == 0) return &.{};
+        if (self.info.tool_style == .none)
+            return self.fail(ErrorInfo.unsupported("function calling is not supported by this model backend", "tools"));
+        const out = try self.arena.alloc([]const u8, items.len);
+        for (items, out) |tv, *dst| {
+            if (tv != .object) return self.failInvalid("tools must be objects", "tools");
+            if (try self.optString(tv.object, "type")) |t| {
+                if (!std.mem.eql(u8, t, "function"))
+                    return self.fail(ErrorInfo.unsupported("only function tools are supported", "tools"));
+            }
+            const fv = self.optField(tv.object, "function") orelse
+                return self.failInvalid("tool missing \"function\"", "tools");
+            if (fv != .object) return self.failInvalid("expected an object", "tools");
+            if ((try self.optString(fv.object, "name")) == null)
+                return self.failInvalid("function missing \"name\"", "tools");
+            dst.* = std.json.Stringify.valueAlloc(self.arena, tv, .{}) catch return error.OutOfMemory;
+        }
+        return out;
+    }
+
+    /// Responses `tools`: the flat function shape, rebuilt into the nested
+    /// object the hermes system block embeds.
+    fn parseResponsesTools(self: *Parser) Error![]const []const u8 {
+        const tools_v = self.optField(self.obj, "tools") orelse return &.{};
+        if (tools_v != .array) return self.failInvalid("expected an array", "tools");
+        const items = tools_v.array.items;
+        if (items.len == 0) return &.{};
+        if (self.info.tool_style == .none)
+            return self.fail(ErrorInfo.unsupported("function calling is not supported by this model backend", "tools"));
+        const out = try self.arena.alloc([]const u8, items.len);
+        for (items, out) |tv, *dst| {
+            if (tv != .object) return self.failInvalid("tools must be objects", "tools");
+            const t = (try self.optString(tv.object, "type")) orelse
+                return self.failInvalid("tool missing \"type\"", "tools");
+            if (!std.mem.eql(u8, t, "function"))
+                return self.fail(ErrorInfo.unsupported("hosted tool types are not supported by this server", "tools"));
+            const name = (try self.optString(tv.object, "name")) orelse
+                return self.failInvalid("tool missing \"name\"", "tools");
+            dst.* = self.nestedFunctionJson(tv.object, name) catch return error.OutOfMemory;
+        }
+        return out;
+    }
+
+    fn nestedFunctionJson(self: *Parser, tool: std.json.ObjectMap, name: []const u8) ![]const u8 {
+        var aw = std.Io.Writer.Allocating.init(self.arena);
+        var s: std.json.Stringify = .{ .writer = &aw.writer };
+        try s.beginObject();
+        try s.objectField("type");
+        try s.write("function");
+        try s.objectField("function");
+        try s.beginObject();
+        try s.objectField("name");
+        try s.write(name);
+        if (tool.get("description")) |d| {
+            if (d == .string) {
+                try s.objectField("description");
+                try s.write(d.string);
+            }
+        }
+        if (tool.get("parameters")) |pv| {
+            if (pv != .null) {
+                const ptext = try std.json.Stringify.valueAlloc(self.arena, pv, .{});
+                try s.objectField("parameters");
+                try s.print("{s}", .{ptext});
+            }
+        }
+        try s.endObject();
+        try s.endObject();
+        return aw.written();
+    }
+
+    /// Shared `tool_choice` handling: "none" drops the declarations (the
+    /// model must not call tools, so they are not offered), "auto" keeps
+    /// them, and anything the server cannot guarantee — "required" or a
+    /// named function — is rejected (generation is not constrained to emit
+    /// a call).
+    fn applyToolChoice(self: *Parser, tools_json: []const []const u8) Error![]const []const u8 {
+        const tc = self.optField(self.obj, "tool_choice") orelse return tools_json;
+        switch (tc) {
+            .string => |s| {
+                if (std.mem.eql(u8, s, "none")) return &.{};
+                if (std.mem.eql(u8, s, "required"))
+                    return self.fail(ErrorInfo.unsupported("a guaranteed tool call cannot be honored; use tool_choice \"auto\" or \"none\"", "tool_choice"));
+                if (!std.mem.eql(u8, s, "auto"))
+                    return self.failInvalid("tool_choice must be \"none\", \"auto\", or \"required\"", "tool_choice");
+                return tools_json;
+            },
+            else => return self.fail(ErrorInfo.unsupported("forcing a specific function cannot be honored; use tool_choice \"auto\" or \"none\"", "tool_choice")),
+        }
+    }
+
     /// Flatten a content string / array of text parts into one string.
     fn contentText(self: *Parser, content: Value, param: []const u8) Error![]const u8 {
         switch (content) {
@@ -332,52 +474,84 @@ const Parser = struct {
 
         // Hard rejections first: fields whose silent loss would corrupt the
         // conversation semantics.
-        try self.rejectField(obj, "tools", "function calling is not supported by this server");
-        try self.rejectField(obj, "functions", "function calling is not supported by this server");
-        try self.rejectField(obj, "function_call", "function calling is not supported by this server");
+        try self.rejectField(obj, "functions", "the legacy functions API is not supported; use tools");
+        try self.rejectField(obj, "function_call", "the legacy functions API is not supported; use tool_choice");
         try self.rejectField(obj, "logprobs", "logprobs are not supported by this server");
         try self.rejectField(obj, "top_logprobs", "logprobs are not supported by this server");
         try self.rejectField(obj, "logit_bias", "logit_bias is not supported by this server");
         try self.rejectField(obj, "audio", "audio output is not supported by this server");
         try self.rejectField(obj, "prediction", "predicted outputs are not supported by this server");
         try self.rejectField(obj, "web_search_options", "web search is not supported by this server");
-        if (try self.optString(obj, "tool_choice")) |tc| {
-            if (!std.mem.eql(u8, tc, "none") and !std.mem.eql(u8, tc, "auto"))
-                return self.fail(ErrorInfo.unsupported("function calling is not supported by this server", "tool_choice"));
-        }
         if (try self.optInt(obj, "n", 1)) |n| {
             if (n != 1) return self.fail(ErrorInfo.unsupported("only n=1 is supported by this server", "n"));
         }
+
+        const tools_json = try self.applyToolChoice(try self.parseChatTools());
 
         // messages
         const messages_v = self.optField(obj, "messages") orelse
             return self.failInvalid("missing \"messages\"", "messages");
         if (messages_v != .array) return self.failInvalid("expected an array", "messages");
         var messages: std.ArrayList(llm.chat.Message) = .empty;
+        var tool_fold: std.ArrayList(u8) = .empty;
         for (messages_v.array.items) |mv| {
             if (mv != .object) return self.failInvalid("messages must be objects", "messages");
             const mobj = mv.object;
             const role_s = (try self.optString(mobj, "role")) orelse
                 return self.failInvalid("message missing \"role\"", "messages");
+
+            if (std.mem.eql(u8, role_s, "tool")) {
+                if (self.info.tool_style == .none)
+                    return self.fail(ErrorInfo.unsupported("tool messages are not supported by this model backend", "messages"));
+                const content_v = self.optField(mobj, "content") orelse
+                    return self.failInvalid("tool message missing \"content\"", "messages");
+                toolcall.appendResponseSection(self.arena, &tool_fold, try self.contentText(content_v, "messages")) catch return error.OutOfMemory;
+                continue;
+            }
+            if (std.mem.eql(u8, role_s, "function"))
+                return self.fail(ErrorInfo.unsupported("the legacy functions API is not supported; use tool messages", "messages"));
+
+            try self.flushToolResponses(&messages, &tool_fold);
+
             const role: llm.chat.Message.Role = if (std.mem.eql(u8, role_s, "system") or std.mem.eql(u8, role_s, "developer"))
                 .system
             else if (std.mem.eql(u8, role_s, "user"))
                 .user
             else if (std.mem.eql(u8, role_s, "assistant"))
                 .assistant
-            else if (std.mem.eql(u8, role_s, "tool") or std.mem.eql(u8, role_s, "function"))
-                return self.fail(ErrorInfo.unsupported("tool messages are not supported by this server", "messages"))
             else
                 return self.failInvalid("unknown message role", "messages");
-            if (self.optField(mobj, "tool_calls") != null)
-                return self.fail(ErrorInfo.unsupported("tool messages are not supported by this server", "messages"));
-            const content_v = self.optField(mobj, "content") orelse
+
+            const calls_v = self.optField(mobj, "tool_calls");
+            if (calls_v != null and self.info.tool_style == .none)
+                return self.fail(ErrorInfo.unsupported("tool messages are not supported by this model backend", "messages"));
+            if (calls_v != null and role != .assistant)
+                return self.failInvalid("tool_calls belong on assistant messages", "messages");
+
+            var turn: std.ArrayList(u8) = .empty;
+            if (self.optField(mobj, "content")) |content_v| {
+                turn.appendSlice(self.arena, try self.contentText(content_v, "messages")) catch return error.OutOfMemory;
+            } else if (calls_v == null) {
+                // Content is optional only on a call-carrying assistant turn.
                 return self.failInvalid("message missing \"content\"", "messages");
-            try messages.append(self.arena, .{
-                .role = role,
-                .content = try self.contentText(content_v, "messages"),
-            });
+            }
+            if (calls_v) |cv| {
+                if (cv != .array) return self.failInvalid("expected an array", "messages");
+                for (cv.array.items) |tcv| {
+                    if (tcv != .object) return self.failInvalid("tool_calls must be objects", "messages");
+                    const fv = self.optField(tcv.object, "function") orelse
+                        return self.failInvalid("tool call missing \"function\"", "messages");
+                    if (fv != .object) return self.failInvalid("expected an object", "messages");
+                    const name = (try self.optString(fv.object, "name")) orelse
+                        return self.failInvalid("tool call missing function \"name\"", "messages");
+                    const args = (try self.optString(fv.object, "arguments")) orelse "{}";
+                    toolcall.appendCallSection(self.arena, &turn, name, args) catch return error.OutOfMemory;
+                }
+            }
+            try messages.append(self.arena, .{ .role = role, .content = turn.items });
         }
+        try self.flushToolResponses(&messages, &tool_fold);
+        try self.applyTools(&parsed, &messages, tools_json);
         parsed.gen.messages = messages.items;
 
         if (self.optField(obj, "response_format")) |rf|
@@ -406,17 +580,14 @@ const Parser = struct {
         try self.rejectField(obj, "conversation", "this server is stateless and has no conversation store");
         try self.rejectField(obj, "prompt", "stored prompt templates are not supported by this server");
         try self.rejectField(obj, "background", "background responses are not supported by this server");
-        if (self.optField(obj, "tools")) |tools_v| {
-            if (tools_v != .array) return self.failInvalid("expected an array", "tools");
-            if (tools_v.array.items.len > 0)
-                return self.fail(ErrorInfo.unsupported("tools are not supported by this server", "tools"));
-        }
+        const tools_json = try self.applyToolChoice(try self.parseResponsesTools());
         if (try self.optString(obj, "truncation")) |tr| {
             if (!std.mem.eql(u8, tr, "disabled"))
                 return self.fail(ErrorInfo.unsupported("only truncation=\"disabled\" is supported", "truncation"));
         }
 
         var messages: std.ArrayList(llm.chat.Message) = .empty;
+        var tool_fold: std.ArrayList(u8) = .empty;
 
         // instructions -> leading system message.
         if (try self.optString(obj, "instructions")) |instructions|
@@ -443,6 +614,7 @@ const Parser = struct {
                         return self.failInvalid("unknown message role", "input");
                     const content_v = self.optField(iobj, "content") orelse
                         return self.failInvalid("message item missing \"content\"", "input");
+                    try self.flushToolResponses(&messages, &tool_fold);
                     try messages.append(self.arena, .{
                         .role = role,
                         .content = try self.contentText(content_v, "input"),
@@ -450,17 +622,30 @@ const Parser = struct {
                 } else if (std.mem.eql(u8, itype, "reasoning")) {
                     // Prior-turn reasoning items (Codex replays them): the
                     // reference templates drop prior reasoning, so do we.
-                } else if (std.mem.eql(u8, itype, "function_call") or
-                    std.mem.eql(u8, itype, "function_call_output") or
-                    std.mem.eql(u8, itype, "item_reference"))
-                {
-                    return self.fail(ErrorInfo.unsupported("tool items are not supported by this server", "input"));
+                } else if (std.mem.eql(u8, itype, "function_call")) {
+                    if (self.info.tool_style == .none)
+                        return self.fail(ErrorInfo.unsupported("tool items are not supported by this model backend", "input"));
+                    const name = (try self.optString(iobj, "name")) orelse
+                        return self.failInvalid("function_call item missing \"name\"", "input");
+                    const args = (try self.optString(iobj, "arguments")) orelse "{}";
+                    try self.flushToolResponses(&messages, &tool_fold);
+                    try self.appendCallToAssistant(&messages, name, args);
+                } else if (std.mem.eql(u8, itype, "function_call_output")) {
+                    if (self.info.tool_style == .none)
+                        return self.fail(ErrorInfo.unsupported("tool items are not supported by this model backend", "input"));
+                    const output = (try self.optString(iobj, "output")) orelse
+                        return self.failInvalid("function_call_output item missing \"output\"", "input");
+                    toolcall.appendResponseSection(self.arena, &tool_fold, output) catch return error.OutOfMemory;
+                } else if (std.mem.eql(u8, itype, "item_reference")) {
+                    return self.fail(ErrorInfo.unsupported("item references need a conversation store; this server is stateless", "input"));
                 } else {
                     return self.fail(ErrorInfo.unsupported("unsupported input item type", "input"));
                 }
             },
             else => return self.failInvalid("input must be a string or an array of items", "input"),
         }
+        try self.flushToolResponses(&messages, &tool_fold);
+        try self.applyTools(&parsed, &messages, tools_json);
         parsed.gen.messages = messages.items;
 
         if (self.optField(obj, "text")) |text_v| {
@@ -580,5 +765,101 @@ test "responses parse: input forms, instructions, statelessness" {
     {
         const outcome = parse(arena, .responses, "{\"input\":\"x\",\"previous_response_id\":\"resp_123\"}", info);
         try std.testing.expectEqualStrings("previous_response_id", outcome.err.param.?);
+    }
+}
+
+test "chat parse: tools render into the system slot, history folds" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const info = types.Info{ .model_id = "t", .context_len = 8192, .tool_style = .hermes };
+
+    const body =
+        \\{"messages":[
+        \\  {"role":"system","content":"Be terse."},
+        \\  {"role":"user","content":"weather?"},
+        \\  {"role":"assistant","tool_calls":[{"id":"call_1","type":"function",
+        \\    "function":{"name":"get_weather","arguments":"{\"city\": \"Paris\"}"}}]},
+        \\  {"role":"tool","tool_call_id":"call_1","content":"22C"},
+        \\  {"role":"tool","tool_call_id":"call_1","content":"sunny"},
+        \\  {"role":"user","content":"and tomorrow?"}
+        \\ ],
+        \\ "tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}}]}
+    ;
+    const p = parse(arena, .chat, body, info).ok;
+    try std.testing.expect(p.tools_active);
+    // system + user + assistant(with call) + folded tool turn + user
+    try std.testing.expectEqual(@as(usize, 5), p.gen.messages.len);
+    try std.testing.expectEqual(llm.chat.Message.Role.system, p.gen.messages[0].role);
+    try std.testing.expect(std.mem.startsWith(u8, p.gen.messages[0].content, "Be terse.\n\n# Tools\n\n"));
+    try std.testing.expect(std.mem.indexOf(u8, p.gen.messages[0].content, "\"name\":\"get_weather\"") != null);
+    try std.testing.expectEqualStrings(
+        "\n<tool_call>\n{\"name\":\"get_weather\",\"arguments\":{\"city\": \"Paris\"}}\n</tool_call>",
+        p.gen.messages[2].content,
+    );
+    try std.testing.expectEqual(llm.chat.Message.Role.user, p.gen.messages[3].role);
+    try std.testing.expectEqualStrings(
+        "<tool_response>\n22C\n</tool_response>\n<tool_response>\nsunny\n</tool_response>",
+        p.gen.messages[3].content,
+    );
+
+    // tool_choice "none" drops the declarations.
+    {
+        const none_body =
+            \\{"messages":[{"role":"user","content":"x"}],"tool_choice":"none",
+            \\ "tools":[{"type":"function","function":{"name":"f"}}]}
+        ;
+        const q = parse(arena, .chat, none_body, info).ok;
+        try std.testing.expect(!q.tools_active);
+        try std.testing.expectEqual(llm.chat.Message.Role.user, q.gen.messages[0].role);
+    }
+    // "required" and named forcing cannot be guaranteed.
+    {
+        const req_body =
+            \\{"messages":[{"role":"user","content":"x"}],"tool_choice":"required",
+            \\ "tools":[{"type":"function","function":{"name":"f"}}]}
+        ;
+        try std.testing.expectEqualStrings("tool_choice", parse(arena, .chat, req_body, info).err.param.?);
+    }
+    // Backends without a tool convention keep rejecting.
+    {
+        const no_style = types.Info{ .model_id = "t", .context_len = 8192 };
+        const tool_body = "{\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}]}";
+        try std.testing.expectEqualStrings("tools", parse(arena, .chat, tool_body, no_style).err.param.?);
+    }
+}
+
+test "responses parse: flat tools, function_call items join the turn" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const info = types.Info{ .model_id = "t", .context_len = 8192, .tool_style = .hermes };
+
+    const body =
+        \\{"input":[
+        \\  {"role":"user","content":"weather?"},
+        \\  {"type":"message","role":"assistant","content":"Checking."},
+        \\  {"type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{\"city\": \"Paris\"}"},
+        \\  {"type":"function_call_output","call_id":"call_1","output":"22C"},
+        \\  {"role":"user","content":"thanks"}
+        \\ ],
+        \\ "tools":[{"type":"function","name":"get_weather","description":"d","parameters":{"type":"object"}}]}
+    ;
+    const p = parse(arena, .responses, body, info).ok;
+    try std.testing.expect(p.tools_active);
+    // tools-system + user + assistant(text+call) + folded output + user
+    try std.testing.expectEqual(@as(usize, 5), p.gen.messages.len);
+    try std.testing.expectEqual(llm.chat.Message.Role.system, p.gen.messages[0].role);
+    try std.testing.expect(std.mem.indexOf(u8, p.gen.messages[0].content, "{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"d\",\"parameters\":{\"type\":\"object\"}}}") != null);
+    try std.testing.expectEqualStrings(
+        "Checking.\n<tool_call>\n{\"name\":\"get_weather\",\"arguments\":{\"city\": \"Paris\"}}\n</tool_call>",
+        p.gen.messages[2].content,
+    );
+    try std.testing.expectEqualStrings("<tool_response>\n22C\n</tool_response>", p.gen.messages[3].content);
+
+    // Hosted tool types stay rejected.
+    {
+        const hosted = "{\"input\":\"x\",\"tools\":[{\"type\":\"web_search\"}]}";
+        try std.testing.expectEqualStrings("tools", parse(arena, .responses, hosted, info).err.param.?);
     }
 }
