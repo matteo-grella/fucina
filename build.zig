@@ -1252,6 +1252,26 @@ pub fn build(b: *std.Build) void {
     const q5kmoe_bench_step = b.step("bench-q5kmoe", "Q5_K MoE-expert matmul: per-row vs 4-row lane-packed col-outer");
     q5kmoe_bench_step.dependOn(&q5kmoe_bench_cmd.step);
 
+    const q8gemv_bench_exe = b.addExecutable(.{
+        .name = "fucina-q8gemv-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/q8gemv.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    q8gemv_bench_exe.root_module.addImport("raw_backend", raw_backend_module);
+    // Uses std.heap.c_allocator directly (see q5kmoe above).
+    q8gemv_bench_exe.root_module.link_libc = true;
+    configureBlas(q8gemv_bench_exe, blas_kind);
+    configureGpu(b, q8gemv_bench_exe, gpu_kind);
+    const q8gemv_bench_cmd = b.addRunArtifact(q8gemv_bench_exe);
+    if (b.args) |args| {
+        q8gemv_bench_cmd.addArgs(args);
+    }
+    const q8gemv_bench_step = b.step("bench-q8gemv", "q8_0 skinny-m decode GEMV: per-row vs x4 interleaved vs lane-packed lhs");
+    q8gemv_bench_step.dependOn(&q8gemv_bench_cmd.step);
+
     const ternary_bench_exe = b.addExecutable(.{
         .name = "fucina-ternary-bench",
         .root_module = b.createModule(.{

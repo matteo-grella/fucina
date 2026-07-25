@@ -633,10 +633,11 @@ test "public splitSwiGlu packed Q8_0x4 RHS dot matches unfused path" {
     ctx.init(allocator);
     defer ctx.deinit();
 
+    // m=1: the decode reroute (fused f32 row + plain-lhs x4 kernel);
     // m=13: LHS quantization scratch fits the 512-block stack fast path;
     // m=1027: 257 row groups x 2 blocks/row = 514 blocks, crossing into the
     // pooled ScratchLease fallback.
-    for ([_]usize{ 13, 1027 }) |m| {
+    for ([_]usize{ 1, 13, 1027 }) |m| {
         const n = 12;
         const k = 64;
         const blocks_per_row = k / dtype_mod.q8_0_block_size;

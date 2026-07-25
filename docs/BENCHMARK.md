@@ -257,6 +257,21 @@ ternary decode is compute-bound, with ~3.7x of memory headroom, while
 8-thread decode at that per-core rate sits right at the ~120 GB/s
 aggregate wall.
 
+### q8_0 skinny-m GEMV
+
+`bench/q8gemv.zig` measures the three live q8_0 decode paths
+single-threaded (`zig build bench-q8gemv -Doptimize=ReleaseFast`): the
+per-row column-major tile (the MoE-expert / unpacked route), the
+x4-interleaved-rhs kernel `PackedRhs(.q8_0)` serves for generic linears,
+and the lane-packed-lhs kernel behind the fused split-SwiGLU projection.
+Reference figures, M1 Max at m=1, n=k=4096: **x4 ~58 GB/s** weight stream
+(~96% of the single-thread ceiling — memory-bound), **per-row tile
+~35 GB/s**, **lane-packed ~32 GB/s**. The lane-packed kernel pays all four
+sdot lanes regardless of m — a compute ceiling, which is why the
+split-SwiGLU route sends m == 1 through the plain-lhs x4 kernel instead —
+and from two row groups up both packed tiles go column-outer, streaming
+the rhs once instead of once per row group.
+
 ### Manual commands
 
 Fucina (comma-separated token IDs; the values are fixtures, the length is

@@ -566,3 +566,105 @@ test "ggml_q8_0 randomized blocks: row-outer matmul matches scalar reference" {
         }
     }
 }
+
+test "ggml_q8_0 single-row chunked sdot path matches scalar reference" {
+    // The aarch64 single-row (decode GEMV) path processes four blocks per
+    // step with a pre-converted row-scale strip and a batched rhs-scale
+    // convert. Shapes chosen to hit the four-block chunk loop, the
+    // block-remainder loop, and the column tail (n % 4 != 0).
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x9e3779b97f4a7c15);
+    const random = prng.random();
+
+    const configs = [_]struct { blocks_per_row: usize, n: usize }{
+        .{ .blocks_per_row = 5, .n = 6 },
+        .{ .blocks_per_row = 8, .n = 4 },
+    };
+
+    inline for (configs) |config| {
+        const blocks_per_row = config.blocks_per_row;
+        const n = config.n;
+        const k = blocks_per_row * q8_0_block_size;
+
+        var lhs_blocks: [blocks_per_row]BlockQ8_0 = undefined;
+        for (&lhs_blocks) |*blk| fillRandomBlockQ8_0(blk, random, false);
+
+        const rhs_blocks = try allocator.alloc(BlockQ8_0, n * blocks_per_row);
+        for (rhs_blocks) |*blk| fillRandomBlockQ8_0(blk, random, true);
+
+        var rhs = QuantizedMatmulRhsQ8_0{
+            .rows = .{
+                .allocator = allocator,
+                .blocks = rhs_blocks,
+                .rows = n,
+                .cols = k,
+                .blocks_per_row = blocks_per_row,
+            },
+            .k = k,
+            .n = n,
+        };
+        defer rhs.deinit();
+
+        var out: [n]f32 = undefined;
+        matmulQ8_0RhsTile(&out, &lhs_blocks, &rhs, n, 0, 1, 0, n);
+
+        for (0..n) |j| {
+            var expected: f32 = 0;
+            for (0..blocks_per_row) |bi| {
+                expected += refDotQ8_0Q8_0(&lhs_blocks[bi], &rhs_blocks[j * blocks_per_row + bi]);
+            }
+            if (comptime builtin.cpu.arch == .aarch64) {
+                try std.testing.expectApproxEqRel(expected, out[j], 1e-5);
+            } else {
+                try std.testing.expectEqual(expected, out[j]);
+            }
+        }
+    }
+}
+
+test "ggml_q8_0x4 padded ColsFirst matches per-row reference and guards the tail rows" {
+    // m=5 -> two row groups, three padding lanes in the last: routes through
+    // the guarded column-outer path. `out` is sized exactly m*n, so a write
+    // to any padding row would trip the out-of-bounds safety check.
+    const allocator = std.testing.allocator;
+    const m = 5;
+    const n = 8;
+    const k = 64;
+    const blocks_per_row = k / q8_0_block_size;
+
+    var lhs_values: [m * k]f32 = undefined;
+    for (&lhs_values, 0..) |*value, i| {
+        const signed: i32 = @as(i32, @intCast((i * 29 + 5) % 251)) - 125;
+        value.* = @as(f32, @floatFromInt(signed)) / 9.0;
+    }
+    var lhs = try Tensor.fromSlice(allocator, &.{ m, k }, &lhs_values);
+    defer lhs.deinit();
+
+    var rhs_values: [n * k]f32 = undefined;
+    for (&rhs_values, 0..) |*value, i| {
+        const signed: i32 = @as(i32, @intCast((i * 23 + 11) % 251)) - 125;
+        value.* = @as(f32, @floatFromInt(signed)) / 6.0;
+    }
+    var rhs_dense = try Tensor.fromSlice(allocator, &.{ n, k }, &rhs_values);
+    defer rhs_dense.deinit();
+
+    var lhs_plain: [m * blocks_per_row]BlockQ8_0 = undefined;
+    try quantizeRowsQ8_0Into(&lhs_plain, &lhs);
+
+    var lhs_padded: [((m + 3) / 4) * blocks_per_row]BlockQ8_0x4 = undefined;
+    try q8_0.quantizeRowsQ8_0x4PaddedInto(&lhs_padded, &lhs);
+
+    var rhs_rows = try quantizeRowsQ8_0(allocator, &rhs_dense);
+    defer rhs_rows.deinit();
+    var rhs = try packMatmulRhsQ8_0x4(allocator, rhs_rows.blocks, n, k, blocks_per_row);
+    defer rhs.deinit();
+
+    var ref: [m * n]f32 = undefined;
+    var got: [m * n]f32 = undefined;
+    matmulQ8_0x4RhsRange(&ref, &lhs_plain, &rhs, m, n, 0, m);
+    q8_0.matmulQ8_0x4PackedPaddedRhsRange(&got, &lhs_padded, &rhs, m, n);
+
+    for (ref, got) |expected, actual| {
+        try std.testing.expectApproxEqAbs(expected, actual, 1e-3);
+    }
+}

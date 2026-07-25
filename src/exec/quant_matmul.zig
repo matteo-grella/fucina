@@ -390,6 +390,22 @@ pub fn splitSwiGluMatmul2DWithPackedQ8_0x4Rhs(
     var gg = try self.prepareContiguousTyped(.f32, gate_up);
     defer gg.deinit();
 
+    // Decode (m == 1): the lane-packed kernel pads the single row to four
+    // sdot lanes and pays four-row compute for one row of output — measured
+    // at roughly half the weight-stream GB/s of the plain-lhs x4 kernel
+    // (bench-q8gemv). Materialize the fused SwiGLU row and take the
+    // plain-lhs route instead.
+    if (m == 1) {
+        var fused = try self.emptyRankTyped(.f32, 2, .{ 1, k });
+        defer fused.deinit();
+        backend_mod.quantized_matmul.splitSwiGluRowInto(fused.data(), gg.tensor().dataConst(), k);
+        var row_out = try self.emptyRankTyped(.f32, 2, .{ 1, rhs.n });
+        errdefer row_out.deinit();
+        self.enableNativeTypedMatmulPoolForWork(1, rhs.n, k);
+        try self.backend.matmul2DQuantizedRhsQ8_0x4(self.allocator, &row_out, &fused, rhs, 1, rhs.n, k);
+        return row_out;
+    }
+
     var out = try self.emptyRankTyped(.f32, 2, .{ m, rhs.n });
     errdefer out.deinit();
 

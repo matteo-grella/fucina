@@ -593,6 +593,7 @@ pub const matmulQ8_0x4PackedRhsTile = q8_0.matmulQ8_0x4PackedRhsTile;
 pub const matmulQ8_0x4RhsRange = q8_0.matmulQ8_0x4RhsRange;
 pub const matmulQ8_0x4RhsTile = q8_0.matmulQ8_0x4RhsTile;
 pub const packMatmulRhsQ8_0x4 = q8_0.packMatmulRhsQ8_0x4;
+pub const splitSwiGluRowInto = q8_0.splitSwiGluRowInto;
 pub const quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto = q8_0.quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto;
 pub const quantizeSplitSwiGluRowsQ8_0x4PaddedInto = q8_0.quantizeSplitSwiGluRowsQ8_0x4PaddedInto;
 pub const quantizeRowsQ8_0x4GroupsInto = q8_0.quantizeRowsQ8_0x4GroupsInto;

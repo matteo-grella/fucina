@@ -176,6 +176,27 @@ pub fn quantizeSplitSwiGluRowsQ8_0x4PaddedInto(
     quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto(blocks, data, rows, cols, blocks_per_row, 0, row_groups);
 }
 
+/// Fused SwiGLU row values for one row: `dst[i] = up[i] * silu(gate[i])`,
+/// where the gate half is `data[0..cols]` and the up half is
+/// `data[cols..2*cols]`. Same 4-lane formula and lane order as the fused
+/// quantizer below, so quantizing `dst` row-wise reproduces that path's
+/// q8_0 blocks exactly.
+pub fn splitSwiGluRowInto(dst: []f32, data: []const f32, cols: usize) void {
+    std.debug.assert(dst.len == cols);
+    std.debug.assert(data.len >= 2 * cols);
+    const one: QKV4f32 = @splat(1);
+    var i: usize = 0;
+    while (i + 4 <= cols) : (i += 4) {
+        const gate_v: QKV4f32 = data[i..][0..4].*;
+        const up_v: QKV4f32 = data[cols + i ..][0..4].*;
+        dst[i..][0..4].* = up_v * gate_v * (one / (one + @exp(-gate_v)));
+    }
+    while (i < cols) : (i += 1) {
+        const g = data[i];
+        dst[i] = data[cols + i] * g * (1.0 / (1.0 + @exp(-g)));
+    }
+}
+
 pub fn quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto(
     blocks: []BlockQ8_0x4,
     data: []const f32,
@@ -398,9 +419,71 @@ fn matmulQ8_0RhsTileAarch64(
         }
     }
 
+    // Single-row (decode GEMV) rows: the row's f16 block scales are converted
+    // to f32 once up front instead of once per column, rhs scales are
+    // converted four blocks at a time through the f16x4 lane convert, and
+    // each block's dot lands with one lane-indexed fused multiply-add.
+    // Even/odd block pairs feed separate accumulators so eight independent
+    // f32 chains stay in flight across the four-column tile.
     while (i < r1) : (i += 1) {
         const lhs_row = lhs_blocks[i * blocks_per_row ..][0..blocks_per_row];
+        var lhs_scales_buf: [q8_0_row_scale_strip]f32 = undefined;
         var j = c0;
+
+        if (blocks_per_row <= lhs_scales_buf.len) {
+            for (lhs_row, lhs_scales_buf[0..blocks_per_row]) |*b, *s| s.* = f16BitsToF32(b.d);
+            const lhs_scales = lhs_scales_buf[0..blocks_per_row];
+
+            while (j + q8_0_aarch64_tail_col_block <= c1) : (j += q8_0_aarch64_tail_col_block) {
+                var acc0 = [_]QKV4f32{@splat(0)} ** q8_0_aarch64_tail_col_block;
+                var acc1 = [_]QKV4f32{@splat(0)} ** q8_0_aarch64_tail_col_block;
+
+                var block_index: usize = 0;
+                while (block_index + 4 <= blocks_per_row) : (block_index += 4) {
+                    const ls: QKV4f32 = lhs_scales[block_index..][0..4].*;
+                    var lhs_lo: [4]QKV16i8 = undefined;
+                    var lhs_hi: [4]QKV16i8 = undefined;
+                    inline for (0..4) |b| {
+                        lhs_lo[b] = @bitCast(lhs_row[block_index + b].qs[0..16].*);
+                        lhs_hi[b] = @bitCast(lhs_row[block_index + b].qs[16..32].*);
+                    }
+                    inline for (0..q8_0_aarch64_tail_col_block) |c| {
+                        const col_blocks = rhs.rows.blocks[(j + c) * blocks_per_row + block_index ..][0..4];
+                        const rd: [4]u16 = .{ col_blocks[0].d, col_blocks[1].d, col_blocks[2].d, col_blocks[3].d };
+                        const scale4 = f16x4BitsToF32(rd) * ls;
+                        inline for (0..4) |b| {
+                            var dot: QKV4i32 = @splat(0);
+                            dot = sdotI8x16(dot, lhs_lo[b], @bitCast(col_blocks[b].qs[0..16].*));
+                            dot = sdotI8x16(dot, lhs_hi[b], @bitCast(col_blocks[b].qs[16..32].*));
+                            const dot_f: QKV4f32 = @floatFromInt(dot);
+                            if (b % 2 == 0) {
+                                acc0[c] = @mulAdd(QKV4f32, dot_f, @splat(scale4[b]), acc0[c]);
+                            } else {
+                                acc1[c] = @mulAdd(QKV4f32, dot_f, @splat(scale4[b]), acc1[c]);
+                            }
+                        }
+                    }
+                }
+                while (block_index < blocks_per_row) : (block_index += 1) {
+                    const lhs_block = &lhs_row[block_index];
+                    const lhs_lo: QKV16i8 = @bitCast(lhs_block.qs[0..16].*);
+                    const lhs_hi: QKV16i8 = @bitCast(lhs_block.qs[16..32].*);
+                    inline for (0..q8_0_aarch64_tail_col_block) |c| {
+                        const rhs_block = &rhs.rows.blocks[(j + c) * blocks_per_row + block_index];
+                        acc0[c] = accumulateQ8_0Aarch64(
+                            acc0[c],
+                            lhs_block.d,
+                            lhs_lo,
+                            lhs_hi,
+                            rhs_block.d,
+                            @bitCast(rhs_block.qs[0..16].*),
+                            @bitCast(rhs_block.qs[16..32].*),
+                        );
+                    }
+                }
+                inline for (0..q8_0_aarch64_tail_col_block) |c| out[i * n + j + c] = @reduce(.Add, acc0[c] + acc1[c]);
+            }
+        }
 
         while (j + q8_0_aarch64_tail_col_block <= c1) : (j += q8_0_aarch64_tail_col_block) {
             var acc = [_]QKV4f32{@splat(0)} ** q8_0_aarch64_tail_col_block;
@@ -545,8 +628,11 @@ pub fn matmulQ8_0x4PackedRhsTile(
     std.debug.assert(c0 % 4 == 0);
     std.debug.assert(c1 % 4 == 0);
 
-    if (r1 - r0 >= 128) {
-        matmulQ8_0x4PackedRhsTileColsFirst(out, lhs_blocks, rhs, n, r0, r1, c0, c1);
+    // Column-outer from two row groups up: each rhs group column is streamed
+    // once while the (much smaller) lhs strips stay cache-resident, instead
+    // of re-streaming the whole rhs once per row group.
+    if (r1 - r0 >= 8) {
+        matmulQ8_0x4PackedRhsTileColsFirst(out, lhs_blocks, rhs, n, r0, r1, c0, c1, false, r1);
         return;
     }
 
@@ -585,6 +671,8 @@ fn matmulQ8_0x4PackedRhsTileColsFirst(
     r1: usize,
     c0: usize,
     c1: usize,
+    comptime guard_rows: bool,
+    m: usize,
 ) void {
     const blocks_per_row = rhs.blocks_per_group;
     const row_group_tile = 8;
@@ -613,15 +701,19 @@ fn matmulQ8_0x4PackedRhsTileColsFirst(
 
                 inline for (0..4) |r| {
                     const row_a = row_group * 4 + r;
-                    out[row_a * n + j + 0] = acc_a[r][0];
-                    out[row_a * n + j + 1] = acc_a[r][1];
-                    out[row_a * n + j + 2] = acc_a[r][2];
-                    out[row_a * n + j + 3] = acc_a[r][3];
+                    if (!guard_rows or row_a < m) {
+                        out[row_a * n + j + 0] = acc_a[r][0];
+                        out[row_a * n + j + 1] = acc_a[r][1];
+                        out[row_a * n + j + 2] = acc_a[r][2];
+                        out[row_a * n + j + 3] = acc_a[r][3];
+                    }
                     const row_b = (row_group + 1) * 4 + r;
-                    out[row_b * n + j + 0] = acc_b[r][0];
-                    out[row_b * n + j + 1] = acc_b[r][1];
-                    out[row_b * n + j + 2] = acc_b[r][2];
-                    out[row_b * n + j + 3] = acc_b[r][3];
+                    if (!guard_rows or row_b < m) {
+                        out[row_b * n + j + 0] = acc_b[r][0];
+                        out[row_b * n + j + 1] = acc_b[r][1];
+                        out[row_b * n + j + 2] = acc_b[r][2];
+                        out[row_b * n + j + 3] = acc_b[r][3];
+                    }
                 }
             }
             // Odd trailing row-group.
@@ -637,10 +729,12 @@ fn matmulQ8_0x4PackedRhsTileColsFirst(
 
                 inline for (0..4) |r| {
                     const row = row_group * 4 + r;
-                    out[row * n + j + 0] = acc[r][0];
-                    out[row * n + j + 1] = acc[r][1];
-                    out[row * n + j + 2] = acc[r][2];
-                    out[row * n + j + 3] = acc[r][3];
+                    if (!guard_rows or row < m) {
+                        out[row * n + j + 0] = acc[r][0];
+                        out[row * n + j + 1] = acc[r][1];
+                        out[row * n + j + 2] = acc[r][2];
+                        out[row * n + j + 3] = acc[r][3];
+                    }
                 }
             }
         }
@@ -674,6 +768,12 @@ pub fn matmulQ8_0x4PackedPaddedRhsTile(
 
     const blocks_per_row = rhs.blocks_per_group;
     const row_groups = (m + 3) / 4;
+    // Same column-outer dispatch as the unpadded tile; only the writes need
+    // the row guard (padding lanes live in the final row group).
+    if (row_groups >= 2) {
+        matmulQ8_0x4PackedRhsTileColsFirst(out, lhs_blocks, rhs, n, 0, row_groups * 4, c0, c1, true, m);
+        return;
+    }
     var row_group: usize = 0;
     while (row_group < row_groups) : (row_group += 1) {
         var j = c0;
@@ -1560,6 +1660,9 @@ test {
 const q8_0_col_block: usize = 3;
 const q8_0_aarch64_col_block: usize = 4;
 const q8_0_aarch64_tail_col_block: usize = 4;
+// Stack strip for the single-row path's pre-converted lhs block scales:
+// covers k up to 32768; longer rows fall back to the per-column-convert loop.
+const q8_0_row_scale_strip: usize = 1024;
 
 // Scalar reference replica of dotQ8_0Q8_0: exact i32 integer dot, identical
 // f32 expression shape — comparisons against it are BIT-EXACT on every target.
