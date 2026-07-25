@@ -1,9 +1,10 @@
-# LMSERVER — the OpenAI-compatible language-model server example
+# LMSERVER — the OpenAI- and Anthropic-compatible language-model server example
 
 `zig build lmserve` (`examples/lmserve/main.zig` + `examples/lmserve/`) exposes the
-in-tree language models behind the two OpenAI wire dialects. It is an
-example, not a library surface: the shared code lives under `examples/lmserve/`
-and integrates a model family through one small `Backend` vtable.
+in-tree language models behind the two OpenAI wire dialects plus the
+Anthropic Messages API. It is an example, not a library surface: the shared
+code lives under `examples/lmserve/` and integrates a model family through
+one small `Backend` vtable.
 
 ```sh
 # qwen3 / qwen3moe / qwen35 / gemma4 / diffusion-gemma / inkling GGUFs (arch auto-detected)
@@ -14,12 +15,15 @@ zig build lmserve -Dllguidance=true -Doptimize=ReleaseFast -- \
 zig build lmserve -Doptimize=ReleaseFast -- --nanochat runs/sft --port 8080
 ```
 
-Endpoints: `POST /v1/chat/completions`, `POST /v1/responses` (both also
-unprefixed), `GET /v1/models`, `GET /health`. Flags: `--host --port --ctx
---api-key --queue --conns --experts=borrow --nanochat` (see `--help`).
-Point any OpenAI client at `http://host:port/v1`; the loaded model's id is
-whatever `GET /v1/models` reports (the request's `model` field is accepted
-and ignored — one process serves one model).
+Endpoints: `POST /v1/chat/completions`, `POST /v1/responses`,
+`POST /v1/messages` (all also unprefixed), `GET /v1/models`, `GET /health`.
+Flags: `--host --port --ctx --api-key --queue --conns --experts=borrow
+--nanochat` (see `--help`). Point any OpenAI client at
+`http://host:port/v1` — or any Anthropic client (Claude Code:
+`ANTHROPIC_BASE_URL=http://host:port`) at the messages endpoint; `--api-key`
+is honored as `Authorization: Bearer` or `x-api-key`. The loaded model's id
+is whatever `GET /v1/models` reports (the request's `model` field is
+accepted and ignored — one process serves one model).
 
 ## Design: accept concurrently, generate sequentially
 
@@ -158,6 +162,24 @@ HTTP status codes (the SDKs dispatch on status). Mid-stream failures arrive
 in-band: chat as a `data:` frame with a top-level `error` key, responses as
 an `error` event followed by `response.failed`.
 
+**Anthropic Messages** (`/v1/messages`, `examples/lmserve/anthropic.zig`) is
+a translation layer over the same normalized request — honored: `system`
+(string or text blocks), `messages` with text blocks (prior-turn
+`thinking`/`redacted_thinking` blocks are dropped like the responses
+dialect's replayed reasoning items), `temperature`/`top_p` (0..1)/`top_k`,
+required `max_tokens`, `stream`, `thinking` (`enabled`/`adaptive` switch
+the reasoning channel on where one exists; a no-op otherwise, so
+thinking-by-default clients stay usable), `output_config.format`
+(`json_schema` → the same llguidance constraint). `tools` declarations are
+accepted and dropped — the server never emits `tool_use`, valid under
+`tool_choice: "auto"` — while forced tool calls, `tool_use`/`tool_result`
+history blocks, images/documents, and `stop_sequences` (the engine stops on
+them but does not report which sequence fired, so
+`stop_reason`/`stop_sequence` could not be attributed) are rejected
+explicitly. Errors use the Anthropic envelope
+`{"type":"error","error":{type,message}}` with the type derived from the
+status; mid-stream failures arrive as an `error` event.
+
 ## Streaming contracts
 
 - **Chat**: `data:`-only SSE, `chat.completion.chunk` deltas
@@ -171,23 +193,34 @@ an `error` event followed by `response.failed`.
   `.done` mirrors → `response.completed` / `response.incomplete` (budget) /
   `response.failed`. Reasoning streams as its own output item
   (`response.reasoning_text.delta`).
+- **Anthropic Messages**: `event:` + `data:` framing, no `[DONE]`:
+  `message_start` (skeleton; usage zeroed — prompt tokens are only known
+  once generation finishes) → `content_block_start`/`content_block_delta`/
+  `content_block_stop` per block (`thinking` first when reasoning streams,
+  closed by an empty `signature_delta`; then `text`) → `message_delta`
+  (`stop_reason` `end_turn`/`max_tokens`, full usage incl.
+  `cache_read_input_tokens` from the KV prefix reuse) → `message_stop`.
+  `ping` keepalives are not sent (optional in the protocol).
 - Deltas are UTF-8-boundary-safe: a token ending mid-code-point carries into
   the next frame instead of corrupting the JSON.
 - Verified against openai-python 2.45.0 end-to-end (both dialects, stream +
-  non-stream, strict stream helper, structured outputs, error types).
+  non-stream, strict stream helper, structured outputs, error types);
+  `/v1/messages` verified live with Claude Code as the client.
 
 ## Reasoning and the `<think>` head
 
 Reasoning is OFF by default (JSON-first serving; a grammar constraint forces
 it off — the constraint governs the reply from token 0,
 CONSTRAINED-DECODING.md §7). Clients enable it per request via
-`reasoning_effort` / `reasoning.effort`; anything but `none`/`minimal` needs
-`caps.think` (qwen3 only today). The emitter scans the reply head whenever
-the family has think markers: a leading `<think>…</think>` block routes to
-`reasoning_content` (chat) or a reasoning output item (responses), and the
-stray leading `</think>` qwen3 emits under the primed-empty think block of
-no-think prompts is dropped as a template artifact — OpenAI `content` stays
-clean either way.
+`reasoning_effort` / `reasoning.effort` / `thinking` (anthropic messages);
+on the OpenAI dialects anything but `none`/`minimal` needs `caps.think`
+(qwen3 only today). The emitter scans the reply head whenever the family
+has think markers: a leading `<think>…</think>` block routes to
+`reasoning_content` (chat), a reasoning output item (responses), or a
+`thinking` content block (anthropic messages), and the stray leading
+`</think>` qwen3 emits under the primed-empty think block of no-think
+prompts is dropped as a template artifact — reply `content` stays clean
+either way.
 
 ## Constrained output
 

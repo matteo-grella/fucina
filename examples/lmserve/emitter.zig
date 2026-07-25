@@ -1,10 +1,12 @@
 //! Per-request response emission. The backend streams raw reply bytes into
 //! `Emitter.sink()`; the emitter routes reasoning-block text (qwen3
 //! `<think>…</think>`) away from the content channel, frames deltas in the
-//! requested dialect (Chat Completions chunks / Responses semantic events),
-//! and builds the final bodies. Threading contract: the WORKER drives the
-//! sink between job states running->finished; the CONNECTION thread calls
-//! `finish` afterwards — never concurrently.
+//! requested wire dialect (Chat Completions chunks / Responses semantic
+//! events / Anthropic Messages events, where the reasoning channel becomes
+//! `thinking` content blocks), and builds the final bodies. Threading
+//! contract: the WORKER drives the sink between job states
+//! running->finished; the CONNECTION thread calls `finish` afterwards —
+//! never concurrently.
 //!
 //! Streaming responses start lazily on the first delta: a request that fails
 //! before producing anything (bad grammar, context overflow) still gets a
@@ -14,10 +16,16 @@
 const std = @import("std");
 const types = @import("types.zig");
 const openai = @import("openai.zig");
+const anthropic = @import("anthropic.zig");
 const scheduler = @import("scheduler.zig");
 
 const Allocator = std.mem.Allocator;
 const Stringify = std.json.Stringify;
+
+/// The response wire shape. `chat`/`responses` share the OpenAI request
+/// parser (`openai.Dialect`); `anthropic` requests come from
+/// `anthropic.parse` — all three normalize into one `openai.Parsed`.
+pub const Wire = enum { chat, responses, anthropic };
 
 /// Deferred SSE start: implemented by the HTTP layer; writes the
 /// `text/event-stream` response head and returns the body writer.
@@ -31,7 +39,7 @@ pub const StreamStarter = struct {
 };
 
 pub const Config = struct {
-    dialect: openai.Dialect,
+    dialect: Wire,
     model_id: []const u8,
     /// Unix seconds, stamped at request arrival.
     created: i64,
@@ -66,6 +74,9 @@ pub const Emitter = struct {
     /// Set once the SSE head is written; frames may only follow.
     out: ?*std.Io.Writer = null,
     sent_role: bool = false,
+    /// Open-item state, shared by the wire shapes that stream typed blocks:
+    /// the Responses reasoning item / output message item, and the
+    /// Anthropic `thinking` / `text` content blocks.
     reasoning_item_open: bool = false,
     message_item_open: bool = false,
 
@@ -214,6 +225,16 @@ pub const Emitter = struct {
                     try self.endEvent();
                 },
             },
+            .anthropic => switch (channel) {
+                .reasoning => {
+                    try self.ensureAnthropicThinking();
+                    try self.anthropicDelta(self.reasoningIndex(), "thinking_delta", "thinking", delta);
+                },
+                .content => {
+                    try self.ensureAnthropicText();
+                    try self.anthropicDelta(self.messageIndex(), "text_delta", "text", delta);
+                },
+            },
         }
         try self.out.?.flush();
     }
@@ -248,6 +269,7 @@ pub const Emitter = struct {
             return .{ .body = switch (self.cfg.dialect) {
                 .chat => try self.buildChatBody(res),
                 .responses => try self.buildResponsesBody(res),
+                .anthropic => try self.buildAnthropicBody(res),
             } };
         }
 
@@ -343,6 +365,39 @@ pub const Emitter = struct {
                 try self.endEvent();
                 try self.out.?.flush();
             },
+            .anthropic => {
+                try self.closeAnthropicThinking();
+                // An empty reply still gets its (empty) text block: started
+                // blocks are the SDK stream accumulators' anchor.
+                try self.ensureAnthropicText();
+                try self.anthropicBlockStop(self.messageIndex());
+
+                try self.beginEvent("message_delta");
+                var s1 = self.eventJson();
+                try s1.beginObject();
+                try s1.objectField("type");
+                try s1.write("message_delta");
+                try s1.objectField("delta");
+                try s1.beginObject();
+                try s1.objectField("stop_reason");
+                try s1.write(anthropicStopReason(res.finish));
+                try s1.objectField("stop_sequence");
+                try s1.write(null);
+                try s1.endObject();
+                try s1.objectField("usage");
+                try self.writeAnthropicUsage(&s1, res);
+                try s1.endObject();
+                try self.endEvent();
+
+                try self.beginEvent("message_stop");
+                var s2 = self.eventJson();
+                try s2.beginObject();
+                try s2.objectField("type");
+                try s2.write("message_stop");
+                try s2.endObject();
+                try self.endEvent();
+                try self.out.?.flush();
+            },
         }
         return .streamed;
     }
@@ -392,6 +447,13 @@ pub const Emitter = struct {
                 try sf.endObject();
                 try self.endEvent();
             },
+            .anthropic => {
+                // The protocol's in-stream error event; the connection then
+                // closes without message_stop.
+                try self.beginEvent("error");
+                anthropic.writeErrorBody(info, self.out.?) catch return error.WriteFailed;
+                try self.endEvent();
+            },
         }
         try self.out.?.flush();
     }
@@ -401,17 +463,34 @@ pub const Emitter = struct {
     fn ensureStarted(self: *Emitter) !void {
         if (self.out != null) return;
         self.out = try self.cfg.starter.start();
-        if (self.cfg.dialect == .responses) {
-            inline for (.{ "response.created", "response.in_progress" }) |event| {
-                try self.beginEvent(event);
+        switch (self.cfg.dialect) {
+            .chat => {},
+            .responses => {
+                inline for (.{ "response.created", "response.in_progress" }) |event| {
+                    try self.beginEvent(event);
+                    var s = self.eventJson();
+                    try s.beginObject();
+                    try self.eventCommon(&s, event);
+                    try s.objectField("response");
+                    try self.writeResponseObject(&s, "in_progress", null, false, null);
+                    try s.endObject();
+                    try self.endEvent();
+                }
+            },
+            .anthropic => {
+                // The message skeleton. Usage is zeroed: prompt tokens are
+                // only known once generation finishes — the final
+                // message_delta carries the real numbers.
+                try self.beginEvent("message_start");
                 var s = self.eventJson();
                 try s.beginObject();
-                try self.eventCommon(&s, event);
-                try s.objectField("response");
-                try self.writeResponseObject(&s, "in_progress", null, false, null);
+                try s.objectField("type");
+                try s.write("message_start");
+                try s.objectField("message");
+                try self.writeAnthropicMessage(&s, null);
                 try s.endObject();
                 try self.endEvent();
-            }
+            },
         }
     }
 
@@ -874,12 +953,174 @@ pub const Emitter = struct {
         try self.writeResponseObject(&s, status, res, true, null);
         return aw.written();
     }
+
+    // ---- anthropic framing ----
+
+    /// One content_block_delta frame.
+    fn anthropicDelta(self: *Emitter, index: u32, delta_type: []const u8, field: []const u8, delta: []const u8) !void {
+        try self.beginEvent("content_block_delta");
+        var s = self.eventJson();
+        try s.beginObject();
+        try s.objectField("type");
+        try s.write("content_block_delta");
+        try s.objectField("index");
+        try s.write(index);
+        try s.objectField("delta");
+        try s.beginObject();
+        try s.objectField("type");
+        try s.write(delta_type);
+        try s.objectField(field);
+        try s.write(delta);
+        try s.endObject();
+        try s.endObject();
+        try self.endEvent();
+    }
+
+    fn anthropicBlockStop(self: *Emitter, index: u32) !void {
+        try self.beginEvent("content_block_stop");
+        var s = self.eventJson();
+        try s.beginObject();
+        try s.objectField("type");
+        try s.write("content_block_stop");
+        try s.objectField("index");
+        try s.write(index);
+        try s.endObject();
+        try self.endEvent();
+    }
+
+    fn anthropicBlockStart(self: *Emitter, index: u32, block_type: []const u8, text_field: []const u8) !void {
+        try self.beginEvent("content_block_start");
+        var s = self.eventJson();
+        try s.beginObject();
+        try s.objectField("type");
+        try s.write("content_block_start");
+        try s.objectField("index");
+        try s.write(index);
+        try s.objectField("content_block");
+        try s.beginObject();
+        try s.objectField("type");
+        try s.write(block_type);
+        try s.objectField(text_field);
+        try s.write("");
+        if (std.mem.eql(u8, block_type, "thinking")) {
+            try s.objectField("signature");
+            try s.write("");
+        }
+        try s.endObject();
+        try s.endObject();
+        try self.endEvent();
+    }
+
+    fn ensureAnthropicThinking(self: *Emitter) !void {
+        if (self.reasoning_item_open) return;
+        self.reasoning_item_open = true;
+        try self.anthropicBlockStart(self.reasoningIndex(), "thinking", "thinking");
+    }
+
+    /// Thinking blocks end with a signature_delta on the hosted API; a
+    /// local server has no signing key, so the signature is empty (and
+    /// replayed thinking blocks are dropped at parse time anyway).
+    fn closeAnthropicThinking(self: *Emitter) !void {
+        if (!self.reasoning_item_open) return;
+        self.reasoning_item_open = false;
+        try self.anthropicDelta(self.reasoningIndex(), "signature_delta", "signature", "");
+        try self.anthropicBlockStop(self.reasoningIndex());
+    }
+
+    fn ensureAnthropicText(self: *Emitter) !void {
+        if (self.message_item_open) return;
+        try self.closeAnthropicThinking();
+        self.message_item_open = true;
+        try self.anthropicBlockStart(self.messageIndex(), "text", "text");
+    }
+
+    /// Usage in the Messages shape. The cross-request KV prefix reuse is
+    /// reported as cache reads; this server writes no cache entries on
+    /// behalf of the client.
+    fn writeAnthropicUsage(self: *Emitter, s: *Stringify, res: ?types.GenerateResult) !void {
+        _ = self;
+        try s.beginObject();
+        try s.objectField("input_tokens");
+        try s.write(if (res) |r| r.prompt_tokens else 0);
+        try s.objectField("cache_creation_input_tokens");
+        try s.write(0);
+        try s.objectField("cache_read_input_tokens");
+        try s.write(if (res) |r| r.cached_tokens else 0);
+        try s.objectField("output_tokens");
+        try s.write(if (res) |r| r.completion_tokens else 0);
+        try s.endObject();
+    }
+
+    /// The Message object: `res == null` is the message_start skeleton
+    /// (empty content, null stop_reason, zeroed usage); with a result it is
+    /// the complete non-streaming body.
+    fn writeAnthropicMessage(self: *Emitter, s: *Stringify, res: ?types.GenerateResult) !void {
+        try s.beginObject();
+        try s.objectField("id");
+        try s.print("\"msg_{s}\"", .{&self.id_hex});
+        try s.objectField("type");
+        try s.write("message");
+        try s.objectField("role");
+        try s.write("assistant");
+        try s.objectField("model");
+        try s.write(self.cfg.model_id);
+        try s.objectField("content");
+        try s.beginArray();
+        if (res != null) {
+            if (self.reasoning.items.len > 0) {
+                try s.beginObject();
+                try s.objectField("type");
+                try s.write("thinking");
+                try s.objectField("thinking");
+                try s.write(self.reasoning.items);
+                try s.objectField("signature");
+                try s.write("");
+                try s.endObject();
+            }
+            // A thinking-only reply carries no text block; otherwise the
+            // text block is present even when empty.
+            if (self.content.items.len > 0 or self.reasoning.items.len == 0) {
+                try s.beginObject();
+                try s.objectField("type");
+                try s.write("text");
+                try s.objectField("text");
+                try s.write(self.content.items);
+                try s.endObject();
+            }
+        }
+        try s.endArray();
+        try s.objectField("stop_reason");
+        if (res) |r| {
+            try s.write(anthropicStopReason(r.finish));
+        } else {
+            try s.write(null);
+        }
+        try s.objectField("stop_sequence");
+        try s.write(null);
+        try s.objectField("usage");
+        try self.writeAnthropicUsage(s, res);
+        try s.endObject();
+    }
+
+    fn buildAnthropicBody(self: *Emitter, res: types.GenerateResult) ![]const u8 {
+        var aw = std.Io.Writer.Allocating.init(self.arena);
+        var s: Stringify = .{ .writer = &aw.writer };
+        try self.writeAnthropicMessage(&s, res);
+        return aw.written();
+    }
 };
 
 fn finishReasonName(finish: types.FinishReason) []const u8 {
     return switch (finish) {
         .stop => "stop",
         .length => "length",
+    };
+}
+
+fn anthropicStopReason(finish: types.FinishReason) []const u8 {
+    return switch (finish) {
+        .stop => "end_turn",
+        .length => "max_tokens",
     };
 }
 
@@ -1081,4 +1322,105 @@ test "think scanner: routes blocks, drops stray close, holds partial markers" {
         try std.testing.expectEqualStrings("c", r.content);
         try std.testing.expectEqualStrings("a </thing b", r.reasoning);
     }
+}
+
+/// Collects everything the emitter streams (the test stand-in for the HTTP
+/// layer's SSE starter).
+const CollectStarter = struct {
+    aw: std.Io.Writer.Allocating,
+
+    fn start(ptr: *anyopaque) anyerror!*std.Io.Writer {
+        const self: *CollectStarter = @ptrCast(@alignCast(ptr));
+        return &self.aw.writer;
+    }
+};
+
+/// Drive one full anthropic-wire generation: `reply` goes through the sink
+/// (think markers active), `res` finishes the job.
+fn runAnthropic(arena: Allocator, stream: bool, reply: []const u8, res: types.GenerateResult) !struct { outcome: Outcome, streamed_bytes: []const u8 } {
+    const parsed = try arena.create(openai.Parsed);
+    parsed.* = .{ .gen = .{ .messages = &.{}, .sampling = .{}, .max_tokens = 64 }, .stream = stream };
+    const starter = try arena.create(CollectStarter);
+    starter.* = .{ .aw = std.Io.Writer.Allocating.init(arena) };
+    const em = try arena.create(Emitter);
+    em.* = Emitter.init(arena, parsed, .{
+        .dialect = .anthropic,
+        .model_id = "test-model",
+        .created = 0,
+        .think_markers = .{ .open = "<think>", .close = "</think>" },
+        .starter = .{ .ptr = starter, .startFn = CollectStarter.start },
+    });
+    var dummy_buf: [1]u8 = undefined;
+    var dummy = std.Io.Writer.fixed(&dummy_buf);
+    const job = try arena.create(scheduler.Job);
+    job.* = .{ .req = parsed.gen, .sink = &dummy };
+    job.res = res;
+    em.job = job;
+
+    const sink = em.sink();
+    try sink.writeAll(reply);
+    try sink.flush();
+    const outcome = try em.finish(null);
+    return .{ .outcome = outcome, .streamed_bytes = starter.aw.written() };
+}
+
+fn expectOrdered(haystack: []const u8, needles: []const []const u8) !void {
+    var pos: usize = 0;
+    for (needles) |needle| {
+        const idx = std.mem.indexOfPos(u8, haystack, pos, needle) orelse {
+            std.debug.print("missing (after byte {d}): {s}\nin:\n{s}\n", .{ pos, needle, haystack });
+            return error.TestExpectedNeedle;
+        };
+        pos = idx + needle.len;
+    }
+}
+
+test "anthropic wire: streamed event sequence with thinking and text blocks" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const r = try runAnthropic(arena, true, "<think>plan</think>Hello", .{
+        .prompt_tokens = 7,
+        .completion_tokens = 3,
+        .cached_tokens = 2,
+        .finish = .stop,
+    });
+    try std.testing.expect(r.outcome == .streamed);
+    try expectOrdered(r.streamed_bytes, &.{
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_",
+        "\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":0,",
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"plan\"}}",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"\"}}",
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}",
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}",
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}",
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":7,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":2,\"output_tokens\":3}}",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}",
+    });
+}
+
+test "anthropic wire: non-streaming message body" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const r = try runAnthropic(arena, false, "<think>plan</think>Hello", .{
+        .prompt_tokens = 7,
+        .completion_tokens = 3,
+        .cached_tokens = 0,
+        .finish = .length,
+    });
+    const body = r.outcome.body;
+    try expectOrdered(body, &.{
+        "{\"id\":\"msg_",
+        "\"type\":\"message\",\"role\":\"assistant\",\"model\":\"test-model\",",
+        "\"content\":[{\"type\":\"thinking\",\"thinking\":\"plan\",\"signature\":\"\"},{\"type\":\"text\",\"text\":\"Hello\"}]",
+        "\"stop_reason\":\"max_tokens\",\"stop_sequence\":null",
+        "\"usage\":{\"input_tokens\":7,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":3}",
+    });
+    // Nothing was streamed on the non-stream path.
+    try std.testing.expectEqual(@as(usize, 0), r.streamed_bytes.len);
 }

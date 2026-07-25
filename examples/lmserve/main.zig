@@ -1,8 +1,10 @@
-//! OpenAI-compatible HTTP server over the in-tree language models: Chat
-//! Completions (`POST /v1/chat/completions`) plus the stateless Responses
-//! API (`POST /v1/responses`), with SSE streaming, JSON-schema/regex/Lark
-//! constrained output (`-Dllguidance=true` builds), and a bounded request
-//! queue in front of one sequential inference worker.
+//! OpenAI- and Anthropic-compatible HTTP server over the in-tree language
+//! models: Chat Completions (`POST /v1/chat/completions`), the stateless
+//! Responses API (`POST /v1/responses`), and the Anthropic Messages API
+//! (`POST /v1/messages` — Claude Code works against it), with SSE
+//! streaming, JSON-schema/regex/Lark constrained output
+//! (`-Dllguidance=true` builds), and a bounded request queue in front of
+//! one sequential inference worker.
 //!
 //! The model family is dispatched from the GGUF's `general.architecture`
 //! (qwen3 / qwen3moe / gemma4 / diffusion-gemma); nanochat checkpoints load
@@ -22,7 +24,7 @@ const scheduler_mod = @import("scheduler.zig");
 const http_mod = @import("http.zig");
 
 const usage_text =
-    \\fucina lmserve — OpenAI-compatible LM server (chat completions + responses)
+    \\fucina lmserve — OpenAI- and Anthropic-compatible LM server
     \\
     \\usage: zig build lmserve -Doptimize=ReleaseFast [-Dllguidance=true] -- <model.gguf> [flags]
     \\       zig build lmserve -Doptimize=ReleaseFast -- --nanochat <checkpoint dir> [flags]
@@ -72,10 +74,13 @@ const usage_text =
     \\  --rag-margin F      fleet: the adaptive switch margin (cosine units)
     \\
     \\Reasoning is off by default; clients enable it per request via
-    \\reasoning_effort (chat) or reasoning.effort (responses).
+    \\reasoning_effort (chat), reasoning.effort (responses), or thinking
+    \\(anthropic messages). Anthropic clients (Claude Code, the SDKs) point
+    \\ANTHROPIC_BASE_URL at this server; x-api-key carries --api-key.
     \\
     \\endpoints: POST /v1/chat/completions   POST /v1/responses
-    \\           GET  /v1/models             GET  /health
+    \\           POST /v1/messages           GET  /v1/models
+    \\           GET  /health
     \\
 ;
 
@@ -750,6 +755,7 @@ test {
     _ = @import("backend_diffusion.zig");
     _ = @import("scheduler.zig");
     _ = @import("openai.zig");
+    _ = @import("anthropic.zig");
     _ = @import("emitter.zig");
     _ = @import("http.zig");
 }

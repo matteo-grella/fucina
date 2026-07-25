@@ -76,7 +76,7 @@ zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --repl
 | `zig build diffusion-gemma` | DiffusionGemma 26B-A4B block text-diffusion (live inline denoising) | [examples/diffusion_gemma/README.md](../examples/diffusion_gemma/README.md) |
 | `zig build qwen35` | Qwen3.5 0.8B Gated-DeltaNet hybrid + Ternary-Bonsai-27B loader/parity harness | [examples/qwen35/README.md](../examples/qwen35/README.md) |
 | `zig build inkling` | Inkling 975B-A41B hybrid attention + MoE, text + image/audio towers | [examples/inkling/README.md](../examples/inkling/README.md) |
-| `zig build lmserve` | OpenAI-compatible HTTP server over the family backends | [examples/lmserve/README.md](../examples/lmserve/README.md) |
+| `zig build lmserve` | OpenAI- and Anthropic-compatible HTTP server over the family backends | [examples/lmserve/README.md](../examples/lmserve/README.md) |
 | `zig build omnivoice` | OmniVoice MaskGIT TTS: voice cloning/design, codec round-trip | [examples/omnivoice/README.md](../examples/omnivoice/README.md) |
 | `zig build parakeet` | Parakeet ASR (NeMo FastConformer): transcribe/stream/mic | [examples/parakeet/README.md](../examples/parakeet/README.md) |
 | `zig build locate-anything` | LocateAnything-3B open-vocabulary detection | [examples/locate_anything/README.md](../examples/locate_anything/README.md) |

@@ -1,9 +1,10 @@
-# lmserve — OpenAI-compatible LM server
+# lmserve — OpenAI- and Anthropic-compatible LM server
 
-One process serves one model behind `POST /v1/chat/completions` and the
-stateless `POST /v1/responses` (plus `GET /v1/models`, `GET /health`), with
-SSE streaming in both dialects. Point any OpenAI client at
-`http://host:port/v1`.
+One process serves one model behind `POST /v1/chat/completions`, the
+stateless `POST /v1/responses`, and the Anthropic Messages API
+`POST /v1/messages` (plus `GET /v1/models`, `GET /health`), with SSE
+streaming in all three dialects. Point any OpenAI client — or any Anthropic
+client, Claude Code included — at `http://host:port`.
 
 The GGUF's `general.architecture` picks the backend: `qwen3`, `qwen3moe`,
 `qwen35` (Qwen3.5 / Ternary-Bonsai), `gemma4`, `diffusion-gemma`, `inkling`;
@@ -104,6 +105,41 @@ curl -s http://127.0.0.1:8080/health
 The request's `model` field is accepted and ignored — one process serves one
 model; `GET /v1/models` reports its id.
 
+## Anthropic Messages API
+
+`POST /v1/messages` speaks the Anthropic wire shape — request translation
+into the same engine path, Messages response/SSE framing
+(`message_start` → `content_block_*` → `message_delta` → `message_stop`),
+and the Anthropic error envelope. `x-api-key` carries the `--api-key`
+value (`Authorization: Bearer` works too):
+
+```sh
+curl -s http://127.0.0.1:8080/v1/messages -H 'Content-Type: application/json' -d '{
+  "model": "any", "max_tokens": 128,
+  "system": "Answer in one sentence.",
+  "messages": [{"role":"user","content":"Hi!"}]}'
+```
+
+`thinking: {"type":"enabled"}` (or `"adaptive"`) turns the model's
+reasoning channel on where one exists — qwen3 `<think>` text streams as
+`thinking` content blocks. `temperature`/`top_p`/`top_k` map to the
+sampler; `output_config.format` with a JSON schema maps to the same
+constrained decoding as the OpenAI dialects (`-Dllguidance=true` builds).
+`tools` declarations are accepted and dropped — the server never emits
+`tool_use` blocks, which under `tool_choice: "auto"` is valid behavior;
+forced tool calls, `tool_use`/`tool_result` history blocks, and
+`stop_sequences` are rejected with explicit errors.
+
+**Claude Code** runs against it directly:
+
+```sh
+ANTHROPIC_BASE_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=local \
+  claude -p "Say hello"
+```
+
+Size `--ctx` for Claude Code's system prompt (~4k tokens before any
+conversation): `--ctx 16384` is a comfortable floor.
+
 ## Flags
 
 `--help` lists them all:
@@ -113,7 +149,7 @@ model; `GET /v1/models` reports its id.
 | `--host H` | bind address (default 127.0.0.1) |
 | `--port N` | port (default 8080) |
 | `--ctx N` | per-request context budget in tokens (default 4096) |
-| `--api-key K` | require `Authorization: Bearer K` |
+| `--api-key K` | require `Authorization: Bearer K` (or `x-api-key: K`) |
 | `--queue N` | max queued requests before 429 (default 16) |
 | `--conns N` | max concurrent connections (default 32) |
 | `--experts=borrow` | zero-copy MoE expert load (gemma4/diffusion-gemma) |
@@ -129,11 +165,12 @@ model; `GET /v1/models` reports its id.
 
 Requests are accepted concurrently and generated sequentially (one inference
 worker; the queue bounds admission — overflow gets 429). Reasoning is off by
-default; clients enable it per request via `reasoning_effort` (chat) or
+default; clients enable it per request via `reasoning_effort` (chat),
 `reasoning.effort` (responses) — `"none"`/`"minimal"` disable,
 `"low"`/`"medium"`/`"high"`/`"xhigh"`/`"default"` enable (rejected when the
-model has no toggleable reasoning channel). qwen3 routes `<think>` text to
-`reasoning_content`.
+model has no toggleable reasoning channel) — or `thinking` (anthropic
+messages, a no-op without a reasoning channel). qwen3 routes `<think>` text
+to `reasoning_content` / a `thinking` content block.
 
 ## Cartridge serving
 

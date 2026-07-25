@@ -8,8 +8,25 @@ const std = @import("std");
 const posix = std.posix;
 const types = @import("types.zig");
 const openai = @import("openai.zig");
+const anthropic = @import("anthropic.zig");
 const emitter_mod = @import("emitter.zig");
 const scheduler_mod = @import("scheduler.zig");
+
+/// One generation endpoint: the request parser, response framing, and error
+/// envelope all follow from it.
+const Route = enum {
+    chat,
+    responses,
+    anthropic,
+
+    fn wire(self: Route) emitter_mod.Wire {
+        return switch (self) {
+            .chat => .chat,
+            .responses => .responses,
+            .anthropic => .anthropic,
+        };
+    }
+};
 
 const Allocator = std.mem.Allocator;
 
@@ -143,7 +160,7 @@ pub const Server = struct {
             return request.respond("", .{ .status = .no_content, .extra_headers = &[_]std.http.Header{
                 .{ .name = "access-control-allow-origin", .value = "*" },
                 .{ .name = "access-control-allow-methods", .value = "GET, POST, OPTIONS" },
-                .{ .name = "access-control-allow-headers", .value = "Content-Type, Authorization" },
+                .{ .name = "access-control-allow-headers", .value = "Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta" },
             } });
         }
 
@@ -160,30 +177,38 @@ pub const Server = struct {
             return self.handleModels(request);
         }
 
-        const dialect: ?openai.Dialect = if (method == .POST and
+        const route: ?Route = if (method == .POST and
             (std.mem.eql(u8, path, "/v1/chat/completions") or std.mem.eql(u8, path, "/chat/completions")))
             .chat
         else if (method == .POST and
             (std.mem.eql(u8, path, "/v1/responses") or std.mem.eql(u8, path, "/responses")))
             .responses
+        else if (method == .POST and
+            (std.mem.eql(u8, path, "/v1/messages") or std.mem.eql(u8, path, "/messages")))
+            .anthropic
         else
             null;
 
-        if (dialect) |d| {
-            if (!self.authorized(request)) return self.respondError(request, .{
+        if (route) |r| {
+            if (!self.authorized(request)) return self.respondRouteError(request, r, .{
                 .status = .unauthorized,
                 .kind = "invalid_request_error",
                 .message = "missing or invalid API key",
                 .code = "invalid_api_key",
             });
-            return self.handleGenerate(request, stream, d);
+            return self.handleGenerate(request, stream, r);
         }
 
-        return self.respondError(request, .{
+        // Anthropic clients under /v1/messages/* (e.g. count_tokens) parse
+        // their own error envelope.
+        const not_found = openai.ErrorInfo{
             .status = .not_found,
             .kind = "invalid_request_error",
             .message = "unknown endpoint",
-        });
+        };
+        if (std.mem.startsWith(u8, path, "/v1/messages"))
+            return self.respondRouteError(request, .anthropic, not_found);
+        return self.respondError(request, not_found);
     }
 
     fn authorized(self: *Server, request: *std.http.Server.Request) bool {
@@ -195,6 +220,10 @@ pub const Server = struct {
                 if (h.value.len == prefix.len + key.len and
                     std.ascii.startsWithIgnoreCase(h.value, prefix) and
                     std.mem.eql(u8, h.value[prefix.len..], key)) return true;
+            } else if (std.ascii.eqlIgnoreCase(h.name, "x-api-key")) {
+                // Anthropic clients (Claude Code, the SDKs) send the key in
+                // x-api-key; accepted wherever Bearer is.
+                if (std.mem.eql(u8, h.value, key)) return true;
             }
         }
         return false;
@@ -214,6 +243,15 @@ pub const Server = struct {
         var buf: [2048]u8 = undefined;
         var fixed = std.Io.Writer.fixed(&buf);
         openai.writeErrorBody(info, &fixed) catch return error.WriteFailed;
+        try self.respondJson(request, info.status, fixed.buffered());
+    }
+
+    /// Like `respondError`, in the route's own error envelope.
+    fn respondRouteError(self: *Server, request: *std.http.Server.Request, route: Route, info: openai.ErrorInfo) !void {
+        if (route != .anthropic) return self.respondError(request, info);
+        var buf: [2048]u8 = undefined;
+        var fixed = std.Io.Writer.fixed(&buf);
+        anthropic.writeErrorBody(info, &fixed) catch return error.WriteFailed;
         try self.respondJson(request, info.status, fixed.buffered());
     }
 
@@ -316,7 +354,7 @@ pub const Server = struct {
         }
     };
 
-    fn handleGenerate(self: *Server, request: *std.http.Server.Request, stream: std.Io.net.Stream, dialect: openai.Dialect) !void {
+    fn handleGenerate(self: *Server, request: *std.http.Server.Request, stream: std.Io.net.Stream, route: Route) !void {
         var arena_state = std.heap.ArenaAllocator.init(self.allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -324,24 +362,28 @@ pub const Server = struct {
         // Read the whole body (bounded) before anything else.
         var transfer_buf: [4096]u8 = undefined;
         const body_reader = request.readerExpectContinue(&transfer_buf) catch
-            return self.respondError(request, .{ .status = .bad_request, .message = "bad expect header" });
+            return self.respondRouteError(request, route, .{ .status = .bad_request, .message = "bad expect header" });
         const body = body_reader.allocRemaining(arena, .limited(self.opts.max_body_bytes)) catch |err| switch (err) {
-            error.StreamTooLong => return self.respondError(request, .{
+            error.StreamTooLong => return self.respondRouteError(request, route, .{
                 .status = .payload_too_large,
                 .message = "request body too large",
             }),
             else => return err,
         };
 
-        const parsed: openai.Parsed = switch (openai.parse(arena, dialect, body, self.backend.info)) {
+        const parsed: openai.Parsed = switch (switch (route) {
+            .chat => openai.parse(arena, .chat, body, self.backend.info),
+            .responses => openai.parse(arena, .responses, body, self.backend.info),
+            .anthropic => anthropic.parse(arena, body, self.backend.info),
+        }) {
             .ok => |p| p,
-            .err => |info| return self.respondError(request, info),
+            .err => |info| return self.respondRouteError(request, route, info),
         };
 
         // Cheap backend validation (message shape, prompt length) — still a
         // plain 400, before anything streams.
         self.backend.validate(&parsed.gen) catch |err|
-            return self.respondError(request, openai.mapError(err));
+            return self.respondRouteError(request, route, openai.mapError(err));
 
         var sse = SseState{
             .request = request,
@@ -349,7 +391,7 @@ pub const Server = struct {
             .interface = undefined,
         };
         var em = emitter_mod.Emitter.init(arena, &parsed, .{
-            .dialect = dialect,
+            .dialect = route.wire(),
             .model_id = self.backend.info.model_id,
             .created = self.nowSeconds(),
             .think_markers = self.backend.info.think_markers,
@@ -359,13 +401,13 @@ pub const Server = struct {
         em.job = &job;
 
         self.sched.submit(&job) catch |err| switch (err) {
-            error.QueueFull => return self.respondError(request, .{
+            error.QueueFull => return self.respondRouteError(request, route, .{
                 .status = .too_many_requests,
                 .kind = "rate_limit_error",
                 .message = "the request queue is full; retry shortly",
                 .code = "rate_limit_exceeded",
             }),
-            error.ShuttingDown => return self.respondError(request, openai.mapError(error.ShuttingDown)),
+            error.ShuttingDown => return self.respondRouteError(request, route, openai.mapError(error.ShuttingDown)),
         };
 
         // Wait for the worker, watching the socket for client hang-up.
@@ -377,7 +419,7 @@ pub const Server = struct {
         // vanished mid-epilogue): drop the connection.
         const outcome = em.finish(job.err) catch return error.WriteFailed;
         switch (outcome) {
-            .plain_error => |info| try self.respondError(request, info),
+            .plain_error => |info| try self.respondRouteError(request, route, info),
             .body => |bytes| try self.respondJson(request, .ok, bytes),
             .streamed => if (sse.started) {
                 sse.body.end() catch return error.WriteFailed;
