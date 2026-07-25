@@ -466,7 +466,16 @@ pub fn rmsNormMulRopeAxisRankWithTable(
     const total_vectors = source.len() / feature_dim;
     const inv_feature_dim = 1 / @as(f32, @floatFromInt(feature_dim));
 
-    if (input_feature_stride == 1 and output_feature_stride == 1 and mode == .half and source.len() >= parallel.vector_elementwise_len_threshold / 8) {
+    // Kernel choice is LAYOUT-ONLY: the vectorized kernel and the
+    // generic fallback reduce a row's sum-of-squares in different orders,
+    // so any batch-size input to this choice would make a row's bytes
+    // depend on how many rows share the call — and k rows land in the KV
+    // cache, where a batch-size dependence leaks into every subsequent
+    // token. Same row shape in, same bytes out, at every row count (the
+    // lossless-speculation contract, speculative/core.zig). The length
+    // threshold below gates POOLING only — a row split never changes
+    // per-row math.
+    if (input_feature_stride == 1 and output_feature_stride == 1 and mode == .half) {
         var shape_dyn = [_]usize{1} ** tensor.max_rank;
         var input_strides_dyn = [_]usize{0} ** tensor.max_rank;
         var output_strides_dyn = [_]usize{0} ** tensor.max_rank;
@@ -497,7 +506,7 @@ pub fn rmsNormMulRopeAxisRankWithTable(
             .vector_end = total_vectors,
         };
 
-        if (total_vectors > 1) {
+        if (total_vectors > 1 and source.len() >= parallel.vector_elementwise_len_threshold / 8) {
             if (rt.workPool()) |pool| {
                 const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), total_vectors);
                 var tasks: [parallel.vector_max_threads]RmsNormMulRopeHalfTask = undefined;
