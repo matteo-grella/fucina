@@ -616,6 +616,38 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
             return committed;
         }
 
+        /// Commit ONE token from caller-computed logits — the prefill
+        /// bootstrap. The byte-identity contract's caller leg (module doc)
+        /// prefills the whole pending span in one batch, which leaves the
+        /// cache FLUSH with history (`history.len == kv.len`) and the
+        /// span's last-row logits in hand; this entry samples those logits
+        /// through the exact plain-step machinery — sampler, history,
+        /// sink, observe hook, stats.committed — and restores the `step`
+        /// invariant `history.len == kv.len + 1`. `logits` may be mutated
+        /// in place (penalties); the caller still owns and deinits it.
+        pub fn bootstrapStep(
+            self: *Self,
+            ctx: *ExecContext,
+            kv: *const KvCache,
+            sampler: *Sampler,
+            history: *std.ArrayList(usize),
+            sink: TokenSink,
+            logits: *Logits,
+        ) !usize {
+            if (history.items.len == 0 or history.items.len != kv.len) {
+                return error.InvalidDecodeState;
+            }
+            if (self.on_verify_row) |hook| {
+                try hook.func(hook.ptr, history.items.len, 0, try logits.dataConst());
+            }
+            const next = try sampler.next(ctx, logits, history.items);
+            try history.append(ctx.allocator, next);
+            try sink.emit(next);
+            self.source.observe(history.items[history.items.len - 1 ..]);
+            self.stats.committed += 1;
+            return 1;
+        }
+
         /// True when this step may speculate; advances the re-probe counter
         /// while disabled.
         fn gateAllows(self: *Self) bool {

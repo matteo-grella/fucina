@@ -958,21 +958,18 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             defer st.decoder.source = st.baseSource();
 
             // Prefill EXACTLY as decodeTurn does: the whole pending span in
-            // one batch, first token sampled from the prefill logits, then
-            // fed through the same gate sink/observe machinery the decoder
-            // uses for every later commit. Plain and speculative turns must
-            // build their caches from call-for-call identical forwards —
-            // prefill kernels are batch-shape-dependent, and matching
+            // one batch, first token committed from the prefill logits via
+            // the decoder's bootstrap entry (same sampler/sink/observe/stats
+            // machinery as every later commit). Plain and speculative turns
+            // must build their caches from call-for-call identical forwards
+            // — prefill kernels are batch-shape-dependent, and matching
             // shapes is the caller's leg of the byte-identity contract
             // (speculative/core.zig).
             const sink = speculative.TokenSink{ .ptr = &gate, .func = TurnGate.emit };
             {
                 var pre = try self.model.forwardStep(self.ctx, &self.cache, self.history.items[self.cache.len..], self.cache.len);
                 defer pre.deinit();
-                const first = try self.sampler.next(self.ctx, &pre, self.history.items);
-                try self.history.append(self.allocator, first);
-                try sink.emit(first);
-                st.decoder.source.observe(self.history.items[self.history.items.len - 1 ..]);
+                _ = try st.decoder.bootstrapStep(self.ctx, &self.cache, &self.sampler, &self.history, sink, &pre);
             }
 
             // Trim the stop marker and any overshoot committed past the boundary

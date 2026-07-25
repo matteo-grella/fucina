@@ -1153,21 +1153,19 @@ fn runGenerateSpec(
     const sink = llm.speculative.core.TokenSink{ .ptr = @ptrCast(&sink_state), .func = nullSinkEmit };
 
     // Prefill EXACTLY as runGenerate does: every prompt token in one
-    // batch, first new token sampled from the prefill logits. Prefill
-    // kernels are batch-shape-dependent, so plain and speculative runs
-    // must start from call-for-call identical forwards to share cache
-    // bytes — the caller's leg of the byte-identity contract
-    // (speculative/core.zig); pinned verifies (Options.pin_kernels) are
-    // the other leg.
+    // batch, first new token committed from the prefill logits via the
+    // decoder's bootstrap entry. Prefill kernels are batch-shape-
+    // dependent, so plain and speculative runs must start from
+    // call-for-call identical forwards to share cache bytes — the
+    // caller's leg of the byte-identity contract (speculative/core.zig);
+    // pinned verifies (Options.pin_kernels) are the other leg.
     const prefill_start = nowNs(io);
-    var first_token: usize = undefined;
     {
         var pre = try model.forwardStep(ctx, &cache, tokens, 0);
         defer pre.deinit();
-        first_token = try sampler.next(ctx, &pre, history.items);
+        _ = try decoder.bootstrapStep(ctx, &cache, &sampler, &history, sink, &pre);
     }
-    try history.append(allocator, first_token);
-    draft_source.observe(history.items[history.items.len - 1 ..]);
+    const first_token = history.items[history.items.len - 1];
     const prefill_ns = nowNs(io) - prefill_start;
 
     const decode_start = nowNs(io);
