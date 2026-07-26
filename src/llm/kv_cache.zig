@@ -313,6 +313,48 @@ pub const KvCache = struct {
     pub fn truncate(self: *KvCache, keep_len: usize) void {
         if (keep_len < self.len) self.len = keep_len;
     }
+
+    /// Copy rows [start, end) of `src` — same model geometry — into this
+    /// cache at the SAME positions and advance `len` to `end`: the
+    /// cross-slot prefix-share primitive (lmserve slot pool). A new
+    /// conversation adopts another slot's common prompt prefix by memcpy
+    /// instead of re-prefilling it; positions are preserved, so the copied
+    /// rows are exactly the rows a prefill of the same tokens would have
+    /// produced. Requires `self.len == start` (rows append in order) and
+    /// `end <= src.len`.
+    pub fn copyRows(self: *KvCache, src: *const KvCache, start: usize, end: usize) !void {
+        if (self.dtype != src.dtype or
+            self.kv_heads.len != src.kv_heads.len or
+            end > self.capacity) return Error.KvCacheShapeMismatch;
+        std.debug.assert(self.len == start);
+        std.debug.assert(end <= src.len);
+        if (end <= start) return;
+        for (0..self.kv_heads.len) |layer_i| {
+            if (self.kv_heads[layer_i] != src.kv_heads[layer_i] or
+                self.head_dim[layer_i] != src.head_dim[layer_i]) return Error.KvCacheShapeMismatch;
+            switch (self.dtype) {
+                .f16 => {
+                    const elems = self.layerRowElems(layer_i);
+                    const range = .{ start * elems, end * elems };
+                    @memcpy(
+                        (try self.k[layer_i].data())[range[0]..range[1]],
+                        (try src.k[layer_i].dataConst())[range[0]..range[1]],
+                    );
+                    @memcpy(
+                        (try self.v[layer_i].data())[range[0]..range[1]],
+                        (try src.v[layer_i].dataConst())[range[0]..range[1]],
+                    );
+                },
+                .q8_0 => {
+                    const bpr = self.layerRowBlocks(layer_i);
+                    const range = .{ start * bpr, end * bpr };
+                    @memcpy(self.k_q8[layer_i][range[0]..range[1]], src.k_q8[layer_i][range[0]..range[1]]);
+                    @memcpy(self.v_q8[layer_i][range[0]..range[1]], src.v_q8[layer_i][range[0]..range[1]]);
+                },
+            }
+        }
+        self.len = end;
+    }
 };
 
 test {

@@ -453,6 +453,50 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
             }
         }
 
+        /// Cross-slot prefix share floor: copying fewer rows than this is
+        /// not worth the bookkeeping (the memcpy itself is nearly free).
+        const min_share_lcp = 16;
+
+        /// Cross-slot KV prefix share (colibri's KV_SHARE): when no slot is
+        /// adoptable WHOLE, the best-LCP same-prefix slot still holds this
+        /// request's prompt opening — copy those rows into `cache` (which
+        /// must hold exactly its `prefix_rows` preloaded rows) so the
+        /// reconcile reuses them instead of re-prefilling. The donor stays
+        /// in the pool untouched. Returns the shared token count.
+        fn sharePrefixFrom(self: *Self, cache: *KvCache, ids: []const u32, selection: []const usize, prefix_rows: usize) usize {
+            var donor_i: ?usize = null;
+            var donor_lcp: usize = 0;
+            for (self.slots.items, 0..) |*slot, i| {
+                if (!std.mem.eql(usize, slot.selection, selection)) continue;
+                if (slot.prefix_rows != prefix_rows) continue;
+                const lcp = commonPrefix(slot.tokens.items, ids);
+                if (lcp > donor_lcp) {
+                    donor_lcp = lcp;
+                    donor_i = i;
+                }
+            }
+            if (donor_lcp < min_share_lcp) return 0;
+            const donor = &self.slots.items[donor_i.?];
+            const shared = @min(donor_lcp, donor.cache.len - donor.prefix_rows);
+            if (shared < min_share_lcp) return 0;
+            cache.copyRows(&donor.cache, prefix_rows, prefix_rows + shared) catch return 0;
+            return shared;
+        }
+
+        /// `initWarm` over a cache seeded by `sharePrefixFrom`: the token
+        /// shadow is the shared ids prefix.
+        fn warmFromShare(self: *Self, cache: KvCache, ids: []const u32, shared: usize, prefix_rows: usize, convo_opts: llm.chat.Options) !Conversation {
+            const a = self.allocator;
+            const toks = try a.alloc(usize, shared);
+            defer a.free(toks);
+            for (toks, ids[0..shared]) |*dst, src| dst.* = src;
+            return Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
+                .cache = cache,
+                .tokens = toks,
+                .prefix_rows = prefix_rows,
+            });
+        }
+
         /// Pick this request's warm state and build the Conversation on it:
         /// the resident slot with the best token-LCP when it passes the
         /// similarity gate; a disk-tier restore when a sidecar strictly
@@ -496,7 +540,16 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 if (disk_lcp <= best_lcp or !similarEnough(disk_lcp, ids.len)) disk_i = null;
             }
 
-            if (disk_i == null and best_i != null and similarEnough(best_lcp, ids.len)) {
+            // Whole-slot adoption is for CONTINUATIONS (the request extends
+            // exactly what the slot holds). A conversation that merely
+            // SHARES a prefix — same system prompt, different dialogue —
+            // goes down the prefix-share path instead: it copies the common
+            // rows and leaves the donor intact for its own continuation
+            // (pre-share behavior destroyed the donor's tail for no extra
+            // reuse).
+            const continues_best = best_i != null and
+                best_lcp == self.slots.items[best_i.?].tokens.items.len;
+            if (disk_i == null and continues_best and similarEnough(best_lcp, ids.len)) {
                 var slot = self.slots.swapRemove(best_i.?);
                 defer slot.tokens.deinit(self.allocator);
                 self.allocator.free(slot.selection);
@@ -563,12 +616,24 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
             if (host) |*h| {
                 const a = self.allocator;
                 if (std.mem.eql(usize, h.selection, selection)) {
-                    // Same prefix: reconcile-overwrite on the victim's rows.
                     defer h.tokens.deinit(a);
                     a.free(h.selection);
                     a.free(h.opener);
+                    // A remaining slot may share MORE of this prompt than
+                    // the evicted victim does — prefix-share from it over
+                    // the victim's cleared rows instead.
+                    const victim_lcp = commonPrefix(h.tokens.items, ids);
+                    var cache = h.cache;
+                    cache.truncate(h.prefix_rows);
+                    const shared = self.sharePrefixFrom(&cache, ids, selection, h.prefix_rows);
+                    if (shared > victim_lcp) {
+                        errdefer cache.deinit();
+                        return self.warmFromShare(cache, ids, shared, h.prefix_rows, convo_opts);
+                    }
+                    // Same prefix: reconcile-overwrite on the victim's rows.
+                    cache.len = h.cache.len;
                     return Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
-                        .cache = h.cache,
+                        .cache = cache,
                         .tokens = h.tokens.items,
                         .prefix_rows = h.prefix_rows,
                     });
@@ -590,22 +655,26 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 });
             }
 
-            var convo = try Conversation.init(self.ctx, self.model, self.tokenizer, self.template, convo_opts);
+            // Cold start: preload the configured prefix (cartridge, or the
+            // fleet selection), then prefix-share from the best-LCP slot
+            // when one holds this request's opening.
+            var cache = try self.model.initKvCache(self.ctx, self.opts.context_len);
+            errdefer cache.deinit();
+            var prefix_rows: usize = 0;
             if (self.opts.cartridge) |cart| {
-                // Cold start in cartridge mode: preload the trained prefix
-                // before the first prefill — the served layout the rows
-                // were trained at (real tokens at positions p..).
-                errdefer convo.deinit();
-                try cart.writeToCache(self.ctx, &convo.cache);
-                try convo.notePrefixRows(cart.p);
+                try cart.writeToCache(self.ctx, &cache);
+                prefix_rows = cart.p;
             } else if (selection.len > 0) {
-                // Cold start in fleet mode: the selected cartridges compose
-                // ahead of the first prefill.
-                errdefer convo.deinit();
-                try self.writeSelectionPrefix(selection, &convo.cache);
-                try convo.notePrefixRows(selection_p);
+                try self.writeSelectionPrefix(selection, &cache);
+                prefix_rows = selection_p;
             }
-            return convo;
+            const shared = self.sharePrefixFrom(&cache, ids, selection, prefix_rows);
+            if (shared > 0) return self.warmFromShare(cache, ids, shared, prefix_rows, convo_opts);
+            return Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
+                .cache = cache,
+                .tokens = &.{},
+                .prefix_rows = prefix_rows,
+            });
         }
 
         /// The generation epilogue (success and error paths alike): move

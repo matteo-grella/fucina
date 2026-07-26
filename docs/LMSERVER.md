@@ -65,8 +65,15 @@ conn threads (≤ --conns, socket deadlines)          ONE inference worker
   token prefix (above a llama.cpp-style 0.1 similarity gate; LRU otherwise),
   prefilling only the rest (`Conversation.initWarm`/`takeCache`/
   `sendTokensReuse` in `examples/lmserve/backend.zig`). Follow-up turns of a
-  chat re-prefill only the last reply + new message; a non-matching request
-  costs one full prefill, exactly as before. Extra slots keep interleaved
+  chat re-prefill only the last reply + new message. Whole-slot adoption is
+  reserved for CONTINUATIONS; a request that merely SHARES a prefix with a
+  resident slot — same system prompt, different dialogue — **copies** the
+  common rows into its own cache (`KvCache.copyRows`, positions preserved)
+  and prefills only the rest, leaving the donor intact for its own
+  continuation. Measured (0.6B, ~1860-token shared system prompt): the
+  second conversation's TTFT drops 3.4 s -> 0.43 s with 1846/1863 tokens
+  copied, while the first conversation's follow-up stays warm. A request
+  matching nothing costs one full prefill, exactly as before. Extra slots keep interleaved
   conversations warm at a full `--ctx` cache each (~112 KiB/position for a
   28-layer/8-kv-head/128-dim f16 geometry). A startup **KV RAM guard**
   (`kvRamGuardSlots` in `examples/lmserve/backend.zig`) sizes one probe

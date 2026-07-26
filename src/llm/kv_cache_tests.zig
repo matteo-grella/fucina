@@ -547,3 +547,81 @@ test "KvCache.init fills a uniform per-layer head_dim" {
     try std.testing.expectEqual(@as(usize, 3), cache.head_dim.len);
     for (cache.head_dim) |hd| try std.testing.expectEqual(@as(usize, 4), hd);
 }
+
+test "copyRows shares a row range across caches at the same positions" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    inline for ([_]KvDtype{ .f16, .q8_0 }) |dtype| {
+        const layers = 2;
+        const kv = 2;
+        const d = 32;
+        const cap = 6;
+        var src = try KvCache.initWithDtype(&ctx, layers, kv, d, cap, dtype);
+        defer src.deinit();
+        var dst = try KvCache.initWithDtype(&ctx, layers, kv, d, cap, dtype);
+        defer dst.deinit();
+
+        // Fill 5 source rows with a per-position pattern.
+        switch (dtype) {
+            .f16 => for (0..layers) |li| {
+                const k = try src.k[li].data();
+                const v = try src.v[li].data();
+                for (0..5 * kv * d) |i| {
+                    k[i] = @floatCast(@as(f32, @floatFromInt(i % 97)) * 0.25);
+                    v[i] = @floatCast(@as(f32, @floatFromInt(i % 89)) * -0.5);
+                }
+            },
+            .q8_0 => for (0..layers) |li| {
+                for (src.k_q8[li], 0..) |*b, i| {
+                    b.d = @bitCast(@as(f16, 0.125));
+                    for (&b.qs, 0..) |*q, j| q.* = @intCast(@as(i32, @intCast((i * 31 + j * 7) % 255)) - 127);
+                }
+                for (src.v_q8[li], 0..) |*b, i| {
+                    b.d = @bitCast(@as(f16, 0.25));
+                    for (&b.qs, 0..) |*q, j| q.* = @intCast(@as(i32, @intCast((i * 13 + j * 11) % 255)) - 127);
+                }
+            },
+        }
+        src.len = 5;
+
+        // Prefix-offset share: dst already holds 2 rows (a preloaded
+        // prefix); rows [2, 5) copy across at the same positions.
+        dst.len = 2;
+        try dst.copyRows(&src, 2, 5);
+        try std.testing.expectEqual(@as(usize, 5), dst.len);
+        switch (dtype) {
+            .f16 => for (0..layers) |li| {
+                const elems = kv * d;
+                const sk = try src.k[li].dataConst();
+                const dk = try dst.k[li].dataConst();
+                const sv = try src.v[li].dataConst();
+                const dv = try dst.v[li].dataConst();
+                try std.testing.expectEqualSlices(f16, sk[2 * elems .. 5 * elems], dk[2 * elems .. 5 * elems]);
+                try std.testing.expectEqualSlices(f16, sv[2 * elems .. 5 * elems], dv[2 * elems .. 5 * elems]);
+            },
+            .q8_0 => for (0..layers) |li| {
+                const bpr = kv * (d / 32);
+                for (src.k_q8[li][2 * bpr .. 5 * bpr], dst.k_q8[li][2 * bpr .. 5 * bpr]) |sb, db| {
+                    try std.testing.expectEqual(sb.d, db.d);
+                    try std.testing.expectEqualSlices(i8, &sb.qs, &db.qs);
+                }
+                for (src.v_q8[li][2 * bpr .. 5 * bpr], dst.v_q8[li][2 * bpr .. 5 * bpr]) |sb, db| {
+                    try std.testing.expectEqual(sb.d, db.d);
+                    try std.testing.expectEqualSlices(i8, &sb.qs, &db.qs);
+                }
+            },
+        }
+
+        // Geometry mismatch is rejected.
+        var narrow = try KvCache.initWithDtype(&ctx, layers, kv, d, 3, dtype);
+        defer narrow.deinit();
+        narrow.len = 0;
+        try std.testing.expectError(Error.KvCacheShapeMismatch, narrow.copyRows(&src, 0, 5));
+    }
+}
