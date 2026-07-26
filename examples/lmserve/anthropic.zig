@@ -23,9 +23,9 @@
 //!   (the reply simply carries no `thinking` blocks) — a hard error would
 //!   make thinking-by-default clients unusable against non-reasoning
 //!   models.
-//! * `stop_sequences` are rejected: the engine could stop on them, but it
-//!   does not report which sequence fired, and misreporting
-//!   `stop_reason`/`stop_sequence` would be worse than refusing.
+//! * `stop_sequences` stop generation before the matching text streams and
+//!   are attributed: the reply's `stop_reason` is `stop_sequence` with the
+//!   fired sequence echoed in `stop_sequence`.
 //! * Mid-conversation `{"role":"system"}` messages (Claude Code appends
 //!   them) fold into a user turn as a `<system-reminder>` block — the
 //!   hosted API's degradation path for models without the feature; the
@@ -370,12 +370,14 @@ const Parser = struct {
         if ((try self.optString(obj, "model")) == null)
             return self.failInvalid("\"model\" is required", "model");
 
-        // Hard rejections first: fields whose silent loss would corrupt the
-        // reply's meaning.
+        var stop_list: std.ArrayList([]const u8) = .empty;
         if (self.optField(obj, "stop_sequences")) |v| {
             if (v != .array) return self.failInvalid("expected an array", "stop_sequences");
-            if (v.array.items.len > 0)
-                return self.fail(ErrorInfo.unsupported("stop_sequences are not supported by this server: the engine does not report which sequence fired, so stop_reason could not be attributed", "stop_sequences"));
+            for (v.array.items) |item| {
+                if (item != .string or item.string.len == 0)
+                    return self.failInvalid("expected non-empty strings", "stop_sequences");
+                stop_list.append(self.arena, item.string) catch return error.OutOfMemory;
+            }
         }
         // Declarations render on hermes backends; elsewhere they are
         // accepted and dropped (see the module doc).
@@ -469,6 +471,7 @@ const Parser = struct {
             parsed.tools_active = true;
         }
         parsed.gen.messages = messages.items;
+        parsed.gen.stop = stop_list.items;
 
         // Sampling: absent fields keep the model's recommended defaults
         // (same documented deviation as the OpenAI dialects). Anthropic
@@ -619,8 +622,8 @@ test "anthropic parse: rejections carry the offending param" {
         .{ .body = "{\"model\":\"m\",\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"ok\"}]}]}", .param = "messages" },
         // forced tool call.
         .{ .body = std.fmt.comptimePrint("{{\"model\":\"m\",\"max_tokens\":8,{s},\"tool_choice\":{{\"type\":\"any\"}}}}", .{user_msg}), .param = "tool_choice" },
-        // stop_sequences.
-        .{ .body = std.fmt.comptimePrint("{{\"model\":\"m\",\"max_tokens\":8,{s},\"stop_sequences\":[\"\\n\"]}}", .{user_msg}), .param = "stop_sequences" },
+        // stop_sequences must be non-empty strings.
+        .{ .body = std.fmt.comptimePrint("{{\"model\":\"m\",\"max_tokens\":8,{s},\"stop_sequences\":[\"\"]}}", .{user_msg}), .param = "stop_sequences" },
         // images.
         .{ .body = "{\"model\":\"m\",\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"image\",\"source\":{}}]}]}", .param = "messages" },
         // Anthropic temperature range is 0..1.
@@ -637,6 +640,12 @@ test "anthropic parse: rejections carry the offending param" {
     // An empty stop_sequences array is absent, not a rejection.
     const ok = parse(arena, std.fmt.comptimePrint("{{\"model\":\"m\",\"max_tokens\":8,{s},\"stop_sequences\":[]}}", .{user_msg}), info);
     try std.testing.expectEqual(@as(usize, 0), ok.ok.gen.stop.len);
+
+    // Populated stop_sequences land on the request in list order.
+    const with = parse(arena, std.fmt.comptimePrint("{{\"model\":\"m\",\"max_tokens\":8,{s},\"stop_sequences\":[\"END\",\"\\n\\n\"]}}", .{user_msg}), info);
+    try std.testing.expectEqual(@as(usize, 2), with.ok.gen.stop.len);
+    try std.testing.expectEqualStrings("END", with.ok.gen.stop[0]);
+    try std.testing.expectEqualStrings("\n\n", with.ok.gen.stop[1]);
 }
 
 test "anthropic parse: mid-conversation system message folds into a user turn" {

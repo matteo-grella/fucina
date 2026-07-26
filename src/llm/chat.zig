@@ -316,6 +316,9 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         stop_id: ?u32,
         extra_stop_ids: []const u32,
         stop_sequences: []const []const u8,
+        /// Index (into `stop_sequences`) of the sequence that ended the last
+        /// turn, null when the turn ended any other way. Reset per turn.
+        fired_stop: ?usize = null,
         max_response_tokens: usize,
         think_off: bool,
         turn: usize,
@@ -581,6 +584,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             if (self.sampler.processor) |p| try p.reset();
 
             self.turn += 1;
+            self.fired_stop = null;
 
             const prefix32 = try self.tokenizer.encodeRaw(a, text);
             defer a.free(prefix32);
@@ -616,6 +620,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             if (self.sampler.processor) |p| try p.reset();
 
             self.turn += 1;
+            self.fired_stop = null;
 
             if (ids.len == 0) return error.EmptyMessages;
             if (self.kv_prefix_rows + ids.len > self.cache.capacity) return error.ContextFull;
@@ -725,7 +730,10 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                     const prev_len = reply.items.len;
                     try self.tokenizer.decodeAppend(a, @intCast(next), &reply);
                     // Stop before streaming the token that completes a stop sequence.
-                    if (stopHitInTail(reply.items, prev_len, self.stop_sequences)) break;
+                    if (stopHitInTail(reply.items, prev_len, self.stop_sequences)) |fired| {
+                        self.fired_stop = fired;
+                        break;
+                    }
                 }
                 try self.stream.push(a, @intCast(next), writer);
                 try writer.flush();
@@ -1072,7 +1080,8 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 const prev_len = s.reply.items.len;
                 try convo.tokenizer.decodeAppend(a, @intCast(next), &s.reply);
                 // Stop before streaming the token that completes a stop sequence.
-                if (stopHitInTail(s.reply.items, prev_len, convo.stop_sequences)) {
+                if (stopHitInTail(s.reply.items, prev_len, convo.stop_sequences)) |fired| {
+                    convo.fired_stop = fired;
                     s.finished = true;
                     return;
                 }
@@ -1260,19 +1269,20 @@ const Accept = struct {
     }
 };
 
-fn containsAny(haystack: []const u8, needles: []const []const u8) bool {
-    for (needles) |n| if (n.len > 0 and std.mem.indexOf(u8, haystack, n) != null) return true;
-    return false;
-}
-
-/// Stop-sequence scan for the bytes appended since `prev_len`. A match wholly
-/// inside `items[0..prev_len]` would already have ended the turn on the append
-/// that completed it, so only the window overlapping the new bytes needs
-/// rescanning — keeps the per-turn cost linear in reply length.
-fn stopHitInTail(items: []const u8, prev_len: usize, needles: []const []const u8) bool {
+/// Stop-sequence scan for the bytes appended since `prev_len`, returning the
+/// index of the sequence that fired (first match in list order — the
+/// attribution the Anthropic dialect reports as `stop_sequence`). A match
+/// wholly inside `items[0..prev_len]` would already have ended the turn on
+/// the append that completed it, so only the window overlapping the new
+/// bytes needs rescanning — keeps the per-turn cost linear in reply length.
+fn stopHitInTail(items: []const u8, prev_len: usize, needles: []const []const u8) ?usize {
     var max_len: usize = 0;
     for (needles) |n| max_len = @max(max_len, n.len);
-    return containsAny(items[prev_len -| (max_len -| 1) ..], needles);
+    const window = items[prev_len -| (max_len -| 1) ..];
+    for (needles, 0..) |n, i| {
+        if (n.len > 0 and std.mem.indexOf(u8, window, n) != null) return i;
+    }
+    return null;
 }
 
 test {

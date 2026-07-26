@@ -65,6 +65,10 @@ pub const GenerateResult = struct {
     /// (cross-request prefix cache) instead of being prefilled; a subset of
     /// `prompt_tokens`. Backends without the reuse slot report 0.
     cached_tokens: usize = 0,
+    /// When a client text stop sequence ended the reply: its index into the
+    /// request's `stop` list (the Anthropic dialect reports the sequence
+    /// itself as `stop_sequence`). Null when the turn ended any other way.
+    stop_sequence: ?usize = null,
     finish: FinishReason,
 };
 

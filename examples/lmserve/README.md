@@ -127,8 +127,11 @@ sampler; `output_config.format` with a JSON schema maps to the same
 constrained decoding as the OpenAI dialects (`-Dllguidance=true` builds).
 On qwen3-family models `tools` work end-to-end (see Tool calling below);
 on families without a tool convention, declarations are accepted and
-dropped so tool-sending clients still work as plain chat. Forced tool
-calls and `stop_sequences` are rejected with explicit errors.
+dropped so tool-sending clients still work as plain chat (forced tool
+calls are rejected there). `stop_sequences` are honored and attributed
+(`stop_reason` `stop_sequence` + the fired sequence). A DNS-rebinding
+guard rejects foreign Host headers on loopback binds; `--allow-host`
+extends the set (and arms the check on non-loopback binds).
 
 **Claude Code** runs against it directly:
 

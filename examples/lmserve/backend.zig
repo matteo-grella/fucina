@@ -928,6 +928,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 .prompt_tokens = convo.history.items.len - produced,
                 .completion_tokens = produced,
                 .cached_tokens = convo.reused_prefix,
+                .stop_sequence = convo.fired_stop,
                 .finish = finish,
             };
         }
@@ -1079,6 +1080,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                     .prompt_tokens = convo.history.items.len - produced[j],
                     .completion_tokens = produced[j],
                     .cached_tokens = convo.reused_prefix,
+                    .stop_sequence = convo.fired_stop,
                     .finish = finish,
                 };
             }

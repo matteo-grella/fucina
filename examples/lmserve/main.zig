@@ -40,6 +40,10 @@ const usage_text =
     \\  --api-key K         require Authorization: Bearer K
     \\  --queue N           max queued requests before 429 (default 16)
     \\  --conns N           max concurrent connections (default 32)
+    \\  --allow-host H      accept Host header H (repeatable, max 8). The
+    \\                      DNS-rebinding guard always accepts loopback names
+    \\                      and the bind host; on non-loopback binds the
+    \\                      check only arms when --allow-host is given
     \\  --batch N           lockstep-decode up to N queued requests together
     \\                      (default 1 = strictly sequential; qwen3/qwen3moe/
     \\                      gemma4). Batching takes only what is already
@@ -115,6 +119,8 @@ const Args = struct {
     rag_chunks: usize = 8,
     rag_adaptive: bool = false,
     rag_margin: f32 = 0.05,
+    allow_hosts: [8][]const u8 = undefined,
+    allow_hosts_n: usize = 0,
 };
 
 var g_shutdown = std.atomic.Value(bool).init(false);
@@ -202,6 +208,14 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--rag-margin") and i + 1 < args_slice.len) {
             i += 1;
             args.rag_margin = try std.fmt.parseFloat(f32, args_slice[i]);
+        } else if (std.mem.eql(u8, arg, "--allow-host") and i + 1 < args_slice.len) {
+            i += 1;
+            if (args.allow_hosts_n >= args.allow_hosts.len) {
+                try stderr.writeAll("too many --allow-host entries (max 8)\n");
+                return error.InvalidArguments;
+            }
+            args.allow_hosts[args.allow_hosts_n] = args_slice[i];
+            args.allow_hosts_n += 1;
         } else if (std.mem.eql(u8, arg, "--experts=borrow")) {
             args.experts_borrow = true;
         } else if (std.mem.eql(u8, arg, "--experts=pack")) {
@@ -749,6 +763,7 @@ fn serveWith(io: std.Io, allocator: std.mem.Allocator, backend: types.Backend, a
             .port = args.port,
             .api_key = args.api_key,
             .max_connections = args.conns,
+            .extra_hosts = args.allow_hosts[0..args.allow_hosts_n],
         },
         .backend = backend,
         .sched = &sched,

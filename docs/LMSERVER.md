@@ -233,11 +233,11 @@ thinking-by-default clients stay usable), `output_config.format`
 — `tools` with `tool_use`/`tool_result` history and `tool_choice`
 `any`/`tool` via the forced-call grammar (the function-calling section
 above; declarations without a tool convention are accepted and dropped,
-which keeps tool-sending clients usable as plain chat). Server-side tool
-types, images/documents, and `stop_sequences` (the engine stops on them
-but does not report which sequence fired, so
-`stop_reason`/`stop_sequence` could not be attributed) are rejected
-explicitly. Errors use the Anthropic
+which keeps tool-sending clients usable as plain chat). `stop_sequences`
+stop generation before the matching text streams and are attributed —
+`stop_reason` is `stop_sequence` with the fired sequence echoed in the
+`stop_sequence` field. Server-side tool types and images/documents are
+rejected explicitly. Errors use the Anthropic
 envelope `{"type":"error","error":{type,message}}` with the type derived
 from the status; mid-stream failures arrive as an `error` event.
 

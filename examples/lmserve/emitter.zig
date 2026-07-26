@@ -489,7 +489,7 @@ pub const Emitter = struct {
                 try s1.objectField("stop_reason");
                 try s1.write(self.anthropicFinalStop(res));
                 try s1.objectField("stop_sequence");
-                try s1.write(null);
+                try s1.write(self.anthropicFiredSequence(res));
                 try s1.endObject();
                 try s1.objectField("usage");
                 try self.writeAnthropicUsage(&s1, res);
@@ -1277,7 +1277,7 @@ pub const Emitter = struct {
             try s.write(null);
         }
         try s.objectField("stop_sequence");
-        try s.write(null);
+        try s.write(if (res) |r| self.anthropicFiredSequence(r) else null);
         try s.objectField("usage");
         try self.writeAnthropicUsage(s, res);
         try s.endObject();
@@ -1291,10 +1291,20 @@ pub const Emitter = struct {
     }
 
     /// Captured tool calls take precedence over the engine's stop kind: the
-    /// turn ended so the client can run them.
+    /// turn ended so the client can run them. A fired client stop sequence
+    /// reports `stop_sequence` (with the sequence itself in the sibling
+    /// field, see `anthropicFiredSequence`).
     fn anthropicFinalStop(self: *const Emitter, res: types.GenerateResult) []const u8 {
         if (self.tool_calls.items.len > 0) return "tool_use";
+        if (self.anthropicFiredSequence(res) != null) return "stop_sequence";
         return anthropicStopReason(res.finish);
+    }
+
+    /// The client stop sequence that ended the reply, when one did.
+    fn anthropicFiredSequence(self: *const Emitter, res: types.GenerateResult) ?[]const u8 {
+        const i = res.stop_sequence orelse return null;
+        const stop = self.parsed.gen.stop;
+        return if (i < stop.len) stop[i] else null;
     }
 
     // ---- tool-call framing (chat + responses) ----
@@ -1807,4 +1817,41 @@ test "responses wire: function_call items follow the message" {
             "\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"",
         });
     }
+}
+
+test "anthropic wire: fired stop sequence is attributed" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const parsed = try arena.create(openai.Parsed);
+    parsed.* = .{
+        .gen = .{ .messages = &.{}, .sampling = .{}, .max_tokens = 64, .stop = &.{ "END", "STOP" } },
+        .stream = false,
+        .tools_active = false,
+    };
+    const starter = try arena.create(CollectStarter);
+    starter.* = .{ .aw = std.Io.Writer.Allocating.init(arena) };
+    const em = try arena.create(Emitter);
+    em.* = Emitter.init(arena, parsed, .{
+        .dialect = .anthropic,
+        .model_id = "test-model",
+        .created = 0,
+        .think_markers = null,
+        .starter = .{ .ptr = starter, .startFn = CollectStarter.start },
+    });
+    var dummy_buf: [1]u8 = undefined;
+    var dummy = std.Io.Writer.fixed(&dummy_buf);
+    const job = try arena.create(scheduler.Job);
+    job.* = .{ .req = parsed.gen, .sink = &dummy };
+    job.res = .{ .prompt_tokens = 3, .completion_tokens = 2, .stop_sequence = 1, .finish = .stop };
+    em.job = job;
+
+    const sink = em.sink();
+    try sink.writeAll("partial reply");
+    try sink.flush();
+    const outcome = try em.finish(null);
+    const body = outcome.body;
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"stop_reason\":\"stop_sequence\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"stop_sequence\":\"STOP\"") != null);
 }

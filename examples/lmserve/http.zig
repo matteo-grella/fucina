@@ -163,7 +163,36 @@ pub const Options = struct {
     read_timeout_s: u31 = 60,
     /// Socket send deadline: bounds stalled clients during streaming.
     write_timeout_s: u31 = 30,
+    /// Extra Host-header names accepted beyond the loopback set and the
+    /// bind host (`--allow-host`). Setting any also ARMS the check on
+    /// non-loopback binds (see `hostAllowed`).
+    extra_hosts: []const []const u8 = &.{},
 };
+
+/// The hostname of a Host header value: strips an optional port and IPv6
+/// brackets (`[::1]:8080` -> `::1`, `example.com:80` -> `example.com`).
+fn hostHeaderName(value: []const u8) []const u8 {
+    if (value.len == 0) return value;
+    if (value[0] == '[') {
+        const close = std.mem.indexOfScalar(u8, value, ']') orelse return value;
+        return value[1..close];
+    }
+    if (std.mem.lastIndexOfScalar(u8, value, ':')) |colon| {
+        // Only a digits-only tail is a port (a bare IPv6 literal is not
+        // valid in Host, but never mistake its groups for ports).
+        const tail = value[colon + 1 ..];
+        if (tail.len > 0 and std.mem.indexOfNone(u8, tail, "0123456789") == null and
+            std.mem.indexOfScalar(u8, value[0..colon], ':') == null)
+            return value[0..colon];
+    }
+    return value;
+}
+
+fn isLoopbackName(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, "localhost") or
+        std.mem.eql(u8, name, "127.0.0.1") or
+        std.mem.eql(u8, name, "::1");
+}
 
 pub const Server = struct {
     allocator: Allocator,
@@ -271,7 +300,42 @@ pub const Server = struct {
         .{ .name = "access-control-allow-origin", .value = "*" },
     };
 
+    /// DNS-rebinding guard: a browser lured to an attacker page resolves the
+    /// attacker's domain to 127.0.0.1 and reaches this server with the
+    /// attacker's Host header. Enforced whenever the bind is loopback (the
+    /// legitimate names are then known: the loopback set + the bind host) or
+    /// `--allow-host` was given; a non-loopback bind without `--allow-host`
+    /// skips the check — the legitimate external names are unknowable here.
+    /// A missing Host header passes: every browser sends one, and non-browser
+    /// clients are not the rebinding audience.
+    fn hostAllowed(self: *Server, request: *std.http.Server.Request) bool {
+        const bind_is_loopback = isLoopbackName(self.opts.host) or std.mem.eql(u8, self.opts.host, "::1");
+        if (!bind_is_loopback and self.opts.extra_hosts.len == 0) return true;
+
+        var it = request.iterateHeaders();
+        const host = blk: {
+            while (it.next()) |h| {
+                if (std.ascii.eqlIgnoreCase(h.name, "host")) break :blk h.value;
+            }
+            return true;
+        };
+        const name = hostHeaderName(host);
+        if (isLoopbackName(name)) return true;
+        if (std.ascii.eqlIgnoreCase(name, self.opts.host)) return true;
+        for (self.opts.extra_hosts) |allowed| {
+            if (std.ascii.eqlIgnoreCase(name, allowed)) return true;
+        }
+        return false;
+    }
+
     fn handleRequest(self: *Server, request: *std.http.Server.Request, stream: std.Io.net.Stream) !void {
+        if (!self.hostAllowed(request)) {
+            return self.respondError(request, .{
+                .status = .forbidden,
+                .kind = "invalid_request_error",
+                .message = "Host header not allowed (DNS-rebinding guard); add it with --allow-host",
+            });
+        }
         const target = request.head.target;
         const path = target[0 .. std.mem.indexOfScalar(u8, target, '?') orelse target.len];
         const method = request.head.method;
@@ -609,4 +673,22 @@ test "stream pipe: frames in order, head-before-body flag, failure propagation" 
     // Dead consumer: producer writes fail from here on.
     pipe.markFailed();
     try std.testing.expectError(error.WriteFailed, w.writeAll("data: c\n\n"));
+}
+
+test "host header name: ports and IPv6 brackets strip, loopback set matches" {
+    try std.testing.expectEqualStrings("localhost", hostHeaderName("localhost:8080"));
+    try std.testing.expectEqualStrings("localhost", hostHeaderName("localhost"));
+    try std.testing.expectEqualStrings("127.0.0.1", hostHeaderName("127.0.0.1:80"));
+    try std.testing.expectEqualStrings("::1", hostHeaderName("[::1]:8080"));
+    try std.testing.expectEqualStrings("::1", hostHeaderName("[::1]"));
+    try std.testing.expectEqualStrings("example.com", hostHeaderName("example.com:443"));
+    try std.testing.expectEqualStrings("example.com", hostHeaderName("example.com"));
+    // A non-numeric tail is not a port.
+    try std.testing.expectEqualStrings("weird:name", hostHeaderName("weird:name"));
+
+    try std.testing.expect(isLoopbackName("LOCALHOST"));
+    try std.testing.expect(isLoopbackName("127.0.0.1"));
+    try std.testing.expect(isLoopbackName("::1"));
+    try std.testing.expect(!isLoopbackName("evil.example"));
+    try std.testing.expect(!isLoopbackName("127.0.0.2"));
 }
