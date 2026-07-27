@@ -120,9 +120,9 @@ pub const GgufChatOptions = struct {
     default_sampling: llm.sampler.Config = .{},
     /// Speculative decoding for solo generations (lmserve --spec): the
     /// self-draft cascade (grammar-wrapped when a constraint is active)
-    /// rides the reuse reconcile via the index rebuild. Requests carrying
-    /// text stop sequences fall back to plain decode (speculation does not
-    /// scan text stops), as does every --batch group of two or more.
+    /// rides the reuse reconcile via the index rebuild; text stop
+    /// sequences are scanned by the TurnGate. Every --batch group of two
+    /// or more decodes plain (lockstep cannot host ragged verifies).
     speculation: bool = false,
     constraint_cache_len: usize = 8,
     /// Resident cross-request KV reuse slots. Each is a FULL `context_len`
@@ -904,7 +904,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 .extra_stop_ids = self.opts.extra_stop_ids,
                 .stop_sequences = req.stop,
                 .logit_processor = processor,
-                .speculation = self.opts.speculation and req.stop.len == 0,
+                .speculation = self.opts.speculation,
             };
             // One tokenization serves both slot selection and the send.
             const ids = try self.tokenizer.encodeRaw(a, rendered);

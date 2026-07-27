@@ -152,10 +152,11 @@ conn threads (≤ --conns, socket deadlines)          ONE inference worker
   speculate BETTER, not worse). It composes with slot reuse — the
   append-only speculation index is rebuilt from the reconciled history
   each request, and the turn ends with the plain path's catch-up forward
-  so the slot shadow stays exact. Requests carrying stop sequences fall
-  back to plain decode (speculation does not scan text stops — the open
-  follow-up), as does every `--batch` group of two or more; solo requests
-  under a batched server still speculate. Verified live: greedy replies
+  so the slot shadow stays exact. Text stop sequences are scanned by
+  the TurnGate (decoded bytes, the plain loop's exact stop-before-stream
+  rule, fired-sequence attribution included), so stop-carrying requests
+  speculate too; only `--batch` groups of two or more decode plain, and
+  solo requests under a batched server still speculate. Verified live: greedy replies
   byte-identical to a plain server across reuse turns.
 - Streaming responses start lazily on the first delta, so a request that
   fails before producing anything (invalid grammar, context overflow) still

@@ -45,9 +45,9 @@ const usage_text =
     \\                      and the bind host; on non-loopback binds the
     \\                      check only arms when --allow-host is given
     \\  --spec              speculative decoding for solo generations
-    \\                      (qwen3/qwen3moe; self-draft cascade, lossless).
-    \\                      Requests with stop sequences and --batch groups
-    \\                      of 2+ decode plain automatically
+    \\                      (qwen3/qwen3moe; self-draft cascade, lossless,
+    \\                      stop sequences included). --batch groups of 2+
+    \\                      decode plain automatically
     \\  --batch N           lockstep-decode up to N queued requests together
     \\                      (default 1 = strictly sequential; qwen3/qwen3moe/
     \\                      gemma4). Batching takes only what is already

@@ -935,11 +935,13 @@ test "speculation config: accounting_min_draft aligned; stop sequences rejected"
     try std.testing.expectEqual(@as(usize, 4), convo.spec.?.index.accounting_min_draft);
     try std.testing.expectEqual(@as(usize, 4), convo.spec.?.decoder.options.min_draft);
 
-    // Text stop sequences cannot compose with the lossless spec contract.
-    try std.testing.expectError(error.StopSequencesWithSpeculation, Conversation.init(&ctx, &model, &tok, tmpl, .{
+    // Text stop sequences compose (the TurnGate scans decoded bytes);
+    // behavioral parity is pinned by the spec==plain stop-sequence test.
+    var stop_convo = try Conversation.init(&ctx, &model, &tok, tmpl, .{
         .speculation = true,
         .stop_sequences = &.{"stop"},
-    }));
+    });
+    stop_convo.deinit();
 }
 
 test "extra stop ids and text stop sequences end the turn before streaming" {
@@ -1559,4 +1561,67 @@ test "2-request reuse: speculation == plain sendTokensReuse (greedy)" {
     try std.testing.expectEqual(results[0].produced[0], results[1].produced[0]);
     try std.testing.expectEqual(results[0].produced[1], results[1].produced[1]);
     try std.testing.expectEqual(results[0].reused, results[1].reused);
+}
+
+test "text stop sequences: speculation == plain, fired index included (greedy)" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try scaffolding.buildTinyModel(&ctx, 0xC4A7);
+    defer model.deinit();
+    var tok = try Tokenizer.initFromParts(allocator, &tiny_vocab, &.{}, .{});
+    defer tok.deinit();
+    const tmpl = Template{ .format = .chatml };
+
+    // Derive a stop that MUST fire: the first byte of the unstopped
+    // reference reply (the plain stop-sequence test's fixture trick).
+    var first_byte: [1]u8 = undefined;
+    {
+        var ref = try Conversation.init(&ctx, &model, &tok, tmpl, .{
+            .capacity = 256,
+            .max_response_tokens = 12,
+        });
+        defer ref.deinit();
+        var aw = std.Io.Writer.Allocating.init(allocator);
+        defer aw.deinit();
+        const ids = try tok.encodeRaw(allocator, "ab a us");
+        defer allocator.free(ids);
+        _ = try ref.sendTokensReuse(ids, &aw.writer);
+        try std.testing.expect(aw.written().len > 0);
+        first_byte[0] = aw.written()[0];
+    }
+    const stops: []const []const u8 = &.{ "zq", &first_byte };
+
+    var texts: [2][]u8 = undefined;
+    var fired: [2]?usize = undefined;
+    var lens: [2]usize = undefined;
+    for ([_]bool{ false, true }, 0..) |spec_on, which| {
+        var convo = try Conversation.init(&ctx, &model, &tok, tmpl, .{
+            .capacity = 256,
+            .max_response_tokens = 12,
+            .speculation = spec_on,
+            .stop_sequences = stops,
+        });
+        defer convo.deinit();
+        var aw = std.Io.Writer.Allocating.init(allocator);
+        defer aw.deinit();
+        const ids = try tok.encodeRaw(allocator, "ab a us");
+        defer allocator.free(ids);
+        _ = try convo.sendTokensReuse(ids, &aw.writer);
+        texts[which] = try allocator.dupe(u8, aw.written());
+        fired[which] = convo.fired_stop;
+        lens[which] = convo.history.items.len;
+    }
+    defer for (&texts) |t| allocator.free(t);
+
+    try std.testing.expectEqualStrings(texts[0], texts[1]);
+    try std.testing.expectEqual(fired[0], fired[1]);
+    try std.testing.expectEqual(lens[0], lens[1]);
+    // Non-vacuous: the stop actually fired, on the right sequence.
+    try std.testing.expectEqual(@as(?usize, 1), fired[0]);
 }

@@ -412,7 +412,6 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         fn initWith(ctx: *ExecContext, model: *const Model, tokenizer: *const Tok.Tokenizer, template: Template, options: Options, warm_opt: ?WarmState) !Self {
             var cache = if (warm_opt) |w| w.cache else try model.initKvCache(ctx, options.capacity);
             errdefer cache.deinit();
-            if (options.speculation and options.stop_sequences.len > 0) return error.StopSequencesWithSpeculation;
             const stop_id: ?u32 = tokenizer.tokenId(template.stopMarker()) orelse tokenizer.eosId();
             var history: std.ArrayList(usize) = .empty;
             errdefer history.deinit(ctx.allocator);
@@ -1144,6 +1143,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 .sink_acc = .{ .stop = self.stop_id, .extra = self.extra_stop_ids, .budget = self.max_response_tokens },
                 .obs_acc = .{ .stop = self.stop_id, .extra = self.extra_stop_ids, .budget = self.max_response_tokens },
             };
+            defer gate.reply.deinit(self.allocator);
             // Route the decoder's source through the gate for this turn.
             st.decoder.source = gate.source();
             defer st.decoder.source = st.baseSource();
@@ -1203,11 +1203,35 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             obs_acc: Accept,
             /// Tokens forwarded by the most recent observe (bounds observeTopK rows).
             last_fwd: usize = 0,
+            /// Committed tokens already forwarded to the index (gObserve);
+            /// never allowed past `sink_acc.n`, so a text stop freezes the
+            /// index exactly where it freezes the stream.
+            observed_total: usize = 0,
+            /// Decoded reply bytes, maintained only when the conversation
+            /// has text stop sequences — the same rolling buffer the plain
+            /// loop scans (`stopHitInTail`).
+            reply: std.ArrayList(u8) = .empty,
 
             fn emit(ptr: *anyopaque, token: usize) anyerror!void {
                 const self: *TurnGate = @ptrCast(@alignCast(ptr));
+                const convo = self.convo;
+                // Text stop sequences, in the plain loop's exact order:
+                // scanned only for a token the accept gate would otherwise
+                // take, and the COMPLETING token is neither streamed nor
+                // counted — the turn trim discards it from history/KV.
+                if (convo.stop_sequences.len > 0 and !self.sink_acc.done and
+                    !self.sink_acc.isStop(token) and self.sink_acc.n < self.sink_acc.budget)
+                {
+                    const prev_len = self.reply.items.len;
+                    try convo.tokenizer.decodeAppend(convo.allocator, @intCast(token), &self.reply);
+                    if (stopHitInTail(self.reply.items, prev_len, convo.stop_sequences)) |fired| {
+                        convo.fired_stop = fired;
+                        self.sink_acc.done = true;
+                        return;
+                    }
+                }
                 if (!self.sink_acc.take(token)) return;
-                try self.convo.stream.push(self.convo.allocator, @intCast(token), self.writer);
+                try convo.stream.push(convo.allocator, @intCast(token), self.writer);
                 try self.writer.flush();
             }
 
@@ -1253,6 +1277,11 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                         break;
                     }
                 }
+                // The index must not learn past what the sink accepted (a
+                // text stop freezes the sink mid-batch; the trim discards
+                // everything after it).
+                keep = @min(keep, self.sink_acc.n -| self.observed_total);
+                self.observed_total += keep;
                 self.last_fwd = keep;
                 self.inner.observe(committed[0..keep]);
             }
