@@ -71,6 +71,7 @@ pub fn main(init: std.process.Init) !void {
     var moe_mirror_n: usize = 0;
     var moe_mirror_weights_arg: ?[]const u8 = null;
     var moe_io_threads: ?usize = null;
+    var moe_uncached = false;
     var kv_save = false;
     var kv_save_arg: ?[]const u8 = null;
     var arg_i: usize = 2;
@@ -265,6 +266,11 @@ pub fn main(init: std.process.Init) !void {
             // Per-mirror read share relative to the primary's 1, comma
             // list in --moe-mirror order (default 1 each: even split).
             moe_mirror_weights_arg = arg["--moe-mirror-weights=".len..];
+        } else if (std.mem.eql(u8, arg, "--moe-uncached")) {
+            // Uncached streamed reads (macOS F_NOCACHE): expert streaming
+            // stops churning the page cache behind the mmap'd dense weights.
+            moe_stream_flag = true;
+            moe_uncached = true;
         } else if (std.mem.startsWith(u8, arg, "--moe-io-threads=")) {
             // Demand-miss read fan-out (default 8; 0 = sequential reads).
             moe_stream_flag = true;
@@ -313,6 +319,7 @@ pub fn main(init: std.process.Init) !void {
             .mirror_paths = moe_mirror_buf[0..moe_mirror_n],
             .mirror_weights = moe_mirror_weights,
             .io_workers = moe_io_threads orelse 8,
+            .uncached = moe_uncached,
         },
     } else .{};
     var model_config = try llm.qwen3.model.Config.fromGguf(&file);

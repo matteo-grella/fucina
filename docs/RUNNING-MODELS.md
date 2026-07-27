@@ -160,6 +160,15 @@ Knobs:
   0 = sequential). Parallel misses are what turn disk queue depth — and
   mirror copies — into real aggregate bandwidth within one token's
   expert fetches. Output is unchanged.
+- `--moe-uncached` — uncached streamed reads (macOS `F_NOCACHE` on every
+  store and mirror fd; Linux currently a no-op). For models LARGER than
+  RAM the page cache can never hold the expert set, so caching the
+  stream only churns out the mmap'd dense weights' pages. Measured
+  (V4-Flash Q4K, 165 GB on a 64 GB M1 Max, identical routing, both
+  A/B orderings): decode 1.32 -> 1.57 tok/s (+19%), miss I/O time
+  15-25% lower. For models that FIT in RAM, plain caching serves
+  re-misses for free — leave this off there (measured regression-free
+  warm, but the cache safety net is gone). Output is unchanged.
 - `--moe-cache-route` — cache-aware near-tie routing (max-rank selection,
   arXiv:2412.00099): the true top-J ranks are always taken, the remaining
   slots prefer experts already resident in RAM among the top-M ranks

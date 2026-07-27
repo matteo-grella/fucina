@@ -140,6 +140,15 @@ fn preadOnce(fd: fd_t, buf: []u8, offset: u64) Error!usize {
     }
 }
 
+/// Ask the OS not to page-cache reads on `fd` (macOS `F_NOCACHE`; fcntl.h
+/// value 48 — the `F_RDADVISE` shim above uses the same raw-constant
+/// pattern). Best effort: a failure just leaves normal caching on.
+fn setUncached(fd: fd_t) void {
+    if (builtin.os.tag == .macos) {
+        _ = std.c.fcntl(fd, 48, @as(c_int, 1));
+    }
+}
+
 fn openWriteTrunc(allocator: Allocator, path: []const u8) Error!fd_t {
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
@@ -571,6 +580,13 @@ pub const ExpertStore = struct {
         pin_bytes: ?usize = null,
         /// Minimum recorded routed pairs before auto-pin trusts the history.
         auto_pin_min_history: u64 = 5000,
+        /// Uncached streamed reads (macOS `F_NOCACHE` on every store and
+        /// mirror fd): a streamed giant reads far more than RAM per token,
+        /// so page-caching those reads only churns out the mmap'd DENSE
+        /// weights' pages. Already-cached pages still serve hits; the
+        /// store's own pinned/LRU tiers are the re-read safety net. No-op
+        /// on Linux (O_DIRECT needs aligned slabs — rig follow-up).
+        uncached: bool = false,
         /// Cache-aware routing (`cacheRouteTopK`), default off — it changes
         /// expert selection, so callers opt in explicitly.
         cache_route: ?CacheRouteOptions = null,
@@ -727,6 +743,7 @@ pub const ExpertStore = struct {
         errdefer for (fds[0..n_open]) |fd| closeFd(fd);
         for (gguf_paths) |path| {
             fds[n_open] = try openReadOnly(allocator, path);
+            if (options.uncached) setUncached(fds[n_open]);
             n_open += 1;
         }
 
@@ -812,6 +829,7 @@ pub const ExpertStore = struct {
         errdefer for (fds[0..n_open]) |fd| closeFd(fd);
         for (paths) |path| {
             fds[n_open] = try openReadOnly(self.allocator, path);
+            if (self.options.uncached) setUncached(fds[n_open]);
             n_open += 1;
         }
         const grown = try self.allocator.alloc(MirrorSet, self.mirrors.len + 1);

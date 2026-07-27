@@ -1358,6 +1358,10 @@ pub const MoeStreamOptions = struct {
     /// Parallelism is what lets disk queue depth — and mirror copies on
     /// separate drives — add bandwidth within one acquire.
     io_workers: usize = 8,
+    /// Uncached streamed reads (macOS F_NOCACHE; Linux no-op for now):
+    /// stops expert streaming from churning the page cache that backs the
+    /// mmap'd dense weights. Opt-in (`--moe-uncached`).
+    uncached: bool = false,
     /// Cache-aware routing (`ExpertStore.cacheRouteTopK`), default off:
     /// near-tie expert selection prefers already-resident experts, trading
     /// exact top-k routing for fewer disk fetches. QUALITY-AFFECTING —
@@ -1425,6 +1429,7 @@ pub fn createExpertStore(allocator: Allocator, options: MoeStreamOptions, n_laye
         .auto_pin = options.auto_pin,
         .pin_bytes = options.pin_bytes,
         .io_workers = options.io_workers,
+        .uncached = options.uncached,
         .cache_route = if (options.cache_route) .{
             .sacred = options.route_sacred,
             .window = options.route_window,
