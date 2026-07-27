@@ -44,6 +44,10 @@ const usage_text =
     \\                      DNS-rebinding guard always accepts loopback names
     \\                      and the bind host; on non-loopback binds the
     \\                      check only arms when --allow-host is given
+    \\  --spec              speculative decoding for solo generations
+    \\                      (qwen3/qwen3moe; self-draft cascade, lossless).
+    \\                      Requests with stop sequences and --batch groups
+    \\                      of 2+ decode plain automatically
     \\  --batch N           lockstep-decode up to N queued requests together
     \\                      (default 1 = strictly sequential; qwen3/qwen3moe/
     \\                      gemma4). Batching takes only what is already
@@ -108,6 +112,7 @@ const Args = struct {
     queue: usize = 16,
     conns: usize = 32,
     batch: usize = 1,
+    spec: bool = false,
     experts_borrow: bool = false,
     kv_slots: usize = 1,
     kv_slots_force: bool = false,
@@ -174,6 +179,8 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--conns") and i + 1 < args_slice.len) {
             i += 1;
             args.conns = try std.fmt.parseInt(usize, args_slice[i], 10);
+        } else if (std.mem.eql(u8, arg, "--spec")) {
+            args.spec = true;
         } else if (std.mem.eql(u8, arg, "--batch") and i + 1 < args_slice.len) {
             i += 1;
             args.batch = @max(try std.fmt.parseInt(usize, args_slice[i], 10), 1);
@@ -573,6 +580,7 @@ fn serveQwen3(
             // Qwen3's recommended no-think chat settings (the server default;
             // per-request reasoning switches nothing here — clients override).
             .default_sampling = .{ .temperature = 0.7, .top_k = 20, .top_p = 0.8 },
+            .speculation = args.spec,
             .constraint_cache_len = @max(8, args.batch),
             .kv_slots = kv_slots,
             .kv_disk = kvDiskOptions(io, args),

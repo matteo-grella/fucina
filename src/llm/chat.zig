@@ -357,6 +357,20 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
 
             /// The decoder's steady-state draft source: the grammar wrapper
             /// when present, the cascade directly otherwise.
+            /// Reset the self-draft index to exactly `committed` (the
+            /// reuse-reconciled history): the index is append-only, so a
+            /// reconcile REWIND invalidates it. The rebuild is in place —
+            /// the SpecState address is stable, so every DraftSource
+            /// pointer into the index survives. O(history) SAM work,
+            /// trivial next to the prefill it precedes.
+            fn rebuild(st: *SpecState, allocator: Allocator, vocab: usize, committed: []const usize) !void {
+                const min_draft = st.index.accounting_min_draft;
+                st.index.deinit();
+                st.index = try spec_cascade.SpeculationIndex.init(allocator, vocab);
+                st.index.accounting_min_draft = min_draft;
+                if (committed.len > 0) st.index.asDraftSource().observe(committed);
+            }
+
             fn baseSource(st: *SpecState) speculative.DraftSource {
                 if (st.grammar_source) |*gs| return gs.source();
                 return st.index.asDraftSource();
@@ -399,7 +413,6 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             var cache = if (warm_opt) |w| w.cache else try model.initKvCache(ctx, options.capacity);
             errdefer cache.deinit();
             if (options.speculation and options.stop_sequences.len > 0) return error.StopSequencesWithSpeculation;
-            if (options.speculation and warm_opt != null) return error.SpeculationWithWarmStart;
             const stop_id: ?u32 = tokenizer.tokenId(template.stopMarker()) orelse tokenizer.eosId();
             var history: std.ArrayList(usize) = .empty;
             errdefer history.deinit(ctx.allocator);
@@ -682,11 +695,10 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         /// reports its length (the OpenAI `cached_tokens` number) — and
         /// everything past it is rewound and re-prefilled. On a fresh
         /// conversation the reconcile finds nothing to reuse and this is
-        /// exactly `sendRendered`. Speculation cannot host the rewind (the
-        /// SpeculationIndex mirrors committed history append-only), so the
-        /// combination errors.
+        /// exactly `sendRendered`. Speculation composes: the append-only
+        /// SpeculationIndex is rebuilt from the reconciled history before
+        /// the turn (`sendTokensReuse`).
         pub fn sendRenderedReuse(self: *Self, rendered: []const u8, writer: *std.Io.Writer) !usize {
-            if (self.spec != null) return error.SpeculationWithReuse;
             const a = self.allocator;
 
             const ids = try self.tokenizer.encodeRaw(a, rendered);
@@ -699,11 +711,29 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         /// candidate caches by common prefix BEFORE any conversation
         /// exists, so the ids are in hand). Semantics are identical.
         pub fn sendTokensReuse(self: *Self, ids: []const u32, writer: *std.Io.Writer) !usize {
-            if (self.spec != null) return error.SpeculationWithReuse;
             const a = self.allocator;
 
             const suffix = try self.beginTurnReconciled(ids);
             defer a.free(suffix);
+            if (self.spec) |st| {
+                // Speculation over cross-request reuse (the lmserve --spec
+                // seam): the reconcile may have rewound history, so rebuild
+                // the append-only self-draft index from the reconciled
+                // prefix; `sendSpec` observes the suffix itself.
+                try st.rebuild(a, self.model.config.vocab_size, self.history.items[0 .. self.history.items.len - suffix.len]);
+                const produced = try self.sendSpec(st, suffix, writer);
+                // The spec decoder leaves its last committed token
+                // un-forwarded (the next SPEC turn's prefill absorbs it);
+                // reuse turns end FLUSH instead — the same catch-up forward
+                // the plain loop issues — so the slot shadow describes
+                // every committed token and spec == plain state.
+                if (self.history.items.len == self.cache.len - self.kv_prefix_rows + 1) {
+                    var single = [_]usize{self.history.items[self.history.items.len - 1]};
+                    var lg = try self.model.forwardStep(self.ctx, &self.cache, &single, self.cache.len);
+                    lg.deinit();
+                }
+                return produced;
+            }
             return self.decodeTurn(suffix, writer);
         }
 

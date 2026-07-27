@@ -347,7 +347,7 @@ test "sendRenderedReuse: warm slot reuses the prefix, matches a fresh stateless 
     try std.testing.expectEqualSlices(usize, fresh.history.items, warm.history.items);
 }
 
-test "sendRenderedReuse: identical resend and divergent edits reconcile; speculation is rejected" {
+test "sendRenderedReuse: identical resend and divergent edits reconcile; speculation composes" {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
     const allocator = gpa.allocator();
@@ -416,23 +416,26 @@ test "sendRenderedReuse: identical resend and divergent edits reconcile; specula
         try std.testing.expectEqual(@as(usize, expect_id), got);
     }
 
-    // Speculation cannot host the reuse rewind...
+    // Speculation composes with the reuse rewind (the index rebuilds from
+    // the reconciled history) and with warm starts — the lmserve --spec
+    // path exercises both.
     var spec_convo = try Conversation.init(&ctx, &model, &tok, tmpl, .{
         .capacity = 64,
+        .max_response_tokens = 4,
         .speculation = true,
     });
     defer spec_convo.deinit();
-    var sink_buf: [16]u8 = undefined;
-    var sink = std.Io.Writer.fixed(&sink_buf);
-    try std.testing.expectError(error.SpeculationWithReuse, spec_convo.sendRenderedReuse(buf.items, &sink));
+    var spec_aw = std.Io.Writer.Allocating.init(allocator);
+    defer spec_aw.deinit();
+    _ = try spec_convo.sendRenderedReuse(buf.items, &spec_aw.writer);
+    try std.testing.expectEqual(spec_convo.history.items.len, spec_convo.cache.len);
 
-    // ...nor adopt a warm slot at init (the adopted cache is freed on the
-    // error path — the leak check would catch it otherwise).
     const orphan = try model.initKvCache(&ctx, 64);
-    try std.testing.expectError(error.SpeculationWithWarmStart, Conversation.initWarm(&ctx, &model, &tok, tmpl, .{
+    var warm_spec = try Conversation.initWarm(&ctx, &model, &tok, tmpl, .{
         .capacity = 64,
         .speculation = true,
-    }, .{ .cache = orphan, .tokens = &.{} }));
+    }, .{ .cache = orphan, .tokens = &.{} });
+    warm_spec.deinit();
 }
 
 test "Conversation instantiates over gemma4 + SPM (compile coverage)" {
@@ -1481,4 +1484,79 @@ test "sendBatchTokensReuse isolates a failing stream and leaves it resendable" {
     const again = try convos[1].sendTokensReuse(ids_store[1], &aw_retry.writer);
     try std.testing.expect(again > 0);
     try std.testing.expect(aw_retry.written().len > 0);
+}
+
+test "2-request reuse: speculation == plain sendTokensReuse (greedy)" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try scaffolding.buildTinyModel(&ctx, 0xC4A7);
+    defer model.deinit();
+    var tok = try Tokenizer.initFromParts(allocator, &tiny_vocab, &.{}, .{});
+    defer tok.deinit();
+    const tmpl = Template{ .format = .chatml };
+
+    const StreamResult = struct {
+        history: []usize,
+        text: []u8,
+        produced: [2]usize,
+        reused: usize,
+    };
+    var results: [2]StreamResult = undefined;
+
+    for ([_]bool{ false, true }, 0..) |spec_on, which| {
+        var convo = try Conversation.init(&ctx, &model, &tok, tmpl, .{
+            .capacity = 256,
+            .max_response_tokens = 12,
+            .speculation = spec_on,
+        });
+        defer convo.deinit();
+        var aw = std.Io.Writer.Allocating.init(allocator);
+        defer aw.deinit();
+
+        var produced: [2]usize = undefined;
+        var reused: usize = 0;
+        for (0..2) |turn| {
+            var ids: []u32 = undefined;
+            if (turn == 0) {
+                ids = try tok.encodeRaw(allocator, "ab a us");
+            } else {
+                // The stateless client replays committed history + a suffix.
+                const extra = try tok.encodeRaw(allocator, " it ba");
+                defer allocator.free(extra);
+                const hist = convo.history.items;
+                ids = try allocator.alloc(u32, hist.len + extra.len);
+                for (ids[0..hist.len], hist) |*d, src| d.* = @intCast(src);
+                @memcpy(ids[hist.len..], extra);
+            }
+            defer allocator.free(ids);
+            produced[turn] = try convo.sendTokensReuse(ids, &aw.writer);
+            if (turn == 1) {
+                reused = convo.reused_prefix;
+                // The replayed history actually reused its cached rows.
+                try std.testing.expect(reused > 0);
+            }
+        }
+        results[which] = .{
+            .history = try allocator.dupe(usize, convo.history.items),
+            .text = try allocator.dupe(u8, aw.written()),
+            .produced = produced,
+            .reused = reused,
+        };
+    }
+    defer for (&results) |r| {
+        allocator.free(r.history);
+        allocator.free(r.text);
+    };
+
+    try std.testing.expectEqualSlices(usize, results[0].history, results[1].history);
+    try std.testing.expectEqualStrings(results[0].text, results[1].text);
+    try std.testing.expectEqual(results[0].produced[0], results[1].produced[0]);
+    try std.testing.expectEqual(results[0].produced[1], results[1].produced[1]);
+    try std.testing.expectEqual(results[0].reused, results[1].reused);
 }
