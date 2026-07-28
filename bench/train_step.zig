@@ -1,0 +1,284 @@
+//! End-to-end GPT training-step benchmark (`zig build bench-train-step`).
+//!
+//! One full autograd training step — embed, transformer blocks (rmsNorm,
+//! RoPE, causal attention, SwiGLU MLP), final norm, untied unembed,
+//! cross-entropy, backward, AdamW — on a fixed synthetic sequence, timed per
+//! step with the loss printed. `--dump <dir>` writes the seeded weights, the
+//! token ids, and the rope table so `tools/torch_train_step.py` can run the
+//! IDENTICAL model in PyTorch eager: matching loss trajectories prove both
+//! sides compute the same thing; the per-step wall clock is the comparison.
+//!
+//! Run in ReleaseFast:
+//!   zig build bench-train-step -Doptimize=ReleaseFast -- --prod-allocator --dump /tmp/train-dump
+
+const std = @import("std");
+const bench_alloc = @import("alloc.zig");
+const Timer = @import("timer.zig").Timer;
+const bench_raw = @import("bench_raw");
+const fucina = bench_raw;
+const optim = bench_raw.optim;
+
+const ExecContext = bench_raw.ExecContext;
+const Tensor = fucina.Tensor;
+const RopeTable = bench_raw.RopeTable;
+
+const vocab: usize = 16384;
+const seq_len: usize = 1024;
+const d_model: usize = 512;
+const n_head: usize = 8;
+const head_dim: usize = d_model / n_head;
+const ffn: usize = 1536;
+const n_layer: usize = 6;
+const attn_scale: f32 = 0.125; // 1/sqrt(head_dim)
+const rms_eps: f32 = 1e-5;
+const rope_theta: f32 = 10000.0;
+const init_std: f32 = 0.02;
+const warmup_steps: usize = 2;
+const timed_steps: usize = 10;
+
+const Layer = struct {
+    c_q: Tensor(.{ .d, .qo }),
+    c_k: Tensor(.{ .d, .kvo }),
+    c_v: Tensor(.{ .d, .kvo }),
+    c_proj: Tensor(.{ .attn, .d }),
+    w_gate: Tensor(.{ .d, .ff }),
+    w_up: Tensor(.{ .d, .ff }),
+    w_down: Tensor(.{ .ff, .d }),
+};
+
+const Model = struct {
+    wte: Tensor(.{ .vocab, .d }),
+    w_lm: Tensor(.{ .d, .vocab }),
+    layers: [n_layer]Layer,
+    rope_table: RopeTable,
+    kv_map: [n_head]usize,
+};
+
+const Dumper = struct {
+    io: std.Io,
+    dir: ?std.Io.Dir,
+    manifest: std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    first: bool = true,
+
+    fn writeTensor(self: *Dumper, name: []const u8, values: []const f32, shape: []const usize) !void {
+        const dir = self.dir orelse return;
+        var name_buf: [128]u8 = undefined;
+        const file_name = try std.fmt.bufPrint(&name_buf, "{s}.bin", .{name});
+        try dir.writeFile(self.io, .{ .sub_path = file_name, .data = std.mem.sliceAsBytes(values) });
+        if (!self.first) try self.manifest.appendSlice(self.allocator, ",\n");
+        self.first = false;
+        try self.manifest.print(self.allocator, "  {{\"name\": \"{s}\", \"file\": \"{s}\", \"shape\": [", .{ name, file_name });
+        for (shape, 0..) |dim, i| {
+            if (i > 0) try self.manifest.appendSlice(self.allocator, ", ");
+            try self.manifest.print(self.allocator, "{d}", .{dim});
+        }
+        try self.manifest.appendSlice(self.allocator, "]}");
+    }
+
+    fn finish(self: *Dumper) !void {
+        const dir = self.dir orelse return;
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(self.allocator);
+        try payload.appendSlice(self.allocator, "[\n");
+        try payload.appendSlice(self.allocator, self.manifest.items);
+        try payload.appendSlice(self.allocator, "\n]\n");
+        try dir.writeFile(self.io, .{ .sub_path = "manifest.json", .data = payload.items });
+    }
+};
+
+fn initParam(
+    comptime T: type,
+    ctx: *ExecContext,
+    allocator: std.mem.Allocator,
+    random: std.Random,
+    dumper: *Dumper,
+    name: []const u8,
+    shape: [2]usize,
+) !T {
+    const data = try allocator.alloc(f32, shape[0] * shape[1]);
+    defer allocator.free(data);
+    for (data) |*value| value.* = random.floatNorm(f32) * init_std;
+    try dumper.writeTensor(name, data, &shape);
+    return T.variableFromSlice(ctx, shape, data);
+}
+
+fn forwardLoss(ctx: *ExecContext, model: *const Model, input_ids: []const usize, labels: []const usize) !Tensor(.{}) {
+    var x = try model.wte.gather(ctx, .vocab, input_ids, .seq);
+    for (0..n_layer) |i| {
+        const l = &model.layers[i];
+
+        var h = try x.rmsNorm(ctx, .d, rms_eps);
+        var q = try (try h.dot(ctx, &l.c_q, .d)).split(ctx, .qo, .{ .head, .d }, [_]usize{ n_head, head_dim });
+        var k = try (try h.dot(ctx, &l.c_k, .d)).split(ctx, .kvo, .{ .kv_head, .d }, [_]usize{ n_head, head_dim });
+        var v = try (try h.dot(ctx, &l.c_v, .d)).split(ctx, .kvo, .{ .kv_head, .d }, [_]usize{ n_head, head_dim });
+        q = try q.rope(ctx, .seq, .d, &model.rope_table, .half);
+        k = try k.rope(ctx, .seq, .d, &model.rope_table, .half);
+        var y = try q.groupedAttention(ctx, &k, &v, &model.kv_map, .attn, attn_scale, .{});
+        var attn_out = try y.dot(ctx, &l.c_proj, .attn);
+        x = try x.add(ctx, &attn_out);
+
+        var m = try x.rmsNorm(ctx, .d, rms_eps);
+        var gate = try (try m.dot(ctx, &l.w_gate, .d)).unary(ctx, .silu);
+        var up = try m.dot(ctx, &l.w_up, .d);
+        var gated = try gate.mul(ctx, &up);
+        var mlp_out = try gated.dot(ctx, &l.w_down, .ff);
+        x = try x.add(ctx, &mlp_out);
+    }
+    x = try x.rmsNorm(ctx, .d, rms_eps);
+    var logits = try x.dot(ctx, &model.w_lm, .d);
+    return logits.crossEntropyExt(ctx, .vocab, labels, .{ .reduction = .mean });
+}
+
+pub fn main(init: std.process.Init) !void {
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    var mode: bench_alloc.AllocatorMode = .smp;
+    var dump_path: ?[]const u8 = null;
+    var arg_i: usize = 1;
+    while (arg_i < args.len) : (arg_i += 1) {
+        if (std.mem.eql(u8, args[arg_i], "--dump") and arg_i + 1 < args.len) {
+            arg_i += 1;
+            dump_path = args[arg_i];
+        } else if (try bench_alloc.parseAllocatorModeArg(args[arg_i])) |parsed| {
+            mode = parsed;
+        }
+    }
+    var bench_allocator = bench_alloc.BenchmarkAllocator.init(mode);
+    const allocator = bench_allocator.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var stdout_buffer: [8192]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
+    const stdout = &stdout_writer.interface;
+    defer stdout.flush() catch {};
+
+    var dumper = Dumper{
+        .io = init.io,
+        .dir = if (dump_path) |path|
+            try std.Io.Dir.cwd().createDirPathOpen(init.io, path, .{})
+        else
+            null,
+        .manifest = .empty,
+        .allocator = allocator,
+    };
+    defer dumper.manifest.deinit(allocator);
+    defer if (dumper.dir) |*dir| dir.close(init.io);
+
+    var prng = std.Random.DefaultPrng.init(0x7ea1);
+    const random = prng.random();
+
+    var model: Model = undefined;
+    for (0..n_head) |i| model.kv_map[i] = i;
+    {
+        const positions = try allocator.alloc(i32, seq_len);
+        defer allocator.free(positions);
+        for (positions, 0..) |*p, i| p.* = @intCast(i);
+        model.rope_table = try ctx.prepareRopeTable(positions, head_dim, rope_theta, false);
+    }
+    defer model.rope_table.deinit();
+    try dumper.writeTensor("rope_sin", model.rope_table.sinValues(), &.{ seq_len, head_dim / 2 });
+    try dumper.writeTensor("rope_cos", model.rope_table.cosValues(), &.{ seq_len, head_dim / 2 });
+
+    var name_buf: [128]u8 = undefined;
+    model.wte = try initParam(Tensor(.{ .vocab, .d }), &ctx, allocator, random, &dumper, "wte", .{ vocab, d_model });
+    model.w_lm = try initParam(Tensor(.{ .d, .vocab }), &ctx, allocator, random, &dumper, "w_lm", .{ d_model, vocab });
+    for (0..n_layer) |i| {
+        model.layers[i] = .{
+            .c_q = try initParam(Tensor(.{ .d, .qo }), &ctx, allocator, random, &dumper, try std.fmt.bufPrint(&name_buf, "layers.{d}.c_q", .{i}), .{ d_model, n_head * head_dim }),
+            .c_k = try initParam(Tensor(.{ .d, .kvo }), &ctx, allocator, random, &dumper, try std.fmt.bufPrint(&name_buf, "layers.{d}.c_k", .{i}), .{ d_model, n_head * head_dim }),
+            .c_v = try initParam(Tensor(.{ .d, .kvo }), &ctx, allocator, random, &dumper, try std.fmt.bufPrint(&name_buf, "layers.{d}.c_v", .{i}), .{ d_model, n_head * head_dim }),
+            .c_proj = try initParam(Tensor(.{ .attn, .d }), &ctx, allocator, random, &dumper, try std.fmt.bufPrint(&name_buf, "layers.{d}.c_proj", .{i}), .{ n_head * head_dim, d_model }),
+            .w_gate = try initParam(Tensor(.{ .d, .ff }), &ctx, allocator, random, &dumper, try std.fmt.bufPrint(&name_buf, "layers.{d}.w_gate", .{i}), .{ d_model, ffn }),
+            .w_up = try initParam(Tensor(.{ .d, .ff }), &ctx, allocator, random, &dumper, try std.fmt.bufPrint(&name_buf, "layers.{d}.w_up", .{i}), .{ d_model, ffn }),
+            .w_down = try initParam(Tensor(.{ .ff, .d }), &ctx, allocator, random, &dumper, try std.fmt.bufPrint(&name_buf, "layers.{d}.w_down", .{i}), .{ ffn, d_model }),
+        };
+    }
+    defer {
+        model.wte.deinit();
+        model.w_lm.deinit();
+        for (0..n_layer) |i| {
+            model.layers[i].c_q.deinit();
+            model.layers[i].c_k.deinit();
+            model.layers[i].c_v.deinit();
+            model.layers[i].c_proj.deinit();
+            model.layers[i].w_gate.deinit();
+            model.layers[i].w_up.deinit();
+            model.layers[i].w_down.deinit();
+        }
+    }
+
+    // Fixed synthetic sequence: ids[t] feeds the model, ids[t+1] is the label.
+    const ids = try allocator.alloc(usize, seq_len + 1);
+    defer allocator.free(ids);
+    for (ids) |*id| id.* = random.uintLessThan(usize, vocab);
+    {
+        const ids_f32 = try allocator.alloc(f32, seq_len + 1);
+        defer allocator.free(ids_f32);
+        for (ids_f32, ids) |*out, id| out.* = @floatFromInt(id);
+        try dumper.writeTensor("token_ids", ids_f32, &.{seq_len + 1});
+    }
+    try dumper.finish();
+    const input_ids = ids[0..seq_len];
+    const labels = ids[1 .. seq_len + 1];
+
+    var opt = optim.AdamW.init(allocator, .{ .lr = 3e-4, .beta1 = 0.9, .beta2 = 0.95, .eps = 1e-8, .weight_decay = 0 });
+    defer opt.deinit();
+    try opt.addParam(&model.wte);
+    try opt.addParam(&model.w_lm);
+    for (0..n_layer) |i| {
+        try opt.addParam(&model.layers[i].c_q);
+        try opt.addParam(&model.layers[i].c_k);
+        try opt.addParam(&model.layers[i].c_v);
+        try opt.addParam(&model.layers[i].c_proj);
+        try opt.addParam(&model.layers[i].w_gate);
+        try opt.addParam(&model.layers[i].w_up);
+        try opt.addParam(&model.layers[i].w_down);
+    }
+
+    try stdout.print(
+        "gpt train step — backend={s} layers={d} d={d} heads={d} ffn={d} vocab={d} seq={d}\n",
+        .{ @tagName(fucina.active_backend_kind), n_layer, d_model, n_head, ffn, vocab, seq_len },
+    );
+
+    var losses: [warmup_steps + timed_steps]f32 = undefined;
+    var step_ms: [warmup_steps + timed_steps]f64 = undefined;
+    for (0..warmup_steps + timed_steps) |step_i| {
+        var timer = try Timer.start(init.io);
+        const scope = ctx.openExecScope();
+        const loss = try forwardLoss(&ctx, &model, input_ids, labels);
+        try loss.backward(&ctx);
+        const loss_value = try loss.item();
+        ctx.closeExecScope(scope);
+        try opt.step(&ctx);
+        opt.zeroGrad();
+        const ns = timer.read();
+        losses[step_i] = loss_value;
+        step_ms[step_i] = @as(f64, @floatFromInt(ns)) / 1e6;
+        try stdout.print("step {d:>2}  loss {d:.6}  {d:>8.2} ms\n", .{ step_i, loss_value, step_ms[step_i] });
+        try stdout.flush();
+    }
+
+    var total: f64 = 0;
+    for (step_ms[warmup_steps..]) |ms| total += ms;
+    try stdout.print("timed mean ({d} steps after {d} warmup): {d:.2} ms/step\n", .{ timed_steps, warmup_steps, total / timed_steps });
+
+    if (dumper.dir) |dir| {
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(allocator);
+        try payload.appendSlice(allocator, "{\"losses\": [");
+        for (losses, 0..) |value, i| {
+            if (i > 0) try payload.appendSlice(allocator, ", ");
+            try payload.print(allocator, "{d}", .{value});
+        }
+        try payload.appendSlice(allocator, "], \"step_ms\": [");
+        for (step_ms, 0..) |value, i| {
+            if (i > 0) try payload.appendSlice(allocator, ", ");
+            try payload.print(allocator, "{d}", .{value});
+        }
+        try payload.print(allocator, "], \"warmup_steps\": {d}}}\n", .{warmup_steps});
+        try dir.writeFile(init.io, .{ .sub_path = "fucina_results.json", .data = payload.items });
+    }
+}

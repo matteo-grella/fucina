@@ -1183,6 +1183,22 @@ pub fn build(b: *std.Build) void {
     const gemm_bench_step = b.step("bench-gemm", "Large-shape f32 GEMM: row kernels vs cache-blocked packed kernel (+BLAS reference)");
     gemm_bench_step.dependOn(&gemm_bench_cmd.step);
 
+    const train_step_bench_exe = b.addExecutable(.{
+        .name = "fucina-train-step-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/train_step.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    train_step_bench_exe.root_module.addImport("bench_raw", bench_raw_module);
+    configureBlas(train_step_bench_exe, blas_kind);
+    configureGpu(b, train_step_bench_exe, gpu_kind);
+    const train_step_bench_cmd = b.addRunArtifact(train_step_bench_exe);
+    if (b.args) |args| train_step_bench_cmd.addArgs(args);
+    const train_step_bench_step = b.step("bench-train-step", "Full GPT autograd training step; pairs with tools/torch_train_step.py");
+    train_step_bench_step.dependOn(&train_step_bench_cmd.step);
+
     const packed_gemm_bench_exe = b.addExecutable(.{
         .name = "fucina-packed-gemm-bench",
         .root_module = b.createModule(.{
