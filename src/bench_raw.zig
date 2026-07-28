@@ -8,6 +8,7 @@ pub const Tensor = ag.Tensor;
 pub const einsumMany = ag.einsumMany;
 pub const RawTensor = tensor.Tensor;
 pub const ExecContext = exec.ExecContext;
+pub const RopeMode = exec.RopeMode;
 pub const active_backend_kind = backend.active_kind;
 pub const BlockQ8_0 = dtype.BlockQ8_0;
 pub const q8_0_block_size = dtype.q8_0_block_size;

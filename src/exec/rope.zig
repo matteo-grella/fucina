@@ -219,6 +219,63 @@ pub fn prepareRopeTableInvFreqsF64(rt: *Runtime, pos0: usize, count: usize, inv_
     };
 }
 
+// ---------------- Vector pair rotation (feature_stride == 1) ----------------
+
+const rope_vec_width = 8;
+const RopeVec = @Vector(rope_vec_width, f32);
+
+/// Rotate one position's pairs when the two features of each pair sit in
+/// separate contiguous halves (`.half` pairing): straight vector loads on
+/// both halves and on the sin/cos table rows. Same per-element expressions
+/// as the scalar loop, so the output is bitwise identical.
+fn rotatePairsHalf(output: []f32, input: []const f32, first_base: usize, second_base: usize, sin_row: []const f32, cos_row: []const f32) void {
+    const pair_count = sin_row.len;
+    var pair_i: usize = 0;
+    while (pair_i + rope_vec_width <= pair_count) : (pair_i += rope_vec_width) {
+        const first: RopeVec = input[first_base + pair_i ..][0..rope_vec_width].*;
+        const second: RopeVec = input[second_base + pair_i ..][0..rope_vec_width].*;
+        const sin_vec: RopeVec = sin_row[pair_i..][0..rope_vec_width].*;
+        const cos_vec: RopeVec = cos_row[pair_i..][0..rope_vec_width].*;
+        output[first_base + pair_i ..][0..rope_vec_width].* = first * cos_vec - second * sin_vec;
+        output[second_base + pair_i ..][0..rope_vec_width].* = first * sin_vec + second * cos_vec;
+    }
+    while (pair_i < pair_count) : (pair_i += 1) {
+        const first = input[first_base + pair_i];
+        const second = input[second_base + pair_i];
+        output[first_base + pair_i] = first * cos_row[pair_i] - second * sin_row[pair_i];
+        output[second_base + pair_i] = first * sin_row[pair_i] + second * cos_row[pair_i];
+    }
+}
+
+/// Rotate one position's pairs when the two features of each pair are
+/// adjacent (`.interleaved` pairing): two contiguous vector loads per step,
+/// deinterleave/reinterleave with `@shuffle` (the ld2/st2 shape on NEON).
+/// Bitwise identical to the scalar loop. Negative shuffle indices select
+/// from the second operand (`~i` picks lane `i`).
+fn rotatePairsInterleaved(output: []f32, input: []const f32, base: usize, sin_row: []const f32, cos_row: []const f32) void {
+    const pair_count = sin_row.len;
+    var pair_i: usize = 0;
+    while (pair_i + rope_vec_width <= pair_count) : (pair_i += rope_vec_width) {
+        const lo: RopeVec = input[base + 2 * pair_i ..][0..rope_vec_width].*;
+        const hi: RopeVec = input[base + 2 * pair_i + rope_vec_width ..][0..rope_vec_width].*;
+        const first = @shuffle(f32, lo, hi, [rope_vec_width]i32{ 0, 2, 4, 6, -1, -3, -5, -7 });
+        const second = @shuffle(f32, lo, hi, [rope_vec_width]i32{ 1, 3, 5, 7, -2, -4, -6, -8 });
+        const sin_vec: RopeVec = sin_row[pair_i..][0..rope_vec_width].*;
+        const cos_vec: RopeVec = cos_row[pair_i..][0..rope_vec_width].*;
+        const rotated_first = first * cos_vec - second * sin_vec;
+        const rotated_second = first * sin_vec + second * cos_vec;
+        output[base + 2 * pair_i ..][0..rope_vec_width].* = @shuffle(f32, rotated_first, rotated_second, [rope_vec_width]i32{ 0, -1, 1, -2, 2, -3, 3, -4 });
+        output[base + 2 * pair_i + rope_vec_width ..][0..rope_vec_width].* = @shuffle(f32, rotated_first, rotated_second, [rope_vec_width]i32{ 4, -5, 5, -6, 6, -7, 7, -8 });
+    }
+    while (pair_i < pair_count) : (pair_i += 1) {
+        const first_offset = base + 2 * pair_i;
+        const first = input[first_offset];
+        const second = input[first_offset + 1];
+        output[first_offset] = first * cos_row[pair_i] - second * sin_row[pair_i];
+        output[first_offset + 1] = first * sin_row[pair_i] + second * cos_row[pair_i];
+    }
+}
+
 pub fn ropeAxisRankWithTable(
     rt: *Runtime,
     comptime rank: usize,
@@ -266,6 +323,16 @@ pub fn ropeAxisRankWithTable(
                 base_offset += coord * strides[dim];
                 if (dim == position_axis) position_coord = coord;
             }
+        }
+
+        if (feature_stride == 1) {
+            const sin_row = sin_values[position_coord * pair_count ..][0..pair_count];
+            const cos_row = cos_values[position_coord * pair_count ..][0..pair_count];
+            switch (mode) {
+                .interleaved, .interleaved_tail => rotatePairsInterleaved(output, input, base_offset, sin_row, cos_row),
+                .half => rotatePairsHalf(output, input, base_offset, base_offset + pair_count, sin_row, cos_row),
+            }
+            continue;
         }
 
         for (0..pair_count) |pair_i| {
@@ -365,6 +432,16 @@ pub fn ropePartialAxisRankWithTable(
                 base_offset += coord * strides[dim];
                 if (dim == position_axis) position_coord = coord;
             }
+        }
+
+        if (feature_stride == 1) {
+            const sin_row = sin_values[position_coord * pair_count ..][0..pair_count];
+            const cos_row = cos_values[position_coord * pair_count ..][0..pair_count];
+            switch (mode) {
+                .interleaved, .interleaved_tail => rotatePairsInterleaved(output, input, base_offset + rotary_offset, sin_row, cos_row),
+                .half => rotatePairsHalf(output, input, base_offset + rotary_offset, base_offset + rotary_offset + pair_count, sin_row, cos_row),
+            }
+            continue;
         }
 
         for (0..pair_count) |pair_i| {

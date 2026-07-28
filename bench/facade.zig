@@ -108,8 +108,10 @@ fn benchMatmulTransB(m: usize, k: usize, n: usize, writer: anytype) !void {
 
 fn benchRopeTable(seq: usize, heads: usize, d: usize, writer: anytype) !void {
     const elems = seq * heads * d;
-    try printResult(writer, "rope_table_full", "raw", elems, try runRawRopeTable(seq, heads, d, default_iterations));
-    try printResult(writer, "rope_table_full", "public_tensor_no_grad", elems, try runPublicRopeTable(seq, heads, d, default_iterations));
+    try printResult(writer, "rope_table_full", "raw", elems, try runRawRopeTable(.half, seq, heads, d, default_iterations));
+    try printResult(writer, "rope_table_full", "public_tensor_no_grad", elems, try runPublicRopeTable(.half, seq, heads, d, default_iterations));
+    try printResult(writer, "rope_table_interleaved", "raw", elems, try runRawRopeTable(.interleaved, seq, heads, d, default_iterations));
+    try printResult(writer, "rope_table_interleaved", "public_tensor_no_grad", elems, try runPublicRopeTable(.interleaved, seq, heads, d, default_iterations));
 }
 
 fn printResult(writer: anytype, case: []const u8, mode: []const u8, n: usize, result: Result) !void {
@@ -920,7 +922,7 @@ fn ropeBenchPositions(allocator: Allocator, seq: usize) ![]i32 {
     return positions;
 }
 
-fn runRawRopeTable(seq: usize, heads: usize, d: usize, iterations: usize) !Result {
+fn runRawRopeTable(comptime mode: bench_raw.RopeMode, seq: usize, heads: usize, d: usize, iterations: usize) !Result {
     var benchmark_allocator = bench_alloc.BenchmarkAllocator.init(benchmark_allocator_mode);
     defer benchmark_allocator.deinit();
 
@@ -939,7 +941,7 @@ fn runRawRopeTable(seq: usize, heads: usize, d: usize, iterations: usize) !Resul
     defer table.deinit();
 
     for (0..4) |_| {
-        var y = try ctx.ropePartialAxisRankWithTable(3, &x, 0, 2, &table, .half);
+        var y = try ctx.ropePartialAxisRankWithTable(3, &x, 0, 2, &table, mode);
         y.deinit();
     }
 
@@ -947,7 +949,7 @@ fn runRawRopeTable(seq: usize, heads: usize, d: usize, iterations: usize) !Resul
     var checksum: f64 = 0;
     var timer = try Timer.start(benchmark_io);
     for (0..iterations) |_| {
-        var y = try ctx.ropePartialAxisRankWithTable(3, &x, 0, 2, &table, .half);
+        var y = try ctx.ropePartialAxisRankWithTable(3, &x, 0, 2, &table, mode);
         checksum += @as(f64, @floatCast(y.dataConst()[0]));
         y.deinit();
     }
@@ -956,7 +958,7 @@ fn runRawRopeTable(seq: usize, heads: usize, d: usize, iterations: usize) !Resul
     return resultFromWindow(iterations, elapsed, &counted, checksum);
 }
 
-fn runPublicRopeTable(seq: usize, heads: usize, d: usize, iterations: usize) !Result {
+fn runPublicRopeTable(comptime mode: bench_raw.RopeMode, seq: usize, heads: usize, d: usize, iterations: usize) !Result {
     var benchmark_allocator = bench_alloc.BenchmarkAllocator.init(benchmark_allocator_mode);
     defer benchmark_allocator.deinit();
 
@@ -976,7 +978,7 @@ fn runPublicRopeTable(seq: usize, heads: usize, d: usize, iterations: usize) !Re
     defer table.deinit();
 
     for (0..4) |_| {
-        var y = try x.rope(&ctx, .seq, .d, &table, .half);
+        var y = try x.rope(&ctx, .seq, .d, &table, mode);
         y.deinit();
     }
 
@@ -984,7 +986,7 @@ fn runPublicRopeTable(seq: usize, heads: usize, d: usize, iterations: usize) !Re
     var checksum: f64 = 0;
     var timer = try Timer.start(benchmark_io);
     for (0..iterations) |_| {
-        var y = try x.rope(&ctx, .seq, .d, &table, .half);
+        var y = try x.rope(&ctx, .seq, .d, &table, mode);
         checksum += @as(f64, @floatCast(y.asRawTensor().dataConst()[0]));
         y.deinit();
     }
