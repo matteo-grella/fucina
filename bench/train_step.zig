@@ -34,7 +34,7 @@ const rms_eps: f32 = 1e-5;
 const rope_theta: f32 = 10000.0;
 const init_std: f32 = 0.02;
 const warmup_steps: usize = 2;
-const timed_steps: usize = 10;
+const default_timed_steps: usize = 10;
 
 const Layer = struct {
     c_q: Tensor(.{ .d, .qo }),
@@ -133,11 +133,15 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     var mode: bench_alloc.AllocatorMode = .smp;
     var dump_path: ?[]const u8 = null;
+    var timed_steps: usize = default_timed_steps;
     var arg_i: usize = 1;
     while (arg_i < args.len) : (arg_i += 1) {
         if (std.mem.eql(u8, args[arg_i], "--dump") and arg_i + 1 < args.len) {
             arg_i += 1;
             dump_path = args[arg_i];
+        } else if (std.mem.eql(u8, args[arg_i], "--steps") and arg_i + 1 < args.len) {
+            arg_i += 1;
+            timed_steps = try std.fmt.parseInt(usize, args[arg_i], 10);
         } else if (try bench_alloc.parseAllocatorModeArg(args[arg_i])) |parsed| {
             mode = parsed;
         }
@@ -242,27 +246,41 @@ pub fn main(init: std.process.Init) !void {
         .{ @tagName(fucina.active_backend_kind), n_layer, d_model, n_head, ffn, vocab, seq_len },
     );
 
-    var losses: [warmup_steps + timed_steps]f32 = undefined;
-    var step_ms: [warmup_steps + timed_steps]f64 = undefined;
+    const losses = try allocator.alloc(f32, warmup_steps + timed_steps);
+    defer allocator.free(losses);
+    const step_ms = try allocator.alloc(f64, warmup_steps + timed_steps);
+    defer allocator.free(step_ms);
+    var fwd_total: f64 = 0;
+    var bwd_total: f64 = 0;
+    var opt_total: f64 = 0;
     for (0..warmup_steps + timed_steps) |step_i| {
         var timer = try Timer.start(init.io);
         const scope = ctx.openExecScope();
         const loss = try forwardLoss(&ctx, &model, input_ids, labels);
+        const fwd_value = try loss.item(); // forces the forward to settle
+        const fwd_ns = timer.read();
         try loss.backward(&ctx);
-        const loss_value = try loss.item();
+        const bwd_ns = timer.read();
         ctx.closeExecScope(scope);
         try opt.step(&ctx);
         opt.zeroGrad();
         const ns = timer.read();
-        losses[step_i] = loss_value;
+        losses[step_i] = fwd_value;
         step_ms[step_i] = @as(f64, @floatFromInt(ns)) / 1e6;
-        try stdout.print("step {d:>2}  loss {d:.6}  {d:>8.2} ms\n", .{ step_i, loss_value, step_ms[step_i] });
+        if (step_i >= warmup_steps) {
+            fwd_total += @as(f64, @floatFromInt(fwd_ns)) / 1e6;
+            bwd_total += @as(f64, @floatFromInt(bwd_ns - fwd_ns)) / 1e6;
+            opt_total += @as(f64, @floatFromInt(ns - bwd_ns)) / 1e6;
+        }
+        try stdout.print("step {d:>2}  loss {d:.6}  {d:>8.2} ms\n", .{ step_i, fwd_value, step_ms[step_i] });
         try stdout.flush();
     }
+    const steps_f: f64 = @floatFromInt(timed_steps);
+    try stdout.print("sections: fwd {d:.1} ms, bwd {d:.1} ms, opt+zero {d:.1} ms\n", .{ fwd_total / steps_f, bwd_total / steps_f, opt_total / steps_f });
 
     var total: f64 = 0;
     for (step_ms[warmup_steps..]) |ms| total += ms;
-    try stdout.print("timed mean ({d} steps after {d} warmup): {d:.2} ms/step\n", .{ timed_steps, warmup_steps, total / timed_steps });
+    try stdout.print("timed mean ({d} steps after {d} warmup): {d:.2} ms/step\n", .{ timed_steps, warmup_steps, total / @as(f64, @floatFromInt(timed_steps)) });
 
     if (dumper.dir) |dir| {
         var payload: std.ArrayList(u8) = .empty;

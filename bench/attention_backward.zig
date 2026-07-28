@@ -37,6 +37,7 @@ const cases = [_]Case{
     .{ .name = "s256_h16_kv4_d64+s", .q_seq = 256, .kv_seq = 256, .heads = 16, .kv_heads = 4, .d = 64, .iters = 8, .stats = true },
     .{ .name = "s512_h16_kv4_d64", .q_seq = 512, .kv_seq = 512, .heads = 16, .kv_heads = 4, .d = 64, .iters = 6 },
     .{ .name = "s512_h16_kv4_d64+s", .q_seq = 512, .kv_seq = 512, .heads = 16, .kv_heads = 4, .d = 64, .iters = 6, .stats = true },
+    .{ .name = "s1024_h8_kv8_d64", .q_seq = 1024, .kv_seq = 1024, .heads = 8, .kv_heads = 8, .d = 64, .iters = 6 },
     .{ .name = "s1024_h16_kv4_d64", .q_seq = 1024, .kv_seq = 1024, .heads = 16, .kv_heads = 4, .d = 64, .iters = 4 },
     .{ .name = "s1024_h16_kv4_d64+s", .q_seq = 1024, .kv_seq = 1024, .heads = 16, .kv_heads = 4, .d = 64, .iters = 4, .stats = true },
     .{ .name = "s2048_h16_kv4_d64", .q_seq = 2048, .kv_seq = 2048, .heads = 16, .kv_heads = 4, .d = 64, .iters = 3 },

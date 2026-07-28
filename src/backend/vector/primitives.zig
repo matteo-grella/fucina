@@ -166,6 +166,72 @@ pub inline fn vecUnary(comptime op: ops.UnaryOp, z: []f32, x: []const f32) void 
     while (i < z.len) : (i += 1) z[i] = ops.unaryScalar(op, x[i]);
 }
 
+/// Input-based unary derivatives with a vector body — the unary VJP's hot
+/// loop (ag/backward.zig) routes these ops here; everything else keeps its
+/// scalar derivative loop. The train-path exp-family ops matter most: the
+/// scalar loop pays one libm expf PER ELEMENT for silu/sigmoid/softplus.
+pub inline fn unaryVjpVectorizes(comptime op: ops.UnaryOp) bool {
+    return switch (op) {
+        .relu, .exp, .sigmoid, .softplus, .silu, .neg, .abs, .log, .log1p => true,
+        else => false,
+    };
+}
+
+/// Formulas mirror `ag/backward.zig unaryDerivative`; the sub-vector tail in
+/// `vecUnaryVjp` uses the scalar forms (the same lane/tail split as vecUnary).
+pub inline fn unaryDerivativeVec(comptime op: ops.UnaryOp, value: Vf32) Vf32 {
+    const zero: Vf32 = @splat(0);
+    const one: Vf32 = @splat(1);
+    return switch (op) {
+        .relu => @select(f32, value > zero, one, zero),
+        .exp => vexpf(vector_len, value),
+        .sigmoid => blk: {
+            const s = sigmoidVec(value);
+            break :blk s * (one - s);
+        },
+        .softplus => sigmoidVec(value),
+        .silu => blk: {
+            const s = sigmoidVec(value);
+            break :blk s * (one + value * (one - s));
+        },
+        .neg => @as(Vf32, @splat(-1)),
+        .abs => @select(f32, value > zero, one, @select(f32, value < zero, @as(Vf32, @splat(-1)), zero)),
+        .log => one / value,
+        .log1p => one / (one + value),
+        else => @compileError("unaryDerivativeVec: op has no vector derivative"),
+    };
+}
+
+inline fn unaryDerivativeScalar(comptime op: ops.UnaryOp, value: f32) f32 {
+    return switch (op) {
+        .relu => if (value > 0) 1 else 0,
+        .exp => @exp(value),
+        .sigmoid => blk: {
+            const s = ops.sigmoidScalar(value);
+            break :blk s * (1 - s);
+        },
+        .softplus => ops.sigmoidScalar(value),
+        .silu => blk: {
+            const s = ops.sigmoidScalar(value);
+            break :blk s * (1 + value * (1 - s));
+        },
+        .neg => -1,
+        .abs => if (value > 0) 1 else if (value < 0) -1 else 0,
+        .log => 1 / value,
+        .log1p => 1 / (1 + value),
+        else => @compileError("unaryDerivativeScalar: op has no vector derivative"),
+    };
+}
+
+/// dst = gy * d(op)/dx elementwise, SIMD lanes + scalar tail.
+pub inline fn vecUnaryVjp(comptime op: ops.UnaryOp, dsts: []f32, xs: []const f32, gys: []const f32) void {
+    var i: usize = 0;
+    while (i + vector_len <= dsts.len) : (i += vector_len) {
+        dsts[i..][0..vector_len].* = @as(Vf32, gys[i..][0..vector_len].*) * unaryDerivativeVec(op, xs[i..][0..vector_len].*);
+    }
+    while (i < dsts.len) : (i += 1) dsts[i] = gys[i] * unaryDerivativeScalar(op, xs[i]);
+}
+
 pub inline fn vecAddUnary(comptime op: ops.UnaryOp, z: []f32, x: []const f32, y: []const f32) void {
     var i: usize = 0;
     while (i + 4 * vector_len <= z.len) : (i += 4 * vector_len) {

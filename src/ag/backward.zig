@@ -8,6 +8,7 @@ const parallel = @import("../parallel.zig");
 const tag_ops = @import("../tagged.zig");
 const core = @import("core.zig");
 const tags_mod = @import("../tags.zig");
+const vector_primitives = @import("../backend/vector/primitives.zig");
 
 const RawTensor = tensor_mod.Tensor;
 const ExecContext = exec_mod.ExecContext;
@@ -698,7 +699,11 @@ pub fn UnaryBackward(comptime op: exec_mod.UnaryOp, comptime tags: anytype) type
             dsts: []f32,
 
             fn run(t: *const ChunkTask) void {
-                if (comptime unaryUsesOutput(op)) {
+                if (comptime vector_primitives.unaryVjpVectorizes(op)) {
+                    // SIMD derivative body — the scalar loop pays one libm
+                    // expf per element for the exp-family ops.
+                    vector_primitives.vecUnaryVjp(op, t.dsts, t.xs, t.gys);
+                } else if (comptime unaryUsesOutput(op)) {
                     for (t.xs, t.gys, t.dsts) |value, grad, *dst| {
                         dst.* = grad * unaryDerivativeFromOutput(op, value);
                     }

@@ -59,6 +59,15 @@ pub fn cpuThreadCount(max_threads: usize) usize {
         // `setMaxThreads` pre-seeds the cache before detection and remains
         // the escape hatch for deliberate oversubscription.
         if (physicalCpuCount()) |physical| count = @min(count, @max(physical, 1));
+        // Apple Silicon: the compute team stays on PERFORMANCE cores. With
+        // the two M1 E-cores in the team, every barrier waits for the E-core
+        // stragglers — measured on the GPT train-step bench: 8P beats
+        // 8P+2E by ~2%, and any spin-budget increase with E-cores enrolled
+        // collapses throughput (287.9 -> 401.1 ms/step at 256k spins). The
+        // QoS pin biases workers to P-cores but cannot guarantee placement;
+        // sizing the team to perflevel0 does. `setMaxThreads` pre-seeds the
+        // cache and remains the deliberate-oversubscription escape hatch.
+        if (performanceCpuCount()) |performance| count = @min(count, @max(performance, 1));
         // Optional override (mirrors llama.cpp's -t): cap the detected CPU count
         // for per-machine thread tuning. See the note on `vector_max_threads`
         // for when fewer threads help (decode / heat-soaked prefill on M1).
@@ -70,6 +79,25 @@ pub fn cpuThreadCount(max_threads: usize) usize {
 
 // 0 = not yet probed; maxInt = probed, unknown; anything else = the count.
 var cached_physical_cpu_count = std.atomic.Value(usize).init(0);
+var cached_performance_cpu_count = std.atomic.Value(usize).init(0);
+
+/// Performance-core count on heterogeneous Apple Silicon (sysctl
+/// hw.perflevel0.physicalcpu), or null elsewhere/unknown. The compute-team
+/// default in `cpuThreadCount` clamps to this; see the rationale there.
+pub fn performanceCpuCount() ?usize {
+    const cached = cached_performance_cpu_count.load(.acquire);
+    if (cached != 0) return if (cached == std.math.maxInt(usize)) null else cached;
+    const probed: ?usize = blk: {
+        if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) break :blk null;
+        var n: c_int = 0;
+        var len: usize = @sizeOf(c_int);
+        if (std.c.sysctlbyname("hw.perflevel0.physicalcpu", &n, &len, null, 0) != 0) break :blk null;
+        if (n < 1) break :blk null;
+        break :blk @intCast(n);
+    };
+    cached_performance_cpu_count.store(probed orelse std.math.maxInt(usize), .release);
+    return probed;
+}
 
 /// Physical-core count, or null when unknown (callers keep the logical
 /// count). Public because the worker team's oversubscription guard
@@ -87,10 +115,10 @@ pub fn physicalCpuCount() ?usize {
 }
 
 /// The uncached probe behind `physicalCpuCount`. Per-target:
-///  - macOS: sysctl hw.physicalcpu. Deliberately NOT hw.perflevel0.physicalcpu
-///    (P-cores only): perflevel0 would silently shrink -Dmax-threads=10/16
-///    builds, while hw.physicalcpu equals the logical count on all Apple
-///    Silicon (no SMT), keeping every macOS config bit-for-bit unchanged;
+///  - macOS: sysctl hw.physicalcpu — ALL physical cores. This stays the
+///    oversubscription guard's reference; the compute-team default takes the
+///    tighter `performanceCpuCount` clamp in `cpuThreadCount` (E-core
+///    stragglers stall every barrier — the train-step measurement there);
 ///  - Linux (libc-free, the readProcSelfEnviron pattern): dedup of
 ///    /sys/devices/system/cpu/cpuN/topology/thread_siblings_list intersected
 ///    with the affinity mask — a core counts once, via its lowest schedulable
