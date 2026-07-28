@@ -40,6 +40,10 @@ const default_timed_steps: usize = 10;
 /// elemental op — the fusion A/B lever.
 var composed_swiglu: bool = false;
 
+/// --inference: eval-mode forward only (fucina.noGrad — no graph nodes, no
+/// backward, no optimizer), the loss scalar as the cross-framework value pin.
+var inference_mode: bool = false;
+
 const Layer = struct {
     c_q: Tensor(.{ .d, .qo }),
     c_k: Tensor(.{ .d, .kvo }),
@@ -156,34 +160,63 @@ const SwigluOp = struct {
     }
 };
 
+/// One forward for BOTH regimes — the exec-scope design makes this legal:
+/// every intermediate deinits at its last use, which under a training scope
+/// is a no-op borrow release (the scope keeps the autograd graph alive for
+/// backward), and without a scope (inference) returns each transient to the
+/// buffer pool immediately, so the same few hot buffers recycle across ops
+/// and layers.
 fn forwardLoss(ctx: *ExecContext, model: *const Model, input_ids: []const usize, labels: []const usize) !Tensor(.{}) {
     var x = try model.wte.gather(ctx, .vocab, input_ids, .seq);
     for (0..n_layer) |i| {
         const l = &model.layers[i];
 
         var h = try x.rmsNorm(ctx, .d, rms_eps);
-        var q = try (try h.dot(ctx, &l.c_q, .d)).split(ctx, .qo, .{ .head, .d }, [_]usize{ n_head, head_dim });
-        var k = try (try h.dot(ctx, &l.c_k, .d)).split(ctx, .kvo, .{ .kv_head, .d }, [_]usize{ n_head, head_dim });
-        var v = try (try h.dot(ctx, &l.c_v, .d)).split(ctx, .kvo, .{ .kv_head, .d }, [_]usize{ n_head, head_dim });
-        q = try q.rope(ctx, .seq, .d, &model.rope_table, .half);
-        k = try k.rope(ctx, .seq, .d, &model.rope_table, .half);
+        defer h.deinit();
+        var q_proj = try h.dot(ctx, &l.c_q, .d);
+        defer q_proj.deinit();
+        var k_proj = try h.dot(ctx, &l.c_k, .d);
+        defer k_proj.deinit();
+        var v_proj = try h.dot(ctx, &l.c_v, .d);
+        defer v_proj.deinit();
+        var q_split = try q_proj.split(ctx, .qo, .{ .head, .d }, [_]usize{ n_head, head_dim });
+        defer q_split.deinit();
+        var k_split = try k_proj.split(ctx, .kvo, .{ .kv_head, .d }, [_]usize{ n_head, head_dim });
+        defer k_split.deinit();
+        var v = try v_proj.split(ctx, .kvo, .{ .kv_head, .d }, [_]usize{ n_head, head_dim });
+        defer v.deinit();
+        var q = try q_split.rope(ctx, .seq, .d, &model.rope_table, .half);
+        defer q.deinit();
+        var k = try k_split.rope(ctx, .seq, .d, &model.rope_table, .half);
+        defer k.deinit();
         var y = try q.groupedAttention(ctx, &k, &v, &model.kv_map, .attn, attn_scale, .{});
+        defer y.deinit();
         var attn_out = try y.dot(ctx, &l.c_proj, .attn);
-        x = try x.add(ctx, &attn_out);
+        defer attn_out.deinit();
+        var x_attn = try x.add(ctx, &attn_out);
+        x.deinit();
 
-        var m = try x.rmsNorm(ctx, .d, rms_eps);
+        var m = try x_attn.rmsNorm(ctx, .d, rms_eps);
+        defer m.deinit();
         var gate = try m.dot(ctx, &l.w_gate, .d);
-        const up = try m.dot(ctx, &l.w_up, .d);
+        defer gate.deinit();
+        var up = try m.dot(ctx, &l.w_up, .d);
+        defer up.deinit();
         var gated = if (composed_swiglu) blk: {
             var silu_out = try gate.unary(ctx, .silu);
-            var up_var = up;
-            break :blk try silu_out.mul(ctx, &up_var);
+            defer silu_out.deinit();
+            break :blk try silu_out.mul(ctx, &up);
         } else try gate.elementalBinary(ctx, up, SwigluOp, {});
+        defer gated.deinit();
         var mlp_out = try gated.dot(ctx, &l.w_down, .ff);
-        x = try x.add(ctx, &mlp_out);
+        defer mlp_out.deinit();
+        x = try x_attn.add(ctx, &mlp_out);
+        x_attn.deinit();
     }
-    x = try x.rmsNorm(ctx, .d, rms_eps);
-    return x.linearCrossEntropyExt(ctx, &model.w_lm, labels, .{ .reduction = .mean });
+    var x_norm = try x.rmsNorm(ctx, .d, rms_eps);
+    x.deinit();
+    defer x_norm.deinit();
+    return x_norm.linearCrossEntropyExt(ctx, &model.w_lm, labels, .{ .reduction = .mean });
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -198,6 +231,8 @@ pub fn main(init: std.process.Init) !void {
             dump_path = args[arg_i];
         } else if (std.mem.eql(u8, args[arg_i], "--composed-swiglu")) {
             composed_swiglu = true;
+        } else if (std.mem.eql(u8, args[arg_i], "--inference")) {
+            inference_mode = true;
         } else if (std.mem.eql(u8, args[arg_i], "--steps") and arg_i + 1 < args.len) {
             arg_i += 1;
             timed_steps = try std.fmt.parseInt(usize, args[arg_i], 10);
@@ -314,6 +349,20 @@ pub fn main(init: std.process.Init) !void {
     var opt_total: f64 = 0;
     for (0..warmup_steps + timed_steps) |step_i| {
         var timer = try Timer.start(init.io);
+        if (inference_mode) {
+            var ng = fucina.noGrad();
+            var loss = try forwardLoss(&ctx, &model, input_ids, labels);
+            const loss_value = try loss.item();
+            loss.deinit();
+            ng.close();
+            const infer_ns = timer.read();
+            losses[step_i] = loss_value;
+            step_ms[step_i] = @as(f64, @floatFromInt(infer_ns)) / 1e6;
+            if (step_i >= warmup_steps) fwd_total += step_ms[step_i];
+            try stdout.print("step {d:>2}  loss {d:.6}  {d:>8.2} ms\n", .{ step_i, loss_value, step_ms[step_i] });
+            try stdout.flush();
+            continue;
+        }
         const scope = ctx.openExecScope();
         const loss = try forwardLoss(&ctx, &model, input_ids, labels);
         const fwd_value = try loss.item(); // forces the forward to settle

@@ -5,6 +5,7 @@ const exec = @import("exec.zig");
 const tensor = @import("tensor.zig");
 
 pub const Tensor = ag.Tensor;
+pub const noGrad = ag.noGrad;
 pub const einsumMany = ag.einsumMany;
 pub const RawTensor = tensor.Tensor;
 pub const ExecContext = exec.ExecContext;

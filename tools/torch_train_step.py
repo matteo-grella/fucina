@@ -83,6 +83,8 @@ def main() -> None:
         help="torch.compile the loss fn (Inductor CPU; AOTAutograd compiles the backward too)",
     )
     parser.add_argument("--fused-adamw", action="store_true", help="AdamW(fused=True) instead of foreach")
+    parser.add_argument("--inference", action="store_true",
+                        help="eval-mode forward only under torch.inference_mode (pairs with the bench's --inference)")
     args = parser.parse_args()
     torch.set_num_threads(args.threads)
 
@@ -93,7 +95,10 @@ def main() -> None:
     labels = ids_all[1:]
     cos = tensors.pop("rope_cos").unsqueeze(1)
     sin = tensors.pop("rope_sin").unsqueeze(1)
-    params = {name: t.requires_grad_() for name, t in tensors.items()}
+    if args.inference:
+        params = dict(tensors)
+    else:
+        params = {name: t.requires_grad_() for name, t in tensors.items()}
 
     fucina = json.loads((dump_dir / "fucina_results.json").read_text())
     warmup = fucina["warmup_steps"]
@@ -114,12 +119,16 @@ def main() -> None:
     losses, step_ms = [], []
     for step_i in range(n_steps):
         t0 = time.perf_counter_ns()
-        for p in params.values():
-            p.grad = None
-        loss = loss_fn(params, ids, labels, cos, sin)
-        loss.backward()
-        loss_value = loss.item()
-        opt.step()
+        if args.inference:
+            with torch.inference_mode():
+                loss_value = loss_fn(params, ids, labels, cos, sin).item()
+        else:
+            for p in params.values():
+                p.grad = None
+            loss = loss_fn(params, ids, labels, cos, sin)
+            loss.backward()
+            loss_value = loss.item()
+            opt.step()
         step_ms.append((time.perf_counter_ns() - t0) / 1e6)
         losses.append(loss_value)
         print(f"step {step_i:>2}  loss {loss_value:.6f}  {step_ms[-1]:>8.2f} ms")
