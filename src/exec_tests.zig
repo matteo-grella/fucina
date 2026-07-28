@@ -2170,8 +2170,8 @@ test "exec context softmax fast path matches generic layout and naive reference"
             }
         }
 
-        // Same data transposed with axis 0 forces inner > 1, i.e. the scalar
-        // generic path; the SIMD fast path must agree with it.
+        // Same data transposed with axis 0 forces inner > 1, i.e. the strided
+        // inner-lane path; the row-kernel fast path must agree with it.
         const transposed = try allocator.alloc(f32, rows * cols);
         defer allocator.free(transposed);
         for (0..rows) |row| {
@@ -2210,7 +2210,7 @@ test "softmax NaN logits poison the row on both SIMD and scalar paths" {
     const yd = y.dataConst();
 
     // Same data transposed, softmax along axis 0: inner > 1, the strided
-    // scalar path. Both paths must agree on NaN poisoning.
+    // inner-lane path. Both paths must agree on NaN poisoning.
     var transposed: [2 * cols]f32 = undefined;
     for (0..2) |row| {
         for (0..cols) |col| transposed[col * 2 + row] = data[row * cols + col];

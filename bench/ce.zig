@@ -57,6 +57,80 @@ fn benchSoftmaxForward(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocat
     try printRow(stdout, "softmax fwd", rows, cols, ns, iters);
 }
 
+// Axis-0 variants: the reduced axis is NOT last (inner > 1), so these hit
+// the strided fallback paths in exec/softmax.zig rather than the row kernels.
+fn benchSoftmaxForwardAxis0(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, stdout: anytype, rows: usize, cols: usize, iters: usize) !void {
+    var x = try randomLogits(ctx, allocator, rows, cols, 0xa0c0 + rows);
+    defer x.deinit();
+
+    for (0..2) |_| {
+        var y = try ctx.softmaxAxisRank(2, &x, 0);
+        y.deinit();
+    }
+    var timer = try Timer.start(io);
+    for (0..iters) |_| {
+        var y = try ctx.softmaxAxisRank(2, &x, 0);
+        y.deinit();
+    }
+    const ns = timer.read() / iters;
+    try printRow(stdout, "softmax fwd ax0", rows, cols, ns, iters);
+}
+
+fn benchLogSoftmaxAxis0(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, stdout: anytype, rows: usize, cols: usize, iters: usize) !void {
+    var x = try randomLogits(ctx, allocator, rows, cols, 0xa1c0 + rows);
+    defer x.deinit();
+
+    for (0..2) |_| {
+        var y = try ctx.logSoftmaxAxisRank(2, &x, 0);
+        y.deinit();
+    }
+    var timer = try Timer.start(io);
+    for (0..iters) |_| {
+        var y = try ctx.logSoftmaxAxisRank(2, &x, 0);
+        y.deinit();
+    }
+    const ns = timer.read() / iters;
+    try printRow(stdout, "logsoftmax ax0", rows, cols, ns, iters);
+}
+
+fn benchLogsumexpAxis0(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, stdout: anytype, rows: usize, cols: usize, iters: usize) !void {
+    var x = try randomLogits(ctx, allocator, rows, cols, 0xa2c0 + rows);
+    defer x.deinit();
+
+    for (0..2) |_| {
+        var y = try ctx.logsumexpAxisRank(2, &x, 0);
+        y.deinit();
+    }
+    var timer = try Timer.start(io);
+    for (0..iters) |_| {
+        var y = try ctx.logsumexpAxisRank(2, &x, 0);
+        y.deinit();
+    }
+    const ns = timer.read() / iters;
+    try printRow(stdout, "logsumexp ax0", rows, cols, ns, iters);
+}
+
+fn benchSoftmaxBackwardAxis0(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, stdout: anytype, rows: usize, cols: usize, iters: usize) !void {
+    var x = try randomLogits(ctx, allocator, rows, cols, 0xa3c0 + rows);
+    defer x.deinit();
+    var y = try ctx.softmaxAxisRank(2, &x, 0);
+    defer y.deinit();
+    var gy = try randomLogits(ctx, allocator, rows, cols, 0xa4c0 + rows);
+    defer gy.deinit();
+
+    for (0..2) |_| {
+        var gx = try ctx.softmaxBackwardAxisRank(2, &y, &gy, 0);
+        gx.deinit();
+    }
+    var timer = try Timer.start(io);
+    for (0..iters) |_| {
+        var gx = try ctx.softmaxBackwardAxisRank(2, &y, &gy, 0);
+        gx.deinit();
+    }
+    const ns = timer.read() / iters;
+    try printRow(stdout, "softmax bwd ax0", rows, cols, ns, iters);
+}
+
 fn benchSoftmaxBackward(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, stdout: anytype, rows: usize, cols: usize, iters: usize) !void {
     var x = try randomLogits(ctx, allocator, rows, cols, 0xbcd0 + rows);
     defer x.deinit();
@@ -324,6 +398,12 @@ pub fn main(init: std.process.Init) !void {
     try benchLinearCe(&ctx, init.io, allocator, stdout, 1024, 151936, 1024, 3);
 
     try benchSoftmaxBackward(&ctx, init.io, allocator, stdout, 1024, 4096, 50);
+
+    try benchSoftmaxForwardAxis0(&ctx, init.io, allocator, stdout, 4096, 1024, 50);
+    try benchSoftmaxForwardAxis0(&ctx, init.io, allocator, stdout, 1024, 4096, 50);
+    try benchLogSoftmaxAxis0(&ctx, init.io, allocator, stdout, 4096, 1024, 50);
+    try benchLogsumexpAxis0(&ctx, init.io, allocator, stdout, 4096, 1024, 50);
+    try benchSoftmaxBackwardAxis0(&ctx, init.io, allocator, stdout, 4096, 1024, 50);
 
     try benchDropout(&ctx, init.io, allocator, stdout, 1024, 1024, 200);
 

@@ -1544,6 +1544,222 @@ pub fn softmaxBackwardRows(task: SoftmaxBackwardRowsTask) void {
     }
 }
 
+// ---------------- Strided-axis (inner > 1) softmax family ----------------
+//
+// The reduced axis has stride `inner` and the inner index is contiguous, so
+// these kernels run vector lanes across `inner` and stream every pass
+// row-major. The memory-order fix matters as much as the SIMD: the scalar
+// strided loops they replace column-walked with an `inner * 4`-byte stride —
+// one cache/TLB miss per element at LLM widths. Per-lane reduction order
+// along the axis matches those scalar loops exactly; `vexpf` replaces `@exp`,
+// matching the last-axis row kernels' arithmetic.
+
+const InnerVec = @Vector(8, f32);
+const inner_vec_width = 8;
+
+/// Lane-wise `acc = max(acc, row)`.
+fn maxIntoLanes(acc: []f32, row: []const f32) void {
+    var i: usize = 0;
+    while (i + inner_vec_width <= acc.len) : (i += inner_vec_width) {
+        acc[i..][0..inner_vec_width].* = @max(@as(InnerVec, acc[i..][0..inner_vec_width].*), @as(InnerVec, row[i..][0..inner_vec_width].*));
+    }
+    while (i < acc.len) : (i += 1) acc[i] = @max(acc[i], row[i]);
+}
+
+/// Lane-wise non-finite guard: ±inf/NaN maxima shift by 0, exactly the
+/// `std.math.isFinite` guard of the scalar loops.
+fn guardFiniteLanes(row: []f32) void {
+    const zero: InnerVec = @splat(0);
+    const inf: InnerVec = @splat(std.math.inf(f32));
+    var i: usize = 0;
+    while (i + inner_vec_width <= row.len) : (i += inner_vec_width) {
+        const value: InnerVec = row[i..][0..inner_vec_width].*;
+        row[i..][0..inner_vec_width].* = @select(f32, @abs(value) < inf, value, zero);
+    }
+    while (i < row.len) : (i += 1) {
+        if (!std.math.isFinite(row[i])) row[i] = 0;
+    }
+}
+
+/// Lane-wise `out = exp(in - max)`, accumulating `sum += out`.
+fn expSubStoreLanes(out: []f32, in: []const f32, max_row: []const f32, sum_row: []f32) void {
+    var i: usize = 0;
+    while (i + inner_vec_width <= out.len) : (i += inner_vec_width) {
+        const value = vexpf(inner_vec_width, @as(InnerVec, in[i..][0..inner_vec_width].*) - @as(InnerVec, max_row[i..][0..inner_vec_width].*));
+        out[i..][0..inner_vec_width].* = value;
+        sum_row[i..][0..inner_vec_width].* = @as(InnerVec, sum_row[i..][0..inner_vec_width].*) + value;
+    }
+    while (i < out.len) : (i += 1) {
+        const value = vexpf(1, @splat(in[i] - max_row[i]))[0];
+        out[i] = value;
+        sum_row[i] += value;
+    }
+}
+
+/// Lane-wise `sum += exp(in - max)` with no materialized output.
+fn expSubSumLanes(in: []const f32, max_row: []const f32, sum_row: []f32) void {
+    var i: usize = 0;
+    while (i + inner_vec_width <= in.len) : (i += inner_vec_width) {
+        sum_row[i..][0..inner_vec_width].* = @as(InnerVec, sum_row[i..][0..inner_vec_width].*) +
+            vexpf(inner_vec_width, @as(InnerVec, in[i..][0..inner_vec_width].*) - @as(InnerVec, max_row[i..][0..inner_vec_width].*));
+    }
+    while (i < in.len) : (i += 1) {
+        sum_row[i] += vexpf(1, @splat(in[i] - max_row[i]))[0];
+    }
+}
+
+/// Lane-wise `out *= 1 / sum` (reciprocal first, matching the scalar loops).
+fn scaleByInvLanes(out: []f32, sum_row: []const f32) void {
+    const one: InnerVec = @splat(1);
+    var i: usize = 0;
+    while (i + inner_vec_width <= out.len) : (i += inner_vec_width) {
+        const inv = one / @as(InnerVec, sum_row[i..][0..inner_vec_width].*);
+        out[i..][0..inner_vec_width].* = @as(InnerVec, out[i..][0..inner_vec_width].*) * inv;
+    }
+    while (i < out.len) : (i += 1) out[i] *= 1 / sum_row[i];
+}
+
+/// Lane-wise `out = in - shift`.
+fn subLanes(out: []f32, in: []const f32, shift_row: []const f32) void {
+    var i: usize = 0;
+    while (i + inner_vec_width <= out.len) : (i += inner_vec_width) {
+        out[i..][0..inner_vec_width].* = @as(InnerVec, in[i..][0..inner_vec_width].*) - @as(InnerVec, shift_row[i..][0..inner_vec_width].*);
+    }
+    while (i < out.len) : (i += 1) out[i] = in[i] - shift_row[i];
+}
+
+/// Lane-wise `dot += gy * y`.
+fn mulIntoLanes(dot_row: []f32, gy: []const f32, y: []const f32) void {
+    var i: usize = 0;
+    while (i + inner_vec_width <= dot_row.len) : (i += inner_vec_width) {
+        dot_row[i..][0..inner_vec_width].* = @as(InnerVec, dot_row[i..][0..inner_vec_width].*) +
+            @as(InnerVec, gy[i..][0..inner_vec_width].*) * @as(InnerVec, y[i..][0..inner_vec_width].*);
+    }
+    while (i < dot_row.len) : (i += 1) dot_row[i] += gy[i] * y[i];
+}
+
+pub const SoftmaxInnerTask = struct {
+    input: []const f32,
+    output: []f32,
+    axis_dim: usize,
+    inner: usize,
+    /// Pooled f32 scratch of length `2 * inner`: max row, then sum row.
+    scratch: []f32,
+    outer: usize,
+};
+
+pub fn softmaxInner(task: SoftmaxInnerTask) void {
+    const inner = task.inner;
+    const max_row = task.scratch[0..inner];
+    const sum_row = task.scratch[inner..][0..inner];
+    for (0..task.outer) |outer_i| {
+        const base = outer_i * task.axis_dim * inner;
+        @memcpy(max_row, task.input[base..][0..inner]);
+        for (1..task.axis_dim) |axis_i| {
+            maxIntoLanes(max_row, task.input[base + axis_i * inner ..][0..inner]);
+        }
+        @memset(sum_row, 0);
+        for (0..task.axis_dim) |axis_i| {
+            const offset = base + axis_i * inner;
+            expSubStoreLanes(task.output[offset..][0..inner], task.input[offset..][0..inner], max_row, sum_row);
+        }
+        for (0..task.axis_dim) |axis_i| {
+            scaleByInvLanes(task.output[base + axis_i * inner ..][0..inner], sum_row);
+        }
+    }
+}
+
+/// Output holds one `inner`-wide row per outer block (the axis removed).
+pub fn logsumexpInner(task: SoftmaxInnerTask) void {
+    const inner = task.inner;
+    const max_row = task.scratch[0..inner];
+    const sum_row = task.scratch[inner..][0..inner];
+    for (0..task.outer) |outer_i| {
+        const base = outer_i * task.axis_dim * inner;
+        @memcpy(max_row, task.input[base..][0..inner]);
+        for (1..task.axis_dim) |axis_i| {
+            maxIntoLanes(max_row, task.input[base + axis_i * inner ..][0..inner]);
+        }
+        guardFiniteLanes(max_row);
+        @memset(sum_row, 0);
+        for (0..task.axis_dim) |axis_i| {
+            expSubSumLanes(task.input[base + axis_i * inner ..][0..inner], max_row, sum_row);
+        }
+        const out_row = task.output[outer_i * inner ..][0..inner];
+        for (out_row, max_row, sum_row) |*out, max_safe, sum_exp| {
+            out.* = max_safe + @log(sum_exp);
+        }
+    }
+}
+
+pub fn logSoftmaxInner(task: SoftmaxInnerTask) void {
+    const inner = task.inner;
+    const max_row = task.scratch[0..inner];
+    const sum_row = task.scratch[inner..][0..inner];
+    for (0..task.outer) |outer_i| {
+        const base = outer_i * task.axis_dim * inner;
+        @memcpy(max_row, task.input[base..][0..inner]);
+        for (1..task.axis_dim) |axis_i| {
+            maxIntoLanes(max_row, task.input[base + axis_i * inner ..][0..inner]);
+        }
+        guardFiniteLanes(max_row);
+        @memset(sum_row, 0);
+        for (0..task.axis_dim) |axis_i| {
+            expSubSumLanes(task.input[base + axis_i * inner ..][0..inner], max_row, sum_row);
+        }
+        // Shift row reuses the max slots: shift = max_safe + log(sum_exp).
+        for (max_row, sum_row) |*max_safe, sum_exp| {
+            max_safe.* = max_safe.* + @log(sum_exp);
+        }
+        for (0..task.axis_dim) |axis_i| {
+            const offset = base + axis_i * inner;
+            subLanes(task.output[offset..][0..inner], task.input[offset..][0..inner], max_row);
+        }
+    }
+}
+
+pub const SoftmaxBackwardInnerTask = struct {
+    y: []const f32,
+    gy: []const f32,
+    output: []f32,
+    axis_dim: usize,
+    inner: usize,
+    /// Pooled f32 scratch of length `inner`: the per-lane gy·y dot row.
+    scratch: []f32,
+    scale: f32,
+    outer: usize,
+};
+
+pub fn softmaxBackwardInner(task: SoftmaxBackwardInnerTask) void {
+    const inner = task.inner;
+    const dot_row = task.scratch[0..inner];
+    const scale_vec: InnerVec = @splat(task.scale);
+    for (0..task.outer) |outer_i| {
+        const base = outer_i * task.axis_dim * inner;
+        @memset(dot_row, 0);
+        for (0..task.axis_dim) |axis_i| {
+            const offset = base + axis_i * inner;
+            mulIntoLanes(dot_row, task.gy[offset..][0..inner], task.y[offset..][0..inner]);
+        }
+        for (0..task.axis_dim) |axis_i| {
+            const offset = base + axis_i * inner;
+            const row_y = task.y[offset..][0..inner];
+            const row_gy = task.gy[offset..][0..inner];
+            const row_out = task.output[offset..][0..inner];
+            var i: usize = 0;
+            while (i + inner_vec_width <= inner) : (i += inner_vec_width) {
+                const yv: InnerVec = row_y[i..][0..inner_vec_width].*;
+                const gyv: InnerVec = row_gy[i..][0..inner_vec_width].*;
+                const dv: InnerVec = dot_row[i..][0..inner_vec_width].*;
+                row_out[i..][0..inner_vec_width].* = scale_vec * yv * (gyv - dv);
+            }
+            while (i < inner) : (i += 1) {
+                row_out[i] = task.scale * row_y[i] * (row_gy[i] - dot_row[i]);
+            }
+        }
+    }
+}
+
 pub fn crossEntropyLossRows(task: CrossEntropyLossRowsTask) void {
     const Vec = @Vector(8, f32);
     const vector_width = 8;

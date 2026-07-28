@@ -29,6 +29,10 @@ const logSoftmaxRows = exec_row_ops.logSoftmaxRows;
 const shapeWithoutAxis = exec_shape.shapeWithoutAxis;
 const SoftmaxExtRowsTask = exec_row_ops.SoftmaxExtRowsTask;
 const SoftmaxBackwardRowsTask = exec_row_ops.SoftmaxBackwardRowsTask;
+const softmaxInner = exec_row_ops.softmaxInner;
+const logsumexpInner = exec_row_ops.logsumexpInner;
+const logSoftmaxInner = exec_row_ops.logSoftmaxInner;
+const softmaxBackwardInner = exec_row_ops.softmaxBackwardInner;
 const runSoftmaxRowsTask = exec_row_ops.runSoftmaxRowsTask;
 const runSoftmaxExtRowsTask = exec_row_ops.runSoftmaxExtRowsTask;
 const runSoftmaxBackwardRowsTask = exec_row_ops.runSoftmaxBackwardRowsTask;
@@ -51,8 +55,8 @@ pub const SoftmaxExtOptions = struct {
 /// max-shifted with the non-finite guard (±inf maxima shift by 0, so
 /// all(-inf) rows give -inf and +inf entries give +inf, never NaN). The
 /// last-axis path runs the fused SIMD row kernel (`logsumexpRows`,
-/// task-parallel over rows like `softmax`); other axes fall back to the
-/// scalar strided loop with identical semantics.
+/// task-parallel over rows like `softmax`); other axes run the streaming
+/// inner-lane kernel (`logsumexpInner`) with identical semantics.
 pub fn logsumexpAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
@@ -96,29 +100,24 @@ pub fn logsumexpAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, c
         return out;
     }
 
-    for (0..outer) |outer_i| {
-        const base = outer_i * axis_dim * inner;
-        for (0..inner) |inner_i| {
-            var max_value = input[base + inner_i];
-            for (1..axis_dim) |axis_i| {
-                max_value = @max(max_value, input[base + axis_i * inner + inner_i]);
-            }
-            const max_safe = if (std.math.isFinite(max_value)) max_value else 0;
-            var sum_exp: f32 = 0;
-            for (0..axis_dim) |axis_i| {
-                sum_exp += @exp(input[base + axis_i * inner + inner_i] - max_safe);
-            }
-            output[outer_i * inner + inner_i] = max_safe + @log(sum_exp);
-        }
-    }
+    var scratch = try rt.emptyRank(1, .{2 * inner});
+    defer scratch.deinit();
+    logsumexpInner(.{
+        .input = input,
+        .output = output,
+        .axis_dim = axis_dim,
+        .inner = inner,
+        .scratch = scratch.data(),
+        .outer = outer,
+    });
     return out;
 }
 
 /// Log-softmax along `axis` (torch.log_softmax), shape-preserving:
 /// `(x - m) - log(Σ exp(x - m))` with the same guarded max as
 /// `logsumexpAxisRank`. Last-axis path is the fused SIMD row kernel
-/// (`logSoftmaxRows`, task-parallel over rows); other axes fall back to
-/// the scalar strided loop.
+/// (`logSoftmaxRows`, task-parallel over rows); other axes run the
+/// streaming inner-lane kernel (`logSoftmaxInner`).
 pub fn logSoftmaxAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
@@ -160,25 +159,16 @@ pub fn logSoftmaxAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, 
         return out;
     }
 
-    for (0..outer) |outer_i| {
-        const base = outer_i * axis_dim * inner;
-        for (0..inner) |inner_i| {
-            var max_value = input[base + inner_i];
-            for (1..axis_dim) |axis_i| {
-                max_value = @max(max_value, input[base + axis_i * inner + inner_i]);
-            }
-            const max_safe = if (std.math.isFinite(max_value)) max_value else 0;
-            var sum_exp: f32 = 0;
-            for (0..axis_dim) |axis_i| {
-                sum_exp += @exp(input[base + axis_i * inner + inner_i] - max_safe);
-            }
-            const shift = max_safe + @log(sum_exp);
-            for (0..axis_dim) |axis_i| {
-                const offset = base + axis_i * inner + inner_i;
-                output[offset] = input[offset] - shift;
-            }
-        }
-    }
+    var scratch = try rt.emptyRank(1, .{2 * inner});
+    defer scratch.deinit();
+    logSoftmaxInner(.{
+        .input = input,
+        .output = output,
+        .axis_dim = axis_dim,
+        .inner = inner,
+        .scratch = scratch.data(),
+        .outer = outer,
+    });
     return out;
 }
 
@@ -224,28 +214,16 @@ pub fn softmaxAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, com
         return out;
     }
 
-    for (0..outer) |outer_i| {
-        const base = outer_i * axis_dim * inner;
-        for (0..inner) |inner_i| {
-            var max_value = input[base + inner_i];
-            for (1..axis_dim) |axis_i| {
-                max_value = @max(max_value, input[base + axis_i * inner + inner_i]);
-            }
-
-            var sum_exp: f32 = 0;
-            for (0..axis_dim) |axis_i| {
-                const offset = base + axis_i * inner + inner_i;
-                const value = @exp(input[offset] - max_value);
-                output[offset] = value;
-                sum_exp += value;
-            }
-
-            const inv_sum = 1 / sum_exp;
-            for (0..axis_dim) |axis_i| {
-                output[base + axis_i * inner + inner_i] *= inv_sum;
-            }
-        }
-    }
+    var scratch = try rt.emptyRank(1, .{2 * inner});
+    defer scratch.deinit();
+    softmaxInner(.{
+        .input = input,
+        .output = output,
+        .axis_dim = axis_dim,
+        .inner = inner,
+        .scratch = scratch.data(),
+        .outer = outer,
+    });
     return out;
 }
 
@@ -401,19 +379,17 @@ pub fn softmaxExtBackwardAxisRank(rt: *Runtime, comptime rank: usize, y: *const 
         return out;
     }
 
-    for (0..outer) |outer_i| {
-        const base = outer_i * axis_dim * inner;
-        for (0..inner) |inner_i| {
-            var dot_acc: f32 = 0;
-            for (0..axis_dim) |axis_i| {
-                const offset = base + axis_i * inner + inner_i;
-                dot_acc += gyd[offset] * yd[offset];
-            }
-            for (0..axis_dim) |axis_i| {
-                const offset = base + axis_i * inner + inner_i;
-                output[offset] = scale_value * yd[offset] * (gyd[offset] - dot_acc);
-            }
-        }
-    }
+    var scratch = try rt.emptyRank(1, .{inner});
+    defer scratch.deinit();
+    softmaxBackwardInner(.{
+        .y = yd,
+        .gy = gyd,
+        .output = output,
+        .axis_dim = axis_dim,
+        .inner = inner,
+        .scratch = scratch.data(),
+        .scale = scale_value,
+        .outer = outer,
+    });
     return out;
 }
