@@ -241,7 +241,7 @@ def build_rows(h: Harness):
     k2 = randn(1, 2, 64, 64)
     v2 = randn(1, 2, 64, 64)
     h.row("attention q64 kv64 h8/2 d64", fa,
-          "case=grouped_causal_attention/mode=raw/n=262144/iters=200", 200,
+          "case=grouped_causal_attention/mode=raw/n=32768/iters=200", 200,
           lambda: F.scaled_dot_product_attention(q2, k2, v2, is_causal=True, enable_gqa=True))
 
     for s, heads_a, kvh, iters in ((128, 16, 4, 18), (256, 16, 4, 8), (512, 16, 4, 6)):
