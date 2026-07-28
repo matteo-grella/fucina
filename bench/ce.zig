@@ -131,6 +131,28 @@ fn benchSoftmaxBackwardAxis0(ctx: *ExecContext, io: std.Io, allocator: std.mem.A
     try printRow(stdout, "softmax bwd ax0", rows, cols, ns, iters);
 }
 
+fn benchLayerNormBackwardAxis0(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, stdout: anytype, rows: usize, cols: usize, iters: usize) !void {
+    var x = try randomLogits(ctx, allocator, rows, cols, 0xa5c0 + rows);
+    defer x.deinit();
+    var gy = try randomLogits(ctx, allocator, rows, cols, 0xa6c0 + rows);
+    defer gy.deinit();
+    var w = try randomRow(ctx, allocator, rows, 0xa7c0 + rows);
+    defer w.deinit();
+    const eps: f32 = 1e-5;
+
+    for (0..2) |_| {
+        var grads = try ctx.layerNormAffineBackwardAxisRank(2, &x, &w, &gy, 0, eps, true, true, true);
+        grads.deinit();
+    }
+    var timer = try Timer.start(io);
+    for (0..iters) |_| {
+        var grads = try ctx.layerNormAffineBackwardAxisRank(2, &x, &w, &gy, 0, eps, true, true, true);
+        grads.deinit();
+    }
+    const ns = timer.read() / iters;
+    try printRow(stdout, "layernorm bwd ax0", rows, cols, ns, iters);
+}
+
 fn benchSoftmaxBackward(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, stdout: anytype, rows: usize, cols: usize, iters: usize) !void {
     var x = try randomLogits(ctx, allocator, rows, cols, 0xbcd0 + rows);
     defer x.deinit();
@@ -404,6 +426,7 @@ pub fn main(init: std.process.Init) !void {
     try benchLogSoftmaxAxis0(&ctx, init.io, allocator, stdout, 4096, 1024, 50);
     try benchLogsumexpAxis0(&ctx, init.io, allocator, stdout, 4096, 1024, 50);
     try benchSoftmaxBackwardAxis0(&ctx, init.io, allocator, stdout, 4096, 1024, 50);
+    try benchLayerNormBackwardAxis0(&ctx, init.io, allocator, stdout, 4096, 1024, 20);
 
     try benchDropout(&ctx, init.io, allocator, stdout, 1024, 1024, 200);
 

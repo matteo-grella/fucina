@@ -1112,42 +1112,23 @@ fn layerNormBackwardDispatchAxisRank(
         return result;
     }
 
-    // Generic inner>1 scalar fallback: everything serial.
-    const dx_data: ?[]f32 = if (result.input) |*value| value.data() else null;
-    const dweight: ?[]f32 = if (result.weight) |*value| value.data() else null;
-    const dbias: ?[]f32 = if (result.bias) |*value| value.data() else null;
-    for (0..outer) |outer_i| {
-        const base = outer_i * axis_dim * inner;
-        for (0..inner) |inner_i| {
-            var sum_acc: f32 = 0;
-            var gsum: f32 = 0;
-            for (0..axis_dim) |axis_i| {
-                const offset = base + axis_i * inner + inner_i;
-                sum_acc += input[offset];
-                gsum += grad[offset] * (if (weights) |w| w[axis_i] else 1);
-            }
-            const mean_value = sum_acc * inv_axis_dim;
-            var sumsq: f32 = 0;
-            var dot_acc: f32 = 0;
-            for (0..axis_dim) |axis_i| {
-                const offset = base + axis_i * inner + inner_i;
-                const centered = input[offset] - mean_value;
-                sumsq += centered * centered;
-                dot_acc += grad[offset] * (if (weights) |w| w[axis_i] else 1) * centered;
-            }
-            const inv_sigma = 1 / @sqrt(sumsq * inv_axis_dim + eps);
-            const shift = gsum * inv_axis_dim * inv_sigma;
-            const correction = dot_acc * inv_axis_dim * inv_sigma * inv_sigma * inv_sigma;
-            for (0..axis_dim) |axis_i| {
-                const offset = base + axis_i * inner + inner_i;
-                const centered = input[offset] - mean_value;
-                if (dx_data) |dx| {
-                    dx[offset] = grad[offset] * (if (weights) |w| w[axis_i] else 1) * inv_sigma - shift - centered * correction;
-                }
-                if (dweight) |weight_out| weight_out[axis_i] += grad[offset] * centered * inv_sigma;
-                if (dbias) |bias_out| bias_out[axis_i] += grad[offset];
-            }
-        }
-    }
+    // Generic inner>1 arm: the streaming inner-lane kernel (serial — the
+    // dweight/dbias accumulation crosses lanes).
+    var scratch = try rt.emptyRank(1, .{4 * inner});
+    defer scratch.deinit();
+    exec_row_ops.layerNormBackwardInner(.{
+        .input = input,
+        .grad = grad,
+        .weights = weights,
+        .dx = if (result.input) |*value| value.data() else null,
+        .dweight = if (result.weight) |*value| value.data() else null,
+        .dbias = if (result.bias) |*value| value.data() else null,
+        .axis_dim = axis_dim,
+        .inner = inner,
+        .scratch = scratch.data(),
+        .inv_axis_dim = inv_axis_dim,
+        .eps = eps,
+        .outer = outer,
+    });
     return result;
 }

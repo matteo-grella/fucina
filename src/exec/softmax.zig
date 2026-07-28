@@ -29,10 +29,49 @@ const logSoftmaxRows = exec_row_ops.logSoftmaxRows;
 const shapeWithoutAxis = exec_shape.shapeWithoutAxis;
 const SoftmaxExtRowsTask = exec_row_ops.SoftmaxExtRowsTask;
 const SoftmaxBackwardRowsTask = exec_row_ops.SoftmaxBackwardRowsTask;
-const softmaxInner = exec_row_ops.softmaxInner;
-const logsumexpInner = exec_row_ops.logsumexpInner;
-const logSoftmaxInner = exec_row_ops.logSoftmaxInner;
-const softmaxBackwardInner = exec_row_ops.softmaxBackwardInner;
+const SoftmaxInnerTask = exec_row_ops.SoftmaxInnerTask;
+const SoftmaxBackwardInnerTask = exec_row_ops.SoftmaxBackwardInnerTask;
+const runSoftmaxInnerTask = exec_row_ops.runSoftmaxInnerTask;
+const runLogsumexpInnerTask = exec_row_ops.runLogsumexpInnerTask;
+const runLogSoftmaxInnerTask = exec_row_ops.runLogSoftmaxInnerTask;
+const runSoftmaxBackwardInnerTask = exec_row_ops.runSoftmaxBackwardInnerTask;
+
+// Minimum lanes per task when splitting an inner-lane kernel across the
+// pool: below this the per-dispatch cost outweighs the split.
+const min_inner_lanes_per_task = 64;
+
+/// Split `base_task`'s `[0, inner)` lane range across the pool when the
+/// total work clears the elementwise threshold; otherwise run it serially.
+/// Lane sub-ranges are independent and scratch columns are disjoint, so the
+/// result is bitwise identical for any task count.
+fn dispatchInnerLanes(
+    comptime Task: type,
+    rt: *Runtime,
+    base_task: Task,
+    total_len: usize,
+    inner: usize,
+    comptime run: fn (task: *const Task) void,
+) void {
+    if (total_len >= parallel.vector_elementwise_len_threshold / 2) {
+        if (rt.workPool()) |pool| {
+            const task_count = @min(
+                parallel.cpuThreadCount(parallel.vector_max_threads),
+                inner / min_inner_lanes_per_task,
+            );
+            if (task_count > 1) {
+                var tasks: [parallel.vector_max_threads]Task = undefined;
+                for (0..task_count) |task_i| {
+                    tasks[task_i] = base_task;
+                    tasks[task_i].inner_start = task_i * inner / task_count;
+                    tasks[task_i].inner_end = (task_i + 1) * inner / task_count;
+                }
+                pool.parallelChunks(Task, tasks[0..task_count], run);
+                return;
+            }
+        }
+    }
+    run(&base_task);
+}
 const runSoftmaxRowsTask = exec_row_ops.runSoftmaxRowsTask;
 const runSoftmaxExtRowsTask = exec_row_ops.runSoftmaxExtRowsTask;
 const runSoftmaxBackwardRowsTask = exec_row_ops.runSoftmaxBackwardRowsTask;
@@ -102,14 +141,16 @@ pub fn logsumexpAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, c
 
     var scratch = try rt.emptyRank(1, .{2 * inner});
     defer scratch.deinit();
-    logsumexpInner(.{
+    dispatchInnerLanes(SoftmaxInnerTask, rt, .{
         .input = input,
         .output = output,
         .axis_dim = axis_dim,
         .inner = inner,
         .scratch = scratch.data(),
         .outer = outer,
-    });
+        .inner_start = 0,
+        .inner_end = inner,
+    }, source.len(), inner, runLogsumexpInnerTask);
     return out;
 }
 
@@ -161,14 +202,16 @@ pub fn logSoftmaxAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, 
 
     var scratch = try rt.emptyRank(1, .{2 * inner});
     defer scratch.deinit();
-    logSoftmaxInner(.{
+    dispatchInnerLanes(SoftmaxInnerTask, rt, .{
         .input = input,
         .output = output,
         .axis_dim = axis_dim,
         .inner = inner,
         .scratch = scratch.data(),
         .outer = outer,
-    });
+        .inner_start = 0,
+        .inner_end = inner,
+    }, source.len(), inner, runLogSoftmaxInnerTask);
     return out;
 }
 
@@ -216,14 +259,16 @@ pub fn softmaxAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, com
 
     var scratch = try rt.emptyRank(1, .{2 * inner});
     defer scratch.deinit();
-    softmaxInner(.{
+    dispatchInnerLanes(SoftmaxInnerTask, rt, .{
         .input = input,
         .output = output,
         .axis_dim = axis_dim,
         .inner = inner,
         .scratch = scratch.data(),
         .outer = outer,
-    });
+        .inner_start = 0,
+        .inner_end = inner,
+    }, source.len(), inner, runSoftmaxInnerTask);
     return out;
 }
 
@@ -381,7 +426,7 @@ pub fn softmaxExtBackwardAxisRank(rt: *Runtime, comptime rank: usize, y: *const 
 
     var scratch = try rt.emptyRank(1, .{inner});
     defer scratch.deinit();
-    softmaxBackwardInner(.{
+    dispatchInnerLanes(SoftmaxBackwardInnerTask, rt, .{
         .y = yd,
         .gy = gyd,
         .output = output,
@@ -390,6 +435,8 @@ pub fn softmaxExtBackwardAxisRank(rt: *Runtime, comptime rank: usize, y: *const 
         .scratch = scratch.data(),
         .scale = scale_value,
         .outer = outer,
-    });
+        .inner_start = 0,
+        .inner_end = inner,
+    }, source.len(), inner, runSoftmaxBackwardInnerTask);
     return out;
 }

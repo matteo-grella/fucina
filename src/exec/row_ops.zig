@@ -1644,27 +1644,47 @@ pub const SoftmaxInnerTask = struct {
     axis_dim: usize,
     inner: usize,
     /// Pooled f32 scratch of length `2 * inner`: max row, then sum row.
+    /// Tasks touch only their own `[inner_start, inner_end)` columns, so a
+    /// single scratch allocation serves every task disjointly.
     scratch: []f32,
     outer: usize,
+    // Lane sub-range this task owns. Lanes are independent, so any split is
+    // bitwise identical to the serial full-range call.
+    inner_start: usize,
+    inner_end: usize,
 };
+
+pub fn runSoftmaxInnerTask(task: *const SoftmaxInnerTask) void {
+    softmaxInner(task.*);
+}
+
+pub fn runLogsumexpInnerTask(task: *const SoftmaxInnerTask) void {
+    logsumexpInner(task.*);
+}
+
+pub fn runLogSoftmaxInnerTask(task: *const SoftmaxInnerTask) void {
+    logSoftmaxInner(task.*);
+}
 
 pub fn softmaxInner(task: SoftmaxInnerTask) void {
     const inner = task.inner;
-    const max_row = task.scratch[0..inner];
-    const sum_row = task.scratch[inner..][0..inner];
+    const lane0 = task.inner_start;
+    const lanes = task.inner_end - task.inner_start;
+    const max_row = task.scratch[lane0..][0..lanes];
+    const sum_row = task.scratch[inner + lane0 ..][0..lanes];
     for (0..task.outer) |outer_i| {
-        const base = outer_i * task.axis_dim * inner;
-        @memcpy(max_row, task.input[base..][0..inner]);
+        const base = outer_i * task.axis_dim * inner + lane0;
+        @memcpy(max_row, task.input[base..][0..lanes]);
         for (1..task.axis_dim) |axis_i| {
-            maxIntoLanes(max_row, task.input[base + axis_i * inner ..][0..inner]);
+            maxIntoLanes(max_row, task.input[base + axis_i * inner ..][0..lanes]);
         }
         @memset(sum_row, 0);
         for (0..task.axis_dim) |axis_i| {
             const offset = base + axis_i * inner;
-            expSubStoreLanes(task.output[offset..][0..inner], task.input[offset..][0..inner], max_row, sum_row);
+            expSubStoreLanes(task.output[offset..][0..lanes], task.input[offset..][0..lanes], max_row, sum_row);
         }
         for (0..task.axis_dim) |axis_i| {
-            scaleByInvLanes(task.output[base + axis_i * inner ..][0..inner], sum_row);
+            scaleByInvLanes(task.output[base + axis_i * inner ..][0..lanes], sum_row);
         }
     }
 }
@@ -1672,20 +1692,22 @@ pub fn softmaxInner(task: SoftmaxInnerTask) void {
 /// Output holds one `inner`-wide row per outer block (the axis removed).
 pub fn logsumexpInner(task: SoftmaxInnerTask) void {
     const inner = task.inner;
-    const max_row = task.scratch[0..inner];
-    const sum_row = task.scratch[inner..][0..inner];
+    const lane0 = task.inner_start;
+    const lanes = task.inner_end - task.inner_start;
+    const max_row = task.scratch[lane0..][0..lanes];
+    const sum_row = task.scratch[inner + lane0 ..][0..lanes];
     for (0..task.outer) |outer_i| {
-        const base = outer_i * task.axis_dim * inner;
-        @memcpy(max_row, task.input[base..][0..inner]);
+        const base = outer_i * task.axis_dim * inner + lane0;
+        @memcpy(max_row, task.input[base..][0..lanes]);
         for (1..task.axis_dim) |axis_i| {
-            maxIntoLanes(max_row, task.input[base + axis_i * inner ..][0..inner]);
+            maxIntoLanes(max_row, task.input[base + axis_i * inner ..][0..lanes]);
         }
         guardFiniteLanes(max_row);
         @memset(sum_row, 0);
         for (0..task.axis_dim) |axis_i| {
-            expSubSumLanes(task.input[base + axis_i * inner ..][0..inner], max_row, sum_row);
+            expSubSumLanes(task.input[base + axis_i * inner ..][0..lanes], max_row, sum_row);
         }
-        const out_row = task.output[outer_i * inner ..][0..inner];
+        const out_row = task.output[outer_i * inner + lane0 ..][0..lanes];
         for (out_row, max_row, sum_row) |*out, max_safe, sum_exp| {
             out.* = max_safe + @log(sum_exp);
         }
@@ -1694,18 +1716,20 @@ pub fn logsumexpInner(task: SoftmaxInnerTask) void {
 
 pub fn logSoftmaxInner(task: SoftmaxInnerTask) void {
     const inner = task.inner;
-    const max_row = task.scratch[0..inner];
-    const sum_row = task.scratch[inner..][0..inner];
+    const lane0 = task.inner_start;
+    const lanes = task.inner_end - task.inner_start;
+    const max_row = task.scratch[lane0..][0..lanes];
+    const sum_row = task.scratch[inner + lane0 ..][0..lanes];
     for (0..task.outer) |outer_i| {
-        const base = outer_i * task.axis_dim * inner;
-        @memcpy(max_row, task.input[base..][0..inner]);
+        const base = outer_i * task.axis_dim * inner + lane0;
+        @memcpy(max_row, task.input[base..][0..lanes]);
         for (1..task.axis_dim) |axis_i| {
-            maxIntoLanes(max_row, task.input[base + axis_i * inner ..][0..inner]);
+            maxIntoLanes(max_row, task.input[base + axis_i * inner ..][0..lanes]);
         }
         guardFiniteLanes(max_row);
         @memset(sum_row, 0);
         for (0..task.axis_dim) |axis_i| {
-            expSubSumLanes(task.input[base + axis_i * inner ..][0..inner], max_row, sum_row);
+            expSubSumLanes(task.input[base + axis_i * inner ..][0..lanes], max_row, sum_row);
         }
         // Shift row reuses the max slots: shift = max_safe + log(sum_exp).
         for (max_row, sum_row) |*max_safe, sum_exp| {
@@ -1713,7 +1737,7 @@ pub fn logSoftmaxInner(task: SoftmaxInnerTask) void {
         }
         for (0..task.axis_dim) |axis_i| {
             const offset = base + axis_i * inner;
-            subLanes(task.output[offset..][0..inner], task.input[offset..][0..inner], max_row);
+            subLanes(task.output[offset..][0..lanes], task.input[offset..][0..lanes], max_row);
         }
     }
 }
@@ -1725,35 +1749,188 @@ pub const SoftmaxBackwardInnerTask = struct {
     axis_dim: usize,
     inner: usize,
     /// Pooled f32 scratch of length `inner`: the per-lane gy·y dot row.
+    /// Tasks touch only their own `[inner_start, inner_end)` columns.
     scratch: []f32,
     scale: f32,
     outer: usize,
+    inner_start: usize,
+    inner_end: usize,
 };
 
-pub fn softmaxBackwardInner(task: SoftmaxBackwardInnerTask) void {
+pub fn runSoftmaxBackwardInnerTask(task: *const SoftmaxBackwardInnerTask) void {
+    softmaxBackwardInner(task.*);
+}
+
+pub const LayerNormBackwardInnerTask = struct {
+    input: []const f32,
+    grad: []const f32,
+    /// Per-axis weight row (`[axis_dim]`), or null for the un-affine form.
+    weights: ?[]const f32,
+    dx: ?[]f32,
+    dweight: ?[]f32,
+    dbias: ?[]f32,
+    axis_dim: usize,
+    inner: usize,
+    /// Pooled f32 scratch of length `4 * inner`: mean, gsum, sumsq/inv_sigma,
+    /// dot/correction rows (the last two pairs share slots).
+    scratch: []f32,
+    inv_axis_dim: f32,
+    eps: f32,
+    outer: usize,
+};
+
+/// Streaming inner-lane layerNorm backward for non-last axes (serial: the
+/// dweight/dbias accumulation crosses lanes, so a lane split would race).
+/// `dx` reproduces the scalar fallback's per-lane expressions exactly;
+/// dweight/dbias accumulate one deterministic vector-reduce per axis row
+/// (a fixed reduction tree — deterministic, though ordered differently
+/// from the retired lane-serial fallback).
+pub fn layerNormBackwardInner(task: LayerNormBackwardInnerTask) void {
     const inner = task.inner;
-    const dot_row = task.scratch[0..inner];
-    const scale_vec: InnerVec = @splat(task.scale);
+    const mean_row = task.scratch[0..inner];
+    const gsum_row = task.scratch[inner..][0..inner];
+    // After the stats passes these two hold inv_sigma and correction.
+    const sumsq_row = task.scratch[2 * inner ..][0..inner];
+    const dot_row = task.scratch[3 * inner ..][0..inner];
+    const inv_axis_splat: InnerVec = @splat(task.inv_axis_dim);
+    const eps_splat: InnerVec = @splat(task.eps);
+    const one: InnerVec = @splat(1);
+
     for (0..task.outer) |outer_i| {
         const base = outer_i * task.axis_dim * inner;
+
+        // Pass A: per-lane Σ input and Σ grad·w over the axis.
+        @memset(mean_row, 0);
+        @memset(gsum_row, 0);
+        for (0..task.axis_dim) |axis_i| {
+            const offset = base + axis_i * inner;
+            const w_axis: f32 = if (task.weights) |w| w[axis_i] else 1;
+            const w_splat: InnerVec = @splat(w_axis);
+            const row_in = task.input[offset..][0..inner];
+            const row_g = task.grad[offset..][0..inner];
+            var i: usize = 0;
+            while (i + inner_vec_width <= inner) : (i += inner_vec_width) {
+                mean_row[i..][0..inner_vec_width].* = @as(InnerVec, mean_row[i..][0..inner_vec_width].*) + @as(InnerVec, row_in[i..][0..inner_vec_width].*);
+                gsum_row[i..][0..inner_vec_width].* = @as(InnerVec, gsum_row[i..][0..inner_vec_width].*) + @as(InnerVec, row_g[i..][0..inner_vec_width].*) * w_splat;
+            }
+            while (i < inner) : (i += 1) {
+                mean_row[i] += row_in[i];
+                gsum_row[i] += row_g[i] * w_axis;
+            }
+        }
+        // mean = Σx / n (in place).
+        {
+            var i: usize = 0;
+            while (i + inner_vec_width <= inner) : (i += inner_vec_width) {
+                mean_row[i..][0..inner_vec_width].* = @as(InnerVec, mean_row[i..][0..inner_vec_width].*) * inv_axis_splat;
+            }
+            while (i < inner) : (i += 1) mean_row[i] *= task.inv_axis_dim;
+        }
+
+        // Pass B: per-lane Σ centered² and Σ grad·w·centered.
+        @memset(sumsq_row, 0);
         @memset(dot_row, 0);
         for (0..task.axis_dim) |axis_i| {
             const offset = base + axis_i * inner;
-            mulIntoLanes(dot_row, task.gy[offset..][0..inner], task.y[offset..][0..inner]);
+            const w_axis: f32 = if (task.weights) |w| w[axis_i] else 1;
+            const w_splat: InnerVec = @splat(w_axis);
+            const row_in = task.input[offset..][0..inner];
+            const row_g = task.grad[offset..][0..inner];
+            var i: usize = 0;
+            while (i + inner_vec_width <= inner) : (i += inner_vec_width) {
+                const centered = @as(InnerVec, row_in[i..][0..inner_vec_width].*) - @as(InnerVec, mean_row[i..][0..inner_vec_width].*);
+                sumsq_row[i..][0..inner_vec_width].* = @as(InnerVec, sumsq_row[i..][0..inner_vec_width].*) + centered * centered;
+                dot_row[i..][0..inner_vec_width].* = @as(InnerVec, dot_row[i..][0..inner_vec_width].*) + @as(InnerVec, row_g[i..][0..inner_vec_width].*) * w_splat * centered;
+            }
+            while (i < inner) : (i += 1) {
+                const centered = row_in[i] - mean_row[i];
+                sumsq_row[i] += centered * centered;
+                dot_row[i] += row_g[i] * w_axis * centered;
+            }
+        }
+        // inv_sigma and correction in place: inv_sigma = 1/√(sumsq/n + eps);
+        // shift = gsum/n·inv_sigma; correction = dot/n·inv_sigma³.
+        {
+            var i: usize = 0;
+            while (i + inner_vec_width <= inner) : (i += inner_vec_width) {
+                const inv_sigma = one / @sqrt(@as(InnerVec, sumsq_row[i..][0..inner_vec_width].*) * inv_axis_splat + eps_splat);
+                sumsq_row[i..][0..inner_vec_width].* = inv_sigma;
+                gsum_row[i..][0..inner_vec_width].* = @as(InnerVec, gsum_row[i..][0..inner_vec_width].*) * inv_axis_splat * inv_sigma;
+                dot_row[i..][0..inner_vec_width].* = @as(InnerVec, dot_row[i..][0..inner_vec_width].*) * inv_axis_splat * inv_sigma * inv_sigma * inv_sigma;
+            }
+            while (i < inner) : (i += 1) {
+                const inv_sigma = 1 / @sqrt(sumsq_row[i] * task.inv_axis_dim + task.eps);
+                sumsq_row[i] = inv_sigma;
+                gsum_row[i] = gsum_row[i] * task.inv_axis_dim * inv_sigma;
+                dot_row[i] = dot_row[i] * task.inv_axis_dim * inv_sigma * inv_sigma * inv_sigma;
+            }
+        }
+
+        // Pass C: dx rows plus one deterministic reduce per axis row for the
+        // parameter gradients.
+        for (0..task.axis_dim) |axis_i| {
+            const offset = base + axis_i * inner;
+            const w_axis: f32 = if (task.weights) |w| w[axis_i] else 1;
+            const w_splat: InnerVec = @splat(w_axis);
+            const row_in = task.input[offset..][0..inner];
+            const row_g = task.grad[offset..][0..inner];
+            var dweight_vec: InnerVec = @splat(0);
+            var dbias_vec: InnerVec = @splat(0);
+            var dweight_tail: f32 = 0;
+            var dbias_tail: f32 = 0;
+            var i: usize = 0;
+            while (i + inner_vec_width <= inner) : (i += inner_vec_width) {
+                const centered = @as(InnerVec, row_in[i..][0..inner_vec_width].*) - @as(InnerVec, mean_row[i..][0..inner_vec_width].*);
+                const gv: InnerVec = row_g[i..][0..inner_vec_width].*;
+                const inv_sigma: InnerVec = sumsq_row[i..][0..inner_vec_width].*;
+                if (task.dx) |dx| {
+                    dx[offset + i ..][0..inner_vec_width].* = gv * w_splat * inv_sigma -
+                        @as(InnerVec, gsum_row[i..][0..inner_vec_width].*) -
+                        centered * @as(InnerVec, dot_row[i..][0..inner_vec_width].*);
+                }
+                if (task.dweight != null) dweight_vec += gv * centered * inv_sigma;
+                if (task.dbias != null) dbias_vec += gv;
+            }
+            while (i < inner) : (i += 1) {
+                const centered = row_in[i] - mean_row[i];
+                if (task.dx) |dx| {
+                    dx[offset + i] = row_g[i] * w_axis * sumsq_row[i] - gsum_row[i] - centered * dot_row[i];
+                }
+                if (task.dweight != null) dweight_tail += row_g[i] * centered * sumsq_row[i];
+                if (task.dbias != null) dbias_tail += row_g[i];
+            }
+            if (task.dweight) |dweight| dweight[axis_i] += @reduce(.Add, dweight_vec) + dweight_tail;
+            if (task.dbias) |dbias| dbias[axis_i] += @reduce(.Add, dbias_vec) + dbias_tail;
+        }
+    }
+}
+
+pub fn softmaxBackwardInner(task: SoftmaxBackwardInnerTask) void {
+    const inner = task.inner;
+    const lane0 = task.inner_start;
+    const lanes = task.inner_end - task.inner_start;
+    const dot_row = task.scratch[lane0..][0..lanes];
+    const scale_vec: InnerVec = @splat(task.scale);
+    for (0..task.outer) |outer_i| {
+        const base = outer_i * task.axis_dim * inner + lane0;
+        @memset(dot_row, 0);
+        for (0..task.axis_dim) |axis_i| {
+            const offset = base + axis_i * inner;
+            mulIntoLanes(dot_row, task.gy[offset..][0..lanes], task.y[offset..][0..lanes]);
         }
         for (0..task.axis_dim) |axis_i| {
             const offset = base + axis_i * inner;
-            const row_y = task.y[offset..][0..inner];
-            const row_gy = task.gy[offset..][0..inner];
-            const row_out = task.output[offset..][0..inner];
+            const row_y = task.y[offset..][0..lanes];
+            const row_gy = task.gy[offset..][0..lanes];
+            const row_out = task.output[offset..][0..lanes];
             var i: usize = 0;
-            while (i + inner_vec_width <= inner) : (i += inner_vec_width) {
+            while (i + inner_vec_width <= lanes) : (i += inner_vec_width) {
                 const yv: InnerVec = row_y[i..][0..inner_vec_width].*;
                 const gyv: InnerVec = row_gy[i..][0..inner_vec_width].*;
                 const dv: InnerVec = dot_row[i..][0..inner_vec_width].*;
                 row_out[i..][0..inner_vec_width].* = scale_vec * yv * (gyv - dv);
             }
-            while (i < inner) : (i += 1) {
+            while (i < lanes) : (i += 1) {
                 row_out[i] = task.scale * row_y[i] * (row_gy[i] - dot_row[i]);
             }
         }

@@ -1811,12 +1811,14 @@ test "exec context layer norm backward matches a naive f64 reference and is bitw
     var prng = std.Random.DefaultPrng.init(0x1a7f);
     const random = prng.random();
 
-    // {outer, axis_dim, inner}: small SIMD rows, the inner>1 scalar fallback,
-    // a degenerate single-element axis, and a shape big enough for the
+    // {outer, axis_dim, inner}: small SIMD rows, the inner>1 streaming
+    // kernel at scalar-tail (inner=3) and vector-lane (inner=70) widths, a
+    // degenerate single-element axis, and a shape big enough for the
     // parallel dx dispatch (70*2050 >= threshold/2).
     const cases = [_][3]usize{
         .{ 3, 5, 1 },
         .{ 2, 8, 3 },
+        .{ 2, 9, 70 },
         .{ 1, 1, 1 },
         .{ 5, 17, 1 },
         .{ 70, 2050, 1 },
@@ -2284,6 +2286,89 @@ test "exec context softmax backward fast path matches generic layout" {
     for (0..rows) |row| {
         for (0..cols) |col| {
             try expectCloseToF64(gxtd[col * rows + row], gxd[row * cols + col], 1e-4, 1e-6);
+        }
+    }
+}
+
+test "softmax family strided inner kernels match last-axis rows across the parallel lane split" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var prng = std.Random.DefaultPrng.init(0x50f9);
+    const random = prng.random();
+
+    // inner = 192 after the transpose: multiple lane-split tasks (192/64 = 3)
+    // plus a vector tail, and rows*cols clears the parallel threshold — the
+    // widths where a scratch-column or split-boundary bug would show.
+    const rows: usize = 192;
+    const cols: usize = 900;
+    const data = try allocator.alloc(f32, rows * cols);
+    defer allocator.free(data);
+    const gy_data = try allocator.alloc(f32, rows * cols);
+    defer allocator.free(gy_data);
+    for (data) |*value| value.* = random.floatNorm(f32) * 3;
+    for (gy_data) |*value| value.* = random.floatNorm(f32);
+
+    const transposed = try allocator.alloc(f32, rows * cols);
+    defer allocator.free(transposed);
+    const gyt_data = try allocator.alloc(f32, rows * cols);
+    defer allocator.free(gyt_data);
+    for (0..rows) |row| {
+        for (0..cols) |col| {
+            transposed[col * rows + row] = data[row * cols + col];
+            gyt_data[col * rows + row] = gy_data[row * cols + col];
+        }
+    }
+
+    var x = try ctx.fromSliceRank(2, .{ rows, cols }, data);
+    defer x.deinit();
+    var xt = try ctx.fromSliceRank(2, .{ cols, rows }, transposed);
+    defer xt.deinit();
+    var gy = try ctx.fromSliceRank(2, .{ rows, cols }, gy_data);
+    defer gy.deinit();
+    var gyt = try ctx.fromSliceRank(2, .{ cols, rows }, gyt_data);
+    defer gyt.deinit();
+
+    var y = try ctx.softmaxAxisRank(2, &x, 1);
+    defer y.deinit();
+    var yt = try ctx.softmaxAxisRank(2, &xt, 0);
+    defer yt.deinit();
+    for (0..rows) |row| {
+        for (0..cols) |col| {
+            try expectCloseToF64(yt.dataConst()[col * rows + row], y.dataConst()[row * cols + col], 1e-5, 1e-12);
+        }
+    }
+
+    // Log-space outputs compare across two different exp-sum accumulation
+    // orders (vector-tree rows kernel vs sequential per-lane inner kernel),
+    // so the band is wider than the probability-space checks above.
+    var ls = try ctx.logSoftmaxAxisRank(2, &x, 1);
+    defer ls.deinit();
+    var lst = try ctx.logSoftmaxAxisRank(2, &xt, 0);
+    defer lst.deinit();
+    for (0..rows) |row| {
+        for (0..cols) |col| {
+            try expectCloseToF64(lst.dataConst()[col * rows + row], ls.dataConst()[row * cols + col], 5e-5, 1e-5);
+        }
+    }
+
+    var lse = try ctx.logsumexpAxisRank(2, &x, 1);
+    defer lse.deinit();
+    var lset = try ctx.logsumexpAxisRank(2, &xt, 0);
+    defer lset.deinit();
+    for (0..rows) |row| {
+        try expectCloseToF64(lset.dataConst()[row], lse.dataConst()[row], 5e-5, 1e-5);
+    }
+
+    var gx = try ctx.softmaxBackwardAxisRank(2, &y, &gy, 1);
+    defer gx.deinit();
+    var gxt = try ctx.softmaxBackwardAxisRank(2, &yt, &gyt, 0);
+    defer gxt.deinit();
+    for (0..rows) |row| {
+        for (0..cols) |col| {
+            try expectCloseToF64(gxt.dataConst()[col * rows + row], gx.dataConst()[row * cols + col], 1e-4, 1e-6);
         }
     }
 }
