@@ -1069,6 +1069,413 @@ pub fn groupedCausalAttentionBackwardKvHeads(task: GroupedCausalAttentionBackwar
     }
 }
 
+/// Panel rows per backward q-tile: the P and dS panels are
+/// `attention_bwd_tile_rows * kv_seq` floats each per task, so a tile's
+/// score/probability rows stay cache-resident across all five backward
+/// contractions instead of round-tripping full `[group_rows, kv_seq]`
+/// panels through memory five times (the retired GEMM route).
+pub const attention_bwd_tile_rows: usize = 16;
+
+pub const GroupedCausalAttentionBackwardTiledTask = struct {
+    q_data: []const f32,
+    k_data: []const f32,
+    v_data: []const f32,
+    gy_data: []const f32,
+    /// Forward-saved {max, sum_exp} per (head, query), or null to recompute.
+    stats: ?[]const f32,
+    q_grad: ?[]f32,
+    /// dK/dV accumulation targets. Partial mode (shared kv heads): contiguous
+    /// `[heads][kv_seq][d]` planes indexed by GLOBAL head, reduced in fixed
+    /// head order after the pool joins. Direct mode (one query head per kv
+    /// head): the `[kv_seq, kv_heads, d]` gradient tensors themselves.
+    dk_target: ?[]f32,
+    dv_target: ?[]f32,
+    partial_mode: bool,
+    kv_head_for_head: []const usize,
+    q_seq: usize,
+    kv_seq: usize,
+    source_offset: usize,
+    heads: usize,
+    d: usize,
+    kv_heads: usize,
+    scale_value: f32,
+    window: usize,
+    causal: bool,
+    /// Per-task scratch: 2 panels of `attention_bwd_tile_rows * kv_seq`.
+    scratch: []f32,
+    head_start: usize,
+    head_end: usize,
+};
+
+pub fn runGroupedCausalAttentionBackwardTiledTask(task: *const GroupedCausalAttentionBackwardTiledTask) void {
+    groupedCausalAttentionBackwardTiles(task.*);
+}
+
+/// Fused tile-blocked attention backward: per (query head, q-tile) the
+/// scaled-score and dO·Vᵀ panels are built once over the tile's LIVE key
+/// range only (causal/window dead cells never compute beyond the sub-block
+/// fringe), the probability/dS rows are formed in place, and all three
+/// gradient contractions read the cache-resident panels. Work splits by
+/// whole query heads: dQ rows have a single writer, and dK/dV go to
+/// per-head planes (or straight to the gradient in direct mode), so the
+/// result is bitwise identical for any task count.
+pub fn groupedCausalAttentionBackwardTiles(task: GroupedCausalAttentionBackwardTiledTask) void {
+    const tile_rows = attention_bwd_tile_rows;
+    const kb = attention_key_block;
+    const qr_block = 4;
+    const DotVec = @Vector(4, f32);
+    const dot_width = 4;
+    const Vec = @Vector(8, f32);
+    const vector_width = 8;
+    const neg_inf = -std.math.inf(f32);
+
+    const d = task.d;
+    const q_seq_stride = task.heads * d;
+    const kv_seq_stride = task.kv_heads * d;
+    const p_panel_all = task.scratch[0 .. tile_rows * task.kv_seq];
+    const ds_panel_all = task.scratch[tile_rows * task.kv_seq ..][0 .. tile_rows * task.kv_seq];
+
+    for (task.head_start..task.head_end) |head_i| {
+        const kv_head_i = task.kv_head_for_head[head_i];
+        const kv_head_base = kv_head_i * d;
+        const acc_base = if (task.partial_mode) head_i * task.kv_seq * d else kv_head_base;
+        const acc_stride = if (task.partial_mode) d else kv_seq_stride;
+        const stats_head: ?[]const f32 = if (task.stats) |values| values[head_i * task.q_seq * 2 ..][0 .. task.q_seq * 2] else null;
+
+        var q0: usize = 0;
+        while (q0 < task.q_seq) : (q0 += tile_rows) {
+            const rows_active = @min(tile_rows, task.q_seq - q0);
+            const p_first = task.source_offset + q0;
+            const tile_hi = if (task.causal) @min(p_first + rows_active, task.kv_seq) else task.kv_seq;
+            const tile_lo = if (!task.causal or task.window == 0) 0 else (p_first + 1) -| task.window;
+            const live = tile_hi - tile_lo;
+
+            // Phase 1: scaled scores and dO·Vᵀ into the panels, kb keys x
+            // qr_block queries per microkernel step (the forward's
+            // outer-product shape). Tail keys/rows clamp to valid indices;
+            // clamped keys skip their store, clamped rows are never stored.
+            var block_start = tile_lo;
+            while (block_start < tile_hi) : (block_start += kb) {
+                var k_base: [kb]usize = undefined;
+                inline for (0..kb) |ki| {
+                    const source_i = @min(block_start + ki, tile_hi - 1);
+                    k_base[ki] = source_i * kv_seq_stride + kv_head_base;
+                }
+
+                var r0: usize = 0;
+                while (r0 < rows_active) : (r0 += qr_block) {
+                    const qr_active = @min(qr_block, rows_active - r0);
+                    var q_base: [qr_block]usize = undefined;
+                    inline for (0..qr_block) |r| {
+                        q_base[r] = (q0 + @min(r0 + r, rows_active - 1)) * q_seq_stride + head_i * d;
+                    }
+
+                    // Two separate kb x qr_block microkernels — fusing the
+                    // score and dO·Vᵀ accumulators into one pass needs 32
+                    // dot registers and spills; K/V rows re-read from L1.
+                    var score_arr: [kb][qr_block]f32 = undefined;
+                    {
+                        var dot: [kb][qr_block]DotVec = undefined;
+                        inline for (0..kb) |ki| inline for (0..qr_block) |r| {
+                            dot[ki][r] = @splat(0);
+                        };
+                        var feature_i: usize = 0;
+                        while (feature_i + dot_width <= d) : (feature_i += dot_width) {
+                            var k_vec: [kb]DotVec = undefined;
+                            inline for (0..kb) |ki| k_vec[ki] = task.k_data[k_base[ki] + feature_i ..][0..dot_width].*;
+                            inline for (0..qr_block) |r| {
+                                const qv: DotVec = task.q_data[q_base[r] + feature_i ..][0..dot_width].*;
+                                inline for (0..kb) |ki| dot[ki][r] = @mulAdd(DotVec, qv, k_vec[ki], dot[ki][r]);
+                            }
+                        }
+                        inline for (0..kb) |ki| inline for (0..qr_block) |r| {
+                            score_arr[ki][r] = @reduce(.Add, dot[ki][r]);
+                        };
+                        while (feature_i < d) : (feature_i += 1) {
+                            inline for (0..kb) |ki| {
+                                const k_value = task.k_data[k_base[ki] + feature_i];
+                                inline for (0..qr_block) |r| score_arr[ki][r] += task.q_data[q_base[r] + feature_i] * k_value;
+                            }
+                        }
+                    }
+                    var dp_arr: [kb][qr_block]f32 = undefined;
+                    {
+                        var dot: [kb][qr_block]DotVec = undefined;
+                        inline for (0..kb) |ki| inline for (0..qr_block) |r| {
+                            dot[ki][r] = @splat(0);
+                        };
+                        var feature_i: usize = 0;
+                        while (feature_i + dot_width <= d) : (feature_i += dot_width) {
+                            var v_vec: [kb]DotVec = undefined;
+                            inline for (0..kb) |ki| v_vec[ki] = task.v_data[k_base[ki] + feature_i ..][0..dot_width].*;
+                            inline for (0..qr_block) |r| {
+                                const gyv: DotVec = task.gy_data[q_base[r] + feature_i ..][0..dot_width].*;
+                                inline for (0..kb) |ki| dot[ki][r] = @mulAdd(DotVec, gyv, v_vec[ki], dot[ki][r]);
+                            }
+                        }
+                        inline for (0..kb) |ki| inline for (0..qr_block) |r| {
+                            dp_arr[ki][r] = @reduce(.Add, dot[ki][r]);
+                        };
+                        while (feature_i < d) : (feature_i += 1) {
+                            inline for (0..kb) |ki| {
+                                const v_value = task.v_data[k_base[ki] + feature_i];
+                                inline for (0..qr_block) |r| dp_arr[ki][r] += task.gy_data[q_base[r] + feature_i] * v_value;
+                            }
+                        }
+                    }
+
+                    inline for (0..kb) |ki| {
+                        if (block_start + ki < tile_hi) {
+                            const column = block_start + ki - tile_lo;
+                            for (0..qr_active) |r| {
+                                const panel_row = (r0 + r) * task.kv_seq;
+                                p_panel_all[panel_row + column] = score_arr[ki][r] * task.scale_value;
+                                ds_panel_all[panel_row + column] = dp_arr[ki][r];
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Phase 2 per row: probabilities in place (stats or recompute),
+            // the softmax-backward row dot, then dS in place. Dead cells hold
+            // P = 0, so their dS is exactly 0 and phase 3 needs no masks.
+            for (0..rows_active) |r| {
+                const query_i = q0 + r;
+                const active = if (task.causal) task.source_offset + query_i + 1 else task.kv_seq;
+                const lo_r = if (!task.causal or task.window == 0) 0 else active -| task.window;
+                const c_lo = lo_r - tile_lo;
+                const c_hi = active - tile_lo;
+                const p_row = p_panel_all[r * task.kv_seq ..][0..live];
+                const ds_row = ds_panel_all[r * task.kv_seq ..][0..live];
+
+                var max_score: f32 = neg_inf;
+                var inv_sum: f32 = undefined;
+                if (stats_head) |values| {
+                    max_score = values[query_i * 2];
+                    inv_sum = 1 / values[query_i * 2 + 1];
+                } else {
+                    var max_vec: Vec = @splat(neg_inf);
+                    var column = c_lo;
+                    while (column + vector_width <= c_hi) : (column += vector_width) {
+                        max_vec = @max(max_vec, @as(Vec, p_row[column..][0..vector_width].*));
+                    }
+                    max_score = @reduce(.Max, max_vec);
+                    while (column < c_hi) : (column += 1) max_score = @max(max_score, p_row[column]);
+                }
+
+                const max_splat: Vec = @splat(max_score);
+                var sum_vec: Vec = @splat(0);
+                var column = c_lo;
+                while (column + vector_width <= c_hi) : (column += vector_width) {
+                    const p = vexpf(vector_width, @as(Vec, p_row[column..][0..vector_width].*) - max_splat);
+                    p_row[column..][0..vector_width].* = p;
+                    sum_vec += p;
+                }
+                var sum_exp = @reduce(.Add, sum_vec);
+                while (column < c_hi) : (column += 1) {
+                    const p = vexpf(1, @splat(p_row[column] - max_score))[0];
+                    p_row[column] = p;
+                    sum_exp += p;
+                }
+                if (stats_head == null) inv_sum = 1 / sum_exp;
+
+                @memset(p_row[0..c_lo], 0);
+                @memset(p_row[c_hi..live], 0);
+
+                const inv_splat: Vec = @splat(inv_sum);
+                var dot_vec: Vec = @splat(0);
+                column = c_lo;
+                while (column + vector_width <= c_hi) : (column += vector_width) {
+                    const p = @as(Vec, p_row[column..][0..vector_width].*) * inv_splat;
+                    p_row[column..][0..vector_width].* = p;
+                    dot_vec += p * @as(Vec, ds_row[column..][0..vector_width].*);
+                }
+                var row_dot = @reduce(.Add, dot_vec);
+                while (column < c_hi) : (column += 1) {
+                    const p = p_row[column] * inv_sum;
+                    p_row[column] = p;
+                    row_dot += p * ds_row[column];
+                }
+
+                const dot_splat: Vec = @splat(row_dot);
+                const scale_splat: Vec = @splat(task.scale_value);
+                @memset(ds_row[0..c_lo], 0);
+                @memset(ds_row[c_hi..live], 0);
+                column = c_lo;
+                while (column + vector_width <= c_hi) : (column += vector_width) {
+                    const p: Vec = p_row[column..][0..vector_width].*;
+                    const dp: Vec = ds_row[column..][0..vector_width].*;
+                    ds_row[column..][0..vector_width].* = scale_splat * p * (dp - dot_splat);
+                }
+                while (column < c_hi) : (column += 1) {
+                    ds_row[column] = task.scale_value * p_row[column] * (ds_row[column] - row_dot);
+                }
+            }
+
+            // Phase 3a: dQ — 4-row register kernel per d-chunk; each K row
+            // vector is loaded once and shared by the 4 dS splats. Single
+            // writer per (head, query) row.
+            if (task.q_grad) |grad| {
+                var r0: usize = 0;
+                while (r0 < rows_active) : (r0 += qr_block) {
+                    const qr_active = @min(qr_block, rows_active - r0);
+                    var panel_rows: [qr_block]usize = undefined;
+                    inline for (0..qr_block) |r| {
+                        panel_rows[r] = @min(r0 + r, rows_active - 1) * task.kv_seq;
+                    }
+                    var feature_i: usize = 0;
+                    while (feature_i + vector_width <= d) : (feature_i += vector_width) {
+                        var acc: [qr_block]Vec = undefined;
+                        inline for (0..qr_block) |r| acc[r] = @splat(0);
+                        for (0..live) |column| {
+                            const k_vec: Vec = task.k_data[(tile_lo + column) * kv_seq_stride + kv_head_base + feature_i ..][0..vector_width].*;
+                            inline for (0..qr_block) |r| {
+                                acc[r] = @mulAdd(Vec, @as(Vec, @splat(ds_panel_all[panel_rows[r] + column])), k_vec, acc[r]);
+                            }
+                        }
+                        for (0..qr_active) |r| {
+                            grad[(q0 + r0 + r) * q_seq_stride + head_i * d + feature_i ..][0..vector_width].* = acc[r];
+                        }
+                    }
+                    while (feature_i < d) : (feature_i += 1) {
+                        for (0..qr_active) |r| {
+                            var tail: f32 = 0;
+                            const ds_row = ds_panel_all[(r0 + r) * task.kv_seq ..][0..live];
+                            for (0..live) |column| {
+                                tail += ds_row[column] * task.k_data[(tile_lo + column) * kv_seq_stride + kv_head_base + feature_i];
+                            }
+                            grad[(q0 + r0 + r) * q_seq_stride + head_i * d + feature_i] = tail;
+                        }
+                    }
+                }
+            }
+
+            // Phase 3b: dV/dK — 4-column register kernel per d-chunk, dV and
+            // dK fused so each gy/q row vector is loaded once. Accumulators
+            // live in registers for the whole row sweep; the panel splats
+            // read 4 contiguous scalars per row.
+            const col_block = 4;
+            var c0: usize = 0;
+            while (c0 + col_block <= live) : (c0 += col_block) {
+                var feature_i: usize = 0;
+                while (feature_i + vector_width <= d) : (feature_i += vector_width) {
+                    var dv_acc: [col_block]Vec = undefined;
+                    var dk_acc: [col_block]Vec = undefined;
+                    inline for (0..col_block) |ci| {
+                        dv_acc[ci] = @splat(0);
+                        dk_acc[ci] = @splat(0);
+                    }
+                    for (0..rows_active) |r| {
+                        const row_base = (q0 + r) * q_seq_stride + head_i * d + feature_i;
+                        const panel_row = r * task.kv_seq + c0;
+                        if (task.dv_target != null) {
+                            const gy_vec: Vec = task.gy_data[row_base..][0..vector_width].*;
+                            inline for (0..col_block) |ci| {
+                                dv_acc[ci] = @mulAdd(Vec, @as(Vec, @splat(p_panel_all[panel_row + ci])), gy_vec, dv_acc[ci]);
+                            }
+                        }
+                        if (task.dk_target != null) {
+                            const q_vec: Vec = task.q_data[row_base..][0..vector_width].*;
+                            inline for (0..col_block) |ci| {
+                                dk_acc[ci] = @mulAdd(Vec, @as(Vec, @splat(ds_panel_all[panel_row + ci])), q_vec, dk_acc[ci]);
+                            }
+                        }
+                    }
+                    inline for (0..col_block) |ci| {
+                        const target_row = acc_base + (tile_lo + c0 + ci) * acc_stride + feature_i;
+                        if (task.dv_target) |target| {
+                            target[target_row..][0..vector_width].* = @as(Vec, target[target_row..][0..vector_width].*) + dv_acc[ci];
+                        }
+                        if (task.dk_target) |target| {
+                            target[target_row..][0..vector_width].* = @as(Vec, target[target_row..][0..vector_width].*) + dk_acc[ci];
+                        }
+                    }
+                }
+                while (feature_i < d) : (feature_i += 1) {
+                    inline for (0..col_block) |ci| {
+                        const target_row = acc_base + (tile_lo + c0 + ci) * acc_stride + feature_i;
+                        var dv_tail: f32 = 0;
+                        var dk_tail: f32 = 0;
+                        for (0..rows_active) |r| {
+                            const value = task.q_data[(q0 + r) * q_seq_stride + head_i * d + feature_i];
+                            const gy_value = task.gy_data[(q0 + r) * q_seq_stride + head_i * d + feature_i];
+                            dv_tail += p_panel_all[r * task.kv_seq + c0 + ci] * gy_value;
+                            dk_tail += ds_panel_all[r * task.kv_seq + c0 + ci] * value;
+                        }
+                        if (task.dv_target) |target| target[target_row] += dv_tail;
+                        if (task.dk_target) |target| target[target_row] += dk_tail;
+                    }
+                }
+            }
+            // Column tail: the last live % 4 keys, one column at a time.
+            while (c0 < live) : (c0 += 1) {
+                const target_row_base = acc_base + (tile_lo + c0) * acc_stride;
+                var feature_i: usize = 0;
+                while (feature_i + vector_width <= d) : (feature_i += vector_width) {
+                    var dv_acc: Vec = @splat(0);
+                    var dk_acc: Vec = @splat(0);
+                    for (0..rows_active) |r| {
+                        const row_base = (q0 + r) * q_seq_stride + head_i * d + feature_i;
+                        const panel_row = r * task.kv_seq + c0;
+                        if (task.dv_target != null) {
+                            dv_acc = @mulAdd(Vec, @as(Vec, @splat(p_panel_all[panel_row])), @as(Vec, task.gy_data[row_base..][0..vector_width].*), dv_acc);
+                        }
+                        if (task.dk_target != null) {
+                            dk_acc = @mulAdd(Vec, @as(Vec, @splat(ds_panel_all[panel_row])), @as(Vec, task.q_data[row_base..][0..vector_width].*), dk_acc);
+                        }
+                    }
+                    if (task.dv_target) |target| {
+                        target[target_row_base + feature_i ..][0..vector_width].* = @as(Vec, target[target_row_base + feature_i ..][0..vector_width].*) + dv_acc;
+                    }
+                    if (task.dk_target) |target| {
+                        target[target_row_base + feature_i ..][0..vector_width].* = @as(Vec, target[target_row_base + feature_i ..][0..vector_width].*) + dk_acc;
+                    }
+                }
+                while (feature_i < d) : (feature_i += 1) {
+                    var dv_tail: f32 = 0;
+                    var dk_tail: f32 = 0;
+                    for (0..rows_active) |r| {
+                        const base_idx = (q0 + r) * q_seq_stride + head_i * d + feature_i;
+                        dv_tail += p_panel_all[r * task.kv_seq + c0] * task.gy_data[base_idx];
+                        dk_tail += ds_panel_all[r * task.kv_seq + c0] * task.q_data[base_idx];
+                    }
+                    if (task.dv_target) |target| target[target_row_base + feature_i] += dv_tail;
+                    if (task.dk_target) |target| target[target_row_base + feature_i] += dk_tail;
+                }
+            }
+        }
+    }
+}
+
+/// Fixed-head-order reduction of the per-head dK/dV planes into the
+/// `[kv_seq, kv_heads, d]` gradients — bitwise identical for any task count
+/// (each source row sums its group's heads in ascending head order).
+pub const AttentionBackwardReduceTask = struct {
+    partials: []const f32,
+    grad: []f32,
+    kv_head_for_head: []const usize,
+    kv_seq: usize,
+    d: usize,
+    kv_heads: usize,
+    source_start: usize,
+    source_end: usize,
+};
+
+pub fn runAttentionBackwardReduceTask(task: *const AttentionBackwardReduceTask) void {
+    attentionBackwardReduceRows(task.*);
+}
+
+pub fn attentionBackwardReduceRows(task: AttentionBackwardReduceTask) void {
+    for (task.source_start..task.source_end) |source_i| {
+        for (task.kv_head_for_head, 0..) |kv_head_i, head_i| {
+            const grad_row = task.grad[source_i * task.kv_heads * task.d + kv_head_i * task.d ..][0..task.d];
+            const partial_row = task.partials[head_i * task.kv_seq * task.d + source_i * task.d ..][0..task.d];
+            addSliceInPlace(grad_row, partial_row);
+        }
+    }
+}
+
 pub fn hasAdjacentKvHeadPairs(kv_head_for_head: []const usize, heads: usize, kv_heads: usize) bool {
     if (heads != kv_heads * 2) return false;
     for (0..kv_heads) |kv_head_i| {
@@ -1108,66 +1515,6 @@ fn attnBwdStatsEnabled() bool {
         true;
     attn_bwd_stats_state.store(if (on) 1 else 2, .release);
     return on;
-}
-
-/// Score panel -> probability panel. With forward-saved `stats` ({max,
-/// sum_exp} pairs indexed by GLOBAL head via `head_indices`) each row is ONE
-/// fused pass p = exp(s*scale - max) * inv_sum; without them the historical
-/// 3-pass recompute (scale+max scan, exp+sum, normalize) runs. The stats
-/// route reconstructs the FORWARD kernel's probabilities (its normalizer),
-/// where the recompute route re-derives them from the GEMM scores — the two
-/// agree to f32 roundoff, not bitwise (the route-parity test pins this).
-pub fn groupedCausalAttentionBackwardSoftmaxRows(
-    scores: []f32,
-    stats: ?[]const f32,
-    head_indices: []const usize,
-    head_count: usize,
-    q_seq: usize,
-    kv_seq: usize,
-    source_offset: usize,
-    scale_value: f32,
-    window: usize,
-    causal: bool,
-) void {
-    std.debug.assert(scores.len == head_count * q_seq * kv_seq);
-    for (0..head_count) |local_head_i| {
-        for (0..q_seq) |query_i| {
-            const row = scores[(local_head_i * q_seq + query_i) * kv_seq ..][0..kv_seq];
-            const active = if (causal) source_offset + query_i + 1 else kv_seq;
-            const lo = if (!causal or window == 0) 0 else active -| window;
-
-            if (lo > 0) @memset(row[0..lo], 0);
-
-            if (stats) |values| {
-                const stat_base = (head_indices[local_head_i] * q_seq + query_i) * 2;
-                const max_score = values[stat_base];
-                const inv_sum = 1 / values[stat_base + 1];
-                for (lo..active) |source_i| {
-                    row[source_i] = @exp(row[source_i] * scale_value - max_score) * inv_sum;
-                }
-                if (active < kv_seq) @memset(row[active..kv_seq], 0);
-                continue;
-            }
-
-            var max_score = -std.math.inf(f32);
-            for (lo..active) |source_i| {
-                const scaled_score = row[source_i] * scale_value;
-                row[source_i] = scaled_score;
-                max_score = @max(max_score, scaled_score);
-            }
-
-            var sum_exp: f32 = 0;
-            for (lo..active) |source_i| {
-                const probability = @exp(row[source_i] - max_score);
-                row[source_i] = probability;
-                sum_exp += probability;
-            }
-
-            const inv_sum = 1 / sum_exp;
-            for (lo..active) |source_i| row[source_i] *= inv_sum;
-            if (active < kv_seq) @memset(row[active..kv_seq], 0);
-        }
-    }
 }
 
 pub fn groupedCausalAttention(
@@ -1253,201 +1600,13 @@ pub fn groupedCausalAttentionStatsOut(
     return groupedCausalAttentionImpl(self, f32, q, k, v, kv_head_for_head, scale_value, window, causal, null, stats);
 }
 
-/// D[head * q_seq + query] = dot over d of gy row and forward-output row —
-/// the softmax-backward row dot via the output identity sum(P*dP) = gy.O.
-/// Both operands are [q_seq, heads * d] row-major.
-fn attentionBackwardRowDots(gy_data: []const f32, out_data: []const f32, row_dots: []f32, q_seq: usize, heads: usize, d: usize) void {
-    const Vec = @Vector(8, f32);
-    const vector_width = 8;
-    for (0..heads) |head_i| {
-        for (0..q_seq) |query_i| {
-            const base = query_i * heads * d + head_i * d;
-            var dot_vec: Vec = @splat(0);
-            var feature_i: usize = 0;
-            while (feature_i + vector_width <= d) : (feature_i += vector_width) {
-                const gv: Vec = gy_data[base + feature_i ..][0..vector_width].*;
-                const ov: Vec = out_data[base + feature_i ..][0..vector_width].*;
-                dot_vec += gv * ov;
-            }
-            var dot = @reduce(.Add, dot_vec);
-            while (feature_i < d) : (feature_i += 1) {
-                dot += gy_data[base + feature_i] * out_data[base + feature_i];
-            }
-            row_dots[head_i * q_seq + query_i] = dot;
-        }
-    }
-}
-
-fn groupedCausalAttentionBackwardGemm(
-    self: *Runtime,
-    q_data: []const f32,
-    k_data: []const f32,
-    v_data: []const f32,
-    gy_data: []const f32,
-    stats: ?[]const f32,
-    row_dots: ?[]const f32,
-    q_grad: ?[]f32,
-    k_grad: ?[]f32,
-    v_grad: ?[]f32,
-    kv_head_for_head: []const usize,
-    q_seq: usize,
-    kv_seq: usize,
-    source_offset: usize,
-    heads: usize,
-    d: usize,
-    kv_heads: usize,
-    scale_value: f32,
-    window: usize,
-    causal: bool,
-) !void {
-    const q_seq_stride = heads * d;
-    const kv_seq_stride = kv_heads * d;
-    const need_score_grad = q_grad != null or k_grad != null;
-
-    for (0..kv_heads) |kv_head_i| {
-        var head_count: usize = 0;
-        for (kv_head_for_head) |mapped_kv_head| {
-            if (mapped_kv_head == kv_head_i) head_count += 1;
-        }
-        if (head_count == 0) continue;
-
-        const head_indices = try self.allocator.alloc(usize, head_count);
-        defer self.allocator.free(head_indices);
-        {
-            var local_head_i: usize = 0;
-            for (kv_head_for_head, 0..) |mapped_kv_head, head_i| {
-                if (mapped_kv_head == kv_head_i) {
-                    head_indices[local_head_i] = head_i;
-                    local_head_i += 1;
-                }
-            }
-        }
-
-        const rows = head_count * q_seq;
-        var q_panel = try self.emptyRank(2, .{ rows, d });
-        defer q_panel.deinit();
-        var gy_panel = try self.emptyRank(2, .{ rows, d });
-        defer gy_panel.deinit();
-        var k_panel = try self.emptyRank(2, .{ kv_seq, d });
-        defer k_panel.deinit();
-        var prob_panel = try self.emptyRank(2, .{ rows, kv_seq });
-        defer prob_panel.deinit();
-
-        const q_panel_data = q_panel.data();
-        const gy_panel_data = gy_panel.data();
-        const k_panel_data = k_panel.data();
-
-        for (head_indices, 0..) |head_i, local_head_i| {
-            for (0..q_seq) |query_i| {
-                const row = local_head_i * q_seq + query_i;
-                const q_base = query_i * q_seq_stride + head_i * d;
-                const panel_base = row * d;
-                @memcpy(q_panel_data[panel_base..][0..d], q_data[q_base..][0..d]);
-                @memcpy(gy_panel_data[panel_base..][0..d], gy_data[q_base..][0..d]);
-            }
-        }
-
-        for (0..kv_seq) |source_i| {
-            const source_base = source_i * kv_seq_stride + kv_head_i * d;
-            @memcpy(k_panel_data[source_i * d ..][0..d], k_data[source_base..][0..d]);
-        }
-
-        self.enableNativeMatmulPoolForWork(rows, kv_seq, d);
-        self.backend.matmulTransB2DIntoUnchecked(&prob_panel, &q_panel, &k_panel, rows, kv_seq, d);
-        const probabilities = prob_panel.data();
-        groupedCausalAttentionBackwardSoftmaxRows(
-            probabilities,
-            stats,
-            head_indices,
-            head_count,
-            q_seq,
-            kv_seq,
-            source_offset,
-            scale_value,
-            window,
-            causal,
-        );
-
-        if (v_grad) |grad| {
-            var dv_panel = try self.emptyRank(2, .{ kv_seq, d });
-            defer dv_panel.deinit();
-            self.enableNativeMatmulPoolForWork(kv_seq, d, rows);
-            self.backend.matmulTransA2DIntoUnchecked(&dv_panel, &prob_panel, &gy_panel, kv_seq, d, rows);
-
-            const dv_panel_data = dv_panel.dataConst();
-            for (0..kv_seq) |source_i| {
-                const grad_base = source_i * kv_seq_stride + kv_head_i * d;
-                addSliceInPlace(grad[grad_base..][0..d], dv_panel_data[source_i * d ..][0..d]);
-            }
-        }
-
-        if (need_score_grad) {
-            var v_panel = try self.emptyRank(2, .{ kv_seq, d });
-            defer v_panel.deinit();
-            const v_panel_data = v_panel.data();
-            for (0..kv_seq) |source_i| {
-                const source_base = source_i * kv_seq_stride + kv_head_i * d;
-                @memcpy(v_panel_data[source_i * d ..][0..d], v_data[source_base..][0..d]);
-            }
-
-            var dscore_panel = try self.emptyRank(2, .{ rows, kv_seq });
-            defer dscore_panel.deinit();
-            self.enableNativeMatmulPoolForWork(rows, kv_seq, d);
-            self.backend.matmulTransB2DIntoUnchecked(&dscore_panel, &gy_panel, &v_panel, rows, kv_seq, d);
-            const dscore_data = dscore_panel.data();
-            groupedCausalAttentionBackwardDScoreRows(
-                probabilities,
-                dscore_data,
-                row_dots,
-                head_indices,
-                head_count,
-                q_seq,
-                kv_seq,
-                source_offset,
-                scale_value,
-                window,
-                causal,
-            );
-
-            if (q_grad) |grad| {
-                var dq_panel = try self.emptyRank(2, .{ rows, d });
-                defer dq_panel.deinit();
-                self.enableNativeMatmulPoolForWork(rows, d, kv_seq);
-                self.backend.matmul2DIntoUnchecked(&dq_panel, &dscore_panel, &k_panel, rows, d, kv_seq);
-
-                const dq_panel_data = dq_panel.dataConst();
-                for (head_indices, 0..) |head_i, local_head_i| {
-                    for (0..q_seq) |query_i| {
-                        const row = local_head_i * q_seq + query_i;
-                        const grad_base = query_i * q_seq_stride + head_i * d;
-                        addSliceInPlace(grad[grad_base..][0..d], dq_panel_data[row * d ..][0..d]);
-                    }
-                }
-            }
-
-            if (k_grad) |grad| {
-                var dk_panel = try self.emptyRank(2, .{ kv_seq, d });
-                defer dk_panel.deinit();
-                self.enableNativeMatmulPoolForWork(kv_seq, d, rows);
-                self.backend.matmulTransA2DIntoUnchecked(&dk_panel, &dscore_panel, &q_panel, kv_seq, d, rows);
-
-                const dk_panel_data = dk_panel.dataConst();
-                for (0..kv_seq) |source_i| {
-                    const grad_base = source_i * kv_seq_stride + kv_head_i * d;
-                    addSliceInPlace(grad[grad_base..][0..d], dk_panel_data[source_i * d ..][0..d]);
-                }
-            }
-        }
-    }
-}
-
 /// `stats` (optional): the forward's saved per-(head, query) {max, sum_exp}
 /// pairs from `groupedCausalAttentionStatsOut` — length heads * q_seq * 2.
-/// `out` (optional, requires stats): the forward's OUTPUT [q_seq, heads*d];
-/// the softmax-backward row dot then comes from the identity
-/// sum(P*dP) = gy.O (length-d dots) instead of a kv_seq-length pass over
-/// both panels. Both are consumed only by the GEMM route (gated together by
-/// FUCINA_NO_ATTN_BWD_STATS); the direct per-kv-head route always recomputes.
+/// The tiled route rebuilds the forward's probabilities from them in one
+/// pass instead of the max/sum recompute (gated by FUCINA_NO_ATTN_BWD_STATS);
+/// the small-shape per-kv-head route always recomputes. `out` (the forward
+/// output) is accepted for the autograd record's convenience but unused —
+/// the tiled route's row dot comes from its own cache-resident panels.
 pub fn groupedCausalAttentionBackward(
     self: *Runtime,
     q: *const Tensor,
@@ -1513,49 +1672,145 @@ pub fn groupedCausalAttentionBackward(
     if (stats_active) |values| {
         if (values.len != heads * q_seq * 2) return tensor.TensorError.InvalidDataLength;
     }
-    // D = gy.O per (head, query) — computed ONCE for all kv heads (the dot
-    // depends only on the query row). Rides the stats gate: both shortcuts
-    // reconstruct forward-side values instead of re-deriving panel-side ones.
-    var row_dots_storage: ?*storage.Buffer = null;
-    defer if (row_dots_storage) |buffer| buffer.release();
-    var row_dots: ?[]const f32 = null;
-    if (stats_active != null) if (out) |out_tensor| {
-        const out_view = try out_tensor.rankView(2);
-        if (out_view.shape[0] != q_seq or out_view.shape[1] != heads * d) return tensor.TensorError.ShapeMismatch;
-        var oo = try self.prepareContiguous(out_tensor);
-        defer oo.deinit();
-        const buffer = try self.buffers.acquire(heads * q_seq);
-        row_dots_storage = buffer;
-        const dots = buffer.data[0 .. heads * q_seq];
-        attentionBackwardRowDots(gy_data, oo.tensor().dataConst(), dots, q_seq, heads, d);
-        row_dots = dots;
-    };
+    // The tiled route derives the softmax-backward row dot from its own
+    // cache-resident P/dP panels, so the forward output is not consulted.
+    _ = out;
     if ((need_q or need_k or need_v) and
-        q_seq >= 8 and kv_seq >= 8 and d >= 4 and
+        q_seq >= 8 and kv_seq >= 8 and d >= 4 and d <= attention_tile_max_d and
         attention_work >= grouped_attention_backward_gemm_work_threshold)
     {
-        try groupedCausalAttentionBackwardGemm(
-            self,
-            q_data,
-            k_data,
-            v_data,
-            gy_data,
-            stats_active,
-            row_dots,
-            q_grad,
-            k_grad,
-            v_grad,
-            kv_head_for_head,
-            q_seq,
-            kv_seq,
-            source_offset,
-            heads,
-            d,
-            kv_heads,
-            scale_value,
-            window,
-            causal,
-        );
+        // Direct dK/dV writes need exactly one query head per kv head;
+        // any sharing switches to per-head planes + the fixed-order reduce.
+        var shared_kv_head = heads != kv_heads;
+        if (!shared_kv_head) {
+            const seen = try self.allocator.alloc(bool, kv_heads);
+            defer self.allocator.free(seen);
+            @memset(seen, false);
+            for (kv_head_for_head) |kv_head_i| {
+                if (seen[kv_head_i]) shared_kv_head = true;
+                seen[kv_head_i] = true;
+            }
+        }
+        const partial_mode = shared_kv_head and (need_k or need_v);
+
+        var dk_plane_storage: ?*storage.Buffer = null;
+        defer if (dk_plane_storage) |buffer| buffer.release();
+        var dv_plane_storage: ?*storage.Buffer = null;
+        defer if (dv_plane_storage) |buffer| buffer.release();
+        var dk_target: ?[]f32 = k_grad;
+        var dv_target: ?[]f32 = v_grad;
+        if (partial_mode) {
+            const plane_len = heads * kv_seq * d;
+            if (need_k) {
+                const buffer = try self.buffers.acquire(plane_len);
+                dk_plane_storage = buffer;
+                @memset(buffer.data[0..plane_len], 0);
+                dk_target = buffer.data[0..plane_len];
+            }
+            if (need_v) {
+                const buffer = try self.buffers.acquire(plane_len);
+                dv_plane_storage = buffer;
+                @memset(buffer.data[0..plane_len], 0);
+                dv_target = buffer.data[0..plane_len];
+            }
+        }
+
+        const base_task: GroupedCausalAttentionBackwardTiledTask = .{
+            .q_data = q_data,
+            .k_data = k_data,
+            .v_data = v_data,
+            .gy_data = gy_data,
+            .stats = stats_active,
+            .q_grad = q_grad,
+            .dk_target = if (need_k) dk_target else null,
+            .dv_target = if (need_v) dv_target else null,
+            .partial_mode = partial_mode,
+            .kv_head_for_head = kv_head_for_head,
+            .q_seq = q_seq,
+            .kv_seq = kv_seq,
+            .source_offset = source_offset,
+            .heads = heads,
+            .d = d,
+            .kv_heads = kv_heads,
+            .scale_value = scale_value,
+            .window = window,
+            .causal = causal,
+            .scratch = &.{},
+            .head_start = 0,
+            .head_end = heads,
+        };
+        const panel_len = 2 * attention_bwd_tile_rows * kv_seq;
+        var dispatched = false;
+        if (attention_work >= parallel.vector_matmul_work_threshold / 2) {
+            if (workPool(self)) |pool| {
+                const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), heads);
+                if (task_count > 1) {
+                    const task_scratch = try self.allocator.alloc(f32, task_count * panel_len);
+                    defer self.allocator.free(task_scratch);
+                    var task_storage: [parallel.vector_max_threads]GroupedCausalAttentionBackwardTiledTask = undefined;
+                    for (0..task_count) |task_i| {
+                        task_storage[task_i] = base_task;
+                        task_storage[task_i].head_start = task_i * heads / task_count;
+                        task_storage[task_i].head_end = (task_i + 1) * heads / task_count;
+                        task_storage[task_i].scratch = task_scratch[task_i * panel_len ..][0..panel_len];
+                    }
+                    pool.parallelChunks(GroupedCausalAttentionBackwardTiledTask, task_storage[0..task_count], runGroupedCausalAttentionBackwardTiledTask);
+                    dispatched = true;
+                }
+            }
+        }
+        if (!dispatched) {
+            const task_scratch = try self.allocator.alloc(f32, panel_len);
+            defer self.allocator.free(task_scratch);
+            var serial_task = base_task;
+            serial_task.scratch = task_scratch;
+            groupedCausalAttentionBackwardTiles(serial_task);
+        }
+
+        if (partial_mode) {
+            const reduce_base: AttentionBackwardReduceTask = .{
+                .partials = &.{},
+                .grad = &.{},
+                .kv_head_for_head = kv_head_for_head,
+                .kv_seq = kv_seq,
+                .d = d,
+                .kv_heads = kv_heads,
+                .source_start = 0,
+                .source_end = kv_seq,
+            };
+            const reduce_targets = [2]struct { partials: ?[]const f32, grad: ?[]f32 }{
+                .{ .partials = if (need_k) dk_target else null, .grad = k_grad },
+                .{ .partials = if (need_v) dv_target else null, .grad = v_grad },
+            };
+            for (reduce_targets) |pair| {
+                const partials = pair.partials orelse continue;
+                const grad = pair.grad orelse continue;
+                var reduced = false;
+                if (parallel.saturatedMul3(kv_seq, heads, d) >= parallel.vector_elementwise_len_threshold) {
+                    if (workPool(self)) |pool| {
+                        const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), kv_seq);
+                        if (task_count > 1) {
+                            var reduce_storage: [parallel.vector_max_threads]AttentionBackwardReduceTask = undefined;
+                            for (0..task_count) |task_i| {
+                                reduce_storage[task_i] = reduce_base;
+                                reduce_storage[task_i].partials = partials;
+                                reduce_storage[task_i].grad = grad;
+                                reduce_storage[task_i].source_start = task_i * kv_seq / task_count;
+                                reduce_storage[task_i].source_end = (task_i + 1) * kv_seq / task_count;
+                            }
+                            pool.parallelChunks(AttentionBackwardReduceTask, reduce_storage[0..task_count], runAttentionBackwardReduceTask);
+                            reduced = true;
+                        }
+                    }
+                }
+                if (!reduced) {
+                    var serial_reduce = reduce_base;
+                    serial_reduce.partials = partials;
+                    serial_reduce.grad = grad;
+                    attentionBackwardReduceRows(serial_reduce);
+                }
+            }
+        }
         return result;
     }
 
@@ -2375,52 +2630,6 @@ fn groupedCausalAttentionDispatch(
         .scores = scores,
         .stats = stats,
     });
-}
-
-/// Probability + dP panels -> score-gradient panel: dS = scale * P * (dP - D)
-/// with D = row dot of P and dP. When `row_dots` is provided (the forward's
-/// output identity D = gy.O, indexed by GLOBAL head via `head_indices` —
-/// length-d dots instead of length-kv_seq ones), the per-row kv_seq dot pass
-/// over BOTH panels is skipped entirely; the values agree with the in-panel
-/// dot to f32 roundoff (same tolerance class as the stats softmax route,
-/// same FUCINA_NO_ATTN_BWD_STATS gate upstream).
-pub fn groupedCausalAttentionBackwardDScoreRows(
-    probabilities: []const f32,
-    dscore: []f32,
-    row_dots: ?[]const f32,
-    head_indices: []const usize,
-    head_count: usize,
-    q_seq: usize,
-    kv_seq: usize,
-    source_offset: usize,
-    scale_value: f32,
-    window: usize,
-    causal: bool,
-) void {
-    std.debug.assert(probabilities.len == head_count * q_seq * kv_seq);
-    std.debug.assert(dscore.len == probabilities.len);
-    for (0..head_count) |local_head_i| {
-        for (0..q_seq) |query_i| {
-            const row_offset = (local_head_i * q_seq + query_i) * kv_seq;
-            const prob_row = probabilities[row_offset..][0..kv_seq];
-            const dscore_row = dscore[row_offset..][0..kv_seq];
-            const active = if (causal) source_offset + query_i + 1 else kv_seq;
-            const lo = if (!causal or window == 0) 0 else active -| window;
-
-            var dprob_dot: f32 = 0;
-            if (row_dots) |dots| {
-                dprob_dot = dots[head_indices[local_head_i] * q_seq + query_i];
-            } else {
-                for (lo..active) |source_i| dprob_dot += prob_row[source_i] * dscore_row[source_i];
-            }
-
-            if (lo > 0) @memset(dscore_row[0..lo], 0);
-            for (lo..active) |source_i| {
-                dscore_row[source_i] = scale_value * prob_row[source_i] * (dscore_row[source_i] - dprob_dot);
-            }
-            if (active < kv_seq) @memset(dscore_row[active..kv_seq], 0);
-        }
-    }
 }
 
 test {

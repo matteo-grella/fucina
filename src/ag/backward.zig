@@ -3259,13 +3259,13 @@ pub const GroupedCausalAttentionBackward = struct {
     v: RawTensor,
     kv_head_for_head: []usize,
     // Forward-saved per-(head, query) softmax {max, sum_exp} pairs (8 bytes
-    // per row; empty = none): the backward's GEMM route rebuilds this
-    // forward's probabilities in ONE pass instead of three (see
-    // `groupedCausalAttentionBackwardSoftmaxRows`).
+    // per row; empty = none): the backward's tiled route rebuilds this
+    // forward's probabilities in ONE pass instead of the max/sum recompute
+    // (see `groupedCausalAttentionBackwardTiles`).
     row_stats: []f32,
-    // The forward's output (refcounted view, no copy): with stats, the
-    // softmax-backward row dot comes from sum(P*dP) = gy.O — length-d dots
-    // instead of a kv_seq pass over both panels.
+    // The forward's output (refcounted view, no copy): kept on the record
+    // for compatibility; the tiled route derives the softmax-backward row
+    // dot from its own panels and does not read it.
     out: RawTensor,
     scale_value: f32,
     window: usize,

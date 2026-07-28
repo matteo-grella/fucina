@@ -2911,6 +2911,78 @@ test "exec attention stats capture is output-neutral and feeds the backward stat
                 try std.testing.expect(@abs(gotv - want) <= 2e-5 + 2e-4 * @abs(want));
             }
         }
+
+        // Ground truth: an f64 naive backward over the same masks — pins the
+        // tiled kernel's values themselves, not just cross-arm agreement.
+        const dq64 = try allocator.alloc(f64, q_seq * heads * d);
+        defer allocator.free(dq64);
+        const dk64 = try allocator.alloc(f64, kv_seq * kv_heads * d);
+        defer allocator.free(dk64);
+        const dv64 = try allocator.alloc(f64, kv_seq * kv_heads * d);
+        defer allocator.free(dv64);
+        @memset(dq64, 0);
+        @memset(dk64, 0);
+        @memset(dv64, 0);
+        const scores64 = try allocator.alloc(f64, kv_seq);
+        defer allocator.free(scores64);
+        const dp64 = try allocator.alloc(f64, kv_seq);
+        defer allocator.free(dp64);
+        for (0..heads) |head_i| {
+            const kv_head_i = kv_head_for_head[head_i];
+            for (0..q_seq) |query_i| {
+                const active = if (causal) kv_seq - q_seq + query_i + 1 else kv_seq;
+                const lo = if (!causal or window == 0) 0 else active -| window;
+                var max64: f64 = -std.math.inf(f64);
+                for (lo..active) |source_i| {
+                    var dot: f64 = 0;
+                    for (0..d) |f| {
+                        dot += @as(f64, q_data[query_i * heads * d + head_i * d + f]) *
+                            @as(f64, k_data[source_i * kv_heads * d + kv_head_i * d + f]);
+                    }
+                    scores64[source_i] = dot * 0.125;
+                    max64 = @max(max64, scores64[source_i]);
+                }
+                var sum64: f64 = 0;
+                for (lo..active) |source_i| {
+                    scores64[source_i] = @exp(scores64[source_i] - max64);
+                    sum64 += scores64[source_i];
+                }
+                var row_dot64: f64 = 0;
+                for (lo..active) |source_i| {
+                    scores64[source_i] /= sum64;
+                    var dot: f64 = 0;
+                    for (0..d) |f| {
+                        dot += @as(f64, gy_data[query_i * heads * d + head_i * d + f]) *
+                            @as(f64, v_data[source_i * kv_heads * d + kv_head_i * d + f]);
+                    }
+                    dp64[source_i] = dot;
+                    row_dot64 += scores64[source_i] * dot;
+                }
+                for (lo..active) |source_i| {
+                    const ds = 0.125 * scores64[source_i] * (dp64[source_i] - row_dot64);
+                    for (0..d) |f| {
+                        dq64[query_i * heads * d + head_i * d + f] +=
+                            ds * @as(f64, k_data[source_i * kv_heads * d + kv_head_i * d + f]);
+                        dk64[source_i * kv_heads * d + kv_head_i * d + f] +=
+                            ds * @as(f64, q_data[query_i * heads * d + head_i * d + f]);
+                        dv64[source_i * kv_heads * d + kv_head_i * d + f] +=
+                            @as(f64, scores64[source_i]) * @as(f64, gy_data[query_i * heads * d + head_i * d + f]);
+                    }
+                }
+            }
+        }
+        for ([_]struct { want: []const f64, got: []const f32 }{
+            .{ .want = dq64, .got = ref.q.?.dataConst() },
+            .{ .want = dk64, .got = ref.k.?.dataConst() },
+            .{ .want = dv64, .got = ref.v.?.dataConst() },
+            .{ .want = dq64, .got = got.q.?.dataConst() },
+            .{ .want = dk64, .got = got.k.?.dataConst() },
+            .{ .want = dv64, .got = got.v.?.dataConst() },
+        }) |pair| {
+            for (pair.want, pair.got) |want, gotv| {
+                try std.testing.expect(@abs(@as(f64, gotv) - want) <= 5e-5 + 5e-4 * @abs(want));
+            }
+        }
     }
 }
 
