@@ -48,7 +48,7 @@ const Layer = struct {
 
 const Model = struct {
     wte: Tensor(.{ .vocab, .d }),
-    w_lm: Tensor(.{ .d, .vocab }),
+    w_lm: Tensor(.{ .vocab, .d }),
     layers: [n_layer]Layer,
     rope_table: RopeTable,
     kv_map: [n_head]usize,
@@ -126,8 +126,7 @@ fn forwardLoss(ctx: *ExecContext, model: *const Model, input_ids: []const usize,
         x = try x.add(ctx, &mlp_out);
     }
     x = try x.rmsNorm(ctx, .d, rms_eps);
-    var logits = try x.dot(ctx, &model.w_lm, .d);
-    return logits.crossEntropyExt(ctx, .vocab, labels, .{ .reduction = .mean });
+    return x.linearCrossEntropyExt(ctx, &model.w_lm, labels, .{ .reduction = .mean });
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -184,7 +183,7 @@ pub fn main(init: std.process.Init) !void {
 
     var name_buf: [128]u8 = undefined;
     model.wte = try initParam(Tensor(.{ .vocab, .d }), &ctx, allocator, random, &dumper, "wte", .{ vocab, d_model });
-    model.w_lm = try initParam(Tensor(.{ .d, .vocab }), &ctx, allocator, random, &dumper, "w_lm", .{ d_model, vocab });
+    model.w_lm = try initParam(Tensor(.{ .vocab, .d }), &ctx, allocator, random, &dumper, "w_lm", .{ vocab, d_model });
     for (0..n_layer) |i| {
         model.layers[i] = .{
             .c_q = try initParam(Tensor(.{ .d, .qo }), &ctx, allocator, random, &dumper, try std.fmt.bufPrint(&name_buf, "layers.{d}.c_q", .{i}), .{ d_model, n_head * head_dim }),

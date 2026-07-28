@@ -70,7 +70,7 @@ def forward_loss(params, ids, labels, cos, sin) -> torch.Tensor:
         m = F.rms_norm(x, (D_MODEL,), eps=RMS_EPS)
         x = x + (F.silu(m @ p("w_gate")) * (m @ p("w_up"))) @ p("w_down")
     x = F.rms_norm(x, (D_MODEL,), eps=RMS_EPS)
-    logits = x @ params["w_lm"]
+    logits = F.linear(x, params["w_lm"])
     return F.cross_entropy(logits, labels)
 
 
@@ -78,6 +78,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dump", required=True)
     parser.add_argument("--threads", type=int, default=8)
+    parser.add_argument(
+        "--compile", choices=["off", "default", "max-autotune"], default="off",
+        help="torch.compile the loss fn (Inductor CPU; AOTAutograd compiles the backward too)",
+    )
+    parser.add_argument("--fused-adamw", action="store_true", help="AdamW(fused=True) instead of foreach")
     args = parser.parse_args()
     torch.set_num_threads(args.threads)
 
@@ -94,14 +99,24 @@ def main() -> None:
     warmup = fucina["warmup_steps"]
     n_steps = len(fucina["losses"])
 
-    opt = torch.optim.AdamW(params.values(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8, weight_decay=0.0, foreach=True)
+    if args.fused_adamw:
+        opt = torch.optim.AdamW(params.values(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8, weight_decay=0.0, fused=True)
+    else:
+        opt = torch.optim.AdamW(params.values(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8, weight_decay=0.0, foreach=True)
+
+    loss_fn = forward_loss
+    if args.compile != "off":
+        mode = None if args.compile == "default" else args.compile
+        loss_fn = torch.compile(forward_loss, fullgraph=True, dynamic=False, mode=mode)
+    print(f"torch {torch.__version__}  threads={args.threads}  compile={args.compile}  "
+          f"adamw={'fused' if args.fused_adamw else 'foreach'}")
 
     losses, step_ms = [], []
     for step_i in range(n_steps):
         t0 = time.perf_counter_ns()
         for p in params.values():
             p.grad = None
-        loss = forward_loss(params, ids, labels, cos, sin)
+        loss = loss_fn(params, ids, labels, cos, sin)
         loss.backward()
         loss_value = loss.item()
         opt.step()
