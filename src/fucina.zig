@@ -122,6 +122,19 @@ pub const CrossEntropyOptions = exec.CrossEntropyOptions;
 pub const UnaryOp = exec.UnaryOp;
 pub const RopeMode = exec.RopeMode;
 pub const RopeTable = exec.RopeTable;
+
+/// SIMD vocabulary for user-defined elemental ops (`elementalUnary` /
+/// `elementalBinary` vector bodies): the machine vector type, its width,
+/// and the transcendental helpers the built-in kernels use.
+pub const simd = struct {
+    const vector_common = @import("backend/vector/common.zig");
+    const vector_primitives = @import("backend/vector/primitives.zig");
+    pub const Vf32 = vector_common.Vf32;
+    pub const vector_len = vector_common.vector_len;
+    pub const vexpf = vector_primitives.vexpf;
+    pub const sigmoidVec = vector_primitives.sigmoidVec;
+    pub const tanhVec = vector_primitives.tanhVec;
+};
 pub const RopeTheta = exec.RopeTheta;
 /// Fake-quantization round trips (FP8-E4M3 / FP4-E2M1 microscaling groups,
 /// Hadamard rotation, f16 round trip) over host slices (§10.10).

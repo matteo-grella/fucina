@@ -22,10 +22,20 @@
 //! as the built-in pointwise backwards). `extra` is captured by value with
 //! the `customVjp` lifetime contract: pointees must outlive backward.
 //!
-//! The scalar loops chunk across the worker team above the elementwise
-//! length threshold; writes are disjoint and every element is a pure
-//! function of its inputs, so results are bitwise identical for any thread
-//! count (serial included).
+//! Optional SIMD bodies: an `Op` may additionally declare vector twins —
+//! `forwardVec`/`backwardVec` (unary) or `forwardVec`/`backwardAVec` +
+//! `backwardBVec` (binary) — over `fucina.simd.Vf32` lanes; the kernels
+//! then run those on full vectors and the scalar rules on the tail (the
+//! same lane/tail split as the built-in SIMD kernels). Bodies containing
+//! transcendentals want this: the scalar rules compile to one libm call
+//! per element, where a vector body can use `fucina.simd.vexpf` and
+//! friends. The scalar and vector rules must compute the same function;
+//! lane/tail rounding may differ exactly as it does in the built-ins.
+//!
+//! The loops chunk across the worker team above the elementwise length
+//! threshold; writes are disjoint and every element is a pure function of
+//! its inputs, so results are bitwise identical for any thread count
+//! (serial included).
 const std = @import("std");
 const exec_mod = @import("../exec.zig");
 const tensor_mod = @import("../tensor.zig");
@@ -33,6 +43,10 @@ const tags_mod = @import("../tags.zig");
 const tag_ops = @import("../tagged.zig");
 const parallel = @import("../parallel.zig");
 const custom = @import("custom.zig");
+const vector_common = @import("../backend/vector/common.zig");
+
+const Vec = vector_common.Vf32;
+const vec_len = vector_common.vector_len;
 const backward_mod = @import("backward.zig");
 
 const ExecContext = exec_mod.ExecContext;
@@ -100,6 +114,15 @@ fn UnarySpec(comptime TensorT: type, comptime Op: type, comptime Extra: type) ty
                 fn at(self: *const @This(), i: usize) void {
                     self.out[i] = Op.forward(self.x[i], self.extra);
                 }
+                fn span(self: *const @This(), start: usize, end: usize) void {
+                    var i = start;
+                    if (comptime @hasDecl(Op, "forwardVec")) {
+                        while (i + vec_len <= end) : (i += vec_len) {
+                            self.out[i..][0..vec_len].* = Op.forwardVec(@as(Vec, self.x[i..][0..vec_len].*), self.extra);
+                        }
+                    }
+                    while (i < end) : (i += 1) self.at(i);
+                }
             };
             dispatchElemental(Body, .{ .out = out.data(), .x = x.dataConst(), .extra = extra }, ctx);
             return out;
@@ -131,6 +154,20 @@ fn UnarySpec(comptime TensorT: type, comptime Op: type, comptime Extra: type) ty
                 extra: Extra,
                 fn at(self: *const @This(), i: usize) void {
                     self.gx[i] = Op.backward(self.x[i], self.y[i], self.g[i], self.extra);
+                }
+                fn span(self: *const @This(), start: usize, end: usize) void {
+                    var i = start;
+                    if (comptime @hasDecl(Op, "backwardVec")) {
+                        while (i + vec_len <= end) : (i += vec_len) {
+                            self.gx[i..][0..vec_len].* = Op.backwardVec(
+                                @as(Vec, self.x[i..][0..vec_len].*),
+                                @as(Vec, self.y[i..][0..vec_len].*),
+                                @as(Vec, self.g[i..][0..vec_len].*),
+                                self.extra,
+                            );
+                        }
+                    }
+                    while (i < end) : (i += 1) self.at(i);
                 }
             };
             dispatchElemental(Body, .{ .gx = gx.data(), .x = x.dataConst(), .y = y.dataConst(), .g = g.dataConst(), .extra = extra }, ctx);
@@ -165,6 +202,19 @@ fn BinarySpec(
                 extra: Extra,
                 fn at(self: *const @This(), i: usize) void {
                     self.out[i] = Op.forward(self.a[i], self.b[i], self.extra);
+                }
+                fn span(self: *const @This(), start: usize, end: usize) void {
+                    var i = start;
+                    if (comptime @hasDecl(Op, "forwardVec")) {
+                        while (i + vec_len <= end) : (i += vec_len) {
+                            self.out[i..][0..vec_len].* = Op.forwardVec(
+                                @as(Vec, self.a[i..][0..vec_len].*),
+                                @as(Vec, self.b[i..][0..vec_len].*),
+                                self.extra,
+                            );
+                        }
+                    }
+                    while (i < end) : (i += 1) self.at(i);
                 }
             };
             dispatchElemental(Body, .{ .out = out.data(), .a = a.dataConst(), .b = b.dataConst(), .extra = extra }, ctx);
@@ -203,6 +253,22 @@ fn BinarySpec(
                         .a => Op.backwardA(self.a[i], self.b[i], self.y[i], self.g[i], self.extra),
                         .b => Op.backwardB(self.a[i], self.b[i], self.y[i], self.g[i], self.extra),
                     };
+                }
+                fn span(self: *const @This(), start: usize, end: usize) void {
+                    var i = start;
+                    if (comptime @hasDecl(Op, "backwardAVec") and @hasDecl(Op, "backwardBVec")) {
+                        while (i + vec_len <= end) : (i += vec_len) {
+                            const av: Vec = self.a[i..][0..vec_len].*;
+                            const bv: Vec = self.b[i..][0..vec_len].*;
+                            const yv: Vec = self.y[i..][0..vec_len].*;
+                            const gv: Vec = self.g[i..][0..vec_len].*;
+                            self.grad[i..][0..vec_len].* = switch (self.which) {
+                                .a => Op.backwardAVec(av, bv, yv, gv, self.extra),
+                                .b => Op.backwardBVec(av, bv, yv, gv, self.extra),
+                            };
+                        }
+                    }
+                    while (i < end) : (i += 1) self.at(i);
                 }
             };
 
@@ -249,7 +315,7 @@ fn dispatchElemental(comptime Body: type, body: Body, ctx: *ExecContext) void {
         start: usize,
         end: usize,
         fn run(task: *const @This()) void {
-            for (task.start..task.end) |i| task.body.at(i);
+            task.body.span(task.start, task.end);
         }
     };
     const len = bodyLen(Body, body);

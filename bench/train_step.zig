@@ -36,6 +36,10 @@ const init_std: f32 = 0.02;
 const warmup_steps: usize = 2;
 const default_timed_steps: usize = 10;
 
+/// --composed-swiglu: the two-op silu+mul MLP gate instead of the fused
+/// elemental op — the fusion A/B lever.
+var composed_swiglu: bool = false;
+
 const Layer = struct {
     c_q: Tensor(.{ .d, .qo }),
     c_k: Tensor(.{ .d, .kvo }),
@@ -103,6 +107,55 @@ fn initParam(
     return T.variableFromSlice(ctx, shape, data);
 }
 
+/// SwiGLU gate as ONE elemental op — silu(gate)·up fused into a single
+/// forward pass and one pass per operand gradient, with SIMD bodies
+/// (the scalar rules alone would pay a libm expf per element). Replaces
+/// the composed `.unary(.silu)` + `.mul` pair.
+const SwigluOp = struct {
+    const simd = bench_raw.simd;
+
+    pub fn forward(gate_value: f32, up_value: f32, extra: void) f32 {
+        _ = extra;
+        const s = 1 / (1 + @exp(-gate_value));
+        return gate_value * s * up_value;
+    }
+
+    pub fn forwardVec(gate_vec: simd.Vf32, up_vec: simd.Vf32, extra: void) simd.Vf32 {
+        _ = extra;
+        return gate_vec * simd.sigmoidVec(gate_vec) * up_vec;
+    }
+
+    pub fn backwardA(gate_value: f32, up_value: f32, y: f32, grad_y: f32, extra: void) f32 {
+        _ = y;
+        _ = extra;
+        const s = 1 / (1 + @exp(-gate_value));
+        return grad_y * up_value * s * (1 + gate_value * (1 - s));
+    }
+
+    pub fn backwardAVec(gate_vec: simd.Vf32, up_vec: simd.Vf32, y: simd.Vf32, grad_y: simd.Vf32, extra: void) simd.Vf32 {
+        _ = y;
+        _ = extra;
+        const one: simd.Vf32 = @splat(1);
+        const s = simd.sigmoidVec(gate_vec);
+        return grad_y * up_vec * s * (one + gate_vec * (one - s));
+    }
+
+    pub fn backwardB(gate_value: f32, up_value: f32, y: f32, grad_y: f32, extra: void) f32 {
+        _ = up_value;
+        _ = y;
+        _ = extra;
+        const s = 1 / (1 + @exp(-gate_value));
+        return grad_y * gate_value * s;
+    }
+
+    pub fn backwardBVec(gate_vec: simd.Vf32, up_vec: simd.Vf32, y: simd.Vf32, grad_y: simd.Vf32, extra: void) simd.Vf32 {
+        _ = up_vec;
+        _ = y;
+        _ = extra;
+        return grad_y * gate_vec * simd.sigmoidVec(gate_vec);
+    }
+};
+
 fn forwardLoss(ctx: *ExecContext, model: *const Model, input_ids: []const usize, labels: []const usize) !Tensor(.{}) {
     var x = try model.wte.gather(ctx, .vocab, input_ids, .seq);
     for (0..n_layer) |i| {
@@ -119,9 +172,13 @@ fn forwardLoss(ctx: *ExecContext, model: *const Model, input_ids: []const usize,
         x = try x.add(ctx, &attn_out);
 
         var m = try x.rmsNorm(ctx, .d, rms_eps);
-        var gate = try (try m.dot(ctx, &l.w_gate, .d)).unary(ctx, .silu);
-        var up = try m.dot(ctx, &l.w_up, .d);
-        var gated = try gate.mul(ctx, &up);
+        var gate = try m.dot(ctx, &l.w_gate, .d);
+        const up = try m.dot(ctx, &l.w_up, .d);
+        var gated = if (composed_swiglu) blk: {
+            var silu_out = try gate.unary(ctx, .silu);
+            var up_var = up;
+            break :blk try silu_out.mul(ctx, &up_var);
+        } else try gate.elementalBinary(ctx, up, SwigluOp, {});
         var mlp_out = try gated.dot(ctx, &l.w_down, .ff);
         x = try x.add(ctx, &mlp_out);
     }
@@ -139,6 +196,8 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, args[arg_i], "--dump") and arg_i + 1 < args.len) {
             arg_i += 1;
             dump_path = args[arg_i];
+        } else if (std.mem.eql(u8, args[arg_i], "--composed-swiglu")) {
+            composed_swiglu = true;
         } else if (std.mem.eql(u8, args[arg_i], "--steps") and arg_i + 1 < args.len) {
             arg_i += 1;
             timed_steps = try std.fmt.parseInt(usize, args[arg_i], 10);
