@@ -238,10 +238,11 @@ pub fn matmul2DIntoUncheckedPackedDenseRhsWithConfig(
         }
     }
     // Explicit packed-op decision table: GPU always wins; BLAS keeps its
-    // established all-dimensions>=16 cells; the packed microkernel owns the
-    // m<16 cliff and every no-BLAS cell.
+    // established all-dimensions>=16 cells EXCEPT the skinny-m tall-k band
+    // below, where the already-packed microkernel is faster than Accelerate;
+    // the packed microkernel also owns the m<16 cliff and every no-BLAS cell.
     if (comptime build_options.use_blas) {
-        if (shouldUseBlas(m, n, k)) {
+        if (shouldUseBlas(m, n, k) and !packedDenseKernelPreferred(m, k)) {
             blasGemm(
                 cblas_no_trans,
                 cblas_trans,
@@ -1490,6 +1491,17 @@ fn configureBlasThreads() void {
 
 fn fitsCblas(m: usize, n: usize, k: usize) bool {
     return m <= max_cblas_dim and n <= max_cblas_dim and k <= max_cblas_dim;
+}
+
+/// With an already-packed dense RHS, skinny-m tall-k cells run faster on the
+/// in-tree packed microkernel than through BLAS: measured on M1 Max
+/// (Accelerate) at k in {4800, 5120, 9600}, m=16 runs 1.8-2.1x BLAS and
+/// m=32 sits at parity-to-1.15x, while at k=64 (the wide-n unembed shape)
+/// BLAS wins from m=16 up — hence the k floor. Scoped to Accelerate: the
+/// OpenBLAS/x86 crossover is unmeasured.
+fn packedDenseKernelPreferred(m: usize, k: usize) bool {
+    if (comptime build_options.blas_kind != .accelerate) return false;
+    return m < 32 and k >= 4096;
 }
 
 fn shouldUseBlas(m: usize, n: usize, k: usize) bool {
