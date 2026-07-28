@@ -246,6 +246,18 @@ inline fn crumb16(q: QKV16u8, comptime lane: usize) QKV16i8 {
     return @bitCast((q >> shift) & @as(QKV16u8, @splat(3)));
 }
 
+/// Lane `lane`'s crumbs left IN PLACE at bit position 2*lane — one AND
+/// (lanes 0-2; their bytes stay <= 0x30, positive as i8) or one bare shift
+/// (lane 3: `q >> 6` needs no mask). Feeding sdot these bytes computes
+/// `4^lane * dot(crumbs, act)` exactly; the caller divides the BLOCK
+/// accumulator once with an arithmetic shift (exact — every term carries
+/// the same power-of-4 factor). Halves the extraction cost of `crumb16`.
+inline fn crumb16InPlace(q: QKV16u8, comptime lane: usize) QKV16i8 {
+    if (lane == 3) return @bitCast(q >> @as(@Vector(16, u3), @splat(6)));
+    const mask: u8 = 0x03 << (2 * lane);
+    return @bitCast(q & @as(QKV16u8, @splat(mask)));
+}
+
 inline fn crumb32(q: QKV32u8, comptime lane: usize) QKV32u8 {
     const shift: @Vector(32, u3) = @splat(2 * lane);
     return (q >> shift) & @as(QKV32u8, @splat(3));
@@ -271,7 +283,12 @@ inline fn blockBsumTotal(a: *const BlockQ8_K) i32 {
 /// 4-column tile and the width-1 tail take the same body.
 inline fn blockCodeDotW(comptime width: usize, w: [width]*const BlockTQ2_0, a: *const BlockQ8_K) [width]i32 {
     if (comptime builtin.cpu.arch == .aarch64) {
-        var acc: [width]QKV4i32 = @splat(@splat(0));
+        // In-place crumbs (see `crumb16InPlace`): lanes 0 and 3 carry no
+        // factor and share an accumulator; lanes 1 and 2 accumulate 4x and
+        // 16x the true dot and are divided once at the reduce — exact.
+        var acc0: [width]QKV4i32 = @splat(@splat(0));
+        var acc1: [width]QKV4i32 = @splat(@splat(0));
+        var acc2: [width]QKV4i32 = @splat(@splat(0));
         inline for ([_]usize{ 0, 32 }) |j| {
             var q0: [width]QKV16u8 = undefined;
             var q1: [width]QKV16u8 = undefined;
@@ -283,13 +300,23 @@ inline fn blockCodeDotW(comptime width: usize, w: [width]*const BlockTQ2_0, a: *
                 const a0: QKV16i8 = a.qs[j * 4 + lane * 32 ..][0..16].*;
                 const a1: QKV16i8 = a.qs[j * 4 + lane * 32 + 16 ..][0..16].*;
                 inline for (0..width) |ci| {
-                    acc[ci] = sdotI8x16(acc[ci], crumb16(q0[ci], lane), a0);
-                    acc[ci] = sdotI8x16(acc[ci], crumb16(q1[ci], lane), a1);
+                    const dst = switch (lane) {
+                        0, 3 => &acc0[ci],
+                        1 => &acc1[ci],
+                        else => &acc2[ci],
+                    };
+                    dst.* = sdotI8x16(dst.*, crumb16InPlace(q0[ci], lane), a0);
+                    dst.* = sdotI8x16(dst.*, crumb16InPlace(q1[ci], lane), a1);
                 }
             }
         }
         var out: [width]i32 = undefined;
-        inline for (0..width) |ci| out[ci] = @reduce(.Add, acc[ci]);
+        inline for (0..width) |ci| {
+            const total = acc0[ci] +
+                (acc1[ci] >> @as(QKV4i32, @splat(2))) +
+                (acc2[ci] >> @as(QKV4i32, @splat(4)));
+            out[ci] = @reduce(.Add, total);
+        }
         return out;
     }
     var acc: [width]QKV8i32 = @splat(@splat(0));
@@ -508,10 +535,16 @@ inline fn x4BlockDot(w: *const BlockTQ2_0x4, a: *const BlockQ8_K) QKV4i32 {
                 const a0: QKV16i8 = a.qs[h + lane * 32 ..][0..16].*;
                 const a1: QKV16i8 = a.qs[h + lane * 32 + 16 ..][0..16].*;
                 inline for (0..4) |fg| {
-                    accs[lane] = sdotI8x16Lane(fg, accs[lane], crumb16(wv[fg], lane), a0);
-                    accs[lane] = sdotI8x16Lane(fg, accs[lane], crumb16(wv[fg + 4], lane), a1);
+                    accs[lane] = sdotI8x16Lane(fg, accs[lane], crumb16InPlace(wv[fg], lane), a0);
+                    accs[lane] = sdotI8x16Lane(fg, accs[lane], crumb16InPlace(wv[fg + 4], lane), a1);
                 }
             }
+        }
+        // Undo the in-place crumbs' 4^lane factor (exact: arithmetic shift
+        // of a sum in which every term is divisible by 4^lane). Lane 3's
+        // bare `>> 6` already yields plain crumbs — no factor to undo.
+        inline for (1..3) |lane| {
+            accs[lane] = accs[lane] >> @as(QKV4i32, @splat(2 * lane));
         }
         return (accs[0] + accs[1]) + (accs[2] + accs[3]);
     }
