@@ -1286,6 +1286,8 @@ fn accumulateQ4_Kx8Q8_Kx4Aarch64(lhs: *const BlockQ8_Kx4, rhs: *const BlockQ4_Kx
         row_dmin0[row] = rhs_dmin0 * lhs_d;
         row_dmin1[row] = rhs_dmin1 * lhs_d;
     }
+    var iscale0: [4]QKV4i32 = .{ @splat(0), @splat(0), @splat(0), @splat(0) };
+    var iscale1: [4]QKV4i32 = .{ @splat(0), @splat(0), @splat(0), @splat(0) };
     var bias0: [4]QKV4i32 = .{ @splat(0), @splat(0), @splat(0), @splat(0) };
     var bias1: [4]QKV4i32 = .{ @splat(0), @splat(0), @splat(0), @splat(0) };
 
@@ -1335,18 +1337,18 @@ fn accumulateQ4_Kx8Q8_Kx4Aarch64(lhs: *const BlockQ8_Kx4, rhs: *const BlockQ4_Kx
                 @as(i32, lhs.bsums[(odd_bsum0 / 4) * 16 + row * 4 + odd_bsum0 % 4]) +
                     @as(i32, lhs.bsums[((odd_bsum0 + 1) / 4) * 16 + row * 4 + (odd_bsum0 + 1) % 4]),
             );
-            const sum0 = dot_even0[row] * even_scales0 + dot_odd0[row] * odd_scales0;
-            const sum1 = dot_even1[row] * even_scales1 + dot_odd1[row] * odd_scales1;
-            acc[row][0] += @as(QKV4f32, @floatFromInt(sum0)) * row_d0[row];
-            acc[row][1] += @as(QKV4f32, @floatFromInt(sum1)) * row_d1[row];
+            iscale0[row] += dot_even0[row] * even_scales0 + dot_odd0[row] * odd_scales0;
+            iscale1[row] += dot_even1[row] * even_scales1 + dot_odd1[row] * odd_scales1;
             bias0[row] += even_bsum * even_mins0 + odd_bsum * odd_mins0;
             bias1[row] += even_bsum * even_mins1 + odd_bsum * odd_mins1;
         }
     }
 
     inline for (0..4) |row| {
-        acc[row][0] -= @as(QKV4f32, @floatFromInt(bias0[row])) * row_dmin0[row];
-        acc[row][1] -= @as(QKV4f32, @floatFromInt(bias1[row])) * row_dmin1[row];
+        acc[row][0] += @as(QKV4f32, @floatFromInt(iscale0[row])) * row_d0[row] -
+            @as(QKV4f32, @floatFromInt(bias0[row])) * row_dmin0[row];
+        acc[row][1] += @as(QKV4f32, @floatFromInt(iscale1[row])) * row_d1[row] -
+            @as(QKV4f32, @floatFromInt(bias1[row])) * row_dmin1[row];
     }
 }
 
@@ -1356,6 +1358,14 @@ fn accumulateQ4_Kx8Aarch64(lhs: *const BlockQ8_K, rhs: *const BlockQ4_Kx8, acc: 
     const dmin0 = q4Kx8D(rhs.dmin, 0) * @as(QKV4f32, @splat(lhs.d));
     const dmin1 = q4Kx8D(rhs.dmin, 1) * @as(QKV4f32, @splat(lhs.d));
 
+    // scale*dot and min*bsum accumulate in i32 across all 8 subblocks with
+    // ONE f32 application per block — the same association as the compact
+    // dotQ4_KQ8_K, so the two layouts are bit-identical (the decode-route
+    // contract; bounds ≈ 31M per the compact kernel's comment, i32-safe).
+    var iscale0: QKV4i32 = @splat(0);
+    var iscale1: QKV4i32 = @splat(0);
+    var imin0: QKV4i32 = @splat(0);
+    var imin1: QKV4i32 = @splat(0);
     inline for (0..4) |pair| {
         const even_subblock = pair * 2;
         const odd_subblock = even_subblock + 1;
@@ -1387,15 +1397,14 @@ fn accumulateQ4_Kx8Aarch64(lhs: *const BlockQ8_K, rhs: *const BlockQ4_Kx8, acc: 
         const odd_mins1 = q4Kx8Scales(&rhs.mins, odd_subblock, 1);
         const even_bsum: QKV4i32 = @splat(@as(i32, lhs.bsums[even_subblock * 2]) + @as(i32, lhs.bsums[even_subblock * 2 + 1]));
         const odd_bsum: QKV4i32 = @splat(@as(i32, lhs.bsums[odd_subblock * 2]) + @as(i32, lhs.bsums[odd_subblock * 2 + 1]));
-        acc[0] += @as(QKV4f32, @floatFromInt(dot_even0 * even_scales0)) * d0 -
-            @as(QKV4f32, @floatFromInt(even_bsum * even_mins0)) * dmin0;
-        acc[1] += @as(QKV4f32, @floatFromInt(dot_even1 * even_scales1)) * d1 -
-            @as(QKV4f32, @floatFromInt(even_bsum * even_mins1)) * dmin1;
-        acc[0] += @as(QKV4f32, @floatFromInt(dot_odd0 * odd_scales0)) * d0 -
-            @as(QKV4f32, @floatFromInt(odd_bsum * odd_mins0)) * dmin0;
-        acc[1] += @as(QKV4f32, @floatFromInt(dot_odd1 * odd_scales1)) * d1 -
-            @as(QKV4f32, @floatFromInt(odd_bsum * odd_mins1)) * dmin1;
+        iscale0 += dot_even0 * even_scales0 + dot_odd0 * odd_scales0;
+        iscale1 += dot_even1 * even_scales1 + dot_odd1 * odd_scales1;
+        imin0 += even_bsum * even_mins0 + odd_bsum * odd_mins0;
+        imin1 += even_bsum * even_mins1 + odd_bsum * odd_mins1;
     }
+
+    acc[0] += @as(QKV4f32, @floatFromInt(iscale0)) * d0 - @as(QKV4f32, @floatFromInt(imin0)) * dmin0;
+    acc[1] += @as(QKV4f32, @floatFromInt(iscale1)) * d1 - @as(QKV4f32, @floatFromInt(imin1)) * dmin1;
 }
 
 fn accumulateQ4_Kx8RowsAarch64(
@@ -1422,6 +1431,11 @@ fn accumulateQ4_Kx8RowsAarch64(
         row_dmin0[r] = rhs_dmin0 * lhs_d;
         row_dmin1[r] = rhs_dmin1 * lhs_d;
     }
+
+    var iscale0: [q4_kx8_row_block]QKV4i32 = @splat(@splat(0));
+    var iscale1: [q4_kx8_row_block]QKV4i32 = @splat(@splat(0));
+    var imin0: [q4_kx8_row_block]QKV4i32 = @splat(@splat(0));
+    var imin1: [q4_kx8_row_block]QKV4i32 = @splat(@splat(0));
 
     inline for (0..4) |pair| {
         const even_subblock = pair * 2;
@@ -1528,15 +1542,18 @@ fn accumulateQ4_Kx8RowsAarch64(
 
             const even_bsum: QKV4i32 = @splat(@as(i32, lhs.bsums[even_subblock * 2]) + @as(i32, lhs.bsums[even_subblock * 2 + 1]));
             const odd_bsum: QKV4i32 = @splat(@as(i32, lhs.bsums[odd_subblock * 2]) + @as(i32, lhs.bsums[odd_subblock * 2 + 1]));
-            acc[r][0] += @as(QKV4f32, @floatFromInt(dot_even0 * even_scales0)) * row_d0[r] -
-                @as(QKV4f32, @floatFromInt(even_bsum * even_mins0)) * row_dmin0[r];
-            acc[r][1] += @as(QKV4f32, @floatFromInt(dot_even1 * even_scales1)) * row_d1[r] -
-                @as(QKV4f32, @floatFromInt(even_bsum * even_mins1)) * row_dmin1[r];
-            acc[r][0] += @as(QKV4f32, @floatFromInt(dot_odd0 * odd_scales0)) * row_d0[r] -
-                @as(QKV4f32, @floatFromInt(odd_bsum * odd_mins0)) * row_dmin0[r];
-            acc[r][1] += @as(QKV4f32, @floatFromInt(dot_odd1 * odd_scales1)) * row_d1[r] -
-                @as(QKV4f32, @floatFromInt(odd_bsum * odd_mins1)) * row_dmin1[r];
+            iscale0[r] += dot_even0 * even_scales0 + dot_odd0 * odd_scales0;
+            iscale1[r] += dot_even1 * even_scales1 + dot_odd1 * odd_scales1;
+            imin0[r] += even_bsum * even_mins0 + odd_bsum * odd_mins0;
+            imin1[r] += even_bsum * even_mins1 + odd_bsum * odd_mins1;
         }
+    }
+
+    inline for (0..q4_kx8_row_block) |r| {
+        acc[r][0] += @as(QKV4f32, @floatFromInt(iscale0[r])) * row_d0[r] -
+            @as(QKV4f32, @floatFromInt(imin0[r])) * row_dmin0[r];
+        acc[r][1] += @as(QKV4f32, @floatFromInt(iscale1[r])) * row_d1[r] -
+            @as(QKV4f32, @floatFromInt(imin1[r])) * row_dmin1[r];
     }
 }
 
@@ -1547,6 +1564,10 @@ pub fn accumulateQ4_Kx8Scalar(lhs: *const BlockQ8_K, rhs: *const BlockQ4_Kx8, ac
     const dmin0 = q4Kx8D(rhs.dmin, 0) * @as(QKV4f32, @splat(lhs.d));
     const dmin1 = q4Kx8D(rhs.dmin, 1) * @as(QKV4f32, @splat(lhs.d));
 
+    var iscale0: QKV4i32 = @splat(0);
+    var iscale1: QKV4i32 = @splat(0);
+    var imin0: QKV4i32 = @splat(0);
+    var imin1: QKV4i32 = @splat(0);
     inline for (0..4) |pair| {
         const even_subblock = pair * 2;
         const odd_subblock = even_subblock + 1;
@@ -1578,15 +1599,14 @@ pub fn accumulateQ4_Kx8Scalar(lhs: *const BlockQ8_K, rhs: *const BlockQ4_Kx8, ac
         const odd_mins1 = q4Kx8Scales(&rhs.mins, odd_subblock, 1);
         const even_bsum: QKV4i32 = @splat(@as(i32, lhs.bsums[even_subblock * 2]) + @as(i32, lhs.bsums[even_subblock * 2 + 1]));
         const odd_bsum: QKV4i32 = @splat(@as(i32, lhs.bsums[odd_subblock * 2]) + @as(i32, lhs.bsums[odd_subblock * 2 + 1]));
-        acc[0] += @as(QKV4f32, @floatFromInt(dot_even0 * even_scales0)) * d0 -
-            @as(QKV4f32, @floatFromInt(even_bsum * even_mins0)) * dmin0;
-        acc[1] += @as(QKV4f32, @floatFromInt(dot_even1 * even_scales1)) * d1 -
-            @as(QKV4f32, @floatFromInt(even_bsum * even_mins1)) * dmin1;
-        acc[0] += @as(QKV4f32, @floatFromInt(dot_odd0 * odd_scales0)) * d0 -
-            @as(QKV4f32, @floatFromInt(odd_bsum * odd_mins0)) * dmin0;
-        acc[1] += @as(QKV4f32, @floatFromInt(dot_odd1 * odd_scales1)) * d1 -
-            @as(QKV4f32, @floatFromInt(odd_bsum * odd_mins1)) * dmin1;
+        iscale0 += dot_even0 * even_scales0 + dot_odd0 * odd_scales0;
+        iscale1 += dot_even1 * even_scales1 + dot_odd1 * odd_scales1;
+        imin0 += even_bsum * even_mins0 + odd_bsum * odd_mins0;
+        imin1 += even_bsum * even_mins1 + odd_bsum * odd_mins1;
     }
+
+    acc[0] += @as(QKV4f32, @floatFromInt(iscale0)) * d0 - @as(QKV4f32, @floatFromInt(imin0)) * dmin0;
+    acc[1] += @as(QKV4f32, @floatFromInt(iscale1)) * d1 - @as(QKV4f32, @floatFromInt(imin1)) * dmin1;
 }
 
 // --- x86 / portable-SIMD arms of the packed Q4_K accumulates -----------------
@@ -1716,6 +1736,10 @@ fn accumulateQ4_Kx8X86(comptime tier: Q4DotTier, lhs: *const BlockQ8_K, rhs: *co
     const dmin0 = q4Kx8D(rhs.dmin, 0) * @as(QKV4f32, @splat(lhs.d));
     const dmin1 = q4Kx8D(rhs.dmin, 1) * @as(QKV4f32, @splat(lhs.d));
 
+    var iscale0: QKV4i32 = @splat(0);
+    var iscale1: QKV4i32 = @splat(0);
+    var imin0: QKV4i32 = @splat(0);
+    var imin1: QKV4i32 = @splat(0);
     inline for (0..4) |pair| {
         const even_subblock = pair * 2;
         const odd_subblock = even_subblock + 1;
@@ -1747,15 +1771,14 @@ fn accumulateQ4_Kx8X86(comptime tier: Q4DotTier, lhs: *const BlockQ8_K, rhs: *co
         const odd_mins1 = q4Kx8Scales(&rhs.mins, odd_subblock, 1);
         const even_bsum: QKV4i32 = @splat(@as(i32, lhs.bsums[even_subblock * 2]) + @as(i32, lhs.bsums[even_subblock * 2 + 1]));
         const odd_bsum: QKV4i32 = @splat(@as(i32, lhs.bsums[odd_subblock * 2]) + @as(i32, lhs.bsums[odd_subblock * 2 + 1]));
-        acc[0] += @as(QKV4f32, @floatFromInt(dot_even0 * even_scales0)) * d0 -
-            @as(QKV4f32, @floatFromInt(even_bsum * even_mins0)) * dmin0;
-        acc[1] += @as(QKV4f32, @floatFromInt(dot_even1 * even_scales1)) * d1 -
-            @as(QKV4f32, @floatFromInt(even_bsum * even_mins1)) * dmin1;
-        acc[0] += @as(QKV4f32, @floatFromInt(dot_odd0 * odd_scales0)) * d0 -
-            @as(QKV4f32, @floatFromInt(odd_bsum * odd_mins0)) * dmin0;
-        acc[1] += @as(QKV4f32, @floatFromInt(dot_odd1 * odd_scales1)) * d1 -
-            @as(QKV4f32, @floatFromInt(odd_bsum * odd_mins1)) * dmin1;
+        iscale0 += dot_even0 * even_scales0 + dot_odd0 * odd_scales0;
+        iscale1 += dot_even1 * even_scales1 + dot_odd1 * odd_scales1;
+        imin0 += even_bsum * even_mins0 + odd_bsum * odd_mins0;
+        imin1 += even_bsum * even_mins1 + odd_bsum * odd_mins1;
     }
+
+    acc[0] += @as(QKV4f32, @floatFromInt(iscale0)) * d0 - @as(QKV4f32, @floatFromInt(imin0)) * dmin0;
+    acc[1] += @as(QKV4f32, @floatFromInt(iscale1)) * d1 - @as(QKV4f32, @floatFromInt(imin1)) * dmin1;
 }
 
 pub fn accumulateQ4_Kx8Q8_Kx4Vnni(lhs: *const BlockQ8_Kx4, rhs: *const BlockQ4_Kx8, acc: *[4][2]QKV4f32) void {
@@ -1787,6 +1810,8 @@ fn accumulateQ4_Kx8Q8_Kx4X86(comptime tier: Q4DotTier, lhs: *const BlockQ8_Kx4, 
         row_dmin0[row] = rhs_dmin0 * lhs_d;
         row_dmin1[row] = rhs_dmin1 * lhs_d;
     }
+    var iscale0: [4]QKV4i32 = .{ @splat(0), @splat(0), @splat(0), @splat(0) };
+    var iscale1: [4]QKV4i32 = .{ @splat(0), @splat(0), @splat(0), @splat(0) };
     var bias0: [4]QKV4i32 = .{ @splat(0), @splat(0), @splat(0), @splat(0) };
     var bias1: [4]QKV4i32 = .{ @splat(0), @splat(0), @splat(0), @splat(0) };
 
@@ -1828,18 +1853,18 @@ fn accumulateQ4_Kx8Q8_Kx4X86(comptime tier: Q4DotTier, lhs: *const BlockQ8_Kx4, 
                 @as(i32, lhs.bsums[(odd_bsum0 / 4) * 16 + row * 4 + odd_bsum0 % 4]) +
                     @as(i32, lhs.bsums[((odd_bsum0 + 1) / 4) * 16 + row * 4 + (odd_bsum0 + 1) % 4]),
             );
-            const sum0 = lowHalfI32x8(sum_even[row]) * even_scales0 + lowHalfI32x8(sum_odd[row]) * odd_scales0;
-            const sum1 = highHalfI32x8(sum_even[row]) * even_scales1 + highHalfI32x8(sum_odd[row]) * odd_scales1;
-            acc[row][0] += @as(QKV4f32, @floatFromInt(sum0)) * row_d0[row];
-            acc[row][1] += @as(QKV4f32, @floatFromInt(sum1)) * row_d1[row];
+            iscale0[row] += lowHalfI32x8(sum_even[row]) * even_scales0 + lowHalfI32x8(sum_odd[row]) * odd_scales0;
+            iscale1[row] += highHalfI32x8(sum_even[row]) * even_scales1 + highHalfI32x8(sum_odd[row]) * odd_scales1;
             bias0[row] += even_bsum * even_mins0 + odd_bsum * odd_mins0;
             bias1[row] += even_bsum * even_mins1 + odd_bsum * odd_mins1;
         }
     }
 
     inline for (0..4) |row| {
-        acc[row][0] -= @as(QKV4f32, @floatFromInt(bias0[row])) * row_dmin0[row];
-        acc[row][1] -= @as(QKV4f32, @floatFromInt(bias1[row])) * row_dmin1[row];
+        acc[row][0] += @as(QKV4f32, @floatFromInt(iscale0[row])) * row_d0[row] -
+            @as(QKV4f32, @floatFromInt(bias0[row])) * row_dmin0[row];
+        acc[row][1] += @as(QKV4f32, @floatFromInt(iscale1[row])) * row_d1[row] -
+            @as(QKV4f32, @floatFromInt(bias1[row])) * row_dmin1[row];
     }
 }
 
@@ -1861,6 +1886,8 @@ pub fn accumulateQ4_Kx8Q8_Kx4Scalar(lhs: *const BlockQ8_Kx4, rhs: *const BlockQ4
         row_dmin0[row] = rhs_dmin0 * lhs_d;
         row_dmin1[row] = rhs_dmin1 * lhs_d;
     }
+    var iscale0: [4]QKV4i32 = .{ @splat(0), @splat(0), @splat(0), @splat(0) };
+    var iscale1: [4]QKV4i32 = .{ @splat(0), @splat(0), @splat(0), @splat(0) };
     var bias0: [4]QKV4i32 = .{ @splat(0), @splat(0), @splat(0), @splat(0) };
     var bias1: [4]QKV4i32 = .{ @splat(0), @splat(0), @splat(0), @splat(0) };
 
@@ -1909,18 +1936,18 @@ pub fn accumulateQ4_Kx8Q8_Kx4Scalar(lhs: *const BlockQ8_Kx4, rhs: *const BlockQ4
                 @as(i32, lhs.bsums[(odd_bsum0 / 4) * 16 + row * 4 + odd_bsum0 % 4]) +
                     @as(i32, lhs.bsums[((odd_bsum0 + 1) / 4) * 16 + row * 4 + (odd_bsum0 + 1) % 4]),
             );
-            const sum0 = @as(QKV4i32, dot_even0[row]) * even_scales0 + @as(QKV4i32, dot_odd0[row]) * odd_scales0;
-            const sum1 = @as(QKV4i32, dot_even1[row]) * even_scales1 + @as(QKV4i32, dot_odd1[row]) * odd_scales1;
-            acc[row][0] += @as(QKV4f32, @floatFromInt(sum0)) * row_d0[row];
-            acc[row][1] += @as(QKV4f32, @floatFromInt(sum1)) * row_d1[row];
+            iscale0[row] += @as(QKV4i32, dot_even0[row]) * even_scales0 + @as(QKV4i32, dot_odd0[row]) * odd_scales0;
+            iscale1[row] += @as(QKV4i32, dot_even1[row]) * even_scales1 + @as(QKV4i32, dot_odd1[row]) * odd_scales1;
             bias0[row] += even_bsum * even_mins0 + odd_bsum * odd_mins0;
             bias1[row] += even_bsum * even_mins1 + odd_bsum * odd_mins1;
         }
     }
 
     inline for (0..4) |row| {
-        acc[row][0] -= @as(QKV4f32, @floatFromInt(bias0[row])) * row_dmin0[row];
-        acc[row][1] -= @as(QKV4f32, @floatFromInt(bias1[row])) * row_dmin1[row];
+        acc[row][0] += @as(QKV4f32, @floatFromInt(iscale0[row])) * row_d0[row] -
+            @as(QKV4f32, @floatFromInt(bias0[row])) * row_dmin0[row];
+        acc[row][1] += @as(QKV4f32, @floatFromInt(iscale1[row])) * row_d1[row] -
+            @as(QKV4f32, @floatFromInt(bias1[row])) * row_dmin1[row];
     }
 }
 

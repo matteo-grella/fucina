@@ -1808,6 +1808,32 @@ pub fn linearSeqQ8_0(
     return input.dotPacked(ctx, &weight.packed_rhs, in_tag, out_tag);
 }
 
+/// Q4_K decode-route gate, the Q5_K gate's sibling: at decode shapes (m < 4)
+/// the dense Q4_K matmul is a DRAM-bound GEMV, and the byte-expanded packed
+/// layout (BlockQ4_Kx8, 276 B per 256-weight block per column = 8.625 bpw)
+/// streams 1.92x the bytes of the GGUF-native compact blocks already
+/// resident in `weight.value` (144 B = 4.5 bpw). Routing decode through the
+/// compact tensor-RHS path is bitwise-equal to the x8 packed family (same
+/// Q8_K LHS quantization, same order-independent i32 integer stage, same f32
+/// epilogue association — proven by the cross-layout test in q4_k_tests.zig)
+/// and wins where bandwidth is the limit: default ON. Runtime overrides:
+/// FUCINA_Q4K_DECODE_COMPACT=1 forces on, FUCINA_NO_Q4K_DECODE_COMPACT=1
+/// forces off (the A/B and emergency-revert switches). Read once, cached.
+const q4k_decode_compact_default_on = true;
+var q4k_decode_compact_state = std.atomic.Value(u8).init(0); // 0 = unread, 1 = enabled, 2 = disabled
+fn q4kDecodeCompactEnabled() bool {
+    const s = q4k_decode_compact_state.load(.acquire);
+    if (s != 0) return s == 1;
+    const on = if (fucina.parallel.envPositiveUsize("FUCINA_NO_Q4K_DECODE_COMPACT") != null)
+        false
+    else if (fucina.parallel.envPositiveUsize("FUCINA_Q4K_DECODE_COMPACT") != null)
+        true
+    else
+        q4k_decode_compact_default_on;
+    q4k_decode_compact_state.store(if (on) 1 else 2, .release);
+    return on;
+}
+
 pub fn linearSeqQ4_K(
     weight: *const WeightQ4_K,
     ctx: *ExecContext,
@@ -1816,6 +1842,15 @@ pub fn linearSeqQ4_K(
     comptime out_tag: Tag,
 ) !fucina.Tensor(.{ .seq, out_tag }) {
     if (try denseQuantGpuTry(.q4_k, weight, ctx, input, in_tag, out_tag)) |r| return r;
+    // Decode shapes: contract against the resident GGUF-native compact blocks
+    // (`weight.value`) — bitwise-equal outputs, ~1.92x fewer weight bytes
+    // streamed (see the gate comment above). Grad inputs keep the packed
+    // path's explicit GradientQuantizedMatmulUnsupported error.
+    if (input.dim(.seq) < 4 and !input.requiresGrad() and q4kDecodeCompactEnabled()) {
+        var tagged = try weight.value.withTags(ctx, .{ out_tag, in_tag });
+        defer tagged.deinit();
+        return input.dot(ctx, &tagged, in_tag);
+    }
     return input.dotPacked(ctx, &weight.packed_rhs, in_tag, out_tag);
 }
 

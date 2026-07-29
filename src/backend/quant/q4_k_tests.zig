@@ -848,3 +848,49 @@ test "q4_k 4-row lane dot SIMD arms match the scalar reference" {
         }
     }
 }
+
+test "Q4_K compact-vs-packed cross-layout matmul is bit-identical at decode shapes (m=1,2,3)" {
+    // The decode-route proof (weights.linearSeqQ4_K m<4 gate): the compact
+    // GGUF-native kernel family (matmulQ4_KRhsRange over BlockQ4_K, 4.5 bpw)
+    // and the byte-expanded packed family (matmulQ4_Kx8RhsRange over
+    // BlockQ4_Kx8, 8.625 bpw) must agree BITWISE on the same blocks and the
+    // same quantized activations: both compute exact order-independent i32
+    // subblock sums (iscale = sum scale*dot, imin = sum min*bsum) and both
+    // apply the identical f32 epilogue association per block —
+    // float(iscale)*(d_w*a.d) - float(imin)*(dmin_w*a.d), accumulated in
+    // ascending block order — so no tolerance is needed on any host.
+    const allocator = std.testing.allocator;
+    const k = 512;
+    const n = 16; // x8-multiple (packed-layout requirement); two column groups
+    const bpc = k / qk_k_block_size;
+
+    var prng = std.Random.DefaultPrng.init(0x4a52c90de13fb864);
+    const random = prng.random();
+
+    const blocks = try allocator.alloc(BlockQ4_K, n * bpc);
+    defer allocator.free(blocks);
+    for (blocks) |*b| fillRandomBlockQ4_K(b, random);
+
+    var rhs_plain = try quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, blocks);
+    defer rhs_plain.deinit();
+    var rhs_packed = try q4_k.packMatmulRhsQ4_Kx8(allocator, blocks, n, k, bpc);
+    defer rhs_packed.deinit();
+
+    inline for ([_]usize{ 1, 2, 3 }) |m| {
+        const lhs_vals = try allocator.alloc(f32, m * k);
+        defer allocator.free(lhs_vals);
+        for (lhs_vals) |*v| v.* = (random.float(f32) - 0.5) * 8.0;
+        var dense = try Tensor.fromSlice(allocator, &.{ m, k }, lhs_vals);
+        defer dense.deinit();
+        const qlhs = try qm.quantizeRowsQ8_K(allocator, &dense);
+        defer allocator.free(qlhs);
+
+        const out_compact = try allocator.alloc(f32, m * n);
+        defer allocator.free(out_compact);
+        const out_packed = try allocator.alloc(f32, m * n);
+        defer allocator.free(out_packed);
+        matmulQ4_KRhsRange(out_compact, qlhs, &rhs_plain, m, n, 0, m);
+        matmulQ4_Kx8RhsRange(out_packed, qlhs, &rhs_packed, m, n, 0, m);
+        try std.testing.expectEqualSlices(f32, out_packed, out_compact);
+    }
+}
