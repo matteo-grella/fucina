@@ -1323,6 +1323,32 @@ pub fn matmul2DIntoUncheckedWithConfig(
     }
 }
 
+/// C += A·B, the accumulate twin of the plain matmul above.
+pub fn matmul2DAccIntoUncheckedWithConfig(
+    out: *Tensor,
+    a: *const Tensor,
+    b: *const Tensor,
+    m: usize,
+    n: usize,
+    k: usize,
+    config: ParallelConfig,
+) void {
+    _ = config;
+    const ad = contiguousDataConst(a, m * k);
+    const bd = contiguousDataConst(b, k * n);
+    const cd = contiguousData(out, m * n);
+
+    for (0..m) |i| {
+        for (0..n) |j| {
+            var acc: f32 = 0;
+            for (0..k) |p| {
+                acc += ad[i * k + p] * bd[p * n + j];
+            }
+            cd[i * n + j] += acc;
+        }
+    }
+}
+
 pub fn matmul2DIntoUncheckedTypedWithConfig(
     comptime dtype: DType,
     out: *tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)),

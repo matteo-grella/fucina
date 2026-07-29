@@ -681,6 +681,86 @@ test "public splitSwiGlu packed Q8_0x4 RHS dot matches unfused path" {
     }
 }
 
+test "public addDot matches dot + add in values and gradients" {
+    // Values: bit-exact on the vector accumulate kernels (k below the BLAS
+    // floor); the BLAS beta=1 shape pins to a relative tolerance (any two
+    // BLAS entry points may differ in the last ulp). Gradients: bit-exact on
+    // both shapes — the base branch is the seed itself, and the operand
+    // branches run the identical einsum contractions the composed pair runs.
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const Base = Tensor(.{ .row, .col });
+    const Left = Tensor(.{ .row, .inner });
+    const Right = Tensor(.{ .inner, .col });
+
+    inline for (.{ .{ 13, 17, 9, true }, .{ 32, 32, 32, false } }) |case| {
+        const m = case[0];
+        const n = case[1];
+        const k = case[2];
+        const exact_values = case[3];
+
+        const base_values = try allocator.alloc(f32, m * n);
+        defer allocator.free(base_values);
+        const left_values = try allocator.alloc(f32, m * k);
+        defer allocator.free(left_values);
+        const right_values = try allocator.alloc(f32, k * n);
+        defer allocator.free(right_values);
+        for (base_values, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 7) % 19)) - 9)) * 0.25;
+        for (left_values, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast(i % 11)) - 5)) * 0.125;
+        for (right_values, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 3) % 13)) - 6)) * 0.0625;
+
+        // Composed reference: dot then add, its own variables.
+        var base_ref = try Base.variableFromSlice(&ctx, .{ m, n }, base_values);
+        defer base_ref.deinit();
+        var left_ref = try Left.variableFromSlice(&ctx, .{ m, k }, left_values);
+        defer left_ref.deinit();
+        var right_ref = try Right.variableFromSlice(&ctx, .{ k, n }, right_values);
+        defer right_ref.deinit();
+        var product = try left_ref.dot(&ctx, &right_ref, .inner);
+        defer product.deinit();
+        var expected = try base_ref.add(&ctx, &product);
+        defer expected.deinit();
+        var expected_loss = try expected.sumAll(&ctx);
+        defer expected_loss.deinit();
+        try expected_loss.backward(&ctx);
+
+        // Fused addDot on fresh variables.
+        var base_f = try Base.variableFromSlice(&ctx, .{ m, n }, base_values);
+        defer base_f.deinit();
+        var left_f = try Left.variableFromSlice(&ctx, .{ m, k }, left_values);
+        defer left_f.deinit();
+        var right_f = try Right.variableFromSlice(&ctx, .{ k, n }, right_values);
+        defer right_f.deinit();
+        var fused = try base_f.addDot(&ctx, left_f, right_f, .inner);
+        defer fused.deinit();
+        var fused_loss = try fused.sumAll(&ctx);
+        defer fused_loss.deinit();
+        try fused_loss.backward(&ctx);
+
+        for (expected.asRawTensor().dataConst(), fused.asRawTensor().dataConst()) |e, actual| {
+            if (exact_values) {
+                try std.testing.expectEqual(e, actual);
+            } else {
+                try std.testing.expectApproxEqRel(e, actual, 1e-5);
+            }
+        }
+
+        inline for (.{ .{ &base_ref, &base_f }, .{ &left_ref, &left_f }, .{ &right_ref, &right_f } }) |pair| {
+            var g_ref = (try pair[0].grad(&ctx)).?;
+            defer g_ref.deinit();
+            var g_fused = (try pair[1].grad(&ctx)).?;
+            defer g_fused.deinit();
+            try std.testing.expectEqualSlices(f32, g_ref.asRawTensor().dataConst(), g_fused.asRawTensor().dataConst());
+        }
+    }
+}
+
 test "public rmsNormMul packed RHS dot matches the unfused pair" {
     // rmsNormMulDotPacked normalizes into task-private scratch with the
     // exact kernels the unfused rmsNormMul dispatch uses (rows kernel /

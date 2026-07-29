@@ -40,6 +40,10 @@ const default_timed_steps: usize = 10;
 /// elemental op — the fusion A/B lever.
 var composed_swiglu: bool = false;
 
+/// --composed-residual: the two-op dot + add residual instead of the fused
+/// addDot (beta=1 GEMM) — the epilogue A/B lever.
+var composed_residual: bool = false;
+
 /// --inference: eval-mode forward only (fucina.noGrad — no graph nodes, no
 /// backward, no optimizer), the loss scalar as the cross-framework value pin.
 var inference_mode: bool = false;
@@ -191,9 +195,11 @@ fn forwardLoss(ctx: *ExecContext, model: *const Model, input_ids: []const usize,
         defer k.deinit();
         var y = try q.groupedAttention(ctx, &k, &v, &model.kv_map, .attn, attn_scale, .{});
         defer y.deinit();
-        var attn_out = try y.dot(ctx, &l.c_proj, .attn);
-        defer attn_out.deinit();
-        var x_attn = try x.add(ctx, &attn_out);
+        var x_attn = if (composed_residual) blk: {
+            var attn_out = try y.dot(ctx, &l.c_proj, .attn);
+            defer attn_out.deinit();
+            break :blk try x.add(ctx, &attn_out);
+        } else try x.addDot(ctx, y, l.c_proj, .attn);
         x.deinit();
 
         var m = try x_attn.rmsNorm(ctx, .d, rms_eps);
@@ -208,9 +214,11 @@ fn forwardLoss(ctx: *ExecContext, model: *const Model, input_ids: []const usize,
             break :blk try silu_out.mul(ctx, &up);
         } else try gate.elementalBinary(ctx, up, SwigluOp, {});
         defer gated.deinit();
-        var mlp_out = try gated.dot(ctx, &l.w_down, .ff);
-        defer mlp_out.deinit();
-        x = try x_attn.add(ctx, &mlp_out);
+        x = if (composed_residual) blk: {
+            var mlp_out = try gated.dot(ctx, &l.w_down, .ff);
+            defer mlp_out.deinit();
+            break :blk try x_attn.add(ctx, &mlp_out);
+        } else try x_attn.addDot(ctx, gated, l.w_down, .ff);
         x_attn.deinit();
     }
     var x_norm = try x.rmsNorm(ctx, .d, rms_eps);
@@ -231,6 +239,8 @@ pub fn main(init: std.process.Init) !void {
             dump_path = args[arg_i];
         } else if (std.mem.eql(u8, args[arg_i], "--composed-swiglu")) {
             composed_swiglu = true;
+        } else if (std.mem.eql(u8, args[arg_i], "--composed-residual")) {
+            composed_residual = true;
         } else if (std.mem.eql(u8, args[arg_i], "--inference")) {
             inference_mode = true;
         } else if (std.mem.eql(u8, args[arg_i], "--steps") and arg_i + 1 < args.len) {

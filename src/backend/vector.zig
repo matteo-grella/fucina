@@ -164,6 +164,7 @@ pub const applyElementwiseTyped = primitives.applyElementwiseTyped;
 pub const matmulInto = gemm.matmulInto;
 pub const matmul2DIntoUnchecked = gemm.matmul2DIntoUnchecked;
 pub const matmul2DIntoUncheckedWithConfig = gemm.matmul2DIntoUncheckedWithConfig;
+pub const matmul2DAccIntoUncheckedWithConfig = gemm.matmul2DAccIntoUncheckedWithConfig;
 pub const matmul2DIntoUncheckedTypedWithConfig = gemm.matmul2DIntoUncheckedTypedWithConfig;
 pub const matmulTransAInto = gemm.matmulTransAInto;
 pub const matmulTransA2DIntoUnchecked = gemm.matmulTransA2DIntoUnchecked;

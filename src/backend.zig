@@ -716,6 +716,19 @@ pub const Backend = struct {
         return active.matmul2DIntoUncheckedWithConfig(out, a, b, m, n, k, self.parallelConfig());
     }
 
+    /// C += A·B: the accumulate (beta=1) GEMM. `out` must hold the addend.
+    pub fn matmul2DAccIntoUnchecked(
+        self: *const Backend,
+        out: *Tensor,
+        a: *const Tensor,
+        b: *const Tensor,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) void {
+        return active.matmul2DAccIntoUncheckedWithConfig(out, a, b, m, n, k, self.parallelConfig());
+    }
+
     pub fn matmul2DIntoUncheckedTyped(
         self: *const Backend,
         comptime dtype: DType,

@@ -5538,6 +5538,141 @@ pub fn EinsumBackward(comptime left_tags: anytype, comptime right_tags: anytype,
     };
 }
 
+/// Backward for `addDot` (`base + left·right`, the addmm form). The base
+/// branch is an identity: its contribution is the output gradient itself,
+/// shared as a view. The left/right branches are the dot VJP contractions,
+/// with the same parallel branch split as `EinsumBackward`.
+pub fn AddDotBackward(comptime base_tags: anytype, comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag) type {
+    comptime std.debug.assert(tagsEqual(dotResultTags(left_tags, right_tags, contract_tag), base_tags));
+
+    return struct {
+        parents: [3]?*GradState,
+        estimated_work: usize,
+        left_value: RawTensor,
+        right_value: RawTensor,
+
+        const Self = @This();
+
+        const BranchTask = struct {
+            self: *const Self,
+            ctx: *ExecContext,
+            gy: *const RawTensor,
+            out: *?RawTensor,
+            err: ?anyerror = null,
+        };
+
+        pub fn init(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            base_parent: ?*GradState,
+            left_parent: ?*GradState,
+            right_parent: ?*GradState,
+            left: *const RawTensor,
+            right: *const RawTensor,
+        ) !void {
+            _ = allocator;
+            self.* = .{
+                .parents = .{ base_parent, left_parent, right_parent },
+                .estimated_work = workEstimate(left_parent, right_parent, left, right),
+                .left_value = try left.cloneView(),
+                .right_value = undefined,
+            };
+            errdefer self.left_value.deinit();
+            self.right_value = try right.cloneView();
+        }
+
+        fn operands(ptr: *const anyopaque) []const ?*GradState {
+            const self: *const Self = @ptrCast(@alignCast(ptr));
+            return self.parents[0..];
+        }
+
+        fn estimatedWork(ptr: *const anyopaque) usize {
+            const self: *const Self = @ptrCast(@alignCast(ptr));
+            return self.estimated_work;
+        }
+
+        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
+            const self: *const Self = @ptrCast(@alignCast(ptr));
+            const need_base = needs_grad.len > 0 and needs_grad[0];
+            const need_left = needs_grad.len > 1 and needs_grad[1];
+            const need_right = needs_grad.len > 2 and needs_grad[2];
+
+            if (need_base) {
+                out[0] = try gy.cloneView();
+            }
+
+            if (comptime exec_mod.parallel_dot_backward_branches) {
+                if (need_left and need_right) {
+                    if (ctx.dotBackwardWorker()) |worker| {
+                        var right_task = BranchTask{
+                            .self = self,
+                            .ctx = ctx,
+                            .gy = gy,
+                            .out = &out[2],
+                        };
+                        if (worker.start(runAddDotBackwardRightBranch, &right_task)) {
+                            self.backwardLeft(ctx, gy, &out[1]) catch |err| {
+                                worker.wait();
+                                return err;
+                            };
+                            worker.wait();
+                            if (right_task.err) |err| return err;
+                            return;
+                        }
+                    }
+                }
+            }
+
+            if (need_left) {
+                try self.backwardLeft(ctx, gy, &out[1]);
+            }
+            if (need_right) {
+                try self.backwardRight(ctx, gy, &out[2]);
+            }
+        }
+
+        fn backwardLeft(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, out: *?RawTensor) !void {
+            out.* = try tag_ops.taggedEinsum(base_tags, gy, ctx, right_tags, &self.right_value, left_tags);
+        }
+
+        fn backwardRight(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, out: *?RawTensor) !void {
+            out.* = try tag_ops.taggedEinsum(base_tags, gy, ctx, left_tags, &self.left_value, right_tags);
+        }
+
+        fn runAddDotBackwardRightBranch(ptr: *anyopaque) void {
+            const task: *BranchTask = @ptrCast(@alignCast(ptr));
+            task.self.backwardRight(task.ctx, task.gy, task.out) catch |err| {
+                task.err = err;
+            };
+        }
+
+        fn workEstimate(left_parent: ?*GradState, right_parent: ?*GradState, left: *const RawTensor, right: *const RawTensor) usize {
+            var branches: usize = 0;
+            if (left_parent != null) branches += 1;
+            if (right_parent != null) branches += 1;
+            if (branches == 0) return 0;
+            const m = left.shape.at(0);
+            const k = left.shape.at(1);
+            const n = right.shape.at(1);
+            return parallel.saturatedMul3(m * k, n, branches);
+        }
+
+        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            self.left_value.deinit();
+            self.right_value.deinit();
+            core.destroyNode(Self, allocator, self);
+        }
+
+        pub const vtable = BackwardFunction.VTable{
+            .operands = operands,
+            .backward = backward,
+            .deinit = deinit,
+            .estimated_work = estimatedWork,
+        };
+    };
+}
+
 /// Backward for `dot` against a quantized, f16, or bf16 RHS. The f32 LHS
 /// (activation) gradient is computed against the RHS widened to f32 at
 /// backward time; the widened copy is transient — weight memory stays

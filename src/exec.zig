@@ -2029,6 +2029,11 @@ pub const ExecContext = struct {
         return exec_matmul.matmul2DDispatch(&self.rt, .plain, a, b);
     }
 
+    /// base + a·b in one accumulate GEMM (see `exec_matmul.matmul2DAdd`).
+    pub fn matmul2DAdd(self: *ExecContext, a: *const Tensor, b: *const Tensor, base: *const Tensor) !Tensor {
+        return exec_matmul.matmul2DAdd(&self.rt, a, b, base);
+    }
+
     pub fn matmul2DTyped(self: *ExecContext, comptime dtype: DType, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)) {
         return exec_matmul.matmul2DTyped(&self.rt, dtype, a, b);
     }

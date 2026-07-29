@@ -310,6 +310,27 @@ pub fn matmul2DDispatch(self: *Runtime, kind: MatmulKind, a: *const Tensor, b: *
     return out;
 }
 
+/// out = base + a·b for 2-D operands. `base` is copied into the result
+/// buffer and the accumulate GEMM (BLAS beta=1, or the vector accumulate
+/// kernels) adds the product in place — the addmm/residual pattern with no
+/// intermediate product tensor and no separate elementwise add pass.
+pub fn matmul2DAdd(self: *Runtime, a: *const Tensor, b: *const Tensor, base: *const Tensor) !Tensor {
+    const info = try analyzeMatmul2D(.plain, a, b);
+    const basev = try base.rankView(2);
+    if (basev.dim(0) != info.m or basev.dim(1) != info.n) return tensor.TensorError.ShapeMismatch;
+
+    var aa = try self.prepareContiguous(a);
+    defer aa.deinit();
+    var bb = try self.prepareContiguous(b);
+    defer bb.deinit();
+
+    var out = try self.materialize(base);
+    errdefer out.deinit();
+    self.enableNativeMatmulPoolForWork(info.m, info.n, info.k);
+    self.backend.matmul2DAccIntoUnchecked(&out, aa.tensor(), bb.tensor(), info.m, info.n, info.k);
+    return out;
+}
+
 pub fn matmul2DTyped(
     self: *Runtime,
     comptime dtype: DType,

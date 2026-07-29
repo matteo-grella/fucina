@@ -137,11 +137,41 @@ pub fn gemmBlocked(
     k: usize,
     config: ParallelConfig,
 ) void {
-    gemmBlockedWithParams(orient, cd, ad, bd, m, n, k, config, .{});
+    gemmBlockedImpl(orient, false, cd, ad, bd, m, n, k, config, .{});
+}
+
+/// C += A·B: the first k-panel joins the existing output in accumulate mode
+/// instead of overwriting it; every later panel already accumulated.
+pub fn gemmBlockedAcc(
+    comptime orient: Orientation,
+    cd: []f32,
+    ad: []const f32,
+    bd: []const f32,
+    m: usize,
+    n: usize,
+    k: usize,
+    config: ParallelConfig,
+) void {
+    gemmBlockedImpl(orient, true, cd, ad, bd, m, n, k, config, .{});
 }
 
 pub fn gemmBlockedWithParams(
     comptime orient: Orientation,
+    cd: []f32,
+    ad: []const f32,
+    bd: []const f32,
+    m: usize,
+    n: usize,
+    k: usize,
+    config: ParallelConfig,
+    params: BlockParams,
+) void {
+    gemmBlockedImpl(orient, false, cd, ad, bd, m, n, k, config, params);
+}
+
+fn gemmBlockedImpl(
+    comptime orient: Orientation,
+    init_accumulate: bool,
     cd: []f32,
     ad: []const f32,
     bd: []const f32,
@@ -162,7 +192,7 @@ pub fn gemmBlockedWithParams(
     }
     if (m == 0 or n == 0) return;
     if (k == 0) {
-        @memset(cd[0 .. m * n], 0);
+        if (!init_accumulate) @memset(cd[0 .. m * n], 0);
         return;
     }
 
@@ -214,7 +244,7 @@ pub fn gemmBlockedWithParams(
                     .num_nr_panels = num_nr_panels,
                     .cell_start = ti * num_cells / task_count,
                     .cell_end = (ti + 1) * num_cells / task_count,
-                    .accumulate = pc != 0,
+                    .accumulate = init_accumulate or pc != 0,
                 };
             }
             const run = comptime taskRunner(orient);

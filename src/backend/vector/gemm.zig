@@ -59,6 +59,25 @@ const f16_accum_native = builtin.cpu.arch.isAARCH64();
 
 // ---------------- MatMul (2-D) ----------------
 
+/// GEMM output-tile write policy: `.store` writes the accumulator (C = A·B),
+/// `.accumulate` adds it to the existing output (C += A·B — the BLAS beta=1
+/// epilogue). Comptime so `.store` kernels compile exactly as before.
+pub const StoreMode = enum { store, accumulate };
+
+inline fn storeVec(comptime mode: StoreMode, dst: *[vector_len]f32, acc: Vf32) void {
+    dst.* = switch (mode) {
+        .store => acc,
+        .accumulate => @as(Vf32, dst.*) + acc,
+    };
+}
+
+inline fn storeScalar(comptime mode: StoreMode, dst: *f32, s: f32) void {
+    dst.* = switch (mode) {
+        .store => s,
+        .accumulate => dst.* + s,
+    };
+}
+
 pub fn matmulInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
     const av = try a.rankView(2);
     const bv = try b.rankView(2);
@@ -101,8 +120,31 @@ pub fn matmul2DIntoUncheckedWithConfig(
 // The pre-blocking register-tiled row-kernel path, bypassing the blocked
 // dispatch above. Public so the GEMM bench can baseline it directly.
 pub fn gemmNNRowPathWithConfig(cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize, config: ParallelConfig) void {
-    if (maybeParallelNN(config, cd, ad, bd, m, n, k)) return;
-    gemmNNRange(cd, ad, bd, m, n, k, 0, m);
+    if (maybeParallelNN(.store, config, cd, ad, bd, m, n, k)) return;
+    gemmNNRangeMode(.store, cd, ad, bd, m, n, k, 0, m);
+}
+
+/// C += A·B. The accumulate twin of `matmul2DIntoUncheckedWithConfig`: the
+/// row/column parallel splits keep every output element owned by one task, so
+/// the read-modify-write store needs no synchronization; the blocked path
+/// seeds its first k-panel in accumulate mode instead of store mode.
+pub fn matmul2DAccIntoUncheckedWithConfig(
+    out: *Tensor,
+    a: *const Tensor,
+    b: *const Tensor,
+    m: usize,
+    n: usize,
+    k: usize,
+    config: ParallelConfig,
+) void {
+    const ad = contiguousDataConst(a, m * k);
+    const bd = contiguousDataConst(b, k * n);
+    const cd = contiguousData(out, m * n);
+    if (gemm_blocked.shouldUseBlocked(m, n, k)) {
+        return gemm_blocked.gemmBlockedAcc(.nn, cd, ad, bd, m, n, k, config);
+    }
+    if (maybeParallelNN(.accumulate, config, cd, ad, bd, m, n, k)) return;
+    gemmNNRangeMode(.accumulate, cd, ad, bd, m, n, k, 0, m);
 }
 
 pub fn matmul2DIntoUncheckedTypedWithConfig(
@@ -367,18 +409,18 @@ const ColTaskF16 = struct {
     col_end: usize,
 };
 
-fn maybeParallelNN(config: ParallelConfig, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize) bool {
+fn maybeParallelNN(comptime mode: StoreMode, config: ParallelConfig, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize) bool {
     const pool = config.pool orelse return false;
     if (m < parallel.vector_column_min_m) {
         const thread_count = columnThreadCount(m, n, k);
         if (thread_count != 1) {
-            runParallelCols(pool, runGemmNNColTask, cd, ad, bd, m, n, k, thread_count);
+            runParallelCols(pool, runGemmNNColTaskMode(mode), cd, ad, bd, m, n, k, thread_count);
             return true;
         }
     }
     const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
     if (thread_count == 1) return false;
-    runParallelRows(pool, runGemmNNTask, cd, ad, bd, m, n, k, thread_count);
+    runParallelRows(pool, runGemmNNTaskMode(mode), cd, ad, bd, m, n, k, thread_count);
     return true;
 }
 
@@ -748,8 +790,20 @@ fn runParallelColsF16(
     pool.parallelChunks(ColTaskF16, tasks[0..thread_count], runGemmNNColTaskF16);
 }
 
-fn runGemmNNTask(task: *const GemmTask) void {
-    gemmNNRange(task.cd, task.ad, task.bd, task.m, task.n, task.k, task.row_start, task.row_end);
+fn runGemmNNTaskMode(comptime mode: StoreMode) fn (*const GemmTask) void {
+    return struct {
+        fn run(task: *const GemmTask) void {
+            gemmNNRangeMode(mode, task.cd, task.ad, task.bd, task.m, task.n, task.k, task.row_start, task.row_end);
+        }
+    }.run;
+}
+
+fn runGemmNNColTaskMode(comptime mode: StoreMode) fn (*const ColTask) void {
+    return struct {
+        fn run(task: *const ColTask) void {
+            gemmNNColsMode(mode, task.cd, task.ad, task.bd, task.m, task.n, task.k, task.col_start, task.col_end);
+        }
+    }.run;
 }
 
 fn runGemmNNF64Task(task: *const GemmTaskF64) void {
@@ -780,10 +834,6 @@ fn runGemmNTBf16RhsTask(task: *const GemmTaskBf16Rhs) void {
     gemmNTBf16RhsRange(task.cd, task.ad, task.bd, task.m, task.n, task.k, task.row_start, task.row_end);
 }
 
-fn runGemmNNColTask(task: *const ColTask) void {
-    gemmNNCols(task.cd, task.ad, task.bd, task.m, task.n, task.k, task.col_start, task.col_end);
-}
-
 fn runGemmTNColTask(task: *const ColTask) void {
     gemmTNCols(task.cd, task.ad, task.bd, task.m, task.n, task.k, task.col_start, task.col_end);
 }
@@ -805,24 +855,30 @@ fn runGemmNNColTaskF16(task: *const ColTaskF16) void {
 }
 
 pub fn gemmNNRange(cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize, row_start: usize, row_end: usize) void {
+    gemmNNRangeMode(.store, cd, ad, bd, m, n, k, row_start, row_end);
+}
+
+fn gemmNNRangeMode(comptime mode: StoreMode, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize, row_start: usize, row_end: usize) void {
     _ = m;
     if (row_start == row_end or n == 0) return;
     if (k == 0) {
-        for (row_start..row_end) |i| {
-            @memset(cd[i * n .. (i + 1) * n], 0);
+        if (comptime mode == .store) {
+            for (row_start..row_end) |i| {
+                @memset(cd[i * n .. (i + 1) * n], 0);
+            }
         }
         return;
     }
 
     var i = row_start;
     while (i + 8 <= row_end) : (i += 8) {
-        gemmNNRows8(cd, ad, bd, i, n, k);
+        gemmNNRows8(mode, cd, ad, bd, i, n, k);
     }
     while (i + 4 <= row_end) : (i += 4) {
-        gemmNNRows4(cd, ad, bd, i, n, k);
+        gemmNNRows4(mode, cd, ad, bd, i, n, k);
     }
     while (i < row_end) : (i += 1) {
-        gemmNNRow(cd, ad, bd, i, n, k);
+        gemmNNRow(mode, cd, ad, bd, i, n, k);
     }
 }
 
@@ -869,11 +925,13 @@ pub fn gemmNTRange(cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usi
     }
 }
 
-fn gemmNNCols(cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize, col_start: usize, col_end: usize) void {
+fn gemmNNColsMode(comptime mode: StoreMode, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize, col_start: usize, col_end: usize) void {
     if (col_start == col_end or m == 0) return;
     if (k == 0) {
-        for (0..m) |i| {
-            @memset(cd[i * n + col_start .. i * n + col_end], 0);
+        if (comptime mode == .store) {
+            for (0..m) |i| {
+                @memset(cd[i * n + col_start .. i * n + col_end], 0);
+            }
         }
         return;
     }
@@ -884,12 +942,12 @@ fn gemmNNCols(cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k
             for (0..k) |p| {
                 acc += @as(Vf32, @splat(ad[i * k + p])) * @as(Vf32, bd[p * n + j ..][0..vector_len].*);
             }
-            cd[i * n + j ..][0..vector_len].* = acc;
+            storeVec(mode, cd[i * n + j ..][0..vector_len], acc);
         }
         while (j < col_end) : (j += 1) {
             var s: f32 = 0;
             for (0..k) |p| s += ad[i * k + p] * bd[p * n + j];
-            cd[i * n + j] = s;
+            storeScalar(mode, &cd[i * n + j], s);
         }
     }
 }
@@ -1416,7 +1474,7 @@ inline fn gemmNTBf16RhsSmallRowsCols(comptime rows: usize, cd: []f32, ad: []cons
     }
 }
 
-inline fn gemmNNRows4(cd: []f32, ad: []const f32, bd: []const f32, row: usize, n: usize, k: usize) void {
+inline fn gemmNNRows4(comptime mode: StoreMode, cd: []f32, ad: []const f32, bd: []const f32, row: usize, n: usize, k: usize) void {
     var j: usize = 0;
     while (j + 2 * vector_len <= n) : (j += 2 * vector_len) {
         var acc00: Vf32 = @splat(0);
@@ -1445,14 +1503,14 @@ inline fn gemmNNRows4(cd: []f32, ad: []const f32, bd: []const f32, row: usize, n
             acc31 += a3 * b1;
         }
 
-        cd[(row + 0) * n + j ..][0..vector_len].* = acc00;
-        cd[(row + 0) * n + j + vector_len ..][0..vector_len].* = acc01;
-        cd[(row + 1) * n + j ..][0..vector_len].* = acc10;
-        cd[(row + 1) * n + j + vector_len ..][0..vector_len].* = acc11;
-        cd[(row + 2) * n + j ..][0..vector_len].* = acc20;
-        cd[(row + 2) * n + j + vector_len ..][0..vector_len].* = acc21;
-        cd[(row + 3) * n + j ..][0..vector_len].* = acc30;
-        cd[(row + 3) * n + j + vector_len ..][0..vector_len].* = acc31;
+        storeVec(mode, cd[(row + 0) * n + j ..][0..vector_len], acc00);
+        storeVec(mode, cd[(row + 0) * n + j + vector_len ..][0..vector_len], acc01);
+        storeVec(mode, cd[(row + 1) * n + j ..][0..vector_len], acc10);
+        storeVec(mode, cd[(row + 1) * n + j + vector_len ..][0..vector_len], acc11);
+        storeVec(mode, cd[(row + 2) * n + j ..][0..vector_len], acc20);
+        storeVec(mode, cd[(row + 2) * n + j + vector_len ..][0..vector_len], acc21);
+        storeVec(mode, cd[(row + 3) * n + j ..][0..vector_len], acc30);
+        storeVec(mode, cd[(row + 3) * n + j + vector_len ..][0..vector_len], acc31);
     }
     while (j + vector_len <= n) : (j += vector_len) {
         var acc0: Vf32 = @splat(0);
@@ -1466,10 +1524,10 @@ inline fn gemmNNRows4(cd: []f32, ad: []const f32, bd: []const f32, row: usize, n
             acc2 += @as(Vf32, @splat(ad[(row + 2) * k + p])) * b0;
             acc3 += @as(Vf32, @splat(ad[(row + 3) * k + p])) * b0;
         }
-        cd[(row + 0) * n + j ..][0..vector_len].* = acc0;
-        cd[(row + 1) * n + j ..][0..vector_len].* = acc1;
-        cd[(row + 2) * n + j ..][0..vector_len].* = acc2;
-        cd[(row + 3) * n + j ..][0..vector_len].* = acc3;
+        storeVec(mode, cd[(row + 0) * n + j ..][0..vector_len], acc0);
+        storeVec(mode, cd[(row + 1) * n + j ..][0..vector_len], acc1);
+        storeVec(mode, cd[(row + 2) * n + j ..][0..vector_len], acc2);
+        storeVec(mode, cd[(row + 3) * n + j ..][0..vector_len], acc3);
     }
     while (j < n) : (j += 1) {
         var s0: f32 = 0;
@@ -1483,14 +1541,14 @@ inline fn gemmNNRows4(cd: []f32, ad: []const f32, bd: []const f32, row: usize, n
             s2 += ad[(row + 2) * k + p] * b;
             s3 += ad[(row + 3) * k + p] * b;
         }
-        cd[(row + 0) * n + j] = s0;
-        cd[(row + 1) * n + j] = s1;
-        cd[(row + 2) * n + j] = s2;
-        cd[(row + 3) * n + j] = s3;
+        storeScalar(mode, &cd[(row + 0) * n + j], s0);
+        storeScalar(mode, &cd[(row + 1) * n + j], s1);
+        storeScalar(mode, &cd[(row + 2) * n + j], s2);
+        storeScalar(mode, &cd[(row + 3) * n + j], s3);
     }
 }
 
-inline fn gemmNNRows8(cd: []f32, ad: []const f32, bd: []const f32, row: usize, n: usize, k: usize) void {
+inline fn gemmNNRows8(comptime mode: StoreMode, cd: []f32, ad: []const f32, bd: []const f32, row: usize, n: usize, k: usize) void {
     var j: usize = 0;
     while (j + 2 * vector_len <= n) : (j += 2 * vector_len) {
         var acc: [8][2]Vf32 = undefined;
@@ -1510,8 +1568,8 @@ inline fn gemmNNRows8(cd: []f32, ad: []const f32, bd: []const f32, row: usize, n
         }
 
         inline for (0..8) |r| {
-            cd[(row + r) * n + j ..][0..vector_len].* = acc[r][0];
-            cd[(row + r) * n + j + vector_len ..][0..vector_len].* = acc[r][1];
+            storeVec(mode, cd[(row + r) * n + j ..][0..vector_len], acc[r][0]);
+            storeVec(mode, cd[(row + r) * n + j + vector_len ..][0..vector_len], acc[r][1]);
         }
     }
     while (j + vector_len <= n) : (j += vector_len) {
@@ -1526,7 +1584,7 @@ inline fn gemmNNRows8(cd: []f32, ad: []const f32, bd: []const f32, row: usize, n
             }
         }
         inline for (0..8) |r| {
-            cd[(row + r) * n + j ..][0..vector_len].* = acc[r];
+            storeVec(mode, cd[(row + r) * n + j ..][0..vector_len], acc[r]);
         }
     }
     while (j < n) : (j += 1) {
@@ -1538,12 +1596,12 @@ inline fn gemmNNRows8(cd: []f32, ad: []const f32, bd: []const f32, row: usize, n
             }
         }
         inline for (0..8) |r| {
-            cd[(row + r) * n + j] = sums[r];
+            storeScalar(mode, &cd[(row + r) * n + j], sums[r]);
         }
     }
 }
 
-inline fn gemmNNRow(cd: []f32, ad: []const f32, bd: []const f32, row: usize, n: usize, k: usize) void {
+inline fn gemmNNRow(comptime mode: StoreMode, cd: []f32, ad: []const f32, bd: []const f32, row: usize, n: usize, k: usize) void {
     var j: usize = 0;
     while (j + vector_len <= n) : (j += vector_len) {
         var acc: Vf32 = @splat(0);
@@ -1551,12 +1609,12 @@ inline fn gemmNNRow(cd: []f32, ad: []const f32, bd: []const f32, row: usize, n: 
             const b: Vf32 = bd[p * n + j ..][0..vector_len].*;
             acc += @as(Vf32, @splat(ad[row * k + p])) * b;
         }
-        cd[row * n + j ..][0..vector_len].* = acc;
+        storeVec(mode, cd[row * n + j ..][0..vector_len], acc);
     }
     while (j < n) : (j += 1) {
         var s: f32 = 0;
         for (0..k) |p| s += ad[row * k + p] * bd[p * n + j];
-        cd[row * n + j] = s;
+        storeScalar(mode, &cd[row * n + j], s);
     }
 }
 

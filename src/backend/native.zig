@@ -185,12 +185,47 @@ pub fn matmul2DIntoUncheckedWithConfig(
                 k,
                 contiguousDataConst(b, k * n),
                 n,
+                0.0,
                 contiguousData(out, m * n),
             );
             return;
         }
     }
     vector.matmul2DIntoUncheckedWithConfig(out, a, b, m, n, k, config);
+}
+
+/// C += A·B (the beta=1 GEMM). BLAS route when the shape qualifies; the
+/// vector accumulate kernels otherwise. GPU builds fall through to the same
+/// CPU routes: the async GPU GEMM overwrites its destination and has no
+/// accumulate seam.
+pub fn matmul2DAccIntoUncheckedWithConfig(
+    out: *Tensor,
+    a: *const Tensor,
+    b: *const Tensor,
+    m: usize,
+    n: usize,
+    k: usize,
+    config: ParallelConfig,
+) void {
+    if (comptime build_options.use_blas) {
+        if (shouldUseBlas(m, n, k)) {
+            blasGemm(
+                cblas_no_trans,
+                cblas_no_trans,
+                m,
+                n,
+                k,
+                contiguousDataConst(a, m * k),
+                k,
+                contiguousDataConst(b, k * n),
+                n,
+                1.0,
+                contiguousData(out, m * n),
+            );
+            return;
+        }
+    }
+    vector.matmul2DAccIntoUncheckedWithConfig(out, a, b, m, n, k, config);
 }
 
 pub fn matmul2DIntoUncheckedTypedWithConfig(
@@ -253,6 +288,7 @@ pub fn matmul2DIntoUncheckedPackedDenseRhsWithConfig(
                 k,
                 contiguousDataConst(&rhs.rhs, rhs.padded_n * k),
                 k,
+                0.0,
                 contiguousData(out, m * n),
             );
             return;
@@ -1139,6 +1175,7 @@ pub fn matmulTransA2DIntoUncheckedWithConfig(
                 m,
                 contiguousDataConst(b, k * n),
                 n,
+                0.0,
                 contiguousData(out, m * n),
             );
             return;
@@ -1189,6 +1226,7 @@ pub fn matmulTransB2DIntoUncheckedWithConfig(
                 k,
                 contiguousDataConst(b, n * k),
                 k,
+                0.0,
                 contiguousData(out, m * n),
             );
             return;
@@ -1426,6 +1464,7 @@ fn blasBatched(
             lda,
             bp[bi * stride_b .. bi * stride_b + matrix_b_len],
             ldb,
+            0.0,
             cp[bi * stride_c .. bi * stride_c + m * n],
         );
     }
@@ -1441,6 +1480,7 @@ fn blasGemm(
     lda: usize,
     b: []const f32,
     ldb: usize,
+    beta: f32,
     c: []f32,
 ) void {
     ensureBlasThreadsConfigured();
@@ -1456,7 +1496,7 @@ fn blasGemm(
         cDim(lda),
         b.ptr,
         cDim(ldb),
-        0.0,
+        beta,
         c.ptr,
         cDim(n),
     );

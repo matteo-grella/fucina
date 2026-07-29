@@ -2658,6 +2658,45 @@ test "dot with an f16 constant RHS stays mixed-precision" {
 }
 ```
 
+#### `addDot`: fused residual/projection accumulate (addmm)
+
+```zig
+pub fn addDot(self: *const Self, ctx: *ExecContext, a: anytype, b: anytype, comptime contract_tag: Tag) !Self
+```
+
+`self + a·b` in one op — torch's `addmm`. The product accumulates directly
+into a copy of `self` (the BLAS beta=1 route, or the vector accumulate
+kernels elsewhere), so the residual pattern costs one GEMM with no
+intermediate product tensor and no separate add pass, and backward is one
+node (the base gradient is the output gradient itself). On the vector
+kernels the result is bit-identical to `a.dot(b)` then `add`; the BLAS
+route may differ in the last ulp, as any two BLAS entry points may.
+
+The form is compile-checked: f32 operands, `a` tagged `[rows, contract]`,
+`b` tagged `[contract, cols]`, `self` tagged exactly `[rows, cols]`.
+Differentiable in all three operands; other RHS dtypes compose `dot` +
+`add` instead.
+
+```zig
+test "addDot fuses the residual add into the GEMM" {
+    const alloc = std.testing.allocator;
+    var ctx: fucina.ExecContext = undefined;
+    ctx.init(alloc);
+    defer ctx.deinit();
+
+    var residual = try fucina.Tensor(.{ .t, .out }).fromSlice(&ctx, .{ 2, 2 }, &.{ 1, 1, 2, 2 });
+    defer residual.deinit();
+    var a = try fucina.Tensor(.{ .t, .in }).fromSlice(&ctx, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
+    defer a.deinit();
+    var w = try fucina.Tensor(.{ .in, .out }).fromSlice(&ctx, .{ 2, 2 }, &.{ 5, 6, 7, 8 });
+    defer w.deinit();
+
+    var y = try residual.addDot(&ctx, a, w, .in); // residual + a·w, one GEMM
+    defer y.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 20, 23, 45, 52 }, try y.dataConst());
+}
+```
+
 #### `einsum` and `einsumMany`: multi-index contraction
 
 ```zig

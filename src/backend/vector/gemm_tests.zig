@@ -14,6 +14,46 @@ const matmul2DIntoUncheckedTypedWithConfig = gemm.matmul2DIntoUncheckedTypedWith
 const matmulTransB2DIntoUncheckedBf16RhsWithConfig = gemm.matmulTransB2DIntoUncheckedBf16RhsWithConfig;
 const matmulTransB2DIntoUncheckedF16OperandsWithConfig = gemm.matmulTransB2DIntoUncheckedF16OperandsWithConfig;
 
+test "f32 accumulate GEMM equals store GEMM plus addend, bit-exact, including k=0" {
+    const allocator = std.testing.allocator;
+    // m spans the 8/4/1 row tiles, n has a vector tail on every ISA width.
+    const m = 13;
+    const n = 17;
+    const k = 9;
+
+    var a_data: [m * k]f32 = undefined;
+    var b_data: [k * n]f32 = undefined;
+    var seed_data: [m * n]f32 = undefined;
+    for (&a_data, 0..) |*value, idx| value.* = @as(f32, @floatFromInt(@as(i32, @intCast(idx % 11)) - 5)) * 0.125;
+    for (&b_data, 0..) |*value, idx| value.* = @as(f32, @floatFromInt(@as(i32, @intCast((idx * 3) % 13)) - 6)) * 0.0625;
+    for (&seed_data, 0..) |*value, idx| value.* = @as(f32, @floatFromInt(@as(i32, @intCast((idx * 7) % 19)) - 9)) * 0.25;
+
+    var a = try Tensor.fromSlice(allocator, &.{ m, k }, &a_data);
+    defer a.deinit();
+    var b = try Tensor.fromSlice(allocator, &.{ k, n }, &b_data);
+    defer b.deinit();
+    var acc_out = try Tensor.fromSlice(allocator, &.{ m, n }, &seed_data);
+    defer acc_out.deinit();
+    var product = try Tensor.zeros(allocator, &.{ m, n });
+    defer product.deinit();
+
+    gemm.matmul2DAccIntoUncheckedWithConfig(&acc_out, &a, &b, m, n, k, .{});
+    gemm.matmul2DIntoUncheckedWithConfig(&product, &a, &b, m, n, k, .{});
+
+    for (0..m * n) |idx| {
+        try std.testing.expectEqual(seed_data[idx] + product.dataConst()[idx], acc_out.dataConst()[idx]);
+    }
+
+    // k=0: the accumulate form leaves the output untouched (the store form
+    // zeroes it).
+    var untouched = try Tensor.fromSlice(allocator, &.{ m, n }, &seed_data);
+    defer untouched.deinit();
+    gemm.matmul2DAccIntoUncheckedWithConfig(&untouched, &a, &b, m, n, 0, .{});
+    for (0..m * n) |idx| {
+        try std.testing.expectEqual(seed_data[idx], untouched.dataConst()[idx]);
+    }
+}
+
 test "f16 matmul vector kernel covers row tiles and tails" {
     const allocator = std.testing.allocator;
     const m = 21;

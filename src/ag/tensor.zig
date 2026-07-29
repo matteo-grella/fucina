@@ -146,6 +146,7 @@ const SnakeBackward = backward.SnakeBackward;
 const GroupNormBackward = backward.GroupNormBackward;
 const GroupedCausalAttentionBackward = backward.GroupedCausalAttentionBackward;
 const DotBackward = backward.DotBackward;
+const AddDotBackward = backward.AddDotBackward;
 const EinsumBackward = backward.EinsumBackward;
 const ConstRhsDotBackward = backward.ConstRhsDotBackward;
 const ConstRhsEinsumBackward = backward.ConstRhsEinsumBackward;
@@ -3768,6 +3769,42 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             var value = try tag_ops.taggedDot(tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), contract_tag);
             errdefer value.deinit();
             return finishOp(result_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), DotBackward(tags, other_tags, contract_tag), .{ ctx.allocator, self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
+        }
+
+        /// `self + a·b` in one op (torch's addmm). The product accumulates
+        /// directly into a copy of `self` — the BLAS beta=1 route or the
+        /// vector accumulate kernels — so the residual/projection pattern
+        /// costs one GEMM with no intermediate product tensor and no
+        /// separate add pass. On the vector kernels the values are
+        /// bit-identical to `a.dot(b)` then `self.add` (the finalized
+        /// accumulator joins the addend with the same single f32 add); the
+        /// BLAS beta=1 route may differ from the composed pair in the last
+        /// ulp, exactly as any two BLAS entry points may.
+        ///
+        /// Supported form (compile-checked): f32 operands, `a` tagged
+        /// [rows, contract], `b` tagged [contract, cols], `self` tagged
+        /// exactly [rows, cols]. Differentiable in all three operands.
+        pub fn addDot(self: *const Self, ctx: *ExecContext, a: anytype, b: anytype, comptime contract_tag: Tag) !Self {
+            const Left = TensorObject(@TypeOf(a));
+            const Right = TensorObject(@TypeOf(b));
+            const left_tags = Left.axis_tags;
+            const right_tags = Right.axis_tags;
+            comptime {
+                if (Left.dtype != .f32 or Right.dtype != .f32)
+                    @compileError("addDot: f32 operands only — compose dot + add for other RHS dtypes");
+                if (left_tags.len != 2 or right_tags.len != 2 or tags.len != 2)
+                    @compileError("addDot: rank-2 addmm form only ([rows, contract] · [contract, cols] into [rows, cols])");
+                if (left_tags[1] != contract_tag or right_tags[0] != contract_tag)
+                    @compileError("addDot: the contract tag must be a's last and b's first axis");
+                if (tags[0] != left_tags[0] or tags[1] != right_tags[1])
+                    @compileError("addDot: self must be tagged [a's rows, b's cols]");
+            }
+            const a_ptr = tensorObjectPtrFrom(@TypeOf(a), &a);
+            const b_ptr = tensorObjectPtrFrom(@TypeOf(b), &b);
+            var value = try ctx.matmul2DAdd(a_ptr.asRawTensor(), b_ptr.asRawTensor(), self.asRawTensor());
+            errdefer value.deinit();
+            const wants_grad = self.requiresGrad() or a_ptr.requiresGrad() or b_ptr.requiresGrad();
+            return finishOp(tags, ctx, value, wants_grad, AddDotBackward(tags, left_tags, right_tags, contract_tag), .{ ctx.allocator, self.grad_state, a_ptr.grad_state, b_ptr.grad_state, a_ptr.asRawTensor(), b_ptr.asRawTensor() });
         }
 
         /// Multi-index tagged contraction (einsum). `out_tags` is the whole
