@@ -1616,6 +1616,19 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             return self.gated(ctx, other, .geglu);
         }
 
+        /// SiTU (Kimi K3's gated activation):
+        /// `25·tanh(self/25) * 4·tanh(other/4)·sigmoid(other)` — `self` is
+        /// the up input (soft-clamped, linear beta 25), `other` the gate
+        /// (soft-bounded SiLU, beta 4). Mirrors `swiglu`'s operand order
+        /// (`up.situ(&ctx, &gate)`). Differentiable in both operands.
+        pub fn situ(
+            self: *const Self,
+            ctx: *ExecContext,
+            other: anytype,
+        ) !Tensor(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
+            return self.gated(ctx, other, .situ);
+        }
+
         /// Split-gated activation over `tag`: halves that axis and gates one
         /// half with the other, per `op` — the gate-half conventions DIFFER
         /// (ggml parity): `.swiglu` gates with the FIRST half
@@ -1640,6 +1653,7 @@ fn FloatTensor(comptime tags_spec: anytype) type {
                     return finishOp(result_tags, ctx, value, self.requiresGrad(), SplitGluBackward(tags, split_axis), .{ ctx.allocator, self.grad_state, self.asRawTensor() });
                 },
                 .geglu => @compileError("splitGated: no split-geglu kernel or gate-half convention exists (compose `unary(.gelu_quant)` + `mul`, or use `geglu` on separate halves)"),
+                .situ => @compileError("splitGated: no split-situ kernel (K3 projects gate and up separately; use the pointwise `situ`)"),
             }
         }
 

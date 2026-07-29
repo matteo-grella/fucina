@@ -94,6 +94,10 @@ pub const GatedOp = enum {
     // up is clamped to [-10, 10] before the multiply (the model's
     // swiglu_clamp_exp metadata; validated == 10 at load).
     swiglu_clamp10,
+    // Kimi K3's SiTU: the gate activation is 4·tanh(g/4)·sigmoid(g) (a
+    // soft-bounded SiLU, beta = 4) and the up input is soft-clamped to
+    // 25·tanh(u/25) (linear beta = 25) before the multiply.
+    situ,
 };
 
 pub inline fn unaryScalar(comptime op: UnaryOp, value: f32) f32 {
@@ -149,16 +153,25 @@ pub inline fn gatedActivationScalar(comptime op: GatedOp, value: f32) f32 {
             const g = @min(value, 10.0);
             break :blk g * sigmoidScalar(g);
         },
+        .situ => 4.0 * std.math.tanh(value * 0.25) * sigmoidScalar(value),
     };
 }
 
-/// The full gated pair for ops whose clamping also touches the `up` input
-/// (`swiglu_clamp10`); all other ops reduce to `up * gatedActivationScalar`.
-pub inline fn gatedPairScalar(comptime op: GatedOp, gate: f32, up: f32) f32 {
+/// The `up`-side transform of a gated pair: identity for the classic ops,
+/// the hard clamp for `swiglu_clamp10`, the 25·tanh(u/25) soft clamp for
+/// `situ`.
+pub inline fn gatedSourceScalar(comptime op: GatedOp, up: f32) f32 {
     return switch (op) {
-        .swiglu_clamp10 => gatedActivationScalar(op, gate) * @min(@max(up, -10.0), 10.0),
-        else => up * gatedActivationScalar(op, gate),
+        .swiglu_clamp10 => @min(@max(up, -10.0), 10.0),
+        .situ => 25.0 * std.math.tanh(up * 0.04),
+        else => up,
     };
+}
+
+/// The full gated pair: `gatedSourceScalar(up) * gatedActivationScalar(gate)`
+/// (the source transform is the identity for ops that use `up` linearly).
+pub inline fn gatedPairScalar(comptime op: GatedOp, gate: f32, up: f32) f32 {
+    return gatedSourceScalar(op, up) * gatedActivationScalar(op, gate);
 }
 
 /// NeuralAmpModelerCore activations.h fast_tanh rational approximation.

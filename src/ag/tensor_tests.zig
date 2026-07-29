@@ -681,6 +681,65 @@ test "public splitSwiGlu packed Q8_0x4 RHS dot matches unfused path" {
     }
 }
 
+test "public situ matches the composed soft-clamp/gate ops in values and gradients" {
+    // situ(up, gate) = 25·tanh(up/25) · 4·tanh(gate/4)·sigmoid(gate).
+    // The reference composes the same math from scale/tanh/sigmoid/mul, so
+    // both the fused forward (vector bodies) and the fused backward are
+    // checked against independently differentiated ops.
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const n = 103; // odd length: vector body + scalar tail both covered
+    const T = Tensor(.{.d});
+    const up_values = try allocator.alloc(f32, n);
+    defer allocator.free(up_values);
+    const gate_values = try allocator.alloc(f32, n);
+    defer allocator.free(gate_values);
+    for (up_values, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast(i % 41)) - 20)) * 1.7; // spans past the ±25 clamp knee
+    for (gate_values, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 7) % 29)) - 14)) * 0.9;
+
+    const scope = ctx.openExecScope();
+    defer ctx.closeExecScope(scope);
+
+    var up_f = try T.variableFromSlice(&ctx, .{n}, up_values);
+    defer up_f.deinit();
+    var gate_f = try T.variableFromSlice(&ctx, .{n}, gate_values);
+    defer gate_f.deinit();
+    var fused = try up_f.situ(&ctx, &gate_f);
+    var fused_loss = try fused.sumAll(&ctx);
+    try fused_loss.backward(&ctx);
+
+    var up_r = try T.variableFromSlice(&ctx, .{n}, up_values);
+    defer up_r.deinit();
+    var gate_r = try T.variableFromSlice(&ctx, .{n}, gate_values);
+    defer gate_r.deinit();
+    var up_soft = try (try (try up_r.scale(&ctx, 0.04)).unary(&ctx, .tanh)).scale(&ctx, 25.0);
+    var gate_tanh = try (try (try gate_r.scale(&ctx, 0.25)).unary(&ctx, .tanh)).scale(&ctx, 4.0);
+    var gate_sig = try gate_r.unary(&ctx, .sigmoid);
+    var gate_act = try gate_tanh.mul(&ctx, &gate_sig);
+    var expected = try up_soft.mul(&ctx, &gate_act);
+    var expected_loss = try expected.sumAll(&ctx);
+    try expected_loss.backward(&ctx);
+
+    for (expected.asRawTensor().dataConst(), fused.asRawTensor().dataConst()) |e, actual| {
+        try std.testing.expectApproxEqAbs(e, actual, 1e-4);
+    }
+    inline for (.{ .{ &up_r, &up_f }, .{ &gate_r, &gate_f } }) |pair| {
+        var g_ref = (try pair[0].grad(&ctx)).?;
+        defer g_ref.deinit();
+        var g_fused = (try pair[1].grad(&ctx)).?;
+        defer g_fused.deinit();
+        for (g_ref.asRawTensor().dataConst(), g_fused.asRawTensor().dataConst()) |e, actual| {
+            try std.testing.expectApproxEqAbs(e, actual, 1e-4);
+        }
+    }
+}
+
 test "public addDot matches dot + add in values and gradients" {
     // Values: bit-exact on the vector accumulate kernels (k below the BLAS
     // floor); the BLAS beta=1 shape pins to a relative tolerance (any two

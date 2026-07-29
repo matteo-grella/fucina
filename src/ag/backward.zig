@@ -931,8 +931,14 @@ pub fn GatedBackward(
 
             if (needs_grad.len > 0 and needs_grad[0]) {
                 var g = try ctx.empty(self.result_shape[0..]);
-                for (gyd, right_data, g.data()) |grad, gate, *dst| {
-                    dst.* = grad * gatedActivation(op, gate);
+                if (comptime gatedSourceIsIdentity(op)) {
+                    for (gyd, right_data, g.data()) |grad, gate, *dst| {
+                        dst.* = grad * gatedActivation(op, gate);
+                    }
+                } else {
+                    for (gyd, left_data, right_data, g.data()) |grad, left, gate, *dst| {
+                        dst.* = grad * gatedSourceDerivative(op, left) * gatedActivation(op, gate);
+                    }
                 }
                 defer g.deinit();
                 out[0] = try reduceGradientToTags(result_tags, left_tags, ctx, &g, self.left_shape);
@@ -941,7 +947,7 @@ pub fn GatedBackward(
             if (needs_grad.len > 1 and needs_grad[1]) {
                 var g = try ctx.empty(self.result_shape[0..]);
                 for (gyd, left_data, right_data, g.data()) |grad, left, gate, *dst| {
-                    dst.* = grad * left * gatedActivationDerivative(op, gate);
+                    dst.* = grad * gatedSource(op, left) * gatedActivationDerivative(op, gate);
                 }
                 defer g.deinit();
                 out[1] = try reduceGradientToTags(result_tags, right_tags, ctx, &g, self.right_shape);
@@ -1372,6 +1378,7 @@ fn gatedActivation(comptime op: exec_mod.GatedOp, value: f32) f32 {
         .geglu => 0.5 * value * (1 + std.math.tanh(0.7978845608028654 * (value + 0.044715 * value * value * value))),
         // Inference-only op (DeepSeek V4); no training/backward path.
         .swiglu_clamp10 => @compileError("swiglu_clamp10 has no backward"),
+        .situ => 4.0 * std.math.tanh(value * 0.25) * sigmoid(value),
     };
 }
 
@@ -1387,6 +1394,43 @@ fn gatedActivationDerivative(comptime op: exec_mod.GatedOp, value: f32) f32 {
         },
         .swiglu_clamp10 => @compileError("swiglu_clamp10 has no backward"),
         .geglu => geluDerivative(value),
+        .situ => blk: {
+            // d/dg [4·tanh(g/4)·σ(g)] = (1 − tanh²(g/4))·σ(g)
+            //                          + 4·tanh(g/4)·σ(g)·(1 − σ(g))
+            const t = std.math.tanh(value * 0.25);
+            const s = sigmoid(value);
+            break :blk (1 - t * t) * s + 4.0 * t * s * (1 - s);
+        },
+    };
+}
+
+/// The gated pair's `up`-side transform and its derivative — the identity
+/// (and 1) for ops that use `up` linearly; `situ`'s 25·tanh(u/25) soft
+/// clamp otherwise. Comptime-identity keeps the classic ops' backward
+/// loops exactly as before.
+fn gatedSource(comptime op: exec_mod.GatedOp, value: f32) f32 {
+    return switch (op) {
+        .situ => 25.0 * std.math.tanh(value * 0.04),
+        else => value,
+    };
+}
+
+fn gatedSourceDerivative(comptime op: exec_mod.GatedOp, value: f32) f32 {
+    return switch (op) {
+        .situ => blk: {
+            const t = std.math.tanh(value * 0.04);
+            break :blk 1 - t * t;
+        },
+        else => 1,
+    };
+}
+
+/// Whether the op's `up`-side transform is the identity (its derivative a
+/// comptime 1) — selects the untouched two-operand backward loops.
+inline fn gatedSourceIsIdentity(comptime op: exec_mod.GatedOp) bool {
+    return switch (op) {
+        .situ => false,
+        else => true,
     };
 }
 

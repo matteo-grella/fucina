@@ -32,6 +32,7 @@ const DType = tensor.DType;
 const Tensor = tensor.Tensor;
 
 pub const MoeBatchProfile = exec_moe.MoeBatchProfile;
+pub const delta_attention = @import("exec/delta_attention.zig");
 pub const expert_store = @import("exec/expert_store.zig");
 
 pub const PackedMatmulFormat = backend_mod.PackedMatmulFormat;
@@ -2034,6 +2035,23 @@ pub const ExecContext = struct {
         return exec_matmul.matmul2DAdd(&self.rt, a, b, base);
     }
 
+    /// Fused delta-rule linear-attention recurrence (KDA; see
+    /// `exec/delta_attention.zig` for the equations and layouts).
+    pub fn kdaRecurrent(
+        self: *ExecContext,
+        q: *const Tensor,
+        k: *const Tensor,
+        v: *const Tensor,
+        g_raw: *const Tensor,
+        beta_raw: *const Tensor,
+        a_log: []const f32,
+        dt_bias: []const f32,
+        initial_state: ?*const Tensor,
+        scale_value: f32,
+    ) !delta_attention.KdaResult {
+        return delta_attention.kdaRecurrent(&self.rt, q, k, v, g_raw, beta_raw, a_log, dt_bias, initial_state, scale_value);
+    }
+
     pub fn matmul2DTyped(self: *ExecContext, comptime dtype: DType, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)) {
         return exec_matmul.matmul2DTyped(&self.rt, dtype, a, b);
     }
@@ -2409,5 +2427,6 @@ pub const ExecContext = struct {
 
 test {
     _ = @import("exec_tests.zig");
+    _ = @import("exec/delta_attention.zig");
     _ = @import("exec/expert_store.zig");
 }

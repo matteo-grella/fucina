@@ -997,7 +997,7 @@ pub fn gatedContiguousIntoUncheckedWithConfig(
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
-    for (z, x, y) |*dst, left, gate| dst.* = left * ops.gatedActivationScalar(op, gate);
+    for (z, x, y) |*dst, left, gate| dst.* = ops.gatedPairScalar(op, gate, left);
 }
 
 pub fn sumInto(out: *Tensor, a: *const Tensor) !void {

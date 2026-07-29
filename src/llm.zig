@@ -7,6 +7,12 @@ pub const qwen3 = struct {
     pub const model = @import("llm/qwen3/model.zig");
     pub const train = @import("llm/qwen3/train.zig");
 };
+/// Kimi-K3 (Kimi-Linear lineage: KDA + Gated-MLA-NoPE hybrid, latent MoE,
+/// attention residuals, SiTU). Files in `llm/kimi3/`.
+pub const kimi3 = struct {
+    pub const model = @import("llm/kimi3/model.zig");
+};
+
 /// Qwen3.5 Gated-DeltaNet hybrid. Files in `llm/qwen35/`.
 pub const qwen35 = struct {
     pub const model = @import("llm/qwen35/model.zig");
@@ -82,6 +88,7 @@ pub const data = @import("llm/data.zig");
 pub const unicode_categories = @import("llm/unicode_categories.zig");
 
 test {
+    _ = kimi3.model;
     _ = qwen3.model;
     _ = qwen3.train;
     _ = qwen35.model;

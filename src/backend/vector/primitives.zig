@@ -289,15 +289,15 @@ pub inline fn vecClamp(z: []f32, x: []const f32, min_value: f32, max_value: f32)
 pub inline fn vecGated(comptime op: ops.GatedOp, z: []f32, x: []const f32, y: []const f32) void {
     var i: usize = 0;
     while (i + 4 * vector_len <= z.len) : (i += 4 * vector_len) {
-        z[i..][0..vector_len].* = @as(Vf32, x[i..][0..vector_len].*) * gatedActivationVec(op, y[i..][0..vector_len].*);
-        z[i + vector_len ..][0..vector_len].* = @as(Vf32, x[i + vector_len ..][0..vector_len].*) * gatedActivationVec(op, y[i + vector_len ..][0..vector_len].*);
-        z[i + 2 * vector_len ..][0..vector_len].* = @as(Vf32, x[i + 2 * vector_len ..][0..vector_len].*) * gatedActivationVec(op, y[i + 2 * vector_len ..][0..vector_len].*);
-        z[i + 3 * vector_len ..][0..vector_len].* = @as(Vf32, x[i + 3 * vector_len ..][0..vector_len].*) * gatedActivationVec(op, y[i + 3 * vector_len ..][0..vector_len].*);
+        z[i..][0..vector_len].* = gatedSourceVec(op, x[i..][0..vector_len].*) * gatedActivationVec(op, y[i..][0..vector_len].*);
+        z[i + vector_len ..][0..vector_len].* = gatedSourceVec(op, x[i + vector_len ..][0..vector_len].*) * gatedActivationVec(op, y[i + vector_len ..][0..vector_len].*);
+        z[i + 2 * vector_len ..][0..vector_len].* = gatedSourceVec(op, x[i + 2 * vector_len ..][0..vector_len].*) * gatedActivationVec(op, y[i + 2 * vector_len ..][0..vector_len].*);
+        z[i + 3 * vector_len ..][0..vector_len].* = gatedSourceVec(op, x[i + 3 * vector_len ..][0..vector_len].*) * gatedActivationVec(op, y[i + 3 * vector_len ..][0..vector_len].*);
     }
     while (i + vector_len <= z.len) : (i += vector_len) {
-        z[i..][0..vector_len].* = @as(Vf32, x[i..][0..vector_len].*) * gatedActivationVec(op, y[i..][0..vector_len].*);
+        z[i..][0..vector_len].* = gatedSourceVec(op, x[i..][0..vector_len].*) * gatedActivationVec(op, y[i..][0..vector_len].*);
     }
-    while (i < z.len) : (i += 1) z[i] = x[i] * ops.gatedActivationScalar(op, y[i]);
+    while (i < z.len) : (i += 1) z[i] = ops.gatedPairScalar(op, y[i], x[i]);
 }
 
 pub inline fn applyUnaryVec(comptime op: ops.UnaryOp, value: Vf32) Vf32 {
@@ -403,6 +403,20 @@ pub inline fn gatedActivationVec(comptime op: ops.GatedOp, value: Vf32) Vf32 {
             const g = @min(value, ten);
             break :blk g * sigmoidVec(g);
         },
+        .situ => @as(Vf32, @splat(4)) * tanhVec(value * @as(Vf32, @splat(0.25))) * sigmoidVec(value),
+    };
+}
+
+/// Vector twin of `ops.gatedSourceScalar`: the gated pair's `up`-side
+/// transform (identity for the classic ops).
+pub inline fn gatedSourceVec(comptime op: ops.GatedOp, value: Vf32) Vf32 {
+    return switch (op) {
+        .swiglu_clamp10 => blk: {
+            const ten: Vf32 = @splat(10);
+            break :blk @min(@max(value, -ten), ten);
+        },
+        .situ => @as(Vf32, @splat(25)) * tanhVec(value * @as(Vf32, @splat(0.04))),
+        else => value,
     };
 }
 
