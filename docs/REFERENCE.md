@@ -151,8 +151,9 @@ API-level companion. Every Zig snippet is machine-verified against the tree
   - [14.4 Gemma 4 — text + MoE (`src/llm/gemma/`)](#144-gemma-4--text--moe-srcllmgemma)
   - [14.5 DiffusionGemma — block text-diffusion (`src/llm/diffusion_gemma/model.zig`)](#145-diffusiongemma--block-text-diffusion-srcllmdiffusion_gemmamodelzig)
   - [14.6 Parakeet ASR (`src/llm/parakeet/`)](#146-parakeet-asr-srcllmparakeet)
-  - [14.7 Example applications](#147-example-applications)
-  - [14.8 Example → features → run command](#148-example--features--run-command)
+  - [14.7 Kimi-K3 — KDA/MLA hybrid, architecture parity (`src/llm/kimi3/model.zig`)](#147-kimi-k3--kdamla-hybrid-architecture-parity-srcllmkimi3modelzig)
+  - [14.8 Example applications](#148-example-applications)
+  - [14.9 Example → features → run command](#149-example--features--run-command)
 
 ## 1. Introduction and mental model
 
@@ -182,8 +183,8 @@ The build exposes two library modules (§2):
 - **`fucina_llm`** (`src/llm.zig`) — the model stack built on top: GGUF
   weight binding, KV caches, tokenizers, samplers, chat sessions,
   speculative decoding, and the model families (Qwen3, Qwen3.5, Gemma 4,
-  DiffusionGemma, DeepSeek V2/V3, GLM-4.5, DeepSeek V4 Flash, Inkling,
-  Parakeet ASR).
+  DiffusionGemma, DeepSeek V2/V3, GLM-4.5, DeepSeek V4 Flash, Kimi-K3,
+  Inkling, Parakeet ASR).
 
 Applications (`examples/`, `tools/`, `bench/`) sit above both.
 
@@ -411,7 +412,7 @@ the launched program.
 | --- | --- |
 | `test` | Runs the unit tests of all nine test roots (§2.7). No model assets needed. |
 | `test-fucina` | Runs the `fucina`-root unit tests only (the routine `-Dbackend=scalar` leg); the full `test` matrix stays the pre-merge gate. |
-| `bench-check` | Compiles the bench executables without running them (all but the `bench-packed-gemm`/`bench-gpu-dispatch`/`bench-gpu-formats` mains, which only their own run steps build) — the cheap gate that keeps the bench suite building (bench mains are otherwise reachable only through their run steps). |
+| `bench-check` | Compiles the bench executables without running them (all but the `bench-packed-gemm`/`bench-gpu-dispatch`/`bench-gpu-formats`/`bench-train-step`/`bench-q8gemv` mains, which only their own run steps build) — the cheap gate that keeps the bench suite building (bench mains are otherwise reachable only through their run steps). |
 | `arch-check` | Builds and runs `tools/check_import_graph.zig`: the production (non-test) `src/**/*.zig` import graph must have zero strongly-connected components. AST-based and test-aware — imports reachable only from `test` decls or test-only private helpers are not counted. |
 | `doc-check` | Builds and runs `tools/check_doc_links.zig`: every backtick-quoted `*.md` in `AGENTS.md`'s "## Doc index" section (root docs, `docs/<name>.md`, and per-example `examples/<name>/README.md`) must exist on disk; `docs/RUNNING-MODELS.md` is additionally scanned for `examples/<name>/README.md` references. |
 | `snippet-check` | Builds and runs `tools/gen_snippet_tests.zig`: every runnable ```zig snippet in this document (a fenced block with a column-0 named `test "..."`) is extracted into a generated test root and run against the real `fucina`/`fucina_llm` modules with the build's option set — a snippet that stops compiling or asserting fails the gate (conventions in §2.7). |
@@ -434,7 +435,7 @@ in the per-example `examples/<name>/README.md` and §14):
 | `deepseek4` | DeepSeek V4 Flash GGUF inference (CSA/HCA + streamed experts). |
 | `inkling` | Inkling (hybrid rel-bias attention + MoE) GGUF inference / parity harness. |
 | `nanochat` | nanochat port (karpathy/nanochat): tok-train / base-train / sft / eval-bpb / chat. |
-| `lmserve` | OpenAI-compatible HTTP server (chat completions + responses; SSE streaming; JSON-schema constrained output with `-Dllguidance=true`) over qwen3/gemma4/diffusion-gemma GGUFs + nanochat checkpoints. Links libc. |
+| `lmserve` | OpenAI- and Anthropic-compatible HTTP server (chat completions, responses, and `/v1/messages`; SSE streaming; hermes function calling on qwen3-family models in all three dialects; opt-in `--spec` speculative and `--batch` lockstep decode; JSON-schema constrained output with `-Dllguidance=true`) over qwen3/qwen35/gemma4/diffusion-gemma/inkling GGUFs + nanochat checkpoints. Links libc. |
 | `parakeet` | Parakeet ASR: WAV → text, `--stream`/`--manifest`/`--mic` (needs `-Dparakeet-mic`), `--compare` parity harness. |
 | `omnivoice` | OmniVoice MaskGIT TTS: voice cloning/design, codec encode/decode. |
 | `locate-anything` | LocateAnything-3B open-vocabulary detection: detect/info, exit-code parity gates, bench. |
@@ -449,8 +450,8 @@ in the per-example `examples/<name>/README.md` and §14):
 | `es-spirals` | Two-spirals MLP trained from scratch by ES (self-verifying). |
 | `es-ternary-spirals` | Ternary-native ES on packed TQ2_0 layers (training state = the int8 inference model; see [`TERNARY.md`](TERNARY.md)). |
 | `ptqtp-spirals` | Self-verifying PTQTP acceptance demo: float-trains an MLP, decorates it post-training with dual trit-planes, asserts accuracy holds on the deployed int8 path (§10.9, [`PTQTP.md`](PTQTP.md)). |
-| `ptqtp-qwen3` | Decorate a Qwen3 GGUF's linears in place (any source dtype; `--planes 1\|2\|3`, `--down-planes/--o-planes`, `--skip-first/--skip-last`, `--head-planes`) with teacher-forced NLL before/after and greedy completion + decode timing; `--save FILE` persists the decorated model as a GGUF that reloads bitwise through the ordinary loaders (§13.2.1, [`PTQTP.md`](PTQTP.md)). |
-| `export-gguf` | `tools/export_gguf.zig`: GGUF re-emit/transcode (`--dtype f16/bf16/f32/q8_0/q4_k/q5_k/q6_k/tq2_0/verbatim`, `--experts-dtype` override), merge of Fucina LoRA adapters into dense weights (`--adapters`), or shard-streaming PTQTP quantization (`--ptqtp[=K]`, one tensor at a time — models bigger than RAM; docs/PTQTP.md); see §12. |
+| `ptqtp-qwen3` | Decorate a Qwen3 GGUF's linears in place (any source dtype; `--planes 1\|2\|3`, `--down-planes/--o-planes`, `--skip-first/--skip-last`, `--head-planes`, `--tie-scales`) with teacher-forced NLL before/after and greedy completion + decode timing; `--save FILE` persists the decorated model as a GGUF that reloads bitwise through the ordinary loaders (§13.2.1, [`PTQTP.md`](PTQTP.md)). |
+| `export-gguf` | `tools/export_gguf.zig`: GGUF re-emit/transcode (`--dtype f16/bf16/f32/q8_0/q4_k/q5_k/q6_k/tq2_0/verbatim`, `--experts-dtype` override), merge of Fucina LoRA adapters into dense weights (`--adapters`), or shard-streaming PTQTP quantization (`--ptqtp[=K]`, `--ptqtp-tie`, one tensor at a time — models bigger than RAM; docs/PTQTP.md); see §12. |
 
 **Microbenchmarks** (all in `bench/`; run under `-Doptimize=ReleaseFast`;
 protocol and thermal discipline in [`BENCHMARK.md`](BENCHMARK.md)):
@@ -467,11 +468,14 @@ protocol and thermal discipline in [`BENCHMARK.md`](BENCHMARK.md)):
 | `bench-backend` | Scalar vs native backends on representative ops. |
 | `bench-f16gemm` | f16 TransB GEMM parallel efficiency (Qwen3 shapes). |
 | `bench-gemm` | Large-shape f32 GEMM: row kernels vs blocked packed kernel vs BLAS. |
+| `bench-train-step` | End-to-end GPT autograd training step (embed, blocks, cross-entropy, backward, AdamW) on a fixed synthetic sequence (`bench/train_step.zig`); `--inference` times the eval-mode forward alone; `--dump <dir>` writes weights/tokens/rope so `tools/torch_train_step.py` runs the identical model in PyTorch. |
 | `bench-packed-gemm` | Pack-once dense GEMM at skinny-m inference shapes (`bench/packed_gemm.zig`). |
 | `bench-gpu-dispatch` | CPU CBLAS vs blocking/async eager GPU GEMM/GEMV: host-visible latency, submit latency, queued throughput, and parity. |
 | `bench-gpu-formats` | Fucina f16/load-time-packed quant CPU kernels vs eager GPU f16/Q4_K/Q5_K/Q6_K/Q8_0 LLM linears: host-visible latency, submit latency, queued throughput, and parity (Q5_K is CUDA-only). |
 | `bench-q5kmoe` | Q5_K MoE-expert matmul variants. |
-| `bench-ternary` | TQ2_0 ternary matmul: hot sdot/vpdpbusd tiles vs cold table path, f32 path, Q4_K, dense f32. |
+| `bench-q8gemv` | q8_0 skinny-m decode GEMV: per-row vs x4 interleaved vs lane-packed LHS (`bench/q8gemv.zig`). |
+| `bench-ternary` | TQ2_0 ternary matmul: hot sdot/vpdpbusd tiles vs x4 interleaved pack (A/B pair) vs cold table path, f32 path, Q4_K, dense f32; prints weight-stream GB/s and `%ceil` of the measured single-thread DRAM ceiling. |
+| `bench-membw` | Measured DRAM read-bandwidth ceiling: single-thread + all-core roofline probe (`bench/membw.zig`); `bench-ternary` reports each kernel's `%ceil` against it. |
 | `bench-facade` | Raw tensor ops vs the public no-grad `Tensor` facade. |
 | `bench-einsum` | `einsum` vs hand-written dot/permute contraction pipelines (parity + advantage cases). |
 
@@ -514,11 +518,13 @@ with `b.addModule`; executables get private root modules via
   seam, so there is exactly one copy of the backend/exec types.
 - **`bench_raw`** — root `src/bench_raw.zig`, same options. Internal raw
   tensor surface (`RawTensor`, `ExecContext`, `optim`) for
-  `bench/{mlp,optim,ce,conv,scatter,backward_diamond,attention_backward,facade,einsum}.zig`.
+  `bench/{mlp,optim,ce,conv,scatter,backward_diamond,attention_backward,train_step,facade,einsum}.zig`.
   Not part of the public facade — the root export guard in `src/fucina.zig`
   makes `fucina.RawTensor` a compile error.
 - **`raw_backend`** — root `src/backend.zig`, same options. Direct kernel
-  access for `bench/{backend,f16gemm,gemm,packed_gemm,gpu_dispatch,gpu_formats,q5kmoe,ternary}.zig`. The
+  access for `bench/{backend,f16gemm,gemm,packed_gemm,gpu_dispatch,gpu_formats,q5kmoe,q8gemv,ternary}.zig`
+  (`bench/membw.zig` imports neither module — the bandwidth probe is
+  standalone). The
   `bench-backend` executable additionally receives a second options module
   named `bench_options` (`native_blas_kind: BlasKind`,
   `native_uses_blas: bool`, `native_blas_threads: u32`) so it can label its
@@ -542,7 +548,8 @@ Only eight files outside tests import it, all inside the `fucina` module:
 `src/parallel.zig`, `src/backend.zig`, `src/backend/native.zig`,
 `src/backend/gpu.zig`, `src/backend/metal.zig`, `src/backend/cuda.zig`,
 `src/exec/reduce.zig`, `src/exec/matmul.zig` (a `src/ag/tensor_tests.zig`
-test also branches on `vector_scan`). The parakeet executable and
+test also branches on `vector_scan`, and a `src/exec_tests.zig` test skips
+on `use_gpu`). The parakeet executable and
 its test root get their *own* single-key `build_options`
 (`parakeet_mic: bool`) — the name collides deliberately; the example reads
 its key, the library module keeps its full set.
@@ -674,8 +681,8 @@ values. On Linux without libc the lookup scans `/proc/self/environ`
 
 | Variable | Effect | Default |
 | --- | --- | --- |
-| `FUCINA_MAX_THREADS` | Lowers the worker count below the `-Dmax-threads` ceiling (mirrors llama.cpp `-t`). Never raises it. Consulted on the first `cpuThreadCount` call; a prior `setMaxThreads` wins. | unset (detected CPU count, capped by the ceiling) |
-| `FUCINA_SPIN_BUDGET` | Overrides the worker-team spin-then-park window (`src/thread.zig` BarrierPool). Read once per pool init. Workload-coupled; the default is deliberate. | unset (built-in budget) |
+| `FUCINA_MAX_THREADS` | Lowers the worker count below the `-Dmax-threads` ceiling (mirrors llama.cpp `-t`). Never raises it. Consulted on the first `cpuThreadCount` call; a prior `setMaxThreads` wins. | unset (detected CPU count — clamped to physical cores on SMT hosts and to performance cores on Apple Silicon — capped by the ceiling) |
+| `FUCINA_SPIN_BUDGET` | Overrides the worker-team spin-then-park window (`src/thread.zig` BarrierPool; `0` = park immediately is a valid override, values above `u32` are ignored). Read once per pool init. Workload-coupled; the default is deliberate. | unset (32768 spins; `0` when the team exceeds the physical-core count — spinning while oversubscribed starves the descheduled participants) |
 | `FUCINA_POOL_PROFILE=1` | Emits one `[pool-trace]` line per `BarrierPool` dispatch with span, claim chunk, and each participant's first-claim/completion offsets and task count. Diagnostic only; read once when the team is created. | off |
 | `FUCINA_WINOGRAD=1` / `FUCINA_NO_WINOGRAD=1` | Force the Winograd conv2d route on/off (A/B + emergency revert switches). | on for no-BLAS builds, off when a platform BLAS backs the matmul |
 | `FUCINA_NO_WINOGRAD_F4=1` | Pins Winograd-routed large maps to the F(2×2,3×3) tier. | F4 tier enabled |
@@ -683,6 +690,7 @@ values. On Linux without libc the lookup scans `/proc/self/environ`
 | `FUCINA_WINOGRAD_F4_MAXCIN` | Maximum input channels for the F4 tier (deep-channel maps run faster on F2). | `56` |
 | `FUCINA_NO_CONV_BWD_GEMM=1` | Pins the `groups == 1` conv2d backward entries to the direct gather kernels instead of the GEMM (matmul + im2col/col2im) decomposition (A/B + emergency revert switch). | GEMM route on |
 | `FUCINA_ATTN_BWD_STATS=1` / `FUCINA_NO_ATTN_BWD_STATS=1` | Force the forward-saved-stats route of the attention-backward softmax reconstruction (`src/exec/attention.zig`) on/off (A/B + emergency revert switches) — the two routes agree to f32 roundoff, not bitwise; only consulted when the autograd record saved forward stats (the stats-less exec path always recomputes). | on |
+| `FUCINA_NO_ATTN_BWD_BLAS=1` | Reverts the attention-backward contraction tiles from the BLAS-strip route (the per-tile contractions issued as strided sgemm strips) to the register-tiled route (`src/exec/attention.zig`; A/B + escape hatch for parity work) — the two routes agree to f32 roundoff, not bitwise. Only consulted on BLAS-backed native builds; elsewhere the register-tiled route always runs. | BLAS-strip route on (BLAS builds) |
 | `FUCINA_CPU_F32_SHADOW=1` | Opt-in (`src/exec/matmul.zig`): attaches a widen-once f32 shadow to a 16-bit weight's storage and routes m ≥ 32 GEMMs through the BLAS f32 path (decode stays on the streaming kernels). +4 bytes/weight resident; leave off when training 16-bit weights in place. CPU builds only. | off |
 | `FUCINA_CPU_F32_SHADOW_MIN_M` | Overrides the shadow route's m ≥ 32 crossover. | `32` |
 
@@ -722,8 +730,9 @@ values. On Linux without libc the lookup scans `/proc/self/environ`
 | Variable | Effect | Default |
 | --- | --- | --- |
 | `FUCINA_NORM_QUANT_FUSED=1` / `FUCINA_NO_NORM_QUANT_FUSED=1` | Force the fused normalize+quantize+packed-GEMM route of `linearSeqNormed` on/off (prefill shapes on the packed CPU arms only; the fused route matches the unfused `rmsNormMul` + linear pair to f32 roundoff, not bitwise). | on |
-| `FUCINA_Q5K_DECODE_COMPACT=1` / `FUCINA_NO_Q5K_DECODE_COMPACT=1` | Route decode-shape (m < 4) no-grad Q5_K matmuls through the GGUF-native compact blocks instead of the byte-expanded packed layout — bitwise-equal, ~1.57× fewer weight bytes streamed. | on on x86_64, off elsewhere |
-| `FUCINA_Q6K_DECODE_COMPACT=1` / `FUCINA_NO_Q6K_DECODE_COMPACT=1` | The same switch for Q6_K (1.30× byte ratio). | on on x86_64, off elsewhere |
+| `FUCINA_Q4K_DECODE_COMPACT=1` / `FUCINA_NO_Q4K_DECODE_COMPACT=1` | Route decode-shape (m < 4) no-grad Q4_K matmuls through the GGUF-native compact blocks instead of the byte-expanded packed layout — bitwise-equal, ~1.92× fewer weight bytes streamed. | on |
+| `FUCINA_Q5K_DECODE_COMPACT=1` / `FUCINA_NO_Q5K_DECODE_COMPACT=1` | The same switch for Q5_K (~1.57× byte ratio). | on |
+| `FUCINA_Q6K_DECODE_COMPACT=1` / `FUCINA_NO_Q6K_DECODE_COMPACT=1` | The same switch for Q6_K (1.30× byte ratio). | on |
 | `FUCINA_NO_FUSED_DISTILL=1` | Forces the composed logits + `cartridge.distillLoss` tail instead of the fused distill route in cartridge training (`src/llm/qwen3/train.zig`; A/B + emergency revert — the fused route matches it to f32 roundoff, not bitwise). | fused route on |
 | `FUCINA_MM_PROFILE=1` | Per-stage timing profile of the Inkling multimodal-projector encode (`src/llm/inkling/mmproj.zig`; read once at load). | off |
 
@@ -741,7 +750,7 @@ values. On Linux without libc the lookup scans `/proc/self/environ`
 ### 2.7 Test organization (`src/`, `examples/`)
 
 Tests live in **sibling `*_tests.zig` files** next to the production file
-they cover (155 of them across `src/` and `examples/`): `exec.zig` ↔
+they cover (157 of them across `src/` and `examples/`): `exec.zig` ↔
 `exec_tests.zig`, `src/llm/tokenizer.zig` ↔ `src/llm/tokenizer_tests.zig`,
 and so on. The production file pulls its sibling in with a forwarding
 stanza, so analyzing the production file analyzes its tests:
@@ -1916,7 +1925,7 @@ methods are documented above; §4 covers every math/NN op in depth.
 `fastTanh`, `softcap30`, `softcap15`, `gelu`, `quickGelu`, `elu`, `geluErf`,
 `floor`, `ceil`, `round`, `sign`, `reciprocal`, `clamp`, `clampMin`, `clampMax`,
 `maximum`, `minimum`, `pow`, `isnan`, `isinf`, `isfinite`,
-`dropout`, `gated`, `glu`, `swiglu`, `geglu`, `splitGated`, `sum`, `mean`,
+`dropout`, `gated`, `glu`, `swiglu`, `geglu`, `situ`, `splitGated`, `sum`, `mean`,
 `cumsum`, `prod`, `cumprod`, `linearRecurrence`, `variance`,
 `standardizeAxis`, `sumAll`,
 `sumMany`, `any`, `all`, `anyAll`, `allAll`, `norm`, `normAll`,
@@ -1927,7 +1936,7 @@ methods are documented above; §4 covers every math/NN op in depth.
 `groupNorm`, `crossEntropy`, `crossEntropyExt`, `linearCrossEntropyExt`, `linearDistillExt`,
 `mseLoss`, `huberLoss`,
 `bceLoss`, `klDivLoss`, `nllLoss`, `l2Normalize`, `cosineSimilarity`,
-`rope`, `matmul`, `dot`, `einsum`, `dotTernarySte`, `packRhs`, `dotPacked`,
+`rope`, `matmul`, `dot`, `addDot`, `einsum`, `dotTernarySte`, `packRhs`, `dotPacked`,
 `rmsNormMulDotPacked`,
 `splitSwiGluDotPacked`, `gegluQuantDotPacked`, `groupedAttention`,
 `conv2d`, `conv2dRelu`, `prepareConv2dWeights`, `conv2dPrepared`,
@@ -2275,6 +2284,17 @@ owned contiguous results; `extra` is captured **by value** in the backward
 node (the `customVjp` lifetime contract: pointees must outlive backward).
 Validate a new `Op` with `fucina.gradcheck` (§5.7).
 
+An `Op` may additionally declare vector twins over `fucina.simd.Vf32`
+lanes — `forwardVec`/`backwardVec` (unary), `forwardVec` plus
+`backwardAVec`/`backwardBVec` (binary) — and the kernels then run those on
+full vectors with the scalar rules on the tail (the built-in kernels'
+lane/tail split). Bodies containing transcendentals want this: a scalar
+rule compiles to one libm call per element, where a vector body can use
+the `fucina.simd` helpers (`vexpf`, `sigmoidVec`, `tanhVec`; `vector_len`
+is the lane count — §9.4). The scalar and vector rules must compute the
+same function; lane/tail rounding may differ exactly as it does in the
+built-ins.
+
 ```zig
 test "elementalUnary" {
     const alloc = std.testing.allocator;
@@ -2305,12 +2325,15 @@ pub fn splitGated(self, ctx, comptime op: GatedOp, comptime tag: Tag, comptime o
     !Tensor(replaceTag(tags, tag, out_tag))
 ```
 
-`exec.GatedOp` is `{ .glu, .swiglu, .geglu, .swiglu_clamp10 }`. The
+`exec.GatedOp` is `{ .glu, .swiglu, .geglu, .swiglu_clamp10, .situ }`. The
 two-operand form computes `self * act(other)` — the **second** operand is
 the gate — with the same tag-broadcast rule as §4.2: `glu` =
 `self·sigmoid(other)`, `swiglu` = `self·silu(other)`, `geglu` =
-`self·gelu(other)` (tanh approximation; Gemma's GeGLU).
-`glu`/`swiglu`/`geglu` are direct aliases of `gated(..., op)`.
+`self·gelu(other)` (tanh approximation; Gemma's GeGLU). `.situ` (Kimi
+K3's SiTU) is the one member that also transforms the up side:
+`25·tanh(self/25) · 4·tanh(other/4)·sigmoid(other)` — a soft-bounded SiLU
+gate (beta 4) on a soft-clamped up input (linear beta 25).
+`glu`/`swiglu`/`geglu`/`situ` are direct aliases of `gated(..., op)`.
 Differentiable in both operands. `.swiglu_clamp10` (DeepSeek V4's clamped
 SwiGLU: the gate is `min(gate, 10)` before SiLU, `up` is clamped to
 `[-10, 10]`) is inference-only — it has no backward and no split kernel,
@@ -2321,8 +2344,9 @@ MoE entries (§4.18).
 fused kernel; the gate-half conventions differ deliberately (ggml parity):
 `.swiglu` gates with the **first** half (`silu(first)·second`), `.glu` with
 the **second** (`first·sigmoid(second)`). `out_tag == tag` is allowed.
-`.geglu` is a compile error (no split-geglu kernel exists). Differentiable
-in `self`.
+`.geglu` and `.situ` are compile errors (no split kernel exists for
+either; K3 projects gate and up separately — use the pointwise `situ`).
+Differentiable in `self`.
 
 ```zig
 test "gated pointwise and split-gated" {
@@ -2510,6 +2534,11 @@ returns the scalar `Tensor(.{})`.
   Composed from existing differentiable ops (scope-required under
   gradients); like torch, the `.l2` gradient at an all-zero vector is NaN
   (`sqrt'(0)`).
+
+Related (exec-level): `ctx.kdaRecurrent` (`src/exec/delta_attention.zig`)
+is the fused, stateful counterpart of this scan family — the delta-rule
+linear-attention recurrence the kimi3 model family mixes sequences with;
+it lives with the attention entries, §4.13.
 
 Dtype policy: on the f32 facade everything is f32 in and out. On the typed
 constant tensors (§4.19) reductions widen per `outputDType(.reduction, ·)` —
@@ -2985,9 +3014,9 @@ gradient).
 
 Two log-domain companions (max-shifted for stability, torch semantics),
 FUSED single-node kernels sharing softmax's row machinery — SIMD max scan
-+ vexpf sum per row, task-parallel over rows, scalar strided fallback on
-non-last axes; no materialized intermediates and no exec-scope
-requirement:
++ vexpf sum per row, task-parallel over rows, streaming inner-lane kernels
+on non-last axes (lane-split across tasks, identical semantics — §9.4);
+no materialized intermediates and no exec-scope requirement:
 
 - `logsumexp(ctx, tag)` — `log(Σ exp(x))` with the tag removed
   (torch.logsumexp). Rows whose max is ±inf are shifted by 0 instead, so
@@ -3208,6 +3237,24 @@ Related: `relposShift(ctx, t_k, out_tags)` — Transformer-XL relative-shift
 ("skew") of a rank-3 `[H, Tq, P]` score tensor to `[H, Tq, Tk]` with
 `out[h,q,j] = self[h, q, j+(Tq−1)−q]` (`P >= Tk+Tq−1`); differentiable
 (scatter VJP).
+
+Below the tag facade, `ExecContext.kdaRecurrent`
+(`src/exec/delta_attention.zig`) is the fused delta-rule linear-attention
+sequence recurrence (Kimi Delta Attention, the kimi3 family's sequence
+mixer). Inputs are the post-convolution projections — `q`/`k`
+`[seq, heads, k_dim]`, `v` `[seq, heads, v_dim]`, `g_raw`
+`[seq, heads, k_dim]` (pre-gate low-rank decay), `beta_raw` `[seq, heads]`
+(pre-sigmoid) — plus `a_log` (length `heads` for per-head or `k_dim` for
+per-channel decay), `dt_bias` (`heads·k_dim`), an optional
+`[heads, k_dim, v_dim]` initial state, and a scale (`<= 0` selects the
+default `k_dim^(−1/2)`). Per token, q/k are l2-normalized, each head's
+`[k_dim, v_dim]` state decays along K by
+`exp(−exp(A_log)·softplus(g + dt_bias))`, the `sigmoid(beta)`-weighted
+delta-rule update lands, and the output row is read out. Returns
+`exec.delta_attention.KdaResult` — `o` `[seq, heads, v_dim]` plus the
+final state (the decode-resume seed), one `deinit()` releasing both. Work
+splits by whole heads (single writer per output row — bitwise identical
+for any task count); inference-only, no backward record.
 
 ```zig
 test "groupedAttention over a single cached position returns v" {
@@ -3504,12 +3551,19 @@ even under an exec scope (§6.3): pair them with `deinit` — an f32
 `values` arm of the same call remains a scope-owned borrow.
 
 - `argmax(ctx, tag)` — indices of the per-row maximum, tag removed, as
-  `Tensor(.{ .dtype = .i64, .tags = ... })`. **No-grad by design** (like
+  `Tensor(.{ .dtype = .i64, .tags = ... })`. NaN never wins (comparisons
+  drop NaN): the winner is the maximum over the non-NaN elements, and an
+  all-NaN row falls back to index 0 — documented divergence from
+  `torch.argmax`, which propagates NaN. **No-grad by design** (like
   sampling).
 - `topK(ctx, tag, k, out_tag)` — returns `TopKResult(replaceTag(tags, tag, out_tag))`,
   a struct of `values` and `indices` with a single `deinit()` releasing
-  both. `values` **is** differentiable (the gradient scatters back through
-  the saved indices); `indices` is a constant i64 tensor.
+  both. NaN never places (it fails the descending-slot admission test); a
+  row with fewer than `k` non-NaN elements leaves its unfilled tail slots
+  at value −inf, index 0 — documented divergence from `torch.topk`, which
+  treats NaN as greater than every number. `values` **is** differentiable
+  (the gradient scatters back through the saved indices); `indices` is a
+  constant i64 tensor.
 - `sort(ctx, tag, descending)` — full sort (`TopKResult(tags)`): values +
   source index per output position. **Unstable** sort; NaN sorts **last**
   regardless of direction (documented divergence from `torch.sort`, which
@@ -3769,10 +3823,14 @@ through the disk-backed expert store (`src/exec/expert_store.zig`)
 instead of one resident buffer). The `ptqtp` arm holds K ∈ {1..3} tq2_0
 plane stacks (PTQTP experts, §10.9): the fused op runs the ternary tile
 once per plane and sums per element in fixed plane order before the gated
-nonlinearity — bitwise the dense fused PTQTP linear on the same weights —
-and the streamed tier gathers a `ProjSpec` with `plane_count`/
-`plane_offsets` pointing at the persisted `<name>.ptqtpK` sibling tensors
-(§13.2.1).
+nonlinearity — bitwise the dense fused PTQTP linear on the same weights.
+Tie-fitted K = 2 stacks (§10.9, `--ptqtp-tie`) additionally carry the
+4-bit folded pack (`MoePtqtpRhs.folded`, expert-major); when present, the
+expert dot runs the one-pass folded kernel instead of two plane passes.
+The streamed tier gathers a `ProjSpec` with `plane_count`/`plane_offsets`
+pointing at the persisted `<name>.ptqtpK` sibling tensors (§13.2.1), and
+`ProjSpec.fold` folds the two plane row-blocks into the pack on the way
+into the slab (disk layout unchanged).
 `moeExpertFfn` computes the route-weighted sum over the selected experts of
 `down(act(gate(x), up(x)))` for a single token; `moeExpertFfnBatch` is the
 batched-prefill variant taking the per-token `selected`/`weights` produced
@@ -3790,12 +3848,26 @@ expert tier behind the `streamed` arm: `fucina.ExpertStore`
 (`create`/`destroy`, `addLayer`/`finalize`) opens the GGUF part files and
 resolves expert blocks through a pinned → LRU → `pread` hierarchy inside
 a caller-driven `acquire`/`release` window, so MoE models larger than RAM
-decode against the same kernels as the resident arms. `streamedRhs` hands
-out the per-projection `StreamedMoeRhs` handle the `streamed` arm wraps;
-`pilotHint` enqueues router-lookahead readahead on a dedicated I/O thread;
-`saveUsage` persists the expert-usage histogram to a `<gguf>.experts`
-sidecar that auto-pin turns into a pinned hot tier at the next startup,
-and `repinPass` adapts that tier live at generation boundaries.
+decode against the same kernels as the resident arms. Demand-miss reads
+fan out across a persistent I/O worker pool (`Options.io_workers`, default
+8; the acquiring thread drains the same batch; `0` = sequential on the
+calling thread), and `addMirror` attaches additional full copies of the
+split GGUF before `finalize` — typically on other drives, with a per-copy
+weight setting its read share relative to the primary's 1 — so expert
+reads split across every copy. `Options.uncached` opens the store and
+mirror fds uncached (macOS `F_NOCACHE`; no-op on Linux): a streamed giant
+reads more than RAM per token, so page-caching those reads only evicts
+the mmapped dense weights. `streamedRhs` hands out the per-projection
+`StreamedMoeRhs` handle the `streamed` arm wraps; `pilotHint` enqueues
+router-lookahead readahead on a dedicated I/O thread; `cacheRouteTopK` —
+active only when `Options.cache_route: ?CacheRouteOptions` was set — is
+opt-in cache-aware top-k selection (max-rank): the true top-`sacred`
+ranks are always taken and the remaining slots prefer already-resident
+experts among the top-`window` ranks (it changes routing, so callers opt
+in explicitly, and `Stats` reports the swap rate); `saveUsage` persists
+the expert-usage histogram to a `<gguf>.experts` sidecar that auto-pin
+turns into a pinned hot tier at the next startup, and `repinPass` adapts
+that tier live at generation boundaries.
 
 ### 4.19 Math on non-f32 tensors (`src/ag/tensor.zig`)
 
@@ -4181,12 +4253,13 @@ but only for records that opt in through the vtable: `prefer_async_backward
 = true` (no in-tree record currently sets it) or an `estimated_work()` at or
 above `parallel.backward_async_work_threshold` (`256 * 1024 * 1024` work
 units; provided by the attention, causal-conv1d-family, gather,
-linear-cross-entropy, linear-distill, `Conv1d`/`Conv2d`, `Dot`, and ternary-STE-dot
-records). Node-level spawning is
+linear-cross-entropy, linear-distill, `Conv1d`/`Conv2d`, `Dot`, `AddDot`,
+and ternary-STE-dot records). Node-level spawning is
 additionally gated at comptime by `exec.parallel_dot_backward_branches`
 (native backend with BLAS, §9) — on scalar or no-BLAS builds every node runs
-inline on the calling thread. (`DotBackward` additionally parallelizes its
-two operand branches internally, via the context's dot-backward worker.)
+inline on the calling thread. (`DotBackward` and `AddDotBackward`
+additionally parallelize their two contraction branches internally, via
+the context's dot-backward worker.)
 `backwardGradSerial` forces `pool = null` so the whole pass is node-serial
 regardless; kernel-level `parallelChunks` parallelism *inside* a VJP is
 unaffected. Serial mode is required whenever a threadlocal guard must
@@ -4661,12 +4734,12 @@ Every differentiable facade op attaches a concrete VJP record from
 | Pointwise arithmetic | `add`, `sub`, `mul`, `div`, `maximum`, `minimum`, `pow`, `scale`, `addScalar`, `subScalar`, `divScalar`, `powScalar`, `biasAdd` | broadcast operands reduce gradients back to source tags; `maximum`/`minimum` split the gradient evenly on exact ties; `biasAdd`'s slice bias is constant |
 | Selection / masking | `where` (grads to both value operands), `maskedFill` (grad zeroed where filled), `clamp`, `dropout`, `bandPart`, `tril`, `triu` | `cond`/`mask` are non-grad; dropout regenerates its mask from `(seed, index)` in forward, backward, and recompute; the triangular family multiplies by a constant 0/1 band plane, so its VJP is the exact same-band mask |
 | Unary activations | `relu`, `leakyRelu`, `exp`, `sqrt`, `rsqrt`, `sigmoid`, `silu`, `log`, `log1p`, `neg`, `abs`, `sin`, `cos`, `tanh`, `fastTanh`, `softcap30`, `softcap15`, `gelu`, `quickGelu`, `elu`, `geluErf`, `floor`, `ceil`, `round`, `sign`, `reciprocal`, `unary`, `snake`, `prelu` | `prelu`/`snake` also differentiate their parameters; `floor`/`ceil`/`round`/`sign` have zero gradient a.e. (torch convention) |
-| Gated units | `gated`, `glu`, `swiglu`, `geglu`, `splitGated` | fused split+gate VJPs |
+| Gated units | `gated`, `glu`, `swiglu`, `geglu`, `situ`, `splitGated` | fused split+gate VJPs; `situ` differentiates both the soft-clamped up input and its soft-bounded SiLU gate |
 | Reductions / statistics | `sum`, `sumMany`, `sumAll`, `mean`, `variance`, `prod`, `cumsum`, `cumprod`, `linearRecurrence`, `logsumexp`, `standardizeAxis`, `norm`, `normAll`, `max`, `min`, `topK` (values arm), `sort` (values arm) | `max`/`min` route gradient to the first extremum (strict tie-break); `topK`/`sort` values scatter back through the saved indices; `linearRecurrence` differentiates input, decay, and initial state through one reverse scan (§4.7) |
 | Structure / views | `withTags`, `permuteTo`, `transpose`, `alignTo`, `insertAxis`, `squeeze`, `split`, `merge`, `reshape`, `viewWithStrides`, `materialize`, `contiguous`, `broadcastTo`, `flatten`, `narrow`, `select`, `slice`, `sliceStep`, `pad`, `zeroPad2d`, `constantPad2d`, `concat`, `stack`, `unbindInto`, `repeatAxis`, `flip`, `roll`, `rollBy`, `shiftBy`, `diagonal`, `trace`, `diag`, `diagEmbed`, `gather`, `indexSelect`, `takeAlongAxis`, `indexAdd`, `scatterAdd`, `scatter`, `maskedSelect`, `maskedScatter`, `setSlice`, `setRows`, `zeroSlice`, `zeroRows`, `relposShift`, `to` (f32/f16/bf16 targets, §3.8) | view VJPs scatter through the saved layout; `detach` deliberately cuts the graph |
 | Norms / softmax | `softmax` (all fused options; `.mask` must not require grad), `logSoftmax`, `rmsNorm`, `rmsNormMul`, `rmsNormMulAdd`, `rmsNormMulRopeHalfPrepared`, `layerNorm` (plain + affine), `groupNorm`, `l2Normalize`, `cosineSimilarity` | |
 | Losses | `crossEntropy`, `crossEntropyExt`, `linearCrossEntropyExt`, `linearDistillExt`, `mseLoss`, `huberLoss`, `bceLoss`, `klDivLoss`, `nllLoss` | `linearCrossEntropyExt` differentiates both the input and the classifier weight without materializing the logit gradient (§4.15) |
-| Contractions | `dot` (f32×f32: both operands; quantized RHS: lhs-only, the RHS is a frozen constant; f16/bf16 RHS: lhs always, plus an f32 dW when the RHS is a grad-requiring 16-bit variable), `einsum` (f32×f32: both operands; f16/bf16 RHS: same variable-RHS contract as dot; each gradient is itself an einsum — GEMM-lowered for every tag structure, broadcast over forward-summed axes; `DotBackward`/`ConstRhsDotBackward` delegate to the einsum records), `einsumMany` (composes binary einsum records), `matmul` (2-D GEMM `.plain`/`.trans_b`, batched bmm all kinds; rank-2 `.trans_a` is a compile error directing to `dot`), `dotTernarySte` (straight-through estimator: dx through the quantized weight, dW as-if-unquantized) | |
+| Contractions | `dot` (f32×f32: both operands; quantized RHS: lhs-only, the RHS is a frozen constant; f16/bf16 RHS: lhs always, plus an f32 dW when the RHS is a grad-requiring 16-bit variable), `einsum` (f32×f32: both operands; f16/bf16 RHS: same variable-RHS contract as dot; each gradient is itself an einsum — GEMM-lowered for every tag structure, broadcast over forward-summed axes; `DotBackward`/`ConstRhsDotBackward` delegate to the einsum records), `addDot` (the fused addmm: all three operands — the base gradient is the upstream gradient itself, shared as a view; the `a`/`b` gradients are the dot VJP contractions, with the same internal branch split as `dot`), `einsumMany` (composes binary einsum records), `matmul` (2-D GEMM `.plain`/`.trans_b`, batched bmm all kinds; rank-2 `.trans_a` is a compile error directing to `dot`), `dotTernarySte` (straight-through estimator: dx through the quantized weight, dW as-if-unquantized) | |
 | Convolutions / pooling | `conv1d`, `convTranspose1d`, `causalConv1d`, `groupedCausalConv1d`, `causalDepthwiseConv1d`, `conv2d`, `conv2dRelu`, `maxPool2d`, `avgPool2d`, `upsample2xNearest`, `unfold`, `fold`, `channelAffine` | `conv2d` differentiates input, weight, and bias; `conv2dRelu` falls back to the composed differentiable path when any operand requires grad; `unfold`/`fold` are exact adjoints of each other (im2col/col2im) |
 | Position / attention | `rope` (table and on-the-fly sources, both modes), `groupedAttention` | attention grad matrix: f32 KV = full q/k/v; f16 or q8_0 KV = q-only (caches are constants); `.bias` or multi-stream KV = inference-only (`error.UnsupportedGradient`) |
 
@@ -4789,6 +4862,7 @@ pub fn adoptScopeNodeAssumeCapacity(self: *ExecContext, node: *anyopaque,
 pub fn tryWorkPool(self: *ExecContext) !*thread.Pool
 pub fn workPool(self: *ExecContext) ?*thread.Pool
 pub fn dotBackwardWorker(self: *ExecContext) ?*thread.OneShotWorker
+pub fn pinRowwiseKernels(self: *ExecContext, on: bool) void
 pub fn classify(_: *const ExecContext, x: *const Tensor) LayoutClass
 pub fn replace(self: *ExecContext, old: anytype, new_value: anytype) @TypeOf(new_value)
 pub fn broadcastTo(self: *ExecContext, x: *const Tensor, shape: []const usize) !Tensor
@@ -4798,8 +4872,17 @@ pub fn broadcastToRank(self: *ExecContext, comptime rank: usize, x: *const Tenso
 `classify` buckets a raw tensor's layout into
 `LayoutClass = enum { contiguous, scalar, tail_broadcast, arbitrary }` — the
 dispatch key elementwise kernels use to pick a fast path. `broadcastTo` /
-`broadcastToRank` return zero-copy views (refcounted aliases, §6.2). The
-scope and pool methods are covered below.
+`broadcastToRank` return zero-copy views (refcounted aliases, §6.2).
+`pinRowwiseKernels(true)` pins every batched quant-matmul entry to the
+`m == 1` kernel numerics — the packed/plain entries run as independent
+single-row calls of themselves, the fused K-quant entries keep their
+per-row tail kernels for every row, and the batched MoE op skips the
+lane-packed Q8_Kx4 kernels — so a speculation verify batch produces
+logits bit-identical to sequential decode, the property that keeps deep
+speculative drafting lossless (§13.9). Batch matmul throughput is
+deliberately sacrificed while pinned; toggle it around the verify forward
+only (the backing `Runtime` field is `pin_rowwise_kernels`, false at
+`init`). The scope and pool methods are covered below.
 
 **MoE decode scratch** (`moe_scratch`, ops in `src/exec/moe.zig`). A
 grow-only, mutex-guarded scratch region backing the single-row MoE decode
@@ -5275,9 +5358,12 @@ The effective thread count is `parallel.cpuThreadCount(vector_max_threads)`
 = `max(1, min(count, vector_max_threads))`, where `count` is the
 `setMaxThreads` value verbatim when one was set (detection is bypassed),
 else the detected CPU count — clamped to the physical-core count on SMT
-machines, so hyperthreads are never double-booked; `setMaxThreads` remains
-the escape hatch for deliberate oversubscription — lowered by
-`FUCINA_MAX_THREADS`. No single
+machines, so hyperthreads are never double-booked, and further to the
+performance-core count on heterogeneous Apple Silicon (with E-cores
+enrolled, every fork-join barrier waits on the E-core stragglers; the QoS
+pin biases workers to P-cores but cannot guarantee placement — sizing the
+team to them does); `setMaxThreads` remains the escape hatch for
+deliberate oversubscription — lowered by `FUCINA_MAX_THREADS`. No single
 value wins every workload (measured: prefill fastest at all P-cores when
 cool, decode often faster one or two threads lower), hence the runtime
 knobs. The env parsers behind these knobs are themselves public:
@@ -5288,7 +5374,12 @@ Linux; unset/invalid/`0` ⇒ `null`), and `parallel.envSpinBudget()` is the
 `0` is a value, not "unset". `parallel.physicalCpuCount()` (macOS sysctl /
 Linux sysfs-topology-over-affinity; null where unknown; probed once and
 process-cached, first caller's affinity mask wins) is public as well — it
-is the count the oversubscription guard compares the team size against.
+is the count the oversubscription guard compares the team size against
+(deliberately the all-physical-cores reference, so a team sized between
+the P-core and all-cores counts is not treated as oversubscribed).
+`parallel.performanceCpuCount()` (Apple Silicon sysctl
+`hw.perflevel0.physicalcpu`; null elsewhere; same probe-once caching) is
+the count the team-size default clamps to on those machines.
 
 ```zig
 test "worker-team sizing knobs" {
@@ -5856,12 +5947,16 @@ Both operands are broadcast to the result shape as views, then the
 rank-matched ExecContext kernel runs (`addRank`/`subRank`/`mulRank`/`divRank`/
 `maxRank`/`minRank`,
 or `gatedRank` for `gatedPointwise`). `GatedOp` (§4) is
-`enum { glu, swiglu, geglu, swiglu_clamp10 }` and computes `left * σ(right)`,
-`left * silu(right)`, `left * gelu(right)`, and — for `.swiglu_clamp10` —
-`left * silu(min(right, 10))` respectively (the gate side only; the
-`up`-side clamp of §4.5's full clamped SwiGLU exists only in the fused MoE
-kernels, §4.18). The output is always
-a newly materialized contiguous tensor in result-tag order.
+`enum { glu, swiglu, geglu, swiglu_clamp10, situ }`; every member computes
+an `up`-side transform of `left` times a gate activation of `right`
+(`gatedSourceScalar` × `gatedActivationScalar`, `src/backend/ops.zig` —
+the source transform is the identity for the classic ops):
+`left * σ(right)`, `left * silu(right)`, `left * gelu(right)`,
+`clamp(left, ±10) * silu(min(right, 10))` for `.swiglu_clamp10` (§4.5's
+full clamped SwiGLU — the same pair the fused MoE kernels apply, §4.18),
+and `25·tanh(left/25) * 4·tanh(right/4)·σ(right)` for `.situ` (Kimi K3's
+SiTU: a soft-bounded SiLU gate over a soft-clamped up input). The output
+is always a newly materialized contiguous tensor in result-tag order.
 
 The shape half is exposed separately for callers that need it (VJPs, facade):
 
@@ -5876,7 +5971,7 @@ These report the **raw-rank** shape — a scalar result reports `{1}` — and
 perform the same dim-by-dim validation.
 
 On the facade this is `add`/`sub`/`mul`/`div`/`maximum`/`minimum` and
-`gated`/`glu`/`swiglu`/`geglu`; the result type is
+`gated`/`glu`/`swiglu`/`geglu`/`situ`; the result type is
 `Tensor(pointwiseResultTags(...))` (§4).
 
 ```zig
@@ -6882,6 +6977,7 @@ pub const internal = struct {
 | `enabled` | `bool` (comptime) | true on GPU builds (`-Dgpu=metal` or `-Dgpu=cuda`, §2): GPU GEMM offload is compiled in |
 | `has_quant_gemm` | `bool` (comptime) | provider implements dequant-in-kernel quantized GEMM (dense + grouped MoE). Loaders that reshape CPU representations for the GPU quant path key on this, **not** on `enabled` — a provider can be enabled while its quantized arms are still CPU-only |
 | `has_q5_k_quant` | `bool` (comptime) | provider additionally implements Q5_K dense/grouped quantized kernels (CUDA only at present, §9.9.2) |
+| `has_tq2_0_quant` | `bool` (comptime) | provider additionally implements the TQ2_0 dequant-in-kernel GEMM (Metal only at present, §9.9.1); the `.tq2_0` GPU offload arms and the ternary/PTQTP loader layouts key on it |
 | `allocResidentBytes` | `fn (len: usize) ?[]u8` | device-owned bytes for GPU-build loaders; `null` when unavailable (no device context, `len == 0`, or too large) |
 | `freeResidentBytes` | `fn (bytes: []const u8) void` | release bytes returned by `allocResidentBytes`; safe no-op when the device context is gone or the slice is foreign |
 | `traceEnabled` | `fn () bool` | opt-in dispatch tracing, enabled by `FUCINA_GPU_TRACE=1` |
@@ -7081,7 +7177,7 @@ The full method inventory, grouped (every name is a `Backend` method; the
 | 2-D conv / image | `conv2dInto`, `conv2dBackwardInputInto`, `conv2dBackwardWeightInto`, `im2colInto`, `col2imInto`, `pool2dInto`, `avgPool2dBackwardInto`, `maxPool2dBackwardInto`, `upsample2xNearestInto` |
 | Winograd transforms | `winogradF2WeightTransformInto`, `winogradF2InputTransformInto`, `winogradF2OutputTransformInto`, `winogradF4WeightTransformInto`, `winogradF4InputTransformInto`, `winogradF4OutputTransformInto` |
 | norm / activation kernels | `groupNormInto`, `groupNormBackwardInto`, `snakeInto`, `snakeBackwardInputInto`, `snakeBackwardParamsInto` |
-| dense GEMM | `matmulInto`, `matmul2DIntoUnchecked`, `matmul2DIntoUncheckedTyped`, `matmulTransAInto`, `matmulTransA2DIntoUnchecked`, `matmulTransBInto`, `matmulTransB2DIntoUnchecked`, `matmulTransB2DIntoUncheckedF16Operands`, `matmulTransB2DIntoUncheckedBf16Rhs` |
+| dense GEMM | `matmulInto`, `matmul2DIntoUnchecked`, `matmul2DAccIntoUnchecked`, `matmul2DIntoUncheckedTyped`, `matmulTransAInto`, `matmulTransA2DIntoUnchecked`, `matmulTransBInto`, `matmulTransB2DIntoUnchecked`, `matmulTransB2DIntoUncheckedF16Operands`, `matmulTransB2DIntoUncheckedBf16Rhs` |
 | batched GEMM | `matmulBatched2DIntoUnchecked`, `matmulBatchedTransA2DIntoUnchecked`, `matmulBatchedTransB2DIntoUnchecked` |
 | packed dense RHS | `packDenseMatmulRhsTyped`, `matmul2DIntoUncheckedPackedDenseRhs`, `packMatmulRhsTyped`, `matmul2DIntoUncheckedPackedRhsTyped` |
 | quantized RHS | `quantizeMatmulRhsBlockwiseI8`, `quantizeMatmulRhsQ4_0`, `quantizeMatmulRhsQ8_0`, `supportsQuantizedMatmulRhs`, `matmul2DQuantizedRhs`, `matmul2DQuantizedRhsQ8_0x4`, `matmul2DQuantizedRhsQ6_Kx4`, `matmul2DQuantizedRhsQ4_Kx4`, `matmul2DQuantizedRhsQ4_Kx8`, `matmul2DQuantizedRhsQ4_Kx2Mmla`, `matmul2DQuantizedRhsQ5_Kx8`, `matmul2DPackedQ8_0x4LhsRhs`, `matmul2DPackedPaddedQ8_0x4LhsRhs`, `matmulPackedQ4_Kx8Q8_Kx4Slice`, `matmulPackedQ4_Kx8RowsSlice`, `matmulPackedQ5_Kx8Q8_Kx4Slice`, `matmulPackedQ5_Kx8RowsSlice`, `matmulPackedQ6_Kx4RowsSlice` |
@@ -7117,7 +7213,10 @@ against: `ElementwiseOp` (`add, sub, mul, div, max, min`), `UnaryOp` (`relu,
 exp, sqrt, rsqrt, sigmoid, silu, log, log1p, softplus, neg, abs, sin, cos,
 tanh, fast_tanh, gelu, quick_gelu, softcap_30, softcap_15, gelu_quant, elu,
 gelu_erf, floor, ceil, round, sign, reciprocal`), `GatedOp` (`glu, swiglu,
-geglu, swiglu_clamp10`), and `CompareOp` (`eq, ne, lt, le, gt, ge` — exec-level only, no
+geglu, swiglu_clamp10, situ` — `situ` is Kimi K3's SiTU: the gate
+activation is `4·tanh(g/4)·sigmoid(g)`, a soft-bounded SiLU, and the up
+input is soft-clamped to `25·tanh(u/25)` before the multiply), and
+`CompareOp` (`eq, ne, lt, le, gt, ge` — exec-level only, no
 backend kernel), plus the scalar reference semantics (`unaryScalar`,
 `gatedActivationScalar`, `compareScalar` with IEEE-754 NaN rules, and `erff`,
 a faithful musl translation so `gelu_erf` matches `ggml_vec_gelu_erf_f32`).
@@ -7173,7 +7272,7 @@ comptime by `std.simd.suggestVectorLength(f32) orelse 4` — 4 lanes on NEON,
 | Module | Contents |
 |---|---|
 | `vector/common.zig` | shared leaf: `ParallelConfig`, `V*` width aliases, thread-count gates, contiguous-data accessors |
-| `vector/primitives.zig` | `@Vector` leaves: `vecAdd/Sub/Mul/Scale/AddScaled`, `vecUnary/AddUnary/LeakyRelu/Clamp/Gated`, `vecSum/Dot`, f16/bf16/f64 typed twins, `vexpf`, bf16 bit converters |
+| `vector/primitives.zig` | `@Vector` leaves: `vecAdd/Sub/Mul/Scale/AddScaled`, `vecUnary/AddUnary/LeakyRelu/Clamp/Gated`, `vecUnaryVjp` (unary-VJP derivative bodies; `unaryVjpVectorizes` gates which ops route here — the exp-family backward loops), `vecSum/Dot`, f16/bf16/f64 typed twins, `vexpf`, bf16 bit converters |
 | `vector/elementwise.zig` | elementwise/reduction entry points, parallel dispatch, snake/groupNorm/prelu/channelAffine kernels |
 | `vector/gemm.zig` | dense f32/f16/f64/bf16 GEMM (NN/TN/NT), register-tiled row kernels, `gemmNNRange/gemmTNRange/gemmNTRange` |
 | `vector/gemm_blocked.zig` | BLIS-style cache-blocked packed f32 GEMM (§9.5) |
@@ -7209,6 +7308,27 @@ threaded result is bit-identical to the serial path for elementwise, conv,
 pool, and Winograd kernels (reductions and GEMM state their reassociation
 tolerance instead — see §9.3).
 
+Above the backend seam, the exec tier builds streaming inner-lane kernels
+from the same primitives (`src/exec/row_ops.zig`): softmax, logsumexp,
+logSoftmax, and softmax backward on non-last axes, and layerNorm
+backward's inner>1 arm, stream every pass row-major and run `@Vector`
+lanes across the contiguous inner index, with pooled scratch rows for the
+per-lane max/sum (`vexpf` matches the last-axis row kernels' arithmetic).
+The softmax-family kernels split their lane range across the pool — lanes
+are independent and scratch columns disjoint, so any task count is
+bitwise identical to the serial call (64-lane minimum per task);
+layerNorm backward stays serial by design, its dweight/dbias accumulation
+crosses lanes.
+
+The primitive vocabulary is also re-exported on the public facade as
+`fucina.simd` (`Vf32`, `vector_len`, `vexpf`, `sigmoidVec`, `tanhVec`):
+an elemental op (§4.4) may declare vector twins of its scalar rules —
+`forwardVec`/`backwardVec` for unary ops,
+`forwardVec`/`backwardAVec`/`backwardBVec` for binary — and the elemental
+kernels then run vector lanes with the scalar rules on the tail, the same
+split as the built-in SIMD kernels. Ops without vector decls are
+untouched.
+
 Elementwise entry points operate on `f32` tensors by default; the `*Typed`
 twins (`elementwiseContiguousIntoTypedWithConfig`, `sumSliceTypedWithConfig`,
 `dotIntoTypedWithConfig`, `matmul2DIntoUncheckedTypedWithConfig`) accept
@@ -7236,6 +7356,22 @@ under a mutex, via the provider-specific setter (`openblas_set_num_threads`,
 `bli_thread_set_num_threads`, `mkl_set_num_threads`,
 `nvpl_blas_set_num_threads`; Accelerate and the generic `blas` provider have
 no setter and are left alone).
+
+The accumulate twin `matmul2DAccIntoUnchecked` (`C += A·B`, the backend
+seam under `addDot`, §4.8) skips the GPU tier: `shouldUseBlas` winners run
+`cblas_sgemm` with `beta = 1` over the addend held in `out`; otherwise the
+vector NN family runs its comptime `StoreMode` (`store`/`accumulate`)
+kernels, with the blocked path seeding its first k-panel in accumulate
+mode (`gemmBlockedAcc`).
+
+The BLAS tier also exposes one raw entry for exec-layer fused kernels:
+`sgemmStrided` (`native.zig`) is row-major
+`C = alpha·op(A)·op(B) + beta·C` with every leading dimension explicit,
+compiled on BLAS builds only (callers comptime-gate on
+`backend.native_uses_blas`). The attention-backward BLAS-strip route
+issues its per-tile contractions through it (`src/exec/attention.zig`;
+`FUCINA_NO_ATTN_BWD_BLAS=1` reverts to the register-tiled route, the only
+route on non-BLAS builds).
 
 Within the pure-Zig tier there are two paths:
 
@@ -7272,7 +7408,8 @@ output-row panels (logical rows remain contiguous; `n` is padded to four), and
 | Build/cell | Packed-dense dispatch |
 |---|---|
 | eligible GPU | provider first, using the stable packed tensor |
-| BLAS build, `m,n,k ≥ 16` | existing `shouldUseBlas` winner |
+| BLAS build, `m,n,k ≥ 16` | existing `shouldUseBlas` winner — except the band below |
+| Accelerate build, `m < 32, k ≥ 4096` | packed microkernel (with the RHS already packed it beats BLAS on skinny-m tall-k cells; scoped to Accelerate — the OpenBLAS/x86 crossover is unmeasured) |
 | BLAS build, any dimension `< 16` | packed microkernel |
 | `-Dblas=none` | packed microkernel |
 | `-Dbackend=scalar` | scalar packed-op specification |
@@ -7505,12 +7642,23 @@ by the ObjC shim (`src/backend/metal/shim.m`): the MLX "steel" f32/f16 GEMM
   `denseQuantMatmulGpu` seam (`src/exec/quant_matmul.zig`) offloads
   `m ≥ 32` stable-weight matmuls behind the compact/raw or packed-CPU
   per-format gate when
-  `k % QFormat.kMultiple() == 0` (32 for q8_0, 256 for q4_k/q6_k) and
+  `k % QFormat.kMultiple() == 0` (32 for q8_0, 256 for q4_k/q6_k/tq2_0) and
   `n % 4 == 0`. `gemmQuantNtAsync` binds input/output tensor storage
   directly and copies its ≤4 KiB tile table into command-owned bytes (up to
   8192 rows); shared-input batches encode multiple weight matrices without
   replicating input rows. Transient RHS or longer prompts retain the blocking
   chunk fallback.
+- **PTQTP ternary prefill** (`src/llm/weights.zig`): with resident plane
+  bytes and `m ≥ 32`, each TQ2_0 trit-plane runs as one dequant-in-kernel
+  dispatch through the same `denseQuantMatmulGpu` seam and the K plane
+  outputs sum on the CPU (K = 1 returns the async tensor directly). A
+  tie-fitted K = 2 pair whose folded pack is resident takes
+  `foldedTernaryMatmulGpu` instead — ONE `fucina_mul_mm_tq2_0_folded_f32`
+  dispatch, async return, no plane sum — behind the provider capability
+  `has_tq2_0_folded_quant`. Both arms share the ternary work gate
+  (`FUCINA_GPU_MIN_WORK_DENSE_TQ2`, §2.6); any refusal falls through to
+  the x4 interleaved CPU kernels wholesale. Not bitwise vs the CPU chain —
+  the same accepted numerics stance as the q4_k/q6_k/q8_0 dense offload.
 - **MoE expert FFN** (llm tier, `src/llm/gemma/moe.zig`): CPU gathers
   activation rows into shared staging panels (`qmoeStage`, grow-only
   MTLBuffers), dispatches grouped tile-table GEMMs (`gemmQGroupedNt`, one
@@ -7640,6 +7788,7 @@ pub const gpu = struct {
     pub const enabled = backend.gpu_impl.enabled;             // comptime: -Dgpu build?
     pub const has_quant_gemm = backend.gpu_impl.has_quant_gemm; // dequant-in-kernel GEMM?
     pub const has_q5_k_quant = backend.gpu_impl.has_q5_k_quant; // CUDA Q5_K capability?
+    pub const has_tq2_0_quant = backend.gpu_impl.has_tq2_0_quant; // ternary TQ2_0 kernel (Metal)
     pub const allocResidentBytes = backend.gpu_impl.allocResidentBytes;
     pub const freeResidentBytes = backend.gpu_impl.freeResidentBytes;
     pub const traceEnabled = backend.gpu_impl.traceEnabled;
@@ -7778,10 +7927,12 @@ Reading the table:
   carries), Q8_K for all 256-element formats.
 - First-class end-to-end (encoder + hot kernel + GGUF export): `.q8_0`,
   `.q4_k`, `.q5_k`, `.q6_k`, `.tq2_0`, `.q2_0` — the first four additionally
-  have packed (column-interleaved) RHS layouts; the ternary formats
-  `.tq2_0`/`.q2_0` have none (`PackedRhsLayout` has no ternary member;
-  `packRhs` on a `.tq2_0` or `.q2_0` tensor is a compile error — their
-  dedicated kernels work from plain blocks).
+  have facade packed (column-interleaved) RHS layouts; the ternary formats
+  `.tq2_0`/`.q2_0` have no facade pack (`PackedRhsLayout` has no ternary
+  member; `packRhs` on a `.tq2_0` or `.q2_0` tensor is a compile error),
+  though the kernel tier ships an x4 column-interleaved TQ2_0 pack
+  (`packMatmulRhsTQ2_0x4`, §10.7) that the PTQTP weight wrappers consume
+  (§13.2.1).
 
 The kernel tier's trait layer describes each format programmatically:
 `QuantizedMatmulFormat` (enum: `fucina_w8a8_rhs` plus `ggml_*` per dtype),
@@ -8153,8 +8304,8 @@ K-quant, IQ\*, and TQ\* weight) and the Q8_1 path heap-allocate their block
 buffers unconditionally (`quantizeRowsQ8_K`/`quantizeRowsQ8_1` take the
 allocator). The native backend's fused K-quant split-SwiGLU and GeGLU paths
 (§10.3) lease buffers from the context's reusable scratch pool
-(`buffers.acquireScratch`) — the q8_0x4 fused split-SwiGLU arm keeps the
-stack-array-plus-alloc-fallback scheme instead — and parallelize row-group
+(`buffers.acquireScratch`) — the q8_0x4 fused split-SwiGLU arm puts a
+512-block stack array in front of the same pool lease — and parallelize row-group
 quantization across the work pool once `m·k` reaches **one eighth** of
 `parallel.vector_elementwise_len_threshold`. Failure mode: allocation
 failure is the only runtime error; quantization itself is total for finite
@@ -8254,6 +8405,26 @@ frees nothing), `quantizedMatmulRhsTQ2_0FromF32` (absmax) and
 `quantizedMatmulRhsTQ2_0FromF32Absmean` (b1.58). Measured: ~4.2x the cold
 path and ~2.1x Q4_K per byte-ratio on M1 Max; ~5.1x cold and ~4.8x Q4_K on
 Raptor Lake AVX-VNNI ([TERNARY.md](TERNARY.md)).
+
+A kernel-tier x4 pack exists below the facade: `packMatmulRhsTQ2_0x4`
+rearranges four RHS rows (output columns) into `BlockTQ2_0x4` groups,
+column-interleaved in 4-byte granules so one 16-byte load feeds the same
+4-element k-group to all four columns — each int8 dot lane accumulates
+its own column and the per-block horizontal reduce disappears (the
+Q8_0x4/Q4_Kx8 layout family, ternary form).
+`matmulTQ2_0X4RhsTile`/`matmulTQ2_0X4RhsRange` consume it against the
+same Q8_K activations, bit-identical to the row kernels; the accumulating
+twin `matmulTQ2_0X4RhsTileAcc` folds additional planes straight into the
+output. `n % 4 == 0` is required, and there is no facade entry (`packRhs`
+on a `.tq2_0` tensor stays a compile error) — the LLM layer's PTQTP
+wrappers build and consume the packs (§13.2.1). For scale-tied PTQTP
+pairs (§10.9), the fold family (`packMatmulRhsTQ2_0Foldedx4`/`Foldedx4Into`,
+`packMatmulRhsTQ2_0FoldedRows`, kernels
+`matmulTQ2_0FoldedX4RhsTile`/`Range`) combines two ratio-3 planes into
+one 4-bit code pack (`BlockTQ2_0Foldedx4`; row-major `BlockTQ2_0Folded`
+for the GPU dequant-in-kernel GEMM) — codes `c = 3·t1 + t2` in {0..8}
+with the fine plane's f16 scale, the coarse scale derived as 3× in f32 —
+so a single dot pass serves both planes.
 
 As inference weights, `.tq2_0` tensors go through the ordinary facade:
 
@@ -8427,8 +8598,11 @@ regression for the scales with an exhaustive 3ᴷ-way per-element trit
 search, in a pinned candidate order that makes the whole solve bitwise
 reproducible for any thread count. The group size is the TQ2_0 block
 width, so **each plane is a standalone byte-valid `.tq2_0` tensor** whose
-per-block f16 `d` is the group scale: decorated inference is K stock
-ternary matmuls (§10.7) plus adds — no new kernels. `k % 256 == 0` is
+per-block f16 `d` is the group scale: decorated inference is K ternary
+matmuls (§10.7) plus adds — through the plain row kernels, or the x4
+column-interleaved kernels and their accumulating twin once the serving
+layer has built packs; a tie-fitted K = 2 pair additionally folds into
+one 4-bit pack that a single dot pass serves (§10.7). `k % 256 == 0` is
 required.
 
 ```zig
@@ -8437,6 +8611,7 @@ pub const Options = struct {
     group_size: usize = 256,   // quantizeMatrix requires 256 (the packable size)
     max_iterations: usize = 50, epsilon: f32 = 1e-4,
     lambda0: f32 = 1e-8, lambda_max: f32 = 1.0, kappa_max: f32 = 1e6,
+    tie_scales: bool = false,  // lock plane scales to the exact ratio 3 (requires planes >= 2)
 };
 pub fn quantizeMatrix(ctx: *ExecContext, weights: []const f32, n: usize, k: usize,
                       options: Options) !PlanePair
@@ -8456,6 +8631,14 @@ Non-finite weights are excluded from the regression and forced to zero
 trits in every plane. K = 1 is a least-squares upgrade over the absmean
 b1.58 encoder (§10.7); planes are separable, so serving fewer planes than
 were solved is valid.
+
+`tie_scales` locks the plane scales to the exact ratio 3 (`alpha = [3s, s]`
+at K = 2, `[9s, 3s, s]` at K = 3), turning the K planes into one uniform
+symmetric 3ᴷ-level quantizer with step `s`; the tied solve replaces the
+ridge iteration with a per-group step-size sweep against the group
+absmax, and it makes the plane-folding identity exact — one combined dot
+pass can serve all K planes (§10.7). Meaningless at `planes = 1`
+(`Error.InvalidOptions`).
 
 ```zig
 test "PTQTP: planes reconstruct and multiply as plain TQ2_0 tensors" {
@@ -8507,8 +8690,13 @@ walks a whole model (§13.2.1); `zig build ptqtp-spirals` and
 `zig build ptqtp-qwen3` are the acceptance/measurement examples. Decorated
 models persist to GGUF as per-plane standalone TQ2_0 tensors and load back
 bitwise through plane pair-detection in the qwen3 loaders
-(`llm.ptqtp_gguf`, §13.2.1), so the solve runs once per model. Measured
-accuracy/speed tables and
+(`llm.ptqtp_gguf`, §13.2.1), so the solve runs once per model; a
+scale-tied fit persists as the file key `fucina.ptqtp.tie_scales`
+(present only when every decorated linear was tie-fitted), which lets the
+loaders rebuild the folded one-pass serving form.
+`zig build export-gguf -- --ptqtp[=K] --ptqtp-tie` runs the same solve
+shard-streaming, tensor-at-a-time, for models bigger than RAM (§12.4).
+Measured accuracy/speed tables and
 configuration guidance (plane counts, source precision, lm_head economics
 per ISA): [PTQTP.md](PTQTP.md).
 
@@ -9895,6 +10083,19 @@ dominant cold-load cost. It is a silent no-op on heap buffers and wherever
 the advice call fails. Deliberately not called for borrowed (zero-copy)
 blocks, which stay lazily paged.
 
+```zig
+pub fn release(data: []const u8) void
+```
+
+`release` is the counterpart hint for a mapped region the caller is DONE
+reading (the tensor-at-a-time streaming paths): it issues
+`madvise(DONTNEED)` so the pages drop from residency immediately instead
+of waiting for memory pressure. Only meaningful on read-only file-backed
+mappings (`loadMmap*`) — the pages are clean, so a later touch simply
+refaults from the file. Best-effort like `prefetch`, and like it the
+range is rounded to page boundaries (shared first/last pages refault
+harmlessly).
+
 #### 12.1.2 Metadata
 
 ```zig
@@ -10222,6 +10423,7 @@ zig build export-gguf -Doptimize=ReleaseFast -- \
 | `--alpha F` | LoRA scaling; **required** with `--adapters` (the safetensors checkpoint stores A/B but not alpha; finetune default 16) |
 | `--ptqtp[=K]` | mode (c): replace eligible matrices with `K` (1–3, default 2) `<name>.ptqtp0..K-1` TQ2_0 plane tensors, streamed tensor-at-a-time; exclusive with the other modes |
 | `--ptqtp-planes K` | plane count as a separate knob (implies `--ptqtp`) |
+| `--ptqtp-tie` | scale-tied fit (`ptqtp.Options.tie_scales`, implies `--ptqtp`): plane scales locked to the exact ratio 3 — one uniform 3ᴷ-level quantizer per group — so loaders can fold tied K=2 planes into a single one-pass pack; needs at least 2 planes (§10.9) |
 | `--ptqtp-include SUB[,SUB]` | only quantize names containing a substring (replaces the default embeddings/head-stay policy); repeatable |
 | `--ptqtp-exclude SUB[,SUB]` | never quantize matching names; repeatable |
 | `--dry-run` | (with `--ptqtp`) print the per-tensor plan — name, shape, source dtype → target, bytes before/after — and exit without writing |
@@ -10260,7 +10462,10 @@ per expert slice (`ptqtp_gguf.quantizeMoeStack`): each expert's
 base 3D `[in, out, n_expert]` shape, plane-major — the MoE convention the
 qwen3 loaders pair-detect. The output carries the `fucina.ptqtp.version`
 stamp and the `src/llm/ptqtp_gguf.zig` plane names, so it loads through
-the existing pair-detection. Split sources load via `loadMmapAuto` (the
+the existing pair-detection; a `--ptqtp-tie` run additionally stamps
+`fucina.ptqtp.tie_scales` — all-or-nothing by construction, since one
+`Options` covers every quantized tensor — which the loaders read to
+rebuild the folded one-pass serving form. Split sources load via `loadMmapAuto` (the
 single-file output drops `split.*` keys), and the data section is produced
 with the streaming writer — the tool holds one source tensor's f32 buffer
 plus its planes, never the whole model (expert stacks are the exception:
@@ -10518,6 +10723,7 @@ family-agnostic helpers stay flat:
 | Namespace | Contents | Files |
 |---|---|---|
 | `llm.qwen3` | `model`, `train` — Qwen3 dense + LoRA fine-tuning | `llm/qwen3/` |
+| `llm.kimi3` | `model` — Kimi-K3 (Kimi-Linear lineage: KDA + gated-MLA-NoPE hybrid, latent MoE, attention residuals, SiTU) | `llm/kimi3/` |
 | `llm.qwen35` | `model`, `chat` — Qwen3.5 Gated-DeltaNet hybrid | `llm/qwen35/` |
 | `llm.gemma` | `gemma4`, `gemma4_train`, `moe`, `moe_route`, `moe_route_tensor` | `llm/gemma/` |
 | `llm.diffusion_gemma` | `model` — block text-diffusion on the gemma4 backbone | `llm/diffusion_gemma/` |
@@ -10547,9 +10753,9 @@ family-agnostic helpers stay flat:
 | `llm.cartridge_fleet` | per-document cartridge fleets: manifest, RAM/disk budget manager, cosine chunk index (Cartridges at Scale, arXiv 2606.04557) | §13.10 |
 | `llm.engram` | conditional n-gram memory: hashed-lookup embedding tables grafted onto a frozen model (Engram, arXiv 2601.07372) | §13.11 |
 
-The family namespaces are covered in §14 (deepseek2/glm4moe/deepseek4/
-inkling by their module doc comments); this section documents the shared
-stack they are built from.
+The family namespaces are covered in §14 (kimi3 in §14.7,
+deepseek2/glm4moe/deepseek4/inkling by their module doc comments); this
+section documents the shared stack they are built from.
 
 ### 13.2 Weight loading (`src/llm/weights.zig`)
 
@@ -10582,7 +10788,7 @@ precision** — nothing is widened to f32 at load time:
 | `bf16` | raw u16 bit patterns, 2 B/weight | mixed f32×bf16 TransB kernel, exact in-register widening |
 | `q8_0`, `q4_k`, `q5_k`, `q6_k` | raw GGUF blocks **plus** a pre-packed matmul RHS | `dotPacked` on the CPU quantized hot path (§10); q4_k/q6_k/q8_0 also try Metal, and CUDA additionally supports q5_k |
 | all other quant arms | raw GGUF blocks (`QuantWeight(dtype)`) | tagged `dot` through the generic quantized matmul |
-| `ptqtp` | up to three `.tq2_0` plane tensors (§10.9) — built in place by `toPtqtp`, or rebuilt bitwise from persisted `<name>.ptqtp0/1/2` plane tensors (`llm.ptqtp_gguf` pair-detection; [PTQTP.md](PTQTP.md)) | fused multi-plane entry: ONE Q8_K activation quantization + ONE worker-team dispatch computing every plane and summing in fixed plane order (bitwise equal to per-plane facade dots, which remain the gradient-path fallback) |
+| `ptqtp` | up to three `.tq2_0` plane tensors (§10.9) — built in place by `toPtqtp`, or rebuilt bitwise from persisted `<name>.ptqtp0/1/2` plane tensors (`llm.ptqtp_gguf` pair-detection; [PTQTP.md](PTQTP.md)) | fused multi-plane entry: ONE Q8_K activation quantization + ONE worker-team dispatch running every plane on the x4 column-interleaved packs and summing in fixed plane order (bitwise equal to the per-plane facade dots, which remain the gradient-path fallback); scale-tied K=2 planes additionally fold into one 4-bit pack served by a single dot pass, and on Metal builds prefill-sized inputs dispatch against resident plane copies — one ternary dequant-in-kernel dispatch per plane, ONE folded dispatch when tied (the dense quant offload's accepted-numerics stance, not bitwise) |
 
 `pub fn QuantWeight(comptime dtype: DType) type` returns
 `fucina.Tensor(.{ .dtype = dtype, .tags = .{ .out, .in } })`. The four hot
@@ -10675,12 +10881,12 @@ pub fn deinit(self: *LinearWeight) void
   q4_k/q6_k/q8_0 on Metal and those plus q5_k on CUDA — declined when
   the input requires gradients or the exec gate says the shape is too
   small, falling back to the CPU packed path; at
-  decode shapes (`seq < 4`, no gradients) q5_k and q6_k instead contract
-  against the resident GGUF-native compact blocks — bitwise-equal outputs,
-  ~1.57x/1.30x fewer weight bytes streamed than the byte-expanded packed
-  layout; default on x86_64, off on aarch64, with
-  `FUCINA_Q5K_DECODE_COMPACT`/`FUCINA_NO_Q5K_DECODE_COMPACT` and the Q6K
-  pair forcing the route on/off and `setQ5kDecodeCompact`/
+  decode shapes (`seq < 4`, no gradients) q4_k, q5_k, and q6_k instead
+  contract against the resident GGUF-native compact blocks —
+  bitwise-equal outputs, ~1.92x/1.57x/1.30x fewer weight bytes streamed
+  than the byte-expanded packed layout; default on, with the per-format
+  `FUCINA_Q4K_DECODE_COMPACT`/`FUCINA_NO_Q4K_DECODE_COMPACT` (and the
+  Q5K/Q6K pairs) forcing the route on/off and `setQ5kDecodeCompact`/
   `setQ6kDecodeCompact` as the programmatic overrides), and a tagged `dot`
   for everything else. The per-format helpers `linearSeqQ8_0`,
   `linearSeqQ4_K`, `linearSeqQ5_K`, `linearSeqQ6_K` are also `pub` for
@@ -10717,7 +10923,10 @@ pub fn deinit(self: *LinearWeight) void
   `Model.savePtqtpGguf(ctx, io, src_file, out_path)` persists the decorated
   model: `llm.ptqtp_gguf` writes one standalone TQ2_0 tensor per plane —
   `<name>.ptqtp0/1/2` replaces `<name>`, fused weights row-slicing back to
-  their source tensor names — plus a `fucina.ptqtp.version` metadata key,
+  their source tensor names — plus a `fucina.ptqtp.version` metadata key
+  and, when every decorated entry was tie-fitted
+  (`ptqtp.Options.tie_scales`), a `fucina.ptqtp.tie_scales` key the
+  loaders read to rebuild the tied, fold-capable serving form (§10.9),
   everything else byte-verbatim; the qwen3 loaders pair-detect planes and
   rebuild the arm bitwise (re-fusing via `fuseLinear`'s ptqtp arm — other
   families do not read decorated files yet), so decoration runs once and
@@ -10812,6 +11021,26 @@ it registers one layer's gate/up/down stacked expert tensors with the
 `fucina.ExpertStore` (which `pread`s individual experts on demand) and
 returns a `StreamedMoeFfnRhs{ gate, up, down }` of `.streamed` RHS values —
 only the geometry is validated, nothing of the expert stacks is read.
+
+The store itself comes from `createExpertStore(allocator, options:
+MoeStreamOptions, n_layers)`, which expands split-GGUF part paths, opens
+the `fucina.ExpertStore` with the stream policy —
+`cache_bytes`/`cache_slots_per_layer`, the pinned learning tier
+(`auto_pin`/`pin_bytes`), `readahead`, `io_workers` parallel demand-miss
+reads, `uncached` streamed reads (macOS `F_NOCACHE`; keeps expert
+streaming from churning the page cache backing the mmapped dense
+weights), and `pilot` router-lookahead prefetch — and adds each
+`mirror_paths` entry as a weighted read mirror (`mirror_weights`;
+`parseMirrorWeights` parses the runners' shared `--moe-mirror-weights=`
+comma list against the `--moe-mirror` count). `cacheRouteSel(gate,
+choice, sel)` applies the store's resident-preferring top-k selection
+when the layer streams from a store opened with `cache_route`
+(quality-affecting, opt-in: `route_sacred` true top ranks are always
+taken, `route_window` bounds the resident-preferring fill) and returns
+false when the caller keeps its plain top-k.
+`reportAndSaveMoeStream(store, learn, writer)` is the runners' exit-time
+report — stream, pilot, prefetch, cache-route, and mirror stats — and
+persists the usage histogram that seeds the next load's pinned tier.
 
 Zero-copy linears over caller-owned immutable bytes (used by runners that keep
 weights mmapped):
@@ -10969,6 +11198,7 @@ pub fn appendLayer(self: *KvCache, ctx: *ExecContext, layer_i: usize,
 pub fn advance(self: *KvCache, m: usize) void
 pub fn reset(self: *KvCache) void                // len = 0, buffers retained
 pub fn truncate(self: *KvCache, keep_len: usize) void
+pub fn copyRows(self: *KvCache, src: *const KvCache, start: usize, end: usize) !void
 pub fn kSlice(self, layer_i: usize, len: usize) ![]const f16   // f16 mode
 pub fn vSlice(self, layer_i: usize, len: usize) ![]const f16
 pub fn kBlocks(self, layer_i: usize, len: usize) []const fucina.BlockQ8_0  // q8_0 mode
@@ -10989,6 +11219,15 @@ pub fn byteSize(self) usize
   address rows strictly from `len` — the next append overwrites the abandoned
   rows. This is the speculative decoder's rewind primitive (§13.9): rejected
   draft positions are dropped with one integer store.
+- `copyRows(src, start, end)` copies rows `[start, end)` of a
+  same-geometry cache into this one at the SAME positions and advances
+  `len` to `end` — the cross-slot prefix-share primitive (lmserve's slot
+  pool): a new conversation adopts another slot's common prompt prefix by
+  memcpy instead of re-prefilling it. Positions are preserved, so the
+  copied rows are exactly the rows a prefill of the same tokens would
+  have produced; both storage dtypes copy. Requires `self.len == start`
+  (rows append in order) and `end <= src.len`; a dtype or per-layer
+  geometry mismatch is `Error.KvCacheShapeMismatch`.
 
 ```zig
 test "kv cache: append, advance, truncate rewind" {
@@ -11217,7 +11456,7 @@ example-local tokenizer) share the tables.
 ```zig
 pub const Config = struct {
     temperature: f32 = 0,        // <= 0 selects greedy (argmax)
-    top_k: usize = 0,            // 0 = internal cap of 256 candidates
+    top_k: usize = 0,            // 0 = exact full-vocab nucleus (256-candidate first window)
     top_p: f32 = 1.0,            // nucleus: smallest prefix with cum. prob >= top_p
     min_p: f32 = 0,              // keep tokens with p >= min_p * p(best); 0 disables
     repeat_penalty: f32 = 1.0,   // llama.cpp penalty_repeat; 1.0 disables
@@ -11249,7 +11488,13 @@ softmax → top-p → min-p → categorical draw. Semantics worth pinning:
 - Sampling uses a `std.Random.DefaultPrng` seeded once from `config.seed` at
   `init`: the draw sequence is a pure function of the seed, which the chat and
   speculative layers rely on (one draw per committed token, §13.8/§13.9).
-  The candidate set is capped at 256 even when `top_k = 0`.
+  With `top_k = 0` the nucleus is exact: probabilities carry the
+  full-vocab softmax denominator, and the 256-candidate work window grows
+  (×4 per pass, up to the vocab) until it covers the requested `top_p`
+  mass — no tail is silently clipped. `top_p = 1.0` keeps the window at
+  256, the work cap. An explicit `top_k` is clamped to 256 and keeps the
+  llama.cpp order: top-k filter, softmax renormalized over the kept set,
+  nucleus within it.
 - A `Sampler` is single-stream mutable state (RNG + config): not thread-safe,
   one per decode stream.
 - With a `processor` set, its `process` hook mutates the logits row before
@@ -11731,7 +11976,7 @@ pub const Options = struct {
     think_off: bool = false,
     sampler: sampler.Config = .{},
     extra_stop_ids: []const u32 = &.{},   // borrowed
-    stop_sequences: []const []const u8 = &.{},  // borrowed; incompatible with speculation
+    stop_sequences: []const []const u8 = &.{},  // borrowed; composes with speculation
     logit_processor: ?sampler.LogitProcessor = null,  // borrowed; §13.6
     speculation: bool = false,
     spec_options: speculative.Options = .{},
@@ -11746,12 +11991,16 @@ pub fn initWarm(ctx: *ExecContext, model: *const Model, tokenizer: *const Tok.To
                 template: Template, options: Options, warm: WarmState) !Self
 pub fn deinit(self: *Self) void
 pub fn takeCache(self: *Self) KvCache
+pub fn notePrefixRows(self: *Self, rows: usize) !void
 pub fn send(self: *Self, user: []const u8, writer: *std.Io.Writer) !usize
 pub fn sendRendered(self: *Self, rendered: []const u8, writer: *std.Io.Writer) !usize
 pub fn sendRenderedReuse(self: *Self, rendered: []const u8, writer: *std.Io.Writer) !usize
 pub fn sendTokensReuse(self: *Self, ids: []const u32, writer: *std.Io.Writer) !usize
 pub fn sendBatch(convos: []const *Self, users: []const []const u8,
                  writers: []const *std.Io.Writer, produced: []usize) !void
+pub fn sendBatchTokensReuse(convos: []const *Self, ids_list: []const []const u32,
+                            writers: []const *std.Io.Writer, produced: []usize,
+                            errs: []?anyerror) !void
 pub fn addSpecReference(self: *Self, tokens: []const usize) !void
 pub fn enablePersistence(self: *Self, io: std.Io, path: []const u8) !usize
 pub fn specStats(self: *const Self) ?speculative.Stats
@@ -11765,10 +12014,11 @@ Semantics:
   state (a `SpeculationIndex` cascade plus a `SpeculativeDecoder(Model)`,
   §13.9), wiring the stop id into `spec_options.stop_token` and aligning the
   cascade's `accounting_min_draft` with the decoder's `min_draft`.
-  **`stop_sequences` plus `speculation` fails loudly with
-  `error.StopSequencesWithSpeculation`**: the token completing a text stop
-  sequence could be accepted mid-verify-batch, breaking the
-  one-RNG-draw-per-committed-token contract. The `Conversation` borrows `ctx`,
+  `stop_sequences` compose with `speculation`: the turn-boundary gate scans
+  the decoded reply bytes in the plain loop's exact order, the completing
+  token is neither streamed nor committed (the turn trim discards it from
+  history and KV), and spec == plain — reply bytes, fired index, post-turn
+  state — is proven in `chat_tests.zig`. The `Conversation` borrows `ctx`,
   `model`, `tokenizer`, `system`, `extra_stop_ids`, and `stop_sequences` —
   they must outlive it; `deinit` releases the cache, history, stream decoder,
   and speculative state.
@@ -11781,7 +12031,10 @@ Semantics:
   any of `extra_stop_ids`, the `max_response_tokens` budget, or KV exhaustion.
   With `stop_sequences`, generation stops **before streaming** the token whose
   decoded reply text completes a sequence (the completing token is not
-  committed).
+  committed), and `fired_stop` records the index (into `stop_sequences`)
+  of the sequence that fired — null when the turn ended any other way,
+  reset per turn — the stop-attribution seam servers report from
+  (lmserve's Anthropic `stop_sequence` field).
 - `sendRendered` is `send` over caller-provided pre-rendered template text —
   the stateless-API entry: `Template.renderMessages` renders a full message
   history and a FRESH conversation prefills it in one turn (`Options.system`
@@ -11810,11 +12063,16 @@ Semantics:
   committed-but-unforwarded token an aborted turn can leave); deinit skips a
   taken cache. `sendTokensReuse` is the same entry over pre-encoded ids —
   for a server that already tokenized the render to score candidate slots
-  by common prefix. Speculation is incompatible on both sides
-  (`error.SpeculationWithWarmStart`, `error.SpeculationWithReuse`): the
-  SpeculationIndex mirrors committed history append-only and can neither
-  adopt nor rewind. Warm-reuse == fresh-stateless equivalence is proven in
-  `chat_tests.zig`.
+  by common prefix. Speculation composes on both sides (the lmserve
+  `--spec` seam): the SpeculationIndex mirrors committed history
+  append-only, so a warm adoption or a reconcile rewind rebuilds it in
+  place from the reconciled history before the turn; the turn then ends
+  with the same catch-up forward the plain loop issues, so the released
+  slot's token shadow describes every committed token (spec == plain
+  reuse output and state, and warm-reuse == fresh-stateless equivalence,
+  are proven in `chat_tests.zig`). Only the batched entry
+  (`sendBatchTokensReuse`) requires speculation off on every stream
+  (`error.SpeculationWithReuse`).
 - With speculation on, `send` routes through the decoder with a turn-boundary
   gate that stops streaming/index-learning at the stop marker and trims any
   verify-batch overshoot from history **and** the KV cache — unconditionally,
@@ -11848,6 +12106,28 @@ Semantics:
   is trimmed back to its KV cache, so healthy siblings of the failing stream
   remain internally consistent and resendable; bytes already streamed are not
   recalled. Turn prefills run per stream.
+- `sendBatchTokensReuse` is `sendTokensReuse` over N sibling conversations
+  in lockstep — the server batching entry (lmserve `--batch`). Per stream
+  it runs the reuse reconcile, prefills the un-reused suffix, and samples
+  the first token, then joins the `sendBatch` lockstep loop. Unlike
+  `sendBatch`, per-stream failures are ISOLATED: a stream whose sink write
+  (client gone), prologue (`error.ContextFull`), or sampler
+  (`error.AllTokensMasked`) fails finishes with the error recorded in
+  `errs[i]` while the remaining streams keep decoding; only a
+  shared-compute failure (the batched forward itself) aborts the whole
+  batch. `produced[i]` and `errs[i]` are always written, and on every path
+  out each stream's history is trimmed back to its cache, so every
+  conversation stays consistent and resendable. Speculation must be off on
+  every stream (`error.SpeculationWithReuse`); the other up-front checks
+  match `sendBatch`.
+- `notePrefixRows(rows)` declares the first `rows` cache positions a
+  PRELOADED KV prefix with no token shadow — the cartridge serving seam
+  (§13.10): `writeToCache` into the fresh conversation's cache, then this,
+  once, before any send; the cache must hold exactly the prefix and
+  speculation must be off (`error.InvalidPrefix` otherwise). The reuse
+  reconcile never rewinds into the prefix, KV persistence records the
+  prefix shape, and `WarmState.prefix_rows` adopts the same declaration on
+  a warm start.
 - `addSpecReference(tokens)` injects a tokenized reference document into the
   speculation index (the RAG seam); `error.SpeculationDisabled` when
   speculation is off. `specStats` returns the decoder's lifetime
@@ -11905,10 +12185,17 @@ an argmax). Token IDs are compared, never probabilities. Exactly **one RNG
 draw is consumed per committed token** — the same pattern as a plain run —
 and committing `Options.stop_token` ends the verify row loop immediately, so
 a persistent sampler never desyncs. Given bitwise-identical logits the output
-stream equals the non-speculative run's; logits are computed in verify
-batches of m = 1+draft rows, which match bitwise below the m-dependent kernel
-thresholds and can drift ~1e-6 beyond them ("same distribution always; same
-sample stream whenever the logits match bitwise").
+stream equals the non-speculative run's. Logits are computed in verify
+batches of m = 1+draft rows, and byte-identity with a plain run rests on
+two legs: `Options.pin_kernels` (the default) runs the verify forward
+under `ExecContext.pinRowwiseKernels` (§6.1), so every batched quant
+matmul reproduces the m = 1 numerics bitwise — the verify logits AND the
+KV rows the verify leaves behind for committed positions — and the caller
+must prefill both runs identically (prefill kernels are
+batch-shape-dependent; the chat layer's speculative turn prefills exactly
+as the plain turn does). Unpinned, the m-dependent kernel switches can
+drift the logits ~1e-6 and flip a near-tied sample ("same distribution
+always; same sample stream whenever the logits match bitwise").
 
 #### 13.9.1 Core (`speculative/core.zig`)
 
@@ -11948,6 +12235,7 @@ pub const Options = struct {
     enabled: bool = true,
     topk_feedback: usize = 8,       // candidates per verified position
     stop_token: ?usize = null,
+    pin_kernels: bool = true,       // verify forward under pinned rowwise kernels: m == 1 numerics bitwise
     // cost-aware auto-off gate:
     rate_window: usize = 16, min_window_drafted: usize = 8,
     min_speedup: f32 = 1.0, probe_margin: f32 = 0.10,
@@ -11986,6 +12274,8 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
     pub fn deinit(self: *Self) void
     pub fn step(self, ctx, model: *const Model, kv: *KvCache,
                 sampler: *Sampler, history: *std.ArrayList(usize), sink: TokenSink) !usize
+    pub fn bootstrapStep(self, ctx, kv: *const KvCache, sampler: *Sampler,
+                         history: *std.ArrayList(usize), sink: TokenSink, logits: *Logits) !usize
 }
 ```
 
@@ -12003,6 +12293,16 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
   passes run one batched `forwardStepAllLogits` over `[carried token,
   draft...]`, and `kv.truncate` drops rejected rows — on error-unwind paths
   too (`errdefer` restores the invariant).
+- `bootstrapStep` commits ONE token from caller-computed logits — the
+  prefill bootstrap. The caller prefills the whole pending span in one
+  batch (the byte-identity contract's caller leg), leaving the cache
+  flush with history (`history.len == kv.len`, else
+  `error.InvalidDecodeState`) and the span's last-row logits in hand; the
+  entry samples them through the exact plain-step machinery (sampler,
+  history, sink, observe hook, stats) and restores the `step` invariant.
+  The chat layer's speculative turn opens with it, so plain and
+  speculative turns build their caches from call-for-call identical
+  forwards.
 - `Model` is duck-typed: `forwardStep` + `forwardStepAllLogits` over the
   shared `KvCache` (qwen3 and gemma4 today; qwen35's recurrent cache cannot
   rewind and is out of scope).
@@ -12583,7 +12883,8 @@ test "engram: hashed n-gram memory with a zero-init graft gate" {
 ## 14. Model families and example applications
 
 The `fucina_llm` module root (`src/llm.zig`) exposes each model family as a
-namespace — `llm.qwen3.{model,train}`, `llm.qwen35.{model,chat}`,
+namespace — `llm.qwen3.{model,train}`, `llm.kimi3.model`,
+`llm.qwen35.{model,chat}`,
 `llm.gemma.{gemma4,gemma4_train,moe,moe_route,moe_route_tensor}`,
 `llm.diffusion_gemma.model`, `llm.deepseek2.model`, `llm.glm4moe.model`,
 `llm.deepseek4.model`, `llm.inkling.{model,mmproj,chat}`, `llm.parakeet.*`,
@@ -12604,7 +12905,8 @@ GGUF parsing is §12; LoRA/optimizer/ES mechanics are §11.
 (`src/llm/*/model.zig`, `src/llm/gguf_meta.zig`)
 
 **Config from GGUF metadata.** Each family's `Config.fromGguf(file)`
-(deepseek4/inkling additionally take an allocator) reads
+(deepseek4/inkling additionally take an allocator; kimi3 is the one
+non-GGUF family — it loads a reference checkpoint directory, §14.7) reads
 hyperparameters from the standard GGUF key convention: the value of
 `general.architecture` (e.g. `"qwen3"`, `"qwen3moe"`, `"qwen35"`, `"gemma4"`,
 `"diffusion-gemma"`, `"parakeet"`) prefixes every key —
@@ -13465,7 +13767,34 @@ zig build parakeet -Doptimize=ReleaseFast -- --model ... --manifest files.txt --
 `--decoder tdt|ctc` picks the head on hybrid models; `--lang XX` selects the
 prompt locale on multilingual models; `--threads N` caps the worker team.
 
-### 14.7 Example applications
+### 14.7 Kimi-K3 — KDA/MLA hybrid, architecture parity (`src/llm/kimi3/model.zig`)
+
+The `kimi3` family (the Kimi-Linear lineage) is a **KDA linear-attention /
+Gated-MLA-NoPE hybrid** with a latent sigmoid-routed MoE, cross-layer
+attention residuals (layers at `index % attn_res_block_size == 0` snapshot
+their entry into a residual bank that later layers depth-mix against), and
+the SiTU gated activation (§4.5). It is the one family outside the GGUF
+conventions of §14.1: an architecture-parity model over the tiny f32
+reference checkpoint, loaded from a checkpoint directory.
+`Config.fromJsonFile(allocator, io, path)` parses the reference
+`config.json` (`text_config`, including the 1-based KDA layer list from
+`linear_attn_config` — `Config.isKdaLayer(layer_idx)` implements the
+schedule, `Config.deinit(allocator)` frees the list) and
+`Model.load(allocator, io, ctx, dir)` reads `<dir>/config.json` plus
+`<dir>/model.safetensors` (`safetensors.File.loadMmap`).
+
+Heavy lifting goes through the shared exec ops — `matmulTransB`,
+`causalDepthwiseConv1dAxisRank`, `kdaRecurrent` (§4.13),
+`gatedRank(.situ)`, `rmsNormMulAxisRank` — while the depth mixture and the
+small MLA core are model-local routines. Model surface: `load`, `deinit`,
+`forward(ctx, tokens)` (full-sequence forward: token ids, `[]const u32`,
+to `[seq, vocab]` logits) and `forwardProbed(ctx, tokens, probe)` with
+`Probe` (`{ context, callback }`) — a stage observer that receives the
+same per-layer intermediates the reference dumps. No KV/state cache, no
+runner CLI, no GGUF path; the golden tests pin the forward against
+reference activations.
+
+### 14.8 Example applications
 
 Beyond the family runners, six applications exercise the library end to end.
 
@@ -13479,16 +13808,30 @@ everything composes from the public facade — and every stage is validated
 against the fp32 Python reference under a tiered parity ladder.
 `zig build nanochat -- tok-train|base-train|sft|eval-bpb|chat ...`.
 
-**lmserve** (`examples/lmserve/`, [README](../examples/lmserve/README.md))
-is an OpenAI-compatible HTTP server over
-the in-tree language models: Chat Completions (`POST /v1/chat/completions`)
-plus the stateless Responses API (`POST /v1/responses`), with SSE streaming,
-JSON-schema/regex/Lark constrained output (`-Dllguidance=true` builds), and
-a bounded request queue in front of one sequential inference worker. The
-GGUF's `general.architecture` picks the backend (qwen3 / qwen3moe / qwen35 /
-gemma4 / diffusion-gemma / inkling); `--nanochat <dir>` serves a nanochat
-checkpoint.
-`zig build lmserve -- <model.gguf> [--host H] [--port N]`.
+**lmserve** (`examples/lmserve/`, [README](../examples/lmserve/README.md);
+[LMSERVER.md](LMSERVER.md) is the full design doc) is an OpenAI- and
+Anthropic-compatible HTTP server over the in-tree language models: Chat
+Completions (`POST /v1/chat/completions`), the stateless Responses API
+(`POST /v1/responses`), and the Anthropic Messages API
+(`POST /v1/messages` — a translation layer onto the same engine), with SSE
+streaming in all three dialects, hermes-style function calling on the
+qwen3-family backends (tool declarations render into the prompt, the
+client executes; `tool_choice` is grammar-forced on `-Dllguidance=true`
+builds), JSON-schema/regex/Lark constrained output (`-Dllguidance=true`
+builds), an optional Host-header allowlist (`--allow-host`), and a bounded
+request queue in front of one inference worker — a per-request stream pipe
+decouples generation from client sockets, so a stalled client never blocks
+the worker. Serving levers: `--kv-slots` keeps interleaved conversations
+warm (guarded against RAM overcommit; `--kv-cache-dir` adds a disk tier,
+and a request sharing a prefix with another resident slot copies those KV
+rows instead of re-prefilling them, §13.4), `--batch N` lockstep-decodes
+queued requests together with per-stream failure isolation (§13.8),
+`--spec` adds lossless self-draft speculative decoding (composes with
+reuse and stop sequences, §13.9), and `--cartridge`/`--fleet` mount
+trained KV-prefix cartridges (§13.10). The GGUF's `general.architecture`
+picks the backend (qwen3 / qwen3moe / qwen35 / gemma4 / diffusion-gemma /
+inkling); `--nanochat <dir>` serves a nanochat checkpoint.
+`zig build lmserve -- <model.gguf> [--host H] [--port N] [flags]`.
 
 **facedetect** (`examples/facedetect/`,
 [README](../examples/facedetect/README.md)) runs the insightface
@@ -13548,7 +13891,7 @@ with a fixed seed; decoded audio cosine >= 0.99999; 2.3-4.6x faster than the
 reference's CPU backend on M1 Max. The example doubles as a library
 (`pipeline.synthesize`/`synthesizeStream`, ring-buffered `play.Player`) and
 ships a WAV↔RVQ codec tool. `zig build omnivoice -- tts --model ... --codec
-... --lang English -o out.wav` (see 14.8 for the flag shape).
+... --lang English -o out.wav` (see 14.9 for the flag shape).
 
 **The didactic set** (single-`main.zig` examples under `examples/`):
 
@@ -13582,7 +13925,7 @@ ships a WAV↔RVQ codec tool. `zig build omnivoice -- tts --model ... --codec
   [README](../examples/engram/README.md)) — conditional n-gram memory graft
   trained on a frozen qwen3 GGUF (§13.11, [`ENGRAM.md`](ENGRAM.md)).
 
-### 14.8 Example → features → run command
+### 14.9 Example → features → run command
 
 Weights are never bundled; [RUNNING-MODELS.md](RUNNING-MODELS.md) lists the
 download source for every model row; each example's README
@@ -13606,8 +13949,8 @@ download source for every model row; each example's README
 | `nam` | streaming conv nets, live audio/MIDI, `.nam`/GGUF interchange | `zig build nam -- live profile.nam --ir cab.wav` |
 | `facedetect` | channel-last conv2d/pool2d/prelu/upsample CNNs (§4) | `zig build facedetect -- detect --model models/buffalo_l.gguf --input face.png --json` |
 | `locate_anything` | VLM: ViT + projector + LM, token-space detection | `zig build locate-anything -- detect --model models/locate-anything-f32.gguf --input scene.png --prompt '...'` |
-| `nanochat` | end-to-end GPT: BPE tokenizer training, pretraining, SFT, bpb eval, chat (14.7) | `zig build nanochat -- chat -i <ckpt dir> --tokenizer <tokenizer.bin> -p "..."` |
-| `lmserve` | OpenAI-compatible HTTP server: chat completions + responses, SSE streaming, constrained output (14.7) | `zig build lmserve -- models/Qwen3-0.6B-Q8_0.gguf --port 8080` |
+| `nanochat` | end-to-end GPT: BPE tokenizer training, pretraining, SFT, bpb eval, chat (14.8) | `zig build nanochat -- chat -i <ckpt dir> --tokenizer <tokenizer.bin> -p "..."` |
+| `lmserve` | OpenAI- and Anthropic-compatible HTTP server: chat completions + responses + messages, function calling, SSE streaming, constrained output, `--spec`/`--batch`/`--kv-slots` (14.8) | `zig build lmserve -- models/Qwen3-0.6B-Q8_0.gguf --port 8080` |
 | `deepseek2` | DeepSeek V2/V3: MLA compressed KV cache, MoE decode ([README](../examples/deepseek2/README.md)) | `zig build deepseek2 -- models/DeepSeek-V2-Lite-Chat.Q8_0.gguf --prompt "..." --gen 64` |
 | `glm4moe` | GLM-4.5 family: native MTP speculative decode, streamed experts ([README](../examples/glm4moe/README.md)) | `zig build glm4moe -- models/glm45-air/GLM-4.5-Air-Q6_K-00001-of-00002.gguf --prompt "..." --gen 64 --mtp` |
 | `deepseek4` | DeepSeek V4 Flash: CSA/HCA trunk, streamed experts, MTP sidecar ([README](../examples/deepseek4/README.md)) | `zig build deepseek4 -- <model.gguf> --chat --prompt "..." --moe-stream` |
