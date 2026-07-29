@@ -723,13 +723,9 @@ fn AdamWMap(comptime md: StateDType, comptime vd: StateDType) type {
         s: AdamWScalars,
 
         fn run(c: @This(), start: usize, end: usize) void {
-            if (comptime (md == .f32 and vd == .f32)) {
-                // The golden-pinned baseline stays on the original scalar loop.
-                runScalar(c, start, end);
-                return;
-            }
-            // Hand-vectorized bf16 arm (see `state_vec_len`); bit-identical
-            // to runScalar per element.
+            // Hand-vectorized update (see `state_vec_len`); bit-identical to
+            // runScalar per element on every state dtype — the lanes are
+            // independent and vector sqrt/divide are per-lane IEEE ops.
             const keep: StateVec = @splat(c.s.keep);
             const beta2: StateVec = @splat(c.s.beta2);
             const one_minus_b1: StateVec = @splat(c.s.one_minus_b1);
@@ -983,13 +979,9 @@ fn AdamMap(comptime md: StateDType, comptime vd: StateDType) type {
         s: AdamScalars,
 
         fn run(c: @This(), start: usize, end: usize) void {
-            if (comptime (md == .f32 and vd == .f32)) {
-                // The golden-pinned baseline stays on the original scalar loop.
-                runScalar(c, start, end);
-                return;
-            }
-            // Hand-vectorized bf16 arm (see `state_vec_len`); bit-identical
-            // to runScalar per element. The decay branch is loop-invariant.
+            // Hand-vectorized update (see `state_vec_len`); bit-identical to
+            // runScalar per element on every state dtype — the lanes are
+            // independent and vector sqrt/divide are per-lane IEEE ops. The decay branch is loop-invariant.
             const wd: StateVec = @splat(c.s.weight_decay);
             const beta2: StateVec = @splat(c.s.beta2);
             const one_minus_b1: StateVec = @splat(c.s.one_minus_b1);
