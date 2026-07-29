@@ -1502,6 +1502,45 @@ fn blasGemm(
     );
 }
 
+/// Raw strided sgemm for exec-layer fused kernels (the attention-backward
+/// strip contractions): C[m,n] = alpha·op(A)·op(B) + beta·C, row-major,
+/// every leading dimension explicit. BLAS builds only — callers comptime-gate
+/// on `backend.native_uses_blas`.
+pub fn sgemmStrided(
+    trans_a: bool,
+    trans_b: bool,
+    m: usize,
+    n: usize,
+    k: usize,
+    alpha: f32,
+    a: []const f32,
+    lda: usize,
+    b: []const f32,
+    ldb: usize,
+    beta: f32,
+    c: []f32,
+    ldc: usize,
+) void {
+    if (comptime !build_options.use_blas) unreachable;
+    ensureBlasThreadsConfigured();
+    cblas_sgemm(
+        cblas_row_major,
+        if (trans_a) cblas_trans else cblas_no_trans,
+        if (trans_b) cblas_trans else cblas_no_trans,
+        cDim(m),
+        cDim(n),
+        cDim(k),
+        alpha,
+        a.ptr,
+        cDim(lda),
+        b.ptr,
+        cDim(ldb),
+        beta,
+        c.ptr,
+        cDim(ldc),
+    );
+}
+
 fn ensureBlasThreadsConfigured() void {
     if (comptime build_options.blas_threads != 0) {
         if (blas_threads_config_done.load(.acquire)) return;

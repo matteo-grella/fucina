@@ -1111,6 +1111,99 @@ pub fn runGroupedCausalAttentionBackwardTiledTask(task: *const GroupedCausalAtte
     groupedCausalAttentionBackwardTiles(task.*);
 }
 
+/// Phase 2 of the tiled backward, shared by the register-tiled and the
+/// BLAS-strip routes: per row of the tile, probabilities in place (stats or
+/// recompute), the softmax-backward row dot, then dS in place. Dead cells
+/// (outside the row's causal/window span) are zeroed in BOTH panels, so the
+/// gradient contractions that follow need no masks.
+inline fn attentionBackwardSoftmaxTileRows(
+    task: *const GroupedCausalAttentionBackwardTiledTask,
+    q0: usize,
+    rows_active: usize,
+    tile_lo: usize,
+    live: usize,
+    p_panel_all: []f32,
+    ds_panel_all: []f32,
+    stats_head: ?[]const f32,
+) void {
+    const Vec = @Vector(8, f32);
+    const vector_width = 8;
+    const neg_inf = -std.math.inf(f32);
+
+    for (0..rows_active) |r| {
+        const query_i = q0 + r;
+        const active = if (task.causal) task.source_offset + query_i + 1 else task.kv_seq;
+        const lo_r = if (!task.causal or task.window == 0) 0 else active -| task.window;
+        const c_lo = lo_r - tile_lo;
+        const c_hi = active - tile_lo;
+        const p_row = p_panel_all[r * task.kv_seq ..][0..live];
+        const ds_row = ds_panel_all[r * task.kv_seq ..][0..live];
+
+        var max_score: f32 = neg_inf;
+        var inv_sum: f32 = undefined;
+        if (stats_head) |values| {
+            max_score = values[query_i * 2];
+            inv_sum = 1 / values[query_i * 2 + 1];
+        } else {
+            var max_vec: Vec = @splat(neg_inf);
+            var column = c_lo;
+            while (column + vector_width <= c_hi) : (column += vector_width) {
+                max_vec = @max(max_vec, @as(Vec, p_row[column..][0..vector_width].*));
+            }
+            max_score = @reduce(.Max, max_vec);
+            while (column < c_hi) : (column += 1) max_score = @max(max_score, p_row[column]);
+        }
+
+        const max_splat: Vec = @splat(max_score);
+        var sum_vec: Vec = @splat(0);
+        var column = c_lo;
+        while (column + vector_width <= c_hi) : (column += vector_width) {
+            const p = vexpf(vector_width, @as(Vec, p_row[column..][0..vector_width].*) - max_splat);
+            p_row[column..][0..vector_width].* = p;
+            sum_vec += p;
+        }
+        var sum_exp = @reduce(.Add, sum_vec);
+        while (column < c_hi) : (column += 1) {
+            const p = vexpf(1, @splat(p_row[column] - max_score))[0];
+            p_row[column] = p;
+            sum_exp += p;
+        }
+        if (stats_head == null) inv_sum = 1 / sum_exp;
+
+        @memset(p_row[0..c_lo], 0);
+        @memset(p_row[c_hi..live], 0);
+
+        const inv_splat: Vec = @splat(inv_sum);
+        var dot_vec: Vec = @splat(0);
+        column = c_lo;
+        while (column + vector_width <= c_hi) : (column += vector_width) {
+            const p = @as(Vec, p_row[column..][0..vector_width].*) * inv_splat;
+            p_row[column..][0..vector_width].* = p;
+            dot_vec += p * @as(Vec, ds_row[column..][0..vector_width].*);
+        }
+        var row_dot = @reduce(.Add, dot_vec);
+        while (column < c_hi) : (column += 1) {
+            const p = p_row[column] * inv_sum;
+            p_row[column] = p;
+            row_dot += p * ds_row[column];
+        }
+
+        const dot_splat: Vec = @splat(row_dot);
+        const scale_splat: Vec = @splat(task.scale_value);
+        @memset(ds_row[0..c_lo], 0);
+        @memset(ds_row[c_hi..live], 0);
+        column = c_lo;
+        while (column + vector_width <= c_hi) : (column += vector_width) {
+            const p: Vec = p_row[column..][0..vector_width].*;
+            const dp: Vec = ds_row[column..][0..vector_width].*;
+            ds_row[column..][0..vector_width].* = scale_splat * p * (dp - dot_splat);
+        }
+        while (column < c_hi) : (column += 1) {
+            ds_row[column] = task.scale_value * p_row[column] * (ds_row[column] - row_dot);
+        }
+    }
+}
+
 /// Fused tile-blocked attention backward: per (query head, q-tile) the
 /// scaled-score and dO·Vᵀ panels are built once over the tile's LIVE key
 /// range only (causal/window dead cells never compute beyond the sub-block
@@ -1127,7 +1220,6 @@ pub fn groupedCausalAttentionBackwardTiles(task: GroupedCausalAttentionBackwardT
     const dot_width = 4;
     const Vec = @Vector(8, f32);
     const vector_width = 8;
-    const neg_inf = -std.math.inf(f32);
 
     const d = task.d;
     const q_seq_stride = task.heads * d;
@@ -1240,78 +1332,7 @@ pub fn groupedCausalAttentionBackwardTiles(task: GroupedCausalAttentionBackwardT
             // Phase 2 per row: probabilities in place (stats or recompute),
             // the softmax-backward row dot, then dS in place. Dead cells hold
             // P = 0, so their dS is exactly 0 and phase 3 needs no masks.
-            for (0..rows_active) |r| {
-                const query_i = q0 + r;
-                const active = if (task.causal) task.source_offset + query_i + 1 else task.kv_seq;
-                const lo_r = if (!task.causal or task.window == 0) 0 else active -| task.window;
-                const c_lo = lo_r - tile_lo;
-                const c_hi = active - tile_lo;
-                const p_row = p_panel_all[r * task.kv_seq ..][0..live];
-                const ds_row = ds_panel_all[r * task.kv_seq ..][0..live];
-
-                var max_score: f32 = neg_inf;
-                var inv_sum: f32 = undefined;
-                if (stats_head) |values| {
-                    max_score = values[query_i * 2];
-                    inv_sum = 1 / values[query_i * 2 + 1];
-                } else {
-                    var max_vec: Vec = @splat(neg_inf);
-                    var column = c_lo;
-                    while (column + vector_width <= c_hi) : (column += vector_width) {
-                        max_vec = @max(max_vec, @as(Vec, p_row[column..][0..vector_width].*));
-                    }
-                    max_score = @reduce(.Max, max_vec);
-                    while (column < c_hi) : (column += 1) max_score = @max(max_score, p_row[column]);
-                }
-
-                const max_splat: Vec = @splat(max_score);
-                var sum_vec: Vec = @splat(0);
-                var column = c_lo;
-                while (column + vector_width <= c_hi) : (column += vector_width) {
-                    const p = vexpf(vector_width, @as(Vec, p_row[column..][0..vector_width].*) - max_splat);
-                    p_row[column..][0..vector_width].* = p;
-                    sum_vec += p;
-                }
-                var sum_exp = @reduce(.Add, sum_vec);
-                while (column < c_hi) : (column += 1) {
-                    const p = vexpf(1, @splat(p_row[column] - max_score))[0];
-                    p_row[column] = p;
-                    sum_exp += p;
-                }
-                if (stats_head == null) inv_sum = 1 / sum_exp;
-
-                @memset(p_row[0..c_lo], 0);
-                @memset(p_row[c_hi..live], 0);
-
-                const inv_splat: Vec = @splat(inv_sum);
-                var dot_vec: Vec = @splat(0);
-                column = c_lo;
-                while (column + vector_width <= c_hi) : (column += vector_width) {
-                    const p = @as(Vec, p_row[column..][0..vector_width].*) * inv_splat;
-                    p_row[column..][0..vector_width].* = p;
-                    dot_vec += p * @as(Vec, ds_row[column..][0..vector_width].*);
-                }
-                var row_dot = @reduce(.Add, dot_vec);
-                while (column < c_hi) : (column += 1) {
-                    const p = p_row[column] * inv_sum;
-                    p_row[column] = p;
-                    row_dot += p * ds_row[column];
-                }
-
-                const dot_splat: Vec = @splat(row_dot);
-                const scale_splat: Vec = @splat(task.scale_value);
-                @memset(ds_row[0..c_lo], 0);
-                @memset(ds_row[c_hi..live], 0);
-                column = c_lo;
-                while (column + vector_width <= c_hi) : (column += vector_width) {
-                    const p: Vec = p_row[column..][0..vector_width].*;
-                    const dp: Vec = ds_row[column..][0..vector_width].*;
-                    ds_row[column..][0..vector_width].* = scale_splat * p * (dp - dot_splat);
-                }
-                while (column < c_hi) : (column += 1) {
-                    ds_row[column] = task.scale_value * p_row[column] * (ds_row[column] - row_dot);
-                }
-            }
+            attentionBackwardSoftmaxTileRows(&task, q0, rows_active, tile_lo, live, p_panel_all, ds_panel_all, stats_head);
 
             // Phase 3a: dQ — 4-row register kernel per d-chunk; each K row
             // vector is loaded once and shared by the 4 dS splats. Single
@@ -1442,6 +1463,91 @@ pub fn groupedCausalAttentionBackwardTiles(task: GroupedCausalAttentionBackwardT
                     }
                     if (task.dv_target) |target| target[target_row_base + feature_i] += dv_tail;
                     if (task.dk_target) |target| target[target_row_base + feature_i] += dk_tail;
+                }
+            }
+        }
+    }
+}
+
+/// Wider q-tiles for the BLAS-strip route: the sgemm strips need enough
+/// rows to reach the GEMM engine's efficient regime; the panels stay
+/// L2-resident (`2 * 64 * kv_seq` floats per task).
+pub const attention_bwd_blas_tile_rows: usize = 64;
+
+/// The BLAS-strip backward route is the default on BLAS builds — the same
+/// kernel-selection contract as `shouldUseBlas` on the plain matmuls.
+/// FUCINA_NO_ATTN_BWD_BLAS reverts to the register-tiled route (the A/B
+/// switch and the escape hatch for non-BLAS parity work).
+var attn_bwd_blas_state = std.atomic.Value(u8).init(0); // 0 unread, 1 on, 2 off
+fn attentionBackwardBlasEnabled() bool {
+    if (comptime !(backend_mod.active_kind == .native and backend_mod.native_uses_blas)) return false;
+    var s = attn_bwd_blas_state.load(.acquire);
+    if (s == 0) {
+        s = if (std.c.getenv("FUCINA_NO_ATTN_BWD_BLAS") != null) 2 else 1;
+        attn_bwd_blas_state.store(s, .release);
+    }
+    return s == 1;
+}
+
+pub fn runGroupedCausalAttentionBackwardBlasTiledTask(task: *const GroupedCausalAttentionBackwardTiledTask) void {
+    groupedCausalAttentionBackwardBlasTiles(task.*);
+}
+
+/// BLAS-strip attention backward: the register-tiled route's tile walk and
+/// task contract, with the five per-tile contractions issued as strided
+/// sgemm strips — the scaled-score and dO·Vᵀ panels (nt), dQ (nn), and the
+/// dK/dV accumulations (tn, beta=1) — so the contraction FLOPs run on the
+/// BLAS engine while the softmax/dS rows stay on the vector units (shared
+/// phase 2, which zeroes every dead cell the full-rectangle strips filled).
+/// Same head split and single-writer discipline as the tiled route; results
+/// are deterministic for any task count but differ from the register route
+/// in the last ulps (different contraction associations).
+pub fn groupedCausalAttentionBackwardBlasTiles(task: GroupedCausalAttentionBackwardTiledTask) void {
+    if (comptime !(backend_mod.active_kind == .native and backend_mod.native_uses_blas)) {
+        return groupedCausalAttentionBackwardTiles(task);
+    } else {
+        const sgemm = backend_mod.native_impl.sgemmStrided;
+        const tile_rows = attention_bwd_blas_tile_rows;
+        const d = task.d;
+        const q_seq_stride = task.heads * d;
+        const kv_seq_stride = task.kv_heads * d;
+        const p_panel_all = task.scratch[0 .. tile_rows * task.kv_seq];
+        const ds_panel_all = task.scratch[tile_rows * task.kv_seq ..][0 .. tile_rows * task.kv_seq];
+
+        for (task.head_start..task.head_end) |head_i| {
+            const kv_head_i = task.kv_head_for_head[head_i];
+            const kv_head_base = kv_head_i * d;
+            const acc_base = if (task.partial_mode) head_i * task.kv_seq * d else kv_head_base;
+            const acc_stride = if (task.partial_mode) d else kv_seq_stride;
+            const stats_head: ?[]const f32 = if (task.stats) |values| values[head_i * task.q_seq * 2 ..][0 .. task.q_seq * 2] else null;
+
+            var q0: usize = 0;
+            while (q0 < task.q_seq) : (q0 += tile_rows) {
+                const rows_active = @min(tile_rows, task.q_seq - q0);
+                const p_first = task.source_offset + q0;
+                const tile_hi = if (task.causal) @min(p_first + rows_active, task.kv_seq) else task.kv_seq;
+                const tile_lo = if (!task.causal or task.window == 0) 0 else (p_first + 1) -| task.window;
+                if (tile_hi <= tile_lo) continue;
+                const live = tile_hi - tile_lo;
+
+                const q_tile = task.q_data[q0 * q_seq_stride + head_i * d ..];
+                const gy_tile = task.gy_data[q0 * q_seq_stride + head_i * d ..];
+                const k_live = task.k_data[tile_lo * kv_seq_stride + kv_head_base ..];
+                const v_live = task.v_data[tile_lo * kv_seq_stride + kv_head_base ..];
+
+                sgemm(false, true, rows_active, live, d, task.scale_value, q_tile, q_seq_stride, k_live, kv_seq_stride, 0.0, p_panel_all, task.kv_seq);
+                sgemm(false, true, rows_active, live, d, 1.0, gy_tile, q_seq_stride, v_live, kv_seq_stride, 0.0, ds_panel_all, task.kv_seq);
+
+                attentionBackwardSoftmaxTileRows(&task, q0, rows_active, tile_lo, live, p_panel_all, ds_panel_all, stats_head);
+
+                if (task.q_grad) |grad| {
+                    sgemm(false, false, rows_active, d, live, 1.0, ds_panel_all, task.kv_seq, k_live, kv_seq_stride, 0.0, grad[q0 * q_seq_stride + head_i * d ..], q_seq_stride);
+                }
+                if (task.dv_target) |target| {
+                    sgemm(true, false, live, d, rows_active, 1.0, p_panel_all, task.kv_seq, gy_tile, q_seq_stride, 1.0, target[acc_base + tile_lo * acc_stride ..], acc_stride);
+                }
+                if (task.dk_target) |target| {
+                    sgemm(true, false, live, d, rows_active, 1.0, ds_panel_all, task.kv_seq, q_tile, q_seq_stride, 1.0, target[acc_base + tile_lo * acc_stride ..], acc_stride);
                 }
             }
         }
@@ -1739,7 +1845,9 @@ pub fn groupedCausalAttentionBackward(
             .head_start = 0,
             .head_end = heads,
         };
-        const panel_len = 2 * attention_bwd_tile_rows * kv_seq;
+        const blas_route = attentionBackwardBlasEnabled();
+        const route_tile_rows = if (blas_route) attention_bwd_blas_tile_rows else attention_bwd_tile_rows;
+        const panel_len = 2 * route_tile_rows * kv_seq;
         var dispatched = false;
         if (attention_work >= parallel.vector_matmul_work_threshold / 2) {
             if (workPool(self)) |pool| {
@@ -1754,7 +1862,11 @@ pub fn groupedCausalAttentionBackward(
                         task_storage[task_i].head_end = (task_i + 1) * heads / task_count;
                         task_storage[task_i].scratch = task_scratch[task_i * panel_len ..][0..panel_len];
                     }
-                    pool.parallelChunks(GroupedCausalAttentionBackwardTiledTask, task_storage[0..task_count], runGroupedCausalAttentionBackwardTiledTask);
+                    if (blas_route) {
+                        pool.parallelChunks(GroupedCausalAttentionBackwardTiledTask, task_storage[0..task_count], runGroupedCausalAttentionBackwardBlasTiledTask);
+                    } else {
+                        pool.parallelChunks(GroupedCausalAttentionBackwardTiledTask, task_storage[0..task_count], runGroupedCausalAttentionBackwardTiledTask);
+                    }
                     dispatched = true;
                 }
             }
@@ -1764,7 +1876,11 @@ pub fn groupedCausalAttentionBackward(
             defer self.allocator.free(task_scratch);
             var serial_task = base_task;
             serial_task.scratch = task_scratch;
-            groupedCausalAttentionBackwardTiles(serial_task);
+            if (blas_route) {
+                groupedCausalAttentionBackwardBlasTiles(serial_task);
+            } else {
+                groupedCausalAttentionBackwardTiles(serial_task);
+            }
         }
 
         if (partial_mode) {

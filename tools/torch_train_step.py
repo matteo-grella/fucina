@@ -117,6 +117,7 @@ def main() -> None:
           f"adamw={'fused' if args.fused_adamw else 'foreach'}")
 
     losses, step_ms = [], []
+    fwd_ms, bwd_ms, opt_ms = [], [], []
     for step_i in range(n_steps):
         t0 = time.perf_counter_ns()
         if args.inference:
@@ -126,12 +127,23 @@ def main() -> None:
             for p in params.values():
                 p.grad = None
             loss = loss_fn(params, ids, labels, cos, sin)
+            loss_value = loss.item()  # forces the forward to settle (fucina-bench parity)
+            t1 = time.perf_counter_ns()
             loss.backward()
-            loss_value = loss.item()
+            t2 = time.perf_counter_ns()
             opt.step()
+            t3 = time.perf_counter_ns()
+            fwd_ms.append((t1 - t0) / 1e6)
+            bwd_ms.append((t2 - t1) / 1e6)
+            opt_ms.append((t3 - t2) / 1e6)
         step_ms.append((time.perf_counter_ns() - t0) / 1e6)
         losses.append(loss_value)
         print(f"step {step_i:>2}  loss {loss_value:.6f}  {step_ms[-1]:>8.2f} ms")
+    if fwd_ms:
+        n_timed = len(fwd_ms) - warmup
+        print(f"sections: fwd {sum(fwd_ms[warmup:]) / n_timed:.1f} ms, "
+              f"bwd {sum(bwd_ms[warmup:]) / n_timed:.1f} ms, "
+              f"opt {sum(opt_ms[warmup:]) / n_timed:.1f} ms")
 
     print(f"\n{'step':>4} {'fucina loss':>12} {'torch loss':>12} {'|diff|':>10} {'fucina ms':>10} {'torch ms':>10}")
     max_diff = 0.0

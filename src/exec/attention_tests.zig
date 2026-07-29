@@ -109,6 +109,154 @@ fn checkTiledAttentionParity(
     try expectTiledAttentionClose(ref.dataConst(), got.dataConst());
 }
 
+test "BLAS-strip attention backward matches the register-tiled route" {
+    // Drives both backward route functions directly on the same task (no env
+    // flag), so the BLAS route is exercised in every CI run on BLAS builds.
+    // Tolerance pin: the routes differ only in contraction association
+    // (sgemm vs register tiles), so gradients agree to f32 contraction
+    // tolerance across causal/window, GQA-partial vs direct, stats on/off.
+    const backend_mod = @import("../backend.zig");
+    if (comptime !(backend_mod.active_kind == .native and backend_mod.native_uses_blas)) return;
+
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const random = prng.random();
+
+    const cases = [_]struct {
+        q_seq: usize,
+        kv_seq: usize,
+        heads: usize,
+        kv_heads: usize,
+        d: usize,
+        window: usize,
+        use_stats: bool,
+    }{
+        .{ .q_seq = 96, .kv_seq = 96, .heads = 4, .kv_heads = 4, .d = 32, .window = 0, .use_stats = false },
+        .{ .q_seq = 80, .kv_seq = 80, .heads = 4, .kv_heads = 2, .d = 16, .window = 0, .use_stats = false },
+        .{ .q_seq = 70, .kv_seq = 70, .heads = 2, .kv_heads = 1, .d = 24, .window = 33, .use_stats = false },
+        .{ .q_seq = 96, .kv_seq = 96, .heads = 2, .kv_heads = 2, .d = 32, .window = 0, .use_stats = true },
+    };
+
+    for (cases) |case| {
+        const q_len = case.q_seq * case.heads * case.d;
+        const kv_len = case.kv_seq * case.kv_heads * case.d;
+        const q_data = try allocator.alloc(f32, q_len);
+        defer allocator.free(q_data);
+        const k_data = try allocator.alloc(f32, kv_len);
+        defer allocator.free(k_data);
+        const v_data = try allocator.alloc(f32, kv_len);
+        defer allocator.free(v_data);
+        const gy_data = try allocator.alloc(f32, q_len);
+        defer allocator.free(gy_data);
+        for (q_data) |*value| value.* = random.floatNorm(f32) * 0.5;
+        for (k_data) |*value| value.* = random.floatNorm(f32) * 0.5;
+        for (v_data) |*value| value.* = random.floatNorm(f32) * 0.5;
+        for (gy_data) |*value| value.* = random.floatNorm(f32) * 0.5;
+
+        var kv_map: [8]usize = undefined;
+        const group = case.heads / case.kv_heads;
+        for (0..case.heads) |head_i| kv_map[head_i] = head_i / group;
+        const partial_mode = group > 1;
+
+        const scale_value: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(case.d)));
+
+        // Forward-saved {max, sum_exp} stats when requested: max over the
+        // row's scaled scores, then the exp sum — matching the forward's
+        // definition (scaled scores, row-local max).
+        var stats: ?[]f32 = null;
+        defer if (stats) |values| allocator.free(values);
+        if (case.use_stats) {
+            const values = try allocator.alloc(f32, case.heads * case.q_seq * 2);
+            for (0..case.heads) |head_i| {
+                const kv_head_base = kv_map[head_i] * case.d;
+                for (0..case.q_seq) |query_i| {
+                    var max_score: f32 = -std.math.inf(f32);
+                    var scores_buf: [128]f32 = undefined;
+                    const active = query_i + 1;
+                    for (0..active) |key_i| {
+                        var dot: f32 = 0;
+                        for (0..case.d) |feature_i| {
+                            dot += q_data[query_i * case.heads * case.d + head_i * case.d + feature_i] *
+                                k_data[key_i * case.kv_heads * case.d + kv_head_base + feature_i];
+                        }
+                        scores_buf[key_i] = dot * scale_value;
+                        max_score = @max(max_score, scores_buf[key_i]);
+                    }
+                    var sum_exp: f32 = 0;
+                    for (0..active) |key_i| sum_exp += @exp(scores_buf[key_i] - max_score);
+                    values[head_i * case.q_seq * 2 + query_i * 2] = max_score;
+                    values[head_i * case.q_seq * 2 + query_i * 2 + 1] = sum_exp;
+                }
+            }
+            stats = values;
+        }
+
+        const target_len = if (partial_mode) case.heads * case.kv_seq * case.d else kv_len;
+        const RouteOut = struct { dq: []f32, dk: []f32, dv: []f32 };
+        var outs: [2]RouteOut = undefined;
+        for (0..2) |route_i| {
+            const dq = try allocator.alloc(f32, q_len);
+            const dk = try allocator.alloc(f32, target_len);
+            const dv = try allocator.alloc(f32, target_len);
+            @memset(dq, 0);
+            @memset(dk, 0);
+            @memset(dv, 0);
+            const tile_rows = if (route_i == 0)
+                exec_attention.attention_bwd_tile_rows
+            else
+                exec_attention.attention_bwd_blas_tile_rows;
+            const scratch = try allocator.alloc(f32, 2 * tile_rows * case.kv_seq);
+            defer allocator.free(scratch);
+
+            const task = exec_attention.GroupedCausalAttentionBackwardTiledTask{
+                .q_data = q_data,
+                .k_data = k_data,
+                .v_data = v_data,
+                .gy_data = gy_data,
+                .stats = stats,
+                .q_grad = dq,
+                .dk_target = dk,
+                .dv_target = dv,
+                .partial_mode = partial_mode,
+                .kv_head_for_head = kv_map[0..case.heads],
+                .q_seq = case.q_seq,
+                .kv_seq = case.kv_seq,
+                .source_offset = 0,
+                .heads = case.heads,
+                .d = case.d,
+                .kv_heads = case.kv_heads,
+                .scale_value = scale_value,
+                .window = case.window,
+                .causal = true,
+                .scratch = scratch,
+                .head_start = 0,
+                .head_end = case.heads,
+            };
+            if (route_i == 0) {
+                exec_attention.groupedCausalAttentionBackwardTiles(task);
+            } else {
+                exec_attention.groupedCausalAttentionBackwardBlasTiles(task);
+            }
+            outs[route_i] = .{ .dq = dq, .dk = dk, .dv = dv };
+        }
+        defer for (outs) |out| {
+            allocator.free(out.dq);
+            allocator.free(out.dk);
+            allocator.free(out.dv);
+        };
+
+        for ([_][2][]const f32{
+            .{ outs[0].dq, outs[1].dq },
+            .{ outs[0].dk, outs[1].dk },
+            .{ outs[0].dv, outs[1].dv },
+        }) |pair| {
+            for (pair[0], pair[1]) |reference, actual| {
+                try std.testing.expectApproxEqAbs(reference, actual, 2e-4);
+            }
+        }
+    }
+}
+
 test "grouped causal attention query-tiled kernel parity vs per-query kernels" {
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;
