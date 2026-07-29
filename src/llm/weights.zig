@@ -1826,9 +1826,8 @@ pub fn linearSeqQ4_K(
 /// 5.5 bpw). Routing decode through the compact tensor-RHS path is
 /// bitwise-equal (same Q8_K LHS quantization, same order-independent i32
 /// integer stage, same f32 epilogue association — proven by the cross-layout
-/// test in q5_k_tests.zig) and wins where bandwidth is the limit: default ON
-/// on x86_64 (the measured ~10% decode loss), OFF on aarch64 (pending
-/// measurement). Runtime overrides: FUCINA_Q5K_DECODE_COMPACT=1 forces on,
+/// test in q5_k_tests.zig) and wins where bandwidth is the limit: default
+/// ON. Runtime overrides: FUCINA_Q5K_DECODE_COMPACT=1 forces on,
 /// FUCINA_NO_Q5K_DECODE_COMPACT=1 forces off (the A/B and emergency-revert
 /// switches, winograd-style). Read once, cached.
 var norm_quant_fused_state = std.atomic.Value(u8).init(0); // 0 = unread, 1 = enabled, 2 = disabled
@@ -1845,7 +1844,7 @@ fn normQuantFusedEnabled() bool {
     return on;
 }
 
-const q5k_decode_compact_default_on = builtin.cpu.arch == .x86_64;
+const q5k_decode_compact_default_on = true;
 var q5k_decode_compact_state = std.atomic.Value(u8).init(0); // 0 = unread, 1 = enabled, 2 = disabled
 fn q5kDecodeCompactEnabled() bool {
     const s = q5k_decode_compact_state.load(.acquire);
@@ -1900,10 +1899,9 @@ pub fn linearSeqQ5_K(
 /// iacc = sum dot*scale — Q6_K has no separate mins path — and the identical
 /// f32 epilogue association acc + float(iacc)*(f16(d_w)*a.d) in ascending
 /// block order; proven by the cross-layout test in q6_k_tests.zig). Default
-/// ON on x86_64, OFF on aarch64. Runtime overrides:
-/// FUCINA_Q6K_DECODE_COMPACT=1 forces on, FUCINA_NO_Q6K_DECODE_COMPACT=1
-/// forces off. Read once, cached.
-const q6k_decode_compact_default_on = builtin.cpu.arch == .x86_64;
+/// ON. Runtime overrides: FUCINA_Q6K_DECODE_COMPACT=1 forces on,
+/// FUCINA_NO_Q6K_DECODE_COMPACT=1 forces off. Read once, cached.
+const q6k_decode_compact_default_on = true;
 var q6k_decode_compact_state = std.atomic.Value(u8).init(0); // 0 = unread, 1 = enabled, 2 = disabled
 fn q6kDecodeCompactEnabled() bool {
     const s = q6k_decode_compact_state.load(.acquire);
