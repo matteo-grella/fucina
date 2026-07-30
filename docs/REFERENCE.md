@@ -7692,7 +7692,7 @@ flagged cacheable
 reads stale data. `freeResidentBytes` unregisters and releases.
 
 What does **not** offload on Metal, per current tree: **quantized** decode GEMV
-(`decodeGemvEnabled()` is hard-`false`; resident dense-f32 GEMV is separate),
+(`shouldUseGpuQuantDecode` is hard-`false`; resident dense-f32 GEMV is separate),
 attention (`shouldUseGpuAttn`/`attnPrefillF16` return
 `false`; the CPU tiled kernel runs), and the ES parameter-update device arm
 (`esPerturb`/`esUpdate`/`esAnchor` are stubs returning `false` — on unified

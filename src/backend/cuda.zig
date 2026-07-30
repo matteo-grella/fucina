@@ -2444,15 +2444,13 @@ pub fn setMinWorkQMoeForTest(v: u64) void {
     state.min_work_qmoe = v;
 }
 
-/// Decode-GEMV capability gate for exec's m <= 8 arm: FUCINA_GPU_DECODE=1
-/// opts in, default off pending a sampled-token parity-oracle pass.
-pub fn decodeGemvEnabled() bool {
-    ensureConfig();
-    return state.decode_enabled;
-}
-
+/// Quantized decode-GEMV gate — exec's m <= 8 arm in `denseQuantMatmulGpu`
+/// (`src/exec/quant_matmul.zig`): FUCINA_GPU_DECODE=1 opts in, default off
+/// pending a sampled-token parity-oracle pass; Q5_K additionally clears its
+/// own work floor.
 pub fn shouldUseGpuQuantDecode(format: QFormat, m: usize, n: usize, k: usize) bool {
-    if (!decodeGemvEnabled()) return false;
+    ensureConfig();
+    if (!state.decode_enabled) return false;
     if (format != .q5_k) return true;
     const work = std.math.mul(u64, std.math.mul(u64, m, n) catch std.math.maxInt(u64), k) catch std.math.maxInt(u64);
     const pass = work >= state.min_work_decode_q5;

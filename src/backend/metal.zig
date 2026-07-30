@@ -1590,13 +1590,9 @@ pub fn setMinWorkQMoeForTest(v: u64) void {
     state.min_work_qmoe = v;
 }
 
-/// Decode-GEMV capability gate (exec's m <= 8 arm in denseQuantMatmulGpu).
-/// The Metal provider keeps decode on CPU by design — always false here;
-/// the CUDA provider opts in via FUCINA_GPU_DECODE=1.
-pub fn decodeGemvEnabled() bool {
-    return false;
-}
-
+/// Quantized decode-GEMV gate — exec's m <= 8 arm in `denseQuantMatmulGpu`
+/// (`src/exec/quant_matmul.zig`). The Metal provider keeps decode on CPU by
+/// design — always false; the CUDA provider opts in via FUCINA_GPU_DECODE=1.
 pub fn shouldUseGpuQuantDecode(format: QFormat, m: usize, n: usize, k: usize) bool {
     _ = format;
     _ = m;
