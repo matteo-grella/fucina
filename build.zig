@@ -143,573 +143,55 @@ pub fn build(b: *std.Build) void {
     nanochat_module.addImport("fucina", module);
     nanochat_module.addImport("fucina_llm", llm_module);
 
-    const exe = b.addExecutable(.{
-        .name = "fucina-smoke",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/smoke/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    exe.root_module.addImport("fucina", module);
-    configureBlas(exe, blas_kind);
-    configureGpu(b, exe, gpu_kind);
-    const exe_install = installArtifactStep(b, exe);
+    const tool_ctx: ToolCtx = .{ .target = target, .optimize = optimize, .module = module, .llm_module = llm_module, .blas_kind = blas_kind, .gpu_kind = gpu_kind };
 
-    const run_cmd = b.addRunArtifact(exe);
-    run_cmd.step.dependOn(exe_install);
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-
-    const smoke_step = b.step("smoke", "Run the smoke example");
-    smoke_step.dependOn(&run_cmd.step);
-
+    const smoke = addExample(b, tool_ctx, .{ .step = "smoke", .desc = "Run the smoke example", .exe = "fucina-smoke", .root = "examples/smoke/main.zig", .llm = false });
     const run_step = b.step("run", "Run the smoke example (alias of smoke)");
-    run_step.dependOn(&run_cmd.step);
+    run_step.dependOn(&smoke.run.step);
 
-    const facedetect_exe = b.addExecutable(.{
-        .name = "fucina-facedetect",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/facedetect/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    facedetect_exe.root_module.addImport("fucina", module);
-    configureBlas(facedetect_exe, blas_kind);
-    configureGpu(b, facedetect_exe, gpu_kind);
-    const facedetect_install = installArtifactStep(b, facedetect_exe);
-
-    const facedetect_cmd = b.addRunArtifact(facedetect_exe);
-    facedetect_cmd.step.dependOn(facedetect_install);
-    if (b.args) |args| {
-        facedetect_cmd.addArgs(args);
-    }
-
-    const facedetect_step = b.step("facedetect", "Face detection/recognition (face-detect.cpp buffalo_l port): detect/embed/verify/analyze/landmarks");
-    facedetect_step.dependOn(&facedetect_cmd.step);
-
-    const nanochat_exe = b.addExecutable(.{
-        .name = "fucina-nanochat",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/nanochat/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    nanochat_exe.root_module.addImport("fucina", module);
+    _ = addExample(b, tool_ctx, .{ .step = "facedetect", .desc = "Face detection/recognition (face-detect.cpp buffalo_l port): detect/embed/verify/analyze/landmarks", .exe = "fucina-facedetect", .root = "examples/facedetect/main.zig", .llm = false });
     // nanochat's raw-byte BPE pretokenizer reuses the generated \p{L}/\p{N}/\s
     // tables via the fucina_llm re-export (llm.unicode_categories) — sharing
     // the file keeps it in ONE module, so nanochat code can coexist with
     // fucina_llm consumers in the same compilation (the lmserve example).
-    nanochat_exe.root_module.addImport("fucina_llm", llm_module);
-    configureBlas(nanochat_exe, blas_kind);
-    configureGpu(b, nanochat_exe, gpu_kind);
-    const nanochat_install = installArtifactStep(b, nanochat_exe);
-
-    const nanochat_cmd = b.addRunArtifact(nanochat_exe);
-    nanochat_cmd.step.dependOn(nanochat_install);
-    if (b.args) |args| {
-        nanochat_cmd.addArgs(args);
-    }
-
-    const nanochat_step = b.step("nanochat", "nanochat port (karpathy/nanochat): tok-train / base-train / sft / eval-bpb / chat");
-    nanochat_step.dependOn(&nanochat_cmd.step);
-
-    const spirals_exe = b.addExecutable(.{
-        .name = "fucina-spirals",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/spirals/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    spirals_exe.root_module.addImport("fucina", module);
-    configureBlas(spirals_exe, blas_kind);
-    configureGpu(b, spirals_exe, gpu_kind);
-    const spirals_install = installArtifactStep(b, spirals_exe);
-
-    const spirals_cmd = b.addRunArtifact(spirals_exe);
-    spirals_cmd.step.dependOn(spirals_install);
-    if (b.args) |args| {
-        spirals_cmd.addArgs(args);
-    }
-
-    const spirals_step = b.step("spirals", "Train a two-spirals MLP with SGD/AdamW/Muon/APOLLO (+groups/schedule/clip), checkpoint, resume, infer");
-    spirals_step.dependOn(&spirals_cmd.step);
-
-    const nam_exe = b.addExecutable(.{
-        .name = "fucina-nam",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/nam/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    nam_exe.root_module.addImport("fucina", module);
-    configureBlas(nam_exe, blas_kind);
-    configureGpu(b, nam_exe, gpu_kind);
-    configureNamAudio(nam_exe);
-    const nam_install = installArtifactStep(b, nam_exe);
-
-    const nam_cmd = b.addRunArtifact(nam_exe);
-    nam_cmd.step.dependOn(nam_install);
-    if (b.args) |args| {
-        nam_cmd.addArgs(args);
-    }
-
-    const nam_step = b.step("nam", "Neural Amp Modeler: .nam profiles, profiling/training, live amp sim");
-    nam_step.dependOn(&nam_cmd.step);
-
-    const qwen3_exe = b.addExecutable(.{
-        .name = "fucina-qwen3",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/qwen3/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    qwen3_exe.root_module.addImport("fucina", module);
-    qwen3_exe.root_module.addImport("fucina_llm", llm_module);
-    configureBlas(qwen3_exe, blas_kind);
-    configureGpu(b, qwen3_exe, gpu_kind);
-    configureLlguidance(qwen3_exe, llguidance_dep);
-    const qwen3_install = installArtifactStep(b, qwen3_exe);
-
-    const qwen3_cmd = b.addRunArtifact(qwen3_exe);
-    qwen3_cmd.step.dependOn(qwen3_install);
-    if (b.args) |args| {
-        qwen3_cmd.addArgs(args);
-    }
-
-    const qwen3_step = b.step("qwen3", "Run Qwen3 dense/MoE GGUF inference (text chat; --spec/--spec-ref lossless speculative decode, --tokenize tokenizer-parity oracle)");
-    qwen3_step.dependOn(&qwen3_cmd.step);
-
-    const deepseek2_exe = b.addExecutable(.{
-        .name = "fucina-deepseek2",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/deepseek2/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    deepseek2_exe.root_module.addImport("fucina", module);
-    deepseek2_exe.root_module.addImport("fucina_llm", llm_module);
-    configureBlas(deepseek2_exe, blas_kind);
-    configureGpu(b, deepseek2_exe, gpu_kind);
-    const deepseek2_install = installArtifactStep(b, deepseek2_exe);
-
-    const deepseek2_cmd = b.addRunArtifact(deepseek2_exe);
-    deepseek2_cmd.step.dependOn(deepseek2_install);
-    if (b.args) |args| {
-        deepseek2_cmd.addArgs(args);
-    }
-
-    const deepseek2_step = b.step("deepseek2", "Run DeepSeek-V2 family (MLA + MoE) GGUF inference");
-    deepseek2_step.dependOn(&deepseek2_cmd.step);
-
-    const inkling_exe = b.addExecutable(.{
-        .name = "fucina-inkling",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/inkling/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    inkling_exe.root_module.addImport("fucina", module);
-    inkling_exe.root_module.addImport("fucina_llm", llm_module);
-    inkling_exe.root_module.addImport("facedetect_image", facedetect_image_module);
-    configureBlas(inkling_exe, blas_kind);
-    configureGpu(b, inkling_exe, gpu_kind);
-    const inkling_install = installArtifactStep(b, inkling_exe);
-
-    const inkling_cmd = b.addRunArtifact(inkling_exe);
-    inkling_cmd.step.dependOn(inkling_install);
-    if (b.args) |args| {
-        inkling_cmd.addArgs(args);
-    }
-
-    const inkling_step = b.step("inkling", "Run Inkling (hybrid SWA + rel-bias + MoE) GGUF inference");
-    inkling_step.dependOn(&inkling_cmd.step);
-
-    const glm4moe_exe = b.addExecutable(.{
-        .name = "fucina-glm4moe",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/glm4moe/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    glm4moe_exe.root_module.addImport("fucina", module);
-    glm4moe_exe.root_module.addImport("fucina_llm", llm_module);
-    configureBlas(glm4moe_exe, blas_kind);
-    configureGpu(b, glm4moe_exe, gpu_kind);
-    const glm4moe_install = installArtifactStep(b, glm4moe_exe);
-
-    const glm4moe_cmd = b.addRunArtifact(glm4moe_exe);
-    glm4moe_cmd.step.dependOn(glm4moe_install);
-    if (b.args) |args| {
-        glm4moe_cmd.addArgs(args);
-    }
-
-    const glm4moe_step = b.step("glm4moe", "Run GLM-4.5 family GGUF inference (--mtp native multi-token-prediction speculative decode)");
-    glm4moe_step.dependOn(&glm4moe_cmd.step);
-
-    const deepseek4_exe = b.addExecutable(.{
-        .name = "fucina-deepseek4",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/deepseek4/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    deepseek4_exe.root_module.addImport("fucina", module);
-    deepseek4_exe.root_module.addImport("fucina_llm", llm_module);
-    configureBlas(deepseek4_exe, blas_kind);
-    configureGpu(b, deepseek4_exe, gpu_kind);
-    const deepseek4_install = installArtifactStep(b, deepseek4_exe);
-
-    const deepseek4_cmd = b.addRunArtifact(deepseek4_exe);
-    deepseek4_cmd.step.dependOn(deepseek4_install);
-    if (b.args) |args| {
-        deepseek4_cmd.addArgs(args);
-    }
-
-    const deepseek4_step = b.step("deepseek4", "Run DeepSeek V4 Flash GGUF inference (CSA/HCA + streamed experts)");
-    deepseek4_step.dependOn(&deepseek4_cmd.step);
-
-    const omnivoice_exe = b.addExecutable(.{
-        .name = "fucina-omnivoice",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/omnivoice/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    omnivoice_exe.root_module.addImport("fucina", module);
-    omnivoice_exe.root_module.addImport("fucina_llm", llm_module);
-    configureBlas(omnivoice_exe, blas_kind);
-    configureGpu(b, omnivoice_exe, gpu_kind);
-    configureOmnivoiceAudio(omnivoice_exe);
-    const omnivoice_install = installArtifactStep(b, omnivoice_exe);
-
-    const omnivoice_cmd = b.addRunArtifact(omnivoice_exe);
-    omnivoice_cmd.step.dependOn(omnivoice_install);
-    if (b.args) |args| {
-        omnivoice_cmd.addArgs(args);
-    }
-
-    const omnivoice_step = b.step("omnivoice", "OmniVoice MaskGIT TTS from GGUF: voice cloning/design, codec encode/decode");
-    omnivoice_step.dependOn(&omnivoice_cmd.step);
-
-    const locate_anything_exe = b.addExecutable(.{
-        .name = "fucina-locate-anything",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/locate_anything/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    locate_anything_exe.root_module.addImport("fucina", module);
-    locate_anything_exe.root_module.addImport("fucina_llm", llm_module);
-    configureBlas(locate_anything_exe, blas_kind);
-    configureGpu(b, locate_anything_exe, gpu_kind);
-    const locate_anything_install = installArtifactStep(b, locate_anything_exe);
-
-    const locate_anything_cmd = b.addRunArtifact(locate_anything_exe);
-    locate_anything_cmd.step.dependOn(locate_anything_install);
-    if (b.args) |args| {
-        locate_anything_cmd.addArgs(args);
-    }
-
-    const locate_anything_step = b.step("locate-anything", "LocateAnything-3B open-vocabulary detection from GGUF: detect/info, parity oracles, bench");
-    locate_anything_step.dependOn(&locate_anything_cmd.step);
-
-    const finetune_exe = b.addExecutable(.{
-        .name = "fucina-finetune",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/finetune/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    finetune_exe.root_module.addImport("fucina", module);
-    finetune_exe.root_module.addImport("fucina_llm", llm_module);
-    configureBlas(finetune_exe, blas_kind);
-    configureGpu(b, finetune_exe, gpu_kind);
-    const finetune_install = installArtifactStep(b, finetune_exe);
-
-    const finetune_cmd = b.addRunArtifact(finetune_exe);
-    finetune_cmd.step.dependOn(finetune_install);
-    if (b.args) |args| {
-        finetune_cmd.addArgs(args);
-    }
-
-    const finetune_step = b.step("finetune", "LoRA fine-tune Qwen3 GGUF on a tiny built-in SFT dataset");
-    finetune_step.dependOn(&finetune_cmd.step);
-
-    const cartridge_exe = b.addExecutable(.{
-        .name = "fucina-cartridge",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/cartridge/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    cartridge_exe.root_module.addImport("fucina", module);
-    cartridge_exe.root_module.addImport("fucina_llm", llm_module);
-    configureBlas(cartridge_exe, blas_kind);
-    configureGpu(b, cartridge_exe, gpu_kind);
-    const cartridge_install = installArtifactStep(b, cartridge_exe);
-
-    const cartridge_cmd = b.addRunArtifact(cartridge_exe);
-    cartridge_cmd.step.dependOn(cartridge_install);
-    if (b.args) |args| {
-        cartridge_cmd.addArgs(args);
-    }
-
-    const cartridge_step = b.step("cartridge", "Train/serve a corpus as a trained KV prefix on a Qwen3 GGUF (arXiv 2506.06266)");
-    cartridge_step.dependOn(&cartridge_cmd.step);
-
-    const cartridge_fleet_exe = b.addExecutable(.{
-        .name = "fucina-cartridge-fleet",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/cartridge_fleet/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    cartridge_fleet_exe.root_module.addImport("fucina", module);
-    cartridge_fleet_exe.root_module.addImport("fucina_llm", llm_module);
-    configureBlas(cartridge_fleet_exe, blas_kind);
-    configureGpu(b, cartridge_fleet_exe, gpu_kind);
-    const cartridge_fleet_install = installArtifactStep(b, cartridge_fleet_exe);
-
-    const cartridge_fleet_cmd = b.addRunArtifact(cartridge_fleet_exe);
-    cartridge_fleet_cmd.step.dependOn(cartridge_fleet_install);
-    if (b.args) |args| {
-        cartridge_fleet_cmd.addArgs(args);
-    }
-
-    const cartridge_fleet_step = b.step("cartridge-fleet", "Per-document cartridge fleets: mixed-visibility training, RAM/disk budget manager, cosine cartridge-RAG (arXiv 2606.04557)");
-    cartridge_fleet_step.dependOn(&cartridge_fleet_cmd.step);
-
-    const engram_exe = b.addExecutable(.{
-        .name = "fucina-engram",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/engram/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    engram_exe.root_module.addImport("fucina", module);
-    engram_exe.root_module.addImport("fucina_llm", llm_module);
-    configureBlas(engram_exe, blas_kind);
-    configureGpu(b, engram_exe, gpu_kind);
-    const engram_install = installArtifactStep(b, engram_exe);
-
-    const engram_cmd = b.addRunArtifact(engram_exe);
-    engram_cmd.step.dependOn(engram_install);
-    if (b.args) |args| {
-        engram_cmd.addArgs(args);
-    }
-
-    const engram_step = b.step("engram", "Graft conditional n-gram memory onto a frozen Qwen3 GGUF and train it (arXiv 2601.07372)");
-    engram_step.dependOn(&engram_cmd.step);
-
-    const es_finetune_exe = b.addExecutable(.{
-        .name = "fucina-es-finetune",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/es_finetune/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    es_finetune_exe.root_module.addImport("fucina", module);
-    es_finetune_exe.root_module.addImport("fucina_llm", llm_module);
-    configureBlas(es_finetune_exe, blas_kind);
-    configureGpu(b, es_finetune_exe, gpu_kind);
-    const es_finetune_install = installArtifactStep(b, es_finetune_exe);
-
-    const es_finetune_cmd = b.addRunArtifact(es_finetune_exe);
-    es_finetune_cmd.step.dependOn(es_finetune_install);
-    if (b.args) |args| {
-        es_finetune_cmd.addArgs(args);
-    }
-
-    const es_finetune_step = b.step("es-finetune", "Evolution-strategies fine-tune Qwen3 GGUF (gradient-free; --mode lora|full, --reward rule|nll|acc)");
-    es_finetune_step.dependOn(&es_finetune_cmd.step);
-
-    const es_spirals_exe = b.addExecutable(.{
-        .name = "fucina-es-spirals",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/es_spirals/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    es_spirals_exe.root_module.addImport("fucina", module);
-    configureBlas(es_spirals_exe, blas_kind);
-    configureGpu(b, es_spirals_exe, gpu_kind);
-    const es_spirals_install = installArtifactStep(b, es_spirals_exe);
-
-    const es_spirals_cmd = b.addRunArtifact(es_spirals_exe);
-    es_spirals_cmd.step.dependOn(es_spirals_install);
-    if (b.args) |args| {
-        es_spirals_cmd.addArgs(args);
-    }
-
-    const es_spirals_step = b.step("es-spirals", "Train the two-spirals MLP FROM SCRATCH with evolution strategies (gradient-free; self-verifying)");
-    es_spirals_step.dependOn(&es_spirals_cmd.step);
-
-    const es_ternary_spirals_exe = b.addExecutable(.{
-        .name = "fucina-es-ternary-spirals",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/es_ternary_spirals/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    es_ternary_spirals_exe.root_module.addImport("fucina", module);
-    configureBlas(es_ternary_spirals_exe, blas_kind);
-    configureGpu(b, es_ternary_spirals_exe, gpu_kind);
-    const es_ternary_spirals_install = installArtifactStep(b, es_ternary_spirals_exe);
-
-    const es_ternary_spirals_cmd = b.addRunArtifact(es_ternary_spirals_exe);
-    es_ternary_spirals_cmd.step.dependOn(es_ternary_spirals_install);
-    if (b.args) |args| {
-        es_ternary_spirals_cmd.addArgs(args);
-    }
-
-    const es_ternary_spirals_step = b.step("es-ternary-spirals", "Train a two-spirals MLP FROM SCRATCH with the ternary-native ES (packed TQ2_0 genome = the inference model; self-verifying)");
-    es_ternary_spirals_step.dependOn(&es_ternary_spirals_cmd.step);
-
-    const ptqtp_spirals_exe = b.addExecutable(.{
-        .name = "fucina-ptqtp-spirals",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/ptqtp_spirals/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    ptqtp_spirals_exe.root_module.addImport("fucina", module);
-    configureBlas(ptqtp_spirals_exe, blas_kind);
-    configureGpu(b, ptqtp_spirals_exe, gpu_kind);
-    const ptqtp_spirals_install = installArtifactStep(b, ptqtp_spirals_exe);
-
-    const ptqtp_spirals_cmd = b.addRunArtifact(ptqtp_spirals_exe);
-    ptqtp_spirals_cmd.step.dependOn(ptqtp_spirals_install);
-    if (b.args) |args| {
-        ptqtp_spirals_cmd.addArgs(args);
-    }
-
-    const ptqtp_spirals_step = b.step("ptqtp-spirals", "Train a float two-spirals MLP, then post-training-quantize it to dual trit-planes (PTQTP over packed TQ2_0; self-verifying)");
-    ptqtp_spirals_step.dependOn(&ptqtp_spirals_cmd.step);
-
-    const ptqtp_qwen3_exe = b.addExecutable(.{
-        .name = "fucina-ptqtp-qwen3",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/ptqtp_qwen3/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    ptqtp_qwen3_exe.root_module.addImport("fucina", module);
-    ptqtp_qwen3_exe.root_module.addImport("fucina_llm", llm_module);
-    configureBlas(ptqtp_qwen3_exe, blas_kind);
-    configureGpu(b, ptqtp_qwen3_exe, gpu_kind);
-    const ptqtp_qwen3_install = installArtifactStep(b, ptqtp_qwen3_exe);
-
-    const ptqtp_qwen3_cmd = b.addRunArtifact(ptqtp_qwen3_exe);
-    ptqtp_qwen3_cmd.step.dependOn(ptqtp_qwen3_install);
-    if (b.args) |args| {
-        ptqtp_qwen3_cmd.addArgs(args);
-    }
-
-    const ptqtp_qwen3_step = b.step("ptqtp-qwen3", "PTQTP-decorate a Qwen3 GGUF's linears in place (any source dtype) and compare teacher-forced NLL before/after + greedy completion");
-    ptqtp_qwen3_step.dependOn(&ptqtp_qwen3_cmd.step);
-
-    const gemma4_exe = b.addExecutable(.{
-        .name = "fucina-gemma4",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/gemma4/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    gemma4_exe.root_module.addImport("fucina", module);
-    gemma4_exe.root_module.addImport("fucina_llm", llm_module);
-    configureBlas(gemma4_exe, blas_kind);
-    configureGpu(b, gemma4_exe, gpu_kind);
-    configureLlguidance(gemma4_exe, llguidance_dep);
-    const gemma4_install = installArtifactStep(b, gemma4_exe);
-
-    const gemma4_cmd = b.addRunArtifact(gemma4_exe);
-    gemma4_cmd.step.dependOn(gemma4_install);
-    if (b.args) |args| {
-        gemma4_cmd.addArgs(args);
-    }
-
-    const gemma4_step = b.step("gemma4", "Run Gemma 4 GGUF inference from token IDs (logit-parity harness)");
-    gemma4_step.dependOn(&gemma4_cmd.step);
-
-    const lmserve_exe = b.addExecutable(.{
-        .name = "fucina-lmserve",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/lmserve/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    lmserve_exe.root_module.addImport("fucina", module);
-    lmserve_exe.root_module.addImport("fucina_llm", llm_module);
-    lmserve_exe.root_module.addImport("nanochat", nanochat_module);
-    configureBlas(lmserve_exe, blas_kind);
-    configureGpu(b, lmserve_exe, gpu_kind);
-    configureLlguidance(lmserve_exe, llguidance_dep);
+    _ = addExample(b, tool_ctx, .{ .step = "nanochat", .desc = "nanochat port (karpathy/nanochat): tok-train / base-train / sft / eval-bpb / chat", .exe = "fucina-nanochat", .root = "examples/nanochat/main.zig", .llm = true });
+    _ = addExample(b, tool_ctx, .{ .step = "spirals", .desc = "Train a two-spirals MLP with SGD/AdamW/Muon/APOLLO (+groups/schedule/clip), checkpoint, resume, infer", .exe = "fucina-spirals", .root = "examples/spirals/main.zig", .llm = false });
+    const nam = addExample(b, tool_ctx, .{ .step = "nam", .desc = "Neural Amp Modeler: .nam profiles, profiling/training, live amp sim", .exe = "fucina-nam", .root = "examples/nam/main.zig", .llm = false });
+    configureNamAudio(nam.exe);
+    const qwen3 = addExample(b, tool_ctx, .{ .step = "qwen3", .desc = "Run Qwen3 dense/MoE GGUF inference (text chat; --spec/--spec-ref lossless speculative decode, --tokenize tokenizer-parity oracle)", .exe = "fucina-qwen3", .root = "examples/qwen3/main.zig", .llm = true });
+    configureLlguidance(qwen3.exe, llguidance_dep);
+    _ = addExample(b, tool_ctx, .{ .step = "deepseek2", .desc = "Run DeepSeek-V2 family (MLA + MoE) GGUF inference", .exe = "fucina-deepseek2", .root = "examples/deepseek2/main.zig", .llm = true });
+    const inkling = addExample(b, tool_ctx, .{ .step = "inkling", .desc = "Run Inkling (hybrid SWA + rel-bias + MoE) GGUF inference", .exe = "fucina-inkling", .root = "examples/inkling/main.zig", .llm = true });
+    inkling.exe.root_module.addImport("facedetect_image", facedetect_image_module);
+    _ = addExample(b, tool_ctx, .{ .step = "glm4moe", .desc = "Run GLM-4.5 family GGUF inference (--mtp native multi-token-prediction speculative decode)", .exe = "fucina-glm4moe", .root = "examples/glm4moe/main.zig", .llm = true });
+    _ = addExample(b, tool_ctx, .{ .step = "deepseek4", .desc = "Run DeepSeek V4 Flash GGUF inference (CSA/HCA + streamed experts)", .exe = "fucina-deepseek4", .root = "examples/deepseek4/main.zig", .llm = true });
+    const omnivoice = addExample(b, tool_ctx, .{ .step = "omnivoice", .desc = "OmniVoice MaskGIT TTS from GGUF: voice cloning/design, codec encode/decode", .exe = "fucina-omnivoice", .root = "examples/omnivoice/main.zig", .llm = true });
+    configureOmnivoiceAudio(omnivoice.exe);
+    _ = addExample(b, tool_ctx, .{ .step = "locate-anything", .desc = "LocateAnything-3B open-vocabulary detection from GGUF: detect/info, parity oracles, bench", .exe = "fucina-locate-anything", .root = "examples/locate_anything/main.zig", .llm = true });
+    _ = addExample(b, tool_ctx, .{ .step = "finetune", .desc = "LoRA fine-tune Qwen3 GGUF on a tiny built-in SFT dataset", .exe = "fucina-finetune", .root = "examples/finetune/main.zig", .llm = true });
+    _ = addExample(b, tool_ctx, .{ .step = "cartridge", .desc = "Train/serve a corpus as a trained KV prefix on a Qwen3 GGUF (arXiv 2506.06266)", .exe = "fucina-cartridge", .root = "examples/cartridge/main.zig", .llm = true });
+    _ = addExample(b, tool_ctx, .{ .step = "cartridge-fleet", .desc = "Per-document cartridge fleets: mixed-visibility training, RAM/disk budget manager, cosine cartridge-RAG (arXiv 2606.04557)", .exe = "fucina-cartridge-fleet", .root = "examples/cartridge_fleet/main.zig", .llm = true });
+    _ = addExample(b, tool_ctx, .{ .step = "engram", .desc = "Graft conditional n-gram memory onto a frozen Qwen3 GGUF and train it (arXiv 2601.07372)", .exe = "fucina-engram", .root = "examples/engram/main.zig", .llm = true });
+    _ = addExample(b, tool_ctx, .{ .step = "es-finetune", .desc = "Evolution-strategies fine-tune Qwen3 GGUF (gradient-free; --mode lora|full, --reward rule|nll|acc)", .exe = "fucina-es-finetune", .root = "examples/es_finetune/main.zig", .llm = true });
+    _ = addExample(b, tool_ctx, .{ .step = "es-spirals", .desc = "Train the two-spirals MLP FROM SCRATCH with evolution strategies (gradient-free; self-verifying)", .exe = "fucina-es-spirals", .root = "examples/es_spirals/main.zig", .llm = false });
+    _ = addExample(b, tool_ctx, .{ .step = "es-ternary-spirals", .desc = "Train a two-spirals MLP FROM SCRATCH with the ternary-native ES (packed TQ2_0 genome = the inference model; self-verifying)", .exe = "fucina-es-ternary-spirals", .root = "examples/es_ternary_spirals/main.zig", .llm = false });
+    _ = addExample(b, tool_ctx, .{ .step = "ptqtp-spirals", .desc = "Train a float two-spirals MLP, then post-training-quantize it to dual trit-planes (PTQTP over packed TQ2_0; self-verifying)", .exe = "fucina-ptqtp-spirals", .root = "examples/ptqtp_spirals/main.zig", .llm = false });
+    _ = addExample(b, tool_ctx, .{ .step = "ptqtp-qwen3", .desc = "PTQTP-decorate a Qwen3 GGUF's linears in place (any source dtype) and compare teacher-forced NLL before/after + greedy completion", .exe = "fucina-ptqtp-qwen3", .root = "examples/ptqtp_qwen3/main.zig", .llm = true });
+    const gemma4 = addExample(b, tool_ctx, .{ .step = "gemma4", .desc = "Run Gemma 4 GGUF inference from token IDs (logit-parity harness)", .exe = "fucina-gemma4", .root = "examples/gemma4/main.zig", .llm = true });
+    configureLlguidance(gemma4.exe, llguidance_dep);
+    const lmserve = addExample(b, tool_ctx, .{ .step = "lmserve", .desc = "OpenAI-compatible language-model HTTP server (chat completions + responses; SSE streaming; JSON-schema constrained output with -Dllguidance=true) over qwen3/gemma4/diffusion-gemma GGUFs + nanochat checkpoints", .exe = "fucina-lmserve", .root = "examples/lmserve/main.zig", .llm = true });
+    lmserve.exe.root_module.addImport("nanochat", nanochat_module);
+    configureLlguidance(lmserve.exe, llguidance_dep);
     // Uses std.c.shutdown/recv (signal-driven accept unblock, MSG_PEEK
     // hang-up probe): libc links implicitly on macOS but must be declared
     // for the Linux leg.
-    lmserve_exe.root_module.link_libc = true;
-    const lmserve_install = installArtifactStep(b, lmserve_exe);
-
-    const lmserve_cmd = b.addRunArtifact(lmserve_exe);
-    lmserve_cmd.step.dependOn(lmserve_install);
-    if (b.args) |args| {
-        lmserve_cmd.addArgs(args);
-    }
-
-    const lmserve_step = b.step("lmserve", "OpenAI-compatible language-model HTTP server (chat completions + responses; SSE streaming; JSON-schema constrained output with -Dllguidance=true) over qwen3/gemma4/diffusion-gemma GGUFs + nanochat checkpoints");
-    lmserve_step.dependOn(&lmserve_cmd.step);
-
-    const parakeet_exe = b.addExecutable(.{
-        .name = "fucina-parakeet",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/parakeet/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    parakeet_exe.root_module.addImport("fucina", module);
-    parakeet_exe.root_module.addImport("fucina_llm", llm_module);
-    parakeet_exe.root_module.addImport("nam_audio", nam_audio_module);
+    lmserve.exe.root_module.link_libc = true;
+    const parakeet = addExample(b, tool_ctx, .{ .step = "parakeet", .desc = "Parakeet ASR (NeMo FastConformer): transcribe a WAV (mel -> encoder -> CTC/TDT decoder -> text); --stream/--manifest/--mic, --compare parity harness", .exe = "fucina-parakeet", .root = "examples/parakeet/main.zig", .llm = true });
+    parakeet.exe.root_module.addImport("nam_audio", nam_audio_module);
     const parakeet_opts = b.addOptions();
     parakeet_opts.addOption(bool, "parakeet_mic", parakeet_mic);
-    parakeet_exe.root_module.addOptions("build_options", parakeet_opts);
-    configureBlas(parakeet_exe, blas_kind);
-    configureGpu(b, parakeet_exe, gpu_kind);
-    if (parakeet_mic) configureParakeetAudio(parakeet_exe); // --mic: vendored miniaudio capture
-    const parakeet_install = installArtifactStep(b, parakeet_exe);
-
-    const parakeet_cmd = b.addRunArtifact(parakeet_exe);
-    parakeet_cmd.step.dependOn(parakeet_install);
-    if (b.args) |args| {
-        parakeet_cmd.addArgs(args);
-    }
-
-    const parakeet_step = b.step("parakeet", "Parakeet ASR (NeMo FastConformer): transcribe a WAV (mel -> encoder -> CTC/TDT decoder -> text); --stream/--manifest/--mic, --compare parity harness");
-    parakeet_step.dependOn(&parakeet_cmd.step);
+    parakeet.exe.root_module.addOptions("build_options", parakeet_opts);
+    if (parakeet_mic) configureParakeetAudio(parakeet.exe); // --mic: vendored miniaudio capture
 
     const bench_gate_cmd = b.addSystemCommand(&.{ "python3", "tools/bench_gate.py" });
     bench_gate_cmd.step.dependOn(b.getInstallStep());
@@ -719,75 +201,10 @@ pub fn build(b: *std.Build) void {
     const bench_gate_step = b.step("bench-gate", "Run paired Fucina-vs-llama benchmark gate");
     bench_gate_step.dependOn(&bench_gate_cmd.step);
 
-    const diffusion_gemma_exe = b.addExecutable(.{
-        .name = "fucina-diffusion-gemma",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/diffusion_gemma/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    diffusion_gemma_exe.root_module.addImport("fucina", module);
-    diffusion_gemma_exe.root_module.addImport("fucina_llm", llm_module);
-    configureBlas(diffusion_gemma_exe, blas_kind);
-    configureGpu(b, diffusion_gemma_exe, gpu_kind);
-    diffusion_gemma_exe.root_module.link_libc = true;
-    const diffusion_gemma_install = installArtifactStep(b, diffusion_gemma_exe);
-
-    const diffusion_gemma_cmd = b.addRunArtifact(diffusion_gemma_exe);
-    diffusion_gemma_cmd.step.dependOn(diffusion_gemma_install);
-    if (b.args) |args| {
-        diffusion_gemma_cmd.addArgs(args);
-    }
-
-    const diffusion_gemma_step = b.step("diffusion-gemma", "Run DiffusionGemma GGUF block-diffusion inference (parity harness + EB chat)");
-    diffusion_gemma_step.dependOn(&diffusion_gemma_cmd.step);
-
-    const qwen35_exe = b.addExecutable(.{
-        .name = "fucina-qwen35",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/qwen35/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    qwen35_exe.root_module.addImport("fucina", module);
-    qwen35_exe.root_module.addImport("fucina_llm", llm_module);
-    configureBlas(qwen35_exe, blas_kind);
-    configureGpu(b, qwen35_exe, gpu_kind);
-    const qwen35_install = installArtifactStep(b, qwen35_exe);
-
-    const qwen35_cmd = b.addRunArtifact(qwen35_exe);
-    qwen35_cmd.step.dependOn(qwen35_install);
-    if (b.args) |args| {
-        qwen35_cmd.addArgs(args);
-    }
-
-    const qwen35_step = b.step("qwen35", "Run Qwen3.5 (qwen35 hybrid Gated-DeltaNet) GGUF — loader/parity harness");
-    qwen35_step.dependOn(&qwen35_cmd.step);
-
-    const export_gguf_exe = b.addExecutable(.{
-        .name = "fucina-export-gguf",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/export_gguf.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    export_gguf_exe.root_module.addImport("fucina", module);
-    export_gguf_exe.root_module.addImport("fucina_llm", llm_module);
-    configureBlas(export_gguf_exe, blas_kind);
-    configureGpu(b, export_gguf_exe, gpu_kind);
-    const export_gguf_install = installArtifactStep(b, export_gguf_exe);
-
-    const export_gguf_cmd = b.addRunArtifact(export_gguf_exe);
-    export_gguf_cmd.step.dependOn(export_gguf_install);
-    if (b.args) |args| {
-        export_gguf_cmd.addArgs(args);
-    }
-
-    const export_gguf_step = b.step("export-gguf", "Export a GGUF: re-emit/transcode a model, merge Fucina LoRA adapters (checkpoint dir or safetensors) into dense weights, or PTQTP-quantize tensor-at-a-time (--ptqtp[=K]; models bigger than RAM)");
-    export_gguf_step.dependOn(&export_gguf_cmd.step);
+    const diffusion_gemma = addExample(b, tool_ctx, .{ .step = "diffusion-gemma", .desc = "Run DiffusionGemma GGUF block-diffusion inference (parity harness + EB chat)", .exe = "fucina-diffusion-gemma", .root = "examples/diffusion_gemma/main.zig", .llm = true });
+    diffusion_gemma.exe.root_module.link_libc = true;
+    _ = addExample(b, tool_ctx, .{ .step = "qwen35", .desc = "Run Qwen3.5 (qwen35 hybrid Gated-DeltaNet) GGUF — loader/parity harness", .exe = "fucina-qwen35", .root = "examples/qwen35/main.zig", .llm = true });
+    _ = addExample(b, tool_ctx, .{ .step = "export-gguf", .desc = "Export a GGUF: re-emit/transcode a model, merge Fucina LoRA adapters (checkpoint dir or safetensors) into dense weights, or PTQTP-quantize tensor-at-a-time (--ptqtp[=K]; models bigger than RAM)", .exe = "fucina-export-gguf", .root = "tools/export_gguf.zig", .llm = true });
 
     const arch_check_exe = b.addExecutable(.{
         .name = "fucina-arch-check",
@@ -971,426 +388,50 @@ pub fn build(b: *std.Build) void {
     // Compile every bench executable without running it. Bench mains are
     // reachable only through their run steps, so nothing else in the build
     // graph exercises them; this step is the cheap gate that keeps the suite
-    // compiling. Every bench registers itself right below its addExecutable,
-    // so a new bench cannot land outside the gate.
+    // compiling. addBench registers every bench into it.
     const bench_check_step = b.step("bench-check", "Compile all bench executables without running them");
 
-    const bench_exe = b.addExecutable(.{
-        .name = "fucina-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/mlp.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    bench_check_step.dependOn(&bench_exe.step);
     const bench_raw_module = b.addModule("bench_raw", .{
         .root_source_file = b.path("src/bench_raw.zig"),
         .target = target,
         .optimize = optimize,
     });
     bench_raw_module.addOptions("build_options", options);
-    bench_exe.root_module.addImport("bench_raw", bench_raw_module);
-    configureBlas(bench_exe, blas_kind);
-    configureGpu(b, bench_exe, gpu_kind);
-
-    const bench_cmd = b.addRunArtifact(bench_exe);
-    if (b.args) |args| {
-        bench_cmd.addArgs(args);
-    }
-
-    const bench_step = b.step("bench", "Run MLP-shaped inference and backward benchmarks");
-    bench_step.dependOn(&bench_cmd.step);
-
-    const optim_bench_exe = b.addExecutable(.{
-        .name = "fucina-optim-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/optim.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    bench_check_step.dependOn(&optim_bench_exe.step);
-    optim_bench_exe.root_module.addImport("bench_raw", bench_raw_module);
-    configureBlas(optim_bench_exe, blas_kind);
-    configureGpu(b, optim_bench_exe, gpu_kind);
-
-    const optim_bench_cmd = b.addRunArtifact(optim_bench_exe);
-    if (b.args) |args| {
-        optim_bench_cmd.addArgs(args);
-    }
-
-    const optim_bench_step = b.step("bench-optim", "Optimizer step kernels (SGD/AdamW/Muon/APOLLO) at LLM shapes");
-    optim_bench_step.dependOn(&optim_bench_cmd.step);
-
-    const ce_bench_exe = b.addExecutable(.{
-        .name = "fucina-ce-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/ce.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    bench_check_step.dependOn(&ce_bench_exe.step);
-    ce_bench_exe.root_module.addImport("bench_raw", bench_raw_module);
-    configureBlas(ce_bench_exe, blas_kind);
-    configureGpu(b, ce_bench_exe, gpu_kind);
-
-    const ce_bench_cmd = b.addRunArtifact(ce_bench_exe);
-    if (b.args) |args| {
-        ce_bench_cmd.addArgs(args);
-    }
-
-    const ce_bench_step = b.step("bench-ce", "Softmax / cross-entropy row kernels at LLM shapes");
-    ce_bench_step.dependOn(&ce_bench_cmd.step);
-
-    const conv_bench_exe = b.addExecutable(.{
-        .name = "fucina-conv-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/conv.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    bench_check_step.dependOn(&conv_bench_exe.step);
-    conv_bench_exe.root_module.addImport("bench_raw", bench_raw_module);
-    configureBlas(conv_bench_exe, blas_kind);
-    configureGpu(b, conv_bench_exe, gpu_kind);
-
-    const conv_bench_cmd = b.addRunArtifact(conv_bench_exe);
-    if (b.args) |args| {
-        conv_bench_cmd.addArgs(args);
-    }
-
-    const conv_bench_step = b.step("bench-conv", "conv2d forward/backward-input/backward-weight at CNN shapes");
-    conv_bench_step.dependOn(&conv_bench_cmd.step);
-
-    const scatter_bench_exe = b.addExecutable(.{
-        .name = "fucina-scatter-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/scatter.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    bench_check_step.dependOn(&scatter_bench_exe.step);
-    scatter_bench_exe.root_module.addImport("bench_raw", bench_raw_module);
-    configureBlas(scatter_bench_exe, blas_kind);
-    configureGpu(b, scatter_bench_exe, gpu_kind);
-
-    const scatter_bench_cmd = b.addRunArtifact(scatter_bench_exe);
-    if (b.args) |args| {
-        scatter_bench_cmd.addArgs(args);
-    }
-
-    const scatter_bench_step = b.step("bench-scatter", "Scatter-add (embedding-gradient) kernel at vocab x dim shapes");
-    scatter_bench_step.dependOn(&scatter_bench_cmd.step);
-
-    const backward_diamond_bench_exe = b.addExecutable(.{
-        .name = "fucina-backward-diamond-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/backward_diamond.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    bench_check_step.dependOn(&backward_diamond_bench_exe.step);
-    backward_diamond_bench_exe.root_module.addImport("bench_raw", bench_raw_module);
-    configureBlas(backward_diamond_bench_exe, blas_kind);
-    configureGpu(b, backward_diamond_bench_exe, gpu_kind);
-
-    const backward_diamond_bench_cmd = b.addRunArtifact(backward_diamond_bench_exe);
-    if (b.args) |args| {
-        backward_diamond_bench_cmd.addArgs(args);
-    }
-
-    const backward_diamond_bench_step = b.step("bench-backward-diamond", "Measure serial vs manual-parallel independent GEMM VJPs");
-    backward_diamond_bench_step.dependOn(&backward_diamond_bench_cmd.step);
-
-    const attention_backward_bench_exe = b.addExecutable(.{
-        .name = "fucina-attention-backward-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/attention_backward.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    bench_check_step.dependOn(&attention_backward_bench_exe.step);
-    attention_backward_bench_exe.root_module.addImport("bench_raw", bench_raw_module);
-    configureBlas(attention_backward_bench_exe, blas_kind);
-    configureGpu(b, attention_backward_bench_exe, gpu_kind);
-
-    const attention_backward_bench_cmd = b.addRunArtifact(attention_backward_bench_exe);
-    if (b.args) |args| {
-        attention_backward_bench_cmd.addArgs(args);
-    }
-
-    const attention_backward_bench_step = b.step("bench-attention-backward", "Measure grouped causal attention backward");
-    attention_backward_bench_step.dependOn(&attention_backward_bench_cmd.step);
-
-    // Backend comparison benchmark. No ggml C kernels are linked by the Zig
-    // project; pure Zig vector kernels are internal to the native backend.
-    const backend_bench_exe = b.addExecutable(.{
-        .name = "fucina-backend-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/backend.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    bench_check_step.dependOn(&backend_bench_exe.step);
     const raw_backend_module = b.addModule("raw_backend", .{
         .root_source_file = b.path("src/backend.zig"),
         .target = target,
         .optimize = optimize,
     });
     raw_backend_module.addOptions("build_options", options);
-    backend_bench_exe.root_module.addImport("raw_backend", raw_backend_module);
+
+    _ = addBench(b, tool_ctx, bench_check_step, .{ .step = "bench", .desc = "Run MLP-shaped inference and backward benchmarks", .exe = "fucina-bench", .root = "bench/mlp.zig", .import = .{ .name = "bench_raw", .module = bench_raw_module } });
+    _ = addBench(b, tool_ctx, bench_check_step, .{ .step = "bench-optim", .desc = "Optimizer step kernels (SGD/AdamW/Muon/APOLLO) at LLM shapes", .exe = "fucina-optim-bench", .root = "bench/optim.zig", .import = .{ .name = "bench_raw", .module = bench_raw_module } });
+    _ = addBench(b, tool_ctx, bench_check_step, .{ .step = "bench-ce", .desc = "Softmax / cross-entropy row kernels at LLM shapes", .exe = "fucina-ce-bench", .root = "bench/ce.zig", .import = .{ .name = "bench_raw", .module = bench_raw_module } });
+    _ = addBench(b, tool_ctx, bench_check_step, .{ .step = "bench-conv", .desc = "conv2d forward/backward-input/backward-weight at CNN shapes", .exe = "fucina-conv-bench", .root = "bench/conv.zig", .import = .{ .name = "bench_raw", .module = bench_raw_module } });
+    _ = addBench(b, tool_ctx, bench_check_step, .{ .step = "bench-scatter", .desc = "Scatter-add (embedding-gradient) kernel at vocab x dim shapes", .exe = "fucina-scatter-bench", .root = "bench/scatter.zig", .import = .{ .name = "bench_raw", .module = bench_raw_module } });
+    _ = addBench(b, tool_ctx, bench_check_step, .{ .step = "bench-backward-diamond", .desc = "Measure serial vs manual-parallel independent GEMM VJPs", .exe = "fucina-backward-diamond-bench", .root = "bench/backward_diamond.zig", .import = .{ .name = "bench_raw", .module = bench_raw_module } });
+    _ = addBench(b, tool_ctx, bench_check_step, .{ .step = "bench-attention-backward", .desc = "Measure grouped causal attention backward", .exe = "fucina-attention-backward-bench", .root = "bench/attention_backward.zig", .import = .{ .name = "bench_raw", .module = bench_raw_module } });
+    const backend_bench = addBench(b, tool_ctx, bench_check_step, .{ .step = "bench-backend", .desc = "Compare scalar / native backends on representative ops", .exe = "fucina-backend-bench", .root = "bench/backend.zig", .import = .{ .name = "raw_backend", .module = raw_backend_module } });
     const bench_options = b.addOptions();
     bench_options.addOption(BlasKind, "native_blas_kind", blas_kind);
     bench_options.addOption(bool, "native_uses_blas", blas_kind != .none);
     bench_options.addOption(u32, "native_blas_threads", blas_threads);
-    backend_bench_exe.root_module.addOptions("bench_options", bench_options);
-    configureBlas(backend_bench_exe, blas_kind);
-    configureGpu(b, backend_bench_exe, gpu_kind);
-
-    const backend_bench_cmd = b.addRunArtifact(backend_bench_exe);
-    if (b.args) |args| {
-        backend_bench_cmd.addArgs(args);
-    }
-
-    const backend_bench_step = b.step("bench-backend", "Compare scalar / native backends on representative ops");
-    backend_bench_step.dependOn(&backend_bench_cmd.step);
-
-    const f16gemm_bench_exe = b.addExecutable(.{
-        .name = "fucina-f16gemm-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/f16gemm.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    bench_check_step.dependOn(&f16gemm_bench_exe.step);
-    f16gemm_bench_exe.root_module.addImport("raw_backend", raw_backend_module);
-    configureBlas(f16gemm_bench_exe, blas_kind);
-    configureGpu(b, f16gemm_bench_exe, gpu_kind);
-    const f16gemm_bench_cmd = b.addRunArtifact(f16gemm_bench_exe);
-    if (b.args) |args| {
-        f16gemm_bench_cmd.addArgs(args);
-    }
-    const f16gemm_bench_step = b.step("bench-f16gemm", "f16 TransB GEMM parallel-efficiency microbench (Qwen3 shapes)");
-    f16gemm_bench_step.dependOn(&f16gemm_bench_cmd.step);
-
-    const gemm_bench_exe = b.addExecutable(.{
-        .name = "fucina-gemm-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/gemm.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    bench_check_step.dependOn(&gemm_bench_exe.step);
-    gemm_bench_exe.root_module.addImport("raw_backend", raw_backend_module);
-    configureBlas(gemm_bench_exe, blas_kind);
-    configureGpu(b, gemm_bench_exe, gpu_kind);
-    const gemm_bench_cmd = b.addRunArtifact(gemm_bench_exe);
-    if (b.args) |args| {
-        gemm_bench_cmd.addArgs(args);
-    }
-    const gemm_bench_step = b.step("bench-gemm", "Large-shape f32 GEMM: row kernels vs cache-blocked packed kernel (+BLAS reference)");
-    gemm_bench_step.dependOn(&gemm_bench_cmd.step);
-
-    const train_step_bench_exe = b.addExecutable(.{
-        .name = "fucina-train-step-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/train_step.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    bench_check_step.dependOn(&train_step_bench_exe.step);
-    train_step_bench_exe.root_module.addImport("bench_raw", bench_raw_module);
-    configureBlas(train_step_bench_exe, blas_kind);
-    configureGpu(b, train_step_bench_exe, gpu_kind);
-    const train_step_bench_cmd = b.addRunArtifact(train_step_bench_exe);
-    if (b.args) |args| train_step_bench_cmd.addArgs(args);
-    const train_step_bench_step = b.step("bench-train-step", "Full GPT autograd training step; pairs with tools/torch_train_step.py");
-    train_step_bench_step.dependOn(&train_step_bench_cmd.step);
-
-    const packed_gemm_bench_exe = b.addExecutable(.{
-        .name = "fucina-packed-gemm-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/packed_gemm.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    bench_check_step.dependOn(&packed_gemm_bench_exe.step);
-    packed_gemm_bench_exe.root_module.addImport("raw_backend", raw_backend_module);
-    configureBlas(packed_gemm_bench_exe, blas_kind);
-    configureGpu(b, packed_gemm_bench_exe, gpu_kind);
-    const packed_gemm_bench_cmd = b.addRunArtifact(packed_gemm_bench_exe);
-    if (b.args) |args| packed_gemm_bench_cmd.addArgs(args);
-    const packed_gemm_bench_step = b.step("bench-packed-gemm", "Pack-once dense GEMM at skinny-m inference shapes");
-    packed_gemm_bench_step.dependOn(&packed_gemm_bench_cmd.step);
-
-    const gpu_dispatch_bench_exe = b.addExecutable(.{
-        .name = "fucina-gpu-dispatch-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/gpu_dispatch.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    bench_check_step.dependOn(&gpu_dispatch_bench_exe.step);
-    gpu_dispatch_bench_exe.root_module.addImport("raw_backend", raw_backend_module);
-    configureBlas(gpu_dispatch_bench_exe, blas_kind);
-    configureGpu(b, gpu_dispatch_bench_exe, gpu_kind);
-    const gpu_dispatch_bench_cmd = b.addRunArtifact(gpu_dispatch_bench_exe);
-    if (b.args) |args| gpu_dispatch_bench_cmd.addArgs(args);
-    const gpu_dispatch_bench_step = b.step("bench-gpu-dispatch", "CPU BLAS vs synchronous/asynchronous eager GPU GEMM/GEMV dispatch");
-    gpu_dispatch_bench_step.dependOn(&gpu_dispatch_bench_cmd.step);
-
-    const gpu_formats_bench_exe = b.addExecutable(.{
-        .name = "fucina-gpu-formats-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/gpu_formats.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    bench_check_step.dependOn(&gpu_formats_bench_exe.step);
-    gpu_formats_bench_exe.root_module.addImport("raw_backend", raw_backend_module);
-    configureBlas(gpu_formats_bench_exe, blas_kind);
-    configureGpu(b, gpu_formats_bench_exe, gpu_kind);
-    const gpu_formats_bench_cmd = b.addRunArtifact(gpu_formats_bench_exe);
-    if (b.args) |args| gpu_formats_bench_cmd.addArgs(args);
-    const gpu_formats_bench_step = b.step("bench-gpu-formats", "Packed CPU vs eager GPU f16/Q4_K/Q5_K/Q6_K/Q8_0 LLM linears");
-    gpu_formats_bench_step.dependOn(&gpu_formats_bench_cmd.step);
-
-    const q5kmoe_bench_exe = b.addExecutable(.{
-        .name = "fucina-q5kmoe-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/q5kmoe.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    bench_check_step.dependOn(&q5kmoe_bench_exe.step);
-    q5kmoe_bench_exe.root_module.addImport("raw_backend", raw_backend_module);
-    // Uses std.heap.c_allocator directly: libc links implicitly on macOS but
-    // must be declared for the Linux bench-check leg.
-    q5kmoe_bench_exe.root_module.link_libc = true;
-    configureBlas(q5kmoe_bench_exe, blas_kind);
-    configureGpu(b, q5kmoe_bench_exe, gpu_kind);
-    const q5kmoe_bench_cmd = b.addRunArtifact(q5kmoe_bench_exe);
-    if (b.args) |args| {
-        q5kmoe_bench_cmd.addArgs(args);
-    }
-    const q5kmoe_bench_step = b.step("bench-q5kmoe", "Q5_K MoE-expert matmul: per-row vs 4-row lane-packed col-outer");
-    q5kmoe_bench_step.dependOn(&q5kmoe_bench_cmd.step);
-
-    const q8gemv_bench_exe = b.addExecutable(.{
-        .name = "fucina-q8gemv-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/q8gemv.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    bench_check_step.dependOn(&q8gemv_bench_exe.step);
-    q8gemv_bench_exe.root_module.addImport("raw_backend", raw_backend_module);
-    // Uses std.heap.c_allocator directly (see q5kmoe above).
-    q8gemv_bench_exe.root_module.link_libc = true;
-    configureBlas(q8gemv_bench_exe, blas_kind);
-    configureGpu(b, q8gemv_bench_exe, gpu_kind);
-    const q8gemv_bench_cmd = b.addRunArtifact(q8gemv_bench_exe);
-    if (b.args) |args| {
-        q8gemv_bench_cmd.addArgs(args);
-    }
-    const q8gemv_bench_step = b.step("bench-q8gemv", "q8_0 skinny-m decode GEMV: per-row vs x4 interleaved vs lane-packed lhs");
-    q8gemv_bench_step.dependOn(&q8gemv_bench_cmd.step);
-
-    const ternary_bench_exe = b.addExecutable(.{
-        .name = "fucina-ternary-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/ternary.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    bench_check_step.dependOn(&ternary_bench_exe.step);
-    ternary_bench_exe.root_module.addImport("raw_backend", raw_backend_module);
-    // Uses std.heap.c_allocator directly (see q5kmoe above).
-    ternary_bench_exe.root_module.link_libc = true;
-    configureBlas(ternary_bench_exe, blas_kind);
-    configureGpu(b, ternary_bench_exe, gpu_kind);
-    const ternary_bench_cmd = b.addRunArtifact(ternary_bench_exe);
-    if (b.args) |args| {
-        ternary_bench_cmd.addArgs(args);
-    }
-    const ternary_bench_step = b.step("bench-ternary", "TQ2_0 ternary matmul: hot sdot/vpdpbusd tiles vs x4 interleaved pack (A/B pair) vs cold table path, f32-act path, Q4_K, dense f32");
-    ternary_bench_step.dependOn(&ternary_bench_cmd.step);
-
-    const membw_bench_exe = b.addExecutable(.{
-        .name = "fucina-membw-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/membw.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    bench_check_step.dependOn(&membw_bench_exe.step);
-    // macOS QoS pinning (pthread_set_qos_class_self_np, as src/thread.zig).
-    membw_bench_exe.root_module.link_libc = true;
-    const membw_bench_cmd = b.addRunArtifact(membw_bench_exe);
-    if (b.args) |args| {
-        membw_bench_cmd.addArgs(args);
-    }
-    const membw_bench_step = b.step("bench-membw", "Measured DRAM read-bandwidth ceiling: single-thread + all-core roofline probe");
-    membw_bench_step.dependOn(&membw_bench_cmd.step);
-
-    const facade_bench_exe = b.addExecutable(.{
-        .name = "fucina-facade-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/facade.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    bench_check_step.dependOn(&facade_bench_exe.step);
-    facade_bench_exe.root_module.addImport("bench_raw", bench_raw_module);
-    configureBlas(facade_bench_exe, blas_kind);
-    configureGpu(b, facade_bench_exe, gpu_kind);
-
-    const facade_bench_cmd = b.addRunArtifact(facade_bench_exe);
-    if (b.args) |args| {
-        facade_bench_cmd.addArgs(args);
-    }
-
-    const facade_bench_step = b.step("bench-facade", "Compare raw tensor ops with the public no-grad Tensor facade");
-    facade_bench_step.dependOn(&facade_bench_cmd.step);
-
-    const einsum_bench_exe = b.addExecutable(.{
-        .name = "fucina-einsum-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/einsum.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    bench_check_step.dependOn(&einsum_bench_exe.step);
-    einsum_bench_exe.root_module.addImport("bench_raw", bench_raw_module);
-    configureBlas(einsum_bench_exe, blas_kind);
-    configureGpu(b, einsum_bench_exe, gpu_kind);
-
-    const einsum_bench_cmd = b.addRunArtifact(einsum_bench_exe);
-    if (b.args) |args| {
-        einsum_bench_cmd.addArgs(args);
-    }
-
-    const einsum_bench_step = b.step("bench-einsum", "einsum vs hand-written dot/permute contraction pipelines (parity + advantage cases)");
-    einsum_bench_step.dependOn(&einsum_bench_cmd.step);
+    backend_bench.root_module.addOptions("bench_options", bench_options);
+    _ = addBench(b, tool_ctx, bench_check_step, .{ .step = "bench-f16gemm", .desc = "f16 TransB GEMM parallel-efficiency microbench (Qwen3 shapes)", .exe = "fucina-f16gemm-bench", .root = "bench/f16gemm.zig", .import = .{ .name = "raw_backend", .module = raw_backend_module } });
+    _ = addBench(b, tool_ctx, bench_check_step, .{ .step = "bench-gemm", .desc = "Large-shape f32 GEMM: row kernels vs cache-blocked packed kernel (+BLAS reference)", .exe = "fucina-gemm-bench", .root = "bench/gemm.zig", .import = .{ .name = "raw_backend", .module = raw_backend_module } });
+    _ = addBench(b, tool_ctx, bench_check_step, .{ .step = "bench-train-step", .desc = "Full GPT autograd training step; pairs with tools/torch_train_step.py", .exe = "fucina-train-step-bench", .root = "bench/train_step.zig", .import = .{ .name = "bench_raw", .module = bench_raw_module } });
+    _ = addBench(b, tool_ctx, bench_check_step, .{ .step = "bench-packed-gemm", .desc = "Pack-once dense GEMM at skinny-m inference shapes", .exe = "fucina-packed-gemm-bench", .root = "bench/packed_gemm.zig", .import = .{ .name = "raw_backend", .module = raw_backend_module } });
+    _ = addBench(b, tool_ctx, bench_check_step, .{ .step = "bench-gpu-dispatch", .desc = "CPU BLAS vs synchronous/asynchronous eager GPU GEMM/GEMV dispatch", .exe = "fucina-gpu-dispatch-bench", .root = "bench/gpu_dispatch.zig", .import = .{ .name = "raw_backend", .module = raw_backend_module } });
+    _ = addBench(b, tool_ctx, bench_check_step, .{ .step = "bench-gpu-formats", .desc = "Packed CPU vs eager GPU f16/Q4_K/Q5_K/Q6_K/Q8_0 LLM linears", .exe = "fucina-gpu-formats-bench", .root = "bench/gpu_formats.zig", .import = .{ .name = "raw_backend", .module = raw_backend_module } });
+    // q5kmoe/q8gemv/ternary use std.c timing and membw is a raw libc probe:
+    // libc links implicitly on macOS but must be declared for the Linux
+    // bench-check leg.
+    _ = addBench(b, tool_ctx, bench_check_step, .{ .step = "bench-q5kmoe", .desc = "Q5_K MoE-expert matmul: per-row vs 4-row lane-packed col-outer", .exe = "fucina-q5kmoe-bench", .root = "bench/q5kmoe.zig", .import = .{ .name = "raw_backend", .module = raw_backend_module }, .libc = true });
+    _ = addBench(b, tool_ctx, bench_check_step, .{ .step = "bench-q8gemv", .desc = "q8_0 skinny-m decode GEMV: per-row vs x4 interleaved vs lane-packed lhs", .exe = "fucina-q8gemv-bench", .root = "bench/q8gemv.zig", .import = .{ .name = "raw_backend", .module = raw_backend_module }, .libc = true });
+    _ = addBench(b, tool_ctx, bench_check_step, .{ .step = "bench-ternary", .desc = "TQ2_0 ternary matmul: hot sdot/vpdpbusd tiles vs x4 interleaved pack (A/B pair) vs cold table path, f32-act path, Q4_K, dense f32", .exe = "fucina-ternary-bench", .root = "bench/ternary.zig", .import = .{ .name = "raw_backend", .module = raw_backend_module }, .libc = true });
+    _ = addBench(b, tool_ctx, bench_check_step, .{ .step = "bench-membw", .desc = "Measured DRAM read-bandwidth ceiling: single-thread + all-core roofline probe", .exe = "fucina-membw-bench", .root = "bench/membw.zig", .libc = true, .backend = false });
+    _ = addBench(b, tool_ctx, bench_check_step, .{ .step = "bench-facade", .desc = "Compare raw tensor ops with the public no-grad Tensor facade", .exe = "fucina-facade-bench", .root = "bench/facade.zig", .import = .{ .name = "bench_raw", .module = bench_raw_module } });
+    _ = addBench(b, tool_ctx, bench_check_step, .{ .step = "bench-einsum", .desc = "einsum vs hand-written dot/permute contraction pipelines (parity + advantage cases)", .exe = "fucina-einsum-bench", .root = "bench/einsum.zig", .import = .{ .name = "bench_raw", .module = bench_raw_module } });
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -1728,4 +769,94 @@ fn addLibrarySearchPath(step: *std.Build.Step.Compile, prefix: []const u8) void 
 
 fn bPath(prefix: []const u8, suffix: []const u8) []const u8 {
     return std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ prefix, suffix }) catch @panic("failed to allocate build path");
+}
+
+const ToolCtx = struct {
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    module: *std.Build.Module,
+    llm_module: *std.Build.Module,
+    blas_kind: BlasKind,
+    gpu_kind: GpuKind,
+};
+
+const ExampleArtifacts = struct {
+    exe: *std.Build.Step.Compile,
+    run: *std.Build.Step.Run,
+};
+
+/// Standard example/tool wiring: exe + fucina (+ fucina_llm) imports,
+/// BLAS/GPU config, install, and a run step forwarding `-- args`. Special
+/// per-target wiring (extra imports, libc, llguidance, option modules)
+/// attaches to the returned artifacts at the call site — the build graph is
+/// declarative, so late additions are equivalent to inline ones.
+fn addExample(
+    b: *std.Build,
+    ctx: ToolCtx,
+    spec: struct {
+        step: []const u8,
+        desc: []const u8,
+        exe: []const u8,
+        root: []const u8,
+        llm: bool = false,
+    },
+) ExampleArtifacts {
+    const exe = b.addExecutable(.{
+        .name = spec.exe,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(spec.root),
+            .target = ctx.target,
+            .optimize = ctx.optimize,
+        }),
+    });
+    exe.root_module.addImport("fucina", ctx.module);
+    if (spec.llm) exe.root_module.addImport("fucina_llm", ctx.llm_module);
+    configureBlas(exe, ctx.blas_kind);
+    configureGpu(b, exe, ctx.gpu_kind);
+    const install = installArtifactStep(b, exe);
+    const cmd = b.addRunArtifact(exe);
+    cmd.step.dependOn(install);
+    if (b.args) |args| cmd.addArgs(args);
+    const step = b.step(spec.step, spec.desc);
+    step.dependOn(&cmd.step);
+    return .{ .exe = exe, .run = cmd };
+}
+
+/// Standard bench wiring: exe (+ its raw module import), optional libc,
+/// BLAS/GPU config, registration into bench-check, and a run step
+/// forwarding `-- args`. Benches are never installed.
+fn addBench(
+    b: *std.Build,
+    ctx: ToolCtx,
+    bench_check_step: *std.Build.Step,
+    spec: struct {
+        step: []const u8,
+        desc: []const u8,
+        exe: []const u8,
+        root: []const u8,
+        import: ?struct { name: []const u8, module: *std.Build.Module } = null,
+        libc: bool = false,
+        backend: bool = true,
+    },
+) *std.Build.Step.Compile {
+    const exe = b.addExecutable(.{
+        .name = spec.exe,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(spec.root),
+            .target = ctx.target,
+            .optimize = ctx.optimize,
+        }),
+    });
+    if (spec.import) |imp| exe.root_module.addImport(imp.name, imp.module);
+    if (spec.libc) exe.root_module.link_libc = true;
+    if (spec.backend) {
+        configureBlas(exe, ctx.blas_kind);
+        configureGpu(b, exe, ctx.gpu_kind);
+    }
+    bench_check_step.dependOn(&exe.step);
+    const cmd = b.addRunArtifact(exe);
+    if (b.args) |args| cmd.addArgs(args);
+    const step = b.step(spec.step, spec.desc);
+    step.dependOn(&cmd.step);
+    return exe;
 }

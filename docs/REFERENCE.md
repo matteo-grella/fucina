@@ -412,7 +412,7 @@ the launched program.
 | --- | --- |
 | `test` | Runs the unit tests of all nine test roots (§2.7). No model assets needed. |
 | `test-fucina` | Runs the `fucina`-root unit tests only (the routine `-Dbackend=scalar` leg); the full `test` matrix stays the pre-merge gate. |
-| `bench-check` | Compiles every bench executable without running it — the cheap gate that keeps the bench suite building (bench mains are otherwise reachable only through their run steps). Each bench registers into the gate right below its `addExecutable`, so a new bench cannot land outside it. |
+| `bench-check` | Compiles every bench executable without running it — the cheap gate that keeps the bench suite building (bench mains are otherwise reachable only through their run steps). The `addBench` helper registers every bench into the gate, so a new bench cannot land outside it. |
 | `arch-check` | Builds and runs `tools/check_import_graph.zig`: the production (non-test) `src/**/*.zig` import graph must have zero strongly-connected components. AST-based and test-aware — imports reachable only from `test` decls or test-only private helpers are not counted. Also enforces test-file forwarding: every `src/**/*_tests.zig`/`*_test.zig` must be `@import`ed by some non-test src file, so a forgotten forwarding stanza (§2.7) cannot silently drop a test file from `zig build test`. |
 | `doc-check` | Builds and runs `tools/check_doc_links.zig`: every backtick-quoted `*.md` in `AGENTS.md`'s "## Doc index" section (root docs, `docs/<name>.md`, and per-example `examples/<name>/README.md`) must exist on disk; `docs/RUNNING-MODELS.md` is additionally scanned for `examples/<name>/README.md` references. |
 | `snippet-check` | Builds and runs `tools/gen_snippet_tests.zig`: every runnable ```zig snippet in this document (a fenced block with a column-0 named `test "..."`) is extracted into a generated test root and run against the real `fucina`/`fucina_llm` modules with the build's option set — a snippet that stops compiling or asserting fails the gate (conventions in §2.7). |
@@ -554,7 +554,13 @@ its test root get their *own* single-key `build_options`
 (`parakeet_mic: bool`) — the name collides deliberately; the example reads
 its key, the library module keeps its full set.
 
-Linking is centralized in six helpers applied per executable:
+Example and bench targets are declared through two spec-driven helpers —
+`addExample(b, ctx, spec)` (exe + module imports + BLAS/GPU config +
+install + a run step forwarding `-- args`) and `addBench(b, ctx,
+bench_check_step, spec)` (no install; registers into `bench-check`) —
+with per-target special wiring (extra imports, libc, llguidance, option
+modules) attached to the returned artifacts at the call site. Linking
+itself is centralized in six helpers applied per executable:
 
 - `configureBlas(step, blas_kind)` — per provider: link libc plus
   `Accelerate` (framework), `openblas`, `mkl_rt`, `blis`, `nvpl_blas`, or
@@ -11093,7 +11099,7 @@ Metal-residency utilities shared by loaders and eager dispatch batching:
 ### 13.3 GGUF metadata glue (`src/llm/gguf_meta.zig`)
 
 Flat helpers shared by every model family's loader. Error set:
-`Error = error{InvalidConfig}`.
+`Error = error{ InvalidConfig, MissingMetadata }`.
 
 ```zig
 pub const ZeroPolicy = enum { reject_zero, accept_zero };
@@ -11101,16 +11107,21 @@ pub fn metaInt(file: *const gguf.File, arch: []const u8, suffix: []const u8, zer
 pub fn metaIntOpt(file, arch, suffix, zero: ZeroPolicy) ?usize
 pub fn metaFloat(file, arch, suffix) Error!f32
 pub fn metaFloatOpt(file, arch, suffix) ?f32
+pub fn readU32OrBoolArray(allocator, file, key: []const u8, n_layer: usize, comptime T: type) ![]T
 ```
 
-All read the key `"<arch>.<suffix>"`. Missing keys, negative integers, and —
-under `.reject_zero` — present-but-zero integers are invalid: the `Opt`
-variants read them as `null`, the strict variants return
-`Error.InvalidConfig`. `ZeroPolicy` exists because families disagree about
-zero on purpose: qwen3 treats a zero-valued key like a missing key everywhere,
-while gemma reads legitimately-zero keys such as
+The `meta*` quartet reads the key `"<arch>.<suffix>"`. Missing keys,
+negative integers, and — under `.reject_zero` — present-but-zero integers
+are invalid: the `Opt` variants read them as `null`, the strict variants
+return `Error.InvalidConfig`. `ZeroPolicy` exists because families disagree
+about zero on purpose: qwen3 treats a zero-valued key like a missing key
+everywhere, while gemma reads legitimately-zero keys such as
 `attention.shared_kv_layers`. A key that overflows the internal 128-byte
-format buffer reads as absent.
+format buffer reads as absent. `readU32OrBoolArray` reads a per-layer
+metadata array (bool/int item types), broadcasting a scalar value across
+all layers like llama.cpp's `get_key_or_arr` — the convention for
+per-layer keys such as `<arch>.attention.head_count_kv` (gemma4, inkling,
+diffusion-gemma).
 
 ```zig
 test "gguf_meta: zero-valued keys split by policy" {
