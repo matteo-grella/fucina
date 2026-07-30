@@ -13376,8 +13376,9 @@ Config keys beyond the common set: `attention.key_length_swa`,
 `expert_feed_forward_length`, `embedding_length_per_layer_input` (PLE width,
 0 = disabled), `final_logit_softcapping`, plus the per-layer arrays
 `gemma4.attention.sliding_window_pattern` and
-`gemma4.attention.head_count_kv` (read by `readU32OrBoolArray`, which
-broadcasts a scalar across layers like llama.cpp's `get_key_or_arr`).
+`gemma4.attention.head_count_kv` (read by `gguf_meta.readU32OrBoolArray`,
+which broadcasts a scalar across layers like llama.cpp's
+`get_key_or_arr`).
 `Config.fromGguf` wraps `Config.fromGgufArch(file, "gemma4")`; the `arch`
 argument exists because diffusion-gemma shares the identical hparam key set
 under its own prefix. `Config.borrow_experts` is a **load-time policy field**,
@@ -13429,7 +13430,7 @@ softcapping applies to every row), `forwardStepBatch`/`forwardStepBatchSpans`
 model's actual 30.0 value). The remaining public symbols are loader/forward
 plumbing reused by diffusion_gemma and the trainer: `max_heads` (64),
 `metaInt`/`metaIntOpt`/`metaFloat`/`metaFloatOpt`, `LayerGeometry`,
-`deriveGeometry`, `readU32OrBoolArray`, `MoeFfn`, `PerLayerInject`,
+`deriveGeometry`, `MoeFfn`, `PerLayerInject`,
 `SeparateAttentionProjection`, `FusedAttentionProjectionKind`,
 `FusedAttentionProjection`, `AttentionProjectionResult`,
 `AttentionProjection` (with `toResidentF16` and `project`), `Layer`,

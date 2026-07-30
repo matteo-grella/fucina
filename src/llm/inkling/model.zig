@@ -29,7 +29,6 @@ const std = @import("std");
 const fucina = @import("fucina");
 const weights = @import("../weights.zig");
 const gguf_meta = @import("../gguf_meta.zig");
-const gemma4 = @import("../gemma/gemma4.zig");
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
@@ -79,9 +78,9 @@ pub const Config = struct {
         const embd = try file.get("token_embd.weight");
         const embd_shape = try embd.logicalMatrixShape();
 
-        const kv_heads = try gemma4.readU32OrBoolArray(allocator, file, "inkling.attention.head_count_kv", num_layers, usize);
+        const kv_heads = try gguf_meta.readU32OrBoolArray(allocator, file, "inkling.attention.head_count_kv", num_layers, usize);
         errdefer allocator.free(kv_heads);
-        const is_swa = try gemma4.readU32OrBoolArray(allocator, file, "inkling.attention.sliding_window_pattern", num_layers, bool);
+        const is_swa = try gguf_meta.readU32OrBoolArray(allocator, file, "inkling.attention.sliding_window_pattern", num_layers, bool);
         errdefer allocator.free(is_swa);
 
         const logit_scale_denom = try metaFloat(file, "inkling.logit_scale_denom");

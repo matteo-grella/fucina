@@ -45,6 +45,7 @@
 const std = @import("std");
 const fucina = @import("fucina");
 const gemma4 = @import("../gemma/gemma4.zig");
+const gguf_meta = @import("../gguf_meta.zig");
 const weights = @import("../weights.zig");
 const kv_cache = @import("../kv_cache.zig");
 
@@ -155,9 +156,9 @@ pub const Model = struct {
         if (config.base.per_layer_input_size != 0) return Error.InvalidConfig;
         const allocator = ctx.allocator;
 
-        const swa_pattern = try gemma4.readU32OrBoolArray(allocator, file, "diffusion-gemma.attention.sliding_window_pattern", config.base.num_layers, bool);
+        const swa_pattern = try gguf_meta.readU32OrBoolArray(allocator, file, "diffusion-gemma.attention.sliding_window_pattern", config.base.num_layers, bool);
         defer allocator.free(swa_pattern);
-        const kv_heads = try gemma4.readU32OrBoolArray(allocator, file, "diffusion-gemma.attention.head_count_kv", config.base.num_layers, usize);
+        const kv_heads = try gguf_meta.readU32OrBoolArray(allocator, file, "diffusion-gemma.attention.head_count_kv", config.base.num_layers, usize);
         defer allocator.free(kv_heads);
         for (kv_heads) |kvh| {
             if (kvh == 0 or config.base.num_attention_heads % kvh != 0) return Error.InvalidConfig;

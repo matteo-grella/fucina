@@ -9,7 +9,7 @@ const fucina = @import("fucina");
 const ExecContext = fucina.ExecContext;
 const gguf = fucina.gguf;
 
-pub const Error = error{InvalidConfig};
+pub const Error = error{ InvalidConfig, MissingMetadata };
 
 /// Whether a present-but-zero integer key counts as valid. Families disagree
 /// on purpose: qwen3 treats 0 like a missing key everywhere, while gemma reads
@@ -43,6 +43,37 @@ pub fn metaFloatOpt(file: *const gguf.File, arch: []const u8, suffix: []const u8
     const key = std.fmt.bufPrint(&buf, "{s}.{s}", .{ arch, suffix }) catch return null;
     const v = file.getFloat(key) orelse return null;
     return @floatCast(v);
+}
+
+/// Read a per-layer metadata array (bool/int), broadcasting a scalar value
+/// across all layers (mirrors llama.cpp `get_key_or_arr`) — the standard
+/// convention for per-layer keys like `<arch>.attention.head_count_kv` and
+/// `<arch>.attention.sliding_window_pattern`.
+pub fn readU32OrBoolArray(allocator: std.mem.Allocator, file: *const gguf.File, key: []const u8, n_layer: usize, comptime T: type) ![]T {
+    const out = try allocator.alloc(T, n_layer);
+    errdefer allocator.free(out);
+    if (file.getArray(key)) |arr| {
+        if (arr.len != n_layer) return Error.InvalidConfig;
+        switch (arr.item_type) {
+            7, 0, 1 => for (out, 0..) |*s, i| {
+                s.* = if (T == bool) (arr.data[i] != 0) else @as(T, arr.data[i]);
+            },
+            4, 5 => for (out, 0..) |*s, i| {
+                const v = std.mem.readInt(u32, arr.data[i * 4 ..][0..4], .little);
+                s.* = if (T == bool) (v != 0) else @intCast(v);
+            },
+            10, 11 => for (out, 0..) |*s, i| {
+                const v = std.mem.readInt(u64, arr.data[i * 8 ..][0..8], .little);
+                s.* = if (T == bool) (v != 0) else @intCast(v);
+            },
+            else => return Error.InvalidConfig,
+        }
+        return out;
+    }
+    // scalar broadcast
+    const scalar = file.getInt(key) orelse return Error.MissingMetadata;
+    for (out) |*s| s.* = if (T == bool) (scalar != 0) else @intCast(scalar);
+    return out;
 }
 
 /// Load all model layers, in parallel across the exec work pool when

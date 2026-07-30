@@ -207,35 +207,6 @@ pub fn deriveGeometry(
     return .{ .is_swa = is_swa, .head_dim = head_dim, .kv_heads = kv_heads, .has_kv = has_kv, .kv_ref = kv_ref };
 }
 
-/// Read a per-layer metadata array (bool/int), broadcasting a scalar value
-/// across all layers (mirrors llama.cpp `get_key_or_arr`).
-pub fn readU32OrBoolArray(allocator: Allocator, file: *const gguf.File, key: []const u8, n_layer: usize, comptime T: type) ![]T {
-    const out = try allocator.alloc(T, n_layer);
-    errdefer allocator.free(out);
-    if (file.getArray(key)) |arr| {
-        if (arr.len != n_layer) return Error.InvalidConfig;
-        switch (arr.item_type) {
-            7, 0, 1 => for (out, 0..) |*s, i| {
-                s.* = if (T == bool) (arr.data[i] != 0) else @as(T, arr.data[i]);
-            },
-            4, 5 => for (out, 0..) |*s, i| {
-                const v = std.mem.readInt(u32, arr.data[i * 4 ..][0..4], .little);
-                s.* = if (T == bool) (v != 0) else @intCast(v);
-            },
-            10, 11 => for (out, 0..) |*s, i| {
-                const v = std.mem.readInt(u64, arr.data[i * 8 ..][0..8], .little);
-                s.* = if (T == bool) (v != 0) else @intCast(v);
-            },
-            else => return Error.InvalidConfig,
-        }
-        return out;
-    }
-    // scalar broadcast
-    const scalar = file.getInt(key) orelse return Error.MissingMetadata;
-    for (out) |*s| s.* = if (T == bool) (scalar != 0) else @intCast(scalar);
-    return out;
-}
-
 const Vec = fucina.Tensor(.{.embed});
 
 const PerLayerEmbeddings = struct {
@@ -534,9 +505,9 @@ pub const Model = struct {
         try config.validate();
         const allocator = ctx.allocator;
 
-        const swa_pattern = try readU32OrBoolArray(allocator, file, "gemma4.attention.sliding_window_pattern", config.num_layers, bool);
+        const swa_pattern = try gguf_meta.readU32OrBoolArray(allocator, file, "gemma4.attention.sliding_window_pattern", config.num_layers, bool);
         defer allocator.free(swa_pattern);
-        const kv_heads = try readU32OrBoolArray(allocator, file, "gemma4.attention.head_count_kv", config.num_layers, usize);
+        const kv_heads = try gguf_meta.readU32OrBoolArray(allocator, file, "gemma4.attention.head_count_kv", config.num_layers, usize);
         defer allocator.free(kv_heads);
         for (kv_heads) |kvh| {
             if (kvh == 0 or config.num_attention_heads % kvh != 0) return Error.InvalidConfig;
