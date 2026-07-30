@@ -630,31 +630,6 @@ fn utf8Len(byte0: u8) usize {
     return 1;
 }
 
-/// One Qwen2 pretoken chunk: the exclusive end index (in codepoints) of the
-/// chunk starting at `start` (always > `start`).
-///
-/// Faithful port of llama.cpp's `unicode_regex_split_custom_qwen2`
-/// (refs/llama.cpp/src/unicode.cpp), the hand-rolled codepoint loop for the
-/// Qwen2/StableLM2/Hunyuan pretokenizer regex
-/// (LLAMA_VOCAB_PRE_TYPE_QWEN2 in refs/llama.cpp/src/llama-vocab.cpp):
-///
-///   (?i:'s|'t|'re|'ve|'m|'ll|'d) | [^\r\n\p{L}\p{N}]?\p{L}+ | \p{N}
-///   |  ?[^\s\p{L}\p{N}]+[\r\n]*  | \s*[\r\n]+ | \s+(?!\S)   | \s+
-///
-/// The load-bearing details vs the previous ASCII approximation: digits split
-/// ONE per chunk (\p{N} has no quantifier), punctuation runs absorb trailing
-/// \r\n, a whitespace run before a non-space keeps its LAST space glued to the
-/// next chunk (\s+(?!\S)), newline runs split \s*[\r\n]+, any single
-/// non-letter/digit/CR/LF (not just space) prefixes a letter run, and \p{L} /
-/// \p{N} / \s use real Unicode categories (unicode_categories.zig).
-///
-/// Known deviation (malformed input only): we classify each undecodable BYTE
-/// as its own U+FFFD and keep the original bytes in the chunk, while
-/// llama.cpp's unicode_cpts_from_utf8 decodes overlong/surrogate-range forms
-/// leniently (one codepoint for the whole sequence) and substitutes U+FFFD's
-/// encoding into the output — so on invalid UTF-8 both the chunk BOUNDARIES
-/// and the emitted bytes can differ from llama.cpp. Valid UTF-8 input chunks
-/// and encodes identically.
 // ---------------------------------------------------------------------------
 // JoyAI ("joyai-llm", DeepSeek V4 family) pre-tokenizer. Byte-oriented port
 // of the reference splitter; the split SHAPE matters because different
@@ -709,42 +684,6 @@ fn joyaiConsumeLetters(text: []const u8, start: usize) usize {
 }
 
 /// One JoyAI pre-token: byte offset just past the chunk starting at `start`.
-/// GLM-4/5 ("glm4"/"chatglm-bpe") pre-tokenizer: llama.cpp's CHATGLM4 regex
-/// is the Qwen2 regex with ONE difference — digits chunk as runs of up to
-/// three (\p{N}{1,3}) instead of one per chunk. Everything else (explicit
-/// case-class contractions included) is semantically identical, so this
-/// delegates to the qwen2 state machine and post-extends digit chunks.
-fn glm4ChunkEnd(c: []const u32, start: usize) usize {
-    const end = qwen2ChunkEnd(c, start);
-    if (ucat.isNumber(c[start])) {
-        var pos = end; // qwen2 digit chunk is exactly one codepoint
-        while (pos < c.len and pos - start < 3 and ucat.isNumber(c[pos])) pos += 1;
-        return pos;
-    }
-    return end;
-}
-
-test "glm4 pretokenizer: digit runs chunk up to three" {
-    // "20488" -> "204" | "88"; qwen2 would give five single-digit chunks.
-    const text = "x 20488!";
-    const cps = [_]u32{ 'x', ' ', '2', '0', '4', '8', '8', '!' };
-    var pos: usize = 0;
-    var chunks: [8][2]usize = undefined;
-    var n: usize = 0;
-    while (pos < cps.len) {
-        const end = glm4ChunkEnd(&cps, pos);
-        chunks[n] = .{ pos, end };
-        n += 1;
-        pos = end;
-    }
-    // "x" | " " | "204" | "88" | "!" — the space is its own \s+ chunk
-    // (spaces glue to letter runs only, not digit runs).
-    try std.testing.expectEqual(@as(usize, 5), n);
-    try std.testing.expectEqual([2]usize{ 2, 5 }, chunks[2]); // "204"
-    try std.testing.expectEqual([2]usize{ 5, 7 }, chunks[3]); // "88"
-    _ = text;
-}
-
 fn joyaiChunkEnd(text: []const u8, start: usize) usize {
     const len = text.len;
     var pos = start;
@@ -821,6 +760,31 @@ test "joyai pretokenizer: digit runs split three per chunk, indentation donates 
     }
 }
 
+/// One Qwen2 pretoken chunk: the exclusive end index (in codepoints) of the
+/// chunk starting at `start` (always > `start`).
+///
+/// Faithful port of llama.cpp's `unicode_regex_split_custom_qwen2`
+/// (refs/llama.cpp/src/unicode.cpp), the hand-rolled codepoint loop for the
+/// Qwen2/StableLM2/Hunyuan pretokenizer regex
+/// (LLAMA_VOCAB_PRE_TYPE_QWEN2 in refs/llama.cpp/src/llama-vocab.cpp):
+///
+///   (?i:'s|'t|'re|'ve|'m|'ll|'d) | [^\r\n\p{L}\p{N}]?\p{L}+ | \p{N}
+///   |  ?[^\s\p{L}\p{N}]+[\r\n]*  | \s*[\r\n]+ | \s+(?!\S)   | \s+
+///
+/// The load-bearing details vs the previous ASCII approximation: digits split
+/// ONE per chunk (\p{N} has no quantifier), punctuation runs absorb trailing
+/// \r\n, a whitespace run before a non-space keeps its LAST space glued to the
+/// next chunk (\s+(?!\S)), newline runs split \s*[\r\n]+, any single
+/// non-letter/digit/CR/LF (not just space) prefixes a letter run, and \p{L} /
+/// \p{N} / \s use real Unicode categories (unicode_categories.zig).
+///
+/// Known deviation (malformed input only): we classify each undecodable BYTE
+/// as its own U+FFFD and keep the original bytes in the chunk, while
+/// llama.cpp's unicode_cpts_from_utf8 decodes overlong/surrogate-range forms
+/// leniently (one codepoint for the whole sequence) and substitutes U+FFFD's
+/// encoding into the output — so on invalid UTF-8 both the chunk BOUNDARIES
+/// and the emitted bytes can differ from llama.cpp. Valid UTF-8 input chunks
+/// and encodes identically.
 fn qwen2ChunkEnd(c: []const u32, start: usize) usize {
     const n = c.len;
     var pos = start;
@@ -1169,6 +1133,42 @@ fn expectChunks(text: []const u8, expected: []const []const u8) !void {
         pos = end;
     }
     try std.testing.expectEqual(expected.len, idx);
+}
+
+/// GLM-4/5 ("glm4"/"chatglm-bpe") pre-tokenizer: llama.cpp's CHATGLM4 regex
+/// is the Qwen2 regex with ONE difference — digits chunk as runs of up to
+/// three (\p{N}{1,3}) instead of one per chunk. Everything else (explicit
+/// case-class contractions included) is semantically identical, so this
+/// delegates to the qwen2 state machine and post-extends digit chunks.
+fn glm4ChunkEnd(c: []const u32, start: usize) usize {
+    const end = qwen2ChunkEnd(c, start);
+    if (ucat.isNumber(c[start])) {
+        var pos = end; // qwen2 digit chunk is exactly one codepoint
+        while (pos < c.len and pos - start < 3 and ucat.isNumber(c[pos])) pos += 1;
+        return pos;
+    }
+    return end;
+}
+
+test "glm4 pretokenizer: digit runs chunk up to three" {
+    // "20488" -> "204" | "88"; qwen2 would give five single-digit chunks.
+    const text = "x 20488!";
+    const cps = [_]u32{ 'x', ' ', '2', '0', '4', '8', '8', '!' };
+    var pos: usize = 0;
+    var chunks: [8][2]usize = undefined;
+    var n: usize = 0;
+    while (pos < cps.len) {
+        const end = glm4ChunkEnd(&cps, pos);
+        chunks[n] = .{ pos, end };
+        n += 1;
+        pos = end;
+    }
+    // "x" | " " | "204" | "88" | "!" — the space is its own \s+ chunk
+    // (spaces glue to letter runs only, not digit runs).
+    try std.testing.expectEqual(@as(usize, 5), n);
+    try std.testing.expectEqual([2]usize{ 2, 5 }, chunks[2]); // "204"
+    try std.testing.expectEqual([2]usize{ 5, 7 }, chunks[3]); // "88"
+    _ = text;
 }
 
 test "qwen2 pretokenizer: digits split one per chunk (\\p{N} singleton)" {
