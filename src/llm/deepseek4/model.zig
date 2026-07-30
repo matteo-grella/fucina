@@ -768,27 +768,9 @@ fn loadLayerNamed(ctx: *ExecContext, file: *const gguf.File, config: Config, pre
     };
 }
 
-fn hostVector(allocator: Allocator, file: *const gguf.File, tensor_name: []const u8, expected: usize) ![]f32 {
-    return hostVectorInfo(allocator, try file.get(tensor_name), expected);
-}
-
-fn hostVectorInfo(allocator: Allocator, info: *const gguf.TensorInfo, expected: usize) ![]f32 {
-    if (info.n_dims != 1 or info.dims[0] != expected) return Error.InvalidWeightShape;
-    const out = try allocator.alloc(f32, expected);
-    errdefer allocator.free(out);
-    try weights.fillF32(out, info);
-    return out;
-}
-
-/// 2D host matrix as [rows][cols] f32 (GGUF dims [cols, rows]).
-fn hostMatrix(allocator: Allocator, file: *const gguf.File, tensor_name: []const u8, cols: usize, rows: usize) ![]f32 {
-    const info = try file.get(tensor_name);
-    if (info.n_dims != 2 or info.dims[0] != cols or info.dims[1] != rows) return Error.InvalidWeightShape;
-    const out = try allocator.alloc(f32, rows * cols);
-    errdefer allocator.free(out);
-    try weights.fillF32(out, info);
-    return out;
-}
+const hostVector = weights.hostVector;
+const hostVectorInfo = weights.hostVectorInfo;
+const hostMatrix = weights.hostMatrix;
 
 fn rmsNormInto(out: []f32, x: []const f32, weight: ?[]const f32, eps: f32) void {
     var sum: f64 = 0;

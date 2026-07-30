@@ -1586,6 +1586,30 @@ pub fn layerName(buf: []u8, layer_i: usize, suffix: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "blk.{d}.{s}", .{ layer_i, suffix });
 }
 
+/// 1-D tensor as an owned host f32 slice (any decodable source dtype).
+pub fn hostVector(allocator: Allocator, file: *const gguf.File, tensor_name: []const u8, expected: usize) ![]f32 {
+    return hostVectorInfo(allocator, try file.get(tensor_name), expected);
+}
+
+pub fn hostVectorInfo(allocator: Allocator, info: *const gguf.TensorInfo, expected: usize) ![]f32 {
+    if (info.n_dims != 1 or info.dims[0] != expected) return Error.InvalidWeightShape;
+    const out = try allocator.alloc(f32, expected);
+    errdefer allocator.free(out);
+    try fillF32(out, info);
+    return out;
+}
+
+/// 2-D tensor (GGUF dims `{cols, rows}`) as an owned host row-major
+/// `[rows][cols]` f32 slice.
+pub fn hostMatrix(allocator: Allocator, file: *const gguf.File, tensor_name: []const u8, cols: usize, rows: usize) ![]f32 {
+    const info = try file.get(tensor_name);
+    if (info.n_dims != 2 or info.dims[0] != cols or info.dims[1] != rows) return Error.InvalidWeightShape;
+    const out = try allocator.alloc(f32, rows * cols);
+    errdefer allocator.free(out);
+    try fillF32(out, info);
+    return out;
+}
+
 pub fn loadVector(ctx: *ExecContext, info: *const gguf.TensorInfo, expected_len: usize, comptime tag: Tag) !fucina.Tensor(.{tag}) {
     if (info.n_dims != 1 or info.dims[0] != expected_len) return Error.InvalidWeightShape;
 

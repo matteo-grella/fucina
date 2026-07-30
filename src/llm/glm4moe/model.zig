@@ -719,9 +719,7 @@ pub const Model = struct {
     }
 };
 
-fn layerName(buf: []u8, layer_i: usize, suffix: []const u8) ![]const u8 {
-    return std.fmt.bufPrint(buf, "blk.{d}.{s}", .{ layer_i, suffix });
-}
+const layerName = weights.layerName;
 
 fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i: usize, store: ?*fucina.ExpertStore) !Layer {
     const allocator = ctx.allocator;
@@ -822,17 +820,8 @@ fn swigluLinear(ctx: *ExecContext, allocator: Allocator, x: *const fucina.Tensor
     return allocator.dupe(f32, try down_t.dataConst());
 }
 
-fn hostVector(allocator: Allocator, file: *const gguf.File, tensor_name: []const u8, expected: usize) ![]f32 {
-    return hostVectorInfo(allocator, try file.get(tensor_name), expected);
-}
-
-fn hostVectorInfo(allocator: Allocator, info: *const gguf.TensorInfo, expected: usize) ![]f32 {
-    if (info.n_dims != 1 or info.dims[0] != expected) return Error.InvalidWeightShape;
-    const out = try allocator.alloc(f32, expected);
-    errdefer allocator.free(out);
-    try weights.fillF32(out, info);
-    return out;
-}
+const hostVector = weights.hostVector;
+const hostVectorInfo = weights.hostVectorInfo;
 
 fn rmsNormInto(out: []f32, x: []const f32, weight: []const f32, eps: f32) void {
     var sum: f64 = 0;

@@ -921,9 +921,7 @@ fn sconvInPlace(allocator: Allocator, x: []f32, S: usize, width: usize, kernel: 
     @memcpy(state, next_state);
 }
 
-fn layerName(buf: []u8, layer_i: usize, suffix: []const u8) ![]const u8 {
-    return std.fmt.bufPrint(buf, "blk.{d}.{s}", .{ layer_i, suffix });
-}
+const layerName = weights.layerName;
 
 /// Per-expert 2-D sub-view of a stacked 3-D expert bank (ne {in, out, E}):
 /// expert e's block is contiguous, so a shifted TensorInfo suffices.
@@ -1118,24 +1116,9 @@ fn swigluLinear(ctx: *ExecContext, allocator: Allocator, x: *const fucina.Tensor
     return allocator.dupe(f32, try down_t.dataConst());
 }
 
-fn hostVector(allocator: Allocator, file: *const gguf.File, tensor_name: []const u8, expected: usize) ![]f32 {
-    const info = try file.get(tensor_name);
-    if (info.n_dims != 1 or info.dims[0] != expected) return Error.InvalidWeightShape;
-    const out = try allocator.alloc(f32, expected);
-    errdefer allocator.free(out);
-    try weights.fillF32(out, info);
-    return out;
-}
-
-/// Load a 2-D F32 tensor (ne {d0, d1}) as a host row-major [d1][d0] slice.
-fn hostMatrixF32(allocator: Allocator, file: *const gguf.File, tensor_name: []const u8, d0: usize, d1: usize) ![]f32 {
-    const info = try file.get(tensor_name);
-    if (info.n_dims != 2 or info.dims[0] != d0 or info.dims[1] != d1) return Error.InvalidWeightShape;
-    const out = try allocator.alloc(f32, d0 * d1);
-    errdefer allocator.free(out);
-    try weights.fillF32(out, info);
-    return out;
-}
+const hostVector = weights.hostVector;
+/// 2-D F32 tensor (ne {d0, d1}) as a host row-major [d1][d0] slice.
+const hostMatrixF32 = weights.hostMatrix;
 
 /// Load a shortconv kernel (GGUF ne {taps, width} = channel-major [C][K])
 /// transposed to tap-major [K][C] for the SIMD conv loop.
