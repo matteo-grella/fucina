@@ -541,156 +541,169 @@ pub const AdamWConfig = struct {
     second_moment_dtype: StateDType = .f32,
 };
 
-pub const AdamW = struct {
-    allocator: Allocator,
-    config: AdamWConfig,
-    slots: std.ArrayList(Slot) = .empty,
+/// AdamW and Adam share every line of registration, clipping, and
+/// checkpoint scaffolding — only the per-element update kernel, the config
+/// defaults, and the frame magic trio differ. One comptime body serves
+/// both (the `PackedQuantWeight`/`recordVTable` pattern): the kernels stay
+/// separate reference-faithful ports, and the frame bytes are pinned by
+/// the checkpoint tests, so the two instantiations are wire-identical to
+/// the former hand-written twins.
+fn MomentPairOptimizer(comptime ConfigT: type, comptime magics: [3]*const [4]u8, comptime updateFn: anytype) type {
+    return struct {
+        const Self = @This();
 
-    const Slot = struct {
-        param: Param,
-        m: StateBuf,
-        v: StateBuf,
-        step: u64 = 0,
+        allocator: Allocator,
+        config: ConfigT,
+        slots: std.ArrayList(Slot) = .empty,
+
+        const Slot = struct {
+            param: Param,
+            m: StateBuf,
+            v: StateBuf,
+            step: u64 = 0,
+        };
+
+        pub fn init(allocator: Allocator, config: ConfigT) Self {
+            return .{ .allocator = allocator, .config = config };
+        }
+
+        pub fn deinit(self: *Self) void {
+            for (self.slots.items) |*slot| {
+                slot.m.deinit(self.allocator);
+                slot.v.deinit(self.allocator);
+                slot.param.deinit(self.allocator);
+            }
+            self.slots.deinit(self.allocator);
+            self.* = undefined;
+        }
+
+        pub fn addParam(self: *Self, t: anytype) !void {
+            var param = try Param.of(t);
+            errdefer param.deinit(self.allocator);
+            try self.addOwnedParam(param);
+        }
+
+        /// `addParam` plus a checkpoint name (borrowed; see `Param.name`).
+        pub fn addParamNamed(self: *Self, t: anytype, name: []const u8) !void {
+            var param = try Param.of(t);
+            errdefer param.deinit(self.allocator);
+            param.name = name;
+            try self.addOwnedParam(param);
+        }
+
+        /// Add this optimizer's grad-states to `set` for `OptimizerSet`'s
+        /// cross-member duplicate check; `DuplicateParam` if any already present
+        /// (set left unchanged on collision).
+        pub fn collectGradStates(self: *const Self, set: *GradStateSet, allocator: Allocator) !void {
+            if (gradStatesCollide(set, self.slots.items)) return OptimError.DuplicateParam;
+            try insertGradStates(set, allocator, self.slots.items);
+        }
+
+        fn containsGradState(self: *const Self, state: *const GradState) bool {
+            for (self.slots.items) |*slot| {
+                if (slot.param.grad_state == state) return true;
+            }
+            return false;
+        }
+
+        fn addOwnedParam(self: *Self, param: Param) !void {
+            if (self.containsGradState(param.grad_state)) return OptimError.DuplicateParam;
+            var owned = param;
+            try owned.ensureMaster(self.allocator);
+            errdefer if (owned.master.len != 0) self.allocator.free(owned.master);
+            const n = owned.len();
+            const m = try StateBuf.alloc(self.allocator, self.config.state_dtype, n);
+            errdefer m.deinit(self.allocator);
+            const v = try StateBuf.alloc(self.allocator, self.config.second_moment_dtype, n);
+            errdefer v.deinit(self.allocator);
+            try self.slots.append(self.allocator, .{ .param = owned, .m = m, .v = v });
+        }
+
+        pub fn step(self: *Self, ctx: *ExecContext) !void {
+            for (self.slots.items) |*slot| {
+                var grad = (try takeGrad(ctx, &slot.param)) orelse continue;
+                defer grad.deinit();
+                slot.step += 1;
+                updateFn(ctx, self.config, slot.param.data(), grad.dataConst(), slot.m, slot.v, slot.step);
+                slot.param.publish();
+            }
+        }
+
+        pub fn zeroGrad(self: *Self) void {
+            for (self.slots.items) |*slot| slot.param.grad_state.zeroGrad();
+        }
+
+        pub fn gradSquaredNorm(self: *Self, ctx: *ExecContext) !f64 {
+            var total: f64 = 0;
+            for (self.slots.items) |*slot| total += try paramGradSqNorm(ctx, &slot.param);
+            return total;
+        }
+
+        pub fn scaleGradients(self: *Self, ctx: *ExecContext, factor: f32) !void {
+            for (self.slots.items) |*slot| try scaleParamGrad(ctx, &slot.param, factor);
+        }
+
+        /// L2 global-norm clip over this optimizer's params (after backward,
+        /// before step). Returns the pre-clip norm.
+        pub fn clipGradNorm(self: *Self, ctx: *ExecContext, max_norm: f32) !f32 {
+            return clipByGlobalNorm(ctx, self, max_norm);
+        }
+
+        pub fn saveState(self: *const Self, writer: *std.Io.Writer) !void {
+            try validateSlotNames(self.slots.items);
+            var version = momentSlotsFrameVersion(self.slots.items);
+            if (slotsCarryMasters(self.slots.items)) version = .v5;
+            try writer.writeAll(switch (version) {
+                .v3 => magics[0],
+                .v4 => magics[1],
+                .v5 => magics[2],
+            });
+            try writer.writeInt(u32, @intCast(self.slots.items.len), .little);
+            for (self.slots.items, 0..) |*slot, i| {
+                try writeSlotName(writer, &slot.param, i);
+                try writeSlotDims(writer, &slot.param);
+                try writer.writeInt(u64, slot.step, .little);
+                try writeStateSlice(writer, version, slot.m);
+                try writeStateSlice(writer, version, slot.v);
+                try writeSlotMaster(writer, version, &slot.param);
+            }
+        }
+
+        pub fn loadState(self: *Self, reader: *std.Io.Reader) !void {
+            const version = try expectMagicVersion(reader, magics[0], magics[1], magics[2]);
+            const count = try reader.takeInt(u32, .little);
+            var matcher = try SlotMatcher.init(self.allocator, self.slots.items.len);
+            defer matcher.deinit(self.allocator);
+            var staged = try std.ArrayList(StagedSlot).initCapacity(self.allocator, count);
+            defer freeStaged(self.allocator, &staged);
+            for (0..count) |_| {
+                const idx = try matcher.match(reader, self.slots.items);
+                const slot = &self.slots.items[idx];
+                try expectSlotDims(reader, &slot.param);
+                const step_val = try reader.takeInt(u64, .little);
+                const m_bytes = slot.m.byteLen();
+                const data = try self.allocator.alloc(u8, m_bytes + slot.v.byteLen());
+                errdefer self.allocator.free(data);
+                try readStateSlice(reader, version, slot.m, data[0..m_bytes]);
+                try readStateSlice(reader, version, slot.v, data[m_bytes..]);
+                const master = try readSlotMaster(self.allocator, reader, version, &slot.param);
+                errdefer if (master.len != 0) self.allocator.free(master);
+                try staged.append(self.allocator, .{ .idx = idx, .step = step_val, .data = data, .master = master });
+            }
+            try matcher.requireAllFilled();
+            for (staged.items) |s| {
+                const slot = &self.slots.items[s.idx];
+                slot.step = s.step;
+                const m_bytes = slot.m.byteLen();
+                @memcpy(slot.m.bytes(), s.data[0..m_bytes]);
+                @memcpy(slot.v.bytes(), s.data[m_bytes..]);
+                commitSlotMaster(&slot.param, s.master);
+            }
+        }
     };
+}
 
-    pub fn init(allocator: Allocator, config: AdamWConfig) AdamW {
-        return .{ .allocator = allocator, .config = config };
-    }
-
-    pub fn deinit(self: *AdamW) void {
-        for (self.slots.items) |*slot| {
-            slot.m.deinit(self.allocator);
-            slot.v.deinit(self.allocator);
-            slot.param.deinit(self.allocator);
-        }
-        self.slots.deinit(self.allocator);
-        self.* = undefined;
-    }
-
-    pub fn addParam(self: *AdamW, t: anytype) !void {
-        var param = try Param.of(t);
-        errdefer param.deinit(self.allocator);
-        try self.addOwnedParam(param);
-    }
-
-    /// `addParam` plus a checkpoint name (borrowed; see `Param.name`).
-    pub fn addParamNamed(self: *AdamW, t: anytype, name: []const u8) !void {
-        var param = try Param.of(t);
-        errdefer param.deinit(self.allocator);
-        param.name = name;
-        try self.addOwnedParam(param);
-    }
-
-    /// Add this optimizer's grad-states to `set` for `OptimizerSet`'s
-    /// cross-member duplicate check; `DuplicateParam` if any already present
-    /// (set left unchanged on collision).
-    pub fn collectGradStates(self: *const AdamW, set: *GradStateSet, allocator: Allocator) !void {
-        if (gradStatesCollide(set, self.slots.items)) return OptimError.DuplicateParam;
-        try insertGradStates(set, allocator, self.slots.items);
-    }
-
-    fn containsGradState(self: *const AdamW, state: *const GradState) bool {
-        for (self.slots.items) |*slot| {
-            if (slot.param.grad_state == state) return true;
-        }
-        return false;
-    }
-
-    fn addOwnedParam(self: *AdamW, param: Param) !void {
-        if (self.containsGradState(param.grad_state)) return OptimError.DuplicateParam;
-        var owned = param;
-        try owned.ensureMaster(self.allocator);
-        errdefer if (owned.master.len != 0) self.allocator.free(owned.master);
-        const n = owned.len();
-        const m = try StateBuf.alloc(self.allocator, self.config.state_dtype, n);
-        errdefer m.deinit(self.allocator);
-        const v = try StateBuf.alloc(self.allocator, self.config.second_moment_dtype, n);
-        errdefer v.deinit(self.allocator);
-        try self.slots.append(self.allocator, .{ .param = owned, .m = m, .v = v });
-    }
-
-    pub fn step(self: *AdamW, ctx: *ExecContext) !void {
-        for (self.slots.items) |*slot| {
-            var grad = (try takeGrad(ctx, &slot.param)) orelse continue;
-            defer grad.deinit();
-            slot.step += 1;
-            adamwUpdate(ctx, self.config, slot.param.data(), grad.dataConst(), slot.m, slot.v, slot.step);
-            slot.param.publish();
-        }
-    }
-
-    pub fn zeroGrad(self: *AdamW) void {
-        for (self.slots.items) |*slot| slot.param.grad_state.zeroGrad();
-    }
-
-    pub fn gradSquaredNorm(self: *AdamW, ctx: *ExecContext) !f64 {
-        var total: f64 = 0;
-        for (self.slots.items) |*slot| total += try paramGradSqNorm(ctx, &slot.param);
-        return total;
-    }
-
-    pub fn scaleGradients(self: *AdamW, ctx: *ExecContext, factor: f32) !void {
-        for (self.slots.items) |*slot| try scaleParamGrad(ctx, &slot.param, factor);
-    }
-
-    /// L2 global-norm clip over this optimizer's params (after backward,
-    /// before step). Returns the pre-clip norm.
-    pub fn clipGradNorm(self: *AdamW, ctx: *ExecContext, max_norm: f32) !f32 {
-        return clipByGlobalNorm(ctx, self, max_norm);
-    }
-
-    pub fn saveState(self: *const AdamW, writer: *std.Io.Writer) !void {
-        try validateSlotNames(self.slots.items);
-        var version = momentSlotsFrameVersion(self.slots.items);
-        if (slotsCarryMasters(self.slots.items)) version = .v5;
-        try writer.writeAll(switch (version) {
-            .v3 => "FZA3",
-            .v4 => "FZA4",
-            .v5 => "FZA5",
-        });
-        try writer.writeInt(u32, @intCast(self.slots.items.len), .little);
-        for (self.slots.items, 0..) |*slot, i| {
-            try writeSlotName(writer, &slot.param, i);
-            try writeSlotDims(writer, &slot.param);
-            try writer.writeInt(u64, slot.step, .little);
-            try writeStateSlice(writer, version, slot.m);
-            try writeStateSlice(writer, version, slot.v);
-            try writeSlotMaster(writer, version, &slot.param);
-        }
-    }
-
-    pub fn loadState(self: *AdamW, reader: *std.Io.Reader) !void {
-        const version = try expectMagicVersion(reader, "FZA3", "FZA4", "FZA5");
-        const count = try reader.takeInt(u32, .little);
-        var matcher = try SlotMatcher.init(self.allocator, self.slots.items.len);
-        defer matcher.deinit(self.allocator);
-        var staged = try std.ArrayList(StagedSlot).initCapacity(self.allocator, count);
-        defer freeStaged(self.allocator, &staged);
-        for (0..count) |_| {
-            const idx = try matcher.match(reader, self.slots.items);
-            const slot = &self.slots.items[idx];
-            try expectSlotDims(reader, &slot.param);
-            const step_val = try reader.takeInt(u64, .little);
-            const m_bytes = slot.m.byteLen();
-            const data = try self.allocator.alloc(u8, m_bytes + slot.v.byteLen());
-            errdefer self.allocator.free(data);
-            try readStateSlice(reader, version, slot.m, data[0..m_bytes]);
-            try readStateSlice(reader, version, slot.v, data[m_bytes..]);
-            const master = try readSlotMaster(self.allocator, reader, version, &slot.param);
-            errdefer if (master.len != 0) self.allocator.free(master);
-            try staged.append(self.allocator, .{ .idx = idx, .step = step_val, .data = data, .master = master });
-        }
-        try matcher.requireAllFilled();
-        for (staged.items) |s| {
-            const slot = &self.slots.items[s.idx];
-            slot.step = s.step;
-            const m_bytes = slot.m.byteLen();
-            @memcpy(slot.m.bytes(), s.data[0..m_bytes]);
-            @memcpy(slot.v.bytes(), s.data[m_bytes..]);
-            commitSlotMaster(&slot.param, s.master);
-        }
-    }
-};
+pub const AdamW = MomentPairOptimizer(AdamWConfig, .{ "FZA3", "FZA4", "FZA5" }, adamwUpdate);
 
 /// The exact PyTorch `_single_tensor_adam(decoupled_weight_decay=True)` update.
 /// Order matters: decay multiplies the parameter BEFORE the moment update and
@@ -811,150 +824,7 @@ pub const AdamConfig = struct {
     second_moment_dtype: StateDType = .f32,
 };
 
-pub const Adam = struct {
-    allocator: Allocator,
-    config: AdamConfig,
-    slots: std.ArrayList(Slot) = .empty,
-
-    const Slot = struct {
-        param: Param,
-        m: StateBuf,
-        v: StateBuf,
-        step: u64 = 0,
-    };
-
-    pub fn init(allocator: Allocator, config: AdamConfig) Adam {
-        return .{ .allocator = allocator, .config = config };
-    }
-
-    pub fn deinit(self: *Adam) void {
-        for (self.slots.items) |*slot| {
-            slot.m.deinit(self.allocator);
-            slot.v.deinit(self.allocator);
-            slot.param.deinit(self.allocator);
-        }
-        self.slots.deinit(self.allocator);
-        self.* = undefined;
-    }
-
-    pub fn addParam(self: *Adam, t: anytype) !void {
-        var param = try Param.of(t);
-        errdefer param.deinit(self.allocator);
-        try self.addOwnedParam(param);
-    }
-
-    pub fn addParamNamed(self: *Adam, t: anytype, name: []const u8) !void {
-        var param = try Param.of(t);
-        errdefer param.deinit(self.allocator);
-        param.name = name;
-        try self.addOwnedParam(param);
-    }
-
-    pub fn collectGradStates(self: *const Adam, set: *GradStateSet, allocator: Allocator) !void {
-        if (gradStatesCollide(set, self.slots.items)) return OptimError.DuplicateParam;
-        try insertGradStates(set, allocator, self.slots.items);
-    }
-
-    fn containsGradState(self: *const Adam, state: *const GradState) bool {
-        for (self.slots.items) |*slot| {
-            if (slot.param.grad_state == state) return true;
-        }
-        return false;
-    }
-
-    fn addOwnedParam(self: *Adam, param: Param) !void {
-        if (self.containsGradState(param.grad_state)) return OptimError.DuplicateParam;
-        var owned = param;
-        try owned.ensureMaster(self.allocator);
-        errdefer if (owned.master.len != 0) self.allocator.free(owned.master);
-        const n = owned.len();
-        const m = try StateBuf.alloc(self.allocator, self.config.state_dtype, n);
-        errdefer m.deinit(self.allocator);
-        const v = try StateBuf.alloc(self.allocator, self.config.second_moment_dtype, n);
-        errdefer v.deinit(self.allocator);
-        try self.slots.append(self.allocator, .{ .param = owned, .m = m, .v = v });
-    }
-
-    pub fn step(self: *Adam, ctx: *ExecContext) !void {
-        for (self.slots.items) |*slot| {
-            var grad = (try takeGrad(ctx, &slot.param)) orelse continue;
-            defer grad.deinit();
-            slot.step += 1;
-            adamUpdate(ctx, self.config, slot.param.data(), grad.dataConst(), slot.m, slot.v, slot.step);
-            slot.param.publish();
-        }
-    }
-
-    pub fn zeroGrad(self: *Adam) void {
-        for (self.slots.items) |*slot| slot.param.grad_state.zeroGrad();
-    }
-
-    pub fn gradSquaredNorm(self: *Adam, ctx: *ExecContext) !f64 {
-        var total: f64 = 0;
-        for (self.slots.items) |*slot| total += try paramGradSqNorm(ctx, &slot.param);
-        return total;
-    }
-
-    pub fn scaleGradients(self: *Adam, ctx: *ExecContext, factor: f32) !void {
-        for (self.slots.items) |*slot| try scaleParamGrad(ctx, &slot.param, factor);
-    }
-
-    pub fn clipGradNorm(self: *Adam, ctx: *ExecContext, max_norm: f32) !f32 {
-        return clipByGlobalNorm(ctx, self, max_norm);
-    }
-
-    pub fn saveState(self: *const Adam, writer: *std.Io.Writer) !void {
-        try validateSlotNames(self.slots.items);
-        var version = momentSlotsFrameVersion(self.slots.items);
-        if (slotsCarryMasters(self.slots.items)) version = .v5;
-        try writer.writeAll(switch (version) {
-            .v3 => "FZAD",
-            .v4 => "FZD4",
-            .v5 => "FZD5",
-        });
-        try writer.writeInt(u32, @intCast(self.slots.items.len), .little);
-        for (self.slots.items, 0..) |*slot, i| {
-            try writeSlotName(writer, &slot.param, i);
-            try writeSlotDims(writer, &slot.param);
-            try writer.writeInt(u64, slot.step, .little);
-            try writeStateSlice(writer, version, slot.m);
-            try writeStateSlice(writer, version, slot.v);
-            try writeSlotMaster(writer, version, &slot.param);
-        }
-    }
-
-    pub fn loadState(self: *Adam, reader: *std.Io.Reader) !void {
-        const version = try expectMagicVersion(reader, "FZAD", "FZD4", "FZD5");
-        const count = try reader.takeInt(u32, .little);
-        var matcher = try SlotMatcher.init(self.allocator, self.slots.items.len);
-        defer matcher.deinit(self.allocator);
-        var staged = try std.ArrayList(StagedSlot).initCapacity(self.allocator, count);
-        defer freeStaged(self.allocator, &staged);
-        for (0..count) |_| {
-            const idx = try matcher.match(reader, self.slots.items);
-            const slot = &self.slots.items[idx];
-            try expectSlotDims(reader, &slot.param);
-            const step_val = try reader.takeInt(u64, .little);
-            const m_bytes = slot.m.byteLen();
-            const data = try self.allocator.alloc(u8, m_bytes + slot.v.byteLen());
-            errdefer self.allocator.free(data);
-            try readStateSlice(reader, version, slot.m, data[0..m_bytes]);
-            try readStateSlice(reader, version, slot.v, data[m_bytes..]);
-            const master = try readSlotMaster(self.allocator, reader, version, &slot.param);
-            errdefer if (master.len != 0) self.allocator.free(master);
-            try staged.append(self.allocator, .{ .idx = idx, .step = step_val, .data = data, .master = master });
-        }
-        try matcher.requireAllFilled();
-        for (staged.items) |s| {
-            const slot = &self.slots.items[s.idx];
-            slot.step = s.step;
-            const m_bytes = slot.m.byteLen();
-            @memcpy(slot.m.bytes(), s.data[0..m_bytes]);
-            @memcpy(slot.v.bytes(), s.data[m_bytes..]);
-            commitSlotMaster(&slot.param, s.master);
-        }
-    }
-};
+pub const Adam = MomentPairOptimizer(AdamConfig, .{ "FZAD", "FZD4", "FZD5" }, adamUpdate);
 
 /// PyTorch Adam keeps weight decay coupled to the gradient. This differs from
 /// AdamW only when `weight_decay != 0`; NAM packed training uses that path.
