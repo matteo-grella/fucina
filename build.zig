@@ -968,6 +968,13 @@ pub fn build(b: *std.Build) void {
         cuda_check_step.dependOn(&cuda_ptx_gen.step);
     }
 
+    // Compile every bench executable without running it. Bench mains are
+    // reachable only through their run steps, so nothing else in the build
+    // graph exercises them; this step is the cheap gate that keeps the suite
+    // compiling. Every bench registers itself right below its addExecutable,
+    // so a new bench cannot land outside the gate.
+    const bench_check_step = b.step("bench-check", "Compile all bench executables without running them");
+
     const bench_exe = b.addExecutable(.{
         .name = "fucina-bench",
         .root_module = b.createModule(.{
@@ -976,6 +983,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    bench_check_step.dependOn(&bench_exe.step);
     const bench_raw_module = b.addModule("bench_raw", .{
         .root_source_file = b.path("src/bench_raw.zig"),
         .target = target,
@@ -1002,6 +1010,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    bench_check_step.dependOn(&optim_bench_exe.step);
     optim_bench_exe.root_module.addImport("bench_raw", bench_raw_module);
     configureBlas(optim_bench_exe, blas_kind);
     configureGpu(b, optim_bench_exe, gpu_kind);
@@ -1022,6 +1031,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    bench_check_step.dependOn(&ce_bench_exe.step);
     ce_bench_exe.root_module.addImport("bench_raw", bench_raw_module);
     configureBlas(ce_bench_exe, blas_kind);
     configureGpu(b, ce_bench_exe, gpu_kind);
@@ -1042,6 +1052,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    bench_check_step.dependOn(&conv_bench_exe.step);
     conv_bench_exe.root_module.addImport("bench_raw", bench_raw_module);
     configureBlas(conv_bench_exe, blas_kind);
     configureGpu(b, conv_bench_exe, gpu_kind);
@@ -1062,6 +1073,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    bench_check_step.dependOn(&scatter_bench_exe.step);
     scatter_bench_exe.root_module.addImport("bench_raw", bench_raw_module);
     configureBlas(scatter_bench_exe, blas_kind);
     configureGpu(b, scatter_bench_exe, gpu_kind);
@@ -1082,6 +1094,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    bench_check_step.dependOn(&backward_diamond_bench_exe.step);
     backward_diamond_bench_exe.root_module.addImport("bench_raw", bench_raw_module);
     configureBlas(backward_diamond_bench_exe, blas_kind);
     configureGpu(b, backward_diamond_bench_exe, gpu_kind);
@@ -1102,6 +1115,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    bench_check_step.dependOn(&attention_backward_bench_exe.step);
     attention_backward_bench_exe.root_module.addImport("bench_raw", bench_raw_module);
     configureBlas(attention_backward_bench_exe, blas_kind);
     configureGpu(b, attention_backward_bench_exe, gpu_kind);
@@ -1124,6 +1138,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    bench_check_step.dependOn(&backend_bench_exe.step);
     const raw_backend_module = b.addModule("raw_backend", .{
         .root_source_file = b.path("src/backend.zig"),
         .target = target,
@@ -1155,6 +1170,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    bench_check_step.dependOn(&f16gemm_bench_exe.step);
     f16gemm_bench_exe.root_module.addImport("raw_backend", raw_backend_module);
     configureBlas(f16gemm_bench_exe, blas_kind);
     configureGpu(b, f16gemm_bench_exe, gpu_kind);
@@ -1173,6 +1189,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    bench_check_step.dependOn(&gemm_bench_exe.step);
     gemm_bench_exe.root_module.addImport("raw_backend", raw_backend_module);
     configureBlas(gemm_bench_exe, blas_kind);
     configureGpu(b, gemm_bench_exe, gpu_kind);
@@ -1191,6 +1208,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    bench_check_step.dependOn(&train_step_bench_exe.step);
     train_step_bench_exe.root_module.addImport("bench_raw", bench_raw_module);
     configureBlas(train_step_bench_exe, blas_kind);
     configureGpu(b, train_step_bench_exe, gpu_kind);
@@ -1207,6 +1225,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    bench_check_step.dependOn(&packed_gemm_bench_exe.step);
     packed_gemm_bench_exe.root_module.addImport("raw_backend", raw_backend_module);
     configureBlas(packed_gemm_bench_exe, blas_kind);
     configureGpu(b, packed_gemm_bench_exe, gpu_kind);
@@ -1223,6 +1242,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    bench_check_step.dependOn(&gpu_dispatch_bench_exe.step);
     gpu_dispatch_bench_exe.root_module.addImport("raw_backend", raw_backend_module);
     configureBlas(gpu_dispatch_bench_exe, blas_kind);
     configureGpu(b, gpu_dispatch_bench_exe, gpu_kind);
@@ -1239,6 +1259,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    bench_check_step.dependOn(&gpu_formats_bench_exe.step);
     gpu_formats_bench_exe.root_module.addImport("raw_backend", raw_backend_module);
     configureBlas(gpu_formats_bench_exe, blas_kind);
     configureGpu(b, gpu_formats_bench_exe, gpu_kind);
@@ -1255,6 +1276,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    bench_check_step.dependOn(&q5kmoe_bench_exe.step);
     q5kmoe_bench_exe.root_module.addImport("raw_backend", raw_backend_module);
     // Uses std.heap.c_allocator directly: libc links implicitly on macOS but
     // must be declared for the Linux bench-check leg.
@@ -1276,6 +1298,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    bench_check_step.dependOn(&q8gemv_bench_exe.step);
     q8gemv_bench_exe.root_module.addImport("raw_backend", raw_backend_module);
     // Uses std.heap.c_allocator directly (see q5kmoe above).
     q8gemv_bench_exe.root_module.link_libc = true;
@@ -1296,6 +1319,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    bench_check_step.dependOn(&ternary_bench_exe.step);
     ternary_bench_exe.root_module.addImport("raw_backend", raw_backend_module);
     // Uses std.heap.c_allocator directly (see q5kmoe above).
     ternary_bench_exe.root_module.link_libc = true;
@@ -1316,6 +1340,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    bench_check_step.dependOn(&membw_bench_exe.step);
     // macOS QoS pinning (pthread_set_qos_class_self_np, as src/thread.zig).
     membw_bench_exe.root_module.link_libc = true;
     const membw_bench_cmd = b.addRunArtifact(membw_bench_exe);
@@ -1333,6 +1358,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    bench_check_step.dependOn(&facade_bench_exe.step);
     facade_bench_exe.root_module.addImport("bench_raw", bench_raw_module);
     configureBlas(facade_bench_exe, blas_kind);
     configureGpu(b, facade_bench_exe, gpu_kind);
@@ -1353,6 +1379,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    bench_check_step.dependOn(&einsum_bench_exe.step);
     einsum_bench_exe.root_module.addImport("bench_raw", bench_raw_module);
     configureBlas(einsum_bench_exe, blas_kind);
     configureGpu(b, einsum_bench_exe, gpu_kind);
@@ -1364,31 +1391,6 @@ pub fn build(b: *std.Build) void {
 
     const einsum_bench_step = b.step("bench-einsum", "einsum vs hand-written dot/permute contraction pipelines (parity + advantage cases)");
     einsum_bench_step.dependOn(&einsum_bench_cmd.step);
-
-    // Compile every bench executable without running it. Bench mains are
-    // reachable only through their run steps, so nothing else in the build
-    // graph exercises them; this step is the cheap gate that keeps the suite
-    // compiling.
-    const bench_check_step = b.step("bench-check", "Compile all bench executables without running them");
-    for ([_]*std.Build.Step.Compile{
-        bench_exe,
-        optim_bench_exe,
-        ce_bench_exe,
-        conv_bench_exe,
-        scatter_bench_exe,
-        backward_diamond_bench_exe,
-        attention_backward_bench_exe,
-        backend_bench_exe,
-        f16gemm_bench_exe,
-        gemm_bench_exe,
-        q5kmoe_bench_exe,
-        ternary_bench_exe,
-        membw_bench_exe,
-        facade_bench_exe,
-        einsum_bench_exe,
-    }) |bench_check_exe| {
-        bench_check_step.dependOn(&bench_check_exe.step);
-    }
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
