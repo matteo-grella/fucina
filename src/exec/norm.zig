@@ -134,15 +134,7 @@ pub fn rmsNormMulAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, 
             .row_end = outer,
         };
         if (outer > 1) {
-            if (rt.workPool()) |pool| {
-                const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), outer);
-                var tasks: [parallel.vector_max_threads]RmsNormMulRowsTask = undefined;
-                for (0..task_count) |task_i| {
-                    tasks[task_i] = base_task;
-                    tasks[task_i].row_start = task_i * outer / task_count;
-                    tasks[task_i].row_end = (task_i + 1) * outer / task_count;
-                }
-                pool.parallelChunks(RmsNormMulRowsTask, tasks[0..task_count], runRmsNormMulRowsTask);
+            if (rt.dispatchRange(RmsNormMulRowsTask, "row_start", "row_end", base_task, outer, runRmsNormMulRowsTask)) {
                 return out;
             }
         }
@@ -209,15 +201,7 @@ pub fn rmsNormMulAddAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tenso
             .row_end = outer,
         };
         if (outer > 1) {
-            if (rt.workPool()) |pool| {
-                const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), outer);
-                var tasks: [parallel.vector_max_threads]RmsNormMulAddRowsTask = undefined;
-                for (0..task_count) |task_i| {
-                    tasks[task_i] = base_task;
-                    tasks[task_i].row_start = task_i * outer / task_count;
-                    tasks[task_i].row_end = (task_i + 1) * outer / task_count;
-                }
-                pool.parallelChunks(RmsNormMulAddRowsTask, tasks[0..task_count], runRmsNormMulAddRowsTask);
+            if (rt.dispatchRange(RmsNormMulAddRowsTask, "row_start", "row_end", base_task, outer, runRmsNormMulAddRowsTask)) {
                 return out;
             }
         }
@@ -292,15 +276,7 @@ pub fn rmsNormMulBackwardInputAxisRank(
             .row_end = outer,
         };
         if (outer > 1) {
-            if (rt.workPool()) |pool| {
-                const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), outer);
-                var tasks: [parallel.vector_max_threads]RmsNormMulBackwardInputRowsTask = undefined;
-                for (0..task_count) |task_i| {
-                    tasks[task_i] = base_task;
-                    tasks[task_i].row_start = task_i * outer / task_count;
-                    tasks[task_i].row_end = (task_i + 1) * outer / task_count;
-                }
-                pool.parallelChunks(RmsNormMulBackwardInputRowsTask, tasks[0..task_count], runRmsNormMulBackwardInputRowsTask);
+            if (rt.dispatchRange(RmsNormMulBackwardInputRowsTask, "row_start", "row_end", base_task, outer, runRmsNormMulBackwardInputRowsTask)) {
                 return out;
             }
         }
@@ -507,15 +483,7 @@ pub fn rmsNormMulRopeAxisRankWithTable(
         };
 
         if (total_vectors > 1 and source.len() >= parallel.vector_elementwise_len_threshold / 8) {
-            if (rt.workPool()) |pool| {
-                const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), total_vectors);
-                var tasks: [parallel.vector_max_threads]RmsNormMulRopeHalfTask = undefined;
-                for (0..task_count) |task_i| {
-                    tasks[task_i] = base_task;
-                    tasks[task_i].vector_start = task_i * total_vectors / task_count;
-                    tasks[task_i].vector_end = (task_i + 1) * total_vectors / task_count;
-                }
-                pool.parallelChunks(RmsNormMulRopeHalfTask, tasks[0..task_count], runRmsNormMulRopeHalfTask);
+            if (rt.dispatchRange(RmsNormMulRopeHalfTask, "vector_start", "vector_end", base_task, total_vectors, runRmsNormMulRopeHalfTask)) {
                 return out;
             }
         }
@@ -685,15 +653,7 @@ pub fn layerNormAffineRows(
         .row_end = rows,
     };
     if (input.len >= parallel.vector_elementwise_len_threshold / 2 and rows > 1) {
-        if (rt.workPool()) |pool| {
-            const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), rows);
-            var tasks: [parallel.vector_max_threads]LayerNormRowsTask = undefined;
-            for (0..task_count) |task_i| {
-                tasks[task_i] = base_task;
-                tasks[task_i].row_start = task_i * rows / task_count;
-                tasks[task_i].row_end = (task_i + 1) * rows / task_count;
-            }
-            pool.parallelChunks(LayerNormRowsTask, tasks[0..task_count], runLayerNormRowsTask);
+        if (rt.dispatchRange(LayerNormRowsTask, "row_start", "row_end", base_task, rows, runLayerNormRowsTask)) {
             return out;
         }
     }
@@ -768,15 +728,7 @@ fn layerNormDispatchAxisRank(
             .row_end = outer,
         };
         if (outer > 1) {
-            if (rt.workPool()) |pool| {
-                const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), outer);
-                var tasks: [parallel.vector_max_threads]LayerNormRowsTask = undefined;
-                for (0..task_count) |task_i| {
-                    tasks[task_i] = base_task;
-                    tasks[task_i].row_start = task_i * outer / task_count;
-                    tasks[task_i].row_end = (task_i + 1) * outer / task_count;
-                }
-                pool.parallelChunks(LayerNormRowsTask, tasks[0..task_count], runLayerNormRowsTask);
+            if (rt.dispatchRange(LayerNormRowsTask, "row_start", "row_end", base_task, outer, runLayerNormRowsTask)) {
                 return out;
             }
         }
@@ -1027,15 +979,7 @@ fn layerNormBackwardDispatchAxisRank(
             };
             var dispatched = false;
             if (outer > 1 and source.len() >= parallel.vector_elementwise_len_threshold / 2) {
-                if (rt.workPool()) |pool| {
-                    const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), outer);
-                    var tasks: [parallel.vector_max_threads]LayerNormBackwardInputRowsTask = undefined;
-                    for (0..task_count) |task_i| {
-                        tasks[task_i] = base_task;
-                        tasks[task_i].row_start = task_i * outer / task_count;
-                        tasks[task_i].row_end = (task_i + 1) * outer / task_count;
-                    }
-                    pool.parallelChunks(LayerNormBackwardInputRowsTask, tasks[0..task_count], runLayerNormBackwardInputRowsTask);
+                if (rt.dispatchRange(LayerNormBackwardInputRowsTask, "row_start", "row_end", base_task, outer, runLayerNormBackwardInputRowsTask)) {
                     dispatched = true;
                 }
             }

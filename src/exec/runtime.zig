@@ -168,6 +168,53 @@ pub const Runtime = struct {
         return self.tryWorkPool() catch null;
     }
 
+    /// One row/lane-range pool dispatch for the domain modules'
+    /// task-parallel kernels: copy `base_task` per task with
+    /// `start_field`/`end_field` rewritten to its `[0, count)` sub-range
+    /// and run the tasks on the work pool. False — the caller runs its
+    /// serial path — when no pool exists or the split degenerates to a
+    /// single task. Work GATES stay at the call sites: whether a shape is
+    /// worth dispatching is per-op knowledge; how a range splits is not.
+    /// Sub-ranges own disjoint output rows, so the pooled result is
+    /// bitwise identical to the serial call for any task count.
+    pub fn dispatchRange(
+        self: *Runtime,
+        comptime Task: type,
+        comptime start_field: []const u8,
+        comptime end_field: []const u8,
+        base_task: Task,
+        count: usize,
+        comptime run: fn (task: *const Task) void,
+    ) bool {
+        return self.dispatchRangeCapped(Task, start_field, end_field, base_task, count, count, run);
+    }
+
+    /// `dispatchRange` with a separate task-count cap (the inner-lane
+    /// dispatches cap tasks by a minimum per-task lane width, not by the
+    /// range being split).
+    pub fn dispatchRangeCapped(
+        self: *Runtime,
+        comptime Task: type,
+        comptime start_field: []const u8,
+        comptime end_field: []const u8,
+        base_task: Task,
+        count: usize,
+        max_tasks: usize,
+        comptime run: fn (task: *const Task) void,
+    ) bool {
+        const pool = self.workPool() orelse return false;
+        const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), max_tasks);
+        if (task_count <= 1) return false;
+        var tasks: [parallel.vector_max_threads]Task = undefined;
+        for (0..task_count) |task_i| {
+            tasks[task_i] = base_task;
+            @field(tasks[task_i], start_field) = task_i * count / task_count;
+            @field(tasks[task_i], end_field) = (task_i + 1) * count / task_count;
+        }
+        pool.parallelChunks(Task, tasks[0..task_count], run);
+        return true;
+    }
+
     fn tryDotBackwardWorker(self: *Runtime) !*thread.OneShotWorker {
         self.dot_backward_worker_mutex.lock();
         defer self.dot_backward_worker_mutex.unlock();

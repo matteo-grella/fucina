@@ -636,36 +636,18 @@ fn splitGatedAxisRankImpl(rt: *Runtime, comptime op: GatedOp, comptime rank: usi
     const inner = productAfterAxis(rank, source.shape, axis);
     const outer = productBeforeAxis(rank, source.shape, axis);
     if (inner == 1) {
-        if (out.len() >= parallel.vector_elementwise_len_threshold / 8) {
-            if (rt.workPool()) |pool| {
-                const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), outer);
-                var tasks: [parallel.vector_max_threads]Task = undefined;
-                const base: Task = .{
-                    .input = input,
-                    .output = output,
-                    .axis_dim = axis_dim,
-                    .half = half,
-                    .outer_start = 0,
-                    .outer_end = outer,
-                };
-                for (0..task_count) |task_i| {
-                    tasks[task_i] = base;
-                    tasks[task_i].outer_start = task_i * outer / task_count;
-                    tasks[task_i].outer_end = (task_i + 1) * outer / task_count;
-                }
-                pool.parallelChunks(Task, tasks[0..task_count], runTask);
-                return out;
-            }
-        }
-
-        rowsKernel(.{
+        const base: Task = .{
             .input = input,
             .output = output,
             .axis_dim = axis_dim,
             .half = half,
             .outer_start = 0,
             .outer_end = outer,
-        });
+        };
+        if (out.len() >= parallel.vector_elementwise_len_threshold / 8) {
+            if (rt.dispatchRange(Task, "outer_start", "outer_end", base, outer, runTask)) return out;
+        }
+        rowsKernel(base);
         return out;
     }
 
@@ -725,15 +707,7 @@ pub fn splitSwiGluBackwardAxisRank(rt: *Runtime, comptime rank: usize, x: *const
             .outer_end = outer,
         };
         if (out.len() >= parallel.vector_elementwise_len_threshold / 4 and outer > 1) {
-            if (rt.workPool()) |pool| {
-                const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), outer);
-                var tasks: [parallel.vector_max_threads]SplitSwiGluBackwardTask = undefined;
-                for (0..task_count) |task_i| {
-                    tasks[task_i] = base_task;
-                    tasks[task_i].outer_start = task_i * outer / task_count;
-                    tasks[task_i].outer_end = (task_i + 1) * outer / task_count;
-                }
-                pool.parallelChunks(SplitSwiGluBackwardTask, tasks[0..task_count], runSplitSwiGluBackwardTask);
+            if (rt.dispatchRange(SplitSwiGluBackwardTask, "outer_start", "outer_end", base_task, outer, runSplitSwiGluBackwardTask)) {
                 return out;
             }
         }
@@ -801,15 +775,7 @@ pub fn splitGluBackwardAxisRank(rt: *Runtime, comptime rank: usize, x: *const Te
             .outer_end = outer,
         };
         if (out.len() >= parallel.vector_elementwise_len_threshold / 4 and outer > 1) {
-            if (rt.workPool()) |pool| {
-                const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), outer);
-                var tasks: [parallel.vector_max_threads]SplitGluBackwardTask = undefined;
-                for (0..task_count) |task_i| {
-                    tasks[task_i] = base_task;
-                    tasks[task_i].outer_start = task_i * outer / task_count;
-                    tasks[task_i].outer_end = (task_i + 1) * outer / task_count;
-                }
-                pool.parallelChunks(SplitGluBackwardTask, tasks[0..task_count], runSplitGluBackwardTask);
+            if (rt.dispatchRange(SplitGluBackwardTask, "outer_start", "outer_end", base_task, outer, runSplitGluBackwardTask)) {
                 return out;
             }
         }
@@ -1275,15 +1241,7 @@ fn dropoutApply(rt: *Runtime, x: *const Tensor, p: f32, seed: u64) !Tensor {
     // the split is bitwise neutral (same per-element mask and arithmetic
     // for any thread count).
     if (input.len >= parallel.vector_elementwise_len_threshold) {
-        if (rt.workPool()) |pool| {
-            const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), input.len);
-            var tasks: [parallel.vector_max_threads]DropoutRangeTask = undefined;
-            for (0..task_count) |task_i| {
-                tasks[task_i] = base_task;
-                tasks[task_i].start = task_i * input.len / task_count;
-                tasks[task_i].end = (task_i + 1) * input.len / task_count;
-            }
-            pool.parallelChunks(DropoutRangeTask, tasks[0..task_count], runDropoutRangeTask);
+        if (rt.dispatchRange(DropoutRangeTask, "start", "end", base_task, input.len, runDropoutRangeTask)) {
             return out;
         }
     }

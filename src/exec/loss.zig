@@ -207,15 +207,7 @@ pub fn crossEntropyLossExStatsAxisRank(
         };
         var dispatched = false;
         if (outer > 1 and source.len() >= parallel.vector_elementwise_len_threshold / 2) {
-            if (rt.workPool()) |pool| {
-                const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), outer);
-                var tasks: [parallel.vector_max_threads]CrossEntropyLossRowsTask = undefined;
-                for (0..task_count) |task_i| {
-                    tasks[task_i] = base_task;
-                    tasks[task_i].row_start = task_i * outer / task_count;
-                    tasks[task_i].row_end = (task_i + 1) * outer / task_count;
-                }
-                pool.parallelChunks(CrossEntropyLossRowsTask, tasks[0..task_count], runCrossEntropyLossRowsTask);
+            if (rt.dispatchRange(CrossEntropyLossRowsTask, "row_start", "row_end", base_task, outer, runCrossEntropyLossRowsTask)) {
                 dispatched = true;
             }
         }
@@ -497,15 +489,7 @@ pub const LinearCrossEntropyGrads = struct {
 fn dispatchCrossEntropyBackwardRows(rt: *Runtime, base_task: CrossEntropyBackwardRowsTask) void {
     const outer = base_task.row_end;
     if (outer > 1 and outer * base_task.class_count >= parallel.vector_elementwise_len_threshold / 2) {
-        if (rt.workPool()) |pool| {
-            const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), outer);
-            var tasks: [parallel.vector_max_threads]CrossEntropyBackwardRowsTask = undefined;
-            for (0..task_count) |task_i| {
-                tasks[task_i] = base_task;
-                tasks[task_i].row_start = task_i * outer / task_count;
-                tasks[task_i].row_end = (task_i + 1) * outer / task_count;
-            }
-            pool.parallelChunks(CrossEntropyBackwardRowsTask, tasks[0..task_count], runCrossEntropyBackwardRowsTask);
+        if (rt.dispatchRange(CrossEntropyBackwardRowsTask, "row_start", "row_end", base_task, outer, runCrossEntropyBackwardRowsTask)) {
             return;
         }
     }
@@ -647,15 +631,7 @@ pub const LinearDistillForward = struct {
 fn dispatchDistillStatsRows(rt: *Runtime, base_task: DistillStatsRowsTask) void {
     const outer = base_task.row_end;
     if (outer > 1 and outer * base_task.class_count >= parallel.vector_elementwise_len_threshold / 2) {
-        if (rt.workPool()) |pool| {
-            const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), outer);
-            var tasks: [parallel.vector_max_threads]DistillStatsRowsTask = undefined;
-            for (0..task_count) |task_i| {
-                tasks[task_i] = base_task;
-                tasks[task_i].row_start = task_i * outer / task_count;
-                tasks[task_i].row_end = (task_i + 1) * outer / task_count;
-            }
-            pool.parallelChunks(DistillStatsRowsTask, tasks[0..task_count], runDistillStatsRowsTask);
+        if (rt.dispatchRange(DistillStatsRowsTask, "row_start", "row_end", base_task, outer, runDistillStatsRowsTask)) {
             return;
         }
     }
@@ -760,15 +736,7 @@ fn orderUsize(context: usize, item: usize) std.math.Order {
 fn dispatchDistillBackwardRows(rt: *Runtime, base_task: DistillBackwardRowsTask) void {
     const outer = base_task.row_end;
     if (outer > 1 and outer * base_task.class_count >= parallel.vector_elementwise_len_threshold / 2) {
-        if (rt.workPool()) |pool| {
-            const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), outer);
-            var tasks: [parallel.vector_max_threads]DistillBackwardRowsTask = undefined;
-            for (0..task_count) |task_i| {
-                tasks[task_i] = base_task;
-                tasks[task_i].row_start = task_i * outer / task_count;
-                tasks[task_i].row_end = (task_i + 1) * outer / task_count;
-            }
-            pool.parallelChunks(DistillBackwardRowsTask, tasks[0..task_count], runDistillBackwardRowsTask);
+        if (rt.dispatchRange(DistillBackwardRowsTask, "row_start", "row_end", base_task, outer, runDistillBackwardRowsTask)) {
             return;
         }
     }

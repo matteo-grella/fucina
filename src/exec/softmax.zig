@@ -53,22 +53,7 @@ fn dispatchInnerLanes(
     comptime run: fn (task: *const Task) void,
 ) void {
     if (total_len >= parallel.vector_elementwise_len_threshold / 2) {
-        if (rt.workPool()) |pool| {
-            const task_count = @min(
-                parallel.cpuThreadCount(parallel.vector_max_threads),
-                inner / min_inner_lanes_per_task,
-            );
-            if (task_count > 1) {
-                var tasks: [parallel.vector_max_threads]Task = undefined;
-                for (0..task_count) |task_i| {
-                    tasks[task_i] = base_task;
-                    tasks[task_i].inner_start = task_i * inner / task_count;
-                    tasks[task_i].inner_end = (task_i + 1) * inner / task_count;
-                }
-                pool.parallelChunks(Task, tasks[0..task_count], run);
-                return;
-            }
-        }
+        if (rt.dispatchRangeCapped(Task, "inner_start", "inner_end", base_task, inner, inner / min_inner_lanes_per_task, run)) return;
     }
     run(&base_task);
 }
@@ -88,7 +73,6 @@ pub const SoftmaxExtOptions = struct {
     causal_query_axis: ?usize = null,
     causal_source_offset: usize = 0,
 };
-
 
 /// Log-sum-exp along `axis` (torch.logsumexp), the axis removed:
 /// max-shifted with the non-finite guard (±inf maxima shift by 0, so
@@ -123,15 +107,7 @@ pub fn logsumexpAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, c
             .row_end = outer,
         };
         if (outer > 1 and source.len() >= parallel.vector_elementwise_len_threshold / 2) {
-            if (rt.workPool()) |pool| {
-                const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), outer);
-                var tasks: [parallel.vector_max_threads]LogRowsTask = undefined;
-                for (0..task_count) |task_i| {
-                    tasks[task_i] = base_task;
-                    tasks[task_i].row_start = task_i * outer / task_count;
-                    tasks[task_i].row_end = (task_i + 1) * outer / task_count;
-                }
-                pool.parallelChunks(LogRowsTask, tasks[0..task_count], runLogsumexpRowsTask);
+            if (rt.dispatchRange(LogRowsTask, "row_start", "row_end", base_task, outer, runLogsumexpRowsTask)) {
                 return out;
             }
         }
@@ -184,15 +160,7 @@ pub fn logSoftmaxAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, 
             .row_end = outer,
         };
         if (outer > 1 and source.len() >= parallel.vector_elementwise_len_threshold / 2) {
-            if (rt.workPool()) |pool| {
-                const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), outer);
-                var tasks: [parallel.vector_max_threads]LogRowsTask = undefined;
-                for (0..task_count) |task_i| {
-                    tasks[task_i] = base_task;
-                    tasks[task_i].row_start = task_i * outer / task_count;
-                    tasks[task_i].row_end = (task_i + 1) * outer / task_count;
-                }
-                pool.parallelChunks(LogRowsTask, tasks[0..task_count], runLogSoftmaxRowsTask);
+            if (rt.dispatchRange(LogRowsTask, "row_start", "row_end", base_task, outer, runLogSoftmaxRowsTask)) {
                 return out;
             }
         }
@@ -240,15 +208,7 @@ pub fn softmaxAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, com
             .row_end = outer,
         };
         if (outer > 1 and source.len() >= parallel.vector_elementwise_len_threshold / 2) {
-            if (rt.workPool()) |pool| {
-                const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), outer);
-                var tasks: [parallel.vector_max_threads]SoftmaxRowsTask = undefined;
-                for (0..task_count) |task_i| {
-                    tasks[task_i] = base_task;
-                    tasks[task_i].row_start = task_i * outer / task_count;
-                    tasks[task_i].row_end = (task_i + 1) * outer / task_count;
-                }
-                pool.parallelChunks(SoftmaxRowsTask, tasks[0..task_count], runSoftmaxRowsTask);
+            if (rt.dispatchRange(SoftmaxRowsTask, "row_start", "row_end", base_task, outer, runSoftmaxRowsTask)) {
                 return out;
             }
         }
@@ -355,15 +315,7 @@ pub fn softmaxExtAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, 
         .row_end = rows,
     };
     if (rows > 1 and source.len() >= parallel.vector_elementwise_len_threshold / 2) {
-        if (rt.workPool()) |pool| {
-            const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), rows);
-            var tasks: [parallel.vector_max_threads]SoftmaxExtRowsTask(rank) = undefined;
-            for (0..task_count) |task_i| {
-                tasks[task_i] = base_task;
-                tasks[task_i].row_start = task_i * rows / task_count;
-                tasks[task_i].row_end = (task_i + 1) * rows / task_count;
-            }
-            pool.parallelChunks(SoftmaxExtRowsTask(rank), tasks[0..task_count], runSoftmaxExtRowsTask(rank, axis));
+        if (rt.dispatchRange(SoftmaxExtRowsTask(rank), "row_start", "row_end", base_task, rows, runSoftmaxExtRowsTask(rank, axis))) {
             return out;
         }
     }
@@ -407,15 +359,7 @@ pub fn softmaxExtBackwardAxisRank(rt: *Runtime, comptime rank: usize, y: *const 
             .row_end = outer,
         };
         if (outer > 1 and source.len() >= parallel.vector_elementwise_len_threshold / 2) {
-            if (rt.workPool()) |pool| {
-                const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), outer);
-                var tasks: [parallel.vector_max_threads]SoftmaxBackwardRowsTask = undefined;
-                for (0..task_count) |task_i| {
-                    tasks[task_i] = base_task;
-                    tasks[task_i].row_start = task_i * outer / task_count;
-                    tasks[task_i].row_end = (task_i + 1) * outer / task_count;
-                }
-                pool.parallelChunks(SoftmaxBackwardRowsTask, tasks[0..task_count], runSoftmaxBackwardRowsTask);
+            if (rt.dispatchRange(SoftmaxBackwardRowsTask, "row_start", "row_end", base_task, outer, runSoftmaxBackwardRowsTask)) {
                 return out;
             }
         }
