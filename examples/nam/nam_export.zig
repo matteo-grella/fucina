@@ -50,12 +50,6 @@ pub const LoudnessGain = struct {
 
 /// Measures upstream's loudness + gain metadata (base.py:121-156) by
 /// streaming the trained weights over the vendored standardized input.
-pub fn measureLoudnessAndGain(allocator: std.mem.Allocator, spec: *const train.ModelSpec, weights: []const f32) !LoudnessGain {
-    var config = try train.toEngineConfig(allocator, spec);
-    defer train.freeEngineConfig(allocator, &config);
-    return measureLoudnessAndGainConfig(allocator, &config, weights);
-}
-
 pub fn measureLoudnessAndGainConfig(
     allocator: std.mem.Allocator,
     config: *const nam_file.WaveNetConfig,
@@ -90,19 +84,6 @@ pub fn measureLoudnessAndGainConfig(
     else
         0.0;
     return .{ .loudness = loudness, .gain = gain };
-}
-
-pub fn exportWaveNet(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    path: []const u8,
-    spec: *const train.ModelSpec,
-    weights: []const f32,
-    info: ExportInfo,
-) !void {
-    var config = try train.toEngineConfig(allocator, spec);
-    defer train.freeEngineConfig(allocator, &config);
-    try exportWaveNetConfig(io, allocator, path, &config, weights, info);
 }
 
 pub fn exportWaveNetConfig(

@@ -173,11 +173,6 @@ pub const Midi = struct {
         self.* = undefined;
     }
 
-    pub fn sourceCount(self: *Midi) usize {
-        const count = nam_midi_source_count(self.handle);
-        return if (count > 0) @intCast(count) else 0;
-    }
-
     /// Identity hash of the connected sources (count + unique IDs): the
     /// hot-plug rescan keys on this so an unplug+replug that lands on the
     /// same COUNT still reads as a change.

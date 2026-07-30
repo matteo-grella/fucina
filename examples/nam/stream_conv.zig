@@ -87,10 +87,6 @@ pub const StreamConv = struct {
         self.* = undefined;
     }
 
-    pub fn weightCount(self: *const StreamConv) usize {
-        return self.weight.len + self.bias.len;
-    }
-
     /// Loads from the NAM flat-weight stream (PyTorch (out, in, k) row-major
     /// order, spec §5.1/§5.2), permuting into our [tap, in, out] layout;
     /// bias follows when present. Returns the number of floats consumed.
@@ -106,24 +102,6 @@ pub const StreamConv = struct {
                         self.weight[(k * in_per_group + local_i) * self.out_channels + o] = stream[idx];
                         idx += 1;
                     }
-                }
-            }
-        }
-        for (self.bias) |*b| {
-            b.* = stream[idx];
-            idx += 1;
-        }
-        return idx;
-    }
-
-    pub fn loadDenseWeights(self: *StreamConv, stream: []const f32) usize {
-        std.debug.assert(self.groups == 1);
-        var idx: usize = 0;
-        for (0..self.out_channels) |o| {
-            for (0..self.in_channels) |i| {
-                for (0..self.taps) |k| {
-                    self.weight[(k * self.in_channels + i) * self.out_channels + o] = stream[idx];
-                    idx += 1;
                 }
             }
         }
