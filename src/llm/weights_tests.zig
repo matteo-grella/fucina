@@ -693,3 +693,23 @@ test "fused ptqtp linear is bitwise identical to the per-plane facade chain" {
         try std.testing.expectEqualSlices(f32, try acc.dataConst(), try y.dataConst());
     }
 }
+
+test "MoeStreamCli: mirror weights without mirrors abort instead of arming nothing" {
+    var cli: weights.MoeStreamCli = .{};
+    try std.testing.expect(try cli.tryParse("--moe-mirror-weights=2,1"));
+    try std.testing.expect(cli.armed);
+    try std.testing.expectError(error.MirrorWeightsMismatch, cli.options("model.gguf"));
+
+    // The valid pairing is unaffected: one mirror, one weight.
+    var ok: weights.MoeStreamCli = .{};
+    try std.testing.expect(try ok.tryParse("--moe-mirror=/alt/model.gguf"));
+    try std.testing.expect(try ok.tryParse("--moe-mirror-weights=2"));
+    const opts = (try ok.options("model.gguf")).?;
+    try std.testing.expectEqual(@as(usize, 1), opts.mirror_paths.len);
+    try std.testing.expectEqualSlices(f32, &.{2}, opts.mirror_weights.?);
+
+    // Unrelated flags never arm.
+    var off: weights.MoeStreamCli = .{};
+    try std.testing.expect(!try off.tryParse("--prompt"));
+    try std.testing.expect((try off.options("model.gguf")) == null);
+}

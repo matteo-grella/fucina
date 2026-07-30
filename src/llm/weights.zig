@@ -1241,6 +1241,10 @@ pub const MoeStreamCli = struct {
         } else if (std.mem.startsWith(u8, arg, "--moe-mirror-weights=")) {
             // Per-mirror read share relative to the primary's 1, comma
             // list in --moe-mirror order (default 1 each: even split).
+            // Arms like every sibling so that weights WITHOUT --moe-mirror
+            // reach `options`' parseMirrorWeights and abort with
+            // MirrorWeightsMismatch instead of silently running unmirrored.
+            self.armed = true;
             self.mirror_weights_arg = arg["--moe-mirror-weights=".len..];
         } else if (std.mem.eql(u8, arg, "--moe-uncached")) {
             // Uncached streamed reads (macOS F_NOCACHE): expert streaming
