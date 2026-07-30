@@ -13,6 +13,14 @@
 //! (comptime blocks, container fields). Shadowed names can only over-count
 //! edges; references made through strings (`@field`) are not seen. Files that
 //! fail to parse conservatively count every `@import`.
+//!
+//! Second invariant — test-file forwarding: every `src/**/*_tests.zig` /
+//! `*_test.zig` file must have an incoming `@import` from some non-test src
+//! file (the `test { _ = @import("x_tests.zig"); }` forwarding stanza).
+//! Zig's lazy analysis means an unforwarded test file is silently absent
+//! from `zig build test` — it neither runs nor even compiles. This scan
+//! covers ALL tokens of every production file (test decls included, since
+//! that is exactly where the stanzas live).
 
 const std = @import("std");
 
@@ -20,6 +28,7 @@ const Allocator = std.mem.Allocator;
 
 const Error = error{
     ImportCycleDetected,
+    TestFileNotForwarded,
 };
 
 const FileInfo = struct {
@@ -41,6 +50,18 @@ const Graph = struct {
         for (self.files.items) |*file| file.deinit(allocator);
         self.files.deinit(allocator);
         self.index_by_path.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+const TestFiles = struct {
+    /// test-file path -> has an incoming `@import` from a non-test src file.
+    forwarded_by_path: std.StringHashMapUnmanaged(bool) = .empty,
+
+    fn deinit(self: *TestFiles, allocator: Allocator) void {
+        var it = self.forwarded_by_path.keyIterator();
+        while (it.next()) |key| allocator.free(key.*);
+        self.forwarded_by_path.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -135,44 +156,65 @@ pub fn main(init: std.process.Init) !void {
     const stdout = &stdout_writer.interface;
     defer stdout.flush() catch {};
 
-    var stderr_buffer: [4096]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
-    const stderr = &stderr_writer.interface;
-    defer stderr.flush() catch {};
+    // Failure diagnostics go through std.debug.print (unbuffered fd 2): the
+    // build runner relays that channel on a failing run step, where the
+    // buffered writer's late flush is not shown.
 
     var graph: Graph = .{};
     defer graph.deinit(allocator);
+    var test_files: TestFiles = .{};
+    defer test_files.deinit(allocator);
 
-    try collectFiles(allocator, io, &graph);
-    try collectEdges(allocator, io, &graph);
+    try collectFiles(allocator, io, &graph, &test_files);
+    try collectEdges(allocator, io, &graph, &test_files);
 
     var tarjan = try Tarjan.init(allocator, &graph);
     defer tarjan.deinit();
     try tarjan.run();
 
+    var unforwarded: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer unforwarded.deinit(allocator);
+    var it = test_files.forwarded_by_path.iterator();
+    while (it.next()) |entry| {
+        if (!entry.value_ptr.*) try unforwarded.append(allocator, entry.key_ptr.*);
+    }
+    std.mem.sort([]const u8, unforwarded.items, {}, stringLessThan);
+
     const edge_count = countEdges(&graph);
-    if (tarjan.cycles.items.len == 0) {
+    if (tarjan.cycles.items.len == 0 and unforwarded.items.len == 0) {
         try stdout.print(
-            "production import graph: {d} files, {d} edges, 0 SCCs\n",
-            .{ graph.files.items.len, edge_count },
+            "production import graph: {d} files, {d} edges, 0 SCCs; {d} test files, all forwarded\n",
+            .{ graph.files.items.len, edge_count, test_files.forwarded_by_path.count() },
         );
         return;
     }
 
-    try stderr.print(
-        "production import graph: {d} files, {d} edges, {d} SCC(s)\n",
-        .{ graph.files.items.len, edge_count, tarjan.cycles.items.len },
-    );
-    for (tarjan.cycles.items, 0..) |cycle, i| {
-        try stderr.print("SCC {d}:\n", .{i + 1});
-        for (cycle) |node| {
-            try stderr.print("  {s}\n", .{graph.files.items[node].path});
+    if (tarjan.cycles.items.len != 0) {
+        std.debug.print(
+            "production import graph: {d} files, {d} edges, {d} SCC(s)\n",
+            .{ graph.files.items.len, edge_count, tarjan.cycles.items.len },
+        );
+        for (tarjan.cycles.items, 0..) |cycle, i| {
+            std.debug.print("SCC {d}:\n", .{i + 1});
+            for (cycle) |node| {
+                std.debug.print("  {s}\n", .{graph.files.items[node].path});
+            }
         }
     }
-    return Error.ImportCycleDetected;
+    if (unforwarded.items.len != 0) {
+        std.debug.print(
+            "{d} test file(s) with no incoming @import from any production src file — silently absent from `zig build test`:\n",
+            .{unforwarded.items.len},
+        );
+        for (unforwarded.items) |path| {
+            std.debug.print("  {s} (add `test {{ _ = @import(\"...\"); }}` to its production sibling)\n", .{path});
+        }
+    }
+    if (tarjan.cycles.items.len != 0) return Error.ImportCycleDetected;
+    return Error.TestFileNotForwarded;
 }
 
-fn collectFiles(allocator: Allocator, io: std.Io, graph: *Graph) !void {
+fn collectFiles(allocator: Allocator, io: std.Io, graph: *Graph, test_files: *TestFiles) !void {
     var src_dir = try std.Io.Dir.cwd().openDir(io, "src", .{ .iterate = true });
     defer src_dir.close(io);
 
@@ -182,7 +224,12 @@ fn collectFiles(allocator: Allocator, io: std.Io, graph: *Graph) !void {
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.path, ".zig")) continue;
-        if (isTestPath(entry.path)) continue;
+        if (isTestPath(entry.path)) {
+            const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+            errdefer allocator.free(path);
+            try test_files.forwarded_by_path.put(allocator, path, false);
+            continue;
+        }
 
         const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
         errdefer allocator.free(path);
@@ -191,7 +238,7 @@ fn collectFiles(allocator: Allocator, io: std.Io, graph: *Graph) !void {
     }
 }
 
-fn collectEdges(allocator: Allocator, io: std.Io, graph: *Graph) !void {
+fn collectEdges(allocator: Allocator, io: std.Io, graph: *Graph, test_files: *TestFiles) !void {
     for (graph.files.items, 0..) |*file, file_index| {
         const contents = try readFileSentinel(allocator, io, file.path);
         defer allocator.free(contents);
@@ -218,6 +265,27 @@ fn collectEdges(allocator: Allocator, io: std.Io, graph: *Graph) !void {
                 const target_index = graph.index_by_path.get(resolved) orelse continue;
                 try addEdge(allocator, &graph.files.items[file_index], target_index);
             }
+        }
+
+        // Test-file forwarding: scan ALL tokens (test decls included — that is
+        // where the forwarding stanzas live) for imports that resolve to a
+        // test file, and mark those files as wired into a test root.
+        if (ast.tokens.len < 3) continue;
+        var tok: std.zig.Ast.TokenIndex = 0;
+        const last_start: std.zig.Ast.TokenIndex = @intCast(ast.tokens.len - 2);
+        while (tok < last_start) : (tok += 1) {
+            if (ast.tokenTag(tok) != .builtin) continue;
+            if (!std.mem.eql(u8, ast.tokenSlice(tok), "@import")) continue;
+            if (ast.tokenTag(tok + 1) != .l_paren) continue;
+            if (ast.tokenTag(tok + 2) != .string_literal) continue;
+
+            const raw = ast.tokenSlice(tok + 2);
+            const imported = std.zig.string_literal.parseAlloc(allocator, raw) catch continue;
+            defer allocator.free(imported);
+            if (!isTestPath(imported)) continue;
+            const resolved = try resolveLocalImport(allocator, file.path, imported) orelse continue;
+            defer allocator.free(resolved);
+            if (test_files.forwarded_by_path.getPtr(resolved)) |forwarded| forwarded.* = true;
         }
     }
 }
@@ -352,6 +420,10 @@ fn addEdge(allocator: Allocator, file: *FileInfo, target_index: usize) !void {
 fn isTestPath(path: []const u8) bool {
     return std.mem.endsWith(u8, path, "_tests.zig") or
         std.mem.endsWith(u8, path, "_test.zig");
+}
+
+fn stringLessThan(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
 }
 
 fn hasSelfEdge(graph: *const Graph, node: usize) bool {

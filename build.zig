@@ -799,7 +799,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const arch_check_cmd = b.addRunArtifact(arch_check_exe);
-    const arch_check_step = b.step("arch-check", "Verify the production src/*.zig import graph has zero SCCs");
+    const arch_check_step = b.step("arch-check", "Verify the production src/*.zig import graph has zero SCCs and every test file is forwarded");
     arch_check_step.dependOn(&arch_check_cmd.step);
 
     const doc_check_exe = b.addExecutable(.{

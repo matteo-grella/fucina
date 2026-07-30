@@ -413,7 +413,7 @@ the launched program.
 | `test` | Runs the unit tests of all nine test roots (§2.7). No model assets needed. |
 | `test-fucina` | Runs the `fucina`-root unit tests only (the routine `-Dbackend=scalar` leg); the full `test` matrix stays the pre-merge gate. |
 | `bench-check` | Compiles every bench executable without running it — the cheap gate that keeps the bench suite building (bench mains are otherwise reachable only through their run steps). Each bench registers into the gate right below its `addExecutable`, so a new bench cannot land outside it. |
-| `arch-check` | Builds and runs `tools/check_import_graph.zig`: the production (non-test) `src/**/*.zig` import graph must have zero strongly-connected components. AST-based and test-aware — imports reachable only from `test` decls or test-only private helpers are not counted. |
+| `arch-check` | Builds and runs `tools/check_import_graph.zig`: the production (non-test) `src/**/*.zig` import graph must have zero strongly-connected components. AST-based and test-aware — imports reachable only from `test` decls or test-only private helpers are not counted. Also enforces test-file forwarding: every `src/**/*_tests.zig`/`*_test.zig` must be `@import`ed by some non-test src file, so a forgotten forwarding stanza (§2.7) cannot silently drop a test file from `zig build test`. |
 | `doc-check` | Builds and runs `tools/check_doc_links.zig`: every backtick-quoted `*.md` in `AGENTS.md`'s "## Doc index" section (root docs, `docs/<name>.md`, and per-example `examples/<name>/README.md`) must exist on disk; `docs/RUNNING-MODELS.md` is additionally scanned for `examples/<name>/README.md` references. |
 | `snippet-check` | Builds and runs `tools/gen_snippet_tests.zig`: every runnable ```zig snippet in this document (a fenced block with a column-0 named `test "..."`) is extracted into a generated test root and run against the real `fucina`/`fucina_llm` modules with the build's option set — a snippet that stops compiling or asserting fails the gate (conventions in §2.7). |
 | `x86dot-check` | Runs the cross-ISA int8/Q4_K/Q8_0/TQ2_0 dot-kernel parity checker (`src/x86dot_check.zig`, always ReleaseSafe, deterministic output diffable across environments). The run leg follows `-Dtarget` (so `-Dtarget=x86_64-macos -Dcpu=baseline` under Rosetta drives the emulated x86 legs); four additional compile-only legs (x86_64_v3, alderlake, znver4, neoverse_v1) catch bit-rot of the AVX2/AVX-VNNI/AVX512-VNNI/smmla inline-asm arms that the local machine cannot execute. |
@@ -750,7 +750,7 @@ values. On Linux without libc the lookup scans `/proc/self/environ`
 ### 2.7 Test organization (`src/`, `examples/`)
 
 Tests live in **sibling `*_tests.zig` files** next to the production file
-they cover (157 of them across `src/` and `examples/`): `exec.zig` ↔
+they cover (156 of them across `src/` and `examples/`): `exec.zig` ↔
 `exec_tests.zig`, `src/llm/tokenizer.zig` ↔ `src/llm/tokenizer_tests.zig`,
 and so on. The production file pulls its sibling in with a forwarding
 stanza, so analyzing the production file analyzes its tests:
