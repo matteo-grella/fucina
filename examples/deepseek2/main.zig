@@ -21,14 +21,8 @@ pub fn main(init: std.process.Init) !void {
 
     var prompt_text: []const u8 = "The capital of France is";
     var gen_count: usize = 32;
-    var moe_stream_flag = false;
-    var moe_cache_mb: ?usize = null;
+    var moe_cli: llm.weights.MoeStreamCli = .{};
     var moe_pilot = false;
-    var moe_mirror_buf: [8][]const u8 = undefined;
-    var moe_mirror_n: usize = 0;
-    var moe_mirror_weights_arg: ?[]const u8 = null;
-    var moe_io_threads: ?usize = null;
-    var moe_uncached = false;
     var moe_cache_route = false;
     var moe_route_j: usize = 2;
     var moe_route_m: usize = 12;
@@ -59,39 +53,15 @@ pub fn main(init: std.process.Init) !void {
             gen_count = try std.fmt.parseInt(usize, args[arg_i], 10);
         } else if (std.mem.startsWith(u8, arg, "--gen=")) {
             gen_count = try std.fmt.parseInt(usize, arg["--gen=".len..], 10);
-        } else if (std.mem.eql(u8, arg, "--moe-stream")) {
-            moe_stream_flag = true;
-        } else if (std.mem.startsWith(u8, arg, "--moe-cache-mb=")) {
-            moe_stream_flag = true;
-            moe_cache_mb = try std.fmt.parseInt(usize, arg["--moe-cache-mb=".len..], 10);
+        } else if (try moe_cli.tryParse(arg)) {
+            // Shared streamed-experts flags (llm.weights.MoeStreamCli).
         } else if (std.mem.eql(u8, arg, "--moe-pilot")) {
-            moe_stream_flag = true;
+            moe_cli.armed = true;
             moe_pilot = true;
-        } else if (std.mem.startsWith(u8, arg, "--moe-mirror=")) {
-            // Another full copy of the model, typically on another drive
-            // (repeatable): expert reads split across every copy, so
-            // miss-bound streaming gets each drive's bandwidth.
-            moe_stream_flag = true;
-            if (moe_mirror_n >= moe_mirror_buf.len) return error.TooManyMirrors;
-            moe_mirror_buf[moe_mirror_n] = arg["--moe-mirror=".len..];
-            moe_mirror_n += 1;
-        } else if (std.mem.startsWith(u8, arg, "--moe-mirror-weights=")) {
-            // Per-mirror read share relative to the primary's 1, comma
-            // list in --moe-mirror order (default 1 each: even split).
-            moe_mirror_weights_arg = arg["--moe-mirror-weights=".len..];
-        } else if (std.mem.eql(u8, arg, "--moe-uncached")) {
-            // Uncached streamed reads (macOS F_NOCACHE): expert streaming
-            // stops churning the page cache behind the mmap'd dense weights.
-            moe_stream_flag = true;
-            moe_uncached = true;
-        } else if (std.mem.startsWith(u8, arg, "--moe-io-threads=")) {
-            // Demand-miss read fan-out (default 8; 0 = sequential reads).
-            moe_stream_flag = true;
-            moe_io_threads = try std.fmt.parseInt(usize, arg["--moe-io-threads=".len..], 10);
         } else if (std.mem.eql(u8, arg, "--moe-cache-route")) {
             // Cache-aware near-tie routing (QUALITY-AFFECTING, opt-in):
             // prefer already-resident experts among the top-M ranks.
-            moe_stream_flag = true;
+            moe_cli.armed = true;
             moe_cache_route = true;
         } else if (std.mem.startsWith(u8, arg, "--moe-route-j=")) {
             // Sacred true-top ranks always taken (default 2).
@@ -160,22 +130,14 @@ pub fn main(init: std.process.Init) !void {
         try stdout.print("--index-probe measures the exact path; drop --index-share\n", .{});
         return error.UnknownArgument;
     }
-    var moe_mirror_weights_buf: [8]f32 = undefined;
-    const moe_mirror_weights = try llm.weights.parseMirrorWeights(moe_mirror_weights_arg, moe_mirror_n, &moe_mirror_weights_buf);
-    var load_options: llm.deepseek2.model.Model.LoadOptions = if (moe_stream_flag) .{
-        .moe_stream = .{
-            .gguf_path = args[1],
-            .cache_bytes = if (moe_cache_mb) |mb| mb << 20 else null,
-            .pilot = moe_pilot,
-            .mirror_paths = moe_mirror_buf[0..moe_mirror_n],
-            .mirror_weights = moe_mirror_weights,
-            .io_workers = moe_io_threads orelse 8,
-            .uncached = moe_uncached,
-            .cache_route = moe_cache_route,
-            .route_sacred = moe_route_j,
-            .route_window = moe_route_m,
-        },
-    } else .{};
+    var moe_stream = try moe_cli.options(args[1]);
+    if (moe_stream) |*m| {
+        m.pilot = moe_pilot;
+        m.cache_route = moe_cache_route;
+        m.route_sacred = moe_route_j;
+        m.route_window = moe_route_m;
+    }
+    var load_options: llm.deepseek2.model.Model.LoadOptions = if (moe_stream) |m| .{ .moe_stream = m } else .{};
     load_options.dsa = dsa_flag;
     var model = try llm.deepseek2.model.Model.loadGgufFromFileOptions(&ctx, &file, load_options);
     defer model.deinit();

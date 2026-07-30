@@ -11041,6 +11041,16 @@ false when the caller keeps its plain top-k.
 `reportAndSaveMoeStream(store, learn, writer)` is the runners' exit-time
 report — stream, pilot, prefetch, cache-route, and mirror stats — and
 persists the usage histogram that seeds the next load's pinned tier.
+`MoeStreamCli` is the runners' shared argv seam for the six common
+`--moe-*` flags (`--moe-stream`, `--moe-cache-mb=`, `--moe-mirror=`,
+`--moe-mirror-weights=`, `--moe-uncached`, `--moe-io-threads=`):
+`tryParse(arg)` consumes exactly those (false = not a shared flag, the
+caller keeps its family-specific flags and unknown-flag error) and
+`options(gguf_path)` assembles the `MoeStreamOptions` (null when nothing
+armed streaming; the result borrows the CLI struct's mirror buffers).
+Family-specific levers — `--moe-pilot`, the cache-route trio, the
+pinned-tier knobs — stay in the runners, which arm streaming via `armed`
+and set their fields on the returned options.
 
 Zero-copy linears over caller-owned immutable bytes (used by runners that keep
 weights mmapped):

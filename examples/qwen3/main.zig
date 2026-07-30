@@ -60,18 +60,12 @@ pub fn main(init: std.process.Init) !void {
     var minp_arg: ?f32 = null;
     var penalty_arg: ?f32 = null;
     var seed_arg: ?u64 = null;
-    var moe_stream_flag = false;
-    var moe_cache_mb: ?usize = null;
+    var moe_cli: llm.weights.MoeStreamCli = .{};
     var moe_cache_slots: ?usize = null;
     var moe_pin_mb: ?usize = null;
     var moe_no_learn = false;
     var moe_pilot = false;
     var moe_expert_top_p: ?f32 = null;
-    var moe_mirror_buf: [8][]const u8 = undefined;
-    var moe_mirror_n: usize = 0;
-    var moe_mirror_weights_arg: ?[]const u8 = null;
-    var moe_io_threads: ?usize = null;
-    var moe_uncached = false;
     var kv_save = false;
     var kv_save_arg: ?[]const u8 = null;
     var arg_i: usize = 2;
@@ -233,16 +227,13 @@ pub fn main(init: std.process.Init) !void {
             regex_arg = args[arg_i];
         } else if (std.mem.startsWith(u8, arg, "--regex=")) {
             regex_arg = arg["--regex=".len..];
-        } else if (std.mem.eql(u8, arg, "--moe-stream")) {
-            moe_stream_flag = true;
-        } else if (std.mem.startsWith(u8, arg, "--moe-cache-mb=")) {
-            moe_stream_flag = true;
-            moe_cache_mb = try std.fmt.parseInt(usize, arg["--moe-cache-mb=".len..], 10);
+        } else if (try moe_cli.tryParse(arg)) {
+            // Shared streamed-experts flags (llm.weights.MoeStreamCli).
         } else if (std.mem.startsWith(u8, arg, "--moe-cache-slots=")) {
-            moe_stream_flag = true;
+            moe_cli.armed = true;
             moe_cache_slots = try std.fmt.parseInt(usize, arg["--moe-cache-slots=".len..], 10);
         } else if (std.mem.startsWith(u8, arg, "--moe-pin-mb=")) {
-            moe_stream_flag = true;
+            moe_cli.armed = true;
             moe_pin_mb = try std.fmt.parseInt(usize, arg["--moe-pin-mb=".len..], 10);
         } else if (std.mem.eql(u8, arg, "--moe-no-learn")) {
             moe_no_learn = true;
@@ -252,29 +243,8 @@ pub fn main(init: std.process.Init) !void {
             kv_save = true;
             kv_save_arg = arg["--kv-save=".len..];
         } else if (std.mem.eql(u8, arg, "--moe-pilot")) {
-            moe_stream_flag = true;
+            moe_cli.armed = true;
             moe_pilot = true;
-        } else if (std.mem.startsWith(u8, arg, "--moe-mirror=")) {
-            // Another full copy of the model, typically on another drive
-            // (repeatable): expert reads split across every copy, so
-            // miss-bound streaming gets each drive's bandwidth.
-            moe_stream_flag = true;
-            if (moe_mirror_n >= moe_mirror_buf.len) return error.TooManyMirrors;
-            moe_mirror_buf[moe_mirror_n] = arg["--moe-mirror=".len..];
-            moe_mirror_n += 1;
-        } else if (std.mem.startsWith(u8, arg, "--moe-mirror-weights=")) {
-            // Per-mirror read share relative to the primary's 1, comma
-            // list in --moe-mirror order (default 1 each: even split).
-            moe_mirror_weights_arg = arg["--moe-mirror-weights=".len..];
-        } else if (std.mem.eql(u8, arg, "--moe-uncached")) {
-            // Uncached streamed reads (macOS F_NOCACHE): expert streaming
-            // stops churning the page cache behind the mmap'd dense weights.
-            moe_stream_flag = true;
-            moe_uncached = true;
-        } else if (std.mem.startsWith(u8, arg, "--moe-io-threads=")) {
-            // Demand-miss read fan-out (default 8; 0 = sequential reads).
-            moe_stream_flag = true;
-            moe_io_threads = try std.fmt.parseInt(usize, arg["--moe-io-threads=".len..], 10);
         } else if (std.mem.startsWith(u8, arg, "--moe-expert-top-p=")) {
             moe_expert_top_p = try std.fmt.parseFloat(f32, arg["--moe-expert-top-p=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--")) {
@@ -306,22 +276,14 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    var moe_mirror_weights_buf: [8]f32 = undefined;
-    const moe_mirror_weights = try llm.weights.parseMirrorWeights(moe_mirror_weights_arg, moe_mirror_n, &moe_mirror_weights_buf);
-    const load_options: llm.qwen3.model.LoadOptions = if (moe_stream_flag) .{
-        .moe_stream = .{
-            .gguf_path = args[1],
-            .cache_bytes = if (moe_cache_mb) |mb| mb << 20 else null,
-            .cache_slots_per_layer = moe_cache_slots,
-            .auto_pin = !moe_no_learn,
-            .pin_bytes = if (moe_pin_mb) |mb| mb << 20 else null,
-            .pilot = moe_pilot,
-            .mirror_paths = moe_mirror_buf[0..moe_mirror_n],
-            .mirror_weights = moe_mirror_weights,
-            .io_workers = moe_io_threads orelse 8,
-            .uncached = moe_uncached,
-        },
-    } else .{};
+    var moe_stream = try moe_cli.options(args[1]);
+    if (moe_stream) |*m| {
+        m.cache_slots_per_layer = moe_cache_slots;
+        m.auto_pin = !moe_no_learn;
+        m.pin_bytes = if (moe_pin_mb) |mb| mb << 20 else null;
+        m.pilot = moe_pilot;
+    }
+    const load_options: llm.qwen3.model.LoadOptions = if (moe_stream) |m| .{ .moe_stream = m } else .{};
     var model_config = try llm.qwen3.model.Config.fromGguf(&file);
     if (moe_expert_top_p) |p| model_config.moe_expert_top_p = p;
     var model = try llm.qwen3.model.Model.loadGgufFromFileOptions(&ctx, &file, model_config, load_options);

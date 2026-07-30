@@ -1271,6 +1271,76 @@ pub fn parseMirrorWeights(arg: ?[]const u8, n_mirrors: usize, buf: []f32) !?[]co
     return buf[0..n];
 }
 
+/// Shared runner CLI for the streamed-experts flags: every MoE runner
+/// (qwen3, deepseek2, deepseek4, glm4moe) speaks the same six `--moe-*`
+/// flags, so their parsing and the `MoeStreamOptions` assembly live here —
+/// a new shared streaming lever lands in every runner at once.
+/// Family-specific levers (`--moe-pilot`, the cache-route trio, the
+/// pinned-tier knobs) stay in the runners: they arm streaming through
+/// `armed` and set their fields on the returned options.
+pub const MoeStreamCli = struct {
+    armed: bool = false,
+    cache_mb: ?usize = null,
+    mirror_n: usize = 0,
+    mirror_buf: [8][]const u8 = undefined,
+    mirror_weights_arg: ?[]const u8 = null,
+    mirror_weights_buf: [8]f32 = undefined,
+    uncached: bool = false,
+    io_threads: ?usize = null,
+
+    /// Consume one argv entry; false = not a shared `--moe-*` flag (the
+    /// caller keeps its family-specific flags and unknown-flag error).
+    /// The stored slices borrow `arg`.
+    pub fn tryParse(self: *MoeStreamCli, arg: []const u8) !bool {
+        if (std.mem.eql(u8, arg, "--moe-stream")) {
+            self.armed = true;
+        } else if (std.mem.startsWith(u8, arg, "--moe-cache-mb=")) {
+            self.armed = true;
+            self.cache_mb = try std.fmt.parseInt(usize, arg["--moe-cache-mb=".len..], 10);
+        } else if (std.mem.startsWith(u8, arg, "--moe-mirror=")) {
+            // Another full copy of the model, typically on another drive
+            // (repeatable): expert reads split across every copy, so
+            // miss-bound streaming gets each drive's bandwidth.
+            self.armed = true;
+            if (self.mirror_n >= self.mirror_buf.len) return error.TooManyMirrors;
+            self.mirror_buf[self.mirror_n] = arg["--moe-mirror=".len..];
+            self.mirror_n += 1;
+        } else if (std.mem.startsWith(u8, arg, "--moe-mirror-weights=")) {
+            // Per-mirror read share relative to the primary's 1, comma
+            // list in --moe-mirror order (default 1 each: even split).
+            self.mirror_weights_arg = arg["--moe-mirror-weights=".len..];
+        } else if (std.mem.eql(u8, arg, "--moe-uncached")) {
+            // Uncached streamed reads (macOS F_NOCACHE): expert streaming
+            // stops churning the page cache behind the mmap'd dense weights.
+            self.armed = true;
+            self.uncached = true;
+        } else if (std.mem.startsWith(u8, arg, "--moe-io-threads=")) {
+            // Demand-miss read fan-out (default 8; 0 = sequential reads).
+            self.armed = true;
+            self.io_threads = try std.fmt.parseInt(usize, arg["--moe-io-threads=".len..], 10);
+        } else {
+            return false;
+        }
+        return true;
+    }
+
+    /// Assemble the shared `MoeStreamOptions`, null when nothing armed
+    /// streaming. The result borrows `self`'s mirror buffers, so `self`
+    /// must outlive the model load. The caller sets its family-specific
+    /// fields on the returned value afterwards.
+    pub fn options(self: *MoeStreamCli, gguf_path: []const u8) !?MoeStreamOptions {
+        if (!self.armed) return null;
+        return .{
+            .gguf_path = gguf_path,
+            .cache_bytes = if (self.cache_mb) |mb| mb << 20 else null,
+            .mirror_paths = self.mirror_buf[0..self.mirror_n],
+            .mirror_weights = try parseMirrorWeights(self.mirror_weights_arg, self.mirror_n, &self.mirror_weights_buf),
+            .io_workers = self.io_threads orelse 8,
+            .uncached = self.uncached,
+        };
+    }
+};
+
 /// Cache-aware expert selection when `gate` streams from an ExpertStore
 /// that opted into cache routing (`MoeStreamOptions.cache_route`); false =
 /// the caller keeps its plain top-k.
