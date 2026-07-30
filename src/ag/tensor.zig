@@ -3771,12 +3771,12 @@ fn FloatTensor(comptime tags_spec: anytype) type {
                 return finishOp(result_tags, ctx, value, self.requiresGrad(), ConstRhsDotBackward(Other.dtype, tags, other_tags, contract_tag), .{ ctx.allocator, self.grad_state, null, self.asRawTensor(), other_ptr.asRawTensor() });
             }
             if (comptime Other.dtype == .f16) {
-                var value = try f16RhsDotRaw(tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), contract_tag);
+                var value = try halfRhsDotRaw(.f16, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), contract_tag);
                 errdefer value.deinit();
                 return finishOp(result_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), ConstRhsDotBackward(.f16, tags, other_tags, contract_tag), .{ ctx.allocator, self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
             }
             if (comptime Other.dtype == .bf16) {
-                var value = try bf16RhsDotRaw(tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), contract_tag);
+                var value = try halfRhsDotRaw(.bf16, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), contract_tag);
                 errdefer value.deinit();
                 return finishOp(result_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), ConstRhsDotBackward(.bf16, tags, other_tags, contract_tag), .{ ctx.allocator, self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
             }
@@ -6644,15 +6644,22 @@ fn quantizedRhsDotRaw(
     return reshaped;
 }
 
-fn f16RhsDotRaw(
+/// The f16/bf16 constant-RHS lowering `dot` shares with the quantized
+/// arms: the NT fast path runs the half-precision TransB kernel when the
+/// contraction is a plain 2-D `[m,k]x[n,k]` (no batch axes, one right
+/// free axis, right already in TransB order); everything else widens the
+/// RHS to f32 once and takes the typed dot.
+fn halfRhsDotRaw(
+    comptime rhs_dtype: DType,
     comptime left_tags: anytype,
     left: *const RawTensor,
     ctx: *ExecContext,
     comptime right_tags: anytype,
-    right: *const tensor_mod.TensorOf(.f16),
+    right: *const tensor_mod.TensorOf(rhs_dtype),
     comptime contract_tag: Tag,
 ) !RawTensor {
-    const result_shape = try dotResultShapeOf(.f32, .f16, left_tags, left, right_tags, right, contract_tag);
+    comptime std.debug.assert(rhs_dtype == .f16 or rhs_dtype == .bf16);
+    const result_shape = try dotResultShapeOf(.f32, rhs_dtype, left_tags, left, right_tags, right, contract_tag);
     const batch_rank = comptime dotBatchLen(left_tags, right_tags, contract_tag);
     const left_free_rank = comptime dotLeftFreeLen(left_tags, right_tags, contract_tag);
     const right_free_rank = comptime dotRightFreeLen(left_tags, right_tags, contract_tag);
@@ -6669,7 +6676,7 @@ fn f16RhsDotRaw(
 
         var left_ready = try contiguousForReshapeOf(.f32, ctx, &left_aligned);
         defer left_ready.deinit();
-        var right_ready = try contiguousForReshapeOf(.f16, ctx, right);
+        var right_ready = try contiguousForReshapeOf(rhs_dtype, ctx, right);
         defer right_ready.deinit();
 
         var left_matrix = try left_ready.reshape(&.{ m, k });
@@ -6677,7 +6684,11 @@ fn f16RhsDotRaw(
         var right_matrix = try right_ready.reshape(&.{ right.shape.at(0), k });
         defer right_matrix.deinit();
 
-        var matmul = try ctx.matmulTransB2DWithF16Rhs(&left_matrix, &right_matrix);
+        var matmul = switch (comptime rhs_dtype) {
+            .f16 => try ctx.matmulTransB2DWithF16Rhs(&left_matrix, &right_matrix),
+            .bf16 => try ctx.matmulTransB2DWithBf16Rhs(&left_matrix, &right_matrix),
+            else => unreachable,
+        };
         errdefer matmul.deinit();
 
         if (std.mem.eql(usize, matmul.shape.slice(), result_shape[0..])) return matmul;
@@ -6686,54 +6697,7 @@ fn f16RhsDotRaw(
         return reshaped;
     }
 
-    var right_f32 = try ctx.castTyped(.f16, .f32, right);
-    defer right_f32.deinit();
-    return typedDotRaw(.f32, left_tags, left, ctx, right_tags, &right_f32, contract_tag);
-}
-
-fn bf16RhsDotRaw(
-    comptime left_tags: anytype,
-    left: *const RawTensor,
-    ctx: *ExecContext,
-    comptime right_tags: anytype,
-    right: *const tensor_mod.TensorOf(.bf16),
-    comptime contract_tag: Tag,
-) !RawTensor {
-    const result_shape = try dotResultShapeOf(.f32, .bf16, left_tags, left, right_tags, right, contract_tag);
-    const batch_rank = comptime dotBatchLen(left_tags, right_tags, contract_tag);
-    const left_free_rank = comptime dotLeftFreeLen(left_tags, right_tags, contract_tag);
-    const right_free_rank = comptime dotRightFreeLen(left_tags, right_tags, contract_tag);
-
-    const expected_right_order = dotRightTransBOrder(left_tags, right_tags, contract_tag);
-    if (comptime batch_rank == 0 and right_free_rank == 1 and tagsEqual(right_tags, expected_right_order)) {
-        const left_order = dotLeftOrder(left_tags, right_tags, contract_tag);
-        var left_aligned = try alignTensorToOf(.f32, left_tags, left, left_order);
-        defer left_aligned.deinit();
-
-        const m = productRangeOf(.f32, &left_aligned, batch_rank, left_free_rank);
-        const k = left_aligned.shape.at(batch_rank + left_free_rank);
-        if (right.shape.at(1) != k) return TensorError.ShapeMismatch;
-
-        var left_ready = try contiguousForReshapeOf(.f32, ctx, &left_aligned);
-        defer left_ready.deinit();
-        var right_ready = try contiguousForReshapeOf(.bf16, ctx, right);
-        defer right_ready.deinit();
-
-        var left_matrix = try left_ready.reshape(&.{ m, k });
-        defer left_matrix.deinit();
-        var right_matrix = try right_ready.reshape(&.{ right.shape.at(0), k });
-        defer right_matrix.deinit();
-
-        var matmul = try ctx.matmulTransB2DWithBf16Rhs(&left_matrix, &right_matrix);
-        errdefer matmul.deinit();
-
-        if (std.mem.eql(usize, matmul.shape.slice(), result_shape[0..])) return matmul;
-        const reshaped = try matmul.reshape(result_shape[0..]);
-        matmul.deinit();
-        return reshaped;
-    }
-
-    var right_f32 = try ctx.castTyped(.bf16, .f32, right);
+    var right_f32 = try ctx.castTyped(rhs_dtype, .f32, right);
     defer right_f32.deinit();
     return typedDotRaw(.f32, left_tags, left, ctx, right_tags, &right_f32, contract_tag);
 }
