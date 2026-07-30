@@ -18,54 +18,63 @@ pub const Error = error{
 pub const WeightF32 = fucina.Tensor(.{ .out, .in });
 pub const WeightF16 = fucina.Tensor(.{ .dtype = .f16, .tags = .{ .out, .in } });
 pub const WeightBf16 = fucina.Tensor(.{ .dtype = .bf16, .tags = .{ .out, .in } });
-const RawWeightQ4_K = QuantWeight(.q4_k);
-const RawWeightQ5_K = QuantWeight(.q5_k);
-const RawWeightQ6_K = QuantWeight(.q6_k);
-const RawWeightQ8_0 = QuantWeight(.q8_0);
+/// Packed quantized linear weight: the raw block tensor plus its
+/// column-interleaved packed RHS, built once at init. One comptime body
+/// serves every packed format — the four public names below are distinct
+/// instantiations, so `LinearWeight`'s union arms stay nominal and every
+/// change to the ownership/residency contract lands in all four at once.
+fn PackedQuantWeight(comptime dtype: DType) type {
+    return struct {
+        value: QuantWeight(dtype),
+        packed_rhs: fucina.PackedRhs(dtype),
+        rhs_lifetime: RhsLifetime = .transient,
 
-pub const WeightQ4_K = struct {
-    value: RawWeightQ4_K,
-    packed_rhs: fucina.PackedRhs(.q4_k),
-    rhs_lifetime: RhsLifetime = .transient,
+        const Self = @This();
 
-    pub fn init(ctx: *ExecContext, value: RawWeightQ4_K) !WeightQ4_K {
-        return initWithRhsLifetime(ctx, value, .transient);
-    }
+        pub fn init(ctx: *ExecContext, value: QuantWeight(dtype)) !Self {
+            return initWithRhsLifetime(ctx, value, .transient);
+        }
 
-    pub fn initWithRhsLifetime(ctx: *ExecContext, value: RawWeightQ4_K, rhs_lifetime: RhsLifetime) !WeightQ4_K {
-        var owned = value;
-        errdefer owned.deinit();
-        var packed_rhs = try owned.packRhs(ctx);
-        errdefer packed_rhs.deinit();
-        return .{ .value = owned, .packed_rhs = packed_rhs, .rhs_lifetime = rhs_lifetime };
-    }
+        pub fn initWithRhsLifetime(ctx: *ExecContext, value: QuantWeight(dtype), rhs_lifetime: RhsLifetime) !Self {
+            var owned = value;
+            errdefer owned.deinit();
+            var packed_rhs = try owned.packRhs(ctx);
+            errdefer packed_rhs.deinit();
+            return .{ .value = owned, .packed_rhs = packed_rhs, .rhs_lifetime = rhs_lifetime };
+        }
 
-    pub fn deinit(self: *WeightQ4_K) void {
-        self.packed_rhs.deinit();
-        self.value.deinit();
-        self.* = undefined;
-    }
+        pub fn deinit(self: *Self) void {
+            self.packed_rhs.deinit();
+            self.value.deinit();
+            self.* = undefined;
+        }
 
-    pub fn cloneView(self: *const WeightQ4_K, ctx: *ExecContext) !WeightQ4_K {
-        const value = try self.value.withTags(ctx, .{ .out, .in });
-        return initWithRhsLifetime(ctx, value, self.rhs_lifetime);
-    }
+        pub fn cloneView(self: *const Self, ctx: *ExecContext) !Self {
+            const value = try self.value.withTags(ctx, .{ .out, .in });
+            return initWithRhsLifetime(ctx, value, self.rhs_lifetime);
+        }
 
-    pub fn concat(self: *const WeightQ4_K, ctx: *ExecContext, comptime tag: Tag, others: []const *const WeightQ4_K) !WeightQ4_K {
-        var raw_others = try ctx.allocator.alloc(*const RawWeightQ4_K, others.len);
-        defer ctx.allocator.free(raw_others);
-        for (others, 0..) |other, i| raw_others[i] = &other.value;
+        pub fn concat(self: *const Self, ctx: *ExecContext, comptime tag: Tag, others: []const *const Self) !Self {
+            var raw_others = try ctx.allocator.alloc(*const QuantWeight(dtype), others.len);
+            defer ctx.allocator.free(raw_others);
+            for (others, 0..) |other, i| raw_others[i] = &other.value;
 
-        var value = try self.value.concat(ctx, tag, raw_others);
-        var owns_value = true;
-        errdefer if (owns_value) value.deinit();
-        const rhs_lifetime: RhsLifetime = if (try makeGpuResidentQuantWeight(.q4_k, ctx, &value)) .stable_process else .transient;
-        return initWithRhsLifetime(ctx, value, rhs_lifetime) catch |err| {
-            owns_value = false;
-            return err;
-        };
-    }
-};
+            var value = try self.value.concat(ctx, tag, raw_others);
+            var owns_value = true;
+            errdefer if (owns_value) value.deinit();
+            const rhs_lifetime: RhsLifetime = if (try makeGpuResidentQuantWeight(dtype, ctx, &value)) .stable_process else .transient;
+            return initWithRhsLifetime(ctx, value, rhs_lifetime) catch |err| {
+                owns_value = false;
+                return err;
+            };
+        }
+    };
+}
+
+pub const WeightQ4_K = PackedQuantWeight(.q4_k);
+pub const WeightQ5_K = PackedQuantWeight(.q5_k);
+pub const WeightQ6_K = PackedQuantWeight(.q6_k);
+pub const WeightQ8_0 = PackedQuantWeight(.q8_0);
 
 /// Session/model-owned registry for immutable byte payloads that should be
 /// copied once into device-owned storage when a capable GPU provider is built.
@@ -99,136 +108,6 @@ pub const ResidentByteRegistry = struct {
         @memcpy(dev, src);
         self.map.putAssumeCapacityNoClobber(key, dev);
         return dev;
-    }
-};
-
-pub const WeightQ5_K = struct {
-    value: RawWeightQ5_K,
-    packed_rhs: fucina.PackedRhs(.q5_k),
-    rhs_lifetime: RhsLifetime = .transient,
-
-    pub fn init(ctx: *ExecContext, value: RawWeightQ5_K) !WeightQ5_K {
-        return initWithRhsLifetime(ctx, value, .transient);
-    }
-
-    pub fn initWithRhsLifetime(ctx: *ExecContext, value: RawWeightQ5_K, rhs_lifetime: RhsLifetime) !WeightQ5_K {
-        var owned = value;
-        errdefer owned.deinit();
-        var packed_rhs = try owned.packRhs(ctx);
-        errdefer packed_rhs.deinit();
-        return .{ .value = owned, .packed_rhs = packed_rhs, .rhs_lifetime = rhs_lifetime };
-    }
-
-    pub fn deinit(self: *WeightQ5_K) void {
-        self.packed_rhs.deinit();
-        self.value.deinit();
-        self.* = undefined;
-    }
-
-    pub fn cloneView(self: *const WeightQ5_K, ctx: *ExecContext) !WeightQ5_K {
-        const value = try self.value.withTags(ctx, .{ .out, .in });
-        return initWithRhsLifetime(ctx, value, self.rhs_lifetime);
-    }
-
-    pub fn concat(self: *const WeightQ5_K, ctx: *ExecContext, comptime tag: Tag, others: []const *const WeightQ5_K) !WeightQ5_K {
-        var raw_others = try ctx.allocator.alloc(*const RawWeightQ5_K, others.len);
-        defer ctx.allocator.free(raw_others);
-        for (others, 0..) |other, i| raw_others[i] = &other.value;
-
-        var value = try self.value.concat(ctx, tag, raw_others);
-        var owns_value = true;
-        errdefer if (owns_value) value.deinit();
-        const rhs_lifetime: RhsLifetime = if (try makeGpuResidentQuantWeight(.q5_k, ctx, &value)) .stable_process else .transient;
-        return initWithRhsLifetime(ctx, value, rhs_lifetime) catch |err| {
-            owns_value = false;
-            return err;
-        };
-    }
-};
-pub const WeightQ6_K = struct {
-    value: RawWeightQ6_K,
-    packed_rhs: fucina.PackedRhs(.q6_k),
-    rhs_lifetime: RhsLifetime = .transient,
-
-    pub fn init(ctx: *ExecContext, value: RawWeightQ6_K) !WeightQ6_K {
-        return initWithRhsLifetime(ctx, value, .transient);
-    }
-
-    pub fn initWithRhsLifetime(ctx: *ExecContext, value: RawWeightQ6_K, rhs_lifetime: RhsLifetime) !WeightQ6_K {
-        var owned = value;
-        errdefer owned.deinit();
-        var packed_rhs = try owned.packRhs(ctx);
-        errdefer packed_rhs.deinit();
-        return .{ .value = owned, .packed_rhs = packed_rhs, .rhs_lifetime = rhs_lifetime };
-    }
-
-    pub fn deinit(self: *WeightQ6_K) void {
-        self.packed_rhs.deinit();
-        self.value.deinit();
-        self.* = undefined;
-    }
-
-    pub fn cloneView(self: *const WeightQ6_K, ctx: *ExecContext) !WeightQ6_K {
-        const value = try self.value.withTags(ctx, .{ .out, .in });
-        return initWithRhsLifetime(ctx, value, self.rhs_lifetime);
-    }
-
-    pub fn concat(self: *const WeightQ6_K, ctx: *ExecContext, comptime tag: Tag, others: []const *const WeightQ6_K) !WeightQ6_K {
-        var raw_others = try ctx.allocator.alloc(*const RawWeightQ6_K, others.len);
-        defer ctx.allocator.free(raw_others);
-        for (others, 0..) |other, i| raw_others[i] = &other.value;
-
-        var value = try self.value.concat(ctx, tag, raw_others);
-        var owns_value = true;
-        errdefer if (owns_value) value.deinit();
-        const rhs_lifetime: RhsLifetime = if (try makeGpuResidentQuantWeight(.q6_k, ctx, &value)) .stable_process else .transient;
-        return initWithRhsLifetime(ctx, value, rhs_lifetime) catch |err| {
-            owns_value = false;
-            return err;
-        };
-    }
-};
-pub const WeightQ8_0 = struct {
-    value: RawWeightQ8_0,
-    packed_rhs: fucina.PackedRhs(.q8_0),
-    rhs_lifetime: RhsLifetime = .transient,
-
-    pub fn init(ctx: *ExecContext, value: RawWeightQ8_0) !WeightQ8_0 {
-        return initWithRhsLifetime(ctx, value, .transient);
-    }
-
-    pub fn initWithRhsLifetime(ctx: *ExecContext, value: RawWeightQ8_0, rhs_lifetime: RhsLifetime) !WeightQ8_0 {
-        var owned = value;
-        errdefer owned.deinit();
-        var packed_rhs = try owned.packRhs(ctx);
-        errdefer packed_rhs.deinit();
-        return .{ .value = owned, .packed_rhs = packed_rhs, .rhs_lifetime = rhs_lifetime };
-    }
-
-    pub fn deinit(self: *WeightQ8_0) void {
-        self.packed_rhs.deinit();
-        self.value.deinit();
-        self.* = undefined;
-    }
-
-    pub fn cloneView(self: *const WeightQ8_0, ctx: *ExecContext) !WeightQ8_0 {
-        const value = try self.value.withTags(ctx, .{ .out, .in });
-        return initWithRhsLifetime(ctx, value, self.rhs_lifetime);
-    }
-
-    pub fn concat(self: *const WeightQ8_0, ctx: *ExecContext, comptime tag: Tag, others: []const *const WeightQ8_0) !WeightQ8_0 {
-        var raw_others = try ctx.allocator.alloc(*const RawWeightQ8_0, others.len);
-        defer ctx.allocator.free(raw_others);
-        for (others, 0..) |other, i| raw_others[i] = &other.value;
-
-        var value = try self.value.concat(ctx, tag, raw_others);
-        var owns_value = true;
-        errdefer if (owns_value) value.deinit();
-        const rhs_lifetime: RhsLifetime = if (try makeGpuResidentQuantWeight(.q8_0, ctx, &value)) .stable_process else .transient;
-        return initWithRhsLifetime(ctx, value, rhs_lifetime) catch |err| {
-            owns_value = false;
-            return err;
-        };
     }
 };
 
