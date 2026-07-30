@@ -1033,14 +1033,7 @@ fn packTowerRhs(ctx: *ExecContext, linear: *const LinearWeight) !?fucina.PackedR
     };
 }
 
-fn hostVector(allocator: Allocator, file: *const gguf.File, tensor_name: []const u8, expected: usize) ![]f32 {
-    const info = try file.get(tensor_name);
-    if (info.n_dims != 1 or info.dims[0] != expected) return Error.InvalidWeightShape;
-    const out = try allocator.alloc(f32, expected);
-    errdefer allocator.free(out);
-    try weights.fillF32(out, info);
-    return out;
-}
+const hostVector = weights.hostVector;
 
 fn readF32Triple(file: *const gguf.File, key: []const u8, out: *[3]f32) void {
     const arr = file.getArray(key) orelse return;

@@ -13,7 +13,6 @@ const vector_primitives = @import("../backend/vector/primitives.zig");
 const RawTensor = tensor_mod.Tensor;
 const ExecContext = exec_mod.ExecContext;
 const GradState = core.GradState;
-const BackwardFunction = core.BackwardFunction;
 const Tag = tags_mod.Tag;
 const inserted_axis = tags_mod.inserted_axis;
 const rawRank = tags_mod.rawRank;
