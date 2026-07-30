@@ -4,7 +4,6 @@ const dtype_mod = @import("../dtype.zig");
 const tensor = @import("../tensor.zig");
 const parallel = @import("../parallel.zig");
 const storage = @import("../storage.zig");
-const thread = @import("../thread.zig");
 const Runtime = @import("runtime.zig").Runtime;
 
 const DType = tensor.DType;
@@ -25,16 +24,6 @@ pub const GroupedCausalAttentionBackwardResult = struct {
 };
 
 const grouped_attention_backward_gemm_work_threshold: usize = 16 * 1024;
-
-fn zerosRank(self: *Runtime, comptime rank: usize, shape: [rank]usize) !tensor.Tensor {
-    var out = try self.emptyRank(rank, shape);
-    @memset(out.data(), 0);
-    return out;
-}
-
-fn workPool(self: *Runtime) ?*thread.Pool {
-    return self.tryWorkPool() catch null;
-}
 
 // K/V come in either as f32 (prefill, no cache), f16 (the decode KV cache,
 // half the bandwidth), or q8_0 blocks (the quantized KV cache, ~quarter the
@@ -1765,9 +1754,9 @@ pub fn groupedCausalAttentionBackward(
 
     var result = GroupedCausalAttentionBackwardResult{};
     errdefer result.deinit();
-    if (need_q) result.q = try zerosRank(self, 3, .{ q_seq, heads, d });
-    if (need_k) result.k = try zerosRank(self, 3, .{ kv_seq, kv_heads, d });
-    if (need_v) result.v = try zerosRank(self, 3, .{ kv_seq, kv_heads, d });
+    if (need_q) result.q = try self.zerosRank(3, .{ q_seq, heads, d });
+    if (need_k) result.k = try self.zerosRank(3, .{ kv_seq, kv_heads, d });
+    if (need_v) result.v = try self.zerosRank(3, .{ kv_seq, kv_heads, d });
     const q_grad: ?[]f32 = if (result.q) |*value| value.data() else null;
     const k_grad: ?[]f32 = if (result.k) |*value| value.data() else null;
     const v_grad: ?[]f32 = if (result.v) |*value| value.data() else null;
@@ -1850,7 +1839,7 @@ pub fn groupedCausalAttentionBackward(
         const panel_len = 2 * route_tile_rows * kv_seq;
         var dispatched = false;
         if (attention_work >= parallel.vector_matmul_work_threshold / 2) {
-            if (workPool(self)) |pool| {
+            if (self.workPool()) |pool| {
                 const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), heads);
                 if (task_count > 1) {
                     const task_scratch = try self.allocator.alloc(f32, task_count * panel_len);
@@ -1903,7 +1892,7 @@ pub fn groupedCausalAttentionBackward(
                 const grad = pair.grad orelse continue;
                 var reduced = false;
                 if (parallel.saturatedMul3(kv_seq, heads, d) >= parallel.vector_elementwise_len_threshold) {
-                    if (workPool(self)) |pool| {
+                    if (self.workPool()) |pool| {
                         const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), kv_seq);
                         if (task_count > 1) {
                             var reduce_storage: [parallel.vector_max_threads]AttentionBackwardReduceTask = undefined;
@@ -1931,7 +1920,7 @@ pub fn groupedCausalAttentionBackward(
     }
 
     if (attention_work >= parallel.vector_matmul_work_threshold / 2 and kv_heads > 1) {
-        if (workPool(self)) |pool| {
+        if (self.workPool()) |pool| {
             const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), kv_heads);
             var task_storage: [parallel.vector_max_threads]GroupedCausalAttentionBackwardTask = undefined;
             const task_scratch = try self.allocator.alloc(f32, task_count * kv_seq * 2);
@@ -2315,7 +2304,7 @@ fn groupedCausalAttentionMultiImpl(
 
     const attention_work = parallel.saturatedMul3(lens_sum, heads, d);
     if (attention_work >= parallel.vector_matmul_work_threshold / 2 and total_work > 1) {
-        if (workPool(self)) |pool| {
+        if (self.workPool()) |pool| {
             const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), total_work);
             var task_storage: [parallel.vector_max_threads]GroupedCausalAttentionMultiTask(KvElem) = undefined;
             const scores_storage = try self.buffers.acquire(task_count * scores_per_task);
@@ -2437,7 +2426,7 @@ pub fn groupedCausalAttentionTiledRun(
     // item, so the partitioning cannot change any result.
     const attention_work = parallel.saturatedMul3(base.q_seq, base.kv_seq, base.heads * base.d);
     const gate_ok = attention_work >= parallel.vector_matmul_work_threshold / 2;
-    const pool = (if (gate_ok) workPool(self) else null) orelse {
+    const pool = (if (gate_ok) self.workPool() else null) orelse {
         var task = base;
         task.work_start = 0;
         task.work_end = total_work;
@@ -2603,7 +2592,7 @@ fn groupedCausalAttentionDispatch(
         return;
     }
     if (attention_work >= parallel.vector_matmul_work_threshold / 2 and heads > 1) {
-        if (workPool(self)) |pool| {
+        if (self.workPool()) |pool| {
             if (can_pair_heads) {
                 const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), kv_heads);
                 var task_storage: [parallel.vector_max_threads]GroupedCausalAttentionPairTask(KvElem) = undefined;
