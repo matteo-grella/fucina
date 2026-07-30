@@ -806,14 +806,21 @@ fn shutdownKicker(io: std.Io, port: u16) void {
     stream.close(io);
 }
 
+// Every sibling .zig file in this directory is listed: a file referenced
+// only from main()'s serve paths contributes ZERO tests to the test binary
+// (Zig's lazy analysis — silently green), so presence in the directory must
+// imply presence here.
 test {
     _ = @import("types.zig");
     _ = @import("backend.zig");
     _ = @import("backend_nanochat.zig");
     _ = @import("backend_diffusion.zig");
+    _ = @import("backend_inkling.zig");
+    _ = @import("backend_qwen35.zig");
     _ = @import("scheduler.zig");
     _ = @import("openai.zig");
     _ = @import("anthropic.zig");
     _ = @import("emitter.zig");
     _ = @import("http.zig");
+    _ = @import("toolcall.zig");
 }
