@@ -1,7 +1,9 @@
 //! Quantized matmul dispatch relocated out of vector.zig: every
-//! matmul2DQ*RhsIntoWithConfig / matmul2DI8BlockwiseIntoWithConfig entry point,
-//! the per-format Task structs and their run/spawn helpers, the
-//! QuantizedRhsParallel generic, and the maybeParallel* row/column splitters.
+//! matmul2DQ*RhsIntoWithConfig / matmul2DI8BlockwiseIntoWithConfig entry point
+//! and the QuantizedRhsParallel generic — one Task/run/spawn/maybeParallel
+//! body whose SplitPolicy carries each format's lane grouping and split
+//! gates. Two entries keep bespoke splitters for their different task
+//! shapes: the i8-blockwise path and the padded packed-Q8_0x4 path.
 //! The actual per-block kernels live behind quant/matmul_api.zig. Shared-core
 //! symbols (ParallelConfig, the i8ColumnThreadCount / matmulThreadCount gates)
 //! are aliased from vector.zig (`vm`) so the moved bodies compile unchanged.
@@ -49,7 +51,7 @@ pub fn matmul2DQ1_0RhsIntoWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
-    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_0, quantized_matmul.QuantizedMatmulRhsQ1_0, quantized_matmul.matmulQ1_0RhsTile);
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_0, quantized_matmul.QuantizedMatmulRhsQ1_0, quantized_matmul.matmulQ1_0RhsTile, .{});
     if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulQ1_0RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -63,7 +65,7 @@ pub fn matmul2DQ2_0RhsIntoWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
-    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_0, quantized_matmul.QuantizedMatmulRhsQ2_0, quantized_matmul.matmulQ2_0RhsTile);
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_0, quantized_matmul.QuantizedMatmulRhsQ2_0, quantized_matmul.matmulQ2_0RhsTile, .{});
     if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulQ2_0RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -77,7 +79,8 @@ pub fn matmul2DQ8_0RhsIntoWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
-    if (maybeParallelQ8_0Rhs(config, out, lhs_blocks, rhs, m, n, k)) return;
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_0, quantized_matmul.QuantizedMatmulRhsQ8_0, quantized_matmul.matmulQ8_0RhsTile, .{});
+    if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulQ8_0RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
@@ -90,7 +93,8 @@ pub fn matmul2DQ8_0x4RhsIntoWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
-    if (maybeParallelQ8_0x4Rhs(config, out, lhs_blocks, rhs, m, n, k)) return;
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_0, quantized_matmul.QuantizedMatmulRhsQ8_0x4, quantized_matmul.matmulQ8_0x4RhsTile, .{ .col_group = 4 });
+    if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulQ8_0x4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
@@ -103,7 +107,8 @@ pub fn matmul2DQ8_0x4PackedRhsIntoWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
-    if (maybeParallelQ8_0x4PackedRhs(config, out, lhs_blocks, rhs, m, n, k)) return;
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_0x4, quantized_matmul.QuantizedMatmulRhsQ8_0x4, quantized_matmul.matmulQ8_0x4PackedRhsTile, .{ .col_group = 4, .col_gate = .small_m_or_m128, .row_group = 4, .row_cap_groups = true });
+    if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulQ8_0x4PackedRhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
@@ -129,7 +134,8 @@ pub fn matmul2DQ4_0RhsIntoWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
-    if (maybeParallelQ4_0Rhs(config, out, lhs_blocks, rhs, m, n, k)) return;
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_0, quantized_matmul.QuantizedMatmulRhsQ4_0, quantized_matmul.matmulQ4_0RhsTile, .{});
+    if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulQ4_0RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
@@ -142,7 +148,7 @@ pub fn matmul2DQ4_1RhsIntoWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
-    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_1, quantized_matmul.QuantizedMatmulRhsQ4_1, quantized_matmul.matmulQ4_1RhsTile);
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_1, quantized_matmul.QuantizedMatmulRhsQ4_1, quantized_matmul.matmulQ4_1RhsTile, .{});
     if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulQ4_1RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -156,7 +162,7 @@ pub fn matmul2DQ5_0RhsIntoWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
-    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_0, quantized_matmul.QuantizedMatmulRhsQ5_0, quantized_matmul.matmulQ5_0RhsTile);
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_0, quantized_matmul.QuantizedMatmulRhsQ5_0, quantized_matmul.matmulQ5_0RhsTile, .{});
     if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulQ5_0RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -170,7 +176,7 @@ pub fn matmul2DQ5_1RhsIntoWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
-    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_1, quantized_matmul.QuantizedMatmulRhsQ5_1, quantized_matmul.matmulQ5_1RhsTile);
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_1, quantized_matmul.QuantizedMatmulRhsQ5_1, quantized_matmul.matmulQ5_1RhsTile, .{});
     if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulQ5_1RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -184,7 +190,8 @@ pub fn matmul2DQ2_KRhsIntoWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
-    if (maybeParallelQ2_KRhs(config, out, lhs_blocks, rhs, m, n, k)) return;
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_K, quantized_matmul.QuantizedMatmulRhsQ2_K, quantized_matmul.matmulQ2_KRhsTile, .{});
+    if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulQ2_KRhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
@@ -197,7 +204,8 @@ pub fn matmul2DQ3_KRhsIntoWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
-    if (maybeParallelQ3_KRhs(config, out, lhs_blocks, rhs, m, n, k)) return;
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_K, quantized_matmul.QuantizedMatmulRhsQ3_K, quantized_matmul.matmulQ3_KRhsTile, .{});
+    if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulQ3_KRhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
@@ -210,7 +218,8 @@ pub fn matmul2DQ4_KRhsIntoWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
-    if (maybeParallelQ4_KRhs(config, out, lhs_blocks, rhs, m, n, k)) return;
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_K, quantized_matmul.QuantizedMatmulRhsQ4_K, quantized_matmul.matmulQ4_KRhsTile, .{});
+    if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulQ4_KRhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
@@ -223,7 +232,8 @@ pub fn matmul2DQ4_Kx4RhsIntoWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
-    if (maybeParallelQ4_Kx4Rhs(config, out, lhs_blocks, rhs, m, n, k)) return;
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_K, quantized_matmul.QuantizedMatmulRhsQ4_Kx4, quantized_matmul.matmulQ4_Kx4RhsTile, .{ .col_group = 4 });
+    if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulQ4_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
@@ -236,7 +246,8 @@ pub fn matmul2DQ4_Kx8RhsIntoWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
-    if (maybeParallelQ4_Kx8Rhs(config, out, lhs_blocks, rhs, m, n, k)) return;
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_K, quantized_matmul.QuantizedMatmulRhsQ4_Kx8, quantized_matmul.matmulQ4_Kx8RhsTile, .{ .col_group = 8, .col_gate = .small_m_x2, .row_cap_3_at_m128 = true });
+    if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulQ4_Kx8RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
@@ -249,7 +260,8 @@ pub fn matmul2DQ4_Kx8Q8_Kx4RhsIntoWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
-    if (maybeParallelQ4_Kx8Q8_Kx4Rhs(config, out, lhs_blocks, rhs, m, n, k)) return;
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_Kx4, quantized_matmul.QuantizedMatmulRhsQ4_Kx8, quantized_matmul.matmulQ4_Kx8Q8_Kx4RhsTile, .{ .col_group = 8, .col_gate = .always, .row_group = 4, .row_round = .ceil_clamp });
+    if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulQ4_Kx8Q8_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
@@ -262,7 +274,8 @@ pub fn matmul2DQ4_Kx2MmlaRhsIntoWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
-    if (maybeParallelQ4_Kx2MmlaRhs(config, out, lhs_blocks, rhs, m, n, k)) return;
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_K, quantized_matmul.QuantizedMatmulRhsQ4_Kx2Mmla, quantized_matmul.matmulQ4_Kx2MmlaRhsTile, .{ .col_group = 2, .col_gate = .small_m_x2 });
+    if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulQ4_Kx2MmlaRhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
@@ -275,7 +288,8 @@ pub fn matmul2DQ4_Kx2MmlaQ8_Kx2MmlaRhsIntoWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
-    if (maybeParallelQ4_Kx2MmlaQ8_Kx2MmlaRhs(config, out, lhs_blocks, rhs, m, n, k)) return;
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_Kx2Mmla, quantized_matmul.QuantizedMatmulRhsQ4_Kx2Mmla, quantized_matmul.matmulQ4_Kx2MmlaQ8_Kx2MmlaRhsTile, .{ .col_group = 2, .col_gate = .small_m_x2, .row_group = 2 });
+    if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulQ4_Kx2MmlaQ8_Kx2MmlaRhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
@@ -288,7 +302,8 @@ pub fn matmul2DQ5_Kx8RhsIntoWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
-    if (maybeParallelQ5_Kx8Rhs(config, out, lhs_blocks, rhs, m, n, k)) return;
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_K, quantized_matmul.QuantizedMatmulRhsQ5_Kx8, quantized_matmul.matmulQ5_Kx8RhsTile, .{ .col_group = 8, .col_gate = .small_m_x2, .row_cap_3_at_m128 = true });
+    if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulQ5_Kx8RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
@@ -301,7 +316,8 @@ pub fn matmul2DQ5_Kx8Q8_Kx4RhsIntoWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
-    if (maybeParallelQ5_Kx8Q8_Kx4Rhs(config, out, lhs_blocks, rhs, m, n, k)) return;
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_Kx4, quantized_matmul.QuantizedMatmulRhsQ5_Kx8, quantized_matmul.matmulQ5_Kx8Q8_Kx4RhsTile, .{ .col_group = 8, .col_gate = .small_m_x2, .row_group = 4 });
+    if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulQ5_Kx8Q8_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
@@ -314,7 +330,8 @@ pub fn matmul2DQ5_KRhsIntoWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
-    if (maybeParallelQ5_KRhs(config, out, lhs_blocks, rhs, m, n, k)) return;
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_K, quantized_matmul.QuantizedMatmulRhsQ5_K, quantized_matmul.matmulQ5_KRhsTile, .{});
+    if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulQ5_KRhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
@@ -327,7 +344,8 @@ pub fn matmul2DQ6_KRhsIntoWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
-    if (maybeParallelQ6_KRhs(config, out, lhs_blocks, rhs, m, n, k)) return;
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_K, quantized_matmul.QuantizedMatmulRhsQ6_K, quantized_matmul.matmulQ6_KRhsTile, .{});
+    if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulQ6_KRhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
@@ -340,7 +358,8 @@ pub fn matmul2DQ6_Kx4RhsIntoWithConfig(
     k: usize,
     config: ParallelConfig,
 ) void {
-    if (maybeParallelQ6_Kx4Rhs(config, out, lhs_blocks, rhs, m, n, k)) return;
+    const Parallel = QuantizedRhsParallel(quantized_matmul.BlockQ8_K, quantized_matmul.QuantizedMatmulRhsQ6_Kx4, quantized_matmul.matmulQ6_Kx4RhsTile, .{ .col_group = 4 });
+    if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulQ6_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
@@ -358,6 +377,7 @@ pub fn matmul2DTableQ8_0RhsIntoWithConfig(
         quantized_matmul.BlockQ8_0,
         quantized_matmul.QuantizedMatmulRhsRowsFor(rhs_dtype),
         TableQ8_0Tile(rhs_dtype).run,
+        .{},
     );
     if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulTableQ8_0RhsRange(rhs_dtype, out, lhs_blocks, rhs, m, n, 0, m);
@@ -376,6 +396,7 @@ pub fn matmul2DTQ2_0RhsIntoWithConfig(
         quantized_matmul.BlockQ8_K,
         quantized_matmul.QuantizedMatmulRhsTQ2_0,
         quantized_matmul.matmulTQ2_0RhsTile,
+        .{},
     );
     if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulTQ2_0RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
@@ -397,6 +418,7 @@ pub fn matmul2DTQ2_0F32RhsIntoWithConfig(
         f32,
         quantized_matmul.QuantizedMatmulRhsTQ2_0,
         quantized_matmul.matmulTQ2_0F32RhsTile,
+        .{},
     );
     if (Parallel.maybeParallel(config, out, lhs, rhs, m, n, k)) return;
     quantized_matmul.matmulTQ2_0F32RhsRange(out, lhs, rhs, m, n, 0, m);
@@ -416,6 +438,7 @@ pub fn matmul2DTableQ8_KRhsIntoWithConfig(
         quantized_matmul.BlockQ8_K,
         quantized_matmul.QuantizedMatmulRhsRowsFor(rhs_dtype),
         TableQ8_KTile(rhs_dtype).run,
+        .{},
     );
     if (Parallel.maybeParallel(config, out, lhs_blocks, rhs, m, n, k)) return;
     quantized_matmul.matmulTableQ8_KRhsRange(rhs_dtype, out, lhs_blocks, rhs, m, n, 0, m);
@@ -437,39 +460,6 @@ const I8BlockwiseTask = struct {
     c1: usize,
 };
 
-const Q8_0RhsTask = struct {
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_0,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ8_0,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-};
-
-const Q8_0x4RhsTask = struct {
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_0,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ8_0x4,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-};
-
-const Q8_0x4PackedRhsTask = struct {
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_0x4,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ8_0x4,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-};
-
 const Q8_0x4PackedPaddedRhsTask = struct {
     out: []f32,
     lhs_blocks: []const quantized_matmul.BlockQ8_0x4,
@@ -480,313 +470,61 @@ const Q8_0x4PackedPaddedRhsTask = struct {
     c1: usize,
 };
 
-const Q4_0RhsTask = struct {
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_0,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_0,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-};
-
-const Q2_KRhsTask = struct {
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_K,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ2_K,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-};
-
-const Q3_KRhsTask = struct {
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_K,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ3_K,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-};
-
-const Q4_KRhsTask = struct {
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_K,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_K,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-};
-
-const Q4_Kx4RhsTask = struct {
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_K,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx4,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-};
-
-const Q4_Kx8RhsTask = struct {
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_K,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx8,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-};
-
-const Q4_Kx8Q8_Kx4RhsTask = struct {
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_Kx4,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx8,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-};
-
-const Q4_Kx2MmlaRhsTask = struct {
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_K,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx2Mmla,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-};
-
-const Q4_Kx2MmlaQ8_Kx2MmlaRhsTask = struct {
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_Kx2Mmla,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx2Mmla,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-};
-
-const Q5_Kx8RhsTask = struct {
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_K,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_Kx8,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-};
-
-const Q5_Kx8Q8_Kx4RhsTask = struct {
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_Kx4,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_Kx8,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-};
-
-const Q5_KRhsTask = struct {
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_K,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_K,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-};
-
-const Q6_KRhsTask = struct {
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_K,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ6_K,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-};
-
-const Q6_Kx4RhsTask = struct {
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_K,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ6_Kx4,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-};
-
 fn runI8BlockwiseTask(task: *const I8BlockwiseTask) void {
     quantized_matmul.matmulI8BlockwiseTile(task.out, task.qa, task.a_scales, task.qw, task.w_scales, task.n, task.k, task.group_size, task.num_groups, task.r0, task.r1, task.c0, task.c1);
-}
-
-fn runQ8_0RhsTask(task: *const Q8_0RhsTask) void {
-    quantized_matmul.matmulQ8_0RhsTile(task.out, task.lhs_blocks, task.rhs, task.n, task.r0, task.r1, task.c0, task.c1);
-}
-
-fn runQ8_0x4RhsTask(task: *const Q8_0x4RhsTask) void {
-    quantized_matmul.matmulQ8_0x4RhsTile(task.out, task.lhs_blocks, task.rhs, task.n, task.r0, task.r1, task.c0, task.c1);
-}
-
-fn runQ8_0x4PackedRhsTask(task: *const Q8_0x4PackedRhsTask) void {
-    quantized_matmul.matmulQ8_0x4PackedRhsTile(task.out, task.lhs_blocks, task.rhs, task.n, task.r0, task.r1, task.c0, task.c1);
 }
 
 fn runQ8_0x4PackedPaddedRhsTask(task: *const Q8_0x4PackedPaddedRhsTask) void {
     quantized_matmul.matmulQ8_0x4PackedPaddedRhsTile(task.out, task.lhs_blocks, task.rhs, task.m, task.n, task.c0, task.c1);
 }
 
-fn runQ4_0RhsTask(task: *const Q4_0RhsTask) void {
-    quantized_matmul.matmulQ4_0RhsTile(task.out, task.lhs_blocks, task.rhs, task.n, task.r0, task.r1, task.c0, task.c1);
-}
-
-fn runQ2_KRhsTask(task: *const Q2_KRhsTask) void {
-    quantized_matmul.matmulQ2_KRhsTile(task.out, task.lhs_blocks, task.rhs, task.n, task.r0, task.r1, task.c0, task.c1);
-}
-
-fn runQ3_KRhsTask(task: *const Q3_KRhsTask) void {
-    quantized_matmul.matmulQ3_KRhsTile(task.out, task.lhs_blocks, task.rhs, task.n, task.r0, task.r1, task.c0, task.c1);
-}
-
-fn runQ4_KRhsTask(task: *const Q4_KRhsTask) void {
-    quantized_matmul.matmulQ4_KRhsTile(task.out, task.lhs_blocks, task.rhs, task.n, task.r0, task.r1, task.c0, task.c1);
-}
-
-fn runQ4_Kx4RhsTask(task: *const Q4_Kx4RhsTask) void {
-    quantized_matmul.matmulQ4_Kx4RhsTile(task.out, task.lhs_blocks, task.rhs, task.n, task.r0, task.r1, task.c0, task.c1);
-}
-
-fn runQ4_Kx8RhsTask(task: *const Q4_Kx8RhsTask) void {
-    quantized_matmul.matmulQ4_Kx8RhsTile(task.out, task.lhs_blocks, task.rhs, task.n, task.r0, task.r1, task.c0, task.c1);
-}
-
-fn runQ4_Kx8Q8_Kx4RhsTask(task: *const Q4_Kx8Q8_Kx4RhsTask) void {
-    quantized_matmul.matmulQ4_Kx8Q8_Kx4RhsTile(task.out, task.lhs_blocks, task.rhs, task.n, task.r0, task.r1, task.c0, task.c1);
-}
-
-fn runQ4_Kx2MmlaRhsTask(task: *const Q4_Kx2MmlaRhsTask) void {
-    quantized_matmul.matmulQ4_Kx2MmlaRhsTile(task.out, task.lhs_blocks, task.rhs, task.n, task.r0, task.r1, task.c0, task.c1);
-}
-
-fn runQ4_Kx2MmlaQ8_Kx2MmlaRhsTask(task: *const Q4_Kx2MmlaQ8_Kx2MmlaRhsTask) void {
-    quantized_matmul.matmulQ4_Kx2MmlaQ8_Kx2MmlaRhsTile(task.out, task.lhs_blocks, task.rhs, task.n, task.r0, task.r1, task.c0, task.c1);
-}
-
-fn runQ5_Kx8RhsTask(task: *const Q5_Kx8RhsTask) void {
-    quantized_matmul.matmulQ5_Kx8RhsTile(task.out, task.lhs_blocks, task.rhs, task.n, task.r0, task.r1, task.c0, task.c1);
-}
-
-fn runQ5_Kx8Q8_Kx4RhsTask(task: *const Q5_Kx8Q8_Kx4RhsTask) void {
-    quantized_matmul.matmulQ5_Kx8Q8_Kx4RhsTile(task.out, task.lhs_blocks, task.rhs, task.n, task.r0, task.r1, task.c0, task.c1);
-}
-
-fn runQ5_KRhsTask(task: *const Q5_KRhsTask) void {
-    quantized_matmul.matmulQ5_KRhsTile(task.out, task.lhs_blocks, task.rhs, task.n, task.r0, task.r1, task.c0, task.c1);
-}
-
-fn runQ6_KRhsTask(task: *const Q6_KRhsTask) void {
-    quantized_matmul.matmulQ6_KRhsTile(task.out, task.lhs_blocks, task.rhs, task.n, task.r0, task.r1, task.c0, task.c1);
-}
-
-fn runQ6_Kx4RhsTask(task: *const Q6_Kx4RhsTask) void {
-    quantized_matmul.matmulQ6_Kx4RhsTile(task.out, task.lhs_blocks, task.rhs, task.n, task.r0, task.r1, task.c0, task.c1);
-}
-
 fn spawnI8BlockwiseTasks(pool: *thread.Pool, tasks: []I8BlockwiseTask) void {
     pool.parallelChunks(I8BlockwiseTask, tasks, runI8BlockwiseTask);
-}
-
-fn spawnQ8_0RhsTasks(pool: *thread.Pool, tasks: []Q8_0RhsTask) void {
-    pool.parallelChunks(Q8_0RhsTask, tasks, runQ8_0RhsTask);
-}
-
-fn spawnQ8_0x4RhsTasks(pool: *thread.Pool, tasks: []Q8_0x4RhsTask) void {
-    pool.parallelChunks(Q8_0x4RhsTask, tasks, runQ8_0x4RhsTask);
-}
-
-fn spawnQ8_0x4PackedRhsTasks(pool: *thread.Pool, tasks: []Q8_0x4PackedRhsTask) void {
-    pool.parallelChunks(Q8_0x4PackedRhsTask, tasks, runQ8_0x4PackedRhsTask);
 }
 
 fn spawnQ8_0x4PackedPaddedRhsTasks(pool: *thread.Pool, tasks: []Q8_0x4PackedPaddedRhsTask) void {
     pool.parallelChunks(Q8_0x4PackedPaddedRhsTask, tasks, runQ8_0x4PackedPaddedRhsTask);
 }
 
-fn spawnQ4_0RhsTasks(pool: *thread.Pool, tasks: []Q4_0RhsTask) void {
-    pool.parallelChunks(Q4_0RhsTask, tasks, runQ4_0RhsTask);
-}
+/// Row/column split policy for `QuantizedRhsParallel`. The default is the
+/// plain-block behavior; the interleaved packs round task boundaries to
+/// their lane group so a task never bisects a packed column or row group.
+const SplitPolicy = struct {
+    /// Column-task boundaries are multiples of this (the pack's column
+    /// lane group).
+    col_group: usize = 1,
+    /// When the column arm may fire (the row arm handles the rest).
+    col_gate: enum {
+        /// Decode-sized m only (the plain-block rule).
+        small_m,
+        /// Twice the m window: the x8/x2 tiles amortize more per column.
+        small_m_x2,
+        /// Also at m >= 128 (packed-LHS wide batches favor columns).
+        small_m_or_m128,
+        /// Columns whenever the count gate allows (lane-packed LHS).
+        always,
+    } = .small_m,
+    /// Row-task boundaries are multiples of this (the packed LHS's row
+    /// group).
+    row_group: usize = 1,
+    /// Row-group rounding: `.floor` never emits a partial group (those
+    /// callers guarantee `m % row_group == 0`); `.ceil_clamp` covers a
+    /// ragged tail by clamping the last boundary to `m`.
+    row_round: enum { floor, ceil_clamp } = .floor,
+    /// Cap the row-arm thread count at the group count, bailing to the
+    /// serial path when no full group exists.
+    row_cap_groups: bool = false,
+    /// At m >= 128 the x8 tiles are LHS-bandwidth bound: 3 threads
+    /// saturate, more only adds barrier cost.
+    row_cap_3_at_m128: bool = false,
+};
 
-fn spawnQ2_KRhsTasks(pool: *thread.Pool, tasks: []Q2_KRhsTask) void {
-    pool.parallelChunks(Q2_KRhsTask, tasks, runQ2_KRhsTask);
-}
-
-fn spawnQ3_KRhsTasks(pool: *thread.Pool, tasks: []Q3_KRhsTask) void {
-    pool.parallelChunks(Q3_KRhsTask, tasks, runQ3_KRhsTask);
-}
-
-fn spawnQ4_KRhsTasks(pool: *thread.Pool, tasks: []Q4_KRhsTask) void {
-    pool.parallelChunks(Q4_KRhsTask, tasks, runQ4_KRhsTask);
-}
-
-fn spawnQ4_Kx4RhsTasks(pool: *thread.Pool, tasks: []Q4_Kx4RhsTask) void {
-    pool.parallelChunks(Q4_Kx4RhsTask, tasks, runQ4_Kx4RhsTask);
-}
-
-fn spawnQ4_Kx8RhsTasks(pool: *thread.Pool, tasks: []Q4_Kx8RhsTask) void {
-    pool.parallelChunks(Q4_Kx8RhsTask, tasks, runQ4_Kx8RhsTask);
-}
-
-fn spawnQ4_Kx8Q8_Kx4RhsTasks(pool: *thread.Pool, tasks: []Q4_Kx8Q8_Kx4RhsTask) void {
-    pool.parallelChunks(Q4_Kx8Q8_Kx4RhsTask, tasks, runQ4_Kx8Q8_Kx4RhsTask);
-}
-
-fn spawnQ4_Kx2MmlaRhsTasks(pool: *thread.Pool, tasks: []Q4_Kx2MmlaRhsTask) void {
-    pool.parallelChunks(Q4_Kx2MmlaRhsTask, tasks, runQ4_Kx2MmlaRhsTask);
-}
-
-fn spawnQ4_Kx2MmlaQ8_Kx2MmlaRhsTasks(pool: *thread.Pool, tasks: []Q4_Kx2MmlaQ8_Kx2MmlaRhsTask) void {
-    pool.parallelChunks(Q4_Kx2MmlaQ8_Kx2MmlaRhsTask, tasks, runQ4_Kx2MmlaQ8_Kx2MmlaRhsTask);
-}
-
-fn spawnQ5_Kx8RhsTasks(pool: *thread.Pool, tasks: []Q5_Kx8RhsTask) void {
-    pool.parallelChunks(Q5_Kx8RhsTask, tasks, runQ5_Kx8RhsTask);
-}
-
-fn spawnQ5_Kx8Q8_Kx4RhsTasks(pool: *thread.Pool, tasks: []Q5_Kx8Q8_Kx4RhsTask) void {
-    pool.parallelChunks(Q5_Kx8Q8_Kx4RhsTask, tasks, runQ5_Kx8Q8_Kx4RhsTask);
-}
-
-fn spawnQ5_KRhsTasks(pool: *thread.Pool, tasks: []Q5_KRhsTask) void {
-    pool.parallelChunks(Q5_KRhsTask, tasks, runQ5_KRhsTask);
-}
-
-fn spawnQ6_KRhsTasks(pool: *thread.Pool, tasks: []Q6_KRhsTask) void {
-    pool.parallelChunks(Q6_KRhsTask, tasks, runQ6_KRhsTask);
-}
-
-fn spawnQ6_Kx4RhsTasks(pool: *thread.Pool, tasks: []Q6_Kx4RhsTask) void {
-    pool.parallelChunks(Q6_Kx4RhsTask, tasks, runQ6_Kx4RhsTask);
-}
-
-fn QuantizedRhsParallel(comptime LhsBlock: type, comptime Rhs: type, comptime tileFn: anytype) type {
+fn QuantizedRhsParallel(
+    comptime LhsBlock: type,
+    comptime Rhs: type,
+    comptime tileFn: anytype,
+    comptime policy: SplitPolicy,
+) type {
     return struct {
         const Self = @This();
 
@@ -819,6 +557,12 @@ fn QuantizedRhsParallel(comptime LhsBlock: type, comptime Rhs: type, comptime ti
             k: usize,
         ) bool {
             const pool = config.pool orelse return false;
+            const row_groups = switch (policy.row_round) {
+                .floor => m / policy.row_group,
+                .ceil_clamp => (m + policy.row_group - 1) / policy.row_group,
+            };
+            if (policy.row_cap_groups and row_groups == 0) return false;
+
             var tasks: [parallel.vector_max_threads]Task = undefined;
             const base: Task = .{
                 .out = out,
@@ -831,26 +575,39 @@ fn QuantizedRhsParallel(comptime LhsBlock: type, comptime Rhs: type, comptime ti
                 .c1 = n,
             };
 
-            if (m < parallel.vector_column_min_m) {
+            const col_arm = switch (policy.col_gate) {
+                .small_m => m < parallel.vector_column_min_m,
+                .small_m_x2 => m < parallel.vector_column_min_m * 2,
+                .small_m_or_m128 => m < parallel.vector_column_min_m or m >= 128,
+                .always => true,
+            };
+            if (col_arm) {
                 const col_threads = i8ColumnThreadCount(m, n, k);
                 if (col_threads != 1) {
+                    const group_count = n / policy.col_group;
                     for (0..col_threads) |ti| {
                         tasks[ti] = base;
-                        tasks[ti].c0 = ti * n / col_threads;
-                        tasks[ti].c1 = (ti + 1) * n / col_threads;
+                        tasks[ti].c0 = policy.col_group * (ti * group_count / col_threads);
+                        tasks[ti].c1 = policy.col_group * ((ti + 1) * group_count / col_threads);
                     }
                     Self.spawn(pool, tasks[0..col_threads]);
                     return true;
                 }
             }
 
-            const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
+            const requested_threads = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
+            var thread_count = if (policy.row_cap_3_at_m128 and m >= 128)
+                @min(requested_threads, @as(usize, 3))
+            else
+                requested_threads;
+            if (policy.row_cap_groups) thread_count = @min(thread_count, row_groups);
             if (thread_count == 1) return false;
 
             for (0..thread_count) |ti| {
                 tasks[ti] = base;
-                tasks[ti].r0 = ti * m / thread_count;
-                tasks[ti].r1 = (ti + 1) * m / thread_count;
+                tasks[ti].r0 = policy.row_group * (ti * row_groups / thread_count);
+                const r1 = policy.row_group * ((ti + 1) * row_groups / thread_count);
+                tasks[ti].r1 = if (policy.row_round == .ceil_clamp) @min(m, r1) else r1;
             }
             Self.spawn(pool, tasks[0..thread_count]);
             return true;
@@ -952,153 +709,6 @@ fn maybeParallelI8Blockwise(
     return true;
 }
 
-fn maybeParallelQ8_0Rhs(
-    config: ParallelConfig,
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_0,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ8_0,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
-    const pool = config.pool orelse return false;
-    var tasks: [parallel.vector_max_threads]Q8_0RhsTask = undefined;
-    const base: Q8_0RhsTask = .{
-        .out = out,
-        .lhs_blocks = lhs_blocks,
-        .rhs = rhs,
-        .n = n,
-        .r0 = 0,
-        .r1 = m,
-        .c0 = 0,
-        .c1 = n,
-    };
-
-    if (m < parallel.vector_column_min_m) {
-        const col_threads = i8ColumnThreadCount(m, n, k);
-        if (col_threads != 1) {
-            for (0..col_threads) |ti| {
-                tasks[ti] = base;
-                tasks[ti].c0 = ti * n / col_threads;
-                tasks[ti].c1 = (ti + 1) * n / col_threads;
-            }
-            spawnQ8_0RhsTasks(pool, tasks[0..col_threads]);
-            return true;
-        }
-    }
-
-    const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    if (thread_count == 1) return false;
-
-    for (0..thread_count) |ti| {
-        tasks[ti] = base;
-        tasks[ti].r0 = ti * m / thread_count;
-        tasks[ti].r1 = (ti + 1) * m / thread_count;
-    }
-    spawnQ8_0RhsTasks(pool, tasks[0..thread_count]);
-    return true;
-}
-
-fn maybeParallelQ8_0x4Rhs(
-    config: ParallelConfig,
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_0,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ8_0x4,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
-    const pool = config.pool orelse return false;
-    var tasks: [parallel.vector_max_threads]Q8_0x4RhsTask = undefined;
-    const base: Q8_0x4RhsTask = .{
-        .out = out,
-        .lhs_blocks = lhs_blocks,
-        .rhs = rhs,
-        .n = n,
-        .r0 = 0,
-        .r1 = m,
-        .c0 = 0,
-        .c1 = n,
-    };
-
-    if (m < parallel.vector_column_min_m) {
-        const col_threads = i8ColumnThreadCount(m, n, k);
-        if (col_threads != 1) {
-            const group_count = n / 4;
-            for (0..col_threads) |ti| {
-                tasks[ti] = base;
-                tasks[ti].c0 = 4 * (ti * group_count / col_threads);
-                tasks[ti].c1 = 4 * ((ti + 1) * group_count / col_threads);
-            }
-            spawnQ8_0x4RhsTasks(pool, tasks[0..col_threads]);
-            return true;
-        }
-    }
-
-    const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    if (thread_count == 1) return false;
-
-    for (0..thread_count) |ti| {
-        tasks[ti] = base;
-        tasks[ti].r0 = ti * m / thread_count;
-        tasks[ti].r1 = (ti + 1) * m / thread_count;
-    }
-    spawnQ8_0x4RhsTasks(pool, tasks[0..thread_count]);
-    return true;
-}
-
-fn maybeParallelQ8_0x4PackedRhs(
-    config: ParallelConfig,
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_0x4,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ8_0x4,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
-    const pool = config.pool orelse return false;
-    const row_groups = m / 4;
-    if (row_groups == 0) return false;
-
-    var tasks: [parallel.vector_max_threads]Q8_0x4PackedRhsTask = undefined;
-    const base: Q8_0x4PackedRhsTask = .{
-        .out = out,
-        .lhs_blocks = lhs_blocks,
-        .rhs = rhs,
-        .n = n,
-        .r0 = 0,
-        .r1 = m,
-        .c0 = 0,
-        .c1 = n,
-    };
-
-    if (m < parallel.vector_column_min_m or m >= 128) {
-        const col_threads = i8ColumnThreadCount(m, n, k);
-        if (col_threads != 1) {
-            const group_count = n / 4;
-            for (0..col_threads) |ti| {
-                tasks[ti] = base;
-                tasks[ti].c0 = 4 * (ti * group_count / col_threads);
-                tasks[ti].c1 = 4 * ((ti + 1) * group_count / col_threads);
-            }
-            spawnQ8_0x4PackedRhsTasks(pool, tasks[0..col_threads]);
-            return true;
-        }
-    }
-
-    const requested_threads = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    const thread_count = @min(requested_threads, row_groups);
-    if (thread_count == 1) return false;
-
-    for (0..thread_count) |ti| {
-        tasks[ti] = base;
-        tasks[ti].r0 = 4 * (ti * row_groups / thread_count);
-        tasks[ti].r1 = 4 * ((ti + 1) * row_groups / thread_count);
-    }
-    spawnQ8_0x4PackedRhsTasks(pool, tasks[0..thread_count]);
-    return true;
-}
-
 fn maybeParallelQ8_0x4PackedPaddedRhs(
     config: ParallelConfig,
     out: []f32,
@@ -1129,672 +739,6 @@ fn maybeParallelQ8_0x4PackedPaddedRhs(
         tasks[ti].c1 = 4 * ((ti + 1) * group_count / col_threads);
     }
     spawnQ8_0x4PackedPaddedRhsTasks(pool, tasks[0..col_threads]);
-    return true;
-}
-
-fn maybeParallelQ4_0Rhs(
-    config: ParallelConfig,
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_0,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_0,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
-    const pool = config.pool orelse return false;
-    var tasks: [parallel.vector_max_threads]Q4_0RhsTask = undefined;
-    const base: Q4_0RhsTask = .{
-        .out = out,
-        .lhs_blocks = lhs_blocks,
-        .rhs = rhs,
-        .n = n,
-        .r0 = 0,
-        .r1 = m,
-        .c0 = 0,
-        .c1 = n,
-    };
-
-    if (m < parallel.vector_column_min_m) {
-        const col_threads = i8ColumnThreadCount(m, n, k);
-        if (col_threads != 1) {
-            for (0..col_threads) |ti| {
-                tasks[ti] = base;
-                tasks[ti].c0 = ti * n / col_threads;
-                tasks[ti].c1 = (ti + 1) * n / col_threads;
-            }
-            spawnQ4_0RhsTasks(pool, tasks[0..col_threads]);
-            return true;
-        }
-    }
-
-    const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    if (thread_count == 1) return false;
-
-    for (0..thread_count) |ti| {
-        tasks[ti] = base;
-        tasks[ti].r0 = ti * m / thread_count;
-        tasks[ti].r1 = (ti + 1) * m / thread_count;
-    }
-    spawnQ4_0RhsTasks(pool, tasks[0..thread_count]);
-    return true;
-}
-
-fn maybeParallelQ2_KRhs(
-    config: ParallelConfig,
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_K,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ2_K,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
-    const pool = config.pool orelse return false;
-    var tasks: [parallel.vector_max_threads]Q2_KRhsTask = undefined;
-    const base: Q2_KRhsTask = .{
-        .out = out,
-        .lhs_blocks = lhs_blocks,
-        .rhs = rhs,
-        .n = n,
-        .r0 = 0,
-        .r1 = m,
-        .c0 = 0,
-        .c1 = n,
-    };
-
-    if (m < parallel.vector_column_min_m) {
-        const col_threads = i8ColumnThreadCount(m, n, k);
-        if (col_threads != 1) {
-            for (0..col_threads) |ti| {
-                tasks[ti] = base;
-                tasks[ti].c0 = ti * n / col_threads;
-                tasks[ti].c1 = (ti + 1) * n / col_threads;
-            }
-            spawnQ2_KRhsTasks(pool, tasks[0..col_threads]);
-            return true;
-        }
-    }
-
-    const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    if (thread_count == 1) return false;
-
-    for (0..thread_count) |ti| {
-        tasks[ti] = base;
-        tasks[ti].r0 = ti * m / thread_count;
-        tasks[ti].r1 = (ti + 1) * m / thread_count;
-    }
-    spawnQ2_KRhsTasks(pool, tasks[0..thread_count]);
-    return true;
-}
-
-fn maybeParallelQ3_KRhs(
-    config: ParallelConfig,
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_K,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ3_K,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
-    const pool = config.pool orelse return false;
-    var tasks: [parallel.vector_max_threads]Q3_KRhsTask = undefined;
-    const base: Q3_KRhsTask = .{
-        .out = out,
-        .lhs_blocks = lhs_blocks,
-        .rhs = rhs,
-        .n = n,
-        .r0 = 0,
-        .r1 = m,
-        .c0 = 0,
-        .c1 = n,
-    };
-
-    if (m < parallel.vector_column_min_m) {
-        const col_threads = i8ColumnThreadCount(m, n, k);
-        if (col_threads != 1) {
-            for (0..col_threads) |ti| {
-                tasks[ti] = base;
-                tasks[ti].c0 = ti * n / col_threads;
-                tasks[ti].c1 = (ti + 1) * n / col_threads;
-            }
-            spawnQ3_KRhsTasks(pool, tasks[0..col_threads]);
-            return true;
-        }
-    }
-
-    const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    if (thread_count == 1) return false;
-
-    for (0..thread_count) |ti| {
-        tasks[ti] = base;
-        tasks[ti].r0 = ti * m / thread_count;
-        tasks[ti].r1 = (ti + 1) * m / thread_count;
-    }
-    spawnQ3_KRhsTasks(pool, tasks[0..thread_count]);
-    return true;
-}
-
-fn maybeParallelQ4_KRhs(
-    config: ParallelConfig,
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_K,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_K,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
-    const pool = config.pool orelse return false;
-    var tasks: [parallel.vector_max_threads]Q4_KRhsTask = undefined;
-    const base: Q4_KRhsTask = .{
-        .out = out,
-        .lhs_blocks = lhs_blocks,
-        .rhs = rhs,
-        .n = n,
-        .r0 = 0,
-        .r1 = m,
-        .c0 = 0,
-        .c1 = n,
-    };
-
-    if (m < parallel.vector_column_min_m) {
-        const col_threads = i8ColumnThreadCount(m, n, k);
-        if (col_threads != 1) {
-            for (0..col_threads) |ti| {
-                tasks[ti] = base;
-                tasks[ti].c0 = ti * n / col_threads;
-                tasks[ti].c1 = (ti + 1) * n / col_threads;
-            }
-            spawnQ4_KRhsTasks(pool, tasks[0..col_threads]);
-            return true;
-        }
-    }
-
-    const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    if (thread_count == 1) return false;
-
-    for (0..thread_count) |ti| {
-        tasks[ti] = base;
-        tasks[ti].r0 = ti * m / thread_count;
-        tasks[ti].r1 = (ti + 1) * m / thread_count;
-    }
-    spawnQ4_KRhsTasks(pool, tasks[0..thread_count]);
-    return true;
-}
-
-fn maybeParallelQ5_KRhs(
-    config: ParallelConfig,
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_K,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_K,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
-    const pool = config.pool orelse return false;
-    var tasks: [parallel.vector_max_threads]Q5_KRhsTask = undefined;
-    const base: Q5_KRhsTask = .{
-        .out = out,
-        .lhs_blocks = lhs_blocks,
-        .rhs = rhs,
-        .n = n,
-        .r0 = 0,
-        .r1 = m,
-        .c0 = 0,
-        .c1 = n,
-    };
-
-    if (m < parallel.vector_column_min_m) {
-        const col_threads = i8ColumnThreadCount(m, n, k);
-        if (col_threads != 1) {
-            for (0..col_threads) |ti| {
-                tasks[ti] = base;
-                tasks[ti].c0 = ti * n / col_threads;
-                tasks[ti].c1 = (ti + 1) * n / col_threads;
-            }
-            spawnQ5_KRhsTasks(pool, tasks[0..col_threads]);
-            return true;
-        }
-    }
-
-    const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    if (thread_count == 1) return false;
-
-    for (0..thread_count) |ti| {
-        tasks[ti] = base;
-        tasks[ti].r0 = ti * m / thread_count;
-        tasks[ti].r1 = (ti + 1) * m / thread_count;
-    }
-    spawnQ5_KRhsTasks(pool, tasks[0..thread_count]);
-    return true;
-}
-
-fn maybeParallelQ4_Kx4Rhs(
-    config: ParallelConfig,
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_K,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx4,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
-    const pool = config.pool orelse return false;
-    var tasks: [parallel.vector_max_threads]Q4_Kx4RhsTask = undefined;
-    const base: Q4_Kx4RhsTask = .{
-        .out = out,
-        .lhs_blocks = lhs_blocks,
-        .rhs = rhs,
-        .n = n,
-        .r0 = 0,
-        .r1 = m,
-        .c0 = 0,
-        .c1 = n,
-    };
-
-    if (m < parallel.vector_column_min_m) {
-        const col_threads = i8ColumnThreadCount(m, n, k);
-        if (col_threads != 1) {
-            const group_count = n / 4;
-            for (0..col_threads) |ti| {
-                tasks[ti] = base;
-                tasks[ti].c0 = 4 * (ti * group_count / col_threads);
-                tasks[ti].c1 = 4 * ((ti + 1) * group_count / col_threads);
-            }
-            spawnQ4_Kx4RhsTasks(pool, tasks[0..col_threads]);
-            return true;
-        }
-    }
-
-    const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    if (thread_count == 1) return false;
-
-    for (0..thread_count) |ti| {
-        tasks[ti] = base;
-        tasks[ti].r0 = ti * m / thread_count;
-        tasks[ti].r1 = (ti + 1) * m / thread_count;
-    }
-    spawnQ4_Kx4RhsTasks(pool, tasks[0..thread_count]);
-    return true;
-}
-
-fn maybeParallelQ4_Kx8Rhs(
-    config: ParallelConfig,
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_K,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx8,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
-    const pool = config.pool orelse return false;
-    var tasks: [parallel.vector_max_threads]Q4_Kx8RhsTask = undefined;
-    const base: Q4_Kx8RhsTask = .{
-        .out = out,
-        .lhs_blocks = lhs_blocks,
-        .rhs = rhs,
-        .n = n,
-        .r0 = 0,
-        .r1 = m,
-        .c0 = 0,
-        .c1 = n,
-    };
-
-    if (m < parallel.vector_column_min_m * 2) {
-        const col_threads = i8ColumnThreadCount(m, n, k);
-        if (col_threads != 1) {
-            const group_count = n / 8;
-            for (0..col_threads) |ti| {
-                tasks[ti] = base;
-                tasks[ti].c0 = 8 * (ti * group_count / col_threads);
-                tasks[ti].c1 = 8 * ((ti + 1) * group_count / col_threads);
-            }
-            spawnQ4_Kx8RhsTasks(pool, tasks[0..col_threads]);
-            return true;
-        }
-    }
-
-    const requested_threads = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    const thread_count = if (m >= 128) @min(requested_threads, @as(usize, 3)) else requested_threads;
-    if (thread_count == 1) return false;
-
-    for (0..thread_count) |ti| {
-        tasks[ti] = base;
-        tasks[ti].r0 = ti * m / thread_count;
-        tasks[ti].r1 = (ti + 1) * m / thread_count;
-    }
-    spawnQ4_Kx8RhsTasks(pool, tasks[0..thread_count]);
-    return true;
-}
-
-fn maybeParallelQ4_Kx8Q8_Kx4Rhs(
-    config: ParallelConfig,
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_Kx4,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx8,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
-    const pool = config.pool orelse return false;
-    var tasks: [parallel.vector_max_threads]Q4_Kx8Q8_Kx4RhsTask = undefined;
-    const base: Q4_Kx8Q8_Kx4RhsTask = .{
-        .out = out,
-        .lhs_blocks = lhs_blocks,
-        .rhs = rhs,
-        .n = n,
-        .r0 = 0,
-        .r1 = m,
-        .c0 = 0,
-        .c1 = n,
-    };
-
-    const col_threads = i8ColumnThreadCount(m, n, k);
-    if (col_threads != 1) {
-        const group_count = n / 8;
-        for (0..col_threads) |ti| {
-            tasks[ti] = base;
-            tasks[ti].c0 = 8 * (ti * group_count / col_threads);
-            tasks[ti].c1 = 8 * ((ti + 1) * group_count / col_threads);
-        }
-        spawnQ4_Kx8Q8_Kx4RhsTasks(pool, tasks[0..col_threads]);
-        return true;
-    }
-
-    const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    if (thread_count == 1) return false;
-    const row_groups = (m + 3) / 4;
-    for (0..thread_count) |ti| {
-        tasks[ti] = base;
-        tasks[ti].r0 = 4 * (ti * row_groups / thread_count);
-        tasks[ti].r1 = @min(m, 4 * ((ti + 1) * row_groups / thread_count));
-    }
-    spawnQ4_Kx8Q8_Kx4RhsTasks(pool, tasks[0..thread_count]);
-    return true;
-}
-
-fn maybeParallelQ4_Kx2MmlaRhs(
-    config: ParallelConfig,
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_K,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx2Mmla,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
-    const pool = config.pool orelse return false;
-    var tasks: [parallel.vector_max_threads]Q4_Kx2MmlaRhsTask = undefined;
-    const base: Q4_Kx2MmlaRhsTask = .{
-        .out = out,
-        .lhs_blocks = lhs_blocks,
-        .rhs = rhs,
-        .n = n,
-        .r0 = 0,
-        .r1 = m,
-        .c0 = 0,
-        .c1 = n,
-    };
-
-    if (m < parallel.vector_column_min_m * 2) {
-        const col_threads = i8ColumnThreadCount(m, n, k);
-        if (col_threads != 1) {
-            const group_count = n / 2;
-            for (0..col_threads) |ti| {
-                tasks[ti] = base;
-                tasks[ti].c0 = 2 * (ti * group_count / col_threads);
-                tasks[ti].c1 = 2 * ((ti + 1) * group_count / col_threads);
-            }
-            spawnQ4_Kx2MmlaRhsTasks(pool, tasks[0..col_threads]);
-            return true;
-        }
-    }
-
-    const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    if (thread_count == 1) return false;
-
-    for (0..thread_count) |ti| {
-        tasks[ti] = base;
-        tasks[ti].r0 = ti * m / thread_count;
-        tasks[ti].r1 = (ti + 1) * m / thread_count;
-    }
-    spawnQ4_Kx2MmlaRhsTasks(pool, tasks[0..thread_count]);
-    return true;
-}
-
-fn maybeParallelQ4_Kx2MmlaQ8_Kx2MmlaRhs(
-    config: ParallelConfig,
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_Kx2Mmla,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx2Mmla,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
-    const pool = config.pool orelse return false;
-    var tasks: [parallel.vector_max_threads]Q4_Kx2MmlaQ8_Kx2MmlaRhsTask = undefined;
-    const base: Q4_Kx2MmlaQ8_Kx2MmlaRhsTask = .{
-        .out = out,
-        .lhs_blocks = lhs_blocks,
-        .rhs = rhs,
-        .n = n,
-        .r0 = 0,
-        .r1 = m,
-        .c0 = 0,
-        .c1 = n,
-    };
-
-    if (m < parallel.vector_column_min_m * 2) {
-        const col_threads = i8ColumnThreadCount(m, n, k);
-        if (col_threads != 1) {
-            const group_count = n / 2;
-            for (0..col_threads) |ti| {
-                tasks[ti] = base;
-                tasks[ti].c0 = 2 * (ti * group_count / col_threads);
-                tasks[ti].c1 = 2 * ((ti + 1) * group_count / col_threads);
-            }
-            spawnQ4_Kx2MmlaQ8_Kx2MmlaRhsTasks(pool, tasks[0..col_threads]);
-            return true;
-        }
-    }
-
-    const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    if (thread_count == 1) return false;
-    const row_groups = m / 2;
-    for (0..thread_count) |ti| {
-        tasks[ti] = base;
-        tasks[ti].r0 = 2 * (ti * row_groups / thread_count);
-        tasks[ti].r1 = 2 * ((ti + 1) * row_groups / thread_count);
-    }
-    spawnQ4_Kx2MmlaQ8_Kx2MmlaRhsTasks(pool, tasks[0..thread_count]);
-    return true;
-}
-
-fn maybeParallelQ5_Kx8Rhs(
-    config: ParallelConfig,
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_K,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_Kx8,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
-    const pool = config.pool orelse return false;
-    var tasks: [parallel.vector_max_threads]Q5_Kx8RhsTask = undefined;
-    const base: Q5_Kx8RhsTask = .{
-        .out = out,
-        .lhs_blocks = lhs_blocks,
-        .rhs = rhs,
-        .n = n,
-        .r0 = 0,
-        .r1 = m,
-        .c0 = 0,
-        .c1 = n,
-    };
-
-    if (m < parallel.vector_column_min_m * 2) {
-        const col_threads = i8ColumnThreadCount(m, n, k);
-        if (col_threads != 1) {
-            const group_count = n / 8;
-            for (0..col_threads) |ti| {
-                tasks[ti] = base;
-                tasks[ti].c0 = 8 * (ti * group_count / col_threads);
-                tasks[ti].c1 = 8 * ((ti + 1) * group_count / col_threads);
-            }
-            spawnQ5_Kx8RhsTasks(pool, tasks[0..col_threads]);
-            return true;
-        }
-    }
-
-    const requested_threads = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    const thread_count = if (m >= 128) @min(requested_threads, @as(usize, 3)) else requested_threads;
-    if (thread_count == 1) return false;
-
-    for (0..thread_count) |ti| {
-        tasks[ti] = base;
-        tasks[ti].r0 = ti * m / thread_count;
-        tasks[ti].r1 = (ti + 1) * m / thread_count;
-    }
-    spawnQ5_Kx8RhsTasks(pool, tasks[0..thread_count]);
-    return true;
-}
-
-fn maybeParallelQ5_Kx8Q8_Kx4Rhs(
-    config: ParallelConfig,
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_Kx4,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_Kx8,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
-    const pool = config.pool orelse return false;
-    var tasks: [parallel.vector_max_threads]Q5_Kx8Q8_Kx4RhsTask = undefined;
-    const base: Q5_Kx8Q8_Kx4RhsTask = .{
-        .out = out,
-        .lhs_blocks = lhs_blocks,
-        .rhs = rhs,
-        .n = n,
-        .r0 = 0,
-        .r1 = m,
-        .c0 = 0,
-        .c1 = n,
-    };
-
-    if (m < parallel.vector_column_min_m * 2) {
-        const col_threads = i8ColumnThreadCount(m, n, k);
-        if (col_threads != 1) {
-            const group_count = n / 8;
-            for (0..col_threads) |ti| {
-                tasks[ti] = base;
-                tasks[ti].c0 = 8 * (ti * group_count / col_threads);
-                tasks[ti].c1 = 8 * ((ti + 1) * group_count / col_threads);
-            }
-            spawnQ5_Kx8Q8_Kx4RhsTasks(pool, tasks[0..col_threads]);
-            return true;
-        }
-    }
-
-    const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    if (thread_count == 1) return false;
-    const row_groups = m / 4;
-    for (0..thread_count) |ti| {
-        tasks[ti] = base;
-        tasks[ti].r0 = 4 * (ti * row_groups / thread_count);
-        tasks[ti].r1 = 4 * ((ti + 1) * row_groups / thread_count);
-    }
-    spawnQ5_Kx8Q8_Kx4RhsTasks(pool, tasks[0..thread_count]);
-    return true;
-}
-
-fn maybeParallelQ6_KRhs(
-    config: ParallelConfig,
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_K,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ6_K,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
-    const pool = config.pool orelse return false;
-    var tasks: [parallel.vector_max_threads]Q6_KRhsTask = undefined;
-    const base: Q6_KRhsTask = .{
-        .out = out,
-        .lhs_blocks = lhs_blocks,
-        .rhs = rhs,
-        .n = n,
-        .r0 = 0,
-        .r1 = m,
-        .c0 = 0,
-        .c1 = n,
-    };
-
-    if (m < parallel.vector_column_min_m) {
-        const col_threads = i8ColumnThreadCount(m, n, k);
-        if (col_threads != 1) {
-            for (0..col_threads) |ti| {
-                tasks[ti] = base;
-                tasks[ti].c0 = ti * n / col_threads;
-                tasks[ti].c1 = (ti + 1) * n / col_threads;
-            }
-            spawnQ6_KRhsTasks(pool, tasks[0..col_threads]);
-            return true;
-        }
-    }
-
-    const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    if (thread_count == 1) return false;
-
-    for (0..thread_count) |ti| {
-        tasks[ti] = base;
-        tasks[ti].r0 = ti * m / thread_count;
-        tasks[ti].r1 = (ti + 1) * m / thread_count;
-    }
-    spawnQ6_KRhsTasks(pool, tasks[0..thread_count]);
-    return true;
-}
-
-fn maybeParallelQ6_Kx4Rhs(
-    config: ParallelConfig,
-    out: []f32,
-    lhs_blocks: []const quantized_matmul.BlockQ8_K,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ6_Kx4,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
-    const pool = config.pool orelse return false;
-    var tasks: [parallel.vector_max_threads]Q6_Kx4RhsTask = undefined;
-    const base: Q6_Kx4RhsTask = .{
-        .out = out,
-        .lhs_blocks = lhs_blocks,
-        .rhs = rhs,
-        .n = n,
-        .r0 = 0,
-        .r1 = m,
-        .c0 = 0,
-        .c1 = n,
-    };
-
-    if (m < parallel.vector_column_min_m) {
-        const col_threads = i8ColumnThreadCount(m, n, k);
-        if (col_threads != 1) {
-            const group_count = n / 4;
-            for (0..col_threads) |ti| {
-                tasks[ti] = base;
-                tasks[ti].c0 = 4 * (ti * group_count / col_threads);
-                tasks[ti].c1 = 4 * ((ti + 1) * group_count / col_threads);
-            }
-            spawnQ6_Kx4RhsTasks(pool, tasks[0..col_threads]);
-            return true;
-        }
-    }
-
-    const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    if (thread_count == 1) return false;
-
-    for (0..thread_count) |ti| {
-        tasks[ti] = base;
-        tasks[ti].r0 = ti * m / thread_count;
-        tasks[ti].r1 = (ti + 1) * m / thread_count;
-    }
-    spawnQ6_Kx4RhsTasks(pool, tasks[0..thread_count]);
     return true;
 }
 
