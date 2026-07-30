@@ -141,13 +141,12 @@ pub fn PointwiseBackward(
             left: *const RawTensor,
             right: *const RawTensor,
         ) !void {
-            _ = allocator;
             self.* = .{
                 .parents = .{ left_parent, right_parent },
                 .left_shape = rawShapeArray(left_tags, left),
                 .right_shape = rawShapeArray(right_tags, right),
             };
-            errdefer self.deinitFields();
+            errdefer self.deinitFields(allocator);
 
             if (comptime op == .mul or op == .div or op == .max or op == .min) {
                 self.left_value = try left.cloneView();
@@ -183,19 +182,13 @@ pub fn PointwiseBackward(
             return tag_ops.pointwise(.mul, result_tags, gy, ctx, result_tags, &weight);
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(
-            ptr: *const anyopaque,
+        pub fn vjp(
+            self: *const Self,
             ctx: *ExecContext,
             gy: *const RawTensor,
             needs_grad: []const bool,
             out: []?RawTensor,
         ) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
             if (needs_grad.len > 0 and needs_grad[0]) {
                 var g = switch (op) {
                     .add, .sub => try gy.cloneView(),
@@ -229,60 +222,18 @@ pub fn PointwiseBackward(
             }
         }
 
-        fn deinitFields(self: *Self) void {
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             if (self.left_value) |*value| value.deinit();
             if (self.right_value) |*value| value.deinit();
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            self.deinitFields();
-            core.destroyNode(Self, allocator, self);
-        }
-
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
-pub fn CastBackward(comptime tags: anytype) type {
-    _ = tags;
-    return struct {
-        parents: [1]?*GradState,
-
-        const Self = @This();
-
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState) !void {
-            _ = allocator;
-            self.* = .{ .parents = .{parent} };
-        }
-
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            _ = ptr;
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
-            out[0] = try contiguousForRead(ctx, gy);
-        }
-
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            core.destroyNode(Self, allocator, self);
-        }
-
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
-    };
-}
+/// Cast's VJP is the identity: pass the gradient through contiguously.
+pub const CastBackward = IdentityBackward;
 
 pub fn IdentityBackward(comptime tags: anytype) type {
     _ = tags;
@@ -296,27 +247,13 @@ pub fn IdentityBackward(comptime tags: anytype) type {
             self.* = .{ .parents = .{parent} };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            _ = ptr;
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
+            _ = self;
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try contiguousForRead(ctx, gy);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            core.destroyNode(Self, allocator, self);
-        }
-
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -346,13 +283,7 @@ pub fn Matmul2DBackward(comptime trans_b: bool) type {
             self.right = try right.cloneView();
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 out[0] = if (comptime trans_b)
                     try ctx.matmul2D(gy, &self.right)
@@ -367,18 +298,13 @@ pub fn Matmul2DBackward(comptime trans_b: bool) type {
             }
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.left.deinit();
             self.right.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -408,14 +334,7 @@ pub fn BmmBackward(comptime kind: exec_mod.BmmKind) type {
             self.right = try right.cloneView();
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 var full = switch (kind) {
                     .plain => try ctx.bmmTransB(gy, &self.right),
@@ -437,18 +356,13 @@ pub fn BmmBackward(comptime kind: exec_mod.BmmKind) type {
             }
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.left.deinit();
             self.right.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -471,6 +385,8 @@ test "reduceGradientToTags uses direct view when tags and shape already match" {
 }
 
 pub const ReluBackward = struct {
+    const Self = @This();
+
     parents: [1]?*GradState,
     input: RawTensor,
 
@@ -482,13 +398,7 @@ pub const ReluBackward = struct {
         };
     }
 
-    fn operands(ptr: *const anyopaque) []const ?*GradState {
-        const self: *const ReluBackward = @ptrCast(@alignCast(ptr));
-        return self.parents[0..];
-    }
-
-    fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        const self: *const ReluBackward = @ptrCast(@alignCast(ptr));
+    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len == 0 or !needs_grad[0]) return;
 
         var x = try contiguousForRead(ctx, &self.input);
@@ -504,17 +414,12 @@ pub const ReluBackward = struct {
         out[0] = gx;
     }
 
-    fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-        const self: *ReluBackward = @ptrCast(@alignCast(ptr));
+    pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+        _ = allocator;
         self.input.deinit();
-        core.destroyNode(ReluBackward, allocator, self);
     }
 
-    pub const vtable = BackwardFunction.VTable{
-        .operands = operands,
-        .backward = backward,
-        .deinit = deinit,
-    };
+    pub const vtable = core.recordVTable(Self);
 };
 
 /// VJP of `relposShiftRank3` (S.2 skew). Forward is a per-query gather
@@ -523,6 +428,8 @@ pub const ReluBackward = struct {
 /// intra-row accumulation, but unused relpos entries correctly get 0). Saves
 /// only `p` (the input relpos-table dim) to size the gradient.
 pub const RelposShiftBackward = struct {
+    const Self = @This();
+
     parents: [1]?*GradState,
     p: usize,
 
@@ -531,13 +438,7 @@ pub const RelposShiftBackward = struct {
         self.* = .{ .parents = .{parent}, .p = p };
     }
 
-    fn operands(ptr: *const anyopaque) []const ?*GradState {
-        const self: *const RelposShiftBackward = @ptrCast(@alignCast(ptr));
-        return self.parents[0..];
-    }
-
-    fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        const self: *const RelposShiftBackward = @ptrCast(@alignCast(ptr));
+    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len == 0 or !needs_grad[0]) return;
 
         var gy_ready = try contiguousForRead(ctx, gy);
@@ -562,19 +463,12 @@ pub const RelposShiftBackward = struct {
         out[0] = gbd;
     }
 
-    fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-        const self: *RelposShiftBackward = @ptrCast(@alignCast(ptr));
-        core.destroyNode(RelposShiftBackward, allocator, self);
-    }
-
-    pub const vtable = BackwardFunction.VTable{
-        .operands = operands,
-        .backward = backward,
-        .deinit = deinit,
-    };
+    pub const vtable = core.recordVTable(Self);
 };
 
 pub const LeakyReluBackward = struct {
+    const Self = @This();
+
     parents: [1]?*GradState,
     input: RawTensor,
     negative_slope: f32,
@@ -588,13 +482,7 @@ pub const LeakyReluBackward = struct {
         };
     }
 
-    fn operands(ptr: *const anyopaque) []const ?*GradState {
-        const self: *const LeakyReluBackward = @ptrCast(@alignCast(ptr));
-        return self.parents[0..];
-    }
-
-    fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        const self: *const LeakyReluBackward = @ptrCast(@alignCast(ptr));
+    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len == 0 or !needs_grad[0]) return;
 
         var x = try contiguousForRead(ctx, &self.input);
@@ -610,17 +498,12 @@ pub const LeakyReluBackward = struct {
         out[0] = gx;
     }
 
-    fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-        const self: *LeakyReluBackward = @ptrCast(@alignCast(ptr));
+    pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+        _ = allocator;
         self.input.deinit();
-        core.destroyNode(LeakyReluBackward, allocator, self);
     }
 
-    pub const vtable = BackwardFunction.VTable{
-        .operands = operands,
-        .backward = backward,
-        .deinit = deinit,
-    };
+    pub const vtable = core.recordVTable(Self);
 };
 
 /// Ops whose derivative is cheaper in terms of the forward OUTPUT t
@@ -651,13 +534,7 @@ pub fn UnaryBackward(comptime op: exec_mod.UnaryOp, comptime tags: anytype) type
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
 
             var x = try contiguousForRead(ctx, &self.input);
@@ -715,17 +592,12 @@ pub fn UnaryBackward(comptime op: exec_mod.UnaryOp, comptime tags: anytype) type
             }
         };
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.input.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -745,27 +617,12 @@ pub fn ScaleBackward(comptime tags: anytype) type {
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.scale(gy, self.scalar_value);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            core.destroyNode(Self, allocator, self);
-        }
-
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -791,31 +648,18 @@ pub fn DropoutBackward(comptime tags: anytype) type {
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.dropoutBackward(gy, self.p, self.seed);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            core.destroyNode(Self, allocator, self);
-        }
-
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
 pub const ClampBackward = struct {
+    const Self = @This();
+
     parents: [1]?*GradState,
     input: RawTensor,
     min_value: f32,
@@ -831,13 +675,7 @@ pub const ClampBackward = struct {
         };
     }
 
-    fn operands(ptr: *const anyopaque) []const ?*GradState {
-        const self: *const ClampBackward = @ptrCast(@alignCast(ptr));
-        return self.parents[0..];
-    }
-
-    fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        const self: *const ClampBackward = @ptrCast(@alignCast(ptr));
+    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len == 0 or !needs_grad[0]) return;
 
         var x = try contiguousForRead(ctx, &self.input);
@@ -853,17 +691,12 @@ pub const ClampBackward = struct {
         out[0] = gx;
     }
 
-    fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-        const self: *ClampBackward = @ptrCast(@alignCast(ptr));
+    pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+        _ = allocator;
         self.input.deinit();
-        core.destroyNode(ClampBackward, allocator, self);
     }
 
-    pub const vtable = BackwardFunction.VTable{
-        .operands = operands,
-        .backward = backward,
-        .deinit = deinit,
-    };
+    pub const vtable = core.recordVTable(Self);
 };
 
 pub fn GatedBackward(
@@ -904,13 +737,7 @@ pub fn GatedBackward(
             self.right_value = try right.cloneView();
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if ((needs_grad.len == 0 or !needs_grad[0]) and (needs_grad.len < 2 or !needs_grad[1])) return;
 
             var gy_ready = try contiguousForRead(ctx, gy);
@@ -954,18 +781,13 @@ pub fn GatedBackward(
             }
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.left_value.deinit();
             self.right_value.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -984,28 +806,17 @@ pub fn SplitSwiGluBackward(comptime tags: anytype, comptime axis: usize) type {
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.splitSwiGluBackwardAxisRank(rawRank(tags.len), &self.input, gy, axis);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.input.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -1024,28 +835,17 @@ pub fn SplitGluBackward(comptime tags: anytype, comptime axis: usize) type {
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.splitGluBackwardAxisRank(rawRank(tags.len), &self.input, gy, axis);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.input.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -1063,27 +863,13 @@ pub fn AddScalarBackward(comptime tags: anytype) type {
             self.* = .{ .parents = .{parent} };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            _ = ptr;
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
+            _ = self;
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.scale(gy, 1); // identity passthrough as a fresh owned tensor
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            core.destroyNode(Self, allocator, self);
-        }
-
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -1102,13 +888,7 @@ pub fn PowScalarBackward(comptime tags: anytype) type {
             self.* = .{ .parents = .{parent}, .input = try input.cloneView(), .exponent = exponent };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
 
             var x = try contiguousForRead(ctx, &self.input);
@@ -1125,17 +905,12 @@ pub fn PowScalarBackward(comptime tags: anytype) type {
             out[0] = gx;
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.input.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -1160,13 +935,7 @@ pub fn MaskedFillBackward(comptime tags: anytype, comptime mask_dtype: tensor_mo
             self.* = .{ .parents = .{parent}, .mask = try mask.cloneView() };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             var m = try contiguousForReadTyped(mask_dtype, ctx, &self.mask);
             defer m.deinit();
@@ -1180,17 +949,12 @@ pub fn MaskedFillBackward(comptime tags: anytype, comptime mask_dtype: tensor_mo
             out[0] = gx;
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.mask.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -1209,13 +973,7 @@ pub fn WhereBackward(comptime tags: anytype, comptime cond_dtype: tensor_mod.DTy
             self.* = .{ .parents = .{ x_parent, y_parent }, .cond = try cond.cloneView() };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             var c = try contiguousForReadTyped(cond_dtype, ctx, &self.cond);
             defer c.deinit();
             var gy_ready = try contiguousForRead(ctx, gy);
@@ -1238,17 +996,12 @@ pub fn WhereBackward(comptime tags: anytype, comptime cond_dtype: tensor_mod.DTy
             }
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.cond.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -1449,27 +1202,12 @@ pub fn SumBackward(comptime source_tags: anytype, comptime result_tags: anytype)
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try expandGradientToTags(result_tags, source_tags, ctx, gy, self.source_shape);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            core.destroyNode(Self, allocator, self);
-        }
-
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -1488,13 +1226,7 @@ pub fn MeanBackward(comptime source_tags: anytype, comptime result_tags: anytype
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
 
             var expanded = try expandGradientToTags(result_tags, source_tags, ctx, gy, self.source_shape);
@@ -1502,16 +1234,7 @@ pub fn MeanBackward(comptime source_tags: anytype, comptime result_tags: anytype
             out[0] = try ctx.scale(&expanded, 1 / @as(f32, @floatFromInt(self.source_shape[axis])));
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            core.destroyNode(Self, allocator, self);
-        }
-
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -1534,13 +1257,7 @@ pub fn VarBackward(comptime source_tags: anytype, comptime axis: usize) type {
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
 
             const rank = comptime rawRank(source_tags.len);
@@ -1582,17 +1299,12 @@ pub fn VarBackward(comptime source_tags: anytype, comptime axis: usize) type {
             out[0] = gx;
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.input.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -1622,28 +1334,17 @@ pub fn StandardizeBackward(comptime tags: anytype, comptime axis: usize) type {
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.standardizeBackwardAxisRank(rawRank(tags.len), &self.input, gy, axis, self.valid_len, self.options);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.input.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -1662,27 +1363,12 @@ pub fn BroadcastBackward(comptime source_tags: anytype, comptime result_tags: an
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try reduceGradientToTags(result_tags, source_tags, ctx, gy, self.source_shape);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            core.destroyNode(Self, allocator, self);
-        }
-
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -1714,34 +1400,16 @@ pub fn GatherBackward(comptime source_tags: anytype, comptime axis: usize) type 
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn estimatedWork(ptr: *const anyopaque) usize {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.estimated_work;
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.scatterAddAxisRank(rawRank(source_tags.len), gy, self.source_shape, axis, self.indices);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
             allocator.free(self.indices);
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-            .estimated_work = estimatedWork,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -1768,13 +1436,7 @@ pub fn TopKBackward(comptime source_tags: anytype, comptime axis: usize) type {
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
 
             const rank = comptime rawRank(source_tags.len);
@@ -1810,17 +1472,12 @@ pub fn TopKBackward(comptime source_tags: anytype, comptime axis: usize) type {
             out[0] = gx;
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.indices.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -1853,13 +1510,7 @@ pub fn MinMaxBackward(comptime source_tags: anytype, comptime axis: usize) type 
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
 
             const rank = comptime rawRank(source_tags.len);
@@ -1891,17 +1542,12 @@ pub fn MinMaxBackward(comptime source_tags: anytype, comptime axis: usize) type 
             out[0] = gx;
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.indices.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -1922,27 +1568,12 @@ pub fn NarrowBackward(comptime source_tags: anytype, comptime axis: usize) type 
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.sliceGradientAxisRank(rawRank(source_tags.len), gy, self.source_shape, axis, self.start);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            core.destroyNode(Self, allocator, self);
-        }
-
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -1961,27 +1592,13 @@ pub fn CumsumBackward(comptime source_tags: anytype, comptime axis: usize) type 
             self.* = .{ .parents = .{parent} };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            _ = ptr;
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
+            _ = self;
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.cumsumReverseAxisRank(rawRank(source_tags.len), gy, axis);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            core.destroyNode(Self, allocator, self);
-        }
-
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -2027,13 +1644,7 @@ pub fn LinearRecurrenceBackward(comptime source_tags: anytype, comptime decay_ta
             if (initial) |ini| self.initial_value = try ini.cloneView();
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             const need_b = needs_grad.len > 0 and needs_grad[0];
             const need_a = needs_grad.len > 1 and needs_grad[1];
             const need_init = needs_grad.len > 2 and needs_grad[2];
@@ -2060,19 +1671,14 @@ pub fn LinearRecurrenceBackward(comptime source_tags: anytype, comptime decay_ta
             }
         }
 
-        fn deinitFn(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.a_view.deinit();
             self.h_value.deinit();
             if (self.initial_value) |*ini| ini.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinitFn,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -2096,29 +1702,14 @@ pub fn PadBackward(comptime source_tags: anytype, comptime axis: usize) type {
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             var view = try ctx.narrowAxisRank(rawRank(source_tags.len), gy, axis, self.before, self.source_shape[axis]);
             defer view.deinit();
             out[0] = try ctx.materialize(&view);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            core.destroyNode(Self, allocator, self);
-        }
-
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -2139,13 +1730,7 @@ pub fn ConcatBackward(comptime tags: anytype, comptime axis: usize) type {
             self.sizes = try allocator.dupe(usize, sizes);
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents;
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             var start: usize = 0;
             for (self.sizes, 0..) |size, i| {
                 defer start += size;
@@ -2156,18 +1741,12 @@ pub fn ConcatBackward(comptime tags: anytype, comptime axis: usize) type {
             }
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
             allocator.free(self.parents);
             allocator.free(self.sizes);
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -2188,13 +1767,7 @@ pub fn SetSliceBackward(comptime tags: anytype, comptime axis: usize) type {
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 out[0] = try ctx.zeroSliceAxisRank(rawRank(tags.len), gy, axis, self.start, self.update_shape[axis]);
             }
@@ -2205,16 +1778,7 @@ pub fn SetSliceBackward(comptime tags: anytype, comptime axis: usize) type {
             }
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            core.destroyNode(Self, allocator, self);
-        }
-
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -2232,13 +1796,7 @@ pub fn SetRowsBackward(comptime tags: anytype, comptime axis: usize) type {
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 out[0] = try ctx.zeroRowsAxisRank(rawRank(tags.len), gy, axis, self.indices);
             }
@@ -2247,17 +1805,11 @@ pub fn SetRowsBackward(comptime tags: anytype, comptime axis: usize) type {
             }
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
             allocator.free(self.indices);
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -2288,13 +1840,7 @@ pub fn ProdBackward(comptime source_tags: anytype, comptime axis: usize) type {
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
 
             var x_ready = try contiguousForRead(ctx, &self.input);
@@ -2338,17 +1884,12 @@ pub fn ProdBackward(comptime source_tags: anytype, comptime axis: usize) type {
             out[0] = gx;
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.input.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -2372,13 +1913,7 @@ pub fn CumprodBackward(comptime source_tags: anytype, comptime axis: usize) type
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
 
             var x_ready = try contiguousForRead(ctx, &self.input);
@@ -2439,18 +1974,13 @@ pub fn CumprodBackward(comptime source_tags: anytype, comptime axis: usize) type
             out[0] = gx;
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.input.deinit();
             self.output.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -2474,13 +2004,7 @@ pub fn LogsumexpBackward(comptime source_tags: anytype, comptime axis: usize) ty
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
 
             var x_ready = try contiguousForRead(ctx, &self.input);
@@ -2517,18 +2041,13 @@ pub fn LogsumexpBackward(comptime source_tags: anytype, comptime axis: usize) ty
             out[0] = gx;
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.input.deinit();
             self.output.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -2548,13 +2067,7 @@ pub fn LogSoftmaxBackward(comptime source_tags: anytype, comptime axis: usize) t
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
 
             var y_ready = try contiguousForRead(ctx, &self.output);
@@ -2587,17 +2100,12 @@ pub fn LogSoftmaxBackward(comptime source_tags: anytype, comptime axis: usize) t
             out[0] = gx;
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.output.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -2618,13 +2126,7 @@ pub fn TakeAlongBackward(comptime tags: anytype, comptime axis: usize) type {
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             // Adjoint of the elementwise gather: scatter-add gy into zeros.
             var zeros_base = try ctx.zeros(self.source_shape[0..]);
@@ -2632,17 +2134,11 @@ pub fn TakeAlongBackward(comptime tags: anytype, comptime axis: usize) type {
             out[0] = try ctx.scatterAddAlongAxisRank(rank, &zeros_base, gy, axis, self.indices);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
             allocator.free(self.indices);
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -2663,13 +2159,7 @@ pub fn ScatterAlongBackward(comptime tags: anytype, comptime axis: usize, compti
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 if (comptime accumulate) {
                     // scatter-add: d/dbase is the identity.
@@ -2704,17 +2194,11 @@ pub fn ScatterAlongBackward(comptime tags: anytype, comptime axis: usize, compti
             }
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
             allocator.free(self.indices);
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -2732,13 +2216,7 @@ pub fn IndexAddBackward(comptime tags: anytype, comptime axis: usize) type {
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             // out = self + scatterAdd(update): d/dself is the identity;
             // d/dupdate gathers the addressed rows (duplicate indices each
             // receive their position's gradient — the accumulation adjoint).
@@ -2750,17 +2228,11 @@ pub fn IndexAddBackward(comptime tags: anytype, comptime axis: usize) type {
             }
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
             allocator.free(self.indices);
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -2781,27 +2253,12 @@ pub fn ZeroSliceBackward(comptime tags: anytype, comptime axis: usize) type {
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.zeroSliceAxisRank(rawRank(tags.len), gy, axis, self.start, self.length);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            core.destroyNode(Self, allocator, self);
-        }
-
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -2819,28 +2276,16 @@ pub fn ZeroRowsBackward(comptime tags: anytype, comptime axis: usize) type {
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.zeroRowsAxisRank(rawRank(tags.len), gy, axis, self.indices);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
             allocator.free(self.indices);
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -2859,28 +2304,17 @@ pub fn SoftmaxBackward(comptime tags: anytype, comptime axis: usize) type {
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.softmaxBackwardAxisRank(rawRank(tags.len), &self.output, gy, axis);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.output.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -2901,28 +2335,17 @@ pub fn SoftmaxExtBackward(comptime tags: anytype, comptime axis: usize) type {
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.softmaxExtBackwardAxisRank(rawRank(tags.len), &self.output, gy, axis, self.scale);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.output.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -2943,28 +2366,17 @@ pub fn RmsNormBackward(comptime tags: anytype, comptime axis: usize) type {
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.rmsNormBackwardAxisRank(rawRank(tags.len), &self.input, gy, axis, self.eps);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.input.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -2997,13 +2409,7 @@ pub fn RmsNormMulBackward(comptime tags: anytype, comptime axis: usize) type {
             self.weight = try weight.cloneView();
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 out[0] = try ctx.rmsNormMulBackwardInputAxisRank(rawRank(tags.len), &self.input, &self.weight, gy, axis, self.eps);
             }
@@ -3012,18 +2418,13 @@ pub fn RmsNormMulBackward(comptime tags: anytype, comptime axis: usize) type {
             }
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.input.deinit();
             self.weight.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -3057,13 +2458,7 @@ pub fn RmsNormMulAddBackward(comptime tags: anytype, comptime axis: usize) type 
             self.weight = try weight.cloneView();
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 out[0] = try ctx.rmsNormMulBackwardInputAxisRank(rawRank(tags.len), &self.input, &self.weight, gy, axis, self.eps);
             }
@@ -3075,18 +2470,13 @@ pub fn RmsNormMulAddBackward(comptime tags: anytype, comptime axis: usize) type 
             }
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.input.deinit();
             self.weight.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -3107,28 +2497,17 @@ pub fn LayerNormBackward(comptime tags: anytype, comptime axis: usize) type {
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.layerNormBackwardAxisRank(rawRank(tags.len), &self.input, gy, axis, self.eps);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.input.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -3162,13 +2541,7 @@ pub fn LayerNormAffineBackward(comptime tags: anytype, comptime axis: usize) typ
             self.weight = try weight.cloneView();
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             const need_input = needs_grad.len > 0 and needs_grad[0];
             const need_weight = needs_grad.len > 1 and needs_grad[1];
             const need_bias = needs_grad.len > 2 and needs_grad[2];
@@ -3190,18 +2563,13 @@ pub fn LayerNormAffineBackward(comptime tags: anytype, comptime axis: usize) typ
             if (need_bias) out[2] = result.bias.?;
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.input.deinit();
             self.weight.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -3263,13 +2631,7 @@ pub fn RmsNormMulRopeBackward(
             self.inverse_table = try cloneInverseRopeTable(allocator, table);
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             const need_input = needs_grad.len > 0 and needs_grad[0];
             const need_weight = needs_grad.len > 1 and needs_grad[1];
             if (!need_input and !need_weight) return;
@@ -3285,23 +2647,20 @@ pub fn RmsNormMulRopeBackward(
             }
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.input.deinit();
             self.weight.deinit();
             self.inverse_table.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
 pub const GroupedCausalAttentionBackward = struct {
+    const Self = @This();
+
     parents: [3]?*GradState,
     q: RawTensor,
     k: RawTensor,
@@ -3364,18 +2723,7 @@ pub const GroupedCausalAttentionBackward = struct {
         self.row_stats = try allocator.dupe(f32, row_stats);
     }
 
-    fn operands(ptr: *const anyopaque) []const ?*GradState {
-        const self: *const GroupedCausalAttentionBackward = @ptrCast(@alignCast(ptr));
-        return self.parents[0..];
-    }
-
-    fn estimatedWork(ptr: *const anyopaque) usize {
-        const self: *const GroupedCausalAttentionBackward = @ptrCast(@alignCast(ptr));
-        return self.estimated_work;
-    }
-
-    fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        const self: *const GroupedCausalAttentionBackward = @ptrCast(@alignCast(ptr));
+    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         const need_q = needs_grad.len > 0 and needs_grad[0];
         const need_k = needs_grad.len > 1 and needs_grad[1];
         const need_v = needs_grad.len > 2 and needs_grad[2];
@@ -3423,23 +2771,16 @@ pub const GroupedCausalAttentionBackward = struct {
         return std.math.mul(usize, base, d * branches) catch std.math.maxInt(usize);
     }
 
-    fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-        const self: *GroupedCausalAttentionBackward = @ptrCast(@alignCast(ptr));
+    pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
         self.q.deinit();
         self.k.deinit();
         self.v.deinit();
         self.out.deinit();
         allocator.free(self.kv_head_for_head);
         allocator.free(self.row_stats);
-        core.destroyNode(GroupedCausalAttentionBackward, allocator, self);
     }
 
-    pub const vtable = BackwardFunction.VTable{
-        .operands = operands,
-        .backward = backward,
-        .deinit = deinit,
-        .estimated_work = estimatedWork,
-    };
+    pub const vtable = core.recordVTable(Self);
 };
 
 /// VJP record of the fused `linearCrossEntropy` (loss = CE(x·Wᵀ, labels)):
@@ -3496,18 +2837,7 @@ pub fn LinearCrossEntropyBackward(comptime options: exec_mod.CrossEntropyOptions
             self.row_stats = try allocator.dupe(f32, row_stats);
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn estimatedWork(ptr: *const anyopaque) usize {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.estimated_work;
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             const need_x = needs_grad.len > 0 and needs_grad[0];
             const need_weight = needs_grad.len > 1 and needs_grad[1];
             // The record exclusively owns its saved logits and the VJP
@@ -3538,22 +2868,15 @@ pub fn LinearCrossEntropyBackward(comptime options: exec_mod.CrossEntropyOptions
             }
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
             self.x.deinit();
             self.weight.deinit();
             self.logits.deinit();
             allocator.free(self.labels);
             allocator.free(self.row_stats);
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-            .estimated_work = estimatedWork,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -3629,18 +2952,7 @@ pub const LinearDistillBackward = struct {
         self.row_stats = try allocator.dupe(f32, row_stats);
     }
 
-    fn operands(ptr: *const anyopaque) []const ?*GradState {
-        const self: *const Self = @ptrCast(@alignCast(ptr));
-        return self.parents[0..];
-    }
-
-    fn estimatedWork(ptr: *const anyopaque) usize {
-        const self: *const Self = @ptrCast(@alignCast(ptr));
-        return self.estimated_work;
-    }
-
-    fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        const self: *const Self = @ptrCast(@alignCast(ptr));
+    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         const need_x = needs_grad.len > 0 and needs_grad[0];
         const need_weight = needs_grad.len > 1 and needs_grad[1];
         // Single-writer in-place consumption of the saved logits, as
@@ -3674,8 +2986,7 @@ pub const LinearDistillBackward = struct {
         }
     }
 
-    fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-        const self: *Self = @ptrCast(@alignCast(ptr));
+    pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
         self.x_sel.deinit();
         self.weight.deinit();
         self.logits.deinit();
@@ -3684,15 +2995,9 @@ pub const LinearDistillBackward = struct {
         allocator.free(self.classes);
         allocator.free(self.probs);
         allocator.free(self.row_stats);
-        core.destroyNode(Self, allocator, self);
     }
 
-    pub const vtable = BackwardFunction.VTable{
-        .operands = operands,
-        .backward = backward,
-        .deinit = deinit,
-        .estimated_work = estimatedWork,
-    };
+    pub const vtable = core.recordVTable(Self);
 };
 
 pub fn CrossEntropyBackward(comptime tags: anytype, comptime axis: usize) type {
@@ -3732,32 +3037,20 @@ pub fn CrossEntropyExtBackward(comptime tags: anytype, comptime axis: usize, com
             self.row_stats = try allocator.dupe(f32, row_stats);
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             // For `.mean`/`.sum` the upstream gy must be a scalar; for `.none`
             // it's the per-position gradient tensor (class axis removed).
             out[0] = try ctx.crossEntropyBackwardExUpstreamStatsAxisRank(rawRank(tags.len), &self.logits, axis, self.labels, options, gy, self.row_stats);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
             self.logits.deinit();
             allocator.free(self.labels);
             allocator.free(self.row_stats);
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -3792,13 +3085,7 @@ fn ElementwiseLossBackward(comptime Options: type, comptime options: Options, co
             self.target = try target.cloneView();
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 out[0] = try upstream_fn(ctx, &self.input, &self.target, options, gy, .input);
             }
@@ -3807,18 +3094,13 @@ fn ElementwiseLossBackward(comptime Options: type, comptime options: Options, co
             }
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.input.deinit();
             self.target.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -3869,28 +3151,16 @@ pub fn RopeBackward(
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.ropeAxisRank(rawRank(tags.len), gy, position_axis, feature_axis, self.positions, self.theta_base, mode, true);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
             allocator.free(self.positions);
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -3922,34 +3192,25 @@ pub fn RopeTableBackward(
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             // Mirrors the forward: the partial entry self-falls-back to the
             // full kernel when the table spans the whole feature axis.
             out[0] = try ctx.ropePartialAxisRankWithTable(rawRank(tags.len), gy, position_axis, feature_axis, &self.inverse_table, mode);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.inverse_table.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
 pub const ReshapeBackward = struct {
+    const Self = @This();
+
     parents: [1]?*GradState,
     source_shape: []usize,
 
@@ -3960,13 +3221,7 @@ pub const ReshapeBackward = struct {
         };
     }
 
-    fn operands(ptr: *const anyopaque) []const ?*GradState {
-        const self: *const ReshapeBackward = @ptrCast(@alignCast(ptr));
-        return self.parents[0..];
-    }
-
-    fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        const self: *const ReshapeBackward = @ptrCast(@alignCast(ptr));
+    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len == 0 or !needs_grad[0]) return;
 
         var ready = if (gy.isContiguous()) try gy.cloneView() else try ctx.materialize(gy);
@@ -3974,17 +3229,11 @@ pub const ReshapeBackward = struct {
         out[0] = try ready.reshape(self.source_shape);
     }
 
-    fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-        const self: *ReshapeBackward = @ptrCast(@alignCast(ptr));
+    pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
         allocator.free(self.source_shape);
-        core.destroyNode(ReshapeBackward, allocator, self);
     }
 
-    pub const vtable = BackwardFunction.VTable{
-        .operands = operands,
-        .backward = backward,
-        .deinit = deinit,
-    };
+    pub const vtable = core.recordVTable(Self);
 };
 
 pub fn AxisViewBackward(comptime source_tags: anytype, comptime axes: anytype) type {
@@ -4002,13 +3251,7 @@ pub fn AxisViewBackward(comptime source_tags: anytype, comptime axes: anytype) t
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
 
             if (comptime source_tags.len == 0) {
@@ -4029,16 +3272,7 @@ pub fn AxisViewBackward(comptime source_tags: anytype, comptime axes: anytype) t
             out[0] = try ctx.materialize(&view);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            core.destroyNode(Self, allocator, self);
-        }
-
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -4082,13 +3316,7 @@ pub fn StridedViewBackward(comptime source_tags: anytype, comptime view_tags: an
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
 
             if (!self.gyShapeMatches(gy)) return tensor_mod.TensorError.ShapeMismatch;
@@ -4112,11 +3340,6 @@ pub fn StridedViewBackward(comptime source_tags: anytype, comptime view_tags: an
                 gxd[source_linear] += g;
             }
             out[0] = gx;
-        }
-
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            core.destroyNode(Self, allocator, self);
         }
 
         fn gyShapeMatches(self: *const Self, gy: *const RawTensor) bool {
@@ -4279,11 +3502,7 @@ pub fn StridedViewBackward(comptime source_tags: anytype, comptime view_tags: an
             return out;
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -4332,18 +3551,7 @@ pub fn CausalDepthwiseConv1dBackward(
             }
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn estimatedWork(ptr: *const anyopaque) usize {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.estimated_work;
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 out[0] = try ctx.causalDepthwiseConv1dBackwardInputAxisRank(
                     rawRank(input_tags.len),
@@ -4380,20 +3588,13 @@ pub fn CausalDepthwiseConv1dBackward(
             return std.math.mul(usize, base, branches) catch std.math.maxInt(usize);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
             self.input_value.deinit();
             self.kernel_value.deinit();
             if (self.state) |values| allocator.free(values);
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-            .estimated_work = estimatedWork,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -4442,18 +3643,7 @@ pub fn CausalConv1dBackward(
             }
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn estimatedWork(ptr: *const anyopaque) usize {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.estimated_work;
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 out[0] = try ctx.causalConv1dBackwardInputAxisRank(
                     rawRank(input_tags.len),
@@ -4491,20 +3681,13 @@ pub fn CausalConv1dBackward(
             return std.math.mul(usize, base, branches) catch std.math.maxInt(usize);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
             self.input_value.deinit();
             self.weight_value.deinit();
             if (self.state) |values| allocator.free(values);
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-            .estimated_work = estimatedWork,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -4556,18 +3739,7 @@ pub fn GroupedCausalConv1dBackward(
             }
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn estimatedWork(ptr: *const anyopaque) usize {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.estimated_work;
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 out[0] = try ctx.groupedCausalConv1dBackwardInputAxisRank(
                     rawRank(input_tags.len),
@@ -4607,20 +3779,13 @@ pub fn GroupedCausalConv1dBackward(
             return std.math.mul(usize, base, branches) catch std.math.maxInt(usize);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
             self.input_value.deinit();
             self.weight_value.deinit();
             if (self.state) |values| allocator.free(values);
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-            .estimated_work = estimatedWork,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -4675,18 +3840,7 @@ pub const Conv2dBackward = struct {
         self.weight_value = try weight.cloneView();
     }
 
-    fn operands(ptr: *const anyopaque) []const ?*GradState {
-        const self: *const Self = @ptrCast(@alignCast(ptr));
-        return self.parents[0..];
-    }
-
-    fn estimatedWork(ptr: *const anyopaque) usize {
-        const self: *const Self = @ptrCast(@alignCast(ptr));
-        return self.estimated_work;
-    }
-
-    fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        const self: *const Self = @ptrCast(@alignCast(ptr));
+    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len > 0 and needs_grad[0]) {
             out[0] = try ctx.conv2dBackwardInput(gy, &self.weight_value, self.input_shape[0], self.input_shape[1], self.stride, self.pad, self.groups);
         }
@@ -4700,19 +3854,13 @@ pub const Conv2dBackward = struct {
         }
     }
 
-    fn deinitFn(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-        const self: *Self = @ptrCast(@alignCast(ptr));
+    pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+        _ = allocator;
         self.input_value.deinit();
         self.weight_value.deinit();
-        core.destroyNode(Self, allocator, self);
     }
 
-    pub const vtable = BackwardFunction.VTable{
-        .operands = operands,
-        .backward = backward,
-        .deinit = deinitFn,
-        .estimated_work = estimatedWork,
-    };
+    pub const vtable = core.recordVTable(Self);
 };
 
 /// VJP for `unfold` (im2col patch extraction): the input gradient is the
@@ -4746,27 +3894,12 @@ pub const UnfoldBackward = struct {
         };
     }
 
-    fn operands(ptr: *const anyopaque) []const ?*GradState {
-        const self: *const Self = @ptrCast(@alignCast(ptr));
-        return self.parents[0..];
-    }
-
-    fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        const self: *const Self = @ptrCast(@alignCast(ptr));
+    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len == 0 or !needs_grad[0]) return;
         out[0] = try ctx.fold(gy, self.output_size, self.kernel, self.stride, self.pad);
     }
 
-    fn deinitFn(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-        const self: *Self = @ptrCast(@alignCast(ptr));
-        core.destroyNode(Self, allocator, self);
-    }
-
-    pub const vtable = BackwardFunction.VTable{
-        .operands = operands,
-        .backward = backward,
-        .deinit = deinitFn,
-    };
+    pub const vtable = core.recordVTable(Self);
 };
 
 /// VJP for `fold` (col2im patch scatter): the column gradient is the
@@ -4797,27 +3930,12 @@ pub const FoldBackward = struct {
         };
     }
 
-    fn operands(ptr: *const anyopaque) []const ?*GradState {
-        const self: *const Self = @ptrCast(@alignCast(ptr));
-        return self.parents[0..];
-    }
-
-    fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        const self: *const Self = @ptrCast(@alignCast(ptr));
+    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len == 0 or !needs_grad[0]) return;
         out[0] = try ctx.unfold(gy, self.kernel, self.stride, self.pad);
     }
 
-    fn deinitFn(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-        const self: *Self = @ptrCast(@alignCast(ptr));
-        core.destroyNode(Self, allocator, self);
-    }
-
-    pub const vtable = BackwardFunction.VTable{
-        .operands = operands,
-        .backward = backward,
-        .deinit = deinitFn,
-    };
+    pub const vtable = core.recordVTable(Self);
 };
 
 /// VJP of the channel-last max pool2d: `gy` routes to each window's argmax
@@ -4843,28 +3961,17 @@ pub const MaxPool2dBackward = struct {
         };
     }
 
-    fn operands(ptr: *const anyopaque) []const ?*GradState {
-        const self: *const Self = @ptrCast(@alignCast(ptr));
-        return self.parents[0..];
-    }
-
-    fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        const self: *const Self = @ptrCast(@alignCast(ptr));
+    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len == 0 or !needs_grad[0]) return;
         out[0] = try ctx.maxPool2dBackward(&self.input_value, gy, self.kernel, self.stride, self.pad);
     }
 
-    fn deinitFn(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-        const self: *Self = @ptrCast(@alignCast(ptr));
+    pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+        _ = allocator;
         self.input_value.deinit();
-        core.destroyNode(Self, allocator, self);
     }
 
-    pub const vtable = BackwardFunction.VTable{
-        .operands = operands,
-        .backward = backward,
-        .deinit = deinitFn,
-    };
+    pub const vtable = core.recordVTable(Self);
 };
 
 /// VJP of the channel-last avg pool2d: scatter `gy / valid_count` over each
@@ -4884,27 +3991,12 @@ pub const AvgPool2dBackward = struct {
         self.* = .{ .parents = .{parent}, .in_h = in_h, .in_w = in_w, .kernel = kernel, .stride = stride, .pad = pad };
     }
 
-    fn operands(ptr: *const anyopaque) []const ?*GradState {
-        const self: *const Self = @ptrCast(@alignCast(ptr));
-        return self.parents[0..];
-    }
-
-    fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        const self: *const Self = @ptrCast(@alignCast(ptr));
+    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len == 0 or !needs_grad[0]) return;
         out[0] = try ctx.avgPool2dBackward(gy, self.in_h, self.in_w, self.kernel, self.stride, self.pad);
     }
 
-    fn deinitFn(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-        const self: *Self = @ptrCast(@alignCast(ptr));
-        core.destroyNode(Self, allocator, self);
-    }
-
-    pub const vtable = BackwardFunction.VTable{
-        .operands = operands,
-        .backward = backward,
-        .deinit = deinitFn,
-    };
+    pub const vtable = core.recordVTable(Self);
 };
 
 /// VJP of the 2× nearest upsample: a 2×2 stride-2 sum-pool of `gy`.
@@ -4918,27 +4010,13 @@ pub const Upsample2xNearestBackward = struct {
         self.* = .{ .parents = .{parent} };
     }
 
-    fn operands(ptr: *const anyopaque) []const ?*GradState {
-        const self: *const Self = @ptrCast(@alignCast(ptr));
-        return self.parents[0..];
-    }
-
-    fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        _ = ptr;
+    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
+        _ = self;
         if (needs_grad.len == 0 or !needs_grad[0]) return;
         out[0] = try ctx.upsample2xNearestBackward(gy);
     }
 
-    fn deinitFn(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-        const self: *Self = @ptrCast(@alignCast(ptr));
-        core.destroyNode(Self, allocator, self);
-    }
-
-    pub const vtable = BackwardFunction.VTable{
-        .operands = operands,
-        .backward = backward,
-        .deinit = deinitFn,
-    };
+    pub const vtable = core.recordVTable(Self);
 };
 
 /// VJP of the per-channel PReLU: `gx = x > 0 ? gy : α[c]·gy`;
@@ -4963,13 +4041,7 @@ pub const PreluChannelsBackward = struct {
         self.alpha_value = try alpha.cloneView();
     }
 
-    fn operands(ptr: *const anyopaque) []const ?*GradState {
-        const self: *const Self = @ptrCast(@alignCast(ptr));
-        return self.parents[0..];
-    }
-
-    fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        const self: *const Self = @ptrCast(@alignCast(ptr));
+    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len > 0 and needs_grad[0]) {
             out[0] = try ctx.preluChannelsBackwardInput(gy, &self.input_value, &self.alpha_value);
         }
@@ -4978,18 +4050,13 @@ pub const PreluChannelsBackward = struct {
         }
     }
 
-    fn deinitFn(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-        const self: *Self = @ptrCast(@alignCast(ptr));
+    pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+        _ = allocator;
         self.input_value.deinit();
         self.alpha_value.deinit();
-        core.destroyNode(Self, allocator, self);
     }
 
-    pub const vtable = BackwardFunction.VTable{
-        .operands = operands,
-        .backward = backward,
-        .deinit = deinitFn,
-    };
+    pub const vtable = core.recordVTable(Self);
 };
 
 /// VJP of the per-channel affine `y = x·scale[c] + shift[c]`:
@@ -5015,13 +4082,7 @@ pub const ChannelAffineBackward = struct {
         self.scale_value = try scale.cloneView();
     }
 
-    fn operands(ptr: *const anyopaque) []const ?*GradState {
-        const self: *const Self = @ptrCast(@alignCast(ptr));
-        return self.parents[0..];
-    }
-
-    fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        const self: *const Self = @ptrCast(@alignCast(ptr));
+    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len > 0 and needs_grad[0]) {
             out[0] = try ctx.channelAffine(gy, &self.scale_value, null);
         }
@@ -5035,18 +4096,13 @@ pub const ChannelAffineBackward = struct {
         }
     }
 
-    fn deinitFn(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-        const self: *Self = @ptrCast(@alignCast(ptr));
+    pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+        _ = allocator;
         self.input_value.deinit();
         self.scale_value.deinit();
-        core.destroyNode(Self, allocator, self);
     }
 
-    pub const vtable = BackwardFunction.VTable{
-        .operands = operands,
-        .backward = backward,
-        .deinit = deinitFn,
-    };
+    pub const vtable = core.recordVTable(Self);
 };
 
 pub fn Conv1dBackward(
@@ -5098,18 +4154,7 @@ pub fn Conv1dBackward(
             self.weight_value = try weight.cloneView();
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn estimatedWork(ptr: *const anyopaque) usize {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.estimated_work;
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 out[0] = try ctx.conv1dBackwardInputAxisRank(
                     rawRank(input_tags.len),
@@ -5153,19 +4198,13 @@ pub fn Conv1dBackward(
             return std.math.mul(usize, base, branches) catch std.math.maxInt(usize);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.input_value.deinit();
             self.weight_value.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-            .estimated_work = estimatedWork,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -5218,13 +4257,7 @@ pub fn ConvTranspose1dBackward(comptime input_tags: anytype) type {
             self.weight_value = try weight2.cloneView();
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             const need_input = needs_grad.len > 0 and needs_grad[0];
             const need_weight = needs_grad.len > 1 and needs_grad[1];
             const need_bias = needs_grad.len > 2 and needs_grad[2];
@@ -5245,18 +4278,13 @@ pub fn ConvTranspose1dBackward(comptime input_tags: anytype) type {
             if (need_bias) out[2] = try ctx.sumAxisRank(2, gy, 0);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.input_value.deinit();
             self.weight_value.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -5299,13 +4327,7 @@ pub fn SnakeBackward(comptime tags: anytype) type {
             self.inv_b_value = try inv_b.cloneView();
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 out[0] = try ctx.snakeRowsBackwardInput(&self.input_value, gy, &self.alpha_value, &self.inv_b_value);
             }
@@ -5318,19 +4340,14 @@ pub fn SnakeBackward(comptime tags: anytype) type {
             }
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.input_value.deinit();
             self.alpha_value.deinit();
             self.inv_b_value.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -5375,13 +4392,7 @@ pub fn GroupNormBackward(comptime tags: anytype) type {
             }
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             const need_input = needs_grad.len > 0 and needs_grad[0];
             const need_weight = needs_grad.len > 1 and needs_grad[1];
             const need_bias = needs_grad.len > 2 and needs_grad[2];
@@ -5402,18 +4413,13 @@ pub fn GroupNormBackward(comptime tags: anytype) type {
             if (need_bias) out[2] = result.bias.?;
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.input_value.deinit();
             if (self.weight_value) |*w| w.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -5475,18 +4481,7 @@ pub fn EinsumBackward(comptime left_tags: anytype, comptime right_tags: anytype,
             self.right_value = try right.cloneView();
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn estimatedWork(ptr: *const anyopaque) usize {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.estimated_work;
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             const need_left = needs_grad.len > 0 and needs_grad[0];
             const need_right = needs_grad.len > 1 and needs_grad[1];
 
@@ -5566,19 +4561,13 @@ pub fn EinsumBackward(comptime left_tags: anytype, comptime right_tags: anytype,
             return std.math.mul(usize, a, b) catch std.math.maxInt(usize);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.left_value.deinit();
             self.right_value.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-            .estimated_work = estimatedWork,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -5625,18 +4614,7 @@ pub fn AddDotBackward(comptime base_tags: anytype, comptime left_tags: anytype, 
             self.right_value = try right.cloneView();
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn estimatedWork(ptr: *const anyopaque) usize {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.estimated_work;
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             const need_base = needs_grad.len > 0 and needs_grad[0];
             const need_left = needs_grad.len > 1 and needs_grad[1];
             const need_right = needs_grad.len > 2 and needs_grad[2];
@@ -5701,19 +4679,13 @@ pub fn AddDotBackward(comptime base_tags: anytype, comptime left_tags: anytype, 
             return parallel.saturatedMul3(m * k, n, branches);
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.left_value.deinit();
             self.right_value.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-            .estimated_work = estimatedWork,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -5780,13 +4752,7 @@ pub fn ConstRhsEinsumBackward(
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 var right_f32 = if (comptime dtype_mod.isBlockQuantized(rhs_dtype))
                     try ctx.dequantizeTensorTyped(rhs_dtype, &self.right_value)
@@ -5807,18 +4773,13 @@ pub fn ConstRhsEinsumBackward(
             }
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.right_value.deinit();
             if (self.left_value) |*left| left.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
@@ -5865,16 +4826,6 @@ pub fn TernarySteDotBackward(comptime left_tags: anytype) type {
             };
         }
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn estimatedWork(ptr: *const anyopaque) usize {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.estimated_work;
-        }
-
         /// DotBackward's accounting adapted to this op's fixed shapes: each
         /// live branch is one [m, n] x [n, k]-shaped dense contraction, so
         /// work = result_elems (m*n) * contract (k) * branches. The dx
@@ -5893,8 +4844,7 @@ pub fn TernarySteDotBackward(comptime left_tags: anytype) type {
             return parallel.saturatedMul3(result_elems, k, branches);
         }
 
-        fn backward(ptr: *const anyopaque, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             const m = self.left.shape.at(0);
             const k = self.left.shape.at(1);
             const n = self.rhs.n;
@@ -5926,18 +4876,12 @@ pub fn TernarySteDotBackward(comptime left_tags: anytype) type {
             }
         }
 
-        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
             self.left.deinit();
             self.rhs.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-            .estimated_work = estimatedWork,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }

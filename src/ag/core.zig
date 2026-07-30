@@ -97,6 +97,58 @@ pub fn destroyNode(comptime Record: type, allocator: Allocator, record: *Record)
     allocator.destroy(node);
 }
 
+/// Synthesize a record's `BackwardFunction.VTable` from its typed decls,
+/// replacing the hand-written anyopaque plumbing every record used to
+/// repeat:
+/// - `operands` returns `self.parents[0..]` (array or slice field alike);
+/// - `backward` casts and delegates to
+///   `Record.vjp(self, ctx, gy, needs_grad, out)` — the record's typed
+///   backward body, verbatim minus the cast lines;
+/// - `deinit` runs `Record.deinitFields(self, allocator)` iff declared
+///   (records owning tensors/slices release them there), then frees the
+///   co-allocated node;
+/// - `.estimated_work` is wired automatically iff the record carries an
+///   `estimated_work` field, so a record can never hold the field and
+///   silently lose async backward scheduling to a forgotten vtable line;
+/// - `.prefer_async_backward` from an optional `pub const` of that name.
+pub fn recordVTable(comptime Record: type) BackwardFunction.VTable {
+    const Shim = struct {
+        fn operands(ptr: *const anyopaque) []const ?*GradState {
+            const self: *const Record = @ptrCast(@alignCast(ptr));
+            return self.parents[0..];
+        }
+
+        fn backward(
+            ptr: *const anyopaque,
+            ctx: *ExecContext,
+            gy: *const Tensor,
+            needs_grad: []const bool,
+            out: []?Tensor,
+        ) anyerror!void {
+            const self: *const Record = @ptrCast(@alignCast(ptr));
+            return Record.vjp(self, ctx, gy, needs_grad, out);
+        }
+
+        fn deinit(ptr: *anyopaque, allocator: Allocator) void {
+            const self: *Record = @ptrCast(@alignCast(ptr));
+            if (comptime @hasDecl(Record, "deinitFields")) self.deinitFields(allocator);
+            destroyNode(Record, allocator, self);
+        }
+
+        fn estimatedWork(ptr: *const anyopaque) usize {
+            const self: *const Record = @ptrCast(@alignCast(ptr));
+            return self.estimated_work;
+        }
+    };
+    return .{
+        .operands = Shim.operands,
+        .backward = Shim.backward,
+        .deinit = Shim.deinit,
+        .prefer_async_backward = if (@hasDecl(Record, "prefer_async_backward")) Record.prefer_async_backward else false,
+        .estimated_work = if (@hasField(Record, "estimated_work")) Shim.estimatedWork else null,
+    };
+}
+
 pub const GradState = struct {
     allocator: Allocator,
     grad: ?Tensor = null,
