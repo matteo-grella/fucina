@@ -38,10 +38,6 @@ pub fn dotLeftOrder(comptime left_tags: anytype, comptime right_tags: anytype, c
     return dotOrder(left_tags.len, left_tags, right_tags, contract_tag, [_]DotOrderPart{ .batch, .left_free, .contract });
 }
 
-pub fn dotLeftTransAOrder(comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag) [left_tags.len]Tag {
-    return dotOrder(left_tags.len, left_tags, right_tags, contract_tag, [_]DotOrderPart{ .batch, .contract, .left_free });
-}
-
 pub fn dotRightOrder(comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag) [right_tags.len]Tag {
     return dotOrder(right_tags.len, left_tags, right_tags, contract_tag, [_]DotOrderPart{ .batch, .contract, .right_free });
 }

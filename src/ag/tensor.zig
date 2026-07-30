@@ -23,7 +23,6 @@ const UnaryOp = exec_mod.UnaryOp;
 const GatedOp = exec_mod.GatedOp;
 const RopeMode = exec_mod.RopeMode;
 const GradState = core.GradState;
-const BackwardFunction = core.BackwardFunction;
 const Tag = tags_mod.Tag;
 const inserted_axis = tags_mod.inserted_axis;
 const normalizeTags = tags_mod.normalizeTags;
@@ -49,7 +48,6 @@ const tagsEqual = tags_mod.tagsEqual;
 const dotLeftOrder = tags_mod.dotLeftOrder;
 const dotRightOrder = tags_mod.dotRightOrder;
 const dotRightTransBOrder = tags_mod.dotRightTransBOrder;
-const dotBatchTags = tags_mod.dotBatchTags;
 const dotBatchLen = tags_mod.dotBatchLen;
 const dotLeftFreeLen = tags_mod.dotLeftFreeLen;
 const dotRightFreeLen = tags_mod.dotRightFreeLen;
@@ -6182,14 +6180,6 @@ fn typedConstantRepeatAxis(self: anytype, ctx: *ExecContext, comptime tag: Tag, 
     const self_ptr = tensorObjectPtrFrom(@TypeOf(self), &self);
     for (ptrs) |*ptr| ptr.* = self_ptr;
     return typedConstantConcat(self_ptr, ctx, tag, ptrs);
-}
-
-pub fn variable(ctx: *ExecContext, comptime tags_spec: anytype, value: RawTensor) !Tensor(tags_spec) {
-    return Tensor(tags_spec).variable(ctx, value);
-}
-
-pub fn constant(ctx: *ExecContext, comptime tags_spec: anytype, value: RawTensor) !Tensor(tags_spec) {
-    return Tensor(tags_spec).constant(ctx, value);
 }
 
 fn pointwise(comptime op: PointwiseOp, self: anytype, ctx: *ExecContext, other: anytype) !Tensor(pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags)) {

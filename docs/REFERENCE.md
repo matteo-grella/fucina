@@ -5783,13 +5783,16 @@ present in **both** operands (compile error otherwise), and the result must
 fit `max_rank`. Contracting a vector against a vector yields the empty tuple —
 a scalar tensor.
 
-Four canonical **storage orders** drive kernel selection in `taggedDot`
-(§7.9): they describe, for each operand, the tag order a direct kernel expects.
+Three canonical **storage orders** describe, per operand, the tag order a
+direct kernel expects; the einsum lowering underneath `taggedDot` (§7.9)
+then picks each operand's plain-vs-transposed orientation at runtime by
+which aligned view is already contiguous (a transposed GEMM is free, a
+materialized permutation costs a copy — at most one of transA/transB per
+call, and a side no orientation can express materializes at most once).
 
 ```zig
 // All: (comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag)
 pub fn dotLeftOrder(...) [left_tags.len]Tag        // batch ++ left_free ++ contract
-pub fn dotLeftTransAOrder(...) [left_tags.len]Tag  // batch ++ contract ++ left_free
 pub fn dotRightOrder(...) [right_tags.len]Tag      // batch ++ contract ++ right_free
 pub fn dotRightTransBOrder(...) [right_tags.len]Tag// batch ++ right_free ++ contract
 ```
