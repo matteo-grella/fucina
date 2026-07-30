@@ -10538,7 +10538,6 @@ pub const File = struct {
     pub fn deinit(self: *File) void
     pub fn tensor(self: *const File, name: []const u8) !*const TensorInfo   // Error.TensorNotFound
     pub fn maybeTensor(self: *const File, name: []const u8) ?*const TensorInfo
-    pub fn names(self: *const File) []const TensorInfo    // the full info slice, not just names
     pub fn tensorNames(self: *const File, allocator: Allocator) ![][]const u8
     pub fn len(self: *const File) usize
     pub fn isEmpty(self: *const File) bool

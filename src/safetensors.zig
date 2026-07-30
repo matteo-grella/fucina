@@ -292,10 +292,6 @@ pub const File = struct {
         return &self.tensors[i];
     }
 
-    pub fn names(self: *const File) []const TensorInfo {
-        return self.tensors;
-    }
-
     pub fn tensorNames(self: *const File, allocator: Allocator) ![][]const u8 {
         const out = try allocator.alloc([]const u8, self.tensors.len);
         for (self.tensors, out) |*info, *name| name.* = info.name;
@@ -320,7 +316,9 @@ pub fn readPrefix(allocator: Allocator, reader: *std.Io.Reader) !File {
     try reader.readSliceAll(header);
 
     var header_file = try parseHeader(allocator, header, &.{});
-    defer deinitHeaderOnly(&header_file);
+    // Header-only File: parseHeader leaves ownership at .borrowed, so
+    // deinit frees exactly the parsed header structures.
+    defer header_file.deinit();
     const data_len = dataLen(&header_file);
 
     const header_total = std.math.add(usize, n_len, header_len) catch return Error.ValidationOverflow;
@@ -692,22 +690,6 @@ fn appendInt(out: *std.ArrayList(u8), allocator: Allocator, value: usize) !void 
     var buf: [20]u8 = undefined;
     const text = try std.fmt.bufPrint(&buf, "{d}", .{value});
     try out.appendSlice(allocator, text);
-}
-
-fn deinitHeaderOnly(file: *File) void {
-    for (file.tensors) |*tensor| {
-        file.allocator.free(tensor.name);
-        file.allocator.free(tensor.shape);
-    }
-    file.allocator.free(file.tensors);
-    var meta_it = file.metadata.iterator();
-    while (meta_it.next()) |entry| {
-        file.allocator.free(entry.key_ptr.*);
-        file.allocator.free(entry.value_ptr.*);
-    }
-    file.metadata.deinit();
-    file.index.deinit();
-    file.* = undefined;
 }
 
 fn dataLen(file: *const File) usize {
