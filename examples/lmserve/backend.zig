@@ -490,14 +490,22 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
         }
 
         /// `initWarm` over a cache seeded by `sharePrefixFrom`: the token
-        /// shadow is the shared ids prefix.
+        /// shadow is the shared ids prefix. Owns `cache` on EVERY failure
+        /// path (`initWarm`'s own contract) — callers must not hold an
+        /// errdefer across this call, or the cache double-frees.
         fn warmFromShare(self: *Self, cache: KvCache, ids: []const u32, shared: usize, prefix_rows: usize, convo_opts: llm.chat.Options) !Conversation {
             const a = self.allocator;
-            const toks = try a.alloc(usize, shared);
+            var owned = cache;
+            const toks = blk: {
+                // Disarmed once the allocation lands: from there `initWarm`
+                // owns the cache, failure paths included.
+                errdefer owned.deinit();
+                break :blk try a.alloc(usize, shared);
+            };
             defer a.free(toks);
             for (toks, ids[0..shared]) |*dst, src| dst.* = src;
             return Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
-                .cache = cache,
+                .cache = owned,
                 .tokens = toks,
                 .prefix_rows = prefix_rows,
             });
@@ -633,7 +641,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                     cache.truncate(h.prefix_rows);
                     const shared = self.sharePrefixFrom(&cache, ids, selection, h.prefix_rows);
                     if (shared > victim_lcp) {
-                        errdefer cache.deinit();
+                        // warmFromShare owns the cache on every failure path.
                         return self.warmFromShare(cache, ids, shared, h.prefix_rows, convo_opts);
                     }
                     // Same prefix: reconcile-overwrite on the victim's rows.
@@ -646,14 +654,18 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 }
                 // Foreign prefix (fleet mode): nothing behind it is
                 // reusable — reset the cache and rebuild this request's
-                // composed prefix.
+                // composed prefix. The errdefer ends BEFORE the initWarm
+                // call: initWarm owns the cache on its own failure paths,
+                // so a caller errdefer held across it would double-free.
                 h.tokens.deinit(a);
                 a.free(h.selection);
                 a.free(h.opener);
                 var cache = h.cache;
-                errdefer cache.deinit();
-                cache.truncate(0);
-                try self.writeSelectionPrefix(selection, &cache);
+                {
+                    errdefer cache.deinit();
+                    cache.truncate(0);
+                    try self.writeSelectionPrefix(selection, &cache);
+                }
                 return Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
                     .cache = cache,
                     .tokens = &.{},
@@ -663,18 +675,23 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
 
             // Cold start: preload the configured prefix (cartridge, or the
             // fleet selection), then prefix-share from the best-LCP slot
-            // when one holds this request's opening.
+            // when one holds this request's opening. The errdefer ends
+            // BEFORE the ownership-transfer calls (initWarm/warmFromShare
+            // own the cache on their own failure paths).
             var cache = try self.model.initKvCache(self.ctx, self.opts.context_len);
-            errdefer cache.deinit();
             var prefix_rows: usize = 0;
-            if (self.opts.cartridge) |cart| {
-                try cart.writeToCache(self.ctx, &cache);
-                prefix_rows = cart.p;
-            } else if (selection.len > 0) {
-                try self.writeSelectionPrefix(selection, &cache);
-                prefix_rows = selection_p;
+            var shared: usize = 0;
+            {
+                errdefer cache.deinit();
+                if (self.opts.cartridge) |cart| {
+                    try cart.writeToCache(self.ctx, &cache);
+                    prefix_rows = cart.p;
+                } else if (selection.len > 0) {
+                    try self.writeSelectionPrefix(selection, &cache);
+                    prefix_rows = selection_p;
+                }
+                shared = self.sharePrefixFrom(&cache, ids, selection, prefix_rows);
             }
-            const shared = self.sharePrefixFrom(&cache, ids, selection, prefix_rows);
             if (shared > 0) return self.warmFromShare(cache, ids, shared, prefix_rows, convo_opts);
             return Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
                 .cache = cache,
