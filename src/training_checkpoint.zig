@@ -115,30 +115,27 @@ pub fn loadTrainerState(allocator: Allocator, io: std.Io, dir_path: []const u8) 
     return parseTrainerState(allocator, bytes);
 }
 
+/// The hand-written required header: the `format` sentinel plus these
+/// three fields. Every OTHER `TrainerState` field must be optional — the
+/// writer and parser bodies are comptime-generated from the struct, so
+/// adding a field is ONE struct line (JSON key = field name, emission
+/// order = declaration order) and a writer/parser mismatch is impossible
+/// by construction.
+fn trainerStateFieldIsHeader(comptime name: []const u8) bool {
+    return std.mem.eql(u8, name, "version") or std.mem.eql(u8, name, "step") or std.mem.eql(u8, name, "seed");
+}
+
 fn writeTrainerStateJson(state: TrainerState, writer: *std.Io.Writer) !void {
     try writer.print(
         "{{\n  \"format\": \"fucina.training_checkpoint\",\n  \"version\": {d},\n  \"step\": {d},\n  \"seed\": {d}",
         .{ state.version, state.step, state.seed },
     );
-    if (state.lora_rank) |rank| try writer.print(",\n  \"lora_rank\": {d}", .{rank});
-    if (state.lora_alpha) |alpha| try writer.print(",\n  \"lora_alpha\": {d}", .{alpha});
-    if (state.lora_dropout_p) |dropout_p| try writer.print(",\n  \"lora_dropout_p\": {d}", .{dropout_p});
-    if (state.learning_rate) |lr| try writer.print(",\n  \"learning_rate\": {d}", .{lr});
-    if (state.accum_steps) |accum| try writer.print(",\n  \"accum_steps\": {d}", .{accum});
-    if (state.data_seed) |seed| try writer.print(",\n  \"data_seed\": {d}", .{seed});
-    if (state.data_epoch) |epoch| try writer.print(",\n  \"data_epoch\": {d}", .{epoch});
-    if (state.data_index) |index| try writer.print(",\n  \"data_index\": {d}", .{index});
-    if (state.es_sigma) |sigma| try writer.print(",\n  \"es_sigma\": {d}", .{sigma});
-    if (state.es_alpha) |alpha| try writer.print(",\n  \"es_alpha\": {d}", .{alpha});
-    if (state.es_population) |population| try writer.print(",\n  \"es_population\": {d}", .{population});
-    if (state.es_noise) |noise| try writer.print(",\n  \"es_noise\": {d}", .{noise});
-    if (state.es_antithetic) |antithetic| try writer.print(",\n  \"es_antithetic\": {d}", .{antithetic});
-    if (state.es_anchor_decay) |decay| try writer.print(",\n  \"es_anchor_decay\": {d}", .{decay});
-    if (state.es_anchor_lambda) |lambda| try writer.print(",\n  \"es_anchor_lambda\": {d}", .{lambda});
-    if (state.es_ternary_flip_rate) |rate| try writer.print(",\n  \"es_ternary_flip_rate\": {d}", .{rate});
-    if (state.es_ternary_update_fraction) |fraction| try writer.print(",\n  \"es_ternary_update_fraction\": {d}", .{fraction});
-    if (state.es_ternary_update_decay) |decay| try writer.print(",\n  \"es_ternary_update_decay\": {d}", .{decay});
-    if (state.es_iteration) |iteration| try writer.print(",\n  \"es_iteration\": {d}", .{iteration});
+    inline for (@typeInfo(TrainerState).@"struct".fields) |field| {
+        if (comptime trainerStateFieldIsHeader(field.name)) continue;
+        if (@field(state, field.name)) |value| {
+            try writer.print(",\n  \"" ++ field.name ++ "\": {d}", .{value});
+        }
+    }
     try writer.writeAll("\n}\n");
 }
 
@@ -154,30 +151,22 @@ fn parseTrainerState(allocator: Allocator, bytes: []const u8) !TrainerState {
     const version = try jsonU32(object.get("version") orelse return Error.InvalidTrainerState);
     if (version != 1) return Error.UnsupportedTrainerStateVersion;
 
-    return .{
+    var state: TrainerState = .{
         .version = version,
         .step = try jsonU64(object.get("step") orelse return Error.InvalidTrainerState),
         .seed = try jsonU64(object.get("seed") orelse return Error.InvalidTrainerState),
-        .lora_rank = if (object.get("lora_rank")) |value| try jsonU64(value) else null,
-        .lora_alpha = if (object.get("lora_alpha")) |value| try jsonF64(value) else null,
-        .lora_dropout_p = if (object.get("lora_dropout_p")) |value| try jsonF64(value) else null,
-        .learning_rate = if (object.get("learning_rate")) |value| try jsonF64(value) else null,
-        .accum_steps = if (object.get("accum_steps")) |value| try jsonU64(value) else null,
-        .data_seed = if (object.get("data_seed")) |value| try jsonU64(value) else null,
-        .data_epoch = if (object.get("data_epoch")) |value| try jsonU64(value) else null,
-        .data_index = if (object.get("data_index")) |value| try jsonU64(value) else null,
-        .es_sigma = if (object.get("es_sigma")) |value| try jsonF64(value) else null,
-        .es_alpha = if (object.get("es_alpha")) |value| try jsonF64(value) else null,
-        .es_population = if (object.get("es_population")) |value| try jsonU64(value) else null,
-        .es_noise = if (object.get("es_noise")) |value| try jsonU64(value) else null,
-        .es_antithetic = if (object.get("es_antithetic")) |value| try jsonU64(value) else null,
-        .es_anchor_decay = if (object.get("es_anchor_decay")) |value| try jsonU64(value) else null,
-        .es_anchor_lambda = if (object.get("es_anchor_lambda")) |value| try jsonF64(value) else null,
-        .es_ternary_flip_rate = if (object.get("es_ternary_flip_rate")) |value| try jsonF64(value) else null,
-        .es_ternary_update_fraction = if (object.get("es_ternary_update_fraction")) |value| try jsonF64(value) else null,
-        .es_ternary_update_decay = if (object.get("es_ternary_update_decay")) |value| try jsonF64(value) else null,
-        .es_iteration = if (object.get("es_iteration")) |value| try jsonU64(value) else null,
     };
+    inline for (@typeInfo(TrainerState).@"struct".fields) |field| {
+        if (comptime trainerStateFieldIsHeader(field.name)) continue;
+        if (object.get(field.name)) |value| {
+            @field(state, field.name) = switch (comptime @typeInfo(field.type).optional.child) {
+                u64 => try jsonU64(value),
+                f64 => try jsonF64(value),
+                else => @compileError("TrainerState optional fields must be ?u64 or ?f64: " ++ field.name),
+            };
+        }
+    }
+    return state;
 }
 
 fn jsonU32(value: std.json.Value) !u32 {
@@ -217,6 +206,27 @@ fn readFileAlloc(allocator: Allocator, io: std.Io, path: []const u8) ![]u8 {
         read_len += n;
     }
     return bytes;
+}
+
+test "trainer state serializes with the pinned json shape" {
+    // Byte-format pin: the writer/parser bodies are comptime-generated, so
+    // this is what keeps them from co-drifting to a DIFFERENT format that
+    // still roundtrips (key spelling, emission order, layout).
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer aw.deinit();
+    try writeTrainerStateJson(.{ .step = 12, .seed = 34, .lora_rank = 8, .learning_rate = 1e-3, .es_iteration = 17 }, &aw.writer);
+    try std.testing.expectEqualStrings(
+        "{\n" ++
+            "  \"format\": \"fucina.training_checkpoint\",\n" ++
+            "  \"version\": 1,\n" ++
+            "  \"step\": 12,\n" ++
+            "  \"seed\": 34,\n" ++
+            "  \"lora_rank\": 8,\n" ++
+            "  \"learning_rate\": 0.001,\n" ++
+            "  \"es_iteration\": 17\n" ++
+            "}\n",
+        aw.written(),
+    );
 }
 
 test "trainer state roundtrips through directory sentinel" {
