@@ -65,47 +65,31 @@ pub const Config = struct {
     pub fn fromGguf(file: *const gguf.File) !Config {
         const arch = file.getString("general.architecture") orelse return Error.InvalidConfig;
         if (!std.mem.eql(u8, arch, "glm4moe")) return Error.InvalidConfig;
-        const block_count = try metaInt(file, "glm4moe.block_count");
+        const block_count = try gguf_meta.metaInt(file, "glm4moe", "block_count", .reject_zero);
         const nextn = gguf_meta.metaIntOpt(file, "glm4moe", "nextn_predict_layers", .accept_zero) orelse 0;
         const embd = try file.get("token_embd.weight");
         const shape = try embd.logicalMatrixShape();
         return .{
             .vocab_size = shape[0],
-            .hidden_size = try metaInt(file, "glm4moe.embedding_length"),
+            .hidden_size = try gguf_meta.metaInt(file, "glm4moe", "embedding_length", .reject_zero),
             .num_layers = block_count - nextn,
             .num_nextn_layers = nextn,
-            .num_heads = try metaInt(file, "glm4moe.attention.head_count"),
-            .num_kv_heads = try metaInt(file, "glm4moe.attention.head_count_kv"),
-            .head_dim = try metaInt(file, "glm4moe.attention.key_length"),
-            .rope_dims = try metaInt(file, "glm4moe.rope.dimension_count"),
-            .dense_ffn_size = try metaInt(file, "glm4moe.feed_forward_length"),
+            .num_heads = try gguf_meta.metaInt(file, "glm4moe", "attention.head_count", .reject_zero),
+            .num_kv_heads = try gguf_meta.metaInt(file, "glm4moe", "attention.head_count_kv", .reject_zero),
+            .head_dim = try gguf_meta.metaInt(file, "glm4moe", "attention.key_length", .reject_zero),
+            .rope_dims = try gguf_meta.metaInt(file, "glm4moe", "rope.dimension_count", .reject_zero),
+            .dense_ffn_size = try gguf_meta.metaInt(file, "glm4moe", "feed_forward_length", .reject_zero),
             .leading_dense_layers = gguf_meta.metaIntOpt(file, "glm4moe", "leading_dense_block_count", .accept_zero) orelse 0,
             .num_experts = gguf_meta.metaIntOpt(file, "glm4moe", "expert_count", .accept_zero) orelse 0,
             .num_experts_used = gguf_meta.metaIntOpt(file, "glm4moe", "expert_used_count", .accept_zero) orelse 0,
             .expert_ffn_size = gguf_meta.metaIntOpt(file, "glm4moe", "expert_feed_forward_length", .accept_zero) orelse 0,
             .num_shared_experts = gguf_meta.metaIntOpt(file, "glm4moe", "expert_shared_count", .accept_zero) orelse 0,
-            .expert_weights_scale = metaFloatOpt(file, "glm4moe.expert_weights_scale") orelse 1.0,
+            .expert_weights_scale = gguf_meta.metaFloatOpt(file, "glm4moe", "expert_weights_scale") orelse 1.0,
             .expert_gating_func = gguf_meta.metaIntOpt(file, "glm4moe", "expert_gating_func", .accept_zero) orelse 1,
             .expert_weights_norm = file.getBool("glm4moe.expert_weights_norm") orelse false,
-            .rms_norm_eps = try metaFloat(file, "glm4moe.attention.layer_norm_rms_epsilon"),
-            .rope_theta = metaFloatOpt(file, "glm4moe.rope.freq_base") orelse 10000.0,
+            .rms_norm_eps = try gguf_meta.metaFloat(file, "glm4moe", "attention.layer_norm_rms_epsilon"),
+            .rope_theta = gguf_meta.metaFloatOpt(file, "glm4moe", "rope.freq_base") orelse 10000.0,
         };
-    }
-
-    fn metaInt(file: *const gguf.File, key: []const u8) !usize {
-        const v = file.getInt(key) orelse return Error.InvalidConfig;
-        if (v <= 0) return Error.InvalidConfig;
-        return @intCast(v);
-    }
-
-    fn metaFloat(file: *const gguf.File, key: []const u8) !f32 {
-        const v = file.getFloat(key) orelse return Error.InvalidConfig;
-        return @floatCast(v);
-    }
-
-    fn metaFloatOpt(file: *const gguf.File, key: []const u8) ?f32 {
-        const v = file.getFloat(key) orelse return null;
-        return @floatCast(v);
     }
 };
 

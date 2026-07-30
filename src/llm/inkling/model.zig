@@ -74,7 +74,7 @@ pub const Config = struct {
         const arch = file.getString("general.architecture") orelse return Error.InvalidConfig;
         if (!std.mem.eql(u8, arch, "inkling")) return Error.InvalidConfig;
 
-        const num_layers = try metaInt(file, "inkling.block_count");
+        const num_layers = try gguf_meta.metaInt(file, "inkling", "block_count", .reject_zero);
         const embd = try file.get("token_embd.weight");
         const embd_shape = try embd.logicalMatrixShape();
 
@@ -83,7 +83,7 @@ pub const Config = struct {
         const is_swa = try gguf_meta.readU32OrBoolArray(allocator, file, "inkling.attention.sliding_window_pattern", num_layers, bool);
         errdefer allocator.free(is_swa);
 
-        const logit_scale_denom = try metaFloat(file, "inkling.logit_scale_denom");
+        const logit_scale_denom = try gguf_meta.metaFloat(file, "inkling", "logit_scale_denom");
         if (logit_scale_denom == 0) return Error.InvalidConfig;
 
         const gating = gguf_meta.metaIntOpt(file, "inkling", "expert_gating_func", .accept_zero) orelse 2;
@@ -92,28 +92,28 @@ pub const Config = struct {
         return .{
             .vocab_size = embd_shape[0],
             .unpadded_vocab_size = gguf_meta.metaIntOpt(file, "inkling", "unpadded_vocab_size", .accept_zero) orelse 0,
-            .hidden_size = try metaInt(file, "inkling.embedding_length"),
+            .hidden_size = try gguf_meta.metaInt(file, "inkling", "embedding_length", .reject_zero),
             .num_layers = num_layers,
-            .num_heads = try metaInt(file, "inkling.attention.head_count"),
-            .head_dim = try metaInt(file, "inkling.attention.key_length"),
+            .num_heads = try gguf_meta.metaInt(file, "inkling", "attention.head_count", .reject_zero),
+            .head_dim = try gguf_meta.metaInt(file, "inkling", "attention.key_length", .reject_zero),
             .kv_heads = kv_heads,
             .is_swa = is_swa,
-            .sliding_window = try metaInt(file, "inkling.attention.sliding_window"),
-            .d_rel = try metaInt(file, "inkling.d_rel"),
-            .rel_extent = try metaInt(file, "inkling.rel_extent"),
-            .rel_extent_swa = try metaInt(file, "inkling.rel_extent_swa"),
-            .shortconv_kernel = try metaInt(file, "inkling.shortconv_kernel"),
+            .sliding_window = try gguf_meta.metaInt(file, "inkling", "attention.sliding_window", .reject_zero),
+            .d_rel = try gguf_meta.metaInt(file, "inkling", "d_rel", .reject_zero),
+            .rel_extent = try gguf_meta.metaInt(file, "inkling", "rel_extent", .reject_zero),
+            .rel_extent_swa = try gguf_meta.metaInt(file, "inkling", "rel_extent_swa", .reject_zero),
+            .shortconv_kernel = try gguf_meta.metaInt(file, "inkling", "shortconv_kernel", .reject_zero),
             .dense_layers = gguf_meta.metaIntOpt(file, "inkling", "dense_block_count", .accept_zero) orelse 0,
-            .dense_ffn_size = try metaInt(file, "inkling.feed_forward_length"),
-            .num_experts = try metaInt(file, "inkling.expert_count"),
-            .num_experts_used = try metaInt(file, "inkling.expert_used_count"),
-            .expert_ffn_size = try metaInt(file, "inkling.expert_feed_forward_length"),
-            .num_shared_experts = try metaInt(file, "inkling.expert_shared_count"),
-            .expert_weights_scale = metaFloatOpt(file, "inkling.expert_weights_scale") orelse 1.0,
+            .dense_ffn_size = try gguf_meta.metaInt(file, "inkling", "feed_forward_length", .reject_zero),
+            .num_experts = try gguf_meta.metaInt(file, "inkling", "expert_count", .reject_zero),
+            .num_experts_used = try gguf_meta.metaInt(file, "inkling", "expert_used_count", .reject_zero),
+            .expert_ffn_size = try gguf_meta.metaInt(file, "inkling", "expert_feed_forward_length", .reject_zero),
+            .num_shared_experts = try gguf_meta.metaInt(file, "inkling", "expert_shared_count", .reject_zero),
+            .expert_weights_scale = gguf_meta.metaFloatOpt(file, "inkling", "expert_weights_scale") orelse 1.0,
             .logit_scale = 1.0 / logit_scale_denom,
             .log_n_floor = gguf_meta.metaIntOpt(file, "inkling", "log_scaling_n_floor", .accept_zero) orelse 0,
-            .log_alpha = metaFloatOpt(file, "inkling.log_scaling_alpha") orelse 0.0,
-            .rms_norm_eps = try metaFloat(file, "inkling.attention.layer_norm_rms_epsilon"),
+            .log_alpha = gguf_meta.metaFloatOpt(file, "inkling", "log_scaling_alpha") orelse 0.0,
+            .rms_norm_eps = try gguf_meta.metaFloat(file, "inkling", "attention.layer_norm_rms_epsilon"),
         };
     }
 
@@ -125,22 +125,6 @@ pub const Config = struct {
 
     pub fn relExtent(self: *const Config, layer_i: usize) usize {
         return if (self.is_swa[layer_i]) self.rel_extent_swa else self.rel_extent;
-    }
-
-    fn metaInt(file: *const gguf.File, key: []const u8) !usize {
-        const v = file.getInt(key) orelse return Error.InvalidConfig;
-        if (v <= 0) return Error.InvalidConfig;
-        return @intCast(v);
-    }
-
-    fn metaFloat(file: *const gguf.File, key: []const u8) !f32 {
-        const v = file.getFloat(key) orelse return Error.InvalidConfig;
-        return @floatCast(v);
-    }
-
-    fn metaFloatOpt(file: *const gguf.File, key: []const u8) ?f32 {
-        const v = file.getFloat(key) orelse return null;
-        return @floatCast(v);
     }
 };
 

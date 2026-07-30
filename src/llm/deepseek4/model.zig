@@ -77,7 +77,7 @@ pub const Config = struct {
     pub fn fromGguf(allocator: Allocator, file: *const gguf.File) !Config {
         const arch = file.getString("general.architecture") orelse return Error.InvalidConfig;
         if (!std.mem.eql(u8, arch, "deepseek4")) return Error.InvalidConfig;
-        const block_count = try metaInt(file, "deepseek4.block_count");
+        const block_count = try gguf_meta.metaInt(file, "deepseek4", "block_count", .reject_zero);
         const nextn = gguf_meta.metaIntOpt(file, "deepseek4", "nextn_predict_layers", .accept_zero) orelse 0;
         const n_layers = block_count - nextn;
 
@@ -94,47 +94,36 @@ pub const Config = struct {
         }
 
         return .{
-            .vocab_size = try metaInt(file, "deepseek4.vocab_size"),
-            .hidden_size = try metaInt(file, "deepseek4.embedding_length"),
+            .vocab_size = try gguf_meta.metaInt(file, "deepseek4", "vocab_size", .reject_zero),
+            .hidden_size = try gguf_meta.metaInt(file, "deepseek4", "embedding_length", .reject_zero),
             .num_layers = n_layers,
             .num_nextn_layers = nextn,
-            .num_heads = try metaInt(file, "deepseek4.attention.head_count"),
-            .head_dim = try metaInt(file, "deepseek4.attention.key_length"),
-            .rope_dims = try metaInt(file, "deepseek4.rope.dimension_count"),
-            .n_swa = try metaInt(file, "deepseek4.attention.sliding_window"),
-            .indexer_heads = try metaInt(file, "deepseek4.attention.indexer.head_count"),
-            .indexer_head_dim = try metaInt(file, "deepseek4.attention.indexer.key_length"),
-            .indexer_top_k = try metaInt(file, "deepseek4.attention.indexer.top_k"),
-            .q_lora_rank = try metaInt(file, "deepseek4.attention.q_lora_rank"),
-            .output_lora_rank = try metaInt(file, "deepseek4.attention.output_lora_rank"),
-            .output_groups = try metaInt(file, "deepseek4.attention.output_group_count"),
-            .num_experts = try metaInt(file, "deepseek4.expert_count"),
-            .num_experts_used = try metaInt(file, "deepseek4.expert_used_count"),
-            .expert_ffn_size = try metaInt(file, "deepseek4.expert_feed_forward_length"),
-            .num_shared_experts = try metaInt(file, "deepseek4.expert_shared_count"),
-            .expert_weights_scale = metaFloat(file, "deepseek4.expert_weights_scale") orelse 1.0,
+            .num_heads = try gguf_meta.metaInt(file, "deepseek4", "attention.head_count", .reject_zero),
+            .head_dim = try gguf_meta.metaInt(file, "deepseek4", "attention.key_length", .reject_zero),
+            .rope_dims = try gguf_meta.metaInt(file, "deepseek4", "rope.dimension_count", .reject_zero),
+            .n_swa = try gguf_meta.metaInt(file, "deepseek4", "attention.sliding_window", .reject_zero),
+            .indexer_heads = try gguf_meta.metaInt(file, "deepseek4", "attention.indexer.head_count", .reject_zero),
+            .indexer_head_dim = try gguf_meta.metaInt(file, "deepseek4", "attention.indexer.key_length", .reject_zero),
+            .indexer_top_k = try gguf_meta.metaInt(file, "deepseek4", "attention.indexer.top_k", .reject_zero),
+            .q_lora_rank = try gguf_meta.metaInt(file, "deepseek4", "attention.q_lora_rank", .reject_zero),
+            .output_lora_rank = try gguf_meta.metaInt(file, "deepseek4", "attention.output_lora_rank", .reject_zero),
+            .output_groups = try gguf_meta.metaInt(file, "deepseek4", "attention.output_group_count", .reject_zero),
+            .num_experts = try gguf_meta.metaInt(file, "deepseek4", "expert_count", .reject_zero),
+            .num_experts_used = try gguf_meta.metaInt(file, "deepseek4", "expert_used_count", .reject_zero),
+            .expert_ffn_size = try gguf_meta.metaInt(file, "deepseek4", "expert_feed_forward_length", .reject_zero),
+            .num_shared_experts = try gguf_meta.metaInt(file, "deepseek4", "expert_shared_count", .reject_zero),
+            .expert_weights_scale = gguf_meta.metaFloatOpt(file, "deepseek4", "expert_weights_scale") orelse 1.0,
             .hash_layers = gguf_meta.metaIntOpt(file, "deepseek4", "hash_layer_count", .accept_zero) orelse 0,
-            .n_hc = try metaInt(file, "deepseek4.hyper_connection.count"),
-            .hc_sinkhorn_iters = try metaInt(file, "deepseek4.hyper_connection.sinkhorn_iterations"),
-            .hc_eps = metaFloat(file, "deepseek4.hyper_connection.epsilon") orelse 1.0e-7,
-            .rms_norm_eps = metaFloat(file, "deepseek4.attention.layer_norm_rms_epsilon") orelse 1.0e-6,
-            .rope_theta = metaFloat(file, "deepseek4.rope.freq_base") orelse 10000.0,
-            .compress_rope_theta = metaFloat(file, "deepseek4.attention.compress_rope_freq_base") orelse 10000.0,
-            .yarn_factor = metaFloat(file, "deepseek4.rope.scaling.factor") orelse 1.0,
+            .n_hc = try gguf_meta.metaInt(file, "deepseek4", "hyper_connection.count", .reject_zero),
+            .hc_sinkhorn_iters = try gguf_meta.metaInt(file, "deepseek4", "hyper_connection.sinkhorn_iterations", .reject_zero),
+            .hc_eps = gguf_meta.metaFloatOpt(file, "deepseek4", "hyper_connection.epsilon") orelse 1.0e-7,
+            .rms_norm_eps = gguf_meta.metaFloatOpt(file, "deepseek4", "attention.layer_norm_rms_epsilon") orelse 1.0e-6,
+            .rope_theta = gguf_meta.metaFloatOpt(file, "deepseek4", "rope.freq_base") orelse 10000.0,
+            .compress_rope_theta = gguf_meta.metaFloatOpt(file, "deepseek4", "attention.compress_rope_freq_base") orelse 10000.0,
+            .yarn_factor = gguf_meta.metaFloatOpt(file, "deepseek4", "rope.scaling.factor") orelse 1.0,
             .yarn_orig_ctx = gguf_meta.metaIntOpt(file, "deepseek4", "rope.scaling.original_context_length", .accept_zero) orelse 0,
             .compress_ratio = compress_ratio,
         };
-    }
-
-    fn metaInt(file: *const gguf.File, key: []const u8) !usize {
-        const v = file.getInt(key) orelse return Error.InvalidConfig;
-        if (v <= 0) return Error.InvalidConfig;
-        return @intCast(v);
-    }
-
-    fn metaFloat(file: *const gguf.File, key: []const u8) ?f32 {
-        const v = file.getFloat(key) orelse return null;
-        return @floatCast(v);
     }
 };
 
@@ -242,7 +231,6 @@ const StepRope = struct {
         return if (compressed) &self.comp_inv else &self.raw_inv;
     }
 };
-
 
 // =========================================================================
 // Weights.
@@ -1010,8 +998,6 @@ pub const IndexProbe = struct {
         try writer.print("\n", .{});
     }
 };
-
-
 
 // (continued in Model.step below)
 

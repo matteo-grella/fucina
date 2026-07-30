@@ -97,69 +97,48 @@ pub const Config = struct {
             return Error.InvalidConfig;
 
         var kbuf: [96]u8 = undefined;
-        const K = struct {
-            fn of(b: []u8, p: []const u8, suffix: []const u8) []const u8 {
-                return std.fmt.bufPrint(b, "{s}.{s}", .{ p, suffix }) catch unreachable;
-            }
-        };
 
         // Newer MLA-native conversions set key_length/value_length to the
         // LATENT attention dims (576/512) and carry the real per-head dims
         // in *_mla; older files carry them in key_length/value_length.
         const qk_head = gguf_meta.metaIntOpt(file, prefix, "attention.key_length_mla", .reject_zero) orelse
-            try metaInt(file, K.of(&kbuf, prefix, "attention.key_length"));
+            try gguf_meta.metaInt(file, prefix, "attention.key_length", .reject_zero);
         const v_head = gguf_meta.metaIntOpt(file, prefix, "attention.value_length_mla", .reject_zero) orelse
-            try metaInt(file, K.of(&kbuf, prefix, "attention.value_length"));
-        const rope_dims = try metaInt(file, K.of(&kbuf, prefix, "rope.dimension_count"));
-        const block_count = try metaInt(file, K.of(&kbuf, prefix, "block_count"));
+            try gguf_meta.metaInt(file, prefix, "attention.value_length", .reject_zero);
+        const rope_dims = try gguf_meta.metaInt(file, prefix, "rope.dimension_count", .reject_zero);
+        const block_count = try gguf_meta.metaInt(file, prefix, "block_count", .reject_zero);
         const nextn = gguf_meta.metaIntOpt(file, prefix, "nextn_predict_layers", .accept_zero) orelse 0;
         if (nextn >= block_count) return Error.InvalidConfig;
         return .{
-            .vocab_size = try metaInt(file, K.of(&kbuf, prefix, "vocab_size")),
-            .hidden_size = try metaInt(file, K.of(&kbuf, prefix, "embedding_length")),
+            .vocab_size = try gguf_meta.metaInt(file, prefix, "vocab_size", .reject_zero),
+            .hidden_size = try gguf_meta.metaInt(file, prefix, "embedding_length", .reject_zero),
             .num_layers = block_count - nextn,
-            .num_heads = try metaInt(file, K.of(&kbuf, prefix, "attention.head_count")),
+            .num_heads = try gguf_meta.metaInt(file, prefix, "attention.head_count", .reject_zero),
             .qk_nope_dim = qk_head - rope_dims,
             .qk_rope_dim = rope_dims,
             .qk_head_dim = qk_head,
             .v_head_dim = v_head,
-            .kv_lora_rank = try metaInt(file, K.of(&kbuf, prefix, "attention.kv_lora_rank")),
-            .dense_ffn_size = try metaInt(file, K.of(&kbuf, prefix, "feed_forward_length")),
+            .kv_lora_rank = try gguf_meta.metaInt(file, prefix, "attention.kv_lora_rank", .reject_zero),
+            .dense_ffn_size = try gguf_meta.metaInt(file, prefix, "feed_forward_length", .reject_zero),
             .leading_dense_layers = gguf_meta.metaIntOpt(file, prefix, "leading_dense_block_count", .accept_zero) orelse 0,
             .num_experts = gguf_meta.metaIntOpt(file, prefix, "expert_count", .accept_zero) orelse 0,
             .num_experts_used = gguf_meta.metaIntOpt(file, prefix, "expert_used_count", .accept_zero) orelse 0,
             .expert_ffn_size = gguf_meta.metaIntOpt(file, prefix, "expert_feed_forward_length", .accept_zero) orelse 0,
             .num_shared_experts = gguf_meta.metaIntOpt(file, prefix, "expert_shared_count", .accept_zero) orelse 0,
-            .expert_weights_scale = metaFloatOpt(file, K.of(&kbuf, prefix, "expert_weights_scale")) orelse 1.0,
+            .expert_weights_scale = gguf_meta.metaFloatOpt(file, prefix, "expert_weights_scale") orelse 1.0,
             .expert_gating_func = gguf_meta.metaIntOpt(file, prefix, "expert_gating_func", .accept_zero) orelse 1,
-            .expert_weights_norm = file.getBool(K.of(&kbuf, prefix, "expert_weights_norm")) orelse false,
+            .expert_weights_norm = file.getBool(std.fmt.bufPrint(&kbuf, "{s}.expert_weights_norm", .{prefix}) catch unreachable) orelse false,
             .q_lora_rank = gguf_meta.metaIntOpt(file, prefix, "attention.q_lora_rank", .accept_zero) orelse 0,
-            .rms_norm_eps = try metaFloat(file, K.of(&kbuf, prefix, "attention.layer_norm_rms_epsilon")),
-            .rope_theta = metaFloatOpt(file, K.of(&kbuf, prefix, "rope.freq_base")) orelse 10000.0,
-            .yarn_factor = metaFloatOpt(file, K.of(&kbuf, prefix, "rope.scaling.factor")) orelse 1.0,
+            .rms_norm_eps = try gguf_meta.metaFloat(file, prefix, "attention.layer_norm_rms_epsilon"),
+            .rope_theta = gguf_meta.metaFloatOpt(file, prefix, "rope.freq_base") orelse 10000.0,
+            .yarn_factor = gguf_meta.metaFloatOpt(file, prefix, "rope.scaling.factor") orelse 1.0,
             .yarn_orig_ctx = gguf_meta.metaIntOpt(file, prefix, "rope.scaling.original_context_length", .accept_zero) orelse 0,
-            .yarn_log_multiplier = metaFloatOpt(file, K.of(&kbuf, prefix, "rope.scaling.yarn_log_multiplier")) orelse 0.0,
+            .yarn_log_multiplier = gguf_meta.metaFloatOpt(file, prefix, "rope.scaling.yarn_log_multiplier") orelse 0.0,
             .indexer_heads = gguf_meta.metaIntOpt(file, prefix, "attention.indexer.head_count", .accept_zero) orelse 0,
             .indexer_key_dim = gguf_meta.metaIntOpt(file, prefix, "attention.indexer.key_length", .accept_zero) orelse 0,
             .indexer_top_k = gguf_meta.metaIntOpt(file, prefix, "attention.indexer.top_k", .accept_zero) orelse 0,
             .indexer_rope_half = std.mem.eql(u8, arch, "deepseek32"),
         };
-    }
-
-    fn metaInt(file: *const gguf.File, key: []const u8) !usize {
-        const v = file.getInt(key) orelse return Error.InvalidConfig;
-        if (v <= 0) return Error.InvalidConfig;
-        return @intCast(v);
-    }
-
-    fn metaFloat(file: *const gguf.File, key: []const u8) !f32 {
-        const v = file.getFloat(key) orelse return Error.InvalidConfig;
-        return @floatCast(v);
-    }
-
-    fn metaFloatOpt(file: *const gguf.File, key: []const u8) ?f32 {
-        const v = file.getFloat(key) orelse return null;
-        return @floatCast(v);
     }
 };
 
@@ -1677,7 +1656,7 @@ fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i:
             const src_base = h * head_rows * lora;
             @memcpy(
                 kv_b_k[h * config.qk_nope_dim * lora ..][0 .. config.qk_nope_dim * lora],
-                kv_b_all[src_base ..][0 .. config.qk_nope_dim * lora],
+                kv_b_all[src_base..][0 .. config.qk_nope_dim * lora],
             );
             @memcpy(
                 kv_b_v[h * config.v_head_dim * lora ..][0 .. config.v_head_dim * lora],
