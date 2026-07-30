@@ -1036,80 +1036,13 @@ pub fn loadMoeRhs(
             @memcpy(owned, src);
             break :blk .{ .q8_0 = .{ .rows = .{ .allocator = ctx.allocator, .blocks = owned, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
         },
-        // iq2_xxs experts: nested generic rows container with mutable
-        // blocks, so the borrow arm needs the sound @constCast.
-        .iq2_xxs => blk: {
-            const src = try blockSlice(fucina.BlockIQ2_XXS, info.data);
-            if (rows == 0 or src.len % rows != 0) return Error.InvalidWeightShape;
-            const bpc = src.len / rows;
-            if (try fucina.internal.backend_mod.quantized_matmul.qkBlockCount(in_dim) != bpc) return Error.InvalidWeightShape;
-            if (borrow) {
-                break :blk .{ .iq2_xxs = .{ .rows = .{ .allocator = null, .blocks = @constCast(src), .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
-            }
-            gguf.prefetch(info.data);
-            const owned = try ctx.allocator.alloc(fucina.BlockIQ2_XXS, src.len);
-            errdefer ctx.allocator.free(owned);
-            @memcpy(owned, src);
-            break :blk .{ .iq2_xxs = .{ .rows = .{ .allocator = ctx.allocator, .blocks = owned, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
-        },
-        .iq2_s => blk: {
-            const src = try blockSlice(fucina.BlockIQ2_S, info.data);
-            if (rows == 0 or src.len % rows != 0) return Error.InvalidWeightShape;
-            const bpc = src.len / rows;
-            if (try fucina.internal.backend_mod.quantized_matmul.qkBlockCount(in_dim) != bpc) return Error.InvalidWeightShape;
-            if (borrow) {
-                break :blk .{ .iq2_s = .{ .rows = .{ .allocator = null, .blocks = @constCast(src), .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
-            }
-            gguf.prefetch(info.data);
-            const owned = try ctx.allocator.alloc(fucina.BlockIQ2_S, src.len);
-            errdefer ctx.allocator.free(owned);
-            @memcpy(owned, src);
-            break :blk .{ .iq2_s = .{ .rows = .{ .allocator = ctx.allocator, .blocks = owned, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
-        },
-        .iq4_xs => blk: {
-            const src = try blockSlice(fucina.BlockIQ4_XS, info.data);
-            if (rows == 0 or src.len % rows != 0) return Error.InvalidWeightShape;
-            const bpc = src.len / rows;
-            if (try fucina.internal.backend_mod.quantized_matmul.qkBlockCount(in_dim) != bpc) return Error.InvalidWeightShape;
-            if (borrow) {
-                break :blk .{ .iq4_xs = .{ .rows = .{ .allocator = null, .blocks = @constCast(src), .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
-            }
-            gguf.prefetch(info.data);
-            const owned = try ctx.allocator.alloc(fucina.BlockIQ4_XS, src.len);
-            errdefer ctx.allocator.free(owned);
-            @memcpy(owned, src);
-            break :blk .{ .iq4_xs = .{ .rows = .{ .allocator = ctx.allocator, .blocks = owned, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
-        },
-        .iq3_xxs => blk: {
-            const src = try blockSlice(fucina.BlockIQ3_XXS, info.data);
-            if (rows == 0 or src.len % rows != 0) return Error.InvalidWeightShape;
-            const bpc = src.len / rows;
-            if (try fucina.internal.backend_mod.quantized_matmul.qkBlockCount(in_dim) != bpc) return Error.InvalidWeightShape;
-            if (borrow) {
-                break :blk .{ .iq3_xxs = .{ .rows = .{ .allocator = null, .blocks = @constCast(src), .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
-            }
-            gguf.prefetch(info.data);
-            const owned = try ctx.allocator.alloc(fucina.BlockIQ3_XXS, src.len);
-            errdefer ctx.allocator.free(owned);
-            @memcpy(owned, src);
-            break :blk .{ .iq3_xxs = .{ .rows = .{ .allocator = ctx.allocator, .blocks = owned, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
-        },
-        // Ternary experts (TQ2_0): nested generic rows container with
-        // mutable blocks, so the borrow arm needs the sound @constCast.
-        .tq2_0 => blk: {
-            const src = try blockSlice(fucina.BlockTQ2_0, info.data);
-            if (rows == 0 or src.len % rows != 0) return Error.InvalidWeightShape;
-            const bpc = src.len / rows;
-            if (try fucina.internal.backend_mod.quantized_matmul.qkBlockCount(in_dim) != bpc) return Error.InvalidWeightShape;
-            if (borrow) {
-                break :blk .{ .tq2_0 = .{ .rows = .{ .allocator = null, .blocks = @constCast(src), .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
-            }
-            gguf.prefetch(info.data);
-            const owned = try ctx.allocator.alloc(fucina.BlockTQ2_0, src.len);
-            errdefer ctx.allocator.free(owned);
-            @memcpy(owned, src);
-            break :blk .{ .tq2_0 = .{ .rows = .{ .allocator = ctx.allocator, .blocks = owned, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
-        },
+        // IQ*/ternary experts: nested-rows containers, one shared
+        // copy-or-borrow (copyOrBorrowMoeRhsRows).
+        .iq2_xxs => .{ .iq2_xxs = try copyOrBorrowMoeRhsRows(.iq2_xxs, ctx, info, rows, in_dim, borrow) },
+        .iq2_s => .{ .iq2_s = try copyOrBorrowMoeRhsRows(.iq2_s, ctx, info, rows, in_dim, borrow) },
+        .iq4_xs => .{ .iq4_xs = try copyOrBorrowMoeRhsRows(.iq4_xs, ctx, info, rows, in_dim, borrow) },
+        .iq3_xxs => .{ .iq3_xxs = try copyOrBorrowMoeRhsRows(.iq3_xxs, ctx, info, rows, in_dim, borrow) },
+        .tq2_0 => .{ .tq2_0 = try copyOrBorrowMoeRhsRows(.tq2_0, ctx, info, rows, in_dim, borrow) },
         else => Error.UnsupportedWeightType,
     };
 }
@@ -1650,6 +1583,42 @@ fn copyOrBorrowMoeRhs(comptime Rhs: type, comptime Block: type, ctx: *ExecContex
     errdefer ctx.allocator.free(owned);
     @memcpy(owned, src);
     return .{ .allocator = ctx.allocator, .blocks = owned, .k = in_dim, .n = rows, .blocks_per_column = blocks_per_column };
+}
+
+/// `copyOrBorrowMoeRhs` for the nested-rows expert containers
+/// (`QuantizedMatmulRhsRowsFor` — mutable blocks, so the borrow arm needs
+/// the sound `@constCast`: every consumer only reads through the
+/// container). The IQ*/TQ2_0 arms of `loadMoeRhs` are one-line users, so a
+/// new streamed expert format cannot silently drop the shape validation or
+/// the prefetch.
+fn copyOrBorrowMoeRhsRows(
+    comptime dtype: DType,
+    ctx: *ExecContext,
+    info: *const gguf.TensorInfo,
+    rows: usize,
+    in_dim: usize,
+    borrow: bool,
+) !backend_quant.QuantizedMatmulRhsRowsFor(dtype) {
+    const Block = switch (dtype) {
+        .iq2_xxs => fucina.BlockIQ2_XXS,
+        .iq2_s => fucina.BlockIQ2_S,
+        .iq4_xs => fucina.BlockIQ4_XS,
+        .iq3_xxs => fucina.BlockIQ3_XXS,
+        .tq2_0 => fucina.BlockTQ2_0,
+        else => @compileError("copyOrBorrowMoeRhsRows: no nested-rows expert container for this dtype"),
+    };
+    const src = try blockSlice(Block, info.data);
+    if (rows == 0 or src.len % rows != 0) return Error.InvalidWeightShape;
+    const bpc = src.len / rows;
+    if (try backend_quant.qkBlockCount(in_dim) != bpc) return Error.InvalidWeightShape;
+    if (borrow) {
+        return .{ .rows = .{ .allocator = null, .blocks = @constCast(src), .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows };
+    }
+    gguf.prefetch(info.data);
+    const owned = try ctx.allocator.alloc(Block, src.len);
+    errdefer ctx.allocator.free(owned);
+    @memcpy(owned, src);
+    return .{ .rows = .{ .allocator = ctx.allocator, .blocks = owned, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows };
 }
 
 pub fn layerName(buf: []u8, layer_i: usize, suffix: []const u8) ![]const u8 {
