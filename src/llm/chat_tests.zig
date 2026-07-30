@@ -1207,6 +1207,66 @@ test "sendBatch abort leaves every stream consistent and resendable" {
     try std.testing.expectEqual(healthy.history.items.len, healthy.cache.len);
 }
 
+test "sendBatch abort trims a preloaded-prefix stream to its token-backed length" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try scaffolding.buildTinyModel(&ctx, 0xC4A7);
+    defer model.deinit();
+    var tok = try Tokenizer.initFromParts(allocator, &tiny_vocab, &.{}, .{});
+    defer tok.deinit();
+    const tmpl = Template{ .format = .chatml };
+
+    // A conversation serving a preloaded KV prefix (the cartridge seam):
+    // history[i] describes cache row kv_prefix_rows + i, so the abort trim
+    // must target cache.len - kv_prefix_rows, not cache.len.
+    var trainer = try qwen3_train.Trainer(.{ .q = false, .v = false }).init(&ctx, &model, .{ .rank = 1, .alpha = 1 }, 7);
+    defer trainer.deinit();
+    const prefix_tokens = [_]usize{ 1, 3, 5, 7, 9 };
+    var cart = try trainer.initCartridge(&ctx, &prefix_tokens, 1);
+    defer cart.deinit();
+
+    var prefixed = try Conversation.init(&ctx, &model, &tok, tmpl, .{ .capacity = 256, .max_response_tokens = 8 });
+    defer prefixed.deinit();
+    try cart.writeToCache(&ctx, &prefixed.cache);
+    try prefixed.notePrefixRows(cart.p);
+
+    // Capacity 2 cannot hold any rendered ChatML turn: this stream's
+    // beginTurnTokens fails AFTER the prefixed stream already committed
+    // its first sampled token (phase 1 runs in batch order).
+    var cramped = try Conversation.init(&ctx, &model, &tok, tmpl, .{ .capacity = 2 });
+    defer cramped.deinit();
+
+    var aw_prefixed = std.Io.Writer.Allocating.init(allocator);
+    defer aw_prefixed.deinit();
+    var aw_cramped = std.Io.Writer.Allocating.init(allocator);
+    defer aw_cramped.deinit();
+
+    var convos = [_]*Conversation{ &prefixed, &cramped };
+    const users = [_][]const u8{ "ab a", "ba b" };
+    var writers = [_]*std.Io.Writer{ &aw_prefixed.writer, &aw_cramped.writer };
+    var produced = [_]usize{ 99, 99 };
+
+    try std.testing.expectError(error.ContextFull, Conversation.sendBatch(&convos, &users, &writers, &produced));
+
+    // The abort trim restored the prefix-aware invariant: every history
+    // token is cache-backed BEHIND the prefix, no committed-but-unforwarded
+    // token survives.
+    try std.testing.expectEqual(prefixed.history.items.len, prefixed.cache.len - prefixed.kv_prefix_rows);
+    try std.testing.expectEqual(cramped.history.items.len, cramped.cache.len);
+
+    // The prefixed conversation remains usable: a plain send completes and
+    // keeps the prefix-aware post-turn invariant.
+    const n = try prefixed.send("us it", &aw_prefixed.writer);
+    try std.testing.expect(n <= 8);
+    try std.testing.expectEqual(prefixed.history.items.len, prefixed.cache.len - prefixed.kv_prefix_rows);
+}
+
 test "conversation serves a preloaded KV prefix and reuses past it" {
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;

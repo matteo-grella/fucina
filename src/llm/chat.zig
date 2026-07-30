@@ -270,10 +270,9 @@ pub const Options = struct {
     /// template's stop marker (e.g. Gemma's stray `<eos>`). Borrowed.
     extra_stop_ids: []const u32 = &.{},
     /// Text stop sequences: generation stops BEFORE streaming the token whose
-    /// decoded reply text completes one of these. Borrowed. Incompatible with
-    /// `speculation` — the completing token could be accepted mid-verify-batch,
-    /// breaking the one-RNG-draw-per-plain-committed-token contract — so init
-    /// fails loudly on the combination.
+    /// decoded reply text completes one of these. Borrowed. Composes with
+    /// `speculation`: the turn-boundary gate scans the decoded reply in the
+    /// plain loop's exact order, so spec == plain holds (`chat_tests.zig`).
     stop_sequences: []const []const u8 = &.{},
     /// Optional logit processor (grammar/JSON-schema constrained decoding —
     /// `logit_processor.zig`, `llguidance.zig` — or any custom logit
@@ -800,11 +799,12 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         /// batching cannot host the decoder's ragged verify steps).
         /// `produced` receives per-stream reply token counts
         /// (unwritten if the batch errors). On error the batch aborts and
-        /// every stream's history is trimmed back to its KV cache (the
-        /// sendSpec turn-trim pattern), so each conversation — including
-        /// healthy siblings of the failing stream — stays internally
-        /// consistent and resendable; tokens already streamed to a writer
-        /// before the abort are not recalled.
+        /// every stream's history is trimmed back to its cache's
+        /// token-backed length (the sendSpec turn-trim pattern,
+        /// prefix-aware), so each conversation — including healthy
+        /// siblings of the failing stream — stays internally consistent
+        /// and resendable; tokens already streamed to a writer before the
+        /// abort are not recalled.
         pub fn sendBatch(
             convos: []const *Self,
             users: []const []const u8,
@@ -813,9 +813,28 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         ) !void {
             if (convos.len == 0) return error.EmptyBatch;
             if (users.len != convos.len or writers.len != convos.len or produced.len != convos.len) return error.BatchLengthMismatch;
+            try validateBatch(convos, .batch);
+            // Comptime-gated so model families without a batch entry still
+            // compile the Conversation type; they get a runtime error here
+            // instead.
+            if (comptime @hasDecl(Model, "forwardStepBatch")) {
+                return sendBatchImpl(convos, users, writers, produced);
+            } else {
+                return error.BatchDecodeUnsupported;
+            }
+        }
+
+        /// The per-conversation batch checks shared by `sendBatch` and
+        /// `sendBatchTokensReuse`; the check ORDER is part of the contract
+        /// (pinned by the validation tests). `entry` names the entry's
+        /// speculation rejection.
+        fn validateBatch(convos: []const *Self, comptime entry: enum { batch, reuse }) !void {
             const first = convos[0];
             for (convos, 0..) |convo, i| {
-                if (convo.spec != null) return error.SpeculationWithBatch;
+                if (convo.spec != null) return switch (entry) {
+                    .batch => error.SpeculationWithBatch,
+                    .reuse => error.SpeculationWithReuse,
+                };
                 if (convo.ctx != first.ctx or convo.model != first.model) return error.MixedBatchModels;
                 for (convos[0..i]) |prev| {
                     if (prev == convo) return error.DuplicateBatchConversation;
@@ -830,14 +849,6 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                         }
                     }
                 }
-            }
-            // Comptime-gated so model families without a batch entry still
-            // compile the Conversation type; they get a runtime error here
-            // instead.
-            if (comptime @hasDecl(Model, "forwardStepBatch")) {
-                return sendBatchImpl(convos, users, writers, produced);
-            } else {
-                return error.BatchDecodeUnsupported;
             }
         }
 
@@ -874,18 +885,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 a.free(streams);
             }
             for (streams, convos, writers) |*s, convo, writer| s.* = .{ .convo = convo, .writer = writer };
-
-            // Abort consistency (the sendSpec unconditional-trim pattern):
-            // an error stops the batch mid-flight, possibly leaving a stream
-            // with a committed-but-unforwarded token — or an un-prefilled
-            // turn prefix — in history. Trim every stream back to its cache;
-            // a no-op on success (the lockstep loop's catch-up forward keeps
-            // history.len == cache.len), and on error it returns every
-            // conversation, healthy siblings included, to a resendable state
-            // instead of a silent history/KV desync.
-            defer for (streams) |*s| {
-                s.convo.history.shrinkRetainingCapacity(s.convo.cache.len);
-            };
+            defer trimBatchToCaches(streams);
 
             // Turn prologue + prefill + first sample, stream by stream: each
             // stream's sampler sees exactly the draw sequence of its own
@@ -900,6 +900,45 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 try sampleStep(s, ctx, &logits);
             }
 
+            try lockstepDecode(false, streams);
+
+            for (streams, produced) |*s, *count| {
+                try s.convo.stream.flush(s.writer);
+                try s.writer.flush();
+                count.* = s.produced;
+            }
+        }
+
+        /// Abort consistency (the sendSpec unconditional-trim pattern): an
+        /// error stops a batch mid-flight, possibly leaving a stream with a
+        /// committed-but-unforwarded token — or an un-prefilled turn prefix —
+        /// in history. Trim every stream back to its cache's token-backed
+        /// length (`history[i]` describes cache row `kv_prefix_rows + i`);
+        /// a no-op on success (the lockstep loop's catch-up forward keeps
+        /// history flush with the cache), and on error it returns every
+        /// conversation, healthy siblings included, to a resendable state
+        /// instead of a silent history/KV desync.
+        fn trimBatchToCaches(streams: []BatchStream) void {
+            for (streams) |*s| {
+                s.convo.history.shrinkRetainingCapacity(s.convo.cache.len - s.convo.kv_prefix_rows);
+            }
+        }
+
+        /// The lockstep decode loop shared by `sendBatchImpl` (`isolate` =
+        /// false: any stream failure aborts the batch) and
+        /// `sendBatchReuseImpl` (`isolate` = true: a failing stream records
+        /// its error and leaves the lockstep; only the batched forward
+        /// stays batch-fatal). Every iteration forwards each live stream's
+        /// committed-but-unforwarded token in ONE batched pass (this also
+        /// covers the final catch-up forward a plain `send` issues after
+        /// its last committed token), then samples each stream's next
+        /// token from its own logits row.
+        fn lockstepDecode(comptime isolate: bool, streams: []BatchStream) !void {
+            const first = streams[0].convo;
+            const ctx = first.ctx;
+            const a = first.allocator;
+            const n = streams.len;
+
             const caches = try a.alloc(*KvCache, n);
             defer a.free(caches);
             const tokens = try a.alloc(usize, n);
@@ -907,10 +946,6 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             const active = try a.alloc(*BatchStream, n);
             defer a.free(active);
 
-            // Lockstep decode: forward every live stream's committed-but-
-            // unforwarded token in ONE batched pass (this also covers the
-            // final catch-up forward a plain `send` issues after its last
-            // committed token), then sample each stream's next token.
             while (true) {
                 var n_active: usize = 0;
                 for (streams) |*s| {
@@ -927,14 +962,15 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 for (active[0..n_active], 0..) |s, row_i| {
                     var row = try logits.narrow(ctx, .seq, row_i, 1);
                     defer row.deinit();
-                    try sampleStep(s, ctx, &row);
+                    if (comptime isolate) {
+                        sampleStep(s, ctx, &row) catch |err| {
+                            s.err = err;
+                            s.finished = true;
+                        };
+                    } else {
+                        try sampleStep(s, ctx, &row);
+                    }
                 }
-            }
-
-            for (streams, produced) |*s, *count| {
-                try s.convo.stream.flush(s.writer);
-                try s.writer.flush();
-                count.* = s.produced;
             }
         }
 
@@ -964,21 +1000,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             if (ids_list.len != convos.len or writers.len != convos.len or
                 produced.len != convos.len or errs.len != convos.len)
                 return error.BatchLengthMismatch;
-            const first = convos[0];
-            for (convos, 0..) |convo, i| {
-                if (convo.spec != null) return error.SpeculationWithReuse;
-                if (convo.ctx != first.ctx or convo.model != first.model) return error.MixedBatchModels;
-                for (convos[0..i]) |prev| {
-                    if (prev == convo) return error.DuplicateBatchConversation;
-                    // One logit-processor instance per stream (the sendBatch
-                    // rule): shared state would interleave commits.
-                    if (convo.sampler.processor) |p| {
-                        if (prev.sampler.processor) |q| {
-                            if (p.ptr == q.ptr) return error.SharedBatchProcessor;
-                        }
-                    }
-                }
-            }
+            try validateBatch(convos, .reuse);
             if (comptime @hasDecl(Model, "forwardStepBatch")) {
                 return sendBatchReuseImpl(convos, ids_list, writers, produced, errs);
             } else {
@@ -1004,15 +1026,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 a.free(streams);
             }
             for (streams, convos, writers) |*s, convo, writer| s.* = .{ .convo = convo, .writer = writer };
-
-            // Abort consistency (the sendBatchImpl pattern, prefix-aware):
-            // history[i] describes cache row kv_prefix_rows + i, so the
-            // trim target is the cache's token-backed length. A no-op for
-            // healthy streams; for errored ones it drops any committed-but-
-            // unforwarded (or un-prefilled) tail.
-            defer for (streams) |*s| {
-                s.convo.history.shrinkRetainingCapacity(s.convo.cache.len - s.convo.kv_prefix_rows);
-            };
+            defer trimBatchToCaches(streams);
 
             // Prologue per stream, isolated: reconcile, prefill the suffix,
             // first sample — the exact `sendTokensReuse` opening.
@@ -1039,38 +1053,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 if (!ok) s.finished = true;
             }
 
-            const caches = try a.alloc(*KvCache, n);
-            defer a.free(caches);
-            const tokens = try a.alloc(usize, n);
-            defer a.free(tokens);
-            const active = try a.alloc(*BatchStream, n);
-            defer a.free(active);
-
-            // The sendBatchImpl lockstep loop with per-stream isolation: a
-            // stream whose sample/stream step fails leaves the lockstep;
-            // the batched forward's own failure stays batch-fatal.
-            while (true) {
-                var n_active: usize = 0;
-                for (streams) |*s| {
-                    if (s.finished) continue;
-                    active[n_active] = s;
-                    caches[n_active] = &s.convo.cache;
-                    tokens[n_active] = s.last;
-                    n_active += 1;
-                }
-                if (n_active == 0) break;
-
-                var logits = try first.model.forwardStepBatch(ctx, caches[0..n_active], tokens[0..n_active]);
-                defer logits.deinit();
-                for (active[0..n_active], 0..) |s, row_i| {
-                    var row = try logits.narrow(ctx, .seq, row_i, 1);
-                    defer row.deinit();
-                    sampleStep(s, ctx, &row) catch |err| {
-                        s.err = err;
-                        s.finished = true;
-                    };
-                }
-            }
+            try lockstepDecode(true, streams);
 
             for (streams, produced, errs) |*s, *count, *e| {
                 if (s.err == null) {

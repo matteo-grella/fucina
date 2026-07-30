@@ -12113,7 +12113,8 @@ Semantics:
   (`error.MixedBatchModels`), distinct conversations
   (`error.DuplicateBatchConversation`). Ownership contract on error: the
   batch aborts, `produced` is left unwritten, and **every** stream's history
-  is trimmed back to its KV cache, so healthy siblings of the failing stream
+  is trimmed back to its cache's token-backed length (prefix-aware, §13.10's
+  preloaded-prefix conversations included), so healthy siblings of the failing stream
   remain internally consistent and resendable; bytes already streamed are not
   recalled. Turn prefills run per stream.
 - `sendBatchTokensReuse` is `sendTokensReuse` over N sibling conversations
@@ -12126,7 +12127,8 @@ Semantics:
   `errs[i]` while the remaining streams keep decoding; only a
   shared-compute failure (the batched forward itself) aborts the whole
   batch. `produced[i]` and `errs[i]` are always written, and on every path
-  out each stream's history is trimmed back to its cache, so every
+  out each stream's history is trimmed back to its cache's token-backed
+  length, so every
   conversation stays consistent and resendable. Speculation must be off on
   every stream (`error.SpeculationWithReuse`); the other up-front checks
   match `sendBatch`.
