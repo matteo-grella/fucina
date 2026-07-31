@@ -6,6 +6,7 @@ const loader = @import("loader.zig");
 const recognizer = @import("recognizer.zig");
 const scrfd = @import("scrfd.zig");
 const genderage = @import("genderage.zig");
+const antispoof = @import("antispoof.zig");
 const image = @import("image.zig");
 
 const gguf = fucina.gguf;
@@ -20,7 +21,7 @@ const usage =
     \\  zig build facedetect -- info      <model.gguf>
     \\  zig build facedetect -- detect    --model <model.gguf> --input <img> [--threads N]
     \\  zig build facedetect -- embed     --model <model.gguf> --input <img> [--threads N]
-    \\  zig build facedetect -- verify    --model <model.gguf> --a <imgA> --b <imgB> [--threshold T] [--threads N]
+    \\  zig build facedetect -- verify    --model <model.gguf> --a <imgA> --b <imgB> [--threshold T] [--anti-spoof] [--threads N]
     \\  zig build facedetect -- analyze   --model <model.gguf> --input <img> [--threads N]
     \\  zig build facedetect -- landmarks --model <landmarks.gguf> --input <img> [--3d] [--detector <det.gguf>] [--json] [--threads N]
     \\  zig build facedetect -- bench     --model <model.gguf> --input <img> [--mode pipeline|recognizer|detect|analyze] [--n N] [--threads N]
@@ -32,6 +33,10 @@ const Command = enum { info, detect, embed, verify, analyze, landmarks, bench };
 fn flagVal(args: []const [:0]const u8, name: []const u8) ?[]const u8 {
     for (args, 0..) |a, i| if (std.mem.eql(u8, a, name) and i + 1 < args.len) return args[i + 1];
     return null;
+}
+fn hasFlag(args: []const [:0]const u8, name: []const u8) bool {
+    for (args) |a| if (std.mem.eql(u8, a, name)) return true;
+    return false;
 }
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
@@ -122,7 +127,17 @@ pub fn main(init: std.process.Init) !void {
             defer allocator.free(eb);
             const dist = 1.0 - pipeline.cosine(ea, eb);
             const thr: f64 = if (flagVal(args, "--threshold")) |t| try std.fmt.parseFloat(f64, t) else 0.35;
-            const json = try cli.verifyJson(allocator, dist, dist <= thr);
+            var verified = dist <= thr;
+            // Anti-spoof veto (reference verify): runs only after a positive
+            // match, on BOTH images — a face judged fake (or no face found)
+            // in either flips the verdict; the distance prints unchanged.
+            if (verified and hasFlag(args, "--anti-spoof") and antispoof.present(&file)) {
+                var as_model = try antispoof.Model.init(&ctx, allocator, &file);
+                defer as_model.deinit();
+                if (!(try pipeline.liveWith(&ctx, allocator, &det_model, &as_model, &ia)) or
+                    !(try pipeline.liveWith(&ctx, allocator, &det_model, &as_model, &ib))) verified = false;
+            }
+            const json = try cli.verifyJson(allocator, dist, verified);
             try stdout.print("{s}\n", .{json});
         },
         .landmarks => try stdout.print("landmarks: end-to-end wiring not implemented\n", .{}),

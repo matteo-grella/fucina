@@ -16,6 +16,7 @@ const detect = @import("detect.zig");
 const align_mod = @import("align.zig");
 const rec = @import("recognizer.zig");
 const genderage = @import("genderage.zig");
+const antispoof = @import("antispoof.zig");
 
 const gguf = fucina.gguf;
 const ExecContext = fucina.ExecContext;
@@ -102,6 +103,14 @@ pub fn analyzeWith(ctx: *ExecContext, al: std.mem.Allocator, det_model: *scrfd.M
     defer al.free(crop_pixels);
     var crop_img = image.Image{ .allocator = al, .width = 96, .height = 96, .pixels = crop_pixels };
     return genderage.analyzeImageWith(ctx, al, ga_model, &crop_img);
+}
+
+/// Liveness check (the reference verify veto's per-image `live` lambda):
+/// fresh detection pass — no face cannot prove liveness — then the largest
+/// face's ensemble score against the reference's fixed 0.5 threshold.
+pub fn liveWith(ctx: *ExecContext, al: std.mem.Allocator, det_model: *scrfd.Model, as_model: *const antispoof.Model, src: *const image.Image) !bool {
+    const primary = (try primaryFaceWith(ctx, al, det_model, src)) orelse return false;
+    return (try antispoof.scoreWith(ctx, al, as_model, src, primary.box)) >= 0.5;
 }
 
 pub fn cosine(a: []const f32, b: []const f32) f64 {

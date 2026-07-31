@@ -197,3 +197,37 @@ pub fn centerScaleCrop(allocator: std.mem.Allocator, src: *const image.Image, bo
     const M = [6]f64{ s, 0, -s * cx + sz * 0.5, 0, s, -s * cy + sz * 0.5 };
     return warpAffine(allocator, src, M, size, size);
 }
+
+/// Anti-spoof crop (the Silent-Face `_crop_face` geometry, mirroring the
+/// reference `antispoof_crop`): expand the box by `scale` about its center,
+/// clamped so the crop fits the image, integer-truncate the crop rect, then
+/// cv2-resize it to `size²` expressed as a forward affine through the shared
+/// warp. All geometry in f32 like the reference.
+pub fn antispoofCrop(allocator: std.mem.Allocator, src: *const image.Image, box: [4]f32, size: usize, scale: f32) ![]u8 {
+    const src_w: f32 = @floatFromInt(src.width);
+    const src_h: f32 = @floatFromInt(src.height);
+    const box_w = @max(1.0, box[2] - box[0]);
+    const box_h = @max(1.0, box[3] - box[1]);
+    // Reference _crop_face: scale = min((H-1)/h, (W-1)/w, scale).
+    const s = @min(@min((src_h - 1) / box_h, (src_w - 1) / box_w), scale);
+    const new_w = box_w * s;
+    const new_h = box_h * s;
+    const cx = box[0] + box_w * 0.5;
+    const cy = box[1] + box_h * 0.5;
+    // int() truncates toward zero, then clamp to the image (matches numpy/cv2).
+    const cx1 = @max(0, @as(i32, @intFromFloat(cx - new_w * 0.5)));
+    const cy1 = @max(0, @as(i32, @intFromFloat(cy - new_h * 0.5)));
+    const cx2 = @min(@as(i32, @intCast(src.width)) - 1, @as(i32, @intFromFloat(cx + new_w * 0.5)));
+    const cy2 = @min(@as(i32, @intCast(src.height)) - 1, @as(i32, @intFromFloat(cy + new_h * 0.5)));
+    if (cx2 < cx1 or cy2 < cy1) return error.EmptyCrop;
+    const cw: f32 = @floatFromInt(cx2 - cx1 + 1);
+    const ch: f32 = @floatFromInt(cy2 - cy1 + 1);
+    // u = (src_x - cx1 + 0.5)*size/cw - 0.5, per axis.
+    const sx = @as(f32, @floatFromInt(size)) / cw;
+    const sy = @as(f32, @floatFromInt(size)) / ch;
+    const M = [6]f64{
+        sx, 0, (0.5 - @as(f32, @floatFromInt(cx1))) * sx - 0.5,
+        0, sy, (0.5 - @as(f32, @floatFromInt(cy1))) * sy - 0.5,
+    };
+    return warpAffine(allocator, src, M, size, size);
+}

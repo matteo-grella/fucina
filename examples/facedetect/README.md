@@ -49,8 +49,10 @@ zig build facedetect -Doptimize=ReleaseFast -- detect --model models/buffalo_l.g
 # 512-d ArcFace embedding of the largest face (detect -> align -> embed)
 zig build facedetect -Doptimize=ReleaseFast -- embed --model models/buffalo_l.gguf --input face.png
 
-# 1:1 verification of two images (cosine distance; default threshold 0.35)
-zig build facedetect -Doptimize=ReleaseFast -- verify --model models/buffalo_l.gguf --a a.png --b b.png [--threshold T]
+# 1:1 verification of two images (cosine distance; default threshold 0.35).
+# --anti-spoof adds the MiniFASNet liveness veto: after a positive match, a
+# face judged fake (or no face found) in either image flips verified to false.
+zig build facedetect -Doptimize=ReleaseFast -- verify --model models/buffalo_l.gguf --a a.png --b b.png [--threshold T] [--anti-spoof]
 
 # gender + age of the largest face
 zig build facedetect -Doptimize=ReleaseFast -- analyze --model models/buffalo_l.gguf --input face.png
