@@ -46,8 +46,9 @@ zig build facedetect -Doptimize=ReleaseFast -- info models/buffalo_l.gguf
 # detect all faces -> reference-format JSON (boxes, scores, 5-point landmarks)
 zig build facedetect -Doptimize=ReleaseFast -- detect --model models/buffalo_l.gguf --input face.png
 
-# 512-d ArcFace embedding of the largest face (detect -> align -> embed)
-zig build facedetect -Doptimize=ReleaseFast -- embed --model models/buffalo_l.gguf --input face.png
+# 512-d ArcFace embedding of the largest face (detect -> align -> embed);
+# plain %.6f floats by default, --json for {"dim":..,"embedding":[..]}
+zig build facedetect -Doptimize=ReleaseFast -- embed --model models/buffalo_l.gguf --input face.png --json
 
 # 1:1 verification of two images (cosine distance; default threshold 0.35).
 # --anti-spoof adds the MiniFASNet liveness veto: after a positive match, a

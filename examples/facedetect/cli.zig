@@ -55,6 +55,19 @@ pub fn embedJson(allocator: std.mem.Allocator, emb: []f32) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
+/// Space-separated `%.6f` floats — the reference CLI's no-`--json` embed
+/// output, over the same L2-normalized vector as `embedJson`.
+pub fn embedPlain(allocator: std.mem.Allocator, emb: []f32) ![]u8 {
+    pipeline.l2normalize(emb);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    for (emb, 0..) |v, i| {
+        if (i > 0) try out.append(allocator, ' ');
+        try appendFmt(&out, allocator, "{d:.6}", .{v});
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 /// `{"faces":[{"score":..,"box":[..],"age":..,"gender":".."}]}`.
 pub fn analyzeJson(allocator: std.mem.Allocator, d: detect.Detection, r: genderage.Result) ![]u8 {
     return std.fmt.allocPrint(allocator, "{{\"faces\":[{{\"score\":{d:.4},\"box\":[{d:.2},{d:.2},{d:.2},{d:.2}],\"age\":{d},\"gender\":\"{c}\"}}]}}", .{ d.score, d.box[0], d.box[1], d.box[2], d.box[3], r.age, r.gender });

@@ -20,7 +20,7 @@ const usage =
     \\usage:
     \\  zig build facedetect -- info      <model.gguf>
     \\  zig build facedetect -- detect    --model <model.gguf> --input <img> [--threads N]
-    \\  zig build facedetect -- embed     --model <model.gguf> --input <img> [--threads N]
+    \\  zig build facedetect -- embed     --model <model.gguf> --input <img> [--json] [--threads N]
     \\  zig build facedetect -- verify    --model <model.gguf> --a <imgA> --b <imgB> [--threshold T] [--anti-spoof] [--threads N]
     \\  zig build facedetect -- analyze   --model <model.gguf> --input <img> [--threads N]
     \\  zig build facedetect -- landmarks --model <landmarks.gguf> --input <img> [--3d] [--detector <det.gguf>] [--json] [--threads N]
@@ -96,8 +96,11 @@ pub fn main(init: std.process.Init) !void {
             defer rec_model.deinit();
             const emb = try pipeline.embedWith(&ctx, allocator, &det_model, &rec_model, &img);
             defer allocator.free(emb);
-            const json = try cli.embedJson(allocator, emb);
-            try stdout.print("{s}\n", .{json});
+            const out = if (hasFlag(args, "--json"))
+                try cli.embedJson(allocator, emb)
+            else
+                try cli.embedPlain(allocator, emb);
+            try stdout.print("{s}\n", .{out});
         },
         .analyze => {
             var img = try cli.readImage(allocator, init.io, flagVal(args, "--input").?);

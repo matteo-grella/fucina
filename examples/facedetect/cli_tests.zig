@@ -12,6 +12,18 @@ const testlog = @import("testlog.zig");
 const gguf = fucina.gguf;
 const ExecContext = fucina.ExecContext;
 
+test "cli: embed formatters agree on the normalized vector, differ only in shape" {
+    const allocator = std.testing.allocator;
+    var v_json = [_]f32{ 3.0, 4.0 }; // L2-normalizes to 0.6, 0.8
+    const json = try cli.embedJson(allocator, &v_json);
+    defer allocator.free(json);
+    try std.testing.expectEqualStrings("{\"dim\":2,\"embedding\":[0.600000,0.800000]}", json);
+    var v_plain = [_]f32{ 3.0, 4.0 };
+    const plain = try cli.embedPlain(allocator, &v_plain);
+    defer allocator.free(plain);
+    try std.testing.expectEqualStrings("0.600000 0.800000", plain);
+}
+
 const Face = struct { score: f32, box: [4]f32, landmarks: [5][2]f32 };
 const DetJson = struct { faces: []Face };
 const AFace = struct { score: f32, box: [4]f32, age: i32, gender: []const u8 };
