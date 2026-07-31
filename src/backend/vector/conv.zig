@@ -1098,12 +1098,6 @@ pub fn conv2dIntoWithConfig(
     conv2dRangeRows(o, in, wt, bias, d, 0, d.oh);
 }
 
-/// Direct conv2d (correctness-first; f32 accumulation to match ggml's f32 conv
-/// path). Full-output convenience wrapper over `conv2dRangeRows`.
-pub fn conv2dRange(out: []f32, in: []const f32, w: []const f32, bias: ?[]const f32, d: Conv2dDims) void {
-    conv2dRangeRows(out, in, w, bias, d, 0, d.oh);
-}
-
 const Im2colTask = struct {
     col: []f32,
     in: []const f32,
@@ -1172,6 +1166,8 @@ fn im2colRangeRows(col: []f32, in: []const f32, d: Conv2dDims, oh_start: usize, 
 
 /// Compute output rows `[oh_start, oh_end)` only (the per-worker range for the
 /// threaded path). Each row is independent — no cross-row state.
+/// Direct conv2d over an output-row range (correctness-first; f32 accumulation
+/// to match ggml's f32 conv path).
 fn conv2dRangeRows(out: []f32, in: []const f32, w: []const f32, bias: ?[]const f32, d: Conv2dDims, oh_start: usize, oh_end: usize) void {
     const cin_pg = d.cin / d.groups;
     const cout_pg = d.cout / d.groups;

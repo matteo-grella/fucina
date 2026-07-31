@@ -6,7 +6,6 @@ const dtype_mod = @import("../dtype.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
 const vector_conv = @import("vector/conv.zig");
-const vector_elementwise = @import("vector/elementwise.zig");
 const vector_pool = @import("vector/pool.zig");
 const vector_winograd = @import("vector/winograd.zig");
 
