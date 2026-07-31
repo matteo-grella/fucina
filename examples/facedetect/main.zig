@@ -18,9 +18,9 @@ const ExecContext = fucina.ExecContext;
 const usage =
     \\usage:
     \\  zig build facedetect -- info      <model.gguf>
-    \\  zig build facedetect -- detect    --model <model.gguf> --input <img> [--json] [--threads N]
-    \\  zig build facedetect -- embed     --model <model.gguf> --input <img> [--json] [--threads N]
-    \\  zig build facedetect -- verify    --model <model.gguf> --a <imgA> --b <imgB> [--threshold T] [--anti-spoof] [--threads N]
+    \\  zig build facedetect -- detect    --model <model.gguf> --input <img> [--threads N]
+    \\  zig build facedetect -- embed     --model <model.gguf> --input <img> [--threads N]
+    \\  zig build facedetect -- verify    --model <model.gguf> --a <imgA> --b <imgB> [--threshold T] [--threads N]
     \\  zig build facedetect -- analyze   --model <model.gguf> --input <img> [--threads N]
     \\  zig build facedetect -- landmarks --model <landmarks.gguf> --input <img> [--3d] [--detector <det.gguf>] [--json] [--threads N]
     \\  zig build facedetect -- bench     --model <model.gguf> --input <img> [--mode pipeline|recognizer|detect|analyze] [--n N] [--threads N]
@@ -33,11 +33,6 @@ fn flagVal(args: []const [:0]const u8, name: []const u8) ?[]const u8 {
     for (args, 0..) |a, i| if (std.mem.eql(u8, a, name) and i + 1 < args.len) return args[i + 1];
     return null;
 }
-fn hasFlag(args: []const [:0]const u8, name: []const u8) bool {
-    for (args) |a| if (std.mem.eql(u8, a, name)) return true;
-    return false;
-}
-
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);

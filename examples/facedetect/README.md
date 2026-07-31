@@ -44,10 +44,10 @@ terms — see `docs/THIRD-PARTY-NOTICES.md`.
 zig build facedetect -Doptimize=ReleaseFast -- info models/buffalo_l.gguf
 
 # detect all faces -> reference-format JSON (boxes, scores, 5-point landmarks)
-zig build facedetect -Doptimize=ReleaseFast -- detect --model models/buffalo_l.gguf --input face.png --json
+zig build facedetect -Doptimize=ReleaseFast -- detect --model models/buffalo_l.gguf --input face.png
 
 # 512-d ArcFace embedding of the largest face (detect -> align -> embed)
-zig build facedetect -Doptimize=ReleaseFast -- embed --model models/buffalo_l.gguf --input face.png --json
+zig build facedetect -Doptimize=ReleaseFast -- embed --model models/buffalo_l.gguf --input face.png
 
 # 1:1 verification of two images (cosine distance; default threshold 0.35)
 zig build facedetect -Doptimize=ReleaseFast -- verify --model models/buffalo_l.gguf --a a.png --b b.png [--threshold T]
@@ -65,7 +65,7 @@ fixtures' decoded pixels (`align-src-{a,b,c}.bin`) as FDR1, which the CLI
 reads directly:
 
 ```sh
-zig build facedetect -Doptimize=ReleaseFast -- detect --model models/buffalo_l.gguf --input examples/facedetect/goldens/align-src-a.bin --json
+zig build facedetect -Doptimize=ReleaseFast -- detect --model models/buffalo_l.gguf --input examples/facedetect/goldens/align-src-a.bin
 zig build facedetect -Doptimize=ReleaseFast -- verify --model models/buffalo_l.gguf --a examples/facedetect/goldens/align-src-a.bin --b examples/facedetect/goldens/align-src-b.bin
 ```
 

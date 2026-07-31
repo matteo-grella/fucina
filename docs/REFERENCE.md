@@ -13973,7 +13973,7 @@ download source for every model row; each example's README
 | `parakeet` | ASR pipeline, streaming encoder, mic capture (14.6) | `zig build parakeet -- --model models/parakeet/tdt_ctc-110m-f16.gguf --audio clip.wav --transcribe` |
 | `omnivoice` | MaskGIT TTS, HuBERT/DAC/RVQ codec, streaming WAV | `zig build omnivoice -- tts --model models/omnivoice/omnivoice-base-Q8_0.gguf --codec models/omnivoice/omnivoice-tokenizer-F32.gguf --lang English -o out.wav` |
 | `nam` | streaming conv nets, live audio/MIDI, `.nam`/GGUF interchange | `zig build nam -- live profile.nam --ir cab.wav` |
-| `facedetect` | channel-last conv2d/pool2d/prelu/upsample CNNs (§4) | `zig build facedetect -- detect --model models/buffalo_l.gguf --input face.png --json` |
+| `facedetect` | channel-last conv2d/pool2d/prelu/upsample CNNs (§4) | `zig build facedetect -- detect --model models/buffalo_l.gguf --input face.png` |
 | `locate_anything` | VLM: ViT + projector + LM, token-space detection | `zig build locate-anything -- detect --model models/locate-anything-f32.gguf --input scene.png --prompt '...'` |
 | `nanochat` | end-to-end GPT: BPE tokenizer training, pretraining, SFT, bpb eval, chat (14.8) | `zig build nanochat -- chat -i <ckpt dir> --tokenizer <tokenizer.bin> -p "..."` |
 | `lmserve` | OpenAI- and Anthropic-compatible HTTP server: chat completions + responses + messages, function calling, SSE streaming, constrained output, `--spec`/`--batch`/`--kv-slots` (14.8) | `zig build lmserve -- models/Qwen3-0.6B-Q8_0.gguf --port 8080` |

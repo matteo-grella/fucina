@@ -244,10 +244,6 @@ pub fn analyze(ctx: *ExecContext, allocator: std.mem.Allocator, io: std.Io, file
     return decode(o);
 }
 
-pub fn analyzeImage(ctx: *ExecContext, allocator: std.mem.Allocator, file: *const gguf.File, img: *const image.Image) !Result {
-    return decode(try forwardImage(ctx, allocator, file, img));
-}
-
 pub fn analyzeImageWith(ctx: *ExecContext, allocator: std.mem.Allocator, model: *Model, img: *const image.Image) !Result {
     return decode(try forwardImageWith(ctx, allocator, model, img));
 }
