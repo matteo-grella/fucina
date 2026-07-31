@@ -129,9 +129,12 @@ algorithms without accepting that existing checkpoints break.
 
 The scalar backend (`-Dbackend=scalar`) is the executable reference: native
 and scalar must agree, and `src/backend/parity_test.zig` holds them together.
-Anything numeric runs the scalar leg before merge (once, on the final code —
-it is slow by design). Everything integer is bit-exact across architectures;
-float tile kernels document association-order tolerance instead.
+The scalar leg runs before merge when the change touches `src/backend/` or
+`src/exec/` (once, on the final code — it is slow by design); other changes
+skip it, since `parity_test.zig` already diffs both backends inside every
+native `zig build test`. Everything integer is bit-exact across
+architectures; float tile kernels document association-order tolerance
+instead.
 
 ## 2. Check before you build
 
@@ -208,7 +211,7 @@ GEMM sweep; a kernel change needs both tracks, always.
 | Gate | What it proves | Run when |
 | --- | --- | --- |
 | `zig build test` | nine test roots, native backend, no assets needed | always |
-| `zig build test -Dbackend=scalar` | native agrees with the reference backend | anything numeric — once, on final code |
+| `zig build test -Dbackend=scalar` | native agrees with the reference backend | `src/backend/` or `src/exec/` changed — once, on final code |
 | `zig build test -Dblas=none` | pure-Zig kernels unbroken | anything numeric near GEMM dispatch |
 | `zig build arch-check` | layering intact (zero SCCs) | new files / imports |
 | `zig build doc-check` | AGENTS.md doc index resolves | doc adds/moves |
