@@ -50,25 +50,31 @@ pub const speculative = struct {
     pub const cascade = @import("llm/speculative/cascade.zig");
     pub const constrained = @import("llm/speculative/constrained.zig");
 };
-
-// === Generic / shared helpers (stay flat) ===
-pub const weights = @import("llm/weights.zig");
-pub const ptqtp_gguf = @import("llm/ptqtp_gguf.zig");
-pub const gguf_meta = @import("llm/gguf_meta.zig");
+/// DeepSeek-V2 MLA + fine-grained MoE with shared experts. Files in `llm/deepseek2/`.
 pub const deepseek2 = struct {
     pub const model = @import("llm/deepseek2/model.zig");
 };
+/// GLM-4.5 MoE with native MTP (`nextn`) self-speculation. Files in `llm/glm4moe/`.
 pub const glm4moe = struct {
     pub const model = @import("llm/glm4moe/model.zig");
 };
+/// DeepSeek V4 Flash (hyper-connections, compressed-KV MQA, streamed experts,
+/// MTP). Files in `llm/deepseek4/`.
 pub const deepseek4 = struct {
     pub const model = @import("llm/deepseek4/model.zig");
 };
+/// Inkling (hybrid SWA/global rel-bias attention, shortconv sites, sink-shared
+/// MoE; hMLP vision + dMel audio towers). Files in `llm/inkling/`.
 pub const inkling = struct {
     pub const model = @import("llm/inkling/model.zig");
     pub const mmproj = @import("llm/inkling/mmproj.zig");
     pub const chat = @import("llm/inkling/chat.zig");
 };
+
+// === Generic / shared helpers (stay flat) ===
+pub const weights = @import("llm/weights.zig");
+pub const ptqtp_gguf = @import("llm/ptqtp_gguf.zig");
+pub const gguf_meta = @import("llm/gguf_meta.zig");
 pub const cartridge = @import("llm/cartridge.zig");
 pub const cartridge_fleet = @import("llm/cartridge_fleet.zig");
 pub const engram = @import("llm/engram.zig");
@@ -113,12 +119,15 @@ test {
     _ = speculative.recycling;
     _ = speculative.cascade;
     _ = speculative.constrained;
-    _ = weights;
-    _ = ptqtp_gguf;
-    _ = gguf_meta;
     _ = deepseek2.model;
     _ = glm4moe.model;
     _ = deepseek4.model;
+    _ = inkling.model;
+    _ = inkling.mmproj;
+    _ = inkling.chat;
+    _ = weights;
+    _ = ptqtp_gguf;
+    _ = gguf_meta;
     _ = cartridge;
     _ = cartridge_fleet;
     _ = engram;
