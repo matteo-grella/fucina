@@ -485,12 +485,17 @@ fn runFleetTrain(
         try stdout.print("fleet resumed from {s}: {d} docs, {d} rounds so far\n", .{ dir, docs.len, reopened.manifest.rounds });
         break :blk reopened;
     } else blk: {
-        var manifest = fleet_mod.Manifest.init(allocator, opts.p);
-        errdefer manifest.deinit();
-        manifest.frozen_prefix = opts.frozen_prefix;
-        manifest.embed_chunk = opts.embed_chunk;
-        for (docs) |*doc| _ = try manifest.addDoc(doc.name, doc.ids.len);
-        var created = try fleet_mod.Fleet.create(allocator, io, dir, manifest, opts.lr, policy);
+        // The manifest errdefer ends AT Fleet.create: ownership transfers on
+        // success, so an errdefer held past the call would double-free it
+        // alongside `created.deinit()`.
+        var created = fresh: {
+            var manifest = fleet_mod.Manifest.init(allocator, opts.p);
+            errdefer manifest.deinit();
+            manifest.frozen_prefix = opts.frozen_prefix;
+            manifest.embed_chunk = opts.embed_chunk;
+            for (docs) |*doc| _ = try manifest.addDoc(doc.name, doc.ids.len);
+            break :fresh try fleet_mod.Fleet.create(allocator, io, dir, manifest, opts.lr, policy);
+        };
         errdefer created.deinit();
 
         // Init pass: every document's cartridge from its own opening tokens

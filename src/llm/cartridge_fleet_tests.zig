@@ -256,10 +256,14 @@ test "evict/reload continues training bit-identically (rows + Adam moments)" {
     // Arm 1 (interrupted): 2 steps, evict to disk, reload, 2 more steps.
     var interrupted: []f32 = undefined;
     {
-        var manifest = fleet_mod.Manifest.init(allocator, fleet_p);
-        errdefer manifest.deinit();
-        _ = try manifest.addDoc("doc-a", doc_tokens.len);
-        var fleet = try fleet_mod.Fleet.create(allocator, io, dir, manifest, 2e-2, policy);
+        // The manifest errdefer ends AT Fleet.create: ownership transfers
+        // on success, and the fleet's deinit frees it from then on.
+        var fleet = blk: {
+            var manifest = fleet_mod.Manifest.init(allocator, fleet_p);
+            errdefer manifest.deinit();
+            _ = try manifest.addDoc("doc-a", doc_tokens.len);
+            break :blk try fleet_mod.Fleet.create(allocator, io, dir, manifest, 2e-2, policy);
+        };
         defer fleet.deinit();
 
         const cart = try trainer.initCartridge(&ctx, doc_tokens[0..fleet_p], 1);
@@ -286,13 +290,15 @@ test "evict/reload continues training bit-identically (rows + Adam moments)" {
 
     // Arm 2 (uninterrupted): 4 straight steps, never leaving memory.
     {
-        var manifest = fleet_mod.Manifest.init(allocator, fleet_p);
-        errdefer manifest.deinit();
-        _ = try manifest.addDoc("doc-a", doc_tokens.len);
         var dir2_buf: [128]u8 = undefined;
         const dir2 = try uniqueDir(&dir2_buf, "straight");
         defer std.Io.Dir.cwd().deleteTree(io, dir2) catch {};
-        var fleet = try fleet_mod.Fleet.create(allocator, io, dir2, manifest, 2e-2, policy);
+        var fleet = blk: {
+            var manifest = fleet_mod.Manifest.init(allocator, fleet_p);
+            errdefer manifest.deinit();
+            _ = try manifest.addDoc("doc-a", doc_tokens.len);
+            break :blk try fleet_mod.Fleet.create(allocator, io, dir2, manifest, 2e-2, policy);
+        };
         defer fleet.deinit();
 
         const cart = try trainer.initCartridge(&ctx, doc_tokens[0..fleet_p], 1);
@@ -331,17 +337,19 @@ test "budget rotation swaps most-trained residents for least-trained absentees" 
     const dir = try uniqueDir(&dir_buf, "rotate");
     defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
 
-    var manifest = fleet_mod.Manifest.init(allocator, fleet_p);
-    errdefer manifest.deinit();
-    _ = try manifest.addDoc("doc-a", 100);
-    _ = try manifest.addDoc("doc-b", 100);
-    _ = try manifest.addDoc("doc-c", 100);
-    var fleet = try fleet_mod.Fleet.create(allocator, io, dir, manifest, 1e-2, .{
-        .budget = 2,
-        .every = 1,
-        .evict_fraction = 0.5,
-        .warmup = 0,
-    });
+    var fleet = blk: {
+        var manifest = fleet_mod.Manifest.init(allocator, fleet_p);
+        errdefer manifest.deinit();
+        _ = try manifest.addDoc("doc-a", 100);
+        _ = try manifest.addDoc("doc-b", 100);
+        _ = try manifest.addDoc("doc-c", 100);
+        break :blk try fleet_mod.Fleet.create(allocator, io, dir, manifest, 1e-2, .{
+            .budget = 2,
+            .every = 1,
+            .evict_fraction = 0.5,
+            .warmup = 0,
+        });
+    };
     defer fleet.deinit();
 
     // Initialize all three docs on disk (the CLI's init pass), then keep

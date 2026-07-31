@@ -579,7 +579,9 @@ pub const Fleet = struct {
 
     /// Create a fleet directory around an existing `manifest` and persist
     /// it. Ownership of `manifest` transfers ON SUCCESS only — on error the
-    /// caller still owns (and deinits) it.
+    /// caller still owns (and deinits) it. Callers must not hold a manifest
+    /// errdefer past a successful call: the fleet's deinit frees it from
+    /// then on, and a stale errdefer would double-free.
     pub fn create(allocator: Allocator, io: std.Io, dir: []const u8, manifest: Manifest, base_lr: f32, policy: RotationPolicy) !Fleet {
         try std.Io.Dir.cwd().createDirPath(io, dir);
         var fleet = Fleet{
