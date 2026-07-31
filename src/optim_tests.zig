@@ -1995,6 +1995,48 @@ test "optim Adam frames carry their own magics, not AdamW's" {
     try std.testing.expectEqualSlices(u8, "FZD4", writer_v4.buffered()[0..4]);
 }
 
+test "optim v5 frames carry per-optimizer magics for both moment-pair twins" {
+    @setEvalBranchQuota(1_000_000);
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    // A 16-bit param registers its f32 master at addParam time — that is what
+    // upgrades the frame to v5, no step needed.
+    const w0 = [_]f32{ 1.0, -2.0, 0.5, 3.0 };
+    var w32 = try Tensor(.{ .out, .in }).fromSlice(&ctx, .{ 2, 2 }, &w0);
+    defer w32.deinit();
+    var narrow = try w32.to(&ctx, .bf16);
+    defer narrow.deinit();
+    const BF16 = Tensor(.{ .dtype = .bf16, .tags = .{ .out, .in } });
+    var w = try BF16.variable(&ctx, try narrow.asRawTensor().cloneView());
+    defer w.deinit();
+
+    var buf_adamw: [8192]u8 = undefined;
+    var writer_adamw = std.Io.Writer.fixed(&buf_adamw);
+    {
+        var opt = optim.AdamW.init(allocator, .{ .lr = 0.1 });
+        defer opt.deinit();
+        try opt.addParamNamed(&w, "w");
+        try opt.saveState(&writer_adamw);
+    }
+    try std.testing.expectEqualSlices(u8, "FZA5", writer_adamw.buffered()[0..4]);
+
+    var buf_adam: [8192]u8 = undefined;
+    var writer_adam = std.Io.Writer.fixed(&buf_adam);
+    {
+        var opt = optim.Adam.init(allocator, .{ .lr = 0.1 });
+        defer opt.deinit();
+        try opt.addParamNamed(&w, "w");
+        try opt.saveState(&writer_adam);
+    }
+    try std.testing.expectEqualSlices(u8, "FZD5", writer_adam.buffered()[0..4]);
+}
+
 test "optim v4 loadState is transactional: a truncated record leaves prior slot unmutated" {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
