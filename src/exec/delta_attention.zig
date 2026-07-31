@@ -245,22 +245,8 @@ pub fn kdaRecurrent(
     };
 
     const work = parallel.saturatedMul3(seq, heads, k_dim * v_dim);
-    var dispatched = false;
-    if (work >= parallel.vector_matmul_work_threshold / 2) {
-        if (rt.workPool()) |pool| {
-            const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), heads);
-            if (task_count > 1) {
-                var tasks: [parallel.vector_max_threads]KdaTask = undefined;
-                for (0..task_count) |ti| {
-                    tasks[ti] = base;
-                    tasks[ti].head_start = ti * heads / task_count;
-                    tasks[ti].head_end = (ti + 1) * heads / task_count;
-                }
-                pool.parallelChunks(KdaTask, tasks[0..task_count], runKdaTask);
-                dispatched = true;
-            }
-        }
-    }
+    const dispatched = work >= parallel.vector_matmul_work_threshold / 2 and
+        rt.dispatchRange(KdaTask, "head_start", "head_end", base, heads, runKdaTask);
     if (!dispatched) kdaHeads(base);
 
     return .{ .o = o, .state = state };

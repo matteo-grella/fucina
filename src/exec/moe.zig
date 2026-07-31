@@ -5,7 +5,6 @@ const Runtime = @import("runtime.zig").Runtime;
 const backend_ops = backend_mod.ops;
 const expert_store = @import("expert_store.zig");
 const moe_chain = @import("moe_chain.zig");
-const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
 
@@ -1847,18 +1846,9 @@ pub fn moeExpertFfnBatch(
         .t0 = 0,
         .t1 = seq,
     };
-    if (phased_pool) |pool| {
-        const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), seq);
-        var scatter_tasks: [parallel.vector_max_threads]MoeBatchScatterTask = undefined;
-        for (0..task_count) |i| {
-            scatter_tasks[i] = scatter_base;
-            scatter_tasks[i].t0 = i * seq / task_count;
-            scatter_tasks[i].t1 = (i + 1) * seq / task_count;
-        }
-        pool.parallelChunks(MoeBatchScatterTask, scatter_tasks[0..task_count], runMoeBatchScatterTask);
-    } else {
-        runMoeBatchScatterTask(&scatter_base);
-    }
+    const scatter_pooled = use_phased and
+        rt.dispatchRange(MoeBatchScatterTask, "t0", "t1", scatter_base, seq, runMoeBatchScatterTask);
+    if (!scatter_pooled) runMoeBatchScatterTask(&scatter_base);
     if (profile) |p| {
         p.scatter_ns += moeBatchProfileElapsed(scatter_start, io);
         p.total_ns += moeBatchProfileElapsed(total_start, io);

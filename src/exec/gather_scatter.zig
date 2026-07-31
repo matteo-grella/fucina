@@ -422,17 +422,7 @@ pub fn takeAlongAxisRank(
         .outer_end = outer,
     };
     if (outer > 1 and out_len >= parallel.vector_elementwise_len_threshold) {
-        if (rt.workPool()) |pool| {
-            const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), outer);
-            var tasks: [parallel.vector_max_threads]TakeAlongTask = undefined;
-            for (0..task_count) |task_i| {
-                tasks[task_i] = base_task;
-                tasks[task_i].outer_start = task_i * outer / task_count;
-                tasks[task_i].outer_end = (task_i + 1) * outer / task_count;
-            }
-            pool.parallelChunks(TakeAlongTask, tasks[0..task_count], runTakeAlongTask);
-            return out;
-        }
+        if (rt.dispatchRange(TakeAlongTask, "outer_start", "outer_end", base_task, outer, runTakeAlongTask)) return out;
     }
     runTakeAlongTask(&base_task);
     return out;
@@ -516,17 +506,7 @@ fn scatterAlongAxisRankImpl(
         .outer_end = outer,
     };
     if (outer > 1 and src_len >= parallel.vector_elementwise_len_threshold) {
-        if (rt.workPool()) |pool| {
-            const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), outer);
-            var tasks: [parallel.vector_max_threads]ScatterAlongTask(mode) = undefined;
-            for (0..task_count) |task_i| {
-                tasks[task_i] = base_task;
-                tasks[task_i].outer_start = task_i * outer / task_count;
-                tasks[task_i].outer_end = (task_i + 1) * outer / task_count;
-            }
-            pool.parallelChunks(ScatterAlongTask(mode), tasks[0..task_count], runScatterAlongTask(mode));
-            return out;
-        }
+        if (rt.dispatchRange(ScatterAlongTask(mode), "outer_start", "outer_end", base_task, outer, runScatterAlongTask(mode))) return out;
     }
     runScatterAlongTask(mode)(&base_task);
     return out;
@@ -689,27 +669,19 @@ pub fn scatterAddAxisRank(
         // identical to the serial path below (see ScatterAddRowsTask).
         const total_work = source_len +| input.len;
         if (rows > 1 and total_work >= parallel.vector_elementwise_len_threshold) {
-            if (rt.workPool()) |pool| {
-                var out = try rt.emptyRank(rank, source_shape);
-                errdefer out.deinit();
-                const base_task: ScatterAddRowsTask = .{
-                    .grad = input,
-                    .output = out.data(),
-                    .indices = indices,
-                    .row_len = row_len,
-                    .row_start = 0,
-                    .row_end = rows,
-                };
-                const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), rows);
-                var tasks: [parallel.vector_max_threads]ScatterAddRowsTask = undefined;
-                for (0..task_count) |task_i| {
-                    tasks[task_i] = base_task;
-                    tasks[task_i].row_start = task_i * rows / task_count;
-                    tasks[task_i].row_end = (task_i + 1) * rows / task_count;
-                }
-                pool.parallelChunks(ScatterAddRowsTask, tasks[0..task_count], runScatterAddRowsTask);
-                return out;
-            }
+            var out = try rt.emptyRank(rank, source_shape);
+            errdefer out.deinit();
+            const base_task: ScatterAddRowsTask = .{
+                .grad = input,
+                .output = out.data(),
+                .indices = indices,
+                .row_len = row_len,
+                .row_start = 0,
+                .row_end = rows,
+            };
+            if (!rt.dispatchRange(ScatterAddRowsTask, "row_start", "row_end", base_task, rows, runScatterAddRowsTask))
+                runScatterAddRowsTask(&base_task);
+            return out;
         }
 
         var out = try rt.zerosRank(rank, source_shape);

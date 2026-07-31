@@ -1888,32 +1888,12 @@ pub fn groupedCausalAttentionBackward(
                 .{ .partials = if (need_v) dv_target else null, .grad = v_grad },
             };
             for (reduce_targets) |pair| {
-                const partials = pair.partials orelse continue;
-                const grad = pair.grad orelse continue;
-                var reduced = false;
-                if (parallel.saturatedMul3(kv_seq, heads, d) >= parallel.vector_elementwise_len_threshold) {
-                    if (self.workPool()) |pool| {
-                        const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), kv_seq);
-                        if (task_count > 1) {
-                            var reduce_storage: [parallel.vector_max_threads]AttentionBackwardReduceTask = undefined;
-                            for (0..task_count) |task_i| {
-                                reduce_storage[task_i] = reduce_base;
-                                reduce_storage[task_i].partials = partials;
-                                reduce_storage[task_i].grad = grad;
-                                reduce_storage[task_i].source_start = task_i * kv_seq / task_count;
-                                reduce_storage[task_i].source_end = (task_i + 1) * kv_seq / task_count;
-                            }
-                            pool.parallelChunks(AttentionBackwardReduceTask, reduce_storage[0..task_count], runAttentionBackwardReduceTask);
-                            reduced = true;
-                        }
-                    }
-                }
-                if (!reduced) {
-                    var serial_reduce = reduce_base;
-                    serial_reduce.partials = partials;
-                    serial_reduce.grad = grad;
-                    attentionBackwardReduceRows(serial_reduce);
-                }
+                var pair_base = reduce_base;
+                pair_base.partials = pair.partials orelse continue;
+                pair_base.grad = pair.grad orelse continue;
+                const reduced = parallel.saturatedMul3(kv_seq, heads, d) >= parallel.vector_elementwise_len_threshold and
+                    self.dispatchRange(AttentionBackwardReduceTask, "source_start", "source_end", pair_base, kv_seq, runAttentionBackwardReduceTask);
+                if (!reduced) attentionBackwardReduceRows(pair_base);
             }
         }
         return result;

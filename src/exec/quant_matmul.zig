@@ -423,47 +423,26 @@ pub fn splitSwiGluMatmul2DWithPackedQ8_0x4Rhs(
 
     const input = gg.tensor().dataConst();
     const row_groups = (m + 3) / 4;
-    if (m * k >= parallel.vector_elementwise_len_threshold / 8) {
-        if (self.workPool()) |pool| {
-            const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), row_groups);
-            var tasks: [parallel.vector_max_threads]SplitSwiGluQuantQ8_0x4Task = undefined;
-            const base: SplitSwiGluQuantQ8_0x4Task = .{
-                .input = input,
-                .blocks = qlhs_blocks,
-                .rows = m,
-                .cols = k,
-                .blocks_per_row = blocks_per_row,
-                .row_group_start = 0,
-                .row_group_end = row_groups,
-            };
-            for (0..task_count) |task_i| {
-                tasks[task_i] = base;
-                tasks[task_i].row_group_start = task_i * row_groups / task_count;
-                tasks[task_i].row_group_end = (task_i + 1) * row_groups / task_count;
-            }
-            pool.parallelChunks(SplitSwiGluQuantQ8_0x4Task, tasks[0..task_count], runSplitSwiGluQuantQ8_0x4Task);
-        } else {
-            backend_mod.quantized_matmul.quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto(
-                qlhs_blocks,
-                input,
-                m,
-                k,
-                blocks_per_row,
-                0,
-                row_groups,
-            );
-        }
-    } else {
-        backend_mod.quantized_matmul.quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto(
-            qlhs_blocks,
-            input,
-            m,
-            k,
-            blocks_per_row,
-            0,
-            row_groups,
-        );
-    }
+    const base: SplitSwiGluQuantQ8_0x4Task = .{
+        .input = input,
+        .blocks = qlhs_blocks,
+        .rows = m,
+        .cols = k,
+        .blocks_per_row = blocks_per_row,
+        .row_group_start = 0,
+        .row_group_end = row_groups,
+    };
+    const pooled = m * k >= parallel.vector_elementwise_len_threshold / 8 and
+        self.dispatchRange(SplitSwiGluQuantQ8_0x4Task, "row_group_start", "row_group_end", base, row_groups, runSplitSwiGluQuantQ8_0x4Task);
+    if (!pooled) backend_mod.quantized_matmul.quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto(
+        qlhs_blocks,
+        input,
+        m,
+        k,
+        blocks_per_row,
+        0,
+        row_groups,
+    );
     self.enableNativeTypedMatmulPoolForWork(m, rhs.n, k);
     if (m % 4 == 0) {
         try self.backend.matmul2DPackedQ8_0x4LhsRhs(&out, qlhs_blocks, rhs, m, rhs.n, k);
