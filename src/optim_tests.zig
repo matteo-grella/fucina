@@ -1959,6 +1959,42 @@ test "optim checkpoint cross-dtype loads are rejected without conversion" {
     try std.testing.expectEqualSlices(u8, "FZS3", writer_sgd.buffered()[0..4]);
 }
 
+test "optim Adam frames carry their own magics, not AdamW's" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var w = try Tensor(.{.out}).variableFromSlice(&ctx, .{2}, &.{ 1, 2 });
+    defer w.deinit();
+
+    // The magic trio is the only optimizer-specific frame bytes the shared
+    // MomentPairOptimizer body writes, and saveState/loadState read the same
+    // comptime trio — a drifted trio roundtrips green. Pin the bytes.
+    var buf: [4096]u8 = undefined;
+    var writer_v3 = std.Io.Writer.fixed(&buf);
+    {
+        var opt = optim.Adam.init(allocator, .{ .lr = 0.1 });
+        defer opt.deinit();
+        try opt.addParamNamed(&w, "w");
+        try opt.saveState(&writer_v3);
+    }
+    try std.testing.expectEqualSlices(u8, "FZAD", writer_v3.buffered()[0..4]);
+
+    var buf_v4: [4096]u8 = undefined;
+    var writer_v4 = std.Io.Writer.fixed(&buf_v4);
+    {
+        var opt = optim.Adam.init(allocator, .{ .lr = 0.1, .state_dtype = .bf16 });
+        defer opt.deinit();
+        try opt.addParamNamed(&w, "w");
+        try opt.saveState(&writer_v4);
+    }
+    try std.testing.expectEqualSlices(u8, "FZD4", writer_v4.buffered()[0..4]);
+}
+
 test "optim v4 loadState is transactional: a truncated record leaves prior slot unmutated" {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
