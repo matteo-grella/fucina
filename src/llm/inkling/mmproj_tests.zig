@@ -22,8 +22,8 @@ test "bf16 round-trip matches round-to-nearest-even" {
     try std.testing.expectEqual(@as(f32, 0.0), r(0.0));
     // 1.0 + 2^-9 rounds down to 1.0 in bf16 (7 mantissa bits, tie-to-even).
     try std.testing.expectEqual(@as(f32, 1.0), r(1.0 + 0.001953125));
-    // 1.0 + 3*2^-9 rounds up to 1.015625.
-    try std.testing.expectEqual(@as(f32, 1.015625), r(1.0 + 3.0 * 0.001953125));
+    // 1.0 + 3*2^-9 (three quarters of a bf16 ulp) rounds up to 1.0078125.
+    try std.testing.expectEqual(@as(f32, 1.0078125), r(1.0 + 3.0 * 0.001953125));
 }
 
 test "pillow lanczos resize: identity when size is unchanged" {
