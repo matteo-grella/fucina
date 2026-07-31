@@ -709,8 +709,11 @@ pub const Model = struct {
         // Every expert over the full latent sequence (8 tiny matmuls beat
         // per-token gathers at parity scale), then the routed weighted sum.
         const expert_outs = try allocator.alloc(Tensor, experts);
+        // Free only the experts the loop below actually built: a mid-loop
+        // failure leaves the tail undefined.
+        var built: usize = 0;
         defer {
-            for (expert_outs) |*t| t.deinit();
+            for (expert_outs[0..built]) |*t| t.deinit();
             allocator.free(expert_outs);
         }
         for (expert_outs, w.experts) |*out, *expert| {
@@ -721,6 +724,7 @@ pub const Model = struct {
             var act = try ctx.gatedRank(2, .situ, &up, &gate);
             defer act.deinit();
             out.* = try ctx.matmulTransB(&act, &expert.w2);
+            built += 1;
         }
 
         const routed_values = try allocator.alloc(f32, seq * latent);
