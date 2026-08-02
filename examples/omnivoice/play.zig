@@ -79,6 +79,12 @@ pub const Ring = struct {
     }
 
     /// Frames currently readable.
+    /// Consumer-side drop of everything queued (the realtime callback owns
+    /// the read cursor; called from it on a discard request).
+    pub fn discardAll(self: *Ring) void {
+        self.read_pos.store(self.write_pos.load(.acquire), .release);
+    }
+
     pub fn len(self: *const Ring) usize {
         return self.write_pos.load(.acquire) - self.read_pos.load(.acquire);
     }
@@ -164,6 +170,8 @@ pub const Player = struct {
     // Shared with the realtime callback (atomics only).
     played_any: std.atomic.Value(bool),
     finished: std.atomic.Value(bool),
+    /// Set by `discard`; the realtime callback drops the queued ring content.
+    discard_requested: std.atomic.Value(bool) = .init(false),
     underrun_episodes: std.atomic.Value(usize),
     silence_frames: std.atomic.Value(usize),
     /// Callback-thread-local: whether the device is currently starved, and
@@ -234,6 +242,7 @@ pub const Player = struct {
     /// Queues samples for playback, blocking while the ring is full (the
     /// device drains at realtime speed). Producer thread only.
     pub fn pushSamples(self: *Player, samples: []const f32) !void {
+        self.finished.store(false, .release);
         var rest = samples;
         while (rest.len > 0) {
             const n = self.ring.pushSlice(rest);
@@ -241,6 +250,30 @@ pub const Player = struct {
             self.reportUnderruns();
             if (rest.len > 0) try std.Io.sleep(self.io, .{ .nanoseconds = 2 * std.time.ns_per_ms }, .awake);
         }
+    }
+
+    /// Blocks until the ring is empty and the device tail has played out,
+    /// KEEPING the device running — the per-turn drain for long-lived
+    /// callers (voiceagent). `drainAndStop` remains the one-shot teardown.
+    pub fn drain(self: *Player) !void {
+        while (self.ring.len() > 0) {
+            self.reportUnderruns();
+            try std.Io.sleep(self.io, .{ .nanoseconds = 5 * std.time.ns_per_ms }, .awake);
+        }
+        self.finished.store(true, .release);
+        const tail_ms: u64 = 100 + (2 * @as(u64, self.opts.period_frames) * 1000) / self.opts.sample_rate;
+        try std.Io.sleep(self.io, .{ .nanoseconds = tail_ms * std.time.ns_per_ms }, .awake);
+    }
+
+    /// Ask the realtime callback to throw away everything queued (barge-in);
+    /// returns once the ring reads empty. The device keeps running.
+    pub fn discard(self: *Player) !void {
+        self.discard_requested.store(true, .release);
+        while (self.ring.len() > 0) {
+            try std.Io.sleep(self.io, .{ .nanoseconds = 2 * std.time.ns_per_ms }, .awake);
+        }
+        self.discard_requested.store(false, .release);
+        self.finished.store(true, .release);
     }
 
     /// Blocks until the ring is empty and the device tail has played out,
@@ -281,6 +314,7 @@ pub const Player = struct {
     /// starvation. No allocation, no locks, no I/O.
     fn deviceCallback(user: ?*anyopaque, output: [*]f32, frame_count: c_uint) callconv(.c) void {
         const self: *Player = @ptrCast(@alignCast(user.?));
+        if (self.discard_requested.load(.acquire)) self.ring.discardAll();
         const out = output[0..frame_count];
         const got = self.ring.popSlice(out);
         if (got > 0) {

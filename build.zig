@@ -135,6 +135,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const omnivoice_play_module = b.createModule(.{
+        .root_source_file = b.path("examples/omnivoice/play.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const nanochat_module = b.createModule(.{
         .root_source_file = b.path("examples/nanochat/nanochat.zig"),
         .target = target,
@@ -165,6 +170,12 @@ pub fn build(b: *std.Build) void {
     inkling.exe.root_module.addImport("facedetect_image", facedetect_image_module);
     _ = addExample(b, tool_ctx, .{ .step = "glm4moe", .desc = "Run GLM-4.5 family GGUF inference (--mtp native multi-token-prediction speculative decode)", .exe = "fucina-glm4moe", .root = "examples/glm4moe/main.zig", .llm = true });
     _ = addExample(b, tool_ctx, .{ .step = "deepseek4", .desc = "Run DeepSeek V4 Flash GGUF inference (CSA/HCA + streamed experts)", .exe = "fucina-deepseek4", .root = "examples/deepseek4/main.zig", .llm = true });
+    const voiceagent = addExample(b, tool_ctx, .{ .step = "voiceagent", .desc = "Native cascade voice agent TUI: mic -> parakeet EOU STT -> qwen3 chat -> qwen3-tts -> speakers", .exe = "fucina-voiceagent", .root = "examples/voiceagent/main.zig", .llm = true });
+    voiceagent.exe.root_module.addImport("nam_audio", nam_audio_module);
+    voiceagent.exe.root_module.addImport("omnivoice_play", omnivoice_play_module);
+    configureOmnivoiceAudio(voiceagent.exe);
+    _ = addExample(b, tool_ctx, .{ .step = "pockettts", .desc = "Pocket TTS v2 from GGUF (kyutai port): continuous-latent flow-matching TTS, streaming Mimi decode", .exe = "fucina-pockettts", .root = "examples/pockettts/main.zig", .llm = true });
+    _ = addExample(b, tool_ctx, .{ .step = "qwen3tts", .desc = "Qwen3-TTS from GGUF (qwentts.cpp port): CustomVoice text-to-speech, streamed codec decode", .exe = "fucina-qwen3tts", .root = "examples/qwen3tts/main.zig", .llm = true });
     const omnivoice = addExample(b, tool_ctx, .{ .step = "omnivoice", .desc = "OmniVoice MaskGIT TTS from GGUF: voice cloning/design, codec encode/decode", .exe = "fucina-omnivoice", .root = "examples/omnivoice/main.zig", .llm = true });
     configureOmnivoiceAudio(omnivoice.exe);
     _ = addExample(b, tool_ctx, .{ .step = "locate-anything", .desc = "LocateAnything-3B open-vocabulary detection from GGUF: detect/info, parity oracles, bench", .exe = "fucina-locate-anything", .root = "examples/locate_anything/main.zig", .llm = true });
@@ -204,8 +215,6 @@ pub fn build(b: *std.Build) void {
     const diffusion_gemma = addExample(b, tool_ctx, .{ .step = "diffusion-gemma", .desc = "Run DiffusionGemma GGUF block-diffusion inference (parity harness + EB chat)", .exe = "fucina-diffusion-gemma", .root = "examples/diffusion_gemma/main.zig", .llm = true });
     diffusion_gemma.exe.root_module.link_libc = true;
     _ = addExample(b, tool_ctx, .{ .step = "qwen35", .desc = "Run Qwen3.5 (qwen35 hybrid Gated-DeltaNet) GGUF — loader/parity harness", .exe = "fucina-qwen35", .root = "examples/qwen35/main.zig", .llm = true });
-    _ = addExample(b, tool_ctx, .{ .step = "pockettts", .desc = "Pocket TTS v2 from GGUF (kyutai port): continuous-latent flow-matching TTS, streaming Mimi decode", .exe = "fucina-pockettts", .root = "examples/pockettts/main.zig", .llm = true });
-    _ = addExample(b, tool_ctx, .{ .step = "qwen3tts", .desc = "Qwen3-TTS from GGUF (qwentts.cpp port): CustomVoice text-to-speech, streamed codec decode", .exe = "fucina-qwen3tts", .root = "examples/qwen3tts/main.zig", .llm = true });
     _ = addExample(b, tool_ctx, .{ .step = "export-gguf", .desc = "Export a GGUF: re-emit/transcode a model, merge Fucina LoRA adapters (checkpoint dir or safetensors) into dense weights, or PTQTP-quantize tensor-at-a-time (--ptqtp[=K]; models bigger than RAM)", .exe = "fucina-export-gguf", .root = "tools/export_gguf.zig", .llm = true });
 
     const arch_check_exe = b.addExecutable(.{
@@ -568,6 +577,30 @@ pub fn build(b: *std.Build) void {
 
     const run_facedetect_tests = b.addRunArtifact(facedetect_tests);
     test_step.dependOn(&run_facedetect_tests.step);
+
+    const voiceagent_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/voiceagent/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    voiceagent_tests.root_module.addImport("fucina", module);
+    voiceagent_tests.root_module.addImport("fucina_llm", llm_module);
+    voiceagent_tests.root_module.addImport("nam_audio", nam_audio_module);
+    voiceagent_tests.root_module.addImport("omnivoice_play", omnivoice_play_module);
+    configureOmnivoiceAudio(voiceagent_tests);
+    configureBlas(voiceagent_tests, blas_kind);
+    configureGpu(b, voiceagent_tests, gpu_kind);
+
+    const run_voiceagent_tests = b.addRunArtifact(voiceagent_tests);
+    test_step.dependOn(&run_voiceagent_tests.step);
+
+    // AEC/duplex leg: the voiceagent root alone. The GTCRN parity test gates
+    // every stage against the exporter fixtures, so kernel work on aec.zig
+    // iterates here instead of through the full nine-root matrix.
+    const test_voiceagent_step = b.step("test-voiceagent", "Run the voiceagent-root unit tests only (GTCRN-AEC parity + duplex gates)");
+    test_voiceagent_step.dependOn(&run_voiceagent_tests.step);
 
     const nanochat_tests = b.addTest(.{
         .root_module = b.createModule(.{

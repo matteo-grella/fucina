@@ -156,6 +156,47 @@ ggml authors, with the Q2_0 additions authored by Prism ML):
   Ternary-Bonsai model weights (Apache-2.0, Hugging Face) are not in this
   repository.
 
+## Ported code — speech stack
+
+From **LocalVQE** ([localai-org/LocalVQE](https://github.com/localai-org/LocalVQE),
+Apache-2.0):
+
+- **GTCRN-AEC acoustic echo canceller** (`examples/voiceagent/aec.zig`): a
+  1:1 Zig port of the scalar reference `ggml/gtcrn/gtcrn.cpp` — ERB sub-band
+  analysis, SFE, the grouped-conv encoder, the grouped dual-path RNN, the
+  grouped-deconv decoder, and the complex-ratio mask, operation for
+  operation, including the streaming state discipline. Gated per stage
+  against the `.npy` fixtures LocalVQE ships (see Test fixtures below). The
+  model architecture is upstream **GTCRN**
+  ([Xiaobin-Rong/gtcrn](https://github.com/Xiaobin-Rong/gtcrn), ICASSP 2024),
+  which LocalVQE credits.
+
+From **kyutai Pocket TTS** ([kyutai-labs/pocket-tts](https://github.com/kyutai-labs/pocket-tts),
+MIT):
+
+- **Pocket TTS v2** (`src/llm/pockettts/`, `examples/pockettts/`): a pure-Zig
+  port of the streaming text-to-speech model — the prefix-LM backbone, the
+  1-step flow-matching (LSD) latent head, and the VAE-style Mimi decoder.
+  Per-stage numerical parity is pinned against dumps produced by running the
+  stock pinned checkout (`tools/pocket/pocket_dump.py`).
+  [babybirdprd/pocket-tts](https://github.com/babybirdprd/pocket-tts) (MIT), a
+  Candle implementation, was consulted as a second opinion where the
+  reference leaves a tensor layout implicit.
+
+From **qwentts.cpp** ([andimarafioti/qwentts.cpp](https://github.com/andimarafioti/qwentts.cpp),
+MIT, Copyright (c) 2023-2026 The omnivoice.cpp authors) and its bindings
+([andimarafioti/qwentts-cpp-python](https://github.com/andimarafioti/qwentts-cpp-python),
+MIT, Copyright (c) 2026 Andres Marafioti):
+
+- **Qwen3-TTS** (`src/llm/qwen3tts/`, `examples/qwen3tts/`): the talker, the
+  MTP code predictor, and the 12.5 Hz RVQ codec decoder follow the graph
+  decomposition of the C++ reference (RVQ dequant → pre-transformer →
+  upsample → DAC decoder). Token-level and per-stage parity is pinned against
+  activations dumped from the pinned checkout through its python bindings.
+  [andimarafioti/faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts)
+  (MIT) is a design reference only, consulted for the streaming decode
+  decomposition; no code copied and no parity asserted against it.
+
 ## Parity references (no code copied)
 
 Fucina implementations validated against, but not derived from:
@@ -195,6 +236,16 @@ grouped-MoE path does not use the split.
   `examples/nam/resources/README.md`).
 - Quantization golden vectors in tests — byte outputs of running ggml's
   encoders over documented inputs (generated 2026-06-11).
+- `goldens-aec/*.npy` — the per-stage GTCRN-AEC fixtures published by
+  LocalVQE (Apache-2.0) under `ggml/tests/gtcrn/`, copied in unmodified;
+  provenance and refresh recipe in `goldens-aec/README.md`.
+- `goldens-qwen3tts/**` — reference activations produced by running the
+  pinned qwentts.cpp checkout through its python bindings (MIT); the dumps
+  are program output, not upstream source. Recipe in
+  `goldens-qwen3tts/README.md`.
+- `refs/pocket-tts-dumps/` (not committed) — Pocket TTS reference
+  activations, regenerated locally by `tools/pocket/pocket_dump.py` against
+  the stock pinned checkout.
 
 ## Linked system libraries (not redistributed)
 
@@ -209,7 +260,20 @@ The repository contains no model weights. Weights you download to run the
 examples carry their own licenses: Qwen3/Qwen3.5 (Apache-2.0), Gemma 4 /
 DiffusionGemma (Google's Gemma Terms of Use), NVIDIA Parakeet (CC-BY-4.0),
 OmniVoice (CC-BY-NC pretrained weights), Higgs Audio v2 codec (upstream
-terms). See `RUNNING-MODELS.md` for the per-model notes.
+terms), Qwen3-TTS (Alibaba's upstream terms; the GGUF conversions used by
+`examples/qwen3tts` are third-party redistributions), Pocket TTS and its
+voices (kyutai — the voice packs carry their own licenses, listed at
+`huggingface.co/kyutai/tts-voices`, and kyutai publishes a use policy
+prohibiting voice cloning without consent and deceptive use), and the
+GTCRN-AEC canceller weights used by `examples/voiceagent` (LocalVQE,
+Apache-2.0; trained on the Microsoft DNS Challenge corpus, CC-BY-4.0, and
+fine-tuned on the AEC Challenge). See `RUNNING-MODELS.md` for the per-model
+notes.
+
+LocalVQE additionally documents a safety caveat that carries over to any
+deployment of those weights: its training data was filtered with DNSMOS,
+which can misclassify distressed speech (screaming, crying) as noise, so the
+canceller may attenuate it.
 
 ## MIT license text (for the components above marked MIT)
 

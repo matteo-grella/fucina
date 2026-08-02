@@ -74,6 +74,32 @@
 # and is never run: numerical parity comes from tools/gen_engram_goldens.py,
 # an INDEPENDENT PyTorch implementation of the demo semantics (torch 2.12)
 # whose output is committed as src/llm/engram_golden_tests.zig.
+# qwentts.cpp + qwentts-cpp-python (andimarafioti) are the parity oracles for
+# the Qwen3-TTS port (src/llm/qwen3tts, examples/qwen3tts): the C++ side pins
+# the codec decoder's stage decomposition (pre-conv, transformer, RVQ,
+# upsample) and the python side drives it to emit the reference activations.
+# Both stay stock — the committed fixtures under goldens-qwen3tts/ were
+# produced by the python harness against the pinned checkout; see that
+# directory's README.md for the regeneration recipe.
+#
+# faster-qwen3-tts (andimarafioti) is a design reference only: the streaming
+# decode decomposition and the talker/codec pipelining were audited from it.
+# Pinned for the record, never built or benchmarked.
+#
+# pocket-tts (kyutai-labs) is the semantics reference for the Pocket TTS port
+# (src/llm/pockettts, examples/pockettts): the flow-LM, the LSD head, and the
+# Mimi decoder wiring. pocket-tts-candle (babybirdprd) is the second opinion
+# used to disambiguate tensor layouts where the reference is implicit. Both
+# stay stock and are never run in the loop: numerical parity comes from
+# tools/pocket/pocket_dump.py, an out-of-tree harness run with the stock
+# pinned checkout on PYTHONPATH (invocation line in that file's header), and
+# tools/pocket/pocket_to_gguf.py converts the released weights.
+#
+# LocalVQE (localai-org, Apache-2.0 code AND weights) is the reference for the
+# GTCRN-AEC echo canceller in examples/voiceagent/aec.zig: ggml/gtcrn/gtcrn.cpp
+# is the scalar implementation the port follows and ggml/tests/gtcrn/ ships the
+# per-stage .npy fixtures committed under goldens-aec/. Stock, never patched.
+
 set -eu
 cd "$(dirname "$0")/.."
 mkdir -p refs
@@ -104,7 +130,13 @@ es-awd|https://github.com/kschweig/es-awd|f432ff823a7d59f91d4ac2cf99e4923654c6f4
 ik_llama.cpp|https://github.com/ikawrakow/ik_llama.cpp|b90939934add9ba4fbb37e8c6470809a70b78f0a
 cartridges|https://github.com/HazyResearch/cartridges|ef34ba97a06049c34820506e2c283746284ae5f0
 engram|https://github.com/deepseek-ai/Engram|fb7f84a21f91223715394a33a1dc24bbfb7f788e
-llama.cpp-inkling|https://github.com/danielhanchen/llama.cpp|1cb0374226406360a2b1345f11a9ec9bf18c8ddf'
+llama.cpp-inkling|https://github.com/danielhanchen/llama.cpp|1cb0374226406360a2b1345f11a9ec9bf18c8ddf
+qwentts.cpp|https://github.com/andimarafioti/qwentts.cpp|b7d601ff66f71ef07b17305e18757c8c8f19f40a
+qwentts-cpp-python|https://github.com/andimarafioti/qwentts-cpp-python|b0b2da11293fb5a3f84fafc0a4c64524d7635b88
+faster-qwen3-tts|https://github.com/andimarafioti/faster-qwen3-tts|a70afc0f81f7f5f8801c3227968f1102f43f211c
+pocket-tts|https://github.com/kyutai-labs/pocket-tts|d108410d23eef7e01db282f9442891162dbc3db6
+pocket-tts-candle|https://github.com/babybirdprd/pocket-tts|dbf78c816cd83c89f11dbeb9d87290ad0a3dccd0
+LocalVQE|https://github.com/localai-org/LocalVQE|f53063c9eb2a85f96479867d1dd911dc3bf6319b'
 
 build_llama=0
 apply_patches=0
