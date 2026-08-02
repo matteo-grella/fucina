@@ -49,6 +49,11 @@ Notes:
 - **f16 Qwen3.** Some commands reference `Qwen3-0.6B-f16.gguf`; if your source only
   ships bf16, transcode one locally:
   `zig build export-gguf -Doptimize=ReleaseFast -- --from-gguf <src>.gguf --out models/Qwen3-0.6B-f16.gguf --dtype f16`.
+- **Voice agent.** `examples/voiceagent` is a four-stage cascade and needs five
+  artifacts from four sources, one of which is a local conversion rather than a
+  download. `tools/fetch_voice_models.sh [fast|quality|both]` collects the lot
+  and prints the command to run; see
+  [examples/voiceagent/README.md](../examples/voiceagent/README.md).
 
 ---
 
@@ -79,6 +84,9 @@ zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --repl
 | `zig build lmserve` | OpenAI- and Anthropic-compatible HTTP server over the family backends | [examples/lmserve/README.md](../examples/lmserve/README.md) |
 | `zig build omnivoice` | OmniVoice MaskGIT TTS: voice cloning/design, codec round-trip | [examples/omnivoice/README.md](../examples/omnivoice/README.md) |
 | `zig build parakeet` | Parakeet ASR (NeMo FastConformer): transcribe/stream/mic | [examples/parakeet/README.md](../examples/parakeet/README.md) |
+| `zig build voiceagent` | Full-duplex voice agent: mic → STT → chat → TTS → speakers, echo-cancelled barge-in | [examples/voiceagent/README.md](../examples/voiceagent/README.md) |
+| `zig build qwen3tts` | Qwen3-TTS CustomVoice: text → 24 kHz WAV, streamed codec decode | [examples/qwen3tts/README.md](../examples/qwen3tts/README.md) |
+| `zig build pockettts` | Pocket TTS v2 (kyutai): flow-matching TTS, no codec stage | [examples/pockettts/README.md](../examples/pockettts/README.md) |
 | `zig build locate-anything` | LocateAnything-3B open-vocabulary detection | [examples/locate_anything/README.md](../examples/locate_anything/README.md) |
 | `zig build facedetect` | Face detection/recognition (buffalo_l): detect/embed/verify/analyze | [examples/facedetect/README.md](../examples/facedetect/README.md) |
 | `zig build nam` | Neural Amp Modeler: `.nam` profiles, live amp sim, training | [examples/nam/README.md](../examples/nam/README.md) |

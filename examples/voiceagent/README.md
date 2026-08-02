@@ -60,10 +60,30 @@ There is no faster ASR: the quantized `tdt_ctc-110m` checkpoints are not
 streaming models and are rejected, and the only other accepted streaming
 model is 5× larger.
 
-Models: parakeet and Qwen3 GGUFs as used by their own examples;
-`Serveurperso/Qwen3-TTS-GGUF` for the talker plus the `qwen-tokenizer-12hz`
-codec (see `examples/qwen3tts/README.md`); Pocket TTS converted by
-`tools/pocket/pocket_to_gguf.py` (see `examples/pockettts/README.md`).
+## Getting the weights
+
+Five artifacts from four sources, one of which needs a local conversion, so
+there is a script:
+
+```sh
+tools/fetch_voice_models.sh            # fast tier: Pocket TTS, no codec
+tools/fetch_voice_models.sh quality    # Qwen3-TTS CustomVoice + codec
+tools/fetch_voice_models.sh both
+```
+
+It needs the Hugging Face CLI (`pip install -U huggingface_hub`), plus
+`safetensors` and `sentencepiece` for the Pocket tier — kyutai ships
+safetensors rather than GGUF, so `tools/pocket/pocket_to_gguf.py` packs it.
+Re-running is cheap; it skips what you already have and prints the command to
+run at the end.
+
+By hand, if you prefer: parakeet and Qwen3 GGUFs as used by their own
+examples; [`LocalAI-io/LocalVQE`](https://huggingface.co/LocalAI-io/LocalVQE)
+for the canceller; `Serveurperso/Qwen3-TTS-GGUF` for the talker plus the
+`qwen-tokenizer-12hz` codec (see `examples/qwen3tts/README.md`); Pocket TTS
+from `kyutai/pocket-tts-without-voice-cloning` (see
+`examples/pockettts/README.md`). Weights are not redistributed here and carry
+their own terms — see [`docs/THIRD-PARTY-NOTICES.md`](../../docs/THIRD-PARTY-NOTICES.md).
 
 ## Flags
 
@@ -133,9 +153,11 @@ text-level echo guard (stricter inside the 2 s turn-boundary echo-tail
 window) drops residual self-transcriptions before they reach the chat.
 
 Enter also interrupts; Ctrl-C quits. `--no-aec` (or a missing
-`models/aec/gtcrn_aec.gguf`) falls back to half-duplex. AEC model:
-`refs/LocalVQE/ggml/tests/gtcrn/gtcrn_aec.gguf` copied to `models/aec/`;
-parity fixtures in `goldens-aec/`.
+`models/aec/gtcrn_aec.gguf`) falls back to half-duplex. The canceller weights
+are the compact GTCRN-AEC line from
+[`LocalAI-io/LocalVQE`](https://huggingface.co/LocalAI-io/LocalVQE)
+(`localvqe-pi-aec-v1-49k-f32.gguf`, 2.3 MB); the parity fixtures in
+`goldens-aec/` ship with the reference checkout, not with the weights.
 
 **The prompt line.** Your turn opens with a `❯` mark on screen before you say
 anything, and the live transcript fills in after it as the STT emits tokens —

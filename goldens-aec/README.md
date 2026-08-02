@@ -12,10 +12,12 @@ tools/fetch_refs.sh LocalVQE
 cp refs/LocalVQE/ggml/tests/gtcrn/*.npy goldens-aec/
 ```
 
-The model itself is a separate download:
+The weights are NOT in that checkout — they are published separately, and
+`tools/fetch_voice_models.sh` fetches them:
 
 ```sh
-cp refs/LocalVQE/ggml/tests/gtcrn/gtcrn_aec.gguf models/aec/
+hf download LocalAI-io/LocalVQE localvqe-pi-aec-v1-49k-f32.gguf --local-dir models/aec
+ln -s localvqe-pi-aec-v1-49k-f32.gguf models/aec/gtcrn_aec.gguf
 ```
 
 ## What each file gates
