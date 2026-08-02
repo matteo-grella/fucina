@@ -63,6 +63,15 @@ pub const glm4moe = struct {
 pub const deepseek4 = struct {
     pub const model = @import("llm/deepseek4/model.zig");
 };
+/// Qwen3-TTS 12.5 Hz two-stack TTS (talker + MTP code predictor + codec).
+/// Files in `llm/qwen3tts/`.
+pub const qwen3tts = struct {
+    pub const codec = @import("llm/qwen3tts/codec.zig");
+    pub const sampling = @import("llm/qwen3tts/sampling.zig");
+    pub const model = @import("llm/qwen3tts/model.zig");
+    pub const prompt = @import("llm/qwen3tts/prompt.zig");
+    pub const pipeline = @import("llm/qwen3tts/pipeline.zig");
+};
 /// Inkling (hybrid SWA/global rel-bias attention, shortconv sites, sink-shared
 /// MoE; hMLP vision + dMel audio towers). Files in `llm/inkling/`.
 pub const inkling = struct {
@@ -122,6 +131,11 @@ test {
     _ = deepseek2.model;
     _ = glm4moe.model;
     _ = deepseek4.model;
+    _ = qwen3tts.codec;
+    _ = qwen3tts.sampling;
+    _ = qwen3tts.model;
+    _ = qwen3tts.prompt;
+    _ = qwen3tts.pipeline;
     _ = inkling.model;
     _ = inkling.mmproj;
     _ = inkling.chat;

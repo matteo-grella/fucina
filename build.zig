@@ -204,6 +204,7 @@ pub fn build(b: *std.Build) void {
     const diffusion_gemma = addExample(b, tool_ctx, .{ .step = "diffusion-gemma", .desc = "Run DiffusionGemma GGUF block-diffusion inference (parity harness + EB chat)", .exe = "fucina-diffusion-gemma", .root = "examples/diffusion_gemma/main.zig", .llm = true });
     diffusion_gemma.exe.root_module.link_libc = true;
     _ = addExample(b, tool_ctx, .{ .step = "qwen35", .desc = "Run Qwen3.5 (qwen35 hybrid Gated-DeltaNet) GGUF — loader/parity harness", .exe = "fucina-qwen35", .root = "examples/qwen35/main.zig", .llm = true });
+    _ = addExample(b, tool_ctx, .{ .step = "qwen3tts", .desc = "Qwen3-TTS from GGUF (qwentts.cpp port): CustomVoice text-to-speech, streamed codec decode", .exe = "fucina-qwen3tts", .root = "examples/qwen3tts/main.zig", .llm = true });
     _ = addExample(b, tool_ctx, .{ .step = "export-gguf", .desc = "Export a GGUF: re-emit/transcode a model, merge Fucina LoRA adapters (checkpoint dir or safetensors) into dense weights, or PTQTP-quantize tensor-at-a-time (--ptqtp[=K]; models bigger than RAM)", .exe = "fucina-export-gguf", .root = "tools/export_gguf.zig", .llm = true });
 
     const arch_check_exe = b.addExecutable(.{
