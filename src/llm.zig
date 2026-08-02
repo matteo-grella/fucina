@@ -72,6 +72,11 @@ pub const qwen3tts = struct {
     pub const prompt = @import("llm/qwen3tts/prompt.zig");
     pub const pipeline = @import("llm/qwen3tts/pipeline.zig");
 };
+/// Pocket TTS (kyutai): continuous-latent flow-matching prefix-LM + VAE-Mimi
+/// streaming decoder. Files in `llm/pockettts/`.
+pub const pockettts = struct {
+    pub const pocket = @import("llm/pockettts/pocket.zig");
+};
 /// Inkling (hybrid SWA/global rel-bias attention, shortconv sites, sink-shared
 /// MoE; hMLP vision + dMel audio towers). Files in `llm/inkling/`.
 pub const inkling = struct {
@@ -132,6 +137,7 @@ test {
     _ = glm4moe.model;
     _ = deepseek4.model;
     _ = qwen3tts.codec;
+    _ = pockettts.pocket;
     _ = qwen3tts.sampling;
     _ = qwen3tts.model;
     _ = qwen3tts.prompt;
