@@ -278,6 +278,11 @@ fn linearSeqPtqtpFused(
     // bitwise identical to the serial run.
     const work = m * n * k * plane_count;
     var tasks_run = false;
+    // The dense threshold stands for ternary too: swept 1M/8M/32M/96M on an
+    // M1 Max (2026-07) — pooled beats serial even at seq=1 talker shapes
+    // (36.4 vs 14.4 fps; 1.7B chat 43 vs 30 tok/s). A profile's "main
+    // thread waits in the barrier" is not evidence of waste: the team
+    // finishes the columns faster than one core runs them.
     if (work >= fucina.parallel.vector_matmul_work_threshold) {
         if (ctx.workPool()) |pool| {
             const cpu_count = fucina.parallel.cpuThreadCount(fucina.parallel.vector_max_threads);
@@ -339,9 +344,9 @@ pub const WeightPtqtp = struct {
     /// locked to exact ratio 3). At K=2 the fused linear then serves through
     /// `pfold` — the 4-bit pack folding both planes into one 9-level code,
     /// ONE dot pass (matmulTQ2_0FoldedX4RhsTile). K=3's 27 levels exceed a
-    /// nibble, so tied K=3 serves through the 2-pass x4 path. Not persisted
-    /// by the GGUF sidecars yet, so loaded decorations run unfolded
-    /// (correct, just K passes).
+    /// nibble, so tied K=3 serves through the multi-pass x4 path. Persisted
+    /// by the GGUF sidecars (`fucina.ptqtp.tie` — ptqtp_gguf.zig), so loaded
+    /// tied K=2 decorations rebuild the fold and serve one-pass.
     tied: bool = false,
     pfold: ?[]backend_quant.BlockTQ2_0Foldedx4 = null,
 

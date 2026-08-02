@@ -1658,7 +1658,7 @@ fn FloatTensor(comptime tags_spec: anytype) type {
         pub fn unary(self: *const Self, ctx: *ExecContext, comptime op: UnaryOp) !Self {
             return switch (op) {
                 .relu => self.relu(ctx),
-                .exp, .sqrt, .rsqrt, .sigmoid, .silu, .log, .log1p, .softplus, .neg, .abs, .sin, .cos, .tanh, .fast_tanh, .gelu, .quick_gelu, .softcap_30, .softcap_15, .gelu_quant, .elu, .gelu_erf, .floor, .ceil, .round, .sign, .reciprocal => self.unaryDifferentiable(ctx, op),
+                .exp, .sqrt, .rsqrt, .sigmoid, .silu, .log, .log1p, .softplus, .neg, .abs, .sin, .cos, .tanh, .fast_tanh, .gelu, .quick_gelu, .softcap_30, .softcap_15, .gelu_quant, .elu, .gelu_erf, .erf, .floor, .ceil, .round, .sign, .reciprocal => self.unaryDifferentiable(ctx, op),
             };
         }
 
@@ -1772,6 +1772,7 @@ fn FloatTensor(comptime tags_spec: anytype) type {
         pub const quickGelu = UnaryMethod(.quick_gelu).call;
         pub const elu = UnaryMethod(.elu).call;
         pub const geluErf = UnaryMethod(.gelu_erf).call;
+        pub const erf = UnaryMethod(.erf).call;
         pub const floor = UnaryMethod(.floor).call;
         pub const ceil = UnaryMethod(.ceil).call;
         pub const round = UnaryMethod(.round).call;
@@ -5103,6 +5104,7 @@ fn TypedFloatConstantTensor(comptime tags_spec: anytype, comptime tensor_dtype: 
         pub const quickGelu = TypedUnaryMethod(.quick_gelu).call;
         pub const elu = TypedUnaryMethod(.elu).call;
         pub const geluErf = TypedUnaryMethod(.gelu_erf).call;
+        pub const erf = TypedUnaryMethod(.erf).call;
         pub const floor = TypedUnaryMethod(.floor).call;
         pub const ceil = TypedUnaryMethod(.ceil).call;
         pub const round = TypedUnaryMethod(.round).call;

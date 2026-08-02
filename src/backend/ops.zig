@@ -72,6 +72,8 @@ pub const UnaryOp = enum {
     // Exact-erf GELU: 0.5*x*(1 + erf(x/sqrt(2))). Matches ggml_vec_gelu_erf_f32
     // (which calls libm erff) — NOT the tanh approximation (`gelu`).
     gelu_erf,
+    // Error function (torch.erf): same musl-faithful erff as gelu_erf.
+    erf,
     floor,
     ceil,
     // Round-half-to-even (torch.round / IEEE roundTiesToEven), NOT Zig's
@@ -124,6 +126,7 @@ pub inline fn unaryScalar(comptime op: UnaryOp, value: f32) f32 {
         .gelu_quant => geluQuantScalar(value),
         .elu => if (value > 0) value else std.math.expm1(value),
         .gelu_erf => 0.5 * value * (1 + erff(value * 0.70710678118654752440084436210484)),
+        .erf => erff(value),
         .floor => @floor(value),
         .ceil => @ceil(value),
         .round => rintScalar(value),

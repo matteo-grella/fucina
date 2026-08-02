@@ -1060,6 +1060,8 @@ fn unaryDerivative(comptime op: exec_mod.UnaryOp, value: f32) f32 {
         .gelu_quant => geluDerivative(value), // inference-only; exact-gelu derivative
         .elu => if (value > 0) 1 else @exp(value),
         .gelu_erf => geluErfDerivative(value),
+        // d/dx erf(x) = 2/sqrt(pi) * e^(-x^2)
+        .erf => 1.1283791670955126 * @exp(-value * value),
         // Piecewise-constant ops: zero gradient almost everywhere (the
         // torch convention — jump points get the a.e. value, 0).
         .floor, .ceil, .round, .sign => 0,

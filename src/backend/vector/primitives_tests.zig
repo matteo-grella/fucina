@@ -101,6 +101,13 @@ test "elu and gelu_erf scalar values match known-good constants" {
     try std.testing.expectApproxEqAbs(@as(f32, -0.15865526), ops.unaryScalar(.gelu_erf, -1.0), 1e-6);
     try std.testing.expectEqual(@as(f32, 0.0), ops.unaryScalar(.gelu_erf, 0.0));
     try std.testing.expectApproxEqAbs(@as(f32, 1.9544997), ops.unaryScalar(.gelu_erf, 2.0), 1e-6);
+
+    // erf: torch.erf reference values
+    try std.testing.expectApproxEqAbs(@as(f32, 0.8427008), ops.unaryScalar(.erf, 1.0), 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, -0.8427008), ops.unaryScalar(.erf, -1.0), 1e-6);
+    try std.testing.expectEqual(@as(f32, 0.0), ops.unaryScalar(.erf, 0.0));
+    try std.testing.expectApproxEqAbs(@as(f32, 0.9953223), ops.unaryScalar(.erf, 2.0), 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5204999), ops.unaryScalar(.erf, 0.5), 1e-6);
 }
 
 test "vecUnary elu and gelu_erf match the scalar path bit-for-bit" {
@@ -117,4 +124,7 @@ test "vecUnary elu and gelu_erf match the scalar path bit-for-bit" {
 
     primitives.vecUnary(.gelu_erf, &got, &x);
     for (x, got) |v, g| try std.testing.expectEqual(ops.unaryScalar(.gelu_erf, v), g);
+
+    primitives.vecUnary(.erf, &got, &x);
+    for (x, got) |v, g| try std.testing.expectEqual(ops.unaryScalar(.erf, v), g);
 }

@@ -330,6 +330,7 @@ pub inline fn applyUnaryVec(comptime op: ops.UnaryOp, value: Vf32) Vf32 {
         .gelu_quant => geluQuantVec(value),
         .elu => perLaneUnary(.elu, value),
         .gelu_erf => perLaneUnary(.gelu_erf, value),
+        .erf => perLaneUnary(.erf, value),
         .floor => @floor(value),
         .ceil => @ceil(value),
         .round => rintVec(value),

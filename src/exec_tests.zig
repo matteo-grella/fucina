@@ -3872,6 +3872,11 @@ test "exec context applies elu and gelu_erf unary ops" {
     defer gelu_y.deinit();
     const gelu_want = [_]f32{ -0.15865526, 0.0, 0.8413447, 1.9544997 };
     for (gelu_want, gelu_y.dataConst()) |w, g| try std.testing.expectApproxEqAbs(w, g, 1e-6);
+
+    var erf_y = try ctx.unary(.erf, &x);
+    defer erf_y.deinit();
+    const erf_want = [_]f32{ -0.8427008, 0.0, 0.8427008, 0.9953223 };
+    for (erf_want, erf_y.dataConst()) |w, g| try std.testing.expectApproxEqAbs(w, g, 1e-6);
 }
 
 test "moe route plan groups pairs by expert with a consistent inverse" {

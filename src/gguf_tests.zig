@@ -15,6 +15,8 @@ const Writer = gguf.Writer;
 const MetaType = gguf.MetaType;
 const Error = gguf.Error;
 const tensorByteLen = gguf.tensorByteLen;
+const TensorInfo = gguf.TensorInfo;
+const RowTable = gguf.RowTable;
 const encodeF32 = gguf.encodeF32;
 const decodeF32 = gguf.decodeF32;
 
@@ -375,6 +377,45 @@ test "GGUF writer rejects duplicate and malformed tensors" {
     try std.testing.expectError(Error.InvalidTensorInfo, w.addTensor("u", .f32, &.{3}, &bytes));
     try std.testing.expectError(Error.InvalidTensorInfo, w.addTensor("", .f32, &.{2}, &bytes));
     try std.testing.expectError(Error.InvalidTensorInfo, w.addTensor("v", .f32, &.{ 1, 1, 1, 1, 2 }, &bytes));
+}
+
+test "RowTable: quantized per-row reads match whole-tensor decode; f32 is zero-copy" {
+    const allocator = std.testing.allocator;
+    var src: [2 * 256]f32 = undefined;
+    for (&src, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i)) * 0.07) * 2.0;
+
+    const Block = dtype_mod.Storage(.q8_0);
+    var blocks: [2 * 8]Block = undefined; // 256/32 = 8 blocks per row
+    try encodeF32(.q8_0, &src, std.mem.asBytes(&blocks));
+    var info = TensorInfo{
+        .name = "t",
+        .n_dims = 2,
+        .dims = .{ 256, 2, 1, 1 },
+        .ggml_type = .q8_0,
+        .offset = 0,
+        .data = std.mem.asBytes(&blocks),
+    };
+    var table = try RowTable.init(allocator, &info);
+    var whole: [2 * 256]f32 = undefined;
+    try decodeF32(.q8_0, std.mem.asBytes(&blocks), &whole);
+    var scratch: [256]f32 = undefined;
+    for (0..2) |r| {
+        const got = table.row(r, &scratch);
+        try std.testing.expectEqualSlices(f32, whole[r * 256 ..][0..256], got);
+    }
+
+    // f32 path: zero-copy slice into the tensor bytes
+    var finfo = TensorInfo{
+        .name = "f",
+        .n_dims = 2,
+        .dims = .{ 256, 2, 1, 1 },
+        .ggml_type = .f32,
+        .offset = 0,
+        .data = std.mem.sliceAsBytes(&src),
+    };
+    var ftable = try RowTable.init(allocator, &finfo);
+    const frow = ftable.row(1, &scratch);
+    try std.testing.expectEqual(@as([*]const f32, @ptrCast(&src[256])), frow.ptr);
 }
 
 test "encodeF32 K-quant transcode round-trips through the parity-tested dequant" {

@@ -14,6 +14,8 @@ const training_checkpoint_mod = @import("training_checkpoint.zig");
 const thread = @import("thread.zig");
 pub const es = @import("es.zig");
 pub const gguf = @import("gguf.zig");
+/// Streaming causal 1-D convolutions (codec-decoder state discipline).
+pub const streamconv = @import("streamconv.zig");
 pub const lora = @import("lora.zig");
 pub const optim = @import("optim.zig");
 pub const ptqtp = @import("ptqtp.zig");
@@ -185,6 +187,7 @@ pub const internal = struct {
 };
 
 test {
+    _ = streamconv;
     _ = dtype;
     _ = storage;
     _ = tensor;

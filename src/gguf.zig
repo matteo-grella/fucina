@@ -1264,6 +1264,54 @@ pub fn decodeF32(ggml_type: GgmlType, src: []const u8, dst: []f32) !void {
     }
 }
 
+/// Decode a whole (possibly quantized) tensor into an owned f32 buffer.
+pub fn decodeAllocF32(allocator: Allocator, t: *const TensorInfo) ![]f32 {
+    var n: usize = 1;
+    for (t.dims[0..t.n_dims]) |d| n *= d;
+    const buf = try allocator.alloc(f32, n);
+    errdefer allocator.free(buf);
+    try decodeF32(t.ggml_type, t.data, buf);
+    return buf;
+}
+
+/// Embedding-style table with on-demand row reads: zero-copy for f32
+/// tables, per-row dequantization (Q8_0/K-quants/…) into a caller scratch
+/// otherwise — huge tables (vocab-sized embeddings) stay in their quantized
+/// mmap instead of ballooning RSS. Validated once at init so `row` cannot
+/// fail.
+pub const RowTable = struct {
+    bytes: []const u8,
+    typ: GgmlType,
+    width: usize,
+    row_bytes: usize,
+
+    pub fn init(allocator: Allocator, t: *const TensorInfo) !RowTable {
+        const shape = try t.logicalMatrixShape();
+        const self = RowTable{
+            .bytes = t.data,
+            .typ = t.ggml_type,
+            .width = shape[1],
+            .row_bytes = t.data.len / shape[0],
+        };
+        // Validate dtype + alignment once (worst case: the last row).
+        const probe = try allocator.alloc(f32, self.width);
+        defer allocator.free(probe);
+        try decodeF32(self.typ, self.bytes[(shape[0] - 1) * self.row_bytes ..][0..self.row_bytes], probe);
+        return self;
+    }
+
+    /// Row `i` as f32; when dequantized, the result borrows `scratch` until
+    /// the next call with the same scratch.
+    pub fn row(self: *const RowTable, i: usize, scratch: []f32) []const f32 {
+        const src = self.bytes[i * self.row_bytes ..][0..self.row_bytes];
+        if (self.typ == .f32 and std.mem.isAligned(@intFromPtr(src.ptr), @alignOf(f32))) {
+            return @as([*]const f32, @ptrCast(@alignCast(src.ptr)))[0..self.width];
+        }
+        decodeF32(self.typ, src, scratch[0..self.width]) catch unreachable; // validated in init
+        return scratch[0..self.width];
+    }
+};
+
 fn decodeBlocks(comptime dt: dtype_mod.DType, src: []const u8, dst: []f32) !void {
     const Block = dtype_mod.Storage(dt);
     if (@intFromPtr(src.ptr) % @alignOf(Block) != 0) return Error.InvalidTensorInfo;
