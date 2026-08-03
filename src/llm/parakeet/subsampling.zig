@@ -30,12 +30,14 @@ fn f32Data(info: *const gguf.TensorInfo) ![]const f32 {
 /// (each has IC=1 or KH=KW=1), so no repacking is needed.
 fn convWeight(ctx: *ExecContext, file: *const gguf.File, name: []const u8, cout: usize, kh: usize, kw: usize, cinpg: usize) !fucina.Tensor(4) {
     const info = try file.get(name);
-    return fucina.Tensor(4).fromSlice(ctx, .{ cout, kh, kw, cinpg }, try f32Data(info));
+    // Borrows the mmap (f32Data): the file outlives every chunk/utterance,
+    // so the per-call weight copy was pure waste.
+    return fucina.Tensor(4).fromBorrowedConstSlice(ctx, .{ cout, kh, kw, cinpg }, try f32Data(info));
 }
 
 fn vecTensor(ctx: *ExecContext, file: *const gguf.File, name: []const u8, n: usize) !fucina.Tensor(1) {
     const info = try file.get(name);
-    return fucina.Tensor(1).fromSlice(ctx, .{n}, try f32Data(info));
+    return fucina.Tensor(1).fromBorrowedConstSlice(ctx, .{n}, try f32Data(info));
 }
 
 /// Route a raw conv2d through the PUBLIC facade conv2d: bridge

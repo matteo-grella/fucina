@@ -342,8 +342,10 @@ fn streamingConvModule(
     var glu_t = try pw1.splitGated(ctx, .glu, ._1, ._1); // [tc, d]
     defer glu_t.deinit();
 
+    // Weight views borrow the mmap (f32Data) — no per-chunk copy; the
+    // mapping is owned by ParakeetWeights and outlives every chunk.
     const dww = try encoder.f32Data(try w.file.get(encoder.convName(&wb, il, "depthwise_conv.weight"))); // [d*K], w[c*K+k]
-    var dwk = try fucina.Tensor(2).fromSlice(ctx, .{ d, kk }, dww);
+    var dwk = try fucina.Tensor(2).fromBorrowedConstSlice(ctx, .{ d, kk }, dww);
     defer dwk.deinit();
     var dw = try streamingDepthwiseConv(ctx, &glu_t, &dwk, conv_cache); // [tc, d]
     defer dw.deinit();
@@ -355,9 +357,9 @@ fn streamingConvModule(
     // the facade `layerNorm` affine arm (the layerNormAffineAxisRank kernel) — NOT the
     // offline encoder's layerNormAffineRows row kernel: the two differ numerically
     // (see `encoder.zig` layerNormRaw); streaming parity was validated on this one.
-    var gt = try fucina.Tensor(1).fromSlice(ctx, .{d}, try encoder.f32Data(try w.file.get(encoder.convName(&wb, il, "batch_norm.weight"))));
+    var gt = try fucina.Tensor(1).fromBorrowedConstSlice(ctx, .{d}, try encoder.f32Data(try w.file.get(encoder.convName(&wb, il, "batch_norm.weight"))));
     defer gt.deinit();
-    var bt = try fucina.Tensor(1).fromSlice(ctx, .{d}, try encoder.f32Data(try w.file.get(encoder.convName(&bb, il, "batch_norm.bias"))));
+    var bt = try fucina.Tensor(1).fromBorrowedConstSlice(ctx, .{d}, try encoder.f32Data(try w.file.get(encoder.convName(&bb, il, "batch_norm.bias"))));
     defer bt.deinit();
     var normed = try dw.layerNorm(ctx, ._1, 1e-5, .{ .weight = gt, .bias = bt });
     defer normed.deinit();
@@ -568,11 +570,12 @@ pub fn applyPromptKernel(ctx: *ExecContext, w: *ParakeetWeights, cfg: loader.Con
     var x = try fucina.Tensor(2).empty(ctx, .{ tc, in_dim }); // [enc | onehot]
     defer x.deinit();
     const xd = try x.data();
-    @memset(xd, 0);
     const ed = try enc.dataConst();
     const pi: usize = @intCast(prompt_index);
     for (0..tc) |t| {
         @memcpy(xd[t * in_dim ..][0..d], ed[t * d ..][0..d]);
+        // only the one-hot tail needs zeroing; the enc half is fully copied
+        @memset(xd[t * in_dim + d ..][0..num_prompts], 0);
         xd[t * in_dim + d + pi] = 1.0;
     }
     var h = try encoder.linearWT(w, "prompt_kernel.0.weight", "prompt_kernel.0.bias", &x); // [Tc, 2D]

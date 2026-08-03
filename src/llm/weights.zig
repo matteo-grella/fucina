@@ -1738,10 +1738,10 @@ pub fn hostMatrix(allocator: Allocator, file: *const gguf.File, tensor_name: []c
 pub fn loadVector(ctx: *ExecContext, info: *const gguf.TensorInfo, expected_len: usize, comptime tag: Tag) !fucina.Tensor(.{tag}) {
     if (info.n_dims != 1 or info.dims[0] != expected_len) return Error.InvalidWeightShape;
 
-    const values = try ctx.allocator.alloc(f32, expected_len);
-    defer ctx.allocator.free(values);
-    try fillF32(values, info);
-    return fucina.Tensor(.{tag}).fromSlice(ctx, .{expected_len}, values);
+    var v = try fucina.Tensor(.{tag}).empty(ctx, .{expected_len});
+    errdefer v.deinit();
+    try fillF32(try v.data(), info);
+    return v;
 }
 
 pub const BorrowedQuantLinearOptions = struct {
@@ -2154,11 +2154,10 @@ fn requireMatrixShape(info: *const gguf.TensorInfo, expected_rows: usize, expect
 }
 
 fn loadDenseF32Weight(ctx: *ExecContext, info: *const gguf.TensorInfo, shape: [2]usize) !WeightF32 {
-    const len = try std.math.mul(usize, shape[0], shape[1]);
-    const values = try ctx.allocator.alloc(f32, len);
-    defer ctx.allocator.free(values);
-    try fillF32(values, info);
-    return WeightF32.fromSlice(ctx, shape, values);
+    var w = try WeightF32.empty(ctx, shape);
+    errdefer w.deinit();
+    try fillF32(try w.data(), info); // validates info.data.len against the shape
+    return w;
 }
 
 fn loadDenseF16Weight(ctx: *ExecContext, info: *const gguf.TensorInfo, shape: [2]usize, options: LinearWeight.LoadOptions) !WeightF16 {
@@ -2179,13 +2178,13 @@ fn loadDenseF16Weight(ctx: *ExecContext, info: *const gguf.TensorInfo, shape: [2
         }
     }
 
-    const values = try ctx.allocator.alloc(f16, len);
-    defer ctx.allocator.free(values);
-    for (values, 0..) |*dst, i| {
+    var w = try WeightF16.empty(ctx, shape);
+    errdefer w.deinit();
+    for (try w.data(), 0..) |*dst, i| {
         const bits = std.mem.readInt(u16, info.data[i * 2 ..][0..2], .little);
         dst.* = @bitCast(bits);
     }
-    return WeightF16.fromSlice(ctx, shape, values);
+    return w;
 }
 
 /// bf16 stays RESIDENT (2 B/weight, like llama.cpp): the linearSeq fast path
@@ -2197,12 +2196,12 @@ fn loadDenseBf16Weight(ctx: *ExecContext, info: *const gguf.TensorInfo, shape: [
     const len = try std.math.mul(usize, shape[0], shape[1]);
     if (info.data.len != len * @sizeOf(u16)) return Error.InvalidWeightShape;
 
-    const values = try ctx.allocator.alloc(u16, len);
-    defer ctx.allocator.free(values);
-    for (values, 0..) |*dst, i| {
+    var w = try WeightBf16.empty(ctx, shape);
+    errdefer w.deinit();
+    for (try w.data(), 0..) |*dst, i| {
         dst.* = std.mem.readInt(u16, info.data[i * 2 ..][0..2], .little);
     }
-    return WeightBf16.fromSlice(ctx, shape, values);
+    return w;
 }
 
 pub fn fillF32(out: []f32, info: *const gguf.TensorInfo) !void {

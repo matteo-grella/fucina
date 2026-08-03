@@ -145,19 +145,6 @@ const Linear = struct {
     w: LinearWeight,
     out_dim: usize,
     in_dim: usize,
-
-    fn apply(self: *const Linear, ctx: *ExecContext, out: []f32, x: []const f32, bias: ?[]const f32) void {
-        var rows = Rows.fromSlice(ctx, .{ 1, self.in_dim }, x) catch unreachable;
-        defer rows.deinit();
-        var y = self.w.linearSeq(ctx, &rows, .embed, .d) catch unreachable;
-        defer y.deinit();
-        const yd = y.dataConst() catch unreachable;
-        if (bias) |bb| {
-            for (out, yd[0..self.out_dim], bb) |*o, v, b| o.* = v + b;
-        } else {
-            @memcpy(out, yd[0..self.out_dim]);
-        }
-    }
 };
 
 fn loadLinear(ctx: *ExecContext, file: *const gguf.File, name: []const u8, out_dim: usize, in_dim: usize) !Linear {
@@ -675,9 +662,10 @@ fn transformerForward(
             @memcpy(kv.k[li][kv.offset * heads * hd ..][0 .. s * heads * hd], kd);
             @memcpy(kv.v[li][kv.offset * heads * hd ..][0 .. s * heads * hd], vd);
         }
-        var k_all = try fucina.Tensor(.{ .seq, .kv_head, .d }).fromSlice(ctx, .{ cached_len, heads, hd }, kv.k[li][0 .. cached_len * heads * hd]);
+        // Borrowed ring views (rows appended above; attention reads only).
+        var k_all = try fucina.Tensor(.{ .seq, .kv_head, .d }).fromBorrowedConstSlice(ctx, .{ cached_len, heads, hd }, kv.k[li][0 .. cached_len * heads * hd]);
         defer k_all.deinit();
-        var v_all = try fucina.Tensor(.{ .seq, .kv_head, .d }).fromSlice(ctx, .{ cached_len, heads, hd }, kv.v[li][0 .. cached_len * heads * hd]);
+        var v_all = try fucina.Tensor(.{ .seq, .kv_head, .d }).fromBorrowedConstSlice(ctx, .{ cached_len, heads, hd }, kv.v[li][0 .. cached_len * heads * hd]);
         defer v_all.deinit();
 
         var attn = try q_rope.groupedAttention(ctx, &k_all, &v_all, head_map, .attn, scale, .{ .window = window });

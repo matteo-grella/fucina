@@ -434,14 +434,14 @@ pub const Model = struct {
     ) !fucina.Tensor(.{ .seq, .embed }) {
         if (signal.row_offsets.len != c_len + 1) return Error.CanvasLengthMismatch;
         const hidden = self.config.base.hidden_size;
-        const allocator = ctx.allocator;
 
         var rows = try self.token_embedding.getRowsAs(ctx, signal.ids, .embed);
         defer rows.deinit();
         const rows_data = try rows.dataConst();
 
-        const acc = try allocator.alloc(f32, c_len * hidden);
-        defer allocator.free(acc);
+        var out = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ c_len, hidden });
+        errdefer out.deinit();
+        const acc = try out.data();
         @memset(acc, 0);
         for (0..c_len) |c| {
             const out_row = acc[c * hidden ..][0..hidden];
@@ -451,7 +451,7 @@ pub const Model = struct {
                 for (out_row, src) |*a, v| a.* += p * v;
             }
         }
-        return fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ c_len, hidden }, acc);
+        return out;
     }
 
     /// gemma4.attnBlock with the canvas-pass deltas: K/V appended into the

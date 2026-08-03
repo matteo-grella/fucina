@@ -732,9 +732,9 @@ pub fn distillLoss(
 
     const flat_indices = try ctx.allocator.alloc(usize, n);
     defer ctx.allocator.free(flat_indices);
-    const neg_weights = try ctx.allocator.alloc(f32, n);
-    defer ctx.allocator.free(neg_weights);
-    for (flat_indices, neg_weights, targets.positions, targets.tokens, targets.logprobs) |*idx, *w, pos, token, logprob| {
+    var weights = try fucina.Tensor(.{.entry}).empty(ctx, .{n});
+    defer weights.deinit();
+    for (flat_indices, try weights.data(), targets.positions, targets.tokens, targets.logprobs) |*idx, *w, pos, token, logprob| {
         idx.* = (pos - 1) * vocab + token;
         w.* = -@exp(logprob);
     }
@@ -745,8 +745,6 @@ pub fn distillLoss(
     defer flat.deinit();
     var picked = try flat.gather(ctx, .flat, flat_indices, .entry);
     defer picked.deinit();
-    var weights = try fucina.Tensor(.{.entry}).fromSlice(ctx, .{n}, neg_weights);
-    defer weights.deinit();
     var weighted = try picked.mul(ctx, &weights);
     defer weighted.deinit();
 

@@ -317,9 +317,11 @@ pub const Stack = struct {
                 @memcpy(kv.k[li][n_past * kv.kv_dim ..][0 .. t * kv.kv_dim], kd);
                 @memcpy(kv.v[li][n_past * kv.kv_dim ..][0 .. t * kv.kv_dim], vd);
             }
-            var k_all = try fucina.Tensor(.{ .seq, .kv_head, .d }).fromSlice(ctx, .{ cached_len, cfg.n_kv_heads, cfg.head_dim }, kv.k[li][0 .. cached_len * kv.kv_dim]);
+            // Borrowed full-context views of the host ring: rows were appended
+            // above, and nothing writes the ring while attention reads it.
+            var k_all = try fucina.Tensor(.{ .seq, .kv_head, .d }).fromBorrowedConstSlice(ctx, .{ cached_len, cfg.n_kv_heads, cfg.head_dim }, kv.k[li][0 .. cached_len * kv.kv_dim]);
             defer k_all.deinit();
-            var v_all = try fucina.Tensor(.{ .seq, .kv_head, .d }).fromSlice(ctx, .{ cached_len, cfg.n_kv_heads, cfg.head_dim }, kv.v[li][0 .. cached_len * kv.kv_dim]);
+            var v_all = try fucina.Tensor(.{ .seq, .kv_head, .d }).fromBorrowedConstSlice(ctx, .{ cached_len, cfg.n_kv_heads, cfg.head_dim }, kv.v[li][0 .. cached_len * kv.kv_dim]);
             defer v_all.deinit();
 
             const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(cfg.head_dim)));

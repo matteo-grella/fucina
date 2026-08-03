@@ -158,8 +158,9 @@ fn loadConvW(ctx: *ExecContext, file: *const gguf.File, name: []const u8, k: usi
     const t = try file.get(name);
     if (t.dims[0] != k or t.dims[1] != ic or t.dims[2] != oc) return Error.BadShape;
     const src = try f32Data(t);
-    const dst = try ctx.allocator.alloc(f32, src.len);
-    defer ctx.allocator.free(dst);
+    var w = try ConvW.empty(ctx, .{ k, ic, oc });
+    errdefer w.deinit();
+    const dst = try w.data();
     for (0..oc) |o| {
         for (0..ic) |i| {
             for (0..k) |kk| {
@@ -167,7 +168,7 @@ fn loadConvW(ctx: *ExecContext, file: *const gguf.File, name: []const u8, k: usi
             }
         }
     }
-    return ConvW.fromSlice(ctx, .{ k, ic, oc }, dst);
+    return w;
 }
 
 /// Depthwise kernel: GGUF ne `[K, 1, C]` (memory `w[c][k]`) → facade
@@ -186,8 +187,9 @@ fn loadTConvW(ctx: *ExecContext, file: *const gguf.File, name: []const u8, k: us
     const t = try file.get(name);
     if (t.dims[0] != k or t.dims[1] != oc or t.dims[2] != ic) return Error.BadShape;
     const src = try f32Data(t);
-    const dst = try ctx.allocator.alloc(f32, src.len);
-    defer ctx.allocator.free(dst);
+    var w = try TConvW.empty(ctx, .{ k * oc, ic });
+    errdefer w.deinit();
+    const dst = try w.data();
     for (0..ic) |i| {
         for (0..oc) |o| {
             for (0..k) |kk| {
@@ -195,7 +197,7 @@ fn loadTConvW(ctx: *ExecContext, file: *const gguf.File, name: []const u8, k: us
             }
         }
     }
-    return TConvW.fromSlice(ctx, .{ k * oc, ic }, dst);
+    return w;
 }
 
 /// Snake params folded at load: `a = exp(alpha)`, `inv_b = 1/(exp(beta)+1e-9)`.
@@ -203,17 +205,14 @@ fn loadSnakeFolded(ctx: *ExecContext, at: *const gguf.TensorInfo, bt: *const ggu
     if (elemCount(at) != c or elemCount(bt) != c) return Error.BadShape;
     const alpha = try f32Data(at);
     const beta = try f32Data(bt);
-    const a = try ctx.allocator.alloc(f32, c);
-    defer ctx.allocator.free(a);
-    const ib = try ctx.allocator.alloc(f32, c);
-    defer ctx.allocator.free(ib);
-    for (0..c) |i| {
-        a[i] = @exp(alpha[i]);
-        ib[i] = 1.0 / (@exp(beta[i]) + 1e-9);
-    }
-    var av = try VecIn.fromSlice(ctx, .{c}, a);
+    var av = try VecIn.empty(ctx, .{c});
     errdefer av.deinit();
-    const ibv = try VecIn.fromSlice(ctx, .{c}, ib);
+    var ibv = try VecIn.empty(ctx, .{c});
+    errdefer ibv.deinit();
+    for (try av.data(), try ibv.data(), alpha, beta) |*a, *ib, al, be| {
+        a.* = @exp(al);
+        ib.* = 1.0 / (@exp(be) + 1e-9);
+    }
     return .{ .a = av, .ib = ibv };
 }
 
@@ -991,9 +990,10 @@ pub const Streaming = struct {
                 @memcpy(self.kv_v[li][self.kv_len * kv_dim ..][0 .. t * kv_dim], vd);
             }
             const cached = self.kv_len + t;
-            var k_all = try fucina.Tensor(.{ .seq, .kv_head, .d }).fromSlice(ctx, .{ cached, cfg.n_kv_heads, cfg.head_dim }, self.kv_k[li][0 .. cached * kv_dim]);
+            // Borrowed ring views (rows appended above; attention reads only).
+            var k_all = try fucina.Tensor(.{ .seq, .kv_head, .d }).fromBorrowedConstSlice(ctx, .{ cached, cfg.n_kv_heads, cfg.head_dim }, self.kv_k[li][0 .. cached * kv_dim]);
             defer k_all.deinit();
-            var v_all = try fucina.Tensor(.{ .seq, .kv_head, .d }).fromSlice(ctx, .{ cached, cfg.n_kv_heads, cfg.head_dim }, self.kv_v[li][0 .. cached * kv_dim]);
+            var v_all = try fucina.Tensor(.{ .seq, .kv_head, .d }).fromBorrowedConstSlice(ctx, .{ cached, cfg.n_kv_heads, cfg.head_dim }, self.kv_v[li][0 .. cached * kv_dim]);
             defer v_all.deinit();
             const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(cfg.head_dim)));
             var attn = try q_rope.groupedAttention(ctx, &k_all, &v_all, dec.kv_head_for_head, .attn, scale, .{ .window = cfg.sliding_window });

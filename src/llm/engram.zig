@@ -429,11 +429,9 @@ pub const HashPlan = struct {
             const mods_slice = self.head_mods[slot * per_layer + order * heads ..][0..heads];
             var mods = try I64Head.fromSlice(ctx, .{heads}, mods_slice);
             defer mods.deinit();
-            const offs_buf = try self.allocator.alloc(i64, heads);
-            defer self.allocator.free(offs_buf);
-            for (offs_buf, self.head_offsets[slot * per_layer + order * heads ..][0..heads]) |*dst, off| dst.* = @intCast(off);
-            var offs = try I64Head.fromSlice(ctx, .{heads}, offs_buf);
+            var offs = try I64Head.empty(ctx, .{heads});
             defer offs.deinit();
+            for (try offs.data(), self.head_offsets[slot * per_layer + order * heads ..][0..heads]) |*dst, off| dst.* = @intCast(off);
 
             var rows = try mix.?.mod(ctx, &mods);
             defer rows.deinit();

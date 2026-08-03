@@ -110,17 +110,14 @@ pub const ParakeetWeights = struct {
         const wi = try self.file.get(w_name);
         if (!canCacheF32(wi.ggml_type)) return weights.Error.UnsupportedWeightType;
         const shape = try linearShape(wi);
-        const len = try std.math.mul(usize, shape.out, shape.in);
         gguf.prefetch(wi.data);
-
-        const values = try self.allocator.alloc(f32, len);
-        defer self.allocator.free(values);
-        try gguf.decodeF32(wi.ggml_type, wi.data, values);
 
         const wt = try self.allocator.create(weights.WeightF32);
         errdefer self.allocator.destroy(wt);
-        wt.* = try weights.WeightF32.fromSlice(self.ctx, .{ shape.out, shape.in }, values);
+        wt.* = try weights.WeightF32.empty(self.ctx, .{ shape.out, shape.in });
         errdefer wt.deinit();
+        // decodeF32 validates wi.data.len against the tensor's element count.
+        try gguf.decodeF32(wi.ggml_type, wi.data, try wt.data());
         const key = try self.allocator.dupe(u8, w_name);
         errdefer self.allocator.free(key);
         try self.f32_cache.put(self.allocator, key, wt);

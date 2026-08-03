@@ -1187,7 +1187,6 @@ fn moeFfn(
 ) !fucina.Tensor(.{ .seq, .embed }) {
     const allocator = ctx.allocator;
     const seq = moe_in.dim(.seq);
-    const hidden = config.hidden_size;
     const n_expert = config.num_experts;
     const top_k = config.num_experts_used;
 
@@ -1301,7 +1300,11 @@ fn moeFfn(
         return out;
     }
 
-    if (seq * top_k >= 1) {
+    // Prefill (seq>1): the fused batch op groups the (token, expert) pairs by
+    // expert so each expert's gate/up/down weights are read ONCE across all
+    // its routed tokens (one m>1 GEMM per expert via the packed Q6_K/Q8_0
+    // kernels) — far less weight traffic than a GEMV per token.
+    {
         var batch_profile: fucina.MoeBatchProfile = .{};
         const batch_profile_ptr: ?*fucina.MoeBatchProfile = if (profile != null) &batch_profile else null;
         const out = try gemma_moe.batchPackedTensor(
@@ -1327,83 +1330,6 @@ fn moeFfn(
         }
         return out;
     }
-
-    // Prefill (seq>1): group the (token, expert) pairs by expert so each
-    // expert's gate/up/down weights are read ONCE and reused across all m_e
-    // tokens routed to it (one m>1 batched GEMM per expert via the packed
-    // Q6_K/Q8_0 kernels) — far less weight traffic than a GEMV per token.
-    const acc = try allocator.alloc(f32, seq * hidden);
-    defer allocator.free(acc);
-    @memset(acc, 0);
-
-    const count = try allocator.alloc(usize, n_expert);
-    defer allocator.free(count);
-    @memset(count, 0);
-    for (sel) |e| count[e] += 1;
-    const offset = try allocator.alloc(usize, n_expert);
-    defer allocator.free(offset);
-    const cursor = try allocator.alloc(usize, n_expert);
-    defer allocator.free(cursor);
-    {
-        var running: usize = 0;
-        for (0..n_expert) |e| {
-            offset[e] = running;
-            cursor[e] = running;
-            running += count[e];
-        }
-    }
-    const order = try allocator.alloc(usize, n_pairs); // pair indices grouped by expert
-    defer allocator.free(order);
-    for (sel, 0..) |e, p| {
-        order[cursor[e]] = p;
-        cursor[e] += 1;
-    }
-
-    const moe_in_data = try moe_in.dataConst();
-    const gathered = try allocator.alloc(f32, seq * hidden); // m_e <= seq (distinct experts per token)
-    defer allocator.free(gathered);
-
-    for (0..n_expert) |e| {
-        const m = count[e];
-        if (m == 0) continue;
-        const base = offset[e];
-        for (0..m) |i| {
-            const token = order[base + i] / top_k;
-            @memcpy(gathered[i * hidden ..][0..hidden], moe_in_data[token * hidden ..][0..hidden]);
-        }
-        var gx = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ m, hidden }, gathered[0 .. m * hidden]);
-        defer gx.deinit();
-        const gate_up_start = profileStart(profile, io);
-        var gate = try gx.dotPacked(ctx, &moe.gate[e], .embed, .ffn);
-        defer gate.deinit();
-        var up = try gx.dotPacked(ctx, &moe.up[e], .embed, .ffn);
-        defer up.deinit();
-        if (profile) |p| p.moe_gate_up_ns += profileElapsed(gate_up_start, io);
-
-        const act_start = profileStart(profile, io);
-        var gate_act = try gate.unary(ctx, .gelu_quant);
-        defer gate_act.deinit();
-        var g = try up.mul(ctx, &gate_act);
-        defer g.deinit();
-        if (profile) |p| p.moe_act_ns += profileElapsed(act_start, io);
-
-        const down_start = profileStart(profile, io);
-        var d = try g.dotPacked(ctx, &moe.down[e], .ffn, .embed);
-        defer d.deinit();
-        if (profile) |p| p.moe_down_ns += profileElapsed(down_start, io);
-
-        const scatter_start = profileStart(profile, io);
-        const dd = try d.dataConst();
-        for (0..m) |i| {
-            const p = order[base + i];
-            const token = p / top_k;
-            const w = wgt[p];
-            const src = dd[i * hidden ..][0..hidden];
-            for (acc[token * hidden ..][0..hidden], src) |*a, v| a.* += w * v;
-        }
-        if (profile) |p| p.moe_scatter_ns += profileElapsed(scatter_start, io);
-    }
-    return fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ seq, hidden }, acc);
 }
 
 fn profileStart(profile: ?*ForwardProfile, io: ?std.Io) i128 {

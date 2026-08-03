@@ -410,13 +410,14 @@ pub const Model = struct {
         const seq = tokens.len;
         const allocator = self.allocator;
 
-        // Embedding rows.
-        const x_values = try allocator.alloc(f32, seq * d);
-        defer allocator.free(x_values);
-        for (tokens, 0..) |token, t| {
-            @memcpy(x_values[t * d ..][0..d], self.embed[token * d ..][0..d]);
+        // Embedding rows, gathered straight into the residual tensor.
+        var x = try ctx.empty(&.{ seq, d });
+        {
+            const x_values = x.data();
+            for (tokens, 0..) |token, t| {
+                @memcpy(x_values[t * d ..][0..d], self.embed[token * d ..][0..d]);
+            }
         }
-        var x = try ctx.fromSlice(&.{ seq, d }, x_values);
 
         // The block-residual bank: entry snapshots of block-boundary layers.
         var bank: std.ArrayList([]f32) = .empty;
@@ -497,8 +498,9 @@ pub const Model = struct {
         const seq = cur.len / d;
         const candidates = bank.len + 1;
 
-        const out_values = try self.allocator.alloc(f32, seq * d);
-        defer self.allocator.free(out_values);
+        var out = try ctx.empty(&.{ seq, d });
+        errdefer out.deinit();
+        const out_values = out.data();
 
         var scores_buf: [64]f32 = undefined;
         const scores = scores_buf[0..candidates];
@@ -527,7 +529,7 @@ pub const Model = struct {
                 for (out_row, row) |*dst, value| dst.* += p * value;
             }
         }
-        return ctx.fromSlice(&.{ seq, d }, out_values);
+        return out;
     }
 
     fn kdaAttention(self: *const Model, ctx: *ExecContext, h: *const Tensor, w: *const KdaWeights) !Tensor {
@@ -616,13 +618,14 @@ pub const Model = struct {
 
         // Split compressed kv into the lora half (normalized, expanded by
         // kv_b) and the shared rope-slot half (used raw — NoPE).
-        const kv_low_values = try allocator.alloc(f32, seq * kv_lora);
-        defer allocator.free(kv_low_values);
-        for (0..seq) |t| {
-            @memcpy(kv_low_values[t * kv_lora ..][0..kv_lora], ckv_data[t * (kv_lora + rope) ..][0..kv_lora]);
-        }
-        var kv_low = try ctx.fromSlice(&.{ seq, kv_lora }, kv_low_values);
+        var kv_low = try ctx.empty(&.{ seq, kv_lora });
         defer kv_low.deinit();
+        {
+            const kv_low_values = kv_low.data();
+            for (0..seq) |t| {
+                @memcpy(kv_low_values[t * kv_lora ..][0..kv_lora], ckv_data[t * (kv_lora + rope) ..][0..kv_lora]);
+            }
+        }
         var kv_low_n = try ctx.rmsNormMulAxisRank(2, &kv_low, &w.kv_a_norm, 1, cfg.rms_norm_eps);
         defer kv_low_n.deinit();
         var kv_full = try ctx.matmulTransB(&kv_low_n, &w.kv_b);
@@ -633,8 +636,9 @@ pub const Model = struct {
         const kv_data = kv_full.dataConst(); // [seq, heads*(nope+v)]
         const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(q_dim)));
 
-        const attn_values = try allocator.alloc(f32, seq * heads * v_dim);
-        defer allocator.free(attn_values);
+        var attn = try ctx.empty(&.{ seq, heads * v_dim });
+        defer attn.deinit();
+        const attn_values = attn.data();
         const row_scores = try allocator.alloc(f32, seq);
         defer allocator.free(row_scores);
 
@@ -667,8 +671,6 @@ pub const Model = struct {
             }
         }
 
-        var attn = try ctx.fromSlice(&.{ seq, heads * v_dim }, attn_values);
-        defer attn.deinit();
         var gate = try ctx.matmulTransB(h, &w.g_proj);
         defer gate.deinit();
         var gate_sig = try ctx.sigmoid(&gate);
@@ -727,8 +729,9 @@ pub const Model = struct {
             built += 1;
         }
 
-        const routed_values = try allocator.alloc(f32, seq * latent);
-        defer allocator.free(routed_values);
+        var routed = try ctx.empty(&.{ seq, latent });
+        defer routed.deinit();
+        const routed_values = routed.data();
         @memset(routed_values, 0);
         var top_idx_buf: [64]usize = undefined;
         const top_idx = top_idx_buf[0..top_k];
@@ -760,8 +763,6 @@ pub const Model = struct {
             }
         }
 
-        var routed = try ctx.fromSlice(&.{ seq, latent }, routed_values);
-        defer routed.deinit();
         var routed_n = try ctx.rmsNormMulAxisRank(2, &routed, &w.latent_norm, 1, cfg.rms_norm_eps);
         defer routed_n.deinit();
         var up_out = try ctx.matmulTransB(&routed_n, &w.up_proj);
