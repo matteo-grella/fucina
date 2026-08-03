@@ -68,6 +68,12 @@ pub fn cpuThreadCount(max_threads: usize) usize {
         // sizing the team to perflevel0 does. `setMaxThreads` pre-seeds the
         // cache and remains the deliberate-oversubscription escape hatch.
         if (performanceCpuCount()) |performance| count = @min(count, @max(performance, 1));
+        // A cgroup CPU-bandwidth limit never shows up in the affinity mask, so
+        // size the team to the allowance as well: threads beyond it do not add
+        // throughput, they just drain the quota sooner and stall the next
+        // barrier until CFS refills it. `setMaxThreads` still pre-seeds the
+        // cache as the escape hatch.
+        if (cgroupCpuBudget()) |budget| count = @min(count, @max(budget, 1));
         // Optional override (mirrors llama.cpp's -t): cap the detected CPU count
         // for per-machine thread tuning. See the note on `vector_max_threads`
         // for when fewer threads help (decode / heat-soaked prefill on M1).
@@ -100,8 +106,8 @@ pub fn performanceCpuCount() ?usize {
 }
 
 /// Physical-core count, or null when unknown (callers keep the logical
-/// count). Public because the worker team's oversubscription guard
-/// (`src/thread.zig` BarrierPool.init) compares its team size against it.
+/// count). The oversubscription guard reads it through `schedulableCpuCount`,
+/// which also folds in the cgroup bandwidth limit.
 /// Process-cached: the probe runs once (on Linux it costs up to three
 /// syscalls per CPU in the affinity mask) and every consumer sees one
 /// consistent value — the first caller's affinity mask wins, the same
@@ -190,6 +196,137 @@ fn linuxPhysicalCpuCount() ?usize {
         if (lowest_masked.? == cpu) count += 1;
     }
     return if (count >= 1) count else null;
+}
+
+// 0 = not yet probed; maxInt = probed, unknown; anything else = the budget.
+var cached_cgroup_cpu_budget = std.atomic.Value(usize).init(0);
+
+/// Whole-CPU budget from this process's cgroup CPU-bandwidth limit, or null
+/// when unlimited/unknown.
+///
+/// A bandwidth limit is invisible to `sched_getaffinity`: a container run with
+/// `--cpus=2` (or a Kubernetes CPU limit) still sees every CPU in the mask. A
+/// team sized to the machine then burns the allowance faster than CFS refills
+/// it, and each fork-join barrier stalls until the next period. Folding the
+/// quota in keeps one invariant: the same CPU budget performs the same however
+/// it was imposed, mask or quota.
+///
+/// Process-cached, first-call-wins, like `physicalCpuCount`.
+pub fn cgroupCpuBudget() ?usize {
+    const cached = cached_cgroup_cpu_budget.load(.acquire);
+    if (cached != 0) return if (cached == std.math.maxInt(usize)) null else cached;
+    const probed = if (builtin.os.tag == .linux) linuxCgroupCpuBudget() else null;
+    cached_cgroup_cpu_budget.store(probed orelse std.math.maxInt(usize), .release);
+    return probed;
+}
+
+/// The tightest CPU budget this process can actually run on: physical cores in
+/// the affinity mask, further clamped by any cgroup bandwidth limit. null when
+/// neither is known. This is the oversubscription guard's reference
+/// (`src/thread.zig` BarrierPool.init) — a team wider than this stalls at every
+/// barrier, whichever mechanism imposed the limit.
+pub fn schedulableCpuCount() ?usize {
+    const physical = physicalCpuCount();
+    const cgroup = cgroupCpuBudget();
+    if (physical) |p| return if (cgroup) |c| @min(p, c) else p;
+    return cgroup;
+}
+
+/// cgroup CPU-bandwidth probe (Linux). v2 reads `cpu.max` at this process's own
+/// cgroup and at every ancestor up to the mount root — an ancestor's limit
+/// binds just as hard, so the tightest wins; v1 falls back to
+/// `cpu.cfs_quota_us`/`cpu.cfs_period_us`. Any open/read/parse failure returns
+/// null and detection degrades to affinity-only, today's behavior.
+fn linuxCgroupCpuBudget() ?usize {
+    var proc_buf: [4096]u8 = undefined;
+    if (readSmallFile("/proc/self/cgroup", &proc_buf)) |text| {
+        if (cgroupV2RelativePath(text)) |relative| {
+            var best: ?usize = null;
+            var end: usize = relative.len;
+            while (true) {
+                var path_buf: [640]u8 = undefined;
+                const path = std.fmt.bufPrintZ(
+                    &path_buf,
+                    "/sys/fs/cgroup{s}/cpu.max",
+                    .{relative[0..end]},
+                ) catch break;
+                var file_buf: [64]u8 = undefined;
+                if (readSmallFile(path, &file_buf)) |contents| {
+                    if (parseCgroupV2CpuMax(contents)) |budget| {
+                        best = if (best) |b| @min(b, budget) else budget;
+                    }
+                }
+                if (end == 0) break;
+                end = std.mem.lastIndexOfScalar(u8, relative[0..end], '/') orelse 0;
+            }
+            if (best != null) return best;
+        }
+    }
+    const quota = readCgroupInt("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") orelse return null;
+    const period = readCgroupInt("/sys/fs/cgroup/cpu/cpu.cfs_period_us") orelse return null;
+    return cpuBudgetFromQuota(quota, period);
+}
+
+/// Read a small sysfs/proc file whole. null on any failure, or when the file
+/// fills the buffer (implausibly large: treat as unknown rather than truncate).
+fn readSmallFile(path: [:0]const u8, buf: []u8) ?[]const u8 {
+    const posix = std.posix;
+    const fd = posix.openatZ(posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch return null;
+    // std.posix has no close in 0.16; the raw syscall is fine on this
+    // Linux-only path.
+    defer _ = std.os.linux.close(fd);
+    var filled: usize = 0;
+    while (filled < buf.len) {
+        const n = posix.read(fd, buf[filled..]) catch return null;
+        if (n == 0) break;
+        filled += n;
+    }
+    if (filled == buf.len) return null;
+    return buf[0..filled];
+}
+
+fn readCgroupInt(path: [:0]const u8) ?i64 {
+    var buf: [64]u8 = undefined;
+    const text = readSmallFile(path, &buf) orelse return null;
+    return std.fmt.parseInt(i64, std.mem.trim(u8, text, " \t\r\n"), 10) catch null;
+}
+
+/// The unified-hierarchy (v2) line of /proc/self/cgroup is `0::<path>`; the
+/// path is relative to the cgroup mount. Returns null on a v1-only file or
+/// malformed input. Pure so the parsing is unit-tested on every target.
+fn cgroupV2RelativePath(text: []const u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "0::")) continue;
+        const path = std.mem.trim(u8, line[3..], " \t\r");
+        if (path.len == 0 or path[0] != '/') return null;
+        return path;
+    }
+    return null;
+}
+
+/// Parse cgroup v2 `cpu.max`: "max 100000" (unlimited) -> null,
+/// "200000 100000" -> 2. Pure, unit-tested on every target.
+fn parseCgroupV2CpuMax(text: []const u8) ?usize {
+    var it = std.mem.tokenizeAny(u8, std.mem.trim(u8, text, " \t\r\n"), " \t");
+    const quota_text = it.next() orelse return null;
+    const period_text = it.next() orelse return null;
+    if (it.next() != null) return null;
+    if (std.mem.eql(u8, quota_text, "max")) return null;
+    const quota = std.fmt.parseInt(i64, quota_text, 10) catch return null;
+    const period = std.fmt.parseInt(i64, period_text, 10) catch return null;
+    return cpuBudgetFromQuota(quota, period);
+}
+
+/// Whole CPUs a quota/period pair allows: floored, but never below 1. Floor
+/// because a team wider than the allowance is exactly the barrier stall this
+/// probe exists to avoid; the 1 floor because a fractional allowance still
+/// schedules one worker. A non-positive period, or v1's negative "unlimited"
+/// quota, means no limit.
+fn cpuBudgetFromQuota(quota: i64, period: i64) ?usize {
+    if (quota <= 0 or period <= 0) return null;
+    const budget = @divTrunc(quota, period);
+    return if (budget <= 0) 1 else @intCast(budget);
 }
 
 /// Iterator over a sysfs cpu-list string ("0,16", "0-1,8-9", "3", optional
@@ -562,5 +699,57 @@ test "physicalCpuCount: null or within [1, logical]" {
     if (physicalCpuCount()) |physical| {
         try std.testing.expect(physical >= 1);
         try std.testing.expect(physical <= logical);
+    }
+}
+
+test "cpuBudgetFromQuota: floors, never below 1, unlimited stays null" {
+    try std.testing.expectEqual(@as(?usize, 2), cpuBudgetFromQuota(200_000, 100_000));
+    try std.testing.expectEqual(@as(?usize, 8), cpuBudgetFromQuota(800_000, 100_000));
+    // Fractional allowances floor, but still schedule one worker.
+    try std.testing.expectEqual(@as(?usize, 1), cpuBudgetFromQuota(150_000, 100_000));
+    try std.testing.expectEqual(@as(?usize, 1), cpuBudgetFromQuota(50_000, 100_000));
+    // v1 spells "unlimited" as a negative quota; a zero period is malformed.
+    try std.testing.expectEqual(@as(?usize, null), cpuBudgetFromQuota(-1, 100_000));
+    try std.testing.expectEqual(@as(?usize, null), cpuBudgetFromQuota(0, 100_000));
+    try std.testing.expectEqual(@as(?usize, null), cpuBudgetFromQuota(200_000, 0));
+}
+
+test "parseCgroupV2CpuMax: quota pair, unlimited, malformed" {
+    try std.testing.expectEqual(@as(?usize, 2), parseCgroupV2CpuMax("200000 100000\n"));
+    try std.testing.expectEqual(@as(?usize, 4), parseCgroupV2CpuMax("  400000\t100000  "));
+    try std.testing.expectEqual(@as(?usize, null), parseCgroupV2CpuMax("max 100000\n"));
+    try std.testing.expectEqual(@as(?usize, null), parseCgroupV2CpuMax("200000\n"));
+    try std.testing.expectEqual(@as(?usize, null), parseCgroupV2CpuMax("200000 100000 7\n"));
+    try std.testing.expectEqual(@as(?usize, null), parseCgroupV2CpuMax("abc 100000\n"));
+    try std.testing.expectEqual(@as(?usize, null), parseCgroupV2CpuMax(""));
+}
+
+test "cgroupV2RelativePath: the 0:: line, v1-only files, malformed" {
+    try std.testing.expectEqualStrings(
+        "/user.slice/run-x.scope",
+        cgroupV2RelativePath("0::/user.slice/run-x.scope\n").?,
+    );
+    // The v2 line need not come first.
+    try std.testing.expectEqualStrings(
+        "/pod",
+        cgroupV2RelativePath("4:cpu,cpuacct:/pod\n0::/pod\n").?,
+    );
+    try std.testing.expectEqualStrings("/", cgroupV2RelativePath("0::/\n").?);
+    try std.testing.expectEqual(@as(?[]const u8, null), cgroupV2RelativePath("4:cpu,cpuacct:/pod\n"));
+    try std.testing.expectEqual(@as(?[]const u8, null), cgroupV2RelativePath("0::\n"));
+    try std.testing.expectEqual(@as(?[]const u8, null), cgroupV2RelativePath("0::relative\n"));
+}
+
+test "cgroupCpuBudget / schedulableCpuCount: null or a sane positive budget" {
+    if (cgroupCpuBudget()) |budget| try std.testing.expect(budget >= 1);
+    const logical = std.Thread.getCpuCount() catch 1;
+    if (schedulableCpuCount()) |count| {
+        try std.testing.expect(count >= 1);
+        // The affinity leg is bounded by the logical count; the cgroup leg can
+        // only lower it further.
+        if (physicalCpuCount() != null) try std.testing.expect(count <= logical);
+        // schedulableCpuCount is the tighter of the two legs it composes.
+        if (physicalCpuCount()) |physical| try std.testing.expect(count <= physical);
+        if (cgroupCpuBudget()) |budget| try std.testing.expect(count <= budget);
     }
 }

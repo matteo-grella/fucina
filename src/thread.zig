@@ -508,7 +508,7 @@ const BarrierPool = struct {
         const budgets = spinBudgets(
             parallel.envSpinBudget(),
             worker_count + 1, // the dispatcher is a participant too
-            parallel.physicalCpuCount(),
+            parallel.schedulableCpuCount(),
         );
         self.* = .{
             .allocator = allocator,
