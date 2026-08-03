@@ -20,8 +20,11 @@ recommended 0.3), `--seed`, `--eos-threshold`, `--max-frames`.
 
 Model: convert the HF checkpoint with `tools/pocket/pocket_to_gguf.py`
 (safetensors + SentencePiece pieces/scores + per-voice KV caches → one f32
-GGUF). RTF ≈ 0.7 single-threaded on an M1 Max (56 ms per 80 ms frame);
-first audio after one AR step.
+GGUF). That script wants `safetensors sentencepiece torch numpy` — a one-time
+cost to produce the file, not a dependency of the runner: the tokenizer ends
+up inside the GGUF, so the Zig side reads it from there and links no Python.
+RTF ≈ 0.7 single-threaded on an M1 Max (56 ms per 80 ms frame); first audio
+after one AR step.
 
 ## PTQTP variants
 

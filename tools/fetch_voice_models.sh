@@ -16,13 +16,18 @@
 #
 #   pip install -U safetensors sentencepiece torch numpy
 #
+# THIS IS A ONE-TIME, CONVERSION-ONLY DEPENDENCY. It is python that produces
+# the GGUF; the agent never links any of it. sentencepiece reads the tokenizer
+# .model so its 4000 pieces and scores can be written INTO the GGUF metadata,
+# which is where the Zig side reads them from — so once the file exists you can
+# uninstall all four, and a machine handed a prebuilt GGUF needs none of them.
+# safetensors is opened with the "pt" framework, which is why torch and numpy
+# come along.
+#
 # If those live in a virtualenv rather than system python, point the script at
 # it:  PYTHON=refs/pocket-tts-venv/bin/python tools/fetch_voice_models.sh
 #
-# sentencepiece parses the tokenizer .model so its 4000 pieces and scores can
-# be embedded in the GGUF; safetensors is opened with the "pt" framework, so
-# torch (and numpy) are pulled in to read and cast the tensors. Every other
-# artifact is a direct download and needs none of this.
+# Every other artifact is a direct download and needs none of this.
 #
 # Weights are not redistributed by this repository and carry their own terms;
 # see docs/THIRD-PARTY-NOTICES.md. Re-running is cheap: the CLI skips files it

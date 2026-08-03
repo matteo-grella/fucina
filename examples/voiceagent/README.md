@@ -71,15 +71,19 @@ tools/fetch_voice_models.sh quality    # Qwen3-TTS CustomVoice + codec
 tools/fetch_voice_models.sh both
 ```
 
-It needs the Hugging Face CLI (`pip install -U huggingface_hub`). The Pocket
-tier additionally converts a checkpoint — kyutai ships safetensors rather than
-GGUF — which needs `safetensors sentencepiece torch numpy`: sentencepiece to
-read the tokenizer `.model` whose 4000 pieces and scores get embedded in the
-GGUF, and torch/numpy because the safetensors are opened with the `pt`
-framework. The script checks those imports before it starts writing and names
-whatever is missing; set `PYTHON=<venv>/bin/python` if they live in a
-virtualenv. The `quality` tier needs none of it. Re-running is cheap: it skips
-what you already have and prints the command to run at the end.
+It needs the Hugging Face CLI (`pip install -U huggingface_hub`). Re-running is
+cheap: it skips what you already have and prints the command to run at the end.
+
+The Pocket tier additionally converts a checkpoint, because kyutai ships
+safetensors rather than GGUF, and that conversion needs
+`safetensors sentencepiece torch numpy`. **That is a one-time cost to produce
+the file, not a dependency of the agent.** The tokenizer's 4000 pieces and
+scores are written into the GGUF metadata and read back from there at load, so
+once the GGUF exists you can uninstall all four — and a machine handed a
+prebuilt GGUF never needs them at all. The running agent links no Python, in
+this tier or any other. The script checks those imports before it starts
+writing and names whatever is missing; set `PYTHON=<venv>/bin/python` if they
+live in a virtualenv. The `quality` tier involves no conversion.
 
 By hand, if you prefer: parakeet and Qwen3 GGUFs as used by their own
 examples; [`LocalAI-io/LocalVQE`](https://huggingface.co/LocalAI-io/LocalVQE)
