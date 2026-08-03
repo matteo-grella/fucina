@@ -41,6 +41,20 @@ const std = @import("std");
 const builtin = @import("builtin");
 const backend_mod = @import("../backend.zig");
 const thread = @import("../thread.zig");
+const parallel = @import("../parallel.zig");
+
+/// `FUCINA_MOE_LRU=1` forces the pure-LRU victim scan (A/B on one binary);
+/// read once, cached.
+fn envPlainLru() bool {
+    const S = struct {
+        var state: std.atomic.Value(u8) = .init(0); // 0 unread, 1 lru, 2 heat
+    };
+    const cur = S.state.load(.acquire);
+    if (cur != 0) return cur == 1;
+    const v: u8 = if (parallel.envPositiveUsize("FUCINA_MOE_LRU") != null) 1 else 2;
+    S.state.store(v, .release);
+    return v == 1;
+}
 
 const Allocator = std.mem.Allocator;
 const qm = backend_mod.quantized_matmul;
@@ -600,6 +614,15 @@ pub const ExpertStore = struct {
         /// Cache-aware routing (`cacheRouteTopK`), default off — it changes
         /// expert selection, so callers opt in explicitly.
         cache_route: ?CacheRouteOptions = null,
+        /// LRU-tier victim choice: evict the lowest-heat resident (the
+        /// per-expert routed-pair counters the store already keeps),
+        /// recency breaking ties — measured on real DeepSeek-V2-Lite
+        /// routing traces at +3-10pp hit rate over pure LRU at every
+        /// capacity, both via `tools/replay_experts.zig` and live.
+        /// `FUCINA_MOE_LRU=1` forces pure LRU at runtime (the A/B and
+        /// emergency-revert switch on one binary). Outputs are identical
+        /// either way; only which expert gets re-read later changes.
+        heat_eviction: bool = true,
         /// Record every routed (layer, expert) pair in request order and
         /// write the sequence here at `destroy` (see `saveTrace` for the
         /// format). The usage HISTOGRAM cannot answer policy questions —
@@ -678,6 +701,12 @@ pub const ExpertStore = struct {
     pins_declined_flat: bool = false,
     finalized: bool = false,
     clock: u64 = 0,
+    /// `clock` at the current acquire's entry: slots stamped after it were
+    /// touched by THIS acquire (hits or fresh promotions) and are never
+    /// heat-eviction victims — evicting what the token just used or what
+    /// this release just promoted would cannibalize the working set (pure
+    /// LRU gets the same protection implicitly from recency).
+    acquire_clock0: u64 = 0,
     stats: Stats = .{},
     mutex: thread.Mutex = .{},
     /// Routing trace (pairs of layer, eid in request order; see
@@ -1219,6 +1248,8 @@ pub const ExpertStore = struct {
             }
         }
 
+        self.acquire_clock0 = self.clock;
+
         // Unique active set + usage/heat histograms (every routed pair
         // counts; `usage` persists across sessions, `heat` decays per
         // repin pass).
@@ -1323,6 +1354,29 @@ pub const ExpertStore = struct {
             if (ls.n_slots < cap) {
                 dst = &ls.slots[ls.n_slots];
                 ls.n_slots += 1;
+            } else if (self.options.heat_eviction and envPlainLru() == false) {
+                // Victim = coldest by decayed routed-pair count, recency
+                // breaking ties — over slots NOT touched by this acquire
+                // (see acquire_clock0). When the acquire fills the whole
+                // cap, fall back to plain LRU among its own slots.
+                var pick: ?*Slot = null;
+                for (ls.slots[0..ls.n_slots]) |*s| {
+                    if (s.used > self.acquire_clock0) continue;
+                    const p = pick orelse {
+                        pick = s;
+                        continue;
+                    };
+                    const sh = ls.heat[s.eid];
+                    const ph = ls.heat[p.eid];
+                    if (sh < ph or (sh == ph and s.used < p.used)) pick = s;
+                }
+                dst = pick orelse blk: {
+                    var lru = &ls.slots[0];
+                    for (ls.slots[1..]) |*s| {
+                        if (s.used < lru.used) lru = s;
+                    }
+                    break :blk lru;
+                };
             } else {
                 dst = &ls.slots[0];
                 for (ls.slots[1..]) |*s| {

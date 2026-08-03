@@ -1665,3 +1665,32 @@ test "auto-pin flatness guard: flat usage declines pinning, skewed usage pins" {
 fn fxSlabBytes(store: *ExpertStore) usize {
     return store.layers[0].slab_bytes;
 }
+
+test "heat eviction: the frequent expert survives where pure LRU would evict it" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var fx: Fixture = undefined;
+    try fx.init(allocator, 3); // cap 3
+    defer fx.deinit();
+
+    // Build heat 0:3, 1:2, 2:1 with all three resident, then touch {1, 2}
+    // so 0 ends LEAST-recent while staying HOTTEST — the state where the
+    // two policies diverge (heat 0:3+1=4? no: after {1,2}: 0:3, 1:3, 2:2).
+    try fx.expectDecodeMatches(&ctx, &.{ 0, 1 }, &.{ 0.6, 0.4 });
+    try fx.expectDecodeMatches(&ctx, &.{ 0, 2 }, &.{ 0.6, 0.4 });
+    try fx.expectDecodeMatches(&ctx, &.{ 0, 1 }, &.{ 0.6, 0.4 });
+    try fx.expectDecodeMatches(&ctx, &.{ 1, 2 }, &.{ 0.5, 0.5 });
+    // Miss on 3 (0 is protected as this acquire's hit): pure LRU would
+    // evict the least-recent unprotected resident by stamp order (1,
+    // touched before 2 in the {1, 2} acquire); heat eviction evicts 2
+    // (heat 2 vs 1's heat 3).
+    try fx.expectDecodeMatches(&ctx, &.{ 3, 0 }, &.{ 0.5, 0.5 });
+    const misses_before = fx.store.stats.misses;
+    // 1 must still be resident — heat kept it; pure LRU would have
+    // evicted it and missed here.
+    try fx.expectDecodeMatches(&ctx, &.{ 0, 1 }, &.{ 0.6, 0.4 });
+    try std.testing.expectEqual(misses_before, fx.store.stats.misses);
+}

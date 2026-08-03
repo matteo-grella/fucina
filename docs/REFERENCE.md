@@ -11082,16 +11082,26 @@ and set their fields on the returned options.
 
 `--moe-trace=PATH` records the routed (layer, expert) sequence in request
 order and writes it at store teardown (`ExpertStore.saveTrace`); `zig
-build replay-experts -- PATH [slots-per-layer...]` replays it through
+build replay-experts -- PATH [slots-per-layer...] [--pins-from=SIDECAR]
+[--heat-decay=N]` replays it through LRU, heat (decayed-LFU), segmented-
 LRU, Belady-optimal, and pinned+LRU policies across a capacity sweep —
 answering offline whether more cache would help and whether the policy
 or the capacity is the bottleneck (LRU flat where Belady climbs =
-policy). The persisted usage histogram cannot answer either: both need
-temporal order. Relatedly, auto-pin declines (`pins_declined_flat`,
-threshold `Options.auto_pin_min_advantage`) when the histogram is ~flat
-— a quantile-balanced router's pinned tier retains no more traffic than
-random slots — handing the whole budget to the LRU instead; the guard
-is bypassed whenever the budget holds every used expert.
+policy). `--pins-from` draws the pinned set from a persisted
+`<gguf>.experts` histogram instead of the whole-trace oracle, measuring
+how pins learned in previous sessions generalize to a new prompt. The
+persisted usage histogram alone cannot answer any of this: every policy
+needs temporal order. The cache tier itself evicts by heat by default
+(`Options.heat_eviction`; `FUCINA_MOE_LRU=1` reverts to pure LRU for
+A/B): victim = lowest decayed routed-pair count among slots not touched
+by the current acquire, recency breaking ties — measured at +3 hit-rate
+points and −4% streamed bytes over LRU on real DeepSeek-V2-Lite traces,
+replay and live agreeing. Relatedly, auto-pin declines
+(`pins_declined_flat`, threshold `Options.auto_pin_min_advantage`) when
+the histogram is ~flat — a quantile-balanced router's pinned tier
+retains no more traffic than random slots — handing the whole budget to
+the LRU instead; the guard is bypassed whenever the budget holds every
+used expert.
 
 Zero-copy linears over caller-owned immutable bytes (used by runners that keep
 weights mmapped):
