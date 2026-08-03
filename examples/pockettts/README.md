@@ -23,6 +23,14 @@ Model: convert the HF checkpoint with `tools/pocket/pocket_to_gguf.py`
 GGUF). That script wants `safetensors sentencepiece torch numpy` — a one-time
 cost to produce the file, not a dependency of the runner: the tokenizer ends
 up inside the GGUF, so the Zig side reads it from there and links no Python.
+
+There is no prebuilt GGUF to download instead. Third-party ones exist
+(`idle-intelligence/pocket-tts-gguf`) but target other runtimes and ship a
+different container: the tokenizer stays a separate `tokenizer.model` file and
+the voices are left out entirely, where this loader requires both inside the
+GGUF (`tokenizer.pocket.tokens`/`.scores`, `voice.<name>.cache.<layer>` —
+roped-K caches, not raw embeddings). Nor would it save space: 128 MB Q8_0
+against 141 MB for the tied-PTQTP build here.
 RTF ≈ 0.7 single-threaded on an M1 Max (56 ms per 80 ms frame); first audio
 after one AR step.
 
