@@ -56,7 +56,13 @@ extern fn cblas_sgemm(
 
 extern fn openblas_set_num_threads(num_threads: c_int) void;
 extern fn bli_thread_set_num_threads(num_threads: c_int) void;
-extern fn mkl_set_num_threads(num_threads: c_int) void;
+// MKL's C entry points are the capitalized names. The lowercase
+// `mkl_set_num_threads` is the Fortran binding: it takes its argument by
+// reference, so calling it by value dereferences the count.
+extern fn MKL_Set_Num_Threads(num_threads: c_int) void;
+// Per-thread override; returns the previous value for the calling thread,
+// where 0 means "follow the global setting".
+extern fn MKL_Set_Num_Threads_Local(num_threads: c_int) c_int;
 extern fn nvpl_blas_set_num_threads(num_threads: c_int) void;
 
 pub const vector_len = vector.vector_len;
@@ -1562,10 +1568,35 @@ fn configureBlasThreads() void {
     switch (comptime build_options.blas_kind) {
         .openblas => openblas_set_num_threads(n),
         .blis => bli_thread_set_num_threads(n),
-        .mkl => mkl_set_num_threads(n),
+        .mkl => MKL_Set_Num_Threads(n),
         .nvpl => nvpl_blas_set_num_threads(n),
         .none, .accelerate, .blas => {},
     }
+}
+
+/// Token from `beginNestedBlasScope`, restored by `endNestedBlasScope`.
+pub const NestedBlasScope = c_int;
+
+/// Serialize THIS thread's BLAS calls for the duration of a fucina parallel
+/// region, returning the token that restores the previous setting.
+///
+/// A self-threading BLAS spawns an engine team per call, so one issued from
+/// inside our own parallel region puts two schedulers on the same cores. The
+/// limit belongs to the nested caller, not the process: a single big top-level
+/// GEMM still wants the engine's own threads, and it outruns our pool-parallel
+/// packed path when it gets them.
+///
+/// Only MKL is covered — `MKL_Set_Num_Threads_Local` is per-thread and hands
+/// back the previous value, which is exactly this contract. Providers exposing
+/// only process-wide setters keep the engine's default threading.
+pub fn beginNestedBlasScope() NestedBlasScope {
+    if (comptime build_options.blas_kind != .mkl) return 0;
+    return MKL_Set_Num_Threads_Local(1);
+}
+
+pub fn endNestedBlasScope(previous: NestedBlasScope) void {
+    if (comptime build_options.blas_kind != .mkl) return;
+    _ = MKL_Set_Num_Threads_Local(previous);
 }
 
 fn fitsCblas(m: usize, n: usize, k: usize) bool {

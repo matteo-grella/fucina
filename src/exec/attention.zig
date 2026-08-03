@@ -1496,6 +1496,12 @@ pub fn groupedCausalAttentionBackwardBlasTiles(task: GroupedCausalAttentionBackw
         return groupedCausalAttentionBackwardTiles(task);
     } else {
         const sgemm = backend_mod.native_impl.sgemmStrided;
+        // One task per head range, so this scope covers every strip sgemm this
+        // worker issues; without it a self-threading BLAS starts an engine team
+        // per call inside our own parallel region. The token restores whatever
+        // this thread had.
+        const blas_scope = backend_mod.native_impl.beginNestedBlasScope();
+        defer backend_mod.native_impl.endNestedBlasScope(blas_scope);
         const tile_rows = attention_bwd_blas_tile_rows;
         const d = task.d;
         const q_seq_stride = task.heads * d;
