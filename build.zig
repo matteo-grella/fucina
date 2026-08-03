@@ -230,6 +230,19 @@ pub fn build(b: *std.Build) void {
     const arch_check_step = b.step("arch-check", "Verify the production src/*.zig import graph has zero SCCs and every test file is forwarded");
     arch_check_step.dependOn(&arch_check_cmd.step);
 
+    const replay_experts_exe = b.addExecutable(.{
+        .name = "fucina-replay-experts",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/replay_experts.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    const replay_experts_cmd = b.addRunArtifact(replay_experts_exe);
+    if (b.args) |args| replay_experts_cmd.addArgs(args);
+    const replay_experts_step = b.step("replay-experts", "Replay a --moe-trace routing trace through LRU/Belady/pinned cache policies across capacities");
+    replay_experts_step.dependOn(&replay_experts_cmd.step);
+
     const doc_check_exe = b.addExecutable(.{
         .name = "fucina-doc-check",
         .root_module = b.createModule(.{

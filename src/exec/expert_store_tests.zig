@@ -1565,3 +1565,103 @@ test "parallel demand reads: fan-out stays bit-exact, drives a mirror concurrent
     try store2.finalize();
     try std.testing.expectError(error.UnexpectedEndOfFile, store2.acquire(0, &.{ 0, 3, 5 }));
 }
+
+test "routing trace: request order round-trips through the sidecar" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var fx: Fixture = undefined;
+    try fx.init(allocator, 2);
+    defer fx.deinit();
+
+    var trace_buf: [160]u8 = undefined;
+    const stamp = std.Io.Clock.real.now(std.testing.io).nanoseconds;
+    const trace_path = try std.fmt.bufPrint(&trace_buf, "expert_trace_{d}.bin", .{stamp});
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, trace_path) catch {};
+
+    // The trace must record what the model ASKED for, in order — including
+    // requests that were cache hits.
+    const turns = [_][2]usize{ .{ 5, 6 }, .{ 1, 5 }, .{ 6, 5 } };
+    {
+        var store = try ExpertStore.create(allocator, &.{fx.path}, 1, .{
+            .cache_slots_per_layer = 2,
+            .trace_path = trace_path,
+        });
+        defer store.destroy();
+        try fx.registerLayer(store);
+        try store.finalize();
+        for (&turns) |sel| try fx.expectDecodeWith(&ctx, store, &.{ sel[0], sel[1] }, &.{ 0.7, 0.3 });
+    } // destroy writes the trace
+
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, trace_path, allocator, .limited(1 << 20));
+    defer allocator.free(bytes);
+    try std.testing.expect(std.mem.eql(u8, bytes[0..8], ExpertStore.trace_magic));
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, bytes[8..12], .little));
+    try std.testing.expectEqual(@as(u64, 6), std.mem.readInt(u64, bytes[12..20], .little));
+    var at: usize = 20;
+    for (&turns) |sel| {
+        for (sel) |eid| {
+            try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, bytes[at..][0..4], .little));
+            try std.testing.expectEqual(@as(u32, @intCast(eid)), std.mem.readInt(u32, bytes[at + 4 ..][0..4], .little));
+            at += 8;
+        }
+    }
+    try std.testing.expectEqual(bytes.len, at);
+}
+
+test "auto-pin flatness guard: flat usage declines pinning, skewed usage pins" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var fx: Fixture = undefined;
+    try fx.init(allocator, 2);
+    defer fx.deinit();
+
+    // FLAT: every expert routed exactly once (a quantile-balanced router's
+    // signature). Budget holds 2 of 8 used experts; the "hottest" two cover
+    // exactly 2/8 of the traffic = the flat baseline -> pinning declined,
+    // the whole budget stays with the LRU.
+    for (0..n_expert / 2) |i| {
+        try fx.expectDecodeMatches(&ctx, &.{ 2 * i, 2 * i + 1 }, &.{ 0.5, 0.5 });
+    }
+    try fx.store.saveUsage();
+    {
+        var store2 = try ExpertStore.create(allocator, &.{fx.path}, 1, .{
+            .cache_slots_per_layer = 1,
+            .auto_pin_min_history = 1,
+        });
+        defer store2.destroy();
+        try fx.registerLayer(store2);
+        store2.options.pin_bytes = 2 * fxSlabBytes(store2);
+        try store2.finalize();
+        try std.testing.expectEqual(@as(usize, 0), store2.pinned_experts);
+        try std.testing.expect(store2.pins_declined_flat);
+    }
+
+    // SKEWED on top of the flat base: {5, 6} now dominate. The same budget
+    // retains far more than the flat baseline -> pinning proceeds.
+    for (0..8) |_| try fx.expectDecodeMatches(&ctx, &.{ 5, 6 }, &.{ 0.7, 0.3 });
+    try fx.store.saveUsage();
+    {
+        var store3 = try ExpertStore.create(allocator, &.{fx.path}, 1, .{
+            .cache_slots_per_layer = 1,
+            .auto_pin_min_history = 1,
+        });
+        defer store3.destroy();
+        try fx.registerLayer(store3);
+        store3.options.pin_bytes = 2 * fxSlabBytes(store3);
+        try store3.finalize();
+        try std.testing.expectEqual(@as(usize, 2), store3.pinned_experts);
+        try std.testing.expect(!store3.pins_declined_flat);
+        try fx.expectDecodeWith(&ctx, store3, &.{ 5, 6 }, &.{ 0.7, 0.3 });
+        try std.testing.expectEqual(@as(u64, 2), store3.stats.pin_hits);
+    }
+}
+
+fn fxSlabBytes(store: *ExpertStore) usize {
+    return store.layers[0].slab_bytes;
+}

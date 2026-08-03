@@ -580,6 +580,16 @@ pub const ExpertStore = struct {
         pin_bytes: ?usize = null,
         /// Minimum recorded routed pairs before auto-pin trusts the history.
         auto_pin_min_history: u64 = 5000,
+        /// Auto-pin must beat a FLAT histogram by this factor or it declines
+        /// and hands the whole budget to the LRU. Quantile-balanced routers
+        /// (Kimi-K3 class) deliberately flatten expert usage; there the
+        /// "hottest" experts are noise and a pinned tier retains no more
+        /// traffic than random slots would — measured upstream as 0.0%
+        /// retention across a 48x cache-size sweep (kimi-k3-in-c). Only
+        /// consulted when the pin budget cannot hold every used expert
+        /// (when it can, pinning the whole working set is optimal
+        /// regardless of skew). 1.0 disables the guard.
+        auto_pin_min_advantage: f32 = 1.25,
         /// Uncached streamed reads (macOS `F_NOCACHE` on every store and
         /// mirror fd): a streamed giant reads far more than RAM per token,
         /// so page-caching those reads only churns out the mmap'd DENSE
@@ -590,6 +600,14 @@ pub const ExpertStore = struct {
         /// Cache-aware routing (`cacheRouteTopK`), default off — it changes
         /// expert selection, so callers opt in explicitly.
         cache_route: ?CacheRouteOptions = null,
+        /// Record every routed (layer, expert) pair in request order and
+        /// write the sequence here at `destroy` (see `saveTrace` for the
+        /// format). The usage HISTOGRAM cannot answer policy questions —
+        /// LRU and Belady both need temporal order — so this is the input
+        /// to `tools/replay_experts.zig`'s offline cache replay. Purely
+        /// diagnostic: recording failures are swallowed, serving never
+        /// depends on it. The path is borrowed; it must outlive the store.
+        trace_path: ?[]const u8 = null,
     };
 
     /// Knobs for `cacheRouteTopK` (max-rank selection, arXiv:2412.00099).
@@ -654,10 +672,18 @@ pub const ExpertStore = struct {
     /// Pinned-tier summary, fixed at `finalize` (adapted by `repinPass`).
     pinned_experts: usize = 0,
     pinned_bytes: usize = 0,
+    /// Auto-pin declined because the usage histogram was ~flat (quantile-
+    /// balanced router): pinning would have retained no more traffic than
+    /// random slots, so the whole budget went to the LRU tier instead.
+    pins_declined_flat: bool = false,
     finalized: bool = false,
     clock: u64 = 0,
     stats: Stats = .{},
     mutex: thread.Mutex = .{},
+    /// Routing trace (pairs of layer, eid in request order; see
+    /// `Options.trace_path`). Grows unbounded by design — opt-in
+    /// diagnostic for bounded analysis sessions.
+    trace: std.ArrayList(u32) = .empty,
     // ---- per-acquire state (valid while the mutex is held) ----
     acquired_layer: ?usize = null,
     /// Unique experts of the current acquire / their miss subset (parallel
@@ -769,6 +795,10 @@ pub const ExpertStore = struct {
 
     pub fn destroy(self: *ExpertStore) void {
         const allocator = self.allocator;
+        // Best-effort: a failed trace write loses an analysis artifact,
+        // nothing else.
+        self.saveTrace() catch {};
+        self.trace.deinit(allocator);
         for (self.layers, self.registered) |*ls, reg| {
             if (!reg) continue;
             for (ls.slots) |*slot| slot.deinit(allocator);
@@ -990,6 +1020,23 @@ pub const ExpertStore = struct {
         }
         if (picks.items.len == 0) return 0;
 
+        // Flatness guard (see Options.auto_pin_min_advantage): compare the
+        // traffic share the greedy picks would retain against what the same
+        // slot count retains under a flat histogram. Skipped when every
+        // used expert fits — a fully-pinned working set wins at any skew.
+        if (picks.items.len < cands.items.len) {
+            var picked_traffic: u64 = 0;
+            for (picks.items) |cand| picked_traffic += cand.count;
+            var total_traffic: u64 = 0;
+            for (cands.items) |cand| total_traffic += cand.count;
+            const coverage = @as(f64, @floatFromInt(picked_traffic)) / @as(f64, @floatFromInt(total_traffic));
+            const flat = @as(f64, @floatFromInt(picks.items.len)) / @as(f64, @floatFromInt(cands.items.len));
+            if (coverage < flat * self.options.auto_pin_min_advantage) {
+                self.pins_declined_flat = true;
+                return 0;
+            }
+        }
+
         // Pass 2: allocate the pinned tiers, hint the whole pick set, then
         // read it sequentially (the hints let the kernel batch the reads).
         for (self.layers, self.registered, 0..) |*ls, reg, layer_i| {
@@ -1158,6 +1205,19 @@ pub const ExpertStore = struct {
         if (!self.finalized) return Error.StoreNotFinalized;
         if (layer_i >= self.layers.len or !self.registered[layer_i]) return Error.LayerNotRegistered;
         const ls = &self.layers[layer_i];
+
+        // Trace what the MODEL asked for, before any cache outcome — a
+        // replay at a different capacity is meaningless otherwise. Loss on
+        // OOM is acceptable: the trace is diagnostic, serving is not.
+        if (self.options.trace_path != null) {
+            self.trace.ensureUnusedCapacity(self.allocator, 2 * selected.len) catch {};
+            if (self.trace.unusedCapacitySlice().len >= 2 * selected.len) {
+                for (selected) |e| {
+                    self.trace.appendAssumeCapacity(@intCast(layer_i));
+                    self.trace.appendAssumeCapacity(@intCast(e));
+                }
+            }
+        }
 
         // Unique active set + usage/heat histograms (every routed pair
         // counts; `usage` persists across sessions, `heat` decays per
@@ -1456,6 +1516,26 @@ pub const ExpertStore = struct {
     /// are retried synchronously here.
     fn readMissSet(self: *ExpertStore, ls: *LayerState, layer_i: usize, count: usize) Error!void {
         if (count == 0) return;
+        // Issue in DISK order: expert file offsets are monotone in eid
+        // within each projection, so an ascending-eid batch turns scattered
+        // seeks into (per-projection) forward sweeps the drive can merge.
+        if (count > 1) {
+            const Ctx = struct {
+                eids: []u32,
+                slots: []*Slot,
+                pub fn lessThan(c: @This(), a: usize, b: usize) bool {
+                    return c.eids[a] < c.eids[b];
+                }
+                pub fn swap(c: @This(), a: usize, b: usize) void {
+                    std.mem.swap(u32, &c.eids[a], &c.eids[b]);
+                    std.mem.swap(*Slot, &c.slots[a], &c.slots[b]);
+                }
+            };
+            std.mem.sortUnstableContext(0, count, Ctx{
+                .eids = self.read_eids[0..count],
+                .slots = self.read_slots[0..count],
+            });
+        }
         const want = @min(self.options.io_workers, count - 1);
         if (want > 0) self.ioEnsurePool();
         const started = @min(self.io_ready, want);
@@ -1643,6 +1723,30 @@ pub const ExpertStore = struct {
     // ---- the learning cache: persistent usage histogram --------------------
 
     const usage_magic = "FUCEXPT1";
+    pub const trace_magic = "FUCTRCE1";
+
+    /// Write the routing trace (`Options.trace_path`): magic, layer count,
+    /// then little-endian u32 (layer, eid) pairs in request order. The
+    /// input format of `tools/replay_experts.zig`. Called from `destroy`;
+    /// also callable early to snapshot mid-session.
+    pub fn saveTrace(self: *ExpertStore) Error!void {
+        const path = self.options.trace_path orelse return;
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(self.allocator);
+        try bytes.appendSlice(self.allocator, trace_magic);
+        try appendInt(u32, self.allocator, &bytes, @intCast(self.layers.len));
+        try appendInt(u64, self.allocator, &bytes, @intCast(self.trace.items.len / 2));
+        for (self.trace.items) |v| try appendInt(u32, self.allocator, &bytes, v);
+
+        const tmp_path = try std.fmt.allocPrint(self.allocator, "{s}.tmp", .{path});
+        defer self.allocator.free(tmp_path);
+        {
+            const fd = try openWriteTrunc(self.allocator, tmp_path);
+            defer closeFd(fd);
+            try writeFull(fd, bytes.items);
+        }
+        try renamePath(self.allocator, tmp_path, path);
+    }
 
     /// Persist the usage histogram to the sidecar (`<gguf>.experts`),
     /// atomically (tmp + rename): counts accumulate across sessions, and at

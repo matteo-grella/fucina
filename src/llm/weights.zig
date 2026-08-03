@@ -1268,6 +1268,10 @@ pub const MoeStreamOptions = struct {
     route_sacred: usize = 2,
     /// Max-rank window the resident-preferring fill may draw from.
     route_window: usize = 12,
+    /// Record the routed (layer, expert) sequence and write it to this path
+    /// at store teardown (`ExpertStore.saveTrace` format) — the input of
+    /// `tools/replay_experts.zig`. Borrowed; must outlive the model.
+    trace_path: ?[]const u8 = null,
 };
 
 /// The runners' shared `--moe-mirror-weights=` comma list, parsed into
@@ -1302,6 +1306,7 @@ pub const MoeStreamCli = struct {
     mirror_weights_buf: [8]f32 = undefined,
     uncached: bool = false,
     io_threads: ?usize = null,
+    trace_path: ?[]const u8 = null,
 
     /// Consume one argv entry; false = not a shared `--moe-*` flag (the
     /// caller keeps its family-specific flags and unknown-flag error).
@@ -1337,6 +1342,12 @@ pub const MoeStreamCli = struct {
             // Demand-miss read fan-out (default 8; 0 = sequential reads).
             self.armed = true;
             self.io_threads = try std.fmt.parseInt(usize, arg["--moe-io-threads=".len..], 10);
+        } else if (std.mem.startsWith(u8, arg, "--moe-trace=")) {
+            // Record the routed (layer, expert) sequence and write it here
+            // at store teardown — the input of tools/replay_experts.zig
+            // (offline LRU/Belady/pinned cache replay across capacities).
+            self.armed = true;
+            self.trace_path = arg["--moe-trace=".len..];
         } else {
             return false;
         }
@@ -1356,6 +1367,7 @@ pub const MoeStreamCli = struct {
             .mirror_weights = try parseMirrorWeights(self.mirror_weights_arg, self.mirror_n, &self.mirror_weights_buf),
             .io_workers = self.io_threads orelse 8,
             .uncached = self.uncached,
+            .trace_path = self.trace_path,
         };
     }
 };
@@ -1398,6 +1410,7 @@ pub fn createExpertStore(allocator: Allocator, options: MoeStreamOptions, n_laye
         .pin_bytes = options.pin_bytes,
         .io_workers = options.io_workers,
         .uncached = options.uncached,
+        .trace_path = options.trace_path,
         .cache_route = if (options.cache_route) .{
             .sacred = options.route_sacred,
             .window = options.route_window,
