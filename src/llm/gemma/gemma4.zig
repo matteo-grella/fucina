@@ -36,6 +36,7 @@ const RhsQ8_0 = fucina.QuantizedMatmulRhsQ8_0x4;
 pub const Error = weights.Error || error{
     InvalidConfig,
     InvalidSequenceLength,
+    MappingUnavailable,
     MismatchedKvCaches,
     MissingMetadata,
     PleUnsupported,
@@ -210,7 +211,11 @@ pub fn deriveGeometry(
 const Vec = fucina.Tensor(.{.embed});
 
 const PerLayerEmbeddings = struct {
-    tok_embd: LinearWeight,
+    /// Lookup-only (row-gathered per token, never a matmul operand): on a
+    /// single-file mmap load it borrows rows straight from the mapping —
+    /// no resident copy of the largest PLE tensor — and the Model then
+    /// owns the mapping (see loadGgufFromFile).
+    tok_embd: weights.LookupWeight,
     model_proj: LinearWeight,
     proj_norm: fucina.Tensor(.{.ple}),
 
@@ -490,9 +495,10 @@ pub const Model = struct {
     rope_freqs: ?fucina.Tensor(.{.rope}),
     layers: []Layer,
     ple: ?PerLayerEmbeddings,
-    /// The GGUF mapping, owned by the model when MoE experts borrow from it
-    /// (`--experts=borrow`, see loadMoe); unmapped last in deinit. null when
-    /// nothing borrows (the default packed path copies everything out).
+    /// The GGUF mapping, owned by the model when MoE experts
+    /// (`--experts=borrow`, see loadMoe) or the PLE lookup table (any
+    /// single-file mmap load on CPU builds) borrow from it; unmapped last
+    /// in deinit. null when nothing borrows (everything copied out).
     weight_mapping: ?gguf.File.MappedRegion = null,
 
     pub fn loadGguf(ctx: *ExecContext, io: std.Io, path: []const u8, config: Config) !Model {
@@ -542,9 +548,16 @@ pub const Model = struct {
         try loadLayers(ctx, file, config, geom, layers);
         errdefer for (layers) |*layer| layer.deinit(allocator);
 
-        // When experts borrow from the mapping (loadMoe), the model takes
-        // ownership of it; the packed/copied default leaves nothing mapped.
-        const weight_mapping = if (config.num_experts > 0 and config.borrow_experts) file.takeMapping() else null;
+        // When experts (loadMoe) or the PLE table borrow from the mapping,
+        // the model takes ownership of it; the packed/copied default leaves
+        // nothing mapped. A borrowing PLE table always gets a mapping:
+        // LookupWeight.load borrows only under takeMapping's own predicate
+        // (single-file mmap), and nothing between the two clears it — the
+        // error return is the safety net for a future reordering, because a
+        // silently-null mapping here would leave the table's rows dangling.
+        const ple_borrows = if (ple) |*p| p.tok_embd.borrowsMapping() else false;
+        const weight_mapping = if ((config.num_experts > 0 and config.borrow_experts) or ple_borrows) file.takeMapping() else null;
+        if (ple_borrows and weight_mapping == null) return Error.MappingUnavailable;
 
         return .{
             .allocator = allocator,
@@ -1479,7 +1492,7 @@ fn pleInject(
 
 fn loadPerLayerEmbeddings(ctx: *ExecContext, file: *const gguf.File, config: Config) !PerLayerEmbeddings {
     const ple_all = config.per_layer_input_size * config.num_layers;
-    var tok_embd = try LinearWeight.load(ctx, try file.get("per_layer_token_embd.weight"), config.vocab_size, ple_all);
+    var tok_embd = try weights.LookupWeight.load(ctx, file, try file.get("per_layer_token_embd.weight"), config.vocab_size, ple_all);
     errdefer tok_embd.deinit();
     var model_proj = try LinearWeight.load(ctx, try file.get("per_layer_model_proj.weight"), ple_all, config.hidden_size);
     errdefer model_proj.deinit();

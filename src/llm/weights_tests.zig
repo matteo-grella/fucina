@@ -713,3 +713,89 @@ test "MoeStreamCli: mirror weights without mirrors abort instead of arming nothi
     try std.testing.expect(!try off.tryParse("--prompt"));
     try std.testing.expect((try off.options("model.gguf")) == null);
 }
+
+// ---------------------------------------------------------------------------
+// LookupWeight: mmap-borrowed rows vs the resident copy
+// ---------------------------------------------------------------------------
+
+// One tensor per dtype, same logical [vocab, width] values, written to a real
+// GGUF file so `LookupWeight.load` sees the production predicate (is_mmap).
+test "LookupWeight: mapped rows match the resident getRowsAs bitwise" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const vocab = 8;
+    const width = 512; // superblock-divisible: covers q4_k/q5_k/q6_k (256) and q8_0 (32)
+    var vals: [vocab * width]f32 = undefined;
+    fucina.rng.uniformFill(0x70B1E, &vals, -1.5, 1.5);
+
+    const dtypes = [_]gguf.GgmlType{ .f32, .f16, .bf16, .q8_0, .q4_k, .q5_k, .q6_k };
+
+    // The Writer borrows tensor data until finish: encode into an arena
+    // that outlives it.
+    var enc_arena = std.heap.ArenaAllocator.init(allocator);
+    defer enc_arena.deinit();
+    var w = gguf.Writer.init(allocator);
+    defer w.deinit();
+    var name_buf: [dtypes.len][16]u8 = undefined;
+    inline for (dtypes, 0..) |dt, di| {
+        const name = try std.fmt.bufPrint(&name_buf[di], "t{d}.weight", .{di});
+        const enc = try enc_arena.allocator().alloc(u8, try gguf.tensorByteLen(dt, &.{vals.len}));
+        try gguf.encodeF32(dt, &vals, enc);
+        try w.addTensor(name, dt, &.{ width, vocab }, enc);
+    }
+    const buf = try allocator.alloc(u8, 1 << 20);
+    defer allocator.free(buf);
+    var sink = std.Io.Writer.fixed(buf);
+    try w.finish(&sink);
+
+    var path_buf: [64]u8 = undefined;
+    const stamp = std.Io.Clock.real.now(io).nanoseconds;
+    const path = try std.fmt.bufPrint(&path_buf, "lookup_weight_{d}.gguf", .{stamp});
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    {
+        var f = try std.Io.Dir.cwd().createFile(io, path, .{});
+        defer f.close(io);
+        try f.writePositionalAll(io, sink.buffered(), 0);
+    }
+
+    const ids = [_]usize{ 3, 0, 7, 3 };
+
+    var mapped_file = try gguf.File.loadMmap(allocator, io, path);
+    defer mapped_file.deinit();
+    var heap_file = try gguf.File.load(allocator, io, path);
+    defer heap_file.deinit();
+
+    inline for (dtypes, 0..) |_, di| {
+        const name = try std.fmt.bufPrint(&name_buf[di], "t{d}.weight", .{di});
+        const info = try mapped_file.get(name);
+
+        var lookup = try weights.LookupWeight.load(&ctx, &mapped_file, info, vocab, width);
+        defer lookup.deinit();
+        // CPU builds must borrow here — the entire point of the type; GPU
+        // builds keep the resident path and the comparison is a no-op check.
+        if (comptime !fucina.internal.gpu.enabled)
+            try std.testing.expect(lookup.borrowsMapping());
+
+        var reference = try LinearWeight.load(&ctx, info, vocab, width);
+        defer reference.deinit();
+
+        var got = try lookup.getRowsAs(&ctx, &ids, .embed);
+        defer got.deinit();
+        var want = try reference.getRowsAs(&ctx, &ids, .embed);
+        defer want.deinit();
+        try std.testing.expectEqualSlices(f32, try want.dataConst(), try got.dataConst());
+
+        // Heap-read files must fall back to the resident copy.
+        var fallback = try weights.LookupWeight.load(&ctx, &heap_file, try heap_file.get(name), vocab, width);
+        defer fallback.deinit();
+        try std.testing.expect(!fallback.borrowsMapping());
+        var fb_rows = try fallback.getRowsAs(&ctx, &ids, .embed);
+        defer fb_rows.deinit();
+        try std.testing.expectEqualSlices(f32, try want.dataConst(), try fb_rows.dataConst());
+    }
+}
+

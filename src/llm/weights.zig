@@ -995,6 +995,80 @@ pub const LinearWeight = union(enum) {
     }
 };
 
+/// Lookup-only table: a weight consumed exclusively through `getRowsAs`
+/// (per-layer-embedding tables and the like — never a matmul operand).
+/// The `mapped` arm serves rows straight out of the GGUF mapping: no heap
+/// copy of the table, no matmul-RHS packing, rows decoded on demand with
+/// the shared `gguf.decodeF32` kernels. The mapping must outlive the
+/// weight — the owning model keeps it alive via `gguf.File.takeMapping`
+/// whenever `borrowsMapping()` reports a borrow. `resident` is the copying
+/// `LinearWeight` fallback for heap-read files, split mappings (their part
+/// mappings die with the `File`), GPU builds, and dtypes without a row
+/// decoder.
+pub const LookupWeight = union(enum) {
+    resident: LinearWeight,
+    mapped: MappedTable,
+
+    pub const MappedTable = struct {
+        table: gguf.RowTable,
+        rows: usize,
+    };
+
+    /// Borrow when the caller will be able to keep the mapping alive
+    /// (single-file mmap — the same predicate as `gguf.File.takeMapping`)
+    /// and the dtype decodes per row; copy otherwise. CPU builds only: GPU
+    /// builds keep the resident load path and its device placement policy.
+    pub fn load(ctx: *ExecContext, file: *const gguf.File, info: *const gguf.TensorInfo, expected_rows: usize, expected_cols: usize) !LookupWeight {
+        if (comptime !fucina.internal.gpu.enabled) {
+            if (file.is_mmap and !file.isSplit()) {
+                const shape = try requireMatrixShape(info, expected_rows, expected_cols);
+                if (gguf.RowTable.init(ctx.allocator, info)) |table| {
+                    return .{ .mapped = .{ .table = table, .rows = shape[0] } };
+                } else |_| {} // no row decoder for this dtype: fall through to the copy
+            }
+        }
+        return .{ .resident = try LinearWeight.load(ctx, info, expected_rows, expected_cols) };
+    }
+
+    /// True when this weight points into the GGUF mapping — the loader must
+    /// then take ownership of the mapping for the model's lifetime.
+    pub fn borrowsMapping(self: *const LookupWeight) bool {
+        return self.* == .mapped;
+    }
+
+    pub fn deinit(self: *LookupWeight) void {
+        switch (self.*) {
+            .resident => |*w| w.deinit(),
+            .mapped => {}, // borrows the mapping; nothing owned
+        }
+        self.* = undefined;
+    }
+
+    /// Same contract as `LinearWeight.getRowsAs` (ids must be < rows, as
+    /// for the resident gather); the mapped arm decodes each requested row
+    /// straight into the result tensor — the same shape the resident
+    /// quantized gather has (`getRowsTensorInto` decodes into its output),
+    /// so neither arm pays a scratch pass.
+    pub fn getRowsAs(self: *const LookupWeight, ctx: *ExecContext, token_ids: []const usize, comptime out_tag: Tag) !fucina.Tensor(.{ .seq, out_tag }) {
+        switch (self.*) {
+            .resident => |*w| return w.getRowsAs(ctx, token_ids, out_tag),
+            .mapped => |*m| {
+                const width = m.table.width;
+                var out = try fucina.Tensor(.{ .seq, out_tag }).empty(ctx, .{ token_ids.len, width });
+                errdefer out.deinit();
+                const out_data = try out.data();
+                for (token_ids, 0..) |id, i| {
+                    std.debug.assert(id < m.rows);
+                    const dst = out_data[i * width ..][0..width];
+                    const src = m.table.row(id, dst);
+                    if (src.ptr != dst.ptr) @memcpy(dst, src);
+                }
+                return out;
+            },
+        }
+    }
+};
+
 /// Load all experts of one MoE projection from a 3D stacked tensor
 /// (`blk.N.ffn_{gate,up,down}_exps.weight`, GGUF shape `[in, out, n_expert]`)
 /// into a SINGLE packed matmul RHS. The 3D tensor is expert-major contiguous, so

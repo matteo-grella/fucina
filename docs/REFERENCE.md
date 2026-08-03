@@ -10998,6 +10998,25 @@ wrong rank/length is `Error.InvalidWeightShape`. `layerName` formats
 `"blk.{d}.{s}"` into a caller buffer — the GGUF per-layer naming convention.
 
 ```zig
+pub const LookupWeight = union(enum) { resident: LinearWeight, mapped: MappedTable };
+pub fn load(ctx, file: *const gguf.File, info: *const gguf.TensorInfo,
+    expected_rows: usize, expected_cols: usize) !LookupWeight
+pub fn getRowsAs(self, ctx, token_ids: []const usize, comptime out_tag: Tag)
+    !fucina.Tensor(.{ .seq, out_tag })
+pub fn borrowsMapping(self) bool
+```
+
+`LookupWeight` is for tables consumed exclusively through `getRowsAs` — never
+a matmul operand (gemma4's per-layer-embedding table). On CPU builds, when the
+file is a single-file mmap and the dtype has a `gguf.RowTable` row decoder,
+`load` returns the `mapped` arm: rows decode on demand straight out of the
+mapping — no resident copy of the table, no matmul-RHS packing — bitwise-equal
+to the resident gather. The caller that gets `borrowsMapping() == true` must
+keep the mapping alive for the weight's lifetime via `gguf.File.takeMapping`
+(gemma4's `Model.weight_mapping` does). Heap-read files, split GGUFs, GPU
+builds, and undecodable dtypes fall back to the copying `resident` arm.
+
+```zig
 pub fn loadMoeRhs(ctx: *ExecContext, info: *const gguf.TensorInfo,
     expected_in_dim: usize, expected_out_dim: usize, expected_n_expert: usize,
     borrow: bool) !fucina.MoeRhs
