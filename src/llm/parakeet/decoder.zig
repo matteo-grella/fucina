@@ -332,15 +332,13 @@ pub const Joint = struct {
         defer pp.deinit();
         const ppd = try pp.dataConst();
 
-        const f = try self.allocator.alloc(f32, self.jh);
-        defer self.allocator.free(f);
+        var f_t = try fucina.Tensor(.{ .seq, .in }).empty(ctx, .{ 1, self.jh });
+        defer f_t.deinit();
+        const f = try f_t.data();
         for (0..self.jh) |hh| {
             const sum = @as(f64, enc_proj_t[hh]) + @as(f64, ppd[hh]) + @as(f64, self.pred_b[hh]);
             f[hh] = if (sum > 0) @floatCast(sum) else 0; // ReLU
         }
-
-        var f_t = try fucina.Tensor(.{ .seq, .in }).fromSlice(ctx, .{ 1, self.jh }, f);
-        defer f_t.deinit();
         var lg = try self.pw.linear("joint.joint_net.2.weight", &f_t); // [1, vp]
         defer lg.deinit();
         const lgd = try lg.dataConst();

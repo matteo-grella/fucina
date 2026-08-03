@@ -518,7 +518,8 @@ pub const StreamingEncoder = struct {
         if (tc == 0) return fucina.Tensor(2).empty(ctx, .{ 0, d });
 
         const sub_data = try sub.dataConst();
-        var x = try fucina.Tensor(2).fromSlice(ctx, .{ tc, d }, sub_data[drop * d ..][0 .. tc * d]);
+        // Borrowed row-drop view: `sub` outlives the layer-stack call.
+        var x = try fucina.Tensor(2).fromBorrowedConstSlice(ctx, .{ tc, d }, sub_data[drop * d ..][0 .. tc * d]);
         defer x.deinit();
         var y_full = try self.layerStack(ctx, w, cfg, &x); // [tc, d]
 
@@ -540,10 +541,9 @@ pub const StreamingEncoder = struct {
         const d = cfg.d_model;
         const tc = x.shape()[0];
         const tk = self.chan_caches[0].cache_len + tc;
-        const pe = try encoder.relPosEncoding(ctx.allocator, tk, d); // [2Tk-1, d]
-        defer ctx.allocator.free(pe);
-        var pet = try fucina.Tensor(2).fromSlice(ctx, .{ 2 * tk - 1, d }, pe);
+        var pet = try fucina.Tensor(2).empty(ctx, .{ 2 * tk - 1, d }); // [2Tk-1, d]
         defer pet.deinit();
+        try encoder.relPosEncodingInto(ctx.allocator, try pet.data(), tk, d);
 
         var cur = try x.detach(ctx);
         errdefer cur.deinit();

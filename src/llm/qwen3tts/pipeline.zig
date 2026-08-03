@@ -98,7 +98,7 @@ pub fn generate(
     const pred_kv = &kvs.predictor;
 
     // Prefill.
-    var prompt_rows = try Rows.fromSlice(ctx, .{ prompt.t_ctx, hidden }, prompt.input_embed);
+    var prompt_rows = try Rows.fromBorrowedConstSlice(ctx, .{ prompt.t_ctx, hidden }, prompt.input_embed);
     defer prompt_rows.deinit();
     var hidden_all: ?Rows = try model.talker.forward(ctx, kv, &prompt_rows, if (taps) |tp| tp.prefill_hidden else null);
     defer if (hidden_all) |*ha| ha.deinit();
@@ -195,7 +195,7 @@ pub fn generate(
             if (step == 0 and tp.next_emb_step0 == null) tp.next_emb_step0 = try allocator.dupe(f32, next_emb);
         }
 
-        var step_rows = try Rows.fromSlice(ctx, .{ 1, hidden }, next_emb);
+        var step_rows = try Rows.fromBorrowedConstSlice(ctx, .{ 1, hidden }, next_emb);
         defer step_rows.deinit();
         hidden_all = try model.talker.forward(ctx, kv, &step_rows, null);
     }

@@ -469,13 +469,12 @@ pub const Model = struct {
     fn headLogits(self: *Model, ctx: *ExecContext, x: []const f32, S: usize, norm: []const f32, head: *const LinearWeight) ![][]f32 {
         const cfg = self.config;
         const allocator = ctx.allocator;
-        const normed = try allocator.alloc(f32, S * cfg.hidden_size);
-        defer allocator.free(normed);
+        var normed_t = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ S, cfg.hidden_size });
+        defer normed_t.deinit();
+        const normed = try normed_t.data();
         for (0..S) |r| {
             rmsNormInto(normed[r * cfg.hidden_size ..][0..cfg.hidden_size], x[r * cfg.hidden_size ..][0..cfg.hidden_size], norm, cfg.rms_norm_eps);
         }
-        var normed_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ S, cfg.hidden_size }, normed);
-        defer normed_t.deinit();
         var logits_t = try head.linearSeq(ctx, &normed_t, .embed, .vocab);
         defer logits_t.deinit();
         const flat = try logits_t.dataConst();
@@ -500,7 +499,7 @@ pub const Model = struct {
         const h_norm = try allocator.alloc(f32, S * cfg.hidden_size);
         defer allocator.free(h_norm);
         for (0..S) |r| rmsNormInto(h_norm[r * cfg.hidden_size ..][0..cfg.hidden_size], x[r * cfg.hidden_size ..][0..cfg.hidden_size], layer.attn_norm, cfg.rms_norm_eps);
-        var h_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ S, cfg.hidden_size }, h_norm);
+        var h_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ S, cfg.hidden_size }, h_norm);
         defer h_t.deinit();
 
         var q_t = try layer.q_proj.linearSeq(ctx, &h_t, .embed, .q);
@@ -528,8 +527,9 @@ pub const Model = struct {
 
         const kv_cache = mtp_cache orelse cache.?;
         const cache_layer = if (mtp_cache != null) 0 else layer_i;
-        const attn_out = try allocator.alloc(f32, S * q_width);
-        defer allocator.free(attn_out);
+        var attn_t = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ S, q_width });
+        defer attn_t.deinit();
+        const attn_out = try attn_t.data();
         const scores = try allocator.alloc(f32, pos0 + S);
         defer allocator.free(scores);
 
@@ -571,8 +571,6 @@ pub const Model = struct {
         }
         if (mtp_cache) |mc| mc.len = pos0 + S;
 
-        var attn_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ S, q_width }, attn_out);
-        defer attn_t.deinit();
         var o_t = try layer.o_proj.linearSeq(ctx, &attn_t, .embed, .attn);
         defer o_t.deinit();
         for (x, try o_t.dataConst()) |*xi, oi| xi.* += oi;
@@ -581,7 +579,7 @@ pub const Model = struct {
         for (0..S) |r| rmsNormInto(h_norm[r * cfg.hidden_size ..][0..cfg.hidden_size], x[r * cfg.hidden_size ..][0..cfg.hidden_size], layer.post_attention_norm, cfg.rms_norm_eps);
         switch (layer.ffn) {
             .dense => |*dense| {
-                var f_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ S, cfg.hidden_size }, h_norm);
+                var f_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ S, cfg.hidden_size }, h_norm);
                 defer f_t.deinit();
                 const y = try swigluLinear(ctx, allocator, &f_t, &dense.gate, &dense.up, &dense.down);
                 defer allocator.free(y);
@@ -593,7 +591,7 @@ pub const Model = struct {
                 // share expert reads via the store's LRU when streaming.
                 for (0..S) |r| {
                     const row = h_norm[r * cfg.hidden_size ..][0..cfg.hidden_size];
-                    var f_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, cfg.hidden_size }, row);
+                    var f_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, cfg.hidden_size }, row);
                     defer f_t.deinit();
                     const y = try self.moeForward(ctx, allocator, moe, &f_t);
                     defer allocator.free(y);
@@ -677,14 +675,13 @@ pub const Model = struct {
             var ids = [_]usize{token};
             var emb = try mtp.embed.getRowsAs(ctx, &ids, .embed);
             defer emb.deinit();
-            const cat = try allocator.alloc(f32, 2 * cfg.hidden_size);
-            defer allocator.free(cat);
+            var cat_t = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ 1, 2 * cfg.hidden_size });
+            defer cat_t.deinit();
+            const cat = try cat_t.data();
             // Concat order per the GLM/DeepSeek MTP reference: normed token
             // embedding first, normed trunk hidden second.
             rmsNormInto(cat[0..cfg.hidden_size], try emb.dataConst(), mtp.enorm, cfg.rms_norm_eps);
             rmsNormInto(cat[cfg.hidden_size..], h_prev, mtp.hnorm, cfg.rms_norm_eps);
-            var cat_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, 2 * cfg.hidden_size }, cat);
-            defer cat_t.deinit();
             var proj_t = try mtp.eh_proj.linearSeq(ctx, &cat_t, .embed, .attn);
             defer proj_t.deinit();
             @memcpy(x, try proj_t.dataConst());
@@ -794,11 +791,9 @@ fn swigluLinear(ctx: *ExecContext, allocator: Allocator, x: *const fucina.Tensor
     defer up_t.deinit();
     const width = gate_t.dim(.gate_up);
     const rows = gate_t.dim(.seq);
-    const g = try allocator.alloc(f32, rows * width);
-    defer allocator.free(g);
-    for (g, try gate_t.dataConst(), try up_t.dataConst()) |*gi, gv, uv| gi.* = silu(gv) * uv;
-    var g_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ rows, width }, g);
+    var g_t = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ rows, width });
     defer g_t.deinit();
+    for (try g_t.data(), try gate_t.dataConst(), try up_t.dataConst()) |*gi, gv, uv| gi.* = silu(gv) * uv;
     var down_t = try down.linearSeq(ctx, &g_t, .embed, .attn);
     defer down_t.deinit();
     return allocator.dupe(f32, try down_t.dataConst());

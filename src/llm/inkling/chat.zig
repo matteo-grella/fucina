@@ -208,9 +208,13 @@ pub fn Engine(comptime TokMod: type) type {
             var produced: usize = 0;
             var stopped = false;
             while (produced < opts.max_tokens) {
-                var logits_t = try Logits.fromSlice(self.ctx, .{ 1, logits_buf.len }, logits_buf);
-                defer logits_t.deinit();
-                const next = try sampler.next(self.ctx, &logits_t, history.items);
+                // Borrow scoped BEFORE the free at the loop bottom: the
+                // tensor must not outlive the row it points into.
+                const next = blk: {
+                    var logits_t = try Logits.fromBorrowedConstSlice(self.ctx, .{ 1, logits_buf.len }, logits_buf);
+                    defer logits_t.deinit();
+                    break :blk try sampler.next(self.ctx, &logits_t, history.items);
+                };
                 const id: u32 = @intCast(next);
 
                 if (id == self.markers.end_sampling or isExtraStop(id, opts.extra_stop_ids)) {

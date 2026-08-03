@@ -810,16 +810,17 @@ const TailBuf = struct {
         const xd = try x.dataConst();
         const t_new = x.dim(.seq);
         const total = self.have + t_new;
-        const tmp = try ctx.allocator.alloc(f32, total * self.c);
-        defer ctx.allocator.free(tmp);
-        @memcpy(tmp[0 .. self.have * self.c], self.buf[0 .. self.have * self.c]);
-        @memcpy(tmp[self.have * self.c ..][0 .. t_new * self.c], xd);
+        var t = try Act.empty(ctx, .{ total, self.c });
+        errdefer t.deinit();
+        const td = try t.data();
+        @memcpy(td[0 .. self.have * self.c], self.buf[0 .. self.have * self.c]);
+        @memcpy(td[self.have * self.c ..][0 .. t_new * self.c], xd);
         // save the new tail from the composite input
         const keep = @min(self.cap_cols, total);
-        @memcpy(self.buf[0 .. keep * self.c], tmp[(total - keep) * self.c ..][0 .. keep * self.c]);
+        @memcpy(self.buf[0 .. keep * self.c], td[(total - keep) * self.c ..][0 .. keep * self.c]);
         const drop = self.have;
         self.have = keep;
-        return .{ .t = try Act.fromSlice(ctx, .{ total, self.c }, tmp), .drop = drop };
+        return .{ .t = t, .drop = drop };
     }
 
     fn reset(self: *TailBuf) void {

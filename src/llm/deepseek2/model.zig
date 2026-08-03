@@ -648,14 +648,12 @@ pub const Model = struct {
     /// (the reference indexer's [pe | nope] row layout).
     fn dsaRopeKeyRows(self: *const Model, ctx: *ExecContext, rows: []f32, n_rows: usize, rope_table: anytype) !void {
         const cfg = self.config;
-        const allocator = ctx.allocator;
         const dim = cfg.indexer_key_dim;
         const rd = cfg.qk_rope_dim;
-        const tmp = try allocator.alloc(f32, n_rows * rd);
-        defer allocator.free(tmp);
-        for (0..n_rows) |r| @memcpy(tmp[r * rd ..][0..rd], rows[r * dim ..][0..rd]);
-        var t = try fucina.Tensor(.{ .seq, .k }).fromSlice(ctx, .{ n_rows, rd }, tmp);
+        var t = try fucina.Tensor(.{ .seq, .k }).empty(ctx, .{ n_rows, rd });
         defer t.deinit();
+        const td = try t.data();
+        for (0..n_rows) |r| @memcpy(td[r * rd ..][0..rd], rows[r * dim ..][0..rd]);
         var rot = if (self.dsaRopeHalf())
             try t.rope(ctx, .seq, .k, rope_table, .half)
         else
@@ -716,7 +714,7 @@ pub const Model = struct {
         for (self.layers, 0..) |*layer, layer_i| {
             // ---- MLA attention ----
             rmsNormInto(h_norm, x, layer.attn_norm, cfg.rms_norm_eps);
-            var h_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, cfg.hidden_size }, h_norm);
+            var h_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, cfg.hidden_size }, h_norm);
             defer h_t.deinit();
 
             // Cross-layer index sharing, two sources composed: GLM-5.2's
@@ -741,11 +739,9 @@ pub const Model = struct {
                 // q-LoRA: hidden -> q_lora -> rmsnorm -> heads*qk_head.
                 var qa_t = try layer.q_a.?.linearSeq(ctx, &h_t, .embed, .q);
                 defer qa_t.deinit();
-                const q_lat = try allocator.alloc(f32, cfg.q_lora_rank);
-                defer allocator.free(q_lat);
-                rmsNormInto(q_lat, try qa_t.dataConst(), layer.q_a_norm.?, cfg.rms_norm_eps);
-                var q_lat_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, cfg.q_lora_rank }, q_lat);
+                var q_lat_t = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ 1, cfg.q_lora_rank });
                 defer q_lat_t.deinit();
+                rmsNormInto(try q_lat_t.data(), try qa_t.dataConst(), layer.q_a_norm.?, cfg.rms_norm_eps);
                 if (dsa_here and pos + 1 > cfg.indexer_top_k) {
                     idx_q_t = try layer.idx_q_b.?.linearSeq(ctx, &q_lat_t, .embed, .attn);
                 }
@@ -782,7 +778,7 @@ pub const Model = struct {
                     // attention over materialized K/V — the deliberately
                     // naive, hand-auditable validation baseline (host dot /
                     // softmax / mix loops stay on purpose).
-                    var latent_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, cfg.kv_lora_rank }, latent);
+                    var latent_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, cfg.kv_lora_rank }, latent);
                     defer latent_t.deinit();
                     const kv_b_full = if (layer.kv_b) |*w| w else return Error.InvalidWeightShape;
                     var kv_t = try kv_b_full.linearSeq(ctx, &latent_t, .embed, .v);
@@ -931,7 +927,7 @@ pub const Model = struct {
 
             // ---- FFN ----
             rmsNormInto(h_norm, x, layer.ffn_norm, cfg.rms_norm_eps);
-            var f_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, cfg.hidden_size }, h_norm);
+            var f_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, cfg.hidden_size }, h_norm);
             defer f_t.deinit();
             switch (layer.ffn) {
                 .dense => |*dense| {
@@ -950,7 +946,7 @@ pub const Model = struct {
         cache.len += 1;
 
         rmsNormInto(h_norm, x, self.output_norm, cfg.rms_norm_eps);
-        var final_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, cfg.hidden_size }, h_norm);
+        var final_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, cfg.hidden_size }, h_norm);
         defer final_t.deinit();
         var logits_t = try self.output.linearSeq(ctx, &final_t, .embed, .vocab);
         defer logits_t.deinit();
@@ -1015,12 +1011,11 @@ pub const Model = struct {
                 }
                 var qa_t = try layer.q_a.?.linearSeq(ctx, &h_t, .embed, .q);
                 defer qa_t.deinit();
-                const q_lat = try allocator.alloc(f32, S * cfg.q_lora_rank);
-                defer allocator.free(q_lat);
-                const qa = try qa_t.dataConst();
-                for (0..S) |s| rmsNormInto(q_lat[s * cfg.q_lora_rank ..][0..cfg.q_lora_rank], qa[s * cfg.q_lora_rank ..][0..cfg.q_lora_rank], layer.q_a_norm.?, cfg.rms_norm_eps);
-                var q_lat_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ S, cfg.q_lora_rank }, q_lat);
+                var q_lat_t = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ S, cfg.q_lora_rank });
                 defer q_lat_t.deinit();
+                const qa = try qa_t.dataConst();
+                const ql = try q_lat_t.data();
+                for (0..S) |s| rmsNormInto(ql[s * cfg.q_lora_rank ..][0..cfg.q_lora_rank], qa[s * cfg.q_lora_rank ..][0..cfg.q_lora_rank], layer.q_a_norm.?, cfg.rms_norm_eps);
                 if (dsa_here and selecting) {
                     idx_q_t = try layer.idx_q_b.?.linearSeq(ctx, &q_lat_t, .embed, .attn);
                 }
@@ -1201,7 +1196,7 @@ pub const Model = struct {
         cache.len += S;
 
         rmsNormInto(hn[0..hidden], xs[(S - 1) * hidden ..][0..hidden], self.output_norm, cfg.rms_norm_eps);
-        var final_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, hidden }, hn[0..hidden]);
+        var final_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, hidden }, hn[0..hidden]);
         defer final_t.deinit();
         var logits_t = try self.output.linearSeq(ctx, &final_t, .embed, .vocab);
         defer logits_t.deinit();
@@ -1810,11 +1805,9 @@ fn swigluLinear(ctx: *ExecContext, allocator: Allocator, x: *const fucina.Tensor
     var up_t = try up.linearSeq(ctx, x, .embed, .gate_up);
     defer up_t.deinit();
     const width = gate_t.dim(.gate_up);
-    const g = try allocator.alloc(f32, rows * width);
-    defer allocator.free(g);
-    for (g, try gate_t.dataConst(), try up_t.dataConst()) |*gi, gv, uv| gi.* = silu(gv) * uv;
-    var g_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ rows, width }, g);
+    var g_t = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ rows, width });
     defer g_t.deinit();
+    for (try g_t.data(), try gate_t.dataConst(), try up_t.dataConst()) |*gi, gv, uv| gi.* = silu(gv) * uv;
     var down_t = try down.linearSeq(ctx, &g_t, .embed, .attn);
     defer down_t.deinit();
     return allocator.dupe(f32, try down_t.dataConst());

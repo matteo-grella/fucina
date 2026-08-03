@@ -1011,7 +1011,7 @@ fn hcPre(
     const hc_dim = config.n_hc * config.hidden_size;
 
     // flat = rms_norm_no_weight(streams) over the full 4*hidden vector.
-    var flat_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, hc_dim }, streams);
+    var flat_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, hc_dim }, streams);
     defer flat_t.deinit();
     var normed_t = try flat_t.rmsNorm(ctx, .embed, config.rms_norm_eps);
     defer normed_t.deinit();
@@ -1020,7 +1020,7 @@ fn hcPre(
     const split = hcSplitSinkhorn(try mix_t.dataConst(), module.scale, module.base, config.n_hc, config.hc_sinkhorn_iters);
 
     // sublayer input = sum_h pre[h] * stream_h : [stream, embed] x [stream].
-    var streams_t = try fucina.Tensor(.{ .stream, .embed }).fromSlice(ctx, .{ config.n_hc, config.hidden_size }, streams);
+    var streams_t = try fucina.Tensor(.{ .stream, .embed }).fromBorrowedConstSlice(ctx, .{ config.n_hc, config.hidden_size }, streams);
     defer streams_t.deinit();
     var pre_t = try fucina.Tensor(.{.stream}).fromSlice(ctx, .{config.n_hc}, &split.pre);
     defer pre_t.deinit();
@@ -1040,7 +1040,9 @@ fn hcPost(
     streams: []f32, // residual in, next state out
 ) !void {
     // streams'[dst] = post[dst]*block_out + sum_src comb[dst + src*4]*streams[src]
-    var streams_t = try fucina.Tensor(.{ .stream, .embed }).fromSlice(ctx, .{ config.n_hc, config.hidden_size }, streams);
+    // Borrow is aliasing-safe: the last read of streams_t is the dot below;
+    // the memcpy back into `streams` happens strictly after it.
+    var streams_t = try fucina.Tensor(.{ .stream, .embed }).fromBorrowedConstSlice(ctx, .{ config.n_hc, config.hidden_size }, streams);
     defer streams_t.deinit();
     var comb_t = try fucina.Tensor(.{ .stream_dst, .stream }).fromSlice(ctx, .{ config.n_hc, config.n_hc }, blk: {
         // comb is addressed [dst + src*n_hc]; lay it out row-major [dst][src].
@@ -1053,7 +1055,7 @@ fn hcPost(
     defer comb_t.deinit();
     var mixed = try comb_t.dot(ctx, &streams_t, .stream);
     defer mixed.deinit();
-    var out_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, config.hidden_size }, block_out);
+    var out_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, config.hidden_size }, block_out);
     defer out_t.deinit();
     var post_t = try fucina.Tensor(.{.stream_dst}).fromSlice(ctx, .{config.n_hc}, &split.post);
     defer post_t.deinit();
@@ -1068,12 +1070,15 @@ fn hcPost(
 // Sublayer blocks + the step orchestration.
 // =========================================================================
 
+/// Borrowed views: `host` must outlive the tensor's last read (every caller
+/// passes a persistent weight, a live tensor's data, or a scratch that
+/// spans the sublayer).
 fn embedTag(ctx: *ExecContext, host: []const f32) !fucina.Tensor(.{.embed}) {
-    return fucina.Tensor(.{.embed}).fromSlice(ctx, .{host.len}, host);
+    return fucina.Tensor(.{.embed}).fromBorrowedConstSlice(ctx, .{host.len}, host);
 }
 
 fn rowTensor(ctx: *ExecContext, host: []const f32, width: usize) !fucina.Tensor(.{ .seq, .embed }) {
-    return fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ host.len / width, width }, host);
+    return fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ host.len / width, width }, host);
 }
 
 /// The reference's streaming compressor for one token: project, add the
@@ -1508,7 +1513,7 @@ fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const 
     // tensor through attention (per-token views below).
     var q_lat = try layer.q_a.linearSeq(ctx, &x_norm, .embed, .q);
     defer q_lat.deinit();
-    var q_a_norm_w = try fucina.Tensor(.{.q}).fromSlice(ctx, .{cfg.q_lora_rank}, layer.q_a_norm);
+    var q_a_norm_w = try fucina.Tensor(.{.q}).fromBorrowedConstSlice(ctx, .{cfg.q_lora_rank}, layer.q_a_norm);
     defer q_a_norm_w.deinit();
     var qr_norm_t = try q_lat.rmsNormMul(ctx, .q, &q_a_norm_w, cfg.rms_norm_eps);
     defer qr_norm_t.deinit();
@@ -1523,7 +1528,7 @@ fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const 
 
     var kv_lin = try layer.kv.linearSeq(ctx, &x_norm, .embed, .k);
     defer kv_lin.deinit();
-    var kv_norm_w = try fucina.Tensor(.{.k}).fromSlice(ctx, .{hd}, layer.kv_a_norm);
+    var kv_norm_w = try fucina.Tensor(.{.k}).fromBorrowedConstSlice(ctx, .{hd}, layer.kv_a_norm);
     defer kv_norm_w.deinit();
     var kv_normed = try kv_lin.rmsNormMul(ctx, .k, &kv_norm_w, cfg.rms_norm_eps);
     defer kv_normed.deinit();
@@ -1730,7 +1735,7 @@ fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer
     // rms norm, tail rotary — q stays a tensor through attention.
     var q_lat = try layer.q_a.linearSeq(ctx, &x_norm, .embed, .q);
     defer q_lat.deinit();
-    var q_a_norm_w = try fucina.Tensor(.{.q}).fromSlice(ctx, .{cfg.q_lora_rank}, layer.q_a_norm);
+    var q_a_norm_w = try fucina.Tensor(.{.q}).fromBorrowedConstSlice(ctx, .{cfg.q_lora_rank}, layer.q_a_norm);
     defer q_a_norm_w.deinit();
     var qr_norm_t = try q_lat.rmsNormMul(ctx, .q, &q_a_norm_w, cfg.rms_norm_eps);
     defer qr_norm_t.deinit();
@@ -1747,7 +1752,7 @@ fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer
 
     var kv_lin = try layer.kv.linearSeq(ctx, &x_norm, .embed, .k);
     defer kv_lin.deinit();
-    var kv_norm_w = try fucina.Tensor(.{.k}).fromSlice(ctx, .{cfg.head_dim}, layer.kv_a_norm);
+    var kv_norm_w = try fucina.Tensor(.{.k}).fromBorrowedConstSlice(ctx, .{cfg.head_dim}, layer.kv_a_norm);
     defer kv_norm_w.deinit();
     var kv_normed = try kv_lin.rmsNormMul(ctx, .k, &kv_norm_w, cfg.rms_norm_eps);
     defer kv_normed.deinit();
@@ -2315,7 +2320,7 @@ fn mtpAttnBlock(self: *Model, mtp: *const Mtp, ctx: *ExecContext, state: *MtpSta
 
     var q_lat = try layer.q_a.linearSeq(ctx, &x_norm, .embed, .q);
     defer q_lat.deinit();
-    var q_a_norm_w = try fucina.Tensor(.{.q}).fromSlice(ctx, .{cfg.q_lora_rank}, layer.q_a_norm);
+    var q_a_norm_w = try fucina.Tensor(.{.q}).fromBorrowedConstSlice(ctx, .{cfg.q_lora_rank}, layer.q_a_norm);
     defer q_a_norm_w.deinit();
     var qr_norm_t = try q_lat.rmsNormMul(ctx, .q, &q_a_norm_w, cfg.rms_norm_eps);
     defer qr_norm_t.deinit();
@@ -2332,7 +2337,7 @@ fn mtpAttnBlock(self: *Model, mtp: *const Mtp, ctx: *ExecContext, state: *MtpSta
 
     var kv_lin = try layer.kv.linearSeq(ctx, &x_norm, .embed, .k);
     defer kv_lin.deinit();
-    var kv_norm_w = try fucina.Tensor(.{.k}).fromSlice(ctx, .{hd}, layer.kv_a_norm);
+    var kv_norm_w = try fucina.Tensor(.{.k}).fromBorrowedConstSlice(ctx, .{hd}, layer.kv_a_norm);
     defer kv_norm_w.deinit();
     var kv_normed = try kv_lin.rmsNormMul(ctx, .k, &kv_norm_w, cfg.rms_norm_eps);
     defer kv_normed.deinit();

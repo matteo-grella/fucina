@@ -520,12 +520,11 @@ pub const Model = struct {
         cache.len += S;
 
         // Final norm, muP logit scale, unembed — last row only.
-        const normed = try allocator.alloc(f32, H);
-        defer allocator.free(normed);
+        var normed_t = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ 1, H });
+        defer normed_t.deinit();
+        const normed = try normed_t.data();
         rmsNormInto(normed, x[(S - 1) * H ..][0..H], self.output_norm, cfg.rms_norm_eps);
         for (normed) |*nv| nv.* *= cfg.logit_scale;
-        var normed_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, H }, normed);
-        defer normed_t.deinit();
         var logits_t = try self.output.linearSeq(ctx, &normed_t);
         defer logits_t.deinit();
 
@@ -555,7 +554,7 @@ pub const Model = struct {
         const h_norm = try allocator.alloc(f32, S * H);
         defer allocator.free(h_norm);
         for (0..S) |r| rmsNormInto(h_norm[r * H ..][0..H], x[r * H ..][0..H], layer.attn_norm, cfg.rms_norm_eps);
-        var h_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ S, H }, h_norm);
+        var h_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ S, H }, h_norm);
         defer h_t.deinit();
 
         const r_width = n_head * cfg.d_rel;
@@ -604,9 +603,9 @@ pub const Model = struct {
 
         // Rel-bias logits: rel[s, h, e] = sum_d r[s, h, d] * rel_proj[d][e],
         // one [S*n_head, d_rel] x [d_rel, extent] GEMM over the fused r rows.
-        var r2 = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ S * n_head, cfg.d_rel }, r_flat);
+        var r2 = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ S * n_head, cfg.d_rel }, r_flat);
         defer r2.deinit();
-        var proj_t = try fucina.Tensor(.{ .embed, .attn }).fromSlice(ctx, .{ cfg.d_rel, extent }, layer.rel_proj);
+        var proj_t = try fucina.Tensor(.{ .embed, .attn }).fromBorrowedConstSlice(ctx, .{ cfg.d_rel, extent }, layer.rel_proj);
         defer proj_t.deinit();
         var rel_t = try r2.dot(ctx, &proj_t, .embed);
         defer rel_t.deinit();
@@ -644,8 +643,9 @@ pub const Model = struct {
         // appended, so rows are independent — fan out over the hot team
         // (per-row arithmetic identical to the serial loop: bitwise-safe
         // scheduling-only parallelism).
-        const attn_out = try allocator.alloc(f32, S * q_width);
-        defer allocator.free(attn_out);
+        var attn_t = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ S, q_width });
+        defer attn_t.deinit();
+        const attn_out = try attn_t.data();
         const inv_d: f32 = 1.0 / @as(f32, @floatFromInt(hd));
 
         const max_t_len = pos0 + S;
@@ -679,8 +679,6 @@ pub const Model = struct {
             for (tasks) |*t| AttnRowTask.run(t);
         }
 
-        var attn_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ S, q_width }, attn_out);
-        defer attn_t.deinit();
         var o_t = try layer.o_proj.linearSeq(ctx, &attn_t, .embed, .attn);
         defer o_t.deinit();
         const o = try allocator.dupe(f32, try o_t.dataConst());
@@ -694,7 +692,7 @@ pub const Model = struct {
         defer allocator.free(ffn_out);
         switch (layer.ffn) {
             .dense => |*dense| {
-                var f_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ S, H }, h_norm);
+                var f_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ S, H }, h_norm);
                 defer f_t.deinit();
                 const y = try swigluLinear(ctx, allocator, &f_t, &dense.gate_up, &dense.down, cfg.dense_ffn_size);
                 defer allocator.free(y);
@@ -719,7 +717,7 @@ pub const Model = struct {
         const n_shared = cfg.num_shared_experts;
         const fe = cfg.expert_ffn_size;
 
-        var in_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ S, H }, h_norm);
+        var in_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ S, H }, h_norm);
         defer in_t.deinit();
         var logits_t = try moe.router.linearSeq(ctx, &in_t, .embed, .expert);
         defer logits_t.deinit();
@@ -790,7 +788,7 @@ pub const Model = struct {
                     n_rows += 1;
                 }
             }
-            var g_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ n_rows, H }, gather[0 .. n_rows * H]);
+            var g_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ n_rows, H }, gather[0 .. n_rows * H]);
             defer g_t.deinit();
             const ex = &moe.experts[e];
             const y = try swigluLinear(ctx, allocator, &g_t, &ex.gate_up, &ex.down, fe);
@@ -804,8 +802,9 @@ pub const Model = struct {
         // activation BEFORE the down projection (D1).
         for (0..n_shared) |s| {
             const ex = &moe.shared[s];
-            const hbuf = try allocator.alloc(f32, S * fe);
-            defer allocator.free(hbuf);
+            var h_t = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ S, fe });
+            defer h_t.deinit();
+            const hbuf = try h_t.data();
             switch (ex.gate_up) {
                 .fused => |*w| {
                     var gu_t = try w.linearSeq(ctx, &in_t, .embed, .gate_up);
@@ -832,8 +831,6 @@ pub const Model = struct {
                     }
                 },
             }
-            var h_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ S, fe }, hbuf);
-            defer h_t.deinit();
             var down_t = try ex.down.linearSeq(ctx, &h_t, .embed, .attn);
             defer down_t.deinit();
             const dv = try down_t.dataConst();
@@ -1071,8 +1068,9 @@ fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: *const Config, l
 
 fn swigluLinear(ctx: *ExecContext, allocator: Allocator, x: *const fucina.Tensor(.{ .seq, .embed }), gate_up: *const GateUp, down: *const LinearWeight, width: usize) ![]f32 {
     const rows = x.dim(.seq);
-    const g = try allocator.alloc(f32, rows * width);
-    defer allocator.free(g);
+    var g_t = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ rows, width });
+    defer g_t.deinit();
+    const g = try g_t.data();
     switch (gate_up.*) {
         .fused => |*w| {
             var gu_t = try w.linearSeq(ctx, x, .embed, .gate_up);
@@ -1092,8 +1090,6 @@ fn swigluLinear(ctx: *ExecContext, allocator: Allocator, x: *const fucina.Tensor
             for (g, try gate_t.dataConst(), try up_t.dataConst()) |*gi, gv, uv| gi.* = silu(gv) * uv;
         },
     }
-    var g_t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ rows, width }, g);
-    defer g_t.deinit();
     var down_t = try down.linearSeq(ctx, &g_t, .embed, .attn);
     defer down_t.deinit();
     return allocator.dupe(f32, try down_t.dataConst());

@@ -592,14 +592,11 @@ pub const Model = struct {
         const h = self.predictor.cfg.hidden;
         kv.reset();
 
-        var two_rows = try self.allocator.alloc(f32, 2 * h);
-        defer self.allocator.free(two_rows);
+        var rows = try Rows.empty(ctx, .{ 2, h });
+        defer rows.deinit();
+        const two_rows = try rows.data();
         try self.mtpProject(talker_hidden_last, two_rows[0..h]);
         try self.mtpProject(self.codecRow(c0), two_rows[h..]);
-        const step_buf = try self.allocator.alloc(f32, h);
-        defer self.allocator.free(step_buf);
-        var rows = try Rows.fromSlice(ctx, .{ 2, h }, two_rows);
-        defer rows.deinit();
 
         var hidden = try self.predictor.forward(ctx, kv, &rows, null);
         var hidden_live = true;
@@ -615,9 +612,9 @@ pub const Model = struct {
             hidden.deinit();
             hidden_live = false;
             if (g + 1 < self.specials.num_code_groups - 1) {
-                try self.mtpProject(self.predRow(g, sampled), step_buf);
-                var step_rows = try Rows.fromSlice(ctx, .{ 1, h }, step_buf);
+                var step_rows = try Rows.empty(ctx, .{ 1, h });
                 defer step_rows.deinit();
+                try self.mtpProject(self.predRow(g, sampled), try step_rows.data());
                 hidden = try self.predictor.forward(ctx, kv, &step_rows, null);
                 hidden_live = true;
             }

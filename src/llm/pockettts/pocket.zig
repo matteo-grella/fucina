@@ -634,7 +634,7 @@ fn transformerForward(
     var rope_table = try ctx.prepareRopeTable(positions, hd, 10000.0, false);
     defer rope_table.deinit();
 
-    var x = try Rows.fromSlice(ctx, .{ s, d }, rows);
+    var x = try Rows.fromBorrowedConstSlice(ctx, .{ s, d }, rows);
     errdefer x.deinit();
     const cached_len = kv.offset + s;
     const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(hd)));
@@ -647,19 +647,20 @@ fn transformerForward(
         // fused [s, 3d] → three contiguous [s, heads, hd] (host gather; the
         // strided narrow is not a valid split view)
         const qkvd = try qkv.dataConst();
-        const qb = try allocator.alloc(f32, 3 * s * d);
-        defer allocator.free(qb);
-        for (0..s) |t| {
-            @memcpy(qb[t * d ..][0..d], qkvd[t * 3 * d ..][0..d]);
-            @memcpy(qb[s * d + t * d ..][0..d], qkvd[t * 3 * d + d ..][0..d]);
-            @memcpy(qb[2 * s * d + t * d ..][0..d], qkvd[t * 3 * d + 2 * d ..][0..d]);
-        }
-        var q3 = try fucina.Tensor(.{ .seq, .head, .d }).fromSlice(ctx, .{ s, heads, hd }, qb[0 .. s * d]);
+        var q3 = try fucina.Tensor(.{ .seq, .head, .d }).empty(ctx, .{ s, heads, hd });
         defer q3.deinit();
-        var k3 = try fucina.Tensor(.{ .seq, .kv_head, .d }).fromSlice(ctx, .{ s, heads, hd }, qb[s * d .. 2 * s * d]);
+        var k3 = try fucina.Tensor(.{ .seq, .kv_head, .d }).empty(ctx, .{ s, heads, hd });
         defer k3.deinit();
-        var v3 = try fucina.Tensor(.{ .seq, .kv_head, .d }).fromSlice(ctx, .{ s, heads, hd }, qb[2 * s * d .. 3 * s * d]);
+        var v3 = try fucina.Tensor(.{ .seq, .kv_head, .d }).empty(ctx, .{ s, heads, hd });
         defer v3.deinit();
+        const q_dst = try q3.data();
+        const k_dst = try k3.data();
+        const v_dst = try v3.data();
+        for (0..s) |t| {
+            @memcpy(q_dst[t * d ..][0..d], qkvd[t * 3 * d ..][0..d]);
+            @memcpy(k_dst[t * d ..][0..d], qkvd[t * 3 * d + d ..][0..d]);
+            @memcpy(v_dst[t * d ..][0..d], qkvd[t * 3 * d + 2 * d ..][0..d]);
+        }
 
         const q_raw = try ctx.ropeAxisRankWithTable(3, q3.asRawTensor(), 0, 2, &rope_table, .interleaved);
         var q_rope = try fucina.Tensor(.{ .seq, .head, .d }).fromTensor(ctx, q_raw);

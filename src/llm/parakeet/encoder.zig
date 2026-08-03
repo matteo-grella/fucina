@@ -33,13 +33,14 @@ pub fn f32Data(info: *const gguf.TensorInfo) ![]const f32 {
 /// NeMo `RelPositionalEncoding` table: `[P=2T-1, d_model]`, caller-owned.
 /// `pos = (T-1)-p` (row 0 = +(T-1) … last = -(T-1)); even dims sin, odd cos,
 /// `div_term[i] = exp(2i · -(ln 10000 / d_model))`. Computed in double.
-pub fn relPosEncoding(allocator: Allocator, t: usize, d_model: usize) ![]f32 {
+/// Fill `out` ([2t-1, d_model], fully overwritten) with the relative-position
+/// sinusoids — the into-variant writes straight into tensor storage so the
+/// per-chunk/per-utterance table never bounces through a scratch.
+pub fn relPosEncodingInto(allocator: Allocator, out: []f32, t: usize, d_model: usize) !void {
     if (d_model == 0 or d_model % 2 != 0 or t == 0) return error.InvalidShape;
     const p_count = try std.math.sub(usize, try std.math.mul(usize, 2, t), 1);
     const half = d_model / 2;
-    const out = try allocator.alloc(f32, try std.math.mul(usize, p_count, d_model));
-    errdefer allocator.free(out);
-    @memset(out, 0);
+    if (out.len != try std.math.mul(usize, p_count, d_model)) return error.InvalidShape;
 
     const div = try allocator.alloc(f64, half);
     defer allocator.free(div);
@@ -55,6 +56,14 @@ pub fn relPosEncoding(allocator: Allocator, t: usize, d_model: usize) ![]f32 {
             row[2 * i + 1] = @floatCast(@cos(arg));
         }
     }
+}
+
+pub fn relPosEncoding(allocator: Allocator, t: usize, d_model: usize) ![]f32 {
+    if (d_model == 0 or d_model % 2 != 0 or t == 0) return error.InvalidShape;
+    const p_count = try std.math.sub(usize, try std.math.mul(usize, 2, t), 1);
+    const out = try allocator.alloc(f32, try std.math.mul(usize, p_count, d_model));
+    errdefer allocator.free(out);
+    try relPosEncodingInto(allocator, out, t, d_model);
     return out;
 }
 
@@ -463,10 +472,9 @@ pub fn encodeWithWeights(ctx: *ExecContext, file: *const gguf.File, cfg: loader.
     errdefer cur.deinit();
     const tp = cur.shape()[0];
 
-    const pe = try relPosEncoding(alloc, tp, d);
-    var pet = try fucina.Tensor(2).fromSlice(ctx, .{ 2 * tp - 1, d }, pe);
-    alloc.free(pe); // fromSlice copied it
+    var pet = try fucina.Tensor(2).empty(ctx, .{ 2 * tp - 1, d });
     defer pet.deinit();
+    try relPosEncodingInto(alloc, try pet.data(), tp, d);
 
     var pos_proj_all = try w.linearPosAllD(cfg.n_layers, &pet);
     defer if (pos_proj_all) |*t| t.deinit();

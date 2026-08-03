@@ -2268,8 +2268,9 @@ fn FloatTensor(comptime tags_spec: anytype) type {
 
             const indices = try ctx.allocator.alloc(usize, total);
             defer ctx.allocator.free(indices);
-            const fill_mask = try ctx.allocator.alloc(f32, total);
-            defer ctx.allocator.free(fill_mask);
+            var mask = try Self.empty(ctx, self.shape());
+            defer mask.deinit();
+            const fill_mask = try mask.data();
             const section_stride = n * inner;
             const n_signed: isize = @intCast(n);
             for (indices, fill_mask, 0..) |*index, *fm, i| {
@@ -2296,8 +2297,6 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             defer shifted_flat.deinit();
             var shifted = try shifted_flat.split(ctx, tag, tags, self.shape());
             defer shifted.deinit();
-            var mask = try Self.fromSlice(ctx, self.shape(), fill_mask);
-            defer mask.deinit();
             return shifted.maskedFill(ctx, mask, fill);
         }
 
@@ -3573,9 +3572,11 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             const position_count = outer * inner;
             if (labels.len != position_count) return TensorError.InvalidDataLength;
 
-            const one_hot_values = try ctx.allocator.alloc(f32, position_count * class_count);
-            defer ctx.allocator.free(one_hot_values);
-            @memset(one_hot_values, 0);
+            // Sparse marks into a zeroed tensor — the `oneHot` constructor's
+            // shape; a dense scratch here would copy the full logits size.
+            var one_hot = try Self.zeros(ctx, raw_shape);
+            defer one_hot.deinit();
+            const one_hot_values = try one_hot.data();
             for (0..outer) |outer_i| {
                 for (0..inner) |inner_i| {
                     const label = labels[outer_i * inner + inner_i];
@@ -3583,8 +3584,6 @@ fn FloatTensor(comptime tags_spec: anytype) type {
                     one_hot_values[(outer_i * class_count + label) * inner + inner_i] = 1;
                 }
             }
-            var one_hot = try Self.fromSlice(ctx, raw_shape, one_hot_values);
-            defer one_hot.deinit();
 
             var picked = try self.mul(ctx, &one_hot);
             defer picked.deinit();

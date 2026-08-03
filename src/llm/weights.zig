@@ -219,8 +219,11 @@ fn linearSeqPtqtpFused(
     for (0..m) |r| {
         try backend_quant.quantizeRowQ8_KInto(lhs[r * blocks_per_row ..][0..blocks_per_row], x[r * k ..][0..k]);
     }
-    const out = try allocator.alloc(f32, m * n);
-    defer allocator.free(out);
+    // The kernels tile straight into the result tensor; only the multi-plane
+    // accumulate keeps a scratch.
+    var out_t = try fucina.Tensor(.{ .seq, out_tag }).empty(ctx, .{ m, n });
+    errdefer out_t.deinit();
+    const out = try out_t.data();
     const tmp = try allocator.alloc(f32, if (plane_count > 1 and !px4_ready) m * n else 0);
     defer allocator.free(tmp);
 
@@ -309,7 +312,7 @@ fn linearSeqPtqtpFused(
     }
     if (!tasks_run) Task.run(&base);
 
-    return try fucina.Tensor(.{ .seq, out_tag }).fromSlice(ctx, .{ m, n }, out);
+    return out_t;
 }
 
 /// PTQTP-decorated linear (arXiv:2509.16989; docs/PTQTP.md): the weight is
