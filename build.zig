@@ -135,11 +135,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const omnivoice_play_module = b.createModule(.{
-        .root_source_file = b.path("examples/omnivoice/play.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
     const nanochat_module = b.createModule(.{
         .root_source_file = b.path("examples/nanochat/nanochat.zig"),
         .target = target,
@@ -172,8 +167,7 @@ pub fn build(b: *std.Build) void {
     _ = addExample(b, tool_ctx, .{ .step = "deepseek4", .desc = "Run DeepSeek V4 Flash GGUF inference (CSA/HCA + streamed experts)", .exe = "fucina-deepseek4", .root = "examples/deepseek4/main.zig", .llm = true });
     const voiceagent = addExample(b, tool_ctx, .{ .step = "voiceagent", .desc = "Native cascade voice agent TUI: mic -> parakeet EOU STT -> qwen3 chat -> qwen3-tts -> speakers", .exe = "fucina-voiceagent", .root = "examples/voiceagent/main.zig", .llm = true });
     voiceagent.exe.root_module.addImport("nam_audio", nam_audio_module);
-    voiceagent.exe.root_module.addImport("omnivoice_play", omnivoice_play_module);
-    configureOmnivoiceAudio(voiceagent.exe);
+    configureAudioShim(voiceagent.exe);
     _ = addExample(b, tool_ctx, .{ .step = "pockettts", .desc = "Pocket TTS v2 from GGUF (kyutai port): continuous-latent flow-matching TTS, streaming Mimi decode", .exe = "fucina-pockettts", .root = "examples/pockettts/main.zig", .llm = true });
     _ = addExample(b, tool_ctx, .{ .step = "qwen3tts", .desc = "Qwen3-TTS from GGUF (qwentts.cpp port): CustomVoice text-to-speech, streamed codec decode", .exe = "fucina-qwen3tts", .root = "examples/qwen3tts/main.zig", .llm = true });
     const omnivoice = addExample(b, tool_ctx, .{ .step = "omnivoice", .desc = "OmniVoice MaskGIT TTS from GGUF: voice cloning/design, codec encode/decode", .exe = "fucina-omnivoice", .root = "examples/omnivoice/main.zig", .llm = true });
@@ -202,7 +196,7 @@ pub fn build(b: *std.Build) void {
     const parakeet_opts = b.addOptions();
     parakeet_opts.addOption(bool, "parakeet_mic", parakeet_mic);
     parakeet.exe.root_module.addOptions("build_options", parakeet_opts);
-    if (parakeet_mic) configureParakeetAudio(parakeet.exe); // --mic: vendored miniaudio capture
+    if (parakeet_mic) configureAudioShim(parakeet.exe); // --mic: vendored miniaudio capture
 
     const bench_gate_cmd = b.addSystemCommand(&.{ "python3", "tools/bench_gate.py" });
     bench_gate_cmd.step.dependOn(b.getInstallStep());
@@ -541,7 +535,7 @@ pub fn build(b: *std.Build) void {
     parakeet_tests.root_module.addOptions("build_options", parakeet_opts);
     configureBlas(parakeet_tests, blas_kind);
     configureGpu(b, parakeet_tests, gpu_kind);
-    if (parakeet_mic) configureParakeetAudio(parakeet_tests);
+    if (parakeet_mic) configureAudioShim(parakeet_tests);
 
     const run_parakeet_tests = b.addRunArtifact(parakeet_tests);
     test_step.dependOn(&run_parakeet_tests.step);
@@ -601,8 +595,7 @@ pub fn build(b: *std.Build) void {
     voiceagent_tests.root_module.addImport("fucina", module);
     voiceagent_tests.root_module.addImport("fucina_llm", llm_module);
     voiceagent_tests.root_module.addImport("nam_audio", nam_audio_module);
-    voiceagent_tests.root_module.addImport("omnivoice_play", omnivoice_play_module);
-    configureOmnivoiceAudio(voiceagent_tests);
+    configureAudioShim(voiceagent_tests);
     configureBlas(voiceagent_tests, blas_kind);
     configureGpu(b, voiceagent_tests, gpu_kind);
 
@@ -713,11 +706,12 @@ fn configureOmnivoiceAudio(step: *std.Build.Step.Compile) void {
     }
 }
 
-/// Link ONLY the miniaudio capture shim (no MIDI) into the parakeet example for
-/// `--mic` (`-Dparakeet-mic`). Reuses NAM's vendored `examples/nam/audio_shim.c`
-/// + `third_party/miniaudio.h`; macOS needs the CoreAudio frameworks (elsewhere
-/// miniaudio dlopens its backend).
-fn configureParakeetAudio(step: *std.Build.Step.Compile) void {
+/// Link ONLY NAM's vendored miniaudio TU (`examples/nam/audio_shim.c` +
+/// `third_party/miniaudio.h`: enumeration, capture, duplex — no MIDI, no
+/// OmniVoice play shim). Used by parakeet `--mic` (`-Dparakeet-mic`) and the
+/// voiceagent duplex stream; macOS links the CoreAudio frameworks directly
+/// (MA_NO_RUNTIME_LINKING), elsewhere miniaudio dlopens its backend.
+fn configureAudioShim(step: *std.Build.Step.Compile) void {
     const module = step.root_module;
     module.link_libc = true;
     module.addCSourceFile(.{

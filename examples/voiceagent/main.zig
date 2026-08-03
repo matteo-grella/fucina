@@ -29,7 +29,6 @@ const std = @import("std");
 const fucina = @import("fucina");
 const llm = @import("fucina_llm");
 const audio_mod = @import("nam_audio");
-const play_mod = @import("omnivoice_play");
 const duplex = @import("duplex.zig");
 const rail_mod = @import("rail.zig");
 const aec_mod = @import("aec.zig");
@@ -47,7 +46,8 @@ const usage =
     \\usage: zig build voiceagent -- --asr <parakeet-eou.gguf> --chat <qwen3.gguf>
     \\         --tts <talker.gguf> --codec <codec.gguf>
     \\         [--speaker NAME] [--lang NAME] [--system PROMPT] [--eager-text]
-    \\         [--seed N] [--max-reply N] [--threads N] [--mic-device N] [--list-devices]
+    \\         [--seed N] [--max-reply N] [--threads N]
+    \\         [--mic-device N] [--speaker-device N] [--list-devices]
     \\         [--sim user.wav [--sim-barge over-reply.wav]]  (headless scripted run)
     \\
 ;
@@ -1791,12 +1791,11 @@ pub fn main(init: std.process.Init) anyerror!void {
     var dev = try audio_mod.Audio.init();
     defer dev.deinit();
     if (hasFlag(args, "--list-devices")) {
-        var caps: [audio_mod.max_devices]audio_mod.DeviceInfo = undefined;
-        const cap_list = try dev.listDevices(.capture, &caps);
-        for (cap_list, 0..) |d, i| try out.print("capture {d}: {s}\n", .{ i, d.nameSlice() });
-        var pouts: [play_mod.max_devices]play_mod.DeviceInfo = undefined;
-        const play_list = try play_mod.listPlaybackDevices(&pouts);
-        for (play_list, 0..) |d, i| try out.print("playback {d}: {s}\n", .{ i, d.nameSlice() });
+        var infos: [audio_mod.max_devices]audio_mod.DeviceInfo = undefined;
+        for ([_]audio_mod.DeviceKind{ .capture, .playback }) |kind| {
+            const list = try dev.listDevices(kind, &infos);
+            for (list, 0..) |d, i| try out.print("{t} {d}: {s}{s}\n", .{ kind, i, d.nameSlice(), if (d.is_default) " (default)" else "" });
+        }
         return;
     }
 
@@ -2002,8 +2001,13 @@ pub fn main(init: std.process.Init) anyerror!void {
         th.detach();
         sim = sd;
     } else {
+        // Indices are --list-devices enumeration order; null = system default.
+        // Mic and speaker on different hardware clocks drift relative to each
+        // other; mic/ref rings stay callback-aligned and the AEC's delay
+        // tracker absorbs the slow residual, so split devices are fine.
         const mic_index: ?usize = if (flagVal(args, "--mic-device")) |m| try std.fmt.parseInt(usize, m, 10) else null;
-        try dev.start(mic_index, null, duplex.stream_rate, duplex.period_frames, duplex.Engine.callback, &engine);
+        const spk_index: ?usize = if (flagVal(args, "--speaker-device")) |s| try std.fmt.parseInt(usize, s, 10) else null;
+        try dev.start(mic_index, spk_index, duplex.stream_rate, duplex.period_frames, duplex.Engine.callback, &engine);
     }
 
     var pump = AecPump.init(&engine, if (aec_sess) |*sx| sx else null, &aec_ctx);

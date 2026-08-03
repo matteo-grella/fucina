@@ -113,7 +113,8 @@ their own terms — see [`docs/THIRD-PARTY-NOTICES.md`](../../docs/THIRD-PARTY-N
 | `--max-reply N` | cap on reply tokens |
 | `--threads N` | worker threads (default: detected cores) |
 | `--mic-device N` | capture device index (default: system default) |
-| `--list-devices` | print capture devices and exit |
+| `--speaker-device N` | playback device index (default: system default); mic and speaker may sit on different hardware clocks — the AEC's delay tracker absorbs the drift |
+| `--list-devices` | print capture and playback devices (system defaults marked) and exit |
 | `--aec <gguf>` | echo-canceller model (default `models/aec/gtcrn_aec.gguf`) |
 | `--no-aec` | disable echo cancellation — falls back to half-duplex, no barge-in |
 | `--aec-debug` | trace delay-lock and barge-gate decisions to stderr; the first thing to read when barge-in does nothing |

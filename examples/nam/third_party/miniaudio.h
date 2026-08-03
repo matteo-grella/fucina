@@ -34729,18 +34729,16 @@ static ma_result ma_context_enumerate_devices__coreaudio(ma_context* pContext, m
         }
 
         if (ma_does_AudioObject_support_playback(pContext, deviceObjectID)) {
-            if (deviceObjectID == defaultDeviceObjectIDPlayback) {
-                info.isDefault = MA_TRUE;
-            }
+            /* local fix (not upstream): assign rather than accumulate, so a duplex-capable
+             * default-playback device does not leak isDefault into its capture row below. */
+            info.isDefault = (deviceObjectID == defaultDeviceObjectIDPlayback) ? MA_TRUE : MA_FALSE;
 
             if (!callback(pContext, ma_device_type_playback, &info, pUserData)) {
                 break;
             }
         }
         if (ma_does_AudioObject_support_capture(pContext, deviceObjectID)) {
-            if (deviceObjectID == defaultDeviceObjectIDCapture) {
-                info.isDefault = MA_TRUE;
-            }
+            info.isDefault = (deviceObjectID == defaultDeviceObjectIDCapture) ? MA_TRUE : MA_FALSE;
 
             if (!callback(pContext, ma_device_type_capture, &info, pUserData)) {
                 break;
