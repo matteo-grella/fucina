@@ -261,10 +261,17 @@ examples carry their own licenses: Qwen3/Qwen3.5 (Apache-2.0), Gemma 4 /
 DiffusionGemma (Google's Gemma Terms of Use), NVIDIA Parakeet (CC-BY-4.0),
 OmniVoice (CC-BY-NC pretrained weights), Higgs Audio v2 codec (upstream
 terms), Qwen3-TTS (Alibaba's upstream terms; the GGUF conversions used by
-`examples/qwen3tts` are third-party redistributions), Pocket TTS and its
-voices (kyutai — the voice packs carry their own licenses, listed at
-`huggingface.co/kyutai/tts-voices`, and kyutai publishes a use policy
-prohibiting voice cloning without consent and deceptive use), and the
+`examples/qwen3tts` are third-party redistributions), Pocket TTS (kyutai, CC-BY-4.0, which permits
+redistribution and format conversion with attribution; kyutai additionally
+publishes a use policy prohibiting voice cloning without consent and
+deceptive use, and gates the model behind accepting it). Its voices are
+licensed INDIVIDUALLY and not uniformly — `huggingface.co/kyutai/tts-voices`
+lists each, and some (the `expresso` and `ears` sets) are CC BY-**NC** 4.0.
+The English pack this port converts ships only two, both permissive:
+**alba** (`alba-mackenna/casual.wav`, CC BY 4.0 — attribution required) and
+**marius** (`voice-donations/Selfie.wav`, CC0). Anyone extending the
+conversion to the other voices should re-check, since pulling in an NC voice
+would attach a non-commercial restriction to the resulting GGUF, and the
 GTCRN-AEC canceller weights used by `examples/voiceagent` (LocalVQE,
 Apache-2.0; trained on the Microsoft DNS Challenge corpus, CC-BY-4.0, and
 fine-tuned on the AEC Challenge). See `RUNNING-MODELS.md` for the per-model

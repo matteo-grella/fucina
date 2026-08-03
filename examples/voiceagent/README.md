@@ -44,7 +44,7 @@ recommended pairing above:
 zig build voiceagent -Doptimize=ReleaseFast -- \
     --asr models/parakeet/realtime_eou_120m-v1-f16.gguf \
     --chat models/Qwen3-1.7B-Q4_K_M.gguf \
-    --tts models/pocket-tts/pocket-tts-english-v2-ptqtp-k3tie.gguf \
+    --tts models/pocket-tts/pocket-tts-english-v2.gguf \
     --voice alba
 ```
 
@@ -52,8 +52,11 @@ The chat model dominates that latency: holding the TTS fixed, 4B-Q8 gives
 3.8 s and 1.7B-Q4_K_M gives 0.6 s. Dropping to 0.6B reaches 0.3 s but the
 replies get noticeably worse. The `--tts` GGUF's architecture selects the
 engine, so switching families is just a path change — drop `--codec` for
-Pocket, which needs none. The tied-PTQTP Pocket build (141 MB, RTF 0.61)
-also cuts startup: 0.3 s of model loading versus 3.4 s for the full stack.
+Pocket, which needs none. Startup drops too: 0.3 s of model loading against
+3.4 s for the Qwen3-TTS stack. Quantizing Pocket further with
+`--ptqtp --ptqtp-tie` (see `examples/pockettts/README.md`) takes it from
+411 MB to 148 MB for a few percent of synthesis time — worth it for
+distribution, not for latency, since the chat model dominates either way.
 The F32 Qwen3-TTS talker is a parity reference — it barely holds real time.
 
 There is no faster ASR: the quantized `tdt_ctc-110m` checkpoints are not
