@@ -36,9 +36,7 @@ zig build voiceagent -Doptimize=ReleaseFast -- \
     --speaker Aiden --lang english
 ```
 
-**Snappiest** — Pocket TTS (no codec) with a small quantized chat model.
-Measured 0.6 s from end-of-utterance to first audio, against 4.3 s for the
-recommended pairing above:
+**Snappiest** — Pocket TTS (no codec) with a small quantized chat model:
 
 ```sh
 zig build voiceagent -Doptimize=ReleaseFast -- \
@@ -48,12 +46,15 @@ zig build voiceagent -Doptimize=ReleaseFast -- \
     --voice alba
 ```
 
-The chat model dominates that latency: holding the TTS fixed, 4B-Q8 gives
-3.8 s and 1.7B-Q4_K_M gives 0.6 s. Dropping to 0.6B reaches 0.3 s but the
-replies get noticeably worse. The `--tts` GGUF's architecture selects the
-engine, so switching families is just a path change — drop `--codec` for
-Pocket, which needs none. Startup drops too: 0.3 s of model loading against
-3.4 s for the Qwen3-TTS stack. Quantizing Pocket further with
+The chat model dominates end-of-utterance-to-first-audio latency: holding
+everything else fixed and interleaving the runs, 4B-Q8 lands around 1.9 s and
+1.7B-Q4_K_M around 1.1 s on an M1 Max. Treat those as indicative rather than
+exact — the spread across runs is a couple of hundred milliseconds, and the
+figure moves with the utterance, since it includes chat prefill and
+generation. Measure your own pairing with `--sim` before trusting a number.
+The `--tts` GGUF's architecture selects the engine, so switching families is
+just a path change — drop `--codec` for Pocket, which needs none, and skip
+loading the codec entirely. Quantizing Pocket further with
 `--ptqtp --ptqtp-tie` (see `examples/pockettts/README.md`) takes it from
 411 MB to 148 MB for a few percent of synthesis time — worth it for
 distribution, not for latency, since the chat model dominates either way.
