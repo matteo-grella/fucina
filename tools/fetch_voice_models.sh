@@ -9,10 +9,20 @@
 #   tools/fetch_voice_models.sh both
 #
 # Requires the Hugging Face CLI (`pip install -U huggingface_hub`; the binary
-# is `hf`, or `huggingface-cli` on older installs). The Pocket tier also needs
-# python with `safetensors` and `sentencepiece` for the checkpoint conversion —
-# kyutai ships safetensors, not GGUF, so tools/pocket/pocket_to_gguf.py packs
-# it. Every other artifact is a direct download.
+# is `hf`, or `huggingface-cli` on older installs).
+#
+# The Pocket tier additionally converts a checkpoint, because kyutai ships
+# safetensors rather than GGUF, and tools/pocket/pocket_to_gguf.py needs:
+#
+#   pip install -U safetensors sentencepiece torch numpy
+#
+# If those live in a virtualenv rather than system python, point the script at
+# it:  PYTHON=refs/pocket-tts-venv/bin/python tools/fetch_voice_models.sh
+#
+# sentencepiece parses the tokenizer .model so its 4000 pieces and scores can
+# be embedded in the GGUF; safetensors is opened with the "pt" framework, so
+# torch (and numpy) are pulled in to read and cast the tensors. Every other
+# artifact is a direct download and needs none of this.
 #
 # Weights are not redistributed by this repository and carry their own terms;
 # see docs/THIRD-PARTY-NOTICES.md. Re-running is cheap: the CLI skips files it
@@ -20,6 +30,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 
+PY_BIN="${PYTHON:-python3}"
 tier="${1:-fast}"
 case "$tier" in
 fast | quality | both) ;;
@@ -52,8 +63,13 @@ get unsloth/Qwen3-1.7B-GGUF Qwen3-1.7B-Q4_K_M.gguf models
 echo "[3/3] echo canceller — LocalVQE compact GTCRN-AEC"
 get LocalAI-io/LocalVQE localvqe-pi-aec-v1-49k-f32.gguf models/aec
 # The agent's default --aec path is models/aec/gtcrn_aec.gguf. Link rather
-# than rename, so the upstream filename stays visible.
-[ -e models/aec/gtcrn_aec.gguf ] || ln -s localvqe-pi-aec-v1-49k-f32.gguf models/aec/gtcrn_aec.gguf
+# than rename, so the upstream filename stays visible. mkdir explicitly: the
+# directory is otherwise only a side effect of the download succeeding.
+# -f, not a [ -e ] guard: that test FOLLOWS the link, so a dangling one (a
+# download that failed after the link was made) would test false and then
+# collide.
+mkdir -p models/aec
+ln -sf localvqe-pi-aec-v1-49k-f32.gguf models/aec/gtcrn_aec.gguf
 
 if [ "$tier" = fast ] || [ "$tier" = both ]; then
     echo "[tts] Pocket TTS — checkpoint + conversion"
@@ -61,8 +77,23 @@ if [ "$tier" = fast ] || [ "$tier" = both ]; then
     if [ -e models/pocket-tts/pocket-tts-english-v2.gguf ]; then
         echo "  models/pocket-tts/pocket-tts-english-v2.gguf (already converted)"
     else
+        # Check the conversion's imports BEFORE it starts writing, so a
+        # missing package is a one-line message rather than a traceback
+        # partway through a GGUF.
+        if ! "$PY_BIN" -c "import safetensors, sentencepiece, torch, numpy" 2>/dev/null; then
+            echo "error: the Pocket conversion needs python packages that are missing:" >&2
+            "$PY_BIN" - <<'PY' >&2
+import importlib.util
+missing = [m for m in ("safetensors", "sentencepiece", "torch", "numpy")
+           if importlib.util.find_spec(m) is None]
+print("  pip install -U " + " ".join(missing))
+PY
+            echo "(set PYTHON=<venv>/bin/python if they are in a virtualenv, or run" >&2
+            echo " tools/fetch_voice_models.sh quality — the Qwen3-TTS tier needs no conversion)" >&2
+            exit 1
+        fi
         echo "  converting safetensors -> GGUF ..."
-        python3 tools/pocket/pocket_to_gguf.py
+        "$PY_BIN" tools/pocket/pocket_to_gguf.py
     fi
 fi
 

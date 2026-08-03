@@ -71,11 +71,15 @@ tools/fetch_voice_models.sh quality    # Qwen3-TTS CustomVoice + codec
 tools/fetch_voice_models.sh both
 ```
 
-It needs the Hugging Face CLI (`pip install -U huggingface_hub`), plus
-`safetensors` and `sentencepiece` for the Pocket tier — kyutai ships
-safetensors rather than GGUF, so `tools/pocket/pocket_to_gguf.py` packs it.
-Re-running is cheap; it skips what you already have and prints the command to
-run at the end.
+It needs the Hugging Face CLI (`pip install -U huggingface_hub`). The Pocket
+tier additionally converts a checkpoint — kyutai ships safetensors rather than
+GGUF — which needs `safetensors sentencepiece torch numpy`: sentencepiece to
+read the tokenizer `.model` whose 4000 pieces and scores get embedded in the
+GGUF, and torch/numpy because the safetensors are opened with the `pt`
+framework. The script checks those imports before it starts writing and names
+whatever is missing; set `PYTHON=<venv>/bin/python` if they live in a
+virtualenv. The `quality` tier needs none of it. Re-running is cheap: it skips
+what you already have and prints the command to run at the end.
 
 By hand, if you prefer: parakeet and Qwen3 GGUFs as used by their own
 examples; [`LocalAI-io/LocalVQE`](https://huggingface.co/LocalAI-io/LocalVQE)
