@@ -599,6 +599,12 @@ pub const StreamingSession = struct {
     eou_id: i32, // -1 if the model has no <EOU>
     eob_id: i32,
     eou_events: usize = 0, // count of EOU/EOB events seen
+    /// Per-encoder-frame P(<EOU>), appended as chunks decode. The token has to
+    /// beat ~1026 rivals plus blank to be EMITTED, so `eou_events` is a very
+    /// late read of a signal that starts climbing much earlier; this is the
+    /// raw one. Empty unless `watch_eou` is set.
+    eou_probs: std.ArrayList(f32) = .empty,
+    watch_eou: bool = false,
     tokens: std.ArrayList(i32), // accumulated non-special token ids
     collect_meta: bool = false, // gather per-token TokenInfo (timestamps)
     token_meta: std.ArrayList(decoder.TokenInfo) = .empty, // aligned with `tokens` when collect_meta
@@ -674,6 +680,7 @@ pub const StreamingSession = struct {
         self.state.deinit(self.allocator);
         self.tokens.deinit(self.allocator);
         self.token_meta.deinit(self.allocator);
+        self.eou_probs.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -691,7 +698,22 @@ pub const StreamingSession = struct {
         var meta: std.ArrayList(decoder.TokenInfo) = .empty;
         defer meta.deinit(self.allocator);
         // frame_base = GLOBAL frames decoded by prior chunks → token frames are global, not per-chunk t.
-        try decoder.rnntDecodeFrames(ctx, self.cfg, &self.pred, &self.joint, enc_frames, &self.state, &emitted, self.allocator, if (self.collect_meta) &meta else null, self.frames_consumed);
+        try decoder.rnntDecodeFrames(
+            ctx,
+            self.cfg,
+            &self.pred,
+            &self.joint,
+            enc_frames,
+            &self.state,
+            &emitted,
+            self.allocator,
+            if (self.collect_meta) &meta else null,
+            self.frames_consumed,
+            if (self.watch_eou and self.eou_id >= 0)
+                .{ .id = self.eou_id, .probs = &self.eou_probs, .first_frame = self.frames_consumed }
+            else
+                null,
+        );
         self.frames_consumed += n;
         var had_eou = false;
         for (emitted.items, 0..) |tok, i| {

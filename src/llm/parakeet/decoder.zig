@@ -363,6 +363,35 @@ fn argmaxSlice(a: []const f32) usize {
 /// softmax accumulated in f64 (matches parakeet.cpp `decode_common.hpp::
 /// decode_max_prob_conf` to ≤1e-3). Model-glue (the NeMo formula), not a general
 /// kernel — the inner softmax-of-one-index is a few lines, so it stays local.
+/// Plain softmax probability of index `k` (no NeMo rescaling). `maxProbConf`
+/// answers "how sure was the model about the token it PICKED"; this answers
+/// "how close was token k to being picked", which is a different question and
+/// the one an endpointer wants.
+pub fn tokenProb(a: []const f32, k: usize) f32 {
+    var mx: f32 = a[0];
+    for (a[1..]) |x| {
+        if (x > mx) mx = x;
+    }
+    var denom: f64 = 0;
+    for (a) |x| denom += @exp(@as(f64, x) - @as(f64, mx));
+    return @floatCast(@exp(@as(f64, a[k]) - @as(f64, mx)) / denom);
+}
+
+/// Per-encoder-frame probability of one watched token, recorded even on frames
+/// where it loses to blank.
+///
+/// The greedy loop breaks the moment blank wins, so an endpointing token that
+/// is climbing but has not yet beaten every one of the other ~1026 logits is
+/// invisible — the caller learns nothing until it wins outright. Watching one
+/// index costs a softmax over a distribution the joint already produced.
+pub const TokenWatch = struct {
+    id: i32,
+    /// Appended per encoder frame, in frame order.
+    probs: *std.ArrayList(f32),
+    /// GLOBAL frame index of the first sample, for the caller's timeline.
+    first_frame: usize = 0,
+};
+
 fn maxProbConf(a: []const f32, k: usize) f32 {
     var mx: f32 = a[0];
     for (a[1..]) |x| {
@@ -522,6 +551,7 @@ pub fn rnntDecodeFrames(
     allocator: Allocator,
     meta: TokenMeta,
     frame_base: usize, // GLOBAL encoder-frame offset for this chunk (streaming); 0 offline
+    watch: ?TokenWatch,
 ) !void {
     if (cfg.num_durations != 0) return error.InvalidShape; // pure RNN-T
     const d = cfg.d_model;
@@ -561,6 +591,12 @@ pub fn rnntDecodeFrames(
                 g_valid = true;
             }
             try joint.step(ctx, enc_proj[t * jh ..][0..jh], g, logits);
+            // Sampled BEFORE the blank break, which is the whole point: the
+            // interesting frames are the ones where blank still wins.
+            if (watch) |w| {
+                if (emitted == 0 and w.id >= 0 and @as(usize, @intCast(w.id)) < v_plus)
+                    try w.probs.append(allocator, tokenProb(logits[0..v_plus], @intCast(w.id)));
+            }
             const k: i32 = @intCast(argmaxSlice(logits[0..v_plus]));
             if (k == blank) break; // blank -> advance time
             try out.append(allocator, k);
