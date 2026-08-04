@@ -30,6 +30,7 @@ const fucina = @import("fucina");
 const llm = @import("fucina_llm");
 const audio_mod = @import("nam_audio");
 const duplex = @import("duplex.zig");
+const remote_chat = @import("remote_chat.zig");
 const rail_mod = @import("rail.zig");
 const aec_mod = @import("aec.zig");
 
@@ -48,6 +49,9 @@ const usage =
     \\         [--speaker NAME] [--lang NAME] [--system PROMPT] [--eager-text]
     \\         [--seed N] [--max-reply N] [--threads N]
     \\         [--mic-device N] [--speaker-device N] [--list-devices]
+    \\         [--barge-floor RMS] [--aec-debug]
+    \\         [--chat-url URL] [--chat-model NAME] [--chat-api-key K]
+    \\         [--chat-port N] [--endpoint-ms N] [--speculate-ms N]
     \\         [--sim user.wav [--sim-barge over-reply.wav]]  (headless scripted run)
     \\
 ;
@@ -140,6 +144,24 @@ const AecPump = struct {
     fill: usize = 0,
     // barge-in gate state
     floor: f32 = 1e-4,
+    /// Absolute floor under the adaptive one: no residual quieter than this
+    /// counts as speech. Mostly a backstop now — during playback the gate
+    /// keys on `speak_base` instead, which self-calibrates.
+    min_floor: f32 = 0.010,
+    /// Echo-era residual: an EMA taken ONLY while the agent is audibly
+    /// speaking and unpaused, so it converges to what the canceller leaves
+    /// through (measured 0.10-0.13 on a live speaker setup) rather than to
+    /// the quiet room between words.
+    ///
+    /// Barging in has to be detected as a RISE above this, not as an absolute
+    /// level. An absolute threshold cannot win: set below the echo residual it
+    /// pauses the agent on its own voice every reply, set above it the user's
+    /// voice never clears it and barge-in stops working. Both failures were
+    /// measured on the same machine, at 0.010 and 0.18 respectively. A ratio
+    /// against a self-calibrating baseline is the only form that survives
+    /// both, because the baseline knows the room, the speaker volume and the
+    /// mic gain, and no constant does.
+    speak_base: f32 = 0,
     hot_hops: usize = 0,
     lag_votes: [76]u8 = @splat(0), // 4 ms bins over 0..300 ms
     votes_total: usize = 0,
@@ -336,22 +358,43 @@ const AecPump = struct {
     /// floor for >= `need` consecutive hops. Never fires on uncancelled
     /// echo: while playback demonstrably leaks into the mic (high NCC) but
     /// the bulk delay is not locked yet, the gate holds.
-    fn gate(self: *AecPump, rms: f32, need: usize) bool {
+    fn gate(self: *AecPump, rms: f32, need: usize, base: ?f32) bool {
         // Reconvergence hold decays with TIME (every hop) — decrementing
         // only on hot hops sticks forever once the canceller goes quiet,
         // and the zero-feed would silence the STT permanently.
         const converging = self.converge_hops > 0;
         if (converging) self.converge_hops -= 1;
-        const hot = rms > @max(4.0 * self.floor, 0.010);
+        // While the agent speaks, the bar is a rise over the echo it is
+        // leaking; elsewhere it is the quiet-room floor it learned.
+        const thresh = if (base) |b|
+            @max(speak_rise * b, self.min_floor)
+        else
+            @max(4.0 * self.floor, self.min_floor);
+        const hot = rms > thresh;
         if (!hot) {
             self.floor = 0.98 * self.floor + 0.02 * rms;
             self.hot_hops = 0;
             return false;
         }
+        // The floor also has to track a residual that stays hot, or it
+        // freezes at the quiet-room level for the whole reply and the
+        // canceller's own leak reads as speech forever after. Measured live:
+        // a locked canceller whose residual merely cleared 0.010 paused the
+        // agent on its own voice three times in one short reply. Adapting
+        // slowly here (~1.2% over the 12-hop decision window, so a real voice
+        // still stands out as a RISE) lets the floor climb toward the
+        // echo-era residual over seconds while leaving the gate's sensitivity
+        // to an actual barge intact.
+        self.floor = 0.999 * self.floor + 0.001 * rms;
         if (converging) return false;
         self.hot_hops += 1;
         return self.hot_hops >= need;
     }
+
+    /// How far over the echo-era residual a hop has to sit to read as the
+    /// near end. The user's voice arrives ON TOP of the echo, so the sum
+    /// clears this comfortably while stationary echo does not.
+    const speak_rise = 1.8;
 
     fn resetGate(self: *AecPump) void {
         self.hot_hops = 0;
@@ -458,15 +501,38 @@ const BargeCtx = struct {
     pending: bool = false, // COMMIT decided (Enter uses the atomic instead)
     hops_seen: usize = 0,
     pause_hop: usize = 0,
+    pause_tokens: usize = 0, // STT tokens at the moment of the hold
     last_hot: usize = 0, // hop index of the most recent above-floor residual
+    /// Hop index of the most recent hop with any plausible voice energy,
+    /// against a FIXED floor. `last_hot` rides the adaptive gate, which drifts
+    /// up during a long utterance and goes false while the user is still
+    /// talking — fine for deciding a barge, wrong for reporting how long the
+    /// endpointer waited. This is the honest one.
+    last_voice: usize = 0,
     far_hot_until: usize = 0, // playback recently live (ref window active)
     last_token_count: usize = 0,
     prev_max_run: usize = 0, // novel-run stability across token updates
+    // Stage-1 holds. A hold is silent in every other metric — it keeps the
+    // queue, so no `audible gap` is counted, and it commits nothing, so
+    // `interrupts` stays 0 — yet each one is a ~2 s stall in the middle of a
+    // reply. Repeated false holds are the single worst thing the barge gate
+    // can do to fluency, so they get their own honest count.
+    /// Wall time spent inside scan() while the chat model was generating.
+    /// The AEC and the residual STT run synchronously from the generation
+    /// loop, so a backlog there is charged to the chat stage even though the
+    /// model is not the one that is slow. Splitting it out is the difference
+    /// between "the LLM is slow" and "the LLM is being starved".
+    think_scan_ns: i96 = 0,
+    holds: usize = 0, // stage-1 pauses entered this turn
+    false_holds: usize = 0, // ... that timed out with no confirming words
+    held_hops: usize = 0, // total hops spent paused
     strip_words: usize = 0, // leading echo words to drop from a carried utterance
     batch: [aec_mod.hop * 200]f32 = undefined, // up to ~3.2 s of postponed audio
     fill: usize = 0,
 
     const flush_hops = aec_mod.hop * 3; // ~48 ms normal batch — snappy partials
+    /// Fixed bar for "there was voice here", used only for reporting.
+    const voice_floor = 0.01;
     /// Backchannels never confirm a barge (and never count as novel).
     const backchannels = [_][]const u8{ "yeah", "ok", "okay", "right", "sure", "uh", "huh", "hmm", "mhm", "yes", "yep", "aha" };
     /// Command words commit immediately when energy-backed.
@@ -477,8 +543,20 @@ const BargeCtx = struct {
         fn hop(c: *const @This(), res: []const f32, rms: f32) !void {
             const b = c.ctx;
             b.hops_seen += 1;
-            const sustained = b.pump.gate(rms, 12);
+            // Track what the canceller leaks only while it is actually
+            // leaking: during playback, unpaused. A slow EMA (~1.6 s) so a
+            // short burst of the user's voice cannot drag the baseline up to
+            // meet itself, while steady echo is tracked within a sentence.
+            const audible_now = b.phase == .speak and b.stage == .none and b.engine.outPending() > 0;
+            if (audible_now) {
+                b.pump.speak_base = if (b.pump.speak_base == 0)
+                    rms
+                else
+                    0.99 * b.pump.speak_base + 0.01 * rms;
+            }
+            const sustained = b.pump.gate(rms, 12, if (audible_now and b.pump.speak_base > 0) b.pump.speak_base else null);
             if (b.pump.hot_hops > 0) b.last_hot = b.hops_seen;
+            if (rms > voice_floor) b.last_voice = b.hops_seen;
             if (b.engine.outPending() > 0) b.far_hot_until = b.hops_seen + 60; // ~1 s: bulk delay + reverb tail
 
             // Stage 1 (fast, reversible): sustained residual energy PAUSES
@@ -487,29 +565,53 @@ const BargeCtx = struct {
             // Only on EVIDENCE: canceller locked, or a MEASURED no-leak
             // (headphones). An unmeasured 0 is not "no leak" — pausing on
             // uncancelled first-reply echo starves the estimator forever.
+            //
+            // `locked` alone is NOT that evidence. It says the echo DELAY is
+            // known, not that this residual is the user: on a live mic whose
+            // post-AEC residual clears the gate's floor, a locked canceller
+            // pauses the agent on its own voice. Measured on an M1 Max with
+            // speakers: three ~2 s holds inside one short reply, firing at
+            // ncc 0.68 / 0.86 / 0.79 — a high mic-to-reference correlation,
+            // i.e. the mic hearing the reply come back. Near-end speech
+            // dilutes that correlation (it adds mic energy the reference
+            // cannot explain), so requiring it to be LOW is the standard
+            // double-talk test, and a real barge still lands — about 0.3 s
+            // later, while the peak-hold decays.
+            const pause_evidence = b.pump.locked or (b.pump.ncc_measured and b.pump.echo_ncc <= 0.08);
             if (b.phase == .speak and b.stage == .none and !b.pending and sustained and
-                b.engine.outPending() > 0 and
-                (b.pump.locked or (b.pump.ncc_measured and b.pump.echo_ncc <= 0.08)))
+                b.engine.outPending() > 0 and pause_evidence)
             {
                 b.engine.setPaused(true);
                 b.stage = .paused;
                 b.pause_hop = b.hops_seen;
-                if (b.pump.debug) std.debug.print("[aec-dbg] t={d:.2}s STAGE1 pause (hot={d})\n", .{ b.pump.clock(), b.pump.hot_hops });
+                b.pause_tokens = b.streamer.sess.tokens.items.len;
+                b.holds += 1;
+                if (b.pump.debug) std.debug.print("[aec-dbg] t={d:.2}s STAGE1 pause (hot={d} res={d:.4} echo_base={d:.4} bar={d:.4} ncc={d:.3})\n", .{ b.pump.clock(), b.pump.hot_hops, b.pump.res_ema, b.pump.speak_base, AecPump.speak_rise * b.pump.speak_base, b.pump.echo_ncc });
             }
             // Why a sustained-energy hop did NOT pause: the single most
             // useful line when barge-in silently does nothing.
-            if (b.pump.debug and b.phase == .speak and b.stage == .none and sustained and b.engine.outPending() > 0 and
-                !(b.pump.locked or (b.pump.ncc_measured and b.pump.echo_ncc <= 0.08)))
+            if (b.pump.debug and b.phase == .speak and b.stage == .none and sustained and
+                b.engine.outPending() > 0 and !pause_evidence)
             {
                 std.debug.print("[aec-dbg] t={d:.2}s BLOCKED: speech held but locked={} ncc_measured={} echo_ncc={d:.3}\n", .{ b.pump.clock(), b.pump.locked, b.pump.ncc_measured, b.pump.echo_ncc });
             }
-            // No confirming words within ~2 s: resume playback (a false
-            // trigger costs a hiccup, not the reply).
-            if (b.stage == .paused and !b.pending and b.hops_seen > b.pause_hop + 125) {
+            if (b.stage == .paused) b.held_hops += 1;
+            // Leaving the hold. Two ways out, and the second is what keeps a
+            // false trigger cheap: while paused the echo path is dead, so a
+            // residual that falls quiet PROVES the room is quiet and nobody
+            // is there to confirm. Resuming on that costs a hiccup instead of
+            // serving the full confirm window as dead air. A user who really
+            // is talking keeps the residual hot and gets the whole ~2 s.
+            const confirm_window_over = b.hops_seen > b.pause_hop + 125;
+            const nobody_there = b.hops_seen > b.pause_hop + 15 and b.hops_seen -| b.last_hot >= 15 and
+                b.streamer.sess.tokens.items.len == b.pause_tokens;
+            if (b.stage == .paused and !b.pending and (confirm_window_over or nobody_there)) {
                 b.engine.setPaused(false);
                 b.stage = .none;
+                b.false_holds += 1;
                 b.pump.resetGate();
                 b.prev_max_run = 0;
+                if (b.pump.debug) std.debug.print("[aec-dbg] t={d:.2}s hold released ({s}) after {d} hops\n", .{ b.pump.clock(), if (nobody_there) "room quiet" else "confirm window", b.hops_seen - b.pause_hop });
             }
 
             if (b.fill == b.batch.len) {
@@ -696,6 +798,11 @@ const ReplyWriter = struct {
     tui: *Tui,
     barge: *BargeCtx,
     rail: *RailCtl,
+    /// Where finished sentences go while the model is still writing. Null
+    /// disables the overlap (tool-response rounds, which are short and
+    /// already play behind the preamble).
+    speak: ?*SpeakWorker = null,
+    sent: usize = 0, // bytes of `text` already handed to the talker
 
     fn init(arena: std.mem.Allocator, tui: *Tui, barge: *BargeCtx, rail: *RailCtl, text: *std.ArrayList(u8), buffer: []u8) ReplyWriter {
         return .{
@@ -706,6 +813,18 @@ const ReplyWriter = struct {
             .rail = rail,
             .text = text,
         };
+    }
+
+    /// Hand every finished sentence past `sent` to the talker.
+    ///
+    /// The stop is a tool-call guard, not punctuation: a reply that turns out
+    /// to be `<tool_call>{...}</tool_call>` must never be spoken, and Hermes
+    /// opens with the tag, so text containing no '<' is committed prose. A
+    /// tool turn therefore reaches its '<' before any sentence terminator and
+    /// dispatches nothing — the synchronous path below handles it unchanged.
+    fn dispatch(self: *ReplyWriter) void {
+        const w = self.speak orelse return;
+        self.sent = dispatchSentences(self.text.items, self.sent, w);
     }
 
     fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
@@ -723,12 +842,173 @@ const ReplyWriter = struct {
             if (self.tui.eager_text) self.tui.assistantDelta(chunk);
             n += chunk.len;
         }
+        self.dispatch();
         // Keep the rings drained and the residual STT live while thinking:
         // words spoken over the think gap abort the reply before its first
-        // frame instead of being lost.
+        // frame instead of being lost. Once the talker has taken over it owns
+        // the pump, the rail and the reveal — two drivers on the AEC would
+        // race the decimator state that mic/reference alignment rests on.
+        if (self.speak) |sw| if (sw.speaking()) return n;
+        const t0 = nowNs(self.rail.io);
         self.barge.scan() catch {};
+        self.barge.think_scan_ns += nowNs(self.rail.io) - t0;
         self.rail.draw(self.barge.pump.res_ema);
         return n;
+    }
+};
+
+
+
+/// Hand every finished sentence past `sent` to the talker; returns the new
+/// cursor. A free function because two producers drive it: the writer below,
+/// and the main loop draining a speculative generation.
+///
+/// The `'<'` stop is a tool-call guard, not punctuation: a reply that turns
+/// out to be `<tool_call>{...}</tool_call>` must never be spoken, and Hermes
+/// opens with the tag, so text containing no '<' is committed prose.
+fn dispatchSentences(items: []const u8, sent_in: usize, w: *SpeakWorker) usize {
+    const limit = std.mem.indexOfScalarPos(u8, items, sent_in, '<') orelse items.len;
+    var cut: ?usize = null;
+    var i = sent_in;
+    while (i < limit) : (i += 1) {
+        if (items[i] != '.' and items[i] != '!' and items[i] != '?') continue;
+        var j = i + 1;
+        while (j < limit and (items[j] == '.' or items[j] == '!' or items[j] == '?')) j += 1;
+        // A terminator only ends a sentence once something follows it: waiting
+        // for that byte costs one token and keeps "3.14" and "e.g." whole.
+        if (j < limit and (items[j] == ' ' or items[j] == '\n' or items[j] == '\t')) cut = j;
+        i = j - 1;
+    }
+    const end = cut orelse return sent_in;
+    const span = std.mem.trim(u8, items[sent_in..end], " \n\t");
+    if (span.len == 0) return end;
+    w.say(span) catch {}; // a failed handoff costs overlap, not the reply
+    return end;
+}
+
+// --- speculative turn: generate through the reopen window -------------------
+//
+// The turn closes on a quiet-and-stable window, and waiting that window out is
+// dead time the chat model could have been working through. So the moment the
+// room goes quiet and the transcript settles — well before the window is up —
+// generation starts against the transcript AS IT STANDS. If the user was only
+// pausing and starts again, the request is abandoned and nothing was spoken;
+// if the window completes, the reply is already part-written.
+//
+// The worker is a PURE BYTE PRODUCER. It never touches the AEC pump, the rail,
+// the reveal or the TUI: those have exactly one owner and it is the main
+// thread. All the main thread does with this is drain bytes under a mutex.
+const SpecTurn = struct {
+    allocator: std.mem.Allocator,
+    chat: *remote_chat.Client,
+    thread: ?std.Thread = null,
+    mutex: std.Io.Mutex = .init,
+    buf: std.ArrayList(u8) = .empty,
+    utt: []u8 = &.{}, // the transcript this speculation is against (owned)
+    cancel: std.atomic.Value(bool) = .init(false),
+    done: std.atomic.Value(bool) = .init(false),
+    failed: bool = false,
+
+    fn lock(self: *SpecTurn) void {
+        std.Io.Threaded.mutexLock(&self.mutex);
+    }
+    fn unlock(self: *SpecTurn) void {
+        std.Io.Threaded.mutexUnlock(&self.mutex);
+    }
+
+    fn running(self: *const SpecTurn) bool {
+        return self.thread != null;
+    }
+
+    fn start(self: *SpecTurn, utt: []const u8) !void {
+        std.debug.assert(self.thread == null);
+        self.utt = try self.allocator.dupe(u8, utt);
+        errdefer self.allocator.free(self.utt);
+        self.buf.clearRetainingCapacity();
+        self.cancel.store(false, .release);
+        self.done.store(false, .release);
+        self.failed = false;
+        self.thread = try std.Thread.spawn(.{}, workerMain, .{self});
+    }
+
+    /// Bytes generated so far, appended to `out`. Returns how many were new.
+    fn drainInto(self: *SpecTurn, out: *std.ArrayList(u8), arena: std.mem.Allocator, from: usize) !usize {
+        self.lock();
+        defer self.unlock();
+        if (self.buf.items.len <= from) return 0;
+        const fresh = self.buf.items[from..];
+        try out.appendSlice(arena, fresh);
+        return fresh.len;
+    }
+
+    fn generated(self: *SpecTurn) usize {
+        self.lock();
+        defer self.unlock();
+        return self.buf.items.len;
+    }
+
+    /// Abandon: the user kept talking, so this reply is about the wrong words.
+    fn abort(self: *SpecTurn) void {
+        if (self.thread == null) return;
+        self.cancel.store(true, .release);
+        self.join();
+    }
+
+    fn join(self: *SpecTurn) void {
+        if (self.thread) |t| t.join();
+        self.thread = null;
+        // Clear the result latch: `done` means "a finished speculation is
+        // waiting to be adopted", so leaving it set after an abandoned one
+        // blocks every later speculation in the turn.
+        self.done.store(false, .release);
+        if (self.utt.len > 0) {
+            self.allocator.free(self.utt);
+            self.utt = &.{};
+        }
+    }
+
+    fn deinit(self: *SpecTurn) void {
+        self.abort();
+        self.buf.deinit(self.allocator);
+    }
+
+    const Sink = struct {
+        interface: std.Io.Writer,
+        owner: *SpecTurn,
+
+        fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+            _ = splat;
+            const self: *Sink = @alignCast(@fieldParentPtr("interface", w));
+            const o = self.owner;
+            o.lock();
+            defer o.unlock();
+            var n: usize = 0;
+            const buffered = w.buffered();
+            if (buffered.len > 0) {
+                o.buf.appendSlice(o.allocator, buffered) catch return error.WriteFailed;
+                w.end = 0;
+            }
+            for (data) |chunk| {
+                o.buf.appendSlice(o.allocator, chunk) catch return error.WriteFailed;
+                n += chunk.len;
+            }
+            return n;
+        }
+    };
+
+    fn workerMain(self: *SpecTurn) void {
+        var scratch: [256]u8 = undefined;
+        var sink = Sink{
+            .interface = .{ .vtable = &.{ .drain = Sink.drain }, .buffer = &scratch },
+            .owner = self,
+        };
+        _ = self.chat.sendCancellable(self.utt, &sink.interface, &self.cancel, false) catch |e| {
+            if (e != error.Cancelled) self.failed = true;
+            self.done.store(true, .release);
+            return;
+        };
+        sink.interface.flush() catch {};
+        self.done.store(true, .release);
     }
 };
 
@@ -1110,6 +1390,12 @@ const Reveal = struct {
     tui: *Tui,
     engine: *duplex.Engine,
     eager: bool,
+    allocator: std.mem.Allocator,
+    /// The reply text arrives a sentence at a time (the talker starts on the
+    /// first one while the chat model is still writing the rest), so the
+    /// reveal owns its copy and grows it — a borrowed slice into the
+    /// generator's buffer would dangle on the next append.
+    buf: std.ArrayList(u8) = .empty,
     text: []const u8 = &.{},
     shown: usize = 0,
     active: bool = false,
@@ -1125,9 +1411,28 @@ const Reveal = struct {
     /// |sample| above this counts as voice (the sim's radiated-voice gate).
     const voice_thresh = 0.01;
 
-    fn begin(self: *Reveal, text: []const u8) void {
+    fn deinit(self: *Reveal) void {
+        self.buf.deinit(self.allocator);
+    }
+
+    /// Add the next span of reply text. Called only from the speaking side,
+    /// in order, before the span's audio is produced — so `shown` stays a
+    /// valid index and the map only ever extends to the right.
+    fn extend(self: *Reveal, span: []const u8) !void {
+        if (self.eager or !self.active) return;
+        if (span.len == 0) return;
+        // The reply line opens on the first spoken words, not at the start of
+        // the turn: a turn that resolves to a tool call must not leave an
+        // empty bot line above the ACTING rail.
+        if (self.buf.items.len == 0) self.tui.botPrefix() else try self.buf.append(self.allocator, ' ');
+        try self.buf.appendSlice(self.allocator, span);
+        self.text = self.buf.items;
+    }
+
+    fn begin(self: *Reveal) void {
         if (self.eager) return;
-        self.text = text;
+        self.buf.clearRetainingCapacity();
+        self.text = &.{};
         self.shown = 0;
         self.total_s = null;
         self.pushed48.store(0, .monotonic);
@@ -1135,7 +1440,6 @@ const Reveal = struct {
         self.voiced_hi48.store(0, .monotonic);
         self.all_pushed.store(false, .monotonic);
         self.active = true;
-        self.tui.botPrefix();
     }
 
     /// Producer side: one source sample (= 2 samples at 48 kHz) entered the
@@ -1569,6 +1873,323 @@ const SpeakSink = struct {
     }
 };
 
+// --- speak worker: the reply is spoken a sentence at a time ----------------
+//
+// The chat model writes 1-4 sentences; waiting for the last one before the
+// talker starts makes time-to-first-audio scale with REPLY length, which is
+// the wrong variable — the user is waiting on the first sentence, not the
+// last. So generation and speech overlap: the sentence splitter in
+// ReplyWriter hands each finished sentence to this worker while the model is
+// still writing, and the talker is already producing audio for sentence N
+// while N+1 decodes.
+//
+// Ownership is a strict handoff, not sharing. The AEC pump, the rail, the
+// reveal and the TUI have exactly one driver at any moment: the main thread
+// through ReplyWriter.drain until the first sentence is queued, this worker
+// from then until it is joined. `started` is the flag both sides read, and
+// it only ever goes false -> true within a turn.
+const SpeakWorker = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    engine: *duplex.Engine,
+    up2: *duplex.Upsampler2,
+    barge: *BargeCtx,
+    rail: *RailCtl,
+    reveal: *Reveal,
+    interrupt: *std.atomic.Value(bool),
+    abort: ?*const std.atomic.Value(bool),
+    full_duplex: bool,
+    seed: i64,
+
+    // Exactly one of these is live, chosen by the --tts model's architecture.
+    pocket: ?*llm.pockettts.pocket.Engine,
+    qwen: ?Qwen,
+
+    mutex: std.Io.Mutex = .init,
+    queue: std.ArrayList([]u8) = .empty,
+    closed: bool = false, // no more sentences will be added
+    busy: bool = false,
+    started: std.atomic.Value(bool) = .init(false),
+    thread: ?std.Thread = null,
+    joined: bool = false,
+    /// When the first speakable sentence was handed over. Splits the turn at
+    /// the seam that matters: everything before it is the chat model writing,
+    /// everything after is the talker synthesizing.
+    first_say_ns: ?i96 = null,
+    frames: usize = 0,
+    first_push_ns: ?i96 = null,
+    err: ?anyerror = null,
+
+    const Qwen = struct {
+        ctx: *ExecContext,
+        model: *qtts.model.Model,
+        tok: *llm.tokenizer.Tokenizer,
+        kvs: *qtts.pipeline.Kvs,
+        codec_ctx: *ExecContext,
+        codec_dec: *const qtts.codec.Decoder,
+        codec_sess: *qtts.codec.Streaming,
+        lang: []const u8,
+        speaker: []const u8,
+    };
+
+    fn lock(self: *SpeakWorker) void {
+        std.Io.Threaded.mutexLock(&self.mutex);
+    }
+    fn unlock(self: *SpeakWorker) void {
+        std.Io.Threaded.mutexUnlock(&self.mutex);
+    }
+
+    fn stopRequested(self: *SpeakWorker) bool {
+        if (self.abort) |a| if (a.load(.acquire)) return true;
+        return self.interrupt.load(.acquire) or self.barge.pending;
+    }
+
+    /// Has the worker taken over the pump/rail/reveal? Read by the main
+    /// thread before it touches any of them.
+    fn speaking(self: *SpeakWorker) bool {
+        return self.started.load(.acquire);
+    }
+
+    /// Queue one span of reply text. The first call spawns the thread — the
+    /// talker must not be running while there is nothing to say.
+    fn say(self: *SpeakWorker, span: []const u8) !void {
+        if (self.first_say_ns == null) self.first_say_ns = nowNs(self.io);
+        const owned = try self.allocator.dupe(u8, span);
+        {
+            errdefer self.allocator.free(owned);
+            self.lock();
+            defer self.unlock();
+            try self.queue.append(self.allocator, owned);
+        }
+        if (self.thread != null) return;
+        // Audio can reach the room from here: the STT must stop transcribing
+        // (BargeCtx gates on .speak) BEFORE the first frame, not after.
+        self.barge.phase = .speak;
+        self.started.store(true, .release);
+        self.thread = std.Thread.spawn(.{}, workerMain, .{self}) catch |e| {
+            self.started.store(false, .release);
+            self.barge.phase = .think;
+            return e;
+        };
+    }
+
+    /// No more text is coming. The worker releases the warm-up latch when it
+    /// drains the queue, so a reply shorter than the cushion still plays.
+    fn close(self: *SpeakWorker) void {
+        self.lock();
+        self.closed = true;
+        self.unlock();
+    }
+
+    /// Everything queued has been spoken and the queue is closed.
+    fn drained(self: *SpeakWorker) bool {
+        self.lock();
+        defer self.unlock();
+        return self.closed and self.queue.items.len == 0 and !self.busy;
+    }
+
+    fn join(self: *SpeakWorker) void {
+        if (self.joined) return; // the errdefer may join after the normal path did
+        self.joined = true;
+        if (self.thread) |t| t.join();
+        self.thread = null;
+        self.lock();
+        for (self.queue.items) |s| self.allocator.free(s);
+        self.queue.clearRetainingCapacity();
+        self.unlock();
+        self.queue.deinit(self.allocator);
+    }
+
+    fn workerMain(self: *SpeakWorker) void {
+        while (true) {
+            self.lock();
+            const span: ?[]u8 = if (self.queue.items.len > 0) self.queue.orderedRemove(0) else null;
+            if (span != null) self.busy = true;
+            const closing = self.closed;
+            self.unlock();
+
+            if (span) |s| {
+                defer self.allocator.free(s);
+                if (!self.stopRequested() and self.err == null) {
+                    self.speakSpan(s) catch |e| {
+                        if (self.err == null) self.err = e;
+                    };
+                }
+                self.lock();
+                self.busy = false;
+                const idle = self.queue.items.len == 0;
+                const last = self.closed and idle;
+                self.unlock();
+                if (last) self.reveal.markAllPushed(); // end anchor is exact now
+                // Nothing more is buffered, so holding the cushion can only
+                // add silence: no further audio can arrive until the chat
+                // model emits another sentence. Releasing here is what keeps
+                // time-to-first-audio off the knife edge of whether the first
+                // sentence happens to be longer than the cushion — a whole
+                // buffered sentence is better lead than a depth threshold,
+                // and if the ring does drain the re-arm still turns it into
+                // one clean pause.
+                if (idle) self.engine.releaseWarmup();
+            } else if (closing) {
+                break;
+            } else if (self.stopRequested()) {
+                break;
+            } else {
+                // Between sentences the chat model is still decoding; keep
+                // the rings moving so the AEC and the barge gate stay live.
+                if (self.full_duplex) self.barge.scan() catch {};
+                self.rail.set(if (self.barge.stage == .paused) .waiting else .speaking);
+                self.rail.draw(self.barge.pump.res_ema);
+                self.reveal.step();
+                std.Io.sleep(self.io, .{ .nanoseconds = 5 * std.time.ns_per_ms }, .awake) catch {};
+            }
+        }
+        self.engine.releaseWarmup();
+        // Drain: wait for the out-ring, then the device tail.
+        while (self.engine.outPending() > 0) {
+            if (self.engine.outPending() < duplex.period_frames * 4) self.engine.setSpeaking(false);
+            if (self.full_duplex) self.barge.scan() catch {};
+            self.rail.set(if (self.barge.stage == .paused) .waiting else .speaking);
+            self.rail.hold_listening = self.barge.streamer.sess.tokens.items.len != 0;
+            self.rail.draw(self.barge.pump.res_ema);
+            self.reveal.step();
+            if (self.stopRequested()) break;
+            std.Io.sleep(self.io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch {};
+        }
+    }
+
+    fn speakSpan(self: *SpeakWorker, span: []const u8) !void {
+        try self.reveal.extend(span);
+        if (self.pocket) |pe| return self.speakPocket(pe, span);
+        return self.speakQwen(span);
+    }
+
+    fn speakPocket(self: *SpeakWorker, pe: *llm.pockettts.pocket.Engine, span: []const u8) !void {
+        const Cb = struct {
+            w: *SpeakWorker,
+
+            fn onFrame(c: *@This(), pcm: []const f32) bool {
+                const w = c.w;
+                if (w.stopRequested()) return false;
+                if (w.full_duplex) w.barge.scan() catch {};
+                if (w.stopRequested()) return false;
+                var acc: f32 = 0;
+                for (pcm) |x| acc += x * x;
+                w.rail.setOutputLevel(@sqrt(acc / @as(f32, @floatFromInt(pcm.len))));
+                w.rail.set(if (w.barge.stage == .paused) .waiting else .speaking);
+                w.rail.draw(w.barge.pump.res_ema);
+                w.reveal.step();
+                for (pcm) |x| {
+                    var pair: [2]f32 = undefined;
+                    w.up2.push(x, &pair);
+                    var off: usize = 0;
+                    while (off < 2) {
+                        off += w.engine.out48.push(pair[off..]);
+                        if (off == 2) break;
+                        if (w.stopRequested()) return false;
+                        std.Io.sleep(w.io, .{ .nanoseconds = 2 * std.time.ns_per_ms }, .awake) catch {};
+                    }
+                    w.reveal.notePushed(@abs(x) > Reveal.voice_thresh);
+                }
+                if (w.first_push_ns == null) w.first_push_ns = nowNs(w.io);
+                return true;
+            }
+        };
+        var cb = Cb{ .w = self };
+        self.frames += try pe.speak(span, .{
+            .temp = pe.temp_default,
+            .seed = @bitCast(self.seed),
+        }, &cb, Cb.onFrame);
+        // No setTotal here: the pushed count covers only the spans spoken so
+        // far, and a total that understates the reply makes the reveal run
+        // ahead of the voice. The rate estimate paces until markAllPushed
+        // pins the exact voiced span at the end of the reply.
+    }
+
+    fn speakQwen(self: *SpeakWorker, span: []const u8) !void {
+        const q = self.qwen.?;
+        var prompt = try qtts.prompt.build(self.allocator, q.model, q.tok, .{
+            .text = span,
+            .language = q.lang,
+            .speaker = q.speaker,
+        });
+        defer prompt.deinit();
+        var sink = SpeakSink{
+            .ctx = q.codec_ctx,
+            .dec = q.codec_dec,
+            .sess = q.codec_sess,
+            .engine = self.engine,
+            .up2 = self.up2,
+            .barge = self.barge,
+            .full_duplex = self.full_duplex,
+            .allocator = self.allocator,
+            .interrupt = self.interrupt,
+            .abort = self.abort,
+            .rail = self.rail,
+            .reveal = self.reveal,
+            .io = self.io,
+            .kq = q.model.specials.num_code_groups,
+            .chunk_first = 12,
+            .chunk_main = 12,
+            .left_ctx = 0,
+            .first_push_ns = self.first_push_ns,
+        };
+        defer sink.frames.deinit(self.allocator);
+        try sink.startWorker();
+        // A generate error must not unwind past a live worker: it would keep
+        // decoding into frames/contexts the defers tear down.
+        errdefer sink.stopWorker();
+
+        var result = try qtts.pipeline.generate(q.ctx, q.model, &prompt, .{
+            .seed = self.seed,
+            .max_new_tokens = 512,
+        }, q.kvs, SpeakSink.onFrame, &sink, null);
+        defer result.deinit();
+
+        if (!sink.stopRequested() and sink.err == null) {
+            sink.finish() catch |e| {
+                sink.err = e;
+            };
+            // Let the codec worker decode the tail while we keep scanning.
+            while (!sink.queueIdle() and !sink.stopRequested()) {
+                if (self.full_duplex) self.barge.scan() catch {};
+                self.rail.draw(self.barge.pump.res_ema);
+                self.reveal.step();
+                std.Io.sleep(self.io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch {};
+            }
+        }
+        sink.stopWorker();
+        if (sink.first_push_ns) |t| {
+            if (self.first_push_ns == null) self.first_push_ns = t;
+        }
+        self.frames += result.frames;
+        if (sink.err) |e| return e;
+    }
+
+    /// Make a joined worker usable for another round (the follow-up after a
+    /// tool call). Counters carry over — they are per turn, not per round.
+    fn reset(self: *SpeakWorker) void {
+        self.queue = .empty;
+        self.closed = false;
+        self.busy = false;
+        self.joined = false;
+        self.started.store(false, .release);
+        self.err = null;
+    }
+};
+
+/// Wait out everything the talker still has queued, then join it. The worker
+/// owns the AEC pump, the rail and the reveal for as long as it runs, so this
+/// loop deliberately touches none of them — it only waits.
+fn awaitSpeech(w: *SpeakWorker, io: std.Io) void {
+    w.close();
+    while (!w.drained()) {
+        if (w.stopRequested()) break;
+        std.Io.sleep(io, .{ .nanoseconds = 5 * std.time.ns_per_ms }, .awake) catch {};
+    }
+    w.join();
+}
+
 // --- sim driver: scripted "device" for headless end-to-end tests ------------
 //
 // Replaces the miniaudio duplex stream with a thread that calls the SAME
@@ -1800,7 +2421,17 @@ pub fn main(init: std.process.Init) anyerror!void {
     }
 
     const asr_path = flagVal(args, "--asr") orelse return out.print("{s}", .{usage});
-    const chat_path = flagVal(args, "--chat") orelse return out.print("{s}", .{usage});
+    // The chat stage is always an OpenAI-compatible endpoint: either one this
+    // process spawns for --chat, or one the user points at. There is no
+    // in-process path. Two reasons, and the second is the load-bearing one:
+    // an in-process Conversation binds ONE architecture at compile time, and
+    // its `send` cannot be abandoned mid-generation. Speculative turns are
+    // built on abandoning generations, so the cancellable seam is the design,
+    // not a convenience.
+    const chat_url_flag = flagVal(args, "--chat-url");
+    const chat_path_opt = flagVal(args, "--chat");
+    if (chat_path_opt == null and chat_url_flag == null) return out.print("{s}", .{usage});
+    const chat_path = chat_path_opt orelse "";
     const tts_path = flagVal(args, "--tts") orelse return out.print("{s}", .{usage});
     const codec_path = flagVal(args, "--codec") orelse "";
     const speaker = flagVal(args, "--speaker") orelse "Aiden";
@@ -1820,6 +2451,32 @@ pub fn main(init: std.process.Init) anyerror!void {
         try std.mem.concat(allocator, u8, &.{ base_system, tools_system_block })
     else
         base_system;
+    // Quiet needed to close a turn without waiting for the <EOU> model.
+    //
+    // The endpointer is a learned model that emits <EOU>/<EOB> when IT is
+    // confident, and measured on this machine that takes ~2.9 s of trailing
+    // silence — three times everything else in the pipeline combined, and not
+    // tunable, because there is no threshold in it to turn down. So the turn
+    // also closes on evidence we can measure: the room has gone quiet AND the
+    // transcript has stopped growing, both for this long. <EOU> still commits
+    // early whenever it fires first, so this only ever shortens a turn.
+    //
+    // huggingface/speech-to-speech reaches the same place from the other
+    // side: soft-end after 64 ms, start generating, and reopen the turn if
+    // speech resumes within ~1 s. Waiting the window out instead of
+    // speculating through it costs the window but needs no cancellable
+    // in-flight generation, no turn revisions, and cannot speak over a user
+    // who was only pausing.
+    const endpoint_ms: usize = if (flagVal(args, "--endpoint-ms")) |v| try std.fmt.parseInt(usize, v, 10) else 800;
+    const endpoint_hops = endpoint_ms / 16; // the pump's hop is 16 ms
+    // Quiet needed before generation starts SPECULATIVELY, against the
+    // transcript as it stands. Waiting out `--endpoint-ms` is dead time the
+    // chat model could have been working through; starting here and
+    // abandoning the request if the user resumes converts most of that window
+    // into a head start. Must be well under `endpoint_ms` to be worth
+    // anything. 0 disables speculation.
+    const spec_ms: usize = if (flagVal(args, "--speculate-ms")) |v| try std.fmt.parseInt(usize, v, 10) else 240;
+    const spec_hops = spec_ms / 16;
     const seed: i64 = if (flagVal(args, "--seed")) |s| try std.fmt.parseInt(i64, s, 10) else 7;
     const max_reply: usize = if (flagVal(args, "--max-reply")) |s| try std.fmt.parseInt(usize, s, 10) else 160;
 
@@ -1872,30 +2529,45 @@ pub fn main(init: std.process.Init) anyerror!void {
     var asr_weights = parakeet_weights.ParakeetWeights.init(&asr_ctx, &asr_file);
     defer asr_weights.deinit();
     var sess = try parakeet_streaming.StreamingSession.init(allocator, &asr_file, asr_cfg, asr_sc, &asr_weights, "en");
+    sess.watch_eou = hasFlag(args, "--eou-probe");
     defer sess.deinit();
     const pieces = try parakeet_loader.loadPieces(&asr_file, allocator);
 
-    tui.status("[load] chat…", .{});
-    var chat_file = try fucina.gguf.File.loadMmap(allocator, io, chat_path);
-    defer chat_file.deinit();
-    var chat_ctx: ExecContext = undefined;
-    chat_ctx.init(allocator);
-    defer chat_ctx.deinit();
-    const chat_cfg = try llm.qwen3.model.Config.fromGguf(&chat_file);
-    var chat_model = try llm.qwen3.model.Model.loadGgufFromFile(&chat_ctx, &chat_file, chat_cfg);
-    defer chat_model.deinit();
-    var chat_tok = try llm.tokenizer.Tokenizer.initFromGguf(allocator, &chat_file, .{});
-    defer chat_tok.deinit();
-    const template = llm.chat.Template.detect(chat_file.getString("tokenizer.chat_template")) orelse {
-        tui.line("error: chat model has no recognizable chat template", .{});
-        return;
-    };
-    var convo = try llm.chat.Conversation(llm.qwen3.model.Model, llm.tokenizer).init(&chat_ctx, &chat_model, &chat_tok, template, .{
-        .system = system,
-        .max_response_tokens = max_reply,
-        .think_off = true,
-    });
-    defer convo.deinit();
+    var hosted: ?remote_chat.Hosted = null;
+    defer if (hosted) |*h| h.deinit();
+    if (chat_url_flag == null) {
+        tui.status("[load] chat…", .{});
+        const port: u16 = if (flagVal(args, "--chat-port")) |p|
+            try std.fmt.parseInt(u16, p, 10)
+        else
+            remote_chat.Hosted.pickPort(io, 8137, 32) catch {
+                tui.line("error: no free port in 8137-8168 — pass --chat-port N", .{});
+                return;
+            };
+        hosted = remote_chat.Hosted.start(allocator, io, chat_path, port, 8192) catch |e| {
+            if (e == error.PortNotOurs) {
+                tui.line("error: port {d} is already serving something else — use --chat-port N", .{port});
+            } else {
+                tui.line("error: could not serve {s}: {s}", .{ chat_path, @errorName(e) });
+            }
+            return;
+        };
+    }
+
+    const chat_url = chat_url_flag orelse hosted.?.url;
+    const chat_model_name = flagVal(args, "--chat-model") orelse
+        (if (chat_path.len > 0) std.fs.path.stem(chat_path) else "local");
+    var chat = try remote_chat.Client.init(
+        allocator,
+        io,
+        chat_url,
+        chat_model_name,
+        system,
+        max_reply,
+        flagVal(args, "--chat-api-key"),
+    );
+    defer chat.deinit();
+    tui.line("\x1b[90m[chat] {s} via {s}\x1b[0m", .{ chat_model_name, chat_url });
 
     tui.status("[load] tts…", .{});
     var tts_file = try fucina.gguf.File.loadMmap(allocator, io, tts_path);
@@ -1984,6 +2656,9 @@ pub fn main(init: std.process.Init) anyerror!void {
     // --- audio I/O: one 48 kHz duplex stream, callback-clock-aligned ---------
     // (--sim <wav> [--sim-barge <wav>] swaps the device for a scripted driver)
     var engine = duplex.Engine{};
+    // The cushion is the TTS engine's real-time margin priced in latency —
+    // the faster producer buys a shallower hold.
+    engine.warmup_samples = duplex.Engine.warmupSamplesFor(use_pocket);
     var sim: ?*SimDriver = null;
     if (flagVal(args, "--sim")) |sim_path| {
         const sd = try allocator.create(SimDriver);
@@ -2011,9 +2686,16 @@ pub fn main(init: std.process.Init) anyerror!void {
     }
 
     var pump = AecPump.init(&engine, if (aec_sess) |*sx| sx else null, &aec_ctx);
+    if (flagVal(args, "--barge-floor")) |v| {
+        pump.min_floor = std.fmt.parseFloat(f32, v) catch {
+            tui.line("error: --barge-floor expects a number (default 0.010)", .{});
+            return;
+        };
+    }
     pump.debug = hasFlag(args, "--aec-debug");
     var up2 = duplex.Upsampler2.init();
-    var reveal = Reveal{ .tui = &tui, .engine = &engine, .eager = eager_text };
+    var reveal = Reveal{ .tui = &tui, .engine = &engine, .eager = eager_text, .allocator = allocator };
+    defer reveal.deinit();
     var barge: BargeCtx = undefined; // wired below once the streamer exists
 
     var reply_acc: std.ArrayList(u8) = .empty;
@@ -2098,10 +2780,14 @@ pub fn main(init: std.process.Init) anyerror!void {
     }.go;
 
     var last_token_count: usize = 0;
+    var spec = SpecTurn{ .allocator = allocator, .chat = &chat };
+    defer spec.deinit();
     var eou_seen: usize = sess.eou_events;
     var reply_buf: [256]u8 = undefined;
     var continue_session = false;
     var interrupts_fired: usize = 0;
+    var spec_started: usize = 0;
+    var spec_aborts: usize = 0;
     var last_reply: []u8 = &.{};
     defer if (last_reply.len > 0) allocator.free(last_reply);
 
@@ -2126,6 +2812,12 @@ pub fn main(init: std.process.Init) anyerror!void {
         // still on the QUEUE and get applied fresh below.
         typed.reset();
         tui.promptBegin();
+        // Transcript-stability tracking for the quiet-window close. The
+        // transcript LAGS the audio, so quiet alone is not enough — a word
+        // still being decoded would be cut off.
+        var stable_tokens: usize = sess.tokens.items.len;
+        var stable_since: usize = barge.hops_seen;
+        var closed_on_quiet = false;
         const utterance: []u8 = listen: while (true) {
             if (sim) |sd| if (sd.done.load(.acquire)) {
                 const tb: f64 = if (sd.barge_at) |b| @as(f64, @floatFromInt(b)) / 48000.0 else -1;
@@ -2175,6 +2867,40 @@ pub fn main(init: std.process.Init) anyerror!void {
                 const text = try parakeet_tokenizer.detokenize(allocator, pieces, sess.tokens.items);
                 break :listen text;
             }
+            if (sess.tokens.items.len != stable_tokens) {
+                stable_tokens = sess.tokens.items.len;
+                stable_since = barge.hops_seen;
+                // The words changed under it: whatever it is writing answers a
+                // question the user did not finish asking.
+                if (spec.running()) {
+                    spec.abort();
+                    spec_aborts += 1;
+                }
+            }
+            const quiet_h = barge.hops_seen -| barge.last_voice;
+            const stable_h = barge.hops_seen -| stable_since;
+            if (spec.running() and quiet_h < spec_hops) {
+                // Voice came back before the window closed.
+                spec.abort();
+                spec_aborts += 1;
+            }
+            if (!typed.active and spec_hops > 0 and !spec.running() and !spec.done.load(.acquire) and
+                sess.tokens.items.len > 0 and quiet_h >= spec_hops and stable_h >= spec_hops)
+            {
+                const partial = try parakeet_tokenizer.detokenize(allocator, pieces, sess.tokens.items);
+                defer allocator.free(partial);
+                if (!echoGuard(partial, last_reply, false)) {
+                    spec.start(partial) catch {};
+                    spec_started += 1;
+                }
+            }
+            if (!typed.active and endpoint_hops > 0 and sess.tokens.items.len > 0 and
+                quiet_h >= endpoint_hops and stable_h >= endpoint_hops)
+            {
+                closed_on_quiet = true;
+                const text = try parakeet_tokenizer.detokenize(allocator, pieces, sess.tokens.items);
+                break :listen text;
+            }
             std.Io.sleep(io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch {};
         };
         railctl.set(.captured);
@@ -2188,6 +2914,47 @@ pub fn main(init: std.process.Init) anyerror!void {
         const utt = if (typed.active) utterance else skipWords(utterance, barge.strip_words);
         barge.strip_words = 0;
         const t_eou = nowNs(io);
+        // The silence the endpointer sat through before it committed. Every
+        // other number on the turn line starts HERE, so this is the one part
+        // of the user's wait that the rest of the instrumentation cannot see.
+        // Measured on the pump's own audio clock (hops, not wall time), so a
+        // busy machine cannot inflate it.
+        const endpoint_s = @as(f64, @floatFromInt(barge.hops_seen -| barge.last_voice)) * 0.016;
+        if (pump.debug) std.debug.print("[eou-dbg] clock={d:.2}s gap={d:.2}s closed-by={s}\n", .{ pump.clock(), endpoint_s, if (closed_on_quiet) "quiet-window" else "EOU" });
+        if (sess.watch_eou) {
+            // Encoder frames are 80 ms here (10 ms hop, x8 subsampling).
+            const fs = 0.08;
+            const probs = sess.eou_probs.items;
+            var mx: f32 = 0;
+            var first: [3]?usize = .{ null, null, null };
+            const thr = [3]f32{ 0.10, 0.30, 0.50 };
+            for (probs, 0..) |pv, i| {
+                if (pv > mx) mx = pv;
+                for (thr, 0..) |t, ti| if (first[ti] == null and pv >= t) {
+                    first[ti] = i;
+                };
+            }
+            std.debug.print("[eou-probe] frames={d} ({d:.2}s) max_p={d:.3}", .{ probs.len, @as(f64, @floatFromInt(probs.len)) * fs, mx });
+            for (thr, 0..) |t, ti| {
+                if (first[ti]) |i| {
+                    std.debug.print("  p>={d:.2}@{d:.2}s", .{ t, @as(f64, @floatFromInt(i)) * fs });
+                } else std.debug.print("  p>={d:.2}:never", .{t});
+            }
+            std.debug.print("\n", .{});
+            // The trajectory, not just the crossings: a threshold endpointer is
+            // only worth building if the rise spans several frames. Printed as
+            // the tail (where the commit happens) plus a rise-width count.
+            var rising: usize = 0;
+            for (probs) |pv| {
+                if (pv >= 0.01 and pv < 0.50) rising += 1;
+            }
+            const tail_n = @min(probs.len, 16);
+            std.debug.print("[eou-probe] rise_frames(0.01<=p<0.50)={d}  tail:", .{rising});
+            for (probs[probs.len - tail_n ..], 0..) |pv, i| {
+                std.debug.print(" {d:.2}s={d:.3}", .{ @as(f64, @floatFromInt(probs.len - tail_n + i)) * fs, pv });
+            }
+            std.debug.print("\n", .{});
+        }
         if (utt.len == 0) continue;
 
         if (pump.lock_ms_event) |ms| {
@@ -2213,12 +2980,130 @@ pub fn main(init: std.process.Init) anyerror!void {
         last_token_count = 0;
         reply_acc.clearRetainingCapacity();
         barge.phase = .think;
+        // The whole history rides every request, so it has to stay inside the
+        // server's context budget; the system message is never dropped.
+        chat.trim(24);
+
+        // The talker starts on the first finished sentence, so everything it
+        // needs is armed BEFORE generation: the reply is spoken while it is
+        // still being written. `barge.phase` goes to .speak with it — the STT
+        // must not transcribe once audio can reach the room.
+        var speak_worker = SpeakWorker{
+            .allocator = allocator,
+            .io = io,
+            .engine = &engine,
+            .up2 = &up2,
+            .barge = &barge,
+            .rail = &railctl,
+            .reveal = &reveal,
+            .interrupt = &interrupt,
+            .abort = if (sim) |sd| &sd.done else null,
+            .full_duplex = full_duplex,
+            .seed = seed,
+            .pocket = if (pocket_engine) |*pe| pe else null,
+            .qwen = if (use_pocket) null else .{
+                .ctx = &tts_ctx,
+                .model = &tts_model,
+                .tok = &tts_tok,
+                .kvs = &tts_kvs,
+                .codec_ctx = &codec_ctx,
+                .codec_dec = &codec_dec,
+                .codec_sess = &codec_sess,
+                .lang = lang,
+                .speaker = speaker,
+            },
+        };
+        interrupt.store(false, .release);
+        pump.resetGate();
+        barge.holds = 0;
+        barge.false_holds = 0;
+        barge.held_hops = 0;
+        barge.think_scan_ns = 0;
+        var armed_frame = engine.armWarmup();
+        var t_speak = nowNs(io);
+        engine.setSpeaking(true);
+        engine.gaps.store(0, .monotonic);
+        reveal.begin();
+
+        // Adopt the speculation only if it answers THESE words. The transcript
+        // can still grow between the last stability check and the close, and a
+        // reply to a half-finished question is worse than a slower one.
+        var adopted = false;
+        if (spec.running() or spec.done.load(.acquire)) {
+            if (std.mem.eql(u8, spec.utt, utt)) {
+                adopted = true;
+            } else {
+                spec.abort();
+                spec_aborts += 1;
+            }
+        }
+
         var reply = ReplyWriter.init(allocator, &tui, &barge, &railctl, &reply_acc, &reply_buf);
-        _ = try convo.send(utt, &reply.interface);
-        try reply.interface.flush();
-        tui.closeLine();
+        // Who gets the reply a sentence at a time:
+        //
+        // - Pocket pays nothing per span (it already rewinds to the voice
+        //   prefix at every sentence internally) and starts producing
+        //   immediately, so the overlap is close to free: 1.32 s -> 0.87 s on
+        //   the long fixture, and time-to-first-audio stops tracking reply
+        //   length at all.
+        // - Qwen3-TTS rebuilds a speaker-conditioned prompt and restarts the
+        //   talker KV per call. Measured, per-sentence spans cost it 3.97 s ->
+        //   4.42 s: its first audio waits on the 2 s cushion, not on the chat
+        //   model, so there is nothing for the overlap to hide and the extra
+        //   prompt builds are pure loss. It speaks the reply in one span.
+        // - --eager-text puts the whole reply on screen from the generator
+        //   thread; overlapping the talker would give the TUI two writers.
+        if (!tui.eager_text and use_pocket) reply.speak = &speak_worker;
+        // The talker holds pointers into this frame, so no error may escape
+        // past it while its thread is alive.
+        errdefer awaitSpeech(&speak_worker, io);
+        if (adopted) {
+            // The bytes already generated are free; the rest streams in on the
+            // worker while the main thread does what it always does — split
+            // sentences, feed the talker, keep the pump and rail alive.
+            var taken: usize = 0;
+            var sent: usize = 0;
+            while (true) {
+                const finished = spec.done.load(.acquire);
+                const n = try spec.drainInto(&reply_acc, allocator, taken);
+                taken += n;
+                if (n > 0 and !tui.eager_text) sent = dispatchSentences(reply_acc.items, sent, &speak_worker);
+                if (tui.eager_text and n > 0) tui.assistantDelta(reply_acc.items[reply_acc.items.len - n ..]);
+                if (finished and n == 0) break;
+                if (interrupt.load(.acquire) or barge.pending) break;
+                if (!speak_worker.speaking()) {
+                    const scan_t0 = nowNs(io);
+                    barge.scan() catch {};
+                    barge.think_scan_ns += nowNs(io) - scan_t0;
+                    railctl.draw(pump.res_ema);
+                }
+                if (n == 0) std.Io.sleep(io, .{ .nanoseconds = 3 * std.time.ns_per_ms }, .awake) catch {};
+            }
+            reply.sent = sent;
+            const failed = spec.failed;
+            // The speculation deliberately recorded nothing. Now that it IS
+            // this turn, the exchange enters the history — once, with the
+            // committed words rather than the partial ones it started from.
+            if (!failed and !interrupt.load(.acquire) and !barge.pending)
+                chat.commit(utt, reply_acc.items) catch {};
+            spec.join();
+            if (failed) {
+                awaitSpeech(&speak_worker, io);
+                engine.setSpeaking(false);
+                barge.phase = .idle;
+                tui.line("\x1b[90m[turn] chat request failed\x1b[0m", .{});
+                continue;
+            }
+        } else {
+            _ = try chat.send(utt, &reply.interface);
+            try reply.interface.flush();
+        }
+        if (tui.eager_text) tui.closeLine();
         const reply_text = std.mem.trim(u8, reply_acc.items, " \n");
         if (reply_text.len == 0) {
+            awaitSpeech(&speak_worker, io);
+            engine.setSpeaking(false);
+            barge.phase = .idle;
             if (barge.pending) {
                 interrupts_fired += 1;
                 continue_session = full_duplex;
@@ -2234,6 +3119,17 @@ pub fn main(init: std.process.Init) anyerror!void {
         var tool_rounds: usize = 0;
         while (tools_on and tool_rounds < 3) {
             const tc = parseToolCall(spoken) orelse break;
+            if (tool_rounds == 0) {
+                // The model asked for a tool. Almost always it emitted the
+                // tag before any sentence terminator, so nothing was spoken
+                // and this returns at once; if it did open with a spoken
+                // line, that line finishes playing before ACTING starts —
+                // and either way the main thread takes the pump, the rail
+                // and the reveal back for the duration of the round.
+                awaitSpeech(&speak_worker, io);
+                speak_worker.reset();
+                engine.setSpeaking(false);
+            }
             tool_rounds += 1;
             var result_buf: [128]u8 = undefined;
             var result: []const u8 = "ok";
@@ -2287,7 +3183,7 @@ pub fn main(init: std.process.Init) anyerror!void {
             reply_acc.clearRetainingCapacity();
             var reply2 = ReplyWriter.init(allocator, &tui, &barge, &railctl, &reply_acc, &reply_buf);
             tui.userFinal("(tool result)");
-            _ = try convo.send(tool_msg, &reply2.interface);
+            _ = try chat.send(tool_msg, &reply2.interface);
             try reply2.interface.flush();
             tui.closeLine();
             allocator.free(spoken);
@@ -2298,176 +3194,42 @@ pub fn main(init: std.process.Init) anyerror!void {
             std.mem.trim(u8, spoken[0..off], " \n")
         else
             spoken;
-        if (reply_text2.len == 0) continue;
+        if (reply_text2.len == 0) {
+            awaitSpeech(&speak_worker, io);
+            engine.setSpeaking(false);
+            barge.phase = .idle;
+            continue;
+        }
 
         if (last_reply.len > 0) allocator.free(last_reply);
         last_reply = try allocator.dupe(u8, reply_text2);
 
-        // SPEAK: pocket streams 80 ms frames straight to the out-ring;
-        // qwen3-tts goes through the pipelined codec worker.
+        // SPEAK: whatever the sentence splitter has not already handed over.
+        // On a plain reply that is the trailing partial sentence; after a
+        // tool round it is the whole follow-up, because the round joined the
+        // talker to take the pump back and re-armed for a fresh reply.
         railctl.set(.speaking);
-        // Only Enter pressed FROM HERE interrupts this reply; a fresh onset
-        // grace for the auxiliary energy gate.
-        interrupt.store(false, .release);
-        barge.phase = .speak;
-        pump.resetGate();
-        engine.armWarmup();
-        engine.setSpeaking(true);
-        engine.gaps.store(0, .monotonic);
-        var frames_spoken: usize = 0;
-        var first_push: ?i96 = null;
-        reveal.begin(reply_text2);
-
-        if (pocket_engine) |*pe| {
-            const PocketCb = struct {
-                engine: *duplex.Engine,
-                up2: *duplex.Upsampler2,
-                barge: *BargeCtx,
-                interrupt: *std.atomic.Value(bool),
-                abort: ?*const std.atomic.Value(bool),
-                full_duplex: bool,
-                io: std.Io,
-                first_push_ns: *?i96,
-                rail: *RailCtl,
-                reveal: *Reveal,
-
-                fn stop(c: *const @This()) bool {
-                    if (c.abort) |a| if (a.load(.acquire)) return true;
-                    return c.interrupt.load(.acquire) or c.barge.pending;
-                }
-
-                fn onFrame(c: *@This(), pcm: []const f32) bool {
-                    if (c.stop()) return false;
-                    if (c.full_duplex) c.barge.scan() catch {};
-                    if (c.stop()) return false;
-                    var acc: f32 = 0;
-                    for (pcm) |x| acc += x * x;
-                    c.rail.setOutputLevel(@sqrt(acc / @as(f32, @floatFromInt(pcm.len))));
-                    c.rail.set(if (c.barge.stage == .paused) .waiting else .speaking);
-                    c.rail.draw(c.barge.pump.res_ema);
-                    c.reveal.step();
-                    for (pcm) |x| {
-                        var pair: [2]f32 = undefined;
-                        c.up2.push(x, &pair);
-                        var off: usize = 0;
-                        while (off < 2) {
-                            off += c.engine.out48.push(pair[off..]);
-                            if (off == 2) break;
-                            if (c.stop()) return false;
-                            std.Io.sleep(c.io, .{ .nanoseconds = 2 * std.time.ns_per_ms }, .awake) catch {};
-                        }
-                        c.reveal.notePushed(@abs(x) > Reveal.voice_thresh);
-                    }
-                    if (c.first_push_ns.* == null) c.first_push_ns.* = nowNs(c.io);
-                    return true;
-                }
-            };
-            var pcb = PocketCb{
-                .engine = &engine,
-                .up2 = &up2,
-                .barge = &barge,
-                .interrupt = &interrupt,
-                .abort = if (sim) |sd| &sd.done else null,
-                .full_duplex = full_duplex,
-                .io = io,
-                .first_push_ns = &first_push,
-                .rail = &railctl,
-                .reveal = &reveal,
-            };
-            frames_spoken = try pe.speak(reply_text2, .{
-                .temp = pe.temp_default,
-                .seed = @bitCast(seed),
-            }, &pcb, PocketCb.onFrame);
-            reveal.setTotalFromPushed();
-            reveal.markAllPushed();
-            if (!pcb.stop()) {
-                engine.releaseWarmup();
-                while (engine.outPending() > 0) {
-                    if (engine.outPending() < duplex.period_frames * 4) engine.setSpeaking(false);
-                    if (full_duplex) barge.scan() catch {};
-                    railctl.set(if (barge.stage == .paused) .waiting else .speaking);
-                    railctl.hold_listening = sess.tokens.items.len != 0;
-            railctl.draw(pump.res_ema);
-                    reveal.step();
-                    if (pcb.stop()) break;
-                    std.Io.sleep(io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch {};
-                }
+        const rest = blk: {
+            if (tool_rounds > 0) {
+                // The round re-armed nothing yet: this is a fresh reply.
+                interrupt.store(false, .release);
+                pump.resetGate();
+                armed_frame = engine.armWarmup();
+                t_speak = nowNs(io);
+                engine.setSpeaking(true);
+                break :blk reply_text2;
             }
-        } else {
-            var prompt = try qtts.prompt.build(allocator, &tts_model, &tts_tok, .{
-                .text = reply_text2,
-                .language = lang,
-                .speaker = speaker,
-            });
-            defer prompt.deinit();
-            var sink = SpeakSink{
-                .ctx = &codec_ctx,
-                .dec = &codec_dec,
-                .sess = &codec_sess,
-                .engine = &engine,
-                .up2 = &up2,
-                .barge = &barge,
-                .full_duplex = full_duplex,
-                .allocator = allocator,
-                .interrupt = &interrupt,
-                .abort = if (sim) |sd| &sd.done else null,
-                .rail = &railctl,
-                .reveal = &reveal,
-                .io = io,
-                .kq = tts_model.specials.num_code_groups,
-                .chunk_first = 12,
-                .chunk_main = 12,
-                .left_ctx = 0,
-            };
-            defer sink.frames.deinit(allocator);
-            try sink.startWorker();
-            // A generate error must not unwind past a live worker: it would
-            // keep decoding into frames/contexts the defers tear down.
-            errdefer sink.stopWorker();
-
-            var result = try qtts.pipeline.generate(&tts_ctx, &tts_model, &prompt, .{
-                .seed = seed,
-                .max_new_tokens = 512,
-            }, &tts_kvs, SpeakSink.onFrame, &sink, null);
-            defer result.deinit();
-
-            if (!sink.stopRequested() and sink.err == null) {
-                sink.finish() catch |e| {
-                    sink.err = e;
-                };
-                // Frame count is final: the reveal switches to exact pacing.
-                reveal.setTotal(@as(f64, @floatFromInt(sink.frames.items.len / sink.kq)) *
-                    @as(f64, @floatFromInt(qtts.codec.hop_length)) / 24000.0);
-                // Let the worker decode the tail while we keep scanning.
-                while (!sink.queueIdle() and !sink.stopRequested()) {
-                    if (full_duplex) barge.scan() catch {};
-                    reveal.step();
-                    std.Io.sleep(io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch {};
-                }
-                // Final ONLY on the clean exit: a stop leaves the worker
-                // mid-job, still raising the voiced high-water mark — a
-                // premature "final" maps played audio onto a shrunken span
-                // and bright-reveals words the voice never spoke.
-                if (!sink.stopRequested()) reveal.markAllPushed();
-                engine.releaseWarmup(); // short replies below the cushion play now
-                // Drain: wait for the out-ring, then the device tail.
-                while (engine.outPending() > 0) {
-                    if (engine.outPending() < duplex.period_frames * 4) engine.setSpeaking(false);
-                    if (full_duplex) barge.scan() catch {};
-                    railctl.set(if (barge.stage == .paused) .waiting else .speaking);
-                    railctl.hold_listening = sess.tokens.items.len != 0;
-            railctl.draw(pump.res_ema);
-                    reveal.step();
-                    if (sink.stopRequested()) break;
-                    std.Io.sleep(io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch {};
-                }
-            }
-            sink.stopWorker();
-            if (sink.err) |e| return @as(anyerror!void, e);
-            frames_spoken = result.frames;
-            first_push = sink.first_push_ns;
-        }
+            const tail = reply_acc.items[@min(reply.sent, reply_acc.items.len)..];
+            const cut = if (std.mem.indexOf(u8, tail, "<tool_call>")) |o| tail[0..o] else tail;
+            break :blk std.mem.trim(u8, cut, " \n\t");
+        };
+        if (rest.len > 0) speak_worker.say(rest) catch |e| return @as(anyerror!void, e);
+        awaitSpeech(&speak_worker, io);
+        const frames_spoken = speak_worker.frames;
+        const first_push = speak_worker.first_push_ns;
+        if (speak_worker.err) |e| return @as(anyerror!void, e);
         engine.setSpeaking(false);
+
 
         if (interrupt.load(.acquire) or barge.pending) {
             // Cut the reveal BEFORE discarding the queue: the discard makes
@@ -2493,21 +3255,54 @@ pub fn main(init: std.process.Init) anyerror!void {
             // line keeps the full generated text — spoken words bright,
             // the unspoken remainder dimmed (all bright under --eager-text).
             railctl.set(.interrupted);
-            tui.line("\x1b[90m[turn] interrupted — {d} frames generated, queue discarded\x1b[0m", .{frames_spoken});
+            tui.line("\x1b[90m[turn] interrupted — {d} frames generated, queue discarded, holds {d} ({d} false, {d:.1} s)\x1b[0m", .{
+                frames_spoken,
+                barge.holds,
+                barge.false_holds,
+                @as(f64, @floatFromInt(barge.held_hops)) * 0.016,
+            });
         } else {
             reveal.finishAll();
             std.Io.sleep(io, .{ .nanoseconds = 60 * std.time.ns_per_ms }, .awake) catch {};
-            const ttfa_s = if (first_push) |t1| @as(f64, @floatFromInt(t1 - t_eou)) / 1e9 else 0.0;
+            const queued_s = if (first_push) |t1| @as(f64, @floatFromInt(t1 - t_eou)) / 1e9 else 0.0;
+            // What the user actually waited: the cushion sits between the
+            // first frame entering the ring and the first sample reaching the
+            // device, so the queued figure alone understates the turn.
+            const heard_s = if (engine.audibleAfter(armed_frame)) |dt|
+                @as(f64, @floatFromInt(t_speak - t_eou)) / 1e9 + dt
+            else
+                queued_s;
             // The user may have started speaking near the reply tail without
             // reaching the barge threshold — carry those words forward.
             const tail_novel = if (full_duplex) barge.novelCount() catch 0 else 0;
             continue_session = tail_novel >= 1;
             railctl.question_pending = std.mem.endsWith(u8, std.mem.trimEnd(u8, reply_text2, " "), "?");
             railctl.set(.complete);
-            tui.line("\x1b[90m[turn] first-audio-queued {d:.1} s, {d} frames, audible gaps {d}\x1b[0m", .{
-                ttfa_s,
+            // Split the wait at the seam: chat = end of your words to the
+            // first sentence worth speaking, tts = that sentence to the first
+            // frame queued, cushion = the hold before it was audible.
+            const chat_s = if (speak_worker.first_say_ns) |t1|
+                @as(f64, @floatFromInt(t1 - t_eou)) / 1e9
+            else
+                queued_s;
+            tui.line("\x1b[90m[turn] first-audio {d:.2} s (endpoint {d:.2} + chat {d:.2} [aec/stt {d:.2}] + tts {d:.2} + cushion {d:.2}), {d} frames, audible gaps {d}, holds {d} ({d} false, {d:.1} s)\x1b[0m", .{
+                heard_s + endpoint_s,
+                endpoint_s,
+                chat_s,
+                @as(f64, @floatFromInt(barge.think_scan_ns)) / 1e9,
+                queued_s - chat_s,
+                heard_s - queued_s,
                 frames_spoken,
                 engine.gaps.load(.monotonic),
+                barge.holds,
+                barge.false_holds,
+                @as(f64, @floatFromInt(barge.held_hops)) * 0.016,
+            });
+            tui.line("\x1b[90m[turn] closed-by {s}, speculation {s} (started {d}, abandoned {d})\x1b[0m", .{
+                if (closed_on_quiet) "quiet-window" else "EOU",
+                if (adopted) "adopted" else "unused",
+                spec_started,
+                spec_aborts,
             });
         }
         barge.phase = .idle;

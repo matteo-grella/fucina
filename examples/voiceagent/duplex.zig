@@ -177,8 +177,34 @@ pub const Engine = struct {
     was_fed: bool = false, // callback-local: ring was non-empty
     gaps: std.atomic.Value(usize) = .init(0), // audible starvation events
     underruns: std.atomic.Value(usize) = .init(0),
+    /// Callback clock: 48 kHz frames the device has consumed. The only clock
+    /// shared with the producer that costs nothing to read in the callback,
+    /// and the one that dates `audible_frame` exactly.
+    frames_out: std.atomic.Value(u64) = .init(0),
+    /// Frame index at which this reply first became AUDIBLE (cushion filled
+    /// or latch released). `no_audible` until then. Reset by armWarmup.
+    audible_frame: std.atomic.Value(u64) = .init(no_audible),
+    /// Cushion depth, in 48 kHz samples. Set per TTS engine: it must cover
+    /// the worst production stall a reply can hit, and every sample of it is
+    /// latency the user waits through before hearing anything. See
+    /// `warmupSamplesFor`.
+    warmup_samples: usize = 2 * stream_rate,
 
-    pub const warmup_samples = 2 * stream_rate; // 2 s cushion
+    pub const no_audible = std.math.maxInt(u64);
+
+    /// How deep a cushion a TTS engine needs, measured on an M1 Max against
+    /// the 12.5 fps real-time budget:
+    ///
+    /// - Pocket TTS sustains ~20.8 fps (1.66x real time) and produces its
+    ///   first frame immediately, so 0.4 s absorbs a stall with room to
+    ///   spare — measured `audible gaps 0` on both the short and long sim
+    ///   fixtures, while 2 s cost a flat ~1.15 s of pure time-to-first-audio.
+    /// - Qwen3-TTS is the talker plus a chunked codec worker and only clears
+    ///   ~1.27x end to end; at 0.4 s the long fixture broke up into 8 audible
+    ///   gaps. Its 2 s is load-bearing, not conservatism.
+    pub fn warmupSamplesFor(pocket: bool) usize {
+        return if (pocket) stream_rate / 2 else 2 * stream_rate;
+    }
 
     /// Realtime duplex callback (miniaudio thread): play out-ring → output,
     /// capture input → mic ring, and mirror the played frames → ref ring.
@@ -188,6 +214,8 @@ pub const Engine = struct {
     pub fn callback(user: ?*anyopaque, output: ?[*]f32, input: ?[*]const f32, frame_count: c_uint) callconv(.c) void {
         const self: *Engine = @ptrCast(@alignCast(user.?));
         const n: usize = frame_count;
+        const frame0 = self.frames_out.load(.monotonic);
+        self.frames_out.store(frame0 + n, .release);
         if (self.discard_requested.load(.acquire)) {
             self.out48.discardAll();
             self.discard_requested.store(false, .release);
@@ -200,11 +228,17 @@ pub const Engine = struct {
             const chunk = outbuf[0..sl];
             if (paused) {
                 @memset(chunk, 0);
-            } else if (self.warmup.load(.acquire) and self.out48.len() < warmup_samples) {
+            } else if (self.warmup.load(.acquire) and self.out48.len() < self.warmup_samples) {
                 @memset(chunk, 0); // hold: cushion not built yet
             } else {
                 self.warmup.store(false, .release); // latch open for this reply
                 const got = self.out48.pop(chunk);
+                // First real samples of this reply reach the device here —
+                // this, not the first push into the ring, is when the user
+                // hears it. Stamped on the callback clock so no wall clock
+                // has to be read from the realtime thread.
+                if (got > 0 and self.audible_frame.load(.monotonic) == no_audible)
+                    self.audible_frame.store(frame0 + off, .release);
                 if (got < sl) {
                     @memset(chunk[got..], 0);
                     if (!(got == 0 and self.out48.len() == 0)) _ = self.underruns.fetchAdd(1, .monotonic);
@@ -249,9 +283,21 @@ pub const Engine = struct {
     }
 
     /// Arm the warm-up latch for a new reply (playback holds until the
-    /// cushion is built or the latch is released).
-    pub fn armWarmup(self: *Engine) void {
+    /// cushion is built or the latch is released). Returns the callback-clock
+    /// frame it was armed at: pair it with `audibleAfter` to date the moment
+    /// the reply became audible.
+    pub fn armWarmup(self: *Engine) u64 {
+        self.audible_frame.store(no_audible, .release);
         self.warmup.store(true, .release);
+        return self.frames_out.load(.acquire);
+    }
+
+    /// Seconds from `armed` (an `armWarmup` return) to the first audible
+    /// sample, or null if the reply never became audible.
+    pub fn audibleAfter(self: *Engine, armed: u64) ?f64 {
+        const at = self.audible_frame.load(.acquire);
+        if (at == no_audible or at < armed) return null;
+        return @as(f64, @floatFromInt(at - armed)) / @as(f64, stream_rate);
     }
 
     /// Release the latch (generation finished / short reply / barge).

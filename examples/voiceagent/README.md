@@ -1,17 +1,19 @@
 # voiceagent — native cascade voice agent in a TUI
 
-Microphone → **Parakeet** streaming STT (learned `<EOU>` endpointing) →
-in-process **Qwen3** chat → **Qwen3-TTS** → speakers. Every stage is a Fucina
-port running in one process — no Python, no server, no browser. The
+Microphone → **Parakeet** streaming STT (learned `<EOU>` endpointing) → a chat
+model behind an OpenAI-compatible endpoint → **Qwen3-TTS** or **Pocket TTS** →
+speakers. Every stage is a Fucina port, and by default all of them run inside
+one process — no Python, no browser, nothing to start beforehand. The
 architecture mirrors huggingface/speech-to-speech's VAD→STT→LLM→TTS cascade
 with the fucina-native stages substituted (the EOU model replaces Silero VAD's
 endpointing role).
 
 ## Run
 
-Four stages, four GGUFs. `--asr` and `--chat` are always required; the TTS
-side is either a Qwen3-TTS talker plus its `--codec`, or a single Pocket TTS
-model with no codec at all.
+Four stages, four GGUFs. `--asr` is always required, as is a chat backend —
+either `--chat` for one the agent hosts itself or `--chat-url` for one already
+running. The TTS side is either a Qwen3-TTS talker plus its `--codec`, or a
+single Pocket TTS model with no codec at all.
 
 **Recommended default** — 4B chat obeys spoken style, Q8 talker runs ~41 fps
 against a 12.5 fps budget:
@@ -46,12 +48,35 @@ zig build voiceagent -Doptimize=ReleaseFast -- \
     --voice alba
 ```
 
-The chat model dominates end-of-utterance-to-first-audio latency: holding
-everything else fixed and interleaving the runs, 4B-Q8 lands around 1.9 s and
-1.7B-Q4_K_M around 1.1 s on an M1 Max. Treat those as indicative rather than
-exact — the spread across runs is a couple of hundred milliseconds, and the
-figure moves with the utterance, since it includes chat prefill and
-generation. Measure your own pairing with `--sim` before trusting a number.
+Last word to first audio *heard* — endpointing included — on an M1 Max under
+`--sim`, with Qwen3-1.7B-Q4_K_M served by lmserve and Pocket TTS speaking,
+median of 3 runs:
+
+| | short question (1.8 s) | long question (10.2 s) |
+|---|---|---|
+| total | **1.14 s** | **1.15 s** |
+| of which endpointing | 0.16 s | 0.58 s |
+
+Both fixtures are synthesised, so the pair reproduces exactly:
+
+```sh
+printf 'What is the capital of France?' \
+  | ./zig-out/bin/fucina-pockettts \
+      --model models/pocket-tts/pocket-tts-english-v2.gguf \
+      --voice alba --seed 7 -o short.wav
+```
+
+The reply is spoken sentence-by-sentence, so what matters after that is how
+fast the chat model writes its FIRST sentence, not the whole reply — which is
+why the total barely moves between a two-second question and a ten-second one.
+The chat model dominates the remainder, and the 4B keeps some dependence on the
+question because it writes a longer opening sentence for it. The Qwen3-TTS tier
+is slower to first audio — ~3.3 s and ~4.9 s for the
+same pair with the 0.6B-Q8 talker — because it speaks the reply in one span
+behind a 2 s cushion (see [Output pipeline](#output-pipeline)); it buys voice
+quality, not latency. Treat these as indicative — the spread across runs is a
+couple of hundred milliseconds. Measure your own pairing with `--sim` before
+trusting a number.
 The `--tts` GGUF's architecture selects the engine, so switching families is
 just a path change — drop `--codec` for Pocket, which needs none, and skip
 loading the codec entirely. Quantizing Pocket further with
@@ -102,7 +127,13 @@ their own terms — see [`docs/THIRD-PARTY-NOTICES.md`](../../docs/THIRD-PARTY-N
 | flag | effect |
 |---|---|
 | `--asr <gguf>` | Parakeet streaming STT with learned `<EOU>` endpointing (required) |
-| `--chat <gguf>` | Qwen3 chat model (required) |
+| `--chat <gguf>` | chat model, served by the lmserve server hosted in-process (any architecture it supports) |
+| `--chat-url URL` | speak `/v1/chat/completions` to an existing server instead of spawning one |
+| `--endpoint-ms N` | quiet + transcript-stable window that closes a turn (default 800; 0 = wait for `<EOU>` only) |
+| `--speculate-ms N` | quiet before generation starts speculatively, through that window (default 240; 0 = off) |
+| `--chat-port N` | loopback port for the hosted server (default: first free in 8137-8168) |
+| `--chat-model NAME` | model name sent in the request (default: the GGUF's stem) |
+| `--chat-api-key K` | `Authorization: Bearer` for `--chat-url` |
 | `--tts <gguf>` | talker or Pocket model; its architecture picks the engine (required) |
 | `--codec <gguf>` | RVQ codec decoder — Qwen3-TTS only, omit for Pocket |
 | `--speaker NAME` | CustomVoice speaker for Qwen3-TTS (default `Aiden`) |
@@ -117,18 +148,132 @@ their own terms — see [`docs/THIRD-PARTY-NOTICES.md`](../../docs/THIRD-PARTY-N
 | `--list-devices` | print capture and playback devices (system defaults marked) and exit |
 | `--aec <gguf>` | echo-canceller model (default `models/aec/gtcrn_aec.gguf`) |
 | `--no-aec` | disable echo cancellation — falls back to half-duplex, no barge-in |
-| `--aec-debug` | trace delay-lock and barge-gate decisions to stderr; the first thing to read when barge-in does nothing |
+| `--aec-debug` | trace delay-lock and barge-gate decisions to stderr; the first thing to read when barge-in does nothing, or when a reply keeps stalling |
+| `--barge-floor RMS` | absolute residual level below which nothing counts as speech (default `0.010`). Raise it if replies stall on their own echo — see [When the reply keeps stalling](#when-the-reply-keeps-stalling) |
+| `--eou-probe` | print the endpointer's per-frame P(`<EOU>`) trajectory at each turn close — max, first threshold crossings, and the tail. Costs one softmax per encoder frame; see [Reading the endpointer](#reading-the-endpointer) |
 | `--no-tools` | disable local tool calling |
-| `--eager-text` | print the reply during THINK instead of revealing it in sync with the voice |
+| `--eager-text` | print the reply during THINK instead of revealing it in sync with the voice; also turns off sentence-at-a-time speaking (one TUI writer) |
 | `--rail-ascii` | force the Signal Rail's ASCII profile |
 | `--prompt-color C` | colour of the `❯` prompt mark (default `white`): a name — `white`, `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `gray` — all rendered bold, or a raw SGR parameter string such as `38;5;208` or `2;37`. `NO_COLOR` drops the escape entirely. |
 
 Headless-sim flags are documented under [Headless end-to-end sim](#headless-end-to-end-sim).
 Enter interrupts a reply; Ctrl-C quits.
 
+## Chat backend
+
+The chat stage is an OpenAI-compatible endpoint, always. Either one the agent
+hosts itself:
+
+```sh
+--chat models/gemma-4-26B-A4B-it-UD-Q6_K.gguf     # served in-process
+```
+
+or one you point it at — lmserve, llama.cpp, vLLM, a hosted provider:
+
+```sh
+--chat-url http://127.0.0.1:8080/v1 --chat-model my-model
+```
+
+The first form is **not a child process**: `examples/lmserve` is built as a
+module and its `serveBlocking` runs on a thread inside this binary. One
+process, one executable, nothing to find on `$PATH` and nothing orphaned if the
+agent dies. The port is picked by probing for the first free one in 8137-8168 —
+the registered band, deliberately not the ephemeral range (49152+) the OS hands
+to outbound connections.
+
+What that buys over calling `llm.chat.Conversation` directly is the two things
+it cannot do. It dispatches on the GGUF's `general.architecture`, so Gemma,
+Qwen3.5 and the rest work where a `Conversation` is bound to one model type at
+compile time. And its generation can be **abandoned mid-flight**, which is what
+speculative turns are built on — closing the request makes the server flip the
+job's cancel flag.
+
+The loopback socket costs microseconds and buys a hard boundary: the server
+owns its own `ExecContext`, KV slots and worker team. The whole history rides
+every request and the server's prefix cache does what an in-process KV would.
+STT, TTS, echo cancellation and turn-taking remain in-process fucina ports.
+
 ## Turn-taking and echo cancellation
 
 FULL-DUPLEX with barge-in, layered the way production stacks do it:
+
+**Closing the turn.** `<EOU>`/`<EOB>` are tokens the endpointer model emits
+when it is confident. There is no threshold in it to turn down and no earlier,
+softer form of the signal to read instead — see [Reading the
+endpointer](#reading-the-endpointer). On clean speech it is quick: **0.16 s**
+after a short question's last word, **0.58 s** after a long one.
+
+It is not guaranteed to arrive, so the turn also closes on evidence that can
+be measured directly: the room has gone quiet AND the transcript has stopped
+growing, both for `--endpoint-ms` (default 800). Requiring both matters — the
+transcript lags the audio, so quiet alone would cut off a word still being
+decoded. Whichever fires first closes the turn, which makes the window a bound
+on the wait rather than the normal path: speech that ends cleanly commits well
+inside it. `--endpoint-ms 0` removes it entirely.
+
+The window commits on silence alone, with no evidence from the model, and that
+is the trade it makes — an utterance broken by a pause longer than
+`--endpoint-ms` becomes two turns. Lower it and mid-thought pauses start
+becoming turn boundaries.
+
+**Speculating through the window.** Whichever way the turn closes, the quiet
+before it is dead time the chat model could have been working through, so at
+`--speculate-ms` (240) of quiet the reply starts generating against the
+transcript *as it stands*. If the user was only pausing, the request is
+abandoned — closing it makes lmserve flip the job's cancel flag, so it stops
+costing GPU almost immediately — and nothing was ever spoken. If the turn
+closes and the transcript still matches what was speculated against, the reply
+is already part-written and the `chat` term collapses.
+
+The worker is a pure byte producer: it never touches the AEC pump, the rail,
+the reveal or the TUI. Those have exactly one owner and it is the main thread,
+which drains bytes under a mutex and does the sentence splitting itself.
+
+The gain is conditional. It pays when the chat stage is slow relative to the
+wait: a short question through a 4B served by lmserve reaches first audio in
+**1.28 s**. It does nothing for a long question, whose transcript keeps
+growing, so the speculation starts late or is abandoned and restarted with no
+head start left; and nothing for a small model on a warm server, where the
+`chat` term is already 0.04-0.15 s and there is nothing to hide.
+`--speculate-ms 0` turns it off.
+
+The commit itself always waits for the turn to close — only the generation
+runs ahead. That is the difference from huggingface/speech-to-speech, which
+soft-ends after 64 ms and *reopens* the turn if speech resumes, making the
+commit early and the retraction its safety net. Running the generation alone
+ahead cannot speak over someone who was merely pausing, and cannot shorten the
+wait either. The turn line reports which path closed the turn and whether the
+speculation was used:
+
+```
+[turn] closed-by EOU, speculation adopted (started 1, abandoned 0)
+```
+
+### Reading the endpointer
+
+`--eou-probe` prints the endpointer's P(`<EOU>`) for every encoder frame
+(80 ms) at each turn close. The sample is taken inside the RNN-T greedy loop
+*before* the blank break, so the frames where blank still wins are recorded
+too — it costs one softmax over a distribution the joint already produced.
+
+The signal is a step, not a ramp: the model is either unfinished or completely
+certain, with nothing in between.
+
+```
+[eou-probe] frames=140 (11.20s) max_p=1.000  p>=0.10@11.04s  p>=0.30@11.04s  p>=0.50@11.04s
+[eou-probe] rise_frames(0.01<=p<0.50)=0  tail: … 10.88s=0.000 10.96s=0.000 11.04s=1.000 11.12s=0.000
+```
+
+`rise_frames` counts the frames whose probability sits between 0.01 and 0.50.
+On an utterance that ends cleanly it is zero — the probability is 0.000 on
+every frame, 1.000 on one, 0.000 after — and every threshold therefore crosses
+on the same frame. A probability threshold fires exactly when the token does,
+which leaves `--endpoint-ms` as the only lever that commits earlier than the
+model's own verdict.
+
+An utterance broken by a long internal silence can raise a single intermediate
+frame that decays back to zero without committing. One sub-threshold frame is
+noise, not an early warning.
 
 **Acoustic layer.** One 48 kHz duplex stream whose realtime callback plays the
 TTS and mirrors the exact played frames into a reference ring sample-aligned
@@ -142,8 +287,8 @@ reference to the locked lag before the canceller — the alignment WebRTC
 pairs with every AEC; on (re)lock the canceller state resets and the gate
 holds ~0.5 s for reconvergence (the STT is fed zeros through the transient).
 
-**Text layer — the robustness principle: we know the exact text being
-spoken.** The streaming STT runs on the AEC residual during THINK, LISTEN and
+**Text layer — the robustness principle: the agent knows exactly what text is
+being spoken.** The streaming STT runs on the AEC residual during THINK, LISTEN and
 pause windows. It deliberately does NOT run while the agent is audibly
 speaking: the talker keeps its whole real-time budget, and playback-era echo
 can never be transcribed, by construction. Residual audio captured during
@@ -171,6 +316,31 @@ are the compact GTCRN-AEC line from
 [`LocalAI-io/LocalVQE`](https://huggingface.co/LocalAI-io/LocalVQE)
 (`localvqe-pi-aec-v1-49k-f32.gguf`, 2.3 MB); the parity fixtures in
 `goldens-aec/` ship with the reference checkout, not with the weights.
+
+### When the reply keeps stalling
+
+A stage-1 hold is invisible to every other counter — it keeps the audio queue,
+so no `audible gap` is recorded, and it commits nothing, so `interrupts` stays
+0. It has a counter of its own: the `[turn]` line ends with
+`holds N (M false, X s)`, counting stage-1 pauses, how many timed out with
+nobody behind them, and the total time spent held. Repeated holds are what a
+reply chopped into fragments looks like.
+
+Holds fire on sustained residual energy, and the residual after cancellation
+depends on your room, your speaker volume and your mic gain — not on the code.
+A setup whose residual sits above the gate's absolute floor pauses the agent on
+its own voice. `--aec-debug` prints the numbers at each hold:
+
+```
+[aec-dbg] t=6.60s STAGE1 pause (hot=12 res=0.0243 floor=0.0021 min=0.0100 ncc=0.684) — if nobody spoke, --barge-floor above res
+```
+
+If those fire while nobody is speaking, set `--barge-floor` above the reported
+`res`. The cost is barge sensitivity: the floor is the level a voice has to
+clear to interrupt, so raising it too far stops barge-in working: at
+`--barge-floor 0.05` the sim's barge case reports `interrupts 0`. Headphones
+remove the echo path entirely and make the question moot; `--no-aec` drops to
+half-duplex and is the fastest way to confirm the gate is what you are hearing.
 
 **The prompt line.** Your turn opens with a `❯` mark on screen before you say
 anything, and the live transcript fills in after it as the STT emits tokens —
@@ -306,15 +476,57 @@ The three runs worth keeping green:
 
 ## Output pipeline
 
+**The reply is spoken while it is still being written.** The chat model
+writes 1–4 sentences; waiting for the last one before the talker starts
+makes time-to-first-audio scale with *reply* length, which is the wrong
+variable — the user is waiting on the first sentence. So the sentence
+splitter hands each finished sentence to a speak worker as it completes, and
+sentence N is audible while N+1 is still decoding. A reply that turns out to
+be a `<tool_call>` is never spoken: dispatch stops at the first `<`, and
+since Hermes opens with the tag, a tool turn reaches it before any sentence
+terminator and hands over nothing.
+
+Only Pocket takes the reply a sentence at a time. It already rewinds to its
+voice prefix at every sentence internally, so a span costs it nothing;
+Qwen3-TTS rebuilds a speaker-conditioned prompt and restarts the talker KV
+per call, and its first audio waits on the cushion rather than on the chat
+model, so it speaks the reply in one span — 3.97 s to first audio, against
+4.42 s if the same reply is handed over a sentence at a time.
+`--eager-text` also keeps the single span — it prints
+the reply from the generator, and overlapping the talker would give the TUI
+two writers.
+
 The talker and the codec run as a two-stage pipeline: generation streams
-frames on the main thread while a dedicated worker decodes chunk N as chunk
-N+1 is generated (the codec's 25-frame left context makes small serial
-chunks ~3× overpriced; steady-state chunks are 36 frames after a fast
-12-frame first chunk). Playback holds behind a 2 s warm-up cushion per
-reply, and if the producer ever falls behind mid-reply the cushion re-arms —
-one clean pause instead of stutter. The `[turn]` line reports `audible gaps`
-honestly (ring-starvation events while speaking); on an unloaded M1 Max the
-F32 talker sustains real time and gaps stay 0.
+frames while a dedicated worker decodes chunk N as chunk N+1 is generated
+(the codec's 25-frame left context makes small serial chunks ~3×
+overpriced). Playback holds behind a warm-up cushion per reply, and if the
+producer ever falls behind mid-reply the cushion re-arms — one clean pause
+instead of stutter.
+
+**The cushion is per engine, because every sample of it is latency the user
+waits through.** Pocket sustains ~20.8 fps against the 12.5 fps budget
+(1.66× real time) and needs only 0.4 s. Qwen3-TTS is the talker plus the
+chunked codec worker and clears ~1.27× end to end, so it needs the full 2 s:
+at 0.4 s the long sim fixture breaks into 8 audible gaps. The `[turn]`
+line reports `audible gaps` honestly (ring-starvation events while
+speaking) and both tiers hold at 0 on an unloaded M1 Max.
+
+`[turn]` reports `first-audio` — when a sample first reached the device,
+stamped on the callback clock — split into the four terms that produce it:
+
+```
+[turn] first-audio 1.12 s (endpoint 0.16 + chat 0.59 [aec/stt 0.15] + tts 0.08 + cushion 0.30)
+```
+
+- **endpoint**: quiet after your last word before the turn closed. Measured on
+  the pump's audio clock against a fixed voice floor, so neither machine load
+  nor the barge gate's adaptive floor can distort it.
+- **chat**: end of the turn to the first sentence worth speaking. `aec/stt` is
+  the part of it spent inside `barge.scan()` from the generation loop — the
+  canceller and residual STT run synchronously there, so a backlog is charged
+  to the chat stage even though the model is not what is slow.
+- **tts**: that sentence to the first frame queued.
+- **cushion**: the warm-up hold before it became audible.
 
 ## Status
 
@@ -328,9 +540,10 @@ parakeet/qwen3 golden tests.
 Against a 12.5 fps real-time budget on an M1 Max, the quantized Qwen3-TTS
 talkers run with headroom (~41 fps at 0.6B-Q8, ~14.5 fps at 1.7B-Q8) while
 the F32 talker sits at ~13 fps — real time only just, which is why it is a
-parity reference rather than a serving tier. The codec decodes at ~0.5× RTF,
-so speech starts after roughly one chunk is synthesized. Pocket TTS needs no
-codec at all and starts as soon as the chat replies.
+parity reference rather than a serving tier. Serialized with the chunked
+codec the chain clears ~1.27× end to end. Pocket TTS needs no codec at all,
+sustains ~20.8 fps (1.66× real time), and starts on the chat model's first
+sentence rather than its last.
 
 ## Acknowledgements
 
