@@ -102,7 +102,12 @@ const usage_text =
     \\
 ;
 
-const Args = struct {
+pub const Args = struct {
+    /// Install SIGINT/SIGTERM handlers. False when the server is HOSTED
+    /// inside another program: those handlers belong to the host, and
+    /// clobbering them leaves Ctrl-C stopping the server while the host keeps
+    /// running (and, for a TUI host, the terminal in raw mode).
+    own_signals: bool = true,
     model_path: ?[]const u8 = null,
     nanochat_dir: ?[]const u8 = null,
     host: []const u8 = "127.0.0.1",
@@ -253,6 +258,23 @@ pub fn main(init: std.process.Init) !void {
     }
     if (args.kv_cache_dir) |dir| try std.Io.Dir.cwd().createDirPath(init.io, dir);
 
+    return serveBlocking(init.io, allocator, stderr, args);
+}
+
+/// Everything `main` does once the flags are parsed: open the GGUF, pick the
+/// backend from `general.architecture`, and run the server until it stops.
+///
+/// Split out so the server can be hosted INSIDE another process — the voice
+/// agent runs it on a thread rather than shelling out to this binary, which
+/// keeps one process and one binary while still getting the architecture
+/// dispatch that an in-process `Conversation` (bound to one model type at
+/// compile time) cannot offer.
+pub fn serveBlocking(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    stderr: *std.Io.Writer,
+    args: Args,
+) !void {
     var ctx: fucina.ExecContext = undefined;
     ctx.init(allocator);
     defer ctx.deinit();
@@ -264,9 +286,9 @@ pub fn main(init: std.process.Init) !void {
         }
         const model_id = try allocator.dupe(u8, std.fs.path.basename(dir));
         defer allocator.free(model_id);
-        var adapter = try backend_nanochat.NanochatBackend.load(allocator, &ctx, init.io, dir, model_id, args.ctx_len);
+        var adapter = try backend_nanochat.NanochatBackend.load(allocator, &ctx, io, dir, model_id, args.ctx_len);
         defer adapter.deinit();
-        return serveWith(init.io, allocator, adapter.backend(), args);
+        return serveWith(io, allocator, adapter.backend(), args);
     }
 
     const model_path = args.model_path orelse {
@@ -274,7 +296,7 @@ pub fn main(init: std.process.Init) !void {
         return error.MissingModelPath;
     };
 
-    var file = try fucina.gguf.File.loadMmap(allocator, init.io, model_path);
+    var file = try fucina.gguf.File.loadMmap(allocator, io, model_path);
     const arch = file.getString("general.architecture") orelse {
         try stderr.writeAll("GGUF is missing general.architecture\n");
         return error.UnknownArchitecture;
@@ -284,15 +306,15 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(model_id);
 
     if (std.mem.eql(u8, arch, "qwen3") or std.mem.eql(u8, arch, "qwen3moe")) {
-        try serveQwen3(init.io, allocator, stderr, &ctx, &file, model_id, args);
+        try serveQwen3(io, allocator, stderr, &ctx, &file, model_id, args);
     } else if (std.mem.eql(u8, arch, "gemma4")) {
-        try serveGemma4(init.io, allocator, stderr, &ctx, &file, model_id, args);
+        try serveGemma4(io, allocator, stderr, &ctx, &file, model_id, args);
     } else if (std.mem.eql(u8, arch, "diffusion-gemma")) {
-        try serveDiffusion(init.io, allocator, stderr, &ctx, &file, model_id, args);
+        try serveDiffusion(io, allocator, stderr, &ctx, &file, model_id, args);
     } else if (std.mem.eql(u8, arch, "inkling")) {
-        try serveInkling(init.io, allocator, stderr, &ctx, &file, model_id, args);
+        try serveInkling(io, allocator, stderr, &ctx, &file, model_id, args);
     } else if (std.mem.eql(u8, arch, "qwen35")) {
-        try serveQwen35(init.io, allocator, stderr, &ctx, &file, model_id, args);
+        try serveQwen35(io, allocator, stderr, &ctx, &file, model_id, args);
     } else {
         try stderr.print("unsupported architecture for serving: {s} (supported: qwen3, qwen3moe, qwen35, gemma4, diffusion-gemma, inkling)\n", .{arch});
         file.deinit();
@@ -780,7 +802,7 @@ fn serveWith(io: std.Io, allocator: std.mem.Allocator, backend: types.Backend, a
 
     try server.bind();
     g_listener_fd.store(@intCast(server.listenerHandle()), .release);
-    installSignalHandlers();
+    if (args.own_signals) installSignalHandlers();
 
     // A signal handler alone cannot end the accept loop: the Io layer
     // retries accept() on EINTR, and macOS does not wake a pending accept
