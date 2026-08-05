@@ -28,7 +28,7 @@ pub fn main(init: std.process.Init) !void {
     defer stdout.flush() catch {};
 
     if (args.len < 2) {
-        try stdout.print("usage: zig build deepseek4 -- <model.gguf> --prompt \"...\" [--prompt-file=PATH] [--gen N] [--chat] [--moe-stream --moe-cache-mb=N] [--index-probe | --index-share=N] [--vectors=DIR [--vectors-max-prompt=N]]\n", .{});
+        try stdout.print("usage: zig build deepseek4 -- <model.gguf> --prompt \"...\" [--prompt-file=PATH] [--gen N] [--chat] [--moe-stream --moe-cache-mb=N --moe-pilot --moe-pin-mb=N --moe-no-learn --moe-cache-slots=N] [--index-probe | --index-share=N] [--vectors=DIR [--vectors-max-prompt=N]]\n", .{});
         return;
     }
 
@@ -38,10 +38,22 @@ pub fn main(init: std.process.Init) !void {
     var moe_cache_route = false;
     var moe_route_j: usize = 2;
     var moe_route_m: usize = 12;
+    var moe_pilot = false;
+    var moe_pin_mb: ?usize = null;
+    var moe_no_learn = false;
+    var moe_cache_slots: ?usize = null;
+    var moe_expert_top_p: f32 = 1.0;
+    var temp_arg: f32 = 0;
+    var topp_arg: f32 = 1.0;
+    var topk_arg: usize = 0;
+    var minp_arg: f32 = 0;
+    var penalty_arg: f32 = 1.0;
+    var seed_arg: u64 = 0;
     var chat = false;
     var prefill_chunk: usize = 128;
     var mtp_path: ?[]const u8 = null;
     var mtp_depth: usize = 1;
+    var spec = false;
     var vectors_dir: ?[]const u8 = null;
     var golden_path: ?[]const u8 = null;
     var vectors_max_prompt: usize = 256;
@@ -65,6 +77,13 @@ pub fn main(init: std.process.Init) !void {
             gen_count = try std.fmt.parseInt(usize, arg["--gen=".len..], 10);
         } else if (std.mem.eql(u8, arg, "--chat")) {
             chat = true;
+        } else if (std.mem.eql(u8, arg, "--spec")) {
+            // Draft-model-free speculative decoding: the shared cascade
+            // (conversation SAM + token recycling) drafts, the trunk
+            // verifies in one batched, kernel-pinned step — lossless, and
+            // the dense trunk's per-forward weight streaming amortizes
+            // over every accepted token.
+            spec = true;
         } else if (std.mem.startsWith(u8, arg, "--mtp=")) {
             mtp_path = arg["--mtp=".len..];
         } else if (std.mem.startsWith(u8, arg, "--mtp-depth=")) {
@@ -92,12 +111,45 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.startsWith(u8, arg, "--moe-route-m=")) {
             // Max-rank window for the resident-preferring fill (default 12).
             moe_route_m = try std.fmt.parseInt(usize, arg["--moe-route-m=".len..], 10);
+        } else if (std.mem.eql(u8, arg, "--moe-pilot")) {
+            // Router lookahead: predict each next layer's experts and stage
+            // them from a background I/O thread. Never changes output.
+            moe_cli.armed = true;
+            moe_pilot = true;
+        } else if (std.mem.startsWith(u8, arg, "--moe-pin-mb=")) {
+            moe_cli.armed = true;
+            moe_pin_mb = try std.fmt.parseInt(usize, arg["--moe-pin-mb=".len..], 10);
+        } else if (std.mem.eql(u8, arg, "--moe-no-learn")) {
+            moe_cli.armed = true;
+            moe_no_learn = true;
+        } else if (std.mem.startsWith(u8, arg, "--moe-cache-slots=")) {
+            moe_cli.armed = true;
+            moe_cache_slots = try std.fmt.parseInt(usize, arg["--moe-cache-slots=".len..], 10);
+        } else if (std.mem.startsWith(u8, arg, "--moe-expert-top-p=")) {
+            // Routing sparsification (QUALITY-AFFECTING, opt-in): keep
+            // experts per token up to cumulative router weight F.
+            moe_expert_top_p = try std.fmt.parseFloat(f32, arg["--moe-expert-top-p=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--index-share=")) {
             index_share = try std.fmt.parseInt(usize, arg["--index-share=".len..], 10);
         } else if (std.mem.eql(u8, arg, "--index-probe")) {
             index_probe = true;
         } else if (std.mem.startsWith(u8, arg, "--prompt-file=")) {
             prompt_file = arg["--prompt-file=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--temp=")) {
+            // The 0731 release is tuned for temperature 1.0 sampling
+            // (stamped in the GGUF as general.sampling.temp); greedy
+            // (default 0) stays the deterministic oracle/benchmark path.
+            temp_arg = try std.fmt.parseFloat(f32, arg["--temp=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "--top-p=")) {
+            topp_arg = try std.fmt.parseFloat(f32, arg["--top-p=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "--top-k=")) {
+            topk_arg = try std.fmt.parseInt(usize, arg["--top-k=".len..], 10);
+        } else if (std.mem.startsWith(u8, arg, "--min-p=")) {
+            minp_arg = try std.fmt.parseFloat(f32, arg["--min-p=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "--repeat-penalty=")) {
+            penalty_arg = try std.fmt.parseFloat(f32, arg["--repeat-penalty=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "--seed=")) {
+            seed_arg = try std.fmt.parseInt(u64, arg["--seed=".len..], 10);
         } else {
             try stdout.print("unknown flag: {s}\n", .{arg});
             return error.UnknownArgument;
@@ -119,6 +171,10 @@ pub fn main(init: std.process.Init) !void {
         m.cache_route = moe_cache_route;
         m.route_sacred = moe_route_j;
         m.route_window = moe_route_m;
+        m.pilot = moe_pilot;
+        if (moe_pin_mb) |mb| m.pin_bytes = mb << 20;
+        if (moe_no_learn) m.auto_pin = false;
+        if (moe_cache_slots) |n| m.cache_slots_per_layer = n;
     }
     const load_options: Model.LoadOptions = if (moe_stream) |m| .{ .moe_stream = m } else .{};
     var model = try Model.loadGgufFromFileOptions(&ctx, &file, load_options);
@@ -130,11 +186,12 @@ pub fn main(init: std.process.Init) !void {
         return error.UnknownArgument;
     }
     model.index_share_every = index_share;
+    model.moe_expert_top_p = moe_expert_top_p;
     // The stats go through the SAME buffered stdout writer as everything
     // else: stdout's positional writes and stderr's offset-advancing writes
     // cannot safely share one redirected file (`cmd > f 2>&1` interleaves
     // destructively), so a std.debug stats line would get overwritten.
-    defer if (model.expert_store) |store| llm.weights.reportAndSaveMoeStream(store, true, stdout);
+    defer if (model.expert_store) |store| llm.weights.reportAndSaveMoeStream(store, !moe_no_learn, stdout);
     file.deinit();
     try stdout.print("load: {d:.3} s\n", .{@as(f64, @floatFromInt(std.Io.Clock.awake.now(init.io).nanoseconds - load_start)) / 1e9});
 
@@ -171,6 +228,17 @@ pub fn main(init: std.process.Init) !void {
 
     var mtp: ?llm.deepseek4.model.Mtp = if (mtp_path) |mp| try llm.deepseek4.model.Mtp.loadGguf(&ctx, init.io, mp, model.config) else null;
     defer if (mtp) |*m| m.deinit();
+    if (mtp != null and temp_arg > 0) {
+        // MTP verify is exact only against greedy: acceptance compares the
+        // draft to the trunk argmax. Lossless speculative SAMPLING needs
+        // rejection sampling — not wired yet.
+        try stdout.print("--mtp is greedy-only; drop --temp or --mtp\n", .{});
+        return error.UnknownArgument;
+    }
+    if (spec and (mtp != null or temp_arg > 0)) {
+        try stdout.print("--spec is greedy-only and excludes --mtp\n", .{});
+        return error.UnknownArgument;
+    }
 
     const hc_dim = model.config.n_hc * model.config.hidden_size;
     const frontier = try allocator.alloc(f32, hc_dim);
@@ -272,11 +340,129 @@ pub fn main(init: std.process.Init) !void {
                 forwards += 1;
             }
         }
+    } else if (spec) {
+        // Draft-model-free speculation: the shared cascade drafts from the
+        // committed stream (conversation SAM + token recycling), the trunk
+        // verifies in one batched, kernel-pinned step — same losslessness
+        // contract as --mtp (byte-identical to plain greedy), no sidecar,
+        // no drafter I/O, and the dense trunk stream amortizes over every
+        // accepted token.
+        var index = try llm.speculative.cascade.SpeculationIndex.init(allocator, model.config.vocab_size);
+        defer index.deinit();
+        index.accounting_min_draft = 1;
+        const source = index.asDraftSource();
+        const wants_topk = source.wantsTopK();
+        var history: std.ArrayList(usize) = .empty;
+        defer history.deinit(allocator);
+        try history.appendSlice(allocator, tokens.items);
+        index.observe(tokens.items);
+
+        const rows = try allocator.alloc([]f32, 9);
+        defer allocator.free(rows);
+        var topk_ids: [9][8]u32 = undefined;
+        var topk_rows: [9]llm.speculative.core.TopKRow = undefined;
+        var next_token = argmax(logits);
+
+        decode: while (produced < gen_count) {
+            if (eos != null and next_token == eos.?) break;
+            var draft_buf: [9]usize = undefined;
+            draft_buf[0] = next_token;
+            try history.append(allocator, next_token);
+            // The committed stream must reach the index token-for-token, in
+            // order: the anchor now, the accepted drafts after the verify.
+            index.observe(history.items[history.items.len - 1 ..]);
+            const prev_committed = history.items.len;
+            const n_drafts = 1 + @min(source.suggest(history.items, draft_buf[1..]), draft_buf.len - 1);
+            drafted += n_drafts - 1;
+
+            if (n_drafts == 1) {
+                // No draft (cold or muted sources): a plain step, so the
+                // muted regime costs exactly what plain greedy costs.
+                if (produced == gen_count) break;
+                try tokenizer.decodeAppend(allocator, @intCast(next_token), &reply);
+                produced += 1;
+                allocator.free(logits);
+                logits = try llm.deepseek4.model.step(&model, &ctx, &session, next_token);
+                forwards += 1;
+                if (wants_topk) {
+                    topKIds(logits, topk_ids[0][0..]);
+                    topk_rows[0] = .{ .token = next_token, .topk = topk_ids[0][0..] };
+                    source.observeTopK(topk_rows[0..1]);
+                }
+                next_token = argmax(logits);
+                continue;
+            }
+
+            var snap = try session.cache.snapshot();
+            defer snap.deinit();
+            ctx.pinRowwiseKernels(true);
+            _ = blk: {
+                defer ctx.pinRowwiseKernels(false);
+                break :blk try llm.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..n_drafts], rows[0..n_drafts], null);
+            };
+            forwards += 1;
+            var accepted: usize = 1;
+            while (accepted < n_drafts) : (accepted += 1) {
+                if (argmax(rows[accepted - 1]) != draft_buf[accepted]) break;
+            }
+            draft_hits += accepted - 1;
+
+            for (draft_buf[0..accepted]) |t| {
+                if (produced == gen_count) break;
+                try tokenizer.decodeAppend(allocator, @intCast(t), &reply);
+                produced += 1;
+                if (eos != null and t == eos.?) {
+                    for (rows[0..n_drafts]) |r| allocator.free(r);
+                    break :decode;
+                }
+            }
+            try history.appendSlice(allocator, draft_buf[1..accepted]);
+            if (history.items.len > prev_committed) index.observe(history.items[prev_committed..]);
+            if (wants_topk) {
+                for (0..accepted) |i| {
+                    topKIds(rows[i], topk_ids[i][0..]);
+                    topk_rows[i] = .{ .token = draft_buf[i], .topk = topk_ids[i][0..] };
+                }
+                source.observeTopK(topk_rows[0..accepted]);
+            }
+            next_token = argmax(rows[accepted - 1]);
+            for (rows[0..n_drafts]) |r| allocator.free(r);
+            if (accepted < n_drafts) {
+                // Restore and replay only the accepted prefix — pinned, so
+                // the rebuilt cache rows match sequential decode.
+                session.cache.restore(&snap);
+                ctx.pinRowwiseKernels(true);
+                const replay = blk: {
+                    defer ctx.pinRowwiseKernels(false);
+                    break :blk try llm.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..accepted], null, null);
+                };
+                allocator.free(replay);
+                forwards += 1;
+            }
+        }
+        try index.writeSourceSummary(stdout);
+        try stdout.print("\n", .{});
     } else {
+        var sampler = llm.sampler.Sampler.init(.{
+            .temperature = temp_arg,
+            .top_k = topk_arg,
+            .top_p = topp_arg,
+            .min_p = minp_arg,
+            .repeat_penalty = penalty_arg,
+            .seed = seed_arg,
+        });
+        var history: std.ArrayList(usize) = .empty;
+        defer history.deinit(allocator);
+        try history.appendSlice(allocator, tokens.items);
         while (produced < gen_count) : (produced += 1) {
-            const best = argmax(logits);
+            const best = if (sampler.config.isGreedy()) argmax(logits) else blk: {
+                var lt = try fucina.Tensor(.{ .seq, .vocab }).fromBorrowedSlice(&ctx, .{ 1, model.config.vocab_size }, logits);
+                defer lt.deinit();
+                break :blk try sampler.next(&ctx, &lt, history.items);
+            };
             if (eos != null and best == eos.?) break;
             try tokenizer.decodeAppend(allocator, @intCast(best), &reply);
+            try history.append(allocator, best);
             allocator.free(logits);
             logits = try llm.deepseek4.model.step(&model, &ctx, &session, best);
             forwards += 1;
@@ -284,12 +470,32 @@ pub fn main(init: std.process.Init) !void {
     }
     const decode_ns = std.Io.Clock.awake.now(init.io).nanoseconds - decode_start;
     try stdout.print("decode: {d} tokens in {d} forwards, {d:.1} ms, {d:.2} tok/s ({d:.2} tok/forward)\n", .{ produced, forwards, @as(f64, @floatFromInt(decode_ns)) / 1e6, @as(f64, @floatFromInt(produced)) * 1e9 / @as(f64, @floatFromInt(decode_ns)), @as(f64, @floatFromInt(produced)) / @as(f64, @floatFromInt(@max(forwards, 1))) });
+    if (model.prof.steps > 0) {
+        const p = model.prof;
+        const n = @as(f64, @floatFromInt(p.steps));
+        const attn = @as(f64, @floatFromInt(p.attn_ns)) / 1e6 / n;
+        const router = @as(f64, @floatFromInt(p.router_ns)) / 1e6 / n;
+        const experts = @as(f64, @floatFromInt(p.experts_ns)) / 1e6 / n;
+        const shared = @as(f64, @floatFromInt(p.shared_ns)) / 1e6 / n;
+        const head = @as(f64, @floatFromInt(p.head_ns)) / 1e6 / n;
+        const wall = @as(f64, @floatFromInt(decode_ns)) / 1e6 / n;
+        try stdout.print("decode profile (ms/token, {d} steps): attn {d:.1} | router {d:.1} | experts {d:.1} (incl stream waits) | shared {d:.1} | head {d:.1} | other {d:.1}\n", .{ p.steps, attn, router, experts, shared, head, wall - attn - router - experts - shared - head });
+        const aq = @as(f64, @floatFromInt(p.attn_q_ns)) / 1e6 / n;
+        const akv = @as(f64, @floatFromInt(p.attn_kv_ns)) / 1e6 / n;
+        const aidx = @as(f64, @floatFromInt(p.attn_idx_ns)) / 1e6 / n;
+        const arows = @as(f64, @floatFromInt(p.attn_rows_ns)) / 1e6 / n;
+        const aatt = @as(f64, @floatFromInt(p.attn_attend_ns)) / 1e6 / n;
+        const aplumb = @as(f64, @floatFromInt(p.attn_out_plumb_ns)) / 1e6 / n;
+        const agroups = @as(f64, @floatFromInt(p.attn_out_groups_ns)) / 1e6 / n;
+        const ab = @as(f64, @floatFromInt(p.attn_out_b_ns)) / 1e6 / n;
+        try stdout.print("attn detail (ms/token): q {d:.1} | kv {d:.1} | index {d:.1} | rows {d:.1} | attend {d:.1} | out-plumb {d:.1} | out-groups {d:.1} | out-b {d:.1} | hc {d:.1}\n", .{ aq, akv, aidx, arows, aatt, aplumb, agroups, ab, attn - aq - akv - aidx - arows - aatt - aplumb - agroups - ab });
+    }
     if (model.index_share_every >= 2) {
         try stdout.print("index-share: every {d} — selections computed {d}, reused {d}\n", .{ model.index_share_every, session.scratch.share_computed, session.scratch.share_reused });
     }
     if (session.probe) |*p| try p.report(stdout);
     if (drafted > 0) {
-        try stdout.print("mtp: {d}/{d} drafts accepted ({d:.1}%)\n", .{ draft_hits, drafted, @as(f64, @floatFromInt(draft_hits)) * 100.0 / @as(f64, @floatFromInt(drafted)) });
+        try stdout.print("{s}: {d}/{d} drafts accepted ({d:.1}%)\n", .{ if (spec) "spec" else "mtp", draft_hits, drafted, @as(f64, @floatFromInt(draft_hits)) * 100.0 / @as(f64, @floatFromInt(drafted)) });
     }
     try stdout.print("prompt: {s}\ntext:  {s}\n", .{ prompt_text, reply.items });
 }
@@ -325,6 +531,25 @@ fn renderChat(allocator: std.mem.Allocator, tokenizer: *const Tokenizer, prompt:
     for (ids32) |id| try out.append(allocator, id);
     try out.append(allocator, assistant_id);
     try out.append(allocator, think_end_id);
+}
+
+/// Top-`out.len` token ids of a logit row, most probable first (small-k
+/// insertion scan — the recycling feedback wants k = 8).
+fn topKIds(row: []const f32, out: []u32) void {
+    var vals: [16]f32 = undefined;
+    const k = @min(out.len, vals.len);
+    var n: usize = 0;
+    for (row, 0..) |v, i| {
+        if (n == k and v <= vals[k - 1]) continue;
+        var j = if (n < k) n else k - 1;
+        while (j > 0 and vals[j - 1] < v) : (j -= 1) {
+            vals[j] = vals[j - 1];
+            out[j] = out[j - 1];
+        }
+        vals[j] = v;
+        out[j] = @intCast(i);
+        if (n < k) n += 1;
+    }
 }
 
 fn argmax(logits: []const f32) usize {

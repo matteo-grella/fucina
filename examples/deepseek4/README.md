@@ -59,11 +59,19 @@ Flags (first positional argument = model GGUF, required):
 | `--prefill-chunk=N` | batched-prefill chunk size, default 128; `1` = sequential |
 | `--mtp=PATH` | MTP sidecar GGUF for native speculative decoding |
 | `--mtp-depth=N` | draft depth, default 1, caps at 8 (kernel-pinned verify; depth 4 measured byte-identical to plain greedy) |
+| `--spec` | draft-model-free speculation: the shared cascade (conversation SAM + token recycling) drafts, the trunk verifies in one batched kernel-pinned step — lossless vs plain greedy; greedy-only, mutually exclusive with `--mtp` |
+| `--temp=F` / `--top-p=F` / `--top-k=N` / `--min-p=F` / `--repeat-penalty=F` / `--seed=N` | sampling controls; the default `--temp=0` keeps the deterministic greedy path (`--mtp`/`--spec` are greedy-only) |
 | `--index-probe` | decode-time selection-overlap probe across CSA layers; measures the exact path, so mutually exclusive with `--index-share` |
 | `--index-share=N` | cross-layer indexer reuse: every Nth Full CSA layer computes its selection, the layers between reuse it — approximate by design, calibrate with the probe first |
 | `--vectors=DIR` / `--vectors-max-prompt=N` | official-vector regression, see below |
 | `--golden=PATH` | local-golden logit oracle, see below |
 | `--moe-stream` / `--moe-cache-mb=N` | streamed experts — see *Shared knobs* |
+| `--moe-pin-mb=N` | RAM budget for pinned hot experts (usage-ranked; they never miss) |
+| `--moe-cache-slots=N` | fix the per-layer LRU slot count directly instead of deriving it from the byte budget |
+| `--moe-pilot` | router-lookahead prefetch: predict each next layer's routed experts and stage them from the store's background I/O thread; never changes output |
+| `--moe-no-learn` | don't persist expert-usage counts at exit (and don't auto-pin from them) |
+| `--moe-expert-top-p=F` | adaptive expert top-p: keep experts per token up to cumulative router weight F — quality-affecting, opt-in; `1.0` = exact routing |
+| `--moe-l2=PATH` / `--moe-l2-build-gb=N` | striped L2 expert tier on a faster drive (sparse partial mirror + presence index); `--moe-l2-build-gb` (re)builds it at load, capped at N GB |
 
 ## Parity oracles
 
@@ -111,5 +119,6 @@ it can kernel-panic the VM system (`tools/fetch_refs.sh` records this).
 MoE expert streaming, GPU offload (`-Dgpu=metal`/`-Dgpu=cuda`), global
 thread/BLAS knobs and the ReleaseFast/`-Dcpu` build discipline are shared
 machinery — see [docs/RUNNING-MODELS.md](../../docs/RUNNING-MODELS.md).
-Of the streaming knob set this runner parses only `--moe-stream` and
-`--moe-cache-mb`.
+This runner parses the full shared streaming knob set (`--moe-mirror`,
+`--moe-mirror-weights`, `--moe-uncached`, `--moe-io-threads`, `--moe-trace`
+and friends) alongside the family-specific flags in the table above.

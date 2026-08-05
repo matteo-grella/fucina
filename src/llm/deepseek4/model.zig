@@ -23,6 +23,7 @@
 //! streamable single-GGUF exports this port loads are his too:
 //! huggingface.co/antirez/deepseek-v4-gguf.
 const std = @import("std");
+const builtin = @import("builtin");
 const fucina = @import("fucina");
 const weights = @import("../weights.zig");
 const gguf_meta = @import("../gguf_meta.zig");
@@ -79,7 +80,22 @@ pub const Config = struct {
         if (!std.mem.eql(u8, arch, "deepseek4")) return Error.InvalidConfig;
         const block_count = try gguf_meta.metaInt(file, "deepseek4", "block_count", .reject_zero);
         const nextn = gguf_meta.metaIntOpt(file, "deepseek4", "nextn_predict_layers", .accept_zero) orelse 0;
-        const n_layers = block_count - nextn;
+        // Trunk layer count: the streamable exports carry only trunk blocks,
+        // but the 0731 exporter stamps nextn_predict_layers=1 (the pre-0731
+        // one wrote 0) with an unchanged trunk-only tensor set — subtracting
+        // the stamp would silently drop the final trunk layer. Probe the
+        // tensors themselves: every block that ships attn_norm is a trunk
+        // layer; embedded-nextn exports (no attn_norm on the draft block)
+        // still resolve to block_count - nextn.
+        var n_layers = block_count - nextn;
+        {
+            var probe_buf: [48]u8 = undefined;
+            while (n_layers < block_count) {
+                const probe_name = std.fmt.bufPrint(&probe_buf, "blk.{d}.attn_norm.weight", .{n_layers}) catch break;
+                if (file.maybeGet(probe_name) == null) break;
+                n_layers += 1;
+            }
+        }
 
         const ratios_arr = file.getArray("deepseek4.attention.compress_ratios") orelse return Error.InvalidConfig;
         if (ratios_arr.len < n_layers) return Error.InvalidConfig;
@@ -304,6 +320,9 @@ const Layer = struct {
     /// Grouped low-rank output stage A: raw q8_0 rows, `groups*rank` rows of
     /// `group_dim` (borrowed from the mapping; per-group row-block slices).
     output_a: []const u8,
+    /// Load-time x4 packs of `output_a`, one per group — the decode fast
+    /// path's hot-kernel RHS (`weights.groupedQ8_0GemvFusedInto`).
+    output_a_x4: []weights.GroupedQ8_0RhsX4,
     output_b: LinearWeight,
     attn_compressor: ?Compressor,
     index_compressor: ?Compressor,
@@ -317,6 +336,8 @@ const Layer = struct {
         if (self.indexer_q_b) |*w| w.deinit();
         if (self.index_compressor) |*c| c.deinit(allocator);
         if (self.attn_compressor) |*c| c.deinit(allocator);
+        for (self.output_a_x4) |*p| p.deinit();
+        allocator.free(self.output_a_x4);
         self.output_b.deinit();
         allocator.free(self.sinks);
         allocator.free(self.kv_a_norm);
@@ -461,6 +482,22 @@ pub const Model = struct {
     attn_scale: f32,
     weight_mapping: ?gguf.File.MappedRegion = null,
     expert_store: ?*fucina.ExpertStore = null,
+    /// Router-lookahead prefetch (`MoeStreamOptions.pilot`): predict each
+    /// next layer's routed experts and stage them from the store's
+    /// background I/O thread while the current layer computes. Hash-routed
+    /// layers are predicted exactly from the token-id table. Never changes
+    /// output.
+    pilot_enabled: bool = false,
+    /// Adaptive expert top-p (qwen3's `applyExpertTopP`): keep experts per
+    /// token up to cumulative routing weight F, re-point the dropped slots
+    /// at an already-fetched expert with weight 0 (no extra disk read).
+    /// Quality-traded; 1.0 = exact baseline.
+    moe_expert_top_p: f32 = 1.0,
+    /// Decode-phase wall-time accumulators (single-token steps only) —
+    /// the runner prints the per-token split after decode. `experts_ns`
+    /// includes streamed-expert miss waits; subtract the store's read
+    /// stats to separate compute from I/O.
+    prof: StepProf = .{},
     /// Cross-layer indexer reuse (IndexCache, arXiv:2603.12201): 0/1 = off —
     /// every CSA (ratio-4) layer computes its own selection, the exact path.
     /// N >= 2 = uniform Full/Shared pattern over the CSA layers in depth
@@ -539,6 +576,7 @@ pub const Model = struct {
             .attn_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(config.head_dim))),
             .weight_mapping = weight_mapping,
             .expert_store = expert_store,
+            .pilot_enabled = if (options.moe_stream) |so| (so.pilot and expert_store != null) else false,
         };
     }
 
@@ -650,6 +688,11 @@ fn loadLayerNamed(ctx: *ExecContext, file: *const gguf.File, config: Config, pre
     if (output_a_info.n_dims != 2 or output_a_info.dims[0] != group_dim or output_a_info.dims[1] != config.output_groups * config.output_lora_rank) return Error.InvalidWeightShape;
     if (output_a_info.ggml_type != .q8_0) return Error.UnsupportedWeightType;
     const output_a = output_a_info.data;
+    const output_a_x4 = try weights.packGroupedQ8_0Rhs(allocator, output_a, config.output_groups, config.output_lora_rank, group_dim);
+    errdefer {
+        for (output_a_x4) |*p| p.deinit();
+        allocator.free(output_a_x4);
+    }
     var output_b = try LinearWeight.load(ctx, try file.get(try name.of(&buf, prefix, "attn_output_b.weight")), hidden, config.output_groups * config.output_lora_rank);
     errdefer output_b.deinit();
 
@@ -737,6 +780,7 @@ fn loadLayerNamed(ctx: *ExecContext, file: *const gguf.File, config: Config, pre
         .kv_a_norm = kv_a_norm,
         .sinks = sinks,
         .output_a = output_a,
+        .output_a_x4 = output_a_x4,
         .output_b = output_b,
         .attn_compressor = attn_compressor,
         .index_compressor = index_compressor,
@@ -1001,6 +1045,45 @@ pub const IndexProbe = struct {
 
 // (continued in Model.step below)
 
+pub const StepProf = struct {
+    attn_ns: u64 = 0,
+    router_ns: u64 = 0,
+    experts_ns: u64 = 0,
+    shared_ns: u64 = 0,
+    head_ns: u64 = 0,
+    steps: u64 = 0,
+    // attnBlock sub-regions (decode only):
+    attn_q_ns: u64 = 0,
+    attn_kv_ns: u64 = 0,
+    attn_idx_ns: u64 = 0,
+    attn_rows_ns: u64 = 0,
+    attn_attend_ns: u64 = 0,
+    attn_out_plumb_ns: u64 = 0,
+    attn_out_groups_ns: u64 = 0,
+    attn_out_b_ns: u64 = 0,
+};
+
+/// attnBlock -> out-projection marker handoff (decode is single-threaded
+/// through the block, so a file-scope scratch is safe).
+var attn_prof_t_attend: u64 = 0;
+
+/// Monotonic nanoseconds for the decode profile (the exec-op clock rides
+/// on `std.Io`, which model code legitimately runs without).
+fn profNowNs() u64 {
+    switch (builtin.os.tag) {
+        .linux => {
+            var ts: std.os.linux.timespec = undefined;
+            if (std.os.linux.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
+            return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+        },
+        else => {
+            var ts: std.c.timespec = undefined;
+            if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
+            return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+        },
+    }
+}
+
 fn hcPre(
     ctx: *ExecContext,
     config: Config,
@@ -1256,17 +1339,22 @@ pub fn step(self: *Model, ctx: *ExecContext, session: *Session, token: usize) ![
     }
 
     session.scratch.shareReset();
+    if (self.pilot_enabled) pilotHintHashAll(self, &.{token});
     for (self.layers, 0..) |*layer, layer_i| {
         // ---- attention sublayer ----
         {
+            const t0 = profNowNs();
             const pre = try hcPre(ctx, cfg, &layer.hc_attn, streams);
             defer allocator.free(pre.sub_in);
             const block_out = try attnBlock(self, ctx, cache, layer, layer_i, pre.sub_in, pos, &tables, &session.scratch, if (session.probe) |*p| p else null);
             defer allocator.free(block_out);
             try hcPost(ctx, cfg, &pre.split, block_out, streams);
+            self.prof.attn_ns +%= profNowNs() -% t0;
         }
         // ---- FFN sublayer ----
         {
+            if (self.pilot_enabled and layer_i + 1 < self.layers.len)
+                pilotPrefetchNext(self, ctx, layer_i + 1, streams, token) catch {};
             const pre = try hcPre(ctx, cfg, &layer.hc_ffn, streams);
             defer allocator.free(pre.sub_in);
             const block_out = try moeBlock(self, ctx, layer, pre.sub_in, token);
@@ -1276,7 +1364,11 @@ pub fn step(self: *Model, ctx: *ExecContext, session: *Session, token: usize) ![
     }
     if (session.probe) |*p| p.stepDone();
     cache.len += 1;
-    return outputLogits(self, ctx, streams);
+    const t_head = profNowNs();
+    const out = try outputLogits(self, ctx, streams);
+    self.prof.head_ns +%= profNowNs() -% t_head;
+    self.prof.steps += 1;
+    return out;
 }
 
 /// Output: sigmoid-gated HC merge, output norm, vocab head — for the stream
@@ -1358,6 +1450,7 @@ pub fn stepBatchExtra(self: *Model, ctx: *ExecContext, session: *Session, tokens
     var tables = try StepRope.init(&self.rope, ctx, pos0, S);
     defer tables.deinit();
     session.scratch.shareReset();
+    if (self.pilot_enabled) pilotHintHashAll(self, tokens);
 
     // Every batch row carries its own HC stream state.
     const streams_all = try allocator.alloc(f32, S * hc_dim);
@@ -1723,6 +1816,7 @@ fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer
     const lc = &cache.layers[layer_i];
     const ratio = cfg.compress_ratio[layer_i];
     const compressed_family = ratio != 0;
+    const t0 = profNowNs();
 
     var in_t = try rowTensor(ctx, sub_in, cfg.hidden_size);
     defer in_t.deinit();
@@ -1749,6 +1843,7 @@ fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer
     defer q_rot.deinit();
     var q_t = try q_rot.squeeze(ctx, .seq);
     defer q_t.deinit();
+    const t_q = profNowNs();
 
     var kv_lin = try layer.kv.linearSeq(ctx, &x_norm, .embed, .k);
     defer kv_lin.deinit();
@@ -1773,6 +1868,7 @@ fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer
     @memcpy(ring_dst, kv_row);
     fakequant.roundF16InPlace(ring_dst);
     lc.n_raw += 1;
+    const t_kv = profNowNs();
 
     // Compressed streams + indexer selection. Under cross-layer sharing
     // (Model.index_share_every) a Shared CSA layer skips its index-side
@@ -1814,6 +1910,7 @@ fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer
         }
     }
 
+    const t_idx = profNowNs();
     // Assemble the visible rows (exclusion == absence from the sink
     // softmax), then attention through tensor ops.
     var rows: std.ArrayList(f32) = .empty;
@@ -1825,8 +1922,16 @@ fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer
         }
         try rows.appendSlice(allocator, lc.comp.items[c * cfg.head_dim ..][0..cfg.head_dim]);
     }
+    const t_rows = profNowNs();
     var out_heads_t = try attendRowsSink(self, ctx, layer, &q_t, rows.items);
     defer out_heads_t.deinit();
+    const t_attend_end = profNowNs();
+    self.prof.attn_q_ns +%= t_q -% t0;
+    self.prof.attn_kv_ns +%= t_kv -% t_q;
+    self.prof.attn_idx_ns +%= t_idx -% t_kv;
+    self.prof.attn_rows_ns +%= t_rows -% t_idx;
+    self.prof.attn_attend_ns +%= t_attend_end -% t_rows;
+    attn_prof_t_attend = t_attend_end;
 
     // Undo the value-side tail rotation carried by the K==V rows, then the
     // grouped low-rank output: per group, [group_heads*d] -> rank off a
@@ -1837,43 +1942,25 @@ fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer
     defer out_rot.deinit();
     var heads_full = try out_rot.merge(ctx, .embed, .{ .head, .d });
     defer heads_full.deinit();
+    const t_plumb = profNowNs();
 
-    const group_heads = cfg.num_heads / cfg.output_groups;
-    const group_dim = group_heads * cfg.head_dim;
+    const group_dim = (cfg.num_heads / cfg.output_groups) * cfg.head_dim;
     const rank = cfg.output_lora_rank;
-    const group_row_bytes = blk: {
-        // q8_0 rows of `group_dim` values: group g's rows start at
-        // g*rank rows into the stacked stage-A weight.
-        const bpr = group_dim / 32;
-        break :blk bpr * @sizeOf(fucina.BlockQ8_0);
-    };
-    var lows: [8]fucina.Tensor(.{ .seq, .attn }) = undefined;
-    var n_lows: usize = 0;
-    defer for (lows[0..n_lows]) |*t| t.deinit();
-    std.debug.assert(cfg.output_groups <= lows.len);
-    for (0..cfg.output_groups) |g| {
-        var gs_v = try heads_full.narrow(ctx, .embed, g * group_dim, group_dim);
-        defer gs_v.deinit();
-        lows[n_lows] = try weights.linearSeqBorrowedQuantized(
-            .q8_0,
-            ctx,
-            &gs_v,
-            layer.output_a[g * rank * group_row_bytes ..][0 .. rank * group_row_bytes],
-            .{ rank, group_dim },
-            .{ .allow_gpu = false },
-            .embed,
-            .attn,
-        );
-        n_lows += 1;
-    }
-    var low_refs: [7]*const fucina.Tensor(.{ .seq, .attn }) = undefined;
-    for (lows[1..n_lows], 0..) |*t, i| low_refs[i] = t;
-    var low_cat = try lows[0].concat(ctx, .attn, low_refs[0 .. n_lows - 1]);
-    defer low_cat.deinit();
-    var low_in = try low_cat.withTags(ctx, .{ .seq, .embed });
+    // Fused stage-A: all groups' rank rows in ONE worker-team dispatch,
+    // written in group order — the same integer dots the per-group facade
+    // linears + concat computed, bit-identically (i32 accumulation is
+    // order-free), minus 8 facade dispatches per layer.
+    const low_flat = try allocator.alloc(f32, cfg.output_groups * rank);
+    defer allocator.free(low_flat);
+    try weights.groupedQ8_0GemvFusedInto(ctx, try heads_full.dataConst(), layer.output_a_x4, rank, group_dim, low_flat);
+    const t_groups = profNowNs();
+    var low_in = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, cfg.output_groups * rank }, low_flat);
     defer low_in.deinit();
     var out_t = try layer.output_b.linearSeq(ctx, &low_in, .embed, .attn);
     defer out_t.deinit();
+    self.prof.attn_out_plumb_ns +%= t_plumb -% attn_prof_t_attend;
+    self.prof.attn_out_groups_ns +%= t_groups -% t_plumb;
+    self.prof.attn_out_b_ns +%= profNowNs() -% t_groups;
     return allocator.dupe(f32, try out_t.dataConst());
 }
 
@@ -1976,6 +2063,108 @@ fn indexerSelectFrom(self: *const Model, ctx: *ExecContext, q: []f32, head_w: []
     return allowed;
 }
 
+/// Router lookahead (pilot): predict layer `next_layer_i`'s routed experts
+/// from the CURRENT stream state — the next layer's hcPre + ffn_norm +
+/// sqrt-softplus router, bias-adjusted choice, host top-k in the kernel's
+/// lowest-id tie order — and hint the store so its background I/O thread
+/// stages the predicted experts while this layer's MoE computes. The
+/// prediction skips this layer's FFN write-back and the next layer's
+/// attention update — the same bet the deepseek2/qwen3 pilots make.
+/// Hash-routed layers are exact. Purely advisory: never changes output.
+fn pilotPrefetchNext(self: *Model, ctx: *ExecContext, next_layer_i: usize, streams: []const f32, token: usize) !void {
+    const cfg = self.config;
+    const allocator = ctx.allocator;
+    const next = &self.layers[next_layer_i];
+    const store = switch (next.moe.gate) {
+        .streamed => |*sw| sw.store,
+        else => return,
+    };
+    const used = cfg.num_experts_used;
+    var selbuf: [64]usize = undefined;
+    std.debug.assert(used <= selbuf.len);
+    if (next.moe.tid2eid != null) {
+        pilotHintHashLayer(self, next, next_layer_i, &.{token});
+        return;
+    }
+    const pre = try hcPre(ctx, cfg, &next.hc_ffn, streams);
+    defer allocator.free(pre.sub_in);
+    var in_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, cfg.hidden_size }, pre.sub_in);
+    defer in_t.deinit();
+    var ffn_norm_w = try embedTag(ctx, next.ffn_norm);
+    defer ffn_norm_w.deinit();
+    var x_norm = try in_t.rmsNormMul(ctx, .embed, &ffn_norm_w, cfg.rms_norm_eps);
+    defer x_norm.deinit();
+    var logits_t = try next.moe.router.linearSeq(ctx, &x_norm, .embed, .expert);
+    defer logits_t.deinit();
+    var sp = try logits_t.unary(ctx, .softplus);
+    defer sp.deinit();
+    var probs_t = try sp.unary(ctx, .sqrt);
+    defer probs_t.deinit();
+    const choice = try allocator.dupe(f32, try probs_t.dataConst());
+    defer allocator.free(choice);
+    if (next.moe.router_bias) |bias| {
+        for (choice, bias) |*c, b| c.* += b;
+    }
+    for (selbuf[0..used]) |*slot| {
+        var best: usize = 0;
+        var best_c = -std.math.inf(f32);
+        for (choice, 0..) |c, e| {
+            if (c > best_c) {
+                best_c = c;
+                best = e;
+            }
+        }
+        choice[best] = -std.math.inf(f32);
+        slot.* = best;
+    }
+    store.pilotHint(next_layer_i, selbuf[0..used]);
+}
+
+/// Hint one hash-routed layer's experts for `tokens` — the token-id table
+/// makes the selection exact, so this can run before any compute. The
+/// deduped union is capped at the routed-expert count; overflow simply
+/// truncates the hint (advisory, never wrong output).
+fn pilotHintHashLayer(self: *Model, layer: *const Layer, layer_i: usize, tokens: []const usize) void {
+    const cfg = self.config;
+    const used = cfg.num_experts_used;
+    const table = layer.moe.tid2eid orelse return;
+    const store = switch (layer.moe.gate) {
+        .streamed => |*sw| sw.store,
+        else => return,
+    };
+    var selbuf: [256]usize = undefined;
+    var n: usize = 0;
+    outer: for (tokens) |tok| {
+        for (table[tok * used ..][0..used]) |eid| {
+            const e: usize = @intCast(eid);
+            if (e >= cfg.num_experts) continue;
+            var dup = false;
+            for (selbuf[0..n]) |x| {
+                if (x == e) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup) {
+                if (n >= selbuf.len) break :outer;
+                selbuf[n] = e;
+                n += 1;
+            }
+        }
+    }
+    if (n > 0) store.pilotHint(layer_i, selbuf[0..n]);
+}
+
+/// Stage every hash-routed layer's experts for `tokens` at step entry —
+/// those selections depend only on token ids, so they are exact before
+/// the first layer computes.
+fn pilotHintHashAll(self: *Model, tokens: []const usize) void {
+    for (self.layers, 0..) |*layer, li| {
+        if (layer.moe.tid2eid == null) continue;
+        pilotHintHashLayer(self, layer, li, tokens);
+    }
+}
+
 fn moeBlock(self: *Model, ctx: *ExecContext, layer: *const Layer, sub_in: []const f32, token: usize) ![]f32 {
     return moeBlockBatch(self, ctx, layer, sub_in, &.{token});
 }
@@ -1985,6 +2174,10 @@ fn moeBlockBatch(self: *Model, ctx: *ExecContext, layer: *const Layer, sub_in: [
     const allocator = ctx.allocator;
     const S = tokens.len;
     const used = cfg.num_experts_used;
+    const prof_decode = S == 1;
+    const t_entry = if (prof_decode) profNowNs() else 0;
+    var t_router: u64 = 0;
+    var t_routed: u64 = 0;
 
     var in_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ S, cfg.hidden_size }, sub_in);
     defer in_t.deinit();
@@ -2090,9 +2283,13 @@ fn moeBlockBatch(self: *Model, ctx: *ExecContext, layer: *const Layer, sub_in: [
         if (sum < 6.103515625e-5) sum = 6.103515625e-5;
         for (wts) |*w| w.* = w.* / sum * cfg.expert_weights_scale;
     }
+    if (self.moe_expert_top_p < 1)
+        @import("../qwen3/model.zig").applyExpertTopP(selected, routing, used, self.moe_expert_top_p);
 
+    if (prof_decode) t_router = profNowNs();
     var routed = try weights.moeGatedFfnSeq(ctx, &x_norm, &layer.moe.gate, &layer.moe.up, &layer.moe.down, selected, routing, used, cfg.expert_ffn_size, .swiglu_clamp10, null, null);
     defer routed.deinit();
+    if (prof_decode) t_routed = profNowNs();
 
     // Shared expert with the clamped SwiGLU, entirely through tensor ops.
     var gate_t = try layer.moe.shared_gate.linearSeq(ctx, &x_norm, .embed, .gate_up);
@@ -2112,6 +2309,12 @@ fn moeBlockBatch(self: *Model, ctx: *ExecContext, layer: *const Layer, sub_in: [
 
     var total = try routed.add(ctx, &shared);
     defer total.deinit();
+    if (prof_decode) {
+        const t_end = profNowNs();
+        self.prof.router_ns +%= t_router -% t_entry;
+        self.prof.experts_ns +%= t_routed -% t_router;
+        self.prof.shared_ns +%= t_end -% t_routed;
+    }
     return allocator.dupe(f32, try total.dataConst());
 }
 
