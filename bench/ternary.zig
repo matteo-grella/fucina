@@ -332,5 +332,122 @@ pub fn main(init: std.process.Init) !void {
         try out.print("{s}\n", .{"-" ** 137});
     }
 
+    try teamScaling(allocator, out);
+
     if (any_mismatch) return error.HotColdParityMismatch;
+}
+
+/// Team-level roofline: aggregate weight-stream GB/s of the decode (m=1)
+/// Q4_K and hot-TQ2_0 kernels at the streamed-expert shape, vs the
+/// same-thread-count pure-read DRAM ceiling. Two parallelism modes:
+/// `colsplit` (one shared matrix, threads take column ranges — the dense
+/// linear dispatch) and `indep` (one matrix per thread — the pooled
+/// per-expert MoE dispatch). Answers the compact-vs-repack regime
+/// question: near-ceiling numbers are memory-bound (smaller formats win);
+/// low fractions are kernel-bound (faster kernels / wider packs win).
+fn teamScaling(allocator: std.mem.Allocator, out: *std.Io.Writer) !void {
+    const n: usize = 2048; // streamed-expert gate/up rows
+    const k: usize = 4096;
+    const bpr = k / 256;
+    const reps: usize = 150;
+    const thread_counts = [_]usize{ 1, 2, 4, 8 };
+
+    const w_vals = try allocator.alloc(f32, n * k);
+    defer allocator.free(w_vals);
+    fillWeights(w_vals);
+    const q4_blocks = try allocator.alloc(qm.BlockQ4_K, n * bpr);
+    defer allocator.free(q4_blocks);
+    for (0..n) |row| try qm.quantizeRowQ4_KInto(q4_blocks[row * bpr ..][0..bpr], w_vals[row * k ..][0..k]);
+    var rhs_t = try qm.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w_vals);
+    defer rhs_t.deinit();
+
+    const x_vals = try allocator.alloc(f32, k);
+    defer allocator.free(x_vals);
+    for (x_vals, 0..) |*v, ii| v.* = @floatFromInt(@as(i32, @intCast((ii * 7) % 173)) - 86);
+    const qlhs = try allocator.alloc(BlockQ8_K, bpr);
+    defer allocator.free(qlhs);
+    try qm.quantizeRowQ8_KInto(qlhs, x_vals);
+
+    const q4_bytes = n * bpr * @sizeOf(qm.BlockQ4_K);
+    const t_bytes = n * bpr * @sizeOf(BlockTQ2_0);
+
+    const Worker = struct {
+        kind: enum { q4, tq2 },
+        q4_rhs: qm.QuantizedMatmulRhsQ4_K,
+        t_rhs: *const qm.QuantizedMatmulRhsTQ2_0,
+        qlhs: []const BlockQ8_K,
+        out: []f32,
+        c0: usize,
+        c1: usize,
+        reps: usize,
+
+        fn run(w: *@This()) void {
+            for (0..w.reps) |_| {
+                switch (w.kind) {
+                    .q4 => qm.matmulQ4_KRhsTile(w.out, w.qlhs, &w.q4_rhs, w.q4_rhs.n, 0, 1, w.c0, w.c1),
+                    .tq2 => qm.matmulTQ2_0RhsTile(w.out, w.qlhs, w.t_rhs, w.t_rhs.n, 0, 1, w.c0, w.c1),
+                }
+            }
+        }
+    };
+
+    try out.print("\nteam scaling @ n={d} k={d}, m=1 (aggregate weight GB/s; reps={d})\n", .{ n, k, reps });
+    try out.print("{s:<10} | {s:>3} | {s:>9} | {s:>9} | {s:>9}\n", .{ "mode", "T", "q4_k", "tq2_0", "read-ceil" });
+    for (thread_counts) |tc| {
+        var ceil_gbps: f64 = 0;
+        if (membw.probe(allocator, io, tc, 3, 256)) |r| {
+            ceil_gbps = r.gbps;
+        } else |_| {}
+        inline for ([_][]const u8{ "colsplit", "indep" }) |mode| {
+            var rates: [2]f64 = undefined;
+            inline for ([_]@TypeOf((Worker{ .kind = .q4, .q4_rhs = undefined, .t_rhs = undefined, .qlhs = undefined, .out = undefined, .c0 = 0, .c1 = 0, .reps = 0 }).kind){ .q4, .tq2 }, 0..) |kind, ki| {
+                var workers: [8]Worker = undefined;
+                var outs: [8][]f32 = undefined;
+                var q4_copies: [8][]qm.BlockQ4_K = undefined;
+                var t_copies: [8]?qm.QuantizedMatmulRhsTQ2_0 = .{null} ** 8;
+                defer for (0..tc) |ti| {
+                    allocator.free(outs[ti]);
+                    if (std.mem.eql(u8, mode, "indep")) {
+                        allocator.free(q4_copies[ti]);
+                        if (t_copies[ti]) |*tr| tr.deinit();
+                    }
+                };
+                for (0..tc) |ti| {
+                    outs[ti] = try allocator.alloc(f32, n);
+                    var my_q4 = q4_blocks;
+                    var my_t: *const qm.QuantizedMatmulRhsTQ2_0 = &rhs_t;
+                    if (std.mem.eql(u8, mode, "indep")) {
+                        q4_copies[ti] = try allocator.dupe(qm.BlockQ4_K, q4_blocks);
+                        my_q4 = q4_copies[ti];
+                        t_copies[ti] = try qm.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w_vals);
+                        my_t = &t_copies[ti].?;
+                    } else {
+                        q4_copies[ti] = &.{};
+                    }
+                    const c0 = if (std.mem.eql(u8, mode, "colsplit")) ti * n / tc else 0;
+                    const c1 = if (std.mem.eql(u8, mode, "colsplit")) (ti + 1) * n / tc else n;
+                    workers[ti] = .{
+                        .kind = kind,
+                        .q4_rhs = try qm.quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, my_q4),
+                        .t_rhs = my_t,
+                        .qlhs = qlhs,
+                        .out = outs[ti],
+                        .c0 = c0,
+                        .c1 = c1,
+                        .reps = reps,
+                    };
+                }
+                defer for (0..tc) |ti| workers[ti].q4_rhs.deinit();
+                var threads: [8]std.Thread = undefined;
+                var timer = try Timer.start(io);
+                for (0..tc) |ti| threads[ti] = try std.Thread.spawn(.{}, Worker.run, .{&workers[ti]});
+                for (0..tc) |ti| threads[ti].join();
+                const ns = timer.read();
+                const per_call: f64 = @floatFromInt(if (kind == .q4) q4_bytes else t_bytes);
+                const total = per_call * @as(f64, @floatFromInt(reps)) * (if (std.mem.eql(u8, mode, "indep")) @as(f64, @floatFromInt(tc)) else 1.0);
+                rates[ki] = total / @as(f64, @floatFromInt(ns));
+            }
+            try out.print("{s:<10} | {d:>3} | {d:>9.1} | {d:>9.1} | {d:>9.1}\n", .{ mode, tc, rates[0], rates[1], ceil_gbps });
+        }
+    }
 }

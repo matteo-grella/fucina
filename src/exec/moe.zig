@@ -271,6 +271,47 @@ fn acquireMoeStreamed(gate: *const MoeRhs, up: *const MoeRhs, down: *const MoeRh
     return .{ .store = sg.store, .layer = sg.layer };
 }
 
+/// Wave-split residency of one decode op: bit i of `resident` set =
+/// `selected[i]` computable immediately. All-ones when nothing is streamed,
+/// when the selection exceeds the mask width (blocking acquire taken), or
+/// when the store read synchronously; any clear bit means a miss batch is
+/// in flight and `ExpertStore.acquireFinish` must run before that expert
+/// computes.
+const MoeStreamStart = struct {
+    guard: MoeStreamGuard,
+    resident: u64,
+};
+
+/// `acquireMoeStreamed`, wave-split: same wiring checks, but the store only
+/// STARTS its miss reads — hits resolve immediately so the caller can run
+/// their compute inside the read shadow.
+fn acquireMoeStreamedStart(gate: *const MoeRhs, up: *const MoeRhs, down: *const MoeRhs, selected: []const usize) !MoeStreamStart {
+    const all: u64 = std.math.maxInt(u64);
+    const sg = switch (gate.*) {
+        .streamed => |*v| v,
+        else => {
+            if (up.* == .streamed or down.* == .streamed) return tensor.TensorError.ShapeMismatch;
+            return .{ .guard = .{}, .resident = all };
+        },
+    };
+    const su = switch (up.*) {
+        .streamed => |*v| v,
+        else => return tensor.TensorError.ShapeMismatch,
+    };
+    const sd = switch (down.*) {
+        .streamed => |*v| v,
+        else => return tensor.TensorError.ShapeMismatch,
+    };
+    if (su.store != sg.store or sd.store != sg.store) return tensor.TensorError.ShapeMismatch;
+    if (su.layer != sg.layer or sd.layer != sg.layer) return tensor.TensorError.ShapeMismatch;
+    if (selected.len > 64) {
+        try sg.store.acquire(sg.layer, selected);
+        return .{ .guard = .{ .store = sg.store, .layer = sg.layer }, .resident = all };
+    }
+    const resident = try sg.store.acquireStart(sg.layer, selected);
+    return .{ .guard = .{ .store = sg.store, .layer = sg.layer }, .resident = resident };
+}
+
 /// out[0 .. m*out_dim] = `m` Q8_K-quantized input rows (`qlhs`) times expert
 /// `e`'s contiguous row-block of `rhs`. Single threaded — one expert's GEMM,
 /// run inside a pooled per-expert task. `m == 1` is the decode GEMV; `m > 1`
@@ -932,14 +973,151 @@ fn runMoeDecodeChainTask(task: *MoeDecodeChainTask, chain: *const thread.Chain) 
     }
 }
 
+/// Shared inputs for building decode chain states/tasks. Buffer slices stay
+/// indexed by the ORIGINAL selection slot `j` — each expert owns its
+/// j-based gate/up/g/qg/out strips whichever wave it runs in, so the final
+/// j-ordered reduce (and with it the f32 accumulation order) is identical
+/// however the dispatch splits. Only chain/task indices are wave-local.
+const MoeDecodeChainBuild = struct {
+    gate: *const MoeRhs,
+    up: *const MoeRhs,
+    down: *const MoeRhs,
+    qx: []const backend_mod.quantized_matmul.BlockQ8_K,
+    qx8: []const backend_mod.quantized_matmul.BlockQ8_0,
+    out_pe: usize,
+    hidden: usize,
+    selected: []const usize,
+    weights: []const f32,
+    gate_buf: []f32,
+    up_buf: []f32,
+    g_buf: []f32,
+    qg: []backend_mod.quantized_matmul.BlockQ8_K,
+    qg8_all: []backend_mod.quantized_matmul.BlockQ8_0,
+    outs: []f32,
+    blocks_per_g: usize,
+    blocks_per_g8: usize,
+    act: GatedOp,
+    profile_enabled: bool,
+    io: ?std.Io,
+    gate_split: usize,
+    down_split: usize,
+
+    /// Fill `states[w]` and its four tasks for original slot `j` at
+    /// wave-local position `w` of an `n_wave`-expert wave: gate_up at
+    /// tasks[2w], [2w+1], down at 2*n_wave + 2w (the wave's
+    /// chain_initial_count is 2*n_wave). Index arithmetic is unchecked —
+    /// the caller validated 4*top_k >= 4*n_wave up front.
+    fn fill(b: *const MoeDecodeChainBuild, states: []MoeDecodeChainState, tasks: []MoeDecodeChainTask, w: usize, j: usize, n_wave: usize) void {
+        const down_task0 = 2 * n_wave + 2 * w;
+        const state = &states[w];
+        state.* = .{
+            .gate = b.gate,
+            .up = b.up,
+            .down = b.down,
+            .qx = b.qx,
+            .qx8 = b.qx8,
+            .out_pe = b.out_pe,
+            .hidden = b.hidden,
+            .expert_index = b.selected[j],
+            .weight = b.weights[j],
+            .gate_buf = b.gate_buf[j * b.out_pe ..][0..b.out_pe],
+            .up_buf = b.up_buf[j * b.out_pe ..][0..b.out_pe],
+            .g_buf = b.g_buf[j * b.out_pe ..][0..b.out_pe],
+            .qg = b.qg[j * b.blocks_per_g ..][0..b.blocks_per_g],
+            .qg8 = b.qg8_all[j * b.blocks_per_g8 ..][0..b.blocks_per_g8],
+            .out = b.outs[j * b.hidden ..][0..b.hidden],
+            .gated_op = b.act,
+            .profile_enabled = b.profile_enabled,
+            .io = b.io,
+            .remaining_gate_up = .init(2),
+            .swiglu_requant_ns = 0,
+            .down_task0 = down_task0,
+        };
+        tasks[2 * w] = .{ .state = state, .kind = .gate_up, .c0 = 0, .c1 = b.gate_split, .elapsed_ns = 0 };
+        tasks[2 * w + 1] = .{ .state = state, .kind = .gate_up, .c0 = b.gate_split, .c1 = b.out_pe, .elapsed_ns = 0 };
+        tasks[down_task0] = .{ .state = state, .kind = .down, .c0 = 0, .c1 = b.down_split, .elapsed_ns = 0 };
+        tasks[down_task0 + 1] = .{ .state = state, .kind = .down, .c0 = b.down_split, .c1 = b.hidden, .elapsed_ns = 0 };
+    }
+
+    /// Serial fallback for one original slot `j` (no worker team): the same
+    /// whole-expert task the single-dispatch path runs.
+    fn runSerial(b: *const MoeDecodeChainBuild, j: usize, profile: ?*MoeBatchProfile) void {
+        var t = MoeExpertTask{
+            .gate = b.gate,
+            .up = b.up,
+            .down = b.down,
+            .qx = b.qx,
+            .qx8 = b.qx8,
+            .out_pe = b.out_pe,
+            .hidden = b.hidden,
+            .expert_index = b.selected[j],
+            .weight = b.weights[j],
+            .gate_buf = b.gate_buf[j * b.out_pe ..][0..b.out_pe],
+            .up_buf = b.up_buf[j * b.out_pe ..][0..b.out_pe],
+            .g_buf = b.g_buf[j * b.out_pe ..][0..b.out_pe],
+            .qg = b.qg[j * b.blocks_per_g ..][0..b.blocks_per_g],
+            .qg8 = b.qg8_all[j * b.blocks_per_g8 ..][0..b.blocks_per_g8],
+            .out = b.outs[j * b.hidden ..][0..b.hidden],
+            .gated_op = b.act,
+            .profile_enabled = b.profile_enabled,
+            .io = b.io,
+            .gate_up_ns = 0,
+            .swiglu_requant_ns = 0,
+            .down_ns = 0,
+        };
+        runMoeExpertTask(&t);
+        if (profile) |p| {
+            p.gate_up_ns += t.gate_up_ns;
+            p.swiglu_requant_ns += t.swiglu_requant_ns;
+            p.down_ns += t.down_ns;
+        }
+    }
+};
+
+/// Dispatch one wave of decode experts (`js` = original selection slots):
+/// a wave-local chain over the leading `4 * js.len` tasks, with the serial
+/// per-expert path as fallback. Chain profile times accumulate here because
+/// the next wave reuses the same state/task storage.
+fn runMoeDecodeChainWave(
+    rt: *Runtime,
+    build: *const MoeDecodeChainBuild,
+    states: []MoeDecodeChainState,
+    tasks: []MoeDecodeChainTask,
+    js: []const usize,
+    profile: ?*MoeBatchProfile,
+) void {
+    const n_wave = js.len;
+    if (n_wave == 0) return;
+    for (js, 0..) |j, w| build.fill(states, tasks, w, j, n_wave);
+    var used_chain = false;
+    if (rt.workPool()) |pool| {
+        used_chain = pool.parallelChained(MoeDecodeChainTask, tasks[0 .. 4 * n_wave], 2 * n_wave, runMoeDecodeChainTask);
+    }
+    if (!used_chain) {
+        for (js) |j| build.runSerial(j, profile);
+        return;
+    }
+    if (profile) |p| {
+        for (tasks[0 .. 4 * n_wave]) |*t| switch (t.kind) {
+            .gate_up => p.gate_up_ns += t.elapsed_ns,
+            .down => p.down_ns += t.elapsed_ns,
+        };
+        for (states[0..n_wave]) |*state| p.swiglu_requant_ns += state.swiglu_requant_ns;
+    }
+}
+
 /// Fused MoE FFN for a single token: route-weighted sum over the selected
 /// experts of down(SwiGLU(gate(x), up(x))). The whole layer's expert work runs
 /// in ONE pooled dispatch — one task per selected expert, each computing its
 /// full gate/up/SwiGLU/down single-threaded, so `top_k` experts map onto the
 /// worker cores at active-param bandwidth instead of dispatching ~25 tiny
 /// GEMV/elementwise ops per layer (which made decode ~1.6x slower, and a
-/// finer 3-phase split slower still from the extra barriers). `x` is
-/// (1, hidden) of K-quant experts; returns (1, hidden).
+/// finer 3-phase split slower still from the extra barriers). On a streamed
+/// layer with misses the dispatch wave-splits: the resident experts compute
+/// while the store's I/O pool reads the misses, and a second wave runs the
+/// landed experts after `acquireFinish` — the weighted reduce stays in
+/// original selection order, so the output is bit-identical either way.
+/// `x` is (1, hidden) of K-quant experts; returns (1, hidden).
 pub fn moeExpertFfn(
     rt: *Runtime,
     scratch: *MoeDecodeScratch,
@@ -963,10 +1141,16 @@ pub fn moeExpertFfn(
     const profile_enabled = profile != null;
     const total_start = moeBatchProfileStart(profile_enabled, io);
 
-    // Streamed experts: resolve/read the routed set before any task spawns;
-    // the guard's release (after compute) promotes misses into the LRU.
-    var stream_guard = try acquireMoeStreamed(gate, up, down, selected);
+    // Streamed experts, wave-split: START the miss reads (I/O pool only)
+    // and resolve what is already resident, so the resident experts'
+    // compute — and the scratch carving and activation quantization below —
+    // run inside the miss-read shadow. The guard's release (after compute)
+    // promotes misses into the LRU.
+    const stream_start = try acquireMoeStreamedStart(gate, up, down, selected);
+    var stream_guard = stream_start.guard;
     defer stream_guard.release();
+    const full_mask: u64 = if (top_k >= 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(top_k)) - 1;
+    const wave_split = (stream_start.resident & full_mask) != full_mask;
 
     // Per-projection activation formats: K-quant arms read Q8_K rows, q8_0
     // arms (deepseek2 experts) read Q8_0 rows; both forms are produced only
@@ -1009,109 +1193,72 @@ pub fn moeExpertFfn(
 
     const gate_split = moeDecodeColumnSplit(out_pe, 32);
     const down_split = moeDecodeColumnSplit(hidden, 32);
-    for (sv.states, 0..) |*state, j| {
-        const down_task_offset = try checkedMoeProduct(2, j);
-        const down_task0 = std.math.add(usize, chain_initial_count, down_task_offset) catch return tensor.TensorError.InvalidDataLength;
-        state.* = .{
-            .gate = gate,
-            .up = up,
-            .down = down,
-            .qx = qx,
-            .qx8 = qx8,
-            .out_pe = out_pe,
-            .hidden = hidden,
-            .expert_index = selected[j],
-            .weight = weights[j],
-            .gate_buf = gate_buf[j * out_pe ..][0..out_pe],
-            .up_buf = up_buf[j * out_pe ..][0..out_pe],
-            .g_buf = g_buf[j * out_pe ..][0..out_pe],
-            .qg = qg[j * blocks_per_g ..][0..blocks_per_g],
-            .qg8 = qg8_all[j * blocks_per_g8 ..][0..blocks_per_g8],
-            .out = outs[j * hidden ..][0..hidden],
-            .gated_op = act,
-            .profile_enabled = profile_enabled,
-            .io = io,
-            .remaining_gate_up = .init(2),
-            .swiglu_requant_ns = 0,
-            .down_task0 = down_task0,
-        };
-        tasks[2 * j] = .{
-            .state = state,
-            .kind = .gate_up,
-            .c0 = 0,
-            .c1 = gate_split,
-            .elapsed_ns = 0,
-        };
-        tasks[2 * j + 1] = .{
-            .state = state,
-            .kind = .gate_up,
-            .c0 = gate_split,
-            .c1 = out_pe,
-            .elapsed_ns = 0,
-        };
-        tasks[down_task0] = .{
-            .state = state,
-            .kind = .down,
-            .c0 = 0,
-            .c1 = down_split,
-            .elapsed_ns = 0,
-        };
-        tasks[down_task0 + 1] = .{
-            .state = state,
-            .kind = .down,
-            .c0 = down_split,
-            .c1 = hidden,
-            .elapsed_ns = 0,
-        };
-    }
+    const build = MoeDecodeChainBuild{
+        .gate = gate,
+        .up = up,
+        .down = down,
+        .qx = qx,
+        .qx8 = qx8,
+        .out_pe = out_pe,
+        .hidden = hidden,
+        .selected = selected,
+        .weights = weights,
+        .gate_buf = gate_buf,
+        .up_buf = up_buf,
+        .g_buf = g_buf,
+        .qg = qg,
+        .qg8_all = qg8_all,
+        .outs = outs,
+        .blocks_per_g = blocks_per_g,
+        .blocks_per_g8 = blocks_per_g8,
+        .act = act,
+        .profile_enabled = profile_enabled,
+        .io = io,
+        .gate_split = gate_split,
+        .down_split = down_split,
+    };
 
     const expert_wall_start = moeBatchProfileStart(profile_enabled, io);
-    var used_chain = false;
-    if (rt.workPool()) |pool| {
-        used_chain = pool.parallelChained(MoeDecodeChainTask, tasks, chain_initial_count, runMoeDecodeChainTask);
-    }
-    if (!used_chain) {
-        for (0..top_k) |j| {
-            var t = MoeExpertTask{
-                .gate = gate,
-                .up = up,
-                .down = down,
-                .qx = qx,
-                .qx8 = qx8,
-                .out_pe = out_pe,
-                .hidden = hidden,
-                .expert_index = selected[j],
-                .weight = weights[j],
-                .gate_buf = gate_buf[j * out_pe ..][0..out_pe],
-                .up_buf = up_buf[j * out_pe ..][0..out_pe],
-                .g_buf = g_buf[j * out_pe ..][0..out_pe],
-                .qg = qg[j * blocks_per_g ..][0..blocks_per_g],
-                .qg8 = qg8_all[j * blocks_per_g8 ..][0..blocks_per_g8],
-                .out = outs[j * hidden ..][0..hidden],
-                .gated_op = act,
-                .profile_enabled = profile_enabled,
-                .io = io,
-                .gate_up_ns = 0,
-                .swiglu_requant_ns = 0,
-                .down_ns = 0,
-            };
-            runMoeExpertTask(&t);
-            if (profile) |p| {
-                p.gate_up_ns += t.gate_up_ns;
-                p.swiglu_requant_ns += t.swiglu_requant_ns;
-                p.down_ns += t.down_ns;
-            }
+    if (!wave_split) {
+        // Every routed expert resident (or nothing streamed): the original
+        // single dispatch over all top_k experts.
+        for (0..top_k) |j| build.fill(sv.states, tasks, j, j, top_k);
+        var used_chain = false;
+        if (rt.workPool()) |pool| {
+            used_chain = pool.parallelChained(MoeDecodeChainTask, tasks, chain_initial_count, runMoeDecodeChainTask);
         }
-    }
-    if (profile) |p| {
-        p.expert_wall_ns += moeBatchProfileElapsed(expert_wall_start, io);
-        if (used_chain) {
+        if (!used_chain) {
+            for (0..top_k) |j| build.runSerial(j, profile);
+        } else if (profile) |p| {
             for (tasks) |*t| switch (t.kind) {
                 .gate_up => p.gate_up_ns += t.elapsed_ns,
                 .down => p.down_ns += t.elapsed_ns,
             };
             for (sv.states) |*state| p.swiglu_requant_ns += state.swiglu_requant_ns;
         }
+    } else {
+        // Wave 1: the resident experts compute under the in-flight miss
+        // reads; the finish then blocks only for what the shadow did not
+        // cover, and wave 2 runs the freshly landed experts.
+        var hit_js: [64]usize = undefined;
+        var miss_js: [64]usize = undefined;
+        var n_hit: usize = 0;
+        var n_miss: usize = 0;
+        for (0..top_k) |j| {
+            if (stream_start.resident & (@as(u64, 1) << @intCast(j)) != 0) {
+                hit_js[n_hit] = j;
+                n_hit += 1;
+            } else {
+                miss_js[n_miss] = j;
+                n_miss += 1;
+            }
+        }
+        runMoeDecodeChainWave(rt, &build, sv.states, tasks, hit_js[0..n_hit], profile);
+        try stream_guard.store.?.acquireFinish();
+        runMoeDecodeChainWave(rt, &build, sv.states, tasks, miss_js[0..n_miss], profile);
+    }
+    if (profile) |p| {
+        p.expert_wall_ns += moeBatchProfileElapsed(expert_wall_start, io);
         p.batches += 1;
         p.pairs += top_k;
         p.active_experts += top_k;

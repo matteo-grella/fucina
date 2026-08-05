@@ -1566,6 +1566,131 @@ test "parallel demand reads: fan-out stays bit-exact, drives a mirror concurrent
     try std.testing.expectError(error.UnexpectedEndOfFile, store2.acquire(0, &.{ 0, 3, 5 }));
 }
 
+test "wave-split acquire: start resolves hits and launches misses, finish lands them" {
+    const allocator = std.testing.allocator;
+    var fx: Fixture = undefined;
+    try fx.init(allocator, 4);
+    defer fx.deinit();
+
+    // Warm 0 and 3 into the LRU.
+    try fx.store.acquire(0, &.{ 0, 3 });
+    fx.store.release(0);
+
+    // Start over {hit, miss, hit, miss}: the hits resolve immediately (and
+    // only they are computable), the misses are in flight on the I/O pool.
+    const ls = &fx.store.layers[0];
+    const mask = try fx.store.acquireStart(0, &.{ 0, 5, 3, 6 });
+    try std.testing.expectEqual(@as(u64, 0b0101), mask);
+    try std.testing.expect(ls.resolved[0][0] != null);
+    try std.testing.expect(ls.resolved[3][0] != null);
+    try std.testing.expect(ls.resolved[5][0] == null);
+    try std.testing.expect(ls.resolved[6][0] == null);
+    try fx.store.acquireFinish();
+    try std.testing.expect(ls.resolved[5][0] != null);
+    try std.testing.expect(ls.resolved[6][0] != null);
+    fx.store.release(0);
+
+    // The finished misses were promoted: re-acquiring them is hit-only —
+    // full mask at start, and finish is a no-op.
+    const misses_before = fx.store.stats.misses;
+    const mask2 = try fx.store.acquireStart(0, &.{ 5, 6 });
+    try std.testing.expectEqual(@as(u64, 0b11), mask2);
+    try fx.store.acquireFinish();
+    fx.store.release(0);
+    try std.testing.expectEqual(misses_before, fx.store.stats.misses);
+}
+
+test "wave-split decode: partial-resident selections are bit-exact through both waves" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var fx: Fixture = undefined;
+    try fx.init(allocator, 4);
+    defer fx.deinit();
+
+    // Warm {1, 4}, then route {1, 2, 4, 7}: wave 1 computes slots 0 and 2
+    // under the in-flight reads of 2 and 7, wave 2 computes slots 1 and 3.
+    try fx.store.acquire(0, &.{ 1, 4 });
+    fx.store.release(0);
+    try fx.expectDecodeMatches(&ctx, &.{ 1, 2, 4, 7 }, &.{ 0.4, 0.3, 0.2, 0.1 });
+
+    // All 8 with exactly the LRU's 4 resident: interleaved hit/miss slots.
+    try fx.expectDecodeMatches(&ctx, &.{ 0, 1, 2, 3, 4, 5, 6, 7 }, &.{ 0.2, 0.05, 0.15, 0.1, 0.05, 0.2, 0.05, 0.2 });
+
+    // Duplicate selection slots of a resident expert plus one miss: the
+    // dup slots share a wave, each with its own j-based output strip.
+    // (After the full-8 decode's promotions the LRU holds {0, 3, 5, 6}.)
+    try fx.expectDecodeMatches(&ctx, &.{ 0, 1, 0 }, &.{ 0.5, 0.3, 0.2 });
+}
+
+test "wave-split acquire degrades to synchronous reads without an io pool" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var fx: Fixture = undefined;
+    try fx.init(allocator, 2);
+    defer fx.deinit();
+
+    var store2 = try ExpertStore.create(allocator, &.{fx.path}, 1, .{
+        .cache_slots_per_layer = 2,
+        .io_workers = 0,
+    });
+    defer store2.destroy();
+    try fx.registerLayer(store2);
+    try store2.finalize();
+
+    // No pool: start reads synchronously and reports everything resident.
+    const mask = try store2.acquireStart(0, &.{ 0, 5 });
+    try std.testing.expectEqual(@as(u64, 0b11), mask);
+    try store2.acquireFinish(); // no-op
+    store2.release(0);
+
+    try fx.expectDecodeWith(&ctx, store2, &.{ 0, 5 }, &.{ 0.5, 0.5 });
+}
+
+test "wave-split acquire: worker read failures surface at finish and release stays safe" {
+    const allocator = std.testing.allocator;
+    var fx: Fixture = undefined;
+    try fx.init(allocator, 2);
+    defer fx.deinit();
+
+    // Primary truncated to the gate section only: the workers' up/down
+    // preads fail, the finish retry re-fails with the true error, and the
+    // release that follows (the op's guard unwinding) must not publish the
+    // half-read slabs into the LRU.
+    var short_buf: [160]u8 = undefined;
+    const short_path = try std.fmt.bufPrint(&short_buf, "{s}.wshort", .{fx.path});
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, short_path) catch {};
+    defer cleanupSidecar(short_path);
+    {
+        var file = try std.Io.Dir.cwd().createFile(std.testing.io, short_path, .{});
+        defer file.close(std.testing.io);
+        var write_buffer: [4096]u8 = undefined;
+        var writer = file.writer(std.testing.io, &write_buffer);
+        try writer.interface.writeAll(std.mem.sliceAsBytes(fx.gate_blocks));
+        try writer.interface.flush();
+    }
+    var store2 = try ExpertStore.create(allocator, &.{short_path}, 1, .{
+        .cache_slots_per_layer = 2,
+        .io_workers = 3,
+    });
+    defer store2.destroy();
+    try fx.registerLayer(store2);
+    try store2.finalize();
+
+    const mask = try store2.acquireStart(0, &.{ 0, 3, 5 });
+    try std.testing.expectEqual(@as(u64, 0), mask);
+    try std.testing.expectError(error.UnexpectedEndOfFile, store2.acquireFinish());
+    store2.release(0);
+    // Nothing findable was promoted: the next acquire still misses (and
+    // still fails on the truncated file, via the blocking path).
+    try std.testing.expectError(error.UnexpectedEndOfFile, store2.acquire(0, &.{0}));
+}
+
 test "routing trace: request order round-trips through the sidecar" {
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;
@@ -1693,4 +1818,58 @@ test "heat eviction: the frequent expert survives where pure LRU would evict it"
     // evicted it and missed here.
     try fx.expectDecodeMatches(&ctx, &.{ 0, 1 }, &.{ 0.6, 0.4 });
     try std.testing.expectEqual(misses_before, fx.store.stats.misses);
+}
+
+test "l2 tier: built sparse mirror serves every miss bit-exact and reopens across stores" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var fx: Fixture = undefined;
+    try fx.init(allocator, 2);
+    defer fx.deinit();
+
+    var l2_buf: [160]u8 = undefined;
+    const l2_path = try std.fmt.bufPrint(&l2_buf, "{s}.l2", .{fx.path});
+    defer {
+        var buf: [176]u8 = undefined;
+        std.Io.Dir.cwd().deleteFile(std.testing.io, l2_path) catch {};
+        const idx = std.fmt.bufPrint(&buf, "{s}.idx", .{l2_path}) catch &.{};
+        if (idx.len > 0) std.Io.Dir.cwd().deleteFile(std.testing.io, idx) catch {};
+    }
+
+    // Build + serve: 1 LRU slot so every distinct pair misses; the budget
+    // covers all 8 experts (no usage history -> natural order fill).
+    {
+        var store = try ExpertStore.create(allocator, &.{fx.path}, 1, .{
+            .cache_slots_per_layer = 1,
+            .l2_path = l2_path,
+            .l2_build_bytes = 1 << 30,
+        });
+        defer store.destroy();
+        try fx.registerLayer(store);
+        try store.finalize();
+
+        try fx.expectDecodeWith(&ctx, store, &.{ 0, 3 }, &.{ 0.6, 0.4 });
+        try fx.expectDecodeWith(&ctx, store, &.{ 5, 7 }, &.{ 0.5, 0.5 });
+        // Every miss so far was L2-present (the build covered the pool).
+        const hits = store.l2_expert_hits.load(.monotonic);
+        try std.testing.expectEqual(store.stats.misses, hits);
+        try std.testing.expect(hits >= 4);
+        try std.testing.expectEqual(@as(u64, 0), store.l2_fallbacks.load(.monotonic));
+    }
+
+    // Reopen WITHOUT rebuilding: the persisted index must serve as-is.
+    {
+        var store = try ExpertStore.create(allocator, &.{fx.path}, 1, .{
+            .cache_slots_per_layer = 1,
+            .l2_path = l2_path,
+        });
+        defer store.destroy();
+        try fx.registerLayer(store);
+        try store.finalize();
+        try fx.expectDecodeWith(&ctx, store, &.{ 2, 6 }, &.{ 0.5, 0.5 });
+        try std.testing.expect(store.l2_expert_hits.load(.monotonic) >= 2);
+    }
 }

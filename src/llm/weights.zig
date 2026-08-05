@@ -1272,6 +1272,12 @@ pub const MoeStreamOptions = struct {
     /// at store teardown (`ExpertStore.saveTrace` format) — the input of
     /// `tools/replay_experts.zig`. Borrowed; must outlive the model.
     trace_path: ?[]const u8 = null,
+    /// L2 expert tier on a faster drive (`ExpertStore.Options.l2_path`):
+    /// sparse per-part files + `.idx` presence sidecar. Borrowed.
+    l2_path: ?[]const u8 = null,
+    /// (Re)build the tier at load up to this many payload bytes
+    /// (`ExpertStore.Options.l2_build_bytes`). Requires `l2_path`.
+    l2_build_bytes: ?u64 = null,
 };
 
 /// The runners' shared `--moe-mirror-weights=` comma list, parsed into
@@ -1307,6 +1313,8 @@ pub const MoeStreamCli = struct {
     uncached: bool = false,
     io_threads: ?usize = null,
     trace_path: ?[]const u8 = null,
+    l2_path: ?[]const u8 = null,
+    l2_build_gb: ?u64 = null,
 
     /// Consume one argv entry; false = not a shared `--moe-*` flag (the
     /// caller keeps its family-specific flags and unknown-flag error).
@@ -1348,6 +1356,17 @@ pub const MoeStreamCli = struct {
             // (offline LRU/Belady/pinned cache replay across capacities).
             self.armed = true;
             self.trace_path = arg["--moe-trace=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--moe-l2=")) {
+            // L2 expert tier on a faster drive (sparse partial mirror +
+            // presence index). Same bytes, same kernels — only the drive
+            // serving a miss changes.
+            self.armed = true;
+            self.l2_path = arg["--moe-l2=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--moe-l2-build-gb=")) {
+            // (Re)build the tier at load: hottest non-pinned experts by
+            // usage history until this many GB. Requires --moe-l2=.
+            self.armed = true;
+            self.l2_build_gb = try std.fmt.parseInt(u64, arg["--moe-l2-build-gb=".len..], 10);
         } else {
             return false;
         }
@@ -1360,6 +1379,7 @@ pub const MoeStreamCli = struct {
     /// fields on the returned value afterwards.
     pub fn options(self: *MoeStreamCli, gguf_path: []const u8) !?MoeStreamOptions {
         if (!self.armed) return null;
+        if (self.l2_build_gb != null and self.l2_path == null) return error.L2BuildWithoutPath;
         return .{
             .gguf_path = gguf_path,
             .cache_bytes = if (self.cache_mb) |mb| mb << 20 else null,
@@ -1368,6 +1388,8 @@ pub const MoeStreamCli = struct {
             .io_workers = self.io_threads orelse 8,
             .uncached = self.uncached,
             .trace_path = self.trace_path,
+            .l2_path = self.l2_path,
+            .l2_build_bytes = if (self.l2_build_gb) |gb| gb << 30 else null,
         };
     }
 };
@@ -1411,6 +1433,8 @@ pub fn createExpertStore(allocator: Allocator, options: MoeStreamOptions, n_laye
         .io_workers = options.io_workers,
         .uncached = options.uncached,
         .trace_path = options.trace_path,
+        .l2_path = options.l2_path,
+        .l2_build_bytes = options.l2_build_bytes,
         .cache_route = if (options.cache_route) .{
             .sacred = options.route_sacred,
             .window = options.route_window,
@@ -1445,6 +1469,16 @@ pub fn reportAndSaveMoeStream(store: *fucina.ExpertStore, learn: bool, writer: a
     writer.print(
         "moe stream: {d} acquires, hits {d} / misses {d} ({d:.1}% hit, {d} pin hits), {d:.2} GB read in {d:.2}s, cap {d} slots/layer, pinned {d} experts ({d:.2} GB)\n",
         .{ s.acquires, s.hits, s.misses, s.hitRate() * 100, s.pin_hits, @as(f64, @floatFromInt(s.bytes_read)) / 1e9, @as(f64, @floatFromInt(s.read_ns)) / 1e9, store.cap, store.pinned_experts, @as(f64, @floatFromInt(store.pinned_bytes)) / 1e9 },
+    ) catch {};
+    if (store.l2_fds.len > 0) writer.print(
+        "moe l2: {d} expert reads served ({d:.2} GB in {d:.2}s thread-aggregate, {d:.2} GB/s), {d} fallbacks\n",
+        .{
+            store.l2_expert_hits.load(.monotonic),
+            @as(f64, @floatFromInt(store.l2_bytes.load(.monotonic))) / 1e9,
+            @as(f64, @floatFromInt(store.l2_read_ns.load(.monotonic))) / 1e9,
+            @as(f64, @floatFromInt(store.l2_bytes.load(.monotonic))) / @max(1.0, @as(f64, @floatFromInt(store.l2_read_ns.load(.monotonic)))),
+            store.l2_fallbacks.load(.monotonic),
+        },
     ) catch {};
     if (s.pilot_recall_total > 0) writer.print(
         "moe pilot: recall {d:.1}% ({d}/{d} routed experts predicted), {d} experts hinted\n",
@@ -1777,6 +1811,93 @@ pub fn linearSeqBorrowedF16(
     var rhs = try fucina.Tensor(.{ .dtype = .f16, .tags = .{ out_tag, in_tag } }).fromBorrowedConstSlice(ctx, shape, values);
     defer rhs.deinit();
     return input.dot(ctx, &rhs, in_tag);
+}
+
+/// Fused grouped low-rank GEMV (the deepseek4 attention output's stage-A
+/// stack): `n_groups` independent q8_0 linears of `rank x group_dim`,
+/// group g reading activation slice g, results written in group order —
+/// exactly the concat a per-group facade path would produce. One LHS
+/// quantization per group and ONE worker-team dispatch replace n_groups
+/// facade linears + concat, bit-identically: the same q8_0 tile kernel
+/// computes the same integer dots, and i32 accumulation is order-free.
+pub const GroupedQ8_0RhsX4 = backend_quant.QuantizedMatmulRhsQ8_0x4;
+
+/// Load-time x4 packing for `groupedQ8_0GemvFusedInto`: one pack per
+/// group — same bytes column-interleaved, the difference between the
+/// generic q8_0 row kernel and the hot sdot tile path (the bench-ternary
+/// "x4 pack (load-time, same bytes)" pattern). Caller owns the slice;
+/// free each pack's deinit then the slice.
+pub fn packGroupedQ8_0Rhs(
+    allocator: Allocator,
+    weight_bytes: []const u8,
+    n_groups: usize,
+    rank: usize,
+    group_dim: usize,
+) ![]GroupedQ8_0RhsX4 {
+    const qm = backend_quant;
+    if (group_dim % 32 != 0 or rank % 4 != 0 or n_groups == 0) return Error.InvalidWeightShape;
+    const bpr = group_dim / 32;
+    const row_bytes = bpr * @sizeOf(qm.BlockQ8_0);
+    if (weight_bytes.len != n_groups * rank * row_bytes) return Error.InvalidWeightShape;
+    const packs = try allocator.alloc(GroupedQ8_0RhsX4, n_groups);
+    var built: usize = 0;
+    errdefer {
+        for (packs[0..built]) |*p| p.deinit();
+        allocator.free(packs);
+    }
+    const all = std.mem.bytesAsSlice(qm.BlockQ8_0, weight_bytes);
+    for (0..n_groups) |g| {
+        packs[g] = try qm.packMatmulRhsQ8_0x4(allocator, @alignCast(all[g * rank * bpr ..][0 .. rank * bpr]), rank, group_dim, bpr);
+        built += 1;
+    }
+    return packs;
+}
+
+pub fn groupedQ8_0GemvFusedInto(
+    ctx: *ExecContext,
+    x: []const f32,
+    rhs_packs: []const GroupedQ8_0RhsX4,
+    rank: usize,
+    group_dim: usize,
+    out: []f32,
+) !void {
+    const qm = backend_quant;
+    const n_groups = rhs_packs.len;
+    if (group_dim % 32 != 0 or n_groups == 0 or n_groups > 8) return Error.InvalidWeightShape;
+    const bpr = group_dim / 32;
+    if (x.len != n_groups * group_dim or out.len != n_groups * rank) return Error.InvalidWeightShape;
+
+    const allocator = ctx.allocator;
+    const lhs = try allocator.alloc(qm.BlockQ8_0, n_groups * bpr);
+    defer allocator.free(lhs);
+    for (0..n_groups) |g| {
+        try qm.quantizeRowQ8_0Into(lhs[g * bpr ..][0..bpr], x[g * group_dim ..][0..group_dim]);
+    }
+
+    const Task = struct {
+        out: []f32,
+        lhs: []const qm.BlockQ8_0,
+        rhs: *const GroupedQ8_0RhsX4,
+        n: usize,
+
+        fn run(task: *const @This()) void {
+            qm.matmulQ8_0x4RhsTile(task.out, task.lhs, task.rhs, task.n, 0, 1, 0, task.n);
+        }
+    };
+    var tasks: [8]Task = undefined;
+    for (0..n_groups) |g| {
+        tasks[g] = .{
+            .out = out[g * rank ..][0..rank],
+            .lhs = lhs[g * bpr ..][0..bpr],
+            .rhs = &rhs_packs[g],
+            .n = rank,
+        };
+    }
+    if (ctx.workPool()) |pool| {
+        pool.parallelChunks(Task, tasks[0..n_groups], Task.run);
+    } else {
+        for (tasks[0..n_groups]) |*t| Task.run(t);
+    }
 }
 
 /// Zero-copy block-quantized RHS linear over caller-owned immutable bytes. This
