@@ -7,8 +7,9 @@
 //! one sequential inference worker.
 //!
 //! The model family is dispatched from the GGUF's `general.architecture`
-//! (qwen3 / qwen3moe / gemma4 / diffusion-gemma); nanochat checkpoints load
-//! via `--nanochat <dir>`. Run with `zig build lmserve -- <model.gguf> [flags]`.
+//! (qwen3 / qwen3moe / qwen35 / gemma4 / diffusion-gemma / inkling /
+//! deepseek4); nanochat checkpoints load via `--nanochat <dir>`. Run with
+//! `zig build lmserve -- <model.gguf> [flags]`.
 
 const std = @import("std");
 const fucina = @import("fucina");
@@ -20,6 +21,7 @@ const backend_nanochat = @import("backend_nanochat.zig");
 const backend_diffusion = @import("backend_diffusion.zig");
 const backend_inkling = @import("backend_inkling.zig");
 const backend_qwen35 = @import("backend_qwen35.zig");
+const backend_deepseek4 = @import("backend_deepseek4.zig");
 const scheduler_mod = @import("scheduler.zig");
 const http_mod = @import("http.zig");
 
@@ -30,9 +32,9 @@ const usage_text =
     \\       zig build lmserve -Doptimize=ReleaseFast -- --nanochat <checkpoint dir> [flags]
     \\
     \\The GGUF's general.architecture picks the backend: qwen3, qwen3moe,
-    \\qwen35 (Qwen3.5 / Ternary-Bonsai), gemma4, diffusion-gemma, inkling.
-    \\--nanochat serves a nanochat checkpoint dir (model.safetensors +
-    \\tokenizer.bin).
+    \\qwen35 (Qwen3.5 / Ternary-Bonsai), gemma4, diffusion-gemma, inkling,
+    \\deepseek4 (DeepSeek V4 Flash). --nanochat serves a nanochat checkpoint
+    \\dir (model.safetensors + tokenizer.bin).
     \\
     \\  --host H            bind address (default 127.0.0.1)
     \\  --port N            port (default 8080)
@@ -88,6 +90,17 @@ const usage_text =
     \\                      default 0.05) under the contextual query; default is
     \\                      fully sticky (selection pinned at conversation start)
     \\  --rag-margin F      fleet: the adaptive switch margin (cosine units)
+    \\  --moe-stream        deepseek4: stream MoE expert weights from disk on
+    \\                      demand (dense trunk stays resident); companions:
+    \\                      --moe-cache-mb=N (streamed-tier RAM budget),
+    \\                      --moe-pin-mb=N (pinned hot-expert tier budget),
+    \\                      --moe-cache-slots=N (fixed LRU slots per layer),
+    \\                      --moe-pilot (router-lookahead prefetch),
+    \\                      --moe-no-learn (don't persist expert-usage counts),
+    \\                      --moe-uncached, --moe-io-threads=N, --moe-mirror=P,
+    \\                      --moe-mirror-weights=..., --moe-trace=P,
+    \\                      --moe-l2=DIR, --moe-l2-build-gb=N
+    \\                      (docs/RUNNING-MODELS.md documents the family)
     \\
     \\Reasoning is off by default; clients enable it per request via
     \\reasoning_effort (chat), reasoning.effort (responses), or thinking
@@ -131,6 +144,14 @@ pub const Args = struct {
     rag_margin: f32 = 0.05,
     allow_hosts: [8][]const u8 = undefined,
     allow_hosts_n: usize = 0,
+    /// Streamed-expert flags (deepseek4 backend): the shared `--moe-*` set
+    /// plus the family-specific levers the deepseek4 runner speaks. Slices
+    /// parsed into `moe_cli` borrow argv.
+    moe_cli: llm.weights.MoeStreamCli = .{},
+    moe_pilot: bool = false,
+    moe_pin_mb: ?usize = null,
+    moe_no_learn: bool = false,
+    moe_cache_slots: ?usize = null,
 };
 
 var g_shutdown = std.atomic.Value(bool).init(false);
@@ -232,6 +253,20 @@ pub fn main(init: std.process.Init) !void {
             args.experts_borrow = true;
         } else if (std.mem.eql(u8, arg, "--experts=pack")) {
             args.experts_borrow = false;
+        } else if (try args.moe_cli.tryParse(arg)) {
+            // Shared streamed-experts flags (llm.weights.MoeStreamCli).
+        } else if (std.mem.eql(u8, arg, "--moe-pilot")) {
+            args.moe_cli.armed = true;
+            args.moe_pilot = true;
+        } else if (std.mem.startsWith(u8, arg, "--moe-pin-mb=")) {
+            args.moe_cli.armed = true;
+            args.moe_pin_mb = try std.fmt.parseInt(usize, arg["--moe-pin-mb=".len..], 10);
+        } else if (std.mem.eql(u8, arg, "--moe-no-learn")) {
+            args.moe_cli.armed = true;
+            args.moe_no_learn = true;
+        } else if (std.mem.startsWith(u8, arg, "--moe-cache-slots=")) {
+            args.moe_cli.armed = true;
+            args.moe_cache_slots = try std.fmt.parseInt(usize, arg["--moe-cache-slots=".len..], 10);
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             try stderr.writeAll(usage_text);
             return;
@@ -280,6 +315,10 @@ pub fn serveBlocking(
     defer ctx.deinit();
 
     if (args.nanochat_dir) |dir| {
+        if (args.moe_cli.armed) {
+            try stderr.writeAll("--moe-* streamed-expert flags are supported by the deepseek4 backend only\n");
+            return error.MoeStreamUnsupported;
+        }
         if (args.cartridge_path != null or args.fleet_dir != null) {
             try stderr.writeAll("--cartridge/--fleet are supported by the GGUF chat backends only (qwen3/gemma4; --fleet is qwen3)\n");
             return error.CartridgeUnsupported;
@@ -296,11 +335,19 @@ pub fn serveBlocking(
         return error.MissingModelPath;
     };
 
-    var file = try fucina.gguf.File.loadMmap(allocator, io, model_path);
+    // loadMmapAuto follows llama.cpp split GGUFs (deepseek4-scale exports
+    // ship in parts); single-file paths take the plain loadMmap route.
+    var file = try fucina.gguf.File.loadMmapAuto(allocator, io, model_path);
     const arch = file.getString("general.architecture") orelse {
         try stderr.writeAll("GGUF is missing general.architecture\n");
         return error.UnknownArchitecture;
     };
+    if (args.moe_cli.armed and !std.mem.eql(u8, arch, "deepseek4")) {
+        // Reject instead of silently dropping (the caps philosophy).
+        try stderr.print("--moe-* streamed-expert flags are supported by the deepseek4 backend only (this GGUF is {s})\n", .{arch});
+        file.deinit();
+        return error.MoeStreamUnsupported;
+    }
 
     const model_id = try allocator.dupe(u8, std.fs.path.stem(std.fs.path.basename(model_path)));
     defer allocator.free(model_id);
@@ -315,8 +362,10 @@ pub fn serveBlocking(
         try serveInkling(io, allocator, stderr, &ctx, &file, model_id, args);
     } else if (std.mem.eql(u8, arch, "qwen35")) {
         try serveQwen35(io, allocator, stderr, &ctx, &file, model_id, args);
+    } else if (std.mem.eql(u8, arch, "deepseek4")) {
+        try serveDeepseek4(io, allocator, stderr, &ctx, &file, model_id, args);
     } else {
-        try stderr.print("unsupported architecture for serving: {s} (supported: qwen3, qwen3moe, qwen35, gemma4, diffusion-gemma, inkling)\n", .{arch});
+        try stderr.print("unsupported architecture for serving: {s} (supported: qwen3, qwen3moe, qwen35, gemma4, diffusion-gemma, inkling, deepseek4)\n", .{arch});
         file.deinit();
         return error.UnsupportedArchitecture;
     }
@@ -421,6 +470,65 @@ fn serveQwen35(
         &model,
         &tokenizer,
         template,
+        model_id,
+        args.ctx_len,
+        default_sampling,
+    );
+    defer adapter.deinit();
+    try serveWith(io, allocator, adapter.backend(), args);
+}
+
+fn serveDeepseek4(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    stderr: *std.Io.Writer,
+    ctx: *fucina.ExecContext,
+    file: *fucina.gguf.File,
+    model_id: []const u8,
+    args: Args,
+) !void {
+    if (args.cartridge_path != null or args.fleet_dir != null) {
+        try stderr.writeAll("--cartridge/--fleet are supported by the GGUF chat backends only (qwen3/gemma4; --fleet is qwen3)\n");
+        return error.CartridgeUnsupported;
+    }
+    var tokenizer = llm.tokenizer.Tokenizer.initFromGguf(allocator, file, .{}) catch {
+        try stderr.writeAll("this GGUF has no usable tokenizer metadata\n");
+        return error.TokenizerUnavailable;
+    };
+    defer tokenizer.deinit();
+    // GGUF-stamped sampling; the ds4 0731 export stamps temp 1.0 / top_p
+    // 0.95, which samplingFromGguf's fallbacks match — only its gemma-shaped
+    // top_k=64 fallback differs (deepseek4 recommends no top-k truncation).
+    var default_sampling = samplingFromGguf(file);
+    if (file.getInt("general.sampling.top_k") == null) default_sampling.top_k = 0;
+
+    // Streamed experts (`--moe-stream` + companions): the local copy must
+    // outlive the load — MoeStreamOptions borrows its buffers.
+    var moe_cli = args.moe_cli;
+    var moe_stream = try moe_cli.options(args.model_path.?);
+    if (moe_stream) |*m| {
+        m.pilot = args.moe_pilot;
+        if (args.moe_pin_mb) |mb| m.pin_bytes = mb << 20;
+        if (args.moe_no_learn) m.auto_pin = false;
+        if (args.moe_cache_slots) |n| m.cache_slots_per_layer = n;
+    }
+    const load_options: llm.deepseek4.model.Model.LoadOptions =
+        if (moe_stream) |m| .{ .moe_stream = m } else .{};
+    var model = try llm.deepseek4.model.Model.loadGgufFromFileOptions(ctx, file, load_options);
+    defer model.deinit();
+    // LIFO: the streamed-tier report + usage save runs BEFORE model.deinit
+    // destroys the store.
+    defer if (model.expert_store) |store| {
+        llm.weights.reportAndSaveMoeStream(store, !args.moe_no_learn, stderr);
+        stderr.flush() catch {};
+    };
+    file.deinit();
+
+    var adapter = try backend_deepseek4.Deepseek4Backend.init(
+        allocator,
+        ctx,
+        &model,
+        &tokenizer,
         model_id,
         args.ctx_len,
         default_sampling,
@@ -839,6 +947,7 @@ test {
     _ = @import("backend_diffusion.zig");
     _ = @import("backend_inkling.zig");
     _ = @import("backend_qwen35.zig");
+    _ = @import("backend_deepseek4.zig");
     _ = @import("scheduler.zig");
     _ = @import("openai.zig");
     _ = @import("anthropic.zig");
