@@ -87,11 +87,12 @@ const optim = fucina.optim;
 const ptqtp = fucina.ptqtp;
 const ptqtp_gguf = llm.ptqtp_gguf;
 const safetensors = fucina.safetensors;
+const bq = fucina.internal.backend_mod.quantized_matmul;
 
 const DtypeMode = enum { verbatim, f32, f16, bf16, q8_0, q4_k, q5_k, q6_k, tq2_0 };
 
 const usage =
-    "usage: zig build export-gguf -Doptimize=ReleaseFast -- --from-gguf IN.gguf --out OUT.gguf [--dtype f16|bf16|f32|q8_0|q4_k|q5_k|q6_k|tq2_0|verbatim] [--experts-dtype DTYPE (only tensors named *_exps.weight; may requantize)] [--adapters DIR_OR_SAFETENSORS --alpha F (required together)] [--ptqtp[=K] --ptqtp-planes K --ptqtp-tie --ptqtp-include SUB[,SUB] --ptqtp-exclude SUB[,SUB] --dry-run (shard-streaming PTQTP quantization; docs/PTQTP.md)]\n";
+    "usage: zig build export-gguf -Doptimize=ReleaseFast -- --from-gguf IN.gguf --out OUT.gguf [--dtype f16|bf16|f32|q8_0|q4_k|q5_k|q6_k|tq2_0|verbatim] [--experts-dtype DTYPE (only tensors named *_exps.weight; may requantize)] [--adapters DIR_OR_SAFETENSORS --alpha F (required together)] [--ptqtp[=K] --ptqtp-planes K --ptqtp-tie --ptqtp-native (tied K=2 folded straight to base-named tq2_0_fx4 packs) --ptqtp-include SUB[,SUB] --ptqtp-exclude SUB[,SUB] --dry-run (shard-streaming PTQTP quantization; docs/PTQTP.md)]\n";
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -111,6 +112,7 @@ pub fn main(init: std.process.Init) !void {
     var ptqtp_mode = false;
     var ptqtp_planes: u8 = 2;
     var ptqtp_tie = false;
+    var ptqtp_native = false;
     var dry_run = false;
     const arena = init.arena.allocator();
     var includes: std.ArrayList([]const u8) = .empty;
@@ -187,6 +189,10 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--ptqtp-tie")) {
             ptqtp_mode = true;
             ptqtp_tie = true;
+        } else if (std.mem.eql(u8, arg, "--ptqtp-native")) {
+            ptqtp_mode = true;
+            ptqtp_tie = true;
+            ptqtp_native = true;
         } else if (std.mem.eql(u8, arg, "--dry-run")) {
             dry_run = true;
         } else {
@@ -222,6 +228,10 @@ pub fn main(init: std.process.Init) !void {
         try stdout.print("--ptqtp-tie locks plane scales to the exact ratio 3, so it needs at least 2 planes (got {d})\n", .{ptqtp_planes});
         return error.InvalidPlaneCount;
     }
+    if (ptqtp_native and ptqtp_planes != 2) {
+        try stdout.print("--ptqtp-native folds the tied K=2 planes into the 4-bit pack; plane count must be 2 (got {d})\n", .{ptqtp_planes});
+        return error.InvalidPlaneCount;
+    }
     if (out_path == null and !dry_run) {
         try stdout.print(usage, .{});
         return error.MissingOutPath;
@@ -233,6 +243,7 @@ pub fn main(init: std.process.Init) !void {
         return runPtqtp(allocator, io, in_path, out_path, .{
             .planes = ptqtp_planes,
             .tie = ptqtp_tie,
+            .native = ptqtp_native,
             .includes = includes.items,
             .excludes = excludes.items,
             .dry_run = dry_run,
@@ -361,9 +372,13 @@ fn transcodeTarget(info: *const gguf.TensorInfo, base_mode: DtypeMode, experts_m
     switch (info.ggml_type) {
         .f32, .f16, .bf16 => {},
         // The experts override accepts quantized sources (dequant →
-        // re-encode; see the module doc) — the global --dtype keeps
-        // refusing chain-requantization.
-        else => if (!experts_override) return error.QuantizedSourceUnsupported, // no chain-requantize; use --dtype verbatim
+        // re-encode; see the module doc) — but only dtypes gguf.decodeF32
+        // can read; the global --dtype keeps refusing chain-requantization.
+        .q4_0, .q4_1, .q5_0, .q5_1, .q8_0, .q4_k, .q5_k, .q6_k, .tq2_0 => if (!experts_override) return error.QuantizedSourceUnsupported, // no chain-requantize; use --dtype verbatim
+        // PTQTP packs (tq2_0_fx4) and other undecodable types have no f32
+        // decoder — requantization is unsupported regardless of override;
+        // re-export from the original weights instead.
+        else => return error.QuantizedSourceUnsupported,
     }
     if (target == .q8_0 and info.dims[0] % 32 != 0) return info.ggml_type;
     // K-quant super-blocks and TQ2_0 blocks span 256 elements: rows that
@@ -431,10 +446,23 @@ fn bf16ToF32(bits: u16) f32 {
 const PtqtpArgs = struct {
     planes: u8,
     tie: bool,
+    /// Emit eligible tensors as base-named `tq2_0_fx4` packs (docs/PTQTP.md
+    /// native folded format) instead of `.ptqtpK` sibling planes. Requires
+    /// the tied K=2 fit (the fold algebra). Tensors whose out dim is not a
+    /// multiple of 4 fall back to sibling planes (and only then do the
+    /// `fucina.ptqtp.*` stamps appear — a pure-native file carries none).
+    native: bool,
     includes: []const []const u8,
     excludes: []const []const u8,
     dry_run: bool,
 };
+
+/// Whether a `ptqtpQuantizes` tensor emits the native folded pack — the
+/// second pure plan/stream agreement predicate (never folded into
+/// `ptqtpQuantizes`: that would change the sibling-mode tensor set).
+fn nativeEmits(info: *const gguf.TensorInfo, args: *const PtqtpArgs) bool {
+    return args.native and info.dims[1] % 4 == 0;
+}
 
 /// Split a (repeatable) comma-separated filter argument into the list. The
 /// substrings borrow the argv arena, which outlives the run.
@@ -516,7 +544,9 @@ fn runPtqtp(
     // Plan pass: decide per tensor; print the plan (--dry-run) or declare
     // the output tensor set (names, dims, offsets — no data yet).
     var quantized_count: usize = 0;
+    var native_count: usize = 0;
     var quant_stacks: usize = 0;
+    var native_stacks: usize = 0;
     var passthrough_count: usize = 0;
     var kept_stacks: usize = 0;
     var quant_src_bytes: u64 = 0;
@@ -529,6 +559,38 @@ fn runPtqtp(
         total_src_bytes += info.data.len;
         const dims = info.dims[0..info.n_dims];
         if (ptqtpQuantizes(info, &args)) {
+            if (nativeEmits(info, &args)) {
+                const out_bytes = try gguf.tensorByteLen(.tq2_0_fx4, dims);
+                native_count += 1;
+                quant_src_bytes += info.data.len;
+                quant_dst_bytes += out_bytes;
+                total_dst_bytes += out_bytes;
+                if (info.n_dims == 3) {
+                    native_stacks += 1;
+                    // Whole pack stack + one expert's transient K=2 planes
+                    // + one expert's f32 slice — no resident plane stacks.
+                    const plane_bytes = try gguf.tensorByteLen(.tq2_0, dims);
+                    const workset = out_bytes + 2 * (plane_bytes / info.dims[2]) +
+                        @as(u64, info.dims[0] * info.dims[1] * @sizeOf(f32));
+                    peak_stack_buffer = @max(peak_stack_buffer, workset);
+                }
+                if (args.dry_run) {
+                    try stdout.print("ptqtp {s} ", .{info.name});
+                    try printShape(stdout, info);
+                    if (info.n_dims == 3) {
+                        try stdout.print(" {s} -> tq2_0_fx4 per expert ({d} experts)  ({d:.1} -> {d:.1} MiB)\n", .{
+                            @tagName(info.ggml_type), info.dims[2], mib(info.data.len), mib(out_bytes),
+                        });
+                    } else {
+                        try stdout.print(" {s} -> tq2_0_fx4  ({d:.1} -> {d:.1} MiB)\n", .{
+                            @tagName(info.ggml_type), mib(info.data.len), mib(out_bytes),
+                        });
+                    }
+                    continue;
+                }
+                try writer.declareTensor(info.name, .tq2_0_fx4, dims);
+                continue;
+            }
             const out_bytes = try gguf.tensorByteLen(.tq2_0, dims) * args.planes;
             quantized_count += 1;
             quant_src_bytes += info.data.len;
@@ -576,8 +638,8 @@ fn runPtqtp(
 
     if (args.dry_run) {
         try stdout.print(
-            "plan: {d} tensors; {d} ptqtp-quantized (K={d}, {d} plane tensors, {d} expert stacks), {d} passthrough ({d} expert stacks kept)\n",
-            .{ file.tensors.len, quantized_count, args.planes, quantized_count * args.planes, quant_stacks, passthrough_count, kept_stacks },
+            "plan: {d} tensors; {d} ptqtp-quantized (K={d}, {d} plane tensors, {d} expert stacks), {d} native fx4 ({d} expert stacks), {d} passthrough ({d} expert stacks kept)\n",
+            .{ file.tensors.len, quantized_count, args.planes, quantized_count * args.planes, quant_stacks, native_count, native_stacks, passthrough_count, kept_stacks },
         );
         try stdout.print("bytes: {d:.1} -> {d:.1} MiB total; quantized linears {d:.1} -> {d:.1} MiB\n", .{
             mib(total_src_bytes), mib(total_dst_bytes), mib(quant_src_bytes), mib(quant_dst_bytes),
@@ -592,6 +654,9 @@ fn runPtqtp(
     // planes claims the PTQTP format (gates loader pair-detection). One
     // Options covers every quantized tensor, so the tie stamp is
     // all-or-nothing by construction — the loaders' fold contract.
+    // Native fx4 tensors need NO stamp (base-named, loaded through the
+    // ordinary quant switch) — a pure-native file carries no fucina.ptqtp.*
+    // keys; the stamps appear only for out%4!=0 sibling-plane fallbacks.
     if (quantized_count != 0) {
         try writer.addMetaInt(ptqtp_gguf.version_key, u32, ptqtp_gguf.format_version);
         if (args.tie) try writer.addMetaInt(ptqtp_gguf.tie_key, u32, 1);
@@ -613,7 +678,12 @@ fn runPtqtp(
     var peak_workset: u64 = 0;
     for (file.tensors) |*info| {
         if (ptqtpQuantizes(info, &args)) {
-            const workset = if (info.n_dims == 3)
+            const workset = if (nativeEmits(info, &args))
+                (if (info.n_dims == 3)
+                    try quantizeExpertStackStreamNative(&ctx, &streamer, info, options, file.is_mmap, stdout)
+                else
+                    try quantizeTensorStreamNative(allocator, &ctx, &streamer, info, options, file.is_mmap, stdout))
+            else if (info.n_dims == 3)
                 try quantizeExpertStackStream(&ctx, &streamer, info, options, file.is_mmap, stdout)
             else
                 try quantizeTensorStream(allocator, &ctx, &streamer, info, options, file.is_mmap, stdout);
@@ -627,9 +697,9 @@ fn runPtqtp(
     try streamer.finish();
     try out_writer.interface.flush();
 
-    try stdout.print("exported {s} -> {s} (PTQTP K={d})\n", .{ in_path, dst_path, args.planes });
-    try stdout.print("tensors: {d} quantized -> {d} plane tensors ({d} expert stacks), {d} passthrough ({d} expert stacks kept)\n", .{
-        quantized_count, quantized_count * args.planes, quant_stacks, passthrough_count, kept_stacks,
+    try stdout.print("exported {s} -> {s} (PTQTP K={d}{s})\n", .{ in_path, dst_path, args.planes, if (args.native) " native" else "" });
+    try stdout.print("tensors: {d} quantized -> {d} plane tensors ({d} expert stacks), {d} native fx4 ({d} expert stacks), {d} passthrough ({d} expert stacks kept)\n", .{
+        quantized_count, quantized_count * args.planes, quant_stacks, native_count, native_stacks, passthrough_count, kept_stacks,
     });
     try stdout.print("bytes: {d:.1} -> {d:.1} MiB total; quantized linears {d:.1} -> {d:.1} MiB\n", .{
         mib(total_src_bytes), mib(total_dst_bytes), mib(quant_src_bytes), mib(quant_dst_bytes),
@@ -739,6 +809,111 @@ fn quantizeExpertStackStream(
     // K resident plane stacks + one expert's transient planes + one
     // expert's f32 decode slice coexisted at each expert's solve.
     return @as(u64, out_bytes) + out_bytes / n_expert + @as(u64, out_dim * in_dim * @sizeOf(f32));
+}
+
+/// Native (`tq2_0_fx4`) dense variant of `quantizeTensorStream`: solve the
+/// tied K=2 planes, fold them into the one-pass 4-bit pack
+/// (`packMatmulRhsTQ2_0Foldedx4` — the exact serving bytes), write ONE
+/// base-named tensor. Peak hold = f32 decode buffer + two transient planes
+/// + the pack.
+fn quantizeTensorStreamNative(
+    allocator: std.mem.Allocator,
+    ctx: *fucina.ExecContext,
+    streamer: *gguf.Writer.DataStreamer,
+    info: *const gguf.TensorInfo,
+    options: fucina.ptqtp.Options,
+    release_pages: bool,
+    stdout: *std.Io.Writer,
+) !u64 {
+    const shape = try info.logicalMatrixShape(); // [out, in]
+    const rows = shape[0];
+    const cols = shape[1];
+
+    var pair = blk: {
+        const values = try allocator.alloc(f32, rows * cols);
+        defer allocator.free(values);
+        gguf.prefetch(info.data);
+        try gguf.decodeF32(info.ggml_type, info.data, values);
+        if (release_pages) gguf.release(info.data);
+        break :blk try ptqtp.quantizeMatrix(ctx, values, rows, cols, options);
+    };
+    defer pair.deinit(ctx.allocator);
+
+    const bpr = cols / 256;
+    var v0 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(pair.plane1), .rows = rows, .cols = cols, .blocks_per_row = bpr }, .k = cols, .n = rows };
+    var v1 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(pair.plane2), .rows = rows, .cols = cols, .blocks_per_row = bpr }, .k = cols, .n = rows };
+    const pack = try bq.packMatmulRhsTQ2_0Foldedx4(allocator, &v0, &v1);
+    defer allocator.free(pack);
+    const pack_bytes = std.mem.sliceAsBytes(pack);
+    try streamer.writeTensorData(pack_bytes);
+
+    const stats = pair.stats;
+    try stdout.print("ptqtp {s} [{d} x {d}] {s} -> tq2_0_fx4  rel_err {d:.4}  iters {d:.1}  unconverged {d}/{d}  ({d:.1} -> {d:.1} MiB)\n", .{
+        info.name,          rows,                  cols,                     @tagName(info.ggml_type),
+        stats.rel_frob_err, stats.mean_iterations, stats.unconverged_groups, stats.group_count,
+        mib(info.data.len), mib(pack_bytes.len),
+    });
+    try stdout.flush();
+    const plane_bytes = pair.plane1.len * @sizeOf(fucina.ptqtp.BlockTQ2_0);
+    return @as(u64, rows * cols * @sizeOf(f32)) + 2 * plane_bytes + pack_bytes.len;
+}
+
+/// Native expert-stack variant: fold each expert DURING quantization into
+/// the expert-major pack stack — the K resident plane-major stacks of the
+/// sibling path are never built (only one expert's transient planes live at
+/// a time), so the peak hold is the pack stack (~4.06 bpw) + one expert's
+/// f32 slice.
+fn quantizeExpertStackStreamNative(
+    ctx: *fucina.ExecContext,
+    streamer: *gguf.Writer.DataStreamer,
+    info: *const gguf.TensorInfo,
+    options: fucina.ptqtp.Options,
+    release_pages: bool,
+    stdout: *std.Io.Writer,
+) !u64 {
+    const allocator = ctx.allocator;
+    const in_dim = info.dims[0];
+    const out_dim = info.dims[1];
+    const n_expert = info.dims[2];
+    const bpc = in_dim / 256;
+    const fg = (out_dim / 4) * bpc;
+
+    const pack = try allocator.alloc(bq.BlockTQ2_0Foldedx4, n_expert * fg);
+    defer allocator.free(pack);
+    const values = try allocator.alloc(f32, out_dim * in_dim);
+    defer allocator.free(values);
+
+    const expert_src = info.data.len / n_expert;
+    var rel_sum: f64 = 0;
+    var rel_max: f64 = 0;
+    var unconverged: usize = 0;
+    var groups: usize = 0;
+    for (0..n_expert) |e| {
+        const slice = info.data[e * expert_src ..][0..expert_src];
+        gguf.prefetch(slice);
+        try gguf.decodeF32(info.ggml_type, slice, values);
+        if (release_pages) gguf.release(slice);
+        var pair = try ptqtp.quantizeMatrix(ctx, values, out_dim, in_dim, options);
+        defer pair.deinit(ctx.allocator);
+        var v0 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(pair.plane1), .rows = out_dim, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = out_dim };
+        var v1 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(pair.plane2), .rows = out_dim, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = out_dim };
+        try bq.packMatmulRhsTQ2_0Foldedx4Into(pack[e * fg ..][0..fg], &v0, &v1);
+        rel_sum += pair.stats.rel_frob_err;
+        rel_max = @max(rel_max, pair.stats.rel_frob_err);
+        unconverged += pair.stats.unconverged_groups;
+        groups += pair.stats.group_count;
+    }
+    const pack_bytes = std.mem.sliceAsBytes(pack);
+    try streamer.writeTensorData(pack_bytes);
+
+    try stdout.print("ptqtp {s} [{d} x {d} x {d}] {s} -> tq2_0_fx4  rel_err mean {d:.4} max {d:.4}  unconverged {d}/{d}  ({d:.1} -> {d:.1} MiB)\n", .{
+        info.name, n_expert, out_dim, in_dim, @tagName(info.ggml_type),
+        rel_sum / @as(f64, @floatFromInt(n_expert)), rel_max, unconverged, groups,
+        mib(info.data.len), mib(pack_bytes.len),
+    });
+    try stdout.flush();
+    const expert_plane_bytes = out_dim * bpc * @sizeOf(fucina.ptqtp.BlockTQ2_0);
+    return @as(u64, pack_bytes.len) + 2 * expert_plane_bytes + @as(u64, out_dim * in_dim * @sizeOf(f32));
 }
 
 /// Logical (row-major) shape — reversed ne dims, outermost first.

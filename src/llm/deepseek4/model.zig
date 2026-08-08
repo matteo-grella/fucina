@@ -27,6 +27,7 @@ const builtin = @import("builtin");
 const fucina = @import("fucina");
 const weights = @import("../weights.zig");
 const gguf_meta = @import("../gguf_meta.zig");
+const ptqtp_gguf = @import("../ptqtp_gguf.zig");
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
@@ -638,6 +639,22 @@ fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i:
     return loadLayerNamed(ctx, file, config, prefix, config.compress_ratio[layer_i], layer_i < config.hash_layers, store, layer_i);
 }
 
+/// Resident MoE expert stack by GGUF name: persisted PTQTP plane stacks
+/// when the file carries them (ptqtp_gguf pair-detection; a no-op metadata
+/// lookup on undecorated files — the MTP sidecar takes this branch), else
+/// the base stacked tensor.
+fn loadMoeProjection(ctx: *ExecContext, file: *const gguf.File, tensor_name: []const u8, in_dim: usize, out_dim: usize, n_expert: usize, borrow: bool) !fucina.MoeRhs {
+    if (try ptqtp_gguf.maybeLoadMoeRhs(ctx, file, tensor_name, in_dim, out_dim, n_expert, borrow)) |rhs| return rhs;
+    return weights.loadMoeRhs(ctx, try file.get(tensor_name), in_dim, out_dim, n_expert, borrow);
+}
+
+/// Streamed counterpart: an ExpertStore ProjSpec, pair-detecting PTQTP
+/// plane sets the same way.
+fn moeProjSpec(file: *const gguf.File, tensor_name: []const u8, in_dim: usize, out_dim: usize, n_expert: usize) !fucina.expert_store.ProjSpec {
+    if (try ptqtp_gguf.maybeStreamedMoeProjSpec(file, tensor_name, in_dim, out_dim, n_expert)) |spec| return spec;
+    return weights.streamedProjSpec(file, try file.get(tensor_name), in_dim, out_dim, n_expert);
+}
+
 /// Layer loader shared by the trunk ("blk.N." names) and the MTP sidecar
 /// ("mtp.0." names, always raw-family, top-k routed).
 fn loadLayerNamed(ctx: *ExecContext, file: *const gguf.File, config: Config, prefix: []const u8, ratio: usize, hash_routed: bool, store: ?*fucina.ExpertStore, store_layer: usize) !Layer {
@@ -750,15 +767,41 @@ fn loadLayerNamed(ctx: *ExecContext, file: *const gguf.File, config: Config, pre
     var up: fucina.MoeRhs = undefined;
     var down: fucina.MoeRhs = undefined;
     if (store) |st| {
-        const trio = try weights.loadMoeRhsStreamed(st, file, store_layer, try file.get(try name.of(&buf, prefix, "ffn_gate_exps.weight")), try file.get(try name.of(&buf, prefix, "ffn_up_exps.weight")), try file.get(try name.of(&buf, prefix, "ffn_down_exps.weight")), hidden, config.expert_ffn_size, config.num_experts);
-        gate = trio.gate;
-        up = trio.up;
-        down = trio.down;
+        // Slab-native container (docs/PTQTP.md): one .i8 record tensor per
+        // layer holding each expert's [gate|up|down] fx4 packs at the RAM
+        // slab's own section offsets — a miss is ONE contiguous pread. The
+        // specs below carry geometry only; the record layout is validated
+        // against it by `addLayerSlab`.
+        if (file.maybeGet(try name.of(&buf, prefix, "ffn_exps_slab.weight"))) |slab_info| {
+            if (slab_info.n_dims != 2 or slab_info.dims[1] != config.num_experts) return Error.InvalidWeightShape;
+            if (slab_info.ggml_type != .i8) return Error.UnsupportedWeightType;
+            const gu_plane = config.expert_ffn_size * (hidden / 256) * 130;
+            const down_plane = hidden * (config.expert_ffn_size / 256) * 130;
+            const specs = [3]fucina.expert_store.ProjSpec{
+                .{ .quant = .tq2_0_fx4, .file_offset = 0, .byte_len = config.num_experts * gu_plane, .in_dim = hidden, .out_dim = config.expert_ffn_size },
+                .{ .quant = .tq2_0_fx4, .file_offset = 0, .byte_len = config.num_experts * gu_plane, .in_dim = hidden, .out_dim = config.expert_ffn_size },
+                .{ .quant = .tq2_0_fx4, .file_offset = 0, .byte_len = config.num_experts * down_plane, .in_dim = config.expert_ffn_size, .out_dim = hidden },
+            };
+            try st.addLayerSlab(store_layer, specs, slab_info.part, file.partDataOffset(slab_info.part) + slab_info.offset, slab_info.dims[0], config.num_experts);
+            gate = .{ .streamed = st.streamedRhs(store_layer, .gate) };
+            up = .{ .streamed = st.streamedRhs(store_layer, .up) };
+            down = .{ .streamed = st.streamedRhs(store_layer, .down) };
+        } else {
+            const trio = try weights.registerStreamedMoeLayer(st, store_layer, .{
+                try moeProjSpec(file, try name.of(&buf, prefix, "ffn_gate_exps.weight"), hidden, config.expert_ffn_size, config.num_experts),
+                try moeProjSpec(file, try name.of(&buf, prefix, "ffn_up_exps.weight"), hidden, config.expert_ffn_size, config.num_experts),
+                // down transposes the FFN: (out_pe -> hidden).
+                try moeProjSpec(file, try name.of(&buf, prefix, "ffn_down_exps.weight"), config.expert_ffn_size, hidden, config.num_experts),
+            }, config.num_experts);
+            gate = trio.gate;
+            up = trio.up;
+            down = trio.down;
+        }
     } else {
         const borrow = file.is_mmap and !file.isSplit();
-        gate = try weights.loadMoeRhs(ctx, try file.get(try name.of(&buf, prefix, "ffn_gate_exps.weight")), hidden, config.expert_ffn_size, config.num_experts, borrow);
-        up = try weights.loadMoeRhs(ctx, try file.get(try name.of(&buf, prefix, "ffn_up_exps.weight")), hidden, config.expert_ffn_size, config.num_experts, borrow);
-        down = try weights.loadMoeRhs(ctx, try file.get(try name.of(&buf, prefix, "ffn_down_exps.weight")), config.expert_ffn_size, hidden, config.num_experts, borrow);
+        gate = try loadMoeProjection(ctx, file, try name.of(&buf, prefix, "ffn_gate_exps.weight"), hidden, config.expert_ffn_size, config.num_experts, borrow);
+        up = try loadMoeProjection(ctx, file, try name.of(&buf, prefix, "ffn_up_exps.weight"), hidden, config.expert_ffn_size, config.num_experts, borrow);
+        down = try loadMoeProjection(ctx, file, try name.of(&buf, prefix, "ffn_down_exps.weight"), config.expert_ffn_size, hidden, config.num_experts, borrow);
     }
     const shared_ffn = config.expert_ffn_size * config.num_shared_experts;
     var shared_gate = try LinearWeight.load(ctx, try file.get(try name.of(&buf, prefix, "ffn_gate_shexp.weight")), shared_ffn, hidden);
@@ -894,6 +937,12 @@ fn hcSplitSinkhorn(mix: []const f32, scale: []const f32, base: []const f32, n_hc
 pub const StepScratch = struct {
     /// HC stream state [n_hc * hidden], persistent across layers of one step.
     streams: []f32,
+    /// Backs the slice `step`/`stepBatch` (and rows-less `stepBatchExtra`)
+    /// return at the public API boundary: valid until the next step call on
+    /// the same session, never freed by callers. Everything inside the step
+    /// stays in pooled Tensors (defer-deinit'd, buffer-pool recycled) — this
+    /// is the one place tensor storage crosses to a raw slice.
+    logits: []f32,
     /// Cross-layer index-share state (`Model.index_share_every` >= 2): the
     /// nearest Full CSA layer's selection(s) for the CURRENT step, reset at
     /// every step entry. Decode holds one mask; batched prefill holds S
@@ -907,12 +956,16 @@ pub const StepScratch = struct {
     share_reused: u64 = 0,
 
     pub fn init(allocator: Allocator, config: Config) !StepScratch {
-        return .{ .streams = try allocator.alloc(f32, config.n_hc * config.hidden_size) };
+        const streams = try allocator.alloc(f32, config.n_hc * config.hidden_size);
+        errdefer allocator.free(streams);
+        const logits = try allocator.alloc(f32, config.vocab_size);
+        return .{ .streams = streams, .logits = logits };
     }
 
     pub fn deinit(self: *StepScratch, allocator: Allocator) void {
         self.share_lens.deinit(allocator);
         self.share_mask.deinit(allocator);
+        allocator.free(self.logits);
         allocator.free(self.streams);
         self.* = undefined;
     }
@@ -1084,13 +1137,15 @@ fn profNowNs() u64 {
     }
 }
 
+/// The sublayer input stays a pooled Tensor: the caller defer-deinits it
+/// after the block consumes its `dataConst()` view, so the buffer pool
+/// recycles the storage every layer — no per-call dupe.
 fn hcPre(
     ctx: *ExecContext,
     config: Config,
     module: *const HcModule,
     streams: []const f32,
-) !struct { sub_in: []f32, split: HcSplit } {
-    const allocator = ctx.allocator;
+) !struct { sub_in: fucina.Tensor(.{.embed}), split: HcSplit } {
     const hc_dim = config.n_hc * config.hidden_size;
 
     // flat = rms_norm_no_weight(streams) over the full 4*hidden vector.
@@ -1109,10 +1164,8 @@ fn hcPre(
     defer pre_t.deinit();
     var weighted = try streams_t.mul(ctx, &pre_t);
     defer weighted.deinit();
-    var summed = try weighted.sum(ctx, .stream);
-    defer summed.deinit();
-    const sub_in = try allocator.dupe(f32, try summed.dataConst());
-    return .{ .sub_in = sub_in, .split = split };
+    const summed = try weighted.sum(ctx, .stream);
+    return .{ .sub_in = summed, .split = split };
 }
 
 fn hcPost(
@@ -1319,9 +1372,13 @@ pub const Session = struct {
     }
 };
 
+/// One decode step. The returned logits are SESSION-OWNED (backed by
+/// `session.scratch.logits`): valid until the next step/stepBatch call on
+/// this session, never freed by the caller. Same contract for `stepBatch`
+/// and rows-less `stepBatchExtra`; the rows variant keeps caller-owned
+/// rows (see there).
 pub fn step(self: *Model, ctx: *ExecContext, session: *Session, token: usize) ![]f32 {
     const cfg = self.config;
-    const allocator = ctx.allocator;
     const cache = &session.cache;
     if (cache.len >= cache.capacity) return Error.KvCacheOverflow;
     const pos = cache.len;
@@ -1344,28 +1401,28 @@ pub fn step(self: *Model, ctx: *ExecContext, session: *Session, token: usize) ![
         // ---- attention sublayer ----
         {
             const t0 = profNowNs();
-            const pre = try hcPre(ctx, cfg, &layer.hc_attn, streams);
-            defer allocator.free(pre.sub_in);
-            const block_out = try attnBlock(self, ctx, cache, layer, layer_i, pre.sub_in, pos, &tables, &session.scratch, if (session.probe) |*p| p else null);
-            defer allocator.free(block_out);
-            try hcPost(ctx, cfg, &pre.split, block_out, streams);
+            var pre = try hcPre(ctx, cfg, &layer.hc_attn, streams);
+            defer pre.sub_in.deinit();
+            var block_out = try attnBlock(self, ctx, cache, layer, layer_i, try pre.sub_in.dataConst(), pos, &tables, &session.scratch, if (session.probe) |*p| p else null);
+            defer block_out.deinit();
+            try hcPost(ctx, cfg, &pre.split, try block_out.dataConst(), streams);
             self.prof.attn_ns +%= profNowNs() -% t0;
         }
         // ---- FFN sublayer ----
         {
             if (self.pilot_enabled and layer_i + 1 < self.layers.len)
                 pilotPrefetchNext(self, ctx, layer_i + 1, streams, token) catch {};
-            const pre = try hcPre(ctx, cfg, &layer.hc_ffn, streams);
-            defer allocator.free(pre.sub_in);
-            const block_out = try moeBlock(self, ctx, layer, pre.sub_in, token);
-            defer allocator.free(block_out);
-            try hcPost(ctx, cfg, &pre.split, block_out, streams);
+            var pre = try hcPre(ctx, cfg, &layer.hc_ffn, streams);
+            defer pre.sub_in.deinit();
+            var block_out = try moeBlock(self, ctx, layer, try pre.sub_in.dataConst(), token);
+            defer block_out.deinit();
+            try hcPost(ctx, cfg, &pre.split, try block_out.dataConst(), streams);
         }
     }
     if (session.probe) |*p| p.stepDone();
     cache.len += 1;
     const t_head = profNowNs();
-    const out = try outputLogits(self, ctx, streams);
+    const out = try outputLogitsWithInto(self, ctx, streams, &self.output_hc, self.output_norm, session.scratch.logits);
     self.prof.head_ns +%= profNowNs() -% t_head;
     self.prof.steps += 1;
     return out;
@@ -1379,9 +1436,17 @@ fn outputLogits(self: *Model, ctx: *ExecContext, streams: []const f32) ![]f32 {
 
 /// The same head with substituted merge/norm weights (the MTP sidecar has
 /// its own hc_head module and final norm but shares the trunk's vocab head).
+/// Owned-slice variant (MTP head + per-row batch logits): allocates.
 fn outputLogitsWith(self: *Model, ctx: *ExecContext, streams: []const f32, head_hc: *const HcModule, out_norm: []const f32) ![]f32 {
+    const dst = try ctx.allocator.alloc(f32, self.config.vocab_size);
+    errdefer ctx.allocator.free(dst);
+    return outputLogitsWithInto(self, ctx, streams, head_hc, out_norm, dst);
+}
+
+/// Head math into caller storage — the decode hot path writes the session
+/// logits buffer (no per-token allocation); returns `dst`.
+fn outputLogitsWithInto(self: *Model, ctx: *ExecContext, streams: []const f32, head_hc: *const HcModule, out_norm: []const f32, dst: []f32) ![]f32 {
     const cfg = self.config;
-    const allocator = ctx.allocator;
     const hc_dim = cfg.n_hc * cfg.hidden_size;
     var flat_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, hc_dim }, streams);
     defer flat_t.deinit();
@@ -1410,7 +1475,8 @@ fn outputLogitsWith(self: *Model, ctx: *ExecContext, streams: []const f32, head_
     defer final_norm.deinit();
     var logits_t = try self.output.linearSeq(ctx, &final_norm, .embed, .vocab);
     defer logits_t.deinit();
-    return allocator.dupe(f32, try logits_t.dataConst());
+    @memcpy(dst, try logits_t.dataConst());
+    return dst;
 }
 
 /// Batched prefill: one chunk of positions through all layers with S-row
@@ -1492,9 +1558,9 @@ pub fn stepBatchExtra(self: *Model, ctx: *ExecContext, session: *Session, tokens
             const tail = streams_all[(S - ffn_s) * hc_dim ..][0 .. ffn_s * hc_dim];
             const sub_in = try hcPreBatch(ctx, cfg, &layer.hc_ffn, tail, ffn_s, splits[0..ffn_s]);
             defer allocator.free(sub_in);
-            const block_out = try moeBlockBatch(self, ctx, layer, sub_in, tokens[S - ffn_s ..]);
-            defer allocator.free(block_out);
-            try hcPostBatch(ctx, cfg, splits[0..ffn_s], block_out, tail, ffn_s);
+            var block_out = try moeBlockBatch(self, ctx, layer, sub_in, tokens[S - ffn_s ..]);
+            defer block_out.deinit();
+            try hcPostBatch(ctx, cfg, splits[0..ffn_s], try block_out.dataConst(), tail, ffn_s);
         }
     }
     cache.len += S;
@@ -1507,7 +1573,7 @@ pub fn stepBatchExtra(self: *Model, ctx: *ExecContext, session: *Session, tokens
         for (rows, 0..) |*row, s| row.* = try outputLogits(self, ctx, streams_all[s * hc_dim ..][0..hc_dim]);
         return rows[S - 1];
     }
-    return outputLogits(self, ctx, streams_all[(S - 1) * hc_dim ..][0..hc_dim]);
+    return outputLogitsWithInto(self, ctx, streams_all[(S - 1) * hc_dim ..][0..hc_dim], &self.output_hc, self.output_norm, session.scratch.logits);
 }
 
 /// Batched hcPre: one flat rms-norm + fn projection over all rows, Sinkhorn
@@ -1810,7 +1876,7 @@ fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const 
     return allocator.dupe(f32, try out_t.dataConst());
 }
 
-fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer, layer_i: usize, sub_in: []const f32, pos: usize, tables: *const StepRope, scratch: *StepScratch, probe: ?*IndexProbe) ![]f32 {
+fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer, layer_i: usize, sub_in: []const f32, pos: usize, tables: *const StepRope, scratch: *StepScratch, probe: ?*IndexProbe) !fucina.Tensor(.{ .seq, .attn }) {
     const cfg = self.config;
     const allocator = ctx.allocator;
     const lc = &cache.layers[layer_i];
@@ -1956,12 +2022,13 @@ fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer
     const t_groups = profNowNs();
     var low_in = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, cfg.output_groups * rank }, low_flat);
     defer low_in.deinit();
-    var out_t = try layer.output_b.linearSeq(ctx, &low_in, .embed, .attn);
-    defer out_t.deinit();
+    const out_t = try layer.output_b.linearSeq(ctx, &low_in, .embed, .attn);
     self.prof.attn_out_plumb_ns +%= t_plumb -% attn_prof_t_attend;
     self.prof.attn_out_groups_ns +%= t_groups -% t_plumb;
     self.prof.attn_out_b_ns +%= profNowNs() -% t_groups;
-    return allocator.dupe(f32, try out_t.dataConst());
+    // Returned as the pooled tensor: the caller defer-deinits after hcPost
+    // consumes the view — no dupe, the pool recycles the storage.
+    return out_t;
 }
 
 /// Attention over an assembled row set with the per-head sink logit as an
@@ -2086,9 +2153,9 @@ fn pilotPrefetchNext(self: *Model, ctx: *ExecContext, next_layer_i: usize, strea
         pilotHintHashLayer(self, next, next_layer_i, &.{token});
         return;
     }
-    const pre = try hcPre(ctx, cfg, &next.hc_ffn, streams);
-    defer allocator.free(pre.sub_in);
-    var in_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, cfg.hidden_size }, pre.sub_in);
+    var pre = try hcPre(ctx, cfg, &next.hc_ffn, streams);
+    defer pre.sub_in.deinit();
+    var in_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, cfg.hidden_size }, try pre.sub_in.dataConst());
     defer in_t.deinit();
     var ffn_norm_w = try embedTag(ctx, next.ffn_norm);
     defer ffn_norm_w.deinit();
@@ -2165,11 +2232,11 @@ fn pilotHintHashAll(self: *Model, tokens: []const usize) void {
     }
 }
 
-fn moeBlock(self: *Model, ctx: *ExecContext, layer: *const Layer, sub_in: []const f32, token: usize) ![]f32 {
+fn moeBlock(self: *Model, ctx: *ExecContext, layer: *const Layer, sub_in: []const f32, token: usize) !fucina.Tensor(.{ .seq, .embed }) {
     return moeBlockBatch(self, ctx, layer, sub_in, &.{token});
 }
 
-fn moeBlockBatch(self: *Model, ctx: *ExecContext, layer: *const Layer, sub_in: []const f32, tokens: []const usize) ![]f32 {
+fn moeBlockBatch(self: *Model, ctx: *ExecContext, layer: *const Layer, sub_in: []const f32, tokens: []const usize) !fucina.Tensor(.{ .seq, .embed }) {
     const cfg = self.config;
     const allocator = ctx.allocator;
     const S = tokens.len;
@@ -2307,15 +2374,15 @@ fn moeBlockBatch(self: *Model, ctx: *ExecContext, layer: *const Layer, sub_in: [
     var shared = try layer.moe.shared_down.linearSeq(ctx, &mid, .gate_up, .embed);
     defer shared.deinit();
 
-    var total = try routed.add(ctx, &shared);
-    defer total.deinit();
+    const total = try routed.add(ctx, &shared);
     if (prof_decode) {
         const t_end = profNowNs();
         self.prof.router_ns +%= t_router -% t_entry;
         self.prof.experts_ns +%= t_routed -% t_router;
         self.prof.shared_ns +%= t_end -% t_routed;
     }
-    return allocator.dupe(f32, try total.dataConst());
+    // Pooled tensor out: caller defer-deinits after consuming the view.
+    return total;
 }
 
 test {
@@ -2484,19 +2551,19 @@ pub fn mtpDraftStep(self: *Model, mtp: *const Mtp, ctx: *ExecContext, state: *Mt
 
     // ---- attention sublayer (raw family, MTP-private ring) ----
     {
-        const pre = try hcPre(ctx, cfg, &mtp.layer.hc_attn, work);
-        defer allocator.free(pre.sub_in);
-        const block_out = try mtpAttnBlock(self, mtp, ctx, state, pre.sub_in, pos);
+        var pre = try hcPre(ctx, cfg, &mtp.layer.hc_attn, work);
+        defer pre.sub_in.deinit();
+        const block_out = try mtpAttnBlock(self, mtp, ctx, state, try pre.sub_in.dataConst(), pos);
         defer allocator.free(block_out);
         try hcPost(ctx, cfg, &pre.split, block_out, work);
     }
     // ---- FFN sublayer (top-k routed) ----
     {
-        const pre = try hcPre(ctx, cfg, &mtp.layer.hc_ffn, work);
-        defer allocator.free(pre.sub_in);
-        const block_out = try moeBlock(self, ctx, &mtp.layer, pre.sub_in, token);
-        defer allocator.free(block_out);
-        try hcPost(ctx, cfg, &pre.split, block_out, work);
+        var pre = try hcPre(ctx, cfg, &mtp.layer.hc_ffn, work);
+        defer pre.sub_in.deinit();
+        var block_out = try moeBlock(self, ctx, &mtp.layer, try pre.sub_in.dataConst(), token);
+        defer block_out.deinit();
+        try hcPost(ctx, cfg, &pre.split, try block_out.dataConst(), work);
     }
 
     @memcpy(state.streams, work);

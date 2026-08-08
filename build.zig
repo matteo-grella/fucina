@@ -227,6 +227,7 @@ pub fn build(b: *std.Build) void {
     diffusion_gemma.exe.root_module.link_libc = true;
     _ = addExample(b, tool_ctx, .{ .step = "qwen35", .desc = "Run Qwen3.5 (qwen35 hybrid Gated-DeltaNet) GGUF — loader/parity harness", .exe = "fucina-qwen35", .root = "examples/qwen35/main.zig", .llm = true });
     _ = addExample(b, tool_ctx, .{ .step = "export-gguf", .desc = "Export a GGUF: re-emit/transcode a model, merge Fucina LoRA adapters (checkpoint dir or safetensors) into dense weights, or PTQTP-quantize tensor-at-a-time (--ptqtp[=K]; models bigger than RAM)", .exe = "fucina-export-gguf", .root = "tools/export_gguf.zig", .llm = true });
+    _ = addExample(b, tool_ctx, .{ .step = "convert-ds4-fp4", .desc = "Convert DeepSeek-V4 fp4 safetensors experts into tied-PTQTP plane stacks over a trunk GGUF (trunk bytes verbatim, experts solved from the released fp4)", .exe = "fucina-convert-ds4-fp4", .root = "tools/convert_ds4_fp4.zig", .llm = true });
 
     const arch_check_exe = b.addExecutable(.{
         .name = "fucina-arch-check",

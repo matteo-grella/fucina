@@ -177,18 +177,12 @@ pub const Deepseek4Backend = struct {
         var session = try ds4.Session.init(self.model, self.context_len);
         defer session.deinit(self.model);
 
-        // Chunked prefill. Logits are owned by ctx's allocator; clear the
-        // slice before each re-fill so an error path never double-frees.
-        const logits_a = self.ctx.allocator;
+        // Chunked prefill. Logits are SESSION-OWNED (valid until the next
+        // step on this session) — never freed here.
         var logits: []f32 = &.{};
-        defer if (logits.len > 0) logits_a.free(logits);
         var fed: usize = 0;
         while (fed < ids.len) {
             const end = @min(fed + prefill_chunk, ids.len);
-            if (logits.len > 0) {
-                logits_a.free(logits);
-                logits = &.{};
-            }
             logits = try ds4.stepBatch(self.model, self.ctx, &session, ids[fed..end]);
             fed = end;
         }
@@ -209,7 +203,6 @@ pub const Deepseek4Backend = struct {
         ids: []const usize,
     ) anyerror!types.GenerateResult {
         const a = self.allocator;
-        const logits_a = self.ctx.allocator;
         var sampler = llm.sampler.Sampler.init(req.sampling);
         sampler.processor = processor;
         // Whole-conversation token history (the repetition-penalty window).
@@ -252,8 +245,6 @@ pub const Deepseek4Backend = struct {
             // its logits would never be sampled, and one deepseek4 forward
             // is real work (streamed experts).
             if (produced >= req.max_tokens or session.cache.len >= session.cache.capacity) break;
-            logits_a.free(logits.*);
-            logits.* = &.{};
             logits.* = try ds4.step(self.model, self.ctx, session, next);
         }
         try self.stream.flush(sink);

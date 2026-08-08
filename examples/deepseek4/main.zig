@@ -56,6 +56,8 @@ pub fn main(init: std.process.Init) !void {
     var spec = false;
     var vectors_dir: ?[]const u8 = null;
     var golden_path: ?[]const u8 = null;
+    var nll_path: ?[]const u8 = null;
+    var nll_tokens: usize = 512;
     var vectors_max_prompt: usize = 256;
     var index_share: usize = 0;
     var index_probe = false;
@@ -96,6 +98,11 @@ pub fn main(init: std.process.Init) !void {
             golden_path = arg["--golden=".len..];
         } else if (std.mem.startsWith(u8, arg, "--vectors=")) {
             vectors_dir = arg["--vectors=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--nll=")) {
+            nll_path = arg["--nll=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--nll-tokens=")) {
+            nll_tokens = try std.fmt.parseInt(usize, arg["--nll-tokens=".len..], 10);
+            if (nll_tokens == 0) nll_tokens = 1;
         } else if (std.mem.startsWith(u8, arg, "--vectors-max-prompt=")) {
             vectors_max_prompt = try std.fmt.parseInt(usize, arg["--vectors-max-prompt=".len..], 10);
         } else if (try moe_cli.tryParse(arg)) {
@@ -201,6 +208,9 @@ pub fn main(init: std.process.Init) !void {
     if (vectors_dir) |dir_path| {
         return runVectors(init.io, allocator, &ctx, &model, &tokenizer, stdout, dir_path, vectors_max_prompt, prefill_chunk);
     }
+    if (nll_path) |path| {
+        return runNll(init.io, allocator, &ctx, &model, &tokenizer, stdout, path, nll_tokens, prefill_chunk);
+    }
 
     var prompt_file_bytes: ?[]u8 = null;
     defer if (prompt_file_bytes) |b| allocator.free(b);
@@ -245,13 +255,12 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(frontier);
 
     const prefill_start = std.Io.Clock.awake.now(init.io).nanoseconds;
+    // Logits are session-owned (valid until the next step) — never freed.
     var logits: []f32 = &.{};
-    defer if (logits.len > 0) allocator.free(logits);
     {
         var fed: usize = 0;
         while (fed < tokens.items.len) {
             const end = @min(fed + prefill_chunk, tokens.items.len);
-            if (logits.len > 0) allocator.free(logits);
             // Final-row-only stream request: exactly the frontier the drafter
             // needs, and it keeps the model's final-layer FFN truncation
             // active during prefill.
@@ -332,11 +341,13 @@ pub fn main(init: std.process.Init) !void {
                 // pinned too, so the rebuilt rows match sequential decode.
                 session.cache.restore(&snap);
                 ctx.pinRowwiseKernels(true);
-                const replay = blk: {
+                // Rows-less stepBatchExtra returns the SESSION-OWNED logits
+                // slice — discarded, never freed (freeing it poisons the
+                // session's buffer and the next step segfaults).
+                _ = blk: {
                     defer ctx.pinRowwiseKernels(false);
                     break :blk try llm.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..accepted], null, null);
                 };
-                allocator.free(replay);
                 forwards += 1;
             }
         }
@@ -381,7 +392,6 @@ pub fn main(init: std.process.Init) !void {
                 if (produced == gen_count) break;
                 try tokenizer.decodeAppend(allocator, @intCast(next_token), &reply);
                 produced += 1;
-                allocator.free(logits);
                 logits = try llm.deepseek4.model.step(&model, &ctx, &session, next_token);
                 forwards += 1;
                 if (wants_topk) {
@@ -432,11 +442,13 @@ pub fn main(init: std.process.Init) !void {
                 // the rebuilt cache rows match sequential decode.
                 session.cache.restore(&snap);
                 ctx.pinRowwiseKernels(true);
-                const replay = blk: {
+                // Rows-less stepBatchExtra returns the SESSION-OWNED logits
+                // slice — discarded, never freed (freeing it poisons the
+                // session's buffer and the next step segfaults).
+                _ = blk: {
                     defer ctx.pinRowwiseKernels(false);
                     break :blk try llm.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..accepted], null, null);
                 };
-                allocator.free(replay);
                 forwards += 1;
             }
         }
@@ -463,7 +475,6 @@ pub fn main(init: std.process.Init) !void {
             if (eos != null and best == eos.?) break;
             try tokenizer.decodeAppend(allocator, @intCast(best), &reply);
             try history.append(allocator, best);
-            allocator.free(logits);
             logits = try llm.deepseek4.model.step(&model, &ctx, &session, best);
             forwards += 1;
         }
@@ -596,6 +607,68 @@ fn parseVector(arena: std.mem.Allocator, bytes: []const u8) !Vector {
 /// boundary with identical text still counts as a match. Fails when any run
 /// vector diverges on the very first step (quantized weights legitimately
 /// drift a few steps in; step 0 disagreeing means the forward is wrong).
+/// Teacher-forced mean NLL (and perplexity) over the first `max_tokens`
+/// supervised positions of a plain-encoded text file — the standard
+/// perplexity currency for quant comparisons (mirrors ptqtp-qwen3's --nll).
+/// Runs the deployed batched forward in `prefill_chunk` chunks with
+/// per-row logits (`stepBatchExtra`), so the number is computed at prefill
+/// speed on the exact serving path.
+fn runNll(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    ctx: *fucina.ExecContext,
+    model: *Model,
+    tokenizer: *const Tokenizer,
+    stdout: *std.Io.Writer,
+    path: []const u8,
+    max_tokens: usize,
+    prefill_chunk: usize,
+) !void {
+    const bytes = try readAllFile(io, allocator, path);
+    defer allocator.free(bytes);
+    const ids32 = try tokenizer.encode(allocator, bytes);
+    defer allocator.free(ids32);
+    // max_tokens supervised transitions need max_tokens + 1 tokens.
+    const n = @min(ids32.len, max_tokens + 1);
+    if (n < 2) return error.NllTextTooShort;
+    const tokens = try allocator.alloc(usize, n);
+    defer allocator.free(tokens);
+    for (tokens, ids32[0..n]) |*t, id| t.* = @intCast(id);
+
+    var session = try Session.init(model, n + 8);
+    defer session.deinit(model);
+
+    var total: f64 = 0;
+    var count: usize = 0;
+    const rows = try allocator.alloc([]f32, prefill_chunk);
+    defer allocator.free(rows);
+    var fed: usize = 0;
+    while (fed < n) {
+        const end = @min(fed + prefill_chunk, n);
+        const chunk = end - fed;
+        // The returned final-row logits ALIAS rows[chunk-1] when rows are
+        // requested (stepBatchExtra contract) — freeing the rows frees it.
+        _ = try llm.deepseek4.model.stepBatchExtra(model, ctx, &session, tokens[fed..end], rows[0..chunk], null);
+        defer for (rows[0..chunk]) |r| allocator.free(r);
+        for (0..chunk) |j| {
+            const pos = fed + j;
+            if (pos + 1 >= n) break;
+            const target = tokens[pos + 1];
+            const row = rows[j];
+            var max_logit: f32 = row[0];
+            for (row) |v| max_logit = @max(max_logit, v);
+            var sum_exp: f64 = 0;
+            for (row) |v| sum_exp += @exp(@as(f64, v - max_logit));
+            total += @as(f64, max_logit) + @log(sum_exp) - @as(f64, row[target]);
+            count += 1;
+        }
+        fed = end;
+    }
+    const nll = total / @as(f64, @floatFromInt(count));
+    try stdout.print("nll: {d:.4} (ppl {d:.2}) over {d} supervised tokens\n", .{ nll, @exp(nll), count });
+    try stdout.flush();
+}
+
 fn runVectors(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -660,12 +733,11 @@ fn runVectors(
         var session = try Session.init(model, tokens.items.len + vec.steps.len + 8);
         defer session.deinit(model);
 
+        // Session-owned logits: valid until the next step, never freed.
         var logits: []f32 = &.{};
-        defer if (logits.len > 0) allocator.free(logits);
         var fed: usize = 0;
         while (fed < tokens.items.len) {
             const end = @min(fed + prefill_chunk, tokens.items.len);
-            if (logits.len > 0) allocator.free(logits);
             logits = try llm.deepseek4.model.stepBatch(model, ctx, &session, tokens.items[fed..end]);
             fed = end;
         }
@@ -677,7 +749,6 @@ fn runVectors(
             const best = argmax(logits);
             if (eos != null and best == eos.?) break;
             try tokenizer.decodeAppend(allocator, @intCast(best), &ours);
-            allocator.free(logits);
             logits = try llm.deepseek4.model.step(model, ctx, &session, best);
         }
 
@@ -707,6 +778,9 @@ fn runVectors(
         try stdout.flush();
     }
     try stdout.print("vectors: {d} run, {d} failed\n", .{ ran, failures });
+    // Flush BEFORE the error return: the per-fixture PASS/FAIL evidence
+    // must survive a failing gate, not just a passing one.
+    try stdout.flush();
     if (failures > 0) return error.VectorMismatch;
 }
 
@@ -789,14 +863,13 @@ fn runGolden(
 
     var session = try Session.init(model, g.frontier + 8);
     defer session.deinit(model);
+    // Session-owned logits: valid until the next step, never freed.
     var logits: []f32 = &.{};
-    defer if (logits.len > 0) allocator.free(logits);
     var fed: usize = 0;
     const tokens = try arena.alloc(usize, g.frontier);
     for (tokens, ids32[0..g.frontier]) |*t, id| t.* = id;
     while (fed < g.frontier) {
         const end = @min(fed + prefill_chunk, g.frontier);
-        if (logits.len > 0) allocator.free(logits);
         logits = try llm.deepseek4.model.stepBatch(model, ctx, &session, tokens[fed..end]);
         fed = end;
     }
