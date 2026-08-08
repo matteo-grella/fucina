@@ -943,13 +943,7 @@ pub fn dequantizeRowIQ4_XSInto(dst: []f32, src: []const BlockIQ4_XS) !void {
     }
 }
 
-fn e8m0ToF32Half(x: u8) f32 {
-    const bits: u32 = if (x < 2)
-        @as(u32, 0x00200000) << @intCast(x)
-    else
-        @as(u32, x - 1) << 23;
-    return @bitCast(bits);
-}
+const e8m0ToF32Half = common.e8m0ToF32Half;
 
 fn ue4m3ToF32(x: u8) f32 {
     if (x == 0 or x == 0x7f) return 0;

@@ -67,6 +67,17 @@ pub const tie_key = "fucina.ptqtp.tie_scales";
 /// Longest tensor name this module reads or writes (base + `.ptqtp0`).
 const max_name_len = 160;
 
+/// `FUCINA_PTQTP_NO_FOLD=1` serves tie-fitted MoE plane sets through the
+/// per-plane path instead of the folded one-pass form (A/B on one binary).
+/// The expert-store L2 tier stripes primary-file plane bytes and skips
+/// folded slab sections entirely, so a striped tier only covers unfolded
+/// layers — this knob trades the halved cache-hit dot for L2 coverage.
+/// Applied to BOTH the resident and streamed MoE loaders so the two tiers
+/// keep serving the same numbers.
+fn moeFoldDisabled() bool {
+    return fucina.parallel.envFlag("FUCINA_PTQTP_NO_FOLD");
+}
+
 /// `<base>.ptqtpK` — one byte-valid TQ2_0 tensor per plane.
 pub fn planeName(buf: []u8, base: []const u8, plane: usize) ![]const u8 {
     return std.fmt.bufPrint(buf, "{s}.ptqtp{d}", .{ base, plane });
@@ -288,7 +299,7 @@ pub fn maybeLoadMoeRhs(
     borrow: bool,
 ) !?fucina.MoeRhs {
     const set = (try moePlaneInfos(file, base_name)) orelse return null;
-    const tied = (file.getInt(tie_key) orelse 0) == 1;
+    const tied = (file.getInt(tie_key) orelse 0) == 1 and !moeFoldDisabled();
     return try weights.loadMoeRhsPtqtp(ctx, set.infos[0..set.count], in_dim, out_dim, n_expert, borrow, tied);
 }
 
@@ -303,7 +314,7 @@ pub fn maybeStreamedMoeProjSpec(
     n_expert: usize,
 ) !?fucina.expert_store.ProjSpec {
     const set = (try moePlaneInfos(file, base_name)) orelse return null;
-    const tied = (file.getInt(tie_key) orelse 0) == 1;
+    const tied = (file.getInt(tie_key) orelse 0) == 1 and !moeFoldDisabled();
     return try weights.streamedProjSpecPtqtp(file, set.infos[0..set.count], in_dim, out_dim, n_expert, tied);
 }
 

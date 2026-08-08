@@ -73,6 +73,7 @@ pub const Error = error{
     ExpertFileReadFailed,
     UsageFileWriteFailed,
     UnexpectedEndOfFile,
+    L2NoStripeableLayers,
 } || Allocator.Error;
 
 // ---- platform I/O shims -------------------------------------------------
@@ -274,6 +275,13 @@ pub const StreamedQuant = enum {
     iq2_s,
     iq4_xs,
     q3_k,
+    mxfp4,
+    /// Tie-fitted K=2 PTQTP pre-folded on disk (`gguf.GgmlType.tq2_0_fx4`):
+    /// one contiguous pack per expert projection — single pread per miss,
+    /// slab bytes == file bytes (L2-stripeable), served by the one-pass
+    /// folded kernel. Resident MoE and dense loaders carry the same format
+    /// (docs/PTQTP.md, "Native folded expert format").
+    tq2_0_fx4,
 
     pub fn blockSize(self: StreamedQuant) usize {
         return switch (self) {
@@ -288,13 +296,20 @@ pub const StreamedQuant = enum {
             .iq2_s => @sizeOf(qm.BlockIQ2_S),
             .iq4_xs => @sizeOf(qm.BlockIQ4_XS),
             .q3_k => @sizeOf(qm.BlockQ3_K),
+            .mxfp4 => @sizeOf(qm.BlockMXFP4),
+            // Amortized per-column bytes: the physical 520-byte
+            // `BlockTQ2_0Foldedx4` spans FOUR columns' 256-element blocks,
+            // so per column it costs 130 — geometry math (rows x bpc x
+            // blockSize) then yields exact byte counts (out_dim % 4 == 0
+            // enforced in ProjGeometry.init).
+            .tq2_0_fx4 => @sizeOf(qm.BlockTQ2_0Foldedx4) / 4,
         };
     }
 
     /// Weight blocks per row for a row of `in_dim` inputs.
     pub fn blocksPerColumn(self: StreamedQuant, in_dim: usize) Error!usize {
         switch (self) {
-            .q8_0 => {
+            .q8_0, .mxfp4 => {
                 if (in_dim == 0 or in_dim % 32 != 0) return Error.InvalidExpertGeometry;
                 return in_dim / 32;
             },
@@ -366,6 +381,10 @@ const ProjGeometry = struct {
         // interprets a >1 plane slab as summed ternary planes.
         if (spec.plane_count > 1 and spec.quant != .tq2_0) return Error.InvalidExpertGeometry;
         if (spec.fold and (spec.plane_count != 2 or spec.quant != .tq2_0 or spec.out_dim % 4 != 0))
+            return Error.InvalidExpertGeometry;
+        // The native pre-folded pack: one plane by definition (the fold is
+        // on disk), never fill-folded, 4-column blocks need out_dim % 4.
+        if (spec.quant == .tq2_0_fx4 and (spec.plane_count != 1 or spec.fold or spec.out_dim % 4 != 0))
             return Error.InvalidExpertGeometry;
         const bpc = try spec.quant.blocksPerColumn(spec.in_dim);
         const row_bytes = std.math.mul(usize, bpc, spec.quant.blockSize()) catch return Error.InvalidExpertGeometry;
@@ -445,6 +464,14 @@ pub const LayerState = struct {
     /// Per-expert slab layout: projection `p`'s blocks start at `proj_off[p]`.
     proj_off: [3]usize,
     slab_bytes: usize,
+    /// Slab-native layer (`addLayerSlab`): the on-disk record IS the RAM
+    /// slab, byte for byte — expert `e` occupies
+    /// `[slab_file_offset + e*slab_bytes, +slab_bytes)` in `slab_part` and
+    /// a miss is ONE contiguous pread (three per-projection reads
+    /// otherwise). The per-projection ProjGeometry stays authoritative for
+    /// serving; only the read path changes.
+    slab_file_offset: ?u64 = null,
+    slab_part: u16 = 0,
     /// LRU tier (`cap` entries; slabs allocated on first promotion).
     slots: []Slot = &.{},
     n_slots: usize = 0,
@@ -1013,6 +1040,25 @@ pub const ExpertStore = struct {
         self.registered[layer_i] = true;
     }
 
+    /// Register a slab-native layer: `specs` carry the three projections'
+    /// GEOMETRY (their file offsets are ignored); the on-disk record at
+    /// `[slab_file_offset + e*record_bytes, +record_bytes)` is the RAM slab
+    /// byte-for-byte — projection sections at their 16 KiB-aligned
+    /// `proj_off` positions, tail-padded to `record_bytes`. The converter
+    /// writes that layout (`--repack-slab`); `record_bytes` is validated
+    /// against the geometry-derived slab size, so a layout drift between
+    /// producer and store fails loudly at load.
+    pub fn addLayerSlab(self: *ExpertStore, layer_i: usize, specs: [3]ProjSpec, slab_part: u16, slab_file_offset: u64, record_bytes: usize, n_expert: usize) Error!void {
+        if (slab_part >= self.fds.len) return Error.InvalidExpertGeometry;
+        try self.addLayer(layer_i, specs, n_expert);
+        const ls = &self.layers[layer_i];
+        if (record_bytes != ls.slab_bytes) {
+            return Error.InvalidExpertGeometry;
+        }
+        ls.slab_file_offset = slab_file_offset;
+        ls.slab_part = slab_part;
+    }
+
     /// Fix the tier layout from the configured budget: load the persisted
     /// usage history, carve the pinned tier out of the budget when the
     /// history qualifies (auto-pin — the learning cache), give the LRU the
@@ -1209,7 +1255,10 @@ pub const ExpertStore = struct {
             .n_expert = ls.n_expert,
             .blocks_per_column = g.blocks_per_column,
             .plane_count = g.plane_count,
-            .folded = g.fold,
+            // Folded SERVING: fill-time fold (sibling-plane files) or the
+            // native pre-folded pack — the dispatch reads the same section
+            // layout either way.
+            .folded = g.fold or g.quant == .tq2_0_fx4,
         };
     }
 
@@ -1666,6 +1715,12 @@ pub const ExpertStore = struct {
                 list.append(allocator, .{ .layer = @intCast(li), .eid = eid, .usage = ls.usage[e] }) catch return Error.UsageFileWriteFailed;
             }
         }
+        // Refuse before truncating: a build over a store whose every layer
+        // is fold-served (an all-tied-K2 PTQTP model without
+        // FUCINA_PTQTP_NO_FOLD=1) would wipe the existing tier and record
+        // zero coverage — an easy-to-miss silent perf cliff.
+        if (max_slab == 0) return Error.L2NoStripeableLayers;
+
         const S = struct {
             fn hotter(_: void, a: Entry, b: Entry) bool {
                 if (a.usage != b.usage) return a.usage > b.usage;
@@ -1708,7 +1763,8 @@ pub const ExpertStore = struct {
         }
 
         // Offset index: magic, version, layer count, then per registered
-        // layer its expert count and one u64 slab offset per expert.
+        // layer its expert count, one u64 slab offset per expert, and (v4)
+        // the slab_bytes + content fingerprint the open-side must match.
         const idx_path = std.fmt.allocPrint(allocator, "{s}.idx", .{base}) catch return Error.UsageFileWriteFailed;
         defer allocator.free(idx_path);
         const idx_fd = try openWriteTrunc(allocator, idx_path);
@@ -1716,7 +1772,7 @@ pub const ExpertStore = struct {
         var off: u64 = 0;
         var head: [12]u8 = undefined;
         std.mem.writeInt(u32, head[0..4], 0x4632_4C43, .little); // "CL2F"
-        std.mem.writeInt(u32, head[4..8], 3, .little);
+        std.mem.writeInt(u32, head[4..8], 4, .little);
         std.mem.writeInt(u32, head[8..12], @intCast(self.layers.len), .little);
         try pwriteFullFd(idx_fd, &head, off);
         off += head.len;
@@ -1733,7 +1789,32 @@ pub const ExpertStore = struct {
                 try pwriteFullFd(idx_fd, std.mem.sliceAsBytes(p), off);
                 off += p.len * 8;
             }
+            var ident: [16]u8 = undefined;
+            std.mem.writeInt(u64, ident[0..8], if (p.len > 0) ls.slab_bytes else 0, .little);
+            std.mem.writeInt(u64, ident[8..16], if (p.len > 0) try self.l2LayerFingerprint(ls) else 0, .little);
+            try pwriteFullFd(idx_fd, &ident, off);
+            off += ident.len;
         }
+    }
+
+    /// Content fingerprint for a registered layer: Wyhash of the first
+    /// min(4 KiB, one plane) of the primary-file expert bytes this layer's
+    /// tier slabs mirror. Ties a tier to the EXPERT BYTES it holds — model
+    /// files that share expert stacks (trunk-only variants) keep matching,
+    /// while a file with different expert content is refused at open
+    /// instead of silently served another model's weights.
+    fn l2LayerFingerprint(self: *ExpertStore, ls: *const LayerState) Error!u64 {
+        var buf: [4096]u8 = undefined;
+        const g = &ls.projs[0];
+        var part: usize = g.part;
+        var offset: u64 = g.plane_offsets[0];
+        if (ls.slab_file_offset) |so| {
+            part = ls.slab_part;
+            offset = so;
+        }
+        const len = @min(buf.len, g.plane_bytes);
+        try preadFullFd(self.fds[part], buf[0..len], offset);
+        return std.hash.Wyhash.hash(0x4632_4c46, buf[0..len]);
     }
 
     /// Striped prefix length for a slab: the bandwidth-balance fraction,
@@ -1760,7 +1841,10 @@ pub const ExpertStore = struct {
         var head: [12]u8 = undefined;
         if ((try preadOnce(idx_fd, &head, 0)) != head.len) return Error.InvalidExpertGeometry;
         if (std.mem.readInt(u32, head[0..4], .little) != 0x4632_4C43) return Error.InvalidExpertGeometry;
-        if (std.mem.readInt(u32, head[4..8], .little) != 3) return Error.InvalidExpertGeometry;
+        // v3 tiers (no fingerprint) stay openable and are trusted as-is;
+        // rebuilding upgrades them to v4.
+        const idx_version = std.mem.readInt(u32, head[4..8], .little);
+        if (idx_version != 3 and idx_version != 4) return Error.InvalidExpertGeometry;
         if (std.mem.readInt(u32, head[8..12], .little) != self.layers.len) return Error.InvalidExpertGeometry;
 
         const offsets = try allocator.alloc([]u64, self.layers.len);
@@ -1793,7 +1877,37 @@ pub const ExpertStore = struct {
                 off += bytes.len;
                 break :blk p;
             } else &.{};
+            // Tier offsets locate slab PREFIXES of primary-file bytes. A
+            // layer served folded rebuilds its slab section at fill time
+            // (the 4-bit pack is not primary bytes), so coverage recorded
+            // for it — a tier built under FUCINA_PTQTP_NO_FOLD=1, opened
+            // without it — must never be served: `readExpertPrefix` would
+            // overwrite the pack's head with unfolded plane bytes. Drop
+            // that layer's coverage instead (the tier adds speed, never
+            // correctness; the drop is visible as zero l2 reads in the
+            // exit stats).
+            // Count the layer as built NOW: the fingerprint checks below
+            // can error, and the errdefer frees offsets[0..built] only.
+            const cur = built;
             built += 1;
+            if (reg and offsets[cur].len > 0) {
+                var folded = false;
+                for (&ls.projs) |*g| folded = folded or g.fold;
+                if (folded) @memset(offsets[cur], l2_absent);
+            }
+            if (idx_version >= 4) {
+                var ident: [16]u8 = undefined;
+                if ((try preadOnce(idx_fd, &ident, off)) != ident.len) return Error.InvalidExpertGeometry;
+                off += ident.len;
+                if (n > 0) {
+                    // The tier's slabs are primary-file bytes of the model
+                    // it was built from: refuse any file whose expert
+                    // content differs (same-trunk-different-experts served
+                    // silently wrong is exactly the failure this catches).
+                    if (std.mem.readInt(u64, ident[0..8], .little) != ls.slab_bytes) return Error.InvalidExpertGeometry;
+                    if (std.mem.readInt(u64, ident[8..16], .little) != try self.l2LayerFingerprint(ls)) return Error.InvalidExpertGeometry;
+                }
+            }
         }
 
         const fds = try allocator.alloc(fd_t, 1);
@@ -1847,6 +1961,15 @@ pub const ExpertStore = struct {
     fn readExpertMain(self: *ExpertStore, ls: *LayerState, layer_i: usize, eid: u32, slot: *Slot) Error!void {
         const copy = self.routeCopy(layer_i, eid);
         const prefix: usize = if (self.l2Offset(layer_i, eid) != null) @intCast(self.l2_prefix[layer_i]) else 0;
+        // Slab-native record: the on-disk bytes ARE the slab — one
+        // contiguous pread of [prefix..slab_bytes) (the tier phase serves
+        // the prefix) instead of three per-projection reads.
+        if (ls.slab_file_offset) |base| {
+            if (prefix < ls.slab_bytes) {
+                try self.preadFull(ls.slab_part, copy, slot.slab[prefix..ls.slab_bytes], base + @as(u64, eid) * ls.slab_bytes + prefix);
+            }
+            return;
+        }
         for (&ls.projs, 0..) |*g, p| {
             if (g.fold) {
                 std.debug.assert(prefix == 0);
@@ -1883,6 +2006,10 @@ pub const ExpertStore = struct {
             _ = self.l2_fallbacks.fetchAdd(1, .monotonic);
         }
         const copy = self.routeCopy(layer_i, eid);
+        if (ls.slab_file_offset) |base| {
+            try self.preadFull(ls.slab_part, copy, slot.slab[0..prefix], base + @as(u64, eid) * ls.slab_bytes);
+            return;
+        }
         for (&ls.projs, 0..) |*g, p| {
             for (0..g.plane_count) |plane| {
                 const lo = ls.proj_off[p] + plane * g.plane_bytes;

@@ -94,6 +94,9 @@ fn dotLinear(
             }
             break :blk acc;
         },
+        // Native-folded PTQTP has no plane facade to dot through — fx4
+        // files are serving artifacts, not training checkpoints.
+        .tq2_0_fx4 => error.UnsupportedWeightType,
         inline else => |*w| dotFrozen(w, ctx, input, in_tag, out_tag),
     };
 }

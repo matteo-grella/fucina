@@ -766,3 +766,238 @@ test "MoE tie stamp: tied K=2 stacks load with the folded expert pack and fold t
     const spec2 = (try ptqtp_gguf.maybeStreamedMoeProjSpec(&out2, "e.weight", in_dim, odd_out, n_expert)).?;
     try std.testing.expectEqual(false, spec2.fold);
 }
+
+test "native folded MoE (tq2_0_fx4): loadMoeRhs serves the pack bit-identical to the sibling-plane fold" {
+    // Pin: a base-named tq2_0_fx4 expert stack loads as the
+    // folded-only resident `ptqtp` arm, whose pack bytes and served output
+    // must equal the sibling-plane path (maybeLoadMoeRhs -> eager fold) on
+    // the same solved planes — the fx4 tensor is by construction the bytes
+    // that fold produces.
+    const allocator = std.testing.allocator;
+    const bq = fucina.internal.backend_mod.quantized_matmul;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const t_in: usize = 256;
+    const t_out: usize = 256; // valid as OUT (%4) and as a down-proj contract dim (%256)
+    const n_expert: usize = 3;
+    const rows = n_expert * t_out;
+    const bpc = t_in / 256;
+
+    const vals = testWeightValues(rows * t_in, 9);
+    const tied_opts = fucina.ptqtp.Options{ .planes = 2, .max_iterations = 8, .tie_scales = true };
+    var pair = try fucina.ptqtp.quantizeMatrix(&ctx, &vals, rows, t_in, tied_opts);
+    defer pair.deinit(allocator);
+
+    // Sibling-plane file: version+tie stamps, two 3D plane-major tensors.
+    var sib = blk: {
+        var w = gguf.Writer.init(allocator);
+        defer w.deinit();
+        try w.addMetaInt(ptqtp_gguf.version_key, u32, ptqtp_gguf.format_version);
+        try w.addMetaInt(ptqtp_gguf.tie_key, u32, 1);
+        try w.addTensor("blk.0.ffn_gate_exps.weight.ptqtp0", .tq2_0, &.{ t_in, t_out, n_expert }, std.mem.sliceAsBytes(pair.plane1));
+        try w.addTensor("blk.0.ffn_gate_exps.weight.ptqtp1", .tq2_0, &.{ t_in, t_out, n_expert }, std.mem.sliceAsBytes(pair.plane2));
+        const buf = try allocator.alloc(u8, 1 << 20);
+        defer allocator.free(buf);
+        var sink = std.Io.Writer.fixed(buf);
+        try w.finish(&sink);
+        break :blk try gguf.File.parseOwned(allocator, try allocator.dupe(u8, sink.buffered()));
+    };
+    defer sib.deinit();
+    var sib_rhs = (try ptqtp_gguf.maybeLoadMoeRhs(&ctx, &sib, "blk.0.ffn_gate_exps.weight", t_in, t_out, n_expert, false)).?;
+    defer sib_rhs.deinit();
+
+    // fx4 file: ONE base-named pack tensor, no stamps, built by the same
+    // fold the loader would run.
+    const fg = (t_out / 4) * bpc;
+    const pack = try allocator.alloc(bq.BlockTQ2_0Foldedx4, n_expert * fg);
+    defer allocator.free(pack);
+    for (0..n_expert) |e| {
+        const pb = t_out * bpc;
+        var v0 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(pair.plane1[e * pb ..][0..pb]), .rows = t_out, .cols = t_in, .blocks_per_row = bpc }, .k = t_in, .n = t_out };
+        var v1 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(pair.plane2[e * pb ..][0..pb]), .rows = t_out, .cols = t_in, .blocks_per_row = bpc }, .k = t_in, .n = t_out };
+        try bq.packMatmulRhsTQ2_0Foldedx4Into(pack[e * fg ..][0..fg], &v0, &v1);
+    }
+    var fx4 = blk: {
+        var w = gguf.Writer.init(allocator);
+        defer w.deinit();
+        try w.addTensor("blk.0.ffn_gate_exps.weight", .tq2_0_fx4, &.{ t_in, t_out, n_expert }, std.mem.sliceAsBytes(pack));
+        const buf = try allocator.alloc(u8, 1 << 20);
+        defer allocator.free(buf);
+        var sink = std.Io.Writer.fixed(buf);
+        try w.finish(&sink);
+        break :blk try gguf.File.parseOwned(allocator, try allocator.dupe(u8, sink.buffered()));
+    };
+    defer fx4.deinit();
+    var fx4_rhs = try weights.loadMoeRhs(&ctx, try fx4.get("blk.0.ffn_gate_exps.weight"), t_in, t_out, n_expert, false);
+    defer fx4_rhs.deinit();
+
+    // Pack bytes equal the sibling loader's eagerly built fold...
+    try std.testing.expectEqual(@as(usize, 0), fx4_rhs.ptqtp.plane_count);
+    try std.testing.expectEqualSlices(
+        u8,
+        std.mem.sliceAsBytes(sib_rhs.ptqtp.folded),
+        std.mem.sliceAsBytes(fx4_rhs.ptqtp.folded),
+    );
+
+    // ...and the served expert FFN is bit-identical (gate/up/down all fx4).
+    const x_vals = testWeightValues(t_in, 5);
+    var x = try ctx.fromSliceRank(2, .{ 1, t_in }, &x_vals);
+    defer x.deinit();
+    const pairs = [2]usize{ 0, 2 };
+    const routing = [_]f32{ 0.7, 0.3 };
+    var want = try ctx.moeExpertFfn(&x, &sib_rhs, &sib_rhs, &sib_rhs, &pairs, &routing, t_out, .swiglu, null, null);
+    defer want.deinit();
+    var got = try ctx.moeExpertFfn(&x, &fx4_rhs, &fx4_rhs, &fx4_rhs, &pairs, &routing, t_out, .swiglu, null, null);
+    defer got.deinit();
+    try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
+}
+
+test "dense fx4 arm: serve and fusion bitwise vs tied sibling planes; relayout and row decode agree" {
+    // Pins: (a) a base-named tq2_0_fx4 dense tensor loads through
+    // LinearWeight.load and linearSeq output is BITWISE the tied sibling
+    // weight's pfold serve (same kernel, same pack bytes) at decode and
+    // batch m; (b) fuseLinear over fx4 parts == fuseLinear over the tied
+    // ptqtp parts, bitwise (pack concat == fold-of-concatenated-planes);
+    // (c) the Foldedx4 -> Folded-rows GPU relayout equals the from-planes
+    // packer byte-for-byte; (d) getRowsAs decodes rows within f16-coarse
+    // rounding of the plane-sum path (folded algebra derives coarse = 3s
+    // exactly; the plane sum multiplies an independently rounded f16 —
+    // equal math, different ulps).
+    const allocator = std.testing.allocator;
+    const bq = fucina.internal.backend_mod.quantized_matmul;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const t_k: usize = 256;
+    const parts_n = [3]usize{ 64, 32, 32 };
+    const tied_opts = fucina.ptqtp.Options{ .planes = 2, .max_iterations = 8, .tie_scales = true };
+
+    var pairs: [3]fucina.ptqtp.PlanePair = undefined;
+    var built: usize = 0;
+    defer for (0..built) |i| pairs[i].deinit(allocator);
+    inline for (parts_n, 0..) |pn, i| {
+        const vals = testWeightValues(pn * t_k, 11 + i);
+        pairs[i] = try fucina.ptqtp.quantizeMatrix(&ctx, &vals, pn, t_k, tied_opts);
+        built += 1;
+    }
+
+    // Per-part packs (the fx4 payloads).
+    var packs: [3][]bq.BlockTQ2_0Foldedx4 = undefined;
+    var packs_built: usize = 0;
+    defer for (0..packs_built) |i| allocator.free(packs[i]);
+    for (0..3) |i| {
+        const pn = parts_n[i];
+        const bpr = t_k / 256;
+        packs[i] = try allocator.alloc(bq.BlockTQ2_0Foldedx4, (pn / 4) * bpr);
+        var v0 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(pairs[i].plane1), .rows = pn, .cols = t_k, .blocks_per_row = bpr }, .k = t_k, .n = pn };
+        var v1 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(pairs[i].plane2), .rows = pn, .cols = t_k, .blocks_per_row = bpr }, .k = t_k, .n = pn };
+        try bq.packMatmulRhsTQ2_0Foldedx4Into(packs[i], &v0, &v1);
+        packs_built += 1;
+    }
+
+    // (c) relayout parity for part 0.
+    {
+        var v0 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(pairs[0].plane1), .rows = parts_n[0], .cols = t_k, .blocks_per_row = 1 }, .k = t_k, .n = parts_n[0] };
+        var v1 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(pairs[0].plane2), .rows = parts_n[0], .cols = t_k, .blocks_per_row = 1 }, .k = t_k, .n = parts_n[0] };
+        const from_planes = try bq.packMatmulRhsTQ2_0FoldedRows(allocator, &v0, &v1);
+        defer allocator.free(from_planes);
+        const from_x4 = try bq.packMatmulRhsTQ2_0FoldedRowsFromX4(allocator, packs[0], parts_n[0], 1);
+        defer allocator.free(from_x4);
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(from_planes), std.mem.sliceAsBytes(from_x4));
+    }
+
+    // Sibling (tied) weight and fx4 weight for part 0, loaded from files.
+    var sib = blk: {
+        var w = gguf.Writer.init(allocator);
+        defer w.deinit();
+        try w.addMetaInt(ptqtp_gguf.version_key, u32, ptqtp_gguf.format_version);
+        try w.addMetaInt(ptqtp_gguf.tie_key, u32, 1);
+        try w.addTensor("part.weight.ptqtp0", .tq2_0, &.{ t_k, parts_n[0] }, std.mem.sliceAsBytes(pairs[0].plane1));
+        try w.addTensor("part.weight.ptqtp1", .tq2_0, &.{ t_k, parts_n[0] }, std.mem.sliceAsBytes(pairs[0].plane2));
+        const buf = try allocator.alloc(u8, 1 << 20);
+        defer allocator.free(buf);
+        var sink = std.Io.Writer.fixed(buf);
+        try w.finish(&sink);
+        break :blk try gguf.File.parseOwned(allocator, try allocator.dupe(u8, sink.buffered()));
+    };
+    defer sib.deinit();
+    var sib_w = (try ptqtp_gguf.maybeLoadPlanes(&ctx, &sib, "part.weight", parts_n[0], t_k)).?;
+    defer sib_w.deinit();
+    try std.testing.expect(sib_w.ptqtp.pfold != null); // tied serve = pfold
+
+    var fx4_file = blk: {
+        var w = gguf.Writer.init(allocator);
+        defer w.deinit();
+        try w.addTensor("part.weight", .tq2_0_fx4, &.{ t_k, parts_n[0] }, std.mem.sliceAsBytes(packs[0]));
+        const buf = try allocator.alloc(u8, 1 << 20);
+        defer allocator.free(buf);
+        var sink = std.Io.Writer.fixed(buf);
+        try w.finish(&sink);
+        break :blk try gguf.File.parseOwned(allocator, try allocator.dupe(u8, sink.buffered()));
+    };
+    defer fx4_file.deinit();
+    var fx4_w = try LinearWeight.load(&ctx, try fx4_file.get("part.weight"), parts_n[0], t_k);
+    defer fx4_w.deinit();
+    try std.testing.expectEqual(parts_n[0], fx4_w.outDim());
+    try std.testing.expectEqual(t_k, fx4_w.inDim());
+    try std.testing.expect(!fx4_w.ptqtpEligible());
+
+    // (a) serve parity at decode (m=1) and batch (m=5).
+    inline for ([_]usize{ 1, 5 }) |m| {
+        const x_vals = testWeightValues(m * t_k, 3 + m);
+        var x = try fucina.Tensor(.{ .seq, .in }).fromSlice(&ctx, .{ m, t_k }, &x_vals);
+        defer x.deinit();
+        var want = try sib_w.linearSeq(&ctx, &x, .in, .out);
+        defer want.deinit();
+        var got = try fx4_w.linearSeq(&ctx, &x, .in, .out);
+        defer got.deinit();
+        try std.testing.expectEqualSlices(f32, try want.dataConst(), try got.dataConst());
+    }
+
+    // (d) row decode vs plane-sum rows: same math, coarse-scale ulps only.
+    {
+        const ids = [_]usize{ 0, 3, 17, 63 };
+        var want_rows = try sib_w.getRowsAs(&ctx, &ids, .in);
+        defer want_rows.deinit();
+        var got_rows = try fx4_w.getRowsAs(&ctx, &ids, .in);
+        defer got_rows.deinit();
+        for (try want_rows.dataConst(), try got_rows.dataConst()) |a, b| {
+            try std.testing.expect(@abs(a - b) <= 0.02 * (@abs(a) + 1e-3));
+        }
+    }
+
+    // (b) fusion parity: fx4 parts concat == tied ptqtp parts fused, bitwise.
+    var fx4_parts: [3]LinearWeight = undefined;
+    var ptq_parts: [3]LinearWeight = undefined;
+    for (0..3) |i| {
+        const owned = try allocator.alloc(bq.BlockTQ2_0Foldedx4, packs[i].len);
+        @memcpy(owned, packs[i]);
+        fx4_parts[i] = .{ .tq2_0_fx4 = weights.WeightPtqtpFx4.init(allocator, owned, allocator, parts_n[i], t_k, false) };
+        var p1 = try weights.QuantWeight(.tq2_0).fromBlocks(&ctx, .{ parts_n[i], t_k }, pairs[i].plane1);
+        errdefer p1.deinit();
+        const p2 = try weights.QuantWeight(.tq2_0).fromBlocks(&ctx, .{ parts_n[i], t_k }, pairs[i].plane2);
+        ptq_parts[i] = .{ .ptqtp = weights.WeightPtqtp.init(allocator, p1, p2, null, true) };
+    }
+    var fx4_fused = (try weights.fuseLinear(&ctx, &.{ &fx4_parts[0], &fx4_parts[1], &fx4_parts[2] })).?;
+    defer fx4_fused.deinit();
+    var ptq_fused = (try weights.fuseLinear(&ctx, &.{ &ptq_parts[0], &ptq_parts[1], &ptq_parts[2] })).?;
+    defer ptq_fused.deinit();
+    try std.testing.expectEqual(@as(usize, 128), fx4_fused.outDim());
+    // The fused fx4 pack must equal the fused-ptqtp weight's pfold bytes.
+    try std.testing.expectEqualSlices(
+        u8,
+        std.mem.sliceAsBytes(ptq_fused.ptqtp.pfold.?),
+        std.mem.sliceAsBytes(fx4_fused.tq2_0_fx4.pack),
+    );
+    const xf_vals = testWeightValues(2 * t_k, 21);
+    var xf = try fucina.Tensor(.{ .seq, .in }).fromSlice(&ctx, .{ 2, t_k }, &xf_vals);
+    defer xf.deinit();
+    var want_f = try ptq_fused.linearSeq(&ctx, &xf, .in, .out);
+    defer want_f.deinit();
+    var got_f = try fx4_fused.linearSeq(&ctx, &xf, .in, .out);
+    defer got_f.deinit();
+    try std.testing.expectEqualSlices(f32, try want_f.dataConst(), try got_f.dataConst());
+}

@@ -315,6 +315,96 @@ fn linearSeqPtqtpFused(
     return out_t;
 }
 
+/// Native-folded (`tq2_0_fx4`) dense serve: the WeightPtqtp pfold path with
+/// the pack unconditionally present — same guards, one Q8_K quantize of the
+/// m rows, one fork-join column-split dispatch of the one-pass folded
+/// kernel, partitioned in 4-column-group units. Bitwise identical to the
+/// tied `.ptqtp` pfold serve by construction (same kernel, same pack
+/// algebra). The GPU arm is one async folded dispatch at prefill m, same
+/// accepted non-bitwise stance as ptqtp's. No plane facade exists to fall
+/// back to: gradient-tracking inputs error (an fx4 file is a serving
+/// artifact, not a training checkpoint), non-contiguous views surface the
+/// view error truthfully, and m == 0 returns the empty result like every
+/// other arm.
+fn linearSeqFx4(
+    weight: *const WeightPtqtpFx4,
+    ctx: *ExecContext,
+    input: anytype,
+    comptime out_tag: Tag,
+) !fucina.Tensor(.{ .seq, out_tag }) {
+    if (input.requiresGrad()) return Error.UnsupportedWeightType;
+    if (input.dim(.seq) == 0) return try fucina.Tensor(.{ .seq, out_tag }).empty(ctx, .{ 0, weight.n });
+    const x = try input.asRawTensor().dataConstChecked();
+
+    const n = weight.n;
+    const k = weight.k;
+    const m = input.dim(.seq);
+    if (n == 0 or k == 0 or m * k != x.len) return Error.InvalidWeightShape;
+    const blocks_per_row = k / 256;
+
+    if (comptime fucina.internal.gpu.enabled and fucina.internal.gpu.has_tq2_0_quant) {
+        if (comptime fucina.internal.backend_mod.gpu_impl.has_tq2_0_folded_quant) {
+            if (m >= 32 and weight.gpu_fold != null) {
+                const nb01 = blocks_per_row * @sizeOf(backend_quant.BlockTQ2_0Folded);
+                if (try ctx.foldedTernaryMatmulGpu(weight.gpu_fold.?, .stable_process, nb01, input.asRawTensor(), m, n, k)) |out_raw| {
+                    return try fucina.Tensor(.{ .seq, out_tag }).fromTensor(ctx, out_raw);
+                }
+            }
+        }
+    }
+
+    const allocator = ctx.allocator;
+    const lhs = try allocator.alloc(backend_quant.BlockQ8_K, m * blocks_per_row);
+    defer allocator.free(lhs);
+    for (0..m) |r| {
+        try backend_quant.quantizeRowQ8_KInto(lhs[r * blocks_per_row ..][0..blocks_per_row], x[r * k ..][0..k]);
+    }
+    var out_t = try fucina.Tensor(.{ .seq, out_tag }).empty(ctx, .{ m, n });
+    errdefer out_t.deinit();
+    const out = try out_t.data();
+
+    const Task = struct {
+        out: []f32,
+        lhs: []const backend_quant.BlockQ8_K,
+        pack: []const backend_quant.BlockTQ2_0Foldedx4,
+        bpr: usize,
+        m: usize,
+        n: usize,
+        c0: usize,
+        c1: usize,
+
+        fn run(task: *const @This()) void {
+            backend_quant.matmulTQ2_0FoldedX4RhsTile(task.out, task.lhs, task.pack, task.bpr, task.n, 0, task.m, task.c0, task.c1);
+        }
+    };
+    const base = Task{ .out = out, .lhs = lhs, .pack = weight.pack, .bpr = blocks_per_row, .m = m, .n = n, .c0 = 0, .c1 = n };
+    // plane_count 2 in the work formula for pooling-decision parity with
+    // the tied .ptqtp pfold path (results are bitwise for any partition).
+    const work = m * n * k * 2;
+    var tasks_run = false;
+    if (work >= fucina.parallel.vector_matmul_work_threshold) {
+        if (ctx.workPool()) |pool| {
+            const cpu_count = fucina.parallel.cpuThreadCount(fucina.parallel.vector_max_threads);
+            const task_count = @max(@as(usize, 1), @min(cpu_count, n / fucina.parallel.vector_column_chunk));
+            if (task_count > 1) {
+                var tasks: [fucina.parallel.vector_max_threads]Task = undefined;
+                for (0..task_count) |ti| {
+                    tasks[ti] = base;
+                    // 4-column group units: the pack has no finer addressing.
+                    const groups = n / 4;
+                    tasks[ti].c0 = (ti * groups / task_count) * 4;
+                    tasks[ti].c1 = ((ti + 1) * groups / task_count) * 4;
+                }
+                pool.parallelChunks(Task, tasks[0..task_count], Task.run);
+                tasks_run = true;
+            }
+        }
+    }
+    if (!tasks_run) Task.run(&base);
+
+    return out_t;
+}
+
 /// PTQTP-decorated linear (arXiv:2509.16989; docs/PTQTP.md): the weight is
 /// two packed TQ2_0 trit-planes with per-block group scales — each plane a
 /// standalone valid TQ2_0 tensor — and the product is p1·x + p2·x through
@@ -481,6 +571,82 @@ pub const WeightPtqtp = struct {
     }
 };
 
+/// Native-folded tied-K=2 PTQTP dense weight (`gguf.GgmlType.tq2_0_fx4`,
+/// docs/PTQTP.md): the weight IS the one-pass 4-bit pack — no planes, no
+/// x4 repacks, no load-time fold. 4.0625 bpw resident vs the sibling-plane
+/// `WeightPtqtp`'s planes + x4 packs + pfold (~3x the bytes for the same
+/// tied serving numbers). Serving is bitwise the `WeightPtqtp.pfold` CPU
+/// path for every m (same kernel, same pack algebra); on Metal builds the
+/// pack relayouts into the row-major folded device form for the single
+/// async prefill dispatch (same accepted non-bitwise GPU stance as ptqtp).
+/// Autograd walks and frozen-training dots reject the arm (no plane facade
+/// to fall back to) — an fx4 file is a serving artifact, not a training
+/// checkpoint.
+pub const WeightPtqtpFx4 = struct {
+    /// Column-group-major pack: `pack[g * blocks_per_row + bi]`, group `g`
+    /// = output columns `4g..4g+3`.
+    pack: []const backend_quant.BlockTQ2_0Foldedx4,
+    /// Frees `pack`; null = borrowed storage kept alive by the owner.
+    allocator: ?Allocator,
+    /// Out / in dims — the pack slice carries no shape.
+    n: usize,
+    k: usize,
+    /// Metal-resident row-major folded bytes (`BlockTQ2_0Folded`), built
+    /// best-effort at init on capable builds.
+    gpu_fold: ?[]u8 = null,
+
+    pub fn init(allocator: Allocator, pack: []const backend_quant.BlockTQ2_0Foldedx4, pack_allocator: ?Allocator, n: usize, k: usize, gpu_resident: bool) WeightPtqtpFx4 {
+        var self = WeightPtqtpFx4{ .pack = pack, .allocator = pack_allocator, .n = n, .k = k };
+        if (gpu_resident) self.buildGpuResidency(allocator);
+        return self;
+    }
+
+    pub fn buildGpuResidency(self: *WeightPtqtpFx4, allocator: Allocator) void {
+        const gpu = fucina.internal.gpu;
+        if (comptime !(gpu.enabled and gpu.has_quant_gemm and gpu.has_tq2_0_quant)) return;
+        if (comptime !fucina.internal.backend_mod.gpu_impl.has_tq2_0_folded_quant) return;
+        if (self.gpu_fold != null) return;
+        const rows = backend_quant.packMatmulRhsTQ2_0FoldedRowsFromX4(allocator, self.pack, self.n, self.k / 256) catch return;
+        defer allocator.free(rows);
+        const bytes = std.mem.sliceAsBytes(rows);
+        const dev = gpu.allocResidentBytes(bytes.len) orelse return;
+        @memcpy(dev, bytes);
+        self.gpu_fold = dev;
+    }
+
+    /// Decode output row `r` to f32 — the embedding/util path (`getRowsAs`,
+    /// `toResidentF16`). value = fine_scale * (cu - 4), cu the stored
+    /// 9-level code; exact-equal to the tied plane sum by the tie identity.
+    pub fn decodeRow(self: *const WeightPtqtpFx4, r: usize, dst: []f32) void {
+        const bpr = self.k / 256;
+        const g = r / 4;
+        const ci = r % 4;
+        for (0..bpr) |bi| {
+            const block = &self.pack[g * bpr + bi];
+            const d: f32 = @floatCast(@as(f16, @bitCast(block.d[ci])));
+            const out = dst[bi * 256 ..][0..256];
+            for (0..256) |e| {
+                const sub = e / 32;
+                const rem = e % 32;
+                const idx = rem % 16;
+                const byte = block.qs[sub * 64 + (idx / 4) * 16 + ci * 4 + (idx % 4)];
+                const cu: i32 = if (rem >= 16) (byte >> 4) else (byte & 0xF);
+                out[e] = d * @as(f32, @floatFromInt(cu - 4));
+            }
+        }
+    }
+
+    pub fn deinit(self: *WeightPtqtpFx4) void {
+        const gpu = fucina.internal.gpu;
+        if (comptime gpu.enabled) {
+            if (self.gpu_fold) |dev| gpu.freeResidentBytes(dev);
+            self.gpu_fold = null;
+        }
+        if (self.allocator) |allocator| allocator.free(self.pack);
+        self.* = undefined;
+    }
+};
+
 /// One raw quantized linear weight to be copied into a contiguous stack.
 /// `data` is the GGUF block payload for a `[out, in]` matrix.
 pub const QuantByteStackPart = struct {
@@ -617,6 +783,7 @@ pub const LinearWeight = union(enum) {
     mxfp4: QuantWeight(.mxfp4),
     nvfp4: QuantWeight(.nvfp4),
     ptqtp: WeightPtqtp,
+    tq2_0_fx4: WeightPtqtpFx4,
 
     pub const LoadOptions = struct {
         /// Copy provider-supported quant payloads into device-owned storage
@@ -674,6 +841,20 @@ pub const LinearWeight = union(enum) {
             .tq2_0 => .{ .tq2_0 = try loadQuantizedWeight(.tq2_0, ctx, info, shape) },
             .mxfp4 => .{ .mxfp4 = try loadQuantizedWeight(.mxfp4, ctx, info, shape) },
             .nvfp4 => .{ .nvfp4 = try loadQuantizedWeight(.nvfp4, ctx, info, shape) },
+            .tq2_0_fx4 => blk: {
+                const n = shape[0];
+                const k = shape[1];
+                if (n % 4 != 0 or k % 256 != 0) return Error.InvalidWeightShape;
+                const src = try blockSlice(backend_quant.BlockTQ2_0Foldedx4, info.data);
+                if (src.len != (n / 4) * (k / 256)) return Error.InvalidWeightShape;
+                // Copy (like every dense quant arm): load() has no file
+                // handle, so mmap lifetime cannot be promised here. Still
+                // 4.0625 bpw once — no planes, no x4 packs, no fold pass.
+                const owned = try ctx.allocator.alloc(backend_quant.BlockTQ2_0Foldedx4, src.len);
+                errdefer ctx.allocator.free(owned);
+                @memcpy(owned, src);
+                break :blk .{ .tq2_0_fx4 = WeightPtqtpFx4.init(ctx.allocator, owned, ctx.allocator, n, k, options.gpu_resident) };
+            },
             else => Error.UnsupportedWeightType,
         };
     }
@@ -706,6 +887,13 @@ pub const LinearWeight = union(enum) {
                     null;
                 break :blk .{ .ptqtp = WeightPtqtp.init(ctx.allocator, p1, p2, p3, false) };
             },
+            // The fold IS the weight: clone copies the pack (unlike the
+            // ptqtp clone above, which drops fold/tie and rebuilds free).
+            .tq2_0_fx4 => |*value| blk: {
+                const owned = try ctx.allocator.alloc(backend_quant.BlockTQ2_0Foldedx4, value.pack.len);
+                @memcpy(owned, value.pack);
+                break :blk .{ .tq2_0_fx4 = WeightPtqtpFx4.init(ctx.allocator, owned, ctx.allocator, value.n, value.k, true) };
+            },
             inline else => |*value, tag| blk: {
                 const view = try value.withTags(ctx, .{ .out, .in });
                 break :blk @unionInit(LinearWeight, @tagName(tag), view);
@@ -721,6 +909,7 @@ pub const LinearWeight = union(enum) {
             .q6_k => |*w| w.value.dim(.out),
             .q8_0 => |*w| w.value.dim(.out),
             .ptqtp => |*w| w.p1.dim(.out),
+            .tq2_0_fx4 => |*w| w.n,
             inline else => |*w| w.dim(.out),
         };
     }
@@ -733,6 +922,7 @@ pub const LinearWeight = union(enum) {
             .q6_k => |*w| w.value.dim(.in),
             .q8_0 => |*w| w.value.dim(.in),
             .ptqtp => |*w| w.p1.dim(.in),
+            .tq2_0_fx4 => |*w| w.k,
             inline else => |*w| w.dim(.in),
         };
     }
@@ -776,7 +966,9 @@ pub const LinearWeight = union(enum) {
     /// contract dim satisfies the TQ2_0 256-element block granularity.
     pub fn ptqtpEligible(self: *const LinearWeight) bool {
         return switch (self.*) {
-            .ptqtp => false,
+            // Both PTQTP forms are already the decoration — re-decorating
+            // would double-quantize.
+            .ptqtp, .tq2_0_fx4 => false,
             else => self.inDim() % fucina.ptqtp.block_len == 0,
         };
     }
@@ -855,6 +1047,7 @@ pub const LinearWeight = union(enum) {
                 }
                 break :blk acc;
             },
+            .tq2_0_fx4 => |*weight| try linearSeqFx4(weight, ctx, input, out_tag),
             inline else => |*weight| blk: {
                 var tagged_weight = try weight.withTags(ctx, .{ out_tag, in_tag });
                 defer tagged_weight.deinit();
@@ -988,6 +1181,13 @@ pub const LinearWeight = union(enum) {
                     }
                 }
                 break :blk try acc.withTags(ctx, .{ .seq, out_tag });
+            },
+            .tq2_0_fx4 => |*table| blk: {
+                var out_t = try fucina.Tensor(.{ .seq, out_tag }).empty(ctx, .{ token_ids.len, table.k });
+                errdefer out_t.deinit();
+                const dst = try out_t.data();
+                for (token_ids, 0..) |row, i| table.decodeRow(row, dst[i * table.k ..][0..table.k]);
+                break :blk out_t;
             },
             inline else => |*table| blk: {
                 var rows = try table.getRows(ctx, .out, token_ids, .seq);
@@ -1125,6 +1325,34 @@ pub fn loadMoeRhs(
         .iq4_xs => .{ .iq4_xs = try copyOrBorrowMoeRhsRows(.iq4_xs, ctx, info, rows, in_dim, borrow) },
         .iq3_xxs => .{ .iq3_xxs = try copyOrBorrowMoeRhsRows(.iq3_xxs, ctx, info, rows, in_dim, borrow) },
         .tq2_0 => .{ .tq2_0 = try copyOrBorrowMoeRhsRows(.tq2_0, ctx, info, rows, in_dim, borrow) },
+        // Native pre-folded tied-K=2 PTQTP (docs/PTQTP.md): the on-disk
+        // bytes ARE the expert-major one-pass pack, so the resident arm is
+        // the folded-only `ptqtp` form — no planes, no load-time fold, and
+        // a borrow serves straight from the mapping's clean pages.
+        .tq2_0_fx4 => blk: {
+            if (out_dim % 4 != 0 or in_dim % 256 != 0) return Error.InvalidWeightShape;
+            const src = try blockSlice(backend_quant.BlockTQ2_0Foldedx4, info.data);
+            if (src.len != (rows / 4) * (in_dim / 256)) return Error.InvalidWeightShape;
+            var folded: []const backend_quant.BlockTQ2_0Foldedx4 = src;
+            var folded_allocator: ?Allocator = null;
+            if (!borrow) {
+                gguf.prefetch(info.data);
+                const owned = try ctx.allocator.alloc(backend_quant.BlockTQ2_0Foldedx4, src.len);
+                @memcpy(owned, src);
+                folded = owned;
+                folded_allocator = ctx.allocator;
+            }
+            break :blk .{ .ptqtp = .{
+                .allocator = null,
+                .planes = .{ &.{}, &.{}, &.{} },
+                .plane_count = 0,
+                .k = in_dim,
+                .n = rows,
+                .blocks_per_column = in_dim / 256,
+                .folded = folded,
+                .folded_allocator = folded_allocator,
+            } };
+        },
         else => Error.UnsupportedWeightType,
     };
 }
@@ -1572,6 +1800,8 @@ pub fn streamedProjSpec(
         .q6_k => .q6_k,
         .q8_0 => .q8_0,
         .tq2_0 => .tq2_0,
+        .tq2_0_fx4 => .tq2_0_fx4,
+        .mxfp4 => .mxfp4,
         .q2_k => .q2_k,
         .iq2_xxs => .iq2_xxs,
         .iq3_xxs => .iq3_xxs,
@@ -2157,6 +2387,9 @@ fn restoreGpuResidencyAfterDeclinedFusion(ctx: *ExecContext, parts: []const *Lin
         .q8_0 => |*weight| if (!weight.rhs_lifetime.isCacheable() and try makeGpuResidentQuantWeight(.q8_0, ctx, &weight.value)) {
             weight.rhs_lifetime = .stable_process;
         },
+        // loadForFusion skipped the fold residency; a declined fx4 part
+        // serves standalone and wants it back.
+        .tq2_0_fx4 => |*weight| weight.buildGpuResidency(ctx.allocator),
         else => {},
     };
 }
@@ -2232,6 +2465,33 @@ pub fn fuseLinear(ctx: *ExecContext, parts: []const *LinearWeight) !?LinearWeigh
         for (parts) |part| all_tied = all_tied and part.ptqtp.tied;
         for (parts) |part| part.deinit();
         return .{ .ptqtp = WeightPtqtp.init(ctx.allocator, p1, p2, p3, all_tied) };
+    }
+    // Native-folded parts concat by plain pack append: the layout is
+    // column-group-major and every part's out dim is a multiple of 4 (the
+    // format rejects anything else), so each part's groups land whole on
+    // group boundaries — byte-identical to folding the fused matrix (fold
+    // is per-column with no cross-column state).
+    if (std.meta.activeTag(parts[0].*) == .tq2_0_fx4) {
+        for (parts[1..]) |part| {
+            if (std.meta.activeTag(part.*) != .tq2_0_fx4) return declinedFusion(ctx, parts);
+        }
+        const k = parts[0].tq2_0_fx4.k;
+        var total_blocks: usize = 0;
+        var total_n: usize = 0;
+        for (parts) |part| {
+            if (part.tq2_0_fx4.k != k) return declinedFusion(ctx, parts);
+            total_blocks += part.tq2_0_fx4.pack.len;
+            total_n += part.tq2_0_fx4.n;
+        }
+        const fused = try ctx.allocator.alloc(backend_quant.BlockTQ2_0Foldedx4, total_blocks);
+        errdefer ctx.allocator.free(fused);
+        var off: usize = 0;
+        for (parts) |part| {
+            @memcpy(fused[off..][0..part.tq2_0_fx4.pack.len], part.tq2_0_fx4.pack);
+            off += part.tq2_0_fx4.pack.len;
+        }
+        for (parts) |part| part.deinit();
+        return .{ .tq2_0_fx4 = WeightPtqtpFx4.init(ctx.allocator, fused, ctx.allocator, total_n, k, true) };
     }
     return declinedFusion(ctx, parts);
 }

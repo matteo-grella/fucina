@@ -391,6 +391,28 @@ pub fn maddubsDotGroupsI32x8(acc: QKV8i32, a: QKV32u8, b: QKV32i8) QKV8i32 {
     return dpbusdI32x8Portable(acc, a, b);
 }
 
+/// vpshufb on ymm: per-128-bit-lane 16-entry byte table lookup —
+/// out[i] = 0 when idx[i] bit 7 is set, else table[lane_base + (idx[i] & 0x0F)]
+/// with lane_base 0 for the low half and 16 for the high half. Callers
+/// duplicate a 16-entry table across both halves for a uniform lookup.
+pub fn pshufbI8x32(table: QKV32i8, idx: QKV32u8) QKV32i8 {
+    if (comptime has_x86_avx2 and has_llvm_asm) {
+        return asm ("vpshufb %[idx], %[table], %[out]"
+            : [out] "=x" (-> QKV32i8),
+            : [table] "x" (table),
+              [idx] "x" (idx),
+        );
+    }
+    const t: [32]i8 = table;
+    const ix: [32]u8 = idx;
+    var out: [32]i8 = undefined;
+    inline for (0..32) |i| {
+        const lane_base: usize = if (i < 16) 0 else 16;
+        out[i] = if (ix[i] & 0x80 != 0) 0 else t[lane_base + (ix[i] & 0x0f)];
+    }
+    return out;
+}
+
 /// vpsignb on ymm: out[i] = y[i]·sign(x[i]) — y negated where x < 0, zeroed
 /// where x == 0, passed through where x > 0. Negation WRAPS: -(-128) stays
 /// -128 (the portable twin reproduces the wrap via -% exactly).
@@ -479,6 +501,36 @@ fn smmlaI8x16Portable(acc: QKV4i32, a: QKV16i8, b: QKV16i8) QKV4i32 {
         d[3] += ai[8 + k] * bi[8 + k];
     }
     return acc + @as(QKV4i32, d);
+}
+
+/// 16-entry signed byte table lookup: out[i] = table[idx[i]]. Callers must
+/// mask idx to 0..15; lanes outside that range are unspecified on the
+/// portable path (NEON `tbl` would zero them, but no caller relies on it).
+pub fn tblI8x16(table: QKV16i8, idx: QKV16u8) QKV16i8 {
+    if (comptime builtin.cpu.arch == .aarch64) {
+        var out: QKV16i8 = undefined;
+        asm ("tbl %[out].16b, {%[t].16b}, %[i].16b"
+            : [out] "=w" (out),
+            : [t] "w" (table),
+              [i] "w" (idx),
+        );
+        return out;
+    }
+    var out: [16]i8 = undefined;
+    inline for (0..16) |i| out[i] = table[idx[i] & 0x0f];
+    return out;
+}
+
+/// e8m0 exponent byte → 2^(e-127) / 2, exact for every non-NaN byte
+/// (e < 2 lands in the f32 subnormal range). The MXFP4 nibble table stores
+/// doubled e2m1 values so integer dots stay exact; this halved scale folds
+/// the /2 back without a rounding step.
+pub fn e8m0ToF32Half(x: u8) f32 {
+    const bits: u32 = if (x < 2)
+        @as(u32, 0x00200000) << @intCast(x)
+    else
+        @as(u32, x - 1) << 23;
+    return @bitCast(bits);
 }
 
 pub fn sdotI8x16(acc: QKV4i32, a: QKV16i8, b: QKV16i8) QKV4i32 {

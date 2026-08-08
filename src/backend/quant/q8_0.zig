@@ -589,8 +589,17 @@ pub fn matmulQ8_0x4RhsTile(
             const rhs_group = rhs.groupBlocks(j / 4);
             var acc: QKV4f32 = @splat(0);
             var block_index: usize = 0;
-            while (block_index < blocks_per_row) : (block_index += 1) {
-                acc = accumulateQ8_0x4(&lhs_row[block_index], &rhs_group[block_index], acc);
+            // Block pairs: the two contributions carry no dependency on acc
+            // or each other, so their integer dots pipeline; the adds land
+            // in the original order (bitwise identical to the serial loop).
+            while (block_index + 2 <= blocks_per_row) : (block_index += 2) {
+                const t0 = contributionQ8_0x4(&lhs_row[block_index], &rhs_group[block_index]);
+                const t1 = contributionQ8_0x4(&lhs_row[block_index + 1], &rhs_group[block_index + 1]);
+                acc += t0;
+                acc += t1;
+            }
+            if (block_index < blocks_per_row) {
+                acc += contributionQ8_0x4(&lhs_row[block_index], &rhs_group[block_index]);
             }
             out[i * n + j + 0] = acc[0];
             out[i * n + j + 1] = acc[1];
@@ -1098,16 +1107,24 @@ fn accumulateQ8_0Aarch64(
 }
 
 fn accumulateQ8_0x4(lhs: *const BlockQ8_0, rhs: *const BlockQ8_0x4, acc: QKV4f32) QKV4f32 {
+    return acc + contributionQ8_0x4(lhs, rhs);
+}
+
+/// The acc-independent part of one block's dot: exact integer sums times the
+/// scale product. Splitting it from the accumulate lets the single-row GEMV
+/// overlap consecutive blocks' integer pipelines while keeping the float
+/// ADD sequence — and therefore the results — bitwise unchanged.
+fn contributionQ8_0x4(lhs: *const BlockQ8_0, rhs: *const BlockQ8_0x4) QKV4f32 {
     if (comptime builtin.cpu.arch == .aarch64) {
-        return accumulateQ8_0x4Aarch64(lhs, rhs, acc);
+        return contributionQ8_0x4Aarch64(lhs, rhs);
     }
     if (comptime has_x86_vnni_ymm) {
-        return accumulateQ8_0x4Vnni(lhs, rhs, acc);
+        return contributionQ8_0x4Vnni(lhs, rhs);
     }
     if (comptime has_x86_avx2) {
-        return accumulateQ8_0x4Avx2(lhs, rhs, acc);
+        return contributionQ8_0x4Avx2(lhs, rhs);
     }
-    return accumulateQ8_0x4Widen(lhs, rhs, acc);
+    return contributionQ8_0x4Widen(lhs, rhs);
 }
 
 fn accumulateQ8_0x4Rows(
@@ -1128,6 +1145,10 @@ fn accumulateQ8_0x4Rows(
 }
 
 fn accumulateQ8_0x4Aarch64(lhs: *const BlockQ8_0, rhs: *const BlockQ8_0x4, acc: QKV4f32) QKV4f32 {
+    return acc + contributionQ8_0x4Aarch64(lhs, rhs);
+}
+
+fn contributionQ8_0x4Aarch64(lhs: *const BlockQ8_0, rhs: *const BlockQ8_0x4) QKV4f32 {
     const lhs_lo: QKV16i8 = @bitCast(lhs.qs[0..16].*);
     const lhs_hi: QKV16i8 = @bitCast(lhs.qs[16..32].*);
 
@@ -1143,7 +1164,7 @@ fn accumulateQ8_0x4Aarch64(lhs: *const BlockQ8_0, rhs: *const BlockQ8_0x4, acc: 
 
     const rhs_scale = f16x4BitsToF32(rhs.d);
     const scale = rhs_scale * @as(QKV4f32, @splat(f16BitsToF32(lhs.d)));
-    return acc + @as(QKV4f32, @floatFromInt(dot)) * scale;
+    return @as(QKV4f32, @floatFromInt(dot)) * scale;
 }
 
 fn accumulateQ8_0x4RowsAarch64(
@@ -1549,6 +1570,10 @@ pub fn accumulateQ8_0x4PackedWiden(lhs: *const BlockQ8_0x4, rhs: *const BlockQ8_
 /// column group): same +128-bias/correction algebra and bounds as the Packed
 /// arm; the LHS feature-group pairs are broadcast cross-lane instead.
 pub fn accumulateQ8_0x4Vnni(lhs: *const BlockQ8_0, rhs: *const BlockQ8_0x4, acc: QKV4f32) QKV4f32 {
+    return acc + contributionQ8_0x4Vnni(lhs, rhs);
+}
+
+fn contributionQ8_0x4Vnni(lhs: *const BlockQ8_0, rhs: *const BlockQ8_0x4) QKV4f32 {
     var sum: QKV8i32 = @splat(0);
     var gsum: QKV8i32 = @splat(0);
     const ones: QKV32u8 = @splat(1);
@@ -1563,13 +1588,17 @@ pub fn accumulateQ8_0x4Vnni(lhs: *const BlockQ8_0, rhs: *const BlockQ8_0x4, acc:
     }
 
     const t = addHalvesI32x8(sum) - addHalvesI32x8(gsum) * @as(QKV4i32, @splat(128));
-    return acc + @as(QKV4f32, @floatFromInt(t)) * @as(QKV4f32, @splat(f16BitsToF32(lhs.d))) * f16x4BitsToF32(rhs.d);
+    return @as(QKV4f32, @floatFromInt(t)) * @as(QKV4f32, @splat(f16BitsToF32(lhs.d))) * f16x4BitsToF32(rhs.d);
 }
 
 /// AVX2 arm of accumulateQ8_0x4: same sign-transfer arrangement, domain, and
 /// saturation proof as accumulateQ8_0x4PackedAvx2 (lhs = clamped activations
 /// in [−127,127], rhs = weights unrestricted).
 pub fn accumulateQ8_0x4Avx2(lhs: *const BlockQ8_0, rhs: *const BlockQ8_0x4, acc: QKV4f32) QKV4f32 {
+    return acc + contributionQ8_0x4Avx2(lhs, rhs);
+}
+
+fn contributionQ8_0x4Avx2(lhs: *const BlockQ8_0, rhs: *const BlockQ8_0x4) QKV4f32 {
     var sum: QKV8i32 = @splat(0);
     const lhs_groups: QKV8i32 = @bitCast(lhs.qs);
 
@@ -1581,12 +1610,16 @@ pub fn accumulateQ8_0x4Avx2(lhs: *const BlockQ8_0, rhs: *const BlockQ8_0x4, acc:
     }
 
     const t = addHalvesI32x8(sum);
-    return acc + @as(QKV4f32, @floatFromInt(t)) * @as(QKV4f32, @splat(f16BitsToF32(lhs.d))) * f16x4BitsToF32(rhs.d);
+    return @as(QKV4f32, @floatFromInt(t)) * @as(QKV4f32, @splat(f16BitsToF32(lhs.d))) * f16x4BitsToF32(rhs.d);
 }
 
 /// Universal portable-SIMD arm of accumulateQ8_0x4 (no arch gate, no domain
 /// restriction) — the widening tier of the plain-LHS accumulate.
 pub fn accumulateQ8_0x4Widen(lhs: *const BlockQ8_0, rhs: *const BlockQ8_0x4, acc: QKV4f32) QKV4f32 {
+    return acc + contributionQ8_0x4Widen(lhs, rhs);
+}
+
+fn contributionQ8_0x4Widen(lhs: *const BlockQ8_0, rhs: *const BlockQ8_0x4) QKV4f32 {
     var sum: QKV8i32 = @splat(0);
     const lhs_groups: QKV8i32 = @bitCast(lhs.qs);
 
@@ -1597,7 +1630,7 @@ pub fn accumulateQ8_0x4Widen(lhs: *const BlockQ8_0, rhs: *const BlockQ8_0x4, acc
     }
 
     const t = addHalvesI32x8(sum);
-    return acc + @as(QKV4f32, @floatFromInt(t)) * @as(QKV4f32, @splat(f16BitsToF32(lhs.d))) * f16x4BitsToF32(rhs.d);
+    return @as(QKV4f32, @floatFromInt(t)) * @as(QKV4f32, @splat(f16BitsToF32(lhs.d))) * f16x4BitsToF32(rhs.d);
 }
 
 // pub: the bit-exactness reference for the SIMD arms above (q8_0_tests.zig).

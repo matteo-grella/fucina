@@ -665,6 +665,42 @@ inline fn foldedCode(b1: *const BlockTQ2_0, b2: *const BlockTQ2_0, e: usize) u8 
     return 3 * u1c + u2c;
 }
 
+/// `packMatmulRhsTQ2_0FoldedRows` from an existing x4 pack instead of the
+/// two planes — a pure byte permutation (both layouts share the nibble
+/// pairing lo = element e, hi = e + 16): row 4g+ci block bi's
+/// qs[s*16 + jg*4 + j] is the x4 block (g, bi)'s qs[s*64 + jg*16 + ci*4 +
+/// j], and its d is the x4 block's d[ci]. The native-folded (`tq2_0_fx4`)
+/// dense arm builds its GPU residency through this — no planes exist to
+/// re-fold. Caller frees.
+pub fn packMatmulRhsTQ2_0FoldedRowsFromX4(
+    allocator: Allocator,
+    pack: []const BlockTQ2_0Foldedx4,
+    n: usize,
+    blocks_per_row: usize,
+) ![]BlockTQ2_0Folded {
+    const tensor = @import("../../tensor.zig");
+    if (n % 4 != 0 or pack.len != (n / 4) * blocks_per_row) return tensor.TensorError.InvalidShape;
+    const out = try allocator.alloc(BlockTQ2_0Folded, n * blocks_per_row);
+    errdefer allocator.free(out);
+    for (0..n / 4) |g| {
+        for (0..blocks_per_row) |bi| {
+            const src = &pack[g * blocks_per_row + bi];
+            for (0..4) |ci| {
+                const dst = &out[(g * 4 + ci) * blocks_per_row + bi];
+                dst.d = src.d[ci];
+                for (0..8) |sub| {
+                    for (0..4) |jg| {
+                        for (0..4) |j| {
+                            dst.qs[sub * 16 + jg * 4 + j] = src.qs[sub * 64 + jg * 16 + ci * 4 + j];
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return out;
+}
+
 /// Row-major fold for per-row block consumers (GPU residency): weight row
 /// major, blocks_per_row blocks per row, same 9-level codes and fine-scale
 /// contract as the x4 fold. Caller frees.
@@ -738,6 +774,17 @@ inline fn foldedBlockDot(w: *const BlockTQ2_0Foldedx4, a: *const BlockQ8_K) QKV4
     return acc;
 }
 
+/// One folded block's acc-independent contribution: integer dot minus the
+/// bsum offset, times the four column scales and the activation scale —
+/// the exact expression the serial loop added per block.
+inline fn foldedBlockContribution(w: *const BlockTQ2_0Foldedx4, a: *const BlockQ8_K, bsum: i32) @Vector(4, f32) {
+    const acc = foldedBlockDot(w, a);
+    const isum = acc - @as(QKV4i32, @splat(4 * bsum));
+    var sv: @Vector(4, f32) = undefined;
+    inline for (0..4) |ci| sv[ci] = f16BitsToF32(w.d[ci]);
+    return sv * @as(@Vector(4, f32), @splat(a.d)) * @as(@Vector(4, f32), @floatFromInt(isum));
+}
+
 /// Folded tile: rows [r0,r1), columns [c0,c1) on 4-column boundaries.
 pub fn matmulTQ2_0FoldedX4RhsTile(
     out: []f32,
@@ -764,14 +811,18 @@ pub fn matmulTQ2_0FoldedX4RhsTile(
         while (g < c1 / 4) : (g += 1) {
             const wgroup = folded[g * blocks_per_row ..][0..blocks_per_row];
             var sums: @Vector(4, f32) = @splat(0);
-            for (arow, 0..) |*a, bi| {
-                const w = &wgroup[bi];
-                const bsum = if (cached) bsum_cache[bi] else blockBsumTotal(a);
-                const acc = foldedBlockDot(w, a);
-                const isum = acc - @as(QKV4i32, @splat(4 * bsum));
-                var sv: @Vector(4, f32) = undefined;
-                inline for (0..4) |ci| sv[ci] = f16BitsToF32(w.d[ci]);
-                sums += sv * @as(@Vector(4, f32), @splat(a.d)) * @as(@Vector(4, f32), @floatFromInt(isum));
+            // Block pairs: the two contributions are independent of `sums`
+            // and of each other, so their integer dots pipeline; the float
+            // adds land in the original order — bitwise identical.
+            var bi: usize = 0;
+            while (bi + 2 <= arow.len) : (bi += 2) {
+                const t0 = foldedBlockContribution(&wgroup[bi], &arow[bi], if (cached) bsum_cache[bi] else blockBsumTotal(&arow[bi]));
+                const t1 = foldedBlockContribution(&wgroup[bi + 1], &arow[bi + 1], if (cached) bsum_cache[bi + 1] else blockBsumTotal(&arow[bi + 1]));
+                sums += t0;
+                sums += t1;
+            }
+            if (bi < arow.len) {
+                sums += foldedBlockContribution(&wgroup[bi], &arow[bi], if (cached) bsum_cache[bi] else blockBsumTotal(&arow[bi]));
             }
             orow[g * 4 ..][0..4].* = sums;
         }

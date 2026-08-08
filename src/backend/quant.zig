@@ -45,6 +45,7 @@ const q4_k = @import("quant/q4_k.zig");
 const q5_k = @import("quant/q5_k.zig");
 const q6_k = @import("quant/q6_k.zig");
 const ternary = @import("quant/ternary.zig");
+const mxfp4 = @import("quant/mxfp4.zig");
 const common = @import("quant/common.zig");
 const matmul_api = @import("quant/matmul_api.zig");
 
@@ -662,6 +663,7 @@ pub const matmulTQ2_0X4RhsTileAcc = ternary.matmulTQ2_0X4RhsTileAcc;
 pub const packMatmulRhsTQ2_0Foldedx4 = ternary.packMatmulRhsTQ2_0Foldedx4;
 pub const packMatmulRhsTQ2_0Foldedx4Into = ternary.packMatmulRhsTQ2_0Foldedx4Into;
 pub const packMatmulRhsTQ2_0FoldedRows = ternary.packMatmulRhsTQ2_0FoldedRows;
+pub const packMatmulRhsTQ2_0FoldedRowsFromX4 = ternary.packMatmulRhsTQ2_0FoldedRowsFromX4;
 pub const matmulTQ2_0FoldedX4RhsTile = ternary.matmulTQ2_0FoldedX4RhsTile;
 pub const matmulTQ2_0FoldedX4RhsRange = ternary.matmulTQ2_0FoldedX4RhsRange;
 pub const matmulQ2_0RhsRange = ternary.matmulQ2_0RhsRange;
@@ -673,6 +675,7 @@ pub const dequantizeRowQ2_0FastInto = ternary.dequantizeRowQ2_0FastInto;
 pub const matmulTQ2_0F32RhsRange = ternary.matmulTQ2_0F32RhsRange;
 pub const matmulTQ2_0F32RhsTile = ternary.matmulTQ2_0F32RhsTile;
 pub const dotTQ2_0F32 = ternary.dotTQ2_0F32;
+pub const matmulMXFP4RhsTile = mxfp4.matmulMXFP4RhsTile;
 
 test {
     _ = @import("quant_tests.zig");
@@ -683,5 +686,6 @@ test {
     _ = @import("quant/q5_k.zig");
     _ = @import("quant/q6_k.zig");
     _ = @import("quant/ternary.zig");
+    _ = @import("quant/mxfp4.zig");
     _ = @import("quant/encode_golden_test.zig");
 }

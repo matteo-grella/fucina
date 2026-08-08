@@ -1873,3 +1873,750 @@ test "l2 tier: built sparse mirror serves every miss bit-exact and reopens acros
         try std.testing.expect(store.l2_expert_hits.load(.monotonic) >= 2);
     }
 }
+
+test "l2 tier: fold-mode flip drops coverage instead of corrupting folded slabs; all-folded build refuses" {
+    // A tier snapshot records slab-prefix offsets of PRIMARY file bytes,
+    // which is only valid for unfolded serving (e.g. FUCINA_PTQTP_NO_FOLD=1
+    // over a tie-fitted file). Pins for the two mode-flip hazards:
+    // (a) l2Build over a store whose every layer is fold-served refuses
+    //     (L2NoStripeableLayers) BEFORE truncating an existing tier;
+    // (b) a tier built from unfolded specs, reopened with fold-serving
+    //     specs, drops that layer's coverage — `readExpertPrefix` would
+    //     otherwise overwrite the folded pack's head with plane bytes —
+    //     and decode stays bit-exact vs the resident folded arm.
+    const allocator = std.testing.allocator;
+    const ptqtp = @import("../ptqtp.zig");
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const t_hidden: usize = 256;
+    const t_ffn: usize = 512;
+    const t_experts: usize = 2;
+    const gu_rows = t_experts * t_ffn;
+    const gu_bpc = t_hidden / qm.qk_k_block_size;
+    const down_rows = t_experts * t_hidden;
+    const down_bpc = t_ffn / qm.qk_k_block_size;
+
+    const gate_w = try allocator.alloc(f32, gu_rows * t_hidden);
+    defer allocator.free(gate_w);
+    const up_w = try allocator.alloc(f32, gu_rows * t_hidden);
+    defer allocator.free(up_w);
+    const down_w = try allocator.alloc(f32, down_rows * t_ffn);
+    defer allocator.free(down_w);
+    for (gate_w, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i)) * 0.023) * 0.8;
+    for (up_w, 0..) |*v, i| v.* = @cos(@as(f32, @floatFromInt(i)) * 0.031) * 1.1;
+    for (down_w, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i)) * 0.017 + 0.5) * 0.7;
+
+    const tied_opts = ptqtp.Options{ .planes = 2, .max_iterations = 8, .tie_scales = true };
+    var gate_pair = try ptqtp.quantizeMatrix(&ctx, gate_w, gu_rows, t_hidden, tied_opts);
+    defer gate_pair.deinit(allocator);
+    var up_pair = try ptqtp.quantizeMatrix(&ctx, up_w, gu_rows, t_hidden, tied_opts);
+    defer up_pair.deinit(allocator);
+    var down_pair = try ptqtp.quantizeMatrix(&ctx, down_w, down_rows, t_ffn, tied_opts);
+    defer down_pair.deinit(allocator);
+
+    const gate_folded = try foldExpertStack(allocator, gate_pair.plane1, gate_pair.plane2, t_experts, t_hidden, t_ffn);
+    defer allocator.free(gate_folded);
+    const up_folded = try foldExpertStack(allocator, up_pair.plane1, up_pair.plane2, t_experts, t_hidden, t_ffn);
+    defer allocator.free(up_folded);
+    const down_folded = try foldExpertStack(allocator, down_pair.plane1, down_pair.plane2, t_experts, t_ffn, t_hidden);
+    defer allocator.free(down_folded);
+
+    var resident_gate_planes: MoeRhs = .{ .ptqtp = .{ .allocator = null, .planes = .{ gate_pair.plane1, gate_pair.plane2, &.{} }, .plane_count = 2, .k = t_hidden, .n = gu_rows, .blocks_per_column = gu_bpc } };
+    var resident_up_planes: MoeRhs = .{ .ptqtp = .{ .allocator = null, .planes = .{ up_pair.plane1, up_pair.plane2, &.{} }, .plane_count = 2, .k = t_hidden, .n = gu_rows, .blocks_per_column = gu_bpc } };
+    var resident_down_planes: MoeRhs = .{ .ptqtp = .{ .allocator = null, .planes = .{ down_pair.plane1, down_pair.plane2, &.{} }, .plane_count = 2, .k = t_ffn, .n = down_rows, .blocks_per_column = down_bpc } };
+    var resident_gate_folded: MoeRhs = .{ .ptqtp = .{ .allocator = null, .planes = .{ gate_pair.plane1, gate_pair.plane2, &.{} }, .plane_count = 2, .k = t_hidden, .n = gu_rows, .blocks_per_column = gu_bpc, .folded = gate_folded } };
+    var resident_up_folded: MoeRhs = .{ .ptqtp = .{ .allocator = null, .planes = .{ up_pair.plane1, up_pair.plane2, &.{} }, .plane_count = 2, .k = t_hidden, .n = gu_rows, .blocks_per_column = gu_bpc, .folded = up_folded } };
+    var resident_down_folded: MoeRhs = .{ .ptqtp = .{ .allocator = null, .planes = .{ down_pair.plane1, down_pair.plane2, &.{} }, .plane_count = 2, .k = t_ffn, .n = down_rows, .blocks_per_column = down_bpc, .folded = down_folded } };
+
+    var path_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "expert_store_l2_foldflip_{d}.bin", .{std.Io.Clock.real.now(std.testing.io).nanoseconds});
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+    defer cleanupSidecar(path);
+    const gu_plane_bytes = gate_pair.plane1.len * @sizeOf(qm.BlockTQ2_0);
+    const down_plane_bytes = down_pair.plane1.len * @sizeOf(qm.BlockTQ2_0);
+    {
+        var file = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
+        defer file.close(std.testing.io);
+        var write_buffer: [4096]u8 = undefined;
+        var writer = file.writer(std.testing.io, &write_buffer);
+        for ([_][]const qm.BlockTQ2_0{
+            gate_pair.plane1, gate_pair.plane2,
+            up_pair.plane1,   up_pair.plane2,
+            down_pair.plane1, down_pair.plane2,
+        }) |plane| try writer.interface.writeAll(std.mem.sliceAsBytes(plane));
+        try writer.interface.flush();
+    }
+    const specs_unfolded = [3]expert_store.ProjSpec{
+        .{ .quant = .tq2_0, .file_offset = 0, .byte_len = gu_plane_bytes, .in_dim = t_hidden, .out_dim = t_ffn, .plane_count = 2, .plane_offsets = .{ gu_plane_bytes, 0 } },
+        .{ .quant = .tq2_0, .file_offset = 2 * gu_plane_bytes, .byte_len = gu_plane_bytes, .in_dim = t_hidden, .out_dim = t_ffn, .plane_count = 2, .plane_offsets = .{ 3 * gu_plane_bytes, 0 } },
+        .{ .quant = .tq2_0, .file_offset = 4 * gu_plane_bytes, .byte_len = down_plane_bytes, .in_dim = t_ffn, .out_dim = t_hidden, .plane_count = 2, .plane_offsets = .{ 4 * gu_plane_bytes + down_plane_bytes, 0 } },
+    };
+    var specs_folded = specs_unfolded;
+    for (&specs_folded) |*s| s.fold = true;
+
+    var l2_buf: [160]u8 = undefined;
+    const l2_path = try std.fmt.bufPrint(&l2_buf, "{s}.l2", .{path});
+    defer {
+        var buf: [176]u8 = undefined;
+        std.Io.Dir.cwd().deleteFile(std.testing.io, l2_path) catch {};
+        const idx = std.fmt.bufPrint(&buf, "{s}.idx", .{l2_path}) catch &.{};
+        if (idx.len > 0) std.Io.Dir.cwd().deleteFile(std.testing.io, idx) catch {};
+    }
+
+    const x_vals = try allocator.alloc(f32, t_hidden);
+    defer allocator.free(x_vals);
+    for (x_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 13) % 167)) - 83)) / 83.0;
+    var x = try ctx.fromSliceRank(2, .{ 1, t_hidden }, x_vals);
+    defer x.deinit();
+    const pair = [2]usize{ 0, 1 };
+    const routing = [_]f32{ 0.6, 0.4 };
+
+    // (1) Unfolded store builds + serves the tier; decode bit-exact vs the
+    // resident per-plane arm and every miss covered.
+    {
+        var store = try ExpertStore.create(allocator, &.{path}, 1, .{
+            .cache_slots_per_layer = 1,
+            .l2_path = l2_path,
+            .l2_build_bytes = 1 << 30,
+        });
+        defer store.destroy();
+        try store.addLayer(0, specs_unfolded, t_experts);
+        try store.finalize();
+        var s_gate: MoeRhs = .{ .streamed = store.streamedRhs(0, .gate) };
+        var s_up: MoeRhs = .{ .streamed = store.streamedRhs(0, .up) };
+        var s_down: MoeRhs = .{ .streamed = store.streamedRhs(0, .down) };
+        var want = try ctx.moeExpertFfn(&x, &resident_gate_planes, &resident_up_planes, &resident_down_planes, &pair, &routing, t_ffn, .swiglu, null, null);
+        defer want.deinit();
+        var got = try ctx.moeExpertFfn(&x, &s_gate, &s_up, &s_down, &pair, &routing, t_ffn, .swiglu, null, null);
+        defer got.deinit();
+        try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
+        try std.testing.expect(store.l2_expert_hits.load(.monotonic) >= 2);
+        try std.testing.expectEqual(@as(u64, 0), store.l2_fallbacks.load(.monotonic));
+    }
+
+    // (2) All-folded build refuses before truncating the existing tier.
+    {
+        var store = try ExpertStore.create(allocator, &.{path}, 1, .{
+            .cache_slots_per_layer = 1,
+            .l2_path = l2_path,
+            .l2_build_bytes = 1 << 30,
+        });
+        defer store.destroy();
+        try store.addLayer(0, specs_folded, t_experts);
+        try std.testing.expectError(error.L2NoStripeableLayers, store.finalize());
+    }
+
+    // (3) Folded store over the unfolded-built tier: coverage dropped
+    // (zero l2 reads), decode bit-exact vs the resident folded arm.
+    {
+        var store = try ExpertStore.create(allocator, &.{path}, 1, .{
+            .cache_slots_per_layer = 1,
+            .l2_path = l2_path,
+        });
+        defer store.destroy();
+        try store.addLayer(0, specs_folded, t_experts);
+        try store.finalize();
+        var s_gate: MoeRhs = .{ .streamed = store.streamedRhs(0, .gate) };
+        var s_up: MoeRhs = .{ .streamed = store.streamedRhs(0, .up) };
+        var s_down: MoeRhs = .{ .streamed = store.streamedRhs(0, .down) };
+        var want = try ctx.moeExpertFfn(&x, &resident_gate_folded, &resident_up_folded, &resident_down_folded, &pair, &routing, t_ffn, .swiglu, null, null);
+        defer want.deinit();
+        var got = try ctx.moeExpertFfn(&x, &s_gate, &s_up, &s_down, &pair, &routing, t_ffn, .swiglu, null, null);
+        defer got.deinit();
+        try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
+        try std.testing.expectEqual(@as(u64, 0), store.l2_expert_hits.load(.monotonic));
+        try std.testing.expectEqual(@as(u64, 0), store.l2_fallbacks.load(.monotonic));
+    }
+}
+
+test "native folded (tq2_0_fx4) experts: streamed pack serves the one-pass kernel bit-exact; L2 stripes it" {
+    // The pre-folded on-disk format: the pack bytes fill-time folding
+    // would produce, stored as ONE expert-major tensor region — a single
+    // pread per projection per miss, and slab bytes == file bytes, so the
+    // L2 tier stripes these layers like any plain quant (the whole point
+    // of the format). Pins: (a) streamed fx4 == resident folded arm
+    // bitwise across cold/warm/evicting decode and batch; (b) an L2 tier
+    // built over fx4 layers serves misses bit-exact with hits recorded;
+    // (c) geometry legs (plane_count/fold/out_dim%4 rejections).
+    const allocator = std.testing.allocator;
+    const ptqtp = @import("../ptqtp.zig");
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const t_hidden: usize = 256;
+    const t_ffn: usize = 512;
+    const t_experts: usize = 2;
+    const gu_rows = t_experts * t_ffn;
+    const gu_bpc = t_hidden / qm.qk_k_block_size;
+    const down_rows = t_experts * t_hidden;
+    const down_bpc = t_ffn / qm.qk_k_block_size;
+
+    const gate_w = try allocator.alloc(f32, gu_rows * t_hidden);
+    defer allocator.free(gate_w);
+    const up_w = try allocator.alloc(f32, gu_rows * t_hidden);
+    defer allocator.free(up_w);
+    const down_w = try allocator.alloc(f32, down_rows * t_ffn);
+    defer allocator.free(down_w);
+    for (gate_w, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i)) * 0.021) * 0.85;
+    for (up_w, 0..) |*v, i| v.* = @cos(@as(f32, @floatFromInt(i)) * 0.027) * 1.15;
+    for (down_w, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i)) * 0.015 + 0.4) * 0.65;
+
+    const tied_opts = ptqtp.Options{ .planes = 2, .max_iterations = 8, .tie_scales = true };
+    var gate_pair = try ptqtp.quantizeMatrix(&ctx, gate_w, gu_rows, t_hidden, tied_opts);
+    defer gate_pair.deinit(allocator);
+    var up_pair = try ptqtp.quantizeMatrix(&ctx, up_w, gu_rows, t_hidden, tied_opts);
+    defer up_pair.deinit(allocator);
+    var down_pair = try ptqtp.quantizeMatrix(&ctx, down_w, down_rows, t_ffn, tied_opts);
+    defer down_pair.deinit(allocator);
+
+    const gate_folded = try foldExpertStack(allocator, gate_pair.plane1, gate_pair.plane2, t_experts, t_hidden, t_ffn);
+    defer allocator.free(gate_folded);
+    const up_folded = try foldExpertStack(allocator, up_pair.plane1, up_pair.plane2, t_experts, t_hidden, t_ffn);
+    defer allocator.free(up_folded);
+    const down_folded = try foldExpertStack(allocator, down_pair.plane1, down_pair.plane2, t_experts, t_ffn, t_hidden);
+    defer allocator.free(down_folded);
+
+    var resident_gate: MoeRhs = .{ .ptqtp = .{ .allocator = null, .planes = .{ gate_pair.plane1, gate_pair.plane2, &.{} }, .plane_count = 2, .k = t_hidden, .n = gu_rows, .blocks_per_column = gu_bpc, .folded = gate_folded } };
+    var resident_up: MoeRhs = .{ .ptqtp = .{ .allocator = null, .planes = .{ up_pair.plane1, up_pair.plane2, &.{} }, .plane_count = 2, .k = t_hidden, .n = gu_rows, .blocks_per_column = gu_bpc, .folded = up_folded } };
+    var resident_down: MoeRhs = .{ .ptqtp = .{ .allocator = null, .planes = .{ down_pair.plane1, down_pair.plane2, &.{} }, .plane_count = 2, .k = t_ffn, .n = down_rows, .blocks_per_column = down_bpc, .folded = down_folded } };
+
+    // On disk: the expert-major PACK per projection — what --repack-native
+    // writes as the base-named tq2_0_fx4 tensor.
+    var path_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "expert_store_fx4_{d}.bin", .{std.Io.Clock.real.now(std.testing.io).nanoseconds});
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+    defer cleanupSidecar(path);
+    const gu_pack_bytes = gate_folded.len * @sizeOf(qm.BlockTQ2_0Foldedx4);
+    const down_pack_bytes = down_folded.len * @sizeOf(qm.BlockTQ2_0Foldedx4);
+    {
+        var file = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
+        defer file.close(std.testing.io);
+        var write_buffer: [4096]u8 = undefined;
+        var writer = file.writer(std.testing.io, &write_buffer);
+        for ([_][]const qm.BlockTQ2_0Foldedx4{ gate_folded, up_folded, down_folded }) |pack|
+            try writer.interface.writeAll(std.mem.sliceAsBytes(pack));
+        try writer.interface.flush();
+    }
+    const specs_fx4 = [3]expert_store.ProjSpec{
+        .{ .quant = .tq2_0_fx4, .file_offset = 0, .byte_len = gu_pack_bytes, .in_dim = t_hidden, .out_dim = t_ffn },
+        .{ .quant = .tq2_0_fx4, .file_offset = gu_pack_bytes, .byte_len = gu_pack_bytes, .in_dim = t_hidden, .out_dim = t_ffn },
+        .{ .quant = .tq2_0_fx4, .file_offset = 2 * gu_pack_bytes, .byte_len = down_pack_bytes, .in_dim = t_ffn, .out_dim = t_hidden },
+    };
+
+    // Geometry legs: fx4 rejects multi-plane, fill-fold, and out_dim % 4.
+    {
+        var store = try ExpertStore.create(allocator, &.{path}, 1, .{ .cache_slots_per_layer = 1 });
+        defer store.destroy();
+        var bad = specs_fx4;
+        bad[0].plane_count = 2;
+        try std.testing.expectError(error.InvalidExpertGeometry, store.addLayer(0, bad, t_experts));
+        bad = specs_fx4;
+        bad[0].fold = true;
+        try std.testing.expectError(error.InvalidExpertGeometry, store.addLayer(0, bad, t_experts));
+        bad = specs_fx4;
+        bad[1].out_dim = t_ffn + 2;
+        try std.testing.expectError(error.InvalidExpertGeometry, store.addLayer(0, bad, t_experts));
+    }
+
+    var l2_buf: [160]u8 = undefined;
+    const l2_path = try std.fmt.bufPrint(&l2_buf, "{s}.l2", .{path});
+    defer {
+        var buf: [176]u8 = undefined;
+        std.Io.Dir.cwd().deleteFile(std.testing.io, l2_path) catch {};
+        const idx = std.fmt.bufPrint(&buf, "{s}.idx", .{l2_path}) catch &.{};
+        if (idx.len > 0) std.Io.Dir.cwd().deleteFile(std.testing.io, idx) catch {};
+    }
+
+    var store = try ExpertStore.create(allocator, &.{path}, 1, .{
+        .cache_slots_per_layer = 1,
+        .l2_path = l2_path,
+        .l2_build_bytes = 1 << 30,
+    });
+    defer store.destroy();
+    try store.addLayer(0, specs_fx4, t_experts);
+    try store.finalize();
+    var s_gate: MoeRhs = .{ .streamed = store.streamedRhs(0, .gate) };
+    var s_up: MoeRhs = .{ .streamed = store.streamedRhs(0, .up) };
+    var s_down: MoeRhs = .{ .streamed = store.streamedRhs(0, .down) };
+
+    const x_vals = try allocator.alloc(f32, t_hidden);
+    defer allocator.free(x_vals);
+    for (x_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 11) % 173)) - 86)) / 86.0;
+    var x = try ctx.fromSliceRank(2, .{ 1, t_hidden }, x_vals);
+    defer x.deinit();
+    for ([_][2]usize{ .{ 0, 1 }, .{ 0, 1 }, .{ 1, 0 } }) |pair| {
+        const routing = [_]f32{ 0.55, 0.45 };
+        var want = try ctx.moeExpertFfn(&x, &resident_gate, &resident_up, &resident_down, &pair, &routing, t_ffn, .swiglu, null, null);
+        defer want.deinit();
+        var got = try ctx.moeExpertFfn(&x, &s_gate, &s_up, &s_down, &pair, &routing, t_ffn, .swiglu, null, null);
+        defer got.deinit();
+        try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
+    }
+    // The point of the format: fx4 layers ARE striped (vs the fill-folded
+    // sibling format, which gets zero coverage).
+    try std.testing.expect(store.l2_expert_hits.load(.monotonic) >= 2);
+    try std.testing.expectEqual(@as(u64, 0), store.l2_fallbacks.load(.monotonic));
+
+    // Batched prefill across both experts.
+    const m: usize = 5;
+    const top_k: usize = 2;
+    const xb_vals = try allocator.alloc(f32, m * t_hidden);
+    defer allocator.free(xb_vals);
+    for (xb_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 19) % 181)) - 90)) / 90.0;
+    var xb = try ctx.fromSliceRank(2, .{ m, t_hidden }, xb_vals);
+    defer xb.deinit();
+    const selected = [_]usize{ 0, 1, 1, 0, 0, 1, 1, 0, 0, 0 };
+    const routing_b = [_]f32{ 0.6, 0.4, 0.5, 0.5, 0.7, 0.3, 0.2, 0.8, 0.9, 0.1 };
+    var want_b = try ctx.moeExpertFfnBatch(&xb, &resident_gate, &resident_up, &resident_down, &selected, &routing_b, top_k, t_ffn, .swiglu, null, null);
+    defer want_b.deinit();
+    var got_b = try ctx.moeExpertFfnBatch(&xb, &s_gate, &s_up, &s_down, &selected, &routing_b, top_k, t_ffn, .swiglu, null, null);
+    defer got_b.deinit();
+    try std.testing.expectEqualSlices(f32, want_b.dataConst(), got_b.dataConst());
+}
+
+test "slab-native fx4 records: one-pread misses serve bit-exact; geometry mismatch rejected; L2 stripes" {
+    // The slab-native container: the on-disk record IS the RAM slab
+    // (sections at their 16 KiB-aligned proj_off positions, tail padded),
+    // registered via addLayerSlab. Pins: (a) streamed decode/batch over
+    // one-pread misses == the resident folded arm bitwise; (b) a record
+    // size that disagrees with the geometry-derived slab is rejected;
+    // (c) the L2 tier builds and serves over slab-native layers.
+    const allocator = std.testing.allocator;
+    const ptqtp = @import("../ptqtp.zig");
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const t_hidden: usize = 256;
+    const t_ffn: usize = 512;
+    const t_experts: usize = 2;
+    const gu_rows = t_experts * t_ffn;
+    const gu_bpc = t_hidden / qm.qk_k_block_size;
+    const down_rows = t_experts * t_hidden;
+    const down_bpc = t_ffn / qm.qk_k_block_size;
+
+    const gate_w = try allocator.alloc(f32, gu_rows * t_hidden);
+    defer allocator.free(gate_w);
+    const up_w = try allocator.alloc(f32, gu_rows * t_hidden);
+    defer allocator.free(up_w);
+    const down_w = try allocator.alloc(f32, down_rows * t_ffn);
+    defer allocator.free(down_w);
+    for (gate_w, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i)) * 0.017) * 0.8;
+    for (up_w, 0..) |*v, i| v.* = @cos(@as(f32, @floatFromInt(i)) * 0.033) * 1.05;
+    for (down_w, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i)) * 0.011 + 0.6) * 0.7;
+
+    const tied_opts = ptqtp.Options{ .planes = 2, .max_iterations = 8, .tie_scales = true };
+    var gate_pair = try ptqtp.quantizeMatrix(&ctx, gate_w, gu_rows, t_hidden, tied_opts);
+    defer gate_pair.deinit(allocator);
+    var up_pair = try ptqtp.quantizeMatrix(&ctx, up_w, gu_rows, t_hidden, tied_opts);
+    defer up_pair.deinit(allocator);
+    var down_pair = try ptqtp.quantizeMatrix(&ctx, down_w, down_rows, t_ffn, tied_opts);
+    defer down_pair.deinit(allocator);
+
+    const gate_folded = try foldExpertStack(allocator, gate_pair.plane1, gate_pair.plane2, t_experts, t_hidden, t_ffn);
+    defer allocator.free(gate_folded);
+    const up_folded = try foldExpertStack(allocator, up_pair.plane1, up_pair.plane2, t_experts, t_hidden, t_ffn);
+    defer allocator.free(up_folded);
+    const down_folded = try foldExpertStack(allocator, down_pair.plane1, down_pair.plane2, t_experts, t_ffn, t_hidden);
+    defer allocator.free(down_folded);
+
+    var resident_gate: MoeRhs = .{ .ptqtp = .{ .allocator = null, .planes = .{ gate_pair.plane1, gate_pair.plane2, &.{} }, .plane_count = 2, .k = t_hidden, .n = gu_rows, .blocks_per_column = gu_bpc, .folded = gate_folded } };
+    var resident_up: MoeRhs = .{ .ptqtp = .{ .allocator = null, .planes = .{ up_pair.plane1, up_pair.plane2, &.{} }, .plane_count = 2, .k = t_hidden, .n = gu_rows, .blocks_per_column = gu_bpc, .folded = up_folded } };
+    var resident_down: MoeRhs = .{ .ptqtp = .{ .allocator = null, .planes = .{ down_pair.plane1, down_pair.plane2, &.{} }, .plane_count = 2, .k = t_ffn, .n = down_rows, .blocks_per_column = down_bpc, .folded = down_folded } };
+
+    // Record layout mirroring expertSlabOffsets: 16 KiB-aligned sections.
+    const gu_expert_bytes = (t_ffn / 4) * gu_bpc * @sizeOf(qm.BlockTQ2_0Foldedx4);
+    const down_expert_bytes = (t_hidden / 4) * down_bpc * @sizeOf(qm.BlockTQ2_0Foldedx4);
+    const salign: usize = 16384;
+    var off: [3]usize = undefined;
+    var at: usize = 0;
+    for ([_]usize{ gu_expert_bytes, gu_expert_bytes, down_expert_bytes }, 0..) |sz, p| {
+        at = std.mem.alignForward(usize, at, salign);
+        off[p] = at;
+        at += sz;
+    }
+    const record = std.mem.alignForward(usize, at, salign);
+
+    var path_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "expert_store_slab_{d}.bin", .{std.Io.Clock.real.now(std.testing.io).nanoseconds});
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+    defer cleanupSidecar(path);
+    {
+        const stack = try allocator.alloc(u8, record * t_experts);
+        defer allocator.free(stack);
+        @memset(stack, 0);
+        const gu_fg = (t_ffn / 4) * gu_bpc;
+        const down_fg = (t_hidden / 4) * down_bpc;
+        for (0..t_experts) |e| {
+            const dst = stack[e * record ..][0..record];
+            @memcpy(dst[off[0]..][0..gu_expert_bytes], std.mem.sliceAsBytes(gate_folded[e * gu_fg ..][0..gu_fg]));
+            @memcpy(dst[off[1]..][0..gu_expert_bytes], std.mem.sliceAsBytes(up_folded[e * gu_fg ..][0..gu_fg]));
+            @memcpy(dst[off[2]..][0..down_expert_bytes], std.mem.sliceAsBytes(down_folded[e * down_fg ..][0..down_fg]));
+        }
+        var file = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
+        defer file.close(std.testing.io);
+        var write_buffer: [4096]u8 = undefined;
+        var writer = file.writer(std.testing.io, &write_buffer);
+        try writer.interface.writeAll(stack);
+        try writer.interface.flush();
+    }
+
+    const specs = [3]expert_store.ProjSpec{
+        .{ .quant = .tq2_0_fx4, .file_offset = 0, .byte_len = t_experts * gu_expert_bytes, .in_dim = t_hidden, .out_dim = t_ffn },
+        .{ .quant = .tq2_0_fx4, .file_offset = 0, .byte_len = t_experts * gu_expert_bytes, .in_dim = t_hidden, .out_dim = t_ffn },
+        .{ .quant = .tq2_0_fx4, .file_offset = 0, .byte_len = t_experts * down_expert_bytes, .in_dim = t_ffn, .out_dim = t_hidden },
+    };
+
+    // (b) record-size mismatch is a loud failure.
+    {
+        var store = try ExpertStore.create(allocator, &.{path}, 1, .{ .cache_slots_per_layer = 1 });
+        defer store.destroy();
+        try std.testing.expectError(error.InvalidExpertGeometry, store.addLayerSlab(0, specs, 0, 0, record + salign, t_experts));
+    }
+
+    var l2_buf: [160]u8 = undefined;
+    const l2_path = try std.fmt.bufPrint(&l2_buf, "{s}.l2", .{path});
+    defer {
+        var buf: [176]u8 = undefined;
+        std.Io.Dir.cwd().deleteFile(std.testing.io, l2_path) catch {};
+        const idx = std.fmt.bufPrint(&buf, "{s}.idx", .{l2_path}) catch &.{};
+        if (idx.len > 0) std.Io.Dir.cwd().deleteFile(std.testing.io, idx) catch {};
+    }
+
+    var store = try ExpertStore.create(allocator, &.{path}, 1, .{
+        .cache_slots_per_layer = 1,
+        .l2_path = l2_path,
+        .l2_build_bytes = 1 << 30,
+    });
+    defer store.destroy();
+    try store.addLayerSlab(0, specs, 0, 0, record, t_experts);
+    try store.finalize();
+    var s_gate: MoeRhs = .{ .streamed = store.streamedRhs(0, .gate) };
+    var s_up: MoeRhs = .{ .streamed = store.streamedRhs(0, .up) };
+    var s_down: MoeRhs = .{ .streamed = store.streamedRhs(0, .down) };
+
+    const x_vals = try allocator.alloc(f32, t_hidden);
+    defer allocator.free(x_vals);
+    for (x_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 7) % 157)) - 78)) / 78.0;
+    var x = try ctx.fromSliceRank(2, .{ 1, t_hidden }, x_vals);
+    defer x.deinit();
+    for ([_][2]usize{ .{ 0, 1 }, .{ 0, 1 }, .{ 1, 0 } }) |pair| {
+        const routing = [_]f32{ 0.65, 0.35 };
+        var want = try ctx.moeExpertFfn(&x, &resident_gate, &resident_up, &resident_down, &pair, &routing, t_ffn, .swiglu, null, null);
+        defer want.deinit();
+        var got = try ctx.moeExpertFfn(&x, &s_gate, &s_up, &s_down, &pair, &routing, t_ffn, .swiglu, null, null);
+        defer got.deinit();
+        try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
+    }
+    try std.testing.expect(store.l2_expert_hits.load(.monotonic) >= 2);
+    try std.testing.expectEqual(@as(u64, 0), store.l2_fallbacks.load(.monotonic));
+
+    const m: usize = 4;
+    const top_k: usize = 2;
+    const xb_vals = try allocator.alloc(f32, m * t_hidden);
+    defer allocator.free(xb_vals);
+    for (xb_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 23) % 199)) - 99)) / 99.0;
+    var xb = try ctx.fromSliceRank(2, .{ m, t_hidden }, xb_vals);
+    defer xb.deinit();
+    const selected = [_]usize{ 0, 1, 1, 0, 0, 1, 1, 0 };
+    const routing_b = [_]f32{ 0.6, 0.4, 0.5, 0.5, 0.7, 0.3, 0.2, 0.8 };
+    var want_b = try ctx.moeExpertFfnBatch(&xb, &resident_gate, &resident_up, &resident_down, &selected, &routing_b, top_k, t_ffn, .swiglu, null, null);
+    defer want_b.deinit();
+    var got_b = try ctx.moeExpertFfnBatch(&xb, &s_gate, &s_up, &s_down, &selected, &routing_b, top_k, t_ffn, .swiglu, null, null);
+    defer got_b.deinit();
+    try std.testing.expectEqualSlices(f32, want_b.dataConst(), got_b.dataConst());
+}
+
+test "mxfp4 experts: streamed serving matches an exact q8_0 mirror; miss==hit bitwise; L2 stripes" {
+    // Native fp4 expert stacks served straight from disk. The reference arm
+    // exploits exact representability: with power-of-two block scales in the
+    // f16-normal range and doubled-e2m1 codes (|c| <= 12), the SAME real
+    // weights load losslessly as resident q8_0 — so the proven q8_0 path
+    // cross-checks the whole new dispatch (decode, lhs pairing, geometry)
+    // within float-schedule tolerance. Store-consistency pins are bitwise:
+    // a cold-miss serve must equal the cached repeat, and the L2 tier must
+    // stripe these plain-quant layers with zero fallbacks.
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const kv = [16]i8{ 0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12 };
+    const t_hidden: usize = 256;
+    const t_ffn: usize = 512;
+    const t_experts: usize = 2;
+    const gu_rows = t_experts * t_ffn;
+    const gu_bpc = t_hidden / 32;
+    const down_rows = t_experts * t_hidden;
+    const down_bpc = t_ffn / 32;
+
+    const Mirror = struct {
+        fn halfScale(e: u8) f32 {
+            return @bitCast(@as(u32, e - 1) << 23);
+        }
+        fn fill(mx: []qm.BlockMXFP4, q8: []qm.BlockQ8_0, seed: usize) void {
+            for (mx, q8, 0..) |*w, *r, i| {
+                // Deterministic pattern; scales 2^-24..2^-6 stay exact f16
+                // (incl. the subnormal floor) and keep the FFN intermediates
+                // small enough that their own Q8_0 block scales fit f16.
+                w.e = @intCast(104 + (seed + i * 7) % 19);
+                for (&w.qs, 0..) |*q, j| q.* = @intCast((seed * 31 + i * 17 + j * 13) % 256);
+                r.d = f16Bits(halfScale(w.e));
+                for (0..16) |j| {
+                    r.qs[j] = kv[w.qs[j] & 0x0f];
+                    r.qs[j + 16] = kv[w.qs[j] >> 4];
+                }
+            }
+        }
+    };
+
+    var stacks: [3][]qm.BlockMXFP4 = undefined;
+    var mirrors: [3][]qm.BlockQ8_0 = undefined;
+    const counts = [3]usize{ gu_rows * gu_bpc, gu_rows * gu_bpc, down_rows * down_bpc };
+    for (0..3) |p| {
+        stacks[p] = try allocator.alloc(qm.BlockMXFP4, counts[p]);
+        mirrors[p] = try allocator.alloc(qm.BlockQ8_0, counts[p]);
+        Mirror.fill(stacks[p], mirrors[p], 5 + p * 97);
+    }
+    defer for (0..3) |p| {
+        allocator.free(stacks[p]);
+        allocator.free(mirrors[p]);
+    };
+
+    var resident_gate: MoeRhs = .{ .q8_0 = .{ .rows = .{ .allocator = null, .blocks = mirrors[0], .rows = gu_rows, .cols = t_hidden, .blocks_per_row = gu_bpc }, .k = t_hidden, .n = gu_rows } };
+    var resident_up: MoeRhs = .{ .q8_0 = .{ .rows = .{ .allocator = null, .blocks = mirrors[1], .rows = gu_rows, .cols = t_hidden, .blocks_per_row = gu_bpc }, .k = t_hidden, .n = gu_rows } };
+    var resident_down: MoeRhs = .{ .q8_0 = .{ .rows = .{ .allocator = null, .blocks = mirrors[2], .rows = down_rows, .cols = t_ffn, .blocks_per_row = down_bpc }, .k = t_ffn, .n = down_rows } };
+
+    var path_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "expert_store_mxfp4_{d}.bin", .{std.Io.Clock.real.now(std.testing.io).nanoseconds});
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+    defer cleanupSidecar(path);
+    const gu_bytes = counts[0] * @sizeOf(qm.BlockMXFP4);
+    const down_bytes = counts[2] * @sizeOf(qm.BlockMXFP4);
+    {
+        var file = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
+        defer file.close(std.testing.io);
+        var write_buffer: [4096]u8 = undefined;
+        var writer = file.writer(std.testing.io, &write_buffer);
+        for (stacks) |pack| try writer.interface.writeAll(std.mem.sliceAsBytes(pack));
+        try writer.interface.flush();
+    }
+    const specs = [3]expert_store.ProjSpec{
+        .{ .quant = .mxfp4, .file_offset = 0, .byte_len = gu_bytes, .in_dim = t_hidden, .out_dim = t_ffn },
+        .{ .quant = .mxfp4, .file_offset = gu_bytes, .byte_len = gu_bytes, .in_dim = t_hidden, .out_dim = t_ffn },
+        .{ .quant = .mxfp4, .file_offset = 2 * gu_bytes, .byte_len = down_bytes, .in_dim = t_ffn, .out_dim = t_hidden },
+    };
+
+    const Approx = struct {
+        fn expectClose(want: []const f32, got: []const f32) !void {
+            try std.testing.expectEqual(want.len, got.len);
+            var max_abs: f32 = 0;
+            var max_rel: f32 = 0;
+            var max_mag: f32 = 0;
+            var nans: usize = 0;
+            for (want, got) |w, g| {
+                if (std.math.isNan(g) or std.math.isNan(w)) {
+                    nans += 1;
+                    continue;
+                }
+                const d = @abs(w - g);
+                max_abs = @max(max_abs, d);
+                max_mag = @max(max_mag, @abs(w));
+                if (@abs(w) > 1e-3) max_rel = @max(max_rel, d / @abs(w));
+            }
+            // rel 2e-3: the mxfp4 and q8_0 kernels have different (per-arch)
+            // accumulation schedules; x86's diverges up to ~9e-4 on near-1e-3
+            // magnitudes. Real decode/layout bugs show up as percent-level.
+            if (nans != 0 or max_rel > 2e-3 or max_abs > 1e-2) {
+                std.debug.print("mxfp4-vs-q8_0 mirror divergence: nans={d} max_abs={e} max_rel={e} max_mag={e} want[0..4]={e} {e} {e} {e} got[0..4]={e} {e} {e} {e}\n", .{ nans, max_abs, max_rel, max_mag, want[0], want[1], want[2], want[3], got[0], got[1], got[2], got[3] });
+                return error.TestExpectedApproxEqRel;
+            }
+        }
+    };
+
+    // Geometry leg: a non-multiple-of-32 in_dim must be rejected.
+    {
+        var store = try ExpertStore.create(allocator, &.{path}, 1, .{ .cache_slots_per_layer = 1 });
+        defer store.destroy();
+        var bad = specs;
+        bad[0].in_dim = 240;
+        try std.testing.expectError(error.InvalidExpertGeometry, store.addLayer(0, bad, t_experts));
+    }
+
+    // No-L2 leg first: isolates the serving path from the stripe tier.
+    {
+        var plain = try ExpertStore.create(allocator, &.{path}, 1, .{ .cache_slots_per_layer = 1 });
+        defer plain.destroy();
+        try plain.addLayer(0, specs, t_experts);
+        try plain.finalize();
+        var p_gate: MoeRhs = .{ .streamed = plain.streamedRhs(0, .gate) };
+        var p_up: MoeRhs = .{ .streamed = plain.streamedRhs(0, .up) };
+        var p_down: MoeRhs = .{ .streamed = plain.streamedRhs(0, .down) };
+        const x0_vals = try allocator.alloc(f32, t_hidden);
+        defer allocator.free(x0_vals);
+        for (x0_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 11) % 173)) - 86)) / 86.0;
+        var x0 = try ctx.fromSliceRank(2, .{ 1, t_hidden }, x0_vals);
+        defer x0.deinit();
+        const pair0 = [2]usize{ 0, 1 };
+        const routing0 = [_]f32{ 0.55, 0.45 };
+        var want0 = try ctx.moeExpertFfn(&x0, &resident_gate, &resident_up, &resident_down, &pair0, &routing0, t_ffn, .swiglu, null, null);
+        defer want0.deinit();
+        var got0 = try ctx.moeExpertFfn(&x0, &p_gate, &p_up, &p_down, &pair0, &routing0, t_ffn, .swiglu, null, null);
+        defer got0.deinit();
+        try Approx.expectClose(want0.dataConst(), got0.dataConst());
+    }
+
+    var l2_buf: [160]u8 = undefined;
+    const l2_path = try std.fmt.bufPrint(&l2_buf, "{s}.l2", .{path});
+    defer {
+        var buf: [176]u8 = undefined;
+        std.Io.Dir.cwd().deleteFile(std.testing.io, l2_path) catch {};
+        const idx = std.fmt.bufPrint(&buf, "{s}.idx", .{l2_path}) catch &.{};
+        if (idx.len > 0) std.Io.Dir.cwd().deleteFile(std.testing.io, idx) catch {};
+    }
+
+    var store = try ExpertStore.create(allocator, &.{path}, 1, .{
+        .cache_slots_per_layer = 1,
+        .l2_path = l2_path,
+        .l2_build_bytes = 1 << 30,
+    });
+    defer store.destroy();
+    try store.addLayer(0, specs, t_experts);
+    try store.finalize();
+    var s_gate: MoeRhs = .{ .streamed = store.streamedRhs(0, .gate) };
+    var s_up: MoeRhs = .{ .streamed = store.streamedRhs(0, .up) };
+    var s_down: MoeRhs = .{ .streamed = store.streamedRhs(0, .down) };
+
+    const x_vals = try allocator.alloc(f32, t_hidden);
+    defer allocator.free(x_vals);
+    for (x_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 11) % 173)) - 86)) / 86.0;
+    var x = try ctx.fromSliceRank(2, .{ 1, t_hidden }, x_vals);
+    defer x.deinit();
+
+    var first_pass: ?[]f32 = null;
+    defer if (first_pass) |p| allocator.free(p);
+    for (0..2) |round| {
+        const pair = [2]usize{ 0, 1 };
+        const routing = [_]f32{ 0.55, 0.45 };
+        var want = try ctx.moeExpertFfn(&x, &resident_gate, &resident_up, &resident_down, &pair, &routing, t_ffn, .swiglu, null, null);
+        defer want.deinit();
+        var got = try ctx.moeExpertFfn(&x, &s_gate, &s_up, &s_down, &pair, &routing, t_ffn, .swiglu, null, null);
+        defer got.deinit();
+        try Approx.expectClose(want.dataConst(), got.dataConst());
+        if (round == 0) {
+            first_pass = try allocator.dupe(f32, got.dataConst());
+        } else {
+            // Cold-miss serve vs cached repeat: BITWISE.
+            try std.testing.expectEqualSlices(f32, first_pass.?, got.dataConst());
+        }
+    }
+    // Plain-quant layers must be striped with no fallback reads.
+    try std.testing.expect(store.l2_expert_hits.load(.monotonic) >= 1);
+    try std.testing.expectEqual(@as(u64, 0), store.l2_fallbacks.load(.monotonic));
+
+    // Batched prefill across both experts.
+    const m: usize = 5;
+    const top_k: usize = 2;
+    const xb_vals = try allocator.alloc(f32, m * t_hidden);
+    defer allocator.free(xb_vals);
+    for (xb_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 19) % 181)) - 90)) / 90.0;
+    var xb = try ctx.fromSliceRank(2, .{ m, t_hidden }, xb_vals);
+    defer xb.deinit();
+    const selected = [_]usize{ 0, 1, 1, 0, 0, 1, 1, 0, 0, 0 };
+    const routing_b = [_]f32{ 0.6, 0.4, 0.5, 0.5, 0.7, 0.3, 0.2, 0.8, 0.9, 0.1 };
+    var want_b = try ctx.moeExpertFfnBatch(&xb, &resident_gate, &resident_up, &resident_down, &selected, &routing_b, top_k, t_ffn, .swiglu, null, null);
+    defer want_b.deinit();
+    var got_b = try ctx.moeExpertFfnBatch(&xb, &s_gate, &s_up, &s_down, &selected, &routing_b, top_k, t_ffn, .swiglu, null, null);
+    defer got_b.deinit();
+    try Approx.expectClose(want_b.dataConst(), got_b.dataConst());
+}
+
+test "l2 tier refuses a file whose expert bytes differ (content fingerprint)" {
+    // A v3 tier index carries no content fingerprint (structure only:
+    // layer/expert counts, prefix bounds), so it cannot detect a
+    // same-shaped file with different expert bytes. The v4 index records
+    // a per-layer content fingerprint of the primary bytes; opening
+    // against a file with different expert content must fail loudly.
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const t_hidden: usize = 256;
+    const t_ffn: usize = 512;
+    const t_experts: usize = 2;
+    const gu_bpc = t_hidden / 32;
+    const down_bpc = t_ffn / 32;
+    const gu_count = t_experts * t_ffn * gu_bpc;
+    const down_count = t_experts * t_hidden * down_bpc;
+
+    const blocks = try allocator.alloc(qm.BlockQ8_0, 2 * gu_count + down_count);
+    defer allocator.free(blocks);
+    for (blocks, 0..) |*b, i| {
+        b.d = f16Bits(0.01);
+        for (&b.qs, 0..) |*q, j| q.* = @intCast(@as(i32, @intCast((i * 13 + j * 7) % 255)) - 127);
+    }
+
+    var path_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "expert_store_l2fp_{d}.bin", .{std.Io.Clock.real.now(std.testing.io).nanoseconds});
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+    defer cleanupSidecar(path);
+    {
+        var file = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
+        defer file.close(std.testing.io);
+        var write_buffer: [4096]u8 = undefined;
+        var writer = file.writer(std.testing.io, &write_buffer);
+        try writer.interface.writeAll(std.mem.sliceAsBytes(blocks));
+        try writer.interface.flush();
+    }
+    const gu_bytes = gu_count * @sizeOf(qm.BlockQ8_0);
+    const down_bytes = down_count * @sizeOf(qm.BlockQ8_0);
+    const specs = [3]expert_store.ProjSpec{
+        .{ .quant = .q8_0, .file_offset = 0, .byte_len = gu_bytes, .in_dim = t_hidden, .out_dim = t_ffn },
+        .{ .quant = .q8_0, .file_offset = gu_bytes, .byte_len = gu_bytes, .in_dim = t_hidden, .out_dim = t_ffn },
+        .{ .quant = .q8_0, .file_offset = 2 * gu_bytes, .byte_len = down_bytes, .in_dim = t_ffn, .out_dim = t_hidden },
+    };
+
+    var l2_buf: [160]u8 = undefined;
+    const l2_path = try std.fmt.bufPrint(&l2_buf, "{s}.l2", .{path});
+    defer {
+        var buf: [176]u8 = undefined;
+        std.Io.Dir.cwd().deleteFile(std.testing.io, l2_path) catch {};
+        const idx = std.fmt.bufPrint(&buf, "{s}.idx", .{l2_path}) catch &.{};
+        if (idx.len > 0) std.Io.Dir.cwd().deleteFile(std.testing.io, idx) catch {};
+    }
+    {
+        var store = try ExpertStore.create(allocator, &.{path}, 1, .{
+            .cache_slots_per_layer = 1,
+            .l2_path = l2_path,
+            .l2_build_bytes = 1 << 30,
+        });
+        defer store.destroy();
+        try store.addLayer(0, specs, t_experts);
+        try store.finalize();
+    }
+
+    // Same shape, different expert content: flip one code in the first
+    // expert's gate bytes and rewrite the file.
+    blocks[0].qs[2] ^= 0x55;
+    {
+        var file = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
+        defer file.close(std.testing.io);
+        var write_buffer: [4096]u8 = undefined;
+        var writer = file.writer(std.testing.io, &write_buffer);
+        try writer.interface.writeAll(std.mem.sliceAsBytes(blocks));
+        try writer.interface.flush();
+    }
+    {
+        var store = try ExpertStore.create(allocator, &.{path}, 1, .{
+            .cache_slots_per_layer = 1,
+            .l2_path = l2_path,
+        });
+        defer store.destroy();
+        try store.addLayer(0, specs, t_experts);
+        try std.testing.expectError(error.InvalidExpertGeometry, store.finalize());
+    }
+}

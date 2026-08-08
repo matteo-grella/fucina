@@ -96,6 +96,13 @@ pub const GgmlType = enum(u32) {
     nvfp4 = 40,
     q1_0 = 41,
     q2_0 = 42,
+    /// Fucina-custom: tie-fitted K=2 PTQTP planes pre-folded into the
+    /// one-pass 4-bit pack (`BlockTQ2_0Foldedx4`, backend/quant/types.zig)
+    /// — 520 bytes per 4 columns x 256 elements (4.0625 bpw). The expert
+    /// streaming format: one contiguous read per expert projection, and
+    /// slab bytes == file bytes, so the L2 tier stripes it like any plain
+    /// quant. Requires dims[0] % 256 == 0 and dims[1] % 4 == 0.
+    tq2_0_fx4 = 43,
 };
 
 pub fn dtypeForGgmlType(value: GgmlType) ?DType {
@@ -589,6 +596,12 @@ pub fn tensorByteLen(ggml_type: GgmlType, dims: []const usize) !usize {
         .tq2_0 => quantizedByteLen(.tq2_0, dims, logical_count),
         .mxfp4 => quantizedByteLen(.mxfp4, dims, logical_count),
         .nvfp4 => quantizedByteLen(.nvfp4, dims, logical_count),
+        // 2-D block: 4 columns (dims[1]) x 256 elements (dims[0]) per
+        // 520-byte pack — the only fucina type whose block spans dims[1].
+        .tq2_0_fx4 => blk: {
+            if (dims.len < 2 or dims[0] % 256 != 0 or dims[1] % 4 != 0) return Error.InvalidTensorInfo;
+            break :blk try std.math.mul(usize, logical_count / 1024, 520);
+        },
     };
 }
 
@@ -638,6 +651,7 @@ fn ggmlTypeFromInt(value: u32) ?GgmlType {
         40 => .nvfp4,
         41 => .q1_0,
         42 => .q2_0,
+        43 => .tq2_0_fx4,
         else => null,
     };
 }
@@ -1140,13 +1154,21 @@ pub const Writer = struct {
 
         /// Write the next tensor's wire bytes. Length must match the
         /// declaration (`Error.InvalidTensorInfo`); writing past the
-        /// declared set is `Error.TensorDataMissing`.
+        /// declared set is `Error.TensorDataMissing`. Written in <= 1 GiB
+        /// slices: a single `write(2)` of 2 GiB+ fails with EINVAL on
+        /// macOS, and slab-native expert records make multi-GiB tensors
+        /// routine.
         pub fn writeTensorData(self: *DataStreamer, data: []const u8) !void {
             const tensors = self.writer.tensors.items;
             if (self.next_index >= tensors.len) return Error.TensorDataMissing;
             const t = &tensors[self.next_index];
             if (data.len != t.byte_len) return Error.InvalidTensorInfo;
-            try self.out.writeAll(data);
+            var index: usize = 0;
+            while (index < data.len) {
+                const n = @min(data.len - index, @as(usize, 1) << 30);
+                try self.out.writeAll(data[index..][0..n]);
+                index += n;
+            }
             try self.out.splatByteAll(0, std.mem.alignForward(usize, t.byte_len, self.writer.alignment) - t.byte_len);
             self.next_index += 1;
         }
