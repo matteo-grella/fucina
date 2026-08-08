@@ -111,7 +111,8 @@ Deliberate deltas from the paper:
   Decoration thus runs once
   (`--save`): the saved file serves through the ordinary qwen3 runners —
   chat CLI, speculation, batch — with no re-decoration. Pair-detection is
-  wired in the qwen3 loaders only; other families do not read decorated
+  wired in the qwen3 loaders (dense + MoE) and the deepseek4 MoE expert
+  trio (resident and streamed); other families do not read decorated
   files yet.
 - **Scale-tied fit** (`Options.tie_scales`, `--tie-scales`): locks the plane
   scales to the exact ratio 3 (`[3s, s]` at K=2, `[9s, 3s, s]` at K=3),
@@ -180,7 +181,8 @@ Deliberate deltas from the paper:
   into a contiguous cache-slab section (`ProjSpec.plane_count`/
   `plane_offsets`), so K-plane expert models stream out-of-core with no
   new kernels. Loaders: `ptqtp_gguf.maybeLoadMoeRhs` /
-  `maybeStreamedMoeProjSpec`, wired into the qwen3 MoE load paths.
+  `maybeStreamedMoeProjSpec`, wired into the qwen3 and deepseek4 MoE
+  load paths.
   **Tie-fitted K=2 stacks serve folded here too**: the resident loader
   builds an expert-major `BlockTQ2_0Foldedx4` pack next to the planes and
   the expert dot runs the one-pass folded kernel — the same
@@ -193,6 +195,16 @@ Deliberate deltas from the paper:
   on every cache hit). Requires `out_dim % 4 == 0`; anything else serves
   the per-plane path. Both arms pinned bitwise against the direct folded
   kernel in `expert_store_tests.zig` ("tie-folded ptqtp experts").
+  `FUCINA_PTQTP_NO_FOLD=1` serves tie-fitted MoE plane sets through the
+  per-plane path instead (resident AND streamed, so the tiers agree): the
+  expert-store L2 tier stripes primary-file plane bytes and never covers
+  fold-served layers (a fold-time slab is not primary bytes), so on a
+  two-drive box the knob trades the halved cache-hit dot for L2 striping
+  of every miss. Guards: `l2Open` drops tier coverage recorded for a
+  layer now served folded, and an `--moe-l2-build-gb` build over an
+  all-folded store refuses (`L2NoStripeableLayers`) instead of truncating
+  the tier to zero coverage — both pinned in `expert_store_tests.zig`
+  ("fold-mode flip").
 - Examples: `zig build ptqtp-spirals` (self-verifying acceptance demo:
   float-trains an MLP, decorates post-training, PASSes only if dual planes
   hold accuracy on the deployed int8 path) and `zig build ptqtp-qwen3`
@@ -243,9 +255,9 @@ Mechanics and policy:
 - **Same on-disk format as `ptqtp_gguf.zig`**: eligible matrices are
   replaced by `<name>.ptqtp0..K-1` byte-valid TQ2_0 plane tensors plus the
   `fucina.ptqtp.version` stamp, so outputs load through the existing
-  pair-detection with zero loader changes (wired in the qwen3 loaders
-  today — see the persistence bullet above; other families read the format
-  once their loaders adopt the same seam).
+  pair-detection with zero loader changes (wired in the qwen3 loaders and
+  the deepseek4 expert trio today — see the persistence bullet above;
+  other families read the format once their loaders adopt the same seam).
 - **Eligibility**: 2D matrix or 3D `*_exps` expert stack, name ends
   `.weight`, no `norm`, contract dim divisible by 256, source dtype
   decodable (f32/f16/bf16/legacy/K-quants; quantized sources dequantize
@@ -283,6 +295,80 @@ working set, and the mixed file loads through the qwen3 MoE
 pair-detection and generates correct text; per-expert plane bitwise
 identity against standalone `quantizeMatrix` is pinned by
 `ptqtp_gguf_tests`.
+
+## Native folded expert format (`tq2_0_fx4`)
+
+Tie-fitted K=2 expert stacks can skip the sibling-plane container entirely:
+GGUF type `tq2_0_fx4` stores the one-pass 4-bit pack
+(`BlockTQ2_0Foldedx4`, 520 bytes per 4 columns × 256 elements, 4.0625 bpw)
+under the **base** tensor name, expert-major for stacks. Compared with
+`.ptqtp0/1` siblings this is the same served numbers (bit-identical — the
+pack algebra is exactly what the fold produces) in a strictly better
+container. No metadata stamps, no pair-detection: the tensor loads through
+the ordinary quant switches. Constraints: contract dim % 256, out dim % 4,
+K=2 tied only (27-level tied K=3 exceeds a nibble). Fucina-custom type
+(enum 43) — not parseable by stock GGUF tooling; the sibling-plane format
+remains the interchange form.
+
+- **Streamed MoE experts** (`StreamedQuant.tq2_0_fx4`): one pread per
+  projection per miss instead of two, no fill-time fold, and slab bytes ==
+  file bytes, so the **L2 tier stripes these layers like any plain quant**
+  — the fold-vs-striping exclusion disappears by construction. Measured on
+  DeepSeek-V4-Flash-0731 streamed from disk (M1 Max, striped NVMe L2
+  tier): decode 2.92–3.24 tok/s vs 2.46–2.56 for the q4_k experts file at
+  bit-identical output; 139.2 vs 153.3 GiB file bytes (−9.2%). The format
+  serves identically on x86-64 (AVX2/AVX-VNNI kernel arms, bitwise-pinned
+  against the aarch64 path; i9-13950HX/NVMe: 2.6 tok/s evicted-cache, 3.3
+  page-cache-warm).
+- **Resident MoE experts** (`loadMoeRhs`): the folded-only `ptqtp` arm —
+  the pack borrows straight from the mapping (zero heap for experts, no
+  load-time fold; the sibling path holds borrowed planes AND a heap fold).
+- **Dense linears** (`WeightPtqtpFx4`): pack-only weight serving bitwise
+  the tied `.ptqtp` pfold path at every m; qkv/gate-up fusion is a plain
+  pack concat (byte-identical to folding the fused matrix); Metal prefill
+  residency comes from a pure byte relayout
+  (`packMatmulRhsTQ2_0FoldedRowsFromX4`). Holds ~4.06 bpw vs the sibling
+  arm's planes + x4 repacks + fold (~12.3 bpw) — ~3× less RAM and no
+  pack-building at load. Not a training arm: autograd/frozen-training
+  walks reject it (sibling planes remain the trainable form).
+
+Producers: `export-gguf --ptqtp-native` quantizes any model straight to
+fx4 (tied K=2 implied; tensors with out % 4 != 0 — none in the qwen3
+family — fall back to sibling planes, and only then do `fucina.ptqtp.*`
+stamps appear); `convert-ds4-fp4 --repack-native` transforms an existing
+tied sibling-plane MoE GGUF without re-solving. Oracle: sibling-tied and
+native exports of the same source produce bit-equal NLL and byte-identical
+greedy completions (the solver is bitwise-deterministic and both serve the
+same pack bytes).
+
+## DeepSeek-V4 fp4-expert converter (`zig build convert-ds4-fp4`)
+
+The DeepSeek-V4-Flash checkpoint releases its routed experts in MXFP4
+(fp4 e2m1 codes packed two per byte, one e8m0 power-of-two scale per 32
+elements along K) — `export-gguf --ptqtp` cannot see them (safetensors,
+no GGUF dtype). `tools/convert_ds4_fp4.zig` closes the gap for the
+deepseek4 family: it dequantizes each expert **exactly** (both factors
+are dyadic, so fp4 × 2^k is lossless in f32 — a single-hop requant of
+the released weights, unlike requantizing an intermediate GGUF), solves
+tied-K2 planes per expert via `ptqtp.quantizeMatrix`, and streams a
+single-file GGUF whose metadata and every non-expert tensor pass through
+byte-verbatim from a trunk GGUF (identical attention/router/shared-expert
+bytes — a clean A/B against that file).
+
+```sh
+zig build convert-ds4-fp4 -Doptimize=ReleaseFast -- \
+  --src-dir deepseek-v4-fp8/ --trunk-gguf TRUNK.gguf --out OUT.gguf [--planes K] [--no-tie]
+```
+
+`--smoke N` cross-checks layer N's fp4 dequant against the trunk's Q4_K
+experts (both derive from the same release, so cos ≈ 0.9985 validates the
+name map, nibble order, scale layout, and expert-major slicing in one
+shot); `--verify N` re-solves sample experts post-conversion and
+byte-compares against the stored planes (the solver is bitwise-
+deterministic, so equality is exact). The tool refuses already-decorated
+trunks and hard-errors on 0xFF (NaN) e8m0 scale bytes. Measured on the
+284B-A13B 0731 checkpoint: 129 stacks × 256 experts in ~64 min on an M1
+Max, 157.0 → 141.2 GiB, per-expert rel err ≈ 0.18, 0 unconverged groups.
 
 ## Configuration guidance
 
