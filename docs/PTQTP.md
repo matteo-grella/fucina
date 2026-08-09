@@ -315,8 +315,8 @@ remains the interchange form.
   file bytes, so the **L2 tier stripes these layers like any plain quant**
   — the fold-vs-striping exclusion disappears by construction. Measured on
   DeepSeek-V4-Flash-0731 streamed from disk (M1 Max, striped NVMe L2
-  tier, matched fresh tiers both arms): decode 3.04–3.10 tok/s vs
-  2.88–2.92 for the q4_k experts file at bit-identical output per format;
+  tier, matched fresh tiers both arms): decode 3.11–3.12 tok/s vs
+  2.91–2.95 for the q4_k experts file at bit-identical output per format;
   30.31 vs 33.89 GB read per 32-token round (−10.6%); 139.2 vs 153.3 GiB
   file bytes (−9.2%). Absolute rates vary with tier build state and disk
   headroom; the byte and pin advantages are invariant. The format
