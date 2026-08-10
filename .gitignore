@@ -1,5 +1,6 @@
 .zig-cache/
 zig-out/
+bench/baselines/
 models
 .DS_Store
 refs/
