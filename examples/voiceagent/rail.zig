@@ -312,7 +312,7 @@ pub fn frame(state: State, ctx: Ctx, cells: []Cell) void {
         .interrupted => {
             // stop, retract to the input/processing boundary, hard cut
             const b = z.input;
-            const retract = @min(t, 3);
+            const retract: usize = @min(t, 3);
             const spill = (3 - retract) * 2;
             for (0..b) |i| cells[i] = .{ .glyph = .medium, .color = .interrupted, .emphasis = .normal };
             var i: usize = 0;
@@ -555,6 +555,10 @@ test "waiting: frozen with a single boundary; interrupted: hard cut" {
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, &s, "|"));
     const i = snap(.interrupted, .{ .width = 25, .tick = 10, .entry_tick = 0 });
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, &i, "!"));
+    // t=0: nothing retracted yet — full 6-cell spill trail past the cut
+    const cut0 = snap(.interrupted, .{ .width = 25, .tick = 0, .entry_tick = 0 });
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, &cut0, "!"));
+    try std.testing.expectEqual(@as(usize, 6), std.mem.count(u8, &cut0, "."));
     // monochrome-distinct from error (fractures = spaces)
     const e = snap(.err, .{ .width = 25, .tick = 10, .entry_tick = 0, .seed = 5 });
     try std.testing.expect(std.mem.count(u8, &e, " ") >= 2);
