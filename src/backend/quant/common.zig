@@ -516,8 +516,12 @@ pub fn tblI8x16(table: QKV16i8, idx: QKV16u8) QKV16i8 {
         );
         return out;
     }
+    // Materialize both vectors: a runtime lane index into a @Vector is a
+    // compile error, arrays index freely.
+    const t: [16]i8 = table;
+    const ix: [16]u8 = idx;
     var out: [16]i8 = undefined;
-    inline for (0..16) |i| out[i] = table[idx[i] & 0x0f];
+    inline for (0..16) |i| out[i] = t[ix[i] & 0x0f];
     return out;
 }
 
