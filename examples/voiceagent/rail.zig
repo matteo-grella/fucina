@@ -600,6 +600,31 @@ test "needs-input: two markers, input side dominant in phase B" {
     }
 }
 
+test "golden frames: every state, exact 25-cell ASCII snapshots" {
+    // one pinned context tuple per state (plus sweep/settled and
+    // pre/post-retraction variants); any frame change must be deliberate
+    const cases = [_]struct { s: State, ctx: Ctx, want: *const [25]u8 }{
+        .{ .s = .idle, .ctx = .{ .width = 25, .tick = 0, .entry_tick = 0 }, .want = "------------=------------" },
+        .{ .s = .listening, .ctx = .{ .width = 25, .tick = 5, .entry_tick = 0, .input_q = 3 }, .want = ".=###=.------------------" },
+        .{ .s = .captured, .ctx = .{ .width = 25, .tick = 3, .entry_tick = 0 }, .want = "---#---------------------" },
+        .{ .s = .thinking, .ctx = .{ .width = 25, .tick = 8, .entry_tick = 0, .seed = 9 }, .want = "--------=.=>.-.=..-------" },
+        .{ .s = .speaking, .ctx = .{ .width = 25, .tick = 13, .entry_tick = 0, .output_q = 3 }, .want = "------------------=>..=>." },
+        .{ .s = .acting, .ctx = .{ .width = 25, .tick = 3, .entry_tick = 0, .progress = 0.5 }, .want = "============>------------" },
+        .{ .s = .acting, .ctx = .{ .width = 25, .tick = 7, .entry_tick = 0 }, .want = "-----------.=#>----------" },
+        .{ .s = .waiting, .ctx = .{ .width = 25, .tick = 2, .entry_tick = 0, .seed = 3 }, .want = "---..-------.----.|------" },
+        .{ .s = .needs_input, .ctx = .{ .width = 25, .tick = 5, .entry_tick = 0 }, .want = "---=--------.------------" },
+        .{ .s = .complete, .ctx = .{ .width = 25, .tick = 1, .entry_tick = 0 }, .want = "========>----------------" },
+        .{ .s = .complete, .ctx = .{ .width = 25, .tick = 20, .entry_tick = 0 }, .want = "=========================" },
+        .{ .s = .interrupted, .ctx = .{ .width = 25, .tick = 0, .entry_tick = 0 }, .want = "=======!......-----------" },
+        .{ .s = .interrupted, .ctx = .{ .width = 25, .tick = 10, .entry_tick = 0 }, .want = "=======!-----------------" },
+        .{ .s = .err, .ctx = .{ .width = 25, .tick = 10, .entry_tick = 0, .seed = 5 }, .want = "## ###  ##  ###  ##### ##" },
+    };
+    for (cases) |case| {
+        const got = snap(case.s, case.ctx);
+        try std.testing.expectEqualSlices(u8, case.want, &got);
+    }
+}
+
 test "quantizer bands and stepped meter response" {
     try std.testing.expectEqual(@as(u3, 0), quantize(0.05));
     try std.testing.expectEqual(@as(u3, 2), quantize(0.4));
