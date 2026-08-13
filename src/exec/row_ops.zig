@@ -826,7 +826,21 @@ pub fn rmsNormMulRopeHalfVectors(task: RmsNormMulRopeHalfTask) void {
         }
 
         var feature_i: usize = 0;
-        var sumsq_vec: Vec = @splat(0);
+        var acc0: Vec = @splat(0);
+        var acc1: Vec = @splat(0);
+        var acc2: Vec = @splat(0);
+        var acc3: Vec = @splat(0);
+        while (feature_i + 4 * vector_width <= task.feature_dim) : (feature_i += 4 * vector_width) {
+            const v0: Vec = task.input[input_base + feature_i ..][0..vector_width].*;
+            const v1: Vec = task.input[input_base + feature_i + vector_width ..][0..vector_width].*;
+            const v2: Vec = task.input[input_base + feature_i + 2 * vector_width ..][0..vector_width].*;
+            const v3: Vec = task.input[input_base + feature_i + 3 * vector_width ..][0..vector_width].*;
+            acc0 += v0 * v0;
+            acc1 += v1 * v1;
+            acc2 += v2 * v2;
+            acc3 += v3 * v3;
+        }
+        var sumsq_vec: Vec = (acc0 + acc1) + (acc2 + acc3);
         while (feature_i + vector_width <= task.feature_dim) : (feature_i += vector_width) {
             const values: Vec = task.input[input_base + feature_i ..][0..vector_width].*;
             sumsq_vec += values * values;
@@ -866,7 +880,21 @@ pub fn rmsNormMulRows(task: RmsNormMulRowsTask) void {
     for (task.row_start..task.row_end) |row_i| {
         const base = row_i * task.axis_dim;
         var axis_i: usize = 0;
-        var sumsq_vec: Vec = @splat(0);
+        var acc0: Vec = @splat(0);
+        var acc1: Vec = @splat(0);
+        var acc2: Vec = @splat(0);
+        var acc3: Vec = @splat(0);
+        while (axis_i + 4 * vector_width <= task.axis_dim) : (axis_i += 4 * vector_width) {
+            const v0: Vec = task.input[base + axis_i ..][0..vector_width].*;
+            const v1: Vec = task.input[base + axis_i + vector_width ..][0..vector_width].*;
+            const v2: Vec = task.input[base + axis_i + 2 * vector_width ..][0..vector_width].*;
+            const v3: Vec = task.input[base + axis_i + 3 * vector_width ..][0..vector_width].*;
+            acc0 += v0 * v0;
+            acc1 += v1 * v1;
+            acc2 += v2 * v2;
+            acc3 += v3 * v3;
+        }
+        var sumsq_vec: Vec = (acc0 + acc1) + (acc2 + acc3);
         while (axis_i + vector_width <= task.axis_dim) : (axis_i += vector_width) {
             const values: Vec = task.input[base + axis_i ..][0..vector_width].*;
             sumsq_vec += values * values;
@@ -898,7 +926,21 @@ pub fn rmsNormMulAddRows(task: RmsNormMulAddRowsTask) void {
     for (task.row_start..task.row_end) |row_i| {
         const base = row_i * task.axis_dim;
         var axis_i: usize = 0;
-        var sumsq_vec: Vec = @splat(0);
+        var acc0: Vec = @splat(0);
+        var acc1: Vec = @splat(0);
+        var acc2: Vec = @splat(0);
+        var acc3: Vec = @splat(0);
+        while (axis_i + 4 * vector_width <= task.axis_dim) : (axis_i += 4 * vector_width) {
+            const v0: Vec = task.input[base + axis_i ..][0..vector_width].*;
+            const v1: Vec = task.input[base + axis_i + vector_width ..][0..vector_width].*;
+            const v2: Vec = task.input[base + axis_i + 2 * vector_width ..][0..vector_width].*;
+            const v3: Vec = task.input[base + axis_i + 3 * vector_width ..][0..vector_width].*;
+            acc0 += v0 * v0;
+            acc1 += v1 * v1;
+            acc2 += v2 * v2;
+            acc3 += v3 * v3;
+        }
+        var sumsq_vec: Vec = (acc0 + acc1) + (acc2 + acc3);
         while (axis_i + vector_width <= task.axis_dim) : (axis_i += vector_width) {
             const values: Vec = task.input[base + axis_i ..][0..vector_width].*;
             sumsq_vec += values * values;
@@ -931,8 +973,24 @@ pub fn rmsNormMulBackwardInputRows(task: RmsNormMulBackwardInputRowsTask) void {
     for (task.row_start..task.row_end) |row_i| {
         const base = row_i * task.axis_dim;
         var axis_i: usize = 0;
-        var sumsq_vec: Vec = @splat(0);
-        var dot_vec: Vec = @splat(0);
+        var sumsq0: Vec = @splat(0);
+        var sumsq1: Vec = @splat(0);
+        var dot0: Vec = @splat(0);
+        var dot1: Vec = @splat(0);
+        while (axis_i + 2 * vector_width <= task.axis_dim) : (axis_i += 2 * vector_width) {
+            const v0: Vec = task.input[base + axis_i ..][0..vector_width].*;
+            const g0: Vec = task.grad[base + axis_i ..][0..vector_width].*;
+            const w0: Vec = task.weights[axis_i..][0..vector_width].*;
+            const v1: Vec = task.input[base + axis_i + vector_width ..][0..vector_width].*;
+            const g1: Vec = task.grad[base + axis_i + vector_width ..][0..vector_width].*;
+            const w1: Vec = task.weights[axis_i + vector_width ..][0..vector_width].*;
+            sumsq0 += v0 * v0;
+            dot0 += g0 * w0 * v0;
+            sumsq1 += v1 * v1;
+            dot1 += g1 * w1 * v1;
+        }
+        var sumsq_vec: Vec = sumsq0 + sumsq1;
+        var dot_vec: Vec = dot0 + dot1;
         while (axis_i + vector_width <= task.axis_dim) : (axis_i += vector_width) {
             const values: Vec = task.input[base + axis_i ..][0..vector_width].*;
             const grad: Vec = task.grad[base + axis_i ..][0..vector_width].*;
@@ -973,7 +1031,21 @@ pub fn rmsNormMulBackwardWeightRows(task: RmsNormMulBackwardWeightRowsTask) void
     for (task.row_start..task.row_end) |row_i| {
         const base = row_i * task.axis_dim;
         var axis_i: usize = 0;
-        var sumsq_vec: Vec = @splat(0);
+        var acc0: Vec = @splat(0);
+        var acc1: Vec = @splat(0);
+        var acc2: Vec = @splat(0);
+        var acc3: Vec = @splat(0);
+        while (axis_i + 4 * vector_width <= task.axis_dim) : (axis_i += 4 * vector_width) {
+            const v0: Vec = task.input[base + axis_i ..][0..vector_width].*;
+            const v1: Vec = task.input[base + axis_i + vector_width ..][0..vector_width].*;
+            const v2: Vec = task.input[base + axis_i + 2 * vector_width ..][0..vector_width].*;
+            const v3: Vec = task.input[base + axis_i + 3 * vector_width ..][0..vector_width].*;
+            acc0 += v0 * v0;
+            acc1 += v1 * v1;
+            acc2 += v2 * v2;
+            acc3 += v3 * v3;
+        }
+        var sumsq_vec: Vec = (acc0 + acc1) + (acc2 + acc3);
         while (axis_i + vector_width <= task.axis_dim) : (axis_i += vector_width) {
             const values: Vec = task.input[base + axis_i ..][0..vector_width].*;
             sumsq_vec += values * values;
