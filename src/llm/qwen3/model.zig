@@ -2,6 +2,7 @@ const std = @import("std");
 const fucina = @import("fucina");
 const weights = @import("../weights.zig");
 const kv_cache = @import("../kv_cache.zig");
+const subq_mod = @import("../subq.zig");
 const gguf_meta = @import("../gguf_meta.zig");
 const ptqtp_gguf = @import("../ptqtp_gguf.zig");
 
@@ -292,7 +293,7 @@ pub const Model = struct {
         const cfg = self.config;
         for (self.layers, 0..) |*layer, layer_i| {
             const last_query_only = layer_i + 1 == cfg.num_layers and token_ids.len > 1;
-            x = try ctx.replace(x, attentionBlock(ctx, io, cfg, layer, &x, &rope_table, self.kv_head_for_head, last_query_only, profile, null, layer_i));
+            x = try ctx.replace(x, attentionBlock(ctx, io, cfg, layer, &x, &rope_table, self.kv_head_for_head, last_query_only, profile, null, layer_i, null));
 
             x = try ctx.replace(x, ffnBlock(ctx, io, cfg, layer, &x, profile));
             if (profile) |p| p.layers += 1;
@@ -451,7 +452,7 @@ pub const Model = struct {
         token_ids: []const usize,
         pos0: usize,
     ) !fucina.Tensor(.{ .seq, .vocab }) {
-        return self.forwardStepImpl(ctx, null, kv, token_ids, pos0, null, true);
+        return self.forwardStepImpl(ctx, null, kv, token_ids, pos0, null, true, null);
     }
 
     pub fn forwardStepProfiled(
@@ -463,7 +464,7 @@ pub const Model = struct {
         pos0: usize,
         profile: *ForwardProfile,
     ) !fucina.Tensor(.{ .seq, .vocab }) {
-        return self.forwardStepImpl(ctx, io, kv, token_ids, pos0, profile, true);
+        return self.forwardStepImpl(ctx, io, kv, token_ids, pos0, profile, true, null);
     }
 
     /// As `forwardStep`, but returns logits for EVERY appended position —
@@ -485,7 +486,21 @@ pub const Model = struct {
         token_ids: []const usize,
         pos0: usize,
     ) !fucina.Tensor(.{ .seq, .vocab }) {
-        return self.forwardStepImpl(ctx, null, kv, token_ids, pos0, null, false);
+        return self.forwardStepImpl(ctx, null, kv, token_ids, pos0, null, false, null);
+    }
+
+    /// `forwardStep` with the SubQ research attention evaluator active on
+    /// every layer's decode attention (f16 KV caches only; the evaluator
+    /// falls back to dense until its warmup floor is reached).
+    pub fn forwardStepSubq(
+        self: *const Model,
+        ctx: *ExecContext,
+        kv: *KvCache,
+        token_ids: []const usize,
+        pos0: usize,
+        sq: *subq_mod.State,
+    ) !fucina.Tensor(.{ .seq, .vocab }) {
+        return self.forwardStepImpl(ctx, null, kv, token_ids, pos0, null, true, sq);
     }
 
     fn forwardStepImpl(
@@ -497,6 +512,7 @@ pub const Model = struct {
         pos0: usize,
         profile: ?*ForwardProfile,
         last_only: bool,
+        subq_state: ?*subq_mod.State,
     ) !fucina.Tensor(.{ .seq, .vocab }) {
         if (token_ids.len == 0) return Error.InvalidSequenceLength;
         if (kv.len != pos0) return Error.InvalidSequenceLength;
@@ -515,7 +531,7 @@ pub const Model = struct {
         const cfg = self.config;
         for (self.layers, 0..) |*layer, layer_i| {
             const last_query_only = last_only and layer_i + 1 == cfg.num_layers and token_ids.len > 1;
-            x = try ctx.replace(x, attentionBlock(ctx, io, cfg, layer, &x, &rope_table, self.kv_head_for_head, last_query_only, profile, kv, layer_i));
+            x = try ctx.replace(x, attentionBlock(ctx, io, cfg, layer, &x, &rope_table, self.kv_head_for_head, last_query_only, profile, kv, layer_i, subq_state));
             // Router lookahead (pilot): predict the NEXT layer's experts from
             // this layer's post-attention state and start their disk
             // readahead in the background while this layer's FFN computes.
@@ -1181,6 +1197,7 @@ fn attentionBlock(
     profile: ?*ForwardProfile,
     cache: ?*KvCache,
     layer_i: usize,
+    subq_state: ?*subq_mod.State,
 ) !fucina.Tensor(.{ .seq, .embed }) {
     const prep_start = profileStart(profile, io);
     var qkv_linear = try layer.attn_proj.projectNormed(ctx, input, &layer.attn_norm, config.rms_norm_eps, config);
@@ -1216,6 +1233,11 @@ fn attentionBlock(
         const cached_len = kv.len + k_rope.dim(.seq);
         switch (kv.dtype) {
             .f16 => {
+                if (subq_state) |sq| {
+                    if (q_attention.dim(.seq) == 1) {
+                        break :blk try subqAttention(ctx, config, sq, layer_i, q_attention, kv, cached_len);
+                    }
+                }
                 var k_view = try kv.k[layer_i].narrow(ctx, .seq, 0, cached_len);
                 defer k_view.deinit();
                 var v_view = try kv.v[layer_i].narrow(ctx, .seq, 0, cached_len);
@@ -1251,6 +1273,41 @@ fn attentionBlock(
     const out = try residual_input.add(ctx, &attn_out);
     if (profile) |p| p.attn_residual_ns += profileElapsed(residual_start, io);
     return out;
+}
+
+fn subqAttention(
+    ctx: *ExecContext,
+    config: Config,
+    sq: *subq_mod.State,
+    layer_i: usize,
+    q: *const fucina.Tensor(.{ .seq, .head, .d }),
+    kv: *KvCache,
+    cached_len: usize,
+) !fucina.Tensor(.{ .seq, .attn }) {
+    const heads = config.num_attention_heads;
+    const d = config.head_dim;
+    // Borrow the contiguous query row when possible; the state's persistent
+    // bridge buffers cover the fallback and the output (no per-token
+    // allocations in this glue).
+    const q_flat: []const f32 = blk: {
+        if (q.dataConst()) |qd| {
+            if (qd.len == heads * d) break :blk qd;
+        } else |_| {}
+        try q.copyTo(sq.bridge_q);
+        break :blk sq.bridge_q;
+    };
+    const out = sq.bridge_out;
+    const row_len = cached_len * config.num_key_value_heads * d;
+    try sq.attend(
+        ctx,
+        layer_i,
+        q_flat,
+        (try kv.k[layer_i].dataConst())[0..row_len],
+        (try kv.v[layer_i].dataConst())[0..row_len],
+        cached_len,
+        out,
+    );
+    return fucina.Tensor(.{ .seq, .attn }).fromSlice(ctx, .{ 1, heads * d }, out);
 }
 
 /// Per-stream KV attention spans for `forwardStepBatch`: allocated once per

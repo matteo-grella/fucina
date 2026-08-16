@@ -2,6 +2,9 @@
 //! and are exposed as namespaces (`llm.parakeet.decoder`, `llm.gemma.gemma4`, …);
 //! generic/shared helpers (weights, kv_cache, tokenizers, sampler, chat) stay flat.
 
+/// SubQ attention: research decode-path evaluator (docs/SUBQUADRATIC-ATTENTION.md).
+pub const subq = @import("llm/subq.zig");
+
 /// Qwen3 dense + LoRA fine-tuning. Files in `llm/qwen3/`.
 pub const qwen3 = struct {
     pub const model = @import("llm/qwen3/model.zig");
@@ -160,4 +163,5 @@ test {
     _ = llguidance;
     _ = chat;
     _ = data;
+    _ = subq;
 }
