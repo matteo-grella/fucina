@@ -29,9 +29,9 @@ const llm = @import("fucina_llm");
 const QModel = llm.qwen3.model;
 
 pub fn main(init: std.process.Init) !void {
-    // c_allocator, not the process arena: the arena never frees, and the
+    // smp_allocator, not the process arena: the arena never frees, and the
     // two arms' KV caches plus packed copies would coexist (~13GB at 32K).
-    const allocator = std.heap.c_allocator;
+    const allocator = std.heap.smp_allocator;
     const arena = init.arena.allocator();
     _ = arena;
     const args = try init.minimal.args.toSlice(allocator);

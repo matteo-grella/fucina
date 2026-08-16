@@ -48,7 +48,7 @@ fn scoreRows4F16Comptime(comptime dim: usize, scores: []f32, query: *const [dim]
 }
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.heap.smp_allocator;
     const io = init.io;
     var stdout_buf: [4096]u8 = undefined;
     var stdout_w = std.Io.File.stdout().writer(io, &stdout_buf);
