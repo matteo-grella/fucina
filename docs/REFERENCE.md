@@ -1932,7 +1932,7 @@ methods are documented above; §4 covers every math/NN op in depth.
 `floor`, `ceil`, `round`, `sign`, `reciprocal`, `clamp`, `clampMin`, `clampMax`,
 `maximum`, `minimum`, `pow`, `isnan`, `isinf`, `isfinite`,
 `dropout`, `gated`, `glu`, `swiglu`, `geglu`, `situ`, `splitGated`, `sum`, `mean`,
-`cumsum`, `prod`, `cumprod`, `linearRecurrence`, `variance`,
+`cumsum`, `prod`, `cumprod`, `segmentSum`, `linearRecurrence`, `variance`,
 `standardizeAxis`, `sumAll`,
 `sumMany`, `any`, `all`, `anyAll`, `allAll`, `norm`, `normAll`,
 `bandPart`, `tril`, `triu`,
@@ -2512,6 +2512,16 @@ returns the scalar `Tensor(.{})`.
   `-Dvector-scan` (§2.2, the `cumsum` gating). Differentiable: zero-free rows use the
   O(n) reverse-scan closed form; rows containing a zero fall back to an
   exact division-free O(n²) expansion (torch semantics).
+- `segmentSum(ctx, tag, offsets)` — sums CONTIGUOUS index ranges of one
+  axis (`torch.segment_reduce("sum")` over sorted segments):
+  `out[..., i, ...] = Σ_{j ∈ [offsets[i], offsets[i+1])} x[..., j, ...]`.
+  `offsets` must be non-decreasing, start at `0`, and end at the axis size
+  (`offsets.len - 1` segments partitioning the whole axis; empty segments
+  produce zero rows). The reduced axis keeps its tag at the new size
+  `offsets.len - 1`. Differentiable: the gradient broadcasts each output
+  row back over its segment. Rank-level entries on `ExecContext`:
+  `segmentSumAxisRank(rank, x, axis, offsets)` and its VJP helper
+  `segmentBroadcastAxisRank(rank, gy, axis, offsets, n)`.
 - `linearRecurrence(ctx, time_tag, decay, options)` — the first-order
   linear recurrence `h_t = a_t ⊙ h_{t-1} + b_t` along `time_tag`,
   shape-preserving: `self` supplies `b` (and the result shape), `decay`
