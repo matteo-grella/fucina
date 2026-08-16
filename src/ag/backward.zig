@@ -1603,6 +1603,37 @@ pub fn CumsumBackward(comptime source_tags: anytype, comptime axis: usize) type 
     };
 }
 
+/// VJP for `segmentSum`: each input row receives its segment's gradient row
+/// (a broadcast along the segmented axis). Owns a copy of the offsets.
+pub fn SegmentSumBackward(comptime source_tags: anytype, comptime axis: usize) type {
+    return struct {
+        parents: [1]?*GradState,
+        offsets: []usize,
+        n: usize,
+
+        const Self = @This();
+
+        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, offsets: []const usize, n: usize) !void {
+            self.* = .{
+                .parents = .{parent},
+                .offsets = try allocator.dupe(usize, offsets),
+                .n = n,
+            };
+        }
+
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            allocator.free(self.offsets);
+        }
+
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
+            if (needs_grad.len == 0 or !needs_grad[0]) return;
+            out[0] = try ctx.segmentBroadcastAxisRank(rawRank(source_tags.len), gy, axis, self.offsets, self.n);
+        }
+
+        pub const vtable = core.recordVTable(Self);
+    };
+}
+
 /// VJP for `linearRecurrence` (`h_t = a_t·h_{t-1} + b_t` along an axis):
 /// one exec reverse scan produces the input gradient `gb` (the reverse
 /// recurrence `gh_t = a_{t+1}·gh_{t+1} + gy_t`), the full-shape decay

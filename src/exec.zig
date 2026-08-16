@@ -1163,6 +1163,14 @@ pub const ExecContext = struct {
         return exec_reduce.cumsumReverseAxisRank(&self.rt, rank, x, axis);
     }
 
+    pub fn segmentSumAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, offsets: []const usize) !Tensor {
+        return exec_reduce.segmentSumAxisRank(&self.rt, rank, x, axis, offsets);
+    }
+
+    pub fn segmentBroadcastAxisRank(self: *ExecContext, comptime rank: usize, gy: *const Tensor, comptime axis: usize, offsets: []const usize, n: usize) !Tensor {
+        return exec_reduce.segmentBroadcastAxisRank(&self.rt, rank, gy, axis, offsets, n);
+    }
+
     /// First-order linear recurrence `h_t = a_t·h_{t-1} + b_t` along `axis`
     /// (`a` is a same-logical-shape, possibly zero-stride view; `initial`
     /// holds one `h_{-1}` per lane). See `exec/reduce.zig`.

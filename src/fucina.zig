@@ -136,6 +136,14 @@ pub const simd = struct {
     pub const vexpf = vector_primitives.vexpf;
     pub const sigmoidVec = vector_primitives.sigmoidVec;
     pub const tanhVec = vector_primitives.tanhVec;
+    /// f16 row-block attention primitives (online-softmax inner loops over
+    /// contiguous or strided f16 rows); see backend/vector/primitives.zig.
+    pub const vecScale = vector_primitives.vecScale;
+    pub const vecMaxReduce = vector_primitives.vecMaxReduce;
+    pub const dotF32F16 = vector_primitives.dotF32F16;
+    pub const scoreRows4F16 = vector_primitives.scoreRows4F16;
+    pub const vecExpAffineSumInPlace = vector_primitives.vecExpAffineSumInPlace;
+    pub const weightedAccumRows4F16 = vector_primitives.weightedAccumRows4F16;
 };
 pub const RopeTheta = exec.RopeTheta;
 /// Fake-quantization round trips (FP8-E4M3 / FP4-E2M1 microscaling groups,

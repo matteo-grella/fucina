@@ -466,6 +466,16 @@ fn cumsumLoss(ctx: *ExecContext, a: *const Tensor(.{.d})) !Tensor(.{}) {
     return z.sumAll(ctx);
 }
 
+fn segmentSumLoss(ctx: *ExecContext, a: *const Tensor(.{.d})) !Tensor(.{}) {
+    var y = try a.segmentSum(ctx, .d, &.{ 0, 2, 2, 5 });
+    defer y.deinit();
+    var w = try Tensor(.{.d}).fromSlice(ctx, .{3}, &.{ 1, -2, 0.5 });
+    defer w.deinit();
+    var z = try y.mul(ctx, &w);
+    defer z.deinit();
+    return z.sumAll(ctx);
+}
+
 fn padLoss(ctx: *ExecContext, a: *const Tensor(.{.d})) !Tensor(.{}) {
     var y = try a.pad(ctx, .d, 1, 2, 3.5);
     defer y.deinit();
@@ -553,6 +563,19 @@ test "gradcheck validates the repeatAxis multi-copy gradient accumulation" {
     defer a.deinit();
     const result = try gradcheck_mod.gradcheck(&ctx, repeatAxisLoss, .{&a}, .{});
     try std.testing.expectEqual(@as(usize, 4), result.checked);
+}
+
+test "gradcheck validates the segmentSum VJP (segment-broadcast gradient)" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    var a = try Tensor(.{.d}).variableFromSlice(&ctx, .{5}, &.{ 2, -3, 4, 1, -2 });
+    defer a.deinit();
+    const result = try gradcheck_mod.gradcheck(&ctx, segmentSumLoss, .{&a}, .{});
+    try std.testing.expectEqual(@as(usize, 5), result.checked);
 }
 
 test "gradcheck validates the cumsum VJP (reversed cumulative sum)" {

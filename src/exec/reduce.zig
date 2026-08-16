@@ -796,3 +796,98 @@ pub fn meanAxisRankTyped(
     }
     return out;
 }
+
+/// Segmented sum along `axis` over contiguous index ranges: `offsets` has
+/// length `s + 1`, is nondecreasing, and spans the axis exactly
+/// (`offsets[0] == 0`, `offsets[s] == shape[axis]`);
+/// `out[..., i, ...] = Σ_{j in [offsets[i], offsets[i+1])} x[..., j, ...]`
+/// and the axis size becomes `s` (empty segments produce zero rows). Each
+/// segment accumulates serially in axis order — bitwise deterministic for
+/// any thread count (cold op, no parallel dispatch). The sorted-contiguous
+/// restriction of torch.segment_reduce / JAX segment_sum.
+pub fn segmentSumAxisRank(
+    rt: *Runtime,
+    comptime rank: usize,
+    x: *const Tensor,
+    comptime axis: usize,
+    offsets: []const usize,
+) !Tensor {
+    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (axis >= rank) @compileError("axis out of bounds");
+    const source = try x.rankView(rank);
+    if (offsets.len < 2) return tensor.TensorError.InvalidShape;
+    const segments = offsets.len - 1;
+    if (offsets[0] != 0 or offsets[segments] != source.shape[axis]) return tensor.TensorError.InvalidShape;
+    for (offsets[0..segments], offsets[1..]) |lo, hi| {
+        if (lo > hi) return tensor.TensorError.InvalidShape;
+    }
+
+    var out_shape: [rank]usize = source.shape;
+    out_shape[axis] = segments;
+
+    var xx = try rt.prepareContiguous(x);
+    defer xx.deinit();
+    const input = xx.tensor().dataConst();
+
+    var out = try rt.zerosRank(rank, out_shape);
+    errdefer out.deinit();
+    const output = out.data();
+
+    const inner = productAfterAxis(rank, source.shape, axis);
+    const outer = productBeforeAxis(rank, source.shape, axis);
+    const n = source.shape[axis];
+    for (0..outer) |o| {
+        for (0..segments) |s_i| {
+            const out_base = (o * segments + s_i) * inner;
+            for (offsets[s_i]..offsets[s_i + 1]) |j| {
+                const in_base = (o * n + j) * inner;
+                for (0..inner) |c| output[out_base + c] += input[in_base + c];
+            }
+        }
+    }
+    return out;
+}
+
+/// `segmentSumAxisRank`'s VJP companion: expand the segment axis back to
+/// `n` rows, every input row receiving its segment's row:
+/// `out[..., j, ...] = gy[..., seg(j), ...]`.
+pub fn segmentBroadcastAxisRank(
+    rt: *Runtime,
+    comptime rank: usize,
+    gy: *const Tensor,
+    comptime axis: usize,
+    offsets: []const usize,
+    n: usize,
+) !Tensor {
+    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (axis >= rank) @compileError("axis out of bounds");
+    const source = try gy.rankView(rank);
+    if (offsets.len < 2) return tensor.TensorError.InvalidShape;
+    const segments = offsets.len - 1;
+    if (source.shape[axis] != segments) return tensor.TensorError.ShapeMismatch;
+    if (offsets[0] != 0 or offsets[segments] != n) return tensor.TensorError.InvalidShape;
+
+    var out_shape: [rank]usize = source.shape;
+    out_shape[axis] = n;
+
+    var gg = try rt.prepareContiguous(gy);
+    defer gg.deinit();
+    const input = gg.tensor().dataConst();
+
+    var out = try rt.zerosRank(rank, out_shape);
+    errdefer out.deinit();
+    const output = out.data();
+
+    const inner = productAfterAxis(rank, out_shape, axis);
+    const outer = productBeforeAxis(rank, out_shape, axis);
+    for (0..outer) |o| {
+        for (0..segments) |s_i| {
+            const in_base = (o * segments + s_i) * inner;
+            for (offsets[s_i]..offsets[s_i + 1]) |j| {
+                const out_base = (o * n + j) * inner;
+                @memcpy(output[out_base..][0..inner], input[in_base..][0..inner]);
+            }
+        }
+    }
+    return out;
+}

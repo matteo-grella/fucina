@@ -101,6 +101,7 @@ const MinMaxBackward = backward.MinMaxBackward;
 const NarrowBackward = backward.NarrowBackward;
 const ConcatBackward = backward.ConcatBackward;
 const CumsumBackward = backward.CumsumBackward;
+const SegmentSumBackward = backward.SegmentSumBackward;
 const LinearRecurrenceBackward = backward.LinearRecurrenceBackward;
 const PadBackward = backward.PadBackward;
 const SetSliceBackward = backward.SetSliceBackward;
@@ -1830,6 +1831,23 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             var value = try ctx.cumsumAxisRank(tag_rank, self.asRawTensor(), scan_axis);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad(), CumsumBackward(tags, scan_axis), .{ ctx.allocator, self.grad_state });
+        }
+
+        /// Segmented sum along `tag`: contiguous index ranges
+        /// `[offsets[i], offsets[i+1])` collapse to one output row each, so
+        /// the axis size becomes `offsets.len - 1` (`offsets[0] == 0`,
+        /// nondecreasing, last entry == the axis size; empty segments
+        /// produce zero rows). The sorted-contiguous form of
+        /// torch.segment_reduce / JAX segment_sum. Serial per segment in
+        /// axis order — bitwise deterministic for any thread count.
+        /// Differentiable: the VJP broadcasts each segment's gradient row
+        /// back over that segment's input rows.
+        pub fn segmentSum(self: *const Self, ctx: *ExecContext, comptime tag: Tag, offsets: []const usize) !Self {
+            const seg_axis = comptime axis(tag);
+            const n = self.dim(tag);
+            var value = try ctx.segmentSumAxisRank(tag_rank, self.asRawTensor(), seg_axis, offsets);
+            errdefer value.deinit();
+            return finishOp(tags, ctx, value, self.requiresGrad(), SegmentSumBackward(tags, seg_axis), .{ ctx.allocator, self.grad_state, offsets, n });
         }
 
         /// First-order linear recurrence along `time_tag` — the

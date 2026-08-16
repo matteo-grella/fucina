@@ -2615,3 +2615,50 @@ test "iq2_xxs and iq3_xxs sdot dots match the lane-based reference bitwise" {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Hot q4_0 row kernels: fused nibble-unpack dot and weighted accumulate
+// without materializing the row (the q4 centroid-residual attention read
+// path is DRAM-bound only if dequantization stays in registers).
+
+/// dot(x, dequant(blocks)); x.len == blocks.len * 32.
+pub fn vecDotQ4_0F32(blocks: []const BlockQ4_0, x: []const f32) f32 {
+    const V = @Vector(8, f32);
+    const U = @Vector(8, u8);
+    const I = @Vector(8, i16);
+    var acc: V = @splat(0);
+    for (blocks, 0..) |*block, bi| {
+        const scale = f16BitsToF32(block.d);
+        const base = bi * q4_0_block_size;
+        var blk: V = @splat(0);
+        inline for (0..2) |h| {
+            const qv: U = block.qs[h * 8 ..][0..8].*;
+            const lo: V = @floatFromInt(@as(I, @intCast(qv & @as(U, @splat(0xF)))) - @as(I, @splat(8)));
+            const hi: V = @floatFromInt(@as(I, @intCast(qv >> @splat(4))) - @as(I, @splat(8)));
+            blk = @mulAdd(V, lo, x[base + h * 8 ..][0..8].*, blk);
+            blk = @mulAdd(V, hi, x[base + 16 + h * 8 ..][0..8].*, blk);
+        }
+        acc = @mulAdd(V, blk, @as(V, @splat(scale)), acc);
+    }
+    return @reduce(.Add, acc);
+}
+
+/// out (+)= weight * dequant(blocks); out.len == blocks.len * 32.
+pub fn weightedQ4_0Row(comptime accumulate: bool, out: []f32, blocks: []const BlockQ4_0, weight: f32) void {
+    const V = @Vector(8, f32);
+    const U = @Vector(8, u8);
+    const I = @Vector(8, i16);
+    for (blocks, 0..) |*block, bi| {
+        const ws: V = @splat(weight * f16BitsToF32(block.d));
+        const base = bi * q4_0_block_size;
+        inline for (0..2) |h| {
+            const qv: U = block.qs[h * 8 ..][0..8].*;
+            const lo: V = @floatFromInt(@as(I, @intCast(qv & @as(U, @splat(0xF)))) - @as(I, @splat(8)));
+            const hi: V = @floatFromInt(@as(I, @intCast(qv >> @splat(4))) - @as(I, @splat(8)));
+            const dst_lo = out[base + h * 8 ..][0..8];
+            const dst_hi = out[base + 16 + h * 8 ..][0..8];
+            dst_lo.* = if (accumulate) @mulAdd(V, lo, ws, @as(V, dst_lo.*)) else lo * ws;
+            dst_hi.* = if (accumulate) @mulAdd(V, hi, ws, @as(V, dst_hi.*)) else hi * ws;
+        }
+    }
+}
