@@ -829,16 +829,14 @@ pub fn Trainer(comptime targets: Targets) type {
             if (self.rope_tables.get(key)) |tables| return tables;
 
             const cfg = self.model.config;
-            const positions = try ctx.allocator.alloc(i32, seq_len);
-            defer ctx.allocator.free(positions);
-            for (positions, 0..) |*position, i| position.* = @intCast(offset + i);
+            const rope_positions: fucina.AxisRange = .{ .origin = @intCast(offset), .len = seq_len };
 
             const fresh = try self.allocator.create(RopeTables);
             errdefer self.allocator.destroy(fresh);
             const factors: ?[]const f32 = if (self.model.rope_freqs) |*t| try t.dataConst() else null;
             fresh.* = .{
-                .swa = try ctx.prepareRopeTable(positions, cfg.head_dim_swa, cfg.rope_theta_swa, false),
-                .global = try ctx.prepareRopeTableFactors(positions, cfg.head_dim_global, cfg.rope_theta, false, factors),
+                .swa = try ctx.prepareRopeTableRange(rope_positions, cfg.head_dim_swa, cfg.rope_theta_swa, false),
+                .global = try ctx.prepareRopeTableFactorsRange(rope_positions, cfg.head_dim_global, cfg.rope_theta, false, factors),
             };
             errdefer fresh.deinit();
 

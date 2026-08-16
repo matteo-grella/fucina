@@ -760,14 +760,12 @@ pub const Model = struct {
         const cfg = self.config;
         const allocator = ctx.allocator;
 
-        const positions = try allocator.alloc(i32, token_ids.len);
-        defer allocator.free(positions);
-        for (positions, 0..) |*p, i| p.* = @intCast(pos0 + i);
+        const rope_positions: fucina.AxisRange = .{ .origin = @intCast(pos0), .len = token_ids.len };
 
         const factors: ?[]const f32 = if (self.rope_freqs) |*t| try t.dataConst() else null;
-        var swa_table = try ctx.prepareRopeTable(positions, cfg.head_dim_swa, cfg.rope_theta_swa, false);
+        var swa_table = try ctx.prepareRopeTableRange(rope_positions, cfg.head_dim_swa, cfg.rope_theta_swa, false);
         defer swa_table.deinit();
-        var global_table = try ctx.prepareRopeTableFactors(positions, cfg.head_dim_global, cfg.rope_theta, false, factors);
+        var global_table = try ctx.prepareRopeTableFactorsRange(rope_positions, cfg.head_dim_global, cfg.rope_theta, false, factors);
         defer global_table.deinit();
 
         const embed_start = profileStart(profile, io);

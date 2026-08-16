@@ -58,6 +58,7 @@ zig build bench-gate           # paired Fucina-vs-llama benchmark gate (tools/be
 zig build bench-optim          # optimizer step kernels at LLM shapes (bench/optim.zig)
 zig build bench-ce             # softmax / cross-entropy / layerNorm row kernels at LLM shapes (bench/ce.zig)
 zig build bench-scatter        # scatter-add (embedding-gradient) kernel at vocab x dim shapes (bench/scatter.zig)
+zig build bench-masked-reduce  # masked reductions: fused vs maskedFill+reduce vs unmasked (bench/masked_reduce.zig)
 zig build bench-backend        # scalar vs native backends on representative ops
 zig build bench-f16gemm        # f16 TransB GEMM parallel-efficiency microbench
 zig build bench-gemm           # large-shape f32 GEMM: row kernels vs blocked packed kernel vs BLAS dispatch (bench/gemm.zig)
@@ -139,7 +140,7 @@ Build options (consumed at comptime via `build_options`):
 | Path | Role |
 | --- | --- |
 | `src/fucina.zig` | Public facade (the `fucina` module root). |
-| `src/tensor.zig` | Raw internal tensor (shape/stride/offset, rank ≤ 8). |
+| `src/tensor.zig` | Raw internal tensor (shape/stride/offset, rank ≤ 8) + `AxisRange` (an axis's absolute origin + length — Fortran's array lower bound as a value; the rope tables take one instead of a materialized position array). |
 | `src/tagged.zig`, `src/tags.zig` | Tag-semantics op library over raw tensors + comptime rank/axis-tag metaprogramming (no tagged tensor type). |
 | `src/exec.zig` | `ExecContext` — forwarding facade over `src/exec/`: embeds one `Runtime` as `rt`, forwards every op to its domain module, and re-exports the option/result types. Exec scopes live here too (openExecScope/closeExecScope: implicit ownership of training intermediates). |
 | `src/exec/` | The eager-runtime implementation. `runtime.zig` = leaf `Runtime` substrate (allocator, worker team, exec-scope stack, tensor allocation primitives; domain modules take an explicit `*Runtime`, never `self: anytype`); `buffer_pool.zig` = the reusable transient-buffer pool (see `docs/MEMORY-MODEL.md`); domain modules (`attention`, `matmul`, `quant_matmul`, `moe`, `norm`, `rope`, `softmax`, `loss`, `stats`, `topk`, `reduce`, `gather_scatter`, `conv`, `pool`, `convert`, `elementwise`, `shape`, + the `row_ops` kernel leaf); `expert_store.zig` = disk-backed MoE expert store (pinned set + per-layer LRU + pread readahead — out-of-core experts for models larger than RAM); `moe_chain.zig` = shared batched-MoE scheduling leaf (expert-grouped route plan, phase-chain machinery, chunk helpers, profile timers) consumed by `exec/moe.zig` and — via the `ExecContext.moe_chain` re-export — by the gemma MoE engines. |
@@ -150,6 +151,7 @@ Build options (consumed at comptime via `build_options`):
 | `src/dtype.zig` | Scalar + block-quantized dtype definitions. |
 | `src/parallel.zig`, `src/thread.zig` | Thread pool + parallel-chunk helpers. |
 | `src/gguf.zig` | GGUF parser + writer (`Writer`: byte-verbatim metadata passthrough, llama.cpp-exact offsets/padding — a 449 MiB verbatim re-emit is byte-identical; `encodeF32` = the writer-side quantize seam onto the `quant/` encoders). |
+| `src/fpenv.zig` | IEEE floating-point environment: rounding/underflow inquiry + scoped `Guard`, accrued exception flags + nesting `Probe`, `assertDefault`. Inquiry-first (aarch64 `FPCR`/`FPSR`, x86_64 `MXCSR`; unsupported targets return null and no-op), libc-free, off every hot path. `ExecContext.checkFloatEnvironment` is the determinism guard against a vendor BLAS leaving flush-to-zero on. |
 | `src/rng.zig` | Repo-owned deterministic RNG: splitmix64, counter-based `at(seed, i)`, uniform/gaussian/kaiming/normal fills. The (seed→values) mapping is a checkpoint contract (APOLLO projections, dropout masks). |
 | `src/ag.zig`, `src/ag/` | Autograd: `tensor.zig` (facade), `backward.zig` (VJPs), `core.zig` (scheduling), `checkpoint.zig` (activation checkpointing — recompute-in-backward, `checkpoint`/`checkpointWithContext`). |
 | `src/optim.zig` | Optimizers (SGD/AdamW/Muon/APOLLO), grad clipping, LR schedule, OptimizerSet (param groups), checkpoint save/load (positional FZT1 + named/dtype-aware safetensors state dicts, name-matched optimizer state v3, `addParamNamed`; native frames FZAD/FZA3/FZM3/FZP3/FZS3/FZO3). Golden-parity-tested vs the torch references. |

@@ -98,16 +98,81 @@ pub fn prepareRopeTableFactors(
     inverse: bool,
     freq_factors: ?[]const f32,
 ) !RopeTable {
+    return prepareRopeTableCore(rt, .{ .explicit = positions }, feature_dim, theta_base, inverse, freq_factors);
+}
+
+/// As `prepareRopeTable`, but for the positions of ONE CONTIGUOUS RUN, named
+/// by its origin instead of materialized: `range` spans
+/// `[range.origin, range.origin + range.len)`.
+///
+/// This is the overwhelmingly common case — a prefill covers `0..n`, a decode
+/// step covers `pos0..pos0+n` — and the array form made every caller allocate
+/// `n` integers, fill them with `origin + i`, and free them just to express
+/// `origin`. Same arithmetic body as the array form (they share
+/// `prepareRopeTableCore`), so the tables are BITWISE identical; only the
+/// caller-side allocation and fill disappear.
+///
+/// Ragged batches, where the positions are several runs rather than one, keep
+/// the explicit-array form.
+pub fn prepareRopeTableRange(rt: *Runtime, range: tensor.AxisRange, feature_dim: usize, theta_base: f32, inverse: bool) !RopeTable {
+    return prepareRopeTableFactorsRange(rt, range, feature_dim, theta_base, inverse, null);
+}
+
+/// `prepareRopeTableFactors` over a contiguous position run; see
+/// `prepareRopeTableRange`.
+pub fn prepareRopeTableFactorsRange(
+    rt: *Runtime,
+    range: tensor.AxisRange,
+    feature_dim: usize,
+    theta_base: f32,
+    inverse: bool,
+    freq_factors: ?[]const f32,
+) !RopeTable {
+    return prepareRopeTableCore(rt, .{ .range = range }, feature_dim, theta_base, inverse, freq_factors);
+}
+
+/// Where a table's positions come from. Both arms feed one arithmetic body, so
+/// a run expressed as a range and the same run expressed as an array produce
+/// bitwise identical tables.
+const PositionSource = union(enum) {
+    explicit: []const i32,
+    range: tensor.AxisRange,
+
+    fn len(self: PositionSource) usize {
+        return switch (self) {
+            .explicit => |p| p.len,
+            .range => |r| r.len,
+        };
+    }
+
+    fn at(self: PositionSource, i: usize) i32 {
+        return switch (self) {
+            .explicit => |p| p[i],
+            .range => |r| @intCast(r.at(i)),
+        };
+    }
+};
+
+fn prepareRopeTableCore(
+    rt: *Runtime,
+    source: PositionSource,
+    feature_dim: usize,
+    theta_base: f32,
+    inverse: bool,
+    freq_factors: ?[]const f32,
+) !RopeTable {
     if (feature_dim % 2 != 0) return tensor.TensorError.InvalidShape;
     const pair_count = feature_dim / 2;
     if (freq_factors) |ff| {
         if (ff.len != pair_count) return tensor.TensorError.ShapeMismatch;
     }
-    const angle_count = try std.math.mul(usize, positions.len, pair_count);
+    const position_count = source.len();
+    const angle_count = try std.math.mul(usize, position_count, pair_count);
     const values = try rt.allocator.alloc(f32, try std.math.mul(usize, angle_count, 2));
     errdefer rt.allocator.free(values);
-    const positions_copy = try rt.allocator.dupe(i32, positions);
+    const positions_copy = try rt.allocator.alloc(i32, position_count);
     errdefer rt.allocator.free(positions_copy);
+    for (positions_copy, 0..) |*slot, i| slot.* = source.at(i);
 
     const sin_values = values[0..angle_count];
     const cos_values = values[angle_count..][0..angle_count];
@@ -121,7 +186,9 @@ pub fn prepareRopeTableFactors(
         const exponent = @as(f32, @floatFromInt(2 * pair_i)) / @as(f32, @floatFromInt(feature_dim));
         p.* = std.math.pow(f32, theta_base, exponent);
     }
-    for (positions, 0..) |position, position_i| {
+    // Read the positions back out of the copy, so both sources run the exact
+    // same arithmetic on the exact same i32 values.
+    for (positions_copy, 0..) |position, position_i| {
         const pos = @as(f32, @floatFromInt(position));
         for (0..pair_count) |pair_i| {
             const inv_freq = pos / pow_cache[pair_i];

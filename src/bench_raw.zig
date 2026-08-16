@@ -8,6 +8,7 @@ pub const Tensor = ag.Tensor;
 pub const noGrad = ag.noGrad;
 pub const einsumMany = ag.einsumMany;
 pub const RawTensor = tensor.Tensor;
+pub const RawTensorOf = tensor.TensorOf;
 pub const ExecContext = exec.ExecContext;
 pub const RopeMode = exec.RopeMode;
 pub const RopeTable = exec.RopeTable;

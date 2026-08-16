@@ -10,6 +10,7 @@ const exec_elementwise = @import("exec/elementwise.zig");
 const exec_row_ops = @import("exec/row_ops.zig");
 const exec_moe_chain = @import("exec/moe_chain.zig");
 const dtype_mod = @import("dtype.zig");
+const fpenv = @import("fpenv.zig");
 const parallel = @import("parallel.zig");
 const rng = @import("rng.zig");
 const tensor = @import("tensor.zig");
@@ -390,6 +391,65 @@ test "exec context matmul uses backend into pooled output" {
     defer c.deinit();
 
     try std.testing.expectEqualSlices(f32, &.{ 58, 64, 139, 154 }, c.dataConst());
+}
+
+test "the GEMM dispatch tier leaves the IEEE float environment untouched" {
+    // The rounding mode and the flush-to-zero bit are per-thread state this
+    // process shares with whatever CBLAS the build linked. A vendor kernel that
+    // switches flush-to-zero on and forgets to restore it silently changes the
+    // numerics of every op that follows, including the ones whose backend
+    // parity tolerances and thread-count invariance are pinned by tests. This
+    // is the gate for that: cross the dispatch tier at shapes that reach BLAS
+    // (m, n, k >= 16 is `shouldUseBlas`) and confirm the environment survives.
+    if (!fpenv.supported) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const before = fpenv.get().?;
+    try std.testing.expect(before.isDefault());
+
+    // Denormal and huge operands, so a kernel that flushes subnormals or traps
+    // on overflow shows up here rather than in a distant parity failure.
+    const n = 64;
+    var lhs = try ctx.zeros(&.{ n, n });
+    defer lhs.deinit();
+    var rhs = try ctx.zeros(&.{ n, n });
+    defer rhs.deinit();
+    for (lhs.data(), 0..) |*v, i| v.* = if (i % 7 == 0) 1.0e-40 else @floatFromInt(i % 13);
+    for (rhs.data(), 0..) |*v, i| v.* = if (i % 5 == 0) 1.0e-40 else @floatFromInt(i % 11);
+
+    var nn = try ctx.matmul(&lhs, &rhs);
+    defer nn.deinit();
+    var nt = try ctx.matmulTransB(&lhs, &rhs);
+    defer nt.deinit();
+    var tn = try ctx.matmulTransA(&lhs, &rhs);
+    defer tn.deinit();
+
+    try std.testing.expectEqual(before, fpenv.get().?);
+    try ctx.checkFloatEnvironment();
+}
+
+test "checkFloatEnvironment catches a changed environment" {
+    if (!fpenv.supported) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    try ctx.checkFloatEnvironment();
+    try std.testing.expect(ctx.floatEnvironmentAtInit().?.isDefault());
+
+    var guard = fpenv.Guard.begin();
+    defer guard.restore();
+    fpenv.set(.{ .rounding = .nearest_even, .underflow = .flush_to_zero });
+    try std.testing.expectError(error.FloatEnvironmentChanged, ctx.checkFloatEnvironment());
+
+    guard.restore();
+    try ctx.checkFloatEnvironment();
 }
 
 test "exec context matmul transpose variants use backend outputs" {
@@ -1362,6 +1422,89 @@ test "grouped bidirectional attention matches a naive full-range reference" {
             }
         }
     }
+}
+
+test "a rope table built from an AxisRange is bitwise equal to the array form" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    // The refactor this pins: ~17 call sites used to allocate an i32 array,
+    // fill it with `origin + i`, build a table, and free it, purely to express
+    // `origin`. Both forms feed one arithmetic body, so the tables must agree
+    // BITWISE — a tolerance here would not be evidence, since every model
+    // family's rotary parity now rides on this equality.
+    const feature_dim = 64;
+    const theta: f32 = 10000;
+    const count = 37; // deliberately not a vector multiple
+    for ([_]i64{ 0, 1, 7, 4096, 131072 }) |origin| {
+        const positions = try allocator.alloc(i32, count);
+        defer allocator.free(positions);
+        for (positions, 0..) |*p, i| p.* = @intCast(origin + @as(i64, @intCast(i)));
+
+        for ([_]bool{ false, true }) |inverse| {
+            var from_array = try ctx.prepareRopeTable(positions, feature_dim, theta, inverse);
+            defer from_array.deinit();
+            var from_range = try ctx.prepareRopeTableRange(.{ .origin = origin, .len = count }, feature_dim, theta, inverse);
+            defer from_range.deinit();
+
+            try std.testing.expectEqualSlices(f32, from_array.sinValues(), from_range.sinValues());
+            try std.testing.expectEqualSlices(f32, from_array.cosValues(), from_range.cosValues());
+            try std.testing.expectEqual(from_array.feature_dim, from_range.feature_dim);
+            try std.testing.expectEqual(from_array.pair_count, from_range.pair_count);
+            try std.testing.expectEqual(from_array.theta_base, from_range.theta_base);
+        }
+
+        // Same equality with per-pair frequency factors (the Llama-3 /
+        // Gemma-global arm).
+        const factors = try allocator.alloc(f32, feature_dim / 2);
+        defer allocator.free(factors);
+        for (factors, 0..) |*f, i| f.* = 1.0 + @as(f32, @floatFromInt(i)) * 0.03;
+
+        var array_factors = try ctx.prepareRopeTableFactors(positions, feature_dim, theta, false, factors);
+        defer array_factors.deinit();
+        var range_factors = try ctx.prepareRopeTableFactorsRange(.{ .origin = origin, .len = count }, feature_dim, theta, false, factors);
+        defer range_factors.deinit();
+        try std.testing.expectEqualSlices(f32, array_factors.sinValues(), range_factors.sinValues());
+        try std.testing.expectEqualSlices(f32, array_factors.cosValues(), range_factors.cosValues());
+    }
+}
+
+test "AxisRange carries an origin the way a Fortran lower bound does" {
+    const AxisRange = tensor.AxisRange;
+
+    // The plain 0-origin axis is the default, so `.{ .len = n }` is the
+    // ordinary case and costs nothing to write.
+    const plain: AxisRange = .{ .len = 4 };
+    try std.testing.expectEqual(@as(i64, 0), plain.origin);
+    try std.testing.expectEqual(@as(i64, 4), plain.end());
+    try std.testing.expectEqual(@as(i64, 2), plain.at(2));
+
+    const decode: AxisRange = .{ .origin = 4096, .len = 3 };
+    try std.testing.expectEqual(@as(i64, 4096), decode.at(0));
+    try std.testing.expectEqual(@as(i64, 4099), decode.end());
+    try std.testing.expect(decode.contains(4098));
+    try std.testing.expect(!decode.contains(4099));
+    try std.testing.expect(!decode.contains(4095));
+
+    // narrowed is the operation a 0-origin axis cannot express: take a local
+    // sub-run and keep knowing where it sits absolutely.
+    const tail = decode.narrowed(1, 2);
+    try std.testing.expectEqual(@as(i64, 4097), tail.origin);
+    try std.testing.expectEqual(@as(usize, 2), tail.len);
+
+    try std.testing.expectEqual(@as(i64, 4106), decode.shifted(10).origin);
+    try std.testing.expectEqual(@as(i64, 0), decode.rebased(0).origin);
+    try std.testing.expectEqual(@as(usize, 3), decode.rebased(0).len);
+
+    // The materialization it exists to avoid, still available for ragged
+    // interop boundaries.
+    var out: [3]i32 = undefined;
+    try decode.writeInto(&out);
+    try std.testing.expectEqualSlices(i32, &.{ 4096, 4097, 4098 }, &out);
+    var wrong: [2]i32 = undefined;
+    try std.testing.expectError(error.InvalidDataLength, decode.writeInto(&wrong));
 }
 
 test "prepareRopeTableFactors scales frequencies; null reproduces plain RoPE" {

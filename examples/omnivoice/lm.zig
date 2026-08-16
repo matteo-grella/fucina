@@ -407,10 +407,7 @@ pub const Model = struct {
         // Positions 0..S-1, identical for cond and uncond rows (reference
         // pipeline-tts.cpp:477-480); NEOX half-rotation RoPE over all
         // head_dim dims, theta 1e6, no freq factors.
-        const positions = try ctx.allocator.alloc(i32, seq_len);
-        defer ctx.allocator.free(positions);
-        for (positions, 0..) |*position, i| position.* = @intCast(i);
-        var rope_table = try ctx.prepareRopeTable(positions, cfg.head_dim, cfg.rope_theta, false);
+        var rope_table = try ctx.prepareRopeTableRange(.{ .len = seq_len }, cfg.head_dim, cfg.rope_theta, false);
         defer rope_table.deinit();
 
         var final = blk: {

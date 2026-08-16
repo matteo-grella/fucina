@@ -73,6 +73,7 @@ API-level companion. Every Zig snippet is machine-verified against the tree
   - [6.7 RhsLifetime: address-keyed caching of RHS operands (`src/exec/quant_matmul.zig`)](#67-rhslifetime-address-keyed-caching-of-rhs-operands-srcexecquant_matmulzig)
   - [6.8 Determinism and the RNG contract (`src/rng.zig`)](#68-determinism-and-the-rng-contract-srcrngzig)
   - [6.9 The thread-safety contract](#69-the-thread-safety-contract)
+  - [6.10 The IEEE floating-point environment (`src/fpenv.zig`)](#610-the-ieee-floating-point-environment-srcfpenvzig)
 - [7. Named axes: the tag algebra](#7-named-axes-the-tag-algebra)
   - [7.1 Tags, tag specs, and normalization (`src/tags.zig`)](#71-tags-tag-specs-and-normalization-srctagszig)
   - [7.2 Lookup, equality, and constraint helpers (`src/tags.zig`)](#72-lookup-equality-and-constraint-helpers-srctagszig)
@@ -2551,6 +2552,115 @@ returns the scalar `Tensor(.{})`.
   gradients); like torch, the `.l2` gradient at an all-zero vector is NaN
   (`sqrt'(0)`).
 
+#### Masked reductions
+
+```zig
+pub fn sumExt(self, ctx, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag))
+pub fn meanExt(self, ctx, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag))
+pub fn maxExt(self, ctx, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag))
+pub fn minExt(self, ctx, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag))
+```
+
+The `sum(a, dim, mask)` / `maxval(a, dim, mask)` family: a reduction
+restricted to the elements a mask selects. `opts` is `.{}` (identical to the
+unmasked op), `.{ .mask = &m }`, or `.{ .mask = &m, .empty = v }`; any other
+field is a **compile error**, never a silently-unmasked reduction (the
+`groupedAttention` opts discipline, §4.13).
+
+- **Mask contract**, shared with `where`/`maskedFill` (§4.6): a `.bool` mask
+  or a float read by truthiness (`!= 0`, NaN truthy), carrying `self`'s exact
+  tags and shape, non-grad, integer masks a compile error. Compose
+  `broadcastTo` for a mask over fewer axes.
+- **Why not just compose.** The spelling these replace is `maskedFill` into a
+  full-size f32 temporary followed by an ordinary reduction: two passes and a
+  whole extra tensor. These accumulate straight out of the source through the
+  same SIMD row kernel. Measured on M1 Max, ReleaseFast, `-Dblas=accelerate`
+  (`zig build bench-masked-reduce`): **2.3–2.4x faster** than the composition
+  at `[1024, 4096]` and `[4096, 1024]` on both the last-axis and
+  non-last-axis arms.
+- **Bitwise contract.** An excluded element contributes the operation's
+  identity rather than being skipped, so a masked reduction performs exactly
+  the composition's arithmetic in exactly its order: `sumExt` is **bitwise
+  equal** to `maskedFill(¬mask, 0)` then `sum`, and bitwise equal to the
+  unmasked reduction when the mask is all-true. Substituting the identity is
+  also what keeps an excluded NaN from poisoning its lane.
+- **Empty lanes.** A lane whose mask selects nothing takes the operation's
+  identity: `0` for `sumExt`, `-inf`/`+inf` for `maxExt`/`minExt` (Fortran's
+  `maxval` of an empty selection is `-HUGE`). This is why a masked reduction
+  needs no `EmptySelection` error the way `maskedSelect` does (§3.7) — the
+  answer is defined. `mean` has no identity, so its empty lane is `NaN`
+  (0/0). `.empty = v` overrides the value for any of them.
+- **Gradients.** `sumExt`: the unmasked scatter, zeroed where the mask
+  excluded the element. `meanExt`: divided by the count of SELECTED elements
+  per lane (not the axis length), so an empty lane — which produced a
+  constant, not a function of the data — contributes nothing.
+  `maxExt`/`minExt`: the gradient goes to the first *selected* extremum, with
+  `max`'s tie-break and NaN semantics applied to the selected elements only;
+  an empty lane receives none. All four are pinned against finite differences
+  by `fucina.gradcheck` (§5.7).
+- Counting a mask stays `mask.sum(tag)` (i64, §4.19); there is no separate
+  `count` entry.
+
+`maxExt`/`minExt` cover Fortran's `maxval`/`minval`; `product` and
+`all`/`any` deliberately have no masked twin (no in-tree consumer, and
+`all`/`any` compose with `logicalAnd`/`logicalOr`).
+
+```zig
+test "masked reductions restrict a reduction to the elements a mask selects" {
+    const alloc = std.testing.allocator;
+    var ctx: fucina.ExecContext = undefined;
+    ctx.init(alloc);
+    defer ctx.deinit();
+
+    const M = fucina.Tensor(.{ .dtype = .bool, .tags = .{ .row, .col } });
+    var x = try fucina.Tensor(.{ .row, .col })
+        .variableFromSlice(&ctx, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    defer x.deinit();
+    // row 0 keeps {1, 3}; row 1 keeps {5}
+    var mask = try M.fromSlice(&ctx, .{ 2, 3 }, &.{ true, false, true, false, true, false });
+    defer mask.deinit();
+
+    var total = try x.sumExt(&ctx, .col, .{ .mask = &mask });
+    defer total.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 4, 5 }, try total.dataConst());
+
+    // The mean divides by the SELECTED count (2 and 1), not the axis length.
+    var avg = try x.meanExt(&ctx, .col, .{ .mask = &mask });
+    defer avg.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 2, 5 }, try avg.dataConst());
+
+    // Gradient reaches only the selected elements.
+    var loss = try total.sumAll(&ctx);
+    defer loss.deinit();
+    try loss.backward(&ctx);
+    var gx = (try x.grad(&ctx)).?;
+    defer gx.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 1, 0, 1, 0, 1, 0 }, try gx.dataConst());
+}
+
+test "a masked lane that selects nothing takes the identity, not an error" {
+    const alloc = std.testing.allocator;
+    var ctx: fucina.ExecContext = undefined;
+    ctx.init(alloc);
+    defer ctx.deinit();
+
+    const M = fucina.Tensor(.{ .dtype = .bool, .tags = .{ .row, .col } });
+    var x = try fucina.Tensor(.{ .row, .col }).fromSlice(&ctx, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
+    defer x.deinit();
+    var mask = try M.fromSlice(&ctx, .{ 2, 2 }, &.{ false, false, true, false });
+    defer mask.deinit();
+
+    var total = try x.sumExt(&ctx, .col, .{ .mask = &mask });
+    defer total.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 0, 3 }, try total.dataConst()); // identity, no error
+
+    // A mean has no identity: 0/0 unless the caller names a sentinel.
+    var avg = try x.meanExt(&ctx, .col, .{ .mask = &mask, .empty = 0 });
+    defer avg.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 0, 3 }, try avg.dataConst());
+}
+```
+
 Related (exec-level): `ctx.kdaRecurrent` (`src/exec/delta_attention.zig`)
 is the fused, stateful counterpart of this scan family — the delta-rule
 linear-attention recurrence the kimi3 model family mixes sequences with;
@@ -3187,6 +3297,51 @@ at comptime (a closed set; anything else is a compile error):
 Differentiable in `self`; the backward applies the inverse rotation (§5).
 Negative positions rotate backwards, so re-roping cached values to a new
 offset is a valid pattern.
+
+**Position runs: `AxisRange`.** A tensor axis here is 0-origin: `Shape`
+records how long an axis is, never where it starts. A positional axis has an
+origin anyway — the absolute token position of its first row — and with
+nowhere to put it, callers materialized it: allocate `n` integers, fill them
+with `origin + i`, pass them down, free them, all to express `origin`.
+`fucina.AxisRange` is that origin as a value (Fortran's array lower bound,
+which NumPy and torch have no equivalent of):
+
+```zig
+pub const AxisRange = struct {
+    origin: i64 = 0,   // absolute index of the axis's first element
+    len: usize,        // the axis spans [origin, origin + len)
+    pub fn at(self, i: usize) i64
+    pub fn end(self) i64
+    pub fn narrowed(self, start: usize, count: usize) AxisRange  // keeps the absolute origin
+    pub fn shifted(self, delta: i64) AxisRange
+    pub fn rebased(self, new_origin: i64) AxisRange
+    pub fn contains(self, absolute: i64) bool
+    pub fn writeInto(self, out: []i32) !void   // the materialization it avoids
+};
+```
+
+The rope-table constructors take one directly:
+
+```zig
+pub fn prepareRopeTableRange(range: AxisRange, feature_dim, theta_base, inverse) !RopeTable
+pub fn prepareRopeTableFactorsRange(range: AxisRange, feature_dim, theta_base, inverse, freq_factors) !RopeTable
+```
+
+`.{ .len = n }` is a prefill over `0..n`; `.{ .origin = pos0, .len = n }` is a
+decode step. Both share one arithmetic body with the array form, so a run
+expressed as a range and the same run expressed as an array produce
+**bitwise identical** tables (pinned in `src/exec_tests.zig` across several
+origins, both `inverse` arms, and the `freq_factors` arm). The explicit
+`positions: []const i32` form stays for the genuinely ragged case — a
+multi-stream batch whose positions are several runs, not one.
+
+**Band masks already carry an origin.** An offset causal mask needs no new
+API: a row origin shifts a `bandMask`/`bandPart` band by folding into the
+bounds. Queries at absolute `p0..p0+n` over keys `0..k` keep
+`absolute_q >= absolute_k`, which is `bandMask(shape, null, p0)` — the
+`upper` bound absorbs the origin, since `(i + p0) - j >= 0` is `j - i <= p0`.
+Generally, an origin difference `o = row_origin - col_origin` turns bounds
+`(lower, upper)` into `(lower - o, upper + o)`.
 
 ```zig
 test "rope rotates feature pairs by position" {
@@ -5570,6 +5725,11 @@ No blanket bitwise-reproducibility claim is made for every parallel
 reduction at every thread count; where a kernel guarantees serial/parallel
 parity, the guarantee is pinned by its tests (§9).
 
+Every guarantee above is stated under the default IEEE floating-point
+environment. That environment is per-thread state this process shares with
+the linked CBLAS and the GPU driver, so it is checkable rather than assumed:
+see §6.10.
+
 ### 6.9 The thread-safety contract
 
 What is thread-safe inside a context:
@@ -5601,6 +5761,121 @@ What is not:
   dot-backward branches — is always mediated by the context's own team and
   joins before the op returns. Submitted GPU completion is the explicitly
   documented exception (`GPU-OFFLOAD.md`).
+
+### 6.10 The IEEE floating-point environment (`src/fpenv.zig`)
+
+Every numeric contract in this library — the RNG's (seed → values) mapping
+(§6.8), scalar-vs-native backend parity (§9.3), thread-count-invariant
+kernels (§9.4) — is stated under the **default IEEE environment**: round to
+nearest-even, gradual underflow, no trapping. Nothing in the language
+guarantees it. The rounding mode and the flush-to-zero bit live in a
+per-thread control register (`FPCR` on aarch64, `MXCSR` on x86_64) shared
+with everything else on the thread, including the external CBLAS and the GPU
+driver. A vendor kernel that enables flush-to-zero and does not restore it
+changes the numerics of every op that follows, silently: results stay
+plausible and stop matching the oracles.
+
+`fucina.fpenv` makes that state observable, controllable within a scope, and
+assertable. It is inquiry-first in the Fortran `ieee_arithmetic` sense —
+`supported` reports whether the target exposes the registers, the getters
+return `null` where it does not, and the setters are no-ops there — so
+calling code never has to branch on the architecture. Nothing here sits on an
+op hot path.
+
+```zig
+pub const supported: bool                     // aarch64 / x86_64 today
+pub const RoundingMode = enum { nearest_even, toward_zero, upward, downward };
+pub const UnderflowMode = enum { gradual, flush_to_zero };
+pub const Environment = struct { rounding: RoundingMode, underflow: UnderflowMode,
+                                 pub fn isDefault(self) bool };
+pub const default_environment: Environment    // nearest_even + gradual
+
+pub fn get() ?Environment
+pub fn set(env: Environment) void
+pub fn roundingMode() ?RoundingMode
+pub fn underflowMode() ?UnderflowMode
+pub fn assertDefault() error{NonDefaultFloatEnvironment}!void
+
+pub const Exceptions = struct { invalid, division_by_zero, overflow, underflow,
+                                inexact, denormal: bool,
+                                pub fn any(self) bool
+                                pub fn anySignificant(self) bool      // any but inexact
+                                pub fn unionWith(self, other) Exceptions };
+pub fn testExceptions() Exceptions
+pub fn clearExceptions() void
+pub fn raiseExceptions(flags: Exceptions) void
+
+pub const Guard = struct { pub fn begin() Guard; pub fn restore(self) void };
+pub const Probe = struct { pub fn begin() Probe; pub fn sample(self) Exceptions;
+                           pub fn end(self) Exceptions };
+```
+
+- `Guard` is Fortran's rule that a procedure changing the environment restores
+  it before returning, made explicit: `begin` snapshots, `restore` puts it
+  back, and `restore` is idempotent and safe on unsupported targets.
+- `Probe` measures which IEEE exceptions a region raised. `begin` takes over
+  the accrued flags (saving and clearing them), `sample` reads what has
+  accrued so far, and `end` reads the final set and merges the saved outer
+  flags back in, so probes nest without an inner region erasing an outer
+  one's history. Flags are per-thread: a probe around a parallel op observes
+  only the calling thread's, not the worker team's.
+- `Exceptions.denormal` is not one of the five IEEE exceptions. Both
+  supported architectures expose a subnormal-operand flag (x86 `DE`, aarch64
+  `IDC`) and it is informative when auditing quantization block scales, so it
+  is surfaced alongside them. `anySignificant()` is the "worth looking at"
+  predicate: everything except `inexact`, which ordinary arithmetic raises
+  constantly.
+
+On the context side, `ExecContext` records the environment at `init` and
+compares on demand:
+
+```zig
+pub fn checkFloatEnvironment(self: *const ExecContext) !void   // error.FloatEnvironmentChanged
+pub fn floatEnvironmentAtInit(self: *const ExecContext) ?Environment
+```
+
+Call `checkFloatEnvironment` after crossing into foreign code, or around a run
+whose output is compared bitwise. Both succeed unconditionally where the
+target does not expose the environment: the facility never reports a wrong
+answer in place of "cannot observe". The in-tree gate that the GEMM dispatch
+tier (BLAS included) leaves the environment intact lives in
+`src/exec_tests.zig`.
+
+```zig
+test "float environment: assert the default, scope a change, probe exceptions" {
+    const fpenv = fucina.fpenv;
+    if (!fpenv.supported) return; // nothing to observe on this target
+
+    // The contract every pinned numeric result in this library assumes.
+    try fpenv.assertDefault();
+
+    // A scoped change: the guard puts the environment back.
+    {
+        var guard = fpenv.Guard.begin();
+        defer guard.restore();
+        fpenv.set(.{ .rounding = .toward_zero, .underflow = .gradual });
+        try std.testing.expectEqual(fpenv.RoundingMode.toward_zero, fpenv.roundingMode().?);
+    }
+    try fpenv.assertDefault();
+
+    // Which exceptions did this region raise?
+    var probe = fpenv.Probe.begin();
+    var huge: f32 = 3.0e38;
+    std.mem.doNotOptimizeAway(&huge);
+    var squared = huge * huge;
+    std.mem.doNotOptimizeAway(&squared);
+    const raised = probe.end();
+    try std.testing.expect(raised.overflow);
+    try std.testing.expect(raised.anySignificant());
+    fpenv.clearExceptions();
+
+    // A context checks its own environment against creation time.
+    var ctx: fucina.ExecContext = undefined;
+    ctx.init(std.testing.allocator);
+    defer ctx.deinit();
+    try ctx.checkFloatEnvironment();
+}
+```
 
 ## 7. Named axes: the tag algebra
 

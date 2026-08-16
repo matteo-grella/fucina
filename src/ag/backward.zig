@@ -1239,6 +1239,210 @@ pub fn MeanBackward(comptime source_tags: anytype, comptime result_tags: anytype
     };
 }
 
+/// VJP for a masked sum: the unmasked scatter, gated by the mask.
+///
+/// An element the mask excluded contributed nothing to the output, so it
+/// receives nothing back. Lanes that selected nothing scatter a gradient no
+/// element keeps, which is the same statement.
+pub fn MaskedSumBackward(comptime source_tags: anytype, comptime result_tags: anytype, comptime mask_dtype: tensor_mod.DType) type {
+    return struct {
+        parents: [1]?*GradState,
+        source_shape: [rawRank(source_tags.len)]usize,
+        mask: tensor_mod.TensorOf(mask_dtype),
+
+        const Self = @This();
+
+        pub fn init(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            parent: ?*GradState,
+            source: *const RawTensor,
+            mask: *const tensor_mod.TensorOf(mask_dtype),
+        ) !void {
+            _ = allocator;
+            self.* = .{
+                .parents = .{parent},
+                .source_shape = rawShapeArray(source_tags, source),
+                .mask = try mask.cloneView(),
+            };
+        }
+
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
+            if (needs_grad.len == 0 or !needs_grad[0]) return;
+            out[0] = try gateGradientByMask(mask_dtype, result_tags, source_tags, ctx, gy, &self.mask, self.source_shape);
+        }
+
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
+            self.mask.deinit();
+        }
+
+        pub const vtable = core.recordVTable(Self);
+    };
+}
+
+/// Shared tail of the masked-reduction VJPs: broadcast a result-shaped
+/// gradient back over the reduced axis and zero it wherever the mask excluded
+/// the element. The broadcast alone is a stride-0 view (what the unmasked sum
+/// returns), but gating makes the result genuinely per-element, so this
+/// materializes — one allocation at source shape, the `MaskedFillBackward`
+/// shape.
+fn gateGradientByMask(
+    comptime mask_dtype: tensor_mod.DType,
+    comptime result_tags: anytype,
+    comptime source_tags: anytype,
+    ctx: *ExecContext,
+    gy: *const RawTensor,
+    mask: *const tensor_mod.TensorOf(mask_dtype),
+    source_shape: [rawRank(source_tags.len)]usize,
+) !RawTensor {
+    var m = try contiguousForReadTyped(mask_dtype, ctx, mask);
+    defer m.deinit();
+
+    var expanded_view = try expandGradientToTags(result_tags, source_tags, ctx, gy, source_shape);
+    defer expanded_view.deinit();
+    var expanded = try contiguousForRead(ctx, &expanded_view);
+    defer expanded.deinit();
+
+    var gx = try ctx.empty(m.shape.slice());
+    errdefer gx.deinit();
+    for (m.dataConst(), expanded.dataConst(), gx.data()) |mv, grad, *dst| {
+        dst.* = if (dtype_mod.isTruthy(mask_dtype, mv)) grad else 0;
+    }
+    return gx;
+}
+
+/// VJP for a masked mean: the masked scatter divided by the per-lane count of
+/// selected elements, which the forward already computed.
+///
+/// A lane that selected nothing has count zero and produced the caller's
+/// `empty` sentinel rather than a mean of the data, so no gradient flows out
+/// of it: the divide would be 0/0, and the honest derivative of a constant is
+/// zero. The stored counts carry the per-lane divisor so the backward never
+/// recounts.
+pub fn MaskedMeanBackward(comptime source_tags: anytype, comptime result_tags: anytype, comptime mask_dtype: tensor_mod.DType) type {
+    return struct {
+        parents: [1]?*GradState,
+        source_shape: [rawRank(source_tags.len)]usize,
+        mask: tensor_mod.TensorOf(mask_dtype),
+        counts: RawTensor,
+
+        const Self = @This();
+
+        pub fn init(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            parent: ?*GradState,
+            source: *const RawTensor,
+            mask: *const tensor_mod.TensorOf(mask_dtype),
+            counts: *const RawTensor,
+        ) !void {
+            _ = allocator;
+            self.* = .{
+                .parents = .{parent},
+                .source_shape = rawShapeArray(source_tags, source),
+                .mask = try mask.cloneView(),
+                .counts = try counts.cloneView(),
+            };
+        }
+
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
+            if (needs_grad.len == 0 or !needs_grad[0]) return;
+
+            // Divide at the RESULT shape (one value per lane) before
+            // broadcasting, so the divide runs over the small tensor. A lane
+            // that selected nothing produced the caller's `empty` constant,
+            // not a mean of the data, so its gradient is zero.
+            var gy_ready = try contiguousForRead(ctx, gy);
+            defer gy_ready.deinit();
+            var counts_ready = try contiguousForRead(ctx, &self.counts);
+            defer counts_ready.deinit();
+
+            var scaled = try ctx.empty(gy_ready.shape.slice());
+            defer scaled.deinit();
+            for (gy_ready.dataConst(), counts_ready.dataConst(), scaled.data()) |g, count, *dst| {
+                dst.* = if (count == 0) 0 else g / count;
+            }
+
+            out[0] = try gateGradientByMask(mask_dtype, result_tags, source_tags, ctx, &scaled, &self.mask, self.source_shape);
+        }
+
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
+            self.mask.deinit();
+            self.counts.deinit();
+        }
+
+        pub const vtable = core.recordVTable(Self);
+    };
+}
+
+/// VJP for a masked extremum: the unmasked first-winner scatter, skipping
+/// lanes whose index is the -1 "nothing selected" sentinel.
+pub fn MaskedMinMaxBackward(comptime source_tags: anytype, comptime axis: usize) type {
+    return struct {
+        parents: [1]?*GradState,
+        source_shape: [rawRank(source_tags.len)]usize,
+        indices: tensor_mod.TensorOf(.i64),
+
+        const Self = @This();
+
+        pub fn init(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            parent: ?*GradState,
+            source: *const RawTensor,
+            indices: *const tensor_mod.TensorOf(.i64),
+        ) !void {
+            _ = allocator;
+            self.* = .{
+                .parents = .{parent},
+                .source_shape = rawShapeArray(source_tags, source),
+                .indices = try indices.cloneView(),
+            };
+        }
+
+        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
+            if (needs_grad.len == 0 or !needs_grad[0]) return;
+
+            const rank = comptime rawRank(source_tags.len);
+            var gy_ready = try contiguousForRead(ctx, gy);
+            defer gy_ready.deinit();
+            const idxd = self.indices.dataConst();
+
+            var gx = try ctx.zeros(self.source_shape[0..]);
+            errdefer gx.deinit();
+            const gyd = gy_ready.dataConst();
+            const gxd = gx.data();
+
+            const axis_dim = self.source_shape[axis];
+            var inner: usize = 1;
+            inline for (axis + 1..rank) |i| inner *= self.source_shape[i];
+            var outer: usize = 1;
+            inline for (0..axis) |i| outer *= self.source_shape[i];
+
+            for (0..outer) |outer_i| {
+                const gx_base = outer_i * axis_dim * inner;
+                for (0..inner) |inner_i| {
+                    const flat = outer_i * inner + inner_i;
+                    const raw_index = idxd[flat];
+                    if (raw_index < 0) continue; // empty lane: nothing participated
+                    const index: usize = @intCast(raw_index);
+                    gxd[gx_base + index * inner + inner_i] = gyd[flat];
+                }
+            }
+            out[0] = gx;
+        }
+
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
+            self.indices.deinit();
+        }
+
+        pub const vtable = core.recordVTable(Self);
+    };
+}
+
 /// VJP for variance over an axis: dx = gy·2(x−μ)/(N−ddof) with μ the row
 /// mean, recomputed here from the saved input.
 pub fn VarBackward(comptime source_tags: anytype, comptime axis: usize) type {

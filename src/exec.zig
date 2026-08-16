@@ -2,6 +2,7 @@ const std = @import("std");
 const backend_mod = @import("backend.zig");
 const backend_ops = backend_mod.ops;
 const dtype_mod = @import("dtype.zig");
+const fpenv = @import("fpenv.zig");
 const tensor = @import("tensor.zig");
 const thread = @import("thread.zig");
 
@@ -98,6 +99,9 @@ pub const StandardizeOptions = exec_stats.StandardizeOptions;
 
 pub const GroupedCausalAttentionBackwardResult = exec_attention.GroupedCausalAttentionBackwardResult;
 
+/// Masked-mean forward result: the per-lane means plus the per-lane counts of
+/// selected elements (the mean's divisor, which the VJP reuses).
+pub const MaskedMeanResult = exec_reduce.MaskedMeanResult;
 pub const LayerNormAffineBackwardResult = exec_norm.LayerNormAffineBackwardResult;
 pub const GroupNormBackwardResult = exec_norm.GroupNormBackwardResult;
 pub const SnakeBackwardParamsResult = exec_elementwise.SnakeBackwardParamsResult;
@@ -153,6 +157,20 @@ pub const ExecContext = struct {
     /// See `Runtime.pin_rowwise_kernels` for the mechanism.
     pub fn pinRowwiseKernels(self: *ExecContext, on: bool) void {
         self.rt.pin_rowwise_kernels = on;
+    }
+
+    /// `error.FloatEnvironmentChanged` when the calling thread's IEEE rounding
+    /// or underflow mode is no longer what it was when this context was
+    /// created. See `Runtime.checkFloatEnvironment`; the facility itself is
+    /// `fucina.fpenv`.
+    pub fn checkFloatEnvironment(self: *const ExecContext) !void {
+        return self.rt.checkFloatEnvironment();
+    }
+
+    /// The IEEE floating-point environment recorded at context creation, or
+    /// null where the target does not expose it.
+    pub fn floatEnvironmentAtInit(self: *const ExecContext) ?fpenv.Environment {
+        return self.rt.fp_env_at_init;
     }
 
     // ------------------------------------------------------------------
@@ -1198,6 +1216,36 @@ pub const ExecContext = struct {
         return exec_reduce.meanAxisRank(&self.rt, rank, x, axis);
     }
 
+    /// Sum over `axis` of the elements `mask` selects (Fortran's
+    /// `sum(a, dim, mask)`). Lanes selecting nothing yield `empty orelse 0`.
+    pub fn sumMaskedAxisRank(
+        self: *ExecContext,
+        comptime mask_dtype: DType,
+        comptime rank: usize,
+        x: *const Tensor,
+        mask: *const tensor.TensorOf(mask_dtype),
+        comptime axis: usize,
+        empty_value: ?f32,
+    ) !Tensor {
+        return exec_reduce.sumMaskedAxisRank(&self.rt, mask_dtype, rank, x, mask, axis, empty_value);
+    }
+
+    /// Mean over `axis` of the elements `mask` selects, plus the per-lane
+    /// selected counts (the divisor the VJP needs). Lanes selecting nothing
+    /// yield `empty orelse NaN`.
+    pub fn meanMaskedAxisRank(
+        self: *ExecContext,
+        comptime mask_dtype: DType,
+        comptime rank: usize,
+        x: *const Tensor,
+        mask: *const tensor.TensorOf(mask_dtype),
+        comptime axis: usize,
+        empty_value: ?f32,
+    ) !MaskedMeanResult {
+        return exec_reduce.meanMaskedAxisRank(&self.rt, mask_dtype, rank, x, mask, axis, empty_value);
+    }
+
+
     pub fn meanAxisRankTyped(
         self: *ExecContext,
         comptime dtype: DType,
@@ -1319,6 +1367,35 @@ pub const ExecContext = struct {
 
     pub fn minAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !TopKResult {
         return exec_stats.minAxisRank(&self.rt, rank, x, axis);
+    }
+
+    /// Max over `axis` of the elements `mask` selects (Fortran's
+    /// `maxval(a, dim, mask)`). Empty lanes take `empty orelse -inf` and index
+    /// -1 (the "no element participated" sentinel the masked VJP reads).
+    pub fn maxMaskedAxisRank(
+        self: *ExecContext,
+        comptime mask_dtype: DType,
+        comptime rank: usize,
+        x: *const Tensor,
+        mask: *const tensor.TensorOf(mask_dtype),
+        comptime axis: usize,
+        empty_value: ?f32,
+    ) !TopKResult {
+        return exec_stats.maxMaskedAxisRank(&self.rt, mask_dtype, rank, x, mask, axis, empty_value);
+    }
+
+    /// Min over `axis` of the elements `mask` selects; empty lanes take
+    /// `empty orelse +inf` and index -1. See `maxMaskedAxisRank`.
+    pub fn minMaskedAxisRank(
+        self: *ExecContext,
+        comptime mask_dtype: DType,
+        comptime rank: usize,
+        x: *const Tensor,
+        mask: *const tensor.TensorOf(mask_dtype),
+        comptime axis: usize,
+        empty_value: ?f32,
+    ) !TopKResult {
+        return exec_stats.minMaskedAxisRank(&self.rt, mask_dtype, rank, x, mask, axis, empty_value);
     }
 
     pub fn varAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, ddof: u1) !Tensor {
@@ -1763,6 +1840,27 @@ pub const ExecContext = struct {
         freq_factors: ?[]const f32,
     ) !RopeTable {
         return exec_rope.prepareRopeTableFactors(&self.rt, positions, feature_dim, theta_base, inverse, freq_factors);
+    }
+
+    /// `prepareRopeTable` for one CONTIGUOUS run of positions, named by its
+    /// origin instead of materialized: `range` spans
+    /// `[range.origin, range.origin + range.len)`. Bitwise identical to
+    /// passing the same run as an array (see `exec/rope.zig`).
+    pub fn prepareRopeTableRange(self: *ExecContext, range: tensor.AxisRange, feature_dim: usize, theta_base: f32, inverse: bool) !RopeTable {
+        return exec_rope.prepareRopeTableRange(&self.rt, range, feature_dim, theta_base, inverse);
+    }
+
+    /// `prepareRopeTableFactors` over a contiguous position run; see
+    /// `prepareRopeTableRange`.
+    pub fn prepareRopeTableFactorsRange(
+        self: *ExecContext,
+        range: tensor.AxisRange,
+        feature_dim: usize,
+        theta_base: f32,
+        inverse: bool,
+        freq_factors: ?[]const f32,
+    ) !RopeTable {
+        return exec_rope.prepareRopeTableFactorsRange(&self.rt, range, feature_dim, theta_base, inverse, freq_factors);
     }
 
     /// Hand-fill a rope table for `count` consecutive positions from

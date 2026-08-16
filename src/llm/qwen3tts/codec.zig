@@ -573,10 +573,7 @@ fn transformerForward(ctx: *ExecContext, dec: *const Decoder, x: *const Act) !Ac
     try cur.addAxisVectorInPlace(ctx, dec.in_proj_b, .d);
 
     const t = cur.dim(.seq);
-    const positions = try ctx.allocator.alloc(i32, t);
-    defer ctx.allocator.free(positions);
-    for (positions, 0..) |*p, i| p.* = @intCast(i);
-    var rope_table = try ctx.prepareRopeTable(positions, cfg.head_dim, cfg.rope_theta, false);
+    var rope_table = try ctx.prepareRopeTableRange(.{ .len = t }, cfg.head_dim, cfg.rope_theta, false);
     defer rope_table.deinit();
 
     for (dec.layers) |*l| {
@@ -957,11 +954,8 @@ pub const Streaming = struct {
             self.kv_len = keep;
         }
 
-        const positions = try ctx.allocator.alloc(i32, t);
-        defer ctx.allocator.free(positions);
         const abs0 = self.pos_base + self.kv_len;
-        for (positions, 0..) |*p, i| p.* = @intCast(abs0 + i);
-        var rope_table = try ctx.prepareRopeTable(positions, cfg.head_dim, cfg.rope_theta, false);
+        var rope_table = try ctx.prepareRopeTableRange(.{ .origin = @intCast(abs0), .len = t }, cfg.head_dim, cfg.rope_theta, false);
         defer rope_table.deinit();
 
         for (dec.layers, 0..) |*l, li| {

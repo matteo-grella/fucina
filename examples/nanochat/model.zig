@@ -205,7 +205,7 @@ pub fn ModelOf(comptime dtype: fucina.DType) type {
             const ff = 4 * d;
             const padded_vocab = (try file.tensor("transformer.wte.weight")).shape[0];
 
-            var rope_table = try buildRopeTable(ctx, allocator, cfg.sequence_len, hd);
+            var rope_table = try buildRopeTable(ctx, cfg.sequence_len, hd);
             errdefer rope_table.deinit();
 
             var wte = try loadParam(.{ .vocab, .d }, ctx, allocator, &file, "transformer.wte.weight", [_]usize{ padded_vocab, d });
@@ -302,7 +302,7 @@ pub fn ModelOf(comptime dtype: fucina.DType) type {
             const ff = 4 * d;
             const padded_vocab = paddedVocab(cfg.vocab_size);
 
-            var rope_table = try buildRopeTable(ctx, allocator, cfg.sequence_len, hd);
+            var rope_table = try buildRopeTable(ctx, cfg.sequence_len, hd);
             errdefer rope_table.deinit();
 
             // s = √3 · n_embd^-0.5 (uniform bound matching a normal of the same std).
@@ -462,7 +462,7 @@ pub fn ModelOf(comptime dtype: fucina.DType) type {
             const table: *const RopeTable = if (n == cfg.sequence_len)
                 &self.rope_table
             else blk: {
-                adhoc = try buildRopeTable(ctx, self.allocator, n, hd);
+                adhoc = try buildRopeTable(ctx, n, hd);
                 break :blk &adhoc.?;
             };
 
@@ -582,10 +582,7 @@ pub fn ModelOf(comptime dtype: fucina.DType) type {
 
             if (cache.len + t > cache.cap) return error.CacheFull;
 
-            const positions = try self.allocator.alloc(i32, t);
-            defer self.allocator.free(positions);
-            for (positions, 0..) |*p, i| p.* = @intCast(pos0 + i);
-            var table = try ctx.prepareRopeTable(positions, hd, rope_theta, true);
+            var table = try ctx.prepareRopeTableRange(.{ .origin = @intCast(pos0), .len = t }, hd, rope_theta, true);
             defer table.deinit();
 
             var x_norm = try (try self.wte.gather(ctx, .vocab, token_ids, .seq)).rmsNorm(ctx, .d, rms_eps);
@@ -768,11 +765,8 @@ fn toLabels(targets: []const isize, labels: []usize) void {
 
 /// Rotary table for positions 0..seq_len-1 (rope_theta base, inverse=true so
 /// the stock .half kernel reproduces nanochat's rotation — gpt.py:57-65).
-fn buildRopeTable(ctx: *ExecContext, allocator: Allocator, seq_len: usize, head_dim: usize) !RopeTable {
-    const positions = try allocator.alloc(i32, seq_len);
-    defer allocator.free(positions);
-    for (positions, 0..) |*p, i| p.* = @intCast(i);
-    return ctx.prepareRopeTable(positions, head_dim, rope_theta, true);
+fn buildRopeTable(ctx: *ExecContext, seq_len: usize, head_dim: usize) !RopeTable {
+    return ctx.prepareRopeTableRange(.{ .len = seq_len }, head_dim, rope_theta, true);
 }
 
 fn lname(buf: []u8, layer: usize, comptime suffix: []const u8) ![]const u8 {

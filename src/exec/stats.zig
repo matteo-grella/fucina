@@ -9,11 +9,13 @@
 //! together (plan D3).
 
 const std = @import("std");
+const dtype_mod = @import("../dtype.zig");
 const tensor = @import("../tensor.zig");
 
 const exec_shape = @import("shape.zig");
 const Runtime = @import("runtime.zig").Runtime;
 
+const DType = tensor.DType;
 const Tensor = tensor.Tensor;
 
 const shapeWithoutAxis = exec_shape.shapeWithoutAxis;
@@ -235,6 +237,136 @@ fn extremumAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, compti
             id[outer_i * inner + inner_i] = @intCast(best_i);
         }
     }
+    return .{ .values = values, .indices = indices };
+}
+
+/// Max over `axis` of the elements `mask` selects; see `extremumMaskedAxisRank`.
+pub fn maxMaskedAxisRank(
+    rt: *Runtime,
+    comptime mask_dtype: DType,
+    comptime rank: usize,
+    x: *const Tensor,
+    mask: *const tensor.TensorOf(mask_dtype),
+    comptime axis: usize,
+    empty_value: ?f32,
+) !TopKResult {
+    return extremumMaskedAxisRank(rt, mask_dtype, rank, x, mask, axis, .max, empty_value);
+}
+
+/// Min over `axis` of the elements `mask` selects; see `extremumMaskedAxisRank`.
+pub fn minMaskedAxisRank(
+    rt: *Runtime,
+    comptime mask_dtype: DType,
+    comptime rank: usize,
+    x: *const Tensor,
+    mask: *const tensor.TensorOf(mask_dtype),
+    comptime axis: usize,
+    empty_value: ?f32,
+) !TopKResult {
+    return extremumMaskedAxisRank(rt, mask_dtype, rank, x, mask, axis, .min, empty_value);
+}
+
+/// Extremum over `axis` restricted to the elements `mask` selects — the
+/// `maxval(a, dim, mask)` / `minval(a, dim, mask)` of the Fortran intrinsic
+/// set. `mask` must have `x`'s shape (broadcasting happens at the tag layer).
+///
+/// Semantics follow the unmasked twin exactly, with the mask applied at the
+/// comparison: seed with the ±inf identity, take the FIRST strict winner, and
+/// let NaN never win. A lane selecting nothing therefore lands on the identity
+/// seed, which is Fortran's answer (`maxval` of an empty selection is
+/// -HUGE); `empty` overrides that value when a caller wants a different
+/// sentinel.
+///
+/// The returned index for an empty lane is **-1**, not a position: no element
+/// participated, so there is nothing for a gradient to flow to.
+/// `MaskedMinMaxBackward` reads that sentinel and drops the lane's gradient.
+/// Every non-empty lane's index is a real, unmasked position, which is why the
+/// masked VJP is otherwise the unmasked scatter.
+fn extremumMaskedAxisRank(
+    rt: *Runtime,
+    comptime mask_dtype: DType,
+    comptime rank: usize,
+    x: *const Tensor,
+    mask: *const tensor.TensorOf(mask_dtype),
+    comptime axis: usize,
+    comptime op: ExtremumOp,
+    empty_value: ?f32,
+) !TopKResult {
+    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (axis >= rank) @compileError("axis out of bounds");
+
+    const source = try x.rankView(rank);
+    const mask_view = try mask.rankView(rank);
+    for (0..rank) |dim| {
+        if (source.shape[dim] != mask_view.shape[dim]) return tensor.TensorError.ShapeMismatch;
+    }
+
+    var xx = try rt.prepareContiguous(x);
+    defer xx.deinit();
+    const input = xx.tensor().dataConst();
+
+    var mm = try rt.prepareContiguousTyped(mask_dtype, mask);
+    defer mm.deinit();
+    const flags = mm.tensor().dataConst();
+
+    const out_rank = if (rank == 1) 1 else rank - 1;
+    const out_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
+    var values = try rt.emptyRank(out_rank, out_shape);
+    errdefer values.deinit();
+    var indices = try rt.emptyRankTyped(.i64, out_rank, out_shape);
+    errdefer indices.deinit();
+    const vd = values.data();
+    const id = indices.data();
+
+    const identity: f32 = switch (op) {
+        .max => -std.math.inf(f32),
+        .min => std.math.inf(f32),
+    };
+    const axis_dim = source.shape[axis];
+    const inner = productAfterAxis(rank, source.shape, axis);
+    const outer = productBeforeAxis(rank, source.shape, axis);
+
+    for (0..outer) |outer_i| {
+        const base = outer_i * axis_dim * inner;
+        for (0..inner) |inner_i| {
+            var best_i: usize = axis_dim; // "no position holds best yet"
+            var best_value: f32 = identity;
+            var selected: usize = 0;
+            for (0..axis_dim) |axis_i| {
+                const at = base + axis_i * inner + inner_i;
+                if (!dtype_mod.isTruthy(mask_dtype, flags[at])) continue;
+                selected += 1;
+                const value = input[at];
+                const better = switch (op) {
+                    .max => value > best_value,
+                    .min => value < best_value,
+                };
+                if (better) {
+                    best_value = value;
+                    best_i = axis_i;
+                } else if (best_i == axis_dim and value == best_value) {
+                    best_i = axis_i;
+                }
+            }
+            const flat = outer_i * inner + inner_i;
+            if (selected == 0) {
+                vd[flat] = empty_value orelse identity;
+                id[flat] = -1;
+                continue;
+            }
+            // An all-NaN selection leaves best_i unset; fall back to the first
+            // SELECTED position, the masked analogue of the unmasked fallback
+            // to 0 (see the NaN contract on maxAxisRank).
+            if (best_i == axis_dim) {
+                var first: usize = 0;
+                while (first < axis_dim and !dtype_mod.isTruthy(mask_dtype, flags[base + first * inner + inner_i])) first += 1;
+                best_i = first;
+            }
+            vd[flat] = best_value;
+            id[flat] = @intCast(best_i);
+        }
+    }
+
     return .{ .values = values, .indices = indices };
 }
 

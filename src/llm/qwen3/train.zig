@@ -1231,13 +1231,11 @@ pub fn Trainer(comptime targets: Targets) type {
             if (self.rope_tables.get(key)) |table| return table;
 
             const cfg = self.model.config;
-            const positions = try ctx.allocator.alloc(i32, seq_len);
-            defer ctx.allocator.free(positions);
-            for (positions, 0..) |*position, i| position.* = @intCast(offset + i);
+            const rope_positions: fucina.AxisRange = .{ .origin = @intCast(offset), .len = seq_len };
 
             const fresh = try self.allocator.create(fucina.RopeTable);
             errdefer self.allocator.destroy(fresh);
-            fresh.* = try ctx.prepareRopeTable(positions, cfg.head_dim, cfg.rope_theta, false);
+            fresh.* = try ctx.prepareRopeTableRange(rope_positions, cfg.head_dim, cfg.rope_theta, false);
             errdefer fresh.deinit();
 
             try self.rope_tables.put(self.allocator, key, fresh);

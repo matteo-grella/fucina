@@ -300,16 +300,13 @@ pub const Model = struct {
         if (kv.len + token_ids.len > kv.capacity) return kv_cache.Error.KvCacheOverflow;
 
         const cfg = self.config.base;
-        const allocator = ctx.allocator;
 
-        const positions = try allocator.alloc(i32, token_ids.len);
-        defer allocator.free(positions);
-        for (positions, 0..) |*p, i| p.* = @intCast(pos0 + i);
+        const rope_positions: fucina.AxisRange = .{ .origin = @intCast(pos0), .len = token_ids.len };
 
         const factors: ?[]const f32 = if (self.rope_freqs) |*t| try t.dataConst() else null;
-        var swa_table = try ctx.prepareRopeTable(positions, cfg.head_dim_swa, cfg.rope_theta_swa, false);
+        var swa_table = try ctx.prepareRopeTableRange(rope_positions, cfg.head_dim_swa, cfg.rope_theta_swa, false);
         defer swa_table.deinit();
-        var global_table = try ctx.prepareRopeTableFactors(positions, cfg.head_dim_global, cfg.rope_theta, false, factors);
+        var global_table = try ctx.prepareRopeTableFactorsRange(rope_positions, cfg.head_dim_global, cfg.rope_theta, false, factors);
         defer global_table.deinit();
 
         var x = try self.token_embedding.getRowsAs(ctx, token_ids, .embed);
@@ -344,17 +341,14 @@ pub const Model = struct {
         if (kv.len + c_len > kv.capacity) return kv_cache.Error.KvCacheOverflow;
         if (sc != null and self.sc == null) return Error.SelfConditioningUnavailable;
 
-        const allocator = ctx.allocator;
         const prefix_len = kv.len;
 
-        const positions = try allocator.alloc(i32, c_len);
-        defer allocator.free(positions);
-        for (positions, 0..) |*p, i| p.* = @intCast(prefix_len + i);
+        const rope_positions: fucina.AxisRange = .{ .origin = @intCast(prefix_len), .len = c_len };
 
         const factors: ?[]const f32 = if (self.rope_freqs) |*t| try t.dataConst() else null;
-        var swa_table = try ctx.prepareRopeTable(positions, cfg.head_dim_swa, cfg.rope_theta_swa, false);
+        var swa_table = try ctx.prepareRopeTableRange(rope_positions, cfg.head_dim_swa, cfg.rope_theta_swa, false);
         defer swa_table.deinit();
-        var global_table = try ctx.prepareRopeTableFactors(positions, cfg.head_dim_global, cfg.rope_theta, false, factors);
+        var global_table = try ctx.prepareRopeTableFactorsRange(rope_positions, cfg.head_dim_global, cfg.rope_theta, false, factors);
         defer global_table.deinit();
 
         var x = try self.canvasEmbed(ctx, canvas_ids, sc);

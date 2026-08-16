@@ -92,6 +92,9 @@ const SplitSwiGluBackward = backward.SplitSwiGluBackward;
 const SplitGluBackward = backward.SplitGluBackward;
 const SumBackward = backward.SumBackward;
 const MeanBackward = backward.MeanBackward;
+const MaskedSumBackward = backward.MaskedSumBackward;
+const MaskedMeanBackward = backward.MaskedMeanBackward;
+const MaskedMinMaxBackward = backward.MaskedMinMaxBackward;
 const VarBackward = backward.VarBackward;
 const StandardizeBackward = backward.StandardizeBackward;
 const BroadcastBackward = backward.BroadcastBackward;
@@ -1819,6 +1822,106 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             var value = try ctx.meanAxisRank(tag_rank, self.asRawTensor(), reduce_axis);
             errdefer value.deinit();
             return finishOp(result_tags, ctx, value, self.requiresGrad(), MeanBackward(tags, result_tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value });
+        }
+
+        /// Sum over `tag` restricted to the elements a mask selects — the
+        /// `sum(a, dim, mask)` of the Fortran intrinsic set.
+        ///
+        /// `opts` is `.{}` (plain `sum`), `.{ .mask = &m }`, or
+        /// `.{ .mask = &m, .empty = v }`; any other field is a compile error.
+        /// The mask follows the `where`/`maskedFill` convention: `.bool` or a
+        /// float read by truthiness (`!= 0`), `self`'s exact tags and shape,
+        /// non-grad. Compose `broadcastTo` for a smaller mask.
+        ///
+        /// The point is fusion. The composed spelling
+        /// (`maskedFill` then `sum`) materializes a full f32 copy of the input
+        /// and walks it twice; this accumulates straight out of the source
+        /// through the same SIMD kernel `sum` uses, so an ALL-TRUE mask
+        /// reproduces `sum` bitwise.
+        ///
+        /// A lane whose mask selects nothing yields `empty orelse 0` — the
+        /// operation's identity, which is Fortran's answer and the reason a
+        /// masked reduction has no `EmptySelection` error the way
+        /// `maskedSelect` does. Differentiable in `self`: an excluded element
+        /// contributed nothing, so it receives nothing back.
+        pub fn sumExt(self: *const Self, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag)) {
+            comptime validateMaskedReduceOptions(@TypeOf(opts));
+            if (comptime !@hasField(@TypeOf(opts), "mask")) return self.sum(ctx, tag);
+
+            const Mask = TensorObject(@TypeOf(opts.mask));
+            comptime validateMaskType(Mask, "sumExt");
+            const result_tags = removeTag(tags, tag);
+            var value = try ctx.sumMaskedAxisRank(Mask.dtype, tag_rank, self.asRawTensor(), opts.mask.asRawTensor(), axis(tag), maskedReduceEmpty(opts));
+            errdefer value.deinit();
+            return finishOp(result_tags, ctx, value, self.requiresGrad(), MaskedSumBackward(tags, result_tags, Mask.dtype), .{ ctx.allocator, self.grad_state, &self.value, opts.mask.asRawTensor() });
+        }
+
+        /// Mean over `tag` of the elements a mask selects: the masked sum
+        /// divided by the per-lane count of SELECTED elements, not by the axis
+        /// length. This is padding-masked pooling in one op.
+        ///
+        /// `opts` and the mask contract are `sumExt`'s. An all-true mask
+        /// reproduces `mean` bitwise.
+        ///
+        /// A lane selecting nothing yields `empty orelse NaN`: unlike a sum, a
+        /// mean has no identity to fall back on (0/0), so the caller either
+        /// supplies a sentinel or gets the IEEE answer. Such a lane's gradient
+        /// is zero — it produced a constant, not a function of the data.
+        pub fn meanExt(self: *const Self, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag)) {
+            comptime validateMaskedReduceOptions(@TypeOf(opts));
+            if (comptime !@hasField(@TypeOf(opts), "mask")) return self.mean(ctx, tag);
+
+            const Mask = TensorObject(@TypeOf(opts.mask));
+            comptime validateMaskType(Mask, "meanExt");
+            const result_tags = removeTag(tags, tag);
+            var raw = try ctx.meanMaskedAxisRank(Mask.dtype, tag_rank, self.asRawTensor(), opts.mask.asRawTensor(), axis(tag), maskedReduceEmpty(opts));
+            var raw_values: ?RawTensor = raw.values;
+            errdefer if (raw_values) |*value| value.deinit();
+            defer raw.counts.deinit();
+            const out = try finishOp(result_tags, ctx, raw_values.?, self.requiresGrad(), MaskedMeanBackward(tags, result_tags, Mask.dtype), .{ ctx.allocator, self.grad_state, &self.value, opts.mask.asRawTensor(), &raw.counts });
+            raw_values = null;
+            return out;
+        }
+
+        /// Max over `tag` of the elements a mask selects — `maxval(a, dim, mask)`.
+        /// `opts` and the mask contract are `sumExt`'s; tie-break and NaN
+        /// semantics are `max`'s, applied to the selected elements only.
+        /// A lane selecting nothing yields `empty orelse -inf` and receives no
+        /// gradient (no element participated).
+        pub fn maxExt(self: *const Self, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag)) {
+            return self.extremumExt(ctx, tag, .max, opts);
+        }
+
+        /// Min over `tag` of the elements a mask selects; empty lanes yield
+        /// `empty orelse +inf`. See `maxExt`.
+        pub fn minExt(self: *const Self, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag)) {
+            return self.extremumExt(ctx, tag, .min, opts);
+        }
+
+        fn extremumExt(self: *const Self, ctx: *ExecContext, comptime tag: Tag, comptime op: enum { max, min }, opts: anytype) !Tensor(removeTag(tags, tag)) {
+            comptime validateMaskedReduceOptions(@TypeOf(opts));
+            if (comptime !@hasField(@TypeOf(opts), "mask")) {
+                return switch (op) {
+                    .max => self.max(ctx, tag),
+                    .min => self.min(ctx, tag),
+                };
+            }
+
+            const Mask = TensorObject(@TypeOf(opts.mask));
+            comptime validateMaskType(Mask, "maxExt/minExt");
+            const result_tags = removeTag(tags, tag);
+            const reduce_axis = comptime axis(tag);
+            const empty_value = maskedReduceEmpty(opts);
+            var raw = switch (op) {
+                .max => try ctx.maxMaskedAxisRank(Mask.dtype, tag_rank, self.asRawTensor(), opts.mask.asRawTensor(), reduce_axis, empty_value),
+                .min => try ctx.minMaskedAxisRank(Mask.dtype, tag_rank, self.asRawTensor(), opts.mask.asRawTensor(), reduce_axis, empty_value),
+            };
+            var raw_values: ?RawTensor = raw.values;
+            errdefer if (raw_values) |*value| value.deinit();
+            defer raw.indices.deinit();
+            const out = try finishOp(result_tags, ctx, raw_values.?, self.requiresGrad(), MaskedMinMaxBackward(tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value, &raw.indices });
+            raw_values = null;
+            return out;
         }
 
         /// Cumulative sum along `tag` (torch.cumsum), preserving shape:
@@ -6716,6 +6819,35 @@ fn TensorObject(comptime T: type) type {
         .pointer => |ptr| ptr.child,
         else => T,
     };
+}
+
+/// Comptime whitelist for the masked-reduction option struct. A misspelled
+/// field is a compile error, never a silently-unmasked reduction — the
+/// `groupedAttention` opts discipline.
+fn validateMaskedReduceOptions(comptime Opts: type) void {
+    const info = @typeInfo(Opts);
+    if (info != .@"struct") @compileError("masked-reduction options must be a struct literal, e.g. .{ .mask = &m }");
+    inline for (info.@"struct".fields) |field| {
+        if (!std.mem.eql(u8, field.name, "mask") and !std.mem.eql(u8, field.name, "empty")) {
+            @compileError("unknown masked-reduction option '" ++ field.name ++ "'; expected .mask or .empty");
+        }
+    }
+}
+
+/// The mask contract shared with `where`/`maskedFill`: `.bool` or a float read
+/// by truthiness. Integer masks stay a compile error so a token-id tensor is
+/// never mistaken for a mask.
+fn validateMaskType(comptime Mask: type, comptime op_name: []const u8) void {
+    if (Mask.dtype != .bool and !dtype_mod.supportsForwardFloatMath(Mask.dtype)) {
+        @compileError(op_name ++ " takes a .bool or float mask; cast integer masks explicitly");
+    }
+}
+
+/// `opts.empty` when present, else null (each op falls back to its own
+/// identity: 0 for a sum, ±inf for an extremum, NaN for a mean).
+fn maskedReduceEmpty(opts: anytype) ?f32 {
+    if (comptime @hasField(@TypeOf(opts), "empty")) return @as(f32, opts.empty);
+    return null;
 }
 
 fn tensorObjectPtrFrom(comptime T: type, value: *const T) *const TensorObject(T) {

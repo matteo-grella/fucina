@@ -14,6 +14,7 @@
 const std = @import("std");
 const backend_mod = @import("../backend.zig");
 const dtype_mod = @import("../dtype.zig");
+const fpenv = @import("../fpenv.zig");
 const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
@@ -68,6 +69,13 @@ pub const Runtime = struct {
     /// and on streamed MoE the expert-fetch amortization — the part that
     /// pays — is preserved).
     pin_rowwise_kernels: bool = false,
+    /// The IEEE floating-point environment observed when this context was
+    /// created, or null where the target does not expose it. Every numeric
+    /// contract the context goes on to honor (backend parity tolerances,
+    /// thread-count invariance, checkpoint reproducibility) is stated under
+    /// this environment; `checkFloatEnvironment` is how a caller confirms it
+    /// still holds after code outside our control has run on the thread.
+    fp_env_at_init: ?fpenv.Environment = null,
 
     pub fn init(self: *Runtime, allocator: Allocator) void {
         self.thread_safe_allocator = .{ .child_allocator = allocator };
@@ -83,6 +91,23 @@ pub const Runtime = struct {
         self.scope_entries = .empty;
         self.scope_depth = 0;
         self.pin_rowwise_kernels = false;
+        self.fp_env_at_init = fpenv.get();
+    }
+
+    /// `error.FloatEnvironmentChanged` when the calling thread's rounding or
+    /// underflow mode differs from what it was when this context was created.
+    ///
+    /// The environment is per-thread state shared with everything else running
+    /// on the thread — an external CBLAS, a GPU driver, a host application. A
+    /// change is silent: kernels keep running and keep producing plausible
+    /// numbers that no longer match the pinned oracles. Call this after
+    /// crossing into foreign code, or around a run whose results are compared
+    /// bitwise. Always succeeds where the target does not expose the
+    /// environment, since there is nothing to observe.
+    pub fn checkFloatEnvironment(self: *const Runtime) !void {
+        const recorded = self.fp_env_at_init orelse return;
+        const current = fpenv.get() orelse return;
+        if (!std.meta.eql(recorded, current)) return error.FloatEnvironmentChanged;
     }
 
     pub fn deinit(self: *Runtime) void {

@@ -681,14 +681,10 @@ pub const Model = struct {
         if (token_ids.len == 0) return Error.InvalidSequenceLength;
         const cfg = self.config;
 
-        const positions = try ctx.allocator.alloc(i32, token_ids.len);
-        defer ctx.allocator.free(positions);
-        for (positions, 0..) |*p, i| p.* = @intCast(i);
-
         // For text input, multi-section / IMROPE reduces to standard NEOX RoPE
         // (all position components equal), so a plain table over the rotary dims
         // (`rope_n_rot`) suffices.
-        var rope_table = try ctx.prepareRopeTable(positions, cfg.rope_n_rot, cfg.rope_theta, false);
+        var rope_table = try ctx.prepareRopeTableRange(.{ .len = token_ids.len }, cfg.rope_n_rot, cfg.rope_theta, false);
         defer rope_table.deinit();
 
         var x = try self.token_embedding.getRowsAs(ctx, token_ids, .embed);
@@ -792,11 +788,7 @@ pub const Model = struct {
         const cfg = self.config;
 
         const prep_start = profileStart(profile, io);
-        const positions = try ctx.allocator.alloc(i32, token_ids.len);
-        defer ctx.allocator.free(positions);
-        for (positions, 0..) |*p, i| p.* = @intCast(pos0 + i);
-
-        var rope_table = try ctx.prepareRopeTable(positions, cfg.rope_n_rot, cfg.rope_theta, false);
+        var rope_table = try ctx.prepareRopeTableRange(.{ .origin = @intCast(pos0), .len = token_ids.len }, cfg.rope_n_rot, cfg.rope_theta, false);
         defer rope_table.deinit();
         profileAdd(profile, io, prep_start, .prep);
 

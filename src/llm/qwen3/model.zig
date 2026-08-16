@@ -280,11 +280,7 @@ pub const Model = struct {
     fn forwardLastLogitsImpl(self: *const Model, ctx: *ExecContext, io: ?std.Io, token_ids: []const usize, profile: ?*ForwardProfile) !fucina.Tensor(.{ .seq, .vocab }) {
         if (token_ids.len == 0) return Error.InvalidSequenceLength;
 
-        const positions = try ctx.allocator.alloc(i32, token_ids.len);
-        defer ctx.allocator.free(positions);
-        for (positions, 0..) |*position, i| position.* = @intCast(i);
-
-        var rope_table = try ctx.prepareRopeTable(positions, self.config.head_dim, self.config.rope_theta, false);
+        var rope_table = try ctx.prepareRopeTableRange(.{ .len = token_ids.len }, self.config.head_dim, self.config.rope_theta, false);
         defer rope_table.deinit();
 
         var x = try self.token_embedding.getRowsAs(ctx, token_ids, .embed);
@@ -518,11 +514,7 @@ pub const Model = struct {
         if (kv.len != pos0) return Error.InvalidSequenceLength;
         if (kv.len + token_ids.len > kv.capacity) return kv_cache.Error.KvCacheOverflow;
 
-        const positions = try ctx.allocator.alloc(i32, token_ids.len);
-        defer ctx.allocator.free(positions);
-        for (positions, 0..) |*position, i| position.* = @intCast(pos0 + i);
-
-        var rope_table = try ctx.prepareRopeTable(positions, self.config.head_dim, self.config.rope_theta, false);
+        var rope_table = try ctx.prepareRopeTableRange(.{ .origin = @intCast(pos0), .len = token_ids.len }, self.config.head_dim, self.config.rope_theta, false);
         defer rope_table.deinit();
 
         var x = try self.token_embedding.getRowsAs(ctx, token_ids, .embed);

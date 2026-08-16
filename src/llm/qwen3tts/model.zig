@@ -276,10 +276,7 @@ pub const Stack = struct {
         if (kv.len + t > kv.capacity) return Error.KvOverflow;
         const n_past = kv.len;
 
-        const positions = try ctx.allocator.alloc(i32, t);
-        defer ctx.allocator.free(positions);
-        for (positions, 0..) |*p, i| p.* = @intCast(n_past + i);
-        var rope_table = try ctx.prepareRopeTable(positions, cfg.head_dim, cfg.rope_theta, false);
+        var rope_table = try ctx.prepareRopeTableRange(.{ .origin = @intCast(n_past), .len = t }, cfg.head_dim, cfg.rope_theta, false);
         defer rope_table.deinit();
 
         var x = try rows.withTags(ctx, .{ .seq, .embed });

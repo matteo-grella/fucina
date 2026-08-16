@@ -21,6 +21,10 @@ pub const optim = @import("optim.zig");
 pub const ptqtp = @import("ptqtp.zig");
 pub const rng = @import("rng.zig");
 pub const parallel = @import("parallel.zig");
+/// IEEE floating-point environment: rounding/underflow inquiry and scoped
+/// control, plus the accrued exception flags. The bitwise contracts elsewhere
+/// in this library assume the default environment; this is how you check it.
+pub const fpenv = @import("fpenv.zig");
 pub const ParamRegistry = param_registry_mod.ParamRegistry;
 pub const state_dict = state_dict_mod;
 pub const safetensors = safetensors_mod;
@@ -61,6 +65,11 @@ pub const supports_q4_k_mmla = backend.supports_q4_k_mmla;
 pub const PackedRhs = ag.PackedRhs;
 pub const PackedRhsLayout = backend.PackedRhsLayout;
 pub const SliceRange = ag.SliceRange;
+/// A contiguous run of ABSOLUTE indices along one axis, `[origin, origin+len)`
+/// — Fortran's array lower bound as a value. Tensor axes here are 0-origin, so
+/// this is how a positional axis's origin travels alongside its length instead
+/// of being materialized into an arithmetic array (see `prepareRopeTableRange`).
+pub const AxisRange = tensor.AxisRange;
 pub const PreparedConvWeights = exec.ExecContext.PreparedConvWeights;
 pub const BlockQ1_0 = dtype.BlockQ1_0;
 pub const BlockQ2_0 = dtype.BlockQ2_0;
@@ -214,5 +223,6 @@ test {
     _ = optim;
     _ = ptqtp;
     _ = rng;
+    _ = fpenv;
     _ = @import("fucina_tests.zig");
 }
