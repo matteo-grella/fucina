@@ -49,3 +49,96 @@ jobs:
           cargo --version
           zig build test -Dllguidance=true
           zig build snippet-check -Dllguidance=true
+
+  # Package-consumer gate: package the tracked tree (git archive) and consume
+  # it from a scratch project via `zig fetch` + b.dependency — the README /
+  # REFERENCE §2.5 flow — so the manifest, the module exports, and the
+  # module-carried BLAS linkage (Accelerate by default on macOS) cannot rot.
+  consume:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Package the tracked tree
+        run: git archive --prefix=fucina/ -o "$RUNNER_TEMP/fucina-pkg.tar.gz" HEAD
+      - name: Consume as a package dependency
+        run: |
+          mkdir -p "$RUNNER_TEMP/consumer/src"
+          cd "$RUNNER_TEMP/consumer"
+          cat > build.zig.zon <<'ZON'
+          .{
+              .name = .fucina_consume,
+              .version = "0.0.0",
+              .fingerprint = 0xdddf23eb1e74c287,
+              .minimum_zig_version = "0.16.0",
+              .dependencies = .{},
+              .paths = .{""},
+          }
+          ZON
+          cat > build.zig <<'BUILD'
+          const std = @import("std");
+
+          pub fn build(b: *std.Build) void {
+              const target = b.standardTargetOptions(.{});
+              const optimize = b.standardOptimizeOption(.{});
+              const fucina_dep = b.dependency("fucina", .{ .target = target, .optimize = optimize });
+              const exe = b.addExecutable(.{
+                  .name = "smoke",
+                  .root_module = b.createModule(.{
+                      .root_source_file = b.path("src/main.zig"),
+                      .target = target,
+                      .optimize = optimize,
+                  }),
+              });
+              exe.root_module.addImport("fucina", fucina_dep.module("fucina"));
+              exe.root_module.addImport("fucina_llm", fucina_dep.module("fucina_llm"));
+              b.installArtifact(exe);
+              const run = b.addRunArtifact(exe);
+              b.step("run", "Run the smoke program").dependOn(&run.step);
+          }
+          BUILD
+          cat > src/main.zig <<'MAIN'
+          const std = @import("std");
+          const fucina = @import("fucina");
+          const llm = @import("fucina_llm");
+
+          // Force semantic analysis of a fucina_llm decl so the module
+          // really compiles.
+          comptime {
+              _ = llm.speculative;
+          }
+
+          pub fn main(init: std.process.Init) !void {
+              const alloc = init.arena.allocator();
+              var ctx: fucina.ExecContext = undefined;
+              ctx.init(alloc);
+              defer ctx.deinit();
+
+              var x = try fucina.Tensor(.{ .batch, .in }).variable(&ctx, try ctx.fromSlice(&.{ 1, 2 }, &.{ 2, 3 }));
+              defer x.deinit();
+              var w = try fucina.Tensor(.{ .in, .out }).variable(&ctx, try ctx.fromSlice(&.{ 2, 1 }, &.{ 4, 5 }));
+              defer w.deinit();
+
+              var y = try x.dot(&ctx, &w, .in);
+              defer y.deinit();
+              var loss = try y.sumAll(&ctx);
+              defer loss.deinit();
+              try loss.backward(&ctx);
+              var gx = (try x.grad(&ctx)).?;
+              defer gx.deinit();
+
+              var out_buffer: [128]u8 = undefined;
+              var writer = std.Io.File.stdout().writer(init.io, &out_buffer);
+              try writer.interface.print("loss={d} dx0={d}\n", .{ try loss.item(), (try gx.dataConst())[0] });
+              try writer.interface.flush();
+          }
+          MAIN
+          zig fetch --save "$RUNNER_TEMP/fucina-pkg.tar.gz"
+          zig build run -Doptimize=ReleaseFast | tee run-out.txt
+          grep -q "loss=23 dx0=4" run-out.txt
