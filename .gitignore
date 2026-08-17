@@ -1,5 +1,7 @@
 .zig-cache/
 zig-out/
+.docs-site/
+.docs-site-out/
 bench/baselines/
 models
 .DS_Store

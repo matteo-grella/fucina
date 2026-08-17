@@ -1,9 +1,23 @@
 name: pages
 
+# One Pages artifact, two parts: the landing page (site/, served at /) and
+# the manual (served at /docs/). The manual is MkDocs Material over a staged
+# copy of the repo markdown produced by tools/gen_docs_site.zig — see
+# mkdocs.yml for the layout and the local-preview recipe. mkdocs runs in
+# strict mode and the staging tool verifies every cross-link, so a broken
+# doc link fails this workflow instead of going live.
+
 on:
   push:
     branches: [main]
-    paths: ['site/**', '.github/workflows/pages.yml']
+    paths:
+      - 'site/**'
+      - 'docs/**'
+      - 'README.md'
+      - 'examples/**/README.md'
+      - 'mkdocs.yml'
+      - 'tools/gen_docs_site.zig'
+      - '.github/workflows/pages.yml'
   workflow_dispatch:
 
 permissions:
@@ -23,9 +37,27 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Stage docs markdown
+        run: zig run tools/gen_docs_site.zig -- . .docs-site
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build the manual (strict)
+        run: |
+          pip install 'mkdocs-material==9.7.*'
+          mkdocs build
+      - name: Compose the Pages artifact
+        run: |
+          mkdir -p _site
+          cp -R site/. _site/
+          rm -rf _site/docs
+          mv .docs-site-out _site/docs
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: _site
       - id: deployment
         uses: actions/deploy-pages@v4

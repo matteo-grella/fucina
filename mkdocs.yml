@@ -1,0 +1,159 @@
+# Fucina manual (https://matteo-grella.github.io/fucina/docs/).
+#
+# The docs_dir is GENERATED: `zig run tools/gen_docs_site.zig -- . .docs-site`
+# stages the repo markdown (README.md, docs/, docs/course/,
+# examples/*/README.md) into .docs-site with links resolved against the
+# staged tree; see that tool's doc comment. The repo markdown stays the
+# single source of truth — never edit .docs-site.
+#
+# Local preview:
+#   zig run tools/gen_docs_site.zig -- . .docs-site
+#   pip install mkdocs-material && mkdocs serve
+#
+# Deployed by .github/workflows/pages.yml (landing page at /, this manual
+# at /docs/).
+
+site_name: Fucina
+site_description: CPU-first tensor/autograd runtime and LLM inference engine in pure Zig
+site_url: https://matteo-grella.github.io/fucina/docs/
+repo_url: https://github.com/matteo-grella/fucina
+repo_name: matteo-grella/fucina
+edit_uri: ""
+docs_dir: .docs-site
+site_dir: .docs-site-out
+strict: true
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: deep orange
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      accent: deep orange
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+  features:
+    - navigation.tabs
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - toc.follow
+
+extra_css:
+  - assets/extra.css
+
+markdown_extensions:
+  - toc:
+      permalink: true
+  - tables
+  - admonition
+  - attr_list
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+
+nav:
+  - Home: index.md
+  - Reference:
+      - reference/index.md
+      - reference/01-introduction.md
+      - reference/02-toolchain.md
+      - reference/03-tensors.md
+      - reference/04-operations.md
+      - reference/05-autograd.md
+      - reference/06-execution-runtime.md
+      - reference/07-named-axes.md
+      - reference/08-dtypes-storage.md
+      - reference/09-backends.md
+      - reference/10-quantization.md
+      - reference/11-training.md
+      - reference/12-model-io.md
+      - reference/13-llm-stack.md
+      - reference/14-model-families.md
+  - Guides:
+      - Run & serve:
+          - Running models: guides/running-models.md
+          - LM server: guides/lmserver.md
+          - Speculative decoding: guides/speculative.md
+          - Constrained decoding: guides/constrained-decoding.md
+          - Cartridges: guides/cartridges.md
+      - Training: guides/training.md
+      - Quantization:
+          - PTQTP: guides/ptqtp.md
+          - PTQTP recipe: guides/ptqtp-recipe.md
+          - Ternary: guides/ternary.md
+      - Memory & compute:
+          - Memory model: guides/memory-model.md
+          - GPU offload: guides/gpu-offload.md
+          - Subquadratic attention: guides/subquadratic-attention.md
+          - Engram: guides/engram.md
+      - Project:
+          - Architecture: guides/architecture.md
+          - Porting models: guides/porting.md
+          - Development: guides/development.md
+          - Benchmarks: guides/benchmark.md
+          - Third-party notices: guides/third-party-notices.md
+  - Learn:
+      - course/index.md
+      - "00 · Introduction": course/00-introduction.md
+      - "01 · Just enough Zig": course/01-just-enough-zig.md
+      - "02 · Just enough ML": course/02-just-enough-ml.md
+      - "03 · Tensors from scratch": course/03-tensors-from-scratch.md
+      - "04 · Axes with names": course/04-axes-with-names.md
+      - "05 · The operation library": course/05-the-operation-library.md
+      - "06 · Going fast on CPUs": course/06-going-fast-on-cpus.md
+      - "07 · Autograd": course/07-autograd.md
+      - "08 · Training": course/08-training.md
+      - "09 · Training without gradients": course/09-training-without-gradients.md
+      - "10 · The guitar amp": course/10-the-guitar-amp.md
+      - "11 · Model files and quantization": course/11-model-files-and-quantization.md
+      - "12 · A transformer from scratch": course/12-a-transformer-from-scratch.md
+      - "13 · Inference tricks": course/13-inference-tricks.md
+      - "14 · The low-bit frontier": course/14-the-low-bit-frontier.md
+      - "15 · Training LLMs on CPU": course/15-training-llms-on-cpu.md
+      - "16 · The craft": course/16-the-craft.md
+      - "17 · Epilogue": course/17-epilogue.md
+  - Examples:
+      - examples/index.md
+      - cartridge: examples/cartridge.md
+      - cartridge_fleet: examples/cartridge_fleet.md
+      - deepseek2: examples/deepseek2.md
+      - deepseek4: examples/deepseek4.md
+      - diffusion_gemma: examples/diffusion_gemma.md
+      - engram: examples/engram.md
+      - es_finetune: examples/es_finetune.md
+      - es_spirals: examples/es_spirals.md
+      - es_ternary_spirals: examples/es_ternary_spirals.md
+      - facedetect: examples/facedetect.md
+      - finetune: examples/finetune.md
+      - gemma4: examples/gemma4.md
+      - glm4moe: examples/glm4moe.md
+      - inkling: examples/inkling.md
+      - lmserve: examples/lmserve.md
+      - locate_anything: examples/locate_anything.md
+      - nam: examples/nam.md
+      - nanochat: examples/nanochat.md
+      - omnivoice: examples/omnivoice.md
+      - parakeet: examples/parakeet.md
+      - pockettts: examples/pockettts.md
+      - ptqtp_qwen3: examples/ptqtp_qwen3.md
+      - ptqtp_spirals: examples/ptqtp_spirals.md
+      - qwen3: examples/qwen3.md
+      - qwen35: examples/qwen35.md
+      - qwen3tts: examples/qwen3tts.md
+      - smoke: examples/smoke.md
+      - spirals: examples/spirals.md
+      - voiceagent: examples/voiceagent.md

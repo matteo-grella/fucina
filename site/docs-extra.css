@@ -1,0 +1,40 @@
+/* Fucina manual: Material overrides. Copied into the staged docs tree as
+   assets/extra.css by tools/gen_docs_site.zig. The palette mirrors the
+   landing page's forge language (site/index.html :root). */
+
+:root {
+  --md-accent-fg-color: #f26b1f; /* --ember */
+  --md-accent-fg-color--transparent: rgba(242, 107, 31, 0.1);
+}
+
+[data-md-color-scheme="slate"] {
+  --md-default-bg-color: #101114; /* --bg-1 */
+  --md-code-bg-color: #17191d; /* --panel */
+  --md-typeset-a-color: #ff8a3d; /* --ember-2 */
+}
+
+[data-md-color-scheme="default"] {
+  --md-typeset-a-color: #c4531a;
+}
+
+/* "compiled & run in CI" badge under every gated REFERENCE snippet
+   (tools/gen_docs_site.zig emits it after the closing fence). */
+.md-typeset .snippet-ci {
+  margin: -0.8em 0 1.6em;
+  text-align: right;
+  font-size: 0.62rem;
+  letter-spacing: 0.02em;
+  color: var(--md-default-fg-color--light);
+  cursor: help;
+}
+
+.md-typeset .snippet-ci::before {
+  content: "";
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  margin-right: 0.3rem;
+  border-radius: 50%;
+  background: #2e9e44;
+  vertical-align: baseline;
+}
