@@ -1,15 +1,32 @@
 # Fucina
 
-**Fucina** (Italian for *forge*) is a CPU-first tensor/autograd runtime and
-LLM inference engine written in pure **Zig 0.16**. Computation is **eager**:
-every op executes the moment the model code calls it, on real buffers.
-There is no graph to build, plan, or compile first, so what you read is what
-runs, in inference and in training alike. Eager does not mean slow: on most
-measured CPU shapes Fucina matches or beats llama.cpp (`docs/BENCHMARK.md` keeps
-the dated records, losses included). There is no C/C++ build system, no
-Python runtime dependency, and no ggml-style graph executor — just Zig
-vector kernels, plus CBLAS providers and a GPU offload (Metal or CUDA) as
-opt-in accelerators for matrix multiplication.
+[![CI](https://github.com/matteo-grella/fucina/actions/workflows/ci.yml/badge.svg)](https://github.com/matteo-grella/fucina/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-manual-F26B1F)](https://matteo-grella.github.io/fucina/docs/)
+[![Zig](https://img.shields.io/badge/Zig-0.16.0-F7A41D)](https://ziglang.org/download/)
+
+**Fucina** (Italian for *forge*) is a CPU-first tensor/autograd library
+written in pure **Zig 0.16**. Axes have names checked at compile time, and
+computation is **eager**: every op executes the moment your code calls it,
+on real buffers — no graph to build, plan, or compile first, so what you
+read is what runs, in inference and in training alike. There is no C/C++
+build system and no Python anywhere: Zig vector kernels, with CBLAS
+providers and a GPU offload (Metal or CUDA) as opt-in accelerators for
+matrix multiplication.
+
+To prove the library on real workloads, this repository also ships complete
+**applications built on it**: LLM chat and serving (Qwen3, DeepSeek, GLM,
+Gemma, ...), speech, vision, and audio models — each validated against its
+reference implementation and benchmarked against llama.cpp, which it
+matches or beats on most measured CPU shapes
+([docs/BENCHMARK.md](docs/BENCHMARK.md), losses included). The
+applications use the library; they are not the library, and they will
+graduate to their own repositories.
+
+**[The manual](https://matteo-grella.github.io/fucina/docs/)** is the
+rendered documentation: the machine-verified API reference, the guides, and
+[*Forging Deep Learning in Zig*](https://matteo-grella.github.io/fucina/docs/course/),
+a book-length course that rebuilds this library from a dtype enum to a live
+guitar amp and chatting language models.
 
 ## What it looks like
 
@@ -54,34 +71,117 @@ try opt.step(ctx);
 ```
 
 The shape discipline lives in the program text, the way it did in Fortran —
-`real A(n,m)` told you the rank before you read a single loop. Here the
-signature `x: Tensor(.{ .batch, .in }) -> Tensor(.{ .batch, .class })` lets
-you check the algorithm against the math by eye, and Zig's comptime makes it
-free: the tags exist only in the type system and compile away entirely.
+`real A(n,m)` told you the rank before you read a single loop — and Zig's
+comptime makes it free: the tags exist only in the type system and compile
+away entirely.
 
-## Design
+## Getting started
 
-Fucina is deliberately **eager and local**: no global graph object, no fusion
-pass, no compiler layer. The execution context validates shapes once, then
-dispatches to small unchecked, allocation-free backend kernels selected at
-build time. Transient memory goes through a thread-safe reusable buffer pool
-with bucket-rounded buffer allocation for small temporaries — the rationale
-(and why it beats an arena here) is in `docs/MEMORY-MODEL.md`. The intended
-growth path is model-specific sessions with semantic weight binding and
-preallocated buffers, not a generic ggml-like graph. `docs/ARCHITECTURE.md` maps
-the whole tree.
+Requires [Zig 0.16.0](https://ziglang.org/download/) — the toolchain is
+pinned (`build.zig.zon` enforces the minimum); other versions will not build.
 
-That choice has a known price, paid deliberately. Whole-graph machinery —
-fusion passes, static device memory planning, captured launch sequences — is
-what mainstream GPU inference stacks are built on, so an eager runtime can
-use a GPU only at the op seam (which is what the Metal and CUDA offloads do)
-and will never chase TensorRT-class GPU throughput. On CPU the ledger reads
-the other way: per-op dispatch costs next to nothing, kernels specialize at
-compile time instead of fusing at runtime, and the paired benchmarks are run
-against a graph executor. CPU-first is the design point, not a stage on the
-way to somewhere else.
+### Run a model
 
-## What runs today
+```sh
+git clone https://github.com/matteo-grella/fucina
+cd fucina
+
+# Grab a small model (or download the GGUF from your browser into models/)
+mkdir -p models
+hf download Qwen/Qwen3-0.6B-GGUF Qwen3-0.6B-Q8_0.gguf --local-dir models
+
+# Talk to it
+zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf \
+  --chat "What is the capital of France?" --no-think
+
+# Or serve it to any OpenAI client (chat completions + responses, SSE
+# streaming, JSON-schema constrained output with -Dllguidance=true)
+zig build lmserve -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --port 8080
+
+# No model files needed to verify the toolchain:
+zig build test
+```
+
+Build with `-Doptimize=ReleaseFast` whenever speed matters (Debug is 10–50x
+slower). Build options (`-Dbackend`, `-Dblas`, `-Dmax-threads`, `-Dgpu=metal`,
+…) are documented in
+[the manual's toolchain chapter](https://matteo-grella.github.io/fucina/docs/reference/02-toolchain-build-and-project-wiring/).
+
+**Builds are tuned to the machine that compiles them.** Without `-Dtarget`,
+Zig targets the host CPU with its full feature set — as if `-march=native`
+were always on — and Fucina's kernels specialize at compile time
+(NEON/dotprod arms on Apple Silicon, AVX2/AVX-VNNI on modern x86; unused
+arms are not in the binary). Two rules follow: run the binary on the
+machine you built it on, and if you must cross-compile, pass `-Dcpu` as
+well (e.g. `-Dtarget=x86_64-linux -Dcpu=x86_64_v3`) — a bare `-Dtarget`
+gets that architecture's *baseline* features and silently loses the fast
+kernels.
+
+### Use the library in your project
+
+Fucina is an ordinary Zig package:
+
+```sh
+zig fetch --save git+https://github.com/matteo-grella/fucina#v0.1.0
+```
+
+```zig
+// build.zig
+const fucina_dep = b.dependency("fucina", .{ .target = target, .optimize = optimize });
+exe.root_module.addImport("fucina", fucina_dep.module("fucina"));
+exe.root_module.addImport("fucina_llm", fucina_dep.module("fucina_llm")); // LLM stack; optional
+```
+
+```zig
+const fucina = @import("fucina");
+
+var ctx: fucina.ExecContext = undefined;
+ctx.init(allocator);
+defer ctx.deinit();
+
+var x = try fucina.Tensor(.{ .batch, .in }).variable(&ctx, try ctx.fromSlice(&.{ 1, 2 }, &.{ 2, 3 }));
+defer x.deinit();
+var w = try fucina.Tensor(.{ .in, .out }).variable(&ctx, try ctx.fromSlice(&.{ 2, 1 }, &.{ 4, 5 }));
+defer w.deinit();
+
+var y = try x.dot(&ctx, &w, .in); // contract .in => [batch, out]
+defer y.deinit();
+var loss = try y.sumAll(&ctx);
+defer loss.deinit();
+try loss.backward(&ctx); // gradients now live on x and w
+```
+
+BLAS/GPU configuration passes through `b.dependency` options
+(`.blas = .none`, `.backend = .scalar`, ...) and the modules carry their
+own link inputs, so the defaults work with no extra build steps. The API is
+pre-1.0 and will change: pin the tag (or a commit) you fetch. Details,
+option reference, and the vendoring fallback:
+[REFERENCE §2.5](https://matteo-grella.github.io/fucina/docs/reference/02-toolchain-build-and-project-wiring/#25-consuming-fucina-from-another-project).
+
+## The applications
+
+With the tensor core in place, Fucina grows and gets tested through real
+applications, so the runtime and the things built on it develop side by
+side. Every family below is validated against its reference
+implementation, and that discipline is the core of the project:
+token-ID-exact tokenizers vs `llama-tokenize`, logit-parity oracles vs
+llama.cpp, byte-exact quantization encoders vs ggml, byte-identical GGUF
+re-emit. Each family's folder under `examples/` carries its own README
+with copy-paste commands; [docs/RUNNING-MODELS.md](docs/RUNNING-MODELS.md)
+is the index — verified weight downloads and licenses, plus the machinery
+shared across runners (expert streaming, GPU offload, global knobs).
+
+These applications will eventually graduate into their own repositories.
+The known debt of the in-tree phase is that generic operations accumulate
+inside the examples — resamplers, spectrograms, reference-parity image
+resizing — and graduation starts with an audit of which of those are
+really tensor ops that belong in the core. Research experiments that lack
+a reference oracle live on `research/*` branches rather than `main` —
+currently `research/nla`, a natural-language autoencoder study
+(text→vector→text on a Qwen3 GGUF) built on the trainer's hidden-state
+seams.
+
+### Language models
 
 | Family | What it is |
 | --- | --- |
@@ -94,108 +194,47 @@ way to somewhere else.
 | **[DiffusionGemma](examples/diffusion_gemma/README.md)** 26B-A4B | block text-diffusion decoding on the Gemma backbone |
 | **[Inkling](examples/inkling/README.md)** 975B-A41B (MoE) | hybrid local/global-attention multimodal decoder: text chat plus image and audio input towers |
 | **[nanochat](examples/nanochat/README.md)** | karpathy/nanochat ported whole: BPE tokenizer training, GPT pretraining, SFT, bits-per-byte eval, and chat — trained from scratch on CPU |
-| **[Parakeet](examples/parakeet/README.md)** (NVIDIA NeMo FastConformer) | speech-to-text: offline, streaming, and live microphone |
-| **[OmniVoice](examples/omnivoice/README.md)** | MaskGIT text-to-speech with voice cloning (Higgs Audio v2 codec included) |
-| **[LocateAnything-3B](examples/locate_anything/README.md)** | NVIDIA's open-vocabulary detection VLM: text-prompted labeled boxes, byte-compatible with the reference CLI |
-| **[facedetect](examples/facedetect/README.md)** (insightface buffalo_l) | face detection, recognition, gender/age, anti-spoofing, and dense landmarks |
-| **[Neural Amp Modeler](examples/nam/README.md)** | `.nam` guitar-amp profiles: run, train, export, live amp simulation |
 
 MoE models bigger than RAM are first-class: `--moe-stream` keeps only the
 dense weights resident and pages routed experts from disk through a
 pinned-set + LRU tier, bit-identical to the resident path — that is how the
 142 GB Qwen3-235B and the 164.6 GB V4 Flash decode on a 64 GB machine.
 
-Every family is validated against its reference implementation, and that
-discipline is the core of the project: token-ID-exact tokenizers vs
-`llama-tokenize`, logit-parity oracles vs llama.cpp, byte-exact quantization
-encoders vs ggml, byte-identical GGUF re-emit. Each family's folder under
-`examples/` carries its own README with copy-paste commands;
-`docs/RUNNING-MODELS.md` is the index — verified weight downloads and
-licenses, plus the machinery shared across runners (expert streaming, GPU
-offload, global knobs).
+### Speech, vision, and audio
 
-These applications live in `examples/` and each will eventually graduate
-into its own repository. They use the library; they are not the library.
-Keeping them in-tree during this phase is deliberate: with the Tensor core
-in place, Fucina grows and gets tested through real applications, so the
-runtime and the things built on it develop side by side. The known debt of
-that convenience is that generic operations accumulate inside the examples
-— resamplers, spectrograms, reference-parity image resizing — and
-graduation starts with an audit of which of those are really tensor ops
-that belong in the core. Research experiments that lack a reference oracle live on
-`research/*` branches rather than `main` — currently `research/nla`, a
-natural-language autoencoder study (text→vector→text on a Qwen3 GGUF)
-built on the trainer's hidden-state seams.
-
-## Quick start
-
-Requires [Zig 0.16.0](https://ziglang.org/download/) — the toolchain is
-pinned; other versions will not build.
-
-```sh
-git clone https://github.com/matteo-grella/fucina
-cd fucina
-zig build test          # unit tests, no model files needed
-
-# grab a small model and talk to it
-mkdir -p models
-hf download Qwen/Qwen3-0.6B-GGUF Qwen3-0.6B-Q8_0.gguf --local-dir models
-zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf \
-  --chat "What is the capital of France?" --no-think
-
-# or serve it to any OpenAI client (chat completions + responses, SSE
-# streaming, JSON-schema constrained output with -Dllguidance=true)
-zig build lmserve -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --port 8080
-```
-
-Build with `-Doptimize=ReleaseFast` whenever speed matters (Debug is 10–50x
-slower). Build options (`-Dbackend`, `-Dblas`, `-Dmax-threads`, `-Dgpu=metal`,
-…) are documented in `AGENTS.md`.
-
-**Builds are tuned to the machine that compiles them.** Without `-Dtarget`,
-Zig targets the host CPU with its full feature set — as if `-march=native`
-were always on — and Fucina's kernels specialize at compile time
-(NEON/dotprod arms on Apple Silicon, AVX2/AVX-VNNI on modern x86; unused
-arms are not in the binary). Two rules follow: run the binary on the
-machine you built it on, and if you must cross-compile, pass `-Dcpu` as
-well (e.g. `-Dtarget=x86_64-linux -Dcpu=x86_64_v3`) — a bare `-Dtarget`
-gets that architecture's *baseline* features and silently loses the fast
-kernels.
+| Family | What it is |
+| --- | --- |
+| **[Parakeet](examples/parakeet/README.md)** (NVIDIA NeMo FastConformer) | speech-to-text: offline, streaming, and live microphone |
+| **[OmniVoice](examples/omnivoice/README.md)** | MaskGIT text-to-speech with voice cloning (Higgs Audio v2 codec included) |
+| **[LocateAnything-3B](examples/locate_anything/README.md)** | NVIDIA's open-vocabulary detection VLM: text-prompted labeled boxes, byte-compatible with the reference CLI |
+| **[facedetect](examples/facedetect/README.md)** (insightface buffalo_l) | face detection, recognition, gender/age, anti-spoofing, and dense landmarks |
+| **[Neural Amp Modeler](examples/nam/README.md)** | `.nam` guitar-amp profiles: run, train, export, live amp simulation |
 
 ## Performance
 
-Measured, not asserted: the protocol is paired same-machine runs against
-a reference implementation.
+Measured, not asserted: the protocol is paired same-machine runs against a
+reference implementation — same GGUF, same thread count, CPU-only both
+sides — with losses recorded as plainly as wins, each number carrying its
+hardware, protocol, and caveats. The short version of the dated record
+(snapshot 2026-07-04): on Apple M1 Max, of 236 paired sweep cells across
+Qwen3 dense (0.6B/1.7B), Qwen3.5, the 30B MoE, and Gemma-26B, Fucina is
+faster in 221 and at parity in 13 — dense prefill geomeans 1.18–1.81x per
+format, large MoE prefill up to ~2x. On an x86 Raptor Lake box
+(AVX2+VNNI), Fucina wins all dense quantized formats (medians 1.32–1.95x)
+while llama.cpp decisively wins MoE small-batch prefill. The full record —
+the losing cells, the caveats, and the reproduction commands
+(`tools/fetch_refs.sh`, `tools/bench_gate.py`) — is
+[docs/BENCHMARK.md](docs/BENCHMARK.md).
 
-For instance, llama.cpp — same GGUF, same thread
-count, CPU-only both sides — and `docs/BENCHMARK.md` records losses as plainly
-as wins, each number with its hardware, protocol, and caveats, the whole record a dated snapshot.
-The short version of the record (snapshot 2026-07-04): on Apple M1 Max, of 236 paired
-sweep cells across Qwen3 dense (0.6B/1.7B), Qwen3.5, the 30B MoE, and Gemma-26B,
-Fucina is faster in 221 and at parity in 13 — dense prefill geomeans 1.18–1.81x per format, large
-MoE prefill up to ~2x — with two cells on llama.cpp's side: Qwen3.5-0.8B at
-pp32 (0.86x; its neighbors pp128 and decode win) and one 30B decode cell
-recorded before the stricter prewarmed protocol. The smallest gemma batch
-cells await one pristine-machine confirmation, as `docs/BENCHMARK.md` discloses.
-On an x86 Raptor Lake box (AVX2+VNNI), Fucina wins all dense quantized
-formats (medians 1.32–1.95x) while llama.cpp decisively wins MoE
-small-batch prefill.
-
-Every row is reproducible — fetch the pinned reference implementations,
-then run the paired gate:
-
-```sh
-tools/fetch_refs.sh --build   # references into refs/ (gitignored), llama.cpp built CPU-only
-python3 tools/bench_gate.py --models qwen3-0.6b-q6_k --tasks prefill,decode
-```
-
-On top of raw speed there is lossless, draft-model-free speculative decoding (up to
-2.3x on retrieval-structured tasks, never-a-loss cost gate; `docs/SPECULATIVE.md`)
-and batch-N multi-stream decode (3.2x aggregate throughput at 8 streams).
-Structured output is built in: a pluggable logit-processor seam on the shared
-sampler, with JSON-schema/regex/Lark constrained decoding through the vendored
+On top of raw speed there is lossless, draft-model-free speculative
+decoding (up to 2.3x on retrieval-structured tasks, never-a-loss cost
+gate; [docs/SPECULATIVE.md](docs/SPECULATIVE.md)) and batch-N multi-stream
+decode (3.2x aggregate throughput at 8 streams). Structured output is
+built in: a pluggable logit-processor seam on the shared sampler, with
+JSON-schema/regex/Lark constrained decoding through the vendored
 [llguidance](https://github.com/guidance-ai/llguidance) engine (opt-in
-`-Dllguidance=true`; composes with speculative decoding — REFERENCE.md §13.6).
+`-Dllguidance=true`; composes with speculative decoding —
+[docs/CONSTRAINED-DECODING.md](docs/CONSTRAINED-DECODING.md)).
 
 ## Training
 
@@ -213,41 +252,63 @@ zig build finetune -Doptimize=ReleaseFast -- --steps 30
 Gradient-free training is a first-class alternative: `fucina.es` implements
 evolution strategies at scale (arXiv:2509.24372) — seed-regenerated noise,
 forward passes only, algebra cross-checked bitwise against the reference —
-and `zig build es-finetune` fine-tunes the same GGUF with it, LoRA-only or
-full-parameter, under rule-based (R1-style) or loss-based rewards.
+and `zig build es-finetune` fine-tunes the same GGUF with it. Because
+autograd, KV-cache plumbing, and serving live in one runtime, the same
+trainer also implements **Cartridges** (arXiv:2506.06266): corpus
+compression into a trained KV prefix by in-process self-study distillation
+(`zig build cartridge`; [docs/CARTRIDGES.md](docs/CARTRIDGES.md)).
 
-Because autograd, KV-cache plumbing, and serving live in one runtime, the
-same trainer also implements **Cartridges** (arXiv:2506.06266): a corpus is
-compressed into a trained KV prefix by in-process self-study distillation —
-the model interviews itself about the corpus, and the teacher-with-context
-distills into a small trainable cache served like any cached prompt.
-`zig build cartridge` trains, saves, and serves one against a real Qwen3
-GGUF (`docs/CARTRIDGES.md`).
+[docs/TRAINING.md](docs/TRAINING.md) is the full guide, including how the
+gradients were verified (PyTorch goldens, finite differences, and a
+real-model audit) and its open issues.
 
-`docs/TRAINING.md` is the full guide, including how the gradients were verified
-(PyTorch goldens, finite differences, and a real-model audit) and its open
-issues.
+## Design
+
+Fucina is deliberately **eager and local**: no global graph object, no fusion
+pass, no compiler layer. The execution context validates shapes once, then
+dispatches to small unchecked, allocation-free backend kernels selected at
+build time. Transient memory goes through a thread-safe reusable buffer pool
+with bucket-rounded buffer allocation for small temporaries — the rationale
+(and why it beats an arena here) is in
+[docs/MEMORY-MODEL.md](docs/MEMORY-MODEL.md). The intended growth path is
+model-specific sessions with semantic weight binding and preallocated
+buffers, not a generic ggml-like graph.
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) maps the whole tree.
+
+That choice has a known price, paid deliberately. Whole-graph machinery —
+fusion passes, static device memory planning, captured launch sequences — is
+what mainstream GPU inference stacks are built on, so an eager runtime can
+use a GPU only at the op seam (which is what the Metal and CUDA offloads do)
+and will never chase TensorRT-class GPU throughput. On CPU the ledger reads
+the other way: per-op dispatch costs next to nothing, kernels specialize at
+compile time instead of fusing at runtime, and the paired benchmarks are run
+against a graph executor. CPU-first is the design point, not a stage on the
+way to somewhere else.
 
 ## Documentation
 
+**[The manual](https://matteo-grella.github.io/fucina/docs/)** renders all
+of it — reference, guides, course, and per-example pages — with search.
+The sources:
+
 | Doc | Contents |
 | --- | --- |
-| `docs/ARCHITECTURE.md` | the actual source layout, layer by layer — start here |
-| `docs/REFERENCE.md` | the detailed API reference: the full public surface, exact semantics, machine-verified snippets |
-| `docs/course/` | *Forging Deep Learning in Zig* — a book-length course that teaches Zig and deep learning together by rebuilding this library's journey, from a dtype enum to a live guitar amp and chatting language models; per-chapter video scripts included |
-| `docs/RUNNING-MODELS.md` | the model index: verified weight downloads + licenses, the example-to-README map, shared runner machinery |
-| `docs/LMSERVER.md` | the lmserve example: OpenAI API mapping tables, streaming contracts, server architecture |
-| `docs/BENCHMARK.md` | the measurement protocol and dated Fucina-vs-llama.cpp records, wins and losses |
-| `docs/TRAINING.md` | the training guide: autograd, optimizers, LoRA, evolution strategies, checkpoints, gradient verification |
-| `docs/MEMORY-MODEL.md` | ownership rules and the buffer-pool-not-arena adjudication |
-| `docs/PORTING.md` | the porting method — how every model family here earned its parity claims, written for the next port |
-| `docs/SPECULATIVE.md` | design record: lossless draft-model-free speculative decoding |
-| `docs/PTQTP-RECIPE.md` | walkthrough: PTQTP-quantize any GGUF (MoE experts included) and run it, resident or streamed |
-| `docs/CONSTRAINED-DECODING.md` | design record: grammar/JSON-schema constrained decoding and its speculation composition |
-| `docs/CARTRIDGES.md` | design record: trained KV-prefix corpus compression (Cartridges) — self-study distillation, serving, gates |
-| `docs/ENGRAM.md` | design record: conditional n-gram memory (Engram) — hashed lookup tables, graft mode, reference parity |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | the actual source layout, layer by layer — start here |
+| [docs/REFERENCE.md](docs/REFERENCE.md) | the detailed API reference: the full public surface, exact semantics, machine-verified snippets |
+| [docs/course/](docs/course/README.md) | *Forging Deep Learning in Zig* — a book-length course that teaches Zig and deep learning together by rebuilding this library's journey, from a dtype enum to a live guitar amp and chatting language models; per-chapter video scripts included |
+| [docs/RUNNING-MODELS.md](docs/RUNNING-MODELS.md) | the model index: verified weight downloads + licenses, the example-to-README map, shared runner machinery |
+| [docs/LMSERVER.md](docs/LMSERVER.md) | the lmserve example: OpenAI API mapping tables, streaming contracts, server architecture |
+| [docs/BENCHMARK.md](docs/BENCHMARK.md) | the measurement protocol and dated Fucina-vs-llama.cpp records, wins and losses |
+| [docs/TRAINING.md](docs/TRAINING.md) | the training guide: autograd, optimizers, LoRA, evolution strategies, checkpoints, gradient verification |
+| [docs/MEMORY-MODEL.md](docs/MEMORY-MODEL.md) | ownership rules and the buffer-pool-not-arena adjudication |
+| [docs/PORTING.md](docs/PORTING.md) | the porting method — how every model family here earned its parity claims, written for the next port |
+| [docs/SPECULATIVE.md](docs/SPECULATIVE.md) | design record: lossless draft-model-free speculative decoding |
+| [docs/PTQTP-RECIPE.md](docs/PTQTP-RECIPE.md) | walkthrough: PTQTP-quantize any GGUF (MoE experts included) and run it, resident or streamed |
+| [docs/CONSTRAINED-DECODING.md](docs/CONSTRAINED-DECODING.md) | design record: grammar/JSON-schema constrained decoding and its speculation composition |
+| [docs/CARTRIDGES.md](docs/CARTRIDGES.md) | design record: trained KV-prefix corpus compression (Cartridges) — self-study distillation, serving, gates |
+| [docs/ENGRAM.md](docs/ENGRAM.md) | design record: conditional n-gram memory (Engram) — hashed lookup tables, graft mode, reference parity |
 | `AGENTS.md` | build/test/bench commands, build options, repo map, house rules |
-| `docs/THIRD-PARTY-NOTICES.md` | full provenance and license inventory of third-party material |
+| [docs/THIRD-PARTY-NOTICES.md](docs/THIRD-PARTY-NOTICES.md) | full provenance and license inventory of third-party material |
 
 ## Status and scope
 
@@ -261,7 +322,8 @@ Honest expectations:
   dlopen'd cuBLAS, quantized dense + MoE prefill and fused prefill attention
   via vendored PTX kernels, and an opt-in decode GEMV.
 - **The API is not stable.** This is a young codebase published in the open,
-  not a 1.0 library. Expect churn.
+  not a 1.0 library. The 0.x tags are pins for `zig fetch`, not a semver
+  promise. Expect churn.
 - **Model weights are not included.** Each model family carries its own
   license (Qwen: Apache-2.0; Gemma: Google's Gemma Terms of Use; Parakeet:
   CC-BY-4.0; OmniVoice weights: CC-BY-NC). `docs/RUNNING-MODELS.md` notes the
@@ -392,7 +454,8 @@ Fucina exists because others built the road first.
   **kitft** (natural-language autoencoders).
 
 The complete inventory — what is vendored, what is ported, what is only a
-parity reference, and under which license — is in `docs/THIRD-PARTY-NOTICES.md`.
+parity reference, and under which license — is in
+[docs/THIRD-PARTY-NOTICES.md](docs/THIRD-PARTY-NOTICES.md).
 
 ## License
 
