@@ -1,3 +1,4 @@
+<!-- docs-nav: group="Project" title="Architecture" weight=50 -->
 # Fucina Zig Architecture
 
 This document describes the current Zig implementation in this tree (`src/`,

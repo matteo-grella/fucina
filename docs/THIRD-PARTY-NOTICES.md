@@ -1,3 +1,4 @@
+<!-- docs-nav: group="Project" title="Third-party notices" weight=54 -->
 # Third-party notices
 
 Fucina is licensed under the MIT License (see `LICENSE`), with one documented

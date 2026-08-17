@@ -1,3 +1,4 @@
+<!-- docs-nav: group="Memory & compute" title="GPU offload" weight=41 -->
 # Eager GPU Offload Without A Compute Graph
 
 Fucina treats Metal/CUDA as callable accelerators inside the native backend.

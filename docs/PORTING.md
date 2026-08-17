@@ -1,3 +1,4 @@
+<!-- docs-nav: group="Project" title="Porting models" weight=51 -->
 # PORTING — how a port earns its place
 
 Every model family and engine in this repo (Qwen3, Gemma 4, Qwen3.5,

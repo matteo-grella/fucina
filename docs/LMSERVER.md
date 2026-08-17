@@ -1,3 +1,4 @@
+<!-- docs-nav: group="Run & serve" title="LM server" weight=11 -->
 # LMSERVER — the OpenAI- and Anthropic-compatible language-model server example
 
 `zig build lmserve` (`examples/lmserve/main.zig` + `examples/lmserve/`) exposes the

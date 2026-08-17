@@ -1,3 +1,4 @@
+<!-- docs-nav: group="Project" title="Development" weight=52 -->
 # DEVELOPMENT — how to build on Fucina
 
 The working method for new development on this codebase — features, kernels,

@@ -4,8 +4,9 @@
 # stages the repo markdown (README.md, docs/, docs/course/,
 # examples/*/README.md) into .docs-site with links resolved against the
 # staged tree AND generates the nav (REFERENCE chapters, guides, course,
-# examples are enumerated; guide grouping lives in the tool's guide_nav
-# table), appending it to this file as .mkdocs-gen.yml. The site builds
+# examples are all enumerated from disk; a guide's sidebar title/group
+# come from its own `<!-- docs-nav: ... -->` comment, see the tool's doc
+# comment), appending it to this file as .mkdocs-gen.yml. The site builds
 # from THAT file; the repo markdown stays the single source of truth.
 #
 # Local preview:

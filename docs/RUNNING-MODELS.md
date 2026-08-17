@@ -1,3 +1,4 @@
+<!-- docs-nav: group="Run & serve" title="Running models" weight=10 -->
 # RUNNING-MODELS — CLI cheat sheet for every model in the repo
 
 Copy-paste commands for running each supported model family from the terminal.

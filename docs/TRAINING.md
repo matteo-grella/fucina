@@ -1,3 +1,4 @@
+<!-- docs-nav: group="" title="Training" weight=20 -->
 # TRAINING.md — training with Fucina
 
 How to train models on the eager autograd runtime: the tensor-lifetime rules

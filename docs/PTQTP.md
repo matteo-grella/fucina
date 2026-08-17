@@ -1,3 +1,4 @@
+<!-- docs-nav: group="Quantization" title="PTQTP" weight=30 -->
 # PTQTP — Post-Training Quantization to Trit-Planes
 
 Design record. Data-free post-training quantization of weight matrices into

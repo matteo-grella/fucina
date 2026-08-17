@@ -1,3 +1,4 @@
+<!-- docs-nav: group="Run & serve" title="Speculative decoding" weight=12 -->
 # Speculative Decoding — Design Record
 
 This document records the design of Fucina's **training-free, draft-model-free

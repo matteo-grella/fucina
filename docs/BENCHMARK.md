@@ -1,3 +1,4 @@
+<!-- docs-nav: group="Project" title="Benchmarks" weight=53 -->
 # Benchmarks — Fucina vs the reference implementations, on CPU
 
 This file is the benchmark record for Fucina's runners: the measurement

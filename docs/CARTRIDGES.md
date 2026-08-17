@@ -1,3 +1,4 @@
+<!-- docs-nav: group="Run & serve" title="Cartridges" weight=14 -->
 # Cartridges: trained KV-prefix corpus compression
 
 Fucina's implementation of **Cartridges** (Stanford Hazy Research,

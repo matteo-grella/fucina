@@ -1,3 +1,4 @@
+<!-- docs-nav: group="Memory & compute" title="Engram" weight=43 -->
 # Engram: conditional n-gram memory
 
 Design record for `src/llm/engram.zig` — Fucina's port of DeepSeek's Engram

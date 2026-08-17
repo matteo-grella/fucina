@@ -20,10 +20,19 @@
 //! - The mkdocs nav is generated too: the tool appends it to the committed
 //!   `mkdocs.yml` (which must not define `nav:`) and writes the result to
 //!   `<repo root>/.mkdocs-gen.yml`, which the Pages workflow builds with
-//!   `mkdocs build -f .mkdocs-gen.yml`. Guides get their sidebar grouping
-//!   from `guide_nav` below; a docs/*.md file absent from that table still
-//!   ships, auto-appended under "More". Course chapters and examples are
-//!   enumerated from disk.
+//!   `mkdocs build -f .mkdocs-gen.yml`. Course chapters and examples are
+//!   enumerated from disk; guides carry their own sidebar placement in an
+//!   invisible HTML comment (same convention as the snippet markers):
+//!
+//!       <!-- docs-nav: group="Run & serve" title="Running models" weight=10 -->
+//!
+//!   All keys are optional. `title` defaults to the file's H1; `group`
+//!   names the sidebar group under Guides (`group=""` means a top-level
+//!   entry, no group; no group key at all files the page under "More");
+//!   `weight` orders entries and, via first appearance, the groups
+//!   (default 1000, ties broken by filename). A brand-new docs/*.md file
+//!   therefore ships with NO changes anywhere else, under "More" until it
+//!   gets a directive.
 //! - Every staged heading gets an explicit GitHub-style anchor id via
 //!   `{: #slug }` (attr_list), so anchors behave identically on GitHub and
 //!   on the site.
@@ -42,31 +51,14 @@ const github_blob = "https://github.com/matteo-grella/fucina/blob/main/";
 /// document on every run.
 const Chapter = struct { title: []const u8, file: []const u8 };
 
-/// Sidebar curation for the guide pages (staged basename, nav title,
-/// group; an empty group is a top-level entry under Guides). Cosmetic
-/// only: a docs/*.md file missing from this table still ships, appended
-/// under "More" with its own H1 as the title, and a table entry whose file
-/// disappeared is skipped with a notice. Keep each group's rows contiguous.
-const GuideNav = struct { file: []const u8, title: []const u8, group: []const u8 };
-const guide_nav = [_]GuideNav{
-    .{ .file = "running-models.md", .title = "Running models", .group = "Run & serve" },
-    .{ .file = "lmserver.md", .title = "LM server", .group = "Run & serve" },
-    .{ .file = "speculative.md", .title = "Speculative decoding", .group = "Run & serve" },
-    .{ .file = "constrained-decoding.md", .title = "Constrained decoding", .group = "Run & serve" },
-    .{ .file = "cartridges.md", .title = "Cartridges", .group = "Run & serve" },
-    .{ .file = "training.md", .title = "Training", .group = "" },
-    .{ .file = "ptqtp.md", .title = "PTQTP", .group = "Quantization" },
-    .{ .file = "ptqtp-recipe.md", .title = "PTQTP recipe", .group = "Quantization" },
-    .{ .file = "ternary.md", .title = "Ternary", .group = "Quantization" },
-    .{ .file = "memory-model.md", .title = "Memory model", .group = "Memory & compute" },
-    .{ .file = "gpu-offload.md", .title = "GPU offload", .group = "Memory & compute" },
-    .{ .file = "subquadratic-attention.md", .title = "Subquadratic attention", .group = "Memory & compute" },
-    .{ .file = "engram.md", .title = "Engram", .group = "Memory & compute" },
-    .{ .file = "architecture.md", .title = "Architecture", .group = "Project" },
-    .{ .file = "porting.md", .title = "Porting models", .group = "Project" },
-    .{ .file = "development.md", .title = "Development", .group = "Project" },
-    .{ .file = "benchmark.md", .title = "Benchmarks", .group = "Project" },
-    .{ .file = "third-party-notices.md", .title = "Third-party notices", .group = "Project" },
+/// A guide page's resolved sidebar placement (from its `docs-nav`
+/// directive, defaults where absent). `group == null` files the page under
+/// "More"; `group == ""` puts it directly under Guides.
+const GuidePlacement = struct {
+    file: []const u8,
+    title: []const u8,
+    group: ?[]const u8,
+    weight: usize,
 };
 
 const snippet_badge =
@@ -96,7 +88,7 @@ const Ctx = struct {
     chapters: std.ArrayList(Chapter) = .empty, // [0] = the reference index page
 
     // nav inputs collected while staging
-    guides: std.ArrayList(NavEntry) = .empty, // staged basename + source H1
+    guides: std.ArrayList(GuidePlacement) = .empty,
     course_entries: std.ArrayList(NavEntry) = .empty,
     example_names: std.ArrayList([]const u8) = .empty,
 
@@ -744,17 +736,87 @@ fn stageGuides(ctx: *Ctx) !void {
         const lower = try std.ascii.allocLowerString(a, name);
         const staged = try std.fmt.allocPrint(a, "guides/{s}", .{lower});
         try stagePage(ctx, src, staged);
-        try ctx.guides.append(a, .{ .file = lower, .title = try firstHeadingText(ctx, src) });
+        const directive = try parseNavDirective(ctx, src);
+        try ctx.guides.append(a, .{
+            .file = lower,
+            .title = directive.title orelse try firstHeadingText(ctx, src),
+            .group = directive.group,
+            .weight = directive.weight orelse 1000,
+        });
     }
 }
 
-/// The H1 text of a repo markdown file (nav-title fallback).
+/// The first heading's text in a repo markdown file (nav-title fallback).
 fn firstHeadingText(ctx: *Ctx, repo_rel: []const u8) ![]const u8 {
     const content = try ctx.readRepoFile(repo_rel);
     var lines = std.mem.splitScalar(u8, content, '\n');
-    var first = lines.first();
-    if (std.mem.startsWith(u8, first, "# ")) first = first[2..];
-    return std.mem.trim(u8, first, " \t");
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "# ")) return std.mem.trim(u8, line[2..], " \t");
+    }
+    return repo_rel;
+}
+
+const NavDirective = struct { title: ?[]const u8 = null, group: ?[]const u8 = null, weight: ?usize = null };
+
+/// The page's `<!-- docs-nav: ... -->` directive (see the doc comment at
+/// the top), or all-defaults when the file has none. Malformed directives
+/// and unknown keys fail the build rather than silently mis-filing a page.
+fn parseNavDirective(ctx: *Ctx, repo_rel: []const u8) !NavDirective {
+    const a = ctx.allocator;
+    const content = try ctx.readRepoFile(repo_rel);
+    const prefix = "<!-- docs-nav:";
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    const body = while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t");
+        if (!std.mem.startsWith(u8, trimmed, prefix)) continue;
+        if (!std.mem.endsWith(u8, trimmed, "-->")) {
+            std.debug.print("docs-site: {s}: docs-nav directive is not closed with -->\n", .{repo_rel});
+            return error.BadNavDirective;
+        }
+        break trimmed[prefix.len .. trimmed.len - "-->".len];
+    } else return .{};
+
+    var d = NavDirective{};
+    var i: usize = 0;
+    while (i < body.len) {
+        while (i < body.len and (body[i] == ' ' or body[i] == ',')) i += 1;
+        if (i >= body.len) break;
+        const key_start = i;
+        while (i < body.len and std.ascii.isAlphabetic(body[i])) i += 1;
+        const key = body[key_start..i];
+        if (i >= body.len or body[i] != '=') {
+            std.debug.print("docs-site: {s}: expected key=value in docs-nav directive at '{s}'\n", .{ repo_rel, body[key_start..] });
+            return error.BadNavDirective;
+        }
+        i += 1;
+        var value: []const u8 = undefined;
+        if (i < body.len and body[i] == '"') {
+            const close = std.mem.indexOfScalarPos(u8, body, i + 1, '"') orelse {
+                std.debug.print("docs-site: {s}: unterminated string in docs-nav directive\n", .{repo_rel});
+                return error.BadNavDirective;
+            };
+            value = body[i + 1 .. close];
+            i = close + 1;
+        } else {
+            const value_start = i;
+            while (i < body.len and body[i] != ' ' and body[i] != ',') i += 1;
+            value = body[value_start..i];
+        }
+        if (std.mem.eql(u8, key, "title")) {
+            d.title = try a.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "group")) {
+            d.group = try a.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "weight")) {
+            d.weight = std.fmt.parseInt(usize, value, 10) catch {
+                std.debug.print("docs-site: {s}: docs-nav weight '{s}' is not a number\n", .{ repo_rel, value });
+                return error.BadNavDirective;
+            };
+        } else {
+            std.debug.print("docs-site: {s}: unknown docs-nav key '{s}'\n", .{ repo_rel, key });
+            return error.BadNavDirective;
+        }
+    }
+    return d;
 }
 
 fn stageCourse(ctx: *Ctx) !void {
@@ -870,7 +932,7 @@ fn writeGeneratedConfig(ctx: *Ctx) !void {
     var check = std.mem.splitScalar(u8, base, '\n');
     while (check.next()) |line| {
         if (std.mem.startsWith(u8, line, "nav:")) {
-            std.debug.print("docs-site: mkdocs.yml must not define nav: (the nav is generated; guide grouping lives in guide_nav in this tool)\n", .{});
+            std.debug.print("docs-site: mkdocs.yml must not define nav: (the nav is generated; a guide's placement lives in its own docs-nav comment)\n", .{});
             return error.NavInBaseConfig;
         }
     }
@@ -886,44 +948,34 @@ fn writeGeneratedConfig(ctx: *Ctx) !void {
     }
 
     try out.appendSlice(a, "  - Guides:\n");
-    var used: std.StringHashMapUnmanaged(void) = .empty;
-    var cur_group: []const u8 = "";
-    for (guide_nav) |g| {
-        const staged = blk: {
-            for (ctx.guides.items) |gg| {
-                if (std.mem.eql(u8, gg.file, g.file)) break :blk true;
-            }
-            break :blk false;
-        };
-        if (!staged) {
-            std.debug.print("docs-site: guide_nav entry '{s}' has no docs/ file; skipped\n", .{g.file});
-            continue;
+    // Placement comes from each guide's docs-nav directive: sort by
+    // (weight, file); a group is emitted whole where its first member
+    // lands; directive-less pages default to weight 1000 in "More".
+    std.mem.sort(GuidePlacement, ctx.guides.items, {}, struct {
+        fn lt(_: void, x: GuidePlacement, y: GuidePlacement) bool {
+            if (x.weight != y.weight) return x.weight < y.weight;
+            return std.mem.lessThan(u8, x.file, y.file);
         }
-        try used.put(a, g.file, {});
-        if (g.group.len == 0) {
+    }.lt);
+    var emitted_groups: std.StringHashMapUnmanaged(void) = .empty;
+    for (ctx.guides.items, 0..) |g, gi| {
+        if (g.group != null and g.group.?.len == 0) {
+            // group="": a top-level entry directly under Guides.
             const entry = try std.fmt.allocPrint(a, "      - {s}: guides/{s}\n", .{ try yamlString(a, g.title), g.file });
             try out.appendSlice(a, entry);
-            cur_group = "";
-        } else {
-            if (!std.mem.eql(u8, g.group, cur_group)) {
-                const header = try std.fmt.allocPrint(a, "      - {s}:\n", .{try yamlString(a, g.group)});
-                try out.appendSlice(a, header);
-                cur_group = g.group;
-            }
-            const entry = try std.fmt.allocPrint(a, "          - {s}: guides/{s}\n", .{ try yamlString(a, g.title), g.file });
+            continue;
+        }
+        const group = g.group orelse "More";
+        if (emitted_groups.get(group) != null) continue;
+        try emitted_groups.put(a, group, {});
+        const header = try std.fmt.allocPrint(a, "      - {s}:\n", .{try yamlString(a, group)});
+        try out.appendSlice(a, header);
+        for (ctx.guides.items[gi..]) |m| {
+            if (m.group != null and m.group.?.len == 0) continue;
+            if (!std.mem.eql(u8, m.group orelse "More", group)) continue;
+            const entry = try std.fmt.allocPrint(a, "          - {s}: guides/{s}\n", .{ try yamlString(a, m.title), m.file });
             try out.appendSlice(a, entry);
         }
-    }
-    // Guides absent from guide_nav still ship, under "More".
-    var extras_header = false;
-    for (ctx.guides.items) |gg| {
-        if (used.get(gg.file) != null) continue;
-        if (!extras_header) {
-            try out.appendSlice(a, "      - More:\n");
-            extras_header = true;
-        }
-        const entry = try std.fmt.allocPrint(a, "          - {s}: guides/{s}\n", .{ try yamlString(a, gg.title), gg.file });
-        try out.appendSlice(a, entry);
     }
 
     try out.appendSlice(a, "  - Learn:\n      - course/index.md\n");

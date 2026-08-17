@@ -1,3 +1,4 @@
+<!-- docs-nav: group="Run & serve" title="Constrained decoding" weight=13 -->
 # Constrained Decoding — Design Record
 
 This document records the design of Fucina's **grammar/JSON-schema

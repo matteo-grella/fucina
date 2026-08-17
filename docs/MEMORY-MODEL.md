@@ -1,3 +1,4 @@
+<!-- docs-nav: group="Memory & compute" title="Memory model" weight=40 -->
 # Memory Model — Buffer Pool vs Arena
 
 This document records *why* Fucina manages transient tensor memory with a

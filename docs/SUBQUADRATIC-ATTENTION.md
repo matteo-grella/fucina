@@ -1,3 +1,4 @@
+<!-- docs-nav: group="Memory & compute" title="Subquadratic attention" weight=42 -->
 # SCSA: Self-Calibrating Subquadratic Attention
 
 A training-free replacement for the decode-time attention operator of a

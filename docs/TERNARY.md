@@ -1,3 +1,4 @@
+<!-- docs-nav: group="Quantization" title="Ternary" weight=32 -->
 # TERNARY — {-1, 0, +1} weights as a first-class citizen (TQ2_0)
 
 Design record, 2026-07-07. Covers the inference kernels, the encoders, the

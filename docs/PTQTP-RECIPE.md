@@ -1,3 +1,4 @@
+<!-- docs-nav: group="Quantization" title="PTQTP recipe" weight=31 -->
 # Recipe: PTQTP-quantize a model and run it (resident or streamed)
 
 The end-to-end walkthrough: take a GGUF, quantize its weight matrices —
