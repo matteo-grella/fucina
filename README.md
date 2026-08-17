@@ -9,12 +9,14 @@ written in pure **Zig 0.16**. Axes have names checked at compile time, and
 computation is **eager**: every op executes the moment your code calls it,
 on real buffers — no graph to build, plan, or compile first, so what you
 read is what runs, in inference and in training alike. There is no C/C++
-build system and no Python anywhere: Zig vector kernels, with CBLAS
-providers and a GPU offload (Metal or CUDA) as opt-in accelerators for
-matrix multiplication.
+build system and no Python runtime dependency: Zig vector kernels, with
+CBLAS providers and a GPU offload (Metal or CUDA) as opt-in accelerators
+for matrix multiplication.
 
 To prove the library on real workloads, this repository also ships complete
-**applications built on it**: LLM chat and serving (Qwen3, DeepSeek, GLM,
+**applications built on it** (see
+[what the library enables today](#what-the-library-enables-today)):
+LLM chat and serving (Qwen3, DeepSeek, GLM,
 Gemma, ...), speech, vision, and audio models — each validated against its
 reference implementation and benchmarked against llama.cpp, which it
 matches or beats on most measured CPU shapes
@@ -92,23 +94,38 @@ exe.root_module.addImport("fucina", fucina_dep.module("fucina"));
 exe.root_module.addImport("fucina_llm", fucina_dep.module("fucina_llm")); // LLM stack; optional
 ```
 
+A first program, verbatim from
+[the reference's §1.4](https://matteo-grella.github.io/fucina/docs/reference/01-introduction-and-mental-model/#14-a-first-program),
+where CI compiles and runs this exact block on every push:
+
 ```zig
+const std = @import("std");
 const fucina = @import("fucina");
 
-var ctx: fucina.ExecContext = undefined;
-ctx.init(allocator);
-defer ctx.deinit();
+test "first program" {
+    const alloc = std.testing.allocator;
+    var ctx: fucina.ExecContext = undefined;
+    ctx.init(alloc);
+    defer ctx.deinit();
 
-var x = try fucina.Tensor(.{ .batch, .in }).variable(&ctx, try ctx.fromSlice(&.{ 1, 2 }, &.{ 2, 3 }));
-defer x.deinit();
-var w = try fucina.Tensor(.{ .in, .out }).variable(&ctx, try ctx.fromSlice(&.{ 2, 1 }, &.{ 4, 5 }));
-defer w.deinit();
+    // x: [batch=1, in=2], w: [in=2, out=1]
+    var x = try fucina.Tensor(.{ .batch, .in }).variable(&ctx, try ctx.fromSlice(&.{ 1, 2 }, &.{ 2, 3 }));
+    defer x.deinit();
+    var w = try fucina.Tensor(.{ .in, .out }).variable(&ctx, try ctx.fromSlice(&.{ 2, 1 }, &.{ 4, 5 }));
+    defer w.deinit();
 
-var y = try x.dot(&ctx, &w, .in); // contract .in => [batch, out]
-defer y.deinit();
-var loss = try y.sumAll(&ctx);
-defer loss.deinit();
-try loss.backward(&ctx); // gradients now live on x and w
+    var y = try x.dot(&ctx, &w, .in); // contract .in => [batch, out]
+    defer y.deinit();
+    var loss = try y.sumAll(&ctx);
+    defer loss.deinit();
+
+    try loss.backward(&ctx);
+    var gx = (try x.grad(&ctx)).?; // dloss/dx = w^T = [4, 5]
+    defer gx.deinit();
+
+    try std.testing.expectApproxEqAbs(@as(f32, 23.0), try loss.item(), 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), (try gx.dataConst())[0], 1e-6);
+}
 ```
 
 BLAS/GPU configuration passes through `b.dependency` options
@@ -134,8 +151,8 @@ kernels.
 
 With the tensor core in place, Fucina grows and gets tested through real
 applications, so the runtime and the things built on it develop side by
-side. Every family below is ordinary consumer code of the public API — the
-same `Tensor`/`ExecContext` surface from Getting started — so `examples/`
+side. Every family below is ordinary consumer code of the same public
+`fucina`/`fucina_llm` surface wired in Getting started, so `examples/`
 doubles as a corpus of real usage: open any `main.zig` and read how the
 library is actually driven. And every family is validated against its
 reference implementation, a discipline that is the core of the project:
@@ -146,13 +163,15 @@ with copy-paste commands; [docs/RUNNING-MODELS.md](docs/RUNNING-MODELS.md)
 is the index — verified weight downloads and licenses, plus the machinery
 shared across runners (expert streaming, GPU offload, global knobs).
 
-Run one in two minutes:
+Run one:
 
 ```sh
 git clone https://github.com/matteo-grella/fucina
 cd fucina
 
-# Grab a small model (or download the GGUF from your browser into models/)
+# Grab a small model. `hf` is the Hugging Face CLI
+# (pip install -U huggingface_hub; formerly `huggingface-cli`); or just
+# download the GGUF from your browser into models/.
 mkdir -p models
 hf download Qwen/Qwen3-0.6B-GGUF Qwen3-0.6B-Q8_0.gguf --local-dir models
 
