@@ -48,7 +48,7 @@ jobs:
       - name: Build the manual (strict)
         run: |
           pip install 'mkdocs-material==9.7.*'
-          mkdocs build
+          mkdocs build -f .mkdocs-gen.yml
       - name: Compose the Pages artifact
         run: |
           mkdir -p _site

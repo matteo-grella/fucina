@@ -2,6 +2,7 @@
 zig-out/
 .docs-site/
 .docs-site-out/
+.mkdocs-gen.yml
 bench/baselines/
 models
 .DS_Store

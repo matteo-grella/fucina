@@ -6,14 +6,24 @@
 //! gitignored staging directory that `mkdocs.yml` uses as `docs_dir`:
 //!
 //! - `docs/REFERENCE.md` is split at its `## N.` chapters into
-//!   `reference/<NN>-<name>.md` (fixed table below; the tool fails if the
-//!   chapter numbering changes so the table and mkdocs.yml nav get updated
-//!   together). The `## Contents` section is dropped (the site nav replaces
-//!   it), the preamble becomes `reference/index.md` with a chapter list,
-//!   heading levels are promoted by one, textual `§N`/`§N.M` references
-//!   become cross-page links, and every runnable snippet (the blocks
-//!   `zig build snippet-check` extracts, see tools/gen_snippet_tests.zig)
-//!   gets a "compiled & run in CI" badge.
+//!   `reference/<NN>-<title-slug>.md`; chapter count, titles, and filenames
+//!   all derive from the document itself, so adding, renaming, or
+//!   renumbering a chapter needs no change anywhere else (numbering must
+//!   stay sequential from 1 — the § cross-references depend on it — and a
+//!   retitled chapter changes its page URL). The `## Contents` section is
+//!   dropped (the site nav replaces it), the preamble becomes
+//!   `reference/index.md` with a chapter list, heading levels are promoted
+//!   by one, textual `§N`/`§N.M` references become cross-page links, and
+//!   every runnable snippet (the blocks `zig build snippet-check`
+//!   extracts, see tools/gen_snippet_tests.zig) gets a
+//!   "compiled & run in CI" badge.
+//! - The mkdocs nav is generated too: the tool appends it to the committed
+//!   `mkdocs.yml` (which must not define `nav:`) and writes the result to
+//!   `<repo root>/.mkdocs-gen.yml`, which the Pages workflow builds with
+//!   `mkdocs build -f .mkdocs-gen.yml`. Guides get their sidebar grouping
+//!   from `guide_nav` below; a docs/*.md file absent from that table still
+//!   ships, auto-appended under "More". Course chapters and examples are
+//!   enumerated from disk.
 //! - Every staged heading gets an explicit GitHub-style anchor id via
 //!   `{: #slug }` (attr_list), so anchors behave identically on GitHub and
 //!   on the site.
@@ -27,26 +37,36 @@ const std = @import("std");
 
 const github_blob = "https://github.com/matteo-grella/fucina/blob/main/";
 
-const chapter_count = 14;
-/// Index 0 is the preamble page; 1..14 the chapters. Filenames are a fixed
-/// contract with mkdocs.yml's nav: renaming or renumbering a REFERENCE
-/// chapter requires updating both (the tool errors when they drift).
-const chapter_files = [chapter_count + 1][]const u8{
-    "index.md",
-    "01-introduction.md",
-    "02-toolchain.md",
-    "03-tensors.md",
-    "04-operations.md",
-    "05-autograd.md",
-    "06-execution-runtime.md",
-    "07-named-axes.md",
-    "08-dtypes-storage.md",
-    "09-backends.md",
-    "10-quantization.md",
-    "11-training.md",
-    "12-model-io.md",
-    "13-llm-stack.md",
-    "14-model-families.md",
+/// One REFERENCE chapter; index 0 is the preamble/index page. Filenames
+/// derive from the chapter titles, so the list rebuilds itself from the
+/// document on every run.
+const Chapter = struct { title: []const u8, file: []const u8 };
+
+/// Sidebar curation for the guide pages (staged basename, nav title,
+/// group; an empty group is a top-level entry under Guides). Cosmetic
+/// only: a docs/*.md file missing from this table still ships, appended
+/// under "More" with its own H1 as the title, and a table entry whose file
+/// disappeared is skipped with a notice. Keep each group's rows contiguous.
+const GuideNav = struct { file: []const u8, title: []const u8, group: []const u8 };
+const guide_nav = [_]GuideNav{
+    .{ .file = "running-models.md", .title = "Running models", .group = "Run & serve" },
+    .{ .file = "lmserver.md", .title = "LM server", .group = "Run & serve" },
+    .{ .file = "speculative.md", .title = "Speculative decoding", .group = "Run & serve" },
+    .{ .file = "constrained-decoding.md", .title = "Constrained decoding", .group = "Run & serve" },
+    .{ .file = "cartridges.md", .title = "Cartridges", .group = "Run & serve" },
+    .{ .file = "training.md", .title = "Training", .group = "" },
+    .{ .file = "ptqtp.md", .title = "PTQTP", .group = "Quantization" },
+    .{ .file = "ptqtp-recipe.md", .title = "PTQTP recipe", .group = "Quantization" },
+    .{ .file = "ternary.md", .title = "Ternary", .group = "Quantization" },
+    .{ .file = "memory-model.md", .title = "Memory model", .group = "Memory & compute" },
+    .{ .file = "gpu-offload.md", .title = "GPU offload", .group = "Memory & compute" },
+    .{ .file = "subquadratic-attention.md", .title = "Subquadratic attention", .group = "Memory & compute" },
+    .{ .file = "engram.md", .title = "Engram", .group = "Memory & compute" },
+    .{ .file = "architecture.md", .title = "Architecture", .group = "Project" },
+    .{ .file = "porting.md", .title = "Porting models", .group = "Project" },
+    .{ .file = "development.md", .title = "Development", .group = "Project" },
+    .{ .file = "benchmark.md", .title = "Benchmarks", .group = "Project" },
+    .{ .file = "third-party-notices.md", .title = "Third-party notices", .group = "Project" },
 };
 
 const snippet_badge =
@@ -62,6 +82,8 @@ const LinkRec = struct {
     anchor: []const u8, // "" when none
 };
 
+const NavEntry = struct { file: []const u8, title: []const u8 };
+
 const Ctx = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -71,7 +93,12 @@ const Ctx = struct {
     // REFERENCE.md structure
     anchor_chapter: std.StringHashMapUnmanaged(usize) = .empty, // heading slug -> chapter
     section_slug: std.AutoHashMapUnmanaged(usize, []const u8) = .empty, // N*1000+M -> slug
-    chapter_titles: [chapter_count + 1][]const u8 = @splat(""),
+    chapters: std.ArrayList(Chapter) = .empty, // [0] = the reference index page
+
+    // nav inputs collected while staging
+    guides: std.ArrayList(NavEntry) = .empty, // staged basename + source H1
+    course_entries: std.ArrayList(NavEntry) = .empty,
+    example_names: std.ArrayList([]const u8) = .empty,
 
     // staged-tree records for the verify pass
     staged_pages: std.StringHashMapUnmanaged(void) = .empty,
@@ -143,14 +170,15 @@ pub fn main(init: std.process.Init) !void {
     try stageExamples(&ctx);
     try copyAsset(&ctx, "site/docs-extra.css", "assets/extra.css");
     try verify(&ctx);
+    try writeGeneratedConfig(&ctx);
 
     var stdout_buffer: [512]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
     defer stdout.flush() catch {};
     try stdout.print(
-        "docs-site: {d} pages staged, {d} CI badges, {d} section-reference links, {d} links rewritten, {d} cross-links verified\n",
-        .{ ctx.n_pages, ctx.n_badges, ctx.n_section_links, ctx.n_rewritten, ctx.links.items.len },
+        "docs-site: {d} pages staged ({d} REFERENCE chapters), {d} CI badges, {d} section-reference links, {d} links rewritten, {d} cross-links verified; nav in .mkdocs-gen.yml\n",
+        .{ ctx.n_pages, ctx.chapters.items.len - 1, ctx.n_badges, ctx.n_section_links, ctx.n_rewritten, ctx.links.items.len },
     );
 }
 
@@ -275,7 +303,7 @@ fn mapRepoToStaged(ctx: *Ctx, repo_path: []const u8, anchor: []const u8) !?[]con
                 std.debug.print("docs-site: link anchor #{s} not found in REFERENCE.md\n", .{anchor});
                 return error.UnknownReferenceAnchor;
             };
-            return try std.fmt.allocPrint(a, "reference/{s}", .{chapter_files[ch]});
+            return try std.fmt.allocPrint(a, "reference/{s}", .{ctx.chapters.items[ch].file});
         }
         return "reference/index.md";
     }
@@ -330,13 +358,6 @@ fn resolveLink(ctx: *Ctx, src_repo_path: []const u8, staged_page: []const u8, ta
 
 // ---------------------------------------------------------------- REFERENCE
 
-const RefStructure = struct {
-    lines: [][]const u8,
-    preamble_end: usize,
-    chapter_start: [chapter_count + 1]usize,
-    chapter_end: [chapter_count + 1]usize,
-};
-
 fn processReference(ctx: *Ctx) !void {
     const a = ctx.allocator;
     const src = try ctx.readRepoFile("docs/REFERENCE.md");
@@ -346,16 +367,18 @@ fn processReference(ctx: *Ctx) !void {
     while (it.next()) |line| try line_list.append(a, line);
     const lines = line_list.items;
 
-    var st = RefStructure{
-        .lines = lines,
-        .preamble_end = lines.len,
-        .chapter_start = @splat(0),
-        .chapter_end = @splat(0),
-    };
+    try ctx.chapters.append(a, .{ .title = "", .file = "index.md" });
+    var chapter_start: std.ArrayList(usize) = .empty; // aligned with ctx.chapters
+    var chapter_end: std.ArrayList(usize) = .empty;
+    try chapter_start.append(a, 0);
+    try chapter_end.append(a, 0);
+    var preamble_end: usize = lines.len;
 
-    // Pass 1: chapter bounds + the heading/anchor maps.
+    // Pass 1: chapter bounds + the heading/anchor maps. Chapters, their
+    // titles, and their filenames all come from the document itself; the
+    // only requirement is sequential numbering from 1 (the § references
+    // depend on the numbers).
     var cur: usize = 0;
-    var next_expected: usize = 1;
     var in_fence = false;
     for (lines, 0..) |line, idx| {
         if (std.mem.startsWith(u8, line, "```")) {
@@ -365,8 +388,8 @@ fn processReference(ctx: *Ctx) !void {
         if (in_fence) continue;
         const h = parseHeading(line) orelse continue;
         if (h.level == 2) {
-            if (cur != 0 and cur != contents_chapter) st.chapter_end[cur] = idx;
-            if (cur == 0) st.preamble_end = idx;
+            if (cur != 0 and cur != contents_chapter) chapter_end.items[cur] = idx;
+            if (cur == 0) preamble_end = idx;
             if (std.mem.eql(u8, h.text, "Contents")) {
                 cur = contents_chapter;
                 continue;
@@ -379,14 +402,16 @@ fn processReference(ctx: *Ctx) !void {
                 std.debug.print("docs-site: unnumbered REFERENCE chapter '{s}'\n", .{h.text});
                 return error.UnexpectedChapter;
             };
-            if (num != next_expected or num > chapter_count) {
-                std.debug.print("docs-site: REFERENCE chapter numbering changed at '{s}' (expected {d}); update chapter_files and mkdocs.yml nav\n", .{ h.text, next_expected });
-                return error.ChapterTableStale;
+            if (num != ctx.chapters.items.len) {
+                std.debug.print("docs-site: REFERENCE chapter '{s}' breaks the sequence (expected {d}); chapters must be numbered 1..N in order\n", .{ h.text, ctx.chapters.items.len });
+                return error.ChapterSequenceBroken;
             }
-            next_expected += 1;
+            const title = std.mem.trim(u8, h.text[dot + 1 ..], " ");
+            const file = try std.fmt.allocPrint(a, "{d:0>2}-{s}.md", .{ num, try slugify(a, title) });
+            try ctx.chapters.append(a, .{ .title = title, .file = file });
+            try chapter_start.append(a, idx);
+            try chapter_end.append(a, lines.len);
             cur = num;
-            st.chapter_start[num] = idx;
-            ctx.chapter_titles[num] = std.mem.trim(u8, h.text[dot + 1 ..], " ");
         }
         if (cur == contents_chapter) continue;
         const slug = try slugifyHeading(a, h.text);
@@ -402,27 +427,27 @@ fn processReference(ctx: *Ctx) !void {
             }
         }
     }
-    if (cur != 0 and cur != contents_chapter) st.chapter_end[cur] = lines.len;
-    if (next_expected != chapter_count + 1) {
-        std.debug.print("docs-site: REFERENCE has {d} chapters, expected {d}; update chapter_files and mkdocs.yml nav\n", .{ next_expected - 1, chapter_count });
-        return error.ChapterTableStale;
+    if (cur != 0 and cur != contents_chapter) chapter_end.items[cur] = lines.len;
+    if (ctx.chapters.items.len < 2) {
+        std.debug.print("docs-site: REFERENCE.md has no numbered chapters\n", .{});
+        return error.NoChapters;
     }
 
     // Pass 2: emit the preamble/index page, then each chapter.
     var index_body: std.ArrayList(u8) = .empty;
-    try emitRefLines(ctx, &index_body, lines[0..st.preamble_end], 0);
+    try emitRefLines(ctx, &index_body, lines[0..preamble_end], 0);
     try index_body.appendSlice(a, "\n## Chapters\n\n");
-    for (1..chapter_count + 1) |n| {
-        const entry = try std.fmt.allocPrint(a, "{d}. [{s}]({s})\n", .{ n, ctx.chapter_titles[n], chapter_files[n] });
+    for (ctx.chapters.items[1..], 1..) |ch, n| {
+        const entry = try std.fmt.allocPrint(a, "{d}. [{s}]({s})\n", .{ n, ch.title, ch.file });
         try index_body.appendSlice(a, entry);
-        try ctx.recordLink("reference/index.md", try std.fmt.allocPrint(a, "reference/{s}", .{chapter_files[n]}), "");
+        try ctx.recordLink("reference/index.md", try std.fmt.allocPrint(a, "reference/{s}", .{ch.file}), "");
     }
     try ctx.writeStaged("reference/index.md", index_body.items);
 
-    for (1..chapter_count + 1) |n| {
+    for (ctx.chapters.items[1..], 1..) |ch, n| {
         var body: std.ArrayList(u8) = .empty;
-        try emitRefLines(ctx, &body, lines[st.chapter_start[n]..st.chapter_end[n]], n);
-        const rel = try std.fmt.allocPrint(a, "reference/{s}", .{chapter_files[n]});
+        try emitRefLines(ctx, &body, lines[chapter_start.items[n]..chapter_end.items[n]], n);
+        const rel = try std.fmt.allocPrint(a, "reference/{s}", .{ch.file});
         try ctx.writeStaged(rel, body.items);
     }
 }
@@ -441,7 +466,7 @@ fn parseSectionNumber(text: []const u8) ?SectionNumber {
 /// anchor-link and file-link rewriting, § linkification, snippet badges.
 fn emitRefLines(ctx: *Ctx, out: *std.ArrayList(u8), lines: []const []const u8, cur_chapter: usize) !void {
     const a = ctx.allocator;
-    const staged_page = try std.fmt.allocPrint(a, "reference/{s}", .{chapter_files[cur_chapter]});
+    const staged_page = try std.fmt.allocPrint(a, "reference/{s}", .{ctx.chapters.items[cur_chapter].file});
 
     var in_fence = false;
     var fence_zig = false;
@@ -551,10 +576,10 @@ fn transformRefInline(ctx: *Ctx, out: *std.ArrayList(u8), line: []const u8, cur_
                         try out.appendSlice(a, slug);
                         try out.append(a, ')');
                     } else {
-                        const link = try std.fmt.allocPrint(a, "]({s}#{s})", .{ chapter_files[ch], slug });
+                        const link = try std.fmt.allocPrint(a, "]({s}#{s})", .{ ctx.chapters.items[ch].file, slug });
                         try out.appendSlice(a, link);
                     }
-                    try ctx.recordLink(staged_page, try std.fmt.allocPrint(a, "reference/{s}", .{chapter_files[ch]}), slug);
+                    try ctx.recordLink(staged_page, try std.fmt.allocPrint(a, "reference/{s}", .{ctx.chapters.items[ch].file}), slug);
                     i = close + 1;
                     continue;
                 }
@@ -583,17 +608,17 @@ fn transformRefInline(ctx: *Ctx, out: *std.ArrayList(u8), line: []const u8, cur_
                 probe = k;
                 depth += 1;
             }
-            if (major >= 1 and major <= chapter_count) {
+            if (major >= 1 and major < ctx.chapters.items.len) {
                 const text = line[i..probe];
-                var target: []const u8 = chapter_files[major];
+                var target: []const u8 = ctx.chapters.items[major].file;
                 var anchor: []const u8 = "";
                 if (minor) |m| {
                     if (ctx.section_slug.get(major * 1000 + m)) |slug| anchor = slug;
                 }
-                if (anchor.len != 0) target = try std.fmt.allocPrint(a, "{s}#{s}", .{ chapter_files[major], anchor });
+                if (anchor.len != 0) target = try std.fmt.allocPrint(a, "{s}#{s}", .{ ctx.chapters.items[major].file, anchor });
                 const link = try std.fmt.allocPrint(a, "[{s}]({s})", .{ text, target });
                 try out.appendSlice(a, link);
-                try ctx.recordLink(staged_page, try std.fmt.allocPrint(a, "reference/{s}", .{chapter_files[major]}), anchor);
+                try ctx.recordLink(staged_page, try std.fmt.allocPrint(a, "reference/{s}", .{ctx.chapters.items[major].file}), anchor);
                 ctx.n_section_links += 1;
                 i = probe;
                 continue;
@@ -719,7 +744,17 @@ fn stageGuides(ctx: *Ctx) !void {
         const lower = try std.ascii.allocLowerString(a, name);
         const staged = try std.fmt.allocPrint(a, "guides/{s}", .{lower});
         try stagePage(ctx, src, staged);
+        try ctx.guides.append(a, .{ .file = lower, .title = try firstHeadingText(ctx, src) });
     }
+}
+
+/// The H1 text of a repo markdown file (nav-title fallback).
+fn firstHeadingText(ctx: *Ctx, repo_rel: []const u8) ![]const u8 {
+    const content = try ctx.readRepoFile(repo_rel);
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    var first = lines.first();
+    if (std.mem.startsWith(u8, first, "# ")) first = first[2..];
+    return std.mem.trim(u8, first, " \t");
 }
 
 fn stageCourse(ctx: *Ctx) !void {
@@ -746,7 +781,25 @@ fn stageCourse(ctx: *Ctx) !void {
         else
             try std.fmt.allocPrint(a, "course/{s}", .{name});
         try stagePage(ctx, src, staged);
+        if (!std.mem.eql(u8, name, "README.md")) {
+            const title = try courseNavTitle(ctx, name, try firstHeadingText(ctx, src));
+            try ctx.course_entries.append(a, .{ .file = name, .title = title });
+        }
     }
+}
+
+/// Short sidebar title for a course chapter: "NN · Short", with the short
+/// part taken from the H1 pattern "Chapter NN — Title[: subtitle]" (the
+/// subtitle is dropped); falls back to the full H1.
+fn courseNavTitle(ctx: *Ctx, file_name: []const u8, h1: []const u8) ![]const u8 {
+    var title = h1;
+    if (std.mem.indexOf(u8, h1, " \u{2014} ")) |p| title = h1[p + " \u{2014} ".len ..];
+    if (std.mem.indexOfScalar(u8, title, ':')) |p| title = title[0..p];
+    title = std.mem.trim(u8, title, " \t");
+    if (file_name.len >= 2 and std.ascii.isDigit(file_name[0]) and std.ascii.isDigit(file_name[1])) {
+        return std.fmt.allocPrint(ctx.allocator, "{s} \u{00B7} {s}", .{ file_name[0..2], title });
+    }
+    return title;
 }
 
 fn stageExamples(ctx: *Ctx) !void {
@@ -783,12 +836,9 @@ fn stageExamples(ctx: *Ctx) !void {
         const src = try std.fmt.allocPrint(a, "examples/{s}/README.md", .{name});
         const staged = try std.fmt.allocPrint(a, "examples/{s}.md", .{name});
         try stagePage(ctx, src, staged);
+        try ctx.example_names.append(a, name);
 
-        const content = try ctx.readRepoFile(src);
-        var content_lines = std.mem.splitScalar(u8, content, '\n');
-        var first_line = content_lines.first();
-        if (std.mem.startsWith(u8, first_line, "# ")) first_line = first_line[2..];
-        const entry = try std.fmt.allocPrint(a, "- [{s}]({s}.md)\n", .{ std.mem.trim(u8, first_line, " \t"), name });
+        const entry = try std.fmt.allocPrint(a, "- [{s}]({s}.md)\n", .{ try firstHeadingText(ctx, src), name });
         try index_body.appendSlice(a, entry);
         try ctx.recordLink("examples/index.md", staged, "");
     }
@@ -807,6 +857,106 @@ fn sortStrings(items: [][]const u8) void {
             return std.mem.lessThan(u8, x, y);
         }
     }.lt);
+}
+
+// ---------------------------------------------------------------- config
+
+/// Concatenate the committed mkdocs.yml (which must not define nav:) with
+/// the generated navigation and write `<repo root>/.mkdocs-gen.yml`, the
+/// config the site is actually built from (`mkdocs build -f .mkdocs-gen.yml`).
+fn writeGeneratedConfig(ctx: *Ctx) !void {
+    const a = ctx.allocator;
+    const base = try ctx.readRepoFile("mkdocs.yml");
+    var check = std.mem.splitScalar(u8, base, '\n');
+    while (check.next()) |line| {
+        if (std.mem.startsWith(u8, line, "nav:")) {
+            std.debug.print("docs-site: mkdocs.yml must not define nav: (the nav is generated; guide grouping lives in guide_nav in this tool)\n", .{});
+            return error.NavInBaseConfig;
+        }
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a, "# GENERATED by tools/gen_docs_site.zig from mkdocs.yml plus the staged tree — do not edit.\n");
+    try out.appendSlice(a, base);
+    if (base.len != 0 and base[base.len - 1] != '\n') try out.append(a, '\n');
+    try out.appendSlice(a, "\nnav:\n  - Home: index.md\n  - Reference:\n      - reference/index.md\n");
+    for (ctx.chapters.items[1..]) |ch| {
+        const entry = try std.fmt.allocPrint(a, "      - reference/{s}\n", .{ch.file});
+        try out.appendSlice(a, entry);
+    }
+
+    try out.appendSlice(a, "  - Guides:\n");
+    var used: std.StringHashMapUnmanaged(void) = .empty;
+    var cur_group: []const u8 = "";
+    for (guide_nav) |g| {
+        const staged = blk: {
+            for (ctx.guides.items) |gg| {
+                if (std.mem.eql(u8, gg.file, g.file)) break :blk true;
+            }
+            break :blk false;
+        };
+        if (!staged) {
+            std.debug.print("docs-site: guide_nav entry '{s}' has no docs/ file; skipped\n", .{g.file});
+            continue;
+        }
+        try used.put(a, g.file, {});
+        if (g.group.len == 0) {
+            const entry = try std.fmt.allocPrint(a, "      - {s}: guides/{s}\n", .{ try yamlString(a, g.title), g.file });
+            try out.appendSlice(a, entry);
+            cur_group = "";
+        } else {
+            if (!std.mem.eql(u8, g.group, cur_group)) {
+                const header = try std.fmt.allocPrint(a, "      - {s}:\n", .{try yamlString(a, g.group)});
+                try out.appendSlice(a, header);
+                cur_group = g.group;
+            }
+            const entry = try std.fmt.allocPrint(a, "          - {s}: guides/{s}\n", .{ try yamlString(a, g.title), g.file });
+            try out.appendSlice(a, entry);
+        }
+    }
+    // Guides absent from guide_nav still ship, under "More".
+    var extras_header = false;
+    for (ctx.guides.items) |gg| {
+        if (used.get(gg.file) != null) continue;
+        if (!extras_header) {
+            try out.appendSlice(a, "      - More:\n");
+            extras_header = true;
+        }
+        const entry = try std.fmt.allocPrint(a, "          - {s}: guides/{s}\n", .{ try yamlString(a, gg.title), gg.file });
+        try out.appendSlice(a, entry);
+    }
+
+    try out.appendSlice(a, "  - Learn:\n      - course/index.md\n");
+    for (ctx.course_entries.items) |e| {
+        const entry = try std.fmt.allocPrint(a, "      - {s}: course/{s}\n", .{ try yamlString(a, e.title), e.file });
+        try out.appendSlice(a, entry);
+    }
+
+    try out.appendSlice(a, "  - Examples:\n      - examples/index.md\n");
+    for (ctx.example_names.items) |name| {
+        const entry = try std.fmt.allocPrint(a, "      - {s}: examples/{s}.md\n", .{ try yamlString(a, name), name });
+        try out.appendSlice(a, entry);
+    }
+
+    const path = try ctx.repoPath(".mkdocs-gen.yml");
+    var file = try std.Io.Dir.cwd().createFile(ctx.io, path, .{});
+    defer file.close(ctx.io);
+    var buffer: [64 * 1024]u8 = undefined;
+    var writer = file.writer(ctx.io, &buffer);
+    try writer.interface.writeAll(out.items);
+    try writer.interface.flush();
+}
+
+fn yamlString(allocator: std.mem.Allocator, s: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.append(allocator, '"');
+    for (s) |c| switch (c) {
+        '"' => try out.appendSlice(allocator, "\\\""),
+        '\\' => try out.appendSlice(allocator, "\\\\"),
+        else => try out.append(allocator, c),
+    };
+    try out.append(allocator, '"');
+    return out.items;
 }
 
 // ---------------------------------------------------------------- verify
