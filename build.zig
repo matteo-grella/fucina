@@ -90,6 +90,18 @@ pub fn build(b: *std.Build) void {
     });
     module.addOptions("build_options", options);
 
+    // Package-dependency builds (`b.dependency("fucina", ...)`) receive the
+    // exported modules without the in-tree executables, so the BLAS/GPU
+    // link inputs must travel WITH the module — link inputs propagate
+    // through module imports. Dependency-context only: in-tree, the
+    // per-executable configure* calls below stay authoritative, and
+    // attaching here too would compile the Metal shim into one binary
+    // twice.
+    if (b.pkg_hash.len != 0) {
+        configureBlasModule(b, module, blas_kind);
+        configureGpuModule(b, module, gpu_kind);
+    }
+
     // fucina_llm's own build options (the fucina options above are per-kernel
     // knobs the llm tier never reads). Every module built from src/llm.zig
     // must receive one of these under the name "llm_build_options".
@@ -756,7 +768,14 @@ fn configureBlas(
     step: *std.Build.Step.Compile,
     blas_kind: BlasKind,
 ) void {
-    const module = step.root_module;
+    configureBlasModule(step.step.owner, step.root_module, blas_kind);
+}
+
+fn configureBlasModule(
+    b: *std.Build,
+    module: *std.Build.Module,
+    blas_kind: BlasKind,
+) void {
     switch (blas_kind) {
         .none => {},
         .accelerate => {
@@ -765,32 +784,32 @@ fn configureBlas(
         },
         .openblas => {
             module.link_libc = true;
-            addLibrarySearchPath(step, "/opt/homebrew/opt/openblas");
-            addLibrarySearchPath(step, "/usr/local/opt/openblas");
+            addLibrarySearchPath(b, module, "/opt/homebrew/opt/openblas");
+            addLibrarySearchPath(b, module, "/usr/local/opt/openblas");
             module.linkSystemLibrary("openblas", .{});
         },
         .mkl => {
             module.link_libc = true;
-            addLibrarySearchPath(step, "/opt/intel/oneapi/mkl/latest");
+            addLibrarySearchPath(b, module, "/opt/intel/oneapi/mkl/latest");
             module.linkSystemLibrary("mkl_rt", .{});
         },
         .blis => {
             module.link_libc = true;
-            addLibrarySearchPath(step, "/opt/homebrew/opt/blis");
-            addLibrarySearchPath(step, "/usr/local/opt/blis");
+            addLibrarySearchPath(b, module, "/opt/homebrew/opt/blis");
+            addLibrarySearchPath(b, module, "/usr/local/opt/blis");
             module.linkSystemLibrary("blis", .{});
         },
         .nvpl => {
             module.link_libc = true;
-            addLibrarySearchPath(step, "/opt/nvidia/hpc_sdk");
+            addLibrarySearchPath(b, module, "/opt/nvidia/hpc_sdk");
             module.linkSystemLibrary("nvpl_blas", .{});
         },
         .blas => {
             module.link_libc = true;
-            addLibrarySearchPath(step, "/opt/homebrew/opt/openblas");
-            addLibrarySearchPath(step, "/usr/local/opt/openblas");
-            addLibrarySearchPath(step, "/opt/homebrew/opt/blis");
-            addLibrarySearchPath(step, "/usr/local/opt/blis");
+            addLibrarySearchPath(b, module, "/opt/homebrew/opt/openblas");
+            addLibrarySearchPath(b, module, "/usr/local/opt/openblas");
+            addLibrarySearchPath(b, module, "/opt/homebrew/opt/blis");
+            addLibrarySearchPath(b, module, "/usr/local/opt/blis");
             module.linkSystemLibrary("blas", .{});
         },
     }
@@ -801,7 +820,14 @@ fn configureGpu(
     step: *std.Build.Step.Compile,
     gpu_kind: GpuKind,
 ) void {
-    const module = step.root_module;
+    configureGpuModule(b, step.root_module, gpu_kind);
+}
+
+fn configureGpuModule(
+    b: *std.Build,
+    module: *std.Build.Module,
+    gpu_kind: GpuKind,
+) void {
     switch (gpu_kind) {
         .none => {},
         .metal => {
@@ -822,17 +848,17 @@ fn configureGpu(
     }
 }
 
-fn addLibrarySearchPath(step: *std.Build.Step.Compile, prefix: []const u8) void {
+fn addLibrarySearchPath(b: *std.Build, module: *std.Build.Module, prefix: []const u8) void {
     // Only add directories that exist: zig 0.16's build runner treats any
     // stderr from a compile step (e.g. "unable to open library directory"
     // warnings for the missing Homebrew prefixes on Linux) as a step
     // failure, so a speculative search path breaks `-Dblas=openblas` exe
     // builds on Linux outright.
     const lib_dir = bPath(prefix, "lib");
-    std.Io.Dir.accessAbsolute(step.step.owner.graph.io, lib_dir, .{}) catch return;
+    std.Io.Dir.accessAbsolute(b.graph.io, lib_dir, .{}) catch return;
     const lib_path = std.Build.LazyPath{ .cwd_relative = lib_dir };
-    step.root_module.addLibraryPath(lib_path);
-    step.root_module.addRPath(lib_path);
+    module.addLibraryPath(lib_path);
+    module.addRPath(lib_path);
 }
 
 fn bPath(prefix: []const u8, suffix: []const u8) []const u8 {

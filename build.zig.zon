@@ -1,0 +1,8 @@
+.{
+    .name = .fucina,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0xf1039dfe7c588a04,
+    .dependencies = .{},
+    .paths = .{""},
+}
