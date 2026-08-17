@@ -78,48 +78,8 @@ away entirely.
 ## Getting started
 
 Requires [Zig 0.16.0](https://ziglang.org/download/) — the toolchain is
-pinned (`build.zig.zon` enforces the minimum); other versions will not build.
-
-### Run a model
-
-```sh
-git clone https://github.com/matteo-grella/fucina
-cd fucina
-
-# Grab a small model (or download the GGUF from your browser into models/)
-mkdir -p models
-hf download Qwen/Qwen3-0.6B-GGUF Qwen3-0.6B-Q8_0.gguf --local-dir models
-
-# Talk to it
-zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf \
-  --chat "What is the capital of France?" --no-think
-
-# Or serve it to any OpenAI client (chat completions + responses, SSE
-# streaming, JSON-schema constrained output with -Dllguidance=true)
-zig build lmserve -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --port 8080
-
-# No model files needed to verify the toolchain:
-zig build test
-```
-
-Build with `-Doptimize=ReleaseFast` whenever speed matters (Debug is 10–50x
-slower). Build options (`-Dbackend`, `-Dblas`, `-Dmax-threads`, `-Dgpu=metal`,
-…) are documented in
-[the manual's toolchain chapter](https://matteo-grella.github.io/fucina/docs/reference/02-toolchain-build-and-project-wiring/).
-
-**Builds are tuned to the machine that compiles them.** Without `-Dtarget`,
-Zig targets the host CPU with its full feature set — as if `-march=native`
-were always on — and Fucina's kernels specialize at compile time
-(NEON/dotprod arms on Apple Silicon, AVX2/AVX-VNNI on modern x86; unused
-arms are not in the binary). Two rules follow: run the binary on the
-machine you built it on, and if you must cross-compile, pass `-Dcpu` as
-well (e.g. `-Dtarget=x86_64-linux -Dcpu=x86_64_v3`) — a bare `-Dtarget`
-gets that architecture's *baseline* features and silently loses the fast
-kernels.
-
-### Use the library in your project
-
-Fucina is an ordinary Zig package:
+pinned (`build.zig.zon` enforces the minimum); other versions will not
+build. Fucina is an ordinary Zig package:
 
 ```sh
 zig fetch --save git+https://github.com/matteo-grella/fucina#v0.1.0
@@ -158,12 +118,27 @@ pre-1.0 and will change: pin the tag (or a commit) you fetch. Details,
 option reference, and the vendoring fallback:
 [REFERENCE §2.5](https://matteo-grella.github.io/fucina/docs/reference/02-toolchain-build-and-project-wiring/#25-consuming-fucina-from-another-project).
 
-## The applications
+Build with `-Doptimize=ReleaseFast` whenever speed matters (Debug is 10–50x
+slower) — that applies to your application exactly as to the in-tree
+binaries. **Builds are tuned to the machine that compiles them.** Without
+`-Dtarget`, Zig targets the host CPU with its full feature set — as if
+`-march=native` were always on — and Fucina's kernels specialize at compile
+time (NEON/dotprod arms on Apple Silicon, AVX2/AVX-VNNI on modern x86;
+unused arms are not in the binary). Two rules follow: run the binary on the
+machine you built it on, and if you must cross-compile, pass `-Dcpu` as
+well (e.g. `-Dtarget=x86_64-linux -Dcpu=x86_64_v3`) — a bare `-Dtarget`
+gets that architecture's *baseline* features and silently loses the fast
+kernels.
+
+## What the library enables today
 
 With the tensor core in place, Fucina grows and gets tested through real
 applications, so the runtime and the things built on it develop side by
-side. Every family below is validated against its reference
-implementation, and that discipline is the core of the project:
+side. Every family below is ordinary consumer code of the public API — the
+same `Tensor`/`ExecContext` surface from Getting started — so `examples/`
+doubles as a corpus of real usage: open any `main.zig` and read how the
+library is actually driven. And every family is validated against its
+reference implementation, a discipline that is the core of the project:
 token-ID-exact tokenizers vs `llama-tokenize`, logit-parity oracles vs
 llama.cpp, byte-exact quantization encoders vs ggml, byte-identical GGUF
 re-emit. Each family's folder under `examples/` carries its own README
@@ -171,15 +146,31 @@ with copy-paste commands; [docs/RUNNING-MODELS.md](docs/RUNNING-MODELS.md)
 is the index — verified weight downloads and licenses, plus the machinery
 shared across runners (expert streaming, GPU offload, global knobs).
 
-These applications will eventually graduate into their own repositories.
-The known debt of the in-tree phase is that generic operations accumulate
-inside the examples — resamplers, spectrograms, reference-parity image
-resizing — and graduation starts with an audit of which of those are
-really tensor ops that belong in the core. Research experiments that lack
-a reference oracle live on `research/*` branches rather than `main` —
-currently `research/nla`, a natural-language autoencoder study
-(text→vector→text on a Qwen3 GGUF) built on the trainer's hidden-state
-seams.
+Run one in two minutes:
+
+```sh
+git clone https://github.com/matteo-grella/fucina
+cd fucina
+
+# Grab a small model (or download the GGUF from your browser into models/)
+mkdir -p models
+hf download Qwen/Qwen3-0.6B-GGUF Qwen3-0.6B-Q8_0.gguf --local-dir models
+
+# Talk to it
+zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf \
+  --chat "What is the capital of France?" --no-think
+
+# Or serve it to any OpenAI client (chat completions + responses, SSE
+# streaming, JSON-schema constrained output with -Dllguidance=true)
+zig build lmserve -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --port 8080
+
+# No model files needed to verify the toolchain:
+zig build test
+```
+
+Build options (`-Dbackend`, `-Dblas`, `-Dmax-threads`, `-Dgpu=metal`, …)
+are documented in
+[the manual's toolchain chapter](https://matteo-grella.github.io/fucina/docs/reference/02-toolchain-build-and-project-wiring/).
 
 ### Language models
 
@@ -209,6 +200,16 @@ pinned-set + LRU tier, bit-identical to the resident path — that is how the
 | **[LocateAnything-3B](examples/locate_anything/README.md)** | NVIDIA's open-vocabulary detection VLM: text-prompted labeled boxes, byte-compatible with the reference CLI |
 | **[facedetect](examples/facedetect/README.md)** (insightface buffalo_l) | face detection, recognition, gender/age, anti-spoofing, and dense landmarks |
 | **[Neural Amp Modeler](examples/nam/README.md)** | `.nam` guitar-amp profiles: run, train, export, live amp simulation |
+
+These applications will eventually graduate into their own repositories.
+The known debt of the in-tree phase is that generic operations accumulate
+inside the examples — resamplers, spectrograms, reference-parity image
+resizing — and graduation starts with an audit of which of those are
+really tensor ops that belong in the core. Research experiments that lack
+a reference oracle live on `research/*` branches rather than `main` —
+currently `research/nla`, a natural-language autoencoder study
+(text→vector→text on a Qwen3 GGUF) built on the trainer's hidden-state
+seams.
 
 ## Performance
 
