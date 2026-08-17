@@ -666,9 +666,11 @@ Generic helpers stay flat in `src/llm/`:
 
 `build.zig` wires two library modules (`fucina` from `src/fucina.zig`,
 `fucina_llm` from `src/llm.zig`) plus the `bench_raw` (`src/bench_raw.zig`)
-and `raw_backend` (rooted at `src/backend.zig`) microbench modules. There is
-no `build.zig.zon`. The full step list and options live in `AGENTS.md`; the
-verification-relevant steps are:
+and `raw_backend` (rooted at `src/backend.zig`) microbench modules.
+`build.zig.zon` names the package `.fucina`, so both library modules are
+consumable from another project via `zig fetch` + `b.dependency`
+(REFERENCE.md §2.5). The full step list and options live in `AGENTS.md`;
+the verification-relevant steps are:
 
 - `zig build test` (+ `-Dbackend=scalar`, `-Dblas=none`, optimize variants):
   drives nine test roots — `src/fucina.zig`, `src/llm.zig`, and the
@@ -723,8 +725,9 @@ behavioral tests, and `arch-check` ignores the imports inside them.
 
 ## Current Production Gaps
 
-- No stable external API contract or versioning; no package manifest or
-  install story beyond local `zig build`.
+- No stable external API contract: the package manifest and 0.x tags give
+  consumers a pin (`zig fetch --save git+...#v0.1.0`), not a semver
+  stability promise — the public API may change between tags.
 - The CUDA backend (`-Dgpu=cuda`, Linux) covers f32/f16 GEMM + quantized
   dense/MoE prefill + opt-in decode GEMV; no attention/KV offload and no
   distributed execution. Mixed-precision training (16-bit params and

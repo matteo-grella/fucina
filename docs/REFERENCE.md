@@ -288,8 +288,10 @@ construction, ownership, tagged contraction, backward — is unpacked in
 
 ### 1.5 Stability
 
-Fucina is a production-oriented core, not a versioned product: there is no
-package manifest, no semver contract, and the public API may change (see
+Fucina is a production-oriented core, not a finished 1.0 product: the
+package manifest and 0.x tags (`v0.1.0`) exist so consumers can pin a
+version (§2.5), but a 0.x tag is a pin, not a semver stability contract —
+the public API may change between tags (see
 *Current Production Gaps* in [ARCHITECTURE.md](ARCHITECTURE.md)). This
 reference describes the tree it ships with; sections marked *internal*
 (§7 library level, §8, backend internals in §9) document machinery that is
@@ -300,8 +302,11 @@ explicitly not a stable API.
 ### 2.1 Toolchain (`AGENTS.md`, `README.md`)
 
 Fucina is pinned to **Zig 0.16.0** — `zig version` must print `0.16.0`; other
-versions do not build. There is no `build.zig.zon` and no package manifest:
-every module, executable, and option is wired directly in `build.zig`. There
+versions do not build. `build.zig.zon` names the package `.fucina` and its
+`minimum_zig_version = "0.16.0"` turns an older toolchain into a proper
+error (a newer toolchain passes that check but is equally unsupported — the
+pin is exact). Every module, executable, and option is wired in
+`build.zig`; the manifest has no dependencies of its own. There
 is also no C/C++ build system — the only non-Zig translation units are a few
 vendored shims (`src/backend/metal/shim.m`, the miniaudio/MIDI shims under
 `examples/`) compiled by `build.zig` itself when the relevant option or
@@ -586,8 +591,43 @@ itself is centralized in six helpers applied per executable:
 
 ### 2.5 Consuming Fucina from another project
 
-There is no package manifest, so today a consumer vendors the repository
-(git submodule, subtree, or plain copy) and wires the modules in its own
+Fucina is an ordinary Zig package: `build.zig.zon` names it `.fucina`, the
+repository is tagged (`v0.1.0`), and both library modules are exported by
+`build.zig` (`b.addModule`), so the standard path is the package manager.
+From the consumer project:
+
+```sh
+zig fetch --save git+https://github.com/matteo-grella/fucina#v0.1.0
+```
+
+```zig
+// build.zig (consumer) — verified against Zig 0.16.0
+const fucina_dep = b.dependency("fucina", .{
+    .target = target,
+    .optimize = optimize,
+    // Any §2.2 build option passes through by name, e.g.:
+    //   .blas = .none, .backend = .native, .@"max-threads" = @as(usize, 4),
+});
+exe.root_module.addImport("fucina", fucina_dep.module("fucina"));
+exe.root_module.addImport("fucina_llm", fucina_dep.module("fucina_llm")); // optional
+```
+
+`@import("fucina")` / `@import("fucina_llm")` then work exactly as in
+every snippet of this reference; omit the `fucina_llm` import for
+tensor/training-only consumers. In dependency builds the exported modules
+carry their own BLAS/GPU link inputs (link inputs propagate through module
+imports), so the default macOS configuration links Accelerate with no
+extra consumer steps and `-Dgpu=metal` brings its shim along — no
+`configureBlas`/`configureGpu` replication. Option defaults match the
+in-tree build (§2.2); pass `.blas = .none` for a zero-system-dependency
+build. Two limits: `.llguidance = true` is not supported through the
+package manager (the vendored cargo build is designed for an in-tree
+checkout — vendor the repo for constrained decoding), and the API is
+pre-1.0 (§1.5) — pin the tag or a commit (`#<sha>`) and expect churn
+between tags.
+
+**Vendoring fallback.** A consumer can instead vendor the repository
+(git submodule, subtree, or plain copy) and wire the modules in its own
 `build.zig` with the same `std.Build` calls the in-tree build uses. The
 option enums must be re-declared, but only the *field names* matter — the
 fucina sources switch on them by name — and all eight keys are required
