@@ -1100,6 +1100,13 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             return Tensor(.{ .dtype = target_dtype, .tags = tags }).fromTensor(ctx, value);
         }
 
+        /// True when the storage is dense row-major in logical order
+        /// (innermost stride 1) — the layout `data`/`dataConst` require;
+        /// false for strided views (permutes, broadcasts, inner narrows).
+        pub fn isContiguous(self: *const Self) bool {
+            return self.value.isContiguous();
+        }
+
         pub fn materialize(self: *const Self, ctx: *ExecContext) !Self {
             var value = try ctx.materialize(self.asRawTensor());
             errdefer value.deinit();
@@ -1122,7 +1129,7 @@ fn FloatTensor(comptime tags_spec: anytype) type {
         /// read-only where the distinction matters, or use `materialize`
         /// when a guaranteed copy is wanted.
         pub fn contiguous(self: *const Self, ctx: *ExecContext) !Self {
-            if (!self.asRawTensor().isContiguous()) return self.materialize(ctx);
+            if (!self.isContiguous()) return self.materialize(ctx);
             var value = try self.value.cloneView();
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad(), IdentityBackward(tags), .{ ctx.allocator, self.grad_state });
@@ -4704,6 +4711,10 @@ fn QuantizedConstantTensor(comptime tags_spec: anytype, comptime tensor_dtype: D
             return Tensor(.{ .dtype = target_dtype, .tags = tags }).fromTensor(ctx, value);
         }
 
+        pub fn isContiguous(self: *const Self) bool {
+            return self.value.isContiguous();
+        }
+
         pub fn materialize(self: *const Self, ctx: *ExecContext) !Self {
             var value = try ctx.materializeTyped(tensor_dtype, self.asRawTensor());
             errdefer value.deinit();
@@ -5006,6 +5017,7 @@ fn TypedScalarConstantTensor(comptime tags_spec: anytype, comptime tensor_dtype:
 
         pub const dim = typedConstantDim;
         pub const shape = typedConstantShape;
+        pub const isContiguous = typedConstantIsContiguous;
         pub const materialize = typedConstantMaterialize;
         pub const withTags = typedConstantWithTags;
         pub const alignTo = typedConstantAlignTo;
@@ -5152,6 +5164,7 @@ fn TypedFloatConstantTensor(comptime tags_spec: anytype, comptime tensor_dtype: 
 
         pub const dim = typedConstantDim;
         pub const shape = typedConstantShape;
+        pub const isContiguous = typedConstantIsContiguous;
         pub const materialize = typedConstantMaterialize;
         pub const withTags = typedConstantWithTags;
         pub const alignTo = typedConstantAlignTo;
@@ -5289,6 +5302,10 @@ fn typedConstantShape(self: anytype) [TensorObject(@TypeOf(self)).tensor_rank]us
         out[i] = self.asRawTensor().shape.at(i);
     }
     return out;
+}
+
+fn typedConstantIsContiguous(self: anytype) bool {
+    return self.value.isContiguous();
 }
 
 fn typedConstantMaterialize(self: anytype, ctx: *ExecContext) !TensorObject(@TypeOf(self)) {

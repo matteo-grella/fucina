@@ -9217,6 +9217,7 @@ test "public Tensor contiguous borrows contiguous layouts and materializes strid
     defer c.deinit();
 
     // Already contiguous: zero-copy alias of the same storage bytes.
+    try std.testing.expect(c.isContiguous());
     var cc = try c.contiguous(&ctx);
     defer cc.deinit();
     try std.testing.expectEqual((try c.dataConst()).ptr, (try cc.dataConst()).ptr);
@@ -9226,11 +9227,27 @@ test "public Tensor contiguous borrows contiguous layouts and materializes strid
     // returns an owned copy in logical order.
     var t = try c.permuteTo(&ctx, .{ .col, .row });
     defer t.deinit();
+    try std.testing.expect(!t.isContiguous());
     try std.testing.expectError(error.UnsupportedView, t.dataConst());
     var tc = try t.contiguous(&ctx);
     defer tc.deinit();
+    try std.testing.expect(tc.isContiguous());
     try std.testing.expect((try tc.dataConst()).ptr != (try c.dataConst()).ptr);
     try std.testing.expectEqualSlices(f32, &.{ 1, 4, 2, 5, 3, 6 }, try tc.dataConst());
+
+    // The predicate is uniform across dtype branches.
+    var ti = try Tensor(.{ .dtype = .i64, .tags = .{ .row, .col } }).fromSlice(&ctx, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    defer ti.deinit();
+    try std.testing.expect(ti.isContiguous());
+    var tit = try ti.permuteTo(&ctx, .{ .col, .row });
+    defer tit.deinit();
+    try std.testing.expect(!tit.isContiguous());
+    var th = try Tensor(.{ .dtype = .f16, .tags = .{ .row, .col } }).fromSlice(&ctx, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    defer th.deinit();
+    try std.testing.expect(th.isContiguous());
+    var tht = try th.permuteTo(&ctx, .{ .col, .row });
+    defer tht.deinit();
+    try std.testing.expect(!tht.isContiguous());
 
     // Differentiable identity through a strided source view: gradient lands
     // in the source's own layout.

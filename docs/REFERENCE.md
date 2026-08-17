@@ -1314,6 +1314,7 @@ pool mid-forward (see [MEMORY-MODEL.md](MEMORY-MODEL.md) and §6).
 pub fn detach(self: *const Self, ctx: *ExecContext) !Self       // f32 + typed-float branches
 pub fn materialize(self: *const Self, ctx: *ExecContext) !Self  // all branches
 pub fn contiguous(self: *const Self, ctx: *ExecContext) !Self   // f32 branch only
+pub fn isContiguous(self: *const Self) bool                     // all branches
 ```
 
 `detach` returns a no-grad tensor **sharing storage** with `self` (a
@@ -1327,7 +1328,10 @@ already-contiguous tensor returns a **zero-copy alias** of the same storage
 visible through both), a strided view returns `materialize(ctx)` — an
 independent snapshot. Either way the result is caller-owned (`deinit` it),
 contiguous, and `dataConst`-safe; use `materialize` when a guaranteed copy
-is wanted.
+is wanted. `isContiguous` is the predicate behind that branch — true when
+storage is dense row-major in logical order (innermost stride 1), i.e. the
+layout `data`/`dataConst` require; false for strided views (permutes,
+broadcasts, inner narrows).
 
 ### 3.5 Data access (`src/ag/tensor.zig`, `src/tensor.zig`)
 
@@ -1907,7 +1911,8 @@ methods are documented above; §4 covers every math/NN op in depth.
 `arange`, `linspace`, `oneHot`, `eye`, `rand`, `uniform`, `randn`, `normal`,
 `bernoulli`, `gumbel`,
 `deinit`, `asRawTensor`, `item`, `data`, `dataConst`,
-`copyTo`, `detach`, `materialize`, `contiguous`, `requiresGrad`, `zeroGrad`,
+`copyTo`, `detach`, `materialize`, `contiguous`, `isContiguous`,
+`requiresGrad`, `zeroGrad`,
 `backward`, `backwardWithGrad`, `grad`, `gradView`, `axis`, `hasTag`, `dim`,
 `shape`, `to`,
 `withTags`, `viewWithStrides`, `alignTo`, `permuteTo`, `transpose`,
@@ -1958,7 +1963,7 @@ is the N-ary companion of `einsum` (§4.8).
 `fromSlice`, `fromBorrowedConstSlice`, `empty`, `zeros`, `ones`,
 `emptyLike`, `zerosLike`, `onesLike`, `item`,
 `data`, `dataConst`, `copyTo`, `axis`, `hasTag`, `deinit`, `asRawTensor`,
-`requiresGrad`, `dim`, `shape`, `materialize`, `withTags`, `alignTo`,
+`requiresGrad`, `dim`, `shape`, `isContiguous`, `materialize`, `withTags`, `alignTo`,
 `permuteTo`, `transpose`, `insertAxis`, `squeeze`, `broadcastTo`, `gather`,
 `narrow`, `concat`, `setSlice`, `setRows` — all §3 — plus `to` (§3.8), the
 integer forward math `add`, `sub`, `mul`, `maximum`, `minimum`,
@@ -1997,7 +2002,8 @@ reductions `max`, `min`, `prod`, `variance`, `logsumexp` (f32 results,
 **Block-quantized branch:** `constant`, `fromTensor`, `fromBlocks`,
 `fromStorageSlice`, `fromBorrowedBlocks`, `deinit`, `asRawTensor`, `data`,
 `dataConst`, `copyTo`, `requiresGrad`, `axis`, `hasTag`, `dim`, `shape`,
-`withTags`, `to`, `materialize`, `concat`, `getRows` — all §3 — plus
+`isContiguous`, `withTags`, `to`, `materialize`, `concat`, `getRows` — all
+§3 — plus
 `packRhs`, `packRhsLayout` (packed matmul RHS containers; §10, used by
 `dotPacked` in §4). The same root helper `fucina.PackedRhs(dtype)` names
 the f32/f16/bf16 dense pack and each quantized `packRhs` return type (§10).
