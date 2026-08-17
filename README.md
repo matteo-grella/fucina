@@ -258,24 +258,33 @@ JSON-schema/regex/Lark constrained decoding through the vendored
 
 ## Training
 
-The runtime trains as well as it infers: an eager autograd engine with exec
-scopes, activation checkpointing, deterministic dropout (counter-based RNG),
-and SGD/AdamW/Muon/APOLLO optimizers golden-parity-tested against their
-reference implementations. LoRA fine-tuning of a quantized Qwen3 GGUF runs
-end-to-end on CPU, and the loop closes: fine-tune → merge → quantize →
-the exported GGUF loads and answers in llama.cpp.
+Fine-tuning here means: on the machine you already run models on. LoRA
+fine-tuning of a quantized Qwen3 GGUF runs end-to-end on a CPU laptop (a
+LoRA step on Qwen3-0.6B takes under a second on an M1 Max: ~932 ms, 38.2
+tok/s supervised throughput), with no GPU, no Python stack, and no
+separate training rig, inside the same runtime that serves the result. The
+loop closes beyond Fucina itself: fine-tune → merge → quantize → the
+exported GGUF loads and answers in llama.cpp.
 
 ```sh
 zig build finetune -Doptimize=ReleaseFast -- --steps 30
 ```
 
-Gradient-free training is a first-class alternative: `fucina.es` implements
-evolution strategies at scale (arXiv:2509.24372) — seed-regenerated noise,
-forward passes only, algebra cross-checked bitwise against the reference —
-and `zig build es-finetune` fine-tunes the same GGUF with it. Because
-autograd, KV-cache plumbing, and serving live in one runtime, the same
-trainer also implements **Cartridges** (arXiv:2506.06266): corpus
-compression into a trained KV prefix by in-process self-study distillation
+That works because the runtime trains as well as it infers: an eager
+autograd engine with exec scopes, activation checkpointing, deterministic
+dropout (counter-based RNG), and SGD/AdamW/Muon/APOLLO optimizers
+golden-parity-tested against their reference implementations.
+
+One runtime for training, inference, and serving also enables modes a GPU
+fine-tuning stack does not offer. Gradient-free training is first-class:
+`fucina.es` implements evolution strategies at scale (arXiv:2509.24372)
+with seed-regenerated noise and forward passes only (no backward memory at
+all), algebra cross-checked bitwise against the reference; `zig build
+es-finetune` fine-tunes the same GGUF with it, under rule-based (R1-style)
+or loss-based rewards. And because autograd, KV-cache plumbing, and
+serving share one process, the same trainer implements **Cartridges**
+(arXiv:2506.06266): compress a corpus into a small trained KV prefix by
+in-process self-study distillation, then serve it like any cached prompt
 (`zig build cartridge`; [docs/CARTRIDGES.md](docs/CARTRIDGES.md)).
 
 [docs/TRAINING.md](docs/TRAINING.md) is the full guide, including how the
