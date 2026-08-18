@@ -1,7 +1,8 @@
 //! Behavioral tests for the Qwen3 LoRA trainer (`qwen3_train.zig`) on a
 //! synthetic tiny dense model (no GGUF dependency): inference parity at LoRA
-//! init, loss descent, frozen-weight immutability, checkpoint bitwise parity,
-//! full-stack finite-difference gradcheck, label masking, adapter
+//! init, the serving-format parity gate (q8_0/q4_k/fused arms at zero
+//! delta), loss descent, frozen-weight immutability, checkpoint bitwise
+//! parity, full-stack finite-difference gradcheck, label masking, adapter
 //! persistence, and MoE rejection.
 const std = @import("std");
 const fucina = @import("fucina");
@@ -64,6 +65,108 @@ fn toBf16Weight(ctx: *ExecContext, w: *weights.LinearWeight) !void {
     errdefer converted.deinit();
     w.deinit();
     w.* = .{ .bf16 = converted };
+}
+
+const quant_encode = fucina.internal.backend_mod.quantized_matmul;
+
+/// Serving formats the zero-delta parity gate covers (block sizes 32 / 256).
+const ServingFormat = enum { q8_0, q4_k };
+
+/// Replace an f32 LinearWeight with the REAL serving arm for `format`: rows
+/// encoded by the same quantizers a GGUF conversion uses, then loaded through
+/// `LinearWeight.load` — the packed-kernel weight type a quantized GGUF
+/// serves with (load copies the blocks; the temp buffer is freed here).
+fn toServingQuant(ctx: *ExecContext, w: *weights.LinearWeight, comptime format: ServingFormat) !void {
+    const Block = switch (format) {
+        .q8_0 => fucina.BlockQ8_0,
+        .q4_k => fucina.BlockQ4_K,
+    };
+    const block_len: usize = switch (format) {
+        .q8_0 => 32,
+        .q4_k => 256,
+    };
+    const src = switch (w.*) {
+        .f32 => |*t| t,
+        else => unreachable, // tests only convert the synthetic f32 weights
+    };
+    const out_dim = src.dim(.out);
+    const in_dim = src.dim(.in);
+    std.debug.assert(in_dim % block_len == 0);
+    const values = try src.dataConst();
+    const blocks = try ctx.allocator.alloc(Block, values.len / block_len);
+    defer ctx.allocator.free(blocks);
+    switch (format) {
+        .q8_0 => try quant_encode.quantizeRowQ8_0Into(blocks, values),
+        .q4_k => try quant_encode.quantizeRowQ4_KInto(blocks, values),
+    }
+    const info = fucina.gguf.TensorInfo{
+        .name = "synthetic",
+        .dims = .{ in_dim, out_dim, 0, 0 },
+        .n_dims = 2,
+        .ggml_type = switch (format) {
+            .q8_0 => .q8_0,
+            .q4_k => .q4_k,
+        },
+        .offset = 0,
+        .data = std.mem.sliceAsBytes(blocks),
+    };
+    const loaded = try weights.LinearWeight.load(ctx, &info, out_dim, in_dim);
+    w.deinit();
+    w.* = loaded;
+}
+
+/// Convert every projection linear + the output head to `format` (the
+/// embedding stays f32: `getRowsAs` is the same function on both paths, so
+/// it cannot contribute a trainer-vs-inference gap).
+fn quantizeModelLinears(ctx: *ExecContext, model: *qwen3.Model, comptime format: ServingFormat) !void {
+    try toServingQuant(ctx, &model.output, format);
+    for (model.layers) |*layer| {
+        const attn = &layer.attn_proj.separate;
+        try toServingQuant(ctx, &attn.q_proj, format);
+        try toServingQuant(ctx, &attn.k_proj, format);
+        try toServingQuant(ctx, &attn.v_proj, format);
+        try toServingQuant(ctx, &layer.o_proj, format);
+        const dense = &layer.ffn.dense;
+        const ffn_in = &dense.input_proj.separate;
+        try toServingQuant(ctx, &ffn_in.gate_proj, format);
+        try toServingQuant(ctx, &ffn_in.up_proj, format);
+        try toServingQuant(ctx, &dense.down_proj, format);
+    }
+}
+
+/// Apply the load-time fusion decision to a synthetic layer: separate q/k/v
+/// and gate/up become the `.fused` union arms (fuseLinear consumes the
+/// parts). Errors if fusion declines — the gate must not silently degrade
+/// to re-testing the separate arms.
+fn fuseLayerProjections(ctx: *ExecContext, layer: *Layer) !void {
+    const attn = &layer.attn_proj.separate;
+    var qkv_parts = [_]*weights.LinearWeight{ &attn.q_proj, &attn.k_proj, &attn.v_proj };
+    const fused_qkv = (try weights.fuseLinear(ctx, &qkv_parts)) orelse return error.FusionDeclined;
+    layer.attn_proj = .{ .fused = fused_qkv };
+
+    const dense = &layer.ffn.dense;
+    const ffn_in = &dense.input_proj.separate;
+    var gu_parts = [_]*weights.LinearWeight{ &ffn_in.gate_proj, &ffn_in.up_proj };
+    const fused_gu = (try weights.fuseLinear(ctx, &gu_parts)) orelse return error.FusionDeclined;
+    dense.input_proj = .{ .fused = fused_gu };
+}
+
+/// Zero-delta parity harness: inference `forwardLastLogits` vs the trainer's
+/// `evalLastLogits` on the SAME model, returning the max abs logit diff —
+/// the measured trainer-vs-serving gap for whatever formats `model` carries.
+fn zeroDeltaMaxDiff(ctx: *ExecContext, model: *const qwen3.Model, tokens: []const usize) !f32 {
+    var trainer = try DefaultTrainer.init(ctx, model, tiny_lora, 1);
+    defer trainer.deinit();
+    var ref = try model.forwardLastLogits(ctx, tokens);
+    defer ref.deinit();
+    var got = try trainer.evalLastLogits(ctx, tokens);
+    defer got.deinit();
+    const ref_values = try ref.dataConst();
+    const got_values = try got.dataConst();
+    try std.testing.expectEqual(ref_values.len, got_values.len);
+    var max_diff: f32 = 0;
+    for (ref_values, got_values) |e, a| max_diff = @max(max_diff, @abs(e - a));
+    return max_diff;
 }
 
 fn randVector(ctx: *ExecContext, seed: u64, comptime tag: @TypeOf(.tag), len: usize) !fucina.Tensor(.{tag}) {
@@ -313,6 +416,93 @@ test "bf16 frozen base: trainable forward matches inference and loss decreases" 
         if (step_i == 0) first = last;
     }
     try std.testing.expect(last < first - 0.1);
+}
+
+/// q4_k-compatible geometry: every projection's in-dim is one 256-wide
+/// superblock (the k-quant row-block size); out-dims are unconstrained.
+const q4k_config = qwen3.Config{
+    .vocab_size = 64,
+    .hidden_size = 256,
+    .intermediate_size = 256,
+    .num_layers = 2,
+    .num_attention_heads = 2,
+    .num_key_value_heads = 1,
+    .head_dim = 128,
+    .rms_norm_eps = 1e-6,
+    .rope_theta = 10_000,
+};
+
+const parity_tokens = [_]usize{ 3, 17, 60, 5, 22, 41, 7, 0 };
+
+test "serving-format parity gate: q8_0 packed weights at zero delta" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try buildTinyModel(&ctx, 0xBEEF);
+    defer model.deinit();
+    try quantizeModelLinears(&ctx, &model, .q8_0);
+
+    // Both paths read the same q8_0 block memory; the residue is kernel
+    // routing (packed linearSeq vs the frozen-RHS dot). Measured 2.4e-7
+    // max logit diff on aarch64 — the bound leaves cross-arch margin while
+    // still certifying an ulp-scale gap, not a semantic divergence.
+    const diff = try zeroDeltaMaxDiff(&ctx, &model, &parity_tokens);
+    try std.testing.expect(diff < 1e-4);
+}
+
+test "serving-format parity gate: q4_k superblock weights at zero delta" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try buildTinyModelWithConfig(&ctx, q4k_config, 0x4B4B);
+    defer model.deinit();
+    try quantizeModelLinears(&ctx, &model, .q4_k);
+
+    // Measured BITWISE equal on aarch64 at this geometry (seq 8 stays below
+    // the m-dependent packed-kernel thresholds); the bound tolerates a
+    // packed route engaging on other arches.
+    const diff = try zeroDeltaMaxDiff(&ctx, &model, &parity_tokens);
+    try std.testing.expect(diff < 1e-4);
+}
+
+test "serving-format parity gate: fused QKV + gate/up at zero delta (f32 and q8_0)" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    // f32 fused arms: the trainer splits its fused-QKV / gate-up dot through
+    // the SAME qwen3.splitQkv / splitGateUp the inference forward uses.
+    var model = try buildTinyModel(&ctx, 0xF05E);
+    defer model.deinit();
+    for (model.layers) |*layer| try fuseLayerProjections(&ctx, layer);
+    // Measured 9.5e-7 max logit diff on aarch64 (GEMM row-blocking only).
+    const diff_f32 = try zeroDeltaMaxDiff(&ctx, &model, &parity_tokens);
+    try std.testing.expect(diff_f32 < 1e-4);
+
+    // q8_0 fused arms (the 0.6B-q8 serving shape): quantize the separate
+    // parts first, then apply the same load-time fusion decision.
+    var model_q = try buildTinyModel(&ctx, 0xF05E);
+    defer model_q.deinit();
+    try quantizeModelLinears(&ctx, &model_q, .q8_0);
+    for (model_q.layers) |*layer| try fuseLayerProjections(&ctx, layer);
+    // Measured 2.4e-7 max logit diff on aarch64 — same residue as the
+    // separate-arm q8_0 gate.
+    const diff_q8 = try zeroDeltaMaxDiff(&ctx, &model_q, &parity_tokens);
+    try std.testing.expect(diff_q8 < 1e-4);
 }
 
 test "frozen weights stay bitwise unchanged; only adapters carry grads" {

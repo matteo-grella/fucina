@@ -560,6 +560,14 @@ independent angles:
   seq 64 (tiled attention path): loss 1.7e-7 relative native / 8.5e-8
   scalar; worst grad element 2.7e-7 — >100x headroom inside the test
   tolerances on both backends. No architecture mismatch found.
+- **Serving-format parity gate** (`src/llm/qwen3/train_tests.zig`): at
+  zero-delta LoRA init the trainer forward is compared against the
+  inference `forwardLastLogits` on the SAME model with the projections and
+  head in the real serving arms — q8_0 packed (separate and fused
+  QKV/gate-up), q4_k superblocks, fused f32. Measured max logit diff on
+  aarch64: 2.4e-7 (q8_0), bitwise 0 (q4_k), 9.5e-7 (fused f32); asserted
+  at 1e-4 for cross-arch margin. The training-vs-serving residue is
+  kernel-routing reassociation at ulp scale, not a semantic divergence.
 - **Real-model evidence** (`zig build finetune -Doptimize=ReleaseFast --
   --verify-grads`, replaces the training run). Five causal checks through
   the production path (quantized frozen weights, tiled attention, fused
