@@ -13584,7 +13584,7 @@ Module-level symbols: `Error` (`MoeUnsupported`, `ExecScopeRequired`,
 `InvalidSequenceLength`, `LabelLengthMismatch`, `InvalidLayerRange`,
 `InvalidInjection`, `InvalidCartridge`, `InvalidCapture`, `InvalidPacking`,
 `InvalidEngram`, `CartridgeCheckpointUnsupported`), `Targets`,
-`ignore_index`, `ModelLayer` (test seam:
+`ignore_index`, `ModelLayer` (alias of the exported `qwen3.Layer` —
 the model's per-block layer type), `Hidden`
 (`fucina.Tensor(.{ .seq, .embed })`), `Injection` (`{ pos, row }` — a
 differentiable single-row embedding override), `ForwardOptions`

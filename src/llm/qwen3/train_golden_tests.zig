@@ -3232,38 +3232,6 @@ fn goldenVector(ctx: *ExecContext, comptime tag: @TypeOf(.tag), values: []const 
     return fucina.Tensor(.{tag}).fromSlice(ctx, .{values.len}, values);
 }
 
-/// Field-wise teardown for error paths (Layer's own deinit is private to
-/// qwen3.zig) — same shape as qwen3_train_tests.zig's destroyLayer.
-fn destroyLayer(layer: *Layer) void {
-    switch (layer.ffn) {
-        .dense => |*dense| {
-            dense.down_proj.deinit();
-            switch (dense.input_proj) {
-                .separate => |*sep| {
-                    sep.up_proj.deinit();
-                    sep.gate_proj.deinit();
-                },
-                .fused => |*w| w.deinit(),
-            }
-        },
-        .moe => unreachable, // golden layers are dense only
-    }
-    layer.o_proj.deinit();
-    switch (layer.attn_proj) {
-        .separate => |*sep| {
-            sep.v_proj.deinit();
-            sep.k_proj.deinit();
-            sep.q_proj.deinit();
-        },
-        .fused => |*w| w.deinit(),
-    }
-    layer.ffn_norm.deinit();
-    layer.k_norm.deinit();
-    layer.q_norm.deinit();
-    layer.attn_norm.deinit();
-    layer.* = undefined;
-}
-
 fn buildGoldenLayer(ctx: *ExecContext, data: *const LayerGolden) !Layer {
     const cfg = golden_config;
     const q_dim = cfg.num_attention_heads * cfg.head_dim;
@@ -3329,7 +3297,7 @@ fn buildGoldenModel(ctx: *ExecContext) !qwen3.Model {
     const layers = try allocator.alloc(Layer, cfg.num_layers);
     errdefer allocator.free(layers);
     var built: usize = 0;
-    errdefer for (layers[0..built]) |*layer| destroyLayer(layer);
+    errdefer for (layers[0..built]) |*layer| layer.deinit();
     for (layers, &layer_goldens) |*layer, *data| {
         layer.* = try buildGoldenLayer(ctx, data);
         built += 1;

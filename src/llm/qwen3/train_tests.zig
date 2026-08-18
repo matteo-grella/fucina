@@ -73,38 +73,6 @@ fn randVector(ctx: *ExecContext, seed: u64, comptime tag: @TypeOf(.tag), len: us
     return fucina.Tensor(.{tag}).fromSlice(ctx, .{len}, values);
 }
 
-/// Field-wise teardown for error paths in `buildTinyModel` (Layer's own
-/// deinit is private to qwen3.zig; fields are reachable, decls are not).
-fn destroyLayer(layer: *Layer) void {
-    switch (layer.ffn) {
-        .dense => |*dense| {
-            dense.down_proj.deinit();
-            switch (dense.input_proj) {
-                .separate => |*sep| {
-                    sep.up_proj.deinit();
-                    sep.gate_proj.deinit();
-                },
-                .fused => |*w| w.deinit(),
-            }
-        },
-        .moe => unreachable, // tests build dense layers only
-    }
-    layer.o_proj.deinit();
-    switch (layer.attn_proj) {
-        .separate => |*sep| {
-            sep.v_proj.deinit();
-            sep.k_proj.deinit();
-            sep.q_proj.deinit();
-        },
-        .fused => |*w| w.deinit(),
-    }
-    layer.ffn_norm.deinit();
-    layer.k_norm.deinit();
-    layer.q_norm.deinit();
-    layer.attn_norm.deinit();
-    layer.* = undefined;
-}
-
 fn buildTinyLayer(ctx: *ExecContext, cfg: qwen3.Config, seed: u64) !Layer {
     const q_dim = cfg.num_attention_heads * cfg.head_dim;
     const kv_dim = cfg.num_key_value_heads * cfg.head_dim;
@@ -192,7 +160,7 @@ fn buildTinyModelPicked(ctx: *ExecContext, cfg_in: qwen3.Config, seed: u64, laye
     const layers = try allocator.alloc(Layer, layer_indices.len);
     errdefer allocator.free(layers);
     var built: usize = 0;
-    errdefer for (layers[0..built]) |*layer| destroyLayer(layer);
+    errdefer for (layers[0..built]) |*layer| layer.deinit();
     for (layers, layer_indices) |*layer, layer_i| {
         layer.* = try buildTinyLayer(ctx, cfg, rng.at(seed, layer_i));
         built += 1;

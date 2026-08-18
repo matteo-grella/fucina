@@ -475,8 +475,11 @@ selected at comptime by `targets` (q/k/v/o/gate/up/down). Frozen projections
 route through the differentiable const-RHS `dot` on each weight's plain value
 tensor — the packed `linearSeq` fast paths stay inference-only — so gradients
 flow to the f32 activations only and weight memory stays quantized/f16. The
-base model is never written; the only parameters are the adapters' A/B. MoE
-configs are rejected (`Error.MoeUnsupported`) in v1.
+trainer reads the model's exported layer structs directly and splits fused
+QKV/gate-up projections through the inference `qwen3.splitQkv`/`splitGateUp`
+(one definition, not a replica). The base model is never written; the only
+parameters are the adapters' A/B. MoE configs are rejected
+(`Error.MoeUnsupported`) in v1.
 
 - `loss(ctx, tokens, labels)` — mean CE with `qwen3.train.ignore_index`
   (`maxInt(usize)`) masking prompt positions; requires an open exec scope

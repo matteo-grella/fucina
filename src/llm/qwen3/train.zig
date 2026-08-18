@@ -73,10 +73,9 @@ pub const Targets = struct {
 /// contribute zero loss and zero gradient (`CrossEntropyOptions.ignore_index`).
 pub const ignore_index: usize = std.math.maxInt(usize);
 
-/// Test seam: the per-block layer type of `qwen3.Model` (not exported by
-/// qwen3.zig), reachable through the `layers` field for synthetic-model
-/// construction in tests.
-pub const ModelLayer = std.meta.Child(@FieldType(qwen3.Model, "layers"));
+/// The per-block layer type of `qwen3.Model` (alias of the exported
+/// `qwen3.Layer`; tests build synthetic layers through it).
+pub const ModelLayer = qwen3.Layer;
 
 /// The trainer's residual-stream tensor type ([seq, embed] f32) — the
 /// currency of `Trainer.forwardHidden` and `Injection.row`.
@@ -260,22 +259,10 @@ fn dotFrozen(
     return input.dot(ctx, &tagged, in_tag);
 }
 
-const QkvLinear = struct {
-    q: fucina.Tensor(.{ .seq, .q }),
-    k: fucina.Tensor(.{ .seq, .k }),
-    v: fucina.Tensor(.{ .seq, .v }),
-
-    fn deinit(self: *QkvLinear) void {
-        self.v.deinit();
-        self.k.deinit();
-        self.q.deinit();
-        self.* = undefined;
-    }
-};
-
 /// Base QKV through the frozen projections — both union arms (mirrors
-/// `AttentionProjection.project`, with the differentiable dot).
-fn projectQkv(ctx: *ExecContext, layer: *const ModelLayer, input: *const Hidden, cfg: qwen3.Config) !QkvLinear {
+/// `AttentionProjection.project`, with the differentiable dot; the fused
+/// split IS the inference `qwen3.splitQkv`, not a replica).
+fn projectQkv(ctx: *ExecContext, layer: *const ModelLayer, input: *const Hidden, cfg: qwen3.Config) !qwen3.QkvProjection {
     return switch (layer.attn_proj) {
         .separate => |*sep| blk: {
             var q = try dotLinear(&sep.q_proj, ctx, input, .embed, .q);
@@ -288,48 +275,17 @@ fn projectQkv(ctx: *ExecContext, layer: *const ModelLayer, input: *const Hidden,
         .fused => |*w| blk: {
             var qkv = try dotLinear(w, ctx, input, .embed, .qkv);
             defer qkv.deinit();
-            break :blk try splitQkv(ctx, &qkv, cfg);
+            break :blk try qwen3.splitQkv(ctx, &qkv, cfg);
         },
     };
 }
 
-/// Replica of qwen3.zig's (private) fused-QKV split: zero-copy narrows.
-fn splitQkv(ctx: *ExecContext, qkv: *const fucina.Tensor(.{ .seq, .qkv }), cfg: qwen3.Config) !QkvLinear {
-    const q_dim = cfg.num_attention_heads * cfg.head_dim;
-    const kv_dim = cfg.num_key_value_heads * cfg.head_dim;
-
-    var q_view = try qkv.narrow(ctx, .qkv, 0, q_dim);
-    defer q_view.deinit();
-    var q = try q_view.withTags(ctx, .{ .seq, .q });
-    errdefer q.deinit();
-
-    var k_view = try qkv.narrow(ctx, .qkv, q_dim, kv_dim);
-    defer k_view.deinit();
-    var k = try k_view.withTags(ctx, .{ .seq, .k });
-    errdefer k.deinit();
-
-    var v_view = try qkv.narrow(ctx, .qkv, q_dim + kv_dim, kv_dim);
-    defer v_view.deinit();
-    const v = try v_view.withTags(ctx, .{ .seq, .v });
-    return .{ .q = q, .k = k, .v = v };
-}
-
-const GateUpLinear = struct {
-    gate: fucina.Tensor(.{ .seq, .ffn }),
-    up: fucina.Tensor(.{ .seq, .ffn }),
-
-    fn deinit(self: *GateUpLinear) void {
-        self.up.deinit();
-        self.gate.deinit();
-        self.* = undefined;
-    }
-};
-
-const DenseFfn = @FieldType(@FieldType(ModelLayer, "ffn"), "dense");
+const DenseFfn = qwen3.DenseFfn;
 
 /// Base gate/up through the frozen projections — both union arms (mirrors
-/// `FfnInputProjection.project`, with the differentiable dot).
-fn projectGateUp(ctx: *ExecContext, dense: *const DenseFfn, input: *const Hidden, cfg: qwen3.Config) !GateUpLinear {
+/// `FfnInputProjection.project`, with the differentiable dot; the fused
+/// split IS the inference `qwen3.splitGateUp`, not a replica).
+fn projectGateUp(ctx: *ExecContext, dense: *const DenseFfn, input: *const Hidden, cfg: qwen3.Config) !qwen3.GateUpProjection {
     return switch (dense.input_proj) {
         .separate => |*sep| blk: {
             var gate = try dotLinear(&sep.gate_proj, ctx, input, .embed, .ffn);
@@ -340,22 +296,9 @@ fn projectGateUp(ctx: *ExecContext, dense: *const DenseFfn, input: *const Hidden
         .fused => |*w| blk: {
             var gate_up = try dotLinear(w, ctx, input, .embed, .gate_up);
             defer gate_up.deinit();
-            break :blk try splitGateUp(ctx, &gate_up, cfg);
+            break :blk try qwen3.splitGateUp(ctx, &gate_up, cfg);
         },
     };
-}
-
-/// Replica of qwen3.zig's (private) fused gate/up split.
-fn splitGateUp(ctx: *ExecContext, gate_up: *const fucina.Tensor(.{ .seq, .gate_up }), cfg: qwen3.Config) !GateUpLinear {
-    var gate_view = try gate_up.narrow(ctx, .gate_up, 0, cfg.intermediate_size);
-    defer gate_view.deinit();
-    var gate = try gate_view.withTags(ctx, .{ .seq, .ffn });
-    errdefer gate.deinit();
-
-    var up_view = try gate_up.narrow(ctx, .gate_up, cfg.intermediate_size, cfg.intermediate_size);
-    defer up_view.deinit();
-    const up = try up_view.withTags(ctx, .{ .seq, .ffn });
-    return .{ .gate = gate, .up = up };
 }
 
 pub fn Trainer(comptime targets: Targets) type {

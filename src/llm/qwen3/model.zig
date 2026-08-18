@@ -741,7 +741,8 @@ fn argmaxLast(ctx: *ExecContext, logits: *const fucina.Tensor(.{ .seq, .vocab })
     return @intCast(try index.item());
 }
 
-const DenseFfn = struct {
+/// Dense-FFN weights (exported for train.zig's differentiable forward).
+pub const DenseFfn = struct {
     input_proj: FfnInputProjection,
     down_proj: LinearWeight,
 
@@ -862,7 +863,10 @@ fn loadMoeFfn(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i
     return .{ .router = router, .gate = gate, .up = up, .down = down };
 }
 
-const Layer = struct {
+/// One transformer layer's weights. Exported: train.zig runs its
+/// differentiable forward over the same layer structs (`layers` field), and
+/// tests build synthetic layers directly.
+pub const Layer = struct {
     attn_norm: fucina.Tensor(.{.embed}),
     q_norm: fucina.Tensor(.{.d}),
     k_norm: fucina.Tensor(.{.d}),
@@ -909,7 +913,7 @@ const Layer = struct {
         };
     }
 
-    fn deinit(self: *Layer) void {
+    pub fn deinit(self: *Layer) void {
         self.ffn.deinit();
         self.o_proj.deinit();
         self.attn_proj.deinit();
@@ -956,12 +960,12 @@ const SeparateAttentionProjection = struct {
     }
 };
 
-const QkvProjection = struct {
+pub const QkvProjection = struct {
     q: fucina.Tensor(.{ .seq, .q }),
     k: fucina.Tensor(.{ .seq, .k }),
     v: fucina.Tensor(.{ .seq, .v }),
 
-    fn deinit(self: *QkvProjection) void {
+    pub fn deinit(self: *QkvProjection) void {
         self.v.deinit();
         self.k.deinit();
         self.q.deinit();
@@ -1072,7 +1076,10 @@ const AttentionProjection = union(enum) {
     }
 };
 
-fn splitQkv(ctx: *ExecContext, qkv: *const fucina.Tensor(.{ .seq, .qkv }), config: Config) !QkvProjection {
+/// Zero-copy narrows of a fused-QKV projection result into per-projection
+/// slices. Exported: train.zig's differentiable forward splits its fused-QKV
+/// dot through this exact function, so the split stays op-for-op one place.
+pub fn splitQkv(ctx: *ExecContext, qkv: *const fucina.Tensor(.{ .seq, .qkv }), config: Config) !QkvProjection {
     var q_view = try qkv.narrow(ctx, .qkv, 0, config.qProjectionDim());
     defer q_view.deinit();
     var q = try q_view.withTags(ctx, .{ .seq, .q });
@@ -1102,11 +1109,11 @@ const SeparateFfnInputProjection = struct {
     }
 };
 
-const GateUpProjection = struct {
+pub const GateUpProjection = struct {
     gate: fucina.Tensor(.{ .seq, .ffn }),
     up: fucina.Tensor(.{ .seq, .ffn }),
 
-    fn deinit(self: *GateUpProjection) void {
+    pub fn deinit(self: *GateUpProjection) void {
         self.up.deinit();
         self.gate.deinit();
         self.* = undefined;
@@ -1163,7 +1170,8 @@ const FfnInputProjection = union(enum) {
     }
 };
 
-fn splitGateUp(ctx: *ExecContext, gate_up: *const fucina.Tensor(.{ .seq, .gate_up }), config: Config) !GateUpProjection {
+/// Fused gate/up counterpart of `splitQkv` (also shared with train.zig).
+pub fn splitGateUp(ctx: *ExecContext, gate_up: *const fucina.Tensor(.{ .seq, .gate_up }), config: Config) !GateUpProjection {
     var gate_view = try gate_up.narrow(ctx, .gate_up, 0, config.intermediate_size);
     defer gate_view.deinit();
     var gate = try gate_view.withTags(ctx, .{ .seq, .ffn });
