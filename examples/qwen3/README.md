@@ -3,8 +3,9 @@
 `zig build qwen3` runs the Qwen3 family — dense 0.6B/1.7B/… and the 30B-A3B
 MoE — from a GGUF file. It is the most complete runner: chat, REPL, raw
 generation, speculative decoding, benchmarks, logit-parity tooling. Entry
-file: [`main.zig`](main.zig); the installed binary is
-`./zig-out/bin/fucina-qwen3`.
+file: [`main.zig`](main.zig) (load + dispatch; the modes live in the
+sibling `options`/`bench`/`generate`/`verify`/`chat.zig` modules); the
+installed binary is `./zig-out/bin/fucina-qwen3`.
 
 This README is the canonical reference for the sampling flags: the `gemma4`
 and `diffusion-gemma` runners mirror the same set.

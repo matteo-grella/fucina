@@ -13546,8 +13546,9 @@ drives the draft-model-free SAM + Token-Recycling cascade from
 from. Output is lossless (greedy streams verified identical with and without
 `--spec`).
 
-**Runner** (`examples/qwen3/main.zig`, the full CLI surface is documented in the
-[README](../examples/qwen3/README.md)):
+**Runner** (`examples/qwen3/` — `main.zig` owns load + dispatch over the
+mode modules `options`/`bench`/`generate`/`verify`/`chat.zig`; the full CLI
+surface is documented in the [README](../examples/qwen3/README.md)):
 
 ```sh
 # chat / REPL, sampling flags, GPU offload

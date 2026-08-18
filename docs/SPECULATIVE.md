@@ -107,7 +107,7 @@ The contract decomposes into proof obligations, each with a test:
 
 ## 3. Verify economics and break-even math
 
-Measured with the `--spec-bench` probe mode (examples/qwen3/main.zig): cost of one
+Measured with the `--spec-bench` probe mode (examples/qwen3/bench.zig): cost of one
 verify-k forward in plain-step equivalents, best-of reps, M1 Max ReleaseFast.
 
 **Dense Qwen3-0.6B-Q4_K_S** (the shipped `default_cost_table`,
