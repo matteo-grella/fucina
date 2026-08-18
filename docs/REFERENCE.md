@@ -9032,7 +9032,7 @@ test "PTQTP: planes reconstruct and multiply as plain TQ2_0 tensors" {
 ```
 
 At the LLM layer, `LinearWeight.toPtqtp` decorates a loaded GGUF linear in
-place from any source dtype and `llm.qwen3.model.Model.decoratePtqtp`
+place from any source dtype and `llm.qwen3.ptqtp.decorate`
 walks a whole model (§13.2.1); `zig build ptqtp-spirals` and
 `zig build ptqtp-qwen3` are the acceptance/measurement examples. Decorated
 models persist to GGUF as per-plane standalone TQ2_0 tensors and load back
@@ -11260,14 +11260,14 @@ pub fn deinit(self: *LinearWeight) void
   storage. On the `ptqtp` arm, `getRowsAs` returns the dequantized plane
   sum (so `toResidentF16` doubles as un-decorate). `decoratePtqtpInto` +
   `PtqtpReport` aggregate per-tensor solver stats over model walks;
-  `llm.qwen3.model.Model.decoratePtqtp(ctx, options)` walks attention
+  `llm.qwen3.ptqtp.decorate(model, ctx, options)` walks attention
   q/k/v (split or fused), o_proj, and dense FFN projections, with
-  `DecoratePtqtpOptions` covering per-projection plane overrides
+  `DecorateOptions` covering per-projection plane overrides
   (`down_planes`/`o_planes`) and data-free edge-layer skip
   (`skip_first_layers`/`skip_last_layers`); embeddings, lm_head, and norms
   are not walked (decorate `model.output` directly for a ternary head).
-  `Model.savePtqtpGguf(ctx, io, src_file, out_path)` persists the decorated
-  model: `llm.ptqtp_gguf` writes one standalone TQ2_0 tensor per plane —
+  `llm.qwen3.ptqtp.save(model, ctx, io, src_file, out_path)` persists the
+  decorated model: `llm.ptqtp_gguf` writes one standalone TQ2_0 tensor per plane —
   `<name>.ptqtp0/1/2` replaces `<name>`, fused weights row-slicing back to
   their source tensor names — plus a `fucina.ptqtp.version` metadata key
   and, when every decorated entry was tie-fitted
@@ -13396,12 +13396,14 @@ gemma-MoE's raw expert representation (14.4) and diffusion_gemma's
   speculative-decoding verify entry (§13 — one batched pass scores all
   draft positions for ~one step's weight traffic).
 - `forwardStepBatch` (qwen3, gemma4) — lockstep multi-stream decode, 14.2.
-- `generate(ctx, kv, prompt_tokens, out_tokens, options)` (qwen3, gemma4;
-  not qwen35) — greedy loop
-  (argmax; `GenerateOptions{ .max_new_tokens, .stop_token = null }`); resets
-  `kv` first, returns the count written. diffusion_gemma's block-diffusion
-  `generate` has its own options and returns a `GenerateResult` (14.5).
-  Sampled decoding is composed by the callers from `llm.sampler` (§13).
+- Greedy generation loop (argmax; resets `kv` first, returns the count
+  written): gemma4 keeps it as `Model.generate(ctx, kv, prompt_tokens,
+  out_tokens, GenerateOptions{ .max_new_tokens, .stop_token = null })`;
+  qwen3 hosts it beside the model as `llm.qwen3.generate.greedy(model, ctx,
+  kv, prompt_tokens, out_tokens, Options)` (qwen35 has neither).
+  diffusion_gemma's block-diffusion `generate` has its own options and
+  returns a `GenerateResult` (14.5). Sampled decoding is composed by the
+  callers from `llm.sampler` (§13).
 - `forward*Profiled` variants take `io: std.Io` and a family-specific
   `ForwardProfile` accumulator (per-block wall-clock buckets; the `--profile`
   runner flag).
@@ -13458,9 +13460,15 @@ InvalidSequenceLength, MismatchedKvCaches }`. Public surface on `Model`:
 (opt-in MoE expert disk streaming, `LoadOptions.moe_stream`), `deinit`,
 `forwardLastLogits`, `forwardLastLogitsProfiled`, `initKvCache`,
 `forwardStep`, `forwardStepProfiled`, `forwardStepAllLogits`,
-`forwardStepBatch`, `forwardStepBatchSpans`, `generate`, `decoratePtqtp`, `savePtqtpGguf` (§10.9);
-plus `GenerateOptions`, `ForwardProfile`, `MoeStreamOptions`, `LoadOptions`,
-and `applyExpertTopP` at module level.
+`forwardStepBatch`, `forwardStepBatchSpans`;
+plus `ForwardProfile`, `MoeStreamOptions`, `LoadOptions`, `Layer`,
+`DenseFfn`, `QkvProjection`/`splitQkv`, `GateUpProjection`/`splitGateUp`
+(the block-structure seam train.zig shares — the trainer's differentiable
+forward reads the same layer structs and splits fused projections through
+the same functions), and `applyExpertTopP` at module level. Greedy
+generation and PTQTP decoration/persistence live in sibling modules:
+`llm.qwen3.generate` (`greedy`, `Options`) and `llm.qwen3.ptqtp`
+(`decorate`, `DecorateOptions`, `save`, §10.9).
 
 Load specifics: when the GGUF is mmap'd, MoE expert stacks
 (`ffn_{gate,up,down}_exps.weight`) are **borrowed zero-copy** from the

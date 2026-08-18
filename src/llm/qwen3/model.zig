@@ -128,11 +128,11 @@ pub const Config = struct {
         }
     }
 
-    fn qProjectionDim(self: Config) usize {
+    pub fn qProjectionDim(self: Config) usize {
         return self.num_attention_heads * self.head_dim;
     }
 
-    fn kvProjectionDim(self: Config) usize {
+    pub fn kvProjectionDim(self: Config) usize {
         return self.num_key_value_heads * self.head_dim;
     }
 };
@@ -313,126 +313,6 @@ pub const Model = struct {
     /// use; gemma4's per-layer-geometry counterpart is initPerLayer-backed.
     pub fn initKvCache(self: *const Model, ctx: *ExecContext, capacity: usize) !KvCache {
         return KvCache.init(ctx, self.config.num_layers, self.config.num_key_value_heads, self.config.head_dim, capacity);
-    }
-
-    /// PTQTP-decorate every eligible layer linear in place (attention
-    /// q/k/v — split or fused — o_proj, dense FFN gate/up/down): each
-    /// becomes two packed TQ2_0 trit-planes and its original storage is
-    /// dropped (docs/PTQTP.md). Embeddings, the lm_head, norms, and MoE
-    /// expert stacks are left untouched (MoE FFNs count as skipped).
-    pub const DecoratePtqtpOptions = struct {
-        solver: fucina.ptqtp.Options = .{},
-        /// Leave the first/last N layers in their source precision — the
-        /// edge layers are the most quantization-sensitive in extreme
-        /// low-bit practice (data-free: pure configuration, no inputs).
-        skip_first_layers: usize = 0,
-        skip_last_layers: usize = 0,
-        /// Per-projection plane-count overrides (null = solver.planes):
-        /// selective capacity for the sensitive projections — an extra
-        /// trit-plane costs +2.06 bpw only where applied and keeps every
-        /// op ternary, unlike layer skipping which retains source-dtype
-        /// matmuls. down_proj (and o_proj) are the classic hot spots.
-        down_planes: ?u8 = null,
-        o_planes: ?u8 = null,
-    };
-
-    pub fn decoratePtqtp(self: *Model, ctx: *ExecContext, decorate_options: DecoratePtqtpOptions) !weights.PtqtpReport {
-        const options = decorate_options.solver;
-        var report = weights.PtqtpReport{};
-        const n_layers = self.layers.len;
-        for (self.layers, 0..) |*layer, layer_i| {
-            if (layer_i < decorate_options.skip_first_layers or
-                layer_i + decorate_options.skip_last_layers >= n_layers)
-            {
-                report.skipped_layers += 1;
-                continue;
-            }
-            switch (layer.attn_proj) {
-                .separate => |*separate| {
-                    try weights.decoratePtqtpInto(&separate.q_proj, ctx, options, &report);
-                    try weights.decoratePtqtpInto(&separate.k_proj, ctx, options, &report);
-                    try weights.decoratePtqtpInto(&separate.v_proj, ctx, options, &report);
-                },
-                .fused => |*fused| try weights.decoratePtqtpInto(fused, ctx, options, &report),
-            }
-            var o_options = options;
-            if (decorate_options.o_planes) |p| o_options.planes = p;
-            try weights.decoratePtqtpInto(&layer.o_proj, ctx, o_options, &report);
-            switch (layer.ffn) {
-                .dense => |*dense| {
-                    switch (dense.input_proj) {
-                        .separate => |*separate| {
-                            try weights.decoratePtqtpInto(&separate.gate_proj, ctx, options, &report);
-                            try weights.decoratePtqtpInto(&separate.up_proj, ctx, options, &report);
-                        },
-                        .fused => |*fused| try weights.decoratePtqtpInto(fused, ctx, options, &report),
-                    }
-                    var down_options = options;
-                    if (decorate_options.down_planes) |p| down_options.planes = p;
-                    try weights.decoratePtqtpInto(&dense.down_proj, ctx, down_options, &report);
-                },
-                .moe => report.skipped += 1,
-            }
-        }
-        return report;
-    }
-
-    /// Persist this (decorated) model as a GGUF beside its source file:
-    /// every `.ptqtp` weight becomes per-source-name plane tensors, all
-    /// other tensors and metadata pass through byte-verbatim
-    /// (ptqtp_gguf.zig; docs/PTQTP.md). Fused in-memory weights are
-    /// row-sliced back to their source tensor names, so the saved file is
-    /// independent of this load's fusion decisions. `src` must be the
-    /// still-open GGUF this model was loaded from.
-    pub fn savePtqtpGguf(self: *const Model, ctx: *ExecContext, io: std.Io, src: *const gguf.File, out_path: []const u8) !ptqtp_gguf.SaveReport {
-        var arena_state = std.heap.ArenaAllocator.init(ctx.allocator);
-        defer arena_state.deinit();
-        const arena = arena_state.allocator();
-
-        var entries: std.ArrayList(ptqtp_gguf.SaveEntry) = .empty;
-        try entries.append(arena, .{ .name = "output.weight", .weight = &self.output });
-
-        const q_dim = self.config.qProjectionDim();
-        const kv_dim = self.config.kvProjectionDim();
-        const ffn_dim = self.config.intermediate_size;
-        for (self.layers, 0..) |*layer, layer_i| {
-            switch (layer.attn_proj) {
-                .separate => |*separate| {
-                    try entries.append(arena, .{ .name = try layerNameOwned(arena, layer_i, "attn_q.weight"), .weight = &separate.q_proj });
-                    try entries.append(arena, .{ .name = try layerNameOwned(arena, layer_i, "attn_k.weight"), .weight = &separate.k_proj });
-                    try entries.append(arena, .{ .name = try layerNameOwned(arena, layer_i, "attn_v.weight"), .weight = &separate.v_proj });
-                },
-                .fused => |*fused| {
-                    try entries.append(arena, .{ .name = try layerNameOwned(arena, layer_i, "attn_q.weight"), .weight = fused, .row0 = 0, .rows = q_dim });
-                    try entries.append(arena, .{ .name = try layerNameOwned(arena, layer_i, "attn_k.weight"), .weight = fused, .row0 = q_dim, .rows = kv_dim });
-                    try entries.append(arena, .{ .name = try layerNameOwned(arena, layer_i, "attn_v.weight"), .weight = fused, .row0 = q_dim + kv_dim, .rows = kv_dim });
-                },
-            }
-            try entries.append(arena, .{ .name = try layerNameOwned(arena, layer_i, "attn_output.weight"), .weight = &layer.o_proj });
-            switch (layer.ffn) {
-                .dense => |*dense| {
-                    switch (dense.input_proj) {
-                        .separate => |*separate| {
-                            try entries.append(arena, .{ .name = try layerNameOwned(arena, layer_i, "ffn_gate.weight"), .weight = &separate.gate_proj });
-                            try entries.append(arena, .{ .name = try layerNameOwned(arena, layer_i, "ffn_up.weight"), .weight = &separate.up_proj });
-                        },
-                        .fused => |*fused| {
-                            try entries.append(arena, .{ .name = try layerNameOwned(arena, layer_i, "ffn_gate.weight"), .weight = fused, .row0 = 0, .rows = ffn_dim });
-                            try entries.append(arena, .{ .name = try layerNameOwned(arena, layer_i, "ffn_up.weight"), .weight = fused, .row0 = ffn_dim, .rows = ffn_dim });
-                        },
-                    }
-                    try entries.append(arena, .{ .name = try layerNameOwned(arena, layer_i, "ffn_down.weight"), .weight = &dense.down_proj });
-                },
-                .moe => {},
-            }
-        }
-
-        // MoE loads moved the mmap into the model (loadMoeFfn borrows expert
-        // blocks), so the metadata copy reads the region through us.
-        const options = ptqtp_gguf.SaveOptions{
-            .header_bytes = if (self.weight_mapping) |mapping| mapping.bytes else null,
-        };
-        return ptqtp_gguf.saveFile(ctx.allocator, io, src, entries.items, options, out_path);
     }
 
     /// Process `token_ids` at absolute positions `pos0 .. pos0 + len`, appending
@@ -691,55 +571,7 @@ pub const Model = struct {
         return self.output.linearSeq(ctx, &final_norm, .embed, .vocab);
     }
 
-    /// Greedy autoregressive generation: prefill `prompt_tokens`, then sample
-    /// the argmax token each step into `out_tokens` until `max_new_tokens`,
-    /// `out_tokens.len`, or the optional `stop_token` is reached. Resets `kv`.
-    /// Returns the number of tokens written.
-    pub fn generate(
-        self: *const Model,
-        ctx: *ExecContext,
-        kv: *KvCache,
-        prompt_tokens: []const usize,
-        out_tokens: []usize,
-        options: GenerateOptions,
-    ) !usize {
-        if (prompt_tokens.len == 0) return Error.InvalidSequenceLength;
-        kv.reset();
-
-        var logits = try self.forwardStep(ctx, kv, prompt_tokens, 0);
-        defer logits.deinit();
-
-        const limit = @min(options.max_new_tokens, out_tokens.len);
-        var produced: usize = 0;
-        while (produced < limit) {
-            const next = try argmaxLast(ctx, &logits);
-            out_tokens[produced] = next;
-            produced += 1;
-            if (options.stop_token) |stop| if (next == stop) break;
-            if (produced == limit) break;
-            // Allocate the next step before freeing the current logits, so an
-            // error here leaves `logits` valid for the function-scope defer
-            // (deinit-then-reassign would leave it dangling on the error path).
-            const fresh = try self.forwardStep(ctx, kv, &.{next}, kv.len);
-            logits.deinit();
-            logits = fresh;
-        }
-        return produced;
-    }
 };
-
-pub const GenerateOptions = struct {
-    max_new_tokens: usize,
-    stop_token: ?usize = null,
-};
-
-fn argmaxLast(ctx: *ExecContext, logits: *const fucina.Tensor(.{ .seq, .vocab })) !usize {
-    var last = try logits.narrow(ctx, .seq, logits.dim(.seq) - 1, 1);
-    defer last.deinit();
-    var index = try last.argmax(ctx, .vocab);
-    defer index.deinit();
-    return @intCast(try index.item());
-}
 
 /// Dense-FFN weights (exported for train.zig's differentiable forward).
 pub const DenseFfn = struct {
@@ -807,12 +639,6 @@ fn loadMoeProjection(ctx: *ExecContext, file: *const gguf.File, name: []const u8
 fn moeProjSpec(file: *const gguf.File, name: []const u8, in_dim: usize, out_dim: usize, n_expert: usize) !fucina.expert_store.ProjSpec {
     if (try ptqtp_gguf.maybeStreamedMoeProjSpec(file, name, in_dim, out_dim, n_expert)) |spec| return spec;
     return weights.streamedProjSpec(file, try file.get(name), in_dim, out_dim, n_expert);
-}
-
-/// `weights.layerName` with owned storage — `savePtqtpGguf` builds its
-/// whole entry list before any name is consumed.
-fn layerNameOwned(allocator: Allocator, layer_i: usize, suffix: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "blk.{d}.{s}", .{ layer_i, suffix });
 }
 
 fn loadDenseFfn(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i: usize) !DenseFfn {

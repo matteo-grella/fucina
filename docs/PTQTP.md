@@ -81,9 +81,9 @@ Deliberate deltas from the paper:
   gradient-tracking or non-contiguous inputs. Dispatch granularity is the
   decode bottleneck this design addresses: per-plane fork-joins cost more
   than the ternary kernel itself at 1.7B decode shapes.
-- `src/llm/qwen3/model.zig`: `Model.decoratePtqtp(ctx, options)` walks
-  attention q/k/v (split or fused), o_proj, and dense FFN projections in
-  place. `DecoratePtqtpOptions`: `solver` (plane count etc.),
+- `src/llm/qwen3/ptqtp.zig`: `qwen3.ptqtp.decorate(model, ctx, options)`
+  walks attention q/k/v (split or fused), o_proj, and dense FFN projections
+  in place. `DecorateOptions`: `solver` (plane count etc.),
   `skip_first_layers`/`skip_last_layers` (edge layers stay in source
   precision — pure configuration, still data-free), `down_planes`/
   `o_planes` (per-projection plane-count overrides for the sensitive
@@ -100,7 +100,7 @@ Deliberate deltas from the paper:
   SOURCE tensor names — the solver's per-group independence makes the
   fused rows' planes byte-identical to solo decoration, so they row-slice
   out losslessly — and re-fuse at load through `fuseLinear`'s ptqtp arm.
-  `Model.savePtqtpGguf` walks the projections `decoratePtqtp` covers plus
+  `qwen3.ptqtp.save` walks the projections `decorate` covers plus
   the output head; save→load→save is byte-stable. The format invariants —
   plane replacement, fused row-slicing vs solo decoration, 3-part
   re-fusion, resave stability, save/load validation errors — are pinned

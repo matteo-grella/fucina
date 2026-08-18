@@ -2,7 +2,7 @@
 //! decode — f16, Q4_K, Q8_0, ... — proving the method is source-agnostic),
 //! measure teacher-forced NLL/perplexity on a text file BEFORE decoration,
 //! decorate every eligible layer linear with dual trit-planes in place
-//! (`Model.decoratePtqtp` -> `LinearWeight.toPtqtp`; originals are dropped),
+//! (`qwen3.ptqtp.decorate` -> `LinearWeight.toPtqtp`; originals are dropped),
 //! measure NLL again on the SAME tokens, and finish with a greedy completion
 //! plus decode timing. One process, one model load, direct deltas.
 //!
@@ -153,7 +153,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (planes > 0) {
         const q_start = nowNs(io);
-        const report = try model.decoratePtqtp(&ctx, .{
+        const report = try llm.qwen3.ptqtp.decorate(&model, &ctx, .{
             .solver = .{ .planes = @intCast(planes), .tie_scales = tie_scales },
             .skip_first_layers = skip_first,
             .skip_last_layers = skip_last,
@@ -191,7 +191,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (save_path) |path| {
         const save_start = nowNs(io);
-        const saved = try model.savePtqtpGguf(&ctx, io, &file, path);
+        const saved = try llm.qwen3.ptqtp.save(&model, &ctx, io, &file, path);
         try stdout.print(
             "saved {s}: {d} decorated tensors -> {d} planes, {d} passed through, {d} appended ({d:.2} s)\n",
             .{ path, saved.decorated, saved.planes, saved.passthrough, saved.appended, seconds(nowNs(io) - save_start) },
