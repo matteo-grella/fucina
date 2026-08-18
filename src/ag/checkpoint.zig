@@ -12,11 +12,17 @@
 //! instead of O(intermediates).
 //!
 //! Contract for `block`:
-//! - a comptime function `fn (*ExecContext, *const Tensor(..), ...) !Tensor(..)`
-//!   over f32 facade tensors whose result is produced by facade ops on the
-//!   inputs. `checkpoint` always runs the block under an exec scope, so the
-//!   defer-deinit forward idiom works unchanged inside it (deinit on
-//!   scope-owned results is a no-op, see docs/TRAINING.md);
+//! - a comptime function over f32 facade tensors whose result is produced by
+//!   facade ops on the inputs, in one of two equivalent signature forms:
+//!   one pointer parameter per input
+//!   (`fn (*ExecContext, *const Tensor(..), ...) !Tensor(..)`), or ONE
+//!   trailing tuple parameter carrying all inputs
+//!   (`fn (*ExecContext, InputsTuple) !Tensor(..)` where `InputsTuple` is a
+//!   tuple of facade-tensor pointer types matching `inputs`) — the tuple
+//!   form serves blocks whose input arity is comptime-variable, e.g. a LoRA
+//!   layer with N enabled adapters. `checkpoint` always runs the block under
+//!   an exec scope, so the defer-deinit forward idiom works unchanged inside
+//!   it (deinit on scope-owned results is a no-op, see docs/TRAINING.md);
 //! - deterministic and pure in its inputs: the recompute must rebuild the
 //!   exact forward values (RNG-using ops such as dropout must derive their
 //!   stream from explicit stored seeds, not from ambient RNG state);
@@ -209,12 +215,6 @@ fn BlockOutputImpl(comptime block: anytype, comptime Extra: type, comptime Input
     };
     const lead = leadParamCount(Extra);
     const fields = inputFields(Inputs);
-    if (fn_info.params.len != fields.len + lead) {
-        @compileError(std.fmt.comptimePrint(
-            "checkpoint block takes {d} parameters but {s} + {d} inputs were supplied",
-            .{ fn_info.params.len, if (Extra == void) "1 (*ExecContext)" else "2 (*ExecContext, extra)", fields.len },
-        ));
-    }
     const Ctx = fn_info.params[0].type orelse @compileError("checkpoint block parameters must be concrete (no anytype)");
     if (Ctx != *ExecContext) {
         @compileError("checkpoint block must take *ExecContext as its first parameter, got " ++ @typeName(Ctx));
@@ -225,13 +225,38 @@ fn BlockOutputImpl(comptime block: anytype, comptime Extra: type, comptime Input
             @compileError("checkpointWithContext extra is " ++ @typeName(Extra) ++ " but the block expects " ++ @typeName(Param));
         }
     }
-    for (fields, 0..) |field, i| {
-        const Param = fn_info.params[i + lead].type orelse @compileError("checkpoint block parameters must be concrete (no anytype)");
-        if (FacadeOf(Param) != FacadeOf(field.type)) {
+    if (blockTakesInputsTuple(fn_info, Extra)) {
+        // Tuple form: the single trailing parameter carries every input.
+        const param_fields = @typeInfo(fn_info.params[lead].type.?).@"struct".fields;
+        if (param_fields.len != fields.len) {
             @compileError(std.fmt.comptimePrint(
-                "checkpoint input {d} is {s} but the block expects {s}",
-                .{ i, @typeName(field.type), @typeName(Param) },
+                "checkpoint block inputs tuple has {d} entries but {d} inputs were supplied",
+                .{ param_fields.len, fields.len },
             ));
+        }
+        for (fields, param_fields, 0..) |field, param_field, i| {
+            if (FacadeOf(param_field.type) != FacadeOf(field.type)) {
+                @compileError(std.fmt.comptimePrint(
+                    "checkpoint input {d} is {s} but the block expects {s}",
+                    .{ i, @typeName(field.type), @typeName(param_field.type) },
+                ));
+            }
+        }
+    } else {
+        if (fn_info.params.len != fields.len + lead) {
+            @compileError(std.fmt.comptimePrint(
+                "checkpoint block takes {d} parameters but {s} + {d} inputs were supplied",
+                .{ fn_info.params.len, if (Extra == void) "1 (*ExecContext)" else "2 (*ExecContext, extra)", fields.len },
+            ));
+        }
+        for (fields, 0..) |field, i| {
+            const Param = fn_info.params[i + lead].type orelse @compileError("checkpoint block parameters must be concrete (no anytype)");
+            if (FacadeOf(Param) != FacadeOf(field.type)) {
+                @compileError(std.fmt.comptimePrint(
+                    "checkpoint input {d} is {s} but the block expects {s}",
+                    .{ i, @typeName(field.type), @typeName(Param) },
+                ));
+            }
         }
     }
     const ret = fn_info.return_type orelse @compileError("checkpoint block must have a concrete return type");
@@ -244,6 +269,17 @@ fn BlockOutputImpl(comptime block: anytype, comptime Extra: type, comptime Input
 /// context blocks, the `extra` value.
 fn leadParamCount(comptime Extra: type) usize {
     return if (Extra == void) 1 else 2;
+}
+
+/// True when the block declares the tuple form: exactly one trailing
+/// parameter that is itself a tuple (of facade-tensor pointers), instead of
+/// one pointer parameter per input. Unambiguous — a per-input parameter is
+/// always a pointer, never a tuple.
+fn blockTakesInputsTuple(comptime fn_info: std.builtin.Type.Fn, comptime Extra: type) bool {
+    if (fn_info.params.len != leadParamCount(Extra) + 1) return false;
+    const Param = fn_info.params[fn_info.params.len - 1].type orelse return false;
+    const info = @typeInfo(Param);
+    return info == .@"struct" and info.@"struct".is_tuple;
 }
 
 /// Backward node for `checkpoint`/`checkpointWithContext`: owns refcounted
@@ -363,12 +399,21 @@ fn callBlock(
     extra: anytype,
     facades: anytype,
 ) anyerror!StripError(@typeInfo(@TypeOf(block)).@"fn".return_type.?) {
+    const fn_info = @typeInfo(@TypeOf(block)).@"fn";
     const lead = comptime leadParamCount(@TypeOf(extra));
     var args: std.meta.ArgsTuple(@TypeOf(block)) = undefined;
     args[0] = ctx;
     if (comptime @TypeOf(extra) != void) args[1] = extra;
-    inline for (0..args.len - lead) |i| {
-        args[i + lead] = &facades.*[i];
+    if (comptime blockTakesInputsTuple(fn_info, @TypeOf(extra))) {
+        var tuple: fn_info.params[lead].type.? = undefined;
+        inline for (0..@typeInfo(@TypeOf(tuple)).@"struct".fields.len) |i| {
+            tuple[i] = &facades.*[i];
+        }
+        args[lead] = tuple;
+    } else {
+        inline for (0..args.len - lead) |i| {
+            args[i + lead] = &facades.*[i];
+        }
     }
     return @call(.auto, block, args);
 }

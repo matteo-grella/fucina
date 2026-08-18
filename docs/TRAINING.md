@@ -349,8 +349,12 @@ parity (both asserted in `src/ag/checkpoint_tests.zig`).
 
 - `block` is a comptime function `fn (*ExecContext, *const Tensor(..), ...)
   !Tensor(..)` over f32 facade tensors; `inputs` is a tuple of pointers
-  matching its parameters. The block always runs under a scope, so the
-  defer-deinit forward idiom works unchanged inside it.
+  matching its parameters. A block may instead declare ONE trailing tuple
+  parameter carrying all inputs (`fn (*ExecContext, inputs: InputsTuple)`)
+  — the comptime-variable-arity form the Qwen3 trainer's per-layer block
+  uses (one wrapper for every LoRA target set instead of one per arity).
+  The block always runs under a scope, so the defer-deinit forward idiom
+  works unchanged inside it.
 - `block` must be deterministic and pure in its inputs: the recompute must
   rebuild the exact forward values. Dropout under a checkpoint replays
   bitwise BY CONSTRUCTION (the mask is a function of the stored seed, §6) —

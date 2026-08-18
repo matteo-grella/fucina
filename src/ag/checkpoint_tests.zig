@@ -43,6 +43,18 @@ const Blocks = struct {
         return s.tanh(ctx);
     }
 
+    const Layer2Inputs = std.meta.Tuple(&.{
+        *const Tensor(.{ .batch, .h1 }),
+        *const Tensor(.{ .h2, .h1 }),
+        *const Tensor(.{.h2}),
+    });
+
+    /// `layer2` in the TUPLE block form (`fn (ctx, inputs)`): identical math,
+    /// the inputs arrive as one tuple — the comptime-variable-arity contract.
+    fn layer2Tuple(ctx: *ExecContext, inputs: Layer2Inputs) !Tensor(.{ .batch, .h2 }) {
+        return layer2(ctx, inputs[0], inputs[1], inputs[2]);
+    }
+
     fn layer3(ctx: *ExecContext, x: *const Tensor(.{ .batch, .h2 }), w: *const Tensor(.{ .class, .h2 }), b: *const Tensor(.{.class})) !Tensor(.{ .batch, .class }) {
         var z = try x.dot(ctx, w, .h2);
         defer z.deinit();
@@ -119,6 +131,14 @@ const ContextBlocks = struct {
         var s = try z.scale(ctx, extra.scale);
         defer s.deinit();
         return s.tanh(ctx);
+    }
+
+    /// `frozenLayer` in the TUPLE block form — also the single-entry-tuple
+    /// edge: (ctx, extra, inputs) has the same parameter count as a
+    /// one-input per-parameter block, so detection must go by the parameter
+    /// TYPE (tuple vs pointer), which this pins.
+    fn frozenLayerTuple(ctx: *ExecContext, extra: *const FrozenLayer, inputs: std.meta.Tuple(&.{*const Tensor(.{ .batch, .in })})) !Tensor(.{ .batch, .h1 }) {
+        return frozenLayer(ctx, extra, inputs[0]);
     }
 
     const BiasedLayer = struct {
@@ -405,6 +425,56 @@ test "checkpointed middle layer matches plain backward bitwise (exec scope)" {
 
     try std.testing.expectEqual(plain_loss, ck_loss);
     for (plain_snap, ck_snap) |p, c| try std.testing.expectEqualSlices(f32, p, c);
+}
+
+test "tuple-form block matches the per-parameter block bitwise" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try Model.initRandom(&ctx, 42);
+    defer model.deinit();
+    var x = try makeInput(&ctx, 99);
+    defer x.deinit();
+
+    // Per-parameter reference (already pinned against plain above).
+    const ref_snap, const ref_loss = ref: {
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        const a1 = try Blocks.layer1(&ctx, &x, &model.w1, &model.b1);
+        const h2 = try checkpoint(&ctx, Blocks.layer2, .{ &a1, &model.w2, &model.b2 });
+        const logits = try Blocks.layer3(&ctx, &h2, &model.w3, &model.b3);
+        const loss = try logits.sumAll(&ctx);
+        try loss.backward(&ctx);
+        const loss_value = try loss.item();
+        break :ref .{ try snapshotGrads(&ctx, &model, &x), loss_value };
+    };
+    defer freeGrads(allocator, &ref_snap);
+
+    model.zeroGrad();
+    x.zeroGrad();
+
+    // The SAME `inputs` argument drives the tuple-form block: forward,
+    // recompute, and every input gradient must be bitwise identical.
+    const tup_snap, const tup_loss = tup: {
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        const a1 = try Blocks.layer1(&ctx, &x, &model.w1, &model.b1);
+        const h2 = try checkpoint(&ctx, Blocks.layer2Tuple, .{ &a1, &model.w2, &model.b2 });
+        const logits = try Blocks.layer3(&ctx, &h2, &model.w3, &model.b3);
+        const loss = try logits.sumAll(&ctx);
+        try loss.backward(&ctx);
+        const loss_value = try loss.item();
+        break :tup .{ try snapshotGrads(&ctx, &model, &x), loss_value };
+    };
+    defer freeGrads(allocator, &tup_snap);
+
+    try std.testing.expectEqual(ref_loss, tup_loss);
+    for (ref_snap, tup_snap) |p, c| try std.testing.expectEqualSlices(f32, p, c);
 }
 
 test "checkpointed scalar-output block matches plain backward bitwise" {
@@ -1104,6 +1174,56 @@ test "checkpointWithContext frozen f16 weight matches plain backward bitwise" {
     try std.testing.expectEqualSlices(f32, plain_gx, ck_gx);
     // The frozen weight is a constant facade: no gradient facility exists.
     try std.testing.expect(!w16.requiresGrad());
+}
+
+test "checkpointWithContext tuple-form block matches the per-parameter form bitwise" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var prng = std.Random.DefaultPrng.init(41);
+    var w_buf: [n_h1 * n_in]f32 = undefined;
+    fillUniform(prng.random(), &w_buf, 0.8);
+    var w16_buf: [n_h1 * n_in]f16 = undefined;
+    for (w_buf, &w16_buf) |v, *h| h.* = @floatCast(v);
+
+    var w16 = try FrozenW.fromSlice(&ctx, .{ n_h1, n_in }, &w16_buf);
+    defer w16.deinit();
+    var x = try makeInput(&ctx, 53);
+    defer x.deinit();
+
+    const frozen = ContextBlocks.FrozenLayer{ .w = &w16, .scale = 0.75 };
+
+    const ref_gx, const ref_loss = ref: {
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        const h = try checkpointWithContext(&ctx, ContextBlocks.frozenLayer, &frozen, .{&x});
+        const loss = try h.sumAll(&ctx);
+        try loss.backward(&ctx);
+        const loss_value = try loss.item();
+        break :ref .{ try gradData(&ctx, &x), loss_value };
+    };
+    defer allocator.free(ref_gx);
+
+    x.zeroGrad();
+
+    const tup_gx, const tup_loss = tup: {
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        const h = try checkpointWithContext(&ctx, ContextBlocks.frozenLayerTuple, &frozen, .{&x});
+        const loss = try h.sumAll(&ctx);
+        try loss.backward(&ctx);
+        const loss_value = try loss.item();
+        break :tup .{ try gradData(&ctx, &x), loss_value };
+    };
+    defer allocator.free(tup_gx);
+
+    try std.testing.expectEqual(ref_loss, tup_loss);
+    try std.testing.expectEqualSlices(f32, ref_gx, tup_gx);
 }
 
 test "checkpointWithContext extra with slice and config fields matches plain bitwise" {

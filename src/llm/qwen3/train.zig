@@ -426,10 +426,6 @@ pub fn Trainer(comptime targets: Targets) type {
 
         const InputsTuple = std.meta.Tuple(&([_]type{*const Hidden} ++ ab_ptr_types));
 
-        fn AbPtr(comptime i: usize) type {
-            return ab_ptr_types[i];
-        }
-
         pub fn init(ctx: *ExecContext, model: *const qwen3.Model, config: lora.Config, seed: u64) !Self {
             if (model.config.isMoe()) return Error.MoeUnsupported;
             const allocator = ctx.allocator;
@@ -1425,52 +1421,16 @@ pub fn Trainer(comptime targets: Targets) type {
             return outs[0].concat(ctx, .seq, rest);
         }
 
-        /// Checkpoint-block wrapper of `layerBody` with the comptime arity the
-        /// enabled `targets` dictate: (hidden, A/B per enabled target). The
-        /// block signature must be concrete, so one wrapper per arity; all
-        /// forward to the shared body.
-        const LayerBlock = switch (n_enabled) {
-            0 => struct {
-                fn run(ctx: *ExecContext, extra: LayerExtra, h: *const Hidden) !Hidden {
-                    return layerBody(ctx, extra, h, .{});
-                }
-            },
-            1 => struct {
-                fn run(ctx: *ExecContext, extra: LayerExtra, h: *const Hidden, a0: AbPtr(0), b0: AbPtr(1)) !Hidden {
-                    return layerBody(ctx, extra, h, .{ a0, b0 });
-                }
-            },
-            2 => struct {
-                fn run(ctx: *ExecContext, extra: LayerExtra, h: *const Hidden, a0: AbPtr(0), b0: AbPtr(1), a1: AbPtr(2), b1: AbPtr(3)) !Hidden {
-                    return layerBody(ctx, extra, h, .{ a0, b0, a1, b1 });
-                }
-            },
-            3 => struct {
-                fn run(ctx: *ExecContext, extra: LayerExtra, h: *const Hidden, a0: AbPtr(0), b0: AbPtr(1), a1: AbPtr(2), b1: AbPtr(3), a2: AbPtr(4), b2: AbPtr(5)) !Hidden {
-                    return layerBody(ctx, extra, h, .{ a0, b0, a1, b1, a2, b2 });
-                }
-            },
-            4 => struct {
-                fn run(ctx: *ExecContext, extra: LayerExtra, h: *const Hidden, a0: AbPtr(0), b0: AbPtr(1), a1: AbPtr(2), b1: AbPtr(3), a2: AbPtr(4), b2: AbPtr(5), a3: AbPtr(6), b3: AbPtr(7)) !Hidden {
-                    return layerBody(ctx, extra, h, .{ a0, b0, a1, b1, a2, b2, a3, b3 });
-                }
-            },
-            5 => struct {
-                fn run(ctx: *ExecContext, extra: LayerExtra, h: *const Hidden, a0: AbPtr(0), b0: AbPtr(1), a1: AbPtr(2), b1: AbPtr(3), a2: AbPtr(4), b2: AbPtr(5), a3: AbPtr(6), b3: AbPtr(7), a4: AbPtr(8), b4: AbPtr(9)) !Hidden {
-                    return layerBody(ctx, extra, h, .{ a0, b0, a1, b1, a2, b2, a3, b3, a4, b4 });
-                }
-            },
-            6 => struct {
-                fn run(ctx: *ExecContext, extra: LayerExtra, h: *const Hidden, a0: AbPtr(0), b0: AbPtr(1), a1: AbPtr(2), b1: AbPtr(3), a2: AbPtr(4), b2: AbPtr(5), a3: AbPtr(6), b3: AbPtr(7), a4: AbPtr(8), b4: AbPtr(9), a5: AbPtr(10), b5: AbPtr(11)) !Hidden {
-                    return layerBody(ctx, extra, h, .{ a0, b0, a1, b1, a2, b2, a3, b3, a4, b4, a5, b5 });
-                }
-            },
-            7 => struct {
-                fn run(ctx: *ExecContext, extra: LayerExtra, h: *const Hidden, a0: AbPtr(0), b0: AbPtr(1), a1: AbPtr(2), b1: AbPtr(3), a2: AbPtr(4), b2: AbPtr(5), a3: AbPtr(6), b3: AbPtr(7), a4: AbPtr(8), b4: AbPtr(9), a5: AbPtr(10), b5: AbPtr(11), a6: AbPtr(12), b6: AbPtr(13)) !Hidden {
-                    return layerBody(ctx, extra, h, .{ a0, b0, a1, b1, a2, b2, a3, b3, a4, b4, a5, b5, a6, b6 });
-                }
-            },
-            else => unreachable,
+        /// Checkpoint-block wrapper of `layerBody`: the differentiable inputs
+        /// (hidden + A/B per enabled target) arrive as ONE tuple via the
+        /// checkpoint machinery's tuple-form block contract, so a single
+        /// wrapper serves every `targets` arity.
+        const LayerBlock = struct {
+            fn run(ctx: *ExecContext, extra: LayerExtra, inputs: InputsTuple) !Hidden {
+                var abs: AbTuple = undefined;
+                inline for (0..2 * n_enabled) |i| abs[i] = inputs[i + 1];
+                return layerBody(ctx, extra, inputs[0], abs);
+            }
         };
 
         /// Checkpoint block for the no-adapter SINGLE-cartridge forward:

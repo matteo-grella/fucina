@@ -4678,9 +4678,16 @@ Contract for `block` (violations are compile errors where detectable):
   `checkpointWithContext`, `fn (*ExecContext, extra, ...inputs) !Tensor(..)`
   — whose parameters after the lead are single-item pointers to **f32**
   facade tensors matching the `inputs` tuple, and whose result is produced
-  by facade ops on those inputs. The block always runs under an exec scope,
-  so the defer-deinit forward idiom works unchanged inside it (deinits of
-  scope-owned results are no-ops).
+  by facade ops on those inputs. Alternatively the block may take ONE
+  trailing tuple parameter carrying all inputs
+  (`fn (*ExecContext[, extra], inputs: InputsTuple) !Tensor(..)`, where
+  `InputsTuple` is a tuple of the same facade-pointer types) — the tuple
+  form serves blocks whose input arity is comptime-variable, e.g. a LoRA
+  layer with N enabled adapters; detection is by parameter type (a tuple is
+  never a facade pointer), and both forms are bitwise-identical (pinned by
+  tests). The block always runs under an exec scope, so the defer-deinit
+  forward idiom works unchanged inside it (deinits of scope-owned results
+  are no-ops).
 - **deterministic and pure in its inputs**: the recompute must rebuild the
   exact forward values. RNG-using ops must derive their stream from explicit
   stored seeds — `dropout(p, seed)` qualifies by construction (its mask is a
