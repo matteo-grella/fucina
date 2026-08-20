@@ -35,7 +35,9 @@
 //!   - Decode GEMV (m <= 8, opt-in FUCINA_GPU_DECODE=1): warp-per-row
 //!     dequant-dot against RESIDENT weights only; kept opt-in pending a
 //!     parity-oracle pass on sampled-token streams.
-//!   - Fused prefill attention over f16 KV (`attnPrefillF16`).
+//!   - Streaming attention forward, f32 or f16 KV, optional softmax stats
+//!     (`attentionFwdF32`/`attentionFwdF16Kv` for exec/attention.zig's GPU
+//!     tier; `attnPrefillF16` is the runner seam over the same kernel).
 //!
 //! Weight residency: `allocResidentBytes` = cuMemAllocManaged +
 //! SET_READ_MOSTLY + prefetch-on-first-use — unified addressing means a
@@ -604,52 +606,95 @@ pub fn shouldUseGpuBf16ForRhs(_: *const tensor.TensorOf(.bf16), _: usize, _: usi
     return false;
 }
 
-/// The exec-tier attention forward does not offload on CUDA (the CPU
-/// tiers serve it); a CUDA kernel would implement the host contract of
-/// src/backend/metal/attention.metal. Distinct from the qwen3 runner's
-/// fused prefill-attention path, which has its own gate below.
-pub const has_attention_fwd = false;
+/// Provider capability flag for the grouped-causal-attention forward arm
+/// (exec/attention.zig's GPU tier): both KV element types instantiate one
+/// streaming kernel (`fucina_attn_fwd_*`), shared with the runner's fused
+/// prefill-attention seam (`attnPrefillF16`).
+pub const has_attention_fwd = true;
 
-pub fn shouldUseGpuAttentionFwd(_: usize, _: usize, _: usize, _: usize) bool {
-    return false;
+/// Uniform-GQA head cap: the exec-tier arm synthesizes the per-head kv map
+/// into a stack buffer of this size.
+const attn_max_heads = 512;
+
+/// Attention-forward gate: the same residency-free work floor as the fused
+/// prefill seam (`FUCINA_GPU_MIN_WORK_ATTN`; arithmetic intensity grows
+/// with q_seq, so streaming Q/K/V per call already pays at prefill
+/// shapes), plus the kernel's structural limits (d <= 256, map buffer).
+pub fn shouldUseGpuAttentionFwd(q_seq: usize, kv_seq: usize, heads: usize, d: usize) bool {
+    if (d == 0 or d > 256 or heads == 0 or heads > attn_max_heads) return false;
+    return shouldUseGpuAttn(q_seq, kv_seq, heads, d);
 }
 
+/// Grouped causal attention forward on the GPU, f32 K/V (training graphs),
+/// blocking — the exact CPU-kernel contract: rows `[q_seq, heads, d]`
+/// against `[kv_seq, kv_heads, d]` K/V with the uniform `heads_per_kv` GQA
+/// mapping, analytic causal/window bounds, optional `{row max, sum exp}`
+/// stats capture for the training backward. Values differ from the CPU
+/// kernels in summation order only (the tier-shared ~1e-6 relative class).
+/// Returns false when the GPU did not run (caller falls through to the CPU
+/// tiers).
 pub fn attentionFwdF32(
-    _: []const f32,
-    _: []const f32,
-    _: []const f32,
-    _: []f32,
-    _: ?[]f32,
-    _: usize,
-    _: usize,
-    _: usize,
-    _: usize,
-    _: usize,
-    _: usize,
-    _: bool,
-    _: usize,
-    _: f32,
+    q_data: []const f32,
+    k_data: []const f32,
+    v_data: []const f32,
+    out_data: []f32,
+    stats: ?[]f32,
+    q_seq: usize,
+    kv_seq: usize,
+    heads: usize,
+    kv_heads: usize,
+    d: usize,
+    window: usize,
+    causal: bool,
+    heads_per_kv: usize,
+    scale_value: f32,
 ) bool {
-    return false;
+    return attentionFwdUniform(f32, q_data, k_data, v_data, out_data, stats, q_seq, kv_seq, heads, kv_heads, d, window, causal, heads_per_kv, scale_value);
 }
 
+/// The f16-KV-cache instantiation of the same kernel (inference prefill:
+/// f32 queries against the half K/V cache, widened per load, f32
+/// accumulation — the CPU f16-KV tier's contract).
 pub fn attentionFwdF16Kv(
-    _: []const f32,
-    _: []const f16,
-    _: []const f16,
-    _: []f32,
-    _: ?[]f32,
-    _: usize,
-    _: usize,
-    _: usize,
-    _: usize,
-    _: usize,
-    _: usize,
-    _: bool,
-    _: usize,
-    _: f32,
+    q_data: []const f32,
+    k_data: []const f16,
+    v_data: []const f16,
+    out_data: []f32,
+    stats: ?[]f32,
+    q_seq: usize,
+    kv_seq: usize,
+    heads: usize,
+    kv_heads: usize,
+    d: usize,
+    window: usize,
+    causal: bool,
+    heads_per_kv: usize,
+    scale_value: f32,
 ) bool {
-    return false;
+    return attentionFwdUniform(f16, q_data, k_data, v_data, out_data, stats, q_seq, kv_seq, heads, kv_heads, d, window, causal, heads_per_kv, scale_value);
+}
+
+fn attentionFwdUniform(
+    comptime KvElem: type,
+    q_data: []const f32,
+    k_data: []const KvElem,
+    v_data: []const KvElem,
+    out_data: []f32,
+    stats: ?[]f32,
+    q_seq: usize,
+    kv_seq: usize,
+    heads: usize,
+    kv_heads: usize,
+    d: usize,
+    window: usize,
+    causal: bool,
+    heads_per_kv: usize,
+    scale_value: f32,
+) bool {
+    if (heads == 0 or heads > attn_max_heads or heads_per_kv == 0 or kv_seq < q_seq) return false;
+    var map: [attn_max_heads]i32 = undefined;
+    for (0..heads) |h| map[h] = @intCast(h / heads_per_kv);
+    return attnFwdHostImpl(KvElem, q_data, k_data, v_data, out_data, stats, map[0..heads], q_seq, kv_seq, heads, kv_heads, d, kv_seq - q_seq, scale_value, window, causal);
 }
 
 pub fn gemmBf16NtAsync(_: *const Tensor, _: *const tensor.TensorOf(.bf16), _: *Tensor, _: usize, _: usize, _: usize) bool {
@@ -1771,7 +1816,8 @@ const Kernels = struct {
     mul_mm_mma_n32: [4]?api.CUfunction,
     reduce_split_k: ?api.CUfunction,
     gemv: [4]api.CUfunction,
-    attn_f16: api.CUfunction,
+    attn_fwd_f16: api.CUfunction,
+    attn_fwd_f32: api.CUfunction,
     // ES kernels ([0] = f16, [1] = f32). Optional: a stale vendored PTX
     // without them only disables the device ES arm (CPU fallback), never
     // the quant/attention arms.
@@ -1868,7 +1914,8 @@ fn ensureKernels(ctx: *Ctx) ?*Kernels {
     for (gemv_names, 0..) |name, i| {
         if (d.cuModuleGetFunction(&ks.gemv[i], module, name.ptr) != 0) return null;
     }
-    if (d.cuModuleGetFunction(&ks.attn_f16, module, "fucina_attn_f16") != 0) return null;
+    if (d.cuModuleGetFunction(&ks.attn_fwd_f16, module, "fucina_attn_fwd_f16") != 0) return null;
+    if (d.cuModuleGetFunction(&ks.attn_fwd_f32, module, "fucina_attn_fwd_f32") != 0) return null;
     const es_perturb_names = [_][:0]const u8{ "fucina_es_perturb_f16", "fucina_es_perturb_f32" };
     const es_update_names = [_][:0]const u8{ "fucina_es_update_f16", "fucina_es_update_f32" };
     const es_anchor_names = [_][:0]const u8{ "fucina_es_anchor_f16", "fucina_es_anchor_f32" };
@@ -2529,6 +2576,7 @@ var attn_q_dev: DeviceBuf = .{};
 var attn_k_dev: DeviceBuf = .{};
 var attn_v_dev: DeviceBuf = .{};
 var attn_o_dev: DeviceBuf = .{};
+var attn_s_dev: DeviceBuf = .{};
 var attn_map_dev: DeviceBuf = .{};
 
 /// Gate for the fused prefill-attention offload: score work q·kv·heads·d
@@ -2566,14 +2614,46 @@ pub fn attnPrefillF16(
     window: usize,
     causal: bool,
 ) bool {
+    return attnFwdHostImpl(f16, q, k, v, out, null, kv_head_for_head, q_seq, kv_seq, heads, kv_heads, d, source_offset, scale, window, causal);
+}
+
+/// Shared host body for both attention seams: stream Q/K/V (+ per-head kv
+/// map) in, launch the KV-typed kernel, stream the output (and, when
+/// requested, the `{row max, sum exp}` stats) back. Blocking; `false` ->
+/// untouched CPU path. The sliding window is clamped to `kv_seq` before
+/// the i32 narrowing (semantics-preserving: any window >= kv_seq is full
+/// causal; 0 stays the no-window sentinel).
+fn attnFwdHostImpl(
+    comptime KvElem: type,
+    q: []const f32,
+    k: []const KvElem,
+    v: []const KvElem,
+    out: []f32,
+    stats: ?[]f32,
+    kv_head_for_head: []const i32,
+    q_seq: usize,
+    kv_seq: usize,
+    heads: usize,
+    kv_heads: usize,
+    d: usize,
+    source_offset: usize,
+    scale: f32,
+    window: usize,
+    causal: bool,
+) bool {
     if (q_seq == 0 or kv_seq == 0 or heads == 0 or kv_heads == 0 or d == 0 or d > 256) return false;
     if (q_seq > std.math.maxInt(i32) or kv_seq > std.math.maxInt(i32) or heads > std.math.maxInt(i32) or
-        kv_heads > std.math.maxInt(i32) or d > std.math.maxInt(i32) or source_offset > std.math.maxInt(i32) or
-        window > std.math.maxInt(i32)) return false;
+        kv_heads > std.math.maxInt(i32) or d > std.math.maxInt(i32) or source_offset > std.math.maxInt(i32)) return false;
     if (kv_head_for_head.len < heads) return false;
+    const win = @min(window, kv_seq);
     const q_elems = std.math.mul(usize, std.math.mul(usize, q_seq, heads) catch return false, d) catch return false;
     const kv_elems = std.math.mul(usize, std.math.mul(usize, kv_seq, kv_heads) catch return false, d) catch return false;
     if (q.len < q_elems or out.len < q_elems or k.len < kv_elems or v.len < kv_elems) return false;
+    const stat_elems = heads * q_seq * 2;
+    if (stats) |values| {
+        if (values.len < stat_elems) return false;
+    }
+    const kv_bytes = @sizeOf(KvElem);
 
     const ctx = context() orelse return false;
     const ks = ensureKernels(ctx) orelse return false;
@@ -2585,15 +2665,16 @@ pub fn attnPrefillF16(
     if (d_.cuCtxSetCurrent(ctx.context) != 0) return false;
 
     if (!attn_q_dev.ensure(d_, q_elems * 4) or !attn_o_dev.ensure(d_, q_elems * 4) or
-        !attn_k_dev.ensure(d_, kv_elems * 2) or !attn_v_dev.ensure(d_, kv_elems * 2) or
-        !attn_map_dev.ensure(d_, heads * 4))
+        !attn_k_dev.ensure(d_, kv_elems * kv_bytes) or !attn_v_dev.ensure(d_, kv_elems * kv_bytes) or
+        !attn_map_dev.ensure(d_, heads * 4) or
+        (stats != null and !attn_s_dev.ensure(d_, stat_elems * 4)))
     {
         if (trace_on) tinc(&trace.cuda_err, 1);
         return false;
     }
     if (d_.cuMemcpyHtoD(attn_q_dev.ptr, q.ptr, q_elems * 4) != 0 or
-        d_.cuMemcpyHtoD(attn_k_dev.ptr, k.ptr, kv_elems * 2) != 0 or
-        d_.cuMemcpyHtoD(attn_v_dev.ptr, v.ptr, kv_elems * 2) != 0 or
+        d_.cuMemcpyHtoD(attn_k_dev.ptr, k.ptr, kv_elems * kv_bytes) != 0 or
+        d_.cuMemcpyHtoD(attn_v_dev.ptr, v.ptr, kv_elems * kv_bytes) != 0 or
         d_.cuMemcpyHtoD(attn_map_dev.ptr, kv_head_for_head.ptr, heads * 4) != 0)
     {
         if (trace_on) tinc(&trace.cuda_err, 1);
@@ -2604,6 +2685,7 @@ pub fn attnPrefillF16(
     var p_k = attn_k_dev.ptr;
     var p_v = attn_v_dev.ptr;
     var p_o = attn_o_dev.ptr;
+    var p_s: @TypeOf(attn_s_dev.ptr) = if (stats != null) attn_s_dev.ptr else 0;
     var p_map = attn_map_dev.ptr;
     var p_qs: c_int = @intCast(q_seq);
     var p_ks: c_int = @intCast(kv_seq);
@@ -2612,16 +2694,17 @@ pub fn attnPrefillF16(
     var p_d: c_int = @intCast(d);
     var p_off: c_int = @intCast(source_offset);
     var p_scale: f32 = scale;
-    var p_win: c_int = @intCast(window);
+    var p_win: c_int = @intCast(win);
     var p_causal: c_int = @intFromBool(causal);
     var params = [_]?*anyopaque{
-        @ptrCast(&p_q),   @ptrCast(&p_k),     @ptrCast(&p_v),   @ptrCast(&p_o),      @ptrCast(&p_map),
-        @ptrCast(&p_qs),  @ptrCast(&p_ks),    @ptrCast(&p_h),   @ptrCast(&p_kh),     @ptrCast(&p_d),
-        @ptrCast(&p_off), @ptrCast(&p_scale), @ptrCast(&p_win), @ptrCast(&p_causal),
+        @ptrCast(&p_q),   @ptrCast(&p_k),  @ptrCast(&p_v),   @ptrCast(&p_o),     @ptrCast(&p_s),
+        @ptrCast(&p_map), @ptrCast(&p_qs), @ptrCast(&p_ks),  @ptrCast(&p_h),     @ptrCast(&p_kh),
+        @ptrCast(&p_d),   @ptrCast(&p_off), @ptrCast(&p_scale), @ptrCast(&p_win), @ptrCast(&p_causal),
     };
+    const kernel = if (comptime KvElem == f16) ks.attn_fwd_f16 else ks.attn_fwd_f32;
     const warps_per_block = 4;
     const grid_x: c_uint = @intCast((q_seq + warps_per_block - 1) / warps_per_block);
-    if (d_.cuLaunchKernel(ks.attn_f16, grid_x, @intCast(heads), 1, 32 * warps_per_block, 1, 1, 0, ctx.stream, &params, null) != 0) {
+    if (d_.cuLaunchKernel(kernel, grid_x, @intCast(heads), 1, 32 * warps_per_block, 1, 1, 0, ctx.stream, &params, null) != 0) {
         if (trace_on) tinc(&trace.cuda_err, 1);
         return false;
     }
@@ -2633,11 +2716,18 @@ pub fn attnPrefillF16(
         if (trace_on) tinc(&trace.cuda_err, 1);
         return false;
     }
+    if (stats) |values| {
+        if (d_.cuMemcpyDtoH(values.ptr, attn_s_dev.ptr, stat_elems * 4) != 0) {
+            if (trace_on) tinc(&trace.cuda_err, 1);
+            return false;
+        }
+    }
     if (trace_on) {
+        const d2h_total = q_elems * 4 + (if (stats != null) stat_elems * 4 else @as(usize, 0));
         tinc(&trace.attn_calls, 1);
         telapsed(&trace.attn_ns, timer);
-        tinc(&trace.h2d_bytes, q_elems * 4 + kv_elems * 4 + heads * 4);
-        tinc(&trace.d2h_bytes, q_elems * 4);
+        tinc(&trace.h2d_bytes, q_elems * 4 + kv_elems * 2 * kv_bytes + heads * 4);
+        tinc(&trace.d2h_bytes, d2h_total);
     }
     return true;
 }
@@ -3461,6 +3551,86 @@ test "cuda prefill attention parity vs f64 reference (gqa, offset, window, bidi)
                     const tol = @max(2e-3 * @max(@abs(want), @abs(got)), 2e-3);
                     try std.testing.expect(@abs(got - want) <= tol);
                 }
+            }
+        }
+    }
+}
+
+test "cuda attention forward parity vs f64 reference (f32 kv, uniform gqa, stats)" {
+    if (comptime !enabled) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    if (context() == null) return error.SkipZigTest;
+
+    var prng = std.Random.DefaultPrng.init(7);
+    const random = prng.random();
+
+    const Case = struct { q_seq: usize, kv_seq: usize, heads: usize, kv_heads: usize, d: usize, window: usize, causal: bool };
+    const cases = [_]Case{
+        .{ .q_seq = 96, .kv_seq = 96, .heads = 4, .kv_heads = 2, .d = 64, .window = 0, .causal = true }, // gqa causal
+        .{ .q_seq = 64, .kv_seq = 96, .heads = 4, .kv_heads = 4, .d = 64, .window = 0, .causal = true }, // decode-suffix offset
+        .{ .q_seq = 96, .kv_seq = 96, .heads = 2, .kv_heads = 1, .d = 80, .window = 40, .causal = true }, // sliding window
+        .{ .q_seq = 48, .kv_seq = 48, .heads = 2, .kv_heads = 2, .d = 64, .window = 0, .causal = false }, // bidirectional
+    };
+    for (cases) |case| {
+        const qs = case.q_seq;
+        const ks = case.kv_seq;
+        const nh = case.heads;
+        const nkh = case.kv_heads;
+        const d = case.d;
+        const heads_per_kv = nh / nkh;
+        const offset = ks - qs;
+        const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(d)));
+
+        const q = try allocator.alloc(f32, qs * nh * d);
+        defer allocator.free(q);
+        const k = try allocator.alloc(f32, ks * nkh * d);
+        defer allocator.free(k);
+        const v = try allocator.alloc(f32, ks * nkh * d);
+        defer allocator.free(v);
+        const out = try allocator.alloc(f32, qs * nh * d);
+        defer allocator.free(out);
+        const stats = try allocator.alloc(f32, nh * qs * 2);
+        defer allocator.free(stats);
+        for (q) |*x| x.* = random.floatNorm(f32);
+        for (k) |*x| x.* = random.floatNorm(f32);
+        for (v) |*x| x.* = random.floatNorm(f32);
+        @memset(out, std.math.nan(f32));
+        @memset(stats, std.math.nan(f32));
+
+        try std.testing.expect(attentionFwdF32(q, k, v, out, stats, qs, ks, nh, nkh, d, case.window, case.causal, heads_per_kv, scale));
+
+        const scores = try allocator.alloc(f64, ks);
+        defer allocator.free(scores);
+        for (0..qs) |qi| {
+            const p_abs = offset + qi;
+            const end = if (case.causal) @min(ks, p_abs + 1) else ks;
+            const start = if (case.causal and case.window > 0 and p_abs + 1 > case.window) p_abs + 1 - case.window else 0;
+            for (0..nh) |h| {
+                const kvh = h / heads_per_kv;
+                var m: f64 = -std.math.inf(f64);
+                for (start..end) |j| {
+                    var dot: f64 = 0;
+                    for (0..d) |t| dot += @as(f64, q[(qi * nh + h) * d + t]) * @as(f64, k[(j * nkh + kvh) * d + t]);
+                    scores[j] = dot * scale;
+                    m = @max(m, scores[j]);
+                }
+                var l: f64 = 0;
+                for (start..end) |j| {
+                    scores[j] = @exp(scores[j] - m);
+                    l += scores[j];
+                }
+                for (0..d) |t| {
+                    var acc: f64 = 0;
+                    for (start..end) |j| acc += scores[j] * @as(f64, v[(j * nkh + kvh) * d + t]);
+                    const want: f32 = @floatCast(acc / l);
+                    const got = out[(qi * nh + h) * d + t];
+                    const tol = @max(2e-5 * @max(@abs(want), @abs(got)), 2e-5);
+                    try std.testing.expect(@abs(got - want) <= tol);
+                }
+                const m_got = stats[(h * qs + qi) * 2];
+                const l_got = stats[(h * qs + qi) * 2 + 1];
+                try std.testing.expect(@abs(m_got - @as(f32, @floatCast(m))) <= @max(2e-5 * @abs(m), 2e-5));
+                try std.testing.expect(@abs(l_got - @as(f32, @floatCast(l))) <= 2e-5 * l);
             }
         }
     }

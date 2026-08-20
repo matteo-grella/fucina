@@ -2525,10 +2525,14 @@ fn groupedCausalAttentionImpl(
                 if (kv_head_i != head_i / heads_per_kv) break :attn_gpu;
             }
             if (!gpu.shouldUseGpuAttentionFwd(q_seq, kv_seq, heads, d)) break :attn_gpu;
+            // Same clamp as the tiled path: any window >= kv_seq is full
+            // causal, and providers narrow the window to their kernels'
+            // integer width.
+            const win = @min(window, kv_seq);
             const dispatched = if (comptime KvElem == f32)
-                gpu.attentionFwdF32(q_data, k_data, v_data, out.data(), stats, q_seq, kv_seq, heads, kv_heads, d, window, causal, heads_per_kv, scale_value)
+                gpu.attentionFwdF32(q_data, k_data, v_data, out.data(), stats, q_seq, kv_seq, heads, kv_heads, d, win, causal, heads_per_kv, scale_value)
             else
-                gpu.attentionFwdF16Kv(q_data, k_data, v_data, out.data(), stats, q_seq, kv_seq, heads, kv_heads, d, window, causal, heads_per_kv, scale_value);
+                gpu.attentionFwdF16Kv(q_data, k_data, v_data, out.data(), stats, q_seq, kv_seq, heads, kv_heads, d, win, causal, heads_per_kv, scale_value);
             if (dispatched) return out;
         }
     }

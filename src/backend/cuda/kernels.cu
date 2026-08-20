@@ -529,23 +529,55 @@ __device__ __forceinline__ void gemv_body(
     }
 }
 
-// --- Prefill attention (f16 KV) ----------------------------------------------
+// --- Prefill attention (f32 or f16 KV) ----------------------------------------
 // Fused online-softmax grouped attention, semantics identical to the CPU
 // tiled kernel (exec/attention.zig): query row i at absolute position
 // p = source_offset + i attends keys [max(0, p+1-window), p] when causal
 // (window 0 = full causal, pre-clamped host-side), or all kv_seq keys when
 // bidirectional. Layouts: q/o [q_seq, heads, d] f32, k/v [kv_seq, kv_heads,
-// d] f16, kvmap [heads] -> kv head. One warp per query row per head; f32
-// accumulate; d <= 256.
+// d] f32 or f16, kvmap [heads] -> kv head. One warp per query row per head;
+// f32 accumulate; d <= 256. A non-null `stats` captures the CPU kernels'
+// {row max, sum exp} pair at [(h*q_seq + qi)*2] for the training backward.
 
 #define ATTN_WARPS 4
 #define ATTN_MAX_D 256
 
-extern "C" __global__ void fucina_attn_f16(
+static __device__ __forceinline__ float attn_ldf(const __half x) { return __half2float(x); }
+static __device__ __forceinline__ float attn_ldf(const float x) { return x; }
+
+// Query-key inner products: paired loads (half2/float2) halve the
+// instruction count of this latency-bound loop. d is even for every
+// supported head_dim, which also keeps the paired loads aligned.
+static __device__ __forceinline__ float attn_dot(const float *sq, const __half *krow, int d) {
+    const __half2 *krow2 = (const __half2 *)krow;
+    float dot = 0.f;
+#pragma unroll 4
+    for (int t = 0; t < d / 2; t++) {
+        const float2 kk = __half22float2(krow2[t]);
+        dot += sq[2 * t] * kk.x + sq[2 * t + 1] * kk.y;
+    }
+    if (d & 1) dot += sq[d - 1] * __half2float(krow[d - 1]);
+    return dot;
+}
+static __device__ __forceinline__ float attn_dot(const float *sq, const float *krow, int d) {
+    const float2 *krow2 = (const float2 *)krow;
+    float dot = 0.f;
+#pragma unroll 4
+    for (int t = 0; t < d / 2; t++) {
+        const float2 kk = krow2[t];
+        dot += sq[2 * t] * kk.x + sq[2 * t + 1] * kk.y;
+    }
+    if (d & 1) dot += sq[d - 1] * krow[d - 1];
+    return dot;
+}
+
+template <typename KVT>
+static __device__ __forceinline__ void attn_fwd_body(
     const float *__restrict__ q,
-    const __half *__restrict__ k,
-    const __half *__restrict__ v,
+    const KVT *__restrict__ k,
+    const KVT *__restrict__ v,
     float *__restrict__ o,
+    float *__restrict__ stats,
     const int *__restrict__ kvmap,
     int q_seq, int kv_seq, int heads, int kv_heads, int d,
     int source_offset, float scale, int window, int causal) {
@@ -578,20 +610,7 @@ extern "C" __global__ void fucina_attn_f16(
     for (int j0 = start; j0 < end; j0 += 32) {
         const int j = j0 + lane;
         float s = -3.4e38f;
-        if (j < end) {
-            const __half *krow = k + ((size_t)j * kv_heads + kvh) * d;
-            float dot = 0.f;
-            // d is even for every supported head_dim; half2 loads halve the
-            // instruction count of this latency-bound inner product.
-            const __half2 *krow2 = (const __half2 *)krow;
-#pragma unroll 4
-            for (int t = 0; t < d / 2; t++) {
-                const float2 kk = __half22float2(krow2[t]);
-                dot += sh_q[w][2 * t] * kk.x + sh_q[w][2 * t + 1] * kk.y;
-            }
-            if (d & 1) dot += sh_q[w][d - 1] * __half2float(krow[d - 1]);
-            s = dot;
-        }
+        if (j < end) s = attn_dot(sh_q[w], k + ((size_t)j * kv_heads + kvh) * d, d);
         // Warp max of this tile, then online-softmax rescale.
         float m_tile = s;
 #pragma unroll
@@ -616,7 +635,7 @@ extern "C" __global__ void fucina_attn_f16(
             if (dim < d) {
                 for (int jj = 0; jj < jn; jj++) {
                     const float pj = sh_p[w][jj];
-                    a += pj * __half2float(v[((size_t)(j0 + jj) * kv_heads + kvh) * d + dim]);
+                    a += pj * attn_ldf(v[((size_t)(j0 + jj) * kv_heads + kvh) * d + dim]);
                 }
             }
             acc[t] = a;
@@ -630,6 +649,35 @@ extern "C" __global__ void fucina_attn_f16(
         const int dim = lane + t * 32;
         if (dim < d) orow[dim] = acc[t] * inv_l;
     }
+    if (stats != (float *)0 && lane == 0) {
+        const size_t sbase = ((size_t)h * q_seq + qi) * 2;
+        stats[sbase] = m_run;
+        stats[sbase + 1] = l_run;
+    }
+}
+
+extern "C" __global__ void fucina_attn_fwd_f16(
+    const float *__restrict__ q,
+    const __half *__restrict__ k,
+    const __half *__restrict__ v,
+    float *__restrict__ o,
+    float *__restrict__ stats,
+    const int *__restrict__ kvmap,
+    int q_seq, int kv_seq, int heads, int kv_heads, int d,
+    int source_offset, float scale, int window, int causal) {
+    attn_fwd_body<__half>(q, k, v, o, stats, kvmap, q_seq, kv_seq, heads, kv_heads, d, source_offset, scale, window, causal);
+}
+
+extern "C" __global__ void fucina_attn_fwd_f32(
+    const float *__restrict__ q,
+    const float *__restrict__ k,
+    const float *__restrict__ v,
+    float *__restrict__ o,
+    float *__restrict__ stats,
+    const int *__restrict__ kvmap,
+    int q_seq, int kv_seq, int heads, int kv_heads, int d,
+    int source_offset, float scale, int window, int causal) {
+    attn_fwd_body<float>(q, k, v, o, stats, kvmap, q_seq, kv_seq, heads, kv_heads, d, source_offset, scale, window, causal);
 }
 
 extern "C" __global__ void fucina_gemv_q8_0(

@@ -678,8 +678,8 @@ pub fn shouldUseGpuForRhs(b: *const Tensor, m: usize, n: usize, k: usize) bool {
 }
 
 /// Provider capability flag for the grouped-causal-attention forward arm
-/// (exec/attention.zig's GPU tier). CUDA carries the `false` stub until its
-/// kernel lands.
+/// (exec/attention.zig's GPU tier). CUDA implements the same contract over
+/// its streaming attention kernel.
 pub const has_attention_fwd = true;
 
 /// Attention-forward gate: prefill-length rows over the work floor
