@@ -18,7 +18,15 @@ pub fn build(b: *std.Build) void {
         "accelerate",
         "Compatibility alias: false is equivalent to -Dblas=none; true selects Accelerate on macOS",
     );
-    const default_blas: BlasKind = if (target.result.os.tag == .macos) .accelerate else .none;
+    // macOS always has Accelerate; native Linux probes the system for a
+    // provider (cross builds cannot inspect the target machine and default
+    // to none, matching the cuda-check legs).
+    const default_blas: BlasKind = if (target.result.os.tag == .macos)
+        .accelerate
+    else if (target.result.os.tag == .linux and target.query.isNative())
+        detectNativeLinuxBlas(b, target.result.cpu.arch)
+    else
+        .none;
     const blas_kind = b.option(
         BlasKind,
         "blas",
@@ -814,6 +822,36 @@ fn configureBlasModule(
             module.linkSystemLibrary("blas", .{});
         },
     }
+}
+
+/// Probe the build host for a linkable BLAS provider (native Linux only:
+/// cross builds cannot inspect the target machine). The probe is the
+/// dynamic-linker cache — the honest proxy for "linkSystemLibrary will
+/// find it without extra search paths". Priority is by expected GEMM
+/// throughput: NVPL first on aarch64, MKL first on x86-64, then OpenBLAS,
+/// then BLIS. The generic netlib `blas` is never auto-selected: reference
+/// BLAS is routinely slower than the in-house SIMD kernels, so linking it
+/// stays an explicit choice. One stderr line reports the outcome.
+fn detectNativeLinuxBlas(b: *std.Build, arch: std.Target.Cpu.Arch) BlasKind {
+    var code: u8 = undefined;
+    const listing = b.runAllowFail(&.{ "ldconfig", "-p" }, &code, .ignore) catch
+        (b.runAllowFail(&.{ "/sbin/ldconfig", "-p" }, &code, .ignore) catch "");
+    const kind: BlasKind = if (arch == .aarch64 and std.mem.indexOf(u8, listing, "libnvpl_blas") != null)
+        .nvpl
+    else if (arch == .x86_64 and std.mem.indexOf(u8, listing, "libmkl_rt.so") != null)
+        .mkl
+    else if (std.mem.indexOf(u8, listing, "libopenblas.so") != null)
+        .openblas
+    else if (std.mem.indexOf(u8, listing, "libblis.so") != null)
+        .blis
+    else
+        .none;
+    if (kind == .none) {
+        std.debug.print("blas: none (no MKL/OpenBLAS/BLIS in the linker cache; -Dblas=<provider> links one explicitly)\n", .{});
+    } else {
+        std.debug.print("blas: {s} (auto-detected on this Linux host; -Dblas overrides, -Dblas=none disables)\n", .{@tagName(kind)});
+    }
+    return kind;
 }
 
 fn configureGpu(
