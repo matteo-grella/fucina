@@ -26,6 +26,7 @@ pub fn run(
     context_arg: ?[]const u8,
     adapter_path: ?[]const u8,
     save_path: ?[]const u8,
+    save_cartridge_path: ?[]const u8,
     chat_text: ?[]const u8,
     repl: bool,
     max_new_tokens: usize,
@@ -73,6 +74,38 @@ pub fn run(
         const context_ids = try allocator.alloc(usize, context_ids32.len);
         defer allocator.free(context_ids);
         for (context_ids, context_ids32) |*d, s| d.* = s;
+
+        // Cartridge readout: a cartridge-mode checkpoint compiles the
+        // context into a STANDARD KV-prefix cartridge (safetensors state
+        // dict) instead of a LoRA adapter — train, evaluate, and serve it
+        // exactly like `zig build cartridge` output (--cartridge, fleets).
+        if (sh.config.cartridge_rows != 0 or save_cartridge_path != null) {
+            if (sh.config.cartridge_rows == 0) {
+                try stdout.print("--shine-save-cartridge needs a cartridge-mode SHINE checkpoint (shine.cartridge_rows > 0); this one uses the LoRA readout\n", .{});
+                return error.InvalidShineConfig;
+            }
+            const cart_path = save_cartridge_path orelse {
+                try stdout.print("cartridge-mode SHINE checkpoint: pass --shine-save-cartridge PATH, then serve with --cartridge PATH\n", .{});
+                return error.MissingArgument;
+            };
+            const cart_start = util.nowNs(io);
+            var cart = try shine.generateCartridge(model, &sh, ctx, allocator, context_ids);
+            defer cart.deinit();
+            var out_file = try std.Io.Dir.cwd().createFile(io, cart_path, .{});
+            defer out_file.close(io);
+            var write_buffer: [1 << 20]u8 = undefined;
+            var out_writer = out_file.writer(io, &write_buffer);
+            try cart.saveState(&out_writer.interface);
+            try out_writer.interface.flush();
+            try stdout.print("shine: context ({d} tokens) -> cartridge in {d:.2}s ({d} rows/layer) saved to {s}\n", .{
+                context_ids.len,
+                @as(f64, @floatFromInt(util.nowNs(io) - cart_start)) / 1e9,
+                cart.p,
+                cart_path,
+            });
+            try stdout.print("serve it like any cartridge: zig build qwen3 -- <base.gguf> --cartridge {s} --chat \"...\"\n", .{cart_path});
+            return;
+        }
 
         const gen_start = util.nowNs(io);
         const set = try shine.generateAdapter(model, &sh, ctx, context_ids);

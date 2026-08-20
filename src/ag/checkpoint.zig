@@ -317,6 +317,9 @@ fn CheckpointBackward(comptime block: anytype, comptime Extra: type, comptime In
             needs_grad: []const bool,
             out: []?RawTensor,
         ) anyerror!void {
+            // Wide input tuples (a packed LoRA layer runs 15) push the
+            // unrolled per-input loops past the default comptime quota.
+            @setEvalBranchQuota(1000 * (n + 1));
             const self: *const Self = @ptrCast(@alignCast(ptr));
             std.debug.assert(needs_grad.len == n and out.len == n);
 

@@ -93,6 +93,18 @@ zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-8B-F16.gguf \
 zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-8B-Q8_0.gguf \
   --shine-adapter doc.adapter.gguf --chat "What does the document say about X?"
 
+# Cartridge readout: a cartridge-mode SHINE checkpoint
+# (shine.cartridge_rows > 0; trained with ShineTrainer.lossCartridge)
+# compiles the context into a STANDARD KV-prefix cartridge instead of a
+# LoRA adapter — the same safetensors artifact `zig build cartridge`
+# distills, served/evaluated/fleeted exactly the same way (REFERENCE
+# §13.12 "Cartridge readout")
+zig build qwen3 -Doptimize=ReleaseFast -- <base.gguf> \
+  --shine <shine-cartridge.gguf> --shine-context @doc.txt \
+  --shine-save-cartridge doc.cartridge.safetensors
+zig build qwen3 -Doptimize=ReleaseFast -- <base.gguf> \
+  --cartridge doc.cartridge.safetensors --chat "What does the document say about X?"
+
 # Fleet build: one adapter + retrieval embeddings per .txt/.md under docs/,
 # served by `zig build lmserve -- <base.gguf> --shine-fleet fleet-out`
 # (per-request cosine routing; see ../lmserve/README.md)

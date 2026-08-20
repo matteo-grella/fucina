@@ -52,6 +52,7 @@ pub const Options = struct {
     shine_context: ?[]const u8 = null,
     shine_adapter: ?[]const u8 = null,
     shine_save: ?[]const u8 = null,
+    shine_save_cartridge: ?[]const u8 = null,
     shine_fleet_build: ?[]const u8 = null,
     shine_docs: ?[]const u8 = null,
 
@@ -176,6 +177,12 @@ pub fn parse(args: []const []const u8, stdout: *std.Io.Writer, token_buf: []usiz
             o.shine_adapter = args[arg_i];
         } else if (std.mem.startsWith(u8, arg, "--shine-adapter=")) {
             o.shine_adapter = arg["--shine-adapter=".len..];
+        } else if (std.mem.eql(u8, arg, "--shine-save-cartridge")) {
+            arg_i += 1;
+            if (arg_i >= args.len) return error.MissingArgument;
+            o.shine_save_cartridge = args[arg_i];
+        } else if (std.mem.startsWith(u8, arg, "--shine-save-cartridge=")) {
+            o.shine_save_cartridge = arg["--shine-save-cartridge=".len..];
         } else if (std.mem.eql(u8, arg, "--shine-save")) {
             arg_i += 1;
             if (arg_i >= args.len) return error.MissingShineSavePath;

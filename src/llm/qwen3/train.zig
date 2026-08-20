@@ -279,7 +279,7 @@ fn widenedFrozen(cache: *FrozenCache, weight: *const LinearWeight, ctx: *ExecCon
     return cache.map.getPtr(weight).?;
 }
 
-fn dotLinear(
+pub fn dotLinear(
     cache: ?*FrozenCache,
     weight: *const LinearWeight,
     ctx: *ExecContext,
@@ -332,7 +332,7 @@ fn dotFrozen(
 /// Base QKV through the frozen projections — both union arms (mirrors
 /// `AttentionProjection.project`, with the differentiable dot; the fused
 /// split IS the inference `qwen3.splitQkv`, not a replica).
-fn projectQkv(cache: ?*FrozenCache, ctx: *ExecContext, layer: *const ModelLayer, input: *const Hidden, cfg: qwen3.Config) !qwen3.QkvProjection {
+pub fn projectQkv(cache: ?*FrozenCache, ctx: *ExecContext, layer: *const ModelLayer, input: *const Hidden, cfg: qwen3.Config) !qwen3.QkvProjection {
     return switch (layer.attn_proj) {
         .separate => |*sep| blk: {
             var q = try dotLinear(cache, &sep.q_proj, ctx, input, .embed, .q);
@@ -355,7 +355,7 @@ const DenseFfn = qwen3.DenseFfn;
 /// Base gate/up through the frozen projections — both union arms (mirrors
 /// `FfnInputProjection.project`, with the differentiable dot; the fused
 /// split IS the inference `qwen3.splitGateUp`, not a replica).
-fn projectGateUp(cache: ?*FrozenCache, ctx: *ExecContext, dense: *const DenseFfn, input: *const Hidden, cfg: qwen3.Config) !qwen3.GateUpProjection {
+pub fn projectGateUp(cache: ?*FrozenCache, ctx: *ExecContext, dense: *const DenseFfn, input: *const Hidden, cfg: qwen3.Config) !qwen3.GateUpProjection {
     return switch (dense.input_proj) {
         .separate => |*sep| blk: {
             var gate = try dotLinear(cache, &sep.gate_proj, ctx, input, .embed, .ffn);

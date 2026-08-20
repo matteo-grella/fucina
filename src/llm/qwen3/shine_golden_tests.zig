@@ -133,7 +133,7 @@ test "SHINE m2p + sliceLora parity vs the PyTorch reference" {
         const probe_drift = Drift.measure(try layer0.dataConst(), golden_probe);
         std.debug.print("shine m2p stage {d}: max|diff| {d} (max|ref| {d}, rel {d})\n", .{ stage, probe_drift.max_abs, probe_drift.max_ref, probe_drift.rel() });
         try std.testing.expect(probe_drift.rel() < 1e-4);
-        if (stage < sh.m2p.len) x = try ctx.replace(x, shine.m2pStage(&sh, &ctx, stage, &x));
+        if (stage < sh.m2p.len) x = try ctx.replace(x, shine.m2pStage(sh.config, sh.m2p, &ctx, stage, &x));
     }
     const plain_drift = Drift.measure(try x.dataConst(), golden_plain);
     std.debug.print("shine m2p plain: max|diff| {d} (max|ref| {d}, rel {d})\n", .{ plain_drift.max_abs, plain_drift.max_ref, plain_drift.rel() });

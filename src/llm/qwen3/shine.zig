@@ -31,6 +31,7 @@ const fucina = @import("fucina");
 const weights = @import("../weights.zig");
 const kv_cache = @import("../kv_cache.zig");
 const qwen3 = @import("model.zig");
+const cartridge_mod = @import("../cartridge.zig");
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
@@ -58,6 +59,11 @@ pub const Config = struct {
     m2p_ffn: usize,
     m2p_eps: f32,
     layer_transformer_first: bool,
+    /// Cartridge readout: > 0 selects the KV-prefix interpretation of the
+    /// generated per-layer block — `cartridge_rows` prefix positions, each
+    /// a K row and a V row (`M * hidden == 2 * rows * kv_dim`). 0 keeps
+    /// the LoRA "rl" slicing.
+    cartridge_rows: usize = 0,
 
     pub fn fromGguf(file: *const gguf.File) !Config {
         const arch = file.getString("general.architecture") orelse return Error.InvalidShineConfig;
@@ -73,6 +79,7 @@ pub const Config = struct {
             .m2p_heads = try metaInt(file, "shine.m2p.head_count"),
             .m2p_ffn = try metaInt(file, "shine.m2p.feed_forward_length"),
             .m2p_eps = @floatCast(file.getFloat("shine.m2p.layer_norm_eps") orelse return Error.InvalidShineConfig),
+            .cartridge_rows = if (file.getInt("shine.cartridge_rows")) |rows| @intCast(@max(rows, 0)) else 0,
             .layer_transformer_first = file.getBool("shine.m2p.layer_transformer_first") orelse true,
         };
     }
@@ -83,10 +90,19 @@ pub const Config = struct {
         if (self.m2p_layers % 2 != 0) return Error.InvalidShineConfig;
         if (self.hidden_size % self.m2p_heads != 0) return Error.InvalidShineConfig;
         if (base.isMoe()) return Error.MoeNotSupported;
-        // The memory-token count IS the LoRA budget: M * hidden must equal
-        // the per-layer generated-parameter count (SHINE's M = ceil(rD/H)).
-        if (self.num_mem_token * self.hidden_size != loraParamsPerLayer(base, self.lora_r))
-            return Error.InvalidShineConfig;
+        if (self.cartridge_rows > 0) {
+            // Cartridge readout: the budget is one K and one V row per
+            // prefix position, per layer.
+            const kv_dim = base.num_key_value_heads * base.head_dim;
+            if (self.num_mem_token * self.hidden_size != 2 * self.cartridge_rows * kv_dim)
+                return Error.InvalidShineConfig;
+        } else {
+            // The memory-token count IS the LoRA budget: M * hidden must
+            // equal the per-layer generated-parameter count
+            // (SHINE's M = ceil(rD/H)).
+            if (self.num_mem_token * self.hidden_size != loraParamsPerLayer(base, self.lora_r))
+                return Error.InvalidShineConfig;
+        }
     }
 };
 
@@ -173,42 +189,42 @@ pub const LoraSet = struct {
 };
 
 /// One M2P encoder layer's weights (torch nn.TransformerEncoderLayer,
-/// post-LN, biased throughout).
-const M2pBlock = struct {
+/// post-LN, biased throughout). Field tensors may be constants (inference)
+/// or gradient-carrying variables (the trainer) — same type, same code.
+pub const M2pBlock = struct {
     in_w: fucina.Tensor(.{ .proj, .embed }), // [3H, H] packed q;k;v
-    in_b: []f32,
+    in_b: fucina.Tensor(.{.proj}),
     out_w: fucina.Tensor(.{ .eout, .hmerge }), // [H, H]
-    out_b: []f32,
+    out_b: fucina.Tensor(.{.eout}),
     ff1_w: fucina.Tensor(.{ .m2pffn, .embed }), // [FF, H]
-    ff1_b: []f32,
+    ff1_b: fucina.Tensor(.{.m2pffn}),
     ff2_w: fucina.Tensor(.{ .eout, .m2pffn }), // [H, FF]
-    ff2_b: []f32,
+    ff2_b: fucina.Tensor(.{.eout}),
     norm1_w: fucina.Tensor(.{.embed}),
     norm1_b: fucina.Tensor(.{.embed}),
     norm2_w: fucina.Tensor(.{.embed}),
     norm2_b: fucina.Tensor(.{.embed}),
 
     fn load(ctx: *ExecContext, file: *const gguf.File, config: Config, i: usize) !M2pBlock {
-        const allocator = ctx.allocator;
         const hidden = config.hidden_size;
         var name_buf: [64]u8 = undefined;
 
         var in_w = try loadMatrix(ctx, file, try m2pName(&name_buf, i, "attn_in.weight"), 3 * hidden, hidden, .{ .proj, .embed });
         errdefer in_w.deinit();
-        const in_b = try loadRow(allocator, file, try m2pName(&name_buf, i, "attn_in.bias"), 3 * hidden);
-        errdefer allocator.free(in_b);
+        var in_b = try weights.loadVector(ctx, try file.get(try m2pName(&name_buf, i, "attn_in.bias")), 3 * hidden, .proj);
+        errdefer in_b.deinit();
         var out_w = try loadMatrix(ctx, file, try m2pName(&name_buf, i, "attn_out.weight"), hidden, hidden, .{ .eout, .hmerge });
         errdefer out_w.deinit();
-        const out_b = try loadRow(allocator, file, try m2pName(&name_buf, i, "attn_out.bias"), hidden);
-        errdefer allocator.free(out_b);
+        var out_b = try weights.loadVector(ctx, try file.get(try m2pName(&name_buf, i, "attn_out.bias")), hidden, .eout);
+        errdefer out_b.deinit();
         var ff1_w = try loadMatrix(ctx, file, try m2pName(&name_buf, i, "ffn_up.weight"), config.m2p_ffn, hidden, .{ .m2pffn, .embed });
         errdefer ff1_w.deinit();
-        const ff1_b = try loadRow(allocator, file, try m2pName(&name_buf, i, "ffn_up.bias"), config.m2p_ffn);
-        errdefer allocator.free(ff1_b);
+        var ff1_b = try weights.loadVector(ctx, try file.get(try m2pName(&name_buf, i, "ffn_up.bias")), config.m2p_ffn, .m2pffn);
+        errdefer ff1_b.deinit();
         var ff2_w = try loadMatrix(ctx, file, try m2pName(&name_buf, i, "ffn_down.weight"), hidden, config.m2p_ffn, .{ .eout, .m2pffn });
         errdefer ff2_w.deinit();
-        const ff2_b = try loadRow(allocator, file, try m2pName(&name_buf, i, "ffn_down.bias"), hidden);
-        errdefer allocator.free(ff2_b);
+        var ff2_b = try weights.loadVector(ctx, try file.get(try m2pName(&name_buf, i, "ffn_down.bias")), hidden, .eout);
+        errdefer ff2_b.deinit();
         var norm1_w = try weights.loadVector(ctx, try file.get(try m2pName(&name_buf, i, "norm1.weight")), hidden, .embed);
         errdefer norm1_w.deinit();
         var norm1_b = try weights.loadVector(ctx, try file.get(try m2pName(&name_buf, i, "norm1.bias")), hidden, .embed);
@@ -234,18 +250,19 @@ const M2pBlock = struct {
         };
     }
 
-    fn deinit(self: *M2pBlock, allocator: Allocator) void {
+    pub fn deinit(self: *M2pBlock, allocator: Allocator) void {
+        _ = allocator;
         self.norm2_b.deinit();
         self.norm2_w.deinit();
         self.norm1_b.deinit();
         self.norm1_w.deinit();
-        allocator.free(self.ff2_b);
+        self.ff2_b.deinit();
         self.ff2_w.deinit();
-        allocator.free(self.ff1_b);
+        self.ff1_b.deinit();
         self.ff1_w.deinit();
-        allocator.free(self.out_b);
+        self.out_b.deinit();
         self.out_w.deinit();
-        allocator.free(self.in_b);
+        self.in_b.deinit();
         self.in_w.deinit();
         self.* = undefined;
     }
@@ -325,16 +342,6 @@ fn loadMatrix(ctx: *ExecContext, file: *const gguf.File, name: []const u8, rows:
     var out = try fucina.Tensor(tags).empty(ctx, .{ rows, cols });
     errdefer out.deinit();
     try weights.fillF32(try out.data(), info);
-    return out;
-}
-
-/// A 1-D f32 row as a plain owned slice (the `biasAdd` input shape).
-fn loadRow(allocator: Allocator, file: *const gguf.File, name: []const u8, len: usize) ![]f32 {
-    const info = try file.get(name);
-    if (info.n_dims != 1 or info.dims[0] != len) return Error.InvalidShineConfig;
-    const out = try allocator.alloc(f32, len);
-    errdefer allocator.free(out);
-    try weights.fillF32(out, info);
     return out;
 }
 
@@ -437,7 +444,9 @@ pub fn loadLoraGguf(ctx: *ExecContext, io: std.Io, path: []const u8, base: qwen3
 
 /// `(x @ a) @ b` re-tagged to `{ .seq, out_tag }` — the LoRA side path added
 /// to a base projection's output. `x` is any `{ .seq, * }` activation.
-fn loraDelta(ctx: *ExecContext, x: anytype, pair: *const LoraPair, comptime out_tag: Tag) !fucina.Tensor(.{ .seq, out_tag }) {
+/// Differentiable end to end when the operands carry grad state (the
+/// trainer's route); shared with the no-grad inference path.
+pub fn loraDelta(ctx: *ExecContext, x: anytype, pair: *const LoraPair, comptime out_tag: Tag) !fucina.Tensor(.{ .seq, out_tag }) {
     var xr = try x.withTags(ctx, .{ .seq, .lin });
     defer xr.deinit();
     var mid = try xr.dot(ctx, &pair.a, .lin);
@@ -604,20 +613,20 @@ pub fn encodeMemoryStates(
 /// attending along `.layer` (layer-mixing) or `.mem` (token-mixing) with the
 /// other axis as batch — both passes fully batched through tag-aligned dots.
 fn m2pEncoderLayer(
-    sh: *const Shine,
+    config: Config,
     ctx: *ExecContext,
     block: *const M2pBlock,
     x: *const fucina.Tensor(.{ .layer, .mem, .embed }),
     comptime attend_layer: bool,
 ) !fucina.Tensor(.{ .layer, .mem, .embed }) {
-    const hidden = sh.config.hidden_size;
-    const heads = sh.config.m2p_heads;
+    const hidden = config.hidden_size;
+    const heads = config.m2p_heads;
     const head_dim = hidden / heads;
     const scale = 1 / @sqrt(@as(f32, @floatFromInt(head_dim)));
 
     var qkv = try x.dot(ctx, &block.in_w, .embed);
     defer qkv.deinit();
-    qkv = try ctx.replace(qkv, qkv.biasAdd(ctx, block.in_b, .proj));
+    qkv = try ctx.replace(qkv, qkv.add(ctx, &block.in_b));
 
     var q_slice = try qkv.narrow(ctx, .proj, 0, hidden);
     defer q_slice.deinit();
@@ -657,28 +666,28 @@ fn m2pEncoderLayer(
 
     var sa = try merged.dot(ctx, &block.out_w, .hmerge);
     defer sa.deinit();
-    sa = try ctx.replace(sa, sa.biasAdd(ctx, block.out_b, .eout));
+    sa = try ctx.replace(sa, sa.add(ctx, &block.out_b));
     var sa_e = try sa.withTags(ctx, .{ .layer, .mem, .embed });
     defer sa_e.deinit();
 
     var post_attn = try x.add(ctx, &sa_e);
     defer post_attn.deinit();
-    var normed1 = try post_attn.layerNorm(ctx, .embed, sh.config.m2p_eps, .{ .weight = &block.norm1_w, .bias = &block.norm1_b });
+    var normed1 = try post_attn.layerNorm(ctx, .embed, config.m2p_eps, .{ .weight = &block.norm1_w, .bias = &block.norm1_b });
     defer normed1.deinit();
 
     var ff = try normed1.dot(ctx, &block.ff1_w, .embed);
     defer ff.deinit();
-    ff = try ctx.replace(ff, ff.biasAdd(ctx, block.ff1_b, .m2pffn));
+    ff = try ctx.replace(ff, ff.add(ctx, &block.ff1_b));
     ff = try ctx.replace(ff, ff.unary(ctx, .gelu_erf));
     var ff_out = try ff.dot(ctx, &block.ff2_w, .m2pffn);
     defer ff_out.deinit();
-    ff_out = try ctx.replace(ff_out, ff_out.biasAdd(ctx, block.ff2_b, .eout));
+    ff_out = try ctx.replace(ff_out, ff_out.add(ctx, &block.ff2_b));
     var ff_e = try ff_out.withTags(ctx, .{ .layer, .mem, .embed });
     defer ff_e.deinit();
 
     var post_ff = try normed1.add(ctx, &ff_e);
     defer post_ff.deinit();
-    return post_ff.layerNorm(ctx, .embed, sh.config.m2p_eps, .{ .weight = &block.norm2_w, .bias = &block.norm2_b });
+    return post_ff.layerNorm(ctx, .embed, config.m2p_eps, .{ .weight = &block.norm2_w, .bias = &block.norm2_b });
 }
 
 /// The M2P input: memory states plus the learned layer/token positional
@@ -712,16 +721,17 @@ pub fn m2pInput(
 /// One M2P stage: encoder layer `i` with its alternation choice
 /// (layer_transformer_first: even passes mix along the layer axis).
 pub fn m2pStage(
-    sh: *const Shine,
+    config: Config,
+    m2p: []const M2pBlock,
     ctx: *ExecContext,
     i: usize,
     x: *const fucina.Tensor(.{ .layer, .mem, .embed }),
 ) !fucina.Tensor(.{ .layer, .mem, .embed }) {
-    const layer_pass = (i % 2 == 0) == sh.config.layer_transformer_first;
+    const layer_pass = (i % 2 == 0) == config.layer_transformer_first;
     return if (layer_pass)
-        m2pEncoderLayer(sh, ctx, &sh.m2p[i], x, true)
+        m2pEncoderLayer(config, ctx, &m2p[i], x, true)
     else
-        m2pEncoderLayer(sh, ctx, &sh.m2p[i], x, false);
+        m2pEncoderLayer(config, ctx, &m2p[i], x, false);
 }
 
 /// Stage 2: memory states -> the flat generated-parameter tensor (still
@@ -734,7 +744,7 @@ pub fn m2pForward(
     var x = try m2pInput(sh, ctx, memory_states);
     errdefer x.deinit();
     for (0..sh.m2p.len) |i| {
-        x = try ctx.replace(x, m2pStage(sh, ctx, i, &x));
+        x = try ctx.replace(x, m2pStage(sh.config, sh.m2p, ctx, i, &x));
     }
     return x;
 }
@@ -793,6 +803,61 @@ pub fn generateAdapter(
     var plain = try m2pForward(sh, ctx, &memory_states);
     defer plain.deinit();
     return sliceLora(ctx, model.config, sh.config.lora_r, sh.config.scale, &plain);
+}
+
+/// Cartridge ("KV-prefix") readout of the generated block: each layer's
+/// flat `M * hidden` row is `rows` K rows then `rows` V rows (kv-cache row
+/// order `[rows, kv_heads * head_dim]`), both scaled by `sqrt(scale)` (the
+/// "rl" discipline: generation starts near zero, so the prefix begins with
+/// near-uniform logits and near-zero value content). The result is a
+/// STANDARD `llm.cartridge.Cartridge` (leaf rows, registry, no sink):
+/// save it with `saveState`, serve it with `--cartridge`/fleets, evaluate
+/// it exactly like a distilled one. Prefix K rows are read as post-
+/// norm/rope kv-cache rows at positions `0..rows-1` — the cartridge
+/// serving contract (tokens shift to offset `rows`).
+pub fn sliceCartridge(
+    ctx: *ExecContext,
+    allocator: Allocator,
+    base: qwen3.Config,
+    config: Config,
+    plain: *const fucina.Tensor(.{ .layer, .mem, .embed }),
+) !cartridge_mod.Cartridge {
+    if (config.cartridge_rows == 0) return Error.InvalidShineConfig;
+    const rows = config.cartridge_rows;
+    const kv_dim = base.num_key_value_heads * base.head_dim;
+
+    var scaled = try plain.scale(ctx, @sqrt(config.scale));
+    defer scaled.deinit();
+    const values = try scaled.dataConst();
+    const per_layer = 2 * rows * kv_dim;
+
+    const k_rows = try allocator.alloc([]const f32, base.num_layers);
+    defer allocator.free(k_rows);
+    const v_rows = try allocator.alloc([]const f32, base.num_layers);
+    defer allocator.free(v_rows);
+    for (0..base.num_layers) |layer_i| {
+        const layer_base = layer_i * per_layer;
+        k_rows[layer_i] = values[layer_base..][0 .. rows * kv_dim];
+        v_rows[layer_i] = values[layer_base + rows * kv_dim ..][0 .. rows * kv_dim];
+    }
+    return cartridge_mod.Cartridge.initFromRows(ctx, allocator, 0, rows, base.num_key_value_heads, base.head_dim, k_rows, v_rows);
+}
+
+/// The full hypernetwork with the cartridge readout: context ids -> a
+/// standard KV-prefix cartridge, one pass (the amortized counterpart of
+/// the distillation run that normally produces one).
+pub fn generateCartridge(
+    model: *const qwen3.Model,
+    sh: *const Shine,
+    ctx: *ExecContext,
+    allocator: Allocator,
+    token_ids: []const usize,
+) !cartridge_mod.Cartridge {
+    var memory_states = try encodeMemoryStates(model, sh, ctx, token_ids);
+    defer memory_states.deinit();
+    var plain = try m2pForward(sh, ctx, &memory_states);
+    defer plain.deinit();
+    return sliceCartridge(ctx, allocator, model.config, sh.config, &plain);
 }
 
 /// `qwen3.Model.forwardStep` with a LoRA set active on every linear: appends

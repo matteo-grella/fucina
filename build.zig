@@ -207,6 +207,7 @@ pub fn build(b: *std.Build) void {
     configureOmnivoiceAudio(omnivoice.exe);
     _ = addExample(b, tool_ctx, .{ .step = "locate-anything", .desc = "LocateAnything-3B open-vocabulary detection from GGUF: detect/info, parity oracles, bench", .exe = "fucina-locate-anything", .root = "examples/locate_anything/main.zig", .llm = true });
     _ = addExample(b, tool_ctx, .{ .step = "finetune", .desc = "LoRA fine-tune Qwen3 GGUF on a tiny built-in SFT dataset", .exe = "fucina-finetune", .root = "examples/finetune/main.zig", .llm = true });
+    _ = addExample(b, tool_ctx, .{ .step = "shine-train", .desc = "Train the SHINE hypernetwork (LoRA or cartridge readout) over a frozen qwen3 base", .exe = "fucina-shine-train", .root = "examples/shine_train/main.zig", .llm = true });
     _ = addExample(b, tool_ctx, .{ .step = "cartridge", .desc = "Train/serve a corpus as a trained KV prefix on a Qwen3 GGUF (arXiv 2506.06266)", .exe = "fucina-cartridge", .root = "examples/cartridge/main.zig", .llm = true });
     _ = addExample(b, tool_ctx, .{ .step = "cartridge-fleet", .desc = "Per-document cartridge fleets: mixed-visibility training, RAM/disk budget manager, cosine cartridge-RAG (arXiv 2606.04557)", .exe = "fucina-cartridge-fleet", .root = "examples/cartridge_fleet/main.zig", .llm = true });
     _ = addExample(b, tool_ctx, .{ .step = "engram", .desc = "Graft conditional n-gram memory onto a frozen Qwen3 GGUF and train it (arXiv 2601.07372)", .exe = "fucina-engram", .root = "examples/engram/main.zig", .llm = true });

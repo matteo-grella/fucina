@@ -13398,6 +13398,56 @@ degenerate adapters through the f16 path while bf16 stayed correct).
 SERVING a saved adapter is robust on any base format, f16 and q8_0
 included.
 
+Training is native: `shine_train.ShineTrainer` runs the full
+differentiable SHINE step — Meta-LoRA encoder pass with per-layer memory
+capture, M2P, "rl" slicing, adapted conversation pass, masked CE — as one
+autograd graph, with the frozen base routed through the LoRA trainer's
+`FrozenCache` dots and the LoRA/M2P math reusing shine.zig's facade code
+with gradient-carrying variables. `loss` takes one example;
+`lossPacked` takes a batch and runs every base GEMM once over the
+concatenated segments (per-segment RoPE, causal attention, and adapter
+side paths decompose exactly; a pack of identical examples reproduces
+the single step to 1.5e-6). `checkpoint_layers` runs each base layer as
+one `fucina.checkpointWithContext` block (§5.5's component): only the
+layer-boundary hiddens stay retained — the per-layer memory captures are
+narrows of those boundaries, so capture is free — and the block's
+grad-free first forward makes the packed GEMMs GPU-eligible. Rope tables
+and segment vectors are then step-retained on the trainer; call
+`freeTransient` between optimizer steps, never between a forward and its
+backward. The golden gate (`tools/gen_shine_train_goldens.py`,
+`models/shine/train-goldens`) pins loss and the gradient of every
+trainable leaf against PyTorch autograd at 1e-3 (measured 1.8e-6), plain
+and checkpointed.
+
+**Cartridge readout** (`Config.cartridge_rows > 0`, a Fucina extension —
+no reference implementation exists): the generator (encoder + M2P) is
+readout-agnostic, and this mode reinterprets each layer's generated
+`M x hidden` block as a KV PREFIX instead of LoRA pairs — `rows` K rows
+then `rows` V rows in kv-cache row order, both scaled by `sqrt(scale)`,
+with the budget identity `M * hidden == 2 * rows * kv_dim`
+(`Config.validate`). The product is a STANDARD `llm.cartridge.Cartridge`
+(§13.10) in every respect: `generateCartridge` (or the runner's
+`--shine-save-cartridge PATH`, given `--shine-context`) writes the same
+safetensors state dict `zig build cartridge` produces, so serving,
+fleets, composition, held-out evaluation, and the speculative draft
+reference all apply unchanged — serve it with `--cartridge PATH`. SHINE
+is thereby the amortized cartridge press: one prefill-priced pass where
+distillation runs an optimization. Training mirrors the LoRA mode:
+`ShineTrainer.lossCartridge` runs the same encoder + M2P over the same
+trainable leaves, slices the block as graph views
+(`sliceCartridgeViews`), and the conversation pass is the qwen3
+trainer's own cartridge forward (`ForwardOptions.cartridge` with the
+generated rows borrowed in), so RoPE offsets, prefix attention, and the
+CE/label convention are byte-shared with distillation training. Gates
+(`shine_cartridge_tests.zig`): budget-identity validation, bitwise
+parity between the inference slicer and the trainer views, a
+saveState -> initFromStateDict round trip, and finite-difference
+gradient checks through the full chain (autograd vs secant agree to
+~0.1% on the tiny harness). Zero-start note: at generation start the
+prefix has near-uniform key logits and near-zero value content (the
+`sqrt(scale)` discipline) — prefix-tuning's trainable regime, not the
+LoRA mode's exact-identity start.
+
 ## 14. Model families and example applications
 
 The `fucina_llm` module root (`src/llm.zig`) exposes each model family as a

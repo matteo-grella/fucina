@@ -1,0 +1,33 @@
+diff --git a/meta_train_parallel.py b/meta_train_parallel.py
+index 1d63931..106a080 100755
+--- a/meta_train_parallel.py
++++ b/meta_train_parallel.py
+@@ -580,11 +580,11 @@ def main(cfg: DictConfig):
+     no_decay = ["bias", "LayerNorm.weight", "layer_norm.weight", "norm.weight", "norm1", "norm2"]
+     grouped_params = [
+         {
+-            "params": [p for n, p in ddp_metanet.named_parameters() if (not any(nd in n for nd in no_decay) and not n.startswith("module.metamodel"))],
++            "params": [p for n, p in ddp_metanet.named_parameters() if (not any(nd in n for nd in no_decay) and not n.startswith(("module.metamodel", "metamodel")))],
+             "weight_decay": cfg.optim.weight_decay,
+         },
+         {
+-            "params": [p for n, p in ddp_metanet.named_parameters() if (any(nd in n for nd in no_decay) and not n.startswith("module.metamodel"))],
++            "params": [p for n, p in ddp_metanet.named_parameters() if (any(nd in n for nd in no_decay) and not n.startswith(("module.metamodel", "metamodel")))],
+             "weight_decay": 0.0,
+         },
+         {
+diff --git a/utils/myinit.py b/utils/myinit.py
+index a64072e..b5bd748 100755
+--- a/utils/myinit.py
++++ b/utils/myinit.py
+@@ -12,6 +12,10 @@ def _resolve_device(device_cfg: str) -> torch.device:
+             torch.cuda.set_device(local_rank)
+             return torch.device(f"cuda:{local_rank}")
+         return torch.device("cpu")
++    if device_cfg == "mps":
++        if not torch.backends.mps.is_available():
++            raise ValueError("mps requested but torch.backends.mps is unavailable")
++        return torch.device("mps")
+     if device_cfg in ("cuda", "cpu"):
+         if device_cfg == "cuda" and torch.cuda.is_available():
+             local_rank = get_local_rank()

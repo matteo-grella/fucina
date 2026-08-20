@@ -169,7 +169,7 @@ pub fn main(init: std.process.Init) !void {
     // one, then answer --chat / --repl questions with it (greedy).
     if (opts.shine_gguf != null or opts.shine_adapter != null) {
         const t = tok_ptr orelse return error.TokenizerUnavailable;
-        try shine_mode.run(init.io, allocator, stdout, &ctx, &model, t, opts.shine_gguf, opts.shine_context, opts.shine_adapter, opts.shine_save, opts.chat_text, opts.repl_flag, opts.gen_count orelse 128);
+        try shine_mode.run(init.io, allocator, stdout, &ctx, &model, t, opts.shine_gguf, opts.shine_context, opts.shine_adapter, opts.shine_save, opts.shine_save_cartridge, opts.chat_text, opts.repl_flag, opts.gen_count orelse 128);
         return;
     }
 
