@@ -3891,7 +3891,18 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
             const result_tags = dotResultTags(tags, other_tags, contract_tag);
             if (comptime dtype_mod.isBlockQuantized(Other.dtype)) {
-                const allow_gpu = !self.requiresGrad() and control.isQuantDotGpuEnabled();
+                // Gradient-aware GPU policy: the quant GPU dot is legal
+                // under gradients — the VJP never reads the forward
+                // kernel's internals (dgrad contracts gy with a
+                // transiently widened f32 weight; the quant RHS is const,
+                // so there is no wgrad), and the GPU and CPU quant
+                // kernels sit within serving-parity tolerance of each
+                // other. Backend gates own the economics per memory
+                // system (Metal: size; CUDA: residency-aware floors).
+                // Checkpoint blocks still pin BOTH passes to the CPU
+                // kernels through the disable scope, keeping the
+                // recompute bitwise against pass 1.
+                const allow_gpu = control.isQuantDotGpuEnabled();
                 var value = try quantizedRhsDotRaw(Other.dtype, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), contract_tag, allow_gpu);
                 errdefer value.deinit();
                 return finishOp(result_tags, ctx, value, self.requiresGrad(), ConstRhsDotBackward(Other.dtype, tags, other_tags, contract_tag), .{ ctx.allocator, self.grad_state, null, self.asRawTensor(), other_ptr.asRawTensor() });

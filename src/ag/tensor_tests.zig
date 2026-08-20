@@ -344,6 +344,98 @@ test "public f32 Tensor dot dispatches to quantized RHS Tensor" {
     try std.testing.expectApproxEqAbs(@as(f32, 64), y.asRawTensor().dataConst()[1], 1e-2);
 }
 
+test "quant RHS dot under gradients: GPU dispatch matches the CPU kernels" {
+    // The gradient-aware GPU policy: a grads-on quant dot may take the
+    // backend's quant GPU route. This pins its values and LHS gradient
+    // against the CPU quant kernels (the disable-scope route). Shape is
+    // chosen to clear the Metal q8_0 dense gate (m >= 32, m*n*k >= 2^30);
+    // on CPU-only builds both runs take the same kernels and the compare
+    // is exact. Optimized-only: the shape is sized for the dispatch gate,
+    // not for Debug throughput.
+    if (@import("builtin").mode == .Debug) return error.SkipZigTest;
+    const allocator = std.heap.smp_allocator;
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const m = 512;
+    const k = 2048;
+    const n = 1024;
+    const X = Tensor(.{ .dtype = .f32, .tags = .{ .batch, .in } });
+    const W = Tensor(.{ .dtype = .q8_0, .tags = .{ .out, .in } });
+
+    const x_values = try allocator.alloc(f32, m * k);
+    defer allocator.free(x_values);
+    var rng: u32 = 0x2F6E2B1;
+    for (x_values) |*v| {
+        rng = rng *% 1664525 +% 1013904223;
+        v.* = (@as(f32, @floatFromInt(rng >> 9)) / (1 << 23) - 0.5) * 0.1;
+    }
+    const blocks = try allocator.alloc(dtype_mod.BlockQ8_0, n * k / dtype_mod.q8_0_block_size);
+    defer allocator.free(blocks);
+    for (blocks, 0..) |*block, bi| {
+        block.d = f16TestBits(0.01);
+        for (&block.qs, 0..) |*q, qi| q.* = @intCast(@as(i32, @intCast((bi * 31 + qi * 7) % 255)) - 127);
+    }
+
+    const Run = struct {
+        out: []f32,
+        grad: []f32,
+        fn free(self: *@This(), a: std.mem.Allocator) void {
+            a.free(self.out);
+            a.free(self.grad);
+        }
+    };
+    var runs: [2]Run = undefined;
+    var runs_built: usize = 0;
+    defer for (runs[0..runs_built]) |*run| run.free(allocator);
+    for (&runs, 0..) |*run, ri| {
+        var disable: ?control.QuantDotGpuDisabledScope = if (ri == 1) control.disableQuantDotGpu() else null;
+        defer if (disable) |*scope| scope.close();
+
+        var x = try X.variableFromSlice(&ctx, .{ m, k }, x_values);
+        defer x.deinit();
+        var w = try W.fromBlocks(&ctx, .{ n, k }, blocks);
+        defer w.deinit();
+        var y = try x.dot(&ctx, &w, .in);
+        defer y.deinit();
+        const out = try allocator.dupe(f32, y.asRawTensor().dataConst());
+        errdefer allocator.free(out);
+        var loss = try y.sumAll(&ctx);
+        defer loss.deinit();
+        try loss.backward(&ctx);
+        var grad = (try x.grad(&ctx)) orelse return error.MissingGrad;
+        defer grad.deinit();
+        run.* = .{ .out = out, .grad = try allocator.dupe(f32, try grad.dataConst()) };
+        runs_built = ri + 1;
+    }
+
+    const Rel = struct {
+        fn max(a_values: []const f32, b_values: []const f32) f32 {
+            var max_abs: f32 = 0;
+            var max_ref: f32 = 0;
+            for (a_values, b_values) |a, b| {
+                max_abs = @max(max_abs, @abs(a - b));
+                max_ref = @max(max_ref, @abs(b));
+            }
+            return if (max_ref == 0) max_abs else max_abs / max_ref;
+        }
+    };
+    const out_rel = Rel.max(runs[0].out, runs[1].out);
+    const grad_rel = Rel.max(runs[0].grad, runs[1].grad);
+    std.debug.print("quant-dot grads-on GPU parity: out max rel {d}, grad max rel {d}\n", .{ out_rel, grad_rel });
+    // Per-ELEMENT forward compare (a summed scalar cancels to near zero
+    // here and amplifies kernel noise): the routes may differ by the
+    // activation-quantization gap — the CPU q8 kernels quantize
+    // activations, a GPU kernel may keep them f32 — the same scale the
+    // widened-cache train tests document. The LHS gradient is
+    // route-independent: dgrad contracts gy with the transiently widened
+    // f32 weight on both runs.
+    try std.testing.expect(out_rel < 5e-3);
+    try std.testing.expect(grad_rel < 1e-4);
+}
+
 test "public f32 Tensor dot dispatches to quantized RHS Tensor with multiple left free axes" {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");

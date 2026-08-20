@@ -2824,7 +2824,9 @@ comptime-dispatched:
 - block-quantized RHS (q8_0, q4_k, ... — §10): the quantized-RHS GEMM;
   gradient to `self` only. Requires RHS storage `[free, contract]`, one RHS
   free axis, no batch tags (compile errors otherwise). When a GPU backend is
-  active and `self` needs no gradient the GEMM may be offloaded (§9).
+  active the GEMM may be offloaded (§9) with or without gradients — the LHS
+  gradient flows through the dequantized weight either way; checkpoint
+  blocks disable the offload for both of their runs (§5.5).
 
 ```zig
 test "dot with a shared batch tag lowers to bmm" {
@@ -8427,9 +8429,16 @@ kernel, and reshapes back. Gradients: the quantized weight is a constant
 the **dequantized** weight — the backward node holds a view of the block
 data and dequantizes it transiently (`ConstRhsDotBackward`,
 `src/ag/backward.zig`). On GPU builds the forward may offload to the
-dense-quant GEMM provider (q4_k/q6_k/q8_0 on Metal, plus q5_k on CUDA, §9); the facade
-automatically disables offload when the LHS requires grad, so training
-numerics stay on the CPU path.
+dense-quant GEMM provider (q4_k/q6_k/q8_0 on Metal, plus q5_k on CUDA, §9)
+with or without gradients: the LHS gradient never reads the forward
+kernel's internals (it flows through the dequantized weight), so the GPU
+and CPU forwards share one backward and differ only by the
+activation-quantization gap (the CPU kernels quantize the LHS, §10.5;
+measured 3.7e-3 max rel at a 512x1024x2048 q8_0 shape, gradient
+bit-identical). Checkpoint blocks pin both of their runs to the CPU
+kernels (§5.5). Each backend's dispatch gate prices its own memory
+system — Metal by work size alone (unified memory), CUDA with
+residency-aware work floors — so the policy needs no per-backend carve-out.
 
 ```zig
 test "f32 activations contract against a Q8_0 weight tensor" {
