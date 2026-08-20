@@ -120,7 +120,11 @@ pub fn mapError(err: anyerror) ErrorInfo {
             .message = "constrained output requires a server built with -Dllguidance=true",
         },
         error.ShuttingDown => .{ .status = .service_unavailable, .kind = "unavailable_error", .message = "the server is shutting down" },
-        else => .{ .status = .internal_server_error, .kind = "server_error", .message = "internal generation failure" },
+        else => blk: {
+            // The client gets a generic 500; the operator gets the name.
+            std.log.err("generation failed: {t}", .{err});
+            break :blk .{ .status = .internal_server_error, .kind = "server_error", .message = "internal generation failure" };
+        },
     };
 }
 

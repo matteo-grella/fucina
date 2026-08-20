@@ -63,6 +63,56 @@ zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf \
 Chat needs the GGUF's tokenizer + chat-template metadata (both present in
 the artifacts above).
 
+## SHINE: context -> LoRA adapter in one pass
+
+SHINE (arXiv 2602.06358) is an in-context hypernetwork: one forward pass
+over a context passage produces a rank-8 LoRA over every linear of the
+frozen base model. Questions are then answered with the adapter alone,
+with zero context tokens and zero context KV at question time. The
+released checkpoint targets Qwen3-8B; convert it once with
+`tools/convert_shine.py` (see the script header for the download and
+environment).
+
+```sh
+# One-shot: compile doc.txt into an adapter, answer one question
+zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-8B-F16.gguf \
+  --shine models/shine/shine-ift-mqa-1qa.gguf \
+  --shine-context @doc.txt --chat "What does the document say about X?"
+
+# Interactive: multi-turn questions against the same adapter
+zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-8B-F16.gguf \
+  --shine models/shine/shine-ift-mqa-1qa.gguf \
+  --shine-context "Apple is green." --repl
+
+# Generate once, serve forever: save the adapter as a standalone
+# artifact (~87 MB), then reload it without the SHINE weights or the
+# hypernetwork pass — including on a quantized base for faster decode
+zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-8B-F16.gguf \
+  --shine models/shine/shine-ift-mqa-1qa.gguf \
+  --shine-context @doc.txt --shine-save doc.adapter.gguf
+zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-8B-Q8_0.gguf \
+  --shine-adapter doc.adapter.gguf --chat "What does the document say about X?"
+
+# Fleet build: one adapter + retrieval embeddings per .txt/.md under docs/,
+# served by `zig build lmserve -- <base.gguf> --shine-fleet fleet-out`
+# (per-request cosine routing; see ../lmserve/README.md)
+zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-8B-F16.gguf \
+  --shine models/shine/shine-ift-mqa-1qa.gguf \
+  --shine-docs my-docs --shine-fleet-build fleet-out
+```
+
+Prefer a bf16/f32 base when GENERATING adapters (the f16 GEMM path
+rounds activations, and hypernetwork outputs can be sensitive to the
+drift); serving a saved adapter works on any base format.
+
+`--shine-context` takes a literal string or `@FILE`. Decoding is greedy
+and no-think, matching the reference inference setup; `--gen` caps the
+reply length (default 128). The checkpoint was trained with contexts up
+to ~1.1k tokens; quality degrades beyond that (paper §5). Answer quality
+follows the paper: extractive QA sits below in-context prompting. The
+win is serving cost: the context is paid once, at adapter build time,
+instead of on every request.
+
 ## Speculative decoding
 
 ```sh

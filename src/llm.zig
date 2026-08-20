@@ -11,6 +11,7 @@ pub const qwen3 = struct {
     pub const train = @import("llm/qwen3/train.zig");
     pub const ptqtp = @import("llm/qwen3/ptqtp.zig");
     pub const generate = @import("llm/qwen3/generate.zig");
+    pub const shine = @import("llm/qwen3/shine.zig");
 };
 /// Kimi-K3 (Kimi-Linear lineage: KDA + Gated-MLA-NoPE hybrid, latent MoE,
 /// attention residuals, SiTU). Files in `llm/kimi3/`.
@@ -118,6 +119,7 @@ test {
     _ = qwen3.train;
     _ = qwen3.ptqtp;
     _ = qwen3.generate;
+    _ = qwen3.shine;
     _ = qwen35.model;
     _ = qwen35.chat;
     _ = gemma.gemma4;

@@ -48,6 +48,12 @@ pub const Options = struct {
     moe_expert_top_p: ?f32 = null,
     kv_save: bool = false,
     kv_save_arg: ?[]const u8 = null,
+    shine_gguf: ?[]const u8 = null,
+    shine_context: ?[]const u8 = null,
+    shine_adapter: ?[]const u8 = null,
+    shine_save: ?[]const u8 = null,
+    shine_fleet_build: ?[]const u8 = null,
+    shine_docs: ?[]const u8 = null,
 
     pub fn specRefs(self: *const Options) []const []const u8 {
         return self.spec_ref_buf[0..self.spec_ref_count];
@@ -67,6 +73,9 @@ pub fn parse(args: []const []const u8, stdout: *std.Io.Writer, token_buf: []usiz
         try stdout.print("generate: zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --prompt \"The capital of France is\" --gen 64\n", .{});
         try stdout.print("chat:     zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --chat \"What is the capital of France?\" [--no-think] [--system \"...\"]\n", .{});
         try stdout.print("repl:     zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --repl   (multi-turn; streams replies)\n", .{});
+        try stdout.print("shine:    zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-8B-F16.gguf --shine models/shine/shine-ift-mqa-1qa.gguf --shine-context @doc.txt [--shine-save adapter.gguf] --chat \"...\"|--repl   (context -> LoRA adapter in one hypernetwork pass, arXiv 2602.06358; greedy, no-think)\n", .{});
+        try stdout.print("          ... --shine-adapter adapter.gguf --chat \"...\"|--repl   (serve a saved adapter; no SHINE weights, no hypernetwork pass)\n", .{});
+        try stdout.print("          ... --shine models/shine/shine-ift-mqa-1qa.gguf --shine-docs DIR --shine-fleet-build OUT   (adapter + retrieval index per .txt/.md doc; serve with `zig build lmserve -- <base.gguf> --shine-fleet OUT`)\n", .{});
         try stdout.print("sampling: --temp F --top-k N --top-p F --min-p F --repeat-penalty F --seed N\n", .{});
         try stdout.print("grammar:  --json-schema JSON|@FILE | --lark GRAMMAR|@FILE | --regex PATTERN   (constrained decoding; needs a -Dllguidance=true build; combine with --no-think)\n", .{});
         try stdout.print("other:    --info | --spec-bench\n", .{});
@@ -149,6 +158,42 @@ pub fn parse(args: []const []const u8, stdout: *std.Io.Writer, token_buf: []usiz
             o.chat_text = args[arg_i];
         } else if (std.mem.startsWith(u8, arg, "--chat=")) {
             o.chat_text = arg["--chat=".len..];
+        } else if (std.mem.eql(u8, arg, "--shine")) {
+            arg_i += 1;
+            if (arg_i >= args.len) return error.MissingShinePath;
+            o.shine_gguf = args[arg_i];
+        } else if (std.mem.startsWith(u8, arg, "--shine=")) {
+            o.shine_gguf = arg["--shine=".len..];
+        } else if (std.mem.eql(u8, arg, "--shine-context")) {
+            arg_i += 1;
+            if (arg_i >= args.len) return error.MissingShineContext;
+            o.shine_context = args[arg_i];
+        } else if (std.mem.startsWith(u8, arg, "--shine-context=")) {
+            o.shine_context = arg["--shine-context=".len..];
+        } else if (std.mem.eql(u8, arg, "--shine-adapter")) {
+            arg_i += 1;
+            if (arg_i >= args.len) return error.MissingShineAdapterPath;
+            o.shine_adapter = args[arg_i];
+        } else if (std.mem.startsWith(u8, arg, "--shine-adapter=")) {
+            o.shine_adapter = arg["--shine-adapter=".len..];
+        } else if (std.mem.eql(u8, arg, "--shine-save")) {
+            arg_i += 1;
+            if (arg_i >= args.len) return error.MissingShineSavePath;
+            o.shine_save = args[arg_i];
+        } else if (std.mem.startsWith(u8, arg, "--shine-save=")) {
+            o.shine_save = arg["--shine-save=".len..];
+        } else if (std.mem.eql(u8, arg, "--shine-fleet-build")) {
+            arg_i += 1;
+            if (arg_i >= args.len) return error.MissingShineFleetDir;
+            o.shine_fleet_build = args[arg_i];
+        } else if (std.mem.startsWith(u8, arg, "--shine-fleet-build=")) {
+            o.shine_fleet_build = arg["--shine-fleet-build=".len..];
+        } else if (std.mem.eql(u8, arg, "--shine-docs")) {
+            arg_i += 1;
+            if (arg_i >= args.len) return error.MissingShineDocsDir;
+            o.shine_docs = args[arg_i];
+        } else if (std.mem.startsWith(u8, arg, "--shine-docs=")) {
+            o.shine_docs = arg["--shine-docs=".len..];
         } else if (std.mem.eql(u8, arg, "--system")) {
             arg_i += 1;
             if (arg_i >= args.len) return error.MissingSystemMessage;

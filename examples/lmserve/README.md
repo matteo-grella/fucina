@@ -207,6 +207,7 @@ curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/
 | `--kv-disk-slots M` | max sidecar files under `--kv-cache-dir` (default 8) |
 | `--cartridge F` | preload a trained KV-prefix cartridge into every conversation (see below) |
 | `--fleet DIR` | serve a per-document cartridge fleet (see below) |
+| `--shine-fleet DIR` | serve a per-document SHINE adapter fleet (see below) |
 | `--rag-docs` `--rag-chunks` `--rag-adaptive` `--rag-margin` | fleet retrieval knobs (see below) |
 
 ## Queue and reasoning semantics
@@ -247,10 +248,22 @@ knowledge with zero prompt tokens
   default 0.05). gemma4 MoE GGUFs need `--experts=borrow`; excludes
   `--cartridge` and `--kv-cache-dir`.
 
-Both flags expect artifacts trained against the same model GGUF being
-served — KV geometry is probed at startup, so a mismatched file fails
-there, not mid-request. Size `--ctx` to include the prefix (fleet:
-`rag_docs × p` rows on top of the conversation). Training recipes:
+- `--shine-fleet DIR` serves a per-document SHINE adapter fleet (from
+  `zig build qwen3 -- <base> --shine <shine.gguf> --shine-docs DOCS
+  --shine-fleet-build DIR`; REFERENCE §13.12): each request's user
+  messages pick ONE document via the same cosine index (`--rag-chunks`
+  scanned) and that document's saved adapter decodes the reply. The
+  knowledge rides in the adapter weights: zero context tokens, zero
+  prefix rows, no extra KV. Selection is sticky per conversation, and
+  slots stay keyed by selection so only same-adapter KV is ever adopted
+  or prefix-shared. Dense qwen3 bases only; excludes `--fleet`,
+  `--cartridge`, `--kv-cache-dir`, and `--batch`.
+
+All three flags expect artifacts built against the same model being
+served — KV/index geometry is probed at startup, so a mismatched file
+fails there, not mid-request. Size `--ctx` to include the prefix (fleet:
+`rag_docs × p` rows on top of the conversation; SHINE adapters add no
+rows). Training recipes:
 [`docs/CARTRIDGES.md`](../../docs/CARTRIDGES.md); full serving semantics:
 [`docs/LMSERVER.md`](../../docs/LMSERVER.md).
 

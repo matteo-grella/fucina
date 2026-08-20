@@ -149,6 +149,34 @@ pub const GgufChatOptions = struct {
     /// both. Slot reuse stays on, keyed by selection: only a slot whose
     /// cartridge selection matches the request's is adoptable.
     fleet: ?FleetOptions = null,
+    /// SHINE adapter fleet serving (arXiv 2602.06358, REFERENCE §13.12):
+    /// the same contextual query embeds through `embedFn`, the cosine
+    /// index picks ONE document, and the apply hook swaps that document's
+    /// saved adapter into the served AdaptedModel box before decode
+    /// (adapters do not compose, unlike cartridge prefixes — selection is
+    /// always a single doc). The slot machinery is shared with fleet mode:
+    /// slots stay keyed by selection, so only same-adapter KV is ever
+    /// adopted or prefix-shared. Mutually exclusive with `fleet`,
+    /// `cartridge`, `kv_disk`, and `--batch` (the caller enforces all).
+    shine_fleet: ?ShineFleetOptions = null,
+};
+
+pub const ShineFleetOptions = struct {
+    /// Retrieval index over the fleet's documents (the cartridge fleets'
+    /// EmbedIndex, content-agnostic; borrowed — must outlive the backend).
+    index: *const llm.cartridge_fleet.EmbedIndex,
+    /// Query embedder — the `cartridge_fleet.embed_suffix` contract the
+    /// index was built with. Worker thread only, like generation itself.
+    embed_ctx: *anyopaque,
+    embedFn: *const fn (ctx: *anyopaque, text: []const u8, out: []f32) anyerror!void,
+    /// Loads (LRU) the doc's adapter artifact and points the served
+    /// AdaptedModel box at it (`null` = plain base). Worker thread only —
+    /// the box is process state shared by every request.
+    apply_ctx: *anyopaque,
+    applyFn: *const fn (ctx: *anyopaque, doc: ?usize) anyerror!void,
+    /// Cosine top-N chunks scanned per selection (docs per request is
+    /// always 1).
+    rag_chunks: usize = 8,
 };
 
 pub const FleetOptions = struct {
@@ -433,7 +461,36 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
 
         /// Embed the contextual retrieval query — every user message,
         /// concatenated (the full render as fallback) — into `vec`.
-        fn embedFleetQuery(self: *Self, fl: FleetOptions, req: *const types.GenerateRequest, rendered: []const u8, vec: []f32) !void {
+        /// The retrieval surface shared by cartridge fleets and SHINE
+        /// adapter fleets: index + embedder + selection widths. Adapter
+        /// fleets select exactly one document (adapters do not compose).
+        const Retrieval = struct {
+            index: *const llm.cartridge_fleet.EmbedIndex,
+            embed_ctx: *anyopaque,
+            embedFn: *const fn (ctx: *anyopaque, text: []const u8, out: []f32) anyerror!void,
+            rag_chunks: usize,
+            rag_docs: usize,
+        };
+
+        fn retrieval(self: *const Self) ?Retrieval {
+            if (self.opts.fleet) |fl| return .{
+                .index = fl.index,
+                .embed_ctx = fl.embed_ctx,
+                .embedFn = fl.embedFn,
+                .rag_chunks = fl.rag_chunks,
+                .rag_docs = fl.rag_docs,
+            };
+            if (self.opts.shine_fleet) |sf| return .{
+                .index = sf.index,
+                .embed_ctx = sf.embed_ctx,
+                .embedFn = sf.embedFn,
+                .rag_chunks = sf.rag_chunks,
+                .rag_docs = 1,
+            };
+            return null;
+        }
+
+        fn embedFleetQuery(self: *Self, rv: Retrieval, req: *const types.GenerateRequest, rendered: []const u8, vec: []f32) !void {
             const a = self.allocator;
             var buf: std.ArrayList(u8) = .empty;
             defer buf.deinit(a);
@@ -443,7 +500,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 try buf.appendSlice(a, msg.content);
             }
             const query: []const u8 = if (buf.items.len > 0) buf.items else rendered;
-            try fl.embedFn(fl.embed_ctx, query, vec);
+            try rv.embedFn(rv.embed_ctx, query, vec);
         }
 
         /// Compose the selection's cartridges, in order, into an EMPTY
@@ -664,7 +721,9 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 {
                     errdefer cache.deinit();
                     cache.truncate(0);
-                    try self.writeSelectionPrefix(selection, &cache);
+                    // Adapter fleets carry no prefix rows — the selection's
+                    // knowledge is in the applied adapter, not the cache.
+                    if (self.opts.fleet != null) try self.writeSelectionPrefix(selection, &cache);
                 }
                 return Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
                     .cache = cache,
@@ -686,7 +745,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 if (self.opts.cartridge) |cart| {
                     try cart.writeToCache(self.ctx, &cache);
                     prefix_rows = cart.p;
-                } else if (selection.len > 0) {
+                } else if (self.opts.fleet != null and selection.len > 0) {
                     try self.writeSelectionPrefix(selection, &cache);
                     prefix_rows = selection_p;
                 }
@@ -942,7 +1001,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
             // user message (empty outside fleet mode — non-fleet slots
             // match by token-LCP alone, as before).
             var opener: []const u8 = &.{};
-            if (self.opts.fleet != null) {
+            if (self.retrieval() != null) {
                 for (req.messages) |msg| {
                     if (msg.role == .user) {
                         opener = msg.content;
@@ -950,17 +1009,18 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                     }
                 }
             }
-            if (self.opts.fleet) |fl| {
+            if (self.retrieval()) |rv| {
                 self.clock += 1;
                 var sticky_i = self.findStickySlot(ids, opener);
 
-                if (sticky_i != null and fl.adaptive) {
+                if (sticky_i != null and self.opts.fleet != null and self.opts.fleet.?.adaptive) {
+                    const fl = self.opts.fleet.?;
                     // Adaptive: re-embed the contextual query and leave the
                     // conversation's knowledge base only on decisive
                     // evidence (see shouldSwitchSelection).
                     const vec = try a.alloc(f32, fl.index.dim);
                     defer a.free(vec);
-                    try self.embedFleetQuery(fl, req, rendered, vec);
+                    try self.embedFleetQuery(rv, req, rendered, vec);
                     const hits = try fl.index.topDocs(a, vec, fl.rag_chunks, fl.rag_docs);
                     defer a.free(hits);
                     const cur = self.slots.items[sticky_i.?].selection;
@@ -992,10 +1052,10 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                     selection = adopted.selection;
                 } else if (selection.len == 0) {
                     // Fresh conversation: contextual retrieval.
-                    const vec = try a.alloc(f32, fl.index.dim);
+                    const vec = try a.alloc(f32, rv.index.dim);
                     defer a.free(vec);
-                    try self.embedFleetQuery(fl, req, rendered, vec);
-                    const hits = try fl.index.topDocs(a, vec, fl.rag_chunks, fl.rag_docs);
+                    try self.embedFleetQuery(rv, req, rendered, vec);
+                    const hits = try rv.index.topDocs(a, vec, rv.rag_chunks, rv.rag_docs);
                     defer a.free(hits);
                     if (hits.len == 0) return error.EmptySelection;
                     selection = try a.alloc(usize, hits.len);
@@ -1003,9 +1063,19 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 }
             }
 
+            // SHINE fleet: point the served box at this request's adapter
+            // BEFORE any forward — the box is process state, and the
+            // previous request may have left another document's adapter in
+            // it (adopted conversations re-apply for the same reason).
+            if (self.opts.shine_fleet) |sf| try sf.applyFn(sf.apply_ctx, if (selection.len > 0) selection[0] else null);
+
             var convo = maybe_convo orelse blk: {
+                // Cartridge fleets prefix the cache with the composed
+                // selection; adapter fleets carry no prefix rows.
                 var selection_p: usize = 0;
-                for (selection) |doc| selection_p += (try self.fleetCartridge(doc)).p;
+                if (self.opts.fleet != null) {
+                    for (selection) |doc| selection_p += (try self.fleetCartridge(doc)).p;
+                }
                 break :blk try self.acquireConversation(ids, convo_opts, selection, selection_p);
             };
             defer convo.deinit();

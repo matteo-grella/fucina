@@ -13,6 +13,7 @@ const bench = @import("bench.zig");
 const generate = @import("generate.zig");
 const verify = @import("verify.zig");
 const chat = @import("chat.zig");
+const shine_mode = @import("shine.zig");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -146,6 +147,31 @@ pub fn main(init: std.process.Init) !void {
         };
     }
     const processor: ?llm.sampler.LogitProcessor = if (constraint) |*con| con.processor() else null;
+
+    // --shine-fleet-build: batch-compile a docs directory into a served
+    // adapter fleet (adapters + retrieval index + manifest).
+    if (opts.shine_fleet_build) |out_dir| {
+        const t = tok_ptr orelse return error.TokenizerUnavailable;
+        const sh_path = opts.shine_gguf orelse {
+            try stdout.print("--shine-fleet-build requires --shine <shine.gguf>\n", .{});
+            return error.MissingShinePath;
+        };
+        const docs_dir = opts.shine_docs orelse {
+            try stdout.print("--shine-fleet-build requires --shine-docs DIR\n", .{});
+            return error.MissingShineDocsDir;
+        };
+        try shine_mode.buildFleet(init.io, allocator, stdout, &ctx, &model, t, sh_path, docs_dir, out_dir);
+        return;
+    }
+
+    // --shine / --shine-adapter: hypernetwork mode — compile --shine-context
+    // into a LoRA adapter (optionally --shine-save it) or reload a saved
+    // one, then answer --chat / --repl questions with it (greedy).
+    if (opts.shine_gguf != null or opts.shine_adapter != null) {
+        const t = tok_ptr orelse return error.TokenizerUnavailable;
+        try shine_mode.run(init.io, allocator, stdout, &ctx, &model, t, opts.shine_gguf, opts.shine_context, opts.shine_adapter, opts.shine_save, opts.chat_text, opts.repl_flag, opts.gen_count orelse 128);
+        return;
+    }
 
     if (is_chat) {
         const t = tok_ptr orelse return error.TokenizerUnavailable;

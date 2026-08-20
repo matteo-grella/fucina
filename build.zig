@@ -187,7 +187,7 @@ pub fn build(b: *std.Build) void {
     _ = addExample(b, tool_ctx, .{ .step = "spirals", .desc = "Train a two-spirals MLP with SGD/AdamW/Muon/APOLLO (+groups/schedule/clip), checkpoint, resume, infer", .exe = "fucina-spirals", .root = "examples/spirals/main.zig", .llm = false });
     const nam = addExample(b, tool_ctx, .{ .step = "nam", .desc = "Neural Amp Modeler: .nam profiles, profiling/training, live amp sim", .exe = "fucina-nam", .root = "examples/nam/main.zig", .llm = false });
     configureNamAudio(nam.exe);
-    const qwen3 = addExample(b, tool_ctx, .{ .step = "qwen3", .desc = "Run Qwen3 dense/MoE GGUF inference (text chat; --spec/--spec-ref lossless speculative decode, --tokenize tokenizer-parity oracle)", .exe = "fucina-qwen3", .root = "examples/qwen3/main.zig", .llm = true });
+    const qwen3 = addExample(b, tool_ctx, .{ .step = "qwen3", .desc = "Run Qwen3 dense/MoE GGUF inference (text chat; --spec/--spec-ref lossless speculative decode, --tokenize tokenizer-parity oracle, --shine in-context hypernetwork adapters)", .exe = "fucina-qwen3", .root = "examples/qwen3/main.zig", .llm = true });
     configureLlguidance(qwen3.exe, llguidance_dep);
     _ = addExample(b, tool_ctx, .{ .step = "deepseek2", .desc = "Run DeepSeek-V2 family (MLA + MoE) GGUF inference", .exe = "fucina-deepseek2", .root = "examples/deepseek2/main.zig", .llm = true });
     const inkling = addExample(b, tool_ctx, .{ .step = "inkling", .desc = "Run Inkling (hybrid SWA + rel-bias + MoE) GGUF inference", .exe = "fucina-inkling", .root = "examples/inkling/main.zig", .llm = true });

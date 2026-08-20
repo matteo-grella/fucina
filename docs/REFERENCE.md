@@ -145,6 +145,7 @@ API-level companion. Every Zig snippet is machine-verified against the tree
   - [13.9 Speculative decoding (`src/llm/speculative/`)](#139-speculative-decoding-srcllmspeculative)
   - [13.10 Cartridges (`src/llm/cartridge.zig`)](#1310-cartridges-srcllmcartridgezig)
   - [13.11 Engram (`src/llm/engram.zig`)](#1311-engram-srcllmengramzig)
+  - [13.12 SHINE (`src/llm/qwen3/shine.zig`)](#1312-shine-srcllmqwen3shinezig)
 - [14. Model families and example applications](#14-model-families-and-example-applications)
   - [14.1 Conventions shared by every family](#141-conventions-shared-by-every-family)
   - [14.2 Qwen3 — dense and MoE (`src/llm/qwen3/model.zig`)](#142-qwen3--dense-and-moe-srcllmqwen3modelzig)
@@ -432,7 +433,7 @@ in the per-example `examples/<name>/README.md` and §14):
 | Step | Program |
 | --- | --- |
 | `smoke` | `examples/smoke/main.zig` — the smoke example (`run` is kept as an alias). |
-| `qwen3` | Qwen3 dense/MoE GGUF inference: chat/REPL, `--spec`/`--spec-ref` lossless speculative decode, `--tokenize` tokenizer-parity oracle. |
+| `qwen3` | Qwen3 dense/MoE GGUF inference: chat/REPL, `--spec`/`--spec-ref` lossless speculative decode, `--tokenize` tokenizer-parity oracle, `--shine` in-context hypernetwork adapters (§13.12). |
 | `gemma4` | Gemma 4 GGUF inference / logit-parity harness; chat/REPL/`--spec`. |
 | `qwen35` | Qwen3.5 (hybrid Gated-DeltaNet) GGUF loader/parity harness. |
 | `diffusion-gemma` | DiffusionGemma block text-diffusion (parity harness + EB chat). Links libc. |
@@ -13294,6 +13295,108 @@ test "engram: hashed n-gram memory with a zero-init graft gate" {
     for (out.asRawTensor().dataConst()) |v| try std.testing.expectEqual(@as(f32, 0), v);
 }
 ```
+
+### 13.12 SHINE (`src/llm/qwen3/shine.zig`)
+
+```zig
+pub const Config = struct { hidden_size: usize, num_mem_token: usize, lora_r: usize, scale: f32, ... };
+pub const LoraPair = struct { a: fucina.Tensor(.{ .lin, .lora_r }), b: fucina.Tensor(.{ .lora_r, .lout }) };
+pub const LayerLora = struct { q: LoraPair, k: LoraPair, v: LoraPair, o: LoraPair, gate: LoraPair, up: LoraPair, down: LoraPair };
+pub const LoraSet = struct { allocator: Allocator, layers: []LayerLora };
+pub const Shine = struct { config: Config, mem_tokens: ..., m2p: ..., metalora: LoraSet };
+pub const Error = error{ InvalidShineConfig, UnsupportedKvDtype, MoeNotSupported };
+```
+
+**SHINE** (arXiv 2602.06358) is an in-context hypernetwork: one forward
+pass over a context passage produces a rank-8 LoRA over all 7 linears of
+every layer of a frozen dense Qwen3, and questions are then answered with
+the adapter alone (no context tokens, no context KV). It is the amortized
+counterpart of cartridges (§13.10): the artifact is adapter weights
+instead of a trained KV prefix, and producing it costs one prefill-priced
+pass instead of a distillation run. The trade, measured in the paper and
+reproduced here: extractive-QA quality sits below in-context prompting;
+the win is per-request serving cost.
+
+The pipeline, mirrored 1:1 from the reference implementation
+(MuLabPKU/SHINE; released checkpoint `Yewei-Liu/SHINE-ift_mqa_1qa`, MIT,
+backbone Qwen3-8B):
+
+- `encodeMemoryStates(model, sh, ctx, token_ids)` — embed the context,
+  append the 148 learned memory embeddings, run the base model once with
+  the rank-128 Meta LoRA active on every linear (side path
+  `base + (x @ A) @ B`, never merged), and capture the residual stream at
+  the memory rows after each layer: `(layer, mem, embed)`. The
+  memory-token count is the LoRA budget itself: `M · hidden` equals the
+  per-layer generated-parameter count (`Config.validate` enforces it).
+- `m2pForward(sh, ctx, memory_states)` — learned layer/token positional
+  embeddings, then 4 post-LN transformer encoder layers (gelu-erf, 32
+  heads, ff 8192, biased, LayerNorm eps 1e-5) alternating LAYER-mixing
+  (attention along the 36-layer axis, one sequence per memory token) and
+  TOKEN-mixing (attention along the 148-token axis, one sequence per
+  layer). Both passes run fully batched through tag-aligned `dot`
+  contractions; `m2pInput`/`m2pStage` expose the per-stage seam the
+  golden tests walk.
+- `sliceLora(ctx, base, r, scale, plain)` — scale by `sqrt(scale)` (both
+  halves carry it, reference "rl" method), then cut each layer's
+  flattened row into `A [in, r]` / `B [r, out]` pairs in module order
+  q,k,v,o,gate,up,down.
+- `forwardStep` / `greedy` — the decode loop with the generated adapter
+  active on every linear (f16 KV cache); `GreedyOptions.vocab_limit`
+  reproduces the reference's resized head (len(tokenizer) = 151,672 for
+  the released run, below the GGUF's padded 151,936 rows).
+- `saveLora` / `loadLoraFromFile` / `loadLoraGguf` — the adapter as a
+  standalone `shine-adapter` GGUF artifact (`blk.<layer>.<module>.{a,b}`
+  f32, ~87 MB at r=8 on the 8B): generate once, serve forever. The reload
+  path needs neither the SHINE weights nor the hypernetwork pass and
+  cross-checks the base geometry, so an adapter built on a 16-bit base
+  serves on a quantized one (the LoRA side paths stay f32 regardless of
+  the base format). Runner: `--shine-save PATH` on the generate side,
+  `--shine-adapter PATH` to serve.
+
+Artifacts and parity: `tools/convert_shine.py` packs the released
+checkpoint (mem_tokens + metalora + metanetwork, 3.3 GB) into one f32
+GGUF; `tools/gen_shine_goldens.py` dumps reference goldens from the
+PyTorch implementation (fp32, transformers pinned to the 4.57 API
+window). The model-gated golden tests measure both 16-bit bases when
+present: on f16, encoder memory states 5.1e-3 max rel and answer logits
+≤ 0.16 (kernel drift, not structure: the f16 GEMM path also rounds
+activations to f16); on bf16, 2.8e-6 and ≤ 0.016 (the mixed f32 × bf16
+kernel keeps the f32 activations). M2P stages sit ≤ 1e-6 rel (pure f32
+both sides), adapter slices ≤ 1.2e-7, and greedy answers are
+token-for-token equal to the reference on both golden turns on both
+bases. Serving also works from a q8_0 base (adapter side paths stay
+f32): correct golden answers with faster decode; bf16 is the accuracy
+pick, f16/q8_0 the speed picks.
+
+`zig build qwen3 -- <base.gguf> --shine <shine.gguf> --shine-context
+TEXT|@FILE --chat "..."|--repl` is the direct serving surface (greedy,
+no-think, matching the reference harness; see
+[`examples/qwen3/README.md`](../examples/qwen3/README.md)). Constraints:
+dense Qwen3 backbones only, the base must match the checkpoint's
+(`Config.validate` cross-checks dims), decode is f16-KV, and the released
+run was trained on contexts up to ~1.1k tokens.
+
+Adapter fleets close the serving loop: `--shine-docs DIR
+--shine-fleet-build OUT` in the qwen3 runner compiles every .txt/.md
+document into a saved adapter plus retrieval embeddings (the cartridge
+fleets' `EmbedIndex`, same `embed_suffix` recipe, 256-token chunks), and
+`zig build lmserve -- <base.gguf> --shine-fleet OUT` serves the
+directory: each request's user messages pick ONE document by cosine
+retrieval, and that document's adapter decodes the reply through
+`AdaptedModel` — the frozen base plus a swappable adapter behind the
+duck-typed model surface `chat.Conversation` consumes, swapped per
+request by the single inference worker. Zero context tokens, zero prefix
+rows; lmserve's slot reuse stays keyed by selection, so only
+same-adapter KV is ever adopted or prefix-shared
+([`examples/lmserve/README.md`](../examples/lmserve/README.md)).
+
+Base-format guidance: prefer a bf16 or f32 base for adapter GENERATION —
+the f16 GEMM path also rounds activations, and hypernetwork outputs can
+be sensitive to that drift (the golden gates hold on both 16-bit formats
+for the released 8B checkpoint, but sharper checkpoints have produced
+degenerate adapters through the f16 path while bf16 stayed correct).
+SERVING a saved adapter is robust on any base format, f16 and q8_0
+included.
 
 ## 14. Model families and example applications
 
