@@ -2508,6 +2508,31 @@ fn groupedCausalAttentionImpl(
 
     var out = try self.emptyRank(2, .{ q_seq, heads * d });
     errdefer out.deinit();
+
+    // GPU tier: providers with the attention-forward arm take
+    // prefill-length rows over the uniform GQA mapping — f32 K/V (training
+    // graphs) and the f16 KV cache (inference prefill) instantiate the same
+    // kernel; bias rows, exotic head maps, quantized caches, and any
+    // provider decline stay on the CPU tiers. Same contract,
+    // summation-order tolerance class.
+    if (comptime backend_mod.gpu_impl.enabled and (KvElem == f32 or KvElem == f16)) {
+        const gpu = backend_mod.gpu_impl;
+        if (comptime gpu.has_attention_fwd) attn_gpu: {
+            if (bias_data != null) break :attn_gpu;
+            if (kv_heads == 0 or heads % kv_heads != 0) break :attn_gpu;
+            const heads_per_kv = heads / kv_heads;
+            for (kv_head_for_head, 0..) |kv_head_i, head_i| {
+                if (kv_head_i != head_i / heads_per_kv) break :attn_gpu;
+            }
+            if (!gpu.shouldUseGpuAttentionFwd(q_seq, kv_seq, heads, d)) break :attn_gpu;
+            const dispatched = if (comptime KvElem == f32)
+                gpu.attentionFwdF32(q_data, k_data, v_data, out.data(), stats, q_seq, kv_seq, heads, kv_heads, d, window, causal, heads_per_kv, scale_value)
+            else
+                gpu.attentionFwdF16Kv(q_data, k_data, v_data, out.data(), stats, q_seq, kv_seq, heads, kv_heads, d, window, causal, heads_per_kv, scale_value);
+            if (dispatched) return out;
+        }
+    }
+
     try groupedCausalAttentionDispatch(self, KvElem, q_data, k_data, v_data, out.data(), kv_head_for_head, q_seq, kv_seq, heads, d, kv_heads, scale_value, window, causal, bias_data, stats);
     return out;
 }

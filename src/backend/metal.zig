@@ -177,7 +177,7 @@ extern fn fucina_metal_gemm_q_dense_nt_async(
 // One library: the MLX steel f32/f16 GEMM plus the vendored ggml quantized
 // mul_mm (dequant-in-kernel). Both files are self-contained MSL; metal_stdlib
 // include-guards make the concatenation safe.
-const msl_source = @embedFile("metal/mlx_gemm.metal") ++ "\n" ++ @embedFile("metal/ggml_mul_mm.metal");
+const msl_source = @embedFile("metal/mlx_gemm.metal") ++ "\n" ++ @embedFile("metal/ggml_mul_mm.metal") ++ "\n" ++ @embedFile("metal/attention.metal");
 
 const State = struct {
     ctx: ?*anyopaque = null,
@@ -186,6 +186,7 @@ const State = struct {
     min_work_f16: u64 = default_min_work_f16,
     min_work_16bit_resident: u64 = default_min_work_16bit_resident,
     min_work_gemv: u64 = default_min_work_gemv,
+    min_work_attn: u64 = default_min_work_attn,
     min_work_qmoe: u64 = default_min_work_qmoe,
     min_work_dense_q6: u64 = default_min_work_dense_q6,
     min_work_packed_q4: u64 = default_min_work_packed_q4,
@@ -210,6 +211,12 @@ const default_min_work_f16: u64 = 1 << 27;
 /// removes page-wiring overhead.  M1 Max crosses Accelerate around 8 Mi work;
 /// keep a conservative 16 Mi default and require m<=8 plus residency.
 const default_min_work_gemv: u64 = 1 << 24;
+/// Attention-forward offload floor on q_seq*kv_seq*heads*d: the blocking
+/// dispatch costs ~1 ms, and the CPU tiled kernel runs the same work at
+/// roughly 0.2 GFLOP/ms, so prefill-length rows pay off while decode and
+/// short prefill (whose work sits orders of magnitude lower) never enter.
+/// FUCINA_GPU_MIN_WORK_ATTN overrides.
+const default_min_work_attn: u64 = 1 << 29;
 
 // Small-m (decode/batched-decode) admission for 16-bit weight GEMMs whose
 // RHS is already Metal-mapped (a storage-lifetime page wrap from an earlier
@@ -291,6 +298,10 @@ const Trace = struct {
     bf16_wait_ns: std.atomic.Value(u64) = .{ .raw = 0 },
     bf16_gpu_ns: std.atomic.Value(u64) = .{ .raw = 0 },
     bf16_sched_ns: std.atomic.Value(u64) = .{ .raw = 0 },
+    attn_calls: std.atomic.Value(u64) = .{ .raw = 0 },
+    attn_ns: std.atomic.Value(u64) = .{ .raw = 0 },
+    attn_gpu_ns: std.atomic.Value(u64) = .{ .raw = 0 },
+    attn_sched_ns: std.atomic.Value(u64) = .{ .raw = 0 },
     quant_calls: std.atomic.Value(u64) = .{ .raw = 0 },
     quant_ns: std.atomic.Value(u64) = .{ .raw = 0 },
     quant_gpu_ns: std.atomic.Value(u64) = .{ .raw = 0 },
@@ -427,9 +438,11 @@ pub fn traceDump() void {
     const f32_wall = trace.f32_ns.load(.monotonic);
     const f16_wall = trace.f16_ns.load(.monotonic);
     const quant_wall = trace.quant_ns.load(.monotonic);
+    const attn_wall = trace.attn_ns.load(.monotonic);
     const f32_gpu = trace.f32_gpu_ns.load(.monotonic);
     const f16_gpu = trace.f16_gpu_ns.load(.monotonic);
     const quant_gpu = trace.quant_gpu_ns.load(.monotonic);
+    const attn_gpu = trace.attn_gpu_ns.load(.monotonic);
     std.debug.print(
         "[gpu-trace] async: f32 calls={d} submit={d:.1}ms host-wait={d:.1}ms | f16 calls={d} submit={d:.1}ms host-wait={d:.1}ms | bf16 calls={d} submit={d:.1}ms host-wait={d:.1}ms gpu={d:.1}ms | quant calls={d} submit={d:.1}ms host-wait={d:.1}ms\n",
         .{
@@ -443,9 +456,9 @@ pub fn traceDump() void {
         },
     );
     std.debug.print(
-        \\[gpu-trace] dispatch: f32={d} ({d:.1}ms) f16={d} ({d:.1}ms) quant={d} ({d:.1}ms)
-        \\[gpu-trace] gpu-time: f32={d:.1}ms overhead={d:.1}ms | f16={d:.1}ms overhead={d:.1}ms | quant={d:.1}ms overhead={d:.1}ms
-        \\[gpu-trace] kernel-sched: f32={d:.1}ms f16={d:.1}ms quant={d:.1}ms
+        \\[gpu-trace] dispatch: f32={d} ({d:.1}ms) f16={d} ({d:.1}ms) quant={d} ({d:.1}ms) attn={d} ({d:.1}ms)
+        \\[gpu-trace] gpu-time: f32={d:.1}ms overhead={d:.1}ms | f16={d:.1}ms overhead={d:.1}ms | quant={d:.1}ms overhead={d:.1}ms | attn={d:.1}ms overhead={d:.1}ms
+        \\[gpu-trace] kernel-sched: f32={d:.1}ms f16={d:.1}ms quant={d:.1}ms attn={d:.1}ms
         \\[gpu-trace] quant overhead: lock-wait={d:.1}ms stage-copy={d:.1}ms
         \\[gpu-trace] rhs-cache: stable={d} transient={d} | resident-bytes allocs={d} ({d:.1} MB)
         \\[gpu-trace] gate decisions: pass={d} below-gate={d} shape-reject={d} shim-error={d} shape-overflow={d}
@@ -454,11 +467,14 @@ pub fn traceDump() void {
         trace.f32_calls.load(.monotonic),                                      ms(f32_wall),
         trace.f16_calls.load(.monotonic),                                      ms(f16_wall),
         trace.quant_calls.load(.monotonic),                                    ms(quant_wall),
+        trace.attn_calls.load(.monotonic),                                     ms(attn_wall),
         ms(f32_gpu),                                                           ms(overheadNs(f32_wall, f32_gpu)),
         ms(f16_gpu),                                                           ms(overheadNs(f16_wall, f16_gpu)),
         ms(quant_gpu),                                                         ms(overheadNs(quant_wall, quant_gpu)),
+        ms(attn_gpu),                                                          ms(overheadNs(attn_wall, attn_gpu)),
         ms(trace.f32_sched_ns.load(.monotonic)),                               ms(trace.f16_sched_ns.load(.monotonic)),
-        ms(trace.quant_sched_ns.load(.monotonic)),                             ms(trace.quant_lock_ns.load(.monotonic)),
+        ms(trace.quant_sched_ns.load(.monotonic)),                             ms(trace.attn_sched_ns.load(.monotonic)),
+        ms(trace.quant_lock_ns.load(.monotonic)),
         ms(trace.quant_stage_ns.load(.monotonic)),                             trace.rhs_cacheable.load(.monotonic),
         trace.rhs_transient.load(.monotonic),                                  trace.dev_alloc_calls.load(.monotonic),
         @as(f64, @floatFromInt(trace.dev_alloc_bytes.load(.monotonic))) / 1e6, trace.gate_pass.load(.monotonic),
@@ -507,6 +523,9 @@ fn initConfigOnce() void {
     }
     if (std.c.getenv("FUCINA_GPU_MIN_WORK_GEMV")) |v_ptr| {
         state.min_work_gemv = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_gemv;
+    }
+    if (std.c.getenv("FUCINA_GPU_MIN_WORK_ATTN")) |v_ptr| {
+        state.min_work_attn = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_attn;
     }
     if (std.c.getenv("FUCINA_GPU_MIN_WORK_16BIT_RESIDENT")) |v_ptr| {
         state.min_work_16bit_resident = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_16bit_resident;
@@ -657,6 +676,155 @@ pub fn shouldUseGpuGemv(b: *const Tensor, m: usize, n: usize, k: usize) bool {
 pub fn shouldUseGpuForRhs(b: *const Tensor, m: usize, n: usize, k: usize) bool {
     return shouldUseGpuGemv(b, m, n, k) or shouldUseGpu(m, n, k);
 }
+
+/// Provider capability flag for the grouped-causal-attention forward arm
+/// (exec/attention.zig's GPU tier). CUDA carries the `false` stub until its
+/// kernel lands.
+pub const has_attention_fwd = true;
+
+/// Attention-forward gate: prefill-length rows over the work floor
+/// (`q_seq*kv_seq*heads*d >= min_work_attn`), plus the kernel's structural
+/// limits — the score span must fit the 32 KB threadgroup budget and `d`
+/// stays within the CPU tiled kernel's own ceiling.
+pub fn shouldUseGpuAttentionFwd(q_seq: usize, kv_seq: usize, heads: usize, d: usize) bool {
+    ensureConfig();
+    if (!state.gpu_enabled) return false;
+    if (kv_seq > 7680 or d > 256 or d == 0) return false;
+    const work = std.math.mul(u64, std.math.mul(u64, q_seq, kv_seq) catch return false, heads * d) catch return false;
+    const pass = work >= state.min_work_attn;
+    tgate(pass);
+    return pass;
+}
+
+/// Grouped causal attention forward on the GPU, f32, blocking — the exact
+/// CPU-kernel contract: rows `[q_seq, heads, d]` against `[kv_seq,
+/// kv_heads, d]` K/V with the uniform `heads_per_kv` GQA mapping, analytic
+/// causal/window bounds, optional `{row max, sum exp}` stats capture for
+/// the training backward. Values differ from the CPU kernels in summation
+/// order only (the tier-shared ~1e-6 relative class). Returns false when
+/// the GPU did not run (caller falls through to the CPU tiers).
+pub fn attentionFwdF32(
+    q_data: []const f32,
+    k_data: []const f32,
+    v_data: []const f32,
+    out_data: []f32,
+    stats: ?[]f32,
+    q_seq: usize,
+    kv_seq: usize,
+    heads: usize,
+    kv_heads: usize,
+    d: usize,
+    window: usize,
+    causal: bool,
+    heads_per_kv: usize,
+    scale_value: f32,
+) bool {
+    return attentionFwdImpl(f32, q_data, k_data, v_data, out_data, stats, q_seq, kv_seq, heads, kv_heads, d, window, causal, heads_per_kv, scale_value);
+}
+
+/// The f16-KV-cache instantiation of the same kernel (inference prefill:
+/// f32 queries against the half K/V cache, widened per load, f32
+/// accumulation — the CPU f16-KV tier's contract).
+pub fn attentionFwdF16Kv(
+    q_data: []const f32,
+    k_data: []const f16,
+    v_data: []const f16,
+    out_data: []f32,
+    stats: ?[]f32,
+    q_seq: usize,
+    kv_seq: usize,
+    heads: usize,
+    kv_heads: usize,
+    d: usize,
+    window: usize,
+    causal: bool,
+    heads_per_kv: usize,
+    scale_value: f32,
+) bool {
+    return attentionFwdImpl(f16, q_data, k_data, v_data, out_data, stats, q_seq, kv_seq, heads, kv_heads, d, window, causal, heads_per_kv, scale_value);
+}
+
+fn attentionFwdImpl(
+    comptime KvElem: type,
+    q_data: []const f32,
+    k_data: []const KvElem,
+    v_data: []const KvElem,
+    out_data: []f32,
+    stats: ?[]f32,
+    q_seq: usize,
+    kv_seq: usize,
+    heads: usize,
+    kv_heads: usize,
+    d: usize,
+    window: usize,
+    causal: bool,
+    heads_per_kv: usize,
+    scale_value: f32,
+) bool {
+    const ctx = context() orelse return false;
+    if (q_seq == 0 or kv_seq == 0 or heads == 0 or d == 0 or heads_per_kv == 0) return false;
+    if (q_seq > std.math.maxInt(i32) or kv_seq > std.math.maxInt(i32) or d > std.math.maxInt(i32)) return false;
+    const q_elems = q_seq * heads * d;
+    const kv_elems = kv_seq * kv_heads * d;
+    if (q_data.len < q_elems or k_data.len < kv_elems or v_data.len < kv_elems or out_data.len < q_elems) return false;
+    if (stats) |values| {
+        if (values.len < heads * q_seq * 2) return false;
+    }
+    var timing: CommandTiming = .{ .gpu_ns = 0, .sched_ns = 0 };
+    const timer = tstart();
+    const rc = fucina_metal_attention_fwd_f32(
+        ctx,
+        q_data.ptr,
+        @ptrCast(k_data.ptr),
+        @ptrCast(v_data.ptr),
+        out_data.ptr,
+        if (stats) |values| values.ptr else out_data.ptr,
+        @intCast(q_seq),
+        @intCast(kv_seq),
+        @intCast(heads),
+        @intCast(kv_heads),
+        @intCast(d),
+        @intCast(kv_seq - q_seq),
+        @intCast(window),
+        @intFromBool(causal),
+        @intCast(heads_per_kv),
+        @intFromBool(stats != null),
+        @intFromBool(KvElem == f16),
+        scale_value,
+        if (trace_on) &timing else null,
+    );
+    if (trace_on) {
+        const wall_ns = tfinish(timer);
+        tinc(&trace.attn_ns, wall_ns);
+        tinc(&trace.attn_gpu_ns, timing.gpu_ns);
+        tinc(&trace.attn_sched_ns, timing.sched_ns);
+        tinc(&trace.attn_calls, 1);
+        if (rc != 0) tinc(&trace.shim_err, 1);
+    }
+    return rc == 0;
+}
+
+extern fn fucina_metal_attention_fwd_f32(
+    ctx: *anyopaque,
+    q: [*]const f32,
+    k: *const anyopaque,
+    v: *const anyopaque,
+    out: [*]f32,
+    stats: [*]f32,
+    q_seq: i64,
+    kv_seq: i64,
+    heads: i64,
+    kv_heads: i64,
+    d: i64,
+    source_offset: i64,
+    window: i64,
+    causal: i32,
+    heads_per_kv: i64,
+    has_stats: i32,
+    kv_half: i32,
+    scale: f32,
+    timing: ?*CommandTiming,
+) c_int;
 
 pub fn shouldUseGpuBatchedForRhs(_: *const Tensor, m: usize, n: usize, k: usize, batch_count: usize) bool {
     return shouldUseGpuBatched(m, n, k, batch_count);
@@ -1705,6 +1873,157 @@ test "metal gemm f32 parity vs reference (all orientations, edge tiles)" {
             try std.testing.expect(gemmF32(orient, a, b, c, m, n, k));
             cpuReference(orient, a, b, expected, m, n, k);
             for (c, expected) |got, want| {
+                const tol = @max(2e-5 * @max(@abs(want), @abs(got)), 2e-5);
+                try std.testing.expect(@abs(got - want) <= tol);
+            }
+        }
+    }
+}
+
+test "metal attention forward parity vs scalar reference (causal, window, offset, stats)" {
+    if (comptime !enabled) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    if (context() == null) return error.SkipZigTest;
+
+    var prng = std.Random.DefaultPrng.init(7);
+    const random = prng.random();
+
+    const Case = struct { q_seq: usize, kv_seq: usize, heads: usize, kv_heads: usize, d: usize, window: usize, causal: bool };
+    const cases = [_]Case{
+        .{ .q_seq = 96, .kv_seq = 96, .heads = 4, .kv_heads = 2, .d = 64, .window = 0, .causal = true },
+        .{ .q_seq = 64, .kv_seq = 96, .heads = 4, .kv_heads = 4, .d = 64, .window = 0, .causal = true }, // decode-suffix offset
+        .{ .q_seq = 96, .kv_seq = 96, .heads = 2, .kv_heads = 1, .d = 80, .window = 40, .causal = true }, // window + d chunk tail
+        .{ .q_seq = 48, .kv_seq = 48, .heads = 2, .kv_heads = 2, .d = 64, .window = 0, .causal = false }, // bidirectional
+    };
+    for (cases) |case| {
+        const q = try allocator.alloc(f32, case.q_seq * case.heads * case.d);
+        defer allocator.free(q);
+        const k = try allocator.alloc(f32, case.kv_seq * case.kv_heads * case.d);
+        defer allocator.free(k);
+        const v = try allocator.alloc(f32, case.kv_seq * case.kv_heads * case.d);
+        defer allocator.free(v);
+        const out = try allocator.alloc(f32, q.len);
+        defer allocator.free(out);
+        const stats = try allocator.alloc(f32, case.heads * case.q_seq * 2);
+        defer allocator.free(stats);
+        for (q) |*x| x.* = random.floatNorm(f32);
+        for (k) |*x| x.* = random.floatNorm(f32);
+        for (v) |*x| x.* = random.floatNorm(f32);
+        @memset(out, std.math.nan(f32));
+
+        const scale: f32 = 0.125;
+        const heads_per_kv = case.heads / case.kv_heads;
+        try std.testing.expect(attentionFwdF32(q, k, v, out, stats, case.q_seq, case.kv_seq, case.heads, case.kv_heads, case.d, case.window, case.causal, heads_per_kv, scale));
+
+        const source_offset = case.kv_seq - case.q_seq;
+        const scores = try allocator.alloc(f64, case.kv_seq);
+        defer allocator.free(scores);
+        for (0..case.heads) |head_i| {
+            const kv_base = (head_i / heads_per_kv) * case.d;
+            for (0..case.q_seq) |q_i| {
+                const p_abs = source_offset + q_i;
+                const hi = if (case.causal) @min(p_abs + 1, case.kv_seq) else case.kv_seq;
+                const lo = if (!case.causal or case.window == 0) 0 else (p_abs + 1) -| case.window;
+                var m_row: f64 = -std.math.inf(f64);
+                for (lo..hi) |j| {
+                    var s: f64 = 0;
+                    for (0..case.d) |c| {
+                        s += @as(f64, q[(q_i * case.heads + head_i) * case.d + c]) * k[(j * case.kv_heads) * case.d + kv_base + c];
+                    }
+                    s *= scale;
+                    scores[j] = s;
+                    m_row = @max(m_row, s);
+                }
+                var sum: f64 = 0;
+                for (lo..hi) |j| {
+                    scores[j] = @exp(scores[j] - m_row);
+                    sum += scores[j];
+                }
+                const sb = (head_i * case.q_seq + q_i) * 2;
+                try std.testing.expectApproxEqRel(@as(f32, @floatCast(m_row)), stats[sb], 1e-4);
+                try std.testing.expectApproxEqRel(@as(f32, @floatCast(sum)), stats[sb + 1], 1e-4);
+                for (0..case.d) |c| {
+                    var acc: f64 = 0;
+                    for (lo..hi) |j| {
+                        acc += scores[j] * v[(j * case.kv_heads) * case.d + kv_base + c];
+                    }
+                    const want: f32 = @floatCast(acc / sum);
+                    const got = out[(q_i * case.heads + head_i) * case.d + c];
+                    const tol = @max(2e-5 * @max(@abs(want), @abs(got)), 2e-5);
+                    try std.testing.expect(@abs(got - want) <= tol);
+                }
+            }
+        }
+    }
+}
+
+test "metal attention forward f16-KV parity vs scalar reference" {
+    if (comptime !enabled) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    if (context() == null) return error.SkipZigTest;
+
+    var prng = std.Random.DefaultPrng.init(11);
+    const random = prng.random();
+
+    // Causal + GQA + decode-suffix offset, the inference prefill shape
+    // class. The reference reads the same f16-rounded K/V the kernel sees.
+    const q_seq = 64;
+    const kv_seq = 96;
+    const heads = 4;
+    const kv_heads = 2;
+    const d = 64;
+    const heads_per_kv = heads / kv_heads;
+    const scale: f32 = 0.125;
+
+    const q = try allocator.alloc(f32, q_seq * heads * d);
+    defer allocator.free(q);
+    const k16 = try allocator.alloc(f16, kv_seq * kv_heads * d);
+    defer allocator.free(k16);
+    const v16 = try allocator.alloc(f16, kv_seq * kv_heads * d);
+    defer allocator.free(v16);
+    const out = try allocator.alloc(f32, q.len);
+    defer allocator.free(out);
+    const stats = try allocator.alloc(f32, heads * q_seq * 2);
+    defer allocator.free(stats);
+    for (q) |*x| x.* = random.floatNorm(f32);
+    for (k16) |*x| x.* = @floatCast(random.floatNorm(f32));
+    for (v16) |*x| x.* = @floatCast(random.floatNorm(f32));
+    @memset(out, std.math.nan(f32));
+
+    try std.testing.expect(attentionFwdF16Kv(q, k16, v16, out, stats, q_seq, kv_seq, heads, kv_heads, d, 0, true, heads_per_kv, scale));
+
+    const source_offset = kv_seq - q_seq;
+    const scores = try allocator.alloc(f64, kv_seq);
+    defer allocator.free(scores);
+    for (0..heads) |head_i| {
+        const kv_base = (head_i / heads_per_kv) * d;
+        for (0..q_seq) |q_i| {
+            const hi = @min(source_offset + q_i + 1, kv_seq);
+            var m_row: f64 = -std.math.inf(f64);
+            for (0..hi) |j| {
+                var sum_qk: f64 = 0;
+                for (0..d) |c| {
+                    sum_qk += @as(f64, q[(q_i * heads + head_i) * d + c]) * @as(f64, @floatCast(k16[(j * kv_heads) * d + kv_base + c]));
+                }
+                sum_qk *= scale;
+                scores[j] = sum_qk;
+                m_row = @max(m_row, sum_qk);
+            }
+            var sum: f64 = 0;
+            for (0..hi) |j| {
+                scores[j] = @exp(scores[j] - m_row);
+                sum += scores[j];
+            }
+            const sb = (head_i * q_seq + q_i) * 2;
+            try std.testing.expectApproxEqRel(@as(f32, @floatCast(m_row)), stats[sb], 1e-4);
+            try std.testing.expectApproxEqRel(@as(f32, @floatCast(sum)), stats[sb + 1], 1e-4);
+            for (0..d) |c| {
+                var acc: f64 = 0;
+                for (0..hi) |j| {
+                    acc += scores[j] * @as(f64, @floatCast(v16[(j * kv_heads) * d + kv_base + c]));
+                }
+                const want: f32 = @floatCast(acc / sum);
+                const got = out[(q_i * heads + head_i) * d + c];
                 const tol = @max(2e-5 * @max(@abs(want), @abs(got)), 2e-5);
                 try std.testing.expect(@abs(got - want) <= tol);
             }

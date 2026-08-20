@@ -604,6 +604,54 @@ pub fn shouldUseGpuBf16ForRhs(_: *const tensor.TensorOf(.bf16), _: usize, _: usi
     return false;
 }
 
+/// The exec-tier attention forward does not offload on CUDA (the CPU
+/// tiers serve it); a CUDA kernel would implement the host contract of
+/// src/backend/metal/attention.metal. Distinct from the qwen3 runner's
+/// fused prefill-attention path, which has its own gate below.
+pub const has_attention_fwd = false;
+
+pub fn shouldUseGpuAttentionFwd(_: usize, _: usize, _: usize, _: usize) bool {
+    return false;
+}
+
+pub fn attentionFwdF32(
+    _: []const f32,
+    _: []const f32,
+    _: []const f32,
+    _: []f32,
+    _: ?[]f32,
+    _: usize,
+    _: usize,
+    _: usize,
+    _: usize,
+    _: usize,
+    _: usize,
+    _: bool,
+    _: usize,
+    _: f32,
+) bool {
+    return false;
+}
+
+pub fn attentionFwdF16Kv(
+    _: []const f32,
+    _: []const f16,
+    _: []const f16,
+    _: []f32,
+    _: ?[]f32,
+    _: usize,
+    _: usize,
+    _: usize,
+    _: usize,
+    _: usize,
+    _: usize,
+    _: bool,
+    _: usize,
+    _: f32,
+) bool {
+    return false;
+}
+
 pub fn gemmBf16NtAsync(_: *const Tensor, _: *const tensor.TensorOf(.bf16), _: *Tensor, _: usize, _: usize, _: usize) bool {
     return false;
 }

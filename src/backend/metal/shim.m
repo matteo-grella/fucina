@@ -144,6 +144,11 @@ typedef struct {
     // first-dispatch residency cost — never apply to the panels) and for the
     // tile table. All guarded by the caller's qmoe lock (metal.zig).
     id<MTLComputePipelineState> qmm_pipelines[FUCINA_QMM_FORMATS];
+    // Grouped causal attention forward (attention.metal); lazily built under
+    // pipeline_lock like the GEMM pipelines. One pipeline per K/V element
+    // type instantiation (f32 training graphs, half inference KV cache).
+    id<MTLComputePipelineState> attn_pipeline;
+    id<MTLComputePipelineState> attn_f16kv_pipeline;
     id<MTLBuffer> qmoe_in;
     size_t qmoe_in_cap;
     id<MTLBuffer> qmoe_out;
@@ -1135,6 +1140,132 @@ int fucina_metal_gemm_q_grouped_nt(
                   (CFAbsoluteTimeGetCurrent() - wall0) * 1000.0,
                   (cmd.GPUEndTime - cmd.GPUStartTime) * 1000.0,
                   (cmd.kernelEndTime - cmd.kernelStartTime) * 1000.0);
+        }
+        return 0;
+    }
+}
+
+// Must mirror fucina_attn_args in attention.metal (C layout).
+typedef struct {
+    int32_t q_seq;
+    int32_t kv_seq;
+    int32_t heads;
+    int32_t kv_heads;
+    int32_t d;
+    int32_t source_offset;
+    int32_t window;
+    int32_t causal;
+    int32_t heads_per_kv;
+    int32_t has_stats;
+    float scale;
+} FucinaAttnArgs;
+
+static id<MTLComputePipelineState> fucina_attn_pipeline(FucinaMetalCtx *ctx,
+                                                        id<MTLComputePipelineState> __strong *slot,
+                                                        NSString *name) {
+    id<MTLComputePipelineState> pipeline = *slot;
+    if (pipeline != nil) {
+        return pipeline;
+    }
+    os_unfair_lock_lock(&ctx->pipeline_lock);
+    pipeline = *slot;
+    if (pipeline == nil) {
+        NSError *error = nil;
+        id<MTLFunction> fn = [ctx->library newFunctionWithName:name];
+        if (fn == nil) {
+            NSLog(@"fucina-metal: function %@ missing", name);
+        } else {
+            pipeline = [ctx->device newComputePipelineStateWithFunction:fn error:&error];
+            if (pipeline == nil) {
+                NSLog(@"fucina-metal: attention pipeline %@: %@", name, error);
+            }
+            *slot = pipeline;
+        }
+    }
+    os_unfair_lock_unlock(&ctx->pipeline_lock);
+    return pipeline;
+}
+
+// Grouped causal attention forward, f32, blocking (commit + wait under the
+// caller's lifetime guarantees — all operand wraps are zero-copy page wraps
+// of caller memory). `stats` may alias `out` when has_stats == 0 (the
+// kernel never touches it then). Returns nonzero when the GPU did not run.
+int fucina_metal_attention_fwd_f32(void *ctx_,
+                                   const float *q, const void *k, const void *v,
+                                   float *out, float *stats,
+                                   int64_t q_seq, int64_t kv_seq,
+                                   int64_t heads, int64_t kv_heads, int64_t d,
+                                   int64_t source_offset, int64_t window,
+                                   int32_t causal, int64_t heads_per_kv,
+                                   int32_t has_stats, int32_t kv_half, float scale,
+                                   FucinaCommandTiming *timing) {
+    @autoreleasepool {
+        FucinaMetalCtx *ctx = (FucinaMetalCtx *)ctx_;
+        id<MTLComputePipelineState> pipeline = kv_half != 0
+            ? fucina_attn_pipeline(ctx, &ctx->attn_f16kv_pipeline, @"fucina_attention_fwd_f16kv")
+            : fucina_attn_pipeline(ctx, &ctx->attn_pipeline, @"fucina_attention_fwd_f32");
+        if (pipeline == nil) {
+            return 1;
+        }
+        size_t scores_bytes = ((size_t)kv_seq * sizeof(float) + 15) & ~(size_t)15;
+        if (scores_bytes > [ctx->device maxThreadgroupMemoryLength] - 2048) {
+            return 1; // host gate should have declined already
+        }
+
+        size_t q_bytes = (size_t)q_seq * (size_t)heads * (size_t)d * sizeof(float);
+        size_t kv_elem = kv_half != 0 ? 2 : sizeof(float);
+        size_t kv_bytes = (size_t)kv_seq * (size_t)kv_heads * (size_t)d * kv_elem;
+        size_t stats_bytes = has_stats != 0 ? (size_t)heads * (size_t)q_seq * 2 * sizeof(float) : q_bytes;
+        size_t q_off, k_off, v_off, out_off, stats_off;
+        id<MTLBuffer> q_buf = fucina_wrap(ctx, q, q_bytes, &q_off);
+        id<MTLBuffer> k_buf = fucina_wrap(ctx, k, kv_bytes, &k_off);
+        id<MTLBuffer> v_buf = fucina_wrap(ctx, v, kv_bytes, &v_off);
+        id<MTLBuffer> out_buf = fucina_wrap(ctx, out, q_bytes, &out_off);
+        id<MTLBuffer> stats_buf = fucina_wrap(ctx, stats, stats_bytes, &stats_off);
+        if (q_buf == nil || k_buf == nil || v_buf == nil || out_buf == nil || stats_buf == nil) {
+            return 1;
+        }
+
+        FucinaAttnArgs args = {
+            .q_seq = (int32_t)q_seq,
+            .kv_seq = (int32_t)kv_seq,
+            .heads = (int32_t)heads,
+            .kv_heads = (int32_t)kv_heads,
+            .d = (int32_t)d,
+            .source_offset = (int32_t)source_offset,
+            .window = (int32_t)window,
+            .causal = causal,
+            .heads_per_kv = (int32_t)heads_per_kv,
+            .has_stats = has_stats,
+            .scale = scale,
+        };
+
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBufferWithUnretainedReferences];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:pipeline];
+        [enc setBytes:&args length:sizeof(args) atIndex:0];
+        [enc setBuffer:q_buf offset:q_off atIndex:1];
+        [enc setBuffer:k_buf offset:k_off atIndex:2];
+        [enc setBuffer:v_buf offset:v_off atIndex:3];
+        [enc setBuffer:out_buf offset:out_off atIndex:4];
+        [enc setBuffer:stats_buf offset:stats_off atIndex:5];
+        [enc setThreadgroupMemoryLength:scores_bytes atIndex:0];
+        [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)q_seq, (NSUInteger)heads, 1)
+            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+        if (cmd.status == MTLCommandBufferStatusError) {
+            NSLog(@"fucina-metal: attention command failed: %@", cmd.error);
+            return 1;
+        }
+        fucina_record_timing(timing, cmd);
+        if (getenv("FUCINA_GPU_DEBUG") != NULL) {
+            NSLog(@"fucina-metal: attn q=%lld kv=%lld heads=%lld d=%lld gpu=%.3fms sched=%.3fms occ-max-threads=%lu",
+                  q_seq, kv_seq, heads, d,
+                  (cmd.GPUEndTime - cmd.GPUStartTime) * 1000.0,
+                  (cmd.kernelEndTime - cmd.kernelStartTime) * 1000.0,
+                  (unsigned long)pipeline.maxTotalThreadsPerThreadgroup);
         }
         return 0;
     }

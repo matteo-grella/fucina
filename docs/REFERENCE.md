@@ -763,7 +763,7 @@ values. On Linux without libc the lookup scans `/proc/self/environ`
 | `FUCINA_GPU_TRACE` | Non-`0` first character enables dispatch tracing; dump via `fucina.internal.gpu.traceDump()` (no-op when off). | off |
 | `FUCINA_GPU_TF32` (cuda) | Non-`0` opts f32 GEMMs into TF32 tensor cores (default is strict FP32). | off |
 | `FUCINA_GPU_MIN_WORK_TRANSIENT` (cuda) | Work floor for *non-resident* operands (each crossing PCIe per call); an `m ≥ 128` row floor applies alongside it. | `2^33` |
-| `FUCINA_GPU_MIN_WORK_ATTN` (cuda) | Fused prefill-attention gate, in q·kv·heads·d work units. | `2^28` |
+| `FUCINA_GPU_MIN_WORK_ATTN` | Attention work floor, in q·kv·heads·d units: on Metal the exec-tier grouped-causal forward kernel, on CUDA the runner's fused prefill-attention path. | Metal `2^29`; CUDA `2^28` |
 | `FUCINA_GPU_DECODE` (cuda) | Non-`0` enables opt-in quantized decode for m ≤ 8 and resident weights only (GEMV generally; Q5_K uses tiled MMA at m=4..8). | off |
 | `FUCINA_GPU_MIN_WORK_DECODE_Q5` (cuda) | Q5_K-only decode work gate after `FUCINA_GPU_DECODE=1`; rejects the compact CPU kernel's measured 1×4096² win. | `3·2^23` |
 | `FUCINA_GPU_QUANT_MMA` (cuda) | A value starting with `0` disables the tensor-core Q4_K/Q5_K/Q6_K/Q8_0 kernels and selects the scalar-FFMA fallback (diagnostic A/B switch). | enabled on compute capability ≥ 7 |
