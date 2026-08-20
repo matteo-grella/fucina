@@ -164,6 +164,8 @@ const target_names = [n_targets][]const u8{ "q", "k", "v", "o", "gate", "up", "d
 const LayerExtra = struct {
     layer: *const ModelLayer,
     config: qwen3.Config,
+    /// Widened-f32 frozen-projection cache (null = kernel-identical route).
+    frozen: ?*FrozenCache,
     rope_table: *const fucina.RopeTable,
     kv_head_for_head: []const usize,
     /// Per-projection dropout seeds for this (step, layer); null = eval.
@@ -213,7 +215,72 @@ fn fusedDistillEnabled() bool {
     return state == 1;
 }
 
+/// Lazily widened f32 copies of frozen projections, keyed by weight
+/// identity. Training dots through a 16-bit or quantized frozen weight pay
+/// twice per step without this: the grads-on forward runs the generic
+/// (non-packed, CPU-only) kernels, and the backward re-widens the WHOLE
+/// weight to a transient f32 copy on every call
+/// (`ConstRhsEinsumBackward`). With the cache, both directions run the
+/// plain f32 `dot` — the BLAS route at training shapes — against one copy
+/// built on first use. Cost: 4 bytes per frozen weight while the trainer
+/// lives (~2.4 GB at 0.6B). Numerics: the forward becomes
+/// f32-GEMM-over-dequantized values instead of the serving integer
+/// kernels — slightly MORE accurate, but no longer kernel-identical to
+/// serving, so the serving-format zero-delta parity tests pin
+/// `widen_frozen = false`.
+pub const FrozenCache = struct {
+    map: std.AutoHashMapUnmanaged(*const LinearWeight, fucina.Tensor(.{ .out, .in })) = .empty,
+
+    pub fn deinit(self: *FrozenCache, allocator: std.mem.Allocator) void {
+        var values = self.map.valueIterator();
+        while (values.next()) |wide| wide.deinit();
+        self.map.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+/// Deep-copy a scope-owned raw f32 matrix OUT of the active exec scope
+/// (the `adoptFusedHead` pattern) — cache entries must outlive the step.
+fn adoptWidened(ctx: *ExecContext, raw: anytype) !fucina.Tensor(.{ .out, .in }) {
+    var value = try raw.clone(ctx.allocator);
+    return fucina.Tensor(.{ .out, .in }).fromTensor(ctx, value) catch |err| {
+        value.deinit();
+        return err;
+    };
+}
+
+/// Get-or-build the widened f32 copy of `weight`. Null when the arm has no
+/// cached route: f32 already IS the plain path, and ptqtp/fx4 keep their
+/// per-plane dots.
+fn widenedFrozen(cache: *FrozenCache, weight: *const LinearWeight, ctx: *ExecContext) !?*const fucina.Tensor(.{ .out, .in }) {
+    if (cache.map.getPtr(weight)) |hit| return hit;
+    var wide: fucina.Tensor(.{ .out, .in }) = switch (weight.*) {
+        inline .f16, .bf16 => |*w| blk: {
+            var wide16 = try w.to(ctx, .f32);
+            defer wide16.deinit();
+            break :blk try adoptWidened(ctx, &wide16.value);
+        },
+        inline .q4_k, .q5_k, .q6_k, .q8_0 => |*w, arm| blk: {
+            const dt = comptime switch (arm) {
+                .q4_k => .q4_k,
+                .q5_k => .q5_k,
+                .q6_k => .q6_k,
+                .q8_0 => .q8_0,
+                else => unreachable,
+            };
+            var raw = try ctx.dequantizeTensorTyped(dt, w.value.asRawTensor());
+            defer raw.deinit();
+            break :blk try adoptWidened(ctx, &raw);
+        },
+        else => return null,
+    };
+    errdefer wide.deinit();
+    try cache.map.put(ctx.allocator, weight, wide);
+    return cache.map.getPtr(weight).?;
+}
+
 fn dotLinear(
+    cache: ?*FrozenCache,
     weight: *const LinearWeight,
     ctx: *ExecContext,
     input: anytype,
@@ -221,6 +288,9 @@ fn dotLinear(
     comptime out_tag: Tag,
 ) !fucina.Tensor(.{ .seq, out_tag }) {
     @setEvalBranchQuota(20_000);
+    if (cache) |c| {
+        if (try widenedFrozen(c, weight, ctx)) |wide| return dotFrozen(wide, ctx, input, in_tag, out_tag);
+    }
     return switch (weight.*) {
         .q4_k => |*w| dotFrozen(&w.value, ctx, input, in_tag, out_tag),
         .q5_k => |*w| dotFrozen(&w.value, ctx, input, in_tag, out_tag),
@@ -262,18 +332,18 @@ fn dotFrozen(
 /// Base QKV through the frozen projections — both union arms (mirrors
 /// `AttentionProjection.project`, with the differentiable dot; the fused
 /// split IS the inference `qwen3.splitQkv`, not a replica).
-fn projectQkv(ctx: *ExecContext, layer: *const ModelLayer, input: *const Hidden, cfg: qwen3.Config) !qwen3.QkvProjection {
+fn projectQkv(cache: ?*FrozenCache, ctx: *ExecContext, layer: *const ModelLayer, input: *const Hidden, cfg: qwen3.Config) !qwen3.QkvProjection {
     return switch (layer.attn_proj) {
         .separate => |*sep| blk: {
-            var q = try dotLinear(&sep.q_proj, ctx, input, .embed, .q);
+            var q = try dotLinear(cache, &sep.q_proj, ctx, input, .embed, .q);
             errdefer q.deinit();
-            var k = try dotLinear(&sep.k_proj, ctx, input, .embed, .k);
+            var k = try dotLinear(cache, &sep.k_proj, ctx, input, .embed, .k);
             errdefer k.deinit();
-            const v = try dotLinear(&sep.v_proj, ctx, input, .embed, .v);
+            const v = try dotLinear(cache, &sep.v_proj, ctx, input, .embed, .v);
             break :blk .{ .q = q, .k = k, .v = v };
         },
         .fused => |*w| blk: {
-            var qkv = try dotLinear(w, ctx, input, .embed, .qkv);
+            var qkv = try dotLinear(cache, w, ctx, input, .embed, .qkv);
             defer qkv.deinit();
             break :blk try qwen3.splitQkv(ctx, &qkv, cfg);
         },
@@ -285,16 +355,16 @@ const DenseFfn = qwen3.DenseFfn;
 /// Base gate/up through the frozen projections — both union arms (mirrors
 /// `FfnInputProjection.project`, with the differentiable dot; the fused
 /// split IS the inference `qwen3.splitGateUp`, not a replica).
-fn projectGateUp(ctx: *ExecContext, dense: *const DenseFfn, input: *const Hidden, cfg: qwen3.Config) !qwen3.GateUpProjection {
+fn projectGateUp(cache: ?*FrozenCache, ctx: *ExecContext, dense: *const DenseFfn, input: *const Hidden, cfg: qwen3.Config) !qwen3.GateUpProjection {
     return switch (dense.input_proj) {
         .separate => |*sep| blk: {
-            var gate = try dotLinear(&sep.gate_proj, ctx, input, .embed, .ffn);
+            var gate = try dotLinear(cache, &sep.gate_proj, ctx, input, .embed, .ffn);
             errdefer gate.deinit();
-            const up = try dotLinear(&sep.up_proj, ctx, input, .embed, .ffn);
+            const up = try dotLinear(cache, &sep.up_proj, ctx, input, .embed, .ffn);
             break :blk .{ .gate = gate, .up = up };
         },
         .fused => |*w| blk: {
-            var gate_up = try dotLinear(w, ctx, input, .embed, .gate_up);
+            var gate_up = try dotLinear(cache, w, ctx, input, .embed, .gate_up);
             defer gate_up.deinit();
             break :blk try qwen3.splitGateUp(ctx, &gate_up, cfg);
         },
@@ -346,6 +416,15 @@ pub fn Trainer(comptime targets: Targets) type {
         fused_head_state: enum { unknown, ready, unavailable } = .unknown,
         /// Recompute-in-backward per layer (one checkpoint block per layer).
         checkpoint_layers: bool = false,
+        /// Route frozen 16-bit/quantized projections through lazily cached
+        /// f32 copies (see `FrozenCache`): both dot directions then take
+        /// the plain f32 BLAS path instead of the generic grads-on kernels
+        /// + per-backward re-widening. Default on; turn off to keep the
+        /// trainer's forward kernel-identical to serving (the
+        /// serving-format zero-delta parity tests do) or to avoid the
+        /// resident f32 copies on big bases.
+        widen_frozen: bool = true,
+        frozen_cache: FrozenCache = .{},
 
         const Self = @This();
 
@@ -483,7 +562,12 @@ pub fn Trainer(comptime targets: Targets) type {
             self.transient_tables.clearRetainingCapacity();
         }
 
+        fn frozenCache(self: *Self) ?*FrozenCache {
+            return if (self.widen_frozen) &self.frozen_cache else null;
+        }
+
         pub fn deinit(self: *Self) void {
+            self.frozen_cache.deinit(self.allocator);
             if (self.fused_head) |*head| head.deinit();
             self.freeTransientRope();
             self.transient_tables.deinit(self.allocator);
@@ -976,7 +1060,7 @@ pub fn Trainer(comptime targets: Targets) type {
             const model = self.model;
             var normed = try hidden.rmsNormMul(ctx, .embed, &model.output_norm, model.config.rms_norm_eps);
             defer normed.deinit();
-            return dotLinear(&model.output, ctx, &normed, .embed, .vocab);
+            return dotLinear(self.frozenCache(), &model.output, ctx, &normed, .embed, .vocab);
         }
 
         /// Raw-residual trainable forward: embedding (frozen constant) →
@@ -1105,6 +1189,7 @@ pub fn Trainer(comptime targets: Targets) type {
                 const extra = LayerExtra{
                     .layer = layer,
                     .config = cfg,
+                    .frozen = self.frozenCache(),
                     .rope_table = rope_table,
                     .kv_head_for_head = model.kv_head_for_head,
                     .seeds = self.layerSeeds(step, layer_i),
@@ -1265,7 +1350,7 @@ pub fn Trainer(comptime targets: Targets) type {
             var attn_in = try hidden.rmsNormMul(ctx, .embed, &layer.attn_norm, cfg.rms_norm_eps);
             defer attn_in.deinit();
 
-            var qkv = try projectQkv(ctx, layer, &attn_in, cfg);
+            var qkv = try projectQkv(extra.frozen, ctx, layer, &attn_in, cfg);
             defer qkv.deinit();
 
             // LoRA deltas land on the per-projection slices AFTER any fused
@@ -1325,7 +1410,7 @@ pub fn Trainer(comptime targets: Targets) type {
             } else try q_rope.groupedAttention(ctx, &k_rope, &v3, extra.kv_head_for_head, .attn, attn_scale, .{});
             defer attn.deinit();
 
-            var attn_out_base = try dotLinear(&layer.o_proj, ctx, &attn, .attn, .embed);
+            var attn_out_base = try dotLinear(extra.frozen, &layer.o_proj, ctx, &attn, .attn, .embed);
             defer attn_out_base.deinit();
             var attn_out = try adapted(3, ctx, abs, extra, &attn, &attn_out_base);
             defer attn_out.deinit();
@@ -1342,7 +1427,7 @@ pub fn Trainer(comptime targets: Targets) type {
             var ffn_in = try h.rmsNormMul(ctx, .embed, &layer.ffn_norm, cfg.rms_norm_eps);
             defer ffn_in.deinit();
 
-            var gate_up = try projectGateUp(ctx, dense, &ffn_in, cfg);
+            var gate_up = try projectGateUp(extra.frozen, ctx, dense, &ffn_in, cfg);
             defer gate_up.deinit();
 
             var gate = try adapted(4, ctx, abs, extra, &ffn_in, &gate_up.gate);
@@ -1353,7 +1438,7 @@ pub fn Trainer(comptime targets: Targets) type {
             var gated = try up.swiglu(ctx, &gate);
             defer gated.deinit();
 
-            var down_base = try dotLinear(&dense.down_proj, ctx, &gated, .ffn, .embed);
+            var down_base = try dotLinear(extra.frozen, &dense.down_proj, ctx, &gated, .ffn, .embed);
             defer down_base.deinit();
             var down = try adapted(6, ctx, abs, extra, &gated, &down_base);
             defer down.deinit();

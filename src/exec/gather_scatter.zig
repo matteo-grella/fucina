@@ -624,10 +624,67 @@ pub fn sliceGradientAxisRank(rt: *Runtime, comptime rank: usize, grad: *const Te
         if (dim != axis and gv.shape[dim] != source_shape[dim]) return tensor.TensorError.ShapeMismatch;
     }
 
-    var out = try rt.zerosRank(rank, source_shape);
+    // One fused pass instead of zerosRank + writeSliceAxisRank: per outer
+    // block, memset the gap before the slice, copy the slice rows, memset
+    // the gap after — every output byte is touched exactly once, threaded
+    // over outer blocks. With recycled (non-fresh) buffers the two-pass
+    // form pays a full extra memory walk.
+    var out = try rt.emptyRank(rank, source_shape);
     errdefer out.deinit();
-    try writeSliceAxisRank(rt, rank, &out, grad, axis, start);
+    var gg = try rt.prepareContiguous(grad);
+    defer gg.deinit();
+    const base = SliceGradientFillTask{
+        .input = gg.tensor().dataConst(),
+        .output = out.data(),
+        .inner = productAfterAxis(rank, source_shape, axis),
+        .dim = source_shape[axis],
+        .start = start,
+        .len = gv.shape[axis],
+        .outer_start = 0,
+        .outer_end = productBeforeAxis(rank, source_shape, axis),
+    };
+    const total_bytes = base.outer_end * base.dim * base.inner * @sizeOf(f32);
+    if (total_bytes >= 2 << 20 and base.outer_end > 1) {
+        if (rt.workPool()) |pool| {
+            const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), base.outer_end);
+            if (task_count > 1) {
+                var tasks: [parallel.vector_max_threads]SliceGradientFillTask = undefined;
+                for (0..task_count) |task_i| {
+                    tasks[task_i] = base;
+                    tasks[task_i].outer_start = task_i * base.outer_end / task_count;
+                    tasks[task_i].outer_end = (task_i + 1) * base.outer_end / task_count;
+                }
+                pool.parallelChunks(SliceGradientFillTask, tasks[0..task_count], runSliceGradientFillTask);
+                return out;
+            }
+        }
+    }
+    runSliceGradientFillTask(&base);
     return out;
+}
+
+const SliceGradientFillTask = struct {
+    input: []const f32,
+    output: []f32,
+    inner: usize,
+    dim: usize,
+    start: usize,
+    len: usize,
+    outer_start: usize,
+    outer_end: usize,
+};
+
+fn runSliceGradientFillTask(task: *const SliceGradientFillTask) void {
+    const before = task.start * task.inner;
+    const mid = task.len * task.inner;
+    const after = (task.dim - task.start - task.len) * task.inner;
+    const out_stride = task.dim * task.inner;
+    for (task.outer_start..task.outer_end) |outer_i| {
+        const dst = task.output[outer_i * out_stride ..][0..out_stride];
+        @memset(dst[0..before], 0);
+        @memcpy(dst[before..][0..mid], task.input[outer_i * mid ..][0..mid]);
+        @memset(dst[before + mid ..][0..after], 0);
+    }
 }
 
 pub fn scatterAddAxisRank(

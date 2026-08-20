@@ -25,6 +25,10 @@ pub const parallel = @import("parallel.zig");
 /// control, plus the accrued exception flags. The bitwise contracts elsewhere
 /// in this library assume the default environment; this is how you check it.
 pub const fpenv = @import("fpenv.zig");
+/// Steady-state caching allocator for training loops (see the module doc:
+/// large blocks recycle through power-of-two freelists, never returning to
+/// the OS mid-run).
+pub const CachingAllocator = @import("caching_allocator.zig").CachingAllocator;
 pub const ParamRegistry = param_registry_mod.ParamRegistry;
 pub const state_dict = state_dict_mod;
 pub const safetensors = safetensors_mod;
@@ -224,5 +228,6 @@ test {
     _ = ptqtp;
     _ = rng;
     _ = fpenv;
+    _ = @import("caching_allocator.zig");
     _ = @import("fucina_tests.zig");
 }

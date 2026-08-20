@@ -64,11 +64,19 @@ pub fn main(init: std.process.Init) !void {
     var load_path: ?[]const u8 = null;
     var seed: u64 = 42;
     var verify_grads = false;
+    // train.zig `widen_frozen`: false keeps the frozen base on the quant
+    // kernels (no f32 copies) — the memory pick for big quantized bases,
+    // with GPU dispatch under the gradient-aware quant-dot policy.
+    var widen_frozen = true;
+    // Skip the held-prompt BEFORE/AFTER generations (each token re-runs a
+    // full cache-less trainer forward — minutes at 8B): the benchmark mode.
+    var no_sample = false;
     var state_dtype: optim.StateDType = .f32;
     var accum_steps: usize = 1;
     var data_path: ?[]const u8 = null;
     var shuffle = false;
     var data_seed: ?u64 = null;
+    var threads: ?usize = null;
 
     var arg_i: usize = 1;
     while (arg_i < args.len) : (arg_i += 1) {
@@ -183,9 +191,19 @@ pub fn main(init: std.process.Init) !void {
             data_seed = try std.fmt.parseInt(u64, arg["--data-seed=".len..], 10);
         } else if (std.mem.eql(u8, arg, "--verify-grads")) {
             verify_grads = true;
+        } else if (std.mem.eql(u8, arg, "--no-widen-frozen")) {
+            widen_frozen = false;
+        } else if (std.mem.eql(u8, arg, "--no-sample")) {
+            no_sample = true;
+        } else if (std.mem.eql(u8, arg, "--threads")) {
+            arg_i += 1;
+            if (arg_i >= args.len) return error.MissingThreads;
+            threads = try std.fmt.parseInt(usize, args[arg_i], 10);
+        } else if (std.mem.startsWith(u8, arg, "--threads=")) {
+            threads = try std.fmt.parseInt(usize, arg["--threads=".len..], 10);
         } else {
             try stdout.print(
-                "usage: zig build finetune -Doptimize=ReleaseFast -- [--model PATH] [--data PATH.jsonl] [--shuffle] [--data-seed N] [--steps N] [--accum-steps N] [--lr F] [--rank N] [--alpha F] [--seq-max N] [--checkpoint-layers] [--save DIR] [--save-every N] [--load DIR] [--seed N] [--state-dtype f32|bf16] [--verify-grads]\n",
+                "usage: zig build finetune -Doptimize=ReleaseFast -- [--model PATH] [--data PATH.jsonl] [--shuffle] [--data-seed N] [--steps N] [--accum-steps N] [--lr F] [--rank N] [--alpha F] [--seq-max N] [--checkpoint-layers] [--no-widen-frozen] [--no-sample] [--threads N] [--save DIR] [--save-every N] [--load DIR] [--seed N] [--state-dtype f32|bf16] [--verify-grads]\n",
                 .{},
             );
             return error.UnknownArgument;
@@ -194,7 +212,17 @@ pub fn main(init: std.process.Init) !void {
 
     if (accum_steps == 0) return error.InvalidAccumSteps;
 
-    const allocator = std.heap.smp_allocator;
+    // Steady-state caching allocator over the general-purpose one: the
+    // training loop's tensor churn reuses warm pages instead of paying
+    // mmap/madvise + first-touch faults per step (measured 6.1 -> 4.9 s
+    // per 0.6B step; see src/caching_allocator.zig).
+    step_cache = fucina.CachingAllocator.init(std.heap.smp_allocator);
+    const allocator = step_cache.allocator();
+
+    // Training is a dense fork-join stream: chunks parked on efficiency
+    // cores stall every barrier, so default the team to the performance
+    // cores. --threads N overrides.
+    if (threads orelse fucina.parallel.performanceCoreCount()) |n| fucina.parallel.setMaxThreads(n);
 
     var ctx: fucina.ExecContext = undefined;
     ctx.init(allocator);
@@ -216,6 +244,7 @@ pub fn main(init: std.process.Init) !void {
     var trainer = try Trainer.init(&ctx, &model, .{ .rank = rank, .alpha = alpha }, seed);
     defer trainer.deinit();
     trainer.checkpoint_layers = checkpoint_layers;
+    trainer.widen_frozen = widen_frozen;
 
     var opt = optim.AdamW.init(allocator, .{ .lr = lr, .weight_decay = 0, .state_dtype = state_dtype });
     defer opt.deinit();
@@ -300,13 +329,15 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const max_new = 25;
-    try stdout.print("\nheld prompt: {s}\n", .{pairs[0].instruction});
-    const before = try greedyGenerate(&ctx, &trainer, allocator, held, max_new, stop_id);
-    defer allocator.free(before);
-    const before_text = try decodeIds(allocator, &tokenizer, before);
-    defer allocator.free(before_text);
-    try stdout.print("BEFORE: {s}\n\n", .{before_text});
-    try stdout.flush();
+    if (!no_sample) {
+        try stdout.print("\nheld prompt: {s}\n", .{pairs[0].instruction});
+        const before = try greedyGenerate(&ctx, &trainer, allocator, held, max_new, stop_id);
+        defer allocator.free(before);
+        const before_text = try decodeIds(allocator, &tokenizer, before);
+        defer allocator.free(before_text);
+        try stdout.print("BEFORE: {s}\n\n", .{before_text});
+        try stdout.flush();
+    }
 
     // Training loop: loader-ordered over the pairs; each MACRO step consumes
     // `accum_steps` micro-batches and applies ONE clip/step/zeroGrad.
@@ -402,12 +433,15 @@ pub fn main(init: std.process.Init) !void {
     try saveFinetuneCheckpoint(allocator, io, save_path, &trainer, &set, opt.config.lr, accum_steps, loader.state());
     try stdout.print("saved checkpoint to {s}\n", .{save_path});
 
-    const after = try greedyGenerate(&ctx, &trainer, allocator, held, max_new, stop_id);
-    defer allocator.free(after);
-    const after_text = try decodeIds(allocator, &tokenizer, after);
-    defer allocator.free(after_text);
-    try stdout.print("\nheld prompt: {s}\n", .{pairs[0].instruction});
-    try stdout.print("AFTER:  {s}\n", .{after_text});
+    if (!no_sample) {
+        const after = try greedyGenerate(&ctx, &trainer, allocator, held, max_new, stop_id);
+        defer allocator.free(after);
+        const after_text = try decodeIds(allocator, &tokenizer, after);
+        defer allocator.free(after_text);
+        try stdout.print("\nheld prompt: {s}\n", .{pairs[0].instruction});
+        try stdout.print("AFTER:  {s}\n", .{after_text});
+    }
+    fucina.internal.gpu.traceDump(); // FUCINA_GPU_TRACE=1: dispatch breakdown to stderr
 }
 
 fn saveFinetuneCheckpoint(
@@ -1011,3 +1045,5 @@ fn seconds(ns: i96) f64 {
 fn millis(ns: i96) f64 {
     return @as(f64, @floatFromInt(ns)) / 1_000_000.0;
 }
+
+var step_cache: fucina.CachingAllocator = undefined;

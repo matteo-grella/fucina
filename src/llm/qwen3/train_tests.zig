@@ -157,6 +157,9 @@ fn fuseLayerProjections(ctx: *ExecContext, layer: *Layer) !void {
 fn zeroDeltaMaxDiff(ctx: *ExecContext, model: *const qwen3.Model, tokens: []const usize) !f32 {
     var trainer = try DefaultTrainer.init(ctx, model, tiny_lora, 1);
     defer trainer.deinit();
+    // The gate certifies the serving-kernel-identical trainer route; the
+    // widened-cache route has its own tolerance tests below.
+    trainer.widen_frozen = false;
     var ref = try model.forwardLastLogits(ctx, tokens);
     defer ref.deinit();
     var got = try trainer.evalLastLogits(ctx, tokens);
@@ -473,6 +476,111 @@ test "serving-format parity gate: q4_k superblock weights at zero delta" {
     // packed route engaging on other arches.
     const diff = try zeroDeltaMaxDiff(&ctx, &model, &parity_tokens);
     try std.testing.expect(diff < 1e-4);
+}
+
+test "widened frozen cache: q8_0 forward tracks the kernel path at quantization scale" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try buildTinyModel(&ctx, 0xBEEF);
+    defer model.deinit();
+    try quantizeModelLinears(&ctx, &model, .q8_0);
+
+    var trainer = try DefaultTrainer.init(&ctx, &model, tiny_lora, 1);
+    defer trainer.deinit();
+    var ref = try model.forwardLastLogits(&ctx, &parity_tokens);
+    defer ref.deinit();
+    var got = try trainer.evalLastLogits(&ctx, &parity_tokens);
+    defer got.deinit();
+    var max_diff: f32 = 0;
+    var max_ref: f32 = 0;
+    for (try ref.dataConst(), try got.dataConst()) |e, a| {
+        max_diff = @max(max_diff, @abs(e - a));
+        max_ref = @max(max_ref, @abs(e));
+    }
+    // The cached route computes f32 GEMMs over the dequantized weights and
+    // the EXACT f32 activations; the serving kernels also quantize the
+    // activations to q8_0 per block. The gap is that activation-rounding
+    // term — quantization-scale, not semantic.
+    std.debug.print("widened-cache q8_0 zero-delta: max|diff| {d} (max|ref| {d})\n", .{ max_diff, max_ref });
+    try std.testing.expect(max_diff < 2e-2 * @max(1.0, max_ref));
+}
+
+test "widened frozen cache: q8_0 loss and adapter grads track the kernel path" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try buildTinyModel(&ctx, 0xBEEF);
+    defer model.deinit();
+    try quantizeModelLinears(&ctx, &model, .q8_0);
+
+    var cached = try DefaultTrainer.init(&ctx, &model, tiny_lora, 7);
+    defer cached.deinit();
+    var kernel = try DefaultTrainer.init(&ctx, &model, tiny_lora, 7);
+    defer kernel.deinit();
+    kernel.widen_frozen = false;
+
+    var cached_loss: f32 = 0;
+    var kernel_loss: f32 = 0;
+    {
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        const loss = try cached.loss(&ctx, batch_inputs, batch_labels);
+        try loss.backward(&ctx);
+        cached_loss = try loss.item();
+    }
+    {
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        const loss = try kernel.loss(&ctx, batch_inputs, batch_labels);
+        try loss.backward(&ctx);
+        kernel_loss = try loss.item();
+    }
+    std.debug.print("widened-cache q8_0 loss: cached {d} kernel {d}\n", .{ cached_loss, kernel_loss });
+    try std.testing.expect(@abs(cached_loss - kernel_loss) < 1e-2 * @max(1.0, @abs(kernel_loss)));
+
+    // The two routes see slightly different activations (the kernel path
+    // quantizes them), so the grads are compared as optimization signals:
+    // same direction (cosine) and same magnitude (norm ratio).
+    var worst_cos: f32 = 1;
+    for (cached.adapters, kernel.adapters) |*cads, *kads| {
+        inline for (.{ "q", "v" }) |name| {
+            inline for (.{ "a", "b" }) |half| {
+                var cg = (try @field(@field(cads.*, name), half).grad(&ctx)) orelse return error.MissingGrad;
+                defer cg.deinit();
+                var kg = (try @field(@field(kads.*, name), half).grad(&ctx)) orelse return error.MissingGrad;
+                defer kg.deinit();
+                var dot_ck: f64 = 0;
+                var nc: f64 = 0;
+                var nk: f64 = 0;
+                for (try cg.dataConst(), try kg.dataConst()) |c, k| {
+                    dot_ck += @as(f64, c) * k;
+                    nc += @as(f64, c) * c;
+                    nk += @as(f64, k) * k;
+                }
+                if (nk == 0) {
+                    try std.testing.expectEqual(@as(f64, 0), nc);
+                } else {
+                    const cos: f32 = @floatCast(dot_ck / (@sqrt(nc) * @sqrt(nk)));
+                    worst_cos = @min(worst_cos, cos);
+                    try std.testing.expect(cos > 0.99);
+                    const ratio: f32 = @floatCast(@sqrt(nc) / @sqrt(nk));
+                    try std.testing.expect(ratio > 0.85 and ratio < 1.18);
+                }
+            }
+        }
+    }
+    std.debug.print("widened-cache q8_0 grads: worst cosine {d}\n", .{worst_cos});
 }
 
 test "serving-format parity gate: fused QKV + gate/up at zero delta (f32 and q8_0)" {

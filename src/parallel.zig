@@ -43,6 +43,29 @@ pub fn setMaxThreads(n: usize) void {
     if (n >= 1) cached_cpu_count.store(n, .release);
 }
 
+/// Performance-core count on heterogeneous Apple Silicon
+/// (`hw.perflevel0.physicalcpu`), null elsewhere or on inquiry failure.
+/// A fork-join team sized past this count parks chunks on efficiency
+/// cores and every barrier waits for them: the 0.6B LoRA training step
+/// runs ~9% faster at 8 threads than at the 10-logical-core default on
+/// an M1 Max (8P+2E). Pair with `setMaxThreads` where the workload is a
+/// dense barrier stream; the library default stays the full count.
+pub fn performanceCoreCount() ?usize {
+    if (comptime @import("builtin").os.tag != .macos) return null;
+    var value: c_int = 0;
+    var len: usize = @sizeOf(c_int);
+    if (std.c.sysctlbyname("hw.perflevel0.physicalcpu", &value, &len, null, 0) != 0) return null;
+    if (value < 1) return null;
+    return @intCast(value);
+}
+
+test "performance-core inquiry is sane on macOS and null-safe elsewhere" {
+    if (performanceCoreCount()) |count| {
+        try std.testing.expect(count >= 1);
+        try std.testing.expect(count <= (std.Thread.getCpuCount() catch return));
+    }
+}
+
 pub fn cpuThreadCount(max_threads: usize) usize {
     var count = cached_cpu_count.load(.acquire);
     if (count == 0) {

@@ -93,6 +93,12 @@ const logits = try forwardLogits(&ctx, &model, &x);   // zero ceremony inside
   scope releases only its own suffix), and a failed op mid-forward leaks
   nothing — the scope already owns the prefix, so user model code needs no
   errdefer chains at all.
+- Back the context with `fucina.CachingAllocator` for training loops: the
+  per-step tensor churn then recycles warm blocks through power-of-two
+  freelists instead of paying the general-purpose allocator's mmap/madvise
+  and first-touch page faults every step (`examples/finetune` wires it).
+  Cached memory holds at
+  the high-water mark of live large blocks until `deinit`.
 - Adoption is wired into the op tails themselves (`finishOp` in
   `src/ag/tensor.zig`), covering both differentiable results and no-grad
   f32 results (eval on constants, the `values` arms, the packed-RHS fast
