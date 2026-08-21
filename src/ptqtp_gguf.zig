@@ -30,7 +30,21 @@
 //! (breaking per-plane dequantizability) to save K-1 preads per miss.
 
 const std = @import("std");
-const fucina = @import("fucina.zig");
+// The facade surface this file consumes, bound to the home modules
+// directly: `fucina.zig` re-exports this file as `fucina.ptqtp_gguf`, so
+// the facade cannot be imported from here — the production import graph
+// is cycle-checked (`zig build arch-check`).
+const fucina = struct {
+    const dtype_mod = @import("dtype.zig");
+    const exec_mod = @import("exec.zig");
+    pub const gguf = @import("gguf.zig");
+    pub const ptqtp = @import("ptqtp.zig");
+    pub const parallel = @import("parallel.zig");
+    pub const BlockTQ2_0 = dtype_mod.BlockTQ2_0;
+    pub const ExecContext = exec_mod.ExecContext;
+    pub const MoeRhs = exec_mod.ExecContext.MoeRhs;
+    pub const expert_store = exec_mod.expert_store;
+};
 const weights = @import("weights.zig");
 
 const Allocator = std.mem.Allocator;

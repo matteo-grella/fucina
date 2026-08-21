@@ -1,6 +1,74 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const fucina = @import("fucina.zig");
+// The facade surface this file consumes, bound to the home modules
+// directly: `fucina.zig` re-exports this file as `fucina.weights`, so the
+// facade cannot be imported from here — the production import graph is
+// cycle-checked (`zig build arch-check`). The spelling matches the facade
+// so the body reads identically to its former llm-tier home.
+const fucina = struct {
+    const dtype_mod = @import("dtype.zig");
+    const backend_mod_ = @import("backend.zig");
+    const exec_mod = @import("exec.zig");
+    const ag_mod = @import("ag.zig");
+    const tensor_mod_ = @import("tensor.zig");
+    pub const gguf = @import("gguf.zig");
+    pub const es = @import("es.zig");
+    pub const ptqtp = @import("ptqtp.zig");
+    pub const rng = @import("rng.zig");
+    pub const parallel = @import("parallel.zig");
+    pub const Tensor = ag_mod.Tensor;
+    pub const PackedRhs = ag_mod.PackedRhs;
+    pub const DType = dtype_mod.DType;
+    pub const ExecContext = exec_mod.ExecContext;
+    pub const RhsLifetime = exec_mod.RhsLifetime;
+    pub const MoeRhs = exec_mod.ExecContext.MoeRhs;
+    pub const MoeBatchProfile = exec_mod.MoeBatchProfile;
+    pub const GatedOp = exec_mod.GatedOp;
+    pub const expert_store = exec_mod.expert_store;
+    pub const ExpertStore = exec_mod.expert_store.ExpertStore;
+    pub const supports_q4_k_mmla = backend_mod_.supports_q4_k_mmla;
+    pub const QuantizedMatmulRhsQ2_K = backend_mod_.QuantizedMatmulRhsQ2_K;
+    pub const QuantizedMatmulRhsQ3_K = backend_mod_.QuantizedMatmulRhsQ3_K;
+    pub const QuantizedMatmulRhsQ4_K = backend_mod_.QuantizedMatmulRhsQ4_K;
+    pub const QuantizedMatmulRhsQ5_K = backend_mod_.QuantizedMatmulRhsQ5_K;
+    pub const QuantizedMatmulRhsQ6_K = backend_mod_.QuantizedMatmulRhsQ6_K;
+    pub const BlockQ1_0 = dtype_mod.BlockQ1_0;
+    pub const BlockQ2_0 = dtype_mod.BlockQ2_0;
+    pub const BlockQ4_0 = dtype_mod.BlockQ4_0;
+    pub const BlockQ4_1 = dtype_mod.BlockQ4_1;
+    pub const BlockQ5_0 = dtype_mod.BlockQ5_0;
+    pub const BlockQ5_1 = dtype_mod.BlockQ5_1;
+    pub const BlockQ8_0 = dtype_mod.BlockQ8_0;
+    pub const BlockQ2_K = dtype_mod.BlockQ2_K;
+    pub const BlockQ3_K = dtype_mod.BlockQ3_K;
+    pub const BlockQ4_K = dtype_mod.BlockQ4_K;
+    pub const BlockQ5_K = dtype_mod.BlockQ5_K;
+    pub const BlockQ6_K = dtype_mod.BlockQ6_K;
+    pub const BlockIQ1_S = dtype_mod.BlockIQ1_S;
+    pub const BlockIQ1_M = dtype_mod.BlockIQ1_M;
+    pub const BlockIQ2_XXS = dtype_mod.BlockIQ2_XXS;
+    pub const BlockIQ2_XS = dtype_mod.BlockIQ2_XS;
+    pub const BlockIQ2_S = dtype_mod.BlockIQ2_S;
+    pub const BlockIQ3_XXS = dtype_mod.BlockIQ3_XXS;
+    pub const BlockIQ3_S = dtype_mod.BlockIQ3_S;
+    pub const BlockIQ4_NL = dtype_mod.BlockIQ4_NL;
+    pub const BlockIQ4_XS = dtype_mod.BlockIQ4_XS;
+    pub const BlockMXFP4 = dtype_mod.BlockMXFP4;
+    pub const BlockNVFP4 = dtype_mod.BlockNVFP4;
+    pub const BlockTQ1_0 = dtype_mod.BlockTQ1_0;
+    pub const BlockTQ2_0 = dtype_mod.BlockTQ2_0;
+    pub const internal = struct {
+        pub const backend_mod = backend_mod_;
+        pub const tensor_mod = tensor_mod_;
+        pub const gpu = struct {
+            pub const enabled = backend_mod_.gpu_impl.enabled;
+            pub const has_q5_k_quant = backend_mod_.gpu_impl.has_q5_k_quant;
+            pub const has_tq2_0_quant = backend_mod_.gpu_impl.has_tq2_0_quant;
+            pub const allocResidentBytes = backend_mod_.gpu_impl.allocResidentBytes;
+            pub const freeResidentBytes = backend_mod_.gpu_impl.freeResidentBytes;
+        };
+    };
+};
 
 const DType = fucina.DType;
 const ExecContext = fucina.ExecContext;

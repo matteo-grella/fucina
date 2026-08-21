@@ -4,7 +4,14 @@
 //! policy (zero handling, layer load/deinit shape).
 
 const std = @import("std");
-const fucina = @import("fucina.zig");
+// The facade surface this file consumes, bound to the home modules
+// directly: `fucina.zig` re-exports this file as `fucina.gguf_meta`, so
+// the facade cannot be imported from here — the production import graph
+// is cycle-checked (`zig build arch-check`).
+const fucina = struct {
+    pub const gguf = @import("gguf.zig");
+    pub const ExecContext = @import("exec.zig").ExecContext;
+};
 
 const ExecContext = fucina.ExecContext;
 const gguf = fucina.gguf;
