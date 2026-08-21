@@ -221,7 +221,8 @@ bytes (holder-managed lifetime) or device-resident bytes (freed through
 storage release hooks) instead of copying (§8, §12).
 
 **Multi-dtype with a sealed policy.** Tensors span bool/integer dtypes,
-`f16`/`bf16`/`f32`/`f64`, and the GGML block-quantized formats. What each
+`f16`/`bf16`/`f32`/`f64`, the OCP FP8 storage floats
+(`f8_e4m3`/`f8_e5m2`), and the GGML block-quantized formats. What each
 dtype branch can do is enforced by the type system, not runtime checks:
 `.f32` is the differentiable branch; other scalar dtypes are constant typed
 tensors (floats additionally get forward-only math); block-quantized tensors
@@ -1007,13 +1008,15 @@ unsupported operation is a compile error, never a runtime failure
 |---|---|---|
 | Float (differentiable) | `.f32` | Full surface: autograd (`variable`, `backward`, `grad`), all math/NN ops (§4), load-time dense `packRhs`, all views and structural ops |
 | Typed float | `.f16`, `.bf16`, `.f64` (`supportsForwardFloatMath`) | Forward math: the native typed set (`add/sub/mul/div/sum/mean/sumAll/dot/scale/divScalar`, `to`), the full structural set (`split`/`merge`/`flatten`/`reshape`/`sliceStep`/`flip`/`roll`/`stack`/`repeatAxis` + the §3.10 base set), and — **f16/bf16 only** — the widened forward set (unary family, gated, softmax/norm family, remaining reductions, masks, `pad`, `einsum`, load-time dense `packRhs`; §4.19). **f16/bf16 only, autograd LEAVES**: `variable`/`variableFromSlice` with f32 gradients; differentiable `to` casts and mixed-RHS `dot`/`einsum` are the graph entries (§5.1) |
-| Typed scalar constant | `.bool`, `.u8`, `.u16`, `.i8`, `.i16`, `.i32`, `.i64` | Constants only; construction, data access, structural ops, `to` (scalar casts, §3.8), and integer forward math (§4.19): wrapping `add`/`sub`/`mul`, `maximum`/`minimum`, explicit `divTrunc`/`divFloor` + `rem`/`mod`, bitwise `bitAnd`/`bitOr`/`bitXor`, i64-returning `sum`/`sumAll`, plus exact integer `compare` (§4.6). `.bool` keeps only `to`, the counting `sum`/`sumAll`, and the mask combinators `logicalAnd`/`logicalOr`/`logicalXor`/`logicalNot` |
+| Typed scalar constant | `.bool`, `.u8`, `.u16`, `.i8`, `.i16`, `.i32`, `.i64`, `.f8_e4m3`, `.f8_e5m2` | Constants only; construction, data access, structural ops, `to` (scalar casts, §3.8), and integer forward math (§4.19): wrapping `add`/`sub`/`mul`, `maximum`/`minimum`, explicit `divTrunc`/`divFloor` + `rem`/`mod`, bitwise `bitAnd`/`bitOr`/`bitXor`, i64-returning `sum`/`sumAll`, plus exact integer `compare` (§4.6). `.bool` keeps only `to`, the counting `sum`/`sumAll`, and the mask combinators `logicalAnd`/`logicalOr`/`logicalXor`/`logicalNot`. The f8 storage floats (`.f8_e4m3`/`.f8_e5m2`, §8.1) keep only construction, data access, structural ops, and `to` VALUE casts through the f32 bridge (no integer or float forward math) |
 | Block-quantized constant | `q1_0/q2_0`, `q4_0 … q8_k`, `iq*`, `tq1_0/tq2_0`, `mxfp4`, `nvfp4` (`isBlockQuantized`) | Constants only; block construction, `to(.f32)` dequantize, `getRows`, row `concat`, `packRhs`/`packRhsLayout` (§10) |
 
 Notes that follow from the dtype layer (`src/dtype.zig`, detailed in §8):
 
 - `Scalar(.bf16)` is `u16` — bf16 tensors store and expose **raw bits**, not
-  a native float type; `f16` uses Zig's `f16`.
+  a native float type; `f16` uses Zig's `f16`. The f8 storage floats follow
+  the same convention with `u8` bits (`dtype_mod.f32ToF8e4m3` /
+  `f8e4m3ToF32` and the e5m2 pair are the value bridges, §8.2).
 - Block-quantized tensors have no per-element scalar; their element type is
   the block struct (`Storage(dtype)`, e.g. `fucina.BlockQ8_0`), and shapes
   count *logical* elements while storage counts blocks.
@@ -6672,6 +6675,7 @@ these types. Expect this surface to change without compatibility notice.
 ```zig
 pub const DType = enum {
     bool, u8, u16, i8, i16, i32, i64, f16, bf16, f32, f64,
+    f8_e4m3, f8_e5m2,
     q1_0, q2_0, q4_0, q4_1, q5_0, q5_1, q8_0, q8_1,
     q2_k, q3_k, q4_k, q5_k, q6_k, q8_k,
     iq1_s, iq1_m, iq2_xxs, iq2_xs, iq2_s, iq3_xxs, iq3_s, iq4_nl, iq4_xs,
@@ -6704,6 +6708,8 @@ Scalar dtypes:
 | `.bf16` | `u16` | 2 B | **raw bfloat16 bits**, not a float type; `one(.bf16) == 0x3f80` |
 | `.f32` | `f32` | 4 B | the only differentiable public dtype |
 | `.f64` | `f64` | 8 B | |
+| `.f8_e4m3` | `u8` | 1 B | **raw OCP FP8 E4M3FN bits** (NaN code, no infinities); storage-only float, `one(.f8_e4m3) == 0x38` |
+| `.f8_e5m2` | `u8` | 1 B | **raw OCP FP8 E5M2 bits** (IEEE-like, ±inf); storage-only float, `one(.f8_e5m2) == 0x3c` |
 
 Block-quantized dtypes (GGML-compatible wire formats; the packed `extern
 struct` layouts are byte-exact against ggml and pinned by `comptime` size
@@ -6771,8 +6777,9 @@ pub fn Accumulator(comptime dtype: DType) type  // scalar dtypes only
   scalar dtypes, the block struct for block-quantized dtypes. Buffers and
   raw tensors are sized in `Storage(dtype)` units.
 - `Accumulator(dtype)` is the reduction accumulator type: `f32` for
-  `.f16`/`.bf16`/`.f32`, `f64` for `.f64`, `u64` for `.bool`/`.u8`/`.u16`,
-  `i64` for the signed integers. Compile error for block dtypes.
+  `.f16`/`.bf16`/`.f32` and the f8 storage floats, `f64` for `.f64`, `u64`
+  for `.bool`/`.u8`/`.u16`, `i64` for the signed integers. Compile error for
+  block dtypes.
 
 Classification predicates (all comptime, all `pub`):
 
@@ -6781,33 +6788,47 @@ Classification predicates (all comptime, all `pub`):
 | `kind(dtype)` | returns `.scalar` or `.block_quantized` |
 | `isScalar` / `isBlockQuantized` | kind shorthands |
 | `isFloat` | `.f16`, `.bf16`, `.f32`, `.f64` |
+| `isF8` | `.f8_e4m3`, `.f8_e5m2` (OCP FP8 storage-only floats: convertible to/from f32, excluded from forward math and grads) |
 | `isInteger` | `.u8`, `.u16`, `.i8`, `.i16`, `.i32`, `.i64` |
 | `isSignedInteger` / `isUnsignedInteger` | the obvious subsets |
 | `supportsGrad` | `== isFloat` (only float tensors can carry gradients; in practice only `.f32` does, §5) |
 | `supportsIntMath` | `== isInteger` (wrapping integer pointwise math and i64-accumulated reductions; `.bool` reduces but has no pointwise math) |
 | `supportsForwardFloatMath` | `== isFloat` (forward-only math on the typed facade, §3) |
-| `supportsToFloat` | floats plus every block-quantized dtype (dequantizable) |
+| `supportsToFloat` | floats, the f8 storage floats, plus every block-quantized dtype (dequantizable) |
 | `supportsQuantizedMatmulRhs` | every block dtype **except** `.q8_1` and `.q8_k` (those two are activation-side dot-product formats, §10) |
 | `supportsQuantizedGetRows` | `== isBlockQuantized` (embedding-row gather) |
-| `logicalDType` | blocks map to `.f32`, scalars map to themselves |
+| `logicalDType` | blocks and the f8 storage floats map to `.f32`, other scalars map to themselves |
 
 Scalar constant/conversion helpers: `zero(dtype)`, `one(dtype)`,
 `name(dtype)` (the tag name), `toF32`/`toF64`/`fromF32`/`fromF64` (float
-dtypes only; compile error otherwise), and
+dtypes and the f8 storage floats; compile error otherwise), and
 `castFloat(source_dtype, target_dtype, value)`, which routes through `f64`
 when the target is `.f64` and through `f32` otherwise.
 `castScalar(source_dtype, target_dtype, value)` is the general scalar cast
-across the non-block dtypes: float↔float delegates to `castFloat`, and the
-int/bool legs follow the semantics quoted in §3.8's `to` conversion table
-(integer↔integer wraps two's-complement, float→integer truncates toward
-zero and saturates with NaN → 0, anything→bool is `!= 0`, bool→number is
-0/1). `isTruthy(dtype, value)` is mask truthiness: `!= 0`, with bf16 read
-through the value bridge so `-0.0` stays falsy and NaN is truthy.
-`toAccumulator`/`fromAccumulator` convert between `Scalar(dtype)` and
-`Accumulator(dtype)` (bool maps to 0/1). `bf16ToF32(bits: u16) f32` and
+across the non-block dtypes: float↔float delegates to `castFloat`, the f8
+storage floats bridge through `f32` in both directions (so their raw `u8`
+storage never takes the integer legs), and the int/bool legs follow the
+semantics quoted in §3.8's `to` conversion table (integer↔integer wraps
+two's-complement, float→integer truncates toward zero and saturates with
+NaN → 0, anything→bool is `!= 0`, bool→number is 0/1).
+`isTruthy(dtype, value)` is mask truthiness: `!= 0`, with bf16 and the f8
+formats read through the value bridge so `-0.0` stays falsy and NaN is
+truthy. `toAccumulator`/`fromAccumulator` convert between `Scalar(dtype)`
+and `Accumulator(dtype)` (bool maps to 0/1). `bf16ToF32(bits: u16) f32` and
 `f32ToBf16(value: f32) u16` implement the bf16 bridge: round-to-nearest-even
 on narrowing, with ggml-compatible NaN quieting (a NaN payload never
 truncates to infinity; `src/dtype_tests.zig` pins this).
+
+`f8e4m3ToF32`/`f32ToF8e4m3` and `f8e5m2ToF32`/`f32ToF8e5m2` implement the
+OCP FP8 bridges. Decode is an exact comptime 256-entry table per format
+(every representable value is exact in f32; NaN codes keep their sign).
+Encode is round-to-nearest-even with per-format overflow semantics: e4m3
+(the E4M3FN variant, no infinities) saturates to its NaN code like torch's
+`float8_e4m3fn` cast, e5m2 overflows to ±inf; NaN inputs keep their sign
+with the canonical NaN code. `src/dtype_tests.zig` pins all of this
+exhaustively: every finite code round-trips bit-exactly, and every f16
+value (which covers every rounding boundary of both formats) encodes
+identically to a brute-force nearest-even search over the decode table.
 
 ### 8.3 Float compute/output dtype policy (`src/dtype.zig`)
 
@@ -9866,6 +9887,9 @@ test "state_dict: named save/load round-trip" {
 `fucina.state_dict` sits on `fucina.safetensors`, which is also usable
 directly: `File` (`parse`, `parseOwned`, `load`, `loadMmap`, `deinit`,
 `tensor`, `maybeTensor`, `names`, `tensorNames`, `len`, `isEmpty`),
+`Sharded` (`load`, `loadMmap`, `deinit`, `tensor`, `maybeTensor`,
+`tensorNames`, `len`, `isEmpty`, `total_size` — the Hugging Face
+`*.safetensors.index.json` multi-file layout; `isIndexPath` recognizes it),
 `TensorInfo` (+ `sliceBytesAlloc` with `TensorInfo.Slice` ranges),
 `readPrefix` (one safetensors payload from a stream — what `loadStateDict`
 uses), `serialize` / `serializeAlloc` / `saveFileAtomic`, `Tensor`,
@@ -10864,15 +10888,16 @@ pub const DType = enum {
     pub fn bitsize(self: DType) usize
     pub fn string(self: DType) []const u8
 };
-pub fn dtypeFromFucina(dtype: fucina.DType) !DType   // f32/f16/bf16/i64 only
-pub fn dtypeToFucina(dtype: DType) !fucina.DType     // F32/F16/BF16/I64 only
+pub fn dtypeFromFucina(dtype: fucina.DType) !DType   // f32/f16/bf16/f8_e4m3/f8_e5m2/i64 only
+pub fn dtypeToFucina(dtype: DType) !fucina.DType     // F32/F16/BF16/F8_E4M3/F8_E5M2/I64 only
 ```
 
 Every upstream dtype tag round-trips as raw bytes, including the sub-byte
 `F4` (4-bit) and `F6_*` (6-bit) types — for those, the total bit count of a
 tensor must land on a byte boundary (`Error.MisalignedSlice` otherwise).
-Only `F32`/`F16`/`BF16`/`I64` map to core `DType`s; both direction functions
-return `Error.UnsupportedDtype` for the rest.
+Only `F32`/`F16`/`BF16`/`F8_E4M3`/`F8_E5M2`/`I64` map to core `DType`s
+(the FP8 tags to the `.f8_e4m3`/`.f8_e5m2` storage floats, §8.1); both
+direction functions return `Error.UnsupportedDtype` for the rest.
 
 #### 12.5.2 Reading
 
@@ -10911,6 +10936,38 @@ the result is an `owned` `File`.
 
 Unlike GGUF, tensor **names and shapes are allocated copies** (they survive
 into error paths cleanly); only `TensorInfo.data` borrows `File.bytes`.
+
+Sharded checkpoints (the Hugging Face big-model layout: an
+`*.safetensors.index.json` whose `weight_map` object maps tensor names to
+shard files next to the index) load through `Sharded`:
+
+```zig
+pub fn isIndexPath(path: []const u8) bool   // ends with ".safetensors.index.json"
+
+pub const Sharded = struct {
+    total_size: ?u64,   // metadata.total_size from the index, when present
+
+    pub fn load(allocator: Allocator, io: std.Io, index_path: []const u8) !Sharded
+    pub fn loadMmap(allocator: Allocator, io: std.Io, index_path: []const u8) !Sharded
+    pub fn deinit(self: *Sharded) void
+    pub fn tensor(self: *const Sharded, name: []const u8) !*const TensorInfo
+    pub fn maybeTensor(self: *const Sharded, name: []const u8) ?*const TensorInfo
+    pub fn tensorNames(self: *const Sharded, allocator: Allocator) ![][]const u8  // weight_map order
+    pub fn len(self: *const Sharded) usize
+    pub fn isEmpty(self: *const Sharded) bool
+};
+```
+
+Every shard opens eagerly (`loadMmap` maps each shard exactly like
+`File.loadMmap`; `load` reads each into memory), and every `weight_map`
+entry is verified to exist in its mapped shard at open — a truncated or
+mismatched download fails with `Error.InvalidIndex` before any lookup.
+Malformed index JSON, a missing `weight_map`, a non-string mapping, and a
+shard filename that is not a plain basename (any path separator or `..`)
+all reject with `Error.InvalidIndex`; a missing shard file surfaces the
+underlying open error. Lookups resolve to the owning shard's `TensorInfo`,
+so `data` borrows that shard's bytes with the same lifetime rules as
+`File`.
 
 ```zig
 pub const TensorInfo = struct {

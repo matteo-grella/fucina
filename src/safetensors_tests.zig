@@ -514,3 +514,119 @@ fn dtypeByteLen(dtype: safetensors.DType, shape: []const usize) !usize {
     if (bits % 8 != 0) return error.MisalignedTestShape;
     return bits / 8;
 }
+
+fn writeTestFile(path: []const u8, bytes: []const u8) !void {
+    var file = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
+    defer file.close(std.testing.io);
+    var buffer: [4096]u8 = undefined;
+    var writer = file.writer(std.testing.io, &buffer);
+    try writer.interface.writeAll(bytes);
+    try writer.interface.flush();
+}
+
+test "safetensors sharded index loads tensors across shards" {
+    const ns = std.Io.Clock.real.now(std.testing.io).nanoseconds;
+    var b1: [96]u8 = undefined;
+    var b2: [96]u8 = undefined;
+    var b3: [96]u8 = undefined;
+    const s1 = try std.fmt.bufPrint(&b1, "st_sharded_{d}-1.safetensors", .{ns});
+    const s2 = try std.fmt.bufPrint(&b2, "st_sharded_{d}-2.safetensors", .{ns});
+    const idx = try std.fmt.bufPrint(&b3, "st_sharded_{d}.safetensors.index.json", .{ns});
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, s1) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, s2) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, idx) catch {};
+
+    const a_data = [_]u8{ 0, 0, 128, 63, 0, 0, 0, 64 }; // f32 {1.0, 2.0}
+    const b_data = [_]u8{ 0, 0, 64, 64 }; // f32 {3.0}
+    const c_data = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
+    const shard1 = try safetensors.serializeAlloc(allocator, &.{
+        .{ .name = "a", .dtype = .F32, .shape = &.{2}, .data = &a_data },
+        .{ .name = "b", .dtype = .F32, .shape = &.{1}, .data = &b_data },
+    }, null);
+    defer allocator.free(shard1);
+    const shard2 = try safetensors.serializeAlloc(allocator, &.{
+        .{ .name = "c", .dtype = .F32, .shape = &.{3}, .data = &c_data },
+    }, null);
+    defer allocator.free(shard2);
+    const index_json = try std.fmt.allocPrint(
+        allocator,
+        "{{\"metadata\":{{\"total_size\":24}},\"weight_map\":{{\"a\":\"{s}\",\"b\":\"{s}\",\"c\":\"{s}\"}}}}",
+        .{ s1, s1, s2 },
+    );
+    defer allocator.free(index_json);
+    try writeTestFile(s1, shard1);
+    try writeTestFile(s2, shard2);
+    try writeTestFile(idx, index_json);
+
+    try std.testing.expect(safetensors.isIndexPath(idx));
+    try std.testing.expect(!safetensors.isIndexPath(s1));
+
+    var sharded = try safetensors.Sharded.load(allocator, std.testing.io, idx);
+    {
+        errdefer sharded.deinit();
+        try std.testing.expectEqual(@as(usize, 3), sharded.len());
+        try std.testing.expect(!sharded.isEmpty());
+        try std.testing.expectEqual(@as(?u64, 24), sharded.total_size);
+        const a = try sharded.tensor("a");
+        try std.testing.expectEqual(safetensors.DType.F32, a.dtype);
+        try std.testing.expectEqualSlices(usize, &.{2}, a.shape);
+        try std.testing.expectEqualSlices(u8, &a_data, a.data);
+        const c = try sharded.tensor("c");
+        try std.testing.expectEqualSlices(u8, &c_data, c.data);
+        try std.testing.expectEqual(@as(?*const safetensors.TensorInfo, null), sharded.maybeTensor("zz"));
+        try std.testing.expectError(safetensors.Error.TensorNotFound, sharded.tensor("zz"));
+        const names = try sharded.tensorNames(allocator);
+        defer allocator.free(names);
+        try std.testing.expectEqual(@as(usize, 3), names.len);
+        try std.testing.expectEqualStrings("a", names[0]);
+        try std.testing.expectEqualStrings("b", names[1]);
+        try std.testing.expectEqualStrings("c", names[2]);
+    }
+    sharded.deinit();
+
+    var mapped = try safetensors.Sharded.loadMmap(allocator, std.testing.io, idx);
+    defer mapped.deinit();
+    try std.testing.expectEqualSlices(u8, &b_data, (try mapped.tensor("b")).data);
+}
+
+test "safetensors sharded index rejects malformed and mismatched indexes" {
+    const ns = std.Io.Clock.real.now(std.testing.io).nanoseconds;
+    var b1: [96]u8 = undefined;
+    var b2: [96]u8 = undefined;
+    const idx = try std.fmt.bufPrint(&b1, "st_shardedbad_{d}.safetensors.index.json", .{ns});
+    const s1 = try std.fmt.bufPrint(&b2, "st_shardedbad_{d}-1.safetensors", .{ns});
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, idx) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, s1) catch {};
+
+    try writeTestFile(idx, "{not json");
+    try std.testing.expectError(safetensors.Error.InvalidIndex, safetensors.Sharded.load(allocator, std.testing.io, idx));
+
+    try writeTestFile(idx, "{\"metadata\":{\"total_size\":1}}");
+    try std.testing.expectError(safetensors.Error.InvalidIndex, safetensors.Sharded.load(allocator, std.testing.io, idx));
+
+    try writeTestFile(idx, "{\"weight_map\":{\"a\":\"../evil.safetensors\"}}");
+    try std.testing.expectError(safetensors.Error.InvalidIndex, safetensors.Sharded.load(allocator, std.testing.io, idx));
+
+    try writeTestFile(idx, "{\"weight_map\":{\"a\":\"sub/shard.safetensors\"}}");
+    try std.testing.expectError(safetensors.Error.InvalidIndex, safetensors.Sharded.load(allocator, std.testing.io, idx));
+
+    try writeTestFile(idx, "{\"weight_map\":{\"a\":1}}");
+    try std.testing.expectError(safetensors.Error.InvalidIndex, safetensors.Sharded.load(allocator, std.testing.io, idx));
+
+    const missing_json = try std.fmt.allocPrint(allocator, "{{\"weight_map\":{{\"a\":\"st_shardedbad_{d}_absent.safetensors\"}}}}", .{ns});
+    defer allocator.free(missing_json);
+    try writeTestFile(idx, missing_json);
+    try std.testing.expectError(error.FileNotFound, safetensors.Sharded.load(allocator, std.testing.io, idx));
+
+    // Shard exists but does not contain the mapped tensor.
+    const b_data = [_]u8{ 0, 0, 64, 64 };
+    const shard1 = try safetensors.serializeAlloc(allocator, &.{
+        .{ .name = "b", .dtype = .F32, .shape = &.{1}, .data = &b_data },
+    }, null);
+    defer allocator.free(shard1);
+    try writeTestFile(s1, shard1);
+    const mismatch_json = try std.fmt.allocPrint(allocator, "{{\"weight_map\":{{\"a\":\"{s}\"}}}}", .{s1});
+    defer allocator.free(mismatch_json);
+    try writeTestFile(idx, mismatch_json);
+    try std.testing.expectError(safetensors.Error.InvalidIndex, safetensors.Sharded.load(allocator, std.testing.io, idx));
+}

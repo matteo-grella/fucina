@@ -12,6 +12,8 @@ pub const DType = enum {
     bf16,
     f32,
     f64,
+    f8_e4m3,
+    f8_e5m2,
     q1_0,
     q2_0,
     q4_0,
@@ -268,6 +270,7 @@ pub fn Scalar(comptime dtype: DType) type {
         .bf16 => u16,
         .f32 => f32,
         .f64 => f64,
+        .f8_e4m3, .f8_e5m2 => u8,
         .q1_0,
         .q2_0,
         .q4_0,
@@ -336,6 +339,7 @@ pub fn Accumulator(comptime dtype: DType) type {
     return switch (dtype) {
         .f64 => f64,
         .f16, .bf16, .f32 => f32,
+        .f8_e4m3, .f8_e5m2 => f32,
         .bool, .u8, .u16 => u64,
         .i8, .i16, .i32, .i64 => i64,
         .q1_0,
@@ -418,6 +422,16 @@ pub fn isFloat(comptime dtype: DType) bool {
     };
 }
 
+/// 8-bit storage floats (OCP FP8: f8_e4m3 is the E4M3FN variant with NaN
+/// but no infinities; f8_e5m2 is IEEE-like with infinities). Storage-only:
+/// they convert to/from f32 but are excluded from forward math and grads.
+pub fn isF8(comptime dtype: DType) bool {
+    return switch (dtype) {
+        .f8_e4m3, .f8_e5m2 => true,
+        else => false,
+    };
+}
+
 pub fn isInteger(comptime dtype: DType) bool {
     return switch (dtype) {
         .u8, .u16, .i8, .i16, .i32, .i64 => true,
@@ -465,7 +479,7 @@ pub fn supportsForwardFloatMath(comptime dtype: DType) bool {
 }
 
 pub fn supportsToFloat(comptime dtype: DType) bool {
-    return supportsForwardFloatMath(dtype) or isBlockQuantized(dtype);
+    return supportsForwardFloatMath(dtype) or isF8(dtype) or isBlockQuantized(dtype);
 }
 
 pub fn supportsQuantizedMatmulRhs(comptime dtype: DType) bool {
@@ -533,6 +547,8 @@ pub fn logicalDType(comptime dtype: DType) DType {
         .tq2_0,
         .mxfp4,
         .nvfp4,
+        .f8_e4m3,
+        .f8_e5m2,
         => .f32,
         else => dtype,
     };
@@ -627,6 +643,8 @@ pub fn one(comptime dtype: DType) Scalar(dtype) {
     return switch (dtype) {
         .bool => true,
         .bf16 => 0x3f80,
+        .f8_e4m3 => 0x38,
+        .f8_e5m2 => 0x3c,
         else => @as(Scalar(dtype), 1),
     };
 }
@@ -641,6 +659,8 @@ pub fn toF32(comptime dtype: DType, value: Scalar(dtype)) f32 {
         .bf16 => bf16ToF32(value),
         .f32 => value,
         .f64 => @floatCast(value),
+        .f8_e4m3 => f8e4m3ToF32(value),
+        .f8_e5m2 => f8e5m2ToF32(value),
         else => @compileError("dtype cannot be converted to f32"),
     };
 }
@@ -651,6 +671,8 @@ pub fn toF64(comptime dtype: DType, value: Scalar(dtype)) f64 {
         .bf16 => @floatCast(bf16ToF32(value)),
         .f32 => @floatCast(value),
         .f64 => value,
+        .f8_e4m3 => @floatCast(f8e4m3ToF32(value)),
+        .f8_e5m2 => @floatCast(f8e5m2ToF32(value)),
         else => @compileError("dtype cannot be converted to f64"),
     };
 }
@@ -661,6 +683,8 @@ pub fn fromF32(comptime dtype: DType, value: f32) Scalar(dtype) {
         .bf16 => f32ToBf16(value),
         .f32 => value,
         .f64 => @floatCast(value),
+        .f8_e4m3 => f32ToF8e4m3(value),
+        .f8_e5m2 => f32ToF8e5m2(value),
         else => @compileError("dtype cannot be converted from f32"),
     };
 }
@@ -671,6 +695,8 @@ pub fn fromF64(comptime dtype: DType, value: f64) Scalar(dtype) {
         .bf16 => f32ToBf16(@floatCast(value)),
         .f32 => @floatCast(value),
         .f64 => value,
+        .f8_e4m3 => f32ToF8e4m3(@floatCast(value)),
+        .f8_e5m2 => f32ToF8e5m2(@floatCast(value)),
         else => @compileError("dtype cannot be converted from f64"),
     };
 }
@@ -687,6 +713,8 @@ pub fn toAccumulator(comptime dtype: DType, value: Scalar(dtype)) Accumulator(dt
         .bf16 => bf16ToF32(value),
         .f32 => value,
         .f64 => value,
+        .f8_e4m3 => f8e4m3ToF32(value),
+        .f8_e5m2 => f8e5m2ToF32(value),
         .bool => if (value) 1 else 0,
         .u8, .u16, .i8, .i16, .i32, .i64 => @intCast(value),
         else => @compileError("block-quantized dtypes have no scalar accumulator"),
@@ -699,6 +727,8 @@ pub fn fromAccumulator(comptime dtype: DType, value: Accumulator(dtype)) Scalar(
         .bf16 => f32ToBf16(value),
         .f32 => value,
         .f64 => value,
+        .f8_e4m3 => f32ToF8e4m3(value),
+        .f8_e5m2 => f32ToF8e5m2(value),
         .bool => value != 0,
         .u8, .u16, .i8, .i16, .i32, .i64 => @intCast(value),
         else => @compileError("block-quantized dtypes have no scalar accumulator"),
@@ -734,6 +764,11 @@ fn wrapFromI64(comptime to: DType, wide: i64) Scalar(to) {
 /// anything → bool is `!= 0` (NaN → true); bool → number is 0/1.
 pub fn castScalar(comptime from: DType, comptime to: DType, v: Scalar(from)) Scalar(to) {
     if (comptime from == to) return v;
+    // f8 bridges through f32 (its u8 storage must not take the integer
+    // paths below); float-to-f8 overflow follows the format: e4m3 has no
+    // infinities so it saturates to NaN, e5m2 overflows to ±inf.
+    if (comptime isF8(from)) return castScalar(.f32, to, toF32(from, v));
+    if (comptime isF8(to)) return fromF32(to, castScalar(from, .f32, v));
     const from_float = comptime supportsForwardFloatMath(from);
     const to_float = comptime supportsForwardFloatMath(to);
     if (comptime (from_float and to_float)) return castFloat(from, to, v);
@@ -758,8 +793,113 @@ pub fn isTruthy(comptime dtype: DType, value: Scalar(dtype)) bool {
     return switch (dtype) {
         .bool => value,
         .bf16 => bf16ToF32(value) != 0,
+        .f8_e4m3 => f8e4m3ToF32(value) != 0,
+        .f8_e5m2 => f8e5m2ToF32(value) != 0,
         else => value != 0,
     };
+}
+
+/// Decode tables for the OCP FP8 formats. Every representable value is
+/// exact in f32; NaN codes decode to a NaN carrying the code's sign.
+const f8_e4m3_decode = f8DecodeTable(4, 3, false);
+const f8_e5m2_decode = f8DecodeTable(5, 2, true);
+
+fn f8DecodeTable(comptime exp_bits: u4, comptime mant_bits: u4, comptime has_inf: bool) [256]f32 {
+    @setEvalBranchQuota(10_000);
+    const bias: i32 = (1 << (exp_bits - 1)) - 1;
+    const max_exp_field: i32 = (1 << exp_bits) - 1;
+    var table: [256]f32 = undefined;
+    for (0..256) |code| {
+        const negative = code >> 7 == 1;
+        const e: i32 = @intCast((code >> mant_bits) & ((1 << exp_bits) - 1));
+        const m: i32 = @intCast(code & ((1 << mant_bits) - 1));
+        const v: f32 = if (has_inf and e == max_exp_field)
+            (if (m == 0) std.math.inf(f32) else std.math.nan(f32))
+        else if (!has_inf and e == max_exp_field and m == (1 << mant_bits) - 1)
+            std.math.nan(f32)
+        else if (e == 0)
+            std.math.ldexp(@as(f32, @floatFromInt(m)), 1 - bias - mant_bits)
+        else
+            std.math.ldexp(@as(f32, @floatFromInt((1 << mant_bits) + m)), e - bias - mant_bits);
+        table[code] = if (negative) -v else v;
+    }
+    return table;
+}
+
+pub fn f8e4m3ToF32(bits: u8) f32 {
+    return f8_e4m3_decode[bits];
+}
+
+pub fn f8e5m2ToF32(bits: u8) f32 {
+    return f8_e5m2_decode[bits];
+}
+
+pub fn f32ToF8e4m3(value: f32) u8 {
+    return f32ToF8(4, 3, false, value);
+}
+
+pub fn f32ToF8e5m2(value: f32) u8 {
+    return f32ToF8(5, 2, true, value);
+}
+
+/// Round-to-nearest-even encode. NaN keeps its sign with the format's
+/// canonical NaN code. Overflow follows the format: e4m3 (no infinities)
+/// goes to NaN like torch's float8_e4m3fn cast, e5m2 goes to ±inf.
+fn f32ToF8(comptime exp_bits: u4, comptime mant_bits: u4, comptime has_inf: bool, value: f32) u8 {
+    const bias: i32 = (1 << (exp_bits - 1)) - 1;
+    const max_exp_field: i32 = (1 << exp_bits) - 1;
+    const nan_code: u8 = if (has_inf)
+        @intCast((max_exp_field << mant_bits) | (1 << (mant_bits - 1)))
+    else
+        @intCast((max_exp_field << mant_bits) | ((1 << mant_bits) - 1));
+    const mshift: u5 = 23 - @as(u5, mant_bits);
+
+    const bits: u32 = @bitCast(value);
+    const sign: u8 = @intCast((bits >> 31) << 7);
+    const abs: u32 = bits & 0x7fff_ffff;
+    if (abs > 0x7f80_0000) return sign | nan_code;
+
+    const e_f32: i32 = @as(i32, @intCast(abs >> 23)) - 127;
+    const m23: u32 = abs & 0x7f_ffff;
+    const min_normal_e: i32 = 1 - bias;
+    var e_field: i32 = undefined;
+    var m_field: u32 = undefined;
+    if (e_f32 >= min_normal_e) {
+        m_field = rneShift(m23, mshift);
+        e_field = e_f32 + bias;
+        if (m_field == (1 << mant_bits)) {
+            m_field = 0;
+            e_field += 1;
+        }
+        const overflow = if (has_inf)
+            e_field >= max_exp_field
+        else
+            e_field > max_exp_field or (e_field == max_exp_field and m_field == (1 << mant_bits) - 1);
+        if (overflow) {
+            const inf_code: u8 = @intCast(max_exp_field << mant_bits);
+            return sign | (if (has_inf) inf_code else nan_code);
+        }
+    } else {
+        // Subnormal target: rescale so one target quantum is one ulp.
+        // f32 subnormal inputs land in the rounds-to-zero branch for both
+        // formats, so treating their exponent field as biased-0 is moot.
+        const total: i32 = @as(i32, mshift) + (min_normal_e - e_f32);
+        if (total >= 25) return sign;
+        m_field = rneShift(m23 | 0x0080_0000, @intCast(total));
+        e_field = 0;
+        if (m_field == (1 << mant_bits)) {
+            m_field = 0;
+            e_field = 1;
+        }
+    }
+    return sign | @as(u8, @intCast(e_field << mant_bits)) | @as(u8, @intCast(m_field));
+}
+
+fn rneShift(v: u32, shift: u5) u32 {
+    const keep = v >> shift;
+    const round = (v >> (shift - 1)) & 1;
+    const sticky = (v & ((@as(u32, 1) << (shift - 1)) - 1)) != 0;
+    return keep + (round & @intFromBool(sticky or (keep & 1) == 1));
 }
 
 pub fn bf16ToF32(bits: u16) f32 {

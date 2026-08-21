@@ -1189,6 +1189,37 @@ test "public non-f32 float Tensor supports forward math" {
     try std.testing.expectEqualSlices(f16, &.{ 58, 64, 139, 154 }, product.asRawTensor().dataConst());
 }
 
+test "public f8 storage tensors round-trip through to casts" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    // f32 -> f8_e4m3 -> f32: values on the e4m3 grid come back exactly.
+    var src = try Tensor(.{ .batch, .d }).fromSlice(&ctx, .{ 2, 2 }, &.{ 1.0, -2.0, 0.5, 448.0 });
+    defer src.deinit();
+    var as_e4m3 = try src.to(&ctx, .f8_e4m3);
+    defer as_e4m3.deinit();
+    try std.testing.expect(@TypeOf(as_e4m3).dtype == .f8_e4m3);
+    try std.testing.expectEqualSlices(u8, &.{ 0x38, 0xc0, 0x30, 0x7e }, as_e4m3.asRawTensor().dataConst());
+    var back = try as_e4m3.to(&ctx, .f32);
+    defer back.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 1.0, -2.0, 0.5, 448.0 }, back.asRawTensor().dataConst());
+
+    // Raw-bits construction (the bf16 storage convention) and the e5m2 leg.
+    var e5 = try Tensor(.{ .dtype = .f8_e5m2, .tags = .{.d} }).fromSlice(&ctx, .{2}, &.{
+        dtype_mod.f32ToF8e5m2(3.0),
+        dtype_mod.f32ToF8e5m2(-0.125),
+    });
+    defer e5.deinit();
+    var e5_f32 = try e5.to(&ctx, .f32);
+    defer e5_f32.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 3.0, -0.125 }, e5_f32.asRawTensor().dataConst());
+}
+
 test "public non-f32 float Tensor dot supports multi-free and batch tags" {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");

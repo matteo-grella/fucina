@@ -32,6 +32,7 @@ pub const Error = error{
     InvalidMetadata,
     UnsupportedDtype,
     InvalidSlice,
+    InvalidIndex,
 };
 
 pub const DType = enum {
@@ -110,6 +111,8 @@ pub fn dtypeFromFucina(dtype: FucinaDType) !DType {
         .f32 => .F32,
         .f16 => .F16,
         .bf16 => .BF16,
+        .f8_e4m3 => .F8_E4M3,
+        .f8_e5m2 => .F8_E5M2,
         .i64 => .I64,
         else => Error.UnsupportedDtype,
     };
@@ -120,6 +123,8 @@ pub fn dtypeToFucina(dtype: DType) !FucinaDType {
         .F32 => .f32,
         .F16 => .f16,
         .BF16 => .bf16,
+        .F8_E4M3 => .f8_e4m3,
+        .F8_E5M2 => .f8_e5m2,
         .I64 => .i64,
         else => Error.UnsupportedDtype,
     };
@@ -332,6 +337,183 @@ pub fn readPrefix(allocator: Allocator, reader: *std.Io.Reader) !File {
     }
 
     return File.parseOwned(allocator, bytes);
+}
+
+/// True for the Hugging Face sharded-checkpoint index layout
+/// (`model.safetensors.index.json`).
+pub fn isIndexPath(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".safetensors.index.json");
+}
+
+/// Sharded checkpoint reader for the Hugging Face big-model layout: an
+/// `*.safetensors.index.json` file whose `weight_map` object maps tensor
+/// names to shard files living next to the index. Every shard opens
+/// eagerly (`loadMmap` maps them; `load` reads them into memory) and every
+/// `weight_map` entry is verified to exist in its mapped shard, so a
+/// truncated or mismatched download fails at open, not at first lookup.
+/// Shard filenames must be plain basenames; anything with a path
+/// separator or `..` is rejected.
+pub const Sharded = struct {
+    allocator: Allocator,
+    shards: []File,
+    entries: []Entry,
+    index: std.StringHashMap(usize),
+    /// `metadata.total_size` from the index when present: the checkpoint's
+    /// total tensor bytes as written by the exporter.
+    total_size: ?u64,
+
+    pub const Entry = struct {
+        shard: usize,
+        tensor: usize,
+    };
+
+    pub fn load(allocator: Allocator, io: std.Io, index_path: []const u8) !Sharded {
+        return loadWithMode(allocator, io, index_path, .read);
+    }
+
+    pub fn loadMmap(allocator: Allocator, io: std.Io, index_path: []const u8) !Sharded {
+        return loadWithMode(allocator, io, index_path, .mmap);
+    }
+
+    const LoadMode = enum { read, mmap };
+
+    fn loadWithMode(allocator: Allocator, io: std.Io, index_path: []const u8, mode: LoadMode) !Sharded {
+        const index_bytes = try readWholeFile(allocator, io, index_path, max_header_size);
+        defer allocator.free(index_bytes);
+
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const root = std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), index_bytes, .{}) catch {
+            return Error.InvalidIndex;
+        };
+        if (root != .object) return Error.InvalidIndex;
+        const weight_map_value = root.object.get("weight_map") orelse return Error.InvalidIndex;
+        if (weight_map_value != .object) return Error.InvalidIndex;
+        const weight_map = weight_map_value.object;
+
+        var total_size: ?u64 = null;
+        if (root.object.get("metadata")) |meta| {
+            if (meta == .object) {
+                if (meta.object.get("total_size")) |size| {
+                    if (size == .integer and size.integer >= 0) total_size = @intCast(size.integer);
+                }
+            }
+        }
+
+        // Unique shard files in first-appearance order.
+        var shard_ids: std.StringArrayHashMapUnmanaged(void) = .empty;
+        var map_it = weight_map.iterator();
+        while (map_it.next()) |entry| {
+            if (entry.value_ptr.* != .string) return Error.InvalidIndex;
+            const shard_name = entry.value_ptr.string;
+            try validateShardName(shard_name);
+            try shard_ids.put(arena.allocator(), shard_name, {});
+        }
+
+        const dir = std.fs.path.dirname(index_path);
+        var shards = try allocator.alloc(File, shard_ids.count());
+        var opened: usize = 0;
+        errdefer {
+            for (shards[0..opened]) |*shard| shard.deinit();
+            allocator.free(shards);
+        }
+        for (shard_ids.keys(), 0..) |shard_name, i| {
+            const shard_path = if (dir) |d|
+                try std.fs.path.join(allocator, &.{ d, shard_name })
+            else
+                shard_name;
+            defer if (dir != null) allocator.free(@constCast(shard_path));
+            shards[i] = switch (mode) {
+                .read => try File.load(allocator, io, shard_path),
+                .mmap => try File.loadMmap(allocator, io, shard_path),
+            };
+            opened += 1;
+        }
+
+        var entries = try allocator.alloc(Entry, weight_map.count());
+        errdefer allocator.free(entries);
+        var index = std.StringHashMap(usize).init(allocator);
+        errdefer index.deinit();
+        try index.ensureTotalCapacity(@intCast(weight_map.count()));
+        var entry_count: usize = 0;
+        map_it = weight_map.iterator();
+        while (map_it.next()) |entry| {
+            const shard_i = shard_ids.getIndex(entry.value_ptr.string).?;
+            const shard = &shards[shard_i];
+            const tensor_i = shard.index.get(entry.key_ptr.*) orelse return Error.InvalidIndex;
+            entries[entry_count] = .{ .shard = shard_i, .tensor = tensor_i };
+            // Key on the shard-owned name so the map borrows storage that
+            // lives exactly as long as the shards.
+            index.putAssumeCapacityNoClobber(shard.tensors[tensor_i].name, entry_count);
+            entry_count += 1;
+        }
+
+        return .{
+            .allocator = allocator,
+            .shards = shards,
+            .entries = entries,
+            .index = index,
+            .total_size = total_size,
+        };
+    }
+
+    fn validateShardName(name: []const u8) !void {
+        if (name.len == 0) return Error.InvalidIndex;
+        if (std.mem.indexOfAny(u8, name, "/\\") != null) return Error.InvalidIndex;
+        if (std.mem.indexOf(u8, name, "..") != null) return Error.InvalidIndex;
+    }
+
+    pub fn deinit(self: *Sharded) void {
+        self.index.deinit();
+        self.allocator.free(self.entries);
+        for (self.shards) |*shard| shard.deinit();
+        self.allocator.free(self.shards);
+        self.* = undefined;
+    }
+
+    pub fn tensor(self: *const Sharded, name: []const u8) !*const TensorInfo {
+        return self.maybeTensor(name) orelse Error.TensorNotFound;
+    }
+
+    pub fn maybeTensor(self: *const Sharded, name: []const u8) ?*const TensorInfo {
+        const i = self.index.get(name) orelse return null;
+        const entry = self.entries[i];
+        return &self.shards[entry.shard].tensors[entry.tensor];
+    }
+
+    /// Names in `weight_map` order (the exporter's insertion order).
+    pub fn tensorNames(self: *const Sharded, allocator: Allocator) ![][]const u8 {
+        const out = try allocator.alloc([]const u8, self.entries.len);
+        for (self.entries, out) |entry, *name| {
+            name.* = self.shards[entry.shard].tensors[entry.tensor].name;
+        }
+        return out;
+    }
+
+    pub fn len(self: *const Sharded) usize {
+        return self.entries.len;
+    }
+
+    pub fn isEmpty(self: *const Sharded) bool {
+        return self.entries.len == 0;
+    }
+};
+
+fn readWholeFile(allocator: Allocator, io: std.Io, path: []const u8, cap: usize) ![]u8 {
+    var handle = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer handle.close(io);
+    const stat = try handle.stat(io);
+    if (stat.kind != .file) return error.IsDir;
+    if (stat.size > cap) return Error.InvalidIndex;
+    const bytes = try allocator.alloc(u8, @intCast(stat.size));
+    errdefer allocator.free(bytes);
+    var read_len: usize = 0;
+    while (read_len < bytes.len) {
+        const n = try handle.readStreaming(io, &.{bytes[read_len..]});
+        if (n == 0) return error.EndOfStream;
+        read_len += n;
+    }
+    return bytes;
 }
 
 pub fn serialize(allocator: Allocator, writer: *std.Io.Writer, tensors: []const Tensor, metadata: ?[]const MetadataEntry) !void {
