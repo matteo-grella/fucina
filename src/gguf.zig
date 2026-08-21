@@ -49,9 +49,14 @@ pub const Error = error{
     UnsupportedGgmlType,
     InvalidTensorInfo,
     TensorNotFound,
+    /// Two tensors (writer or parsed container) or two metadata entries
+    /// (parsed container) share one name: refused, never last-wins — a
+    /// silently-resolved duplicate lets an auditing tool and this reader
+    /// see different payloads under the same name.
+    DuplicateTensorName,
+    DuplicateMetadataKey,
     // Writer-side errors.
     KeyNotFound,
-    DuplicateTensorName,
     InvalidAlignment,
     TensorDataMissing,
     MetadataValueOutOfRange,
@@ -306,7 +311,12 @@ pub const File = struct {
             for (f.tensors) |info| {
                 tensors[at] = info;
                 tensors[at].part = @intCast(part_i);
-                try index.put(tensors[at].name, at);
+                const gop = try index.getOrPut(tensors[at].name);
+                if (gop.found_existing) {
+                    std.log.warn("gguf: duplicate tensor name '{s}' across split parts — refusing the file", .{tensors[at].name});
+                    return Error.DuplicateTensorName;
+                }
+                gop.value_ptr.* = at;
                 at += 1;
             }
         }
@@ -385,6 +395,7 @@ pub const File = struct {
         var alignment: usize = 32;
         for (0..metadata_count) |_| {
             const key = try cursor.readString();
+            if (metadata.contains(key)) return Error.DuplicateMetadataKey;
             const value_type = try cursor.readInt(u32);
             if (std.mem.eql(u8, key, "general.alignment")) {
                 // Validate directly from the wire value (before readValue's lossy
@@ -437,7 +448,12 @@ pub const File = struct {
                 return Error.InvalidTensorInfo;
             }
             info.data = bytes[start..end];
-            try index.put(info.name, tensor_i);
+            const gop = try index.getOrPut(info.name);
+            if (gop.found_existing) {
+                std.log.warn("gguf: duplicate tensor name '{s}' — refusing the file", .{info.name});
+                return Error.DuplicateTensorName;
+            }
+            gop.value_ptr.* = tensor_i;
         }
 
         return .{

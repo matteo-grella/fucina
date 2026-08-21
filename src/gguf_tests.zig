@@ -765,3 +765,77 @@ test "loadMmapAuto merges llama.cpp split GGUFs with part-tagged tensors" {
     // Multiple mappings cannot be handed over as one region.
     try std.testing.expectEqual(@as(?File.MappedRegion, null), merged.takeMapping());
 }
+
+test "GGUF parser refuses duplicate tensor names and metadata keys" {
+    const allocator = std.testing.allocator;
+
+    // Two tensors both named "w": refused, never last-wins.
+    {
+        var raw: [256]u8 = undefined;
+        @memset(&raw, 0);
+        var offset: usize = 0;
+        try writeBytes(&raw, &offset, "GGUF");
+        try writeInt(&raw, &offset, u32, 3);
+        try writeInt(&raw, &offset, u64, 2); // tensor_count
+        try writeInt(&raw, &offset, u64, 0); // metadata_count
+        inline for (.{ 0, 8 }) |data_off| {
+            try writeString(&raw, &offset, "w");
+            try writeInt(&raw, &offset, u32, 1); // n_dims
+            try writeInt(&raw, &offset, u64, 2);
+            try writeInt(&raw, &offset, u32, @intFromEnum(GgmlType.f32));
+            try writeInt(&raw, &offset, u64, data_off);
+        }
+        offset = std.mem.alignForward(usize, offset, 32);
+        offset += 16; // both tensors' payload bytes
+        const owned = try allocator.dupe(u8, raw[0..offset]);
+        try std.testing.expectError(Error.DuplicateTensorName, File.parseOwned(allocator, owned));
+    }
+
+    // The same metadata key twice: refused at the second key.
+    {
+        var raw: [256]u8 = undefined;
+        @memset(&raw, 0);
+        var offset: usize = 0;
+        try writeBytes(&raw, &offset, "GGUF");
+        try writeInt(&raw, &offset, u32, 3);
+        try writeInt(&raw, &offset, u64, 0); // tensor_count
+        try writeInt(&raw, &offset, u64, 2); // metadata_count
+        inline for (.{ 1, 2 }) |v| {
+            try writeString(&raw, &offset, "general.file_type");
+            try writeInt(&raw, &offset, u32, 4); // u32
+            try writeInt(&raw, &offset, u32, v);
+        }
+        const owned = try allocator.dupe(u8, raw[0..offset]);
+        try std.testing.expectError(Error.DuplicateMetadataKey, File.parseOwned(allocator, owned));
+    }
+}
+
+test "loadMmapAuto refuses duplicate tensor names across split parts" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    // Each part is valid alone (the Writer refuses in-file duplicates), but
+    // both carry tensor "a" — the merged index must refuse, never last-wins.
+    var stamp_buf: [160]u8 = undefined;
+    const stamp = std.Io.Clock.real.now(io).nanoseconds;
+    const path1 = try std.fmt.bufPrint(stamp_buf[0..80], "gguf_dup_{d}-00001-of-00002.gguf", .{stamp});
+    const path2 = try std.fmt.bufPrint(stamp_buf[80..], "gguf_dup_{d}-00002-of-00002.gguf", .{stamp});
+    defer std.Io.Dir.cwd().deleteFile(io, path1) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, path2) catch {};
+
+    const vals = [_]f32{ 1, 2, 3, 4 };
+    inline for (.{ path1, path2 }) |path| {
+        var w = Writer.init(allocator);
+        defer w.deinit();
+        try w.addMetaString("general.architecture", "split-test");
+        try w.addTensor("a", .f32, &.{vals.len}, std.mem.sliceAsBytes(vals[0..]));
+        var buf: [4096]u8 = undefined;
+        var sink = std.Io.Writer.fixed(&buf);
+        try w.finish(&sink);
+        var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+        defer file.close(io);
+        try file.writePositionalAll(io, sink.buffered(), 0);
+    }
+
+    try std.testing.expectError(Error.DuplicateTensorName, File.loadMmapAuto(allocator, io, path1));
+}
