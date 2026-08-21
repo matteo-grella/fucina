@@ -100,6 +100,18 @@ build needs and nothing else. The model runners, example applications,
 docs, and tools are repo development surface — to run those, clone the
 repo instead (next section).
 
+If you do want the complete repository as your dependency (say, to hack
+on fucina and your project together), skip `zig fetch`: clone the repo
+(or add it as a git submodule) next to your project and point
+`build.zig.zon` at the directory —
+
+```zon
+.fucina = .{ .path = "../fucina" },
+```
+
+A path dependency uses the directory exactly as it is on disk, so
+everything a clone has is there.
+
 A first program, verbatim from
 [the reference's §1.4](https://matteo-grella.github.io/fucina/docs/reference/01-introduction-and-mental-model/#14-a-first-program),
 where CI compiles and runs this exact block on every push:
