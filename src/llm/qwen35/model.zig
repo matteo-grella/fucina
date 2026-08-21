@@ -10,15 +10,23 @@
 //!   - **linear (DeltaNet)**: a causal depthwise conv1d feeding a gated
 //!     delta-rule recurrent scan over per-v-head state matrices, with a gated
 //!     RMSNorm and L2-normed q/k.
-//! Both feed a SiLU dense FFN. The dense Qwen3.5 text path supports GGUF
-//! loading, prefill, decode, KV/recurrent cache, and an opt-in forward profiler;
-//! `qwen35moe` and MTP/NextN variants are still rejected at load time.
+//! Both feed either a SiLU dense FFN or, in the `qwen35moe` variant
+//! (Qwen3.6-35B-A3B and architecture-identical checkpoints), a routed MoE
+//! block: softmax router → top-k (renormalized) SwiGLU expert mixture plus a
+//! sigmoid-gated shared expert. Routed expert stacks load resident (borrowed
+//! from the mmap) or stream from disk through `fucina.ExpertStore`
+//! (`LoadOptions.moe_stream`), with optional router-lookahead prefetch.
+//! Supports GGUF loading, prefill, decode, KV/recurrent cache, and an opt-in
+//! forward profiler. A trailing MTP/NextN block (`nextn_predict_layers`) is
+//! skipped at load: the trunk runs without it; speculative MTP decode is a
+//! later phase.
 
 const std = @import("std");
 const fucina = @import("fucina");
 const weights = @import("../weights.zig");
 const kv_cache = @import("../kv_cache.zig");
 const gguf_meta = @import("../gguf_meta.zig");
+const ptqtp_gguf = @import("../ptqtp_gguf.zig");
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
@@ -70,6 +78,9 @@ pub const ForwardProfile = struct {
     ffn_act_ns: i128 = 0,
     ffn_down_ns: i128 = 0,
     ffn_residual_ns: i128 = 0,
+    moe_router_ns: i128 = 0,
+    moe_shexp_ns: i128 = 0,
+    moe_batch: fucina.MoeBatchProfile = .{},
     final_ns: i128 = 0,
 };
 
@@ -101,6 +112,11 @@ pub const Config = struct {
     nextn_predict_layers: usize = 0,
     // --- MoE (qwen35moe; 0 = dense) ---
     num_experts: usize = 0,
+    num_experts_used: usize = 0,
+    /// Routed expert FFN width (`expert_feed_forward_length`).
+    moe_intermediate_size: usize = 0,
+    /// Shared expert FFN width (`expert_shared_feed_forward_length`).
+    moe_shared_intermediate_size: usize = 0,
 
     /// llama.cpp `hparams.is_recurrent(il)`: linear (DeltaNet) layers are all
     /// trunk blocks except every `full_attention_interval`-th; MTP blocks (the
@@ -112,6 +128,12 @@ pub const Config = struct {
 
     pub fn isMoe(self: Config) bool {
         return self.num_experts > 0;
+    }
+
+    /// Trunk depth: `num_layers` minus the trailing MTP/NextN blocks. Only
+    /// the trunk is loaded and run (module doc).
+    pub fn numMainLayers(self: Config) usize {
+        return self.num_layers - self.nextn_predict_layers;
     }
 
     // --- DeltaNet derived dims (see qwen35.cpp load_block_trunk) ---
@@ -155,10 +177,24 @@ pub const Config = struct {
         const embd = try file.get("token_embd.weight");
         const shape = try embd.logicalMatrixShape(); // {vocab, hidden}
 
+        // MoE GGUFs may omit/zero feed_forward_length; expert widths take
+        // over (with the llama.cpp fallbacks: routed = n_ff / top_k,
+        // shared = n_ff).
+        const num_experts = metaIntOpt(file, arch, "expert_count") orelse 0;
+        const num_experts_used = metaIntOpt(file, arch, "expert_used_count") orelse 0;
+        const n_ff = metaIntOpt(file, arch, "feed_forward_length") orelse 0;
+        var moe_ff: usize = 0;
+        var moe_shared_ff: usize = 0;
+        if (num_experts > 0) {
+            if (num_experts_used == 0) return Error.InvalidConfig;
+            moe_ff = metaIntOpt(file, arch, "expert_feed_forward_length") orelse n_ff / num_experts_used;
+            moe_shared_ff = metaIntOpt(file, arch, "expert_shared_feed_forward_length") orelse n_ff;
+        } else if (n_ff == 0) return Error.InvalidConfig;
+
         return .{
             .vocab_size = shape[0],
             .hidden_size = try metaInt(file, arch, "embedding_length"),
-            .intermediate_size = try metaInt(file, arch, "feed_forward_length"),
+            .intermediate_size = n_ff,
             .num_layers = try metaInt(file, arch, "block_count"),
             .num_attention_heads = try metaInt(file, arch, "attention.head_count"),
             .num_key_value_heads = try metaInt(file, arch, "attention.head_count_kv"),
@@ -174,13 +210,21 @@ pub const Config = struct {
             .ssm_dt_rank = try metaInt(file, arch, "ssm.time_step_rank"),
             .ssm_n_group = try metaInt(file, arch, "ssm.group_count"),
             .nextn_predict_layers = metaIntOpt(file, arch, "nextn_predict_layers") orelse 0,
-            .num_experts = metaIntOpt(file, arch, "expert_count") orelse 0,
+            .num_experts = num_experts,
+            .num_experts_used = num_experts_used,
+            .moe_intermediate_size = moe_ff,
+            .moe_shared_intermediate_size = moe_shared_ff,
         };
     }
 
     fn validate(self: Config) !void {
-        if (self.isMoe()) return Error.UnsupportedVariant; // qwen35moe: later phase
-        if (self.nextn_predict_layers != 0) return Error.UnsupportedVariant; // MTP: later phase
+        if (self.isMoe()) {
+            if (self.num_experts_used == 0 or self.num_experts_used > self.num_experts) return Error.InvalidConfig;
+            if (self.moe_intermediate_size == 0 or self.moe_shared_intermediate_size == 0) return Error.InvalidConfig;
+        } else {
+            if (self.intermediate_size == 0) return Error.InvalidConfig;
+        }
+        if (self.nextn_predict_layers >= self.num_layers) return Error.InvalidConfig;
         if (self.num_attention_heads == 0 or self.num_key_value_heads == 0) return Error.InvalidConfig;
         if (self.num_attention_heads % self.num_key_value_heads != 0) return Error.InvalidConfig;
         if (self.full_attention_interval == 0) return Error.InvalidConfig;
@@ -243,11 +287,11 @@ const FfnInputProjection = union(enum) {
     separate: SeparateFfnInputProjection,
     fused: LinearWeight,
 
-    fn load(ctx: *ExecContext, file: *const gguf.File, cfg: Config, il: usize) !FfnInputProjection {
+    fn load(ctx: *ExecContext, file: *const gguf.File, hidden: usize, width: usize, il: usize, comptime suffix: []const u8) !FfnInputProjection {
         var nb: [96]u8 = undefined;
-        var gate = try LinearWeight.loadForFusion(ctx, try file.get(try weights.layerName(&nb, il, "ffn_gate.weight")), cfg.intermediate_size, cfg.hidden_size);
+        var gate = try LinearWeight.loadForFusion(ctx, try file.get(try weights.layerName(&nb, il, "ffn_gate" ++ suffix ++ ".weight")), width, hidden);
         errdefer gate.deinit();
-        var up = try LinearWeight.loadForFusion(ctx, try file.get(try weights.layerName(&nb, il, "ffn_up.weight")), cfg.intermediate_size, cfg.hidden_size);
+        var up = try LinearWeight.loadForFusion(ctx, try file.get(try weights.layerName(&nb, il, "ffn_up" ++ suffix ++ ".weight")), width, hidden);
         errdefer up.deinit();
 
         var fuse_parts = [_]*LinearWeight{ &gate, &up };
@@ -267,15 +311,16 @@ const FfnInputProjection = union(enum) {
 
 /// SiLU gate/up/down dense FFN. Gate+up weights are fused when they share a
 /// dtype/layout, so prefill can issue one wider GEMM and run split-SwiGLU.
+/// Also serves the MoE shared expert (`suffix = "_shexp"`, its own width).
 const DenseFfn = struct {
     input_proj: FfnInputProjection,
     down: LinearWeight,
 
-    fn load(ctx: *ExecContext, file: *const gguf.File, cfg: Config, il: usize) !DenseFfn {
+    fn load(ctx: *ExecContext, file: *const gguf.File, hidden: usize, width: usize, il: usize, comptime suffix: []const u8) !DenseFfn {
         var nb: [96]u8 = undefined;
-        var input_proj = try FfnInputProjection.load(ctx, file, cfg, il);
+        var input_proj = try FfnInputProjection.load(ctx, file, hidden, width, il, suffix);
         errdefer input_proj.deinit();
-        var down = try LinearWeight.load(ctx, try file.get(try weights.layerName(&nb, il, "ffn_down.weight")), cfg.hidden_size, cfg.intermediate_size);
+        var down = try LinearWeight.load(ctx, try file.get(try weights.layerName(&nb, il, "ffn_down" ++ suffix ++ ".weight")), hidden, width);
         errdefer down.deinit();
         return .{ .input_proj = input_proj, .down = down };
     }
@@ -283,6 +328,92 @@ const DenseFfn = struct {
     fn deinit(self: *DenseFfn) void {
         self.down.deinit();
         self.input_proj.deinit();
+        self.* = undefined;
+    }
+};
+
+/// MoE expert-stack projection: persisted PTQTP plane siblings win over the
+/// plain GGUF tensor when present (same contract as the qwen3 loader).
+fn loadMoeProjection(ctx: *ExecContext, file: *const gguf.File, name: []const u8, in_dim: usize, out_dim: usize, n_expert: usize, borrow: bool) !fucina.MoeRhs {
+    if (try ptqtp_gguf.maybeLoadMoeRhs(ctx, file, name, in_dim, out_dim, n_expert, borrow)) |rhs| return rhs;
+    return weights.loadMoeRhs(ctx, try file.get(name), in_dim, out_dim, n_expert, borrow);
+}
+
+fn moeProjSpec(file: *const gguf.File, name: []const u8, in_dim: usize, out_dim: usize, n_expert: usize) !fucina.expert_store.ProjSpec {
+    if (try ptqtp_gguf.maybeStreamedMoeProjSpec(file, name, in_dim, out_dim, n_expert)) |spec| return spec;
+    return weights.streamedProjSpec(file, try file.get(name), in_dim, out_dim, n_expert);
+}
+
+/// Routed MoE FFN (qwen35moe): softmax router over `num_experts` with
+/// renormalized top-k SwiGLU expert mixture, plus a shared expert (a dense
+/// SiLU FFN at its own width) gated by a per-token sigmoid scalar.
+const MoeFfn = struct {
+    router: LinearWeight, // ffn_gate_inp: hidden -> num_experts
+    gate: fucina.MoeRhs,
+    up: fucina.MoeRhs,
+    down: fucina.MoeRhs,
+    shexp_gate: fucina.Tensor(.{.embed}), // ffn_gate_inp_shexp: per-token scalar gate
+    shexp: DenseFfn,
+
+    fn load(ctx: *ExecContext, file: *const gguf.File, cfg: Config, il: usize, store: ?*fucina.ExpertStore) !MoeFfn {
+        var nb: [96]u8 = undefined;
+        var router = try LinearWeight.load(ctx, try file.get(try weights.layerName(&nb, il, "ffn_gate_inp.weight")), cfg.num_experts, cfg.hidden_size);
+        errdefer router.deinit();
+        var shexp_gate = try weights.loadVector(ctx, try file.get(try weights.layerName(&nb, il, "ffn_gate_inp_shexp.weight")), cfg.hidden_size, .embed);
+        errdefer shexp_gate.deinit();
+        var shexp = try DenseFfn.load(ctx, file, cfg.hidden_size, cfg.moe_shared_intermediate_size, il, "_shexp");
+        errdefer shexp.deinit();
+
+        // Streamed: register geometry only — the expert stacks stay on disk
+        // and are fetched on demand through the store's cache tiers.
+        if (store) |s| {
+            const trio = try weights.registerStreamedMoeLayer(s, il, .{
+                try moeProjSpec(file, try weights.layerName(&nb, il, "ffn_gate_exps.weight"), cfg.hidden_size, cfg.moe_intermediate_size, cfg.num_experts),
+                try moeProjSpec(file, try weights.layerName(&nb, il, "ffn_up_exps.weight"), cfg.hidden_size, cfg.moe_intermediate_size, cfg.num_experts),
+                try moeProjSpec(file, try weights.layerName(&nb, il, "ffn_down_exps.weight"), cfg.moe_intermediate_size, cfg.hidden_size, cfg.num_experts),
+            }, cfg.num_experts);
+            return .{ .router = router, .gate = trio.gate, .up = trio.up, .down = trio.down, .shexp_gate = shexp_gate, .shexp = shexp };
+        }
+
+        // Resident: borrow the expert stacks straight from the mmap when
+        // possible (the Model takes ownership of the mapping in
+        // loadGgufFromFileOptions); split GGUFs cannot hand over their
+        // multiple mappings, so their experts are copied — stream those.
+        const borrow = file.is_mmap and !file.isSplit();
+        var gate = try loadMoeProjection(ctx, file, try weights.layerName(&nb, il, "ffn_gate_exps.weight"), cfg.hidden_size, cfg.moe_intermediate_size, cfg.num_experts, borrow);
+        errdefer gate.deinit();
+        var up = try loadMoeProjection(ctx, file, try weights.layerName(&nb, il, "ffn_up_exps.weight"), cfg.hidden_size, cfg.moe_intermediate_size, cfg.num_experts, borrow);
+        errdefer up.deinit();
+        var down = try loadMoeProjection(ctx, file, try weights.layerName(&nb, il, "ffn_down_exps.weight"), cfg.moe_intermediate_size, cfg.hidden_size, cfg.num_experts, borrow);
+        errdefer down.deinit();
+        return .{ .router = router, .gate = gate, .up = up, .down = down, .shexp_gate = shexp_gate, .shexp = shexp };
+    }
+
+    fn deinit(self: *MoeFfn) void {
+        self.shexp.deinit();
+        self.shexp_gate.deinit();
+        self.down.deinit();
+        self.up.deinit();
+        self.gate.deinit();
+        self.router.deinit();
+        self.* = undefined;
+    }
+};
+
+const Ffn = union(enum) {
+    dense: DenseFfn,
+    moe: MoeFfn,
+
+    fn load(ctx: *ExecContext, file: *const gguf.File, cfg: Config, il: usize, store: ?*fucina.ExpertStore) !Ffn {
+        if (cfg.isMoe()) return .{ .moe = try MoeFfn.load(ctx, file, cfg, il, store) };
+        return .{ .dense = try DenseFfn.load(ctx, file, cfg.hidden_size, cfg.intermediate_size, il, "") };
+    }
+
+    fn deinit(self: *Ffn) void {
+        switch (self.*) {
+            .dense => |*d| d.deinit(),
+            .moe => |*m| m.deinit(),
+        }
         self.* = undefined;
     }
 };
@@ -446,9 +577,9 @@ const AttnLayer = struct {
     q_norm: fucina.Tensor(.{.d}),
     k_norm: fucina.Tensor(.{.d}),
     o_proj: LinearWeight,
-    ffn: DenseFfn,
+    ffn: Ffn,
 
-    fn load(ctx: *ExecContext, file: *const gguf.File, cfg: Config, il: usize) !AttnLayer {
+    fn load(ctx: *ExecContext, file: *const gguf.File, cfg: Config, il: usize, store: ?*fucina.ExpertStore) !AttnLayer {
         var nb: [96]u8 = undefined;
         var attn_norm = try weights.loadVector(ctx, try file.get(try weights.layerName(&nb, il, "attn_norm.weight")), cfg.hidden_size, .embed);
         errdefer attn_norm.deinit();
@@ -466,7 +597,7 @@ const AttnLayer = struct {
         errdefer k_norm.deinit();
         var o_proj = try LinearWeight.load(ctx, try file.get(try weights.layerName(&nb, il, "attn_output.weight")), cfg.hidden_size, cfg.attnOutInDim());
         errdefer o_proj.deinit();
-        var ffn = try DenseFfn.load(ctx, file, cfg, il);
+        var ffn = try Ffn.load(ctx, file, cfg, il, store);
         errdefer ffn.deinit();
         return .{
             .attn_norm = attn_norm,
@@ -500,9 +631,10 @@ const LayerLoader = struct {
     ctx: *ExecContext,
     file: *const gguf.File,
     config: Config,
+    store: ?*fucina.ExpertStore,
 
     pub fn load(self: LayerLoader, layer_i: usize) !Layer {
-        return Layer.load(self.ctx, self.file, self.config, layer_i);
+        return Layer.load(self.ctx, self.file, self.config, layer_i, self.store);
     }
 
     pub fn deinitLayer(_: LayerLoader, layer: *Layer) void {
@@ -512,8 +644,8 @@ const LayerLoader = struct {
 
 /// Load all transformer layers, in parallel across the work pool when
 /// available (see `gguf_meta.parallelLoadLayers` for the failure semantics).
-fn loadLayers(ctx: *ExecContext, file: *const gguf.File, config: Config, layers: []Layer) !void {
-    return gguf_meta.parallelLoadLayers(Layer, LayerLoader, ctx, .{ .ctx = ctx, .file = file, .config = config }, layers);
+fn loadLayers(ctx: *ExecContext, file: *const gguf.File, config: Config, layers: []Layer, store: ?*fucina.ExpertStore) !void {
+    return gguf_meta.parallelLoadLayers(Layer, LayerLoader, ctx, .{ .ctx = ctx, .file = file, .config = config, .store = store }, layers);
 }
 
 /// A linear (Gated DeltaNet) block.
@@ -527,9 +659,9 @@ const LinearLayer = struct {
     ssm_dt: fucina.Tensor(.{.vhead}), // [num_v_heads] dt bias
     ssm_norm: fucina.Tensor(.{.d}), // [head_v_dim] gated RMSNorm weight
     out_proj: LinearWeight, // value_dim -> hidden
-    ffn: DenseFfn,
+    ffn: Ffn,
 
-    fn load(ctx: *ExecContext, file: *const gguf.File, cfg: Config, il: usize) !LinearLayer {
+    fn load(ctx: *ExecContext, file: *const gguf.File, cfg: Config, il: usize, store: ?*fucina.ExpertStore) !LinearLayer {
         var nb: [96]u8 = undefined;
         var attn_norm = try weights.loadVector(ctx, try file.get(try weights.layerName(&nb, il, "attn_norm.weight")), cfg.hidden_size, .embed);
         errdefer attn_norm.deinit();
@@ -550,7 +682,7 @@ const LinearLayer = struct {
         errdefer ssm_norm.deinit();
         var out = try LinearWeight.load(ctx, try file.get(try weights.layerName(&nb, il, "ssm_out.weight")), cfg.hidden_size, cfg.valueDim());
         errdefer out.deinit();
-        var ffn = try DenseFfn.load(ctx, file, cfg, il);
+        var ffn = try Ffn.load(ctx, file, cfg, il, store);
         errdefer ffn.deinit();
         return .{
             .attn_norm = attn_norm,
@@ -585,9 +717,9 @@ const Layer = union(enum) {
     attn: AttnLayer,
     linear: LinearLayer,
 
-    fn load(ctx: *ExecContext, file: *const gguf.File, cfg: Config, il: usize) !Layer {
-        if (cfg.isRecurrent(il)) return .{ .linear = try LinearLayer.load(ctx, file, cfg, il) };
-        return .{ .attn = try AttnLayer.load(ctx, file, cfg, il) };
+    fn load(ctx: *ExecContext, file: *const gguf.File, cfg: Config, il: usize, store: ?*fucina.ExpertStore) !Layer {
+        if (cfg.isRecurrent(il)) return .{ .linear = try LinearLayer.load(ctx, file, cfg, il, store) };
+        return .{ .attn = try AttnLayer.load(ctx, file, cfg, il, store) };
     }
 
     fn deinit(self: *Layer) void {
@@ -599,6 +731,14 @@ const Layer = union(enum) {
     }
 };
 
+/// Opt-in disk streaming for the MoE expert stacks (shared across the MoE
+/// loaders — see `weights.MoeStreamOptions`).
+pub const MoeStreamOptions = weights.MoeStreamOptions;
+
+pub const LoadOptions = struct {
+    moe_stream: ?MoeStreamOptions = null,
+};
+
 pub const Model = struct {
     allocator: Allocator,
     config: Config,
@@ -608,16 +748,40 @@ pub const Model = struct {
     layers: []Layer,
     /// head index → its KV-head index (GQA grouping) for the attention layers.
     kv_head_for_head: []usize,
+    /// The GGUF mmap, owned by the model when MoE expert blocks borrow from it
+    /// (see MoeFfn.load); unmapped last in deinit.
+    weight_mapping: ?gguf.File.MappedRegion = null,
+    /// Disk-streaming tier for MoE experts (`MoeStreamOptions`); destroyed
+    /// after the layers whose streamed arms point into it.
+    expert_store: ?*fucina.ExpertStore = null,
+    /// Router-lookahead prefetch (`MoeStreamOptions.pilot`).
+    pilot_enabled: bool = false,
 
     pub fn loadGguf(ctx: *ExecContext, io: std.Io, path: []const u8, config: Config) !Model {
-        var file = try gguf.File.load(ctx.allocator, io, path);
-        defer file.deinit();
-        return loadGgufFromFile(ctx, &file, config);
+        return loadGgufOptions(ctx, io, path, config, .{});
     }
 
-    pub fn loadGgufFromFile(ctx: *ExecContext, file: *const gguf.File, config: Config) !Model {
+    pub fn loadGgufOptions(ctx: *ExecContext, io: std.Io, path: []const u8, config: Config, options: LoadOptions) !Model {
+        // mmap, matching the CLI (examples/qwen35/main.zig): lets resident MoE
+        // expert stacks borrow straight from the mapping instead of copying.
+        var file = try gguf.File.loadMmap(ctx.allocator, io, path);
+        defer file.deinit();
+        return loadGgufFromFileOptions(ctx, &file, config, options);
+    }
+
+    pub fn loadGgufFromFile(ctx: *ExecContext, file: *gguf.File, config: Config) !Model {
+        return loadGgufFromFileOptions(ctx, file, config, .{});
+    }
+
+    pub fn loadGgufFromFileOptions(ctx: *ExecContext, file: *gguf.File, config: Config, options: LoadOptions) !Model {
         try config.validate();
         const allocator = ctx.allocator;
+
+        var expert_store: ?*fucina.ExpertStore = null;
+        if (options.moe_stream) |stream_options| {
+            if (config.isMoe()) expert_store = try weights.createExpertStore(allocator, stream_options, config.numMainLayers());
+        }
+        errdefer if (expert_store) |store| store.destroy();
 
         var token_embedding = try LinearWeight.load(ctx, try file.get("token_embd.weight"), config.vocab_size, config.hidden_size);
         errdefer token_embedding.deinit();
@@ -636,9 +800,18 @@ pub const Model = struct {
         const heads_per_kv = config.num_attention_heads / config.num_key_value_heads;
         for (kv_head_for_head, 0..) |*kv_head, head_i| kv_head.* = head_i / heads_per_kv;
 
-        const layers = try allocator.alloc(Layer, config.num_layers);
+        // Trunk only: the trailing MTP/NextN blocks are not loaded.
+        const layers = try allocator.alloc(Layer, config.numMainLayers());
         errdefer allocator.free(layers);
-        try loadLayers(ctx, file, config, layers);
+        try loadLayers(ctx, file, config, layers, expert_store);
+
+        if (expert_store) |store| try store.finalize();
+
+        // Resident MoE expert blocks borrow from the mmap (MoeFfn.load), so
+        // the model takes ownership of the mapping. Streamed MoE reads
+        // experts through the store instead — leave the mapping with the
+        // caller and resident memory stays dense weights + the expert cache.
+        const weight_mapping = if (config.isMoe() and expert_store == null) file.takeMapping() else null;
 
         return .{
             .allocator = allocator,
@@ -648,6 +821,9 @@ pub const Model = struct {
             .output = output,
             .layers = layers,
             .kv_head_for_head = kv_head_for_head,
+            .weight_mapping = weight_mapping,
+            .expert_store = expert_store,
+            .pilot_enabled = expert_store != null and options.moe_stream.?.pilot,
         };
     }
 
@@ -658,6 +834,10 @@ pub const Model = struct {
         self.output.deinit();
         self.output_norm.deinit();
         self.token_embedding.deinit();
+        // Last: expert blocks borrowed from this mapping / streamed arms
+        // pointing into the store.
+        if (self.expert_store) |store| store.destroy();
+        if (self.weight_mapping) |*mapping| mapping.deinit();
         self.* = undefined;
     }
 
@@ -802,6 +982,13 @@ pub const Model = struct {
                 .attn => |*a| x = try ctx.replace(x, attnForward(ctx, cfg, a, &x, &rope_table, self.kv_head_for_head, &cache.kv, il, io, profile)),
                 .linear => |*l| x = try ctx.replace(x, linearForward(ctx, cfg, l, &x, cache.convSlice(il), cache.ssmSlice(il), scan_mode, io, profile)),
             }
+            // Router lookahead (pilot): predict the NEXT layer's experts from
+            // this layer's post-mixing state and start their disk readahead
+            // while this layer's FFN computes. Decode-sized batches only —
+            // prefill's batch-union reads each routed expert once regardless.
+            if (self.pilot_enabled and token_ids.len <= 4 and il + 1 < self.layers.len) {
+                pilotPrefetchNext(ctx, cfg, &self.layers[il + 1], il + 1, &x) catch {};
+            }
             // Multi-token prefill on the last layer: only the final position
             // feeds the logits, so its FFN (and the final norm below) run on
             // one row. Mixing already updated the caches full-width above.
@@ -846,14 +1033,15 @@ pub const Cache = struct {
 
     fn init(model: *const Model, ctx: *ExecContext, capacity: usize) !Cache {
         const cfg = model.config;
-        var kv = try KvCache.init(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity);
+        const n_layers = cfg.numMainLayers();
+        var kv = try KvCache.init(ctx, n_layers, cfg.num_key_value_heads, cfg.head_dim, capacity);
         errdefer kv.deinit();
         const conv_stride = (cfg.ssm_d_conv - 1) * cfg.convDim();
         const ssm_stride = cfg.numVHeads() * cfg.headVDim() * cfg.headVDim();
-        const conv = try ctx.allocator.alloc(f32, cfg.num_layers * conv_stride);
+        const conv = try ctx.allocator.alloc(f32, n_layers * conv_stride);
         errdefer ctx.allocator.free(conv);
         @memset(conv, 0);
-        const ssm = try ctx.allocator.alloc(f32, cfg.num_layers * ssm_stride);
+        const ssm = try ctx.allocator.alloc(f32, n_layers * ssm_stride);
         @memset(ssm, 0);
         return .{ .allocator = ctx.allocator, .kv = kv, .conv = conv, .ssm = ssm, .conv_stride = conv_stride, .ssm_stride = ssm_stride };
     }
@@ -911,6 +1099,8 @@ const ProfileBucket = enum {
     ffn_act,
     ffn_down,
     ffn_residual,
+    moe_router,
+    moe_shexp,
     final,
 };
 
@@ -949,6 +1139,8 @@ fn profileAdd(profile: ?*ForwardProfile, io: ?std.Io, start: i128, bucket: Profi
         .ffn_act => p.ffn_act_ns += elapsed,
         .ffn_down => p.ffn_down_ns += elapsed,
         .ffn_residual => p.ffn_residual_ns += elapsed,
+        .moe_router => p.moe_router_ns += elapsed,
+        .moe_shexp => p.moe_shexp_ns += elapsed,
         .final => p.final_ns += elapsed,
     }
 }
@@ -1831,7 +2023,7 @@ fn ffnForward(
     ctx: *ExecContext,
     cfg: Config,
     post_norm: *const fucina.Tensor(.{.embed}),
-    ffn: *const DenseFfn,
+    ffn: *const Ffn,
     input: *const fucina.Tensor(.{ .seq, .embed }),
     io: ?std.Io,
     profile: ?*ForwardProfile,
@@ -1843,11 +2035,24 @@ fn ffnForward(
     defer ffn_in.deinit();
     profileAdd(profile, io, norm_start, .ffn_norm);
 
+    const dense = switch (ffn.*) {
+        .dense => |*d| d,
+        .moe => |*moe| {
+            var contribution = try moeContribution(ctx, cfg, moe, &ffn_in, io, profile);
+            defer contribution.deinit();
+            const residual_start = profileStart(profile, io);
+            var result = try input.add(ctx, &contribution);
+            errdefer result.deinit();
+            profileAdd(profile, io, residual_start, .ffn_residual);
+            return result;
+        },
+    };
+
     const ffn_rows = ffn_in.dim(.seq);
     if (ffn_rows >= 12) {
-        switch (ffn.input_proj) {
+        switch (dense.input_proj) {
             .fused => |*fused_weight| switch (fused_weight.*) {
-                .q8_0 => |*gate_up_weight| switch (ffn.down) {
+                .q8_0 => |*gate_up_weight| switch (dense.down) {
                     .q8_0 => |*down_weight| {
                         const gate_up_start = profileStart(profile, io);
                         var gate_up = try weights.linearSeqQ8_0(gate_up_weight, ctx, &ffn_in, .embed, .gate_up);
@@ -1873,7 +2078,7 @@ fn ffnForward(
         }
     }
 
-    var gated = switch (ffn.input_proj) {
+    var gated = switch (dense.input_proj) {
         .separate => |*separate| blk: {
             const gate_start = profileStart(profile, io);
             var gate = try separate.gate.linearSeq(ctx, &ffn_in, .embed, .ffn);
@@ -1905,7 +2110,7 @@ fn ffnForward(
     defer gated.deinit();
 
     const down_start = profileStart(profile, io);
-    var contribution = try ffn.down.linearSeq(ctx, &gated, .ffn, .embed);
+    var contribution = try dense.down.linearSeq(ctx, &gated, .ffn, .embed);
     defer contribution.deinit();
     profileAdd(profile, io, down_start, .ffn_down);
 
@@ -1914,6 +2119,110 @@ fn ffnForward(
     errdefer result.deinit();
     profileAdd(profile, io, residual_start, .ffn_residual);
     return result;
+}
+
+/// MoE FFN contribution (pre-residual): softmax router → renormalized top-k
+/// (llama.cpp qwen35moe `build_moe_ffn` with `norm_w = true` and softmax
+/// gating, no expert scale) SwiGLU expert mixture, plus the shared expert
+/// gated by `sigmoid(shexp_gate · x)` per token. Decode (seq == 1) uses the
+/// fused expert-parallel GEMV; prefill groups tokens by expert (weights read
+/// once per expert per chunk).
+fn moeContribution(
+    ctx: *ExecContext,
+    cfg: Config,
+    moe: *const MoeFfn,
+    ffn_in: *const fucina.Tensor(.{ .seq, .embed }),
+    io: ?std.Io,
+    profile: ?*ForwardProfile,
+) !fucina.Tensor(.{ .seq, .embed }) {
+    const allocator = ctx.allocator;
+    const seq = ffn_in.dim(.seq);
+    const top_k = cfg.num_experts_used;
+
+    const router_start = profileStart(profile, io);
+    var logits = try moe.router.linearSeq(ctx, ffn_in, .embed, .expert);
+    defer logits.deinit();
+    const sel = try allocator.alloc(usize, seq * top_k);
+    defer allocator.free(sel);
+    const wgt = try allocator.alloc(f32, seq * top_k);
+    defer allocator.free(wgt);
+    try logits.routerTopK(ctx, .expert, top_k, .{ .normalize_selected = true }, sel, wgt);
+    profileAdd(profile, io, router_start, .moe_router);
+
+    const moe_profile: ?*fucina.MoeBatchProfile = if (profile) |p| &p.moe_batch else null;
+    var experts_out = try weights.moeSwiGluFfnSeq(ctx, ffn_in, &moe.gate, &moe.up, &moe.down, sel, wgt, top_k, cfg.moe_intermediate_size, io, moe_profile);
+    defer experts_out.deinit();
+
+    // Shared expert: dense SiLU FFN at its own width, scaled per token by
+    // the sigmoid of a scalar gate projection (`.glu` broadcasts the [seq]
+    // gate over .embed).
+    const shexp_start = profileStart(profile, io);
+    var gated = switch (moe.shexp.input_proj) {
+        .separate => |*sep| blk: {
+            var gate = try sep.gate.linearSeq(ctx, ffn_in, .embed, .ffn);
+            defer gate.deinit();
+            var up = try sep.up.linearSeq(ctx, ffn_in, .embed, .ffn);
+            defer up.deinit();
+            break :blk try up.swiglu(ctx, &gate);
+        },
+        .fused => |*w| blk: {
+            var gate_up = try w.linearSeq(ctx, ffn_in, .embed, .gate_up);
+            defer gate_up.deinit();
+            break :blk try gate_up.splitGated(ctx, .swiglu, .gate_up, .ffn);
+        },
+    };
+    defer gated.deinit();
+    var shexp_out = try moe.shexp.down.linearSeq(ctx, &gated, .ffn, .embed);
+    defer shexp_out.deinit();
+
+    var gate_logit = try ffn_in.dot(ctx, &moe.shexp_gate, .embed); // [.seq]
+    defer gate_logit.deinit();
+    var shexp_gated = try shexp_out.glu(ctx, &gate_logit);
+    defer shexp_gated.deinit();
+    profileAdd(profile, io, shexp_start, .moe_shexp);
+
+    return experts_out.add(ctx, &shexp_gated);
+}
+
+/// Router lookahead (pilot): apply the NEXT layer's post-attention norm +
+/// router to the current post-mixing state and hand the predicted top-k
+/// experts to the expert store's background readahead thread. Pure
+/// prediction — no routing state changes, and a failure costs only the
+/// overlap.
+fn pilotPrefetchNext(
+    ctx: *ExecContext,
+    cfg: Config,
+    next: *const Layer,
+    next_layer_i: usize,
+    x: *const fucina.Tensor(.{ .seq, .embed }),
+) !void {
+    const post_norm, const ffn = switch (next.*) {
+        .attn => |*a| .{ &a.post_norm, &a.ffn },
+        .linear => |*l| .{ &l.post_norm, &l.ffn },
+    };
+    const moe = switch (ffn.*) {
+        .moe => |*m| m,
+        else => return,
+    };
+    const store = switch (moe.gate) {
+        .streamed => |*s| s.store,
+        else => return,
+    };
+    const top_k = cfg.num_experts_used;
+    const seq = x.dim(.seq);
+
+    var nrm = try x.rmsNormMul(ctx, .embed, post_norm, cfg.rms_norm_eps);
+    defer nrm.deinit();
+    var logits = try moe.router.linearSeq(ctx, &nrm, .embed, .expert);
+    defer logits.deinit();
+
+    const allocator = ctx.allocator;
+    const sel = try allocator.alloc(usize, seq * top_k);
+    defer allocator.free(sel);
+    const wgt = try allocator.alloc(f32, seq * top_k);
+    defer allocator.free(wgt);
+    try logits.routerTopK(ctx, .expert, top_k, .{ .normalize_selected = false }, sel, wgt);
+    store.pilotHint(next_layer_i, sel);
 }
 
 test "qwen35 Config.isRecurrent + derived dims (0.8B shape)" {
@@ -1958,6 +2267,60 @@ test "qwen35 Config.isRecurrent + derived dims (0.8B shape)" {
     try std.testing.expectEqual(@as(usize, 512), cfg.kvDim());
     try std.testing.expectEqual(@as(usize, 2048), cfg.attnOutInDim());
     try cfg.validate();
+}
+
+test "qwen35moe Config: validation and NextN trunk layout (35B-A3B shape)" {
+    var cfg = Config{
+        .vocab_size = 248320,
+        .hidden_size = 2048,
+        .intermediate_size = 0, // MoE GGUFs may omit it; expert widths rule
+        .num_layers = 41, // 40 trunk + 1 MTP/NextN trailer
+        .num_attention_heads = 16,
+        .num_key_value_heads = 4,
+        .head_dim = 256,
+        .rms_norm_eps = 1e-6,
+        .rope_theta = 1e7,
+        .rope_n_rot = 64,
+        .rope_sections = .{ 11, 11, 10, 0 },
+        .full_attention_interval = 4,
+        .ssm_d_conv = 4,
+        .ssm_d_inner = 4096,
+        .ssm_d_state = 128,
+        .ssm_dt_rank = 32,
+        .ssm_n_group = 16,
+        .nextn_predict_layers = 1,
+        .num_experts = 256,
+        .num_experts_used = 8,
+        .moe_intermediate_size = 512,
+        .moe_shared_intermediate_size = 512,
+    };
+    try std.testing.expect(cfg.isMoe());
+    try std.testing.expectEqual(@as(usize, 40), cfg.numMainLayers());
+    try cfg.validate();
+
+    // The MTP trailer block (il 40) is dense-attention, never recurrent;
+    // trunk layout is unchanged by the trailer.
+    try std.testing.expect(!cfg.isRecurrent(40));
+    try std.testing.expect(cfg.isRecurrent(0));
+    try std.testing.expect(!cfg.isRecurrent(3));
+    try std.testing.expect(!cfg.isRecurrent(39)); // (39+1) % 4 == 0 → full attention
+
+    // Degenerate MoE configs are refused.
+    cfg.num_experts_used = 0;
+    try std.testing.expectError(Error.InvalidConfig, cfg.validate());
+    cfg.num_experts_used = 300;
+    try std.testing.expectError(Error.InvalidConfig, cfg.validate());
+    cfg.num_experts_used = 8;
+    cfg.moe_intermediate_size = 0;
+    try std.testing.expectError(Error.InvalidConfig, cfg.validate());
+    cfg.moe_intermediate_size = 512;
+    cfg.nextn_predict_layers = 41;
+    try std.testing.expectError(Error.InvalidConfig, cfg.validate());
+    cfg.nextn_predict_layers = 1;
+
+    // A dense config without an FFN width is refused.
+    cfg.num_experts = 0;
+    try std.testing.expectError(Error.InvalidConfig, cfg.validate());
 }
 
 test "partialRope rotates first n_rot dims and passes the rest through" {

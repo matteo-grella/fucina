@@ -1,13 +1,15 @@
-# Qwen3.5 — Gated-DeltaNet hybrid loader/parity harness
+# Qwen3.5 / Qwen3.6 — Gated-DeltaNet hybrid loader/parity harness
 
-Runner for the `qwen35` architecture: full-attention blocks interleaved with
-DeltaNet-linear blocks (conv1d + DeltaNet scan + multi-section RoPE). The CLI
-is minimal by design — it loads a GGUF, prints the derived config and per-kind
-block counts, and runs the hybrid forward pass with a top-5 logit readout.
-Streaming decode is in the `llm.qwen35` module; chat serving goes through
-[lmserve](../lmserve/README.md).
+Runner for the `qwen35` and `qwen35moe` architectures: full-attention blocks
+interleaved with DeltaNet-linear blocks (conv1d + DeltaNet scan +
+multi-section RoPE), feeding either a dense FFN (`qwen35`) or a routed MoE
+block (`qwen35moe`: softmax top-k expert mixture + sigmoid-gated shared
+expert). The CLI is minimal by design — it loads a GGUF, prints the derived
+config and per-kind block counts, and runs the hybrid forward pass with a
+top-5 logit readout. Streaming decode is in the `llm.qwen35` module; chat
+serving goes through [lmserve](../lmserve/README.md).
 
-## Getting the model
+## Getting the models
 
 Weights are not part of this repository. `Qwen3.5-0.8B-Q8_0.gguf` comes from
 [`unsloth/Qwen3.5-0.8B-GGUF`](https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF)
@@ -16,6 +18,25 @@ Weights are not part of this repository. `Qwen3.5-0.8B-Q8_0.gguf` comes from
 ```sh
 mkdir -p models
 hf download unsloth/Qwen3.5-0.8B-GGUF Qwen3.5-0.8B-Q8_0.gguf --local-dir models
+```
+
+Qwen3.6-35B-A3B (`qwen35moe`, 256 routed experts top-8 + 1 shared) comes from
+[`unsloth/Qwen3.6-35B-A3B-GGUF`](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF):
+
+```sh
+hf download unsloth/Qwen3.6-35B-A3B-GGUF Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --local-dir models
+```
+
+The routed expert stacks load resident (borrowed from the GGUF mmap) by
+default, or stream from disk with `--moe-stream` — the shared streamed-expert
+machinery documented in
+[docs/RUNNING-MODELS.md](../../docs/RUNNING-MODELS.md) (pinned hot tier +
+per-layer LRU + learning cache + `--moe-pilot` router lookahead; output is
+bit-identical to the resident path):
+
+```sh
+zig build qwen35 -Doptimize=ReleaseFast -- models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf \
+  --decode --moe-stream --moe-cache-mb=6144
 ```
 
 ## CLI
@@ -39,6 +60,7 @@ Full usage:
 | `--gen N` | decode-step count for `--bench` (default 128) |
 | `--logits-out PATH` | dump the forward-pass f32 logits for external parity checks |
 | `--linear-scan chunked\|recurrent` | DeltaNet scan implementation (default `chunked`) |
+| `--moe-stream` + companions | stream qwen35moe routed experts from disk (`--moe-cache-mb/--moe-cache-slots/--moe-pin-mb/--moe-no-learn/--moe-pilot/--moe-io-threads/--moe-uncached/--moe-mirror/--moe-trace/--moe-l2`; see [docs/RUNNING-MODELS.md](../../docs/RUNNING-MODELS.md)) |
 
 ## Parity oracle
 

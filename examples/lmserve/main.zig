@@ -32,9 +32,9 @@ const usage_text =
     \\       zig build lmserve -Doptimize=ReleaseFast -- --nanochat <checkpoint dir> [flags]
     \\
     \\The GGUF's general.architecture picks the backend: qwen3, qwen3moe,
-    \\qwen35 (Qwen3.5 / Ternary-Bonsai), gemma4, diffusion-gemma, inkling,
-    \\deepseek4 (DeepSeek V4 Flash). --nanochat serves a nanochat checkpoint
-    \\dir (model.safetensors + tokenizer.bin).
+    \\qwen35/qwen35moe (Qwen3.5 / Qwen3.6 / Ternary-Bonsai), gemma4,
+    \\diffusion-gemma, inkling, deepseek4 (DeepSeek V4 Flash). --nanochat
+    \\serves a nanochat checkpoint dir (model.safetensors + tokenizer.bin).
     \\
     \\  --host H            bind address (default 127.0.0.1)
     \\  --port N            port (default 8080)
@@ -384,12 +384,12 @@ pub fn serveBlocking(
         try serveDiffusion(io, allocator, stderr, &ctx, &file, model_id, args);
     } else if (std.mem.eql(u8, arch, "inkling")) {
         try serveInkling(io, allocator, stderr, &ctx, &file, model_id, args);
-    } else if (std.mem.eql(u8, arch, "qwen35")) {
+    } else if (std.mem.eql(u8, arch, "qwen35") or std.mem.eql(u8, arch, "qwen35moe")) {
         try serveQwen35(io, allocator, stderr, &ctx, &file, model_id, args);
     } else if (std.mem.eql(u8, arch, "deepseek4")) {
         try serveDeepseek4(io, allocator, stderr, &ctx, &file, model_id, args);
     } else {
-        try stderr.print("unsupported architecture for serving: {s} (supported: qwen3, qwen3moe, qwen35, gemma4, diffusion-gemma, inkling, deepseek4)\n", .{arch});
+        try stderr.print("unsupported architecture for serving: {s} (supported: qwen3, qwen3moe, qwen35, qwen35moe, gemma4, diffusion-gemma, inkling, deepseek4)\n", .{arch});
         file.deinit();
         return error.UnsupportedArchitecture;
     }
@@ -484,8 +484,27 @@ fn serveQwen35(
     const default_sampling = samplingFromGguf(file);
 
     const config = try llm.qwen35.model.Config.fromGguf(file);
-    var model = try llm.qwen35.model.Model.loadGgufFromFile(ctx, file, config);
+
+    // Streamed experts (`--moe-stream` + companions, qwen35moe): the local
+    // copy must outlive the load — MoeStreamOptions borrows its buffers.
+    var moe_cli = args.moe_cli;
+    var moe_stream = try moe_cli.options(args.model_path.?);
+    if (moe_stream) |*m| {
+        m.pilot = args.moe_pilot;
+        if (args.moe_pin_mb) |mb| m.pin_bytes = mb << 20;
+        if (args.moe_no_learn) m.auto_pin = false;
+        if (args.moe_cache_slots) |n| m.cache_slots_per_layer = n;
+    }
+    const load_options: llm.qwen35.model.LoadOptions =
+        if (moe_stream) |m| .{ .moe_stream = m } else .{};
+    var model = try llm.qwen35.model.Model.loadGgufFromFileOptions(ctx, file, config, load_options);
     defer model.deinit();
+    // LIFO: the streamed-tier report + usage save runs BEFORE model.deinit
+    // destroys the store.
+    defer if (model.expert_store) |store| {
+        llm.weights.reportAndSaveMoeStream(store, !args.moe_no_learn, stderr);
+        stderr.flush() catch {};
+    };
     file.deinit();
 
     var adapter = try backend_qwen35.Qwen35Backend.init(

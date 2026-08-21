@@ -32,6 +32,7 @@ hf download unsloth/diffusiongemma-26B-A4B-it-GGUF diffusiongemma-26B-A4B-it-Q6_
 | Qwen3 dense (0.6B/1.7B/…) | `zig build qwen3` | Official [`Qwen/Qwen3-0.6B-GGUF`](https://huggingface.co/Qwen/Qwen3-0.6B-GGUF) / [`Qwen/Qwen3-1.7B-GGUF`](https://huggingface.co/Qwen/Qwen3-1.7B-GGUF) ship Q8_0 only; the full K-quant ladder (Q4_K_S … Q6_K + bf16) is on [`bartowski/Qwen_Qwen3-0.6B-GGUF`](https://huggingface.co/bartowski/Qwen_Qwen3-0.6B-GGUF) or [`unsloth/Qwen3-0.6B-GGUF`](https://huggingface.co/unsloth/Qwen3-0.6B-GGUF) (same pattern per size). |
 | Qwen3 MoE 30B-A3B | `zig build qwen3` | [`unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF`](https://huggingface.co/unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF) — `…-Q5_K_M.gguf` (21.7 GB), `…-Q6_K.gguf` (25.1 GB). |
 | Qwen3.5 0.8B (Gated-DeltaNet hybrid) | `zig build qwen35` | [`unsloth/Qwen3.5-0.8B-GGUF`](https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF) — `Qwen3.5-0.8B-Q8_0.gguf` (812 MB); also mirrored by lmstudio-community and bartowski. |
+| Qwen3.6 35B-A3B (hybrid MoE, `qwen35moe`) | `zig build qwen35` | [`unsloth/Qwen3.6-35B-A3B-GGUF`](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) — `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf` (22.1 GB); K-quant ladder up to Q8_0. |
 | Gemma 4 26B-A4B (MoE) | `zig build gemma4` | [`unsloth/gemma-4-26B-A4B-it-GGUF`](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) — `gemma-4-26B-A4B-it-UD-Q6_K.gguf` (23.2 GB). |
 | DiffusionGemma 26B-A4B | `zig build diffusion-gemma` | [`unsloth/diffusiongemma-26B-A4B-it-GGUF`](https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF) — `diffusiongemma-26B-A4B-it-Q6_K.gguf` (22.7 GB), `…-Q4_K_M.gguf` (16.8 GB). |
 | OmniVoice TTS | `zig build omnivoice` | [`Serveurperso/OmniVoice-GGUF`](https://huggingface.co/Serveurperso/OmniVoice-GGUF) — `omnivoice-base-*.gguf` + `omnivoice-tokenizer-*.gguf` (F32/BF16/Q8_0/Q4_K_M each). |
@@ -80,7 +81,7 @@ zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --repl
 | `zig build deepseek4` | DeepSeek V4 Flash 284B-A13B (streamed experts, MTP sidecar) | [examples/deepseek4/README.md](../examples/deepseek4/README.md) |
 | `zig build gemma4` | Gemma 4 26B-A4B MoE chat/REPL | [examples/gemma4/README.md](../examples/gemma4/README.md) |
 | `zig build diffusion-gemma` | DiffusionGemma 26B-A4B block text-diffusion (live inline denoising) | [examples/diffusion_gemma/README.md](../examples/diffusion_gemma/README.md) |
-| `zig build qwen35` | Qwen3.5 0.8B Gated-DeltaNet hybrid + Ternary-Bonsai-27B loader/parity harness | [examples/qwen35/README.md](../examples/qwen35/README.md) |
+| `zig build qwen35` | Qwen3.5/3.6 Gated-DeltaNet hybrid (dense + qwen35moe streamed MoE) + Ternary-Bonsai-27B loader/parity harness | [examples/qwen35/README.md](../examples/qwen35/README.md) |
 | `zig build inkling` | Inkling 975B-A41B hybrid attention + MoE, text + image/audio towers | [examples/inkling/README.md](../examples/inkling/README.md) |
 | `zig build lmserve` | OpenAI- and Anthropic-compatible HTTP server over the family backends | [examples/lmserve/README.md](../examples/lmserve/README.md) |
 | `zig build omnivoice` | OmniVoice MaskGIT TTS: voice cloning/design, codec round-trip | [examples/omnivoice/README.md](../examples/omnivoice/README.md) |
@@ -190,11 +191,12 @@ Knobs:
   conversations reopen warm across process restarts with zero re-prefill
   (essential below 1 tok/s). Default sidecar `<gguf>.kvcache`.
 
-The DeepSeek-family runners share this streamed-expert machinery; all of
-them accept `--moe-stream`/`--moe-cache-mb`
+The DeepSeek-family runners and the qwen35 runner (qwen35moe) share this
+streamed-expert machinery; all of them accept `--moe-stream`/`--moe-cache-mb`
 ([examples/deepseek2/README.md](../examples/deepseek2/README.md),
 [examples/glm4moe/README.md](../examples/glm4moe/README.md),
-[examples/deepseek4/README.md](../examples/deepseek4/README.md)). DeepSeek
+[examples/deepseek4/README.md](../examples/deepseek4/README.md),
+[examples/qwen35/README.md](../examples/qwen35/README.md)). DeepSeek
 V4 Flash's 164.6 GB Q4K release decodes on a 64 GB machine with
 `--moe-stream` (measured 1.5–3.6 tok/s warm at a 20 GB expert budget).
 

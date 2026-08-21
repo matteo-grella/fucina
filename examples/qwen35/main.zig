@@ -1,10 +1,12 @@
-//! Qwen3.5 (`qwen35` hybrid Gated-DeltaNet) harness.
+//! Qwen3.5 / Qwen3.6 (`qwen35`/`qwen35moe` hybrid Gated-DeltaNet) harness.
 //!
-//! Loads a `qwen35` GGUF, prints the derived config + per-kind block counts
-//! (full-attention vs DeltaNet-linear blocks), and runs the hybrid forward
-//! pass (conv1d + DeltaNet scan + multi-section RoPE): whole-sequence logits
+//! Loads a `qwen35` or `qwen35moe` GGUF, prints the derived config +
+//! per-kind block counts (full-attention vs DeltaNet-linear blocks), and
+//! runs the hybrid forward pass (conv1d + DeltaNet scan + multi-section
+//! RoPE; routed MoE + shared expert on qwen35moe): whole-sequence logits
 //! with a top-5 readout, `--logits-out` dumps for external parity checks,
 //! `--decode` incremental-decode equivalence, and a `--bench` pp/tg sweep.
+//! `--moe-stream` + companions stream the routed experts from disk.
 //!
 //!   zig build qwen35 -- <model.gguf> [--info]
 const std = @import("std");
@@ -26,6 +28,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (args.len < 2) {
         try stdout.print("usage: zig build qwen35 -- <model.gguf> [<token-ids>] [--info] [--decode] [--profile] [--bench R [--gen N]] [--logits-out PATH] [--linear-scan chunked|recurrent]\n", .{});
+        try stdout.print("       MoE streaming (qwen35moe): --moe-stream --moe-cache-mb=N --moe-cache-slots=N --moe-pin-mb=N --moe-no-learn --moe-pilot --moe-io-threads=N --moe-uncached --moe-mirror=PATH --moe-mirror-weights=W,.. --moe-trace=PATH --moe-l2=PATH --moe-l2-build-gb=N\n", .{});
         return;
     }
 
@@ -50,13 +53,31 @@ pub fn main(init: std.process.Init) !void {
     var gen_count: usize = 128;
     var profile_enabled = false;
     var linear_scan: LinearScanMode = .chunked;
+    var moe_cli: llm.weights.MoeStreamCli = .{};
+    var moe_cache_slots: ?usize = null;
+    var moe_pin_mb: ?usize = null;
+    var moe_no_learn = false;
+    var moe_pilot = false;
     var ai: usize = 2;
     while (ai < args.len) : (ai += 1) {
         if (std.mem.eql(u8, args[ai], "--info")) {
             file.deinit();
             return;
         }
-        if (std.mem.eql(u8, args[ai], "--decode")) {
+        if (try moe_cli.tryParse(args[ai])) {
+            // Shared streamed-experts flags (llm.weights.MoeStreamCli).
+        } else if (std.mem.startsWith(u8, args[ai], "--moe-cache-slots=")) {
+            moe_cli.armed = true;
+            moe_cache_slots = try std.fmt.parseInt(usize, args[ai]["--moe-cache-slots=".len..], 10);
+        } else if (std.mem.startsWith(u8, args[ai], "--moe-pin-mb=")) {
+            moe_cli.armed = true;
+            moe_pin_mb = try std.fmt.parseInt(usize, args[ai]["--moe-pin-mb=".len..], 10);
+        } else if (std.mem.eql(u8, args[ai], "--moe-no-learn")) {
+            moe_no_learn = true;
+        } else if (std.mem.eql(u8, args[ai], "--moe-pilot")) {
+            moe_cli.armed = true;
+            moe_pilot = true;
+        } else if (std.mem.eql(u8, args[ai], "--decode")) {
             decode_check = true;
         } else if (std.mem.eql(u8, args[ai], "--profile")) {
             profile_enabled = true;
@@ -81,15 +102,25 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    var moe_stream = try moe_cli.options(args[1]);
+    if (moe_stream) |*m| {
+        m.cache_slots_per_layer = moe_cache_slots;
+        m.auto_pin = !moe_no_learn;
+        m.pin_bytes = if (moe_pin_mb) |mb| mb << 20 else null;
+        m.pilot = moe_pilot;
+    }
+    const load_options: llm.qwen35.model.LoadOptions = if (moe_stream) |m| .{ .moe_stream = m } else .{};
+
     const t0 = nowNs(init.io);
-    var model = try Model.loadGgufFromFile(&ctx, &file, config);
+    var model = try Model.loadGgufFromFileOptions(&ctx, &file, config, load_options);
     defer model.deinit();
+    defer if (model.expert_store) |store| llm.weights.reportAndSaveMoeStream(store, !moe_no_learn, stdout);
     file.deinit();
     const load_ns = nowNs(init.io) - t0;
 
     const counts = model.blockCounts();
     try stdout.print("loaded: {d} blocks ({d} full-attn, {d} DeltaNet-linear)  in {d:.3} s\n", .{
-        config.num_layers, counts.attn, counts.linear, seconds(load_ns),
+        config.numMainLayers(), counts.attn, counts.linear, seconds(load_ns),
     });
 
     if (bench_reps > 0) {
@@ -297,9 +328,16 @@ fn printProfile(stdout: *std.Io.Writer, p: *const ForwardProfile, prefix: []cons
             millis(linear_other),
         },
     );
+    if (p.moe_router_ns != 0 or p.moe_shexp_ns != 0) {
+        try stdout.print(
+            "{s}: moe router={d:.2} shexp={d:.2}\n",
+            .{ prefix, millis(p.moe_router_ns), millis(p.moe_shexp_ns) },
+        );
+    }
     const ffn_other =
         p.ffn_ns -
-        (p.ffn_norm_ns + p.ffn_gate_up_ns + p.ffn_gate_ns + p.ffn_up_ns + p.ffn_act_ns + p.ffn_down_ns + p.ffn_residual_ns);
+        (p.ffn_norm_ns + p.ffn_gate_up_ns + p.ffn_gate_ns + p.ffn_up_ns + p.ffn_act_ns + p.ffn_down_ns + p.ffn_residual_ns +
+            p.moe_router_ns + p.moe_shexp_ns);
     try stdout.print(
         "{s}: ffn detail norm={d:.2} gate_up={d:.2} gate={d:.2} up={d:.2} act={d:.2} down={d:.2} residual={d:.2} other={d:.2}\n",
         .{
@@ -355,6 +393,11 @@ fn printConfig(stdout: *std.Io.Writer, c: Config) !void {
         c.full_attention_interval, c.ssm_d_conv,          c.ssm_d_inner,       c.ssm_d_state,
         c.ssm_dt_rank,             c.ssm_n_group,         c.rope_theta,        c.rms_norm_eps,
     });
+    if (c.isMoe()) {
+        try stdout.print("  moe: experts={d} top_k={d} expert_ffn={d} shared_ffn={d} nextn={d}\n", .{
+            c.num_experts, c.num_experts_used, c.moe_intermediate_size, c.moe_shared_intermediate_size, c.nextn_predict_layers,
+        });
+    }
 }
 
 fn millis(ns: i128) f64 {
