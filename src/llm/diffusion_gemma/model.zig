@@ -45,8 +45,8 @@
 const std = @import("std");
 const fucina = @import("fucina");
 const gemma4 = @import("../gemma/gemma4.zig");
-const gguf_meta = @import("../gguf_meta.zig");
-const weights = @import("../weights.zig");
+const gguf_meta = @import("fucina").gguf_meta;
+const weights = @import("fucina").weights;
 const kv_cache = @import("../kv_cache.zig");
 
 const Allocator = std.mem.Allocator;

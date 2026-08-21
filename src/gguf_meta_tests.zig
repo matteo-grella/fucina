@@ -3,7 +3,7 @@
 //! layer loader's partial-failure semantics (deinit only the layers that
 //! loaded, return the first error in layer order).
 const std = @import("std");
-const fucina = @import("fucina");
+const fucina = @import("fucina.zig");
 const gguf_meta = @import("gguf_meta.zig");
 
 const ExecContext = fucina.ExecContext;

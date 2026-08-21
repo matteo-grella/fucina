@@ -25,9 +25,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const fucina = @import("fucina");
-const weights = @import("../weights.zig");
-const gguf_meta = @import("../gguf_meta.zig");
-const ptqtp_gguf = @import("../ptqtp_gguf.zig");
+const weights = @import("fucina").weights;
+const gguf_meta = @import("fucina").gguf_meta;
+const ptqtp_gguf = @import("fucina").ptqtp_gguf;
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;

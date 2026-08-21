@@ -30,7 +30,7 @@
 //! (breaking per-plane dequantizability) to save K-1 preads per miss.
 
 const std = @import("std");
-const fucina = @import("fucina");
+const fucina = @import("fucina.zig");
 const weights = @import("weights.zig");
 
 const Allocator = std.mem.Allocator;

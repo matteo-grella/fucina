@@ -53,7 +53,7 @@ pub fn main(init: std.process.Init) !void {
     var gen_count: usize = 128;
     var profile_enabled = false;
     var linear_scan: LinearScanMode = .chunked;
-    var moe_cli: llm.weights.MoeStreamCli = .{};
+    var moe_cli: fucina.weights.MoeStreamCli = .{};
     var moe_cache_slots: ?usize = null;
     var moe_pin_mb: ?usize = null;
     var moe_no_learn = false;
@@ -65,7 +65,7 @@ pub fn main(init: std.process.Init) !void {
             return;
         }
         if (try moe_cli.tryParse(args[ai])) {
-            // Shared streamed-experts flags (llm.weights.MoeStreamCli).
+            // Shared streamed-experts flags (fucina.weights.MoeStreamCli).
         } else if (std.mem.startsWith(u8, args[ai], "--moe-cache-slots=")) {
             moe_cli.armed = true;
             moe_cache_slots = try std.fmt.parseInt(usize, args[ai]["--moe-cache-slots=".len..], 10);
@@ -114,7 +114,7 @@ pub fn main(init: std.process.Init) !void {
     const t0 = nowNs(init.io);
     var model = try Model.loadGgufFromFileOptions(&ctx, &file, config, load_options);
     defer model.deinit();
-    defer if (model.expert_store) |store| llm.weights.reportAndSaveMoeStream(store, !moe_no_learn, stdout);
+    defer if (model.expert_store) |store| fucina.weights.reportAndSaveMoeStream(store, !moe_no_learn, stdout);
     file.deinit();
     const load_ns = nowNs(init.io) - t0;
 

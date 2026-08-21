@@ -15,14 +15,13 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
 const config_mod = @import("config.zig");
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
 const gguf = fucina.gguf;
-const weights = llm.weights;
-const gguf_meta = llm.gguf_meta;
+const weights = fucina.weights;
+const gguf_meta = fucina.gguf_meta;
 const LinearWeight = weights.LinearWeight;
 const Config = config_mod.Config;
 

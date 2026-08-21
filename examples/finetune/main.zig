@@ -574,8 +574,8 @@ fn verifyGrads(
     // at all -- a frozen base weight CANNOT receive gradients. The frozen-RHS
     // `dot` routes gradients to the f32 activations only (ConstRhsDotBackward).
     comptime {
-        std.debug.assert(!@hasField(llm.weights.QuantWeight(.q4_k), "grad_state"));
-        std.debug.assert(!@hasField(llm.weights.QuantWeight(.q6_k), "grad_state"));
+        std.debug.assert(!@hasField(fucina.weights.QuantWeight(.q4_k), "grad_state"));
+        std.debug.assert(!@hasField(fucina.weights.QuantWeight(.q6_k), "grad_state"));
     }
 
     if (samples.len < 2) return error.DatasetTooSmall; // needs a held-out pair

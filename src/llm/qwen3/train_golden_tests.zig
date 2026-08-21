@@ -24,7 +24,7 @@ const std = @import("std");
 const fucina = @import("fucina");
 const qwen3 = @import("model.zig");
 const qwen3_train = @import("train.zig");
-const weights = @import("../weights.zig");
+const weights = @import("fucina").weights;
 
 const ExecContext = fucina.ExecContext;
 const Layer = qwen3_train.ModelLayer;

@@ -4,8 +4,8 @@
 const std = @import("std");
 const fucina = @import("fucina");
 const qwen3 = @import("model.zig");
-const weights = @import("../weights.zig");
-const ptqtp_gguf = @import("../ptqtp_gguf.zig");
+const weights = @import("fucina").weights;
+const ptqtp_gguf = @import("fucina").ptqtp_gguf;
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;

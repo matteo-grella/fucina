@@ -620,7 +620,7 @@ test "tq2_0 ternary experts: streamed decode and batch are bit-exact vs resident
 /// (K=1 tq2_0) ternary tile once per plane over the FULL row, summed
 /// host-side in fixed plane order (p0 + p1 (+ p2), left-associated). This
 /// is the dense fused PTQTP linear's contract — verified by reading
-/// llm/weights.zig `linearSeqPtqtpFused`, which computes each plane's full
+/// src/weights.zig `linearSeqPtqtpFused`, which computes each plane's full
 /// tile dot and adds the results elementwise in plane order (sum of dots,
 /// NOT interleaved accumulation) — so the fused MoE `ptqtp` arm must
 /// reproduce this bitwise.

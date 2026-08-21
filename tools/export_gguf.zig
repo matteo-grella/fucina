@@ -36,7 +36,7 @@
 //! not containing "norm", contract dim divisible by 256 (the plane block
 //! width), source dtype decodable to f32 — is replaced by K byte-valid
 //! standalone TQ2_0 plane tensors named `<name>.ptqtp0..K-1`, following the
-//! src/llm/ptqtp_gguf.zig persistence conventions exactly (same names, same
+//! src/ptqtp_gguf.zig persistence conventions exactly (same names, same
 //! `fucina.ptqtp.version` metadata stamp), so the output loads through the
 //! existing family pair-detection. By default embeddings (`token_embd`) and
 //! the output head stay in source precision (docs/PTQTP.md guidance);
@@ -79,13 +79,12 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
 
 const gguf = fucina.gguf;
 const lora = fucina.lora;
 const optim = fucina.optim;
 const ptqtp = fucina.ptqtp;
-const ptqtp_gguf = llm.ptqtp_gguf;
+const ptqtp_gguf = fucina.ptqtp_gguf;
 const safetensors = fucina.safetensors;
 const bq = fucina.internal.backend_mod.quantized_matmul;
 

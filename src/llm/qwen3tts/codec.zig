@@ -21,7 +21,7 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const weights = @import("../weights.zig");
+const weights = @import("fucina").weights;
 
 const gguf = fucina.gguf;
 const ExecContext = fucina.ExecContext;

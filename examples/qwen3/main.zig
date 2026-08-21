@@ -64,7 +64,7 @@ pub fn main(init: std.process.Init) !void {
     // else: stdout's positional writes and stderr's offset-advancing writes
     // cannot safely share one redirected file (`cmd > f 2>&1` interleaves
     // destructively), so a std.debug stats line would get overwritten.
-    defer if (model.expert_store) |store| llm.weights.reportAndSaveMoeStream(store, !opts.moe_no_learn, stdout);
+    defer if (model.expert_store) |store| fucina.weights.reportAndSaveMoeStream(store, !opts.moe_no_learn, stdout);
     // Build a tokenizer from the same file's metadata; tolerate models without it.
     var tokenizer: ?llm.tokenizer.Tokenizer = llm.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{}) catch null;
     defer if (tokenizer) |*t| t.deinit();

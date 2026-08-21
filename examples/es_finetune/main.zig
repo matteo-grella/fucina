@@ -671,7 +671,7 @@ fn ensureResidentFloatWeights(model: *const llm.qwen3.model.Model, stdout: *std.
     }
 }
 
-fn isFloatWeight(w: *const llm.weights.LinearWeight) bool {
+fn isFloatWeight(w: *const fucina.weights.LinearWeight) bool {
     return switch (w.*) {
         .f32, .f16, .bf16 => true,
         else => false,

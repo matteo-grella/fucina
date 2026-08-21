@@ -658,7 +658,7 @@ Generic helpers stay flat in `src/llm/`:
   is documented in `TRAINING.md`).
 - `src/ptqtp.zig`: post-training quantization to trit-planes — K ∈ {1,2,3}
   ternary planes with per-group scales over packed TQ2_0 (`PTQTP.md`;
-  GGUF persistence in `src/llm/ptqtp_gguf.zig`).
+  GGUF persistence in `src/ptqtp_gguf.zig`).
 - `src/gguf.zig`: GGUF parser + writer (byte-verbatim metadata passthrough,
   llama.cpp-exact offsets; `encodeF32` is the writer-side quantize seam).
 

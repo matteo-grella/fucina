@@ -20,9 +20,9 @@
 //!     GGUF (both paths are kept but inactive).
 const std = @import("std");
 const fucina = @import("fucina");
-const weights = @import("../weights.zig");
+const weights = @import("fucina").weights;
 const kv_cache = @import("../kv_cache.zig");
-const gguf_meta = @import("../gguf_meta.zig");
+const gguf_meta = @import("fucina").gguf_meta;
 const gemma_moe = @import("moe.zig");
 
 const Allocator = std.mem.Allocator;

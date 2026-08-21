@@ -32,7 +32,7 @@ test "resident byte registry: non-gpu identity + no growth; gpu cache-hit; deini
         .ctx = &ctx,
         .file = undefined,
         .allocator = std.testing.allocator,
-        .resident = @import("../weights.zig").ResidentByteRegistry.init(std.testing.allocator),
+        .resident = @import("fucina").weights.ResidentByteRegistry.init(std.testing.allocator),
     };
     defer pw.deinit();
 

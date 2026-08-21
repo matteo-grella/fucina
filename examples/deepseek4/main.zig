@@ -34,7 +34,7 @@ pub fn main(init: std.process.Init) !void {
 
     var prompt_text: []const u8 = "The capital of France is";
     var gen_count: usize = 16;
-    var moe_cli: llm.weights.MoeStreamCli = .{};
+    var moe_cli: fucina.weights.MoeStreamCli = .{};
     var moe_cache_route = false;
     var moe_route_j: usize = 2;
     var moe_route_m: usize = 12;
@@ -106,7 +106,7 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.startsWith(u8, arg, "--vectors-max-prompt=")) {
             vectors_max_prompt = try std.fmt.parseInt(usize, arg["--vectors-max-prompt=".len..], 10);
         } else if (try moe_cli.tryParse(arg)) {
-            // Shared streamed-experts flags (llm.weights.MoeStreamCli).
+            // Shared streamed-experts flags (fucina.weights.MoeStreamCli).
         } else if (std.mem.eql(u8, arg, "--moe-cache-route")) {
             // Cache-aware near-tie routing (QUALITY-AFFECTING, opt-in):
             // prefer already-resident experts among the top-M ranks.
@@ -198,7 +198,7 @@ pub fn main(init: std.process.Init) !void {
     // else: stdout's positional writes and stderr's offset-advancing writes
     // cannot safely share one redirected file (`cmd > f 2>&1` interleaves
     // destructively), so a std.debug stats line would get overwritten.
-    defer if (model.expert_store) |store| llm.weights.reportAndSaveMoeStream(store, !moe_no_learn, stdout);
+    defer if (model.expert_store) |store| fucina.weights.reportAndSaveMoeStream(store, !moe_no_learn, stdout);
     file.deinit();
     try stdout.print("load: {d:.3} s\n", .{@as(f64, @floatFromInt(std.Io.Clock.awake.now(init.io).nanoseconds - load_start)) / 1e9});
 

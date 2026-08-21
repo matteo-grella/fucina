@@ -12,7 +12,7 @@ const qwen3 = @import("model.zig");
 const shine = @import("shine.zig");
 const shine_train = @import("shine_train.zig");
 const qwen3_train = @import("train.zig");
-const weights = @import("../weights.zig");
+const weights = @import("fucina").weights;
 
 const ExecContext = fucina.ExecContext;
 

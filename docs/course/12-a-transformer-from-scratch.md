@@ -68,7 +68,7 @@ In practice nobody types these numbers: `Config.fromGguf`
 (`model.zig:89-118`) reads them from the GGUF's own metadata under the
 `general.architecture` prefix (`qwen3.block_count`, …), so any Qwen3-family
 size — 0.6B through 8B, plus the MoE variants — loads without hardcoding.
-The helpers live in `src/llm/gguf_meta.zig`, with one design point worth
+The helpers live in `src/gguf_meta.zig`, with one design point worth
 noticing: qwen3's loader treats a present-but-zero key as missing
 (`.reject_zero`, `model.zig:139-143`), because every qwen3 config integer
 is structurally positive — a zero can only be a broken file.
@@ -397,7 +397,7 @@ piece in the order the code runs it.
 
 `token_embedding` is a `LinearWeight` — the same 29-arm `union(enum)` over
 weight formats you met in [Chapter 11](11-model-files-and-quantization.md) —
-and `getRowsAs` (`src/llm/weights.zig:832`) gathers one row per token id
+and `getRowsAs` (`src/weights.zig:832`) gathers one row per token id
 into a fresh `[seq, embed]` f32 tensor. Because the gather is a method on
 the weight union, a q8_0 or f16 embedding table works exactly like an f32
 one: rows dequantize or widen on the fly ("nothing is widened to f32 at
@@ -859,7 +859,7 @@ about to see:
   norm-into-GEMM path from Chapter 11 is explicitly gated to m ≥ 4:
   `supportsNormedFusion` declines at decode sizes, citing a "measured 2-3%
   decode LOSS on M1 Q4_K_M/Q8_0, against a +11-23% pp32 win"
-  (`src/llm/weights.zig:780-789`) — a documented decision *with its
+  (`src/weights.zig:780-789`) — a documented decision *with its
   numbers*, and a reminder that these are dated, machine-specific
   measurements, not laws.
 - **Batch decode** shares the stream: `forwardStepBatch`
@@ -1252,7 +1252,7 @@ stacks are the bulk of a MoE model's bytes, so when the GGUF is
 memory-mapped they are *borrowed* straight from the mapping instead of
 copied — the model takes ownership and unmaps it last in `deinit`
 (`model.zig:236-241, 264-267`). And for models bigger than your RAM,
-`MoeStreamOptions` (`src/llm/weights.zig:1069-1100`, re-exported at
+`MoeStreamOptions` (`src/weights.zig:1069-1100`, re-exported at
 `model.zig:153`) keeps experts on disk, read on
 demand through a tiered cache — "the explicit trade that lets a
 bigger-than-RAM model run at all" (`weights.zig:1073-1074`); that story (LRU

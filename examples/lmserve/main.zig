@@ -154,7 +154,7 @@ pub const Args = struct {
     /// Streamed-expert flags (deepseek4 backend): the shared `--moe-*` set
     /// plus the family-specific levers the deepseek4 runner speaks. Slices
     /// parsed into `moe_cli` borrow argv.
-    moe_cli: llm.weights.MoeStreamCli = .{},
+    moe_cli: fucina.weights.MoeStreamCli = .{},
     moe_pilot: bool = false,
     moe_pin_mb: ?usize = null,
     moe_no_learn: bool = false,
@@ -264,7 +264,7 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--experts=pack")) {
             args.experts_borrow = false;
         } else if (try args.moe_cli.tryParse(arg)) {
-            // Shared streamed-experts flags (llm.weights.MoeStreamCli).
+            // Shared streamed-experts flags (fucina.weights.MoeStreamCli).
         } else if (std.mem.eql(u8, arg, "--moe-pilot")) {
             args.moe_cli.armed = true;
             args.moe_pilot = true;
@@ -502,7 +502,7 @@ fn serveQwen35(
     // LIFO: the streamed-tier report + usage save runs BEFORE model.deinit
     // destroys the store.
     defer if (model.expert_store) |store| {
-        llm.weights.reportAndSaveMoeStream(store, !args.moe_no_learn, stderr);
+        fucina.weights.reportAndSaveMoeStream(store, !args.moe_no_learn, stderr);
         stderr.flush() catch {};
     };
     file.deinit();
@@ -562,7 +562,7 @@ fn serveDeepseek4(
     // LIFO: the streamed-tier report + usage save runs BEFORE model.deinit
     // destroys the store.
     defer if (model.expert_store) |store| {
-        llm.weights.reportAndSaveMoeStream(store, !args.moe_no_learn, stderr);
+        fucina.weights.reportAndSaveMoeStream(store, !args.moe_no_learn, stderr);
         stderr.flush() catch {};
     };
     file.deinit();

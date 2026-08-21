@@ -19,7 +19,7 @@
 //! a clean A/B against that file), while each `blk.N.ffn_*_exps.weight`
 //! Q4_K stack is replaced by K plane-major TQ2_0 sibling tensors
 //! (`<name>.ptqtpK`) solved per expert from the fp4 source, following the
-//! src/llm/ptqtp_gguf.zig persistence conventions (`fucina.ptqtp.version`
+//! src/ptqtp_gguf.zig persistence conventions (`fucina.ptqtp.version`
 //! stamp; `fucina.ptqtp.tie_scales` when tie-fitted), so the output loads
 //! through the deepseek4 pair-detection and streams through the
 //! ExpertStore multi-plane path.
@@ -39,11 +39,10 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
 
 const gguf = fucina.gguf;
 const ptqtp = fucina.ptqtp;
-const ptqtp_gguf = llm.ptqtp_gguf;
+const ptqtp_gguf = fucina.ptqtp_gguf;
 const safetensors = fucina.safetensors;
 
 const usage =

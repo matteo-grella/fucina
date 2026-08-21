@@ -20,7 +20,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
 
 const codec = @import("codec.zig");
 
@@ -399,7 +398,7 @@ fn ffn(ctx: *ExecContext, layer: *const codec.HubertLayer, x: []const f32, t: us
 /// call the reference's ggml-BLAS backend makes). Returns owned rows.
 fn linearHost(
     ctx: *ExecContext,
-    weight: *const llm.weights.LinearWeight,
+    weight: *const fucina.weights.LinearWeight,
     input: []const f32,
     t: usize,
     in_dim: usize,

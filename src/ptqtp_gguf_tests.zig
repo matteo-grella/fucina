@@ -5,7 +5,7 @@
 //! fused weights row-slice to per-source planes that re-fuse losslessly,
 //! and save→load→save is byte-stable.
 const std = @import("std");
-const fucina = @import("fucina");
+const fucina = @import("fucina.zig");
 const weights = @import("weights.zig");
 const ptqtp_gguf = @import("ptqtp_gguf.zig");
 

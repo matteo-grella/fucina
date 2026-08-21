@@ -135,8 +135,8 @@ API-level companion. Every Zig snippet is machine-verified against the tree
   - [12.7 Training-checkpoint directory and native optimizer frames (`src/training_checkpoint.zig`, `src/optim.zig`)](#127-training-checkpoint-directory-and-native-optimizer-frames-srctraining_checkpointzig-srcoptimzig)
 - [13. The LLM stack (fucina_llm)](#13-the-llm-stack-fucina_llm)
   - [13.1 Module layout (`src/llm.zig`)](#131-module-layout-srcllmzig)
-  - [13.2 Weight loading (`src/llm/weights.zig`)](#132-weight-loading-srcllmweightszig)
-  - [13.3 GGUF metadata glue (`src/llm/gguf_meta.zig`)](#133-gguf-metadata-glue-srcllmgguf_metazig)
+  - [13.2 Weight loading (`src/weights.zig`)](#132-weight-loading-srcweightszig)
+  - [13.3 GGUF metadata glue (`src/gguf_meta.zig`)](#133-gguf-metadata-glue-srcgguf_metazig)
   - [13.4 KV cache (`src/llm/kv_cache.zig`)](#134-kv-cache-srcllmkv_cachezig)
   - [13.5 Tokenizers](#135-tokenizers)
   - [13.6 Sampling (`src/llm/sampler.zig`)](#136-sampling-srcllmsamplerzig)
@@ -772,7 +772,7 @@ values. On Linux without libc the lookup scans `/proc/self/environ`
 | `FUCINA_GPU_VRAM_BUDGET` (cuda) | Weight-residency budget in bytes; `0` disables the bound. | 80% of free VRAM at init |
 | `FUCINA_GPU_KERNELS=src` (cuda) | NVRTC-recompiles the vendored kernels from `kernels.cu` instead of loading the committed PTX (dev loop; `tools/gen_cuda_ptx.sh` regenerates the PTX). | committed PTX |
 
-**LLM stack** (`src/llm/weights.zig` §13.2, `src/llm/qwen3/train.zig`,
+**Model I/O + LLM stack** (`src/weights.zig` §13.2, `src/llm/qwen3/train.zig`,
 `src/llm/inkling/mmproj.zig`; read once and cached like the tables above):
 
 | Variable | Effect | Default |
@@ -5690,7 +5690,7 @@ The hard rule: **pooled storage must never be marked `.stable_process`.**
 The slab arm makes address reuse routine, so a cached wrap keyed on a pooled
 transient's address would silently read stale data after the slab is
 recycled. Every in-tree `.stable_process` caller wraps device-resident or
-mmap'd weight bytes (`src/llm/weights.zig` threads the flag through the
+mmap'd weight bytes (`src/weights.zig` threads the flag through the
 quantized-weight loaders via `QuantizedMatmulOptions.rhs_lifetime`). This is
 about storage stability, not about whether the operand is a model weight.
 
@@ -6961,7 +6961,7 @@ first, then free/unmap the bytes: provider teardown may still need the live
 address to unregister it. The two in-tree
 production uses:
 
-- **GPU device-resident bytes** — `src/llm/weights.zig` wraps managed device
+- **GPU device-resident bytes** — `src/weights.zig` wraps managed device
   allocations from `internal.gpu.allocResidentBytes` so the final buffer
   release (counting `cloneView`'d weights that share it) frees them via
   `internal.gpu.freeResidentBytes` (§8.6, §9).
@@ -7000,7 +7000,7 @@ fn wrapMappedWeights(alloc: std.mem.Allocator, mapped: []f32) !fucina.internal.R
 ```
 
 The buffer type is not separately exported; internal code names it through
-the tensor's field type, as above (the `src/llm/weights.zig` idiom).
+the tensor's field type, as above (the `src/weights.zig` idiom).
 
 **Thread-safety.** `retain`/`release` are atomic and may race freely; the
 data slice is not synchronized — concurrent reads are fine, and writers need
@@ -7998,7 +7998,7 @@ by the ObjC shim (`src/backend/metal/shim.m`): the MLX "steel" f32/f16 GEMM
   8192 rows); shared-input batches encode multiple weight matrices without
   replicating input rows. Transient RHS or longer prompts retain the blocking
   chunk fallback.
-- **PTQTP ternary prefill** (`src/llm/weights.zig`): with resident plane
+- **PTQTP ternary prefill** (`src/weights.zig`): with resident plane
   bytes and `m ≥ 32`, each TQ2_0 trit-plane runs as one dequant-in-kernel
   dispatch through the same `denseQuantMatmulGpu` seam and the K plane
   outputs sum on the CPU (K = 1 returns the async tensor directly). A
@@ -9047,7 +9047,7 @@ walks a whole model (§13.2.1); `zig build ptqtp-spirals` and
 `zig build ptqtp-qwen3` are the acceptance/measurement examples. Decorated
 models persist to GGUF as per-plane standalone TQ2_0 tensors and load back
 bitwise through plane pair-detection in the qwen3 loaders
-(`llm.ptqtp_gguf`, §13.2.1), so the solve runs once per model; a
+(`fucina.ptqtp_gguf`, §13.2.1), so the solve runs once per model; a
 scale-tied fit persists as the file key `fucina.ptqtp.tie_scales`
 (present only when every decorated linear was tie-fitted), which lets the
 loaders rebuild the folded one-pass serving form.
@@ -10341,6 +10341,12 @@ Fucina speaks two interchange formats and two native sidecar formats:
 | state-dict stream | `fucina.state_dict` (`src/state_dict.zig`) | named, dtype-aware checkpoint entries; wire format IS safetensors |
 | checkpoint directory | `fucina.training_checkpoint` (`src/training_checkpoint.zig`) | resumable-training layout: safetensors payloads + native `optimizer.fucina` frames + JSON sentinel |
 
+One floor above the container parsers, the executable-weight band is also
+core: `fucina.weights` (GGUF tensor → typed quantized weight containers,
+MoE streaming glue), `fucina.ptqtp_gguf` (PTQTP plane sidecars), and
+`fucina.gguf_meta` (metadata readers, parallel layer loading) — documented
+with their main consumers in §13.2-13.3.
+
 All integers in both binary formats are little-endian. None of the types in
 this section have internal locking: a parsed `File` is safe to read from many
 threads once construction returns, but `deinit`, `takeMapping`, and every
@@ -10818,7 +10824,7 @@ per expert slice (`ptqtp_gguf.quantizeMoeStack`): each expert's
 `[out x in]` matrix solves independently, and the K plane tensors keep the
 base 3D `[in, out, n_expert]` shape, plane-major — the MoE convention the
 qwen3 loaders pair-detect. The output carries the `fucina.ptqtp.version`
-stamp and the `src/llm/ptqtp_gguf.zig` plane names, so it loads through
+stamp and the `src/ptqtp_gguf.zig` plane names, so it loads through
 the existing pair-detection; a `--ptqtp-tie` run additionally stamps
 `fucina.ptqtp.tie_scales` — all-or-nothing by construction, since one
 `Options` covers every quantized tensor — which the loaders read to
@@ -11092,9 +11098,9 @@ family-agnostic helpers stay flat:
 
 | Flat helper | Purpose | Section |
 |---|---|---|
-| `llm.weights` | GGUF tensor → typed linear weight binding | §13.2 |
-| `llm.ptqtp_gguf` | PTQTP plane persistence — `<name>.ptqtp0/1/2` writer + pair-detecting loader | §13.2 |
-| `llm.gguf_meta` | metadata readers + parallel layer loader | §13.3 |
+| `fucina.weights` | GGUF tensor → typed linear weight binding | §13.2 |
+| `fucina.ptqtp_gguf` | PTQTP plane persistence — `<name>.ptqtp0/1/2` writer + pair-detecting loader | §13.2 |
+| `fucina.gguf_meta` | metadata readers + parallel layer loader | §13.3 |
 | `llm.kv_cache` | per-layer K/V store for autoregressive decode | §13.4 |
 | `llm.kv_persist` | crash-safe append-only KV-cache sidecar: conversations reopen warm | §13.4 |
 | `llm.tokenizer` | byte-level BPE (GPT-2/Qwen) | §13.5 |
@@ -11113,10 +11119,14 @@ The family namespaces are covered in §14 (kimi3 in §14.7,
 deepseek2/glm4moe/deepseek4/inkling by their module doc comments); this
 section documents the shared stack they are built from.
 
-### 13.2 Weight loading (`src/llm/weights.zig`)
+### 13.2 Weight loading (`src/weights.zig`)
 
 `weights.zig` turns raw GGUF tensor payloads (§12) into typed, immediately
-usable linear weights. Its error set is
+usable linear weights. It lives in the CORE module (`fucina.weights`, with
+`fucina.ptqtp_gguf` beside it): nothing in it is language-model-specific —
+vision encoders and audio models load through the same band (the
+locate-anything ViT does). `llm.weights`/`llm.ptqtp_gguf` remain as
+aliases. Its error set is
 `Error = error{ InvalidWeightShape, UnsupportedWeightType, GradUnsupported }`.
 
 #### 13.2.1 `LinearWeight`
@@ -11144,7 +11154,7 @@ precision** — nothing is widened to f32 at load time:
 | `bf16` | raw u16 bit patterns, 2 B/weight | mixed f32×bf16 TransB kernel, exact in-register widening |
 | `q8_0`, `q4_k`, `q5_k`, `q6_k` | raw GGUF blocks **plus** a pre-packed matmul RHS | `dotPacked` on the CPU quantized hot path (§10); q4_k/q6_k/q8_0 also try Metal, and CUDA additionally supports q5_k |
 | all other quant arms | raw GGUF blocks (`QuantWeight(dtype)`) | tagged `dot` through the generic quantized matmul |
-| `ptqtp` | up to three `.tq2_0` plane tensors (§10.9) — built in place by `toPtqtp`, or rebuilt bitwise from persisted `<name>.ptqtp0/1/2` plane tensors (`llm.ptqtp_gguf` pair-detection; [PTQTP.md](PTQTP.md)) | fused multi-plane entry: ONE Q8_K activation quantization + ONE worker-team dispatch running every plane on the x4 column-interleaved packs and summing in fixed plane order (bitwise equal to the per-plane facade dots, which remain the gradient-path fallback); scale-tied K=2 planes additionally fold into one 4-bit pack served by a single dot pass, and on Metal builds prefill-sized inputs dispatch against resident plane copies — one ternary dequant-in-kernel dispatch per plane, ONE folded dispatch when tied (the dense quant offload's accepted-numerics stance, not bitwise) |
+| `ptqtp` | up to three `.tq2_0` plane tensors (§10.9) — built in place by `toPtqtp`, or rebuilt bitwise from persisted `<name>.ptqtp0/1/2` plane tensors (`fucina.ptqtp_gguf` pair-detection; [PTQTP.md](PTQTP.md)) | fused multi-plane entry: ONE Q8_K activation quantization + ONE worker-team dispatch running every plane on the x4 column-interleaved packs and summing in fixed plane order (bitwise equal to the per-plane facade dots, which remain the gradient-path fallback); scale-tied K=2 planes additionally fold into one 4-bit pack served by a single dot pass, and on Metal builds prefill-sized inputs dispatch against resident plane copies — one ternary dequant-in-kernel dispatch per plane, ONE folded dispatch when tied (the dense quant offload's accepted-numerics stance, not bitwise) |
 
 `pub fn QuantWeight(comptime dtype: DType) type` returns
 `fucina.Tensor(.{ .dtype = dtype, .tags = .{ .out, .in } })`. The four hot
@@ -11277,7 +11287,7 @@ pub fn deinit(self: *LinearWeight) void
   (`skip_first_layers`/`skip_last_layers`); embeddings, lm_head, and norms
   are not walked (decorate `model.output` directly for a ternary head).
   `llm.qwen3.ptqtp.save(model, ctx, io, src_file, out_path)` persists the
-  decorated model: `llm.ptqtp_gguf` writes one standalone TQ2_0 tensor per plane —
+  decorated model: `fucina.ptqtp_gguf` writes one standalone TQ2_0 tensor per plane —
   `<name>.ptqtp0/1/2` replaces `<name>`, fused weights row-slicing back to
   their source tensor names — plus a `fucina.ptqtp.version` metadata key
   and, when every decorated entry was tie-fitted
@@ -11304,7 +11314,7 @@ pub fn deinit(self: *LinearWeight) void
 ```zig
 fn snippetLinearWeight(ctx: *fucina.ExecContext, file: *const fucina.gguf.File, row: []const f32) !void {
     const info = try file.get("blk.0.attn_q.weight");
-    var w = try llm.weights.LinearWeight.load(ctx, info, 1024, 1024); // expected [out, in]
+    var w = try fucina.weights.LinearWeight.load(ctx, info, 1024, 1024); // expected [out, in]
     defer w.deinit();
 
     var x = try fucina.Tensor(.{ .seq, .embed }).fromSlice(ctx, .{ 1, w.inDim() }, row);
@@ -11319,11 +11329,11 @@ fn snippetLinearWeight(ctx: *fucina.ExecContext, file: *const fucina.gguf.File, 
 
 ```zig
 fn snippetFuseLinear(ctx: *fucina.ExecContext, file: *const fucina.gguf.File) !void {
-    var gate = try llm.weights.LinearWeight.loadForFusion(ctx, try file.get("blk.0.ffn_gate.weight"), 3072, 1024);
+    var gate = try fucina.weights.LinearWeight.loadForFusion(ctx, try file.get("blk.0.ffn_gate.weight"), 3072, 1024);
     errdefer gate.deinit();
-    var up = try llm.weights.LinearWeight.loadForFusion(ctx, try file.get("blk.0.ffn_up.weight"), 3072, 1024);
+    var up = try fucina.weights.LinearWeight.loadForFusion(ctx, try file.get("blk.0.ffn_up.weight"), 3072, 1024);
     errdefer up.deinit();
-    if (try llm.weights.fuseLinear(ctx, &.{ &gate, &up })) |fused| {
+    if (try fucina.weights.fuseLinear(ctx, &.{ &gate, &up })) |fused| {
         var owned = fused; // one [6144, 1024] weight; gate/up were consumed
         defer owned.deinit();
     } else {
@@ -11489,7 +11499,7 @@ Metal-residency utilities shared by loaders and eager dispatch batching:
   mismatched part shapes are `Error.InvalidWeightShape`. Device-capable
   dtypes: q4_k/q6_k/q8_0 on both providers, plus q5_k on CUDA.
 
-### 13.3 GGUF metadata glue (`src/llm/gguf_meta.zig`)
+### 13.3 GGUF metadata glue (`src/gguf_meta.zig`)
 
 Flat helpers shared by every model family's loader. Error set:
 `Error = error{ InvalidConfig, MissingMetadata }`.
@@ -11529,7 +11539,7 @@ test "gguf_meta: zero-valued keys split by policy" {
     var file = try fucina.gguf.File.parseOwned(alloc, try alloc.dupe(u8, sink.buffered()));
     defer file.deinit();
 
-    const meta = llm.gguf_meta;
+    const meta = fucina.gguf_meta;
     try std.testing.expectEqual(@as(usize, 24), try meta.metaInt(&file, "arch", "block_count", .reject_zero));
     try std.testing.expectError(error.InvalidConfig, meta.metaInt(&file, "arch", "shared_kv_layers", .reject_zero));
     try std.testing.expectEqual(@as(usize, 0), try meta.metaInt(&file, "arch", "shared_kv_layers", .accept_zero));
@@ -13457,9 +13467,9 @@ namespace — `llm.qwen3.{model,train}`, `llm.kimi3.model`,
 `llm.diffusion_gemma.model`, `llm.deepseek2.model`, `llm.glm4moe.model`,
 `llm.deepseek4.model`, `llm.inkling.{model,mmproj,chat}`, `llm.parakeet.*`,
 `llm.speculative.*` — while the
-generic helpers (`llm.weights`, `llm.kv_cache`, `llm.kv_persist`, `llm.tokenizer`,
+generic helpers (`fucina.weights`, `llm.kv_cache`, `llm.kv_persist`, `llm.tokenizer`,
 `llm.spm_tokenizer`, `llm.sampler`, `llm.logit_processor`, `llm.llguidance`,
-`llm.chat`, `llm.data`, `llm.gguf_meta`, `llm.ptqtp_gguf`, `llm.cartridge`,
+`llm.chat`, `llm.data`, `fucina.gguf_meta`, `fucina.ptqtp_gguf`, `llm.cartridge`,
 `llm.cartridge_fleet`, `llm.engram`,
 `llm.unicode_categories`) stay flat and are covered in §13. This section
 documents the per-family model
@@ -13470,7 +13480,7 @@ GGUF parsing is §12; LoRA/optimizer/ES mechanics are §11.
 
 ### 14.1 Conventions shared by every family
 
-(`src/llm/*/model.zig`, `src/llm/gguf_meta.zig`)
+(`src/llm/*/model.zig`, `src/gguf_meta.zig`)
 
 **Config from GGUF metadata.** Each family's `Config.fromGguf(file)`
 (deepseek4/inkling additionally take an allocator; kimi3 is the one
@@ -13481,7 +13491,7 @@ hyperparameters from the standard GGUF key convention: the value of
 `<arch>.block_count`, `<arch>.embedding_length`,
 `<arch>.attention.head_count`, `<arch>.rope.freq_base`, and so on — so one
 loader covers every size of a family without hardcoding. The vocab size comes
-from the `token_embd.weight` tensor shape, not a key. The `llm.gguf_meta`
+from the `token_embd.weight` tensor shape, not a key. The `fucina.gguf_meta`
 helpers (`metaInt`, `metaIntOpt`, `metaFloat`, `metaFloatOpt`) implement the
 prefixing plus a per-family zero policy: qwen3/qwen35 reject present-but-zero
 required ints (`.reject_zero` — every config int is structurally positive),
@@ -13520,7 +13530,7 @@ var tok = try llm.tokenizer.Tokenizer.initFromGguf(alloc, &file, .{});
 defer tok.deinit();
 ```
 
-Weights are materialized through `llm.weights.LinearWeight.load` (§13), which
+Weights are materialized through `fucina.weights.LinearWeight.load` (§13), which
 keeps the GGUF dtype resident — f32/f16/bf16 and the quant forms (Q8_0,
 Q4_K/Q5_K/Q6_K and the other ggml types) run their own packed kernels; no
 global dequantization happens at load. Sibling projections that share a dtype

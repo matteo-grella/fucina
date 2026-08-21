@@ -12,8 +12,8 @@
 //! per-position logits, which is what the MTP verify needs.
 const std = @import("std");
 const fucina = @import("fucina");
-const weights = @import("../weights.zig");
-const gguf_meta = @import("../gguf_meta.zig");
+const weights = @import("fucina").weights;
+const gguf_meta = @import("fucina").gguf_meta;
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;

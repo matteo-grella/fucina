@@ -101,7 +101,7 @@ pub const MoeRhs = union(enum) {
     /// per-projection dots are SUMMED per element in fixed plane order
     /// inside the fused op, before the gated nonlinearity — bitwise the
     /// dense fused PTQTP linear on the same weights. Loaded from persisted
-    /// `<name>.ptqtpK` sibling plane tensors (llm/ptqtp_gguf.zig).
+    /// `<name>.ptqtpK` sibling plane tensors (src/ptqtp_gguf.zig).
     ptqtp: MoePtqtpRhs,
     /// q2_k experts (2.5625 bpw): the K-quant floor, present in the UD
     /// 2-bit community files alongside the iq2 codebook formats.
@@ -579,7 +579,7 @@ const ptqtp_acc_cols: usize = 1024;
 /// fixed stack scratch in (row, column) sub-tiles and adds elementwise —
 /// so every element is dot_p0 + dot_p1 (+ dot_p2), left-associated in
 /// plane order: the exact per-element arithmetic of the dense fused PTQTP
-/// linear (llm/weights.zig `linearSeqPtqtpFused`, which computes full
+/// linear (src/weights.zig `linearSeqPtqtpFused`, which computes full
 /// per-plane tiles and sums them in fixed plane order). Sub-tiling cannot
 /// change results: each out[r][c] is an independent dot and the ternary
 /// kernel's 4-column body and width-1 tail agree bitwise, so any

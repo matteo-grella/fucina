@@ -16,7 +16,7 @@ const llm = @import("fucina_llm");
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
 const gguf = fucina.gguf;
-const weights = llm.weights;
+const weights = fucina.weights;
 const LinearWeight = weights.LinearWeight;
 
 /// Whether to output-stack q/k/v (and gate/up) into fused GEMM weights.

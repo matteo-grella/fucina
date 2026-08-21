@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const fucina = @import("fucina");
+const fucina = @import("fucina.zig");
 
 const DType = fucina.DType;
 const ExecContext = fucina.ExecContext;
@@ -1360,7 +1360,7 @@ pub fn loadMoeRhs(
 /// PTQTP counterpart of `loadMoeRhs`: build the multi-plane `ptqtp` MoeRhs
 /// arm from persisted `<name>.ptqtpK` sibling plane tensors (plane-major,
 /// each with the base expert stack's `[in, out, n_expert]` shape and
-/// standalone-valid TQ2_0 payload — `llm/ptqtp_gguf.zig` owns the
+/// standalone-valid TQ2_0 payload — `ptqtp_gguf.zig` owns the
 /// naming/version pair-detection and calls this). Planes are borrowed from
 /// the mapping or copied, exactly as `loadMoeRhs` treats a tq2_0 stack.
 pub fn loadMoeRhsPtqtp(

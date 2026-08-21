@@ -145,8 +145,8 @@ pub fn main(init: std.process.Init) !void {
         // head on ARM while winning on VNNI hardware and on memory.
         // Independent of --planes: `--planes 0 --head-planes N` is a
         // head-only decoration.
-        var report_head = llm.weights.PtqtpReport{};
-        try llm.weights.decoratePtqtpInto(&model.output, &ctx, .{ .planes = hp, .tie_scales = tie_scales }, &report_head);
+        var report_head = fucina.weights.PtqtpReport{};
+        try fucina.weights.decoratePtqtpInto(&model.output, &ctx, .{ .planes = hp, .tie_scales = tie_scales }, &report_head);
         try stdout.print("head decorated at {d} planes (rel err {d:.4})\n", .{ hp, report_head.rmsRelErr() });
         try stdout.flush();
     }

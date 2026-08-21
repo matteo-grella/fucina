@@ -5,10 +5,9 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
 
 const gguf = fucina.gguf;
-const gguf_meta = llm.gguf_meta;
+const gguf_meta = fucina.gguf_meta;
 
 pub const arch = "locateanything";
 

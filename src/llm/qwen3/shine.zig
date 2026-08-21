@@ -28,7 +28,7 @@
 //! weights; model.zig is untouched.
 const std = @import("std");
 const fucina = @import("fucina");
-const weights = @import("../weights.zig");
+const weights = @import("fucina").weights;
 const kv_cache = @import("../kv_cache.zig");
 const qwen3 = @import("model.zig");
 const cartridge_mod = @import("../cartridge.zig");

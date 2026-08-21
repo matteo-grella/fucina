@@ -17,7 +17,7 @@
 //! Non-f32 tensors are widened/dequantized via `gguf.decodeF32` (exact bf16
 //! bit-shift widening, ggml-parity block decoders), matching the reference's
 //! type-trait widening. `project_out`/`fc2` matrices stay at their native
-//! GGUF dtype behind `llm.weights.LinearWeight`.
+//! GGUF dtype behind `fucina.weights.LinearWeight`.
 //!
 //! Ownership: `Codec.load` copies/repacks every tensor it materializes, but
 //! quantized `LinearWeight` arms may borrow the mmapped GGUF bytes — keep the
@@ -26,7 +26,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
 
 const gguf = fucina.gguf;
 const ExecContext = fucina.ExecContext;
@@ -914,7 +913,7 @@ pub const Quantizer = struct {
     /// like the reference (rvq-codec.h:83-96).
     embed_sq: []f32,
     /// Linear(64→1024) at native GGUF dtype.
-    project_out: llm.weights.LinearWeight,
+    project_out: fucina.weights.LinearWeight,
     /// `[1024]` f32.
     project_out_bias: []f32,
 
@@ -931,7 +930,7 @@ pub const Quantizer = struct {
 pub const RvqDecoder = struct {
     quantizers: [n_codebooks]Quantizer,
     /// Linear(1024→256) at native GGUF dtype.
-    fc2: llm.weights.LinearWeight,
+    fc2: fucina.weights.LinearWeight,
     /// `[256]` f32.
     fc2_bias: []f32,
 
@@ -1039,17 +1038,17 @@ pub const HubertFeatLayer = struct {
 /// One HuBERT Post-LN transformer layer: MHA (all 4 projections biased) +
 /// FFN (both denses biased) + the two affine LayerNorms.
 pub const HubertLayer = struct {
-    q_proj: llm.weights.LinearWeight,
+    q_proj: fucina.weights.LinearWeight,
     q_bias: []f32,
-    k_proj: llm.weights.LinearWeight,
+    k_proj: fucina.weights.LinearWeight,
     k_bias: []f32,
-    v_proj: llm.weights.LinearWeight,
+    v_proj: fucina.weights.LinearWeight,
     v_bias: []f32,
-    out_proj: llm.weights.LinearWeight,
+    out_proj: fucina.weights.LinearWeight,
     out_bias: []f32,
-    fc1: llm.weights.LinearWeight, // intermediate_dense 768→3072
+    fc1: fucina.weights.LinearWeight, // intermediate_dense 768→3072
     fc1_bias: []f32,
-    fc2: llm.weights.LinearWeight, // output_dense 3072→768
+    fc2: fucina.weights.LinearWeight, // output_dense 3072→768
     fc2_bias: []f32,
     ln_attn_w: []f32, // layer_norm (post attn add)
     ln_attn_b: []f32,
@@ -1082,7 +1081,7 @@ pub const Hubert = struct {
     feat: [hubert_feat_num_layers]HubertFeatLayer,
     fp_ln_w: []f32, // feature_projection.layer_norm (512)
     fp_ln_b: []f32,
-    fp_proj: llm.weights.LinearWeight, // 512→768
+    fp_proj: fucina.weights.LinearWeight, // 512→768
     fp_proj_bias: []f32,
     /// pos_conv grouped weight, flat rows `[768][48*128]` (groups=16;
     /// weight_norm already folded in the GGUF).
@@ -1218,7 +1217,7 @@ pub const DacEncoder = struct {
 
 /// RVQ encode-side per-codebook projection: Linear(1024→64) + bias.
 pub const ProjectIn = struct {
-    weight: llm.weights.LinearWeight,
+    weight: fucina.weights.LinearWeight,
     bias: []f32, // [64]
 
     pub fn deinit(self: *ProjectIn, allocator: Allocator) void {
@@ -1237,7 +1236,7 @@ pub const Encoder = struct {
     semantic: SemanticEncoder,
     dac: DacEncoder,
     project_in: [n_codebooks]ProjectIn,
-    fc: llm.weights.LinearWeight, // Linear(1024→1024)
+    fc: fucina.weights.LinearWeight, // Linear(1024→1024)
     fc_bias: []f32,
 
     /// Loads the encode-side weights. Same ownership contract as
@@ -1260,7 +1259,7 @@ pub const Encoder = struct {
         }
 
         const fc_info = try file.get("fc.weight");
-        var fc = try llm.weights.LinearWeight.load(ctx, fc_info, 1024, 1024);
+        var fc = try fucina.weights.LinearWeight.load(ctx, fc_info, 1024, 1024);
         errdefer fc.deinit();
         const fc_bias = try loadVectorF32(ctx.allocator, file, "fc.bias", 1024);
         errdefer ctx.allocator.free(fc_bias);
@@ -1500,7 +1499,7 @@ pub fn loadRvqDecoder(ctx: *ExecContext, file: *const gguf.File, config: Config)
     }
 
     const fc2_info = try file.get("fc2.weight");
-    var fc2 = try llm.weights.LinearWeight.load(ctx, fc2_info, 256, 1024);
+    var fc2 = try fucina.weights.LinearWeight.load(ctx, fc2_info, 256, 1024);
     errdefer fc2.deinit();
     const fc2_bias = try loadVectorF32(allocator, file, "fc2.bias", 256);
     errdefer allocator.free(fc2_bias);
@@ -1534,7 +1533,7 @@ fn loadQuantizer(ctx: *ExecContext, file: *const gguf.File, name_buf: []u8, k: u
 
     const w_name = try std.fmt.bufPrint(name_buf, "quantizer.quantizers.{d}.project_out.weight", .{k});
     const w_info = try file.get(w_name);
-    var project_out = try llm.weights.LinearWeight.load(ctx, w_info, 1024, 64);
+    var project_out = try fucina.weights.LinearWeight.load(ctx, w_info, 1024, 64);
     errdefer project_out.deinit();
 
     const b_name = try std.fmt.bufPrint(name_buf, "quantizer.quantizers.{d}.project_out.bias", .{k});
@@ -1780,7 +1779,7 @@ fn loadHubert(ctx: *ExecContext, file: *const gguf.File) !Hubert {
     const fp_ln_b = try loadVectorF32(allocator, file, "semantic_model.feature_projection.layer_norm.bias", hubert_feat_dim);
     errdefer allocator.free(fp_ln_b);
     const fp_proj_info = try file.get("semantic_model.feature_projection.projection.weight");
-    var fp_proj = try llm.weights.LinearWeight.load(ctx, fp_proj_info, hubert_hidden, hubert_feat_dim);
+    var fp_proj = try fucina.weights.LinearWeight.load(ctx, fp_proj_info, hubert_hidden, hubert_feat_dim);
     errdefer fp_proj.deinit();
     const fp_proj_bias = try loadVectorF32(allocator, file, "semantic_model.feature_projection.projection.bias", hubert_hidden);
     errdefer allocator.free(fp_proj_bias);
@@ -1820,10 +1819,10 @@ fn loadHubert(ctx: *ExecContext, file: *const gguf.File) !Hubert {
     };
 }
 
-fn loadHubertLinear(ctx: *ExecContext, file: *const gguf.File, name_buf: []u8, layer_i: usize, suffix: []const u8, out_dim: usize, in_dim: usize) !llm.weights.LinearWeight {
+fn loadHubertLinear(ctx: *ExecContext, file: *const gguf.File, name_buf: []u8, layer_i: usize, suffix: []const u8, out_dim: usize, in_dim: usize) !fucina.weights.LinearWeight {
     const name = try std.fmt.bufPrint(name_buf, "semantic_model.encoder.layers.{d}.{s}.weight", .{ layer_i, suffix });
     const info = try file.get(name);
-    return llm.weights.LinearWeight.load(ctx, info, out_dim, in_dim);
+    return fucina.weights.LinearWeight.load(ctx, info, out_dim, in_dim);
 }
 
 fn loadHubertBias(ctx: *ExecContext, file: *const gguf.File, name_buf: []u8, layer_i: usize, suffix: []const u8, len: usize) ![]f32 {
@@ -2064,7 +2063,7 @@ fn loadEncResUnit(ctx: *ExecContext, file: *const gguf.File, name_buf: []u8, blo
 fn loadProjectIn(ctx: *ExecContext, file: *const gguf.File, name_buf: []u8, k: usize) !ProjectIn {
     const w_name = try std.fmt.bufPrint(name_buf, "quantizer.quantizers.{d}.project_in.weight", .{k});
     const w_info = try file.get(w_name);
-    var weight = try llm.weights.LinearWeight.load(ctx, w_info, 64, 1024);
+    var weight = try fucina.weights.LinearWeight.load(ctx, w_info, 64, 1024);
     errdefer weight.deinit();
 
     const b_name = try std.fmt.bufPrint(name_buf, "quantizer.quantizers.{d}.project_in.bias", .{k});

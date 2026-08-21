@@ -64,7 +64,7 @@ Deliberate deltas from the paper:
   `quantizeRowTQ2_0ScaledInto` (the layout contract), error ordering
   K3 < K2 < K1 < absmean, RHS-view matmul equivalence, NaN benignity,
   determinism, all-zero packing, option/shape validation.
-- `src/llm/weights.zig`: the `LinearWeight` union has a
+- `src/weights.zig`: the `LinearWeight` union has a
   `ptqtp: WeightPtqtp` arm (up to three plane tensors).
   `LinearWeight.toPtqtp` dequantizes rows in chunks through `getRowsAs` —
   **any loadable source dtype quantizes through one code path** (f32, f16,
@@ -89,7 +89,7 @@ Deliberate deltas from the paper:
   `o_planes` (per-projection plane-count overrides for the sensitive
   residual-writing projections). Embeddings, lm_head, and norms are not
   walked; MoE FFNs are counted skipped.
-- **GGUF persistence** (`src/llm/ptqtp_gguf.zig`): a decorated model saves
+- **GGUF persistence** (`src/ptqtp_gguf.zig`): a decorated model saves
   as one byte-valid standalone TQ2_0 tensor per plane — `<name>.ptqtp0/1/2`
   replaces `<name>`, each plane individually llama.cpp-dequantizable — plus
   a `fucina.ptqtp.version` metadata key; every other tensor and metadata

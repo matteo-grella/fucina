@@ -27,7 +27,7 @@ const fucina = @import("fucina");
 const qwen3 = @import("model.zig");
 const cartridge_mod = @import("../cartridge.zig");
 const engram_mod = @import("../engram.zig");
-const weights = @import("../weights.zig");
+const weights = @import("fucina").weights;
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;

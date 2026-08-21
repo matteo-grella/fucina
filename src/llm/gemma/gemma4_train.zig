@@ -16,7 +16,7 @@ const std = @import("std");
 const fucina = @import("fucina");
 const gemma4 = @import("gemma4.zig");
 const gemma_moe = @import("moe.zig");
-const weights = @import("../weights.zig");
+const weights = @import("fucina").weights;
 
 const Allocator = std.mem.Allocator;
 const backend_mod = fucina.internal.backend_mod;

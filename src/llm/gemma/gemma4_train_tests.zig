@@ -9,7 +9,7 @@ const gemma4 = @import("gemma4.zig");
 const cartridge = @import("../cartridge.zig");
 const kv_cache_mod = @import("../kv_cache.zig");
 const gemma_moe = @import("moe.zig");
-const weights = @import("../weights.zig");
+const weights = @import("fucina").weights;
 
 const Allocator = std.mem.Allocator;
 const backend_mod = fucina.internal.backend_mod;

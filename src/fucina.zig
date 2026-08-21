@@ -14,6 +14,15 @@ const training_checkpoint_mod = @import("training_checkpoint.zig");
 const thread = @import("thread.zig");
 pub const es = @import("es.zig");
 pub const gguf = @import("gguf.zig");
+/// Model I/O above the container parsers: GGUF tensors → executable
+/// quantized weight containers (`LinearWeight`, `MoeRhs`, fusion, mmap
+/// borrowing, ExpertStore streaming glue). Model-agnostic — LLM families,
+/// vision encoders, and audio models load through the same band.
+pub const weights = @import("weights.zig");
+/// PTQTP sidecar planes as weight decorations (docs/PTQTP.md).
+pub const ptqtp_gguf = @import("ptqtp_gguf.zig");
+/// GGUF metadata readers + parallel layer loading shared by model loaders.
+pub const gguf_meta = @import("gguf_meta.zig");
 /// Streaming causal 1-D convolutions (codec-decoder state discipline).
 pub const streamconv = @import("streamconv.zig");
 pub const lora = @import("lora.zig");
@@ -223,6 +232,9 @@ test {
     _ = thread;
     _ = es;
     _ = gguf;
+    _ = weights;
+    _ = ptqtp_gguf;
+    _ = gguf_meta;
     _ = lora;
     _ = optim;
     _ = ptqtp;

@@ -11,14 +11,14 @@ const std = @import("std");
 const builtin = @import("builtin");
 const fucina = @import("fucina");
 const gguf = fucina.gguf;
-const weights = @import("../weights.zig");
+const weights = @import("fucina").weights;
 
 const DType = fucina.DType;
 const ExecContext = fucina.ExecContext;
 const Allocator = std.mem.Allocator;
 // RAW (allowed): the dispatch-batched q6 helper produces one raw output that is
 // immediately wrapped as a Tensor. Ordinary per-weight borrowed RHS dispatch
-// lives in src/llm/weights.zig.
+// lives in src/weights.zig.
 const RawTensor = fucina.internal.RawTensor;
 
 /// Tagged facade for the linear bridge: a raw `[T,in]` activation is wrapped as

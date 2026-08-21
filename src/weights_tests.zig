@@ -3,7 +3,7 @@
 //! routing to the resident bf16 arm, and quantized-weight storage ownership
 //! (a cloneView'd weight outlives the source it shares blocks with).
 const std = @import("std");
-const fucina = @import("fucina");
+const fucina = @import("fucina.zig");
 const weights = @import("weights.zig");
 
 const ExecContext = fucina.ExecContext;

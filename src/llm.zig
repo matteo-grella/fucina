@@ -1,6 +1,8 @@
 //! LLM/ASR module root. Model families live in subdirectories (`llm/<family>/`)
 //! and are exposed as namespaces (`llm.parakeet.decoder`, `llm.gemma.gemma4`, …);
-//! generic/shared helpers (weights, kv_cache, tokenizers, sampler, chat) stay flat.
+//! generic/shared helpers (kv_cache, tokenizers, sampler, chat) stay flat.
+//! Model I/O (weights containers, PTQTP sidecars, GGUF metadata) is core:
+//! `fucina.weights` / `fucina.ptqtp_gguf` / `fucina.gguf_meta` (aliased here).
 
 /// SubQ attention: research decode-path evaluator (docs/SUBQUADRATIC-ATTENTION.md).
 pub const subq = @import("llm/subq.zig");
@@ -93,9 +95,12 @@ pub const inkling = struct {
 };
 
 // === Generic / shared helpers (stay flat) ===
-pub const weights = @import("llm/weights.zig");
-pub const ptqtp_gguf = @import("llm/ptqtp_gguf.zig");
-pub const gguf_meta = @import("llm/gguf_meta.zig");
+// Model I/O (weights containers, PTQTP sidecars, GGUF metadata) lives in
+// the core module — it is model-agnostic (`fucina.weights` et al.). These
+// aliases keep the historical `llm.weights` spelling working.
+pub const weights = @import("fucina").weights;
+pub const ptqtp_gguf = @import("fucina").ptqtp_gguf;
+pub const gguf_meta = @import("fucina").gguf_meta;
 pub const cartridge = @import("llm/cartridge.zig");
 pub const cartridge_fleet = @import("llm/cartridge_fleet.zig");
 pub const engram = @import("llm/engram.zig");
@@ -156,9 +161,6 @@ test {
     _ = inkling.model;
     _ = inkling.mmproj;
     _ = inkling.chat;
-    _ = weights;
-    _ = ptqtp_gguf;
-    _ = gguf_meta;
     _ = cartridge;
     _ = cartridge_fleet;
     _ = engram;

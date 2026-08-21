@@ -4,7 +4,7 @@
 //! policy (zero handling, layer load/deinit shape).
 
 const std = @import("std");
-const fucina = @import("fucina");
+const fucina = @import("fucina.zig");
 
 const ExecContext = fucina.ExecContext;
 const gguf = fucina.gguf;

@@ -25,7 +25,7 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const weights = @import("../weights.zig");
+const weights = @import("fucina").weights;
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;

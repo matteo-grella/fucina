@@ -10,7 +10,6 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
 
 const codec = @import("codec.zig");
 const dump = @import("dump.zig");
@@ -63,7 +62,7 @@ fn buildSynthetic(ctx: *fucina.ExecContext, allocator: std.mem.Allocator) !Synth
             for (out.embed[k][j * d_dim ..][0..d_dim]) |x| sum += x * x;
             sq.* = sum;
         }
-        var weight = try llm.weights.WeightF32.fromSlice(ctx, .{ h_dim, d_dim }, &out.proj_w[k]);
+        var weight = try fucina.weights.WeightF32.fromSlice(ctx, .{ h_dim, d_dim }, &out.proj_w[k]);
         errdefer weight.deinit();
         const bias = try allocator.dupe(f32, &out.proj_b[k]);
         errdefer allocator.free(bias);
@@ -74,7 +73,7 @@ fn buildSynthetic(ctx: *fucina.ExecContext, allocator: std.mem.Allocator) !Synth
             .project_out_bias = bias,
         };
     }
-    var fc2_w = try llm.weights.WeightF32.fromSlice(ctx, .{ fc_dim, h_dim }, &out.fc2_w);
+    var fc2_w = try fucina.weights.WeightF32.fromSlice(ctx, .{ fc_dim, h_dim }, &out.fc2_w);
     errdefer fc2_w.deinit();
     out.dec.fc2 = .{ .f32 = fc2_w };
     out.dec.fc2_bias = try allocator.dupe(f32, &out.fc2_b);
