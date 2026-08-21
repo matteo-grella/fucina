@@ -1083,6 +1083,91 @@ pub fn matmul2DQuantizedRhsQ6_Kx4WithConfig(
     return matmul2DQuantizedRhsQ8_KRowsWithConfig(vector.matmul2DQ6_Kx4RhsIntoWithConfig, allocator, out, a, rhs, m, n, k, config);
 }
 
+/// Prefill row count at/above which the table-decoded formats (iq*/fp4)
+/// dequantize weight panels to f32 and ride BLAS, exactly like the Q2_0
+/// arm above. Their int path pays a per-block table decode per
+/// (weight-row, LHS-row) pair, so the dequant-once panel amortizes even
+/// earlier than Q2_0's mul-free path — same accepted-numerics stance: the
+/// BLAS arm consumes exact f32 activations, the int kernels keep decode
+/// and short bursts (and every bitwise contract).
+const table_blas_min_m: usize = 64;
+
+fn TableDequantSliceTask(comptime rhs_dtype: DType) type {
+    return struct {
+        rhs: *const quantized_matmul.QuantizedMatmulRhsRowsFor(rhs_dtype),
+        dst: []f32, // kc floats of weight row `row`, from block bi0
+        row: usize,
+        bi0: usize,
+
+        fn run(task: *const @This()) void {
+            const bs = comptime dtype_mod.blockSize(rhs_dtype);
+            const blocks = task.rhs.columnBlocks(task.row);
+            // Lengths are exact by construction (dst covers whole blocks),
+            // so the only representable error cannot occur.
+            quantized_matmul.dequantizeRowForDType(
+                rhs_dtype,
+                task.dst,
+                blocks[task.bi0 .. task.bi0 + task.dst.len / bs],
+            ) catch unreachable;
+        }
+    };
+}
+
+fn matmul2DQuantizedRhsTableBlasWithConfig(
+    comptime rhs_dtype: DType,
+    allocator: std.mem.Allocator,
+    out: *Tensor,
+    a: *const Tensor,
+    rhs: *const quantized_matmul.QuantizedMatmulRhsRowsFor(rhs_dtype),
+    m: usize,
+    n: usize,
+    k: usize,
+    config: ParallelConfig,
+) !void {
+    const Task = TableDequantSliceTask(rhs_dtype);
+    const bs = comptime dtype_mod.blockSize(rhs_dtype);
+    const ad = contiguousDataConst(a, m * k);
+    const cd = contiguousData(out, m * n);
+
+    // k-slice width: whole blocks, full k when it fits the Q2_0 panel budget.
+    const kp_max = @max(bs, (q2_0_blas_panel_floats / n) & ~(bs - 1));
+    const kp = @min(k, kp_max);
+    const panel = try allocator.alloc(f32, n * kp);
+    defer allocator.free(panel);
+    const tasks = try allocator.alloc(Task, n);
+    defer allocator.free(tasks);
+
+    var k0: usize = 0;
+    while (k0 < k) : (k0 += kp) {
+        const kc = @min(kp, k - k0);
+        const bi0 = k0 / bs;
+        for (0..n) |row| tasks[row] = .{ .rhs = rhs, .dst = panel[row * kc ..][0..kc], .row = row, .bi0 = bi0 };
+        if (config.pool) |pool| {
+            pool.parallelChunks(Task, tasks, Task.run);
+        } else {
+            for (tasks) |*t| Task.run(t);
+        }
+        // C (m x n, full width) += A[:, k0..k0+kc] x panel^T (kc x n).
+        ensureBlasThreadsConfigured();
+        cblas_sgemm(
+            cblas_row_major,
+            cblas_no_trans,
+            cblas_trans,
+            cDim(m),
+            cDim(n),
+            cDim(kc),
+            1.0,
+            ad.ptr + k0,
+            cDim(k),
+            panel.ptr,
+            cDim(kc),
+            if (k0 == 0) 0.0 else 1.0,
+            cd.ptr,
+            cDim(n),
+        );
+    }
+}
+
 fn matmul2DQuantizedRhsTableQ8_0WithConfig(
     comptime rhs_dtype: DType,
     allocator: std.mem.Allocator,
@@ -1095,6 +1180,12 @@ fn matmul2DQuantizedRhsTableQ8_0WithConfig(
     config: ParallelConfig,
 ) !void {
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
+
+    if (comptime build_options.use_blas) {
+        if (m >= table_blas_min_m and fitsCblas(m, n, k)) {
+            return matmul2DQuantizedRhsTableBlasWithConfig(rhs_dtype, allocator, out, a, rhs, m, n, k, config);
+        }
+    }
 
     const cd = contiguousData(out, m * n);
     var qlhs = try quantized_matmul.quantizeRowsQ8_0(allocator, a);
@@ -1114,6 +1205,12 @@ fn matmul2DQuantizedRhsTableQ8_KWithConfig(
     config: ParallelConfig,
 ) !void {
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
+
+    if (comptime build_options.use_blas) {
+        if (m >= table_blas_min_m and fitsCblas(m, n, k)) {
+            return matmul2DQuantizedRhsTableBlasWithConfig(rhs_dtype, allocator, out, a, rhs, m, n, k, config);
+        }
+    }
 
     const cd = contiguousData(out, m * n);
     const qlhs = try quantized_matmul.quantizeRowsQ8_K(allocator, a);

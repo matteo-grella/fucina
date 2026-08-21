@@ -48,6 +48,7 @@ const QKV16i32 = common.QKV16i32;
 const QKV16i8 = common.QKV16i8;
 const QKV4i32 = common.QKV4i32;
 const sdotI8x16 = common.sdotI8x16;
+const tblI8x16 = common.tblI8x16;
 const QKV16u16 = common.QKV16u16;
 const QKV16u8 = common.QKV16u8;
 const QKV8i16 = common.QKV8i16;
@@ -1407,6 +1408,13 @@ pub fn matmulTableQ8_KRhsTile(
     c0: usize,
     c1: usize,
 ) void {
+    // Multi-row LHS on iq4_xs: the generic loop below re-decodes every
+    // weight block once per LHS row; the decoded tile hoists the table
+    // decode out of the row loop (identical float sequence — bitwise equal,
+    // pinned by the randomized tile parity test in this file).
+    if (comptime rhs_dtype == .iq4_xs) {
+        if (r1 - r0 > 1) return matmulIQ4_XSTileDecoded(out, lhs_blocks, rhs, n, r0, r1, c0, c1);
+    }
     const blocks_per_row = rhs.rows.blocks_per_row;
 
     var row = r0;
@@ -1435,6 +1443,122 @@ pub fn matmulTableQ8_KRhsTile(
                 acc += dotTableQ8_K(rhs_dtype, &rhs_col[block_index], &lhs_row[block_index]);
             }
             out[row * n + col] = acc;
+        }
+    }
+}
+
+/// LHS rows per decoded-tile pass: bounds the strided Q8_K activation
+/// window a decoded weight block is reused across (64 rows x 292 B ≈ 18 KB).
+const iq4_xs_row_tile: usize = 64;
+
+/// iq4_xs tile with the weight-block table decode hoisted out of the LHS row
+/// loop: per (column, superblock) the 8 sub-block nibble lanes decode ONCE
+/// (two `tbl` each) and serve every row of the tile, instead of once per
+/// row. Float ops replicate the generic path's exact sequence — per
+/// (row, col): out starts at 0 and accumulates one per-superblock partial
+/// per step, each partial summing `(d·ls)·isum` terms in sub-block order —
+/// so results are bitwise identical to the generic loop.
+fn matmulIQ4_XSTileDecoded(
+    out: []f32,
+    lhs_blocks: []const BlockQ8_K,
+    rhs: *const QuantizedMatmulRhsRowsFor(.iq4_xs),
+    n: usize,
+    r0: usize,
+    r1: usize,
+    c0: usize,
+    c1: usize,
+) void {
+    const blocks_per_row = rhs.rows.blocks_per_row;
+    var rt = r0;
+    while (rt < r1) : (rt += iq4_xs_row_tile) {
+        const rt_end = @min(rt + iq4_xs_row_tile, r1);
+        var col = c0;
+        // 4 columns per pass, sub-block-outer: per sub-block only the four
+        // columns' two decoded lanes are live (8 vectors — fits the NEON
+        // register file), and every streamed activation load feeds four
+        // accumulator chains. The f32 partial tile accumulates each
+        // (row, col)'s eight sub-block terms in sub-block order, so the
+        // float sequence — and therefore the result — is bitwise identical
+        // to the generic path.
+        while (col + 4 <= c1) : (col += 4) {
+            for (rt..rt_end) |row| {
+                inline for (0..4) |c| out[row * n + col + c] = 0;
+            }
+            var bsum_tile: [iq4_xs_row_tile][4]f32 = undefined;
+            var block_index: usize = 0;
+            while (block_index < blocks_per_row) : (block_index += 1) {
+                var wb: [4]*const BlockIQ4_XS = undefined;
+                var wd: [4]f32 = undefined;
+                inline for (0..4) |c| {
+                    wb[c] = &rhs.rows.blocks[(col + c) * blocks_per_row + block_index];
+                    wd[c] = f16BitsToF32(wb[c].d);
+                }
+                for (rt..rt_end) |row| {
+                    bsum_tile[row - rt] = .{ 0, 0, 0, 0 };
+                }
+                inline for (0..8) |ib| {
+                    var wlo: [4]QKV16i8 = undefined;
+                    var whi: [4]QKV16i8 = undefined;
+                    var lsf: [4]f32 = undefined;
+                    inline for (0..4) |c| {
+                        const nib = nibbleTableBytes(&tables.kvalues_iq4nl, wb[c].qs[16 * ib ..][0..16]);
+                        wlo[c] = nib.lo;
+                        whi[c] = nib.hi;
+                        const low = (wb[c].scales_l[ib / 2] >> @intCast(4 * (ib % 2))) & 0x0f;
+                        const high = ((wb[c].scales_h >> @intCast(2 * ib)) & 3) << 4;
+                        const ls: i32 = @intCast(@as(u16, low) | high);
+                        lsf[c] = @floatFromInt(ls - 32);
+                    }
+                    for (rt..rt_end) |row| {
+                        const ab = &lhs_blocks[row * blocks_per_row + block_index];
+                        const a_lo: QKV16i8 = @bitCast(ab.qs[32 * ib ..][0..16].*);
+                        const a_hi: QKV16i8 = @bitCast(ab.qs[32 * ib + 16 ..][0..16].*);
+                        const bt = &bsum_tile[row - rt];
+                        inline for (0..4) |c| {
+                            var acc: QKV4i32 = @splat(0);
+                            acc = sdotI8x16(acc, wlo[c], a_lo);
+                            acc = sdotI8x16(acc, whi[c], a_hi);
+                            bt[c] += (wd[c] * ab.d) * lsf[c] * @as(f32, @floatFromInt(@reduce(.Add, acc)));
+                        }
+                    }
+                }
+                for (rt..rt_end) |row| {
+                    inline for (0..4) |c| out[row * n + col + c] += bsum_tile[row - rt][c];
+                }
+            }
+        }
+        while (col < c1) : (col += 1) {
+            const col_blocks = rhs.rows.blocks[col * blocks_per_row ..][0..blocks_per_row];
+            for (rt..rt_end) |row| out[row * n + col] = 0;
+            var block_index: usize = 0;
+            while (block_index < blocks_per_row) : (block_index += 1) {
+                const wb = &col_blocks[block_index];
+                const wd = f16BitsToF32(wb.d);
+                var wlo: [8]QKV16i8 = undefined;
+                var whi: [8]QKV16i8 = undefined;
+                var lsf: [8]f32 = undefined;
+                inline for (0..8) |ib| {
+                    const nib = nibbleTableBytes(&tables.kvalues_iq4nl, wb.qs[16 * ib ..][0..16]);
+                    wlo[ib] = nib.lo;
+                    whi[ib] = nib.hi;
+                    const low = (wb.scales_l[ib / 2] >> @intCast(4 * (ib % 2))) & 0x0f;
+                    const high = ((wb.scales_h >> @intCast(2 * ib)) & 3) << 4;
+                    const ls: i32 = @intCast(@as(u16, low) | high);
+                    lsf[ib] = @floatFromInt(ls - 32);
+                }
+                for (rt..rt_end) |row| {
+                    const ab = &lhs_blocks[row * blocks_per_row + block_index];
+                    const d = wd * ab.d;
+                    var bsum: f32 = 0;
+                    inline for (0..8) |ib| {
+                        var acc: QKV4i32 = @splat(0);
+                        acc = sdotI8x16(acc, wlo[ib], @bitCast(ab.qs[32 * ib ..][0..16].*));
+                        acc = sdotI8x16(acc, whi[ib], @bitCast(ab.qs[32 * ib + 16 ..][0..16].*));
+                        bsum += d * lsf[ib] * @as(f32, @floatFromInt(@reduce(.Add, acc)));
+                    }
+                    out[row * n + col] += bsum;
+                }
+            }
         }
     }
 }
@@ -1615,6 +1739,47 @@ fn dotIQ3_XXSQ8_K(w: *const BlockIQ3_XXS, a: *const BlockQ8_K) f32 {
 }
 
 fn dotIQ3_SQ8_K(w: *const BlockIQ3_S, a: *const BlockQ8_K) f32 {
+    // Hot path: the four 8-value lanes of each 32-subblock assemble into one
+    // 32-byte signed-weight vector (grid magnitudes ±sign via the two's-
+    // complement mask trick) and dot through sdot/vpdpbusd. The per-subblock
+    // integer sum and the float combination are unchanged, so the result is
+    // BITWISE identical to the per-lane reference below (pinned by the
+    // randomized parity test in this file).
+    const d = f16BitsToF32(w.d) * a.d;
+    var sum: f32 = 0;
+    var qs_index: usize = 0;
+    var qh_index: usize = 0;
+    var signs_index: usize = 0;
+    var offset: usize = 0;
+    var ib32: usize = 0;
+    while (ib32 < qk_k_block_size / 32) : (ib32 += 2) {
+        const scale = w.scales[ib32 / 2];
+        const db1 = d * @as(f32, @floatFromInt(1 + 2 * @as(u16, scale & 0x0f)));
+        const db2 = d * @as(f32, @floatFromInt(1 + 2 * @as(u16, scale >> 4)));
+
+        inline for (0..2) |half| {
+            var wbytes: [32]i8 = undefined;
+            inline for (0..4) |lane| {
+                const qh = w.qh[qh_index + half];
+                const grid1: usize = @as(usize, w.qs[qs_index + 2 * lane]) | ((@as(usize, qh) << @intCast(8 - 2 * lane)) & 256);
+                const grid2: usize = @as(usize, w.qs[qs_index + 2 * lane + 1]) | ((@as(usize, qh) << @intCast(7 - 2 * lane)) & 256);
+                const grid = gridU32PairVector(&tables.iq3s_grid, grid1, grid2);
+                wbytes[8 * lane ..][0..8].* = signedGridBytes8(grid, w.signs[signs_index + lane]);
+            }
+            const isum = dotSignedWeights32(&wbytes, a.qs[offset..][0..32]);
+            sum += (if (half == 0) db1 else db2) * @as(f32, @floatFromInt(isum));
+            offset += 32;
+            qs_index += 8;
+            signs_index += 4;
+        }
+        qh_index += 2;
+    }
+    return sum;
+}
+
+/// Per-lane reference formulation of `dotIQ3_SQ8_K` (the parity oracle; the
+/// integer subblock sums are exact in both, so the two must agree bitwise).
+fn dotIQ3_SQ8_KRef(w: *const BlockIQ3_S, a: *const BlockQ8_K) f32 {
     const d = f16BitsToF32(w.d) * a.d;
     var sum: f32 = 0;
     var qs_index: usize = 0;
@@ -2024,7 +2189,37 @@ fn nibbleTableVectors(comptime table: *const [16]i8, qs: *const [16]u8) NibbleTa
     return .{ .lo = @bitCast(lo), .hi = @bitCast(hi) };
 }
 
+/// Decode 16 packed nibbles through a 16-entry signed byte table into the
+/// low-nibble and high-nibble i8 lanes: one `tbl` per lane on aarch64
+/// instead of 32 scalar table loads. Table values fit i8, so the lanes feed
+/// sdot directly.
+fn nibbleTableBytes(comptime table: *const [16]i8, qs: *const [16]u8) struct { lo: QKV16i8, hi: QKV16i8 } {
+    const tv: QKV16i8 = @bitCast(table.*);
+    const q: QKV16u8 = @bitCast(qs.*);
+    const lo_idx = q & @as(QKV16u8, @splat(0x0f));
+    const hi_idx = q >> @as(QKV16u8, @splat(4));
+    return .{ .lo = tblI8x16(tv, lo_idx), .hi = tblI8x16(tv, hi_idx) };
+}
+
+// Hot path: vector table decode + two sdot granules. `isum` is integer-exact
+// either way, so the result is BITWISE identical to the scalar-decode i16
+// reference below (pinned by the randomized parity test in this file).
 fn dotNibbleTable32Q8(
+    comptime table: *const [16]i8,
+    qs: *const [16]u8,
+    a_lo: *const [16]i8,
+    a_hi: *const [16]i8,
+) i32 {
+    const w = nibbleTableBytes(table, qs);
+    var acc: QKV4i32 = @splat(0);
+    acc = sdotI8x16(acc, w.lo, @bitCast(a_lo.*));
+    acc = sdotI8x16(acc, w.hi, @bitCast(a_hi.*));
+    return @reduce(.Add, acc);
+}
+
+/// Scalar-decode reference formulation of `dotNibbleTable32Q8` (the parity
+/// oracle; integer-exact, so the two must agree bitwise).
+fn dotNibbleTable32Q8Ref(
     comptime table: *const [16]i8,
     qs: *const [16]u8,
     a_lo: *const [16]i8,
@@ -2035,6 +2230,19 @@ fn dotNibbleTable32Q8(
 }
 
 fn dotNibbleTable16Q8(comptime table: *const [16]i8, qs: *const [8]u8, a_qs: *const [16]i8) i32 {
+    const tv: QKV16i8 = @bitCast(table.*);
+    var idx: [16]u8 = undefined;
+    inline for (0..8) |j| {
+        idx[j] = qs[j] & 0x0f;
+        idx[j + 8] = qs[j] >> 4;
+    }
+    var acc: QKV4i32 = @splat(0);
+    acc = sdotI8x16(acc, tblI8x16(tv, @bitCast(idx)), @bitCast(a_qs.*));
+    return @reduce(.Add, acc);
+}
+
+/// Scalar-decode reference formulation of `dotNibbleTable16Q8`.
+fn dotNibbleTable16Q8Ref(comptime table: *const [16]i8, qs: *const [8]u8, a_qs: *const [16]i8) i32 {
     var decoded: [16]i16 = undefined;
     for (qs, 0..) |q, j| {
         decoded[j] = @intCast(table[q & 0x0f]);
@@ -2661,4 +2869,78 @@ pub fn weightedQ4_0Row(comptime accumulate: bool, out: []f32, blocks: []const Bl
             dst_hi.* = if (accumulate) @mulAdd(V, hi, ws, @as(V, dst_hi.*)) else hi * ws;
         }
     }
+}
+
+test "nibble-table sdot dots match the scalar-decode reference bitwise" {
+    var prng = std.Random.DefaultPrng.init(0x14C0FFEE);
+    const rnd = prng.random();
+    for (0..256) |_| {
+        var qs32: [16]u8 = undefined;
+        rnd.bytes(&qs32);
+        var a_lo: [16]i8 = undefined;
+        rnd.bytes(std.mem.asBytes(&a_lo));
+        var a_hi: [16]i8 = undefined;
+        rnd.bytes(std.mem.asBytes(&a_hi));
+        try std.testing.expectEqual(
+            dotNibbleTable32Q8Ref(&tables.kvalues_iq4nl, &qs32, &a_lo, &a_hi),
+            dotNibbleTable32Q8(&tables.kvalues_iq4nl, &qs32, &a_lo, &a_hi),
+        );
+        try std.testing.expectEqual(
+            dotNibbleTable32Q8Ref(&tables.kvalues_mxfp4, &qs32, &a_lo, &a_hi),
+            dotNibbleTable32Q8(&tables.kvalues_mxfp4, &qs32, &a_lo, &a_hi),
+        );
+
+        var qs16: [8]u8 = undefined;
+        rnd.bytes(&qs16);
+        try std.testing.expectEqual(
+            dotNibbleTable16Q8Ref(&tables.kvalues_mxfp4, &qs16, &a_lo),
+            dotNibbleTable16Q8(&tables.kvalues_mxfp4, &qs16, &a_lo),
+        );
+    }
+}
+
+test "iq3_s sdot dot matches the per-lane reference bitwise" {
+    var prng = std.Random.DefaultPrng.init(0x13C0FFEE);
+    const rnd = prng.random();
+    for (0..128) |_| {
+        var w: BlockIQ3_S = undefined;
+        rnd.bytes(std.mem.asBytes(&w));
+        w.d = f32ToF16Bits(rnd.float(f32) * 2.0 - 1.0);
+        var a: BlockQ8_K = undefined;
+        rnd.bytes(std.mem.asBytes(&a));
+        a.d = rnd.float(f32) * 2.0 - 1.0;
+        try std.testing.expectEqual(dotIQ3_SQ8_KRef(&w, &a), dotIQ3_SQ8_K(&w, &a));
+    }
+}
+
+test "iq4_xs decoded tile matmul matches the per-row generic path bitwise" {
+    var prng = std.Random.DefaultPrng.init(0x44C0FFEE);
+    const rnd = prng.random();
+    const m = 7;
+    const cols = 5;
+    const bpr = 3;
+
+    var wblocks: [cols * bpr]BlockIQ4_XS = undefined;
+    rnd.bytes(std.mem.sliceAsBytes(wblocks[0..]));
+    for (&wblocks) |*wb| wb.d = f32ToF16Bits(rnd.float(f32) * 2.0 - 1.0);
+    var ablocks: [m * bpr]BlockQ8_K = undefined;
+    rnd.bytes(std.mem.sliceAsBytes(ablocks[0..]));
+    for (&ablocks) |*ab| ab.d = rnd.float(f32) * 2.0 - 1.0;
+
+    const rhs = QuantizedMatmulRhsRowsFor(.iq4_xs){
+        .rows = .{ .allocator = std.testing.allocator, .blocks = &wblocks, .rows = cols, .cols = bpr * qk_k_block_size, .blocks_per_row = bpr },
+        .k = bpr * qk_k_block_size,
+        .n = cols,
+    };
+
+    var out_tiled: [m * cols]f32 = undefined;
+    matmulTableQ8_KRhsTile(.iq4_xs, &out_tiled, &ablocks, &rhs, cols, 0, m, 0, cols);
+
+    // Single-row calls take the generic per-row loop (the decoded tile only
+    // arms for multi-row LHS), so this is the reference formulation.
+    var out_ref: [m * cols]f32 = undefined;
+    for (0..m) |row| {
+        matmulTableQ8_KRhsTile(.iq4_xs, &out_ref, &ablocks, &rhs, cols, row, row + 1, 0, cols);
+    }
+    try std.testing.expectEqualSlices(f32, &out_ref, &out_tiled);
 }
