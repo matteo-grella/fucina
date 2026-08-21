@@ -94,6 +94,12 @@ exe.root_module.addImport("fucina", fucina_dep.module("fucina"));
 exe.root_module.addImport("fucina_llm", fucina_dep.module("fucina_llm")); // LLM stack; optional
 ```
 
+The fetched package is the library surface only (`src/`, the vendored
+llguidance source, build files — about 11 MB): everything a dependency
+build needs and nothing else. The model runners, example applications,
+docs, and tools are repo development surface — to run those, clone the
+repo instead (next section).
+
 A first program, verbatim from
 [the reference's §1.4](https://matteo-grella.github.io/fucina/docs/reference/01-introduction-and-mental-model/#14-a-first-program),
 where CI compiles and runs this exact block on every push:
