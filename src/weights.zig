@@ -60,6 +60,7 @@ const fucina = struct {
     pub const internal = struct {
         pub const backend_mod = backend_mod_;
         pub const tensor_mod = tensor_mod_;
+        pub const native_impl = backend_mod_.native_impl;
         pub const gpu = struct {
             pub const enabled = backend_mod_.gpu_impl.enabled;
             pub const has_q5_k_quant = backend_mod_.gpu_impl.has_q5_k_quant;
@@ -422,6 +423,27 @@ fn linearSeqFx4(
     }
 
     const allocator = ctx.allocator;
+
+    // Prefill arm: dequantized weight panels through BLAS/AMX (the
+    // backend's gate decides; decode and short bursts stay on the
+    // mul-free ternary tile below).
+    if (comptime fucina.internal.backend_mod.active_kind == .native and fucina.internal.backend_mod.native_uses_blas) {
+        var out_blas = try fucina.Tensor(.{ .seq, out_tag }).empty(ctx, .{ m, n });
+        errdefer out_blas.deinit();
+        if (try fucina.internal.native_impl.matmulFoldedx4BlasWithConfig(
+            allocator,
+            try out_blas.data(),
+            x,
+            weight.pack,
+            blocks_per_row,
+            m,
+            n,
+            k,
+            .{ .pool = ctx.workPool() },
+        )) return out_blas;
+        out_blas.deinit();
+    }
+
     const lhs = try allocator.alloc(backend_quant.BlockQ8_K, m * blocks_per_row);
     defer allocator.free(lhs);
     for (0..m) |r| {

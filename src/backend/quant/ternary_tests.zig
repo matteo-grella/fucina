@@ -657,3 +657,53 @@ test "q2_0 fast dequantize matches the scalar decoder bitwise" {
     try ternary.dequantizeRowQ2_0FastInto(got, &blocks);
     try std.testing.expectEqualSlices(f32, want, got);
 }
+
+test "folded x4 dequantize expands the pack by the fold's own decode law" {
+    // The BLAS prefill arm multiplies dequantizeFoldedx4ColumnInto's f32
+    // panels, so its expansion must reproduce the fold law exactly:
+    // w = s * (3*u1 + u2 - 4), s = the FINE plane's f16 scale, crumbs read
+    // from the source planes with TQ2_0's addressing. Pinning against the
+    // planes (not against the integer kernel) keeps activation
+    // quantization out of the comparison — this is bitwise.
+    const allocator = std.testing.allocator;
+    const k = 3 * qk_k_block_size;
+    const n = 8;
+
+    var prng = std.Random.DefaultPrng.init(0x5f01d);
+    const w1 = try allocator.alloc(f32, n * k);
+    defer allocator.free(w1);
+    fillUniform(&prng, w1, 1.5);
+    const w2 = try allocator.alloc(f32, n * k);
+    defer allocator.free(w2);
+    fillUniform(&prng, w2, 0.5);
+
+    var rhs1 = try ternary.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w1);
+    defer rhs1.deinit();
+    var rhs2 = try ternary.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w2);
+    defer rhs2.deinit();
+    const folded = try ternary.packMatmulRhsTQ2_0Foldedx4(allocator, &rhs1, &rhs2);
+    defer allocator.free(folded);
+    const bpr = rhs1.rows.blocks_per_row;
+
+    const got = try allocator.alloc(f32, qk_k_block_size);
+    defer allocator.free(got);
+    for (0..n) |c| {
+        // Every block offset, so the bi0 addressing is exercised too.
+        for (0..bpr) |bi| {
+            ternary.dequantizeFoldedx4ColumnInto(got, folded, bpr, c, bi);
+            const b1 = &rhs1.columnBlocks(c)[bi];
+            const b2 = &rhs2.columnBlocks(c)[bi];
+            const scale = @as(f32, @floatCast(@as(f16, @bitCast(b2.d))));
+            for (0..qk_k_block_size) |e| {
+                const half = e / 128;
+                const rem = e % 128;
+                const byte = half * 32 + rem % 32;
+                const lane: u3 = @intCast(rem / 32);
+                const u1c: i32 = (b1.qs[byte] >> (2 * lane)) & 3;
+                const u2c: i32 = (b2.qs[byte] >> (2 * lane)) & 3;
+                const expected = scale * @as(f32, @floatFromInt(3 * u1c + u2c - 4));
+                try std.testing.expectEqual(expected, got[e]);
+            }
+        }
+    }
+}

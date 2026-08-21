@@ -841,6 +841,40 @@ pub fn matmulTQ2_0FoldedX4RhsRange(
     matmulTQ2_0FoldedX4RhsTile(out, lhs_blocks, folded, blocks_per_row, n, r0, r1, 0, n);
 }
 
+/// Expand one weight column of a folded pack to f32: `dst.len / 256`
+/// whole blocks starting at block `bi0`. The fold's decode law is the
+/// kernel's, minus the integer detour — code `cu` in {0..8} biased by 4,
+/// times the FINE plane's f16 scale (`foldedBlockContribution`'s
+/// `isum = acc - 4*bsum` and per-column `sv`). Feeds the BLAS prefill arm,
+/// which multiplies exact f32 activations instead of Q8_K-quantized ones.
+pub fn dequantizeFoldedx4ColumnInto(
+    dst: []f32,
+    folded: []const BlockTQ2_0Foldedx4,
+    blocks_per_row: usize,
+    col: usize,
+    bi0: usize,
+) void {
+    std.debug.assert(dst.len % 256 == 0);
+    const group = col / 4;
+    const ci = col % 4;
+    const nb = dst.len / 256;
+    for (0..nb) |b| {
+        const blk = &folded[group * blocks_per_row + bi0 + b];
+        const scale = f16BitsToF32(blk.d[ci]);
+        const out = dst[b * 256 ..][0..256];
+        for (0..8) |sub| {
+            for (0..4) |jg| {
+                for (0..4) |j| {
+                    const byte = blk.qs[sub * 64 + jg * 16 + ci * 4 + j];
+                    const e_lo = sub * 32 + jg * 4 + j;
+                    out[e_lo] = scale * (@as(f32, @floatFromInt(byte & 0x0f)) - 4.0);
+                    out[e_lo + 16] = scale * (@as(f32, @floatFromInt(byte >> 4)) - 4.0);
+                }
+            }
+        }
+    }
+}
+
 fn x4Tile(
     comptime accumulate: bool,
     out: []f32,

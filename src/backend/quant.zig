@@ -667,6 +667,7 @@ pub const packMatmulRhsTQ2_0Foldedx4Into = ternary.packMatmulRhsTQ2_0Foldedx4Int
 pub const packMatmulRhsTQ2_0FoldedRows = ternary.packMatmulRhsTQ2_0FoldedRows;
 pub const packMatmulRhsTQ2_0FoldedRowsFromX4 = ternary.packMatmulRhsTQ2_0FoldedRowsFromX4;
 pub const matmulTQ2_0FoldedX4RhsTile = ternary.matmulTQ2_0FoldedX4RhsTile;
+pub const dequantizeFoldedx4ColumnInto = ternary.dequantizeFoldedx4ColumnInto;
 pub const matmulTQ2_0FoldedX4RhsRange = ternary.matmulTQ2_0FoldedX4RhsRange;
 pub const matmulQ2_0RhsRange = ternary.matmulQ2_0RhsRange;
 pub const matmulQ2_0RhsTile = ternary.matmulQ2_0RhsTile;

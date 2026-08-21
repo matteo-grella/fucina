@@ -1168,6 +1168,83 @@ fn matmul2DQuantizedRhsTableBlasWithConfig(
     }
 }
 
+/// Prefill row count at/above which the folded tied-K=2 PTQTP path
+/// (`tq2_0_fx4`) dequantizes weight panels to f32 and rides BLAS. The
+/// mul-free ternary tile owns decode and short bursts — it beats a GEMM
+/// there — but its 4-column pack has no AMX-class batch form, so past this
+/// width the dequant-once panel plus sgemm wins on operand reuse. Accepted
+/// numerics, like every BLAS arm: exact f32 activations instead of the
+/// Q8_K-quantized ones the integer kernel consumes.
+const folded_blas_min_m: usize = 64;
+
+/// C[m, n] = A[m, k] · dequant(folded)ᵀ through BLAS, k-sliced so each
+/// GEMM is full output width with a contiguous C (the Q2_0 arm's panel
+/// discipline). Returns false when the caller must keep the integer path:
+/// non-BLAS builds, m below the gate, or dimensions cblas cannot take.
+pub fn matmulFoldedx4BlasWithConfig(
+    allocator: std.mem.Allocator,
+    out: []f32,
+    a: []const f32,
+    folded: []const quantized_matmul.BlockTQ2_0Foldedx4,
+    blocks_per_row: usize,
+    m: usize,
+    n: usize,
+    k: usize,
+    config: ParallelConfig,
+) !bool {
+    if (comptime !build_options.use_blas) return false;
+    if (m < folded_blas_min_m or !fitsCblas(m, n, k)) return false;
+
+    const Task = struct {
+        folded: []const quantized_matmul.BlockTQ2_0Foldedx4,
+        blocks_per_row: usize,
+        dst: []f32,
+        col: usize,
+        bi0: usize,
+
+        fn run(task: *const @This()) void {
+            quantized_matmul.dequantizeFoldedx4ColumnInto(task.dst, task.folded, task.blocks_per_row, task.col, task.bi0);
+        }
+    };
+
+    const kp_max = @max(@as(usize, 256), (q2_0_blas_panel_floats / n) & ~@as(usize, 255));
+    const kp = @min(k, kp_max);
+    const panel = try allocator.alloc(f32, n * kp);
+    defer allocator.free(panel);
+    const tasks = try allocator.alloc(Task, n);
+    defer allocator.free(tasks);
+
+    var k0: usize = 0;
+    while (k0 < k) : (k0 += kp) {
+        const kc = @min(kp, k - k0);
+        const bi0 = k0 / 256;
+        for (0..n) |col| tasks[col] = .{ .folded = folded, .blocks_per_row = blocks_per_row, .dst = panel[col * kc ..][0..kc], .col = col, .bi0 = bi0 };
+        if (config.pool) |pool| {
+            pool.parallelChunks(Task, tasks, Task.run);
+        } else {
+            for (tasks) |*t| Task.run(t);
+        }
+        ensureBlasThreadsConfigured();
+        cblas_sgemm(
+            cblas_row_major,
+            cblas_no_trans,
+            cblas_trans,
+            cDim(m),
+            cDim(n),
+            cDim(kc),
+            1.0,
+            a.ptr + k0,
+            cDim(k),
+            panel.ptr,
+            cDim(kc),
+            if (k0 == 0) 0.0 else 1.0,
+            out.ptr,
+            cDim(n),
+        );
+    }
+    return true;
+}
+
 fn matmul2DQuantizedRhsTableQ8_0WithConfig(
     comptime rhs_dtype: DType,
     allocator: std.mem.Allocator,
