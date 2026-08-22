@@ -7,6 +7,7 @@
 //! (its kernel coverage lives in the exec/backend suites).
 
 const std = @import("std");
+const test_support = @import("../test_support.zig");
 const fucina = @import("fucina");
 const codec = @import("codec.zig");
 
@@ -18,7 +19,7 @@ const rvq_path = "testdata/qwen3tts/codes-137.rvq";
 const wav_path = "testdata/qwen3tts/decoded-137-f32.wav";
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1 << 30));
+    return test_support.readFileOrSkip(allocator, std.testing.io, path, 1 << 30);
 }
 
 /// Minimal RIFF parse for the oracle's F32 mono output: find the `data`
@@ -45,7 +46,7 @@ fn wavF32Samples(allocator: std.mem.Allocator, bytes: []const u8) ![]f32 {
 }
 
 test "qwen3tts codec: golden rvq decodes to the oracle waveform" {
-    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
+    try test_support.requireNative();
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
     const allocator = gpa.allocator();
@@ -54,10 +55,7 @@ test "qwen3tts codec: golden rvq decodes to the oracle waveform" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var file = gguf.File.loadMmap(allocator, std.testing.io, model_path) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
+    var file = try test_support.openGgufOrSkip(allocator, std.testing.io, model_path);
     defer file.deinit();
     const rvq_bytes = readFile(allocator, rvq_path) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
@@ -126,7 +124,7 @@ fn stageCosine(name: []const u8, got_tc: []const f32, dump: anytype, dump_is_ct:
 }
 
 test "qwen3tts codec: stage bisect vs oracle dumps (debug, needs dump-codec/)" {
-    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
+    try test_support.requireNative();
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
     const allocator = gpa.allocator();
@@ -135,11 +133,11 @@ test "qwen3tts codec: stage bisect vs oracle dumps (debug, needs dump-codec/)" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var file = gguf.File.loadMmap(allocator, std.testing.io, model_path) catch return error.SkipZigTest;
+    var file = try test_support.openGgufOrSkip(allocator, std.testing.io, model_path);
     defer file.deinit();
-    const rvq_bytes = readFile(allocator, rvq_path) catch return error.SkipZigTest;
+    const rvq_bytes = try readFile(allocator, rvq_path);
     defer allocator.free(rvq_bytes);
-    const rvq_dump = loadDump(allocator, "testdata/qwen3tts/dump-codec/codec-rvq.bin") catch return error.SkipZigTest;
+    const rvq_dump = try loadDump(allocator, "testdata/qwen3tts/dump-codec/codec-rvq.bin");
     defer allocator.free(rvq_dump.data);
     const preconv_dump = try loadDump(allocator, "testdata/qwen3tts/dump-codec/codec-preconv.bin");
     defer allocator.free(preconv_dump.data);
@@ -168,14 +166,11 @@ test "qwen3tts codec: stage bisect vs oracle dumps (debug, needs dump-codec/)" {
 }
 
 test "codec: streaming session equals whole-clip decode" {
-    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
+    try test_support.requireNative();
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
     const allocator = gpa.allocator();
-    var file = gguf.File.loadMmap(allocator, std.testing.io, model_path) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
+    var file = try test_support.openGgufOrSkip(allocator, std.testing.io, model_path);
     defer file.deinit();
     var ctx: fucina.ExecContext = undefined;
     ctx.init(allocator);

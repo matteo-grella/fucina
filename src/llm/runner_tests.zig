@@ -10,6 +10,7 @@
 //! wiring). Force-imported by `llm.zig`'s test block.
 
 const std = @import("std");
+const test_support = @import("test_support.zig");
 const builtin = @import("builtin");
 const fucina = @import("fucina");
 const runner = @import("runner.zig");
@@ -79,16 +80,13 @@ fn goldenOnGguf(path: []const u8, golden: Golden) !void {
     // Native builds only: real-model goldens verify model wiring, which is
     // backend-independent; the scalar leg would re-run 0.6B forwards on the
     // slow kernels for no added coverage.
-    if (comptime fucina.internal.backend_mod.active_kind != .native) return error.SkipZigTest;
+    try test_support.requireNative();
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var file = gguf.File.loadMmap(allocator, std.testing.io, path) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
+    var file = try test_support.openGgufOrSkip(allocator, std.testing.io, path);
     defer file.deinit();
 
     const desc = try runner.Descriptor.fromGguf(&file);
@@ -245,7 +243,7 @@ fn writeTinyQwen(allocator: std.mem.Allocator, moe: bool) ![]u8 {
 }
 
 fn syntheticQwenGolden(moe: bool, golden: Golden) !void {
-    if (comptime fucina.internal.backend_mod.active_kind != .native) return error.SkipZigTest;
+    try test_support.requireNative();
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;
     ctx.init(allocator);
@@ -332,7 +330,7 @@ fn writeTinyGlm(allocator: std.mem.Allocator) ![]u8 {
 }
 
 test "descriptor runner matches the hand glm4moe port bitwise on a synthetic GGUF (gate 3: host_reference vocabulary)" {
-    if (comptime fucina.internal.backend_mod.active_kind != .native) return error.SkipZigTest;
+    try test_support.requireNative();
     // Recorded trace for the same fixture: chain[0] = prefill argmax.
     const golden = Golden{
         .prefill_hash = 0xb4ec8486578aa204,

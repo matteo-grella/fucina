@@ -15,6 +15,7 @@
 //! MODEL WIRING, not kernel math, so the scalar reference leg skips them
 //! (its kernel coverage lives in the exec/backend suites).
 const std = @import("std");
+const test_support = @import("../test_support.zig");
 const fucina = @import("fucina");
 const qwen3 = @import("model.zig");
 const shine = @import("shine.zig");
@@ -35,7 +36,7 @@ const reference_vocab = 151_672;
 const im_end = 151_645;
 
 fn readBytes(allocator: std.mem.Allocator, comptime name: []const u8) ![]u8 {
-    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, goldens_dir ++ "/" ++ name, allocator, .limited(1 << 30));
+    return test_support.readFileOrSkip(allocator, std.testing.io, goldens_dir ++ "/" ++ name, 1 << 30);
 }
 
 fn readF32(allocator: std.mem.Allocator, comptime name: []const u8, expected_len: usize) ![]f32 {
@@ -83,12 +84,12 @@ const Drift = struct {
 /// Cheap presence probe so a goldens-less checkout skips before any
 /// multi-GB GGUF load is attempted.
 fn requireGoldens(allocator: std.mem.Allocator) !void {
-    const probe = readBytes(allocator, "manifest.json") catch return error.SkipZigTest;
+    const probe = try readBytes(allocator, "manifest.json");
     allocator.free(probe);
 }
 
 test "SHINE m2p + sliceLora parity vs the PyTorch reference" {
-    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
+    try test_support.requireNative();
     // Loads the 3.3GB f32 SHINE GGUF and runs the full M2P stack — the
     // tracking allocator's overhead is irrelevant at this test's runtime.
     const allocator = std.heap.smp_allocator;
@@ -97,10 +98,7 @@ test "SHINE m2p + sliceLora parity vs the PyTorch reference" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var file = gguf.File.loadMmap(allocator, std.testing.io, shine_gguf_path) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
+    var file = try test_support.openGgufOrSkip(allocator, std.testing.io, shine_gguf_path);
     defer file.deinit();
     const base = qwen3.Config{
         .vocab_size = 151_936,
@@ -117,7 +115,7 @@ test "SHINE m2p + sliceLora parity vs the PyTorch reference" {
     defer sh.deinit();
 
     const state_len = sh.config.num_layers * sh.config.num_mem_token * sh.config.hidden_size;
-    const golden_memory = readF32(allocator, "memory_states.f32.bin", state_len) catch return error.SkipZigTest;
+    const golden_memory = try readF32(allocator, "memory_states.f32.bin", state_len);
     defer allocator.free(golden_memory);
     const golden_plain = try readF32(allocator, "plain_output.f32.bin", state_len);
     defer allocator.free(golden_plain);
@@ -172,7 +170,7 @@ test "SHINE m2p + sliceLora parity vs the PyTorch reference" {
 }
 
 test "SHINE encoder + end-to-end greedy parity vs the PyTorch reference" {
-    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
+    try test_support.requireNative();
     // A Debug 8B forward is a ~25x slowdown; this leg runs only in the
     // optimized gate (`zig build test-llm -Doptimize=ReleaseFast`) so the
     // routine Debug `zig build test` loop stays usable with the model
@@ -197,26 +195,20 @@ fn runEncoderE2e(allocator: std.mem.Allocator, base_path: []const u8) !void {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var base_file = gguf.File.loadMmap(allocator, std.testing.io, base_path) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
+    var base_file = try test_support.openGgufOrSkip(allocator, std.testing.io, base_path);
     defer base_file.deinit();
     const base = try qwen3.Config.fromGguf(&base_file);
     var model = try qwen3.Model.loadGgufFromFile(&ctx, &base_file, base);
     defer model.deinit();
 
     var sh = blk: {
-        var file = gguf.File.loadMmap(allocator, std.testing.io, shine_gguf_path) catch |err| switch (err) {
-            error.FileNotFound => return error.SkipZigTest,
-            else => return err,
-        };
+        var file = try test_support.openGgufOrSkip(allocator, std.testing.io, shine_gguf_path);
         defer file.deinit();
         break :blk try shine.Shine.loadGgufFromFile(&ctx, &file, base);
     };
     defer sh.deinit();
 
-    const evidence_ids = readIds(allocator, "evidence_ids.i32.bin") catch return error.SkipZigTest;
+    const evidence_ids = try readIds(allocator, "evidence_ids.i32.bin");
     defer allocator.free(evidence_ids);
 
     // Stage 1: encoder parity. Reference: fp32 weights; port: f16 (exact

@@ -3,6 +3,7 @@
 //! llama-tokenize parity fixtures (skips without models/), and the streaming
 //! decoder.
 const std = @import("std");
+const test_support = @import("test_support.zig");
 const fucina = @import("fucina");
 const gguf = fucina.gguf;
 const tokenizer = @import("tokenizer.zig");
@@ -108,10 +109,7 @@ const parity_fixtures = [_]ParityFixture{
 
 test "llama-tokenize parity on embedded fixtures (skips without models/)" {
     const allocator = std.testing.allocator;
-    var file = gguf.File.loadMmap(allocator, std.testing.io, "models/Qwen3-0.6B-Q4_K_S.gguf") catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
+    var file = try test_support.openGgufOrSkip(allocator, std.testing.io, "models/Qwen3-0.6B-Q4_K_S.gguf");
     defer file.deinit();
     var tok = try Tokenizer.initFromGguf(allocator, &file, .{});
     defer tok.deinit();

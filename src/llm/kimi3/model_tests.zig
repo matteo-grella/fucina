@@ -9,6 +9,7 @@
 //! (its kernel coverage lives in the exec/backend suites).
 
 const std = @import("std");
+const test_support = @import("../test_support.zig");
 
 const model_mod = @import("model.zig");
 
@@ -30,7 +31,7 @@ fn readGolden(allocator: std.mem.Allocator, name: []const u8) !?[]f32 {
 }
 
 test "kimi3 model matches the reference checkpoint logits" {
-    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
+    try test_support.requireNative();
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
     const allocator = gpa.allocator();

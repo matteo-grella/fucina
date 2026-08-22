@@ -315,3 +315,10 @@ pub const Model = struct {
         return rows[0];
     }
 };
+
+test {
+    // The family's numeric gates live beside the runner: the synthetic glm
+    // fixture in ../runner_tests.zig pins bitwise runner-vs-family parity
+    // plus the recorded logits hash and greedy chain.
+    _ = @import("../runner_tests.zig");
+}

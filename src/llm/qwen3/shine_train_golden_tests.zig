@@ -11,6 +11,7 @@
 //! MODEL WIRING, not kernel math, so the scalar reference leg skips them
 //! (its kernel coverage lives in the exec/backend suites).
 const std = @import("std");
+const test_support = @import("../test_support.zig");
 const fucina = @import("fucina");
 const qwen3 = @import("model.zig");
 const shine = @import("shine.zig");
@@ -51,7 +52,7 @@ const sh_config = shine.Config{
 fn readF32(allocator: std.mem.Allocator, name: []const u8, expected_len: usize) ![]f32 {
     const path = try std.fmt.allocPrint(allocator, goldens_dir ++ "/{s}", .{name});
     defer allocator.free(path);
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1 << 26));
+    const bytes = try test_support.readFileOrSkip(allocator, std.testing.io, path, 1 << 26);
     defer allocator.free(bytes);
     if (bytes.len != expected_len * 4) return error.GoldenShapeMismatch;
     const out = try allocator.alloc(f32, expected_len);
@@ -270,7 +271,7 @@ fn goldenGate(checkpoint_layers: bool) !void {
     const allocator = std.heap.smp_allocator;
     // Presence probe before any construction.
     {
-        const probe = std.Io.Dir.cwd().readFileAlloc(std.testing.io, goldens_dir ++ "/manifest.json", allocator, .limited(1 << 20)) catch return error.SkipZigTest;
+        const probe = try test_support.readFileOrSkip(allocator, std.testing.io, goldens_dir ++ "/manifest.json", 1 << 20);
         allocator.free(probe);
     }
     var ctx: ExecContext = undefined;
@@ -386,20 +387,20 @@ fn goldenGate(checkpoint_layers: bool) !void {
 }
 
 test "SHINE training step: loss and every trainable gradient match the PyTorch reference" {
-    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
+    try test_support.requireNative();
     try goldenGate(false);
 }
 
 test "SHINE training step under per-layer checkpointing: same goldens" {
-    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
+    try test_support.requireNative();
     try goldenGate(true);
 }
 
 test "SHINE packed step: two copies of one example equal the single-example step" {
-    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
+    try test_support.requireNative();
     const allocator = std.heap.smp_allocator;
     {
-        const probe = std.Io.Dir.cwd().readFileAlloc(std.testing.io, goldens_dir ++ "/manifest.json", allocator, .limited(1 << 20)) catch return error.SkipZigTest;
+        const probe = try test_support.readFileOrSkip(allocator, std.testing.io, goldens_dir ++ "/manifest.json", 1 << 20);
         allocator.free(probe);
     }
     var ctx: ExecContext = undefined;
@@ -505,7 +506,7 @@ fn noiseSlice(allocator: std.mem.Allocator, len: usize, seed: u32) ![]f32 {
 }
 
 test "SHINE training step timing at 0.6B (informational)" {
-    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
+    try test_support.requireNative();
     // Meaningful only optimized; the 0.6B graph is ~25x slower in Debug.
     if (@import("builtin").mode == .Debug) return error.SkipZigTest;
     const allocator = std.heap.smp_allocator;
@@ -513,10 +514,7 @@ test "SHINE training step timing at 0.6B (informational)" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var file = fucina.gguf.File.loadMmap(allocator, std.testing.io, "models/Qwen3-0.6B-BF16.gguf") catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
+    var file = try test_support.openGgufOrSkip(allocator, std.testing.io, "models/Qwen3-0.6B-BF16.gguf");
     defer file.deinit();
     const cfg = try qwen3.Config.fromGguf(&file);
     var model = try qwen3.Model.loadGgufFromFile(&ctx, &file, cfg);

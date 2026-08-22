@@ -10,6 +10,7 @@
 //! (its kernel coverage lives in the exec/backend suites).
 
 const std = @import("std");
+const test_support = @import("../test_support.zig");
 const fucina = @import("fucina");
 const pocket = @import("model.zig");
 
@@ -19,7 +20,7 @@ const model_path = "models/pocket-tts/pocket-tts-english-v2.gguf";
 const dumps = "refs/pocket-tts-dumps";
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1 << 30));
+    return test_support.readFileOrSkip(allocator, std.testing.io, path, 1 << 30);
 }
 
 const Npy = struct {
@@ -94,17 +95,14 @@ fn expectClose(name: []const u8, got: []const f32, want: []const f32, max_diff: 
 }
 
 test "pocket-tts: tokenizer, backbone, flow head, mimi frame vs reference dumps" {
-    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
+    try test_support.requireNative();
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
     const allocator = gpa.allocator();
 
-    var file = gguf.File.loadMmap(allocator, std.testing.io, model_path) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
+    var file = try test_support.openGgufOrSkip(allocator, std.testing.io, model_path);
     defer file.deinit();
-    var ref_tokens = npyLoad(allocator, "text_tokens") catch return error.SkipZigTest;
+    var ref_tokens = try npyLoad(allocator, "text_tokens");
     defer ref_tokens.deinit(allocator);
 
     var ctx: fucina.ExecContext = undefined;

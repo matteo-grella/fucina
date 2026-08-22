@@ -9,6 +9,7 @@
 //! (its kernel coverage lives in the exec/backend suites).
 
 const std = @import("std");
+const test_support = @import("../test_support.zig");
 const fucina = @import("fucina");
 const model_mod = @import("model.zig");
 const prompt_mod = @import("prompt.zig");
@@ -23,7 +24,7 @@ const dump_dir = "testdata/qwen3tts/dump-greedy";
 const test_text = "The quick brown fox jumps over the lazy dog.";
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1 << 30));
+    return test_support.readFileOrSkip(allocator, std.testing.io, path, 1 << 30);
 }
 
 const Dump = struct {
@@ -66,7 +67,7 @@ fn cosine(a: []const f32, b: []const f32) f64 {
 }
 
 test "qwen3tts talker: greedy generation matches the oracle token-for-token" {
-    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
+    try test_support.requireNative();
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
     const allocator = gpa.allocator();
@@ -75,12 +76,9 @@ test "qwen3tts talker: greedy generation matches the oracle token-for-token" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var file = gguf.File.loadMmap(allocator, std.testing.io, talker_path) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
+    var file = try test_support.openGgufOrSkip(allocator, std.testing.io, talker_path);
     defer file.deinit();
-    var ids_dump = loadDump(allocator, "prompt-ids") catch return error.SkipZigTest;
+    var ids_dump = try loadDump(allocator, "prompt-ids");
     defer ids_dump.deinit(allocator);
     var embed_dump = try loadDump(allocator, "talker-input-embed");
     defer embed_dump.deinit(allocator);
@@ -156,7 +154,7 @@ test "qwen3tts talker: greedy generation matches the oracle token-for-token" {
 }
 
 test "qwen3tts talker: seeded sampling replays the oracle draw-for-draw" {
-    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
+    try test_support.requireNative();
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
     const allocator = gpa.allocator();
@@ -165,12 +163,9 @@ test "qwen3tts talker: seeded sampling replays the oracle draw-for-draw" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var file = gguf.File.loadMmap(allocator, std.testing.io, talker_path) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
+    var file = try test_support.openGgufOrSkip(allocator, std.testing.io, talker_path);
     defer file.deinit();
-    const bytes = readFile(allocator, "testdata/qwen3tts/dump-seed42/codes-full.bin") catch return error.SkipZigTest;
+    const bytes = try readFile(allocator, "testdata/qwen3tts/dump-seed42/codes-full.bin");
     allocator.free(bytes);
     var codes_dump = blk: {
         const b = try readFile(allocator, "testdata/qwen3tts/dump-seed42/codes-full.bin");

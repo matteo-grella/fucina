@@ -2323,3 +2323,7 @@ fn hostMoeForward(ctx: *ExecContext, cfg: Descriptor, allocator: Allocator, moe:
     for (y, shared) |*yi, si| yi.* += si;
     return y;
 }
+
+test {
+    _ = @import("runner_tests.zig");
+}

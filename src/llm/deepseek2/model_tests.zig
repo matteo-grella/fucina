@@ -4,6 +4,7 @@
 //! Skips without models/. Native-only (model wiring, not kernels).
 
 const std = @import("std");
+const test_support = @import("../test_support.zig");
 const builtin = @import("builtin");
 const fucina = @import("fucina");
 const deepseek2 = @import("model.zig");
@@ -30,16 +31,13 @@ fn fnvHash(values: []const f32) u64 {
 }
 
 test "deepseek2 matches the recorded DeepSeek-V2-Lite forward (Q8_0; skips without models/)" {
-    if (comptime fucina.internal.backend_mod.active_kind != .native) return error.SkipZigTest;
+    try test_support.requireNative();
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var file = fucina.gguf.File.loadMmap(allocator, std.testing.io, "models/DeepSeek-V2-Lite-Chat.Q8_0.gguf") catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
+    var file = try test_support.openGgufOrSkip(allocator, std.testing.io, "models/DeepSeek-V2-Lite-Chat.Q8_0.gguf");
     defer file.deinit();
 
     var model = try deepseek2.Model.loadGgufFromFile(&ctx, &file);
