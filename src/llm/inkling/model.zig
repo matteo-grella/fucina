@@ -29,6 +29,7 @@ const std = @import("std");
 const fucina = @import("fucina");
 const weights = @import("fucina").weights;
 const gguf_meta = @import("fucina").gguf_meta;
+const host_ops = @import("../host_ops.zig");
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
@@ -1186,32 +1187,15 @@ fn vecAxpy(acc: []f32, w: f32, v: []const f32) void {
     while (i < acc.len) : (i += 1) acc[i] += w * v[i];
 }
 
-fn rmsNormInto(out: []f32, x: []const f32, weight: []const f32, eps: f32) void {
-    var sum: f64 = 0;
-    for (x) |v| sum += @as(f64, v) * v;
-    const inv = 1.0 / @sqrt(sum / @as(f64, @floatFromInt(x.len)) + eps);
-    for (out, x, weight) |*o, v, w| o.* = @floatCast(@as(f64, v) * inv * w);
-}
-
-fn softmaxInPlace(v: []f32) void {
-    var max: f32 = -std.math.inf(f32);
-    for (v) |x| max = @max(max, x);
-    var sum: f32 = 0;
-    for (v) |*x| {
-        x.* = @exp(x.* - max);
-        sum += x.*;
-    }
-    for (v) |*x| x.* /= sum;
-}
+const rmsNormInto = host_ops.rmsNormInto;
+const softmaxInPlace = host_ops.softmaxInPlace;
 
 /// logsigmoid(x) = -softplus(-x) = -log(1 + exp(-x)).
 fn logsigmoid(x: f32) f32 {
     return -std.math.log1p(@exp(-x));
 }
 
-fn silu(x: f32) f32 {
-    return x / (1.0 + @exp(-x));
-}
+const silu = host_ops.silu;
 
 const Self = @This();
 

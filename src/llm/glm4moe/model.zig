@@ -17,6 +17,7 @@ const fucina = @import("fucina");
 const weights = @import("fucina").weights;
 const gguf_meta = @import("fucina").gguf_meta;
 const runner = @import("../runner.zig");
+const host_ops = @import("../host_ops.zig");
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
@@ -244,7 +245,7 @@ pub const Model = struct {
             self.step_hiddens = try self.allocator.alloc(f32, x.len);
         }
         for (0..S) |r| {
-            runner.hostRmsNormInto(self.step_hiddens[r * cfg.hidden_size ..][0..cfg.hidden_size], x[r * cfg.hidden_size ..][0..cfg.hidden_size], self.band.output_norm, cfg.rms_norm_eps);
+            host_ops.rmsNormInto(self.step_hiddens[r * cfg.hidden_size ..][0..cfg.hidden_size], x[r * cfg.hidden_size ..][0..cfg.hidden_size], self.band.output_norm, cfg.rms_norm_eps);
         }
         return self.headLogits(ctx, x, S, self.band.output_norm, &self.output);
     }
@@ -256,7 +257,7 @@ pub const Model = struct {
         defer normed_t.deinit();
         const normed = try normed_t.data();
         for (0..S) |r| {
-            runner.hostRmsNormInto(normed[r * cfg.hidden_size ..][0..cfg.hidden_size], x[r * cfg.hidden_size ..][0..cfg.hidden_size], norm, cfg.rms_norm_eps);
+            host_ops.rmsNormInto(normed[r * cfg.hidden_size ..][0..cfg.hidden_size], x[r * cfg.hidden_size ..][0..cfg.hidden_size], norm, cfg.rms_norm_eps);
         }
         var logits_t = try head.linearSeq(ctx, &normed_t, .embed, .vocab);
         defer logits_t.deinit();
@@ -295,8 +296,8 @@ pub const Model = struct {
             const cat = try cat_t.data();
             // Concat order per the GLM/DeepSeek MTP reference: normed token
             // embedding first, normed trunk hidden second.
-            runner.hostRmsNormInto(cat[0..cfg.hidden_size], try emb.dataConst(), mtp.enorm, cfg.rms_norm_eps);
-            runner.hostRmsNormInto(cat[cfg.hidden_size..], h_prev, mtp.hnorm, cfg.rms_norm_eps);
+            host_ops.rmsNormInto(cat[0..cfg.hidden_size], try emb.dataConst(), mtp.enorm, cfg.rms_norm_eps);
+            host_ops.rmsNormInto(cat[cfg.hidden_size..], h_prev, mtp.hnorm, cfg.rms_norm_eps);
             var proj_t = try mtp.eh_proj.linearSeq(ctx, &cat_t, .embed, .attn);
             defer proj_t.deinit();
             @memcpy(x, try proj_t.dataConst());

@@ -18,6 +18,7 @@ const std = @import("std");
 const fucina = @import("fucina");
 const weights = @import("fucina").weights;
 const gguf_meta = @import("fucina").gguf_meta;
+const host_ops = @import("../host_ops.zig");
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
@@ -1798,48 +1799,15 @@ fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i:
 }
 
 /// SwiGLU through three resident linears, result as a host row.
-fn swigluLinear(ctx: *ExecContext, allocator: Allocator, x: *const fucina.Tensor(.{ .seq, .embed }), gate: *const LinearWeight, up: *const LinearWeight, down: *const LinearWeight) ![]f32 {
-    const rows = x.dim(.seq);
-    var gate_t = try gate.linearSeq(ctx, x, .embed, .gate_up);
-    defer gate_t.deinit();
-    var up_t = try up.linearSeq(ctx, x, .embed, .gate_up);
-    defer up_t.deinit();
-    const width = gate_t.dim(.gate_up);
-    var g_t = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ rows, width });
-    defer g_t.deinit();
-    for (try g_t.data(), try gate_t.dataConst(), try up_t.dataConst()) |*gi, gv, uv| gi.* = silu(gv) * uv;
-    var down_t = try down.linearSeq(ctx, &g_t, .embed, .attn);
-    defer down_t.deinit();
-    return allocator.dupe(f32, try down_t.dataConst());
-}
+const swigluLinear = host_ops.swigluLinear;
 
 const hostVector = weights.hostVector;
 const hostVectorInfo = weights.hostVectorInfo;
 
-fn rmsNormInto(out: []f32, x: []const f32, weight: []const f32, eps: f32) void {
-    var sum: f64 = 0;
-    for (x) |v| sum += @as(f64, v) * v;
-    const inv = 1.0 / @sqrt(sum / @as(f64, @floatFromInt(x.len)) + eps);
-    for (out, x, weight) |*o, v, w| o.* = @floatCast(@as(f64, v) * inv * w);
-}
+const rmsNormInto = host_ops.rmsNormInto;
+const softmaxInPlace = host_ops.softmaxInPlace;
+const silu = host_ops.silu;
 
-fn softmaxInPlace(v: []f32) void {
-    var max: f32 = -std.math.inf(f32);
-    for (v) |x| max = @max(max, x);
-    var sum: f32 = 0;
-    for (v) |*x| {
-        x.* = @exp(x.* - max);
-        sum += x.*;
-    }
-    for (v) |*x| x.* /= sum;
-}
-
-fn silu(x: f32) f32 {
-    return x / (1.0 + @exp(-x));
-}
-
-test "deepseek2 config rejects non-deepseek architectures" {
-    // Covered structurally: Config.fromGguf requires general.architecture ==
-    // "deepseek2"; real-model behavior is validated by the runner (the
-    // GGUF-dependent tests live with models/ and skip without it).
+test {
+    _ = @import("model_tests.zig");
 }

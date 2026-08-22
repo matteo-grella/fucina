@@ -24,6 +24,7 @@ const fucina = @import("fucina");
 const weights = @import("fucina").weights;
 const kv_cache = @import("kv_cache.zig");
 const subq_mod = @import("subq.zig");
+const host_ops = @import("host_ops.zig");
 const gguf_meta = @import("fucina").gguf_meta;
 const ptqtp_gguf = @import("fucina").ptqtp_gguf;
 
@@ -762,7 +763,7 @@ pub const Model = struct {
         defer normed_t.deinit();
         const normed = try normed_t.data();
         for (0..S) |r| {
-            hostRmsNormInto(normed[r * cfg.hidden_size ..][0..cfg.hidden_size], x[r * cfg.hidden_size ..][0..cfg.hidden_size], band.output_norm, cfg.rms_norm_eps);
+            host_ops.rmsNormInto(normed[r * cfg.hidden_size ..][0..cfg.hidden_size], x[r * cfg.hidden_size ..][0..cfg.hidden_size], band.output_norm, cfg.rms_norm_eps);
         }
         return self.output.linearSeq(ctx, &normed_t, .embed, .vocab);
     }
@@ -2187,7 +2188,7 @@ pub fn hostLayerForward(ctx: *ExecContext, cfg: Descriptor, band: *const HostBan
 
     const h_norm = try allocator.alloc(f32, S * cfg.hidden_size);
     defer allocator.free(h_norm);
-    for (0..S) |r| hostRmsNormInto(h_norm[r * cfg.hidden_size ..][0..cfg.hidden_size], x[r * cfg.hidden_size ..][0..cfg.hidden_size], layer.attn_norm, cfg.rms_norm_eps);
+    for (0..S) |r| host_ops.rmsNormInto(h_norm[r * cfg.hidden_size ..][0..cfg.hidden_size], x[r * cfg.hidden_size ..][0..cfg.hidden_size], layer.attn_norm, cfg.rms_norm_eps);
     var h_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ S, cfg.hidden_size }, h_norm);
     defer h_t.deinit();
 
@@ -2249,7 +2250,7 @@ pub fn hostLayerForward(ctx: *ExecContext, cfg: Descriptor, band: *const HostBan
                 for (q_head, kt) |a, b| dot += a * b;
                 scores[t] = dot * band.attn_scale;
             }
-            hostSoftmaxInPlace(scores[0..t_len]);
+            host_ops.softmaxInPlace(scores[0..t_len]);
             const out_head = attn_out[r * q_width + h * cfg.head_dim ..][0..cfg.head_dim];
             @memset(out_head, 0);
             for (0..t_len) |t| {
@@ -2266,12 +2267,12 @@ pub fn hostLayerForward(ctx: *ExecContext, cfg: Descriptor, band: *const HostBan
     for (x, try o_t.dataConst()) |*xi, oi| xi.* += oi;
 
     // FFN with the sandwich naming (post_attention_norm = pre-FFN).
-    for (0..S) |r| hostRmsNormInto(h_norm[r * cfg.hidden_size ..][0..cfg.hidden_size], x[r * cfg.hidden_size ..][0..cfg.hidden_size], layer.post_attention_norm, cfg.rms_norm_eps);
+    for (0..S) |r| host_ops.rmsNormInto(h_norm[r * cfg.hidden_size ..][0..cfg.hidden_size], x[r * cfg.hidden_size ..][0..cfg.hidden_size], layer.post_attention_norm, cfg.rms_norm_eps);
     switch (layer.ffn) {
         .dense => |*dense| {
             var f_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ S, cfg.hidden_size }, h_norm);
             defer f_t.deinit();
-            const y = try hostSwigluLinear(ctx, allocator, &f_t, &dense.gate, &dense.up, &dense.down);
+            const y = try host_ops.swigluLinear(ctx, allocator, &f_t, &dense.gate, &dense.up, &dense.down);
             defer allocator.free(y);
             for (x, y) |*xi, yi| xi.* += yi;
         },
@@ -2302,7 +2303,7 @@ fn hostMoeForward(ctx: *ExecContext, cfg: Descriptor, allocator: Allocator, moe:
         2 => for (probs) |*p| {
             p.* = 1.0 / (1.0 + @exp(-p.*));
         },
-        else => hostSoftmaxInPlace(probs),
+        else => host_ops.softmaxInPlace(probs),
     }
     const choice = try allocator.dupe(f32, probs);
     defer allocator.free(choice);
@@ -2340,45 +2341,8 @@ fn hostMoeForward(ctx: *ExecContext, cfg: Descriptor, allocator: Allocator, moe:
 
     const y = try allocator.dupe(f32, try mix.dataConst());
     errdefer allocator.free(y);
-    const shared = try hostSwigluLinear(ctx, allocator, f_t, &moe.shared_gate, &moe.shared_up, &moe.shared_down);
+    const shared = try host_ops.swigluLinear(ctx, allocator, f_t, &moe.shared_gate, &moe.shared_up, &moe.shared_down);
     defer allocator.free(shared);
     for (y, shared) |*yi, si| yi.* += si;
     return y;
-}
-
-fn hostSwigluLinear(ctx: *ExecContext, allocator: Allocator, x: *const fucina.Tensor(.{ .seq, .embed }), gate: *const LinearWeight, up: *const LinearWeight, down: *const LinearWeight) ![]f32 {
-    var gate_t = try gate.linearSeq(ctx, x, .embed, .gate_up);
-    defer gate_t.deinit();
-    var up_t = try up.linearSeq(ctx, x, .embed, .gate_up);
-    defer up_t.deinit();
-    const width = gate_t.dim(.gate_up);
-    const rows = gate_t.dim(.seq);
-    var g_t = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ rows, width });
-    defer g_t.deinit();
-    for (try g_t.data(), try gate_t.dataConst(), try up_t.dataConst()) |*gi, gv, uv| gi.* = hostSilu(gv) * uv;
-    var down_t = try down.linearSeq(ctx, &g_t, .embed, .attn);
-    defer down_t.deinit();
-    return allocator.dupe(f32, try down_t.dataConst());
-}
-
-pub fn hostRmsNormInto(out: []f32, x: []const f32, weight: []const f32, eps: f32) void {
-    var sum: f64 = 0;
-    for (x) |v| sum += @as(f64, v) * v;
-    const inv = 1.0 / @sqrt(sum / @as(f64, @floatFromInt(x.len)) + eps);
-    for (out, x, weight) |*o, v, w| o.* = @floatCast(@as(f64, v) * inv * w);
-}
-
-fn hostSoftmaxInPlace(v: []f32) void {
-    var max: f32 = -std.math.inf(f32);
-    for (v) |x| max = @max(max, x);
-    var sum: f32 = 0;
-    for (v) |*x| {
-        x.* = @exp(x.* - max);
-        sum += x.*;
-    }
-    for (v) |*x| x.* /= sum;
-}
-
-fn hostSilu(x: f32) f32 {
-    return x / (1.0 + @exp(-x));
 }

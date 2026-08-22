@@ -1057,12 +1057,7 @@ fn vecAdd(acc: []f32, v: []const f32) void {
     while (i < acc.len) : (i += 1) acc[i] += v[i];
 }
 
-fn rmsNormInto(out: []f32, x: []const f32, weight: []const f32, eps: f32) void {
-    var sum: f64 = 0;
-    for (x) |v| sum += @as(f64, v) * v;
-    const inv = 1.0 / @sqrt(sum / @as(f64, @floatFromInt(x.len)) + eps);
-    for (out, x, weight) |*o, v, w| o.* = @floatCast(@as(f64, v) * inv * w);
-}
+const rmsNormInto = @import("../host_ops.zig").rmsNormInto;
 
 /// dMel quantizer used by preprocessAudio, exposed for tests.
 fn quantizeDmel(logmel: f32) u8 {
