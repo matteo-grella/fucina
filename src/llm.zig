@@ -118,6 +118,10 @@ pub const chat = @import("llm/chat.zig");
 /// flags, and the per-model-family `Backend` vtable a server consumes
 /// (`examples/lmserve` is the in-tree server built on it).
 pub const serving = @import("llm/serving.zig");
+/// The descriptor runner: one family-independent decoder driven by a
+/// runtime `Descriptor` (Level 0 of the universal checkpoint runner);
+/// `qwen3` remains the hand-written parity oracle.
+pub const runner = @import("llm/runner.zig");
 pub const data = @import("llm/data.zig");
 /// Generated \p{L}/\p{N}/\s tables (the byte-BPE pretokenizer's). Re-exported
 /// so out-of-module consumers (nanochat's example-local tokenizer) share the
@@ -126,6 +130,8 @@ pub const data = @import("llm/data.zig");
 pub const unicode_categories = @import("llm/unicode_categories.zig");
 
 test {
+    _ = runner;
+    _ = @import("llm/runner_tests.zig");
     _ = kimi3.model;
     _ = qwen3.model;
     _ = qwen3.train;
