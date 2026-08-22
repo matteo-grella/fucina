@@ -22,6 +22,14 @@ point; earlier history is `git log`.
 
 ### Changed
 
+- The glm4moe family's trunk now runs on the runner's host_reference
+  band: `llm.glm4moe.model` keeps the MTP (`nextn`) head, draft step, and
+  the `step` verify API, and drives `runner.hostLayerForward` (which gains
+  a nullable `mtp_cache` seam for the MTP stream's single-layer cache).
+  `Config` is `runner.Descriptor`; `Cache` is `runner.HostCache`. The
+  ~530-line verbatim block copy is gone; bit-exactness is pinned by the
+  glm fixture's recorded logits hash and greedy chain in
+  `runner_tests.zig`.
 - The qwen3 family now runs directly on the descriptor runner:
   `llm.qwen3.model` is an alias surface over `llm.runner` (`Config` is
   `runner.Descriptor`, `Model` is `runner.Model`), removing the ~1,300-line

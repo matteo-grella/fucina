@@ -754,7 +754,7 @@ pub const Model = struct {
         }
 
         for (band.layers, 0..) |*layer, layer_i| {
-            try hostLayerForward(ctx, cfg, band, cache, layer, layer_i, x, S, cache.len);
+            try hostLayerForward(ctx, cfg, band, cache, layer, layer_i, x, S, cache.len, null);
         }
         cache.len += S;
 
@@ -1901,10 +1901,12 @@ test "Qwen3 0.6B config matches expected projection dimensions" {
 
 
 // ---- host_reference band: types and block code ---------------------------
-// Ported verbatim from the hand glm4moe port's block (src/llm/glm4moe/
-// model.zig) and parameterized by the Descriptor, so parity with that
-// oracle holds bitwise: same host-side f32 rope/attention/routing order,
-// same fucina kernels for the heavy linears and the fused MoE mixture.
+// The auditable host-side f32 block vocabulary (GLM/DeepSeek-MoE shape):
+// host rope/attention/routing order on plain slices, fucina kernels for the
+// heavy linears and the fused MoE mixture. The glm4moe family module
+// (glm4moe/model.zig) runs on these blocks and adds the MTP (`nextn`) head,
+// threading the MTP stream's own single-layer cache through the nullable
+// `mtp_cache` seam of `hostLayerForward`.
 
 pub const HostBand = struct {
     layers: []HostLayer,
@@ -1912,7 +1914,7 @@ pub const HostBand = struct {
     output_norm: []f32,
     attn_scale: f32,
 
-    fn deinit(self: *HostBand, allocator: Allocator) void {
+    pub fn deinit(self: *HostBand, allocator: Allocator) void {
         self.rope.deinit(allocator);
         allocator.free(self.output_norm);
         for (self.layers) |*l| l.deinit(allocator);
@@ -1923,14 +1925,14 @@ pub const HostBand = struct {
 
 /// Plain-rope cos/sin table over the rotated dims (partial rope: the first
 /// `rope_dims` of each head), pairing selected by the descriptor.
-const HostRope = struct {
+pub const HostRope = struct {
     cos: []f32,
     sin: []f32,
     pairs: usize,
     pairing: RopePairing,
     capacity: usize,
 
-    fn init(allocator: Allocator, config: Descriptor, capacity: usize) !HostRope {
+    pub fn init(allocator: Allocator, config: Descriptor, capacity: usize) !HostRope {
         const rope_dims = if (config.rope_dims == 0) config.head_dim else config.rope_dims;
         const pairs = rope_dims / 2;
         const cos = try allocator.alloc(f32, capacity * pairs);
@@ -1947,7 +1949,7 @@ const HostRope = struct {
         return .{ .cos = cos, .sin = sin, .pairs = pairs, .pairing = config.rope_pairing, .capacity = capacity };
     }
 
-    fn deinit(self: *HostRope, allocator: Allocator) void {
+    pub fn deinit(self: *HostRope, allocator: Allocator) void {
         allocator.free(self.cos);
         allocator.free(self.sin);
         self.* = undefined;
@@ -2079,7 +2081,7 @@ pub const HostLayer = struct {
     o_proj: LinearWeight,
     ffn: HostFfn,
 
-    fn deinit(self: *HostLayer, allocator: Allocator) void {
+    pub fn deinit(self: *HostLayer, allocator: Allocator) void {
         self.ffn.deinit(allocator);
         self.o_proj.deinit();
         allocator.free(self.v_bias);
@@ -2094,7 +2096,7 @@ pub const HostLayer = struct {
     }
 };
 
-fn loadHostLayer(ctx: *ExecContext, file: *const gguf.File, config: Descriptor, layer_i: usize, store: ?*fucina.ExpertStore) !HostLayer {
+pub fn loadHostLayer(ctx: *ExecContext, file: *const gguf.File, config: Descriptor, layer_i: usize, store: ?*fucina.ExpertStore) !HostLayer {
     const allocator = ctx.allocator;
     var name_buf: [96]u8 = undefined;
 
@@ -2176,9 +2178,10 @@ fn loadHostLayer(ctx: *ExecContext, file: *const gguf.File, config: Descriptor, 
     };
 }
 
-/// One transformer layer over `x` rows in place (the hand glm4moe
-/// `layerForward` minus its MTP threading).
-fn hostLayerForward(ctx: *ExecContext, cfg: Descriptor, band: *const HostBand, cache: *HostCache, layer: *const HostLayer, layer_i: usize, x: []f32, S: usize, pos0: usize) !void {
+/// One transformer layer over `x` rows in place. `mtp_cache` non-null
+/// routes the K/V through the MTP stream's own single-layer cache (the
+/// glm4moe `nextn` head); the runner's own entries pass null.
+pub fn hostLayerForward(ctx: *ExecContext, cfg: Descriptor, band: *const HostBand, cache: ?*HostCache, layer: *const HostLayer, layer_i: usize, x: []f32, S: usize, pos0: usize, mtp_cache: ?*HostCache) !void {
     const allocator = ctx.allocator;
     const heads_per_kv = cfg.num_attention_heads / cfg.num_key_value_heads;
 
@@ -2213,6 +2216,8 @@ fn hostLayerForward(ctx: *ExecContext, cfg: Descriptor, band: *const HostBand, c
         }
     }
 
+    const host_kv = mtp_cache orelse cache.?;
+    const cache_layer = if (mtp_cache != null) 0 else layer_i;
     var attn_t = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ S, q_width });
     defer attn_t.deinit();
     const attn_out = try attn_t.data();
@@ -2227,8 +2232,8 @@ fn hostLayerForward(ctx: *ExecContext, cfg: Descriptor, band: *const HostBand, c
         for (0..cfg.num_key_value_heads) |h| {
             band.rope.apply(k_row[h * cfg.head_dim ..][0..cfg.head_dim], pos);
         }
-        const k_dst = cache.k[layer_i][pos * kv_width ..][0..kv_width];
-        const v_dst = cache.v[layer_i][pos * kv_width ..][0..kv_width];
+        const k_dst = host_kv.k[cache_layer][pos * kv_width ..][0..kv_width];
+        const v_dst = host_kv.v[cache_layer][pos * kv_width ..][0..kv_width];
         @memcpy(k_dst, k_row);
         @memcpy(v_dst, v_row);
 
@@ -2239,7 +2244,7 @@ fn hostLayerForward(ctx: *ExecContext, cfg: Descriptor, band: *const HostBand, c
             band.rope.apply(q_head, pos);
             const kv_h = h / heads_per_kv;
             for (0..t_len) |t| {
-                const kt = cache.k[layer_i][(t * cfg.num_key_value_heads + kv_h) * cfg.head_dim ..][0..cfg.head_dim];
+                const kt = host_kv.k[cache_layer][(t * cfg.num_key_value_heads + kv_h) * cfg.head_dim ..][0..cfg.head_dim];
                 var dot: f32 = 0;
                 for (q_head, kt) |a, b| dot += a * b;
                 scores[t] = dot * band.attn_scale;
@@ -2249,11 +2254,12 @@ fn hostLayerForward(ctx: *ExecContext, cfg: Descriptor, band: *const HostBand, c
             @memset(out_head, 0);
             for (0..t_len) |t| {
                 const w = scores[t];
-                const vt = cache.v[layer_i][(t * cfg.num_key_value_heads + kv_h) * cfg.head_dim ..][0..cfg.head_dim];
+                const vt = host_kv.v[cache_layer][(t * cfg.num_key_value_heads + kv_h) * cfg.head_dim ..][0..cfg.head_dim];
                 for (out_head, vt) |*o, val| o.* += w * val;
             }
         }
     }
+    if (mtp_cache) |mc| mc.len = pos0 + S;
 
     var o_t = try layer.o_proj.linearSeq(ctx, &attn_t, .embed, .attn);
     defer o_t.deinit();
@@ -2355,7 +2361,7 @@ fn hostSwigluLinear(ctx: *ExecContext, allocator: Allocator, x: *const fucina.Te
     return allocator.dupe(f32, try down_t.dataConst());
 }
 
-fn hostRmsNormInto(out: []f32, x: []const f32, weight: []const f32, eps: f32) void {
+pub fn hostRmsNormInto(out: []f32, x: []const f32, weight: []const f32, eps: f32) void {
     var sum: f64 = 0;
     for (x) |v| sum += @as(f64, v) * v;
     const inv = 1.0 / @sqrt(sum / @as(f64, @floatFromInt(x.len)) + eps);
