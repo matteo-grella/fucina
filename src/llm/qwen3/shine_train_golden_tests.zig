@@ -6,6 +6,10 @@
 //! positional embeddings) against the reference autograd. Memory tokens
 //! are constant zeros on both sides (the reference optimizer excludes
 //! them), so their gradient is not part of the gate.
+//!
+//! Native backend only: these are real-model golden forwards — they pin
+//! MODEL WIRING, not kernel math, so the scalar reference leg skips them
+//! (its kernel coverage lives in the exec/backend suites).
 const std = @import("std");
 const fucina = @import("fucina");
 const qwen3 = @import("model.zig");
@@ -382,14 +386,17 @@ fn goldenGate(checkpoint_layers: bool) !void {
 }
 
 test "SHINE training step: loss and every trainable gradient match the PyTorch reference" {
+    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
     try goldenGate(false);
 }
 
 test "SHINE training step under per-layer checkpointing: same goldens" {
+    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
     try goldenGate(true);
 }
 
 test "SHINE packed step: two copies of one example equal the single-example step" {
+    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
     const allocator = std.heap.smp_allocator;
     {
         const probe = std.Io.Dir.cwd().readFileAlloc(std.testing.io, goldens_dir ++ "/manifest.json", allocator, .limited(1 << 20)) catch return error.SkipZigTest;
@@ -498,6 +505,7 @@ fn noiseSlice(allocator: std.mem.Allocator, len: usize, seed: u32) ![]f32 {
 }
 
 test "SHINE training step timing at 0.6B (informational)" {
+    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
     // Meaningful only optimized; the 0.6B graph is ~25x slower in Debug.
     if (@import("builtin").mode == .Debug) return error.SkipZigTest;
     const allocator = std.heap.smp_allocator;

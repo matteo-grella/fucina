@@ -3,6 +3,10 @@
 //! jumps over the lazy dog.", --greedy --no-fa, natural EOS at 37 frames).
 //! Gates: prompt ids exact, prompt embeds + prefill logits cosine, generated
 //! codes token-for-token. Skips without the talker GGUF + dumps.
+//!
+//! Native backend only: these are real-model golden forwards — they pin
+//! MODEL WIRING, not kernel math, so the scalar reference leg skips them
+//! (its kernel coverage lives in the exec/backend suites).
 
 const std = @import("std");
 const fucina = @import("fucina");
@@ -62,6 +66,7 @@ fn cosine(a: []const f32, b: []const f32) f64 {
 }
 
 test "qwen3tts talker: greedy generation matches the oracle token-for-token" {
+    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
     const allocator = gpa.allocator();
@@ -151,6 +156,7 @@ test "qwen3tts talker: greedy generation matches the oracle token-for-token" {
 }
 
 test "qwen3tts talker: seeded sampling replays the oracle draw-for-draw" {
+    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
     const allocator = gpa.allocator();

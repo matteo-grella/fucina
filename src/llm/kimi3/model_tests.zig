@@ -3,6 +3,10 @@
 //! goldens come from `tools/kimi3_goldens.py`). Skips when the local model
 //! or goldens are absent. Layer-level attention outputs localize a failure
 //! to a component before the full-logits check runs.
+//!
+//! Native backend only: these are real-model golden forwards — they pin
+//! MODEL WIRING, not kernel math, so the scalar reference leg skips them
+//! (its kernel coverage lives in the exec/backend suites).
 
 const std = @import("std");
 
@@ -26,6 +30,7 @@ fn readGolden(allocator: std.mem.Allocator, name: []const u8) !?[]f32 {
 }
 
 test "kimi3 model matches the reference checkpoint logits" {
+    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
     const allocator = gpa.allocator();

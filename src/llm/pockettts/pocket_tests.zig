@@ -4,6 +4,10 @@
 //! INJECTED — torch RNG is not reproduced), and the first Mimi frame's four
 //! stages. Skips without models/pocket-tts/pocket-tts-english-v2.gguf +
 //! refs/pocket-tts-dumps/.
+//!
+//! Native backend only: these are real-model golden forwards — they pin
+//! MODEL WIRING, not kernel math, so the scalar reference leg skips them
+//! (its kernel coverage lives in the exec/backend suites).
 
 const std = @import("std");
 const fucina = @import("fucina");
@@ -90,6 +94,7 @@ fn expectClose(name: []const u8, got: []const f32, want: []const f32, max_diff: 
 }
 
 test "pocket-tts: tokenizer, backbone, flow head, mimi frame vs reference dumps" {
+    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
     const allocator = gpa.allocator();

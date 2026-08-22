@@ -1,6 +1,10 @@
 //! Codec decode parity vs the qwentts.cpp oracle: unpack the golden `.rvq`
 //! (137 frames of ref_audio_2), decode, and compare against the oracle's F32
 //! WAV decode sample-by-sample. Skips without the codec GGUF + goldens.
+//!
+//! Native backend only: these are real-model golden forwards — they pin
+//! MODEL WIRING, not kernel math, so the scalar reference leg skips them
+//! (its kernel coverage lives in the exec/backend suites).
 
 const std = @import("std");
 const fucina = @import("fucina");
@@ -41,6 +45,7 @@ fn wavF32Samples(allocator: std.mem.Allocator, bytes: []const u8) ![]f32 {
 }
 
 test "qwen3tts codec: golden rvq decodes to the oracle waveform" {
+    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
     const allocator = gpa.allocator();
@@ -121,6 +126,7 @@ fn stageCosine(name: []const u8, got_tc: []const f32, dump: anytype, dump_is_ct:
 }
 
 test "qwen3tts codec: stage bisect vs oracle dumps (debug, needs dump-codec/)" {
+    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
     const allocator = gpa.allocator();
@@ -162,6 +168,7 @@ test "qwen3tts codec: stage bisect vs oracle dumps (debug, needs dump-codec/)" {
 }
 
 test "codec: streaming session equals whole-clip decode" {
+    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
     const allocator = gpa.allocator();

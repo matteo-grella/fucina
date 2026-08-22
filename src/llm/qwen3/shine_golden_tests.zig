@@ -10,6 +10,10 @@
 //! The reference runs fp32 weights (upcast from the bf16 release); the port
 //! runs 16-bit GGUF weights. bf16 -> f16 is exact for every weight in range,
 //! so the compared drift is kernel-path reassociation/rounding only.
+//!
+//! Native backend only: these are real-model golden forwards — they pin
+//! MODEL WIRING, not kernel math, so the scalar reference leg skips them
+//! (its kernel coverage lives in the exec/backend suites).
 const std = @import("std");
 const fucina = @import("fucina");
 const qwen3 = @import("model.zig");
@@ -84,6 +88,7 @@ fn requireGoldens(allocator: std.mem.Allocator) !void {
 }
 
 test "SHINE m2p + sliceLora parity vs the PyTorch reference" {
+    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
     // Loads the 3.3GB f32 SHINE GGUF and runs the full M2P stack — the
     // tracking allocator's overhead is irrelevant at this test's runtime.
     const allocator = std.heap.smp_allocator;
@@ -167,6 +172,7 @@ test "SHINE m2p + sliceLora parity vs the PyTorch reference" {
 }
 
 test "SHINE encoder + end-to-end greedy parity vs the PyTorch reference" {
+    if (comptime @import("fucina").internal.backend_mod.active_kind != .native) return error.SkipZigTest; // real-model goldens: native only
     // A Debug 8B forward is a ~25x slowdown; this leg runs only in the
     // optimized gate (`zig build test-llm -Doptimize=ReleaseFast`) so the
     // routine Debug `zig build test` loop stays usable with the model
