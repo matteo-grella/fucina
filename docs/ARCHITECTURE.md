@@ -588,7 +588,7 @@ subdirectories and are exposed as namespaces:
   pass over N per-stream KV caches).
 - `llm.qwen35.{model,chat}` — Qwen3.5/Qwen3.6 Gated-DeltaNet hybrid plus its
   ChatML chat/generation engine.
-- `llm.gemma.{gemma4,gemma4_train,moe,moe_route,moe_route_tensor}` — Gemma 4
+- `llm.gemma.{model,train,moe,moe_route,moe_route_tensor}` — Gemma 4
   text + MoE; the gemma MoE engines reuse `ExecContext.moe_chain`.
 - `llm.diffusion_gemma.model` — block text-diffusion on the gemma4 backbone.
 - `llm.deepseek2.model` — DeepSeek-V2 family (MLA + MoE).
@@ -669,7 +669,7 @@ Generic helpers stay flat in `src/llm/`:
   checkpointing and optimizer registration; a registered name is an on-disk
   schema path (renames go through `state_dict.LoadOptions.aliases`, never by
   loosening strictness). The trainers (`llm/qwen3/train.zig`,
-  `llm/gemma/gemma4_train.zig`) delegate their parameter plumbing here.
+  `llm/gemma/train.zig`) delegate their parameter plumbing here.
 - `src/state_dict.zig` + `src/safetensors.zig`: the named checkpoint stream
   and its safetensors container.
 - `src/training_checkpoint.zig`: canonical checkpoint directory

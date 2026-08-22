@@ -14,7 +14,7 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const gemma4 = @import("gemma4.zig");
+const gemma4 = @import("model.zig");
 const gemma_moe = @import("moe.zig");
 const weights = @import("fucina").weights;
 
@@ -1116,5 +1116,5 @@ pub fn Trainer(comptime targets: Targets) type {
 }
 
 test {
-    _ = @import("gemma4_train_tests.zig");
+    _ = @import("train_tests.zig");
 }

@@ -8185,7 +8185,7 @@ pub const gpu = struct {
 ```
 
 `has_quant_gemm` is the capability loaders key on when reshaping CPU-side
-weight representations for the GPU quant path (e.g. `src/llm/gemma/gemma4.zig`
+weight representations for the GPU quant path (e.g. `src/llm/gemma/model.zig`
 copying mmap'd expert tensors into resident storage) — a provider can be
 `enabled` while its quantized arms are stubs. `RhsLifetime`
 (`fucina.RhsLifetime`) is how callers communicate the storage-stability
@@ -11165,7 +11165,7 @@ family-agnostic helpers stay flat:
 | `llm.qwen3` | `model`, `train`, `generate`, `ptqtp`, `shine`, `shine_train` — Qwen3 dense + MoE, LoRA fine-tuning, SHINE adapters | `llm/qwen3/` |
 | `llm.kimi3` | `model` — Kimi-K3 (Kimi-Linear lineage: KDA + gated-MLA-NoPE hybrid, latent MoE, attention residuals, SiTU) | `llm/kimi3/` |
 | `llm.qwen35` | `model`, `chat` — Qwen3.5 Gated-DeltaNet hybrid | `llm/qwen35/` |
-| `llm.gemma` | `gemma4`, `gemma4_train`, `moe`, `moe_route`, `moe_route_tensor` | `llm/gemma/` |
+| `llm.gemma` | `model`, `train`, `moe`, `moe_route`, `moe_route_tensor` | `llm/gemma/` |
 | `llm.diffusion_gemma` | `model` — block text-diffusion on the gemma4 backbone | `llm/diffusion_gemma/` |
 | `llm.parakeet` | `loader`, `frontend`, `subsampling`, `encoder`, `weights`, `decoder`, `tokenizer`, `streaming`, `transcription` — NeMo FastConformer/RNN-T ASR | `llm/parakeet/` |
 | `llm.speculative` | `core`, `sam_index`, `recycling`, `cascade`, `constrained` | `llm/speculative/` |
@@ -13196,7 +13196,7 @@ single-cartridge forward (pinned bitwise), a two-part composition built
 from one capture reproduces the real prefill exactly (the composition
 oracle — bitwise on Qwen3-0.6B-f16 at p = 256 via `cartridge-fleet
 --equiv`; gemma4 arms, SWA cutting the composed prefix included, in
-`gemma4_train_tests.zig`), and serving through `writeComposedToCache` is
+`train_tests.zig`), and serving through `writeComposedToCache` is
 cache-level, so compositions serve on ANY family
 (`train_cartridge_compose_tests.zig`).
 
@@ -13543,7 +13543,7 @@ LoRA mode's exact-identity start.
 The `fucina_llm` module root (`src/llm.zig`) exposes each model family as a
 namespace — `llm.qwen3.{model,train}`, `llm.kimi3.model`,
 `llm.qwen35.{model,chat}`,
-`llm.gemma.{gemma4,gemma4_train,moe,moe_route,moe_route_tensor}`,
+`llm.gemma.{model,train,moe,moe_route,moe_route_tensor}`,
 `llm.diffusion_gemma.model`, `llm.deepseek2.model`, `llm.glm4moe.model`,
 `llm.deepseek4.model`, `llm.inkling.{model,mmproj,chat}`, `llm.parakeet.*`,
 `llm.speculative.*` — while the
@@ -14052,7 +14052,7 @@ layers store no K/V and instead reference the last same-type writer (offset
 ```zig
 test "gemma4 shared-KV geometry" {
     const alloc = std.testing.allocator;
-    var geom = try llm.gemma.gemma4.deriveGeometry(
+    var geom = try llm.gemma.model.deriveGeometry(
         alloc,
         4, // n_layer
         &.{ true, true, false, true }, // SWA pattern (false = global)
@@ -14096,9 +14096,9 @@ plumbing reused by diffusion_gemma and the trainer: `max_heads` (64),
 ```zig
 var file = try fucina.gguf.File.loadMmap(alloc, io, "models/gemma-4-26B-A4B-it-UD-Q6_K.gguf");
 defer file.deinit();
-var config = try llm.gemma.gemma4.Config.fromGguf(&file);
+var config = try llm.gemma.model.Config.fromGguf(&file);
 config.borrow_experts = true; // zero-copy experts from the mmap (--experts=borrow)
-var model = try llm.gemma.gemma4.Model.loadGgufFromFile(&ctx, &file, config);
+var model = try llm.gemma.model.Model.loadGgufFromFile(&ctx, &file, config);
 defer model.deinit();
 
 var kv = try model.initKvCache(&ctx, 512); // per-layer geometry
@@ -14129,8 +14129,8 @@ each token's summation order fixed against parity oracles);
 `moe_route_tensor.scatterGrouped` / `recordBatch` are the tensor-level
 scatter and profile hooks.
 
-**LoRA fine-tuning** (`gemma4_train.zig`, pointer depth — §11).
-`llm.gemma.gemma4_train.Trainer(targets)` mirrors the qwen3 trainer over the
+**LoRA fine-tuning** (`train.zig`, pointer depth — §11).
+`llm.gemma.train.Trainer(targets)` mirrors the qwen3 trainer over the
 gemma4 forward: identical `Targets` struct and defaults (q, v), identical
 `ignore_index`, and the same member set — `init(ctx, model, lora.Config,
 seed)`, `deinit`, `registerAllParams`, `saveAdapters`, `loadAdapters`,

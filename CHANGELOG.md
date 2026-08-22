@@ -20,7 +20,22 @@ point; earlier history is `git log`.
 
 ## Unreleased
 
+### Added
+
+- `llm.generate`: the greedy generation driver, shared by the tensor-band
+  families (duck-typed on `forwardStep` + `KvCache`). `llm.qwen3.generate`
+  re-exports it; `gemma.model.Model.generate` forwards to it.
+- `KvCache.requireF16` (+ `kv_cache.Error.UnsupportedKvCacheDtype`): the
+  f16-views-only guard the gemma4/qwen35/diffusion_gemma forwards share.
+  Replaces the per-family `requireF16KvCache` copies (experimental tier,
+  no alias).
+
 ### Changed
+
+- Family namespace shape unified to `family.model`: `llm.gemma.model` /
+  `llm.gemma.train` (files `llm/gemma/{model,train}.zig`) and
+  `llm.pockettts.model`. `gemma.gemma4`, `gemma.gemma4_train`, and
+  `pockettts.pocket` remain as deprecated aliases for one MINOR release.
 
 - The glm4moe family's trunk now runs on the runner's host_reference
   band: `llm.glm4moe.model` keeps the MTP (`nextn`) head, draft step, and

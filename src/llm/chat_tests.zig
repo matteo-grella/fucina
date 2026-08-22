@@ -441,7 +441,7 @@ test "sendRenderedReuse: identical resend and divergent edits reconcile; specula
 test "Conversation instantiates over gemma4 + SPM (compile coverage)" {
     // The generic covers both in-tree families; force semantic analysis of
     // every Conversation path against the gemma4/SPM duck-typed signatures.
-    std.testing.refAllDecls(chat.Conversation(@import("gemma/gemma4.zig").Model, @import("spm_tokenizer.zig")));
+    std.testing.refAllDecls(chat.Conversation(@import("gemma/model.zig").Model, @import("spm_tokenizer.zig")));
 }
 
 /// Minimal byte-level vocab for the tiny 64-token model: GPT-2 symbol forms

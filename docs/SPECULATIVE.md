@@ -37,7 +37,7 @@ SpeculationIndex (cascade)    src/llm/speculative/cascade.zig:130
   ↓ drafts verified by
 SpeculativeDecoder(Model)     src/llm/speculative/core.zig:476
   one batched forwardStepAllLogits + full sampler pipeline per row
-  KvCache.truncate drops rejected rows        src/llm/kv_cache.zig:310
+  KvCache.truncate drops rejected rows        src/llm/kv_cache.zig:328
 ```
 
 - **`DraftSource`** is a three-method vtable: `suggest(context, buf)`
@@ -48,7 +48,7 @@ SpeculativeDecoder(Model)     src/llm/speculative/core.zig:476
   deterministic proposer.
 - **`SpeculativeDecoder(Model)`** runs the decode loop step: ask the source
   for a draft, run **one** batched forward over `[carried token, draft...]`
-  via `forwardStepAllLogits` (qwen3/model.zig:320, gemma/gemma4.zig:652 — same as
+  via `forwardStepAllLogits` (runner.zig:452, gemma/model.zig:639 — same as
   `forwardStep` but no `last_query_only` narrowing, returns `[k, vocab]`),
   sample every row with the full pipeline, commit the longest prefix the
   target model itself would have produced, truncate the KV cache back to the

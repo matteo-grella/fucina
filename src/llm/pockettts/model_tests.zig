@@ -11,7 +11,7 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const pocket = @import("pocket.zig");
+const pocket = @import("model.zig");
 
 const gguf = fucina.gguf;
 

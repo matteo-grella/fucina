@@ -1852,13 +1852,8 @@ test "applyExpertTopP keeps the cumulative-weight prefix and re-points dropped p
     try std.testing.expectEqual(@as(f32, 0), wgt1[1]);
 }
 
-fn profileStart(profile: ?*ForwardProfile, io: ?std.Io) i128 {
-    return if (profile != null) std.Io.Clock.awake.now(io.?).nanoseconds else 0;
-}
-
-fn profileElapsed(start: i128, io: ?std.Io) i128 {
-    return std.Io.Clock.awake.now(io.?).nanoseconds - start;
-}
+const profileStart = @import("profile.zig").start;
+const profileElapsed = @import("profile.zig").elapsed;
 
 /// Causal grouped attention at the model's scale; `k`/`v` may be any KV
 /// representation `groupedAttention` accepts (f32 tensors, f16 cache views,

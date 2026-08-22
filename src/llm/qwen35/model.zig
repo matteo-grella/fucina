@@ -956,7 +956,7 @@ pub const Model = struct {
         const total_start = profileStart(profile, io);
         if (profile) |p| p.tokens += token_ids.len;
         if (token_ids.len == 0) return Error.InvalidSequenceLength;
-        try requireF16KvCache(&cache.kv);
+        try cache.kv.requireF16();
         if (cache.kv.len != pos0) return Error.InvalidSequenceLength;
         if (cache.kv.len + token_ids.len > cache.kv.capacity) return kv_cache.Error.KvCacheOverflow;
         const cfg = self.config;
@@ -1098,10 +1098,7 @@ const ProfileBucket = enum {
     final,
 };
 
-fn profileStart(profile: ?*ForwardProfile, io: ?std.Io) i128 {
-    if (profile == null) return 0;
-    return std.Io.Clock.awake.now(io.?).nanoseconds;
-}
+const profileStart = @import("../profile.zig").start;
 
 fn profileAdd(profile: ?*ForwardProfile, io: ?std.Io, start: i128, bucket: ProfileBucket) void {
     const p = profile orelse return;
@@ -1150,16 +1147,6 @@ fn partialRope(ctx: *ExecContext, x: anytype, n_rot: usize, table: *const fucina
     return x.rope(ctx, .seq, .d, table, .half);
 }
 
-/// qwen35's attention reads the `kv.k`/`kv.v` f16 tensor views directly; a
-/// q8_0 cache stores blocks in `k_q8`/`v_q8` and leaves those views EMPTY, so
-/// indexing them would be out of bounds. Reject non-f16 caches at the forward
-/// seam (qwen3 is the only model with a q8_0 attention path).
-fn requireF16KvCache(kv: *const KvCache) Error!void {
-    switch (kv.dtype) {
-        .f16 => {},
-        .q8_0 => return Error.UnsupportedKvCacheDtype,
-    }
-}
 
 /// One full-attention block: returns `input + attn_out`. Fused Q+gate
 /// projection (per head: [query | gate]), per-head q/k RMSNorm, partial RoPE,
@@ -2694,9 +2681,9 @@ test "qwen35 rejects a q8_0 KV cache at the forward seam" {
 
     var q8 = try KvCache.initWithDtype(&ctx, 1, 2, 64, 4, .q8_0);
     defer q8.deinit();
-    try std.testing.expectError(Error.UnsupportedKvCacheDtype, requireF16KvCache(&q8));
+    try std.testing.expectError(Error.UnsupportedKvCacheDtype, q8.requireF16());
 
     var f16_cache = try KvCache.initWithDtype(&ctx, 1, 2, 64, 4, .f16);
     defer f16_cache.deinit();
-    try requireF16KvCache(&f16_cache);
+    try f16_cache.requireF16();
 }

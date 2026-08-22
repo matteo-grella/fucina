@@ -89,7 +89,7 @@ deliberate allocator exception noted in `AGENTS.md`; decode is covered by stack
 fast paths, and pooling the prefill arm is a known deferred optimization), and
 load-time RHS weight packs. The once-hot f16 temporary during KV-cache append
 was fused away before pooling existed: rows cast straight into the f16 cache
-slot (`src/llm/kv_cache.zig:269-280`).
+slot (`src/llm/kv_cache.zig:286-298`).
 
 ---
 
@@ -123,10 +123,10 @@ Every view operation retains the source buffer and releases it on `deinit`:
 (`src/exec/gather_scatter.zig:80`). A view's lifetime is independent of its parent's.
 
 The most important instance: per-step attention reads the KV cache via a
-**zero-copy `narrow`** (`src/llm/gemma/gemma4.zig:993`) that aliases a
+**zero-copy `narrow`** (`src/llm/gemma/model.zig:1035`) that aliases a
 **session-lifetime, non-pooled f16 buffer** (`KvCache.k/v`, allocated once via
-`emptyRankTyped(.f16, ...)`, `src/llm/kv_cache.zig:179`; `reset()` only sets
-`len = 0` and keeps the buffers, `:199-200`). A region-reset arena has no per-object
+`emptyRankTyped(.f16, ...)`, `src/llm/kv_cache.zig:185`; `reset()` only sets
+`len = 0` and keeps the buffers, `:217-219`). A region-reset arena has no per-object
 lifetime to represent this — it would either free live KV memory (corruption) or
 have to carve KV out entirely (at which point it is no longer one arena).
 
@@ -139,7 +139,7 @@ substantive axes (in addition to the view/KV constraint in §3):
 
 1. **Peak memory regresses from working-set to sum-of-all-intermediates.** The
    pool reclaims a buffer the instant a transient dies; per-block peak live set
-   is only ~6–12 tensors (`attnBlock`/`ffnBlock`, `src/llm/gemma/gemma4.zig:1031/:1126`),
+   is only ~6–12 tensors (`attnBlock`/`ffnBlock`, `src/llm/gemma/model.zig:976/:1071`),
    and the residual stream is a single carried `x` advanced via `ctx.replace`
    (which frees the old buffer each layer, `src/exec.zig:398`). An arena frees
    nothing until reset, so a forward balloons to roughly `n_layer ×` the
@@ -180,7 +180,7 @@ amortization — and adds intra-pass reuse plus a bounded cap the arena lacks.
 ## 5. The one honest caveat: ergonomics
 
 The genuine cost of the current pattern is **boilerplate** — ~21 `defer .deinit()`
-lines across `attnBlock` + `ffnBlock` (`src/llm/gemma/gemma4.zig:1031/:1126`).
+lines across `attnBlock` + `ffnBlock` (`src/llm/gemma/model.zig:1031/:1126`).
 (The hand-written `catch { …deinit(); return e; }` error-path cleanups this
 section originally cited have since been converted to plain `defer`/`errdefer`
 arms.) These manual frees are the real fragility, and they are precisely the
@@ -255,7 +255,7 @@ inference frame helper is unchanged.
   device-resident or mmap'd weight bytes, never pooled storage — keep it that
   way).
 - **`KvCache.reset()` does not zero or free** — it only sets `len = 0`
-  (`src/llm/kv_cache.zig:199-200`); stale f16 data is simply overwritten on the
+  (`src/llm/kv_cache.zig:217-219`); stale f16 data is simply overwritten on the
   next append, which is correct only because attention reads just the `[0..len]`
   prefix.
 - **Uninitialized allocations commit lazily.** `empty*` buffers and the slabs

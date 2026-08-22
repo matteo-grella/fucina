@@ -1063,5 +1063,5 @@ pub const Engine = struct {
 };
 
 test {
-    _ = @import("pocket_tests.zig");
+    _ = @import("model_tests.zig");
 }

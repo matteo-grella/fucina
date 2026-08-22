@@ -56,7 +56,7 @@ MIT, Copyright (c) 2023-2026 The ggml authors):
   `ggml_v_expf` scheme, itself adapted from
   [ARM optimized-routines](https://github.com/ARM-software/optimized-routines)
   (MIT, Copyright Arm Limited) — constant-for-constant in Zig vector form.
-- **Model graphs** (`src/llm/gemma/gemma4.zig`, `src/llm/qwen35/model.zig`):
+- **Model graphs** (`src/llm/gemma/model.zig`, `src/llm/qwen35/model.zig`):
   implemented with llama.cpp's `src/models/*.cpp` as source of truth,
   validated by logit parity. **DiffusionGemma**
   (`src/llm/diffusion_gemma/model.zig`) was implemented from llama.cpp draft

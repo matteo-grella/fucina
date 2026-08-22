@@ -44,7 +44,7 @@
 //! re-runs via the eval harness's `--sc-logits` flag).
 const std = @import("std");
 const fucina = @import("fucina");
-const gemma4 = @import("../gemma/gemma4.zig");
+const gemma4 = @import("../gemma/model.zig");
 const gguf_meta = @import("fucina").gguf_meta;
 const weights = @import("fucina").weights;
 const kv_cache = @import("../kv_cache.zig");
@@ -295,7 +295,7 @@ pub const Model = struct {
         pos0: usize,
     ) !void {
         if (token_ids.len == 0) return Error.InvalidSequenceLength;
-        try gemma4.requireF16KvCache(kv);
+        try kv.requireF16();
         if (kv.len != pos0) return Error.InvalidSequenceLength;
         if (kv.len + token_ids.len > kv.capacity) return kv_cache.Error.KvCacheOverflow;
 
@@ -337,7 +337,7 @@ pub const Model = struct {
         const cfg = self.config.base;
         const c_len = canvas_ids.len;
         if (c_len == 0) return Error.InvalidSequenceLength;
-        try gemma4.requireF16KvCache(kv);
+        try kv.requireF16();
         if (kv.len + c_len > kv.capacity) return kv_cache.Error.KvCacheOverflow;
         if (sc != null and self.sc == null) return Error.SelfConditioningUnavailable;
 

@@ -891,7 +891,7 @@ test "init rejects degenerate cost-gate options in every build mode" {
 test "SpeculativeDecoder instantiates for gemma4.Model (compile coverage)" {
     // gemma4 shares the duck-typed forwardStep/forwardStepAllLogits/KvCache
     // contract; force semantic analysis of every decoder path against it.
-    const Dec = SpeculativeDecoder(@import("../gemma/gemma4.zig").Model);
+    const Dec = SpeculativeDecoder(@import("../gemma/model.zig").Model);
     std.testing.refAllDecls(Dec);
     var decoder = try Dec.init(std.testing.allocator, NullDraft.source(), .{});
     decoder.deinit();

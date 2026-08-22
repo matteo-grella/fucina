@@ -22,6 +22,7 @@ const std = @import("std");
 const fucina = @import("fucina");
 const weights = @import("fucina").weights;
 const kv_cache = @import("../kv_cache.zig");
+const generate_mod = @import("../generate.zig");
 const gguf_meta = @import("fucina").gguf_meta;
 const gemma_moe = @import("moe.zig");
 
@@ -670,7 +671,7 @@ pub const Model = struct {
         }
         if (total != token_ids.len) return Error.InvalidSequenceLength;
         for (caches, span_lens, 0..) |kv, span, i| {
-            try requireF16KvCache(kv);
+            try kv.requireF16();
             if (kv.head_dim.len != self.layers.len) return Error.MismatchedKvCaches;
             if (kv.len + span > kv.capacity) return kv_cache.Error.KvCacheOverflow;
             for (caches[0..i]) |prev| if (prev == kv) return Error.MismatchedKvCaches;
@@ -753,7 +754,7 @@ pub const Model = struct {
         last_only: bool,
     ) !fucina.Tensor(.{ .seq, .vocab }) {
         if (token_ids.len == 0) return Error.InvalidSequenceLength;
-        try requireF16KvCache(kv);
+        try kv.requireF16();
         if (kv.len != pos0) return Error.InvalidSequenceLength;
         if (kv.len + token_ids.len > kv.capacity) return kv_cache.Error.KvCacheOverflow;
 
@@ -847,55 +848,17 @@ pub const Model = struct {
         out_tokens: []usize,
         options: GenerateOptions,
     ) !usize {
-        if (prompt_tokens.len == 0) return Error.InvalidSequenceLength;
-        kv.reset();
-
-        var logits = try self.forwardStep(ctx, kv, prompt_tokens, 0);
-        defer logits.deinit();
-
-        const limit = @min(options.max_new_tokens, out_tokens.len);
-        var produced: usize = 0;
-        while (produced < limit) {
-            const next = try argmaxLast(ctx, &logits);
-            out_tokens[produced] = next;
-            produced += 1;
-            if (options.stop_token) |stop| if (next == stop) break;
-            if (produced == limit) break;
-            const fresh = try self.forwardStep(ctx, kv, &.{next}, kv.len);
-            logits.deinit();
-            logits = fresh;
-        }
-        return produced;
+        return generate_mod.greedy(self, ctx, kv, prompt_tokens, out_tokens, options);
     }
 };
 
-pub const GenerateOptions = struct {
-    max_new_tokens: usize,
-    stop_token: ?usize = null,
-};
-
-fn argmaxLast(ctx: *ExecContext, logits: *const fucina.Tensor(.{ .seq, .vocab })) !usize {
-    var last = try logits.narrow(ctx, .seq, logits.dim(.seq) - 1, 1);
-    defer last.deinit();
-    var index = try last.argmax(ctx, .vocab);
-    defer index.deinit();
-    return @intCast(try index.item());
-}
+pub const GenerateOptions = generate_mod.Options;
 
 // ---------------------------------------------------------------------------
 // Forward blocks
 // ---------------------------------------------------------------------------
 
-/// gemma4's attention reads the `kv.k`/`kv.v` f16 tensor views directly; a
-/// q8_0 cache stores blocks in `k_q8`/`v_q8` and leaves those views EMPTY, so
-/// indexing them would be out of bounds. Reject non-f16 caches at the forward
-/// seam (qwen3 is the only model with a q8_0 attention path).
-pub fn requireF16KvCache(kv: *const KvCache) Error!void {
-    switch (kv.dtype) {
-        .f16 => {},
-        .q8_0 => return Error.UnsupportedKvCacheDtype,
-    }
-}
+
 
 /// The ragged-batch twin of `attnBlock` (see `forwardStepBatchSpans`):
 /// norms/projections/rope run over the packed rows; K/V append and
@@ -1330,13 +1293,8 @@ fn moeFfn(
     }
 }
 
-fn profileStart(profile: ?*ForwardProfile, io: ?std.Io) i128 {
-    return if (profile != null) std.Io.Clock.awake.now(io.?).nanoseconds else 0;
-}
-
-fn profileElapsed(start: i128, io: ?std.Io) i128 {
-    return std.Io.Clock.awake.now(io.?).nanoseconds - start;
-}
+const profileStart = @import("../profile.zig").start;
+const profileElapsed = @import("../profile.zig").elapsed;
 
 // ---------------------------------------------------------------------------
 // Per-Layer Embeddings (inactive when per_layer_input_size == 0)
@@ -1828,5 +1786,5 @@ pub fn loadLayers(ctx: *ExecContext, file: *const gguf.File, config: Config, geo
 // ---------------------------------------------------------------------------
 
 test {
-    _ = @import("gemma4_tests.zig");
+    _ = @import("model_tests.zig");
 }

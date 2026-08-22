@@ -5,13 +5,12 @@ const std = @import("std");
 const fucina = @import("fucina");
 const gguf = fucina.gguf;
 const kv_cache = @import("../kv_cache.zig");
-const gemma4 = @import("gemma4.zig");
+const gemma4 = @import("model.zig");
 
 const ExecContext = fucina.ExecContext;
 const KvCache = kv_cache.KvCache;
 const Error = gemma4.Error;
 const deriveGeometry = gemma4.deriveGeometry;
-const requireF16KvCache = gemma4.requireF16KvCache;
 
 test "gemma4 per-layer geometry maps an explicit SWA + KV pattern" {
     const allocator = std.testing.allocator;
@@ -54,11 +53,11 @@ test "gemma4 rejects a q8_0 KV cache at the forward seam" {
 
     var q8 = try KvCache.initWithDtype(&ctx, 1, 2, 64, 4, .q8_0);
     defer q8.deinit();
-    try std.testing.expectError(Error.UnsupportedKvCacheDtype, requireF16KvCache(&q8));
+    try std.testing.expectError(Error.UnsupportedKvCacheDtype, q8.requireF16());
 
     var f16_cache = try KvCache.initWithDtype(&ctx, 1, 2, 64, 4, .f16);
     defer f16_cache.deinit();
-    try requireF16KvCache(&f16_cache);
+    try f16_cache.requireF16();
 }
 
 test "gemma4 shared-KV reuse map is in range" {

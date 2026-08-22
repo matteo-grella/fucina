@@ -38,6 +38,9 @@ pub const Error = error{
     /// q8_0 packs 32 elements per block; a head_dim that is not a multiple of
     /// 32 would straddle heads/positions. Use the f16 cache for such models.
     KvCacheHeadDimNotBlockAligned,
+    /// The model's attention path reads the f16 `k`/`v` tensor views only
+    /// (`requireF16`); a q8_0 cache leaves those views empty.
+    UnsupportedKvCacheDtype,
 };
 
 pub const KvCache = struct {
@@ -199,6 +202,18 @@ pub const KvCache = struct {
     }
 
     /// Drop all cached positions; buffers are retained for reuse.
+    /// Reject non-f16 caches at a model's forward seam. Models whose
+    /// attention reads the `k`/`v` f16 tensor views directly (gemma4,
+    /// qwen35, diffusion_gemma) call this once per step; a q8_0 cache
+    /// stores blocks in `k_q8`/`v_q8` and leaves those views EMPTY, so
+    /// indexing them would be out of bounds.
+    pub fn requireF16(self: *const KvCache) Error!void {
+        switch (self.dtype) {
+            .f16 => {},
+            .q8_0 => return Error.UnsupportedKvCacheDtype,
+        }
+    }
+
     pub fn reset(self: *KvCache) void {
         self.len = 0;
     }

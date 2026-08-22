@@ -2,10 +2,10 @@
 //! end-to-end loss + backward gradient-evidence smoke over tiny synthetic
 //! dense and MoE models built from random GGUF-shaped weights.
 const std = @import("std");
-const gemma4_train = @import("gemma4_train.zig");
+const gemma4_train = @import("train.zig");
 
 const fucina = @import("fucina");
-const gemma4 = @import("gemma4.zig");
+const gemma4 = @import("model.zig");
 const cartridge = @import("../cartridge.zig");
 const kv_cache_mod = @import("../kv_cache.zig");
 const gemma_moe = @import("moe.zig");
