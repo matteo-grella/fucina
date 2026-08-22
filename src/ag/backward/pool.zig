@@ -1,45 +1,13 @@
 //! VJPs for pooling and nearest-neighbor upsampling.
 
 const std = @import("std");
-const backend_ops = @import("../../backend.zig").ops;
-const backend_quant = @import("../../backend.zig").quantized_matmul;
 const tensor_mod = @import("../../tensor.zig");
-const dtype_mod = @import("../../dtype.zig");
 const exec_mod = @import("../../exec.zig");
-const parallel = @import("../../parallel.zig");
-const tag_ops = @import("../../tagged.zig");
 const core = @import("../core.zig");
-const tags_mod = @import("../../tags.zig");
-const vector_primitives = @import("../../backend/vector/primitives.zig");
 
 const RawTensor = tensor_mod.Tensor;
 const ExecContext = exec_mod.ExecContext;
 const GradState = core.GradState;
-const Tag = tags_mod.Tag;
-const inserted_axis = tags_mod.inserted_axis;
-const rawRank = tags_mod.rawRank;
-const tagIndex = tags_mod.tagIndex;
-const removeTags = tags_mod.removeTags;
-const dotResultTags = tags_mod.dotResultTags;
-const pointwiseResultTags = tags_mod.pointwiseResultTags;
-const intersectTags = tags_mod.intersectTags;
-const tagsEqual = tags_mod.tagsEqual;
-
-const common = @import("common.zig");
-const PointwiseOp = tag_ops.PointwiseOp;
-const rawShapeArray = common.rawShapeArray;
-const rawShapeArrayOf = common.rawShapeArrayOf;
-const rawStrideArray = common.rawStrideArray;
-const taggedShapeArray = common.taggedShapeArray;
-const tagsDifference = common.tagsDifference;
-const tagsDifferenceLen = common.tagsDifferenceLen;
-const reduceGradientToTags = common.reduceGradientToTags;
-const contiguousForRead = common.contiguousForRead;
-const expandGradientToTags = common.expandGradientToTags;
-const contiguousForReadTyped = common.contiguousForReadTyped;
-const axisGeometry = common.axisGeometry;
-const gateGradientByMask = common.gateGradientByMask;
-const cloneInverseRopeTable = common.cloneInverseRopeTable;
 
 /// VJP of the channel-last max pool2d: `gy` routes to each window's argmax
 /// tap, recomputed in the exec backward kernel from the saved forward input
