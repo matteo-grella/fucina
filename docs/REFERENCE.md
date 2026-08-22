@@ -1030,7 +1030,7 @@ Notes that follow from the dtype layer (`src/dtype.zig`, detailed in §8):
   the same convention with `u8` bits (`dtype_mod.f32ToF8e4m3` /
   `f8e4m3ToF32` and the e5m2 pair are the value bridges, §8.2).
 - Block-quantized tensors have no per-element scalar; their element type is
-  the block struct (`Storage(dtype)`, e.g. `fucina.BlockQ8_0`), and shapes
+  the block struct (`Storage(dtype)`, e.g. `fucina.quant.BlockQ8_0`), and shapes
   count *logical* elements while storage counts blocks.
 - Output dtypes of typed-float math follow `dtype_mod.outputDType`:
   pointwise and `dot` keep the input dtype; reductions (`sum`, `mean`,
@@ -1287,7 +1287,7 @@ f16/bf16 leaf constructors `variable`/`variableFromSlice` (§3.2): gradients
 are always f32.
 
 **Block-quantized branch** constructors take *block* slices
-(`Storage(dtype)`, e.g. `[]const fucina.BlockQ8_0`):
+(`Storage(dtype)`, e.g. `[]const fucina.quant.BlockQ8_0`):
 
 ```zig
 pub fn constant(ctx: *ExecContext, value: RawTypedTensor) !Self
@@ -1314,16 +1314,16 @@ test "q8_0 constants: fromBlocks, dequantize, getRows" {
             return @bitCast(@as(f16, @floatCast(x)));
         }
     }.of;
-    var blocks = [_]fucina.BlockQ8_0{
-        .{ .d = bits(1), .qs = [_]i8{1} ** fucina.q8_0_block_size },
-        .{ .d = bits(2), .qs = [_]i8{3} ** fucina.q8_0_block_size },
+    var blocks = [_]fucina.quant.BlockQ8_0{
+        .{ .d = bits(1), .qs = [_]i8{1} ** fucina.quant.q8_0_block_size },
+        .{ .d = bits(2), .qs = [_]i8{3} ** fucina.quant.q8_0_block_size },
     };
-    var q = try Q.fromBlocks(&ctx, .{ 2, fucina.q8_0_block_size }, &blocks);
+    var q = try Q.fromBlocks(&ctx, .{ 2, fucina.quant.q8_0_block_size }, &blocks);
     defer q.deinit();
 
     var dense = try q.to(&ctx, .f32); // dequantize; .f32 is the only target
     defer dense.deinit();
-    try std.testing.expectEqual(@as(f32, 6), (try dense.dataConst())[fucina.q8_0_block_size]);
+    try std.testing.expectEqual(@as(f32, 6), (try dense.dataConst())[fucina.quant.q8_0_block_size]);
 
     var row = try q.getRows(&ctx, .out, &.{1}, .batch); // dequantizing row gather
     defer row.deinit();
@@ -6768,7 +6768,7 @@ The block structs and the size constants (`q1_0_block_size`, `q2_0_block_size`,
 `k_scale_size` = 12, `iq4_nl_block_size`, `mxfp4_block_size`,
 `nvfp4_block_size`, `nvfp4_subblock_size`, `iq3s_n_scale`) are `pub` in
 `src/dtype.zig`; the block structs are also re-exported at the public root
-(`fucina.BlockQ4_K`, `fucina.BlockTQ2_0`, ...) because loaders and format
+(`fucina.quant.BlockQ4_K`, `fucina.quant.BlockTQ2_0`, ...) because loaders and format
 code legitimately handle raw blocks.
 
 A block-quantized tensor of shape `[..., n]` requires `n` to be a nonzero
@@ -7167,7 +7167,7 @@ are indivisible, so only whole-tensor aliasing is a view. Broadcasting
 follows the generic path but is only meaningful on non-trailing axes.
 
 ```zig
-fn rawViewTour(alloc: std.mem.Allocator, blocks: []const fucina.BlockQ8_0) !void {
+fn rawViewTour(alloc: std.mem.Allocator, blocks: []const fucina.quant.BlockQ8_0) !void {
     const RawTensor = fucina.internal.RawTensor; // TensorOf(.f32)
 
     var x = try RawTensor.fromSlice(alloc, &.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
@@ -7507,7 +7507,7 @@ test "backend build facts" {
     // -Dblas-threads pin (0 = provider default) and the aarch64+i8mm
     // Q4_K smmla capability, both comptime constants.
     const blas_threads: u32 = fucina.native_blas_threads;
-    const q4k_mmla: bool = fucina.supports_q4_k_mmla;
+    const q4k_mmla: bool = fucina.quant.supports_q4_k_mmla;
     _ = blas_threads;
     _ = q4k_mmla;
 }
@@ -8263,7 +8263,7 @@ Each quantized `DType` stores rows as a contiguous sequence of fixed-size
 blocks; a row of `k` logical elements is `k / block_size` blocks (`k` must
 divide exactly — `QuantizedFormatError.InvalidQuantizedLength` otherwise).
 The block structs are `extern struct`s matching ggml's wire layout exactly
-and are re-exported at the root (`fucina.BlockQ4_K`, ...). The formats are
+and are re-exported at the root (`fucina.quant.BlockQ4_K`, ...). The formats are
 registered once in `dtype.block_formats` (dtype tag, block struct,
 elems/block); `Storage`, `kind`, `blockSize`, and GGUF's type mapping all
 derive from that table, and a comptime completeness check makes a `DType`
@@ -8337,7 +8337,7 @@ The kernel tier's trait layer describes each format programmatically:
 `iq4_nl_block_size`/`mxfp4_block_size` = 32, `nvfp4_block_size` = 64,
 `nvfp4_subblock_size` = 16, `q1_0_block_size`/`q2_0_block_size` = 128, `q4_0_block_size`,
 `q4_1_block_size`, `q5_0_block_size`, `q5_1_block_size`,
-`q8_1_block_size`) originate in `src/dtype.zig`; `fucina.q8_0_block_size`
+`q8_1_block_size`) originate in `src/dtype.zig`; `fucina.quant.q8_0_block_size`
 is re-exported at the root.
 
 Separate from the ggml formats, the kernel tier also ships a Fucina-native
@@ -8434,14 +8434,14 @@ test "encode f32 rows to Q8_0 blocks and dequantize them back" {
     defer ctx.deinit();
 
     // Two 32-element rows -> one BlockQ8_0 per row.
-    var src: [2 * fucina.q8_0_block_size]f32 = undefined;
+    var src: [2 * fucina.quant.q8_0_block_size]f32 = undefined;
     for (&src, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 7)) * 0.25;
 
-    var blocks: [2]fucina.BlockQ8_0 = undefined;
+    var blocks: [2]fucina.quant.BlockQ8_0 = undefined;
     try fucina.gguf.encodeF32(.q8_0, &src, std.mem.sliceAsBytes(&blocks));
 
     const W = fucina.Tensor(.{ .dtype = .q8_0, .tags = .{ .out, .in } });
-    var w = try W.fromBlocks(&ctx, .{ 2, fucina.q8_0_block_size }, &blocks);
+    var w = try W.fromBlocks(&ctx, .{ 2, fucina.quant.q8_0_block_size }, &blocks);
     defer w.deinit();
 
     var dense = try w.to(&ctx, .f32); // block-wise dequantize
@@ -8490,18 +8490,18 @@ test "f32 activations contract against a Q8_0 weight tensor" {
     ctx.init(alloc);
     defer ctx.deinit();
 
-    var wsrc: [2 * fucina.q8_0_block_size]f32 = undefined;
-    for (wsrc[0..fucina.q8_0_block_size]) |*v| v.* = 1.0;
-    for (wsrc[fucina.q8_0_block_size..]) |*v| v.* = 2.0;
-    var blocks: [2]fucina.BlockQ8_0 = undefined;
+    var wsrc: [2 * fucina.quant.q8_0_block_size]f32 = undefined;
+    for (wsrc[0..fucina.quant.q8_0_block_size]) |*v| v.* = 1.0;
+    for (wsrc[fucina.quant.q8_0_block_size..]) |*v| v.* = 2.0;
+    var blocks: [2]fucina.quant.BlockQ8_0 = undefined;
     try fucina.gguf.encodeF32(.q8_0, &wsrc, std.mem.sliceAsBytes(&blocks));
 
     const W = fucina.Tensor(.{ .dtype = .q8_0, .tags = .{ .out, .in } });
-    var w = try W.fromBlocks(&ctx, .{ 2, fucina.q8_0_block_size }, &blocks);
+    var w = try W.fromBlocks(&ctx, .{ 2, fucina.quant.q8_0_block_size }, &blocks);
     defer w.deinit();
 
-    const x_values = [_]f32{1} ** fucina.q8_0_block_size;
-    var x = try fucina.Tensor(.{ .batch, .in }).fromSlice(&ctx, .{ 1, fucina.q8_0_block_size }, &x_values);
+    const x_values = [_]f32{1} ** fucina.quant.q8_0_block_size;
+    var x = try fucina.Tensor(.{ .batch, .in }).fromSlice(&ctx, .{ 1, fucina.quant.q8_0_block_size }, &x_values);
     defer x.deinit();
 
     var y = try x.dot(&ctx, &w, .in); // y: .{ .batch, .out }
@@ -8520,9 +8520,9 @@ test "f32 activations contract against a Q8_0 weight tensor" {
 Two families of weight-side containers exist below the tensor facade, both
 re-exported at the root:
 
-**Plain per-format containers** — `fucina.QuantizedMatmulRhsQ2_K`,
-`fucina.QuantizedMatmulRhsQ4_K`, `fucina.QuantizedMatmulRhsQ5_K`,
-`fucina.QuantizedMatmulRhsQ6_K` (root); the kernel tier additionally
+**Plain per-format containers** — `fucina.quant.QuantizedMatmulRhsQ2_K`,
+`fucina.quant.QuantizedMatmulRhsQ4_K`, `fucina.quant.QuantizedMatmulRhsQ5_K`,
+`fucina.quant.QuantizedMatmulRhsQ6_K` (root); the kernel tier additionally
 defines `QuantizedMatmulRhsQ8_0`, `QuantizedMatmulRhsQ4_0`,
 `QuantizedMatmulRhsQ3_K`, the
 `QuantizedMatmulRhsRowsFor(dtype)` generic (instantiated as
@@ -8597,7 +8597,7 @@ Packing and consuming happen on the facade:
   split-SwiGLU activation + down-projection GEMM without materializing the
   gated tensor; kernels exist for `q8_0x4`/`q4_kx8`/`q5_kx8`/`q6_kx4`
   (`q4_kx2mmla` is a deliberate comptime error — callers guard with
-  `comptime !fucina.supports_q4_k_mmla` and fall back to unfused).
+  `comptime !fucina.quant.supports_q4_k_mmla` and fall back to unfused).
 - `gate.gegluQuantDotPacked(ctx, &up, &packed, in_tag, out_tag)` — fused
   GeGLU + down projection, `q8_0x4` only.
 
@@ -8616,11 +8616,11 @@ test "packed RHS matmul matches the unpacked quantized dot" {
 
     const m = 3;
     const n = 8;
-    const k = 2 * fucina.q8_0_block_size;
+    const k = 2 * fucina.quant.q8_0_block_size;
 
     var wsrc: [n * k]f32 = undefined;
     for (&wsrc, 0..) |*v, i| v.* = @as(f32, @floatFromInt((i * 13 + 5) % 17)) * 0.1 - 0.8;
-    var blocks: [n * 2]fucina.BlockQ8_0 = undefined;
+    var blocks: [n * 2]fucina.quant.BlockQ8_0 = undefined;
     try fucina.gguf.encodeF32(.q8_0, &wsrc, std.mem.sliceAsBytes(&blocks));
 
     const W = fucina.Tensor(.{ .dtype = .q8_0, .tags = .{ .out, .in } });
@@ -8838,7 +8838,7 @@ test "TQ2_0 ternary weights are a first-class matmul RHS" {
     var wsrc: [2 * k]f32 = undefined;
     for (wsrc[0..k]) |*v| v.* = 0.5; // encodes exactly: d = 0.5, trit = +1
     for (wsrc[k..]) |*v| v.* = -0.5;
-    var blocks: [2]fucina.BlockTQ2_0 = undefined;
+    var blocks: [2]fucina.quant.BlockTQ2_0 = undefined;
     try fucina.gguf.encodeF32(.tq2_0, &wsrc, std.mem.sliceAsBytes(&blocks));
 
     const W = fucina.Tensor(.{ .dtype = .tq2_0, .tags = .{ .out, .in } });
@@ -11705,8 +11705,8 @@ pub fn truncate(self: *KvCache, keep_len: usize) void
 pub fn copyRows(self: *KvCache, src: *const KvCache, start: usize, end: usize) !void
 pub fn kSlice(self, layer_i: usize, len: usize) ![]const f16   // f16 mode
 pub fn vSlice(self, layer_i: usize, len: usize) ![]const f16
-pub fn kBlocks(self, layer_i: usize, len: usize) []const fucina.BlockQ8_0  // q8_0 mode
-pub fn vBlocks(self, layer_i: usize, len: usize) []const fucina.BlockQ8_0
+pub fn kBlocks(self, layer_i: usize, len: usize) []const fucina.quant.BlockQ8_0  // q8_0 mode
+pub fn vBlocks(self, layer_i: usize, len: usize) []const fucina.quant.BlockQ8_0
 pub fn byteSize(self) usize
 ```
 

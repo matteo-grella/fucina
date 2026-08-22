@@ -45,7 +45,7 @@ test "LinearWeight.load q8_0: cloneView shares block storage and survives source
     // d = 1.0 (f16 bits) with small-int qs: the dequantized weight IS qs, and
     // the LHS below quantizes exactly (per-block amax 127 -> scale 1), so the
     // integer reference is reached bitwise in f32.
-    var blocks: [out_dim]fucina.BlockQ8_0 = undefined;
+    var blocks: [out_dim]fucina.quant.BlockQ8_0 = undefined;
     for (&blocks, 0..) |*blk, o| {
         blk.d = 0x3C00;
         for (&blk.qs, 0..) |*q, j| q.* = @intCast(@as(i64, @intCast((o * 7 + j * 3) % 11)) - 5);
@@ -97,7 +97,7 @@ test "LinearWeight.load q8_0: cloneView shares block storage and survives source
 
 /// Integer-valued q8_0 blocks (d = 1.0): the dequantized weight IS qs, so the
 /// linear output is reached exactly in f32 (see the q8_0 test above).
-fn testFillQ8_0Blocks(blocks: []fucina.BlockQ8_0, salt: usize) void {
+fn testFillQ8_0Blocks(blocks: []fucina.quant.BlockQ8_0, salt: usize) void {
     for (blocks, 0..) |*blk, o| {
         blk.d = 0x3C00;
         for (&blk.qs, 0..) |*q, j| q.* = @intCast(@as(i64, @intCast((o * 7 + j * 3 + salt) % 11)) - 5);
@@ -114,9 +114,9 @@ test "loadForFusion q8_0: parts skip residency but the fused weight matches the 
     const out_a = 4; // out dims stay x4-pack friendly (n % 4 == 0)
     const out_b = 8;
 
-    var blocks_a: [out_a]fucina.BlockQ8_0 = undefined;
+    var blocks_a: [out_a]fucina.quant.BlockQ8_0 = undefined;
     testFillQ8_0Blocks(&blocks_a, 0);
-    var blocks_b: [out_b]fucina.BlockQ8_0 = undefined;
+    var blocks_b: [out_b]fucina.quant.BlockQ8_0 = undefined;
     testFillQ8_0Blocks(&blocks_b, 4);
 
     const info_a = gguf.TensorInfo{
@@ -198,7 +198,7 @@ test "linearSeqQ5_K: compact decode route (m < 4) matches the packed path bitwis
     // Arbitrary-but-deterministic valid Q5_K encodings (any byte pattern is a
     // valid encoding; getScaleMinK4 decodes the scale bytes the same way on
     // both routes). dm holds raw f16 bits: ~0.1 / ~0.05.
-    var blocks: [out_dim * (in_dim / 256)]fucina.BlockQ5_K = undefined;
+    var blocks: [out_dim * (in_dim / 256)]fucina.quant.BlockQ5_K = undefined;
     for (&blocks, 0..) |*b, bi| {
         b.dm = .{ 0x2E66, 0x2A66 };
         for (&b.scales, 0..) |*s, i| s.* = @intCast((i * 7 + bi * 3) % 256);
@@ -257,7 +257,7 @@ test "linearSeqQ6_K: compact decode route (m < 4) matches the packed path bitwis
 
     // Arbitrary-but-deterministic valid Q6_K encodings; d holds raw f16 bits
     // (~0.1).
-    var blocks: [out_dim * (in_dim / 256)]fucina.BlockQ6_K = undefined;
+    var blocks: [out_dim * (in_dim / 256)]fucina.quant.BlockQ6_K = undefined;
     for (&blocks, 0..) |*b, bi| {
         b.d = 0x2E66;
         for (&b.scales, 0..) |*s, i| s.* = @intCast(@as(i32, @intCast((i * 5 + bi * 3) % 64)) - 32);

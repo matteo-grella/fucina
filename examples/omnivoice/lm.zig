@@ -642,7 +642,7 @@ pub const Model = struct {
         if (ffn_in.dim(.seq) >= 12 and layer.ffn_input == .fused) {
             const gate_up_weight = &layer.ffn_input.fused;
             switch (layer.down_proj) {
-                .q4_k => |*down| if (comptime !fucina.supports_q4_k_mmla) {
+                .q4_k => |*down| if (comptime !fucina.quant.supports_q4_k_mmla) {
                     return ffnFusedDown(ctx, gate_up_weight, &down.packed_rhs, ffn_in);
                 },
                 .q5_k => |*down| return ffnFusedDown(ctx, gate_up_weight, &down.packed_rhs, ffn_in),

@@ -22,6 +22,14 @@ point; earlier history is `git log`.
 
 ### Added
 
+- `fucina.quant`: the quantized-format namespace — every GGML `Block*`
+  struct, the `QuantizedMatmulRhs*` container types, `q8_0_block_size`,
+  and `supports_q4_k_mmla` move under one name. The flat root spellings
+  remain as deprecated aliases for one MINOR release.
+- The module root now states its membership rule in its header (pillar
+  types, receiver-less graph control, subsystem namespaces, backend
+  constants, scalar format converters), and every root export carries a
+  doc comment.
 - `llm.generate`: the greedy generation driver, shared by the tensor-band
   families (duck-typed on `forwardStep` + `KvCache`). `llm.qwen3.generate`
   re-exports it; `gemma.model.Model.generate` forwards to it.

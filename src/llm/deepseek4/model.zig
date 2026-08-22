@@ -1828,7 +1828,7 @@ fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const 
     const group_heads = cfg.num_heads / cfg.output_groups;
     const group_dim = group_heads * hd;
     const rank = cfg.output_lora_rank;
-    const group_row_bytes = (group_dim / 32) * @sizeOf(fucina.BlockQ8_0);
+    const group_row_bytes = (group_dim / 32) * @sizeOf(fucina.quant.BlockQ8_0);
     var out3 = try fucina.Tensor(.{ .seq, .head, .d }).fromBorrowedConstSlice(ctx, .{ S, cfg.num_heads, hd }, out_heads_all);
     defer out3.deinit();
     var out_rot = try out3.rope(ctx, .seq, .d, tables.inv(compressed_family), .interleaved_tail);
@@ -2635,7 +2635,7 @@ fn mtpAttnBlock(self: *Model, mtp: *const Mtp, ctx: *ExecContext, state: *MtpSta
     const group_heads = cfg.num_heads / cfg.output_groups;
     const group_dim = group_heads * hd;
     const rank = cfg.output_lora_rank;
-    const group_row_bytes = (group_dim / 32) * @sizeOf(fucina.BlockQ8_0);
+    const group_row_bytes = (group_dim / 32) * @sizeOf(fucina.quant.BlockQ8_0);
     var lows: [8]fucina.Tensor(.{ .seq, .attn }) = undefined;
     var n_lows: usize = 0;
     defer for (lows[0..n_lows]) |*t| t.deinit();

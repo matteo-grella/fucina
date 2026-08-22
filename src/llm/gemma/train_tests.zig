@@ -145,20 +145,20 @@ fn buildTinyMoe(ctx: *ExecContext, cfg: gemma4.Config, seed: u64) !gemma4.MoeFfn
     var post_norm_2 = try randVector(ctx, rng.at(seed, 4), .embed, hidden);
     errdefer post_norm_2.deinit();
 
-    const gate = try allocator.alloc(fucina.QuantizedMatmulRhsQ6_Kx4, 0);
+    const gate = try allocator.alloc(fucina.quant.QuantizedMatmulRhsQ6_Kx4, 0);
     errdefer allocator.free(gate);
-    const up = try allocator.alloc(fucina.QuantizedMatmulRhsQ6_Kx4, 0);
+    const up = try allocator.alloc(fucina.quant.QuantizedMatmulRhsQ6_Kx4, 0);
     errdefer allocator.free(up);
-    const down = try allocator.alloc(fucina.QuantizedMatmulRhsQ8_0x4, 0);
+    const down = try allocator.alloc(fucina.quant.QuantizedMatmulRhsQ8_0x4, 0);
     errdefer allocator.free(down);
 
     const down_scale = try allocator.alloc(f32, n_expert);
     errdefer allocator.free(down_scale);
     rng.uniformFill(rng.at(seed, 5), down_scale, 0.8, 1.2);
 
-    const gu_blocks = try allocator.alloc(fucina.BlockQ6_K, n_expert * 2 * n_ff * bpr_gu);
+    const gu_blocks = try allocator.alloc(fucina.quant.BlockQ6_K, n_expert * 2 * n_ff * bpr_gu);
     errdefer allocator.free(gu_blocks);
-    const dn_blocks = try allocator.alloc(fucina.BlockQ8_0, n_expert * hidden * bpr_dn);
+    const dn_blocks = try allocator.alloc(fucina.quant.BlockQ8_0, n_expert * hidden * bpr_dn);
     errdefer allocator.free(dn_blocks);
     {
         const row_gu = try allocator.alloc(f32, hidden);

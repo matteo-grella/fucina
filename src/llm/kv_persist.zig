@@ -46,7 +46,7 @@ fn layerRowBytes(kv: *const KvCache, layer_i: usize) usize {
     const elems = kv.kv_heads[layer_i] * kv.head_dim[layer_i];
     return switch (kv.dtype) {
         .f16 => elems * @sizeOf(f16),
-        .q8_0 => (elems / fucina.q8_0_block_size) * @sizeOf(fucina.BlockQ8_0),
+        .q8_0 => (elems / fucina.quant.q8_0_block_size) * @sizeOf(fucina.quant.BlockQ8_0),
     };
 }
 
@@ -107,7 +107,7 @@ fn buildRecord(kv: *const KvCache, token: usize, pos: usize, rec: []u8) !void {
                 at += row;
             },
             .q8_0 => {
-                const blocks = (kv.kv_heads[layer_i] * kv.head_dim[layer_i]) / fucina.q8_0_block_size;
+                const blocks = (kv.kv_heads[layer_i] * kv.head_dim[layer_i]) / fucina.quant.q8_0_block_size;
                 const k = std.mem.sliceAsBytes(kv.k_q8[layer_i][pos * blocks ..][0..blocks]);
                 const v = std.mem.sliceAsBytes(kv.v_q8[layer_i][pos * blocks ..][0..blocks]);
                 @memcpy(rec[at..][0..row], k);
@@ -136,7 +136,7 @@ fn applyRecord(kv: *KvCache, pos: usize, rec: []const u8) !usize {
                 at += row;
             },
             .q8_0 => {
-                const blocks = (kv.kv_heads[layer_i] * kv.head_dim[layer_i]) / fucina.q8_0_block_size;
+                const blocks = (kv.kv_heads[layer_i] * kv.head_dim[layer_i]) / fucina.quant.q8_0_block_size;
                 @memcpy(std.mem.sliceAsBytes(kv.k_q8[layer_i][pos * blocks ..][0..blocks]), rec[at..][0..row]);
                 at += row;
                 @memcpy(std.mem.sliceAsBytes(kv.v_q8[layer_i][pos * blocks ..][0..blocks]), rec[at..][0..row]);

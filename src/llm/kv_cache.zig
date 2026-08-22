@@ -3,7 +3,7 @@ const fucina = @import("fucina");
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
-const q8_0_block_size = fucina.q8_0_block_size;
+const q8_0_block_size = fucina.quant.q8_0_block_size;
 
 /// Per-layer post-RoPE key/value store for autoregressive decode.
 ///
@@ -52,8 +52,8 @@ pub const KvCache = struct {
     v: []KvTensor,
     // q8_0 mode: capacity * kv_heads * head_dim/32 blocks per layer, laid out
     // [capacity, kv_heads, head_dim/32]. Empty in f16 mode.
-    k_q8: [][]fucina.BlockQ8_0,
-    v_q8: [][]fucina.BlockQ8_0,
+    k_q8: [][]fucina.quant.BlockQ8_0,
+    v_q8: [][]fucina.quant.BlockQ8_0,
     len: usize,
     capacity: usize,
     // Per-layer KV-head count and head_dim. Most models share one value across
@@ -156,9 +156,9 @@ pub const KvCache = struct {
                 cache.v = v;
             },
             .q8_0 => {
-                const k_q8 = try allocator.alloc([]fucina.BlockQ8_0, num_layers);
+                const k_q8 = try allocator.alloc([]fucina.quant.BlockQ8_0, num_layers);
                 errdefer allocator.free(k_q8);
-                const v_q8 = try allocator.alloc([]fucina.BlockQ8_0, num_layers);
+                const v_q8 = try allocator.alloc([]fucina.quant.BlockQ8_0, num_layers);
                 errdefer allocator.free(v_q8);
 
                 var initialized: usize = 0;
@@ -168,9 +168,9 @@ pub const KvCache = struct {
                 };
                 for (0..num_layers) |i| {
                     const layer_blocks = capacity * kv_heads_per_layer[i] * (head_dims[i] / q8_0_block_size);
-                    k_q8[i] = try allocator.alloc(fucina.BlockQ8_0, layer_blocks);
+                    k_q8[i] = try allocator.alloc(fucina.quant.BlockQ8_0, layer_blocks);
                     errdefer allocator.free(k_q8[i]);
-                    v_q8[i] = try allocator.alloc(fucina.BlockQ8_0, layer_blocks);
+                    v_q8[i] = try allocator.alloc(fucina.quant.BlockQ8_0, layer_blocks);
                     initialized += 1;
                 }
                 cache.k_q8 = k_q8;
@@ -227,7 +227,7 @@ pub const KvCache = struct {
                 total += (k_layer.value.len() + v_layer.value.len()) * @sizeOf(f16);
             },
             .q8_0 => for (self.k_q8, self.v_q8) |k_layer, v_layer| {
-                total += (k_layer.len + v_layer.len) * @sizeOf(fucina.BlockQ8_0);
+                total += (k_layer.len + v_layer.len) * @sizeOf(fucina.quant.BlockQ8_0);
             },
         }
         return total;
@@ -236,12 +236,12 @@ pub const KvCache = struct {
     /// q8_0 mode: layer `layer_i`'s cached K blocks for the first `len`
     /// positions, laid out [len, kv_heads, head_dim/32] — the shape
     /// `groupedAttention`'s q8_0-block KV arm consumes.
-    pub fn kBlocks(self: *const KvCache, layer_i: usize, len: usize) []const fucina.BlockQ8_0 {
+    pub fn kBlocks(self: *const KvCache, layer_i: usize, len: usize) []const fucina.quant.BlockQ8_0 {
         return self.k_q8[layer_i][0 .. len * self.layerRowBlocks(layer_i)];
     }
 
     /// q8_0 mode: as `kBlocks`, for V.
-    pub fn vBlocks(self: *const KvCache, layer_i: usize, len: usize) []const fucina.BlockQ8_0 {
+    pub fn vBlocks(self: *const KvCache, layer_i: usize, len: usize) []const fucina.quant.BlockQ8_0 {
         return self.v_q8[layer_i][0 .. len * self.layerRowBlocks(layer_i)];
     }
 

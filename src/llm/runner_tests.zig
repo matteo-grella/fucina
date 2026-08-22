@@ -162,7 +162,7 @@ const FixtureWriter = struct {
         const values = try self.arena.allocator().alloc(f32, n);
         const rand = self.prng.random();
         for (values) |*v| v.* = rand.floatNorm(f32) * 0.08;
-        const bytes = try self.arena.allocator().alignedAlloc(u8, .of(fucina.BlockQ8_0), n / 32 * 34);
+        const bytes = try self.arena.allocator().alignedAlloc(u8, .of(fucina.quant.BlockQ8_0), n / 32 * 34);
         try gguf.encodeF32(.q8_0, values, bytes);
         try self.w.addTensor(name, .q8_0, dims, bytes);
     }

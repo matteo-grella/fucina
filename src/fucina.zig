@@ -1,3 +1,22 @@
+//! The public surface of fucina. Root membership follows a closed rule —
+//! a declaration lives here only if it is one of:
+//!
+//!   1. a pillar type: `Tensor` (the tagged autograd facade), `ExecContext`
+//!      (the eager runtime), `DType`, and their option/result types;
+//!   2. a graph-control free function with no natural receiver (`noGrad`,
+//!      `checkpoint`, `customVjp`, `gradcheck`) or the N-ary fold of a
+//!      method (`einsumMany`);
+//!   3. a subsystem namespace, one name per band (`weights`, `gguf`,
+//!      `optim`, `quant`, `tuning`, `simd`, ...);
+//!   4. a backend identity/capability constant (`active_backend_kind`,
+//!      `native_*`);
+//!   5. a scalar converter bridging storage formats (`bf16ToF32`).
+//!
+//! Everything else earns a namespace, not a root name. `internal` is the
+//! sibling-module seam (exact core type identity for `fucina_llm`), not
+//! public API; the raw tensor type is deliberately unexported (see the
+//! comptime guard below). Layer stack and band map: docs/ARCHITECTURE.md.
+
 const std = @import("std");
 
 const dtype = @import("dtype.zig");
@@ -12,7 +31,11 @@ const state_dict_mod = @import("state_dict.zig");
 const safetensors_mod = @import("safetensors.zig");
 const training_checkpoint_mod = @import("training_checkpoint.zig");
 const thread = @import("thread.zig");
+/// Evolution strategies (experimental tier): NES/OpenAI-ES optimizers
+/// over flat parameter slices.
 pub const es = @import("es.zig");
+/// GGUF container: mmap/streamed parsing, metadata, tensor infos, the
+/// writer, and split-file handling.
 pub const gguf = @import("gguf.zig");
 /// Model I/O above the container parsers: GGUF tensors → executable
 /// quantized weight containers (`LinearWeight`, `MoeRhs`, fusion, mmap
@@ -25,10 +48,20 @@ pub const ptqtp_gguf = @import("ptqtp_gguf.zig");
 pub const gguf_meta = @import("gguf_meta.zig");
 /// Streaming causal 1-D convolutions (codec-decoder state discipline).
 pub const streamconv = @import("streamconv.zig");
+/// LoRA adapters: low-rank deltas over `weights.LinearWeight` plus their
+/// train-time plumbing.
 pub const lora = @import("lora.zig");
+/// Optimizers (SGD/AdamW/Muon/APOLLO...) over parameter registries, with
+/// recorded-golden parity tests.
 pub const optim = @import("optim.zig");
+/// PTQTP ternary-plane quantization (experimental tier): K trit-plane
+/// decomposition and its quality stats (docs/PTQTP.md).
 pub const ptqtp = @import("ptqtp.zig");
+/// Deterministic RNG streams (philox-style splittable seeds) shared by
+/// init, dropout, and samplers.
 pub const rng = @import("rng.zig");
+/// Parallel execution policies over the worker pool: chunked loops,
+/// reduction scaffolding, thread-count gates.
 pub const parallel = @import("parallel.zig");
 /// Tuning policy: the shared shape of every FUCINA_* route gate (read-once
 /// env switch + measured default + programmatic `set`), the numeric route
@@ -42,11 +75,19 @@ pub const fpenv = @import("fpenv.zig");
 /// large blocks recycle through power-of-two freelists, never returning to
 /// the OS mid-run).
 pub const CachingAllocator = @import("caching_allocator.zig").CachingAllocator;
+/// Named parameter registry: the bridge between model structs and the
+/// optimizers/serializers (registration order is the flat layout).
 pub const ParamRegistry = param_registry_mod.ParamRegistry;
+/// Torch-style state-dict reading (name -> tensor) over safetensors.
 pub const state_dict = state_dict_mod;
+/// safetensors container: single-file and sharded (`index.json`) reading.
 pub const safetensors = safetensors_mod;
+/// Resumable training checkpoints (params + optimizer state + RNG).
 pub const training_checkpoint = training_checkpoint_mod;
 
+/// THE public tensor: comptime-tagged axes, eager forward, tape-recorded
+/// autograd. `Tensor(.{ .seq, .embed })` names a distinct type; methods
+/// live on it, documented in docs/REFERENCE.md.
 pub const Tensor = ag.Tensor;
 // Deliberately NO public `RawTensor` root export. Raw f32 tensors are an INTERNAL
 // runtime/backend detail, not a stable public API — the no-grad `Tensor` facade
@@ -63,6 +104,7 @@ comptime {
             "Use fucina.internal.RawTensor (in-tree raw naming) or bench_raw.RawTensor (microbench).",
     );
 }
+// Graph-control free functions (species 2 of the membership rule).
 pub const einsumMany = ag.einsumMany;
 pub const checkpoint = ag.checkpoint;
 pub const checkpointWithContext = ag.checkpointWithContext;
@@ -73,12 +115,63 @@ pub const customVjp = ag.customVjp;
 pub const gradcheck = ag.gradcheck;
 pub const GradcheckOptions = ag.GradcheckOptions;
 pub const GradcheckResult = ag.GradcheckResult;
+/// Element dtype enum (f32/f16/bf16/int/bool + every quantized block
+/// format); the block-format registry lives in `quant`/`dtype`.
 pub const DType = dtype.DType;
 /// bf16 <-> f32 scalar converters (bf16 tensors store raw u16 bits): the
 /// bridge for consumers of bf16 state dicts and 16-bit params.
 pub const bf16ToF32 = dtype.bf16ToF32;
 pub const f32ToBf16 = dtype.f32ToBf16;
-pub const supports_q4_k_mmla = backend.supports_q4_k_mmla;
+/// Quantized-format vocabulary: the GGML block structs, the packed
+/// quantized-matmul RHS container types, block sizes, and the quant
+/// capability flags. The comptime completeness registry behind the block
+/// set is `dtype.block_formats` (every quantized dtype claims exactly one
+/// row or compilation fails).
+pub const quant = struct {
+    pub const supports_q4_k_mmla = backend.supports_q4_k_mmla;
+    pub const BlockQ1_0 = dtype.BlockQ1_0;
+    pub const BlockQ2_0 = dtype.BlockQ2_0;
+    pub const BlockQ4_0 = dtype.BlockQ4_0;
+    pub const BlockQ4_1 = dtype.BlockQ4_1;
+    pub const BlockQ5_0 = dtype.BlockQ5_0;
+    pub const BlockQ5_1 = dtype.BlockQ5_1;
+    pub const BlockQ8_0 = dtype.BlockQ8_0;
+    pub const q8_0_block_size = dtype.q8_0_block_size;
+    pub const QuantizedMatmulRhsQ8_0x4 = backend.QuantizedMatmulRhsQ8_0x4;
+    pub const QuantizedMatmulRhsQ4_Kx4 = backend.QuantizedMatmulRhsQ4_Kx4;
+    pub const QuantizedMatmulRhsQ4_Kx8 = backend.QuantizedMatmulRhsQ4_Kx8;
+    pub const QuantizedMatmulRhsQ4_Kx2Mmla = backend.QuantizedMatmulRhsQ4_Kx2Mmla;
+    pub const QuantizedMatmulRhsQ5_Kx8 = backend.QuantizedMatmulRhsQ5_Kx8;
+    pub const QuantizedMatmulRhsQ6_Kx4 = backend.QuantizedMatmulRhsQ6_Kx4;
+    pub const QuantizedMatmulRhsQ2_K = backend.QuantizedMatmulRhsQ2_K;
+    pub const QuantizedMatmulRhsQ3_K = backend.QuantizedMatmulRhsQ3_K;
+    pub const QuantizedMatmulRhsQ4_K = backend.QuantizedMatmulRhsQ4_K;
+    pub const QuantizedMatmulRhsQ5_K = backend.QuantizedMatmulRhsQ5_K;
+    pub const QuantizedMatmulRhsQ6_K = backend.QuantizedMatmulRhsQ6_K;
+    pub const BlockQ8_1 = dtype.BlockQ8_1;
+    pub const BlockQ2_K = dtype.BlockQ2_K;
+    pub const BlockQ3_K = dtype.BlockQ3_K;
+    pub const BlockQ4_K = dtype.BlockQ4_K;
+    pub const BlockQ5_K = dtype.BlockQ5_K;
+    pub const BlockQ6_K = dtype.BlockQ6_K;
+    pub const BlockQ8_K = dtype.BlockQ8_K;
+    pub const BlockIQ1_S = dtype.BlockIQ1_S;
+    pub const BlockIQ1_M = dtype.BlockIQ1_M;
+    pub const BlockIQ2_XXS = dtype.BlockIQ2_XXS;
+    pub const BlockIQ2_XS = dtype.BlockIQ2_XS;
+    pub const BlockIQ2_S = dtype.BlockIQ2_S;
+    pub const BlockIQ3_XXS = dtype.BlockIQ3_XXS;
+    pub const BlockIQ3_S = dtype.BlockIQ3_S;
+    pub const BlockIQ4_NL = dtype.BlockIQ4_NL;
+    pub const BlockIQ4_XS = dtype.BlockIQ4_XS;
+    pub const BlockTQ1_0 = dtype.BlockTQ1_0;
+    pub const BlockTQ2_0 = dtype.BlockTQ2_0;
+    pub const BlockMXFP4 = dtype.BlockMXFP4;
+    pub const BlockNVFP4 = dtype.BlockNVFP4;
+};
+
+/// Deprecated: use `quant.supports_q4_k_mmla`. Removal per docs/DEVELOPMENT.md §6.
+pub const supports_q4_k_mmla = quant.supports_q4_k_mmla;
 pub const PackedRhs = ag.PackedRhs;
 pub const PackedRhsLayout = backend.PackedRhsLayout;
 pub const SliceRange = ag.SliceRange;
@@ -88,45 +181,86 @@ pub const SliceRange = ag.SliceRange;
 /// of being materialized into an arithmetic array (see `prepareRopeTableRange`).
 pub const AxisRange = tensor.AxisRange;
 pub const PreparedConvWeights = exec.ExecContext.PreparedConvWeights;
-pub const BlockQ1_0 = dtype.BlockQ1_0;
-pub const BlockQ2_0 = dtype.BlockQ2_0;
-pub const BlockQ4_0 = dtype.BlockQ4_0;
-pub const BlockQ4_1 = dtype.BlockQ4_1;
-pub const BlockQ5_0 = dtype.BlockQ5_0;
-pub const BlockQ5_1 = dtype.BlockQ5_1;
-pub const BlockQ8_0 = dtype.BlockQ8_0;
-pub const q8_0_block_size = dtype.q8_0_block_size;
-pub const QuantizedMatmulRhsQ8_0x4 = backend.QuantizedMatmulRhsQ8_0x4;
-pub const QuantizedMatmulRhsQ4_Kx4 = backend.QuantizedMatmulRhsQ4_Kx4;
-pub const QuantizedMatmulRhsQ4_Kx8 = backend.QuantizedMatmulRhsQ4_Kx8;
-pub const QuantizedMatmulRhsQ4_Kx2Mmla = backend.QuantizedMatmulRhsQ4_Kx2Mmla;
-pub const QuantizedMatmulRhsQ5_Kx8 = backend.QuantizedMatmulRhsQ5_Kx8;
-pub const QuantizedMatmulRhsQ6_Kx4 = backend.QuantizedMatmulRhsQ6_Kx4;
-pub const QuantizedMatmulRhsQ2_K = backend.QuantizedMatmulRhsQ2_K;
-pub const QuantizedMatmulRhsQ3_K = backend.QuantizedMatmulRhsQ3_K;
-pub const QuantizedMatmulRhsQ4_K = backend.QuantizedMatmulRhsQ4_K;
-pub const QuantizedMatmulRhsQ5_K = backend.QuantizedMatmulRhsQ5_K;
-pub const QuantizedMatmulRhsQ6_K = backend.QuantizedMatmulRhsQ6_K;
-pub const BlockQ8_1 = dtype.BlockQ8_1;
-pub const BlockQ2_K = dtype.BlockQ2_K;
-pub const BlockQ3_K = dtype.BlockQ3_K;
-pub const BlockQ4_K = dtype.BlockQ4_K;
-pub const BlockQ5_K = dtype.BlockQ5_K;
-pub const BlockQ6_K = dtype.BlockQ6_K;
-pub const BlockQ8_K = dtype.BlockQ8_K;
-pub const BlockIQ1_S = dtype.BlockIQ1_S;
-pub const BlockIQ1_M = dtype.BlockIQ1_M;
-pub const BlockIQ2_XXS = dtype.BlockIQ2_XXS;
-pub const BlockIQ2_XS = dtype.BlockIQ2_XS;
-pub const BlockIQ2_S = dtype.BlockIQ2_S;
-pub const BlockIQ3_XXS = dtype.BlockIQ3_XXS;
-pub const BlockIQ3_S = dtype.BlockIQ3_S;
-pub const BlockIQ4_NL = dtype.BlockIQ4_NL;
-pub const BlockIQ4_XS = dtype.BlockIQ4_XS;
-pub const BlockTQ1_0 = dtype.BlockTQ1_0;
-pub const BlockTQ2_0 = dtype.BlockTQ2_0;
-pub const BlockMXFP4 = dtype.BlockMXFP4;
-pub const BlockNVFP4 = dtype.BlockNVFP4;
+/// Deprecated: use `quant.BlockQ1_0`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockQ1_0 = quant.BlockQ1_0;
+/// Deprecated: use `quant.BlockQ2_0`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockQ2_0 = quant.BlockQ2_0;
+/// Deprecated: use `quant.BlockQ4_0`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockQ4_0 = quant.BlockQ4_0;
+/// Deprecated: use `quant.BlockQ4_1`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockQ4_1 = quant.BlockQ4_1;
+/// Deprecated: use `quant.BlockQ5_0`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockQ5_0 = quant.BlockQ5_0;
+/// Deprecated: use `quant.BlockQ5_1`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockQ5_1 = quant.BlockQ5_1;
+/// Deprecated: use `quant.BlockQ8_0`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockQ8_0 = quant.BlockQ8_0;
+/// Deprecated: use `quant.q8_0_block_size`. Removal per docs/DEVELOPMENT.md §6.
+pub const q8_0_block_size = quant.q8_0_block_size;
+/// Deprecated: use `quant.QuantizedMatmulRhsQ8_0x4`. Removal per docs/DEVELOPMENT.md §6.
+pub const QuantizedMatmulRhsQ8_0x4 = quant.QuantizedMatmulRhsQ8_0x4;
+/// Deprecated: use `quant.QuantizedMatmulRhsQ4_Kx4`. Removal per docs/DEVELOPMENT.md §6.
+pub const QuantizedMatmulRhsQ4_Kx4 = quant.QuantizedMatmulRhsQ4_Kx4;
+/// Deprecated: use `quant.QuantizedMatmulRhsQ4_Kx8`. Removal per docs/DEVELOPMENT.md §6.
+pub const QuantizedMatmulRhsQ4_Kx8 = quant.QuantizedMatmulRhsQ4_Kx8;
+/// Deprecated: use `quant.QuantizedMatmulRhsQ4_Kx2Mmla`. Removal per docs/DEVELOPMENT.md §6.
+pub const QuantizedMatmulRhsQ4_Kx2Mmla = quant.QuantizedMatmulRhsQ4_Kx2Mmla;
+/// Deprecated: use `quant.QuantizedMatmulRhsQ5_Kx8`. Removal per docs/DEVELOPMENT.md §6.
+pub const QuantizedMatmulRhsQ5_Kx8 = quant.QuantizedMatmulRhsQ5_Kx8;
+/// Deprecated: use `quant.QuantizedMatmulRhsQ6_Kx4`. Removal per docs/DEVELOPMENT.md §6.
+pub const QuantizedMatmulRhsQ6_Kx4 = quant.QuantizedMatmulRhsQ6_Kx4;
+/// Deprecated: use `quant.QuantizedMatmulRhsQ2_K`. Removal per docs/DEVELOPMENT.md §6.
+pub const QuantizedMatmulRhsQ2_K = quant.QuantizedMatmulRhsQ2_K;
+/// Deprecated: use `quant.QuantizedMatmulRhsQ3_K`. Removal per docs/DEVELOPMENT.md §6.
+pub const QuantizedMatmulRhsQ3_K = quant.QuantizedMatmulRhsQ3_K;
+/// Deprecated: use `quant.QuantizedMatmulRhsQ4_K`. Removal per docs/DEVELOPMENT.md §6.
+pub const QuantizedMatmulRhsQ4_K = quant.QuantizedMatmulRhsQ4_K;
+/// Deprecated: use `quant.QuantizedMatmulRhsQ5_K`. Removal per docs/DEVELOPMENT.md §6.
+pub const QuantizedMatmulRhsQ5_K = quant.QuantizedMatmulRhsQ5_K;
+/// Deprecated: use `quant.QuantizedMatmulRhsQ6_K`. Removal per docs/DEVELOPMENT.md §6.
+pub const QuantizedMatmulRhsQ6_K = quant.QuantizedMatmulRhsQ6_K;
+/// Deprecated: use `quant.BlockQ8_1`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockQ8_1 = quant.BlockQ8_1;
+/// Deprecated: use `quant.BlockQ2_K`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockQ2_K = quant.BlockQ2_K;
+/// Deprecated: use `quant.BlockQ3_K`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockQ3_K = quant.BlockQ3_K;
+/// Deprecated: use `quant.BlockQ4_K`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockQ4_K = quant.BlockQ4_K;
+/// Deprecated: use `quant.BlockQ5_K`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockQ5_K = quant.BlockQ5_K;
+/// Deprecated: use `quant.BlockQ6_K`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockQ6_K = quant.BlockQ6_K;
+/// Deprecated: use `quant.BlockQ8_K`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockQ8_K = quant.BlockQ8_K;
+/// Deprecated: use `quant.BlockIQ1_S`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockIQ1_S = quant.BlockIQ1_S;
+/// Deprecated: use `quant.BlockIQ1_M`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockIQ1_M = quant.BlockIQ1_M;
+/// Deprecated: use `quant.BlockIQ2_XXS`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockIQ2_XXS = quant.BlockIQ2_XXS;
+/// Deprecated: use `quant.BlockIQ2_XS`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockIQ2_XS = quant.BlockIQ2_XS;
+/// Deprecated: use `quant.BlockIQ2_S`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockIQ2_S = quant.BlockIQ2_S;
+/// Deprecated: use `quant.BlockIQ3_XXS`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockIQ3_XXS = quant.BlockIQ3_XXS;
+/// Deprecated: use `quant.BlockIQ3_S`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockIQ3_S = quant.BlockIQ3_S;
+/// Deprecated: use `quant.BlockIQ4_NL`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockIQ4_NL = quant.BlockIQ4_NL;
+/// Deprecated: use `quant.BlockIQ4_XS`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockIQ4_XS = quant.BlockIQ4_XS;
+/// Deprecated: use `quant.BlockTQ1_0`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockTQ1_0 = quant.BlockTQ1_0;
+/// Deprecated: use `quant.BlockTQ2_0`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockTQ2_0 = quant.BlockTQ2_0;
+/// Deprecated: use `quant.BlockMXFP4`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockMXFP4 = quant.BlockMXFP4;
+/// Deprecated: use `quant.BlockNVFP4`. Removal per docs/DEVELOPMENT.md §6.
+pub const BlockNVFP4 = quant.BlockNVFP4;
+// Backend identity + capability constants (species 4 of the membership
+// rule); the selected provider is fixed at build time.
 pub const Backend = backend.Backend;
 pub const BackendKind = backend.Kind;
 pub const active_backend_kind = backend.active_kind;
@@ -134,6 +268,9 @@ pub const native_blas_kind = backend.native_blas_kind;
 pub const native_uses_blas = backend.native_uses_blas;
 pub const native_uses_accelerate = backend.native_uses_accelerate;
 pub const native_blas_threads = backend.native_blas_threads;
+/// The eager execution runtime: owns allocation (buffer pool), validation,
+/// and kernel dispatch. One per thread of model execution; every Tensor op
+/// takes it explicitly.
 pub const ExecContext = exec.ExecContext;
 pub const RhsLifetime = exec.RhsLifetime;
 pub const MoeRhs = exec.ExecContext.MoeRhs;

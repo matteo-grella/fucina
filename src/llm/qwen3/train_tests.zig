@@ -78,8 +78,8 @@ const ServingFormat = enum { q8_0, q4_k };
 /// serves with (load copies the blocks; the temp buffer is freed here).
 fn toServingQuant(ctx: *ExecContext, w: *weights.LinearWeight, comptime format: ServingFormat) !void {
     const Block = switch (format) {
-        .q8_0 => fucina.BlockQ8_0,
-        .q4_k => fucina.BlockQ4_K,
+        .q8_0 => fucina.quant.BlockQ8_0,
+        .q4_k => fucina.quant.BlockQ4_K,
     };
     const block_len: usize = switch (format) {
         .q8_0 => 32,

@@ -505,7 +505,7 @@ test "quantizeMoeStack: expert row-blocks equal direct per-expert quantizeMatrix
         var pair = try fucina.ptqtp.quantizeMatrix(&ctx, stack_vals[e * out_dim * in_dim ..][0 .. out_dim * in_dim], out_dim, in_dim, options);
         defer pair.deinit(allocator);
         const dst0 = e * blocks_per_expert;
-        const expert_planes = [3][]const fucina.BlockTQ2_0{ pair.plane1, pair.plane2, pair.plane3 };
+        const expert_planes = [3][]const fucina.quant.BlockTQ2_0{ pair.plane1, pair.plane2, pair.plane3 };
         for (expert_planes, 0..) |expert_plane, p| {
             try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(expert_plane), std.mem.sliceAsBytes(quant.planes[p][dst0..][0..blocks_per_expert]));
         }
@@ -596,8 +596,8 @@ test "MoE expert stacks: plane pair-detection loads the ptqtp arm; streamed Proj
 
     // Patterned, byte-valid TQ2_0 plane stacks (the loader checks dtype and
     // geometry; crumb values only need to be in 0..2).
-    var p0_blocks: [rows]fucina.BlockTQ2_0 = undefined;
-    var p1_blocks: [rows]fucina.BlockTQ2_0 = undefined;
+    var p0_blocks: [rows]fucina.quant.BlockTQ2_0 = undefined;
+    var p1_blocks: [rows]fucina.quant.BlockTQ2_0 = undefined;
     for (&p0_blocks, 0..) |*b, i| {
         b.d = @bitCast(@as(f16, @floatCast(0.5 + 0.01 * @as(f32, @floatFromInt(i)))));
         for (&b.qs, 0..) |*q, j| q.* = @intCast((i * 3 + j) % 3);
@@ -665,8 +665,8 @@ test "MoE tie stamp: tied K=2 stacks load with the folded expert pack and fold t
     const out_dim: usize = 4;
     const rows = n_expert * out_dim;
 
-    var p0_blocks: [rows]fucina.BlockTQ2_0 = undefined;
-    var p1_blocks: [rows]fucina.BlockTQ2_0 = undefined;
+    var p0_blocks: [rows]fucina.quant.BlockTQ2_0 = undefined;
+    var p1_blocks: [rows]fucina.quant.BlockTQ2_0 = undefined;
     for (&p0_blocks, 0..) |*b, i| {
         b.d = @bitCast(@as(f16, @floatCast(0.6 + 0.01 * @as(f32, @floatFromInt(i)))));
         for (&b.qs, 0..) |*q, j| q.* = @intCast((i * 5 + j) % 3);
@@ -700,7 +700,7 @@ test "MoE tie stamp: tied K=2 stacks load with the folded expert pack and fold t
     var want: [n_expert * fg]bq.BlockTQ2_0Foldedx4 = undefined;
     for (0..n_expert) |e| {
         var views: [2]fucina.internal.backend_mod.QuantizedMatmulRhsTQ2_0 = undefined;
-        for ([2][]fucina.BlockTQ2_0{ &p0_blocks, &p1_blocks }, 0..) |plane, p| {
+        for ([2][]fucina.quant.BlockTQ2_0{ &p0_blocks, &p1_blocks }, 0..) |plane, p| {
             views[p] = .{
                 .rows = .{ .allocator = null, .blocks = plane[e * out_dim * bpc ..][0 .. out_dim * bpc], .rows = out_dim, .cols = in_dim, .blocks_per_row = bpc },
                 .k = in_dim,
@@ -719,7 +719,7 @@ test "MoE tie stamp: tied K=2 stacks load with the folded expert pack and fold t
     // all three layers (resident build, streamed spec, store validation)
     // must agree. K=3: three sibling planes never fold (27 levels exceed
     // the nibble).
-    var p2_blocks: [rows]fucina.BlockTQ2_0 = undefined;
+    var p2_blocks: [rows]fucina.quant.BlockTQ2_0 = undefined;
     for (&p2_blocks, 0..) |*b, i| {
         b.d = @bitCast(@as(f16, @floatCast(0.07 + 0.01 * @as(f32, @floatFromInt(i)))));
         for (&b.qs, 0..) |*q, j| q.* = @intCast((i * 13 + j * 7) % 3);

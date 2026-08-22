@@ -31,8 +31,8 @@ const ExecContext = fucina.ExecContext;
 const KvCache = kv_cache.KvCache;
 const gguf = fucina.gguf;
 const LinearWeight = weights.LinearWeight;
-const RhsQ6_K = fucina.QuantizedMatmulRhsQ6_Kx4;
-const RhsQ8_0 = fucina.QuantizedMatmulRhsQ8_0x4;
+const RhsQ6_K = fucina.quant.QuantizedMatmulRhsQ6_Kx4;
+const RhsQ8_0 = fucina.quant.QuantizedMatmulRhsQ8_0x4;
 
 pub const Error = weights.Error || error{
     InvalidConfig,
@@ -1390,13 +1390,13 @@ fn blocksOf(comptime Block: type, data: []const u8) ![]const Block {
     return std.mem.bytesAsSlice(Block, aligned);
 }
 
-fn packExpertQ6_K(ctx: *ExecContext, blocks: []const fucina.BlockQ6_K, out_rows: usize, in_cols: usize) !RhsQ6_K {
+fn packExpertQ6_K(ctx: *ExecContext, blocks: []const fucina.quant.BlockQ6_K, out_rows: usize, in_cols: usize) !RhsQ6_K {
     var raw = try fucina.Tensor(.{ .dtype = .q6_k, .tags = .{ .out, .in } }).fromBlocks(ctx, .{ out_rows, in_cols }, blocks);
     defer raw.deinit();
     return raw.packRhs(ctx);
 }
 
-fn packExpertQ8_0(ctx: *ExecContext, blocks: []const fucina.BlockQ8_0, out_rows: usize, in_cols: usize) !RhsQ8_0 {
+fn packExpertQ8_0(ctx: *ExecContext, blocks: []const fucina.quant.BlockQ8_0, out_rows: usize, in_cols: usize) !RhsQ8_0 {
     var raw = try fucina.Tensor(.{ .dtype = .q8_0, .tags = .{ .out, .in } }).fromBlocks(ctx, .{ out_rows, in_cols }, blocks);
     defer raw.deinit();
     return raw.packRhs(ctx);
@@ -1434,8 +1434,8 @@ fn loadMoe(ctx: *ExecContext, file: *const gguf.File, config: Config, il: usize,
     if (gu_info.n_dims != 3) return Error.UnsupportedExpertType;
     if (gu_info.dims[0] != hidden or gu_info.dims[1] != 2 * n_ff or gu_info.dims[2] != n_expert) return Error.InvalidWeightShape;
     const gu: gemma_moe.RawExpertWeights.GuBlocks = switch (gu_info.ggml_type) {
-        .q6_k => .{ .q6_k = try blocksOf(fucina.BlockQ6_K, gu_info.data) },
-        .q4_k => .{ .q4_k = try blocksOf(fucina.BlockQ4_K, gu_info.data) },
+        .q6_k => .{ .q6_k = try blocksOf(fucina.quant.BlockQ6_K, gu_info.data) },
+        .q4_k => .{ .q4_k = try blocksOf(fucina.quant.BlockQ4_K, gu_info.data) },
         else => return Error.UnsupportedExpertType,
     };
     const bpr_gu = hidden / 256; // 256-elem super-blocks per output row (Q6_K and Q4_K)
@@ -1444,7 +1444,7 @@ fn loadMoe(ctx: *ExecContext, file: *const gguf.File, config: Config, il: usize,
     const dn_info = try file.get(try weights.layerName(&nb, il, "ffn_down_exps.weight"));
     if (dn_info.ggml_type != .q8_0 or dn_info.n_dims != 3) return Error.UnsupportedExpertType;
     if (dn_info.dims[0] != n_ff or dn_info.dims[1] != hidden or dn_info.dims[2] != n_expert) return Error.InvalidWeightShape;
-    const dn_blocks = try blocksOf(fucina.BlockQ8_0, dn_info.data);
+    const dn_blocks = try blocksOf(fucina.quant.BlockQ8_0, dn_info.data);
     const bpr_dn = n_ff / 32; // Q8_0 blocks per output row
 
     var down_scale_t = try weights.loadVector(ctx, try file.get(try weights.layerName(&nb, il, "ffn_down_exps.scale")), n_expert, .expert);
@@ -1493,10 +1493,10 @@ fn loadMoe(ctx: *ExecContext, file: *const gguf.File, config: Config, il: usize,
                 @memcpy(dn_dev, dn_bytes);
                 gpu_weights = .{
                     .gu = switch (gu) {
-                        .q6_k => .{ .q6_k = @alignCast(std.mem.bytesAsSlice(fucina.BlockQ6_K, gu_dev)) },
-                        .q4_k => .{ .q4_k = @alignCast(std.mem.bytesAsSlice(fucina.BlockQ4_K, gu_dev)) },
+                        .q6_k => .{ .q6_k = @alignCast(std.mem.bytesAsSlice(fucina.quant.BlockQ6_K, gu_dev)) },
+                        .q4_k => .{ .q4_k = @alignCast(std.mem.bytesAsSlice(fucina.quant.BlockQ4_K, gu_dev)) },
                     },
-                    .dn_blocks = @alignCast(std.mem.bytesAsSlice(fucina.BlockQ8_0, dn_dev)),
+                    .dn_blocks = @alignCast(std.mem.bytesAsSlice(fucina.quant.BlockQ8_0, dn_dev)),
                     .device_owned = true,
                 };
             }
@@ -1505,13 +1505,13 @@ fn loadMoe(ctx: *ExecContext, file: *const gguf.File, config: Config, il: usize,
         }
         if (gpu_weights == null) {
             const gu_owned = switch (gu) {
-                .q6_k => |gu_blocks| gemma_moe.RawExpertWeights.GuBlocks{ .q6_k = try allocator.dupe(fucina.BlockQ6_K, gu_blocks) },
-                .q4_k => |gu_blocks| gemma_moe.RawExpertWeights.GuBlocks{ .q4_k = try allocator.dupe(fucina.BlockQ4_K, gu_blocks) },
+                .q6_k => |gu_blocks| gemma_moe.RawExpertWeights.GuBlocks{ .q6_k = try allocator.dupe(fucina.quant.BlockQ6_K, gu_blocks) },
+                .q4_k => |gu_blocks| gemma_moe.RawExpertWeights.GuBlocks{ .q4_k = try allocator.dupe(fucina.quant.BlockQ4_K, gu_blocks) },
             };
             errdefer switch (gu_owned) {
                 inline else => |gu_blocks| allocator.free(gu_blocks),
             };
-            const dn_owned = try allocator.dupe(fucina.BlockQ8_0, dn_blocks);
+            const dn_owned = try allocator.dupe(fucina.quant.BlockQ8_0, dn_blocks);
             gpu_weights = .{ .gu = gu_owned, .dn_blocks = dn_owned, .device_owned = false };
         }
     } else if (borrow) {
@@ -1521,9 +1521,9 @@ fn loadMoe(ctx: *ExecContext, file: *const gguf.File, config: Config, il: usize,
         // No borrow: the GGUF mapping is released after load, so the raw
         // representation is an allocator-owned copy. (No x4 packing exists for
         // the Q4_K gate_up arm — the raw CPU paths are its only consumers.)
-        const gu_owned = try allocator.dupe(fucina.BlockQ4_K, gu.q4_k);
+        const gu_owned = try allocator.dupe(fucina.quant.BlockQ4_K, gu.q4_k);
         errdefer allocator.free(gu_owned);
-        const dn_owned = try allocator.dupe(fucina.BlockQ8_0, dn_blocks);
+        const dn_owned = try allocator.dupe(fucina.quant.BlockQ8_0, dn_blocks);
         gpu_weights = .{ .gu = .{ .q4_k = gu_owned }, .dn_blocks = dn_owned, .device_owned = false };
     }
     errdefer if (gpu_weights) |gw| {
