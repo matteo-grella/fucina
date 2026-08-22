@@ -8,6 +8,7 @@
 const std = @import("std");
 const backend_mod = @import("../backend.zig");
 const parallel = @import("../parallel.zig");
+const tuning = @import("../tuning.zig");
 const tensor = @import("../tensor.zig");
 
 const exec_shape = @import("shape.zig");
@@ -286,7 +287,7 @@ pub fn conv2dPreparedExt(
     // tolerance argument in vector/winograd.zig). FUCINA_NO_WINOGRAD=1
     // reverts to im2col; FUCINA_NO_WINOGRAD_F4=1 pins large maps to F2.
     if (groups == 1 and kh == 3 and kw == 3 and stride[0] == 1 and stride[1] == 1 and
-        pad[0] <= 1 and pad[1] <= 1 and cin >= 4 and oh >= 2 and ow >= 2 and winogradEnabled())
+        pad[0] <= 1 and pad[1] <= 1 and cin >= 4 and oh >= 2 and ow >= 2 and winograd.enabled())
     {
         // A non-empty prepared set must belong to THIS weight's shape; a
         // mismatch is a caller wiring bug, not a fallback case. (`.empty`
@@ -296,7 +297,7 @@ pub fn conv2dPreparedExt(
                 return tensor.TensorError.ShapeMismatch;
             }
         }
-        if (@min(oh, ow) >= winogradF4MinSpatial() and cin <= winogradF4MaxCin() and winogradF4Enabled()) {
+        if (@min(oh, ow) >= winogradF4MinSpatial() and cin <= winogradF4MaxCin() and winograd_f4.enabled()) {
             const f4_planes: ?*const [36]Tensor = if (prepared) |p| (if (p.f4) |*planes| planes else null) else null;
             return winogradConv(rt, .f4, ii.tensor(), ww.tensor(), f4_planes, bias_slice, fused_relu, .{
                 .h = h,
@@ -406,31 +407,15 @@ fn conv2dDimsFor(h: usize, w: usize, cin: usize, oh: usize, ow: usize, cout: usi
 /// im2col GEMM faster than 16 tile-element GEMMs — measured M1 Max).
 /// Runtime overrides: FUCINA_WINOGRAD=1 forces on, FUCINA_NO_WINOGRAD=1
 /// forces off (the A/B and emergency-revert switches). Read once, cached.
-const winograd_default_on = !backend_mod.native_uses_blas;
-var winograd_state = std.atomic.Value(u8).init(0); // 0 = unread, 1 = enabled, 2 = disabled
-fn winogradEnabled() bool {
-    const s = winograd_state.load(.acquire);
-    if (s != 0) return s == 1;
-    const on = if (parallel.envPositiveUsize("FUCINA_NO_WINOGRAD") != null)
-        false
-    else if (parallel.envPositiveUsize("FUCINA_WINOGRAD") != null)
-        true
-    else
-        winograd_default_on;
-    winograd_state.store(if (on) 1 else 2, .release);
-    return on;
-}
+const winograd = tuning.Switch(.{
+    .on = "FUCINA_WINOGRAD",
+    .off = "FUCINA_NO_WINOGRAD",
+    .default = !backend_mod.native_uses_blas,
+});
 
 /// FUCINA_NO_WINOGRAD_F4=1 pins Winograd-routed large maps to F2 (the F4
 /// tier's A/B switch). Read once, cached.
-var winograd_f4_state = std.atomic.Value(u8).init(0);
-fn winogradF4Enabled() bool {
-    const s = winograd_f4_state.load(.acquire);
-    if (s != 0) return s == 1;
-    const disabled = parallel.envPositiveUsize("FUCINA_NO_WINOGRAD_F4") != null;
-    winograd_f4_state.store(if (disabled) 2 else 1, .release);
-    return !disabled;
-}
+const winograd_f4 = tuning.Switch(.{ .off = "FUCINA_NO_WINOGRAD_F4", .default = true });
 
 // F4 shape gates, bench-tuned (i9-13950HX sweep): F4 pays where the tile
 // count keeps its 36 GEMMs well-shaped and the transform cost is amortized
@@ -462,7 +447,7 @@ fn winogradF4MaxCin() usize {
 /// Test hook: pin the Winograd route on/off, or `null` to restore the
 /// env/default gate (re-read on next use).
 pub fn setWinogradForTest(state: ?bool) void {
-    winograd_state.store(if (state) |on| (if (on) @as(u8, 1) else 2) else 0, .release);
+    winograd.set(state);
 }
 
 /// conv2d backward GEMM-route gate: the groups == 1 backward entries
@@ -470,19 +455,12 @@ pub fn setWinogradForTest(state: ?bool) void {
 /// which is both GEMM-fast and pool-parallel. FUCINA_NO_CONV_BWD_GEMM=1 pins
 /// both entries to the direct gather kernels (the A/B and emergency-revert
 /// switch). Read once, cached.
-var conv_bwd_gemm_state = std.atomic.Value(u8).init(0); // 0 = unread, 1 = enabled, 2 = disabled
-fn convBwdGemmEnabled() bool {
-    const s = conv_bwd_gemm_state.load(.acquire);
-    if (s != 0) return s == 1;
-    const on = parallel.envPositiveUsize("FUCINA_NO_CONV_BWD_GEMM") == null;
-    conv_bwd_gemm_state.store(if (on) 1 else 2, .release);
-    return on;
-}
+const conv_bwd_gemm = tuning.Switch(.{ .off = "FUCINA_NO_CONV_BWD_GEMM", .default = true });
 
 /// Test hook: pin the conv2d backward GEMM route on/off, or `null` to restore
 /// the env/default gate (re-read on next use).
 pub fn setConvBwdGemmForTest(state: ?bool) void {
-    conv_bwd_gemm_state.store(if (state) |on| (if (on) @as(u8, 1) else 2) else 0, .release);
+    conv_bwd_gemm.set(state);
 }
 
 const WinoKind = enum { f2, f4 };
@@ -526,7 +504,7 @@ pub fn prepareConv2dWeights(rt: *Runtime, weight: *const Tensor) !PreparedConvWe
     const kh = w_view.shape[1];
     const kw = w_view.shape[2];
     const cin = w_view.shape[3];
-    if (!(kh == 3 and kw == 3 and cin >= 4 and winogradEnabled())) return .empty;
+    if (!(kh == 3 and kw == 3 and cin >= 4 and winograd.enabled())) return .empty;
 
     var ww = try rt.prepareContiguous(weight);
     defer ww.deinit();
@@ -534,7 +512,7 @@ pub fn prepareConv2dWeights(rt: *Runtime, weight: *const Tensor) !PreparedConvWe
     var out: PreparedConvWeights = .{ .cout = cout, .cin = cin };
     errdefer out.deinit();
     out.f2 = try winogradWeightPlanes(rt, .f2, ww.tensor(), cout, cin);
-    if (winogradF4Enabled() and cin <= winogradF4MaxCin()) {
+    if (winograd_f4.enabled() and cin <= winogradF4MaxCin()) {
         out.f4 = try winogradWeightPlanes(rt, .f4, ww.tensor(), cout, cin);
     }
     return out;
@@ -660,7 +638,7 @@ pub fn conv2dBackwardInput(rt: *Runtime, gy: *const Tensor, weight: *const Tenso
     var ww = try rt.prepareContiguous(weight);
     defer ww.deinit();
 
-    if (groups == 1 and convBwdGemmEnabled()) {
+    if (groups == 1 and conv_bwd_gemm.enabled()) {
         var gy_2d = try gg.tensor().viewWithStrides(&.{ oh * ow, cout }, &.{ cout, 1 });
         defer gy_2d.deinit();
         if (kh == 1 and kw == 1 and stride[0] == 1 and stride[1] == 1 and pad[0] == 0 and pad[1] == 0) {
@@ -720,7 +698,7 @@ pub fn conv2dBackwardWeight(rt: *Runtime, input: *const Tensor, gy: *const Tenso
     var gg = try rt.prepareContiguous(gy);
     defer gg.deinit();
 
-    if (groups == 1 and convBwdGemmEnabled()) {
+    if (groups == 1 and conv_bwd_gemm.enabled()) {
         var gy_2d = try gg.tensor().viewWithStrides(&.{ oh * ow, cout }, &.{ cout, 1 });
         defer gy_2d.deinit();
         if (kh == 1 and kw == 1 and stride[0] == 1 and stride[1] == 1 and pad[0] == 0 and pad[1] == 0) {

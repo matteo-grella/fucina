@@ -3,6 +3,7 @@ const backend_mod = @import("../backend.zig");
 const dtype_mod = @import("../dtype.zig");
 const tensor = @import("../tensor.zig");
 const parallel = @import("../parallel.zig");
+const tuning = @import("../tuning.zig");
 const storage = @import("../storage.zig");
 const Runtime = @import("runtime.zig").Runtime;
 
@@ -1467,15 +1468,10 @@ pub const attention_bwd_blas_tile_rows: usize = 64;
 /// kernel-selection contract as `shouldUseBlas` on the plain matmuls.
 /// FUCINA_NO_ATTN_BWD_BLAS reverts to the register-tiled route (the A/B
 /// switch and the escape hatch for non-BLAS parity work).
-var attn_bwd_blas_state = std.atomic.Value(u8).init(0); // 0 unread, 1 on, 2 off
+const attn_bwd_blas = tuning.Switch(.{ .off = "FUCINA_NO_ATTN_BWD_BLAS", .default = true });
 fn attentionBackwardBlasEnabled() bool {
     if (comptime !(backend_mod.active_kind == .native and backend_mod.native_uses_blas)) return false;
-    var s = attn_bwd_blas_state.load(.acquire);
-    if (s == 0) {
-        s = if (std.c.getenv("FUCINA_NO_ATTN_BWD_BLAS") != null) 2 else 1;
-        attn_bwd_blas_state.store(s, .release);
-    }
-    return s == 1;
+    return attn_bwd_blas.enabled();
 }
 
 pub fn runGroupedCausalAttentionBackwardBlasTiledTask(task: *const GroupedCausalAttentionBackwardTiledTask) void {
@@ -1604,18 +1600,13 @@ pub fn addSliceInPlace(dest: []f32, src: []const f32) void {
 /// emergency-revert switch), FUCINA_ATTN_BWD_STATS=1 forces on. Read once,
 /// cached. Only consulted when the caller has stats at all (the autograd
 /// record); the stats-less exec path always recomputes.
-var attn_bwd_stats_state = std.atomic.Value(u8).init(0); // 0 = unread, 1 = on, 2 = off
+const attn_bwd_stats = tuning.Switch(.{
+    .on = "FUCINA_ATTN_BWD_STATS",
+    .off = "FUCINA_NO_ATTN_BWD_STATS",
+    .default = true,
+});
 fn attnBwdStatsEnabled() bool {
-    const state = attn_bwd_stats_state.load(.acquire);
-    if (state != 0) return state == 1;
-    const on = if (parallel.envPositiveUsize("FUCINA_NO_ATTN_BWD_STATS") != null)
-        false
-    else if (parallel.envPositiveUsize("FUCINA_ATTN_BWD_STATS") != null)
-        true
-    else
-        true;
-    attn_bwd_stats_state.store(if (on) 1 else 2, .release);
-    return on;
+    return attn_bwd_stats.enabled();
 }
 
 pub fn groupedCausalAttention(

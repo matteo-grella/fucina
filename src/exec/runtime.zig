@@ -16,6 +16,7 @@ const backend_mod = @import("../backend.zig");
 const dtype_mod = @import("../dtype.zig");
 const fpenv = @import("../fpenv.zig");
 const parallel = @import("../parallel.zig");
+const tuning = @import("../tuning.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
 
@@ -48,6 +49,9 @@ pub const Runtime = struct {
     allocator: Allocator,
     backend: Backend,
     buffers: BufferPool,
+    /// Per-context tuning overrides (`ExecContext.setTuning`); every field
+    /// null = follow the process-wide gates (see src/tuning.zig).
+    tuning: tuning.Overrides = .{},
     work_pool: thread.Pool,
     work_pool_ready: bool = false,
     work_pool_mutex: thread.Mutex = .{},
@@ -91,6 +95,7 @@ pub const Runtime = struct {
         self.scope_entries = .empty;
         self.scope_depth = 0;
         self.pin_rowwise_kernels = false;
+        self.tuning = .{};
         self.fp_env_at_init = fpenv.get();
     }
 

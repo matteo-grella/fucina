@@ -682,6 +682,31 @@ test "cpu f32 shadow route matches the streaming kernels and caches per buffer" 
     defer again.deinit();
     try std.testing.expect(b16.buffer.acceleratorResource(.cpu).? == first);
     try std.testing.expectEqualSlices(f32, got16.dataConst(), again.dataConst());
+
+    // Per-context override beats the process gate: with the process gate
+    // pinned OFF, a context whose Overrides force the route ON still takes
+    // it (fresh weight tensor so the shadow resource is created here), and
+    // a second untouched context stays on the streaming kernels — two
+    // contexts in one process running different policy.
+    exec_matmul.setCpuF32Shadow(false, null);
+    var ctx_on: ExecContext = undefined;
+    ctx_on.init(allocator);
+    defer ctx_on.deinit();
+    ctx_on.setTuning(.{ .cpu_f32_shadow = true, .cpu_f32_shadow_min_m = 4 });
+    var b16_ovr = try ctx_on.fromSliceRankTyped(.f16, 2, .{ n, k }, &b16_data);
+    defer b16_ovr.deinit();
+    var a_ovr = try ctx_on.fromSlice(&.{ m, k }, &a_data);
+    defer a_ovr.deinit();
+    var got_ovr = try ctx_on.matmulTransB2DWithF16Rhs(&a_ovr, &b16_ovr);
+    defer got_ovr.deinit();
+    try std.testing.expect(b16_ovr.buffer.acceleratorResource(.cpu) != null); // shadow route ran
+    for (want16.dataConst(), got_ovr.dataConst()) |w, g| try std.testing.expectApproxEqAbs(w, g, 2e-3);
+
+    var b16_plain = try ctx.fromSliceRankTyped(.f16, 2, .{ n, k }, &b16_data);
+    defer b16_plain.deinit();
+    var got_plain = try ctx.matmulTransB2DWithF16Rhs(&a, &b16_plain);
+    defer got_plain.deinit();
+    try std.testing.expect(b16_plain.buffer.acceleratorResource(.cpu) == null); // gate off, no shadow
 }
 
 test "exec context applies unary ops through materialized inputs" {

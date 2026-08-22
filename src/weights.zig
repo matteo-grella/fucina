@@ -16,6 +16,7 @@ const fucina = struct {
     pub const ptqtp = @import("ptqtp.zig");
     pub const rng = @import("rng.zig");
     pub const parallel = @import("parallel.zig");
+    pub const tuning = @import("tuning.zig");
     pub const Tensor = ag_mod.Tensor;
     pub const PackedRhs = ag_mod.PackedRhs;
     pub const DType = dtype_mod.DType;
@@ -1160,13 +1161,12 @@ pub const LinearWeight = union(enum) {
     /// the unfused rmsNormMul + linearSeq pair, FUCINA_NORM_QUANT_FUSED=1
     /// forces the fused route. Read once, cached (winograd-style).
     pub fn setNormQuantFused(on: ?bool) void {
-        const s: u8 = if (on) |o| (if (o) 1 else 2) else 0;
-        norm_quant_fused_state.store(s, .release);
+        norm_quant_fused.set(on);
     }
 
     pub fn supportsNormedFusion(self: *const LinearWeight, m: usize) bool {
         if (comptime fucina.internal.gpu.enabled) return false;
-        if (!normQuantFusedEnabled()) return false;
+        if (!norm_quant_fused.enabled()) return false;
         // Prefill-only: at decode shapes (m < 4) the fused route pays pooled
         // scratch acquisitions plus a padded 4-row-group quantize for one
         // real row, where the unfused internal quantizer has an m=1 stack
@@ -1201,7 +1201,7 @@ pub const LinearWeight = union(enum) {
     ) !fucina.Tensor(.{ .seq, out_tag }) {
         @setEvalBranchQuota(20_000);
         if (comptime !fucina.internal.gpu.enabled) {
-            if (!x.requiresGrad() and x.dim(.seq) >= 4 and normQuantFusedEnabled()) switch (self.*) {
+            if (!x.requiresGrad() and x.dim(.seq) >= 4 and norm_quant_fused.enabled()) switch (self.*) {
                 .q4_k => |*weight| if (comptime !fucina.supports_q4_k_mmla) {
                     return x.rmsNormMulDotPacked(ctx, norm_weight, eps, &weight.packed_rhs, in_tag, out_tag);
                 },
@@ -2301,20 +2301,11 @@ pub fn linearSeqQ8_0(
 /// and wins where bandwidth is the limit: default ON. Runtime overrides:
 /// FUCINA_Q4K_DECODE_COMPACT=1 forces on, FUCINA_NO_Q4K_DECODE_COMPACT=1
 /// forces off (the A/B and emergency-revert switches). Read once, cached.
-const q4k_decode_compact_default_on = true;
-var q4k_decode_compact_state = std.atomic.Value(u8).init(0); // 0 = unread, 1 = enabled, 2 = disabled
-fn q4kDecodeCompactEnabled() bool {
-    const s = q4k_decode_compact_state.load(.acquire);
-    if (s != 0) return s == 1;
-    const on = if (fucina.parallel.envPositiveUsize("FUCINA_NO_Q4K_DECODE_COMPACT") != null)
-        false
-    else if (fucina.parallel.envPositiveUsize("FUCINA_Q4K_DECODE_COMPACT") != null)
-        true
-    else
-        q4k_decode_compact_default_on;
-    q4k_decode_compact_state.store(if (on) 1 else 2, .release);
-    return on;
-}
+const q4k_decode_compact = fucina.tuning.Switch(.{
+    .on = "FUCINA_Q4K_DECODE_COMPACT",
+    .off = "FUCINA_NO_Q4K_DECODE_COMPACT",
+    .default = true,
+});
 
 pub fn linearSeqQ4_K(
     weight: *const WeightQ4_K,
@@ -2328,7 +2319,7 @@ pub fn linearSeqQ4_K(
     // (`weight.value`) — bitwise-equal outputs, ~1.92x fewer weight bytes
     // streamed (see the gate comment above). Grad inputs keep the packed
     // path's explicit GradientQuantizedMatmulUnsupported error.
-    if (input.dim(.seq) < 4 and !input.requiresGrad() and q4kDecodeCompactEnabled()) {
+    if (input.dim(.seq) < 4 and !input.requiresGrad() and q4k_decode_compact.enabled()) {
         var tagged = try weight.value.withTags(ctx, .{ out_tag, in_tag });
         defer tagged.deinit();
         return input.dot(ctx, &tagged, in_tag);
@@ -2347,42 +2338,24 @@ pub fn linearSeqQ4_K(
 /// ON. Runtime overrides: FUCINA_Q5K_DECODE_COMPACT=1 forces on,
 /// FUCINA_NO_Q5K_DECODE_COMPACT=1 forces off (the A/B and emergency-revert
 /// switches, winograd-style). Read once, cached.
-var norm_quant_fused_state = std.atomic.Value(u8).init(0); // 0 = unread, 1 = enabled, 2 = disabled
-fn normQuantFusedEnabled() bool {
-    const s = norm_quant_fused_state.load(.acquire);
-    if (s != 0) return s == 1;
-    const on = if (fucina.parallel.envPositiveUsize("FUCINA_NO_NORM_QUANT_FUSED") != null)
-        false
-    else if (fucina.parallel.envPositiveUsize("FUCINA_NORM_QUANT_FUSED") != null)
-        true
-    else
-        true;
-    norm_quant_fused_state.store(if (on) 1 else 2, .release);
-    return on;
-}
+const norm_quant_fused = fucina.tuning.Switch(.{
+    .on = "FUCINA_NORM_QUANT_FUSED",
+    .off = "FUCINA_NO_NORM_QUANT_FUSED",
+    .default = true,
+});
 
-const q5k_decode_compact_default_on = true;
-var q5k_decode_compact_state = std.atomic.Value(u8).init(0); // 0 = unread, 1 = enabled, 2 = disabled
-fn q5kDecodeCompactEnabled() bool {
-    const s = q5k_decode_compact_state.load(.acquire);
-    if (s != 0) return s == 1;
-    const on = if (fucina.parallel.envPositiveUsize("FUCINA_NO_Q5K_DECODE_COMPACT") != null)
-        false
-    else if (fucina.parallel.envPositiveUsize("FUCINA_Q5K_DECODE_COMPACT") != null)
-        true
-    else
-        q5k_decode_compact_default_on;
-    q5k_decode_compact_state.store(if (on) 1 else 2, .release);
-    return on;
-}
+const q5k_decode_compact = fucina.tuning.Switch(.{
+    .on = "FUCINA_Q5K_DECODE_COMPACT",
+    .off = "FUCINA_NO_Q5K_DECODE_COMPACT",
+    .default = true,
+});
 
 /// Programmatic override for the Q5_K decode-route gate (pre-seeds the
 /// read-once cache, like `parallel.setMaxThreads`): `true`/`false` force the
 /// compact/packed route, `null` resets to unread so the next query re-reads
 /// the env/arch default. The tests' A/B hook; also usable from a CLI flag.
 pub fn setQ5kDecodeCompact(on: ?bool) void {
-    const s: u8 = if (on) |o| (if (o) 1 else 2) else 0;
-    q5k_decode_compact_state.store(s, .release);
+    q5k_decode_compact.set(on);
 }
 
 pub fn linearSeqQ5_K(
@@ -2400,7 +2373,7 @@ pub fn linearSeqQ5_K(
     // bitwise-equal outputs, ~1.57x fewer weight bytes streamed (see the gate
     // comment above). Grad inputs keep the packed path's explicit
     // GradientQuantizedMatmulUnsupported error.
-    if (input.dim(.seq) < 4 and !input.requiresGrad() and q5kDecodeCompactEnabled()) {
+    if (input.dim(.seq) < 4 and !input.requiresGrad() and q5k_decode_compact.enabled()) {
         var tagged = try weight.value.withTags(ctx, .{ out_tag, in_tag });
         defer tagged.deinit();
         return input.dot(ctx, &tagged, in_tag);
@@ -2418,26 +2391,16 @@ pub fn linearSeqQ5_K(
 /// block order; proven by the cross-layout test in q6_k_tests.zig). Default
 /// ON. Runtime overrides: FUCINA_Q6K_DECODE_COMPACT=1 forces on,
 /// FUCINA_NO_Q6K_DECODE_COMPACT=1 forces off. Read once, cached.
-const q6k_decode_compact_default_on = true;
-var q6k_decode_compact_state = std.atomic.Value(u8).init(0); // 0 = unread, 1 = enabled, 2 = disabled
-fn q6kDecodeCompactEnabled() bool {
-    const s = q6k_decode_compact_state.load(.acquire);
-    if (s != 0) return s == 1;
-    const on = if (fucina.parallel.envPositiveUsize("FUCINA_NO_Q6K_DECODE_COMPACT") != null)
-        false
-    else if (fucina.parallel.envPositiveUsize("FUCINA_Q6K_DECODE_COMPACT") != null)
-        true
-    else
-        q6k_decode_compact_default_on;
-    q6k_decode_compact_state.store(if (on) 1 else 2, .release);
-    return on;
-}
+const q6k_decode_compact = fucina.tuning.Switch(.{
+    .on = "FUCINA_Q6K_DECODE_COMPACT",
+    .off = "FUCINA_NO_Q6K_DECODE_COMPACT",
+    .default = true,
+});
 
 /// Programmatic override for the Q6_K decode-route gate; same contract as
 /// `setQ5kDecodeCompact` (null resets the read-once cache to unread).
 pub fn setQ6kDecodeCompact(on: ?bool) void {
-    const s: u8 = if (on) |o| (if (o) 1 else 2) else 0;
-    q6k_decode_compact_state.store(s, .release);
+    q6k_decode_compact.set(on);
 }
 
 pub fn linearSeqQ6_K(
@@ -2452,7 +2415,7 @@ pub fn linearSeqQ6_K(
     // packed layout — see the Q5_K gate above; identical structure here. The
     // GPU try stays first so `-Dgpu` builds keep their existing offload
     // policy (weight-lifetime-aware wraps) ahead of the CPU route choice.
-    if (input.dim(.seq) < 4 and !input.requiresGrad() and q6kDecodeCompactEnabled()) {
+    if (input.dim(.seq) < 4 and !input.requiresGrad() and q6k_decode_compact.enabled()) {
         var tagged = try weight.value.withTags(ctx, .{ out_tag, in_tag });
         defer tagged.deinit();
         return input.dot(ctx, &tagged, in_tag);

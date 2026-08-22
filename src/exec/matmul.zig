@@ -5,6 +5,7 @@ const backend_mod = @import("../backend.zig");
 const dtype_mod = @import("../dtype.zig");
 const parallel = @import("../parallel.zig");
 const storage_mod = @import("../storage.zig");
+const tuning = @import("../tuning.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
 
@@ -456,29 +457,22 @@ pub fn matmul2DWithPackedRhsTyped(
 // FUCINA_CPU_F32_SHADOW_MIN_M overrides the m >= 32 crossover.
 // ---------------------------------------------------------------------------
 
-var cpu_shadow_state = std.atomic.Value(u8).init(0); // 0 unread, 1 on, 2 off
-var cpu_shadow_min_m = std.atomic.Value(u64).init(32);
+const cpu_shadow = tuning.Switch(.{ .on = "FUCINA_CPU_F32_SHADOW", .default = false });
+const cpu_shadow_min_m = tuning.Threshold("FUCINA_CPU_F32_SHADOW_MIN_M", tuning.defaults.cpu_f32_shadow_min_m);
 
 /// Test hook (and emergency switch), `setNormQuantFused`-style: overrides
 /// the env read. `null` re-arms the env read.
 pub fn setCpuF32Shadow(on: ?bool, min_m: ?u64) void {
-    cpu_shadow_state.store(if (on) |o| (if (o) @as(u8, 1) else 2) else 0, .release);
-    if (min_m) |v| cpu_shadow_min_m.store(v, .release);
+    cpu_shadow.set(on);
+    if (min_m) |v| cpu_shadow_min_m.set(v);
 }
 
-fn cpuShadowMinM() ?u64 {
-    var s = cpu_shadow_state.load(.acquire);
-    if (s == 0) {
-        // parallel.envFlag/envPositiveUsize, NOT std.c.getenv: the libc-free
-        // Linux test/server builds have no std.c (the FUCINA_MAX_THREADS
-        // lesson; /proc/self/environ arm).
-        s = if (parallel.envFlag("FUCINA_CPU_F32_SHADOW")) 1 else 2;
-        if (parallel.envPositiveUsize("FUCINA_CPU_F32_SHADOW_MIN_M")) |v| {
-            cpu_shadow_min_m.store(v, .release);
-        }
-        cpu_shadow_state.store(s, .release);
-    }
-    return if (s == 1) cpu_shadow_min_m.load(.acquire) else null;
+/// The shadow route's crossover for this runtime, or null when the route is
+/// off. Per-context `Overrides` win; otherwise the process gate decides.
+fn cpuShadowMinM(rt: *const Runtime) ?u64 {
+    const on = rt.tuning.cpu_f32_shadow orelse cpu_shadow.enabled();
+    if (!on) return null;
+    return rt.tuning.cpu_f32_shadow_min_m orelse cpu_shadow_min_m.get();
 }
 
 const CpuShadow = struct {
@@ -574,7 +568,7 @@ pub fn matmulTransB2DWithF16Rhs(self: *Runtime, a: *const Tensor, b: *const tens
     // FUCINA_CPU_F32_SHADOW block above); the per-call-widen objection
     // below does not apply to a widen-once copy.
     if (comptime !build_options.use_gpu) {
-        if (cpuShadowMinM()) |min_m| {
+        if (cpuShadowMinM(self)) |min_m| {
             if (m >= min_m) {
                 if (matmulTransB2DViaShadow(self, .f16, aa_f32.tensor(), bb.tensor(), m, n, k)) |out| return out;
             }
@@ -613,7 +607,7 @@ pub fn matmulTransB2DWithBf16Rhs(self: *Runtime, a: *const Tensor, b: *const ten
     // Opt-in cached-shadow BLAS arm (see FUCINA_CPU_F32_SHADOW above); the
     // bf16 widen is a pure bit shift, exact.
     if (comptime !build_options.use_gpu) {
-        if (cpuShadowMinM()) |min_m| {
+        if (cpuShadowMinM(self)) |min_m| {
             if (m >= min_m) {
                 if (matmulTransB2DViaShadow(self, .bf16, aa.tensor(), bb.tensor(), m, n, k)) |out| return out;
             }

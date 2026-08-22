@@ -30,6 +30,10 @@ pub const optim = @import("optim.zig");
 pub const ptqtp = @import("ptqtp.zig");
 pub const rng = @import("rng.zig");
 pub const parallel = @import("parallel.zig");
+/// Tuning policy: the shared shape of every FUCINA_* route gate (read-once
+/// env switch + measured default + programmatic `set`), the numeric route
+/// defaults, and the per-context `Overrides` (`ExecContext.setTuning`).
+pub const tuning = @import("tuning.zig");
 /// IEEE floating-point environment: rounding/underflow inquiry and scoped
 /// control, plus the accrued exception flags. The bitwise contracts elsewhere
 /// in this library assume the default environment; this is how you check it.
@@ -218,6 +222,7 @@ pub const internal = struct {
 
 test {
     _ = streamconv;
+    _ = tuning;
     _ = dtype;
     _ = storage;
     _ = tensor;

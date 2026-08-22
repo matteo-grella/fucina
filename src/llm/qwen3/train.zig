@@ -198,21 +198,14 @@ const RopeKey = struct {
 /// logits + `cartridge.distillLoss` tail (the A/B and emergency-revert
 /// switch — the fused route matches it to f32 roundoff, not bitwise).
 /// Read once, cached; `setFusedDistill` is the test hook.
-var fused_distill_state = std.atomic.Value(u8).init(0); // 0 unread, 1 on, 2 off
+const fused_distill = fucina.tuning.Switch(.{ .off = "FUCINA_NO_FUSED_DISTILL", .default = true });
 
 pub fn setFusedDistill(on: ?bool) void {
-    fused_distill_state.store(if (on) |o| (if (o) @as(u8, 1) else 2) else 0, .release);
+    fused_distill.set(on);
 }
 
 fn fusedDistillEnabled() bool {
-    var state = fused_distill_state.load(.acquire);
-    if (state == 0) {
-        // fucina.parallel.envFlag, NOT std.c.getenv: libc-free Linux
-        // builds have no std.c.
-        state = if (fucina.parallel.envFlag("FUCINA_NO_FUSED_DISTILL")) 2 else 1;
-        fused_distill_state.store(state, .release);
-    }
-    return state == 1;
+    return fused_distill.enabled();
 }
 
 /// Lazily widened f32 copies of frozen projections, keyed by weight

@@ -207,6 +207,10 @@ Autograd:
   Tensor Semantics*).
 - `src/ag.zig`: autograd module root, exporting the public `Tensor` and the
   framework pillars.
+- `src/tuning.zig`: tuning policy — the shared shape of every FUCINA_* route
+  gate (read-once env switch + measured default + programmatic `set`), the
+  numeric route defaults, and the per-context `Overrides` carried by
+  `ExecContext` (`setTuning`).
 - `src/ag/tensor.zig`: public tagged/autograd tensor facade — the `Tensor`
   dispatcher, the f32 struct core, and one-line aliases onto the per-domain
   method mixins in `src/ag/tensor/float/` (elementwise, matmul, reduce,

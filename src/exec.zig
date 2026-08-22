@@ -159,6 +159,13 @@ pub const ExecContext = struct {
         self.rt.pin_rowwise_kernels = on;
     }
 
+    /// Per-context tuning overrides: route policy that can differ between
+    /// two contexts in one process (fields left null follow the process-wide
+    /// FUCINA_* gates; see `fucina.tuning`).
+    pub fn setTuning(self: *ExecContext, overrides: @import("tuning.zig").Overrides) void {
+        self.rt.tuning = overrides;
+    }
+
     /// `error.FloatEnvironmentChanged` when the calling thread's IEEE rounding
     /// or underflow mode is no longer what it was when this context was
     /// created. See `Runtime.checkFloatEnvironment`; the facility itself is

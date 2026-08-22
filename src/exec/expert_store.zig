@@ -47,18 +47,13 @@ const builtin = @import("builtin");
 const backend_mod = @import("../backend.zig");
 const thread = @import("../thread.zig");
 const parallel = @import("../parallel.zig");
+const tuning = @import("../tuning.zig");
 
 /// `FUCINA_MOE_LRU=1` forces the pure-LRU victim scan (A/B on one binary);
 /// read once, cached.
+const plain_lru = tuning.Switch(.{ .on = "FUCINA_MOE_LRU", .default = false });
 fn envPlainLru() bool {
-    const S = struct {
-        var state: std.atomic.Value(u8) = .init(0); // 0 unread, 1 lru, 2 heat
-    };
-    const cur = S.state.load(.acquire);
-    if (cur != 0) return cur == 1;
-    const v: u8 = if (parallel.envPositiveUsize("FUCINA_MOE_LRU") != null) 1 else 2;
-    S.state.store(v, .release);
-    return v == 1;
+    return plain_lru.enabled();
 }
 
 const Allocator = std.mem.Allocator;
