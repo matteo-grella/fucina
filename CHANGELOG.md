@@ -18,6 +18,16 @@ point; earlier history is `git log`.
   research features under model families (SHINE, cartridges, Engram), and
   every model family's internal layout.
 
+## Unreleased
+
+### Changed
+
+- Qwen3-TTS parity fixtures moved out of the shipped package:
+  `src/llm/qwen3tts/goldens/` → `testdata/qwen3tts/` (5.5 MB of binary
+  dumps that only in-repo parity tests read; `build.zig.zon` ships all of
+  `src/`, so the move halves the fetched package). The tests already skip
+  when fixtures are absent; dependency builds are unaffected.
+
 ## 0.2.0 — 2026-08-22
 
 ### Added

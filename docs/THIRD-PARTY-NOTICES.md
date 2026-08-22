@@ -240,10 +240,10 @@ grouped-MoE path does not use the split.
 - `examples/voiceagent/goldens/*.npy` — the per-stage GTCRN-AEC fixtures published by
   LocalVQE (Apache-2.0) under `ggml/tests/gtcrn/`, copied in unmodified;
   provenance and refresh recipe in `examples/voiceagent/goldens/README.md`.
-- `src/llm/qwen3tts/goldens/**` — reference activations produced by running the
+- `testdata/qwen3tts/**` — reference activations produced by running the
   pinned qwentts.cpp checkout through its python bindings (MIT); the dumps
   are program output, not upstream source. Recipe in
-  `src/llm/qwen3tts/goldens/README.md`.
+  `testdata/qwen3tts/README.md`.
 - `refs/pocket-tts-dumps/` (not committed) — Pocket TTS reference
   activations, regenerated locally by `tools/pocket/pocket_dump.py` against
   the stock pinned checkout.

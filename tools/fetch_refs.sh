@@ -78,7 +78,7 @@
 # the Qwen3-TTS port (src/llm/qwen3tts, examples/qwen3tts): the C++ side pins
 # the codec decoder's stage decomposition (pre-conv, transformer, RVQ,
 # upsample) and the python side drives it to emit the reference activations.
-# Both stay stock — the committed fixtures under src/llm/qwen3tts/goldens/ were
+# Both stay stock — the committed fixtures under testdata/qwen3tts/ were
 # produced by the python harness against the pinned checkout; see that
 # directory's README.md for the regeneration recipe.
 #

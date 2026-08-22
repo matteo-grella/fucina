@@ -1,5 +1,5 @@
 //! Talker-stack parity vs the qwentts.cpp oracle's greedy dump
-//! (src/llm/qwen3tts/goldens/dump-greedy: CustomVoice Aiden, "The quick brown fox
+//! (testdata/qwen3tts/dump-greedy: CustomVoice Aiden, "The quick brown fox
 //! jumps over the lazy dog.", --greedy --no-fa, natural EOS at 37 frames).
 //! Gates: prompt ids exact, prompt embeds + prefill logits cosine, generated
 //! codes token-for-token. Skips without the talker GGUF + dumps.
@@ -19,7 +19,7 @@ const gguf = fucina.gguf;
 const ExecContext = fucina.ExecContext;
 
 const talker_path = "models/qwen3-tts/qwen-talker-0.6b-customvoice-F32.gguf";
-const dump_dir = "src/llm/qwen3tts/goldens/dump-greedy";
+const dump_dir = "testdata/qwen3tts/dump-greedy";
 const test_text = "The quick brown fox jumps over the lazy dog.";
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
@@ -170,10 +170,10 @@ test "qwen3tts talker: seeded sampling replays the oracle draw-for-draw" {
         else => return err,
     };
     defer file.deinit();
-    const bytes = readFile(allocator, "src/llm/qwen3tts/goldens/dump-seed42/codes-full.bin") catch return error.SkipZigTest;
+    const bytes = readFile(allocator, "testdata/qwen3tts/dump-seed42/codes-full.bin") catch return error.SkipZigTest;
     allocator.free(bytes);
     var codes_dump = blk: {
-        const b = try readFile(allocator, "src/llm/qwen3tts/goldens/dump-seed42/codes-full.bin");
+        const b = try readFile(allocator, "testdata/qwen3tts/dump-seed42/codes-full.bin");
         defer allocator.free(b);
         const ndims: usize = @intCast(std.mem.readInt(i32, b[0..4], .little));
         var n: usize = 1;
