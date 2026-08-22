@@ -5,7 +5,7 @@
 //! multi-axis reductions, and `dot` lowering onto the ExecContext matmul/bmm
 //! kernels. Functions take comptime tag tuples plus `*const` raw tensors and
 //! return *owned* raw tensors; the public autograd facade (`ag/tensor.zig`) and
-//! the VJPs (`ag/backward.zig`) re-attach tags at comptime on their side.
+//! the VJPs (`ag/backward/`) re-attach tags at comptime on their side.
 //!
 //! There is intentionally no tagged tensor *type* here: tags are comptime-only
 //! data (`tags.zig`), so the single runtime tensor currency stays the raw

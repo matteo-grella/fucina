@@ -167,7 +167,7 @@ pub inline fn vecUnary(comptime op: ops.UnaryOp, z: []f32, x: []const f32) void 
 }
 
 /// Input-based unary derivatives with a vector body — the unary VJP's hot
-/// loop (ag/backward.zig) routes these ops here; everything else keeps its
+/// loop (ag/backward/elementwise.zig) routes these ops here; everything else keeps its
 /// scalar derivative loop. The train-path exp-family ops matter most: the
 /// scalar loop pays one libm expf PER ELEMENT for silu/sigmoid/softplus.
 pub inline fn unaryVjpVectorizes(comptime op: ops.UnaryOp) bool {
@@ -177,7 +177,7 @@ pub inline fn unaryVjpVectorizes(comptime op: ops.UnaryOp) bool {
     };
 }
 
-/// Formulas mirror `ag/backward.zig unaryDerivative`; the sub-vector tail in
+/// Formulas mirror `ag/backward/elementwise.zig unaryDerivative`; the sub-vector tail in
 /// `vecUnaryVjp` uses the scalar forms (the same lane/tail split as vecUnary).
 pub inline fn unaryDerivativeVec(comptime op: ops.UnaryOp, value: Vf32) Vf32 {
     const zero: Vf32 = @splat(0);
