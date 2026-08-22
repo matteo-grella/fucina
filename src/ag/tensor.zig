@@ -562,5 +562,25 @@ pub fn packedRhsLayout(comptime T: type, comptime op_name: []const u8) backend_m
 }
 
 test {
-    _ = @import("tensor_tests.zig");
+    _ = @import("tensor_tests/attention.zig");
+    _ = @import("tensor_tests/control.zig");
+    _ = @import("tensor_tests/conv.zig");
+    _ = @import("tensor_tests/conv2d.zig");
+    _ = @import("tensor_tests/creation.zig");
+    _ = @import("tensor_tests/elementwise.zig");
+    _ = @import("tensor_tests/facade.zig");
+    _ = @import("tensor_tests/gather_scatter.zig");
+    _ = @import("tensor_tests/indexing.zig");
+    _ = @import("tensor_tests/integer.zig");
+    _ = @import("tensor_tests/loss.zig");
+    _ = @import("tensor_tests/matmul.zig");
+    _ = @import("tensor_tests/norm.zig");
+    _ = @import("tensor_tests/quant.zig");
+    _ = @import("tensor_tests/reduce.zig");
+    _ = @import("tensor_tests/rope.zig");
+    _ = @import("tensor_tests/scan.zig");
+    _ = @import("tensor_tests/shape.zig");
+    _ = @import("tensor_tests/softmax.zig");
+    _ = @import("tensor_tests/stats.zig");
+    _ = @import("tensor_tests/typed.zig");
 }
