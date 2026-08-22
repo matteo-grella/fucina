@@ -207,8 +207,17 @@ Autograd:
   Tensor Semantics*).
 - `src/ag.zig`: autograd module root, exporting the public `Tensor` and the
   framework pillars.
-- `src/ag/tensor.zig`: public tagged/autograd tensor facade and eager op
-  wiring; `src/ag/backward.zig`: concrete VJP records; `src/ag/core.zig`:
+- `src/ag/tensor.zig`: public tagged/autograd tensor facade — the `Tensor`
+  dispatcher, the f32 struct core, and one-line aliases onto the per-domain
+  method mixins in `src/ag/tensor/float/` (elementwise, matmul, reduce,
+  shape, ...); `src/ag/tensor/typed_constant.zig`: the non-f32 constant
+  tensor band; `src/ag/tensor/plumbing.zig`: shared result-finishing and
+  dispatch helpers. The `src/ag/tensor/` files never import the facade
+  back — they receive it as a comptime parameter (`Self.ag_root` /
+  `Mod(ag_tensor)`), keeping the import graph acyclic.
+- `src/ag/backward.zig`: re-export facade over the per-domain VJP modules
+  in `src/ag/backward/` (mirroring `src/exec/`'s taxonomy, over a shared
+  `common.zig`); `src/ag/core.zig`:
   backward-only gradient state and scheduling engine; `src/ag/checkpoint.zig`:
   activation checkpointing (recompute-in-backward); `src/ag/control.zig`:
   no-grad scopes; `src/ag/custom.zig`: the `customVjp` adapter;
@@ -240,10 +249,19 @@ fucina.zig
      safetensors, training_checkpoint)
 
 ag/tensor.zig
-  -> ag/{core,backward,control}.zig, tags.zig, tagged.zig, exec.zig,
+  -> ag/tensor/ (float/ method mixins, typed_constant.zig, plumbing.zig),
+     ag/{core,backward,control}.zig, tags.zig, tagged.zig, exec.zig,
      backend.zig, tensor.zig, dtype.zig
 
+ag/tensor/*.zig, ag/tensor/float/*.zig
+  -> ag/{core,backward,control,elemental}.zig, tags.zig, tagged.zig,
+     exec.zig, backend.zig, tensor.zig, dtype.zig, rng.zig
+     (never ag/tensor.zig — the facade arrives as a comptime parameter)
+
 ag/backward.zig
+  -> ag/backward/ (per-domain VJP modules + common.zig)
+
+ag/backward/*.zig
   -> ag/core.zig, tags.zig, tagged.zig, exec.zig, backend.zig (ops),
      tensor.zig, dtype.zig, parallel.zig
 
@@ -495,7 +513,7 @@ single-contract-tag special case — plus the shared dtype-generic
 shape/validation helpers (`pointwiseShapeOf`, `dotResultShapeOf`,
 `einsumResultShapeOf`, ...). The public autograd `Tensor` (`ag/tensor.zig`)
 implements the named-op surface once and calls into this library; the VJPs
-(`ag/backward.zig`) call the same functions directly on raw gradients.
+(`ag/backward/`) call the same functions directly on raw gradients.
 
 ## Autograd Model
 
@@ -513,7 +531,7 @@ path. When no operand requires gradients (or a `noGrad` scope is active),
 operations return a no-grad public tensor without retaining graph state.
 
 When gradients are required, `ag/tensor.zig` computes the eager forward
-value, creates a backward record from `ag/backward.zig`, and wraps it in a
+value, creates a backward record from `ag/backward/`, and wraps it in a
 `GradState` from `ag/core.zig`. `ag/core.zig` is backward-only: there is no
 public `Node`, no `Function.forward`, and no separate raw autograd surface (a
 guard test in `src/ag_tests.zig` asserts the legacy declarations stay

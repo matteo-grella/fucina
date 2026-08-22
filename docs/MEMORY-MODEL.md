@@ -31,7 +31,7 @@ chain is:
 
 ```
 tensor.deinit()  →  buffer.release()  →  refcount hits 0  →  reclaim()  →  buffer returns to the free-list
-   ag/tensor.zig:977   tensor.zig:177      storage.zig:120     exec/buffer_pool.zig:171
+   ag/tensor.zig:259   tensor.zig:177      storage.zig:120     exec/buffer_pool.zig:171
 ```
 
 `ExecContext` (via its embedded `Runtime`) owns one `BufferPool`
