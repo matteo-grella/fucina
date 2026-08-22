@@ -11193,7 +11193,7 @@ family-agnostic helpers stay flat:
 | `llm.cartridge_fleet` | per-document cartridge fleets: manifest, RAM/disk budget manager, cosine chunk index (Cartridges at Scale, arXiv 2606.04557) | §13.10 |
 | `llm.engram` | conditional n-gram memory: hashed-lookup embedding tables grafted onto a frozen model (Engram, arXiv 2601.07372) | §13.11 |
 | `llm.serving` | the serving contract: `GenerateRequest`/`GenerateResult`, `Caps`, and the per-family `Backend` vtable a server consumes (`examples/lmserve` is the in-tree server; a new family integrates by writing one adapter, a new server by consuming this module) | `src/llm/serving.zig` |
-| `llm.runner` | the descriptor runner (experimental): one family-independent decoder driven by a runtime `Descriptor`; `Descriptor.fromGguf` reads any qwen3-shaped GGUF (dense or MoE); bitwise parity with the hand qwen3 port pinned by `runner_tests.zig` | `docs/RUNNER.md` |
+| `llm.runner` | the descriptor runner (experimental): one family-independent decoder driven by a runtime `Descriptor` with two block styles (fused qwen3-shape, host_reference GLM/DeepSeek-MoE shape); `Descriptor.fromGguf` reads both metadata shapes; three bitwise parity gates in `runner_tests.zig` (real 0.6B, synthetic MoE, synthetic glm4moe) | `docs/RUNNER.md` |
 
 The family namespaces are covered in §14 (kimi3 in §14.7,
 deepseek2/glm4moe/deepseek4/inkling by their module doc comments); this

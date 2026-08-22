@@ -18,7 +18,7 @@ point; earlier history is `git log`.
   research features under model families (SHINE, cartridges, Engram), and
   every model family's internal layout.
 
-## Unreleased
+## 0.2.0 — 2026-08-22
 
 ### Added
 
@@ -33,9 +33,14 @@ point; earlier history is `git log`.
   `examples/lmserve` so an out-of-tree server consumes it without vendoring
   the example.
 - `llm.runner` (experimental): the descriptor runner — one
-  family-independent decoder driven by a runtime `Descriptor`,
-  `Descriptor.fromGguf` reading any qwen3-shaped GGUF (dense or MoE);
-  bitwise parity with the hand qwen3 port is pinned by `runner_tests.zig`
+  family-independent decoder driven by a runtime `Descriptor`, with two
+  block styles (`.fused`: the qwen3/qwen3moe vocabulary; `.host_reference`:
+  the GLM/DeepSeek-MoE vocabulary — biased QKV, partial interleaved rope,
+  sigmoid noaux MoE + shared experts). `Descriptor.fromGguf` reads
+  qwen3-shaped and glm4moe GGUF metadata. Three bitwise parity gates in
+  `runner_tests.zig`: real Qwen3-0.6B vs the hand qwen3 port, a synthetic
+  in-test MoE GGUF (the CI-safe small-MoE fixture), and a synthetic
+  glm4moe GGUF loaded purely from its metadata vs the hand glm4moe port
   (docs/RUNNER.md).
 - `dtype.block_formats`: the block-quantization format registry.
   `Storage`, `kind`, `blockSize`, and GGUF's type mapping derive from the
