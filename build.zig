@@ -290,7 +290,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const doc_check_cmd = b.addRunArtifact(doc_check_exe);
-    const doc_check_step = b.step("doc-check", "Verify AGENTS.md's doc index references only root .md files that exist");
+    const doc_check_step = b.step("doc-check", "Verify doc-index references exist and README's fetch pin matches build.zig.zon's version");
     doc_check_step.dependOn(&doc_check_cmd.step);
 
     // REFERENCE.md snippet gate: extract every runnable ```zig snippet (a

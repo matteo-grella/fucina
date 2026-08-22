@@ -84,7 +84,7 @@ pinned (`build.zig.zon` enforces the minimum); other versions will not
 build. Fucina is an ordinary Zig package:
 
 ```sh
-zig fetch --save git+https://github.com/matteo-grella/fucina#v0.1.0
+zig fetch --save git+https://github.com/matteo-grella/fucina#v0.2.0
 ```
 
 ```zig

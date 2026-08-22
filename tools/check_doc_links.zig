@@ -9,7 +9,10 @@
 //! skipped. docs/RUNNING-MODELS.md is additionally scanned for
 //! `examples/<name>/README.md` references (backtick-quoted, markdown-link
 //! targets, or bare paths), which are existence-checked the same way.
-//! Deliberately minimal — the arch-check counterpart for doc rot.
+//! README.md's `zig fetch ...#vX.Y.Z` pin must match `build.zig.zon`'s
+//! `.version` — the one line every consumer copies is otherwise the first
+//! to rot on release. Deliberately minimal — the arch-check counterpart
+//! for doc rot.
 
 const std = @import("std");
 
@@ -75,6 +78,47 @@ pub fn main(init: std.process.Init) !void {
         return error.DeadDocReference;
     }
     try stdout.print("doc links: {d} docs referenced, all present\n", .{checker.checked});
+
+    try checkFetchPin(allocator, io, stdout, stderr);
+}
+
+/// README.md's `zig fetch --save git+...#vX.Y.Z` line must pin the version
+/// declared in build.zig.zon. Both are parsed leniently (first occurrence);
+/// a README without a fetch pin or a zon without `.version` is an error too,
+/// so silent format drift cannot disable the check.
+fn checkFetchPin(allocator: std.mem.Allocator, io: std.Io, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    const zon = try std.Io.Dir.cwd().readFileAlloc(io, "build.zig.zon", allocator, .limited(1024 * 1024));
+    const version = valueAfter(zon, ".version = \"", '"') orelse {
+        try stderr.print("doc-check: build.zig.zon has no .version field\n", .{});
+        return error.VersionPinMissing;
+    };
+
+    const readme = try std.Io.Dir.cwd().readFileAlloc(io, "README.md", allocator, .limited(4 * 1024 * 1024));
+    const fetch_marker = "zig fetch --save git+";
+    const fetch_start = std.mem.indexOf(u8, readme, fetch_marker) orelse {
+        try stderr.print("doc-check: README.md has no '{s}' line\n", .{fetch_marker});
+        return error.VersionPinMissing;
+    };
+    const tag = valueAfter(readme[fetch_start..], "#v", '\n') orelse {
+        try stderr.print("doc-check: README.md fetch line has no '#v' tag pin\n", .{});
+        return error.VersionPinMissing;
+    };
+
+    if (!std.mem.eql(u8, std.mem.trimEnd(u8, tag, " `"), version)) {
+        try stderr.print(
+            "doc-check: README.md fetch pin v{s} != build.zig.zon version {s}\n",
+            .{ std.mem.trimEnd(u8, tag, " `"), version },
+        );
+        return error.VersionPinMismatch;
+    }
+    try stdout.print("fetch pin: README.md pins v{s}, matches build.zig.zon\n", .{version});
+}
+
+/// The span between the first `prefix` occurrence and the next `terminator`.
+fn valueAfter(haystack: []const u8, prefix: []const u8, terminator: u8) ?[]const u8 {
+    const start = (std.mem.indexOf(u8, haystack, prefix) orelse return null) + prefix.len;
+    const len = std.mem.indexOfScalar(u8, haystack[start..], terminator) orelse return null;
+    return haystack[start..][0..len];
 }
 
 /// Dedupe + existence-check state shared across the scanned sources.
