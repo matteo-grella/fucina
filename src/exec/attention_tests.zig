@@ -891,3 +891,462 @@ test "grouped bidirectional biased attention rejects a mis-shaped bias" {
         ctx.groupedBidirectionalAttentionBiased(&q, &k, &v, &map, 0.25, &bias),
     );
 }
+
+const exec = @import("../exec.zig");
+const parallel = @import("../parallel.zig");
+
+fn checkWindowedAttention(
+    ctx: *ExecContext,
+    comptime S: usize,
+    comptime H: usize,
+    comptime KV: usize,
+    kv_head_for_head: []const usize,
+    window: usize,
+    scale_value: f32,
+) !void {
+    const D = 4;
+    var q_vals: [S * H * D]f32 = undefined;
+    var k_vals: [S * KV * D]f32 = undefined;
+    var v_vals: [S * KV * D]f32 = undefined;
+    for (&q_vals, 0..) |*x, i| x.* = @sin(@as(f32, @floatFromInt(i)) * 0.3) * 1.3;
+    for (&k_vals, 0..) |*x, i| x.* = @cos(@as(f32, @floatFromInt(i)) * 0.21) - 0.2;
+    for (&v_vals, 0..) |*x, i| x.* = @sin(@as(f32, @floatFromInt(i)) * 0.17 + 0.4);
+
+    var q = try ctx.fromSliceRank(3, .{ S, H, D }, &q_vals);
+    defer q.deinit();
+    var k = try ctx.fromSliceRank(3, .{ S, KV, D }, &k_vals);
+    defer k.deinit();
+    var v = try ctx.fromSliceRank(3, .{ S, KV, D }, &v_vals);
+    defer v.deinit();
+
+    var got = try ctx.groupedCausalAttentionWindowed(&q, &k, &v, kv_head_for_head, scale_value, window);
+    defer got.deinit();
+
+    // Scalar reference: query p attends keys [max(0, p-window+1), p] (window 0 = full).
+    var expected: [S * H * D]f32 = undefined;
+    for (0..H) |h| {
+        const kvh = kv_head_for_head[h];
+        for (0..S) |p| {
+            const lo = if (window != 0 and p + 1 > window) p + 1 - window else 0;
+            var scores: [S]f32 = undefined;
+            var maxs: f32 = -std.math.inf(f32);
+            for (lo..p + 1) |j| {
+                var dot: f32 = 0;
+                for (0..D) |d| dot += q_vals[(p * H + h) * D + d] * k_vals[(j * KV + kvh) * D + d];
+                scores[j] = dot * scale_value;
+                maxs = @max(maxs, scores[j]);
+            }
+            var sum: f32 = 0;
+            for (lo..p + 1) |j| {
+                scores[j] = @exp(scores[j] - maxs);
+                sum += scores[j];
+            }
+            for (0..D) |d| {
+                var acc: f32 = 0;
+                for (lo..p + 1) |j| acc += (scores[j] / sum) * v_vals[(j * KV + kvh) * D + d];
+                expected[(p * H + h) * D + d] = acc;
+            }
+        }
+    }
+    for (got.dataConst(), expected) |g, e| try std.testing.expectApproxEqAbs(e, g, 1e-5);
+}
+
+test "grouped causal attention sliding window (pair + heads kernels)" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    // Head-pair kernel (heads == 2*kv_heads, adjacent mapping) — Qwen-style GQA.
+    try checkWindowedAttention(&ctx, 7, 4, 2, &.{ 0, 0, 1, 1 }, 3, 0.5);
+    // Single-head kernel (heads == kv_heads).
+    try checkWindowedAttention(&ctx, 7, 2, 2, &.{ 0, 1 }, 3, 0.5);
+    // window >= seq behaves as full causal (must match the no-window result).
+    try checkWindowedAttention(&ctx, 5, 4, 2, &.{ 0, 0, 1, 1 }, 100, 0.25);
+    try checkWindowedAttention(&ctx, 5, 4, 2, &.{ 0, 0, 1, 1 }, 0, 0.25);
+    // window == 1: each query attends only its own position.
+    try checkWindowedAttention(&ctx, 6, 2, 2, &.{ 0, 1 }, 1, 0.5);
+}
+
+test "grouped causal attention tiled dispatch matches a naive reference at long q_seq" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    // Above the dispatch threshold the public entry points route to the tiled
+    // kernel (parallel split included); check against a naive f64 reference.
+    const S = 67; // odd, > attention_tiled_min_q_seq
+    const KV = 80;
+    const H = 4;
+    const KVH = 2;
+    const D = 16;
+    const kv_head_for_head = [_]usize{ 0, 0, 1, 1 };
+    const scale_value: f32 = 0.25;
+
+    var prng = std.Random.DefaultPrng.init(7);
+    const random = prng.random();
+    var q_vals: [S * H * D]f32 = undefined;
+    var k_vals: [KV * KVH * D]f32 = undefined;
+    var v_vals: [KV * KVH * D]f32 = undefined;
+    for (&q_vals) |*x| x.* = random.floatNorm(f32);
+    for (&k_vals) |*x| x.* = random.floatNorm(f32);
+    for (&v_vals) |*x| x.* = random.floatNorm(f32);
+
+    var q = try ctx.fromSliceRank(3, .{ S, H, D }, &q_vals);
+    defer q.deinit();
+    var k = try ctx.fromSliceRank(3, .{ KV, KVH, D }, &k_vals);
+    defer k.deinit();
+    var v = try ctx.fromSliceRank(3, .{ KV, KVH, D }, &v_vals);
+    defer v.deinit();
+
+    for ([_]usize{ 0, 13 }) |window| {
+        var got = try ctx.groupedCausalAttentionWindowed(&q, &k, &v, &kv_head_for_head, scale_value, window);
+        defer got.deinit();
+
+        const source_offset = KV - S;
+        for (0..H) |h| {
+            const kvh = kv_head_for_head[h];
+            for (0..S) |qi| {
+                const p = source_offset + qi;
+                const lo = if (window == 0) 0 else (p + 1) -| window;
+                var weights: [KV]f64 = undefined;
+                var max_score: f64 = -std.math.inf(f64);
+                for (lo..p + 1) |j| {
+                    var dot: f64 = 0;
+                    for (0..D) |f| dot += @as(f64, q_vals[(qi * H + h) * D + f]) * @as(f64, k_vals[(j * KVH + kvh) * D + f]);
+                    weights[j] = dot * scale_value;
+                    max_score = @max(max_score, weights[j]);
+                }
+                var sum: f64 = 0;
+                for (lo..p + 1) |j| {
+                    weights[j] = @exp(weights[j] - max_score);
+                    sum += weights[j];
+                }
+                for (0..D) |f| {
+                    var acc: f64 = 0;
+                    for (lo..p + 1) |j| acc += (weights[j] / sum) * @as(f64, v_vals[(j * KVH + kvh) * D + f]);
+                    const g = got.dataConst()[(qi * H + h) * D + f];
+                    const e: f32 = @floatCast(acc);
+                    const tol = @max(1e-5 * @max(@abs(e), @abs(g)), 2e-6);
+                    try std.testing.expect(@abs(e - g) <= tol);
+                }
+            }
+        }
+    }
+}
+
+test "grouped bidirectional attention matches a naive full-range reference" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    // Shapes chosen to route through every forward kernel: long q_seq with
+    // adjacent-pair GQA = tiled pair path; long q_seq with a non-adjacent map
+    // = tiled general path; short q_seq = the per-query kernels; the f16 KV
+    // entry covers the widening lanes. Every query must attend ALL keys —
+    // including keys at positions later than its own (the causal kernels
+    // would mask those), which is what the q[0]-sees-k[last] checks verify.
+    const Case = struct { s: usize, kv: usize, h: usize, kvh: usize, d: usize, pair: bool };
+    const cases = [_]Case{
+        .{ .s = 67, .kv = 80, .h = 4, .kvh = 2, .d = 16, .pair = true },
+        .{ .s = 67, .kv = 80, .h = 4, .kvh = 2, .d = 16, .pair = false },
+        .{ .s = 5, .kv = 9, .h = 4, .kvh = 2, .d = 8, .pair = true },
+        .{ .s = 5, .kv = 9, .h = 4, .kvh = 2, .d = 8, .pair = false },
+        // d > attention_tile_max_d: stays on the per-query kernels even at
+        // long q_seq (the gemma4 global-layer head width regime).
+        .{ .s = 49, .kv = 60, .h = 2, .kvh = 1, .d = 288, .pair = false },
+    };
+    const scale_value: f32 = 0.25;
+
+    var prng = std.Random.DefaultPrng.init(11);
+    const random = prng.random();
+
+    for (cases) |case| {
+        const q_len = case.s * case.h * case.d;
+        const kv_len = case.kv * case.kvh * case.d;
+        const q_vals = try allocator.alloc(f32, q_len);
+        defer allocator.free(q_vals);
+        const k_vals = try allocator.alloc(f32, kv_len);
+        defer allocator.free(k_vals);
+        const v_vals = try allocator.alloc(f32, kv_len);
+        defer allocator.free(v_vals);
+        for (q_vals) |*x| x.* = random.floatNorm(f32);
+        for (k_vals) |*x| x.* = random.floatNorm(f32);
+        for (v_vals) |*x| x.* = random.floatNorm(f32);
+
+        var kv_head_for_head: [4]usize = undefined;
+        for (0..case.h) |h| {
+            kv_head_for_head[h] = if (case.pair) h / (case.h / case.kvh) else h % case.kvh;
+        }
+        const head_map = kv_head_for_head[0..case.h];
+
+        var q = try ctx.fromSliceRank(3, .{ case.s, case.h, case.d }, q_vals);
+        defer q.deinit();
+        var k = try ctx.fromSliceRank(3, .{ case.kv, case.kvh, case.d }, k_vals);
+        defer k.deinit();
+        var v = try ctx.fromSliceRank(3, .{ case.kv, case.kvh, case.d }, v_vals);
+        defer v.deinit();
+
+        var got = try ctx.groupedBidirectionalAttention(&q, &k, &v, head_map, scale_value);
+        defer got.deinit();
+
+        var k16 = try ctx.castTyped(.f32, .f16, &k);
+        defer k16.deinit();
+        var v16 = try ctx.castTyped(.f32, .f16, &v);
+        defer v16.deinit();
+        var got16 = try ctx.groupedBidirectionalAttentionF16Kv(&q, &k16, &v16, head_map, scale_value);
+        defer got16.deinit();
+
+        for (0..case.h) |h| {
+            const kvh = head_map[h];
+            for (0..case.s) |qi| {
+                var weights: [80]f64 = undefined;
+                var max_score: f64 = -std.math.inf(f64);
+                for (0..case.kv) |j| {
+                    var dot: f64 = 0;
+                    for (0..case.d) |f| dot += @as(f64, q_vals[(qi * case.h + h) * case.d + f]) * @as(f64, k_vals[(j * case.kvh + kvh) * case.d + f]);
+                    weights[j] = dot * scale_value;
+                    max_score = @max(max_score, weights[j]);
+                }
+                var sum: f64 = 0;
+                for (0..case.kv) |j| {
+                    weights[j] = @exp(weights[j] - max_score);
+                    sum += weights[j];
+                }
+                for (0..case.d) |f| {
+                    var acc: f64 = 0;
+                    for (0..case.kv) |j| acc += (weights[j] / sum) * @as(f64, v_vals[(j * case.kvh + kvh) * case.d + f]);
+                    // Tolerance covers f32-vs-f64 accumulation order at the
+                    // widest case (d=288, 60 keys); a mask bug is O(0.1).
+                    const e: f32 = @floatCast(acc);
+                    const g = got.dataConst()[(qi * case.h + h) * case.d + f];
+                    const tol = @max(5e-5 * @max(@abs(e), @abs(g)), 5e-6);
+                    try std.testing.expect(@abs(e - g) <= tol);
+                    // f16 K/V: logit noise (~1e-3) shifts softmax weights, so
+                    // the f16 lane check is for mask correctness (a causal
+                    // leak is an O(1) error), not numeric precision.
+                    const g16 = got16.dataConst()[(qi * case.h + h) * case.d + f];
+                    const tol16 = @max(2e-2 * @max(@abs(e), @abs(g16)), 1e-2);
+                    try std.testing.expect(@abs(e - g16) <= tol16);
+                }
+            }
+        }
+    }
+}
+
+test "exec attention stats capture is output-neutral and feeds the backward stats route" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var prng = std.Random.DefaultPrng.init(0xa77e);
+    const random = prng.random();
+    const scale: f32 = 0.125;
+
+    // {q_seq, kv_seq, heads, kv_heads, d}: query-tiled (q >= 48), per-query
+    // pair, and per-query general kernels.
+    const shapes = [_][5]usize{ .{ 64, 64, 4, 2, 16 }, .{ 8, 8, 4, 2, 16 }, .{ 8, 8, 3, 3, 16 } };
+    for (shapes) |shape| {
+        const q_seq = shape[0];
+        const kv_seq = shape[1];
+        const heads = shape[2];
+        const kv_heads = shape[3];
+        const d = shape[4];
+        var map_storage: [8]usize = undefined;
+        const kv_head_for_head = map_storage[0..heads];
+        for (kv_head_for_head, 0..) |*m, i| m.* = if (heads == 2 * kv_heads) i / 2 else i;
+
+        const q_data = try allocator.alloc(f32, q_seq * heads * d);
+        defer allocator.free(q_data);
+        const k_data = try allocator.alloc(f32, kv_seq * kv_heads * d);
+        defer allocator.free(k_data);
+        const v_data = try allocator.alloc(f32, kv_seq * kv_heads * d);
+        defer allocator.free(v_data);
+        for (q_data) |*value| value.* = random.floatNorm(f32);
+        for (k_data) |*value| value.* = random.floatNorm(f32);
+        for (v_data) |*value| value.* = random.floatNorm(f32);
+
+        var q = try ctx.fromSliceRank(3, .{ q_seq, heads, d }, q_data);
+        defer q.deinit();
+        var k = try ctx.fromSliceRank(3, .{ kv_seq, kv_heads, d }, k_data);
+        defer k.deinit();
+        var v = try ctx.fromSliceRank(3, .{ kv_seq, kv_heads, d }, v_data);
+        defer v.deinit();
+
+        var out_plain = try ctx.groupedCausalAttention(&q, &k, &v, kv_head_for_head, scale);
+        defer out_plain.deinit();
+        const stats = try allocator.alloc(f32, heads * q_seq * 2);
+        defer allocator.free(stats);
+        var out_stats = try ctx.groupedCausalAttentionStatsOut(&q, &k, &v, kv_head_for_head, scale, 0, true, stats);
+        defer out_stats.deinit();
+        // Capture is write-only: the forward output must be BITWISE identical.
+        try std.testing.expectEqualSlices(f32, out_plain.dataConst(), out_stats.dataConst());
+
+        // f64 reference sanity of the captured normalizers.
+        for (0..heads) |head_i| {
+            const kv_head_i = kv_head_for_head[head_i];
+            for (0..q_seq) |query_i| {
+                const active = kv_seq - q_seq + query_i + 1;
+                var max64: f64 = -std.math.inf(f64);
+                for (0..active) |source_i| {
+                    var dot: f64 = 0;
+                    for (0..d) |f| {
+                        dot += @as(f64, q_data[query_i * heads * d + head_i * d + f]) *
+                            @as(f64, k_data[source_i * kv_heads * d + kv_head_i * d + f]);
+                    }
+                    max64 = @max(max64, dot * scale);
+                }
+                const stat_max = stats[(head_i * q_seq + query_i) * 2];
+                const stat_sum = stats[(head_i * q_seq + query_i) * 2 + 1];
+                try std.testing.expect(@abs(@as(f64, stat_max) - max64) <= 1e-3 + 1e-3 * @abs(max64));
+                var sum64: f64 = 0;
+                for (0..active) |source_i| {
+                    var dot: f64 = 0;
+                    for (0..d) |f| {
+                        dot += @as(f64, q_data[query_i * heads * d + head_i * d + f]) *
+                            @as(f64, k_data[source_i * kv_heads * d + kv_head_i * d + f]);
+                    }
+                    sum64 += @exp(dot * scale - @as(f64, stat_max));
+                }
+                try std.testing.expect(@abs(@as(f64, stat_sum) - sum64) <= 2e-3 * sum64);
+            }
+        }
+    }
+
+    // Backward route parity on the GEMM route (work >= threshold): the
+    // stats route rebuilds the FORWARD's probabilities where the recompute
+    // route re-derives them from the GEMM scores; gradients agree to f32
+    // roundoff, not bitwise.
+    const q_seq = 64;
+    const kv_seq = 64;
+    const heads = 8;
+    const kv_heads = 4;
+    const d = 32;
+    const kv_head_for_head = [_]usize{ 0, 0, 1, 1, 2, 2, 3, 3 };
+    const q_data = try allocator.alloc(f32, q_seq * heads * d);
+    defer allocator.free(q_data);
+    const k_data = try allocator.alloc(f32, kv_seq * kv_heads * d);
+    defer allocator.free(k_data);
+    const v_data = try allocator.alloc(f32, kv_seq * kv_heads * d);
+    defer allocator.free(v_data);
+    const gy_data = try allocator.alloc(f32, q_seq * heads * d);
+    defer allocator.free(gy_data);
+    for (q_data) |*value| value.* = random.floatNorm(f32);
+    for (k_data) |*value| value.* = random.floatNorm(f32);
+    for (v_data) |*value| value.* = random.floatNorm(f32);
+    for (gy_data) |*value| value.* = random.floatNorm(f32);
+    var q = try ctx.fromSliceRank(3, .{ q_seq, heads, d }, q_data);
+    defer q.deinit();
+    var k = try ctx.fromSliceRank(3, .{ kv_seq, kv_heads, d }, k_data);
+    defer k.deinit();
+    var v = try ctx.fromSliceRank(3, .{ kv_seq, kv_heads, d }, v_data);
+    defer v.deinit();
+    var gy = try ctx.fromSliceRank(2, .{ q_seq, heads * d }, gy_data);
+    defer gy.deinit();
+
+    for ([_][2]usize{ .{ 0, 1 }, .{ 16, 1 }, .{ 0, 0 } }) |variant| {
+        const window = variant[0];
+        const causal = variant[1] == 1;
+        const stats = try allocator.alloc(f32, heads * q_seq * 2);
+        defer allocator.free(stats);
+        var out = try ctx.groupedCausalAttentionStatsOut(&q, &k, &v, &kv_head_for_head, 0.125, window, causal, stats);
+        defer out.deinit();
+
+        var ref = try ctx.groupedCausalAttentionBackward(&q, &k, &v, &gy, &kv_head_for_head, 0.125, window, causal, null, null, true, true, true);
+        defer ref.deinit();
+        // Stats + output: the autograd-record route (one-pass softmax rebuild
+        // AND the gy.O row dot).
+        var got = try ctx.groupedCausalAttentionBackward(&q, &k, &v, &gy, &kv_head_for_head, 0.125, window, causal, stats, &out, true, true, true);
+        defer got.deinit();
+        // Stats without output: the in-panel row dot fallback.
+        var got_no_out = try ctx.groupedCausalAttentionBackward(&q, &k, &v, &gy, &kv_head_for_head, 0.125, window, causal, stats, null, true, true, true);
+        defer got_no_out.deinit();
+        for ([_][2][]const f32{
+            .{ ref.q.?.dataConst(), got.q.?.dataConst() },
+            .{ ref.k.?.dataConst(), got.k.?.dataConst() },
+            .{ ref.v.?.dataConst(), got.v.?.dataConst() },
+            .{ ref.q.?.dataConst(), got_no_out.q.?.dataConst() },
+            .{ ref.k.?.dataConst(), got_no_out.k.?.dataConst() },
+            .{ ref.v.?.dataConst(), got_no_out.v.?.dataConst() },
+        }) |pair| {
+            for (pair[0], pair[1]) |want, gotv| {
+                try std.testing.expect(@abs(gotv - want) <= 2e-5 + 2e-4 * @abs(want));
+            }
+        }
+
+        // Ground truth: an f64 naive backward over the same masks — pins the
+        // tiled kernel's values themselves, not just cross-arm agreement.
+        const dq64 = try allocator.alloc(f64, q_seq * heads * d);
+        defer allocator.free(dq64);
+        const dk64 = try allocator.alloc(f64, kv_seq * kv_heads * d);
+        defer allocator.free(dk64);
+        const dv64 = try allocator.alloc(f64, kv_seq * kv_heads * d);
+        defer allocator.free(dv64);
+        @memset(dq64, 0);
+        @memset(dk64, 0);
+        @memset(dv64, 0);
+        const scores64 = try allocator.alloc(f64, kv_seq);
+        defer allocator.free(scores64);
+        const dp64 = try allocator.alloc(f64, kv_seq);
+        defer allocator.free(dp64);
+        for (0..heads) |head_i| {
+            const kv_head_i = kv_head_for_head[head_i];
+            for (0..q_seq) |query_i| {
+                const active = if (causal) kv_seq - q_seq + query_i + 1 else kv_seq;
+                const lo = if (!causal or window == 0) 0 else active -| window;
+                var max64: f64 = -std.math.inf(f64);
+                for (lo..active) |source_i| {
+                    var dot: f64 = 0;
+                    for (0..d) |f| {
+                        dot += @as(f64, q_data[query_i * heads * d + head_i * d + f]) *
+                            @as(f64, k_data[source_i * kv_heads * d + kv_head_i * d + f]);
+                    }
+                    scores64[source_i] = dot * 0.125;
+                    max64 = @max(max64, scores64[source_i]);
+                }
+                var sum64: f64 = 0;
+                for (lo..active) |source_i| {
+                    scores64[source_i] = @exp(scores64[source_i] - max64);
+                    sum64 += scores64[source_i];
+                }
+                var row_dot64: f64 = 0;
+                for (lo..active) |source_i| {
+                    scores64[source_i] /= sum64;
+                    var dot: f64 = 0;
+                    for (0..d) |f| {
+                        dot += @as(f64, gy_data[query_i * heads * d + head_i * d + f]) *
+                            @as(f64, v_data[source_i * kv_heads * d + kv_head_i * d + f]);
+                    }
+                    dp64[source_i] = dot;
+                    row_dot64 += scores64[source_i] * dot;
+                }
+                for (lo..active) |source_i| {
+                    const ds = 0.125 * scores64[source_i] * (dp64[source_i] - row_dot64);
+                    for (0..d) |f| {
+                        dq64[query_i * heads * d + head_i * d + f] +=
+                            ds * @as(f64, k_data[source_i * kv_heads * d + kv_head_i * d + f]);
+                        dk64[source_i * kv_heads * d + kv_head_i * d + f] +=
+                            ds * @as(f64, q_data[query_i * heads * d + head_i * d + f]);
+                        dv64[source_i * kv_heads * d + kv_head_i * d + f] +=
+                            @as(f64, scores64[source_i]) * @as(f64, gy_data[query_i * heads * d + head_i * d + f]);
+                    }
+                }
+            }
+        }
+        for ([_]struct { want: []const f64, got: []const f32 }{
+            .{ .want = dq64, .got = ref.q.?.dataConst() },
+            .{ .want = dk64, .got = ref.k.?.dataConst() },
+            .{ .want = dv64, .got = ref.v.?.dataConst() },
+            .{ .want = dq64, .got = got.q.?.dataConst() },
+            .{ .want = dk64, .got = got.k.?.dataConst() },
+            .{ .want = dv64, .got = got.v.?.dataConst() },
+        }) |pair| {
+            for (pair.want, pair.got) |want, gotv| {
+                try std.testing.expect(@abs(@as(f64, gotv) - want) <= 5e-5 + 5e-4 * @abs(want));
+            }
+        }
+    }
+}

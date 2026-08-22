@@ -2532,6 +2532,18 @@ pub const ExecContext = struct {
 
 test {
     _ = @import("exec_tests.zig");
+    _ = @import("exec/conv_tests.zig");
+    _ = @import("exec/convert_tests.zig");
+    _ = @import("exec/elementwise_tests.zig");
+    _ = @import("exec/gather_scatter_tests.zig");
+    _ = @import("exec/matmul_tests.zig");
+    _ = @import("exec/moe_tests.zig");
+    _ = @import("exec/norm_tests.zig");
+    _ = @import("exec/reduce_tests.zig");
+    _ = @import("exec/rope_tests.zig");
+    _ = @import("exec/row_ops_tests.zig");
+    _ = @import("exec/softmax_tests.zig");
+    _ = @import("exec/stats_tests.zig");
     _ = @import("exec/delta_attention.zig");
     _ = @import("exec/expert_store.zig");
 }
