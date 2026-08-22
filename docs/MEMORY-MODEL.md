@@ -5,7 +5,7 @@ This document records *why* Fucina manages transient tensor memory with a
 per-tensor `create` → `defer x.deinit()` pattern backed by a reusable
 `BufferPool`, and why an arena allocator was considered and **rejected**. It is
 grounded in the source; file:line references (verified against the tree
-2026-07-17) are included so the rationale can be re-verified rather than
+2026-08-22) are included so the rationale can be re-verified rather than
 trusted.
 
 The short version: **keep the current pattern.** The `BufferPool` already *is*
@@ -31,11 +31,11 @@ chain is:
 
 ```
 tensor.deinit()  →  buffer.release()  →  refcount hits 0  →  reclaim()  →  buffer returns to the free-list
-   ag/tensor.zig:259   tensor.zig:177      storage.zig:120     exec/buffer_pool.zig:171
+   ag/tensor.zig:102   tensor.zig:177      storage.zig:120     exec/buffer_pool.zig:171
 ```
 
 `ExecContext` (via its embedded `Runtime`) owns one `BufferPool`
-(`src/exec/runtime.zig:49`; type at `src/exec/buffer_pool.zig:47`). It is:
+(`src/exec/runtime.zig:51`; type at `src/exec/buffer_pool.zig:47`). It is:
 
 - **A size-bucketed free-list.** `acquire(len)` (`src/exec/buffer_pool.zig:82`) does
   first-fit over a list kept **sorted ascending by `data.len`**, returning the
@@ -68,12 +68,12 @@ The pool has **two arms sharing one byte budget** (`cached_bytes` /
 `max_cached_bytes`):
 
 - **The f32 arm** — a free list of `*storage.Buffer`. `ctx.empty` / `emptyRank`
-  acquire from it (`src/exec/runtime.zig:179/:186`). In an LLM forward
+  acquire from it (`src/exec/runtime.zig:270/:277`). In an LLM forward
   essentially all transient activations are f32 (every matmul/linear/norm/add
   output is a default-dtype `FloatTensor`), so this arm covers the hot path.
 - **The byte-slab arm** — a free list of 64-byte-aligned, 4096-byte-rounded raw
   slabs (`[]align(64) u8`). `emptyTyped` / `emptyRankTyped` route every
-  non-f32 dtype through `acquireTyped` (`src/exec/runtime.zig:193-207`), which
+  non-f32 dtype through `acquireTyped` (`src/exec/runtime.zig:284-303`), which
   wraps a slab in a typed `storage.BufferOf(dtype)` header whose release hook
   returns the slab to the free list (cross-dtype reuse: an f16 LHS-cast slab
   can serve q8_k scratch next op). Hot consumers inherited pooling with no
@@ -96,15 +96,15 @@ slot (`src/llm/kv_cache.zig:269-280`).
 ## 2. Inference vs training: the two lifetime regimes
 
 - **Inference tensors are constants** (`grad_state == null`, built via
-  `fromTensor` / `fromSlice`; `src/ag/tensor.zig:244`). `deinit`
-  (`src/ag/tensor.zig:977`) releases the raw buffer immediately, so it returns
+  `fromTensor` / `fromSlice`; `src/ag/tensor/float/creation.zig:42`). `deinit`
+  (`src/ag/tensor.zig:102`) releases the raw buffer immediately, so it returns
   to the pool mid-pass. This is what makes the pool behave arena-like *for free*
   in inference.
 - **Training variables retain their inputs.** Backward functions store operand
-  values via `cloneView()` at op-execution time (`src/ag/backward.zig`: mul/div
-  `:152-153`, relu `:480`, dot `DotBackward` `:5371` delegating to
-  `EinsumBackward`, cloneViews at `:5422-5426`), and `cloneView` bumps the
-  refcount (`src/tensor.zig:190`).
+  values via `cloneView()` at op-execution time (`src/ag/backward/elementwise.zig`: pointwise mul/div
+  `:59-60`, relu `:177`; `src/ag/backward/matmul.zig`: `DotBackward` `:140`
+  delegating to `EinsumBackward`, cloneViews at `:191/:195`), and `cloneView` bumps the
+  refcount (`src/tensor.zig:258`).
   Those input buffers therefore **cannot** return to the pool until the tape
   node is destroyed in/after `backward`.
 
@@ -117,9 +117,9 @@ backward, not something an arena would change.
 ## 3. Views are refcounted aliases (the decisive constraint)
 
 Every view operation retains the source buffer and releases it on `deinit`:
-`cloneView` (`src/tensor.zig:190`), `viewWithStrides(Offset)`
-(`src/tensor.zig:196/:200`), `reshape` (`src/tensor.zig:224`), `broadcastTo`
-(`src/tensor.zig:238`); `narrow` goes through `viewWithStridesOffset`
+`cloneView` (`src/tensor.zig:258`), `viewWithStrides(Offset)`
+(`src/tensor.zig:264/:268`), `reshape` (`src/tensor.zig:292`), `broadcastTo`
+(`src/tensor.zig:306`); `narrow` goes through `viewWithStridesOffset`
 (`src/exec/gather_scatter.zig:80`). A view's lifetime is independent of its parent's.
 
 The most important instance: per-step attention reads the KV cache via a
@@ -141,7 +141,7 @@ substantive axes (in addition to the view/KV constraint in §3):
    pool reclaims a buffer the instant a transient dies; per-block peak live set
    is only ~6–12 tensors (`attnBlock`/`ffnBlock`, `src/llm/gemma/gemma4.zig:1031/:1126`),
    and the residual stream is a single carried `x` advanced via `ctx.replace`
-   (which frees the old buffer each layer, `src/exec.zig:362`). An arena frees
+   (which frees the old buffer each layer, `src/exec.zig:398`). An arena frees
    nothing until reset, so a forward balloons to roughly `n_layer ×` the
    activation footprint — strictly worse than the pool, whose steady-state
    retention is bounded by the actual peak transient set

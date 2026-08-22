@@ -725,6 +725,18 @@ Numeric knobs that fail to parse fall back to their defaults;
 values. On Linux without libc the lookup scans `/proc/self/environ`
 (`src/parallel.zig`), so `FUCINA_MAX_THREADS` also works in static builds.
 
+The boolean route gates below (the `FUCINA_<X>=1` / `FUCINA_NO_<X>=1` pairs)
+all share one implementation, `fucina.tuning.Switch` (`src/tuning.zig`):
+getenv-family truthiness (set with a first character other than `'0'`), the
+`NO_` form winning over the positive form, a read-once process cache, and a
+programmatic `set` (the per-gate `set*` test hooks forward to it). Numeric
+crossovers use the same read-once contract via `tuning.Threshold`. Policy
+that can differ per workload goes through `fucina.tuning.Overrides` instead
+of the process gate: `ExecContext.setTuning(.{ ... })` overrides a route for
+that context only (first consumer: the CPU f32 weight-shadow route —
+`cpu_f32_shadow` / `cpu_f32_shadow_min_m` — so two contexts in one process
+can run different shadow policy).
+
 **Core runtime** (`src/parallel.zig`, `src/exec/conv.zig`,
 `src/exec/attention.zig`, `src/exec/matmul.zig`):
 
@@ -5092,6 +5104,7 @@ pub fn tryWorkPool(self: *ExecContext) !*thread.Pool
 pub fn workPool(self: *ExecContext) ?*thread.Pool
 pub fn dotBackwardWorker(self: *ExecContext) ?*thread.OneShotWorker
 pub fn pinRowwiseKernels(self: *ExecContext, on: bool) void
+pub fn setTuning(self: *ExecContext, overrides: tuning.Overrides) void
 pub fn classify(_: *const ExecContext, x: *const Tensor) LayoutClass
 pub fn replace(self: *ExecContext, old: anytype, new_value: anytype) @TypeOf(new_value)
 pub fn broadcastTo(self: *ExecContext, x: *const Tensor, shape: []const usize) !Tensor
@@ -5102,6 +5115,10 @@ pub fn broadcastToRank(self: *ExecContext, comptime rank: usize, x: *const Tenso
 `LayoutClass = enum { contiguous, scalar, tail_broadcast, arbitrary }` — the
 dispatch key elementwise kernels use to pick a fast path. `broadcastTo` /
 `broadcastToRank` return zero-copy views (refcounted aliases, §6.2).
+`setTuning` installs per-context tuning overrides (`fucina.tuning.Overrides`,
+§2.6): fields left null follow the process-wide FUCINA_* gates, so two
+contexts in one process can run different route policy (first consumer: the
+CPU f32 weight-shadow route).
 `pinRowwiseKernels(true)` pins every batched quant-matmul entry to the
 `m == 1` kernel numerics — the packed/plain entries run as independent
 single-row calls of themselves, the fused K-quant entries keep their
@@ -11145,7 +11162,7 @@ family-agnostic helpers stay flat:
 
 | Namespace | Contents | Files |
 |---|---|---|
-| `llm.qwen3` | `model`, `train` — Qwen3 dense + LoRA fine-tuning | `llm/qwen3/` |
+| `llm.qwen3` | `model`, `train`, `generate`, `ptqtp`, `shine`, `shine_train` — Qwen3 dense + MoE, LoRA fine-tuning, SHINE adapters | `llm/qwen3/` |
 | `llm.kimi3` | `model` — Kimi-K3 (Kimi-Linear lineage: KDA + gated-MLA-NoPE hybrid, latent MoE, attention residuals, SiTU) | `llm/kimi3/` |
 | `llm.qwen35` | `model`, `chat` — Qwen3.5 Gated-DeltaNet hybrid | `llm/qwen35/` |
 | `llm.gemma` | `gemma4`, `gemma4_train`, `moe`, `moe_route`, `moe_route_tensor` | `llm/gemma/` |
@@ -11175,6 +11192,8 @@ family-agnostic helpers stay flat:
 | `llm.cartridge` | trained KV-prefix corpus compression (Cartridges, arXiv 2506.06266) | §13.10 |
 | `llm.cartridge_fleet` | per-document cartridge fleets: manifest, RAM/disk budget manager, cosine chunk index (Cartridges at Scale, arXiv 2606.04557) | §13.10 |
 | `llm.engram` | conditional n-gram memory: hashed-lookup embedding tables grafted onto a frozen model (Engram, arXiv 2601.07372) | §13.11 |
+| `llm.serving` | the serving contract: `GenerateRequest`/`GenerateResult`, `Caps`, and the per-family `Backend` vtable a server consumes (`examples/lmserve` is the in-tree server; a new family integrates by writing one adapter, a new server by consuming this module) | `src/llm/serving.zig` |
+| `llm.runner` | the descriptor runner (experimental): one family-independent decoder driven by a runtime `Descriptor`; `Descriptor.fromGguf` reads any qwen3-shaped GGUF (dense or MoE); bitwise parity with the hand qwen3 port pinned by `runner_tests.zig` | `docs/RUNNER.md` |
 
 The family namespaces are covered in §14 (kimi3 in §14.7,
 deepseek2/glm4moe/deepseek4/inkling by their module doc comments); this
