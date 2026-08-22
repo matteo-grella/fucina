@@ -10,7 +10,6 @@ const TensorError = tensor_mod.TensorError;
 const ExecContext = exec_mod.ExecContext;
 const Tag = tags_mod.Tag;
 const removeTag = tags_mod.removeTag;
-const CrossEntropyBackward = backward.CrossEntropyBackward;
 const CrossEntropyExtBackward = backward.CrossEntropyExtBackward;
 const LinearCrossEntropyBackward = backward.LinearCrossEntropyBackward;
 const LinearDistillBackward = backward.LinearDistillBackward;
@@ -35,20 +34,12 @@ pub fn Ops(comptime Self: type) type {
         const TensorObject = plumbing.TensorObject;
         const tensorObjectPtrFrom = plumbing.tensorObjectPtrFrom;
 
-        pub fn crossEntropy(self: *const Self, ctx: *ExecContext, comptime class_tag: Tag, labels: []const usize) !Tensor(.{}) {
-            const class_axis = comptime axis(class_tag);
-            const row_stats = try rowStatsAlloc(ctx, self.requiresGrad(), labels.len);
-            defer if (row_stats) |stats| ctx.allocator.free(stats);
-            var value = try ctx.crossEntropyLossExStatsAxisRank(tag_rank, self.asRawTensor(), class_axis, labels, .{}, row_stats);
-            errdefer value.deinit();
-            return finishOp(.{}, ctx, value, self.requiresGrad(), CrossEntropyBackward(tags, class_axis), .{ ctx.allocator, self.grad_state, self.asRawTensor(), labels, row_stats orelse &[_]f32{} });
-        }
-
-        /// Cross-entropy with PyTorch-parity options (ignore_index, reduction,
-        /// label smoothing). `.mean`/`.sum` return a scalar like `crossEntropy`;
-        /// `.none` returns per-position losses with `class_tag` removed (same
-        /// tag-removal rule as `sum`/`mean`).
-        pub fn crossEntropyExt(
+        /// Cross-entropy over `class_tag` with PyTorch-parity options
+        /// (ignore_index, reduction, label smoothing); `options` is `.{}`
+        /// for the defaults. `.mean`/`.sum` return a scalar; `.none` returns
+        /// per-position losses with `class_tag` removed (same tag-removal
+        /// rule as `sum`/`mean`).
+        pub fn crossEntropy(
             self: *const Self,
             ctx: *ExecContext,
             comptime class_tag: Tag,
@@ -64,7 +55,7 @@ pub fn Ops(comptime Self: type) type {
             return finishOp(result_tags, ctx, value, self.requiresGrad(), CrossEntropyExtBackward(tags, class_axis, options), .{ ctx.allocator, self.grad_state, self.asRawTensor(), labels, row_stats orelse &[_]f32{} });
         }
 
-        /// Fused linear + cross-entropy: `crossEntropyExt(self·weightᵀ)` as
+        /// Fused linear + cross-entropy: `crossEntropy(self·weightᵀ)` as
         /// ONE differentiable op. `self` is [row, shared] and `weight` is
         /// [class, shared] (both rank-2, shared tag last, f32). The logits
         /// exist only inside the op — computed once and saved on the
@@ -73,9 +64,9 @@ pub fn Ops(comptime Self: type) type {
         /// dx and dweight, so the [rows, classes] logit GRADIENT is never
         /// materialized (see `linearCrossEntropyBackwardUpstream`).
         /// Differentiable in BOTH operands. Reduction contract as
-        /// `crossEntropyExt`: `.mean`/`.sum` return a scalar, `.none` the
+        /// `crossEntropy`: `.mean`/`.sum` return a scalar, `.none` the
         /// per-row losses tagged by the row tag.
-        pub fn linearCrossEntropyExt(
+        pub fn linearCrossEntropy(
             self: *const Self,
             ctx: *ExecContext,
             weight: anytype,
@@ -125,8 +116,8 @@ pub fn Ops(comptime Self: type) type {
         /// reduces over ENTRIES and `options.loss_scale` multiplies the
         /// scalar result (the gradient-accumulation knob). Differentiable
         /// in BOTH operands; the record is single-use like
-        /// `linearCrossEntropyExt`.
-        pub fn linearDistillExt(
+        /// `linearCrossEntropy`.
+        pub fn linearDistill(
             self: *const Self,
             ctx: *ExecContext,
             weight: anytype,
@@ -182,7 +173,7 @@ pub fn Ops(comptime Self: type) type {
         /// Mean-squared-error loss vs a same-tagged `target` (torch F.mse_loss):
         /// per-element (x - t)². `.mean` (the default) divides by the TOTAL
         /// element count; `.none` returns input-shaped per-element losses
-        /// (same reduction-dependent result type as `crossEntropyExt`).
+        /// (same reduction-dependent result type as `crossEntropy`).
         /// Differentiable in BOTH self and target.
         pub fn mseLoss(
             self: *const Self,
@@ -257,7 +248,7 @@ pub fn Ops(comptime Self: type) type {
         ///
         /// Thin composed convenience (one-hot constant → mul → sum → negate →
         /// reduction), differentiable in self through those ops — PREFER
-        /// `crossEntropy`/`crossEntropyExt` (fused log-softmax + NLL) when
+        /// `crossEntropy` (fused log-softmax + NLL) when
         /// starting from logits; this exists for pipelines that already carry
         /// log-probabilities. When gradients are tracked this requires an
         /// active exec scope (the training pattern — the composition's
@@ -298,7 +289,7 @@ pub fn Ops(comptime Self: type) type {
 
             var picked = try self.mul(ctx, &one_hot);
             defer picked.deinit();
-            var picked_sum = try picked.sum(ctx, class_tag);
+            var picked_sum = try picked.sum(ctx, class_tag, .{});
             defer picked_sum.deinit();
             if (comptime reduction == .none) {
                 return picked_sum.neg(ctx);

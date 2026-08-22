@@ -47,7 +47,7 @@ for (0..total_steps) |step_i| {
     const h = try x.dot(&ctx, &w1, .in);          // no keeps, no defers
     const a = try h.add(&ctx, &b1);
     const z = try a.tanh(&ctx);
-    const loss = try z.crossEntropy(&ctx, .class, labels);
+    const loss = try z.crossEntropy(&ctx, .class, labels, .{});
     try loss.backward(&ctx);
     _ = try opt.clipGradNorm(&ctx, 1.0);          // after backward, before step
     try opt.step(&ctx);
@@ -150,11 +150,11 @@ option gets a tombstone you can read.
 ## 8.3 Losses: cross-entropy and its knobs
 
 A loss is just one more differentiable op, and for classification the op is
-cross-entropy. The plain form is what the training-step snippet used —
-`x.crossEntropy(ctx, .class, labels)`, mean cross-entropy over rows, with
-the class axis named by tag ([Chapter 4](04-axes-with-names.md)) rather than
-by position. The extended form `x.crossEntropyExt(ctx, .class, labels,
-options)` adds the PyTorch-parity knobs (`exec.CrossEntropyOptions`,
+cross-entropy. The default form is what the training-step snippet used —
+`x.crossEntropy(ctx, .class, labels, .{})`, mean cross-entropy over rows,
+with the class axis named by tag ([Chapter 4](04-axes-with-names.md)) rather
+than by position. The trailing `options` argument adds the PyTorch-parity
+knobs (`exec.CrossEntropyOptions`,
 `src/exec/loss.zig`; the summary below follows `docs/TRAINING.md` §5):
 
 - **`ignore_index`** — a sentinel label; those positions contribute zero
@@ -187,11 +187,11 @@ shows what "the graph is just the values" makes possible. The final
 projection of an LLM multiplies a `[rows, hidden]` activation by a
 `[vocab, hidden]` weight to produce `[rows, vocab]` logits — at a 151936-word
 vocabulary, the *gradient* of that logit tensor is hundreds of megabytes.
-`x.linearCrossEntropyExt(ctx, &w, labels, options)` fuses projection and
+`x.linearCrossEntropy(ctx, &w, labels, options)` fuses projection and
 loss into ONE differentiable op: the logits never enter the graph, and the
 backward overwrites them in place with the logit gradient before the two
 gradient GEMMs, "so the full `[rows, classes]` gradient never costs a second
-buffer (−622 MB peak and ~4% faster than the composed dot + crossEntropyExt
+buffer (−622 MB peak and ~4% faster than the composed dot + crossEntropy
 backward at 1024x151936x1024 on M1)" (docs/TRAINING.md §5 — again a dated
 M1 snapshot, not a promise).
 
@@ -986,7 +986,7 @@ fn trainStep(ctx: *ExecContext, model: *const Model, x: *const Tensor(.{ .batch,
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope); // releases the whole step's graph
     const logits = try forwardLogits(ctx, model, x);
-    const loss = try logits.crossEntropy(ctx, .class, labels);
+    const loss = try logits.crossEntropy(ctx, .class, labels, .{});
     try loss.backward(ctx);
     try opt.step(ctx);
     opt.zeroGrad();
@@ -1131,7 +1131,7 @@ and the lr trajectory differs). Either way, watch the gate catch you.
   so the same forward code infers and trains.
 - Cross-entropy's knobs (`ignore_index`, `reduction`, `label_smoothing`)
   are load-bearing for real training, and the fused
-  `linearCrossEntropyExt` shows why owning your ops pays at LLM scale.
+  `linearCrossEntropy` shows why owning your ops pays at LLM scale.
 - SGD is one line; momentum is an EMA of gradients; AdamW is twelve lines
   of decoupled decay + two EMAs + bias correction, with f64 scalar prep —
   and each optimizer in the repo is a golden-parity port of its reference,

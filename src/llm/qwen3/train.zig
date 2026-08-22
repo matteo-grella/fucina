@@ -720,11 +720,11 @@ pub fn Trainer(comptime targets: Targets) type {
         /// optional differentiable scale).
         fn ceTail(ctx: *ExecContext, logits: *const fucina.Tensor(.{ .seq, .vocab }), labels: []const usize, options: LossOptions) !fucina.Tensor(.{}) {
             var ce = switch (options.reduction) {
-                .mean => try logits.crossEntropyExt(ctx, .vocab, labels, .{
+                .mean => try logits.crossEntropy(ctx, .vocab, labels, .{
                     .ignore_index = ignore_index,
                     .reduction = .mean,
                 }),
-                .sum => try logits.crossEntropyExt(ctx, .vocab, labels, .{
+                .sum => try logits.crossEntropy(ctx, .vocab, labels, .{
                     .ignore_index = ignore_index,
                     .reduction = .sum,
                 }),
@@ -973,7 +973,7 @@ pub fn Trainer(comptime targets: Targets) type {
                 row.* = pos - 1;
                 prob.* = @exp(logprob);
             }
-            return normed.linearDistillExt(ctx, head, rows, distill_targets.tokens, probs, .{
+            return normed.linearDistill(ctx, head, rows, distill_targets.tokens, probs, .{
                 .reduction = switch (options.reduction) {
                     .mean => .mean,
                     .sum => .sum,

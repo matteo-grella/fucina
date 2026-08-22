@@ -44,7 +44,7 @@ services.
   assistant tokens are supervised, read from logits row `position − 1`;
   top-20 entries truncated at 0.99 cumulative mass, tail dropped, NOT
   renormalized. Optimizer: Adam, lr 2e-2, no weight decay, no schedule.
-  The trainer computes this through the fused `linearDistillExt` core op:
+  The trainer computes this through the fused `linearDistill` core op:
   the output projection and the sparse targets run as ONE node, only the
   supervised rows are ever projected, and the `[seq, vocab]` logits never
   enter the autograd graph (the composed `cartridge.distillLoss` tail

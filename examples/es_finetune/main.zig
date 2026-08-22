@@ -489,7 +489,7 @@ fn accReward(comptime TrainerT: type, ctx: *fucina.ExecContext, trainer: *Traine
     var logits = try trainer.evalLogits(ctx, sample.inputs);
     defer logits.deinit();
 
-    var ce = try logits.crossEntropyExt(ctx, .vocab, sample.labels, .{
+    var ce = try logits.crossEntropy(ctx, .vocab, sample.labels, .{
         .ignore_index = llm.qwen3.train.ignore_index,
         .reduction = .mean,
     });

@@ -481,7 +481,7 @@ Two anchors to carry:
   `ln 4` (docs/REFERENCE.md §4.15, test "crossEntropy on uniform logits is ln(K)").
 - **In practice softmax + cross-entropy is one fused operation.** Numerically and for
   efficiency they are computed together; in Fucina the model's logits go straight into
-  `crossEntropy(ctx, .class, labels)` — signature in docs/REFERENCE.md §4.15 — and no
+  `crossEntropy(ctx, .class, labels, .{})` — signature in docs/REFERENCE.md §4.15 — and no
   probability tensor is ever materialized unless you ask for one.
 
 Here is the by-hand arithmetic above as course code (the fourth test in this chapter's
@@ -638,7 +638,7 @@ fn trainStep(ctx: *ExecContext, model: *const Model, x: *const Tensor(.{ .batch,
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope); // releases the whole step's graph
     const logits = try forwardLogits(ctx, model, x);
-    const loss = try logits.crossEntropy(ctx, .class, labels);
+    const loss = try logits.crossEntropy(ctx, .class, labels, .{});
     try loss.backward(ctx);
     try opt.step(ctx);
     opt.zeroGrad();

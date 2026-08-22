@@ -563,11 +563,11 @@ pub fn Trainer(comptime targets: Targets) type {
             var logits = try self.forwardLogits(ctx, tokens, step);
             defer logits.deinit();
             var ce = switch (options.reduction) {
-                .mean => try logits.crossEntropyExt(ctx, .vocab, labels, .{
+                .mean => try logits.crossEntropy(ctx, .vocab, labels, .{
                     .ignore_index = ignore_index,
                     .reduction = .mean,
                 }),
-                .sum => try logits.crossEntropyExt(ctx, .vocab, labels, .{
+                .sum => try logits.crossEntropy(ctx, .vocab, labels, .{
                     .ignore_index = ignore_index,
                     .reduction = .sum,
                 }),

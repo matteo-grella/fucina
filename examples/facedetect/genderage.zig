@@ -163,9 +163,9 @@ fn taskBranch(ctx: *ExecContext, allocator: std.mem.Allocator, model: *Model, tr
     defer x4.deinit();
 
     // Global average pool over the whole spatial extent → [.c].
-    var ph = try x4.mean(ctx, .h);
+    var ph = try x4.mean(ctx, .h, .{});
     defer ph.deinit();
-    var pooled = try ph.mean(ctx, .w); // [.c]
+    var pooled = try ph.mean(ctx, .w, .{}); // [.c]
     defer pooled.deinit();
 
     var fcw = try loadGaFc(ctx, allocator, model.file, fc ++ "_weight"); // [.out, .c]

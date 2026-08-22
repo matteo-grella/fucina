@@ -1860,7 +1860,7 @@ test "f16 constants: forward math, reductions widen" {
     var twice = try a.add(&ctx, &a);
     defer twice.deinit();
     comptime std.debug.assert(@TypeOf(twice).dtype == .f16); // pointwise keeps dtype
-    var s = try a.sum(&ctx, .k);
+    var s = try a.sum(&ctx, .k, .{});
     defer s.deinit();
     comptime std.debug.assert(@TypeOf(s).dtype == .f32); // reductions widen to f32
     var dense = try a.to(&ctx, .f32);
@@ -1989,7 +1989,7 @@ methods are documented above; §4 covers every math/NN op in depth.
 `logsumexp`, `logSoftmax`, `argmax`, `multinomial`,
 `max`, `min`, `topK`, `sort`, `argsort`, `routerTopK`, `softmax`, `rmsNorm`,
 `rmsNormMul`, `rmsNormMulAdd`, `rmsNormMulRopeHalfPrepared`, `layerNorm`,
-`groupNorm`, `crossEntropy`, `crossEntropyExt`, `linearCrossEntropyExt`, `linearDistillExt`,
+`groupNorm`, `crossEntropy`, `crossEntropy`, `linearCrossEntropy`, `linearDistill`,
 `mseLoss`, `huberLoss`,
 `bceLoss`, `klDivLoss`, `nllLoss`, `l2Normalize`, `cosineSimilarity`,
 `rope`, `matmul`, `dot`, `addDot`, `einsum`, `dotTernarySte`, `packRhs`, `dotPacked`,
@@ -2605,10 +2605,10 @@ returns the scalar `Tensor(.{})`.
 #### Masked reductions
 
 ```zig
-pub fn sumExt(self, ctx, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag))
-pub fn meanExt(self, ctx, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag))
-pub fn maxExt(self, ctx, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag))
-pub fn minExt(self, ctx, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag))
+pub fn sum(self, ctx, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag))
+pub fn mean(self, ctx, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag))
+pub fn max(self, ctx, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag))
+pub fn min(self, ctx, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag))
 ```
 
 The `sum(a, dim, mask)` / `maxval(a, dim, mask)` family: a reduction
@@ -2630,28 +2630,28 @@ field is a **compile error**, never a silently-unmasked reduction (the
   non-last-axis arms.
 - **Bitwise contract.** An excluded element contributes the operation's
   identity rather than being skipped, so a masked reduction performs exactly
-  the composition's arithmetic in exactly its order: `sumExt` is **bitwise
+  the composition's arithmetic in exactly its order: `sum` is **bitwise
   equal** to `maskedFill(¬mask, 0)` then `sum`, and bitwise equal to the
   unmasked reduction when the mask is all-true. Substituting the identity is
   also what keeps an excluded NaN from poisoning its lane.
 - **Empty lanes.** A lane whose mask selects nothing takes the operation's
-  identity: `0` for `sumExt`, `-inf`/`+inf` for `maxExt`/`minExt` (Fortran's
+  identity: `0` for `sum`, `-inf`/`+inf` for `max`/`min` (Fortran's
   `maxval` of an empty selection is `-HUGE`). This is why a masked reduction
   needs no `EmptySelection` error the way `maskedSelect` does (§3.7) — the
   answer is defined. `mean` has no identity, so its empty lane is `NaN`
   (0/0). `.empty = v` overrides the value for any of them.
-- **Gradients.** `sumExt`: the unmasked scatter, zeroed where the mask
-  excluded the element. `meanExt`: divided by the count of SELECTED elements
+- **Gradients.** `sum`: the unmasked scatter, zeroed where the mask
+  excluded the element. `mean`: divided by the count of SELECTED elements
   per lane (not the axis length), so an empty lane — which produced a
   constant, not a function of the data — contributes nothing.
-  `maxExt`/`minExt`: the gradient goes to the first *selected* extremum, with
+  `max`/`min`: the gradient goes to the first *selected* extremum, with
   `max`'s tie-break and NaN semantics applied to the selected elements only;
   an empty lane receives none. All four are pinned against finite differences
   by `fucina.gradcheck` (§5.7).
-- Counting a mask stays `mask.sum(tag)` (i64, §4.19); there is no separate
+- Counting a mask stays `mask.sum(tag, .{})` (i64, §4.19); there is no separate
   `count` entry.
 
-`maxExt`/`minExt` cover Fortran's `maxval`/`minval`; `product` and
+`max`/`min` cover Fortran's `maxval`/`minval`; `product` and
 `all`/`any` deliberately have no masked twin (no in-tree consumer, and
 `all`/`any` compose with `logicalAnd`/`logicalOr`).
 
@@ -2670,12 +2670,12 @@ test "masked reductions restrict a reduction to the elements a mask selects" {
     var mask = try M.fromSlice(&ctx, .{ 2, 3 }, &.{ true, false, true, false, true, false });
     defer mask.deinit();
 
-    var total = try x.sumExt(&ctx, .col, .{ .mask = &mask });
+    var total = try x.sum(&ctx, .col, .{ .mask = &mask });
     defer total.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 4, 5 }, try total.dataConst());
 
     // The mean divides by the SELECTED count (2 and 1), not the axis length.
-    var avg = try x.meanExt(&ctx, .col, .{ .mask = &mask });
+    var avg = try x.mean(&ctx, .col, .{ .mask = &mask });
     defer avg.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 2, 5 }, try avg.dataConst());
 
@@ -2700,12 +2700,12 @@ test "a masked lane that selects nothing takes the identity, not an error" {
     var mask = try M.fromSlice(&ctx, .{ 2, 2 }, &.{ false, false, true, false });
     defer mask.deinit();
 
-    var total = try x.sumExt(&ctx, .col, .{ .mask = &mask });
+    var total = try x.sum(&ctx, .col, .{ .mask = &mask });
     defer total.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 0, 3 }, try total.dataConst()); // identity, no error
 
     // A mean has no identity: 0/0 unless the caller names a sentinel.
-    var avg = try x.meanExt(&ctx, .col, .{ .mask = &mask, .empty = 0 });
+    var avg = try x.mean(&ctx, .col, .{ .mask = &mask, .empty = 0 });
     defer avg.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 0, 3 }, try avg.dataConst());
 }
@@ -2730,7 +2730,7 @@ test "axis reductions and sumAll" {
 
     var x = try fucina.Tensor(.{ .row, .col }).fromSlice(&ctx, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
     defer x.deinit();
-    var s = try x.sum(&ctx, .col); // Tensor(.{ .row })
+    var s = try x.sum(&ctx, .col, .{}); // Tensor(.{ .row })
     defer s.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 3, 7 }, try s.dataConst());
     var v = try x.variance(&ctx, .col, 0); // biased (ddof 0)
@@ -3646,9 +3646,8 @@ are `[]const usize`, one per position, positions ordered with the class axis
 removed, remaining axes row-major):
 
 ```zig
-pub fn crossEntropy(self, ctx, comptime class_tag: Tag, labels: []const usize) !Tensor(.{})
-pub fn crossEntropyExt(self, ctx, comptime class_tag: Tag, labels: []const usize,
-                       comptime options: exec.CrossEntropyOptions)
+pub fn crossEntropy(self, ctx, comptime class_tag: Tag, labels: []const usize,
+                    comptime options: exec.CrossEntropyOptions)
     !Tensor(if (options.reduction == .none) removeTag(tags, class_tag) else .{})
 ```
 
@@ -3661,11 +3660,11 @@ losses with the class tag removed), `label_smoothing: f32 = 0` (in `[0,1)`,
 PyTorch semantics). Labels must be `< class_count` or equal to
 `ignore_index` (`IndexOutOfBounds` otherwise). Differentiable in the logits.
 
-**Fused linear + cross-entropy** — `crossEntropyExt(self·weightᵀ)` as ONE
+**Fused linear + cross-entropy** — `crossEntropy(self·weightᵀ)` as ONE
 differentiable op:
 
 ```zig
-pub fn linearCrossEntropyExt(self, ctx, weight: anytype, labels: []const usize,
+pub fn linearCrossEntropy(self, ctx, weight: anytype, labels: []const usize,
                              comptime options: exec.CrossEntropyOptions)
     !Tensor(if (options.reduction == .none) removeTag(tags, tags[1]) else .{})
 ```
@@ -3677,7 +3676,7 @@ computed once and saved on the backward record with the forward's per-row
 softmax statistics, and the VJP folds block-built probability panels
 straight into dx and dweight, so the `[rows, classes]` logit **gradient**
 is never materialized. Differentiable in **both** operands; same
-options/reduction contract as `crossEntropyExt` (`.none` returns per-row
+options/reduction contract as `crossEntropy` (`.none` returns per-row
 losses tagged by the row tag).
 
 **Fused linear + sparse-soft-target distillation** — cross-entropy of
@@ -3685,13 +3684,13 @@ losses tagged by the row tag).
 differentiable op (a teacher's top-k in the distillation use, §13.10):
 
 ```zig
-pub fn linearDistillExt(self, ctx, weight: anytype, rows: []const usize,
+pub fn linearDistill(self, ctx, weight: anytype, rows: []const usize,
                         classes: []const usize, probs: []const f32,
                         options: exec.LinearDistillOptions) !Tensor(.{})
 ```
 
 `loss = reduce_i probs[i]·(LSE(logits[rows[i]]) − logits[rows[i], classes[i]])`
-with the same operand contract as `linearCrossEntropyExt` (rank-2 f32,
+with the same operand contract as `linearCrossEntropy` (rank-2 f32,
 shared tag last, comptime-checked). Two structural properties on top of
 the fused CE: only the UNIQUE rows named by `rows` are ever projected
 (rows without entries produce no logits at all), and the backward consumes
@@ -3702,7 +3701,7 @@ reduces over ENTRIES (`.mean` divides by the entry count; probs are used
 as given — a truncated teacher tail is deliberately NOT renormalized) and
 `loss_scale` multiplies the scalar result (the gradient-accumulation
 knob). Differentiable in **both** operands; the record is single-use like
-`linearCrossEntropyExt` (a repeat backward errors with
+`linearCrossEntropy` (a repeat backward errors with
 `LinearDistillBackwardConsumed`).
 
 **Elementwise losses** vs a same-tagged `target`, all differentiable in
@@ -3727,7 +3726,7 @@ knob). Differentiable in **both** operands; the record is single-use like
 
 - `nllLoss(ctx, class_tag, labels, comptime reduction)` — NLL over
   **log-probabilities** (one-hot → mul → sum → negate). Prefer
-  `crossEntropy`/`crossEntropyExt` when starting from logits.
+  `crossEntropy`/`crossEntropy` when starting from logits.
 - `cosineSimilarity(ctx, other, tag, eps)` — torch `F.cosine_similarity`:
   `Σxy / max(‖x‖·‖y‖, eps)` with `tag` reduced away; differentiable in both.
 
@@ -3740,11 +3739,11 @@ test "crossEntropy on uniform logits is ln(K)" {
 
     var logits = try fucina.Tensor(.{ .batch, .class }).zeros(&ctx, .{ 1, 4 });
     defer logits.deinit();
-    var loss = try logits.crossEntropy(&ctx, .class, &.{2});
+    var loss = try logits.crossEntropy(&ctx, .class, &.{2}, .{});
     defer loss.deinit();
     try std.testing.expectApproxEqAbs(@log(@as(f32, 4)), try loss.item(), 1e-6);
 
-    var per_pos = try logits.crossEntropyExt(&ctx, .class, &.{2}, .{ .reduction = .none });
+    var per_pos = try logits.crossEntropy(&ctx, .class, &.{2}, .{ .reduction = .none });
     defer per_pos.deinit(); // Tensor(.{ .batch }): class tag removed
     try std.testing.expectApproxEqAbs(@log(@as(f32, 4)), (try per_pos.dataConst())[0], 1e-6);
 }
@@ -4968,7 +4967,7 @@ Every differentiable facade op attaches a concrete VJP record from
 | Reductions / statistics | `sum`, `sumMany`, `sumAll`, `mean`, `variance`, `prod`, `cumsum`, `cumprod`, `linearRecurrence`, `logsumexp`, `standardizeAxis`, `norm`, `normAll`, `max`, `min`, `topK` (values arm), `sort` (values arm) | `max`/`min` route gradient to the first extremum (strict tie-break); `topK`/`sort` values scatter back through the saved indices; `linearRecurrence` differentiates input, decay, and initial state through one reverse scan (§4.7) |
 | Structure / views | `withTags`, `permuteTo`, `transpose`, `alignTo`, `insertAxis`, `squeeze`, `split`, `merge`, `reshape`, `viewWithStrides`, `materialize`, `contiguous`, `broadcastTo`, `flatten`, `narrow`, `select`, `slice`, `sliceStep`, `pad`, `zeroPad2d`, `constantPad2d`, `concat`, `stack`, `unbindInto`, `repeatAxis`, `flip`, `roll`, `rollBy`, `shiftBy`, `diagonal`, `trace`, `diag`, `diagEmbed`, `gather`, `indexSelect`, `takeAlongAxis`, `indexAdd`, `scatterAdd`, `scatter`, `maskedSelect`, `maskedScatter`, `setSlice`, `setRows`, `zeroSlice`, `zeroRows`, `relposShift`, `to` (f32/f16/bf16 targets, §3.8) | view VJPs scatter through the saved layout; `detach` deliberately cuts the graph |
 | Norms / softmax | `softmax` (all fused options; `.mask` must not require grad), `logSoftmax`, `rmsNorm`, `rmsNormMul`, `rmsNormMulAdd`, `rmsNormMulRopeHalfPrepared`, `layerNorm` (plain + affine), `groupNorm`, `l2Normalize`, `cosineSimilarity` | |
-| Losses | `crossEntropy`, `crossEntropyExt`, `linearCrossEntropyExt`, `linearDistillExt`, `mseLoss`, `huberLoss`, `bceLoss`, `klDivLoss`, `nllLoss` | `linearCrossEntropyExt` differentiates both the input and the classifier weight without materializing the logit gradient (§4.15) |
+| Losses | `crossEntropy`, `crossEntropy`, `linearCrossEntropy`, `linearDistill`, `mseLoss`, `huberLoss`, `bceLoss`, `klDivLoss`, `nllLoss` | `linearCrossEntropy` differentiates both the input and the classifier weight without materializing the logit gradient (§4.15) |
 | Contractions | `dot` (f32×f32: both operands; quantized RHS: lhs-only, the RHS is a frozen constant; f16/bf16 RHS: lhs always, plus an f32 dW when the RHS is a grad-requiring 16-bit variable), `einsum` (f32×f32: both operands; f16/bf16 RHS: same variable-RHS contract as dot; each gradient is itself an einsum — GEMM-lowered for every tag structure, broadcast over forward-summed axes; `DotBackward`/`ConstRhsDotBackward` delegate to the einsum records), `addDot` (the fused addmm: all three operands — the base gradient is the upstream gradient itself, shared as a view; the `a`/`b` gradients are the dot VJP contractions, with the same internal branch split as `dot`), `einsumMany` (composes binary einsum records), `matmul` (2-D GEMM `.plain`/`.trans_b`, batched bmm all kinds; rank-2 `.trans_a` is a compile error directing to `dot`), `dotTernarySte` (straight-through estimator: dx through the quantized weight, dW as-if-unquantized) | |
 | Convolutions / pooling | `conv1d`, `convTranspose1d`, `causalConv1d`, `groupedCausalConv1d`, `causalDepthwiseConv1d`, `conv2d`, `conv2dRelu`, `maxPool2d`, `avgPool2d`, `upsample2xNearest`, `unfold`, `fold`, `channelAffine` | `conv2d` differentiates input, weight, and bias; `conv2dRelu` falls back to the composed differentiable path when any operand requires grad; `unfold`/`fold` are exact adjoints of each other (im2col/col2im) |
 | Position / attention | `rope` (table and on-the-fly sources, both modes), `groupedAttention` | attention grad matrix: f32 KV = full q/k/v; f16 or q8_0 KV = q-only (caches are constants); `.bias` or multi-stream KV = inference-only (`error.UnsupportedGradient`) |
@@ -6892,7 +6891,7 @@ test "float dtype policy: f16 reduction returns f32" {
     comptime std.debug.assert(@TypeOf(y).dtype == .f16);
 
     // Reductions on f16 accumulate in f32 and *return* f32.
-    var s = try x.sum(&ctx, .col);
+    var s = try x.sum(&ctx, .col, .{});
     defer s.deinit();
     comptime std.debug.assert(@TypeOf(s).dtype == .f32);
     try std.testing.expectEqualSlices(f32, &.{ 4.0, 7.0 }, try s.dataConst());
@@ -9182,7 +9181,7 @@ test "one training step: forward, backward, clip, step, zero" {
         defer ctx.closeExecScope(scope);
         const z = try x.dot(&ctx, &w, .in);
         const logits = try z.add(&ctx, &b);
-        const loss = try logits.crossEntropy(&ctx, .class, &labels);
+        const loss = try logits.crossEntropy(&ctx, .class, &labels, .{});
         try loss.backward(&ctx);
         _ = try opt.clipGradNorm(&ctx, 1.0); // after backward, before step
         try opt.step(&ctx);
@@ -9548,7 +9547,7 @@ test "param groups under one OptimizerSet with a warmup-cosine schedule" {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
         const logits = try (try x.dot(&ctx, &w, .in)).add(&ctx, &b);
-        const loss = try logits.crossEntropy(&ctx, .class, &labels);
+        const loss = try logits.crossEntropy(&ctx, .class, &labels, .{});
         try loss.backward(&ctx);
         _ = try set.clipGradNorm(&ctx, 1.0); // GLOBAL norm across both groups
         try set.step(&ctx);

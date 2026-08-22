@@ -684,7 +684,7 @@ pub const Layer = struct {
 
             var prod = try normed_key.mul(ctx, &normed_query);
             defer prod.deinit();
-            var dot_raw = try prod.sum(ctx, .d);
+            var dot_raw = try prod.sum(ctx, .d, .{});
             defer dot_raw.deinit();
             var dot_scaled = try dot_raw.scale(ctx, inv_sqrt_d);
             defer dot_scaled.deinit();

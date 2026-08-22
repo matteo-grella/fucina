@@ -749,11 +749,11 @@ test "crossEntropy on uniform logits is ln(K)" {
 
     var logits = try fucina.Tensor(.{ .batch, .class }).zeros(&ctx, .{ 1, 4 });
     defer logits.deinit();
-    var loss = try logits.crossEntropy(&ctx, .class, &.{2});
+    var loss = try logits.crossEntropy(&ctx, .class, &.{2}, .{});
     defer loss.deinit();
     try std.testing.expectApproxEqAbs(@log(@as(f32, 4)), try loss.item(), 1e-6);
 
-    var per_pos = try logits.crossEntropyExt(&ctx, .class, &.{2}, .{ .reduction = .none });
+    var per_pos = try logits.crossEntropy(&ctx, .class, &.{2}, .{ .reduction = .none });
     defer per_pos.deinit(); // Tensor(.{ .batch }): class tag removed
     try std.testing.expectApproxEqAbs(@log(@as(f32, 4)), (try per_pos.dataConst())[0], 1e-6);
 }
@@ -761,13 +761,13 @@ test "crossEntropy on uniform logits is ln(K)" {
 
 *(machine-verified snippet from docs/REFERENCE.md §4.15)*
 
-`crossEntropyExt` adds the practical options with PyTorch parity:
+`crossEntropy` adds the practical options with PyTorch parity:
 `ignore_index` (padding contributes nothing — and when *every* position is
 ignored the loss is 0, a deliberate, documented divergence from PyTorch's
 NaN), `reduction` (`.mean`/`.sum`/`.none`), and `label_smoothing`.
 
 One member of the family earns special attention:
-`linearCrossEntropyExt(self, ctx, weight, labels, options)` fuses the final
+`linearCrossEntropy(self, ctx, weight, labels, options)` fuses the final
 projection *into* the loss. For an LLM, the logit matrix is `[rows, vocab]`
 — often the largest tensor in the training step. The fused op computes the
 logits once, keeps them on the backward record with the per-row softmax

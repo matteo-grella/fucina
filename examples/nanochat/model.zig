@@ -694,7 +694,7 @@ pub fn ModelOf(comptime dtype: fucina.DType) type {
             defer self.allocator.free(labels); // crossEntropyExt dupes labels
             toLabels(targets, labels);
             const logits = try self.forward(ctx, token_ids, null);
-            return logits.crossEntropyExt(ctx, .vocab, labels, .{ .reduction = .mean, .ignore_index = ignore_index });
+            return logits.crossEntropy(ctx, .vocab, labels, .{ .reduction = .mean, .ignore_index = ignore_index });
         }
 
         /// Per-token cross-entropy [.seq] (reduction='none'); ignored positions = 0.
@@ -703,14 +703,14 @@ pub fn ModelOf(comptime dtype: fucina.DType) type {
             defer self.allocator.free(labels);
             toLabels(targets, labels);
             const logits = try self.forward(ctx, token_ids, null);
-            return logits.crossEntropyExt(ctx, .vocab, labels, .{ .reduction = .none, .ignore_index = ignore_index });
+            return logits.crossEntropy(ctx, .vocab, labels, .{ .reduction = .none, .ignore_index = ignore_index });
         }
 
         /// Summed cross-entropy over this sequence's non-ignored targets (the
         /// numerator of the batch mean). Used by the (B,T) grad-accumulation path.
         pub fn lossSum(self: *const Self, ctx: *ExecContext, token_ids: []const usize, labels: []const usize) !Tensor(.{}) {
             const logits = try self.forward(ctx, token_ids, null);
-            return logits.crossEntropyExt(ctx, .vocab, labels, .{ .reduction = .sum, .ignore_index = ignore_index });
+            return logits.crossEntropy(ctx, .vocab, labels, .{ .reduction = .sum, .ignore_index = ignore_index });
         }
     };
 }

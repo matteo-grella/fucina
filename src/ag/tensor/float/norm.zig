@@ -180,7 +180,7 @@ pub fn Ops(comptime Self: type) type {
             const norm_axis = comptime axis(tag);
             var sq = try self.mul(ctx, self);
             defer sq.deinit();
-            var sum_sq = try sq.sum(ctx, tag);
+            var sum_sq = try sq.sum(ctx, tag, .{});
             defer sum_sq.deinit();
             var shifted = try sum_sq.addScalar(ctx, eps);
             defer shifted.deinit();
@@ -206,19 +206,19 @@ pub fn Ops(comptime Self: type) type {
                 .l1 => {
                     var magnitude = try self.abs(ctx);
                     defer magnitude.deinit();
-                    return magnitude.sum(ctx, tag);
+                    return magnitude.sum(ctx, tag, .{});
                 },
                 .l2 => {
                     var squared = try self.mul(ctx, self);
                     defer squared.deinit();
-                    var sum_sq = try squared.sum(ctx, tag);
+                    var sum_sq = try squared.sum(ctx, tag, .{});
                     defer sum_sq.deinit();
                     return sum_sq.sqrt(ctx);
                 },
                 .inf => {
                     var magnitude = try self.abs(ctx);
                     defer magnitude.deinit();
-                    return magnitude.max(ctx, tag);
+                    return magnitude.max(ctx, tag, .{});
                 },
             }
         }
@@ -251,17 +251,17 @@ pub fn Ops(comptime Self: type) type {
             try requireScopeForComposedGrad(ctx, self.requiresGrad() or other.requiresGrad());
             var pointwise_prod = try self.mul(ctx, other);
             defer pointwise_prod.deinit();
-            var dot_sum = try pointwise_prod.sum(ctx, tag);
+            var dot_sum = try pointwise_prod.sum(ctx, tag, .{});
             defer dot_sum.deinit();
             var self_sq = try self.mul(ctx, self);
             defer self_sq.deinit();
-            var self_sum_sq = try self_sq.sum(ctx, tag);
+            var self_sum_sq = try self_sq.sum(ctx, tag, .{});
             defer self_sum_sq.deinit();
             var self_norm = try self_sum_sq.sqrt(ctx);
             defer self_norm.deinit();
             var other_sq = try other.mul(ctx, other);
             defer other_sq.deinit();
-            var other_sum_sq = try other_sq.sum(ctx, tag);
+            var other_sum_sq = try other_sq.sum(ctx, tag, .{});
             defer other_sum_sq.deinit();
             var other_norm = try other_sum_sq.sqrt(ctx);
             defer other_norm.deinit();

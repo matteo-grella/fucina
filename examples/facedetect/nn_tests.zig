@@ -255,7 +255,7 @@ fn arcfaceGcLoss(ctx: *fucina.ExecContext, emb: *const fucina.Tensor(.{ .batch, 
     defer logit.deinit();
     var scaled = try logit.scale(ctx, s);
     defer scaled.deinit();
-    return scaled.crossEntropy(ctx, .cls, &.{1});
+    return scaled.crossEntropy(ctx, .cls, &.{1}, .{});
 }
 
 test "gradcheck: ArcFace additive-angular-margin loss (embedding + head)" {
@@ -336,7 +336,7 @@ test "training capstone: tiny conv classifier converges (AdamW + exec scopes)" {
         var fl = try pl.merge(&ctx, .flat, .{ .h, .w, .c });
         var lg = try fl.dot(&ctx, &fc_w, .flat);
         var lb = try lg.add(&ctx, &fc_b);
-        var loss = try lb.crossEntropy(&ctx, .class, &.{label});
+        var loss = try lb.crossEntropy(&ctx, .class, &.{label}, .{});
 
         const lv = try loss.item();
         if (step == 0) first_loss = lv;

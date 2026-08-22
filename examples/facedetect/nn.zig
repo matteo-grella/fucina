@@ -93,7 +93,7 @@ pub fn batchNormTrain(ctx: *ExecContext, x: *const Map, gamma: *const Channels, 
     const nw = x.dim(.w);
     var m = try x.merge(ctx, .n, .{ .h, .w }); // [n, c]
     defer m.deinit();
-    var mu = try m.mean(ctx, .n); // [c]
+    var mu = try m.mean(ctx, .n, .{}); // [c]
     defer mu.deinit();
     var vr = try m.variance(ctx, .n, 0); // [c] population variance
     defer vr.deinit();

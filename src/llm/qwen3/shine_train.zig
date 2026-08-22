@@ -564,7 +564,7 @@ pub const ShineTrainer = struct {
         defer final.deinit();
         var logits = try qwen3_train.dotLinear(self.frozenCache(), &self.model.output, ctx, &final, .embed, .vocab);
         defer logits.deinit();
-        return logits.crossEntropyExt(ctx, .vocab, all_labels, .{
+        return logits.crossEntropy(ctx, .vocab, all_labels, .{
             .ignore_index = qwen3_train.ignore_index,
             .reduction = .mean,
         });

@@ -28,6 +28,11 @@ pub fn Ops(comptime Self: type) type {
         const Tensor = ag_tensor.Tensor;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
         const finishOp = plumbing.finishOp;
+        const TensorObject = plumbing.TensorObject;
+        const validateMaskedReduceOptions = plumbing.validateMaskedReduceOptions;
+        const validateMaskType = plumbing.validateMaskType;
+        const maskedReduceEmpty = plumbing.maskedReduceEmpty;
+        const MaskedMinMaxBackward = backward.MaskedMinMaxBackward;
 
         /// Variance over `tag` (the tag is removed like sum/mean): ddof 0 =
         /// biased estimator (the LayerNorm convention), ddof 1 = unbiased
@@ -197,28 +202,52 @@ pub fn Ops(comptime Self: type) type {
         /// returns the indices). The gradient flows only to the FIRST
         /// occurrence of the extremum along the axis (strict-comparison
         /// tie-break, like PyTorch's torch.max over a dim).
-        pub fn max(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(removeTag(tags, tag)) {
-            return extremum(self, ctx, tag, .max);
+        pub fn max(self: *const Self, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag)) {
+            return extremum(self, ctx, tag, .max, opts);
         }
 
-        /// Min values over `tag`; see `max` for gradient/tie-break semantics.
-        pub fn min(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(removeTag(tags, tag)) {
-            return extremum(self, ctx, tag, .min);
+        /// Min values over `tag`; see `max` for gradient/tie-break and mask
+        /// semantics (an empty masked lane yields `empty orelse +inf`).
+        pub fn min(self: *const Self, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag)) {
+            return extremum(self, ctx, tag, .min, opts);
         }
 
-        fn extremum(self: *const Self, ctx: *ExecContext, comptime tag: Tag, comptime op: enum { max, min }) !Tensor(removeTag(tags, tag)) {
+        fn extremum(self: *const Self, ctx: *ExecContext, comptime tag: Tag, comptime op: enum { max, min }, opts: anytype) !Tensor(removeTag(tags, tag)) {
+            comptime validateMaskedReduceOptions(@TypeOf(opts));
             const result_tags = removeTag(tags, tag);
             const reduce_axis = comptime axis(tag);
+            if (comptime !@hasField(@TypeOf(opts), "mask")) {
+                var raw = switch (op) {
+                    .max => try ctx.maxAxisRank(tag_rank, self.asRawTensor(), reduce_axis),
+                    .min => try ctx.minAxisRank(tag_rank, self.asRawTensor(), reduce_axis),
+                };
+                // The first-extremum indices go into the backward node
+                // (computed in the forward, not recomputed); the caller only
+                // sees values.
+                var raw_values: ?RawTensor = raw.values;
+                errdefer if (raw_values) |*value| value.deinit();
+                defer raw.indices.deinit();
+                const out = try finishOp(result_tags, ctx, raw_values.?, self.requiresGrad(), MinMaxBackward(tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value, &raw.indices });
+                raw_values = null;
+                return out;
+            }
+
+            // Masked arm — `maxval(a, dim, mask)`: `opts` and the mask
+            // contract are `sum`'s; tie-break and NaN semantics are the plain
+            // arm's, applied to the selected elements only. A lane selecting
+            // nothing yields `empty orelse -inf` (`+inf` for min) and
+            // receives no gradient (no element participated).
+            const Mask = TensorObject(@TypeOf(opts.mask));
+            comptime validateMaskType(Mask, "max/min");
+            const empty_value = maskedReduceEmpty(opts);
             var raw = switch (op) {
-                .max => try ctx.maxAxisRank(tag_rank, self.asRawTensor(), reduce_axis),
-                .min => try ctx.minAxisRank(tag_rank, self.asRawTensor(), reduce_axis),
+                .max => try ctx.maxMaskedAxisRank(Mask.dtype, tag_rank, self.asRawTensor(), opts.mask.asRawTensor(), reduce_axis, empty_value),
+                .min => try ctx.minMaskedAxisRank(Mask.dtype, tag_rank, self.asRawTensor(), opts.mask.asRawTensor(), reduce_axis, empty_value),
             };
-            // The first-extremum indices go into the backward node (computed
-            // in the forward, not recomputed); the caller only sees values.
             var raw_values: ?RawTensor = raw.values;
             errdefer if (raw_values) |*value| value.deinit();
             defer raw.indices.deinit();
-            const out = try finishOp(result_tags, ctx, raw_values.?, self.requiresGrad(), MinMaxBackward(tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value, &raw.indices });
+            const out = try finishOp(result_tags, ctx, raw_values.?, self.requiresGrad(), MaskedMinMaxBackward(tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value, &raw.indices });
             raw_values = null;
             return out;
         }

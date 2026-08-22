@@ -936,7 +936,9 @@ pub fn Mod(comptime ag_tensor: type) type {
             return typedPointwise(Self.dtype, .div, self, ctx, other);
         }
 
-        pub fn typedConstantSum(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = dtype_mod.outputDType(.reduction, TensorObject(@TypeOf(self)).dtype), .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
+        pub fn typedConstantSum(self: anytype, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !Tensor(.{ .dtype = dtype_mod.outputDType(.reduction, TensorObject(@TypeOf(self)).dtype), .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
+            comptime if (@typeInfo(@TypeOf(opts)).@"struct".fields.len != 0)
+                @compileError("typed constant reductions take no options (masked arms are f32-only); pass .{}");
             try typedRequireNoGrad(self);
             const Self = TensorObject(@TypeOf(self));
             const result_tags = removeTag(Self.axis_tags, tag);
@@ -945,7 +947,9 @@ pub fn Mod(comptime ag_tensor: type) type {
             return Tensor(.{ .dtype = dtype_mod.outputDType(.reduction, Self.dtype), .tags = result_tags }).fromTensor(ctx, value);
         }
 
-        pub fn typedConstantMean(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = dtype_mod.outputDType(.reduction, TensorObject(@TypeOf(self)).dtype), .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
+        pub fn typedConstantMean(self: anytype, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !Tensor(.{ .dtype = dtype_mod.outputDType(.reduction, TensorObject(@TypeOf(self)).dtype), .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
+            comptime if (@typeInfo(@TypeOf(opts)).@"struct".fields.len != 0)
+                @compileError("typed constant reductions take no options (masked arms are f32-only); pass .{}");
             try typedRequireNoGrad(self);
             const Self = TensorObject(@TypeOf(self));
             const result_tags = removeTag(Self.axis_tags, tag);
@@ -1462,11 +1466,15 @@ pub fn Mod(comptime ag_tensor: type) type {
             return Tensor(.{ .dtype = .f32, .tags = result_tags }).fromTensor(ctx, value);
         }
 
-        pub fn typedConstantMax(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = .f32, .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
+        pub fn typedConstantMax(self: anytype, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !Tensor(.{ .dtype = .f32, .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
+            comptime if (@typeInfo(@TypeOf(opts)).@"struct".fields.len != 0)
+                @compileError("typed constant reductions take no options (masked arms are f32-only); pass .{}");
             return typedConstantExtremum(self, ctx, tag, .max);
         }
 
-        pub fn typedConstantMin(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = .f32, .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
+        pub fn typedConstantMin(self: anytype, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !Tensor(.{ .dtype = .f32, .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
+            comptime if (@typeInfo(@TypeOf(opts)).@"struct".fields.len != 0)
+                @compileError("typed constant reductions take no options (masked arms are f32-only); pass .{}");
             return typedConstantExtremum(self, ctx, tag, .min);
         }
 

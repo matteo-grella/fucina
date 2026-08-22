@@ -527,7 +527,7 @@ pub fn Ops(comptime Self: type) type {
             try requireScopeForComposedGrad(ctx, self.requiresGrad());
             var diag_view = try self.diagonal(ctx, tag_a, tag_b, tag_a);
             defer diag_view.deinit();
-            return diag_view.sum(ctx, tag_a);
+            return diag_view.sum(ctx, tag_a, .{});
         }
 
         /// Embed a rank-1 tensor as the main diagonal of an `[n, n]` matrix

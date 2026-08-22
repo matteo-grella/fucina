@@ -1163,7 +1163,7 @@ test "public non-f32 float Tensor supports forward math" {
     try std.testing.expectEqual(@as(f32, 11), dtype_mod.bf16ToF32(sum.asRawTensor().dataConst()[0]));
     try std.testing.expectEqual(@as(f32, 44), dtype_mod.bf16ToF32(sum.asRawTensor().dataConst()[3]));
 
-    var reduced = try sum.sum(&ctx, .d);
+    var reduced = try sum.sum(&ctx, .d, .{});
     defer reduced.deinit();
     try std.testing.expect(@TypeOf(reduced).dtype == .f32);
     try std.testing.expectEqualSlices(f32, &.{ 33, 77 }, reduced.asRawTensor().dataConst());
@@ -1528,12 +1528,12 @@ test "typed float widened reductions return f32 and scans keep the dtype" {
         var x_t = try x32.to(&ctx, float_dtype);
         defer x_t.deinit();
 
-        var top = try x_t.max(&ctx, .d);
+        var top = try x_t.max(&ctx, .d, .{});
         defer top.deinit();
         comptime std.debug.assert(@TypeOf(top).dtype == .f32);
         try std.testing.expectEqualSlices(f32, &.{ 3.0, 4.0 }, top.asRawTensor().dataConst());
 
-        var bottom = try x_t.min(&ctx, .d);
+        var bottom = try x_t.min(&ctx, .d, .{});
         defer bottom.deinit();
         comptime std.debug.assert(@TypeOf(bottom).dtype == .f32);
         try std.testing.expectEqualSlices(f32, &.{ -2.5, -1.5 }, bottom.asRawTensor().dataConst());
@@ -3285,7 +3285,7 @@ test "tagged autograd differentiates div mean and scalar unary math" {
 
     var x2 = try Tensor(.{ .batch, .d }).variableFromSlice(&ctx, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer x2.deinit();
-    var mean = try x2.mean(&ctx, .d);
+    var mean = try x2.mean(&ctx, .d, .{});
     defer mean.deinit();
     var mean_loss = try mean.sumAll(&ctx);
     defer mean_loss.deinit();
@@ -4283,7 +4283,7 @@ test "tagged autograd cross entropy fuses stable loss and logits gradient" {
     var logits = try Tensor(.{ .token, .vocab }).variableFromSlice(&ctx, .{ 2, 3 }, &.{ 1, 2, 3, 2, 0, -1 });
     defer logits.deinit();
 
-    var loss = try logits.crossEntropy(&ctx, .vocab, &.{ 2, 0 });
+    var loss = try logits.crossEntropy(&ctx, .vocab, &.{ 2, 0 }, .{});
     defer loss.deinit();
 
     const expected_loss = (expectedCrossEntropy(.{ 1, 2, 3 }, 2) + expectedCrossEntropy(.{ 2, 0, -1 }, 0)) / 2;
@@ -4350,7 +4350,7 @@ test "tagged autograd crossEntropyExt matches finite differences across options"
 
         var loss_value: f32 = undefined;
         if (comptime options.reduction == .none) {
-            var losses = try logits.crossEntropyExt(&ctx, .vocab, labels, options);
+            var losses = try logits.crossEntropy(&ctx, .vocab, labels, options);
             defer losses.deinit();
             // The class tag is removed like sum/mean over an axis.
             try std.testing.expect(@TypeOf(losses).axis_tags.len == 1);
@@ -4364,7 +4364,7 @@ test "tagged autograd crossEntropyExt matches finite differences across options"
             loss_value = loss.asRawTensor().item();
             try loss.backward(&ctx);
         } else {
-            var loss = try logits.crossEntropyExt(&ctx, .vocab, labels, options);
+            var loss = try logits.crossEntropy(&ctx, .vocab, labels, options);
             defer loss.deinit();
             loss_value = loss.asRawTensor().item();
             try loss.backward(&ctx);
@@ -4412,9 +4412,9 @@ test "tagged autograd crossEntropyExt default options match crossEntropy" {
     var logits = try Tensor(.{ .token, .vocab }).fromSlice(&ctx, .{ 2, 3 }, &.{ 1, 2, 3, 2, 0, -1 });
     defer logits.deinit();
 
-    var legacy = try logits.crossEntropy(&ctx, .vocab, &.{ 2, 0 });
+    var legacy = try logits.crossEntropy(&ctx, .vocab, &.{ 2, 0 }, .{});
     defer legacy.deinit();
-    var ext = try logits.crossEntropyExt(&ctx, .vocab, &.{ 2, 0 }, .{});
+    var ext = try logits.crossEntropy(&ctx, .vocab, &.{ 2, 0 }, .{});
     defer ext.deinit();
     try std.testing.expectEqual(legacy.asRawTensor().item(), ext.asRawTensor().item());
 }
@@ -4632,7 +4632,7 @@ test "tagged ggml-inspired axis coverage for softmax rmsnorm and cross entropy" 
     defer probs.deinit();
     try expectSoftmaxAxisSumsClose(probs.asRawTensor().dataConst(), 4, 4, 1e-6);
 
-    var loss = try logits.crossEntropy(&ctx, .vocab, &.{ 3, 0, 2, 1 });
+    var loss = try logits.crossEntropy(&ctx, .vocab, &.{ 3, 0, 2, 1 }, .{});
     defer loss.deinit();
     try loss.backward(&ctx);
     var grad = (try logits.grad(&ctx)).?;
@@ -5117,7 +5117,7 @@ test "tagged autograd max and min route gradients to the first extremum" {
     });
     defer x.deinit();
 
-    var m = try x.max(&ctx, .d);
+    var m = try x.max(&ctx, .d, .{});
     defer m.deinit();
     try std.testing.expect(@TypeOf(m).axis_tags.len == 1);
     try std.testing.expect(@TypeOf(m).axis_tags[0] == .token);
@@ -5136,7 +5136,7 @@ test "tagged autograd max and min route gradients to the first extremum" {
     // min with a duplicated extremum (-2 at indices 1 and 3).
     var x2 = try Tensor(.{ .token, .d }).variableFromSlice(&ctx, .{ 1, 5 }, &.{ 4, -2, 7, -2, 0 });
     defer x2.deinit();
-    var mn = try x2.min(&ctx, .d);
+    var mn = try x2.min(&ctx, .d, .{});
     defer mn.deinit();
     try std.testing.expectEqualSlices(f32, &.{-2}, mn.asRawTensor().dataConst());
     var loss2 = try mn.sumAll(&ctx);
@@ -10928,7 +10928,7 @@ test "typed forward ops reject grad-requiring operands" {
     try std.testing.expectError(error.UnsupportedGradient, w.gelu(&ctx));
     try std.testing.expectError(error.UnsupportedGradient, w.add(&ctx, &w));
     try std.testing.expectError(error.UnsupportedGradient, w.flatten(&ctx, .flat));
-    try std.testing.expectError(error.UnsupportedGradient, w.sum(&ctx, .d));
+    try std.testing.expectError(error.UnsupportedGradient, w.sum(&ctx, .d, .{}));
 
     // The detached view is a constant again: the whole forward set works.
     var frozen = try w.detach(&ctx);
@@ -11079,7 +11079,7 @@ test "integer tensors: wrapping pointwise, explicit division, i64 reductions" {
     const U16 = Tensor(.{ .dtype = .u16, .tags = .{ .row, .col } });
     var wide = try U16.fromSlice(&ctx, .{ 2, 3 }, &.{ 65535, 65535, 65535, 1, 2, 3 });
     defer wide.deinit();
-    var row_sum = try wide.sum(&ctx, .col);
+    var row_sum = try wide.sum(&ctx, .col, .{});
     defer row_sum.deinit();
     comptime std.debug.assert(@TypeOf(row_sum).dtype == .i64);
     try std.testing.expectEqualSlices(i64, &.{ 196605, 6 }, try row_sum.dataConst());
@@ -11814,27 +11814,27 @@ test "an all-true mask reproduces the unmasked reduction bitwise" {
     var all_true = try M.fromSlice(&ctx, .{ 3, 64 }, &([_]bool{true} ** (3 * 64)));
     defer all_true.deinit();
 
-    var plain_sum = try x.sum(&ctx, .col);
+    var plain_sum = try x.sum(&ctx, .col, .{});
     defer plain_sum.deinit();
-    var masked_sum = try x.sumExt(&ctx, .col, .{ .mask = &all_true });
+    var masked_sum = try x.sum(&ctx, .col, .{ .mask = &all_true });
     defer masked_sum.deinit();
     try std.testing.expectEqualSlices(f32, try plain_sum.dataConst(), try masked_sum.dataConst());
 
-    var plain_mean = try x.mean(&ctx, .col);
+    var plain_mean = try x.mean(&ctx, .col, .{});
     defer plain_mean.deinit();
-    var masked_mean = try x.meanExt(&ctx, .col, .{ .mask = &all_true });
+    var masked_mean = try x.mean(&ctx, .col, .{ .mask = &all_true });
     defer masked_mean.deinit();
     try std.testing.expectEqualSlices(f32, try plain_mean.dataConst(), try masked_mean.dataConst());
 
-    var plain_max = try x.max(&ctx, .col);
+    var plain_max = try x.max(&ctx, .col, .{});
     defer plain_max.deinit();
-    var masked_max = try x.maxExt(&ctx, .col, .{ .mask = &all_true });
+    var masked_max = try x.max(&ctx, .col, .{ .mask = &all_true });
     defer masked_max.deinit();
     try std.testing.expectEqualSlices(f32, try plain_max.dataConst(), try masked_max.dataConst());
 
-    var plain_min = try x.min(&ctx, .col);
+    var plain_min = try x.min(&ctx, .col, .{});
     defer plain_min.deinit();
-    var masked_min = try x.minExt(&ctx, .col, .{ .mask = &all_true });
+    var masked_min = try x.min(&ctx, .col, .{ .mask = &all_true });
     defer masked_min.deinit();
     try std.testing.expectEqualSlices(f32, try plain_min.dataConst(), try masked_min.dataConst());
 }
@@ -11848,13 +11848,13 @@ test "empty opts forward to the unmasked reduction" {
     var x = try Tensor(.{ .row, .col }).fromSlice(&ctx, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
     defer x.deinit();
 
-    var s = try x.sumExt(&ctx, .col, .{});
+    var s = try x.sum(&ctx, .col, .{});
     defer s.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 3, 7 }, try s.dataConst());
-    var m = try x.meanExt(&ctx, .col, .{});
+    var m = try x.mean(&ctx, .col, .{});
     defer m.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 1.5, 3.5 }, try m.dataConst());
-    var mx = try x.maxExt(&ctx, .col, .{});
+    var mx = try x.max(&ctx, .col, .{});
     defer mx.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 2, 4 }, try mx.dataConst());
 }
@@ -11872,20 +11872,20 @@ test "masked reductions restrict the reduction to the selected elements" {
     var mask = try M.fromSlice(&ctx, .{ 2, 3 }, &.{ true, false, true, false, true, false });
     defer mask.deinit();
 
-    var s = try x.sumExt(&ctx, .col, .{ .mask = &mask });
+    var s = try x.sum(&ctx, .col, .{ .mask = &mask });
     defer s.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 4, 5 }, try s.dataConst());
 
     // The mean divides by the SELECTED count (2 and 1), not by the axis length.
-    var m = try x.meanExt(&ctx, .col, .{ .mask = &mask });
+    var m = try x.mean(&ctx, .col, .{ .mask = &mask });
     defer m.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 2, 5 }, try m.dataConst());
 
-    var mx = try x.maxExt(&ctx, .col, .{ .mask = &mask });
+    var mx = try x.max(&ctx, .col, .{ .mask = &mask });
     defer mx.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 3, 5 }, try mx.dataConst());
 
-    var mn = try x.minExt(&ctx, .col, .{ .mask = &mask });
+    var mn = try x.min(&ctx, .col, .{ .mask = &mask });
     defer mn.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 1, 5 }, try mn.dataConst());
 }
@@ -11908,14 +11908,14 @@ test "masked sum is bitwise equal to the composed maskedFill reference" {
     var drop = try keep.logicalNot(&ctx);
     defer drop.deinit();
 
-    var fused = try x.sumExt(&ctx, .col, .{ .mask = &keep });
+    var fused = try x.sum(&ctx, .col, .{ .mask = &keep });
     defer fused.deinit();
 
     // The status-quo spelling this op replaces: zero the excluded entries into
     // a full-size temporary, then reduce it.
     var zeroed = try x.maskedFill(&ctx, &drop, 0);
     defer zeroed.deinit();
-    var composed = try zeroed.sum(&ctx, .col);
+    var composed = try zeroed.sum(&ctx, .col, .{});
     defer composed.deinit();
 
     // Bitwise, not approximate: the fused kernel substitutes the identity for
@@ -11939,29 +11939,29 @@ test "a lane that selects nothing takes the identity, and empty overrides it" {
     defer mask.deinit();
 
     // A sum has an identity, so the empty lane is 0 — no EmptySelection error.
-    var s = try x.sumExt(&ctx, .col, .{ .mask = &mask });
+    var s = try x.sum(&ctx, .col, .{ .mask = &mask });
     defer s.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 0, 3 }, try s.dataConst());
 
     // A mean has none: 0/0 is NaN unless the caller supplies a sentinel.
-    var m = try x.meanExt(&ctx, .col, .{ .mask = &mask });
+    var m = try x.mean(&ctx, .col, .{ .mask = &mask });
     defer m.deinit();
     try std.testing.expect(std.math.isNan((try m.dataConst())[0]));
     try std.testing.expectEqual(@as(f32, 3), (try m.dataConst())[1]);
 
-    var m_zero = try x.meanExt(&ctx, .col, .{ .mask = &mask, .empty = 0 });
+    var m_zero = try x.mean(&ctx, .col, .{ .mask = &mask, .empty = 0 });
     defer m_zero.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 0, 3 }, try m_zero.dataConst());
 
     // maxval of an empty selection is Fortran's -HUGE (the identity seed).
-    var mx = try x.maxExt(&ctx, .col, .{ .mask = &mask });
+    var mx = try x.max(&ctx, .col, .{ .mask = &mask });
     defer mx.deinit();
     try std.testing.expect(std.math.isNegativeInf((try mx.dataConst())[0]));
-    var mx_sentinel = try x.maxExt(&ctx, .col, .{ .mask = &mask, .empty = -1 });
+    var mx_sentinel = try x.max(&ctx, .col, .{ .mask = &mask, .empty = -1 });
     defer mx_sentinel.deinit();
     try std.testing.expectEqualSlices(f32, &.{ -1, 3 }, try mx_sentinel.dataConst());
 
-    var s_sentinel = try x.sumExt(&ctx, .col, .{ .mask = &mask, .empty = -7 });
+    var s_sentinel = try x.sum(&ctx, .col, .{ .mask = &mask, .empty = -7 });
     defer s_sentinel.deinit();
     try std.testing.expectEqualSlices(f32, &.{ -7, 3 }, try s_sentinel.dataConst());
 }
@@ -11979,15 +11979,15 @@ test "masked reductions work on a non-last axis" {
     var mask = try M.fromSlice(&ctx, .{ 3, 2 }, &.{ true, false, false, true, true, false });
     defer mask.deinit();
 
-    var s = try x.sumExt(&ctx, .row, .{ .mask = &mask });
+    var s = try x.sum(&ctx, .row, .{ .mask = &mask });
     defer s.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 6, 4 }, try s.dataConst());
 
-    var m = try x.meanExt(&ctx, .row, .{ .mask = &mask });
+    var m = try x.mean(&ctx, .row, .{ .mask = &mask });
     defer m.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 3, 4 }, try m.dataConst());
 
-    var mx = try x.maxExt(&ctx, .row, .{ .mask = &mask });
+    var mx = try x.max(&ctx, .row, .{ .mask = &mask });
     defer mx.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 5, 4 }, try mx.dataConst());
 }
@@ -12003,7 +12003,7 @@ test "a float mask is read by truthiness like where and maskedFill" {
     var gate = try Tensor(.{ .row, .col }).fromSlice(&ctx, .{ 2, 2 }, &.{ 1, 0, 0, 2.5 });
     defer gate.deinit();
 
-    var s = try x.sumExt(&ctx, .col, .{ .mask = &gate });
+    var s = try x.sum(&ctx, .col, .{ .mask = &gate });
     defer s.deinit();
     // Truthiness, not weighting: 2.5 selects, it does not scale.
     try std.testing.expectEqualSlices(f32, &.{ 1, 4 }, try s.dataConst());
@@ -12021,7 +12021,7 @@ test "masked sum sends gradient only to the selected elements" {
     var mask = try M.fromSlice(&ctx, .{ 2, 3 }, &.{ true, false, true, false, true, false });
     defer mask.deinit();
 
-    var s = try x.sumExt(&ctx, .col, .{ .mask = &mask });
+    var s = try x.sum(&ctx, .col, .{ .mask = &mask });
     defer s.deinit();
     var loss = try s.sumAll(&ctx);
     defer loss.deinit();
@@ -12045,7 +12045,7 @@ test "masked mean divides the gradient by the selected count" {
     var mask = try M.fromSlice(&ctx, .{ 2, 3 }, &.{ true, false, true, false, true, false });
     defer mask.deinit();
 
-    var m = try x.meanExt(&ctx, .col, .{ .mask = &mask });
+    var m = try x.mean(&ctx, .col, .{ .mask = &mask });
     defer m.deinit();
     var loss = try m.sumAll(&ctx);
     defer loss.deinit();
@@ -12068,7 +12068,7 @@ test "an empty masked-mean lane produces no gradient" {
     var mask = try M.fromSlice(&ctx, .{ 2, 2 }, &.{ false, false, true, true });
     defer mask.deinit();
 
-    var m = try x.meanExt(&ctx, .col, .{ .mask = &mask, .empty = 0 });
+    var m = try x.mean(&ctx, .col, .{ .mask = &mask, .empty = 0 });
     defer m.deinit();
     var loss = try m.sumAll(&ctx);
     defer loss.deinit();
@@ -12100,7 +12100,7 @@ test "masked extremum routes gradient to the first selected winner and skips emp
     });
     defer mask.deinit();
 
-    var mx = try x.maxExt(&ctx, .col, .{ .mask = &mask, .empty = 0 });
+    var mx = try x.max(&ctx, .col, .{ .mask = &mask, .empty = 0 });
     defer mx.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 5, 2, 0 }, try mx.dataConst());
 
@@ -12122,13 +12122,13 @@ test "masked extremum routes gradient to the first selected winner and skips emp
 var masked_reduce_gradcheck_mask: ?*const Tensor(.{ .dtype = .bool, .tags = .{ .row, .col } }) = null;
 
 fn maskedSumGradcheckLoss(c: *ExecContext, input: *const Tensor(.{ .row, .col })) !Tensor(.{}) {
-    var s = try input.sumExt(c, .col, .{ .mask = masked_reduce_gradcheck_mask.? });
+    var s = try input.sum(c, .col, .{ .mask = masked_reduce_gradcheck_mask.? });
     defer s.deinit();
     return s.sumAll(c);
 }
 
 fn maskedMeanGradcheckLoss(c: *ExecContext, input: *const Tensor(.{ .row, .col })) !Tensor(.{}) {
-    var m = try input.meanExt(c, .col, .{ .mask = masked_reduce_gradcheck_mask.? });
+    var m = try input.mean(c, .col, .{ .mask = masked_reduce_gradcheck_mask.? });
     defer m.deinit();
     return m.sumAll(c);
 }

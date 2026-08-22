@@ -151,7 +151,7 @@ into [REFERENCE.md](REFERENCE.md), whose snippets are machine-verified.
 | Reductions, scans | SIMD-promoted sum/mean/max/min/prod/logsumexp; `cumsum`/`cumprod` (+ `-Dvector-scan`) | §4.7 |
 | Attention | `groupedAttention`: causal/bidirectional, sliding window, additive bias, sinks, ALiBi-style `max_bias`, f32/f16/q8 KV, saved-stats backward | §4.13 |
 | RoPE | interleaved/half/tail-aligned modes, partial rotary, freq-factor (YaRN-style) tables, inverse tables, hand-fillable `RopeTable` | §4.12 |
-| Norms, softmax, losses | rmsNorm family (incl. fused mul/add/rope), layerNorm, groupNorm; softmax with scale/mask/sinks; `crossEntropyExt` (smoothing, ignore-index, accum scale), mse/huber/bce/kl/nll | §4.10–4.11, §4.15 |
+| Norms, softmax, losses | rmsNorm family (incl. fused mul/add/rope), layerNorm, groupNorm; softmax with scale/mask/sinks; `crossEntropy` (smoothing, ignore-index, accum scale), mse/huber/bce/kl/nll | §4.10–4.11, §4.15 |
 | Vision / conv | channel-last conv2d (im2col GEMM + Winograd), conv1d/causal/transpose, pool2d, prelu, channelAffine, upsample, zeroPad2d — all with autograd | §4.14 |
 | MoE | `routerTopK`, `moeExpertFfn`/`Batch`, `MoeRhs` packed containers, `moe_chain` scheduling, disk-streamed experts (`ExpertStore`) for models larger than RAM | §4.16, §4.18, §13.2 |
 | Autograd machinery | seeded backward (`backwardWithGrad`), `noGrad`, activation checkpointing, `customVjp`, `gradcheck`; VJP inventory in §5.8 | §5 |

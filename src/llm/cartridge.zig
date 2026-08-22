@@ -749,8 +749,8 @@ pub fn distillLoss(
     defer weighted.deinit();
 
     var reduced = switch (options.reduction) {
-        .mean => try weighted.mean(ctx, .entry),
-        .sum => try weighted.sum(ctx, .entry),
+        .mean => try weighted.mean(ctx, .entry, .{}),
+        .sum => try weighted.sum(ctx, .entry, .{}),
     };
     if (options.loss_scale == 1) return reduced;
     defer reduced.deinit(); // scope-owned: safe no-op, the graph survives

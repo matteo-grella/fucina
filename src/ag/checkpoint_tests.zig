@@ -882,7 +882,7 @@ fn trainStep(
     else
         try Blocks.layer2(ctx, &a1, &model.w2, &model.b2);
     const logits = try Blocks.layer3(ctx, &a2, &model.w3, &model.b3);
-    const loss = try logits.crossEntropy(ctx, .class, labels);
+    const loss = try logits.crossEntropy(ctx, .class, labels, .{});
     try loss.backward(ctx);
     try opt.step(ctx);
     opt.zeroGrad();

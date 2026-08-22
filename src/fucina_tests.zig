@@ -62,7 +62,7 @@ test "public Tensor is the inline autograd facade" {
     try std.testing.expect(@TypeOf(x).axis_tags[0] == ._0);
     try std.testing.expect(@TypeOf(x).axis_tags[1] == ._1);
 
-    var y = try x.sum(&ctx, ._1);
+    var y = try x.sum(&ctx, ._1, .{});
     defer y.deinit();
     try std.testing.expect(!y.requiresGrad());
     try std.testing.expectEqualSlices(usize, &.{2}, y.asRawTensor().shape.slice());
@@ -102,7 +102,7 @@ test "public Tensor can opt into gradients" {
 }
 
 fn linearCeGcLoss(ctx: *ExecContext, x: *const Tensor(.{ .row, .k }), w: *const Tensor(.{ .class, .k })) !Tensor(.{}) {
-    return x.linearCrossEntropyExt(ctx, w, &.{ 2, 9, 0, 5 }, .{ .ignore_index = 9, .label_smoothing = 0.1 });
+    return x.linearCrossEntropy(ctx, w, &.{ 2, 9, 0, 5 }, .{ .ignore_index = 9, .label_smoothing = 0.1 });
 }
 
 test "public Tensor fused linearCrossEntropyExt matches composed dot + crossEntropyExt" {
@@ -138,7 +138,7 @@ test "public Tensor fused linearCrossEntropyExt matches composed dot + crossEntr
         defer w.deinit();
         var logits = try x.dot(&ctx, &w, .k);
         defer logits.deinit();
-        var loss = try logits.crossEntropyExt(&ctx, .class, &labels, options);
+        var loss = try logits.crossEntropy(&ctx, .class, &labels, options);
         defer loss.deinit();
         try loss.backward(&ctx);
         loss_ref = try loss.item();
@@ -155,7 +155,7 @@ test "public Tensor fused linearCrossEntropyExt matches composed dot + crossEntr
     defer x.deinit();
     var w = try Tensor(.{ .class, .k }).variableFromSlice(&ctx, .{ classes, in_dim }, &w_data);
     defer w.deinit();
-    var loss = try x.linearCrossEntropyExt(&ctx, &w, &labels, options);
+    var loss = try x.linearCrossEntropy(&ctx, &w, &labels, options);
     defer loss.deinit();
     try loss.backward(&ctx);
     try std.testing.expectApproxEqAbs(loss_ref, try loss.item(), 1e-6);
@@ -177,7 +177,7 @@ test "public Tensor fused linearCrossEntropyExt matches composed dot + crossEntr
 }
 
 fn linearDistillGcLoss(ctx: *ExecContext, x: *const Tensor(.{ .row, .k }), w: *const Tensor(.{ .class, .k })) !Tensor(.{}) {
-    return x.linearDistillExt(ctx, w, &.{ 2, 2, 0, 3 }, &.{ 1, 4, 0, 7 }, &.{ 0.6, 0.3, 0.9, 0.5 }, .{ .loss_scale = 0.7 });
+    return x.linearDistill(ctx, w, &.{ 2, 2, 0, 3 }, &.{ 1, 4, 0, 7 }, &.{ 0.6, 0.3, 0.9, 0.5 }, .{ .loss_scale = 0.7 });
 }
 
 test "public Tensor fused linearDistillExt matches the composed sparse-gather route" {
@@ -232,7 +232,7 @@ test "public Tensor fused linearDistillExt matches the composed sparse-gather ro
         defer weights.deinit();
         var weighted = try picked.mul(&ctx, &weights);
         defer weighted.deinit();
-        var reduced = try weighted.mean(&ctx, .entry);
+        var reduced = try weighted.mean(&ctx, .entry, .{});
         defer reduced.deinit();
         var loss = try reduced.scale(&ctx, scale);
         defer loss.deinit();
@@ -251,7 +251,7 @@ test "public Tensor fused linearDistillExt matches the composed sparse-gather ro
     defer x.deinit();
     var w = try Tensor(.{ .class, .k }).variableFromSlice(&ctx, .{ classes, in_dim }, &w_data);
     defer w.deinit();
-    var loss = try x.linearDistillExt(&ctx, &w, &t_rows, &t_classes, &t_probs, .{ .loss_scale = scale });
+    var loss = try x.linearDistill(&ctx, &w, &t_rows, &t_classes, &t_probs, .{ .loss_scale = scale });
     defer loss.deinit();
     try loss.backward(&ctx);
     try std.testing.expectApproxEqAbs(loss_ref, try loss.item(), 1e-6);
@@ -375,7 +375,7 @@ test "README 'What it looks like' snippet stays compilable and correct" {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
         var logits = try Snippet.forward(&ctx, &model, &x);
-        var loss = try logits.crossEntropy(&ctx, .class, &labels);
+        var loss = try logits.crossEntropy(&ctx, .class, &labels, .{});
         try loss.backward(&ctx);
         try std.testing.expect(std.math.isFinite(try loss.item()));
         logits.deinit(); // no-op borrow-release: the scope owns it

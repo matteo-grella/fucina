@@ -34,7 +34,7 @@ for (0..total_steps) |step_i| {
     const h = try x.dot(&ctx, &w1, .in);          // no keeps, no defers
     const a = try h.add(&ctx, &b1);
     const z = try a.tanh(&ctx);
-    const loss = try z.crossEntropy(&ctx, .class, labels);
+    const loss = try z.crossEntropy(&ctx, .class, labels, .{});
     try loss.backward(&ctx);
     _ = try opt.clipGradNorm(&ctx, 1.0);          // after backward, before step
     try opt.step(&ctx);
@@ -271,9 +271,9 @@ sched.apply(optim.warmupCosineFactor(macro_step, ...)); // keyed by MACRO step
 
 ## 5. Loss: cross-entropy options
 
-`x.crossEntropy(ctx, .class, labels)` is plain mean CE.
-`x.crossEntropyExt(ctx, .class, labels, options)` adds the PyTorch-parity
-knobs (`exec.CrossEntropyOptions`, comptime — `src/exec/loss.zig:33`):
+`x.crossEntropy(ctx, .class, labels, .{})` is plain mean CE; the trailing
+`options` argument adds the PyTorch-parity knobs
+(`exec.CrossEntropyOptions`, comptime — `src/exec/loss.zig:33`):
 
 - `ignore_index` — sentinel label: those positions contribute zero loss and
   zero gradient and are excluded from the `.mean` denominator (PyTorch
@@ -298,15 +298,15 @@ The autograd CE node saves the forward's per-row {max, sum_exp} (8 B/row),
 so its backward emits final gradients in ONE pass — bitwise identical to
 recompute, 22.7 → 14.0 ms at 1024x151936.
 
-**Fused projection + loss:** `x.linearCrossEntropyExt(ctx, &w, labels, options)`
-computes `crossEntropyExt(x·wᵀ)` as ONE differentiable op — `x` is
+**Fused projection + loss:** `x.linearCrossEntropy(ctx, &w, labels, options)`
+computes `crossEntropy(x·wᵀ)` as ONE differentiable op — `x` is
 `[row, shared]`, `w` is `[class, shared]` (rank-2, shared tag last, f32),
 gradients flow to BOTH operands, and the same reduction contract applies.
 The logits never enter the graph: the record saves them with the row stats,
 and the backward overwrites them IN PLACE with the logit gradient before the
 two gradient GEMMs, so the full `[rows, classes]` gradient never costs a
 second buffer (−622 MB peak and ~4% faster than the composed dot +
-crossEntropyExt backward at 1024x151936x1024 on M1). The record is
+crossEntropy backward at 1024x151936x1024 on M1). The record is
 single-use: re-running its VJP errors with
 `LinearCrossEntropyBackwardConsumed` instead of computing garbage (a plain
 repeated `backward()` on the same graph is already rejected upstream with

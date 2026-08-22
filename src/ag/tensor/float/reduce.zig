@@ -54,7 +54,7 @@ pub fn Ops(comptime Self: type) type {
         pub fn any(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = .bool, .tags = removeTag(tags, tag) }) {
             var truthy = try self.compare(ctx, .ne, 0);
             defer truthy.deinit();
-            var count = try truthy.sum(ctx, tag);
+            var count = try truthy.sum(ctx, tag, .{});
             defer count.deinit();
             return count.compare(ctx, .ge, 1);
         }
@@ -66,7 +66,7 @@ pub fn Ops(comptime Self: type) type {
         pub fn all(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = .bool, .tags = removeTag(tags, tag) }) {
             var zero = try self.compare(ctx, .eq, 0);
             defer zero.deinit();
-            var count = try zero.sum(ctx, tag);
+            var count = try zero.sum(ctx, tag, .{});
             defer count.deinit();
             return count.compare(ctx, .lt, 1);
         }
@@ -89,14 +89,14 @@ pub fn Ops(comptime Self: type) type {
             return count.compare(ctx, .lt, 1);
         }
 
-        pub fn sum(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(removeTag(tags, tag)) {
+        fn sumUnmasked(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(removeTag(tags, tag)) {
             const result_tags = removeTag(tags, tag);
             var value = try ctx.sumAxisRank(tag_rank, self.asRawTensor(), axis(tag));
             errdefer value.deinit();
             return finishOp(result_tags, ctx, value, self.requiresGrad(), SumBackward(tags, result_tags), .{ ctx.allocator, self.grad_state, &self.value });
         }
 
-        pub fn mean(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(removeTag(tags, tag)) {
+        fn meanUnmasked(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(removeTag(tags, tag)) {
             const result_tags = removeTag(tags, tag);
             const reduce_axis = comptime axis(tag);
             var value = try ctx.meanAxisRank(tag_rank, self.asRawTensor(), reduce_axis);
@@ -104,102 +104,63 @@ pub fn Ops(comptime Self: type) type {
             return finishOp(result_tags, ctx, value, self.requiresGrad(), MeanBackward(tags, result_tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value });
         }
 
-        /// Sum over `tag` restricted to the elements a mask selects — the
-        /// `sum(a, dim, mask)` of the Fortran intrinsic set.
+        /// Sum over `tag` (torch.sum); with a mask, restricted to the
+        /// elements the mask selects — the `sum(a, dim, mask)` of the
+        /// Fortran intrinsic set.
         ///
-        /// `opts` is `.{}` (plain `sum`), `.{ .mask = &m }`, or
+        /// `opts` is `.{}` (plain sum), `.{ .mask = &m }`, or
         /// `.{ .mask = &m, .empty = v }`; any other field is a compile error.
         /// The mask follows the `where`/`maskedFill` convention: `.bool` or a
         /// float read by truthiness (`!= 0`), `self`'s exact tags and shape,
         /// non-grad. Compose `broadcastTo` for a smaller mask.
         ///
-        /// The point is fusion. The composed spelling
-        /// (`maskedFill` then `sum`) materializes a full f32 copy of the input
+        /// The masked arm's point is fusion. The composed spelling
+        /// (`maskedFill` then sum) materializes a full f32 copy of the input
         /// and walks it twice; this accumulates straight out of the source
-        /// through the same SIMD kernel `sum` uses, so an ALL-TRUE mask
-        /// reproduces `sum` bitwise.
+        /// through the same SIMD kernel the plain sum uses, so an ALL-TRUE
+        /// mask reproduces the plain sum bitwise.
         ///
         /// A lane whose mask selects nothing yields `empty orelse 0` — the
         /// operation's identity, which is Fortran's answer and the reason a
         /// masked reduction has no `EmptySelection` error the way
         /// `maskedSelect` does. Differentiable in `self`: an excluded element
         /// contributed nothing, so it receives nothing back.
-        pub fn sumExt(self: *const Self, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag)) {
+        pub fn sum(self: *const Self, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag)) {
             comptime validateMaskedReduceOptions(@TypeOf(opts));
-            if (comptime !@hasField(@TypeOf(opts), "mask")) return self.sum(ctx, tag);
+            if (comptime !@hasField(@TypeOf(opts), "mask")) return sumUnmasked(self, ctx, tag);
 
             const Mask = TensorObject(@TypeOf(opts.mask));
-            comptime validateMaskType(Mask, "sumExt");
+            comptime validateMaskType(Mask, "sum");
             const result_tags = removeTag(tags, tag);
             var value = try ctx.sumMaskedAxisRank(Mask.dtype, tag_rank, self.asRawTensor(), opts.mask.asRawTensor(), axis(tag), maskedReduceEmpty(opts));
             errdefer value.deinit();
             return finishOp(result_tags, ctx, value, self.requiresGrad(), MaskedSumBackward(tags, result_tags, Mask.dtype), .{ ctx.allocator, self.grad_state, &self.value, opts.mask.asRawTensor() });
         }
 
-        /// Mean over `tag` of the elements a mask selects: the masked sum
-        /// divided by the per-lane count of SELECTED elements, not by the axis
-        /// length. This is padding-masked pooling in one op.
+        /// Mean over `tag` (torch.mean); with a mask, the masked sum divided
+        /// by the per-lane count of SELECTED elements, not by the axis
+        /// length — padding-masked pooling in one op.
         ///
-        /// `opts` and the mask contract are `sumExt`'s. An all-true mask
-        /// reproduces `mean` bitwise.
+        /// `opts` and the mask contract are `sum`'s. An all-true mask
+        /// reproduces the plain mean bitwise.
         ///
-        /// A lane selecting nothing yields `empty orelse NaN`: unlike a sum, a
-        /// mean has no identity to fall back on (0/0), so the caller either
-        /// supplies a sentinel or gets the IEEE answer. Such a lane's gradient
-        /// is zero — it produced a constant, not a function of the data.
-        pub fn meanExt(self: *const Self, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag)) {
+        /// A masked lane selecting nothing yields `empty orelse NaN`: unlike
+        /// a sum, a mean has no identity to fall back on (0/0), so the caller
+        /// either supplies a sentinel or gets the IEEE answer. Such a lane's
+        /// gradient is zero — it produced a constant, not a function of the
+        /// data.
+        pub fn mean(self: *const Self, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag)) {
             comptime validateMaskedReduceOptions(@TypeOf(opts));
-            if (comptime !@hasField(@TypeOf(opts), "mask")) return self.mean(ctx, tag);
+            if (comptime !@hasField(@TypeOf(opts), "mask")) return meanUnmasked(self, ctx, tag);
 
             const Mask = TensorObject(@TypeOf(opts.mask));
-            comptime validateMaskType(Mask, "meanExt");
+            comptime validateMaskType(Mask, "mean");
             const result_tags = removeTag(tags, tag);
             var raw = try ctx.meanMaskedAxisRank(Mask.dtype, tag_rank, self.asRawTensor(), opts.mask.asRawTensor(), axis(tag), maskedReduceEmpty(opts));
             var raw_values: ?RawTensor = raw.values;
             errdefer if (raw_values) |*value| value.deinit();
             defer raw.counts.deinit();
             const out = try finishOp(result_tags, ctx, raw_values.?, self.requiresGrad(), MaskedMeanBackward(tags, result_tags, Mask.dtype), .{ ctx.allocator, self.grad_state, &self.value, opts.mask.asRawTensor(), &raw.counts });
-            raw_values = null;
-            return out;
-        }
-
-        /// Max over `tag` of the elements a mask selects — `maxval(a, dim, mask)`.
-        /// `opts` and the mask contract are `sumExt`'s; tie-break and NaN
-        /// semantics are `max`'s, applied to the selected elements only.
-        /// A lane selecting nothing yields `empty orelse -inf` and receives no
-        /// gradient (no element participated).
-        pub fn maxExt(self: *const Self, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag)) {
-            return extremumExt(self, ctx, tag, .max, opts);
-        }
-
-        /// Min over `tag` of the elements a mask selects; empty lanes yield
-        /// `empty orelse +inf`. See `maxExt`.
-        pub fn minExt(self: *const Self, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag)) {
-            return extremumExt(self, ctx, tag, .min, opts);
-        }
-
-        fn extremumExt(self: *const Self, ctx: *ExecContext, comptime tag: Tag, comptime op: enum { max, min }, opts: anytype) !Tensor(removeTag(tags, tag)) {
-            comptime validateMaskedReduceOptions(@TypeOf(opts));
-            if (comptime !@hasField(@TypeOf(opts), "mask")) {
-                return switch (op) {
-                    .max => self.max(ctx, tag),
-                    .min => self.min(ctx, tag),
-                };
-            }
-
-            const Mask = TensorObject(@TypeOf(opts.mask));
-            comptime validateMaskType(Mask, "maxExt/minExt");
-            const result_tags = removeTag(tags, tag);
-            const reduce_axis = comptime axis(tag);
-            const empty_value = maskedReduceEmpty(opts);
-            var raw = switch (op) {
-                .max => try ctx.maxMaskedAxisRank(Mask.dtype, tag_rank, self.asRawTensor(), opts.mask.asRawTensor(), reduce_axis, empty_value),
-                .min => try ctx.minMaskedAxisRank(Mask.dtype, tag_rank, self.asRawTensor(), opts.mask.asRawTensor(), reduce_axis, empty_value),
-            };
-            var raw_values: ?RawTensor = raw.values;
-            errdefer if (raw_values) |*value| value.deinit();
-            defer raw.indices.deinit();
-            const out = try finishOp(result_tags, ctx, raw_values.?, self.requiresGrad(), MaskedMinMaxBackward(tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value, &raw.indices });
             raw_values = null;
             return out;
         }
