@@ -257,7 +257,87 @@ comptime {
     std.debug.assert(@sizeOf(BlockNVFP4) == 36);
 }
 
+/// One registry row per block-quantized storage format.
+pub const BlockFormat = struct {
+    dtype: DType,
+    Block: type,
+    /// Logical elements per block (`blockSize`).
+    elems: usize,
+};
+
+/// The block-format registry: the single source every per-format
+/// enumeration derives from (`Storage`, `kind`, the scalar/accumulator
+/// exclusions, GGUF's `dtypeForGgmlType`). Adding a format is: define its
+/// packed Block struct (with the size assert above), add its `DType` tag,
+/// add one row here — the completeness check below makes a tag claimed by
+/// neither this table nor `scalar_dtypes` (or by both) a compile error, so
+/// a forgotten row can never fall through a switch as a scalar.
+pub const block_formats = [_]BlockFormat{
+    .{ .dtype = .q1_0, .Block = BlockQ1_0, .elems = q1_0_block_size },
+    .{ .dtype = .q2_0, .Block = BlockQ2_0, .elems = q2_0_block_size },
+    .{ .dtype = .q4_0, .Block = BlockQ4_0, .elems = q4_0_block_size },
+    .{ .dtype = .q4_1, .Block = BlockQ4_1, .elems = q4_1_block_size },
+    .{ .dtype = .q5_0, .Block = BlockQ5_0, .elems = q5_0_block_size },
+    .{ .dtype = .q5_1, .Block = BlockQ5_1, .elems = q5_1_block_size },
+    .{ .dtype = .q8_0, .Block = BlockQ8_0, .elems = q8_0_block_size },
+    .{ .dtype = .q8_1, .Block = BlockQ8_1, .elems = q8_1_block_size },
+    .{ .dtype = .q2_k, .Block = BlockQ2_K, .elems = qk_k_block_size },
+    .{ .dtype = .q3_k, .Block = BlockQ3_K, .elems = qk_k_block_size },
+    .{ .dtype = .q4_k, .Block = BlockQ4_K, .elems = qk_k_block_size },
+    .{ .dtype = .q5_k, .Block = BlockQ5_K, .elems = qk_k_block_size },
+    .{ .dtype = .q6_k, .Block = BlockQ6_K, .elems = qk_k_block_size },
+    .{ .dtype = .q8_k, .Block = BlockQ8_K, .elems = qk_k_block_size },
+    .{ .dtype = .iq1_s, .Block = BlockIQ1_S, .elems = qk_k_block_size },
+    .{ .dtype = .iq1_m, .Block = BlockIQ1_M, .elems = qk_k_block_size },
+    .{ .dtype = .iq2_xxs, .Block = BlockIQ2_XXS, .elems = qk_k_block_size },
+    .{ .dtype = .iq2_xs, .Block = BlockIQ2_XS, .elems = qk_k_block_size },
+    .{ .dtype = .iq2_s, .Block = BlockIQ2_S, .elems = qk_k_block_size },
+    .{ .dtype = .iq3_xxs, .Block = BlockIQ3_XXS, .elems = qk_k_block_size },
+    .{ .dtype = .iq3_s, .Block = BlockIQ3_S, .elems = qk_k_block_size },
+    .{ .dtype = .iq4_nl, .Block = BlockIQ4_NL, .elems = iq4_nl_block_size },
+    .{ .dtype = .iq4_xs, .Block = BlockIQ4_XS, .elems = qk_k_block_size },
+    .{ .dtype = .tq1_0, .Block = BlockTQ1_0, .elems = qk_k_block_size },
+    .{ .dtype = .tq2_0, .Block = BlockTQ2_0, .elems = qk_k_block_size },
+    .{ .dtype = .mxfp4, .Block = BlockMXFP4, .elems = mxfp4_block_size },
+    .{ .dtype = .nvfp4, .Block = BlockNVFP4, .elems = nvfp4_block_size },
+};
+
+/// The registry's complement: every non-block dtype, listed once.
+const scalar_dtypes = [_]DType{
+    .bool, .u8,   .u16, .i8,  .i16,     .i32,     .i64,
+    .f16,  .bf16, .f32, .f64, .f8_e4m3, .f8_e5m2,
+};
+
+comptime {
+    @setEvalBranchQuota(10_000);
+    // Completeness: every DType tag appears exactly once across
+    // `scalar_dtypes` and `block_formats`. Fires on any build that analyzes
+    // this module, not just on the first mishandled use.
+    for (@typeInfo(DType).@"enum".fields) |field| {
+        const dt: DType = @enumFromInt(field.value);
+        var claims: usize = 0;
+        for (scalar_dtypes) |s| {
+            if (s == dt) claims += 1;
+        }
+        for (block_formats) |row| {
+            if (row.dtype == dt) claims += 1;
+        }
+        if (claims != 1) @compileError("DType ." ++ field.name ++
+            " must appear exactly once across dtype.scalar_dtypes and dtype.block_formats");
+    }
+}
+
+fn blockFormatIndex(comptime dtype: DType) ?usize {
+    @setEvalBranchQuota(10_000);
+    inline for (block_formats, 0..) |row, i| {
+        if (row.dtype == dtype) return i;
+    }
+    return null;
+}
+
 pub fn Scalar(comptime dtype: DType) type {
+    if (comptime blockFormatIndex(dtype) != null)
+        @compileError("block-quantized dtypes do not have one scalar storage element per logical tensor element");
     return switch (dtype) {
         .bool => bool,
         .u8 => u8,
@@ -271,140 +351,30 @@ pub fn Scalar(comptime dtype: DType) type {
         .f32 => f32,
         .f64 => f64,
         .f8_e4m3, .f8_e5m2 => u8,
-        .q1_0,
-        .q2_0,
-        .q4_0,
-        .q4_1,
-        .q5_0,
-        .q5_1,
-        .q8_0,
-        .q8_1,
-        .q2_k,
-        .q3_k,
-        .q4_k,
-        .q5_k,
-        .q6_k,
-        .q8_k,
-        .iq1_s,
-        .iq1_m,
-        .iq2_xxs,
-        .iq2_xs,
-        .iq2_s,
-        .iq3_xxs,
-        .iq3_s,
-        .iq4_nl,
-        .iq4_xs,
-        .tq1_0,
-        .tq2_0,
-        .mxfp4,
-        .nvfp4,
-        => @compileError("block-quantized dtypes do not have one scalar storage element per logical tensor element"),
+        else => unreachable, // claimed by block_formats (completeness check above)
     };
 }
 
 pub fn Storage(comptime dtype: DType) type {
-    return switch (dtype) {
-        .q1_0 => BlockQ1_0,
-        .q2_0 => BlockQ2_0,
-        .q4_0 => BlockQ4_0,
-        .q4_1 => BlockQ4_1,
-        .q5_0 => BlockQ5_0,
-        .q5_1 => BlockQ5_1,
-        .q8_0 => BlockQ8_0,
-        .q8_1 => BlockQ8_1,
-        .q2_k => BlockQ2_K,
-        .q3_k => BlockQ3_K,
-        .q4_k => BlockQ4_K,
-        .q5_k => BlockQ5_K,
-        .q6_k => BlockQ6_K,
-        .q8_k => BlockQ8_K,
-        .iq1_s => BlockIQ1_S,
-        .iq1_m => BlockIQ1_M,
-        .iq2_xxs => BlockIQ2_XXS,
-        .iq2_xs => BlockIQ2_XS,
-        .iq2_s => BlockIQ2_S,
-        .iq3_xxs => BlockIQ3_XXS,
-        .iq3_s => BlockIQ3_S,
-        .iq4_nl => BlockIQ4_NL,
-        .iq4_xs => BlockIQ4_XS,
-        .tq1_0 => BlockTQ1_0,
-        .tq2_0 => BlockTQ2_0,
-        .mxfp4 => BlockMXFP4,
-        .nvfp4 => BlockNVFP4,
-        else => Scalar(dtype),
-    };
+    if (comptime blockFormatIndex(dtype)) |i| return block_formats[i].Block;
+    return Scalar(dtype);
 }
 
 pub fn Accumulator(comptime dtype: DType) type {
+    if (comptime blockFormatIndex(dtype) != null)
+        @compileError("block-quantized dtypes do not have scalar accumulators");
     return switch (dtype) {
         .f64 => f64,
         .f16, .bf16, .f32 => f32,
         .f8_e4m3, .f8_e5m2 => f32,
         .bool, .u8, .u16 => u64,
         .i8, .i16, .i32, .i64 => i64,
-        .q1_0,
-        .q2_0,
-        .q4_0,
-        .q4_1,
-        .q5_0,
-        .q5_1,
-        .q8_0,
-        .q8_1,
-        .q2_k,
-        .q3_k,
-        .q4_k,
-        .q5_k,
-        .q6_k,
-        .q8_k,
-        .iq1_s,
-        .iq1_m,
-        .iq2_xxs,
-        .iq2_xs,
-        .iq2_s,
-        .iq3_xxs,
-        .iq3_s,
-        .iq4_nl,
-        .iq4_xs,
-        .tq1_0,
-        .tq2_0,
-        .mxfp4,
-        .nvfp4,
-        => @compileError("block-quantized dtypes do not have scalar accumulators"),
+        else => unreachable, // claimed by block_formats (completeness check above)
     };
 }
 
 pub fn kind(comptime dtype: DType) DTypeKind {
-    return switch (dtype) {
-        .q1_0,
-        .q2_0,
-        .q4_0,
-        .q4_1,
-        .q5_0,
-        .q5_1,
-        .q8_0,
-        .q8_1,
-        .q2_k,
-        .q3_k,
-        .q4_k,
-        .q5_k,
-        .q6_k,
-        .q8_k,
-        .iq1_s,
-        .iq1_m,
-        .iq2_xxs,
-        .iq2_xs,
-        .iq2_s,
-        .iq3_xxs,
-        .iq3_s,
-        .iq4_nl,
-        .iq4_xs,
-        .tq1_0,
-        .tq2_0,
-        .mxfp4,
-        .nvfp4,
-        => .block_quantized,
-        else => .scalar,
-    };
+    return if (comptime blockFormatIndex(dtype) != null) .block_quantized else .scalar;
 }
 
 pub fn isScalar(comptime dtype: DType) bool {
@@ -555,37 +525,8 @@ pub fn logicalDType(comptime dtype: DType) DType {
 }
 
 pub fn blockSize(comptime dtype: DType) usize {
-    return switch (dtype) {
-        .q1_0 => q1_0_block_size,
-        .q2_0 => q2_0_block_size,
-        .q4_0 => q4_0_block_size,
-        .q4_1 => q4_1_block_size,
-        .q5_0 => q5_0_block_size,
-        .q5_1 => q5_1_block_size,
-        .q8_0 => q8_0_block_size,
-        .q8_1 => q8_1_block_size,
-        .q2_k,
-        .q3_k,
-        .q4_k,
-        .q5_k,
-        .q6_k,
-        .q8_k,
-        .iq1_s,
-        .iq1_m,
-        .iq2_xxs,
-        .iq2_xs,
-        .iq2_s,
-        .iq3_xxs,
-        .iq3_s,
-        .iq4_xs,
-        .tq1_0,
-        .tq2_0,
-        => qk_k_block_size,
-        .iq4_nl => iq4_nl_block_size,
-        .mxfp4 => mxfp4_block_size,
-        .nvfp4 => nvfp4_block_size,
-        else => @compileError("scalar dtypes do not have quantized blocks"),
-    };
+    if (comptime blockFormatIndex(dtype)) |i| return block_formats[i].elems;
+    @compileError("scalar dtypes do not have quantized blocks");
 }
 
 pub fn blockByteSize(comptime dtype: DType) usize {

@@ -111,39 +111,21 @@ pub const GgmlType = enum(u32) {
 };
 
 pub fn dtypeForGgmlType(value: GgmlType) ?DType {
-    return switch (value) {
-        .f32 => .f32,
-        .f16 => .f16,
-        .bf16 => .bf16,
-        .q1_0 => .q1_0,
-        .q2_0 => .q2_0,
-        .q4_0 => .q4_0,
-        .q4_1 => .q4_1,
-        .q5_0 => .q5_0,
-        .q5_1 => .q5_1,
-        .q8_0 => .q8_0,
-        .q8_1 => .q8_1,
-        .q2_k => .q2_k,
-        .q3_k => .q3_k,
-        .q4_k => .q4_k,
-        .q5_k => .q5_k,
-        .q6_k => .q6_k,
-        .q8_k => .q8_k,
-        .iq1_s => .iq1_s,
-        .iq1_m => .iq1_m,
-        .iq2_xxs => .iq2_xxs,
-        .iq2_xs => .iq2_xs,
-        .iq2_s => .iq2_s,
-        .iq3_xxs => .iq3_xxs,
-        .iq3_s => .iq3_s,
-        .iq4_nl => .iq4_nl,
-        .iq4_xs => .iq4_xs,
-        .tq1_0 => .tq1_0,
-        .tq2_0 => .tq2_0,
-        .mxfp4 => .mxfp4,
-        .nvfp4 => .nvfp4,
-        else => null,
-    };
+    switch (value) {
+        .f32 => return .f32,
+        .f16 => return .f16,
+        .bf16 => return .bf16,
+        else => {},
+    }
+    // Quant formats: GgmlType and DType share tag names, one registry
+    // row per format (dtype.block_formats is the single source). A
+    // registry format with no GgmlType tag is a compile error here —
+    // every block format carries its wire id.
+    @setEvalBranchQuota(10_000);
+    inline for (dtype_mod.block_formats) |row| {
+        if (value == @field(GgmlType, @tagName(row.dtype))) return row.dtype;
+    }
+    return null;
 }
 
 /// A parsed GGUF metadata value. Scalars are widened (all integer types to
@@ -580,44 +562,25 @@ pub fn tensorByteLen(ggml_type: GgmlType, dims: []const usize) !usize {
         logical_count = try std.math.mul(usize, logical_count, dim);
     }
 
+    @setEvalBranchQuota(10_000);
+    inline for (dtype_mod.block_formats) |row| {
+        if (ggml_type == @field(GgmlType, @tagName(row.dtype)))
+            return quantizedByteLen(row.dtype, dims, logical_count);
+    }
     return switch (ggml_type) {
         .f32, .i32 => try std.math.mul(usize, logical_count, 4),
         .f16, .bf16, .i16 => try std.math.mul(usize, logical_count, 2),
         .f64, .i64 => try std.math.mul(usize, logical_count, 8),
         .i8 => logical_count,
-        .q1_0 => quantizedByteLen(.q1_0, dims, logical_count),
-        .q2_0 => quantizedByteLen(.q2_0, dims, logical_count),
-        .q4_0 => quantizedByteLen(.q4_0, dims, logical_count),
-        .q4_1 => quantizedByteLen(.q4_1, dims, logical_count),
-        .q5_0 => quantizedByteLen(.q5_0, dims, logical_count),
-        .q5_1 => quantizedByteLen(.q5_1, dims, logical_count),
-        .q8_0 => quantizedByteLen(.q8_0, dims, logical_count),
-        .q8_1 => quantizedByteLen(.q8_1, dims, logical_count),
-        .q2_k => quantizedByteLen(.q2_k, dims, logical_count),
-        .q3_k => quantizedByteLen(.q3_k, dims, logical_count),
-        .q4_k => quantizedByteLen(.q4_k, dims, logical_count),
-        .q5_k => quantizedByteLen(.q5_k, dims, logical_count),
-        .q6_k => quantizedByteLen(.q6_k, dims, logical_count),
-        .q8_k => quantizedByteLen(.q8_k, dims, logical_count),
-        .iq1_s => quantizedByteLen(.iq1_s, dims, logical_count),
-        .iq1_m => quantizedByteLen(.iq1_m, dims, logical_count),
-        .iq2_xxs => quantizedByteLen(.iq2_xxs, dims, logical_count),
-        .iq2_xs => quantizedByteLen(.iq2_xs, dims, logical_count),
-        .iq2_s => quantizedByteLen(.iq2_s, dims, logical_count),
-        .iq3_xxs => quantizedByteLen(.iq3_xxs, dims, logical_count),
-        .iq3_s => quantizedByteLen(.iq3_s, dims, logical_count),
-        .iq4_nl => quantizedByteLen(.iq4_nl, dims, logical_count),
-        .iq4_xs => quantizedByteLen(.iq4_xs, dims, logical_count),
-        .tq1_0 => quantizedByteLen(.tq1_0, dims, logical_count),
-        .tq2_0 => quantizedByteLen(.tq2_0, dims, logical_count),
-        .mxfp4 => quantizedByteLen(.mxfp4, dims, logical_count),
-        .nvfp4 => quantizedByteLen(.nvfp4, dims, logical_count),
         // 2-D block: 4 columns (dims[1]) x 256 elements (dims[0]) per
         // 520-byte pack — the only fucina type whose block spans dims[1].
         .tq2_0_fx4 => blk: {
             if (dims.len < 2 or dims[0] % 256 != 0 or dims[1] % 4 != 0) return Error.InvalidTensorInfo;
             break :blk try std.math.mul(usize, logical_count / 1024, 520);
         },
+        // Every remaining tag is a registry block format, returned by the
+        // `block_formats` loop above.
+        else => unreachable,
     };
 }
 

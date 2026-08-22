@@ -8246,7 +8246,12 @@ Each quantized `DType` stores rows as a contiguous sequence of fixed-size
 blocks; a row of `k` logical elements is `k / block_size` blocks (`k` must
 divide exactly — `QuantizedFormatError.InvalidQuantizedLength` otherwise).
 The block structs are `extern struct`s matching ggml's wire layout exactly
-and are re-exported at the root (`fucina.BlockQ4_K`, ...).
+and are re-exported at the root (`fucina.BlockQ4_K`, ...). The formats are
+registered once in `dtype.block_formats` (dtype tag, block struct,
+elems/block); `Storage`, `kind`, `blockSize`, and GGUF's type mapping all
+derive from that table, and a comptime completeness check makes a `DType`
+tag claimed by neither the registry nor the scalar list a compile error —
+adding a format is one block struct, one enum tag, and one registry row.
 
 | DType | Block struct | Elems/block | Bytes/block | f32 encoder | Matmul kernel | LHS activation |
 |---|---|---|---|---|---|---|
