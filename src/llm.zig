@@ -96,10 +96,12 @@ pub const inkling = struct {
 
 // === Generic / shared helpers (stay flat) ===
 // Model I/O (weights containers, PTQTP sidecars, GGUF metadata) lives in
-// the core module — it is model-agnostic (`fucina.weights` et al.). These
-// aliases keep the historical `llm.weights` spelling working.
+// the core module — it is model-agnostic (`fucina.weights` et al.).
+/// Deprecated: use `fucina.weights`. Removal per docs/DEVELOPMENT.md §6.
 pub const weights = @import("fucina").weights;
+/// Deprecated: use `fucina.ptqtp_gguf`. Removal per docs/DEVELOPMENT.md §6.
 pub const ptqtp_gguf = @import("fucina").ptqtp_gguf;
+/// Deprecated: use `fucina.gguf_meta`. Removal per docs/DEVELOPMENT.md §6.
 pub const gguf_meta = @import("fucina").gguf_meta;
 pub const cartridge = @import("llm/cartridge.zig");
 pub const cartridge_fleet = @import("llm/cartridge_fleet.zig");

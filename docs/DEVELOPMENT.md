@@ -298,3 +298,26 @@ method:
 - **BLOCKED beats fabricated.** Missing fixture, missing hardware, missing
   reference — say so and name what a human must supply. The parity method
   only works because nobody invents its numbers.
+
+## 6. API stability and deprecation
+
+Fucina is pre-1.0 and versioned `0.MINOR.PATCH`: a MINOR release may change
+public API, and every change that does is listed in `CHANGELOG.md` under that
+release. Within that contract, deprecations follow one mechanical pattern:
+
+- **Where the old spelling can keep compiling** (a renamed declaration, a
+  moved module), the old name stays for one MINOR release as an alias whose
+  doc comment begins `Deprecated:` and names the replacement. The alias is
+  deleted in the next MINOR release.
+- **Where it cannot** (a changed signature, a removed capability), the change
+  lands directly and the CHANGELOG entry shows the one-line rewrite for each
+  affected call form.
+- In-tree code never calls a deprecated name: the tree is migrated in the
+  same commit that introduces the deprecation, so `grep 'Deprecated:'` lists
+  exactly the aliases external code may still be using.
+
+Module stability tiers are declared in each module's doc comment and
+summarized in the CHANGELOG: **stable** modules (`tensor`, `ag`, `exec`,
+`gguf`, `weights`, the serving contract) deprecate as above; **experimental**
+modules (`es`, `ptqtp`, `speculative`, research features under `llm/`) may
+change without an alias step, CHANGELOG entry only.
