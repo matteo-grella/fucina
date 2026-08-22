@@ -8,7 +8,7 @@ checkpointing, checkpoint files, LoRA fine-tuning of GGUF models, gradient
 verification, the export loop back to GGUF, and performance. Everything here
 is exercised end-to-end by `zig build spirals`
 and `zig build finetune` and unit-tested in `src/optim_tests.zig` /
-`src/ag/tensor_tests.zig` / `src/ag/checkpoint_tests.zig` /
+`src/ag/tensor_tests/` / `src/ag/checkpoint_tests.zig` /
 `src/lora_tests.zig` / `src/llm/qwen3/train_tests.zig` /
 `src/llm/qwen3/train_golden_tests.zig`.
 

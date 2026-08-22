@@ -555,8 +555,8 @@ keys (`options.addOption(T, name, value)`):
 Only eight files outside tests import it, all inside the `fucina` module:
 `src/parallel.zig`, `src/backend.zig`, `src/backend/native.zig`,
 `src/backend/gpu.zig`, `src/backend/metal.zig`, `src/backend/cuda.zig`,
-`src/exec/reduce.zig`, `src/exec/matmul.zig` (a `src/ag/tensor_tests.zig`
-test also branches on `vector_scan`, and a `src/exec_tests.zig` test skips
+`src/exec/reduce.zig`, `src/exec/matmul.zig` (a `src/ag/tensor_tests/scan.zig`
+test also branches on `vector_scan`, and a `src/exec/matmul_tests.zig` test skips
 on `use_gpu`). The parakeet executable and
 its test root get their *own* single-key `build_options`
 (`parakeet_mic: bool`) — the name collides deliberately; the example reads
@@ -1014,7 +1014,7 @@ test "Tensor spec forms and comptime introspection" {
 `Tensor(spec)` comptime-dispatches on the dtype into four struct families.
 The method set of each branch is decided at compile time, so calling an
 unsupported operation is a compile error, never a runtime failure
-(pinned by the `@hasDecl` guard tests in `src/ag/tensor_tests.zig`):
+(pinned by the `@hasDecl` guard tests in `src/ag/tensor_tests/facade.zig`):
 
 | Branch | dtypes | Capabilities |
 |---|---|---|
@@ -3394,7 +3394,7 @@ pub fn prepareRopeTableFactorsRange(range: AxisRange, feature_dim, theta_base, i
 `.{ .len = n }` is a prefill over `0..n`; `.{ .origin = pos0, .len = n }` is a
 decode step. Both share one arithmetic body with the array form, so a run
 expressed as a range and the same run expressed as an array produce
-**bitwise identical** tables (pinned in `src/exec_tests.zig` across several
+**bitwise identical** tables (pinned in `src/exec/rope_tests.zig` across several
 origins, both `inverse` arms, and the `freq_factors` arm). The explicit
 `positions: []const i32` form stays for the genuinely ragged case — a
 multi-stream batch whose positions are several runs, not one.
@@ -4165,7 +4165,7 @@ world are `to` (§3.8) and the mixed-RHS `dot`/`einsum` (§4.8); widen with
 
 Because the widened ops run the identical f32 kernels and round once on
 store, their results are bit-identical to "cast up, run the f32 op, cast
-down" — pinned by parity tests in `src/ag/tensor_tests.zig`:
+down" — pinned by parity tests in `src/ag/tensor_tests/`:
 
 ```zig
 test "bf16 forward ops compute through f32 and narrow once" {
@@ -5370,7 +5370,7 @@ recycles ~2 pooled buffers (O(1) working set, warm addresses), while a scope
 keeps every intermediate live until close (O(N), cold addresses) — measured
 2 vs 32 distinct buffers on a 32-op chain
 ([MEMORY-MODEL.md](MEMORY-MODEL.md) §5; the behavior is test-pinned in
-`src/ag/tensor_tests.zig`). For pure inference, deinit-ASAP with no scope is
+`src/ag/tensor_tests/control.zig`). For pure inference, deinit-ASAP with no scope is
 the discipline; scopes are correct where holding the graph *is* the
 semantics (training), and harmless on cold no-grad paths.
 

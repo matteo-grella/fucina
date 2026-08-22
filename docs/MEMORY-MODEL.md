@@ -60,7 +60,7 @@ tensor.deinit()  →  buffer.release()  →  refcount hits 0  →  reclaim()  �
 
 The recycle invariant is asserted by a dedicated unit test: after `first.deinit()`,
 the next same-size op returns `second.buffer == first_buffer`
-(`src/exec_tests.zig:338-358`).
+(`src/exec_tests.zig:120-140`).
 
 ### What is and isn't pooled
 
@@ -149,7 +149,7 @@ substantive axes (in addition to the view/KV constraint in §3):
 2. **It destroys cache locality.** Bump allocation returns a fresh address per
    op; the pool returns the *same* address for same-sized successive
    allocations, keeping the hot working buffer warm in L1/L2. Address reuse is
-   the asserted behavior (`src/exec_tests.zig:338-358`) and directly serves the
+   the asserted behavior (`src/exec_tests.zig:120-140`) and directly serves the
    "match/beat llama.cpp on CPU" North Star.
 3. **It cannot express refcounted views / KV aliasing** — see §3.
 4. **It is impossible for training** — activations must outlive the forward for
@@ -210,7 +210,7 @@ deinit` (both end in `BufferPool.reclaim`), but the *timing* inverts the
 discipline this document defends: (i) a held scope turns the pool's O(1)
 working set into O(N) live intermediates with cold addresses — pinned at
 <=2 vs 16 outstanding buffers on a 16-op chain by the "exec scope holds
-buffers until close" test in `src/ag/tensor_tests.zig`; (ii) scope adoption
+buffers until close" test in `src/ag/tensor_tests/control.zig`; (ii) scope adoption
 covers only the f32-facade op tails, never the typed/quantized/raw ops the
 engines run on, so a scoped engine still manages those explicitly. (A third
 fact at adjudication time — `ctx.replace` double-freeing scope-owned results
