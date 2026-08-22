@@ -146,7 +146,7 @@ shared tails — `finishOp` (attach a backward record if wanted) or
 re-derived per op (`src/ag/tensor.zig`).
 
 Second, the lowering tier shows "validate once" concretely. This is the
-entire tag-broadcast pointwise lowering (from `src/tagged.zig:53`):
+entire tag-broadcast pointwise lowering (from `src/tag_ops.zig:53`):
 
 ```zig
 /// Tag-driven broadcasting pointwise op: broadcasts both operands to the
@@ -1153,7 +1153,7 @@ material.
   (`*Rank`, `*AxisRank`, `*Typed`, `*Backward*`).
 - `src/ag/tensor.zig` — the tagged op facade: read `add`, then `scale`, then
   `finishOp`/`finishNoGrad`, and you have read the whole library's skeleton.
-- `src/tagged.zig` — the lowering tier: `pointwise` is the 25-line
+- `src/tag_ops.zig` — the lowering tier: `pointwise` is the 25-line
   crystallization of "validate once, view, dispatch".
 - `src/exec/softmax.zig`, `src/exec/loss.zig`, `src/exec/topk.zig`,
   `src/exec/moe.zig` — leaf modules (not public API, but the best reading on

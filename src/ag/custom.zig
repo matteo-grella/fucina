@@ -25,7 +25,7 @@
 const std = @import("std");
 const exec_mod = @import("../exec.zig");
 const tensor_mod = @import("../tensor.zig");
-const tag_ops = @import("../tagged.zig");
+const tag_ops = @import("../tag_ops.zig");
 const control = @import("control.zig");
 const core = @import("core.zig");
 

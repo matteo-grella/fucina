@@ -933,7 +933,7 @@ Kept on record so they are not re-tried or over-claimed:
   workaround is faster than the trans_ab ceiling itself (Accelerate's NN
   beats its TT at every measured shape), and on no-BLAS builds at most
   1.06-1.32x is recoverable — likely unattainable with a TT access pattern.
-  Re-open trigger: a port whose profile shows the tagged.zig materialize arm
+  Re-open trigger: a port whose profile shows the tag_ops.zig materialize arm
   hot with genuinely pinned output; the recorded BLAS-arm-only design
   (~250 LOC) then applies, and the cheaper first lever is a blocked
   transpose in the materialize pass (currently ~3-8 GB/s).

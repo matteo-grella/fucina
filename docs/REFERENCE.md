@@ -30,19 +30,19 @@ API-level companion. Every Zig snippet is machine-verified against the tree
   - [3.4 `deinit`, lifetime, and exec scopes (`src/ag/tensor.zig`, `src/tensor.zig`)](#34-deinit-lifetime-and-exec-scopes-srcagtensorzig-srctensorzig)
   - [3.5 Data access (`src/ag/tensor.zig`, `src/tensor.zig`)](#35-data-access-srcagtensorzig-srctensorzig)
   - [3.6 Shape and tag introspection (`src/ag/tensor.zig`, `src/tags.zig`)](#36-shape-and-tag-introspection-srcagtensorzig-srctagszig)
-  - [3.7 Views and structural ops (`src/ag/tensor.zig`, `src/tagged.zig`, `src/exec/gather_scatter.zig`)](#37-views-and-structural-ops-srcagtensorzig-srctaggedzig-srcexecgather_scatterzig)
+  - [3.7 Views and structural ops (`src/ag/tensor.zig`, `src/tag_ops.zig`, `src/exec/gather_scatter.zig`)](#37-views-and-structural-ops-srcagtensorzig-srctaggedzig-srcexecgather_scatterzig)
   - [3.8 Casting: `to(dtype)` (`src/ag/tensor.zig`, `src/exec/convert.zig`)](#38-casting-todtype-srcagtensorzig-srcexecconvertzig)
   - [3.9 Gradient accessors (`src/ag/tensor.zig`, `src/ag/core.zig`; mechanics in §5)](#39-gradient-accessors-srcagtensorzig-srcagcorezig-mechanics-in-5)
   - [3.10 Facade surface index](#310-facade-surface-index)
 - [4. Tensor operations](#4-tensor-operations)
   - [4.1 The common operation contract (`src/ag/tensor.zig`)](#41-the-common-operation-contract-srcagtensorzig)
-  - [4.2 Pointwise binary ops and tag-driven broadcasting (`src/ag/tensor.zig`, `src/tagged.zig`)](#42-pointwise-binary-ops-and-tag-driven-broadcasting-srcagtensorzig-srctaggedzig)
+  - [4.2 Pointwise binary ops and tag-driven broadcasting (`src/ag/tensor.zig`, `src/tag_ops.zig`)](#42-pointwise-binary-ops-and-tag-driven-broadcasting-srcagtensorzig-srctaggedzig)
   - [4.3 Scalar variants and in-place/no-grad helpers (`src/ag/tensor.zig`)](#43-scalar-variants-and-in-placeno-grad-helpers-srcagtensorzig)
   - [4.4 Unary ops (`src/ag/tensor.zig`, `src/backend/ops.zig`)](#44-unary-ops-srcagtensorzig-srcbackendopszig)
   - [4.5 Gated activations (`src/ag/tensor.zig`)](#45-gated-activations-srcagtensorzig)
   - [4.6 Masks, comparisons, and conditionals (`src/ag/tensor.zig`)](#46-masks-comparisons-and-conditionals-srcagtensorzig)
   - [4.7 Reductions and scans (`src/ag/tensor.zig`)](#47-reductions-and-scans-srcagtensorzig)
-  - [4.8 `dot`: tag-directed contraction (`src/ag/tensor.zig`, `src/tagged.zig`)](#48-dot-tag-directed-contraction-srcagtensorzig-srctaggedzig)
+  - [4.8 `dot`: tag-directed contraction (`src/ag/tensor.zig`, `src/tag_ops.zig`)](#48-dot-tag-directed-contraction-srcagtensorzig-srctaggedzig)
   - [4.9 Explicit matmul, ternary STE, and packed-RHS GEMMs (`src/ag/tensor.zig`)](#49-explicit-matmul-ternary-ste-and-packed-rhs-gemms-srcagtensorzig)
   - [4.10 Softmax family (`src/ag/tensor.zig`, `src/exec/softmax.zig`)](#410-softmax-family-srcagtensorzig-srcexecsoftmaxzig)
   - [4.11 Normalization family (`src/ag/tensor.zig`)](#411-normalization-family-srcagtensorzig)
@@ -79,12 +79,12 @@ API-level companion. Every Zig snippet is machine-verified against the tree
   - [7.2 Lookup, equality, and constraint helpers (`src/tags.zig`)](#72-lookup-equality-and-constraint-helpers-srctagszig)
   - [7.3 Tuple rewrites and axis maps (`src/tags.zig`)](#73-tuple-rewrites-and-axis-maps-srctagszig)
   - [7.4 Result-tag computation: pointwise and dot (`src/tags.zig`)](#74-result-tag-computation-pointwise-and-dot-srctagszig)
-  - [7.5 The op library contract (`src/tagged.zig`)](#75-the-op-library-contract-srctaggedzig)
-  - [7.6 Alignment, permutation, and broadcast views (`src/tagged.zig`)](#76-alignment-permutation-and-broadcast-views-srctaggedzig)
-  - [7.7 Pointwise and gated broadcasting (`src/tagged.zig`)](#77-pointwise-and-gated-broadcasting-srctaggedzig)
-  - [7.8 Split, merge, flatten, and multi-axis reduction (`src/tagged.zig`)](#78-split-merge-flatten-and-multi-axis-reduction-srctaggedzig)
-  - [7.9 `taggedDot`: tag-directed contraction and its lowering (`src/tagged.zig`)](#79-taggeddot-tag-directed-contraction-and-its-lowering-srctaggedzig)
-  - [7.10 Shared dtype-generic helpers (`src/tagged.zig`)](#710-shared-dtype-generic-helpers-srctaggedzig)
+  - [7.5 The op library contract (`src/tag_ops.zig`)](#75-the-op-library-contract-srctaggedzig)
+  - [7.6 Alignment, permutation, and broadcast views (`src/tag_ops.zig`)](#76-alignment-permutation-and-broadcast-views-srctaggedzig)
+  - [7.7 Pointwise and gated broadcasting (`src/tag_ops.zig`)](#77-pointwise-and-gated-broadcasting-srctaggedzig)
+  - [7.8 Split, merge, flatten, and multi-axis reduction (`src/tag_ops.zig`)](#78-split-merge-flatten-and-multi-axis-reduction-srctaggedzig)
+  - [7.9 `taggedDot`: tag-directed contraction and its lowering (`src/tag_ops.zig`)](#79-taggeddot-tag-directed-contraction-and-its-lowering-srctaggedzig)
+  - [7.10 Shared dtype-generic helpers (`src/tag_ops.zig`)](#710-shared-dtype-generic-helpers-srctaggedzig)
 - [8. Data types, storage, and the raw tensor layer (internal)](#8-data-types-storage-and-the-raw-tensor-layer-internal)
   - [8.1 The `DType` enum (`src/dtype.zig`)](#81-the-dtype-enum-srcdtypezig)
   - [8.2 Storage mapping and dtype predicates (`src/dtype.zig`)](#82-storage-mapping-and-dtype-predicates-srcdtypezig)
@@ -244,7 +244,7 @@ lint whose configuration is not part of this tree (see
 | llm | `fucina_llm` module | §13, §14 |
 | facade | `src/fucina.zig` public root | §1–§5 |
 | autograd + training | `src/ag/`, optim/es/lora/persistence | §5, §11, §12 |
-| tagged ops | `src/tagged.zig` | §7 |
+| tagged ops | `src/tag_ops.zig` | §7 |
 | exec runtime | `ExecContext`, `src/exec/` | §6 |
 | backends | CPU SIMD, BLAS, Metal/CUDA | §9, §10 |
 | tensor/storage/dtype | raw value types | §8 |
@@ -1460,7 +1460,7 @@ pub fn hasTag(comptime tag: Tag) bool                // comptime membership test
 `tag_count`, `tensor_rank`, `dtype` (§3.1) complete the introspection
 surface. The tag algebra itself — how ops compute *result* tags — is §7.
 
-### 3.7 Views and structural ops (`src/ag/tensor.zig`, `src/tagged.zig`, `src/exec/gather_scatter.zig`)
+### 3.7 Views and structural ops (`src/ag/tensor.zig`, `src/tag_ops.zig`, `src/exec/gather_scatter.zig`)
 
 Two families. **Zero-copy views** re-describe existing storage (shape/stride
 arithmetic plus a refcount retain — nothing is moved); **copying ops**
@@ -2068,7 +2068,7 @@ the f32/f16/bf16 dense pack and each quantized `packRhs` return type (§10).
 
 This section is the reference for the math/NN operation surface of the public
 autograd `fucina.Tensor(tags_spec)` facade (`src/ag/tensor.zig`), the
-tag-semantics lowering library behind it (`src/tagged.zig`), and the public
+tag-semantics lowering library behind it (`src/tag_ops.zig`), and the public
 option types those operations take (`src/exec.zig`). Construction, data
 access, and structural views (`withTags`, `permuteTo`, `transpose`,
 `alignTo`, `insertAxis`, `squeeze`, `split`, `merge`, `broadcastTo`,
@@ -2129,7 +2129,7 @@ const std = @import("std");
 const fucina = @import("fucina");
 ```
 
-### 4.2 Pointwise binary ops and tag-driven broadcasting (`src/ag/tensor.zig`, `src/tagged.zig`)
+### 4.2 Pointwise binary ops and tag-driven broadcasting (`src/ag/tensor.zig`, `src/tag_ops.zig`)
 
 ```zig
 pub fn add(self: *const Self, ctx: *ExecContext, other: anytype)
@@ -2790,7 +2790,7 @@ test "linearRecurrence scans a decayed state along the time tag" {
 }
 ```
 
-### 4.8 `dot`: tag-directed contraction (`src/ag/tensor.zig`, `src/tagged.zig`)
+### 4.8 `dot`: tag-directed contraction (`src/ag/tensor.zig`, `src/tag_ops.zig`)
 
 ```zig
 pub fn dot(self: *const Self, ctx: *ExecContext, other: anytype, comptime contract_tag: Tag)
@@ -5968,7 +5968,7 @@ Two internal modules implement this:
 - `src/tags.zig` — the pure comptime tuple algebra: spec normalization,
   lookup, uniqueness/subset constraints, and result-tag computation. Every
   function here runs at compile time and violations are compile errors.
-- `src/tagged.zig` — the tag-semantics op library: functions that take
+- `src/tag_ops.zig` — the tag-semantics op library: functions that take
   comptime tag tuples plus `*const` raw tensors and return **owned** raw
   tensors (tag-directed views, tag-driven broadcasting, multi-axis reduction,
   and `taggedDot` lowering onto the ExecContext matmul/bmm kernels, §6).
@@ -6179,7 +6179,7 @@ capped by `max_rank`) and `intersectTags`/`intersectTagsLen` (tags of the
 first tuple also present in the second, first-tuple order) support the
 einsum lowering and are general-purpose.
 
-### 7.5 The op library contract (`src/tagged.zig`)
+### 7.5 The op library contract (`src/tag_ops.zig`)
 
 Every runtime function below takes comptime tag tuples plus `*const` raw
 tensors and returns an **owned** raw tensor: the caller must `deinit` it.
@@ -6215,7 +6215,7 @@ Runtime error summary for the whole library:
 | split factors don't multiply to the axis dim, or a zero factor | `TensorError.InvalidShape` |
 | merge over stride-incompatible axes | `TensorError.UnsupportedView` |
 
-### 7.6 Alignment, permutation, and broadcast views (`src/tagged.zig`)
+### 7.6 Alignment, permutation, and broadcast views (`src/tag_ops.zig`)
 
 ```zig
 pub fn alignTensorTo(comptime source_tags: anytype, source: *const RawTensor,
@@ -6291,7 +6291,7 @@ test "broadcastTo expands missing tags without copying" {
 }
 ```
 
-### 7.7 Pointwise and gated broadcasting (`src/tagged.zig`)
+### 7.7 Pointwise and gated broadcasting (`src/tag_ops.zig`)
 
 ```zig
 pub const PointwiseOp = enum { add, sub, mul, div, max, min };
@@ -6404,7 +6404,7 @@ test "incompatible dims fail with ShapeMismatch" {
 }
 ```
 
-### 7.8 Split, merge, flatten, and multi-axis reduction (`src/tagged.zig`)
+### 7.8 Split, merge, flatten, and multi-axis reduction (`src/tag_ops.zig`)
 
 ```zig
 pub fn splitAxisView(comptime source_tags: anytype, source: *const RawTensor,
@@ -6502,7 +6502,7 @@ test "sumMany reduces several named axes at once" {
 }
 ```
 
-### 7.9 `taggedDot`: tag-directed contraction and its lowering (`src/tagged.zig`)
+### 7.9 `taggedDot`: tag-directed contraction and its lowering (`src/tag_ops.zig`)
 
 ```zig
 pub fn taggedDot(comptime left_tags: anytype, left: *const RawTensor, ctx: *ExecContext,
@@ -6655,7 +6655,7 @@ contraction, so no pointwise fallback exists anywhere on the contraction
 backward paths (`DotBackward` and `ConstRhsDotBackward` delegate to the
 einsum records).
 
-### 7.10 Shared dtype-generic helpers (`src/tagged.zig`)
+### 7.10 Shared dtype-generic helpers (`src/tag_ops.zig`)
 
 ```zig
 pub fn contiguousForReshapeOf(comptime tensor_dtype: DType, ctx: *ExecContext,

@@ -4,7 +4,7 @@
 const std = @import("std");
 const tensor_mod = @import("../../../tensor.zig");
 const exec_mod = @import("../../../exec.zig");
-const tag_ops = @import("../../../tagged.zig");
+const tag_ops = @import("../../../tag_ops.zig");
 const tags_mod = @import("../../../tags.zig");
 const backward = @import("../../backward.zig");
 

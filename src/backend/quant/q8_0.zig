@@ -1,7 +1,7 @@
-//! Hot Q8_0 / Q8_0x4 quantized matmul kernels relocated out of quant.zig.
-//! See quant.zig for shared type/helper definitions; every shared symbol this
-//! module references is aliased from quant.zig (`qm`) below so the moved bodies
-//! compile unchanged.
+//! Hot Q8_0 / Q8_0x4 quantized matmul kernels (per-ISA accumulate tiers).
+//! Block/RHS types come from `types.zig`, shared accumulate/dispatch helpers
+//! from `common.zig`, Q8_K LHS quantization from `q8k.zig`; the format
+//! manifest and naming grammar live in `quant.zig`.
 
 const std = @import("std");
 const builtin = @import("builtin");

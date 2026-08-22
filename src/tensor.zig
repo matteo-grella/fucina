@@ -1,3 +1,9 @@
+//! The raw runtime tensor: an untagged, reference-counted n-d f32/typed
+//! buffer with strides — the single runtime currency every band below the
+//! public facade trades in. In-tree code names it `fucina.internal.RawTensor`;
+//! the public API is the tagged autograd `Tensor` (`ag.zig`). Views alias
+//! their parent's storage with independent lifetimes.
+//! Layer stack: docs/ARCHITECTURE.md.
 const std = @import("std");
 const dtype_mod = @import("dtype.zig");
 const storage = @import("storage.zig");

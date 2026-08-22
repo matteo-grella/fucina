@@ -1,3 +1,9 @@
+//! The eager execution runtime (`ExecContext`): owns validation, output
+//! materialization, buffer-pool allocation, and op dispatch onto the
+//! selected backend's kernels. Everything above (tag ops, autograd) drives
+//! tensors through this facade; backends below own only numeric kernels.
+//! Op implementations live in `exec/`; this file is the facade + registry
+//! (deliberately unsplit). Layer stack: docs/ARCHITECTURE.md.
 const std = @import("std");
 const backend_mod = @import("backend.zig");
 const backend_ops = backend_mod.ops;

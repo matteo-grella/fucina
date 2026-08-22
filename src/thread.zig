@@ -1,3 +1,7 @@
+//! The process-wide worker pool: P-core-aware team sizing, task spawn and
+//! join, and the sync primitives the parallel kernels build on.
+//! `parallel.zig` owns the higher-level chunking policies.
+//! Layer stack: docs/ARCHITECTURE.md.
 const std = @import("std");
 const builtin = @import("builtin");
 const parallel = @import("parallel.zig");

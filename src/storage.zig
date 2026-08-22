@@ -1,3 +1,6 @@
+//! Reference-counted byte storage backing raw tensors: allocation,
+//! retain/release, and the borrowed/owned distinction views rely on.
+//! Layer stack: docs/ARCHITECTURE.md.
 const std = @import("std");
 const accelerator = @import("accelerator.zig");
 const dtype_mod = @import("dtype.zig");

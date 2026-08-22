@@ -5,7 +5,7 @@ const storage = @import("storage.zig");
 const tensor = @import("tensor.zig");
 const backend = @import("backend.zig");
 const exec = @import("exec.zig");
-const tagged = @import("tagged.zig");
+const tag_ops = @import("tag_ops.zig");
 const ag = @import("ag.zig");
 const param_registry_mod = @import("param_registry.zig");
 const state_dict_mod = @import("state_dict.zig");
@@ -228,7 +228,7 @@ test {
     _ = tensor;
     _ = backend;
     _ = exec;
-    _ = tagged;
+    _ = tag_ops;
     _ = ag;
     _ = param_registry_mod;
     _ = state_dict_mod;

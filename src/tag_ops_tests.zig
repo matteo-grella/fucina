@@ -1,4 +1,4 @@
-//! Behavioral tests for the tag-semantics op library (`tagged.zig`): comptime
+//! Behavioral tests for the tag-semantics op library (`tag_ops.zig`): comptime
 //! tag rank/axis lookup, tag-directed views (align/permute/broadcast/split/
 //! merge/flatten), tag-driven pointwise broadcasting, multi-axis reduction, and
 //! `taggedDot` matmul/bmm lowering across physical tag orders.
@@ -6,7 +6,7 @@ const std = @import("std");
 const tensor_mod = @import("tensor.zig");
 const exec_mod = @import("exec.zig");
 const tags_mod = @import("tags.zig");
-const tagged = @import("tagged.zig");
+const tagged = @import("tag_ops.zig");
 
 const TensorError = tensor_mod.TensorError;
 const ExecContext = exec_mod.ExecContext;

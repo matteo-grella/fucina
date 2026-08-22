@@ -767,5 +767,5 @@ fn productArraySuffix(comptime rank: usize, shape: [rank]usize, comptime start: 
 }
 
 test {
-    _ = @import("tagged_tests.zig");
+    _ = @import("tag_ops_tests.zig");
 }

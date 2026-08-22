@@ -25,7 +25,7 @@ Top-down; a band may depend only on bands at or below it:
 | llm         | src/llm.zig, src/llm/** (the fucina_llm module) |
 | facade      | src/fucina.zig (the fucina module root) |
 | ag + training/serialization | src/ag.zig, src/ag/**, src/optim.zig, src/es.zig, src/gguf.zig, src/lora.zig, … |
-| tagged      | src/tagged.zig (tag-ops library) |
+| tagged      | src/tag_ops.zig (tag-ops library) |
 | exec        | src/exec.zig, src/exec/** (eager runtime) |
 | backend     | src/backend.zig, src/backend/** (numeric kernels) |
 | tags        | src/tags.zig (comptime tag algebra) |

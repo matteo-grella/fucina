@@ -39,7 +39,7 @@ Top-down; a band may depend only on bands at or below it:
 | llm | `src/llm.zig`, `src/llm/**` (the `fucina_llm` module) |
 | facade | `src/fucina.zig` (the `fucina` module root) |
 | ag + training/serialization | `src/ag.zig`, `src/ag/**`, `src/optim.zig`, `src/es.zig`, `src/ptqtp.zig`, `src/gguf.zig`, `src/lora.zig`, `src/safetensors.zig`, `src/state_dict.zig`, `src/training_checkpoint.zig`, `src/param_registry.zig` |
-| tagged | `src/tagged.zig` (tag-ops library) |
+| tagged | `src/tag_ops.zig` (tag-ops library) |
 | exec | `src/exec.zig`, `src/exec/**` (eager runtime) |
 | backend | `src/backend.zig`, `src/backend/**` (numeric kernels) |
 | tags | `src/tags.zig` (comptime tag algebra) |
@@ -203,7 +203,7 @@ Backends:
 
 Autograd:
 
-- `src/tagged.zig`: tag-semantics op library over raw tensors (see *Tagged
+- `src/tag_ops.zig`: tag-semantics op library over raw tensors (see *Tagged
   Tensor Semantics*).
 - `src/ag.zig`: autograd module root, exporting the public `Tensor` and the
   framework pillars.
@@ -247,18 +247,18 @@ The intended production dependency direction inside the `fucina` module:
 
 ```text
 fucina.zig
-  -> ag.zig, exec.zig, backend.zig, tagged.zig, tensor.zig, storage.zig,
+  -> ag.zig, exec.zig, backend.zig, tag_ops.zig, tensor.zig, storage.zig,
      dtype.zig, thread.zig, and the training/persistence modules (gguf,
      optim, es, ptqtp, lora, rng, parallel, param_registry, state_dict,
      safetensors, training_checkpoint)
 
 ag/tensor.zig
   -> ag/tensor/ (float/ method mixins, typed_constant.zig, plumbing.zig),
-     ag/{core,backward,control}.zig, tags.zig, tagged.zig, exec.zig,
+     ag/{core,backward,control}.zig, tags.zig, tag_ops.zig, exec.zig,
      backend.zig, tensor.zig, dtype.zig
 
 ag/tensor/*.zig, ag/tensor/float/*.zig
-  -> ag/{core,backward,control,elemental}.zig, tags.zig, tagged.zig,
+  -> ag/{core,backward,control,elemental}.zig, tags.zig, tag_ops.zig,
      exec.zig, backend.zig, tensor.zig, dtype.zig, rng.zig
      (never ag/tensor.zig — the facade arrives as a comptime parameter)
 
@@ -266,10 +266,10 @@ ag/backward.zig
   -> ag/backward/ (per-domain VJP modules + common.zig)
 
 ag/backward/*.zig
-  -> ag/core.zig, tags.zig, tagged.zig, exec.zig, backend.zig (ops),
+  -> ag/core.zig, tags.zig, tag_ops.zig, exec.zig, backend.zig (ops),
      tensor.zig, dtype.zig, parallel.zig
 
-tagged.zig
+tag_ops.zig
   -> exec.zig, tags.zig, tensor.zig
 
 exec.zig
@@ -495,7 +495,7 @@ and matmul but do not encode.
 
 ## Tagged Tensor Semantics
 
-`src/tagged.zig` is the tag-semantics op library. It applies the comptime
+`src/tag_ops.zig` is the tag-semantics op library. It applies the comptime
 axis-tag algebra from `src/tags.zig` to runtime raw tensors so the public
 autograd tensor and the VJPs can delegate tag alignment and named-operation
 semantics without duplicating raw view logic. There is intentionally no tagged

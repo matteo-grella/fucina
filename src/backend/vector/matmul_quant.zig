@@ -1,12 +1,11 @@
-//! Quantized matmul dispatch relocated out of vector.zig: every
-//! matmul2DQ*RhsIntoWithConfig / matmul2DI8BlockwiseIntoWithConfig entry point
-//! and the QuantizedRhsParallel generic — one Task/run/spawn/maybeParallel
-//! body whose SplitPolicy carries each format's lane grouping and split
-//! gates. Two entries keep bespoke splitters for their different task
-//! shapes: the i8-blockwise path and the padded packed-Q8_0x4 path.
-//! The actual per-block kernels live behind quant/matmul_api.zig. Shared-core
-//! symbols (ParallelConfig, the i8ColumnThreadCount / matmulThreadCount gates)
-//! are aliased from vector.zig (`vm`) so the moved bodies compile unchanged.
+//! Quantized matmul dispatch: every matmul2DQ*RhsIntoWithConfig /
+//! matmul2DI8BlockwiseIntoWithConfig entry point and the QuantizedRhsParallel
+//! generic — one Task/run/spawn/maybeParallel body whose SplitPolicy carries
+//! each format's lane grouping and split gates. Two entries keep bespoke
+//! splitters for their different task shapes: the i8-blockwise path and the
+//! padded packed-Q8_0x4 path. The per-block kernels live behind
+//! `../quant/matmul_api.zig`; shared parallel gates (ParallelConfig,
+//! i8ColumnThreadCount / matmulThreadCount) come from `common.zig` (`vm`).
 
 const std = @import("std");
 const dtype_mod = @import("../../dtype.zig");

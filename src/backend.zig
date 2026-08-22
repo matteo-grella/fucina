@@ -1,3 +1,9 @@
+//! Backend selection facade: picks the kernel provider at build time
+//! (`-Dbackend=native|scalar`, `-Dgpu=metal|cuda`) and re-exports the
+//! shared kernel vocabulary (ops, quant block/RHS types, packed-RHS
+//! layouts). `native.zig` is the SIMD/BLAS/GPU-seamed implementation,
+//! `cpu.zig` the scalar reference with the same duck-typed surface.
+//! Layer stack: docs/ARCHITECTURE.md.
 const std = @import("std");
 const build_options = @import("build_options");
 pub const ops = @import("backend/ops.zig");
@@ -1114,5 +1120,19 @@ test {
     _ = @import("backend/parity_test.zig");
     if (comptime build_options.use_gpu) {
         _ = @import("backend/gpu.zig"); // forwards to the active provider's tests
+    }
+}
+
+test "scalar reference backend surface compiles" {
+    // On the default native build, Zig's lazy analysis never touches the
+    // scalar impl's unreferenced decls, so a native-side signature change
+    // not mirrored in cpu.zig would surface only on the (occasional)
+    // scalar leg. Referencing every top-level scalar decl makes that
+    // drift a compile error on EVERY `zig build test`.
+    const cpu = @import("backend/cpu.zig");
+    comptime {
+        for (@typeInfo(cpu).@"struct".decls) |d| {
+            _ = &@field(cpu, d.name);
+        }
     }
 }

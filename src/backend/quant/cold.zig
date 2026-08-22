@@ -1,7 +1,8 @@
-//! Cold (rarely-used, generic-format) quantization code relocated out of quant.zig.
-//! See quant.zig for the hot/live kernels and all shared type/helper definitions.
-//! This module holds only cold *function bodies*; every shared symbol it references
-//! is aliased from quant.zig (`qm`) below so the moved bodies compile unchanged.
+//! Cold-format quantized kernels: the rarely-served GGML formats, each with a
+//! straightforward per-block dot skeleton — correctness-first, no per-ISA
+//! tuning (the hot per-ISA kernels live in the sibling per-format modules).
+//! Block/RHS types come from `types.zig` and `common.zig`, dequant tables
+//! from `../quant_tables.zig`; the format manifest lives in `quant.zig`.
 
 const std = @import("std");
 const dtype_mod = @import("../../dtype.zig");

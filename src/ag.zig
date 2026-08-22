@@ -1,3 +1,8 @@
+//! The public autograd band: the tagged `Tensor(spec)` facade (eager
+//! forward over `tag_ops.zig`/`ExecContext`, tape-recorded backward), graph
+//! control (`noGrad`, `checkpoint`, `customVjp`, `gradcheck`), and the VJP
+//! registry (`ag/backward/`). This is the surface `fucina.Tensor` exports.
+//! Layer stack: docs/ARCHITECTURE.md.
 const std = @import("std");
 const backward = @import("ag/backward.zig");
 const checkpoint_mod = @import("ag/checkpoint.zig");

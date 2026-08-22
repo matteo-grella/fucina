@@ -3,7 +3,7 @@
 
 const tensor_mod = @import("../../../tensor.zig");
 const exec_mod = @import("../../../exec.zig");
-const tag_ops = @import("../../../tagged.zig");
+const tag_ops = @import("../../../tag_ops.zig");
 const core = @import("../../core.zig");
 const rng = @import("../../../rng.zig");
 

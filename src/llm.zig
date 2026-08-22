@@ -1,5 +1,5 @@
 //! LLM/ASR module root. Model families live in subdirectories (`llm/<family>/`)
-//! and are exposed as namespaces (`llm.parakeet.decoder`, `llm.gemma.gemma4`, …);
+//! and are exposed as namespaces (`llm.parakeet.decoder`, `llm.gemma.model`, …);
 //! generic/shared helpers (kv_cache, tokenizers, sampler, chat) stay flat.
 //! Model I/O (weights containers, PTQTP sidecars, GGUF metadata) is core:
 //! `fucina.weights` / `fucina.ptqtp_gguf` / `fucina.gguf_meta` (aliased here).
@@ -29,8 +29,12 @@ pub const qwen35 = struct {
 };
 /// Gemma 4 (text) + MoE + LoRA fine-tuning. Files in `llm/gemma/`.
 pub const gemma = struct {
-    pub const gemma4 = @import("llm/gemma/gemma4.zig");
-    pub const gemma4_train = @import("llm/gemma/gemma4_train.zig");
+    pub const model = @import("llm/gemma/model.zig");
+    pub const train = @import("llm/gemma/train.zig");
+    /// Deprecated: use `model`. Removal per docs/DEVELOPMENT.md §6.
+    pub const gemma4 = model;
+    /// Deprecated: use `train`. Removal per docs/DEVELOPMENT.md §6.
+    pub const gemma4_train = train;
     pub const moe = @import("llm/gemma/moe.zig");
     pub const moe_route = @import("llm/gemma/moe_route.zig");
     pub const moe_route_tensor = @import("llm/gemma/moe_route_tensor.zig");
@@ -84,7 +88,9 @@ pub const qwen3tts = struct {
 /// Pocket TTS (kyutai): continuous-latent flow-matching prefix-LM + VAE-Mimi
 /// streaming decoder. Files in `llm/pockettts/`.
 pub const pockettts = struct {
-    pub const pocket = @import("llm/pockettts/pocket.zig");
+    pub const model = @import("llm/pockettts/model.zig");
+    /// Deprecated: use `model`. Removal per docs/DEVELOPMENT.md §6.
+    pub const pocket = model;
 };
 /// Inkling (hybrid SWA/global rel-bias attention, shortconv sites, sink-shared
 /// MoE; hMLP vision + dMel audio towers). Files in `llm/inkling/`.
@@ -107,6 +113,9 @@ pub const cartridge = @import("llm/cartridge.zig");
 pub const cartridge_fleet = @import("llm/cartridge_fleet.zig");
 pub const engram = @import("llm/engram.zig");
 pub const kv_cache = @import("llm/kv_cache.zig");
+/// Greedy generation driver over any tensor-band model (duck-typed on
+/// `forwardStep` + `KvCache`); family modules re-export or wrap it.
+pub const generate = @import("llm/generate.zig");
 pub const kv_persist = @import("llm/kv_persist.zig");
 pub const tokenizer = @import("llm/tokenizer.zig");
 pub const spm_tokenizer = @import("llm/spm_tokenizer.zig");
@@ -119,8 +128,9 @@ pub const chat = @import("llm/chat.zig");
 /// (`examples/lmserve` is the in-tree server built on it).
 pub const serving = @import("llm/serving.zig");
 /// The descriptor runner: one family-independent decoder driven by a
-/// runtime `Descriptor` (Level 0 of the universal checkpoint runner);
-/// `qwen3` remains the hand-written parity oracle.
+/// runtime `Descriptor` (Level 0 of the universal checkpoint runner).
+/// The qwen3 family and the glm4moe trunk run on it; recorded-logits
+/// gates in `llm/runner_tests.zig` pin its numerics.
 pub const runner = @import("llm/runner.zig");
 pub const data = @import("llm/data.zig");
 /// Generated \p{L}/\p{N}/\s tables (the byte-BPE pretokenizer's). Re-exported
@@ -131,7 +141,6 @@ pub const unicode_categories = @import("llm/unicode_categories.zig");
 
 test {
     _ = runner;
-    _ = @import("llm/runner_tests.zig");
     _ = kimi3.model;
     _ = qwen3.model;
     _ = qwen3.train;
@@ -141,8 +150,8 @@ test {
     _ = qwen3.shine_train;
     _ = qwen35.model;
     _ = qwen35.chat;
-    _ = gemma.gemma4;
-    _ = gemma.gemma4_train;
+    _ = gemma.model;
+    _ = gemma.train;
     _ = gemma.moe;
     _ = gemma.moe_route;
     _ = gemma.moe_route_tensor;
@@ -165,7 +174,7 @@ test {
     _ = glm4moe.model;
     _ = deepseek4.model;
     _ = qwen3tts.codec;
-    _ = pockettts.pocket;
+    _ = pockettts.model;
     _ = qwen3tts.sampling;
     _ = qwen3tts.model;
     _ = qwen3tts.prompt;

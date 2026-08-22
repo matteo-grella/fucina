@@ -1,9 +1,8 @@
-//! Elementwise vector kernels relocated out of vector.zig: the contiguous
-//! entry points, the elementwise/reduction Task structs and their parallel
-//! dispatch, and the typed scalar inner kernels. Shared-core symbols (the
-//! ParallelConfig, the contiguous-data helpers, elementwiseThreadCount) and the
-//! @Vector primitives are aliased from vector.zig (`vm`) so the moved bodies
-//! compile unchanged.
+//! Elementwise vector kernels: the contiguous entry points, the
+//! elementwise/reduction Task structs and their parallel dispatch, and the
+//! typed scalar inner kernels. Shared-core symbols (ParallelConfig,
+//! contiguous-data helpers, elementwiseThreadCount) and the @Vector
+//! primitives come from `common.zig` (`vm`); op definitions from `../ops.zig`.
 
 const std = @import("std");
 const ops = @import("../ops.zig");

@@ -77,7 +77,7 @@ by name) was inspired by [ZML](https://github.com/zml/zml)"
 teaches: names and ranks at compile time, sizes and layout at runtime.
 
 Two internal modules implement the machinery: `src/tags.zig` (a pure
-comptime tuple algebra) and `src/tagged.zig` (runtime ops directed by
+comptime tuple algebra) and `src/tag_ops.zig` (runtime ops directed by
 comptime tags). **Neither is public API** — they are not re-exported at the
 module root; user code consumes all of this through `Tensor` methods, and
 the autograd VJPs call the same library on raw gradients (docs/REFERENCE.md
@@ -490,7 +490,7 @@ another's order.
 A view ([Chapter 3](03-tensors-from-scratch.md)) is a shape and strides
 over a shared buffer; the tag layer adds that you never permute *by
 position*, you align *to a target tag order*. Here is the real
-implementation, short enough to read whole (src/tagged.zig:330–362,
+implementation, short enough to read whole (src/tag_ops.zig:330–362,
 `alignTensorToOf`; `alignTensorTo` at :324 is its f32 wrapper):
 
 ```zig
@@ -1015,7 +1015,7 @@ Shared and kept: batch. Shared and dropped: contracted. Private and kept:
 free. Private and dropped: summed away first. Every matmul, batched matmul,
 inner product, outer product, and marginalization is a row of this table —
 and `dot`, our hero of §4.7, turns out to be a one-liner
-(src/tagged.zig:105–118, parameters elided):
+(src/tag_ops.zig:105–118, parameters elided):
 
 ```zig
 pub fn taggedDot(...) !RawTensor {
@@ -1047,8 +1047,8 @@ The tag algebra fixed *which* axes are M, N, K at compile time. Which
 data physically lies — a runtime fact. So the lowering builds zero-copy
 aligned views of each operand against comptime tuple-concatenated targets —
 `const x_plain_target = comptime batch_ord ++ m_ord ++ k_ord;`
-(src/tagged.zig:624–627) — and *probes*, at runtime, which orientation is
-already contiguous (src/tagged.zig:629–652). A transposed-kernel flag costs
+(src/tag_ops.zig:624–627) — and *probes*, at runtime, which orientation is
+already contiguous (src/tag_ops.zig:629–652). A transposed-kernel flag costs
 nothing; a materialization costs a copy pass; the probe pays the flag
 whenever it can, and when *both* operands want the transposed kernel, the
 larger keeps it and the smaller materializes once. The batch group then
@@ -1057,7 +1057,7 @@ runs. How those kernels work — and why GEMM dominates everything — is
 [Chapter 5](05-the-operation-library.md) and
 [Chapter 6](06-going-fast-on-cpus.md)'s story.
 
-One more documented cost (doc comment, src/tagged.zig:133–135): an
+One more documented cost (doc comment, src/tag_ops.zig:133–135): an
 `out_tags` order that interleaves the batch/free groups pays one extra
 output materialization — prefer group-nested orders. And even the
 *rejected* fourth kernel is a documented decision: the double-transposed
@@ -1071,7 +1071,7 @@ benchmark trail; [Chapter 16](16-the-craft.md) returns to that culture.
 
 The claim from §4.1 deserves a proper closing argument. **There is
 deliberately no tagged tensor type at runtime.** The module doc of
-`src/tagged.zig` (lines 10–13) states the decision:
+`src/tag_ops.zig` (lines 10–13) states the decision:
 
 > There is intentionally no tagged tensor *type* here: tags are comptime-only
 > data (`tags.zig`), so the single runtime tensor currency stays the raw
@@ -1155,9 +1155,9 @@ neither a tag nor a check for one.
 
 - `src/tags.zig` — the entire comptime algebra in ~600 lines; readable top
   to bottom, and the best `comptime` tutorial in the tree.
-- `src/tags_tests.zig` / `src/tagged_tests.zig` — the algebra's rules
+- `src/tags_tests.zig` / `src/tag_ops_tests.zig` — the algebra's rules
   pinned as tests, comptime and runtime halves respectively.
-- `src/tagged.zig` — the runtime half: `alignTensorToOf` (the workhorse
+- `src/tag_ops.zig` — the runtime half: `alignTensorToOf` (the workhorse
   view), `pointwise`, `taggedDot`/`taggedEinsum` with the orientation probe.
   Remember: internal — user code goes through `Tensor` methods.
 - `src/ag/tensor.zig:189–215` — the facade constructor: normalize, validate,
@@ -1181,7 +1181,7 @@ neither a tag nor a check for one.
 3. **One dispatcher, six ops.** Generalize the mini `add` into
    `pointwise(comptime op: enum { add, sub, mul, div }, a, b, out)`,
    selecting the scalar operation with a comptime `switch` — the shape of
-   `src/tagged.zig`'s `pointwise` (:55–81). The broadcast machinery should
+   `src/tag_ops.zig`'s `pointwise` (:55–81). The broadcast machinery should
    not change at all.
 4. **Batch axes (hard).** Remove the mini dot's `@compileError` on shared
    non-contract tags: implement `dotBatchTags` (shared, non-contract, in

@@ -25,7 +25,7 @@ listed here.
 
 A band may depend only on bands at or below it: apps (`examples/`, `tools/`,
 `bench/`) → llm (`src/llm/`) → facade (`src/fucina.zig`) → autograd/training
-(`src/ag/`, optim/es/lora/persistence) → tagged ops (`src/tagged.zig`) →
+(`src/ag/`, optim/es/lora/persistence) → tagged ops (`src/tag_ops.zig`) →
 exec runtime (`src/exec/`) → backends (`src/backend/`) → tensor/storage/dtype.
 `fucina_llm` files import the `fucina` *module* (public surface plus
 `fucina.internal`), never individual `src/*.zig` files.

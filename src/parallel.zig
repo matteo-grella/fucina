@@ -1,3 +1,8 @@
+//! Parallel execution policies over the worker pool (`thread.zig`):
+//! chunked for-loops, reduction scaffolding, spin-budget tuning, and the
+//! thread-count gates kernels consult. Kernels never spawn threads
+//! directly; they size and split work through this module.
+//! Layer stack: docs/ARCHITECTURE.md.
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");

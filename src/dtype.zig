@@ -1,3 +1,8 @@
+//! Element dtypes and the quantized block-format vocabulary: the `DType`
+//! enum, scalar converters (bf16/f8), every GGML block struct, and the
+//! comptime `block_formats` registry (one row per quantized dtype, claimed
+//! exactly once — completeness is a compile error, and GGUF derives its
+//! type mapping from it). Layer stack: docs/ARCHITECTURE.md.
 const std = @import("std");
 
 pub const DType = enum {

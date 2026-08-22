@@ -1,3 +1,7 @@
+//! The comptime axis-tag algebra: tag tuple types, membership/position
+//! lookups, and tag-set operations. Comptime-only data — no runtime code;
+//! the op library APPLYING tags to raw tensors is `tag_ops.zig`, and the
+//! public tagged tensor facade is `ag.zig`.
 const std = @import("std");
 const tensor_mod = @import("tensor.zig");
 

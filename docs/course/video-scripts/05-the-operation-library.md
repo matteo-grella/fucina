@@ -47,7 +47,7 @@ unchecked kernels.
 **Visual:** Three code shots in descending sequence, with a small "depth
 gauge" graphic on the left edge (facade → lowering → kernel) tracking the
 descent: (1) `src/ag/tensor.zig:1241–1243` (`add`, the whole method);
-(2) `src/tagged.zig:53–81` (`pointwise` — hold on the two `validateTensorRank`
+(2) `src/tag_ops.zig:53–81` (`pointwise` — hold on the two `validateTensorRank`
 lines, then the two `broadcastTensorTo` view lines, then the `switch`);
 (3) `src/exec.zig:48–53` (`LayoutClass` enum).
 **Overlay:** On shot 2: "validate once — nothing below re-checks". On shot 3:
@@ -113,7 +113,7 @@ over a slow zoom-out of the three-layer depth-gauge diagram from segment 2.
 ## Asset list
 - **Code shots (record from the repo at current main):**
   - `src/ag/tensor.zig:1241–1243` — `add`, the entire facade method.
-  - `src/tagged.zig:53–81` — `pointwise`, the entire lowering function.
+  - `src/tag_ops.zig:53–81` — `pointwise`, the entire lowering function.
   - `src/exec.zig:48–53` — the `LayoutClass` enum.
   - `src/ag/tensor.zig:1257–1261` — `scale`, the entire method.
   - `src/ag/tensor.zig:3747` — the `dot` signature (one line, wraps).
@@ -132,7 +132,7 @@ over a slow zoom-out of the three-layer depth-gauge diagram from segment 2.
   1. Eager-vs-graph pipelines: "capture → compile → execute" grayed vs
      "call → kernel → owned tensor" highlighted.
   2. Depth gauge: three stacked layers labeled facade (`src/ag/tensor.zig`)
-     → lowering (`src/tagged.zig`) → kernels (`src/exec.zig` and leaves),
+     → lowering (`src/tag_ops.zig`) → kernels (`src/exec.zig` and leaves),
      with a marker descending as the trace proceeds.
   3. Pool recycling loop: deinit → free list → same-shaped successor gets
      the same address.
