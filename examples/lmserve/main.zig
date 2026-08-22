@@ -46,6 +46,10 @@ const usage_text =
     \\                      DNS-rebinding guard always accepts loopback names
     \\                      and the bind host; on non-loopback binds the
     \\                      check only arms when --allow-host is given
+    \\  --cors-origin O     let browser pages from origin O ("*" for any)
+    \\                      call the server. Default: no CORS headers, so
+    \\                      cross-origin pages cannot read responses;
+    \\                      non-browser clients are unaffected
     \\  --spec              speculative decoding for solo generations
     \\                      (qwen3/qwen3moe; self-draft cascade, lossless,
     \\                      stop sequences included). --batch groups of 2+
@@ -133,6 +137,7 @@ pub const Args = struct {
     port: u16 = 8080,
     ctx_len: usize = 4096,
     api_key: ?[]const u8 = null,
+    cors_origin: ?[]const u8 = null,
     queue: usize = 16,
     conns: usize = 32,
     batch: usize = 1,
@@ -251,6 +256,9 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--shine-fleet") and i + 1 < args_slice.len) {
             i += 1;
             args.shine_fleet_dir = args_slice[i];
+        } else if (std.mem.eql(u8, arg, "--cors-origin") and i + 1 < args_slice.len) {
+            i += 1;
+            args.cors_origin = args_slice[i];
         } else if (std.mem.eql(u8, arg, "--allow-host") and i + 1 < args_slice.len) {
             i += 1;
             if (args.allow_hosts_n >= args.allow_hosts.len) {
@@ -1174,6 +1182,7 @@ fn serveWith(io: std.Io, allocator: std.mem.Allocator, backend: types.Backend, a
             .api_key = args.api_key,
             .max_connections = args.conns,
             .extra_hosts = args.allow_hosts[0..args.allow_hosts_n],
+            .cors_origin = args.cors_origin,
         },
         .backend = backend,
         .sched = &sched,

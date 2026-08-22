@@ -14463,7 +14463,8 @@ streaming in all three dialects, hermes-style function calling on the
 qwen3-family backends (tool declarations render into the prompt, the
 client executes; `tool_choice` is grammar-forced on `-Dllguidance=true`
 builds), JSON-schema/regex/Lark constrained output (`-Dllguidance=true`
-builds), an optional Host-header allowlist (`--allow-host`), and a bounded
+builds), an optional Host-header allowlist (`--allow-host`), opt-in CORS
+(`--cors-origin`; no CORS headers by default), and a bounded
 request queue in front of one inference worker — a per-request stream pipe
 decouples generation from client sockets, so a stalled client never blocks
 the worker. Serving levers: `--kv-slots` keeps interleaved conversations

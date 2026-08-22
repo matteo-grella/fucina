@@ -131,7 +131,10 @@ dropped so tool-sending clients still work as plain chat (forced tool
 calls are rejected there). `stop_sequences` are honored and attributed
 (`stop_reason` `stop_sequence` + the fired sequence). A DNS-rebinding
 guard rejects foreign Host headers on loopback binds; `--allow-host`
-extends the set (and arms the check on non-loopback binds).
+extends the set (and arms the check on non-loopback binds). CORS is off
+by default (no `access-control-*` headers), so browser pages on other
+origins cannot read responses; `--cors-origin O` opts in for origin `O`
+(`*` for any). Non-browser clients are unaffected.
 
 **Claude Code** runs against it directly:
 
@@ -197,6 +200,7 @@ curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/
 | `--port N` | port (default 8080) |
 | `--ctx N` | per-request context budget in tokens (default 4096) |
 | `--api-key K` | require `Authorization: Bearer K` (or `x-api-key: K`) |
+| `--cors-origin O` | allow browser pages from origin `O` (`*` for any) to call the server; default: no CORS headers |
 | `--queue N` | max queued requests before 429 (default 16) |
 | `--conns N` | max concurrent connections (default 32) |
 | `--batch N` | lockstep-decode up to N queued requests together (default 1; qwen3/qwen3moe/gemma4, excludes `--fleet`; raises `--kv-slots` to N) |

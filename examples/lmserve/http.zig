@@ -167,6 +167,14 @@ pub const Options = struct {
     /// bind host (`--allow-host`). Setting any also ARMS the check on
     /// non-loopback binds (see `hostAllowed`).
     extra_hosts: []const []const u8 = &.{},
+    /// When set (`--cors-origin`), responses carry
+    /// `access-control-allow-origin: <value>` and OPTIONS preflights are
+    /// answered permissively, letting browser pages from that origin (`*`
+    /// for any) call the server. Default null emits NO CORS headers: any
+    /// web page can still SEND a request to a localhost bind (and, with no
+    /// `api_key`, have it served), but the browser withholds the response
+    /// from the page's script. Non-browser clients are unaffected.
+    cors_origin: ?[]const u8 = null,
 };
 
 /// The hostname of a Host header value: strips an optional port and IPv6
@@ -296,9 +304,17 @@ pub const Server = struct {
         posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&snd)) catch {};
     }
 
-    const cors_headers = [_]std.http.Header{
-        .{ .name = "access-control-allow-origin", .value = "*" },
-    };
+    /// `base` plus the configured CORS origin header, if any. `buf` must
+    /// hold `base.len + 1` entries; the returned slice aliases it.
+    fn withCors(cors_origin: ?[]const u8, buf: []std.http.Header, base: []const std.http.Header) []const std.http.Header {
+        @memcpy(buf[0..base.len], base);
+        var n = base.len;
+        if (cors_origin) |origin| {
+            buf[n] = .{ .name = "access-control-allow-origin", .value = origin };
+            n += 1;
+        }
+        return buf[0..n];
+    }
 
     /// DNS-rebinding guard: a browser lured to an attacker page resolves the
     /// attacker's domain to 127.0.0.1 and reaches this server with the
@@ -341,11 +357,16 @@ pub const Server = struct {
         const method = request.head.method;
 
         if (method == .OPTIONS) {
-            return request.respond("", .{ .status = .no_content, .extra_headers = &[_]std.http.Header{
-                .{ .name = "access-control-allow-origin", .value = "*" },
-                .{ .name = "access-control-allow-methods", .value = "GET, POST, OPTIONS" },
-                .{ .name = "access-control-allow-headers", .value = "Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta" },
-            } });
+            // Without --cors-origin the 204 carries no CORS headers, so the
+            // browser fails the preflight and never reads a response.
+            if (self.opts.cors_origin) |origin| {
+                return request.respond("", .{ .status = .no_content, .extra_headers = &[_]std.http.Header{
+                    .{ .name = "access-control-allow-origin", .value = origin },
+                    .{ .name = "access-control-allow-methods", .value = "GET, POST, OPTIONS" },
+                    .{ .name = "access-control-allow-headers", .value = "Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta" },
+                } });
+            }
+            return request.respond("", .{ .status = .no_content });
         }
 
         if (method == .GET and std.mem.eql(u8, path, "/health"))
@@ -414,10 +435,10 @@ pub const Server = struct {
     }
 
     fn respondJson(self: *Server, request: *std.http.Server.Request, status: std.http.Status, body: []const u8) !void {
-        _ = self;
+        var hdrs: [2]std.http.Header = undefined;
         try request.respond(body, .{
             .status = status,
-            .extra_headers = &(cors_headers ++ [_]std.http.Header{
+            .extra_headers = withCors(self.opts.cors_origin, &hdrs, &.{
                 .{ .name = "content-type", .value = "application/json" },
             }),
         });
@@ -492,14 +513,16 @@ pub const Server = struct {
     const SseState = struct {
         request: *std.http.Server.Request,
         conn_out: *std.Io.Writer,
+        cors_origin: ?[]const u8 = null,
         body: std.http.BodyWriter = undefined,
         body_buf: [4096]u8 = undefined,
         started: bool = false,
 
         fn begin(self: *SseState) !void {
+            var hdrs: [3]std.http.Header = undefined;
             self.body = try self.request.respondStreaming(&self.body_buf, .{
                 .respond_options = .{
-                    .extra_headers = &(cors_headers ++ [_]std.http.Header{
+                    .extra_headers = withCors(self.cors_origin, &hdrs, &.{
                         .{ .name = "content-type", .value = "text/event-stream" },
                         .{ .name = "cache-control", .value = "no-cache" },
                     }),
@@ -543,6 +566,7 @@ pub const Server = struct {
         var sse = SseState{
             .request = request,
             .conn_out = request.server.out,
+            .cors_origin = self.opts.cors_origin,
         };
         var pipe = StreamPipe{ .allocator = self.allocator, .io = self.io };
         defer pipe.deinit();
