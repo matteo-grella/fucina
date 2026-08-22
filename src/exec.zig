@@ -36,15 +36,7 @@ pub const MoeBatchProfile = exec_moe.MoeBatchProfile;
 pub const delta_attention = @import("exec/delta_attention.zig");
 pub const expert_store = @import("exec/expert_store.zig");
 
-pub const PackedMatmulFormat = backend_mod.PackedMatmulFormat;
 pub const parallel_dot_backward_branches = Backend.kind == .native and backend_mod.native_uses_blas;
-pub const PackedMatmulRhsFor = backend_mod.PackedMatmulRhsFor;
-pub const PackedDenseRhs = backend_mod.PackedDenseRhs;
-pub const QuantizedMatmulFormat = backend_mod.QuantizedMatmulFormat;
-pub const QuantizedMatmulRhsQ4_Kx4 = backend_mod.QuantizedMatmulRhsQ4_Kx4;
-pub const QuantizedMatmulRhsQ4_Kx8 = backend_mod.QuantizedMatmulRhsQ4_Kx8;
-pub const QuantizedMatmulRhsQ4_Kx2Mmla = backend_mod.QuantizedMatmulRhsQ4_Kx2Mmla;
-pub const QuantizedMatmulRhsQ5_Kx8 = backend_mod.QuantizedMatmulRhsQ5_Kx8;
 pub const RhsLifetime = exec_quant_matmul.RhsLifetime;
 
 pub const LayoutClass = enum {
