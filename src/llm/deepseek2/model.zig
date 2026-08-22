@@ -1581,7 +1581,7 @@ fn dsaScoreSelect(self: *const Model, ctx: *ExecContext, cache: *Cache, layer_i:
     defer w_row.deinit();
     var weighted = try rectified.mul(ctx, &w_row);
     defer weighted.deinit();
-    var scores_t = try weighted.sum(ctx, .head);
+    var scores_t = try weighted.sum(ctx, .head, .{});
     defer scores_t.deinit();
 
     var top = try scores_t.topK(ctx, .t, cfg.indexer_top_k, .k);

@@ -1164,7 +1164,7 @@ fn hcPre(
     defer pre_t.deinit();
     var weighted = try streams_t.mul(ctx, &pre_t);
     defer weighted.deinit();
-    const summed = try weighted.sum(ctx, .stream);
+    const summed = try weighted.sum(ctx, .stream, .{});
     return .{ .sub_in = summed, .split = split };
 }
 
@@ -1464,7 +1464,7 @@ fn outputLogitsWithInto(self: *Model, ctx: *ExecContext, streams: []const f32, h
     defer w_t.deinit();
     var weighted = try streams_t.mul(ctx, &w_t);
     defer weighted.deinit();
-    var merged = try weighted.sum(ctx, .stream);
+    var merged = try weighted.sum(ctx, .stream, .{});
     defer merged.deinit();
 
     var norm_w = try embedTag(ctx, out_norm);
@@ -1605,7 +1605,7 @@ fn hcPreBatch(ctx: *ExecContext, config: Config, module: *const HcModule, stream
     defer pre_t.deinit();
     var weighted = try streams3.mul(ctx, &pre_t);
     defer weighted.deinit();
-    var summed = try weighted.sum(ctx, .stream);
+    var summed = try weighted.sum(ctx, .stream, .{});
     defer summed.deinit();
     return allocator.dupe(f32, try summed.dataConst());
 }
@@ -2118,7 +2118,7 @@ fn indexerSelectFrom(self: *const Model, ctx: *ExecContext, q: []f32, head_w: []
     defer w_t.deinit();
     var weighted = try rectified.mul(ctx, &w_t);
     defer weighted.deinit();
-    var scores_t = try weighted.sum(ctx, .head);
+    var scores_t = try weighted.sum(ctx, .head, .{});
     defer scores_t.deinit();
 
     // Top-k row selection through the core kernel (ties resolve to the

@@ -148,7 +148,7 @@ fn meanCe(ctx: *ExecContext, model: *const Model, x: *const Tensor(.{ .batch, .i
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
     const logits = try forwardLogits(ctx, model, x);
-    const loss = try logits.crossEntropy(ctx, .class, labels);
+    const loss = try logits.crossEntropy(ctx, .class, labels, .{});
     return loss.item();
 }
 
