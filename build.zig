@@ -536,139 +536,34 @@ pub fn build(b: *std.Build) void {
     const test_llm_step = b.step("test-llm", "Run the llm-root unit tests only");
     test_llm_step.dependOn(&run_llm_tests.step);
 
-    const lmserve_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/lmserve/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    lmserve_tests.root_module.addImport("fucina", module);
-    lmserve_tests.root_module.addImport("fucina_llm", llm_module);
+    const lmserve_tests = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-lmserve", .desc = "Run the lmserve-root unit tests only", .root = "examples/lmserve/main.zig", .llm = true });
     lmserve_tests.root_module.addImport("nanochat", nanochat_module);
-    configureBlas(lmserve_tests, blas_kind);
-    configureGpu(b, lmserve_tests, gpu_kind);
     configureLlguidance(lmserve_tests, llguidance_dep);
     lmserve_tests.root_module.link_libc = true;
 
-    const run_lmserve_tests = b.addRunArtifact(lmserve_tests);
-    test_step.dependOn(&run_lmserve_tests.step);
-
-    const nam_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/nam/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    nam_tests.root_module.addImport("fucina", module);
-    configureBlas(nam_tests, blas_kind);
-    configureGpu(b, nam_tests, gpu_kind);
+    const nam_tests = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-nam", .desc = "Run the nam-root unit tests only", .root = "examples/nam/main.zig" });
     configureNamAudio(nam_tests);
 
-    const run_nam_tests = b.addRunArtifact(nam_tests);
-    test_step.dependOn(&run_nam_tests.step);
-
-    const parakeet_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/parakeet/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    parakeet_tests.root_module.addImport("fucina", module);
-    parakeet_tests.root_module.addImport("fucina_llm", llm_module);
+    const parakeet_tests = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-parakeet", .desc = "Run the parakeet-root unit tests only", .root = "examples/parakeet/main.zig", .llm = true });
     parakeet_tests.root_module.addImport("nam_audio", nam_audio_module);
     parakeet_tests.root_module.addOptions("build_options", parakeet_opts);
-    configureBlas(parakeet_tests, blas_kind);
-    configureGpu(b, parakeet_tests, gpu_kind);
     if (parakeet_mic) configureAudioShim(parakeet_tests);
 
-    const run_parakeet_tests = b.addRunArtifact(parakeet_tests);
-    test_step.dependOn(&run_parakeet_tests.step);
-
-    const omnivoice_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/omnivoice/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    omnivoice_tests.root_module.addImport("fucina", module);
-    omnivoice_tests.root_module.addImport("fucina_llm", llm_module);
-    configureBlas(omnivoice_tests, blas_kind);
-    configureGpu(b, omnivoice_tests, gpu_kind);
+    const omnivoice_tests = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-omnivoice", .desc = "Run the omnivoice-root unit tests only", .root = "examples/omnivoice/main.zig", .llm = true });
     configureOmnivoiceAudio(omnivoice_tests);
 
-    const run_omnivoice_tests = b.addRunArtifact(omnivoice_tests);
-    test_step.dependOn(&run_omnivoice_tests.step);
+    _ = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-locate-anything", .desc = "Run the locate_anything-root unit tests only", .root = "examples/locate_anything/main.zig", .llm = true });
 
-    const locate_anything_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/locate_anything/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    locate_anything_tests.root_module.addImport("fucina", module);
-    locate_anything_tests.root_module.addImport("fucina_llm", llm_module);
-    configureBlas(locate_anything_tests, blas_kind);
-    configureGpu(b, locate_anything_tests, gpu_kind);
+    _ = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-facedetect", .desc = "Run the facedetect-root unit tests only", .root = "examples/facedetect/main.zig" });
 
-    const run_locate_anything_tests = b.addRunArtifact(locate_anything_tests);
-    test_step.dependOn(&run_locate_anything_tests.step);
-
-    const facedetect_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/facedetect/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    facedetect_tests.root_module.addImport("fucina", module);
-    configureBlas(facedetect_tests, blas_kind);
-    configureGpu(b, facedetect_tests, gpu_kind);
-
-    const run_facedetect_tests = b.addRunArtifact(facedetect_tests);
-    test_step.dependOn(&run_facedetect_tests.step);
-
-    const voiceagent_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/voiceagent/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    voiceagent_tests.root_module.addImport("fucina", module);
-    voiceagent_tests.root_module.addImport("fucina_llm", llm_module);
+    // AEC/duplex leg: the GTCRN parity test gates every stage against the
+    // exporter fixtures, so kernel work on aec.zig iterates on the solo step
+    // instead of the full matrix.
+    const voiceagent_tests = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-voiceagent", .desc = "Run the voiceagent-root unit tests only (GTCRN-AEC parity + duplex gates)", .root = "examples/voiceagent/main.zig", .llm = true });
     voiceagent_tests.root_module.addImport("nam_audio", nam_audio_module);
     configureAudioShim(voiceagent_tests);
-    configureBlas(voiceagent_tests, blas_kind);
-    configureGpu(b, voiceagent_tests, gpu_kind);
 
-    const run_voiceagent_tests = b.addRunArtifact(voiceagent_tests);
-    test_step.dependOn(&run_voiceagent_tests.step);
-
-    // AEC/duplex leg: the voiceagent root alone. The GTCRN parity test gates
-    // every stage against the exporter fixtures, so kernel work on aec.zig
-    // iterates here instead of through the full nine-root matrix.
-    const test_voiceagent_step = b.step("test-voiceagent", "Run the voiceagent-root unit tests only (GTCRN-AEC parity + duplex gates)");
-    test_voiceagent_step.dependOn(&run_voiceagent_tests.step);
-
-    const nanochat_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/nanochat/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    nanochat_tests.root_module.addImport("fucina", module);
-    nanochat_tests.root_module.addImport("fucina_llm", llm_module);
-    configureBlas(nanochat_tests, blas_kind);
-    configureGpu(b, nanochat_tests, gpu_kind);
-
-    const run_nanochat_tests = b.addRunArtifact(nanochat_tests);
-    test_step.dependOn(&run_nanochat_tests.step);
+    _ = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-nanochat", .desc = "Run the nanochat-root unit tests only", .root = "examples/nanochat/main.zig", .llm = true });
 }
 
 const LlguidanceDep = struct {
@@ -912,6 +807,40 @@ const ToolCtx = struct {
     blas_kind: BlasKind,
     gpu_kind: GpuKind,
 };
+
+/// Standard test-root wiring: addTest + fucina (+ fucina_llm) imports,
+/// BLAS/GPU config, registration into `zig build test`, and a solo
+/// `test-<name>` step so any root iterates without the full matrix.
+/// Special per-root wiring (extra imports, option modules, libc,
+/// llguidance, audio shims) attaches to the returned artifact at the call
+/// site, exactly like `addExample`.
+fn addTestRoot(
+    b: *std.Build,
+    ctx: ToolCtx,
+    test_step: *std.Build.Step,
+    spec: struct {
+        step: []const u8,
+        desc: []const u8,
+        root: []const u8,
+        llm: bool = false,
+    },
+) *std.Build.Step.Compile {
+    const tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(spec.root),
+            .target = ctx.target,
+            .optimize = ctx.optimize,
+        }),
+    });
+    tests.root_module.addImport("fucina", ctx.module);
+    if (spec.llm) tests.root_module.addImport("fucina_llm", ctx.llm_module);
+    configureBlas(tests, ctx.blas_kind);
+    configureGpu(b, tests, ctx.gpu_kind);
+    const run = b.addRunArtifact(tests);
+    test_step.dependOn(&run.step);
+    b.step(spec.step, spec.desc).dependOn(&run.step);
+    return tests;
+}
 
 const ExampleArtifacts = struct {
     exe: *std.Build.Step.Compile,
