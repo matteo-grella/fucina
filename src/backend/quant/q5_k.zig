@@ -236,18 +236,7 @@ fn matmulQ5_Kx8RhsTailRows(
     }
 }
 
-pub fn matmulQ5_Kx8RhsRange(
-    out: []f32,
-    lhs_blocks: []const BlockQ8_K,
-    rhs: *const QuantizedMatmulRhsQ5_Kx8,
-    m: usize,
-    n: usize,
-    row_start: usize,
-    row_end: usize,
-) void {
-    _ = m;
-    matmulQ5_Kx8RhsTile(out, lhs_blocks, rhs, n, row_start, row_end, 0, n);
-}
+pub const matmulQ5_Kx8RhsRange = common.RangeFromTile(matmulQ5_Kx8RhsTile);
 
 pub fn matmulQ5_Kx8Q8_Kx4RhsTile(
     out: []f32,
@@ -296,18 +285,7 @@ pub fn matmulQ5_Kx8Q8_Kx4RhsTile(
     }
 }
 
-pub fn matmulQ5_Kx8Q8_Kx4RhsRange(
-    out: []f32,
-    lhs_blocks: []const BlockQ8_Kx4,
-    rhs: *const QuantizedMatmulRhsQ5_Kx8,
-    m: usize,
-    n: usize,
-    row_start: usize,
-    row_end: usize,
-) void {
-    _ = m;
-    matmulQ5_Kx8Q8_Kx4RhsTile(out, lhs_blocks, rhs, n, row_start, row_end, 0, n);
-}
+pub const matmulQ5_Kx8Q8_Kx4RhsRange = common.RangeFromTile(matmulQ5_Kx8Q8_Kx4RhsTile);
 
 pub fn matmulQ5_KRhsTile(
     out: []f32,
@@ -350,18 +328,7 @@ pub fn matmulQ5_KRhsTile(
     }
 }
 
-pub fn matmulQ5_KRhsRange(
-    out: []f32,
-    lhs_blocks: []const BlockQ8_K,
-    rhs: *const QuantizedMatmulRhsQ5_K,
-    m: usize,
-    n: usize,
-    row_start: usize,
-    row_end: usize,
-) void {
-    _ = m;
-    matmulQ5_KRhsTile(out, lhs_blocks, rhs, n, row_start, row_end, 0, n);
-}
+pub const matmulQ5_KRhsRange = common.RangeFromTile(matmulQ5_KRhsTile);
 
 const moe_row_tile = 4;
 

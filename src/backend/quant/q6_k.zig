@@ -147,18 +147,7 @@ pub fn matmulQ6_KRhsTile(
     }
 }
 
-pub fn matmulQ6_KRhsRange(
-    out: []f32,
-    lhs_blocks: []const BlockQ8_K,
-    rhs: *const QuantizedMatmulRhsQ6_K,
-    m: usize,
-    n: usize,
-    row_start: usize,
-    row_end: usize,
-) void {
-    _ = m;
-    matmulQ6_KRhsTile(out, lhs_blocks, rhs, n, row_start, row_end, 0, n);
-}
+pub const matmulQ6_KRhsRange = common.RangeFromTile(matmulQ6_KRhsTile);
 
 const moe_row_tile = 4;
 
@@ -521,18 +510,7 @@ pub fn matmulQ6_Kx4RhsPairTile(
     }
 }
 
-pub fn matmulQ6_Kx4RhsRange(
-    out: []f32,
-    lhs_blocks: []const BlockQ8_K,
-    rhs: *const QuantizedMatmulRhsQ6_Kx4,
-    m: usize,
-    n: usize,
-    row_start: usize,
-    row_end: usize,
-) void {
-    _ = m;
-    matmulQ6_Kx4RhsTile(out, lhs_blocks, rhs, n, row_start, row_end, 0, n);
-}
+pub const matmulQ6_Kx4RhsRange = common.RangeFromTile(matmulQ6_Kx4RhsTile);
 
 fn dotQ6_KQ8_K(w: *const BlockQ6_K, a: *const BlockQ8_K) f32 {
     if (comptime builtin.cpu.arch == .aarch64) {

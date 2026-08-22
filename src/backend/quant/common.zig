@@ -617,6 +617,25 @@ pub fn dotDense(a: []const f32, b: []const f32) f32 {
     return acc;
 }
 
+/// The `matmul<Fmt>RhsRange` trampoline every quant format exposes: the
+/// parallel dispatch splits ROWS only, so a range call is the format's Tile
+/// kernel over the full column span (`m` is unused by construction — the
+/// tile covers rows [row_start, row_end)). Instantiated per format from its
+/// Tile kernel; formats whose range semantics differ keep a hand-written
+/// body instead.
+pub fn RangeFromTile(comptime tile: anytype) blk: {
+    const params = @typeInfo(@TypeOf(tile)).@"fn".params;
+    break :blk fn (params[0].type.?, params[1].type.?, params[2].type.?, usize, usize, usize, usize) void;
+} {
+    const params = @typeInfo(@TypeOf(tile)).@"fn".params;
+    return struct {
+        fn range(out: params[0].type.?, lhs: params[1].type.?, rhs: params[2].type.?, m: usize, n: usize, row_start: usize, row_end: usize) void {
+            _ = m;
+            tile(out, lhs, rhs, n, row_start, row_end, 0, n);
+        }
+    }.range;
+}
+
 test {
     _ = @import("common_tests.zig");
 }

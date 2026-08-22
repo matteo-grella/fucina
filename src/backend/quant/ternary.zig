@@ -401,18 +401,7 @@ pub fn matmulTQ2_0RhsTile(
     }
 }
 
-pub fn matmulTQ2_0RhsRange(
-    out: []f32,
-    lhs_blocks: []const BlockQ8_K,
-    rhs: *const QuantizedMatmulRhsTQ2_0,
-    m: usize,
-    n: usize,
-    r0: usize,
-    r1: usize,
-) void {
-    _ = m;
-    matmulTQ2_0RhsTile(out, lhs_blocks, rhs, n, r0, r1, 0, n);
-}
+pub const matmulTQ2_0RhsRange = common.RangeFromTile(matmulTQ2_0RhsTile);
 
 // ---------------- int8 flagship: column-interleaved x4 pack ----------------
 
@@ -1175,18 +1164,7 @@ pub fn matmulQ2_0RhsTile(
     }
 }
 
-pub fn matmulQ2_0RhsRange(
-    out: []f32,
-    lhs_blocks: []const BlockQ8_0,
-    rhs: *const QuantizedMatmulRhsQ2_0,
-    m: usize,
-    n: usize,
-    r0: usize,
-    r1: usize,
-) void {
-    _ = m;
-    matmulQ2_0RhsTile(out, lhs_blocks, rhs, n, r0, r1, 0, n);
-}
+pub const matmulQ2_0RhsRange = common.RangeFromTile(matmulQ2_0RhsTile);
 
 // ---------------- f32-activation path (mul-free, IEEE-exact) ----------------
 
@@ -1248,18 +1226,7 @@ pub fn matmulTQ2_0F32RhsTile(
     }
 }
 
-pub fn matmulTQ2_0F32RhsRange(
-    out: []f32,
-    lhs: []const f32,
-    rhs: *const QuantizedMatmulRhsTQ2_0,
-    m: usize,
-    n: usize,
-    r0: usize,
-    r1: usize,
-) void {
-    _ = m;
-    matmulTQ2_0F32RhsTile(out, lhs, rhs, n, r0, r1, 0, n);
-}
+pub const matmulTQ2_0F32RhsRange = common.RangeFromTile(matmulTQ2_0F32RhsTile);
 
 test {
     _ = @import("ternary_tests.zig");
