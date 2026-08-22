@@ -15,7 +15,7 @@
 const std = @import("std");
 const fucina = @import("fucina");
 const llm = @import("fucina_llm");
-const types = @import("types.zig");
+const types = @import("fucina_llm").serving;
 
 const Allocator = std.mem.Allocator;
 const dg = llm.diffusion_gemma.model;

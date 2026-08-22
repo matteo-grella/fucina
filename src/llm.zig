@@ -114,6 +114,10 @@ pub const sampler = @import("llm/sampler.zig");
 pub const logit_processor = @import("llm/logit_processor.zig");
 pub const llguidance = @import("llm/llguidance.zig");
 pub const chat = @import("llm/chat.zig");
+/// The serving contract: `GenerateRequest`/`GenerateResult`, capability
+/// flags, and the per-model-family `Backend` vtable a server consumes
+/// (`examples/lmserve` is the in-tree server built on it).
+pub const serving = @import("llm/serving.zig");
 pub const data = @import("llm/data.zig");
 /// Generated \p{L}/\p{N}/\s tables (the byte-BPE pretokenizer's). Re-exported
 /// so out-of-module consumers (nanochat's example-local tokenizer) share the

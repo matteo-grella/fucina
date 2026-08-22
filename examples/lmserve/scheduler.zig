@@ -6,7 +6,7 @@
 //! contract (docs/REFERENCE.md, Threading).
 
 const std = @import("std");
-const types = @import("types.zig");
+const types = @import("fucina_llm").serving;
 
 fn lock(m: *std.Io.Mutex) void {
     std.Io.Threaded.mutexLock(m);

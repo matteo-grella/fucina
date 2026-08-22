@@ -24,7 +24,7 @@
 const std = @import("std");
 const fucina = @import("fucina");
 const llm = @import("fucina_llm");
-const types = @import("types.zig");
+const types = @import("fucina_llm").serving;
 const backend_mod = @import("backend.zig");
 
 const Allocator = std.mem.Allocator;

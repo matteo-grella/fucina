@@ -15,7 +15,7 @@ const std = @import("std");
 const fucina = @import("fucina");
 const llm = @import("fucina_llm");
 
-const types = @import("types.zig");
+const types = @import("fucina_llm").serving;
 const backend_mod = @import("backend.zig");
 const backend_nanochat = @import("backend_nanochat.zig");
 const backend_diffusion = @import("backend_diffusion.zig");
@@ -1222,7 +1222,6 @@ fn shutdownKicker(io: std.Io, port: u16) void {
 // (Zig's lazy analysis — silently green), so presence in the directory must
 // imply presence here.
 test {
-    _ = @import("types.zig");
     _ = @import("backend.zig");
     _ = @import("backend_nanochat.zig");
     _ = @import("backend_diffusion.zig");

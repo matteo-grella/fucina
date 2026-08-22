@@ -16,7 +16,7 @@
 
 const std = @import("std");
 const llm = @import("fucina_llm");
-const types = @import("types.zig");
+const types = @import("fucina_llm").serving;
 const toolcall = @import("toolcall.zig");
 
 const Allocator = std.mem.Allocator;

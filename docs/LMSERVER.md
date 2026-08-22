@@ -344,7 +344,9 @@ to a token prefix, so the KV-slot reuse tiers (and `--kv-cache-dir`) do
 not apply — every request prefills from scratch on a fresh cache.
 
 Adding a family = implementing the two-function `Backend` vtable
-(`examples/lmserve/types.zig`): `validate` (cheap, connection-thread: message
+(`llm.serving`, `src/llm/serving.zig` — the model-agnostic serving
+contract, so an out-of-tree server consumes it without vendoring
+lmserve): `validate` (cheap, connection-thread: message
 shape + prompt length) and `generate` (worker-thread: stream reply bytes
 into the sink, return token counts + finish reason). Families served by
 `llm.chat.Conversation` get this for free from the generic adapter.
