@@ -40,6 +40,7 @@ pub const Error = weights.Error || error{
     /// Batched entries require distinct sibling caches: one per stream,
     /// all the same dtype (all from this model's `initKvCache`).
     MismatchedKvCaches,
+    KvCacheOverflow,
 };
 
 pub const ForwardProfile = struct {
@@ -59,6 +60,19 @@ pub const ForwardProfile = struct {
     final_ns: i128 = 0,
     layers: usize = 0,
 };
+
+/// Which block implementation executes the descriptor. Structural, not a
+/// family name: `.fused` is the fused-kernel decoder shape (QK-norm +
+/// half-rope over the full head dim, unbiased QKV, softmax top-k MoE — the
+/// qwen3/qwen3moe vocabulary); `.host_reference` is the auditable host-side
+/// f32 shape (biased QKV, PARTIAL rope with selectable pairing, sigmoid
+/// noaux MoE with router bias + shared experts + leading dense layers —
+/// the GLM-4.5 / DeepSeek-MoE vocabulary, ported verbatim from the hand
+/// glm4moe block so parity holds bitwise). Heavy linears and the fused MoE
+/// mixture run on fucina kernels in both styles.
+pub const BlockStyle = enum { fused, host_reference };
+
+pub const RopePairing = enum { half, interleaved };
 
 pub const Descriptor = struct {
     vocab_size: usize,
@@ -80,6 +94,26 @@ pub const Descriptor = struct {
     /// to this cumulative routing weight. 1.0 (default) = full top-k,
     /// bit-identical baseline. A runtime knob, not GGUF metadata.
     moe_expert_top_p: f32 = 1.0,
+
+    // --- block-style variants (see `BlockStyle`); the defaults describe
+    // the fused qwen3 shape, `fromGguf` fills the host_reference shape.
+    block_style: BlockStyle = .fused,
+    /// Rotated dims per head (0 = the full head_dim; host_reference only).
+    rope_dims: usize = 0,
+    rope_pairing: RopePairing = .half,
+    /// QKV projections carry additive biases (host_reference only).
+    qkv_bias: bool = false,
+    /// First N layers use the dense FFN even when `num_experts > 0`.
+    leading_dense_layers: usize = 0,
+    /// Always-on shared experts beside the routed mixture (their fused FFN
+    /// width is `num_shared_experts * moe_intermediate_size`).
+    num_shared_experts: usize = 0,
+    /// Routed-mixture weight scale applied after (optional) renormalization.
+    expert_weights_scale: f32 = 1.0,
+    /// Router activation: 1 = softmax, 2 = sigmoid (the noaux shape).
+    expert_gating_func: usize = 1,
+    /// Renormalize the selected experts' routing weights to sum to 1.
+    expert_weights_norm: bool = false,
 
     pub fn isMoe(self: Descriptor) bool {
         return self.num_experts > 0;
@@ -107,6 +141,36 @@ pub const Descriptor = struct {
         const arch = file.getString("general.architecture") orelse return Error.InvalidConfig;
         const embd = try file.get("token_embd.weight");
         const shape = try embd.logicalMatrixShape(); // {vocab, hidden}
+
+        // The GLM/DeepSeek-MoE metadata shape maps onto the host_reference
+        // block style (partial interleaved rope, QKV biases, noaux MoE).
+        if (std.mem.eql(u8, arch, "glm4moe")) {
+            const block_count = try metaInt(file, arch, "block_count");
+            const nextn = metaIntOpt(file, arch, "nextn_predict_layers") orelse 0;
+            return .{
+                .block_style = .host_reference,
+                .vocab_size = shape[0],
+                .hidden_size = try metaInt(file, arch, "embedding_length"),
+                .intermediate_size = try metaInt(file, arch, "feed_forward_length"),
+                .num_layers = block_count - nextn, // the runner runs the trunk; nextn/MTP stays with the hand port
+                .num_attention_heads = try metaInt(file, arch, "attention.head_count"),
+                .num_key_value_heads = try metaInt(file, arch, "attention.head_count_kv"),
+                .head_dim = try metaInt(file, arch, "attention.key_length"),
+                .rms_norm_eps = try metaFloat(file, arch, "attention.layer_norm_rms_epsilon"),
+                .rope_theta = gguf_meta.metaFloatOpt(file, arch, "rope.freq_base") orelse 10_000.0,
+                .rope_dims = try metaInt(file, arch, "rope.dimension_count"),
+                .rope_pairing = .interleaved,
+                .qkv_bias = true,
+                .num_experts = metaIntOpt(file, arch, "expert_count") orelse 0,
+                .num_experts_used = metaIntOpt(file, arch, "expert_used_count") orelse 0,
+                .moe_intermediate_size = metaIntOpt(file, arch, "expert_feed_forward_length") orelse 0,
+                .leading_dense_layers = metaIntOpt(file, arch, "leading_dense_block_count") orelse 0,
+                .num_shared_experts = metaIntOpt(file, arch, "expert_shared_count") orelse 0,
+                .expert_weights_scale = gguf_meta.metaFloatOpt(file, arch, "expert_weights_scale") orelse 1.0,
+                .expert_gating_func = metaIntOpt(file, arch, "expert_gating_func") orelse 1,
+                .expert_weights_norm = file.getBool("glm4moe.expert_weights_norm") orelse false,
+            };
+        }
 
         // MoE models (qwen3moe) declare experts and replace the dense FFN; a
         // dense model has no expert_count key (num_experts stays 0).
@@ -171,6 +235,9 @@ pub const MoeStreamOptions = weights.MoeStreamOptions;
 
 pub const LoadOptions = struct {
     moe_stream: ?MoeStreamOptions = null,
+    /// host_reference only: the host rope table's position capacity
+    /// (`hostStep` rejects positions beyond it).
+    max_positions: usize = 4096,
 };
 
 pub const Model = struct {
@@ -189,6 +256,9 @@ pub const Model = struct {
     expert_store: ?*fucina.ExpertStore = null,
     /// Router-lookahead prefetch (`MoeStreamOptions.pilot`).
     pilot_enabled: bool = false,
+    /// The host_reference band (`BlockStyle.host_reference`): host-side
+    /// layer state + rope table; null for `.fused` models.
+    host: ?HostBand = null,
 
     pub fn loadGguf(ctx: *ExecContext, io: std.Io, path: []const u8, config: Descriptor) !Model {
         return loadGgufOptions(ctx, io, path, config, .{});
@@ -213,6 +283,7 @@ pub const Model = struct {
 
     pub fn loadGgufFromFileOptions(ctx: *ExecContext, file: *gguf.File, config: Descriptor, options: LoadOptions) !Model {
         try config.validate();
+        if (config.block_style == .host_reference) return loadHostReference(ctx, file, config, options);
 
         const allocator = ctx.allocator;
 
@@ -272,6 +343,7 @@ pub const Model = struct {
     }
 
     pub fn deinit(self: *Model) void {
+        if (self.host) |*band| band.deinit(self.allocator);
         for (self.layers) |*layer| layer.deinit();
         self.allocator.free(self.layers);
         self.allocator.free(self.kv_head_for_head);
@@ -435,7 +507,108 @@ pub const Model = struct {
         return logits;
     }
 
+    // ---- host_reference band (see `BlockStyle`) --------------------------
 
+    fn loadHostReference(ctx: *ExecContext, file: *gguf.File, config: Descriptor, options: LoadOptions) !Model {
+        const allocator = ctx.allocator;
+
+        var expert_store: ?*fucina.ExpertStore = null;
+        if (options.moe_stream) |stream_options| {
+            if (config.isMoe()) expert_store = try weights.createExpertStore(allocator, stream_options, config.num_layers);
+        }
+        errdefer if (expert_store) |store| store.destroy();
+
+        var token_embedding = try LinearWeight.load(ctx, try file.get("token_embd.weight"), config.vocab_size, config.hidden_size);
+        errdefer token_embedding.deinit();
+        var output_norm = try weights.loadVector(ctx, try file.get("output_norm.weight"), config.hidden_size, .embed);
+        errdefer output_norm.deinit();
+        var output = try LinearWeight.load(ctx, try file.get("output.weight"), config.vocab_size, config.hidden_size);
+        errdefer output.deinit();
+
+        const kv_head_for_head = try allocator.alloc(usize, config.num_attention_heads);
+        errdefer allocator.free(kv_head_for_head);
+        const heads_per_kv = config.num_attention_heads / config.num_key_value_heads;
+        for (kv_head_for_head, 0..) |*kv_head, head_i| kv_head.* = head_i / heads_per_kv;
+
+        const host_layers = try allocator.alloc(HostLayer, config.num_layers);
+        errdefer allocator.free(host_layers);
+        var built: usize = 0;
+        errdefer for (host_layers[0..built]) |*l| l.deinit(allocator);
+        for (host_layers, 0..) |*layer, i| {
+            layer.* = try loadHostLayer(ctx, file, config, i, expert_store);
+            built += 1;
+        }
+
+        if (expert_store) |store| try store.finalize();
+        const weight_mapping = if (config.isMoe() and expert_store == null) file.takeMapping() else null;
+        if (config.isMoe() and expert_store == null and weight_mapping == null) return Error.InvalidWeightShape;
+
+        const host_output_norm = try weights.hostVector(allocator, file, "output_norm.weight", config.hidden_size);
+        errdefer allocator.free(host_output_norm);
+        var rope = try HostRope.init(allocator, config, options.max_positions);
+        errdefer rope.deinit(allocator);
+
+        const layers = try allocator.alloc(Layer, 0);
+        errdefer allocator.free(layers);
+
+        return .{
+            .allocator = allocator,
+            .config = config,
+            .token_embedding = token_embedding,
+            .output_norm = output_norm,
+            .output = output,
+            .layers = layers,
+            .kv_head_for_head = kv_head_for_head,
+            .weight_mapping = weight_mapping,
+            .expert_store = expert_store,
+            .host = .{
+                .layers = host_layers,
+                .rope = rope,
+                .output_norm = host_output_norm,
+                .attn_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(config.head_dim))),
+            },
+        };
+    }
+
+    pub fn initHostCache(self: *const Model, capacity: usize) !HostCache {
+        if (self.host == null) return Error.InvalidConfig;
+        return HostCache.init(self.allocator, self.config.num_layers, self.config.num_key_value_heads, self.config.head_dim, capacity);
+    }
+
+    /// host_reference forward: process `tokens` at positions
+    /// [cache.len, cache.len + S) and return per-position next-token logits
+    /// `[S, vocab]`. Positions are computed causally in sequence, so
+    /// per-row numerics match S = 1 steps exactly (the hand glm4moe port's
+    /// `step` contract, whose block this band mirrors verbatim).
+    pub fn hostStep(self: *const Model, ctx: *ExecContext, cache: *HostCache, tokens: []const usize) !fucina.Tensor(.{ .seq, .vocab }) {
+        const band = if (self.host) |*b| b else return Error.InvalidConfig;
+        const cfg = self.config;
+        const allocator = ctx.allocator;
+        if (tokens.len == 0) return Error.InvalidSequenceLength;
+        if (cache.len + tokens.len > cache.capacity or cache.len + tokens.len > band.rope.capacity) return Error.KvCacheOverflow;
+
+        const S = tokens.len;
+        const x = try allocator.alloc(f32, S * cfg.hidden_size);
+        defer allocator.free(x);
+        {
+            var emb = try self.token_embedding.getRowsAs(ctx, tokens, .embed);
+            defer emb.deinit();
+            @memcpy(x, try emb.dataConst());
+        }
+
+        for (band.layers, 0..) |*layer, layer_i| {
+            try hostLayerForward(ctx, cfg, band, cache, layer, layer_i, x, S, cache.len);
+        }
+        cache.len += S;
+
+        var normed_t = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ S, cfg.hidden_size });
+        defer normed_t.deinit();
+        const normed = try normed_t.data();
+        for (0..S) |r| {
+            hostRmsNormInto(normed[r * cfg.hidden_size ..][0..cfg.hidden_size], x[r * cfg.hidden_size ..][0..cfg.hidden_size], band.output_norm, cfg.rms_norm_eps);
+        }
+        return self.output.linearSeq(ctx, &normed_t, .embed, .vocab);
+    }
 
 };
 
@@ -1336,3 +1509,480 @@ test "Qwen3 0.6B config matches expected projection dimensions" {
     try std.testing.expectEqual(@as(usize, 1024), config.kvProjectionDim());
 }
 
+
+// ---- host_reference band: types and block code ---------------------------
+// Ported verbatim from the hand glm4moe port's block (src/llm/glm4moe/
+// model.zig) and parameterized by the Descriptor, so parity with that
+// oracle holds bitwise: same host-side f32 rope/attention/routing order,
+// same fucina kernels for the heavy linears and the fused MoE mixture.
+
+pub const HostBand = struct {
+    layers: []HostLayer,
+    rope: HostRope,
+    output_norm: []f32,
+    attn_scale: f32,
+
+    fn deinit(self: *HostBand, allocator: Allocator) void {
+        self.rope.deinit(allocator);
+        allocator.free(self.output_norm);
+        for (self.layers) |*l| l.deinit(allocator);
+        allocator.free(self.layers);
+        self.* = undefined;
+    }
+};
+
+/// Plain-rope cos/sin table over the rotated dims (partial rope: the first
+/// `rope_dims` of each head), pairing selected by the descriptor.
+const HostRope = struct {
+    cos: []f32,
+    sin: []f32,
+    pairs: usize,
+    pairing: RopePairing,
+    capacity: usize,
+
+    fn init(allocator: Allocator, config: Descriptor, capacity: usize) !HostRope {
+        const rope_dims = if (config.rope_dims == 0) config.head_dim else config.rope_dims;
+        const pairs = rope_dims / 2;
+        const cos = try allocator.alloc(f32, capacity * pairs);
+        errdefer allocator.free(cos);
+        const sin = try allocator.alloc(f32, capacity * pairs);
+        for (0..capacity) |pos| {
+            for (0..pairs) |i| {
+                const freq = std.math.pow(f64, config.rope_theta, -(@as(f64, @floatFromInt(2 * i)) / @as(f64, @floatFromInt(rope_dims))));
+                const angle = @as(f64, @floatFromInt(pos)) * freq;
+                cos[pos * pairs + i] = @floatCast(@cos(angle));
+                sin[pos * pairs + i] = @floatCast(@sin(angle));
+            }
+        }
+        return .{ .cos = cos, .sin = sin, .pairs = pairs, .pairing = config.rope_pairing, .capacity = capacity };
+    }
+
+    fn deinit(self: *HostRope, allocator: Allocator) void {
+        allocator.free(self.cos);
+        allocator.free(self.sin);
+        self.* = undefined;
+    }
+
+    /// Rotate the first `2*pairs` dims of one head slice, in place.
+    fn apply(self: *const HostRope, head: []f32, pos: usize) void {
+        const c = self.cos[pos * self.pairs ..][0..self.pairs];
+        const s = self.sin[pos * self.pairs ..][0..self.pairs];
+        switch (self.pairing) {
+            .interleaved => for (0..self.pairs) |i| {
+                const a = head[2 * i];
+                const b = head[2 * i + 1];
+                head[2 * i] = a * c[i] - b * s[i];
+                head[2 * i + 1] = a * s[i] + b * c[i];
+            },
+            .half => for (0..self.pairs) |i| {
+                const a = head[i];
+                const b = head[i + self.pairs];
+                head[i] = a * c[i] - b * s[i];
+                head[i + self.pairs] = a * s[i] + b * c[i];
+            },
+        }
+    }
+};
+
+/// Host K/V cache: per layer `[capacity, kv_heads, head_dim]` for K
+/// (post-rope) and V. `truncate` is the speculative rewind.
+pub const HostCache = struct {
+    allocator: Allocator,
+    k: [][]f32,
+    v: [][]f32,
+    len: usize = 0,
+    capacity: usize,
+
+    pub fn init(allocator: Allocator, n_layers: usize, kv_heads: usize, head_dim: usize, capacity: usize) !HostCache {
+        const k = try allocator.alloc([]f32, n_layers);
+        var built: usize = 0;
+        errdefer {
+            for (k[0..built]) |l| allocator.free(l);
+            allocator.free(k);
+        }
+        for (0..n_layers) |i| {
+            k[i] = try allocator.alloc(f32, capacity * kv_heads * head_dim);
+            built += 1;
+        }
+        const v = try allocator.alloc([]f32, n_layers);
+        errdefer allocator.free(v);
+        var v_built: usize = 0;
+        errdefer for (v[0..v_built]) |l| allocator.free(l);
+        for (0..n_layers) |i| {
+            v[i] = try allocator.alloc(f32, capacity * kv_heads * head_dim);
+            v_built += 1;
+        }
+        return .{ .allocator = allocator, .k = k, .v = v, .capacity = capacity };
+    }
+
+    pub fn deinit(self: *HostCache) void {
+        for (self.k) |l| self.allocator.free(l);
+        for (self.v) |l| self.allocator.free(l);
+        self.allocator.free(self.k);
+        self.allocator.free(self.v);
+        self.* = undefined;
+    }
+
+    pub fn truncate(self: *HostCache, keep: usize) void {
+        if (keep < self.len) self.len = keep;
+    }
+};
+
+const HostMoeFfn = struct {
+    router: LinearWeight,
+    router_bias: ?[]f32,
+    gate: fucina.MoeRhs,
+    up: fucina.MoeRhs,
+    down: fucina.MoeRhs,
+    shared_gate: LinearWeight,
+    shared_up: LinearWeight,
+    shared_down: LinearWeight,
+
+    fn deinit(self: *HostMoeFfn, allocator: Allocator) void {
+        self.shared_down.deinit();
+        self.shared_up.deinit();
+        self.shared_gate.deinit();
+        self.down.deinit();
+        self.up.deinit();
+        self.gate.deinit();
+        if (self.router_bias) |b| allocator.free(b);
+        self.router.deinit();
+        self.* = undefined;
+    }
+};
+
+const HostDenseFfn = struct {
+    gate: LinearWeight,
+    up: LinearWeight,
+    down: LinearWeight,
+
+    fn deinit(self: *HostDenseFfn) void {
+        self.down.deinit();
+        self.up.deinit();
+        self.gate.deinit();
+        self.* = undefined;
+    }
+};
+
+const HostFfn = union(enum) {
+    dense: HostDenseFfn,
+    moe: HostMoeFfn,
+
+    fn deinit(self: *HostFfn, allocator: Allocator) void {
+        switch (self.*) {
+            .dense => |*d| d.deinit(),
+            .moe => |*m| m.deinit(allocator),
+        }
+        self.* = undefined;
+    }
+};
+
+pub const HostLayer = struct {
+    attn_norm: []f32,
+    post_attention_norm: []f32,
+    q_proj: LinearWeight,
+    q_bias: []f32,
+    k_proj: LinearWeight,
+    k_bias: []f32,
+    v_proj: LinearWeight,
+    v_bias: []f32,
+    o_proj: LinearWeight,
+    ffn: HostFfn,
+
+    fn deinit(self: *HostLayer, allocator: Allocator) void {
+        self.ffn.deinit(allocator);
+        self.o_proj.deinit();
+        allocator.free(self.v_bias);
+        self.v_proj.deinit();
+        allocator.free(self.k_bias);
+        self.k_proj.deinit();
+        allocator.free(self.q_bias);
+        self.q_proj.deinit();
+        allocator.free(self.post_attention_norm);
+        allocator.free(self.attn_norm);
+        self.* = undefined;
+    }
+};
+
+fn loadHostLayer(ctx: *ExecContext, file: *const gguf.File, config: Descriptor, layer_i: usize, store: ?*fucina.ExpertStore) !HostLayer {
+    const allocator = ctx.allocator;
+    var name_buf: [96]u8 = undefined;
+
+    const attn_norm = try weights.hostVector(allocator, file, try weights.layerName(&name_buf, layer_i, "attn_norm.weight"), config.hidden_size);
+    errdefer allocator.free(attn_norm);
+    const post_attention_norm = try weights.hostVector(allocator, file, try weights.layerName(&name_buf, layer_i, "post_attention_norm.weight"), config.hidden_size);
+    errdefer allocator.free(post_attention_norm);
+
+    const q_dim = config.qProjectionDim();
+    const kv_dim = config.kvProjectionDim();
+    var q_proj = try LinearWeight.load(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "attn_q.weight")), q_dim, config.hidden_size);
+    errdefer q_proj.deinit();
+    const q_bias = try weights.hostVector(allocator, file, try weights.layerName(&name_buf, layer_i, "attn_q.bias"), q_dim);
+    errdefer allocator.free(q_bias);
+    var k_proj = try LinearWeight.load(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "attn_k.weight")), kv_dim, config.hidden_size);
+    errdefer k_proj.deinit();
+    const k_bias = try weights.hostVector(allocator, file, try weights.layerName(&name_buf, layer_i, "attn_k.bias"), kv_dim);
+    errdefer allocator.free(k_bias);
+    var v_proj = try LinearWeight.load(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "attn_v.weight")), kv_dim, config.hidden_size);
+    errdefer v_proj.deinit();
+    const v_bias = try weights.hostVector(allocator, file, try weights.layerName(&name_buf, layer_i, "attn_v.bias"), kv_dim);
+    errdefer allocator.free(v_bias);
+    var o_proj = try LinearWeight.load(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "attn_output.weight")), config.hidden_size, q_dim);
+    errdefer o_proj.deinit();
+
+    var ffn: HostFfn = undefined;
+    if (layer_i < config.leading_dense_layers or config.num_experts == 0) {
+        var gate = try LinearWeight.load(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "ffn_gate.weight")), config.intermediate_size, config.hidden_size);
+        errdefer gate.deinit();
+        var up = try LinearWeight.load(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "ffn_up.weight")), config.intermediate_size, config.hidden_size);
+        errdefer up.deinit();
+        var down = try LinearWeight.load(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "ffn_down.weight")), config.hidden_size, config.intermediate_size);
+        errdefer down.deinit();
+        ffn = .{ .dense = .{ .gate = gate, .up = up, .down = down } };
+    } else {
+        var router = try LinearWeight.load(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "ffn_gate_inp.weight")), config.num_experts, config.hidden_size);
+        errdefer router.deinit();
+        var router_bias: ?[]f32 = null;
+        errdefer if (router_bias) |b| allocator.free(b);
+        var bias_buf: [96]u8 = undefined;
+        if (file.maybeGet(try weights.layerName(&bias_buf, layer_i, "exp_probs_b.bias"))) |bias_info| {
+            router_bias = try weights.hostVectorInfo(allocator, bias_info, config.num_experts);
+        }
+        var gate: fucina.MoeRhs = undefined;
+        var up: fucina.MoeRhs = undefined;
+        var down: fucina.MoeRhs = undefined;
+        if (store) |st| {
+            const trio = try weights.loadMoeRhsStreamed(st, file, layer_i, try file.get(try weights.layerName(&name_buf, layer_i, "ffn_gate_exps.weight")), try file.get(try weights.layerName(&name_buf, layer_i, "ffn_up_exps.weight")), try file.get(try weights.layerName(&name_buf, layer_i, "ffn_down_exps.weight")), config.hidden_size, config.moe_intermediate_size, config.num_experts);
+            gate = trio.gate;
+            up = trio.up;
+            down = trio.down;
+        } else {
+            const borrow = file.is_mmap and !file.isSplit();
+            gate = try weights.loadMoeRhs(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "ffn_gate_exps.weight")), config.hidden_size, config.moe_intermediate_size, config.num_experts, borrow);
+            up = try weights.loadMoeRhs(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "ffn_up_exps.weight")), config.hidden_size, config.moe_intermediate_size, config.num_experts, borrow);
+            down = try weights.loadMoeRhs(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "ffn_down_exps.weight")), config.moe_intermediate_size, config.hidden_size, config.num_experts, borrow);
+        }
+        const shared_ffn = config.moe_intermediate_size * config.num_shared_experts;
+        var shared_gate = try LinearWeight.load(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "ffn_gate_shexp.weight")), shared_ffn, config.hidden_size);
+        errdefer shared_gate.deinit();
+        var shared_up = try LinearWeight.load(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "ffn_up_shexp.weight")), shared_ffn, config.hidden_size);
+        errdefer shared_up.deinit();
+        var shared_down = try LinearWeight.load(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "ffn_down_shexp.weight")), config.hidden_size, shared_ffn);
+        errdefer shared_down.deinit();
+        ffn = .{ .moe = .{ .router = router, .router_bias = router_bias, .gate = gate, .up = up, .down = down, .shared_gate = shared_gate, .shared_up = shared_up, .shared_down = shared_down } };
+    }
+
+    return .{
+        .attn_norm = attn_norm,
+        .post_attention_norm = post_attention_norm,
+        .q_proj = q_proj,
+        .q_bias = q_bias,
+        .k_proj = k_proj,
+        .k_bias = k_bias,
+        .v_proj = v_proj,
+        .v_bias = v_bias,
+        .o_proj = o_proj,
+        .ffn = ffn,
+    };
+}
+
+/// One transformer layer over `x` rows in place (the hand glm4moe
+/// `layerForward` minus its MTP threading).
+fn hostLayerForward(ctx: *ExecContext, cfg: Descriptor, band: *const HostBand, cache: *HostCache, layer: *const HostLayer, layer_i: usize, x: []f32, S: usize, pos0: usize) !void {
+    const allocator = ctx.allocator;
+    const heads_per_kv = cfg.num_attention_heads / cfg.num_key_value_heads;
+
+    const h_norm = try allocator.alloc(f32, S * cfg.hidden_size);
+    defer allocator.free(h_norm);
+    for (0..S) |r| hostRmsNormInto(h_norm[r * cfg.hidden_size ..][0..cfg.hidden_size], x[r * cfg.hidden_size ..][0..cfg.hidden_size], layer.attn_norm, cfg.rms_norm_eps);
+    var h_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ S, cfg.hidden_size }, h_norm);
+    defer h_t.deinit();
+
+    var q_t = try layer.q_proj.linearSeq(ctx, &h_t, .embed, .q);
+    defer q_t.deinit();
+    var k_t = try layer.k_proj.linearSeq(ctx, &h_t, .embed, .k);
+    defer k_t.deinit();
+    var v_t = try layer.v_proj.linearSeq(ctx, &h_t, .embed, .v);
+    defer v_t.deinit();
+    const q = try allocator.dupe(f32, try q_t.dataConst());
+    defer allocator.free(q);
+    const k = try allocator.dupe(f32, try k_t.dataConst());
+    defer allocator.free(k);
+    const v = try allocator.dupe(f32, try v_t.dataConst());
+    defer allocator.free(v);
+    const q_width = cfg.qProjectionDim();
+    const kv_width = cfg.kvProjectionDim();
+    if (cfg.qkv_bias) {
+        for (0..S) |r| {
+            const q_row = q[r * q_width ..][0..q_width];
+            for (q_row, layer.q_bias) |*qv, b| qv.* += b;
+            const k_row = k[r * kv_width ..][0..kv_width];
+            for (k_row, layer.k_bias) |*kv, b| kv.* += b;
+            const v_row = v[r * kv_width ..][0..kv_width];
+            for (v_row, layer.v_bias) |*vv, b| vv.* += b;
+        }
+    }
+
+    var attn_t = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ S, q_width });
+    defer attn_t.deinit();
+    const attn_out = try attn_t.data();
+    const scores = try allocator.alloc(f32, pos0 + S);
+    defer allocator.free(scores);
+
+    for (0..S) |r| {
+        const pos = pos0 + r;
+        // Partial rope + append this position's K/V.
+        const k_row = k[r * kv_width ..][0..kv_width];
+        const v_row = v[r * kv_width ..][0..kv_width];
+        for (0..cfg.num_key_value_heads) |h| {
+            band.rope.apply(k_row[h * cfg.head_dim ..][0..cfg.head_dim], pos);
+        }
+        const k_dst = cache.k[layer_i][pos * kv_width ..][0..kv_width];
+        const v_dst = cache.v[layer_i][pos * kv_width ..][0..kv_width];
+        @memcpy(k_dst, k_row);
+        @memcpy(v_dst, v_row);
+
+        const t_len = pos + 1;
+        const q_row = q[r * q_width ..][0..q_width];
+        for (0..cfg.num_attention_heads) |h| {
+            const q_head = q_row[h * cfg.head_dim ..][0..cfg.head_dim];
+            band.rope.apply(q_head, pos);
+            const kv_h = h / heads_per_kv;
+            for (0..t_len) |t| {
+                const kt = cache.k[layer_i][(t * cfg.num_key_value_heads + kv_h) * cfg.head_dim ..][0..cfg.head_dim];
+                var dot: f32 = 0;
+                for (q_head, kt) |a, b| dot += a * b;
+                scores[t] = dot * band.attn_scale;
+            }
+            hostSoftmaxInPlace(scores[0..t_len]);
+            const out_head = attn_out[r * q_width + h * cfg.head_dim ..][0..cfg.head_dim];
+            @memset(out_head, 0);
+            for (0..t_len) |t| {
+                const w = scores[t];
+                const vt = cache.v[layer_i][(t * cfg.num_key_value_heads + kv_h) * cfg.head_dim ..][0..cfg.head_dim];
+                for (out_head, vt) |*o, val| o.* += w * val;
+            }
+        }
+    }
+
+    var o_t = try layer.o_proj.linearSeq(ctx, &attn_t, .embed, .attn);
+    defer o_t.deinit();
+    for (x, try o_t.dataConst()) |*xi, oi| xi.* += oi;
+
+    // FFN with the sandwich naming (post_attention_norm = pre-FFN).
+    for (0..S) |r| hostRmsNormInto(h_norm[r * cfg.hidden_size ..][0..cfg.hidden_size], x[r * cfg.hidden_size ..][0..cfg.hidden_size], layer.post_attention_norm, cfg.rms_norm_eps);
+    switch (layer.ffn) {
+        .dense => |*dense| {
+            var f_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ S, cfg.hidden_size }, h_norm);
+            defer f_t.deinit();
+            const y = try hostSwigluLinear(ctx, allocator, &f_t, &dense.gate, &dense.up, &dense.down);
+            defer allocator.free(y);
+            for (x, y) |*xi, yi| xi.* += yi;
+        },
+        .moe => |*moe| {
+            // Row-wise through the fused decode op (consecutive rows share
+            // expert reads via the store's LRU when streaming).
+            for (0..S) |r| {
+                const row = h_norm[r * cfg.hidden_size ..][0..cfg.hidden_size];
+                var f_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, cfg.hidden_size }, row);
+                defer f_t.deinit();
+                const y = try hostMoeForward(ctx, cfg, allocator, moe, &f_t);
+                defer allocator.free(y);
+                for (x[r * cfg.hidden_size ..][0..cfg.hidden_size], y) |*xi, yi| xi.* += yi;
+            }
+        },
+    }
+}
+
+/// DeepSeek-V3-style routing: sigmoid (or softmax) scores, selection bias
+/// for the top-k choice only, renormalized weights, expert_weights_scale,
+/// plus the always-on shared experts.
+fn hostMoeForward(ctx: *ExecContext, cfg: Descriptor, allocator: Allocator, moe: *const HostMoeFfn, f_t: *const fucina.Tensor(.{ .seq, .embed })) ![]f32 {
+    var logits_t = try moe.router.linearSeq(ctx, f_t, .embed, .expert);
+    defer logits_t.deinit();
+    const probs = try allocator.dupe(f32, try logits_t.dataConst());
+    defer allocator.free(probs);
+    switch (cfg.expert_gating_func) {
+        2 => for (probs) |*p| {
+            p.* = 1.0 / (1.0 + @exp(-p.*));
+        },
+        else => hostSoftmaxInPlace(probs),
+    }
+    const choice = try allocator.dupe(f32, probs);
+    defer allocator.free(choice);
+    if (moe.router_bias) |bias| {
+        for (choice, bias) |*c, b| c.* += b;
+    }
+
+    var selected: [64]usize = undefined;
+    var routing: [64]f32 = undefined;
+    std.debug.assert(cfg.num_experts_used <= selected.len);
+    if (weights.cacheRouteSel(&moe.gate, choice, selected[0..cfg.num_experts_used])) {
+        for (selected[0..cfg.num_experts_used], routing[0..cfg.num_experts_used]) |e, *w| w.* = probs[e];
+    } else for (0..cfg.num_experts_used) |slot| {
+        var best: usize = 0;
+        var best_c: f32 = -std.math.inf(f32);
+        for (choice, 0..) |c, e| {
+            if (c > best_c) {
+                best_c = c;
+                best = e;
+            }
+        }
+        choice[best] = -std.math.inf(f32);
+        selected[slot] = best;
+        routing[slot] = probs[best];
+    }
+    if (cfg.expert_weights_norm) {
+        var total: f32 = 1e-20;
+        for (routing[0..cfg.num_experts_used]) |w| total += w;
+        for (routing[0..cfg.num_experts_used]) |*w| w.* /= total;
+    }
+    for (routing[0..cfg.num_experts_used]) |*w| w.* *= cfg.expert_weights_scale;
+
+    var mix = try weights.moeSwiGluFfnSeq(ctx, f_t, &moe.gate, &moe.up, &moe.down, selected[0..cfg.num_experts_used], routing[0..cfg.num_experts_used], cfg.num_experts_used, cfg.moe_intermediate_size, null, null);
+    defer mix.deinit();
+
+    const y = try allocator.dupe(f32, try mix.dataConst());
+    errdefer allocator.free(y);
+    const shared = try hostSwigluLinear(ctx, allocator, f_t, &moe.shared_gate, &moe.shared_up, &moe.shared_down);
+    defer allocator.free(shared);
+    for (y, shared) |*yi, si| yi.* += si;
+    return y;
+}
+
+fn hostSwigluLinear(ctx: *ExecContext, allocator: Allocator, x: *const fucina.Tensor(.{ .seq, .embed }), gate: *const LinearWeight, up: *const LinearWeight, down: *const LinearWeight) ![]f32 {
+    var gate_t = try gate.linearSeq(ctx, x, .embed, .gate_up);
+    defer gate_t.deinit();
+    var up_t = try up.linearSeq(ctx, x, .embed, .gate_up);
+    defer up_t.deinit();
+    const width = gate_t.dim(.gate_up);
+    const rows = gate_t.dim(.seq);
+    var g_t = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ rows, width });
+    defer g_t.deinit();
+    for (try g_t.data(), try gate_t.dataConst(), try up_t.dataConst()) |*gi, gv, uv| gi.* = hostSilu(gv) * uv;
+    var down_t = try down.linearSeq(ctx, &g_t, .embed, .attn);
+    defer down_t.deinit();
+    return allocator.dupe(f32, try down_t.dataConst());
+}
+
+fn hostRmsNormInto(out: []f32, x: []const f32, weight: []const f32, eps: f32) void {
+    var sum: f64 = 0;
+    for (x) |v| sum += @as(f64, v) * v;
+    const inv = 1.0 / @sqrt(sum / @as(f64, @floatFromInt(x.len)) + eps);
+    for (out, x, weight) |*o, v, w| o.* = @floatCast(@as(f64, v) * inv * w);
+}
+
+fn hostSoftmaxInPlace(v: []f32) void {
+    var max: f32 = -std.math.inf(f32);
+    for (v) |x| max = @max(max, x);
+    var sum: f32 = 0;
+    for (v) |*x| {
+        x.* = @exp(x.* - max);
+        sum += x.*;
+    }
+    for (v) |*x| x.* /= sum;
+}
+
+fn hostSilu(x: f32) f32 {
+    return x / (1.0 + @exp(-x));
+}

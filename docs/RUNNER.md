@@ -24,20 +24,48 @@ loop).
   inherits every kernel, threading decision, and the buffer-pool memory
   discipline; there is nothing between the descriptor walk and the facade.
 
+## Block styles
+
+The descriptor's `block_style` selects the block implementation —
+structural vocabulary, not family names:
+
+- **`.fused`** — the fused-kernel decoder shape: QK-norm + half-rope over
+  the full head dim, unbiased QKV, softmax top-k MoE (the qwen3/qwen3moe
+  vocabulary).
+- **`.host_reference`** — the auditable host-side f32 shape: biased QKV,
+  partial rope with selectable pairing, sigmoid noaux MoE with router
+  bias, shared experts, and leading dense layers (the GLM-4.5 /
+  DeepSeek-MoE vocabulary, ported verbatim from the hand glm4moe block).
+  Heavy linears and the fused MoE mixture run on fucina kernels in both
+  styles; `hostStep` is this style's forward entry.
+
 ## Parity status
 
-`src/llm/runner_tests.zig` pins gate 1 of the design: on real
-Qwen3-0.6B GGUFs (Q8_0 and Q4_K_M), the runner's prefill logits and every
-decode step's logits along a greedy chain are **bitwise identical** to the
-hand `llm.qwen3` port, each side running its own KV cache. The hand port
-remains the parity oracle and keeps its serving/training surface
-(speculative decode, batched steps, SHINE, cartridges).
+`src/llm/runner_tests.zig` pins three parity gates, all **bitwise**:
 
-Open gates: the MoE arm (qwen3moe) is carried over from the hand port but
-has no small-model parity fixture yet; a second GGUF family expressed as a
-descriptor with zero interpreter changes is the next milestone (glm4moe
-needs interleaved partial rope and sigmoid noaux routing added to the
-variant vocabulary first).
+- **Gate 1 (real weights)**: on real Qwen3-0.6B GGUFs (Q8_0 and Q4_K_M),
+  prefill logits and every decode step's logits along a greedy chain match
+  the hand `llm.qwen3` port, each side running its own KV cache (native
+  backend, skips without `models/`).
+- **The small-MoE fixture**: a synthetic qwen3moe GGUF (built in-test via
+  `gguf.Writer`, q8_0 expert stacks, no local models needed) matches the
+  hand port bitwise through prefill and a greedy decode chain — the MoE
+  arm's CI-safe pin.
+- **Gate 3 (second family as data)**: a synthetic glm4moe GGUF loads
+  purely through `Descriptor.fromGguf` — no family code in the test — and
+  matches the hand `llm.glm4moe` port bitwise per position (partial
+  interleaved rope, QKV biases, sigmoid noaux routing + router bias,
+  renormalized scaled weights, one shared expert, one leading dense
+  layer).
+
+The hand ports remain the parity oracles and keep their serving/training
+surfaces (speculative decode, batched steps, SHINE, cartridges, MTP).
+
+Open: validation against a real GLM-4.5 GGUF (none in the local model
+set), an independent speed measurement for gate 2 (currently satisfied by
+construction — the `.fused` style issues the hand port's exact call
+sequence), and the next vocabulary entries (MLA, KDA-recurrent, sliding
+window).
 
 ## Origin
 
