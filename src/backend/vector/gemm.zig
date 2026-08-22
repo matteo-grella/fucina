@@ -1356,6 +1356,10 @@ fn gemmNTBf16RhsRange(cd: []f32, ad: []const f32, bd: []const u16, m: usize, n: 
     }
 }
 
+/// C[m, col_start..col_end] = A[m, k] · Bᵀ where B rows are bf16 and stay
+/// bf16 in-register (widened per SIMD lane, never materialized as f32).
+/// Row-blocked 6/4/1 with a 4+3 split preferred over 6+1 (the scalar row
+/// tail measured slower); each row block streams every RHS column once.
 fn gemmNTBf16RhsCols(cd: []f32, ad: []const f32, bd: []const u16, m: usize, n: usize, k: usize, col_start: usize, col_end: usize) void {
     if (col_start == col_end or m == 0) return;
     if (k == 0) {
@@ -2089,6 +2093,10 @@ fn gemmNNColsF16(cd: []f16, ad: []const f16, bd: []const f16, m: usize, n: usize
     while (i < m) : (i += 1) gemmNNRowsColsF16(1, cd, ad, bd, i, n, k, col_start, col_end);
 }
 
+/// All-bf16 C[row_start..row_end, n] = A · B (operands AND result bf16;
+/// accumulation in f32, one rounding at the final store). Row-blocked
+/// 12/8/4/1 over the row range so a thread team splits by rows; each block
+/// walks B once in k-major order (the NN layout's streaming direction).
 fn gemmNNRangeBf16(cd: []u16, ad: []const u16, bd: []const u16, m: usize, n: usize, k: usize, row_start: usize, row_end: usize) void {
     _ = m;
     if (row_start == row_end or n == 0) return;

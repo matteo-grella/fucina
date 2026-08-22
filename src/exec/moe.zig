@@ -1575,6 +1575,13 @@ fn runMoeBatchSwiGluTaskOpaque(ctx: *anyopaque) void {
     runMoeBatchSwiGluTask(task);
 }
 
+/// Batched MoE FFN as pool-wide stages over per-(expert, tile) task
+/// arrays — gather rows, gate/up projections, SwiGLU + requantize, down
+/// projections — each stage `parallelChunks` across the pool (with a
+/// `parallelChained` arm that overlaps stages where the chain form is
+/// eligible). Staging instead of per-expert chains keeps every worker busy
+/// across experts of unequal token counts; scratch lives in the context's
+/// persistent `moe_scratch`.
 fn runMoeBatchPhased(
     rt: *Runtime,
     pool: *thread.Pool,

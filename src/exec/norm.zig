@@ -402,6 +402,11 @@ pub fn rmsNormMulBackwardWeightAxisRank(
     return out;
 }
 
+/// Fused rmsnorm·weight + rotary embedding in one pass over each vector:
+/// compute the row's rms once, then emit each rotated half-pair from the
+/// normalized-and-scaled values directly (no intermediate normalized
+/// tensor). Positions come from the precomputed sin/cos table; the fused
+/// form matches the composed pair to f32 roundoff, not bitwise.
 pub fn rmsNormMulRopeAxisRankWithTable(
     rt: *Runtime,
     comptime rank: usize,

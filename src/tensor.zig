@@ -148,6 +148,11 @@ pub fn RankedTensor(comptime rank: usize) type {
     return RankedTensorOf(.f32, rank);
 }
 
+/// The raw tensor type for one storage dtype: a refcounted `Buffer` plus
+/// shape/strides metadata (views share the buffer; `deinit` releases one
+/// reference). Scalar dtypes get element accessors (`data`, `at`, ...);
+/// block-quantized dtypes carry block storage and reject per-element access
+/// at comptime. `Tensor` is `TensorOf(.f32)`, the runtime's currency.
 pub fn TensorOf(comptime tensor_dtype: DType) type {
     const Elem = dtype_mod.Storage(tensor_dtype);
     const is_scalar_dtype = dtype_mod.isScalar(tensor_dtype);

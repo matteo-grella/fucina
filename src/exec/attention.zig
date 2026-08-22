@@ -421,6 +421,12 @@ pub fn groupedCausalAttentionHeads(comptime KvElem: type, task: GroupedCausalAtt
     }
 }
 
+/// Attention task for the heads == 2·kv_heads grouping: TWO query heads
+/// sharing one KV head walk the cache together, so each K/V row is loaded
+/// once for both (the GQA pairing win). Three phases per query row: score
+/// both heads into their scratch rows tracking the max, exp-normalize in
+/// place, then the weighted V pass — fused two-out-row Q8_0 kernels when V
+/// is block-quantized, SIMD widen-per-lane otherwise.
 pub fn groupedCausalAttentionHeadPairs(comptime KvElem: type, task: GroupedCausalAttentionPairTask(KvElem)) void {
     const q_head_stride = task.d;
     const q_seq_stride = task.heads * task.d;
