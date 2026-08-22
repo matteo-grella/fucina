@@ -392,7 +392,7 @@ fn runPublicSumLast(rows: usize, cols: usize, iterations: usize) !Result {
     defer x.deinit();
 
     for (0..4) |_| {
-        var y = try x.sum(&ctx, .d);
+        var y = try x.sum(&ctx, .d, .{});
         y.deinit();
     }
 
@@ -400,7 +400,7 @@ fn runPublicSumLast(rows: usize, cols: usize, iterations: usize) !Result {
     var checksum: f64 = 0;
     var timer = try Timer.start(benchmark_io);
     for (0..iterations) |_| {
-        var y = try x.sum(&ctx, .d);
+        var y = try x.sum(&ctx, .d, .{});
         checksum += @as(f64, @floatCast(y.asRawTensor().dataConst()[0]));
         y.deinit();
     }

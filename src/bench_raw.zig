@@ -1,3 +1,8 @@
+//! Raw-tensor vocabulary for the microbenchmarks (`bench/*.zig`): re-exports
+//! the internal RawTensor and the backend/exec plumbing raw kernels bench
+//! against. Lives in `src/` because it is its own module root importing
+//! `src/*.zig` siblings by path, and a Zig module cannot import above its
+//! root's directory. Never part of the public `fucina` module.
 const ag = @import("ag.zig");
 const backend = @import("backend.zig");
 const dtype = @import("dtype.zig");

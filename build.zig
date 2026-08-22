@@ -178,10 +178,13 @@ pub fn build(b: *std.Build) void {
 
     const tool_ctx: ToolCtx = .{ .target = target, .optimize = optimize, .module = module, .llm_module = llm_module, .blas_kind = blas_kind, .gpu_kind = gpu_kind };
 
-    _ = addExample(b, tool_ctx, .{ .step = "bench-subq", .desc = "Dense vs SubQ decode benchmark on a Qwen3 GGUF (research attention evaluator)", .exe = "fucina-bench-subq", .root = "tools/bench_subq_decode.zig", .llm = true });
-    _ = addExample(b, tool_ctx, .{ .step = "bench-subq-kernels", .desc = "Microbenchmark for the f16 row-block attention primitives", .exe = "fucina-bench-subq-kernels", .root = "tools/bench_subq_kernels.zig", .llm = false });
-    _ = addExample(b, tool_ctx, .{ .step = "bench-subq-scaling", .desc = "Selection-scaling probe: flat vs hierarchical frontier on synthetic clustered KV", .exe = "fucina-bench-subq-scaling", .root = "tools/bench_subq_scaling.zig", .llm = true });
-    _ = addExample(b, tool_ctx, .{ .step = "eval-subq-freerun", .desc = "Gate C stage 2: free-running SubQ vs dense generation, loop metrics, dense-judged NLL", .exe = "fucina-eval-subq-freerun", .root = "tools/eval_subq_freerun.zig", .llm = true });
+    // SubQ research tools ride addExample for install/run, and their compile
+    // steps register into bench-check below so the research surface cannot
+    // silently rot out of the compile gate.
+    const bench_subq = addExample(b, tool_ctx, .{ .step = "bench-subq", .desc = "Dense vs SubQ decode benchmark on a Qwen3 GGUF (research attention evaluator)", .exe = "fucina-bench-subq", .root = "tools/bench_subq_decode.zig", .llm = true });
+    const bench_subq_kernels = addExample(b, tool_ctx, .{ .step = "bench-subq-kernels", .desc = "Microbenchmark for the f16 row-block attention primitives", .exe = "fucina-bench-subq-kernels", .root = "tools/bench_subq_kernels.zig", .llm = false });
+    const bench_subq_scaling = addExample(b, tool_ctx, .{ .step = "bench-subq-scaling", .desc = "Selection-scaling probe: flat vs hierarchical frontier on synthetic clustered KV", .exe = "fucina-bench-subq-scaling", .root = "tools/bench_subq_scaling.zig", .llm = true });
+    const eval_subq = addExample(b, tool_ctx, .{ .step = "eval-subq-freerun", .desc = "Gate C stage 2: free-running SubQ vs dense generation, loop metrics, dense-judged NLL", .exe = "fucina-eval-subq-freerun", .root = "tools/eval_subq_freerun.zig", .llm = true });
     const smoke = addExample(b, tool_ctx, .{ .step = "smoke", .desc = "Run the smoke example", .exe = "fucina-smoke", .root = "examples/smoke/main.zig", .llm = false });
     const run_step = b.step("run", "Run the smoke example (alias of smoke)");
     run_step.dependOn(&smoke.run.step);
@@ -451,6 +454,10 @@ pub fn build(b: *std.Build) void {
     // graph exercises them; this step is the cheap gate that keeps the suite
     // compiling. addBench registers every bench into it.
     const bench_check_step = b.step("bench-check", "Compile all bench executables without running them");
+    bench_check_step.dependOn(&bench_subq.exe.step);
+    bench_check_step.dependOn(&bench_subq_kernels.exe.step);
+    bench_check_step.dependOn(&bench_subq_scaling.exe.step);
+    bench_check_step.dependOn(&eval_subq.exe.step);
 
     const bench_raw_module = b.addModule("bench_raw", .{
         .root_source_file = b.path("src/bench_raw.zig"),

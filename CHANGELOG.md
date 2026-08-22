@@ -37,6 +37,15 @@ point; earlier history is `git log`.
   `llm.pockettts.model`. `gemma.gemma4`, `gemma.gemma4_train`, and
   `pockettts.pocket` remain as deprecated aliases for one MINOR release.
 
+### Deprecated
+
+- `llm.gemma.gemma4` / `llm.gemma.gemma4_train` / `llm.pockettts.pocket`
+  — aliases of `gemma.model` / `gemma.train` / `pockettts.model`; removal
+  in the next MINOR release.
+- Build options `-Dbackend=cpu` (alias of `scalar`) and `-Daccelerate`
+  (compatibility alias of `-Dblas`): both predate this changelog and are
+  now on the ledger; removal in the next MINOR release.
+
 - The glm4moe family's trunk now runs on the runner's host_reference
   band: `llm.glm4moe.model` keeps the MTP (`nextn`) head, draft step, and
   the `step` verify API, and drives `runner.hostLayerForward` (which gains

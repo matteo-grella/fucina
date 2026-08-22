@@ -2,6 +2,9 @@
 //! Q4_K / Q8_0 / TQ2_0 dot kernels (the x86 AVX2/AVX-VNNI bring-up validation
 //! vehicle).
 //!
+//! Lives in `src/` because it is its own module root importing `src/*.zig`
+//! siblings by path (a module cannot import above its root's directory).
+//!
 //! Self-contained main(): runs semantic asserts (kernel vs scalar reference)
 //! on deterministic randomized + extreme inputs and exits nonzero on any
 //! mismatch. It also prints FNV-1a checksums of the raw result bit patterns,
