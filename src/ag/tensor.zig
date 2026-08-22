@@ -211,21 +211,8 @@ fn FloatTensor(comptime tags_spec: anytype) type {
             return self.value.isContiguous();
         }
 
+        // ---- creation: constructors and fills ----
         const creation_ops = @import("tensor/float/creation.zig").Ops(Self);
-        const matmul_ops = @import("tensor/float/matmul.zig").Ops(Self);
-        const elementwise_ops = @import("tensor/float/elementwise.zig").Ops(Self);
-        const conv_ops = @import("tensor/float/conv.zig").Ops(Self);
-        const pool_ops = @import("tensor/float/pool.zig").Ops(Self);
-        const gather_scatter_ops = @import("tensor/float/gather_scatter.zig").Ops(Self);
-        const reduce_ops = @import("tensor/float/reduce.zig").Ops(Self);
-        const stats_ops = @import("tensor/float/stats.zig").Ops(Self);
-        const topk_ops = @import("tensor/float/topk.zig").Ops(Self);
-        const shape_ops = @import("tensor/float/shape.zig").Ops(Self);
-        const softmax_ops = @import("tensor/float/softmax.zig").Ops(Self);
-        const norm_ops = @import("tensor/float/norm.zig").Ops(Self);
-        const loss_ops = @import("tensor/float/loss.zig").Ops(Self);
-        const rope_ops = @import("tensor/float/rope.zig").Ops(Self);
-        const attention_ops = @import("tensor/float/attention.zig").Ops(Self);
         pub const variable = creation_ops.variable;
         pub const variableFromSlice = creation_ops.variableFromSlice;
         pub const constant = creation_ops.constant;
@@ -252,7 +239,22 @@ fn FloatTensor(comptime tags_spec: anytype) type {
         pub const zerosLike = creation_ops.zerosLike;
         pub const onesLike = creation_ops.onesLike;
         pub const fullLike = creation_ops.fullLike;
+
+        // ---- matmul: contractions (dot/einsum, packed and ternary-STE RHS) ----
+        const matmul_ops = @import("tensor/float/matmul.zig").Ops(Self);
         pub const matmul = matmul_ops.matmul;
+        pub const dot = matmul_ops.dot;
+        pub const addDot = matmul_ops.addDot;
+        pub const einsum = matmul_ops.einsum;
+        pub const dotTernarySte = matmul_ops.dotTernarySte;
+        pub const dotPacked = matmul_ops.dotPacked;
+        pub const packRhs = matmul_ops.packRhs;
+        pub const rmsNormMulDotPacked = matmul_ops.rmsNormMulDotPacked;
+        pub const splitSwiGluDotPacked = matmul_ops.splitSwiGluDotPacked;
+        pub const gegluQuantDotPacked = matmul_ops.gegluQuantDotPacked;
+
+        // ---- elementwise: pointwise arithmetic, activations, masks, casts ----
+        const elementwise_ops = @import("tensor/float/elementwise.zig").Ops(Self);
         pub const addAxisVectorInPlace = elementwise_ops.addAxisVectorInPlace;
         pub const addAxisVectorUnaryInPlace = elementwise_ops.addAxisVectorUnaryInPlace;
         pub const addScaledInPlace = elementwise_ops.addScaledInPlace;
@@ -267,39 +269,9 @@ fn FloatTensor(comptime tags_spec: anytype) type {
         pub const isnan = elementwise_ops.isnan;
         pub const isinf = elementwise_ops.isinf;
         pub const isfinite = elementwise_ops.isfinite;
-        pub const any = reduce_ops.any;
-        pub const all = reduce_ops.all;
-        pub const anyAll = reduce_ops.anyAll;
-        pub const allAll = reduce_ops.allAll;
-        pub const zeroSlice = gather_scatter_ops.zeroSlice;
-        pub const zeroRows = gather_scatter_ops.zeroRows;
-        pub const conv2d = conv_ops.conv2d;
-        pub const conv2dRelu = conv_ops.conv2dRelu;
-        pub const prepareConv2dWeights = conv_ops.prepareConv2dWeights;
-        pub const conv2dPrepared = conv_ops.conv2dPrepared;
-        pub const conv2dPreparedRelu = conv_ops.conv2dPreparedRelu;
-        pub const maxPool2d = pool_ops.maxPool2d;
-        pub const avgPool2d = pool_ops.avgPool2d;
-        pub const upsample2xNearest = pool_ops.upsample2xNearest;
-        pub const unfold = conv_ops.unfold;
-        pub const fold = conv_ops.fold;
         pub const prelu = elementwise_ops.prelu;
         pub const channelAffine = elementwise_ops.channelAffine;
-        pub const relposShift = gather_scatter_ops.relposShift;
         pub const to = elementwise_ops.to;
-        pub const materialize = shape_ops.materialize;
-        pub const contiguous = shape_ops.contiguous;
-        pub const withTags = shape_ops.withTags;
-        pub const viewWithStrides = shape_ops.viewWithStrides;
-        pub const alignTo = shape_ops.alignTo;
-        pub const permuteTo = shape_ops.permuteTo;
-        pub const transpose = shape_ops.transpose;
-        pub const insertAxis = shape_ops.insertAxis;
-        pub const squeeze = shape_ops.squeeze;
-        pub const split = shape_ops.split;
-        pub const merge = shape_ops.merge;
-        pub const reshape = shape_ops.reshape;
-        pub const broadcastTo = shape_ops.broadcastTo;
         pub const add = elementwise_ops.add;
         pub const sub = elementwise_ops.sub;
         pub const mul = elementwise_ops.mul;
@@ -313,13 +285,7 @@ fn FloatTensor(comptime tags_spec: anytype) type {
         pub const powScalar = elementwise_ops.powScalar;
         pub const log1p = elementwise_ops.log1p;
         pub const dropout = elementwise_ops.dropout;
-        pub const causalDepthwiseConv1d = conv_ops.causalDepthwiseConv1d;
-        pub const causalConv1d = conv_ops.causalConv1d;
-        pub const groupedCausalConv1d = conv_ops.groupedCausalConv1d;
-        pub const conv1d = conv_ops.conv1d;
-        pub const convTranspose1d = conv_ops.convTranspose1d;
         pub const snake = elementwise_ops.snake;
-        pub const groupNorm = norm_ops.groupNorm;
         pub const gated = elementwise_ops.gated;
         pub const glu = elementwise_ops.glu;
         pub const swiglu = elementwise_ops.swiglu;
@@ -361,6 +327,51 @@ fn FloatTensor(comptime tags_spec: anytype) type {
         pub const clamp = elementwise_ops.clamp;
         pub const clampMin = elementwise_ops.clampMin;
         pub const clampMax = elementwise_ops.clampMax;
+
+        // ---- conv: convolutions and unfold/fold ----
+        const conv_ops = @import("tensor/float/conv.zig").Ops(Self);
+        pub const conv2d = conv_ops.conv2d;
+        pub const conv2dRelu = conv_ops.conv2dRelu;
+        pub const prepareConv2dWeights = conv_ops.prepareConv2dWeights;
+        pub const conv2dPrepared = conv_ops.conv2dPrepared;
+        pub const conv2dPreparedRelu = conv_ops.conv2dPreparedRelu;
+        pub const unfold = conv_ops.unfold;
+        pub const fold = conv_ops.fold;
+        pub const causalDepthwiseConv1d = conv_ops.causalDepthwiseConv1d;
+        pub const causalConv1d = conv_ops.causalConv1d;
+        pub const groupedCausalConv1d = conv_ops.groupedCausalConv1d;
+        pub const conv1d = conv_ops.conv1d;
+        pub const convTranspose1d = conv_ops.convTranspose1d;
+
+        // ---- pool: pooling and upsampling ----
+        const pool_ops = @import("tensor/float/pool.zig").Ops(Self);
+        pub const maxPool2d = pool_ops.maxPool2d;
+        pub const avgPool2d = pool_ops.avgPool2d;
+        pub const upsample2xNearest = pool_ops.upsample2xNearest;
+
+        // ---- gather_scatter: indexed reads and writes ----
+        const gather_scatter_ops = @import("tensor/float/gather_scatter.zig").Ops(Self);
+        pub const zeroSlice = gather_scatter_ops.zeroSlice;
+        pub const zeroRows = gather_scatter_ops.zeroRows;
+        pub const relposShift = gather_scatter_ops.relposShift;
+        pub const gather = gather_scatter_ops.gather;
+        pub const indexSelect = gather_scatter_ops.indexSelect;
+        pub const maskedSelect = gather_scatter_ops.maskedSelect;
+        pub const nonzero = gather_scatter_ops.nonzero;
+        pub const maskedScatter = gather_scatter_ops.maskedScatter;
+        pub const setSlice = gather_scatter_ops.setSlice;
+        pub const setRows = gather_scatter_ops.setRows;
+        pub const indexAdd = gather_scatter_ops.indexAdd;
+        pub const takeAlongAxis = gather_scatter_ops.takeAlongAxis;
+        pub const scatterAdd = gather_scatter_ops.scatterAdd;
+        pub const scatter = gather_scatter_ops.scatter;
+
+        // ---- reduce: reductions, scans, linear recurrence ----
+        const reduce_ops = @import("tensor/float/reduce.zig").Ops(Self);
+        pub const any = reduce_ops.any;
+        pub const all = reduce_ops.all;
+        pub const anyAll = reduce_ops.anyAll;
+        pub const allAll = reduce_ops.allAll;
         pub const sum = reduce_ops.sum;
         pub const mean = reduce_ops.mean;
         pub const sumExt = reduce_ops.sumExt;
@@ -372,16 +383,41 @@ fn FloatTensor(comptime tags_spec: anytype) type {
         pub const linearRecurrence = reduce_ops.linearRecurrence;
         pub const prod = reduce_ops.prod;
         pub const cumprod = reduce_ops.cumprod;
-        pub const variance = stats_ops.variance;
-        pub const standardizeAxis = stats_ops.standardizeAxis;
         pub const sumAll = reduce_ops.sumAll;
         pub const sumMany = reduce_ops.sumMany;
+
+        // ---- stats: variance/standardize, extrema, argmax, multinomial ----
+        const stats_ops = @import("tensor/float/stats.zig").Ops(Self);
+        pub const variance = stats_ops.variance;
+        pub const standardizeAxis = stats_ops.standardizeAxis;
+        pub const argmax = stats_ops.argmax;
+        pub const multinomial = stats_ops.multinomial;
+        pub const max = stats_ops.max;
+        pub const min = stats_ops.min;
+
+        // ---- topk: top-k, sort, router top-k ----
+        const topk_ops = @import("tensor/float/topk.zig").Ops(Self);
+        pub const topK = topk_ops.topK;
+        pub const sort = topk_ops.sort;
+        pub const argsort = topk_ops.argsort;
+        pub const routerTopK = topk_ops.routerTopK;
+
+        // ---- shape: views, reshapes, slicing, concat/stack, padding ----
+        const shape_ops = @import("tensor/float/shape.zig").Ops(Self);
+        pub const materialize = shape_ops.materialize;
+        pub const contiguous = shape_ops.contiguous;
+        pub const withTags = shape_ops.withTags;
+        pub const viewWithStrides = shape_ops.viewWithStrides;
+        pub const alignTo = shape_ops.alignTo;
+        pub const permuteTo = shape_ops.permuteTo;
+        pub const transpose = shape_ops.transpose;
+        pub const insertAxis = shape_ops.insertAxis;
+        pub const squeeze = shape_ops.squeeze;
+        pub const split = shape_ops.split;
+        pub const merge = shape_ops.merge;
+        pub const reshape = shape_ops.reshape;
+        pub const broadcastTo = shape_ops.broadcastTo;
         pub const flatten = shape_ops.flatten;
-        pub const gather = gather_scatter_ops.gather;
-        pub const indexSelect = gather_scatter_ops.indexSelect;
-        pub const maskedSelect = gather_scatter_ops.maskedSelect;
-        pub const nonzero = gather_scatter_ops.nonzero;
-        pub const maskedScatter = gather_scatter_ops.maskedScatter;
         pub const flip = shape_ops.flip;
         pub const roll = shape_ops.roll;
         pub const rollBy = shape_ops.rollBy;
@@ -404,28 +440,28 @@ fn FloatTensor(comptime tags_spec: anytype) type {
         pub const stack = shape_ops.stack;
         pub const unbindInto = shape_ops.unbindInto;
         pub const repeatAxis = shape_ops.repeatAxis;
-        pub const setSlice = gather_scatter_ops.setSlice;
-        pub const setRows = gather_scatter_ops.setRows;
-        pub const indexAdd = gather_scatter_ops.indexAdd;
-        pub const takeAlongAxis = gather_scatter_ops.takeAlongAxis;
-        pub const scatterAdd = gather_scatter_ops.scatterAdd;
-        pub const scatter = gather_scatter_ops.scatter;
-        pub const argmax = stats_ops.argmax;
-        pub const multinomial = stats_ops.multinomial;
-        pub const max = stats_ops.max;
-        pub const min = stats_ops.min;
-        pub const topK = topk_ops.topK;
-        pub const sort = topk_ops.sort;
-        pub const argsort = topk_ops.argsort;
-        pub const routerTopK = topk_ops.routerTopK;
+
+        // ---- softmax: softmax family ----
+        const softmax_ops = @import("tensor/float/softmax.zig").Ops(Self);
         pub const logsumexp = softmax_ops.logsumexp;
         pub const logSoftmax = softmax_ops.logSoftmax;
         pub const softmax = softmax_ops.softmax;
+
+        // ---- norm: normalization ops and norms ----
+        const norm_ops = @import("tensor/float/norm.zig").Ops(Self);
+        pub const groupNorm = norm_ops.groupNorm;
         pub const rmsNorm = norm_ops.rmsNorm;
         pub const rmsNormMul = norm_ops.rmsNormMul;
         pub const rmsNormMulAdd = norm_ops.rmsNormMulAdd;
         pub const rmsNormMulRopeHalfPrepared = norm_ops.rmsNormMulRopeHalfPrepared;
         pub const layerNorm = norm_ops.layerNorm;
+        pub const l2Normalize = norm_ops.l2Normalize;
+        pub const norm = norm_ops.norm;
+        pub const normAll = norm_ops.normAll;
+        pub const cosineSimilarity = norm_ops.cosineSimilarity;
+
+        // ---- loss: loss heads ----
+        const loss_ops = @import("tensor/float/loss.zig").Ops(Self);
         pub const crossEntropy = loss_ops.crossEntropy;
         pub const crossEntropyExt = loss_ops.crossEntropyExt;
         pub const linearCrossEntropyExt = loss_ops.linearCrossEntropyExt;
@@ -435,20 +471,13 @@ fn FloatTensor(comptime tags_spec: anytype) type {
         pub const bceLoss = loss_ops.bceLoss;
         pub const klDivLoss = loss_ops.klDivLoss;
         pub const nllLoss = loss_ops.nllLoss;
-        pub const l2Normalize = norm_ops.l2Normalize;
-        pub const norm = norm_ops.norm;
-        pub const normAll = norm_ops.normAll;
-        pub const cosineSimilarity = norm_ops.cosineSimilarity;
+
+        // ---- rope: rotary position embedding ----
+        const rope_ops = @import("tensor/float/rope.zig").Ops(Self);
         pub const rope = rope_ops.rope;
-        pub const dot = matmul_ops.dot;
-        pub const addDot = matmul_ops.addDot;
-        pub const einsum = matmul_ops.einsum;
-        pub const dotTernarySte = matmul_ops.dotTernarySte;
-        pub const dotPacked = matmul_ops.dotPacked;
-        pub const packRhs = matmul_ops.packRhs;
-        pub const rmsNormMulDotPacked = matmul_ops.rmsNormMulDotPacked;
-        pub const splitSwiGluDotPacked = matmul_ops.splitSwiGluDotPacked;
-        pub const gegluQuantDotPacked = matmul_ops.gegluQuantDotPacked;
+
+        // ---- attention: fused grouped causal attention ----
+        const attention_ops = @import("tensor/float/attention.zig").Ops(Self);
         pub const groupedAttention = attention_ops.groupedAttention;
     };
 }
