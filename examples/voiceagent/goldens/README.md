@@ -1,4 +1,4 @@
-# goldens-aec — GTCRN-AEC parity fixtures
+# examples/voiceagent/goldens — GTCRN-AEC parity fixtures
 
 Per-stage reference activations for the echo canceller in
 `examples/voiceagent/aec.zig`, consumed by `examples/voiceagent/aec_tests.zig`.
@@ -9,7 +9,7 @@ PyTorch implementation. Copy them in after pinning the reference:
 
 ```sh
 tools/fetch_refs.sh LocalVQE
-cp refs/LocalVQE/ggml/tests/gtcrn/*.npy goldens-aec/
+cp refs/LocalVQE/ggml/tests/gtcrn/*.npy examples/voiceagent/goldens/
 ```
 
 The weights are NOT in that checkout — they are published separately, and

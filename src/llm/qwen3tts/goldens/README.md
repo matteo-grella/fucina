@@ -1,4 +1,4 @@
-# goldens-qwen3tts — Qwen3-TTS parity fixtures
+# src/llm/qwen3tts/goldens — Qwen3-TTS parity fixtures
 
 Reference activations for `src/llm/qwen3tts`, consumed by
 `src/llm/qwen3tts/codec_tests.zig` and `talker_tests.zig`.

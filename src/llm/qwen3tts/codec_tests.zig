@@ -10,8 +10,8 @@ const gguf = fucina.gguf;
 const ExecContext = fucina.ExecContext;
 
 const model_path = "models/qwen3-tts/qwen-tokenizer-12hz-F32.gguf";
-const rvq_path = "goldens-qwen3tts/codes-137.rvq";
-const wav_path = "goldens-qwen3tts/decoded-137-f32.wav";
+const rvq_path = "src/llm/qwen3tts/goldens/codes-137.rvq";
+const wav_path = "src/llm/qwen3tts/goldens/decoded-137-f32.wav";
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1 << 30));
@@ -133,13 +133,13 @@ test "qwen3tts codec: stage bisect vs oracle dumps (debug, needs dump-codec/)" {
     defer file.deinit();
     const rvq_bytes = readFile(allocator, rvq_path) catch return error.SkipZigTest;
     defer allocator.free(rvq_bytes);
-    const rvq_dump = loadDump(allocator, "goldens-qwen3tts/dump-codec/codec-rvq.bin") catch return error.SkipZigTest;
+    const rvq_dump = loadDump(allocator, "src/llm/qwen3tts/goldens/dump-codec/codec-rvq.bin") catch return error.SkipZigTest;
     defer allocator.free(rvq_dump.data);
-    const preconv_dump = try loadDump(allocator, "goldens-qwen3tts/dump-codec/codec-preconv.bin");
+    const preconv_dump = try loadDump(allocator, "src/llm/qwen3tts/goldens/dump-codec/codec-preconv.bin");
     defer allocator.free(preconv_dump.data);
-    const tfm_dump = try loadDump(allocator, "goldens-qwen3tts/dump-codec/codec-tfm.bin");
+    const tfm_dump = try loadDump(allocator, "src/llm/qwen3tts/goldens/dump-codec/codec-tfm.bin");
     defer allocator.free(tfm_dump.data);
-    const up_dump = try loadDump(allocator, "goldens-qwen3tts/dump-codec/codec-up.bin");
+    const up_dump = try loadDump(allocator, "src/llm/qwen3tts/goldens/dump-codec/codec-up.bin");
     defer allocator.free(up_dump.data);
 
     var dec = try codec.load(&ctx, &file);

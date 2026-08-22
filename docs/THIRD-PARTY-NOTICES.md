@@ -237,13 +237,13 @@ grouped-MoE path does not use the split.
   `examples/nam/resources/README.md`).
 - Quantization golden vectors in tests — byte outputs of running ggml's
   encoders over documented inputs (generated 2026-06-11).
-- `goldens-aec/*.npy` — the per-stage GTCRN-AEC fixtures published by
+- `examples/voiceagent/goldens/*.npy` — the per-stage GTCRN-AEC fixtures published by
   LocalVQE (Apache-2.0) under `ggml/tests/gtcrn/`, copied in unmodified;
-  provenance and refresh recipe in `goldens-aec/README.md`.
-- `goldens-qwen3tts/**` — reference activations produced by running the
+  provenance and refresh recipe in `examples/voiceagent/goldens/README.md`.
+- `src/llm/qwen3tts/goldens/**` — reference activations produced by running the
   pinned qwentts.cpp checkout through its python bindings (MIT); the dumps
   are program output, not upstream source. Recipe in
-  `goldens-qwen3tts/README.md`.
+  `src/llm/qwen3tts/goldens/README.md`.
 - `refs/pocket-tts-dumps/` (not committed) — Pocket TTS reference
   activations, regenerated locally by `tools/pocket/pocket_dump.py` against
   the stock pinned checkout.

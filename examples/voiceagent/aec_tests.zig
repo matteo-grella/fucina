@@ -3,7 +3,7 @@
 //! clip, must reproduce the whole-clip reference output — this pins the
 //! DEPLOYMENT path (carried conv history + GRU hiddens), not just an offline
 //! forward. Also pins stftFrame/istftFrame against the shipped DFT matrices.
-//! Skips without models/aec/gtcrn_aec.gguf + goldens-aec/.
+//! Skips without models/aec/gtcrn_aec.gguf + examples/voiceagent/goldens/.
 
 const std = @import("std");
 const fucina = @import("fucina");
@@ -12,7 +12,7 @@ const aec = @import("aec.zig");
 const gguf = fucina.gguf;
 
 const model_path = "models/aec/gtcrn_aec.gguf";
-const fixtures = "goldens-aec";
+const fixtures = "examples/voiceagent/goldens";
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1 << 30));

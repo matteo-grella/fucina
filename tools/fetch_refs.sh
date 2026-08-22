@@ -78,7 +78,7 @@
 # the Qwen3-TTS port (src/llm/qwen3tts, examples/qwen3tts): the C++ side pins
 # the codec decoder's stage decomposition (pre-conv, transformer, RVQ,
 # upsample) and the python side drives it to emit the reference activations.
-# Both stay stock — the committed fixtures under goldens-qwen3tts/ were
+# Both stay stock — the committed fixtures under src/llm/qwen3tts/goldens/ were
 # produced by the python harness against the pinned checkout; see that
 # directory's README.md for the regeneration recipe.
 #
@@ -98,7 +98,7 @@
 # LocalVQE (localai-org, Apache-2.0 code AND weights) is the reference for the
 # GTCRN-AEC echo canceller in examples/voiceagent/aec.zig: ggml/gtcrn/gtcrn.cpp
 # is the scalar implementation the port follows and ggml/tests/gtcrn/ ships the
-# per-stage .npy fixtures committed under goldens-aec/. Stock, never patched.
+# per-stage .npy fixtures committed under examples/voiceagent/goldens/. Stock, never patched.
 
 set -eu
 cd "$(dirname "$0")/.."

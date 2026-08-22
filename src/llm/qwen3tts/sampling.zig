@@ -161,7 +161,7 @@ pub fn sample(
 
 test "philox matches the oracle's seed-42 sample traces" {
     // [Sample]/[Sample-CP] u values logged by qwen-tts --seed 42
-    // (goldens-qwen3tts/seed42-aiden.log): u depends only on (seed, subseq).
+    // (src/llm/qwen3tts/goldens/seed42-aiden.log): u depends only on (seed, subseq).
     const expected = [_]f32{
         0.6129598618, 0.0100588445, 0.3984136879, 0.0403083973,
         0.1562667489, 0.4824730754, 0.7362473011, 0.4059819579,

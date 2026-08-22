@@ -315,7 +315,7 @@ Enter also interrupts; Ctrl-C quits. `--no-aec` (or a missing
 are the compact GTCRN-AEC line from
 [`LocalAI-io/LocalVQE`](https://huggingface.co/LocalAI-io/LocalVQE)
 (`localvqe-pi-aec-v1-49k-f32.gguf`, 2.3 MB); the parity fixtures in
-`goldens-aec/` ship with the reference checkout, not with the weights.
+`examples/voiceagent/goldens/` ship with the reference checkout, not with the weights.
 
 ### When the reply keeps stalling
 
