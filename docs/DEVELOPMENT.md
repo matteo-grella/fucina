@@ -212,7 +212,7 @@ GEMM sweep; a kernel change needs both tracks, always.
 | Gate | What it proves | Run when |
 | --- | --- | --- |
 | `zig build test` | nine test roots, native backend, no assets needed | always |
-| `zig build test -Dbackend=scalar` | native agrees with the reference backend | `src/backend/` or `src/exec/` changed — once, on final code |
+| `zig build test-fucina -Dbackend=scalar` | native agrees with the reference backend on the kernel/spec surface (the fucina root; model-golden forwards are native-only by design) | `src/backend/` or `src/exec/` changed — once, on final code |
 | `zig build test -Dblas=none` | pure-Zig kernels unbroken | anything numeric near GEMM dispatch |
 | `zig build arch-check` | layering intact (zero SCCs) | new files / imports |
 | `zig build doc-check` | AGENTS.md doc index resolves | doc adds/moves |

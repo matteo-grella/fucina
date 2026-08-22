@@ -27,9 +27,10 @@ needs the parity oracles but not a GEMM sweep; a kernel change needs both
 tracks, always.
 
 **Correctness.** `zig build test` must be green, and run the variants your
-change can affect: `-Dbackend=scalar` when the change touches
-`src/backend/` or `src/exec/` (the scalar backend is the reference —
-native and scalar must agree), `-Dblas=none` for anything numeric near
+change can affect: `zig build test-fucina -Dbackend=scalar` when the change
+touches `src/backend/` or `src/exec/` (the scalar backend is the reference —
+native and scalar must agree on the kernel/spec surface; model-golden
+forwards are native-only by design), `-Dblas=none` for anything numeric near
 GEMM dispatch, the parity oracles for anything touching a model family (logit
 parity, token-ID-exact tokenization, byte-exact quant encoding — see the
 family's example runner). `zig build arch-check` and `zig build doc-check`

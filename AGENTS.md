@@ -20,8 +20,7 @@ repo map, house rules, and the doc index.
 
 ```sh
 zig build test                 # unit tests — NINE roots: src/fucina.zig, src/llm.zig, examples/lmserve/main.zig, examples/nam/main.zig, examples/parakeet/main.zig, examples/omnivoice/main.zig, examples/locate_anything/main.zig, examples/facedetect/main.zig, examples/nanochat/main.zig
-zig build test -Dbackend=scalar   # reference scalar backend
-zig build test-fucina -Dbackend=scalar  # routine scalar leg: fucina root only (the kernel/spec surface); run the full nine-root scalar matrix pre-merge when src/backend/ or src/exec/ changed
+zig build test-fucina -Dbackend=scalar  # THE scalar leg: fucina root only (the kernel/spec surface). The scalar backend verifies kernels/math; real-model golden forwards are native-only by design, so the full nine-root matrix is a native gate
 zig build test -Dblas=none        # native backend via pure Zig vector kernels (no CBLAS)
 zig build arch-check           # production-only src import graph (AST-based, test-aware): enforces 0 SCCs
 zig build doc-check            # doc-index link check: every doc named in AGENTS.md's doc index must exist (tools/check_doc_links.zig)
