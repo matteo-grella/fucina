@@ -334,15 +334,9 @@ const DenseFfn = struct {
 
 /// MoE expert-stack projection: persisted PTQTP plane siblings win over the
 /// plain GGUF tensor when present (same contract as the qwen3 loader).
-fn loadMoeProjection(ctx: *ExecContext, file: *const gguf.File, name: []const u8, in_dim: usize, out_dim: usize, n_expert: usize, borrow: bool) !fucina.MoeRhs {
-    if (try ptqtp_gguf.maybeLoadMoeRhs(ctx, file, name, in_dim, out_dim, n_expert, borrow)) |rhs| return rhs;
-    return weights.loadMoeRhs(ctx, try file.get(name), in_dim, out_dim, n_expert, borrow);
-}
+const loadMoeProjection = ptqtp_gguf.loadMoeRhsAuto;
+const moeProjSpec = ptqtp_gguf.streamedProjSpecAuto;
 
-fn moeProjSpec(file: *const gguf.File, name: []const u8, in_dim: usize, out_dim: usize, n_expert: usize) !fucina.expert_store.ProjSpec {
-    if (try ptqtp_gguf.maybeStreamedMoeProjSpec(file, name, in_dim, out_dim, n_expert)) |spec| return spec;
-    return weights.streamedProjSpec(file, try file.get(name), in_dim, out_dim, n_expert);
-}
 
 /// Routed MoE FFN (qwen35moe): softmax router over `num_experts` with
 /// renormalized top-k SwiGLU expert mixture, plus a shared expert (a dense
@@ -2208,21 +2202,9 @@ fn pilotPrefetchNext(
         .streamed => |*s| s.store,
         else => return,
     };
-    const top_k = cfg.num_experts_used;
-    const seq = x.dim(.seq);
-
     var nrm = try x.rmsNormMul(ctx, .embed, post_norm, cfg.rms_norm_eps);
     defer nrm.deinit();
-    var logits = try moe.router.linearSeq(ctx, &nrm, .embed, .expert);
-    defer logits.deinit();
-
-    const allocator = ctx.allocator;
-    const sel = try allocator.alloc(usize, seq * top_k);
-    defer allocator.free(sel);
-    const wgt = try allocator.alloc(f32, seq * top_k);
-    defer allocator.free(wgt);
-    try logits.routerTopK(ctx, .expert, top_k, .{ .normalize_selected = false }, sel, wgt);
-    store.pilotHint(next_layer_i, sel);
+    try weights.pilotHintTopK(ctx, &nrm, &moe.router, cfg.num_experts_used, store, next_layer_i);
 }
 
 test "qwen35 Config.isRecurrent + derived dims (0.8B shape)" {

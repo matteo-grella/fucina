@@ -826,17 +826,11 @@ fn loadProjection(ctx: *ExecContext, file: *const gguf.File, name: []const u8, r
 /// MoE expert-stack counterpart of `loadProjection`: persisted PTQTP plane
 /// stacks (`<name>.ptqtpK` siblings) when the file carries them, else the
 /// base stacked tensor.
-fn loadMoeProjection(ctx: *ExecContext, file: *const gguf.File, name: []const u8, in_dim: usize, out_dim: usize, n_expert: usize, borrow: bool) !fucina.MoeRhs {
-    if (try ptqtp_gguf.maybeLoadMoeRhs(ctx, file, name, in_dim, out_dim, n_expert, borrow)) |rhs| return rhs;
-    return weights.loadMoeRhs(ctx, try file.get(name), in_dim, out_dim, n_expert, borrow);
-}
+const loadMoeProjection = ptqtp_gguf.loadMoeRhsAuto;
+const moeProjSpec = ptqtp_gguf.streamedProjSpecAuto;
 
 /// Streamed counterpart: an ExpertStore ProjSpec, pair-detecting PTQTP
 /// plane sets the same way.
-fn moeProjSpec(file: *const gguf.File, name: []const u8, in_dim: usize, out_dim: usize, n_expert: usize) !fucina.expert_store.ProjSpec {
-    if (try ptqtp_gguf.maybeStreamedMoeProjSpec(file, name, in_dim, out_dim, n_expert)) |spec| return spec;
-    return weights.streamedProjSpec(file, try file.get(name), in_dim, out_dim, n_expert);
-}
 
 fn loadDenseFfn(ctx: *ExecContext, file: *const gguf.File, config: Descriptor, layer_i: usize) !DenseFfn {
     var name_buf: [96]u8 = undefined;
@@ -1773,21 +1767,9 @@ fn pilotPrefetchNext(
         .streamed => |*s| s.store,
         else => return,
     };
-    const top_k = config.num_experts_used;
-    const seq = x.dim(.seq);
-
     var nrm = try x.rmsNormMul(ctx, .embed, &next.ffn_norm, config.rms_norm_eps);
     defer nrm.deinit();
-    var logits = try moe.router.linearSeq(ctx, &nrm, .embed, .expert);
-    defer logits.deinit();
-
-    const allocator = ctx.allocator;
-    const sel = try allocator.alloc(usize, seq * top_k);
-    defer allocator.free(sel);
-    const wgt = try allocator.alloc(f32, seq * top_k);
-    defer allocator.free(wgt);
-    try logits.routerTopK(ctx, .expert, top_k, .{ .normalize_selected = false }, sel, wgt);
-    store.pilotHint(next_layer_i, sel);
+    try weights.pilotHintTopK(ctx, &nrm, &moe.router, config.num_experts_used, store, next_layer_i);
 }
 
 /// Adaptive expert top-p (routing sparsification, off at p >= 1): per token,

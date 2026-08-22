@@ -643,17 +643,8 @@ fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i:
 /// when the file carries them (ptqtp_gguf pair-detection; a no-op metadata
 /// lookup on undecorated files — the MTP sidecar takes this branch), else
 /// the base stacked tensor.
-fn loadMoeProjection(ctx: *ExecContext, file: *const gguf.File, tensor_name: []const u8, in_dim: usize, out_dim: usize, n_expert: usize, borrow: bool) !fucina.MoeRhs {
-    if (try ptqtp_gguf.maybeLoadMoeRhs(ctx, file, tensor_name, in_dim, out_dim, n_expert, borrow)) |rhs| return rhs;
-    return weights.loadMoeRhs(ctx, try file.get(tensor_name), in_dim, out_dim, n_expert, borrow);
-}
-
-/// Streamed counterpart: an ExpertStore ProjSpec, pair-detecting PTQTP
-/// plane sets the same way.
-fn moeProjSpec(file: *const gguf.File, tensor_name: []const u8, in_dim: usize, out_dim: usize, n_expert: usize) !fucina.expert_store.ProjSpec {
-    if (try ptqtp_gguf.maybeStreamedMoeProjSpec(file, tensor_name, in_dim, out_dim, n_expert)) |spec| return spec;
-    return weights.streamedProjSpec(file, try file.get(tensor_name), in_dim, out_dim, n_expert);
-}
+const loadMoeProjection = ptqtp_gguf.loadMoeRhsAuto;
+const moeProjSpec = ptqtp_gguf.streamedProjSpecAuto;
 
 /// Layer loader shared by the trunk ("blk.N." names) and the MTP sidecar
 /// ("mtp.0." names, always raw-family, top-k routed).

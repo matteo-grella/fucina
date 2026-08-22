@@ -332,6 +332,21 @@ pub fn maybeStreamedMoeProjSpec(
     return try weights.streamedProjSpecPtqtp(file, set.infos[0..set.count], in_dim, out_dim, n_expert, tied);
 }
 
+/// Decoration-aware MoE expert-stack load: the PTQTP plane set when the
+/// file carries one for `name`, `weights.loadMoeRhs` on the base tensor
+/// otherwise. The one entry model loaders call for resident expert stacks.
+pub fn loadMoeRhsAuto(ctx: *ExecContext, file: *const gguf.File, name: []const u8, in_dim: usize, out_dim: usize, n_expert: usize, borrow: bool) !fucina.MoeRhs {
+    if (try maybeLoadMoeRhs(ctx, file, name, in_dim, out_dim, n_expert, borrow)) |rhs| return rhs;
+    return weights.loadMoeRhs(ctx, try file.get(name), in_dim, out_dim, n_expert, borrow);
+}
+
+/// Streamed counterpart of `loadMoeRhsAuto`: an ExpertStore ProjSpec,
+/// pair-detecting PTQTP plane sets the same way.
+pub fn streamedProjSpecAuto(file: *const gguf.File, name: []const u8, in_dim: usize, out_dim: usize, n_expert: usize) !fucina.expert_store.ProjSpec {
+    if (try maybeStreamedMoeProjSpec(file, name, in_dim, out_dim, n_expert)) |spec| return spec;
+    return weights.streamedProjSpec(file, try file.get(name), in_dim, out_dim, n_expert);
+}
+
 /// Per-expert `ptqtp.MatrixStats` folded into one line — a 128-expert
 /// stack reports mean + max instead of 128 rows.
 pub const MoeStackStats = struct {

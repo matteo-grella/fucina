@@ -1726,6 +1726,24 @@ pub fn cacheRouteSel(gate: *const fucina.MoeRhs, choice: []const f32, sel: []usi
 /// paths (single files pass through as one entry) and open the ExpertStore
 /// over them. The caller registers layers (`loadMoeRhsStreamed`) and then
 /// calls `ExpertStore.finalize`.
+/// Router-lookahead tail shared by streamed-MoE decoders: score the normed
+/// hidden rows through `router`, take the un-normalized top-k per row, and
+/// hand the selection to the store as a prefetch hint for `layer_i`.
+/// Callers own the family-specific part (finding the next layer's MoE arm
+/// and building `nrm` with that layer's FFN norm).
+pub fn pilotHintTopK(ctx: *ExecContext, nrm: *const fucina.Tensor(.{ .seq, .embed }), router: *const LinearWeight, top_k: usize, store: *fucina.ExpertStore, layer_i: usize) !void {
+    var logits = try router.linearSeq(ctx, nrm, .embed, .expert);
+    defer logits.deinit();
+    const allocator = ctx.allocator;
+    const seq = nrm.dim(.seq);
+    const sel = try allocator.alloc(usize, seq * top_k);
+    defer allocator.free(sel);
+    const wgt = try allocator.alloc(f32, seq * top_k);
+    defer allocator.free(wgt);
+    try logits.routerTopK(ctx, .expert, top_k, .{ .normalize_selected = false }, sel, wgt);
+    store.pilotHint(layer_i, sel);
+}
+
 pub fn createExpertStore(allocator: Allocator, options: MoeStreamOptions, n_layers: usize) !*fucina.ExpertStore {
     const split_paths = try gguf.File.splitPartPaths(allocator, options.gguf_path);
     defer if (split_paths) |paths| {
