@@ -22,6 +22,11 @@ fn argmaxRow(row: []const f32) usize {
 }
 
 fn parityOnGguf(path: []const u8) !void {
+    // Native builds only: this gate proves DESCRIPTOR-vs-HAND-PORT
+    // equivalence, which is backend-independent (both sides issue the same
+    // facade calls); on the scalar reference leg it would re-run four 0.6B
+    // model forwards on the slow kernels for no added coverage.
+    if (comptime fucina.internal.backend_mod.active_kind != .native) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;
     ctx.init(allocator);
