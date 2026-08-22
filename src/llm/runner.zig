@@ -12,6 +12,8 @@
 //! parity with the hand qwen3 port is pinned token-for-token by
 //! `runner_tests.zig`. Origin: extracted from `qwen3/model.zig`, which
 //! remains the parity oracle.
+//!
+//! Stability: experimental (CHANGELOG.md tiers).
 
 const std = @import("std");
 const fucina = @import("fucina");

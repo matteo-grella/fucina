@@ -97,6 +97,8 @@
 //! (`d`) are never touched. All three ternary knobs and the flip-stream
 //! mapping are checkpoint contracts like `antithetic` (persisted as the
 //! `es_ternary_*` TrainerState fields).
+//!
+//! Stability: experimental (CHANGELOG.md tiers).
 
 const std = @import("std");
 const backend_mod = @import("backend.zig");

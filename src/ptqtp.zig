@@ -41,6 +41,8 @@
 //! regression and forced to trit 0 in every plane — one bad element
 //! degrades only itself instead of poisoning its group (same stance as the
 //! TQ2_0 encoder's NaN clamp).
+//!
+//! Stability: experimental (CHANGELOG.md tiers).
 
 const std = @import("std");
 const backend_mod = @import("backend.zig");
