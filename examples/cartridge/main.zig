@@ -1536,17 +1536,17 @@ fn runGemma(
     corpus_paths: []const []const u8,
     opts: Options,
 ) !void {
-    var config = try llm.gemma.gemma4.Config.fromGguf(file);
+    var config = try llm.gemma.model.Config.fromGguf(file);
     // Zero-copy expert borrow over the GGUF mapping: the trainer's MoE arm
     // consumes the raw expert blocks (RawMoeWeightsRequired otherwise).
     config.borrow_experts = true;
     var spm = try llm.spm_tokenizer.Tokenizer.initFromGguf(allocator, file, .{});
     defer spm.deinit();
-    var model = try llm.gemma.gemma4.Model.loadGgufFromFile(ctx, file, config);
+    var model = try llm.gemma.model.Model.loadGgufFromFile(ctx, file, config);
     defer model.deinit();
     file.deinit();
 
-    var trainer = try llm.gemma.gemma4_train.Trainer(.{ .q = false, .v = false }).init(ctx, &model, .{ .rank = 1, .alpha = 1 }, opts.seed);
+    var trainer = try llm.gemma.train.Trainer(.{ .q = false, .v = false }).init(ctx, &model, .{ .rank = 1, .alpha = 1 }, opts.seed);
     defer trainer.deinit();
 
     // Serve a saved cartridge (--load): same three-way comparison as qwen3.

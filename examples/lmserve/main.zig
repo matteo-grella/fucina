@@ -701,8 +701,8 @@ const FleetServeQwen3 = FleetServeFor(
     llm.tokenizer.Tokenizer,
 );
 const FleetServeGemma4 = FleetServeFor(
-    llm.gemma.gemma4.Model,
-    llm.gemma.gemma4_train.Trainer(.{ .q = false, .v = false }),
+    llm.gemma.model.Model,
+    llm.gemma.train.Trainer(.{ .q = false, .v = false }),
     llm.spm_tokenizer.Tokenizer,
 );
 
@@ -1022,7 +1022,7 @@ fn serveGemma4(
         try stderr.writeAll("--shine-fleet is a dense-qwen3 backend feature\n");
         return error.ShineFleetUnsupported;
     }
-    var config = try llm.gemma.gemma4.Config.fromGguf(file);
+    var config = try llm.gemma.model.Config.fromGguf(file);
     config.borrow_experts = args.experts_borrow;
     var tokenizer = llm.spm_tokenizer.Tokenizer.initFromGguf(allocator, file, .{}) catch {
         try stderr.writeAll("this GGUF has no usable SPM tokenizer metadata\n");
@@ -1033,7 +1033,7 @@ fn serveGemma4(
         llm.chat.Template{ .format = .gemma4 };
     const default_sampling = samplingFromGguf(file);
 
-    var model = try llm.gemma.gemma4.Model.loadGgufFromFile(ctx, file, config);
+    var model = try llm.gemma.model.Model.loadGgufFromFile(ctx, file, config);
     defer model.deinit();
     file.deinit();
 
@@ -1070,9 +1070,9 @@ fn serveGemma4(
     extra_stops_buf[extra_n] = 1;
     extra_n += 1;
 
-    const kv_slots = try backend_mod.kvRamGuardSlots(llm.gemma.gemma4.Model, ctx, &model, args.ctx_len, try slotsForBatch(stderr, args), args.kv_slots_force, stderr);
+    const kv_slots = try backend_mod.kvRamGuardSlots(llm.gemma.model.Model, ctx, &model, args.ctx_len, try slotsForBatch(stderr, args), args.kv_slots_force, stderr);
 
-    var adapter = backend_mod.GgufChatBackend(llm.gemma.gemma4.Model, llm.spm_tokenizer).init(
+    var adapter = backend_mod.GgufChatBackend(llm.gemma.model.Model, llm.spm_tokenizer).init(
         allocator,
         ctx,
         &model,

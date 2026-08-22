@@ -55,7 +55,7 @@ const default_model = "models/Qwen3-0.6B-f16.gguf";
 /// No LoRA targets: the base model stays fully frozen; cartridge rows are
 /// the only parameters.
 const Trainer = llm.qwen3.train.Trainer(.{ .q = false, .v = false });
-const GemmaTrainer = llm.gemma.gemma4_train.Trainer(.{ .q = false, .v = false });
+const GemmaTrainer = llm.gemma.train.Trainer(.{ .q = false, .v = false });
 
 /// Chat-template strings the prompt builders splice (runtime values so one
 /// engine serves both architectures — the base cartridge CLI's Tpl).
@@ -294,12 +294,12 @@ pub fn main(init: std.process.Init) !void {
     var file = try fucina.gguf.File.loadMmap(allocator, io, opts.model_path);
     const arch = file.getString("general.architecture") orelse "";
     if (std.mem.startsWith(u8, arch, "gemma")) {
-        var config = try llm.gemma.gemma4.Config.fromGguf(&file);
+        var config = try llm.gemma.model.Config.fromGguf(&file);
         // Zero-copy expert borrow: the trainer's MoE arm (self-study
         // backward AND the query-embedding forward) consumes raw expert
         // blocks (RawMoeWeightsRequired otherwise).
         config.borrow_experts = true;
-        var model = try llm.gemma.gemma4.Model.loadGgufFromFile(&ctx, &file, config);
+        var model = try llm.gemma.model.Model.loadGgufFromFile(&ctx, &file, config);
         defer model.deinit();
         var tokenizer = try llm.spm_tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
         defer tokenizer.deinit();

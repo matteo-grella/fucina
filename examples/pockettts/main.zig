@@ -14,7 +14,7 @@ const builtin = @import("builtin");
 const fucina = @import("fucina");
 const llm = @import("fucina_llm");
 
-const pocket = llm.pockettts.pocket;
+const pocket = llm.pockettts.model;
 
 const usage =
     \\usage: zig build pockettts -- --model <pocket.gguf> [--voice NAME]

@@ -15,8 +15,8 @@ const std = @import("std");
 const fucina = @import("fucina");
 const llm = @import("fucina_llm");
 
-const Model = llm.gemma.gemma4.Model;
-const Config = llm.gemma.gemma4.Config;
+const Model = llm.gemma.model.Model;
+const Config = llm.gemma.model.Config;
 
 const default_tokens = [_]usize{ 2, 235280 }; // <bos> + a token
 
@@ -346,7 +346,7 @@ pub fn main(init: std.process.Init) !void {
 
     var logits: ?fucina.Tensor(.{ .seq, .vocab }) = null;
     defer if (logits) |*v| v.deinit();
-    var profile: llm.gemma.gemma4.ForwardProfile = .{};
+    var profile: llm.gemma.model.ForwardProfile = .{};
     const forward_start = nowNs(init.io);
     for (0..repeat) |_| {
         if (logits) |*v| {
@@ -595,8 +595,8 @@ fn runBench(
     defer allocator.free(pps);
     const tgs = try allocator.alloc(f64, reps);
     defer allocator.free(tgs);
-    var prefill_profile: llm.gemma.gemma4.ForwardProfile = .{};
-    var decode_profile: llm.gemma.gemma4.ForwardProfile = .{};
+    var prefill_profile: llm.gemma.model.ForwardProfile = .{};
+    var decode_profile: llm.gemma.model.ForwardProfile = .{};
     var decode_steps: usize = 0;
     var rep: usize = 0;
     while (rep <= reps) : (rep += 1) {
@@ -710,7 +710,7 @@ fn millisI128(ns: i128) f64 {
     return @as(f64, @floatFromInt(ns)) / 1_000_000.0;
 }
 
-fn printProfile(stdout: anytype, profile: *const llm.gemma.gemma4.ForwardProfile, denom: f64, label: []const u8) !void {
+fn printProfile(stdout: anytype, profile: *const llm.gemma.model.ForwardProfile, denom: f64, label: []const u8) !void {
     try stdout.print("{s}:", .{label});
     try stdout.print(" embed={d:.3}", .{millisI128(profile.embed_ns) / denom});
     try stdout.print(" attn={d:.3}", .{millisI128(profile.attn_ns) / denom});

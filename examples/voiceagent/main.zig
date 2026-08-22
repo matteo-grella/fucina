@@ -1902,7 +1902,7 @@ const SpeakWorker = struct {
     seed: i64,
 
     // Exactly one of these is live, chosen by the --tts model's architecture.
-    pocket: ?*llm.pockettts.pocket.Engine,
+    pocket: ?*llm.pockettts.model.Engine,
     qwen: ?Qwen,
 
     mutex: std.Io.Mutex = .init,
@@ -2064,7 +2064,7 @@ const SpeakWorker = struct {
         return self.speakQwen(span);
     }
 
-    fn speakPocket(self: *SpeakWorker, pe: *llm.pockettts.pocket.Engine, span: []const u8) !void {
+    fn speakPocket(self: *SpeakWorker, pe: *llm.pockettts.model.Engine, span: []const u8) !void {
         const Cb = struct {
             w: *SpeakWorker,
 
@@ -2580,10 +2580,10 @@ pub fn main(init: std.process.Init) anyerror!void {
     defer tts_ctx.deinit();
 
     // Pocket engine (continuous-latent streaming; no separate codec stage).
-    var pocket_engine: ?llm.pockettts.pocket.Engine = null;
+    var pocket_engine: ?llm.pockettts.model.Engine = null;
     defer if (pocket_engine) |*pe| pe.deinit();
     if (use_pocket) {
-        pocket_engine = try llm.pockettts.pocket.Engine.init(&tts_ctx, &tts_file, flagVal(args, "--voice") orelse "alba");
+        pocket_engine = try llm.pockettts.model.Engine.init(&tts_ctx, &tts_file, flagVal(args, "--voice") orelse "alba");
     }
 
     // Qwen3-TTS stages (skipped under pocket).
