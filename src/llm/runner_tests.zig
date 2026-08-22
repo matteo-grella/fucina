@@ -1,17 +1,26 @@
-//! Parity gate for the descriptor runner (gate 1 of the universal-runner
-//! design note): on a real Qwen3-0.6B GGUF, the runner driven by the
-//! descriptor `fromGguf` derives must reproduce the hand qwen3 port
-//! token-for-token — prefill logits bitwise, then every decode step's
-//! logits bitwise along a greedy chain, through both models' own KV
-//! caches. Skips without models/. Force-imported by `llm.zig`'s test block.
+//! Recorded-logits gates for the descriptor runner. The qwen3 family runs
+//! ON the runner (`qwen3/model.zig` aliases it), so its correctness is
+//! pinned against RECORDED values, not against a hand port: greedy argmax
+//! chains (ISA-portable) always, and exact FNV-1a logit-bit hashes on the
+//! machine class the goldens were recorded on (aarch64 native, Accelerate
+//! BLAS) — a refactor that changes a single output bit fails there. The
+//! glm4moe host_reference gate additionally compares the runner against
+//! the hand glm4moe port bitwise. Real-model gates skip without models/;
+//! all gates are native-only (the scalar leg verifies kernels, not model
+//! wiring). Force-imported by `llm.zig`'s test block.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const fucina = @import("fucina");
 const runner = @import("runner.zig");
-const qwen3 = @import("qwen3/model.zig");
 
 const gguf = fucina.gguf;
 const ExecContext = fucina.ExecContext;
+
+/// Exact-bit assertions hold on the recording machine class only; other
+/// ISAs and BLAS providers reassociate differently at the ulp level. The
+/// argmax chains are asserted everywhere.
+const strict_bits = builtin.cpu.arch == .aarch64;
 
 fn argmaxRow(row: []const f32) usize {
     var best: usize = 0;
@@ -21,11 +30,55 @@ fn argmaxRow(row: []const f32) usize {
     return best;
 }
 
-fn parityOnGguf(path: []const u8) !void {
-    // Native builds only: this gate proves DESCRIPTOR-vs-HAND-PORT
-    // equivalence, which is backend-independent (both sides issue the same
-    // facade calls); on the scalar reference leg it would re-run four 0.6B
-    // model forwards on the slow kernels for no added coverage.
+/// FNV-1a 64 over the raw f32 bytes: the exact-bit fingerprint the strict
+/// gates compare against the recorded goldens.
+fn fnvHash(values: []const f32) u64 {
+    var h: u64 = 0xcbf29ce484222325;
+    for (std.mem.sliceAsBytes(values)) |b| {
+        h ^= b;
+        h *%= 0x100000001b3;
+    }
+    return h;
+}
+
+/// Recorded forward trace: `chain[0]` is the greedy argmax after prefill,
+/// `chain[1..]` the argmaxes of the following decode steps; `prefill_hash`
+/// fingerprints the prefill step's full logits row (cached path).
+const Golden = struct {
+    prefill_hash: u64,
+    chain: [5]usize,
+};
+
+fn goldenForward(ctx: *ExecContext, model: *runner.Model, prompt: []const usize, golden: Golden) !void {
+    // Cross-entry consistency: the no-cache last-logits entry must agree
+    // with the cached prefill on the next token. (Not bitwise: the f16 KV
+    // round-trip is part of the cached path.)
+    {
+        var last = try model.forwardLastLogits(ctx, prompt);
+        defer last.deinit();
+        try std.testing.expectEqual(golden.chain[0], argmaxRow(try last.dataConst()));
+    }
+
+    var kv = try model.initKvCache(ctx, 32);
+    defer kv.deinit();
+    var logits = try model.forwardStep(ctx, &kv, prompt, 0);
+    if (strict_bits) try std.testing.expectEqual(golden.prefill_hash, fnvHash(try logits.dataConst()));
+    var pos: usize = prompt.len;
+    for (golden.chain[0 .. golden.chain.len - 1]) |want| {
+        const next = argmaxRow(try logits.dataConst());
+        try std.testing.expectEqual(want, next);
+        logits.deinit();
+        logits = try model.forwardStep(ctx, &kv, &.{next}, pos);
+        pos += 1;
+    }
+    try std.testing.expectEqual(golden.chain[golden.chain.len - 1], argmaxRow(try logits.dataConst()));
+    logits.deinit();
+}
+
+fn goldenOnGguf(path: []const u8, golden: Golden) !void {
+    // Native builds only: real-model goldens verify model wiring, which is
+    // backend-independent; the scalar leg would re-run 0.6B forwards on the
+    // slow kernels for no added coverage.
     if (comptime fucina.internal.backend_mod.active_kind != .native) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;
@@ -39,62 +92,34 @@ fn parityOnGguf(path: []const u8) !void {
     defer file.deinit();
 
     const desc = try runner.Descriptor.fromGguf(&file);
-    var generic = try runner.Model.loadGgufFromFile(&ctx, &file, desc);
-    defer generic.deinit();
-
-    var hand = try qwen3.Model.loadGgufFromFile(&ctx, &file, try qwen3.Config.fromGguf(&file));
-    defer hand.deinit();
+    var model = try runner.Model.loadGgufFromFile(&ctx, &file, desc);
+    defer model.deinit();
 
     const prompt = [_]usize{ 151644, 872, 198, 9707, 11, 1879, 0, 151645 };
-
-    // Prefill parity: the no-cache last-logits entry, bitwise.
-    {
-        var got = try generic.forwardLastLogits(&ctx, &prompt);
-        defer got.deinit();
-        var want = try hand.forwardLastLogits(&ctx, &prompt);
-        defer want.deinit();
-        try std.testing.expectEqualSlices(f32, try want.dataConst(), try got.dataConst());
-    }
-
-    // Decode parity: each model prefills into ITS OWN cache, then a greedy
-    // chain — every step's full logits row must match bitwise (which pins
-    // the argmax chain too).
-    var kv_generic = try generic.initKvCache(&ctx, 32);
-    defer kv_generic.deinit();
-    var kv_hand = try hand.initKvCache(&ctx, 32);
-    defer kv_hand.deinit();
-
-    var got = try generic.forwardStep(&ctx, &kv_generic, &prompt, 0);
-    var want = try hand.forwardStep(&ctx, &kv_hand, &prompt, 0);
-    var pos: usize = prompt.len;
-    for (0..4) |_| {
-        try std.testing.expectEqualSlices(f32, try want.dataConst(), try got.dataConst());
-        const next = argmaxRow(try want.dataConst());
-        want.deinit();
-        got.deinit();
-        got = try generic.forwardStep(&ctx, &kv_generic, &.{next}, pos);
-        want = try hand.forwardStep(&ctx, &kv_hand, &.{next}, pos);
-        pos += 1;
-    }
-    try std.testing.expectEqualSlices(f32, try want.dataConst(), try got.dataConst());
-    want.deinit();
-    got.deinit();
+    try goldenForward(&ctx, &model, &prompt, golden);
 }
 
-test "descriptor runner reproduces the hand qwen3 port bitwise (Q8_0; skips without models/)" {
-    try parityOnGguf("models/Qwen3-0.6B-Q8_0.gguf");
+test "runner matches the recorded Qwen3-0.6B forward (Q8_0; skips without models/)" {
+    try goldenOnGguf("models/Qwen3-0.6B-Q8_0.gguf", .{
+        .prefill_hash = 0x63a59d2f7713b0b8,
+        .chain = .{ 198, 151644, 198, 151644, 198 },
+    });
 }
 
-test "descriptor runner reproduces the hand qwen3 port bitwise (Q4_K_M; skips without models/)" {
-    try parityOnGguf("models/Qwen3-0.6B-Q4_K_M.gguf");
+test "runner matches the recorded Qwen3-0.6B forward (Q4_K_M; skips without models/)" {
+    try goldenOnGguf("models/Qwen3-0.6B-Q4_K_M.gguf", .{
+        .prefill_hash = 0x7726195312390e83,
+        .chain = .{ 198, 151644, 198, 151667, 198 },
+    });
 }
 
-// ---- synthetic-GGUF parity fixtures --------------------------------------
-// Self-contained (no models/ needed, CI-safe): write a tiny model as a real
-// GGUF through `gguf.Writer`, parse it back, load it through BOTH the hand
-// port and the runner, and require bitwise-identical logits. Weights are
-// deterministic PRNG draws; the GGUF round-trip also pins `fromGguf` and
-// the loaders.
+// ---- synthetic-GGUF fixtures ---------------------------------------------
+// Self-contained (no models/ needed): write a tiny model as a real GGUF
+// through `gguf.Writer`, parse it back, load it through the runner, and
+// require the recorded greedy chain (exact logit bits on the recording
+// machine class). Weights are deterministic PRNG draws; the GGUF round-trip
+// also pins `fromGguf` and the loaders. The glm fixture additionally runs
+// the hand glm4moe port for bitwise runner-vs-port parity.
 
 const glm4moe = @import("glm4moe/model.zig");
 
@@ -219,7 +244,8 @@ fn writeTinyQwen(allocator: std.mem.Allocator, moe: bool) ![]u8 {
     return f.finish();
 }
 
-fn syntheticQwenParity(moe: bool) !void {
+fn syntheticQwenGolden(moe: bool, golden: Golden) !void {
+    if (comptime fucina.internal.backend_mod.active_kind != .native) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;
     ctx.init(allocator);
@@ -230,47 +256,25 @@ fn syntheticQwenParity(moe: bool) !void {
     defer file.deinit();
 
     const desc = try runner.Descriptor.fromGguf(&file);
-    var generic = try runner.Model.loadGgufFromFile(&ctx, &file, desc);
-    defer generic.deinit();
-    var hand = try qwen3.Model.loadGgufFromFile(&ctx, &file, try qwen3.Config.fromGguf(&file));
-    defer hand.deinit();
+    var model = try runner.Model.loadGgufFromFile(&ctx, &file, desc);
+    defer model.deinit();
 
     const prompt = [_]usize{ 5, 61, 2, 33, 17 };
-    {
-        var got = try generic.forwardLastLogits(&ctx, &prompt);
-        defer got.deinit();
-        var want = try hand.forwardLastLogits(&ctx, &prompt);
-        defer want.deinit();
-        try std.testing.expectEqualSlices(f32, try want.dataConst(), try got.dataConst());
-    }
-
-    var kv_generic = try generic.initKvCache(&ctx, 16);
-    defer kv_generic.deinit();
-    var kv_hand = try hand.initKvCache(&ctx, 16);
-    defer kv_hand.deinit();
-    var got = try generic.forwardStep(&ctx, &kv_generic, &prompt, 0);
-    var want = try hand.forwardStep(&ctx, &kv_hand, &prompt, 0);
-    var pos: usize = prompt.len;
-    for (0..4) |_| {
-        try std.testing.expectEqualSlices(f32, try want.dataConst(), try got.dataConst());
-        const next = argmaxRow(try want.dataConst());
-        want.deinit();
-        got.deinit();
-        got = try generic.forwardStep(&ctx, &kv_generic, &.{next}, pos);
-        want = try hand.forwardStep(&ctx, &kv_hand, &.{next}, pos);
-        pos += 1;
-    }
-    try std.testing.expectEqualSlices(f32, try want.dataConst(), try got.dataConst());
-    want.deinit();
-    got.deinit();
+    try goldenForward(&ctx, &model, &prompt, golden);
 }
 
-test "descriptor runner matches the hand port bitwise on a synthetic dense GGUF" {
-    try syntheticQwenParity(false);
+test "runner matches the recorded forward on a synthetic dense GGUF" {
+    try syntheticQwenGolden(false, .{
+        .prefill_hash = 0x84b988c871d84241,
+        .chain = .{ 23, 13, 52, 37, 44 },
+    });
 }
 
-test "descriptor runner matches the hand port bitwise on a synthetic MoE GGUF (the small-MoE fixture)" {
-    try syntheticQwenParity(true);
+test "runner matches the recorded forward on a synthetic MoE GGUF (the small-MoE fixture)" {
+    try syntheticQwenGolden(true, .{
+        .prefill_hash = 0x29724bb80fda2f71,
+        .chain = .{ 34, 51, 61, 17, 34 },
+    });
 }
 
 fn writeTinyGlm(allocator: std.mem.Allocator) ![]u8 {
@@ -328,6 +332,12 @@ fn writeTinyGlm(allocator: std.mem.Allocator) ![]u8 {
 }
 
 test "descriptor runner matches the hand glm4moe port bitwise on a synthetic GGUF (gate 3: host_reference vocabulary)" {
+    if (comptime fucina.internal.backend_mod.active_kind != .native) return error.SkipZigTest;
+    // Recorded trace for the same fixture: chain[0] = prefill argmax.
+    const golden = Golden{
+        .prefill_hash = 0xb4ec8486578aa204,
+        .chain = .{ 57, 28, 57, 28, 59 },
+    };
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;
     ctx.init(allocator);
@@ -376,9 +386,11 @@ test "descriptor runner matches the hand glm4moe port bitwise on a synthetic GGU
         for (rows, 0..) |row, r| {
             try std.testing.expectEqualSlices(f32, row, flat[r * tiny.vocab ..][0..tiny.vocab]);
         }
+        if (strict_bits) try std.testing.expectEqual(golden.prefill_hash, fnvHash(flat));
         next = argmaxRow(rows[rows.len - 1]);
+        try std.testing.expectEqual(golden.chain[0], next);
     }
-    for (0..4) |_| {
+    for (golden.chain[1..]) |want| {
         var step_tokens = [_]usize{next};
         var got = try generic.hostStep(&ctx, &cache_generic, &step_tokens);
         defer got.deinit();
@@ -389,5 +401,6 @@ test "descriptor runner matches the hand glm4moe port bitwise on a synthetic GGU
         }
         try std.testing.expectEqualSlices(f32, rows[0], try got.dataConst());
         next = argmaxRow(rows[0]);
+        try std.testing.expectEqual(want, next);
     }
 }

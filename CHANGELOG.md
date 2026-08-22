@@ -22,6 +22,16 @@ point; earlier history is `git log`.
 
 ### Changed
 
+- The qwen3 family now runs directly on the descriptor runner:
+  `llm.qwen3.model` is an alias surface over `llm.runner` (`Config` is
+  `runner.Descriptor`, `Model` is `runner.Model`), removing the ~1,300-line
+  verbatim copy the extraction had left behind. The runner gains the
+  batched decode entries (`forwardStepBatch`, `forwardStepBatchSpans`) and
+  the SubQ research seam; every public name and method of
+  `llm.qwen3.model` is preserved. Bit-exactness of the consolidation is
+  pinned by recorded-logits gates in `runner_tests.zig` (real Qwen3-0.6B
+  Q8_0/Q4_K_M plus the synthetic fixtures, captured before the merge).
+
 - Qwen3-TTS parity fixtures moved out of the shipped package:
   `src/llm/qwen3tts/goldens/` → `testdata/qwen3tts/` (5.5 MB of binary
   dumps that only in-repo parity tests read; `build.zig.zon` ships all of

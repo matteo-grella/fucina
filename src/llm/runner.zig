@@ -8,10 +8,14 @@
 //! The op vocabulary is the same facade the hand ports use (fused
 //! norm+projection, half-rope QK-norm, grouped causal attention over the
 //! shared KvCache, dense/MoE FFN with the packed fast paths), so the
-//! runner inherits every kernel and the buffer-pool memory discipline;
-//! parity with the hand qwen3 port is pinned token-for-token by
-//! `runner_tests.zig`. Origin: extracted from `qwen3/model.zig`, which
-//! remains the parity oracle.
+//! runner inherits every kernel and the buffer-pool memory discipline.
+//! The qwen3 family runs directly on this module (`qwen3/model.zig` is an
+//! alias surface over it), which is why the `.fused` style also carries
+//! the batched decode entries (`forwardStepBatch`, `forwardStepBatchSpans`)
+//! and the nullable SubQ research seam threaded through `attentionBlock`.
+//! Correctness is pinned by `runner_tests.zig`'s recorded-logits gates
+//! (real Qwen3-0.6B GGUFs + synthetic dense/MoE/glm fixtures) and, for
+//! `.host_reference`, bitwise parity against the hand glm4moe port.
 //!
 //! Stability: experimental (CHANGELOG.md tiers).
 
@@ -19,6 +23,7 @@ const std = @import("std");
 const fucina = @import("fucina");
 const weights = @import("fucina").weights;
 const kv_cache = @import("kv_cache.zig");
+const subq_mod = @import("subq.zig");
 const gguf_meta = @import("fucina").gguf_meta;
 const ptqtp_gguf = @import("fucina").ptqtp_gguf;
 
@@ -377,7 +382,7 @@ pub const Model = struct {
         const cfg = self.config;
         for (self.layers, 0..) |*layer, layer_i| {
             const last_query_only = layer_i + 1 == cfg.num_layers and token_ids.len > 1;
-            x = try ctx.replace(x, attentionBlock(ctx, io, cfg, layer, &x, &rope_table, self.kv_head_for_head, last_query_only, profile, null, layer_i));
+            x = try ctx.replace(x, attentionBlock(ctx, io, cfg, layer, &x, &rope_table, self.kv_head_for_head, last_query_only, profile, null, layer_i, null));
 
             x = try ctx.replace(x, ffnBlock(ctx, io, cfg, layer, &x, profile));
             if (profile) |p| p.layers += 1;
@@ -416,7 +421,7 @@ pub const Model = struct {
         token_ids: []const usize,
         pos0: usize,
     ) !fucina.Tensor(.{ .seq, .vocab }) {
-        return self.forwardStepImpl(ctx, null, kv, token_ids, pos0, null, true);
+        return self.forwardStepImpl(ctx, null, kv, token_ids, pos0, null, true, null);
     }
 
     pub fn forwardStepProfiled(
@@ -428,7 +433,7 @@ pub const Model = struct {
         pos0: usize,
         profile: *ForwardProfile,
     ) !fucina.Tensor(.{ .seq, .vocab }) {
-        return self.forwardStepImpl(ctx, io, kv, token_ids, pos0, profile, true);
+        return self.forwardStepImpl(ctx, io, kv, token_ids, pos0, profile, true, null);
     }
 
     /// As `forwardStep`, but returns logits for EVERY appended position —
@@ -450,9 +455,22 @@ pub const Model = struct {
         token_ids: []const usize,
         pos0: usize,
     ) !fucina.Tensor(.{ .seq, .vocab }) {
-        return self.forwardStepImpl(ctx, null, kv, token_ids, pos0, null, false);
+        return self.forwardStepImpl(ctx, null, kv, token_ids, pos0, null, false, null);
     }
 
+    /// `forwardStep` with the SubQ research attention evaluator active on
+    /// every layer's decode attention (f16 KV caches only; the evaluator
+    /// falls back to dense until its warmup floor is reached).
+    pub fn forwardStepSubq(
+        self: *const Model,
+        ctx: *ExecContext,
+        kv: *KvCache,
+        token_ids: []const usize,
+        pos0: usize,
+        sq: *subq_mod.State,
+    ) !fucina.Tensor(.{ .seq, .vocab }) {
+        return self.forwardStepImpl(ctx, null, kv, token_ids, pos0, null, true, sq);
+    }
 
     fn forwardStepImpl(
         self: *const Model,
@@ -463,6 +481,7 @@ pub const Model = struct {
         pos0: usize,
         profile: ?*ForwardProfile,
         last_only: bool,
+        subq_state: ?*subq_mod.State,
     ) !fucina.Tensor(.{ .seq, .vocab }) {
         if (token_ids.len == 0) return Error.InvalidSequenceLength;
         if (kv.len != pos0) return Error.InvalidSequenceLength;
@@ -477,7 +496,7 @@ pub const Model = struct {
         const cfg = self.config;
         for (self.layers, 0..) |*layer, layer_i| {
             const last_query_only = last_only and layer_i + 1 == cfg.num_layers and token_ids.len > 1;
-            x = try ctx.replace(x, attentionBlock(ctx, io, cfg, layer, &x, &rope_table, self.kv_head_for_head, last_query_only, profile, kv, layer_i));
+            x = try ctx.replace(x, attentionBlock(ctx, io, cfg, layer, &x, &rope_table, self.kv_head_for_head, last_query_only, profile, kv, layer_i, subq_state));
             // Router lookahead (pilot): predict the NEXT layer's experts from
             // this layer's post-attention state and start their disk
             // readahead in the background while this layer's FFN computes.
@@ -505,6 +524,144 @@ pub const Model = struct {
         const logits = try self.output.linearSeq(ctx, &head_in, .embed, .vocab);
         if (profile) |p| p.final_ns += profileElapsed(final_start, io);
         return logits;
+    }
+
+    /// Batched multi-sequence decode: one NEW token per stream, each stream
+    /// backed by its own `KvCache` (distinct sibling caches from this
+    /// model's `initKvCache`, all the same dtype). Row `s` of the returned
+    /// `[n_streams, vocab]` logits is stream `s`'s next-token distribution,
+    /// and each cache advances by one. The dense trunk (QKV/O-proj, FFN or
+    /// MoE mixture, lm_head) runs as ONE m=n pass — weights are read once
+    /// for all streams, the batch-decode bandwidth win — while RoPE
+    /// positions, KV appends, and attention are per-stream (ragged, each
+    /// row against its own cache at its own position). Per-row numerics
+    /// match per-stream `forwardStep` under the same conditions as
+    /// `forwardStepAllLogits`: bit-identical below the m-dependent kernel
+    /// thresholds — for QUANTIZED weights the x4-packed kernels engage at
+    /// n >= 4 (measured: 0.6B Q4_K/Q8_0 batch == sequential token-for-token
+    /// at n <= 3, ~1e-6 reassociation drift at n >= 4); f32/f16 weights
+    /// stay bitwise until the fused-FFN threshold at n >= 12.
+    pub fn forwardStepBatch(
+        self: *const Model,
+        ctx: *ExecContext,
+        caches: []const *KvCache,
+        token_ids: []const usize,
+    ) !fucina.Tensor(.{ .seq, .vocab }) {
+        const n = token_ids.len;
+        if (n == 0 or caches.len != n) return Error.InvalidSequenceLength;
+        const dtype = caches[0].dtype;
+        for (caches, 0..) |kv, i| {
+            if (kv.dtype != dtype) return Error.MismatchedKvCaches;
+            // A cache built for another model's layer stack would index its
+            // per-layer slices out of bounds inside the layer loop.
+            if (kv.head_dim.len != self.layers.len) return Error.MismatchedKvCaches;
+            if (kv.len + 1 > kv.capacity) return kv_cache.Error.KvCacheOverflow;
+            for (caches[0..i]) |prev| if (prev == kv) return Error.MismatchedKvCaches;
+        }
+
+        const a = ctx.allocator;
+        const positions = try a.alloc(i32, n);
+        defer a.free(positions);
+        for (positions, caches) |*position, kv| position.* = @intCast(kv.len);
+
+        var rope_table = try ctx.prepareRopeTable(positions, self.config.head_dim, self.config.rope_theta, false);
+        defer rope_table.deinit();
+
+        // Per-stream attention spans, refilled per layer; the lens are
+        // constant across layers (appendLayer never advances the caches —
+        // they advance once, below, after the layer loop).
+        var spans = try BatchKvSpans.init(a, dtype, n);
+        defer spans.deinit(a);
+        for (spans.lens, caches) |*len, kv| len.* = kv.len + 1;
+
+        var x = try self.token_embedding.getRowsAs(ctx, token_ids, .embed);
+        // Released manually once final_norm is built; the flag keeps the
+        // lm_head projection's error path from re-releasing it.
+        var x_released = false;
+        errdefer if (!x_released) x.deinit();
+
+        const cfg = self.config;
+        for (self.layers, 0..) |*layer, layer_i| {
+            x = try ctx.replace(x, attentionBlockBatch(ctx, cfg, layer, &x, &rope_table, self.kv_head_for_head, caches, layer_i, &spans));
+            x = try ctx.replace(x, ffnBlock(ctx, null, cfg, layer, &x, null));
+        }
+        for (caches) |kv| kv.advance(1);
+
+        var final_norm = try x.rmsNormMul(ctx, .embed, &self.output_norm, self.config.rms_norm_eps);
+        defer final_norm.deinit();
+        x.deinit();
+        x_released = true;
+
+        return self.output.linearSeq(ctx, &final_norm, .embed, .vocab);
+    }
+
+    /// `forwardStepBatch` generalized to a SPAN of tokens per stream — the
+    /// ragged batch a multi-stream speculative verify needs: stream `i`
+    /// contributes `span_lens[i]` consecutive tokens of `token_ids` (its
+    /// carried token plus drafted continuations). Every seq-parallel op runs
+    /// packed over the concatenated rows (the batching win), and attention
+    /// runs per stream against its own cache with the standard kernels
+    /// (q_seq = span, end-aligned causal — per-stream attention IS the
+    /// ragged-batch mask, the same decomposition as the trainer's packed
+    /// segments). Appends each stream's rows to its cache and advances it
+    /// by its span — callers rewind rejected drafts with `truncate`.
+    /// Returns logits for EVERY row, in input order. With all spans == 1
+    /// this computes exactly `forwardStepBatch`.
+    pub fn forwardStepBatchSpans(
+        self: *const Model,
+        ctx: *ExecContext,
+        caches: []const *KvCache,
+        token_ids: []const usize,
+        span_lens: []const usize,
+    ) !fucina.Tensor(.{ .seq, .vocab }) {
+        const n = caches.len;
+        if (n == 0 or span_lens.len != n) return Error.InvalidSequenceLength;
+        var total: usize = 0;
+        for (span_lens) |span| {
+            if (span == 0) return Error.InvalidSequenceLength;
+            total += span;
+        }
+        if (total != token_ids.len) return Error.InvalidSequenceLength;
+        const dtype = caches[0].dtype;
+        for (caches, span_lens, 0..) |kv, span, i| {
+            if (kv.dtype != dtype) return Error.MismatchedKvCaches;
+            if (kv.head_dim.len != self.layers.len) return Error.MismatchedKvCaches;
+            if (kv.len + span > kv.capacity) return kv_cache.Error.KvCacheOverflow;
+            for (caches[0..i]) |prev| if (prev == kv) return Error.MismatchedKvCaches;
+        }
+
+        const a = ctx.allocator;
+        const positions = try a.alloc(i32, total);
+        defer a.free(positions);
+        {
+            var at: usize = 0;
+            for (caches, span_lens) |kv, span| {
+                for (0..span) |j| {
+                    positions[at] = @intCast(kv.len + j);
+                    at += 1;
+                }
+            }
+        }
+        var rope_table = try ctx.prepareRopeTable(positions, self.config.head_dim, self.config.rope_theta, false);
+        defer rope_table.deinit();
+
+        var x = try self.token_embedding.getRowsAs(ctx, token_ids, .embed);
+        var x_released = false;
+        errdefer if (!x_released) x.deinit();
+
+        const cfg = self.config;
+        for (self.layers, 0..) |*layer, layer_i| {
+            x = try ctx.replace(x, attentionBlockBatchSpans(ctx, cfg, layer, &x, &rope_table, self.kv_head_for_head, caches, layer_i, span_lens));
+            x = try ctx.replace(x, ffnBlock(ctx, null, cfg, layer, &x, null));
+        }
+        for (caches, span_lens) |kv, span| kv.advance(span);
+
+        var final_norm = try x.rmsNormMul(ctx, .embed, &self.output_norm, self.config.rms_norm_eps);
+        defer final_norm.deinit();
+        x.deinit();
+        x_released = true;
+
+        return self.output.linearSeq(ctx, &final_norm, .embed, .vocab);
     }
 
     // ---- host_reference band (see `BlockStyle`) --------------------------
@@ -1062,6 +1219,7 @@ fn attentionBlock(
     profile: ?*ForwardProfile,
     cache: ?*KvCache,
     layer_i: usize,
+    subq_state: ?*subq_mod.State,
 ) !fucina.Tensor(.{ .seq, .embed }) {
     const prep_start = profileStart(profile, io);
     var qkv_linear = try layer.attn_proj.projectNormed(ctx, input, &layer.attn_norm, config.rms_norm_eps, config);
@@ -1097,6 +1255,11 @@ fn attentionBlock(
         const cached_len = kv.len + k_rope.dim(.seq);
         switch (kv.dtype) {
             .f16 => {
+                if (subq_state) |sq| {
+                    if (q_attention.dim(.seq) == 1) {
+                        break :blk try subqAttention(ctx, config, sq, layer_i, q_attention, kv, cached_len);
+                    }
+                }
                 var k_view = try kv.k[layer_i].narrow(ctx, .seq, 0, cached_len);
                 defer k_view.deinit();
                 var v_view = try kv.v[layer_i].narrow(ctx, .seq, 0, cached_len);
@@ -1132,6 +1295,233 @@ fn attentionBlock(
     const out = try residual_input.add(ctx, &attn_out);
     if (profile) |p| p.attn_residual_ns += profileElapsed(residual_start, io);
     return out;
+}
+
+fn subqAttention(
+    ctx: *ExecContext,
+    config: Descriptor,
+    sq: *subq_mod.State,
+    layer_i: usize,
+    q: *const fucina.Tensor(.{ .seq, .head, .d }),
+    kv: *KvCache,
+    cached_len: usize,
+) !fucina.Tensor(.{ .seq, .attn }) {
+    const heads = config.num_attention_heads;
+    const d = config.head_dim;
+    // Borrow the contiguous query row when possible; the state's persistent
+    // bridge buffers cover the fallback and the output (no per-token
+    // allocations in this glue).
+    const q_flat: []const f32 = blk: {
+        if (q.dataConst()) |qd| {
+            if (qd.len == heads * d) break :blk qd;
+        } else |_| {}
+        try q.copyTo(sq.bridge_q);
+        break :blk sq.bridge_q;
+    };
+    const out = sq.bridge_out;
+    const row_len = cached_len * config.num_key_value_heads * d;
+    try sq.attend(
+        ctx,
+        layer_i,
+        q_flat,
+        (try kv.k[layer_i].dataConst())[0..row_len],
+        (try kv.v[layer_i].dataConst())[0..row_len],
+        cached_len,
+        out,
+    );
+    return fucina.Tensor(.{ .seq, .attn }).fromSlice(ctx, .{ 1, heads * d }, out);
+}
+
+/// Per-stream KV attention spans for `forwardStepBatch`: allocated once per
+/// step, the span arm matching the caches' dtype refilled per layer.
+const BatchKvSpans = struct {
+    lens: []usize,
+    ks_f16: [][]const f16 = &.{},
+    vs_f16: [][]const f16 = &.{},
+    ks_q8: [][]const fucina.BlockQ8_0 = &.{},
+    vs_q8: [][]const fucina.BlockQ8_0 = &.{},
+
+    fn init(allocator: Allocator, dtype: kv_cache.KvDtype, n: usize) !BatchKvSpans {
+        var spans = BatchKvSpans{ .lens = try allocator.alloc(usize, n) };
+        errdefer allocator.free(spans.lens);
+        switch (dtype) {
+            .f16 => {
+                spans.ks_f16 = try allocator.alloc([]const f16, n);
+                errdefer allocator.free(spans.ks_f16);
+                spans.vs_f16 = try allocator.alloc([]const f16, n);
+            },
+            .q8_0 => {
+                spans.ks_q8 = try allocator.alloc([]const fucina.BlockQ8_0, n);
+                errdefer allocator.free(spans.ks_q8);
+                spans.vs_q8 = try allocator.alloc([]const fucina.BlockQ8_0, n);
+            },
+        }
+        return spans;
+    }
+
+    fn deinit(self: *BatchKvSpans, allocator: Allocator) void {
+        if (self.vs_q8.len > 0) allocator.free(self.vs_q8);
+        if (self.ks_q8.len > 0) allocator.free(self.ks_q8);
+        if (self.vs_f16.len > 0) allocator.free(self.vs_f16);
+        if (self.ks_f16.len > 0) allocator.free(self.ks_f16);
+        allocator.free(self.lens);
+        self.* = undefined;
+    }
+};
+
+/// The batch-decode sibling of `attentionBlock`: the norm/QKV/QK-norm/RoPE
+/// trunk runs on all n stream rows at once (the rope table carries each
+/// stream's own position), then KV append and attention go per-stream —
+/// row `s` appends to and attends `caches[s]` only, via the ragged
+/// multi-stream attention entry. Every row is its stream's last (and only)
+/// query, so no `last_query_only` arm exists; no profile plumbing either.
+fn attentionBlockBatch(
+    ctx: *ExecContext,
+    config: Descriptor,
+    layer: *const Layer,
+    input: *const fucina.Tensor(.{ .seq, .embed }),
+    rope_table: *const fucina.RopeTable,
+    kv_head_for_head: []const usize,
+    caches: []const *KvCache,
+    layer_i: usize,
+    spans: *BatchKvSpans,
+) !fucina.Tensor(.{ .seq, .embed }) {
+    var qkv_linear = try layer.attn_proj.projectNormed(ctx, input, &layer.attn_norm, config.rms_norm_eps, config);
+    defer qkv_linear.deinit();
+
+    var q3 = try qkv_linear.q.split(ctx, .q, .{ .head, .d }, .{ config.num_attention_heads, config.head_dim });
+    defer q3.deinit();
+    var k3 = try qkv_linear.k.split(ctx, .k, .{ .kv_head, .d }, .{ config.num_key_value_heads, config.head_dim });
+    defer k3.deinit();
+    var v3 = try qkv_linear.v.split(ctx, .v, .{ .kv_head, .d }, .{ config.num_key_value_heads, config.head_dim });
+    defer v3.deinit();
+
+    var q_rope = try q3.rmsNormMulRopeHalfPrepared(ctx, .seq, .d, &layer.q_norm, config.rms_norm_eps, rope_table);
+    defer q_rope.deinit();
+    var k_rope = try k3.rmsNormMulRopeHalfPrepared(ctx, .seq, .d, &layer.k_norm, config.rms_norm_eps, rope_table);
+    defer k_rope.deinit();
+
+    for (caches, 0..) |kv, s| {
+        var k_row = try k_rope.narrow(ctx, .seq, s, 1);
+        defer k_row.deinit();
+        var v_row = try v3.narrow(ctx, .seq, s, 1);
+        defer v_row.deinit();
+        try kv.appendLayer(ctx, layer_i, &k_row, &v_row);
+    }
+
+    const scale = 1 / @sqrt(@as(f32, @floatFromInt(config.head_dim)));
+    var attn = switch (caches[0].dtype) {
+        .f16 => blk: {
+            for (caches, spans.ks_f16, spans.vs_f16, spans.lens) |kv, *k_span, *v_span, len| {
+                k_span.* = try kv.kSlice(layer_i, len);
+                v_span.* = try kv.vSlice(layer_i, len);
+            }
+            break :blk try q_rope.groupedAttention(ctx, spans.ks_f16, spans.vs_f16, kv_head_for_head, .attn, scale, .{ .lens = spans.lens, .kv_heads = config.num_key_value_heads });
+        },
+        .q8_0 => blk: {
+            for (caches, spans.ks_q8, spans.vs_q8, spans.lens) |kv, *k_span, *v_span, len| {
+                k_span.* = kv.kBlocks(layer_i, len);
+                v_span.* = kv.vBlocks(layer_i, len);
+            }
+            break :blk try q_rope.groupedAttention(ctx, spans.ks_q8, spans.vs_q8, kv_head_for_head, .attn, scale, .{ .lens = spans.lens, .kv_heads = config.num_key_value_heads });
+        },
+    };
+    defer attn.deinit();
+
+    var attn_out = try layer.o_proj.linearSeq(ctx, &attn, .attn, .embed);
+    defer attn_out.deinit();
+
+    return input.add(ctx, &attn_out);
+}
+
+/// `attentionBlockBatch` for a SPAN of rows per stream (see
+/// `forwardStepBatchSpans`): projections, norms, and RoPE run packed over
+/// the concatenated spans; each stream's rows append to its cache and
+/// attend against it with the standard single-stream kernels (q_seq =
+/// span, kv_seq = cache prefix + span, end-aligned causal).
+fn attentionBlockBatchSpans(
+    ctx: *ExecContext,
+    config: Descriptor,
+    layer: *const Layer,
+    input: *const fucina.Tensor(.{ .seq, .embed }),
+    rope_table: *const fucina.RopeTable,
+    kv_head_for_head: []const usize,
+    caches: []const *KvCache,
+    layer_i: usize,
+    span_lens: []const usize,
+) !fucina.Tensor(.{ .seq, .embed }) {
+    var qkv_linear = try layer.attn_proj.projectNormed(ctx, input, &layer.attn_norm, config.rms_norm_eps, config);
+    defer qkv_linear.deinit();
+
+    var q3 = try qkv_linear.q.split(ctx, .q, .{ .head, .d }, .{ config.num_attention_heads, config.head_dim });
+    defer q3.deinit();
+    var k3 = try qkv_linear.k.split(ctx, .k, .{ .kv_head, .d }, .{ config.num_key_value_heads, config.head_dim });
+    defer k3.deinit();
+    var v3 = try qkv_linear.v.split(ctx, .v, .{ .kv_head, .d }, .{ config.num_key_value_heads, config.head_dim });
+    defer v3.deinit();
+
+    var q_rope = try q3.rmsNormMulRopeHalfPrepared(ctx, .seq, .d, &layer.q_norm, config.rms_norm_eps, rope_table);
+    defer q_rope.deinit();
+    var k_rope = try k3.rmsNormMulRopeHalfPrepared(ctx, .seq, .d, &layer.k_norm, config.rms_norm_eps, rope_table);
+    defer k_rope.deinit();
+
+    const Out = fucina.Tensor(.{ .seq, .attn });
+    const outs = try ctx.allocator.alloc(Out, caches.len);
+    defer ctx.allocator.free(outs);
+    var built: usize = 0;
+    errdefer for (outs[0..built]) |*out| out.deinit();
+
+    var start: usize = 0;
+    for (caches, span_lens, 0..) |kv, span, s| {
+        var k_rows = try k_rope.narrow(ctx, .seq, start, span);
+        defer k_rows.deinit();
+        var v_rows = try v3.narrow(ctx, .seq, start, span);
+        defer v_rows.deinit();
+        try kv.appendLayer(ctx, layer_i, &k_rows, &v_rows);
+        const cached_len = kv.len + span;
+
+        var q_seg = try q_rope.narrow(ctx, .seq, start, span);
+        defer q_seg.deinit();
+        outs[s] = switch (kv.dtype) {
+            .f16 => blk: {
+                var k_view = try kv.k[layer_i].narrow(ctx, .seq, 0, cached_len);
+                defer k_view.deinit();
+                var v_view = try kv.v[layer_i].narrow(ctx, .seq, 0, cached_len);
+                defer v_view.deinit();
+                break :blk try causalAttention(ctx, config, &q_seg, &k_view, &v_view, kv_head_for_head, .{});
+            },
+            .q8_0 => try causalAttention(
+                ctx,
+                config,
+                &q_seg,
+                kv.kBlocks(layer_i, cached_len),
+                kv.vBlocks(layer_i, cached_len),
+                kv_head_for_head,
+                .{ .kv_seq = cached_len, .kv_heads = config.num_key_value_heads },
+            ),
+        };
+        built += 1;
+        start += span;
+    }
+
+    var attn: Out = undefined;
+    if (outs.len == 1) {
+        attn = outs[0];
+        built = 0; // ownership moved
+    } else {
+        const rest = try ctx.allocator.alloc(*const Out, outs.len - 1);
+        defer ctx.allocator.free(rest);
+        for (rest, outs[1..]) |*ptr, *out| ptr.* = out;
+        attn = try outs[0].concat(ctx, .seq, rest);
+        for (outs[0..built]) |*out| out.deinit();
+        built = 0;
+    }
+    defer attn.deinit();
+
+    var attn_out = try layer.o_proj.linearSeq(ctx, &attn, .attn, .embed);
+    defer attn_out.deinit();
+
+    return input.add(ctx, &attn_out);
 }
 
 fn ffnBlock(
