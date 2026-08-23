@@ -5,6 +5,7 @@ const quantized_matmul = @import("quant.zig");
 const dtype_mod = @import("../dtype.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
+const vector_common = @import("vector/common.zig");
 const vector_conv = @import("vector/conv.zig");
 const vector_pool = @import("vector/pool.zig");
 const vector_winograd = @import("vector/winograd.zig");
@@ -17,8 +18,8 @@ pub const PoolKind = vector_pool.PoolKind;
 pub const Pool2dDims = vector_pool.Pool2dDims;
 // The conv2d backward gather cores are scalar loops (no SIMD divergence), so
 // the scalar reference reuses the native config-less serial cores — trivially
-// in parity. (Wrappers so this backend's own ParallelConfig type matches the
-// dispatch.)
+// in parity. (Wrappers only to absorb the `config` argument the dispatch
+// passes; the serial cores take none.)
 pub fn conv2dBackwardInputIntoWithConfig(out: *Tensor, gy: *const Tensor, weight: *const Tensor, d: Conv2dDims, config: ParallelConfig) void {
     _ = config;
     vector_conv.conv2dBackwardInputInto(out, gy, weight, d);
@@ -176,9 +177,10 @@ fn checkedQuantizedProduct(a: usize, b: usize) !usize {
     return std.math.mul(usize, a, b) catch quantized_matmul.QuantizedFormatError.InvalidQuantizedLength;
 }
 
-pub const ParallelConfig = struct {
-    pool: ?*thread.Pool = null,
-};
+/// The SAME type the native backend takes (`vector/common.zig`), not a
+/// structural copy: `backend.zig` dispatches the two interchangeably, and
+/// the surface cross-check there compares parameter types by identity.
+pub const ParallelConfig = vector_common.ParallelConfig;
 
 pub fn addInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
     try tensor.requireSameShape(a, b);

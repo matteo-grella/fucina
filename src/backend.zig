@@ -1130,14 +1130,110 @@ test {
     }
 }
 
+comptime {
+    // The scalar reference and the native backend are dispatched
+    // interchangeably through `impl`, so cpu.zig's surface must be a
+    // faithful subset of native.zig's: same names, same signatures. Only
+    // the scalar leg used to notice otherwise, and only for the arms it
+    // exercised. This compares every public scalar decl against its native
+    // twin STRUCTURALLY — parameter and return types position by position,
+    // so generic decls (anytype / comptime params, whose types are null at
+    // this level) are covered too, not just the concrete ones.
+    //
+    // Native-only decls are legal (the BLAS scopes, `sgemmStrided`,
+    // `vector_len`, `blas_kind`): native is a superset. Scalar-only decls
+    // are not, and neither is a signature that drifted on one side.
+    assertScalarSurfaceMatchesNative();
+}
+
+fn assertScalarSurfaceMatchesNative() void {
+    @setEvalBranchQuota(20_000);
+    for (@typeInfo(scalar_impl).@"struct".decls) |d| {
+        if (!@hasDecl(native_impl, d.name)) @compileError(
+            "backend/cpu.zig declares `" ++ d.name ++ "` with no twin in backend/native.zig; " ++
+                "the scalar reference specifies the dispatched surface, so every scalar decl needs one",
+        );
+        const Scalar = @TypeOf(@field(scalar_impl, d.name));
+        const Native = @TypeOf(@field(native_impl, d.name));
+
+        if (Scalar == type or Native == type) {
+            if (Scalar != Native) @compileError(
+                "backend/cpu.zig." ++ d.name ++ " and backend/native.zig." ++ d.name ++
+                    " must both be types or both be values",
+            );
+            if (@field(scalar_impl, d.name) != @field(native_impl, d.name)) @compileError(
+                "backend/cpu.zig." ++ d.name ++ " is " ++ @typeName(@field(scalar_impl, d.name)) ++
+                    " but backend/native.zig." ++ d.name ++ " is " ++ @typeName(@field(native_impl, d.name)) ++
+                    "; the two backends must name the SAME type, not structural copies",
+            );
+            continue;
+        }
+
+        const s_info = @typeInfo(Scalar);
+        const n_info = @typeInfo(Native);
+        if (s_info != .@"fn" or n_info != .@"fn") {
+            if (Scalar != Native) @compileError(
+                "backend/cpu.zig." ++ d.name ++ " is " ++ @typeName(Scalar) ++
+                    " but backend/native.zig." ++ d.name ++ " is " ++ @typeName(Native),
+            );
+            continue;
+        }
+
+        const s = s_info.@"fn";
+        const n = n_info.@"fn";
+        if (s.params.len != n.params.len) @compileError(std.fmt.comptimePrint(
+            "backend/cpu.zig.{s} takes {d} parameters, backend/native.zig.{s} takes {d}",
+            .{ d.name, s.params.len, d.name, n.params.len },
+        ));
+        if (s.is_generic != n.is_generic or s.is_var_args != n.is_var_args) @compileError(
+            "backend/cpu.zig." ++ d.name ++ " and backend/native.zig." ++ d.name ++
+                " disagree on genericity/varargs",
+        );
+        for (s.params, n.params, 0..) |sp, np, i| {
+            if (sp.type != np.type) @compileError(std.fmt.comptimePrint(
+                "backend/cpu.zig.{s} parameter {d} is {s}, backend/native.zig.{s} parameter {d} is {s}",
+                .{ d.name, i, typeNameOf(sp.type), d.name, i, typeNameOf(np.type) },
+            ));
+            if (sp.is_generic != np.is_generic) @compileError(std.fmt.comptimePrint(
+                "backend/cpu.zig.{s} parameter {d} disagrees with native.zig on being generic",
+                .{ d.name, i },
+            ));
+        }
+        if (!returnsMatch(s.return_type, n.return_type)) @compileError(std.fmt.comptimePrint(
+            "backend/cpu.zig.{s} returns {s}, backend/native.zig.{s} returns {s}",
+            .{ d.name, typeNameOf(s.return_type), d.name, typeNameOf(n.return_type) },
+        ));
+    }
+}
+
+/// Return types agree when they are the same type, or when both are error
+/// unions over the same payload. Nearly every fallible kernel here returns
+/// `!T` with an INFERRED error set, and two inferred sets are distinct types
+/// by construction — the payload is the part that is actually declared, and
+/// the part a caller can be broken by.
+fn returnsMatch(comptime a: ?type, comptime b: ?type) bool {
+    if (a == null or b == null) return a == null and b == null;
+    if (a.? == b.?) return true;
+    const ia = @typeInfo(a.?);
+    const ib = @typeInfo(b.?);
+    if (ia == .error_union and ib == .error_union)
+        return ia.error_union.payload == ib.error_union.payload;
+    return false;
+}
+
+fn typeNameOf(comptime T: ?type) []const u8 {
+    return if (T) |t| @typeName(t) else "(generic)";
+}
+
 test "scalar reference backend surface compiles" {
-    // On the default native build, Zig's lazy analysis never touches the
-    // scalar impl's unreferenced decls, so a native-side signature change
-    // not mirrored in cpu.zig would surface only on the (occasional)
-    // scalar leg. Referencing every top-level scalar decl analyzes each
-    // CONCRETE fn on every `zig build test`; generic decls (anytype /
-    // comptime params — currently 14 of cpu.zig's 128 pub fns) are only
-    // analyzed at instantiation, so the scalar leg remains their gate.
+    // The comptime check above compares signatures; this one forces the
+    // scalar BODIES through the analyzer. On the default native build Zig
+    // never touches the scalar impl's unreferenced decls, so a body that
+    // stopped compiling would surface only on the (occasional) scalar leg.
+    // Referencing every top-level scalar decl analyzes each CONCRETE fn on
+    // every `zig build test`; generic decls (anytype / comptime params —
+    // currently 14 of cpu.zig's 128 pub fns) are only analyzed at
+    // instantiation, so the scalar leg remains their gate.
     const cpu = @import("backend/cpu.zig");
     comptime {
         for (@typeInfo(cpu).@"struct".decls) |d| {
