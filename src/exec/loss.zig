@@ -206,7 +206,7 @@ pub fn crossEntropyLossExStatsAxisRank(
             .row_end = outer,
         };
         var dispatched = false;
-        if (outer > 1 and source.len() >= parallel.vector_elementwise_len_threshold / 2) {
+        if (outer > 1 and source.len() >= parallel.row_kernel_len_threshold) {
             if (rt.dispatchRange(CrossEntropyLossRowsTask, "row_start", "row_end", base_task, outer, runCrossEntropyLossRowsTask)) {
                 dispatched = true;
             }
@@ -488,7 +488,7 @@ pub const LinearCrossEntropyGrads = struct {
 /// either way â disjoint row writes).
 fn dispatchCrossEntropyBackwardRows(rt: *Runtime, base_task: CrossEntropyBackwardRowsTask) void {
     const outer = base_task.row_end;
-    if (outer > 1 and outer * base_task.class_count >= parallel.vector_elementwise_len_threshold / 2) {
+    if (outer > 1 and outer * base_task.class_count >= parallel.row_kernel_len_threshold) {
         if (rt.dispatchRange(CrossEntropyBackwardRowsTask, "row_start", "row_end", base_task, outer, runCrossEntropyBackwardRowsTask)) {
             return;
         }
@@ -630,7 +630,7 @@ pub const LinearDistillForward = struct {
 
 fn dispatchDistillStatsRows(rt: *Runtime, base_task: DistillStatsRowsTask) void {
     const outer = base_task.row_end;
-    if (outer > 1 and outer * base_task.class_count >= parallel.vector_elementwise_len_threshold / 2) {
+    if (outer > 1 and outer * base_task.class_count >= parallel.row_kernel_len_threshold) {
         if (rt.dispatchRange(DistillStatsRowsTask, "row_start", "row_end", base_task, outer, runDistillStatsRowsTask)) {
             return;
         }
@@ -735,7 +735,7 @@ fn orderUsize(context: usize, item: usize) std.math.Order {
 
 fn dispatchDistillBackwardRows(rt: *Runtime, base_task: DistillBackwardRowsTask) void {
     const outer = base_task.row_end;
-    if (outer > 1 and outer * base_task.class_count >= parallel.vector_elementwise_len_threshold / 2) {
+    if (outer > 1 and outer * base_task.class_count >= parallel.row_kernel_len_threshold) {
         if (rt.dispatchRange(DistillBackwardRowsTask, "row_start", "row_end", base_task, outer, runDistillBackwardRowsTask)) {
             return;
         }

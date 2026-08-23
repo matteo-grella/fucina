@@ -82,6 +82,7 @@ pub const contiguousData = common.contiguousData;
 pub const addInto = elementwise.addInto;
 pub const addContiguousIntoUnchecked = elementwise.addContiguousIntoUnchecked;
 pub const addContiguousIntoUncheckedWithConfig = elementwise.addContiguousIntoUncheckedWithConfig;
+pub const divContiguousIntoUncheckedWithConfig = elementwise.divContiguousIntoUncheckedWithConfig;
 pub const maximumContiguousIntoUncheckedWithConfig = elementwise.maximumContiguousIntoUncheckedWithConfig;
 pub const minimumContiguousIntoUncheckedWithConfig = elementwise.minimumContiguousIntoUncheckedWithConfig;
 pub const subInto = elementwise.subInto;

@@ -245,7 +245,7 @@ pub fn kdaRecurrent(
     };
 
     const work = parallel.saturatedMul3(seq, heads, k_dim * v_dim);
-    const dispatched = work >= parallel.vector_matmul_work_threshold / 2 and
+    const dispatched = work >= parallel.attention_work_threshold and
         rt.dispatchRange(KdaTask, "head_start", "head_end", base, heads, runKdaTask);
     if (!dispatched) kdaHeads(base);
 

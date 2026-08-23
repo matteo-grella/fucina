@@ -190,6 +190,14 @@ pub fn addContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tens
     addContiguousIntoUncheckedWithConfig(out, a, b, len, .{});
 }
 
+pub fn divContiguousIntoUncheckedWithConfig(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize, config: ParallelConfig) void {
+    _ = config;
+    const x = contiguousDataConst(a, len);
+    const y = contiguousDataConst(b, len);
+    const z = contiguousData(out, len);
+    for (z, x, y) |*dst, xv, yv| dst.* = xv / yv;
+}
+
 pub fn maximumContiguousIntoUncheckedWithConfig(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize, config: ParallelConfig) void {
     _ = config;
     const x = contiguousDataConst(a, len);

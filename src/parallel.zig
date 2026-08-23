@@ -23,9 +23,18 @@ const build_options = @import("build_options");
 // to e.g. 6 for decode-heavy or sustained workloads.
 pub const vector_max_threads: usize = build_options.max_threads;
 pub const vector_elementwise_len_threshold: usize = 256 * 1024;
+/// Fused-row-kernel parallel gate (softmax/norm/loss rows, quantized row
+/// passes): these engage the pool at HALF the plain-elementwise crossover.
+/// The ratio is policy in ONE place — retuning the base retunes every row
+/// gate with it, deliberately.
+pub const row_kernel_len_threshold: usize = vector_elementwise_len_threshold / 2;
 pub const materialize_parallel_len_threshold: usize = 256 * 1024;
 pub const materialize_parallel_min_chunk: usize = 64 * 1024;
 pub const vector_matmul_work_threshold: usize = 1024 * 1024;
+/// Attention parallel gate: attention kernels engage the pool at HALF the
+/// GEMM work crossover. Same one-place ratio policy as
+/// `row_kernel_len_threshold`.
+pub const attention_work_threshold: usize = vector_matmul_work_threshold / 2;
 pub const vector_batched_work_threshold: usize = 2 * 1024 * 1024;
 pub const vector_column_min_m: usize = 32;
 pub const vector_column_min_n: usize = 128;

@@ -52,7 +52,7 @@ fn dispatchInnerLanes(
     inner: usize,
     comptime run: fn (task: *const Task) void,
 ) void {
-    if (total_len >= parallel.vector_elementwise_len_threshold / 2) {
+    if (total_len >= parallel.row_kernel_len_threshold) {
         if (rt.dispatchRangeCapped(Task, "inner_start", "inner_end", base_task, inner, inner / min_inner_lanes_per_task, run)) return;
     }
     run(&base_task);
@@ -106,7 +106,7 @@ pub fn logsumexpAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, c
             .row_start = 0,
             .row_end = outer,
         };
-        if (outer > 1 and source.len() >= parallel.vector_elementwise_len_threshold / 2) {
+        if (outer > 1 and source.len() >= parallel.row_kernel_len_threshold) {
             if (rt.dispatchRange(LogRowsTask, "row_start", "row_end", base_task, outer, runLogsumexpRowsTask)) {
                 return out;
             }
@@ -159,7 +159,7 @@ pub fn logSoftmaxAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, 
             .row_start = 0,
             .row_end = outer,
         };
-        if (outer > 1 and source.len() >= parallel.vector_elementwise_len_threshold / 2) {
+        if (outer > 1 and source.len() >= parallel.row_kernel_len_threshold) {
             if (rt.dispatchRange(LogRowsTask, "row_start", "row_end", base_task, outer, runLogSoftmaxRowsTask)) {
                 return out;
             }
@@ -207,7 +207,7 @@ pub fn softmaxAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, com
             .row_start = 0,
             .row_end = outer,
         };
-        if (outer > 1 and source.len() >= parallel.vector_elementwise_len_threshold / 2) {
+        if (outer > 1 and source.len() >= parallel.row_kernel_len_threshold) {
             if (rt.dispatchRange(SoftmaxRowsTask, "row_start", "row_end", base_task, outer, runSoftmaxRowsTask)) {
                 return out;
             }
@@ -314,7 +314,7 @@ pub fn softmaxExtAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, 
         .row_start = 0,
         .row_end = rows,
     };
-    if (rows > 1 and source.len() >= parallel.vector_elementwise_len_threshold / 2) {
+    if (rows > 1 and source.len() >= parallel.row_kernel_len_threshold) {
         if (rt.dispatchRange(SoftmaxExtRowsTask(rank), "row_start", "row_end", base_task, rows, runSoftmaxExtRowsTask(rank, axis))) {
             return out;
         }
@@ -358,7 +358,7 @@ pub fn softmaxExtBackwardAxisRank(rt: *Runtime, comptime rank: usize, y: *const 
             .row_start = 0,
             .row_end = outer,
         };
-        if (outer > 1 and source.len() >= parallel.vector_elementwise_len_threshold / 2) {
+        if (outer > 1 and source.len() >= parallel.row_kernel_len_threshold) {
             if (rt.dispatchRange(SoftmaxBackwardRowsTask, "row_start", "row_end", base_task, outer, runSoftmaxBackwardRowsTask)) {
                 return out;
             }

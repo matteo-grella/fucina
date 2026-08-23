@@ -1841,7 +1841,7 @@ pub fn groupedCausalAttentionBackward(
         const route_tile_rows = if (blas_route) attention_bwd_blas_tile_rows else attention_bwd_tile_rows;
         const panel_len = 2 * route_tile_rows * kv_seq;
         var dispatched = false;
-        if (attention_work >= parallel.vector_matmul_work_threshold / 2) {
+        if (attention_work >= parallel.attention_work_threshold) {
             if (self.workPool()) |pool| {
                 const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), heads);
                 if (task_count > 1) {
@@ -1902,7 +1902,7 @@ pub fn groupedCausalAttentionBackward(
         return result;
     }
 
-    if (attention_work >= parallel.vector_matmul_work_threshold / 2 and kv_heads > 1) {
+    if (attention_work >= parallel.attention_work_threshold and kv_heads > 1) {
         if (self.workPool()) |pool| {
             const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), kv_heads);
             var task_storage: [parallel.vector_max_threads]GroupedCausalAttentionBackwardTask = undefined;
@@ -2286,7 +2286,7 @@ fn groupedCausalAttentionMultiImpl(
     };
 
     const attention_work = parallel.saturatedMul3(lens_sum, heads, d);
-    if (attention_work >= parallel.vector_matmul_work_threshold / 2 and total_work > 1) {
+    if (attention_work >= parallel.attention_work_threshold and total_work > 1) {
         if (self.workPool()) |pool| {
             const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), total_work);
             var task_storage: [parallel.vector_max_threads]GroupedCausalAttentionMultiTask(KvElem) = undefined;
@@ -2370,9 +2370,15 @@ pub fn groupedCausalAttentionTiledRun(
     // kernel below. f16-KV common case only; biased/oversized variants stay CPU.
     if (comptime backend_mod.gpu_impl.enabled and KvElem == f16) attn_gpu: {
         const gpu = backend_mod.gpu_impl;
-        if (base.bias != null or base.d > 256 or base.heads > 64) break :attn_gpu;
+        // This seam's own eligibility caps, distinct from the provider's
+        // shouldUseGpuAttn sizing: heads is bounded by the stack head-map
+        // buffer below, and d by what the vendored kernels were validated
+        // for. Raising gpu_attn_max_heads must resize map_buf with it.
+        const gpu_attn_max_heads = 64;
+        const gpu_attn_max_head_dim = 256;
+        if (base.bias != null or base.d > gpu_attn_max_head_dim or base.heads > gpu_attn_max_heads) break :attn_gpu;
         if (!gpu.shouldUseGpuAttn(base.q_seq, base.kv_seq, base.heads, base.d)) break :attn_gpu;
-        var map_buf: [64]i32 = undefined;
+        var map_buf: [gpu_attn_max_heads]i32 = undefined;
         for (0..base.heads) |h| {
             // The pair path (head_group == 2) maps two adjacent q heads onto
             // one kv head implicitly; the general path carries the explicit map.
@@ -2408,7 +2414,7 @@ pub fn groupedCausalAttentionTiledRun(
     // the one task whose [work_start, work_end) range holds its work
     // item, so the partitioning cannot change any result.
     const attention_work = parallel.saturatedMul3(base.q_seq, base.kv_seq, base.heads * base.d);
-    const gate_ok = attention_work >= parallel.vector_matmul_work_threshold / 2;
+    const gate_ok = attention_work >= parallel.attention_work_threshold;
     const pool = (if (gate_ok) self.workPool() else null) orelse {
         var task = base;
         task.work_start = 0;
@@ -2603,7 +2609,7 @@ fn groupedCausalAttentionDispatch(
         }
         return;
     }
-    if (attention_work >= parallel.vector_matmul_work_threshold / 2 and heads > 1) {
+    if (attention_work >= parallel.attention_work_threshold and heads > 1) {
         if (self.workPool()) |pool| {
             if (can_pair_heads) {
                 const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), kv_heads);

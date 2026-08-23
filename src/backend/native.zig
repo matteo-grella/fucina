@@ -138,6 +138,7 @@ pub const gatedContiguousIntoUncheckedWithConfig = vector.gatedContiguousIntoUnc
 pub const sumInto = vector.sumInto;
 pub const sumIntoWithConfig = vector.sumIntoWithConfig;
 pub const sumSlice = vector.sumSlice;
+pub const divContiguousIntoUncheckedWithConfig = vector.divContiguousIntoUncheckedWithConfig;
 pub const maximumContiguousIntoUncheckedWithConfig = vector.maximumContiguousIntoUncheckedWithConfig;
 pub const minimumContiguousIntoUncheckedWithConfig = vector.minimumContiguousIntoUncheckedWithConfig;
 pub const prodInto = vector.prodInto;

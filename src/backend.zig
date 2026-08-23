@@ -169,6 +169,10 @@ pub const Backend = struct {
         return active.addContiguousIntoUncheckedWithConfig(out, a, b, len, self.parallelConfig());
     }
 
+    pub fn divContiguousIntoUnchecked(self: *const Backend, out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
+        return active.divContiguousIntoUncheckedWithConfig(out, a, b, len, self.parallelConfig());
+    }
+
     pub fn maximumContiguousIntoUnchecked(self: *const Backend, out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
         return active.maximumContiguousIntoUncheckedWithConfig(out, a, b, len, self.parallelConfig());
     }

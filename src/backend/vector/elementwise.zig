@@ -32,6 +32,7 @@ const vector_len = vm.vector_len;
 const vecAdd = primitives.vecAdd;
 const vecSub = primitives.vecSub;
 const vecMul = primitives.vecMul;
+const vecDiv = primitives.vecDiv;
 const vecMaximum = primitives.vecMaximum;
 const vecMinimum = primitives.vecMinimum;
 const vecScale = primitives.vecScale;
@@ -127,6 +128,20 @@ pub fn mulContiguousIntoUncheckedWithConfig(
     const z = contiguousData(out, len);
     if (maybeParallelBinary(config, runMulTask, z, x, y)) return;
     vecMul(z, x, y);
+}
+
+pub fn divContiguousIntoUncheckedWithConfig(
+    out: *Tensor,
+    a: *const Tensor,
+    b: *const Tensor,
+    len: usize,
+    config: ParallelConfig,
+) void {
+    const x = contiguousDataConst(a, len);
+    const y = contiguousDataConst(b, len);
+    const z = contiguousData(out, len);
+    if (maybeParallelBinary(config, runDivTask, z, x, y)) return;
+    vecDiv(z, x, y);
 }
 
 pub fn maximumContiguousIntoUncheckedWithConfig(
@@ -859,6 +874,10 @@ fn runSubTask(task: *const BinaryTask) void {
 
 fn runMulTask(task: *const BinaryTask) void {
     vecMul(task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]);
+}
+
+fn runDivTask(task: *const BinaryTask) void {
+    vecDiv(task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]);
 }
 
 fn runMaximumTask(task: *const BinaryTask) void {

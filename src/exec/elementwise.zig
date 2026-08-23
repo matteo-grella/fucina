@@ -1858,7 +1858,7 @@ fn backendElementwiseContiguousUnchecked(
         .add => rt.backend.addContiguousIntoUnchecked(out, a, b, len),
         .sub => rt.backend.subContiguousIntoUnchecked(out, a, b, len),
         .mul => rt.backend.mulContiguousIntoUnchecked(out, a, b, len),
-        .div => elementwiseContiguousInto(.div, out.data()[0..len], a.dataConst()[0..len], b.dataConst()[0..len]),
+        .div => rt.backend.divContiguousIntoUnchecked(out, a, b, len),
         .max => rt.backend.maximumContiguousIntoUnchecked(out, a, b, len),
         .min => rt.backend.minimumContiguousIntoUnchecked(out, a, b, len),
     };

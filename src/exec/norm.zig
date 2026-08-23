@@ -122,7 +122,7 @@ pub fn rmsNormMulAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, 
     const inner = productAfterAxis(rank, source.shape, axis);
     const outer = productBeforeAxis(rank, source.shape, axis);
     const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
-    if (inner == 1 and source.len() >= parallel.vector_elementwise_len_threshold / 2) {
+    if (inner == 1 and source.len() >= parallel.row_kernel_len_threshold) {
         const base_task: RmsNormMulRowsTask = .{
             .input = input,
             .weights = weights,
@@ -188,7 +188,7 @@ pub fn rmsNormMulAddAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tenso
     const inner = productAfterAxis(rank, source.shape, axis);
     const outer = productBeforeAxis(rank, source.shape, axis);
     const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
-    if (inner == 1 and source.len() >= parallel.vector_elementwise_len_threshold / 2) {
+    if (inner == 1 and source.len() >= parallel.row_kernel_len_threshold) {
         const base_task: RmsNormMulAddRowsTask = .{
             .input = input,
             .weights = weights,
@@ -263,7 +263,7 @@ pub fn rmsNormMulBackwardInputAxisRank(
     const inner = productAfterAxis(rank, source.shape, axis);
     const outer = productBeforeAxis(rank, source.shape, axis);
     const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
-    if (inner == 1 and source.len() >= parallel.vector_elementwise_len_threshold / 2) {
+    if (inner == 1 and source.len() >= parallel.row_kernel_len_threshold) {
         const base_task: RmsNormMulBackwardInputRowsTask = .{
             .input = input,
             .weights = weights,
@@ -336,7 +336,7 @@ pub fn rmsNormMulBackwardWeightAxisRank(
     const inner = productAfterAxis(rank, source.shape, axis);
     const outer = productBeforeAxis(rank, source.shape, axis);
     const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
-    if (inner == 1 and source.len() >= parallel.vector_elementwise_len_threshold / 2) {
+    if (inner == 1 and source.len() >= parallel.row_kernel_len_threshold) {
         const base_task: RmsNormMulBackwardWeightRowsTask = .{
             .input = input,
             .grad = grad,
@@ -657,7 +657,7 @@ pub fn layerNormAffineRows(
         .row_start = 0,
         .row_end = rows,
     };
-    if (input.len >= parallel.vector_elementwise_len_threshold / 2 and rows > 1) {
+    if (input.len >= parallel.row_kernel_len_threshold and rows > 1) {
         if (rt.dispatchRange(LayerNormRowsTask, "row_start", "row_end", base_task, rows, runLayerNormRowsTask)) {
             return out;
         }
@@ -720,7 +720,7 @@ fn layerNormDispatchAxisRank(
     const inner = productAfterAxis(rank, source.shape, axis);
     const outer = productBeforeAxis(rank, source.shape, axis);
     const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
-    if (inner == 1 and source.len() >= parallel.vector_elementwise_len_threshold / 2) {
+    if (inner == 1 and source.len() >= parallel.row_kernel_len_threshold) {
         const base_task: LayerNormRowsTask = .{
             .input = input,
             .weights = weights,
@@ -983,7 +983,7 @@ fn layerNormBackwardDispatchAxisRank(
                 .row_end = outer,
             };
             var dispatched = false;
-            if (outer > 1 and source.len() >= parallel.vector_elementwise_len_threshold / 2) {
+            if (outer > 1 and source.len() >= parallel.row_kernel_len_threshold) {
                 if (rt.dispatchRange(LayerNormBackwardInputRowsTask, "row_start", "row_end", base_task, outer, runLayerNormBackwardInputRowsTask)) {
                     dispatched = true;
                 }
@@ -993,7 +993,7 @@ fn layerNormBackwardDispatchAxisRank(
 
         if (need_weight or need_bias) {
             var dispatched = false;
-            if (outer > 1 and axis_dim > 1 and source.len() >= parallel.vector_elementwise_len_threshold / 2) {
+            if (outer > 1 and axis_dim > 1 and source.len() >= parallel.row_kernel_len_threshold) {
                 if (rt.workPool()) |pool| {
                     // Per-row {mean, 1/σ} scratch, then the
                     // column-partitioned accumulation: both stages are

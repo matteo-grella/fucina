@@ -505,6 +505,30 @@ pub inline fn vecSum(x: []const f32) f32 {
     return s;
 }
 
+pub inline fn vecDiv(z: []f32, x: []const f32, y: []const f32) void {
+    var i: usize = 0;
+    while (i + 4 * vector_len <= z.len) : (i += 4 * vector_len) {
+        const x0: Vf32 = x[i..][0..vector_len].*;
+        const y0: Vf32 = y[i..][0..vector_len].*;
+        const x1: Vf32 = x[i + vector_len ..][0..vector_len].*;
+        const y1: Vf32 = y[i + vector_len ..][0..vector_len].*;
+        const x2: Vf32 = x[i + 2 * vector_len ..][0..vector_len].*;
+        const y2: Vf32 = y[i + 2 * vector_len ..][0..vector_len].*;
+        const x3: Vf32 = x[i + 3 * vector_len ..][0..vector_len].*;
+        const y3: Vf32 = y[i + 3 * vector_len ..][0..vector_len].*;
+        z[i..][0..vector_len].* = x0 / y0;
+        z[i + vector_len ..][0..vector_len].* = x1 / y1;
+        z[i + 2 * vector_len ..][0..vector_len].* = x2 / y2;
+        z[i + 3 * vector_len ..][0..vector_len].* = x3 / y3;
+    }
+    while (i + vector_len <= z.len) : (i += vector_len) {
+        const xv: Vf32 = x[i..][0..vector_len].*;
+        const yv: Vf32 = y[i..][0..vector_len].*;
+        z[i..][0..vector_len].* = xv / yv;
+    }
+    while (i < z.len) : (i += 1) z[i] = x[i] / y[i];
+}
+
 pub inline fn vecMaximum(z: []f32, x: []const f32, y: []const f32) void {
     vecMaxMinBinary(.max, z, x, y);
 }
