@@ -1,21 +1,19 @@
 # Changelog
 
 Fucina versions as `0.MINOR.PATCH`: a MINOR release may change public API,
-and every change that does is listed here with its one-line rewrite.
-Deprecations follow the contract in `docs/DEVELOPMENT.md` §6 (renames keep a
-`Deprecated:`-marked alias for one MINOR release; signature changes land
-directly with the rewrite documented here). The changelog starts at this
-point; earlier history is `git log`.
+and every change that does is listed here with its one-line rewrite. Per
+`docs/DEVELOPMENT.md` §6 there is no alias step before 1.0: renames land
+directly and the entry here is the migration guide. The changelog starts at
+this point; earlier history is `git log`.
 
 ## Stability tiers
 
-- **Stable** (deprecation contract applies): `tensor`, `ag` (the public
+- **Stable** (every public change gets a rewrite entry): `tensor`, `ag` (the public
   `Tensor` and autograd pillars), `exec`/`ExecContext`, `gguf`, `weights`,
   `gguf_meta`, `safetensors`, `optim`, `lora`, `parallel`, `tuning`,
   `llm.serving` (the contract: request/result types and the `Backend`
   vtable), `llm.chat`, `llm.tokenizer`, `llm.kv_cache`.
-- **Experimental** (may change without an alias step, changelog entry
-  only): `es`, `ptqtp`, `llm.runner`, the `llm.serving` transport/engine
+- **Experimental** (changelog entry only): `es`, `ptqtp`, `llm.runner`, the `llm.serving` transport/engine
   band (`http`, `scheduler`, `emitter`, wire dialects, `gguf_chat`,
   `open`), `llm.speculative`, `llm.subq`, the
   research features under model families (SHINE, cartridges, Engram), and
@@ -40,6 +38,22 @@ point; earlier history is `git log`.
 - `exec/backend`: `div` joins the backend elementwise surface
   (`divContiguousIntoUnchecked`), so the contiguous binary dispatch no
   longer special-cases it through an exec-local kernel.
+
+### Removed
+
+- Every deprecated alias, ahead of the one-MINOR schedule: the policy is now
+  "no alias step before 1.0" (`docs/DEVELOPMENT.md` §6). Rewrites:
+  `fucina.BlockQ*` / `fucina.BlockIQ*` / `fucina.BlockTQ*` /
+  `fucina.BlockMXFP4` / `fucina.BlockNVFP4` / `fucina.QuantizedMatmulRhs*`
+  / `fucina.q8_0_block_size` / `fucina.supports_q4_k_mmla` → the same
+  names under `fucina.quant`; `fucina.simd.{vecScale, vecMaxReduce,
+  dotF32F16, scoreRows4F16, vecExpAffineSumInPlace, weightedAccumRows4F16}`
+  → `fucina.internal.backend_mod.vector_impl.*` (backend internals);
+  `fucina.weights.GroupedQ8_0RhsX4` → `fucina.quant.QuantizedMatmulRhsQ8_0x4`;
+  `llm.gemma.gemma4` / `llm.gemma.gemma4_train` / `llm.pockettts.pocket` →
+  `llm.gemma.model` / `llm.gemma.train` / `llm.pockettts.model`; build
+  options `-Dbackend=cpu` → `-Dbackend=scalar`, `-Daccelerate=true|false`
+  → `-Dblas=accelerate|none`.
 
 ### Changed
 

@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const BackendKind = enum { scalar, native, cpu };
+const BackendKind = enum { scalar, native };
 const BlasKind = enum { none, accelerate, openblas, mkl, blis, nvpl, blas };
 const GpuKind = enum { none, metal, cuda };
 
@@ -11,13 +11,8 @@ pub fn build(b: *std.Build) void {
     const backend_kind = b.option(
         BackendKind,
         "backend",
-        "Backend implementation: native (Zig SIMD + optional BLAS, default), scalar (reference only); cpu is a deprecated alias for scalar",
+        "Backend implementation: native (Zig SIMD + optional BLAS, default), scalar (reference only)",
     ) orelse .native;
-    const requested_accelerate = b.option(
-        bool,
-        "accelerate",
-        "Compatibility alias: false is equivalent to -Dblas=none; true selects Accelerate on macOS",
-    );
     // macOS always has Accelerate; native Linux probes the system for a
     // provider (cross builds cannot inspect the target machine and default
     // to none, matching the cuda-check legs).
@@ -31,10 +26,7 @@ pub fn build(b: *std.Build) void {
         BlasKind,
         "blas",
         "Native BLAS provider: none, accelerate, openblas, mkl, blis, nvpl, blas",
-    ) orelse if (requested_accelerate) |use_accelerate|
-        if (use_accelerate) BlasKind.accelerate else BlasKind.none
-    else
-        default_blas;
+    ) orelse default_blas;
     const blas_threads = b.option(
         u32,
         "blas-threads",

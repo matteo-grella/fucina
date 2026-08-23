@@ -1954,9 +1954,6 @@ pub fn linearSeqBorrowedF16(
 /// quantization per group and ONE worker-team dispatch replace n_groups
 /// facade linears + concat, bit-identically: the same q8_0 tile kernel
 /// computes the same integer dots, and i32 accumulation is order-free.
-/// Deprecated: use `fucina.quant.QuantizedMatmulRhsQ8_0x4` (the same type). Removal per docs/DEVELOPMENT.md §6.
-pub const GroupedQ8_0RhsX4 = backend_quant.QuantizedMatmulRhsQ8_0x4;
-
 /// Load-time x4 packing for `groupedQ8_0GemvFusedInto`: one pack per
 /// group — same bytes column-interleaved, the difference between the
 /// generic q8_0 row kernel and the hot sdot tile path (the bench-ternary

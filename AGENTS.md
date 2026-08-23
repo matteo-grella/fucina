@@ -76,8 +76,7 @@ zig build bench-backward-diamond  # serial vs manual-parallel independent GEMM V
 
 Build options (consumed at comptime via `build_options`):
 
-- `-Dbackend=native|scalar|cpu` — `native` (default) = Zig SIMD + optional BLAS; `scalar` = reference;
-  `cpu` is a deprecated alias for `scalar`.
+- `-Dbackend=native|scalar` — `native` (default) = Zig SIMD + optional BLAS; `scalar` = reference.
 - `-Dblas=none|accelerate|openblas|mkl|blis|nvpl|blas` — CBLAS provider for GEMM. Default `accelerate`
   on macOS, `none` elsewhere. `none` keeps the native backend on its pure Zig vector kernels.
 - `-Dblas-threads=N` — pin vendor BLAS threads (`0` = provider default).
@@ -124,7 +123,6 @@ Build options (consumed at comptime via `build_options`):
   across independent columns (bitwise identical to serial); last-axis scans use an in-register
   prefix scan — still bitwise deterministic for any thread count, but the accumulation order
   differs from the serial default (the sum-SIMD-lanes rounding class; exact for integer data).
-- `-Daccelerate=bool` — compatibility alias (`false` ≈ `-Dblas=none`).
 - Standard `-Doptimize=Debug|ReleaseSafe|ReleaseFast|ReleaseSmall` and `-Dtarget=...`.
 - **CPU targeting: native by default.** With no `-Dtarget`, Zig targets the compiling machine's
   exact CPU (full detected feature set, like `-march=native`), and the kernels' comptime feature

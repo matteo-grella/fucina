@@ -31,10 +31,6 @@ pub const qwen35 = struct {
 pub const gemma = struct {
     pub const model = @import("llm/gemma/model.zig");
     pub const train = @import("llm/gemma/train.zig");
-    /// Deprecated: use `model`. Removal per docs/DEVELOPMENT.md §6.
-    pub const gemma4 = model;
-    /// Deprecated: use `train`. Removal per docs/DEVELOPMENT.md §6.
-    pub const gemma4_train = train;
     pub const moe = @import("llm/gemma/moe.zig");
 };
 /// DiffusionGemma block text-diffusion (gemma4 backbone). Files in `llm/diffusion_gemma/`.
@@ -87,8 +83,6 @@ pub const qwen3tts = struct {
 /// streaming decoder. Files in `llm/pockettts/`.
 pub const pockettts = struct {
     pub const model = @import("llm/pockettts/model.zig");
-    /// Deprecated: use `model`. Removal per docs/DEVELOPMENT.md §6.
-    pub const pocket = model;
 };
 /// Inkling (hybrid SWA/global rel-bias attention, shortconv sites, sink-shared
 /// MoE; hMLP vision + dMel audio towers). Files in `llm/inkling/`.

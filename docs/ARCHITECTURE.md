@@ -423,8 +423,8 @@ or preallocate an entire model execution schedule.
 
 ## Backend Model
 
-Backend selection is build-time (`-Dbackend=native|scalar|cpu`; `native` is
-the default, `scalar` the reference, `cpu` a deprecated alias for `scalar`).
+Backend selection is build-time (`-Dbackend=native|scalar`; `native` is
+the default, `scalar` the reference).
 Dispatch is compiled away; adding a variant forces edits through exhaustive
 switches.
 

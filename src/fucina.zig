@@ -184,8 +184,6 @@ pub const quant = struct {
     pub const BlockNVFP4 = dtype.BlockNVFP4;
 };
 
-/// Deprecated: use `quant.supports_q4_k_mmla`. Removal per docs/DEVELOPMENT.md §6.
-pub const supports_q4_k_mmla = quant.supports_q4_k_mmla;
 /// Pre-packed dense matmul RHS (weights repacked once at load for the packed GEMM arms).
 pub const PackedRhs = ag.PackedRhs;
 /// Layout tag carried by `PackedRhs` (which packed GEMM arm the bytes are shaped for).
@@ -199,84 +197,6 @@ pub const SliceRange = ag.SliceRange;
 pub const AxisRange = tensor.AxisRange;
 /// Conv weights pre-transformed at load for the streaming conv kernels.
 pub const PreparedConvWeights = exec.ExecContext.PreparedConvWeights;
-/// Deprecated: use `quant.BlockQ1_0`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockQ1_0 = quant.BlockQ1_0;
-/// Deprecated: use `quant.BlockQ2_0`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockQ2_0 = quant.BlockQ2_0;
-/// Deprecated: use `quant.BlockQ4_0`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockQ4_0 = quant.BlockQ4_0;
-/// Deprecated: use `quant.BlockQ4_1`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockQ4_1 = quant.BlockQ4_1;
-/// Deprecated: use `quant.BlockQ5_0`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockQ5_0 = quant.BlockQ5_0;
-/// Deprecated: use `quant.BlockQ5_1`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockQ5_1 = quant.BlockQ5_1;
-/// Deprecated: use `quant.BlockQ8_0`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockQ8_0 = quant.BlockQ8_0;
-/// Deprecated: use `quant.q8_0_block_size`. Removal per docs/DEVELOPMENT.md §6.
-pub const q8_0_block_size = quant.q8_0_block_size;
-/// Deprecated: use `quant.QuantizedMatmulRhsQ8_0x4`. Removal per docs/DEVELOPMENT.md §6.
-pub const QuantizedMatmulRhsQ8_0x4 = quant.QuantizedMatmulRhsQ8_0x4;
-/// Deprecated: use `quant.QuantizedMatmulRhsQ4_Kx4`. Removal per docs/DEVELOPMENT.md §6.
-pub const QuantizedMatmulRhsQ4_Kx4 = quant.QuantizedMatmulRhsQ4_Kx4;
-/// Deprecated: use `quant.QuantizedMatmulRhsQ4_Kx8`. Removal per docs/DEVELOPMENT.md §6.
-pub const QuantizedMatmulRhsQ4_Kx8 = quant.QuantizedMatmulRhsQ4_Kx8;
-/// Deprecated: use `quant.QuantizedMatmulRhsQ4_Kx2Mmla`. Removal per docs/DEVELOPMENT.md §6.
-pub const QuantizedMatmulRhsQ4_Kx2Mmla = quant.QuantizedMatmulRhsQ4_Kx2Mmla;
-/// Deprecated: use `quant.QuantizedMatmulRhsQ5_Kx8`. Removal per docs/DEVELOPMENT.md §6.
-pub const QuantizedMatmulRhsQ5_Kx8 = quant.QuantizedMatmulRhsQ5_Kx8;
-/// Deprecated: use `quant.QuantizedMatmulRhsQ6_Kx4`. Removal per docs/DEVELOPMENT.md §6.
-pub const QuantizedMatmulRhsQ6_Kx4 = quant.QuantizedMatmulRhsQ6_Kx4;
-/// Deprecated: use `quant.QuantizedMatmulRhsQ2_K`. Removal per docs/DEVELOPMENT.md §6.
-pub const QuantizedMatmulRhsQ2_K = quant.QuantizedMatmulRhsQ2_K;
-/// Deprecated: use `quant.QuantizedMatmulRhsQ3_K`. Removal per docs/DEVELOPMENT.md §6.
-pub const QuantizedMatmulRhsQ3_K = quant.QuantizedMatmulRhsQ3_K;
-/// Deprecated: use `quant.QuantizedMatmulRhsQ4_K`. Removal per docs/DEVELOPMENT.md §6.
-pub const QuantizedMatmulRhsQ4_K = quant.QuantizedMatmulRhsQ4_K;
-/// Deprecated: use `quant.QuantizedMatmulRhsQ5_K`. Removal per docs/DEVELOPMENT.md §6.
-pub const QuantizedMatmulRhsQ5_K = quant.QuantizedMatmulRhsQ5_K;
-/// Deprecated: use `quant.QuantizedMatmulRhsQ6_K`. Removal per docs/DEVELOPMENT.md §6.
-pub const QuantizedMatmulRhsQ6_K = quant.QuantizedMatmulRhsQ6_K;
-/// Deprecated: use `quant.BlockQ8_1`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockQ8_1 = quant.BlockQ8_1;
-/// Deprecated: use `quant.BlockQ2_K`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockQ2_K = quant.BlockQ2_K;
-/// Deprecated: use `quant.BlockQ3_K`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockQ3_K = quant.BlockQ3_K;
-/// Deprecated: use `quant.BlockQ4_K`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockQ4_K = quant.BlockQ4_K;
-/// Deprecated: use `quant.BlockQ5_K`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockQ5_K = quant.BlockQ5_K;
-/// Deprecated: use `quant.BlockQ6_K`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockQ6_K = quant.BlockQ6_K;
-/// Deprecated: use `quant.BlockQ8_K`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockQ8_K = quant.BlockQ8_K;
-/// Deprecated: use `quant.BlockIQ1_S`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockIQ1_S = quant.BlockIQ1_S;
-/// Deprecated: use `quant.BlockIQ1_M`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockIQ1_M = quant.BlockIQ1_M;
-/// Deprecated: use `quant.BlockIQ2_XXS`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockIQ2_XXS = quant.BlockIQ2_XXS;
-/// Deprecated: use `quant.BlockIQ2_XS`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockIQ2_XS = quant.BlockIQ2_XS;
-/// Deprecated: use `quant.BlockIQ2_S`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockIQ2_S = quant.BlockIQ2_S;
-/// Deprecated: use `quant.BlockIQ3_XXS`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockIQ3_XXS = quant.BlockIQ3_XXS;
-/// Deprecated: use `quant.BlockIQ3_S`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockIQ3_S = quant.BlockIQ3_S;
-/// Deprecated: use `quant.BlockIQ4_NL`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockIQ4_NL = quant.BlockIQ4_NL;
-/// Deprecated: use `quant.BlockIQ4_XS`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockIQ4_XS = quant.BlockIQ4_XS;
-/// Deprecated: use `quant.BlockTQ1_0`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockTQ1_0 = quant.BlockTQ1_0;
-/// Deprecated: use `quant.BlockTQ2_0`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockTQ2_0 = quant.BlockTQ2_0;
-/// Deprecated: use `quant.BlockMXFP4`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockMXFP4 = quant.BlockMXFP4;
-/// Deprecated: use `quant.BlockNVFP4`. Removal per docs/DEVELOPMENT.md §6.
-pub const BlockNVFP4 = quant.BlockNVFP4;
 // Backend identity + capability constants (species 4 of the membership
 // rule); the selected provider is fixed at build time.
 /// The selected kernel provider (comptime; see `active_backend_kind`).
@@ -341,21 +261,6 @@ pub const simd = struct {
     pub const vexpf = vector_primitives.vexpf;
     pub const sigmoidVec = vector_primitives.sigmoidVec;
     pub const tanhVec = vector_primitives.tanhVec;
-    /// Deprecated: the f16 row-block attention primitives are backend
-    /// internals, not elemental-op vocabulary; in-tree consumers reach them
-    /// through `internal.backend_mod.vector_impl`. Removal per
-    /// docs/DEVELOPMENT.md §6.
-    pub const vecScale = vector_primitives.vecScale;
-    /// Deprecated: see `vecScale`. Removal per docs/DEVELOPMENT.md §6.
-    pub const vecMaxReduce = vector_primitives.vecMaxReduce;
-    /// Deprecated: see `vecScale`. Removal per docs/DEVELOPMENT.md §6.
-    pub const dotF32F16 = vector_primitives.dotF32F16;
-    /// Deprecated: see `vecScale`. Removal per docs/DEVELOPMENT.md §6.
-    pub const scoreRows4F16 = vector_primitives.scoreRows4F16;
-    /// Deprecated: see `vecScale`. Removal per docs/DEVELOPMENT.md §6.
-    pub const vecExpAffineSumInPlace = vector_primitives.vecExpAffineSumInPlace;
-    /// Deprecated: see `vecScale`. Removal per docs/DEVELOPMENT.md §6.
-    pub const weightedAccumRows4F16 = vector_primitives.weightedAccumRows4F16;
 };
 /// Fake-quantization round trips (FP8-E4M3 / FP4-E2M1 microscaling groups,
 /// Hadamard rotation, f16 round trip) over host slices (§10.10).

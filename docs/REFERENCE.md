@@ -336,9 +336,8 @@ kernel arms are not in the binary.
 
 | Option | Values | Default | Effect | Constraints |
 | --- | --- | --- | --- | --- |
-| `-Dbackend` | `native` \| `scalar` \| `cpu` | `native` | Kernel implementation set. `native` = Zig SIMD vector kernels + optional BLAS; `scalar` = the reference backend (correctness oracle — native and scalar must agree). | `cpu` is a deprecated alias for `scalar`. |
+| `-Dbackend` | `native` \| `scalar` | `native` | Kernel implementation set. `native` = Zig SIMD vector kernels + optional BLAS; `scalar` = the reference backend (correctness oracle — native and scalar must agree). | |
 | `-Dblas` | `none` \| `accelerate` \| `openblas` \| `mkl` \| `blis` \| `nvpl` \| `blas` | `accelerate` on macOS *targets*; on a **native Linux** build, auto-detected from the linker cache (NVPL on aarch64 / MKL on x86-64, then OpenBLAS, then BLIS; the generic `blas` is never auto-selected) with one stderr line reporting the pick; `none` when cross-compiling or nothing is found | CBLAS provider backing the native backend's large-GEMM arms; `none` keeps the pure Zig vector kernels (including the blocked packed f32 GEMM). | `accelerate` on a non-macOS target **panics the build**. |
-| `-Daccelerate` | `bool` | unset | Compatibility alias, consulted only when `-Dblas` is absent: `true` → `-Dblas=accelerate`, `false` → `-Dblas=none`. | An explicit `-Dblas` always wins. |
 | `-Dblas-threads` | `u32` | `0` | Pins the vendor BLAS thread count for explicit providers (OpenBLAS/MKL/BLIS/NVPL); `0` keeps the provider default. | No effect with `-Dblas=none`. |
 | `-Dmax-threads` | `usize` | `8` | Comptime worker-team ceiling **and** runtime default thread count (`src/parallel.zig`). Sized for M1 Max P-cores; many-core servers must raise it at build time (`FUCINA_MAX_THREADS` only lowers it at runtime). | Outside 1–64 **panics the build**. |
 | `-Dgpu` | `none` \| `metal` \| `cuda` | `none` | GPU GEMM offload provider (§9). `metal`: big f32/f16/bf16 GEMMs, dense quantized prefill linears, and the MoE expert FFN on macOS. `cuda`: the same surface plus streaming attention forward and opt-in decode GEMV on Linux/NVIDIA, no SDK at build time. Decode below the work gates and training stay on CPU. | `metal` on a non-macOS target **panics**; `cuda` on a non-Linux target **panics** (cross-compiling from macOS with `-Dtarget=x86_64-linux-gnu` is the supported path). |
@@ -7451,7 +7450,7 @@ const active = switch (build_options.backend_kind) {
 ```
 
 Selection is a comptime `switch` over `build_options.backend_kind`
-(`-Dbackend=native|scalar|cpu`; `cpu` is a deprecated alias for `scalar`).
+(`-Dbackend=native|scalar`).
 The inactive implementation is never dispatched to — every `Backend` method
 forwards to `active.<fn>` and the other module's code paths are dead — and the
 switches are exhaustive, so adding a backend variant forces edits at every
@@ -7467,7 +7466,7 @@ Build options that shape the backend (see §2 for the full option list):
 
 | Option | Values | Default | Effect |
 |---|---|---|---|
-| `-Dbackend` | `native`, `scalar`, `cpu` | `native` | backend implementation; `cpu` = deprecated alias for `scalar` |
+| `-Dbackend` | `native`, `scalar` | `native` | backend implementation |
 | `-Dblas` | `none`, `accelerate`, `openblas`, `mkl`, `blis`, `nvpl`, `blas` | `accelerate` on macOS, else `none` | CBLAS provider for large f32 GEMM; `none` selects the pure-Zig blocked packed GEMM |
 | `-Daccelerate` | bool | — | compatibility alias: `false` ≡ `-Dblas=none`, `true` selects Accelerate on macOS |
 | `-Dblas-threads` | `u32` | 0 | pin the provider's thread count once at first GEMM; 0 keeps the provider default |

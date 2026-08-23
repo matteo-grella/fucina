@@ -93,7 +93,6 @@ pub const Tensor = tensor.Tensor;
 pub const TensorOf = tensor.TensorOf;
 pub const ThreadPool = thread.Pool;
 pub const scalar_impl = @import("backend/cpu.zig");
-pub const cpu_impl = scalar_impl;
 pub const native_impl = @import("backend/native.zig");
 // GPU GEMM provider selected by -Dgpu (metal.zig or cuda.zig, via the
 // backend/gpu.zig leaf); inert (never analyzed past the `enabled` flag) on
@@ -119,7 +118,7 @@ pub const Kind = enum {
 };
 
 pub const active_kind: Kind = switch (build_options.backend_kind) {
-    .scalar, .cpu => .scalar,
+    .scalar => .scalar,
     .native => .native,
 };
 
@@ -129,7 +128,7 @@ pub const native_uses_accelerate = build_options.blas_kind == .accelerate;
 pub const native_blas_threads = build_options.blas_threads;
 
 const active = switch (build_options.backend_kind) {
-    .scalar, .cpu => scalar_impl,
+    .scalar => scalar_impl,
     .native => native_impl,
 };
 

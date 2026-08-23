@@ -467,10 +467,10 @@ The f32 tensor's `dot` from [Chapter 5](05-the-operation-library.md) dispatches 
 
 ```zig
 const W = fucina.Tensor(.{ .dtype = .q8_0, .tags = .{ .out, .in } });
-var w = try W.fromBlocks(&ctx, .{ 2, fucina.q8_0_block_size }, &blocks);
+var w = try W.fromBlocks(&ctx, .{ 2, fucina.quant.q8_0_block_size }, &blocks);
 defer w.deinit();
 
-var x = try fucina.Tensor(.{ .batch, .in }).fromSlice(&ctx, .{ 1, fucina.q8_0_block_size }, &x_values);
+var x = try fucina.Tensor(.{ .batch, .in }).fromSlice(&ctx, .{ 1, fucina.quant.q8_0_block_size }, &x_values);
 defer x.deinit();
 
 var y = try x.dot(&ctx, &w, .in); // y: .{ .batch, .out } — f32 out, int8 dots inside
