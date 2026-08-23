@@ -163,9 +163,9 @@ test "gpu conformance: quant gemm grouped expert tiles parity" {
     // Every quantized format THIS provider declares, so a newly added format
     // is covered without editing the suite. The fused PTQTP pair layout has
     // no standalone dtype and keeps its provider-local parity test.
-    inline for (comptime std.meta.fields(impl.QFormat)) |field| {
+    inline for (comptime std.meta.fields(impl.KernelFormatTag)) |field| {
         if (comptime !std.mem.eql(u8, field.name, "tq2_0_folded")) {
-            const fmt = @field(impl.QFormat, field.name);
+            const fmt = @field(impl.KernelFormatTag, field.name);
             const Block = test_util.BlockFor(fmt);
             const k = 2 * comptime fmt.kMultiple();
             const n = 64;

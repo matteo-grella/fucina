@@ -1,6 +1,10 @@
+//! Load-time packed dense matmul RHS: the f32 output-row panel every dense
+//! weight dtype shares (`PackedDenseRhs`, `dtype == .f32`) and the
+//! widened-once f32 panels of f16/bf16 `[k, n]` weights
+//! (`PackedMatmulRhsFor(dtype)`). Each container names the dtype it serves
+//! with `pub const dtype`; the container type is the layout.
 const std = @import("std");
 const dtype_mod = @import("../dtype.zig");
-const packed_layout = @import("packed_layout.zig");
 const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
@@ -8,8 +12,6 @@ const thread = @import("../thread.zig");
 const Allocator = std.mem.Allocator;
 const DType = dtype_mod.DType;
 const Tensor = tensor.Tensor;
-
-pub const PackedRhsLayout = packed_layout.PackedRhsLayout;
 
 /// Load-time f32 RHS panels for `A[m,k] * W[n,k]^T`. Rows are padded to the
 /// four-output microkernel tile, while every logical row remains contiguous so
@@ -22,7 +24,8 @@ pub const PackedDenseRhs = struct {
     padded_n: usize,
 
     const Self = @This();
-    pub const layout: PackedRhsLayout = .dense_f32;
+    /// The panel's storage dtype; f16 and bf16 sources share it.
+    pub const dtype: DType = .f32;
 
     pub fn deinit(self: *Self) void {
         self.rhs.deinit();
@@ -74,55 +77,23 @@ pub fn matmulDenseScalar(
     }
 }
 
-pub const PackedMatmulFormat = enum {
-    f16_rhs_f32,
-    bf16_rhs_f32,
-};
+/// Load-time f32 panel of an f16 or bf16 `[k, n]` weight, widened exactly
+/// once at pack time; `dtype` is the 16-bit source dtype the panel serves.
+pub fn PackedMatmulRhsFor(comptime source_dtype: DType) type {
+    comptime if (source_dtype != .f16 and source_dtype != .bf16)
+        @compileError("packed matmul RHS is not implemented for this dtype");
+    return struct {
+        rhs: Tensor,
+        k: usize,
+        n: usize,
 
-pub fn preferredRhsFormat(comptime dtype: DType) PackedMatmulFormat {
-    return switch (dtype) {
-        .f16 => .f16_rhs_f32,
-        .bf16 => .bf16_rhs_f32,
-        else => @compileError("packed matmul RHS is not implemented for this dtype"),
-    };
-}
+        const Self = @This();
+        pub const dtype: DType = source_dtype;
 
-pub fn PackedMatmulRhsFor(comptime dtype: DType) type {
-    return PackedMatmulRhs(preferredRhsFormat(dtype));
-}
-
-pub fn PackedMatmulRhs(comptime format_value: PackedMatmulFormat) type {
-    return switch (format_value) {
-        .f16_rhs_f32 => struct {
-            rhs: Tensor,
-            k: usize,
-            n: usize,
-
-            const Self = @This();
-            pub const format = format_value;
-            pub const source_dtype = DType.f16;
-            pub const packed_dtype = DType.f32;
-
-            pub fn deinit(self: *Self) void {
-                self.rhs.deinit();
-                self.* = undefined;
-            }
-        },
-        .bf16_rhs_f32 => struct {
-            rhs: Tensor,
-            k: usize,
-            n: usize,
-
-            const Self = @This();
-            pub const format = format_value;
-            pub const source_dtype = DType.bf16;
-            pub const packed_dtype = DType.f32;
-
-            pub fn deinit(self: *Self) void {
-                self.rhs.deinit();
-                self.* = undefined;
-            }
-        },
+        pub fn deinit(self: *Self) void {
+            self.rhs.deinit();
+            self.* = undefined;
+        }
     };
 }
 
@@ -131,9 +102,10 @@ pub fn packRhs(
     comptime dtype: DType,
     rhs: *const tensor.TensorOf(dtype),
 ) !PackedMatmulRhsFor(dtype) {
-    return switch (comptime preferredRhsFormat(dtype)) {
-        .f16_rhs_f32 => packF16RhsAsF32(allocator, rhs),
-        .bf16_rhs_f32 => packBf16RhsAsF32(allocator, rhs),
+    return switch (comptime dtype) {
+        .f16 => packF16RhsAsF32(allocator, rhs),
+        .bf16 => packBf16RhsAsF32(allocator, rhs),
+        else => comptime unreachable,
     };
 }
 
@@ -152,8 +124,8 @@ pub fn matmul2DIntoUncheckedPackedRhsTypedWithConfig(
 ) !void {
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
 
-    switch (comptime preferredRhsFormat(dtype)) {
-        .f16_rhs_f32 => {
+    switch (comptime dtype) {
+        .f16 => {
             const a16 = try a.dataConstChecked();
             const c16 = try out.dataChecked();
             if (comptime configHasPool(@TypeOf(config))) {
@@ -173,7 +145,7 @@ pub fn matmul2DIntoUncheckedPackedRhsTypedWithConfig(
             matmul_f32(config, &c32, &a32, &rhs.rhs, m, n, k);
             narrowF32ToF16(c16[0 .. m * n], c32.dataConst());
         },
-        .bf16_rhs_f32 => {
+        .bf16 => {
             const a_bits = try a.dataConstChecked();
             const c_bits = try out.dataChecked();
             if (comptime configHasPool(@TypeOf(config))) {
@@ -193,13 +165,14 @@ pub fn matmul2DIntoUncheckedPackedRhsTypedWithConfig(
             matmul_f32(config, &c32, &a32, &rhs.rhs, m, n, k);
             narrowF32ToBf16(c_bits[0 .. m * n], c32.dataConst());
         },
+        else => comptime unreachable,
     }
 }
 
 fn packF16RhsAsF32(
     allocator: Allocator,
     rhs: *const tensor.TensorOf(.f16),
-) !PackedMatmulRhs(.f16_rhs_f32) {
+) !PackedMatmulRhsFor(.f16) {
     const view = try rhs.rankView(2);
     const k = view.dim(0);
     const n = view.dim(1);
@@ -214,7 +187,7 @@ fn packF16RhsAsF32(
 fn packBf16RhsAsF32(
     allocator: Allocator,
     rhs: *const tensor.TensorOf(.bf16),
-) !PackedMatmulRhs(.bf16_rhs_f32) {
+) !PackedMatmulRhsFor(.bf16) {
     const view = try rhs.rankView(2);
     const k = view.dim(0);
     const n = view.dim(1);

@@ -5,13 +5,14 @@
 //! borrowed RHS views, NaN benignity, determinism, the reference-path G
 //! ablation, and option/shape validation.
 const std = @import("std");
+const dtype_mod = @import("dtype.zig");
 const backend = @import("backend.zig");
 const exec = @import("exec.zig");
 const ptqtp = @import("ptqtp.zig");
 
 const ExecContext = exec.ExecContext;
 const quant = backend.quantized_matmul;
-const BlockTQ2_0 = backend.BlockTQ2_0;
+const BlockTQ2_0 = dtype_mod.BlockTQ2_0;
 
 fn relErr(w: []const f32, rec: []const f32) f64 {
     var err: f64 = 0;

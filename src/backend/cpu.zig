@@ -1515,31 +1515,31 @@ pub fn matmul2DQuantizedRhs(
 ) !void {
     return switch (rhs) {
         .fucina_w8a8_rhs => |qrhs| matmul2DQuantizedRhsI8(pc, allocator, out, a, qrhs, m, n, k),
-        .ggml_q1_0 => |qrhs| matmul2DQuantizedRhsQ1_0(pc, allocator, out, a, qrhs, m, n, k),
-        .ggml_q2_0 => |qrhs| matmul2DQuantizedRhsQ2_0(pc, allocator, out, a, qrhs, m, n, k),
-        .ggml_q4_0 => |qrhs| matmul2DQuantizedRhsQ4_0(pc, allocator, out, a, qrhs, m, n, k),
-        .ggml_q4_1 => |qrhs| matmul2DQuantizedRhsQ4_1(pc, allocator, out, a, qrhs, m, n, k),
-        .ggml_q5_0 => |qrhs| matmul2DQuantizedRhsQ5_0(pc, allocator, out, a, qrhs, m, n, k),
-        .ggml_q5_1 => |qrhs| matmul2DQuantizedRhsQ5_1(pc, allocator, out, a, qrhs, m, n, k),
-        .ggml_q8_0 => |qrhs| matmul2DQuantizedRhsQ8_0(pc, allocator, out, a, qrhs, m, n, k),
-        .ggml_q2_k => |qrhs| matmul2DQuantizedRhsQ2_K(pc, allocator, out, a, qrhs, m, n, k),
-        .ggml_q3_k => |qrhs| matmul2DQuantizedRhsQ3_K(pc, allocator, out, a, qrhs, m, n, k),
-        .ggml_q4_k => |qrhs| matmul2DQuantizedRhsQ4_K(pc, allocator, out, a, qrhs, m, n, k),
-        .ggml_q5_k => |qrhs| matmul2DQuantizedRhsQ5_K(pc, allocator, out, a, qrhs, m, n, k),
-        .ggml_q6_k => |qrhs| matmul2DQuantizedRhsQ6_K(pc, allocator, out, a, qrhs, m, n, k),
-        .ggml_iq1_s => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq1_s, allocator, out, a, qrhs, m, n, k),
-        .ggml_iq1_m => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq1_m, allocator, out, a, qrhs, m, n, k),
-        .ggml_iq2_xxs => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq2_xxs, allocator, out, a, qrhs, m, n, k),
-        .ggml_iq2_xs => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq2_xs, allocator, out, a, qrhs, m, n, k),
-        .ggml_iq2_s => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq2_s, allocator, out, a, qrhs, m, n, k),
-        .ggml_iq3_xxs => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq3_xxs, allocator, out, a, qrhs, m, n, k),
-        .ggml_iq3_s => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq3_s, allocator, out, a, qrhs, m, n, k),
-        .ggml_iq4_nl => |qrhs| matmul2DQuantizedRhsTableQ8_0(pc, .iq4_nl, allocator, out, a, qrhs, m, n, k),
-        .ggml_iq4_xs => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq4_xs, allocator, out, a, qrhs, m, n, k),
-        .ggml_tq1_0 => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .tq1_0, allocator, out, a, qrhs, m, n, k),
-        .ggml_tq2_0 => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .tq2_0, allocator, out, a, qrhs, m, n, k),
-        .ggml_mxfp4 => |qrhs| matmul2DQuantizedRhsTableQ8_0(pc, .mxfp4, allocator, out, a, qrhs, m, n, k),
-        .ggml_nvfp4 => |qrhs| matmul2DQuantizedRhsTableQ8_0(pc, .nvfp4, allocator, out, a, qrhs, m, n, k),
+        .q1_0 => |qrhs| matmul2DQuantizedRhsQ1_0(pc, allocator, out, a, qrhs, m, n, k),
+        .q2_0 => |qrhs| matmul2DQuantizedRhsQ2_0(pc, allocator, out, a, qrhs, m, n, k),
+        .q4_0 => |qrhs| matmul2DQuantizedRhsQ4_0(pc, allocator, out, a, qrhs, m, n, k),
+        .q4_1 => |qrhs| matmul2DQuantizedRhsQ4_1(pc, allocator, out, a, qrhs, m, n, k),
+        .q5_0 => |qrhs| matmul2DQuantizedRhsQ5_0(pc, allocator, out, a, qrhs, m, n, k),
+        .q5_1 => |qrhs| matmul2DQuantizedRhsQ5_1(pc, allocator, out, a, qrhs, m, n, k),
+        .q8_0 => |qrhs| matmul2DQuantizedRhsQ8_0(pc, allocator, out, a, qrhs, m, n, k),
+        .q2_k => |qrhs| matmul2DQuantizedRhsQ2_K(pc, allocator, out, a, qrhs, m, n, k),
+        .q3_k => |qrhs| matmul2DQuantizedRhsQ3_K(pc, allocator, out, a, qrhs, m, n, k),
+        .q4_k => |qrhs| matmul2DQuantizedRhsQ4_K(pc, allocator, out, a, qrhs, m, n, k),
+        .q5_k => |qrhs| matmul2DQuantizedRhsQ5_K(pc, allocator, out, a, qrhs, m, n, k),
+        .q6_k => |qrhs| matmul2DQuantizedRhsQ6_K(pc, allocator, out, a, qrhs, m, n, k),
+        .iq1_s => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq1_s, allocator, out, a, qrhs, m, n, k),
+        .iq1_m => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq1_m, allocator, out, a, qrhs, m, n, k),
+        .iq2_xxs => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq2_xxs, allocator, out, a, qrhs, m, n, k),
+        .iq2_xs => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq2_xs, allocator, out, a, qrhs, m, n, k),
+        .iq2_s => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq2_s, allocator, out, a, qrhs, m, n, k),
+        .iq3_xxs => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq3_xxs, allocator, out, a, qrhs, m, n, k),
+        .iq3_s => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq3_s, allocator, out, a, qrhs, m, n, k),
+        .iq4_nl => |qrhs| matmul2DQuantizedRhsTableQ8_0(pc, .iq4_nl, allocator, out, a, qrhs, m, n, k),
+        .iq4_xs => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq4_xs, allocator, out, a, qrhs, m, n, k),
+        .tq1_0 => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .tq1_0, allocator, out, a, qrhs, m, n, k),
+        .tq2_0 => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .tq2_0, allocator, out, a, qrhs, m, n, k),
+        .mxfp4 => |qrhs| matmul2DQuantizedRhsTableQ8_0(pc, .mxfp4, allocator, out, a, qrhs, m, n, k),
+        .nvfp4 => |qrhs| matmul2DQuantizedRhsTableQ8_0(pc, .nvfp4, allocator, out, a, qrhs, m, n, k),
     };
 }
 
@@ -1587,11 +1587,11 @@ fn matmul2DQuantizedRhsQ8_0Rows(
     const cd = (try out.dataChecked())[0 .. m * n];
     const blocks_per_row = try quantized_matmul.q8k.q8_0BlockCount(k);
     const block_count = m * blocks_per_row;
-    var stack_blocks: [q8_0_lhs_stack_blocks]quantized_matmul.BlockQ8_0 = undefined;
+    var stack_blocks: [q8_0_lhs_stack_blocks]dtype_mod.BlockQ8_0 = undefined;
     const qlhs_blocks = if (block_count <= stack_blocks.len)
         stack_blocks[0..block_count]
     else
-        try allocator.alloc(quantized_matmul.BlockQ8_0, block_count);
+        try allocator.alloc(dtype_mod.BlockQ8_0, block_count);
     defer if (block_count > stack_blocks.len) allocator.free(qlhs_blocks);
 
     try quantized_matmul.q8k.quantizeRowsQ8_0Into(qlhs_blocks, a);
@@ -1765,7 +1765,7 @@ pub fn matmulPackedQ4_Kx8Q8_Kx4Slice(pc: ParallelConfig, out: []f32, lhs_blocks:
     quantized_matmul.q4_k.matmulQ4_Kx8Q8_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
-pub fn matmulPackedQ4_Kx8RowsSlice(pc: ParallelConfig, out: []f32, lhs_blocks: []const quantized_matmul.BlockQ8_K, rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx8, m: usize, n: usize, k: usize) void {
+pub fn matmulPackedQ4_Kx8RowsSlice(pc: ParallelConfig, out: []f32, lhs_blocks: []const dtype_mod.BlockQ8_K, rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx8, m: usize, n: usize, k: usize) void {
     _ = k;
     _ = pc;
     quantized_matmul.q4_k.matmulQ4_Kx8RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
@@ -1777,13 +1777,13 @@ pub fn matmulPackedQ5_Kx8Q8_Kx4Slice(pc: ParallelConfig, out: []f32, lhs_blocks:
     quantized_matmul.q5_k.matmulQ5_Kx8Q8_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
-pub fn matmulPackedQ5_Kx8RowsSlice(pc: ParallelConfig, out: []f32, lhs_blocks: []const quantized_matmul.BlockQ8_K, rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_Kx8, m: usize, n: usize, k: usize) void {
+pub fn matmulPackedQ5_Kx8RowsSlice(pc: ParallelConfig, out: []f32, lhs_blocks: []const dtype_mod.BlockQ8_K, rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_Kx8, m: usize, n: usize, k: usize) void {
     _ = k;
     _ = pc;
     quantized_matmul.q5_k.matmulQ5_Kx8RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
-pub fn matmulPackedQ6_Kx4RowsSlice(pc: ParallelConfig, out: []f32, lhs_blocks: []const quantized_matmul.BlockQ8_K, rhs: *const quantized_matmul.QuantizedMatmulRhsQ6_Kx4, m: usize, n: usize, k: usize) void {
+pub fn matmulPackedQ6_Kx4RowsSlice(pc: ParallelConfig, out: []f32, lhs_blocks: []const dtype_mod.BlockQ8_K, rhs: *const quantized_matmul.QuantizedMatmulRhsQ6_Kx4, m: usize, n: usize, k: usize) void {
     _ = k;
     _ = pc;
     quantized_matmul.q6_k.matmulQ6_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);

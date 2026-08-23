@@ -45,6 +45,7 @@
 //! Stability: experimental (CHANGELOG.md tiers).
 
 const std = @import("std");
+const dtype_mod = @import("dtype.zig");
 const backend_mod = @import("backend.zig");
 const exec_mod = @import("exec.zig");
 const parallel = @import("parallel.zig");
@@ -53,7 +54,7 @@ const Allocator = std.mem.Allocator;
 const ExecContext = exec_mod.ExecContext;
 const quant = backend_mod.quantized_matmul;
 
-pub const BlockTQ2_0 = backend_mod.BlockTQ2_0;
+pub const BlockTQ2_0 = dtype_mod.BlockTQ2_0;
 pub const Rhs = backend_mod.QuantizedMatmulRhsTQ2_0;
 
 /// Logical elements per TQ2_0 block — the packed group size.

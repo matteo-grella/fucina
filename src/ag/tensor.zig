@@ -477,24 +477,12 @@ fn FloatTensor(comptime tags_spec: anytype) type {
     };
 }
 
-/// Packed matmul RHS container type. Dense f32/f16/bf16 weights use the same
-/// f32 output-row panel; block-quantized weights select the ISA-best lane pack:
-/// q8_0→x4, q6_k→x4, q5_k→x8, q4_k→x2mmla on aarch64+i8mm targets else x8.
-/// This is the return type of `packRhs`; model code stores packed weights as
+/// Packed matmul RHS container type for a weight dtype: the backend's
+/// `PackedRhsFor` map (dense f32/f16/bf16 share the f32 output-row panel;
+/// block-quantized weights select the ISA-best lane pack). This is the
+/// return type of `packRhs`; model code stores packed weights as
 /// `fucina.PackedRhs(dtype)` fields.
-pub fn PackedRhs(comptime dt: DType) type {
-    return switch (dt) {
-        .f32, .f16, .bf16 => backend_mod.PackedDenseRhs,
-        .q8_0 => backend_mod.QuantizedMatmulRhsQ8_0x4,
-        .q6_k => backend_mod.QuantizedMatmulRhsQ6_Kx4,
-        .q5_k => backend_mod.QuantizedMatmulRhsQ5_Kx8,
-        .q4_k => if (backend_mod.supports_q4_k_mmla)
-            backend_mod.QuantizedMatmulRhsQ4_Kx2Mmla
-        else
-            backend_mod.QuantizedMatmulRhsQ4_Kx8,
-        else => @compileError("PackedRhs: no packed matmul RHS layout for dtype ." ++ @tagName(dt)),
-    };
-}
+pub const PackedRhs = backend_mod.PackedRhsFor;
 
 /// Comptime tag guard for rank-1 norm weight/bias operands: tagged tensors
 /// must carry the normalized axis tag; numeric-tag `Tensor(1)` values (`._0`,
@@ -535,16 +523,30 @@ pub fn attentionKvRepr(comptime T: type, comptime which: []const u8) AttentionKv
         " (want *Tensor(.{ .seq, .kv_head, .d }) f32/f16, []const BlockQ8_0, []const []const f16, or []const []const BlockQ8_0)");
 }
 
-/// Comptime layout of a `*const <packed RHS>` argument, with a curated
-/// @compileError (naming `op_name` and the offending type) for anything else.
-pub fn packedRhsLayout(comptime T: type, comptime op_name: []const u8) backend_mod.PackedRhsLayout {
+/// Comptime container type of a `*const <packed RHS>` argument, with a
+/// curated @compileError (naming `op_name` and the offending type) for
+/// anything else. Packed RHS containers are the structs `PackedRhs(dt)`
+/// maps to, plus the explicit-layout packs (`packRhsAs`); each carries
+/// `pub const dtype`, and the Q4_K x8 / x2mmla split is the container type.
+pub fn packedRhsType(comptime T: type, comptime op_name: []const u8) type {
     const info = @typeInfo(T);
     if (info != .pointer or info.pointer.size != .one)
         @compileError(op_name ++ " expects a pointer to a packed matmul RHS (e.g. *const PackedRhs(.f32)); got " ++ @typeName(T));
     const Rhs = info.pointer.child;
-    if (@typeInfo(Rhs) != .@"struct" or !@hasDecl(Rhs, "layout") or @TypeOf(Rhs.layout) != backend_mod.PackedRhsLayout)
+    if (!isPackedRhsType(Rhs))
         @compileError(op_name ++ ": " ++ @typeName(Rhs) ++ " is not a packed matmul RHS");
-    return Rhs.layout;
+    return Rhs;
+}
+
+/// The packed RHS containers the facade dispatches on.
+pub fn isPackedRhsType(comptime Rhs: type) bool {
+    return Rhs == backend_mod.PackedDenseRhs or
+        Rhs == backend_mod.QuantizedMatmulRhsQ8_0x4 or
+        Rhs == backend_mod.QuantizedMatmulRhsQ6_Kx4 or
+        Rhs == backend_mod.QuantizedMatmulRhsQ5_Kx8 or
+        Rhs == backend_mod.QuantizedMatmulRhsQ4_Kx8 or
+        Rhs == backend_mod.QuantizedMatmulRhsQ4_Kx2Mmla or
+        Rhs == backend_mod.QuantizedMatmulRhsQ4_Kx4;
 }
 
 test {

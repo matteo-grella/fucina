@@ -24,12 +24,13 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const dtype_mod = @import("../../dtype.zig");
 const types = @import("types.zig");
 const common = @import("common.zig");
 
 const Allocator = std.mem.Allocator;
 
-const BlockTQ2_0 = types.BlockTQ2_0;
+const BlockTQ2_0 = dtype_mod.BlockTQ2_0;
 
 const QKV4i32 = common.QKV4i32;
 const QKV32u8 = common.QKV32u8;
@@ -241,7 +242,7 @@ inline fn dotGroups32(acc: common.QKV8i32, codes: QKV32u8, a: common.QKV32i8) co
 }
 
 /// sum over the 16 per-16-element activation sums = sum(a) for the block.
-inline fn blockBsumTotal(a: *const types.BlockQ8_K) i32 {
+inline fn blockBsumTotal(a: *const dtype_mod.BlockQ8_K) i32 {
     const sums: @Vector(16, i16) = a.bsums;
     return @reduce(.Add, @as(@Vector(16, i32), sums));
 }
@@ -253,7 +254,7 @@ inline fn blockBsumTotal(a: *const types.BlockQ8_K) i32 {
 /// their portable twins. Every arm accumulates the exact i32 (max |isum| is
 /// 256*2*127 = 65024), so all arms and widths agree bitwise — the fused
 /// 4-column tile and the width-1 tail take the same body.
-inline fn blockCodeDotW(comptime width: usize, w: [width]*const BlockTQ2_0, a: *const types.BlockQ8_K) [width]i32 {
+inline fn blockCodeDotW(comptime width: usize, w: [width]*const BlockTQ2_0, a: *const dtype_mod.BlockQ8_K) [width]i32 {
     if (comptime builtin.cpu.arch == .aarch64) {
         // In-place crumbs (see `crumb16InPlace`): lanes 0 and 3 carry no
         // factor and share an accumulator; lanes 1 and 2 accumulate 4x and
@@ -323,7 +324,7 @@ const bsum_cache_blocks: usize = 256;
 /// only qs, so stale/foreign bsums silently corrupt results.
 pub fn matmulTQ2_0RhsTile(
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_K,
+    lhs_blocks: []const dtype_mod.BlockQ8_K,
     rhs: *const types.QuantizedMatmulRhsTQ2_0,
     n: usize,
     r0: usize,
@@ -420,7 +421,7 @@ pub fn packMatmulRhsTQ2_0x4(allocator: Allocator, rhs: *const types.QuantizedMat
 /// portable by-element twin (bitwise identical, untuned).
 pub fn matmulTQ2_0X4RhsRange(
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_K,
+    lhs_blocks: []const dtype_mod.BlockQ8_K,
     packed_groups: []const types.BlockTQ2_0x4,
     blocks_per_row: usize,
     n: usize,
@@ -435,7 +436,7 @@ pub fn matmulTQ2_0X4RhsRange(
 /// finer-grained addressing).
 pub fn matmulTQ2_0X4RhsTile(
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_K,
+    lhs_blocks: []const dtype_mod.BlockQ8_K,
     packed_groups: []const types.BlockTQ2_0x4,
     blocks_per_row: usize,
     n: usize,
@@ -454,7 +455,7 @@ pub fn matmulTQ2_0X4RhsTile(
 /// traffic. Bitwise equal to that two-pass form by construction.
 pub fn matmulTQ2_0X4RhsTileAcc(
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_K,
+    lhs_blocks: []const dtype_mod.BlockQ8_K,
     packed_groups: []const types.BlockTQ2_0x4,
     blocks_per_row: usize,
     n: usize,
@@ -486,7 +487,7 @@ pub fn matmulTQ2_0X4RhsTileAcc(
 /// portable) accumulates 8 lanes = the same 4 columns at two k-groups,
 /// folded 8->4 once per block (exact i32). Same four-accumulator
 /// independence, mirroring the Q4_Kx8 x86 shape.
-inline fn x4BlockDot(w: *const types.BlockTQ2_0x4, a: *const types.BlockQ8_K) QKV4i32 {
+inline fn x4BlockDot(w: *const types.BlockTQ2_0x4, a: *const dtype_mod.BlockQ8_K) QKV4i32 {
     if (comptime builtin.cpu.arch == .aarch64) {
         var accs: [4]QKV4i32 = @splat(@splat(0));
         inline for ([_]usize{ 0, 128 }) |h| {
@@ -698,7 +699,7 @@ pub fn packMatmulRhsTQ2_0FoldedRows(
 /// One folded block-group dot: i32 lanes are the four columns' exact
 /// combined-code sums. Same accumulator discipline as x4BlockDot (four
 /// independent chains — here per dword-group).
-inline fn foldedBlockDot(w: *const types.BlockTQ2_0Foldedx4, a: *const types.BlockQ8_K) QKV4i32 {
+inline fn foldedBlockDot(w: *const types.BlockTQ2_0Foldedx4, a: *const dtype_mod.BlockQ8_K) QKV4i32 {
     if (comptime builtin.cpu.arch == .aarch64) {
         var accs: [4]QKV4i32 = @splat(@splat(0));
         inline for (0..8) |sub| {
@@ -738,7 +739,7 @@ inline fn foldedBlockDot(w: *const types.BlockTQ2_0Foldedx4, a: *const types.Blo
 /// One folded block's acc-independent contribution: integer dot minus the
 /// bsum offset, times the four column scales and the activation scale —
 /// the exact expression the serial loop added per block.
-inline fn foldedBlockContribution(w: *const types.BlockTQ2_0Foldedx4, a: *const types.BlockQ8_K, bsum: i32) @Vector(4, f32) {
+inline fn foldedBlockContribution(w: *const types.BlockTQ2_0Foldedx4, a: *const dtype_mod.BlockQ8_K, bsum: i32) @Vector(4, f32) {
     const acc = foldedBlockDot(w, a);
     const isum = acc - @as(QKV4i32, @splat(4 * bsum));
     var sv: @Vector(4, f32) = undefined;
@@ -749,7 +750,7 @@ inline fn foldedBlockContribution(w: *const types.BlockTQ2_0Foldedx4, a: *const 
 /// Folded tile: rows [r0,r1), columns [c0,c1) on 4-column boundaries.
 pub fn matmulTQ2_0FoldedX4RhsTile(
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_K,
+    lhs_blocks: []const dtype_mod.BlockQ8_K,
     folded: []const types.BlockTQ2_0Foldedx4,
     blocks_per_row: usize,
     n: usize,
@@ -792,7 +793,7 @@ pub fn matmulTQ2_0FoldedX4RhsTile(
 
 pub fn matmulTQ2_0FoldedX4RhsRange(
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_K,
+    lhs_blocks: []const dtype_mod.BlockQ8_K,
     folded: []const types.BlockTQ2_0Foldedx4,
     blocks_per_row: usize,
     n: usize,
@@ -839,7 +840,7 @@ pub fn dequantizeFoldedx4ColumnInto(
 fn x4Tile(
     comptime accumulate: bool,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_K,
+    lhs_blocks: []const dtype_mod.BlockQ8_K,
     packed_groups: []const types.BlockTQ2_0x4,
     blocks_per_row: usize,
     n: usize,
@@ -935,7 +936,7 @@ inline fn q2_0Codes32(qs: QKV32u8, comptime first_byte: usize) QKV32u8 {
 }
 
 /// sum(a) over one Q8_0 sub-block, exact i32.
-inline fn q8_0BlockSum(a: *const types.BlockQ8_0) i32 {
+inline fn q8_0BlockSum(a: *const dtype_mod.BlockQ8_0) i32 {
     const v: common.QKV32i8 = a.qs;
     return @reduce(.Add, @as(@Vector(32, i32), v));
 }
@@ -965,7 +966,7 @@ inline fn q2_0UnpackCodes(qs: QKV32u8, comptime k: usize) Q2_0Codes {
 /// (|sum(q*a)| <= 32*3*127 = 12192; maddubs pair sums <= 2*127*3 = 762, no
 /// i16 saturation) — every arm produces the exact integer, so all paths
 /// agree with cold.zig's dotQ2_0RowQ8_0 reference bitwise.
-inline fn q2_0CodeDot(codes: Q2_0Codes, a: *const types.BlockQ8_0) i32 {
+inline fn q2_0CodeDot(codes: Q2_0Codes, a: *const dtype_mod.BlockQ8_0) i32 {
     if (comptime builtin.cpu.arch == .aarch64) {
         const a0: common.QKV16i8 = a.qs[0..16].*;
         const a1: common.QKV16i8 = a.qs[16..32].*;
@@ -985,7 +986,7 @@ inline fn q2_0CodeDot(codes: Q2_0Codes, a: *const types.BlockQ8_0) i32 {
 /// so the product rounds identically in any lane order), unpacked with the
 /// same shuffle/shift machinery as the matmul kernels. Feeds the BLAS
 /// prefill panels, where the scalar decoder would dominate the GEMM.
-pub fn dequantizeRowQ2_0FastInto(dst: []f32, src: []const types.BlockQ2_0) !void {
+pub fn dequantizeRowQ2_0FastInto(dst: []f32, src: []const dtype_mod.BlockQ2_0) !void {
     if (dst.len != try types.checkedProduct(src.len, types.q2_0_block_size)) return types.QuantizedFormatError.InvalidQuantizedLength;
     for (src, 0..) |*block, block_index| {
         const d: @Vector(32, f32) = @splat(common.f16BitsToF32(block.d));
@@ -1027,7 +1028,7 @@ inline fn q2_0MicroTile(
     comptime rw: usize,
     comptime cw: usize,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_0,
+    lhs_blocks: []const dtype_mod.BlockQ8_0,
     rhs: *const types.QuantizedMatmulRhsQ2_0,
     n: usize,
     r: usize,
@@ -1040,9 +1041,9 @@ inline fn q2_0MicroTile(
     const blocks_per_row = rhs.rows.blocks_per_row;
     const sub_blocks_per_row = blocks_per_row * sub_per_block;
 
-    var wcols: [cw][]const types.BlockQ2_0 = undefined;
+    var wcols: [cw][]const dtype_mod.BlockQ2_0 = undefined;
     inline for (0..cw) |ci| wcols[ci] = rhs.columnBlocks(c + ci);
-    var arows: [rw][]const types.BlockQ8_0 = undefined;
+    var arows: [rw][]const dtype_mod.BlockQ8_0 = undefined;
     inline for (0..rw) |r2| arows[r2] = lhs_blocks[(r + r2) * sub_blocks_per_row ..][0..sub_blocks_per_row];
 
     var sums4: [rw][cw]@Vector(4, f32) = @splat(@splat(@splat(0)));
@@ -1098,7 +1099,7 @@ inline fn q2_0MicroTile(
 /// dotQ2_0RowQ8_0 / matmulQ2_0RhsRefRange reference.
 pub fn matmulQ2_0RhsTile(
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_0,
+    lhs_blocks: []const dtype_mod.BlockQ8_0,
     rhs: *const types.QuantizedMatmulRhsQ2_0,
     n: usize,
     r0: usize,

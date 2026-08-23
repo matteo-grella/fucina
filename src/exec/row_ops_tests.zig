@@ -76,9 +76,9 @@ test "pinned rowwise kernels: batched quant ops reproduce the m == 1 numerics bi
     // fixture pattern; q8_0 via row quantization.
     {
         const bpc = k / qm.types.qk_k_block_size;
-        const q4_blocks = try allocator.alloc(qm.BlockQ4_K, n * bpc);
+        const q4_blocks = try allocator.alloc(dtype_mod.BlockQ4_K, n * bpc);
         defer allocator.free(q4_blocks);
-        const q5_blocks = try allocator.alloc(qm.BlockQ5_K, n * bpc);
+        const q5_blocks = try allocator.alloc(dtype_mod.BlockQ5_K, n * bpc);
         defer allocator.free(q5_blocks);
         var block_vals: [256]f32 = undefined;
         for (q4_blocks, q5_blocks, 0..) |*b4, *b5, bi| {
@@ -90,7 +90,7 @@ test "pinned rowwise kernels: batched quant ops reproduce the m == 1 numerics bi
         defer q4_rhs.deinit();
         var q5_rhs = try qm.q5_k.packMatmulRhsQ5_Kx8(allocator, q5_blocks, n, k, bpc);
         defer q5_rhs.deinit();
-        const q6_blocks = try allocator.alloc(qm.BlockQ6_K, n * bpc);
+        const q6_blocks = try allocator.alloc(dtype_mod.BlockQ6_K, n * bpc);
         defer allocator.free(q6_blocks);
         for (q6_blocks, 0..) |*b, block_i| {
             b.d = f16BitsFromF32(0.04 + 0.001 * @as(f32, @floatFromInt(block_i % 5)));
@@ -101,7 +101,7 @@ test "pinned rowwise kernels: batched quant ops reproduce the m == 1 numerics bi
         var q6_rhs = try qm.q6_k.packMatmulRhsQ6_Kx4(allocator, q6_blocks, n, k, bpc);
         defer q6_rhs.deinit();
         const q8_bpc = try qm.q8k.q8_0BlockCount(k);
-        const q8_blocks = try allocator.alloc(qm.BlockQ8_0, n * q8_bpc);
+        const q8_blocks = try allocator.alloc(dtype_mod.BlockQ8_0, n * q8_bpc);
         defer allocator.free(q8_blocks);
         {
             var row: [512]f32 = undefined;

@@ -2,6 +2,7 @@
 //! packing, and the deterministic Q5_K MoE RHS builder.
 
 const std = @import("std");
+const dtype_mod = @import("../dtype.zig");
 const backend_mod = @import("../backend.zig");
 const exec = @import("../exec.zig");
 const Allocator = std.mem.Allocator;
@@ -25,7 +26,7 @@ pub fn f16BitsFromF32(x: f32) u16 {
 pub fn buildTestMoeRhsQ5K(allocator: Allocator, rows: usize, k_dim: usize, seed: usize) !exec.ExecContext.MoeRhs {
     const qm = backend_mod.quantized_matmul;
     const bpc = k_dim / qm.types.qk_k_block_size;
-    const blocks = try allocator.alloc(qm.BlockQ5_K, rows * bpc);
+    const blocks = try allocator.alloc(dtype_mod.BlockQ5_K, rows * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, block_i| {
         const bi = block_i + seed;

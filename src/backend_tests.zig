@@ -3,6 +3,7 @@
 //! dense matmul path, kernel dispatch with an attached work pool, and the
 //! native quantized-matmul bulk/remainder row split for off-multiple m.
 const std = @import("std");
+const dtype_mod = @import("dtype.zig");
 const backend_mod = @import("backend.zig");
 const native = @import("backend/native.zig");
 const quant = @import("backend/quant.zig");
@@ -202,7 +203,7 @@ fn rowsRefQ8_0(
     var lhs = try Tensor.fromSlice(allocator, &.{ m, split_test_k }, lhs_values[0 .. m * split_test_k]);
     defer lhs.deinit();
     const blocks_per_row = try quant.q8k.q8_0BlockCount(split_test_k);
-    const qlhs = try allocator.alloc(quant.BlockQ8_0, m * blocks_per_row);
+    const qlhs = try allocator.alloc(dtype_mod.BlockQ8_0, m * blocks_per_row);
     defer allocator.free(qlhs);
     try quant.q8k.quantizeRowsQ8_0Into(qlhs, &lhs);
     const out = try allocator.alloc(f32, m * split_test_n);
@@ -233,7 +234,7 @@ fn paddedTailRefQ4_Kx8(
 
 fn buildSplitRhsQ4_Kx8(allocator: std.mem.Allocator, random: std.Random) !quant.QuantizedMatmulRhsQ4_Kx8 {
     const blocks_per_row = try quant.blockCountForDType(.q4_k, split_test_k);
-    const blocks = try allocator.alloc(quant.BlockQ4_K, split_test_n * blocks_per_row);
+    const blocks = try allocator.alloc(dtype_mod.BlockQ4_K, split_test_n * blocks_per_row);
     defer allocator.free(blocks);
     var values: [256]f32 = undefined;
     for (blocks) |*block| {
@@ -245,7 +246,7 @@ fn buildSplitRhsQ4_Kx8(allocator: std.mem.Allocator, random: std.Random) !quant.
 
 fn buildSplitRhsQ5_Kx8(allocator: std.mem.Allocator, random: std.Random) !quant.QuantizedMatmulRhsQ5_Kx8 {
     const blocks_per_row = try quant.blockCountForDType(.q5_k, split_test_k);
-    const blocks = try allocator.alloc(quant.BlockQ5_K, split_test_n * blocks_per_row);
+    const blocks = try allocator.alloc(dtype_mod.BlockQ5_K, split_test_n * blocks_per_row);
     defer allocator.free(blocks);
     var values: [256]f32 = undefined;
     for (blocks) |*block| {
@@ -262,7 +263,7 @@ fn buildSplitRhsQ8_0x4(allocator: std.mem.Allocator, random: std.Random) !quant.
     fillSplitTestValues(values, random);
     var weights = try Tensor.fromSlice(allocator, &.{ split_test_n, split_test_k }, values);
     defer weights.deinit();
-    const blocks = try allocator.alloc(quant.BlockQ8_0, split_test_n * blocks_per_row);
+    const blocks = try allocator.alloc(dtype_mod.BlockQ8_0, split_test_n * blocks_per_row);
     defer allocator.free(blocks);
     try quant.q8k.quantizeRowsQ8_0Into(blocks, &weights);
     return quant.q8_0.packMatmulRhsQ8_0x4(allocator, blocks, split_test_n, split_test_k, blocks_per_row);

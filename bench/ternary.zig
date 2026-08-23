@@ -25,13 +25,14 @@ const std = @import("std");
 const Timer = @import("timer.zig").Timer;
 const membw = @import("membw.zig");
 const raw_backend = @import("raw_backend");
+const dtype_mod = raw_backend.dtype_info;
 
 const Tensor = raw_backend.Tensor;
 const native = raw_backend.native_impl;
 const qm = raw_backend.quantized_matmul;
-const BlockQ4_K = qm.BlockQ4_K;
-const BlockQ8_K = qm.BlockQ8_K;
-const BlockTQ2_0 = qm.BlockTQ2_0;
+const BlockQ4_K = dtype_mod.BlockQ4_K;
+const BlockQ8_K = dtype_mod.BlockQ8_K;
+const BlockTQ2_0 = dtype_mod.BlockTQ2_0;
 
 var io: std.Io = undefined;
 
@@ -355,7 +356,7 @@ fn teamScaling(allocator: std.mem.Allocator, out: *std.Io.Writer) !void {
     const w_vals = try allocator.alloc(f32, n * k);
     defer allocator.free(w_vals);
     fillWeights(w_vals);
-    const q4_blocks = try allocator.alloc(qm.BlockQ4_K, n * bpr);
+    const q4_blocks = try allocator.alloc(dtype_mod.BlockQ4_K, n * bpr);
     defer allocator.free(q4_blocks);
     for (0..n) |row| try qm.q4_k.quantizeRowQ4_KInto(q4_blocks[row * bpr ..][0..bpr], w_vals[row * k ..][0..k]);
     var rhs_t = try qm.ternary.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w_vals);
@@ -368,7 +369,7 @@ fn teamScaling(allocator: std.mem.Allocator, out: *std.Io.Writer) !void {
     defer allocator.free(qlhs);
     try qm.q8k.quantizeRowQ8_KInto(qlhs, x_vals);
 
-    const q4_bytes = n * bpr * @sizeOf(qm.BlockQ4_K);
+    const q4_bytes = n * bpr * @sizeOf(dtype_mod.BlockQ4_K);
     const t_bytes = n * bpr * @sizeOf(BlockTQ2_0);
 
     const Worker = struct {
@@ -403,7 +404,7 @@ fn teamScaling(allocator: std.mem.Allocator, out: *std.Io.Writer) !void {
             inline for ([_]@TypeOf((Worker{ .kind = .q4, .q4_rhs = undefined, .t_rhs = undefined, .qlhs = undefined, .out = undefined, .c0 = 0, .c1 = 0, .reps = 0 }).kind){ .q4, .tq2 }, 0..) |kind, ki| {
                 var workers: [8]Worker = undefined;
                 var outs: [8][]f32 = undefined;
-                var q4_copies: [8][]qm.BlockQ4_K = undefined;
+                var q4_copies: [8][]dtype_mod.BlockQ4_K = undefined;
                 var t_copies: [8]?qm.QuantizedMatmulRhsTQ2_0 = .{null} ** 8;
                 defer for (0..tc) |ti| {
                     allocator.free(outs[ti]);
@@ -417,7 +418,7 @@ fn teamScaling(allocator: std.mem.Allocator, out: *std.Io.Writer) !void {
                     var my_q4 = q4_blocks;
                     var my_t: *const qm.QuantizedMatmulRhsTQ2_0 = &rhs_t;
                     if (std.mem.eql(u8, mode, "indep")) {
-                        q4_copies[ti] = try allocator.dupe(qm.BlockQ4_K, q4_blocks);
+                        q4_copies[ti] = try allocator.dupe(dtype_mod.BlockQ4_K, q4_blocks);
                         my_q4 = q4_copies[ti];
                         t_copies[ti] = try qm.ternary.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w_vals);
                         my_t = &t_copies[ti].?;

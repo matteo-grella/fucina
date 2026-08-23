@@ -8,11 +8,13 @@
 //!
 //! Two things are deliberately NOT unified:
 //!
-//!   * `QFormat` is per-provider. Its integer values are the ABI the
-//!     provider's own shaders/kernels switch on, and the sets differ:
+//!   * `KernelFormatTag` is per-provider. Its integer values are the ABI
+//!     the provider's own shaders/kernels switch on, and the sets differ:
 //!     Metal has `tq2_0`/`tq2_0_folded` where CUDA has `q5_k`, so tag 3
-//!     means different formats on the two sides. Callers navigate this
-//!     through the capability flags, never by assuming a tag exists —
+//!     means different formats on the two sides. It is a wire tag, not a
+//!     format identity (`DType` is): callers map a dtype to its tag with
+//!     the provider's `kernelTag(dt)` (null when no kernel exists) and
+//!     gate on the capability flags, never by assuming a tag exists;
 //!     `assertConforms` checks flag and tag agree.
 //!   * Provider-private test hooks (CUDA's `setDecodeForTest`,
 //!     `setTransientFloorForTest`) are extras, not interface members.
@@ -50,7 +52,7 @@ pub const EsDType = enum(usize) { f16 = 0, f32 = 1 };
 
 /// Capability flags every provider declares. `enabled` says the provider
 /// is the selected one; the rest gate per-arm support and MUST agree with
-/// the provider's own `QFormat` tag set (checked below).
+/// the provider's own `KernelFormatTag` tag set (checked below).
 const capability_flags = [_][]const u8{
     "enabled",
     "has_quant_gemm",
@@ -60,7 +62,7 @@ const capability_flags = [_][]const u8{
     "has_attention_fwd",
 };
 
-/// Capability flag -> the `QFormat` tag it promises. A flag that is true
+/// Capability flag -> the `KernelFormatTag` tag it promises. A flag that is true
 /// without its tag (or a tag present with the flag false) is a compile
 /// error: that pairing is exactly what dispatch code keys on.
 const format_capabilities = [_]struct { flag: []const u8, tag: []const u8 }{
@@ -94,9 +96,9 @@ const Signature = struct {
 };
 
 /// Every function on the interface, with its exact parameter and return
-/// types. `P.QFormat` resolves per-provider (see the header).
+/// types. `P.KernelFormatTag` resolves per-provider (see the header).
 fn signatures(comptime P: type) []const Signature {
-    const QFormat = P.QFormat;
+    const KernelFormatTag = P.KernelFormatTag;
     return &[_]Signature{
         // Dispatch tracing (`FUCINA_GPU_TRACE`); the reset/dump pair is a
         // no-op when tracing is off, so callers invoke unconditionally.
@@ -117,9 +119,9 @@ fn signatures(comptime P: type) []const Signature {
         .{ .name = "shouldUseGpuAttentionFwd", .params = &.{ usize, usize, usize, usize }, .ret = bool },
         .{ .name = "shouldUseGpuQMoe", .params = &.{u64}, .ret = bool },
         .{ .name = "qmoeFillAcceptable", .params = &.{ usize, usize }, .ret = bool },
-        .{ .name = "shouldUseGpuDenseQuant", .params = &.{ QFormat, u64 }, .ret = bool },
-        .{ .name = "shouldUseGpuDenseQuantPacked", .params = &.{ QFormat, u64 }, .ret = bool },
-        .{ .name = "shouldUseGpuQuantDecode", .params = &.{ QFormat, usize, usize, usize }, .ret = bool },
+        .{ .name = "shouldUseGpuDenseQuant", .params = &.{ KernelFormatTag, u64 }, .ret = bool },
+        .{ .name = "shouldUseGpuDenseQuantPacked", .params = &.{ KernelFormatTag, u64 }, .ret = bool },
+        .{ .name = "shouldUseGpuQuantDecode", .params = &.{ KernelFormatTag, usize, usize, usize }, .ret = bool },
         .{ .name = "shouldUseGpuAttn", .params = &.{ usize, usize, usize, usize }, .ret = bool },
 
         // Seams the shared conformance suite drives (see gpu_conformance.zig):
@@ -167,22 +169,22 @@ fn signatures(comptime P: type) []const Signature {
         // Quantized GEMM: dense (blocking + async) and grouped MoE.
         .{
             .name = "gemmQuantNtAsync",
-            .params = &.{ QFormat, []const u8, bool, usize, usize, *const Tensor, *Tensor, usize, usize, usize, usize },
+            .params = &.{ KernelFormatTag, []const u8, bool, usize, usize, *const Tensor, *Tensor, usize, usize, usize, usize },
             .ret = bool,
         },
         .{
             .name = "gemmQuantNt",
-            .params = &.{ QFormat, []const u8, bool, usize, []const f32, []f32, usize, usize, usize },
+            .params = &.{ KernelFormatTag, []const u8, bool, usize, []const f32, []f32, usize, usize, usize },
             .ret = bool,
         },
         .{
             .name = "gemmQuantNtSharedABatch",
-            .params = &.{ QFormat, []const u8, bool, usize, usize, []const f32, []f32, usize, usize, usize, usize },
+            .params = &.{ KernelFormatTag, []const u8, bool, usize, usize, []const f32, []f32, usize, usize, usize, usize },
             .ret = bool,
         },
         .{
             .name = "gemmQGroupedNt",
-            .params = &.{ QFormat, []const u8, bool, usize, usize, usize, usize, []const QMMTile },
+            .params = &.{ KernelFormatTag, []const u8, bool, usize, usize, usize, usize, []const QMMTile },
             .ret = bool,
         },
         .{ .name = "qmoeStage", .params = &.{ usize, usize }, .ret = ?QMoeStage },
@@ -225,20 +227,21 @@ pub fn assertConforms(comptime P: type) void {
                     entry.name ++ "`, found a distinct type " ++ @typeName(@field(P, entry.name)));
         }
 
-        if (!@hasDecl(P, "QFormat")) @compileError(who ++ " is missing `QFormat`");
-        const QFormat = P.QFormat;
-        const qinfo = @typeInfo(QFormat);
+        if (!@hasDecl(P, "KernelFormatTag")) @compileError(who ++ " is missing `KernelFormatTag`");
+        if (!@hasDecl(P, "kernelTag")) @compileError(who ++ " is missing `kernelTag` (the DType -> KernelFormatTag map)");
+        const KernelFormatTag = P.KernelFormatTag;
+        const qinfo = @typeInfo(KernelFormatTag);
         if (qinfo != .@"enum" or qinfo.@"enum".tag_type != c_int)
-            @compileError(who ++ ".QFormat must be an `enum(c_int)` (its values are the kernel-side ABI)");
-        if (!@hasDecl(QFormat, "kMultiple"))
-            @compileError(who ++ ".QFormat is missing `kMultiple` (the per-format K block granularity)");
+            @compileError(who ++ ".KernelFormatTag must be an `enum(c_int)` (its values are the kernel-side ABI)");
+        if (!@hasDecl(KernelFormatTag, "kMultiple"))
+            @compileError(who ++ ".KernelFormatTag is missing `kMultiple` (the per-format K block granularity)");
         for (format_capabilities) |entry| {
             const flag = @field(P, entry.flag);
-            const has_tag = @hasField(QFormat, entry.tag);
+            const has_tag = @hasField(KernelFormatTag, entry.tag);
             if (flag and !has_tag)
-                @compileError(who ++ "." ++ entry.flag ++ " is true but its QFormat tag `" ++ entry.tag ++ "` does not exist");
+                @compileError(who ++ "." ++ entry.flag ++ " is true but its KernelFormatTag tag `" ++ entry.tag ++ "` does not exist");
             if (!flag and has_tag)
-                @compileError(who ++ ".QFormat declares `" ++ entry.tag ++ "` but " ++ entry.flag ++ " is false");
+                @compileError(who ++ ".KernelFormatTag declares `" ++ entry.tag ++ "` but " ++ entry.flag ++ " is false");
         }
 
         for (signatures(P)) |sig| {

@@ -1,8 +1,9 @@
-//! Behavioral tests for the quantized-matmul module (`quant.zig`): traits
-//! describing storage/scale layout per format (i8 W8A8, GGML row-block,
-//! K-quant, IQ/TQ/FP4), Q8_K x4 packed-vs-direct quantization parity, the
-//! exact i8 block-wise quantize-and-matmul path when the scale is 1, and
-//! the TQ2_0 borrowed-blocks RHS view (no copy, no-op deinit).
+//! Behavioral tests for the quantized-matmul module (`quant.zig`): the W8A8
+//! container's group-size policy and storage shape, the block byte sizes
+//! and block lengths `dtype.block_formats` registers per format, Q8_K x4
+//! packed-vs-direct quantization parity, the exact i8 block-wise
+//! quantize-and-matmul path when the scale is 1, and the TQ2_0
+//! borrowed-blocks RHS view (no copy, no-op deinit).
 const std = @import("std");
 const quant = @import("quant.zig");
 const dtype_mod = @import("../dtype.zig");
@@ -12,13 +13,6 @@ const DType = dtype_mod.DType;
 const Tensor = tensor.Tensor;
 
 const QuantizedMatmulRhsI8 = quant.QuantizedMatmulRhsI8;
-const QuantizedMatmulFormat = quant.QuantizedMatmulFormat;
-const QuantizedMatmulKernel = quant.types.QuantizedMatmulKernel;
-const QuantizedStorageLayout = quant.types.QuantizedStorageLayout;
-const QuantizedScaleLayout = quant.types.QuantizedScaleLayout;
-const matmulTraits = quant.types.matmulTraits;
-const matmulTraitsRuntime = quant.types.matmulTraitsRuntime;
-const supportsMatmul = quant.types.supportsMatmul;
 const qk_k_block_size = quant.types.qk_k_block_size;
 const BlockQ8_Kx4 = quant.BlockQ8_Kx4;
 const quantizeRowsQ8_K = quant.q8k.quantizeRowsQ8_K;
@@ -28,122 +22,59 @@ const quantizeRhsBlockwiseI8 = quant.quantizeRhsBlockwiseI8;
 const quantizeActivationsPerRowI8 = quant.quantizeActivationsPerRowI8;
 const matmulI8BlockwiseRange = quant.matmulI8BlockwiseRange;
 
-test "i8 block-wise quantized matmul traits describe storage layout" {
-    const traits = QuantizedMatmulRhsI8.traits;
+test "i8 block-wise quantized matmul RHS resolves group size and storage shape" {
+    try std.testing.expectEqual(@as(usize, 32), QuantizedMatmulRhsI8.default_group_size);
+    try std.testing.expectEqual(@as(usize, 32), QuantizedMatmulRhsI8.effectiveGroupSize(0));
+    try std.testing.expectEqual(@as(usize, 16), QuantizedMatmulRhsI8.effectiveGroupSize(16));
+    try std.testing.expectEqual(@as(usize, 3), QuantizedMatmulRhsI8.groupCountForSize(65, 32));
 
-    try std.testing.expectEqual(QuantizedMatmulFormat.fucina_w8a8_rhs, traits.format);
-    try std.testing.expectEqual(DType.f32, traits.source_dtype);
-    try std.testing.expectEqual(DType.i8, traits.storage_dtype);
-    try std.testing.expectEqual(DType.f32, traits.scale_dtype);
-    try std.testing.expectEqual(@as(usize, 32), traits.effectiveGroupSize(0));
-    try std.testing.expectEqual(@as(usize, 16), traits.effectiveGroupSize(16));
-    try std.testing.expectEqual(@as(usize, 3), traits.groupCount(65, 32));
-    try std.testing.expectEqual([2]usize{ 7, 65 }, traits.storageShape(65, 7));
-    try std.testing.expectEqual([2]usize{ 7, 3 }, traits.scaleShape(65, 7, 32));
-    try std.testing.expectEqual(@as(usize, 2 * 65 + 4), traits.storageIndex(2, 4, 65));
-    try std.testing.expectEqual(@as(usize, 2 * 3 + 1), traits.scaleIndex(2, 1, 3));
-    try std.testing.expectEqual(QuantizedMatmulKernel.fucina_w8a8_f32, traits.matmul_kernel);
+    // Storage is [n][k] i8 and scales are [n][num_groups] f32: column 2's
+    // k-vector starts at 2 * k and its group-1 scale sits at 2 * 3 + 1.
+    const allocator = std.testing.allocator;
+    const values = [_]f32{1} ** (65 * 7);
+    var rhs = try Tensor.fromSlice(allocator, &.{ 65, 7 }, &values);
+    defer rhs.deinit();
+    var qrhs = try quant.quantizeRhsBlockwiseI8(allocator, &rhs, 0);
+    defer qrhs.deinit();
+    try std.testing.expectEqual(@as(usize, 32), qrhs.group_size);
+    try std.testing.expectEqual(@as(usize, 3), qrhs.num_groups);
+    try std.testing.expectEqualSlices(usize, &.{ 7, 65 }, qrhs.qw.shape.slice());
+    try std.testing.expectEqualSlices(usize, &.{ 7, 3 }, qrhs.scales.shape.slice());
 }
 
-test "ggml_q8_0 traits describe GGML block layout" {
-    const traits = matmulTraits(.ggml_q8_0);
-
-    try std.testing.expectEqual(QuantizedMatmulFormat.ggml_q8_0, traits.format);
-    try std.testing.expectEqual(DType.f32, traits.source_dtype);
-    try std.testing.expectEqual(DType.i8, traits.storage_dtype);
-    try std.testing.expectEqual(DType.f16, traits.scale_dtype);
-    try std.testing.expectEqual(@as(usize, 32), traits.block_size);
-    try std.testing.expectEqual(@as(?usize, 34), traits.block_byte_size);
-    try std.testing.expectEqual(QuantizedStorageLayout.ggml_blocks, traits.storage_layout);
-    try std.testing.expectEqual(QuantizedScaleLayout.inline_block_scale, traits.scale_layout);
-    try std.testing.expectEqual(@as(usize, 3), traits.storageRowSize(96));
-    try std.testing.expectEqual([2]usize{ 7, 3 }, traits.storageShape(96, 7));
-    try std.testing.expectEqual(QuantizedMatmulKernel.ggml_q8_0, traits.matmul_kernel);
-}
-
-test "ggml_q4_0 traits describe GGML block layout" {
-    const traits = matmulTraits(.ggml_q4_0);
-
-    try std.testing.expectEqual(QuantizedMatmulFormat.ggml_q4_0, traits.format);
-    try std.testing.expectEqual(DType.f32, traits.source_dtype);
-    try std.testing.expectEqual(DType.u8, traits.storage_dtype);
-    try std.testing.expectEqual(DType.f16, traits.scale_dtype);
-    try std.testing.expectEqual(@as(usize, 32), traits.block_size);
-    try std.testing.expectEqual(@as(?usize, 18), traits.block_byte_size);
-    try std.testing.expectEqual(QuantizedStorageLayout.ggml_blocks, traits.storage_layout);
-    try std.testing.expectEqual(QuantizedScaleLayout.inline_block_scale, traits.scale_layout);
-    try std.testing.expectEqual(@as(usize, 3), traits.storageRowSize(96));
-    try std.testing.expectEqual([2]usize{ 7, 3 }, traits.storageShape(96, 7));
-    try std.testing.expectEqual(QuantizedMatmulKernel.ggml_q4_0, traits.matmul_kernel);
-}
-
-test "GGML K-quant traits register block formats" {
-    const cases = [_]struct {
-        format: QuantizedMatmulFormat,
-        size: usize,
-        kernel: QuantizedMatmulKernel,
-        supports_from_float: bool,
-        supports_to_float: bool,
-        supports_matmul: bool,
-    }{
-        .{ .format = .ggml_q2_k, .size = 84, .kernel = .ggml_q2_k, .supports_from_float = false, .supports_to_float = true, .supports_matmul = true },
-        .{ .format = .ggml_q3_k, .size = 110, .kernel = .ggml_q3_k, .supports_from_float = false, .supports_to_float = true, .supports_matmul = true },
-        .{ .format = .ggml_q4_k, .size = 144, .kernel = .ggml_q4_k, .supports_from_float = true, .supports_to_float = true, .supports_matmul = true },
-        .{ .format = .ggml_q5_k, .size = 176, .kernel = .ggml_q5_k, .supports_from_float = true, .supports_to_float = true, .supports_matmul = true },
-        .{ .format = .ggml_q6_k, .size = 210, .kernel = .ggml_q6_k, .supports_from_float = true, .supports_to_float = true, .supports_matmul = true },
-        .{ .format = .ggml_q8_k, .size = 292, .kernel = .unsupported, .supports_from_float = true, .supports_to_float = true, .supports_matmul = false },
+test "block formats register GGML block lengths and byte sizes" {
+    const cases = [_]struct { dtype: DType, block_size: usize, byte_size: usize }{
+        .{ .dtype = .q8_0, .block_size = 32, .byte_size = 34 },
+        .{ .dtype = .q4_0, .block_size = 32, .byte_size = 18 },
+        .{ .dtype = .q2_k, .block_size = 256, .byte_size = 84 },
+        .{ .dtype = .q3_k, .block_size = 256, .byte_size = 110 },
+        .{ .dtype = .q4_k, .block_size = 256, .byte_size = 144 },
+        .{ .dtype = .q5_k, .block_size = 256, .byte_size = 176 },
+        .{ .dtype = .q6_k, .block_size = 256, .byte_size = 210 },
+        .{ .dtype = .q8_k, .block_size = 256, .byte_size = 292 },
+        .{ .dtype = .iq1_s, .block_size = 256, .byte_size = 50 },
+        .{ .dtype = .iq1_m, .block_size = 256, .byte_size = 56 },
+        .{ .dtype = .iq2_xxs, .block_size = 256, .byte_size = 66 },
+        .{ .dtype = .iq2_xs, .block_size = 256, .byte_size = 74 },
+        .{ .dtype = .iq2_s, .block_size = 256, .byte_size = 82 },
+        .{ .dtype = .iq3_xxs, .block_size = 256, .byte_size = 98 },
+        .{ .dtype = .iq3_s, .block_size = 256, .byte_size = 110 },
+        .{ .dtype = .iq4_nl, .block_size = 32, .byte_size = 18 },
+        .{ .dtype = .iq4_xs, .block_size = 256, .byte_size = 136 },
+        .{ .dtype = .tq1_0, .block_size = 256, .byte_size = 54 },
+        .{ .dtype = .tq2_0, .block_size = 256, .byte_size = 66 },
+        .{ .dtype = .mxfp4, .block_size = 32, .byte_size = 17 },
+        .{ .dtype = .nvfp4, .block_size = 64, .byte_size = 36 },
     };
-
-    for (cases) |case| {
-        const traits = matmulTraitsRuntime(case.format);
-        try std.testing.expectEqual(case.format, traits.format);
-        try std.testing.expectEqual(@as(usize, 256), traits.block_size);
-        try std.testing.expectEqual(@as(?usize, case.size), traits.block_byte_size);
-        try std.testing.expectEqual(QuantizedStorageLayout.ggml_blocks, traits.storage_layout);
-        try std.testing.expectEqual(QuantizedScaleLayout.inline_block_scale, traits.scale_layout);
-        try std.testing.expectEqual(case.supports_from_float, traits.supports_from_float);
-        try std.testing.expectEqual(case.supports_to_float, traits.supports_to_float);
-        try std.testing.expectEqual(case.supports_matmul, traits.supports_matmul);
-        try std.testing.expectEqual(case.supports_matmul, supportsMatmul(case.format));
-        try std.testing.expectEqual(case.kernel, traits.matmul_kernel);
+    inline for (cases) |case| {
+        try std.testing.expectEqual(case.block_size, dtype_mod.blockSize(case.dtype));
+        try std.testing.expectEqual(case.byte_size, dtype_mod.blockByteSize(case.dtype));
     }
-}
-
-test "GGML IQ, TQ, and FP4 traits register implemented kernels" {
-    const cases = [_]struct {
-        format: QuantizedMatmulFormat,
-        block_size: usize,
-        size: usize,
-        kernel: QuantizedMatmulKernel,
-        supports_from_float: bool,
-    }{
-        .{ .format = .ggml_iq1_s, .block_size = 256, .size = 50, .kernel = .ggml_iq1_s, .supports_from_float = false },
-        .{ .format = .ggml_iq1_m, .block_size = 256, .size = 56, .kernel = .ggml_iq1_m, .supports_from_float = false },
-        .{ .format = .ggml_iq2_xxs, .block_size = 256, .size = 66, .kernel = .ggml_iq2_xxs, .supports_from_float = false },
-        .{ .format = .ggml_iq2_xs, .block_size = 256, .size = 74, .kernel = .ggml_iq2_xs, .supports_from_float = false },
-        .{ .format = .ggml_iq2_s, .block_size = 256, .size = 82, .kernel = .ggml_iq2_s, .supports_from_float = false },
-        .{ .format = .ggml_iq3_xxs, .block_size = 256, .size = 98, .kernel = .ggml_iq3_xxs, .supports_from_float = false },
-        .{ .format = .ggml_iq3_s, .block_size = 256, .size = 110, .kernel = .ggml_iq3_s, .supports_from_float = false },
-        .{ .format = .ggml_iq4_nl, .block_size = 32, .size = 18, .kernel = .ggml_iq4_nl, .supports_from_float = false },
-        .{ .format = .ggml_iq4_xs, .block_size = 256, .size = 136, .kernel = .ggml_iq4_xs, .supports_from_float = false },
-        .{ .format = .ggml_tq1_0, .block_size = 256, .size = 54, .kernel = .ggml_tq1_0, .supports_from_float = false },
-        .{ .format = .ggml_tq2_0, .block_size = 256, .size = 66, .kernel = .ggml_tq2_0, .supports_from_float = true },
-        .{ .format = .ggml_mxfp4, .block_size = 32, .size = 17, .kernel = .ggml_mxfp4, .supports_from_float = false },
-        .{ .format = .ggml_nvfp4, .block_size = 64, .size = 36, .kernel = .ggml_nvfp4, .supports_from_float = false },
-    };
-
-    for (cases) |case| {
-        const traits = matmulTraitsRuntime(case.format);
-        try std.testing.expectEqual(case.format, traits.format);
-        try std.testing.expectEqual(case.block_size, traits.block_size);
-        try std.testing.expectEqual(@as(?usize, case.size), traits.block_byte_size);
-        try std.testing.expectEqual(QuantizedStorageLayout.ggml_blocks, traits.storage_layout);
-        try std.testing.expectEqual(QuantizedScaleLayout.inline_block_scale, traits.scale_layout);
-        try std.testing.expectEqual(case.supports_from_float, traits.supports_from_float);
-        try std.testing.expectEqual(true, traits.supports_to_float);
-        try std.testing.expectEqual(true, traits.supports_matmul);
-        try std.testing.expectEqual(true, supportsMatmul(case.format));
-        try std.testing.expectEqual(case.kernel, traits.matmul_kernel);
+    // q8_1 and q8_k are registered block formats without a matmul RHS kernel.
+    try std.testing.expect(!dtype_mod.supportsQuantizedMatmulRhs(.q8_1));
+    try std.testing.expect(!dtype_mod.supportsQuantizedMatmulRhs(.q8_k));
+    inline for (cases) |case| {
+        if (case.dtype != .q8_k) try std.testing.expect(dtype_mod.supportsQuantizedMatmulRhs(case.dtype));
     }
 }
 
@@ -239,4 +170,3 @@ test "tq2_0 borrowed-blocks RHS: no copy, matmul parity with the owning construc
         quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n + 1, owned.rows.blocks),
     );
 }
-

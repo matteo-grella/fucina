@@ -222,7 +222,7 @@ fn parseExpsName(tensor_name: []const u8) ?ExpsName {
     return .{ .layer = layer, .proj = proj };
 }
 
-const BlockMXFP4 = fucina.internal.backend_mod.quantized_matmul.BlockMXFP4;
+const BlockMXFP4 = fucina.quant.BlockMXFP4;
 
 /// One 32-element group, source pair-packed nibbles (elements 2i, 2i+1 per
 /// byte) → ggml split-halves (qs[j] holds elements j and j+16). Codes and

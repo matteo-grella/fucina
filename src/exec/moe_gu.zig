@@ -59,14 +59,14 @@ const GemmaMoeDecodeTask = struct {
     gate: *const backend_mod.QuantizedMatmulRhsQ6_Kx4,
     up: *const backend_mod.QuantizedMatmulRhsQ6_Kx4,
     down: *const backend_mod.QuantizedMatmulRhsQ8_0x4,
-    qx: []const backend_mod.quantized_matmul.BlockQ8_K,
+    qx: []const dtype_mod.BlockQ8_K,
     out_pe: usize,
     hidden: usize,
     weight: f32,
     gate_buf: []f32,
     up_buf: []f32,
     g_buf: []f32,
-    qg: []backend_mod.quantized_matmul.BlockQ8_0,
+    qg: []dtype_mod.BlockQ8_0,
     out: []f32,
     profile_enabled: bool,
     io: ?std.Io,
@@ -105,14 +105,14 @@ const GemmaMoeDecodeChainState = struct {
     gate: *const backend_mod.QuantizedMatmulRhsQ6_Kx4,
     up: *const backend_mod.QuantizedMatmulRhsQ6_Kx4,
     down: *const backend_mod.QuantizedMatmulRhsQ8_0x4,
-    qx: []const backend_mod.quantized_matmul.BlockQ8_K,
+    qx: []const dtype_mod.BlockQ8_K,
     out_pe: usize,
     hidden: usize,
     weight: f32,
     gate_buf: []f32,
     up_buf: []f32,
     g_buf: []f32,
-    qg: []backend_mod.quantized_matmul.BlockQ8_0,
+    qg: []dtype_mod.BlockQ8_0,
     out: []f32,
     profile_enabled: bool,
     io: ?std.Io,
@@ -200,7 +200,7 @@ pub fn decodePacked(
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
     exec_moe.lockMoeDecodeScratch(ctx);
     defer exec_moe.unlockMoeDecodeScratch(ctx);
-    const sv = try exec_moe.carveMoeDecodeChainScratch(ctx, qm.BlockQ8_0, GemmaMoeDecodeChainState, GemmaMoeDecodeChainTask, try qm.q8k.qkBlockCount(hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
+    const sv = try exec_moe.carveMoeDecodeChainScratch(ctx, dtype_mod.BlockQ8_0, GemmaMoeDecodeChainState, GemmaMoeDecodeChainTask, try qm.q8k.qkBlockCount(hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
     const gate_buf = sv.gate_buf;
     const up_buf = sv.up_buf;
     const g_buf = sv.g_buf;
@@ -411,7 +411,6 @@ fn gemmaBatchBody(
     profile: ?*MoeBatchProfile,
     total_start: i128,
 ) !Tensor {
-    const qm = backend_mod.quantized_matmul;
     const a = ctx.allocator;
     const seq = shape.seq;
     const hidden = shape.hidden;
@@ -427,7 +426,7 @@ fn gemmaBatchBody(
     const order = route.order;
 
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
-    const qx = try a.alloc(qm.BlockQ8_K, n_pairs * bpc_in);
+    const qx = try a.alloc(dtype_mod.BlockQ8_K, n_pairs * bpc_in);
     defer a.free(qx);
     const gate_buf = try a.alloc(f32, n_pairs * out_pe);
     defer a.free(gate_buf);
@@ -435,7 +434,7 @@ fn gemmaBatchBody(
     defer a.free(up_buf);
     const g_buf = try a.alloc(f32, n_pairs * out_pe);
     defer a.free(g_buf);
-    const qg = try a.alloc(qm.BlockQ8_0, n_pairs * bpc_g);
+    const qg = try a.alloc(dtype_mod.BlockQ8_0, n_pairs * bpc_g);
     defer a.free(qg);
     const down_buf = try a.alloc(f32, n_pairs * hidden);
     defer a.free(down_buf);
@@ -752,9 +751,9 @@ fn batchRawGpu(
     const bpr_dn = out_pe / 32;
     if (gw.guBlockCount() != n_expert * gu_out * bpr_gu) return null;
     if (gw.dn_blocks.len != n_expert * hidden * bpr_dn) return null;
-    const gu_format: backend_mod.gpu_impl.QFormat = switch (gw.gu) {
-        .q6_k => .q6_k,
-        .q4_k => .q4_k,
+    const gu_format: backend_mod.gpu_impl.KernelFormatTag = switch (gw.gu) {
+        .q6_k => comptime backend_mod.gpu_impl.kernelTag(.q6_k).?,
+        .q4_k => comptime backend_mod.gpu_impl.kernelTag(.q4_k).?,
     };
     const gu_bytes: []const u8 = switch (gw.gu) {
         inline else => |gu_blocks| std.mem.sliceAsBytes(gu_blocks),
@@ -1017,7 +1016,7 @@ fn gemmaMoeRawGuView(
 fn gemmaMoeRawGuMatmul(
     view: *const GemmaMoeRawGuRhs,
     out: []f32,
-    qlhs: []const backend_mod.quantized_matmul.BlockQ8_K,
+    qlhs: []const dtype_mod.BlockQ8_K,
     out_dim: usize,
     m: usize,
     c0: usize,
@@ -1063,7 +1062,7 @@ fn gemmaMoeRawQ8View(
 
 const GemmaMoeRawDecodeTask = struct {
     gw: RawExpertWeights,
-    qx: []const backend_mod.quantized_matmul.BlockQ8_K,
+    qx: []const dtype_mod.BlockQ8_K,
     out_pe: usize,
     hidden: usize,
     expert_index: usize,
@@ -1071,7 +1070,7 @@ const GemmaMoeRawDecodeTask = struct {
     gate_buf: []f32,
     up_buf: []f32,
     g_buf: []f32,
-    qg: []backend_mod.quantized_matmul.BlockQ8_0,
+    qg: []dtype_mod.BlockQ8_0,
     out: []f32,
     profile_enabled: bool,
     io: ?std.Io,
@@ -1114,7 +1113,7 @@ fn runGemmaMoeRawDecodeTask(task: *const GemmaMoeRawDecodeTask) void {
 
 const GemmaMoeRawDecodeChainState = struct {
     gw: RawExpertWeights,
-    qx: []const backend_mod.quantized_matmul.BlockQ8_K,
+    qx: []const dtype_mod.BlockQ8_K,
     out_pe: usize,
     hidden: usize,
     expert_index: usize,
@@ -1122,7 +1121,7 @@ const GemmaMoeRawDecodeChainState = struct {
     gate_buf: []f32,
     up_buf: []f32,
     g_buf: []f32,
-    qg: []backend_mod.quantized_matmul.BlockQ8_0,
+    qg: []dtype_mod.BlockQ8_0,
     out: []f32,
     profile_enabled: bool,
     io: ?std.Io,
@@ -1215,7 +1214,7 @@ pub fn decodeRaw(
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
     exec_moe.lockMoeDecodeScratch(ctx);
     defer exec_moe.unlockMoeDecodeScratch(ctx);
-    const sv = try exec_moe.carveMoeDecodeChainScratch(ctx, qm.BlockQ8_0, GemmaMoeRawDecodeChainState, GemmaMoeRawDecodeChainTask, try qm.q8k.qkBlockCount(hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
+    const sv = try exec_moe.carveMoeDecodeChainScratch(ctx, dtype_mod.BlockQ8_0, GemmaMoeRawDecodeChainState, GemmaMoeRawDecodeChainTask, try qm.q8k.qkBlockCount(hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
     if (profile) |p| p.alloc_ns += moeBatchProfileElapsed(alloc_start, io);
 
     const gather_quant_start = moeBatchProfileStart(profile_enabled, io);
@@ -1343,7 +1342,7 @@ pub fn decodeRaw(
 
 const GemmaMoeRawGuMatmulTask = struct {
     rhs: GemmaMoeRawGuRhs,
-    qlhs: []const backend_mod.quantized_matmul.BlockQ8_K,
+    qlhs: []const dtype_mod.BlockQ8_K,
     bpc: usize,
     row_start: usize,
     m: usize,
@@ -1375,7 +1374,7 @@ fn runGemmaMoeRawGuMatmulTaskOpaque(ctx: *anyopaque) void {
 
 const GemmaMoeRawQ8MatmulTask = struct {
     rhs: backend_mod.QuantizedMatmulRhsQ8_0,
-    qlhs: []const backend_mod.quantized_matmul.BlockQ8_0,
+    qlhs: []const dtype_mod.BlockQ8_0,
     bpc: usize,
     row_start: usize,
     m: usize,
@@ -1495,7 +1494,7 @@ const GemmaMoeGatherTask = struct {
     bpc_in: usize,
     row_start: usize,
     m: usize,
-    qx: []backend_mod.quantized_matmul.BlockQ8_K,
+    qx: []dtype_mod.BlockQ8_K,
     profile_enabled: bool,
     io: ?std.Io,
     elapsed_ns: i128,
@@ -1523,7 +1522,7 @@ fn runGemmaMoeGatherTaskOpaque(ctx: *anyopaque) void {
 
 const GemmaMoeQ6MatmulTask = struct {
     rhs: *const backend_mod.QuantizedMatmulRhsQ6_Kx4,
-    qlhs: []const backend_mod.quantized_matmul.BlockQ8_K,
+    qlhs: []const dtype_mod.BlockQ8_K,
     bpc: usize,
     row_start: usize,
     m: usize,
@@ -1558,7 +1557,7 @@ const GemmaMoeGegluTask = struct {
     gate_buf: []const f32,
     up_buf: []const f32,
     g_buf: []f32,
-    qg: []backend_mod.quantized_matmul.BlockQ8_0,
+    qg: []dtype_mod.BlockQ8_0,
     out_pe: usize,
     bpc_g: usize,
     row_start: usize,
@@ -1595,7 +1594,7 @@ fn runGemmaMoeGegluTaskOpaque(ctx: *anyopaque) void {
 
 const GemmaMoeQ8MatmulTask = struct {
     rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4,
-    qlhs: []const backend_mod.quantized_matmul.BlockQ8_0,
+    qlhs: []const dtype_mod.BlockQ8_0,
     bpc: usize,
     row_start: usize,
     m: usize,

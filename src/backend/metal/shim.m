@@ -59,7 +59,7 @@ enum {
 };
 
 // Quantized-weights GEMM formats (ggml_mul_mm.metal). Must mirror
-// metal.QFormat in metal.zig.
+// metal.KernelFormatTag in metal.zig.
 enum { FUCINA_QFMT_Q8_0 = 0, FUCINA_QFMT_Q6_K = 1, FUCINA_QFMT_Q4_K = 2, FUCINA_QFMT_TQ2_0 = 3, FUCINA_QFMT_TQ2_0_FOLDED = 4 };
 #define FUCINA_QMM_FORMATS 5
 

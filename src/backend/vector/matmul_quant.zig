@@ -48,13 +48,13 @@ pub fn matmul2DI8BlockwiseInto(
 pub fn matmul2DQ1_0RhsInto(
     pc: ParallelConfig,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_0,
+    lhs_blocks: []const dtype_mod.BlockQ8_0,
     rhs: *const types.QuantizedMatmulRhsQ1_0,
     m: usize,
     n: usize,
     k: usize,
 ) void {
-    const Parallel = QuantizedRhsParallel(types.BlockQ8_0, types.QuantizedMatmulRhsQ1_0, cold.matmulQ1_0RhsTile, .{});
+    const Parallel = QuantizedRhsParallel(dtype_mod.BlockQ8_0, types.QuantizedMatmulRhsQ1_0, cold.matmulQ1_0RhsTile, .{});
     if (Parallel.maybeParallel(pc, out, lhs_blocks, rhs, m, n, k)) return;
     cold.matmulQ1_0RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -62,13 +62,13 @@ pub fn matmul2DQ1_0RhsInto(
 pub fn matmul2DQ2_0RhsInto(
     pc: ParallelConfig,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_0,
+    lhs_blocks: []const dtype_mod.BlockQ8_0,
     rhs: *const types.QuantizedMatmulRhsQ2_0,
     m: usize,
     n: usize,
     k: usize,
 ) void {
-    const Parallel = QuantizedRhsParallel(types.BlockQ8_0, types.QuantizedMatmulRhsQ2_0, ternary.matmulQ2_0RhsTile, .{});
+    const Parallel = QuantizedRhsParallel(dtype_mod.BlockQ8_0, types.QuantizedMatmulRhsQ2_0, ternary.matmulQ2_0RhsTile, .{});
     if (Parallel.maybeParallel(pc, out, lhs_blocks, rhs, m, n, k)) return;
     ternary.matmulQ2_0RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -76,13 +76,13 @@ pub fn matmul2DQ2_0RhsInto(
 pub fn matmul2DQ8_0RhsInto(
     pc: ParallelConfig,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_0,
+    lhs_blocks: []const dtype_mod.BlockQ8_0,
     rhs: *const types.QuantizedMatmulRhsQ8_0,
     m: usize,
     n: usize,
     k: usize,
 ) void {
-    const Parallel = QuantizedRhsParallel(types.BlockQ8_0, types.QuantizedMatmulRhsQ8_0, q8_0.matmulQ8_0RhsTile, .{});
+    const Parallel = QuantizedRhsParallel(dtype_mod.BlockQ8_0, types.QuantizedMatmulRhsQ8_0, q8_0.matmulQ8_0RhsTile, .{});
     if (Parallel.maybeParallel(pc, out, lhs_blocks, rhs, m, n, k)) return;
     q8_0.matmulQ8_0RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -90,13 +90,13 @@ pub fn matmul2DQ8_0RhsInto(
 pub fn matmul2DQ8_0x4RhsInto(
     pc: ParallelConfig,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_0,
+    lhs_blocks: []const dtype_mod.BlockQ8_0,
     rhs: *const types.QuantizedMatmulRhsQ8_0x4,
     m: usize,
     n: usize,
     k: usize,
 ) void {
-    const Parallel = QuantizedRhsParallel(types.BlockQ8_0, types.QuantizedMatmulRhsQ8_0x4, q8_0.matmulQ8_0x4RhsTile, .{ .col_group = 4 });
+    const Parallel = QuantizedRhsParallel(dtype_mod.BlockQ8_0, types.QuantizedMatmulRhsQ8_0x4, q8_0.matmulQ8_0x4RhsTile, .{ .col_group = 4 });
     if (Parallel.maybeParallel(pc, out, lhs_blocks, rhs, m, n, k)) return;
     q8_0.matmulQ8_0x4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -131,13 +131,13 @@ pub fn matmul2DQ8_0x4PackedPaddedRhsInto(
 pub fn matmul2DQ4_0RhsInto(
     pc: ParallelConfig,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_0,
+    lhs_blocks: []const dtype_mod.BlockQ8_0,
     rhs: *const types.QuantizedMatmulRhsQ4_0,
     m: usize,
     n: usize,
     k: usize,
 ) void {
-    const Parallel = QuantizedRhsParallel(types.BlockQ8_0, types.QuantizedMatmulRhsQ4_0, cold.matmulQ4_0RhsTile, .{});
+    const Parallel = QuantizedRhsParallel(dtype_mod.BlockQ8_0, types.QuantizedMatmulRhsQ4_0, cold.matmulQ4_0RhsTile, .{});
     if (Parallel.maybeParallel(pc, out, lhs_blocks, rhs, m, n, k)) return;
     cold.matmulQ4_0RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -145,13 +145,13 @@ pub fn matmul2DQ4_0RhsInto(
 pub fn matmul2DQ4_1RhsInto(
     pc: ParallelConfig,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_1,
+    lhs_blocks: []const dtype_mod.BlockQ8_1,
     rhs: *const types.QuantizedMatmulRhsQ4_1,
     m: usize,
     n: usize,
     k: usize,
 ) void {
-    const Parallel = QuantizedRhsParallel(types.BlockQ8_1, types.QuantizedMatmulRhsQ4_1, cold.matmulQ4_1RhsTile, .{});
+    const Parallel = QuantizedRhsParallel(dtype_mod.BlockQ8_1, types.QuantizedMatmulRhsQ4_1, cold.matmulQ4_1RhsTile, .{});
     if (Parallel.maybeParallel(pc, out, lhs_blocks, rhs, m, n, k)) return;
     cold.matmulQ4_1RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -159,13 +159,13 @@ pub fn matmul2DQ4_1RhsInto(
 pub fn matmul2DQ5_0RhsInto(
     pc: ParallelConfig,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_0,
+    lhs_blocks: []const dtype_mod.BlockQ8_0,
     rhs: *const types.QuantizedMatmulRhsQ5_0,
     m: usize,
     n: usize,
     k: usize,
 ) void {
-    const Parallel = QuantizedRhsParallel(types.BlockQ8_0, types.QuantizedMatmulRhsQ5_0, cold.matmulQ5_0RhsTile, .{});
+    const Parallel = QuantizedRhsParallel(dtype_mod.BlockQ8_0, types.QuantizedMatmulRhsQ5_0, cold.matmulQ5_0RhsTile, .{});
     if (Parallel.maybeParallel(pc, out, lhs_blocks, rhs, m, n, k)) return;
     cold.matmulQ5_0RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -173,13 +173,13 @@ pub fn matmul2DQ5_0RhsInto(
 pub fn matmul2DQ5_1RhsInto(
     pc: ParallelConfig,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_1,
+    lhs_blocks: []const dtype_mod.BlockQ8_1,
     rhs: *const types.QuantizedMatmulRhsQ5_1,
     m: usize,
     n: usize,
     k: usize,
 ) void {
-    const Parallel = QuantizedRhsParallel(types.BlockQ8_1, types.QuantizedMatmulRhsQ5_1, cold.matmulQ5_1RhsTile, .{});
+    const Parallel = QuantizedRhsParallel(dtype_mod.BlockQ8_1, types.QuantizedMatmulRhsQ5_1, cold.matmulQ5_1RhsTile, .{});
     if (Parallel.maybeParallel(pc, out, lhs_blocks, rhs, m, n, k)) return;
     cold.matmulQ5_1RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -187,13 +187,13 @@ pub fn matmul2DQ5_1RhsInto(
 pub fn matmul2DQ2_KRhsInto(
     pc: ParallelConfig,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_K,
+    lhs_blocks: []const dtype_mod.BlockQ8_K,
     rhs: *const types.QuantizedMatmulRhsQ2_K,
     m: usize,
     n: usize,
     k: usize,
 ) void {
-    const Parallel = QuantizedRhsParallel(types.BlockQ8_K, types.QuantizedMatmulRhsQ2_K, cold.matmulQ2_KRhsTile, .{});
+    const Parallel = QuantizedRhsParallel(dtype_mod.BlockQ8_K, types.QuantizedMatmulRhsQ2_K, cold.matmulQ2_KRhsTile, .{});
     if (Parallel.maybeParallel(pc, out, lhs_blocks, rhs, m, n, k)) return;
     cold.matmulQ2_KRhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -201,13 +201,13 @@ pub fn matmul2DQ2_KRhsInto(
 pub fn matmul2DQ3_KRhsInto(
     pc: ParallelConfig,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_K,
+    lhs_blocks: []const dtype_mod.BlockQ8_K,
     rhs: *const types.QuantizedMatmulRhsQ3_K,
     m: usize,
     n: usize,
     k: usize,
 ) void {
-    const Parallel = QuantizedRhsParallel(types.BlockQ8_K, types.QuantizedMatmulRhsQ3_K, cold.matmulQ3_KRhsTile, .{});
+    const Parallel = QuantizedRhsParallel(dtype_mod.BlockQ8_K, types.QuantizedMatmulRhsQ3_K, cold.matmulQ3_KRhsTile, .{});
     if (Parallel.maybeParallel(pc, out, lhs_blocks, rhs, m, n, k)) return;
     cold.matmulQ3_KRhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -215,13 +215,13 @@ pub fn matmul2DQ3_KRhsInto(
 pub fn matmul2DQ4_KRhsInto(
     pc: ParallelConfig,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_K,
+    lhs_blocks: []const dtype_mod.BlockQ8_K,
     rhs: *const types.QuantizedMatmulRhsQ4_K,
     m: usize,
     n: usize,
     k: usize,
 ) void {
-    const Parallel = QuantizedRhsParallel(types.BlockQ8_K, types.QuantizedMatmulRhsQ4_K, q4_k.matmulQ4_KRhsTile, .{});
+    const Parallel = QuantizedRhsParallel(dtype_mod.BlockQ8_K, types.QuantizedMatmulRhsQ4_K, q4_k.matmulQ4_KRhsTile, .{});
     if (Parallel.maybeParallel(pc, out, lhs_blocks, rhs, m, n, k)) return;
     q4_k.matmulQ4_KRhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -229,13 +229,13 @@ pub fn matmul2DQ4_KRhsInto(
 pub fn matmul2DQ4_Kx4RhsInto(
     pc: ParallelConfig,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_K,
+    lhs_blocks: []const dtype_mod.BlockQ8_K,
     rhs: *const types.QuantizedMatmulRhsQ4_Kx4,
     m: usize,
     n: usize,
     k: usize,
 ) void {
-    const Parallel = QuantizedRhsParallel(types.BlockQ8_K, types.QuantizedMatmulRhsQ4_Kx4, q4_k.matmulQ4_Kx4RhsTile, .{ .col_group = 4 });
+    const Parallel = QuantizedRhsParallel(dtype_mod.BlockQ8_K, types.QuantizedMatmulRhsQ4_Kx4, q4_k.matmulQ4_Kx4RhsTile, .{ .col_group = 4 });
     if (Parallel.maybeParallel(pc, out, lhs_blocks, rhs, m, n, k)) return;
     q4_k.matmulQ4_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -243,13 +243,13 @@ pub fn matmul2DQ4_Kx4RhsInto(
 pub fn matmul2DQ4_Kx8RhsInto(
     pc: ParallelConfig,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_K,
+    lhs_blocks: []const dtype_mod.BlockQ8_K,
     rhs: *const types.QuantizedMatmulRhsQ4_Kx8,
     m: usize,
     n: usize,
     k: usize,
 ) void {
-    const Parallel = QuantizedRhsParallel(types.BlockQ8_K, types.QuantizedMatmulRhsQ4_Kx8, q4_k.matmulQ4_Kx8RhsTile, .{ .col_group = 8, .col_gate = .small_m_x2, .row_cap_3_at_m128 = true });
+    const Parallel = QuantizedRhsParallel(dtype_mod.BlockQ8_K, types.QuantizedMatmulRhsQ4_Kx8, q4_k.matmulQ4_Kx8RhsTile, .{ .col_group = 8, .col_gate = .small_m_x2, .row_cap_3_at_m128 = true });
     if (Parallel.maybeParallel(pc, out, lhs_blocks, rhs, m, n, k)) return;
     q4_k.matmulQ4_Kx8RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -271,13 +271,13 @@ pub fn matmul2DQ4_Kx8Q8_Kx4RhsInto(
 pub fn matmul2DQ4_Kx2MmlaRhsInto(
     pc: ParallelConfig,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_K,
+    lhs_blocks: []const dtype_mod.BlockQ8_K,
     rhs: *const types.QuantizedMatmulRhsQ4_Kx2Mmla,
     m: usize,
     n: usize,
     k: usize,
 ) void {
-    const Parallel = QuantizedRhsParallel(types.BlockQ8_K, types.QuantizedMatmulRhsQ4_Kx2Mmla, q4_k.matmulQ4_Kx2MmlaRhsTile, .{ .col_group = 2, .col_gate = .small_m_x2 });
+    const Parallel = QuantizedRhsParallel(dtype_mod.BlockQ8_K, types.QuantizedMatmulRhsQ4_Kx2Mmla, q4_k.matmulQ4_Kx2MmlaRhsTile, .{ .col_group = 2, .col_gate = .small_m_x2 });
     if (Parallel.maybeParallel(pc, out, lhs_blocks, rhs, m, n, k)) return;
     q4_k.matmulQ4_Kx2MmlaRhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -299,13 +299,13 @@ pub fn matmul2DQ4_Kx2MmlaQ8_Kx2MmlaRhsInto(
 pub fn matmul2DQ5_Kx8RhsInto(
     pc: ParallelConfig,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_K,
+    lhs_blocks: []const dtype_mod.BlockQ8_K,
     rhs: *const types.QuantizedMatmulRhsQ5_Kx8,
     m: usize,
     n: usize,
     k: usize,
 ) void {
-    const Parallel = QuantizedRhsParallel(types.BlockQ8_K, types.QuantizedMatmulRhsQ5_Kx8, q5_k.matmulQ5_Kx8RhsTile, .{ .col_group = 8, .col_gate = .small_m_x2, .row_cap_3_at_m128 = true });
+    const Parallel = QuantizedRhsParallel(dtype_mod.BlockQ8_K, types.QuantizedMatmulRhsQ5_Kx8, q5_k.matmulQ5_Kx8RhsTile, .{ .col_group = 8, .col_gate = .small_m_x2, .row_cap_3_at_m128 = true });
     if (Parallel.maybeParallel(pc, out, lhs_blocks, rhs, m, n, k)) return;
     q5_k.matmulQ5_Kx8RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -327,13 +327,13 @@ pub fn matmul2DQ5_Kx8Q8_Kx4RhsInto(
 pub fn matmul2DQ5_KRhsInto(
     pc: ParallelConfig,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_K,
+    lhs_blocks: []const dtype_mod.BlockQ8_K,
     rhs: *const types.QuantizedMatmulRhsQ5_K,
     m: usize,
     n: usize,
     k: usize,
 ) void {
-    const Parallel = QuantizedRhsParallel(types.BlockQ8_K, types.QuantizedMatmulRhsQ5_K, q5_k.matmulQ5_KRhsTile, .{});
+    const Parallel = QuantizedRhsParallel(dtype_mod.BlockQ8_K, types.QuantizedMatmulRhsQ5_K, q5_k.matmulQ5_KRhsTile, .{});
     if (Parallel.maybeParallel(pc, out, lhs_blocks, rhs, m, n, k)) return;
     q5_k.matmulQ5_KRhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -341,13 +341,13 @@ pub fn matmul2DQ5_KRhsInto(
 pub fn matmul2DQ6_KRhsInto(
     pc: ParallelConfig,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_K,
+    lhs_blocks: []const dtype_mod.BlockQ8_K,
     rhs: *const types.QuantizedMatmulRhsQ6_K,
     m: usize,
     n: usize,
     k: usize,
 ) void {
-    const Parallel = QuantizedRhsParallel(types.BlockQ8_K, types.QuantizedMatmulRhsQ6_K, q6_k.matmulQ6_KRhsTile, .{});
+    const Parallel = QuantizedRhsParallel(dtype_mod.BlockQ8_K, types.QuantizedMatmulRhsQ6_K, q6_k.matmulQ6_KRhsTile, .{});
     if (Parallel.maybeParallel(pc, out, lhs_blocks, rhs, m, n, k)) return;
     q6_k.matmulQ6_KRhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -355,13 +355,13 @@ pub fn matmul2DQ6_KRhsInto(
 pub fn matmul2DQ6_Kx4RhsInto(
     pc: ParallelConfig,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_K,
+    lhs_blocks: []const dtype_mod.BlockQ8_K,
     rhs: *const types.QuantizedMatmulRhsQ6_Kx4,
     m: usize,
     n: usize,
     k: usize,
 ) void {
-    const Parallel = QuantizedRhsParallel(types.BlockQ8_K, types.QuantizedMatmulRhsQ6_Kx4, q6_k.matmulQ6_Kx4RhsTile, .{ .col_group = 4 });
+    const Parallel = QuantizedRhsParallel(dtype_mod.BlockQ8_K, types.QuantizedMatmulRhsQ6_Kx4, q6_k.matmulQ6_Kx4RhsTile, .{ .col_group = 4 });
     if (Parallel.maybeParallel(pc, out, lhs_blocks, rhs, m, n, k)) return;
     q6_k.matmulQ6_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
@@ -370,14 +370,14 @@ pub fn matmul2DTableQ8_0RhsInto(
     pc: ParallelConfig,
     comptime rhs_dtype: DType,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_0,
+    lhs_blocks: []const dtype_mod.BlockQ8_0,
     rhs: *const types.QuantizedMatmulRhsRowsFor(rhs_dtype),
     m: usize,
     n: usize,
     k: usize,
 ) void {
     const Parallel = QuantizedRhsParallel(
-        types.BlockQ8_0,
+        dtype_mod.BlockQ8_0,
         types.QuantizedMatmulRhsRowsFor(rhs_dtype),
         TableQ8_0Tile(rhs_dtype).run,
         .{},
@@ -389,14 +389,14 @@ pub fn matmul2DTableQ8_0RhsInto(
 pub fn matmul2DTQ2_0RhsInto(
     pc: ParallelConfig,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_K,
+    lhs_blocks: []const dtype_mod.BlockQ8_K,
     rhs: *const types.QuantizedMatmulRhsTQ2_0,
     m: usize,
     n: usize,
     k: usize,
 ) void {
     const Parallel = QuantizedRhsParallel(
-        types.BlockQ8_K,
+        dtype_mod.BlockQ8_K,
         types.QuantizedMatmulRhsTQ2_0,
         ternary.matmulTQ2_0RhsTile,
         .{},
@@ -431,14 +431,14 @@ pub fn matmul2DTableQ8_KRhsInto(
     pc: ParallelConfig,
     comptime rhs_dtype: DType,
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_K,
+    lhs_blocks: []const dtype_mod.BlockQ8_K,
     rhs: *const types.QuantizedMatmulRhsRowsFor(rhs_dtype),
     m: usize,
     n: usize,
     k: usize,
 ) void {
     const Parallel = QuantizedRhsParallel(
-        types.BlockQ8_K,
+        dtype_mod.BlockQ8_K,
         types.QuantizedMatmulRhsRowsFor(rhs_dtype),
         TableQ8_KTile(rhs_dtype).run,
         .{},
@@ -622,7 +622,7 @@ fn TableQ8_0Tile(comptime rhs_dtype: DType) type {
     return struct {
         fn run(
             out: []f32,
-            lhs_blocks: []const types.BlockQ8_0,
+            lhs_blocks: []const dtype_mod.BlockQ8_0,
             rhs: *const types.QuantizedMatmulRhsRowsFor(rhs_dtype),
             n: usize,
             r0: usize,
@@ -639,7 +639,7 @@ fn TableQ8_KTile(comptime rhs_dtype: DType) type {
     return struct {
         fn run(
             out: []f32,
-            lhs_blocks: []const types.BlockQ8_K,
+            lhs_blocks: []const dtype_mod.BlockQ8_K,
             rhs: *const types.QuantizedMatmulRhsRowsFor(rhs_dtype),
             n: usize,
             r0: usize,

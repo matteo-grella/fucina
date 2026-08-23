@@ -1023,7 +1023,7 @@ unsupported operation is a compile error, never a runtime failure
 | Float (differentiable) | `.f32` | Full surface: autograd (`variable`, `backward`, `grad`), all math/NN ops (§4), load-time dense `packRhs`, all views and structural ops |
 | Typed float | `.f16`, `.bf16`, `.f64` (`supportsForwardFloatMath`) | Forward math: the native typed set (`add/sub/mul/div/sum/mean/sumAll/dot/scale/divScalar`, `to`), the full structural set (`split`/`merge`/`flatten`/`reshape`/`sliceStep`/`flip`/`roll`/`stack`/`repeatAxis` + the §3.10 base set), and — **f16/bf16 only** — the widened forward set (unary family, gated, softmax/norm family, remaining reductions, masks, `pad`, `einsum`, load-time dense `packRhs`; §4.19). **f16/bf16 only, autograd LEAVES**: `variable`/`variableFromSlice` with f32 gradients; differentiable `to` casts and mixed-RHS `dot`/`einsum` are the graph entries (§5.1) |
 | Typed scalar constant | `.bool`, `.u8`, `.u16`, `.i8`, `.i16`, `.i32`, `.i64`, `.f8_e4m3`, `.f8_e5m2` | Constants only; construction, data access, structural ops, `to` (scalar casts, §3.8), and integer forward math (§4.19): wrapping `add`/`sub`/`mul`, `maximum`/`minimum`, explicit `divTrunc`/`divFloor` + `rem`/`mod`, bitwise `bitAnd`/`bitOr`/`bitXor`, i64-returning `sum`/`sumAll`, plus exact integer `compare` (§4.6). `.bool` keeps only `to`, the counting `sum`/`sumAll`, and the mask combinators `logicalAnd`/`logicalOr`/`logicalXor`/`logicalNot`. The f8 storage floats (`.f8_e4m3`/`.f8_e5m2`, §8.1) keep only construction, data access, structural ops, and `to` VALUE casts through the f32 bridge (no integer or float forward math) |
-| Block-quantized constant | `q1_0/q2_0`, `q4_0 … q8_k`, `iq*`, `tq1_0/tq2_0`, `mxfp4`, `nvfp4` (`isBlockQuantized`) | Constants only; block construction, `to(.f32)` dequantize, `getRows`, row `concat`, `packRhs`/`packRhsLayout` (§10) |
+| Block-quantized constant | `q1_0/q2_0`, `q4_0 … q8_k`, `iq*`, `tq1_0/tq2_0`, `mxfp4`, `nvfp4` (`isBlockQuantized`) | Constants only; block construction, `to(.f32)` dequantize, `getRows`, row `concat`, `packRhs`/`packRhsAs` (§10) |
 
 Notes that follow from the dtype layer (`src/dtype.zig`, detailed in §8):
 
@@ -2062,7 +2062,7 @@ reductions `max`, `min`, `prod`, `variance`, `logsumexp` (f32 results,
 `dataConst`, `copyTo`, `requiresGrad`, `axis`, `hasTag`, `dim`, `shape`,
 `isContiguous`, `withTags`, `to`, `materialize`, `concat`, `getRows` — all
 §3 — plus
-`packRhs`, `packRhsLayout` (packed matmul RHS containers; §10, used by
+`packRhs`, `packRhsAs` (packed matmul RHS containers; §10, used by
 `dotPacked` in §4). The same root helper `fucina.PackedRhs(dtype)` names
 the f32/f16/bf16 dense pack and each quantized `packRhs` return type (§10).
 
@@ -2117,7 +2117,7 @@ Every operation below shares one contract, implemented by the shared tails
   `UnaryOp`, `Reduction`, `CrossEntropyOptions`, `StandardizeOptions`,
   `StandardizeAccumulation`, `StandardizeEpsMode`, `RouterTopKOptions`,
   `RopeMode`, `RopeTable`, `RopeTheta`, `MoeRhs`, `MoeBatchProfile`,
-  `PackedRhs`, `PackedRhsLayout`, `GatedOp`. The remaining option types
+  `PackedRhs`, `GatedOp`. The remaining option types
   named in this section (`CompareOp`, `MatmulKind`, `MseOptions`,
   `HuberOptions`, `BceOptions`, `KlDivOptions`, `LinearDistillOptions`,
   `SoftmaxExtOptions`, `NormOrder`) live in
@@ -3134,8 +3134,8 @@ test "dotTernarySte encodes the latent weight per call" {
 - On block-quantized tensors: `packRhs(ctx)` packs a rank-2 weight into the
   ISA-best layout for its dtype — q8_0→x4, q6_k→x4, q5_k→x8, q4_k→x2mmla on
   aarch64+i8mm targets else x8 (the return type is
-  `fucina.PackedRhs(dtype)`); `packRhsLayout(ctx, layout)` forces a specific
-  `fucina.PackedRhsLayout` instead.
+  `fucina.PackedRhs(dtype)`); `packRhsAs(ctx, Rhs)` forces a specific
+  container type (`fucina.quant.QuantizedMatmulRhsQ4_Kx8`, ...) instead.
 - On f32/f16/bf16 tensors: `packRhs(ctx)` snapshots a rank-2 `[out, contract]`
   weight into the shared f32 output-row-panel layout. f16/bf16 values widen
   once while packing; the caller owns and `deinit()`s the returned
@@ -4135,7 +4135,7 @@ that tier live at generation boundaries.
   typed `sum`/`mean` (§8.3); `argmax` returns i64 (§4.16).
 - **Block-quantized** (q8_0, q4_k, ...): no arithmetic — `to(.f32)`
   (dequantize), `getRows` (§4.17), row-axis `concat`, `packRhs` /
-  `packRhsLayout` (§4.9), and constructors/views (§3, §10). Their main math
+  `packRhsAs` (§4.9), and constructors/views (§3, §10). Their main math
   role is as the constant RHS of `dot` (§4.8) and `dotPacked` (§4.9).
 - **Integer dtypes** (e.g. token-id tensors) — ordinary integer forward
   math, plain exec loops (integers are never the hot path): wrapping
@@ -7957,32 +7957,35 @@ matmul-ing against the pack is the hot inference path. The public facade has
 two layout families, plus an older backend-only typed bridge:
 
 - Dense f32/f16/bf16 weights: `weights.packRhs(ctx)` snapshots a rank-2
-  `[out, contract]` weight into an owned `fucina.PackedRhs(dtype)` whose
-  layout is `.dense_f32`. f16/bf16 values widen once at pack time. The public
+  `[out, contract]` weight into an owned `fucina.PackedRhs(dtype)`, the
+  `PackedDenseRhs` f32 panel (`dtype == .f32`). f16/bf16 values widen once
+  at pack time. The public
   `x.dotPacked(ctx, &packed, contract_tag, out_tag)` takes an f32 lhs and
   dispatches through GPU, BLAS, or the skinny-m wide-output microkernel by the
   fixed table in §9.5. The source can be released after packing; the model
   owns and deinitializes the pack.
 
-- Block-quantized weights: the `PackedRhsLayout` members `q8_0x4`, `q6_kx4`,
-  `q4_kx4`, `q4_kx8`, `q4_kx2mmla`, and `q5_kx8` name the interleaved layouts;
-  `backend.PackedRhsFor(layout)` maps a layout to its container type, and the
-  facade's `fucina.PackedRhs(dtype)` picks the ISA-best container per dtype
+- Block-quantized weights: the container types `QuantizedMatmulRhsQ8_0x4`,
+  `Q6_Kx4`, `Q4_Kx4`, `Q4_Kx8`, `Q4_Kx2Mmla`, and `Q5_Kx8` are the
+  interleaved layouts, each carrying `pub const dtype`;
+  `backend.PackedRhsFor(dtype)` (the facade's `fucina.PackedRhs(dtype)`) is
+  the one dtype-to-container map and picks the ISA-best container per dtype
   (`q8_0→x4`, `q6_k→x4`, `q5_k→x8`, `q4_k→x2mmla` when
   `supports_q4_k_mmla` else `x8`). Model code calls
-  `weights.packRhs(ctx)` / `packRhsLayout(ctx, .q4_kx8)` on a rank-2
-  quantized tensor and feeds the pack to `dotPacked` — full semantics in §10.
+  `weights.packRhs(ctx)` / `packRhsAs(ctx, fucina.quant.QuantizedMatmulRhsQ4_Kx8)`
+  on a rank-2 quantized tensor and feeds the pack to `dotPacked` — full
+  semantics in §10.
 - Backend-only same-dtype f16/bf16 bridge: `backend/packed.zig` also defines
-  `PackedMatmulFormat =
-  enum { f16_rhs_f32, bf16_rhs_f32 }` and `PackedMatmulRhsFor(dtype)`; the
-  pack widens the RHS to f32 once (`packRhs` → owns an f32 tensor; caller
-  `deinit()`s the container). `matmul2DIntoUncheckedPackedRhsTyped` then runs
-  f32 GEMM with widen/narrow bridges, with a dedicated `m == 1` GEMV fast
-  path that dots the f16/bf16 activation row directly against the packed f32
-  columns (column-parallel over the pool). This older bridge preserves a
-  same-dtype f16/bf16 result and is distinct from the public f32-lhs
-  `.dense_f32` layout. It is reached through
-  `ExecContext.packMatmulRhsTyped` / `matmul2DWithPackedRhsTyped` (§6).
+  `PackedMatmulRhsFor(dtype)` for `.f16`/`.bf16` (the container's `dtype` is
+  the 16-bit source); the pack widens the RHS to f32 once (`packRhs` → owns
+  an f32 tensor; caller `deinit()`s the container).
+  `matmul2DIntoUncheckedPackedRhsTyped` then runs f32 GEMM with widen/narrow
+  bridges, with a dedicated `m == 1` GEMV fast path that dots the f16/bf16
+  activation row directly against the packed f32 columns (column-parallel
+  over the pool). This bridge preserves a same-dtype f16/bf16 result and is
+  distinct from the public f32-lhs `PackedDenseRhs` panel. It is reached
+  through `ExecContext.packMatmulRhsTyped` / `matmul2DWithPackedRhsTyped`
+  (§6).
 
 **Arch-gated int8 dot arms.** The K-quant/Q8 kernels select their inner dot
 at comptime: aarch64 `sdot` inline asm (all aarch64), aarch64 `smmla` behind
@@ -8087,7 +8090,8 @@ by the ObjC shim (`src/backend/metal/shim.m`): the MLX "steel" f32/f16 GEMM
   `denseQuantMatmulGpu` seam (`src/exec/quant_matmul.zig`) offloads
   `m ≥ 32` stable-weight matmuls behind the compact/raw or packed-CPU
   per-format gate when
-  `k % QFormat.kMultiple() == 0` (32 for q8_0, 256 for q4_k/q6_k/tq2_0) and
+  `k % KernelFormatTag.kMultiple() == 0` (32 for q8_0, 256 for
+  q4_k/q6_k/tq2_0; the tag comes from the provider's `kernelTag(dtype)`) and
   `n % 4 == 0`. `gemmQuantNtAsync` binds input/output tensor storage
   directly and copies its ≤4 KiB tile table into command-owned bytes (up to
   8192 rows); shared-input batches encode multiple weight matrices without
@@ -8380,19 +8384,20 @@ Reading the table:
 - First-class end-to-end (encoder + hot kernel + GGUF export): `.q8_0`,
   `.q4_k`, `.q5_k`, `.q6_k`, `.tq2_0`, `.q2_0` — the first four additionally
   have facade packed (column-interleaved) RHS layouts; the ternary formats
-  `.tq2_0`/`.q2_0` have no facade pack (`PackedRhsLayout` has no ternary
-  member; `packRhs` on a `.tq2_0` or `.q2_0` tensor is a compile error),
+  `.tq2_0`/`.q2_0` have no facade pack (`PackedRhs(dt)` has no ternary arm;
+  `packRhs` on a `.tq2_0` or `.q2_0` tensor is a compile error),
   though the kernel tier ships an x4 column-interleaved TQ2_0 pack
   (`packMatmulRhsTQ2_0x4`, §10.7) that the PTQTP weight wrappers consume
   (§13.2.1).
 
-The kernel tier's trait layer describes each format programmatically:
-`QuantizedMatmulFormat` (enum: `fucina_w8a8_rhs` plus `ggml_*` per dtype),
-`QuantizedMatmulTraits` (block size, byte size, storage/scale layout,
-`supports_from_float`/`supports_to_float`/`supports_matmul`,
-`matmul_kernel`), `matmulTraits` (comptime) / `matmulTraitsRuntime`,
-`formatForDType`, `supportsMatmul`, and the `QuantizedMatmulKernel`,
-`QuantizedStorageLayout`, `QuantizedScaleLayout` enums. Block-size constants
+`DType` is the one identity of every format; `dtype.block_formats`
+describes each block format programmatically (block struct, logical
+elements per block), read through `dtype.blockSize`, `dtype.blockByteSize`,
+`dtype.Storage`, `dtype.isBlockQuantized`, and
+`dtype.supportsQuantizedMatmulRhs` (false for `q8_1`/`q8_k`, the two block
+formats without an RHS kernel). Every RHS container (`QuantizedMatmulRhsQ4_K`,
+the packs, `QuantizedRowsFor(dt)`, ...) carries `pub const dtype: DType`, and
+`AnyQuantizedMatmulRhs` is tagged by `DType` names. Block-size constants
 (`q8_0_block_size` = 32, `qk_k_block_size` = 256, `k_scale_size` = 12,
 `iq4_nl_block_size`/`mxfp4_block_size` = 32, `nvfp4_block_size` = 64,
 `nvfp4_subblock_size` = 16, `q1_0_block_size`/`q2_0_block_size` = 128, `q4_0_block_size`,
@@ -8401,9 +8406,11 @@ The kernel tier's trait layer describes each format programmatically:
 is re-exported at the root.
 
 Separate from the ggml formats, the kernel tier also ships a Fucina-native
-**W8A8** container (`QuantizedMatmulRhsI8`, format `.fucina_w8a8_rhs`):
-symmetric per-(column, group) int8 weights stored transposed `[n][k]` with
-f32 scales (`default_i8_group_size` = 32), built by `quantizeRhsBlockwiseI8`
+**W8A8** container (`QuantizedMatmulRhsI8`, `AnyQuantizedMatmulRhs` tag
+`.fucina_w8a8_rhs`): symmetric per-(column, group) int8 weights stored
+transposed `[n][k]` with f32 scales (`default_group_size` = 32, resolved by
+`effectiveGroupSize`/`groupCountForSize`; it carries no `DType`), built by
+`quantizeRhsBlockwiseI8`
 and multiplied by `matmulI8BlockwiseTile`/`matmulI8BlockwiseRange` against
 per-row int8 activations (`quantizeActivationsPerRowI8`). It is not a tensor
 dtype and has no facade surface; it exists for W8A8 experiments below the
@@ -8445,7 +8452,7 @@ pub fn materialize(self, ctx) !Self                                      // copy
 pub fn concat(self, ctx, comptime tag, others: []const *const Self) !Self// rank-2, row axis only
 pub fn getRows(self, ctx, comptime tag, indices: []const usize, comptime out_tag) !Tensor(f32 ...)
 pub fn packRhs(self, ctx) !PackedRhs(dtype)                              // §10.3
-pub fn packRhsLayout(self, ctx, comptime layout: PackedRhsLayout) !PackedRhsFor(layout)
+pub fn packRhsAs(self, ctx, comptime Rhs: type) !Rhs                  // explicit container
 ```
 
 Semantics:
@@ -8609,31 +8616,32 @@ out so the innermost loop feeds the target's int8 dot instruction
 (`sdot`/`smmla` on aarch64, VNNI/AVX2 on x86). Root exports:
 
 ```zig
-pub const PackedRhsLayout = enum { dense_f32, q8_0x4, q6_kx4, q4_kx4, q4_kx8, q4_kx2mmla, q5_kx8 };
 pub fn PackedRhs(comptime dt: DType) type   // dense panel or ISA-best quantized layout
 pub const QuantizedMatmulRhsQ8_0x4;         // + Q4_Kx4, Q4_Kx8, Q4_Kx2Mmla, Q5_Kx8, Q6_Kx4
 pub const supports_q4_k_mmla: bool;         // aarch64 + i8mm target feature
 ```
 
-`PackedRhs(dt)` maps f32/f16/bf16→`.dense_f32`, q8_0→x4, q6_k→x4,
-q5_k→x8, and q4_k→x2mmla on aarch64+i8mm targets, x8 otherwise. Each
-container owns its snapshot (`PackedDenseRhs.rhs` or quantized blocks), holds
-`k`/`n`, and carries a comptime `layout` tag that `dotPacked` dispatches on.
-`PackedRhsFor(layout)` (kernel tier) maps a layout back to its container type.
-The `q4_kx4` layout exists only for kernel comparisons and has no facade entry
-(comptime error).
+`PackedRhs(dt)` (the backend's `PackedRhsFor`) maps f32/f16/bf16 to the
+`PackedDenseRhs` f32 panel, q8_0→x4, q6_k→x4, q5_k→x8, and q4_k→x2mmla on
+aarch64+i8mm targets, x8 otherwise. Each container owns its snapshot
+(`PackedDenseRhs.rhs` or quantized blocks), holds `k`/`n`, and carries a
+comptime `dtype` that `dotPacked` dispatches on (the Q4_K x8/x2mmla split is
+the container type itself: compare `@TypeOf(rhs)` against
+`fucina.quant.QuantizedMatmulRhsQ4_Kx2Mmla`). The `Q4_Kx4` container exists
+only for kernel comparisons and has no facade entry (comptime error).
 
 Packing and consuming happen on the facade:
 
 - Dense `w.packRhs(ctx)` — snapshot a rank-2 contiguous f32/f16/bf16
-  `[out, contract]` tensor as `.dense_f32`; f16/bf16 widen once. Logical
+  `[out, contract]` tensor as a `PackedDenseRhs` panel; f16/bf16 widen once. Logical
   output rows stay contiguous and the row count is padded to the four-output
   microkernel tile. Equivalent `ExecContext` entry:
   `packDenseMatmulRhsTyped`.
-- Quantized `w.packRhs(ctx)` / `w.packRhsLayout(ctx, layout)` — pack a
+- Quantized `w.packRhs(ctx)` / `w.packRhsAs(ctx, Rhs)` — pack a
   rank-2 contiguous tensor (`TensorError.UnsupportedView` when not
-  contiguous). `packRhsLayout` is the escape hatch to force a non-default
-  layout (e.g. x8 on MMLA hardware to exercise the fused kernels). Equivalent
+  contiguous). `packRhsAs` is the escape hatch to force a non-default
+  container (e.g. `QuantizedMatmulRhsQ4_Kx8` on MMLA hardware to exercise
+  the fused kernels). Equivalent
   `ExecContext` entries: `packMatmulRhsQ8_0x4`,
   `packMatmulRhsQ6_Kx4`, `packMatmulRhsQ4_Kx4`, `packMatmulRhsQ4_Kx8`,
   `packMatmulRhsQ4_Kx2Mmla`, `packMatmulRhsQ5_Kx8`.

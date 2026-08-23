@@ -5,6 +5,7 @@
 //! reference.
 const std = @import("std");
 const builtin = @import("builtin");
+const dtype_mod = @import("../../dtype.zig");
 const tensor = @import("../../tensor.zig");
 const qm = @import("../quant.zig");
 const q8k = @import("q8k.zig");
@@ -21,9 +22,9 @@ test "Q6_Kx4 paired gate/up tile matches two independent tiles" {
     const m = 5;
     const bpc = k / types.qk_k_block_size;
 
-    const gate_blocks = try allocator.alloc(types.BlockQ6_K, n * bpc);
+    const gate_blocks = try allocator.alloc(dtype_mod.BlockQ6_K, n * bpc);
     defer allocator.free(gate_blocks);
-    const up_blocks = try allocator.alloc(types.BlockQ6_K, n * bpc);
+    const up_blocks = try allocator.alloc(dtype_mod.BlockQ6_K, n * bpc);
     defer allocator.free(up_blocks);
     for (gate_blocks, up_blocks, 0..) |*g, *u, bi| {
         g.d = common.f32ToF16Bits(0.021 + 0.001 * @as(f32, @floatFromInt(bi % 7)));
@@ -93,7 +94,7 @@ test "Q6_K compact-vs-packed cross-layout matmul is bit-identical at decode shap
     var prng = std.Random.DefaultPrng.init(0x36d8be51f04a97c2);
     const random = prng.random();
 
-    const blocks = try allocator.alloc(types.BlockQ6_K, n * bpc);
+    const blocks = try allocator.alloc(dtype_mod.BlockQ6_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks) |*b| fillRandomBlockQ6_K(b, random);
 
@@ -127,7 +128,7 @@ test "Q6_K column-outer matmul matches row-outer tile" {
     const n = 8;
     const m = 17;
     const bpc = k / types.qk_k_block_size;
-    const blocks = try allocator.alloc(types.BlockQ6_K, n * bpc);
+    const blocks = try allocator.alloc(dtype_mod.BlockQ6_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {
         b.d = common.f32ToF16Bits(0.03 + 0.001 * @as(f32, @floatFromInt(bi % 5)));
@@ -164,7 +165,7 @@ test "Q6_K lane-packed Q8_Kx4 col-outer is bit-identical on the same activations
     const n = 9;
     const m = 16; // multiple of 4 so packRowsQ8_Kx4 applies (no padding)
     const bpc = k / types.qk_k_block_size;
-    const blocks = try allocator.alloc(types.BlockQ6_K, n * bpc);
+    const blocks = try allocator.alloc(dtype_mod.BlockQ6_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {
         b.d = common.f32ToF16Bits(0.03 + 0.001 * @as(f32, @floatFromInt(bi % 5)));
@@ -200,7 +201,7 @@ test "Q6_K packRowsQ8_Kx4PaddedInto + lane-packed col-outer matches row-outer ti
     const n = 7;
     const m = 13; // not a multiple of 4
     const bpc = k / types.qk_k_block_size;
-    const blocks = try allocator.alloc(types.BlockQ6_K, n * bpc);
+    const blocks = try allocator.alloc(dtype_mod.BlockQ6_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {
         b.d = common.f32ToF16Bits(0.025 + 0.002 * @as(f32, @floatFromInt(bi % 4)));
@@ -243,7 +244,7 @@ test "Q6_K col-outer kernels: split column ranges are bit-identical to full rang
     const split = 256;
     const m = 5;
     const bpc = k / types.qk_k_block_size;
-    const blocks = try allocator.alloc(types.BlockQ6_K, n * bpc);
+    const blocks = try allocator.alloc(dtype_mod.BlockQ6_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {
         b.d = common.f32ToF16Bits(0.03 + 0.001 * @as(f32, @floatFromInt(bi % 5)));
@@ -314,7 +315,7 @@ fn fillRandomBlockQ6_Kx4(block: *types.BlockQ6_Kx4, random: std.Random) void {
 
 // bsums[g] = Σ qs[g*16..][0..16] is part of the BlockQ8_K format contract
 // (quantizeRowQ8_KInto always writes it); the biased SIMD arms rely on it.
-fn setQ8KBsums(block: *types.BlockQ8_K) void {
+fn setQ8KBsums(block: *dtype_mod.BlockQ8_K) void {
     for (&block.bsums, 0..) |*sum, group| {
         var acc: i32 = 0;
         for (block.qs[group * 16 ..][0..16]) |q| acc += q;
@@ -325,7 +326,7 @@ fn setQ8KBsums(block: *types.BlockQ8_K) void {
 // Activations over the FULL i8 range incl. -128: every Q6_Kx4 SIMD arm is
 // activation-unrestricted (no sign-trick on this path), so the tests assert
 // a wider domain than quantizeRowQ8_KInto's [-127,127] production values.
-fn fillRandomBlockQ8_K(block: *types.BlockQ8_K, random: std.Random) void {
+fn fillRandomBlockQ8_K(block: *dtype_mod.BlockQ8_K, random: std.Random) void {
     block.d = 0.25 + random.float(f32);
     for (&block.qs) |*q| q.* = @bitCast(random.int(u8));
     setQ8KBsums(block);
@@ -345,7 +346,7 @@ fn expectVec4BitEqual(expected: common.QKV4f32, got: common.QKV4f32) !void {
     }
 }
 
-fn checkQ6Kx4Arms(lhs: *const types.BlockQ8_K, rhs: *const types.BlockQ6_Kx4, acc: common.QKV4f32) !void {
+fn checkQ6Kx4Arms(lhs: *const dtype_mod.BlockQ8_K, rhs: *const types.BlockQ6_Kx4, acc: common.QKV4f32) !void {
     const ref = q6_k.accumulateQ6_Kx4Scalar(lhs, rhs, acc);
     inline for (simd_tiers) |tier| {
         try expectVec4BitEqual(ref, q6_k.accumulateQ6_Kx4Simd(tier, lhs, rhs, acc));
@@ -358,7 +359,7 @@ test "ggml_q6_kx4 SIMD arms match the scalar arm bit-exactly" {
 
     var iter: usize = 0;
     while (iter < 200) : (iter += 1) {
-        var lhs: types.BlockQ8_K = undefined;
+        var lhs: dtype_mod.BlockQ8_K = undefined;
         var rhs: types.BlockQ6_Kx4 = undefined;
         fillRandomBlockQ8_K(&lhs, random);
         fillRandomBlockQ6_Kx4(&rhs, random);
@@ -369,7 +370,7 @@ test "ggml_q6_kx4 SIMD arms match the scalar arm bit-exactly" {
     // activation extremes (±127 and -128) under scale extremes (-128 / +127
     // / zero) — covers the bias-correction maxima (all-(-32)·all-(-128)·
     // (-128) peaks |iacc| ≈ 134M) and the all-zero-scales block.
-    var lhs: types.BlockQ8_K = undefined;
+    var lhs: dtype_mod.BlockQ8_K = undefined;
     var rhs: types.BlockQ6_Kx4 = undefined;
     lhs.d = 1.0;
     for (&rhs.d) |*d| d.* = common.f32ToF16Bits(1.0);
@@ -402,7 +403,7 @@ test "ggml_q6_kx4 SIMD rows arm matches per-row scalar accumulation" {
 
     var iter: usize = 0;
     while (iter < 50) : (iter += 1) {
-        var lhs_blocks: [common.q8_0_row_block * blocks_per_row]types.BlockQ8_K = undefined;
+        var lhs_blocks: [common.q8_0_row_block * blocks_per_row]dtype_mod.BlockQ8_K = undefined;
         for (&lhs_blocks) |*b| fillRandomBlockQ8_K(b, random);
         var rhs: types.BlockQ6_Kx4 = undefined;
         fillRandomBlockQ6_Kx4(&rhs, random);
@@ -429,7 +430,7 @@ test "ggml_q6_kx4 SIMD pair arm matches two scalar accumulates" {
 
     var iter: usize = 0;
     while (iter < 50) : (iter += 1) {
-        var lhs: types.BlockQ8_K = undefined;
+        var lhs: dtype_mod.BlockQ8_K = undefined;
         var gate_rhs: types.BlockQ6_Kx4 = undefined;
         var up_rhs: types.BlockQ6_Kx4 = undefined;
         fillRandomBlockQ8_K(&lhs, random);
@@ -462,9 +463,9 @@ test "ggml_q6_kx4 matmul entry points match the scalar-arm reference" {
     const m = 6; // 1 full row block + 2 tail rows
     const bpc = k / types.qk_k_block_size;
 
-    const gate_blocks = try allocator.alloc(types.BlockQ6_K, n * bpc);
+    const gate_blocks = try allocator.alloc(dtype_mod.BlockQ6_K, n * bpc);
     defer allocator.free(gate_blocks);
-    const up_blocks = try allocator.alloc(types.BlockQ6_K, n * bpc);
+    const up_blocks = try allocator.alloc(dtype_mod.BlockQ6_K, n * bpc);
     defer allocator.free(up_blocks);
     for (gate_blocks, up_blocks, 0..) |*g, *u, bi| {
         g.d = common.f32ToF16Bits(0.021 + 0.001 * @as(f32, @floatFromInt(bi % 7)));
@@ -565,7 +566,7 @@ test "ggml_q6_kx4 matmul entry points match the scalar-arm reference" {
 
 // Interleave 4 plain Q8_K rows exactly like packRowsQ8_Kx4 (incl. the bsums
 // interleave `bsums[(g/4)*16 + row*4 + g%4]` the biased arms rely on).
-fn packBlockQ8_Kx4(rows: *const [4]types.BlockQ8_K) types.BlockQ8_Kx4 {
+fn packBlockQ8_Kx4(rows: *const [4]dtype_mod.BlockQ8_K) types.BlockQ8_Kx4 {
     var dst: types.BlockQ8_Kx4 = undefined;
     inline for (0..4) |row| dst.d[row] = rows[row].d;
     for (0..types.qk_k_block_size / 4) |feature_group| {
@@ -589,7 +590,7 @@ test "q6_k 4-row lane dot SIMD arms match the scalar reference" {
 
     var iter: usize = 0;
     while (iter < 200) : (iter += 1) {
-        var rows: [4]types.BlockQ8_K = undefined;
+        var rows: [4]dtype_mod.BlockQ8_K = undefined;
         for (&rows) |*r| fillRandomBlockQ8_K(r, random);
         const a = packBlockQ8_Kx4(&rows);
         // Pre-unpacked weight-group domain: unpackQ6_KGroup emits centered
@@ -610,7 +611,7 @@ test "q6_k 4-row lane dot SIMD arms match the scalar reference" {
     // over every scale group's fg_base.
     const edge_a = [_][2]i8{ .{ -128, -128 }, .{ 127, 127 }, .{ 127, -128 }, .{ -127, 127 } };
     const edge_w = [_]i8{ -32, 31, 0 };
-    var rows: [4]types.BlockQ8_K = undefined;
+    var rows: [4]dtype_mod.BlockQ8_K = undefined;
     for (edge_a) |pattern| {
         for (&rows, 0..) |*r, ri| {
             r.d = 1.0;
@@ -631,14 +632,14 @@ test "q6_k 4-row lane dot SIMD arms match the scalar reference" {
     }
 }
 
-fn fillRandomBlockQ6_K(b: *types.BlockQ6_K, random: std.Random) void {
+fn fillRandomBlockQ6_K(b: *dtype_mod.BlockQ6_K, random: std.Random) void {
     b.d = common.f32ToF16Bits(0.25 + random.float(f32));
     for (&b.scales) |*s| s.* = @bitCast(random.int(u8)); // full i8 incl. -128
     for (&b.ql) |*q| q.* = random.int(u8);
     for (&b.qh) |*q| q.* = random.int(u8);
 }
 
-fn checkQ6RowDotArms(w: *const types.BlockQ6_K, a: *const types.BlockQ8_K) !void {
+fn checkQ6RowDotArms(w: *const dtype_mod.BlockQ6_K, a: *const dtype_mod.BlockQ8_K) !void {
     const ref = q6_k.dotQ6_KQ8_KScalar(w, a);
     inline for (simd_tiers) |tier| {
         const got = q6_k.dotQ6_KQ8_KSimd(tier, w, a);
@@ -652,8 +653,8 @@ test "q6_k row dot SIMD arms match the scalar reference bit-exactly" {
 
     var iter: usize = 0;
     while (iter < 200) : (iter += 1) {
-        var w: types.BlockQ6_K = undefined;
-        var a: types.BlockQ8_K = undefined;
+        var w: dtype_mod.BlockQ6_K = undefined;
+        var a: dtype_mod.BlockQ8_K = undefined;
         fillRandomBlockQ6_K(&w, random);
         fillRandomBlockQ8_K(&a, random);
         try checkQ6RowDotArms(&w, &a);
@@ -665,8 +666,8 @@ test "q6_k row dot SIMD arms match the scalar reference bit-exactly" {
     const edge_a = [_][2]i8{ .{ -128, -128 }, .{ 127, 127 }, .{ 127, -128 }, .{ -127, 127 } };
     const edge_bytes = [_]u8{ 0x00, 0xff };
     const edge_scales = [_]i8{ -128, 127, 0 };
-    var w: types.BlockQ6_K = undefined;
-    var a: types.BlockQ8_K = undefined;
+    var w: dtype_mod.BlockQ6_K = undefined;
+    var a: dtype_mod.BlockQ8_K = undefined;
     w.d = common.f32ToF16Bits(1.0);
     a.d = 1.0;
     for (edge_a) |pattern| {
@@ -699,7 +700,7 @@ test "q6_k row-outer tile matches the scalar row dot bit-exactly" {
     const n = 3;
     const m = 2;
     const bpc = k / types.qk_k_block_size;
-    const blocks = try allocator.alloc(types.BlockQ6_K, n * bpc);
+    const blocks = try allocator.alloc(dtype_mod.BlockQ6_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {
         b.d = common.f32ToF16Bits(0.03 + 0.001 * @as(f32, @floatFromInt(bi % 5)));

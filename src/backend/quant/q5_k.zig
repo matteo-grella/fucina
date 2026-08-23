@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const dtype_mod = @import("../../dtype.zig");
 const tensor = @import("../../tensor.zig");
 const q8k = @import("q8k.zig");
 const types = @import("types.zig");
@@ -14,7 +15,7 @@ const Allocator = std.mem.Allocator;
 const Tensor = tensor.Tensor;
 
 const BlockQ5_Kx8 = types.BlockQ5_Kx8;
-const BlockQ8_K = types.BlockQ8_K;
+const BlockQ8_K = dtype_mod.BlockQ8_K;
 const QKV16i8 = common.QKV16i8;
 const QKV16u8 = common.QKV16u8;
 const QKV4f32 = common.QKV4f32;
@@ -25,7 +26,7 @@ const q4Kx8Scales = q8k.q4Kx8Scales;
 
 pub fn packMatmulRhsQ5_Kx8(
     allocator: Allocator,
-    blocks: []const types.BlockQ5_K,
+    blocks: []const dtype_mod.BlockQ5_K,
     n: usize,
     k: usize,
     blocks_per_row: usize,
@@ -40,7 +41,7 @@ pub fn packMatmulRhsQ5_Kx8(
 
     for (0..group_count) |group_i| {
         for (0..blocks_per_row) |block_i| {
-            const cols = [_]*const types.BlockQ5_K{
+            const cols = [_]*const dtype_mod.BlockQ5_K{
                 &blocks[(8 * group_i + 0) * blocks_per_row + block_i],
                 &blocks[(8 * group_i + 1) * blocks_per_row + block_i],
                 &blocks[(8 * group_i + 2) * blocks_per_row + block_i],
@@ -304,7 +305,7 @@ const moe_row_tile = 4;
 /// Unpack one Q5_K sub-block (32 weights) to two i8 lanes for sdot. Same
 /// extraction as `dotQ5_KSubblockI32`, but emitted once so it can be reused
 /// across a batch of LHS rows.
-fn unpackQ5_KSubblock(w: *const types.BlockQ5_K, comptime subblock: usize) [2]QKV16i8 {
+fn unpackQ5_KSubblock(w: *const dtype_mod.BlockQ5_K, comptime subblock: usize) [2]QKV16i8 {
     const q_offset = (subblock / 2) * 32;
     const high_mask: u8 = @as(u8, 1) << @intCast(subblock);
     const q0: QKV16u8 = @bitCast(w.qs[q_offset..][0..16].*);
@@ -833,7 +834,7 @@ pub fn accumulateQ5_Kx8Q8_Kx4Scalar(lhs: *const types.BlockQ8_Kx4, rhs: *const B
     }
 }
 
-fn dotQ5_KQ8_K(w: *const types.BlockQ5_K, a: *const BlockQ8_K) f32 {
+fn dotQ5_KQ8_K(w: *const dtype_mod.BlockQ5_K, a: *const BlockQ8_K) f32 {
     if (comptime builtin.cpu.arch == .aarch64) {
         const d = common.f16BitsToF32(w.dm[0]) * a.d;
         const dmin = common.f16BitsToF32(w.dm[1]) * a.d;
@@ -870,7 +871,7 @@ fn dotQ5_KQ8_K(w: *const types.BlockQ5_K, a: *const BlockQ8_K) f32 {
 /// Identical i32 totals (order-independent integer adds) and identical f32
 /// epilogue as the scalar reference → bit-exact (q5_k_tests.zig). pub for
 /// the sibling exact-parity tests.
-pub fn dotQ5_KQ8_KSimd(comptime tier: common.X86DotTier, w: *const types.BlockQ5_K, a: *const BlockQ8_K) f32 {
+pub fn dotQ5_KQ8_KSimd(comptime tier: common.X86DotTier, w: *const dtype_mod.BlockQ5_K, a: *const BlockQ8_K) f32 {
     @setEvalBranchQuota(10000);
     var iacc8: QKV8i32 = @splat(0);
     var imin: i32 = 0;
@@ -895,7 +896,7 @@ pub fn dotQ5_KQ8_KSimd(comptime tier: common.X86DotTier, w: *const types.BlockQ5
 // pub: the plain-scalar bit-exactness reference for dotQ5_KQ8_KSimd AND the
 // aarch64 row-dot arm (q5_k_tests.zig): same integer totals
 // (order-independent adds), same f32 epilogue expression.
-pub fn dotQ5_KQ8_KScalar(w: *const types.BlockQ5_K, a: *const BlockQ8_K) f32 {
+pub fn dotQ5_KQ8_KScalar(w: *const dtype_mod.BlockQ5_K, a: *const BlockQ8_K) f32 {
     var iscale: i32 = 0;
     var imin: i32 = 0;
     var subblock: usize = 0;
@@ -915,7 +916,7 @@ pub fn dotQ5_KQ8_KScalar(w: *const types.BlockQ5_K, a: *const BlockQ8_K) f32 {
     return d * @as(f32, @floatFromInt(iscale)) - dmin * @as(f32, @floatFromInt(imin));
 }
 
-fn dotQ5_KSubblockI32(w: *const types.BlockQ5_K, a: *const BlockQ8_K, comptime subblock: usize) i32 {
+fn dotQ5_KSubblockI32(w: *const dtype_mod.BlockQ5_K, a: *const BlockQ8_K, comptime subblock: usize) i32 {
     const q_offset = (subblock / 2) * 32;
     const a_offset = subblock * 32;
     const high_mask: u8 = @as(u8, 1) << @intCast(subblock);
@@ -956,7 +957,7 @@ fn dotQ5_KSubblockI32(w: *const types.BlockQ5_K, a: *const BlockQ8_K, comptime s
     return @reduce(.Add, w0 * a0) + @reduce(.Add, w1 * a1);
 }
 
-pub fn dequantizeBlockQ5_KInto(dst: *[types.qk_k_block_size]f32, src: *const types.BlockQ5_K) void {
+pub fn dequantizeBlockQ5_KInto(dst: *[types.qk_k_block_size]f32, src: *const dtype_mod.BlockQ5_K) void {
     const d = common.f16BitsToF32(src.dm[0]);
     const dmin = common.f16BitsToF32(src.dm[1]);
     var subblock: usize = 0;
@@ -974,7 +975,7 @@ pub fn dequantizeBlockQ5_KInto(dst: *[types.qk_k_block_size]f32, src: *const typ
 /// f32 -> Q5_K encoder for one 256-element block; faithful port of ggml's
 /// quantize_row_q5_K_ref (byte-exact, see quant/encode_golden_test.zig).
 /// Assumes finite input (no NaN/inf); see the encoder contract in q8k.zig.
-pub fn quantizeBlockQ5_KInto(dst: *types.BlockQ5_K, src: *const [types.qk_k_block_size]f32) void {
+pub fn quantizeBlockQ5_KInto(dst: *dtype_mod.BlockQ5_K, src: *const [types.qk_k_block_size]f32) void {
     var L: [types.qk_k_block_size]u8 = undefined;
     var Laux: [32]u8 = undefined;
     var weights: [32]f32 = undefined;
@@ -1053,7 +1054,7 @@ pub fn quantizeBlockQ5_KInto(dst: *types.BlockQ5_K, src: *const [types.qk_k_bloc
 }
 
 /// f32 -> Q5_K row encoder (caller supplies the output blocks).
-pub fn quantizeRowQ5_KInto(dst: []types.BlockQ5_K, src: []const f32) !void {
+pub fn quantizeRowQ5_KInto(dst: []dtype_mod.BlockQ5_K, src: []const f32) !void {
     const block_count = try q8k.qkBlockCount(src.len);
     if (dst.len != block_count) return types.QuantizedFormatError.InvalidQuantizedLength;
     for (dst, 0..) |*block, block_index| {
@@ -1061,14 +1062,14 @@ pub fn quantizeRowQ5_KInto(dst: []types.BlockQ5_K, src: []const f32) !void {
     }
 }
 
-fn q5KValue(w: *const types.BlockQ5_K, subblock: usize, offset: usize) u8 {
+fn q5KValue(w: *const dtype_mod.BlockQ5_K, subblock: usize, offset: usize) u8 {
     const byte = w.qs[(subblock / 2) * 32 + offset];
     const low = if (subblock % 2 == 0) byte & 0x0f else byte >> 4;
     const high_mask: u8 = @as(u8, 1) << @intCast(subblock);
     return low + if ((w.qh[offset] & high_mask) != 0) @as(u8, 16) else @as(u8, 0);
 }
 
-fn setQ5KValue(block: *types.BlockQ5_K, subblock: usize, offset: usize, value: u8) void {
+fn setQ5KValue(block: *dtype_mod.BlockQ5_K, subblock: usize, offset: usize, value: u8) void {
     const byte_index = (subblock / 2) * 32 + offset;
     if (subblock % 2 == 0) {
         block.qs[byte_index] = (block.qs[byte_index] & 0xf0) | (value & 0x0f);
@@ -1083,7 +1084,7 @@ fn setQ5KValue(block: *types.BlockQ5_K, subblock: usize, offset: usize, value: u
     }
 }
 
-fn fillQ5KPattern(block: *types.BlockQ5_K) void {
+fn fillQ5KPattern(block: *dtype_mod.BlockQ5_K) void {
     block.dm = .{ common.f32ToF16Bits(1), common.f32ToF16Bits(0) };
     block.scales = .{ 1, 2, 3, 4, 0, 0, 0, 0, 1, 2, 3, 4 };
     @memset(&block.qh, 0);
@@ -1098,7 +1099,7 @@ fn fillQ5KPattern(block: *types.BlockQ5_K) void {
 test "ggml_q5_k dot and matmul consume loaded blocks" {
     const allocator = std.testing.allocator;
 
-    var q5: types.BlockQ5_K = undefined;
+    var q5: dtype_mod.BlockQ5_K = undefined;
     fillQ5KPattern(&q5);
     var q8: BlockQ8_K = undefined;
     q8k.fillQ8KPattern(&q8);
@@ -1110,7 +1111,7 @@ test "ggml_q5_k dot and matmul consume loaded blocks" {
 
     try std.testing.expectEqual(common.dotDense(&dense_w, &dense_a), dotQ5_KQ8_K(&q5, &q8));
 
-    var rhs_blocks = [_]types.BlockQ5_K{ q5, q5 };
+    var rhs_blocks = [_]dtype_mod.BlockQ5_K{ q5, q5 };
     var qrhs = try q8k.quantizedMatmulRhsQ5_KFromBlocks(allocator, types.qk_k_block_size, 2, &rhs_blocks);
     defer qrhs.deinit();
     var out: [2]f32 = undefined;

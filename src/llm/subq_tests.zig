@@ -240,7 +240,7 @@ test "subq q8_0 packed format matches a dequantized-oracle at tau 0" {
     const bpr = d / 32;
     for (0..q_heads) |head_i| {
         const query = fx.q[head_i * d ..][0..d];
-        var q_q8: [16]@import("fucina").internal.backend_mod.quantized_matmul.BlockQ8_0 = undefined;
+        var q_q8: [16]fucina.quant.BlockQ8_0 = undefined;
         try @import("fucina").internal.backend_mod.quantized_matmul.q8k.quantizeRowQ8_0Into(q_q8[0..bpr], query);
         var qdeq: [d]f32 = undefined;
         try @import("fucina").internal.backend_mod.quantized_matmul.q8k.dequantizeRowQ8_0Into(&qdeq, q_q8[0..bpr]);

@@ -116,7 +116,7 @@ const ExecContext = exec_mod.ExecContext;
 /// Ternary genome storage unit (GGUF tq2_0, the backend quantized-matmul
 /// block): 256 2-bit crumbs storing w+1 in {0, 1, 2} plus one fp16 scale
 /// `d` that ES never touches (register scales as float slots to train them).
-pub const BlockTQ2_0 = backend_mod.BlockTQ2_0;
+pub const BlockTQ2_0 = dtype_mod.BlockTQ2_0;
 
 pub const EsError = error{
     InvalidConfig,

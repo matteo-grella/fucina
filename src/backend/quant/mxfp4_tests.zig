@@ -5,13 +5,14 @@
 //! f64 dense reference within tolerance.
 
 const std = @import("std");
+const dtype_mod = @import("../../dtype.zig");
 const types = @import("types.zig");
 const common = @import("common.zig");
 const cold = @import("cold.zig");
 const mxfp4 = @import("mxfp4.zig");
 const tables = @import("../quant_tables.zig");
 
-fn refCell(lhs_row: []const types.BlockQ8_0, col: []const types.BlockMXFP4) f32 {
+fn refCell(lhs_row: []const dtype_mod.BlockQ8_0, col: []const dtype_mod.BlockMXFP4) f32 {
     var acc: common.QKV4f32 = @splat(0);
     for (lhs_row, col) |*a, *w| {
         var iacc: [4]i32 = .{ 0, 0, 0, 0 };
@@ -29,8 +30,8 @@ fn refCell(lhs_row: []const types.BlockQ8_0, col: []const types.BlockMXFP4) f32 
     return @reduce(.Add, acc);
 }
 
-fn randomBlocks(random: std.Random, allocator: std.mem.Allocator, n: usize, bpc: usize) ![]types.BlockMXFP4 {
-    const blocks = try allocator.alloc(types.BlockMXFP4, n * bpc);
+fn randomBlocks(random: std.Random, allocator: std.mem.Allocator, n: usize, bpc: usize) ![]dtype_mod.BlockMXFP4 {
+    const blocks = try allocator.alloc(dtype_mod.BlockMXFP4, n * bpc);
     for (blocks, 0..) |*b, i| {
         // Scale exponents span the useful range plus the subnormal edge
         // (e < 2) so the halved-scale fold is exercised where it bends.
@@ -40,8 +41,8 @@ fn randomBlocks(random: std.Random, allocator: std.mem.Allocator, n: usize, bpc:
     return blocks;
 }
 
-fn randomLhs(random: std.Random, allocator: std.mem.Allocator, m: usize, bpc: usize) ![]types.BlockQ8_0 {
-    const blocks = try allocator.alloc(types.BlockQ8_0, m * bpc);
+fn randomLhs(random: std.Random, allocator: std.mem.Allocator, m: usize, bpc: usize) ![]dtype_mod.BlockQ8_0 {
+    const blocks = try allocator.alloc(dtype_mod.BlockQ8_0, m * bpc);
     for (blocks) |*b| {
         b.d = common.f32ToF16Bits(0.001 + random.float(f32) * 0.05);
         // Quantizer domain: our Q8_0 encoder bounds codes to [-127, 127];

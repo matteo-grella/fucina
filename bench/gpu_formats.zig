@@ -286,13 +286,7 @@ fn benchQuant(
     defer gpu_out.deinit();
     const queued = try allocOutputs(allocator, queue_depth, m, n);
     defer freeOutputs(allocator, queued);
-    const format: gpu.QFormat = switch (dtype) {
-        .q4_k => .q4_k,
-        .q5_k => .q5_k,
-        .q6_k => .q6_k,
-        .q8_0 => .q8_0,
-        else => unreachable,
-    };
+    const format = comptime gpu.kernelTag(dtype) orelse unreachable;
 
     try cpuPackedQuant(dtype, allocator, &cpu_out, &a, &packed_rhs, cpu_blocks, m, n, k, config);
     if (!gpu.gemmQuantNtAsync(format, resident, true, blocks_per_row * @sizeOf(Block), 0, &a, &gpu_out, 1, m, n, k)) return error.GpuDispatchFailed;

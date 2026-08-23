@@ -5,6 +5,7 @@
 //! eviction, and batched prefill whose active set overflows the cache. Plus
 //! store lifecycle/geometry validation.
 const std = @import("std");
+const dtype_mod = @import("../dtype.zig");
 const backend_mod = @import("../backend.zig");
 const exec = @import("../exec.zig");
 const expert_store = @import("expert_store.zig");
@@ -30,7 +31,7 @@ fn f16Bits(v: f32) u16 {
 
 // Valid-domain deterministic block patterns, mirroring the batched-MoE
 // fixtures in exec_tests.zig; `seed` differentiates gate/up/down.
-fn fillQ5KBlocks(blocks: []qm.BlockQ5_K, seed: usize) void {
+fn fillQ5KBlocks(blocks: []dtype_mod.BlockQ5_K, seed: usize) void {
     for (blocks, 0..) |*b, block_i| {
         const bi = block_i + seed;
         b.dm[0] = f16Bits(0.05 + 0.001 * @as(f32, @floatFromInt(bi % 7)));
@@ -41,7 +42,7 @@ fn fillQ5KBlocks(blocks: []qm.BlockQ5_K, seed: usize) void {
     }
 }
 
-fn fillQ6KBlocks(blocks: []qm.BlockQ6_K, seed: usize) void {
+fn fillQ6KBlocks(blocks: []dtype_mod.BlockQ6_K, seed: usize) void {
     for (blocks, 0..) |*b, block_i| {
         const bi = block_i + seed;
         b.d = f16Bits(0.04 + 0.001 * @as(f32, @floatFromInt(bi % 5)));
@@ -59,9 +60,9 @@ const Fixture = struct {
     allocator: std.mem.Allocator,
     path_buf: [128]u8 = undefined,
     path: []const u8 = &.{},
-    gate_blocks: []qm.BlockQ5_K,
-    up_blocks: []qm.BlockQ5_K,
-    down_blocks: []qm.BlockQ6_K,
+    gate_blocks: []dtype_mod.BlockQ5_K,
+    up_blocks: []dtype_mod.BlockQ5_K,
+    down_blocks: []dtype_mod.BlockQ6_K,
     resident_gate: MoeRhs,
     resident_up: MoeRhs,
     resident_down: MoeRhs,
@@ -74,9 +75,9 @@ const Fixture = struct {
     /// created over `self.path` — the reload/auto-pin tests build second
     /// stores against the same bytes.
     fn registerLayer(self: *const Fixture, store: *ExpertStore) !void {
-        const gate_bytes = self.gate_blocks.len * @sizeOf(qm.BlockQ5_K);
-        const up_bytes = self.up_blocks.len * @sizeOf(qm.BlockQ5_K);
-        const down_bytes = self.down_blocks.len * @sizeOf(qm.BlockQ6_K);
+        const gate_bytes = self.gate_blocks.len * @sizeOf(dtype_mod.BlockQ5_K);
+        const up_bytes = self.up_blocks.len * @sizeOf(dtype_mod.BlockQ5_K);
+        const down_bytes = self.down_blocks.len * @sizeOf(dtype_mod.BlockQ6_K);
         try store.addLayer(0, .{
             .{ .quant = .q5_k, .file_offset = 0, .byte_len = gate_bytes, .in_dim = hidden, .out_dim = out_pe },
             .{ .quant = .q5_k, .file_offset = gate_bytes, .byte_len = up_bytes, .in_dim = hidden, .out_dim = out_pe },
@@ -110,9 +111,9 @@ const Fixture = struct {
         const bpc_g = out_pe / qm.types.qk_k_block_size;
 
         self.allocator = allocator;
-        self.gate_blocks = try allocator.alloc(qm.BlockQ5_K, gate_rows * bpc_in);
-        self.up_blocks = try allocator.alloc(qm.BlockQ5_K, gate_rows * bpc_in);
-        self.down_blocks = try allocator.alloc(qm.BlockQ6_K, down_rows * bpc_g);
+        self.gate_blocks = try allocator.alloc(dtype_mod.BlockQ5_K, gate_rows * bpc_in);
+        self.up_blocks = try allocator.alloc(dtype_mod.BlockQ5_K, gate_rows * bpc_in);
+        self.down_blocks = try allocator.alloc(dtype_mod.BlockQ6_K, down_rows * bpc_g);
         fillQ5KBlocks(self.gate_blocks, 0);
         fillQ5KBlocks(self.up_blocks, 1);
         fillQ6KBlocks(self.down_blocks, 2);
@@ -133,9 +134,9 @@ const Fixture = struct {
         self.resident_up = .{ .q5_k = try qm.q8k.quantizedMatmulRhsQ5_KFromBlocks(allocator, hidden, gate_rows, self.up_blocks) };
         self.resident_down = .{ .q6_k = try qm.q8k.quantizedMatmulRhsQ6_KFromBlocks(allocator, out_pe, down_rows, self.down_blocks) };
 
-        const gate_bytes = self.gate_blocks.len * @sizeOf(qm.BlockQ5_K);
-        const up_bytes = self.up_blocks.len * @sizeOf(qm.BlockQ5_K);
-        const down_bytes = self.down_blocks.len * @sizeOf(qm.BlockQ6_K);
+        const gate_bytes = self.gate_blocks.len * @sizeOf(dtype_mod.BlockQ5_K);
+        const up_bytes = self.up_blocks.len * @sizeOf(dtype_mod.BlockQ5_K);
+        const down_bytes = self.down_blocks.len * @sizeOf(dtype_mod.BlockQ6_K);
         self.store = try ExpertStore.create(allocator, &.{self.path}, 1, .{ .cache_slots_per_layer = cache_slots });
         try self.store.addLayer(0, .{
             .{ .quant = .q5_k, .file_offset = 0, .byte_len = gate_bytes, .in_dim = hidden, .out_dim = out_pe },
@@ -396,9 +397,9 @@ test "q8_0 experts with non-256-aligned dims: streamed decode is bit-exact vs re
 
     // gate/up: q5_k stacks [experts * ffn rows, hidden].
     const gu_rows = ds_experts * ds_ffn;
-    const gate_blocks = try allocator.alloc(qm.BlockQ5_K, gu_rows * (ds_hidden / qm.types.qk_k_block_size));
+    const gate_blocks = try allocator.alloc(dtype_mod.BlockQ5_K, gu_rows * (ds_hidden / qm.types.qk_k_block_size));
     defer allocator.free(gate_blocks);
-    const up_blocks = try allocator.alloc(qm.BlockQ5_K, gate_blocks.len);
+    const up_blocks = try allocator.alloc(dtype_mod.BlockQ5_K, gate_blocks.len);
     defer allocator.free(up_blocks);
     // Mild scales: the SwiGLU square of these activations must stay well
     // inside Q8_0's f16 scale range (see the NaN guard below).
@@ -417,7 +418,7 @@ test "q8_0 experts with non-256-aligned dims: streamed decode is bit-exact vs re
     // deterministic f32 rows (valid blocks by construction).
     const down_rows = ds_experts * ds_hidden;
     const down_bpc = ds_ffn / 32;
-    const down_blocks = try allocator.alloc(qm.BlockQ8_0, down_rows * down_bpc);
+    const down_blocks = try allocator.alloc(dtype_mod.BlockQ8_0, down_rows * down_bpc);
     defer allocator.free(down_blocks);
     {
         var row: [ds_ffn]f32 = undefined;
@@ -457,9 +458,9 @@ test "q8_0 experts with non-256-aligned dims: streamed decode is bit-exact vs re
     } };
     defer resident_down.deinit();
 
-    const gate_bytes = gate_blocks.len * @sizeOf(qm.BlockQ5_K);
-    const up_bytes = up_blocks.len * @sizeOf(qm.BlockQ5_K);
-    const down_bytes = down_blocks.len * @sizeOf(qm.BlockQ8_0);
+    const gate_bytes = gate_blocks.len * @sizeOf(dtype_mod.BlockQ5_K);
+    const up_bytes = up_blocks.len * @sizeOf(dtype_mod.BlockQ5_K);
+    const down_bytes = down_blocks.len * @sizeOf(dtype_mod.BlockQ8_0);
     var store = try ExpertStore.create(allocator, &.{path}, 1, .{ .cache_slots_per_layer = 2 });
     defer store.destroy();
     try store.addLayer(0, .{
@@ -511,11 +512,11 @@ test "tq2_0 ternary experts: streamed decode and batch are bit-exact vs resident
     const gu_bpc = t_hidden / qm.types.qk_k_block_size;
     const down_rows = t_experts * t_hidden;
     const down_bpc = t_ffn / qm.types.qk_k_block_size;
-    const gate_blocks = try allocator.alloc(qm.BlockTQ2_0, gu_rows * gu_bpc);
+    const gate_blocks = try allocator.alloc(dtype_mod.BlockTQ2_0, gu_rows * gu_bpc);
     defer allocator.free(gate_blocks);
-    const up_blocks = try allocator.alloc(qm.BlockTQ2_0, gate_blocks.len);
+    const up_blocks = try allocator.alloc(dtype_mod.BlockTQ2_0, gate_blocks.len);
     defer allocator.free(up_blocks);
-    const down_blocks = try allocator.alloc(qm.BlockTQ2_0, down_rows * down_bpc);
+    const down_blocks = try allocator.alloc(dtype_mod.BlockTQ2_0, down_rows * down_bpc);
     defer allocator.free(down_blocks);
     {
         var row: [t_hidden]f32 = undefined;
@@ -552,7 +553,7 @@ test "tq2_0 ternary experts: streamed decode and batch are bit-exact vs resident
     }
 
     const tq2View = struct {
-        fn go(blocks: []qm.BlockTQ2_0, k: usize, rows: usize, bpc: usize) MoeRhs {
+        fn go(blocks: []dtype_mod.BlockTQ2_0, k: usize, rows: usize, bpc: usize) MoeRhs {
             return .{ .tq2_0 = .{
                 .rows = .{ .allocator = null, .blocks = blocks, .rows = rows, .cols = k, .blocks_per_row = bpc },
                 .k = k,
@@ -567,9 +568,9 @@ test "tq2_0 ternary experts: streamed decode and batch are bit-exact vs resident
     var resident_down = tq2View(down_blocks, t_ffn, down_rows, down_bpc);
     defer resident_down.deinit();
 
-    const gate_bytes = gate_blocks.len * @sizeOf(qm.BlockTQ2_0);
-    const up_bytes = up_blocks.len * @sizeOf(qm.BlockTQ2_0);
-    const down_bytes = down_blocks.len * @sizeOf(qm.BlockTQ2_0);
+    const gate_bytes = gate_blocks.len * @sizeOf(dtype_mod.BlockTQ2_0);
+    const up_bytes = up_blocks.len * @sizeOf(dtype_mod.BlockTQ2_0);
+    const down_bytes = down_blocks.len * @sizeOf(dtype_mod.BlockTQ2_0);
     var store = try ExpertStore.create(allocator, &.{path}, 1, .{ .cache_slots_per_layer = 2 });
     defer store.destroy();
     try store.addLayer(0, .{
@@ -625,8 +626,8 @@ test "tq2_0 ternary experts: streamed decode and batch are bit-exact vs resident
 /// NOT interleaved accumulation) — so the fused MoE `ptqtp` arm must
 /// reproduce this bitwise.
 fn ptqtpPlaneSumDot(
-    planes: []const []const qm.BlockTQ2_0,
-    qx: []const qm.BlockQ8_K,
+    planes: []const []const dtype_mod.BlockTQ2_0,
+    qx: []const dtype_mod.BlockQ8_K,
     e: usize,
     k: usize,
     out_dim: usize,
@@ -654,8 +655,8 @@ fn ptqtpPlaneSumDot(
 /// Q8_K requantize, down plane sum — exactly the fused op's per-expert
 /// arithmetic with every multi-plane dot replaced by the host-side sum.
 const PtqtpRefBufs = struct {
-    qx: []qm.BlockQ8_K,
-    qg: []qm.BlockQ8_K,
+    qx: []dtype_mod.BlockQ8_K,
+    qg: []dtype_mod.BlockQ8_K,
     gate_buf: []f32,
     up_buf: []f32,
     g_buf: []f32,
@@ -664,9 +665,9 @@ const PtqtpRefBufs = struct {
 
 fn ptqtpExpertDownReference(
     bufs: *const PtqtpRefBufs,
-    gate_planes: []const []const qm.BlockTQ2_0,
-    up_planes: []const []const qm.BlockTQ2_0,
-    down_planes: []const []const qm.BlockTQ2_0,
+    gate_planes: []const []const dtype_mod.BlockTQ2_0,
+    up_planes: []const []const dtype_mod.BlockTQ2_0,
+    down_planes: []const []const dtype_mod.BlockTQ2_0,
     e: usize,
     hidden_dim: usize,
     ffn_dim: usize,
@@ -725,9 +726,9 @@ test "ptqtp multi-plane experts: fused MoE sums planes like the dense path; stre
     var down_pair = try ptqtp.quantizeMatrix(&ctx, down_w, down_rows, t_ffn, .{ .planes = 3, .max_iterations = 8 });
     defer down_pair.deinit(allocator);
 
-    const gate_planes = [_][]const qm.BlockTQ2_0{ gate_pair.plane1, gate_pair.plane2 };
-    const up_planes = [_][]const qm.BlockTQ2_0{ up_pair.plane1, up_pair.plane2 };
-    const down_planes = [_][]const qm.BlockTQ2_0{ down_pair.plane1, down_pair.plane2, down_pair.plane3 };
+    const gate_planes = [_][]const dtype_mod.BlockTQ2_0{ gate_pair.plane1, gate_pair.plane2 };
+    const up_planes = [_][]const dtype_mod.BlockTQ2_0{ up_pair.plane1, up_pair.plane2 };
+    const down_planes = [_][]const dtype_mod.BlockTQ2_0{ down_pair.plane1, down_pair.plane2, down_pair.plane3 };
 
     // (a) resident multi-plane arms.
     var resident_gate: MoeRhs = .{ .ptqtp = .{
@@ -762,14 +763,14 @@ test "ptqtp multi-plane experts: fused MoE sums planes like the dense path; stre
     const path = try std.fmt.bufPrint(&path_buf, "expert_store_ptqtp_{d}.bin", .{std.Io.Clock.real.now(std.testing.io).nanoseconds});
     defer std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
     defer cleanupSidecar(path);
-    const gu_plane_bytes = gate_pair.plane1.len * @sizeOf(qm.BlockTQ2_0);
-    const down_plane_bytes = down_pair.plane1.len * @sizeOf(qm.BlockTQ2_0);
+    const gu_plane_bytes = gate_pair.plane1.len * @sizeOf(dtype_mod.BlockTQ2_0);
+    const down_plane_bytes = down_pair.plane1.len * @sizeOf(dtype_mod.BlockTQ2_0);
     {
         var file = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
         defer file.close(std.testing.io);
         var write_buffer: [4096]u8 = undefined;
         var writer = file.writer(std.testing.io, &write_buffer);
-        for ([_][]const qm.BlockTQ2_0{
+        for ([_][]const dtype_mod.BlockTQ2_0{
             gate_pair.plane1, gate_pair.plane2,
             up_pair.plane1,   up_pair.plane2,
             down_pair.plane1, down_pair.plane2,
@@ -792,8 +793,8 @@ test "ptqtp multi-plane experts: fused MoE sums planes like the dense path; stre
 
     // (b) scratch for the reference pipeline.
     const bufs = PtqtpRefBufs{
-        .qx = try allocator.alloc(qm.BlockQ8_K, t_hidden / qm.types.qk_k_block_size),
-        .qg = try allocator.alloc(qm.BlockQ8_K, t_ffn / qm.types.qk_k_block_size),
+        .qx = try allocator.alloc(dtype_mod.BlockQ8_K, t_hidden / qm.types.qk_k_block_size),
+        .qg = try allocator.alloc(dtype_mod.BlockQ8_K, t_ffn / qm.types.qk_k_block_size),
         .gate_buf = try allocator.alloc(f32, t_ffn),
         .up_buf = try allocator.alloc(f32, t_ffn),
         .g_buf = try allocator.alloc(f32, t_ffn),
@@ -884,7 +885,7 @@ test "ptqtp multi-plane experts: fused MoE sums planes like the dense path; stre
 
 fn foldedExpertDot(
     folded: []const qm.BlockTQ2_0Foldedx4,
-    qx: []const qm.BlockQ8_K,
+    qx: []const dtype_mod.BlockQ8_K,
     e: usize,
     k: usize,
     out_dim: usize,
@@ -918,8 +919,8 @@ fn foldedExpertDownReference(
 /// `loadMoeRhsPtqtp` builds and the streamed fill reproduces per slab.
 fn foldExpertStack(
     allocator: std.mem.Allocator,
-    plane1: []const qm.BlockTQ2_0,
-    plane2: []const qm.BlockTQ2_0,
+    plane1: []const dtype_mod.BlockTQ2_0,
+    plane2: []const dtype_mod.BlockTQ2_0,
     n_experts: usize,
     k: usize,
     out_dim: usize,
@@ -931,7 +932,7 @@ fn foldExpertStack(
     errdefer allocator.free(folded);
     for (0..n_experts) |e| {
         var views: [2]backend_mod.QuantizedMatmulRhsTQ2_0 = undefined;
-        for ([2][]const qm.BlockTQ2_0{ plane1, plane2 }, 0..) |plane, p| {
+        for ([2][]const dtype_mod.BlockTQ2_0{ plane1, plane2 }, 0..) |plane, p| {
             views[p] = .{
                 .rows = .{
                     .allocator = null,
@@ -1033,14 +1034,14 @@ test "tie-folded ptqtp experts: resident fold serves the one-pass kernel; stream
     const path = try std.fmt.bufPrint(&path_buf, "expert_store_ptqtp_fold_{d}.bin", .{std.Io.Clock.real.now(std.testing.io).nanoseconds});
     defer std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
     defer cleanupSidecar(path);
-    const gu_plane_bytes = gate_pair.plane1.len * @sizeOf(qm.BlockTQ2_0);
-    const down_plane_bytes = down_pair.plane1.len * @sizeOf(qm.BlockTQ2_0);
+    const gu_plane_bytes = gate_pair.plane1.len * @sizeOf(dtype_mod.BlockTQ2_0);
+    const down_plane_bytes = down_pair.plane1.len * @sizeOf(dtype_mod.BlockTQ2_0);
     {
         var file = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
         defer file.close(std.testing.io);
         var write_buffer: [4096]u8 = undefined;
         var writer = file.writer(std.testing.io, &write_buffer);
-        for ([_][]const qm.BlockTQ2_0{
+        for ([_][]const dtype_mod.BlockTQ2_0{
             gate_pair.plane1, gate_pair.plane2,
             up_pair.plane1,   up_pair.plane2,
             down_pair.plane1, down_pair.plane2,
@@ -1061,8 +1062,8 @@ test "tie-folded ptqtp experts: resident fold serves the one-pass kernel; stream
     var streamed_down: MoeRhs = .{ .streamed = store.streamedRhs(0, .down) };
 
     const bufs = PtqtpRefBufs{
-        .qx = try allocator.alloc(qm.BlockQ8_K, t_hidden / qm.types.qk_k_block_size),
-        .qg = try allocator.alloc(qm.BlockQ8_K, t_ffn / qm.types.qk_k_block_size),
+        .qx = try allocator.alloc(dtype_mod.BlockQ8_K, t_hidden / qm.types.qk_k_block_size),
+        .qg = try allocator.alloc(dtype_mod.BlockQ8_K, t_ffn / qm.types.qk_k_block_size),
         .gate_buf = try allocator.alloc(f32, t_ffn),
         .up_buf = try allocator.alloc(f32, t_ffn),
         .g_buf = try allocator.alloc(f32, t_ffn),
@@ -1161,11 +1162,11 @@ test "q2_k, iq2_xxs, and iq3_xxs experts: streamed decode and batch are bit-exac
     const gu_bpc = t_hidden / qm.types.qk_k_block_size;
     const down_rows = t_experts * t_hidden;
     const down_bpc = t_ffn / qm.types.qk_k_block_size;
-    const gate_blocks = try allocator.alloc(qm.BlockIQ2_XXS, gu_rows * gu_bpc);
+    const gate_blocks = try allocator.alloc(dtype_mod.BlockIQ2_XXS, gu_rows * gu_bpc);
     defer allocator.free(gate_blocks);
-    const up_blocks = try allocator.alloc(qm.BlockIQ3_XXS, gu_rows * gu_bpc);
+    const up_blocks = try allocator.alloc(dtype_mod.BlockIQ3_XXS, gu_rows * gu_bpc);
     defer allocator.free(up_blocks);
-    const down_blocks = try allocator.alloc(qm.BlockQ2_K, down_rows * down_bpc);
+    const down_blocks = try allocator.alloc(dtype_mod.BlockQ2_K, down_rows * down_bpc);
     defer allocator.free(down_blocks);
     for (gate_blocks, 0..) |*b, i| {
         b.d = f16Bits(0.02);
@@ -1222,9 +1223,9 @@ test "q2_k, iq2_xxs, and iq3_xxs experts: streamed decode and batch are bit-exac
     } };
     defer resident_down.deinit();
 
-    const gate_bytes = gate_blocks.len * @sizeOf(qm.BlockIQ2_XXS);
-    const up_bytes = up_blocks.len * @sizeOf(qm.BlockIQ3_XXS);
-    const down_bytes = down_blocks.len * @sizeOf(qm.BlockQ2_K);
+    const gate_bytes = gate_blocks.len * @sizeOf(dtype_mod.BlockIQ2_XXS);
+    const up_bytes = up_blocks.len * @sizeOf(dtype_mod.BlockIQ3_XXS);
+    const down_bytes = down_blocks.len * @sizeOf(dtype_mod.BlockQ2_K);
     var store = try ExpertStore.create(allocator, &.{path}, 1, .{ .cache_slots_per_layer = 2 });
     defer store.destroy();
     try store.addLayer(0, .{
@@ -1934,14 +1935,14 @@ test "l2 tier: fold-mode flip drops coverage instead of corrupting folded slabs;
     const path = try std.fmt.bufPrint(&path_buf, "expert_store_l2_foldflip_{d}.bin", .{std.Io.Clock.real.now(std.testing.io).nanoseconds});
     defer std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
     defer cleanupSidecar(path);
-    const gu_plane_bytes = gate_pair.plane1.len * @sizeOf(qm.BlockTQ2_0);
-    const down_plane_bytes = down_pair.plane1.len * @sizeOf(qm.BlockTQ2_0);
+    const gu_plane_bytes = gate_pair.plane1.len * @sizeOf(dtype_mod.BlockTQ2_0);
+    const down_plane_bytes = down_pair.plane1.len * @sizeOf(dtype_mod.BlockTQ2_0);
     {
         var file = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
         defer file.close(std.testing.io);
         var write_buffer: [4096]u8 = undefined;
         var writer = file.writer(std.testing.io, &write_buffer);
-        for ([_][]const qm.BlockTQ2_0{
+        for ([_][]const dtype_mod.BlockTQ2_0{
             gate_pair.plane1, gate_pair.plane2,
             up_pair.plane1,   up_pair.plane2,
             down_pair.plane1, down_pair.plane2,
@@ -2357,7 +2358,7 @@ test "mxfp4 experts: streamed serving matches an exact q8_0 mirror; miss==hit bi
         fn halfScale(e: u8) f32 {
             return @bitCast(@as(u32, e - 1) << 23);
         }
-        fn fill(mx: []qm.BlockMXFP4, q8: []qm.BlockQ8_0, seed: usize) void {
+        fn fill(mx: []dtype_mod.BlockMXFP4, q8: []dtype_mod.BlockQ8_0, seed: usize) void {
             for (mx, q8, 0..) |*w, *r, i| {
                 // Deterministic pattern; scales 2^-24..2^-6 stay exact f16
                 // (incl. the subnormal floor) and keep the FFN intermediates
@@ -2373,12 +2374,12 @@ test "mxfp4 experts: streamed serving matches an exact q8_0 mirror; miss==hit bi
         }
     };
 
-    var stacks: [3][]qm.BlockMXFP4 = undefined;
-    var mirrors: [3][]qm.BlockQ8_0 = undefined;
+    var stacks: [3][]dtype_mod.BlockMXFP4 = undefined;
+    var mirrors: [3][]dtype_mod.BlockQ8_0 = undefined;
     const counts = [3]usize{ gu_rows * gu_bpc, gu_rows * gu_bpc, down_rows * down_bpc };
     for (0..3) |p| {
-        stacks[p] = try allocator.alloc(qm.BlockMXFP4, counts[p]);
-        mirrors[p] = try allocator.alloc(qm.BlockQ8_0, counts[p]);
+        stacks[p] = try allocator.alloc(dtype_mod.BlockMXFP4, counts[p]);
+        mirrors[p] = try allocator.alloc(dtype_mod.BlockQ8_0, counts[p]);
         Mirror.fill(stacks[p], mirrors[p], 5 + p * 97);
     }
     defer for (0..3) |p| {
@@ -2394,8 +2395,8 @@ test "mxfp4 experts: streamed serving matches an exact q8_0 mirror; miss==hit bi
     const path = try std.fmt.bufPrint(&path_buf, "expert_store_mxfp4_{d}.bin", .{std.Io.Clock.real.now(std.testing.io).nanoseconds});
     defer std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
     defer cleanupSidecar(path);
-    const gu_bytes = counts[0] * @sizeOf(qm.BlockMXFP4);
-    const down_bytes = counts[2] * @sizeOf(qm.BlockMXFP4);
+    const gu_bytes = counts[0] * @sizeOf(dtype_mod.BlockMXFP4);
+    const down_bytes = counts[2] * @sizeOf(dtype_mod.BlockMXFP4);
     {
         var file = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
         defer file.close(std.testing.io);
@@ -2553,7 +2554,7 @@ test "l2 tier refuses a file whose expert bytes differ (content fingerprint)" {
     const gu_count = t_experts * t_ffn * gu_bpc;
     const down_count = t_experts * t_hidden * down_bpc;
 
-    const blocks = try allocator.alloc(qm.BlockQ8_0, 2 * gu_count + down_count);
+    const blocks = try allocator.alloc(dtype_mod.BlockQ8_0, 2 * gu_count + down_count);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, i| {
         b.d = f16Bits(0.01);
@@ -2572,8 +2573,8 @@ test "l2 tier refuses a file whose expert bytes differ (content fingerprint)" {
         try writer.interface.writeAll(std.mem.sliceAsBytes(blocks));
         try writer.interface.flush();
     }
-    const gu_bytes = gu_count * @sizeOf(qm.BlockQ8_0);
-    const down_bytes = down_count * @sizeOf(qm.BlockQ8_0);
+    const gu_bytes = gu_count * @sizeOf(dtype_mod.BlockQ8_0);
+    const down_bytes = down_count * @sizeOf(dtype_mod.BlockQ8_0);
     const specs = [3]expert_store.ProjSpec{
         .{ .quant = .q8_0, .file_offset = 0, .byte_len = gu_bytes, .in_dim = t_hidden, .out_dim = t_ffn },
         .{ .quant = .q8_0, .file_offset = gu_bytes, .byte_len = gu_bytes, .in_dim = t_hidden, .out_dim = t_ffn },

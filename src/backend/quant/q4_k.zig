@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const dtype_mod = @import("../../dtype.zig");
 const tensor = @import("../../tensor.zig");
 const q8k = @import("q8k.zig");
 const types = @import("types.zig");
@@ -14,9 +15,9 @@ const common = @import("common.zig");
 const Allocator = std.mem.Allocator;
 const Tensor = tensor.Tensor;
 
-const BlockQ4_K = types.BlockQ4_K;
+const BlockQ4_K = dtype_mod.BlockQ4_K;
 const BlockQ4_Kx8 = types.BlockQ4_Kx8;
-const BlockQ8_K = types.BlockQ8_K;
+const BlockQ8_K = dtype_mod.BlockQ8_K;
 const QKV16i8 = common.QKV16i8;
 const QKV16u8 = common.QKV16u8;
 const QKV4f32 = common.QKV4f32;

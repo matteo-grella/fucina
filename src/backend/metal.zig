@@ -28,6 +28,7 @@
 const std = @import("std");
 const accelerator = @import("../accelerator.zig");
 const build_options = @import("build_options");
+const dtype_mod = @import("../dtype.zig");
 const storage = @import("../storage.zig");
 const gpu_provider = @import("gpu_provider.zig");
 const tensor = @import("../tensor.zig");
@@ -1210,7 +1211,6 @@ const MetalBf16Work = struct {
 /// the GPU didn't run and the caller must take the CPU bf16 streaming
 /// kernel.
 pub fn gemmBf16NtAsync(a: *const Tensor, b: *const TensorBf16, out: *Tensor, m: usize, n: usize, k: usize) bool {
-    const dtype_mod = @import("../dtype.zig");
     if (m == 0 or n == 0 or k == 0) return false;
     if (m > std.math.maxInt(i32) or n > std.math.maxInt(i32) or k > std.math.maxInt(i32)) return false;
     const a_elems = std.math.mul(usize, m, k) catch return false;
@@ -1271,9 +1271,12 @@ pub fn gemmBf16NtAsync(a: *const Tensor, b: *const TensorBf16, out: *Tensor, m: 
 // Kernel: metal/ggml_mul_mm.metal (vendored llama.cpp legacy mul_mm).
 // ---------------------------------------------------------------------------
 
-/// Weight block formats the quantized kernel can read directly.
-/// Must mirror the FUCINA_QFMT_* enum in shim.m.
-pub const QFormat = enum(c_int) {
+/// Kernel-side ABI tags for the weight block formats the quantized kernel
+/// reads directly. Must mirror the FUCINA_QFMT_* enum in shim.m. The tag
+/// names are spelled like their `DType` so `kernelTag` maps by name;
+/// `tq2_0_folded` is the fused PTQTP plane-pair layout with no `DType`.
+/// A wire tag, not a format identity: `DType` is the identity.
+pub const KernelFormatTag = enum(c_int) {
     q8_0 = 0,
     q6_k = 1,
     q4_k = 2,
@@ -1281,7 +1284,7 @@ pub const QFormat = enum(c_int) {
     tq2_0_folded = 4,
 
     /// K (the reduced dim) must be a whole number of blocks.
-    pub fn kMultiple(self: QFormat) usize {
+    pub fn kMultiple(self: KernelFormatTag) usize {
         return switch (self) {
             .q8_0 => 32,
             .q6_k => 256,
@@ -1291,6 +1294,13 @@ pub const QFormat = enum(c_int) {
         };
     }
 };
+
+/// The kernel tag for a weight dtype, or null when this provider has no
+/// kernel for it.
+pub fn kernelTag(comptime dt: dtype_mod.DType) ?KernelFormatTag {
+    if (!@hasField(KernelFormatTag, @tagName(dt))) return null;
+    return @field(KernelFormatTag, @tagName(dt));
+}
 
 /// One 32-row output tile of one expert group. Must mirror FucinaQMMTile in
 /// shim.m / fucina_qmm_tile in the kernel.
@@ -1336,7 +1346,7 @@ const MetalQuantWork = struct {
 /// the ordinary output Work. The 4 KiB command-data tile limit admits up to
 /// 8192 rows per call; longer rare prompts retain the blocking chunk fallback.
 pub fn gemmQuantNtAsync(
-    format: QFormat,
+    format: KernelFormatTag,
     rhs_bytes: []const u8,
     rhs_cacheable: bool,
     nb01: usize,
@@ -1538,7 +1548,7 @@ pub fn qmoeStage(in_bytes: usize, out_bytes: usize) ?QMoeStage {
 /// freeing. A cached wrap of freed-and-reused pages reads stale data.
 /// Returns false when the GPU didn't run — caller falls back to CPU.
 pub fn gemmQGroupedNt(
-    format: QFormat,
+    format: KernelFormatTag,
     rhs_bytes: []const u8,
     rhs_cacheable: bool,
     nb01: usize,
@@ -1599,7 +1609,7 @@ fn rowsCoveredByTiles(tiles: []const QMMTile) usize {
 /// transient buffers. A cached wrap of a freed-and-reused page reads stale
 /// data.
 pub fn gemmQuantNt(
-    format: QFormat,
+    format: KernelFormatTag,
     rhs_bytes: []const u8,
     rhs_cacheable: bool,
     nb01: usize,
@@ -1644,7 +1654,7 @@ pub fn gemmQuantNt(
 /// into one Metal command, while the caller still owns an ordinary CPU-visible
 /// result tensor. `nb02` is the byte stride between consecutive RHS operands.
 pub fn gemmQuantNtSharedABatch(
-    format: QFormat,
+    format: KernelFormatTag,
     rhs_bytes: []const u8,
     rhs_cacheable: bool,
     nb01: usize,
@@ -1720,7 +1730,7 @@ pub fn qmoeFillAcceptable(rows: usize, n_tiles: usize) bool {
     return filled >= @as(u64, n_tiles) * 32 * state.qmoe_min_fill_pct;
 }
 
-pub fn shouldUseGpuDenseQuant(format: QFormat, total_work: u64) bool {
+pub fn shouldUseGpuDenseQuant(format: KernelFormatTag, total_work: u64) bool {
     ensureConfig();
     const min_work = switch (format) {
         .q6_k => state.min_work_dense_q6,
@@ -1732,7 +1742,7 @@ pub fn shouldUseGpuDenseQuant(format: QFormat, total_work: u64) bool {
 }
 
 /// Dense model-weight gate against the load-time-packed CPU fallback.
-pub fn shouldUseGpuDenseQuantPacked(format: QFormat, total_work: u64) bool {
+pub fn shouldUseGpuDenseQuantPacked(format: KernelFormatTag, total_work: u64) bool {
     ensureConfig();
     const min_work = switch (format) {
         .q4_k => state.min_work_packed_q4,
@@ -1773,7 +1783,7 @@ pub fn setQmoeMinFillForTest(v: u64) void {
 /// Quantized decode-GEMV gate — exec's m <= 8 arm in `denseQuantMatmulGpu`
 /// (`src/exec/quant_matmul.zig`). The Metal provider keeps decode on CPU by
 /// design — always false; the CUDA provider opts in via FUCINA_GPU_DECODE=1.
-pub fn shouldUseGpuQuantDecode(format: QFormat, m: usize, n: usize, k: usize) bool {
+pub fn shouldUseGpuQuantDecode(format: KernelFormatTag, m: usize, n: usize, k: usize) bool {
     _ = format;
     _ = m;
     _ = n;
@@ -1991,12 +2001,11 @@ test "metal quant gemm q6_K/q4_K/q8_0 parity vs dequantized reference" {
     const allocator = std.testing.allocator;
     if (context() == null) return error.SkipZigTest;
 
-    const dtype_mod = @import("../dtype.zig");
     var prng = std.Random.DefaultPrng.init(17);
     const random = prng.random();
 
     const Case = struct { m: usize, n: usize, k: usize };
-    inline for (.{ QFormat.q6_k, QFormat.q4_k, QFormat.q8_0, QFormat.tq2_0 }) |fmt| {
+    inline for (.{ KernelFormatTag.q6_k, KernelFormatTag.q4_k, KernelFormatTag.q8_0, KernelFormatTag.tq2_0 }) |fmt| {
         const Block = switch (fmt) {
             .q6_k => dtype_mod.BlockQ6_K,
             .q4_k => dtype_mod.BlockQ4_K,
@@ -2102,10 +2111,9 @@ test "metal eager async dense quant Q4_K/Q6_K/Q8_0 uses direct tensor storage" {
     const allocator = std.testing.allocator;
     if (context() == null) return error.SkipZigTest;
 
-    const dtype_mod = @import("../dtype.zig");
     var prng = std.Random.DefaultPrng.init(31);
     const random = prng.random();
-    inline for (.{ QFormat.q6_k, QFormat.q4_k, QFormat.q8_0, QFormat.tq2_0 }) |fmt| {
+    inline for (.{ KernelFormatTag.q6_k, KernelFormatTag.q4_k, KernelFormatTag.q8_0, KernelFormatTag.tq2_0 }) |fmt| {
         const Block = switch (fmt) {
             .q6_k => dtype_mod.BlockQ6_K,
             .q4_k => dtype_mod.BlockQ4_K,
@@ -2216,7 +2224,6 @@ test "metal eager async gemm chains on the queue and synchronizes on host read" 
 test "metal eager async bf16 NT matches the CPU bf16 reference" {
     if (!enabled) return error.SkipZigTest;
     if (context() == null) return error.SkipZigTest;
-    const dtype_mod = @import("../dtype.zig");
     const allocator = std.testing.allocator;
     // Unaligned on every tile edge (bm 32 / bn 32 / bk 16) to run the
     // partial-tile arms too.

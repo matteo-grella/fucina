@@ -1,8 +1,9 @@
 //! Backend selection facade: picks the kernel provider at build time
 //! (`-Dbackend=native|scalar`, `-Dgpu=metal|cuda`) and re-exports the
-//! shared kernel vocabulary (ops, quant block/RHS types, packed-RHS
-//! layouts). `kernels` is the selected provider's kernel set, the namespace
-//! `backend/interface.zig` names and checks on both providers at comptime;
+//! shared kernel vocabulary (ops, the quantized and packed RHS container
+//! types, `PackedRhsFor`). `kernels` is the selected provider's kernel set,
+//! the namespace `backend/interface.zig` names and checks on both providers
+//! at comptime;
 //! every pool-taking kernel takes `pc: ParallelConfig` first. The fused op
 //! kernels beside their orchestration in `exec/` (attention, row_ops,
 //! fakequant) are backend-independent. Layer stack: docs/ARCHITECTURE.md.
@@ -17,41 +18,9 @@ const thread = @import("thread.zig");
 
 pub const dtype_info = dtype_mod;
 pub const DType = dtype_mod.DType;
-pub const PackedMatmulFormat = packed_matmul.PackedMatmulFormat;
 pub const PackedMatmulRhsFor = packed_matmul.PackedMatmulRhsFor;
 pub const PackedDenseRhs = packed_matmul.PackedDenseRhs;
-pub const BlockQ1_0 = quantized_matmul.BlockQ1_0;
-pub const BlockQ2_0 = quantized_matmul.BlockQ2_0;
-pub const BlockQ4_0 = quantized_matmul.BlockQ4_0;
-pub const BlockQ4_1 = quantized_matmul.BlockQ4_1;
-pub const BlockQ5_0 = quantized_matmul.BlockQ5_0;
-pub const BlockQ5_1 = quantized_matmul.BlockQ5_1;
-pub const BlockQ2_K = quantized_matmul.BlockQ2_K;
-pub const BlockQ3_K = quantized_matmul.BlockQ3_K;
-pub const BlockQ4_K = quantized_matmul.BlockQ4_K;
-pub const BlockQ5_K = quantized_matmul.BlockQ5_K;
-pub const BlockQ6_K = quantized_matmul.BlockQ6_K;
-pub const BlockQ8_0 = quantized_matmul.BlockQ8_0;
-pub const BlockQ8_1 = quantized_matmul.BlockQ8_1;
-pub const BlockQ8_K = quantized_matmul.BlockQ8_K;
-pub const BlockIQ1_S = quantized_matmul.BlockIQ1_S;
-pub const BlockIQ1_M = quantized_matmul.BlockIQ1_M;
-pub const BlockIQ2_XXS = quantized_matmul.BlockIQ2_XXS;
-pub const BlockIQ2_XS = quantized_matmul.BlockIQ2_XS;
-pub const BlockIQ2_S = quantized_matmul.BlockIQ2_S;
-pub const BlockIQ3_XXS = quantized_matmul.BlockIQ3_XXS;
-pub const BlockIQ3_S = quantized_matmul.BlockIQ3_S;
-pub const BlockIQ4_NL = quantized_matmul.BlockIQ4_NL;
-pub const BlockIQ4_XS = quantized_matmul.BlockIQ4_XS;
-pub const BlockTQ1_0 = quantized_matmul.BlockTQ1_0;
-pub const BlockTQ2_0 = quantized_matmul.BlockTQ2_0;
-pub const BlockMXFP4 = quantized_matmul.BlockMXFP4;
-pub const BlockNVFP4 = quantized_matmul.BlockNVFP4;
-pub const QuantizedMatmulFormat = quantized_matmul.QuantizedMatmulFormat;
 pub const supports_q4_k_mmla = quantized_matmul.supports_q4_k_mmla;
-pub const PackedRhsLayout = quantized_matmul.PackedRhsLayout;
-pub const PackedRhsFor = quantized_matmul.PackedRhsFor;
-pub const QuantizedMatmulRhs = quantized_matmul.QuantizedMatmulRhs;
 pub const QuantizedMatmulRhsI8 = quantized_matmul.QuantizedMatmulRhsI8;
 pub const QuantizedMatmulRhsQ1_0 = quantized_matmul.QuantizedMatmulRhsQ1_0;
 pub const QuantizedMatmulRhsQ2_0 = quantized_matmul.QuantizedMatmulRhsQ2_0;
@@ -88,6 +57,28 @@ pub const AnyQuantizedMatmulRhs = quantized_matmul.AnyQuantizedMatmulRhs;
 pub const QuantizedRowsQ4_0 = quantized_matmul.QuantizedRowsQ4_0;
 pub const QuantizedRowsQ8_0 = quantized_matmul.QuantizedRowsQ8_0;
 pub const PackedMatmulRhsI8 = QuantizedMatmulRhsI8;
+
+/// The one dtype -> packed RHS container map. Dense f32/f16/bf16 weights
+/// share the f32 output-row panel; block-quantized weights select the
+/// ISA-best lane pack: q8_0 -> x4, q6_k -> x4, q5_k -> x8, q4_k -> x2mmla on
+/// aarch64+i8mm targets, x8 elsewhere. Every container carries
+/// `pub const dtype`, so `@TypeOf(rhs) == PackedRhsFor(rhs.dtype)` names the
+/// default pack and a different container of the same dtype is an explicit
+/// layout choice (the Q4_K x8 pack on an MMLA target).
+pub fn PackedRhsFor(comptime dt: DType) type {
+    return switch (dt) {
+        .f32, .f16, .bf16 => PackedDenseRhs,
+        .q8_0 => QuantizedMatmulRhsQ8_0x4,
+        .q6_k => QuantizedMatmulRhsQ6_Kx4,
+        .q5_k => QuantizedMatmulRhsQ5_Kx8,
+        .q4_k => if (supports_q4_k_mmla)
+            QuantizedMatmulRhsQ4_Kx2Mmla
+        else
+            QuantizedMatmulRhsQ4_Kx8,
+        else => @compileError("PackedRhsFor: no packed matmul RHS layout for dtype ." ++ @tagName(dt)),
+    };
+}
+
 pub const Tensor = tensor.Tensor;
 pub const TensorOf = tensor.TensorOf;
 pub const ThreadPool = thread.Pool;

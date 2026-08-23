@@ -11,12 +11,13 @@
 const std = @import("std");
 const Timer = @import("timer.zig").Timer;
 const raw_backend = @import("raw_backend");
+const dtype_mod = raw_backend.dtype_info;
 
 const Tensor = raw_backend.Tensor;
 const qm = raw_backend.quantized_matmul;
-const BlockQ5_K = qm.BlockQ5_K;
-const BlockQ6_K = qm.BlockQ6_K;
-const BlockQ8_K = qm.BlockQ8_K;
+const BlockQ5_K = dtype_mod.BlockQ5_K;
+const BlockQ6_K = dtype_mod.BlockQ6_K;
+const BlockQ8_K = dtype_mod.BlockQ8_K;
 const BlockQ8_Kx4 = qm.BlockQ8_Kx4;
 
 var io: std.Io = undefined;

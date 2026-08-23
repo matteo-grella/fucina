@@ -4,6 +4,7 @@
 //! matmul parity, and the randomized row-outer matmul scalar-reference check.
 const std = @import("std");
 const builtin = @import("builtin");
+const dtype_mod = @import("../../dtype.zig");
 const tensor = @import("../../tensor.zig");
 const qm = @import("../quant.zig");
 const q8k = @import("q8k.zig");
@@ -13,7 +14,7 @@ const q8_0 = @import("q8_0.zig");
 
 const Tensor = tensor.Tensor;
 
-const BlockQ8_0 = types.BlockQ8_0;
+const BlockQ8_0 = dtype_mod.BlockQ8_0;
 const q8_0_block_size = types.q8_0_block_size;
 
 test "ggml_q8_0 quantize and dequantize match GGML block semantics" {

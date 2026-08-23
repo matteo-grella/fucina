@@ -1,4 +1,5 @@
 const std = @import("std");
+const dtype_mod = @import("../dtype.zig");
 const backend_mod = @import("../backend.zig");
 const fucina_dtype = @import("../dtype.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
@@ -51,7 +52,7 @@ pub const MoeBatchProfile = struct {
 pub const MoePtqtpRhs = struct {
     allocator: ?Allocator,
     /// Plane block stacks; entries past `plane_count` are empty.
-    planes: [3][]const backend_mod.quantized_matmul.BlockTQ2_0,
+    planes: [3][]const dtype_mod.BlockTQ2_0,
     plane_count: usize,
     k: usize,
     /// Stacked rows per plane (`n_expert * out_dim`).
@@ -319,7 +320,7 @@ fn acquireMoeStreamedStart(gate: *const MoeRhs, up: *const MoeRhs, down: *const 
 /// `e`'s contiguous row-block of `rhs`. Single threaded — one expert's GEMM,
 /// run inside a pooled per-expert task. `m == 1` is the decode GEMV; `m > 1`
 /// is the batched-prefill case (all rows reuse the same weights from cache).
-fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const backend_mod.quantized_matmul.BlockQ8_K, qlhs8: []const backend_mod.quantized_matmul.BlockQ8_0, out: []f32, out_dim: usize, m: usize, c0: usize, c1: usize) void {
+fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const dtype_mod.BlockQ8_K, qlhs8: []const dtype_mod.BlockQ8_0, out: []f32, out_dim: usize, m: usize, c0: usize, c1: usize) void {
     const qm = backend_mod.quantized_matmul;
     switch (rhs.*) {
         .q8_0 => |*big| {
@@ -387,14 +388,14 @@ fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const backend_mod
             const base = s.expertBytes(e);
             switch (s.quant) {
                 .q8_0 => {
-                    const blocks = @as([*]const qm.BlockQ8_0, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const blocks = @as([*]const dtype_mod.BlockQ8_0, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
                     const view = q8_0View(blocks, s.k, out_dim, bpc);
                     qm.q8_0.matmulQ8_0RhsTile(out, qlhs8, &view, out_dim, 0, m, c0, c1);
                 },
                 .mxfp4 => {
                     // Same sound @constCast borrow as tq2_0View: allocator
                     // is null, so the view never mutates or frees the slab.
-                    const blocks = @as([*]const qm.BlockMXFP4, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const blocks = @as([*]const dtype_mod.BlockMXFP4, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
                     const view = backend_mod.QuantizedMatmulRhsMXFP4{
                         .rows = .{ .allocator = null, .blocks = @constCast(blocks), .rows = out_dim, .cols = s.k, .blocks_per_row = bpc },
                         .k = s.k,
@@ -418,7 +419,7 @@ fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const backend_mod
                     // blocks); plane_count == 1 is the plain ternary stack
                     // and takes the single direct tile inside the helper.
                     const plane_blocks = out_dim * bpc;
-                    const all = @as([*]const qm.BlockTQ2_0, @ptrCast(@alignCast(base)));
+                    const all = @as([*]const dtype_mod.BlockTQ2_0, @ptrCast(@alignCast(base)));
                     var views: [3]backend_mod.QuantizedMatmulRhsTQ2_0 = undefined;
                     for (0..s.plane_count) |p| {
                         views[p] = tq2_0View(all[p * plane_blocks ..][0..plane_blocks], s.k, out_dim, bpc);
@@ -426,37 +427,37 @@ fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const backend_mod
                     moePtqtpTileDotRange(views[0..s.plane_count], qlhs, out, out_dim, m, c0, c1);
                 },
                 .q2_k => {
-                    const blocks = @as([*]const qm.BlockQ2_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const blocks = @as([*]const dtype_mod.BlockQ2_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
                     const view = backend_mod.QuantizedMatmulRhsQ2_K{ .allocator = null, .blocks = blocks, .k = s.k, .n = out_dim, .blocks_per_column = bpc };
                     qm.cold.matmulQ2_KRhsTile(out, qlhs, &view, out_dim, 0, m, c0, c1);
                 },
                 .iq2_xxs => {
-                    const blocks = @as([*]const qm.BlockIQ2_XXS, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const blocks = @as([*]const dtype_mod.BlockIQ2_XXS, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
                     const view = iq2_xxsView(blocks, s.k, out_dim, bpc);
                     qm.cold.matmulTableQ8_KRhsTile(.iq2_xxs, out, qlhs, &view, out_dim, 0, m, c0, c1);
                 },
                 .iq3_xxs => {
-                    const blocks = @as([*]const qm.BlockIQ3_XXS, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const blocks = @as([*]const dtype_mod.BlockIQ3_XXS, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
                     const view = iq3_xxsView(blocks, s.k, out_dim, bpc);
                     qm.cold.matmulTableQ8_KRhsTile(.iq3_xxs, out, qlhs, &view, out_dim, 0, m, c0, c1);
                 },
                 .iq2_s => {
-                    const blocks = @as([*]const qm.BlockIQ2_S, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const blocks = @as([*]const dtype_mod.BlockIQ2_S, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
                     const view = tableView(.iq2_s, blocks, s.k, out_dim, bpc);
                     qm.cold.matmulTableQ8_KRhsTile(.iq2_s, out, qlhs, &view, out_dim, 0, m, c0, c1);
                 },
                 .iq4_xs => {
-                    const blocks = @as([*]const qm.BlockIQ4_XS, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const blocks = @as([*]const dtype_mod.BlockIQ4_XS, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
                     const view = tableView(.iq4_xs, blocks, s.k, out_dim, bpc);
                     qm.cold.matmulTableQ8_KRhsTile(.iq4_xs, out, qlhs, &view, out_dim, 0, m, c0, c1);
                 },
                 .q3_k => {
-                    const blocks = @as([*]const qm.BlockQ3_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const blocks = @as([*]const dtype_mod.BlockQ3_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
                     const view = backend_mod.QuantizedMatmulRhsQ3_K{ .allocator = null, .blocks = blocks, .k = s.k, .n = out_dim, .blocks_per_column = bpc };
                     qm.cold.matmulQ3_KRhsTile(out, qlhs, &view, out_dim, 0, m, c0, c1);
                 },
                 .q5_k => {
-                    const blocks = @as([*]const qm.BlockQ5_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const blocks = @as([*]const dtype_mod.BlockQ5_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
                     const view = backend_mod.QuantizedMatmulRhsQ5_K{ .allocator = null, .blocks = blocks, .k = s.k, .n = out_dim, .blocks_per_column = bpc };
                     if (m >= 4) {
                         qm.q5_k.matmulQ5_KRhsCompactColOuter(out, qlhs, &view, out_dim, 0, m, c0, c1);
@@ -465,7 +466,7 @@ fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const backend_mod
                     }
                 },
                 .q6_k => {
-                    const blocks = @as([*]const qm.BlockQ6_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const blocks = @as([*]const dtype_mod.BlockQ6_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
                     const view = backend_mod.QuantizedMatmulRhsQ6_K{ .allocator = null, .blocks = blocks, .k = s.k, .n = out_dim, .blocks_per_column = bpc };
                     if (m >= 4) {
                         qm.q6_k.matmulQ6_KRhsCompactColOuter(out, qlhs, &view, out_dim, 0, m, c0, c1);
@@ -474,7 +475,7 @@ fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const backend_mod
                     }
                 },
                 .q4_k => {
-                    const blocks = @as([*]const qm.BlockQ4_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const blocks = @as([*]const dtype_mod.BlockQ4_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
                     const view = backend_mod.QuantizedMatmulRhsQ4_K{ .allocator = null, .blocks = blocks, .k = s.k, .n = out_dim, .blocks_per_column = bpc };
                     if (m >= 4) {
                         qm.q4_k.matmulQ4_KRhsCompactColOuter(out, qlhs, &view, out_dim, 0, m, c0, c1);
@@ -516,11 +517,11 @@ fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const backend_mod
     }
 }
 
-fn moeExpertTileDot(rhs: *const MoeRhs, e: usize, qlhs: []const backend_mod.quantized_matmul.BlockQ8_K, qlhs8: []const backend_mod.quantized_matmul.BlockQ8_0, out: []f32, out_dim: usize, m: usize) void {
+fn moeExpertTileDot(rhs: *const MoeRhs, e: usize, qlhs: []const dtype_mod.BlockQ8_K, qlhs8: []const dtype_mod.BlockQ8_0, out: []f32, out_dim: usize, m: usize) void {
     moeExpertTileDotRange(rhs, e, qlhs, qlhs8, out, out_dim, m, 0, out_dim);
 }
 
-fn q8_0View(blocks: []const backend_mod.quantized_matmul.BlockQ8_0, k: usize, out_dim: usize, bpc: usize) backend_mod.QuantizedMatmulRhsQ8_0 {
+fn q8_0View(blocks: []const dtype_mod.BlockQ8_0, k: usize, out_dim: usize, bpc: usize) backend_mod.QuantizedMatmulRhsQ8_0 {
     return .{
         .rows = .{ .allocator = null, .blocks = blocks, .rows = out_dim, .cols = k, .blocks_per_row = bpc },
         .k = k,
@@ -528,7 +529,7 @@ fn q8_0View(blocks: []const backend_mod.quantized_matmul.BlockQ8_0, k: usize, ou
     };
 }
 
-fn iq2_xxsView(blocks: []const backend_mod.quantized_matmul.BlockIQ2_XXS, k: usize, out_dim: usize, bpc: usize) backend_mod.QuantizedMatmulRhsIQ2_XXS {
+fn iq2_xxsView(blocks: []const dtype_mod.BlockIQ2_XXS, k: usize, out_dim: usize, bpc: usize) backend_mod.QuantizedMatmulRhsIQ2_XXS {
     // Same sound @constCast borrow as tq2_0View below.
     return .{
         .rows = .{ .allocator = null, .blocks = @constCast(blocks), .rows = out_dim, .cols = k, .blocks_per_row = bpc },
@@ -548,7 +549,7 @@ fn tableView(comptime dt: fucina_dtype.DType, blocks: anytype, k: usize, out_dim
     };
 }
 
-fn iq3_xxsView(blocks: []const backend_mod.quantized_matmul.BlockIQ3_XXS, k: usize, out_dim: usize, bpc: usize) backend_mod.QuantizedMatmulRhsIQ3_XXS {
+fn iq3_xxsView(blocks: []const dtype_mod.BlockIQ3_XXS, k: usize, out_dim: usize, bpc: usize) backend_mod.QuantizedMatmulRhsIQ3_XXS {
     // Same sound @constCast borrow as tq2_0View below.
     return .{
         .rows = .{ .allocator = null, .blocks = @constCast(blocks), .rows = out_dim, .cols = k, .blocks_per_row = bpc },
@@ -557,7 +558,7 @@ fn iq3_xxsView(blocks: []const backend_mod.quantized_matmul.BlockIQ3_XXS, k: usi
     };
 }
 
-fn tq2_0View(blocks: []const backend_mod.quantized_matmul.BlockTQ2_0, k: usize, out_dim: usize, bpc: usize) backend_mod.QuantizedMatmulRhsTQ2_0 {
+fn tq2_0View(blocks: []const dtype_mod.BlockTQ2_0, k: usize, out_dim: usize, bpc: usize) backend_mod.QuantizedMatmulRhsTQ2_0 {
     // The generic rows container carries mutable blocks; the matmul path
     // never writes them, so the @constCast borrow is sound (see the
     // stack-wrapper note in matmul2DWithQuantizedRowsTensorRhs).
@@ -590,7 +591,7 @@ const ptqtp_acc_cols: usize = 1024;
 /// stays race-free under any task partition.
 fn moePtqtpTileDotRange(
     planes: []const backend_mod.QuantizedMatmulRhsTQ2_0,
-    qlhs: []const backend_mod.quantized_matmul.BlockQ8_K,
+    qlhs: []const dtype_mod.BlockQ8_K,
     out: []f32,
     out_dim: usize,
     m: usize,
@@ -656,17 +657,17 @@ fn moeExpertTileDotX4Range(rhs: *const MoeRhs, e: usize, lhs_x4: []const backend
             switch (s.quant) {
                 .q8_0, .tq2_0, .tq2_0_fx4, .mxfp4, .q2_k, .iq2_xxs, .iq3_xxs, .iq2_s, .iq4_xs, .q3_k => unreachable, // gated by moeRhsUsesLanePacked
                 .q4_k => {
-                    const blocks = @as([*]const qm.BlockQ4_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const blocks = @as([*]const dtype_mod.BlockQ4_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
                     const view = backend_mod.QuantizedMatmulRhsQ4_K{ .allocator = null, .blocks = blocks, .k = s.k, .n = out_dim, .blocks_per_column = bpc };
                     qm.q4_k.matmulQ4_KCompactQ8_Kx4ColOuter(out, lhs_x4, &view, out_dim, m, c0, c1);
                 },
                 .q5_k => {
-                    const blocks = @as([*]const qm.BlockQ5_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const blocks = @as([*]const dtype_mod.BlockQ5_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
                     const view = backend_mod.QuantizedMatmulRhsQ5_K{ .allocator = null, .blocks = blocks, .k = s.k, .n = out_dim, .blocks_per_column = bpc };
                     qm.q5_k.matmulQ5_KCompactQ8_Kx4ColOuter(out, lhs_x4, &view, out_dim, m, c0, c1);
                 },
                 .q6_k => {
-                    const blocks = @as([*]const qm.BlockQ6_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
+                    const blocks = @as([*]const dtype_mod.BlockQ6_K, @ptrCast(@alignCast(base)))[0 .. out_dim * bpc];
                     const view = backend_mod.QuantizedMatmulRhsQ6_K{ .allocator = null, .blocks = blocks, .k = s.k, .n = out_dim, .blocks_per_column = bpc };
                     qm.q6_k.matmulQ6_KCompactQ8_Kx4ColOuter(out, lhs_x4, &view, out_dim, m, c0, c1);
                 },
@@ -734,7 +735,7 @@ const MoeScratchCarver = struct {
 
 pub fn MoeDecodeScratchView(comptime QgBlock: type, comptime Task: type) type {
     return struct {
-        qx: []backend_mod.quantized_matmul.BlockQ8_K,
+        qx: []dtype_mod.BlockQ8_K,
         gate_buf: []f32,
         up_buf: []f32,
         g_buf: []f32,
@@ -746,7 +747,7 @@ pub fn MoeDecodeScratchView(comptime QgBlock: type, comptime Task: type) type {
 
 pub fn MoeDecodeChainScratchView(comptime QgBlock: type, comptime State: type, comptime Task: type) type {
     return struct {
-        qx: []backend_mod.quantized_matmul.BlockQ8_K,
+        qx: []dtype_mod.BlockQ8_K,
         gate_buf: []f32,
         up_buf: []f32,
         g_buf: []f32,
@@ -771,9 +772,8 @@ pub fn carveMoeDecodeScratch(
     hidden: usize,
     blocks_per_g: usize,
 ) !MoeDecodeScratchView(QgBlock, Task) {
-    const qm = backend_mod.quantized_matmul;
     comptime {
-        if (@alignOf(qm.BlockQ8_K) > 8 or @alignOf(QgBlock) > 8 or @alignOf(Task) > 8) {
+        if (@alignOf(dtype_mod.BlockQ8_K) > 8 or @alignOf(QgBlock) > 8 or @alignOf(Task) > 8) {
             @compileError("MoE scratch regions must align to <= 8");
         }
     }
@@ -782,7 +782,7 @@ pub fn carveMoeDecodeScratch(
     const out_len = try checkedMoeProduct(top_k, hidden);
 
     var total: usize = 0;
-    total = try MoeScratchCarver.need(qm.BlockQ8_K, total, hidden_blocks);
+    total = try MoeScratchCarver.need(dtype_mod.BlockQ8_K, total, hidden_blocks);
     total = try MoeScratchCarver.need(f32, total, gate_len);
     total = try MoeScratchCarver.need(f32, total, gate_len);
     total = try MoeScratchCarver.need(f32, total, gate_len);
@@ -800,7 +800,7 @@ pub fn carveMoeDecodeScratch(
     }
     var carver = MoeScratchCarver{ .base = @ptrCast(scratch.words.ptr) };
     return .{
-        .qx = try carver.carve(qm.BlockQ8_K, hidden_blocks),
+        .qx = try carver.carve(dtype_mod.BlockQ8_K, hidden_blocks),
         .gate_buf = try carver.carve(f32, gate_len),
         .up_buf = try carver.carve(f32, gate_len),
         .g_buf = try carver.carve(f32, gate_len),
@@ -822,9 +822,8 @@ pub fn carveMoeDecodeChainScratch(
     blocks_per_g: usize,
     task_count: usize,
 ) !MoeDecodeChainScratchView(QgBlock, State, Task) {
-    const qm = backend_mod.quantized_matmul;
     comptime {
-        if (@alignOf(qm.BlockQ8_K) > 8 or @alignOf(QgBlock) > 8 or @alignOf(State) > 8 or @alignOf(Task) > 8) {
+        if (@alignOf(dtype_mod.BlockQ8_K) > 8 or @alignOf(QgBlock) > 8 or @alignOf(State) > 8 or @alignOf(Task) > 8) {
             @compileError("MoE scratch regions must align to <= 8");
         }
     }
@@ -833,7 +832,7 @@ pub fn carveMoeDecodeChainScratch(
     const out_len = try checkedMoeProduct(top_k, hidden);
 
     var total: usize = 0;
-    total = try MoeScratchCarver.need(qm.BlockQ8_K, total, hidden_blocks);
+    total = try MoeScratchCarver.need(dtype_mod.BlockQ8_K, total, hidden_blocks);
     total = try MoeScratchCarver.need(f32, total, gate_len);
     total = try MoeScratchCarver.need(f32, total, gate_len);
     total = try MoeScratchCarver.need(f32, total, gate_len);
@@ -852,7 +851,7 @@ pub fn carveMoeDecodeChainScratch(
     }
     var carver = MoeScratchCarver{ .base = @ptrCast(scratch.words.ptr) };
     return .{
-        .qx = try carver.carve(qm.BlockQ8_K, hidden_blocks),
+        .qx = try carver.carve(dtype_mod.BlockQ8_K, hidden_blocks),
         .gate_buf = try carver.carve(f32, gate_len),
         .up_buf = try carver.carve(f32, gate_len),
         .g_buf = try carver.carve(f32, gate_len),
@@ -867,8 +866,8 @@ const MoeExpertTask = struct {
     gate: *const MoeRhs,
     up: *const MoeRhs,
     down: *const MoeRhs,
-    qx: []const backend_mod.quantized_matmul.BlockQ8_K,
-    qx8: []const backend_mod.quantized_matmul.BlockQ8_0,
+    qx: []const dtype_mod.BlockQ8_K,
+    qx8: []const dtype_mod.BlockQ8_0,
     out_pe: usize,
     hidden: usize,
     expert_index: usize,
@@ -876,8 +875,8 @@ const MoeExpertTask = struct {
     gate_buf: []f32,
     up_buf: []f32,
     g_buf: []f32,
-    qg: []backend_mod.quantized_matmul.BlockQ8_K,
-    qg8: []backend_mod.quantized_matmul.BlockQ8_0,
+    qg: []dtype_mod.BlockQ8_K,
+    qg8: []dtype_mod.BlockQ8_0,
     out: []f32,
     gated_op: GatedOp,
     profile_enabled: bool,
@@ -923,8 +922,8 @@ const MoeDecodeChainState = struct {
     gate: *const MoeRhs,
     up: *const MoeRhs,
     down: *const MoeRhs,
-    qx: []const backend_mod.quantized_matmul.BlockQ8_K,
-    qx8: []const backend_mod.quantized_matmul.BlockQ8_0,
+    qx: []const dtype_mod.BlockQ8_K,
+    qx8: []const dtype_mod.BlockQ8_0,
     out_pe: usize,
     hidden: usize,
     expert_index: usize,
@@ -932,8 +931,8 @@ const MoeDecodeChainState = struct {
     gate_buf: []f32,
     up_buf: []f32,
     g_buf: []f32,
-    qg: []backend_mod.quantized_matmul.BlockQ8_K,
-    qg8: []backend_mod.quantized_matmul.BlockQ8_0,
+    qg: []dtype_mod.BlockQ8_K,
+    qg8: []dtype_mod.BlockQ8_0,
     out: []f32,
     gated_op: GatedOp,
     profile_enabled: bool,
@@ -996,8 +995,8 @@ const MoeDecodeChainBuild = struct {
     gate: *const MoeRhs,
     up: *const MoeRhs,
     down: *const MoeRhs,
-    qx: []const backend_mod.quantized_matmul.BlockQ8_K,
-    qx8: []const backend_mod.quantized_matmul.BlockQ8_0,
+    qx: []const dtype_mod.BlockQ8_K,
+    qx8: []const dtype_mod.BlockQ8_0,
     out_pe: usize,
     hidden: usize,
     selected: []const usize,
@@ -1005,8 +1004,8 @@ const MoeDecodeChainBuild = struct {
     gate_buf: []f32,
     up_buf: []f32,
     g_buf: []f32,
-    qg: []backend_mod.quantized_matmul.BlockQ8_K,
-    qg8_all: []backend_mod.quantized_matmul.BlockQ8_0,
+    qg: []dtype_mod.BlockQ8_K,
+    qg8_all: []dtype_mod.BlockQ8_0,
     outs: []f32,
     blocks_per_g: usize,
     blocks_per_g8: usize,
@@ -1180,15 +1179,15 @@ pub fn moeExpertFfn(
 
     // Q8_0-format activations live outside the carved scratch (only the
     // deepseek2-style layers pay this allocation).
-    const qx8: []qm.BlockQ8_0 = if (gate_up_q8) try ctx.allocator.alloc(qm.BlockQ8_0, hidden / 32) else &.{};
+    const qx8: []dtype_mod.BlockQ8_0 = if (gate_up_q8) try ctx.allocator.alloc(dtype_mod.BlockQ8_0, hidden / 32) else &.{};
     defer if (qx8.len > 0) ctx.allocator.free(qx8);
-    const qg8_all: []qm.BlockQ8_0 = if (down_q8) try ctx.allocator.alloc(qm.BlockQ8_0, try checkedMoeProduct(top_k, blocks_per_g8)) else &.{};
+    const qg8_all: []dtype_mod.BlockQ8_0 = if (down_q8) try ctx.allocator.alloc(dtype_mod.BlockQ8_0, try checkedMoeProduct(top_k, blocks_per_g8)) else &.{};
     defer if (qg8_all.len > 0) ctx.allocator.free(qg8_all);
 
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
     lockMoeDecodeScratch(ctx);
     defer unlockMoeDecodeScratch(ctx);
-    const sv = try carveMoeDecodeChainScratch(ctx, qm.BlockQ8_K, MoeDecodeChainState, MoeDecodeChainTask, hidden_blocks_k, top_k, out_pe, hidden, blocks_per_g, chain_task_count);
+    const sv = try carveMoeDecodeChainScratch(ctx, dtype_mod.BlockQ8_K, MoeDecodeChainState, MoeDecodeChainTask, hidden_blocks_k, top_k, out_pe, hidden, blocks_per_g, chain_task_count);
     const gate_buf = sv.gate_buf;
     const up_buf = sv.up_buf;
     const g_buf = sv.g_buf;
@@ -1310,16 +1309,16 @@ const MoeBatchTask = struct {
     row_start: usize, // first row (in the expert-grouped order) for this expert
     m: usize, // rows routed to this expert
     expert: usize,
-    qx: []backend_mod.quantized_matmul.BlockQ8_K,
+    qx: []dtype_mod.BlockQ8_K,
     // Q8_0-activation twins of qx/qg, non-empty exactly when the experts
     // want Q8_0 lhs (q8_0 / mxfp4 — uniform across all three projections);
     // then qx/qg stay empty and bpc_in/blocks_per_g count 32-elem blocks.
-    qx8: []backend_mod.quantized_matmul.BlockQ8_0 = &.{},
+    qx8: []dtype_mod.BlockQ8_0 = &.{},
     gate_buf: []f32,
     up_buf: []f32,
     g_buf: []f32,
-    qg: []backend_mod.quantized_matmul.BlockQ8_K,
-    qg8: []backend_mod.quantized_matmul.BlockQ8_0 = &.{},
+    qg: []dtype_mod.BlockQ8_K,
+    qg8: []dtype_mod.BlockQ8_0 = &.{},
     down_buf: []f32,
     gated_op: GatedOp,
     profile_enabled: bool,
@@ -1360,8 +1359,8 @@ fn runMoeBatchTask(task: *const MoeBatchTask) void {
     }
     if (task.profile_enabled) task_profile.gather_quant_ns += moeBatchProfileElapsed(gather_quant_start, task.io);
 
-    const no_qk: []const backend_mod.quantized_matmul.BlockQ8_K = &.{};
-    const no_q8: []const backend_mod.quantized_matmul.BlockQ8_0 = &.{};
+    const no_qk: []const dtype_mod.BlockQ8_K = &.{};
+    const no_q8: []const dtype_mod.BlockQ8_0 = &.{};
     const qx = if (q8_lhs) no_qk else task.qx[base * bpc_in ..][0 .. m * bpc_in];
     const qx8 = if (q8_lhs) task.qx8[base * bpc_in ..][0 .. m * bpc_in] else no_q8;
     const gate_out = task.gate_buf[base * out_pe ..][0 .. m * out_pe];
@@ -1411,9 +1410,9 @@ const MoeBatchGatherTask = struct {
     bpc_in: usize,
     row_start: usize,
     m: usize,
-    qx: []backend_mod.quantized_matmul.BlockQ8_K,
+    qx: []dtype_mod.BlockQ8_K,
     // Q8_0 twin of `qx` (see MoeBatchTask.qx8).
-    qx8: []backend_mod.quantized_matmul.BlockQ8_0 = &.{},
+    qx8: []dtype_mod.BlockQ8_0 = &.{},
     // Optional 4-row-interleaved repack of `qx` for the lane-packed Q5_K kernel.
     // Empty when the gate/up experts are not q5_k. `x4_group_start` is this
     // expert's first Q8_Kx4 group index (prefix sum of ceil(m/4)).
@@ -1463,10 +1462,10 @@ fn runMoeBatchGatherTaskOpaque(ctx: *anyopaque) void {
 
 const MoeBatchMatmulTask = struct {
     rhs: *const MoeRhs,
-    qlhs: []const backend_mod.quantized_matmul.BlockQ8_K,
+    qlhs: []const dtype_mod.BlockQ8_K,
     // Q8_0 twin of `qlhs` (see MoeBatchTask.qx8); `bpc` counts the active
     // format's blocks either way.
-    qlhs8: []const backend_mod.quantized_matmul.BlockQ8_0 = &.{},
+    qlhs8: []const dtype_mod.BlockQ8_0 = &.{},
     // 4-row-interleaved repack of `qlhs`; empty unless `rhs` is q5_k. Used for the
     // lane-packed kernel when `m >= 4`. `x4_group_start` is the expert's first group.
     qlhs_x4: []const backend_mod.quantized_matmul.BlockQ8_Kx4,
@@ -1496,12 +1495,12 @@ fn runMoeBatchMatmulTask(task: *const MoeBatchMatmulTask) void {
         const lhs_x4 = task.qlhs_x4[task.x4_group_start * task.bpc ..][0 .. groups * task.bpc];
         moeExpertTileDotX4Range(task.rhs, task.expert, lhs_x4, m, out, task.out_dim, task.c0, task.c1);
     } else if (task.qlhs8.len != 0) {
-        const no_qk: []const backend_mod.quantized_matmul.BlockQ8_K = &.{};
+        const no_qk: []const dtype_mod.BlockQ8_K = &.{};
         const q8 = task.qlhs8[base * task.bpc ..][0 .. m * task.bpc];
         moeExpertTileDotRange(task.rhs, task.expert, no_qk, q8, out, task.out_dim, m, task.c0, task.c1);
     } else {
         const q = task.qlhs[base * task.bpc ..][0 .. m * task.bpc];
-        const no_q8: []const backend_mod.quantized_matmul.BlockQ8_0 = &.{};
+        const no_q8: []const dtype_mod.BlockQ8_0 = &.{};
         moeExpertTileDotRange(task.rhs, task.expert, q, no_q8, out, task.out_dim, m, task.c0, task.c1);
     }
     if (task.profile_enabled) task_profile.elapsed_ns += moeBatchProfileElapsed(start, task.io);
@@ -1516,9 +1515,9 @@ const MoeBatchSwiGluTask = struct {
     gate_buf: []const f32,
     up_buf: []const f32,
     g_buf: []f32,
-    qg: []backend_mod.quantized_matmul.BlockQ8_K,
+    qg: []dtype_mod.BlockQ8_K,
     // Q8_0 twin of `qg` (see MoeBatchTask.qx8).
-    qg8: []backend_mod.quantized_matmul.BlockQ8_0 = &.{},
+    qg8: []dtype_mod.BlockQ8_0 = &.{},
     // Optional 4-row-interleaved repack of `qg` for the lane-packed Q5_K down-proj.
     // Empty when the down experts are not q5_k.
     qg_x4: []backend_mod.quantized_matmul.BlockQ8_Kx4,
@@ -1597,13 +1596,13 @@ fn runMoeBatchPhased(
     blocks_per_g: usize,
     count: []const usize,
     offset: []const usize,
-    qx: []backend_mod.quantized_matmul.BlockQ8_K,
-    qx8: []backend_mod.quantized_matmul.BlockQ8_0,
+    qx: []dtype_mod.BlockQ8_K,
+    qx8: []dtype_mod.BlockQ8_0,
     gate_buf: []f32,
     up_buf: []f32,
     g_buf: []f32,
-    qg: []backend_mod.quantized_matmul.BlockQ8_K,
-    qg8: []backend_mod.quantized_matmul.BlockQ8_0,
+    qg: []dtype_mod.BlockQ8_K,
+    qg8: []dtype_mod.BlockQ8_0,
     down_buf: []f32,
     group_offset: []const usize,
     qx_x4: []backend_mod.quantized_matmul.BlockQ8_Kx4,
@@ -1925,9 +1924,9 @@ pub fn moeExpertFfnBatch(
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
     const group_offset = try a.alloc(usize, n_expert);
     defer a.free(group_offset);
-    const qx = try a.alloc(qm.BlockQ8_K, if (q8_lhs) 0 else try checkedMoeProduct(n_pairs, bpc_in));
+    const qx = try a.alloc(dtype_mod.BlockQ8_K, if (q8_lhs) 0 else try checkedMoeProduct(n_pairs, bpc_in));
     defer a.free(qx);
-    const qx8 = try a.alloc(qm.BlockQ8_0, if (q8_lhs) try checkedMoeProduct(n_pairs, bpc_in) else 0);
+    const qx8 = try a.alloc(dtype_mod.BlockQ8_0, if (q8_lhs) try checkedMoeProduct(n_pairs, bpc_in) else 0);
     defer a.free(qx8);
     const gate_up_len = try checkedMoeProduct(n_pairs, out_pe);
     const gate_buf = try a.alloc(f32, gate_up_len);
@@ -1936,9 +1935,9 @@ pub fn moeExpertFfnBatch(
     defer a.free(up_buf);
     const g_buf = try a.alloc(f32, gate_up_len);
     defer a.free(g_buf);
-    const qg = try a.alloc(qm.BlockQ8_K, if (q8_lhs) 0 else try checkedMoeProduct(n_pairs, bpc_g));
+    const qg = try a.alloc(dtype_mod.BlockQ8_K, if (q8_lhs) 0 else try checkedMoeProduct(n_pairs, bpc_g));
     defer a.free(qg);
-    const qg8 = try a.alloc(qm.BlockQ8_0, if (q8_lhs) try checkedMoeProduct(n_pairs, bpc_g) else 0);
+    const qg8 = try a.alloc(dtype_mod.BlockQ8_0, if (q8_lhs) try checkedMoeProduct(n_pairs, bpc_g) else 0);
     defer a.free(qg8);
     const down_buf = try a.alloc(f32, try checkedMoeProduct(n_pairs, hidden));
     defer a.free(down_buf);

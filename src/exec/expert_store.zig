@@ -44,6 +44,8 @@
 //! pread/advise shims.
 const std = @import("std");
 const builtin = @import("builtin");
+const dtype_mod = @import("../dtype.zig");
+const DType = dtype_mod.DType;
 const backend_mod = @import("../backend.zig");
 const thread = @import("../thread.zig");
 const parallel = @import("../parallel.zig");
@@ -256,8 +258,11 @@ fn readWholeFile(allocator: Allocator, path: []const u8) ?[]u8 {
     return null;
 }
 
-/// Quantized formats an expert stack may stream in — the K-quant family
-/// every real MoE GGUF uses (matching `MoeRhs`'s resident arms).
+/// Quantized formats an expert stack may stream in: the K-quant family
+/// every real MoE GGUF uses (matching `MoeRhs`'s resident arms). Every
+/// member but `tq2_0_fx4` is spelled exactly like its `DType` tag and
+/// derives its block geometry from `dtype.block_formats`; this enum is the
+/// one place the streamable subset is listed (`fromDType`, `streamable`).
 pub const StreamedQuant = enum {
     q4_k,
     q5_k,
@@ -272,44 +277,67 @@ pub const StreamedQuant = enum {
     q3_k,
     mxfp4,
     /// Tie-fitted K=2 PTQTP pre-folded on disk (`gguf.GgmlType.tq2_0_fx4`):
-    /// one contiguous pack per expert projection — single pread per miss,
-    /// slab bytes == file bytes (L2-stripeable), served by the one-pass
+    /// one contiguous pack per expert projection (single pread per miss,
+    /// slab bytes == file bytes, L2-stripeable), served by the one-pass
     /// folded kernel. Resident MoE and dense loaders carry the same format
-    /// (docs/PTQTP.md, "Native folded expert format").
+    /// (docs/PTQTP.md, "Native folded expert format"). Not a `DType`: its
+    /// 520-byte block spans four columns, outside the one-row block
+    /// contract of `dtype.block_formats`.
     tq2_0_fx4,
 
+    comptime {
+        for (@typeInfo(StreamedQuant).@"enum".fields) |field| {
+            if (std.mem.eql(u8, field.name, "tq2_0_fx4")) continue;
+            if (!@hasField(DType, field.name))
+                @compileError("StreamedQuant." ++ field.name ++ " must be spelled like its DType tag");
+        }
+    }
+
+    /// The streamed format for a block dtype, or null when expert stacks
+    /// of that dtype are not streamable.
+    pub fn fromDType(dt: DType) ?StreamedQuant {
+        switch (dt) {
+            inline else => |tag| {
+                if (comptime @hasField(StreamedQuant, @tagName(tag))) return @field(StreamedQuant, @tagName(tag));
+                return null;
+            },
+        }
+    }
+
+    pub fn streamable(dt: DType) bool {
+        return fromDType(dt) != null;
+    }
+
+    /// The `DType` this format stores; null for the folded pack.
+    pub fn dtype(self: StreamedQuant) ?DType {
+        return switch (self) {
+            .tq2_0_fx4 => null,
+            inline else => |tag| @field(DType, @tagName(tag)),
+        };
+    }
+
+    /// Bytes per weight block as the slab accounts for them.
     pub fn blockSize(self: StreamedQuant) usize {
         return switch (self) {
-            .q4_k => @sizeOf(qm.BlockQ4_K),
-            .q5_k => @sizeOf(qm.BlockQ5_K),
-            .q6_k => @sizeOf(qm.BlockQ6_K),
-            .q8_0 => @sizeOf(qm.BlockQ8_0),
-            .tq2_0 => @sizeOf(qm.BlockTQ2_0),
-            .q2_k => @sizeOf(qm.BlockQ2_K),
-            .iq2_xxs => @sizeOf(qm.BlockIQ2_XXS),
-            .iq3_xxs => @sizeOf(qm.BlockIQ3_XXS),
-            .iq2_s => @sizeOf(qm.BlockIQ2_S),
-            .iq4_xs => @sizeOf(qm.BlockIQ4_XS),
-            .q3_k => @sizeOf(qm.BlockQ3_K),
-            .mxfp4 => @sizeOf(qm.BlockMXFP4),
             // Amortized per-column bytes: the physical 520-byte
             // `BlockTQ2_0Foldedx4` spans FOUR columns' 256-element blocks,
-            // so per column it costs 130 — geometry math (rows x bpc x
+            // so per column it costs 130; geometry math (rows x bpc x
             // blockSize) then yields exact byte counts (out_dim % 4 == 0
             // enforced in ProjGeometry.init).
             .tq2_0_fx4 => @sizeOf(qm.BlockTQ2_0Foldedx4) / 4,
+            inline else => |tag| dtype_mod.blockByteSize(@field(DType, @tagName(tag))),
         };
     }
 
     /// Weight blocks per row for a row of `in_dim` inputs.
     pub fn blocksPerColumn(self: StreamedQuant, in_dim: usize) Error!usize {
-        switch (self) {
-            .q8_0, .mxfp4 => {
-                if (in_dim == 0 or in_dim % 32 != 0) return Error.InvalidExpertGeometry;
-                return in_dim / 32;
-            },
-            else => return qm.q8k.qkBlockCount(in_dim) catch Error.InvalidExpertGeometry,
-        }
+        const block_len: usize = switch (self) {
+            // The folded pack keeps TQ2_0's 256-element block along k.
+            .tq2_0_fx4 => dtype_mod.blockSize(.tq2_0),
+            inline else => |tag| dtype_mod.blockSize(@field(DType, @tagName(tag))),
+        };
+        if (in_dim == 0 or in_dim % block_len != 0) return Error.InvalidExpertGeometry;
+        return in_dim / block_len;
     }
 };
 
@@ -2025,7 +2053,7 @@ pub const ExpertStore = struct {
     /// next to the two disk reads it accompanies.
     fn readExpertFolded(self: *ExpertStore, g: *const ProjGeometry, eid: u32, copy: usize, section: []u8) Error!void {
         const plane_blocks = g.out_dim * g.blocks_per_column;
-        const scratch = try self.allocator.alloc(qm.BlockTQ2_0, 2 * plane_blocks);
+        const scratch = try self.allocator.alloc(dtype_mod.BlockTQ2_0, 2 * plane_blocks);
         defer self.allocator.free(scratch);
         for (0..2) |plane| {
             const dst = std.mem.sliceAsBytes(scratch[plane * plane_blocks ..][0..plane_blocks]);

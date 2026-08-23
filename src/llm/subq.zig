@@ -35,7 +35,7 @@ const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
 const Tensor = fucina.internal.tensor_mod.Tensor;
 const qkern = fucina.internal.backend_mod.quantized_matmul;
-const BlockQ8_0 = qkern.BlockQ8_0;
+const BlockQ8_0 = fucina.quant.BlockQ8_0;
 const q8_block = 32;
 
 /// Storage format of the packed per-cluster K/V copies. The sparse arm is

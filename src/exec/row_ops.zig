@@ -1,5 +1,6 @@
 const std = @import("std");
 const backend_mod = @import("../backend.zig");
+const dtype_mod = @import("../dtype.zig");
 const kernels = backend_mod.kernels;
 const backend_ops = backend_mod.ops;
 const rng = @import("../rng.zig");
@@ -61,7 +62,7 @@ pub fn FusedActQuantTask(comptime act: FusedActKind, comptime format: FusedLhsFo
         row_group_start: usize,
         row_group_end: usize,
         x4_blocks: []backend_mod.quantized_matmul.BlockQ8_Kx4 = &.{},
-        row_blocks: []backend_mod.quantized_matmul.BlockQ8_K = &.{},
+        row_blocks: []dtype_mod.BlockQ8_K = &.{},
         q8_0x4_blocks: []backend_mod.quantized_matmul.BlockQ8_0x4 = &.{},
 
         pub fn run(task: *const @This()) void {

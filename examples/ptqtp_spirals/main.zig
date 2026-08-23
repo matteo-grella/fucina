@@ -38,7 +38,7 @@ const backend = fucina.internal.backend_mod;
 const quant = backend.quantized_matmul;
 
 const Allocator = std.mem.Allocator;
-const BlockQ8_K = backend.BlockQ8_K;
+const BlockQ8_K = fucina.quant.BlockQ8_K;
 const BlockTQ2_0 = ptqtp.BlockTQ2_0;
 const Rhs = ptqtp.Rhs;
 

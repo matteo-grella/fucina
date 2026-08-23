@@ -210,7 +210,7 @@ fn linearSeqPtqtpFused(
             }
         }
         if (m >= 32 and weight.gpu_planes[0] != null) gpu_blk: {
-            const nb01 = blocks_per_row * @sizeOf(backend_quant.BlockTQ2_0);
+            const nb01 = blocks_per_row * @sizeOf(dtype_mod.BlockTQ2_0);
             const raw_input = input.asRawTensor();
             const dev_planes = [3]?[]const u8{ weight.gpu_planes[0], weight.gpu_planes[1], weight.gpu_planes[2] };
             var first: ?tensor_mod.Tensor = null;
@@ -260,7 +260,7 @@ fn linearSeqPtqtpFused(
     }
 
     const allocator = ctx.allocator;
-    const lhs = try allocator.alloc(backend_quant.BlockQ8_K, m * blocks_per_row);
+    const lhs = try allocator.alloc(dtype_mod.BlockQ8_K, m * blocks_per_row);
     defer allocator.free(lhs);
     for (0..m) |r| {
         try backend_quant.q8k.quantizeRowQ8_KInto(lhs[r * blocks_per_row ..][0..blocks_per_row], x[r * k ..][0..k]);
@@ -276,7 +276,7 @@ fn linearSeqPtqtpFused(
     const Task = struct {
         out: []f32,
         tmp: []f32,
-        lhs: []const backend_quant.BlockQ8_K,
+        lhs: []const dtype_mod.BlockQ8_K,
         rhs: []const backend_quant.QuantizedMatmulRhsTQ2_0,
         px4: []const []const backend_quant.BlockTQ2_0x4, // empty = row-kernel path
         pfold: []const backend_quant.BlockTQ2_0Foldedx4, // nonempty = one-pass fold
@@ -421,7 +421,7 @@ fn linearSeqFx4(
         out_blas.deinit();
     }
 
-    const lhs = try allocator.alloc(backend_quant.BlockQ8_K, m * blocks_per_row);
+    const lhs = try allocator.alloc(dtype_mod.BlockQ8_K, m * blocks_per_row);
     defer allocator.free(lhs);
     for (0..m) |r| {
         try backend_quant.q8k.quantizeRowQ8_KInto(lhs[r * blocks_per_row ..][0..blocks_per_row], x[r * k ..][0..k]);
@@ -432,7 +432,7 @@ fn linearSeqFx4(
 
     const Task = struct {
         out: []f32,
-        lhs: []const backend_quant.BlockQ8_K,
+        lhs: []const dtype_mod.BlockQ8_K,
         pack: []const backend_quant.BlockTQ2_0Foldedx4,
         bpr: usize,
         m: usize,
@@ -1697,22 +1697,12 @@ pub fn streamedProjSpec(
 ) !expert_store.ProjSpec {
     if (info.n_dims != 3) return Error.InvalidWeightShape;
     if (info.dims[0] != expected_in_dim or info.dims[1] != expected_out_dim or info.dims[2] != expected_n_expert) return Error.InvalidWeightShape;
-    const quant: expert_store.StreamedQuant = switch (info.ggml_type) {
-        .q4_k => .q4_k,
-        .q5_k => .q5_k,
-        .q6_k => .q6_k,
-        .q8_0 => .q8_0,
-        .tq2_0 => .tq2_0,
-        .tq2_0_fx4 => .tq2_0_fx4,
-        .mxfp4 => .mxfp4,
-        .q2_k => .q2_k,
-        .iq2_xxs => .iq2_xxs,
-        .iq3_xxs => .iq3_xxs,
-        .iq2_s => .iq2_s,
-        .iq4_xs => .iq4_xs,
-        .q3_k => .q3_k,
-        else => return Error.UnsupportedWeightType,
-    };
+    // The streamable subset is `StreamedQuant`'s member list: a block
+    // dtype maps by name, and the folded pack is the one non-DType format.
+    const quant: expert_store.StreamedQuant = if (info.ggml_type == .tq2_0_fx4)
+        .tq2_0_fx4
+    else
+        expert_store.StreamedQuant.fromDType(gguf.dtypeForGgmlType(info.ggml_type) orelse return Error.UnsupportedWeightType) orelse return Error.UnsupportedWeightType;
     return .{
         .quant = quant,
         .part = info.part,
@@ -1968,7 +1958,7 @@ pub fn packGroupedQ8_0Rhs(
     const qm = backend_quant;
     if (group_dim % 32 != 0 or rank % 4 != 0 or n_groups == 0) return Error.InvalidWeightShape;
     const bpr = group_dim / 32;
-    const row_bytes = bpr * @sizeOf(qm.BlockQ8_0);
+    const row_bytes = bpr * @sizeOf(dtype_mod.BlockQ8_0);
     if (weight_bytes.len != n_groups * rank * row_bytes) return Error.InvalidWeightShape;
     const packs = try allocator.alloc(backend_quant.QuantizedMatmulRhsQ8_0x4, n_groups);
     var built: usize = 0;
@@ -1976,7 +1966,7 @@ pub fn packGroupedQ8_0Rhs(
         for (packs[0..built]) |*p| p.deinit();
         allocator.free(packs);
     }
-    const all = std.mem.bytesAsSlice(qm.BlockQ8_0, weight_bytes);
+    const all = std.mem.bytesAsSlice(dtype_mod.BlockQ8_0, weight_bytes);
     for (0..n_groups) |g| {
         packs[g] = try qm.q8_0.packMatmulRhsQ8_0x4(allocator, @alignCast(all[g * rank * bpr ..][0 .. rank * bpr]), rank, group_dim, bpr);
         built += 1;
@@ -1999,7 +1989,7 @@ pub fn groupedQ8_0GemvFusedInto(
     if (x.len != n_groups * group_dim or out.len != n_groups * rank) return Error.InvalidWeightShape;
 
     const allocator = ctx.allocator;
-    const lhs = try allocator.alloc(qm.BlockQ8_0, n_groups * bpr);
+    const lhs = try allocator.alloc(dtype_mod.BlockQ8_0, n_groups * bpr);
     defer allocator.free(lhs);
     for (0..n_groups) |g| {
         try qm.q8k.quantizeRowQ8_0Into(lhs[g * bpr ..][0..bpr], x[g * group_dim ..][0..group_dim]);
@@ -2007,7 +1997,7 @@ pub fn groupedQ8_0GemvFusedInto(
 
     const Task = struct {
         out: []f32,
-        lhs: []const qm.BlockQ8_0,
+        lhs: []const dtype_mod.BlockQ8_0,
         rhs: *const backend_quant.QuantizedMatmulRhsQ8_0x4,
         n: usize,
 

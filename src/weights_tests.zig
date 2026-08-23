@@ -648,7 +648,7 @@ test "tie-fitted ptqtp serves the folded one-pass semantics" {
     // same activation quantization — the fused dispatch must be bitwise
     // equal to it under any column partition.
     const bpr = in_dim / 256;
-    const qlhs = try allocator.alloc(fucina.internal.backend_mod.quantized_matmul.BlockQ8_K, seq_len * bpr);
+    const qlhs = try allocator.alloc(fucina.quant.BlockQ8_K, seq_len * bpr);
     defer allocator.free(qlhs);
     for (0..seq_len) |r| {
         try fucina.internal.backend_mod.quantized_matmul.q8k.quantizeRowQ8_KInto(qlhs[r * bpr ..][0..bpr], x_vals[r * in_dim ..][0..in_dim]);

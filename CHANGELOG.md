@@ -54,6 +54,29 @@ this point; earlier history is `git log`.
   `llm.gemma.model` / `llm.gemma.train` / `llm.pockettts.model`; build
   options `-Dbackend=cpu` → `-Dbackend=scalar`, `-Daccelerate=true|false`
   → `-Dblas=accelerate|none`.
+- `fucina.PackedRhsLayout` and the `layout` decl on every packed RHS
+  container: `DType` is the one identity of a storage format, and the
+  container type is the layout. Every RHS container carries
+  `pub const dtype: DType` instead; rewrite a `switch (rhs.layout)` to a
+  `switch (@TypeOf(rhs).dtype)`, and a `.q4_kx2mmla` vs `.q4_kx8` check to
+  `@TypeOf(rhs) == fucina.quant.QuantizedMatmulRhsQ4_Kx2Mmla` (or compare
+  against `fucina.PackedRhs(dt)`, the ISA-best container for `dt`).
+  `Tensor.packRhsLayout(ctx, layout)` → `Tensor.packRhsAs(ctx, Rhs)` with
+  the container type (`fucina.quant.QuantizedMatmulRhsQ4_Kx8`).
+- Kernel-tier format enums, none reachable from the `fucina` root:
+  `QuantizedMatmulFormat`, `QuantizedMatmulKernel`, `QuantizedMatmulTraits`,
+  `QuantizedStorageLayout`, `QuantizedScaleLayout`, `matmulTraits`,
+  `matmulTraitsRuntime`, `formatForDType`, `supportsMatmul`, the
+  `format`/`traits` decls on the RHS containers (`X.dtype`,
+  `dtype.blockSize(X.dtype)`, `dtype.blockByteSize(X.dtype)`,
+  `dtype.supportsQuantizedMatmulRhs(dt)`), `PackedMatmulFormat` /
+  `preferredRhsFormat` in `backend/packed.zig` (`PackedMatmulRhsFor(dt)`
+  carries `dtype`), and `backend/packed_layout.zig`. The
+  `AnyQuantizedMatmulRhs` union tags are `DType` names (`.ggml_q4_k` →
+  `.q4_k`; `.fucina_w8a8_rhs` unchanged). The GGML block structs have two
+  paths, `fucina.quant.BlockQ4_K` (public) and `dtype.BlockQ4_K`
+  (definition); the `backend.zig` and `backend/quant.zig` forwards are gone
+  (`fucina.internal.backend_mod.BlockQ4_K` → `fucina.quant.BlockQ4_K`).
 
 ### Changed
 
@@ -94,6 +117,16 @@ this point; earlier history is `git log`.
   kernel signature takes `pc: ParallelConfig` first when it uses the pool
   and drops the `WithConfig` suffix (`scaleIntoWithConfig(out, a, s,
   config)` -> `scaleInto(pc, out, a, s)`); the config-less twins are gone.
+- GPU providers: the per-provider kernel ABI tag enum is `KernelFormatTag`
+  (was `QFormat`; `fucina.internal.backend_mod.gpu_impl.QFormat` →
+  `.KernelFormatTag`), a wire value rather than a format identity, and each
+  provider maps a dtype to it with `kernelTag(dt) ?KernelFormatTag` (null
+  when the provider has no kernel for that dtype); the exec offload seams
+  and the MoE gate/up path use it instead of hand-written dtype-to-tag
+  switches. `expert_store.StreamedQuant` keeps its members (each spelled
+  like its `DType` tag; `tq2_0_fx4` is the one non-`DType` member) and
+  derives block geometry from `dtype.block_formats`; `fromDType`/
+  `streamable` make the enum the one place the streamable subset is listed.
 - Internal layout, no public spelling changes: the `backend/quant/` and
   `backend/vector/` children are addressed by module (`quant.q4_k.X`,
   `vector.gemm.X`) instead of through re-export manifests in `quant.zig`

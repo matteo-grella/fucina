@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const dtype_mod = @import("../../dtype.zig");
 const types = @import("types.zig");
 const common = @import("common.zig");
 const tables = @import("../quant_tables.zig");
@@ -63,7 +64,7 @@ inline fn decodeBlock(qs: *const [16]u8) DecodedMXFP4 {
 /// hi-group l; the x86 ymm path reproduces the same four sums by folding
 /// dpbusd's eight 4-byte-group lanes halfwise (lane l + lane l+4). The
 /// float tail below is therefore BITWISE identical across architectures.
-inline fn blockDotI32(w: *const types.BlockMXFP4, a_lo: common.QKV16i8, a_hi: common.QKV16i8) common.QKV4i32 {
+inline fn blockDotI32(w: *const dtype_mod.BlockMXFP4, a_lo: common.QKV16i8, a_hi: common.QKV16i8) common.QKV4i32 {
     if (comptime has_x86_fast) {
         const packed_v: common.QKV16u8 = @bitCast(w.qs);
         const lo_idx = packed_v & @as(common.QKV16u8, @splat(0x0f));
@@ -88,13 +89,13 @@ inline fn blockDotI32(w: *const types.BlockMXFP4, a_lo: common.QKV16i8, a_hi: co
     return iacc;
 }
 
-inline fn blockContribution(w: *const types.BlockMXFP4, a_d: f32, a_lo: common.QKV16i8, a_hi: common.QKV16i8) common.QKV4f32 {
+inline fn blockContribution(w: *const dtype_mod.BlockMXFP4, a_d: f32, a_lo: common.QKV16i8, a_hi: common.QKV16i8) common.QKV4f32 {
     const iacc = blockDotI32(w, a_lo, a_hi);
     const scale: common.QKV4f32 = @splat(e8m0_half_lut[w.e] * a_d);
     return @as(common.QKV4f32, @floatFromInt(iacc)) * scale;
 }
 
-inline fn accumulateBlock(acc: common.QKV4f32, w: *const types.BlockMXFP4, a_d: f32, a_lo: common.QKV16i8, a_hi: common.QKV16i8) common.QKV4f32 {
+inline fn accumulateBlock(acc: common.QKV4f32, w: *const dtype_mod.BlockMXFP4, a_d: f32, a_lo: common.QKV16i8, a_hi: common.QKV16i8) common.QKV4f32 {
     return acc + blockContribution(w, a_d, a_lo, a_hi);
 }
 
@@ -105,7 +106,7 @@ const col_block = 4;
 /// activation block load) with a single-column tail.
 pub fn matmulMXFP4RhsTile(
     out: []f32,
-    lhs_blocks: []const types.BlockQ8_0,
+    lhs_blocks: []const dtype_mod.BlockQ8_0,
     rhs: *const types.QuantizedMatmulRhsMXFP4,
     n: usize,
     r0: usize,
@@ -122,7 +123,7 @@ pub fn matmulMXFP4RhsTile(
         while (j + col_block <= c1) : (j += col_block) {
             var acc: [col_block]common.QKV4f32 = undefined;
             inline for (0..col_block) |c| acc[c] = @splat(0);
-            var cols: [col_block][]const types.BlockMXFP4 = undefined;
+            var cols: [col_block][]const dtype_mod.BlockMXFP4 = undefined;
             inline for (0..col_block) |c| cols[c] = rhs.rows.blocks[(j + c) * bpc ..][0..bpc];
 
             // Block pairs per column: independent contributions pipeline the

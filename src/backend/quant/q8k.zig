@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const dtype_mod = @import("../../dtype.zig");
 const tensor = @import("../../tensor.zig");
 const common = @import("common.zig");
 const types = @import("types.zig");
@@ -16,7 +17,7 @@ const QKV4f32 = common.QKV4f32;
 
 const qk_k_block_size = types.qk_k_block_size;
 
-pub fn quantizeRowQ8_0Into(dst: []types.BlockQ8_0, src: []const f32) !void {
+pub fn quantizeRowQ8_0Into(dst: []dtype_mod.BlockQ8_0, src: []const f32) !void {
     const block_count = try q8_0BlockCount(src.len);
     if (dst.len != block_count) return types.QuantizedFormatError.InvalidQuantizedLength;
 
@@ -37,7 +38,7 @@ pub fn quantizeRowQ8_0Into(dst: []types.BlockQ8_0, src: []const f32) !void {
         for (&dst[block_index].qs, row) |*q, v| q.* = common.quantizeToI8(v * inv_d);
     }
 }
-fn quantizeRowQ8_0IntoAarch64(dst: []types.BlockQ8_0, src: []const f32) void {
+fn quantizeRowQ8_0IntoAarch64(dst: []dtype_mod.BlockQ8_0, src: []const f32) void {
     var block_index: usize = 0;
     while (block_index < dst.len) : (block_index += 1) {
         const row = src[block_index * types.q8_0_block_size ..][0..types.q8_0_block_size];
@@ -62,7 +63,7 @@ fn quantizeRowQ8_0IntoAarch64(dst: []types.BlockQ8_0, src: []const f32) void {
         }
     }
 }
-pub fn dequantizeRowQ8_0Into(dst: []f32, src: []const types.BlockQ8_0) !void {
+pub fn dequantizeRowQ8_0Into(dst: []f32, src: []const dtype_mod.BlockQ8_0) !void {
     if (dst.len != try types.checkedProduct(src.len, types.q8_0_block_size)) return types.QuantizedFormatError.InvalidQuantizedLength;
 
     // Explicit 8-lane vectors: the q8_0 KV-cache attention path dequantizes
@@ -88,7 +89,7 @@ pub fn quantizeRowsQ8_0(allocator: Allocator, src: *const Tensor) !types.Quantiz
     const cols = view.dim(1);
     const blocks_per_row = try q8_0BlockCount(cols);
 
-    const blocks = try allocator.alloc(types.BlockQ8_0, try types.checkedProduct(rows, blocks_per_row));
+    const blocks = try allocator.alloc(dtype_mod.BlockQ8_0, try types.checkedProduct(rows, blocks_per_row));
     errdefer allocator.free(blocks);
 
     try quantizeRowsQ8_0Into(blocks, src);
@@ -101,7 +102,7 @@ pub fn quantizeRowsQ8_0(allocator: Allocator, src: *const Tensor) !types.Quantiz
         .blocks_per_row = blocks_per_row,
     };
 }
-pub fn quantizeRowsQ8_0Into(blocks: []types.BlockQ8_0, src: *const Tensor) !void {
+pub fn quantizeRowsQ8_0Into(blocks: []dtype_mod.BlockQ8_0, src: *const Tensor) !void {
     const view = try src.rankView(2);
     const rows = view.dim(0);
     const cols = view.dim(1);
@@ -154,11 +155,11 @@ pub fn quantizedMatmulRhsQ2_KFromBlocks(
     allocator: Allocator,
     k: usize,
     n: usize,
-    blocks: []const types.BlockQ2_K,
+    blocks: []const dtype_mod.BlockQ2_K,
 ) !types.QuantizedMatmulRhsQ2_K {
     const blocks_per_column = try qkBlockCount(k);
     if (blocks.len != try types.checkedProduct(n, blocks_per_column)) return types.QuantizedFormatError.InvalidQuantizedLength;
-    const owned = try allocator.dupe(types.BlockQ2_K, blocks);
+    const owned = try allocator.dupe(dtype_mod.BlockQ2_K, blocks);
     return .{
         .allocator = allocator,
         .blocks = owned,
@@ -171,11 +172,11 @@ pub fn quantizedMatmulRhsQ3_KFromBlocks(
     allocator: Allocator,
     k: usize,
     n: usize,
-    blocks: []const types.BlockQ3_K,
+    blocks: []const dtype_mod.BlockQ3_K,
 ) !types.QuantizedMatmulRhsQ3_K {
     const blocks_per_column = try qkBlockCount(k);
     if (blocks.len != try types.checkedProduct(n, blocks_per_column)) return types.QuantizedFormatError.InvalidQuantizedLength;
-    const owned = try allocator.dupe(types.BlockQ3_K, blocks);
+    const owned = try allocator.dupe(dtype_mod.BlockQ3_K, blocks);
     return .{
         .allocator = allocator,
         .blocks = owned,
@@ -188,11 +189,11 @@ pub fn quantizedMatmulRhsQ4_KFromBlocks(
     allocator: Allocator,
     k: usize,
     n: usize,
-    blocks: []const types.BlockQ4_K,
+    blocks: []const dtype_mod.BlockQ4_K,
 ) !types.QuantizedMatmulRhsQ4_K {
     const blocks_per_column = try qkBlockCount(k);
     if (blocks.len != try types.checkedProduct(n, blocks_per_column)) return types.QuantizedFormatError.InvalidQuantizedLength;
-    const owned = try allocator.dupe(types.BlockQ4_K, blocks);
+    const owned = try allocator.dupe(dtype_mod.BlockQ4_K, blocks);
     return .{
         .allocator = allocator,
         .blocks = owned,
@@ -205,11 +206,11 @@ pub fn quantizedMatmulRhsQ5_KFromBlocks(
     allocator: Allocator,
     k: usize,
     n: usize,
-    blocks: []const types.BlockQ5_K,
+    blocks: []const dtype_mod.BlockQ5_K,
 ) !types.QuantizedMatmulRhsQ5_K {
     const blocks_per_column = try qkBlockCount(k);
     if (blocks.len != try types.checkedProduct(n, blocks_per_column)) return types.QuantizedFormatError.InvalidQuantizedLength;
-    const owned = try allocator.dupe(types.BlockQ5_K, blocks);
+    const owned = try allocator.dupe(dtype_mod.BlockQ5_K, blocks);
     return .{
         .allocator = allocator,
         .blocks = owned,
@@ -222,11 +223,11 @@ pub fn quantizedMatmulRhsQ6_KFromBlocks(
     allocator: Allocator,
     k: usize,
     n: usize,
-    blocks: []const types.BlockQ6_K,
+    blocks: []const dtype_mod.BlockQ6_K,
 ) !types.QuantizedMatmulRhsQ6_K {
     const blocks_per_column = try qkBlockCount(k);
     if (blocks.len != try types.checkedProduct(n, blocks_per_column)) return types.QuantizedFormatError.InvalidQuantizedLength;
-    const owned = try allocator.dupe(types.BlockQ6_K, blocks);
+    const owned = try allocator.dupe(dtype_mod.BlockQ6_K, blocks);
     return .{
         .allocator = allocator,
         .blocks = owned,
@@ -235,7 +236,7 @@ pub fn quantizedMatmulRhsQ6_KFromBlocks(
         .blocks_per_column = blocks_per_column,
     };
 }
-pub fn quantizeRowQ8_KInto(dst: []types.BlockQ8_K, src: []const f32) !void {
+pub fn quantizeRowQ8_KInto(dst: []dtype_mod.BlockQ8_K, src: []const f32) !void {
     const block_count = try qkBlockCount(src.len);
     if (dst.len != block_count) return types.QuantizedFormatError.InvalidQuantizedLength;
     if (comptime builtin.cpu.arch == .aarch64) {
@@ -281,7 +282,7 @@ pub fn quantizeRowQ8_KInto(dst: []types.BlockQ8_K, src: []const f32) !void {
         dst[block_index].d = 1.0 / inv_scale;
     }
 }
-fn quantizeRowQ8_KIntoAarch64(dst: []types.BlockQ8_K, src: []const f32) void {
+fn quantizeRowQ8_KIntoAarch64(dst: []dtype_mod.BlockQ8_K, src: []const f32) void {
     var block_index: usize = 0;
     while (block_index < dst.len) : (block_index += 1) {
         const row = src[block_index * qk_k_block_size ..][0..qk_k_block_size];
@@ -323,14 +324,14 @@ fn quantizeRowQ8_KIntoAarch64(dst: []types.BlockQ8_K, src: []const f32) void {
         block.d = 1.0 / inv_scale;
     }
 }
-pub fn quantizeRowsQ8_K(allocator: Allocator, src: *const Tensor) ![]types.BlockQ8_K {
+pub fn quantizeRowsQ8_K(allocator: Allocator, src: *const Tensor) ![]dtype_mod.BlockQ8_K {
     const view = try src.rankView(2);
     const rows = view.dim(0);
     const cols = view.dim(1);
     const blocks_per_row = try qkBlockCount(cols);
     const data = try src.dataConstChecked();
 
-    const blocks = try allocator.alloc(types.BlockQ8_K, try types.checkedProduct(rows, blocks_per_row));
+    const blocks = try allocator.alloc(dtype_mod.BlockQ8_K, try types.checkedProduct(rows, blocks_per_row));
     errdefer allocator.free(blocks);
 
     var row: usize = 0;
@@ -508,7 +509,7 @@ pub fn quantizeRowsQ8_Kx2MmlaInto(blocks: []types.BlockQ8_Kx2Mmla, src: *const T
 }
 pub fn packRowsQ8_Kx4(
     allocator: Allocator,
-    blocks: []const types.BlockQ8_K,
+    blocks: []const dtype_mod.BlockQ8_K,
     rows: usize,
     cols: usize,
     blocks_per_row: usize,
@@ -523,7 +524,7 @@ pub fn packRowsQ8_Kx4(
 
     for (0..row_groups) |group| {
         for (0..blocks_per_row) |block_index| {
-            const src = [_]*const types.BlockQ8_K{
+            const src = [_]*const dtype_mod.BlockQ8_K{
                 &blocks[(group * 4 + 0) * blocks_per_row + block_index],
                 &blocks[(group * 4 + 1) * blocks_per_row + block_index],
                 &blocks[(group * 4 + 2) * blocks_per_row + block_index],
@@ -552,7 +553,7 @@ pub fn packRowsQ8_Kx4(
 }
 pub fn packRowsQ8_Kx4PaddedInto(
     dst: []types.BlockQ8_Kx4,
-    blocks: []const types.BlockQ8_K,
+    blocks: []const dtype_mod.BlockQ8_K,
     m: usize,
     blocks_per_row: usize,
 ) void {
@@ -597,7 +598,7 @@ pub fn q4Kx8Scales(values: *const [8 * 8]u8, comptime subblock: usize, comptime 
         values[offset + 3],
     };
 }
-pub fn dequantizeBlockQ8_KInto(dst: *[qk_k_block_size]f32, src: *const types.BlockQ8_K) void {
+pub fn dequantizeBlockQ8_KInto(dst: *[qk_k_block_size]f32, src: *const dtype_mod.BlockQ8_K) void {
     for (dst, src.qs) |*out, q| out.* = src.d * @as(f32, @floatFromInt(q));
 }
 const ScaleMinK4 = struct {
@@ -810,7 +811,7 @@ pub fn makeQkx2Quants(
     the_min.* = -min;
     return scale;
 }
-pub fn fillQ8KPattern(block: *types.BlockQ8_K) void {
+pub fn fillQ8KPattern(block: *dtype_mod.BlockQ8_K) void {
     block.d = 1;
     for (&block.qs, 0..) |*q, i| q.* = @intCast(@as(i32, @intCast(i % 17)) - 8);
     for (&block.bsums, 0..) |*sum, group| {

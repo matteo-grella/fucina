@@ -49,6 +49,7 @@
 const std = @import("std");
 const accelerator = @import("../accelerator.zig");
 const build_options = @import("build_options");
+const dtype_mod = @import("../dtype.zig");
 const storage = @import("../storage.zig");
 const gpu_provider = @import("gpu_provider.zig");
 const tensor = @import("../tensor.zig");
@@ -1483,21 +1484,31 @@ pub fn gemmF16NtAsync(a: *const TensorF16, b: *const TensorF16, out: *Tensor, m:
 // Metal provider exactly so exec/llm consumers compile unchanged.
 // ---------------------------------------------------------------------------
 
-/// Weight block formats the quantized kernel reads directly.
-pub const QFormat = enum(c_int) {
+/// Kernel-side ABI tags for the weight block formats the quantized kernel
+/// reads directly. The integer values are what the PTX switches on; the
+/// tag names are spelled like their `DType` so `kernelTag` maps by name.
+/// A wire tag, not a format identity: `DType` is the identity.
+pub const KernelFormatTag = enum(c_int) {
     q8_0 = 0,
     q6_k = 1,
     q4_k = 2,
     q5_k = 3,
 
     /// K (the reduced dim) must be a whole number of blocks.
-    pub fn kMultiple(self: QFormat) usize {
+    pub fn kMultiple(self: KernelFormatTag) usize {
         return switch (self) {
             .q8_0 => 32,
             .q4_k, .q5_k, .q6_k => 256,
         };
     }
 };
+
+/// The kernel tag for a weight dtype, or null when this provider has no
+/// kernel for it.
+pub fn kernelTag(comptime dt: dtype_mod.DType) ?KernelFormatTag {
+    if (!@hasField(KernelFormatTag, @tagName(dt))) return null;
+    return @field(KernelFormatTag, @tagName(dt));
+}
 
 /// One 32-row output tile of one expert group (the CPU-built tile table
 /// protocol shared with the Metal provider).
@@ -1807,7 +1818,7 @@ const kernels_ptx = @embedFile("cuda/kernels.ptx");
 const kernels_src = @embedFile("cuda/kernels.cu");
 
 const Kernels = struct {
-    mul_mm: [4]api.CUfunction, // indexed by @intFromEnum(QFormat)
+    mul_mm: [4]api.CUfunction, // indexed by @intFromEnum(KernelFormatTag)
     mul_mm_mma: [4]?api.CUfunction,
     mul_mm_mma_n32: [4]?api.CUfunction,
     reduce_split_k: ?api.CUfunction,
@@ -1933,7 +1944,7 @@ const QuantMulMmLaunch = struct {
     split_k: c_uint = 1,
 };
 
-fn quantMulMmLaunch(ctx: *const Ctx, kernels: *const Kernels, format: QFormat, grid_x: usize, n: usize, k: usize, allow_split_k: bool) QuantMulMmLaunch {
+fn quantMulMmLaunch(ctx: *const Ctx, kernels: *const Kernels, format: KernelFormatTag, grid_x: usize, n: usize, k: usize, allow_split_k: bool) QuantMulMmLaunch {
     const index: usize = @intCast(@intFromEnum(format));
     if (state.quant_mma and ctx.compute_major >= 7) {
         if (ctx.sm_count > 0) {
@@ -1982,7 +1993,7 @@ fn quantMulMmLaunch(ctx: *const Ctx, kernels: *const Kernels, format: QFormat, g
     return .{ .kernel = kernels.mul_mm[index], .n_tile = 64, .block_y = 16 };
 }
 
-fn quantDecodeUsesGemv(format: QFormat, m: usize) bool {
+fn quantDecodeUsesGemv(format: KernelFormatTag, m: usize) bool {
     // Q5_K switches to Fucina's lane-packed CPU kernel at m=4. Keep its
     // warp-per-row CUDA path on the compact-decode rows (m<4); the tiled MMA
     // path is the relevant GPU contender for batch rows 4..8.
@@ -1995,7 +2006,7 @@ fn quantDecodeUsesGemv(format: QFormat, m: usize) bool {
 /// batch_count > 1 the same input is consumed by one launch per weight matrix
 /// without materializing repeated activation rows.
 pub fn gemmQuantNtAsync(
-    format: QFormat,
+    format: KernelFormatTag,
     rhs_bytes: []const u8,
     rhs_cacheable: bool,
     nb01: usize,
@@ -2235,7 +2246,7 @@ pub fn qmoeStage(in_bytes: usize, out_bytes: usize) ?QMoeStage {
 /// (managed registry hit) dispatches with zero weight transfer; a transient
 /// RHS streams. Returns false when the GPU didn't run.
 pub fn gemmQGroupedNt(
-    format: QFormat,
+    format: KernelFormatTag,
     rhs_bytes: []const u8,
     rhs_cacheable: bool,
     nb01: usize,
@@ -2333,7 +2344,7 @@ pub fn gemmQGroupedNt(
 /// refuses and the caller stays on CPU. f32 dequant (no f16 rounding),
 /// same 5e-3 quant tier. Takes `dispatch_lock` (shares the f32 staging bufs).
 fn gemvQuant(
-    format: QFormat,
+    format: KernelFormatTag,
     rhs_bytes: []const u8,
     rhs_cacheable: bool,
     nb01: usize,
@@ -2389,7 +2400,7 @@ fn gemvQuant(
 /// wrapper shape as the Metal provider; takes `qmoe_lock` itself. With
 /// FUCINA_GPU_DECODE=1 it takes the selected decode route instead.
 pub fn gemmQuantNt(
-    format: QFormat,
+    format: KernelFormatTag,
     rhs_bytes: []const u8,
     rhs_cacheable: bool,
     nb01: usize,
@@ -2432,7 +2443,7 @@ pub fn gemmQuantNt(
 /// eager command-batching seam, one launch via the expert dimension. Same
 /// wrapper shape as the Metal provider.
 pub fn gemmQuantNtSharedABatch(
-    format: QFormat,
+    format: KernelFormatTag,
     rhs_bytes: []const u8,
     rhs_cacheable: bool,
     nb01: usize,
@@ -2500,7 +2511,7 @@ pub fn qmoeFillAcceptable(rows: usize, n_tiles: usize) bool {
     return filled >= @as(u64, n_tiles) * 32 * state.qmoe_min_fill_pct;
 }
 
-pub fn shouldUseGpuDenseQuant(format: QFormat, total_work: u64) bool {
+pub fn shouldUseGpuDenseQuant(format: KernelFormatTag, total_work: u64) bool {
     ensureConfig();
     const min_work = switch (format) {
         .q6_k => state.min_work_dense_q6,
@@ -2513,7 +2524,7 @@ pub fn shouldUseGpuDenseQuant(format: QFormat, total_work: u64) bool {
 }
 
 /// Dense model-weight gate against Fucina's load-time-packed CPU fallback.
-pub fn shouldUseGpuDenseQuantPacked(format: QFormat, total_work: u64) bool {
+pub fn shouldUseGpuDenseQuantPacked(format: KernelFormatTag, total_work: u64) bool {
     ensureConfig();
     const min_work = switch (format) {
         .q4_k => state.min_work_packed_q4,
@@ -2555,7 +2566,7 @@ pub fn setQmoeMinFillForTest(v: u64) void {
 /// (`src/exec/quant_matmul.zig`): FUCINA_GPU_DECODE=1 opts in, default off
 /// pending a sampled-token parity-oracle pass; Q5_K additionally clears its
 /// own work floor.
-pub fn shouldUseGpuQuantDecode(format: QFormat, m: usize, n: usize, k: usize) bool {
+pub fn shouldUseGpuQuantDecode(format: KernelFormatTag, m: usize, n: usize, k: usize) bool {
     ensureConfig();
     if (!state.decode_enabled) return false;
     if (format != .q5_k) return true;
@@ -2886,12 +2897,11 @@ test "cuda quant gemm q4_K/q5_K/q6_K/q8_0 parity vs dequantized reference" {
     const saved_mma = state.quant_mma;
     defer setQuantMmaForTest(saved_mma);
 
-    const dtype_mod = @import("../dtype.zig");
     var prng = std.Random.DefaultPrng.init(17);
     const random = prng.random();
 
     const Case = struct { m: usize, n: usize, k: usize };
-    inline for (.{ QFormat.q6_k, QFormat.q4_k, QFormat.q5_k, QFormat.q8_0 }) |fmt| {
+    inline for (.{ KernelFormatTag.q6_k, KernelFormatTag.q4_k, KernelFormatTag.q5_k, KernelFormatTag.q8_0 }) |fmt| {
         const Block = switch (fmt) {
             .q6_k => dtype_mod.BlockQ6_K,
             .q4_k => dtype_mod.BlockQ4_K,
@@ -2970,10 +2980,9 @@ test "cuda eager async dense quant Q4_K/Q5_K/Q6_K/Q8_0 uses direct tensor storag
         setQuantSplitKForTest(saved_split_k);
     }
 
-    const dtype_mod = @import("../dtype.zig");
     var prng = std.Random.DefaultPrng.init(31);
     const random = prng.random();
-    inline for (.{ QFormat.q6_k, QFormat.q4_k, QFormat.q5_k, QFormat.q8_0 }) |fmt| {
+    inline for (.{ KernelFormatTag.q6_k, KernelFormatTag.q4_k, KernelFormatTag.q5_k, KernelFormatTag.q8_0 }) |fmt| {
         const Block = switch (fmt) {
             .q6_k => dtype_mod.BlockQ6_K,
             .q4_k => dtype_mod.BlockQ4_K,
@@ -3033,11 +3042,10 @@ test "cuda decode gemv q4_K/q5_K/q6_K/q8_0 parity vs dequantized reference" {
     const allocator = std.testing.allocator;
     if (context() == null) return error.SkipZigTest;
 
-    const dtype_mod = @import("../dtype.zig");
     var prng = std.Random.DefaultPrng.init(29);
     const random = prng.random();
 
-    inline for (.{ QFormat.q6_k, QFormat.q4_k, QFormat.q5_k, QFormat.q8_0 }) |fmt| {
+    inline for (.{ KernelFormatTag.q6_k, KernelFormatTag.q4_k, KernelFormatTag.q5_k, KernelFormatTag.q8_0 }) |fmt| {
         const Block = switch (fmt) {
             .q6_k => dtype_mod.BlockQ6_K,
             .q4_k => dtype_mod.BlockQ4_K,

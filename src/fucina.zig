@@ -186,8 +186,6 @@ pub const quant = struct {
 
 /// Pre-packed dense matmul RHS (weights repacked once at load for the packed GEMM arms).
 pub const PackedRhs = ag.PackedRhs;
-/// Layout tag carried by `PackedRhs` (which packed GEMM arm the bytes are shaped for).
-pub const PackedRhsLayout = backend.PackedRhsLayout;
 /// Half-open index range for tensor `slice` calls.
 pub const SliceRange = ag.SliceRange;
 /// A contiguous run of ABSOLUTE indices along one axis, `[origin, origin+len)`

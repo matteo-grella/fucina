@@ -19,10 +19,11 @@
 const std = @import("std");
 const Timer = @import("timer.zig").Timer;
 const raw_backend = @import("raw_backend");
+const dtype_mod = raw_backend.dtype_info;
 
 const Tensor = raw_backend.Tensor;
 const qm = raw_backend.quantized_matmul;
-const BlockQ8_0 = qm.BlockQ8_0;
+const BlockQ8_0 = dtype_mod.BlockQ8_0;
 const BlockQ8_0x4 = qm.BlockQ8_0x4;
 
 var io: std.Io = undefined;

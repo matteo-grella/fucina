@@ -534,19 +534,38 @@ loaded-block construction, dequantize to `f32`, embedding-style `getRows`, and
 f32 matmul RHS when the dtype has a registered RHS dot kernel and the tensor
 is stored `[free, contract]`.
 
+`DType` is the only identity of a storage format. `src/dtype.zig` defines
+every GGML block struct (`dtype.BlockQ4_K`, ...) and the comptime
+`block_formats` registry, one row per block-quantized dtype (its block
+struct and its logical elements per block); `blockSize`, `blockByteSize`,
+`Storage`, `isBlockQuantized`, and `supportsQuantizedMatmulRhs` derive
+from it, and GGUF derives its type mapping from the same rows. No second
+enum names these formats: every RHS container carries `pub const dtype:
+DType` (the W8A8 `QuantizedMatmulRhsI8` is not a block format and carries
+only its group-size policy), `AnyQuantizedMatmulRhs`'s union tags are
+`DType` tags, and the per-provider GPU `KernelFormatTag` is a kernel-side
+ABI value reached through the provider's `kernelTag(dt)`, not an identity.
+Layout choices are comptime functions of `DType` and the target:
+`backend.PackedRhsFor(dt)` (aliased as `fucina.PackedRhs`) is the one
+dtype-to-packed-container map (dense f32/f16/bf16 share the f32 panel;
+q8_0 → x4, q6_k → x4, q5_k → x8, q4_k → x2mmla on aarch64+i8mm else
+x8), and facade ops dispatch on the container's `dtype` plus its type for
+the Q4_K ISA split.
+
 The raw tensor dtype layer owns scalar and block storage. `ExecContext` owns
 validation, materialization, allocation, and dispatch. Backends own numeric
 kernels. `backend/quant.zig` owns block helpers, dequantization, loaded-block
-row access, RHS containers, and the portable kernels shared by both backends;
-backend dispatch consumes `AnyQuantizedMatmulRhs` internally. K-quants and the
-`IQ*`/`TQ*` formats dot against `Q8_K` activation blocks; `IQ4_NL`, `MXFP4`,
-and `NVFP4` (like the legacy formats) use `Q8_0`/`Q8_1` activation blocks.
-Decode follows GGML lookup tables, nonlinear codebooks, and E8M0/UE4M3 FP4
-scale rules; every cold decode format is verified bit-exactly against embedded
-ggml-golden fixtures (`src/backend/quant/cold_tests.zig`). Matmul uses direct
-integer/table dot kernels at the trait/backend boundary, so these paths do not
-materialize dense f32 RHS blocks in the inner loop. Encoders (f32 → blocks)
-exist for the K-quants (Q4_K/Q5_K/Q6_K) and legacy formats
+row access, the interleaved pack layouts and RHS containers, and the
+portable kernels shared by both backends; backend dispatch consumes
+`AnyQuantizedMatmulRhs` internally. K-quants and the `IQ*`/`TQ*` formats dot
+against `Q8_K` activation blocks; `IQ4_NL`, `MXFP4`, and `NVFP4` (like the
+legacy formats) use `Q8_0`/`Q8_1` activation blocks. Decode follows GGML
+lookup tables, nonlinear codebooks, and E8M0/UE4M3 FP4 scale rules; every
+cold decode format is verified bit-exactly against embedded ggml-golden
+fixtures (`src/backend/quant/cold_tests.zig`). Matmul uses direct
+integer/table dot kernels at the dtype/backend boundary, so these paths do
+not materialize dense f32 RHS blocks in the inner loop. Encoders (f32 →
+blocks) exist for the K-quants (Q4_K/Q5_K/Q6_K) and legacy formats
 (`quantizeRowForDType`, surfaced by `gguf.encodeF32`); the cold formats decode
 and matmul but do not encode.
 

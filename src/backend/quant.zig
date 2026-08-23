@@ -3,7 +3,7 @@
 //! and the child modules that own each GGML format's kernels.
 //!
 //! Child modules, each addressed as `quant.<child>.<fn>`:
-//!   types    - packed block layouts, RHS types, format traits and block sizes.
+//!   types    - interleaved block layouts, RHS container types and block sizes.
 //!   common   - SIMD and ISA primitives: vector aliases, sdot/smmla/vpdpbusd
 //!              wrappers, f16 conversions, nibble extractors, rounding and
 //!              quantize helpers, the i8 dot and the shared row/column block
@@ -56,52 +56,22 @@ const Tensor = tensor.Tensor;
 
 pub const supports_q4_k_mmla = common.has_aarch64_i8mm;
 
-// The block and RHS types are the one layer readers outside src/backend
-// address (`backend.zig` forwards them as `backend.X`). Kernels, encoders and
-// block-size constants are addressed by child module.
+// The interleaved block layouts and the RHS container types are the one
+// layer readers outside src/backend address (`backend.zig` forwards them as
+// `backend.X`); the GGML block structs are `dtype.Block*`. Kernels, encoders
+// and block-size constants are addressed by child module.
 pub const AnyQuantizedMatmulRhs = types.AnyQuantizedMatmulRhs;
-pub const BlockIQ1_M = types.BlockIQ1_M;
-pub const BlockIQ1_S = types.BlockIQ1_S;
-pub const BlockIQ2_S = types.BlockIQ2_S;
-pub const BlockIQ2_XS = types.BlockIQ2_XS;
-pub const BlockIQ2_XXS = types.BlockIQ2_XXS;
-pub const BlockIQ3_S = types.BlockIQ3_S;
-pub const BlockIQ3_XXS = types.BlockIQ3_XXS;
-pub const BlockIQ4_NL = types.BlockIQ4_NL;
-pub const BlockIQ4_XS = types.BlockIQ4_XS;
-pub const BlockMXFP4 = types.BlockMXFP4;
-pub const BlockNVFP4 = types.BlockNVFP4;
-pub const BlockQ1_0 = types.BlockQ1_0;
-pub const BlockQ2_0 = types.BlockQ2_0;
-pub const BlockQ2_K = types.BlockQ2_K;
-pub const BlockQ3_K = types.BlockQ3_K;
-pub const BlockQ4_0 = types.BlockQ4_0;
-pub const BlockQ4_1 = types.BlockQ4_1;
-pub const BlockQ4_K = types.BlockQ4_K;
 pub const BlockQ4_Kx2Mmla = types.BlockQ4_Kx2Mmla;
 pub const BlockQ4_Kx4 = types.BlockQ4_Kx4;
 pub const BlockQ4_Kx8 = types.BlockQ4_Kx8;
-pub const BlockQ5_0 = types.BlockQ5_0;
-pub const BlockQ5_1 = types.BlockQ5_1;
-pub const BlockQ5_K = types.BlockQ5_K;
 pub const BlockQ5_Kx8 = types.BlockQ5_Kx8;
-pub const BlockQ6_K = types.BlockQ6_K;
 pub const BlockQ6_Kx4 = types.BlockQ6_Kx4;
-pub const BlockQ8_0 = types.BlockQ8_0;
 pub const BlockQ8_0x4 = types.BlockQ8_0x4;
-pub const BlockQ8_1 = types.BlockQ8_1;
-pub const BlockQ8_K = types.BlockQ8_K;
 pub const BlockQ8_Kx2Mmla = types.BlockQ8_Kx2Mmla;
 pub const BlockQ8_Kx4 = types.BlockQ8_Kx4;
-pub const BlockTQ1_0 = types.BlockTQ1_0;
-pub const BlockTQ2_0 = types.BlockTQ2_0;
 pub const BlockTQ2_0x4 = types.BlockTQ2_0x4;
 pub const BlockTQ2_0Foldedx4 = types.BlockTQ2_0Foldedx4;
 pub const BlockTQ2_0Folded = types.BlockTQ2_0Folded;
-pub const PackedRhsFor = types.PackedRhsFor;
-pub const PackedRhsLayout = types.PackedRhsLayout;
-pub const QuantizedMatmulFormat = types.QuantizedMatmulFormat;
-pub const QuantizedMatmulRhs = types.QuantizedMatmulRhs;
 pub const QuantizedMatmulRhsI8 = types.QuantizedMatmulRhsI8;
 pub const QuantizedMatmulRhsIQ1_M = types.QuantizedMatmulRhsIQ1_M;
 pub const QuantizedMatmulRhsIQ1_S = types.QuantizedMatmulRhsIQ1_S;
@@ -239,20 +209,19 @@ pub fn quantizeRhsBlockwiseI8(
     rhs: *const Tensor,
     group_size: usize,
 ) !QuantizedMatmulRhsI8 {
-    const traits = QuantizedMatmulRhsI8.traits;
     const view = try rhs.rankView(2);
     const k = view.dim(0);
     const n = view.dim(1);
-    const gs = traits.effectiveGroupSize(group_size);
-    const num_groups = traits.groupCountForSize(k, gs);
+    const gs = QuantizedMatmulRhsI8.effectiveGroupSize(group_size);
+    const num_groups = QuantizedMatmulRhsI8.groupCountForSize(k, gs);
 
     const src = try rhs.dataConstChecked();
 
-    const storage_shape = traits.storageShape(k, n);
-    var qw = try tensor.TensorOf(.i8).zeros(allocator, &storage_shape);
+    // Storage is [n][k] (one contiguous k-vector per output column); scales
+    // are [n][num_groups].
+    var qw = try tensor.TensorOf(.i8).zeros(allocator, &.{ n, k });
     errdefer qw.deinit();
-    const scale_shape = traits.scaleShape(k, n, gs);
-    var scales = try Tensor.zeros(allocator, &scale_shape);
+    var scales = try Tensor.zeros(allocator, &.{ n, num_groups });
     errdefer scales.deinit();
 
     const qwd = qw.data();
@@ -270,11 +239,11 @@ pub fn quantizeRhsBlockwiseI8(
             while (p < p1) : (p += 1) amax = @max(amax, @abs(src[p * n + j]));
 
             const scale: f32 = if (amax == 0) 0 else amax / 127.0;
-            sd[traits.scaleIndex(j, g, num_groups)] = scale;
+            sd[j * num_groups + g] = scale;
 
             const inv: f32 = if (scale == 0) 0 else 1.0 / scale;
             p = p0;
-            while (p < p1) : (p += 1) qwd[traits.storageIndex(j, p, k)] = common.quantizeToI8(src[p * n + j] * inv);
+            while (p < p1) : (p += 1) qwd[j * k + p] = common.quantizeToI8(src[p * n + j] * inv);
         }
     }
 
@@ -305,7 +274,7 @@ pub fn quantizeMatmulRhsQ8_0(allocator: Allocator, rhs: *const Tensor) !Quantize
     const blocks_per_column = try q8k.q8_0BlockCount(k);
     const data = try rhs.dataConstChecked();
 
-    const blocks = try allocator.alloc(BlockQ8_0, try types.checkedProduct(n, blocks_per_column));
+    const blocks = try allocator.alloc(dtype_mod.BlockQ8_0, try types.checkedProduct(n, blocks_per_column));
     errdefer allocator.free(blocks);
     const scratch = try allocator.alloc(f32, k);
     defer allocator.free(scratch);
@@ -453,9 +422,9 @@ pub fn dequantizeRowForDType(
 
 /// f32 -> quantized row encoder dispatch (the GGUF quantize-export entry).
 /// The caller supplies the output blocks; `src.len` must be a whole number of
-/// blocks and `dst.len` must match (`blockCountForDType`). Dtypes whose traits
-/// say `supports_from_float == false` (and non-quantized dtypes) are a compile
-/// error. Inputs are assumed finite (no NaN/inf), as in ggml's encoders.
+/// blocks and `dst.len` must match (`blockCountForDType`). Dtypes without an
+/// f32 encoder (and non-quantized dtypes) are a compile error. Inputs are
+/// assumed finite (no NaN/inf), as in ggml's encoders.
 pub fn quantizeRowForDType(
     comptime tensor_dtype: DType,
     dst: []dtype_mod.Storage(tensor_dtype),

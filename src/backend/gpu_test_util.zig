@@ -4,7 +4,7 @@
 //! and each provider's own tests (`metal.zig`, `cuda.zig`) all call these
 //! instead of carrying a copy.
 //!
-//! `QFormat` is per-provider (see `gpu_provider.zig`), so the format-keyed
+//! `KernelFormatTag` is per-provider (see `gpu_provider.zig`), so the format-keyed
 //! helpers take the tag generically and resolve it against `dtype`'s block
 //! registry rather than restating a switch per provider.
 
@@ -16,7 +16,7 @@ const quant = @import("quant.zig");
 const DType = dtype_mod.DType;
 const Orient = gpu_provider.Orient;
 
-/// The `DType` a provider `QFormat` tag names. Provider tags are spelled
+/// The `DType` a provider `KernelFormatTag` tag names. Provider tags are spelled
 /// exactly like their dtypes, so this is a lookup, not a mapping table that
 /// can drift.
 pub fn dtypeForFormat(comptime fmt: anytype) DType {
@@ -25,11 +25,11 @@ pub fn dtypeForFormat(comptime fmt: anytype) DType {
         "tq2_0_folded is a fused PTQTP plane-pair layout with no DType of its own; " ++
             "it is covered by the provider's dedicated parity test",
     );
-    if (!@hasField(DType, name)) @compileError("no DType named `" ++ name ++ "` for QFormat tag");
+    if (!@hasField(DType, name)) @compileError("no DType named `" ++ name ++ "` for KernelFormatTag tag");
     return @field(DType, name);
 }
 
-/// The block struct backing a provider `QFormat` tag (`dtype.block_formats`).
+/// The block struct backing a provider `KernelFormatTag` tag (`dtype.block_formats`).
 pub fn BlockFor(comptime fmt: anytype) type {
     return dtype_mod.Storage(dtypeForFormat(fmt));
 }

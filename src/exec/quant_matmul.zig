@@ -154,31 +154,31 @@ pub fn matmul2DWithQuantizedTensorRhsOptions(
     self.enableNativeTypedMatmulPoolForWork(m, n, k);
 
     switch (rhs_dtype) {
-        .q1_0 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ1_0, "ggml_q1_0", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .q2_0 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ2_0, "ggml_q2_0", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .q4_0 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ4_0, "ggml_q4_0", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .q4_1 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ4_1, "ggml_q4_1", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .q5_0 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ5_0, "ggml_q5_0", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .q5_1 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ5_1, "ggml_q5_1", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .q8_0 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ8_0, "ggml_q8_0", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .q2_k => try matmul2DWithQuantizedKTensorRhs(self, backend_mod.QuantizedMatmulRhsQ2_K, "ggml_q2_k", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .q3_k => try matmul2DWithQuantizedKTensorRhs(self, backend_mod.QuantizedMatmulRhsQ3_K, "ggml_q3_k", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .q4_k => try matmul2DWithQuantizedKTensorRhs(self, backend_mod.QuantizedMatmulRhsQ4_K, "ggml_q4_k", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .q5_k => try matmul2DWithQuantizedKTensorRhs(self, backend_mod.QuantizedMatmulRhsQ5_K, "ggml_q5_k", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .q6_k => try matmul2DWithQuantizedKTensorRhs(self, backend_mod.QuantizedMatmulRhsQ6_K, "ggml_q6_k", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .iq1_s => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsIQ1_S, "ggml_iq1_s", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .iq1_m => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsIQ1_M, "ggml_iq1_m", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .iq2_xxs => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsIQ2_XXS, "ggml_iq2_xxs", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .iq2_xs => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsIQ2_XS, "ggml_iq2_xs", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .iq2_s => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsIQ2_S, "ggml_iq2_s", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .iq3_xxs => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsIQ3_XXS, "ggml_iq3_xxs", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .iq3_s => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsIQ3_S, "ggml_iq3_s", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .iq4_nl => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsIQ4_NL, "ggml_iq4_nl", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .iq4_xs => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsIQ4_XS, "ggml_iq4_xs", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .tq1_0 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsTQ1_0, "ggml_tq1_0", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .tq2_0 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsTQ2_0, "ggml_tq2_0", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .mxfp4 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsMXFP4, "ggml_mxfp4", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .nvfp4 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsNVFP4, "ggml_nvfp4", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .q1_0 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ1_0, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .q2_0 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ2_0, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .q4_0 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ4_0, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .q4_1 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ4_1, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .q5_0 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ5_0, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .q5_1 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ5_1, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .q8_0 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ8_0, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .q2_k => try matmul2DWithQuantizedKTensorRhs(self, backend_mod.QuantizedMatmulRhsQ2_K, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .q3_k => try matmul2DWithQuantizedKTensorRhs(self, backend_mod.QuantizedMatmulRhsQ3_K, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .q4_k => try matmul2DWithQuantizedKTensorRhs(self, backend_mod.QuantizedMatmulRhsQ4_K, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .q5_k => try matmul2DWithQuantizedKTensorRhs(self, backend_mod.QuantizedMatmulRhsQ5_K, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .q6_k => try matmul2DWithQuantizedKTensorRhs(self, backend_mod.QuantizedMatmulRhsQ6_K, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .iq1_s => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsIQ1_S, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .iq1_m => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsIQ1_M, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .iq2_xxs => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsIQ2_XXS, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .iq2_xs => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsIQ2_XS, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .iq2_s => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsIQ2_S, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .iq3_xxs => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsIQ3_XXS, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .iq3_s => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsIQ3_S, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .iq4_nl => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsIQ4_NL, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .iq4_xs => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsIQ4_XS, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .tq1_0 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsTQ1_0, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .tq2_0 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsTQ2_0, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .mxfp4 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsMXFP4, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .nvfp4 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsNVFP4, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
         else => @compileError("supported quantized matmul RHS dtype is missing a dispatch prong"),
     }
 
@@ -236,10 +236,10 @@ pub fn matmul2DWithQuantizedBlocksRhsOptions(
     self.enableNativeTypedMatmulPoolForWork(m, n, k);
 
     switch (rhs_dtype) {
-        .q8_0 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ8_0, "ggml_q8_0", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .q4_k => try matmul2DWithQuantizedKTensorRhs(self, backend_mod.QuantizedMatmulRhsQ4_K, "ggml_q4_k", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .q5_k => try matmul2DWithQuantizedKTensorRhs(self, backend_mod.QuantizedMatmulRhsQ5_K, "ggml_q5_k", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
-        .q6_k => try matmul2DWithQuantizedKTensorRhs(self, backend_mod.QuantizedMatmulRhsQ6_K, "ggml_q6_k", &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .q8_0 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ8_0, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .q4_k => try matmul2DWithQuantizedKTensorRhs(self, backend_mod.QuantizedMatmulRhsQ4_K, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .q5_k => try matmul2DWithQuantizedKTensorRhs(self, backend_mod.QuantizedMatmulRhsQ5_K, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
+        .q6_k => try matmul2DWithQuantizedKTensorRhs(self, backend_mod.QuantizedMatmulRhsQ6_K, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
         else => @compileError("direct quantized-block RHS matmul currently supports q8_0/q4_k/q5_k/q6_k"),
     }
 
@@ -249,7 +249,6 @@ pub fn matmul2DWithQuantizedBlocksRhsOptions(
 fn matmul2DWithQuantizedRowsTensorRhs(
     self: *ExecContext,
     comptime Rhs: type,
-    comptime union_field: []const u8,
     out: *Tensor,
     a: *const Tensor,
     blocks: anytype,
@@ -272,13 +271,12 @@ fn matmul2DWithQuantizedRowsTensorRhs(
         .k = k,
         .n = n,
     };
-    try kernels.matmul2DQuantizedRhs(self.pc(), self.allocator, out, a, @unionInit(backend_mod.AnyQuantizedMatmulRhs, union_field, &qrhs), m, n, k);
+    try kernels.matmul2DQuantizedRhs(self.pc(), self.allocator, out, a, @unionInit(backend_mod.AnyQuantizedMatmulRhs, @tagName(Rhs.dtype), &qrhs), m, n, k);
 }
 
 fn matmul2DWithQuantizedKTensorRhs(
     self: *ExecContext,
     comptime Rhs: type,
-    comptime union_field: []const u8,
     out: *Tensor,
     a: *const Tensor,
     blocks: anytype,
@@ -294,7 +292,7 @@ fn matmul2DWithQuantizedKTensorRhs(
         Rhs{ .allocator = null, .blocks = blocks, .k = k, .n = n, .blocks_per_column = blocks_per_row }
     else
         Rhs{ .allocator = self.allocator, .blocks = @constCast(blocks), .k = k, .n = n, .blocks_per_column = blocks_per_row };
-    try kernels.matmul2DQuantizedRhs(self.pc(), self.allocator, out, a, @unionInit(backend_mod.AnyQuantizedMatmulRhs, union_field, &qrhs), m, n, k);
+    try kernels.matmul2DQuantizedRhs(self.pc(), self.allocator, out, a, @unionInit(backend_mod.AnyQuantizedMatmulRhs, @tagName(Rhs.dtype), &qrhs), m, n, k);
 }
 
 pub fn packMatmulRhsQ8_0x4(self: *ExecContext, rhs: *const tensor.TensorOf(.q8_0)) !backend_mod.QuantizedMatmulRhsQ8_0x4 {
@@ -544,7 +542,7 @@ fn splitSwiGluMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhs
     if (prefix_rows < m) {
         const tail_rows = m - prefix_rows;
         const tail_groups = (tail_rows + 3) / 4;
-        var qlhs_rows_lease = try self.buffers.acquireScratch(qm.BlockQ8_K, try checkedTensorProduct(tail_rows, blocks_per_row));
+        var qlhs_rows_lease = try self.buffers.acquireScratch(dtype_mod.BlockQ8_K, try checkedTensorProduct(tail_rows, blocks_per_row));
         defer qlhs_rows_lease.release();
         const qlhs_rows = qlhs_rows_lease.items;
         const TaskT = FusedActQuantTask(.split_swiglu, .q8_k_rows);
@@ -650,7 +648,7 @@ fn rmsNormMulMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhsK
     if (prefix_rows < m) {
         const tail_rows = m - prefix_rows;
         const tail_groups = (tail_rows + 3) / 4;
-        var qlhs_rows_lease = try self.buffers.acquireScratch(qm.BlockQ8_K, try checkedTensorProduct(tail_rows, blocks_per_row));
+        var qlhs_rows_lease = try self.buffers.acquireScratch(dtype_mod.BlockQ8_K, try checkedTensorProduct(tail_rows, blocks_per_row));
         defer qlhs_rows_lease.release();
         const qlhs_rows = qlhs_rows_lease.items;
         const TaskT = FusedActQuantTask(.rms_norm_mul, .q8_k_rows);
@@ -981,16 +979,14 @@ fn denseQuantMatmulGpuImpl(
 ) !?Tensor {
     if (comptime backend_mod.gpu_impl.enabled) {
         const gpu = backend_mod.gpu_impl;
-        if (comptime dtype == .q5_k and !gpu.has_q5_k_quant) return null;
-        if (comptime dtype == .tq2_0 and !gpu.has_tq2_0_quant) return null;
-        const fmt: gpu.QFormat = comptime switch (dtype) {
-            .q4_k => .q4_k,
-            .q5_k => .q5_k,
-            .q6_k => .q6_k,
-            .q8_0 => .q8_0,
-            .tq2_0 => .tq2_0,
+        comptime switch (dtype) {
+            .q4_k, .q5_k, .q6_k, .q8_0, .tq2_0 => {},
             else => @compileError("denseQuantMatmulGpu supports q4_k/q5_k/q6_k/q8_0/tq2_0 only"),
         };
+        // No kernel tag for this dtype on the selected provider: stay on CPU.
+        const tag = comptime gpu.kernelTag(dtype);
+        if (comptime tag == null) return null;
+        const fmt = comptime tag.?;
         const work = quantMatmulWork(m, n, k);
         // Prefill arm: m >= 32 behind the relevant CPU-competitor gate. Stable
         // weights first try the direct-storage async entry (Metal admits up to
@@ -1079,7 +1075,7 @@ pub fn foldedTernaryMatmulGpu(
     if (comptime backend_mod.gpu_impl.enabled) {
         const gpu = backend_mod.gpu_impl;
         if (comptime !gpu.has_tq2_0_folded_quant) return null;
-        const fmt: gpu.QFormat = .tq2_0_folded;
+        const fmt: gpu.KernelFormatTag = .tq2_0_folded;
         const work = quantMatmulWork(m, n, k);
         const prefill_arm = m >= 32 and gpu.shouldUseGpuDenseQuantPacked(fmt, work);
         if (prefill_arm and k % fmt.kMultiple() == 0 and n % 4 == 0 and input.isContiguous()) {
@@ -1147,16 +1143,14 @@ pub fn denseQuantMatmulGpuSharedInputBatch(
 ) !?Tensor {
     if (comptime backend_mod.gpu_impl.enabled) {
         const gpu = backend_mod.gpu_impl;
-        if (comptime dtype == .q5_k and !gpu.has_q5_k_quant) return null;
-        if (comptime dtype == .tq2_0 and !gpu.has_tq2_0_quant) return null;
-        const fmt: gpu.QFormat = comptime switch (dtype) {
-            .q4_k => .q4_k,
-            .q5_k => .q5_k,
-            .q6_k => .q6_k,
-            .q8_0 => .q8_0,
-            .tq2_0 => .tq2_0,
+        comptime switch (dtype) {
+            .q4_k, .q5_k, .q6_k, .q8_0, .tq2_0 => {},
             else => @compileError("denseQuantMatmulGpuSharedInputBatch supports q4_k/q5_k/q6_k/q8_0/tq2_0 only"),
         };
+        // No kernel tag for this dtype on the selected provider: stay on CPU.
+        const tag = comptime gpu.kernelTag(dtype);
+        if (comptime tag == null) return null;
+        const fmt = comptime tag.?;
         if (batch_count == 0) return null;
         const per_work = quantMatmulWork(m, n, k);
         const work = std.math.mul(u64, per_work, @as(u64, @intCast(batch_count))) catch std.math.maxInt(u64);

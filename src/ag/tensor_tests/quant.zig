@@ -706,7 +706,7 @@ fn fillKQuantTestWeight(comptime Block: type, blocks: []Block, seed: usize) void
     }
 }
 
-fn checkFusedSplitSwiGluKQuant(comptime weight_dtype: DType, comptime rhs_layout: backend_mod.PackedRhsLayout, m: usize) !void {
+fn checkFusedSplitSwiGluKQuant(comptime weight_dtype: DType, comptime Rhs: type, m: usize) !void {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
     const allocator = gpa.allocator();
@@ -737,9 +737,9 @@ fn checkFusedSplitSwiGluKQuant(comptime weight_dtype: DType, comptime rhs_layout
     fillKQuantTestWeight(Block, blocks, m);
     var w = try W.fromBlocks(&ctx, .{ n, k }, blocks);
     defer w.deinit();
-    // Explicit layout, not packRhs: the q4_k case must force x8 on MMLA
+    // Explicit container, not packRhs: the q4_k case must force x8 on MMLA
     // hardware to exercise the fused x8 kernel (no fused MMLA kernel exists).
-    var packed_rhs = try w.packRhsLayout(&ctx, rhs_layout);
+    var packed_rhs = try w.packRhsAs(&ctx, Rhs);
     defer packed_rhs.deinit();
 
     var activated = try gate_up.splitGated(&ctx, .swiglu, .gate_up, .in);
@@ -766,20 +766,20 @@ fn checkFusedSplitSwiGluKQuant(comptime weight_dtype: DType, comptime rhs_layout
 test "public splitSwiGlu packed Q4_Kx8 RHS dot matches unfused path bit-exactly" {
     // m=13: padded-x4 small path; m=3: rows path; m=68: padded-x4 large path.
     for ([_]usize{ 3, 13, 68 }) |m| {
-        try checkFusedSplitSwiGluKQuant(.q4_k, .q4_kx8, m);
+        try checkFusedSplitSwiGluKQuant(.q4_k, backend_mod.QuantizedMatmulRhsQ4_Kx8, m);
     }
 }
 
 test "public splitSwiGlu packed Q5_Kx8 RHS dot matches unfused path bit-exactly" {
     // m=8: exact-x4 path; m=13: rows path; m=130: x4 prefix + 2-row tail.
     for ([_]usize{ 8, 13, 130 }) |m| {
-        try checkFusedSplitSwiGluKQuant(.q5_k, .q5_kx8, m);
+        try checkFusedSplitSwiGluKQuant(.q5_k, backend_mod.QuantizedMatmulRhsQ5_Kx8, m);
     }
 }
 
 test "public splitSwiGlu packed Q6_Kx4 RHS dot matches unfused path bit-exactly" {
     for ([_]usize{ 5, 12 }) |m| {
-        try checkFusedSplitSwiGluKQuant(.q6_k, .q6_kx4, m);
+        try checkFusedSplitSwiGluKQuant(.q6_k, backend_mod.QuantizedMatmulRhsQ6_Kx4, m);
     }
 }
 

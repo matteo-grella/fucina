@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const dtype_mod = @import("../../dtype.zig");
 const tensor = @import("../../tensor.zig");
 const qm = @import("../quant.zig");
 const q8k = @import("q8k.zig");
@@ -14,7 +15,7 @@ const q5_k = @import("q5_k.zig");
 const Allocator = std.mem.Allocator;
 const Tensor = tensor.Tensor;
 
-const BlockQ5_K = types.BlockQ5_K;
+const BlockQ5_K = dtype_mod.BlockQ5_K;
 const f32ToF16Bits = common.f32ToF16Bits;
 
 fn setQ5KValue(block: *BlockQ5_K, subblock: usize, offset: usize, value: u8) void {
@@ -49,10 +50,10 @@ test "ggml_q5_k x8 packed matmul matches plain q5_k matmul" {
 
     var q5: BlockQ5_K = undefined;
     fillQ5KPattern(&q5);
-    var q8: types.BlockQ8_K = undefined;
+    var q8: dtype_mod.BlockQ8_K = undefined;
     q8k.fillQ8KPattern(&q8);
 
-    var lhs_blocks = [_]types.BlockQ8_K{ q8, q8, q8, q8 };
+    var lhs_blocks = [_]dtype_mod.BlockQ8_K{ q8, q8, q8, q8 };
     var rhs_blocks = [_]BlockQ5_K{ q5, q5, q5, q5, q5, q5, q5, q5 };
     var rhs_plain = try q8k.quantizedMatmulRhsQ5_KFromBlocks(allocator, types.qk_k_block_size, 8, &rhs_blocks);
     defer rhs_plain.deinit();
@@ -365,14 +366,14 @@ fn fillRandomBlockQ5_Kx8(block: *qm.BlockQ5_Kx8, random: std.Random) void {
     for (&block.qs) |*q| q.* = @intCast(random.uintLessThan(u8, 32));
 }
 
-fn fillRandomBlockQ8_KConsistent(block: *types.BlockQ8_K, random: std.Random) void {
+fn fillRandomBlockQ8_KConsistent(block: *dtype_mod.BlockQ8_K, random: std.Random) void {
     block.d = 0.25 + random.float(f32);
     // quantizeRowQ8_KInto domain: qs in [-127,127], bsums = 16-wide group sums.
     for (&block.qs) |*q| q.* = @intCast(@as(i32, random.uintLessThan(u8, 255)) - 127);
     recomputeBsums(block);
 }
 
-fn recomputeBsums(block: *types.BlockQ8_K) void {
+fn recomputeBsums(block: *dtype_mod.BlockQ8_K) void {
     for (&block.bsums, 0..) |*b, g| {
         var s: i32 = 0;
         for (block.qs[g * 16 ..][0..16]) |q| s += q;
@@ -381,7 +382,7 @@ fn recomputeBsums(block: *types.BlockQ8_K) void {
 }
 
 // Interleave 4 plain Q8_K rows exactly like packRowsQ8_Kx4.
-fn packBlockQ8_Kx4(rows: *const [4]types.BlockQ8_K) types.BlockQ8_Kx4 {
+fn packBlockQ8_Kx4(rows: *const [4]dtype_mod.BlockQ8_K) types.BlockQ8_Kx4 {
     var dst: types.BlockQ8_Kx4 = undefined;
     inline for (0..4) |row| dst.d[row] = rows[row].d;
     for (0..types.qk_k_block_size / 4) |feature_group| {
@@ -424,7 +425,7 @@ fn expectAcc4x2BitEqual(expected: [4][2]common.QKV4f32, got: [4][2]common.QKV4f3
 }
 
 // Run all plain-LHS arms against the scalar arm for one (lhs, rhs, acc) triple.
-fn checkPlainArms(lhs: *const types.BlockQ8_K, rhs: *const qm.BlockQ5_Kx8, acc0: [2]common.QKV4f32) !void {
+fn checkPlainArms(lhs: *const dtype_mod.BlockQ8_K, rhs: *const qm.BlockQ5_Kx8, acc0: [2]common.QKV4f32) !void {
     var ref = acc0;
     q5_k.accumulateQ5_Kx8Scalar(lhs, rhs, &ref);
 
@@ -488,7 +489,7 @@ test "ggml_q5_kx8 plain-lhs SIMD arms match the scalar arm bit-exactly" {
 
     var iter: usize = 0;
     while (iter < 200) : (iter += 1) {
-        var lhs: types.BlockQ8_K = undefined;
+        var lhs: dtype_mod.BlockQ8_K = undefined;
         var rhs: qm.BlockQ5_Kx8 = undefined;
         fillRandomBlockQ8_KConsistent(&lhs, random);
         fillRandomBlockQ5_Kx8(&rhs, random);
@@ -498,7 +499,7 @@ test "ggml_q5_kx8 plain-lhs SIMD arms match the scalar arm bit-exactly" {
     // Edge blocks: max 5-bit weights / max scales, zero scales, zero weights;
     // activations pinned to their extremes.
     const acc_zero: [2]common.QKV4f32 = .{ @splat(0), @splat(0) };
-    var lhs: types.BlockQ8_K = undefined;
+    var lhs: dtype_mod.BlockQ8_K = undefined;
     var rhs: qm.BlockQ5_Kx8 = undefined;
     lhs.d = 1.0;
     for (edge_activations) |pattern| {
@@ -519,7 +520,7 @@ test "ggml_q5_kx8 packed Q8_Kx4 SIMD arms match the scalar arm bit-exactly" {
 
     var iter: usize = 0;
     while (iter < 200) : (iter += 1) {
-        var rows: [4]types.BlockQ8_K = undefined;
+        var rows: [4]dtype_mod.BlockQ8_K = undefined;
         for (&rows) |*r| fillRandomBlockQ8_KConsistent(r, random);
         const lhs = packBlockQ8_Kx4(&rows);
         var rhs: qm.BlockQ5_Kx8 = undefined;
@@ -540,7 +541,7 @@ test "ggml_q5_kx8 packed Q8_Kx4 SIMD arms match the scalar arm bit-exactly" {
         .{ @splat(0), @splat(0) },
         .{ @splat(0), @splat(0) },
     };
-    var rows: [4]types.BlockQ8_K = undefined;
+    var rows: [4]dtype_mod.BlockQ8_K = undefined;
     var rhs: qm.BlockQ5_Kx8 = undefined;
     for (edge_activations) |pattern| {
         for (&rows, 0..) |*r, ri| {
@@ -666,7 +667,7 @@ test "q5_k 4-row lane dot SIMD arms match the scalar reference" {
 
     var iter: usize = 0;
     while (iter < 100) : (iter += 1) {
-        var rows: [4]types.BlockQ8_K = undefined;
+        var rows: [4]dtype_mod.BlockQ8_K = undefined;
         for (&rows) |*r| fillRandomBlockQ8_KConsistent(r, random);
         const a = packBlockQ8_Kx4(&rows);
         // Pre-unpacked sub-block domain: unpackQ5_KSubblock emits unsigned
@@ -687,7 +688,7 @@ test "q5_k 4-row lane dot SIMD arms match the scalar reference" {
     // Edge blocks: weight extremes (31 / 0) against activation extremes incl.
     // the out-of-domain -128 (the u8*i8 arms stay exact: pair sums are
     // bounded by 2*31*128 = 7936 < 2^15).
-    var rows: [4]types.BlockQ8_K = undefined;
+    var rows: [4]dtype_mod.BlockQ8_K = undefined;
     const edge_w = [_]i8{ 31, 0 };
     for (edge_activations) |pattern| {
         for (&rows, 0..) |*r, ri| {
@@ -715,7 +716,7 @@ fn fillRandomBlockQ5_K(b: *BlockQ5_K, random: std.Random) void {
     for (&b.qh) |*q| q.* = random.int(u8);
 }
 
-fn checkQ5RowDotArms(w: *const BlockQ5_K, a: *const types.BlockQ8_K) !void {
+fn checkQ5RowDotArms(w: *const BlockQ5_K, a: *const dtype_mod.BlockQ8_K) !void {
     const ref = q5_k.dotQ5_KQ8_KScalar(w, a);
     inline for (dot_tiers) |tier| {
         const got = q5_k.dotQ5_KQ8_KSimd(tier, w, a);
@@ -730,7 +731,7 @@ test "q5_k row dot SIMD arms match the scalar reference bit-exactly" {
     var iter: usize = 0;
     while (iter < 200) : (iter += 1) {
         var w: BlockQ5_K = undefined;
-        var a: types.BlockQ8_K = undefined;
+        var a: dtype_mod.BlockQ8_K = undefined;
         fillRandomBlockQ5_K(&w, random);
         fillRandomBlockQ8_KConsistent(&a, random);
         try checkQ5RowDotArms(&w, &a);
@@ -742,7 +743,7 @@ test "q5_k row dot SIMD arms match the scalar reference bit-exactly" {
     const edge_bytes = [_]u8{ 0x00, 0xff };
     const edge_scale_bytes = [_]u8{ 0x00, 0xff };
     var w: BlockQ5_K = undefined;
-    var a: types.BlockQ8_K = undefined;
+    var a: dtype_mod.BlockQ8_K = undefined;
     w.dm = .{ f32ToF16Bits(1.0), f32ToF16Bits(1.0) };
     a.d = 1.0;
     for (edge_activations) |pattern| {

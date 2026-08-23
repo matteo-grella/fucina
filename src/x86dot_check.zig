@@ -86,14 +86,15 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const dtype_mod = @import("dtype.zig");
 const quant = @import("backend/quant.zig");
 const common = @import("backend/quant/common.zig");
 const tensor_mod = @import("tensor.zig");
 
-const BlockQ4_K = quant.BlockQ4_K;
-const BlockQ8_K = quant.BlockQ8_K;
-const BlockQ8_0 = quant.BlockQ8_0;
-const BlockTQ2_0 = quant.BlockTQ2_0;
+const BlockQ4_K = dtype_mod.BlockQ4_K;
+const BlockQ8_K = dtype_mod.BlockQ8_K;
+const BlockQ8_0 = dtype_mod.BlockQ8_0;
+const BlockTQ2_0 = dtype_mod.BlockTQ2_0;
 const qk_k_block_size = quant.types.qk_k_block_size;
 
 var failures: usize = 0;
