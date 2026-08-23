@@ -80,6 +80,37 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- One tuning table replaces the per-gate switches: `fucina.tuning.Table`
+  holds every FUCINA_* route gate and numeric crossover as a typed field,
+  and each leaf derives its env variable from its field path (`FUCINA_`
+  plus the upper-cased segments; a leaf named `base` or `enabled` names
+  its group, so `gpu.min_work.base` is `FUCINA_GPU_MIN_WORK` and
+  `gpu.enabled` is `FUCINA_GPU`). API rewrites: `tuning.Switch(cfg)` and
+  `tuning.Threshold(name, default)` and `tuning.defaults` are gone;
+  read `tuning.get().<field>`, pin via `tuning.setField("<path>", value)`
+  (null re-arms the env/default value) or `tuning.set(patch)`, and take
+  one uncached read with `tuning.load()`. `tuning.Overrides` is now the
+  optional shadow of the whole table (every leaf `?T = null`, not just
+  the two shadow fields), so `ExecContext.setTuning` can override any
+  field per context; routes that support per-context policy consult
+  `tuning.resolve(&ctx.tuning, "<path>")`. Env spellings: the boolean
+  off switch is `FUCINA_X=0` in place of the removed `FUCINA_NO_X=1`
+  form. Removed → replacement: `FUCINA_NO_WINOGRAD=1` →
+  `FUCINA_WINOGRAD=0`; `FUCINA_NO_WINOGRAD_F4=1` → `FUCINA_WINOGRAD_F4=0`;
+  `FUCINA_NO_NORM_QUANT_FUSED=1` → `FUCINA_NORM_QUANT_FUSED=0`;
+  `FUCINA_NO_DECODE_COMPACT=1` → `FUCINA_DECODE_COMPACT=0`;
+  `FUCINA_NO_ATTN_BWD_STATS=1` → `FUCINA_ATTN_BWD_STATS=0`;
+  `FUCINA_NO_ATTN_BWD_BLAS=1` → `FUCINA_ATTN_BWD_BLAS=0`;
+  `FUCINA_NO_CONV_BWD_GEMM=1` → `FUCINA_CONV_BWD_GEMM=0`;
+  `FUCINA_NO_FUSED_DISTILL=1` → `FUCINA_FUSED_DISTILL=0`;
+  `FUCINA_PTQTP_NO_FOLD=1` → `FUCINA_PTQTP_FOLD=0`. Every other spelling
+  is unchanged (they already match the derivation rule), including the
+  whole `FUCINA_GPU_*` family, whose values now flow to the providers
+  through the table; `FUCINA_SPIN_BUDGET` keeps its semantics (0 = park
+  immediately) as the table's `spin_budget` leaf; `FUCINA_MAX_THREADS`
+  (bootstrap) and `FUCINA_GPU_KERNELS` (string-valued) stay direct env
+  reads. With no environment set, every default is byte-identical to the
+  previous per-gate declarations.
 - One exec attention entry with a typed KV view and typed options: the 13
   `ExecContext.grouped*Attention*` entries are now
   `ctx.groupedAttention(q, kv: KvView, kv_head_for_head, scale, opts: AttentionOptions)`
@@ -121,7 +152,7 @@ this point; earlier history is `git log`.
   containers). One decode-route gate replaces the three per-format
   gates: `FUCINA_Q4K_DECODE_COMPACT`/`FUCINA_Q5K_DECODE_COMPACT`/
   `FUCINA_Q6K_DECODE_COMPACT` (and their `FUCINA_NO_*` twins) →
-  `FUCINA_DECODE_COMPACT`/`FUCINA_NO_DECODE_COMPACT`, and
+  `FUCINA_DECODE_COMPACT=1/0`, and
   `weights.setQ5kDecodeCompact`/`setQ6kDecodeCompact` →
   `weights.setDecodeCompact`. Kernel-set entries follow the same rule:
   `kernels.matmul2DQuantizedRhsQ8_0x4`/`...Q4_Kx4`/`...Q4_Kx8`/

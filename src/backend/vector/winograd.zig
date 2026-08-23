@@ -12,7 +12,7 @@
 //! ~2.25× fewer MACs than direct/im2col 3×3 and no 9× col-matrix traffic.
 //! Numerics: the transforms reassociate the 3×3 reduction (adds/subs plus
 //! exact ·0.5 in G), so results differ from the direct kernel at the
-//! ~1e-6-relative level. `FUCINA_NO_WINOGRAD=1` reverts to im2col at
+//! ~1e-6-relative level. `FUCINA_WINOGRAD=0` reverts to im2col at
 //! runtime.
 //!
 //! Channel-last layouts: x `[H,W,Cin]`, w `[Cout,3,3,Cin]`, y `[OH,OW,Cout]`;
@@ -316,7 +316,7 @@ inline fn outputTileChunk(comptime fuse_relu: bool, comptime L: usize, y: []f32,
 // non-dyadic fractions (1/6, 1/12, 1/24), so the drift envelope is wider
 // than F2 (~1e-5-relative). Selected by the exec route for large spatial
 // maps (min(oh,ow) ≥ 14, mirroring the reference's gate);
-// FUCINA_NO_WINOGRAD_F4=1 pins those back to F2.
+// FUCINA_WINOGRAD_F4=0 pins those back to F2.
 // Reuses `F2Dims` with tiles covering ceil(oh/4) × ceil(ow/4).
 // ===========================================================================
 

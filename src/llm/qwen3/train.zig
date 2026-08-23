@@ -194,18 +194,17 @@ const RopeKey = struct {
 /// Differentiable frozen linear: route through the plain `.value` tensor of
 /// every `LinearWeight` variant (the packed fast paths are inference-only —
 /// they reject gradients), tagged [out, in] as the frozen-RHS `dot` expects.
-/// Fused-distill route gate: FUCINA_NO_FUSED_DISTILL=1 forces the composed
+/// Fused-distill route gate: FUCINA_FUSED_DISTILL=0 forces the composed
 /// logits + `cartridge.distillLoss` tail (the A/B and emergency-revert
 /// switch — the fused route matches it to f32 roundoff, not bitwise).
-/// Read once, cached; `setFusedDistill` is the test hook.
-const fused_distill = fucina.tuning.Switch(.{ .off = "FUCINA_NO_FUSED_DISTILL", .default = true });
-
+/// Read once, cached (`tuning.Table.fused_distill`); `setFusedDistill` is
+/// the test hook.
 pub fn setFusedDistill(on: ?bool) void {
-    fused_distill.set(on);
+    fucina.tuning.setField("fused_distill", on);
 }
 
 fn fusedDistillEnabled() bool {
-    return fused_distill.enabled();
+    return fucina.tuning.get().fused_distill;
 }
 
 /// Lazily widened f32 copies of frozen projections, keyed by weight

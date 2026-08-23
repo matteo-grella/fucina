@@ -717,44 +717,62 @@ not yet stable (`README.md` says so explicitly); pin the vendored commit.
 
 ### 2.6 Runtime environment variables
 
-Every knob in the core-runtime and GPU tables is read **once** and cached
-(atomically or under a mutex) at first use; changing the process environment
-afterwards has no effect. The example/test gates in the last table are plain
-`getenv` calls re-read at every use.
+Every knob in the core-runtime and GPU tables is read **once**, at the
+first `tuning.get()`, and cached; changing the process environment
+afterwards has no effect. The example/test gates in the last table are
+plain `getenv` calls re-read at every use.
 Numeric knobs that fail to parse fall back to their defaults;
 `FUCINA_MAX_THREADS`-style positive-integer knobs ignore unset/invalid/zero
 values. On Linux without libc the lookup scans `/proc/self/environ`
-(`src/parallel.zig`), so `FUCINA_MAX_THREADS` also works in static builds.
+(`src/parallel.zig`), so every variable also works in static builds.
 
-The boolean route gates below (the `FUCINA_<X>=1` / `FUCINA_NO_<X>=1` pairs)
-all share one implementation, `fucina.tuning.Switch` (`src/tuning.zig`):
-getenv-family truthiness (set with a first character other than `'0'`), the
-`NO_` form winning over the positive form, a read-once process cache, and a
-programmatic `set` (the per-gate `set*` test hooks forward to it). Numeric
-crossovers use the same read-once contract via `tuning.Threshold`. Policy
-that can differ per workload goes through `fucina.tuning.Overrides` instead
-of the process gate: `ExecContext.setTuning(.{ ... })` overrides a route for
-that context only (first consumer: the CPU f32 weight-shadow route —
-`cpu_f32_shadow` / `cpu_f32_shadow_min_m` — so two contexts in one process
-can run different shadow policy).
+With four exceptions (`FUCINA_MAX_THREADS`, a bootstrap read in
+`src/parallel.zig`; the string-valued `FUCINA_GPU_KERNELS`; the profiling
+flags `FUCINA_POOL_PROFILE`/`FUCINA_MM_PROFILE`), every variable
+below is a leaf of one typed table, `fucina.tuning.Table`
+(`src/tuning.zig`), and its name derives from its field path: `FUCINA_` plus
+the path segments upper-cased and joined with `_` (`decode_compact` reads
+`FUCINA_DECODE_COMPACT`, `gpu.min_work.attn` reads
+`FUCINA_GPU_MIN_WORK_ATTN`; a leaf named `base` or `enabled` names its
+group, so `gpu.min_work.base` reads `FUCINA_GPU_MIN_WORK` and `gpu.enabled`
+reads `FUCINA_GPU`). Booleans: a set, non-empty value whose first character
+is `0` forces the route off, any other set, non-empty value forces it on,
+unset keeps the measured default: one spelling per gate, `FUCINA_X=0`
+where the old `FUCINA_NO_X=1` used to be. Integers parse base-10; the
+top-level crossovers treat `0` and garbage as unset, while leaves under
+`gpu` accept `0` as a meaningful value (a zero work floor always offloads).
+The whole table is read once at the first `tuning.get()` and cached;
+`tuning.setField`/`tuning.set` pin fields programmatically (the per-gate
+`set*` test hooks forward there, and pinning `null` re-arms the env/default
+value). Policy that can differ per workload goes through
+`fucina.tuning.Overrides`, the same field tree with every leaf optional:
+`ExecContext.setTuning(.{ ... })` overrides any table field for that
+context only, consulted by the routes that support per-context policy
+(first consumer: the CPU f32 weight-shadow route — `cpu_f32_shadow` /
+`cpu_f32_shadow_min_m` — so two contexts in one process can run different
+shadow policy).
 
 **Core runtime** (`src/parallel.zig`, `src/exec/conv.zig`,
-`src/exec/attention.zig`, `src/exec/matmul.zig`):
+`src/exec/attention.zig`, `src/exec/matmul.zig`, `src/ptqtp_gguf.zig`,
+`src/store/expert_store.zig`):
 
 | Variable | Effect | Default |
 | --- | --- | --- |
 | `FUCINA_MAX_THREADS` | Lowers the worker count below the `-Dmax-threads` ceiling (mirrors llama.cpp `-t`). Never raises it. Consulted on the first `cpuThreadCount` call; a prior `setMaxThreads` wins. | unset (detected CPU count — clamped to physical cores on SMT hosts and to performance cores on Apple Silicon — capped by the ceiling) |
-| `FUCINA_SPIN_BUDGET` | Overrides the worker-team spin-then-park window (`src/thread.zig` BarrierPool; `0` = park immediately is a valid override, values above `u32` are ignored). Read once per pool init. Workload-coupled; the default is deliberate. | unset (32768 spins; `0` when the team exceeds the physical-core count — spinning while oversubscribed starves the descheduled participants) |
+| `FUCINA_SPIN_BUDGET` | Overrides the worker-team spin-then-park window (`src/thread.zig` BarrierPool; `0` = park immediately is a valid override, values above `u32` are ignored). Consulted at pool init through the tuning table. Workload-coupled; the default is deliberate. | unset (32768 spins; `0` when the team exceeds the physical-core count — spinning while oversubscribed starves the descheduled participants) |
 | `FUCINA_POOL_PROFILE=1` | Emits one `[pool-trace]` line per `BarrierPool` dispatch with span, claim chunk, and each participant's first-claim/completion offsets and task count. Diagnostic only; read once when the team is created. | off |
-| `FUCINA_WINOGRAD=1` / `FUCINA_NO_WINOGRAD=1` | Force the Winograd conv2d route on/off (A/B + emergency revert switches). | on for no-BLAS builds, off when a platform BLAS backs the matmul |
-| `FUCINA_NO_WINOGRAD_F4=1` | Pins Winograd-routed large maps to the F(2×2,3×3) tier. | F4 tier enabled |
+| `FUCINA_WINOGRAD=1/0` | Forces the Winograd conv2d route on/off (A/B + emergency revert switch). | on for no-BLAS builds, off when a platform BLAS backs the matmul |
+| `FUCINA_WINOGRAD_F4=0` | Pins Winograd-routed large maps to the F(2×2,3×3) tier. | F4 tier enabled |
 | `FUCINA_WINOGRAD_F4_MIN` | Minimum output spatial size for the F4 tier. | `14` |
 | `FUCINA_WINOGRAD_F4_MAXCIN` | Maximum input channels for the F4 tier (deep-channel maps run faster on F2). | `56` |
-| `FUCINA_NO_CONV_BWD_GEMM=1` | Pins the `groups == 1` conv2d backward entries to the direct gather kernels instead of the GEMM (matmul + im2col/col2im) decomposition (A/B + emergency revert switch). | GEMM route on |
-| `FUCINA_ATTN_BWD_STATS=1` / `FUCINA_NO_ATTN_BWD_STATS=1` | Force the forward-saved-stats route of the attention-backward softmax reconstruction (`src/exec/attention.zig`) on/off (A/B + emergency revert switches) — the two routes agree to f32 roundoff, not bitwise; only consulted when the autograd record saved forward stats (the stats-less exec path always recomputes). | on |
-| `FUCINA_NO_ATTN_BWD_BLAS=1` | Reverts the attention-backward contraction tiles from the BLAS-strip route (the per-tile contractions issued as strided sgemm strips) to the register-tiled route (`src/exec/attention.zig`; A/B + escape hatch for parity work) — the two routes agree to f32 roundoff, not bitwise. Only consulted on BLAS-backed native builds; elsewhere the register-tiled route always runs. | BLAS-strip route on (BLAS builds) |
+| `FUCINA_CONV_BWD_GEMM=0` | Pins the `groups == 1` conv2d backward entries to the direct gather kernels instead of the GEMM (matmul + im2col/col2im) decomposition (A/B + emergency revert switch). | GEMM route on |
+| `FUCINA_ATTN_BWD_STATS=1/0` | Forces the forward-saved-stats route of the attention-backward softmax reconstruction (`src/exec/attention.zig`) on/off (A/B + emergency revert switch) — the two routes agree to f32 roundoff, not bitwise; only consulted when the autograd record saved forward stats (the stats-less exec path always recomputes). | on |
+| `FUCINA_ATTN_BWD_BLAS=0` | Reverts the attention-backward contraction tiles from the BLAS-strip route (the per-tile contractions issued as strided sgemm strips) to the register-tiled route (`src/exec/attention.zig`; A/B + escape hatch for parity work) — the two routes agree to f32 roundoff, not bitwise. Only consulted on BLAS-backed native builds; elsewhere the register-tiled route always runs. | BLAS-strip route on (BLAS builds) |
 | `FUCINA_CPU_F32_SHADOW=1` | Opt-in (`src/exec/matmul.zig`): attaches a widen-once f32 shadow to a 16-bit weight's storage and routes m ≥ 32 GEMMs through the BLAS f32 path (decode stays on the streaming kernels). +4 bytes/weight resident; leave off when training 16-bit weights in place. CPU builds only. | off |
 | `FUCINA_CPU_F32_SHADOW_MIN_M` | Overrides the shadow route's m ≥ 32 crossover. | `32` |
+| `FUCINA_PTQTP_FOLD=0` | Serves tie-fitted PTQTP MoE plane sets through the per-plane path instead of the folded one-pass form (`src/ptqtp_gguf.zig`; A/B on one binary; a striped expert-store L2 tier only covers unfolded layers, so this trades the halved cache-hit dot for L2 coverage). | folded serving on |
+| `FUCINA_MOE_LRU=1` | Forces the pure-LRU victim scan in the MoE expert store (`src/store/expert_store.zig`; A/B on one binary). | heat-aware eviction |
+| `FUCINA_MOE_L2_CACHED=1` | Keeps the expert-store L2 tier page-cached instead of uncached I/O (`src/store/expert_store.zig`). | uncached |
 
 **GPU offload** (read by both providers unless noted;
 `src/backend/metal.zig`, `src/backend/cuda.zig`; see §9):
@@ -784,16 +802,16 @@ can run different shadow policy).
 | `FUCINA_GPU_QUANT_MMA` (cuda) | A value starting with `0` disables the tensor-core Q4_K/Q5_K/Q6_K/Q8_0 kernels and selects the scalar-FFMA fallback (diagnostic A/B switch). | enabled on compute capability ≥ 7 |
 | `FUCINA_GPU_QUANT_SPLIT_K` (cuda) | A value starting with `0` disables the on-stream split-K/reduction used to fill idle SMs for underfilled dense quantized prefill (diagnostic A/B switch). | enabled when the N64 output grid fills less than roughly 7/8 of the SMs |
 | `FUCINA_GPU_VRAM_BUDGET` (cuda) | Weight-residency budget in bytes; `0` disables the bound. | 80% of free VRAM at init |
-| `FUCINA_GPU_KERNELS=src` (cuda) | NVRTC-recompiles the vendored kernels from `kernels.cu` instead of loading the committed PTX (dev loop; `tools/gen_cuda_ptx.sh` regenerates the PTX). | committed PTX |
+| `FUCINA_GPU_KERNELS=src` (cuda) | NVRTC-recompiles the vendored kernels from `kernels.cu` instead of loading the committed PTX (dev loop; `tools/gen_cuda_ptx.sh` regenerates the PTX). String-valued, so it lives outside the tuning table as a direct env read. | committed PTX |
 
 **Model I/O + LLM stack** (`src/weights.zig` §13.2, `src/llm/qwen3/train.zig`,
 `src/llm/inkling/mmproj.zig`; read once and cached like the tables above):
 
 | Variable | Effect | Default |
 | --- | --- | --- |
-| `FUCINA_NORM_QUANT_FUSED=1` / `FUCINA_NO_NORM_QUANT_FUSED=1` | Force the fused normalize+quantize+packed-GEMM route of `linearSeqNormed` on/off (prefill shapes on the packed CPU arms only; the fused route matches the unfused `rmsNormMul` + linear pair to f32 roundoff, not bitwise). | on |
-| `FUCINA_DECODE_COMPACT=1` / `FUCINA_NO_DECODE_COMPACT=1` | Route decode-shape (m < 4) no-grad K-quant matmuls through the GGUF-native compact blocks instead of the byte-expanded packed layout — bitwise-equal, fewer weight bytes streamed (Q4_K ~1.92×, Q5_K ~1.57×, Q6_K 1.30×). | on |
-| `FUCINA_NO_FUSED_DISTILL=1` | Forces the composed logits + `cartridge.distillLoss` tail instead of the fused distill route in cartridge training (`src/llm/qwen3/train.zig`; A/B + emergency revert — the fused route matches it to f32 roundoff, not bitwise). | fused route on |
+| `FUCINA_NORM_QUANT_FUSED=1/0` | Forces the fused normalize+quantize+packed-GEMM route of `linearSeqNormed` on/off (prefill shapes on the packed CPU arms only; the fused route matches the unfused `rmsNormMul` + linear pair to f32 roundoff, not bitwise). | on |
+| `FUCINA_DECODE_COMPACT=1/0` | Routes decode-shape (m < 4) no-grad K-quant matmuls through the GGUF-native compact blocks instead of the byte-expanded packed layout — bitwise-equal, fewer weight bytes streamed (Q4_K ~1.92×, Q5_K ~1.57×, Q6_K 1.30×). | on |
+| `FUCINA_FUSED_DISTILL=0` | Forces the composed logits + `cartridge.distillLoss` tail instead of the fused distill route in cartridge training (`src/llm/qwen3/train.zig`; A/B + emergency revert — the fused route matches it to f32 roundoff, not bitwise). | fused route on |
 | `FUCINA_MM_PROFILE=1` | Per-stage timing profile of the Inkling multimodal-projector encode (`src/llm/inkling/mmproj.zig`; read once at load). | off |
 
 **Examples and test gates** (`examples/`):
@@ -5635,9 +5653,10 @@ cool, decode often faster one or two threads lower), hence the runtime
 knobs. The env parsers behind these knobs are themselves public:
 `parallel.envPositiveUsize(name)` implements the positive-usize knob
 contract (libc `getenv`, or a libc-free `/proc/self/environ` scan on static
-Linux; unset/invalid/`0` ⇒ `null`), and `parallel.envSpinBudget()` is the
-`FUCINA_SPIN_BUDGET` read consulted once per team init — the one knob where
-`0` is a value, not "unset". `parallel.physicalCpuCount()` (macOS sysctl /
+Linux; unset/invalid/`0` ⇒ `null`), `parallel.envNonNegativeUsize(name)` is
+the same read with `0` as a value, not "unset" (the `FUCINA_SPIN_BUDGET`
+and GPU-floor contract), and `parallel.envFlagValue(name)` is the tri-state
+boolean read the tuning table's gates go through (unset/empty ⇒ `null`). `parallel.physicalCpuCount()` (macOS sysctl /
 Linux sysfs-topology-over-affinity; null where unknown; probed once and
 process-cached, first caller's affinity mask wins) is public as well — it
 is the count the oversubscription guard compares the team size against
@@ -7814,7 +7833,7 @@ The BLAS tier also exposes one raw entry for exec-layer fused kernels:
 compiled on BLAS builds only (callers comptime-gate on
 `backend.native_uses_blas`). The attention-backward BLAS-strip route
 issues its per-tile contractions through it (`src/exec/attention.zig`;
-`FUCINA_NO_ATTN_BWD_BLAS=1` reverts to the register-tiled route, the only
+`FUCINA_ATTN_BWD_BLAS=0` reverts to the register-tiled route, the only
 route on non-BLAS builds).
 
 Within the pure-Zig tier there are two paths:
@@ -7917,10 +7936,10 @@ transform with bias folded in and an optional fused ReLU epilogue. Two tiers:
 
 Gating is read once and cached: the route defaults **on for `-Dblas=none`**
 builds and **off when a platform BLAS backs the matmul**
-(`winograd_default_on = !native_uses_blas` — Accelerate's AMX prefers one big
-im2col GEMM). Runtime overrides: `FUCINA_WINOGRAD=1` forces on,
-`FUCINA_NO_WINOGRAD=1` forces off, `FUCINA_NO_WINOGRAD_F4=1` pins large maps
-to F2, `FUCINA_WINOGRAD_F4_MIN` / `FUCINA_WINOGRAD_F4_MAXCIN` retune the F4
+(`tuning.Table.winograd`, default `!use_blas` — Accelerate's AMX prefers one
+big im2col GEMM). Runtime overrides: `FUCINA_WINOGRAD=1` forces on, `=0`
+forces off, `FUCINA_WINOGRAD_F4=0` pins large maps to F2,
+`FUCINA_WINOGRAD_F4_MIN` / `FUCINA_WINOGRAD_F4_MAXCIN` retune the F4
 shape gate. Ineligible convs fall to im2col + one GEMM (`groups == 1`) or the
 direct grouped kernel; 1×1 stride-1 pad-0 convs lower to a plain NT matmul.
 
@@ -11413,7 +11432,7 @@ pub fn deinit(self: *LinearWeight) void
   contract against the resident GGUF-native compact blocks —
   bitwise-equal outputs, ~1.92x/1.57x/1.30x fewer weight bytes streamed
   than the byte-expanded packed layout; default on, with
-  `FUCINA_DECODE_COMPACT`/`FUCINA_NO_DECODE_COMPACT` forcing the route
+  `FUCINA_DECODE_COMPACT=1/0` forcing the route
   on/off and `setDecodeCompact` as the programmatic override), and a
   tagged `dot` for everything else. The format-generic helper
   `weights.linearSeq(&w, ctx, input, in_tag, out_tag)` is also `pub` for
@@ -11425,7 +11444,7 @@ pub fn deinit(self: *LinearWeight) void
   tensor is never materialized — the fused kernel normalizes into
   task-private scratch and quantizes in place, matching the unfused pair to
   f32 roundoff. Every other arm — GPU builds, decode shapes, and
-  `FUCINA_NO_NORM_QUANT_FUSED=1` (`FUCINA_NORM_QUANT_FUSED=1` forces the
+  `FUCINA_NORM_QUANT_FUSED=0` (`=1` forces the
   fused route; `setNormQuantFused` is the programmatic override) —
   normalizes and delegates. `supportsNormedFusion(m)` reports whether the
   fused route applies for an m-row input; callers fanning one normalized

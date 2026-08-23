@@ -1472,12 +1472,12 @@ pub const attention_bwd_blas_tile_rows: usize = 64;
 
 /// The BLAS-strip backward route is the default on BLAS builds — the same
 /// kernel-selection contract as `shouldUseBlas` on the plain matmuls.
-/// FUCINA_NO_ATTN_BWD_BLAS reverts to the register-tiled route (the A/B
-/// switch and the escape hatch for non-BLAS parity work).
-const attn_bwd_blas = tuning.Switch(.{ .off = "FUCINA_NO_ATTN_BWD_BLAS", .default = true });
+/// FUCINA_ATTN_BWD_BLAS=0 (`tuning.Table.attn_bwd_blas`) reverts to the
+/// register-tiled route (the A/B switch and the escape hatch for non-BLAS
+/// parity work).
 fn attentionBackwardBlasEnabled() bool {
     if (comptime !(backend_mod.active_kind == .native and backend_mod.native_uses_blas)) return false;
-    return attn_bwd_blas.enabled();
+    return tuning.get().attn_bwd_blas;
 }
 
 pub fn runGroupedCausalAttentionBackwardBlasTiledTask(task: *const GroupedCausalAttentionBackwardTiledTask) void {
@@ -1602,17 +1602,13 @@ pub fn addSliceInPlace(dest: []f32, src: []const f32) void {
 }
 
 /// Forward-saved stats route for the backward softmax reconstruction:
-/// FUCINA_NO_ATTN_BWD_STATS=1 pins the 3-pass recompute (the A/B and
-/// emergency-revert switch), FUCINA_ATTN_BWD_STATS=1 forces on. Read once,
-/// cached. Only consulted when the caller has stats at all (the autograd
-/// record); the stats-less exec path always recomputes.
-const attn_bwd_stats = tuning.Switch(.{
-    .on = "FUCINA_ATTN_BWD_STATS",
-    .off = "FUCINA_NO_ATTN_BWD_STATS",
-    .default = true,
-});
+/// FUCINA_ATTN_BWD_STATS=0 pins the 3-pass recompute (the A/B and
+/// emergency-revert switch), =1 forces on. Read once, cached
+/// (`tuning.Table.attn_bwd_stats`). Only consulted when the caller has
+/// stats at all (the autograd record); the stats-less exec path always
+/// recomputes.
 fn attnBwdStatsEnabled() bool {
-    return attn_bwd_stats.enabled();
+    return tuning.get().attn_bwd_stats;
 }
 
 /// Mask mode of `groupedAttention`: causal (each query attends its prefix)
@@ -1730,7 +1726,7 @@ pub fn groupedAttention(
 /// pairs from `groupedAttention`'s `.stats_out` capture — length
 /// heads * q_seq * 2. The tiled route rebuilds the forward's probabilities
 /// from them in one pass instead of the max/sum recompute (gated by
-/// FUCINA_NO_ATTN_BWD_STATS); the small-shape per-kv-head route always
+/// FUCINA_ATTN_BWD_STATS=0); the small-shape per-kv-head route always
 /// recomputes. `out` (the forward output) is accepted for the autograd
 /// record's convenience but unused: the tiled route's row dot comes from
 /// its own cache-resident panels.

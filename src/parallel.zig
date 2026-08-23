@@ -428,22 +428,17 @@ fn envMaxThreads() ?usize {
     return envPositiveUsize("FUCINA_MAX_THREADS");
 }
 
-/// The FUCINA_SPIN_BUDGET override for the worker-team spin-then-park window
-/// (`src/thread.zig` BarrierPool), or null when unset/invalid. Unlike the
-/// positive-usize knobs, `0` is a VALID value here — it means "park
-/// immediately, never spin", the manual escape for oversubscribed teams (and
-/// the value the guard in BarrierPool.init defaults to when the team exceeds
-/// the physical-core count). Read once per BarrierPool init. See the
-/// `spin_budget` comment in thread.zig for when (and on which hardware)
-/// overriding pays; the default is left alone because sweeps (M1 Max;
-/// i9-13950HX, 2026-07-03) found the response U-shaped and workload-coupled —
-/// no single value wins every workload.
-pub fn envSpinBudget() ?usize {
+/// Non-negative-usize environment knob, or null when unset/invalid. Unlike
+/// `envPositiveUsize`, `0` is a VALID value: the tuning-table leaves that
+/// read through this arm (`FUCINA_SPIN_BUDGET`, the GPU work floors and
+/// percentages) give zero a meaning of its own (park immediately, always
+/// offload, occupancy-blind). Same per-target arms as `envPositiveUsize`.
+pub fn envNonNegativeUsize(comptime name: [:0]const u8) ?usize {
     if (builtin.link_libc) {
-        const value = std.c.getenv("FUCINA_SPIN_BUDGET") orelse return null;
+        const value = std.c.getenv(name) orelse return null;
         return parseNonNegativeUsize(std.mem.sliceTo(value, 0));
     } else if (builtin.os.tag == .linux) {
-        return readProcSelfEnviron("FUCINA_SPIN_BUDGET", parseNonNegativeUsize);
+        return readProcSelfEnviron(name, parseNonNegativeUsize);
     } else {
         return null;
     }
@@ -497,6 +492,48 @@ pub fn envFlag(comptime name: [:0]const u8) bool {
 
 fn parseFlag(s: []const u8) ?usize {
     return if (s.len > 0 and s[0] != '0') 1 else 0;
+}
+
+/// Tri-state boolean environment flag: null when unset or set empty (no
+/// override), false when the value's first character is `'0'`, true
+/// otherwise. The tuning table's boolean leaves read through this, so
+/// setting a gate's variable to `0` forces the route off while an unset
+/// variable keeps the measured default. Same per-target arms as `envFlag`.
+pub fn envFlagValue(comptime name: [:0]const u8) ?bool {
+    if (builtin.link_libc) {
+        const value = std.c.getenv(name) orelse return null;
+        const parsed = parseFlagValue(std.mem.sliceTo(value, 0)) orelse return null;
+        return parsed == 1;
+    } else if (builtin.os.tag == .linux) {
+        const parsed = readProcSelfEnviron(name, parseFlagValue) orelse return null;
+        return parsed == 1;
+    } else {
+        return null;
+    }
+}
+
+fn parseFlagValue(s: []const u8) ?usize {
+    if (s.len == 0) return null;
+    return if (s[0] != '0') 1 else 0;
+}
+
+/// True when the variable is set to exactly `expected` (the contract of the
+/// string-valued knobs that select a named mode, e.g.
+/// `FUCINA_GPU_KERNELS=src`). Same per-target arms as `envFlag`.
+pub fn envStringIs(comptime name: [:0]const u8, comptime expected: []const u8) bool {
+    if (builtin.link_libc) {
+        const value = std.c.getenv(name) orelse return false;
+        return std.mem.eql(u8, std.mem.sliceTo(value, 0), expected);
+    } else if (builtin.os.tag == .linux) {
+        const match = struct {
+            fn parse(s: []const u8) ?usize {
+                return if (std.mem.eql(u8, s, expected)) 1 else 0;
+            }
+        };
+        return (readProcSelfEnviron(name, match.parse) orelse 0) == 1;
+    } else {
+        return false;
+    }
 }
 
 /// Env-value parse contract (unchanged from the original libc-only arm):

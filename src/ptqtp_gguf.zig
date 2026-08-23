@@ -37,7 +37,7 @@ const dtype_mod = @import("dtype.zig");
 const exec_mod = @import("exec.zig");
 const gguf = @import("gguf.zig");
 const ptqtp = @import("ptqtp.zig");
-const parallel = @import("parallel.zig");
+const tuning = @import("tuning.zig");
 const weights = @import("weights.zig");
 
 const Allocator = std.mem.Allocator;
@@ -74,15 +74,13 @@ pub const tie_key = "fucina.ptqtp.tie_scales";
 /// Longest tensor name this module reads or writes (base + `.ptqtp0`).
 const max_name_len = 160;
 
-/// `FUCINA_PTQTP_NO_FOLD=1` serves tie-fitted MoE plane sets through the
-/// per-plane path instead of the folded one-pass form (A/B on one binary).
-/// The expert-store L2 tier stripes primary-file plane bytes and skips
-/// folded slab sections entirely, so a striped tier only covers unfolded
-/// layers — this knob trades the halved cache-hit dot for L2 coverage.
-/// Applied to BOTH the resident and streamed MoE loaders so the two tiers
-/// keep serving the same numbers.
+/// `FUCINA_PTQTP_FOLD=0` serves tie-fitted MoE plane sets through the
+/// per-plane path instead of the folded one-pass form (A/B on one binary;
+/// `tuning.Table.ptqtp_fold` carries the L2-coverage trade). Applied to
+/// BOTH the resident and streamed MoE loaders so the two tiers keep
+/// serving the same numbers.
 fn moeFoldDisabled() bool {
-    return parallel.envFlag("FUCINA_PTQTP_NO_FOLD");
+    return !tuning.get().ptqtp_fold;
 }
 
 /// `<base>.ptqtpK` — one byte-valid TQ2_0 tensor per plane.

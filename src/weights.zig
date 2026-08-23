@@ -1107,21 +1107,21 @@ pub const LinearWeight = union(enum) {
     /// keep their offload policy, the x86 m<4 decode-compact routes keep
     /// their byte win, MMLA q4_k has no fused kernel, float/ptqtp/ternary
     /// arms have no LHS quantization to fuse into), gated by
-    /// FUCINA_NO_NORM_QUANT_FUSED=1 (the A/B and emergency-revert switch —
+    /// FUCINA_NORM_QUANT_FUSED=0 (the A/B and emergency-revert switch —
     /// the fused route matches the unfused pair to f32 roundoff, not
     /// bitwise). Callers fanning ONE normalized input into several
     /// projections should require this for every projection before
     /// switching to the normed calls — the fallback re-normalizes per call.
-    /// Norm-into-quantize fusion gate: FUCINA_NO_NORM_QUANT_FUSED=1 forces
-    /// the unfused rmsNormMul + linearSeq pair, FUCINA_NORM_QUANT_FUSED=1
-    /// forces the fused route. Read once, cached (winograd-style).
+    /// Norm-into-quantize fusion gate: FUCINA_NORM_QUANT_FUSED=0 forces
+    /// the unfused rmsNormMul + linearSeq pair, =1 forces the fused route.
+    /// Read once, cached (`tuning.Table.norm_quant_fused`).
     pub fn setNormQuantFused(on: ?bool) void {
-        norm_quant_fused.set(on);
+        tuning.setField("norm_quant_fused", on);
     }
 
     pub fn supportsNormedFusion(self: *const LinearWeight, m: usize) bool {
         if (comptime gpu_impl.enabled) return false;
-        if (!norm_quant_fused.enabled()) return false;
+        if (!tuning.get().norm_quant_fused) return false;
         // Prefill-only: at decode shapes (m < 4) the fused route pays pooled
         // scratch acquisitions plus a padded 4-row-group quantize for one
         // real row, where the unfused internal quantizer has an m=1 stack
@@ -1142,7 +1142,7 @@ pub const LinearWeight = union(enum) {
     /// task-private scratch with the exact kernels the unfused dispatch uses
     /// and quantizes in place — results match the unfused pair to f32
     /// roundoff (<= 1 ulp observed). Every other arm (and
-    /// FUCINA_NO_NORM_QUANT_FUSED=1) normalizes and delegates.
+    /// FUCINA_NORM_QUANT_FUSED=0) normalizes and delegates.
     pub fn linearSeqNormed(
         self: *const LinearWeight,
         ctx: *ExecContext,
@@ -1154,7 +1154,7 @@ pub const LinearWeight = union(enum) {
     ) !Tensor(.{ .seq, out_tag }) {
         @setEvalBranchQuota(20_000);
         if (comptime !gpu_impl.enabled) {
-            if (!x.requiresGrad() and x.dim(.seq) >= 4 and norm_quant_fused.enabled()) switch (self.*) {
+            if (!x.requiresGrad() and x.dim(.seq) >= 4 and tuning.get().norm_quant_fused) switch (self.*) {
                 .q4_k => |*weight| if (comptime !backend_mod.supports_q4_k_mmla) {
                     return x.rmsNormMulDotPacked(ctx, norm_weight, eps, &weight.packed_rhs, in_tag, out_tag);
                 },
@@ -1954,43 +1954,18 @@ fn denseQuantGpuTry(
     return try Tensor(.{ .seq, out_tag }).fromTensor(ctx, out);
 }
 
-const norm_quant_fused = tuning.Switch(.{
-    .on = "FUCINA_NORM_QUANT_FUSED",
-    .off = "FUCINA_NO_NORM_QUANT_FUSED",
-    .default = true,
-});
-
-/// Decode-route gate shared by the K-quant packed weights: at decode
-/// shapes (m < 4) the dense quantized matmul is a DRAM-bound GEMV, and the
-/// byte-expanded packed layouts stream more weight bytes than the
-/// GGUF-native compact blocks already resident in `weight.value` (per
-/// 256-weight block per column: Q4_K 276 B packed vs 144 B compact, 1.92x;
-/// Q5_K 276 B vs 176 B, 1.57x; Q6_K 274 B vs 210 B, 1.30x). Routing decode
-/// through the compact tensor-RHS path is bitwise-equal to the packed
-/// family (same Q8_K LHS quantization, same order-independent i32 integer
-/// stage, same f32 epilogue association — proven by the cross-layout tests
-/// in q4_k/q5_k/q6_k_tests.zig) and wins where bandwidth is the limit:
-/// default ON. Runtime overrides: FUCINA_DECODE_COMPACT=1 forces on,
-/// FUCINA_NO_DECODE_COMPACT=1 forces off (the A/B and emergency-revert
-/// switches). Read once, cached.
-const decode_compact = tuning.Switch(.{
-    .on = "FUCINA_DECODE_COMPACT",
-    .off = "FUCINA_NO_DECODE_COMPACT",
-    .default = true,
-});
-
-/// Programmatic override for the decode-route gate (pre-seeds the
-/// read-once cache, like `parallel.setMaxThreads`): `true`/`false` force the
-/// compact/packed route, `null` resets to unread so the next query re-reads
-/// the env default. The tests' A/B hook; also usable from a CLI flag.
+/// Programmatic override for the decode-route gate
+/// (`tuning.Table.decode_compact`, where the bandwidth argument lives):
+/// `true`/`false` force the compact/packed route, `null` restores the
+/// env/default value. The tests' A/B hook; also usable from a CLI flag.
 pub fn setDecodeCompact(on: ?bool) void {
-    decode_compact.set(on);
+    tuning.setField("decode_compact", on);
 }
 
 /// Formats whose decode-shape GEMV wins by reading the compact GGUF-native
-/// blocks instead of the byte-expanded packed layout (the `decode_compact`
-/// gate's byte ratios). Q8_0's x4 pack carries the same bytes as its
-/// compact blocks, so it goes straight to the packed dot.
+/// blocks instead of the byte-expanded packed layout (the
+/// `tuning.Table.decode_compact` byte ratios). Q8_0's x4 pack carries the
+/// same bytes as its compact blocks, so it goes straight to the packed dot.
 fn hasCompactDecodeRoute(comptime dt: DType) bool {
     return switch (dt) {
         .q4_k, .q5_k, .q6_k => true,
@@ -2016,10 +1991,10 @@ pub fn linearSeq(
     // Decode shapes: contract against the resident GGUF-native compact
     // blocks (`weight.value`) through the public quantized-RHS `dot` —
     // bitwise-equal outputs, fewer weight bytes streamed (see the
-    // `decode_compact` gate comment). The GPU try stays first so `-Dgpu`
+    // `tuning.Table.decode_compact` doc). The GPU try stays first so `-Dgpu`
     // builds keep their offload policy ahead of the CPU route choice.
     if (comptime hasCompactDecodeRoute(dt)) {
-        if (input.dim(.seq) < 4 and !input.requiresGrad() and decode_compact.enabled()) {
+        if (input.dim(.seq) < 4 and !input.requiresGrad() and tuning.get().decode_compact) {
             var tagged = try weight.value.withTags(ctx, .{ out_tag, in_tag });
             defer tagged.deinit();
             return input.dot(ctx, &tagged, in_tag);

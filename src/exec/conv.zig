@@ -332,10 +332,10 @@ pub fn conv2dPreparedExt(
     // reference's gate — 4× fewer MACs), F(2×2,3×3) otherwise (2.25×); both
     // drop im2col's 9× col traffic. The transforms reassociate the 3×3
     // reduction (F2 ~1e-6-, F4 ~1e-5-relative drift vs the direct kernel —
-    // tolerance argument in vector/winograd.zig). FUCINA_NO_WINOGRAD=1
-    // reverts to im2col; FUCINA_NO_WINOGRAD_F4=1 pins large maps to F2.
+    // tolerance argument in vector/winograd.zig). FUCINA_WINOGRAD=0
+    // reverts to im2col; FUCINA_WINOGRAD_F4=0 pins large maps to F2.
     if (groups == 1 and kh == 3 and kw == 3 and stride[0] == 1 and stride[1] == 1 and
-        pad[0] <= 1 and pad[1] <= 1 and cin >= 4 and oh >= 2 and ow >= 2 and winograd.enabled())
+        pad[0] <= 1 and pad[1] <= 1 and cin >= 4 and oh >= 2 and ow >= 2 and tuning.get().winograd)
     {
         // A non-empty prepared set must belong to THIS weight's shape; a
         // mismatch is a caller wiring bug, not a fallback case. (`.empty`
@@ -345,7 +345,7 @@ pub fn conv2dPreparedExt(
                 return tensor.TensorError.ShapeMismatch;
             }
         }
-        if (@min(oh, ow) >= winogradF4MinSpatial() and cin <= winogradF4MaxCin() and winograd_f4.enabled()) {
+        if (@min(oh, ow) >= winogradF4MinSpatial() and cin <= winogradF4MaxCin() and tuning.get().winograd_f4) {
             const f4_planes: ?*const [36]Tensor = if (prepared) |p| (if (p.f4) |*planes| planes else null) else null;
             return winogradConv(ctx, .f4, ii.tensor(), ww.tensor(), f4_planes, bias_slice, fused_relu, .{
                 .h = h,
@@ -448,67 +448,32 @@ fn conv2dDimsFor(h: usize, w: usize, cin: usize, oh: usize, ow: usize, cout: usi
     return .{ .h = h, .w = w, .cin = cin, .oh = oh, .ow = ow, .cout = cout, .kh = kh, .kw = kw, .stride_h = stride[0], .stride_w = stride[1], .pad_h = pad[0], .pad_w = pad[1], .groups = groups };
 }
 
-/// Winograd route gate. Default follows the GEMM provider: ON for
-/// `-Dblas=none` builds (the pure-Zig GEMM gains ~1.7–1.9× from the 2.25×
-/// MAC cut and the dropped col-matrix traffic — measured i9-13950HX), OFF
-/// when a platform BLAS backs the matmul (Accelerate's AMX makes one big
-/// im2col GEMM faster than 16 tile-element GEMMs — measured M1 Max).
-/// Runtime overrides: FUCINA_WINOGRAD=1 forces on, FUCINA_NO_WINOGRAD=1
-/// forces off (the A/B and emergency-revert switches). Read once, cached.
-const winograd = tuning.Switch(.{
-    .on = "FUCINA_WINOGRAD",
-    .off = "FUCINA_NO_WINOGRAD",
-    .default = !backend_mod.native_uses_blas,
-});
+// Winograd route policy lives on the tuning table: `tuning.Table.winograd`
+// (default keyed on the GEMM provider), `winograd_f4` (the F4 tier's A/B
+// switch), and the F4 shape gates `winograd_f4_min`/`winograd_f4_maxcin`
+// (bench-tuned i9-13950HX sweep: F4 pays where the tile count keeps its 36
+// GEMMs well-shaped and the transform cost is amortized, the SCRFD-class
+// big-spatial shallow-channel maps; deep-channel ArcFace-class maps run
+// faster on F2, the same split the reference ships).
 
-/// FUCINA_NO_WINOGRAD_F4=1 pins Winograd-routed large maps to F2 (the F4
-/// tier's A/B switch). Read once, cached.
-const winograd_f4 = tuning.Switch(.{ .off = "FUCINA_NO_WINOGRAD_F4", .default = true });
-
-// F4 shape gates, bench-tuned (i9-13950HX sweep): F4 pays where the tile
-// count keeps its 36 GEMMs well-shaped and the transform cost is amortized
-// (SCRFD-class: big spatial, shallow channels); deep-channel maps
-// (ArcFace-class) run faster on F2 — the same split the reference ships
-// (F4 scope = detector only). FUCINA_WINOGRAD_F4_MIN /
-// FUCINA_WINOGRAD_F4_MAXCIN override at runtime. Read once, cached.
-var winograd_f4_min_spatial = std.atomic.Value(usize).init(0);
 fn winogradF4MinSpatial() usize {
-    const v = winograd_f4_min_spatial.load(.acquire);
-    if (v != 0) return v;
-    const val = parallel.envPositiveUsize("FUCINA_WINOGRAD_F4_MIN") orelse 14;
-    winograd_f4_min_spatial.store(val, .release);
-    return val;
+    return @intCast(tuning.get().winograd_f4_min);
 }
-var winograd_f4_max_cin = std.atomic.Value(usize).init(0);
 fn winogradF4MaxCin() usize {
-    const v = winograd_f4_max_cin.load(.acquire);
-    if (v != 0) return v;
-    // 56 keeps SCRFD-class shallow-channel maps on F4 and pushes ArcFace-class
-    // deep-channel stacks (cin >= 64) to F2 — the measured crossover (F4 on
-    // the 112²×64 stage costs ~30% on the recognizer; F4 on the 28/56-channel
-    // detector maps saves ~22% on detect).
-    const val = parallel.envPositiveUsize("FUCINA_WINOGRAD_F4_MAXCIN") orelse 56;
-    winograd_f4_max_cin.store(val, .release);
-    return val;
+    return @intCast(tuning.get().winograd_f4_maxcin);
 }
 
 /// Test hook: pin the Winograd route on/off, or `null` to restore the
-/// env/default gate (re-read on next use).
+/// env/default gate.
 pub fn setWinogradForTest(state: ?bool) void {
-    winograd.set(state);
+    tuning.setField("winograd", state);
 }
 
-/// conv2d backward GEMM-route gate: the groups == 1 backward entries
-/// decompose into matmul dispatch + im2col/col2im (the forward's adjoint),
-/// which is both GEMM-fast and pool-parallel. FUCINA_NO_CONV_BWD_GEMM=1 pins
-/// both entries to the direct gather kernels (the A/B and emergency-revert
-/// switch). Read once, cached.
-const conv_bwd_gemm = tuning.Switch(.{ .off = "FUCINA_NO_CONV_BWD_GEMM", .default = true });
-
-/// Test hook: pin the conv2d backward GEMM route on/off, or `null` to restore
-/// the env/default gate (re-read on next use).
+/// Test hook: pin the conv2d backward GEMM route
+/// (`tuning.Table.conv_bwd_gemm`) on/off, or `null` to restore the
+/// env/default gate.
 pub fn setConvBwdGemmForTest(state: ?bool) void {
-    conv_bwd_gemm.set(state);
+    tuning.setField("conv_bwd_gemm", state);
 }
 
 const WinoKind = enum { f2, f4 };
@@ -552,7 +517,7 @@ pub fn prepareConv2dWeights(ctx: *ExecContext, weight: *const Tensor) !PreparedC
     const kh = w_view.shape[1];
     const kw = w_view.shape[2];
     const cin = w_view.shape[3];
-    if (!(kh == 3 and kw == 3 and cin >= 4 and winograd.enabled())) return .empty;
+    if (!(kh == 3 and kw == 3 and cin >= 4 and tuning.get().winograd)) return .empty;
 
     var ww = try ctx.prepareContiguous(weight);
     defer ww.deinit();
@@ -560,7 +525,7 @@ pub fn prepareConv2dWeights(ctx: *ExecContext, weight: *const Tensor) !PreparedC
     var out: PreparedConvWeights = .{ .cout = cout, .cin = cin };
     errdefer out.deinit();
     out.f2 = try winogradWeightPlanes(ctx, .f2, ww.tensor(), cout, cin);
-    if (winograd_f4.enabled() and cin <= winogradF4MaxCin()) {
+    if (tuning.get().winograd_f4 and cin <= winogradF4MaxCin()) {
         out.f4 = try winogradWeightPlanes(ctx, .f4, ww.tensor(), cout, cin);
     }
     return out;
@@ -686,7 +651,7 @@ pub fn conv2dBackwardInput(ctx: *ExecContext, gy: *const Tensor, weight: *const 
     var ww = try ctx.prepareContiguous(weight);
     defer ww.deinit();
 
-    if (groups == 1 and conv_bwd_gemm.enabled()) {
+    if (groups == 1 and tuning.get().conv_bwd_gemm) {
         var gy_2d = try gg.tensor().viewWithStrides(&.{ oh * ow, cout }, &.{ cout, 1 });
         defer gy_2d.deinit();
         if (kh == 1 and kw == 1 and stride[0] == 1 and stride[1] == 1 and pad[0] == 0 and pad[1] == 0) {
@@ -746,7 +711,7 @@ pub fn conv2dBackwardWeight(ctx: *ExecContext, input: *const Tensor, gy: *const 
     var gg = try ctx.prepareContiguous(gy);
     defer gg.deinit();
 
-    if (groups == 1 and conv_bwd_gemm.enabled()) {
+    if (groups == 1 and tuning.get().conv_bwd_gemm) {
         var gy_2d = try gg.tensor().viewWithStrides(&.{ oh * ow, cout }, &.{ cout, 1 });
         defer gy_2d.deinit();
         if (kh == 1 and kw == 1 and stride[0] == 1 and stride[1] == 1 and pad[0] == 0 and pad[1] == 0) {

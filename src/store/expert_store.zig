@@ -41,10 +41,9 @@ const parallel = @import("../parallel.zig");
 const tuning = @import("../tuning.zig");
 
 /// `FUCINA_MOE_LRU=1` forces the pure-LRU victim scan (A/B on one binary);
-/// read once, cached.
-const plain_lru = tuning.Switch(.{ .on = "FUCINA_MOE_LRU", .default = false });
+/// read once, cached (`tuning.Table.moe_lru`).
 fn envPlainLru() bool {
-    return plain_lru.enabled();
+    return tuning.get().moe_lru;
 }
 
 const Allocator = std.mem.Allocator;
@@ -1729,7 +1728,7 @@ pub const ExpertStore = struct {
         }
         // Refuse before truncating: a build over a store whose every layer
         // is fold-served (an all-tied-K2 PTQTP model without
-        // FUCINA_PTQTP_NO_FOLD=1) would wipe the existing tier and record
+        // FUCINA_PTQTP_FOLD=0) would wipe the existing tier and record
         // zero coverage — an easy-to-miss silent perf cliff.
         if (max_slab == 0) return Error.L2NoStripeableLayers;
 
@@ -1892,7 +1891,7 @@ pub const ExpertStore = struct {
             // Tier offsets locate slab PREFIXES of primary-file bytes. A
             // layer served folded rebuilds its slab section at fill time
             // (the 4-bit pack is not primary bytes), so coverage recorded
-            // for it — a tier built under FUCINA_PTQTP_NO_FOLD=1, opened
+            // for it — a tier built under FUCINA_PTQTP_FOLD=0, opened
             // without it — must never be served: `readExpertPrefix` would
             // overwrite the pack's head with unfolded plane bytes. Drop
             // that layer's coverage instead (the tier adds speed, never
@@ -1932,7 +1931,7 @@ pub const ExpertStore = struct {
         // budget knob governs tier speed, not just capacity.
         // FUCINA_MOE_L2_CACHED=1 keeps the tier page-cached instead (the
         // FUCINA_MOE_LRU-style A/B on one binary).
-        if (parallel.envPositiveUsize("FUCINA_MOE_L2_CACHED") == null) setUncached(fds[0]);
+        if (!tuning.get().moe_l2_cached) setUncached(fds[0]);
         self.l2_fds = fds;
         self.l2_present = offsets;
         self.l2_prefix = prefixes;

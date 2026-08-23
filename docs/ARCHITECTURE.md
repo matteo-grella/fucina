@@ -45,7 +45,7 @@ Top-down; a band may depend only on bands at or below it:
 | backend | `src/backend.zig`, `src/backend/**` (build-selected numeric kernels behind the `backend/interface.zig` kernel set; the single-implementation fused kernels live beside their ops in `exec/`) |
 | tags | `src/tags.zig` (comptime tag algebra) |
 | tensor | `src/tensor.zig` (raw tensor) |
-| primitives | `src/thread.zig`, `src/parallel.zig`, `src/tuning.zig` (route gates over `parallel`'s env readers) |
+| primitives | `src/thread.zig`, `src/parallel.zig`, `src/tuning.zig` (the tuning table over `parallel`'s env readers) |
 | core | `src/dtype.zig`, `src/storage.zig`, `src/accelerator.zig`, `src/rng.zig`, and the std-only leaves `src/fpenv.zig`, `src/caching_allocator.zig`, `src/streamconv.zig` |
 
 ## Public Surface
@@ -224,9 +224,9 @@ Autograd:
   Tensor Semantics*).
 - `src/ag.zig`: autograd module root, exporting the public `Tensor` and the
   framework pillars.
-- `src/tuning.zig`: tuning policy — the shared shape of every FUCINA_* route
-  gate (read-once env switch + measured default + programmatic `set`), the
-  numeric route defaults, and the per-context `Overrides` carried by
+- `src/tuning.zig`: tuning policy — the typed table of every FUCINA_* route
+  gate and numeric crossover (read-once env load, measured defaults,
+  programmatic pins), and the per-context `Overrides` carried by
   `ExecContext` (`setTuning`).
 - `src/ag/tensor.zig`: public tagged/autograd tensor facade — the `Tensor`
   dispatcher, the f32 struct core, and one-line aliases onto the per-domain

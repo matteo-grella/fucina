@@ -48,7 +48,7 @@ services.
   the output projection and the sparse targets run as ONE node, only the
   supervised rows are ever projected, and the `[seq, vocab]` logits never
   enter the autograd graph (the composed `cartridge.distillLoss` tail
-  remains available — `FUCINA_NO_FUSED_DISTILL=1` — and the two agree to
+  remains available — `FUCINA_FUSED_DISTILL=0` — and the two agree to
   f32 roundoff, pinned by a trainer test).
 - **Self-study** (paper Sec 4, Algorithm 1 with k = 1;
   `examples/cartridge/main.zig`): sample a uniform random corpus token span and

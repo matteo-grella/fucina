@@ -5,6 +5,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const parallel = @import("parallel.zig");
+const tuning = @import("tuning.zig");
 
 const Allocator = std.mem.Allocator;
 const Alignment = std.mem.Alignment;
@@ -459,7 +460,7 @@ const BarrierPool = struct {
     // worst of both (burns the whole window, then parks right before the
     // wake); 262144 regresses the encode ~5% (spin power starves the compute
     // cores). Hence a runtime knob instead of a retune: FUCINA_SPIN_BUDGET
-    // (read once per team init, exact FUCINA_MAX_THREADS precedent) lets
+    // (the tuning table's `spin_budget` leaf, consulted at team init) lets
     // encode-heavy deployments opt into a short window (e.g. 512 for ASR
     // batch/serving) while the default keeps the LLM sentinels intact.
     // 0 is a valid override (park immediately, never spin) and is also the
@@ -492,7 +493,7 @@ const BarrierPool = struct {
     /// default. The join bound depends only on oversubscription: the
     /// timed-wait fallback is pure safety, never disabled by the env
     /// override.
-    fn spinBudgets(env_override: ?usize, team_size: usize, physical_cores: ?usize) struct { worker: u32, join: u32 } {
+    fn spinBudgets(env_override: ?u64, team_size: usize, physical_cores: ?usize) struct { worker: u32, join: u32 } {
         const oversubscribed = if (physical_cores) |cores| team_size > cores else false;
         const guarded_default: u32 = if (oversubscribed) 0 else default_spin_budget;
         const worker: u32 = if (env_override) |raw|
@@ -510,7 +511,7 @@ const BarrierPool = struct {
         // dispatch at the straggler's speed.
         pinToPerformanceCores();
         const budgets = spinBudgets(
-            parallel.envSpinBudget(),
+            tuning.get().spin_budget,
             worker_count + 1, // the dispatcher is a participant too
             parallel.schedulableCpuCount(),
         );
@@ -918,7 +919,7 @@ test "oversubscribed team: guard engages and dispatch stays exactly-once" {
     // policy function says for this environment and host — asserted on every
     // machine, unlike the guard-specific asserts below.
     const expected = BarrierPool.spinBudgets(
-        parallel.envSpinBudget(),
+        tuning.get().spin_budget,
         worker_count + 1,
         parallel.physicalCpuCount(),
     );
@@ -931,7 +932,7 @@ test "oversubscribed team: guard engages and dispatch stays exactly-once" {
     if (parallel.physicalCpuCount()) |cores| {
         if (worker_count + 1 > cores) {
             try std.testing.expectEqual(BarrierPool.oversubscribed_join_spin_budget, bp.join_spin_budget);
-            if (parallel.envSpinBudget() == null) {
+            if (tuning.get().spin_budget == null) {
                 try std.testing.expectEqual(@as(u32, 0), bp.spin_budget);
             }
         }

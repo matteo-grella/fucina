@@ -1877,7 +1877,7 @@ test "l2 tier: built sparse mirror serves every miss bit-exact and reopens acros
 
 test "l2 tier: fold-mode flip drops coverage instead of corrupting folded slabs; all-folded build refuses" {
     // A tier snapshot records slab-prefix offsets of PRIMARY file bytes,
-    // which is only valid for unfolded serving (e.g. FUCINA_PTQTP_NO_FOLD=1
+    // which is only valid for unfolded serving (e.g. FUCINA_PTQTP_FOLD=0
     // over a tie-fitted file). Pins for the two mode-flip hazards:
     // (a) l2Build over a store whose every layer is fold-served refuses
     //     (L2NoStripeableLayers) BEFORE truncating an existing tier;

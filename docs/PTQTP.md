@@ -196,7 +196,7 @@ Deliberate deltas from the paper:
   on every cache hit). Requires `out_dim % 4 == 0`; anything else serves
   the per-plane path. Both arms pinned bitwise against the direct folded
   kernel in `expert_store_tests.zig` ("tie-folded ptqtp experts").
-  `FUCINA_PTQTP_NO_FOLD=1` serves tie-fitted MoE plane sets through the
+  `FUCINA_PTQTP_FOLD=0` serves tie-fitted MoE plane sets through the
   per-plane path instead (resident AND streamed, so the tiers agree): the
   expert-store L2 tier stripes primary-file plane bytes and never covers
   fold-served layers (a fold-time slab is not primary bytes), so on a

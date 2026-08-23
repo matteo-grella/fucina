@@ -63,9 +63,9 @@ pub const rng = @import("rng.zig");
 /// Parallel execution policies over the worker pool: chunked loops,
 /// reduction scaffolding, thread-count gates.
 pub const parallel = @import("parallel.zig");
-/// Tuning policy: the shared shape of every FUCINA_* route gate (read-once
-/// env switch + measured default + programmatic `set`), the numeric route
-/// defaults, and the per-context `Overrides` (`ExecContext.setTuning`).
+/// Tuning policy: the typed table of every FUCINA_* route gate and numeric
+/// crossover (read-once env load, measured defaults, programmatic pins),
+/// and the per-context `Overrides` (`ExecContext.setTuning`).
 pub const tuning = @import("tuning.zig");
 /// IEEE floating-point environment: rounding/underflow inquiry and scoped
 /// control, plus the accrued exception flags. The bitwise contracts elsewhere

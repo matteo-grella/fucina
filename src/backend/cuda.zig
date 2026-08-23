@@ -52,8 +52,10 @@ const build_options = @import("build_options");
 const dtype_mod = @import("../dtype.zig");
 const storage = @import("../storage.zig");
 const gpu_provider = @import("gpu_provider.zig");
+const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
+const tuning = @import("../tuning.zig");
 const api = @import("cuda/api.zig");
 
 const Tensor = tensor.Tensor;
@@ -74,22 +76,29 @@ pub const has_tq2_0_folded_quant = false;
 
 pub const Orient = gpu_provider.Orient;
 
+/// Runtime offload policy, latched from `tuning.get().gpu` at the one-time
+/// configuration read. Crossover provenance lives on the table field docs
+/// (`src/tuning.zig`); the fields keep the provider's own names because the
+/// dispatch code reads them on every gate probe.
 const State = struct {
-    gpu_enabled: bool = true,
-    tf32: bool = false,
-    min_work: u64 = default_min_work,
-    min_work_resident: u64 = default_min_work_resident,
-    min_work_f16: u64 = default_min_work_f16,
-    min_work_f16_resident: u64 = default_min_work_f16_resident,
-    min_work_gemv: u64 = default_min_work_gemv,
-    min_work_qmoe: u64 = default_min_work_qmoe,
-    min_work_dense_q6: u64 = default_min_work_dense_q6,
-    min_work_packed_q4: u64 = default_min_work_packed_q4,
-    min_work_packed_q5: u64 = default_min_work_packed_q5,
+    gpu_enabled: bool = table_defaults.enabled,
+    tf32: bool = table_defaults.tf32,
+    /// Base f32 threshold. Ordinary host RHS operands must also pass the
+    /// much higher transient floor; device-resident RHS uses its separately
+    /// measured lower threshold.
+    min_work: u64 = table_defaults.min_work.base,
+    min_work_resident: u64 = table_defaults.min_work.resident,
+    min_work_f16: u64 = table_defaults.min_work.f16,
+    min_work_f16_resident: u64 = table_defaults.min_work.f16_resident,
+    min_work_gemv: u64 = table_defaults.min_work.gemv,
+    min_work_qmoe: u64 = table_defaults.min_work.qmoe,
+    min_work_dense_q6: u64 = table_defaults.min_work.dense_q6,
+    min_work_packed_q4: u64 = table_defaults.min_work.dense_q4,
+    min_work_packed_q5: u64 = table_defaults.min_work.dense_q5,
     min_work_packed_q6: u64 = default_min_work_packed_q6,
-    min_work_packed_q8: u64 = default_min_work_packed_q8,
-    qmoe_min_fill_pct: u64 = default_qmoe_min_fill_pct,
-    min_work_transient: u64 = default_min_work_transient,
+    min_work_packed_q8: u64 = table_defaults.min_work.dense_q8,
+    qmoe_min_fill_pct: u64 = table_defaults.qmoe_min_fill,
+    min_work_transient: u64 = table_defaults.min_work.transient,
     transient_min_m: usize = default_transient_min_m,
     /// FUCINA_GPU_VRAM_BUDGET override (bytes); null = ~80% of free VRAM at init.
     vram_budget_env: ?usize = null,
@@ -97,68 +106,32 @@ const State = struct {
     kernels_from_src: bool = false,
     /// Tensor-core quantized prefill kernel. FUCINA_GPU_QUANT_MMA=0 keeps the
     /// scalar-FFMA fallback for parity/performance diagnosis.
-    quant_mma: bool = true,
+    quant_mma: bool = table_defaults.quant_mma,
     /// Split substantially underfilled quantized prefill along K, then reduce
     /// on-stream. The per-slot partial buffer is grow-only, so steady-state
     /// dispatch remains allocation-free. FUCINA_GPU_QUANT_SPLIT_K=0 keeps one
     /// block/output tile.
-    quant_split_k: bool = true,
+    quant_split_k: bool = table_defaults.quant_split_k,
     /// FUCINA_GPU_DECODE=1 opts into experimental m<=8 quantized decode
     /// (GEMV normally; Q5_K switches to tiled MMA at m=4..8). Default off because
     /// CPU/GPU quant arithmetic is tolerance-equivalent, not bit-identical.
-    decode_enabled: bool = false,
+    decode_enabled: bool = table_defaults.decode,
     /// Q5_K's compact CPU decode kernel is unusually strong; require enough
     /// work to cross its measured RTX/CPU boundary even when decode is on.
-    min_work_decode_q5: u64 = default_min_work_decode_q5,
+    min_work_decode_q5: u64 = table_defaults.min_work.decode_q5,
     /// Prefill-attention offload gate (q·kv·heads·d work).
-    min_work_attn: u64 = default_min_work_attn,
+    min_work_attn: u64 = table_defaults.min_work.attn,
 };
 
-/// Base f32 threshold. Ordinary host RHS operands must also pass the much
-/// higher transient floor below; device-resident RHS uses its separately
-/// measured lower threshold.
-const default_min_work: u64 = 1 << 30;
-/// Dense f32 GEMM with an already device-resident RHS. Against OpenBLAS-32 on
-/// the reference RTX 5000 Ada host, 256^3 loses, 512^3 is a narrow GPU win,
-/// and 640^3+ is decisive; 2^27 is therefore the first competitive tier.
-const default_min_work_resident: u64 = 1 << 27;
-/// f16 NT gate: the CPU f16 row kernels run far below the f32 blocked path
-/// and f16 operands halve the PCIe bytes, so offload pays off early.
-const default_min_work_f16: u64 = 1 << 27;
-/// Resident f16 decode only crosses a tiny activation/result payload. On the
-/// reference Ada GPU, 1x4096x1024 is 4.2x faster than the 32-thread-capable
-/// CPU kernel (18.3 vs 77.4 us); 2^20 keeps smaller launch-bound dots on CPU.
-const default_min_work_f16_resident: u64 = 1 << 20;
-/// Resident f32 GEMV/GEMM: no RHS transfer, only a small activation/output
-/// crossing. The reference RTX 5000 Ada beats OpenBLAS-32 by 12x at the
-/// 4096-wide GEMV; 16 Mi work keeps launch/copy overhead amortized.
-const default_min_work_gemv: u64 = 1 << 24;
-/// Quantized grouped-MoE / dense-quant gates.
-const default_min_work_qmoe: u64 = 1 << 30;
-const default_min_work_dense_q6: u64 = 1 << 22;
-/// Packed-CPU dense-linear crossovers on the reference Ada host. Q5_K wins at
-/// the smallest admitted 32x1024x512 shape (47.7 vs 63.3 us), so 2^24 keeps
-/// the measured boundary while rejecting lower-work calls.
-const default_min_work_packed_q4: u64 = 1 << 27;
-const default_min_work_packed_q5: u64 = 1 << 24;
+const table_defaults: tuning.Table.Gpu = .{};
+/// Packed-Q6 dense-linear crossover on the reference Ada host (Q5_K wins at
+/// the smallest admitted 32x1024x512 shape, 47.7 vs 63.3 us, so the 2^24
+/// packed tier keeps the measured boundary while rejecting lower-work
+/// calls). No env variable of its own; FUCINA_GPU_MIN_WORK_DENSE_Q6
+/// re-seeds it, see initConfigOnce.
 const default_min_work_packed_q6: u64 = 1 << 24;
-const default_min_work_packed_q8: u64 = 1 << 24;
-/// Q5_K decode crossover against the compact (not x8-packed) CPU route:
-/// 4096x4096 loses narrowly, while 6144x4096 and m>=2 at 4096 square win.
-const default_min_work_decode_q5: u64 = 3 << 23;
-const default_qmoe_min_fill_pct: u64 = 50;
-/// Without residency every RHS streams over PCIe (measured 10.6 GB/s pageable
-/// on the reference rig — ~9.5 ms per ffn-sized f32 matrix). The measured
-/// break-even vs the CPU blocked kernel is m ≈ 35–40 at LLM widths; the
-/// defaults keep a ~3× safety margin. `FUCINA_GPU_MIN_WORK_TRANSIENT`
-/// overrides the work floor.
-const default_min_work_transient: u64 = 1 << 33;
+/// Row floor applied alongside the transient work floor (no env override).
 const default_transient_min_m: usize = 128;
-/// Prefill attention: arithmetic intensity grows with q_seq (FLOPs O(q·kv·d),
-/// bytes O(q·d)), so streamed offload pays off once the score work is a few
-/// hundred MFLOP. 2^28 q·kv·heads·d keeps the ~0.5–1 ms round trip amortized;
-/// decode (q_seq < the tiled floor) never reaches this seam.
-const default_min_work_attn: u64 = 1 << 28;
 
 var state: State = .{};
 var config_done = std.atomic.Value(bool).init(false);
@@ -331,82 +304,41 @@ fn ensureConfig() void {
 }
 
 fn initConfigOnce() void {
-    if (std.c.getenv("FUCINA_GPU")) |v_ptr| {
-        const v = std.mem.span(v_ptr);
-        if (v.len > 0 and v[0] == '0') state.gpu_enabled = false;
+    const t = &tuning.get().gpu;
+    state.gpu_enabled = t.enabled;
+    state.tf32 = t.tf32;
+    state.min_work = t.min_work.base;
+    state.min_work_resident = t.min_work.resident;
+    state.min_work_f16 = t.min_work.f16;
+    state.min_work_f16_resident = t.min_work.f16_resident;
+    state.min_work_gemv = t.min_work.gemv;
+    state.min_work_qmoe = t.min_work.qmoe;
+    state.min_work_dense_q6 = t.min_work.dense_q6;
+    // FUCINA_GPU_MIN_WORK_QMOE also seeds the dense-Q6 floor;
+    // FUCINA_GPU_MIN_WORK_DENSE_Q6 wins over it and re-seeds the packed-Q6
+    // tier alongside.
+    state.min_work_packed_q6 = default_min_work_packed_q6;
+    if (parallel.envNonNegativeUsize("FUCINA_GPU_MIN_WORK_DENSE_Q6")) |v| {
+        state.min_work_packed_q6 = v;
+    } else if (parallel.envNonNegativeUsize("FUCINA_GPU_MIN_WORK_QMOE")) |v| {
+        state.min_work_dense_q6 = v;
     }
-    if (std.c.getenv("FUCINA_GPU_TF32")) |v_ptr| {
-        const v = std.mem.span(v_ptr);
-        if (v.len > 0 and v[0] != '0') state.tf32 = true;
-    }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK")) |v_ptr| {
-        state.min_work = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work;
-    }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK_RESIDENT")) |v_ptr| {
-        state.min_work_resident = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_resident;
-    }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK_F16")) |v_ptr| {
-        state.min_work_f16 = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_f16;
-    }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK_F16_RESIDENT")) |v_ptr| {
-        state.min_work_f16_resident = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_f16_resident;
-    }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK_GEMV")) |v_ptr| {
-        state.min_work_gemv = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_gemv;
-    }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK_QMOE")) |v_ptr| {
-        const parsed = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_qmoe;
-        state.min_work_qmoe = parsed;
-        state.min_work_dense_q6 = parsed;
-    }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK_DENSE_Q6")) |v_ptr| {
-        const parsed = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_dense_q6;
-        state.min_work_dense_q6 = parsed;
-        state.min_work_packed_q6 = parsed;
-    }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK_DENSE_Q4")) |v_ptr| {
-        state.min_work_packed_q4 = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_packed_q4;
-    }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK_DENSE_Q5")) |v_ptr| {
-        state.min_work_packed_q5 = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_packed_q5;
-    }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK_DENSE_Q8")) |v_ptr| {
-        state.min_work_packed_q8 = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_packed_q8;
-    }
-    if (std.c.getenv("FUCINA_GPU_QMOE_MIN_FILL")) |v_ptr| {
-        state.qmoe_min_fill_pct = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_qmoe_min_fill_pct;
-    }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK_TRANSIENT")) |v_ptr| {
-        state.min_work_transient = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_transient;
-    }
-    if (std.c.getenv("FUCINA_GPU_VRAM_BUDGET")) |v_ptr| {
-        state.vram_budget_env = std.fmt.parseInt(usize, std.mem.span(v_ptr), 10) catch null;
-    }
-    if (std.c.getenv("FUCINA_GPU_KERNELS")) |v_ptr| {
-        state.kernels_from_src = std.mem.eql(u8, std.mem.span(v_ptr), "src");
-    }
-    if (std.c.getenv("FUCINA_GPU_QUANT_MMA")) |v_ptr| {
-        const v = std.mem.span(v_ptr);
-        if (v.len > 0 and v[0] == '0') state.quant_mma = false;
-    }
-    if (std.c.getenv("FUCINA_GPU_QUANT_SPLIT_K")) |v_ptr| {
-        const v = std.mem.span(v_ptr);
-        if (v.len > 0 and v[0] == '0') state.quant_split_k = false;
-    }
-    if (std.c.getenv("FUCINA_GPU_DECODE")) |v_ptr| {
-        const v = std.mem.span(v_ptr);
-        if (v.len > 0 and v[0] != '0') state.decode_enabled = true;
-    }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK_DECODE_Q5")) |v_ptr| {
-        state.min_work_decode_q5 = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_decode_q5;
-    }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK_ATTN")) |v_ptr| {
-        state.min_work_attn = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_attn;
-    }
-    if (std.c.getenv("FUCINA_GPU_TRACE")) |v_ptr| {
-        const v = std.mem.span(v_ptr);
-        if (v.len > 0 and v[0] != '0') trace_on = true;
-    }
+    state.min_work_packed_q4 = t.min_work.dense_q4;
+    state.min_work_packed_q5 = t.min_work.dense_q5;
+    state.min_work_packed_q8 = t.min_work.dense_q8;
+    state.qmoe_min_fill_pct = t.qmoe_min_fill;
+    state.min_work_transient = t.min_work.transient;
+    state.vram_budget_env = if (t.vram_budget) |v| @as(usize, @intCast(v)) else null;
+    // FUCINA_GPU_KERNELS is string-valued ("src" selects the NVRTC
+    // recompile path), so it stays outside the tuning table as a direct
+    // env read.
+    state.kernels_from_src = parallel.envStringIs("FUCINA_GPU_KERNELS", "src");
+    state.quant_mma = t.quant_mma;
+    state.quant_split_k = t.quant_split_k;
+    state.decode_enabled = t.decode;
+    state.min_work_decode_q5 = t.min_work.decode_q5;
+    state.min_work_attn = t.min_work.attn;
+    trace_on = t.trace;
 }
 
 /// One-time lazy device init: double-checked under a mutex so concurrent
@@ -2720,8 +2652,8 @@ fn attnFwdHostImpl(
     var p_win: c_int = @intCast(win);
     var p_causal: c_int = @intFromBool(causal);
     var params = [_]?*anyopaque{
-        @ptrCast(&p_q),   @ptrCast(&p_k),  @ptrCast(&p_v),   @ptrCast(&p_o),     @ptrCast(&p_s),
-        @ptrCast(&p_map), @ptrCast(&p_qs), @ptrCast(&p_ks),  @ptrCast(&p_h),     @ptrCast(&p_kh),
+        @ptrCast(&p_q),   @ptrCast(&p_k),   @ptrCast(&p_v),     @ptrCast(&p_o),   @ptrCast(&p_s),
+        @ptrCast(&p_map), @ptrCast(&p_qs),  @ptrCast(&p_ks),    @ptrCast(&p_h),   @ptrCast(&p_kh),
         @ptrCast(&p_d),   @ptrCast(&p_off), @ptrCast(&p_scale), @ptrCast(&p_win), @ptrCast(&p_causal),
     };
     const kernel = if (comptime KvElem == f16) ks.attn_fwd_f16 else ks.attn_fwd_f32;
@@ -2781,7 +2713,7 @@ test "cuda gate applies the transient floor above min_work" {
 
     // 512·2048·2048 = 2^31: above min_work (2^30), below the default
     // transient floor (2^33) — refused until residency lands.
-    setTransientFloorForTest(default_min_work_transient, default_transient_min_m);
+    setTransientFloorForTest(table_defaults.min_work.transient, default_transient_min_m);
     try std.testing.expect(!shouldUseGpu(512, 2048, 2048));
     // m below transient_min_m is refused even at huge work.
     try std.testing.expect(!shouldUseGpu(64, 1 << 14, 1 << 14));
@@ -2802,7 +2734,7 @@ test "cuda Q5_K decode gate preserves the compact CPU crossover" {
     }
 
     state.decode_enabled = true;
-    state.min_work_decode_q5 = default_min_work_decode_q5;
+    state.min_work_decode_q5 = table_defaults.min_work.decode_q5;
     try std.testing.expect(!shouldUseGpuQuantDecode(.q5_k, 1, 4096, 4096));
     try std.testing.expect(shouldUseGpuQuantDecode(.q5_k, 1, 6144, 4096));
     try std.testing.expect(shouldUseGpuQuantDecode(.q5_k, 2, 4096, 4096));

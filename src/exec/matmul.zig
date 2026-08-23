@@ -474,22 +474,19 @@ pub fn matmul2DWithPackedRhsTyped(
 // FUCINA_CPU_F32_SHADOW_MIN_M overrides the m >= 32 crossover.
 // ---------------------------------------------------------------------------
 
-const cpu_shadow = tuning.Switch(.{ .on = "FUCINA_CPU_F32_SHADOW", .default = false });
-const cpu_shadow_min_m = tuning.Threshold("FUCINA_CPU_F32_SHADOW_MIN_M", tuning.defaults.cpu_f32_shadow_min_m);
-
-/// Test hook (and emergency switch), `setNormQuantFused`-style: overrides
-/// the env read. `null` re-arms the env read.
+/// Test hook (and emergency switch), `setNormQuantFused`-style: pins the
+/// process gate over the env read. A `null` first argument re-arms the
+/// env/default gate; a `null` min_m leaves the crossover pin alone.
 pub fn setCpuF32Shadow(on: ?bool, min_m: ?u64) void {
-    cpu_shadow.set(on);
-    if (min_m) |v| cpu_shadow_min_m.set(v);
+    tuning.setField("cpu_f32_shadow", on);
+    if (min_m) |v| tuning.setField("cpu_f32_shadow_min_m", v);
 }
 
 /// The shadow route's crossover for this runtime, or null when the route is
-/// off. Per-context `Overrides` win; otherwise the process gate decides.
+/// off. Per-context `Overrides` win; otherwise the process table decides.
 fn cpuShadowMinM(ctx: *const ExecContext) ?u64 {
-    const on = ctx.tuning.cpu_f32_shadow orelse cpu_shadow.enabled();
-    if (!on) return null;
-    return ctx.tuning.cpu_f32_shadow_min_m orelse cpu_shadow_min_m.get();
+    if (!tuning.resolve(&ctx.tuning, "cpu_f32_shadow")) return null;
+    return tuning.resolve(&ctx.tuning, "cpu_f32_shadow_min_m");
 }
 
 const CpuShadow = struct {

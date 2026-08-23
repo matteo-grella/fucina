@@ -20,7 +20,7 @@
 //! The public Tensor API has no device/location state.
 //!
 //! Heuristics: `shouldUseGpu` gates on m*n*k work (default 2^32, the measured
-//! M1 Max async crossover vs Accelerate/AMX — see `default_min_work`) with
+//! M1 Max async crossover vs Accelerate/AMX — see `tuning.Table.Gpu`) with
 //! `FUCINA_GPU_MIN_WORK` to experiment and `FUCINA_GPU=0` as a runtime kill
 //! switch. Compact/raw Q6_K retains its Parakeet-tuned gate; dense model
 //! weights use per-format gates measured against their faster packed CPU
@@ -31,8 +31,10 @@ const build_options = @import("build_options");
 const dtype_mod = @import("../dtype.zig");
 const storage = @import("../storage.zig");
 const gpu_provider = @import("gpu_provider.zig");
+const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
+const tuning = @import("../tuning.zig");
 
 const Tensor = tensor.Tensor;
 const TensorF16 = tensor.TensorOf(.f16);
@@ -181,90 +183,34 @@ extern fn fucina_metal_gemm_q_dense_nt_async(
 // include-guards make the concatenation safe.
 const msl_source = @embedFile("metal/mlx_gemm.metal") ++ "\n" ++ @embedFile("metal/ggml_mul_mm.metal") ++ "\n" ++ @embedFile("metal/attention.metal");
 
+/// Runtime offload policy, latched from `tuning.get().gpu` at the one-time
+/// configuration read. Crossover provenance lives on the table field docs
+/// (`src/tuning.zig`); the fields keep the provider's own names because the
+/// dispatch code reads them on every gate probe.
 const State = struct {
     ctx: ?*anyopaque = null,
-    gpu_enabled: bool = true,
-    min_work: u64 = default_min_work,
-    min_work_f16: u64 = default_min_work_f16,
-    min_work_16bit_resident: u64 = default_min_work_16bit_resident,
-    min_work_gemv: u64 = default_min_work_gemv,
-    min_work_attn: u64 = default_min_work_attn,
-    min_work_qmoe: u64 = default_min_work_qmoe,
-    min_work_dense_q6: u64 = default_min_work_dense_q6,
-    min_work_packed_q4: u64 = default_min_work_packed_q4,
+    gpu_enabled: bool = table_defaults.enabled,
+    min_work: u64 = table_defaults.min_work.base,
+    min_work_f16: u64 = table_defaults.min_work.f16,
+    min_work_16bit_resident: u64 = table_defaults.min_work.@"16bit_resident",
+    min_work_gemv: u64 = table_defaults.min_work.gemv,
+    min_work_attn: u64 = table_defaults.min_work.attn,
+    min_work_qmoe: u64 = table_defaults.min_work.qmoe,
+    min_work_dense_q6: u64 = table_defaults.min_work.dense_q6,
+    min_work_packed_q4: u64 = table_defaults.min_work.dense_q4,
     min_work_packed_q6: u64 = default_min_work_packed_q6,
-    min_work_packed_q8: u64 = default_min_work_packed_q8,
-    min_work_packed_tq2: u64 = default_min_work_packed_tq2,
-    qmoe_min_fill_pct: u64 = default_qmoe_min_fill_pct,
+    min_work_packed_q8: u64 = table_defaults.min_work.dense_q8,
+    min_work_packed_tq2: u64 = table_defaults.min_work.dense_tq2,
+    qmoe_min_fill_pct: u64 = table_defaults.qmoe_min_fill,
 };
 
-/// Default offload threshold, retuned from the eager-async paired benchmark
-/// on M1 Max (2026-07-10). 1024³ and 2048x1024x1024 (2^31 work) are
-/// DVFS-sensitive crossovers, while repeated
-/// alternating trials at 2048x2048x1024 (2^32) win by at least 24% and
-/// 2048³ wins decisively. Below it AMX and the fixed command cost dominate.
-const default_min_work: u64 = 1 << 32;
-/// The f16-operands NT entry competes with the CPU f16 row kernels (no AMX
-/// arm — Accelerate has no f16 GEMM here), which run an order of magnitude
-/// below AMX f32, so the GPU pays off much earlier. 2^27 ≈ 134M m*n*k keeps
-/// the command cost safely amortized.
-const default_min_work_f16: u64 = 1 << 27;
-/// Resident f32 GEMV has no weight transfer and the cached storage wrapper
-/// removes page-wiring overhead.  M1 Max crosses Accelerate around 8 Mi work;
-/// keep a conservative 16 Mi default and require m<=8 plus residency.
-const default_min_work_gemv: u64 = 1 << 24;
-/// Attention-forward offload floor on q_seq*kv_seq*heads*d: the blocking
-/// dispatch costs ~1 ms, and the CPU tiled kernel runs the same work at
-/// roughly 0.2 GFLOP/ms, so prefill-length rows pay off while decode and
-/// short prefill (whose work sits orders of magnitude lower) never enter.
-/// FUCINA_GPU_MIN_WORK_ATTN overrides.
-const default_min_work_attn: u64 = 1 << 29;
-
-// Small-m (decode/batched-decode) admission for 16-bit weight GEMMs whose
-// RHS is already Metal-mapped (a storage-lifetime page wrap from an earlier
-// prefill): the dispatch reads the whole weight matrix once, so past this
-// work floor the GPU's bandwidth can beat the CPU streaming kernels.
-// MEASURED (Qwen3-1.7B-BF16 self-study, idle M1 Max): a 2^24 floor admits
-// the m=4 batched-decode projections (~2^25) and LOSES 18% end-to-end —
-// per-dispatch overhead outweighs the bandwidth win at that width (unlike
-// CUDA's resident admission) — while m=16 admission (~2^27) is neutral.
-// The default therefore sits at 2^27: batched decode at m>=16 and the
-// m=1 lm-head row may offload; narrow decode stays on the CPU kernels.
-// Tune with FUCINA_GPU_MIN_WORK_16BIT_RESIDENT.
-const default_min_work_16bit_resident: u64 = 1 << 27;
-/// Quantized grouped MoE GEMM gate (total m·n·k across both projections of a
-/// layer). The CPU competitor is the gather/quantize/small-m packed-kernel
-/// path, which runs ~10 GF/s effective (measured 2026-06-12; per-call
-/// overhead around tiny per-expert GEMMs, not compute), so the GPU pays off
-/// well below the f32 crossover; 2^30 keeps the two ~0.5 ms round trips
-/// + gather/geglu/scatter CPU phases safely amortized. Tune with
-/// `FUCINA_GPU_MIN_WORK_QMOE`.
-const default_min_work_qmoe: u64 = 1 << 30;
-/// Dense Q6_K linears in Parakeet 110M are many medium MxN contractions; the
-/// dequant-in-kernel GPU path wins after warmup far below the MoE gate, while
-/// Q4_K/Q8_0 still lose at this size. Keep this separate from the grouped-MoE
-/// threshold to avoid pulling unrelated quant paths onto Metal.
-const default_min_work_dense_q6: u64 = 1 << 22;
-/// Dense GGUF linears fall back to Fucina's load-time-packed CPU kernels,
-/// which are materially faster than the compact/raw fallback used by
-/// Parakeet. Paired eager measurements on M1 Max put the conservative
-/// crossovers at 2^30 (Q4_K), 2^31 (Q6_K), and 2^29 (Q8_0).
-const default_min_work_packed_q4: u64 = 1 << 30;
+const table_defaults: tuning.Table.Gpu = .{};
+/// Packed-Q6 dense-linear crossover: paired eager measurements on M1 Max
+/// put the conservative packed-CPU crossovers at 2^30 (Q4_K), 2^31 (Q6_K),
+/// and 2^29 (Q8_0); Q4_K and Q8_0 live on the tuning table. No env
+/// variable of its own; FUCINA_GPU_MIN_WORK_DENSE_Q6 re-seeds it, see
+/// initConfigOnce.
 const default_min_work_packed_q6: u64 = 1 << 31;
-const default_min_work_packed_q8: u64 = 1 << 29;
-// Ternary: the CPU fallback is the x4 interleaved kernel (docs/TERNARY.md)
-// at ~74 G-MAC/s single-thread — against a ~0.5 ms dispatch floor the
-// break-even sits near 2^25 m*n*k, far below the q8_0-class defaults, and
-// PTQTP bodies at 0.6B-class shapes (128-row chunks x 1024..3072 dims)
-// land in 2^27..2^29. FUCINA_GPU_MIN_WORK_DENSE_TQ2 overrides.
-const default_min_work_packed_tq2: u64 = 1 << 25;
-/// Minimum grouped-MoE tile occupancy (percent of the 32-row token-tile slots
-/// that carry real rows) before the GPU arm engages. Per-tile GPU cost is
-/// fill-independent (~45-53 µs/tile at 12% and at 100% fill — weight dequant
-/// dominates; measured 2026-07-03), so below ~50% occupancy the raw CPU path
-/// wins. `FUCINA_GPU_QMOE_MIN_FILL` overrides (0 = occupancy-blind, the
-/// pre-2026-07 behavior; >100 = grouped GPU path never engages).
-const default_qmoe_min_fill_pct: u64 = 50;
 
 var state: State = .{};
 var config_done = std.atomic.Value(bool).init(false);
@@ -448,12 +394,12 @@ pub fn traceDump() void {
     std.debug.print(
         "[gpu-trace] async: f32 calls={d} submit={d:.1}ms host-wait={d:.1}ms | f16 calls={d} submit={d:.1}ms host-wait={d:.1}ms | bf16 calls={d} submit={d:.1}ms host-wait={d:.1}ms gpu={d:.1}ms | quant calls={d} submit={d:.1}ms host-wait={d:.1}ms\n",
         .{
-            trace.f32_async_calls.load(.monotonic),    ms(trace.f32_submit_ns.load(.monotonic)),
-            ms(trace.f32_wait_ns.load(.monotonic)),    trace.f16_async_calls.load(.monotonic),
-            ms(trace.f16_submit_ns.load(.monotonic)),  ms(trace.f16_wait_ns.load(.monotonic)),
-            trace.bf16_async_calls.load(.monotonic),   ms(trace.bf16_submit_ns.load(.monotonic)),
-            ms(trace.bf16_wait_ns.load(.monotonic)),   ms(trace.bf16_gpu_ns.load(.monotonic)),
-            trace.quant_async_calls.load(.monotonic),  ms(trace.quant_submit_ns.load(.monotonic)),
+            trace.f32_async_calls.load(.monotonic),   ms(trace.f32_submit_ns.load(.monotonic)),
+            ms(trace.f32_wait_ns.load(.monotonic)),   trace.f16_async_calls.load(.monotonic),
+            ms(trace.f16_submit_ns.load(.monotonic)), ms(trace.f16_wait_ns.load(.monotonic)),
+            trace.bf16_async_calls.load(.monotonic),  ms(trace.bf16_submit_ns.load(.monotonic)),
+            ms(trace.bf16_wait_ns.load(.monotonic)),  ms(trace.bf16_gpu_ns.load(.monotonic)),
+            trace.quant_async_calls.load(.monotonic), ms(trace.quant_submit_ns.load(.monotonic)),
             ms(trace.quant_wait_ns.load(.monotonic)),
         },
     );
@@ -466,22 +412,22 @@ pub fn traceDump() void {
         \\[gpu-trace] gate decisions: pass={d} below-gate={d} shape-reject={d} shim-error={d} shape-overflow={d}
         \\
     , .{
-        trace.f32_calls.load(.monotonic),                                      ms(f32_wall),
-        trace.f16_calls.load(.monotonic),                                      ms(f16_wall),
-        trace.quant_calls.load(.monotonic),                                    ms(quant_wall),
-        trace.attn_calls.load(.monotonic),                                     ms(attn_wall),
-        ms(f32_gpu),                                                           ms(overheadNs(f32_wall, f32_gpu)),
-        ms(f16_gpu),                                                           ms(overheadNs(f16_wall, f16_gpu)),
-        ms(quant_gpu),                                                         ms(overheadNs(quant_wall, quant_gpu)),
-        ms(attn_gpu),                                                          ms(overheadNs(attn_wall, attn_gpu)),
-        ms(trace.f32_sched_ns.load(.monotonic)),                               ms(trace.f16_sched_ns.load(.monotonic)),
-        ms(trace.quant_sched_ns.load(.monotonic)),                             ms(trace.attn_sched_ns.load(.monotonic)),
-        ms(trace.quant_lock_ns.load(.monotonic)),
-        ms(trace.quant_stage_ns.load(.monotonic)),                             trace.rhs_cacheable.load(.monotonic),
-        trace.rhs_transient.load(.monotonic),                                  trace.dev_alloc_calls.load(.monotonic),
-        @as(f64, @floatFromInt(trace.dev_alloc_bytes.load(.monotonic))) / 1e6, trace.gate_pass.load(.monotonic),
-        trace.gate_below.load(.monotonic),                                     trace.gate_shape.load(.monotonic),
-        trace.shim_err.load(.monotonic),                                       trace.shape_overflow.load(.monotonic),
+        trace.f32_calls.load(.monotonic),          ms(f32_wall),
+        trace.f16_calls.load(.monotonic),          ms(f16_wall),
+        trace.quant_calls.load(.monotonic),        ms(quant_wall),
+        trace.attn_calls.load(.monotonic),         ms(attn_wall),
+        ms(f32_gpu),                               ms(overheadNs(f32_wall, f32_gpu)),
+        ms(f16_gpu),                               ms(overheadNs(f16_wall, f16_gpu)),
+        ms(quant_gpu),                             ms(overheadNs(quant_wall, quant_gpu)),
+        ms(attn_gpu),                              ms(overheadNs(attn_wall, attn_gpu)),
+        ms(trace.f32_sched_ns.load(.monotonic)),   ms(trace.f16_sched_ns.load(.monotonic)),
+        ms(trace.quant_sched_ns.load(.monotonic)), ms(trace.attn_sched_ns.load(.monotonic)),
+        ms(trace.quant_lock_ns.load(.monotonic)),  ms(trace.quant_stage_ns.load(.monotonic)),
+        trace.rhs_cacheable.load(.monotonic),      trace.rhs_transient.load(.monotonic),
+        trace.dev_alloc_calls.load(.monotonic),    @as(f64, @floatFromInt(trace.dev_alloc_bytes.load(.monotonic))) / 1e6,
+        trace.gate_pass.load(.monotonic),          trace.gate_below.load(.monotonic),
+        trace.gate_shape.load(.monotonic),         trace.shim_err.load(.monotonic),
+        trace.shape_overflow.load(.monotonic),
     });
     trace_shape_lock.lock();
     var shapes = trace_shapes;
@@ -513,51 +459,29 @@ fn ensureConfig() void {
 }
 
 fn initConfigOnce() void {
-    if (std.c.getenv("FUCINA_GPU")) |v_ptr| {
-        const v = std.mem.span(v_ptr);
-        if (v.len > 0 and v[0] == '0') state.gpu_enabled = false;
+    const t = &tuning.get().gpu;
+    state.gpu_enabled = t.enabled;
+    state.min_work = t.min_work.base;
+    state.min_work_f16 = t.min_work.f16;
+    state.min_work_gemv = t.min_work.gemv;
+    state.min_work_attn = t.min_work.attn;
+    state.min_work_16bit_resident = t.min_work.@"16bit_resident";
+    state.min_work_qmoe = t.min_work.qmoe;
+    state.min_work_dense_q6 = t.min_work.dense_q6;
+    // FUCINA_GPU_MIN_WORK_QMOE also seeds the dense-Q6 floor;
+    // FUCINA_GPU_MIN_WORK_DENSE_Q6 wins over it and re-seeds the packed-Q6
+    // tier alongside.
+    state.min_work_packed_q6 = default_min_work_packed_q6;
+    if (parallel.envNonNegativeUsize("FUCINA_GPU_MIN_WORK_DENSE_Q6")) |v| {
+        state.min_work_packed_q6 = v;
+    } else if (parallel.envNonNegativeUsize("FUCINA_GPU_MIN_WORK_QMOE")) |v| {
+        state.min_work_dense_q6 = v;
     }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK")) |v_ptr| {
-        state.min_work = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work;
-    }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK_F16")) |v_ptr| {
-        state.min_work_f16 = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_f16;
-    }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK_GEMV")) |v_ptr| {
-        state.min_work_gemv = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_gemv;
-    }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK_ATTN")) |v_ptr| {
-        state.min_work_attn = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_attn;
-    }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK_16BIT_RESIDENT")) |v_ptr| {
-        state.min_work_16bit_resident = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_16bit_resident;
-    }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK_QMOE")) |v_ptr| {
-        const parsed = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_qmoe;
-        state.min_work_qmoe = parsed;
-        state.min_work_dense_q6 = parsed;
-    }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK_DENSE_Q6")) |v_ptr| {
-        const parsed = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_dense_q6;
-        state.min_work_dense_q6 = parsed;
-        state.min_work_packed_q6 = parsed;
-    }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK_DENSE_Q4")) |v_ptr| {
-        state.min_work_packed_q4 = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_packed_q4;
-    }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK_DENSE_Q8")) |v_ptr| {
-        state.min_work_packed_q8 = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_packed_q8;
-    }
-    if (std.c.getenv("FUCINA_GPU_MIN_WORK_DENSE_TQ2")) |v_ptr| {
-        state.min_work_packed_tq2 = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_min_work_packed_tq2;
-    }
-    if (std.c.getenv("FUCINA_GPU_QMOE_MIN_FILL")) |v_ptr| {
-        state.qmoe_min_fill_pct = std.fmt.parseInt(u64, std.mem.span(v_ptr), 10) catch default_qmoe_min_fill_pct;
-    }
-    if (std.c.getenv("FUCINA_GPU_TRACE")) |v_ptr| {
-        const v = std.mem.span(v_ptr);
-        if (v.len > 0 and v[0] != '0') trace_on = true;
-    }
+    state.min_work_packed_q4 = t.min_work.dense_q4;
+    state.min_work_packed_q8 = t.min_work.dense_q8;
+    state.min_work_packed_tq2 = t.min_work.dense_tq2;
+    state.qmoe_min_fill_pct = t.qmoe_min_fill;
+    trace_on = t.trace;
 }
 
 /// One-time lazy device init (std.once is gone in Zig 0.16): double-checked
@@ -1721,7 +1645,7 @@ pub fn shouldUseGpuQMoe(total_work: u64) bool {
 
 /// Occupancy arm of the grouped-MoE gate: `rows` real panel rows spread over
 /// `n_tiles` 32-row token tiles must reach the configured minimum fill
-/// percentage (see `default_qmoe_min_fill_pct`). Callers pass the exact tile
+/// percentage (see `tuning.Table.Gpu.qmoe_min_fill`). Callers pass the exact tile
 /// table they are about to dispatch.
 pub fn qmoeFillAcceptable(rows: usize, n_tiles: usize) bool {
     ensureConfig();
