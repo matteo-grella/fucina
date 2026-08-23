@@ -41,7 +41,7 @@ pub const Options = struct {
     minp_arg: ?f32 = null,
     penalty_arg: ?f32 = null,
     seed_arg: ?u64 = null,
-    moe_cli: fucina.weights.MoeStreamCli = .{},
+    moe_cli: llm.moe_stream_cli.MoeStreamCli = .{},
     moe_cache_slots: ?usize = null,
     moe_pin_mb: ?usize = null,
     moe_no_learn: bool = false,
@@ -293,7 +293,7 @@ pub fn parse(args: []const []const u8, stdout: *std.Io.Writer, token_buf: []usiz
         } else if (std.mem.startsWith(u8, arg, "--regex=")) {
             o.regex_arg = arg["--regex=".len..];
         } else if (try o.moe_cli.tryParse(arg)) {
-            // Shared streamed-experts flags (fucina.weights.MoeStreamCli).
+            // Shared streamed-experts flags (llm.moe_stream_cli.MoeStreamCli).
         } else if (std.mem.startsWith(u8, arg, "--moe-cache-slots=")) {
             o.moe_cli.armed = true;
             o.moe_cache_slots = try std.fmt.parseInt(usize, arg["--moe-cache-slots=".len..], 10);

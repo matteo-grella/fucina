@@ -40,7 +40,6 @@ const Tensor = tensor.Tensor;
 
 pub const MoeBatchProfile = exec_moe.MoeBatchProfile;
 pub const delta_attention = @import("exec/delta_attention.zig");
-pub const expert_store = @import("exec/expert_store.zig");
 
 pub const parallel_dot_backward_branches = backend_mod.active_kind == .native and backend_mod.native_uses_blas;
 pub const RhsLifetime = exec_quant_matmul.RhsLifetime;
@@ -655,5 +654,4 @@ test {
     _ = @import("exec/softmax_tests.zig");
     _ = @import("exec/stats_tests.zig");
     _ = @import("exec/delta_attention.zig");
-    _ = @import("exec/expert_store.zig");
 }

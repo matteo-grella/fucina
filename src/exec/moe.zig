@@ -4,7 +4,7 @@ const backend_mod = @import("../backend.zig");
 const fucina_dtype = @import("../dtype.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
 const backend_ops = backend_mod.ops;
-const expert_store = @import("expert_store.zig");
+const expert_store = @import("../store/expert_store.zig");
 const moe_chain = @import("moe_chain.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
@@ -120,7 +120,7 @@ pub const MoeRhs = union(enum) {
     iq2_s: backend_mod.QuantizedMatmulRhsIQ2_S,
     iq4_xs: backend_mod.QuantizedMatmulRhsIQ4_XS,
     q3_k: backend_mod.QuantizedMatmulRhsQ3_K,
-    /// Disk-streamed expert stack (`exec/expert_store.zig`): same geometry
+    /// Disk-streamed expert stack (`store/expert_store.zig`): same geometry
     /// and kernels as the resident arms, but expert blocks resolve through
     /// the store's acquire-scoped tier (pin → LRU → pread) instead of a
     /// slice into one resident buffer. The store outlives the arm (owned by

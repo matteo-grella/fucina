@@ -159,7 +159,7 @@ pub const Args = struct {
     /// Streamed-expert flags (deepseek4 backend): the shared `--moe-*` set
     /// plus the family-specific levers the deepseek4 runner speaks. Slices
     /// parsed into `moe_cli` borrow argv.
-    moe_cli: fucina.weights.MoeStreamCli = .{},
+    moe_cli: llm.moe_stream_cli.MoeStreamCli = .{},
     moe_pilot: bool = false,
     moe_pin_mb: ?usize = null,
     moe_no_learn: bool = false,
@@ -272,7 +272,7 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--experts=pack")) {
             args.experts_borrow = false;
         } else if (try args.moe_cli.tryParse(arg)) {
-            // Shared streamed-experts flags (fucina.weights.MoeStreamCli).
+            // Shared streamed-experts flags (llm.moe_stream_cli.MoeStreamCli).
         } else if (std.mem.eql(u8, arg, "--moe-pilot")) {
             args.moe_cli.armed = true;
             args.moe_pilot = true;
@@ -381,8 +381,9 @@ fn serveBlocking(
     defer allocator.free(model_id);
 
     if (std.mem.eql(u8, arch, "qwen3") or std.mem.eql(u8, arch, "qwen3moe") or std.mem.eql(u8, arch, "gemma4")) {
-        // The Conversation-hosted families are served by the library engine.
-        var opened = try types.openFromFile(&ctx, io, allocator, &file, model_id, .{
+        // The Conversation-hosted families are served by the library engine;
+        // a SHINE adapter fleet routes to its qwen3-family entry.
+        const open_options = types.OpenOptions{
             .context_len = args.ctx_len,
             .spec = args.spec,
             .batch = args.batch,
@@ -393,12 +394,15 @@ fn serveBlocking(
             .kv_disk_slots = args.kv_disk_slots,
             .cartridge_path = args.cartridge_path,
             .fleet_dir = args.fleet_dir,
-            .shine_fleet_dir = args.shine_fleet_dir,
             .rag_docs = args.rag_docs,
             .rag_chunks = args.rag_chunks,
             .rag_adaptive = args.rag_adaptive,
             .rag_margin = args.rag_margin,
-        }, stderr);
+        };
+        var opened = if (args.shine_fleet_dir) |dir|
+            try llm.qwen3.shine_serving.openFromFile(&ctx, io, allocator, &file, model_id, dir, open_options, stderr)
+        else
+            try types.openFromFile(&ctx, io, allocator, &file, model_id, open_options, stderr);
         defer opened.deinit();
         try serveWith(io, allocator, opened.backend, args);
     } else if (std.mem.eql(u8, arch, "diffusion-gemma")) {
@@ -523,7 +527,7 @@ fn serveQwen35(
     // LIFO: the streamed-tier report + usage save runs BEFORE model.deinit
     // destroys the store.
     defer if (model.expert_store) |store| {
-        fucina.weights.reportAndSaveMoeStream(store, !args.moe_no_learn, stderr);
+        llm.moe_stream_cli.reportAndSaveMoeStream(store, !args.moe_no_learn, stderr);
         stderr.flush() catch {};
     };
     file.deinit();
@@ -583,7 +587,7 @@ fn serveDeepseek4(
     // LIFO: the streamed-tier report + usage save runs BEFORE model.deinit
     // destroys the store.
     defer if (model.expert_store) |store| {
-        fucina.weights.reportAndSaveMoeStream(store, !args.moe_no_learn, stderr);
+        llm.moe_stream_cli.reportAndSaveMoeStream(store, !args.moe_no_learn, stderr);
         stderr.flush() catch {};
     };
     file.deinit();

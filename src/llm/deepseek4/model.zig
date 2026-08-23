@@ -28,6 +28,7 @@ const fucina = @import("fucina");
 const weights = @import("fucina").weights;
 const gguf_meta = @import("fucina").gguf_meta;
 const ptqtp_gguf = @import("fucina").ptqtp_gguf;
+const moe_router = @import("../moe_router.zig");
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
@@ -2284,7 +2285,7 @@ fn moeBlockBatch(self: *Model, ctx: *ExecContext, layer: *const Layer, sub_in: [
                 if (layer.moe.router_bias) |bias| {
                     for (choice_row, bias) |*c, b| c.* += b;
                 }
-                if (!weights.cacheRouteSel(&layer.moe.gate, choice_row, sel_row)) {
+                if (!moe_router.cacheRouteSel(&layer.moe.gate, choice_row, sel_row)) {
                     for (sel_row) |*slot| {
                         var best: usize = 0;
                         var best_c = -std.math.inf(f32);

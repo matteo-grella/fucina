@@ -17,6 +17,14 @@ const fucina = @import("fucina");
 const optim = fucina.optim;
 const training_checkpoint = fucina.training_checkpoint;
 
+/// This example's resume state: the checkpoint frame is generic over the
+/// state struct, and the spirals MLP persists only the header fields.
+const CheckpointState = struct {
+    version: u32 = 1,
+    step: u64 = 0,
+    seed: u64 = 0,
+};
+
 const Tensor = fucina.Tensor;
 const ExecContext = fucina.ExecContext;
 
@@ -202,11 +210,11 @@ fn saveCheckpoint(allocator: std.mem.Allocator, io: std.Io, path: []const u8, mo
         };
         try training_checkpoint.writeFileAtomic(io, optimizer_path, opt, SaveOptimizer.write);
     }
-    try training_checkpoint.saveTrainerState(allocator, io, path, .{ .step = step, .seed = seed });
+    try training_checkpoint.saveTrainerState(allocator, io, path, CheckpointState{ .step = step, .seed = seed });
 }
 
-fn loadCheckpoint(allocator: std.mem.Allocator, io: std.Io, path: []const u8, model: *Model, opt: anytype) !training_checkpoint.TrainerState {
-    const state = try training_checkpoint.loadTrainerState(allocator, io, path);
+fn loadCheckpoint(allocator: std.mem.Allocator, io: std.Io, path: []const u8, model: *Model, opt: anytype) !CheckpointState {
+    const state = try training_checkpoint.loadTrainerState(CheckpointState, allocator, io, path);
     const model_path = try training_checkpoint.pathJoin(allocator, path, training_checkpoint.model_state_file);
     defer allocator.free(model_path);
     {

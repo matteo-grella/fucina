@@ -151,7 +151,7 @@ pub fn main(init: std.process.Init) !void {
     for (0..2) |arm| {
         var kv = try model.initKvCache(&ctx, prefill + gen + 8);
         defer kv.deinit();
-        var sq = try llm.subq.State.init(
+        var sq = try llm.research.subq.State.init(
             allocator,
             config.num_layers,
             config.num_attention_heads,
@@ -162,6 +162,11 @@ pub fn main(init: std.process.Init) !void {
         defer sq.deinit();
 
         var logits = try model.forwardStep(&ctx, &kv, prompt, 0);
+        // Installed AFTER the dense prefill (both arms prefill identically):
+        // the subq arm decodes through the research seam, the dense arm
+        // runs the stock kernels with the seam cleared.
+        model.attention_override = if (arm == 1) llm.research.subq.attentionOverride(&sq) else null;
+        defer model.attention_override = null;
         var pos: usize = prefill;
         if (arm == 1 and calibrate_n > 0) try sq.startCalibration(calib_tol);
         for (0..gen) |step| {
@@ -178,10 +183,7 @@ pub fn main(init: std.process.Init) !void {
                 next;
             logits.deinit();
             const one = [_]usize{feed};
-            logits = if (arm == 0)
-                try model.forwardStep(&ctx, &kv, &one, pos)
-            else
-                try model.forwardStepSubq(&ctx, &kv, &one, pos, &sq);
+            logits = try model.forwardStep(&ctx, &kv, &one, pos);
             pos += 1;
         }
         logits.deinit();

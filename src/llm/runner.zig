@@ -12,7 +12,7 @@
 //! The qwen3 family runs directly on this module (`qwen3/model.zig` is an
 //! alias surface over it), which is why the `.fused` style also carries
 //! the batched decode entries (`forwardStepBatch`, `forwardStepBatchSpans`)
-//! and the nullable SubQ research seam threaded through `attentionBlock`.
+//! and the `attention_override` research seam consulted in `attentionBlock`.
 //! Correctness is pinned by `runner_tests.zig`'s recorded-logits gates
 //! (real Qwen3-0.6B GGUFs + synthetic dense/MoE/glm fixtures) and, for
 //! `.host_reference`, bitwise parity against the hand glm4moe port.
@@ -24,7 +24,7 @@ const fucina = @import("fucina");
 const weights = @import("fucina").weights;
 const kv_cache = @import("kv_cache.zig");
 const model_common = @import("model_common.zig");
-const subq_mod = @import("subq.zig");
+const moe_router = @import("moe_router.zig");
 const host_ops = @import("host_ops.zig");
 const gguf_meta = @import("fucina").gguf_meta;
 
@@ -253,6 +253,25 @@ pub const LoadOptions = struct {
     max_positions: usize = 4096,
 };
 
+/// Research seam on the fused decode path: an installed override is offered
+/// every layer's cached attention before the stock kernels run. `call`
+/// receives the layer's post-RoPE queries and the appended KV cache and
+/// returns the attention rows, or null to fall through to the stock path
+/// for that call. Overrides must leave KV state untouched; `llm.research.subq`
+/// installs itself through this seam (`State.attentionOverride`).
+pub const AttentionOverride = struct {
+    ctx: *anyopaque,
+    call: *const fn (
+        ctx: *anyopaque,
+        exec: *ExecContext,
+        config: Descriptor,
+        layer_i: usize,
+        q: *const fucina.Tensor(.{ .seq, .head, .d }),
+        kv: *KvCache,
+        cached_len: usize,
+    ) anyerror!?fucina.Tensor(.{ .seq, .attn }),
+};
+
 pub const Model = struct {
     allocator: Allocator,
     config: Descriptor,
@@ -269,6 +288,9 @@ pub const Model = struct {
     expert_store: ?*fucina.ExpertStore = null,
     /// Router-lookahead prefetch (`MoeStreamOptions.pilot`).
     pilot_enabled: bool = false,
+    /// Research seam (`AttentionOverride`): consulted on every layer's
+    /// cached decode attention when set; null runs the stock kernels.
+    attention_override: ?AttentionOverride = null,
     /// The host_reference band (`BlockStyle.host_reference`): host-side
     /// layer state + rope table; null for `.fused` models.
     host: ?HostBand = null,
@@ -420,7 +442,7 @@ pub const Model = struct {
         token_ids: []const usize,
         pos0: usize,
     ) !fucina.Tensor(.{ .seq, .vocab }) {
-        return self.forwardStepImpl(ctx, null, kv, token_ids, pos0, null, true, null);
+        return self.forwardStepImpl(ctx, null, kv, token_ids, pos0, null, true);
     }
 
     pub fn forwardStepProfiled(
@@ -432,7 +454,7 @@ pub const Model = struct {
         pos0: usize,
         profile: *ForwardProfile,
     ) !fucina.Tensor(.{ .seq, .vocab }) {
-        return self.forwardStepImpl(ctx, io, kv, token_ids, pos0, profile, true, null);
+        return self.forwardStepImpl(ctx, io, kv, token_ids, pos0, profile, true);
     }
 
     /// As `forwardStep`, but returns logits for EVERY appended position —
@@ -454,21 +476,7 @@ pub const Model = struct {
         token_ids: []const usize,
         pos0: usize,
     ) !fucina.Tensor(.{ .seq, .vocab }) {
-        return self.forwardStepImpl(ctx, null, kv, token_ids, pos0, null, false, null);
-    }
-
-    /// `forwardStep` with the SubQ research attention evaluator active on
-    /// every layer's decode attention (f16 KV caches only; the evaluator
-    /// falls back to dense until its warmup floor is reached).
-    pub fn forwardStepSubq(
-        self: *const Model,
-        ctx: *ExecContext,
-        kv: *KvCache,
-        token_ids: []const usize,
-        pos0: usize,
-        sq: *subq_mod.State,
-    ) !fucina.Tensor(.{ .seq, .vocab }) {
-        return self.forwardStepImpl(ctx, null, kv, token_ids, pos0, null, true, sq);
+        return self.forwardStepImpl(ctx, null, kv, token_ids, pos0, null, false);
     }
 
     fn forwardStepImpl(
@@ -480,7 +488,6 @@ pub const Model = struct {
         pos0: usize,
         profile: ?*ForwardProfile,
         last_only: bool,
-        subq_state: ?*subq_mod.State,
     ) !fucina.Tensor(.{ .seq, .vocab }) {
         if (self.host != null) return Error.WrongBlockStyle;
         if (token_ids.len == 0) return Error.InvalidSequenceLength;
@@ -496,7 +503,7 @@ pub const Model = struct {
         const cfg = self.config;
         for (self.layers, 0..) |*layer, layer_i| {
             const last_query_only = last_only and layer_i + 1 == cfg.num_layers and token_ids.len > 1;
-            x = try ctx.replace(x, attentionBlock(ctx, io, cfg, layer, &x, &rope_table, self.kv_head_for_head, last_query_only, profile, kv, layer_i, subq_state));
+            x = try ctx.replace(x, attentionBlock(ctx, io, cfg, layer, &x, &rope_table, self.kv_head_for_head, last_query_only, profile, kv, layer_i, self.attention_override));
             // Router lookahead (pilot): predict the NEXT layer's experts from
             // this layer's post-attention state and start their disk
             // readahead in the background while this layer's FFN computes.
@@ -718,7 +725,6 @@ pub const Model = struct {
         try hostForwardRows(ctx, cfg, band, cache, &self.token_embedding, tokens, x);
         return hostProjectRows(ctx, cfg.hidden_size, cfg.rms_norm_eps, x, tokens.len, band.output_norm, &self.output);
     }
-
 };
 
 /// The host_reference trunk every host-band loader shares: embed + lm-head
@@ -1128,7 +1134,7 @@ fn attentionBlock(
     profile: ?*ForwardProfile,
     cache: ?*KvCache,
     layer_i: usize,
-    subq_state: ?*subq_mod.State,
+    override: ?AttentionOverride,
 ) !fucina.Tensor(.{ .seq, .embed }) {
     const prep_start = profileStart(profile, io);
     var qkv_linear = try layer.attn_proj.projectNormed(ctx, input, &layer.attn_norm, config.rms_norm_eps, config);
@@ -1162,13 +1168,11 @@ fn attentionBlock(
     var attn = if (cache) |kv| blk: {
         try kv.appendLayer(ctx, layer_i, &k_rope, &v3);
         const cached_len = kv.len + k_rope.dim(.seq);
+        if (override) |ov| {
+            if (try ov.call(ov.ctx, ctx, config, layer_i, q_attention, kv, cached_len)) |hooked| break :blk hooked;
+        }
         switch (kv.dtype) {
             .f16 => {
-                if (subq_state) |sq| {
-                    if (q_attention.dim(.seq) == 1) {
-                        break :blk try subqAttention(ctx, config, sq, layer_i, q_attention, kv, cached_len);
-                    }
-                }
                 var k_view = try kv.k[layer_i].narrow(ctx, .seq, 0, cached_len);
                 defer k_view.deinit();
                 var v_view = try kv.v[layer_i].narrow(ctx, .seq, 0, cached_len);
@@ -1204,41 +1208,6 @@ fn attentionBlock(
     const out = try residual_input.add(ctx, &attn_out);
     if (profile) |p| p.attn_residual_ns += profileElapsed(residual_start, io);
     return out;
-}
-
-fn subqAttention(
-    ctx: *ExecContext,
-    config: Descriptor,
-    sq: *subq_mod.State,
-    layer_i: usize,
-    q: *const fucina.Tensor(.{ .seq, .head, .d }),
-    kv: *KvCache,
-    cached_len: usize,
-) !fucina.Tensor(.{ .seq, .attn }) {
-    const heads = config.num_attention_heads;
-    const d = config.head_dim;
-    // Borrow the contiguous query row when possible; the state's persistent
-    // bridge buffers cover the fallback and the output (no per-token
-    // allocations in this glue).
-    const q_flat: []const f32 = blk: {
-        if (q.dataConst()) |qd| {
-            if (qd.len == heads * d) break :blk qd;
-        } else |_| {}
-        try q.copyTo(sq.bridge_q);
-        break :blk sq.bridge_q;
-    };
-    const out = sq.bridge_out;
-    const row_len = cached_len * config.num_key_value_heads * d;
-    try sq.attend(
-        ctx,
-        layer_i,
-        q_flat,
-        (try kv.k[layer_i].dataConst())[0..row_len],
-        (try kv.v[layer_i].dataConst())[0..row_len],
-        cached_len,
-        out,
-    );
-    return fucina.Tensor(.{ .seq, .attn }).fromSlice(ctx, .{ 1, heads * d }, out);
 }
 
 /// Per-stream KV attention spans for `forwardStepBatch`: allocated once per
@@ -1683,7 +1652,7 @@ fn pilotPrefetchNext(
     };
     var nrm = try x.rmsNormMul(ctx, .embed, &next.ffn_norm, config.rms_norm_eps);
     defer nrm.deinit();
-    try weights.pilotHintTopK(ctx, &nrm, &moe.router, config.num_experts_used, store, next_layer_i);
+    try moe_router.pilotHintTopK(ctx, &nrm, &moe.router, config.num_experts_used, store, next_layer_i);
 }
 
 /// Adaptive expert top-p (routing sparsification, off at p >= 1): per token,
@@ -1790,7 +1759,6 @@ test "Qwen3 0.6B config matches expected projection dimensions" {
     try std.testing.expectEqual(@as(usize, 2048), config.qProjectionDim());
     try std.testing.expectEqual(@as(usize, 1024), config.kvProjectionDim());
 }
-
 
 // ---- host_reference band: types and block code ---------------------------
 // The auditable host-side f32 block vocabulary (GLM/DeepSeek-MoE shape):
@@ -2205,7 +2173,7 @@ fn hostMoeForward(ctx: *ExecContext, cfg: Descriptor, allocator: Allocator, moe:
     var selected: [64]usize = undefined;
     var routing: [64]f32 = undefined;
     std.debug.assert(cfg.num_experts_used <= selected.len);
-    if (weights.cacheRouteSel(&moe.gate, choice, selected[0..cfg.num_experts_used])) {
+    if (moe_router.cacheRouteSel(&moe.gate, choice, selected[0..cfg.num_experts_used])) {
         for (selected[0..cfg.num_experts_used], routing[0..cfg.num_experts_used]) |e, *w| w.* = probs[e];
     } else for (0..cfg.num_experts_used) |slot| {
         var best: usize = 0;

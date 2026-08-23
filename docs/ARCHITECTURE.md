@@ -41,6 +41,7 @@ Top-down; a band may depend only on bands at or below it:
 | ag + training/serialization | `src/ag.zig`, `src/ag/**`, `src/optim.zig`, `src/optim/**`, `src/es.zig`, `src/ptqtp.zig`, `src/gguf.zig`, `src/lora.zig`, `src/safetensors.zig`, `src/state_dict.zig`, `src/training_checkpoint.zig`, `src/param_registry.zig`, `src/weights.zig`, `src/weights/**`, `src/gguf_meta.zig`, `src/ptqtp_gguf.zig` (model I/O) |
 | tagged | `src/tag_ops.zig` (tag-ops library) |
 | exec | `src/exec.zig`, `src/exec/**` (eager runtime) |
+| store | `src/store/**` (disk-streamed block stores: `expert_store.zig`, the out-of-core MoE expert tier) |
 | backend | `src/backend.zig`, `src/backend/**` (build-selected numeric kernels behind the `backend/interface.zig` kernel set; the single-implementation fused kernels live beside their ops in `exec/`) |
 | tags | `src/tags.zig` (comptime tag algebra) |
 | tensor | `src/tensor.zig` (raw tensor) |
@@ -55,8 +56,8 @@ Top-down; a band may depend only on bands at or below it:
 - `ExecContext` (plus `RhsLifetime`, the MoE/`RouterTopKOptions`/`Reduction`/
   `CrossEntropyOptions`/`StandardizeOptions` option types, `UnaryOp`, and
   `RopeMode`/`RopeTable`) from `src/exec.zig`, plus the `expert_store`
-  disk-streamed MoE expert tier and the `fakequant` low-precision grid
-  round-trips.
+  disk-streamed MoE expert tier (`src/store/expert_store.zig`) and the
+  `fakequant` low-precision grid round-trips.
 - `DType` and the GGML block types (`BlockQ4_K`, `BlockIQ2_XS`, ...) from
   `src/dtype.zig`, plus the quantized RHS container types from the backend.
 - `BackendKind` and the backend build/runtime constants
@@ -155,9 +156,8 @@ Execution runtime:
   root-anchored import cycle (see *Layering And Enforcement*).
 - `src/exec/buffer_pool.zig`: the reusable transient-buffer pool leaf.
 - `src/exec/` domain modules: `attention.zig`, `matmul.zig`,
-  `quant_matmul.zig`, `moe.zig`, `moe_chain.zig`, `expert_store.zig` (the
-  disk-streamed MoE expert tier: pinned set + per-layer LRU + `pread` from
-  the GGUF), `fakequant.zig` (FP8/FP4/f16 grid round-trips), `elementwise.zig`,
+  `quant_matmul.zig`, `moe.zig`, `moe_chain.zig`,
+  `fakequant.zig` (FP8/FP4/f16 grid round-trips), `elementwise.zig`,
   `row_ops.zig`, `norm.zig`, `softmax.zig`, `loss.zig`, `reduce.zig`,
   `topk.zig`, `stats.zig`, `gather_scatter.zig`, `rope.zig`, `convert.zig`,
   `conv.zig`, `pool.zig`, `shape.zig`. These are not public API; `src/exec.zig` remains
@@ -707,6 +707,13 @@ Model families live in subdirectories and are exposed as namespaces:
 - `llm.speculative.{core,sam_index,recycling,cascade,constrained}` — lossless
   draft-model-free speculative decoding (see `SPECULATIVE.md`), including
   grammar-constrained drafting.
+- `llm.research.*` — the research tier, one namespace so the facade states
+  it: `subq` (decode-path attention evaluator, installed through the
+  runner's `AttentionOverride` seam; `SUBQUADRATIC-ATTENTION.md`), `engram`
+  (conditional n-gram memory, grafted through the qwen3 trainer's
+  `residual_hook` seam; `ENGRAM.md`), `shine`/`shine_train` (context-to-LoRA
+  adapters, served by `llm.qwen3.shine_serving`), and `kimi3.model` (the
+  Kimi-K3 port).
 
 Generic helpers stay flat in `src/llm/`:
 
@@ -732,7 +739,8 @@ Generic helpers stay flat in `src/llm/`:
 - `cartridge.zig` / `cartridge_fleet.zig`: trainable KV-prefix cartridges and
   per-document cartridge fleets (`CARTRIDGES.md`).
 - `engram.zig`: conditional n-gram memory — hashed suffix n-gram tables gated
-  into the residual stream of a frozen backbone (`ENGRAM.md`).
+  into the residual stream of a frozen backbone (`ENGRAM.md`); exposed as
+  `llm.research.engram`.
 - `logit_processor.zig` + `llguidance.zig`: the in-place logit-processing seam
   and the vendored llguidance grammar/JSON-schema engine behind it
   (`CONSTRAINED-DECODING.md`).
@@ -791,7 +799,9 @@ Generic helpers stay flat in `src/llm/`:
   and its safetensors container.
 - `src/training_checkpoint.zig`: canonical checkpoint directory
   (`model.safetensors`/`adapters.safetensors`, native `optimizer.fucina`,
-  JSON `trainer_state.json` commit sentinel).
+  JSON `trainer_state.json` commit sentinel); the state codec is generic
+  over the caller's struct, and the LLM trainers' concrete state is
+  `fucina_llm.trainer_state.TrainerState`.
 - `src/lora.zig`: `Adapter(in_tag, out_tag)` over frozen weights; named
   persistence; f32/f16 merge (the fine-tune → merge → quantize → serve loop
   is documented in `TRAINING.md`).

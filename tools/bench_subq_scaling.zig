@@ -79,7 +79,7 @@ pub fn main(init: std.process.Init) !void {
 
         inline for (.{ false, true }, 0..) |hier, mode| {
             _ = mode;
-            var state = try llm.subq.State.init(allocator, 1, q_heads, kv_heads, d, .{
+            var state = try llm.research.subq.State.init(allocator, 1, q_heads, kv_heads, d, .{
                 .cluster_size = 128,
                 .rebuild_interval = 512,
                 .tau_default = 0.05,

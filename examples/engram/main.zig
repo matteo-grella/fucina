@@ -22,7 +22,7 @@ const fucina = @import("fucina");
 const llm = @import("fucina_llm");
 
 const ExecContext = fucina.ExecContext;
-const engram = llm.engram;
+const engram = llm.research.engram;
 // LoRA arm targets q/v (the trainer default shape); rank 1 alpha 1 with
 // q=v=false is the no-adapter trainer (cartridge.zig precedent).
 const TrainerQV = llm.qwen3.train.Trainer(.{});
@@ -174,7 +174,7 @@ pub fn main(init: std.process.Init) !void {
     var table_params: usize = 0;
     for (graft.plan.table_rows) |rows| table_params += rows * ecfg.headDim();
     try stdout.print("engram: layers {any}, {d} hash heads/layer, tables {d} rows total ({d:.1} M params)\n", .{
-        layer_ids,                                    ecfg.headsPerLayer(),
+        layer_ids,                                   ecfg.headsPerLayer(),
         blk: {
             var total: usize = 0;
             for (graft.plan.table_rows) |rows| total += rows;
@@ -254,7 +254,8 @@ fn runEquiv(ctx: *ExecContext, stdout: anytype, allocator: std.mem.Allocator, mo
 
     var bare = try trainer.evalLogits(ctx, ids32);
     defer bare.deinit();
-    var grafted = try trainer.evalLogitsExt(ctx, ids32, .{ .engram = .{ .model = graft, .rows = rows_const } });
+    const graft_adapter = engram.ResidualGraft{ .model = graft, .rows = rows_const };
+    var grafted = try trainer.evalLogitsExt(ctx, ids32, .{ .residual_hook = graft_adapter.hook() });
     defer grafted.deinit();
 
     const b = try bare.dataConst();
@@ -321,10 +322,11 @@ fn runTrainEval(
         train_chunk = (train_chunk + 1) % n_chunks;
 
         var fwd = llm.qwen3.train.ForwardOptions{};
+        const graft_adapter = engram.ResidualGraft{ .model = graft, .rows = rows_const };
         if (!opts.no_engram) {
             try hashChunk(allocator, graft, tokens[0 .. tokens.len - 1], rows);
             for (rows_const, rows) |*dst, src| dst.* = src;
-            fwd.engram = .{ .model = graft, .rows = rows_const };
+            fwd.residual_hook = graft_adapter.hook();
         }
         defer if (!opts.no_engram) for (rows) |r| allocator.free(r);
 
@@ -391,10 +393,11 @@ fn evalHeldOut(
         while (held < n_chunks and count < opts.eval_chunks) : (held += 8) {
             const tokens = ids[held * chunk ..][0..chunk];
             var fwd = llm.qwen3.train.ForwardOptions{};
+            const graft_adapter = engram.ResidualGraft{ .model = graft, .rows = rows_const };
             if (arm == 1) {
                 try hashChunk(allocator, graft, tokens[0 .. tokens.len - 1], rows);
                 for (rows_const, rows) |*dst, src| dst.* = src;
-                fwd.engram = .{ .model = graft, .rows = rows_const };
+                fwd.residual_hook = graft_adapter.hook();
             }
             defer if (arm == 1) for (rows) |r| allocator.free(r);
 
@@ -468,10 +471,11 @@ fn runProbes(
 
             for (0..2) |arm| {
                 var fwd = llm.qwen3.train.ForwardOptions{};
+                const graft_adapter = engram.ResidualGraft{ .model = graft, .rows = rows_const };
                 if (arm == 1 and !opts.no_engram) {
                     try hashChunk(allocator, graft, tokens, rows);
                     for (rows_const, rows) |*dst, src| dst.* = src;
-                    fwd.engram = .{ .model = graft, .rows = rows_const };
+                    fwd.residual_hook = graft_adapter.hook();
                 }
                 defer if (arm == 1 and !opts.no_engram) for (rows) |r| allocator.free(r);
 

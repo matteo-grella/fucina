@@ -1,10 +1,13 @@
 <!-- docs-nav: group="Memory & compute" title="Engram" weight=43 -->
 # Engram: conditional n-gram memory
 
-Design record for `src/llm/engram.zig` — Fucina's port of DeepSeek's Engram
+Design record for `src/llm/engram.zig` (public as `llm.research.engram`) —
+Fucina's port of DeepSeek's Engram
 (arXiv 2601.07372; semantics reference `deepseek-ai/Engram`
 `engram_demo_v1.py`, pinned in `tools/fetch_refs.sh`). API surface:
-REFERENCE.md §13.11.
+REFERENCE.md §13.11. The qwen3 trainer hosts the graft through its
+type-erased `ForwardOptions.residual_hook` seam; `ResidualGraft` is the
+adapter.
 
 ## What it is
 

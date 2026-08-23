@@ -4053,7 +4053,7 @@ pub fn moeExpertFfnBatch(..., top_k: usize, ...) !Tensor
 into a single compact-block RHS (experts are row-contiguous zero-copy
 sub-views; the resident arms cover q4_k/q5_k/q6_k/q8_0/tq2_0/q2_k/
 iq2_xxs/iq3_xxs/iq2_s/iq4_xs/q3_k, plus a `streamed` arm whose expert blocks resolve
-through the disk-backed expert store (`src/exec/expert_store.zig`)
+through the disk-backed expert store (`src/store/expert_store.zig`)
 instead of one resident buffer). The `ptqtp` arm holds K ∈ {1..3} tq2_0
 plane stacks (PTQTP experts, §10.9): the fused op runs the ternary tile
 once per plane and sums per element in fixed plane order before the gated
@@ -4077,7 +4077,7 @@ the phase-chain machinery, chunk helpers, and the profile timer pair — so
 in-tree LLM-band MoE engines (§13) reach the exact same types through the
 `fucina` root.
 
-`fucina.expert_store` (`src/exec/expert_store.zig`) is the out-of-core
+`fucina.expert_store` (`src/store/expert_store.zig`) is the out-of-core
 expert tier behind the `streamed` arm: `fucina.ExpertStore`
 (`create`/`destroy`, `addLayer`/`finalize`) opens the GGUF part files and
 resolves expert blocks through a pinned → LRU → `pread` hierarchy inside
@@ -7393,7 +7393,9 @@ pub const internal = struct {
 
 The hooks resolve at comptime through `src/backend/gpu.zig` to the active
 provider (`src/backend/metal.zig` or `src/backend/cuda.zig`; `-Dgpu=none`
-resolves to `metal.zig` with `enabled == false`). Call sites gate
+resolves to the null provider `src/backend/gpu_none.zig`, with
+`enabled == false` and every capability false, so the default build
+analyzes neither real provider). Call sites gate
 shim-touching calls on `comptime gpu.enabled` so CPU-only builds
 comptime-elide every provider reference; `traceReset`/`traceDump` may be
 called unconditionally on GPU builds since they no-op when tracing is off.
@@ -10009,7 +10011,24 @@ pub const optimizer_state_file = "optimizer.fucina";
 pub const trainer_state_file   = "trainer_state.json";
 pub const Error = error{ InvalidTrainerState, UnsupportedTrainerStateVersion };
 
-pub const TrainerState = struct {
+pub fn pathJoin(allocator, dir_path: []const u8, leaf: []const u8) ![]u8
+pub fn beginSave(allocator, io: std.Io, dir_path: []const u8) !void
+pub fn writeFileAtomic(io: std.Io, path: []const u8, context: anytype,
+    comptime writeFn: fn (@TypeOf(context), *std.Io.Writer) anyerror!void) !void
+pub fn saveTrainerState(allocator, io: std.Io, dir_path: []const u8, state: anytype) !void
+pub fn loadTrainerState(comptime State: type, allocator, io: std.Io, dir_path: []const u8) !State
+pub fn writeTrainerStateJson(state: anytype, writer: *std.Io.Writer) !void
+pub fn parseTrainerState(comptime State: type, allocator, bytes: []const u8) !State
+```
+
+The trainer-state codec is generic over the caller's state struct: a
+`version: u32`/`step: u64`/`seed: u64` header plus optional `?u64`/`?f64`
+fields, with the writer and parser bodies comptime-generated from the
+struct (JSON key = field name, emission order = declaration order). The
+LLM trainers' concrete struct is `fucina_llm.trainer_state.TrainerState`:
+
+```zig
+pub const TrainerState = struct {   // fucina_llm.trainer_state
     version: u32 = 1, step: u64 = 0, seed: u64 = 0,
     lora_rank: ?u64, lora_alpha: ?f64, lora_dropout_p: ?f64, learning_rate: ?f64,
     accum_steps: ?u64,                       // window size; step % accum_steps == 0 at save
@@ -10021,13 +10040,6 @@ pub const TrainerState = struct {
     es_ternary_flip_rate: ?f64, es_ternary_update_fraction: ?f64, es_ternary_update_decay: ?f64,
     es_iteration: ?u64,
 };
-
-pub fn pathJoin(allocator, dir_path: []const u8, leaf: []const u8) ![]u8
-pub fn beginSave(allocator, io: std.Io, dir_path: []const u8) !void
-pub fn writeFileAtomic(io: std.Io, path: []const u8, context: anytype,
-    comptime writeFn: fn (@TypeOf(context), *std.Io.Writer) anyerror!void) !void
-pub fn saveTrainerState(allocator, io: std.Io, dir_path: []const u8, state: TrainerState) !void
-pub fn loadTrainerState(allocator, io: std.Io, dir_path: []const u8) !TrainerState
 ```
 
 **Crash-consistency protocol.** `beginSave` creates the directory and
@@ -10038,7 +10050,7 @@ partial file). `saveTrainerState` writes the sentinel LAST, itself
 atomically. Consequence: a directory with a parseable `trainer_state.json`
 is a complete, committed checkpoint; a crash mid-save leaves a sentinel-less
 directory that resume logic must treat as absent (the previous sentinel was
-deleted up front, so a torn save can never masquerade as committed). All optional `TrainerState` fields
+deleted up front, so a torn save can never masquerade as committed). All optional state fields
 serialize only when set and parse to `null` when absent (older checkpoints
 stay readable); `format` must be `"fucina.training_checkpoint"` and
 `version` 1 (`UnsupportedTrainerStateVersion` otherwise). With gradient
@@ -11233,8 +11245,7 @@ family-agnostic helpers stay flat:
 
 | Namespace | Contents | Files |
 |---|---|---|
-| `llm.qwen3` | `model`, `train`, `generate`, `ptqtp`, `shine`, `shine_train` — Qwen3 dense + MoE, LoRA fine-tuning, SHINE adapters | `llm/qwen3/` |
-| `llm.kimi3` | `model` — Kimi-K3 (Kimi-Linear lineage: KDA + gated-MLA-NoPE hybrid, latent MoE, attention residuals, SiTU) | `llm/kimi3/` |
+| `llm.qwen3` | `model`, `train`, `generate`, `ptqtp`, `shine_serving` — Qwen3 dense + MoE, LoRA fine-tuning, SHINE adapter-fleet serving | `llm/qwen3/` |
 | `llm.qwen35` | `model`, `chat` — Qwen3.5 Gated-DeltaNet hybrid | `llm/qwen35/` |
 | `llm.gemma` | `model`, `train`, `moe` | `llm/gemma/` |
 | `llm.diffusion_gemma` | `model` — block text-diffusion on the gemma4 backbone | `llm/diffusion_gemma/` |
@@ -11244,6 +11255,7 @@ family-agnostic helpers stay flat:
 | `llm.glm4moe` | `model` — GLM-4.5 MoE with native MTP (`nextn`) self-speculation | `llm/glm4moe/` |
 | `llm.deepseek4` | `model` — DeepSeek V4 Flash (hyper-connections, compressed-KV MQA, streamed experts, MTP) | `llm/deepseek4/` |
 | `llm.inkling` | `model`, `mmproj`, `chat` — Inkling (hybrid SWA/global rel-bias attention, shortconv sites, sink-shared MoE; hMLP vision + dMel audio towers) | `llm/inkling/` |
+| `llm.research` | the research tier under one namespace: `subq` (decode-path attention evaluator; installs through `runner.AttentionOverride`), `engram` (conditional n-gram memory; grafts through the qwen3 trainer's `residual_hook`), `shine`/`shine_train` (context-to-LoRA adapters; served by `llm.qwen3.shine_serving`), `kimi3.model` (Kimi-K3: KDA + gated-MLA-NoPE hybrid, latent MoE, attention residuals, SiTU) | `llm/subq.zig`, `llm/engram.zig`, `llm/qwen3/shine*.zig`, `llm/kimi3/` |
 
 | Flat helper | Purpose | Section |
 |---|---|---|
@@ -11262,7 +11274,7 @@ family-agnostic helpers stay flat:
 | `llm.chat` | templates + generic `Conversation(Model, Tok)` | §13.8 |
 | `llm.cartridge` | trained KV-prefix corpus compression (Cartridges, arXiv 2506.06266) | §13.10 |
 | `llm.cartridge_fleet` | per-document cartridge fleets: manifest, RAM/disk budget manager, cosine chunk index (Cartridges at Scale, arXiv 2606.04557) | §13.10 |
-| `llm.engram` | conditional n-gram memory: hashed-lookup embedding tables grafted onto a frozen model (Engram, arXiv 2601.07372) | §13.11 |
+| `llm.research.engram` | conditional n-gram memory: hashed-lookup embedding tables grafted onto a frozen model (Engram, arXiv 2601.07372) | §13.11 |
 | `llm.serving` | the serving band: the contract (`GenerateRequest`/`GenerateResult`, `Caps`, the per-family `Backend` vtable), the HTTP transport (`serving.http`/`scheduler`/`emitter` + the OpenAI/Anthropic dialects and hermes tool calling), the generic `GgufChatBackend` engine, and the `serving.open` load-and-serve entry (`examples/lmserve` is the CLI front end) | §13.13 |
 | `llm.runner` | the descriptor runner (experimental tier): one family-independent decoder driven by a runtime `Descriptor` with two block styles (fused qwen3-shape, host_reference GLM/DeepSeek-MoE shape); the qwen3 family and the glm4moe trunk run on it; recorded-golden gates in `runner_tests.zig` (real 0.6B chains + logit fingerprints, synthetic MoE and glm fixtures) | `docs/RUNNER.md` |
 
@@ -11565,25 +11577,32 @@ the `fucina.ExpertStore` with the stream policy —
 reads, `uncached` streamed reads (macOS `F_NOCACHE`; keeps expert
 streaming from churning the page cache backing the mmapped dense
 weights), and `pilot` router-lookahead prefetch — and adds each
-`mirror_paths` entry as a weighted read mirror (`mirror_weights`;
-`parseMirrorWeights` parses the runners' shared `--moe-mirror-weights=`
-comma list against the `--moe-mirror` count). `cacheRouteSel(gate,
-choice, sel)` applies the store's resident-preferring top-k selection
-when the layer streams from a store opened with `cache_route`
-(quality-affecting, opt-in: `route_sacred` true top ranks are always
-taken, `route_window` bounds the resident-preferring fill) and returns
-false when the caller keeps its plain top-k.
+`mirror_paths` entry as a weighted read mirror (`mirror_weights`).
+
+The routing policy lives in `llm.moe_router`:
+`cacheRouteSel(gate, choice, sel)` applies the store's
+resident-preferring top-k selection when the layer streams from a store
+opened with `cache_route` (quality-affecting, opt-in: `route_sacred`
+true top ranks are always taken, `route_window` bounds the
+resident-preferring fill) and returns false when the caller keeps its
+plain top-k; `pilotHintTopK(ctx, nrm, router, top_k, store, layer_i)` is
+the router-lookahead tail the streamed decoders share.
+
+The runner CLI seam lives in `llm.moe_stream_cli`:
 `reportAndSaveMoeStream(store, learn, writer)` is the runners' exit-time
 report — stream, pilot, prefetch, cache-route, and mirror stats — and
-persists the usage histogram that seeds the next load's pinned tier.
+persists the usage histogram that seeds the next load's pinned tier;
+`parseMirrorWeights` parses the runners' shared `--moe-mirror-weights=`
+comma list against the `--moe-mirror` count.
 `MoeStreamCli` is the runners' shared argv seam for the seven common
 `--moe-*` flags (`--moe-stream`, `--moe-cache-mb=`, `--moe-mirror=`,
 `--moe-mirror-weights=`, `--moe-uncached`, `--moe-io-threads=`,
 `--moe-trace=PATH`):
 `tryParse(arg)` consumes exactly those (false = not a shared flag, the
 caller keeps its family-specific flags and unknown-flag error) and
-`options(gguf_path)` assembles the `MoeStreamOptions` (null when nothing
-armed streaming; the result borrows the CLI struct's mirror buffers).
+`options(gguf_path)` assembles the `fucina.weights.MoeStreamOptions`
+(null when nothing armed streaming; the result borrows the CLI struct's
+mirror buffers).
 Family-specific levers — `--moe-pilot`, the cache-route trio, the
 pinned-tier knobs — stay in the runners, which arm streaming via `armed`
 and set their fields on the returned options.
@@ -13403,12 +13422,13 @@ reference mechanism (forward + every gradient) is pinned by
 implementation; integer geometry compares EXACTLY, floats under the
 shared golden tolerance). Design record: `docs/ENGRAM.md`.
 
-The qwen3 trainer carries the graft seam: `ForwardOptions.engram =
-.{ .model, .rows }` injects each configured layer's memory output into
-the residual stream before attention (plain path only; composes with
-`cartridge`; rejected with `packed_segments` — the ShortConv is causal
-over the packed row), and `lossForwardExt(ctx, tokens, labels, fwd,
-loss_opts)` is the CE loss entry taking full `ForwardOptions`.
+The qwen3 trainer carries the graft seam: `engram.ResidualGraft{ .model,
+.rows }` adapts the module to `ForwardOptions.residual_hook`
+(`fwd.residual_hook = adapter.hook()`), injecting each configured layer's
+memory output into the residual stream before attention (plain path only;
+composes with `cartridge`; rejected with `packed_segments` — the ShortConv
+is causal over the packed row), and `lossForwardExt(ctx, tokens, labels,
+fwd, loss_opts)` is the CE loss entry taking full `ForwardOptions`.
 `examples/engram/main.zig` (`zig build engram`,
 [README](../examples/engram/README.md)) drives it: `--equiv`
 (bitwise zero-init gate on a real GGUF), `--train`/`--eval` (frozen
@@ -13423,7 +13443,7 @@ test "engram: hashed n-gram memory with a zero-init graft gate" {
     ctx.init(alloc);
     defer ctx.deinit();
 
-    const cfg = llm.engram.Config{
+    const cfg = llm.research.engram.Config{
         .hidden_size = 8,
         .hc_mult = 1,
         .n_embed_per_ngram = 4,
@@ -13432,7 +13452,7 @@ test "engram: hashed n-gram memory with a zero-init graft gate" {
         .kernel_size = 2,
         .pad_id = 0,
     };
-    var plan = try llm.engram.HashPlan.init(alloc, cfg, &.{0}, 42, null);
+    var plan = try llm.research.engram.HashPlan.init(alloc, cfg, &.{0}, 42, null);
     defer plan.deinit();
 
     // Addresses are a pure function of token ids — known pre-forward.
@@ -13441,7 +13461,7 @@ test "engram: hashed n-gram memory with a zero-init graft gate" {
     try plan.hashInto(0, &ids, &rows);
     for (rows) |row| try std.testing.expect(row < plan.table_rows[0]);
 
-    var layer = try llm.engram.Layer.initRandom(&ctx, alloc, cfg, plan.table_rows[0], 7, .{ .graft_zero_init = true });
+    var layer = try llm.research.engram.Layer.initRandom(&ctx, alloc, cfg, plan.table_rows[0], 7, .{ .graft_zero_init = true });
     defer layer.deinit();
 
     var hidden = try fucina.Tensor(.{ .seq, .d }).fromSlice(&ctx, .{ 5, 8 }, &([_]f32{0.25} ** 40));
@@ -13548,7 +13568,10 @@ duck-typed model surface `chat.Conversation` consumes, swapped per
 request by the single inference worker. Zero context tokens, zero prefix
 rows; lmserve's slot reuse stays keyed by selection, so only
 same-adapter KV is ever adopted or prefix-shared
-([`examples/lmserve/README.md`](../examples/lmserve/README.md)).
+([`examples/lmserve/README.md`](../examples/lmserve/README.md)). The
+library entry behind the flag is `llm.qwen3.shine_serving.open` /
+`openFromFile` (§13.13), `serving.open`'s counterpart with the fleet
+directory as an explicit argument.
 
 Base-format guidance: prefer a bf16 or f32 base for adapter GENERATION —
 the f16 GEMM path also rounds activations, and hypernetwork outputs can
@@ -13671,8 +13694,11 @@ diffusion-gemma, inkling, qwen35/qwen35moe and deepseek4 return
 to `open` for the rest. `OpenOptions` carries the engine surface
 (`context_len`, `spec`, `batch`, `experts_borrow`, `kv_slots` +
 `kv_slots_force`, `kv_cache_dir` + `kv_disk_slots`, `cartridge_path`,
-`fleet_dir`/`shine_fleet_dir` + the `rag_*` knobs); excluded combinations
-return `error.InvalidOptions`. `serving.openFromFile` is the same entry
+`fleet_dir` + the `rag_*` knobs); excluded combinations
+return `error.InvalidOptions`. SHINE adapter fleets are served by
+`llm.qwen3.shine_serving.open`/`openFromFile` (§13.12), which mirror
+these entries with the fleet directory as an explicit argument and share
+`OpenOptions`. `serving.openFromFile` is the same entry
 over an already-loaded `fucina.gguf.File` (it takes ownership of the file
 on every path); `serving.samplingFromGguf` reads the GGUF-recommended
 `general.sampling.*` block. `stderr` is the diagnostic sink for guard
@@ -13710,16 +13736,17 @@ libc probe, so the llm root stays libc-free.
 ## 14. Model families and example applications
 
 The `fucina_llm` module root (`src/llm.zig`) exposes each model family as a
-namespace — `llm.qwen3.{model,train}`, `llm.kimi3.model`,
+namespace — `llm.qwen3.{model,train}`,
 `llm.qwen35.{model,chat}`,
 `llm.gemma.{model,train,moe}`,
 `llm.diffusion_gemma.model`, `llm.deepseek2.model`, `llm.glm4moe.model`,
 `llm.deepseek4.model`, `llm.inkling.{model,mmproj,chat}`, `llm.parakeet.*`,
-`llm.speculative.*` — while the
+`llm.speculative.*`, plus the research tier under `llm.research.*`
+(`subq`, `engram`, `shine`/`shine_train`, `llm.research.kimi3.model`) — while the
 generic helpers (`fucina.weights`, `llm.kv_cache`, `llm.kv_persist`, `llm.tokenizer`,
 `llm.spm_tokenizer`, `llm.sampler`, `llm.logit_processor`, `llm.llguidance`,
 `llm.chat`, `llm.data`, `fucina.gguf_meta`, `fucina.ptqtp_gguf`, `llm.cartridge`,
-`llm.cartridge_fleet`, `llm.engram`,
+`llm.cartridge_fleet`,
 `llm.unicode_categories`) stay flat and are covered in §13. This section
 documents the per-family model
 APIs, their runner CLIs, and the example applications under `examples/`.
@@ -14027,15 +14054,16 @@ pub fn Trainer(comptime targets: Targets) type
 Module-level symbols: `Error` (`MoeUnsupported`, `ExecScopeRequired`,
 `InvalidSequenceLength`, `LabelLengthMismatch`, `InvalidLayerRange`,
 `InvalidInjection`, `InvalidCartridge`, `InvalidCapture`, `InvalidPacking`,
-`InvalidEngram`, `CartridgeCheckpointUnsupported`), `Targets`,
+`CartridgeCheckpointUnsupported`), `Targets`,
 `ignore_index`, `ModelLayer` (alias of the exported `qwen3.Layer` —
 the model's per-block layer type), `Hidden`
 (`fucina.Tensor(.{ .seq, .embed })`), `Injection` (`{ pos, row }` — a
 differentiable single-row embedding override), `ForwardOptions`
 (`{ start_layer = 0, layer_count = null, inject = null }` plus the
-cartridge/engram fields — `cartridge`, `cartridges`, `capture`,
-`packed_segments`, `engram` — and the module-level
-`KvCapture`/`EngramOptions`, all §13.10-§13.11 material).
+cartridge fields — `cartridge`, `cartridges`, `capture`,
+`packed_segments` — and `residual_hook`, the type-erased research seam
+`llm.research.engram.ResidualGraft` adapts to; the module-level
+`KvCapture`/`ResidualHook`, all §13.10-§13.11 material).
 
 `Trainer(targets)` members: `init(ctx, model, lora.Config, seed)` /
 `deinit`; `registerAllParams(opt)` (registers every A/B under

@@ -12,7 +12,7 @@ const fucina = @import("fucina");
 const llm = @import("fucina_llm");
 const util = @import("util.zig");
 
-const shine = llm.qwen3.shine;
+const shine = llm.research.shine;
 const qwen3 = llm.qwen3.model;
 
 pub fn run(

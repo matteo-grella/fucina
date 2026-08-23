@@ -43,7 +43,7 @@ test "public facade exports safetensors codec" {
 
 test "public facade exports training checkpoint helper" {
     try std.testing.expect(@hasDecl(fucina, "training_checkpoint"));
-    try std.testing.expect(@hasDecl(fucina.training_checkpoint, "TrainerState"));
+    try std.testing.expect(@hasDecl(fucina.training_checkpoint, "saveTrainerState"));
     try std.testing.expect(@hasDecl(fucina.training_checkpoint, "optimizer_state_file"));
 }
 

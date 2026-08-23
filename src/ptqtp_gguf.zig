@@ -43,7 +43,7 @@ const weights = @import("weights.zig");
 const Allocator = std.mem.Allocator;
 const ExecContext = exec_mod.ExecContext;
 const MoeRhs = exec_mod.ExecContext.MoeRhs;
-const expert_store = exec_mod.expert_store;
+const expert_store = @import("store/expert_store.zig");
 const LinearWeight = weights.LinearWeight;
 
 pub const Error = error{

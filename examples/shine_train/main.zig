@@ -20,8 +20,8 @@ const fucina = @import("fucina");
 const llm = @import("fucina_llm");
 
 const optim = fucina.optim;
-const shine = llm.qwen3.shine;
-const shine_train = llm.qwen3.shine_train;
+const shine = llm.research.shine;
+const shine_train = llm.research.shine_train;
 
 const Triple = struct {
     evidence: []const usize,

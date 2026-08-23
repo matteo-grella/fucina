@@ -43,6 +43,7 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
+const qwen3_train = @import("qwen3/train.zig");
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
@@ -880,6 +881,52 @@ pub const Engram = struct {
         if (data.len == self.plan.multipliers.len) {
             @memcpy(self.plan.multipliers, data);
         }
+    }
+};
+
+/// Adapter for the qwen3 trainer's `residual_hook` seam
+/// (`qwen3_train.ForwardOptions.residual_hook`): before each layer the
+/// engram plan lists, the layer's memory output is added to the residual
+/// stream (`hidden += engram(hidden, rows)`, the reference block order,
+/// ahead of attention). `rows[slot]` holds the precomputed table-row
+/// indices for the batch at plan slot `slot` (`HashPlan.compressInto` +
+/// `hashInto`; pure host work, once per sequence). Hashing depends only on
+/// token ids, so the graft composes with `cartridge` (positions shift, ids
+/// do not). Borrowed: `model` and `rows` must outlive every forward driven
+/// through the hook.
+pub const ResidualGraft = struct {
+    model: *const Engram,
+    rows: []const []const usize,
+
+    pub fn hook(self: *const ResidualGraft) qwen3_train.ResidualHook {
+        return .{ .ctx = self, .validate = validate, .call = call };
+    }
+
+    fn validate(ptr: *const anyopaque, hidden_size: usize, n_layers: usize, seq: usize) anyerror!void {
+        const self: *const ResidualGraft = @ptrCast(@alignCast(ptr));
+        const ecfg = &self.model.plan.cfg;
+        if (ecfg.hc_mult != 1 or ecfg.hidden_size != hidden_size) return error.InvalidEngram;
+        if (self.rows.len != self.model.layers.len) return error.InvalidEngram;
+        const want = seq * ecfg.headsPerLayer();
+        for (self.rows) |layer_rows| {
+            if (layer_rows.len != want) return error.InvalidEngram;
+        }
+        for (self.model.plan.layer_ids) |id| {
+            if (id >= n_layers) return error.InvalidEngram;
+        }
+    }
+
+    fn call(ptr: *const anyopaque, ctx: *ExecContext, hidden: *const fucina.Tensor(.{ .seq, .embed }), layer_i: usize) anyerror!?fucina.Tensor(.{ .seq, .embed }) {
+        const self: *const ResidualGraft = @ptrCast(@alignCast(ptr));
+        const slot = self.model.plan.slotOf(layer_i) orelse return null;
+        // hidden += engram(hidden, rows): zero-copy retags bridge the
+        // trainer's .embed tag to the module's .d; the trainer performs
+        // the add on the returned tensor.
+        var q = try hidden.withTags(ctx, .{ .seq, .d });
+        defer q.deinit();
+        var mem = try self.model.layers[slot].forwardResidual(ctx, &q, self.rows[slot], null);
+        defer mem.deinit();
+        return try mem.withTags(ctx, .{ .seq, .embed });
     }
 };
 

@@ -26,6 +26,7 @@ const llm = @import("fucina_llm");
 
 const optim = fucina.optim;
 const training_checkpoint = fucina.training_checkpoint;
+const TrainerState = llm.trainer_state.TrainerState;
 
 const default_model = "models/Qwen3-0.6B-Q4_K_S.gguf";
 const default_save = "/tmp/fucina-qwen3-lora";
@@ -253,7 +254,7 @@ pub fn main(init: std.process.Init) !void {
     defer set.deinit();
     try set.add(&opt);
 
-    var restored_state: ?training_checkpoint.TrainerState = null;
+    var restored_state: ?TrainerState = null;
     if (load_path) |path| {
         const state = try loadFinetuneCheckpoint(allocator, io, path, &trainer, &set, &opt);
         rank = @intCast(state.lora_rank orelse rank);
@@ -474,7 +475,7 @@ fn saveFinetuneCheckpoint(
     };
     try training_checkpoint.writeFileAtomic(io, optimizer_path, set, SaveOptimizer.write);
 
-    try training_checkpoint.saveTrainerState(allocator, io, dir_path, .{
+    try training_checkpoint.saveTrainerState(allocator, io, dir_path, TrainerState{
         .step = trainer.step_counter,
         .seed = trainer.seed,
         .lora_rank = @intCast(trainer.lora_config.rank),
@@ -501,8 +502,8 @@ fn loadFinetuneCheckpoint(
     trainer: *Trainer,
     set: *optim.OptimizerSet,
     opt: *optim.AdamW,
-) !training_checkpoint.TrainerState {
-    const state = try training_checkpoint.loadTrainerState(allocator, io, dir_path);
+) !TrainerState {
+    const state = try training_checkpoint.loadTrainerState(TrainerState, allocator, io, dir_path);
     const saved_rank = state.lora_rank orelse return error.CheckpointConfigMismatch;
     if (saved_rank != trainer.lora_config.rank) return error.CheckpointConfigMismatch;
     const saved_alpha: f32 = @floatCast(state.lora_alpha orelse return error.CheckpointConfigMismatch);

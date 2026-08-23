@@ -8,6 +8,12 @@ for later planning, fusion, or replay. This document describes the completion
 and storage protocol that removes the old per-call host stall while preserving
 that model.
 
+The provider is selected at build time (`-Dgpu=metal` / `-Dgpu=cuda`); the
+default `-Dgpu=none` resolves to the null provider
+(`src/backend/gpu_none.zig`, `enabled = false`, every capability false),
+so a CPU-only build semantically analyzes neither real provider and every
+offload call site comptime-elides.
+
 ## The contract
 
 The old provider contract was synchronous: encode/launch, wait for the whole

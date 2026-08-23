@@ -222,9 +222,9 @@ pub const MoeBatchProfile = exec.MoeBatchProfile;
 /// Gated-activation selector for the fused gate/up FFN kernels (silu/gelu variants).
 pub const GatedOp = exec.GatedOp;
 /// Disk-backed MoE expert streaming: the store, its cache tiers, and the ProjSpec plumbing.
-pub const expert_store = exec.expert_store;
+pub const expert_store = @import("store/expert_store.zig");
 /// The streaming MoE expert store (LRU RAM cache over disk-resident expert blocks).
-pub const ExpertStore = exec.expert_store.ExpertStore;
+pub const ExpertStore = expert_store.ExpertStore;
 /// Options for the router top-k kernel (normalization of the selected weights).
 pub const RouterTopKOptions = exec.RouterTopKOptions;
 /// Options for `standardize` (eps mode, accumulation dtype).
@@ -308,6 +308,7 @@ pub const internal = struct {
 
 test {
     _ = streamconv;
+    _ = expert_store;
     _ = tuning;
     _ = dtype;
     _ = storage;

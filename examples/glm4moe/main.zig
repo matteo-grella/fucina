@@ -23,7 +23,7 @@ pub fn main(init: std.process.Init) !void {
 
     var prompt_text: []const u8 = "The capital of France is";
     var gen_count: usize = 32;
-    var moe_cli: fucina.weights.MoeStreamCli = .{};
+    var moe_cli: llm.moe_stream_cli.MoeStreamCli = .{};
     var moe_cache_route = false;
     var moe_route_j: usize = 2;
     var moe_route_m: usize = 12;
@@ -54,7 +54,7 @@ pub fn main(init: std.process.Init) !void {
             // at seq >= 48) that bound losslessness.
             mtp_depth = @min(try std.fmt.parseInt(usize, arg["--mtp=".len..], 10), 8);
         } else if (try moe_cli.tryParse(arg)) {
-            // Shared streamed-experts flags (fucina.weights.MoeStreamCli).
+            // Shared streamed-experts flags (llm.moe_stream_cli.MoeStreamCli).
         } else if (std.mem.eql(u8, arg, "--moe-cache-route")) {
             // Cache-aware near-tie routing (QUALITY-AFFECTING, opt-in):
             // prefer already-resident experts among the top-M ranks.
@@ -96,7 +96,7 @@ pub fn main(init: std.process.Init) !void {
     // else: stdout's positional writes and stderr's offset-advancing writes
     // cannot safely share one redirected file (`cmd > f 2>&1` interleaves
     // destructively), so a std.debug stats line would get overwritten.
-    defer if (model.expert_store) |store| fucina.weights.reportAndSaveMoeStream(store, true, stdout);
+    defer if (model.expert_store) |store| llm.moe_stream_cli.reportAndSaveMoeStream(store, true, stdout);
     const bos: ?u32 = tokenizer.bosId();
     const eos = tokenizer.eosId();
     file.deinit();

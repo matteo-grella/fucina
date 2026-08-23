@@ -105,7 +105,7 @@ see `RUNNING-MODELS.md` §Streaming.
   sum-of-plane-dots the dense PTQTP linear does (tie-fitted K=2 stacks:
   the same one-pass folded dot), and the streamed path is bit-identical
   to resident (both pinned by tests in
-  `src/exec/expert_store_tests.zig`).
+  `src/store/expert_store_tests.zig`).
 - **Mixed files are fine**: quantize one layer, a subset of projections,
   or everything; decorated and undecorated tensors serve side by side.
 - **K per use case**: K=1 for maximum-compression experiments, K=2 as

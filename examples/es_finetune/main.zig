@@ -58,6 +58,7 @@ const llm = @import("fucina_llm");
 
 const es = fucina.es;
 const training_checkpoint = fucina.training_checkpoint;
+const TrainerState = llm.trainer_state.TrainerState;
 
 const default_model = "models/Qwen3-0.6B-Q4_K_S.gguf";
 const default_save = "/tmp/fucina-qwen3-es";
@@ -292,7 +293,7 @@ fn runEs(
     // CLI flags don't; after the load theta is no longer theta_0).
     if (opts.anchor_decay != .none or opts.load_path != null) try es_trainer.captureAnchor();
 
-    var restored_state: ?training_checkpoint.TrainerState = null;
+    var restored_state: ?TrainerState = null;
     if (opts.load_path) |path| {
         restored_state = try loadEsCheckpoint(TrainerT, mode, allocator, io, path, &trainer, &full_registry, &es_trainer);
         try stdout.print("resumed checkpoint from {s} (iteration {d}, seed {d})\n", .{
@@ -714,7 +715,7 @@ fn saveEsCheckpoint(
         },
     }
 
-    try training_checkpoint.saveTrainerState(allocator, io, dir_path, .{
+    try training_checkpoint.saveTrainerState(allocator, io, dir_path, TrainerState{
         .step = es_trainer.iteration,
         .seed = es_trainer.config.seed,
         .lora_rank = if (mode == .lora) @as(u64, @intCast(trainer.lora_config.rank)) else null,
@@ -753,8 +754,8 @@ fn loadEsCheckpoint(
     trainer: *TrainerT,
     full_registry: *fucina.ParamRegistry,
     es_trainer: *es.Trainer,
-) !training_checkpoint.TrainerState {
-    const state = try training_checkpoint.loadTrainerState(allocator, io, dir_path);
+) !TrainerState {
+    const state = try training_checkpoint.loadTrainerState(TrainerState, allocator, io, dir_path);
 
     // ES stream continuity: (seed, iteration, population, noise scheme)
     // regenerate the member seeds and noise, so the checkpoint wins over the

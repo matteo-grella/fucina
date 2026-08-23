@@ -1,5 +1,5 @@
 //! Behavioral tests for the disk-streamed MoE expert tier
-//! (`exec/expert_store.zig` + the `MoeRhs.streamed` arm): the streamed path
+//! (`store/expert_store.zig` + the `MoeRhs.streamed` arm): the streamed path
 //! must be BIT-EXACT vs the resident path (same blocks, same kernels — any
 //! difference is a resolve/geometry bug), across cold misses, warm hits, LRU
 //! eviction, and batched prefill whose active set overflows the cache. Plus

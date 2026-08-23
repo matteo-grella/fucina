@@ -4,22 +4,15 @@
 //! Model I/O (weights containers, PTQTP sidecars, GGUF metadata) is core:
 //! `fucina.weights` / `fucina.ptqtp_gguf` / `fucina.gguf_meta` (aliased here).
 
-/// SubQ attention: research decode-path evaluator (docs/SUBQUADRATIC-ATTENTION.md).
-pub const subq = @import("llm/subq.zig");
-
 /// Qwen3 dense + LoRA fine-tuning. Files in `llm/qwen3/`.
 pub const qwen3 = struct {
     pub const model = @import("llm/qwen3/model.zig");
     pub const train = @import("llm/qwen3/train.zig");
     pub const ptqtp = @import("llm/qwen3/ptqtp.zig");
     pub const generate = @import("llm/qwen3/generate.zig");
-    pub const shine = @import("llm/qwen3/shine.zig");
-    pub const shine_train = @import("llm/qwen3/shine_train.zig");
-};
-/// Kimi-K3 (Kimi-Linear lineage: KDA + Gated-MLA-NoPE hybrid, latent MoE,
-/// attention residuals, SiTU). Files in `llm/kimi3/`.
-pub const kimi3 = struct {
-    pub const model = @import("llm/kimi3/model.zig");
+    /// SHINE adapter-fleet serving (`serving.open`'s counterpart for the
+    /// research adapters in `research.shine`).
+    pub const shine_serving = @import("llm/qwen3/shine_serving.zig");
 };
 
 /// Qwen3.5 Gated-DeltaNet hybrid. Files in `llm/qwen35/`.
@@ -36,6 +29,27 @@ pub const gemma = struct {
 /// DiffusionGemma block text-diffusion (gemma4 backbone). Files in `llm/diffusion_gemma/`.
 pub const diffusion_gemma = struct {
     pub const model = @import("llm/diffusion_gemma/model.zig");
+};
+/// Research tier: evaluators and memory modules that install into the
+/// production forwards through typed seams (`runner.AttentionOverride`,
+/// `qwen3.train.ResidualHook`), plus the model ports kept for study.
+/// Stability: experimental (CHANGELOG.md tiers).
+pub const research = struct {
+    /// SubQ attention: decode-path evaluator (docs/SUBQUADRATIC-ATTENTION.md);
+    /// installs through `runner.AttentionOverride`.
+    pub const subq = @import("llm/subq.zig");
+    /// Engram conditional n-gram memory (docs/ENGRAM.md); grafts through
+    /// the qwen3 trainer's `residual_hook` seam (`ResidualGraft`).
+    pub const engram = @import("llm/engram.zig");
+    /// SHINE context-to-LoRA hypernetwork and its trainer (qwen3 dense);
+    /// served through `qwen3.shine_serving`.
+    pub const shine = @import("llm/qwen3/shine.zig");
+    pub const shine_train = @import("llm/qwen3/shine_train.zig");
+    /// Kimi-K3 (Kimi-Linear lineage: KDA + Gated-MLA-NoPE hybrid, latent
+    /// MoE, attention residuals, SiTU). Files in `llm/kimi3/`.
+    pub const kimi3 = struct {
+        pub const model = @import("llm/kimi3/model.zig");
+    };
 };
 /// Parakeet ASR (NeMo FastConformer/RNN-T). Files in `llm/parakeet/`.
 pub const parakeet = struct {
@@ -98,11 +112,19 @@ pub const inkling = struct {
 // `fucina.ptqtp_gguf` / `fucina.gguf_meta`).
 pub const cartridge = @import("llm/cartridge.zig");
 pub const cartridge_fleet = @import("llm/cartridge_fleet.zig");
-pub const engram = @import("llm/engram.zig");
 /// The family-independent half of a LoRA trainer: target selection, the
 /// per-layer adapter set, its A/B tuple, and the dropout seed stream. The
 /// qwen3 and gemma trainers instantiate it and add their own forward.
 pub const lora_trainer = @import("llm/lora_trainer.zig");
+/// Shared `--moe-*` argv parser and exit-time report for the streamed-MoE
+/// runner CLIs; the options struct it fills is core
+/// (`fucina.weights.MoeStreamOptions`).
+pub const moe_stream_cli = @import("llm/moe_stream_cli.zig");
+/// The LLM trainers' checkpoint resume state; the save/load frame is core
+/// (`fucina.training_checkpoint`, generic over the state struct).
+pub const trainer_state = @import("llm/trainer_state.zig");
+/// Cache-aware expert routing policy shared by the streamed-MoE decoders.
+pub const moe_router = @import("llm/moe_router.zig");
 pub const kv_cache = @import("llm/kv_cache.zig");
 /// Greedy generation driver over any tensor-band model (duck-typed on
 /// `forwardStep` + `KvCache`); family modules re-export or wrap it.
@@ -135,13 +157,14 @@ pub const unicode_categories = @import("llm/unicode_categories.zig");
 
 test {
     _ = runner;
-    _ = kimi3.model;
+    _ = research.kimi3.model;
     _ = qwen3.model;
     _ = qwen3.train;
     _ = qwen3.ptqtp;
     _ = qwen3.generate;
-    _ = qwen3.shine;
-    _ = qwen3.shine_train;
+    _ = qwen3.shine_serving;
+    _ = research.shine;
+    _ = research.shine_train;
     _ = qwen35.model;
     _ = qwen35.chat;
     _ = gemma.model;
@@ -176,8 +199,11 @@ test {
     _ = inkling.chat;
     _ = cartridge;
     _ = cartridge_fleet;
-    _ = engram;
+    _ = research.engram;
     _ = lora_trainer;
+    _ = moe_stream_cli;
+    _ = trainer_state;
+    _ = moe_router;
     _ = kv_cache;
     _ = kv_persist;
     _ = tokenizer;
@@ -194,5 +220,5 @@ test {
     _ = serving.http;
     _ = serving.toolcall;
     _ = data;
-    _ = subq;
+    _ = research.subq;
 }

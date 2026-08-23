@@ -25,6 +25,7 @@ const std = @import("std");
 const fucina = @import("fucina");
 const weights = @import("fucina").weights;
 const model_common = @import("../model_common.zig");
+const moe_router = @import("../moe_router.zig");
 const kv_cache = @import("../kv_cache.zig");
 const gguf_meta = @import("fucina").gguf_meta;
 
@@ -277,7 +278,6 @@ fn readSections(file: *const gguf.File, arch: []const u8) [4]i32 {
 /// (`suffix = "_shexp"`, its own width).
 const FfnInputProjection = model_common.FfnInputProjection;
 const DenseFfn = model_common.DenseFfn;
-
 
 /// Routed MoE FFN (qwen35moe): softmax router over `num_experts` with
 /// renormalized top-k SwiGLU expert mixture, plus a shared expert (a dense
@@ -1060,7 +1060,6 @@ fn partialRope(ctx: *ExecContext, x: anytype, n_rot: usize, table: *const fucina
     if (n_rot != table.feature_dim) return Error.InvalidConfig;
     return x.rope(ctx, .seq, .d, table, .half);
 }
-
 
 /// One full-attention block: returns `input + attn_out`. Fused Q+gate
 /// projection (per head: [query | gate]), per-head q/k RMSNorm, partial RoPE,
@@ -2122,7 +2121,7 @@ fn pilotPrefetchNext(
     };
     var nrm = try x.rmsNormMul(ctx, .embed, post_norm, cfg.rms_norm_eps);
     defer nrm.deinit();
-    try weights.pilotHintTopK(ctx, &nrm, &moe.router, cfg.num_experts_used, store, next_layer_i);
+    try moe_router.pilotHintTopK(ctx, &nrm, &moe.router, cfg.num_experts_used, store, next_layer_i);
 }
 
 test "qwen35 Config.isRecurrent + derived dims (0.8B shape)" {

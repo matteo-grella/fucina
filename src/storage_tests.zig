@@ -128,7 +128,7 @@ test "waitReady completes a pending work exactly once under concurrent readers" 
 }
 
 /// Short cross-platform sleep for the dwell above (no std.Thread.sleep in
-/// this std; the syscall detour mirrors exec/expert_store.zig).
+/// this std; the syscall detour mirrors store/expert_store.zig).
 fn sleepMicros(us: u64) void {
     switch (@import("builtin").os.tag) {
         .linux => {

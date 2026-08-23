@@ -2,8 +2,9 @@
 //!
 //! Prefills `--prefill` tokens densely from a `--tokens-u32` dump, then runs
 //! `--decode` greedy steps twice — once through the ordinary dense decode
-//! path and once through `forwardStepSubq` — reporting wall-clock tok/s and
-//! the greedy-token agreement between the two runs. Research measurement
+//! path and once with the SubQ evaluator installed on the model's
+//! `attention_override` seam — reporting wall-clock tok/s and the
+//! greedy-token agreement between the two runs. Research measurement
 //! tool; per-head thresholds load from the Gate C calibration JSON.
 
 const std = @import("std");
@@ -147,13 +148,13 @@ pub fn main(init: std.process.Init) !void {
     for (mode_start..2) |mode| {
         var kv = try model.initKvCache(&ctx, prefill + decode + 8);
         defer kv.deinit();
-        var sq = try llm.subq.State.init(
+        var sq = try llm.research.subq.State.init(
             allocator,
             config.num_layers,
             config.num_attention_heads,
             config.num_key_value_heads,
             config.head_dim,
-            .{ .tau_default = tau_default, .rebuild_interval = rebuild, .cluster_size = cluster, .rank = rank, .packed_format = if (packed_q8) .q8_0 else if (packed_f16) .f16 else (llm.subq.Config{}).packed_format, .hierarchical = hier },
+            .{ .tau_default = tau_default, .rebuild_interval = rebuild, .cluster_size = cluster, .rank = rank, .packed_format = if (packed_q8) .q8_0 else if (packed_f16) .f16 else (llm.research.subq.Config{}).packed_format, .hierarchical = hier },
         );
         defer sq.deinit();
         sq.serial = serial;
@@ -164,6 +165,11 @@ pub fn main(init: std.process.Init) !void {
         }
 
         var logits = try model.forwardStep(&ctx, &kv, prompt, 0);
+        // Installed AFTER the dense prefill (both arms prefill identically):
+        // the subq arm decodes through the research seam, the dense arm
+        // runs the stock kernels with the seam cleared.
+        model.attention_override = if (mode == 1) llm.research.subq.attentionOverride(&sq) else null;
+        defer model.attention_override = null;
         var pos: usize = prefill;
         if (mode == 1 and calibrate_n > 0) try sq.startCalibration(calib_tol);
         var t0 = std.Io.Clock.awake.now(init.io).nanoseconds;
@@ -190,10 +196,7 @@ pub fn main(init: std.process.Init) !void {
             const feed = if (mode == 0) next else generated_dense[step];
             const one = [_]usize{feed};
             const step_t0 = std.Io.Clock.awake.now(init.io).nanoseconds;
-            logits = if (mode == 0)
-                try model.forwardStep(&ctx, &kv, &one, pos)
-            else
-                try model.forwardStepSubq(&ctx, &kv, &one, pos, &sq);
+            logits = try model.forwardStep(&ctx, &kv, &one, pos);
             if (step == 0) first_step_ns = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds - step_t0);
             pos += 1;
         }

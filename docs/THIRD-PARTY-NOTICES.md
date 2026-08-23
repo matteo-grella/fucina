@@ -213,7 +213,7 @@ safetensors** (Apache-2.0; independent implementation of the format),
 
 **colibri** ([JustVugg/colibri](https://github.com/JustVugg/colibri),
 Apache-2.0) is a design reference for the out-of-core MoE expert streaming
-(`src/exec/expert_store.zig`): the pinned-set + LRU disk tier, persistent
+(`src/store/expert_store.zig`): the pinned-set + LRU disk tier, persistent
 usage histogram, and router-lookahead prefetch follow its design; no code
 was copied and no output parity exists (Fucina streams ggml quants over its
 own fused kernels; colibri uses its own int4 container).

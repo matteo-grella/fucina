@@ -51,8 +51,8 @@ const RhsLifetime = exec_mod.RhsLifetime;
 const MoeRhs = exec_mod.ExecContext.MoeRhs;
 const MoeBatchProfile = exec_mod.MoeBatchProfile;
 const GatedOp = exec_mod.GatedOp;
-const expert_store = exec_mod.expert_store;
-const ExpertStore = exec_mod.expert_store.ExpertStore;
+const expert_store = @import("store/expert_store.zig");
+const ExpertStore = expert_store.ExpertStore;
 const Tag = @TypeOf(.tag);
 const Allocator = std.mem.Allocator;
 
@@ -1452,41 +1452,12 @@ pub fn loadMoeRhsPtqtp(
     } };
 }
 
-// The streamed-experts configuration band (the options struct and the
-// runners' shared `--moe-*` argv parser) lives in weights/moe_stream.zig;
-// its names stay public here.
+// The streamed-experts options struct lives in weights/moe_stream.zig; the
+// shared `--moe-*` argv parser and the exit-time report belong to the
+// runners (`llm.moe_stream_cli`), the cache-aware routing policy to
+// `llm.moe_router`.
 const moe_stream = @import("weights/moe_stream.zig");
 pub const MoeStreamOptions = moe_stream.MoeStreamOptions;
-pub const MoeStreamCli = moe_stream.MoeStreamCli;
-pub const parseMirrorWeights = moe_stream.parseMirrorWeights;
-
-/// Cache-aware expert selection when `gate` streams from an ExpertStore
-/// that opted into cache routing (`MoeStreamOptions.cache_route`); false =
-/// the caller keeps its plain top-k.
-pub fn cacheRouteSel(gate: *const MoeRhs, choice: []const f32, sel: []usize) bool {
-    return switch (gate.*) {
-        .streamed => |*sw| sw.store.cacheRouteTopK(sw.layer, choice, sel),
-        else => false,
-    };
-}
-
-/// Router-lookahead tail shared by streamed-MoE decoders: score the normed
-/// hidden rows through `router`, take the un-normalized top-k per row, and
-/// hand the selection to the store as a prefetch hint for `layer_i`.
-/// Callers own the family-specific part (finding the next layer's MoE arm
-/// and building `nrm` with that layer's FFN norm).
-pub fn pilotHintTopK(ctx: *ExecContext, nrm: *const Tensor(.{ .seq, .embed }), router: *const LinearWeight, top_k: usize, store: *ExpertStore, layer_i: usize) !void {
-    var logits = try router.linearSeq(ctx, nrm, .embed, .expert);
-    defer logits.deinit();
-    const allocator = ctx.allocator;
-    const seq = nrm.dim(.seq);
-    const sel = try allocator.alloc(usize, seq * top_k);
-    defer allocator.free(sel);
-    const wgt = try allocator.alloc(f32, seq * top_k);
-    defer allocator.free(wgt);
-    try logits.routerTopK(ctx, .expert, top_k, .{ .normalize_selected = false }, sel, wgt);
-    store.pilotHint(layer_i, sel);
-}
 
 /// The store-create block shared by the MoE loaders: expand split-GGUF part
 /// paths (single files pass through as one entry) and open the ExpertStore
@@ -1542,56 +1513,6 @@ pub fn createExpertStore(allocator: Allocator, options: MoeStreamOptions, n_laye
         try store.addMirror(mirror_parts, weight);
     }
     return store;
-}
-
-/// Exit-time streamed-tier report shared by the MoE runners: print the
-/// stats line(s) and persist the usage histogram (the learning cache)
-/// unless `learn` is false. Failures lose only the report/learning.
-pub fn reportAndSaveMoeStream(store: *ExpertStore, learn: bool, writer: anytype) void {
-    if (learn) store.saveUsage() catch {};
-    const s = store.stats;
-    writer.print(
-        "moe stream: {d} acquires, hits {d} / misses {d} ({d:.1}% hit, {d} pin hits), {d:.2} GB read in {d:.2}s, cap {d} slots/layer, pinned {d} experts ({d:.2} GB)\n",
-        .{ s.acquires, s.hits, s.misses, s.hitRate() * 100, s.pin_hits, @as(f64, @floatFromInt(s.bytes_read)) / 1e9, @as(f64, @floatFromInt(s.read_ns)) / 1e9, store.cap, store.pinned_experts, @as(f64, @floatFromInt(store.pinned_bytes)) / 1e9 },
-    ) catch {};
-    if (store.l2_fds.len > 0) writer.print(
-        "moe l2: {d} expert reads served ({d:.2} GB in {d:.2}s thread-aggregate, {d:.2} GB/s), {d} fallbacks\n",
-        .{
-            store.l2_expert_hits.load(.monotonic),
-            @as(f64, @floatFromInt(store.l2_bytes.load(.monotonic))) / 1e9,
-            @as(f64, @floatFromInt(store.l2_read_ns.load(.monotonic))) / 1e9,
-            @as(f64, @floatFromInt(store.l2_bytes.load(.monotonic))) / @max(1.0, @as(f64, @floatFromInt(store.l2_read_ns.load(.monotonic)))),
-            store.l2_fallbacks.load(.monotonic),
-        },
-    ) catch {};
-    if (s.pilot_recall_total > 0) writer.print(
-        "moe pilot: recall {d:.1}% ({d}/{d} routed experts predicted), {d} experts hinted\n",
-        .{ s.pilotRecall() * 100, s.pilot_recall_hits, s.pilot_recall_total, s.pilot_ranges },
-    ) catch {};
-    if (s.staged_loads > 0) writer.print(
-        "moe prefetch: staged {d} loads ({d:.2} GB), consumed {d}, wasted {d}\n",
-        .{ s.staged_loads, @as(f64, @floatFromInt(s.staged_bytes)) / 1e9, s.staged_consumed, s.staged_wasted },
-    ) catch {};
-    if (s.route_slots > 0) writer.print(
-        "moe cache-route: {d} of {d} slots swapped to resident experts ({d:.1}%)\n",
-        .{ s.route_swaps, s.route_slots, s.routeSwapRate() * 100 },
-    ) catch {};
-    if (store.mirrors.len > 0) {
-        var total: u64 = 0;
-        for (store.copy_bytes) |*b| total += b.load(.monotonic);
-        writer.print("moe mirror: {d} copies, reads", .{store.mirrors.len + 1}) catch {};
-        for (store.copy_bytes, 0..) |*b, i| {
-            const bytes = b.load(.monotonic);
-            const pct = if (total == 0) 0 else @as(f64, @floatFromInt(bytes)) / @as(f64, @floatFromInt(total)) * 100;
-            writer.print("{s}{d:.1}% ({d:.2} GB)", .{ if (i == 0) " " else " / ", pct, @as(f64, @floatFromInt(bytes)) / 1e9 }) catch {};
-        }
-        const fallbacks = store.mirror_fallbacks.load(.monotonic);
-        if (fallbacks > 0) {
-            writer.print(", {d} mirror reads fell back to the primary\n", .{fallbacks}) catch {};
-        } else {
-            writer.print("\n", .{}) catch {};
-        }
-    }
 }
 
 /// Streamed counterpart of three `loadMoeRhs` calls: registers one layer's

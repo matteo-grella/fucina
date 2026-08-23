@@ -3,8 +3,9 @@
 //! is the family-named surface over it. `Config` IS `runner.Descriptor`
 //! (qwen3/qwen3moe GGUF metadata fills the `.fused` block style), `Model`
 //! IS `runner.Model` — including the batched decode entries
-//! (`forwardStepBatch`, `forwardStepBatchSpans`) and the SubQ research
-//! seam (`forwardStepSubq`). Family-specific code lives beside this file:
+//! (`forwardStepBatch`, `forwardStepBatchSpans`) and the
+//! `attention_override` research seam. Family-specific code lives beside
+//! this file:
 //! training (`train.zig`), PTQTP decoration (`ptqtp.zig`), greedy
 //! generation (`generate.zig`), SHINE (`shine.zig`).
 //!

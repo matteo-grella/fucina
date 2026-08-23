@@ -15,8 +15,8 @@ this point; earlier history is `git log`.
   vtable), `llm.chat`, `llm.tokenizer`, `llm.kv_cache`.
 - **Experimental** (changelog entry only): `es`, `ptqtp`, `llm.runner`, the `llm.serving` transport/engine
   band (`http`, `scheduler`, `emitter`, wire dialects, `gguf_chat`,
-  `open`), `llm.speculative`, `llm.subq`, the
-  research features under model families (SHINE, cartridges, Engram), and
+  `open`), `llm.speculative`, the `llm.research` namespace (SubQ, Engram,
+  SHINE, kimi3), cartridges, and
   every model family's internal layout.
 
 ## Unreleased
@@ -134,7 +134,7 @@ this point; earlier history is `git log`.
   holds the PTQTP-aware projection loader, the dense-FFN containers, the
   MoE expert-trio loader, the embed/norm/lm-head trio, and the GQA head
   map the runner and qwen35 previously each carried; `weights/moe_stream.zig`
-  holds `MoeStreamOptions` and the `--moe-*` argv band; `exec/moe_gu.zig`'s
+  holds `MoeStreamOptions`; `exec/moe_gu.zig`'s
   packed and raw batch bodies share one chain-wiring skeleton; `optim.zig`
   is a facade over `optim/{common,frame,moment_pair,muon,apollo,sgd,schedule,set}.zig`
   (every `fucina.optim.*` spelling and every checkpoint byte unchanged);
@@ -184,6 +184,52 @@ this point; earlier history is `git log`.
   take `pc: ParallelConfig` first with no `WithConfig` suffix, so
   `native.kernels` is a list of aliases; the Q8_Kx4 lane-dot helpers q4_k
   and q5_k each carried live once in `quant/common.zig`.
+- The research modules live under one namespace, so the facade states the
+  tier: `llm.subq` → `llm.research.subq`, `llm.engram` →
+  `llm.research.engram`, `llm.qwen3.shine`/`llm.qwen3.shine_train` →
+  `llm.research.shine`/`llm.research.shine_train`, `llm.kimi3` →
+  `llm.research.kimi3`.
+- The runner's SubQ entry is a generic seam: `Model.forwardStepSubq(ctx,
+  kv, ids, pos, &sq)` is removed in favor of the type-erased
+  `Model.attention_override` hook: install
+  `model.attention_override = llm.research.subq.attentionOverride(&sq)`
+  and call the stock `forwardStep`. The override receives the same
+  arguments the internal SubQ glue took and returns null to fall through,
+  so numerics are unchanged.
+- The qwen3 trainer's Engram graft is a generic seam:
+  `ForwardOptions.engram = .{ .model, .rows }` (and `EngramOptions`) →
+  `ForwardOptions.residual_hook = adapter.hook()` with
+  `const adapter = llm.research.engram.ResidualGraft{ .model, .rows }`.
+  The hook validates before any compute and adds the same tensor the
+  inline graft added; `error.InvalidEngram` now surfaces from the adapter
+  (it left `qwen3.train.Error`).
+- SHINE fleet serving is its own entry: `serving.OpenOptions.shine_fleet_dir`
+  is removed, and `llm.qwen3.shine_serving.open(ctx, io, allocator,
+  gguf_path, fleet_dir, options, stderr)` / `openFromFile(...)` mirror
+  `serving.open`/`openFromFile` with the fleet directory as an explicit
+  argument (same `OpenOptions`, same `Opened` result).
+- The streamed-experts CLI and routing policy live with the runners:
+  `fucina.weights.MoeStreamCli` / `parseMirrorWeights` /
+  `reportAndSaveMoeStream` → `llm.moe_stream_cli.*`, and
+  `fucina.weights.cacheRouteSel` / `pilotHintTopK` → `llm.moe_router.*`.
+  `fucina.weights.MoeStreamOptions` (the options struct the loaders
+  consume) is unchanged.
+- The trainer resume state is LLM-band:
+  `fucina.training_checkpoint.TrainerState` →
+  `fucina_llm.trainer_state.TrainerState`, and the checkpoint frame is
+  generic over the state struct: `saveTrainerState(allocator, io, dir,
+  state)` takes any struct with the version/step/seed header and optional
+  `?u64`/`?f64` fields, `loadTrainerState(State, allocator, io, dir)`
+  takes the state type first, and the JSON codec pair
+  (`writeTrainerStateJson`, `parseTrainerState`) is exported. The on-disk
+  format is byte-identical.
+- Internal layout, no public spelling changes: `src/store/` is the new
+  `store` band between `exec` and `backend`, and
+  `src/exec/expert_store.zig` moved there (`fucina.expert_store` /
+  `fucina.ExpertStore` unchanged); `-Dgpu=none` resolves to the null
+  provider `src/backend/gpu_none.zig` instead of a disabled `metal.zig`,
+  so the default build analyzes no real GPU provider and the Metal
+  provider tests run only under `-Dgpu=metal`.
 
 ### Deprecated
 

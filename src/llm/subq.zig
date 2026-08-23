@@ -30,6 +30,8 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
+const runner_mod = @import("runner.zig");
+const kv_cache_mod = @import("kv_cache.zig");
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
@@ -45,7 +47,6 @@ const q8_block = 32;
 /// Self-calibration measures its error curves through the packed
 /// representation, so tau absorbs the quantization error automatically.
 pub const PackedFormat = enum { f16, q8_0 };
-
 
 /// Threshold grid swept during self-calibration, largest (cheapest) first.
 pub const calib_grid = [_]f32{ 0.5, 0.4, 0.3, 0.25, 0.2, 0.15, 0.12, 0.1, 0.07, 0.05, 0.03, 0.02, 0.01 };
@@ -229,7 +230,6 @@ pub const State = struct {
     /// output), so the per-layer glue performs no allocations.
     bridge_q: []f32 = &.{},
     bridge_out: []f32 = &.{},
-
 
     pub fn init(
         allocator: Allocator,
@@ -765,103 +765,103 @@ pub const State = struct {
         var tail_z: f64 = 0;
         if (plan.clusters > 0) {
             const clusters = plan.clusters;
-                const sorted = sorted_scratch[0..clusters];
-                const hier_mode = cfg.hierarchical and plan.node_count > 0;
-                var hier_frontier: usize = 0;
-                const hstride = self.scratch_cap + 2;
-                const hp = self.hier_prio[head_i * hstride ..][0..hstride];
-                const ha = self.hier_a0[head_i * hstride ..][0..hstride];
-                const hc = self.hier_child[head_i * hstride ..][0..hstride];
-                var opened: usize = 0;
-                if (hier_mode) {
-                    // Hierarchical selection: expand the highest estimated-
-                    // mass frontier node until the estimate-only stop holds;
-                    // no reads happen inside the walk.
-                    var hn: usize = 0;
-                    const root = self.scoreEntry(plan, 0, query, beta);
-                    heapPush(hp, ha, hc, &hn, root.prio, root.a0, root.child);
-                    var rem: f64 = @exp(root.prio);
-                    var captured: f64 = 0;
-                    const exact_abs_h = exact_w * @exp(@as(f64, gauge));
-                    while (hn > 0) {
-                        if (rem <= @as(f64, tau) * (rem + captured + exact_abs_h)) break;
-                        const e = heapPop(hp, ha, hc, &hn);
-                        rem -= @exp(e.prio);
-                        if (rem < 0) rem = 0;
-                        if (e.child < 0) {
-                            sorted[opened] = @intCast(~e.child);
-                            opened += 1;
-                            captured += @exp(e.prio);
-                        } else {
-                            const ni: usize = @intCast(e.child);
-                            inline for (0..2) |side| {
-                                const cs = self.scoreEntry(plan, plan.node_child[ni * 2 + side], query, beta);
-                                heapPush(hp, ha, hc, &hn, cs.prio, cs.a0, cs.child);
-                                rem += @exp(cs.prio);
-                            }
+            const sorted = sorted_scratch[0..clusters];
+            const hier_mode = cfg.hierarchical and plan.node_count > 0;
+            var hier_frontier: usize = 0;
+            const hstride = self.scratch_cap + 2;
+            const hp = self.hier_prio[head_i * hstride ..][0..hstride];
+            const ha = self.hier_a0[head_i * hstride ..][0..hstride];
+            const hc = self.hier_child[head_i * hstride ..][0..hstride];
+            var opened: usize = 0;
+            if (hier_mode) {
+                // Hierarchical selection: expand the highest estimated-
+                // mass frontier node until the estimate-only stop holds;
+                // no reads happen inside the walk.
+                var hn: usize = 0;
+                const root = self.scoreEntry(plan, 0, query, beta);
+                heapPush(hp, ha, hc, &hn, root.prio, root.a0, root.child);
+                var rem: f64 = @exp(root.prio);
+                var captured: f64 = 0;
+                const exact_abs_h = exact_w * @exp(@as(f64, gauge));
+                while (hn > 0) {
+                    if (rem <= @as(f64, tau) * (rem + captured + exact_abs_h)) break;
+                    const e = heapPop(hp, ha, hc, &hn);
+                    rem -= @exp(e.prio);
+                    if (rem < 0) rem = 0;
+                    if (e.child < 0) {
+                        sorted[opened] = @intCast(~e.child);
+                        opened += 1;
+                        captured += @exp(e.prio);
+                    } else {
+                        const ni: usize = @intCast(e.child);
+                        inline for (0..2) |side| {
+                            const cs = self.scoreEntry(plan, plan.node_child[ni * 2 + side], query, beta);
+                            heapPush(hp, ha, hc, &hn, cs.prio, cs.a0, cs.child);
+                            rem += @exp(cs.prio);
                         }
                     }
-                    hier_frontier = hn;
-                } else {
-                    for (sorted, 0..) |*s, c| s.* = @intCast(c);
-                    std.mem.sort(u32, sorted, est, estDesc);
+                }
+                hier_frontier = hn;
+            } else {
+                for (sorted, 0..) |*s, c| s.* = @intCast(c);
+                std.mem.sort(u32, sorted, est, estDesc);
 
-                    // Estimate-only stop: captured mass is counted by the same
-                    // estimates that rank the clusters, so the denominator is
-                    // constant and the opened set is decided before any read
-                    // (self-calibration freezes tau under this exact rule).
-                    const exact_abs = exact_w * @exp(@as(f64, gauge) - self.head_prio_max[head_i]);
-                    const target = @as(f64, tau) * (total_est + exact_abs);
-                    var rem_est = total_est;
-                    while (opened < clusters and rem_est > target) : (opened += 1) {
-                        rem_est -= est[sorted[opened]];
-                    }
+                // Estimate-only stop: captured mass is counted by the same
+                // estimates that rank the clusters, so the denominator is
+                // constant and the opened set is decided before any read
+                // (self-calibration freezes tau under this exact rule).
+                const exact_abs = exact_w * @exp(@as(f64, gauge) - self.head_prio_max[head_i]);
+                const target = @as(f64, tau) * (total_est + exact_abs);
+                var rem_est = total_est;
+                while (opened < clusters and rem_est > target) : (opened += 1) {
+                    rem_est -= est[sorted[opened]];
                 }
-                // Read the decided set in ascending cluster order; adjacent
-                // opened clusters are contiguous in the packed arrays and
-                // coalesce into single streaming batches.
-                std.mem.sort(u32, sorted[0..opened], {}, std.sort.asc(u32));
-                var oi: usize = 0;
-                while (oi < opened) {
-                    var oj = oi + 1;
-                    while (oj < opened and sorted[oj] == sorted[oj - 1] + 1) : (oj += 1) {}
-                    const off: usize = plan.offsets[sorted[oi]];
-                    const m: usize = plan.offsets[sorted[oj - 1] + 1] - off;
-                    _ = @atomicRmw(u64, &self.stat_opened_rows, .Add, @as(u64, @intCast(m)), .monotonic);
-                    switch (plan.format) {
-                        .q8_0 => exactBatchQ8(numer, &gauge, &exact_w, scores_all[0..m], q_q8_buf[0..bpr], q_scales_buf[0..bpr], plan.packed_k_q8[off * bpr ..], plan.packed_v_q8[off * bpr ..], bpr, beta),
-                        .f16 => exactBatch(numer, &gauge, &exact_w, scores_all[0..m], query, plan.packed_k[off * d ..], plan.packed_v[off * d ..], d, d, beta),
-                    }
-                    oi = oj;
+            }
+            // Read the decided set in ascending cluster order; adjacent
+            // opened clusters are contiguous in the packed arrays and
+            // coalesce into single streaming batches.
+            std.mem.sort(u32, sorted[0..opened], {}, std.sort.asc(u32));
+            var oi: usize = 0;
+            while (oi < opened) {
+                var oj = oi + 1;
+                while (oj < opened and sorted[oj] == sorted[oj - 1] + 1) : (oj += 1) {}
+                const off: usize = plan.offsets[sorted[oi]];
+                const m: usize = plan.offsets[sorted[oj - 1] + 1] - off;
+                _ = @atomicRmw(u64, &self.stat_opened_rows, .Add, @as(u64, @intCast(m)), .monotonic);
+                switch (plan.format) {
+                    .q8_0 => exactBatchQ8(numer, &gauge, &exact_w, scores_all[0..m], q_q8_buf[0..bpr], q_scales_buf[0..bpr], plan.packed_k_q8[off * bpr ..], plan.packed_v_q8[off * bpr ..], bpr, beta),
+                    .f16 => exactBatch(numer, &gauge, &exact_w, scores_all[0..m], query, plan.packed_k[off * d ..], plan.packed_v[off * d ..], d, d, beta),
                 }
+                oi = oj;
+            }
 
-                if (hier_mode) {
-                    // Zeroth-order tails at frontier granularity: every
-                    // unexpanded node (or unopened leaf) contributes its
-                    // aggregated m * exp(a) at its own value mean.
-                    for (0..hier_frontier) |fi| {
-                        const w = @exp(@as(f64, ha[fi]) - @as(f64, gauge));
-                        tail_z += w;
-                        const w32: f32 = @floatCast(w);
-                        const ch = hc[fi];
-                        if (ch >= 0) {
-                            accumulateF32(numer, plan.node_vmean[@as(usize, @intCast(ch)) * d ..][0..d], w32);
-                        } else {
-                            accumulateF32(numer, plan.vmean[@as(usize, @intCast(~ch)) * d ..][0..d], w32);
-                        }
-                    }
-                } else {
-                    // Zeroth-order tail over the unopened clusters (m * exp(a)
-                    // at the value mean): DELIBERATE. The second-cumulant
-                    // estimate exp(a + s^2/2) is the right RANKER but a badly
-                    // biased mass weight (measured 2026-08-16: agreement
-                    // collapse to 27-65% when est[] weighted the tail).
-                    for (sorted[opened..]) |c| {
-                        const w = @as(f64, plan.counts[c]) * @exp(@as(f64, prio_a[c]) - @as(f64, gauge));
-                        tail_z += w;
-                        accumulateF32(numer, plan.vmean[@as(usize, c) * d ..][0..d], @floatCast(w));
+            if (hier_mode) {
+                // Zeroth-order tails at frontier granularity: every
+                // unexpanded node (or unopened leaf) contributes its
+                // aggregated m * exp(a) at its own value mean.
+                for (0..hier_frontier) |fi| {
+                    const w = @exp(@as(f64, ha[fi]) - @as(f64, gauge));
+                    tail_z += w;
+                    const w32: f32 = @floatCast(w);
+                    const ch = hc[fi];
+                    if (ch >= 0) {
+                        accumulateF32(numer, plan.node_vmean[@as(usize, @intCast(ch)) * d ..][0..d], w32);
+                    } else {
+                        accumulateF32(numer, plan.vmean[@as(usize, @intCast(~ch)) * d ..][0..d], w32);
                     }
                 }
+            } else {
+                // Zeroth-order tail over the unopened clusters (m * exp(a)
+                // at the value mean): DELIBERATE. The second-cumulant
+                // estimate exp(a + s^2/2) is the right RANKER but a badly
+                // biased mass weight (measured 2026-08-16: agreement
+                // collapse to 27-65% when est[] weighted the tail).
+                for (sorted[opened..]) |c| {
+                    const w = @as(f64, plan.counts[c]) * @exp(@as(f64, prio_a[c]) - @as(f64, gauge));
+                    tail_z += w;
+                    accumulateF32(numer, plan.vmean[@as(usize, c) * d ..][0..d], @floatCast(w));
+                }
+            }
         }
 
         self.head_z[head_i] = exact_w + tail_z;
@@ -1522,7 +1522,6 @@ pub const State = struct {
     }
 };
 
-
 const HeadTask = struct {
     state: *State,
     layer_i: usize,
@@ -1908,6 +1907,53 @@ fn weightedSquareDot(q: []const f32, w: []const f32) f32 {
     var total: f32 = @reduce(.Add, acc);
     while (i < q.len) : (i += 1) total += q[i] * q[i] * w[i];
     return total;
+}
+
+/// The descriptor runner's research seam adapter
+/// (`runner.AttentionOverride`): install with
+/// `model.attention_override = subq.attentionOverride(&state)` and drive
+/// the stock `forwardStep`. The override takes single query rows over f16
+/// KV caches (the operator's domain) and returns null otherwise, so the
+/// stock kernels keep every other call.
+pub fn attentionOverride(sq: *State) runner_mod.AttentionOverride {
+    return .{ .ctx = sq, .call = attendOverride };
+}
+
+fn attendOverride(
+    ptr: *anyopaque,
+    ctx: *ExecContext,
+    config: runner_mod.Descriptor,
+    layer_i: usize,
+    q: *const fucina.Tensor(.{ .seq, .head, .d }),
+    kv: *kv_cache_mod.KvCache,
+    cached_len: usize,
+) anyerror!?fucina.Tensor(.{ .seq, .attn }) {
+    const sq: *State = @ptrCast(@alignCast(ptr));
+    if (kv.dtype != .f16 or q.dim(.seq) != 1) return null;
+    const heads = config.num_attention_heads;
+    const d = config.head_dim;
+    // Borrow the contiguous query row when possible; the state's persistent
+    // bridge buffers cover the fallback and the output (no per-token
+    // allocations in this glue).
+    const q_flat: []const f32 = blk: {
+        if (q.dataConst()) |qd| {
+            if (qd.len == heads * d) break :blk qd;
+        } else |_| {}
+        try q.copyTo(sq.bridge_q);
+        break :blk sq.bridge_q;
+    };
+    const out = sq.bridge_out;
+    const row_len = cached_len * config.num_key_value_heads * d;
+    try sq.attend(
+        ctx,
+        layer_i,
+        q_flat,
+        (try kv.k[layer_i].dataConst())[0..row_len],
+        (try kv.v[layer_i].dataConst())[0..row_len],
+        cached_len,
+        out,
+    );
+    return try fucina.Tensor(.{ .seq, .attn }).fromSlice(ctx, .{ 1, heads * d }, out);
 }
 
 test {

@@ -8,6 +8,7 @@ const std = @import("std");
 const fucina = @import("fucina");
 const qwen3 = @import("model.zig");
 const qwen3_train = @import("train.zig");
+const trainer_state = @import("../trainer_state.zig");
 const weights = @import("fucina").weights;
 
 const ExecContext = fucina.ExecContext;
@@ -1379,7 +1380,7 @@ test "dropout step counter persists through checkpoint directory state" {
         }
     };
     try fucina.training_checkpoint.writeFileAtomic(std.testing.io, adapters_path, &trained, SaveAdapters.write);
-    try fucina.training_checkpoint.saveTrainerState(allocator, std.testing.io, dir_path, .{
+    try fucina.training_checkpoint.saveTrainerState(allocator, std.testing.io, dir_path, trainer_state.TrainerState{
         .step = trained.step_counter,
         .seed = trained.seed,
         .lora_rank = @intCast(dropout_lora.rank),
@@ -1399,7 +1400,7 @@ test "dropout step counter persists through checkpoint directory state" {
     // dropout stream; adapter tensors stay a standalone safetensors payload.
     var resumed = try DefaultTrainer.init(&ctx, &model, dropout_lora, 13);
     defer resumed.deinit();
-    const state = try fucina.training_checkpoint.loadTrainerState(allocator, std.testing.io, dir_path);
+    const state = try fucina.training_checkpoint.loadTrainerState(trainer_state.TrainerState, allocator, std.testing.io, dir_path);
     resumed.seed = state.seed;
     resumed.step_counter = state.step;
     {
@@ -2009,7 +2010,8 @@ test "engram graft: zero-init is bitwise identity and trains through the frozen 
         try graft.plan.hashInto(slot, &ids, &rows_storage[slot]);
         rows[slot] = &rows_storage[slot];
     }
-    const opts = qwen3_train.ForwardOptions{ .engram = .{ .model = &graft, .rows = &rows } };
+    const graft_adapter = engram.ResidualGraft{ .model = &graft, .rows = &rows };
+    const opts = qwen3_train.ForwardOptions{ .residual_hook = graft_adapter.hook() };
 
     // Zero-init graft: logits BITWISE identical to the bare trainer forward.
     var bare = try trainer.evalLogits(&ctx, batch_inputs);

@@ -255,7 +255,7 @@ sched.apply(optim.warmupCosineFactor(macro_step, ...)); // keyed by MACRO step
   (`trainer_state.json` `.step`) counts MICRO-batches (dropout seed streams,
   one per `loss`/`lossExt` call), while the optimizer slots' `step` counts
   MACRO steps; resume must land on a boundary, i.e. `step % accum_steps == 0`
-  (the optional `accum_steps` field in `training_checkpoint.TrainerState`
+  (the optional `accum_steps` field in `fucina_llm.trainer_state.TrainerState`
   records the window size).
 - **LR schedules are keyed by MACRO step** (one `sched.apply` per optimizer
   step, not per micro-batch).
@@ -911,7 +911,8 @@ so same-length slots receive identical noise — this mirrors the reference
 library, which reseeds the same generator per tensor (an acknowledged
 artifact its authors kept; the paper's results used it). Both are checkpoint
 contracts: `(config.seed, iteration)` fully regenerate the population, so a
-resume needs only the iteration counter (`TrainerState.es_*` fields — there
+resume needs only the iteration counter (the `es_*` fields of
+`fucina_llm.trainer_state.TrainerState` — there
 is no optimizer.fucina in an ES checkpoint).
 
 **Parity evidence.** Three layers, mirroring the optimizer goldens:

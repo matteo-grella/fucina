@@ -27,7 +27,6 @@ const fucina = @import("fucina");
 const qwen3 = @import("model.zig");
 const cartridge_mod = @import("../cartridge.zig");
 const lora_trainer = @import("../lora_trainer.zig");
-const engram_mod = @import("../engram.zig");
 const weights = @import("fucina").weights;
 
 const Allocator = std.mem.Allocator;
@@ -49,7 +48,6 @@ pub const Error = error{
     InvalidCartridge,
     InvalidCapture,
     InvalidPacking,
-    InvalidEngram,
     /// Capture, packed, and composed-cartridge forwards are plain-path
     /// only: the capture sink, transient packed rope tables, and composed
     /// part lists are not checkpoint inputs, so a recompute would silently
@@ -131,22 +129,28 @@ pub const ForwardOptions = struct {
     cartridges: ?[]const *const cartridge_mod.Cartridge = null,
     capture: ?*KvCapture = null,
     packed_segments: ?[]const usize = null,
-    engram: ?EngramOptions = null,
+    residual_hook: ?ResidualHook = null,
 };
 
-/// Engram graft seam (`ForwardOptions.engram`): before each layer whose id
-/// is in the engram model's `layer_ids`, the layer's memory output is added
-/// to the residual stream (`hidden += engram(hidden, rows)` — the reference
-/// block order, ahead of attention). `rows[slot]` holds the precomputed
-/// table-row indices for `tokens` at plan slot `slot`
-/// (`HashPlan.compressInto` + `hashInto`; pure host work, once per
-/// sequence). Plain-path only, and hashing depends only on token ids, so
-/// it composes with `cartridge` (positions shift, ids don't). Rejected
-/// with `packed_segments`: the ShortConv is causal over the packed row and
-/// would leak across segment boundaries.
-pub const EngramOptions = struct {
-    model: *const engram_mod.Engram,
-    rows: []const []const usize,
+/// Research seam on the plain differentiable forward
+/// (`ForwardOptions.residual_hook`): before every layer, `call` receives
+/// the residual stream and returns the tensor to add into it (null = no
+/// contribution at this layer); the add itself stays in the trainer, so
+/// gradients flow through the returned tensor. Plain-path only: rejected
+/// with layer checkpointing (the hook state is not a checkpoint input) and
+/// with `packed_segments` (a provider's causal ops would leak across
+/// segment boundaries). `llm.research.engram` provides the graft adapter
+/// (`ResidualGraft`).
+pub const ResidualHook = struct {
+    ctx: *const anyopaque,
+    /// Called once in the forward's validation block, before any compute:
+    /// the provider checks its configuration against the trunk geometry
+    /// (`hidden_size`, `n_layers`) and the token count and errors here
+    /// rather than mid-forward.
+    validate: *const fn (ctx: *const anyopaque, hidden_size: usize, n_layers: usize, seq: usize) anyerror!void,
+    /// Called before every layer with the residual stream; the returned
+    /// tensor is added into it and then released by the trainer.
+    call: *const fn (ctx: *const anyopaque, exec: *ExecContext, hidden: *const fucina.Tensor(.{ .seq, .embed }), layer_i: usize) anyerror!?fucina.Tensor(.{ .seq, .embed }),
 };
 
 /// The seven adaptable projections, in fixed order. Index doubles as the
@@ -1044,19 +1048,10 @@ pub fn Trainer(comptime targets: Targets) type {
                 }
             }
 
-            if (opts.engram) |eng| {
+            if (opts.residual_hook) |hook| {
                 if (self.checkpoint_layers) return Error.CartridgeCheckpointUnsupported;
                 if (opts.packed_segments != null) return Error.InvalidPacking;
-                const ecfg = &eng.model.plan.cfg;
-                if (ecfg.hc_mult != 1 or ecfg.hidden_size != cfg.hidden_size) return Error.InvalidEngram;
-                if (eng.rows.len != eng.model.layers.len) return Error.InvalidEngram;
-                const want = tokens.len * ecfg.headsPerLayer();
-                for (eng.rows) |layer_rows| {
-                    if (layer_rows.len != want) return Error.InvalidEngram;
-                }
-                for (eng.model.plan.layer_ids) |id| {
-                    if (id >= n_layers) return Error.InvalidEngram;
-                }
+                try hook.validate(hook.ctx, cfg.hidden_size, n_layers, tokens.len);
             }
 
             if (opts.packed_segments) |seg_lens| {
@@ -1092,16 +1087,9 @@ pub fn Trainer(comptime targets: Targets) type {
             }
 
             for (model.layers[opts.start_layer..][0..layer_count], opts.start_layer..) |*layer, layer_i| {
-                if (opts.engram) |eng| {
-                    if (eng.model.plan.slotOf(layer_i)) |slot| {
-                        // hidden += engram(hidden, rows): reference block
-                        // order (before attention). Zero-copy retags bridge
-                        // the trainer's .embed tag to the module's .d.
-                        var q = try x.withTags(ctx, .{ .seq, .d });
-                        defer q.deinit();
-                        var mem = try eng.model.layers[slot].forwardResidual(ctx, &q, eng.rows[slot], null);
-                        defer mem.deinit();
-                        var mem_e = try mem.withTags(ctx, .{ .seq, .embed });
+                if (opts.residual_hook) |hook| {
+                    if (try hook.call(hook.ctx, ctx, &x, layer_i)) |contribution| {
+                        var mem_e = contribution;
                         defer mem_e.deinit();
                         x = try ctx.replace(x, x.add(ctx, &mem_e));
                     }
