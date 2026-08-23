@@ -467,7 +467,7 @@ pub const Model = struct {
     /// the final row runs the unembed. Padded vocab ids carry -inf. Rows are
     /// computed jointly but causally: row r attends to cache positions
     /// <= cache.len + r only, so batch prefill matches S=1 stepping.
-    pub fn step(self: *const Model, ctx: *ExecContext, cache: *Cache, tokens: []const usize) ![]f32 {
+    pub fn step(self: *const Model, ctx: *ExecContext, cache: *Cache, tokens: []const usize) !fucina.Tensor(.{ .seq, .vocab }) {
         const allocator = ctx.allocator;
         const rows = try allocator.alloc(Row, tokens.len);
         defer allocator.free(rows);
@@ -476,7 +476,7 @@ pub const Model = struct {
     }
 
     /// `step` over mixed token/embedding rows (multimodal prompts).
-    pub fn stepMixed(self: *const Model, ctx: *ExecContext, cache: *Cache, items: []const Row) ![]f32 {
+    pub fn stepMixed(self: *const Model, ctx: *ExecContext, cache: *Cache, items: []const Row) !fucina.Tensor(.{ .seq, .vocab }) {
         const cfg = &self.config;
         const allocator = ctx.allocator;
         if (items.len == 0) return Error.InvalidSequenceLength;
@@ -527,13 +527,12 @@ pub const Model = struct {
         rmsNormInto(normed, x[(S - 1) * H ..][0..H], self.output_norm, cfg.rms_norm_eps);
         for (normed) |*nv| nv.* *= cfg.logit_scale;
         var logits_t = try self.output.linearSeq(ctx, &normed_t);
-        defer logits_t.deinit();
-
-        const row = try allocator.dupe(f32, try logits_t.dataConst());
+        errdefer logits_t.deinit();
         if (cfg.unpadded_vocab_size > 0 and cfg.unpadded_vocab_size < cfg.vocab_size) {
+            const row = try logits_t.data();
             for (row[cfg.unpadded_vocab_size..]) |*l| l.* = -std.math.inf(f32);
         }
-        return row;
+        return logits_t;
     }
 
     /// One layer over `x` rows in place.

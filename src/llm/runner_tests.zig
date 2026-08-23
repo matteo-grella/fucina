@@ -375,30 +375,22 @@ test "descriptor runner matches the hand glm4moe port bitwise on a synthetic GGU
     {
         var got = try generic.hostStep(&ctx, &cache_generic, &prompt);
         defer got.deinit();
-        const rows = try hand.step(&ctx, &cache_hand, &prompt);
-        defer {
-            for (rows) |row| allocator.free(row);
-            allocator.free(rows);
-        }
+        var want = try hand.step(&ctx, &cache_hand, &prompt);
+        defer want.deinit();
         const flat = try got.dataConst();
-        for (rows, 0..) |row, r| {
-            try std.testing.expectEqualSlices(f32, row, flat[r * tiny.vocab ..][0..tiny.vocab]);
-        }
+        try std.testing.expectEqualSlices(f32, try want.dataConst(), flat);
         if (strict_bits) try std.testing.expectEqual(golden.prefill_hash, fnvHash(flat));
-        next = argmaxRow(rows[rows.len - 1]);
+        next = argmaxRow(flat[(prompt.len - 1) * tiny.vocab ..][0..tiny.vocab]);
         try std.testing.expectEqual(golden.chain[0], next);
     }
-    for (golden.chain[1..]) |want| {
+    for (golden.chain[1..]) |want_tok| {
         var step_tokens = [_]usize{next};
         var got = try generic.hostStep(&ctx, &cache_generic, &step_tokens);
         defer got.deinit();
-        const rows = try hand.step(&ctx, &cache_hand, &step_tokens);
-        defer {
-            for (rows) |row| allocator.free(row);
-            allocator.free(rows);
-        }
-        try std.testing.expectEqualSlices(f32, rows[0], try got.dataConst());
-        next = argmaxRow(rows[0]);
-        try std.testing.expectEqual(want, next);
+        var want = try hand.step(&ctx, &cache_hand, &step_tokens);
+        defer want.deinit();
+        try std.testing.expectEqualSlices(f32, try want.dataConst(), try got.dataConst());
+        next = argmaxRow(try want.dataConst());
+        try std.testing.expectEqual(want_tok, next);
     }
 }

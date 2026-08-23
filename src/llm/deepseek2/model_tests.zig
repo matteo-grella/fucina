@@ -52,13 +52,13 @@ test "deepseek2 matches the recorded DeepSeek-V2-Lite forward (Q8_0; skips witho
     const golden_hash: u64 = 0xb446357d85ea25f0;
 
     var logits = try model.stepBatch(&ctx, &cache, &prompt);
-    if (strict_bits) try std.testing.expectEqual(golden_hash, fnvHash(logits));
+    if (strict_bits) try std.testing.expectEqual(golden_hash, fnvHash(try logits.dataConst()));
     for (golden_chain[0 .. golden_chain.len - 1]) |want| {
-        const next = argmaxRow(logits);
+        const next = argmaxRow(try logits.dataConst());
         try std.testing.expectEqual(want, next);
-        allocator.free(logits);
+        logits.deinit();
         logits = try model.step(&ctx, &cache, next);
     }
-    try std.testing.expectEqual(golden_chain[golden_chain.len - 1], argmaxRow(logits));
-    allocator.free(logits);
+    try std.testing.expectEqual(golden_chain[golden_chain.len - 1], argmaxRow(try logits.dataConst()));
+    logits.deinit();
 }

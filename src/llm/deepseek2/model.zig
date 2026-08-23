@@ -687,8 +687,9 @@ pub const Model = struct {
     }
 
     /// One decode step: process `token` at position `cache.len`, append its
-    /// K/V, return the next-token logits as a host slice (caller-owned).
-    pub fn step(self: *const Model, ctx: *ExecContext, cache: *Cache, token: usize) ![]f32 {
+    /// K/V, return the next-token logits `[1, vocab]` (the tensor-band
+    /// return shape; caller deinits).
+    pub fn step(self: *const Model, ctx: *ExecContext, cache: *Cache, token: usize) !fucina.Tensor(.{ .seq, .vocab }) {
         const cfg = self.config;
         const allocator = ctx.allocator;
         if (cache.len >= cache.capacity) return Error.KvCacheOverflow;
@@ -949,9 +950,7 @@ pub const Model = struct {
         rmsNormInto(h_norm, x, self.output_norm, cfg.rms_norm_eps);
         var final_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, cfg.hidden_size }, h_norm);
         defer final_t.deinit();
-        var logits_t = try self.output.linearSeq(ctx, &final_t, .embed, .vocab);
-        defer logits_t.deinit();
-        return allocator.dupe(f32, try logits_t.dataConst());
+        return self.output.linearSeq(ctx, &final_t, .embed, .vocab);
     }
 
     /// Batched prefill: one chunk of positions through all layers with S-row
@@ -964,7 +963,7 @@ pub const Model = struct {
     /// reassociate vs S=1 (~1e-6 rel) past the m-dependent kernel
     /// thresholds — the qwen3 forwardStepAllLogits convention. `.latent`
     /// cache mode only (the production path).
-    pub fn stepBatch(self: *const Model, ctx: *ExecContext, cache: *Cache, tokens: []const usize) ![]f32 {
+    pub fn stepBatch(self: *const Model, ctx: *ExecContext, cache: *Cache, tokens: []const usize) !fucina.Tensor(.{ .seq, .vocab }) {
         const cfg = self.config;
         const allocator = ctx.allocator;
         const S = tokens.len;
@@ -1199,9 +1198,7 @@ pub const Model = struct {
         rmsNormInto(hn[0..hidden], xs[(S - 1) * hidden ..][0..hidden], self.output_norm, cfg.rms_norm_eps);
         var final_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, hidden }, hn[0..hidden]);
         defer final_t.deinit();
-        var logits_t = try self.output.linearSeq(ctx, &final_t, .embed, .vocab);
-        defer logits_t.deinit();
-        return allocator.dupe(f32, try logits_t.dataConst());
+        return self.output.linearSeq(ctx, &final_t, .embed, .vocab);
     }
 
     /// Batched routed mixture: per-row V2/V3 routing (same math as

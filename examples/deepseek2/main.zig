@@ -198,13 +198,14 @@ pub fn main(init: std.process.Init) !void {
         var total: f64 = 0;
         var count: usize = 0;
         if (bos) |b| {
-            const l0 = try model.step(&ctx, &nll_cache, b);
-            allocator.free(l0);
+            var l0 = try model.step(&ctx, &nll_cache, b);
+            l0.deinit();
         }
         var prev: usize = @intCast(nll_ids[0]);
         for (nll_ids[1..]) |next_id| {
-            const lg = try model.step(&ctx, &nll_cache, prev);
-            defer allocator.free(lg);
+            var lg_t = try model.step(&ctx, &nll_cache, prev);
+            defer lg_t.deinit();
+            const lg = try lg_t.dataConst();
             var maxv: f32 = lg[0];
             for (lg) |v| maxv = @max(maxv, v);
             var sum_exp: f64 = 0;
@@ -226,12 +227,12 @@ pub fn main(init: std.process.Init) !void {
     // union-routed expert fetches); --prefill-chunk=1 restores the
     // sequential S=1 path.
     const prefill_start = std.Io.Clock.awake.now(init.io).nanoseconds;
-    var logits: []f32 = &.{};
-    defer if (logits.len > 0) allocator.free(logits);
+    var logits: ?fucina.Tensor(.{ .seq, .vocab }) = null;
+    defer if (logits) |*t| t.deinit();
     var fed: usize = 0;
     while (fed < tokens.items.len) {
         const end = @min(fed + prefill_chunk, tokens.items.len);
-        if (logits.len > 0) allocator.free(logits);
+        if (logits) |*t| t.deinit();
         logits = try model.stepBatch(&ctx, &cache, tokens.items[fed..end]);
         fed = end;
     }
@@ -246,7 +247,7 @@ pub fn main(init: std.process.Init) !void {
     while (produced < gen_count) : (produced += 1) {
         var best: usize = 0;
         var best_v: f32 = -std.math.inf(f32);
-        for (logits, 0..) |v, i| {
+        for (try logits.?.dataConst(), 0..) |v, i| {
             if (v > best_v) {
                 best_v = v;
                 best = i;
@@ -255,7 +256,7 @@ pub fn main(init: std.process.Init) !void {
         if (eos != null and best == eos.?) break;
         try tokenizer.decodeAppend(allocator, @intCast(best), &reply);
         try tokens.append(allocator, best);
-        allocator.free(logits);
+        logits.?.deinit();
         logits = try model.step(&ctx, &cache, best);
     }
     const decode_ns = std.Io.Clock.awake.now(init.io).nanoseconds - decode_start;

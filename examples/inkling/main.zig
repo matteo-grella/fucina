@@ -327,26 +327,26 @@ pub fn main(init: std.process.Init) !void {
         var cache = try model.initCache(items.len + gen_count + 1);
         defer cache.deinit();
         var last = try model.stepMixed(&ctx, &cache, items);
-        defer allocator.free(last);
+        defer last.deinit();
 
         if (logits_out) |path| {
-            try writeLogits(init.io, path, last);
-            try stdout.print("logits written: {s} ({d} values)\n", .{ path, last.len });
+            try writeLogits(init.io, path, try last.dataConst());
+            try stdout.print("logits written: {s} ({d} values)\n", .{ path, (try last.dataConst()).len });
         }
         if (compare_logits_path) |path| {
-            const ok = try compareLogits(init.io, allocator, stdout, path, last, max_abs_gate);
+            const ok = try compareLogits(init.io, allocator, stdout, path, try last.dataConst(), max_abs_gate);
             if (!ok) return error.LogitsMismatch;
         }
         if (gen_count > 0) {
             try stdout.print("generated ids:", .{});
             var produced: usize = 0;
             while (produced < gen_count) {
-                const next = argmax(last);
+                const next = argmax(try last.dataConst());
                 try stdout.print(" {d}", .{next});
                 produced += 1;
                 if (next == 200006 or produced == gen_count) break;
                 const gr = try model.step(&ctx, &cache, &.{next});
-                allocator.free(last);
+                last.deinit();
                 last = gr;
             }
             try stdout.print("\n", .{});
@@ -370,11 +370,11 @@ pub fn main(init: std.process.Init) !void {
             var produced: usize = 0;
             while (produced < n_gen) : (produced += 1) {
                 const gr = try model.step(&ctx, &bcache, &.{next});
-                allocator.free(last);
+                last.deinit();
                 last = gr;
             }
             const t2 = nowNs(init.io);
-            allocator.free(last);
+            last.deinit();
             const pp = @as(f64, @floatFromInt(tokens.len)) / seconds(t1 - t0);
             const tg = @as(f64, @floatFromInt(n_gen)) / seconds(t2 - t1);
             best_pp = @max(best_pp, pp);
@@ -388,27 +388,27 @@ pub fn main(init: std.process.Init) !void {
     defer cache.deinit();
 
     // Prefill: one batch step, or --step1 token-at-a-time (decode parity).
-    var last_logits: []f32 = undefined;
+    var last_logits: fucina.Tensor(.{ .seq, .vocab }) = undefined;
     if (step1) {
         var i: usize = 0;
-        var kept: ?[]f32 = null;
+        var kept: ?fucina.Tensor(.{ .seq, .vocab }) = null;
         while (i < tokens.len) : (i += 1) {
             const row = try model.step(&ctx, &cache, tokens[i .. i + 1]);
-            if (kept) |kl| allocator.free(kl);
+            if (kept) |*kl| kl.deinit();
             kept = row;
         }
         last_logits = kept.?;
     } else {
         last_logits = try model.step(&ctx, &cache, tokens);
     }
-    defer allocator.free(last_logits);
+    defer last_logits.deinit();
 
     if (logits_out) |path| {
-        try writeLogits(init.io, path, last_logits);
-        try stdout.print("logits written: {s} ({d} values)\n", .{ path, last_logits.len });
+        try writeLogits(init.io, path, try last_logits.dataConst());
+        try stdout.print("logits written: {s} ({d} values)\n", .{ path, (try last_logits.dataConst()).len });
     }
     if (compare_logits_path) |path| {
-        const ok = try compareLogits(init.io, allocator, stdout, path, last_logits, max_abs_gate);
+        const ok = try compareLogits(init.io, allocator, stdout, path, try last_logits.dataConst(), max_abs_gate);
         if (!ok) return error.LogitsMismatch;
     }
 
@@ -416,20 +416,20 @@ pub fn main(init: std.process.Init) !void {
         var decoded: std.ArrayList(u8) = .empty;
         defer decoded.deinit(allocator);
         var produced: usize = 0;
-        var current = last_logits;
+        var current: ?fucina.Tensor(.{ .seq, .vocab }) = null;
+        defer if (current) |*c| c.deinit();
         try stdout.print("generated ids:", .{});
         while (produced < gen_count) {
-            const next = argmax(current);
+            const next = argmax(try (if (current) |*c| c else &last_logits).dataConst());
             try stdout.print(" {d}", .{next});
             if (tokenizer) |*t| try t.decodeAppend(allocator, @intCast(next), &decoded);
             produced += 1;
             if (next == 200006) break; // <|return|> — sole end-of-generation id
             if (produced == gen_count) break;
             const row = try model.step(&ctx, &cache, &.{next});
-            if (current.ptr != last_logits.ptr) allocator.free(current);
+            if (current) |*c| c.deinit();
             current = row;
         }
-        if (current.ptr != last_logits.ptr) allocator.free(current);
         try stdout.print("\ntext: {s}\n", .{decoded.items});
     }
 }

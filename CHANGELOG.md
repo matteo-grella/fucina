@@ -40,6 +40,13 @@ point; earlier history is `git log`.
 
 ### Changed
 
+- Host-band `step` entries return the tensor-band logits shape
+  `fucina.Tensor(.{ .seq, .vocab })` (caller deinits) instead of host
+  slices: `glm4moe.model.step` (was `[][]f32` with per-row dupes),
+  `deepseek2.model.step`/`stepBatch` and `inkling.model.step`/`stepMixed`
+  (were caller-freed `[]f32` dupes of an internal tensor). Semantics and
+  numerics unchanged; the dupe copies are gone. `deepseek4` keeps its
+  session-owned protocol (its MTP out-rows contract differs by design).
 - Family namespace shape unified to `family.model`: `llm.gemma.model` /
   `llm.gemma.train` (files `llm/gemma/{model,train}.zig`) and
   `llm.pockettts.model`. `gemma.gemma4`, `gemma.gemma4_train`, and

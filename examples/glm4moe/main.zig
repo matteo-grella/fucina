@@ -122,26 +122,21 @@ pub fn main(init: std.process.Init) !void {
     defer mtp_cache.deinit();
 
     const hidden = model.config.hidden_size;
+    const vocab = model.config.vocab_size;
     // Trunk hiddens for every committed position (the MTP stream input).
     var hiddens: std.ArrayList(f32) = .empty;
     defer hiddens.deinit(allocator);
     var mtp_fed: usize = 0;
 
-    const freeRows = struct {
-        fn go(a: std.mem.Allocator, rows: [][]f32) void {
-            for (rows) |r| a.free(r);
-            a.free(rows);
-        }
-    }.go;
-
     // Prefill (one batched step) and the first greedy token.
     const prefill_start = std.Io.Clock.awake.now(init.io).nanoseconds;
     var next_token: usize = undefined;
     {
-        const rows = try model.step(&ctx, &cache, tokens.items);
-        defer freeRows(allocator, rows);
+        var rows = try model.step(&ctx, &cache, tokens.items);
+        defer rows.deinit();
         try hiddens.appendSlice(allocator, model.step_hiddens);
-        next_token = argmax(rows[rows.len - 1]);
+        const flat = try rows.dataConst();
+        next_token = argmax(flat[(tokens.items.len - 1) * vocab ..][0..vocab]);
     }
     try stdout.print("prefill: {d:.1} ms ({d} tokens, one batched step)\n", .{ @as(f64, @floatFromInt(std.Io.Clock.awake.now(init.io).nanoseconds - prefill_start)) / 1e6, tokens.items.len });
 
@@ -167,11 +162,11 @@ pub fn main(init: std.process.Init) !void {
             try tokens.append(allocator, next_token);
             produced += 1;
             var one = [_]usize{next_token};
-            const rows = try model.step(&ctx, &cache, &one);
-            defer freeRows(allocator, rows);
+            var rows = try model.step(&ctx, &cache, &one);
+            defer rows.deinit();
             try hiddens.appendSlice(allocator, model.step_hiddens);
             forwards += 1;
-            next_token = argmax(rows[0]);
+            next_token = argmax((try rows.dataConst())[0..vocab]);
             continue;
         }
 
@@ -212,15 +207,16 @@ pub fn main(init: std.process.Init) !void {
         // its logits are bit-identical to sequential decode at any depth
         // (the lossless contract; see ExecContext.pinRowwiseKernels).
         ctx.pinRowwiseKernels(true);
-        const rows = blk: {
+        var rows = blk: {
             defer ctx.pinRowwiseKernels(false);
             break :blk try model.step(&ctx, &cache, drafts);
         };
-        defer freeRows(allocator, rows);
+        defer rows.deinit();
+        const flat = try rows.dataConst();
         forwards += 1;
         var accepted: usize = 1;
         while (accepted < n_drafts) : (accepted += 1) {
-            if (argmax(rows[accepted - 1]) != drafts[accepted]) break;
+            if (argmax(flat[(accepted - 1) * vocab ..][0..vocab]) != drafts[accepted]) break;
         }
         draft_accepted += accepted - 1;
 
@@ -234,7 +230,7 @@ pub fn main(init: std.process.Init) !void {
         }
         try hiddens.appendSlice(allocator, model.step_hiddens[0 .. accepted * hidden]);
         cache.truncate(tokens.items.len);
-        next_token = argmax(rows[accepted - 1]);
+        next_token = argmax(flat[(accepted - 1) * vocab ..][0..vocab]);
     }
     const decode_ns = std.Io.Clock.awake.now(init.io).nanoseconds - decode_start;
     try stdout.print("decode: {d} tokens in {d} forwards, {d:.1} ms, {d:.2} tok/s ({d:.2} tok/forward)\n", .{ produced, forwards, @as(f64, @floatFromInt(decode_ns)) / 1e6, @as(f64, @floatFromInt(produced)) * 1e9 / @as(f64, @floatFromInt(decode_ns)), @as(f64, @floatFromInt(produced)) / @as(f64, @floatFromInt(@max(forwards, 1))) });

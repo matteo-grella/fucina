@@ -210,11 +210,12 @@ pub const Model = struct {
     }
 
     /// Process `tokens` at positions [cache.len, cache.len + S) and return
-    /// per-position next-token logits `[S][vocab]` (caller frees the outer
-    /// and inner slices). Positions are computed causally in sequence, so
-    /// per-row numerics match S=1 steps exactly — the MTP verify contract.
-    /// Also refreshes `last_hidden` (pre-norm trunk state of the last row).
-    pub fn step(self: *Model, ctx: *ExecContext, cache: *Cache, tokens: []const usize) ![][]f32 {
+    /// per-position next-token logits `[S, vocab]` (the tensor-band return
+    /// shape; caller deinits). Positions are computed causally in sequence,
+    /// so per-row numerics match S=1 steps exactly — the MTP verify
+    /// contract. Also refreshes `last_hidden` (pre-norm trunk state of the
+    /// last row).
+    pub fn step(self: *Model, ctx: *ExecContext, cache: *Cache, tokens: []const usize) !fucina.Tensor(.{ .seq, .vocab }) {
         const cfg = self.config;
         const allocator = ctx.allocator;
         if (tokens.len == 0) return Error.InvalidSequenceLength;
@@ -250,27 +251,15 @@ pub const Model = struct {
         return self.headLogits(ctx, x, S, self.band.output_norm, &self.output);
     }
 
-    fn headLogits(self: *Model, ctx: *ExecContext, x: []const f32, S: usize, norm: []const f32, head: *const LinearWeight) ![][]f32 {
+    fn headLogits(self: *Model, ctx: *ExecContext, x: []const f32, S: usize, norm: []const f32, head: *const LinearWeight) !fucina.Tensor(.{ .seq, .vocab }) {
         const cfg = self.config;
-        const allocator = ctx.allocator;
         var normed_t = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ S, cfg.hidden_size });
         defer normed_t.deinit();
         const normed = try normed_t.data();
         for (0..S) |r| {
             host_ops.rmsNormInto(normed[r * cfg.hidden_size ..][0..cfg.hidden_size], x[r * cfg.hidden_size ..][0..cfg.hidden_size], norm, cfg.rms_norm_eps);
         }
-        var logits_t = try head.linearSeq(ctx, &normed_t, .embed, .vocab);
-        defer logits_t.deinit();
-        const flat = try logits_t.dataConst();
-        const out = try allocator.alloc([]f32, S);
-        errdefer allocator.free(out);
-        var built: usize = 0;
-        errdefer for (out[0..built]) |row| allocator.free(row);
-        for (0..S) |r| {
-            out[r] = try allocator.dupe(f32, flat[r * cfg.vocab_size ..][0..cfg.vocab_size]);
-            built += 1;
-        }
-        return out;
+        return head.linearSeq(ctx, &normed_t, .embed, .vocab);
     }
 
     /// One MTP draft step: combine the token embedding with the previous
@@ -310,9 +299,9 @@ pub const Model = struct {
         @memcpy(h_out, x);
         if (mtp_debug) std.debug.print(" |h1|max {d:.3}\n", .{maxAbs(x)});
 
-        const rows = try self.headLogits(ctx, x, 1, mtp.shared_head_norm, &mtp.shared_head);
-        defer allocator.free(rows);
-        return rows[0];
+        var logits_t = try self.headLogits(ctx, x, 1, mtp.shared_head_norm, &mtp.shared_head);
+        defer logits_t.deinit();
+        return allocator.dupe(f32, try logits_t.dataConst());
     }
 };
 
