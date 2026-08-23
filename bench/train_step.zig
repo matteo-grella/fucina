@@ -224,7 +224,7 @@ fn forwardLoss(ctx: *ExecContext, model: *const Model, input_ids: []const usize,
     var x_norm = try x.rmsNorm(ctx, .d, rms_eps);
     x.deinit();
     defer x_norm.deinit();
-    return x_norm.linearCrossEntropyExt(ctx, &model.w_lm, labels, .{ .reduction = .mean });
+    return x_norm.linearCrossEntropy(ctx, &model.w_lm, labels, .{ .reduction = .mean });
 }
 
 pub fn main(init: std.process.Init) !void {

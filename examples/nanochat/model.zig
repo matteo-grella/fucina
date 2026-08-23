@@ -36,7 +36,7 @@ const rms_eps: f32 = 1.1920928955078125e-07;
 const rope_theta: f32 = 100000.0;
 
 /// nanochat's ignore_index=-1 (gpt.py:520) → Fucina's usize sentinel
-/// (crossEntropyExt has no signed labels).
+/// (crossEntropy has no signed labels).
 pub const ignore_index: usize = std.math.maxInt(usize);
 
 // ---------------------------------------------------------------------------
@@ -691,7 +691,7 @@ pub fn ModelOf(comptime dtype: fucina.DType) type {
         /// (gpt.py:520 with reduction='mean' on one row).
         pub fn loss(self: *const Self, ctx: *ExecContext, token_ids: []const usize, targets: []const isize) !Tensor(.{}) {
             const labels = try self.allocator.alloc(usize, targets.len);
-            defer self.allocator.free(labels); // crossEntropyExt dupes labels
+            defer self.allocator.free(labels); // crossEntropy dupes labels
             toLabels(targets, labels);
             const logits = try self.forward(ctx, token_ids, null);
             return logits.crossEntropy(ctx, .vocab, labels, .{ .reduction = .mean, .ignore_index = ignore_index });
