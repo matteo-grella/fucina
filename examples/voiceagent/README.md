@@ -49,7 +49,7 @@ zig build voiceagent -Doptimize=ReleaseFast -- \
 ```
 
 Last word to first audio *heard* — endpointing included — on an M1 Max under
-`--sim`, with Qwen3-1.7B-Q4_K_M served by lmserve and Pocket TTS speaking,
+`--sim`, with Qwen3-1.7B-Q4_K_M served by the in-process chat server and Pocket TTS speaking,
 median of 3 runs:
 
 | | short question (1.8 s) | long question (10.2 s) |
@@ -127,7 +127,7 @@ their own terms — see [`docs/THIRD-PARTY-NOTICES.md`](../../docs/THIRD-PARTY-N
 | flag | effect |
 |---|---|
 | `--asr <gguf>` | Parakeet streaming STT with learned `<EOU>` endpointing (required) |
-| `--chat <gguf>` | chat model, served by the lmserve server hosted in-process (any architecture it supports) |
+| `--chat <gguf>` | chat model, served in-process by the `llm.serving` engine (qwen3/qwen3moe/gemma4 GGUFs) |
 | `--chat-url URL` | speak `/v1/chat/completions` to an existing server instead of spawning one |
 | `--endpoint-ms N` | quiet + transcript-stable window that closes a turn (default 800; 0 = wait for `<EOU>` only) |
 | `--speculate-ms N` | quiet before generation starts speculatively, through that window (default 240; 0 = off) |
@@ -168,23 +168,24 @@ hosts itself:
 --chat models/gemma-4-26B-A4B-it-UD-Q6_K.gguf     # served in-process
 ```
 
-or one you point it at — lmserve, llama.cpp, vLLM, a hosted provider:
+or one you point it at: lmserve, llama.cpp, vLLM, a hosted provider:
 
 ```sh
 --chat-url http://127.0.0.1:8080/v1 --chat-model my-model
 ```
 
-The first form is **not a child process**: `examples/lmserve` is built as a
-module and its `serveBlocking` runs on a thread inside this binary. One
-process, one executable, nothing to find on `$PATH` and nothing orphaned if the
-agent dies. The port is picked by probing for the first free one in 8137-8168 —
+The first form is **not a child process**: the `llm.serving` engine
+(`serving.open` plus the band's HTTP server and scheduler) runs on a thread
+inside this binary. One process, one executable, nothing to find on `$PATH`
+and nothing orphaned if the agent dies. The port is picked by probing for the first free one in 8137-8168 —
 the registered band, deliberately not the ephemeral range (49152+) the OS hands
 to outbound connections.
 
 What that buys over calling `llm.chat.Conversation` directly is the two things
-it cannot do. It dispatches on the GGUF's `general.architecture`, so Gemma,
-Qwen3.5 and the rest work where a `Conversation` is bound to one model type at
-compile time. And its generation can be **abandoned mid-flight**, which is what
+it cannot do. It dispatches on the GGUF's `general.architecture` (qwen3,
+qwen3moe, gemma4), where a `Conversation` is bound to one model type at
+compile time; families outside that set are served externally through
+`--chat-url`. And its generation can be **abandoned mid-flight**, which is what
 speculative turns are built on — closing the request makes the server flip the
 job's cancel flag.
 
@@ -220,7 +221,7 @@ becoming turn boundaries.
 before it is dead time the chat model could have been working through, so at
 `--speculate-ms` (240) of quiet the reply starts generating against the
 transcript *as it stands*. If the user was only pausing, the request is
-abandoned — closing it makes lmserve flip the job's cancel flag, so it stops
+abandoned — closing it makes the server flip the job's cancel flag, so it stops
 costing GPU almost immediately — and nothing was ever spoken. If the turn
 closes and the transcript still matches what was speculated against, the reply
 is already part-written and the `chat` term collapses.
@@ -230,7 +231,7 @@ the reveal or the TUI. Those have exactly one owner and it is the main thread,
 which drains bytes under a mutex and does the sentence splitting itself.
 
 The gain is conditional. It pays when the chat stage is slow relative to the
-wait: a short question through a 4B served by lmserve reaches first audio in
+wait: a short question through a 4B served in-process reaches first audio in
 **1.28 s**. It does nothing for a long question, whose transcript keeps
 growing, so the speculation starts late or is abandoned and restarted with no
 head start left; and nothing for a small model on a warm server, where the

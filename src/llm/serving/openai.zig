@@ -15,8 +15,8 @@
 //! otherwise.
 
 const std = @import("std");
-const llm = @import("fucina_llm");
-const types = @import("fucina_llm").serving;
+const chat = @import("../chat.zig");
+const types = @import("contract.zig");
 const toolcall = @import("toolcall.zig");
 
 const Allocator = std.mem.Allocator;
@@ -342,14 +342,14 @@ const Parser = struct {
 
     /// Flush accumulated tool-result sections as one user turn (Qwen3's
     /// template shape: consecutive results share the turn).
-    fn flushToolResponses(self: *Parser, messages: *std.ArrayList(llm.chat.Message), fold: *std.ArrayList(u8)) Error!void {
+    fn flushToolResponses(self: *Parser, messages: *std.ArrayList(chat.Message), fold: *std.ArrayList(u8)) Error!void {
         if (fold.items.len == 0) return;
         try messages.append(self.arena, .{ .role = .user, .content = try fold.toOwnedSlice(self.arena) });
     }
 
     /// Render declarations into the leading system slot and arm the reply
     /// scanner.
-    fn applyTools(self: *Parser, parsed: *Parsed, messages: *std.ArrayList(llm.chat.Message), tools_json: []const []const u8) Error!void {
+    fn applyTools(self: *Parser, parsed: *Parsed, messages: *std.ArrayList(chat.Message), tools_json: []const []const u8) Error!void {
         if (tools_json.len == 0) return;
         if (messages.items.len > 0 and messages.items[0].role == .system) {
             messages.items[0].content = toolcall.renderSystemWithTools(self.arena, messages.items[0].content, tools_json) catch return error.OutOfMemory;
@@ -362,7 +362,7 @@ const Parser = struct {
 
     /// A Responses `function_call` item joins the assistant turn it
     /// follows (message + calls are sibling items of one turn).
-    fn appendCallToAssistant(self: *Parser, messages: *std.ArrayList(llm.chat.Message), name: []const u8, args_json: []const u8) Error!void {
+    fn appendCallToAssistant(self: *Parser, messages: *std.ArrayList(chat.Message), name: []const u8, args_json: []const u8) Error!void {
         var turn: std.ArrayList(u8) = .empty;
         if (messages.items.len > 0 and messages.items[messages.items.len - 1].role == .assistant) {
             turn.appendSlice(self.arena, messages.items[messages.items.len - 1].content) catch return error.OutOfMemory;
@@ -584,7 +584,7 @@ const Parser = struct {
         const messages_v = self.optField(obj, "messages") orelse
             return self.failInvalid("missing \"messages\"", "messages");
         if (messages_v != .array) return self.failInvalid("expected an array", "messages");
-        var messages: std.ArrayList(llm.chat.Message) = .empty;
+        var messages: std.ArrayList(chat.Message) = .empty;
         var tool_fold: std.ArrayList(u8) = .empty;
         for (messages_v.array.items) |mv| {
             if (mv != .object) return self.failInvalid("messages must be objects", "messages");
@@ -605,7 +605,7 @@ const Parser = struct {
 
             try self.flushToolResponses(&messages, &tool_fold);
 
-            const role: llm.chat.Message.Role = if (std.mem.eql(u8, role_s, "system") or std.mem.eql(u8, role_s, "developer"))
+            const role: chat.Message.Role = if (std.mem.eql(u8, role_s, "system") or std.mem.eql(u8, role_s, "developer"))
                 .system
             else if (std.mem.eql(u8, role_s, "user"))
                 .user
@@ -679,7 +679,7 @@ const Parser = struct {
                 return self.fail(ErrorInfo.unsupported("only truncation=\"disabled\" is supported", "truncation"));
         }
 
-        var messages: std.ArrayList(llm.chat.Message) = .empty;
+        var messages: std.ArrayList(chat.Message) = .empty;
         var tool_fold: std.ArrayList(u8) = .empty;
 
         // instructions -> leading system message.
@@ -697,7 +697,7 @@ const Parser = struct {
                 if (std.mem.eql(u8, itype, "message")) {
                     const role_s = (try self.optString(iobj, "role")) orelse
                         return self.failInvalid("message item missing \"role\"", "input");
-                    const role: llm.chat.Message.Role = if (std.mem.eql(u8, role_s, "system") or std.mem.eql(u8, role_s, "developer"))
+                    const role: chat.Message.Role = if (std.mem.eql(u8, role_s, "system") or std.mem.eql(u8, role_s, "developer"))
                         .system
                     else if (std.mem.eql(u8, role_s, "user"))
                         .user
@@ -784,7 +784,7 @@ test "chat parse: happy path with schema, stop, sampling overrides" {
     const outcome = parse(arena, .chat, body, info);
     const p = outcome.ok;
     try std.testing.expectEqual(@as(usize, 2), p.gen.messages.len);
-    try std.testing.expectEqual(llm.chat.Message.Role.system, p.gen.messages[0].role);
+    try std.testing.expectEqual(chat.Message.Role.system, p.gen.messages[0].role);
     try std.testing.expectEqualStrings("hi there", p.gen.messages[1].content);
     try std.testing.expectEqual(@as(f32, 0.5), p.gen.sampling.temperature);
     try std.testing.expectEqual(@as(u64, 7), p.gen.sampling.seed);
@@ -833,8 +833,8 @@ test "responses parse: input forms, instructions, statelessness" {
         const outcome = parse(arena, .responses, "{\"input\":\"hi\",\"instructions\":\"be terse\",\"max_output_tokens\":32}", info);
         const p = outcome.ok;
         try std.testing.expectEqual(@as(usize, 2), p.gen.messages.len);
-        try std.testing.expectEqual(llm.chat.Message.Role.system, p.gen.messages[0].role);
-        try std.testing.expectEqual(llm.chat.Message.Role.user, p.gen.messages[1].role);
+        try std.testing.expectEqual(chat.Message.Role.system, p.gen.messages[0].role);
+        try std.testing.expectEqual(chat.Message.Role.user, p.gen.messages[1].role);
         try std.testing.expectEqual(@as(usize, 32), p.gen.max_tokens);
     }
     // Item-list input: typed message items + output_text parts + skipped reasoning item.
@@ -883,14 +883,14 @@ test "chat parse: tools render into the system slot, history folds" {
     try std.testing.expect(p.tools_active);
     // system + user + assistant(with call) + folded tool turn + user
     try std.testing.expectEqual(@as(usize, 5), p.gen.messages.len);
-    try std.testing.expectEqual(llm.chat.Message.Role.system, p.gen.messages[0].role);
+    try std.testing.expectEqual(chat.Message.Role.system, p.gen.messages[0].role);
     try std.testing.expect(std.mem.startsWith(u8, p.gen.messages[0].content, "Be terse.\n\n# Tools\n\n"));
     try std.testing.expect(std.mem.indexOf(u8, p.gen.messages[0].content, "\"name\":\"get_weather\"") != null);
     try std.testing.expectEqualStrings(
         "\n<tool_call>\n{\"name\":\"get_weather\",\"arguments\":{\"city\": \"Paris\"}}\n</tool_call>",
         p.gen.messages[2].content,
     );
-    try std.testing.expectEqual(llm.chat.Message.Role.user, p.gen.messages[3].role);
+    try std.testing.expectEqual(chat.Message.Role.user, p.gen.messages[3].role);
     try std.testing.expectEqualStrings(
         "<tool_response>\n22C\n</tool_response>\n<tool_response>\nsunny\n</tool_response>",
         p.gen.messages[3].content,
@@ -904,7 +904,7 @@ test "chat parse: tools render into the system slot, history folds" {
         ;
         const q = parse(arena, .chat, none_body, info).ok;
         try std.testing.expect(!q.tools_active);
-        try std.testing.expectEqual(llm.chat.Message.Role.user, q.gen.messages[0].role);
+        try std.testing.expectEqual(chat.Message.Role.user, q.gen.messages[0].role);
     }
     // "required" and named forcing cannot be guaranteed.
     {
@@ -1004,7 +1004,7 @@ test "responses parse: flat tools, function_call items join the turn" {
     try std.testing.expect(p.tools_active);
     // tools-system + user + assistant(text+call) + folded output + user
     try std.testing.expectEqual(@as(usize, 5), p.gen.messages.len);
-    try std.testing.expectEqual(llm.chat.Message.Role.system, p.gen.messages[0].role);
+    try std.testing.expectEqual(chat.Message.Role.system, p.gen.messages[0].role);
     try std.testing.expect(std.mem.indexOf(u8, p.gen.messages[0].content, "{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"d\",\"parameters\":{\"type\":\"object\"}}}") != null);
     try std.testing.expectEqualStrings(
         "Checking.\n<tool_call>\n{\"name\":\"get_weather\",\"arguments\":{\"city\": \"Paris\"}}\n</tool_call>",

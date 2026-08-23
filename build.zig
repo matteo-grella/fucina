@@ -163,19 +163,6 @@ pub fn build(b: *std.Build) void {
     nanochat_module.addImport("fucina", module);
     nanochat_module.addImport("fucina_llm", llm_module);
 
-    // The lmserve server as a MODULE, so the voice agent can host it in-process
-    // (one binary, one process) instead of shelling out to the executable. It
-    // is the same root source file the lmserve exe builds from.
-    const lmserve_module = b.createModule(.{
-        .root_source_file = b.path("examples/lmserve/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    lmserve_module.addImport("fucina", module);
-    lmserve_module.addImport("fucina_llm", llm_module);
-    lmserve_module.addImport("nanochat", nanochat_module);
-    lmserve_module.link_libc = true;
-
     const tool_ctx: ToolCtx = .{ .target = target, .optimize = optimize, .module = module, .llm_module = llm_module, .blas_kind = blas_kind, .gpu_kind = gpu_kind };
 
     // SubQ research tools ride addExample for install/run, and their compile
@@ -208,9 +195,9 @@ pub fn build(b: *std.Build) void {
     const voiceagent = addExample(b, tool_ctx, .{ .step = "voiceagent", .desc = "Native cascade voice agent TUI: mic -> parakeet EOU STT -> qwen3 chat -> qwen3-tts -> speakers", .exe = "fucina-voiceagent", .root = "examples/voiceagent/main.zig", .llm = true });
     voiceagent.exe.root_module.addImport("nam_audio", nam_audio_module);
     configureAudioShim(voiceagent.exe);
-    // The agent hosts the lmserve chat server in-process, on a thread.
-    voiceagent.exe.root_module.addImport("lmserve", lmserve_module);
     configureLlguidance(voiceagent.exe, llguidance_dep);
+    // The agent hosts the llm.serving chat server in-process, on a thread;
+    // the band's http layer needs libc on Linux (std.c.recv hang-up probe).
     voiceagent.exe.root_module.link_libc = true;
     _ = addExample(b, tool_ctx, .{ .step = "pockettts", .desc = "Pocket TTS v2 from GGUF (kyutai port): continuous-latent flow-matching TTS, streaming Mimi decode", .exe = "fucina-pockettts", .root = "examples/pockettts/main.zig", .llm = true });
     _ = addExample(b, tool_ctx, .{ .step = "qwen3tts", .desc = "Qwen3-TTS from GGUF (qwentts.cpp port): CustomVoice text-to-speech, streamed codec decode", .exe = "fucina-qwen3tts", .root = "examples/qwen3tts/main.zig", .llm = true });
@@ -543,6 +530,10 @@ pub fn build(b: *std.Build) void {
     const test_llm_step = b.step("test-llm", "Run the llm-root unit tests only");
     test_llm_step.dependOn(&run_llm_tests.step);
 
+    // The llm.serving band's tests ride test-llm (Zig collects tests from
+    // the root module only). That forces no libc on the llm root: the band's
+    // tests never reach http's std.c hang-up probe, which lazy analysis
+    // leaves out of the test binary.
     const lmserve_tests = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-lmserve", .desc = "Run the lmserve-root unit tests only", .root = "examples/lmserve/main.zig", .llm = true });
     lmserve_tests.root_module.addImport("nanochat", nanochat_module);
     configureLlguidance(lmserve_tests, llguidance_dep);

@@ -1,14 +1,21 @@
-//! Backend adapters: the generic GGUF chat backend (qwen3, gemma4 — any
-//! family the shared `llm.chat.Conversation` hosts) and the grammar
-//! constraint cache. Family-specific adapters that cannot ride
-//! `Conversation` live in their own files (`backend_nanochat.zig`,
-//! `backend_diffusion.zig`).
+//! The generic GGUF chat backend (qwen3, gemma4 — any family the shared
+//! `llm.chat.Conversation` hosts) behind the serving `Backend` vtable, plus
+//! the grammar constraint cache, the KV reuse slot pool with its
+//! evict-to-disk tier, and the KV RAM guard. Family-specific adapters that
+//! cannot ride `Conversation` live with the CLI front end
+//! (`examples/lmserve/backend_*.zig`).
 
 const std = @import("std");
 const builtin = @import("builtin");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
-const types = @import("fucina_llm").serving;
+const types = @import("contract.zig");
+const chat = @import("../chat.zig");
+const sampler = @import("../sampler.zig");
+const llguidance = @import("../llguidance.zig");
+const kv_cache = @import("../kv_cache.zig");
+const kv_persist = @import("../kv_persist.zig");
+const cartridge_mod = @import("../cartridge.zig");
+const cartridge_fleet = @import("../cartridge_fleet.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -25,7 +32,7 @@ const Allocator = std.mem.Allocator;
 pub const ConstraintCache = struct {
     const Entry = struct {
         key: []u8,
-        constraint: llm.llguidance.Constraint,
+        constraint: llguidance.Constraint,
     };
 
     allocator: Allocator,
@@ -52,8 +59,8 @@ pub const ConstraintCache = struct {
         self: *ConstraintCache,
         tokenizer: anytype,
         spec: types.ConstraintSpec,
-        options: llm.llguidance.Options,
-    ) !*llm.llguidance.Constraint {
+        options: llguidance.Options,
+    ) !*llguidance.Constraint {
         const a = self.allocator;
         for (self.entries.items, 0..) |e, i| {
             if (e.key.len == spec.source().len + 1 and
@@ -67,12 +74,12 @@ pub const ConstraintCache = struct {
             }
         }
 
-        const grammar: llm.llguidance.Grammar = switch (spec) {
+        const grammar: llguidance.Grammar = switch (spec) {
             .json_schema => |s| .{ .json_schema = s },
             .regex => |s| .{ .regex = s },
             .lark => |s| .{ .lark = s },
         };
-        var constraint = try llm.llguidance.Constraint.init(a, tokenizer, grammar, options);
+        var constraint = try llguidance.Constraint.init(a, tokenizer, grammar, options);
         errdefer constraint.deinit();
 
         const key = try a.alloc(u8, spec.source().len + 1);
@@ -117,7 +124,7 @@ pub const GgufChatOptions = struct {
     supports_think: bool = false,
     /// The family's tool-calling convention (qwen3: `.hermes`).
     tool_style: types.ToolStyle = .none,
-    default_sampling: llm.sampler.Config = .{},
+    default_sampling: sampler.Config = .{},
     /// Speculative decoding for solo generations (lmserve --spec): the
     /// self-draft cascade (grammar-wrapped when a constraint is active)
     /// rides the reuse reconcile via the index rebuild; text stop
@@ -139,7 +146,7 @@ pub const GgufChatOptions = struct {
     /// must outlive the backend. Composes with `kv_disk`: sidecars record
     /// the prefix shape and rows (FUXKV002), so restores are
     /// self-describing even across a cartridge swap.
-    cartridge: ?*const llm.cartridge.Cartridge = null,
+    cartridge: ?*const cartridge_mod.Cartridge = null,
     /// Cartridge FLEET serving (Cartridges at Scale, docs/CARTRIDGES.md):
     /// per request, the last user message embeds through `embedFn`, the
     /// cosine index picks documents, and the selected cartridges COMPOSE as
@@ -164,7 +171,7 @@ pub const GgufChatOptions = struct {
 pub const ShineFleetOptions = struct {
     /// Retrieval index over the fleet's documents (the cartridge fleets'
     /// EmbedIndex, content-agnostic; borrowed — must outlive the backend).
-    index: *const llm.cartridge_fleet.EmbedIndex,
+    index: *const cartridge_fleet.EmbedIndex,
     /// Query embedder — the `cartridge_fleet.embed_suffix` contract the
     /// index was built with. Worker thread only, like generation itself.
     embed_ctx: *anyopaque,
@@ -184,8 +191,8 @@ pub const FleetOptions = struct {
     /// Fleet directory and its parsed manifest/index (borrowed — must
     /// outlive the backend).
     dir: []const u8,
-    manifest: *const llm.cartridge_fleet.Manifest,
-    index: *const llm.cartridge_fleet.EmbedIndex,
+    manifest: *const cartridge_fleet.Manifest,
+    index: *const cartridge_fleet.EmbedIndex,
     /// Query embedder (the family trainer behind a type-erased pointer;
     /// MUST implement the `cartridge_fleet.embed_suffix` contract the index
     /// was built with). Worker thread only, like generation itself.
@@ -259,8 +266,8 @@ fn shouldSwitchSelection(cur_best: f32, outside_best: ?f32, margin: f32) bool {
 pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
     return struct {
         const Self = @This();
-        const Conversation = llm.chat.Conversation(ModelT, TokMod);
-        const KvCache = llm.kv_cache.KvCache;
+        const Conversation = chat.Conversation(ModelT, TokMod);
+        const KvCache = kv_cache.KvCache;
 
         /// One resident reuse slot: a KV cache plus the token shadow
         /// describing exactly the positions it holds (WORKER THREAD ONLY,
@@ -287,7 +294,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
         /// request, but pointer stability keeps the compose loop simple).
         const CartEntry = struct {
             doc: usize,
-            cart: *llm.cartridge.Cartridge,
+            cart: *cartridge_mod.Cartridge,
         };
 
         /// One disk-tier sidecar: its path, an in-memory copy of its token
@@ -303,7 +310,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
         ctx: *fucina.ExecContext,
         model: *const ModelT,
         tokenizer: *const TokMod.Tokenizer,
-        template: llm.chat.Template,
+        template: chat.Template,
         opts: GgufChatOptions,
         constraints: ConstraintCache,
         slots: std.ArrayList(Slot) = .empty,
@@ -323,7 +330,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
             ctx: *fucina.ExecContext,
             model: *const ModelT,
             tokenizer: *const TokMod.Tokenizer,
-            template: llm.chat.Template,
+            template: chat.Template,
             opts: GgufChatOptions,
         ) Self {
             return .{
@@ -369,7 +376,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
         /// heap-stable; entries live until evicted (rows are COPIED into
         /// conversation caches, so eviction never invalidates a served
         /// prefix). Worker thread only.
-        fn fleetCartridge(self: *Self, doc: usize) !*const llm.cartridge.Cartridge {
+        fn fleetCartridge(self: *Self, doc: usize) !*const cartridge_mod.Cartridge {
             const fl = self.opts.fleet.?;
             const a = self.allocator;
             for (self.carts.items, 0..) |e, i| {
@@ -382,11 +389,11 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
             const state = &fl.manifest.docs.items[doc];
             const path = try std.fs.path.join(a, &.{ fl.dir, state.cart_file });
             defer a.free(path);
-            var mapped = try llm.cartridge_fleet.mmapFile(fl.io, path);
+            var mapped = try cartridge_fleet.mmapFile(fl.io, path);
             defer mapped.deinit();
-            const cart = try a.create(llm.cartridge.Cartridge);
+            const cart = try a.create(cartridge_mod.Cartridge);
             errdefer a.destroy(cart);
-            cart.* = try llm.cartridge.Cartridge.initFromStateDict(self.ctx, a, mapped.bytes);
+            cart.* = try cartridge_mod.Cartridge.initFromStateDict(self.ctx, a, mapped.bytes);
             errdefer cart.deinit();
             // Effective capacity never below the selection width, so the
             // acquire-then-compose loop of writeSelectionPrefix cannot
@@ -435,7 +442,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
         /// (per-turn re-retrieval measurably flaps the runner-up document
         /// and forfeits all KV reuse); `--rag-adaptive` layers the decisive
         /// switch rule on top of this in `vtGenerate`.
-        fn adoptSlotAt(self: *Self, i: usize, convo_opts: llm.chat.Options) !Adopted {
+        fn adoptSlotAt(self: *Self, i: usize, convo_opts: chat.Options) !Adopted {
             var slot = self.slots.swapRemove(i);
             defer slot.tokens.deinit(self.allocator);
             self.allocator.free(slot.opener);
@@ -465,7 +472,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
         /// adapter fleets: index + embedder + selection widths. Adapter
         /// fleets select exactly one document (adapters do not compose).
         const Retrieval = struct {
-            index: *const llm.cartridge_fleet.EmbedIndex,
+            index: *const cartridge_fleet.EmbedIndex,
             embed_ctx: *anyopaque,
             embedFn: *const fn (ctx: *anyopaque, text: []const u8, out: []f32) anyerror!void,
             rag_chunks: usize,
@@ -550,7 +557,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
         /// shadow is the shared ids prefix. Owns `cache` on EVERY failure
         /// path (`initWarm`'s own contract) — callers must not hold an
         /// errdefer across this call, or the cache double-frees.
-        fn warmFromShare(self: *Self, cache: KvCache, ids: []const u32, shared: usize, prefix_rows: usize, convo_opts: llm.chat.Options) !Conversation {
+        fn warmFromShare(self: *Self, cache: KvCache, ids: []const u32, shared: usize, prefix_rows: usize, convo_opts: chat.Options) !Conversation {
             const a = self.allocator;
             var owned = cache;
             const toks = blk: {
@@ -579,7 +586,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
         /// fleet mode): only same-selection slots are adoptable, and a
         /// foreign-prefix host is reset and rebuilt behind this request's
         /// cartridges.
-        fn acquireConversation(self: *Self, ids: []const u32, convo_opts: llm.chat.Options, selection: []const usize, selection_p: usize) !Conversation {
+        fn acquireConversation(self: *Self, ids: []const u32, convo_opts: chat.Options, selection: []const usize, selection_p: usize) !Conversation {
             self.clock += 1;
 
             var best_i: ?usize = null;
@@ -656,7 +663,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 }
                 self.disk.items[di].last_used = self.clock;
                 const path = self.disk.items[di].path;
-                const loaded = llm.kv_persist.load(kd.io, self.allocator, path, &cache) catch null;
+                const loaded = kv_persist.load(kd.io, self.allocator, path, &cache) catch null;
                 if (loaded) |resumed| {
                     defer self.allocator.free(resumed.tokens);
                     // The sidecar carries its own prefix rows: the restored
@@ -888,8 +895,8 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
             // prefix rows themselves (FUXKV002) — a restore is
             // self-describing even across a cartridge swap.
             const prefix_rows: usize = if (self.opts.cartridge) |cart| cart.p else 0;
-            llm.kv_persist.reset(io, a, path, cache, prefix_rows) catch return false;
-            llm.kv_persist.appendRange(io, a, path, cache, tokens, prefix_rows) catch return false;
+            kv_persist.reset(io, a, path, cache, prefix_rows) catch return false;
+            kv_persist.appendRange(io, a, path, cache, tokens, prefix_rows) catch return false;
             return true;
         }
 
@@ -918,7 +925,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                     .model_id = self.opts.model_id,
                     .context_len = self.opts.context_len,
                     .caps = .{
-                        .grammar = llm.llguidance.enabled,
+                        .grammar = llguidance.enabled,
                         .think = self.opts.supports_think,
                     },
                     .think_markers = self.opts.think_markers,
@@ -958,9 +965,9 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
             // outlive the clone; the cache guarantees it — see above). The
             // mask forces the turn-end marker when the grammar completes, so
             // normal stop handling ends the reply.
-            var clone: ?llm.llguidance.Constraint = null;
+            var clone: ?llguidance.Constraint = null;
             defer if (clone) |*c| c.deinit();
-            var processor: ?llm.sampler.LogitProcessor = null;
+            var processor: ?sampler.LogitProcessor = null;
             if (req.constraint) |spec| {
                 const turn_stop: ?u32 = self.tokenizer.tokenId(self.template.stopMarker()) orelse self.tokenizer.eosId();
                 const base = try self.constraints.acquire(self.tokenizer, spec, .{
@@ -972,7 +979,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 processor = clone.?.processor();
             }
 
-            const convo_opts: llm.chat.Options = .{
+            const convo_opts: chat.Options = .{
                 .capacity = self.opts.context_len,
                 .max_response_tokens = req.max_tokens,
                 .think_off = !req.think,
@@ -1125,7 +1132,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 a.free(ids_arr);
             }
             for (ids_arr) |*p| p.* = null;
-            const clones = try a.alloc(?llm.llguidance.Constraint, n);
+            const clones = try a.alloc(?llguidance.Constraint, n);
             defer {
                 for (clones) |*maybe| if (maybe.*) |*c| c.deinit();
                 a.free(clones);
@@ -1179,8 +1186,8 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                     };
                     if (!ok) continue;
                 }
-                const processor: ?llm.sampler.LogitProcessor = if (clones[i]) |*c| c.processor() else null;
-                const convo_opts: llm.chat.Options = .{
+                const processor: ?sampler.LogitProcessor = if (clones[i]) |*c| c.processor() else null;
+                const convo_opts: chat.Options = .{
                     .capacity = self.opts.context_len,
                     .max_response_tokens = req.max_tokens,
                     .think_off = !req.think,

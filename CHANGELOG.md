@@ -12,9 +12,12 @@ point; earlier history is `git log`.
 - **Stable** (deprecation contract applies): `tensor`, `ag` (the public
   `Tensor` and autograd pillars), `exec`/`ExecContext`, `gguf`, `weights`,
   `gguf_meta`, `safetensors`, `optim`, `lora`, `parallel`, `tuning`,
-  `llm.serving`, `llm.chat`, `llm.tokenizer`, `llm.kv_cache`.
+  `llm.serving` (the contract: request/result types and the `Backend`
+  vtable), `llm.chat`, `llm.tokenizer`, `llm.kv_cache`.
 - **Experimental** (may change without an alias step, changelog entry
-  only): `es`, `ptqtp`, `llm.runner`, `llm.speculative`, `llm.subq`, the
+  only): `es`, `ptqtp`, `llm.runner`, the `llm.serving` transport/engine
+  band (`http`, `scheduler`, `emitter`, wire dialects, `gguf_chat`,
+  `open`), `llm.speculative`, `llm.subq`, the
   research features under model families (SHINE, cartridges, Engram), and
   every model family's internal layout.
 
@@ -22,6 +25,24 @@ point; earlier history is `git log`.
 
 ### Added
 
+- `llm.serving` transport and engine, promoted from `examples/lmserve`:
+  `serving.http` (server, SSE stream pipe, Host guard), `serving.scheduler`
+  (bounded FIFO + single inference worker), `serving.emitter`, the
+  `serving.openai`/`serving.anthropic` wire dialects, `serving.toolcall`
+  (hermes tool calling), and `serving.gguf_chat` (the generic
+  `GgufChatBackend` engine: constraint cache, KV reuse slots + disk tier,
+  KV RAM guard). A package consumer now gets a working server, not only
+  the `Backend` vtable.
+- `llm.serving.open` / `llm.serving.openFromFile`: load a GGUF and return
+  a ready `serving.Backend` for the `Conversation`-hosted families (qwen3,
+  qwen3moe, gemma4) with the full engine option surface
+  (`serving.OpenOptions`); architectures whose adapters stay with
+  `examples/lmserve` (nanochat, diffusion-gemma, inkling, qwen35,
+  deepseek4) return `error.UnsupportedArchitecture`. lmserve is now a thin
+  CLI front end over the band, and the voice agent hosts the engine
+  through `llm.serving` (the `lmserve` build module is removed; in-process
+  `--chat` covers the `serving.open` families, `--chat-url` covers the
+  rest).
 - `fucina.quant`: the quantized-format namespace — every GGML `Block*`
   struct, the `QuantizedMatmulRhs*` container types, `q8_0_block_size`,
   and `supports_q4_k_mmla` move under one name. The flat root spellings
