@@ -21,7 +21,7 @@ point; earlier history is `git log`.
   research features under model families (SHINE, cartridges, Engram), and
   every model family's internal layout.
 
-## Unreleased
+## 0.3.0 — 2026-08-23
 
 ### Added
 
@@ -38,15 +38,14 @@ point; earlier history is `git log`.
   qwen3moe, gemma4) with the full engine option surface
   (`serving.OpenOptions`); architectures whose adapters stay with
   `examples/lmserve` (nanochat, diffusion-gemma, inkling, qwen35,
-  deepseek4) return `error.UnsupportedArchitecture`. lmserve is now a thin
+  qwen35moe, deepseek4) return `error.UnsupportedArchitecture`. lmserve is now a thin
   CLI front end over the band, and the voice agent hosts the engine
   through `llm.serving` (the `lmserve` build module is removed; in-process
   `--chat` covers the `serving.open` families, `--chat-url` covers the
   rest).
 - `fucina.quant`: the quantized-format namespace — every GGML `Block*`
-  struct, the `QuantizedMatmulRhs*` container types, `q8_0_block_size`,
-  and `supports_q4_k_mmla` move under one name. The flat root spellings
-  remain as deprecated aliases for one MINOR release.
+  struct, the eleven root-exported `QuantizedMatmulRhs*` container types,
+  `q8_0_block_size`, and `supports_q4_k_mmla` move under one name.
 - The module root now states its membership rule in its header (pillar
   types, receiver-less graph control, subsystem namespaces, backend
   constants, scalar format converters), and every root export carries a
@@ -74,6 +73,10 @@ point; earlier history is `git log`.
   (were caller-freed `[]f32` dupes of an internal tensor). Semantics and
   numerics unchanged; the dupe copies are gone. `deepseek4` keeps its
   session-owned protocol (its MTP out-rows contract differs by design).
+  Rewrites: `const row = try model.step(...); defer allocator.free(row)` →
+  `var logits = try model.step(...); defer logits.deinit();` and read via
+  `try logits.dataConst()`; glm4moe's per-row `rows[i]` becomes
+  `flat[i * vocab ..][0 .. vocab]` over the one returned tensor.
 - Family namespace shape unified to `family.model`: `llm.gemma.model` /
   `llm.gemma.train` (files `llm/gemma/{model,train}.zig`) and
   `llm.pockettts.model`. `gemma.gemma4`, `gemma.gemma4_train`, and
@@ -103,12 +106,41 @@ point; earlier history is `git log`.
 
 ### Deprecated
 
+- The flat root quant spellings (`fucina.Block*`,
+  `fucina.QuantizedMatmulRhs*`, `fucina.q8_0_block_size`,
+  `fucina.supports_q4_k_mmla`) — aliases of the same names under
+  `fucina.quant`; removal in the next MINOR release.
 - `llm.gemma.gemma4` / `llm.gemma.gemma4_train` / `llm.pockettts.pocket`
   — aliases of `gemma.model` / `gemma.train` / `pockettts.model`; removal
   in the next MINOR release.
 - Build options `-Dbackend=cpu` (alias of `scalar`) and `-Daccelerate`
   (compatibility alias of `-Dblas`): both predate this changelog and are
   now on the ledger; removal in the next MINOR release.
+
+### Removed
+
+- The 0.2.0-deprecated aliases, on schedule: `sumExt` / `meanExt` /
+  `maxExt` / `minExt` / `crossEntropyExt` / `linearCrossEntropyExt` /
+  `linearDistillExt` (use the base names, same signatures) and
+  `llm.weights` / `llm.ptqtp_gguf` / `llm.gguf_meta` (use the `fucina.*`
+  roots).
+- `llm.gemma.moe_route` / `llm.gemma.moe_route_tensor` (experimental
+  tier): their code folded into the exec-band kernels
+  (`exec/moe_gu.zig`); `llm.gemma.moe` remains the family surface.
+- The `lmserve` build module (voiceagent now hosts the engine through
+  `llm.serving`), and four consumer-less `PackedMatmul*` /
+  `QuantizedMatmulFormat` re-exports on the exec facade (unreachable via
+  `fucina.*`; the RHS container vocabulary lives on `fucina.quant`).
+
+### Fixed
+
+- `-Dgpu=metal` builds compile again: the model-I/O promotion had left
+  `weights.zig`'s internal shim without `RawTensor` and
+  `gpu.has_quant_gemm`, breaking every Metal build since; the leg is now
+  exercised (build + llm tests on Metal).
+- Two `sum` call sites in `bench/facade.zig` missed the 0.2.0 trailing
+  options migration; benches are never compiled by the default build, so
+  the subq research tools and this gap are now inside `bench-check`.
 
 ## 0.2.0 — 2026-08-22
 
