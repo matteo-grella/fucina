@@ -1771,7 +1771,7 @@ fn dot2F32(a0: []const f32, a1: []const f32, b: []const f32) [2]f32 {
     return .{ t0, t1 };
 }
 
-const dotF16 = fucina.simd.dotF32F16;
+const dotF16 = fucina.internal.backend_mod.vector_impl.dotF32F16;
 
 /// One exact-read batch under the shared online softmax gauge: score all
 /// rows, raise the gauge if the batch's max score exceeds it (rescaling the
@@ -1795,7 +1795,7 @@ fn exactBatchQ8(
 ) void {
     const m = scores.len;
     if (m == 0) return;
-    const simd = fucina.simd;
+    const simd = fucina.internal.backend_mod.vector_impl;
     var i: usize = 0;
     while (i + 2 <= m) : (i += 2) {
         const pair = qkern.vecDotQ8_0Q8_0x2(q_q8, q_scales, k_blocks[i * bpr ..][0..bpr], k_blocks[(i + 1) * bpr ..][0..bpr]);
@@ -1833,7 +1833,7 @@ fn exactBatch(
     beta: f32,
 ) void {
     if (scores.len == 0) return;
-    const simd = fucina.simd;
+    const simd = fucina.internal.backend_mod.vector_impl;
     simd.scoreRows4F16(scores, query[0..d], k_rows, stride);
     const m = beta * simd.vecMaxReduce(scores);
     if (m > gauge.*) {

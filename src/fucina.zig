@@ -341,13 +341,20 @@ pub const simd = struct {
     pub const vexpf = vector_primitives.vexpf;
     pub const sigmoidVec = vector_primitives.sigmoidVec;
     pub const tanhVec = vector_primitives.tanhVec;
-    /// f16 row-block attention primitives (online-softmax inner loops over
-    /// contiguous or strided f16 rows); see backend/vector/primitives.zig.
+    /// Deprecated: the f16 row-block attention primitives are backend
+    /// internals, not elemental-op vocabulary; in-tree consumers reach them
+    /// through `internal.backend_mod.vector_impl`. Removal per
+    /// docs/DEVELOPMENT.md §6.
     pub const vecScale = vector_primitives.vecScale;
+    /// Deprecated: see `vecScale`. Removal per docs/DEVELOPMENT.md §6.
     pub const vecMaxReduce = vector_primitives.vecMaxReduce;
+    /// Deprecated: see `vecScale`. Removal per docs/DEVELOPMENT.md §6.
     pub const dotF32F16 = vector_primitives.dotF32F16;
+    /// Deprecated: see `vecScale`. Removal per docs/DEVELOPMENT.md §6.
     pub const scoreRows4F16 = vector_primitives.scoreRows4F16;
+    /// Deprecated: see `vecScale`. Removal per docs/DEVELOPMENT.md §6.
     pub const vecExpAffineSumInPlace = vector_primitives.vecExpAffineSumInPlace;
+    /// Deprecated: see `vecScale`. Removal per docs/DEVELOPMENT.md §6.
     pub const weightedAccumRows4F16 = vector_primitives.weightedAccumRows4F16;
 };
 /// Fake-quantization round trips (FP8-E4M3 / FP4-E2M1 microscaling groups,

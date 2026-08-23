@@ -230,6 +230,13 @@ pub const vecAdd = primitives.vecAdd;
 pub const vecSub = primitives.vecSub;
 pub const vecMul = primitives.vecMul;
 pub const vecScale = primitives.vecScale;
+// f16 row-block attention primitives (the SubQ research evaluator's inner
+// loops); reachable in-tree through `fucina.internal.backend_mod.vector_impl`.
+pub const vecMaxReduce = primitives.vecMaxReduce;
+pub const dotF32F16 = primitives.dotF32F16;
+pub const scoreRows4F16 = primitives.scoreRows4F16;
+pub const vecExpAffineSumInPlace = primitives.vecExpAffineSumInPlace;
+pub const weightedAccumRows4F16 = primitives.weightedAccumRows4F16;
 pub const vecAddScaled = primitives.vecAddScaled;
 pub const vecUnary = primitives.vecUnary;
 pub const vecAddUnary = primitives.vecAddUnary;

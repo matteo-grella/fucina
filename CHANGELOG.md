@@ -21,6 +21,60 @@ point; earlier history is `git log`.
   research features under model families (SHINE, cartridges, Engram), and
   every model family's internal layout.
 
+## Unreleased
+
+### Added
+
+- `fucina.ParamView`: the per-entry view `ParamRegistry.view` returns
+  (name, dtype, shape, mutable byte view, trainability) is now nameable
+  at the root; it was returned but unexported.
+- `llm.runner.Error.WrongBlockStyle`: the fused entries (`forwardStep*`,
+  `forwardLastLogits*`, `initKvCache`) reject a `.host_reference` model
+  instead of silently running zero layers and returning embedding-only
+  logits; `hostStep`/`initHostCache` answer it (was `InvalidConfig`) on a
+  `.fused` model.
+- qwen35: the multi-token fused-down FFN fast path now covers Q4_K (x8
+  targets), Q5_K, and Q6_K down projections (it was Q8_0-only), and every
+  projection loader detects persisted PTQTP planes (decorated qwen35
+  GGUFs previously loaded their base tensors, dropping the decoration).
+- `exec/backend`: `div` joins the backend elementwise surface
+  (`divContiguousIntoUnchecked`), so the contiguous binary dispatch no
+  longer special-cases it through an exec-local kernel.
+
+### Changed
+
+- Internal layout, no public spelling changes: `src/llm/model_common.zig`
+  holds the PTQTP-aware projection loader, the dense-FFN containers, the
+  MoE expert-trio loader, the embed/norm/lm-head trio, and the GQA head
+  map the runner and qwen35 previously each carried; `weights/moe_stream.zig`
+  holds `MoeStreamOptions` and the `--moe-*` argv band; `exec/moe_gu.zig`'s
+  packed and raw batch bodies share one chain-wiring skeleton; the three
+  core model-I/O files import their home modules directly instead of a
+  shadow `fucina` struct. Recorded goldens and llama.cpp parity gates are
+  unchanged.
+- `parallel.row_kernel_len_threshold` and `parallel.attention_work_threshold`
+  name the halved pool gates the fused row kernels and attention paths
+  use (previously 27 inline `threshold / 2` sites); values unchanged.
+- docs/ARCHITECTURE.md: the band table now lists every `src/*.zig` file,
+  and the kernel-boundary wording in `exec.zig`/`backend.zig` states where
+  the fused kernels actually live (exec, backend-independent).
+
+### Deprecated
+
+- `fucina.simd.{vecScale,vecMaxReduce,dotF32F16,scoreRows4F16,vecExpAffineSumInPlace,weightedAccumRows4F16}`
+  — backend internals that were published under the elemental-op
+  namespace; in-tree consumers use `fucina.internal.backend_mod.vector_impl`.
+  Aliases kept; removal in the next MINOR release.
+- `fucina.weights.GroupedQ8_0RhsX4` — alias of
+  `fucina.quant.QuantizedMatmulRhsQ8_0x4` (the same type); removal in the
+  next MINOR release.
+
+### Fixed
+
+- qwen35: a layer leak on the load error path (a failing
+  `ExpertStore.finalize` after the layers had loaded freed the layer
+  slice but not the layers).
+
 ## 0.3.0 — 2026-08-23
 
 ### Added

@@ -1936,6 +1936,7 @@ pub fn linearSeqBorrowedF16(
 /// quantization per group and ONE worker-team dispatch replace n_groups
 /// facade linears + concat, bit-identically: the same q8_0 tile kernel
 /// computes the same integer dots, and i32 accumulation is order-free.
+/// Deprecated: use `fucina.quant.QuantizedMatmulRhsQ8_0x4` (the same type). Removal per docs/DEVELOPMENT.md §6.
 pub const GroupedQ8_0RhsX4 = backend_quant.QuantizedMatmulRhsQ8_0x4;
 
 /// Load-time x4 packing for `groupedQ8_0GemvFusedInto`: one pack per
@@ -1949,13 +1950,13 @@ pub fn packGroupedQ8_0Rhs(
     n_groups: usize,
     rank: usize,
     group_dim: usize,
-) ![]GroupedQ8_0RhsX4 {
+) ![]backend_quant.QuantizedMatmulRhsQ8_0x4 {
     const qm = backend_quant;
     if (group_dim % 32 != 0 or rank % 4 != 0 or n_groups == 0) return Error.InvalidWeightShape;
     const bpr = group_dim / 32;
     const row_bytes = bpr * @sizeOf(qm.BlockQ8_0);
     if (weight_bytes.len != n_groups * rank * row_bytes) return Error.InvalidWeightShape;
-    const packs = try allocator.alloc(GroupedQ8_0RhsX4, n_groups);
+    const packs = try allocator.alloc(backend_quant.QuantizedMatmulRhsQ8_0x4, n_groups);
     var built: usize = 0;
     errdefer {
         for (packs[0..built]) |*p| p.deinit();
@@ -1972,7 +1973,7 @@ pub fn packGroupedQ8_0Rhs(
 pub fn groupedQ8_0GemvFusedInto(
     ctx: *ExecContext,
     x: []const f32,
-    rhs_packs: []const GroupedQ8_0RhsX4,
+    rhs_packs: []const backend_quant.QuantizedMatmulRhsQ8_0x4,
     rank: usize,
     group_dim: usize,
     out: []f32,
@@ -1993,7 +1994,7 @@ pub fn groupedQ8_0GemvFusedInto(
     const Task = struct {
         out: []f32,
         lhs: []const qm.BlockQ8_0,
-        rhs: *const GroupedQ8_0RhsX4,
+        rhs: *const backend_quant.QuantizedMatmulRhsQ8_0x4,
         n: usize,
 
         fn run(task: *const @This()) void {

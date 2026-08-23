@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const simd = fucina.simd;
+const simd = fucina.internal.backend_mod.vector_impl;
 
 const d = 128;
 const rows_n = 64 * 1024; // 16 MB of f16 K rows: far beyond L2
