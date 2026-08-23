@@ -8,8 +8,12 @@
 //! identically under every `-Dbackend`, pinned by their own determinism
 //! tests. Everything above (tag ops, autograd) drives tensors through
 //! this facade. Op implementations live in `exec/`; this file is the
-//! facade + registry (deliberately unsplit). Layer stack:
-//! docs/ARCHITECTURE.md.
+//! facade + registry, deliberately unsplit: 326 of its 332 methods are a
+//! single forwarding statement, so a mixin split (the shape `ag/tensor.zig`
+//! uses, where the mixin files carry real bodies) would move the
+//! restatement rather than remove it and add an alias line per method on
+//! top. The section banners below track the `exec/` file each run forwards
+//! to. Layer stack: docs/ARCHITECTURE.md.
 const std = @import("std");
 const backend_mod = @import("backend.zig");
 const backend_ops = backend_mod.ops;
@@ -430,6 +434,9 @@ pub const ExecContext = struct {
         return self.rt.cloneTyped(dtype, x);
     }
 
+    // ----------------------------------------------------------------------
+    // elementwise: pointwise arithmetic, activations, masks, casts (exec/elementwise.zig)
+    // ----------------------------------------------------------------------
     pub fn add(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
         return exec_elementwise.add(&self.rt, a, b);
     }
@@ -567,6 +574,9 @@ pub const ExecContext = struct {
         return exec_gather_scatter.relposShiftRank3(&self.rt, bd, t_k);
     }
 
+    // ----------------------------------------------------------------------
+    // elementwise: pointwise arithmetic, activations, masks, casts (exec/elementwise.zig)  [continued]
+    // ----------------------------------------------------------------------
     pub fn splitGluAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
         return exec_elementwise.splitGluAxisRank(&self.rt, rank, x, axis);
     }
@@ -695,6 +705,9 @@ pub const ExecContext = struct {
         return exec_elementwise.dropoutBackward(&self.rt, gy, p, seed);
     }
 
+    // ----------------------------------------------------------------------
+    // convert: dtype conversion and quantize/dequantize round trips (exec/convert.zig)
+    // ----------------------------------------------------------------------
     pub fn castTyped(
         self: *ExecContext,
         comptime source_dtype: DType,
@@ -731,6 +744,9 @@ pub const ExecContext = struct {
         return exec_convert.scaleTyped(&self.rt, dtype, x, scalar_value);
     }
 
+    // ----------------------------------------------------------------------
+    // conv: 1-D/2-D convolutions, im2col/col2im, Winograd (exec/conv.zig)
+    // ----------------------------------------------------------------------
     pub fn causalDepthwiseConv1dAxisRank(
         self: *ExecContext,
         comptime rank: usize,
@@ -873,6 +889,9 @@ pub const ExecContext = struct {
         return exec_conv.fold(&self.rt, col, output_size, kernel, stride, pad);
     }
 
+    // ----------------------------------------------------------------------
+    // pool: 2-D pooling and upsampling (exec/pool.zig)
+    // ----------------------------------------------------------------------
     /// 2-D max pool, channel-last rank-3 `[H,W,C]` → `[OH,OW,C]` (zero-pad
     /// border reads as −inf). See `exec/pool.zig`.
     pub fn maxPool2d(self: *ExecContext, input: *const Tensor, kernel: [2]usize, stride: [2]usize, pad: [2]usize) !Tensor {
@@ -902,6 +921,9 @@ pub const ExecContext = struct {
         return exec_pool.upsample2xNearestBackward(&self.rt, gy);
     }
 
+    // ----------------------------------------------------------------------
+    // elementwise: pointwise arithmetic, activations, masks, casts (exec/elementwise.zig)  [continued]
+    // ----------------------------------------------------------------------
     /// Per-channel PReLU (channel axis innermost): `y = x > 0 ? x : α[c]·x`.
     pub fn preluChannels(self: *ExecContext, x: *const Tensor, alpha: *const Tensor) !Tensor {
         return exec_elementwise.preluChannels(&self.rt, x, alpha);
@@ -922,6 +944,9 @@ pub const ExecContext = struct {
         return exec_elementwise.channelAffine(&self.rt, x, scale_vec, shift_vec);
     }
 
+    // ----------------------------------------------------------------------
+    // conv: 1-D/2-D convolutions, im2col/col2im, Winograd (exec/conv.zig)  [continued]
+    // ----------------------------------------------------------------------
     pub fn causalConv1dBackwardInputAxisRank(
         self: *ExecContext,
         comptime rank: usize,
@@ -1075,6 +1100,9 @@ pub const ExecContext = struct {
         return exec_conv.convTranspose1d(&self.rt, input, weight2, bias, out_channels, taps, stride, pad, output_pad);
     }
 
+    // ----------------------------------------------------------------------
+    // elementwise: pointwise arithmetic, activations, masks, casts (exec/elementwise.zig)  [continued]
+    // ----------------------------------------------------------------------
     pub fn unary(self: *ExecContext, comptime op: UnaryOp, x: *const Tensor) !Tensor {
         return exec_elementwise.unary(&self.rt, op, x);
     }
@@ -1155,6 +1183,9 @@ pub const ExecContext = struct {
         return exec_elementwise.clamp(&self.rt, x, min_value, max_value);
     }
 
+    // ----------------------------------------------------------------------
+    // reduce: sums, products, means, argmin/argmax, scans (exec/reduce.zig)
+    // ----------------------------------------------------------------------
     pub fn sum(self: *ExecContext, x: *const Tensor) !Tensor {
         return exec_reduce.sum(&self.rt, x);
     }
@@ -1257,7 +1288,6 @@ pub const ExecContext = struct {
         return exec_reduce.meanMaskedAxisRank(&self.rt, mask_dtype, rank, x, mask, axis, empty_value);
     }
 
-
     pub fn meanAxisRankTyped(
         self: *ExecContext,
         comptime dtype: DType,
@@ -1268,6 +1298,9 @@ pub const ExecContext = struct {
         return exec_reduce.meanAxisRankTyped(&self.rt, dtype, rank, x, axis);
     }
 
+    // ----------------------------------------------------------------------
+    // gather/scatter: indexing, embedding lookups, strided views (exec/gather_scatter.zig)
+    // ----------------------------------------------------------------------
     pub fn narrowAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, start: usize, length: usize) !Tensor {
         return exec_gather_scatter.narrowAxisRank(&self.rt, rank, x, axis, start, length);
     }
@@ -1369,6 +1402,9 @@ pub const ExecContext = struct {
         return exec_gather_scatter.sliceGradientAxisRank(&self.rt, rank, grad, source_shape, axis, start);
     }
 
+    // ----------------------------------------------------------------------
+    // stats: normalization statistics, standardize, moments (exec/stats.zig)
+    // ----------------------------------------------------------------------
     pub fn argmaxAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !tensor.TensorOf(.i64) {
         return exec_stats.argmaxAxisRank(&self.rt, rank, x, axis);
     }
@@ -1469,6 +1505,9 @@ pub const ExecContext = struct {
         return exec_topk.routerTopK(&self.rt, logits, k, options, selected, weights);
     }
 
+    // ----------------------------------------------------------------------
+    // gather/scatter: indexing, embedding lookups, strided views (exec/gather_scatter.zig)  [continued]
+    // ----------------------------------------------------------------------
     pub fn scatterAddAxisRank(
         self: *ExecContext,
         comptime rank: usize,
@@ -1513,6 +1552,9 @@ pub const ExecContext = struct {
         return exec_gather_scatter.scatterAlongAxisRank(&self.rt, rank, base, src, axis, indices);
     }
 
+    // ----------------------------------------------------------------------
+    // softmax family (exec/softmax.zig)
+    // ----------------------------------------------------------------------
     pub fn softmaxAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
         return exec_softmax.softmaxAxisRank(&self.rt, rank, x, axis);
     }
@@ -1537,6 +1579,9 @@ pub const ExecContext = struct {
         return exec_softmax.softmaxExtBackwardAxisRank(&self.rt, rank, y, gy, axis, scale_value);
     }
 
+    // ----------------------------------------------------------------------
+    // norm: RMS/layer/group normalization and their fused arms (exec/norm.zig)
+    // ----------------------------------------------------------------------
     pub fn rmsNormAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
         return exec_norm.rmsNormAxisRank(&self.rt, rank, x, axis, eps);
     }
@@ -1655,6 +1700,9 @@ pub const ExecContext = struct {
         return exec_norm.layerNormAffineBackwardAxisRank(&self.rt, rank, x, weight, gy, axis, eps, need_input, need_weight, need_bias);
     }
 
+    // ----------------------------------------------------------------------
+    // loss: cross-entropy family and reductions (exec/loss.zig)
+    // ----------------------------------------------------------------------
     pub fn crossEntropyLossAxisRank(self: *ExecContext, comptime rank: usize, logits: *const Tensor, comptime axis: usize, labels: []const usize) !Tensor {
         return exec_loss.crossEntropyLossAxisRank(&self.rt, rank, logits, axis, labels);
     }
@@ -1825,6 +1873,9 @@ pub const ExecContext = struct {
         return exec_loss.klDivBackwardUpstream(&self.rt, input, target, options, gy, wrt);
     }
 
+    // ----------------------------------------------------------------------
+    // rope: rotary tables and their fused application (exec/rope.zig)
+    // ----------------------------------------------------------------------
     pub fn ropeAxisRank(
         self: *ExecContext,
         comptime rank: usize,
@@ -1927,6 +1978,9 @@ pub const ExecContext = struct {
         return exec_rope.ropePartialAxisRankWithTable(&self.rt, rank, x, position_axis, feature_axis, table, mode);
     }
 
+    // ----------------------------------------------------------------------
+    // attention: the fused forward/backward kernels (exec/attention.zig)
+    // ----------------------------------------------------------------------
     pub fn groupedCausalAttention(
         self: *ExecContext,
         q: *const Tensor,
@@ -2170,6 +2224,9 @@ pub const ExecContext = struct {
         return delta_attention.kdaRecurrent(&self.rt, q, k, v, g_raw, beta_raw, a_log, dt_bias, initial_state, scale_value);
     }
 
+    // ----------------------------------------------------------------------
+    // matmul: dense contractions, batched and packed (exec/matmul.zig)
+    // ----------------------------------------------------------------------
     pub fn matmul2DTyped(self: *ExecContext, comptime dtype: DType, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)) {
         return exec_matmul.matmul2DTyped(&self.rt, dtype, a, b);
     }
@@ -2199,6 +2256,9 @@ pub const ExecContext = struct {
         return exec_matmul.matmul2DWithPackedRhsTyped(&self.rt, dtype, a, rhs);
     }
 
+    // ----------------------------------------------------------------------
+    // quantized matmul: per-format dense and decode arms (exec/quant_matmul.zig)
+    // ----------------------------------------------------------------------
     pub fn dequantizeTensorTyped(self: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !Tensor {
         return exec_quant_matmul.dequantizeTensorTyped(&self.rt, dtype, x);
     }
@@ -2416,6 +2476,9 @@ pub const ExecContext = struct {
     /// tagged wrappers live in `llm/gemma/moe.zig`.
     pub const moe_gu = exec_moe_gu;
 
+    // ----------------------------------------------------------------------
+    // MoE gate/up: the fused gated-FFN expert kernels (exec/moe_gu.zig)
+    // ----------------------------------------------------------------------
     pub fn moeGuDecodePacked(self: *ExecContext, x: *const Tensor, gate: []const backend_mod.QuantizedMatmulRhsQ6_Kx4, up: []const backend_mod.QuantizedMatmulRhsQ6_Kx4, down: []const backend_mod.QuantizedMatmulRhsQ8_0x4, selected: []const usize, weights: []const f32, out_pe: usize, io: ?std.Io, profile: ?*MoeBatchProfile) !Tensor {
         return exec_moe_gu.decodePacked(&self.rt, &self.moe_scratch, x, gate, up, down, selected, weights, out_pe, io, profile);
     }
@@ -2432,6 +2495,9 @@ pub const ExecContext = struct {
         return exec_moe_gu.batchRaw(&self.rt, x, gw, n_expert, selected, weights, top_k, out_pe, io, profile);
     }
 
+    // ----------------------------------------------------------------------
+    // MoE: expert routing and the batched expert chains (exec/moe.zig)
+    // ----------------------------------------------------------------------
     pub fn lockMoeDecodeScratch(self: *ExecContext) void {
         exec_moe.lockMoeDecodeScratch(&self.moe_scratch);
     }
@@ -2512,6 +2578,9 @@ pub const ExecContext = struct {
         return exec_moe.moeExpertFfnBatch(&self.rt, x, gate, up, down, selected, weights, top_k, out_pe, act, io, profile);
     }
 
+    // ----------------------------------------------------------------------
+    // matmul: dense contractions, batched and packed (exec/matmul.zig)  [continued]
+    // ----------------------------------------------------------------------
     pub fn matmulTransA(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
         return exec_matmul.matmul2DDispatch(&self.rt, .trans_a, a, b);
     }
