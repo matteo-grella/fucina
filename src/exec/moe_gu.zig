@@ -344,47 +344,85 @@ pub fn decodePacked(
 /// activation. `weights` should already include Gemma's per-expert down scale.
 /// (`-Dgpu=metal` builds don't load the x4 representation at all — they go
 /// through `batchRaw`, which holds the GPU arm.)
-pub fn batchPacked(
-    rt: *Runtime,
-    x: *const Tensor,
+/// Expert-weight binding for `gemmaBatchBody`: how a gate/up or down
+/// matmul task names its `rhs` — packed x4 containers by pointer.
+const PackedExpertBind = struct {
     gate: []const backend_mod.QuantizedMatmulRhsQ6_Kx4,
     up: []const backend_mod.QuantizedMatmulRhsQ6_Kx4,
     down: []const backend_mod.QuantizedMatmulRhsQ8_0x4,
-    selected: []const usize,
-    weights: []const f32,
-    top_k: usize,
+
+    fn gu(self: PackedExpertBind, e: usize, is_up: bool) *const backend_mod.QuantizedMatmulRhsQ6_Kx4 {
+        return if (is_up) &self.up[e] else &self.gate[e];
+    }
+
+    fn dn(self: PackedExpertBind, e: usize) *const backend_mod.QuantizedMatmulRhsQ8_0x4 {
+        return &self.down[e];
+    }
+};
+
+/// `PackedExpertBind`'s raw-GGUF-block counterpart: views by value over
+/// the fused gate|up stack (gate rows [0, out_pe), up rows [out_pe, 2*out_pe)).
+const RawExpertBind = struct {
+    gw: RawExpertWeights,
     out_pe: usize,
+    hidden: usize,
+
+    fn gu(self: RawExpertBind, e: usize, is_up: bool) GemmaMoeRawGuRhs {
+        return gemmaMoeRawGuView(self.gw, e, if (is_up) self.out_pe else 0, self.out_pe, self.hidden);
+    }
+
+    fn dn(self: RawExpertBind, e: usize) backend_mod.QuantizedMatmulRhsQ8_0 {
+        return gemmaMoeRawQ8View(self.gw, e, self.out_pe, self.hidden);
+    }
+};
+
+/// The CPU batch body both expert-weight families share once the caller
+/// has validated shapes and built the route plan: scratch, small-m column
+/// chunking, task construction, chain wiring, the chained run with its
+/// four-phase fallback, profile merge, and the weighted scatter.
+/// `GuTask`/`DnTask` differ only in the type of their `rhs` field (bound by
+/// `bind.gu`/`bind.dn`), so every line executes identically for both
+/// families — the packed/raw paths are bitwise-equal by construction.
+/// The batch geometry both families validate before calling
+/// `gemmaBatchBody`: token rows, widths, routing fan-out, and the Q8_K /
+/// Q8_0 block counts of the two quantized LHS panels.
+const BatchShape = struct {
+    seq: usize,
+    hidden: usize,
+    out_pe: usize,
+    top_k: usize,
+    bpc_in: usize,
+    bpc_g: usize,
+};
+
+fn gemmaBatchBody(
+    comptime GuTask: type,
+    comptime DnTask: type,
+    comptime runGu: fn (*const GuTask) void,
+    comptime runDn: fn (*const DnTask) void,
+    comptime runGuOpaque: fn (*anyopaque) void,
+    comptime runDnOpaque: fn (*anyopaque) void,
+    rt: *Runtime,
+    x_data: []const f32,
+    shape: BatchShape,
+    route: *const moe_chain.MoeRoutePlan,
+    weights: []const f32,
+    bind: anytype,
     io: ?std.Io,
     profile: ?*MoeBatchProfile,
+    total_start: i128,
 ) !Tensor {
     const qm = backend_mod.quantized_matmul;
     const a = rt.allocator;
-    const xv = try x.rankView(2);
-    const seq = xv.dim(0);
-    const hidden = xv.dim(1);
-    const x_data = try x.dataConstChecked();
-    const n_pairs = seq * top_k;
-    const n_expert = gate.len;
+    const seq = shape.seq;
+    const hidden = shape.hidden;
+    const out_pe = shape.out_pe;
+    const top_k = shape.top_k;
+    const bpc_in = shape.bpc_in;
+    const bpc_g = shape.bpc_g;
+    const n_expert = route.expertCount();
+    const n_pairs = route.pairCount();
     const profile_enabled = profile != null;
-    const total_start = moeBatchProfileStart(profile_enabled, io);
-
-    if (top_k == 0 or selected.len != n_pairs or weights.len != n_pairs) return tensor.TensorError.InvalidDataLength;
-    if (up.len != n_expert or down.len != n_expert) return tensor.TensorError.ShapeMismatch;
-    for (0..n_expert) |e| {
-        if (gate[e].k != hidden or up[e].k != hidden or gate[e].n != out_pe or up[e].n != out_pe) return tensor.TensorError.ShapeMismatch;
-        if (down[e].k != out_pe or down[e].n != hidden) return tensor.TensorError.ShapeMismatch;
-    }
-
-    const bpc_in = try qm.qkBlockCount(hidden);
-    const bpc_g = try qm.q8_0BlockCount(out_pe);
-
-    const route_result = try moe_chain.buildMoeRoutePlan(a, selected, n_expert, profile_enabled, io);
-    var route = route_result.plan;
-    defer route.deinit();
-    if (profile) |p| {
-        p.alloc_ns += route_result.alloc_ns;
-        p.count_sort_ns += route_result.count_sort_ns;
-    }
     const count = route.count;
     const offset = route.offset;
     const order = route.order;
@@ -430,9 +468,9 @@ pub fn batchPacked(
         down_task_count += moePhaseChunkCount(d_width, hidden);
     }
     const task_alloc_start = moeBatchProfileStart(profile_enabled, io);
-    const gate_up_tasks = try a.alloc(GemmaMoeQ6MatmulTask, gate_up_task_count);
+    const gate_up_tasks = try a.alloc(GuTask, gate_up_task_count);
     defer a.free(gate_up_tasks);
-    const down_tasks = try a.alloc(GemmaMoeQ8MatmulTask, down_task_count);
+    const down_tasks = try a.alloc(DnTask, down_task_count);
     defer a.free(down_tasks);
     const chain_states = try a.alloc(MoeBatchPhaseChainState, n_expert);
     defer a.free(chain_states);
@@ -479,7 +517,7 @@ pub fn batchPacked(
         for (0..gu_chunks) |chunk| {
             const bounds = moePhaseChunkBounds(chunk, gu_width, out_pe);
             gate_up_tasks[gate_up_i] = .{
-                .rhs = &gate[e],
+                .rhs = bind.gu(e, false),
                 .qlhs = qx,
                 .bpc = bpc_in,
                 .row_start = base,
@@ -494,7 +532,7 @@ pub fn batchPacked(
             };
             gate_up_i += 1;
             gate_up_tasks[gate_up_i] = .{
-                .rhs = &up[e],
+                .rhs = bind.gu(e, true),
                 .qlhs = qx,
                 .bpc = bpc_in,
                 .row_start = base,
@@ -516,7 +554,7 @@ pub fn batchPacked(
         for (0..d_chunks) |chunk| {
             const bounds = moePhaseChunkBounds(chunk, d_width, hidden);
             down_tasks[down_i] = .{
-                .rhs = &down[e],
+                .rhs = bind.dn(e),
                 .qlhs = qg,
                 .bpc = bpc_g,
                 .row_start = base,
@@ -543,9 +581,9 @@ pub fn batchPacked(
 
     const chain_initial_count = moe_chain.wireMoeBatchPhaseChain(
         GemmaMoeGatherTask,
-        GemmaMoeQ6MatmulTask,
+        GuTask,
         GemmaMoeGegluTask,
-        GemmaMoeQ8MatmulTask,
+        DnTask,
         chain_tasks,
         chain_states,
         count,
@@ -554,9 +592,9 @@ pub fn batchPacked(
         geglu_tasks,
         down_tasks,
         runGemmaMoeGatherTaskOpaque,
-        runGemmaMoeQ6MatmulTaskOpaque,
+        runGuOpaque,
         runGemmaMoeGegluTaskOpaque,
-        runGemmaMoeQ8MatmulTaskOpaque,
+        runDnOpaque,
     );
 
     var expert_wall_ns: i128 = 0;
@@ -574,9 +612,9 @@ pub fn batchPacked(
 
         phase_start = moeBatchProfileStart(profile_enabled, io);
         if (pool) |p| {
-            p.parallelChunks(GemmaMoeQ6MatmulTask, gate_up_tasks, runGemmaMoeQ6MatmulTask);
+            p.parallelChunks(GuTask, gate_up_tasks, runGu);
         } else {
-            for (gate_up_tasks) |*t| runGemmaMoeQ6MatmulTask(t);
+            for (gate_up_tasks) |*t| runGu(t);
         }
         if (profile_enabled) expert_wall_ns += moeBatchProfileElapsed(phase_start, io);
 
@@ -590,9 +628,9 @@ pub fn batchPacked(
 
         phase_start = moeBatchProfileStart(profile_enabled, io);
         if (pool) |p| {
-            p.parallelChunks(GemmaMoeQ8MatmulTask, down_tasks, runGemmaMoeQ8MatmulTask);
+            p.parallelChunks(DnTask, down_tasks, runDn);
         } else {
-            for (down_tasks) |*t| runGemmaMoeQ8MatmulTask(t);
+            for (down_tasks) |*t| runDn(t);
         }
         if (profile_enabled) expert_wall_ns += moeBatchProfileElapsed(phase_start, io);
     }
@@ -605,9 +643,70 @@ pub fn batchPacked(
         for (down_tasks) |*t| p.down_ns += t.elapsed_ns;
     }
 
-    const out = try scatterGrouped(rt, seq, hidden, top_k, &route, weights, down_buf, io, profile);
-    recordBatch(profile, total_start, io, &route);
+    const out = try scatterGrouped(rt, seq, hidden, top_k, route, weights, down_buf, io, profile);
+    recordBatch(profile, total_start, io, route);
     return out;
+}
+
+pub fn batchPacked(
+    rt: *Runtime,
+    x: *const Tensor,
+    gate: []const backend_mod.QuantizedMatmulRhsQ6_Kx4,
+    up: []const backend_mod.QuantizedMatmulRhsQ6_Kx4,
+    down: []const backend_mod.QuantizedMatmulRhsQ8_0x4,
+    selected: []const usize,
+    weights: []const f32,
+    top_k: usize,
+    out_pe: usize,
+    io: ?std.Io,
+    profile: ?*MoeBatchProfile,
+) !Tensor {
+    const qm = backend_mod.quantized_matmul;
+    const a = rt.allocator;
+    const xv = try x.rankView(2);
+    const seq = xv.dim(0);
+    const hidden = xv.dim(1);
+    const x_data = try x.dataConstChecked();
+    const n_pairs = seq * top_k;
+    const n_expert = gate.len;
+    const profile_enabled = profile != null;
+    const total_start = moeBatchProfileStart(profile_enabled, io);
+
+    if (top_k == 0 or selected.len != n_pairs or weights.len != n_pairs) return tensor.TensorError.InvalidDataLength;
+    if (up.len != n_expert or down.len != n_expert) return tensor.TensorError.ShapeMismatch;
+    for (0..n_expert) |e| {
+        if (gate[e].k != hidden or up[e].k != hidden or gate[e].n != out_pe or up[e].n != out_pe) return tensor.TensorError.ShapeMismatch;
+        if (down[e].k != out_pe or down[e].n != hidden) return tensor.TensorError.ShapeMismatch;
+    }
+
+    const bpc_in = try qm.qkBlockCount(hidden);
+    const bpc_g = try qm.q8_0BlockCount(out_pe);
+
+    const route_result = try moe_chain.buildMoeRoutePlan(a, selected, n_expert, profile_enabled, io);
+    var route = route_result.plan;
+    defer route.deinit();
+    if (profile) |p| {
+        p.alloc_ns += route_result.alloc_ns;
+        p.count_sort_ns += route_result.count_sort_ns;
+    }
+
+    return gemmaBatchBody(
+        GemmaMoeQ6MatmulTask,
+        GemmaMoeQ8MatmulTask,
+        runGemmaMoeQ6MatmulTask,
+        runGemmaMoeQ8MatmulTask,
+        runGemmaMoeQ6MatmulTaskOpaque,
+        runGemmaMoeQ8MatmulTaskOpaque,
+        rt,
+        x_data,
+        .{ .seq = seq, .hidden = hidden, .out_pe = out_pe, .top_k = top_k, .bpc_in = bpc_in, .bpc_g = bpc_g },
+        &route,
+        weights,
+        PackedExpertBind{ .gate = gate, .up = up, .down = down },
+        io,
+        profile,
+        total_start,
+    );
 }
 
 /// GPU arm of the Gemma MoE batch FFN (`-Dgpu=metal`): per layer, ONE
@@ -1245,7 +1344,7 @@ pub fn decodeRaw(
 }
 
 const GemmaMoeRawGuMatmulTask = struct {
-    view: GemmaMoeRawGuRhs,
+    rhs: GemmaMoeRawGuRhs,
     qlhs: []const backend_mod.quantized_matmul.BlockQ8_K,
     bpc: usize,
     row_start: usize,
@@ -1267,7 +1366,7 @@ fn runGemmaMoeRawGuMatmulTask(task: *const GemmaMoeRawGuMatmulTask) void {
     const base = task.row_start;
     const q = task.qlhs[base * task.bpc ..][0 .. m * task.bpc];
     const out = task.out[base * task.out_dim ..][0 .. m * task.out_dim];
-    gemmaMoeRawGuMatmul(&task.view, out, q, task.out_dim, m, task.c0, task.c1);
+    gemmaMoeRawGuMatmul(&task.rhs, out, q, task.out_dim, m, task.c0, task.c1);
     if (task.profile_enabled) task_profile.elapsed_ns += moeBatchProfileElapsed(start, task.io);
 }
 
@@ -1277,7 +1376,7 @@ fn runGemmaMoeRawGuMatmulTaskOpaque(ctx: *anyopaque) void {
 }
 
 const GemmaMoeRawQ8MatmulTask = struct {
-    view: backend_mod.QuantizedMatmulRhsQ8_0,
+    rhs: backend_mod.QuantizedMatmulRhsQ8_0,
     qlhs: []const backend_mod.quantized_matmul.BlockQ8_0,
     bpc: usize,
     row_start: usize,
@@ -1300,7 +1399,7 @@ fn runGemmaMoeRawQ8MatmulTask(task: *const GemmaMoeRawQ8MatmulTask) void {
     const base = task.row_start;
     const q = task.qlhs[base * task.bpc ..][0 .. m * task.bpc];
     const out = task.out[base * task.out_dim ..][0 .. m * task.out_dim];
-    qm.matmulQ8_0RhsTile(out, q, &task.view, task.out_dim, 0, m, task.c0, task.c1);
+    qm.matmulQ8_0RhsTile(out, q, &task.rhs, task.out_dim, 0, m, task.c0, task.c1);
     if (task.profile_enabled) task_profile.elapsed_ns += moeBatchProfileElapsed(start, task.io);
 }
 
@@ -1353,9 +1452,6 @@ pub fn batchRaw(
         p.alloc_ns += route_result.alloc_ns;
         p.count_sort_ns += route_result.count_sort_ns;
     }
-    const count = route.count;
-    const offset = route.offset;
-    const order = route.order;
 
     if (comptime backend_mod.gpu_impl.enabled) {
         if (try batchRawGpu(
@@ -1374,225 +1470,23 @@ pub fn batchRaw(
         )) |out| return out;
     }
 
-    const alloc_start = moeBatchProfileStart(profile_enabled, io);
-    const qx = try a.alloc(qm.BlockQ8_K, n_pairs * bpc_in);
-    defer a.free(qx);
-    const gate_buf = try a.alloc(f32, n_pairs * out_pe);
-    defer a.free(gate_buf);
-    const up_buf = try a.alloc(f32, n_pairs * out_pe);
-    defer a.free(up_buf);
-    const g_buf = try a.alloc(f32, n_pairs * out_pe);
-    defer a.free(g_buf);
-    const qg = try a.alloc(qm.BlockQ8_0, n_pairs * bpc_g);
-    defer a.free(qg);
-    const down_buf = try a.alloc(f32, n_pairs * hidden);
-    defer a.free(down_buf);
-    const gather_tasks = try a.alloc(GemmaMoeGatherTask, n_expert);
-    defer a.free(gather_tasks);
-    const geglu_tasks = try a.alloc(GemmaMoeGegluTask, n_expert);
-    defer a.free(geglu_tasks);
-    if (profile) |p| p.alloc_ns += moeBatchProfileElapsed(alloc_start, io);
-
-    // Small-m column chunking is a per-layer-call decision: with few active
-    // experts each contributing one full-width task per projection, the
-    // team starves. The width helpers keep the counting and construction
-    // loops in exact agreement (the chain's enqueue contract).
-    const pool = rt.workPool();
-    var chain_active_count: usize = 0;
-    for (count) |m| {
-        if (m != 0) chain_active_count += 1;
-    }
-    const workers = if (pool) |p| p.teamSize() else 1;
-    const small_m_width = moeSmallMColWidth(chain_active_count, workers);
-
-    var gate_up_task_count: usize = 0;
-    var down_task_count: usize = 0;
-    for (count) |m| {
-        if (m == 0) continue;
-        const gu_width = moePhaseColWidth(m, out_pe, small_m_width);
-        gate_up_task_count += 2 * moePhaseChunkCount(gu_width, out_pe);
-        const d_width = moePhaseColWidth(m, hidden, small_m_width);
-        down_task_count += moePhaseChunkCount(d_width, hidden);
-    }
-    const task_alloc_start = moeBatchProfileStart(profile_enabled, io);
-    const gate_up_tasks = try a.alloc(GemmaMoeRawGuMatmulTask, gate_up_task_count);
-    defer a.free(gate_up_tasks);
-    const down_tasks = try a.alloc(GemmaMoeRawQ8MatmulTask, down_task_count);
-    defer a.free(down_tasks);
-    const chain_states = try a.alloc(MoeBatchPhaseChainState, n_expert);
-    defer a.free(chain_states);
-    const chain_tasks = try a.alloc(MoeBatchPhaseChainTask, chain_active_count * 2 + gate_up_task_count + down_task_count);
-    defer a.free(chain_tasks);
-    if (profile) |p| p.alloc_ns += moeBatchProfileElapsed(task_alloc_start, io);
-
-    var gate_up_i: usize = 0;
-    var down_i: usize = 0;
-    for (0..n_expert) |e| {
-        const m = count[e];
-        const base = offset[e];
-        gather_tasks[e] = .{
-            .x_data = x_data,
-            .order = order,
-            .hidden = hidden,
-            .top_k = top_k,
-            .bpc_in = bpc_in,
-            .row_start = base,
-            .m = m,
-            .qx = qx,
-            .profile_enabled = profile_enabled,
-            .io = io,
-            .elapsed_ns = 0,
-        };
-        geglu_tasks[e] = .{
-            .gate_buf = gate_buf,
-            .up_buf = up_buf,
-            .g_buf = g_buf,
-            .qg = qg,
-            .out_pe = out_pe,
-            .bpc_g = bpc_g,
-            .row_start = base,
-            .m = m,
-            .profile_enabled = profile_enabled,
-            .io = io,
-            .elapsed_ns = 0,
-        };
-        if (m == 0) continue;
-
-        const gu_width = moePhaseColWidth(m, out_pe, small_m_width);
-        const gu_chunks = moePhaseChunkCount(gu_width, out_pe);
-        const gate_task_start = gate_up_i;
-        for (0..gu_chunks) |chunk| {
-            const bounds = moePhaseChunkBounds(chunk, gu_width, out_pe);
-            gate_up_tasks[gate_up_i] = .{
-                .view = gemmaMoeRawGuView(gw, e, 0, out_pe, hidden),
-                .qlhs = qx,
-                .bpc = bpc_in,
-                .row_start = base,
-                .m = m,
-                .out_dim = out_pe,
-                .out = gate_buf,
-                .c0 = bounds.c0,
-                .c1 = bounds.c1,
-                .profile_enabled = profile_enabled,
-                .io = io,
-                .elapsed_ns = 0,
-            };
-            gate_up_i += 1;
-            gate_up_tasks[gate_up_i] = .{
-                .view = gemmaMoeRawGuView(gw, e, out_pe, out_pe, hidden),
-                .qlhs = qx,
-                .bpc = bpc_in,
-                .row_start = base,
-                .m = m,
-                .out_dim = out_pe,
-                .out = up_buf,
-                .c0 = bounds.c0,
-                .c1 = bounds.c1,
-                .profile_enabled = profile_enabled,
-                .io = io,
-                .elapsed_ns = 0,
-            };
-            gate_up_i += 1;
-        }
-
-        const d_width = moePhaseColWidth(m, hidden, small_m_width);
-        const d_chunks = moePhaseChunkCount(d_width, hidden);
-        const down_task_start = down_i;
-        for (0..d_chunks) |chunk| {
-            const bounds = moePhaseChunkBounds(chunk, d_width, hidden);
-            down_tasks[down_i] = .{
-                .view = gemmaMoeRawQ8View(gw, e, out_pe, hidden),
-                .qlhs = qg,
-                .bpc = bpc_g,
-                .row_start = base,
-                .m = m,
-                .out_dim = hidden,
-                .out = down_buf,
-                .c0 = bounds.c0,
-                .c1 = bounds.c1,
-                .profile_enabled = profile_enabled,
-                .io = io,
-                .elapsed_ns = 0,
-            };
-            down_i += 1;
-        }
-        chain_states[e] = .{
-            .gate_start = gate_task_start,
-            .gate_count = gate_up_i - gate_task_start,
-            .act_index = e,
-            .down_start = down_task_start,
-            .down_count = down_i - down_task_start,
-            .remaining_gate_up = .init(0),
-        };
-    }
-
-    const chain_initial_count = moe_chain.wireMoeBatchPhaseChain(
-        GemmaMoeGatherTask,
+    return gemmaBatchBody(
         GemmaMoeRawGuMatmulTask,
-        GemmaMoeGegluTask,
         GemmaMoeRawQ8MatmulTask,
-        chain_tasks,
-        chain_states,
-        count,
-        gather_tasks,
-        gate_up_tasks,
-        geglu_tasks,
-        down_tasks,
-        runGemmaMoeGatherTaskOpaque,
+        runGemmaMoeRawGuMatmulTask,
+        runGemmaMoeRawQ8MatmulTask,
         runGemmaMoeRawGuMatmulTaskOpaque,
-        runGemmaMoeGegluTaskOpaque,
         runGemmaMoeRawQ8MatmulTaskOpaque,
+        rt,
+        x_data,
+        .{ .seq = seq, .hidden = hidden, .out_pe = out_pe, .top_k = top_k, .bpc_in = bpc_in, .bpc_g = bpc_g },
+        &route,
+        weights,
+        RawExpertBind{ .gw = gw, .out_pe = out_pe, .hidden = hidden },
+        io,
+        profile,
+        total_start,
     );
-
-    var expert_wall_ns: i128 = 0;
-    var phase_start = moeBatchProfileStart(profile_enabled, io);
-    const used_chain = if (pool) |p| p.parallelChained(MoeBatchPhaseChainTask, chain_tasks, chain_initial_count, runMoeBatchPhaseChainTask) else false;
-    if (used_chain) {
-        if (profile_enabled) expert_wall_ns += moeBatchProfileElapsed(phase_start, io);
-    } else {
-        if (pool) |p| {
-            p.parallelChunks(GemmaMoeGatherTask, gather_tasks, runGemmaMoeGatherTask);
-        } else {
-            for (gather_tasks) |*t| runGemmaMoeGatherTask(t);
-        }
-        if (profile_enabled) expert_wall_ns += moeBatchProfileElapsed(phase_start, io);
-
-        phase_start = moeBatchProfileStart(profile_enabled, io);
-        if (pool) |p| {
-            p.parallelChunks(GemmaMoeRawGuMatmulTask, gate_up_tasks, runGemmaMoeRawGuMatmulTask);
-        } else {
-            for (gate_up_tasks) |*t| runGemmaMoeRawGuMatmulTask(t);
-        }
-        if (profile_enabled) expert_wall_ns += moeBatchProfileElapsed(phase_start, io);
-
-        phase_start = moeBatchProfileStart(profile_enabled, io);
-        if (pool) |p| {
-            p.parallelChunks(GemmaMoeGegluTask, geglu_tasks, runGemmaMoeGegluTask);
-        } else {
-            for (geglu_tasks) |*t| runGemmaMoeGegluTask(t);
-        }
-        if (profile_enabled) expert_wall_ns += moeBatchProfileElapsed(phase_start, io);
-
-        phase_start = moeBatchProfileStart(profile_enabled, io);
-        if (pool) |p| {
-            p.parallelChunks(GemmaMoeRawQ8MatmulTask, down_tasks, runGemmaMoeRawQ8MatmulTask);
-        } else {
-            for (down_tasks) |*t| runGemmaMoeRawQ8MatmulTask(t);
-        }
-        if (profile_enabled) expert_wall_ns += moeBatchProfileElapsed(phase_start, io);
-    }
-
-    if (profile) |p| {
-        p.expert_wall_ns += expert_wall_ns;
-        for (gather_tasks) |*t| p.gather_quant_ns += t.elapsed_ns;
-        for (gate_up_tasks) |*t| p.gate_up_ns += t.elapsed_ns;
-        for (geglu_tasks) |*t| p.swiglu_requant_ns += t.elapsed_ns;
-        for (down_tasks) |*t| p.down_ns += t.elapsed_ns;
-    }
-
-    const out = try scatterGrouped(rt, seq, hidden, top_k, &route, weights, down_buf, io, profile);
-    recordBatch(profile, total_start, io, &route);
-    return out;
 }
 
 const GemmaMoeGatherTask = struct {
