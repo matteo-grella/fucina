@@ -527,11 +527,11 @@ test "exec scope holds buffers until close; deinit-ASAP recycles through the poo
         defer ctx.deinit();
         var c = try Tensor(.{ .batch, .d }).fromSlice(&ctx, .{ side, side }, data);
         defer c.deinit();
-        const base = ctx.rt.buffers.outstandingBuffers();
+        const base = ctx.buffers.outstandingBuffers();
         var cur = try c.add(&ctx, &c);
         for (1..chain_len) |_| {
             const next = try cur.add(&ctx, &c);
-            peak_asap = @max(peak_asap, ctx.rt.buffers.outstandingBuffers() - base);
+            peak_asap = @max(peak_asap, ctx.buffers.outstandingBuffers() - base);
             cur.deinit(); // previous intermediate returns to the pool immediately
             cur = next;
         }
@@ -547,15 +547,15 @@ test "exec scope holds buffers until close; deinit-ASAP recycles through the poo
         defer ctx.deinit();
         var c = try Tensor(.{ .batch, .d }).fromSlice(&ctx, .{ side, side }, data);
         defer c.deinit();
-        const base = ctx.rt.buffers.outstandingBuffers();
+        const base = ctx.buffers.outstandingBuffers();
         const scope = ctx.openExecScope();
         var cur = try c.add(&ctx, &c);
         for (1..chain_len) |_| {
             cur = try cur.add(&ctx, &c);
-            peak_scope = @max(peak_scope, ctx.rt.buffers.outstandingBuffers() - base);
+            peak_scope = @max(peak_scope, ctx.buffers.outstandingBuffers() - base);
         }
         ctx.closeExecScope(scope);
-        try std.testing.expectEqual(base, ctx.rt.buffers.outstandingBuffers());
+        try std.testing.expectEqual(base, ctx.buffers.outstandingBuffers());
     }
     try std.testing.expectEqual(chain_len, peak_scope);
 }

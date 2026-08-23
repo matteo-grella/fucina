@@ -3,9 +3,17 @@
 //! Sentrux scans the whole repository, including sibling test files. This tool
 //! enforces the stricter PRODUCTION invariants over the non-test import
 //! graph of `src/`, `examples/`, `bench/`, and `tools/`, in-tree so
-//! `zig build arch-check` is the gate:
-//! no nontrivial strongly-connected components, no band inversions, and no
-//! unforwarded sibling test files.
+//! `zig build arch-check` is the gate: no forbidden strongly-connected
+//! components, no band inversions, and no unforwarded sibling test files.
+//!
+//! First invariant, cycles. A nontrivial SCC is permitted only when (a)
+//! every member is in the same band and (b) at least one member is a
+//! directory root of the others: a file `P.zig` with another member under
+//! `P/` (the "struct body in the root, methods in the children" shape;
+//! `src/exec.zig` with `src/exec/*.zig`, as `std.zig` with
+//! `std/array_list.zig` in Zig's own std). Every other SCC is an error:
+//! children cycling among themselves without their root, or any cycle
+//! that crosses a band.
 //!
 //! Test awareness inside production files: an `@import` is counted only when
 //! it is reachable from production code. Skipped are (a) imports inside `test`
@@ -291,6 +299,13 @@ pub fn main(init: std.process.Init) !void {
     defer tarjan.deinit();
     try tarjan.run();
 
+    var root_anchored: usize = 0;
+    var forbidden: std.ArrayListUnmanaged([]usize) = .empty;
+    defer forbidden.deinit(allocator);
+    for (tarjan.cycles.items) |cycle| {
+        if (isRootAnchoredSameBand(&graph, cycle)) root_anchored += 1 else try forbidden.append(allocator, cycle);
+    }
+
     var unforwarded: std.ArrayListUnmanaged([]const u8) = .empty;
     defer unforwarded.deinit(allocator);
     var it = test_files.forwarded_by_path.iterator();
@@ -306,12 +321,12 @@ pub fn main(init: std.process.Init) !void {
     try checkBands(allocator, &graph, &unbanded, &inversions);
 
     const edge_count = countEdges(&graph);
-    if (tarjan.cycles.items.len == 0 and unforwarded.items.len == 0 and
+    if (forbidden.items.len == 0 and unforwarded.items.len == 0 and
         unbanded.items.len == 0 and inversions.items.len == 0)
     {
         try stdout.print(
-            "production import graph: {d} files, {d} edges, 0 SCCs, 0 band inversions; {d} test files, all forwarded\n",
-            .{ graph.files.items.len, edge_count, test_files.forwarded_by_path.count() },
+            "production import graph: {d} files, {d} edges, {d} root-anchored SCC(s), 0 forbidden SCCs, 0 band inversions; {d} test files, all forwarded\n",
+            .{ graph.files.items.len, edge_count, root_anchored, test_files.forwarded_by_path.count() },
         );
         return;
     }
@@ -334,13 +349,13 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    if (tarjan.cycles.items.len != 0) {
+    if (forbidden.items.len != 0) {
         std.debug.print(
-            "production import graph: {d} files, {d} edges, {d} SCC(s)\n",
-            .{ graph.files.items.len, edge_count, tarjan.cycles.items.len },
+            "production import graph: {d} files, {d} edges, {d} root-anchored SCC(s), {d} forbidden SCC(s)\n",
+            .{ graph.files.items.len, edge_count, root_anchored, forbidden.items.len },
         );
-        for (tarjan.cycles.items, 0..) |cycle, i| {
-            std.debug.print("SCC {d}:\n", .{i + 1});
+        for (forbidden.items, 0..) |cycle, i| {
+            std.debug.print("forbidden SCC {d} (same band + a directory root among the members would permit it):\n", .{i + 1});
             for (cycle) |node| {
                 std.debug.print("  {s}\n", .{graph.files.items[node].path});
             }
@@ -355,10 +370,35 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("  {s} (add `test {{ _ = @import(\"...\"); }}` to its production sibling)\n", .{path});
         }
     }
-    if (tarjan.cycles.items.len != 0) return Error.ImportCycleDetected;
+    if (forbidden.items.len != 0) return Error.ImportCycleDetected;
     if (unbanded.items.len != 0) return Error.FileOutsideBandTable;
     if (inversions.items.len != 0) return Error.BandInversionDetected;
     return Error.TestFileNotForwarded;
+}
+
+/// The one permitted SCC shape: every member in one band, and some member
+/// `P.zig` is the directory root of another member under `P/`. This is the
+/// "struct body in the root, methods in the children" layout, where the
+/// children name the root's type and the root aliases their functions.
+fn isRootAnchoredSameBand(graph: *const Graph, cycle: []const usize) bool {
+    const first_band = bandOf(graph.files.items[cycle[0]].path) orelse return false;
+    for (cycle) |node| {
+        const band = bandOf(graph.files.items[node].path) orelse return false;
+        if (band != first_band) return false;
+    }
+    for (cycle) |root| {
+        const root_path = graph.files.items[root].path;
+        if (!std.mem.endsWith(u8, root_path, ".zig")) continue;
+        const dir_prefix = root_path[0 .. root_path.len - ".zig".len];
+        for (cycle) |child| {
+            if (child == root) continue;
+            const child_path = graph.files.items[child].path;
+            if (child_path.len > dir_prefix.len + 1 and
+                std.mem.startsWith(u8, child_path, dir_prefix) and
+                child_path[dir_prefix.len] == '/') return true;
+        }
+    }
+    return false;
 }
 
 const Inversion = struct {

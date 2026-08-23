@@ -1,13 +1,13 @@
 //! MoE router: softmax over expert logits + top-k selection per row.
 //!
-//! Domain module: receives an explicit `*Runtime`. Negligible-cost route path
+//! Domain module: receives an explicit `*ExecContext`. Negligible-cost route path
 //! (called once per MoE layer). Home of `RouterTopKOptions` (re-exported by
 //! `exec.zig`).
 
 const std = @import("std");
 const tensor = @import("../tensor.zig");
 
-const Runtime = @import("runtime.zig").Runtime;
+const ExecContext = @import("../exec.zig").ExecContext;
 
 const Tensor = tensor.Tensor;
 
@@ -19,7 +19,7 @@ pub const RouterTopKOptions = struct {
 /// selection per row. `probs` is per-row scratch of length >= expert count;
 /// `selected` and `weights` are row-major `[row, k]` outputs.
 pub fn routerTopK(
-    rt: *Runtime,
+    ctx: *ExecContext,
     logits: *const Tensor,
     k: usize,
     options: RouterTopKOptions,
@@ -33,7 +33,7 @@ pub fn routerTopK(
     if (k > experts) return tensor.TensorError.IndexOutOfBounds;
     if (selected.len != rows * k or weights.len != rows * k) return tensor.TensorError.InvalidDataLength;
 
-    var ll = try rt.prepareContiguous(logits);
+    var ll = try ctx.prepareContiguous(logits);
     defer ll.deinit();
     const input = ll.tensor().dataConst();
     for (0..rows) |row| {

@@ -1,7 +1,7 @@
 //! Loss forwards + VJPs: cross-entropy (PyTorch-parity options) and the
 //! whole-tensor elementwise losses (MSE / Huber / BCE / KL divergence).
 //!
-//! Domain module: every op receives an explicit `*Runtime`; per-row kernels +
+//! Domain module: every op receives an explicit `*ExecContext`; per-row kernels +
 //! Task structs stay in the `row_ops` leaf. Home of `CrossEntropyOptions` +
 //! `Reduction` + the elementwise-loss options (re-exported by `exec.zig`).
 //! Softmax is deliberately NOT folded in (no shared dispatch code).
@@ -13,7 +13,7 @@ const tensor = @import("../tensor.zig");
 const exec_matmul = @import("matmul.zig");
 const exec_row_ops = @import("row_ops.zig");
 const exec_shape = @import("shape.zig");
-const Runtime = @import("runtime.zig").Runtime;
+const ExecContext = @import("../exec.zig").ExecContext;
 
 const Tensor = tensor.Tensor;
 
@@ -112,8 +112,8 @@ pub const LossWrt = enum { input, target };
 /// (returning huge boundary gradients rather than 0).
 pub const bce_eps: f32 = 1e-7;
 
-pub fn crossEntropyLossAxisRank(rt: *Runtime, comptime rank: usize, logits: *const Tensor, comptime axis: usize, labels: []const usize) !Tensor {
-    return crossEntropyLossExAxisRank(rt, rank, logits, axis, labels, .{});
+pub fn crossEntropyLossAxisRank(ctx: *ExecContext, comptime rank: usize, logits: *const Tensor, comptime axis: usize, labels: []const usize) !Tensor {
+    return crossEntropyLossExAxisRank(ctx, rank, logits, axis, labels, .{});
 }
 
 /// Validates labels against `class_count` / `options.ignore_index` and
@@ -138,14 +138,14 @@ fn validateCrossEntropyLabels(labels: []const usize, position_count: usize, clas
 /// The `.mean`/`.sum` reduction is one serial sum over per-row losses in
 /// row order, so the result is bitwise identical for any thread count.
 pub fn crossEntropyLossExAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     logits: *const Tensor,
     comptime axis: usize,
     labels: []const usize,
     options: CrossEntropyOptions,
 ) !Tensor {
-    return crossEntropyLossExStatsAxisRank(rt, rank, logits, axis, labels, options, null);
+    return crossEntropyLossExStatsAxisRank(ctx, rank, logits, axis, labels, options, null);
 }
 
 /// As `crossEntropyLossExAxisRank`, additionally writing the per-position
@@ -155,7 +155,7 @@ pub fn crossEntropyLossExAxisRank(
 /// single pass with bitwise-identical gradients (the stats are the exact
 /// f32 values the backward would recompute). Ignored positions get {0, 1}.
 pub fn crossEntropyLossExStatsAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     logits: *const Tensor,
     comptime axis: usize,
@@ -176,7 +176,7 @@ pub fn crossEntropyLossExStatsAxisRank(
         if (stats.len != 2 * position_count) return tensor.TensorError.InvalidDataLength;
     }
 
-    var ll = try rt.prepareContiguous(logits);
+    var ll = try ctx.prepareContiguous(logits);
     defer ll.deinit();
     const input = ll.tensor().dataConst();
 
@@ -185,13 +185,13 @@ pub fn crossEntropyLossExStatsAxisRank(
     // serially below.
     const out_rank = if (rank == 1) 1 else rank - 1;
     var none_out: ?Tensor = if (options.reduction == .none)
-        try rt.emptyRank(out_rank, shapeWithoutAxis(rank, out_rank, source.shape, axis))
+        try ctx.emptyRank(out_rank, shapeWithoutAxis(rank, out_rank, source.shape, axis))
     else
         null;
     errdefer if (none_out) |*value| value.deinit();
     const owns_row_losses = none_out == null;
-    const row_losses: []f32 = if (none_out) |*value| value.data() else try rt.allocator.alloc(f32, position_count);
-    defer if (owns_row_losses) rt.allocator.free(row_losses);
+    const row_losses: []f32 = if (none_out) |*value| value.data() else try ctx.allocator.alloc(f32, position_count);
+    defer if (owns_row_losses) ctx.allocator.free(row_losses);
 
     if (inner == 1) {
         const base_task: CrossEntropyLossRowsTask = .{
@@ -207,7 +207,7 @@ pub fn crossEntropyLossExStatsAxisRank(
         };
         var dispatched = false;
         if (outer > 1 and source.len() >= parallel.row_kernel_len_threshold) {
-            if (rt.dispatchRange(CrossEntropyLossRowsTask, "row_start", "row_end", base_task, outer, runCrossEntropyLossRowsTask)) {
+            if (ctx.dispatchRange(CrossEntropyLossRowsTask, "row_start", "row_end", base_task, outer, runCrossEntropyLossRowsTask)) {
                 dispatched = true;
             }
         }
@@ -269,20 +269,20 @@ pub fn crossEntropyLossExStatsAxisRank(
                 // Deliberate divergence from PyTorch: all-ignored -> 0, not NaN.
                 loss = if (valid_count == 0) 0 else loss / @as(f32, @floatFromInt(valid_count));
             }
-            return rt.scalar(loss);
+            return ctx.scalar(loss);
         },
     }
 }
 
 pub fn crossEntropyBackwardAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     logits: *const Tensor,
     comptime axis: usize,
     labels: []const usize,
     scale_value: f32,
 ) !Tensor {
-    return crossEntropyBackwardExAxisRank(rt, rank, logits, axis, labels, .{}, scale_value, null);
+    return crossEntropyBackwardExAxisRank(ctx, rank, logits, axis, labels, .{}, scale_value, null);
 }
 
 /// Cross-entropy VJP with options. `scale_value` is the scalar upstream
@@ -291,7 +291,7 @@ pub fn crossEntropyBackwardAxisRank(
 /// matching `labels`) and is additionally scaled by `scale_value`.
 /// Ignored positions get exactly zero gradient.
 pub fn crossEntropyBackwardExAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     logits: *const Tensor,
     comptime axis: usize,
@@ -300,7 +300,7 @@ pub fn crossEntropyBackwardExAxisRank(
     scale_value: f32,
     per_row_scale: ?[]const f32,
 ) !Tensor {
-    return crossEntropyBackwardExStatsAxisRank(rt, rank, logits, axis, labels, options, scale_value, per_row_scale, null);
+    return crossEntropyBackwardExStatsAxisRank(ctx, rank, logits, axis, labels, options, scale_value, per_row_scale, null);
 }
 
 /// As `crossEntropyBackwardExAxisRank`, additionally taking the per-position
@@ -309,7 +309,7 @@ pub fn crossEntropyBackwardExAxisRank(
 /// emits final gradients in ONE pass over the logits — bitwise identical to
 /// the recompute path.
 pub fn crossEntropyBackwardExStatsAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     logits: *const Tensor,
     comptime axis: usize,
@@ -337,11 +337,11 @@ pub fn crossEntropyBackwardExStatsAxisRank(
         if (stats.len != 2 * position_count) return tensor.TensorError.InvalidDataLength;
     }
 
-    var ll = try rt.prepareContiguous(logits);
+    var ll = try ctx.prepareContiguous(logits);
     defer ll.deinit();
     const input = ll.tensor().dataConst();
 
-    var out = try rt.emptyRank(rank, source.shape);
+    var out = try ctx.emptyRank(rank, source.shape);
     errdefer out.deinit();
     const output = out.data();
     const grad_common: f32 = switch (options.reduction) {
@@ -351,7 +351,7 @@ pub fn crossEntropyBackwardExStatsAxisRank(
     };
 
     if (inner == 1) {
-        dispatchCrossEntropyBackwardRows(rt, .{
+        dispatchCrossEntropyBackwardRows(ctx, .{
             .input = input,
             .labels = labels,
             .output = output,
@@ -430,7 +430,7 @@ pub fn crossEntropyBackwardExStatsAxisRank(
 /// class axis removed) for `.none`. This is the entry point the autograd
 /// VJP uses.
 pub fn crossEntropyBackwardExUpstreamAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     logits: *const Tensor,
     comptime axis: usize,
@@ -438,13 +438,13 @@ pub fn crossEntropyBackwardExUpstreamAxisRank(
     options: CrossEntropyOptions,
     gy: *const Tensor,
 ) !Tensor {
-    return crossEntropyBackwardExUpstreamStatsAxisRank(rt, rank, logits, axis, labels, options, gy, null);
+    return crossEntropyBackwardExUpstreamStatsAxisRank(ctx, rank, logits, axis, labels, options, gy, null);
 }
 
 /// As `crossEntropyBackwardExUpstreamAxisRank` with forward-saved
 /// {max, sum_exp} statistics (see `crossEntropyBackwardExStatsAxisRank`).
 pub fn crossEntropyBackwardExUpstreamStatsAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     logits: *const Tensor,
     comptime axis: usize,
@@ -459,12 +459,12 @@ pub fn crossEntropyBackwardExUpstreamStatsAxisRank(
         const expected_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
         const gv = try gy.rankView(out_rank);
         if (!std.mem.eql(usize, gv.shape[0..], expected_shape[0..])) return tensor.TensorError.ShapeMismatch;
-        var gg = try rt.prepareContiguous(gy);
+        var gg = try ctx.prepareContiguous(gy);
         defer gg.deinit();
-        return crossEntropyBackwardExStatsAxisRank(rt, rank, logits, axis, labels, options, 1, gg.tensor().dataConst(), row_stats);
+        return crossEntropyBackwardExStatsAxisRank(ctx, rank, logits, axis, labels, options, 1, gg.tensor().dataConst(), row_stats);
     }
     if (!gy.isScalar()) return tensor.TensorError.ShapeMismatch;
-    return crossEntropyBackwardExStatsAxisRank(rt, rank, logits, axis, labels, options, gy.item(), null, row_stats);
+    return crossEntropyBackwardExStatsAxisRank(ctx, rank, logits, axis, labels, options, gy.item(), null, row_stats);
 }
 
 // --- Fused linear + cross-entropy VJP --------------------------------------
@@ -486,10 +486,10 @@ pub const LinearCrossEntropyGrads = struct {
 /// materializing route and the fused linear+CE VJP: pool split over rows
 /// above the elementwise work threshold, serial otherwise (bitwise identical
 /// either way â disjoint row writes).
-fn dispatchCrossEntropyBackwardRows(rt: *Runtime, base_task: CrossEntropyBackwardRowsTask) void {
+fn dispatchCrossEntropyBackwardRows(ctx: *ExecContext, base_task: CrossEntropyBackwardRowsTask) void {
     const outer = base_task.row_end;
     if (outer > 1 and outer * base_task.class_count >= parallel.row_kernel_len_threshold) {
-        if (rt.dispatchRange(CrossEntropyBackwardRowsTask, "row_start", "row_end", base_task, outer, runCrossEntropyBackwardRowsTask)) {
+        if (ctx.dispatchRange(CrossEntropyBackwardRowsTask, "row_start", "row_end", base_task, outer, runCrossEntropyBackwardRowsTask)) {
             return;
         }
     }
@@ -511,7 +511,7 @@ fn dispatchCrossEntropyBackwardRows(rt: *Runtime, base_task: CrossEntropyBackwar
 /// Shapes: x [rows, in], weight [classes, in], logits [rows, classes];
 /// upstream gy is scalar for `.mean`/`.sum` and per-row for `.none`.
 pub fn linearCrossEntropyBackwardUpstream(
-    rt: *Runtime,
+    ctx: *ExecContext,
     x: *const Tensor,
     weight: *const Tensor,
     logits: *Tensor,
@@ -535,12 +535,12 @@ pub fn linearCrossEntropyBackwardUpstream(
 
     // Upstream contract as crossEntropyBackwardExUpstreamStatsAxisRank.
     var scale_value: f32 = 1;
-    var upstream: ?Runtime.PreparedTensor = null;
+    var upstream: ?ExecContext.PreparedTensor = null;
     defer if (upstream) |*p| p.deinit();
     if (options.reduction == .none) {
         const gv = try gy.rankView(1);
         if (gv.shape[0] != rows) return tensor.TensorError.ShapeMismatch;
-        upstream = try rt.prepareContiguous(gy);
+        upstream = try ctx.prepareContiguous(gy);
     } else {
         if (!gy.isScalar()) return tensor.TensorError.ShapeMismatch;
         scale_value = gy.item();
@@ -553,11 +553,11 @@ pub fn linearCrossEntropyBackwardUpstream(
     };
 
     // dL destination: the logits buffer itself when exclusively owned.
-    var dl_owned: ?Tensor = if (logits.canTakeInPlace()) null else try rt.emptyRank(2, .{ rows, class_count });
+    var dl_owned: ?Tensor = if (logits.canTakeInPlace()) null else try ctx.emptyRank(2, .{ rows, class_count });
     defer if (dl_owned) |*value| value.deinit();
     const dl: *Tensor = if (dl_owned) |*value| value else logits;
 
-    dispatchCrossEntropyBackwardRows(rt, .{
+    dispatchCrossEntropyBackwardRows(ctx, .{
         .input = logits.dataConst(),
         .labels = labels,
         .output = dl.data(),
@@ -573,9 +573,9 @@ pub fn linearCrossEntropyBackwardUpstream(
 
     var dx: ?Tensor = null;
     errdefer if (dx) |*value| value.deinit();
-    if (need_x) dx = try exec_matmul.matmul2DDispatch(rt, .plain, dl, weight);
+    if (need_x) dx = try exec_matmul.matmul2DDispatch(ctx, .plain, dl, weight);
     var dweight: ?Tensor = null;
-    if (need_weight) dweight = try exec_matmul.matmul2DDispatch(rt, .trans_a, dl, x);
+    if (need_weight) dweight = try exec_matmul.matmul2DDispatch(ctx, .trans_a, dl, x);
     return .{ .dx = dx, .dweight = dweight };
 }
 
@@ -628,10 +628,10 @@ pub const LinearDistillForward = struct {
     }
 };
 
-fn dispatchDistillStatsRows(rt: *Runtime, base_task: DistillStatsRowsTask) void {
+fn dispatchDistillStatsRows(ctx: *ExecContext, base_task: DistillStatsRowsTask) void {
     const outer = base_task.row_end;
     if (outer > 1 and outer * base_task.class_count >= parallel.row_kernel_len_threshold) {
-        if (rt.dispatchRange(DistillStatsRowsTask, "row_start", "row_end", base_task, outer, runDistillStatsRowsTask)) {
+        if (ctx.dispatchRange(DistillStatsRowsTask, "row_start", "row_end", base_task, outer, runDistillStatsRowsTask)) {
             return;
         }
     }
@@ -643,7 +643,7 @@ fn dispatchDistillStatsRows(rt: *Runtime, base_task: DistillStatsRowsTask) void 
 /// (any non-negative weight; a teacher's top-k probabilities in the distill
 /// use). Shapes: x [row_count, in], weight [classes, in].
 pub fn linearDistillLossStats(
-    rt: *Runtime,
+    ctx: *ExecContext,
     x: *const Tensor,
     weight: *const Tensor,
     rows: []const usize,
@@ -665,8 +665,8 @@ pub fn linearDistillLossStats(
 
     // Unique supervised rows (ascending) + the per-entry local remap.
     const sel_rows = blk: {
-        const sorted = try rt.allocator.dupe(usize, rows);
-        defer rt.allocator.free(sorted);
+        const sorted = try ctx.allocator.dupe(usize, rows);
+        defer ctx.allocator.free(sorted);
         std.mem.sort(usize, sorted, {}, std.sort.asc(usize));
         var unique: usize = 0;
         for (sorted, 0..) |row, i| {
@@ -675,31 +675,31 @@ pub fn linearDistillLossStats(
                 unique += 1;
             }
         }
-        break :blk try rt.allocator.dupe(usize, sorted[0..unique]);
+        break :blk try ctx.allocator.dupe(usize, sorted[0..unique]);
     };
-    errdefer rt.allocator.free(sel_rows);
-    const local_rows = try rt.allocator.alloc(usize, n);
-    errdefer rt.allocator.free(local_rows);
+    errdefer ctx.allocator.free(sel_rows);
+    const local_rows = try ctx.allocator.alloc(usize, n);
+    errdefer ctx.allocator.free(local_rows);
     for (local_rows, rows) |*local, row| {
         local.* = std.sort.binarySearch(usize, sel_rows, row, orderUsize).?;
     }
 
     // Gather the supervised rows and project only them.
-    var xx = try rt.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(x);
     defer xx.deinit();
     const x_data = xx.tensor().dataConst();
-    var x_sel = try rt.emptyRank(2, .{ sel_rows.len, in_dim });
+    var x_sel = try ctx.emptyRank(2, .{ sel_rows.len, in_dim });
     errdefer x_sel.deinit();
     const x_sel_data = x_sel.data();
     for (sel_rows, 0..) |row, j| {
         @memcpy(x_sel_data[j * in_dim ..][0..in_dim], x_data[row * in_dim ..][0..in_dim]);
     }
-    var logits = try exec_matmul.matmul2DDispatch(rt, .trans_b, &x_sel, weight);
+    var logits = try exec_matmul.matmul2DDispatch(ctx, .trans_b, &x_sel, weight);
     errdefer logits.deinit();
 
-    const row_stats = try rt.allocator.alloc(f32, 2 * sel_rows.len);
-    errdefer rt.allocator.free(row_stats);
-    dispatchDistillStatsRows(rt, .{
+    const row_stats = try ctx.allocator.alloc(f32, 2 * sel_rows.len);
+    errdefer ctx.allocator.free(row_stats);
+    dispatchDistillStatsRows(ctx, .{
         .input = logits.dataConst(),
         .row_stats = row_stats,
         .class_count = class_count,
@@ -717,7 +717,7 @@ pub fn linearDistillLossStats(
     if (options.reduction == .mean) total /= @as(f32, @floatFromInt(n));
     total *= options.loss_scale;
 
-    var value = try rt.scalar(total);
+    var value = try ctx.scalar(total);
     errdefer value.deinit();
     return .{
         .value = value,
@@ -733,10 +733,10 @@ fn orderUsize(context: usize, item: usize) std.math.Order {
     return std.math.order(context, item);
 }
 
-fn dispatchDistillBackwardRows(rt: *Runtime, base_task: DistillBackwardRowsTask) void {
+fn dispatchDistillBackwardRows(ctx: *ExecContext, base_task: DistillBackwardRowsTask) void {
     const outer = base_task.row_end;
     if (outer > 1 and outer * base_task.class_count >= parallel.row_kernel_len_threshold) {
-        if (rt.dispatchRange(DistillBackwardRowsTask, "row_start", "row_end", base_task, outer, runDistillBackwardRowsTask)) {
+        if (ctx.dispatchRange(DistillBackwardRowsTask, "row_start", "row_end", base_task, outer, runDistillBackwardRowsTask)) {
             return;
         }
     }
@@ -751,7 +751,7 @@ fn dispatchDistillBackwardRows(rt: *Runtime, base_task: DistillBackwardRowsTask)
 /// dlogits·W into the supervised rows of a zero [row_count, in] tensor and
 /// dweight = dlogitsᵀ·x_sel.
 pub fn linearDistillBackwardUpstream(
-    rt: *Runtime,
+    ctx: *ExecContext,
     x_sel: *const Tensor,
     weight: *const Tensor,
     logits: *Tensor,
@@ -782,17 +782,17 @@ pub fn linearDistillBackwardUpstream(
     var grad_common: f32 = gy.item() * options.loss_scale;
     if (options.reduction == .mean) grad_common /= @as(f32, @floatFromInt(n));
 
-    const row_mass = try rt.allocator.alloc(f32, sel_count);
-    defer rt.allocator.free(row_mass);
+    const row_mass = try ctx.allocator.alloc(f32, sel_count);
+    defer ctx.allocator.free(row_mass);
     @memset(row_mass, 0);
     for (local_rows, probs) |local, prob| row_mass[local] += grad_common * prob;
 
     // dL destination: the logits buffer itself when exclusively owned.
-    var dl_owned: ?Tensor = if (logits.canTakeInPlace()) null else try rt.emptyRank(2, .{ sel_count, class_count });
+    var dl_owned: ?Tensor = if (logits.canTakeInPlace()) null else try ctx.emptyRank(2, .{ sel_count, class_count });
     defer if (dl_owned) |*value| value.deinit();
     const dl: *Tensor = if (dl_owned) |*value| value else logits;
 
-    dispatchDistillBackwardRows(rt, .{
+    dispatchDistillBackwardRows(ctx, .{
         .input = logits.dataConst(),
         .output = dl.data(),
         .row_stats = row_stats,
@@ -811,9 +811,9 @@ pub fn linearDistillBackwardUpstream(
     var dx: ?Tensor = null;
     errdefer if (dx) |*value| value.deinit();
     if (need_x) {
-        var dx_sel = try exec_matmul.matmul2DDispatch(rt, .plain, dl, weight);
+        var dx_sel = try exec_matmul.matmul2DDispatch(ctx, .plain, dl, weight);
         defer dx_sel.deinit();
-        var full = try rt.emptyRank(2, .{ row_count, in_dim });
+        var full = try ctx.emptyRank(2, .{ row_count, in_dim });
         errdefer full.deinit();
         const full_data = full.data();
         @memset(full_data, 0);
@@ -824,7 +824,7 @@ pub fn linearDistillBackwardUpstream(
         dx = full;
     }
     var dweight: ?Tensor = null;
-    if (need_weight) dweight = try exec_matmul.matmul2DDispatch(rt, .trans_a, dl, x_sel);
+    if (need_weight) dweight = try exec_matmul.matmul2DDispatch(ctx, .trans_a, dl, x_sel);
     return .{ .dx = dx, .dweight = dweight };
 }
 
@@ -839,17 +839,17 @@ pub fn linearDistillBackwardUpstream(
 
 /// Shared elementwise-loss forward. Validates same-shaped operands, then
 /// applies `ops.loss` per element and reduces per `reduction`.
-fn elementwiseLossForward(rt: *Runtime, input: *const Tensor, target: *const Tensor, reduction: Reduction, ops: anytype) !Tensor {
+fn elementwiseLossForward(ctx: *ExecContext, input: *const Tensor, target: *const Tensor, reduction: Reduction, ops: anytype) !Tensor {
     try tensor.requireSameShape(input, target);
-    var xx = try rt.prepareContiguous(input);
+    var xx = try ctx.prepareContiguous(input);
     defer xx.deinit();
-    var tt = try rt.prepareContiguous(target);
+    var tt = try ctx.prepareContiguous(target);
     defer tt.deinit();
     const x = xx.tensor().dataConst();
     const t = tt.tensor().dataConst();
     switch (reduction) {
         .none => {
-            var out = try rt.empty(xx.tensor().shape.slice());
+            var out = try ctx.empty(xx.tensor().shape.slice());
             errdefer out.deinit();
             for (x, t, out.data()) |xv, tv, *dst| dst.* = ops.loss(xv, tv);
             return out;
@@ -858,7 +858,7 @@ fn elementwiseLossForward(rt: *Runtime, input: *const Tensor, target: *const Ten
             var loss: f32 = 0;
             for (x, t) |xv, tv| loss += ops.loss(xv, tv);
             if (reduction == .mean) loss /= @as(f32, @floatFromInt(x.len));
-            return rt.scalar(loss);
+            return ctx.scalar(loss);
         },
     }
 }
@@ -868,7 +868,7 @@ fn elementwiseLossForward(rt: *Runtime, input: *const Tensor, target: *const Ten
 /// cross-entropy `*UpstreamAxisRank` contract). Returns the gradient with
 /// respect to the operand selected by `wrt`.
 fn elementwiseLossBackwardUpstream(
-    rt: *Runtime,
+    ctx: *ExecContext,
     input: *const Tensor,
     target: *const Tensor,
     reduction: Reduction,
@@ -877,18 +877,18 @@ fn elementwiseLossBackwardUpstream(
     ops: anytype,
 ) !Tensor {
     try tensor.requireSameShape(input, target);
-    var xx = try rt.prepareContiguous(input);
+    var xx = try ctx.prepareContiguous(input);
     defer xx.deinit();
-    var tt = try rt.prepareContiguous(target);
+    var tt = try ctx.prepareContiguous(target);
     defer tt.deinit();
     const x = xx.tensor().dataConst();
     const t = tt.tensor().dataConst();
-    var out = try rt.empty(xx.tensor().shape.slice());
+    var out = try ctx.empty(xx.tensor().shape.slice());
     errdefer out.deinit();
     switch (reduction) {
         .none => {
             try tensor.requireSameShape(input, gy);
-            var gg = try rt.prepareContiguous(gy);
+            var gg = try ctx.prepareContiguous(gy);
             defer gg.deinit();
             for (x, t, gg.tensor().dataConst(), out.data()) |xv, tv, g, *dst| {
                 dst.* = ops.grad(xv, tv, wrt) * g;
@@ -1011,58 +1011,58 @@ fn validateHuberOptions(options: HuberOptions) !void {
 /// Mean-squared-error forward over same-shaped input/target (torch
 /// F.mse_loss): per-element (x - t)². `.mean`/`.sum` return a scalar,
 /// `.none` an input-shaped tensor.
-pub fn mseLoss(rt: *Runtime, input: *const Tensor, target: *const Tensor, options: MseOptions) !Tensor {
-    return elementwiseLossForward(rt, input, target, options.reduction, MseOps{});
+pub fn mseLoss(ctx: *ExecContext, input: *const Tensor, target: *const Tensor, options: MseOptions) !Tensor {
+    return elementwiseLossForward(ctx, input, target, options.reduction, MseOps{});
 }
 
 /// MSE VJP wrt `wrt` with the upstream gradient as a tensor (scalar for
 /// `.mean`/`.sum`, input-shaped for `.none`): d/dx = 2(x-t)·s, d/dt = -that.
-pub fn mseBackwardUpstream(rt: *Runtime, input: *const Tensor, target: *const Tensor, options: MseOptions, gy: *const Tensor, wrt: LossWrt) !Tensor {
-    return elementwiseLossBackwardUpstream(rt, input, target, options.reduction, gy, wrt, MseOps{});
+pub fn mseBackwardUpstream(ctx: *ExecContext, input: *const Tensor, target: *const Tensor, options: MseOptions, gy: *const Tensor, wrt: LossWrt) !Tensor {
+    return elementwiseLossBackwardUpstream(ctx, input, target, options.reduction, gy, wrt, MseOps{});
 }
 
 /// Huber forward over same-shaped input/target (torch F.huber_loss): see
 /// `HuberOptions`. Errors with `InvalidShape` unless `delta` is positive
 /// and finite.
-pub fn huberLoss(rt: *Runtime, input: *const Tensor, target: *const Tensor, options: HuberOptions) !Tensor {
+pub fn huberLoss(ctx: *ExecContext, input: *const Tensor, target: *const Tensor, options: HuberOptions) !Tensor {
     try validateHuberOptions(options);
-    return elementwiseLossForward(rt, input, target, options.reduction, HuberOps{ .delta = options.delta });
+    return elementwiseLossForward(ctx, input, target, options.reduction, HuberOps{ .delta = options.delta });
 }
 
 /// Huber VJP wrt `wrt` (upstream-gradient tensor contract as
 /// `mseBackwardUpstream`): d/dx = d for |d| <= delta else delta·sign(d),
 /// d/dt = -that.
-pub fn huberBackwardUpstream(rt: *Runtime, input: *const Tensor, target: *const Tensor, options: HuberOptions, gy: *const Tensor, wrt: LossWrt) !Tensor {
+pub fn huberBackwardUpstream(ctx: *ExecContext, input: *const Tensor, target: *const Tensor, options: HuberOptions, gy: *const Tensor, wrt: LossWrt) !Tensor {
     try validateHuberOptions(options);
-    return elementwiseLossBackwardUpstream(rt, input, target, options.reduction, gy, wrt, HuberOps{ .delta = options.delta });
+    return elementwiseLossBackwardUpstream(ctx, input, target, options.reduction, gy, wrt, HuberOps{ .delta = options.delta });
 }
 
 /// Binary cross-entropy forward over same-shaped input/target: see
 /// `BceOptions` (logits vs clamped-probability arm) and `bce_eps`.
-pub fn bceLoss(rt: *Runtime, input: *const Tensor, target: *const Tensor, options: BceOptions) !Tensor {
-    return elementwiseLossForward(rt, input, target, options.reduction, BceOps{ .from_logits = options.from_logits });
+pub fn bceLoss(ctx: *ExecContext, input: *const Tensor, target: *const Tensor, options: BceOptions) !Tensor {
+    return elementwiseLossForward(ctx, input, target, options.reduction, BceOps{ .from_logits = options.from_logits });
 }
 
 /// BCE VJP wrt `wrt` (upstream-gradient tensor contract as
 /// `mseBackwardUpstream`). Logits arm: d/dx = sigmoid(x) - y, d/dy = -x.
 /// Probability arm: d/dx = (p - y)/(p(1-p)) inside the clamp interval and 0
 /// outside (see `bce_eps`), d/dy = ln(1-p) - ln(p).
-pub fn bceBackwardUpstream(rt: *Runtime, input: *const Tensor, target: *const Tensor, options: BceOptions, gy: *const Tensor, wrt: LossWrt) !Tensor {
-    return elementwiseLossBackwardUpstream(rt, input, target, options.reduction, gy, wrt, BceOps{ .from_logits = options.from_logits });
+pub fn bceBackwardUpstream(ctx: *ExecContext, input: *const Tensor, target: *const Tensor, options: BceOptions, gy: *const Tensor, wrt: LossWrt) !Tensor {
+    return elementwiseLossBackwardUpstream(ctx, input, target, options.reduction, gy, wrt, BceOps{ .from_logits = options.from_logits });
 }
 
 /// KL-divergence forward over same-shaped input/target (torch F.kl_div
 /// pointwise semantics; the input is LOG-probabilities): see `KlDivOptions`.
-pub fn klDivLoss(rt: *Runtime, input: *const Tensor, target: *const Tensor, options: KlDivOptions) !Tensor {
-    return elementwiseLossForward(rt, input, target, options.reduction, KlDivOps{ .log_target = options.log_target });
+pub fn klDivLoss(ctx: *ExecContext, input: *const Tensor, target: *const Tensor, options: KlDivOptions) !Tensor {
+    return elementwiseLossForward(ctx, input, target, options.reduction, KlDivOps{ .log_target = options.log_target });
 }
 
 /// KL-divergence VJP wrt `wrt` (upstream-gradient tensor contract as
 /// `mseBackwardUpstream`). Probability target: d/dx = -t,
 /// d/dt = ln(t) + 1 - x (0 at t == 0). Log target: d/dx = -exp(t),
 /// d/dt = exp(t)·(t - x + 1).
-pub fn klDivBackwardUpstream(rt: *Runtime, input: *const Tensor, target: *const Tensor, options: KlDivOptions, gy: *const Tensor, wrt: LossWrt) !Tensor {
-    return elementwiseLossBackwardUpstream(rt, input, target, options.reduction, gy, wrt, KlDivOps{ .log_target = options.log_target });
+pub fn klDivBackwardUpstream(ctx: *ExecContext, input: *const Tensor, target: *const Tensor, options: KlDivOptions, gy: *const Tensor, wrt: LossWrt) !Tensor {
+    return elementwiseLossBackwardUpstream(ctx, input, target, options.reduction, gy, wrt, KlDivOps{ .log_target = options.log_target });
 }
 
 test {

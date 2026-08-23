@@ -1,7 +1,7 @@
 //! Axis reductions that return statistics: argmax, extrema (max/min + index),
 //! variance, standardization (fwd/bwd), top-k, and full sort/argsort.
 //!
-//! Domain module: every op receives an explicit `*Runtime`. Self-contained
+//! Domain module: every op receives an explicit `*ExecContext`. Self-contained
 //! (pure Zig loops over prepared-contiguous inputs; no backend/row_ops
 //! kernels). Home of `TopKResult` (returned by extrema + top-k) and the
 //! `Standardize*` option types (re-exported by `exec.zig`). `topKAxisRank`
@@ -13,7 +13,7 @@ const dtype_mod = @import("../dtype.zig");
 const tensor = @import("../tensor.zig");
 
 const exec_shape = @import("shape.zig");
-const Runtime = @import("runtime.zig").Runtime;
+const ExecContext = @import("../exec.zig").ExecContext;
 
 const DType = tensor.DType;
 const Tensor = tensor.Tensor;
@@ -64,18 +64,18 @@ pub const StandardizeOptions = struct {
 /// (the winner is the max over the non-NaN elements; an all-NaN row falls
 /// back to index 0). Shared with maxAxisRank/minAxisRank; DIVERGES from
 /// torch.argmax, which propagates NaN as the winner.
-pub fn argmaxAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize) !tensor.TensorOf(.i64) {
+pub fn argmaxAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !tensor.TensorOf(.i64) {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
-    var xx = try rt.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
     const out_rank = if (rank == 1) 1 else rank - 1;
     const out_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
-    var out = try rt.emptyRankTyped(.i64, out_rank, out_shape);
+    var out = try ctx.emptyRankTyped(.i64, out_rank, out_shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -130,29 +130,29 @@ const ExtremumOp = enum { max, min };
 ///
 /// Indices are i64 (the repo-wide index convention, shared with
 /// argmaxAxisRank/topK/sort): exact for any axis length.
-pub fn maxAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize) !TopKResult {
-    return extremumAxisRank(rt, rank, x, axis, .max);
+pub fn maxAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !TopKResult {
+    return extremumAxisRank(ctx, rank, x, axis, .max);
 }
 
 /// Min over `axis`; see maxAxisRank (strict `<`, first occurrence wins).
-pub fn minAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize) !TopKResult {
-    return extremumAxisRank(rt, rank, x, axis, .min);
+pub fn minAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !TopKResult {
+    return extremumAxisRank(ctx, rank, x, axis, .min);
 }
 
-fn extremumAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize, comptime op: ExtremumOp) !TopKResult {
+fn extremumAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, comptime op: ExtremumOp) !TopKResult {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
-    var xx = try rt.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
     const out_rank = if (rank == 1) 1 else rank - 1;
     const out_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
-    var values = try rt.emptyRank(out_rank, out_shape);
+    var values = try ctx.emptyRank(out_rank, out_shape);
     errdefer values.deinit();
-    var indices = try rt.emptyRankTyped(.i64, out_rank, out_shape);
+    var indices = try ctx.emptyRankTyped(.i64, out_rank, out_shape);
     errdefer indices.deinit();
     const vd = values.data();
     const id = indices.data();
@@ -242,7 +242,7 @@ fn extremumAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, compti
 
 /// Max over `axis` of the elements `mask` selects; see `extremumMaskedAxisRank`.
 pub fn maxMaskedAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime mask_dtype: DType,
     comptime rank: usize,
     x: *const Tensor,
@@ -250,12 +250,12 @@ pub fn maxMaskedAxisRank(
     comptime axis: usize,
     empty_value: ?f32,
 ) !TopKResult {
-    return extremumMaskedAxisRank(rt, mask_dtype, rank, x, mask, axis, .max, empty_value);
+    return extremumMaskedAxisRank(ctx, mask_dtype, rank, x, mask, axis, .max, empty_value);
 }
 
 /// Min over `axis` of the elements `mask` selects; see `extremumMaskedAxisRank`.
 pub fn minMaskedAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime mask_dtype: DType,
     comptime rank: usize,
     x: *const Tensor,
@@ -263,7 +263,7 @@ pub fn minMaskedAxisRank(
     comptime axis: usize,
     empty_value: ?f32,
 ) !TopKResult {
-    return extremumMaskedAxisRank(rt, mask_dtype, rank, x, mask, axis, .min, empty_value);
+    return extremumMaskedAxisRank(ctx, mask_dtype, rank, x, mask, axis, .min, empty_value);
 }
 
 /// Extremum over `axis` restricted to the elements `mask` selects — the
@@ -283,7 +283,7 @@ pub fn minMaskedAxisRank(
 /// Every non-empty lane's index is a real, unmasked position, which is why the
 /// masked VJP is otherwise the unmasked scatter.
 fn extremumMaskedAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime mask_dtype: DType,
     comptime rank: usize,
     x: *const Tensor,
@@ -301,19 +301,19 @@ fn extremumMaskedAxisRank(
         if (source.shape[dim] != mask_view.shape[dim]) return tensor.TensorError.ShapeMismatch;
     }
 
-    var xx = try rt.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var mm = try rt.prepareContiguousTyped(mask_dtype, mask);
+    var mm = try ctx.prepareContiguousTyped(mask_dtype, mask);
     defer mm.deinit();
     const flags = mm.tensor().dataConst();
 
     const out_rank = if (rank == 1) 1 else rank - 1;
     const out_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
-    var values = try rt.emptyRank(out_rank, out_shape);
+    var values = try ctx.emptyRank(out_rank, out_shape);
     errdefer values.deinit();
-    var indices = try rt.emptyRankTyped(.i64, out_rank, out_shape);
+    var indices = try ctx.emptyRankTyped(.i64, out_rank, out_shape);
     errdefer indices.deinit();
     const vd = values.data();
     const id = indices.data();
@@ -376,18 +376,18 @@ fn extremumMaskedAxisRank(
 /// two-pass like layerNormAxisRank; N == ddof yields 0/0 → NaN, matching
 /// torch.var on a single element. Rows stay serial like
 /// sumAxisRank/meanAxisRank; inner == 1 rows take a SIMD body.
-pub fn varAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize, ddof: u1) !Tensor {
+pub fn varAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, ddof: u1) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
-    var xx = try rt.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
     const out_rank = if (rank == 1) 1 else rank - 1;
     const out_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
-    var out = try rt.emptyRank(out_rank, out_shape);
+    var out = try ctx.emptyRank(out_rank, out_shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -454,31 +454,31 @@ pub fn varAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptim
 /// `N <= ddof` use zero variance; this keeps degenerate standardization
 /// finite when an epsilon is supplied.
 pub fn standardizeAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
     comptime axis: usize,
     options: StandardizeOptions,
 ) !Tensor {
-    return standardizeAxisRankImpl(rt, rank, x, axis, null, options);
+    return standardizeAxisRankImpl(ctx, rank, x, axis, null, options);
 }
 
 /// Standardize over the first `valid_len` elements of `axis`; positions
 /// after that prefix are masked out, written as zero, and ignored by the
 /// matching backward kernel.
 pub fn standardizeAxisValidPrefixRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
     comptime axis: usize,
     valid_len: usize,
     options: StandardizeOptions,
 ) !Tensor {
-    return standardizeAxisRankImpl(rt, rank, x, axis, valid_len, options);
+    return standardizeAxisRankImpl(ctx, rank, x, axis, valid_len, options);
 }
 
 fn standardizeAxisRankImpl(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
     comptime axis: usize,
@@ -486,13 +486,13 @@ fn standardizeAxisRankImpl(
     options: StandardizeOptions,
 ) !Tensor {
     return switch (options.accumulation) {
-        .f32 => standardizeAxisRankAccum(rt, rank, f32, x, axis, valid_len, options),
-        .f64 => standardizeAxisRankAccum(rt, rank, f64, x, axis, valid_len, options),
+        .f32 => standardizeAxisRankAccum(ctx, rank, f32, x, axis, valid_len, options),
+        .f64 => standardizeAxisRankAccum(ctx, rank, f64, x, axis, valid_len, options),
     };
 }
 
 fn standardizeAxisRankAccum(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     comptime Acc: type,
     x: *const Tensor,
@@ -509,11 +509,11 @@ fn standardizeAxisRankAccum(
     const valid_count = valid_len orelse axis_dim;
     if (valid_count > axis_dim) return tensor.TensorError.InvalidShape;
 
-    var xx = try rt.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var out = try rt.emptyRank(rank, source.shape);
+    var out = try ctx.emptyRank(rank, source.shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -565,7 +565,7 @@ fn standardizeAxisRankAccum(
 }
 
 pub fn standardizeBackwardAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
     gy: *const Tensor,
@@ -574,13 +574,13 @@ pub fn standardizeBackwardAxisRank(
     options: StandardizeOptions,
 ) !Tensor {
     return switch (options.accumulation) {
-        .f32 => standardizeBackwardAxisRankAccum(rt, rank, f32, x, gy, axis, valid_len, options),
-        .f64 => standardizeBackwardAxisRankAccum(rt, rank, f64, x, gy, axis, valid_len, options),
+        .f32 => standardizeBackwardAxisRankAccum(ctx, rank, f32, x, gy, axis, valid_len, options),
+        .f64 => standardizeBackwardAxisRankAccum(ctx, rank, f64, x, gy, axis, valid_len, options),
     };
 }
 
 fn standardizeBackwardAxisRankAccum(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     comptime Acc: type,
     x: *const Tensor,
@@ -601,14 +601,14 @@ fn standardizeBackwardAxisRankAccum(
     const valid_count = valid_len orelse axis_dim;
     if (valid_count > axis_dim) return tensor.TensorError.InvalidShape;
 
-    var xx = try rt.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(x);
     defer xx.deinit();
-    var gg = try rt.prepareContiguous(gy);
+    var gg = try ctx.prepareContiguous(gy);
     defer gg.deinit();
     const input = xx.tensor().dataConst();
     const upstream = gg.tensor().dataConst();
 
-    var out = try rt.zerosRank(rank, source.shape);
+    var out = try ctx.zerosRank(rank, source.shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -683,7 +683,7 @@ fn standardizeBackwardAxisRankAccum(
 /// slots at the (-inf, index 0) seed, the same degradation as an
 /// all-NaN row under maxAxisRank. This DIVERGES from torch.topk,
 /// which treats NaN as greater than every number.
-pub fn topKAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize, k: usize) !TopKResult {
+pub fn topKAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, k: usize) !TopKResult {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
     if (k == 0) return tensor.TensorError.InvalidShape;
@@ -691,15 +691,15 @@ pub fn topKAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, compti
     const source = try x.rankView(rank);
     if (k > source.shape[axis]) return tensor.TensorError.IndexOutOfBounds;
 
-    var xx = try rt.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
     var out_shape = source.shape;
     out_shape[axis] = k;
-    var values = try rt.emptyRank(rank, out_shape);
+    var values = try ctx.emptyRank(rank, out_shape);
     errdefer values.deinit();
-    var indices = try rt.emptyRankTyped(.i64, rank, out_shape);
+    var indices = try ctx.emptyRankTyped(.i64, rank, out_shape);
     errdefer indices.deinit();
     const vd = values.data();
     const id = indices.data();
@@ -768,18 +768,18 @@ fn sortPairBefore(descending: bool, a: SortPair, b: SortPair) bool {
 ///
 /// Indices are i64 (the repo-wide index convention, shared with
 /// argmaxAxisRank/topK): exact for any axis length.
-pub fn sortAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize, descending: bool) !TopKResult {
+pub fn sortAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, descending: bool) !TopKResult {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
-    var xx = try rt.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var values = try rt.emptyRank(rank, source.shape);
+    var values = try ctx.emptyRank(rank, source.shape);
     errdefer values.deinit();
-    var indices = try rt.emptyRankTyped(.i64, rank, source.shape);
+    var indices = try ctx.emptyRankTyped(.i64, rank, source.shape);
     errdefer indices.deinit();
     const vd = values.data();
     const id = indices.data();
@@ -788,8 +788,8 @@ pub fn sortAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, compti
     const inner = productAfterAxis(rank, source.shape, axis);
     const outer = productBeforeAxis(rank, source.shape, axis);
 
-    const scratch = try rt.allocator.alloc(SortPair, axis_dim);
-    defer rt.allocator.free(scratch);
+    const scratch = try ctx.allocator.alloc(SortPair, axis_dim);
+    defer ctx.allocator.free(scratch);
 
     for (0..outer) |outer_i| {
         const base = outer_i * axis_dim * inner;

@@ -16,7 +16,7 @@
 //! scalar paths evaluate the same per-element expression, so results are
 //! bit-identical for any length.
 //!
-//! Domain module: pure slice kernels, no `*Runtime` (nothing allocates).
+//! Domain module: pure slice kernels, no `*ExecContext` (nothing allocates).
 //! Re-exported as `exec.fakequant` / `fucina.fakequant`.
 
 const std = @import("std");

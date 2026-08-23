@@ -9,10 +9,10 @@
 const std = @import("std");
 
 const buffer_pool = @import("buffer_pool.zig");
-const runtime_mod = @import("runtime.zig");
+const exec = @import("../exec.zig");
 
 const BufferPool = buffer_pool.BufferPool;
-const Runtime = runtime_mod.Runtime;
+const ExecContext = exec.ExecContext;
 const slab_align = buffer_pool.slab_align;
 const slab_size_quantum = buffer_pool.slab_size_quantum;
 
@@ -26,16 +26,16 @@ const FakePackedBlock = extern struct {
 };
 
 test "typed emptyTyped reuses released slabs (f16 address reuse)" {
-    var rt: Runtime = undefined;
-    rt.init(std.testing.allocator);
-    defer rt.deinit();
+    var ctx: ExecContext = undefined;
+    ctx.init(std.testing.allocator);
+    defer ctx.deinit();
 
-    var first = try rt.emptyTyped(.f16, &.{ 32, 64 });
+    var first = try ctx.emptyTyped(.f16, &.{ 32, 64 });
     @memset(first.data(), 0);
     const first_ptr = first.dataConst().ptr;
     first.deinit();
 
-    var second = try rt.emptyTyped(.f16, &.{ 32, 64 });
+    var second = try ctx.emptyTyped(.f16, &.{ 32, 64 });
     defer second.deinit();
     try std.testing.expectEqual(first_ptr, second.dataConst().ptr);
 }

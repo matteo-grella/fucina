@@ -4,14 +4,14 @@
 //! for the autograd VJP params) plus the forward rope ops. `sinValues`/`cosValues`
 //! are `pub` so `norm.zig`'s fused rms-norm+rope kernel can read them cross-module.
 //!
-//! Domain module: every op receives an explicit `*Runtime`; imports the runtime
-//! + shape leaves; never imports `exec.zig`.
+//! Domain module: every op receives an explicit `*ExecContext`; imports the
+//! shape leaf.
 
 const std = @import("std");
 const tensor = @import("../tensor.zig");
 
 const exec_shape = @import("shape.zig");
-const Runtime = @import("runtime.zig").Runtime;
+const ExecContext = @import("../exec.zig").ExecContext;
 
 const Allocator = std.mem.Allocator;
 const Tensor = tensor.Tensor;
@@ -63,7 +63,7 @@ pub const RopeTable = struct {
 };
 
 pub fn ropeAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
     comptime position_axis: usize,
@@ -75,13 +75,13 @@ pub fn ropeAxisRank(
 ) !Tensor {
     const source = try x.rankView(rank);
     const feature_dim = source.shape[feature_axis];
-    var table = try prepareRopeTable(rt, positions, feature_dim, theta_base, inverse);
+    var table = try prepareRopeTable(ctx, positions, feature_dim, theta_base, inverse);
     defer table.deinit();
-    return ropeAxisRankWithTable(rt, rank, x, position_axis, feature_axis, &table, mode);
+    return ropeAxisRankWithTable(ctx, rank, x, position_axis, feature_axis, &table, mode);
 }
 
-pub fn prepareRopeTable(rt: *Runtime, positions: []const i32, feature_dim: usize, theta_base: f32, inverse: bool) !RopeTable {
-    return prepareRopeTableFactors(rt, positions, feature_dim, theta_base, inverse, null);
+pub fn prepareRopeTable(ctx: *ExecContext, positions: []const i32, feature_dim: usize, theta_base: f32, inverse: bool) !RopeTable {
+    return prepareRopeTableFactors(ctx, positions, feature_dim, theta_base, inverse, null);
 }
 
 /// As `prepareRopeTable`, but with optional per-pair `freq_factors` (length
@@ -91,14 +91,14 @@ pub fn prepareRopeTable(rt: *Runtime, positions: []const i32, feature_dim: usize
 /// long-context scaling and Gemma's global ("full attention") layers both
 /// supply it. `freq_factors == null` reproduces plain RoPE exactly.
 pub fn prepareRopeTableFactors(
-    rt: *Runtime,
+    ctx: *ExecContext,
     positions: []const i32,
     feature_dim: usize,
     theta_base: f32,
     inverse: bool,
     freq_factors: ?[]const f32,
 ) !RopeTable {
-    return prepareRopeTableCore(rt, .{ .explicit = positions }, feature_dim, theta_base, inverse, freq_factors);
+    return prepareRopeTableCore(ctx, .{ .explicit = positions }, feature_dim, theta_base, inverse, freq_factors);
 }
 
 /// As `prepareRopeTable`, but for the positions of ONE CONTIGUOUS RUN, named
@@ -114,21 +114,21 @@ pub fn prepareRopeTableFactors(
 ///
 /// Ragged batches, where the positions are several runs rather than one, keep
 /// the explicit-array form.
-pub fn prepareRopeTableRange(rt: *Runtime, range: tensor.AxisRange, feature_dim: usize, theta_base: f32, inverse: bool) !RopeTable {
-    return prepareRopeTableFactorsRange(rt, range, feature_dim, theta_base, inverse, null);
+pub fn prepareRopeTableRange(ctx: *ExecContext, range: tensor.AxisRange, feature_dim: usize, theta_base: f32, inverse: bool) !RopeTable {
+    return prepareRopeTableFactorsRange(ctx, range, feature_dim, theta_base, inverse, null);
 }
 
 /// `prepareRopeTableFactors` over a contiguous position run; see
 /// `prepareRopeTableRange`.
 pub fn prepareRopeTableFactorsRange(
-    rt: *Runtime,
+    ctx: *ExecContext,
     range: tensor.AxisRange,
     feature_dim: usize,
     theta_base: f32,
     inverse: bool,
     freq_factors: ?[]const f32,
 ) !RopeTable {
-    return prepareRopeTableCore(rt, .{ .range = range }, feature_dim, theta_base, inverse, freq_factors);
+    return prepareRopeTableCore(ctx, .{ .range = range }, feature_dim, theta_base, inverse, freq_factors);
 }
 
 /// Where a table's positions come from. Both arms feed one arithmetic body, so
@@ -154,7 +154,7 @@ const PositionSource = union(enum) {
 };
 
 fn prepareRopeTableCore(
-    rt: *Runtime,
+    ctx: *ExecContext,
     source: PositionSource,
     feature_dim: usize,
     theta_base: f32,
@@ -168,10 +168,10 @@ fn prepareRopeTableCore(
     }
     const position_count = source.len();
     const angle_count = try std.math.mul(usize, position_count, pair_count);
-    const values = try rt.allocator.alloc(f32, try std.math.mul(usize, angle_count, 2));
-    errdefer rt.allocator.free(values);
-    const positions_copy = try rt.allocator.alloc(i32, position_count);
-    errdefer rt.allocator.free(positions_copy);
+    const values = try ctx.allocator.alloc(f32, try std.math.mul(usize, angle_count, 2));
+    errdefer ctx.allocator.free(values);
+    const positions_copy = try ctx.allocator.alloc(i32, position_count);
+    errdefer ctx.allocator.free(positions_copy);
     for (positions_copy, 0..) |*slot, i| slot.* = source.at(i);
 
     const sin_values = values[0..angle_count];
@@ -180,8 +180,8 @@ fn prepareRopeTableCore(
     // theta_base^(2i/d) is position-invariant, so hoist the pow; the
     // freq_factors divide must stay per-element — folding it into the cache
     // changes f32 rounding ((pos/a)/b != pos/(a*b)).
-    const pow_cache = try rt.allocator.alloc(f32, pair_count);
-    defer rt.allocator.free(pow_cache);
+    const pow_cache = try ctx.allocator.alloc(f32, pair_count);
+    defer ctx.allocator.free(pow_cache);
     for (pow_cache, 0..) |*p, pair_i| {
         const exponent = @as(f32, @floatFromInt(2 * pair_i)) / @as(f32, @floatFromInt(feature_dim));
         p.* = std.math.pow(f32, theta_base, exponent);
@@ -200,7 +200,7 @@ fn prepareRopeTableCore(
     }
 
     return .{
-        .allocator = rt.allocator,
+        .allocator = ctx.allocator,
         .positions = positions_copy,
         .theta_base = theta_base,
         .feature_dim = feature_dim,
@@ -217,10 +217,10 @@ fn prepareRopeTableCore(
 /// ports fold it into the attention scale. `factor <= 1` or
 /// `orig_ctx == 0` returns the unblended schedule, so one call covers both
 /// rope families. Caller frees the returned slice.
-pub fn yarnBlendInvFreqsF64(allocator: Allocator, dim: usize, base: f64, factor: f64, orig_ctx: usize) ![]f64 {
+pub fn yarnBlendInvFreqsF64(ctx: *ExecContext, dim: usize, base: f64, factor: f64, orig_ctx: usize) ![]f64 {
     const pairs = dim / 2;
-    const inv_freq = try allocator.alloc(f64, pairs);
-    errdefer allocator.free(inv_freq);
+    const inv_freq = try ctx.allocator.alloc(f64, pairs);
+    errdefer ctx.allocator.free(inv_freq);
     for (inv_freq, 0..) |*f, i| {
         f.* = std.math.pow(f64, base, -(@as(f64, @floatFromInt(2 * i)) / @as(f64, @floatFromInt(dim))));
     }
@@ -258,13 +258,13 @@ pub fn yarnBlendInvFreqsF64(allocator: Allocator, dim: usize, base: f64, factor:
 /// (`prepareRopeTable*` compute f32 angles). `inverse` negates sin (the
 /// un-rotation table). `table.feature_dim` spans `2 * inv_freq.len`
 /// features, so partial application follows the usual table contract.
-pub fn prepareRopeTableInvFreqsF64(rt: *Runtime, pos0: usize, count: usize, inv_freq: []const f64, inverse: bool) !RopeTable {
+pub fn prepareRopeTableInvFreqsF64(ctx: *ExecContext, pos0: usize, count: usize, inv_freq: []const f64, inverse: bool) !RopeTable {
     const pairs = inv_freq.len;
     const angle_count = try std.math.mul(usize, count, pairs);
-    const values = try rt.allocator.alloc(f32, try std.math.mul(usize, angle_count, 2));
-    errdefer rt.allocator.free(values);
-    const positions = try rt.allocator.alloc(i32, count);
-    errdefer rt.allocator.free(positions);
+    const values = try ctx.allocator.alloc(f32, try std.math.mul(usize, angle_count, 2));
+    errdefer ctx.allocator.free(values);
+    const positions = try ctx.allocator.alloc(i32, count);
+    errdefer ctx.allocator.free(positions);
     const sin_values = values[0..angle_count];
     const cos_values = values[angle_count..];
     for (0..count) |i| {
@@ -277,7 +277,7 @@ pub fn prepareRopeTableInvFreqsF64(rt: *Runtime, pos0: usize, count: usize, inv_
         }
     }
     return .{
-        .allocator = rt.allocator,
+        .allocator = ctx.allocator,
         .positions = positions,
         .theta_base = 0, // hand-filled: never rebuilt from a base
         .feature_dim = 2 * pairs,
@@ -344,7 +344,7 @@ fn rotatePairsInterleaved(output: []f32, input: []const f32, base: usize, sin_ro
 }
 
 pub fn ropeAxisRankWithTable(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
     comptime position_axis: usize,
@@ -362,11 +362,11 @@ pub fn ropeAxisRankWithTable(
     if (table.positions.len != source.shape[position_axis]) return tensor.TensorError.InvalidDataLength;
     if (table.feature_dim != feature_dim) return tensor.TensorError.InvalidShape;
 
-    var xx = try rt.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var out = try rt.emptyRank(rank, source.shape);
+    var out = try ctx.emptyRank(rank, source.shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -428,7 +428,7 @@ pub fn ropeAxisRankWithTable(
 }
 
 pub fn ropePartialAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
     comptime position_axis: usize,
@@ -439,13 +439,13 @@ pub fn ropePartialAxisRank(
     comptime mode: RopeMode,
     comptime inverse: bool,
 ) !Tensor {
-    var table = try prepareRopeTable(rt, positions, rotary_dim, theta_base, inverse);
+    var table = try prepareRopeTable(ctx, positions, rotary_dim, theta_base, inverse);
     defer table.deinit();
-    return ropePartialAxisRankWithTable(rt, rank, x, position_axis, feature_axis, &table, mode);
+    return ropePartialAxisRankWithTable(ctx, rank, x, position_axis, feature_axis, &table, mode);
 }
 
 pub fn ropePartialAxisRankWithTable(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
     comptime position_axis: usize,
@@ -462,13 +462,13 @@ pub fn ropePartialAxisRankWithTable(
     const rotary_dim = table.feature_dim;
     if (rotary_dim == 0 or rotary_dim > feature_dim or rotary_dim % 2 != 0) return tensor.TensorError.InvalidShape;
     if (table.positions.len != source.shape[position_axis]) return tensor.TensorError.InvalidDataLength;
-    if (rotary_dim == feature_dim) return ropeAxisRankWithTable(rt, rank, x, position_axis, feature_axis, table, mode);
+    if (rotary_dim == feature_dim) return ropeAxisRankWithTable(ctx, rank, x, position_axis, feature_axis, table, mode);
 
-    var xx = try rt.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var out = try rt.emptyRank(rank, source.shape);
+    var out = try ctx.emptyRank(rank, source.shape);
     errdefer out.deinit();
     const output = out.data();
     @memcpy(output, input);

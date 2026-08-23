@@ -101,9 +101,9 @@ fn checkTiledAttentionParity(
         .work_end = 0,
     };
     if (hasAdjacentKvHeadPairs(kv_head_for_head, heads, kv_heads)) {
-        exec_attention.groupedCausalAttentionTiledRun(&ctx.rt, KvElem, 2, base);
+        exec_attention.groupedCausalAttentionTiledRun(ctx, KvElem, 2, base);
     } else {
-        exec_attention.groupedCausalAttentionTiledRun(&ctx.rt, KvElem, 1, base);
+        exec_attention.groupedCausalAttentionTiledRun(ctx, KvElem, 1, base);
     }
 
     try expectTiledAttentionClose(ref.dataConst(), got.dataConst());
@@ -332,7 +332,7 @@ test "tiled attention NaN logit poisons the query row like the per-query kernels
 
     var got = try ctx.emptyRank(2, .{ S, H * D });
     defer got.deinit();
-    exec_attention.groupedCausalAttentionTiledRun(&ctx.rt, f32, 2, .{
+    exec_attention.groupedCausalAttentionTiledRun(&ctx, f32, 2, .{
         .q_data = q.dataConst(),
         .k_data = k.dataConst(),
         .v_data = v.dataConst(),
@@ -472,7 +472,7 @@ test "tiled attention pool gate: small jobs stay serial and match the parallel s
         defer v.deinit();
         var out = try ctx.groupedCausalAttention(&q, &k, &v, &kv_head_for_head, 0.25);
         defer out.deinit();
-        try std.testing.expect(!ctx.rt.work_pool_ready);
+        try std.testing.expect(!ctx.work_pool_ready);
     }
 
     // Above the gate (48*48*8*64 = 1179648) the job splits across the pool.
@@ -533,7 +533,7 @@ test "tiled attention pool gate: small jobs stay serial and match the parallel s
         base.out_data = pooled_out.data();
         base.n_tiles = 0; // set by groupedCausalAttentionTiledRun
         base.work_end = 0;
-        exec_attention.groupedCausalAttentionTiledRun(&ctx.rt, f32, 2, base);
+        exec_attention.groupedCausalAttentionTiledRun(&ctx, f32, 2, base);
 
         try std.testing.expectEqualSlices(f32, serial_out.dataConst(), pooled_out.dataConst());
     }

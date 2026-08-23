@@ -5,7 +5,7 @@ const tensor = @import("../tensor.zig");
 const parallel = @import("../parallel.zig");
 const tuning = @import("../tuning.zig");
 const storage = @import("../storage.zig");
-const Runtime = @import("runtime.zig").Runtime;
+const ExecContext = @import("../exec.zig").ExecContext;
 
 const DType = tensor.DType;
 const Tensor = tensor.Tensor;
@@ -1616,7 +1616,7 @@ fn attnBwdStatsEnabled() bool {
 }
 
 pub fn groupedCausalAttention(
-    self: *Runtime,
+    self: *ExecContext,
     q: *const Tensor,
     k: *const Tensor,
     v: *const Tensor,
@@ -1630,7 +1630,7 @@ pub fn groupedCausalAttention(
 /// causal; else a query at absolute position `p` attends only keys in
 /// `[max(0, p-window+1), p]`). Used by Gemma's local SWA layers.
 pub fn groupedCausalAttentionWindowed(
-    self: *Runtime,
+    self: *ExecContext,
     q: *const Tensor,
     k: *const Tensor,
     v: *const Tensor,
@@ -1649,7 +1649,7 @@ pub fn groupedCausalAttentionWindowed(
 /// `groupedCausalAttention` (the shared validation keeps
 /// `q_seq <= kv_seq`, which every prefix+canvas layout satisfies).
 pub fn groupedBidirectionalAttention(
-    self: *Runtime,
+    self: *ExecContext,
     q: *const Tensor,
     k: *const Tensor,
     v: *const Tensor,
@@ -1666,7 +1666,7 @@ pub fn groupedBidirectionalAttention(
 /// This is an additive soft bias, NOT -inf masking: a -inf bias value would
 /// poison its query row on the tiled kernel like a NaN logit does.
 pub fn groupedBidirectionalAttentionBiased(
-    self: *Runtime,
+    self: *ExecContext,
     q: *const Tensor,
     k: *const Tensor,
     v: *const Tensor,
@@ -1685,7 +1685,7 @@ pub fn groupedBidirectionalAttentionBiased(
 /// The stats feed `groupedCausalAttentionBackward`, which then rebuilds
 /// this forward's probabilities in one pass instead of three.
 pub fn groupedCausalAttentionStatsOut(
-    self: *Runtime,
+    self: *ExecContext,
     q: *const Tensor,
     k: *const Tensor,
     v: *const Tensor,
@@ -1706,7 +1706,7 @@ pub fn groupedCausalAttentionStatsOut(
 /// output) is accepted for the autograd record's convenience but unused —
 /// the tiled route's row dot comes from its own cache-resident panels.
 pub fn groupedCausalAttentionBackward(
-    self: *Runtime,
+    self: *ExecContext,
     q: *const Tensor,
     k: *const Tensor,
     v: *const Tensor,
@@ -1985,7 +1985,7 @@ pub fn groupedCausalAttentionBackward(
 /// cache): half the bandwidth, widened to f32 in the kernel. Q and the
 /// output stay f32.
 pub fn groupedCausalAttentionF16Kv(
-    self: *Runtime,
+    self: *ExecContext,
     q: *const Tensor,
     k: *const tensor.TensorOf(.f16),
     v: *const tensor.TensorOf(.f16),
@@ -1998,7 +1998,7 @@ pub fn groupedCausalAttentionF16Kv(
 /// f16-KV bidirectional attention (see `groupedBidirectionalAttention`):
 /// the block-diffusion canvas pass over a prefix+canvas f16 KV cache.
 pub fn groupedBidirectionalAttentionF16Kv(
-    self: *Runtime,
+    self: *ExecContext,
     q: *const Tensor,
     k: *const tensor.TensorOf(.f16),
     v: *const tensor.TensorOf(.f16),
@@ -2011,7 +2011,7 @@ pub fn groupedBidirectionalAttentionF16Kv(
 /// f16-KV decode attention with a sliding `window` (see
 /// `groupedCausalAttentionWindowed`).
 pub fn groupedCausalAttentionF16KvWindowed(
-    self: *Runtime,
+    self: *ExecContext,
     q: *const Tensor,
     k: *const tensor.TensorOf(.f16),
     v: *const tensor.TensorOf(.f16),
@@ -2031,7 +2031,7 @@ pub fn groupedCausalAttentionF16KvWindowed(
 /// cache stays the quantized 34 bytes/block. Q and the output stay f32.
 /// Requires `d % 32 == 0` and `d <= attention_q8_max_d`.
 pub fn groupedCausalAttentionQ8Kv(
-    self: *Runtime,
+    self: *ExecContext,
     q: *const Tensor,
     k_blocks: []const BlockQ8_0,
     v_blocks: []const BlockQ8_0,
@@ -2046,7 +2046,7 @@ pub fn groupedCausalAttentionQ8Kv(
 /// q8_0-KV attention with a sliding `window` (see
 /// `groupedCausalAttentionWindowed`).
 pub fn groupedCausalAttentionQ8KvWindowed(
-    self: *Runtime,
+    self: *ExecContext,
     q: *const Tensor,
     k_blocks: []const BlockQ8_0,
     v_blocks: []const BlockQ8_0,
@@ -2060,7 +2060,7 @@ pub fn groupedCausalAttentionQ8KvWindowed(
 }
 
 fn groupedCausalAttentionQ8KvImpl(
-    self: *Runtime,
+    self: *ExecContext,
     q: *const Tensor,
     k_blocks: []const BlockQ8_0,
     v_blocks: []const BlockQ8_0,
@@ -2195,7 +2195,7 @@ fn kvRowElems(comptime KvElem: type, kv_heads: usize, d: usize) usize {
 /// stream's output is bit-identical to its own single-stream
 /// `groupedCausalAttentionF16Kv` call.
 pub fn groupedCausalAttentionMultiF16Kv(
-    self: *Runtime,
+    self: *ExecContext,
     q: *const Tensor,
     ks: []const []const f16,
     vs: []const []const f16,
@@ -2212,7 +2212,7 @@ pub fn groupedCausalAttentionMultiF16Kv(
 /// `[len, kv_heads, d/32]` (the `kBlocks`/`vBlocks` shape). Requires
 /// `d % 32 == 0` and `d <= attention_q8_max_d`.
 pub fn groupedCausalAttentionMultiQ8Kv(
-    self: *Runtime,
+    self: *ExecContext,
     q: *const Tensor,
     ks: []const []const BlockQ8_0,
     vs: []const []const BlockQ8_0,
@@ -2225,7 +2225,7 @@ pub fn groupedCausalAttentionMultiQ8Kv(
 }
 
 fn groupedCausalAttentionMultiImpl(
-    self: *Runtime,
+    self: *ExecContext,
     comptime KvElem: type,
     q: *const Tensor,
     ks: []const []const KvElem,
@@ -2346,7 +2346,7 @@ fn groupedCausalAttentionMultiImpl(
 /// Allocation-free: tile accumulators live on the kernel's stack and no
 /// score scratch exists, so nothing is acquired from the buffer pool.
 pub fn groupedCausalAttentionTiledRun(
-    self: *Runtime,
+    self: *ExecContext,
     comptime KvElem: type,
     comptime head_group: usize,
     base_in: GroupedCausalAttentionTiledTask(KvElem),
@@ -2450,7 +2450,7 @@ pub fn groupedCausalAttentionTiledRun(
 }
 
 fn groupedCausalAttentionImpl(
-    self: *Runtime,
+    self: *ExecContext,
     comptime KvElem: type,
     q: *const Tensor,
     k: *const tensor.TensorOf(kvDtypeOf(KvElem)),
@@ -2492,7 +2492,7 @@ fn groupedCausalAttentionImpl(
 
     // The optional additive bias is validated to [q_seq, kv_seq] here and
     // handed to the kernels as a row-contiguous slice.
-    var bias_prepared: ?Runtime.PreparedTensor = null;
+    var bias_prepared: ?ExecContext.PreparedTensor = null;
     defer if (bias_prepared) |*prepared| prepared.deinit();
     const bias_data: ?[]const f32 = if (bias) |bias_tensor| blk: {
         const bias_view = try bias_tensor.rankView(2);
@@ -2554,7 +2554,7 @@ fn groupedCausalAttentionImpl(
 /// `bias` is the optional row-contiguous [q_seq, kv_seq] additive score
 /// bias (see GroupedCausalAttentionTask), threaded to every kernel tier.
 fn groupedCausalAttentionDispatch(
-    self: *Runtime,
+    self: *ExecContext,
     comptime KvElem: type,
     q_data: []const f32,
     k_data: []const KvElem,

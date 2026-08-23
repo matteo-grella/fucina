@@ -34,8 +34,8 @@ tensor.deinit()  →  buffer.release()  →  refcount hits 0  →  reclaim()  �
    ag/tensor.zig:102   tensor.zig:250      storage.zig:123     exec/buffer_pool.zig:171
 ```
 
-`ExecContext` (via its embedded `Runtime`) owns one `BufferPool`
-(`src/exec/runtime.zig:51`; type at `src/exec/buffer_pool.zig:47`). It is:
+`ExecContext` owns one `BufferPool` (the `buffers` field in `src/exec.zig`;
+type at `src/exec/buffer_pool.zig:47`). It is:
 
 - **A size-bucketed free-list.** `acquire(len)` (`src/exec/buffer_pool.zig:82`) does
   first-fit over a list kept **sorted ascending by `data.len`**, returning the

@@ -52,7 +52,7 @@ const GradState = core.GradState;
 const BackwardFunction = core.BackwardFunction;
 
 /// Recomputes re-run facade ops, which adopt their results into
-/// `ctx.rt.scope_entries` — not thread-safe — and the backward engine may invoke
+/// `ctx.scope_entries` — not thread-safe — and the backward engine may invoke
 /// independent checkpoint nodes from pool threads. One process-wide lock
 /// serializes every recompute. Checkpoint nodes themselves always execute
 /// synchronously on the scheduling thread (`prefer_async_backward` stays

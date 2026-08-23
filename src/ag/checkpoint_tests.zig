@@ -720,11 +720,11 @@ test "checkpoint flows gradients to every input and prunes non-grad inputs" {
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const base = ctx.rt.scope_entries.items.len;
+        const base = ctx.scope_entries.items.len;
         const h = try checkpoint(&ctx, Blocks.layer1, .{ &x_const, &w_const, &b_const });
         try std.testing.expect(!h.requiresGrad());
         try std.testing.expect(h.scope_owned);
-        try std.testing.expectEqual(base + 1, ctx.rt.scope_entries.items.len);
+        try std.testing.expectEqual(base + 1, ctx.scope_entries.items.len);
     }
 }
 
@@ -810,12 +810,12 @@ test "checkpointing a deep chain retains materially fewer scope entries" {
     const plain_gx, const plain_gw, const plain_loss = plain: {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const base = ctx.rt.scope_entries.items.len;
+        const base = ctx.scope_entries.items.len;
         var h = try Blocks.square(&ctx, &x, &w);
         for (1..chain_len) |_| {
             h = try Blocks.square(&ctx, &h, &w);
         }
-        plain_entries = ctx.rt.scope_entries.items.len - base;
+        plain_entries = ctx.scope_entries.items.len - base;
         const loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
@@ -836,12 +836,12 @@ test "checkpointing a deep chain retains materially fewer scope entries" {
     const ck_gx, const ck_gw, const ck_loss = ck: {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const base = ctx.rt.scope_entries.items.len;
+        const base = ctx.scope_entries.items.len;
         var h = try checkpoint(&ctx, Blocks.square, .{ &x, &w });
         for (1..chain_len) |_| {
             h = try checkpoint(&ctx, Blocks.square, .{ &h, &w });
         }
-        ck_entries = ctx.rt.scope_entries.items.len - base;
+        ck_entries = ctx.scope_entries.items.len - base;
         const loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
@@ -1320,12 +1320,12 @@ test "checkpointing a deep context-block chain retains materially fewer scope en
     const plain_gx, const plain_loss = plain: {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const base = ctx.rt.scope_entries.items.len;
+        const base = ctx.scope_entries.items.len;
         var h = try ContextBlocks.square(&ctx, &chain_ctx, &x);
         for (1..chain_len) |_| {
             h = try ContextBlocks.square(&ctx, &chain_ctx, &h);
         }
-        plain_entries = ctx.rt.scope_entries.items.len - base;
+        plain_entries = ctx.scope_entries.items.len - base;
         const loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
@@ -1341,12 +1341,12 @@ test "checkpointing a deep context-block chain retains materially fewer scope en
     const ck_gx, const ck_loss = ck: {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const base = ctx.rt.scope_entries.items.len;
+        const base = ctx.scope_entries.items.len;
         var h = try checkpointWithContext(&ctx, ContextBlocks.square, &chain_ctx, .{&x});
         for (1..chain_len) |_| {
             h = try checkpointWithContext(&ctx, ContextBlocks.square, &chain_ctx, .{&h});
         }
-        ck_entries = ctx.rt.scope_entries.items.len - base;
+        ck_entries = ctx.scope_entries.items.len - base;
         const loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
@@ -1497,8 +1497,8 @@ test "checkpointed einsum block matches plain backward bitwise" {
     defer ctx.deinit();
 
     var q = try Tensor(.{ .b, .g, .i, .d }).variableFromSlice(&ctx, .{ 2, 2, 2, 3 }, &.{
-        0.5,  -1.0, 0.3,  0.8,  -0.2, 1.1,  0.9, -0.7, 0.4,  -0.5, 1.2,  0.1,
-        -0.9, 0.6,  0.2,  -0.3, 0.7,  -1.1, 0.1, 0.4,  -0.6, 0.8,  -0.4, 0.2,
+        0.5,  -1.0, 0.3, 0.8,  -0.2, 1.1,  0.9, -0.7, 0.4,  -0.5, 1.2,  0.1,
+        -0.9, 0.6,  0.2, -0.3, 0.7,  -1.1, 0.1, 0.4,  -0.6, 0.8,  -0.4, 0.2,
     });
     defer q.deinit();
     var k = try Tensor(.{ .b, .j, .d }).variableFromSlice(&ctx, .{ 2, 2, 3 }, &.{

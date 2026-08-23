@@ -10,7 +10,7 @@ const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
 
 const exec_convert = @import("convert.zig");
-const Runtime = @import("runtime.zig").Runtime;
+const ExecContext = @import("../exec.zig").ExecContext;
 
 const DType = tensor.DType;
 const Tensor = tensor.Tensor;
@@ -244,7 +244,7 @@ pub fn batchTensorView(t: *const Tensor, offset_in_elems: usize) BatchTensorView
     };
 }
 
-pub fn dot(self: *Runtime, a: *const Tensor, b: *const Tensor) !Tensor {
+pub fn dot(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
     var aa = try self.prepareContiguous(a);
     defer aa.deinit();
     var bb = try self.prepareContiguous(b);
@@ -262,7 +262,7 @@ pub fn dot(self: *Runtime, a: *const Tensor, b: *const Tensor) !Tensor {
 }
 
 pub fn dotTyped(
-    self: *Runtime,
+    self: *ExecContext,
     comptime dtype: DType,
     a: *const tensor.TensorOf(dtype),
     b: *const tensor.TensorOf(dtype),
@@ -289,7 +289,23 @@ pub fn dotTyped(
     return out;
 }
 
-pub fn matmul2DDispatch(self: *Runtime, kind: MatmulKind, a: *const Tensor, b: *const Tensor) !Tensor {
+/// Strict 2-D `a[m,k] @ b[k,n]`; `matmul` is the same entry under the
+/// torch-familiar name.
+pub fn matmul2D(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
+    return matmul2DDispatch(self, .plain, a, b);
+}
+
+/// `a[k,m]ᵀ @ b[k,n]` without materializing the transpose.
+pub fn matmulTransA(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
+    return matmul2DDispatch(self, .trans_a, a, b);
+}
+
+/// `a[m,k] @ b[n,k]ᵀ` without materializing the transpose.
+pub fn matmulTransB(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
+    return matmul2DDispatch(self, .trans_b, a, b);
+}
+
+pub fn matmul2DDispatch(self: *ExecContext, kind: MatmulKind, a: *const Tensor, b: *const Tensor) !Tensor {
     const info = try analyzeMatmul2D(kind, a, b);
 
     var aa = try self.prepareContiguous(a);
@@ -315,7 +331,7 @@ pub fn matmul2DDispatch(self: *Runtime, kind: MatmulKind, a: *const Tensor, b: *
 /// buffer and the accumulate GEMM (BLAS beta=1, or the vector accumulate
 /// kernels) adds the product in place — the addmm/residual pattern with no
 /// intermediate product tensor and no separate elementwise add pass.
-pub fn matmul2DAdd(self: *Runtime, a: *const Tensor, b: *const Tensor, base: *const Tensor) !Tensor {
+pub fn matmul2DAdd(self: *ExecContext, a: *const Tensor, b: *const Tensor, base: *const Tensor) !Tensor {
     const info = try analyzeMatmul2D(.plain, a, b);
     const basev = try base.rankView(2);
     if (basev.dim(0) != info.m or basev.dim(1) != info.n) return tensor.TensorError.ShapeMismatch;
@@ -333,7 +349,7 @@ pub fn matmul2DAdd(self: *Runtime, a: *const Tensor, b: *const Tensor, base: *co
 }
 
 pub fn matmul2DTyped(
-    self: *Runtime,
+    self: *ExecContext,
     comptime dtype: DType,
     a: *const tensor.TensorOf(dtype),
     b: *const tensor.TensorOf(dtype),
@@ -356,14 +372,14 @@ pub fn matmul2DTyped(
     return out;
 }
 
-pub fn packMatmulRhsTyped(self: *Runtime, comptime dtype: DType, rhs: *const tensor.TensorOf(dtype)) !backend_mod.PackedMatmulRhsFor(dtype) {
+pub fn packMatmulRhsTyped(self: *ExecContext, comptime dtype: DType, rhs: *const tensor.TensorOf(dtype)) !backend_mod.PackedMatmulRhsFor(dtype) {
     _ = try rhs.rankView(2);
     var rr = try self.prepareContiguousTyped(dtype, rhs);
     defer rr.deinit();
     return self.backend.packMatmulRhsTyped(dtype, self.allocator, rr.tensor());
 }
 
-pub fn packDenseMatmulRhsTyped(self: *Runtime, comptime dtype: DType, rhs: *const tensor.TensorOf(dtype)) !backend_mod.PackedDenseRhs {
+pub fn packDenseMatmulRhsTyped(self: *ExecContext, comptime dtype: DType, rhs: *const tensor.TensorOf(dtype)) !backend_mod.PackedDenseRhs {
     _ = try rhs.rankView(2);
     var rr = try self.prepareContiguousTyped(dtype, rhs);
     defer rr.deinit();
@@ -371,7 +387,7 @@ pub fn packDenseMatmulRhsTyped(self: *Runtime, comptime dtype: DType, rhs: *cons
 }
 
 pub fn matmul2DWithPackedDenseRhs(
-    self: *Runtime,
+    self: *ExecContext,
     a: *const Tensor,
     rhs: *const backend_mod.PackedDenseRhs,
 ) !Tensor {
@@ -394,7 +410,7 @@ pub fn matmul2DWithPackedDenseRhs(
 /// synchronized before return because callers may consume the borrowed host
 /// slice directly rather than crossing a later Tensor visibility boundary.
 pub fn matmul2DWithPackedDenseRhsInto(
-    self: *Runtime,
+    self: *ExecContext,
     out: *Tensor,
     a: *const Tensor,
     rhs: *const backend_mod.PackedDenseRhs,
@@ -414,7 +430,7 @@ pub fn matmul2DWithPackedDenseRhsInto(
 }
 
 pub fn matmul2DWithPackedRhsTyped(
-    self: *Runtime,
+    self: *ExecContext,
     comptime dtype: DType,
     a: *const tensor.TensorOf(dtype),
     rhs: *const backend_mod.PackedMatmulRhsFor(dtype),
@@ -469,10 +485,10 @@ pub fn setCpuF32Shadow(on: ?bool, min_m: ?u64) void {
 
 /// The shadow route's crossover for this runtime, or null when the route is
 /// off. Per-context `Overrides` win; otherwise the process gate decides.
-fn cpuShadowMinM(rt: *const Runtime) ?u64 {
-    const on = rt.tuning.cpu_f32_shadow orelse cpu_shadow.enabled();
+fn cpuShadowMinM(ctx: *const ExecContext) ?u64 {
+    const on = ctx.tuning.cpu_f32_shadow orelse cpu_shadow.enabled();
     if (!on) return null;
-    return rt.tuning.cpu_f32_shadow_min_m orelse cpu_shadow_min_m.get();
+    return ctx.tuning.cpu_f32_shadow_min_m orelse cpu_shadow_min_m.get();
 }
 
 const CpuShadow = struct {
@@ -527,7 +543,7 @@ fn cpuShadowBuffer(comptime dtype: DType, b: anytype) ?*storage_mod.Buffer {
 /// widened RHS through the ordinary f32 TransB entry, which takes the BLAS
 /// arm at these shapes.
 fn matmulTransB2DViaShadow(
-    self: *Runtime,
+    self: *ExecContext,
     comptime dtype: DType,
     a_contig: *const Tensor,
     b_contig: anytype,
@@ -551,7 +567,7 @@ fn matmulTransB2DViaShadow(
     return out;
 }
 
-pub fn matmulTransB2DWithF16Rhs(self: *Runtime, a: *const Tensor, b: *const tensor.TensorOf(.f16)) !Tensor {
+pub fn matmulTransB2DWithF16Rhs(self: *ExecContext, a: *const Tensor, b: *const tensor.TensorOf(.f16)) !Tensor {
     const av = try a.rankView(2);
     const bv = try b.rankView(2);
     const m = av.dim(0);
@@ -591,7 +607,10 @@ pub fn matmulTransB2DWithF16Rhs(self: *Runtime, a: *const Tensor, b: *const tens
     return out;
 }
 
-pub fn matmulTransB2DWithBf16Rhs(self: *Runtime, a: *const Tensor, b: *const tensor.TensorOf(.bf16)) !Tensor {
+/// Mixed-precision twin of matmulTransB2DWithF16Rhs for bf16 weights. The
+/// LHS stays f32 (no cast: the kernel widens the bf16 RHS in-register and
+/// accumulates in f32), so only contiguity is prepared here.
+pub fn matmulTransB2DWithBf16Rhs(self: *ExecContext, a: *const Tensor, b: *const tensor.TensorOf(.bf16)) !Tensor {
     const av = try a.rankView(2);
     const bv = try b.rankView(2);
     const m = av.dim(0);
@@ -621,7 +640,36 @@ pub fn matmulTransB2DWithBf16Rhs(self: *Runtime, a: *const Tensor, b: *const ten
     return out;
 }
 
-pub fn bmmDispatch(self: *Runtime, kind: BmmKind, a: *const Tensor, b: *const Tensor) !Tensor {
+/// Batched matrix multiplication. Supports:
+///   - Full batched:    a=[..., M, K] @ b=[..., K, N] -> [..., M, N]
+///                      Leading batch dims may match exactly or broadcast.
+///   - Broadcast RHS:   a=[..., M, K] @ b=[K, N]      -> [..., M, N]
+///                      Single fused 2-D GEMM via reshape, no per-batch loop.
+///   - Broadcast LHS:   a=[M, K]      @ b=[..., K, N] -> [..., M, N]
+/// General multi-axis broadcast never materializes expanded tensors; the
+/// runtime computes per-output-batch source offsets and preserves the exact
+/// and shared-operand fast paths. Strict 2-D inputs must use matmul/matmul2D.
+pub fn bmm(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
+    return bmmDispatch(self, .plain, a, b);
+}
+
+/// Batched matmul with implicit transpose of the per-batch A:
+///   a=[..., K, M] @ b=[..., K, N] -> [..., M, N]
+/// Used by autograd to compute dB = A^T @ dY in batched form. Shares the
+/// dispatch logic with bmm.
+pub fn bmmTransA(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
+    return bmmDispatch(self, .trans_a, a, b);
+}
+
+/// Batched matmul with implicit transpose of the per-batch B:
+///   a=[..., M, K] @ b=[..., N, K] -> [..., M, N]
+/// Used by autograd to compute dA = dY @ B^T in batched form. The shared-B
+/// fast path (broadcast RHS) also applies here.
+pub fn bmmTransB(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
+    return bmmDispatch(self, .trans_b, a, b);
+}
+
+pub fn bmmDispatch(self: *ExecContext, kind: BmmKind, a: *const Tensor, b: *const Tensor) !Tensor {
     const info = try analyzeBmm(kind, a, b);
 
     var out_buf: [tensor.max_rank]usize = undefined;
@@ -640,7 +688,7 @@ pub fn bmmDispatch(self: *Runtime, kind: BmmKind, a: *const Tensor, b: *const Te
 }
 
 fn bmmFastPathSharedB(
-    self: *Runtime,
+    self: *ExecContext,
     kind: BmmKind,
     a: *const Tensor,
     b: *const Tensor,
@@ -668,7 +716,7 @@ fn bmmFastPathSharedB(
 }
 
 fn bmmLoop(
-    self: *Runtime,
+    self: *ExecContext,
     kind: BmmKind,
     a: *const Tensor,
     b: *const Tensor,
@@ -801,7 +849,7 @@ fn batchOffsetForLinear(info: *const BmmShape, linear: usize, strides: []const u
 }
 
 fn bmmLoopParallel(
-    self: *Runtime,
+    self: *ExecContext,
     kind: BmmKind,
     a: *const Tensor,
     b: *const Tensor,
@@ -898,7 +946,7 @@ fn ensureForwardFloatMath(comptime dtype: DType) void {
     }
 }
 
-fn scalarTyped(self: *Runtime, comptime dtype: DType, value: dtype_mod.Scalar(dtype)) !tensor.TensorOf(dtype) {
+fn scalarTyped(self: *ExecContext, comptime dtype: DType, value: dtype_mod.Scalar(dtype)) !tensor.TensorOf(dtype) {
     var out = try self.emptyRankTyped(dtype, 1, .{1});
     out.data()[0] = value;
     return out;

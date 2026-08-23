@@ -1,10 +1,9 @@
 //! Sum / mean reductions (whole-tensor + along-axis, typed) + the cumulative
 //! (prefix/suffix) sums.
 //!
-//! Domain module: every op receives an explicit `*Runtime`. Reduction math
+//! Domain module: every op receives an explicit `*ExecContext`. Reduction math
 //! dispatches to the backend's `sumInto`/`sumSlice(Typed)` kernels. Carries a
-//! local copy of `ensureForwardFloatMath` (precedent: matmul.zig) to stay
-//! leaf-ward of `exec.zig`.
+//! local copy of `ensureForwardFloatMath` (precedent: matmul.zig).
 
 const std = @import("std");
 const build_options = @import("build_options");
@@ -13,7 +12,7 @@ const dtype_mod = @import("../dtype.zig");
 const tensor = @import("../tensor.zig");
 
 const exec_shape = @import("shape.zig");
-const Runtime = @import("runtime.zig").Runtime;
+const ExecContext = @import("../exec.zig").ExecContext;
 
 const DType = tensor.DType;
 const Tensor = tensor.Tensor;
@@ -49,51 +48,51 @@ fn intSumContribution(comptime dtype: DType, value: dtype_mod.Scalar(dtype)) i64
     return if (comptime dtype == .bool) @intFromBool(value) else @as(i64, value);
 }
 
-pub fn sum(rt: *Runtime, x: *const Tensor) !Tensor {
-    var xx = try rt.prepareContiguous(x);
+pub fn sum(ctx: *ExecContext, x: *const Tensor) !Tensor {
+    var xx = try ctx.prepareContiguous(x);
     defer xx.deinit();
 
-    var out = try rt.scalar(0);
+    var out = try ctx.scalar(0);
     errdefer out.deinit();
-    rt.enableNativeVectorPoolForWork(xx.tensor().len(), parallel.vector_elementwise_len_threshold);
-    try rt.backend.sumInto(&out, xx.tensor());
+    ctx.enableNativeVectorPoolForWork(xx.tensor().len(), parallel.vector_elementwise_len_threshold);
+    try ctx.backend.sumInto(&out, xx.tensor());
     return out;
 }
 
-pub fn sumTyped(rt: *Runtime, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype_mod.outputDType(.reduction, dtype)) {
-    if (comptime dtype == .f32) return sum(rt, x);
+pub fn sumTyped(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype_mod.outputDType(.reduction, dtype)) {
+    if (comptime dtype == .f32) return sum(ctx, x);
     if (comptime isIntSum(dtype)) {
-        var xx = try rt.prepareContiguousTyped(dtype, x);
+        var xx = try ctx.prepareContiguousTyped(dtype, x);
         defer xx.deinit();
-        return rt.scalarTyped(.i64, intSumSlice(dtype, xx.tensor().dataConst()));
+        return ctx.scalarTyped(.i64, intSumSlice(dtype, xx.tensor().dataConst()));
     }
     comptime ensureForwardFloatMath(dtype);
     const compute_dtype = comptime dtype_mod.computeDType(.reduction, dtype);
     const output_dtype = comptime dtype_mod.outputDType(.reduction, dtype);
 
-    var xx = try rt.prepareContiguousTyped(dtype, x);
+    var xx = try ctx.prepareContiguousTyped(dtype, x);
     defer xx.deinit();
 
     _ = compute_dtype;
-    rt.enableNativeVectorPoolForWork(xx.tensor().len(), parallel.vector_elementwise_len_threshold);
-    var out = try rt.scalarTyped(output_dtype, rt.backend.sumSliceTyped(dtype, xx.tensor().dataConst()));
+    ctx.enableNativeVectorPoolForWork(xx.tensor().len(), parallel.vector_elementwise_len_threshold);
+    var out = try ctx.scalarTyped(output_dtype, ctx.backend.sumSliceTyped(dtype, xx.tensor().dataConst()));
     errdefer out.deinit();
     return out;
 }
 
-pub fn sumAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    return sumAxisRankTyped(rt, .f32, rank, x, axis);
+pub fn sumAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
+    return sumAxisRankTyped(ctx, .f32, rank, x, axis);
 }
 
 pub fn sumAxisRankTyped(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime dtype: DType,
     comptime rank: usize,
     x: *const tensor.TensorOf(dtype),
     comptime axis: usize,
 ) !tensor.TensorOf(dtype_mod.outputDType(.reduction, dtype)) {
-    if (comptime dtype == .f32) return sumAxisRankF32(rt, rank, x, axis);
-    if (comptime isIntSum(dtype)) return intSumAxisRank(rt, dtype, rank, x, axis);
+    if (comptime dtype == .f32) return sumAxisRankF32(ctx, rank, x, axis);
+    if (comptime isIntSum(dtype)) return intSumAxisRank(ctx, dtype, rank, x, axis);
     comptime ensureForwardFloatMath(dtype);
     const compute_dtype = comptime dtype_mod.computeDType(.reduction, dtype);
     const output_dtype = comptime dtype_mod.outputDType(.reduction, dtype);
@@ -105,18 +104,18 @@ pub fn sumAxisRankTyped(
     const out_rank = if (rank == 1) 1 else rank - 1;
     const out_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
 
-    var xx = try rt.prepareContiguousTyped(dtype, x);
+    var xx = try ctx.prepareContiguousTyped(dtype, x);
     defer xx.deinit();
     const xp = xx.tensor();
     const input = xp.dataConst();
 
-    var out = try rt.zerosRankTyped(output_dtype, out_rank, out_shape);
+    var out = try ctx.zerosRankTyped(output_dtype, out_rank, out_shape);
     errdefer out.deinit();
     const output = out.data();
 
     if (rank == 1) {
-        rt.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
-        output[0] = rt.backend.sumSliceTyped(dtype, input);
+        ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
+        output[0] = ctx.backend.sumSliceTyped(dtype, input);
         return out;
     }
 
@@ -124,7 +123,7 @@ pub fn sumAxisRankTyped(
         const axis_dim = source.shape[axis];
         for (0..output.len) |row| {
             const base = row * axis_dim;
-            output[row] = rt.backend.sumSliceTyped(dtype, input[base..][0..axis_dim]);
+            output[row] = ctx.backend.sumSliceTyped(dtype, input[base..][0..axis_dim]);
         }
         return out;
     }
@@ -151,7 +150,7 @@ pub fn sumAxisRankTyped(
 }
 
 fn intSumAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime dtype: DType,
     comptime rank: usize,
     x: *const tensor.TensorOf(dtype),
@@ -164,11 +163,11 @@ fn intSumAxisRank(
     const out_rank = if (rank == 1) 1 else rank - 1;
     const out_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
 
-    var xx = try rt.prepareContiguousTyped(dtype, x);
+    var xx = try ctx.prepareContiguousTyped(dtype, x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var out = try rt.zerosRankTyped(.i64, out_rank, out_shape);
+    var out = try ctx.zerosRankTyped(.i64, out_rank, out_shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -205,7 +204,7 @@ fn intSumAxisRank(
     return out;
 }
 
-fn sumAxisRankF32(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
+fn sumAxisRankF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
@@ -213,18 +212,18 @@ fn sumAxisRankF32(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime
     const out_rank = if (rank == 1) 1 else rank - 1;
     const out_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
 
-    var xx = try rt.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(x);
     defer xx.deinit();
     const xp = xx.tensor();
     const input = xp.dataConst();
 
-    var out = try rt.zerosRank(out_rank, out_shape);
+    var out = try ctx.zerosRank(out_rank, out_shape);
     errdefer out.deinit();
     const output = out.data();
 
     if (rank == 1) {
-        rt.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
-        try rt.backend.sumInto(&out, xp);
+        ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
+        try ctx.backend.sumInto(&out, xp);
         return out;
     }
 
@@ -232,7 +231,7 @@ fn sumAxisRankF32(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime
         const axis_dim = source.shape[axis];
         for (0..output.len) |row| {
             const base = row * axis_dim;
-            output[row] = rt.backend.sumSlice(input[base..][0..axis_dim]);
+            output[row] = ctx.backend.sumSlice(input[base..][0..axis_dim]);
         }
         return out;
     }
@@ -262,23 +261,23 @@ fn sumAxisRankF32(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime
 /// is one serial prefix sum in axis order — bitwise deterministic for any
 /// thread count (cold op; no parallel dispatch). With `-Dvector-scan` the
 /// scan kernels vectorize (see `scanAxisRankDirected`).
-pub fn cumsumAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    return scanAxisRankDirected(rt, rank, x, axis, .sum, false);
+pub fn cumsumAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
+    return scanAxisRankDirected(ctx, rank, x, axis, .sum, false);
 }
 
 /// Reversed cumulative (suffix) sum along `axis`:
 /// `out[..., i, ...] = Σ_{j >= i} x[..., j, ...]` — the `cumsumAxisRank` VJP
 /// (a dedicated reverse pass, same determinism contract and the same
 /// `-Dvector-scan` gating).
-pub fn cumsumReverseAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    return scanAxisRankDirected(rt, rank, x, axis, .sum, true);
+pub fn cumsumReverseAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
+    return scanAxisRankDirected(ctx, rank, x, axis, .sum, true);
 }
 
 /// Cumulative product along `axis` (torch.cumprod), preserving the input
 /// shape: `out[..., i, ...] = Π_{j <= i} x[..., j, ...]`. Same contract and
 /// `-Dvector-scan` gating as `cumsumAxisRank`.
-pub fn cumprodAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    return scanAxisRankDirected(rt, rank, x, axis, .prod, false);
+pub fn cumprodAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
+    return scanAxisRankDirected(ctx, rank, x, axis, .prod, false);
 }
 
 const ScanOp = enum { sum, prod };
@@ -334,16 +333,16 @@ inline fn scanShiftDown(comptime op: ScanOp, comptime k: usize, v: ScanVec) Scan
 ///     deterministic for any thread count, but the accumulation order
 ///     differs from the serial default (the sum-SIMD-lanes rounding
 ///     class; exact for integer-valued data).
-fn scanAxisRankDirected(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize, comptime op: ScanOp, comptime reverse: bool) !Tensor {
+fn scanAxisRankDirected(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, comptime op: ScanOp, comptime reverse: bool) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
-    var xx = try rt.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var out = try rt.emptyRank(rank, source.shape);
+    var out = try ctx.emptyRank(rank, source.shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -459,7 +458,7 @@ fn scanRowVec(comptime op: ScanOp, comptime reverse: bool, row_in: []const f32, 
 /// stays serial per lane even under `-Dvector-scan`: an in-register form
 /// would reassociate `a·h + b` and change rounding, so no gated variant
 /// exists (unlike cumsum's last-axis prefix scan).
-pub fn linearRecurrenceAxisRank(rt: *Runtime, comptime rank: usize, b: *const Tensor, a: *const Tensor, comptime axis: usize, initial: ?*const Tensor) !Tensor {
+pub fn linearRecurrenceAxisRank(ctx: *ExecContext, comptime rank: usize, b: *const Tensor, a: *const Tensor, comptime axis: usize, initial: ?*const Tensor) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
@@ -473,20 +472,20 @@ pub fn linearRecurrenceAxisRank(rt: *Runtime, comptime rank: usize, b: *const Te
     const inner = productAfterAxis(rank, source.shape, axis);
     const outer = productBeforeAxis(rank, source.shape, axis);
 
-    var bb = try rt.prepareContiguous(b);
+    var bb = try ctx.prepareContiguous(b);
     defer bb.deinit();
     const b_data = bb.tensor().dataConst();
 
-    var init_prep: ?Runtime.PreparedTensor = null;
+    var init_prep: ?ExecContext.PreparedTensor = null;
     defer if (init_prep) |*p| p.deinit();
     var init_data: ?[]const f32 = null;
     if (initial) |ini| {
         if (ini.len() != outer * inner) return tensor.TensorError.ShapeMismatch;
-        init_prep = try rt.prepareContiguous(ini);
+        init_prep = try ctx.prepareContiguous(ini);
         init_data = init_prep.?.tensor().dataConst();
     }
 
-    var out = try rt.emptyRank(rank, source.shape);
+    var out = try ctx.emptyRank(rank, source.shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -547,7 +546,7 @@ pub const LinearRecurrenceGrads = struct {
 /// `-Dvector-scan` lane vectorization as the forward (bitwise identical to
 /// the serial pass either way).
 pub fn linearRecurrenceBackwardAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     gy: *const Tensor,
     a: *const Tensor,
@@ -570,32 +569,32 @@ pub fn linearRecurrenceBackwardAxisRank(
     const inner = productAfterAxis(rank, source.shape, axis);
     const outer = productBeforeAxis(rank, source.shape, axis);
 
-    var gg = try rt.prepareContiguous(gy);
+    var gg = try ctx.prepareContiguous(gy);
     defer gg.deinit();
     const gy_data = gg.tensor().dataConst();
-    var hh = try rt.prepareContiguous(h);
+    var hh = try ctx.prepareContiguous(h);
     defer hh.deinit();
     const h_data = hh.tensor().dataConst();
 
-    var init_prep: ?Runtime.PreparedTensor = null;
+    var init_prep: ?ExecContext.PreparedTensor = null;
     defer if (init_prep) |*p| p.deinit();
     var init_data: ?[]const f32 = null;
     if (initial) |ini| {
         if (ini.len() != outer * inner) return tensor.TensorError.ShapeMismatch;
-        init_prep = try rt.prepareContiguous(ini);
+        init_prep = try ctx.prepareContiguous(ini);
         init_data = init_prep.?.tensor().dataConst();
     }
 
-    var gb = try rt.emptyRank(rank, source.shape);
+    var gb = try ctx.emptyRank(rank, source.shape);
     errdefer gb.deinit();
     const gb_data = gb.data();
 
-    var da: ?Tensor = if (want_da) try rt.emptyRank(rank, source.shape) else null;
+    var da: ?Tensor = if (want_da) try ctx.emptyRank(rank, source.shape) else null;
     errdefer if (da) |*t| t.deinit();
     const da_data: ?[]f32 = if (da) |*t| t.data() else null;
 
     const out_rank = if (rank == 1) 1 else rank - 1;
-    var dinitial: ?Tensor = if (want_dinitial) try rt.emptyRank(out_rank, shapeWithoutAxis(rank, out_rank, source.shape, axis)) else null;
+    var dinitial: ?Tensor = if (want_dinitial) try ctx.emptyRank(out_rank, shapeWithoutAxis(rank, out_rank, source.shape, axis)) else null;
     errdefer if (dinitial) |*t| t.deinit();
     const dinit_data: ?[]f32 = if (dinitial) |*t| t.data() else null;
 
@@ -717,7 +716,7 @@ fn strideOffset(comptime rank: usize, comptime from: usize, comptime to: usize, 
 /// `prodSlice` per row, and the general axis falls back to the same
 /// delinearized scalar accumulation `sum` uses. Like `sum`, the SIMD
 /// lane order fixes the float multiplication order per backend.
-pub fn prodAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
+pub fn prodAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
@@ -725,18 +724,18 @@ pub fn prodAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, compti
     const out_rank = if (rank == 1) 1 else rank - 1;
     const out_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
 
-    var xx = try rt.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(x);
     defer xx.deinit();
     const xp = xx.tensor();
     const input = xp.dataConst();
 
-    var out = try rt.emptyRank(out_rank, out_shape);
+    var out = try ctx.emptyRank(out_rank, out_shape);
     errdefer out.deinit();
     const output = out.data();
 
     if (rank == 1) {
-        rt.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
-        try rt.backend.prodInto(&out, xp);
+        ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
+        try ctx.backend.prodInto(&out, xp);
         return out;
     }
 
@@ -744,7 +743,7 @@ pub fn prodAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, compti
         const axis_dim = source.shape[axis];
         for (0..output.len) |row| {
             const base = row * axis_dim;
-            output[row] = rt.backend.prodSlice(input[base..][0..axis_dim]);
+            output[row] = ctx.backend.prodSlice(input[base..][0..axis_dim]);
         }
         return out;
     }
@@ -770,8 +769,8 @@ pub fn prodAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, compti
     return out;
 }
 
-pub fn meanAxisRank(rt: *Runtime, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    var out = try sumAxisRank(rt, rank, x, axis);
+pub fn meanAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
+    var out = try sumAxisRank(ctx, rank, x, axis);
     errdefer out.deinit();
     out.scaleInPlace(1 / @as(f32, @floatFromInt(x.shape.at(axis))));
     return out;
@@ -819,7 +818,7 @@ pub const MaskedMeanResult = struct {
 /// shape (broadcasting happens above, at the tag layer). Lanes selecting
 /// nothing yield `empty orelse 0`.
 pub fn sumMaskedAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime mask_dtype: DType,
     comptime rank: usize,
     x: *const Tensor,
@@ -829,14 +828,14 @@ pub fn sumMaskedAxisRank(
 ) !Tensor {
     var counts: ?Tensor = null;
     defer if (counts) |*c| c.deinit();
-    return maskedReduceAxisRank(rt, mask_dtype, rank, x, mask, axis, empty_value, &counts, false);
+    return maskedReduceAxisRank(ctx, mask_dtype, rank, x, mask, axis, empty_value, &counts, false);
 }
 
 /// Mean over `axis` of the elements `mask` selects, plus the per-lane
 /// selected counts. Lanes selecting nothing yield `empty orelse NaN` (0/0 has
 /// no identity to fall back on) and a count of zero.
 pub fn meanMaskedAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime mask_dtype: DType,
     comptime rank: usize,
     x: *const Tensor,
@@ -846,7 +845,7 @@ pub fn meanMaskedAxisRank(
 ) !MaskedMeanResult {
     var counts: ?Tensor = null;
     errdefer if (counts) |*c| c.deinit();
-    var values = try maskedReduceAxisRank(rt, mask_dtype, rank, x, mask, axis, empty_value, &counts, true);
+    var values = try maskedReduceAxisRank(ctx, mask_dtype, rank, x, mask, axis, empty_value, &counts, true);
     errdefer values.deinit();
     const result: MaskedMeanResult = .{ .values = values, .counts = counts.? };
     counts = null;
@@ -913,7 +912,7 @@ fn countRow(comptime mask_dtype: DType, flags: []const dtype_mod.Scalar(mask_dty
 /// caller passed a non-null slot; the sum arm only needs them to detect empty
 /// lanes, and drops them.
 fn maskedReduceAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime mask_dtype: DType,
     comptime rank: usize,
     x: *const Tensor,
@@ -935,20 +934,20 @@ fn maskedReduceAxisRank(
     const out_rank = if (rank == 1) 1 else rank - 1;
     const out_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
 
-    var xx = try rt.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(x);
     defer xx.deinit();
     const xp = xx.tensor();
     const input = xp.dataConst();
 
-    var mm = try rt.prepareContiguousTyped(mask_dtype, mask);
+    var mm = try ctx.prepareContiguousTyped(mask_dtype, mask);
     defer mm.deinit();
     const flags = mm.tensor().dataConst();
 
-    var out = try rt.zerosRank(out_rank, out_shape);
+    var out = try ctx.zerosRank(out_rank, out_shape);
     errdefer out.deinit();
     const output = out.data();
 
-    var counts = try rt.zerosRank(out_rank, out_shape);
+    var counts = try ctx.zerosRank(out_rank, out_shape);
     errdefer counts.deinit();
     const count_data = counts.data();
 
@@ -972,10 +971,10 @@ fn maskedReduceAxisRank(
         // Last-axis (and rank-1) reduction: write one row through the mask
         // into pooled scratch (a single cache-resident row, not a copy of the
         // tensor) and hand it to the same SIMD kernel the unmasked path uses.
-        var scratch = try rt.emptyRank(1, .{axis_dim});
+        var scratch = try ctx.emptyRank(1, .{axis_dim});
         defer scratch.deinit();
         const row_scratch = scratch.data();
-        rt.enableNativeVectorPoolForWork(axis_dim, parallel.vector_elementwise_len_threshold);
+        ctx.enableNativeVectorPoolForWork(axis_dim, parallel.vector_elementwise_len_threshold);
 
         // Counting is a separate pass over the (now L1-resident) flag row, and
         // only when someone reads it: fusing a scalar `selected` accumulator
@@ -985,7 +984,7 @@ fn maskedReduceAxisRank(
             const row = input[outer_i * axis_dim ..][0..axis_dim];
             const row_flags = flags[outer_i * axis_dim ..][0..axis_dim];
             selectRow(mask_dtype, row, row_flags, row_scratch);
-            output[outer_i] = rt.backend.sumSlice(row_scratch);
+            output[outer_i] = ctx.backend.sumSlice(row_scratch);
             if (need_counts) count_data[outer_i] = @floatFromInt(countRow(mask_dtype, row_flags));
         }
     } else {
@@ -1026,17 +1025,17 @@ fn maskedReduceAxisRank(
 }
 
 pub fn meanAxisRankTyped(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime dtype: DType,
     comptime rank: usize,
     x: *const tensor.TensorOf(dtype),
     comptime axis: usize,
 ) !tensor.TensorOf(dtype_mod.outputDType(.reduction, dtype)) {
-    if (comptime dtype == .f32) return meanAxisRank(rt, rank, x, axis);
+    if (comptime dtype == .f32) return meanAxisRank(ctx, rank, x, axis);
     comptime ensureForwardFloatMath(dtype);
     const compute_dtype = comptime dtype_mod.computeDType(.reduction, dtype);
     const output_dtype = comptime dtype_mod.outputDType(.reduction, dtype);
-    var out = try sumAxisRankTyped(rt, dtype, rank, x, axis);
+    var out = try sumAxisRankTyped(ctx, dtype, rank, x, axis);
     errdefer out.deinit();
     const scale_value: dtype_mod.Scalar(compute_dtype) = 1 / @as(dtype_mod.Scalar(compute_dtype), @floatFromInt(x.shape.at(axis)));
     for (out.data()) |*value| {
@@ -1055,7 +1054,7 @@ pub fn meanAxisRankTyped(
 /// any thread count (cold op, no parallel dispatch). The sorted-contiguous
 /// restriction of torch.segment_reduce / JAX segment_sum.
 pub fn segmentSumAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
     comptime axis: usize,
@@ -1074,11 +1073,11 @@ pub fn segmentSumAxisRank(
     var out_shape: [rank]usize = source.shape;
     out_shape[axis] = segments;
 
-    var xx = try rt.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var out = try rt.zerosRank(rank, out_shape);
+    var out = try ctx.zerosRank(rank, out_shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -1101,7 +1100,7 @@ pub fn segmentSumAxisRank(
 /// `n` rows, every input row receiving its segment's row:
 /// `out[..., j, ...] = gy[..., seg(j), ...]`.
 pub fn segmentBroadcastAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     gy: *const Tensor,
     comptime axis: usize,
@@ -1119,11 +1118,11 @@ pub fn segmentBroadcastAxisRank(
     var out_shape: [rank]usize = source.shape;
     out_shape[axis] = n;
 
-    var gg = try rt.prepareContiguous(gy);
+    var gg = try ctx.prepareContiguous(gy);
     defer gg.deinit();
     const input = gg.tensor().dataConst();
 
-    var out = try rt.zerosRank(rank, out_shape);
+    var out = try ctx.zerosRank(rank, out_shape);
     errdefer out.deinit();
     const output = out.data();
 

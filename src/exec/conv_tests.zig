@@ -147,7 +147,7 @@ test "conv2d prepared winograd weights: exec-level parity, .empty fallback, shap
     // transform and produces the same bytes.
     var empty = ExecContext.PreparedConvWeights.empty;
     defer empty.deinit();
-    var got_empty = try exec_conv.conv2dPreparedExt(&ctx.rt, &input, &weight, &empty, &bias, .{ 1, 1 }, .{ 1, 1 }, 1, false);
+    var got_empty = try exec_conv.conv2dPreparedExt(&ctx, &input, &weight, &empty, &bias, .{ 1, 1 }, .{ 1, 1 }, 1, false);
     defer got_empty.deinit();
     try std.testing.expectEqualSlices(f32, ref.dataConst(), got_empty.dataConst());
 
@@ -293,14 +293,14 @@ test "convTranspose1d: matches a naive direct scatter reference (DAC combos)" {
         const t_out = (t_in - 1) * stride + taps - 2 * pad;
         const out_len = t_out + output_pad;
 
-        var x = try ctx.rt.zerosRank(2, .{ t_in, in_channels });
+        var x = try ctx.zerosRank(2, .{ t_in, in_channels });
         defer x.deinit();
         for (x.data()) |*v| v.* = random.float(f32) * 2 - 1;
         // weight2[(oc*K + k)*IC + ic] — the reference's load-time repack.
-        var w2 = try ctx.rt.zerosRank(2, .{ taps * out_channels, in_channels });
+        var w2 = try ctx.zerosRank(2, .{ taps * out_channels, in_channels });
         defer w2.deinit();
         for (w2.data()) |*v| v.* = random.float(f32) * 2 - 1;
-        var bias = try ctx.rt.zerosRank(1, .{out_channels});
+        var bias = try ctx.zerosRank(1, .{out_channels});
         defer bias.deinit();
         for (bias.data()) |*v| v.* = random.float(f32);
 

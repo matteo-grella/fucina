@@ -2,9 +2,9 @@
 //! (per expert: gate rows then up rows of Q6_K/Q4_K blocks, Q8_0 down
 //! rows), plus the packed x4 arms and the GPU batch path. Decode carves
 //! the shared MoE decode scratch; batch rides the phase-chain scheduling
-//! in `moe_chain.zig`. Entries take the runtime plus (for decode) the
-//! caller's scratch; the tagged facade wrappers live with the gemma
-//! family (`llm/gemma/moe.zig`), the facade methods on `ExecContext`
+//! in `moe_chain.zig`. Entries take the `*ExecContext` (decode carves
+//! its `moe_scratch`); the tagged facade wrappers live with the gemma
+//! family (`llm/gemma/moe.zig`), the methods on `ExecContext`
 //! (`moeGu*`).
 const std = @import("std");
 
@@ -14,7 +14,7 @@ const dtype_mod = backend_mod.dtype_info;
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
 const exec_moe = @import("moe.zig");
-const Runtime = @import("runtime.zig").Runtime;
+const ExecContext = @import("../exec.zig").ExecContext;
 
 const MoeBatchProfile = exec_moe.MoeBatchProfile;
 const Tensor = tensor.Tensor;
@@ -165,8 +165,7 @@ fn runGemmaMoeDecodeChainTask(task: *GemmaMoeDecodeChainTask, chain: *const thre
 /// f16-LUT GELU. This mirrors Qwen's expert-parallel decode helper while
 /// preserving Gemma's packed formats and numerics.
 pub fn decodePacked(
-    rt: *Runtime,
-    scratch: *exec_moe.MoeDecodeScratch,
+    ctx: *ExecContext,
     x: *const Tensor,
     gate: []const backend_mod.QuantizedMatmulRhsQ6_Kx4,
     up: []const backend_mod.QuantizedMatmulRhsQ6_Kx4,
@@ -199,9 +198,9 @@ pub fn decodePacked(
     const chain_task_count = 4 * top_k;
     const chain_initial_count = 2 * top_k;
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
-    exec_moe.lockMoeDecodeScratch(scratch);
-    defer exec_moe.unlockMoeDecodeScratch(scratch);
-    const sv = try exec_moe.carveMoeDecodeChainScratch(rt, scratch, qm.BlockQ8_0, GemmaMoeDecodeChainState, GemmaMoeDecodeChainTask, try qm.qkBlockCount(hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
+    exec_moe.lockMoeDecodeScratch(ctx);
+    defer exec_moe.unlockMoeDecodeScratch(ctx);
+    const sv = try exec_moe.carveMoeDecodeChainScratch(ctx, qm.BlockQ8_0, GemmaMoeDecodeChainState, GemmaMoeDecodeChainTask, try qm.qkBlockCount(hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
     const gate_buf = sv.gate_buf;
     const up_buf = sv.up_buf;
     const g_buf = sv.g_buf;
@@ -271,7 +270,7 @@ pub fn decodePacked(
 
     const expert_wall_start = moeBatchProfileStart(profile_enabled, io);
     var used_chain = false;
-    if (rt.workPool()) |pool| {
+    if (ctx.workPool()) |pool| {
         used_chain = pool.parallelChained(GemmaMoeDecodeChainTask, tasks, chain_initial_count, runGemmaMoeDecodeChainTask);
     }
     if (!used_chain) {
@@ -320,7 +319,7 @@ pub fn decodePacked(
     }
 
     const out_alloc_start = moeBatchProfileStart(profile_enabled, io);
-    var out = try rt.emptyRank(2, .{ 1, hidden });
+    var out = try ctx.emptyRank(2, .{ 1, hidden });
     errdefer out.deinit();
     if (profile) |p| p.alloc_ns += moeBatchProfileElapsed(out_alloc_start, io);
 
@@ -402,7 +401,7 @@ fn gemmaBatchBody(
     comptime runDn: fn (*const DnTask) void,
     comptime runGuOpaque: fn (*anyopaque) void,
     comptime runDnOpaque: fn (*anyopaque) void,
-    rt: *Runtime,
+    ctx: *ExecContext,
     x_data: []const f32,
     shape: BatchShape,
     route: *const moe_chain.MoeRoutePlan,
@@ -413,7 +412,7 @@ fn gemmaBatchBody(
     total_start: i128,
 ) !Tensor {
     const qm = backend_mod.quantized_matmul;
-    const a = rt.allocator;
+    const a = ctx.allocator;
     const seq = shape.seq;
     const hidden = shape.hidden;
     const out_pe = shape.out_pe;
@@ -450,7 +449,7 @@ fn gemmaBatchBody(
     // experts each contributing one full-width task per projection, the
     // team starves. The width helpers keep the counting and construction
     // loops in exact agreement (the chain's enqueue contract).
-    const pool = rt.workPool();
+    const pool = ctx.workPool();
     var chain_active_count: usize = 0;
     for (count) |m| {
         if (m != 0) chain_active_count += 1;
@@ -643,13 +642,13 @@ fn gemmaBatchBody(
         for (down_tasks) |*t| p.down_ns += t.elapsed_ns;
     }
 
-    const out = try scatterGrouped(rt, seq, hidden, top_k, route, weights, down_buf, io, profile);
+    const out = try scatterGrouped(ctx, seq, hidden, top_k, route, weights, down_buf, io, profile);
     recordBatch(profile, total_start, io, route);
     return out;
 }
 
 pub fn batchPacked(
-    rt: *Runtime,
+    ctx: *ExecContext,
     x: *const Tensor,
     gate: []const backend_mod.QuantizedMatmulRhsQ6_Kx4,
     up: []const backend_mod.QuantizedMatmulRhsQ6_Kx4,
@@ -662,7 +661,7 @@ pub fn batchPacked(
     profile: ?*MoeBatchProfile,
 ) !Tensor {
     const qm = backend_mod.quantized_matmul;
-    const a = rt.allocator;
+    const a = ctx.allocator;
     const xv = try x.rankView(2);
     const seq = xv.dim(0);
     const hidden = xv.dim(1);
@@ -697,7 +696,7 @@ pub fn batchPacked(
         runGemmaMoeQ8MatmulTask,
         runGemmaMoeQ6MatmulTaskOpaque,
         runGemmaMoeQ8MatmulTaskOpaque,
-        rt,
+        ctx,
         x_data,
         .{ .seq = seq, .hidden = hidden, .out_pe = out_pe, .top_k = top_k, .bpc_in = bpc_in, .bpc_g = bpc_g },
         &route,
@@ -722,7 +721,7 @@ pub fn batchPacked(
 /// failure): the caller falls through to the untouched CPU path,
 /// never-a-loss.
 fn batchRawGpu(
-    rt: *Runtime,
+    ctx: *ExecContext,
     x_data: []const f32,
     seq: usize,
     hidden: usize,
@@ -736,7 +735,7 @@ fn batchRawGpu(
     total_start: i128,
 ) !?Tensor {
     const gpu = backend_mod.gpu_impl;
-    const a = rt.allocator;
+    const a = ctx.allocator;
     const count = route.count;
     const offset = route.offset;
     const order = route.order;
@@ -825,7 +824,7 @@ fn batchRawGpu(
         n_pairs * @max(gu_out, hidden) * @sizeOf(f32),
     ) orelse return null;
 
-    const pool = rt.workPool();
+    const pool = ctx.workPool();
 
     // gather the routed f32 rows into the staging panel — the kernel
     // reads f32 activations directly, so the CPU path's Q8_K LHS
@@ -914,7 +913,7 @@ fn batchRawGpu(
 
     const down_panel = stage.out[0 .. n_pairs * hidden];
     const scatter_profile: ?*MoeBatchProfile = if (profile_enabled) &local else null;
-    const out = try scatterGrouped(rt, seq, hidden, top_k, route, weights, down_panel, io, scatter_profile);
+    const out = try scatterGrouped(ctx, seq, hidden, top_k, route, weights, down_panel, io, scatter_profile);
     if (profile) |p| {
         p.alloc_ns += local.alloc_ns;
         p.gather_quant_ns += local.gather_quant_ns;
@@ -1186,8 +1185,7 @@ fn runGemmaMoeRawDecodeChainTask(task: *GemmaMoeRawDecodeChainTask, chain: *cons
 /// (plain row blocks straight from the mmap instead of the widened x4
 /// packing).
 pub fn decodeRaw(
-    rt: *Runtime,
-    scratch: *exec_moe.MoeDecodeScratch,
+    ctx: *ExecContext,
     x: *const Tensor,
     gw: RawExpertWeights,
     n_expert: usize,
@@ -1215,9 +1213,9 @@ pub fn decodeRaw(
     const chain_task_count = 4 * top_k;
     const chain_initial_count = 2 * top_k;
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
-    exec_moe.lockMoeDecodeScratch(scratch);
-    defer exec_moe.unlockMoeDecodeScratch(scratch);
-    const sv = try exec_moe.carveMoeDecodeChainScratch(rt, scratch, qm.BlockQ8_0, GemmaMoeRawDecodeChainState, GemmaMoeRawDecodeChainTask, try qm.qkBlockCount(hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
+    exec_moe.lockMoeDecodeScratch(ctx);
+    defer exec_moe.unlockMoeDecodeScratch(ctx);
+    const sv = try exec_moe.carveMoeDecodeChainScratch(ctx, qm.BlockQ8_0, GemmaMoeRawDecodeChainState, GemmaMoeRawDecodeChainTask, try qm.qkBlockCount(hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
     if (profile) |p| p.alloc_ns += moeBatchProfileElapsed(alloc_start, io);
 
     const gather_quant_start = moeBatchProfileStart(profile_enabled, io);
@@ -1278,7 +1276,7 @@ pub fn decodeRaw(
 
     const expert_wall_start = moeBatchProfileStart(profile_enabled, io);
     var used_chain = false;
-    if (rt.workPool()) |pool| {
+    if (ctx.workPool()) |pool| {
         used_chain = pool.parallelChained(GemmaMoeRawDecodeChainTask, sv.tasks, chain_initial_count, runGemmaMoeRawDecodeChainTask);
     }
     if (!used_chain) {
@@ -1325,7 +1323,7 @@ pub fn decodeRaw(
     }
 
     const out_alloc_start = moeBatchProfileStart(profile_enabled, io);
-    var out = try rt.emptyRank(2, .{ 1, hidden });
+    var out = try ctx.emptyRank(2, .{ 1, hidden });
     errdefer out.deinit();
     if (profile) |p| p.alloc_ns += moeBatchProfileElapsed(out_alloc_start, io);
 
@@ -1416,7 +1414,7 @@ fn runGemmaMoeRawQ8MatmulTaskOpaque(ctx: *anyopaque) void {
 /// borrowed views (no x4 widening exists for these arms).
 /// Numerics match the x4 path: Q8_K LHS, f16-LUT GeGLU, Q8_0 requant.
 pub fn batchRaw(
-    rt: *Runtime,
+    ctx: *ExecContext,
     x: *const Tensor,
     gw: RawExpertWeights,
     n_expert: usize,
@@ -1428,7 +1426,7 @@ pub fn batchRaw(
     profile: ?*MoeBatchProfile,
 ) !Tensor {
     const qm = backend_mod.quantized_matmul;
-    const a = rt.allocator;
+    const a = ctx.allocator;
     const xv = try x.rankView(2);
     const seq = xv.dim(0);
     const hidden = xv.dim(1);
@@ -1455,7 +1453,7 @@ pub fn batchRaw(
 
     if (comptime backend_mod.gpu_impl.enabled) {
         if (try batchRawGpu(
-            rt,
+            ctx,
             x_data,
             seq,
             hidden,
@@ -1477,7 +1475,7 @@ pub fn batchRaw(
         runGemmaMoeRawQ8MatmulTask,
         runGemmaMoeRawGuMatmulTaskOpaque,
         runGemmaMoeRawQ8MatmulTaskOpaque,
-        rt,
+        ctx,
         x_data,
         .{ .seq = seq, .hidden = hidden, .out_pe = out_pe, .top_k = top_k, .bpc_in = bpc_in, .bpc_g = bpc_g },
         &route,
@@ -1658,7 +1656,7 @@ fn scatterInto(
 /// Grouped-rows scatter into a fresh `[seq, hidden]` output (alloc timed
 /// into the profile), the batch paths' tail.
 fn scatterGrouped(
-    rt: *Runtime,
+    ctx: *ExecContext,
     seq: usize,
     hidden: usize,
     top_k: usize,
@@ -1670,7 +1668,7 @@ fn scatterGrouped(
 ) !Tensor {
     const profile_enabled = profile != null;
     const out_alloc_start = moeBatchProfileStart(profile_enabled, io);
-    var out = try rt.emptyRank(2, .{ seq, hidden });
+    var out = try ctx.emptyRank(2, .{ seq, hidden });
     errdefer out.deinit();
     if (profile) |p| p.alloc_ns += moeBatchProfileElapsed(out_alloc_start, io);
 

@@ -4,9 +4,8 @@
 //! kernels it uses (`castF32ToF16`/`castF16ToF32`) are also the primitives the
 //! KV-cache-append helpers in `exec.zig` reuse, so they live here as `pub`.
 //!
-//! Domain module: receives an explicit `*Runtime` (never `self: anytype`).
-//! Imports the `runtime` leaf (`prepareContiguousTyped` lives on `Runtime`);
-//! never imports `exec.zig`.
+//! Domain module: receives an explicit `*ExecContext` (never `self: anytype`);
+//! `prepareContiguousTyped` is the substrate primitive it draws on.
 
 const std = @import("std");
 const backend_mod = @import("../backend.zig");
@@ -14,7 +13,7 @@ const dtype_mod = @import("../dtype.zig");
 const tensor = @import("../tensor.zig");
 
 const exec_elementwise = @import("elementwise.zig");
-const Runtime = @import("runtime.zig").Runtime;
+const ExecContext = @import("../exec.zig").ExecContext;
 
 const DType = tensor.DType;
 const BlockQ8_0 = dtype_mod.BlockQ8_0;
@@ -27,21 +26,21 @@ fn ensureForwardFloatMath(comptime dtype: DType) void {
 }
 
 pub fn castTyped(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime source_dtype: DType,
     comptime target_dtype: DType,
     x: *const tensor.TensorOf(source_dtype),
 ) !tensor.TensorOf(target_dtype) {
-    if (comptime source_dtype == target_dtype) return rt.cloneTyped(source_dtype, x);
+    if (comptime source_dtype == target_dtype) return ctx.cloneTyped(source_dtype, x);
     if (comptime dtype_mod.isBlockQuantized(source_dtype) or dtype_mod.isBlockQuantized(target_dtype)) {
         @compileError("casts are supported between the scalar dtypes only (dequantize with to(.f32))");
     }
 
-    var xx = try rt.prepareContiguousTyped(source_dtype, x);
+    var xx = try ctx.prepareContiguousTyped(source_dtype, x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var out = try rt.emptyTyped(target_dtype, x.shape.slice());
+    var out = try ctx.emptyTyped(target_dtype, x.shape.slice());
     errdefer out.deinit();
     const output = out.data();
     if (comptime source_dtype == .f32 and target_dtype == .f16) {
@@ -144,8 +143,8 @@ pub fn castF16ToF32(output: []f32, input: []const f16) void {
 /// contiguous (a `{seq, kv_head, d}` split of a fused QKV row), walked as
 /// per-row spans. Anything else is UnsupportedView — extend deliberately
 /// rather than silently gathering.
-pub fn castF32RowsToF16Into(rt: *Runtime, x: *const tensor.Tensor, dst: []f16) !void {
-    _ = rt;
+pub fn castF32RowsToF16Into(ctx: *ExecContext, x: *const tensor.Tensor, dst: []f16) !void {
+    _ = ctx;
     if (dst.len != x.len()) return tensor.TensorError.InvalidDataLength;
     @constCast(x.buffer).waitReady();
     const data = x.buffer.data;
@@ -170,8 +169,8 @@ pub fn castF32RowsToF16Into(rt: *Runtime, x: *const tensor.Tensor, dst: []f16) !
 /// Same supported views as `castF32RowsToF16Into` (contiguous, or a
 /// rank-3 `{seq, kv_head, d}` split of a fused QKV row). Row length must
 /// be a multiple of 32 so block boundaries never straddle rows.
-pub fn quantizeF32RowsToQ8_0Into(rt: *Runtime, x: *const tensor.Tensor, dst: []BlockQ8_0) !void {
-    _ = rt;
+pub fn quantizeF32RowsToQ8_0Into(ctx: *ExecContext, x: *const tensor.Tensor, dst: []BlockQ8_0) !void {
+    _ = ctx;
     if (x.len() % q8_0_block_size != 0) return tensor.TensorError.InvalidDataLength;
     if (dst.len != x.len() / q8_0_block_size) return tensor.TensorError.InvalidDataLength;
     @constCast(x.buffer).waitReady();
@@ -200,27 +199,27 @@ pub fn quantizeF32RowsToQ8_0Into(rt: *Runtime, x: *const tensor.Tensor, dst: []B
 /// Dequantize q8_0 blocks into f32 (`dst.len == blocks.len * 32`): the
 /// inverse of `quantizeF32RowsToQ8_0Into`, for round-trip checks and the
 /// q8_0-KV gradient fallback.
-pub fn dequantizeQ8_0RowsInto(rt: *Runtime, dst: []f32, blocks: []const BlockQ8_0) !void {
-    _ = rt;
+pub fn dequantizeQ8_0RowsInto(ctx: *ExecContext, dst: []f32, blocks: []const BlockQ8_0) !void {
+    _ = ctx;
     try backend_mod.quantized_matmul.dequantizeRowQ8_0Into(dst, blocks);
 }
 
 pub fn scaleTyped(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime dtype: DType,
     x: *const tensor.TensorOf(dtype),
     scalar_value: dtype_mod.Accumulator(dtype),
 ) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
-    if (comptime dtype == .f32) return exec_elementwise.scale(rt, x, scalar_value);
+    if (comptime dtype == .f32) return exec_elementwise.scale(ctx, x, scalar_value);
     comptime ensureForwardFloatMath(dtype);
     const compute_dtype = comptime dtype_mod.computeDType(.pointwise, dtype);
     const output_dtype = comptime dtype_mod.outputDType(.pointwise, dtype);
 
-    var xx = try rt.prepareContiguousTyped(dtype, x);
+    var xx = try ctx.prepareContiguousTyped(dtype, x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var out = try rt.emptyTyped(output_dtype, x.shape.slice());
+    var out = try ctx.emptyTyped(output_dtype, x.shape.slice());
     errdefer out.deinit();
     const output = out.data();
     for (output, input) |*dst, value| {

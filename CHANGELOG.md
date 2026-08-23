@@ -74,6 +74,14 @@ this point; earlier history is `git log`.
 - docs/ARCHITECTURE.md: the band table now lists every `src/*.zig` file,
   and the kernel-boundary wording in `exec.zig`/`backend.zig` states where
   the fused kernels actually live (exec, backend-independent).
+- `ExecContext` is one type: the `Runtime` substrate is merged into it
+  (its fields are `ExecContext` fields, its methods are free functions in
+  `exec/runtime.zig` aliased into the struct); domain modules take
+  `*ExecContext`; `ctx.rt.X` -> `ctx.X`. `Runtime` is not public API, so
+  no public spelling changes. `zig build arch-check` permits one SCC
+  shape, a same-band SCC anchored on a directory root (`exec.zig` <->
+  `exec/*.zig`), and reports it in its summary line; every other SCC
+  stays an error.
 
 ### Deprecated
 

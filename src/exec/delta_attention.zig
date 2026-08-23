@@ -23,7 +23,7 @@ const std = @import("std");
 const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
-const Runtime = @import("runtime.zig").Runtime;
+const ExecContext = @import("../exec.zig").ExecContext;
 
 const Tensor = tensor.Tensor;
 
@@ -186,7 +186,7 @@ inline fn softplus(value: f32) f32 {
 /// [heads, k_dim, v_dim] initial state. `scale` <= 0 selects the default
 /// k_dim^(-1/2).
 pub fn kdaRecurrent(
-    rt: *Runtime,
+    ctx: *ExecContext,
     q: *const Tensor,
     k: *const Tensor,
     v: *const Tensor,
@@ -208,20 +208,20 @@ pub fn kdaRecurrent(
     if (a_log.len != heads and a_log.len != k_dim) return tensor.TensorError.ShapeMismatch;
     if (dt_bias.len != heads * k_dim) return tensor.TensorError.ShapeMismatch;
 
-    var qq = try rt.prepareContiguous(q);
+    var qq = try ctx.prepareContiguous(q);
     defer qq.deinit();
-    var kk = try rt.prepareContiguous(k);
+    var kk = try ctx.prepareContiguous(k);
     defer kk.deinit();
-    var vvp = try rt.prepareContiguous(v);
+    var vvp = try ctx.prepareContiguous(v);
     defer vvp.deinit();
-    var gg = try rt.prepareContiguous(g_raw);
+    var gg = try ctx.prepareContiguous(g_raw);
     defer gg.deinit();
-    var bb = try rt.prepareContiguous(beta_raw);
+    var bb = try ctx.prepareContiguous(beta_raw);
     defer bb.deinit();
 
-    var o = try rt.emptyRank(3, .{ seq, heads, v_dim });
+    var o = try ctx.emptyRank(3, .{ seq, heads, v_dim });
     errdefer o.deinit();
-    var state = try rt.emptyRank(3, .{ heads, k_dim, v_dim });
+    var state = try ctx.emptyRank(3, .{ heads, k_dim, v_dim });
     errdefer state.deinit();
 
     const base = KdaTask{
@@ -246,7 +246,7 @@ pub fn kdaRecurrent(
 
     const work = parallel.saturatedMul3(seq, heads, k_dim * v_dim);
     const dispatched = work >= parallel.attention_work_threshold and
-        rt.dispatchRange(KdaTask, "head_start", "head_end", base, heads, runKdaTask);
+        ctx.dispatchRange(KdaTask, "head_start", "head_end", base, heads, runKdaTask);
     if (!dispatched) kdaHeads(base);
 
     return .{ .o = o, .state = state };

@@ -1,7 +1,7 @@
 //! Causal 1-D convolutions (depthwise / general / grouped, fwd + bwd) and the
 //! channel-last 2-D convolution.
 //!
-//! Domain module: every op receives an explicit `*Runtime`. Dispatches to the
+//! Domain module: every op receives an explicit `*ExecContext`. Dispatches to the
 //! allocation-free backend conv kernels; the 1×1 conv2d fast path calls into
 //! the matmul + elementwise domains explicitly (leaf-ward imports).
 
@@ -14,10 +14,10 @@ const tensor = @import("../tensor.zig");
 const exec_shape = @import("shape.zig");
 const exec_matmul = @import("matmul.zig");
 const exec_elementwise = @import("elementwise.zig");
-const Runtime = @import("runtime.zig").Runtime;
+const ExecContext = @import("../exec.zig").ExecContext;
 
 const Tensor = tensor.Tensor;
-const PreparedTensor = Runtime.PreparedTensor;
+const PreparedTensor = ExecContext.PreparedTensor;
 
 const validateCausalDepthwiseState = exec_shape.validateCausalDepthwiseState;
 const validateCausalConvState = exec_shape.validateCausalConvState;
@@ -25,7 +25,7 @@ const validateGroupedCausalConv = exec_shape.validateGroupedCausalConv;
 const causalConvWork = exec_shape.causalConvWork;
 
 pub fn causalDepthwiseConv1dAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     input: *const Tensor,
     kernel: *const Tensor,
@@ -49,20 +49,20 @@ pub fn causalDepthwiseConv1dAxisRank(
     if (kernel_view.shape[0] != channels) return tensor.TensorError.ShapeMismatch;
     try validateCausalDepthwiseState(state, channels, taps, dilation);
 
-    var ii = try rt.prepareContiguous(input);
+    var ii = try ctx.prepareContiguous(input);
     defer ii.deinit();
-    var kk = try rt.prepareContiguous(kernel);
+    var kk = try ctx.prepareContiguous(kernel);
     defer kk.deinit();
 
-    var out = try rt.emptyRank(rank, source.shape);
+    var out = try ctx.emptyRank(rank, source.shape);
     errdefer out.deinit();
-    rt.enableNativeVectorPoolForWork(parallel.saturatedMul3(seq, channels, taps), parallel.vector_elementwise_len_threshold);
-    rt.backend.causalDepthwiseConv1dInto(&out, ii.tensor(), kk.tensor(), state, seq, channels, taps, dilation);
+    ctx.enableNativeVectorPoolForWork(parallel.saturatedMul3(seq, channels, taps), parallel.vector_elementwise_len_threshold);
+    ctx.backend.causalDepthwiseConv1dInto(&out, ii.tensor(), kk.tensor(), state, seq, channels, taps, dilation);
     return out;
 }
 
 pub fn causalDepthwiseConv1dBackwardInputAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     gy: *const Tensor,
     kernel: *const Tensor,
@@ -85,20 +85,20 @@ pub fn causalDepthwiseConv1dBackwardInputAxisRank(
     if (kernel_view.shape[0] != channels) return tensor.TensorError.ShapeMismatch;
     if (dilation == 0) return tensor.TensorError.InvalidShape;
 
-    var gg = try rt.prepareContiguous(gy);
+    var gg = try ctx.prepareContiguous(gy);
     defer gg.deinit();
-    var kk = try rt.prepareContiguous(kernel);
+    var kk = try ctx.prepareContiguous(kernel);
     defer kk.deinit();
 
-    var out = try rt.emptyRank(rank, grad_view.shape);
+    var out = try ctx.emptyRank(rank, grad_view.shape);
     errdefer out.deinit();
-    rt.enableNativeVectorPoolForWork(parallel.saturatedMul3(seq, channels, taps), parallel.vector_elementwise_len_threshold);
-    rt.backend.causalDepthwiseConv1dBackwardInputInto(&out, gg.tensor(), kk.tensor(), seq, channels, taps, dilation);
+    ctx.enableNativeVectorPoolForWork(parallel.saturatedMul3(seq, channels, taps), parallel.vector_elementwise_len_threshold);
+    ctx.backend.causalDepthwiseConv1dBackwardInputInto(&out, gg.tensor(), kk.tensor(), seq, channels, taps, dilation);
     return out;
 }
 
 pub fn causalDepthwiseConv1dBackwardKernelAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     input: *const Tensor,
     gy: *const Tensor,
@@ -123,15 +123,15 @@ pub fn causalDepthwiseConv1dBackwardKernelAxisRank(
     if (taps == 0) return tensor.TensorError.InvalidShape;
     try validateCausalDepthwiseState(state, channels, taps, dilation);
 
-    var ii = try rt.prepareContiguous(input);
+    var ii = try ctx.prepareContiguous(input);
     defer ii.deinit();
-    var gg = try rt.prepareContiguous(gy);
+    var gg = try ctx.prepareContiguous(gy);
     defer gg.deinit();
 
-    var out = try rt.emptyRank(2, .{ channels, taps });
+    var out = try ctx.emptyRank(2, .{ channels, taps });
     errdefer out.deinit();
-    rt.enableNativeVectorPoolForWork(parallel.saturatedMul3(seq, channels, taps), parallel.vector_elementwise_len_threshold);
-    rt.backend.causalDepthwiseConv1dBackwardKernelInto(&out, ii.tensor(), gg.tensor(), state, seq, channels, taps, dilation);
+    ctx.enableNativeVectorPoolForWork(parallel.saturatedMul3(seq, channels, taps), parallel.vector_elementwise_len_threshold);
+    ctx.backend.causalDepthwiseConv1dBackwardKernelInto(&out, ii.tensor(), gg.tensor(), state, seq, channels, taps, dilation);
     return out;
 }
 
@@ -140,7 +140,7 @@ pub fn causalDepthwiseConv1dBackwardKernelAxisRank(
 /// `[time, out]`. `state`, when given, is the `dilation*(taps-1)`
 /// input rows preceding the chunk, oldest first; absent ⇒ zeros.
 pub fn causalConv1dAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     input: *const Tensor,
     weight: *const Tensor,
@@ -165,15 +165,15 @@ pub fn causalConv1dAxisRank(
     if (weight_view.shape[1] != in_channels) return tensor.TensorError.ShapeMismatch;
     try validateCausalConvState(state, in_channels, taps, dilation);
 
-    var ii = try rt.prepareContiguous(input);
+    var ii = try ctx.prepareContiguous(input);
     defer ii.deinit();
-    var ww = try rt.prepareContiguous(weight);
+    var ww = try ctx.prepareContiguous(weight);
     defer ww.deinit();
 
-    var out = try rt.emptyRank(rank, .{ seq, out_channels });
+    var out = try ctx.emptyRank(rank, .{ seq, out_channels });
     errdefer out.deinit();
-    rt.enableNativeVectorPoolForWork(causalConvWork(seq, in_channels, out_channels, taps), parallel.vector_elementwise_len_threshold);
-    rt.backend.causalConv1dInto(&out, ii.tensor(), ww.tensor(), state, seq, in_channels, out_channels, taps, dilation);
+    ctx.enableNativeVectorPoolForWork(causalConvWork(seq, in_channels, out_channels, taps), parallel.vector_elementwise_len_threshold);
+    ctx.backend.causalConv1dInto(&out, ii.tensor(), ww.tensor(), state, seq, in_channels, out_channels, taps, dilation);
     return out;
 }
 
@@ -186,7 +186,7 @@ pub fn causalConv1dAxisRank(
 /// `groups` == Cin gives a depthwise conv. Validates, then dispatches to the
 /// allocation-free backend kernel (native vector or scalar reference).
 pub fn conv2d(
-    rt: *Runtime,
+    ctx: *ExecContext,
     input: *const Tensor,
     weight: *const Tensor,
     bias: ?*const Tensor,
@@ -194,7 +194,7 @@ pub fn conv2d(
     pad: [2]usize,
     groups: usize,
 ) !Tensor {
-    return conv2dExt(rt, input, weight, bias, stride, pad, groups, false);
+    return conv2dExt(ctx, input, weight, bias, stride, pad, groups, false);
 }
 
 /// conv2d with an optional fused relu epilogue: on the Winograd route the
@@ -202,7 +202,7 @@ pub fn conv2d(
 /// routes it runs in place on the fresh output. Values are identical to
 /// conv2d followed by relu (same single max(0,·) on the same numbers).
 pub fn conv2dExt(
-    rt: *Runtime,
+    ctx: *ExecContext,
     input: *const Tensor,
     weight: *const Tensor,
     bias: ?*const Tensor,
@@ -211,7 +211,54 @@ pub fn conv2dExt(
     groups: usize,
     fused_relu: bool,
 ) !Tensor {
-    return conv2dPreparedExt(rt, input, weight, null, bias, stride, pad, groups, fused_relu);
+    return conv2dPreparedExt(ctx, input, weight, null, bias, stride, pad, groups, fused_relu);
+}
+
+/// conv2d with the relu fused into the epilogue (identical values to
+/// conv2d followed by relu; zero extra passes on the Winograd route).
+/// Inference-path op; the autograd facade guards the differentiable
+/// composition.
+pub fn conv2dRelu(
+    ctx: *ExecContext,
+    input: *const Tensor,
+    weight: *const Tensor,
+    bias: ?*const Tensor,
+    stride: [2]usize,
+    pad: [2]usize,
+    groups: usize,
+) !Tensor {
+    return conv2dExt(ctx, input, weight, bias, stride, pad, groups, true);
+}
+
+/// conv2d against load-time prepared Winograd weight planes: bitwise
+/// identical values to `conv2d`, minus the per-call weight transform on
+/// the Winograd route. Every other route ignores `prepared`.
+pub fn conv2dPrepared(
+    ctx: *ExecContext,
+    input: *const Tensor,
+    weight: *const Tensor,
+    prepared: *const PreparedConvWeights,
+    bias: ?*const Tensor,
+    stride: [2]usize,
+    pad: [2]usize,
+    groups: usize,
+) !Tensor {
+    return conv2dPreparedExt(ctx, input, weight, prepared, bias, stride, pad, groups, false);
+}
+
+/// `conv2dPrepared` with the relu fused into the epilogue (identical
+/// values to `conv2dPrepared` followed by relu; see `conv2dRelu`).
+pub fn conv2dPreparedRelu(
+    ctx: *ExecContext,
+    input: *const Tensor,
+    weight: *const Tensor,
+    prepared: *const PreparedConvWeights,
+    bias: ?*const Tensor,
+    stride: [2]usize,
+    pad: [2]usize,
+    groups: usize,
+) !Tensor {
+    return conv2dPreparedExt(ctx, input, weight, prepared, bias, stride, pad, groups, true);
 }
 
 /// conv2dExt with optional load-time prepared Winograd weight planes (see
@@ -221,7 +268,7 @@ pub fn conv2dExt(
 /// Every other route (1×1, stride > 1, grouped, im2col) ignores `prepared`;
 /// `.empty` is always inert.
 pub fn conv2dPreparedExt(
-    rt: *Runtime,
+    ctx: *ExecContext,
     input: *const Tensor,
     weight: *const Tensor,
     prepared: ?*const PreparedConvWeights,
@@ -247,9 +294,9 @@ pub fn conv2dPreparedExt(
     const oh = (h + 2 * pad[0] - kh) / stride[0] + 1;
     const ow = (wd + 2 * pad[1] - kw) / stride[1] + 1;
 
-    var ii = try rt.prepareContiguous(input);
+    var ii = try ctx.prepareContiguous(input);
     defer ii.deinit();
-    var ww = try rt.prepareContiguous(weight);
+    var ww = try ctx.prepareContiguous(weight);
     defer ww.deinit();
 
     var bb: ?PreparedTensor = null;
@@ -258,7 +305,7 @@ pub fn conv2dPreparedExt(
     if (bias) |b| {
         const bv = try b.rankView(1);
         if (bv.shape[0] != cout) return tensor.TensorError.ShapeMismatch;
-        bb = try rt.prepareContiguous(b);
+        bb = try ctx.prepareContiguous(b);
         bias_slice = bb.?.tensor().dataConst();
     }
 
@@ -268,10 +315,10 @@ pub fn conv2dPreparedExt(
         var weight_2d = try ww.tensor().viewWithStrides(&.{ cout, cin }, &.{ cin, 1 });
         defer weight_2d.deinit();
 
-        var out_2d = try exec_matmul.matmul2DDispatch(rt, .trans_b, &input_2d, &weight_2d);
+        var out_2d = try exec_matmul.matmul2DDispatch(ctx, .trans_b, &input_2d, &weight_2d);
         errdefer out_2d.deinit();
-        if (bias_slice) |b| try exec_elementwise.addAxisVectorInPlaceRank(rt, 2, &out_2d, b, 1);
-        if (fused_relu) reluInPlace(rt, &out_2d);
+        if (bias_slice) |b| try exec_elementwise.addAxisVectorInPlaceRank(ctx, 2, &out_2d, b, 1);
+        if (fused_relu) reluInPlace(ctx, &out_2d);
 
         var out_3d = try out_2d.viewWithStrides(&.{ oh, ow, cout }, &.{ ow * cout, cout, 1 });
         errdefer out_3d.deinit();
@@ -299,7 +346,7 @@ pub fn conv2dPreparedExt(
         }
         if (@min(oh, ow) >= winogradF4MinSpatial() and cin <= winogradF4MaxCin() and winograd_f4.enabled()) {
             const f4_planes: ?*const [36]Tensor = if (prepared) |p| (if (p.f4) |*planes| planes else null) else null;
-            return winogradConv(rt, .f4, ii.tensor(), ww.tensor(), f4_planes, bias_slice, fused_relu, .{
+            return winogradConv(ctx, .f4, ii.tensor(), ww.tensor(), f4_planes, bias_slice, fused_relu, .{
                 .h = h,
                 .w = wd,
                 .cin = cin,
@@ -313,7 +360,7 @@ pub fn conv2dPreparedExt(
             });
         }
         const f2_planes: ?*const [16]Tensor = if (prepared) |p| (if (p.f2) |*planes| planes else null) else null;
-        return winogradConv(rt, .f2, ii.tensor(), ww.tensor(), f2_planes, bias_slice, fused_relu, .{
+        return winogradConv(ctx, .f2, ii.tensor(), ww.tensor(), f2_planes, bias_slice, fused_relu, .{
             .h = h,
             .w = wd,
             .cin = cin,
@@ -336,10 +383,10 @@ pub fn conv2dPreparedExt(
     if (groups == 1) {
         const npos = oh * ow;
         const ksz = kh * kw * cin;
-        var col = try rt.emptyRank(2, .{ npos, ksz });
+        var col = try ctx.emptyRank(2, .{ npos, ksz });
         errdefer col.deinit();
-        rt.enableNativeVectorPoolForWork(npos * ksz, parallel.vector_elementwise_len_threshold);
-        rt.backend.im2colInto(&col, ii.tensor(), .{
+        ctx.enableNativeVectorPoolForWork(npos * ksz, parallel.vector_elementwise_len_threshold);
+        ctx.backend.im2colInto(&col, ii.tensor(), .{
             .h = h,
             .w = wd,
             .cin = cin,
@@ -356,23 +403,23 @@ pub fn conv2dPreparedExt(
         });
         var weight_2d = try ww.tensor().viewWithStrides(&.{ cout, ksz }, &.{ ksz, 1 });
         defer weight_2d.deinit();
-        var out_2d = try exec_matmul.matmul2DDispatch(rt, .trans_b, &col, &weight_2d);
+        var out_2d = try exec_matmul.matmul2DDispatch(ctx, .trans_b, &col, &weight_2d);
         col.deinit();
         errdefer out_2d.deinit();
-        if (bias_slice) |b| try exec_elementwise.addAxisVectorInPlaceRank(rt, 2, &out_2d, b, 1);
-        if (fused_relu) reluInPlace(rt, &out_2d);
+        if (bias_slice) |b| try exec_elementwise.addAxisVectorInPlaceRank(ctx, 2, &out_2d, b, 1);
+        if (fused_relu) reluInPlace(ctx, &out_2d);
         var out_3d = try out_2d.viewWithStrides(&.{ oh, ow, cout }, &.{ ow * cout, cout, 1 });
         errdefer out_3d.deinit();
         out_2d.deinit();
         return out_3d;
     }
 
-    var out = try rt.emptyRank(3, .{ oh, ow, cout });
+    var out = try ctx.emptyRank(3, .{ oh, ow, cout });
     errdefer out.deinit();
     // Enable the worker pool so conv2d threads over output rows when the conv
     // is large (e.g. an ASR subsampling stem). Bit-identical to the serial path.
-    rt.enableNativeVectorPoolForWork(oh * ow * cout * kh * kw * cin_pg, parallel.vector_elementwise_len_threshold);
-    rt.backend.conv2dInto(&out, ii.tensor(), ww.tensor(), bias_slice, .{
+    ctx.enableNativeVectorPoolForWork(oh * ow * cout * kh * kw * cin_pg, parallel.vector_elementwise_len_threshold);
+    ctx.backend.conv2dInto(&out, ii.tensor(), ww.tensor(), bias_slice, .{
         .h = h,
         .w = wd,
         .cin = cin,
@@ -387,13 +434,13 @@ pub fn conv2dPreparedExt(
         .pad_w = pad[1],
         .groups = groups,
     });
-    if (fused_relu) reluInPlace(rt, &out);
+    if (fused_relu) reluInPlace(ctx, &out);
     return out;
 }
 
-fn reluInPlace(rt: *Runtime, t: *Tensor) void {
-    rt.enableNativeVectorPoolForWork(t.len(), parallel.vector_elementwise_len_threshold);
-    rt.backend.unaryContiguousIntoUnchecked(.relu, t, t, t.len());
+fn reluInPlace(ctx: *ExecContext, t: *Tensor) void {
+    ctx.enableNativeVectorPoolForWork(t.len(), parallel.vector_elementwise_len_threshold);
+    ctx.backend.unaryContiguousIntoUnchecked(.relu, t, t, t.len());
 }
 
 fn conv2dDimsFor(h: usize, w: usize, cin: usize, oh: usize, ow: usize, cout: usize, kh: usize, kw: usize, stride: [2]usize, pad: [2]usize, groups: usize) backend_mod.Conv2dDims {
@@ -498,7 +545,7 @@ pub const PreparedConvWeights = struct {
 /// planes only when the F4 tier's input-independent gates pass (tier enabled,
 /// cin within the max-cin gate). The spatial gate (`min(oh,ow)` ≥ threshold)
 /// depends on the input, so it stays call-time — hence the F2 fallback set.
-pub fn prepareConv2dWeights(rt: *Runtime, weight: *const Tensor) !PreparedConvWeights {
+pub fn prepareConv2dWeights(ctx: *ExecContext, weight: *const Tensor) !PreparedConvWeights {
     const w_view = try weight.rankView(4);
     const cout = w_view.shape[0];
     const kh = w_view.shape[1];
@@ -506,14 +553,14 @@ pub fn prepareConv2dWeights(rt: *Runtime, weight: *const Tensor) !PreparedConvWe
     const cin = w_view.shape[3];
     if (!(kh == 3 and kw == 3 and cin >= 4 and winograd.enabled())) return .empty;
 
-    var ww = try rt.prepareContiguous(weight);
+    var ww = try ctx.prepareContiguous(weight);
     defer ww.deinit();
 
     var out: PreparedConvWeights = .{ .cout = cout, .cin = cin };
     errdefer out.deinit();
-    out.f2 = try winogradWeightPlanes(rt, .f2, ww.tensor(), cout, cin);
+    out.f2 = try winogradWeightPlanes(ctx, .f2, ww.tensor(), cout, cin);
     if (winograd_f4.enabled() and cin <= winogradF4MaxCin()) {
-        out.f4 = try winogradWeightPlanes(rt, .f4, ww.tensor(), cout, cin);
+        out.f4 = try winogradWeightPlanes(ctx, .f4, ww.tensor(), cout, cin);
     }
     return out;
 }
@@ -521,21 +568,21 @@ pub fn prepareConv2dWeights(rt: *Runtime, weight: *const Tensor) !PreparedConvWe
 /// One tier's weight-transform planes (`[cout, cin]` each) — the load-time
 /// half of `winogradConv`'s transform stage, same allocation pattern and
 /// backend kernel as the per-call path (bitwise-identical plane contents).
-fn winogradWeightPlanes(rt: *Runtime, comptime kind: WinoKind, weight: *const Tensor, cout: usize, cin: usize) ![winoPlanes(kind)]Tensor {
+fn winogradWeightPlanes(ctx: *ExecContext, comptime kind: WinoKind, weight: *const Tensor, cout: usize, cin: usize) ![winoPlanes(kind)]Tensor {
     const planes = comptime winoPlanes(kind);
     var u_t: [planes]Tensor = undefined;
     var u_n: usize = 0;
     errdefer for (u_t[0..u_n]) |*t| t.deinit();
     for (0..planes) |e| {
-        u_t[e] = try rt.emptyRank(2, .{ cout, cin });
+        u_t[e] = try ctx.emptyRank(2, .{ cout, cin });
         u_n = e + 1;
     }
     var u_s: [planes][]f32 = undefined;
     for (0..planes) |e| u_s[e] = u_t[e].data();
-    rt.enableNativeVectorPoolForWork(planes * cout * cin, parallel.vector_elementwise_len_threshold);
+    ctx.enableNativeVectorPoolForWork(planes * cout * cin, parallel.vector_elementwise_len_threshold);
     switch (kind) {
-        .f2 => rt.backend.winogradF2WeightTransformInto(&u_s, weight.dataConst(), cout, cin),
-        .f4 => rt.backend.winogradF4WeightTransformInto(&u_s, weight.dataConst(), cout, cin),
+        .f2 => ctx.backend.winogradF2WeightTransformInto(&u_s, weight.dataConst(), cout, cin),
+        .f4 => ctx.backend.winogradF4WeightTransformInto(&u_s, weight.dataConst(), cout, cin),
     }
     return u_t;
 }
@@ -549,7 +596,7 @@ fn winogradWeightPlanes(rt: *Runtime, comptime kind: WinoKind, weight: *const Te
 /// weight-transform planes (see `prepareConv2dWeights`): the per-call u_t
 /// allocation + weight transform are skipped and the GEMMs read the prepared
 /// planes directly.
-fn winogradConv(rt: *Runtime, comptime kind: WinoKind, input: *const Tensor, weight: *const Tensor, u_prepared: ?*const [winoPlanes(kind)]Tensor, bias: ?[]const f32, fused_relu: bool, d: backend_mod.WinogradF2Dims) !Tensor {
+fn winogradConv(ctx: *ExecContext, comptime kind: WinoKind, input: *const Tensor, weight: *const Tensor, u_prepared: ?*const [winoPlanes(kind)]Tensor, bias: ?[]const f32, fused_relu: bool, d: backend_mod.WinogradF2Dims) !Tensor {
     const planes = comptime winoPlanes(kind);
     const tiles = d.tiles_y * d.tiles_x;
 
@@ -558,7 +605,7 @@ fn winogradConv(rt: *Runtime, comptime kind: WinoKind, input: *const Tensor, wei
     errdefer for (u_t[0..u_n]) |*t| t.deinit();
     if (u_prepared == null) {
         for (0..planes) |e| {
-            u_t[e] = try rt.emptyRank(2, .{ d.cout, d.cin });
+            u_t[e] = try ctx.emptyRank(2, .{ d.cout, d.cin });
             u_n = e + 1;
         }
     }
@@ -566,7 +613,7 @@ fn winogradConv(rt: *Runtime, comptime kind: WinoKind, input: *const Tensor, wei
     var v_n: usize = 0;
     errdefer for (v_t[0..v_n]) |*t| t.deinit();
     for (0..planes) |e| {
-        v_t[e] = try rt.emptyRank(2, .{ tiles, d.cin });
+        v_t[e] = try ctx.emptyRank(2, .{ tiles, d.cin });
         v_n = e + 1;
     }
 
@@ -575,18 +622,18 @@ fn winogradConv(rt: *Runtime, comptime kind: WinoKind, input: *const Tensor, wei
     // With prepared weights the transform stage only touches the input
     // planes, so the weight (d.cout) term drops out of the pool-work gate.
     const transform_work = if (u_prepared == null) planes * (tiles + d.cout) * d.cin else planes * tiles * d.cin;
-    rt.enableNativeVectorPoolForWork(transform_work, parallel.vector_elementwise_len_threshold);
+    ctx.enableNativeVectorPoolForWork(transform_work, parallel.vector_elementwise_len_threshold);
     if (u_prepared == null) {
         var u_s: [planes][]f32 = undefined;
         for (0..planes) |e| u_s[e] = u_t[e].data();
         switch (kind) {
-            .f2 => rt.backend.winogradF2WeightTransformInto(&u_s, weight.dataConst(), d.cout, d.cin),
-            .f4 => rt.backend.winogradF4WeightTransformInto(&u_s, weight.dataConst(), d.cout, d.cin),
+            .f2 => ctx.backend.winogradF2WeightTransformInto(&u_s, weight.dataConst(), d.cout, d.cin),
+            .f4 => ctx.backend.winogradF4WeightTransformInto(&u_s, weight.dataConst(), d.cout, d.cin),
         }
     }
     switch (kind) {
-        .f2 => rt.backend.winogradF2InputTransformInto(&v_s, input.dataConst(), d),
-        .f4 => rt.backend.winogradF4InputTransformInto(&v_s, input.dataConst(), d),
+        .f2 => ctx.backend.winogradF2InputTransformInto(&v_s, input.dataConst(), d),
+        .f4 => ctx.backend.winogradF4InputTransformInto(&v_s, input.dataConst(), d),
     }
 
     const u_src: *const [planes]Tensor = u_prepared orelse &u_t;
@@ -594,7 +641,7 @@ fn winogradConv(rt: *Runtime, comptime kind: WinoKind, input: *const Tensor, wei
     var m_n: usize = 0;
     errdefer for (m_t[0..m_n]) |*t| t.deinit();
     for (0..planes) |e| {
-        m_t[e] = try exec_matmul.matmul2DDispatch(rt, .trans_b, &v_t[e], &u_src[e]);
+        m_t[e] = try exec_matmul.matmul2DDispatch(ctx, .trans_b, &v_t[e], &u_src[e]);
         m_n = e + 1;
     }
     for (u_t[0..u_n]) |*t| t.deinit();
@@ -602,14 +649,14 @@ fn winogradConv(rt: *Runtime, comptime kind: WinoKind, input: *const Tensor, wei
     for (v_t[0..v_n]) |*t| t.deinit();
     v_n = 0;
 
-    var out = try rt.emptyRank(3, .{ d.oh, d.ow, d.cout });
+    var out = try ctx.emptyRank(3, .{ d.oh, d.ow, d.cout });
     errdefer out.deinit();
     var m_s: [planes][]const f32 = undefined;
     for (0..planes) |e| m_s[e] = m_t[e].dataConst();
-    rt.enableNativeVectorPoolForWork(planes * tiles * d.cout, parallel.vector_elementwise_len_threshold);
+    ctx.enableNativeVectorPoolForWork(planes * tiles * d.cout, parallel.vector_elementwise_len_threshold);
     switch (kind) {
-        .f2 => rt.backend.winogradF2OutputTransformInto(out.data(), &m_s, bias, fused_relu, d),
-        .f4 => rt.backend.winogradF4OutputTransformInto(out.data(), &m_s, bias, fused_relu, d),
+        .f2 => ctx.backend.winogradF2OutputTransformInto(out.data(), &m_s, bias, fused_relu, d),
+        .f4 => ctx.backend.winogradF4OutputTransformInto(out.data(), &m_s, bias, fused_relu, d),
     }
     for (m_t[0..m_n]) |*t| t.deinit();
     m_n = 0;
@@ -618,7 +665,7 @@ fn winogradConv(rt: *Runtime, comptime kind: WinoKind, input: *const Tensor, wei
 
 /// VJP of conv2d wrt input. `gy` is `[oh,ow,cout]`, `weight` is the forward
 /// `[cout,kh,kw,cin/groups]`; result is `[in_h,in_w,cin]`.
-pub fn conv2dBackwardInput(rt: *Runtime, gy: *const Tensor, weight: *const Tensor, in_h: usize, in_w: usize, stride: [2]usize, pad: [2]usize, groups: usize) !Tensor {
+pub fn conv2dBackwardInput(ctx: *ExecContext, gy: *const Tensor, weight: *const Tensor, in_h: usize, in_w: usize, stride: [2]usize, pad: [2]usize, groups: usize) !Tensor {
     const gy_view = try gy.rankView(3);
     const w_view = try weight.rankView(4);
     const oh = gy_view.shape[0];
@@ -633,9 +680,9 @@ pub fn conv2dBackwardInput(rt: *Runtime, gy: *const Tensor, weight: *const Tenso
     if (in_h + 2 * pad[0] < kh or in_w + 2 * pad[1] < kw) return tensor.TensorError.InvalidShape;
     if ((in_h + 2 * pad[0] - kh) / stride[0] + 1 != oh or (in_w + 2 * pad[1] - kw) / stride[1] + 1 != ow) return tensor.TensorError.ShapeMismatch;
 
-    var gg = try rt.prepareContiguous(gy);
+    var gg = try ctx.prepareContiguous(gy);
     defer gg.deinit();
-    var ww = try rt.prepareContiguous(weight);
+    var ww = try ctx.prepareContiguous(weight);
     defer ww.deinit();
 
     if (groups == 1 and conv_bwd_gemm.enabled()) {
@@ -646,7 +693,7 @@ pub fn conv2dBackwardInput(rt: *Runtime, gy: *const Tensor, weight: *const Tenso
             // the input VJP is one GEMM too: gx = gy · w.
             var w_2d = try ww.tensor().viewWithStrides(&.{ cout, cin }, &.{ cin, 1 });
             defer w_2d.deinit();
-            var gx_2d = try exec_matmul.matmul2DDispatch(rt, .plain, &gy_2d, &w_2d);
+            var gx_2d = try exec_matmul.matmul2DDispatch(ctx, .plain, &gy_2d, &w_2d);
             errdefer gx_2d.deinit();
             var gx_3d = try gx_2d.viewWithStrides(&.{ in_h, in_w, cin }, &.{ in_w * cin, cin, 1 });
             errdefer gx_3d.deinit();
@@ -659,27 +706,27 @@ pub fn conv2dBackwardInput(rt: *Runtime, gy: *const Tensor, weight: *const Tenso
         const ksz = kh * kw * cin;
         var w_2d = try ww.tensor().viewWithStrides(&.{ cout, ksz }, &.{ ksz, 1 });
         defer w_2d.deinit();
-        var gcol = try exec_matmul.matmul2DDispatch(rt, .plain, &gy_2d, &w_2d);
+        var gcol = try exec_matmul.matmul2DDispatch(ctx, .plain, &gy_2d, &w_2d);
         defer gcol.deinit();
-        var out = try rt.emptyRank(3, .{ in_h, in_w, cin });
+        var out = try ctx.emptyRank(3, .{ in_h, in_w, cin });
         errdefer out.deinit();
-        rt.enableNativeVectorPoolForWork(parallel.saturatedMul3(in_h * in_w, cin, (kh / stride[0] + 1) * (kw / stride[1] + 1)), parallel.vector_elementwise_len_threshold);
-        rt.backend.col2imInto(&out, &gcol, conv2dDimsFor(in_h, in_w, cin, oh, ow, cout, kh, kw, stride, pad, groups));
+        ctx.enableNativeVectorPoolForWork(parallel.saturatedMul3(in_h * in_w, cin, (kh / stride[0] + 1) * (kw / stride[1] + 1)), parallel.vector_elementwise_len_threshold);
+        ctx.backend.col2imInto(&out, &gcol, conv2dDimsFor(in_h, in_w, cin, oh, ow, cout, kh, kw, stride, pad, groups));
         return out;
     }
 
-    var out = try rt.emptyRank(3, .{ in_h, in_w, cin });
+    var out = try ctx.emptyRank(3, .{ in_h, in_w, cin });
     errdefer out.deinit();
     // Same work estimate as the kernel's own thread gate, so the pool is
     // available whenever the kernel would split.
-    rt.enableNativeVectorPoolForWork(std.math.mul(usize, parallel.saturatedMul3(oh * ow, cout, cin_pg), kh * kw) catch std.math.maxInt(usize), parallel.vector_elementwise_len_threshold);
-    rt.backend.conv2dBackwardInputInto(&out, gg.tensor(), ww.tensor(), conv2dDimsFor(in_h, in_w, cin, oh, ow, cout, kh, kw, stride, pad, groups));
+    ctx.enableNativeVectorPoolForWork(std.math.mul(usize, parallel.saturatedMul3(oh * ow, cout, cin_pg), kh * kw) catch std.math.maxInt(usize), parallel.vector_elementwise_len_threshold);
+    ctx.backend.conv2dBackwardInputInto(&out, gg.tensor(), ww.tensor(), conv2dDimsFor(in_h, in_w, cin, oh, ow, cout, kh, kw, stride, pad, groups));
     return out;
 }
 
 /// VJP of conv2d wrt weight. `input` is `[h,w,cin]`, `gy` is `[oh,ow,cout]`;
 /// result is the forward weight layout `[cout,kh,kw,cin/groups]`.
-pub fn conv2dBackwardWeight(rt: *Runtime, input: *const Tensor, gy: *const Tensor, kh: usize, kw: usize, stride: [2]usize, pad: [2]usize, groups: usize) !Tensor {
+pub fn conv2dBackwardWeight(ctx: *ExecContext, input: *const Tensor, gy: *const Tensor, kh: usize, kw: usize, stride: [2]usize, pad: [2]usize, groups: usize) !Tensor {
     const in_view = try input.rankView(3);
     const gy_view = try gy.rankView(3);
     const h = in_view.shape[0];
@@ -693,9 +740,9 @@ pub fn conv2dBackwardWeight(rt: *Runtime, input: *const Tensor, gy: *const Tenso
     if ((h + 2 * pad[0] - kh) / stride[0] + 1 != oh or (w + 2 * pad[1] - kw) / stride[1] + 1 != ow) return tensor.TensorError.ShapeMismatch;
     const cin_pg = cin / groups;
 
-    var ii = try rt.prepareContiguous(input);
+    var ii = try ctx.prepareContiguous(input);
     defer ii.deinit();
-    var gg = try rt.prepareContiguous(gy);
+    var gg = try ctx.prepareContiguous(gy);
     defer gg.deinit();
 
     if (groups == 1 and conv_bwd_gemm.enabled()) {
@@ -705,7 +752,7 @@ pub fn conv2dBackwardWeight(rt: *Runtime, input: *const Tensor, gy: *const Tenso
             // 1x1 s1 p0: gw = gyᵀ · in, one trans-A GEMM.
             var in_2d = try ii.tensor().viewWithStrides(&.{ h * w, cin }, &.{ cin, 1 });
             defer in_2d.deinit();
-            var gw_2d = try exec_matmul.matmul2DDispatch(rt, .trans_a, &gy_2d, &in_2d);
+            var gw_2d = try exec_matmul.matmul2DDispatch(ctx, .trans_a, &gy_2d, &in_2d);
             errdefer gw_2d.deinit();
             var gw_4d = try gw_2d.viewWithStrides(&.{ cout, 1, 1, cin }, &.{ cin, cin, cin, 1 });
             errdefer gw_4d.deinit();
@@ -718,11 +765,11 @@ pub fn conv2dBackwardWeight(rt: *Runtime, input: *const Tensor, gy: *const Tenso
         // the forward's weight_2d view relies on the same identity.
         const npos = oh * ow;
         const ksz = kh * kw * cin;
-        var col = try rt.emptyRank(2, .{ npos, ksz });
+        var col = try ctx.emptyRank(2, .{ npos, ksz });
         defer col.deinit();
-        rt.enableNativeVectorPoolForWork(npos * ksz, parallel.vector_elementwise_len_threshold);
-        rt.backend.im2colInto(&col, ii.tensor(), conv2dDimsFor(h, w, cin, oh, ow, cout, kh, kw, stride, pad, groups));
-        var gw_2d = try exec_matmul.matmul2DDispatch(rt, .trans_a, &gy_2d, &col);
+        ctx.enableNativeVectorPoolForWork(npos * ksz, parallel.vector_elementwise_len_threshold);
+        ctx.backend.im2colInto(&col, ii.tensor(), conv2dDimsFor(h, w, cin, oh, ow, cout, kh, kw, stride, pad, groups));
+        var gw_2d = try exec_matmul.matmul2DDispatch(ctx, .trans_a, &gy_2d, &col);
         errdefer gw_2d.deinit();
         var gw_4d = try gw_2d.viewWithStrides(&.{ cout, kh, kw, cin }, &.{ ksz, kw * cin, cin, 1 });
         errdefer gw_4d.deinit();
@@ -730,12 +777,12 @@ pub fn conv2dBackwardWeight(rt: *Runtime, input: *const Tensor, gy: *const Tenso
         return gw_4d;
     }
 
-    var out = try rt.emptyRank(4, .{ cout, kh, kw, cin_pg });
+    var out = try ctx.emptyRank(4, .{ cout, kh, kw, cin_pg });
     errdefer out.deinit();
     // Same work estimate as the kernel's own thread gate, so the pool is
     // available whenever the kernel would split.
-    rt.enableNativeVectorPoolForWork(std.math.mul(usize, parallel.saturatedMul3(oh * ow, cout, cin_pg), kh * kw) catch std.math.maxInt(usize), parallel.vector_elementwise_len_threshold);
-    rt.backend.conv2dBackwardWeightInto(&out, ii.tensor(), gg.tensor(), conv2dDimsFor(h, w, cin, oh, ow, cout, kh, kw, stride, pad, groups));
+    ctx.enableNativeVectorPoolForWork(std.math.mul(usize, parallel.saturatedMul3(oh * ow, cout, cin_pg), kh * kw) catch std.math.maxInt(usize), parallel.vector_elementwise_len_threshold);
+    ctx.backend.conv2dBackwardWeightInto(&out, ii.tensor(), gg.tensor(), conv2dDimsFor(h, w, cin, oh, ow, cout, kh, kw, stride, pad, groups));
     return out;
 }
 
@@ -746,7 +793,7 @@ pub fn conv2dBackwardWeight(rt: *Runtime, input: *const Tensor, gy: *const Tenso
 /// groups == 1 conv2d GEMM route consumes; out-of-range (pad) taps read 0.
 /// Shares the im2col kernel (threaded over output rows, bit-identical to
 /// serial). The exact adjoint of `fold`.
-pub fn unfold(rt: *Runtime, input: *const Tensor, kernel: [2]usize, stride: [2]usize, pad: [2]usize) !Tensor {
+pub fn unfold(ctx: *ExecContext, input: *const Tensor, kernel: [2]usize, stride: [2]usize, pad: [2]usize) !Tensor {
     const in_view = try input.rankView(3);
     const h = in_view.shape[0];
     const w = in_view.shape[1];
@@ -758,14 +805,14 @@ pub fn unfold(rt: *Runtime, input: *const Tensor, kernel: [2]usize, stride: [2]u
     const oh = (h + 2 * pad[0] - kh) / stride[0] + 1;
     const ow = (w + 2 * pad[1] - kw) / stride[1] + 1;
 
-    var ii = try rt.prepareContiguous(input);
+    var ii = try ctx.prepareContiguous(input);
     defer ii.deinit();
     const npos = oh * ow;
     const ksz = kh * kw * cin;
-    var col = try rt.emptyRank(2, .{ npos, ksz });
+    var col = try ctx.emptyRank(2, .{ npos, ksz });
     errdefer col.deinit();
-    rt.enableNativeVectorPoolForWork(npos * ksz, parallel.vector_elementwise_len_threshold);
-    rt.backend.im2colInto(&col, ii.tensor(), conv2dDimsFor(h, w, cin, oh, ow, 1, kh, kw, stride, pad, 1));
+    ctx.enableNativeVectorPoolForWork(npos * ksz, parallel.vector_elementwise_len_threshold);
+    ctx.backend.im2colInto(&col, ii.tensor(), conv2dDimsFor(h, w, cin, oh, ow, 1, kh, kw, stride, pad, 1));
     return col;
 }
 
@@ -775,7 +822,7 @@ pub fn unfold(rt: *Runtime, input: *const Tensor, kernel: [2]usize, stride: [2]u
 /// row count must match the implied `oH·oW` (`ShapeMismatch` otherwise).
 /// Shares the col2im kernel (threaded over image rows, bit-identical to
 /// serial).
-pub fn fold(rt: *Runtime, col: *const Tensor, output_size: [2]usize, kernel: [2]usize, stride: [2]usize, pad: [2]usize) !Tensor {
+pub fn fold(ctx: *ExecContext, col: *const Tensor, output_size: [2]usize, kernel: [2]usize, stride: [2]usize, pad: [2]usize) !Tensor {
     const col_view = try col.rankView(2);
     const h = output_size[0];
     const w = output_size[1];
@@ -790,12 +837,12 @@ pub fn fold(rt: *Runtime, col: *const Tensor, output_size: [2]usize, kernel: [2]
     const ow = (w + 2 * pad[1] - kw) / stride[1] + 1;
     if (col_view.shape[0] != oh * ow) return tensor.TensorError.ShapeMismatch;
 
-    var cc = try rt.prepareContiguous(col);
+    var cc = try ctx.prepareContiguous(col);
     defer cc.deinit();
-    var out = try rt.emptyRank(3, .{ h, w, cin });
+    var out = try ctx.emptyRank(3, .{ h, w, cin });
     errdefer out.deinit();
-    rt.enableNativeVectorPoolForWork(parallel.saturatedMul3(h * w, cin, (kh / stride[0] + 1) * (kw / stride[1] + 1)), parallel.vector_elementwise_len_threshold);
-    rt.backend.col2imInto(&out, cc.tensor(), conv2dDimsFor(h, w, cin, oh, ow, 1, kh, kw, stride, pad, 1));
+    ctx.enableNativeVectorPoolForWork(parallel.saturatedMul3(h * w, cin, (kh / stride[0] + 1) * (kw / stride[1] + 1)), parallel.vector_elementwise_len_threshold);
+    ctx.backend.col2imInto(&out, cc.tensor(), conv2dDimsFor(h, w, cin, oh, ow, 1, kh, kw, stride, pad, 1));
     return out;
 }
 
@@ -809,7 +856,7 @@ pub fn fold(rt: *Runtime, col: *const Tensor, output_size: [2]usize, kernel: [2]
 /// reads input channels `[g*(in/groups), (g+1)*(in/groups))`. Bias is
 /// deliberately not fused — compose it with `addAxisVectorInPlaceRank`.
 pub fn conv1dAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     input: *const Tensor,
     weight: *const Tensor,
@@ -841,15 +888,15 @@ pub fn conv1dAxisRank(
     if (padded < span) return tensor.TensorError.InvalidShape;
     const out_len = (padded - span) / stride + 1;
 
-    var ii = try rt.prepareContiguous(input);
+    var ii = try ctx.prepareContiguous(input);
     defer ii.deinit();
-    var ww = try rt.prepareContiguous(weight);
+    var ww = try ctx.prepareContiguous(weight);
     defer ww.deinit();
 
-    var out = try rt.emptyRank(rank, .{ out_len, out_channels });
+    var out = try ctx.emptyRank(rank, .{ out_len, out_channels });
     errdefer out.deinit();
-    rt.enableNativeVectorPoolForWork(causalConvWork(out_len, in_channels / groups, out_channels, taps), parallel.vector_elementwise_len_threshold);
-    rt.backend.conv1dInto(&out, ii.tensor(), ww.tensor(), .{
+    ctx.enableNativeVectorPoolForWork(causalConvWork(out_len, in_channels / groups, out_channels, taps), parallel.vector_elementwise_len_threshold);
+    ctx.backend.conv1dInto(&out, ii.tensor(), ww.tensor(), .{
         .seq = seq,
         .out_len = out_len,
         .in_channels = in_channels,
@@ -874,7 +921,7 @@ pub fn conv1dAxisRank(
 /// parity goal, and its own PyTorch-vs-C++ harness shows the effect on those
 /// rows is negligible (audio cosine > 0.9999).
 pub fn col2im1dAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     col: *const Tensor,
     out_channels: usize,
     taps: usize,
@@ -892,13 +939,13 @@ pub fn col2im1dAxisRank(
     const t_out = upsampled - two_pad;
     const out_len = try std.math.add(usize, t_out, output_pad);
 
-    var cc = try rt.prepareContiguous(col);
+    var cc = try ctx.prepareContiguous(col);
     defer cc.deinit();
 
-    var out = try rt.emptyRank(2, .{ out_len, out_channels });
+    var out = try ctx.emptyRank(2, .{ out_len, out_channels });
     errdefer out.deinit();
-    rt.enableNativeVectorPoolForWork(parallel.saturatedMul3(out_len, out_channels, taps / stride + 1), parallel.vector_elementwise_len_threshold);
-    rt.backend.col2im1dInto(&out, cc.tensor(), t_in, out_len, out_channels, taps, stride, pad);
+    ctx.enableNativeVectorPoolForWork(parallel.saturatedMul3(out_len, out_channels, taps / stride + 1), parallel.vector_elementwise_len_threshold);
+    ctx.backend.col2im1dInto(&out, cc.tensor(), t_in, out_len, out_channels, taps, stride, pad);
     return out;
 }
 
@@ -913,7 +960,7 @@ pub fn col2im1dAxisRank(
 /// time rows are zeros — ggml/omnivoice.cpp convention, NOT true PyTorch
 /// semantics when pad > 0 (see col2im1dAxisRank above for the rationale).
 pub fn convTranspose1d(
-    rt: *Runtime,
+    ctx: *ExecContext,
     input: *const Tensor,
     weight2: *const Tensor,
     bias: ?*const Tensor,
@@ -939,16 +986,16 @@ pub fn convTranspose1d(
     if (bias) |b| {
         const bv = try b.rankView(1);
         if (bv.shape[0] != out_channels) return tensor.TensorError.ShapeMismatch;
-        bb = try rt.prepareContiguous(b);
+        bb = try ctx.prepareContiguous(b);
         bias_slice = bb.?.tensor().dataConst();
     }
 
-    var col = try exec_matmul.matmul2DDispatch(rt, .trans_b, input, weight2);
+    var col = try exec_matmul.matmul2DDispatch(ctx, .trans_b, input, weight2);
     defer col.deinit();
 
-    var out = try col2im1dAxisRank(rt, &col, out_channels, taps, stride, pad, output_pad);
+    var out = try col2im1dAxisRank(ctx, &col, out_channels, taps, stride, pad, output_pad);
     errdefer out.deinit();
-    if (bias_slice) |b| try exec_elementwise.addAxisVectorInPlaceRank(rt, 2, &out, b, 1);
+    if (bias_slice) |b| try exec_elementwise.addAxisVectorInPlaceRank(ctx, 2, &out, b, 1);
     return out;
 }
 
@@ -957,7 +1004,7 @@ pub fn convTranspose1d(
 /// (not recoverable from gy alone under stride/pad), validated against the
 /// forward geometry. Result is `[seq, in]`.
 pub fn conv1dBackwardInputAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     gy: *const Tensor,
     weight: *const Tensor,
@@ -990,15 +1037,15 @@ pub fn conv1dBackwardInputAxisRank(
     if (padded < span) return tensor.TensorError.InvalidShape;
     if ((padded - span) / stride + 1 != out_len) return tensor.TensorError.ShapeMismatch;
 
-    var gg = try rt.prepareContiguous(gy);
+    var gg = try ctx.prepareContiguous(gy);
     defer gg.deinit();
-    var ww = try rt.prepareContiguous(weight);
+    var ww = try ctx.prepareContiguous(weight);
     defer ww.deinit();
 
-    var out = try rt.emptyRank(rank, .{ seq, in_channels });
+    var out = try ctx.emptyRank(rank, .{ seq, in_channels });
     errdefer out.deinit();
-    rt.enableNativeVectorPoolForWork(causalConvWork(out_len, in_channels / groups, out_channels, taps), parallel.vector_elementwise_len_threshold);
-    rt.backend.conv1dBackwardInputInto(&out, gg.tensor(), ww.tensor(), .{
+    ctx.enableNativeVectorPoolForWork(causalConvWork(out_len, in_channels / groups, out_channels, taps), parallel.vector_elementwise_len_threshold);
+    ctx.backend.conv1dBackwardInputInto(&out, gg.tensor(), ww.tensor(), .{
         .seq = seq,
         .out_len = out_len,
         .in_channels = in_channels,
@@ -1017,7 +1064,7 @@ pub fn conv1dBackwardInputAxisRank(
 /// `[taps, in/groups, out]`. `gy`'s row count must match the forward
 /// geometry implied by (seq, taps, stride, pad, dilation).
 pub fn conv1dBackwardWeightAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     input: *const Tensor,
     gy: *const Tensor,
@@ -1049,15 +1096,15 @@ pub fn conv1dBackwardWeightAxisRank(
     if (padded < span) return tensor.TensorError.InvalidShape;
     if ((padded - span) / stride + 1 != out_len) return tensor.TensorError.ShapeMismatch;
 
-    var ii = try rt.prepareContiguous(input);
+    var ii = try ctx.prepareContiguous(input);
     defer ii.deinit();
-    var gg = try rt.prepareContiguous(gy);
+    var gg = try ctx.prepareContiguous(gy);
     defer gg.deinit();
 
-    var out = try rt.emptyRank(3, .{ taps, in_channels / groups, out_channels });
+    var out = try ctx.emptyRank(3, .{ taps, in_channels / groups, out_channels });
     errdefer out.deinit();
-    rt.enableNativeVectorPoolForWork(causalConvWork(out_len, in_channels / groups, out_channels, taps), parallel.vector_elementwise_len_threshold);
-    rt.backend.conv1dBackwardWeightInto(&out, ii.tensor(), gg.tensor(), .{
+    ctx.enableNativeVectorPoolForWork(causalConvWork(out_len, in_channels / groups, out_channels, taps), parallel.vector_elementwise_len_threshold);
+    ctx.backend.conv1dBackwardWeightInto(&out, ii.tensor(), gg.tensor(), .{
         .seq = seq,
         .out_len = out_len,
         .in_channels = in_channels,
@@ -1079,7 +1126,7 @@ pub fn conv1dBackwardWeightAxisRank(
 /// k fastest): `gcol[t_in, oc*taps + k] = gy[t_in*stride + k - pad, oc]`
 /// when that row lands in `[0, t_conv)`, else 0.
 pub fn col2im1dBackwardAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     gy: *const Tensor,
     t_in: usize,
     out_channels: usize,
@@ -1096,18 +1143,18 @@ pub fn col2im1dBackwardAxisRank(
     const t_conv = upsampled - two_pad;
     if (grad_view.shape[0] < t_conv) return tensor.TensorError.ShapeMismatch;
 
-    var gg = try rt.prepareContiguous(gy);
+    var gg = try ctx.prepareContiguous(gy);
     defer gg.deinit();
 
-    var out = try rt.emptyRank(2, .{ t_in, try std.math.mul(usize, taps, out_channels) });
+    var out = try ctx.emptyRank(2, .{ t_in, try std.math.mul(usize, taps, out_channels) });
     errdefer out.deinit();
-    rt.enableNativeVectorPoolForWork(parallel.saturatedMul3(t_in, out_channels, taps), parallel.vector_elementwise_len_threshold);
-    rt.backend.col2im1dBackwardInto(&out, gg.tensor(), t_in, grad_view.shape[0], out_channels, taps, stride, pad);
+    ctx.enableNativeVectorPoolForWork(parallel.saturatedMul3(t_in, out_channels, taps), parallel.vector_elementwise_len_threshold);
+    ctx.backend.col2im1dBackwardInto(&out, gg.tensor(), t_in, grad_view.shape[0], out_channels, taps, stride, pad);
     return out;
 }
 
 pub fn causalConv1dBackwardInputAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     gy: *const Tensor,
     weight: *const Tensor,
@@ -1131,20 +1178,20 @@ pub fn causalConv1dBackwardInputAxisRank(
     if (weight_view.shape[2] != out_channels) return tensor.TensorError.ShapeMismatch;
     try validateCausalConvState(null, in_channels, taps, dilation);
 
-    var gg = try rt.prepareContiguous(gy);
+    var gg = try ctx.prepareContiguous(gy);
     defer gg.deinit();
-    var ww = try rt.prepareContiguous(weight);
+    var ww = try ctx.prepareContiguous(weight);
     defer ww.deinit();
 
-    var out = try rt.emptyRank(rank, .{ seq, in_channels });
+    var out = try ctx.emptyRank(rank, .{ seq, in_channels });
     errdefer out.deinit();
-    rt.enableNativeVectorPoolForWork(causalConvWork(seq, in_channels, out_channels, taps), parallel.vector_elementwise_len_threshold);
-    rt.backend.causalConv1dBackwardInputInto(&out, gg.tensor(), ww.tensor(), seq, in_channels, out_channels, taps, dilation);
+    ctx.enableNativeVectorPoolForWork(causalConvWork(seq, in_channels, out_channels, taps), parallel.vector_elementwise_len_threshold);
+    ctx.backend.causalConv1dBackwardInputInto(&out, gg.tensor(), ww.tensor(), seq, in_channels, out_channels, taps, dilation);
     return out;
 }
 
 pub fn causalConv1dBackwardWeightAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     input: *const Tensor,
     gy: *const Tensor,
@@ -1169,15 +1216,15 @@ pub fn causalConv1dBackwardWeightAxisRank(
     if (grad_view.shape[time_axis] != seq) return tensor.TensorError.ShapeMismatch;
     try validateCausalConvState(state, in_channels, taps, dilation);
 
-    var ii = try rt.prepareContiguous(input);
+    var ii = try ctx.prepareContiguous(input);
     defer ii.deinit();
-    var gg = try rt.prepareContiguous(gy);
+    var gg = try ctx.prepareContiguous(gy);
     defer gg.deinit();
 
-    var out = try rt.emptyRank(3, .{ taps, in_channels, out_channels });
+    var out = try ctx.emptyRank(3, .{ taps, in_channels, out_channels });
     errdefer out.deinit();
-    rt.enableNativeVectorPoolForWork(causalConvWork(seq, in_channels, out_channels, taps), parallel.vector_elementwise_len_threshold);
-    rt.backend.causalConv1dBackwardWeightInto(&out, ii.tensor(), gg.tensor(), state, seq, in_channels, out_channels, taps, dilation);
+    ctx.enableNativeVectorPoolForWork(causalConvWork(seq, in_channels, out_channels, taps), parallel.vector_elementwise_len_threshold);
+    ctx.backend.causalConv1dBackwardWeightInto(&out, ii.tensor(), gg.tensor(), state, seq, in_channels, out_channels, taps, dilation);
     return out;
 }
 
@@ -1185,7 +1232,7 @@ pub fn causalConv1dBackwardWeightAxisRank(
 /// `[tap, in_per_group, out]`, output `[time, out]`. Each output channel
 /// only sees the corresponding group slice of the input channels.
 pub fn groupedCausalConv1dAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     input: *const Tensor,
     weight: *const Tensor,
@@ -1211,20 +1258,20 @@ pub fn groupedCausalConv1dAxisRank(
     const in_per_group = try validateGroupedCausalConv(state, in_channels, out_channels, taps, dilation, groups);
     if (weight_view.shape[1] != in_per_group) return tensor.TensorError.ShapeMismatch;
 
-    var ii = try rt.prepareContiguous(input);
+    var ii = try ctx.prepareContiguous(input);
     defer ii.deinit();
-    var ww = try rt.prepareContiguous(weight);
+    var ww = try ctx.prepareContiguous(weight);
     defer ww.deinit();
 
-    var out = try rt.emptyRank(rank, .{ seq, out_channels });
+    var out = try ctx.emptyRank(rank, .{ seq, out_channels });
     errdefer out.deinit();
-    rt.enableNativeVectorPoolForWork(causalConvWork(seq, in_per_group, out_channels, taps), parallel.vector_elementwise_len_threshold);
-    rt.backend.groupedCausalConv1dInto(&out, ii.tensor(), ww.tensor(), state, seq, in_channels, out_channels, taps, dilation, groups);
+    ctx.enableNativeVectorPoolForWork(causalConvWork(seq, in_per_group, out_channels, taps), parallel.vector_elementwise_len_threshold);
+    ctx.backend.groupedCausalConv1dInto(&out, ii.tensor(), ww.tensor(), state, seq, in_channels, out_channels, taps, dilation, groups);
     return out;
 }
 
 pub fn groupedCausalConv1dBackwardInputAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     gy: *const Tensor,
     weight: *const Tensor,
@@ -1250,20 +1297,20 @@ pub fn groupedCausalConv1dBackwardInputAxisRank(
     const in_per_group = try validateGroupedCausalConv(null, in_channels, out_channels, taps, dilation, groups);
     if (weight_view.shape[1] != in_per_group) return tensor.TensorError.ShapeMismatch;
 
-    var gg = try rt.prepareContiguous(gy);
+    var gg = try ctx.prepareContiguous(gy);
     defer gg.deinit();
-    var ww = try rt.prepareContiguous(weight);
+    var ww = try ctx.prepareContiguous(weight);
     defer ww.deinit();
 
-    var out = try rt.emptyRank(rank, .{ seq, in_channels });
+    var out = try ctx.emptyRank(rank, .{ seq, in_channels });
     errdefer out.deinit();
-    rt.enableNativeVectorPoolForWork(causalConvWork(seq, in_per_group, out_channels, taps), parallel.vector_elementwise_len_threshold);
-    rt.backend.groupedCausalConv1dBackwardInputInto(&out, gg.tensor(), ww.tensor(), seq, in_channels, out_channels, taps, dilation, groups);
+    ctx.enableNativeVectorPoolForWork(causalConvWork(seq, in_per_group, out_channels, taps), parallel.vector_elementwise_len_threshold);
+    ctx.backend.groupedCausalConv1dBackwardInputInto(&out, gg.tensor(), ww.tensor(), seq, in_channels, out_channels, taps, dilation, groups);
     return out;
 }
 
 pub fn groupedCausalConv1dBackwardWeightAxisRank(
-    rt: *Runtime,
+    ctx: *ExecContext,
     comptime rank: usize,
     input: *const Tensor,
     gy: *const Tensor,
@@ -1289,14 +1336,14 @@ pub fn groupedCausalConv1dBackwardWeightAxisRank(
     if (grad_view.shape[time_axis] != seq) return tensor.TensorError.ShapeMismatch;
     const in_per_group = try validateGroupedCausalConv(state, in_channels, out_channels, taps, dilation, groups);
 
-    var ii = try rt.prepareContiguous(input);
+    var ii = try ctx.prepareContiguous(input);
     defer ii.deinit();
-    var gg = try rt.prepareContiguous(gy);
+    var gg = try ctx.prepareContiguous(gy);
     defer gg.deinit();
 
-    var out = try rt.emptyRank(3, .{ taps, in_per_group, out_channels });
+    var out = try ctx.emptyRank(3, .{ taps, in_per_group, out_channels });
     errdefer out.deinit();
-    rt.enableNativeVectorPoolForWork(causalConvWork(seq, in_per_group, out_channels, taps), parallel.vector_elementwise_len_threshold);
-    rt.backend.groupedCausalConv1dBackwardWeightInto(&out, ii.tensor(), gg.tensor(), state, seq, in_channels, out_channels, taps, dilation, groups);
+    ctx.enableNativeVectorPoolForWork(causalConvWork(seq, in_per_group, out_channels, taps), parallel.vector_elementwise_len_threshold);
+    ctx.backend.groupedCausalConv1dBackwardWeightInto(&out, ii.tensor(), gg.tensor(), state, seq, in_channels, out_channels, taps, dilation, groups);
     return out;
 }

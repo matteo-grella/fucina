@@ -119,13 +119,13 @@ test "reduceGradientToTags uses direct view when tags and shape already match" {
     var grad = try ctx.fromSliceRank(2, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer grad.deinit();
 
-    const outstanding_before = ctx.rt.buffers.outstandingBuffers();
+    const outstanding_before = ctx.buffers.outstandingBuffers();
     var reduced = try reduceGradientToTags(.{ .batch, .hidden }, .{ .batch, .hidden }, &ctx, &grad, .{ 2, 3 });
     defer reduced.deinit();
 
     try std.testing.expectEqualSlices(f32, grad.dataConst(), reduced.dataConst());
     try std.testing.expectEqual(grad.dataConst().ptr, reduced.dataConst().ptr);
-    try std.testing.expectEqual(outstanding_before, ctx.rt.buffers.outstandingBuffers());
+    try std.testing.expectEqual(outstanding_before, ctx.buffers.outstandingBuffers());
 }
 
 /// VJP for `maskedFill(x, mask, value)`: grad passes through where the mask is

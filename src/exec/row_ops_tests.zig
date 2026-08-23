@@ -26,7 +26,7 @@ const buildTestMoeRhsQ5K = util.buildTestMoeRhsQ5K;
 const f16BitsFromF32 = util.f16BitsFromF32;
 
 test "pinned rowwise kernels: batched quant ops reproduce the m == 1 numerics bitwise" {
-    // The lossless-speculation contract (see Runtime.pin_rowwise_kernels):
+    // The lossless-speculation contract (see ExecContext.pin_rowwise_kernels):
     // with the pin ON, every batched quant entry must produce, for each
     // row, exactly the bytes the same entry produces for that row alone —
     // the m-dependent kernel switches (x4-lane prefixes, padded/unpadded

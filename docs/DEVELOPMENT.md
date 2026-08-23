@@ -83,7 +83,7 @@ one.
 
 Backend compute leaves (`backend/vector/`, `backend/quant/` dots) are
 allocation-free and infallible; results go into buffers the
-`ExecContext`/`Runtime` supplies. The one sanctioned exception is the
+`ExecContext` supplies. The one sanctioned exception is the
 quantized-RHS *dispatch* tier (`matmul2DQuantizedRhs*`), which takes an
 explicit allocator for per-call LHS-quantization scratch. Don't add
 allocation below that tier.

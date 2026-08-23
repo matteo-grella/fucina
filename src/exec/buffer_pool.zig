@@ -5,9 +5,9 @@
 //! the f32 arm (a free list of `*storage.Buffer`, the dominant transient
 //! path) and a byte-granular slab arm serving every other storage dtype
 //! (`acquireTyped`) plus non-DType packed block scratch (`acquireScratch`).
-//! This is a LEAF module: it never references the ExecContext/Runtime, so
-//! anything may depend on it without forming an import cycle (arch-check
-//! 0-SCC invariant).
+//! This is a LEAF module: it never references `ExecContext`, so anything
+//! may depend on it without forming an import cycle (arch-check SCC
+//! invariant).
 
 const std = @import("std");
 const storage = @import("../storage.zig");

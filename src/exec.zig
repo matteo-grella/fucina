@@ -1,26 +1,18 @@
-//! The eager execution runtime (`ExecContext`): owns validation, output
-//! materialization, buffer-pool allocation, and op dispatch. Two kernel
-//! worlds sit below: the build-selected backend (`backend.zig`) owns the
-//! arch-switched shared kernel families (elementwise, GEMM and quant
-//! dots, conv, pool), while `exec/` keeps the single-implementation fused
-//! op kernels (attention, row_ops' softmax/norm rows, fakequant) beside
-//! their orchestration — those have no scalar/native fork and run
-//! identically under every `-Dbackend`, pinned by their own determinism
-//! tests. Everything above (tag ops, autograd) drives tensors through
-//! this facade. Op implementations live in `exec/`; this file is the
-//! facade + registry, deliberately unsplit: 326 of its 332 methods are a
-//! single forwarding statement, so a mixin split (the shape `ag/tensor.zig`
-//! uses, where the mixin files carry real bodies) would move the
-//! restatement rather than remove it and add an alias line per method on
-//! top. The section banners below track the `exec/` file each run forwards
-//! to. Layer stack: docs/ARCHITECTURE.md.
+//! `ExecContext`: the eager execution runtime. One struct carries the
+//! substrate state (allocator, backend, buffer pool, worker team, exec-scope
+//! stack, MoE decode scratch) and every op as a method. Bodies live in
+//! `exec/`: `exec/runtime.zig` holds the lifecycle, scope, pool, and tensor
+//! allocation primitives; `exec/<domain>.zig` holds the ops, each taking
+//! `*ExecContext` first. The struct body below is the alias registry (`pub
+//! const add = exec_elementwise.add;`) grouped by domain; the section banners
+//! name the file each group resolves to. Layer stack: docs/ARCHITECTURE.md.
 const std = @import("std");
 const backend_mod = @import("backend.zig");
 const backend_ops = backend_mod.ops;
-const dtype_mod = @import("dtype.zig");
 const fpenv = @import("fpenv.zig");
 const tensor = @import("tensor.zig");
 const thread = @import("thread.zig");
+const tuning = @import("tuning.zig");
 
 const exec_attention = @import("exec/attention.zig");
 const exec_moe = @import("exec/moe.zig");
@@ -44,9 +36,7 @@ const exec_conv = @import("exec/conv.zig");
 const exec_pool = @import("exec/pool.zig");
 
 const Allocator = std.mem.Allocator;
-const Runtime = exec_runtime.Runtime;
 const Backend = backend_mod.Backend;
-const DType = tensor.DType;
 const Tensor = tensor.Tensor;
 
 pub const MoeBatchProfile = exec_moe.MoeBatchProfile;
@@ -115,8 +105,6 @@ pub const LayerNormAffineBackwardResult = exec_norm.LayerNormAffineBackwardResul
 pub const GroupNormBackwardResult = exec_norm.GroupNormBackwardResult;
 pub const SnakeBackwardParamsResult = exec_elementwise.SnakeBackwardParamsResult;
 
-const BlockQ8_0 = exec_attention.BlockQ8_0;
-
 const MoeDecodeScratch = exec_moe.MoeDecodeScratch;
 pub const MatmulKind = exec_matmul.MatmulKind;
 pub const BmmKind = exec_matmul.BmmKind;
@@ -126,68 +114,61 @@ pub const QuantizedMatmulOptions = exec_quant_matmul.QuantizedMatmulOptions;
 const tailBroadcastInfo = exec_elementwise.tailBroadcastInfo;
 
 /// Reusable transient-buffer pool. Defined in the `exec/buffer_pool.zig` leaf;
-/// re-exported here so `exec.BufferPool` stays reachable and the `Runtime`
-/// `buffers` field can name it.
+/// re-exported here so `exec.BufferPool` stays reachable and the `buffers`
+/// field below can name it.
 pub const BufferPool = exec_buffer_pool.BufferPool;
 
 pub const ExecContext = struct {
-    /// Generic runtime substrate (allocator, backend, buffer pool, worker
-    /// team, exec-scope stack, tensor allocation primitives). All substrate
-    /// methods below forward here; domain modules receive `&self.rt`.
-    rt: Runtime,
-    /// MoE-decode scratch state. Domain state, not substrate: owned by the
-    /// facade and passed to the MoE ops rather than living on `Runtime`.
-    moe_scratch: MoeDecodeScratch = .{},
-    /// Cached copy of `rt.allocator` (a fat pointer into `rt`'s stable
-    /// ThreadSafeAllocator, immutable after init). Lets the MoE decode path
-    /// and the still-inline domain wrappers keep `self.allocator`.
+    thread_safe_allocator: thread.ThreadSafeAllocator,
     allocator: Allocator,
+    backend: Backend,
+    buffers: BufferPool,
+    /// Per-context tuning overrides (`setTuning`); every field
+    /// null = follow the process-wide gates (see src/tuning.zig).
+    tuning: tuning.Overrides = .{},
+    work_pool: thread.Pool,
+    work_pool_ready: bool = false,
+    work_pool_mutex: thread.Mutex = .{},
+    dot_backward_worker: thread.OneShotWorker,
+    dot_backward_worker_ready: bool = false,
+    dot_backward_worker_mutex: thread.Mutex = .{},
+    scope_entries: std.ArrayList(exec_runtime.ScopeEntry) = .empty,
+    scope_depth: usize = 0,
+    /// Speculation-verify kernel pinning (toggle through
+    /// `pinRowwiseKernels`). While set, every batched
+    /// quant-matmul entry reproduces the m == 1 kernel numerics exactly:
+    /// the packed/plain entries run as independent single-row calls of
+    /// themselves, the fused K-quant entries keep their per-row tail
+    /// kernels for every row, and the batched MoE op skips the
+    /// lane-packed Q8_Kx4 kernels. A verify batch then produces logits
+    /// bit-identical to sequential decode — the property that keeps deep
+    /// speculative drafting lossless. Batch matmul throughput is
+    /// deliberately sacrificed while pinned (verify batches are small,
+    /// and on streamed MoE the expert-fetch amortization — the part that
+    /// pays — is preserved).
+    pin_rowwise_kernels: bool = false,
+    /// The IEEE floating-point environment observed when this context was
+    /// created, or null where the target does not expose it. Every numeric
+    /// contract the context goes on to honor (backend parity tolerances,
+    /// thread-count invariance, checkpoint reproducibility) is stated under
+    /// this environment; `checkFloatEnvironment` is how a caller confirms it
+    /// still holds after code outside our control has run on the thread.
+    fp_env_at_init: ?fpenv.Environment = null,
+    /// Grow-only MoE-decode scratch (`exec/moe.zig`): carved by the
+    /// single-row MoE entries under its own mutex.
+    moe_scratch: MoeDecodeScratch = .{},
 
     pub const ScopeNodeDestroy = exec_runtime.ScopeNodeDestroy;
     pub const ExecScope = exec_runtime.ExecScope;
+    pub const PreparedTensor = exec_runtime.PreparedTensor;
+    pub const PreparedTensorOf = exec_runtime.PreparedTensorOf;
 
-    pub fn init(self: *ExecContext, allocator: Allocator) void {
-        self.rt.init(allocator);
-        self.allocator = self.rt.allocator;
-        self.moe_scratch = .{};
-    }
-
-    pub fn deinit(self: *ExecContext) void {
-        self.moe_scratch.deinit(self.allocator);
-        self.rt.deinit();
-        self.* = undefined;
-    }
-
-    /// Speculation-verify kernel pinning: while ON, batched quant-matmul
-    /// ops reproduce the m == 1 kernel numerics bitwise, so a verify
-    /// batch's logits equal sequential decode's (the lossless-speculation
-    /// requirement at any draft depth). Toggle around a speculative
-    /// VERIFY forward only — batch throughput is sacrificed while pinned.
-    /// See `Runtime.pin_rowwise_kernels` for the mechanism.
-    pub fn pinRowwiseKernels(self: *ExecContext, on: bool) void {
-        self.rt.pin_rowwise_kernels = on;
-    }
-
-    /// Per-context tuning overrides: route policy that can differ between
-    /// two contexts in one process (fields left null follow the process-wide
-    /// FUCINA_* gates; see `fucina.tuning`).
-    pub fn setTuning(self: *ExecContext, overrides: @import("tuning.zig").Overrides) void {
-        self.rt.tuning = overrides;
-    }
-
-    /// `error.FloatEnvironmentChanged` when the calling thread's IEEE rounding
-    /// or underflow mode is no longer what it was when this context was
-    /// created. See `Runtime.checkFloatEnvironment`; the facility itself is
-    /// `fucina.fpenv`.
-    pub fn checkFloatEnvironment(self: *const ExecContext) !void {
-        return self.rt.checkFloatEnvironment();
-    }
-
-    /// The IEEE floating-point environment recorded at context creation, or
-    /// null where the target does not expose it.
-    pub fn floatEnvironmentAtInit(self: *const ExecContext) ?fpenv.Environment {
-        return self.rt.fp_env_at_init;
-    }
+    pub const init = exec_runtime.init;
+    pub const deinit = exec_runtime.deinit;
+    pub const pinRowwiseKernels = exec_runtime.pinRowwiseKernels;
+    pub const setTuning = exec_runtime.setTuning;
+    pub const checkFloatEnvironment = exec_runtime.checkFloatEnvironment;
+    pub const floatEnvironmentAtInit = exec_runtime.floatEnvironmentAtInit;
 
     // ------------------------------------------------------------------
     // Exec scopes: implicit ownership of EXECUTION artifacts — the tensor
@@ -212,48 +193,17 @@ pub const ExecContext = struct {
     // are not thread-safe — open/close/ops on one ctx from one thread, like
     // every other ctx mutation.
     // ------------------------------------------------------------------
-
-    pub fn execScopeActive(self: *const ExecContext) bool {
-        return self.rt.execScopeActive();
-    }
-
-    /// Open a scope; close it with `closeExecScope(mark)` (typically `defer`).
-    pub fn openExecScope(self: *ExecContext) ExecScope {
-        return self.rt.openExecScope();
-    }
-
-    /// Release every tensor adopted since `mark`, newest first. Only safe
-    /// once no backward() over tensors adopted in the scope is pending.
-    pub fn closeExecScope(self: *ExecContext, mark: ExecScope) void {
-        self.rt.closeExecScope(mark);
-    }
-
-    /// Two-phase adoption so op construction can stay infallible after its
-    /// "consumes the value on success" point: reserve BEFORE building the
-    /// result, adopt (cannot fail) after.
-    pub fn reserveScopeSlot(self: *ExecContext) !void {
-        return self.rt.reserveScopeSlot();
-    }
-
-    pub fn adoptScopeValueAssumeCapacity(self: *ExecContext, value: Tensor, node: ?*anyopaque, destroy_node: ScopeNodeDestroy) void {
-        self.rt.adoptScopeValueAssumeCapacity(value, node, destroy_node);
-    }
-
-    pub fn adoptScopeNodeAssumeCapacity(self: *ExecContext, node: *anyopaque, destroy_node: ScopeNodeDestroy) void {
-        self.rt.adoptScopeNodeAssumeCapacity(node, destroy_node);
-    }
-
-    pub fn tryWorkPool(self: *ExecContext) !*thread.Pool {
-        return self.rt.tryWorkPool();
-    }
-
-    pub fn workPool(self: *ExecContext) ?*thread.Pool {
-        return self.rt.workPool();
-    }
-
-    pub fn dotBackwardWorker(self: *ExecContext) ?*thread.OneShotWorker {
-        return self.rt.dotBackwardWorker();
-    }
+    pub const execScopeActive = exec_runtime.execScopeActive;
+    pub const openExecScope = exec_runtime.openExecScope;
+    pub const closeExecScope = exec_runtime.closeExecScope;
+    pub const reserveScopeSlot = exec_runtime.reserveScopeSlot;
+    pub const adoptScopeValueAssumeCapacity = exec_runtime.adoptScopeValueAssumeCapacity;
+    pub const adoptScopeNodeAssumeCapacity = exec_runtime.adoptScopeNodeAssumeCapacity;
+    pub const tryWorkPool = exec_runtime.tryWorkPool;
+    pub const workPool = exec_runtime.workPool;
+    pub const dotBackwardWorker = exec_runtime.dotBackwardWorker;
+    pub const dispatchRange = exec_runtime.dispatchRange;
+    pub const dispatchRangeCapped = exec_runtime.dispatchRangeCapped;
 
     pub fn classify(_: *const ExecContext, x: *const Tensor) LayoutClass {
         if (x.isScalar()) return .scalar;
@@ -272,2192 +222,391 @@ pub const ExecContext = struct {
         return x.broadcastToRank(rank, shape);
     }
 
-    pub fn empty(self: *ExecContext, shape: []const usize) !Tensor {
-        return self.rt.empty(shape);
-    }
-
-    pub fn emptyRank(self: *ExecContext, comptime rank: usize, shape: [rank]usize) !Tensor {
-        return self.rt.emptyRank(rank, shape);
-    }
-
-    fn emptyTyped(self: *ExecContext, comptime dtype: DType, shape: []const usize) !tensor.TensorOf(dtype) {
-        return self.rt.emptyTyped(dtype, shape);
-    }
-
-    pub fn emptyRankTyped(self: *ExecContext, comptime dtype: DType, comptime rank: usize, shape: [rank]usize) !tensor.TensorOf(dtype) {
-        return self.rt.emptyRankTyped(dtype, rank, shape);
-    }
-
-    pub fn zeros(self: *ExecContext, shape: []const usize) !Tensor {
-        return self.rt.zeros(shape);
-    }
-
-    pub fn zerosTyped(self: *ExecContext, comptime dtype: DType, shape: []const usize) !tensor.TensorOf(dtype) {
-        return self.rt.zerosTyped(dtype, shape);
-    }
-
-    fn zerosRankTyped(self: *ExecContext, comptime dtype: DType, comptime rank: usize, shape: [rank]usize) !tensor.TensorOf(dtype) {
-        return self.rt.zerosRankTyped(dtype, rank, shape);
-    }
-
-    pub fn ones(self: *ExecContext, shape: []const usize) !Tensor {
-        return self.rt.ones(shape);
-    }
-
-    pub fn onesRank(self: *ExecContext, comptime rank: usize, shape: [rank]usize) !Tensor {
-        return self.rt.onesRank(rank, shape);
-    }
-
-    pub fn onesTyped(self: *ExecContext, comptime dtype: DType, shape: []const usize) !tensor.TensorOf(dtype) {
-        return self.rt.onesTyped(dtype, shape);
-    }
-
-    pub fn onesRankTyped(self: *ExecContext, comptime dtype: DType, comptime rank: usize, shape: [rank]usize) !tensor.TensorOf(dtype) {
-        return self.rt.onesRankTyped(dtype, rank, shape);
-    }
-
-    pub fn full(self: *ExecContext, shape: []const usize, value: f32) !Tensor {
-        return self.rt.full(shape, value);
-    }
-
-    pub fn fullTyped(self: *ExecContext, comptime dtype: DType, shape: []const usize, value: dtype_mod.Scalar(dtype)) !tensor.TensorOf(dtype) {
-        return self.rt.fullTyped(dtype, shape, value);
-    }
-
-    pub fn scalar(self: *ExecContext, value: f32) !Tensor {
-        return self.rt.scalar(value);
-    }
-
-    pub fn fromSlice(self: *ExecContext, shape: []const usize, values: []const f32) !Tensor {
-        return self.rt.fromSlice(shape, values);
-    }
-
-    pub fn fromSliceRank(self: *ExecContext, comptime rank: usize, shape: [rank]usize, values: []const f32) !Tensor {
-        return self.rt.fromSliceRank(rank, shape, values);
-    }
-
-    pub fn fromBorrowedSliceRank(self: *ExecContext, comptime rank: usize, shape: [rank]usize, values: []f32) !Tensor {
-        return self.rt.fromBorrowedSliceRank(rank, shape, values);
-    }
-
-    pub fn fromSliceTyped(self: *ExecContext, comptime dtype: DType, shape: []const usize, values: []const dtype_mod.Scalar(dtype)) !tensor.TensorOf(dtype) {
-        return self.rt.fromSliceTyped(dtype, shape, values);
-    }
-
-    pub fn fromSliceRankTyped(
-        self: *ExecContext,
-        comptime dtype: DType,
-        comptime rank: usize,
-        shape: [rank]usize,
-        values: []const dtype_mod.Scalar(dtype),
-    ) !tensor.TensorOf(dtype) {
-        return self.rt.fromSliceRankTyped(dtype, rank, shape, values);
-    }
-
-    pub fn fromBorrowedSliceRankTyped(
-        self: *ExecContext,
-        comptime dtype: DType,
-        comptime rank: usize,
-        shape: [rank]usize,
-        values: []dtype_mod.Scalar(dtype),
-    ) !tensor.TensorOf(dtype) {
-        return self.rt.fromBorrowedSliceRankTyped(dtype, rank, shape, values);
-    }
-
-    pub fn fromStorageSliceRankTyped(
-        self: *ExecContext,
-        comptime dtype: DType,
-        comptime rank: usize,
-        shape: [rank]usize,
-        values: []const dtype_mod.Storage(dtype),
-    ) !tensor.TensorOf(dtype) {
-        return self.rt.fromStorageSliceRankTyped(dtype, rank, shape, values);
-    }
-
-    pub fn fromBorrowedStorageSliceRankTyped(
-        self: *ExecContext,
-        comptime dtype: DType,
-        comptime rank: usize,
-        shape: [rank]usize,
-        values: []dtype_mod.Storage(dtype),
-    ) !tensor.TensorOf(dtype) {
-        return self.rt.fromBorrowedStorageSliceRankTyped(dtype, rank, shape, values);
-    }
-
-    // Lifetime helper for the "carried value" pattern: deinitializes `old` and
-    // returns the freshly computed `new_value`, advancing an accumulator (e.g. a
-    // transformer residual stream) in one statement instead of the
-    // create/deinit/reassign dance:
-    //
-    //     x = try ctx.replace(x, x.add(ctx, &delta));
-    //
-    // `new_value` is evaluated by the caller before `replace` runs; if it is an
-    // error, `old` is left untouched and the error propagates, so the caller's
-    // `errdefer old.deinit()` still frees it exactly once. On success `old` is
-    // released (one ref) and the new value returned. Generic over any owned
-    // value with a `deinit` method (tagged tensors, projection structs, ...).
-    /// Swap a carried tensor for the result of a block call, e.g.
-    /// `x = try ctx.replace(x, attentionBlock(ctx, ..., &x, ...));`.
-    /// `new_value` is an error union on purpose: on error the old tensor is
-    /// NOT consumed (the caller's binding and defers stay valid) and the
-    /// error propagates; on success the old tensor is released and the new
-    /// one returned for rebinding. Inside an exec scope the release is a
-    /// safe no-op for scope-owned op results (their `deinit` is a no-op —
-    /// the scope owns them), so the same forward code is also training-safe.
-    pub fn replace(self: *ExecContext, old: anytype, new_value: anytype) @TypeOf(new_value) {
-        _ = self;
-        comptime {
-            const ret_info = @typeInfo(@TypeOf(new_value));
-            if (ret_info != .error_union or ret_info.error_union.payload != @TypeOf(old)) {
-                @compileError("ctx.replace expects new_value of type E!" ++ @typeName(@TypeOf(old)));
-            }
-        }
-        const value = try new_value;
-        var owned = old;
-        owned.deinit();
-        return value;
-    }
-
-    pub fn materialize(self: *ExecContext, x: *const Tensor) !Tensor {
-        return self.rt.materialize(x);
-    }
-
-    pub fn materializeTyped(self: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
-        return self.rt.materializeTyped(dtype, x);
-    }
-
-    pub fn clone(self: *ExecContext, x: *const Tensor) !Tensor {
-        return self.rt.clone(x);
-    }
-
-    fn cloneTyped(self: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
-        return self.rt.cloneTyped(dtype, x);
-    }
+    pub const empty = exec_runtime.empty;
+    pub const emptyRank = exec_runtime.emptyRank;
+    pub const emptyTyped = exec_runtime.emptyTyped;
+    pub const emptyRankTyped = exec_runtime.emptyRankTyped;
+    pub const zeros = exec_runtime.zeros;
+    pub const zerosRank = exec_runtime.zerosRank;
+    pub const zerosTyped = exec_runtime.zerosTyped;
+    pub const zerosRankTyped = exec_runtime.zerosRankTyped;
+    pub const ones = exec_runtime.ones;
+    pub const onesRank = exec_runtime.onesRank;
+    pub const onesTyped = exec_runtime.onesTyped;
+    pub const onesRankTyped = exec_runtime.onesRankTyped;
+    pub const full = exec_runtime.full;
+    pub const fullTyped = exec_runtime.fullTyped;
+    pub const scalar = exec_runtime.scalar;
+    pub const scalarTyped = exec_runtime.scalarTyped;
+    pub const fromSlice = exec_runtime.fromSlice;
+    pub const fromSliceRank = exec_runtime.fromSliceRank;
+    pub const fromBorrowedSliceRank = exec_runtime.fromBorrowedSliceRank;
+    pub const fromSliceTyped = exec_runtime.fromSliceTyped;
+    pub const fromSliceRankTyped = exec_runtime.fromSliceRankTyped;
+    pub const fromBorrowedSliceRankTyped = exec_runtime.fromBorrowedSliceRankTyped;
+    pub const fromStorageSliceRankTyped = exec_runtime.fromStorageSliceRankTyped;
+    pub const fromBorrowedStorageSliceRankTyped = exec_runtime.fromBorrowedStorageSliceRankTyped;
+    pub const replace = exec_runtime.replace;
+    pub const materialize = exec_runtime.materialize;
+    pub const materializeTyped = exec_runtime.materializeTyped;
+    pub const clone = exec_runtime.clone;
+    pub const cloneTyped = exec_runtime.cloneTyped;
+    pub const prepareContiguous = exec_runtime.prepareContiguous;
+    pub const prepareContiguousTyped = exec_runtime.prepareContiguousTyped;
+    pub const enableNativeVectorPoolForWork = exec_runtime.enableNativeVectorPoolForWork;
+    pub const enableNativeMatmulPoolForWork = exec_runtime.enableNativeMatmulPoolForWork;
+    pub const enableNativeTypedMatmulPoolForWork = exec_runtime.enableNativeTypedMatmulPoolForWork;
 
     // ----------------------------------------------------------------------
     // elementwise: pointwise arithmetic, activations, masks, casts (exec/elementwise.zig)
     // ----------------------------------------------------------------------
-    pub fn add(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_elementwise.add(&self.rt, a, b);
-    }
-
-    pub fn sub(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_elementwise.sub(&self.rt, a, b);
-    }
-
-    pub fn mul(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_elementwise.mul(&self.rt, a, b);
-    }
-
-    pub fn div(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_elementwise.div(&self.rt, a, b);
-    }
-
-    pub fn addRank(self: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_elementwise.addRank(&self.rt, rank, a, b);
-    }
-
-    pub fn addRankTyped(
-        self: *ExecContext,
-        comptime dtype: DType,
-        comptime rank: usize,
-        a: *const tensor.TensorOf(dtype),
-        b: *const tensor.TensorOf(dtype),
-    ) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
-        return exec_elementwise.addRankTyped(&self.rt, dtype, rank, a, b);
-    }
-
-    pub fn subRank(self: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_elementwise.subRank(&self.rt, rank, a, b);
-    }
-
-    pub fn subRankTyped(
-        self: *ExecContext,
-        comptime dtype: DType,
-        comptime rank: usize,
-        a: *const tensor.TensorOf(dtype),
-        b: *const tensor.TensorOf(dtype),
-    ) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
-        return exec_elementwise.subRankTyped(&self.rt, dtype, rank, a, b);
-    }
-
-    pub fn mulRank(self: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_elementwise.mulRank(&self.rt, rank, a, b);
-    }
-
-    pub fn mulRankTyped(
-        self: *ExecContext,
-        comptime dtype: DType,
-        comptime rank: usize,
-        a: *const tensor.TensorOf(dtype),
-        b: *const tensor.TensorOf(dtype),
-    ) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
-        return exec_elementwise.mulRankTyped(&self.rt, dtype, rank, a, b);
-    }
-
-    pub fn divRank(self: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_elementwise.divRank(&self.rt, rank, a, b);
-    }
-
-    pub fn divRankTyped(
-        self: *ExecContext,
-        comptime dtype: DType,
-        comptime rank: usize,
-        a: *const tensor.TensorOf(dtype),
-        b: *const tensor.TensorOf(dtype),
-    ) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
-        return exec_elementwise.divRankTyped(&self.rt, dtype, rank, a, b);
-    }
-
-    pub fn maxRank(self: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_elementwise.maxRank(&self.rt, rank, a, b);
-    }
-
-    pub fn maxRankTyped(self: *ExecContext, comptime dtype: DType, comptime rank: usize, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
-        return exec_elementwise.maxRankTyped(&self.rt, dtype, rank, a, b);
-    }
-
-    pub fn minRankTyped(self: *ExecContext, comptime dtype: DType, comptime rank: usize, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
-        return exec_elementwise.minRankTyped(&self.rt, dtype, rank, a, b);
-    }
-
-    pub fn divTruncRankTyped(self: *ExecContext, comptime dtype: DType, comptime rank: usize, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
-        return exec_elementwise.intDivRankTyped(&self.rt, dtype, rank, .trunc, a, b);
-    }
-
-    pub fn divFloorRankTyped(self: *ExecContext, comptime dtype: DType, comptime rank: usize, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
-        return exec_elementwise.intDivRankTyped(&self.rt, dtype, rank, .floor, a, b);
-    }
-
-    pub fn remRankTyped(self: *ExecContext, comptime dtype: DType, comptime rank: usize, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
-        return exec_elementwise.intModRankTyped(&self.rt, dtype, rank, .rem, a, b);
-    }
-
-    pub fn modRankTyped(self: *ExecContext, comptime dtype: DType, comptime rank: usize, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
-        return exec_elementwise.intModRankTyped(&self.rt, dtype, rank, .mod, a, b);
-    }
-
-    pub fn bitwiseRankTyped(self: *ExecContext, comptime dtype: DType, comptime rank: usize, comptime op: exec_elementwise.IntBitwiseOp, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
-        return exec_elementwise.intBitwiseRankTyped(&self.rt, dtype, rank, op, a, b);
-    }
-
-    pub fn minRank(self: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_elementwise.minRank(&self.rt, rank, a, b);
-    }
-
-    pub fn gatedRank(self: *ExecContext, comptime rank: usize, comptime op: GatedOp, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_elementwise.gatedRank(&self.rt, rank, op, a, b);
-    }
-
-    pub fn gluRank(self: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_elementwise.gluRank(&self.rt, rank, a, b);
-    }
-
-    pub fn swigluRank(self: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_elementwise.swigluRank(&self.rt, rank, a, b);
-    }
-
-    pub fn gegluRank(self: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_elementwise.gegluRank(&self.rt, rank, a, b);
-    }
-
-    pub fn splitSwiGluAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-        return exec_elementwise.splitSwiGluAxisRank(&self.rt, rank, x, axis);
-    }
-
-    /// Transformer-XL relative-shift ("skew"): a rank-3
-    /// relative-score tensor `bd[H,Tq,P]` → `out[H,Tq,Tk]` with
-    /// `out[h,qi,kj] = bd[h, qi, kj + (Tq-1) - qi]` — the closed form of the NeMo
-    /// relpos pad/reshape/view remap (and parakeet.cpp's skew). `P` must be
-    /// `>= Tk + Tq - 1`. Differentiable via `RelposShiftBackward` (scatter VJP).
-    pub fn relposShiftRank3(self: *ExecContext, bd: *const Tensor, t_k: usize) !Tensor {
-        return exec_gather_scatter.relposShiftRank3(&self.rt, bd, t_k);
-    }
+    pub const add = exec_elementwise.add;
+    pub const sub = exec_elementwise.sub;
+    pub const mul = exec_elementwise.mul;
+    pub const div = exec_elementwise.div;
+    pub const addRank = exec_elementwise.addRank;
+    pub const addRankTyped = exec_elementwise.addRankTyped;
+    pub const subRank = exec_elementwise.subRank;
+    pub const subRankTyped = exec_elementwise.subRankTyped;
+    pub const mulRank = exec_elementwise.mulRank;
+    pub const mulRankTyped = exec_elementwise.mulRankTyped;
+    pub const divRank = exec_elementwise.divRank;
+    pub const divRankTyped = exec_elementwise.divRankTyped;
+    pub const maxRank = exec_elementwise.maxRank;
+    pub const maxRankTyped = exec_elementwise.maxRankTyped;
+    pub const minRankTyped = exec_elementwise.minRankTyped;
+    pub const divTruncRankTyped = exec_elementwise.divTruncRankTyped;
+    pub const divFloorRankTyped = exec_elementwise.divFloorRankTyped;
+    pub const remRankTyped = exec_elementwise.remRankTyped;
+    pub const modRankTyped = exec_elementwise.modRankTyped;
+    pub const bitwiseRankTyped = exec_elementwise.intBitwiseRankTyped;
+    pub const minRank = exec_elementwise.minRank;
+    pub const gatedRank = exec_elementwise.gatedRank;
+    pub const gluRank = exec_elementwise.gluRank;
+    pub const swigluRank = exec_elementwise.swigluRank;
+    pub const gegluRank = exec_elementwise.gegluRank;
+    pub const splitSwiGluAxisRank = exec_elementwise.splitSwiGluAxisRank;
+    pub const relposShiftRank3 = exec_gather_scatter.relposShiftRank3;
 
     // ----------------------------------------------------------------------
     // elementwise: pointwise arithmetic, activations, masks, casts (exec/elementwise.zig)  [continued]
     // ----------------------------------------------------------------------
-    pub fn splitGluAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-        return exec_elementwise.splitGluAxisRank(&self.rt, rank, x, axis);
-    }
-
-    pub fn splitSwiGluBackwardAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize) !Tensor {
-        return exec_elementwise.splitSwiGluBackwardAxisRank(&self.rt, rank, x, gy, axis);
-    }
-
-    pub fn splitGluBackwardAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize) !Tensor {
-        return exec_elementwise.splitGluBackwardAxisRank(&self.rt, rank, x, gy, axis);
-    }
-
-    pub fn addInPlace(self: *ExecContext, target: *Tensor, other: *const Tensor) !void {
-        return exec_elementwise.addInPlace(&self.rt, target, other);
-    }
-
-    pub fn subInPlace(self: *ExecContext, target: *Tensor, other: *const Tensor) !void {
-        return exec_elementwise.subInPlace(&self.rt, target, other);
-    }
-
-    pub fn mulInPlace(self: *ExecContext, target: *Tensor, other: *const Tensor) !void {
-        return exec_elementwise.mulInPlace(&self.rt, target, other);
-    }
-
-    pub fn divInPlace(self: *ExecContext, target: *Tensor, other: *const Tensor) !void {
-        return exec_elementwise.divInPlace(&self.rt, target, other);
-    }
-
-    pub fn takeAdd(self: *ExecContext, target: *Tensor, other: *const Tensor) !Tensor {
-        return exec_elementwise.takeAdd(&self.rt, target, other);
-    }
-
-    pub fn takeSub(self: *ExecContext, target: *Tensor, other: *const Tensor) !Tensor {
-        return exec_elementwise.takeSub(&self.rt, target, other);
-    }
-
-    pub fn takeMul(self: *ExecContext, target: *Tensor, other: *const Tensor) !Tensor {
-        return exec_elementwise.takeMul(&self.rt, target, other);
-    }
-
-    pub fn takeDiv(self: *ExecContext, target: *Tensor, other: *const Tensor) !Tensor {
-        return exec_elementwise.takeDiv(&self.rt, target, other);
-    }
-
-    pub fn takeScale(self: *ExecContext, target: *Tensor, scalar_value: f32) !Tensor {
-        return exec_elementwise.takeScale(&self.rt, target, scalar_value);
-    }
-
-    pub fn takeRelu(self: *ExecContext, target: *Tensor) !Tensor {
-        return exec_elementwise.takeRelu(&self.rt, target);
-    }
-
-    pub fn takeSilu(self: *ExecContext, target: *Tensor) !Tensor {
-        return exec_elementwise.takeSilu(&self.rt, target);
-    }
-
-    pub fn scale(self: *ExecContext, x: *const Tensor, scalar_value: f32) !Tensor {
-        return exec_elementwise.scale(&self.rt, x, scalar_value);
-    }
-
-    pub fn addScalar(self: *ExecContext, x: *const Tensor, scalar_value: f32) !Tensor {
-        return exec_elementwise.addScalar(&self.rt, x, scalar_value);
-    }
-
-    pub fn powScalar(self: *ExecContext, x: *const Tensor, exponent: f32) !Tensor {
-        return exec_elementwise.powScalar(&self.rt, x, exponent);
-    }
-
-    pub fn where(self: *ExecContext, x: *const Tensor, cond: *const Tensor, y: *const Tensor) !Tensor {
-        return exec_elementwise.where(&self.rt, x, cond, y);
-    }
-
-    pub fn whereTyped(self: *ExecContext, comptime cond_dtype: DType, x: *const Tensor, cond: *const tensor.TensorOf(cond_dtype), y: *const Tensor) !Tensor {
-        return exec_elementwise.whereTyped(&self.rt, cond_dtype, x, cond, y);
-    }
-
-    pub fn maskedFill(self: *ExecContext, x: *const Tensor, mask: *const Tensor, value: f32) !Tensor {
-        return exec_elementwise.maskedFill(&self.rt, x, mask, value);
-    }
-
-    pub fn maskedFillTyped(self: *ExecContext, comptime mask_dtype: DType, x: *const Tensor, mask: *const tensor.TensorOf(mask_dtype), value: f32) !Tensor {
-        return exec_elementwise.maskedFillTyped(&self.rt, mask_dtype, x, mask, value);
-    }
-
-    pub fn compare(self: *ExecContext, comptime op: CompareOp, a: *const Tensor, b: *const Tensor) !tensor.TensorOf(.bool) {
-        return exec_elementwise.compare(&self.rt, op, a, b);
-    }
-
-    pub fn compareScalar(self: *ExecContext, comptime op: CompareOp, x: *const Tensor, scalar_value: f32) !tensor.TensorOf(.bool) {
-        return exec_elementwise.compareScalar(&self.rt, op, x, scalar_value);
-    }
-
-    pub fn compareIntTyped(self: *ExecContext, comptime dtype: DType, comptime op: CompareOp, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(.bool) {
-        return exec_elementwise.compareIntTyped(&self.rt, dtype, op, a, b);
-    }
-
-    pub fn compareIntScalarTyped(self: *ExecContext, comptime dtype: DType, comptime op: CompareOp, x: *const tensor.TensorOf(dtype), scalar_value: dtype_mod.Scalar(dtype)) !tensor.TensorOf(.bool) {
-        return exec_elementwise.compareIntScalarTyped(&self.rt, dtype, op, x, scalar_value);
-    }
-
-    pub fn logicalTyped(self: *ExecContext, comptime op: exec_elementwise.LogicalOp, comptime a_dtype: DType, comptime b_dtype: DType, a: *const tensor.TensorOf(a_dtype), b: *const tensor.TensorOf(b_dtype)) !tensor.TensorOf(.bool) {
-        return exec_elementwise.logicalTyped(&self.rt, op, a_dtype, b_dtype, a, b);
-    }
-
-    pub fn logicalNotTyped(self: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !tensor.TensorOf(.bool) {
-        return exec_elementwise.logicalNotTyped(&self.rt, dtype, x);
-    }
-
-    pub fn addScaledInPlace(self: *ExecContext, target: *Tensor, source: *const Tensor, scalar_value: f32) !void {
-        return exec_elementwise.addScaledInPlace(&self.rt, target, source, scalar_value);
-    }
-
-    pub fn addAxisVectorInPlaceRank(self: *ExecContext, comptime rank: usize, target: *Tensor, row_vector: []const f32, comptime axis: usize) !void {
-        return exec_elementwise.addAxisVectorInPlaceRank(&self.rt, rank, target, row_vector, axis);
-    }
-
-    pub fn addAxisVectorUnaryInPlaceRank(self: *ExecContext, comptime rank: usize, comptime op: ?UnaryOp, target: *Tensor, row_vector: []const f32, comptime axis: usize) !void {
-        return exec_elementwise.addAxisVectorUnaryInPlaceRank(&self.rt, rank, op, target, row_vector, axis);
-    }
-
-    pub fn dropoutForward(self: *ExecContext, x: *const Tensor, p: f32, seed: u64) !Tensor {
-        return exec_elementwise.dropoutForward(&self.rt, x, p, seed);
-    }
-
-    pub fn dropoutBackward(self: *ExecContext, gy: *const Tensor, p: f32, seed: u64) !Tensor {
-        return exec_elementwise.dropoutBackward(&self.rt, gy, p, seed);
-    }
+    pub const splitGluAxisRank = exec_elementwise.splitGluAxisRank;
+    pub const splitSwiGluBackwardAxisRank = exec_elementwise.splitSwiGluBackwardAxisRank;
+    pub const splitGluBackwardAxisRank = exec_elementwise.splitGluBackwardAxisRank;
+    pub const addInPlace = exec_elementwise.addInPlace;
+    pub const subInPlace = exec_elementwise.subInPlace;
+    pub const mulInPlace = exec_elementwise.mulInPlace;
+    pub const divInPlace = exec_elementwise.divInPlace;
+    pub const takeAdd = exec_elementwise.takeAdd;
+    pub const takeSub = exec_elementwise.takeSub;
+    pub const takeMul = exec_elementwise.takeMul;
+    pub const takeDiv = exec_elementwise.takeDiv;
+    pub const takeScale = exec_elementwise.takeScale;
+    pub const takeRelu = exec_elementwise.takeRelu;
+    pub const takeSilu = exec_elementwise.takeSilu;
+    pub const scale = exec_elementwise.scale;
+    pub const addScalar = exec_elementwise.addScalar;
+    pub const powScalar = exec_elementwise.powScalar;
+    pub const where = exec_elementwise.where;
+    pub const whereTyped = exec_elementwise.whereTyped;
+    pub const maskedFill = exec_elementwise.maskedFill;
+    pub const maskedFillTyped = exec_elementwise.maskedFillTyped;
+    pub const compare = exec_elementwise.compare;
+    pub const compareScalar = exec_elementwise.compareScalar;
+    pub const compareIntTyped = exec_elementwise.compareIntTyped;
+    pub const compareIntScalarTyped = exec_elementwise.compareIntScalarTyped;
+    pub const logicalTyped = exec_elementwise.logicalTyped;
+    pub const logicalNotTyped = exec_elementwise.logicalNotTyped;
+    pub const addScaledInPlace = exec_elementwise.addScaledInPlace;
+    pub const addAxisVectorInPlaceRank = exec_elementwise.addAxisVectorInPlaceRank;
+    pub const addAxisVectorUnaryInPlaceRank = exec_elementwise.addAxisVectorUnaryInPlaceRank;
+    pub const dropoutForward = exec_elementwise.dropoutForward;
+    pub const dropoutBackward = exec_elementwise.dropoutBackward;
 
     // ----------------------------------------------------------------------
     // convert: dtype conversion and quantize/dequantize round trips (exec/convert.zig)
     // ----------------------------------------------------------------------
-    pub fn castTyped(
-        self: *ExecContext,
-        comptime source_dtype: DType,
-        comptime target_dtype: DType,
-        x: *const tensor.TensorOf(source_dtype),
-    ) !tensor.TensorOf(target_dtype) {
-        return exec_convert.castTyped(&self.rt, source_dtype, target_dtype, x);
-    }
-
-    /// Cast an f32 tensor into a caller-owned f16 slice in logical row-major
-    /// order without allocating: the KV-cache append path. Supports contiguous
-    /// sources (one SIMD pass) and rank-3 views whose two inner axes are
-    /// contiguous (a `{seq, kv_head, d}` split of a fused QKV row), walked as
-    /// per-row spans. Anything else is UnsupportedView — extend deliberately
-    /// rather than silently gathering.
-    pub fn castF32RowsToF16Into(self: *ExecContext, x: *const tensor.Tensor, dst: []f16) !void {
-        return exec_convert.castF32RowsToF16Into(&self.rt, x, dst);
-    }
-
-    pub fn quantizeF32RowsToQ8_0Into(self: *ExecContext, x: *const tensor.Tensor, dst: []BlockQ8_0) !void {
-        return exec_convert.quantizeF32RowsToQ8_0Into(&self.rt, x, dst);
-    }
-
-    pub fn dequantizeQ8_0RowsInto(self: *ExecContext, dst: []f32, blocks: []const BlockQ8_0) !void {
-        return exec_convert.dequantizeQ8_0RowsInto(&self.rt, dst, blocks);
-    }
-
-    pub fn scaleTyped(
-        self: *ExecContext,
-        comptime dtype: DType,
-        x: *const tensor.TensorOf(dtype),
-        scalar_value: dtype_mod.Accumulator(dtype),
-    ) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
-        return exec_convert.scaleTyped(&self.rt, dtype, x, scalar_value);
-    }
+    pub const castTyped = exec_convert.castTyped;
+    pub const castF32RowsToF16Into = exec_convert.castF32RowsToF16Into;
+    pub const quantizeF32RowsToQ8_0Into = exec_convert.quantizeF32RowsToQ8_0Into;
+    pub const dequantizeQ8_0RowsInto = exec_convert.dequantizeQ8_0RowsInto;
+    pub const scaleTyped = exec_convert.scaleTyped;
 
     // ----------------------------------------------------------------------
     // conv: 1-D/2-D convolutions, im2col/col2im, Winograd (exec/conv.zig)
     // ----------------------------------------------------------------------
-    pub fn causalDepthwiseConv1dAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        input: *const Tensor,
-        kernel: *const Tensor,
-        comptime time_axis: usize,
-        comptime channel_axis: usize,
-        dilation: usize,
-        state: ?[]const f32,
-    ) !Tensor {
-        return exec_conv.causalDepthwiseConv1dAxisRank(&self.rt, rank, input, kernel, time_axis, channel_axis, dilation, state);
-    }
-
-    pub fn causalDepthwiseConv1dBackwardInputAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        gy: *const Tensor,
-        kernel: *const Tensor,
-        comptime time_axis: usize,
-        comptime channel_axis: usize,
-        dilation: usize,
-    ) !Tensor {
-        return exec_conv.causalDepthwiseConv1dBackwardInputAxisRank(&self.rt, rank, gy, kernel, time_axis, channel_axis, dilation);
-    }
-
-    pub fn causalDepthwiseConv1dBackwardKernelAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        input: *const Tensor,
-        gy: *const Tensor,
-        comptime time_axis: usize,
-        comptime channel_axis: usize,
-        taps: usize,
-        dilation: usize,
-        state: ?[]const f32,
-    ) !Tensor {
-        return exec_conv.causalDepthwiseConv1dBackwardKernelAxisRank(&self.rt, rank, input, gy, time_axis, channel_axis, taps, dilation, state);
-    }
-
-    pub fn causalConv1dAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        input: *const Tensor,
-        weight: *const Tensor,
-        comptime time_axis: usize,
-        comptime channel_axis: usize,
-        dilation: usize,
-        state: ?[]const f32,
-    ) !Tensor {
-        return exec_conv.causalConv1dAxisRank(&self.rt, rank, input, weight, time_axis, channel_axis, dilation, state);
-    }
-
-    pub fn conv2d(
-        self: *ExecContext,
-        input: *const Tensor,
-        weight: *const Tensor,
-        bias: ?*const Tensor,
-        stride: [2]usize,
-        pad: [2]usize,
-        groups: usize,
-    ) !Tensor {
-        return exec_conv.conv2d(&self.rt, input, weight, bias, stride, pad, groups);
-    }
-
-    /// conv2d with the relu fused into the epilogue (identical values to
-    /// conv2d followed by relu; zero extra passes on the Winograd route).
-    /// Inference-path op — the facade guards the differentiable composition.
-    pub fn conv2dRelu(
-        self: *ExecContext,
-        input: *const Tensor,
-        weight: *const Tensor,
-        bias: ?*const Tensor,
-        stride: [2]usize,
-        pad: [2]usize,
-        groups: usize,
-    ) !Tensor {
-        return exec_conv.conv2dExt(&self.rt, input, weight, bias, stride, pad, groups, true);
-    }
+    pub const causalDepthwiseConv1dAxisRank = exec_conv.causalDepthwiseConv1dAxisRank;
+    pub const causalDepthwiseConv1dBackwardInputAxisRank = exec_conv.causalDepthwiseConv1dBackwardInputAxisRank;
+    pub const causalDepthwiseConv1dBackwardKernelAxisRank = exec_conv.causalDepthwiseConv1dBackwardKernelAxisRank;
+    pub const causalConv1dAxisRank = exec_conv.causalConv1dAxisRank;
+    pub const conv2d = exec_conv.conv2d;
+    pub const conv2dRelu = exec_conv.conv2dRelu;
 
     /// Load-time prepared Winograd conv weight planes; `.empty` is valid and
     /// inert on every conv route. See `exec/conv.zig PreparedConvWeights`.
     pub const PreparedConvWeights = exec_conv.PreparedConvWeights;
 
-    /// Build the Winograd weight-transform planes for a conv2d weight
-    /// (`[Cout, kH, kW, Cin/groups]`) once, at load time; `.empty` when the
-    /// weight can never take the Winograd route. See
-    /// `exec/conv.zig prepareConv2dWeights`.
-    pub fn prepareConv2dWeights(self: *ExecContext, weight: *const Tensor) !PreparedConvWeights {
-        return exec_conv.prepareConv2dWeights(&self.rt, weight);
-    }
-
-    /// conv2d against load-time prepared Winograd weight planes: bitwise
-    /// identical values to `conv2d`, minus the per-call weight transform on
-    /// the Winograd route. Every other route ignores `prepared`.
-    pub fn conv2dPrepared(
-        self: *ExecContext,
-        input: *const Tensor,
-        weight: *const Tensor,
-        prepared: *const PreparedConvWeights,
-        bias: ?*const Tensor,
-        stride: [2]usize,
-        pad: [2]usize,
-        groups: usize,
-    ) !Tensor {
-        return exec_conv.conv2dPreparedExt(&self.rt, input, weight, prepared, bias, stride, pad, groups, false);
-    }
-
-    /// `conv2dPrepared` with the relu fused into the epilogue (identical
-    /// values to `conv2dPrepared` followed by relu; see `conv2dRelu`).
-    pub fn conv2dPreparedRelu(
-        self: *ExecContext,
-        input: *const Tensor,
-        weight: *const Tensor,
-        prepared: *const PreparedConvWeights,
-        bias: ?*const Tensor,
-        stride: [2]usize,
-        pad: [2]usize,
-        groups: usize,
-    ) !Tensor {
-        return exec_conv.conv2dPreparedExt(&self.rt, input, weight, prepared, bias, stride, pad, groups, true);
-    }
-
-    pub fn conv2dBackwardInput(self: *ExecContext, gy: *const Tensor, weight: *const Tensor, in_h: usize, in_w: usize, stride: [2]usize, pad: [2]usize, groups: usize) !Tensor {
-        return exec_conv.conv2dBackwardInput(&self.rt, gy, weight, in_h, in_w, stride, pad, groups);
-    }
-
-    pub fn conv2dBackwardWeight(self: *ExecContext, input: *const Tensor, gy: *const Tensor, kh: usize, kw: usize, stride: [2]usize, pad: [2]usize, groups: usize) !Tensor {
-        return exec_conv.conv2dBackwardWeight(&self.rt, input, gy, kh, kw, stride, pad, groups);
-    }
-
-    /// Patch extraction `[H,W,Cin]` → `[oH·oW, kH·kW·Cin]` (the im2col
-    /// layout, `cin` fastest); the exact adjoint of `fold`. See `exec/conv.zig`.
-    pub fn unfold(self: *ExecContext, input: *const Tensor, kernel: [2]usize, stride: [2]usize, pad: [2]usize) !Tensor {
-        return exec_conv.unfold(&self.rt, input, kernel, stride, pad);
-    }
-
-    /// Overlap-accumulating patch scatter `[oH·oW, kH·kW·Cin]` → `[H,W,Cin]`
-    /// (col2im); the exact adjoint of `unfold`. See `exec/conv.zig`.
-    pub fn fold(self: *ExecContext, col: *const Tensor, output_size: [2]usize, kernel: [2]usize, stride: [2]usize, pad: [2]usize) !Tensor {
-        return exec_conv.fold(&self.rt, col, output_size, kernel, stride, pad);
-    }
+    pub const prepareConv2dWeights = exec_conv.prepareConv2dWeights;
+    pub const conv2dPrepared = exec_conv.conv2dPrepared;
+    pub const conv2dPreparedRelu = exec_conv.conv2dPreparedRelu;
+    pub const conv2dBackwardInput = exec_conv.conv2dBackwardInput;
+    pub const conv2dBackwardWeight = exec_conv.conv2dBackwardWeight;
+    pub const unfold = exec_conv.unfold;
+    pub const fold = exec_conv.fold;
 
     // ----------------------------------------------------------------------
     // pool: 2-D pooling and upsampling (exec/pool.zig)
     // ----------------------------------------------------------------------
-    /// 2-D max pool, channel-last rank-3 `[H,W,C]` → `[OH,OW,C]` (zero-pad
-    /// border reads as −inf). See `exec/pool.zig`.
-    pub fn maxPool2d(self: *ExecContext, input: *const Tensor, kernel: [2]usize, stride: [2]usize, pad: [2]usize) !Tensor {
-        return exec_pool.pool2d(&self.rt, .max, input, kernel, stride, pad);
-    }
-
-    /// 2-D average pool, channel-last rank-3; averages the valid taps only
-    /// (ONNX `count_include_pad=0`). See `exec/pool.zig`.
-    pub fn avgPool2d(self: *ExecContext, input: *const Tensor, kernel: [2]usize, stride: [2]usize, pad: [2]usize) !Tensor {
-        return exec_pool.pool2d(&self.rt, .avg, input, kernel, stride, pad);
-    }
-
-    pub fn maxPool2dBackward(self: *ExecContext, input: *const Tensor, gy: *const Tensor, kernel: [2]usize, stride: [2]usize, pad: [2]usize) !Tensor {
-        return exec_pool.maxPool2dBackward(&self.rt, input, gy, kernel, stride, pad);
-    }
-
-    pub fn avgPool2dBackward(self: *ExecContext, gy: *const Tensor, in_h: usize, in_w: usize, kernel: [2]usize, stride: [2]usize, pad: [2]usize) !Tensor {
-        return exec_pool.avgPool2dBackward(&self.rt, gy, in_h, in_w, kernel, stride, pad);
-    }
-
-    /// 2× nearest-neighbour upsample, channel-last rank-3 `[H,W,C]` → `[2H,2W,C]`.
-    pub fn upsample2xNearest(self: *ExecContext, input: *const Tensor) !Tensor {
-        return exec_pool.upsample2xNearest(&self.rt, input);
-    }
-
-    pub fn upsample2xNearestBackward(self: *ExecContext, gy: *const Tensor) !Tensor {
-        return exec_pool.upsample2xNearestBackward(&self.rt, gy);
-    }
+    pub const maxPool2d = exec_pool.maxPool2d;
+    pub const avgPool2d = exec_pool.avgPool2d;
+    pub const maxPool2dBackward = exec_pool.maxPool2dBackward;
+    pub const avgPool2dBackward = exec_pool.avgPool2dBackward;
+    pub const upsample2xNearest = exec_pool.upsample2xNearest;
+    pub const upsample2xNearestBackward = exec_pool.upsample2xNearestBackward;
 
     // ----------------------------------------------------------------------
     // elementwise: pointwise arithmetic, activations, masks, casts (exec/elementwise.zig)  [continued]
     // ----------------------------------------------------------------------
-    /// Per-channel PReLU (channel axis innermost): `y = x > 0 ? x : α[c]·x`.
-    pub fn preluChannels(self: *ExecContext, x: *const Tensor, alpha: *const Tensor) !Tensor {
-        return exec_elementwise.preluChannels(&self.rt, x, alpha);
-    }
-
-    pub fn preluChannelsBackwardInput(self: *ExecContext, gy: *const Tensor, x: *const Tensor, alpha: *const Tensor) !Tensor {
-        return exec_elementwise.preluChannelsBackwardInput(&self.rt, gy, x, alpha);
-    }
-
-    pub fn preluChannelsBackwardAlpha(self: *ExecContext, gy: *const Tensor, x: *const Tensor, channels: usize) !Tensor {
-        return exec_elementwise.preluChannelsBackwardAlpha(&self.rt, gy, x, channels);
-    }
-
-    /// Per-channel affine (frozen-stats inference BatchNorm) in one pass:
-    /// `y = x·scale[c] + shift[c]`, channel axis innermost; null `shift_vec`
-    /// degrades to the per-channel scale.
-    pub fn channelAffine(self: *ExecContext, x: *const Tensor, scale_vec: *const Tensor, shift_vec: ?*const Tensor) !Tensor {
-        return exec_elementwise.channelAffine(&self.rt, x, scale_vec, shift_vec);
-    }
+    pub const preluChannels = exec_elementwise.preluChannels;
+    pub const preluChannelsBackwardInput = exec_elementwise.preluChannelsBackwardInput;
+    pub const preluChannelsBackwardAlpha = exec_elementwise.preluChannelsBackwardAlpha;
+    pub const channelAffine = exec_elementwise.channelAffine;
 
     // ----------------------------------------------------------------------
     // conv: 1-D/2-D convolutions, im2col/col2im, Winograd (exec/conv.zig)  [continued]
     // ----------------------------------------------------------------------
-    pub fn causalConv1dBackwardInputAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        gy: *const Tensor,
-        weight: *const Tensor,
-        comptime time_axis: usize,
-        comptime channel_axis: usize,
-        dilation: usize,
-    ) !Tensor {
-        return exec_conv.causalConv1dBackwardInputAxisRank(&self.rt, rank, gy, weight, time_axis, channel_axis, dilation);
-    }
-
-    pub fn causalConv1dBackwardWeightAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        input: *const Tensor,
-        gy: *const Tensor,
-        comptime time_axis: usize,
-        comptime channel_axis: usize,
-        taps: usize,
-        dilation: usize,
-        state: ?[]const f32,
-    ) !Tensor {
-        return exec_conv.causalConv1dBackwardWeightAxisRank(&self.rt, rank, input, gy, time_axis, channel_axis, taps, dilation, state);
-    }
-
-    pub fn groupedCausalConv1dAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        input: *const Tensor,
-        weight: *const Tensor,
-        comptime time_axis: usize,
-        comptime channel_axis: usize,
-        dilation: usize,
-        groups: usize,
-        state: ?[]const f32,
-    ) !Tensor {
-        return exec_conv.groupedCausalConv1dAxisRank(&self.rt, rank, input, weight, time_axis, channel_axis, dilation, groups, state);
-    }
-
-    pub fn groupedCausalConv1dBackwardInputAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        gy: *const Tensor,
-        weight: *const Tensor,
-        comptime time_axis: usize,
-        comptime channel_axis: usize,
-        dilation: usize,
-        groups: usize,
-    ) !Tensor {
-        return exec_conv.groupedCausalConv1dBackwardInputAxisRank(&self.rt, rank, gy, weight, time_axis, channel_axis, dilation, groups);
-    }
-
-    pub fn groupedCausalConv1dBackwardWeightAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        input: *const Tensor,
-        gy: *const Tensor,
-        comptime time_axis: usize,
-        comptime channel_axis: usize,
-        taps: usize,
-        dilation: usize,
-        groups: usize,
-        state: ?[]const f32,
-    ) !Tensor {
-        return exec_conv.groupedCausalConv1dBackwardWeightAxisRank(&self.rt, rank, input, gy, time_axis, channel_axis, taps, dilation, groups, state);
-    }
-
-    pub fn conv1dAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        input: *const Tensor,
-        weight: *const Tensor,
-        comptime time_axis: usize,
-        comptime channel_axis: usize,
-        stride: usize,
-        pad: usize,
-        dilation: usize,
-        groups: usize,
-    ) !Tensor {
-        return exec_conv.conv1dAxisRank(&self.rt, rank, input, weight, time_axis, channel_axis, stride, pad, dilation, groups);
-    }
-
-    pub fn conv1dBackwardInputAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        gy: *const Tensor,
-        weight: *const Tensor,
-        comptime time_axis: usize,
-        comptime channel_axis: usize,
-        seq: usize,
-        stride: usize,
-        pad: usize,
-        dilation: usize,
-        groups: usize,
-    ) !Tensor {
-        return exec_conv.conv1dBackwardInputAxisRank(&self.rt, rank, gy, weight, time_axis, channel_axis, seq, stride, pad, dilation, groups);
-    }
-
-    pub fn conv1dBackwardWeightAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        input: *const Tensor,
-        gy: *const Tensor,
-        comptime time_axis: usize,
-        comptime channel_axis: usize,
-        taps: usize,
-        stride: usize,
-        pad: usize,
-        dilation: usize,
-        groups: usize,
-    ) !Tensor {
-        return exec_conv.conv1dBackwardWeightAxisRank(&self.rt, rank, input, gy, time_axis, channel_axis, taps, stride, pad, dilation, groups);
-    }
-
-    pub fn col2im1dAxisRank(
-        self: *ExecContext,
-        col: *const Tensor,
-        out_channels: usize,
-        taps: usize,
-        stride: usize,
-        pad: usize,
-        output_pad: usize,
-    ) !Tensor {
-        return exec_conv.col2im1dAxisRank(&self.rt, col, out_channels, taps, stride, pad, output_pad);
-    }
-
-    pub fn col2im1dBackwardAxisRank(
-        self: *ExecContext,
-        gy: *const Tensor,
-        t_in: usize,
-        out_channels: usize,
-        taps: usize,
-        stride: usize,
-        pad: usize,
-    ) !Tensor {
-        return exec_conv.col2im1dBackwardAxisRank(&self.rt, gy, t_in, out_channels, taps, stride, pad);
-    }
-
-    pub fn convTranspose1d(
-        self: *ExecContext,
-        input: *const Tensor,
-        weight2: *const Tensor,
-        bias: ?*const Tensor,
-        out_channels: usize,
-        taps: usize,
-        stride: usize,
-        pad: usize,
-        output_pad: usize,
-    ) !Tensor {
-        return exec_conv.convTranspose1d(&self.rt, input, weight2, bias, out_channels, taps, stride, pad, output_pad);
-    }
+    pub const causalConv1dBackwardInputAxisRank = exec_conv.causalConv1dBackwardInputAxisRank;
+    pub const causalConv1dBackwardWeightAxisRank = exec_conv.causalConv1dBackwardWeightAxisRank;
+    pub const groupedCausalConv1dAxisRank = exec_conv.groupedCausalConv1dAxisRank;
+    pub const groupedCausalConv1dBackwardInputAxisRank = exec_conv.groupedCausalConv1dBackwardInputAxisRank;
+    pub const groupedCausalConv1dBackwardWeightAxisRank = exec_conv.groupedCausalConv1dBackwardWeightAxisRank;
+    pub const conv1dAxisRank = exec_conv.conv1dAxisRank;
+    pub const conv1dBackwardInputAxisRank = exec_conv.conv1dBackwardInputAxisRank;
+    pub const conv1dBackwardWeightAxisRank = exec_conv.conv1dBackwardWeightAxisRank;
+    pub const col2im1dAxisRank = exec_conv.col2im1dAxisRank;
+    pub const col2im1dBackwardAxisRank = exec_conv.col2im1dBackwardAxisRank;
+    pub const convTranspose1d = exec_conv.convTranspose1d;
 
     // ----------------------------------------------------------------------
     // elementwise: pointwise arithmetic, activations, masks, casts (exec/elementwise.zig)  [continued]
     // ----------------------------------------------------------------------
-    pub fn unary(self: *ExecContext, comptime op: UnaryOp, x: *const Tensor) !Tensor {
-        return exec_elementwise.unary(&self.rt, op, x);
-    }
-
-    pub fn snakeRows(self: *ExecContext, x: *const Tensor, alpha: *const Tensor, inv_b: *const Tensor) !Tensor {
-        return exec_elementwise.snakeRows(&self.rt, x, alpha, inv_b);
-    }
-
-    pub fn snakeRowsBackwardInput(self: *ExecContext, x: *const Tensor, gy: *const Tensor, alpha: *const Tensor, inv_b: *const Tensor) !Tensor {
-        return exec_elementwise.snakeRowsBackwardInput(&self.rt, x, gy, alpha, inv_b);
-    }
-
-    pub fn snakeRowsBackwardParams(self: *ExecContext, x: *const Tensor, gy: *const Tensor, alpha: *const Tensor, inv_b: *const Tensor) !SnakeBackwardParamsResult {
-        return exec_elementwise.snakeRowsBackwardParams(&self.rt, x, gy, alpha, inv_b);
-    }
-
-    pub fn relu(self: *ExecContext, x: *const Tensor) !Tensor {
-        return exec_elementwise.relu(&self.rt, x);
-    }
-
-    pub fn leakyRelu(self: *ExecContext, x: *const Tensor, negative_slope: f32) !Tensor {
-        return exec_elementwise.leakyRelu(&self.rt, x, negative_slope);
-    }
-
-    pub fn exp(self: *ExecContext, x: *const Tensor) !Tensor {
-        return exec_elementwise.exp(&self.rt, x);
-    }
-
-    pub fn sqrt(self: *ExecContext, x: *const Tensor) !Tensor {
-        return exec_elementwise.sqrt(&self.rt, x);
-    }
-
-    pub fn rsqrt(self: *ExecContext, x: *const Tensor) !Tensor {
-        return exec_elementwise.rsqrt(&self.rt, x);
-    }
-
-    pub fn sigmoid(self: *ExecContext, x: *const Tensor) !Tensor {
-        return exec_elementwise.sigmoid(&self.rt, x);
-    }
-
-    pub fn silu(self: *ExecContext, x: *const Tensor) !Tensor {
-        return exec_elementwise.silu(&self.rt, x);
-    }
-
-    pub fn log(self: *ExecContext, x: *const Tensor) !Tensor {
-        return exec_elementwise.log(&self.rt, x);
-    }
-
-    pub fn neg(self: *ExecContext, x: *const Tensor) !Tensor {
-        return exec_elementwise.neg(&self.rt, x);
-    }
-
-    pub fn abs(self: *ExecContext, x: *const Tensor) !Tensor {
-        return exec_elementwise.abs(&self.rt, x);
-    }
-
-    pub fn sin(self: *ExecContext, x: *const Tensor) !Tensor {
-        return exec_elementwise.sin(&self.rt, x);
-    }
-
-    pub fn cos(self: *ExecContext, x: *const Tensor) !Tensor {
-        return exec_elementwise.cos(&self.rt, x);
-    }
-
-    pub fn tanh(self: *ExecContext, x: *const Tensor) !Tensor {
-        return exec_elementwise.tanh(&self.rt, x);
-    }
-
-    pub fn gelu(self: *ExecContext, x: *const Tensor) !Tensor {
-        return exec_elementwise.gelu(&self.rt, x);
-    }
-
-    pub fn quickGelu(self: *ExecContext, x: *const Tensor) !Tensor {
-        return exec_elementwise.quickGelu(&self.rt, x);
-    }
-
-    pub fn clamp(self: *ExecContext, x: *const Tensor, min_value: f32, max_value: f32) !Tensor {
-        return exec_elementwise.clamp(&self.rt, x, min_value, max_value);
-    }
+    pub const unary = exec_elementwise.unary;
+    pub const snakeRows = exec_elementwise.snakeRows;
+    pub const snakeRowsBackwardInput = exec_elementwise.snakeRowsBackwardInput;
+    pub const snakeRowsBackwardParams = exec_elementwise.snakeRowsBackwardParams;
+    pub const relu = exec_elementwise.relu;
+    pub const leakyRelu = exec_elementwise.leakyRelu;
+    pub const exp = exec_elementwise.exp;
+    pub const sqrt = exec_elementwise.sqrt;
+    pub const rsqrt = exec_elementwise.rsqrt;
+    pub const sigmoid = exec_elementwise.sigmoid;
+    pub const silu = exec_elementwise.silu;
+    pub const log = exec_elementwise.log;
+    pub const neg = exec_elementwise.neg;
+    pub const abs = exec_elementwise.abs;
+    pub const sin = exec_elementwise.sin;
+    pub const cos = exec_elementwise.cos;
+    pub const tanh = exec_elementwise.tanh;
+    pub const gelu = exec_elementwise.gelu;
+    pub const quickGelu = exec_elementwise.quickGelu;
+    pub const clamp = exec_elementwise.clamp;
 
     // ----------------------------------------------------------------------
     // reduce: sums, products, means, argmin/argmax, scans (exec/reduce.zig)
     // ----------------------------------------------------------------------
-    pub fn sum(self: *ExecContext, x: *const Tensor) !Tensor {
-        return exec_reduce.sum(&self.rt, x);
-    }
-
-    pub fn sumTyped(self: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype_mod.outputDType(.reduction, dtype)) {
-        return exec_reduce.sumTyped(&self.rt, dtype, x);
-    }
-
-    pub fn sumAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-        return exec_reduce.sumAxisRank(&self.rt, rank, x, axis);
-    }
-
-    pub fn sumAxisRankTyped(
-        self: *ExecContext,
-        comptime dtype: DType,
-        comptime rank: usize,
-        x: *const tensor.TensorOf(dtype),
-        comptime axis: usize,
-    ) !tensor.TensorOf(dtype_mod.outputDType(.reduction, dtype)) {
-        return exec_reduce.sumAxisRankTyped(&self.rt, dtype, rank, x, axis);
-    }
-
-    pub fn cumsumAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-        return exec_reduce.cumsumAxisRank(&self.rt, rank, x, axis);
-    }
-
-    pub fn prodAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-        return exec_reduce.prodAxisRank(&self.rt, rank, x, axis);
-    }
-
-    pub fn cumprodAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-        return exec_reduce.cumprodAxisRank(&self.rt, rank, x, axis);
-    }
-
-    pub fn cumsumReverseAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-        return exec_reduce.cumsumReverseAxisRank(&self.rt, rank, x, axis);
-    }
-
-    pub fn segmentSumAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, offsets: []const usize) !Tensor {
-        return exec_reduce.segmentSumAxisRank(&self.rt, rank, x, axis, offsets);
-    }
-
-    pub fn segmentBroadcastAxisRank(self: *ExecContext, comptime rank: usize, gy: *const Tensor, comptime axis: usize, offsets: []const usize, n: usize) !Tensor {
-        return exec_reduce.segmentBroadcastAxisRank(&self.rt, rank, gy, axis, offsets, n);
-    }
-
-    /// First-order linear recurrence `h_t = a_t·h_{t-1} + b_t` along `axis`
-    /// (`a` is a same-logical-shape, possibly zero-stride view; `initial`
-    /// holds one `h_{-1}` per lane). See `exec/reduce.zig`.
-    pub fn linearRecurrenceAxisRank(self: *ExecContext, comptime rank: usize, b: *const Tensor, a: *const Tensor, comptime axis: usize, initial: ?*const Tensor) !Tensor {
-        return exec_reduce.linearRecurrenceAxisRank(&self.rt, rank, b, a, axis, initial);
-    }
-
-    /// VJP of `linearRecurrenceAxisRank`: the reverse-scan `gb`, the
-    /// full-shape `da` (caller broadcast-reduces), and `dinitial`.
-    pub fn linearRecurrenceBackwardAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        gy: *const Tensor,
-        a: *const Tensor,
-        h: *const Tensor,
-        initial: ?*const Tensor,
-        comptime axis: usize,
-        want_da: bool,
-        want_dinitial: bool,
-    ) !exec_reduce.LinearRecurrenceGrads {
-        return exec_reduce.linearRecurrenceBackwardAxisRank(&self.rt, rank, gy, a, h, initial, axis, want_da, want_dinitial);
-    }
-
-    pub fn meanAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-        return exec_reduce.meanAxisRank(&self.rt, rank, x, axis);
-    }
-
-    /// Sum over `axis` of the elements `mask` selects (Fortran's
-    /// `sum(a, dim, mask)`). Lanes selecting nothing yield `empty orelse 0`.
-    pub fn sumMaskedAxisRank(
-        self: *ExecContext,
-        comptime mask_dtype: DType,
-        comptime rank: usize,
-        x: *const Tensor,
-        mask: *const tensor.TensorOf(mask_dtype),
-        comptime axis: usize,
-        empty_value: ?f32,
-    ) !Tensor {
-        return exec_reduce.sumMaskedAxisRank(&self.rt, mask_dtype, rank, x, mask, axis, empty_value);
-    }
-
-    /// Mean over `axis` of the elements `mask` selects, plus the per-lane
-    /// selected counts (the divisor the VJP needs). Lanes selecting nothing
-    /// yield `empty orelse NaN`.
-    pub fn meanMaskedAxisRank(
-        self: *ExecContext,
-        comptime mask_dtype: DType,
-        comptime rank: usize,
-        x: *const Tensor,
-        mask: *const tensor.TensorOf(mask_dtype),
-        comptime axis: usize,
-        empty_value: ?f32,
-    ) !MaskedMeanResult {
-        return exec_reduce.meanMaskedAxisRank(&self.rt, mask_dtype, rank, x, mask, axis, empty_value);
-    }
-
-    pub fn meanAxisRankTyped(
-        self: *ExecContext,
-        comptime dtype: DType,
-        comptime rank: usize,
-        x: *const tensor.TensorOf(dtype),
-        comptime axis: usize,
-    ) !tensor.TensorOf(dtype_mod.outputDType(.reduction, dtype)) {
-        return exec_reduce.meanAxisRankTyped(&self.rt, dtype, rank, x, axis);
-    }
+    pub const sum = exec_reduce.sum;
+    pub const sumTyped = exec_reduce.sumTyped;
+    pub const sumAxisRank = exec_reduce.sumAxisRank;
+    pub const sumAxisRankTyped = exec_reduce.sumAxisRankTyped;
+    pub const cumsumAxisRank = exec_reduce.cumsumAxisRank;
+    pub const prodAxisRank = exec_reduce.prodAxisRank;
+    pub const cumprodAxisRank = exec_reduce.cumprodAxisRank;
+    pub const cumsumReverseAxisRank = exec_reduce.cumsumReverseAxisRank;
+    pub const segmentSumAxisRank = exec_reduce.segmentSumAxisRank;
+    pub const segmentBroadcastAxisRank = exec_reduce.segmentBroadcastAxisRank;
+    pub const linearRecurrenceAxisRank = exec_reduce.linearRecurrenceAxisRank;
+    pub const linearRecurrenceBackwardAxisRank = exec_reduce.linearRecurrenceBackwardAxisRank;
+    pub const meanAxisRank = exec_reduce.meanAxisRank;
+    pub const sumMaskedAxisRank = exec_reduce.sumMaskedAxisRank;
+    pub const meanMaskedAxisRank = exec_reduce.meanMaskedAxisRank;
+    pub const meanAxisRankTyped = exec_reduce.meanAxisRankTyped;
 
     // ----------------------------------------------------------------------
     // gather/scatter: indexing, embedding lookups, strided views (exec/gather_scatter.zig)
     // ----------------------------------------------------------------------
-    pub fn narrowAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, start: usize, length: usize) !Tensor {
-        return exec_gather_scatter.narrowAxisRank(&self.rt, rank, x, axis, start, length);
-    }
-
-    pub fn narrowAxisRankTyped(
-        self: *ExecContext,
-        comptime dtype: DType,
-        comptime rank: usize,
-        x: *const tensor.TensorOf(dtype),
-        comptime axis: usize,
-        start: usize,
-        length: usize,
-    ) !tensor.TensorOf(dtype) {
-        return exec_gather_scatter.narrowAxisRankTyped(&self.rt, dtype, rank, x, axis, start, length);
-    }
-
-    pub fn concatAxisRank(self: *ExecContext, comptime rank: usize, inputs: []const *const Tensor, comptime axis: usize) !Tensor {
-        return exec_gather_scatter.concatAxisRank(&self.rt, rank, inputs, axis);
-    }
-
-    pub fn concatAxisRankTyped(
-        self: *ExecContext,
-        comptime dtype: DType,
-        comptime rank: usize,
-        inputs: []const *const tensor.TensorOf(dtype),
-        comptime axis: usize,
-    ) !tensor.TensorOf(dtype) {
-        return exec_gather_scatter.concatAxisRankTyped(&self.rt, dtype, rank, inputs, axis);
-    }
-
-    pub fn concatQuantizedRowsTyped(
-        self: *ExecContext,
-        comptime dtype: DType,
-        inputs: []const *const tensor.TensorOf(dtype),
-    ) !tensor.TensorOf(dtype) {
-        return exec_gather_scatter.concatQuantizedRowsTyped(&self.rt, dtype, inputs);
-    }
-
-    pub fn padAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, before: usize, after: usize, fill: f32) !Tensor {
-        return exec_gather_scatter.padAxisRank(&self.rt, rank, x, axis, before, after, fill);
-    }
-
-    pub fn gatherAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, indices: []const usize) !Tensor {
-        return exec_gather_scatter.gatherAxisRank(&self.rt, rank, x, axis, indices);
-    }
-
-    pub fn gatherAxisRankTyped(
-        self: *ExecContext,
-        comptime dtype: DType,
-        comptime rank: usize,
-        x: *const tensor.TensorOf(dtype),
-        comptime axis: usize,
-        indices: []const usize,
-    ) !tensor.TensorOf(dtype) {
-        return exec_gather_scatter.gatherAxisRankTyped(&self.rt, dtype, rank, x, axis, indices);
-    }
-
-    pub fn setSliceAxisRank(self: *ExecContext, comptime rank: usize, base: *const Tensor, update: *const Tensor, comptime axis: usize, start: usize) !Tensor {
-        return exec_gather_scatter.setSliceAxisRank(&self.rt, rank, base, update, axis, start);
-    }
-
-    pub fn setSliceAxisRankTyped(
-        self: *ExecContext,
-        comptime dtype: DType,
-        comptime rank: usize,
-        base: *const tensor.TensorOf(dtype),
-        update: *const tensor.TensorOf(dtype),
-        comptime axis: usize,
-        start: usize,
-    ) !tensor.TensorOf(dtype) {
-        return exec_gather_scatter.setSliceAxisRankTyped(&self.rt, dtype, rank, base, update, axis, start);
-    }
-
-    pub fn setRowsAxisRank(self: *ExecContext, comptime rank: usize, base: *const Tensor, update: *const Tensor, comptime axis: usize, indices: []const usize) !Tensor {
-        return exec_gather_scatter.setRowsAxisRank(&self.rt, rank, base, update, axis, indices);
-    }
-
-    pub fn setRowsAxisRankTyped(
-        self: *ExecContext,
-        comptime dtype: DType,
-        comptime rank: usize,
-        base: *const tensor.TensorOf(dtype),
-        update: *const tensor.TensorOf(dtype),
-        comptime axis: usize,
-        indices: []const usize,
-    ) !tensor.TensorOf(dtype) {
-        return exec_gather_scatter.setRowsAxisRankTyped(&self.rt, dtype, rank, base, update, axis, indices);
-    }
-
-    pub fn zeroSliceAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, start: usize, length: usize) !Tensor {
-        return exec_gather_scatter.zeroSliceAxisRank(&self.rt, rank, x, axis, start, length);
-    }
-
-    pub fn zeroRowsAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, indices: []const usize) !Tensor {
-        return exec_gather_scatter.zeroRowsAxisRank(&self.rt, rank, x, axis, indices);
-    }
-
-    pub fn sliceGradientAxisRank(self: *ExecContext, comptime rank: usize, grad: *const Tensor, source_shape: [rank]usize, comptime axis: usize, start: usize) !Tensor {
-        return exec_gather_scatter.sliceGradientAxisRank(&self.rt, rank, grad, source_shape, axis, start);
-    }
+    pub const narrowAxisRank = exec_gather_scatter.narrowAxisRank;
+    pub const narrowAxisRankTyped = exec_gather_scatter.narrowAxisRankTyped;
+    pub const concatAxisRank = exec_gather_scatter.concatAxisRank;
+    pub const concatAxisRankTyped = exec_gather_scatter.concatAxisRankTyped;
+    pub const concatQuantizedRowsTyped = exec_gather_scatter.concatQuantizedRowsTyped;
+    pub const padAxisRank = exec_gather_scatter.padAxisRank;
+    pub const gatherAxisRank = exec_gather_scatter.gatherAxisRank;
+    pub const gatherAxisRankTyped = exec_gather_scatter.gatherAxisRankTyped;
+    pub const setSliceAxisRank = exec_gather_scatter.setSliceAxisRank;
+    pub const setSliceAxisRankTyped = exec_gather_scatter.setSliceAxisRankTyped;
+    pub const setRowsAxisRank = exec_gather_scatter.setRowsAxisRank;
+    pub const setRowsAxisRankTyped = exec_gather_scatter.setRowsAxisRankTyped;
+    pub const zeroSliceAxisRank = exec_gather_scatter.zeroSliceAxisRank;
+    pub const zeroRowsAxisRank = exec_gather_scatter.zeroRowsAxisRank;
+    pub const sliceGradientAxisRank = exec_gather_scatter.sliceGradientAxisRank;
 
     // ----------------------------------------------------------------------
     // stats: normalization statistics, standardize, moments (exec/stats.zig)
     // ----------------------------------------------------------------------
-    pub fn argmaxAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !tensor.TensorOf(.i64) {
-        return exec_stats.argmaxAxisRank(&self.rt, rank, x, axis);
-    }
-
-    pub fn maxAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !TopKResult {
-        return exec_stats.maxAxisRank(&self.rt, rank, x, axis);
-    }
-
-    pub fn minAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !TopKResult {
-        return exec_stats.minAxisRank(&self.rt, rank, x, axis);
-    }
-
-    /// Max over `axis` of the elements `mask` selects (Fortran's
-    /// `maxval(a, dim, mask)`). Empty lanes take `empty orelse -inf` and index
-    /// -1 (the "no element participated" sentinel the masked VJP reads).
-    pub fn maxMaskedAxisRank(
-        self: *ExecContext,
-        comptime mask_dtype: DType,
-        comptime rank: usize,
-        x: *const Tensor,
-        mask: *const tensor.TensorOf(mask_dtype),
-        comptime axis: usize,
-        empty_value: ?f32,
-    ) !TopKResult {
-        return exec_stats.maxMaskedAxisRank(&self.rt, mask_dtype, rank, x, mask, axis, empty_value);
-    }
-
-    /// Min over `axis` of the elements `mask` selects; empty lanes take
-    /// `empty orelse +inf` and index -1. See `maxMaskedAxisRank`.
-    pub fn minMaskedAxisRank(
-        self: *ExecContext,
-        comptime mask_dtype: DType,
-        comptime rank: usize,
-        x: *const Tensor,
-        mask: *const tensor.TensorOf(mask_dtype),
-        comptime axis: usize,
-        empty_value: ?f32,
-    ) !TopKResult {
-        return exec_stats.minMaskedAxisRank(&self.rt, mask_dtype, rank, x, mask, axis, empty_value);
-    }
-
-    pub fn varAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, ddof: u1) !Tensor {
-        return exec_stats.varAxisRank(&self.rt, rank, x, axis, ddof);
-    }
-
-    pub fn standardizeAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        x: *const Tensor,
-        comptime axis: usize,
-        options: StandardizeOptions,
-    ) !Tensor {
-        return exec_stats.standardizeAxisRank(&self.rt, rank, x, axis, options);
-    }
-
-    pub fn standardizeAxisValidPrefixRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        x: *const Tensor,
-        comptime axis: usize,
-        valid_len: usize,
-        options: StandardizeOptions,
-    ) !Tensor {
-        return exec_stats.standardizeAxisValidPrefixRank(&self.rt, rank, x, axis, valid_len, options);
-    }
-
-    pub fn standardizeBackwardAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        x: *const Tensor,
-        gy: *const Tensor,
-        comptime axis: usize,
-        valid_len: ?usize,
-        options: StandardizeOptions,
-    ) !Tensor {
-        return exec_stats.standardizeBackwardAxisRank(&self.rt, rank, x, gy, axis, valid_len, options);
-    }
-
-    pub fn topKAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, k: usize) !TopKResult {
-        return exec_stats.topKAxisRank(&self.rt, rank, x, axis, k);
-    }
-
-    pub fn sortAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, descending: bool) !TopKResult {
-        return exec_stats.sortAxisRank(&self.rt, rank, x, axis, descending);
-    }
-
-    /// Router softmax over rank-2 `[row, expert]` logits, followed by top-k expert
-    /// selection per row. `probs` is per-row scratch of length >= expert count;
-    /// `selected` and `weights` are row-major `[row, k]` outputs.
-    pub fn routerTopK(
-        self: *ExecContext,
-        logits: *const Tensor,
-        k: usize,
-        options: RouterTopKOptions,
-        selected: []usize,
-        weights: []f32,
-    ) !void {
-        return exec_topk.routerTopK(&self.rt, logits, k, options, selected, weights);
-    }
+    pub const argmaxAxisRank = exec_stats.argmaxAxisRank;
+    pub const maxAxisRank = exec_stats.maxAxisRank;
+    pub const minAxisRank = exec_stats.minAxisRank;
+    pub const maxMaskedAxisRank = exec_stats.maxMaskedAxisRank;
+    pub const minMaskedAxisRank = exec_stats.minMaskedAxisRank;
+    pub const varAxisRank = exec_stats.varAxisRank;
+    pub const standardizeAxisRank = exec_stats.standardizeAxisRank;
+    pub const standardizeAxisValidPrefixRank = exec_stats.standardizeAxisValidPrefixRank;
+    pub const standardizeBackwardAxisRank = exec_stats.standardizeBackwardAxisRank;
+    pub const topKAxisRank = exec_stats.topKAxisRank;
+    pub const sortAxisRank = exec_stats.sortAxisRank;
+    pub const routerTopK = exec_topk.routerTopK;
 
     // ----------------------------------------------------------------------
     // gather/scatter: indexing, embedding lookups, strided views (exec/gather_scatter.zig)  [continued]
     // ----------------------------------------------------------------------
-    pub fn scatterAddAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        grad: *const Tensor,
-        source_shape: [rank]usize,
-        comptime axis: usize,
-        indices: []const usize,
-    ) !Tensor {
-        return exec_gather_scatter.scatterAddAxisRank(&self.rt, rank, grad, source_shape, axis, indices);
-    }
-
-    pub fn takeAlongAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        x: *const Tensor,
-        comptime axis: usize,
-        indices: []const usize,
-        out_axis_len: usize,
-    ) !Tensor {
-        return exec_gather_scatter.takeAlongAxisRank(&self.rt, rank, x, axis, indices, out_axis_len);
-    }
-
-    pub fn scatterAddAlongAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        base: *const Tensor,
-        src: *const Tensor,
-        comptime axis: usize,
-        indices: []const usize,
-    ) !Tensor {
-        return exec_gather_scatter.scatterAddAlongAxisRank(&self.rt, rank, base, src, axis, indices);
-    }
-
-    pub fn scatterAlongAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        base: *const Tensor,
-        src: *const Tensor,
-        comptime axis: usize,
-        indices: []const usize,
-    ) !Tensor {
-        return exec_gather_scatter.scatterAlongAxisRank(&self.rt, rank, base, src, axis, indices);
-    }
+    pub const scatterAddAxisRank = exec_gather_scatter.scatterAddAxisRank;
+    pub const takeAlongAxisRank = exec_gather_scatter.takeAlongAxisRank;
+    pub const scatterAddAlongAxisRank = exec_gather_scatter.scatterAddAlongAxisRank;
+    pub const scatterAlongAxisRank = exec_gather_scatter.scatterAlongAxisRank;
 
     // ----------------------------------------------------------------------
     // softmax family (exec/softmax.zig)
     // ----------------------------------------------------------------------
-    pub fn softmaxAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-        return exec_softmax.softmaxAxisRank(&self.rt, rank, x, axis);
-    }
-
-    pub fn logsumexpAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-        return exec_softmax.logsumexpAxisRank(&self.rt, rank, x, axis);
-    }
-
-    pub fn logSoftmaxAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-        return exec_softmax.logSoftmaxAxisRank(&self.rt, rank, x, axis);
-    }
-
-    pub fn softmaxExtAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, options: SoftmaxExtOptions) !Tensor {
-        return exec_softmax.softmaxExtAxisRank(&self.rt, rank, x, axis, options);
-    }
-
-    pub fn softmaxBackwardAxisRank(self: *ExecContext, comptime rank: usize, y: *const Tensor, gy: *const Tensor, comptime axis: usize) !Tensor {
-        return exec_softmax.softmaxBackwardAxisRank(&self.rt, rank, y, gy, axis);
-    }
-
-    pub fn softmaxExtBackwardAxisRank(self: *ExecContext, comptime rank: usize, y: *const Tensor, gy: *const Tensor, comptime axis: usize, scale_value: f32) !Tensor {
-        return exec_softmax.softmaxExtBackwardAxisRank(&self.rt, rank, y, gy, axis, scale_value);
-    }
+    pub const softmaxAxisRank = exec_softmax.softmaxAxisRank;
+    pub const logsumexpAxisRank = exec_softmax.logsumexpAxisRank;
+    pub const logSoftmaxAxisRank = exec_softmax.logSoftmaxAxisRank;
+    pub const softmaxExtAxisRank = exec_softmax.softmaxExtAxisRank;
+    pub const softmaxBackwardAxisRank = exec_softmax.softmaxBackwardAxisRank;
+    pub const softmaxExtBackwardAxisRank = exec_softmax.softmaxExtBackwardAxisRank;
 
     // ----------------------------------------------------------------------
     // norm: RMS/layer/group normalization and their fused arms (exec/norm.zig)
     // ----------------------------------------------------------------------
-    pub fn rmsNormAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
-        return exec_norm.rmsNormAxisRank(&self.rt, rank, x, axis, eps);
-    }
-
-    pub fn rmsNormMulAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, weight: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
-        return exec_norm.rmsNormMulAxisRank(&self.rt, rank, x, weight, axis, eps);
-    }
-
-    pub fn rmsNormMulAddAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, weight: *const Tensor, residual: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
-        return exec_norm.rmsNormMulAddAxisRank(&self.rt, rank, x, weight, residual, axis, eps);
-    }
-
-    pub fn rmsNormMulBackwardInputAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        x: *const Tensor,
-        weight: *const Tensor,
-        gy: *const Tensor,
-        comptime axis: usize,
-        eps: f32,
-    ) !Tensor {
-        return exec_norm.rmsNormMulBackwardInputAxisRank(&self.rt, rank, x, weight, gy, axis, eps);
-    }
-
-    pub fn rmsNormMulBackwardWeightAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        x: *const Tensor,
-        gy: *const Tensor,
-        comptime axis: usize,
-        eps: f32,
-    ) !Tensor {
-        return exec_norm.rmsNormMulBackwardWeightAxisRank(&self.rt, rank, x, gy, axis, eps);
-    }
-
-    pub fn rmsNormMulRopeAxisRankWithTable(
-        self: *ExecContext,
-        comptime rank: usize,
-        x: *const Tensor,
-        weight: *const Tensor,
-        comptime position_axis: usize,
-        comptime feature_axis: usize,
-        eps: f32,
-        table: *const RopeTable,
-        comptime mode: RopeMode,
-    ) !Tensor {
-        return exec_norm.rmsNormMulRopeAxisRankWithTable(&self.rt, rank, x, weight, position_axis, feature_axis, eps, table, mode);
-    }
-
-    pub fn rmsNormBackwardAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
-        return exec_norm.rmsNormBackwardAxisRank(&self.rt, rank, x, gy, axis, eps);
-    }
-
-    pub fn layerNormAffineRows(
-        self: *ExecContext,
-        input: []const f32,
-        rows: usize,
-        cols: usize,
-        weight: []const f32,
-        bias: []const f32,
-        eps: f32,
-    ) !Tensor {
-        return exec_norm.layerNormAffineRows(&self.rt, input, rows, cols, weight, bias, eps);
-    }
-
-    pub fn layerNormAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
-        return exec_norm.layerNormAxisRank(&self.rt, rank, x, axis, eps);
-    }
-
-    pub fn groupNormAxisRank(self: *ExecContext, x: *const Tensor, groups: usize, eps: f32, weight: ?*const Tensor, bias: ?*const Tensor) !Tensor {
-        return exec_norm.groupNormAxisRank(&self.rt, x, groups, eps, weight, bias);
-    }
-
-    pub fn groupNormBackwardAxisRank(
-        self: *ExecContext,
-        x: *const Tensor,
-        gy: *const Tensor,
-        groups: usize,
-        eps: f32,
-        weight: ?*const Tensor,
-        need_input: bool,
-        need_weight: bool,
-        need_bias: bool,
-    ) !GroupNormBackwardResult {
-        return exec_norm.groupNormBackwardAxisRank(&self.rt, x, gy, groups, eps, weight, need_input, need_weight, need_bias);
-    }
-
-    pub fn layerNormAffineAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        x: *const Tensor,
-        weight: *const Tensor,
-        bias: *const Tensor,
-        comptime axis: usize,
-        eps: f32,
-    ) !Tensor {
-        return exec_norm.layerNormAffineAxisRank(&self.rt, rank, x, weight, bias, axis, eps);
-    }
-
-    pub fn layerNormBackwardAxisRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
-        return exec_norm.layerNormBackwardAxisRank(&self.rt, rank, x, gy, axis, eps);
-    }
-
-    pub fn layerNormAffineBackwardAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        x: *const Tensor,
-        weight: *const Tensor,
-        gy: *const Tensor,
-        comptime axis: usize,
-        eps: f32,
-        need_input: bool,
-        need_weight: bool,
-        need_bias: bool,
-    ) !LayerNormAffineBackwardResult {
-        return exec_norm.layerNormAffineBackwardAxisRank(&self.rt, rank, x, weight, gy, axis, eps, need_input, need_weight, need_bias);
-    }
+    pub const rmsNormAxisRank = exec_norm.rmsNormAxisRank;
+    pub const rmsNormMulAxisRank = exec_norm.rmsNormMulAxisRank;
+    pub const rmsNormMulAddAxisRank = exec_norm.rmsNormMulAddAxisRank;
+    pub const rmsNormMulBackwardInputAxisRank = exec_norm.rmsNormMulBackwardInputAxisRank;
+    pub const rmsNormMulBackwardWeightAxisRank = exec_norm.rmsNormMulBackwardWeightAxisRank;
+    pub const rmsNormMulRopeAxisRankWithTable = exec_norm.rmsNormMulRopeAxisRankWithTable;
+    pub const rmsNormBackwardAxisRank = exec_norm.rmsNormBackwardAxisRank;
+    pub const layerNormAffineRows = exec_norm.layerNormAffineRows;
+    pub const layerNormAxisRank = exec_norm.layerNormAxisRank;
+    pub const groupNormAxisRank = exec_norm.groupNormAxisRank;
+    pub const groupNormBackwardAxisRank = exec_norm.groupNormBackwardAxisRank;
+    pub const layerNormAffineAxisRank = exec_norm.layerNormAffineAxisRank;
+    pub const layerNormBackwardAxisRank = exec_norm.layerNormBackwardAxisRank;
+    pub const layerNormAffineBackwardAxisRank = exec_norm.layerNormAffineBackwardAxisRank;
 
     // ----------------------------------------------------------------------
     // loss: cross-entropy family and reductions (exec/loss.zig)
     // ----------------------------------------------------------------------
-    pub fn crossEntropyLossAxisRank(self: *ExecContext, comptime rank: usize, logits: *const Tensor, comptime axis: usize, labels: []const usize) !Tensor {
-        return exec_loss.crossEntropyLossAxisRank(&self.rt, rank, logits, axis, labels);
-    }
-
-    pub fn crossEntropyLossExAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        logits: *const Tensor,
-        comptime axis: usize,
-        labels: []const usize,
-        options: CrossEntropyOptions,
-    ) !Tensor {
-        return exec_loss.crossEntropyLossExAxisRank(&self.rt, rank, logits, axis, labels, options);
-    }
-
-    pub fn crossEntropyLossExStatsAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        logits: *const Tensor,
-        comptime axis: usize,
-        labels: []const usize,
-        options: CrossEntropyOptions,
-        row_stats: ?[]f32,
-    ) !Tensor {
-        return exec_loss.crossEntropyLossExStatsAxisRank(&self.rt, rank, logits, axis, labels, options, row_stats);
-    }
-
-    pub fn crossEntropyBackwardAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        logits: *const Tensor,
-        comptime axis: usize,
-        labels: []const usize,
-        scale_value: f32,
-    ) !Tensor {
-        return exec_loss.crossEntropyBackwardAxisRank(&self.rt, rank, logits, axis, labels, scale_value);
-    }
-
-    pub fn crossEntropyBackwardExAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        logits: *const Tensor,
-        comptime axis: usize,
-        labels: []const usize,
-        options: CrossEntropyOptions,
-        scale_value: f32,
-        per_row_scale: ?[]const f32,
-    ) !Tensor {
-        return exec_loss.crossEntropyBackwardExAxisRank(&self.rt, rank, logits, axis, labels, options, scale_value, per_row_scale);
-    }
-
-    pub fn crossEntropyBackwardExStatsAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        logits: *const Tensor,
-        comptime axis: usize,
-        labels: []const usize,
-        options: CrossEntropyOptions,
-        scale_value: f32,
-        per_row_scale: ?[]const f32,
-        row_stats: ?[]const f32,
-    ) !Tensor {
-        return exec_loss.crossEntropyBackwardExStatsAxisRank(&self.rt, rank, logits, axis, labels, options, scale_value, per_row_scale, row_stats);
-    }
-
-    pub fn crossEntropyBackwardExUpstreamAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        logits: *const Tensor,
-        comptime axis: usize,
-        labels: []const usize,
-        options: CrossEntropyOptions,
-        gy: *const Tensor,
-    ) !Tensor {
-        return exec_loss.crossEntropyBackwardExUpstreamAxisRank(&self.rt, rank, logits, axis, labels, options, gy);
-    }
-
-    pub fn crossEntropyBackwardExUpstreamStatsAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        logits: *const Tensor,
-        comptime axis: usize,
-        labels: []const usize,
-        options: CrossEntropyOptions,
-        gy: *const Tensor,
-        row_stats: ?[]const f32,
-    ) !Tensor {
-        return exec_loss.crossEntropyBackwardExUpstreamStatsAxisRank(&self.rt, rank, logits, axis, labels, options, gy, row_stats);
-    }
-
-    /// DESTRUCTIVE in `logits` — see `exec_loss.linearCrossEntropyBackwardUpstream`.
-    pub fn linearCrossEntropyBackwardUpstream(
-        self: *ExecContext,
-        x: *const Tensor,
-        weight: *const Tensor,
-        logits: *Tensor,
-        labels: []const usize,
-        options: CrossEntropyOptions,
-        gy: *const Tensor,
-        row_stats: []const f32,
-        need_x: bool,
-        need_weight: bool,
-    ) !LinearCrossEntropyGrads {
-        return exec_loss.linearCrossEntropyBackwardUpstream(&self.rt, x, weight, logits, labels, options, gy, row_stats, need_x, need_weight);
-    }
-
-    pub fn linearDistillLossStats(
-        self: *ExecContext,
-        x: *const Tensor,
-        weight: *const Tensor,
-        rows: []const usize,
-        classes: []const usize,
-        probs: []const f32,
-        options: LinearDistillOptions,
-    ) !LinearDistillForward {
-        return exec_loss.linearDistillLossStats(&self.rt, x, weight, rows, classes, probs, options);
-    }
-
-    /// DESTRUCTIVE in `logits` — see `exec_loss.linearDistillBackwardUpstream`.
-    pub fn linearDistillBackwardUpstream(
-        self: *ExecContext,
-        x_sel: *const Tensor,
-        weight: *const Tensor,
-        logits: *Tensor,
-        sel_rows: []const usize,
-        row_count: usize,
-        local_rows: []const usize,
-        classes: []const usize,
-        probs: []const f32,
-        options: LinearDistillOptions,
-        gy: *const Tensor,
-        row_stats: []const f32,
-        need_x: bool,
-        need_weight: bool,
-    ) !LinearCrossEntropyGrads {
-        return exec_loss.linearDistillBackwardUpstream(&self.rt, x_sel, weight, logits, sel_rows, row_count, local_rows, classes, probs, options, gy, row_stats, need_x, need_weight);
-    }
-
-    pub fn mseLoss(self: *ExecContext, input: *const Tensor, target: *const Tensor, options: MseOptions) !Tensor {
-        return exec_loss.mseLoss(&self.rt, input, target, options);
-    }
-
-    pub fn mseBackwardUpstream(self: *ExecContext, input: *const Tensor, target: *const Tensor, options: MseOptions, gy: *const Tensor, wrt: LossWrt) !Tensor {
-        return exec_loss.mseBackwardUpstream(&self.rt, input, target, options, gy, wrt);
-    }
-
-    pub fn huberLoss(self: *ExecContext, input: *const Tensor, target: *const Tensor, options: HuberOptions) !Tensor {
-        return exec_loss.huberLoss(&self.rt, input, target, options);
-    }
-
-    pub fn huberBackwardUpstream(self: *ExecContext, input: *const Tensor, target: *const Tensor, options: HuberOptions, gy: *const Tensor, wrt: LossWrt) !Tensor {
-        return exec_loss.huberBackwardUpstream(&self.rt, input, target, options, gy, wrt);
-    }
-
-    pub fn bceLoss(self: *ExecContext, input: *const Tensor, target: *const Tensor, options: BceOptions) !Tensor {
-        return exec_loss.bceLoss(&self.rt, input, target, options);
-    }
-
-    pub fn bceBackwardUpstream(self: *ExecContext, input: *const Tensor, target: *const Tensor, options: BceOptions, gy: *const Tensor, wrt: LossWrt) !Tensor {
-        return exec_loss.bceBackwardUpstream(&self.rt, input, target, options, gy, wrt);
-    }
-
-    pub fn klDivLoss(self: *ExecContext, input: *const Tensor, target: *const Tensor, options: KlDivOptions) !Tensor {
-        return exec_loss.klDivLoss(&self.rt, input, target, options);
-    }
-
-    pub fn klDivBackwardUpstream(self: *ExecContext, input: *const Tensor, target: *const Tensor, options: KlDivOptions, gy: *const Tensor, wrt: LossWrt) !Tensor {
-        return exec_loss.klDivBackwardUpstream(&self.rt, input, target, options, gy, wrt);
-    }
+    pub const crossEntropyLossAxisRank = exec_loss.crossEntropyLossAxisRank;
+    pub const crossEntropyLossExAxisRank = exec_loss.crossEntropyLossExAxisRank;
+    pub const crossEntropyLossExStatsAxisRank = exec_loss.crossEntropyLossExStatsAxisRank;
+    pub const crossEntropyBackwardAxisRank = exec_loss.crossEntropyBackwardAxisRank;
+    pub const crossEntropyBackwardExAxisRank = exec_loss.crossEntropyBackwardExAxisRank;
+    pub const crossEntropyBackwardExStatsAxisRank = exec_loss.crossEntropyBackwardExStatsAxisRank;
+    pub const crossEntropyBackwardExUpstreamAxisRank = exec_loss.crossEntropyBackwardExUpstreamAxisRank;
+    pub const crossEntropyBackwardExUpstreamStatsAxisRank = exec_loss.crossEntropyBackwardExUpstreamStatsAxisRank;
+    pub const linearCrossEntropyBackwardUpstream = exec_loss.linearCrossEntropyBackwardUpstream;
+    pub const linearDistillLossStats = exec_loss.linearDistillLossStats;
+    pub const linearDistillBackwardUpstream = exec_loss.linearDistillBackwardUpstream;
+    pub const mseLoss = exec_loss.mseLoss;
+    pub const mseBackwardUpstream = exec_loss.mseBackwardUpstream;
+    pub const huberLoss = exec_loss.huberLoss;
+    pub const huberBackwardUpstream = exec_loss.huberBackwardUpstream;
+    pub const bceLoss = exec_loss.bceLoss;
+    pub const bceBackwardUpstream = exec_loss.bceBackwardUpstream;
+    pub const klDivLoss = exec_loss.klDivLoss;
+    pub const klDivBackwardUpstream = exec_loss.klDivBackwardUpstream;
 
     // ----------------------------------------------------------------------
     // rope: rotary tables and their fused application (exec/rope.zig)
     // ----------------------------------------------------------------------
-    pub fn ropeAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        x: *const Tensor,
-        comptime position_axis: usize,
-        comptime feature_axis: usize,
-        positions: []const i32,
-        theta_base: f32,
-        comptime mode: RopeMode,
-        comptime inverse: bool,
-    ) !Tensor {
-        return exec_rope.ropeAxisRank(&self.rt, rank, x, position_axis, feature_axis, positions, theta_base, mode, inverse);
-    }
-
-    pub fn prepareRopeTable(self: *ExecContext, positions: []const i32, feature_dim: usize, theta_base: f32, inverse: bool) !RopeTable {
-        return exec_rope.prepareRopeTable(&self.rt, positions, feature_dim, theta_base, inverse);
-    }
-
-    pub fn prepareRopeTableFactors(
-        self: *ExecContext,
-        positions: []const i32,
-        feature_dim: usize,
-        theta_base: f32,
-        inverse: bool,
-        freq_factors: ?[]const f32,
-    ) !RopeTable {
-        return exec_rope.prepareRopeTableFactors(&self.rt, positions, feature_dim, theta_base, inverse, freq_factors);
-    }
-
-    /// `prepareRopeTable` for one CONTIGUOUS run of positions, named by its
-    /// origin instead of materialized: `range` spans
-    /// `[range.origin, range.origin + range.len)`. Bitwise identical to
-    /// passing the same run as an array (see `exec/rope.zig`).
-    pub fn prepareRopeTableRange(self: *ExecContext, range: tensor.AxisRange, feature_dim: usize, theta_base: f32, inverse: bool) !RopeTable {
-        return exec_rope.prepareRopeTableRange(&self.rt, range, feature_dim, theta_base, inverse);
-    }
-
-    /// `prepareRopeTableFactors` over a contiguous position run; see
-    /// `prepareRopeTableRange`.
-    pub fn prepareRopeTableFactorsRange(
-        self: *ExecContext,
-        range: tensor.AxisRange,
-        feature_dim: usize,
-        theta_base: f32,
-        inverse: bool,
-        freq_factors: ?[]const f32,
-    ) !RopeTable {
-        return exec_rope.prepareRopeTableFactorsRange(&self.rt, range, feature_dim, theta_base, inverse, freq_factors);
-    }
-
-    /// Hand-fill a rope table for `count` consecutive positions from
-    /// caller-supplied per-pair inverse frequencies, with f64 angle
-    /// accumulation (see `exec/rope.zig`).
-    pub fn prepareRopeTableInvFreqsF64(self: *ExecContext, pos0: usize, count: usize, inv_freq: []const f64, inverse: bool) !RopeTable {
-        return exec_rope.prepareRopeTableInvFreqsF64(&self.rt, pos0, count, inv_freq, inverse);
-    }
-
-    /// DeepSeek-family YaRN inverse-frequency blend in f64 (see
-    /// `exec/rope.zig`); caller frees the returned slice.
-    pub fn yarnBlendInvFreqsF64(self: *ExecContext, dim: usize, base: f64, factor: f64, orig_ctx: usize) ![]f64 {
-        return exec_rope.yarnBlendInvFreqsF64(self.rt.allocator, dim, base, factor, orig_ctx);
-    }
-
-    pub fn ropeAxisRankWithTable(
-        self: *ExecContext,
-        comptime rank: usize,
-        x: *const Tensor,
-        comptime position_axis: usize,
-        comptime feature_axis: usize,
-        table: *const RopeTable,
-        comptime mode: RopeMode,
-    ) !Tensor {
-        return exec_rope.ropeAxisRankWithTable(&self.rt, rank, x, position_axis, feature_axis, table, mode);
-    }
-
-    pub fn ropePartialAxisRank(
-        self: *ExecContext,
-        comptime rank: usize,
-        x: *const Tensor,
-        comptime position_axis: usize,
-        comptime feature_axis: usize,
-        rotary_dim: usize,
-        positions: []const i32,
-        theta_base: f32,
-        comptime mode: RopeMode,
-        comptime inverse: bool,
-    ) !Tensor {
-        return exec_rope.ropePartialAxisRank(&self.rt, rank, x, position_axis, feature_axis, rotary_dim, positions, theta_base, mode, inverse);
-    }
-
-    pub fn ropePartialAxisRankWithTable(
-        self: *ExecContext,
-        comptime rank: usize,
-        x: *const Tensor,
-        comptime position_axis: usize,
-        comptime feature_axis: usize,
-        table: *const RopeTable,
-        comptime mode: RopeMode,
-    ) !Tensor {
-        return exec_rope.ropePartialAxisRankWithTable(&self.rt, rank, x, position_axis, feature_axis, table, mode);
-    }
+    pub const ropeAxisRank = exec_rope.ropeAxisRank;
+    pub const prepareRopeTable = exec_rope.prepareRopeTable;
+    pub const prepareRopeTableFactors = exec_rope.prepareRopeTableFactors;
+    pub const prepareRopeTableRange = exec_rope.prepareRopeTableRange;
+    pub const prepareRopeTableFactorsRange = exec_rope.prepareRopeTableFactorsRange;
+    pub const prepareRopeTableInvFreqsF64 = exec_rope.prepareRopeTableInvFreqsF64;
+    pub const yarnBlendInvFreqsF64 = exec_rope.yarnBlendInvFreqsF64;
+    pub const ropeAxisRankWithTable = exec_rope.ropeAxisRankWithTable;
+    pub const ropePartialAxisRank = exec_rope.ropePartialAxisRank;
+    pub const ropePartialAxisRankWithTable = exec_rope.ropePartialAxisRankWithTable;
 
     // ----------------------------------------------------------------------
     // attention: the fused forward/backward kernels (exec/attention.zig)
     // ----------------------------------------------------------------------
-    pub fn groupedCausalAttention(
-        self: *ExecContext,
-        q: *const Tensor,
-        k: *const Tensor,
-        v: *const Tensor,
-        kv_head_for_head: []const usize,
-        scale_value: f32,
-    ) !Tensor {
-        return exec_attention.groupedCausalAttention(&self.rt, q, k, v, kv_head_for_head, scale_value);
-    }
-
-    /// As `groupedCausalAttention` with a sliding-window `window` (0 = full
-    /// causal; else a query at absolute position `p` attends only keys in
-    /// `[max(0, p-window+1), p]`). Used by Gemma's local SWA layers.
-    pub fn groupedCausalAttentionWindowed(
-        self: *ExecContext,
-        q: *const Tensor,
-        k: *const Tensor,
-        v: *const Tensor,
-        kv_head_for_head: []const usize,
-        scale_value: f32,
-        window: usize,
-    ) !Tensor {
-        return exec_attention.groupedCausalAttentionWindowed(&self.rt, q, k, v, kv_head_for_head, scale_value, window);
-    }
-
-    /// Bidirectional (non-causal) grouped attention: every query row attends
-    /// EVERY key row.
-    pub fn groupedBidirectionalAttention(
-        self: *ExecContext,
-        q: *const Tensor,
-        k: *const Tensor,
-        v: *const Tensor,
-        kv_head_for_head: []const usize,
-        scale_value: f32,
-    ) !Tensor {
-        return exec_attention.groupedBidirectionalAttention(&self.rt, q, k, v, kv_head_for_head, scale_value);
-    }
-
-    /// As `groupedBidirectionalAttention` with an additive f32 `bias`
-    /// `[q_seq, kv_seq]` added to the scaled pre-softmax scores (an additive
-    /// soft bias, ggml_soft_max_ext mask semantics — NOT -inf masking).
-    /// OmniVoice's uncond CFG row.
-    pub fn groupedBidirectionalAttentionBiased(
-        self: *ExecContext,
-        q: *const Tensor,
-        k: *const Tensor,
-        v: *const Tensor,
-        kv_head_for_head: []const usize,
-        scale_value: f32,
-        bias: *const Tensor,
-    ) !Tensor {
-        return exec_attention.groupedBidirectionalAttentionBiased(&self.rt, q, k, v, kv_head_for_head, scale_value, bias);
-    }
-
-    /// As the f32 grouped attention forwards (`causal`/`window` select the
-    /// variant) additionally recording per-(head, query) softmax
-    /// {max, sum_exp} statistics (heads * q_seq * 2 interleaved f32) — the
-    /// output is BITWISE identical to the stats-less entries; the stats feed
-    /// `groupedCausalAttentionBackward`.
-    pub fn groupedCausalAttentionStatsOut(
-        self: *ExecContext,
-        q: *const Tensor,
-        k: *const Tensor,
-        v: *const Tensor,
-        kv_head_for_head: []const usize,
-        scale_value: f32,
-        window: usize,
-        causal: bool,
-        stats: []f32,
-    ) !Tensor {
-        return exec_attention.groupedCausalAttentionStatsOut(&self.rt, q, k, v, kv_head_for_head, scale_value, window, causal, stats);
-    }
-
-    /// `stats` (optional): forward-saved {max, sum_exp} pairs from
-    /// `groupedCausalAttentionStatsOut` (heads * q_seq * 2), consumed by the
-    /// GEMM route (FUCINA_NO_ATTN_BWD_STATS pins the recompute route).
-    pub fn groupedCausalAttentionBackward(
-        self: *ExecContext,
-        q: *const Tensor,
-        k: *const Tensor,
-        v: *const Tensor,
-        gy: *const Tensor,
-        kv_head_for_head: []const usize,
-        scale_value: f32,
-        window: usize,
-        causal: bool,
-        stats: ?[]const f32,
-        out: ?*const Tensor,
-        need_q: bool,
-        need_k: bool,
-        need_v: bool,
-    ) !GroupedCausalAttentionBackwardResult {
-        return exec_attention.groupedCausalAttentionBackward(&self.rt, q, k, v, gy, kv_head_for_head, scale_value, window, causal, stats, out, need_q, need_k, need_v);
-    }
-
-    /// Same as `groupedCausalAttention` but the cached K/V are f16 (decode KV
-    /// cache): half the bandwidth, widened to f32 in the kernel. Q and the
-    /// output stay f32.
-    pub fn groupedCausalAttentionF16Kv(
-        self: *ExecContext,
-        q: *const Tensor,
-        k: *const tensor.TensorOf(.f16),
-        v: *const tensor.TensorOf(.f16),
-        kv_head_for_head: []const usize,
-        scale_value: f32,
-    ) !Tensor {
-        return exec_attention.groupedCausalAttentionF16Kv(&self.rt, q, k, v, kv_head_for_head, scale_value);
-    }
-
-    /// f16-KV bidirectional attention (see `groupedBidirectionalAttention`):
-    /// the block-diffusion canvas pass over a prefix+canvas f16 KV cache.
-    pub fn groupedBidirectionalAttentionF16Kv(
-        self: *ExecContext,
-        q: *const Tensor,
-        k: *const tensor.TensorOf(.f16),
-        v: *const tensor.TensorOf(.f16),
-        kv_head_for_head: []const usize,
-        scale_value: f32,
-    ) !Tensor {
-        return exec_attention.groupedBidirectionalAttentionF16Kv(&self.rt, q, k, v, kv_head_for_head, scale_value);
-    }
-
-    /// f16-KV decode attention with a sliding `window` (see
-    /// `groupedCausalAttentionWindowed`).
-    pub fn groupedCausalAttentionF16KvWindowed(
-        self: *ExecContext,
-        q: *const Tensor,
-        k: *const tensor.TensorOf(.f16),
-        v: *const tensor.TensorOf(.f16),
-        kv_head_for_head: []const usize,
-        scale_value: f32,
-        window: usize,
-    ) !Tensor {
-        return exec_attention.groupedCausalAttentionF16KvWindowed(&self.rt, q, k, v, kv_head_for_head, scale_value, window);
-    }
-
-    /// Same as `groupedCausalAttention` but the cached K/V are q8_0 blocks
-    /// (the quantized decode KV cache). Q and the output stay f32.
-    pub fn groupedCausalAttentionQ8Kv(
-        self: *ExecContext,
-        q: *const Tensor,
-        k_blocks: []const BlockQ8_0,
-        v_blocks: []const BlockQ8_0,
-        kv_seq: usize,
-        kv_heads: usize,
-        kv_head_for_head: []const usize,
-        scale_value: f32,
-    ) !Tensor {
-        return exec_attention.groupedCausalAttentionQ8Kv(&self.rt, q, k_blocks, v_blocks, kv_seq, kv_heads, kv_head_for_head, scale_value);
-    }
-
-    /// q8_0-KV attention with a sliding `window` (see
-    /// `groupedCausalAttentionWindowed`).
-    pub fn groupedCausalAttentionQ8KvWindowed(
-        self: *ExecContext,
-        q: *const Tensor,
-        k_blocks: []const BlockQ8_0,
-        v_blocks: []const BlockQ8_0,
-        kv_seq: usize,
-        kv_heads: usize,
-        kv_head_for_head: []const usize,
-        scale_value: f32,
-        window: usize,
-    ) !Tensor {
-        return exec_attention.groupedCausalAttentionQ8KvWindowed(&self.rt, q, k_blocks, v_blocks, kv_seq, kv_heads, kv_head_for_head, scale_value, window);
-    }
-
-    /// Ragged multi-stream decode attention over per-stream f16 KV caches
-    /// (batch-N decode): query row `s` of `q` `[n_streams, heads, d]`
-    /// attends all `lens[s]` cached positions of `ks[s]`/`vs[s]`. Runs the
-    /// same per-query kernels as m=1 decode — per-stream results are
-    /// bit-identical to N single-stream `groupedCausalAttentionF16Kv` calls.
-    pub fn groupedCausalAttentionMultiF16Kv(
-        self: *ExecContext,
-        q: *const Tensor,
-        ks: []const []const f16,
-        vs: []const []const f16,
-        lens: []const usize,
-        kv_heads: usize,
-        kv_head_for_head: []const usize,
-        scale_value: f32,
-    ) !Tensor {
-        return exec_attention.groupedCausalAttentionMultiF16Kv(&self.rt, q, ks, vs, lens, kv_heads, kv_head_for_head, scale_value);
-    }
-
-    /// As `groupedCausalAttentionMultiF16Kv` for q8_0 caches (per-stream
-    /// `kBlocks`/`vBlocks` slices).
-    pub fn groupedCausalAttentionMultiQ8Kv(
-        self: *ExecContext,
-        q: *const Tensor,
-        ks: []const []const BlockQ8_0,
-        vs: []const []const BlockQ8_0,
-        lens: []const usize,
-        kv_heads: usize,
-        kv_head_for_head: []const usize,
-        scale_value: f32,
-    ) !Tensor {
-        return exec_attention.groupedCausalAttentionMultiQ8Kv(&self.rt, q, ks, vs, lens, kv_heads, kv_head_for_head, scale_value);
-    }
-
-    pub fn dot(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_matmul.dot(&self.rt, a, b);
-    }
-
-    pub fn dotTyped(self: *ExecContext, comptime dtype: DType, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)) {
-        return exec_matmul.dotTyped(&self.rt, dtype, a, b);
-    }
-
-    pub fn matmul(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-        return self.matmul2D(a, b);
-    }
-
-    pub fn matmulTyped(self: *ExecContext, comptime dtype: DType, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)) {
-        return self.matmul2DTyped(dtype, a, b);
-    }
-
-    pub fn matmul2D(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_matmul.matmul2DDispatch(&self.rt, .plain, a, b);
-    }
-
-    /// base + a·b in one accumulate GEMM (see `exec_matmul.matmul2DAdd`).
-    pub fn matmul2DAdd(self: *ExecContext, a: *const Tensor, b: *const Tensor, base: *const Tensor) !Tensor {
-        return exec_matmul.matmul2DAdd(&self.rt, a, b, base);
-    }
-
-    /// Fused delta-rule linear-attention recurrence (KDA; see
-    /// `exec/delta_attention.zig` for the equations and layouts).
-    pub fn kdaRecurrent(
-        self: *ExecContext,
-        q: *const Tensor,
-        k: *const Tensor,
-        v: *const Tensor,
-        g_raw: *const Tensor,
-        beta_raw: *const Tensor,
-        a_log: []const f32,
-        dt_bias: []const f32,
-        initial_state: ?*const Tensor,
-        scale_value: f32,
-    ) !delta_attention.KdaResult {
-        return delta_attention.kdaRecurrent(&self.rt, q, k, v, g_raw, beta_raw, a_log, dt_bias, initial_state, scale_value);
-    }
+    pub const groupedCausalAttention = exec_attention.groupedCausalAttention;
+    pub const groupedCausalAttentionWindowed = exec_attention.groupedCausalAttentionWindowed;
+    pub const groupedBidirectionalAttention = exec_attention.groupedBidirectionalAttention;
+    pub const groupedBidirectionalAttentionBiased = exec_attention.groupedBidirectionalAttentionBiased;
+    pub const groupedCausalAttentionStatsOut = exec_attention.groupedCausalAttentionStatsOut;
+    pub const groupedCausalAttentionBackward = exec_attention.groupedCausalAttentionBackward;
+    pub const groupedCausalAttentionF16Kv = exec_attention.groupedCausalAttentionF16Kv;
+    pub const groupedBidirectionalAttentionF16Kv = exec_attention.groupedBidirectionalAttentionF16Kv;
+    pub const groupedCausalAttentionF16KvWindowed = exec_attention.groupedCausalAttentionF16KvWindowed;
+    pub const groupedCausalAttentionQ8Kv = exec_attention.groupedCausalAttentionQ8Kv;
+    pub const groupedCausalAttentionQ8KvWindowed = exec_attention.groupedCausalAttentionQ8KvWindowed;
+    pub const groupedCausalAttentionMultiF16Kv = exec_attention.groupedCausalAttentionMultiF16Kv;
+    pub const groupedCausalAttentionMultiQ8Kv = exec_attention.groupedCausalAttentionMultiQ8Kv;
+    pub const dot = exec_matmul.dot;
+    pub const dotTyped = exec_matmul.dotTyped;
+    pub const matmul = exec_matmul.matmul2D;
+    pub const matmulTyped = exec_matmul.matmul2DTyped;
+    pub const matmul2D = exec_matmul.matmul2D;
+    pub const matmul2DAdd = exec_matmul.matmul2DAdd;
+    pub const kdaRecurrent = delta_attention.kdaRecurrent;
 
     // ----------------------------------------------------------------------
     // matmul: dense contractions, batched and packed (exec/matmul.zig)
     // ----------------------------------------------------------------------
-    pub fn matmul2DTyped(self: *ExecContext, comptime dtype: DType, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)) {
-        return exec_matmul.matmul2DTyped(&self.rt, dtype, a, b);
-    }
-
-    pub fn packMatmulRhsTyped(self: *ExecContext, comptime dtype: DType, rhs: *const tensor.TensorOf(dtype)) !backend_mod.PackedMatmulRhsFor(dtype) {
-        return exec_matmul.packMatmulRhsTyped(&self.rt, dtype, rhs);
-    }
-
-    pub fn packDenseMatmulRhsTyped(self: *ExecContext, comptime dtype: DType, rhs: *const tensor.TensorOf(dtype)) !backend_mod.PackedDenseRhs {
-        return exec_matmul.packDenseMatmulRhsTyped(&self.rt, dtype, rhs);
-    }
-
-    pub fn matmul2DWithPackedDenseRhs(self: *ExecContext, a: *const Tensor, rhs: *const backend_mod.PackedDenseRhs) !Tensor {
-        return exec_matmul.matmul2DWithPackedDenseRhs(&self.rt, a, rhs);
-    }
-
-    pub fn matmul2DWithPackedDenseRhsInto(self: *ExecContext, out: *Tensor, a: *const Tensor, rhs: *const backend_mod.PackedDenseRhs) !void {
-        return exec_matmul.matmul2DWithPackedDenseRhsInto(&self.rt, out, a, rhs);
-    }
-
-    pub fn matmul2DWithPackedRhsTyped(
-        self: *ExecContext,
-        comptime dtype: DType,
-        a: *const tensor.TensorOf(dtype),
-        rhs: *const backend_mod.PackedMatmulRhsFor(dtype),
-    ) !tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)) {
-        return exec_matmul.matmul2DWithPackedRhsTyped(&self.rt, dtype, a, rhs);
-    }
+    pub const matmul2DTyped = exec_matmul.matmul2DTyped;
+    pub const packMatmulRhsTyped = exec_matmul.packMatmulRhsTyped;
+    pub const packDenseMatmulRhsTyped = exec_matmul.packDenseMatmulRhsTyped;
+    pub const matmul2DWithPackedDenseRhs = exec_matmul.matmul2DWithPackedDenseRhs;
+    pub const matmul2DWithPackedDenseRhsInto = exec_matmul.matmul2DWithPackedDenseRhsInto;
+    pub const matmul2DWithPackedRhsTyped = exec_matmul.matmul2DWithPackedRhsTyped;
 
     // ----------------------------------------------------------------------
     // quantized matmul: per-format dense and decode arms (exec/quant_matmul.zig)
     // ----------------------------------------------------------------------
-    pub fn dequantizeTensorTyped(self: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !Tensor {
-        return exec_quant_matmul.dequantizeTensorTyped(&self.rt, dtype, x);
-    }
-
-    pub fn getRowsQuantizedTyped(self: *ExecContext, comptime dtype: DType, table: *const tensor.TensorOf(dtype), indices: []const usize) !Tensor {
-        return exec_quant_matmul.getRowsQuantizedTyped(&self.rt, dtype, table, indices);
-    }
-
-    // f32 activations [m, k] x block-quantized RHS weights stored as [n, k]
-    // row blocks -> f32 [m, n]. This is the public Tensor-backed path; GGUF
-    // loading will populate these block-quantized tensors directly.
-    pub fn matmul2DWithQuantizedTensorRhs(
-        self: *ExecContext,
-        comptime rhs_dtype: DType,
-        a: *const Tensor,
-        rhs: *const tensor.TensorOf(rhs_dtype),
-    ) !Tensor {
-        return exec_quant_matmul.matmul2DWithQuantizedTensorRhs(&self.rt, rhs_dtype, a, rhs);
-    }
-
-    pub fn matmul2DWithQuantizedTensorRhsOptions(
-        self: *ExecContext,
-        comptime rhs_dtype: DType,
-        a: *const Tensor,
-        rhs: *const tensor.TensorOf(rhs_dtype),
-        options: QuantizedMatmulOptions,
-    ) !Tensor {
-        return exec_quant_matmul.matmul2DWithQuantizedTensorRhsOptions(&self.rt, rhs_dtype, a, rhs, options);
-    }
-
-    pub fn matmul2DWithQuantizedBlocksRhs(
-        self: *ExecContext,
-        comptime rhs_dtype: DType,
-        a: *const Tensor,
-        blocks: []const dtype_mod.Storage(rhs_dtype),
-        n: usize,
-        k: usize,
-    ) !Tensor {
-        return exec_quant_matmul.matmul2DWithQuantizedBlocksRhs(&self.rt, rhs_dtype, a, blocks, n, k);
-    }
-
-    pub fn matmul2DWithQuantizedBlocksRhsOptions(
-        self: *ExecContext,
-        comptime rhs_dtype: DType,
-        a: *const Tensor,
-        blocks: []const dtype_mod.Storage(rhs_dtype),
-        n: usize,
-        k: usize,
-        options: QuantizedMatmulOptions,
-    ) !Tensor {
-        return exec_quant_matmul.matmul2DWithQuantizedBlocksRhsOptions(&self.rt, rhs_dtype, a, blocks, n, k, options);
-    }
-
-    pub fn packMatmulRhsQ8_0x4(self: *ExecContext, rhs: *const tensor.TensorOf(.q8_0)) !backend_mod.QuantizedMatmulRhsQ8_0x4 {
-        return exec_quant_matmul.packMatmulRhsQ8_0x4(&self.rt, rhs);
-    }
-
-    pub fn packMatmulRhsQ6_Kx4(self: *ExecContext, rhs: *const tensor.TensorOf(.q6_k)) !backend_mod.QuantizedMatmulRhsQ6_Kx4 {
-        return exec_quant_matmul.packMatmulRhsQ6_Kx4(&self.rt, rhs);
-    }
-
-    pub fn packMatmulRhsQ4_Kx4(self: *ExecContext, rhs: *const tensor.TensorOf(.q4_k)) !backend_mod.QuantizedMatmulRhsQ4_Kx4 {
-        return exec_quant_matmul.packMatmulRhsQ4_Kx4(&self.rt, rhs);
-    }
-
-    pub fn packMatmulRhsQ4_Kx8(self: *ExecContext, rhs: *const tensor.TensorOf(.q4_k)) !backend_mod.QuantizedMatmulRhsQ4_Kx8 {
-        return exec_quant_matmul.packMatmulRhsQ4_Kx8(&self.rt, rhs);
-    }
-
-    pub fn packMatmulRhsQ4_Kx2Mmla(self: *ExecContext, rhs: *const tensor.TensorOf(.q4_k)) !backend_mod.QuantizedMatmulRhsQ4_Kx2Mmla {
-        return exec_quant_matmul.packMatmulRhsQ4_Kx2Mmla(&self.rt, rhs);
-    }
-
-    pub fn packMatmulRhsQ5_Kx8(self: *ExecContext, rhs: *const tensor.TensorOf(.q5_k)) !backend_mod.QuantizedMatmulRhsQ5_Kx8 {
-        return exec_quant_matmul.packMatmulRhsQ5_Kx8(&self.rt, rhs);
-    }
-
-    pub fn matmul2DWithPackedQ8_0x4Rhs(self: *ExecContext, a: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4) !Tensor {
-        return exec_quant_matmul.matmul2DWithPackedQ8_0x4Rhs(&self.rt, a, rhs);
-    }
-
-    pub fn rmsNormMulMatmul2DWithPackedQ8_0x4Rhs(self: *ExecContext, x: *const Tensor, norm_weights: *const Tensor, eps: f32, rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4) !Tensor {
-        return exec_quant_matmul.rmsNormMulMatmul2DWithPackedQ8_0x4Rhs(&self.rt, x, norm_weights, eps, rhs);
-    }
-
-    pub fn rmsNormMulMatmul2DWithPackedQ4_Kx8Rhs(self: *ExecContext, x: *const Tensor, norm_weights: *const Tensor, eps: f32, rhs: *const backend_mod.QuantizedMatmulRhsQ4_Kx8) !Tensor {
-        return exec_quant_matmul.rmsNormMulMatmul2DWithPackedQ4_Kx8Rhs(&self.rt, x, norm_weights, eps, rhs);
-    }
-
-    pub fn rmsNormMulMatmul2DWithPackedQ5_Kx8Rhs(self: *ExecContext, x: *const Tensor, norm_weights: *const Tensor, eps: f32, rhs: *const backend_mod.QuantizedMatmulRhsQ5_Kx8) !Tensor {
-        return exec_quant_matmul.rmsNormMulMatmul2DWithPackedQ5_Kx8Rhs(&self.rt, x, norm_weights, eps, rhs);
-    }
-
-    pub fn rmsNormMulMatmul2DWithPackedQ6_Kx4Rhs(self: *ExecContext, x: *const Tensor, norm_weights: *const Tensor, eps: f32, rhs: *const backend_mod.QuantizedMatmulRhsQ6_Kx4) !Tensor {
-        return exec_quant_matmul.rmsNormMulMatmul2DWithPackedQ6_Kx4Rhs(&self.rt, x, norm_weights, eps, rhs);
-    }
-
-    pub fn splitSwiGluMatmul2DWithPackedQ8_0x4Rhs(
-        self: *ExecContext,
-        gate_up: *const Tensor,
-        rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4,
-    ) !Tensor {
-        return exec_quant_matmul.splitSwiGluMatmul2DWithPackedQ8_0x4Rhs(&self.rt, gate_up, rhs);
-    }
-
-    pub fn splitSwiGluMatmul2DWithPackedQ4_Kx8Rhs(self: *ExecContext, gate_up: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ4_Kx8) !Tensor {
-        return exec_quant_matmul.splitSwiGluMatmul2DWithPackedQ4_Kx8Rhs(&self.rt, gate_up, rhs);
-    }
-
-    pub fn splitSwiGluMatmul2DWithPackedQ5_Kx8Rhs(self: *ExecContext, gate_up: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ5_Kx8) !Tensor {
-        return exec_quant_matmul.splitSwiGluMatmul2DWithPackedQ5_Kx8Rhs(&self.rt, gate_up, rhs);
-    }
-
-    pub fn splitSwiGluMatmul2DWithPackedQ6_Kx4Rhs(self: *ExecContext, gate_up: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ6_Kx4) !Tensor {
-        return exec_quant_matmul.splitSwiGluMatmul2DWithPackedQ6_Kx4Rhs(&self.rt, gate_up, rhs);
-    }
-
-    /// Fused GeGLU (`up * geluQuant(gate)`, ggml f16-LUT semantics) + Q8_0 LHS
-    /// quantization + packed Q8_0x4 GEMM, for separate gate/up projections.
-    /// Bit-identical to unary(.gelu_quant) + mul + the packed dot, without
-    /// materializing the activation tensors.
-    pub fn gegluQuantMatmul2DWithPackedQ8_0x4Rhs(self: *ExecContext, gate: *const Tensor, up: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4) !Tensor {
-        return exec_quant_matmul.gegluQuantMatmul2DWithPackedQ8_0x4Rhs(&self.rt, gate, up, rhs);
-    }
-
-    pub fn matmul2DWithPackedQ6_Kx4Rhs(self: *ExecContext, a: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ6_Kx4) !Tensor {
-        return exec_quant_matmul.matmul2DWithPackedQ6_Kx4Rhs(&self.rt, a, rhs);
-    }
-
-    pub fn matmul2DWithPackedQ4_Kx4Rhs(self: *ExecContext, a: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ4_Kx4) !Tensor {
-        return exec_quant_matmul.matmul2DWithPackedQ4_Kx4Rhs(&self.rt, a, rhs);
-    }
-
-    pub fn matmul2DWithPackedQ4_Kx8Rhs(self: *ExecContext, a: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ4_Kx8) !Tensor {
-        return exec_quant_matmul.matmul2DWithPackedQ4_Kx8Rhs(&self.rt, a, rhs);
-    }
-
-    pub fn matmul2DWithPackedQ4_Kx2MmlaRhs(self: *ExecContext, a: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ4_Kx2Mmla) !Tensor {
-        return exec_quant_matmul.matmul2DWithPackedQ4_Kx2MmlaRhs(&self.rt, a, rhs);
-    }
-
-    pub fn matmul2DWithPackedQ5_Kx8Rhs(self: *ExecContext, a: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ5_Kx8) !Tensor {
-        return exec_quant_matmul.matmul2DWithPackedQ5_Kx8Rhs(&self.rt, a, rhs);
-    }
-
-    /// GPU arm of a DENSE quantized linear: `out[m,n] = in[m,k] · dequant(W)ᵀ`
-    /// via the vendored ggml dequant-in-kernel Metal GEMM (`gemmQuantNt`), with
-    /// the RHS raw quantized blocks (`rhs_bytes`, row stride `nb01`). Returns the
-    /// f32 result, or `null` whenever the GPU did not run — below the work gate,
-    /// shape unsupported (k % blocksize, n % 4, m in [32, 2048]), non-contiguous
-    /// input, GPU disabled, or dispatch failure — so the caller falls through to
-    /// the CPU packed path, never-a-loss. dtype must be q4_k/q6_k/q8_0 (the
-    /// formats the Metal kernel dequantizes). The whole body is comptime-elided
-    /// on non-gpu builds.
-    pub fn denseQuantMatmulGpu(
-        self: *ExecContext,
-        comptime dtype: DType,
-        rhs_bytes: []const u8,
-        rhs_lifetime: RhsLifetime,
-        nb01: usize,
-        input: *const Tensor,
-        m: usize,
-        n: usize,
-        k: usize,
-    ) !?Tensor {
-        return exec_quant_matmul.denseQuantMatmulGpu(&self.rt, dtype, rhs_bytes, rhs_lifetime, nb01, input, m, n, k);
-    }
-
-    /// One-command GPU batch for same-shape dense quantized linears that share
-    /// the same f32 activation matrix. Internal eager helper; callers still get
-    /// a normal f32 Tensor shaped `[batch_count*m, n]`.
-    pub fn foldedTernaryMatmulGpu(
-        self: *ExecContext,
-        rhs_bytes: []const u8,
-        rhs_lifetime: RhsLifetime,
-        nb01: usize,
-        input: *const Tensor,
-        m: usize,
-        n: usize,
-        k: usize,
-    ) !?Tensor {
-        return exec_quant_matmul.foldedTernaryMatmulGpu(&self.rt, rhs_bytes, rhs_lifetime, nb01, input, m, n, k);
-    }
-
-    pub fn denseQuantMatmulGpuSharedInputBatch(
-        self: *ExecContext,
-        comptime dtype: DType,
-        rhs_bytes: []const u8,
-        rhs_lifetime: RhsLifetime,
-        nb01: usize,
-        nb02: usize,
-        input: *const Tensor,
-        batch_count: usize,
-        m: usize,
-        n: usize,
-        k: usize,
-    ) !?Tensor {
-        return exec_quant_matmul.denseQuantMatmulGpuSharedInputBatch(&self.rt, dtype, rhs_bytes, rhs_lifetime, nb01, nb02, input, batch_count, m, n, k);
-    }
+    pub const dequantizeTensorTyped = exec_quant_matmul.dequantizeTensorTyped;
+    pub const getRowsQuantizedTyped = exec_quant_matmul.getRowsQuantizedTyped;
+    pub const matmul2DWithQuantizedTensorRhs = exec_quant_matmul.matmul2DWithQuantizedTensorRhs;
+    pub const matmul2DWithQuantizedTensorRhsOptions = exec_quant_matmul.matmul2DWithQuantizedTensorRhsOptions;
+    pub const matmul2DWithQuantizedBlocksRhs = exec_quant_matmul.matmul2DWithQuantizedBlocksRhs;
+    pub const matmul2DWithQuantizedBlocksRhsOptions = exec_quant_matmul.matmul2DWithQuantizedBlocksRhsOptions;
+    pub const packMatmulRhsQ8_0x4 = exec_quant_matmul.packMatmulRhsQ8_0x4;
+    pub const packMatmulRhsQ6_Kx4 = exec_quant_matmul.packMatmulRhsQ6_Kx4;
+    pub const packMatmulRhsQ4_Kx4 = exec_quant_matmul.packMatmulRhsQ4_Kx4;
+    pub const packMatmulRhsQ4_Kx8 = exec_quant_matmul.packMatmulRhsQ4_Kx8;
+    pub const packMatmulRhsQ4_Kx2Mmla = exec_quant_matmul.packMatmulRhsQ4_Kx2Mmla;
+    pub const packMatmulRhsQ5_Kx8 = exec_quant_matmul.packMatmulRhsQ5_Kx8;
+    pub const matmul2DWithPackedQ8_0x4Rhs = exec_quant_matmul.matmul2DWithPackedQ8_0x4Rhs;
+    pub const rmsNormMulMatmul2DWithPackedQ8_0x4Rhs = exec_quant_matmul.rmsNormMulMatmul2DWithPackedQ8_0x4Rhs;
+    pub const rmsNormMulMatmul2DWithPackedQ4_Kx8Rhs = exec_quant_matmul.rmsNormMulMatmul2DWithPackedQ4_Kx8Rhs;
+    pub const rmsNormMulMatmul2DWithPackedQ5_Kx8Rhs = exec_quant_matmul.rmsNormMulMatmul2DWithPackedQ5_Kx8Rhs;
+    pub const rmsNormMulMatmul2DWithPackedQ6_Kx4Rhs = exec_quant_matmul.rmsNormMulMatmul2DWithPackedQ6_Kx4Rhs;
+    pub const splitSwiGluMatmul2DWithPackedQ8_0x4Rhs = exec_quant_matmul.splitSwiGluMatmul2DWithPackedQ8_0x4Rhs;
+    pub const splitSwiGluMatmul2DWithPackedQ4_Kx8Rhs = exec_quant_matmul.splitSwiGluMatmul2DWithPackedQ4_Kx8Rhs;
+    pub const splitSwiGluMatmul2DWithPackedQ5_Kx8Rhs = exec_quant_matmul.splitSwiGluMatmul2DWithPackedQ5_Kx8Rhs;
+    pub const splitSwiGluMatmul2DWithPackedQ6_Kx4Rhs = exec_quant_matmul.splitSwiGluMatmul2DWithPackedQ6_Kx4Rhs;
+    pub const gegluQuantMatmul2DWithPackedQ8_0x4Rhs = exec_quant_matmul.gegluQuantMatmul2DWithPackedQ8_0x4Rhs;
+    pub const matmul2DWithPackedQ6_Kx4Rhs = exec_quant_matmul.matmul2DWithPackedQ6_Kx4Rhs;
+    pub const matmul2DWithPackedQ4_Kx4Rhs = exec_quant_matmul.matmul2DWithPackedQ4_Kx4Rhs;
+    pub const matmul2DWithPackedQ4_Kx8Rhs = exec_quant_matmul.matmul2DWithPackedQ4_Kx8Rhs;
+    pub const matmul2DWithPackedQ4_Kx2MmlaRhs = exec_quant_matmul.matmul2DWithPackedQ4_Kx2MmlaRhs;
+    pub const matmul2DWithPackedQ5_Kx8Rhs = exec_quant_matmul.matmul2DWithPackedQ5_Kx8Rhs;
+    pub const denseQuantMatmulGpu = exec_quant_matmul.denseQuantMatmulGpu;
+    pub const foldedTernaryMatmulGpu = exec_quant_matmul.foldedTernaryMatmulGpu;
+    pub const denseQuantMatmulGpuSharedInputBatch = exec_quant_matmul.denseQuantMatmulGpuSharedInputBatch;
 
     /// A Mixture-of-Experts projection: all experts of one layer's gate/up/down
     /// stacked into a single RHS buffer. The implementation lives in exec/moe.zig;
@@ -2479,159 +628,34 @@ pub const ExecContext = struct {
     // ----------------------------------------------------------------------
     // MoE gate/up: the fused gated-FFN expert kernels (exec/moe_gu.zig)
     // ----------------------------------------------------------------------
-    pub fn moeGuDecodePacked(self: *ExecContext, x: *const Tensor, gate: []const backend_mod.QuantizedMatmulRhsQ6_Kx4, up: []const backend_mod.QuantizedMatmulRhsQ6_Kx4, down: []const backend_mod.QuantizedMatmulRhsQ8_0x4, selected: []const usize, weights: []const f32, out_pe: usize, io: ?std.Io, profile: ?*MoeBatchProfile) !Tensor {
-        return exec_moe_gu.decodePacked(&self.rt, &self.moe_scratch, x, gate, up, down, selected, weights, out_pe, io, profile);
-    }
-
-    pub fn moeGuBatchPacked(self: *ExecContext, x: *const Tensor, gate: []const backend_mod.QuantizedMatmulRhsQ6_Kx4, up: []const backend_mod.QuantizedMatmulRhsQ6_Kx4, down: []const backend_mod.QuantizedMatmulRhsQ8_0x4, selected: []const usize, weights: []const f32, top_k: usize, out_pe: usize, io: ?std.Io, profile: ?*MoeBatchProfile) !Tensor {
-        return exec_moe_gu.batchPacked(&self.rt, x, gate, up, down, selected, weights, top_k, out_pe, io, profile);
-    }
-
-    pub fn moeGuDecodeRaw(self: *ExecContext, x: *const Tensor, gw: exec_moe_gu.RawExpertWeights, n_expert: usize, selected: []const usize, weights: []const f32, out_pe: usize, io: ?std.Io, profile: ?*MoeBatchProfile) !Tensor {
-        return exec_moe_gu.decodeRaw(&self.rt, &self.moe_scratch, x, gw, n_expert, selected, weights, out_pe, io, profile);
-    }
-
-    pub fn moeGuBatchRaw(self: *ExecContext, x: *const Tensor, gw: exec_moe_gu.RawExpertWeights, n_expert: usize, selected: []const usize, weights: []const f32, top_k: usize, out_pe: usize, io: ?std.Io, profile: ?*MoeBatchProfile) !Tensor {
-        return exec_moe_gu.batchRaw(&self.rt, x, gw, n_expert, selected, weights, top_k, out_pe, io, profile);
-    }
+    pub const moeGuDecodePacked = exec_moe_gu.decodePacked;
+    pub const moeGuBatchPacked = exec_moe_gu.batchPacked;
+    pub const moeGuDecodeRaw = exec_moe_gu.decodeRaw;
+    pub const moeGuBatchRaw = exec_moe_gu.batchRaw;
 
     // ----------------------------------------------------------------------
     // MoE: expert routing and the batched expert chains (exec/moe.zig)
     // ----------------------------------------------------------------------
-    pub fn lockMoeDecodeScratch(self: *ExecContext) void {
-        exec_moe.lockMoeDecodeScratch(&self.moe_scratch);
-    }
-
-    pub fn unlockMoeDecodeScratch(self: *ExecContext) void {
-        exec_moe.unlockMoeDecodeScratch(&self.moe_scratch);
-    }
-
-    pub fn MoeDecodeScratchView(comptime QgBlock: type, comptime Task: type) type {
-        return exec_moe.MoeDecodeScratchView(QgBlock, Task);
-    }
-
-    pub fn MoeDecodeChainScratchView(comptime QgBlock: type, comptime State: type, comptime Task: type) type {
-        return exec_moe.MoeDecodeChainScratchView(QgBlock, State, Task);
-    }
-
-    pub fn carveMoeDecodeScratch(
-        self: *ExecContext,
-        comptime QgBlock: type,
-        comptime Task: type,
-        hidden_blocks: usize,
-        top_k: usize,
-        out_pe: usize,
-        hidden: usize,
-        blocks_per_g: usize,
-    ) !MoeDecodeScratchView(QgBlock, Task) {
-        return exec_moe.carveMoeDecodeScratch(&self.rt, &self.moe_scratch, QgBlock, Task, hidden_blocks, top_k, out_pe, hidden, blocks_per_g);
-    }
-
-    pub fn carveMoeDecodeChainScratch(
-        self: *ExecContext,
-        comptime QgBlock: type,
-        comptime State: type,
-        comptime Task: type,
-        hidden_blocks: usize,
-        top_k: usize,
-        out_pe: usize,
-        hidden: usize,
-        blocks_per_g: usize,
-        task_count: usize,
-    ) !MoeDecodeChainScratchView(QgBlock, State, Task) {
-        return exec_moe.carveMoeDecodeChainScratch(&self.rt, &self.moe_scratch, QgBlock, State, Task, hidden_blocks, top_k, out_pe, hidden, blocks_per_g, task_count);
-    }
-
-    /// Fused MoE FFN for a single token: route-weighted sum over the selected
-    /// experts of down(SwiGLU(gate(x), up(x))).
-    pub fn moeExpertFfn(
-        self: *ExecContext,
-        x: *const Tensor,
-        gate: *const MoeRhs,
-        up: *const MoeRhs,
-        down: *const MoeRhs,
-        selected: []const usize,
-        weights: []const f32,
-        out_pe: usize,
-        act: GatedOp,
-        io: ?std.Io,
-        profile: ?*MoeBatchProfile,
-    ) !Tensor {
-        return exec_moe.moeExpertFfn(&self.rt, &self.moe_scratch, x, gate, up, down, selected, weights, out_pe, act, io, profile);
-    }
-
-    /// Batched-prefill MoE FFN over `seq > 1` tokens.
-    pub fn moeExpertFfnBatch(
-        self: *ExecContext,
-        x: *const Tensor,
-        gate: *const MoeRhs,
-        up: *const MoeRhs,
-        down: *const MoeRhs,
-        selected: []const usize,
-        weights: []const f32,
-        top_k: usize,
-        out_pe: usize,
-        act: GatedOp,
-        io: ?std.Io,
-        profile: ?*MoeBatchProfile,
-    ) !Tensor {
-        return exec_moe.moeExpertFfnBatch(&self.rt, x, gate, up, down, selected, weights, top_k, out_pe, act, io, profile);
-    }
+    pub const lockMoeDecodeScratch = exec_moe.lockMoeDecodeScratch;
+    pub const unlockMoeDecodeScratch = exec_moe.unlockMoeDecodeScratch;
+    pub const MoeDecodeScratchView = exec_moe.MoeDecodeScratchView;
+    pub const MoeDecodeChainScratchView = exec_moe.MoeDecodeChainScratchView;
+    pub const carveMoeDecodeScratch = exec_moe.carveMoeDecodeScratch;
+    pub const carveMoeDecodeChainScratch = exec_moe.carveMoeDecodeChainScratch;
+    pub const moeExpertFfn = exec_moe.moeExpertFfn;
+    pub const moeExpertFfnBatch = exec_moe.moeExpertFfnBatch;
 
     // ----------------------------------------------------------------------
     // matmul: dense contractions, batched and packed (exec/matmul.zig)  [continued]
     // ----------------------------------------------------------------------
-    pub fn matmulTransA(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_matmul.matmul2DDispatch(&self.rt, .trans_a, a, b);
-    }
-
-    pub fn matmulTransB(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_matmul.matmul2DDispatch(&self.rt, .trans_b, a, b);
-    }
-
-    pub fn matmulTransB2DWithF16Rhs(self: *ExecContext, a: *const Tensor, b: *const tensor.TensorOf(.f16)) !Tensor {
-        return exec_matmul.matmulTransB2DWithF16Rhs(&self.rt, a, b);
-    }
-
-    // Mixed-precision twin of matmulTransB2DWithF16Rhs for bf16 weights. The
-    // LHS stays f32 (no cast: the kernel widens the bf16 RHS in-register and
-    // accumulates in f32), so only contiguity is prepared here.
-    pub fn matmulTransB2DWithBf16Rhs(self: *ExecContext, a: *const Tensor, b: *const tensor.TensorOf(.bf16)) !Tensor {
-        return exec_matmul.matmulTransB2DWithBf16Rhs(&self.rt, a, b);
-    }
-
-    // Batched matrix multiplication. Supports:
-    //   - Full batched:    a=[..., M, K] @ b=[..., K, N] -> [..., M, N]
-    //                      Leading batch dims may match exactly or broadcast.
-    //   - Broadcast RHS:   a=[..., M, K] @ b=[K, N]      -> [..., M, N]
-    //                      Single fused 2-D GEMM via reshape, no per-batch loop.
-    //   - Broadcast LHS:   a=[M, K]      @ b=[..., K, N] -> [..., M, N]
-    // General multi-axis broadcast never materializes expanded tensors; the
-    // runtime computes per-output-batch source offsets and preserves the exact
-    // and shared-operand fast paths. Strict 2-D inputs must use matmul/matmul2D.
-    pub fn bmm(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_matmul.bmmDispatch(&self.rt, .plain, a, b);
-    }
-
-    // Batched matmul with implicit transpose of the per-batch A:
-    //   a=[..., K, M] @ b=[..., K, N] -> [..., M, N]
-    // Used by autograd to compute dB = A^T @ dY in batched form. Shares the
-    // dispatch logic with bmm.
-    pub fn bmmTransA(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_matmul.bmmDispatch(&self.rt, .trans_a, a, b);
-    }
-
-    // Batched matmul with implicit transpose of the per-batch B:
-    //   a=[..., M, K] @ b=[..., N, K] -> [..., M, N]
-    // Used by autograd to compute dA = dY @ B^T in batched form. The shared-B
-    // fast path (broadcast RHS) also applies here.
-    pub fn bmmTransB(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-        return exec_matmul.bmmDispatch(&self.rt, .trans_b, a, b);
-    }
-
-    pub fn reduceBroadcast(self: *ExecContext, x: *const Tensor, target_shape: []const usize) !Tensor {
-        return exec_elementwise.reduceBroadcast(&self.rt, x, target_shape);
-    }
+    pub const matmulTransA = exec_matmul.matmulTransA;
+    pub const matmulTransB = exec_matmul.matmulTransB;
+    pub const matmulTransB2DWithF16Rhs = exec_matmul.matmulTransB2DWithF16Rhs;
+    pub const matmulTransB2DWithBf16Rhs = exec_matmul.matmulTransB2DWithBf16Rhs;
+    pub const bmm = exec_matmul.bmm;
+    pub const bmmTransA = exec_matmul.bmmTransA;
+    pub const bmmTransB = exec_matmul.bmmTransB;
+    pub const reduceBroadcast = exec_elementwise.reduceBroadcast;
 };
 
 test {

@@ -167,8 +167,8 @@ test "buffer pool reuses bucket-rounded buffers across many small temporaries" {
         y.deinit();
     }
 
-    try std.testing.expect(ctx.rt.buffers.cachedBuffers() >= 1);
-    try std.testing.expectEqual(@as(usize, 2), ctx.rt.buffers.outstandingBuffers());
+    try std.testing.expect(ctx.buffers.cachedBuffers() >= 1);
+    try std.testing.expectEqual(@as(usize, 2), ctx.buffers.outstandingBuffers());
 }
 
 test "exec context cross entropy ex matches a naive reference across options" {
@@ -518,16 +518,16 @@ test "exec context cross entropy ex handles ignored labels and validation" {
     try std.testing.expectEqual(legacy.item(), ex_default.item());
 }
 
-// Moved from exec.zig: these drive the Runtime alloc primitives (rt.zerosRank,
-// rt.scalarTyped) and the elementwise reduce-broadcast VJP directly, so they
-// belong beside the other exec_tests rather than inline in the exec.zig facade.
+// These drive the substrate alloc primitives (ctx.zerosRank,
+// ctx.scalarTyped) and the elementwise reduce-broadcast VJP directly, so they
+// belong beside the other exec_tests rather than inline in exec.zig.
 test "exec context reuses buffers for arbitrary broadcast materialization" {
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.rt.zerosRank(3, .{ 2, 4, 3 });
+    var x = try ctx.zerosRank(3, .{ 2, 4, 3 });
     defer x.deinit();
     var middle = try ctx.fromSliceRank(3, .{ 2, 1, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer middle.deinit();
@@ -535,27 +535,27 @@ test "exec context reuses buffers for arbitrary broadcast materialization" {
     defer middle_b.deinit();
 
     try std.testing.expectEqual(LayoutClass.arbitrary, ctx.classify(&middle_b));
-    try std.testing.expectEqual(@as(usize, 2), ctx.rt.buffers.outstandingBuffers());
-    try std.testing.expectEqual(@as(usize, 0), ctx.rt.buffers.cachedBuffers());
+    try std.testing.expectEqual(@as(usize, 2), ctx.buffers.outstandingBuffers());
+    try std.testing.expectEqual(@as(usize, 0), ctx.buffers.cachedBuffers());
 
     var first = try ctx.addRank(3, &x, &middle_b);
     try std.testing.expectEqualSlices(f32, &.{
         1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3,
         4, 5, 6, 4, 5, 6, 4, 5, 6, 4, 5, 6,
     }, first.dataConst());
-    try std.testing.expectEqual(@as(usize, 3), ctx.rt.buffers.outstandingBuffers());
-    try std.testing.expect(ctx.rt.buffers.cachedBuffers() >= 1);
+    try std.testing.expectEqual(@as(usize, 3), ctx.buffers.outstandingBuffers());
+    try std.testing.expect(ctx.buffers.cachedBuffers() >= 1);
     first.deinit();
 
-    try std.testing.expectEqual(@as(usize, 2), ctx.rt.buffers.outstandingBuffers());
-    const cached_after_first = ctx.rt.buffers.cachedBuffers();
+    try std.testing.expectEqual(@as(usize, 2), ctx.buffers.outstandingBuffers());
+    const cached_after_first = ctx.buffers.cachedBuffers();
     try std.testing.expect(cached_after_first >= 2);
 
     var second = try ctx.addRank(3, &x, &middle_b);
     second.deinit();
 
-    try std.testing.expectEqual(@as(usize, 2), ctx.rt.buffers.outstandingBuffers());
-    try std.testing.expectEqual(cached_after_first, ctx.rt.buffers.cachedBuffers());
+    try std.testing.expectEqual(@as(usize, 2), ctx.buffers.outstandingBuffers());
+    try std.testing.expectEqual(cached_after_first, ctx.buffers.cachedBuffers());
 }
 
 test "exec context allocates typed non-f32 tensors without using f32 kernels" {
@@ -573,7 +573,7 @@ test "exec context allocates typed non-f32 tensors without using f32 kernels" {
     defer flags.deinit();
     try std.testing.expectEqualSlices(bool, &.{ true, true, true }, flags.dataConst());
 
-    var scalar_id = try ctx.rt.scalarTyped(.i64, 42);
+    var scalar_id = try ctx.scalarTyped(.i64, 42);
     defer scalar_id.deinit();
     try std.testing.expectEqual(@as(i64, 42), scalar_id.item());
 }

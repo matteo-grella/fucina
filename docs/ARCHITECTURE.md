@@ -141,15 +141,18 @@ Core value types and substrate:
 
 Execution runtime:
 
-- `src/exec.zig`: `ExecContext` — the public runtime boundary. It is a
-  forwarding facade: it embeds the substrate as `rt: Runtime` and forwards
-  every domain op to a module under `src/exec/`.
-- `src/exec/runtime.zig`: the leaf `Runtime` substrate — allocation/thread/
-  scope machinery with no domain semantics (thread-safe allocator, backend
-  instance, `BufferPool`, worker team, exec-scope stack, tensor allocation
-  primitives). Domain modules receive `*Runtime` explicitly (never
-  `self: anytype`), so their code is monomorphic and the file-level import
-  graph stays a strict DAG.
+- `src/exec.zig`: `ExecContext`, the public runtime boundary. One struct
+  declares the substrate state (thread-safe allocator, backend instance,
+  `BufferPool`, worker team, exec-scope stack, MoE decode scratch) and
+  carries every op as an alias line (`pub const add = exec_elementwise.add;`)
+  grouped by domain; the struct body is the registry, the bodies live under
+  `src/exec/`.
+- `src/exec/runtime.zig`: the substrate functions of `ExecContext`
+  (lifecycle, exec scopes, worker team, tensor allocation primitives,
+  `replace`), each taking `*ExecContext` first. Domain modules receive
+  `*ExecContext` explicitly (never `self: anytype`), so their code is
+  monomorphic; `src/exec.zig` and `src/exec/*.zig` form the one permitted
+  root-anchored import cycle (see *Layering And Enforcement*).
 - `src/exec/buffer_pool.zig`: the reusable transient-buffer pool leaf.
 - `src/exec/` domain modules: `attention.zig`, `matmul.zig`,
   `quant_matmul.zig`, `moe.zig`, `moe_chain.zig`, `expert_store.zig` (the
@@ -278,11 +281,13 @@ tag_ops.zig
   -> exec.zig, tags.zig, tensor.zig
 
 exec.zig
-  -> exec/*.zig, backend.zig, tensor.zig, dtype.zig, thread.zig
+  -> exec/*.zig, backend.zig, tensor.zig, thread.zig, tuning.zig, fpenv.zig
 
-exec/runtime.zig (leaf substrate)
-  -> exec/buffer_pool.zig, backend.zig, dtype.zig, parallel.zig,
-     storage.zig, tensor.zig, thread.zig
+exec/runtime.zig, exec/<domain>.zig
+  -> exec.zig (the `ExecContext` type), exec/buffer_pool.zig, backend.zig,
+     dtype.zig, parallel.zig, storage.zig, tensor.zig, thread.zig
+     (the root-anchored cycle with exec.zig: struct body in the root,
+     function bodies in the children)
 
 backend.zig
   -> backend/{ops,packed,quant,cpu,native,gpu,vector}.zig, dtype.zig,
@@ -306,9 +311,14 @@ Enforcement:
 
 - `zig build arch-check` runs `tools/check_import_graph.zig` over the
   production (non-test) import graph of `src/`, `examples/`, `bench/`, and
-  `tools/`, and enforces three invariants: zero nontrivial
+  `tools/`, and enforces three invariants: no forbidden
   strongly-connected components, zero band inversions, and every sibling
-  test file forwarded from a production file. The apps-band roots are
+  test file forwarded from a production file. An SCC is permitted only
+  when every member is in the same band and one member is the directory
+  root of another (`P.zig` with a member under `P/`: `src/exec.zig` with
+  `src/exec/*.zig`, the struct-body-in-the-root shape `std.zig` and
+  `std/array_list.zig` share). Children cycling without their root, or
+  any cycle that crosses a band, fail the build. The apps-band roots are
   scanned because several `examples/` entries are complete model ports
   rather than snippets, and an unforwarded test file there is just as
   silently dead as one in `src/`. A file whose name ends in `_tests.zig`
@@ -320,7 +330,7 @@ Enforcement:
   tests, are excluded, so sibling-test forwarding stanzas and private test
   helpers do not count as production edges. The step prints the current
   file/edge count; the counts grow with the tree, so they are not pinned
-  here.
+  here; the root-anchored SCC count is printed too (1 today: `exec`).
 
 - The direction bands are the *Layer Stack* table, encoded as `band_table`
   in that same tool: every production file belongs to exactly one band, and
@@ -373,23 +383,29 @@ is the canonical in-tree name for allowed-raw zones.
 
 ## Execution Runtime
 
-`ExecContext` is the eager runtime boundary. Its substrate, the `Runtime` in
-`src/exec/runtime.zig`, owns:
+`ExecContext` is the eager runtime boundary. The struct, declared in
+`src/exec.zig`, owns:
 
 - a thread-safe allocator wrapper,
 - the active backend instance,
 - a reusable `BufferPool` (`src/exec/buffer_pool.zig`),
 - a lazily initialized `thread.Pool` (spin-then-park hot worker team),
 - the exec-scope stack (`openExecScope`/`closeExecScope`: implicit ownership
-  of training intermediates; see `MEMORY-MODEL.md` and `TRAINING.md`).
+  of training intermediates; see `MEMORY-MODEL.md` and `TRAINING.md`),
+- the grow-only MoE decode scratch (`moe_scratch`).
+
+The substrate functions that operate on these fields (lifecycle, scopes,
+worker team, tensor allocation primitives) are free functions in
+`src/exec/runtime.zig`; the struct body aliases them, so `ctx.empty(...)`
+and `exec_runtime.empty(ctx, ...)` are the same call.
 
 The execution context is responsible for allocating outputs, reusing buffers,
 classifying layouts, materializing non-contiguous inputs when required
 (large strided materializations are chunked across the worker team over the
 raw tensor's run-based `copyRangeTo`), and calling backend kernels only
-after validation. `src/exec.zig` forwards each
-operation to its domain module; domain modules take `*Runtime` plus validated
-arguments.
+after validation. Each op is an alias line in the `ExecContext` struct
+body that resolves to its domain module; domain modules take `*ExecContext`
+plus validated arguments.
 
 Important execution paths:
 
@@ -776,13 +792,14 @@ behavioral tests, and `arch-check` ignores the imports inside them.
 
 ## Current Strengths
 
-- Clean, machine-enforced dependency direction; zero production SCCs.
+- Clean, machine-enforced dependency direction; the only production SCC
+  is the root-anchored `exec.zig` / `exec/*.zig` pair the checker permits.
 - Single public tensor API for no-grad and grad execution; the raw layer is
   sealed behind a comptime guard with an explicit `internal` escape hatch.
 - Explicit ownership and view semantics for storage, with deterministic
   cleanup and release hooks for borrowed/device-resident bytes.
-- Eager runtime simple enough to reason about; the `Runtime` substrate keeps
-  domain modules monomorphic and the import graph a DAG.
+- Eager runtime simple enough to reason about: one `ExecContext` type,
+  domain modules monomorphic over an explicit `*ExecContext`.
 - Precisely scoped allocation contract: outputs are exec-supplied everywhere,
   compute leaves are allocation-free, and the one allocating tier (quantized
   LHS scratch) is deliberate and documented.

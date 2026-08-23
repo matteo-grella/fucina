@@ -561,28 +561,28 @@ test "exec context reduces higher-rank and scalar broadcast gradients" {
     });
     defer gy.deinit();
 
-    var tail = try exec_elementwise.reduceBroadcastRank(&ctx.rt, 1, &gy, .{3});
+    var tail = try exec_elementwise.reduceBroadcastRank(&ctx, 1, &gy, .{3});
     defer tail.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 22, 26, 30 }, tail.dataConst());
 
-    var exact = try exec_elementwise.reduceBroadcastRank(&ctx.rt, 3, &gy, .{ 2, 2, 3 });
+    var exact = try exec_elementwise.reduceBroadcastRank(&ctx, 3, &gy, .{ 2, 2, 3 });
     defer exact.deinit();
     try std.testing.expectEqualSlices(f32, gy.dataConst(), exact.dataConst());
-    try std.testing.expectEqual(@as(usize, 2), ctx.rt.buffers.outstandingBuffers());
+    try std.testing.expectEqual(@as(usize, 2), ctx.buffers.outstandingBuffers());
 
     var scalar_reduced = try ctx.reduceBroadcast(&gy, &.{1});
     defer scalar_reduced.deinit();
     try std.testing.expectEqual(@as(f32, 78), scalar_reduced.item());
 
-    var singleton_middle = try exec_elementwise.reduceBroadcastRank(&ctx.rt, 3, &gy, .{ 2, 1, 3 });
+    var singleton_middle = try exec_elementwise.reduceBroadcastRank(&ctx, 3, &gy, .{ 2, 1, 3 });
     defer singleton_middle.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 5, 7, 9, 17, 19, 21 }, singleton_middle.dataConst());
 
-    var singleton_prefix = try exec_elementwise.reduceBroadcastRank(&ctx.rt, 2, &gy, .{ 1, 3 });
+    var singleton_prefix = try exec_elementwise.reduceBroadcastRank(&ctx, 2, &gy, .{ 1, 3 });
     defer singleton_prefix.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 22, 26, 30 }, singleton_prefix.dataConst());
 
-    try std.testing.expectError(tensor.TensorError.ShapeMismatch, exec_elementwise.reduceBroadcastRank(&ctx.rt, 2, &gy, .{ 2, 2 }));
+    try std.testing.expectError(tensor.TensorError.ShapeMismatch, exec_elementwise.reduceBroadcastRank(&ctx, 2, &gy, .{ 2, 2 }));
     try std.testing.expectError(tensor.TensorError.InvalidShape, ctx.reduceBroadcast(&gy, &.{ 0, 3 }));
 }
 

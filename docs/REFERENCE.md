@@ -5030,26 +5030,36 @@ autograd semantics in §5, backend selection in §9.
 
 ### 6.1 ExecContext: role and lifecycle (`src/exec.zig`, `src/exec/runtime.zig`)
 
-`ExecContext` is a thin forwarding facade over `Runtime`
-(`src/exec/runtime.zig`), the generic substrate that owns
-allocation/thread/scope machinery. Domain op implementations live in leaf
-modules under `src/exec/` (`elementwise.zig`, `matmul.zig`, `conv.zig`,
-`attention.zig`, `moe.zig`, …) and receive `*Runtime` explicitly; the facade
-methods on `ExecContext` forward to them. The only domain state on the facade
-itself is MoE-decode scratch.
+`ExecContext` is one struct: the substrate fields (allocation, thread, and
+scope machinery, plus the MoE-decode scratch) are declared on it in
+`src/exec.zig`, and every method is an alias line resolving to a function
+that takes `*ExecContext` first. The substrate functions (lifecycle, scopes,
+worker team, tensor allocation primitives, `replace`) live in
+`src/exec/runtime.zig`; the domain ops live in the modules under `src/exec/`
+(`elementwise.zig`, `matmul.zig`, `conv.zig`, `attention.zig`, `moe.zig`, …)
+and receive `*ExecContext` explicitly.
 
 ```zig
 pub const ExecContext = struct {
-    rt: Runtime,                     // substrate: allocator, backend, pool, team, scopes
-    moe_scratch: MoeDecodeScratch,   // domain state, facade-owned
-    allocator: Allocator,            // cached copy of rt.allocator (thread-safe wrapper)
+    thread_safe_allocator: thread.ThreadSafeAllocator,
+    allocator: Allocator,            // fat pointer into thread_safe_allocator
+    backend: Backend,
+    buffers: BufferPool,
+    tuning: tuning.Overrides,
+    work_pool: thread.Pool,          // + work_pool_ready, work_pool_mutex
+    dot_backward_worker: thread.OneShotWorker, // + ready flag, mutex
+    scope_entries, scope_depth,      // the exec-scope stack
+    pin_rowwise_kernels: bool,
+    fp_env_at_init: ?fpenv.Environment,
+    moe_scratch: MoeDecodeScratch,   // grow-only MoE decode scratch
 
-    pub fn init(self: *ExecContext, allocator: Allocator) void
-    pub fn deinit(self: *ExecContext) void
+    pub const init = exec_runtime.init;      // (self: *ExecContext, allocator: Allocator) void
+    pub const deinit = exec_runtime.deinit;  // (self: *ExecContext) void
+    pub const add = exec_elementwise.add;    // ... one alias line per op
 };
 ```
 
-`Runtime` fields (all reached through `ctx.rt`, internal but observable):
+Fields (internal but observable, reached as `ctx.<field>`):
 
 | Field | Type | Created |
 |---|---|---|
@@ -5063,9 +5073,9 @@ pub const ExecContext = struct {
 
 **The init(self-pointer) pattern.** `init` takes `self: *ExecContext` and
 returns `void` instead of returning a value: the context is self-referential
-(`rt.allocator` is a fat pointer into `rt.thread_safe_allocator`, and
-`ctx.allocator` is a cached copy of it), so it must be initialized in place
-at its final address and must never be moved or copied afterwards. The idiom:
+(`ctx.allocator` is a fat pointer into `ctx.thread_safe_allocator`), so it
+must be initialized in place at its final address and must never be moved or
+copied afterwards. The idiom:
 
 ```zig
 test "context lifecycle" {
@@ -5090,8 +5100,10 @@ no pooled buffer is still outstanding — a tensor leaked past context teardown
 fails this assertion in safety builds rather than silently leaking. After
 `deinit` the struct is `undefined`.
 
-**Substrate methods on the facade** (everything else on `ExecContext` is an
-op, see §4):
+**Substrate methods** (everything else on `ExecContext` is an op, see §4;
+the signatures below are the `src/exec/runtime.zig` functions the struct
+aliases, except `classify`/`broadcastTo`/`broadcastToRank`, which are
+defined in `src/exec.zig` itself):
 
 ```zig
 pub fn execScopeActive(self: *const ExecContext) bool
@@ -5129,8 +5141,8 @@ lane-packed Q8_Kx4 kernels — so a speculation verify batch produces
 logits bit-identical to sequential decode, the property that keeps deep
 speculative drafting lossless (§13.9). Batch matmul throughput is
 deliberately sacrificed while pinned; toggle it around the verify forward
-only (the backing `Runtime` field is `pin_rowwise_kernels`, false at
-`init`). The scope and pool methods are covered below.
+only (the backing field is `pin_rowwise_kernels`, false at `init`). The
+scope and pool methods are covered below.
 
 **MoE decode scratch** (`moe_scratch`, ops in `src/exec/moe.zig`). A
 grow-only, mutex-guarded scratch region backing the single-row MoE decode
@@ -5451,10 +5463,11 @@ test "fromSlice copies; fromBorrowedSliceRank wraps caller storage" {
 }
 ```
 
-Internal substrate helpers on `Runtime` (not forwarded to the facade; for
-runtime extenders): `emptyTyped`, `scalarTyped`, `zerosRank`,
-`zerosRankTyped`, `cloneTyped`, and the contiguity-preparation pair
-`prepareContiguous` / `prepareContiguousTyped`
+Internal substrate helpers (aliased on `ExecContext` for the domain
+modules; not part of the op surface): `emptyTyped`, `scalarTyped`,
+`zerosRank`, `zerosRankTyped`, `cloneTyped`, `dispatchRange` /
+`dispatchRangeCapped`, the `enableNative*PoolForWork` pool gates, and the
+contiguity-preparation pair `prepareContiguous` / `prepareContiguousTyped`
 returning `PreparedTensor` / `PreparedTensorOf(dtype)` — a
 borrowed-or-owned union whose `deinit` is a no-op on the borrowed arm, so
 hot paths can `defer prepared.deinit()` unconditionally.
@@ -5470,14 +5483,14 @@ comptime axis index
 `*Backward*` entries are the VJP kernels `src/ag/backward.zig` dispatches to
 (`conv2dBackwardInput`, `dropoutBackward`, `splitSwiGluBackwardAxisRank`).
 This is the surface `customVjp` forward/backward specs (§5.6) are written
-against. `src/exec.zig` is the source of truth; the domain modules under
-`src/exec/` it forwards to are not public API.
+against. `src/exec.zig` is the source of truth for the names; the domain
+modules under `src/exec/` the alias lines resolve to are not public API.
 
 ### 6.5 BufferPool: transient reuse and scratch leases (`src/exec/buffer_pool.zig`)
 
 `BufferPool` (re-exported as `exec.BufferPool`; one instance per context at
-`ctx.rt.buffers`) recycles owned, refcounted storage buffers across ops.
-Kernels never allocate — the `Runtime` allocation primitives of §6.4 are the
+`ctx.buffers`) recycles owned, refcounted storage buffers across ops.
+Kernels never allocate — the allocation primitives of §6.4 are the
 only source of transient tensors, and all of them draw from the pool. Two
 arms share one byte budget:
 
@@ -5548,7 +5561,7 @@ Behavior users should know:
 ### 6.6 The worker team (`src/thread.zig`, `src/parallel.zig`)
 
 CPU kernels parallelize over a persistent fork-join team owned by the
-context. Everything is lazy: `Runtime.tryWorkPool` creates the
+context. Everything is lazy: `tryWorkPool` creates the
 `thread.Pool` on first request (with `cpuThreadCount(vector_max_threads) - 1`
 workers, so the dispatching thread itself is participant 0) and hands it to
 the backend via `setWorkPool`; the pool in turn spawns its worker threads
@@ -5811,7 +5824,7 @@ see §6.10.
 
 What is thread-safe inside a context:
 
-- **The allocator**: `Runtime` wraps the caller's allocator in
+- **The allocator**: `init` wraps the caller's allocator in
   `thread.ThreadSafeAllocator` (a mutex around alloc/resize/remap/free), so
   internal allocations and frees may happen on worker threads. `ctx.allocator`
   is this wrapper.
@@ -7528,8 +7541,8 @@ pub const Backend = struct {
 };
 ```
 
-`Backend` is a thin dispatch value embedded in the exec `Runtime` (one per
-`ExecContext`). Its only state is `parallel_pool`, an atomic pointer to the
+`Backend` is a thin dispatch value embedded in `ExecContext` (one per
+context, the `backend` field). Its only state is `parallel_pool`, an atomic pointer to the
 worker team. The atomicity is load-bearing: kernels may dispatch from other
 threads (e.g. dot-backward's `OneShotWorker`) while a lazy `tryWorkPool` retry
 publishes the pool; the store is `release` and the load `acquire` so a racing
@@ -7964,11 +7977,11 @@ lifecycle, and the `parallelChunks`/`parallelChained` dispatch contracts.
 This subsection covers the backend seam.
 
 **The cross-thread handshake.** The pool is created lazily:
-`Runtime.tryWorkPool` (under `work_pool_mutex`) initializes one `thread.Pool`
+`tryWorkPool` (under `work_pool_mutex`) initializes one `thread.Pool`
 per `ExecContext` with `cpuThreadCount(vector_max_threads) - 1` workers and
 publishes it with `Backend.setWorkPool(&pool)` — the atomic
 release-store/acquire-load pair from §9.2, because a kernel dispatched on
-another thread may race the publication. `Runtime.deinit` unpublishes
+another thread may race the publication. `ExecContext.deinit` unpublishes
 (`setWorkPool(null)`) before destroying the pool. Exec ops call
 `enableNative*PoolForWork(work, threshold)` helpers so the team is only
 instantiated once an op is actually big enough to split. `thread.zig` also

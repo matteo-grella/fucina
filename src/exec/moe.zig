@@ -1,7 +1,7 @@
 const std = @import("std");
 const backend_mod = @import("../backend.zig");
 const fucina_dtype = @import("../dtype.zig");
-const Runtime = @import("runtime.zig").Runtime;
+const ExecContext = @import("../exec.zig").ExecContext;
 const backend_ops = backend_mod.ops;
 const expert_store = @import("expert_store.zig");
 const moe_chain = @import("moe_chain.zig");
@@ -705,12 +705,12 @@ pub const MoeDecodeScratch = struct {
     }
 };
 
-pub fn lockMoeDecodeScratch(scratch: *MoeDecodeScratch) void {
-    scratch.mutex.lock();
+pub fn lockMoeDecodeScratch(ctx: *ExecContext) void {
+    ctx.moe_scratch.mutex.lock();
 }
 
-pub fn unlockMoeDecodeScratch(scratch: *MoeDecodeScratch) void {
-    scratch.mutex.unlock();
+pub fn unlockMoeDecodeScratch(ctx: *ExecContext) void {
+    ctx.moe_scratch.mutex.unlock();
 }
 
 const MoeScratchCarver = struct {
@@ -762,8 +762,7 @@ pub fn MoeDecodeChainScratchView(comptime QgBlock: type, comptime State: type, c
 /// lifetime of the returned view. All region types align to <= 8 (the u64
 /// backing store's natural alignment).
 pub fn carveMoeDecodeScratch(
-    rt: *Runtime,
-    scratch: *MoeDecodeScratch,
+    ctx: *ExecContext,
     comptime QgBlock: type,
     comptime Task: type,
     hidden_blocks: usize,
@@ -793,9 +792,10 @@ pub fn carveMoeDecodeScratch(
 
     const rounded_total = std.math.add(usize, total, @sizeOf(u64) - 1) catch return tensor.TensorError.InvalidDataLength;
     const words_needed = rounded_total / @sizeOf(u64);
+    const scratch = &ctx.moe_scratch;
     if (scratch.words.len < words_needed) {
-        const grown = try rt.allocator.alloc(u64, words_needed);
-        if (scratch.words.len > 0) rt.allocator.free(scratch.words);
+        const grown = try ctx.allocator.alloc(u64, words_needed);
+        if (scratch.words.len > 0) ctx.allocator.free(scratch.words);
         scratch.words = grown;
     }
     var carver = MoeScratchCarver{ .base = @ptrCast(scratch.words.ptr) };
@@ -811,8 +811,7 @@ pub fn carveMoeDecodeScratch(
 }
 
 pub fn carveMoeDecodeChainScratch(
-    rt: *Runtime,
-    scratch: *MoeDecodeScratch,
+    ctx: *ExecContext,
     comptime QgBlock: type,
     comptime State: type,
     comptime Task: type,
@@ -845,9 +844,10 @@ pub fn carveMoeDecodeChainScratch(
 
     const rounded_total = std.math.add(usize, total, @sizeOf(u64) - 1) catch return tensor.TensorError.InvalidDataLength;
     const words_needed = rounded_total / @sizeOf(u64);
+    const scratch = &ctx.moe_scratch;
     if (scratch.words.len < words_needed) {
-        const grown = try rt.allocator.alloc(u64, words_needed);
-        if (scratch.words.len > 0) rt.allocator.free(scratch.words);
+        const grown = try ctx.allocator.alloc(u64, words_needed);
+        if (scratch.words.len > 0) ctx.allocator.free(scratch.words);
         scratch.words = grown;
     }
     var carver = MoeScratchCarver{ .base = @ptrCast(scratch.words.ptr) };
@@ -1093,7 +1093,7 @@ const MoeDecodeChainBuild = struct {
 /// per-expert path as fallback. Chain profile times accumulate here because
 /// the next wave reuses the same state/task storage.
 fn runMoeDecodeChainWave(
-    rt: *Runtime,
+    ctx: *ExecContext,
     build: *const MoeDecodeChainBuild,
     states: []MoeDecodeChainState,
     tasks: []MoeDecodeChainTask,
@@ -1104,7 +1104,7 @@ fn runMoeDecodeChainWave(
     if (n_wave == 0) return;
     for (js, 0..) |j, w| build.fill(states, tasks, w, j, n_wave);
     var used_chain = false;
-    if (rt.workPool()) |pool| {
+    if (ctx.workPool()) |pool| {
         used_chain = pool.parallelChained(MoeDecodeChainTask, tasks[0 .. 4 * n_wave], 2 * n_wave, runMoeDecodeChainTask);
     }
     if (!used_chain) {
@@ -1133,8 +1133,7 @@ fn runMoeDecodeChainWave(
 /// original selection order, so the output is bit-identical either way.
 /// `x` is (1, hidden) of K-quant experts; returns (1, hidden).
 pub fn moeExpertFfn(
-    rt: *Runtime,
-    scratch: *MoeDecodeScratch,
+    ctx: *ExecContext,
     x: *const Tensor,
     gate: *const MoeRhs,
     up: *const MoeRhs,
@@ -1181,15 +1180,15 @@ pub fn moeExpertFfn(
 
     // Q8_0-format activations live outside the carved scratch (only the
     // deepseek2-style layers pay this allocation).
-    const qx8: []qm.BlockQ8_0 = if (gate_up_q8) try rt.allocator.alloc(qm.BlockQ8_0, hidden / 32) else &.{};
-    defer if (qx8.len > 0) rt.allocator.free(qx8);
-    const qg8_all: []qm.BlockQ8_0 = if (down_q8) try rt.allocator.alloc(qm.BlockQ8_0, try checkedMoeProduct(top_k, blocks_per_g8)) else &.{};
-    defer if (qg8_all.len > 0) rt.allocator.free(qg8_all);
+    const qx8: []qm.BlockQ8_0 = if (gate_up_q8) try ctx.allocator.alloc(qm.BlockQ8_0, hidden / 32) else &.{};
+    defer if (qx8.len > 0) ctx.allocator.free(qx8);
+    const qg8_all: []qm.BlockQ8_0 = if (down_q8) try ctx.allocator.alloc(qm.BlockQ8_0, try checkedMoeProduct(top_k, blocks_per_g8)) else &.{};
+    defer if (qg8_all.len > 0) ctx.allocator.free(qg8_all);
 
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
-    scratch.mutex.lock();
-    defer scratch.mutex.unlock();
-    const sv = try carveMoeDecodeChainScratch(rt, scratch, qm.BlockQ8_K, MoeDecodeChainState, MoeDecodeChainTask, hidden_blocks_k, top_k, out_pe, hidden, blocks_per_g, chain_task_count);
+    lockMoeDecodeScratch(ctx);
+    defer unlockMoeDecodeScratch(ctx);
+    const sv = try carveMoeDecodeChainScratch(ctx, qm.BlockQ8_K, MoeDecodeChainState, MoeDecodeChainTask, hidden_blocks_k, top_k, out_pe, hidden, blocks_per_g, chain_task_count);
     const gate_buf = sv.gate_buf;
     const up_buf = sv.up_buf;
     const g_buf = sv.g_buf;
@@ -1238,7 +1237,7 @@ pub fn moeExpertFfn(
         // single dispatch over all top_k experts.
         for (0..top_k) |j| build.fill(sv.states, tasks, j, j, top_k);
         var used_chain = false;
-        if (rt.workPool()) |pool| {
+        if (ctx.workPool()) |pool| {
             used_chain = pool.parallelChained(MoeDecodeChainTask, tasks, chain_initial_count, runMoeDecodeChainTask);
         }
         if (!used_chain) {
@@ -1267,9 +1266,9 @@ pub fn moeExpertFfn(
                 n_miss += 1;
             }
         }
-        runMoeDecodeChainWave(rt, &build, sv.states, tasks, hit_js[0..n_hit], profile);
+        runMoeDecodeChainWave(ctx, &build, sv.states, tasks, hit_js[0..n_hit], profile);
         try stream_guard.store.?.acquireFinish();
-        runMoeDecodeChainWave(rt, &build, sv.states, tasks, miss_js[0..n_miss], profile);
+        runMoeDecodeChainWave(ctx, &build, sv.states, tasks, miss_js[0..n_miss], profile);
     }
     if (profile) |p| {
         p.expert_wall_ns += moeBatchProfileElapsed(expert_wall_start, io);
@@ -1280,7 +1279,7 @@ pub fn moeExpertFfn(
     }
 
     const out_alloc_start = moeBatchProfileStart(profile_enabled, io);
-    var out = try rt.emptyRank(2, .{ 1, hidden });
+    var out = try ctx.emptyRank(2, .{ 1, hidden });
     errdefer out.deinit();
     if (profile) |p| p.alloc_ns += moeBatchProfileElapsed(out_alloc_start, io);
     const scatter_start = moeBatchProfileStart(profile_enabled, io);
@@ -1583,7 +1582,7 @@ fn runMoeBatchSwiGluTaskOpaque(ctx: *anyopaque) void {
 /// across experts of unequal token counts; scratch lives in the context's
 /// persistent `moe_scratch`.
 fn runMoeBatchPhased(
-    rt: *Runtime,
+    ctx: *ExecContext,
     pool: *thread.Pool,
     active_experts: usize,
     gate: *const MoeRhs,
@@ -1621,21 +1620,21 @@ fn runMoeBatchPhased(
     const empty_x4: []const backend_mod.quantized_matmul.BlockQ8_Kx4 = &.{};
     const qx_x4_const: []const backend_mod.quantized_matmul.BlockQ8_Kx4 = qx_x4;
     const qg_x4_const: []const backend_mod.quantized_matmul.BlockQ8_Kx4 = qg_x4;
-    // Pinned mode (Runtime.pin_rowwise_kernels) skips the lane-packed
+    // Pinned mode (ExecContext.pin_rowwise_kernels) skips the lane-packed
     // Q8_Kx4 kernels: every expert then takes the per-row tile path — the
     // m == 1 numerics — so a speculative verify batch through this op
     // stays bit-identical to sequential decode. The expert gather (the
     // disk amortization on streamed models) is unaffected.
-    const pin_rows = rt.pin_rowwise_kernels;
+    const pin_rows = ctx.pin_rowwise_kernels;
     const gate_uses_x4 = !pin_rows and moeRhsUsesLanePacked(gate);
     const up_uses_x4 = !pin_rows and moeRhsUsesLanePacked(up);
     const down_uses_x4 = !pin_rows and moeRhsUsesLanePacked(down);
 
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
-    const gather_tasks = try rt.allocator.alloc(MoeBatchGatherTask, n_expert);
-    defer rt.allocator.free(gather_tasks);
-    const swiglu_tasks = try rt.allocator.alloc(MoeBatchSwiGluTask, n_expert);
-    defer rt.allocator.free(swiglu_tasks);
+    const gather_tasks = try ctx.allocator.alloc(MoeBatchGatherTask, n_expert);
+    defer ctx.allocator.free(gather_tasks);
+    const swiglu_tasks = try ctx.allocator.alloc(MoeBatchSwiGluTask, n_expert);
+    defer ctx.allocator.free(swiglu_tasks);
 
     // Small-m column chunking is a per-layer-call decision: with few active
     // experts each contributing one full-width task per projection, the
@@ -1656,17 +1655,17 @@ fn runMoeBatchPhased(
         const d_width = moePhaseColWidth(m, hidden, small_m_width);
         down_task_count = std.math.add(usize, down_task_count, moePhaseChunkCount(d_width, hidden)) catch return tensor.TensorError.InvalidDataLength;
     }
-    const gate_up_tasks = try rt.allocator.alloc(MoeBatchMatmulTask, gate_up_task_count);
-    defer rt.allocator.free(gate_up_tasks);
-    const down_tasks = try rt.allocator.alloc(MoeBatchMatmulTask, down_task_count);
-    defer rt.allocator.free(down_tasks);
-    const chain_states = try rt.allocator.alloc(MoeBatchPhaseChainState, n_expert);
-    defer rt.allocator.free(chain_states);
+    const gate_up_tasks = try ctx.allocator.alloc(MoeBatchMatmulTask, gate_up_task_count);
+    defer ctx.allocator.free(gate_up_tasks);
+    const down_tasks = try ctx.allocator.alloc(MoeBatchMatmulTask, down_task_count);
+    defer ctx.allocator.free(down_tasks);
+    const chain_states = try ctx.allocator.alloc(MoeBatchPhaseChainState, n_expert);
+    defer ctx.allocator.free(chain_states);
     const active_chain_tasks = try checkedMoeProduct(active_count, 2);
     const matmul_chain_tasks = std.math.add(usize, gate_up_task_count, down_task_count) catch return tensor.TensorError.InvalidDataLength;
     const chain_task_count = std.math.add(usize, active_chain_tasks, matmul_chain_tasks) catch return tensor.TensorError.InvalidDataLength;
-    const chain_tasks = try rt.allocator.alloc(MoeBatchPhaseChainTask, chain_task_count);
-    defer rt.allocator.free(chain_tasks);
+    const chain_tasks = try ctx.allocator.alloc(MoeBatchPhaseChainTask, chain_task_count);
+    defer ctx.allocator.free(chain_tasks);
     if (profile) |p| p.alloc_ns += moeBatchProfileElapsed(alloc_start, io);
 
     for (0..n_expert) |e| {
@@ -1863,7 +1862,7 @@ fn runMoeBatchScatterTask(task: *const MoeBatchScatterTask) void {
 /// over experts. `x` is (seq, hidden); `selected`/`weights` are seq*top_k
 /// (row-major per token). Returns (seq, hidden).
 pub fn moeExpertFfnBatch(
-    rt: *Runtime,
+    ctx: *ExecContext,
     x: *const Tensor,
     gate: *const MoeRhs,
     up: *const MoeRhs,
@@ -1877,7 +1876,7 @@ pub fn moeExpertFfnBatch(
     profile: ?*MoeBatchProfile,
 ) !Tensor {
     const qm = backend_mod.quantized_matmul;
-    const a = rt.allocator;
+    const a = ctx.allocator;
     const av = try x.rankView(2);
     const seq = av.dim(0);
     const hidden = av.dim(1);
@@ -1966,10 +1965,10 @@ pub fn moeExpertFfnBatch(
     const qg_x4_len = if (down_x4) try checkedMoeProduct(total_groups, bpc_g) else 0;
     const qg_x4 = try a.alloc(qm.BlockQ8_Kx4, qg_x4_len);
     defer a.free(qg_x4);
-    const phased_pool = if (use_phased) rt.workPool() else null;
+    const phased_pool = if (use_phased) ctx.workPool() else null;
     if (phased_pool) |pool| {
         try runMoeBatchPhased(
-            rt,
+            ctx,
             pool,
             route.active_experts,
             gate,
@@ -2035,7 +2034,7 @@ pub fn moeExpertFfnBatch(
         }
 
         const expert_wall_start = moeBatchProfileStart(profile_enabled, io);
-        if (rt.workPool()) |pool| {
+        if (ctx.workPool()) |pool| {
             pool.parallelChunks(MoeBatchTask, tasks, runMoeBatchTask);
         } else {
             for (tasks) |*t| runMoeBatchTask(t);
@@ -2061,7 +2060,7 @@ pub fn moeExpertFfnBatch(
     // Token-major split over the pool: disjoint destination rows with the
     // per-row k-order preserved, bit-identical to the serial loop.
     const out_alloc_start = moeBatchProfileStart(profile_enabled, io);
-    var out = try rt.emptyRank(2, .{ seq, hidden });
+    var out = try ctx.emptyRank(2, .{ seq, hidden });
     errdefer out.deinit();
     if (profile) |p| p.alloc_ns += moeBatchProfileElapsed(out_alloc_start, io);
 
@@ -2078,7 +2077,7 @@ pub fn moeExpertFfnBatch(
         .t1 = seq,
     };
     const scatter_pooled = use_phased and
-        rt.dispatchRange(MoeBatchScatterTask, "t0", "t1", scatter_base, seq, runMoeBatchScatterTask);
+        ctx.dispatchRange(MoeBatchScatterTask, "t0", "t1", scatter_base, seq, runMoeBatchScatterTask);
     if (!scatter_pooled) runMoeBatchScatterTask(&scatter_base);
     if (profile) |p| {
         p.scatter_ns += moeBatchProfileElapsed(scatter_start, io);
