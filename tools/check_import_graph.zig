@@ -1,8 +1,9 @@
 //! Production import-graph checker for Fucina.
 //!
 //! Sentrux scans the whole repository, including sibling test files. This tool
-//! enforces the stricter PRODUCTION invariants over the non-test
-//! `src/**/*.zig` import graph, in-tree so `zig build arch-check` is the gate:
+//! enforces the stricter PRODUCTION invariants over the non-test import
+//! graph of `src/`, `examples/`, `bench/`, and `tools/`, in-tree so
+//! `zig build arch-check` is the gate:
 //! no nontrivial strongly-connected components, no band inversions, and no
 //! unforwarded sibling test files.
 //!
@@ -22,7 +23,7 @@
 //! in no band is an error too: a new `src/` root cannot silently inherit
 //! whatever band its neighbours happen to have.
 //!
-//! Third invariant — test-file forwarding: every `src/**/*_tests.zig` /
+//! Third invariant — test-file forwarding: every `*_tests.zig` /
 //! `*_test.zig` file must have an incoming `@import` from some non-test src
 //! file (the `test { _ = @import("x_tests.zig"); }` forwarding stanza).
 //! Zig's lazy analysis means an unforwarded test file is silently absent
@@ -83,6 +84,9 @@ const Band = enum {
 const band_table = [_]struct { path: []const u8, band: Band }{
     .{ .path = "src/bench_raw.zig", .band = .apps },
     .{ .path = "src/x86dot_check.zig", .band = .apps },
+    .{ .path = "examples/", .band = .apps },
+    .{ .path = "bench/", .band = .apps },
+    .{ .path = "tools/", .band = .apps },
 
     .{ .path = "src/llm.zig", .band = .llm },
     .{ .path = "src/llm/", .band = .llm },
@@ -396,27 +400,32 @@ fn checkBands(
     }
 }
 
+/// Roots the checker walks. `src` is the library; the apps-band roots are
+/// scanned too, because an example is not exempt from having no import
+/// cycles and no silently-dead test file — several of them are complete
+/// model ports, not snippets.
+const scan_roots = [_][]const u8{ "src", "examples", "bench", "tools" };
+
 fn collectFiles(allocator: Allocator, io: std.Io, graph: *Graph, test_files: *TestFiles) !void {
-    var src_dir = try std.Io.Dir.cwd().openDir(io, "src", .{ .iterate = true });
-    defer src_dir.close(io);
+    for (scan_roots) |root| {
+        var dir = std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch continue;
+        defer dir.close(io);
 
-    var walker = try src_dir.walk(allocator);
-    defer walker.deinit();
+        var walker = try dir.walk(allocator);
+        defer walker.deinit();
 
-    while (try walker.next(io)) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.path, ".zig")) continue;
-        if (isTestPath(entry.path)) {
-            const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        while (try walker.next(io)) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.path, ".zig")) continue;
+            const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ root, entry.path });
             errdefer allocator.free(path);
-            try test_files.forwarded_by_path.put(allocator, path, false);
-            continue;
+            if (isTestPath(entry.path) and !isProgramRoot(allocator, io, path)) {
+                try test_files.forwarded_by_path.put(allocator, path, false);
+                continue;
+            }
+            try graph.index_by_path.put(allocator, path, graph.files.items.len);
+            try graph.files.append(allocator, .{ .path = path });
         }
-
-        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
-        errdefer allocator.free(path);
-        try graph.index_by_path.put(allocator, path, graph.files.items.len);
-        try graph.files.append(allocator, .{ .path = path });
     }
 }
 
@@ -602,6 +611,17 @@ fn addEdge(allocator: Allocator, file: *FileInfo, target_index: usize) !void {
 fn isTestPath(path: []const u8) bool {
     return std.mem.endsWith(u8, path, "_tests.zig") or
         std.mem.endsWith(u8, path, "_test.zig");
+}
+
+/// A file whose NAME looks like a sibling test suite but which is actually
+/// an executable root (`tools/gen_snippet_tests.zig` GENERATES tests; it is
+/// not one). Nothing forwards a program, so the forwarding invariant must
+/// not claim it. Keyed on `pub fn main` rather than a path allowlist, so a
+/// new generator needs no edit here.
+fn isProgramRoot(allocator: Allocator, io: std.Io, path: []const u8) bool {
+    const contents = readFileSentinel(allocator, io, path) catch return false;
+    defer allocator.free(contents);
+    return std.mem.indexOf(u8, contents, "pub fn main(") != null;
 }
 
 fn stringLessThan(_: void, a: []const u8, b: []const u8) bool {

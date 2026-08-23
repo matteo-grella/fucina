@@ -305,9 +305,16 @@ modules are separate, apps-band roots).
 Enforcement:
 
 - `zig build arch-check` runs `tools/check_import_graph.zig` over the
-  production (non-test) `src/**/*.zig` import graph and enforces three
-  invariants: zero nontrivial strongly-connected components, zero band
-  inversions, and every sibling test file forwarded from a production file.
+  production (non-test) import graph of `src/`, `examples/`, `bench/`, and
+  `tools/`, and enforces three invariants: zero nontrivial
+  strongly-connected components, zero band inversions, and every sibling
+  test file forwarded from a production file. The apps-band roots are
+  scanned because several `examples/` entries are complete model ports
+  rather than snippets, and an unforwarded test file there is just as
+  silently dead as one in `src/`. A file whose name ends in `_tests.zig`
+  but which declares `pub fn main` is an executable root, not a suite
+  (`tools/gen_snippet_tests.zig` generates tests), and is exempt from the
+  forwarding rule.
   The checker is AST-based and test-aware: `@import`s inside `test`
   declarations, and inside non-pub file-scope decls reachable only from
   tests, are excluded, so sibling-test forwarding stanzas and private test

@@ -30,9 +30,9 @@ exec runtime (`src/exec/`) → backends (`src/backend/`) → tensor/storage/dtyp
 `fucina_llm` files import the `fucina` *module* (public surface plus
 `fucina.internal`), never individual `src/*.zig` files.
 
-*Enforced by:* `zig build arch-check` — the production import graph must have
-zero strongly-connected components AND zero band inversions (AST-based,
-test-aware). Band direction is checked against the layer table in
+*Enforced by:* `zig build arch-check` — the production import graph of `src/`,
+`examples/`, `bench/`, and `tools/` must have zero strongly-connected
+components AND zero band inversions (AST-based, test-aware). Band direction is checked against the layer table in
 [ARCHITECTURE.md](ARCHITECTURE.md), encoded as `band_table` in
 `tools/check_import_graph.zig`: production layer inversions are a failed
 build, full stop. A production file in no band fails the check as well, so a
