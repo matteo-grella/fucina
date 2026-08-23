@@ -698,11 +698,11 @@ fn runRawDotPackedQ8_0(m: usize, k: usize, n: usize, iterations: usize) !Result 
     fillQ8_0Blocks(blocks);
     var w = try ctx.fromStorageSliceRankTyped(.q8_0, 2, .{ n, k }, blocks);
     defer w.deinit();
-    var packed_rhs = try ctx.packMatmulRhsQ8_0x4(&w);
+    var packed_rhs = try ctx.packMatmulRhs(.q8_0, &w);
     defer packed_rhs.deinit();
 
     for (0..4) |_| {
-        var y = try ctx.matmul2DWithPackedQ8_0x4Rhs(&x, &packed_rhs);
+        var y = try ctx.matmulPacked(&x, &packed_rhs);
         y.deinit();
     }
 
@@ -710,7 +710,7 @@ fn runRawDotPackedQ8_0(m: usize, k: usize, n: usize, iterations: usize) !Result 
     var checksum: f64 = 0;
     var timer = try Timer.start(benchmark_io);
     for (0..iterations) |_| {
-        var y = try ctx.matmul2DWithPackedQ8_0x4Rhs(&x, &packed_rhs);
+        var y = try ctx.matmulPacked(&x, &packed_rhs);
         checksum += @as(f64, @floatCast(y.dataConst()[0]));
         y.deinit();
     }

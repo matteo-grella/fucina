@@ -322,23 +322,16 @@ pub fn Ops(comptime Self: type) type {
                 if (tag_rank != 2) @compileError("dotPacked (" ++ @typeName(Rhs) ++ " RHS) currently requires a rank-2 lhs");
                 if (axis(contract_tag) != 1) @compileError("dotPacked (" ++ @typeName(Rhs) ++ " RHS) requires lhs storage order [free, contract]");
             }
+            comptime if (Rhs == backend_mod.QuantizedMatmulRhsQ4_Kx4)
+                @compileError("dotPacked: the Q4_Kx4 pack has no facade entry (kernel-comparison surface below the facade); pack q4_k with packRhs (x2mmla/x8) instead");
             if (self.requiresGrad()) return if (Rhs == backend_mod.PackedDenseRhs)
                 error.GradientPackedMatmulUnsupported
             else
                 error.GradientQuantizedMatmulUnsupported;
-            var value = try switch (Rhs.dtype) {
-                .f32 => ctx.matmul2DWithPackedDenseRhs(self.asRawTensor(), rhs),
-                .q8_0 => ctx.matmul2DWithPackedQ8_0x4Rhs(self.asRawTensor(), rhs),
-                .q6_k => ctx.matmul2DWithPackedQ6_Kx4Rhs(self.asRawTensor(), rhs),
-                .q5_k => ctx.matmul2DWithPackedQ5_Kx8Rhs(self.asRawTensor(), rhs),
-                .q4_k => if (Rhs == backend_mod.QuantizedMatmulRhsQ4_Kx2Mmla)
-                    ctx.matmul2DWithPackedQ4_Kx2MmlaRhs(self.asRawTensor(), rhs)
-                else if (Rhs == backend_mod.QuantizedMatmulRhsQ4_Kx8)
-                    ctx.matmul2DWithPackedQ4_Kx8Rhs(self.asRawTensor(), rhs)
-                else
-                    @compileError("dotPacked: the Q4_Kx4 pack has no facade entry (kernel-comparison surface below the facade); pack q4_k with packRhs (x2mmla/x8) instead"),
-                else => unreachable,
-            };
+            var value = if (comptime Rhs == backend_mod.PackedDenseRhs)
+                try ctx.matmul2DWithPackedDenseRhs(self.asRawTensor(), rhs)
+            else
+                try ctx.matmulPacked(self.asRawTensor(), rhs);
             errdefer value.deinit();
             return finishNoGrad(replaceTag(tags, contract_tag, out_tag), ctx, value);
         }
@@ -379,21 +372,17 @@ pub fn Ops(comptime Self: type) type {
                 if (tag_rank != 2) @compileError("rmsNormMulDotPacked (" ++ @typeName(Rhs) ++ " RHS) currently requires a rank-2 lhs");
                 if (axis(contract_tag) != 1) @compileError("rmsNormMulDotPacked (" ++ @typeName(Rhs) ++ " RHS) requires lhs storage order [free, contract]");
             }
+            comptime {
+                if (Rhs == backend_mod.PackedDenseRhs)
+                    @compileError("rmsNormMulDotPacked: dense packed RHS has no fused norm kernel; use rmsNormMul + dotPacked");
+                if (Rhs == backend_mod.QuantizedMatmulRhsQ4_Kx2Mmla)
+                    @compileError("rmsNormMulDotPacked: no fused MMLA kernel exists; use the unfused path (rmsNormMul + dotPacked)");
+                if (Rhs == backend_mod.QuantizedMatmulRhsQ4_Kx4)
+                    @compileError("rmsNormMulDotPacked: the Q4_Kx4 pack has no facade entry (kernel-comparison surface below the facade)");
+            }
             const weight_ptr = tensorObjectPtrFrom(@TypeOf(norm_weight), &norm_weight);
             if (self.requiresGrad() or weight_ptr.requiresGrad()) return error.GradientQuantizedMatmulUnsupported;
-            var value = try switch (Rhs.dtype) {
-                .f32 => @compileError("rmsNormMulDotPacked: dense packed RHS has no fused norm kernel; use rmsNormMul + dotPacked"),
-                .q8_0 => ctx.rmsNormMulMatmul2DWithPackedQ8_0x4Rhs(self.asRawTensor(), weight_ptr.asRawTensor(), eps, rhs),
-                .q5_k => ctx.rmsNormMulMatmul2DWithPackedQ5_Kx8Rhs(self.asRawTensor(), weight_ptr.asRawTensor(), eps, rhs),
-                .q6_k => ctx.rmsNormMulMatmul2DWithPackedQ6_Kx4Rhs(self.asRawTensor(), weight_ptr.asRawTensor(), eps, rhs),
-                .q4_k => if (Rhs == backend_mod.QuantizedMatmulRhsQ4_Kx8)
-                    ctx.rmsNormMulMatmul2DWithPackedQ4_Kx8Rhs(self.asRawTensor(), weight_ptr.asRawTensor(), eps, rhs)
-                else if (Rhs == backend_mod.QuantizedMatmulRhsQ4_Kx2Mmla)
-                    @compileError("rmsNormMulDotPacked: no fused MMLA kernel exists; use the unfused path (rmsNormMul + dotPacked)")
-                else
-                    @compileError("rmsNormMulDotPacked: the Q4_Kx4 pack has no facade entry (kernel-comparison surface below the facade)"),
-                else => unreachable,
-            };
+            var value = try ctx.rmsNormMulMatmulPacked(self.asRawTensor(), weight_ptr.asRawTensor(), eps, rhs);
             errdefer value.deinit();
             return finishNoGrad(replaceTag(tags, contract_tag, out_tag), ctx, value);
         }
@@ -418,20 +407,16 @@ pub fn Ops(comptime Self: type) type {
                 if (tag_rank != 2) @compileError("splitSwiGluDotPacked (" ++ @typeName(Rhs) ++ " RHS) currently requires a rank-2 lhs");
                 if (axis(split_tag) != 1) @compileError("splitSwiGluDotPacked (" ++ @typeName(Rhs) ++ " RHS) requires lhs storage order [free, fused]");
             }
+            comptime {
+                if (Rhs == backend_mod.PackedDenseRhs)
+                    @compileError("splitSwiGluDotPacked: dense packed RHS has no fused SwiGLU kernel; use splitSwiGlu + dotPacked");
+                if (Rhs == backend_mod.QuantizedMatmulRhsQ4_Kx2Mmla)
+                    @compileError("splitSwiGluDotPacked: no fused MMLA kernel exists; on aarch64+i8mm targets use the unfused path (splitSwiGlu + dotPacked)");
+                if (Rhs == backend_mod.QuantizedMatmulRhsQ4_Kx4)
+                    @compileError("splitSwiGluDotPacked: the Q4_Kx4 pack has no facade entry (kernel-comparison surface below the facade)");
+            }
             if (self.requiresGrad()) return error.GradientQuantizedMatmulUnsupported;
-            var value = try switch (Rhs.dtype) {
-                .f32 => @compileError("splitSwiGluDotPacked: dense packed RHS has no fused SwiGLU kernel; use splitSwiGlu + dotPacked"),
-                .q8_0 => ctx.splitSwiGluMatmul2DWithPackedQ8_0x4Rhs(self.asRawTensor(), rhs),
-                .q5_k => ctx.splitSwiGluMatmul2DWithPackedQ5_Kx8Rhs(self.asRawTensor(), rhs),
-                .q6_k => ctx.splitSwiGluMatmul2DWithPackedQ6_Kx4Rhs(self.asRawTensor(), rhs),
-                .q4_k => if (Rhs == backend_mod.QuantizedMatmulRhsQ4_Kx8)
-                    ctx.splitSwiGluMatmul2DWithPackedQ4_Kx8Rhs(self.asRawTensor(), rhs)
-                else if (Rhs == backend_mod.QuantizedMatmulRhsQ4_Kx2Mmla)
-                    @compileError("splitSwiGluDotPacked: no fused MMLA kernel exists; on aarch64+i8mm targets use the unfused path (splitSwiGlu + dotPacked)")
-                else
-                    @compileError("splitSwiGluDotPacked: the Q4_Kx4 pack has no facade entry (kernel-comparison surface below the facade)"),
-                else => unreachable,
-            };
+            var value = try ctx.splitSwiGluMatmulPacked(self.asRawTensor(), rhs);
             errdefer value.deinit();
             return finishNoGrad(replaceTag(tags, split_tag, out_tag), ctx, value);
         }
@@ -455,11 +440,10 @@ pub fn Ops(comptime Self: type) type {
                 if (tag_rank != 2) @compileError("gegluQuantDotPacked (" ++ @typeName(Rhs) ++ " RHS) currently requires a rank-2 lhs");
                 if (axis(in_tag) != 1) @compileError("gegluQuantDotPacked (" ++ @typeName(Rhs) ++ " RHS) requires lhs storage order [free, contract]");
             }
+            comptime if (Rhs != backend_mod.QuantizedMatmulRhsQ8_0x4)
+                @compileError("gegluQuantDotPacked: no fused geglu kernel for packed RHS " ++ @typeName(Rhs));
             if (self.requiresGrad() or up.requiresGrad()) return error.GradientQuantizedMatmulUnsupported;
-            var value = try switch (Rhs.dtype) {
-                .q8_0 => ctx.gegluQuantMatmul2DWithPackedQ8_0x4Rhs(self.asRawTensor(), up.asRawTensor(), rhs),
-                else => @compileError("gegluQuantDotPacked: no fused geglu kernel for packed RHS " ++ @typeName(Rhs)),
-            };
+            var value = try ctx.gegluQuantMatmulPacked(self.asRawTensor(), up.asRawTensor(), rhs);
             errdefer value.deinit();
             return finishNoGrad(replaceTag(tags, in_tag, out_tag), ctx, value);
         }

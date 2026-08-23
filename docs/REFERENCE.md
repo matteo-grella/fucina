@@ -792,9 +792,7 @@ can run different shadow policy).
 | Variable | Effect | Default |
 | --- | --- | --- |
 | `FUCINA_NORM_QUANT_FUSED=1` / `FUCINA_NO_NORM_QUANT_FUSED=1` | Force the fused normalize+quantize+packed-GEMM route of `linearSeqNormed` on/off (prefill shapes on the packed CPU arms only; the fused route matches the unfused `rmsNormMul` + linear pair to f32 roundoff, not bitwise). | on |
-| `FUCINA_Q4K_DECODE_COMPACT=1` / `FUCINA_NO_Q4K_DECODE_COMPACT=1` | Route decode-shape (m < 4) no-grad Q4_K matmuls through the GGUF-native compact blocks instead of the byte-expanded packed layout — bitwise-equal, ~1.92× fewer weight bytes streamed. | on |
-| `FUCINA_Q5K_DECODE_COMPACT=1` / `FUCINA_NO_Q5K_DECODE_COMPACT=1` | The same switch for Q5_K (~1.57× byte ratio). | on |
-| `FUCINA_Q6K_DECODE_COMPACT=1` / `FUCINA_NO_Q6K_DECODE_COMPACT=1` | The same switch for Q6_K (1.30× byte ratio). | on |
+| `FUCINA_DECODE_COMPACT=1` / `FUCINA_NO_DECODE_COMPACT=1` | Route decode-shape (m < 4) no-grad K-quant matmuls through the GGUF-native compact blocks instead of the byte-expanded packed layout — bitwise-equal, fewer weight bytes streamed (Q4_K ~1.92×, Q5_K ~1.57×, Q6_K 1.30×). | on |
 | `FUCINA_NO_FUSED_DISTILL=1` | Forces the composed logits + `cartridge.distillLoss` tail instead of the fused distill route in cartridge training (`src/llm/qwen3/train.zig`; A/B + emergency revert — the fused route matches it to f32 roundoff, not bitwise). | fused route on |
 | `FUCINA_MM_PROFILE=1` | Per-stage timing profile of the Inkling multimodal-projector encode (`src/llm/inkling/mmproj.zig`; read once at load). | off |
 
@@ -7618,7 +7616,7 @@ The full kernel inventory, grouped (every name is an entry of
 | dense GEMM | `matmulInto`*, `matmul2DIntoUnchecked`, `matmul2DAccIntoUnchecked`, `matmul2DIntoUncheckedTyped`, `matmulTransAInto`*, `matmulTransA2DIntoUnchecked`, `matmulTransBInto`*, `matmulTransB2DIntoUnchecked`, `matmulTransB2DIntoUncheckedF16Operands`, `matmulTransB2DIntoUncheckedBf16Rhs` |
 | batched GEMM | `matmulBatched2DIntoUnchecked`, `matmulBatchedTransA2DIntoUnchecked`, `matmulBatchedTransB2DIntoUnchecked` |
 | packed dense RHS | `packDenseMatmulRhsTyped`*, `matmul2DIntoUncheckedPackedDenseRhs`, `packMatmulRhsTyped`*, `matmul2DIntoUncheckedPackedRhsTyped` |
-| quantized RHS | `quantizeMatmulRhsBlockwiseI8`*, `quantizeMatmulRhsQ4_0`*, `quantizeMatmulRhsQ8_0`*, `matmul2DQuantizedRhs`, `matmul2DQuantizedRhsQ8_0x4`, `matmul2DQuantizedRhsQ6_Kx4`, `matmul2DQuantizedRhsQ4_Kx4`, `matmul2DQuantizedRhsQ4_Kx8`, `matmul2DQuantizedRhsQ4_Kx2Mmla`, `matmul2DQuantizedRhsQ5_Kx8`, `matmul2DPackedQ8_0x4LhsRhs`, `matmul2DPackedPaddedQ8_0x4LhsRhs`, `matmulPackedQ4_Kx8Q8_Kx4Slice`, `matmulPackedQ4_Kx8RowsSlice`, `matmulPackedQ5_Kx8Q8_Kx4Slice`, `matmulPackedQ5_Kx8RowsSlice`, `matmulPackedQ6_Kx4RowsSlice` |
+| quantized RHS | `quantizeMatmulRhsBlockwiseI8`*, `quantizeMatmulRhsQ4_0`*, `quantizeMatmulRhsQ8_0`*, `matmul2DQuantizedRhs`, `matmulQuantizedRhs` (comptime dtype, the plain K-quant containers), `matmulPacked` (comptime container dispatch over the packed layouts), `matmulPackedSlice` (pre-quantized LHS slices), `matmul2DPackedQ8_0x4LhsRhs`, `matmul2DPackedPaddedQ8_0x4LhsRhs` |
 
 Geometry structs re-exported through `backend.zig` (and used in the
 signatures above): `Conv2dDims` (channel-last `[H,W,Cin] → [OH,OW,Cout]`;
@@ -8642,9 +8640,8 @@ Packing and consuming happen on the facade:
   contiguous). `packRhsAs` is the escape hatch to force a non-default
   container (e.g. `QuantizedMatmulRhsQ4_Kx8` on MMLA hardware to exercise
   the fused kernels). Equivalent
-  `ExecContext` entries: `packMatmulRhsQ8_0x4`,
-  `packMatmulRhsQ6_Kx4`, `packMatmulRhsQ4_Kx4`, `packMatmulRhsQ4_Kx8`,
-  `packMatmulRhsQ4_Kx2Mmla`, `packMatmulRhsQ5_Kx8`.
+  `ExecContext` entries: `packMatmulRhs(dt, &w)` (the dtype-default
+  container) and `packMatmulRhsAs(Rhs, &w)` (a specific container).
 - Every pack is independent of the source tensor, which may be released after
   packing. The owner calls `deinit()` on the packed container.
 - `x.dotPacked(ctx, &packed, contract_tag, out_tag)` — rank-2 f32 LHS stored
@@ -11403,13 +11400,13 @@ pub fn deinit(self: *LinearWeight) void
   decode shapes (`seq < 4`, no gradients) q4_k, q5_k, and q6_k instead
   contract against the resident GGUF-native compact blocks —
   bitwise-equal outputs, ~1.92x/1.57x/1.30x fewer weight bytes streamed
-  than the byte-expanded packed layout; default on, with the per-format
-  `FUCINA_Q4K_DECODE_COMPACT`/`FUCINA_NO_Q4K_DECODE_COMPACT` (and the
-  Q5K/Q6K pairs) forcing the route on/off and `setQ5kDecodeCompact`/
-  `setQ6kDecodeCompact` as the programmatic overrides), and a tagged `dot`
-  for everything else. The per-format helpers `linearSeqQ8_0`,
-  `linearSeqQ4_K`, `linearSeqQ5_K`, `linearSeqQ6_K` are also `pub` for
-  callers that hold the wrapper struct directly.
+  than the byte-expanded packed layout; default on, with
+  `FUCINA_DECODE_COMPACT`/`FUCINA_NO_DECODE_COMPACT` forcing the route
+  on/off and `setDecodeCompact` as the programmatic override), and a
+  tagged `dot` for everything else. The format-generic helper
+  `weights.linearSeq(&w, ctx, input, in_tag, out_tag)` is also `pub` for
+  callers that hold a packed wrapper struct directly (the format is
+  inferred from the container).
 - `linearSeqNormed` is `linearSeq` over `rmsNormMul(x, norm_weight, eps)`:
   on the packed CPU q4_k/q5_k/q6_k/q8_0 routes at prefill shapes
   (`seq >= 4`, no gradients; q4_k only on non-MMLA targets) the normalized

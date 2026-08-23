@@ -181,7 +181,7 @@ test "loadForFusion q8_0: parts skip residency but the fused weight matches the 
     }
 }
 
-test "linearSeqQ5_K: compact decode route (m < 4) matches the packed path bitwise; m = 4 stays packed" {
+test "linearSeq (q5_k): compact decode route (m < 4) matches the packed path bitwise; m = 4 stays packed" {
     // Route-level A/B of the Q5_K decode gate: with the toggle forced ON the
     // m<4 inputs go through the compact GGUF-native blocks (weight.value ->
     // quantized-RHS dot), with it forced OFF through the byte-expanded packed
@@ -222,7 +222,7 @@ test "linearSeqQ5_K: compact decode route (m < 4) matches the packed path bitwis
 
     // Restore the env/arch default once done (the setter pre-seeds the
     // read-once gate cache; null resets it to unread).
-    defer weights.setQ5kDecodeCompact(null);
+    defer weights.setDecodeCompact(null);
 
     inline for ([_]usize{ 1, 2, 3, 4 }) |seq_len| {
         var x_vals: [seq_len * in_dim]f32 = undefined;
@@ -230,11 +230,11 @@ test "linearSeqQ5_K: compact decode route (m < 4) matches the packed path bitwis
         var x = try fucina.Tensor(.{ .seq, .embed }).fromSlice(&ctx, .{ seq_len, in_dim }, &x_vals);
         defer x.deinit();
 
-        weights.setQ5kDecodeCompact(true);
+        weights.setDecodeCompact(true);
         var y_compact = try w.linearSeq(&ctx, &x, .embed, .ffn);
         defer y_compact.deinit();
 
-        weights.setQ5kDecodeCompact(false);
+        weights.setDecodeCompact(false);
         var y_packed = try w.linearSeq(&ctx, &x, .embed, .ffn);
         defer y_packed.deinit();
 
@@ -242,7 +242,7 @@ test "linearSeqQ5_K: compact decode route (m < 4) matches the packed path bitwis
     }
 }
 
-test "linearSeqQ6_K: compact decode route (m < 4) matches the packed path bitwise; m = 4 stays packed" {
+test "linearSeq (q6_k): compact decode route (m < 4) matches the packed path bitwise; m = 4 stays packed" {
     // Q6_K ride-along of the Q5_K decode gate (same structure): toggle ON
     // routes m<4 through the compact GGUF-native blocks (weight.value ->
     // quantized-RHS dot), OFF through the byte-expanded packed Q6_Kx4 layout
@@ -281,7 +281,7 @@ test "linearSeqQ6_K: compact decode route (m < 4) matches the packed path bitwis
 
     // Restore the env/arch default once done (the setter pre-seeds the
     // read-once gate cache; null resets it to unread).
-    defer weights.setQ6kDecodeCompact(null);
+    defer weights.setDecodeCompact(null);
 
     inline for ([_]usize{ 1, 2, 3, 4 }) |seq_len| {
         var x_vals: [seq_len * in_dim]f32 = undefined;
@@ -289,11 +289,11 @@ test "linearSeqQ6_K: compact decode route (m < 4) matches the packed path bitwis
         var x = try fucina.Tensor(.{ .seq, .embed }).fromSlice(&ctx, .{ seq_len, in_dim }, &x_vals);
         defer x.deinit();
 
-        weights.setQ6kDecodeCompact(true);
+        weights.setDecodeCompact(true);
         var y_compact = try w.linearSeq(&ctx, &x, .embed, .ffn);
         defer y_compact.deinit();
 
-        weights.setQ6kDecodeCompact(false);
+        weights.setDecodeCompact(false);
         var y_packed = try w.linearSeq(&ctx, &x, .embed, .ffn);
         defer y_packed.deinit();
 

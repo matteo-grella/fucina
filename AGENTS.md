@@ -92,7 +92,7 @@ Build options (consumed at comptime via `build_options`):
   32-row tiles would run mostly empty stay on CPU; 0 = old behavior), raw-block CPU fallback —
   gpu builds keep ONE raw expert representation instead of the x4 packs). **Dense quantized
   linears** (Q4_K/Q6_K/Q8_0, and ternary TQ2_0 — e.g. the qwen3/gemma prefill projections and PTQTP plane matmuls) also offload via the same
-  `gemmQuantNtAsync` dequant-in-kernel GEMM (`weights.linearSeqQ*` → `ExecContext.denseQuantMatmulGpu`,
+  `gemmQuantNtAsync` dequant-in-kernel GEMM (`weights.linearSeq` → `ExecContext.denseQuantMatmulGpu`,
   per-format `FUCINA_GPU_MIN_WORK_DENSE_Q4/Q6/Q8/TQ2` gates against the CPU packed-kernel fallback,
   stable RHS residency, ~+33% pp on 0.6B-Q4_K);
   decode (m=1, below the gate) and training (grad path) stay on CPU.

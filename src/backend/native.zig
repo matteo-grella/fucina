@@ -154,21 +154,13 @@ pub const kernels = struct {
     pub const quantizeMatmulRhsQ4_0 = native.quantizeMatmulRhsQ4_0;
     pub const quantizeMatmulRhsQ8_0 = native.quantizeMatmulRhsQ8_0;
     pub const matmul2DQuantizedRhs = native.matmul2DQuantizedRhs;
-    pub const matmul2DQuantizedRhsQ8_0x4 = native.matmul2DQuantizedRhsQ8_0x4;
+    pub const matmulQuantizedRhs = native.matmulQuantizedRhs;
+    pub const matmulPacked = native.matmulPacked;
     pub const matmul2DPackedQ8_0x4LhsRhs = native.matmul2DPackedQ8_0x4LhsRhs;
-    pub const matmulPackedQ4_Kx8Q8_Kx4Slice = native.matmulPackedQ4_Kx8Q8_Kx4Slice;
-    pub const matmulPackedQ4_Kx8RowsSlice = native.matmulPackedQ4_Kx8RowsSlice;
-    pub const matmulPackedQ5_Kx8Q8_Kx4Slice = native.matmulPackedQ5_Kx8Q8_Kx4Slice;
-    pub const matmulPackedQ5_Kx8RowsSlice = native.matmulPackedQ5_Kx8RowsSlice;
-    pub const matmulPackedQ6_Kx4RowsSlice = native.matmulPackedQ6_Kx4RowsSlice;
+    pub const matmulPackedSlice = native.matmulPackedSlice;
     pub const unaryRowSlice = native.unaryRowSlice;
     pub const mulRowSlice = native.mulRowSlice;
     pub const matmul2DPackedPaddedQ8_0x4LhsRhs = native.matmul2DPackedPaddedQ8_0x4LhsRhs;
-    pub const matmul2DQuantizedRhsQ6_Kx4 = native.matmul2DQuantizedRhsQ6_Kx4;
-    pub const matmul2DQuantizedRhsQ4_Kx4 = native.matmul2DQuantizedRhsQ4_Kx4;
-    pub const matmul2DQuantizedRhsQ4_Kx8 = native.matmul2DQuantizedRhsQ4_Kx8;
-    pub const matmul2DQuantizedRhsQ4_Kx2Mmla = native.matmul2DQuantizedRhsQ4_Kx2Mmla;
-    pub const matmul2DQuantizedRhsQ5_Kx8 = native.matmul2DQuantizedRhsQ5_Kx8;
     pub const matmulTransAInto = native.matmulTransAInto;
     pub const matmulTransA2DIntoUnchecked = native.matmulTransA2DIntoUnchecked;
     pub const matmulTransBInto = native.matmulTransBInto;
@@ -404,11 +396,7 @@ pub fn matmul2DQuantizedRhs(
         .q5_0 => |qrhs| matmul2DQuantizedRhsQ5_0(pc, allocator, out, a, qrhs, m, n, k),
         .q5_1 => |qrhs| matmul2DQuantizedRhsQ5_1(pc, allocator, out, a, qrhs, m, n, k),
         .q8_0 => |qrhs| matmul2DQuantizedRhsQ8_0(pc, allocator, out, a, qrhs, m, n, k),
-        .q2_k => |qrhs| matmul2DQuantizedRhsQ2_K(pc, allocator, out, a, qrhs, m, n, k),
-        .q3_k => |qrhs| matmul2DQuantizedRhsQ3_K(pc, allocator, out, a, qrhs, m, n, k),
-        .q4_k => |qrhs| matmul2DQuantizedRhsQ4_K(pc, allocator, out, a, qrhs, m, n, k),
-        .q5_k => |qrhs| matmul2DQuantizedRhsQ5_K(pc, allocator, out, a, qrhs, m, n, k),
-        .q6_k => |qrhs| matmul2DQuantizedRhsQ6_K(pc, allocator, out, a, qrhs, m, n, k),
+        inline .q2_k, .q3_k, .q4_k, .q5_k, .q6_k => |qrhs, tag| matmulQuantizedRhs(pc, @field(DType, @tagName(tag)), allocator, out, a, qrhs, m, n, k),
         .iq1_s => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq1_s, allocator, out, a, qrhs, m, n, k),
         .iq1_m => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq1_m, allocator, out, a, qrhs, m, n, k),
         .iq2_xxs => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq2_xxs, allocator, out, a, qrhs, m, n, k),
@@ -699,7 +687,7 @@ pub fn matmul2DQuantizedRhsQ8_0(
     return matmul2DQuantizedRhsQ8_0Rows(pc, vector.matmul_quant.matmul2DQ8_0RhsInto, allocator, out, a, rhs, m, n, k);
 }
 
-pub fn matmul2DQuantizedRhsQ8_0x4(
+fn matmulPackedQ8_0x4(
     pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
@@ -818,27 +806,34 @@ pub fn matmul2DPackedQ8_0x4LhsRhs(
     vector.matmul_quant.matmul2DQ8_0x4PackedRhsInto(pc, cd, lhs_blocks, rhs, m, n, k);
 }
 
-// Pre-quantized-LHS K-quant GEMM entries for the fused split-activation ops:
-// exec quantizes the activation rows itself there, so these skip the
-// allocator-based LHS quantization of the matmul2DQuantizedRhs* wrappers.
-pub fn matmulPackedQ4_Kx8Q8_Kx4Slice(pc: ParallelConfig, out: []f32, lhs_blocks: []const quantized_matmul.BlockQ8_Kx4, rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx8, m: usize, n: usize, k: usize) void {
-    vector.matmul_quant.matmul2DQ4_Kx8Q8_Kx4RhsInto(pc, out, lhs_blocks, rhs, m, n, k);
-}
-
-pub fn matmulPackedQ4_Kx8RowsSlice(pc: ParallelConfig, out: []f32, lhs_blocks: []const dtype_mod.BlockQ8_K, rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx8, m: usize, n: usize, k: usize) void {
-    vector.matmul_quant.matmul2DQ4_Kx8RhsInto(pc, out, lhs_blocks, rhs, m, n, k);
-}
-
-pub fn matmulPackedQ5_Kx8Q8_Kx4Slice(pc: ParallelConfig, out: []f32, lhs_blocks: []const quantized_matmul.BlockQ8_Kx4, rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_Kx8, m: usize, n: usize, k: usize) void {
-    vector.matmul_quant.matmul2DQ5_Kx8Q8_Kx4RhsInto(pc, out, lhs_blocks, rhs, m, n, k);
-}
-
-pub fn matmulPackedQ5_Kx8RowsSlice(pc: ParallelConfig, out: []f32, lhs_blocks: []const dtype_mod.BlockQ8_K, rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_Kx8, m: usize, n: usize, k: usize) void {
-    vector.matmul_quant.matmul2DQ5_Kx8RhsInto(pc, out, lhs_blocks, rhs, m, n, k);
-}
-
-pub fn matmulPackedQ6_Kx4RowsSlice(pc: ParallelConfig, out: []f32, lhs_blocks: []const dtype_mod.BlockQ8_K, rhs: *const quantized_matmul.QuantizedMatmulRhsQ6_Kx4, m: usize, n: usize, k: usize) void {
-    vector.matmul_quant.matmul2DQ6_Kx4RhsInto(pc, out, lhs_blocks, rhs, m, n, k);
+/// Pre-quantized-LHS K-quant GEMM entry for the fused split-activation
+/// ops: exec quantizes the activation rows itself there, so this skips the
+/// allocator-based LHS quantization of the tensor-LHS entries. The
+/// (LHS block, RHS container) type pair selects the kernel at comptime:
+/// a `BlockQ8_Kx4` LHS takes the lane-packed x4 kernel, `BlockQ8_K` rows
+/// take the per-row kernel.
+pub fn matmulPackedSlice(pc: ParallelConfig, out: []f32, lhs_blocks: anytype, rhs: anytype, m: usize, n: usize, k: usize) void {
+    const Lhs = @typeInfo(@TypeOf(lhs_blocks)).pointer.child;
+    const Rhs = @TypeOf(rhs.*);
+    const x4_lhs = Lhs == quantized_matmul.BlockQ8_Kx4;
+    comptime if (!x4_lhs and Lhs != dtype_mod.BlockQ8_K)
+        @compileError("matmulPackedSlice: unsupported LHS block type " ++ @typeName(Lhs));
+    if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ4_Kx8) {
+        if (comptime x4_lhs)
+            vector.matmul_quant.matmul2DQ4_Kx8Q8_Kx4RhsInto(pc, out, lhs_blocks, rhs, m, n, k)
+        else
+            vector.matmul_quant.matmul2DQ4_Kx8RhsInto(pc, out, lhs_blocks, rhs, m, n, k);
+    } else if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ5_Kx8) {
+        if (comptime x4_lhs)
+            vector.matmul_quant.matmul2DQ5_Kx8Q8_Kx4RhsInto(pc, out, lhs_blocks, rhs, m, n, k)
+        else
+            vector.matmul_quant.matmul2DQ5_Kx8RhsInto(pc, out, lhs_blocks, rhs, m, n, k);
+    } else if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ6_Kx4) {
+        comptime if (x4_lhs) @compileError("matmulPackedSlice: the Q6_Kx4 pack has no lane-packed LHS kernel");
+        vector.matmul_quant.matmul2DQ6_Kx4RhsInto(pc, out, lhs_blocks, rhs, m, n, k);
+    } else {
+        comptime unreachable; // no kernel for this packed RHS container
+    }
 }
 
 // Single-row slice kernels for fused per-row activation math (exact same
@@ -867,85 +862,88 @@ pub fn matmul2DPackedPaddedQ8_0x4LhsRhs(
     vector.matmul_quant.matmul2DQ8_0x4PackedPaddedRhsInto(pc, cd, lhs_blocks, rhs, m, n, k);
 }
 
-pub fn matmul2DQuantizedRhsQ2_K(
+/// f32 [m, k] x plain (non-interleaved) K-quant RHS [n, k] -> f32 [m, n]:
+/// one Q8_K LHS quantization, then the per-dtype row kernel. One entry
+/// replaces the per-format forwards; `dt` names the RHS block format.
+pub fn matmulQuantizedRhs(
     pc: ParallelConfig,
+    comptime dt: DType,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ2_K,
+    rhs: anytype,
     m: usize,
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, vector.matmul_quant.matmul2DQ2_KRhsInto, allocator, out, a, rhs, m, n, k);
+    return matmul2DQuantizedRhsQ8_KRows(pc, switch (dt) {
+        .q2_k => vector.matmul_quant.matmul2DQ2_KRhsInto,
+        .q3_k => vector.matmul_quant.matmul2DQ3_KRhsInto,
+        .q4_k => vector.matmul_quant.matmul2DQ4_KRhsInto,
+        .q5_k => vector.matmul_quant.matmul2DQ5_KRhsInto,
+        .q6_k => vector.matmul_quant.matmul2DQ6_KRhsInto,
+        else => @compileError("matmulQuantizedRhs serves the plain K-quant containers (q2_k..q6_k)"),
+    }, allocator, out, a, rhs, m, n, k);
 }
 
-pub fn matmul2DQuantizedRhsQ3_K(
+/// f32 [m, k] x lane-packed quantized RHS -> f32 [m, n]: the packed RHS
+/// container type selects the kernel family at comptime. One entry
+/// replaces the per-container forwards; each arm keeps its exact dispatch
+/// (the Q8_0x4 bulk/tail split, the Q4_Kx8/Q5_Kx8 x4-prefix split, the
+/// smmla pair path).
+pub fn matmulPacked(
     pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ3_K,
+    rhs: anytype,
     m: usize,
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, vector.matmul_quant.matmul2DQ3_KRhsInto, allocator, out, a, rhs, m, n, k);
+    const Rhs = @TypeOf(rhs.*);
+    if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ8_0x4)
+        return matmulPackedQ8_0x4(pc, allocator, out, a, rhs, m, n, k);
+    if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ6_Kx4)
+        return matmul2DQuantizedRhsQ8_KRows(pc, vector.matmul_quant.matmul2DQ6_Kx4RhsInto, allocator, out, a, rhs, m, n, k);
+    if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ4_Kx4)
+        return matmul2DQuantizedRhsQ8_KRows(pc, vector.matmul_quant.matmul2DQ4_Kx4RhsInto, allocator, out, a, rhs, m, n, k);
+    if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ4_Kx8)
+        return matmul2DQuantizedRhsQ8_Kx4Prefix(
+            pc,
+            vector.matmul_quant.matmul2DQ4_Kx8Q8_Kx4RhsInto,
+            vector.matmul_quant.matmul2DQ4_Kx8RhsInto,
+            allocator,
+            out,
+            a,
+            rhs,
+            m,
+            n,
+            k,
+            q4_k_x4_min_rows,
+            true,
+        );
+    if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ5_Kx8)
+        return matmul2DQuantizedRhsQ8_Kx4Prefix(
+            pc,
+            vector.matmul_quant.matmul2DQ5_Kx8Q8_Kx4RhsInto,
+            vector.matmul_quant.matmul2DQ5_Kx8RhsInto,
+            allocator,
+            out,
+            a,
+            rhs,
+            m,
+            n,
+            k,
+            q5_k_x4_prefix_min_rows,
+            false,
+        );
+    if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ4_Kx2Mmla)
+        return matmulPackedQ4_Kx2Mmla(pc, allocator, out, a, rhs, m, n, k);
+    comptime unreachable; // no kernel for this packed RHS container
 }
 
-pub fn matmul2DQuantizedRhsQ4_K(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_K,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, vector.matmul_quant.matmul2DQ4_KRhsInto, allocator, out, a, rhs, m, n, k);
-}
-
-pub fn matmul2DQuantizedRhsQ4_Kx4(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx4,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, vector.matmul_quant.matmul2DQ4_Kx4RhsInto, allocator, out, a, rhs, m, n, k);
-}
-
-pub fn matmul2DQuantizedRhsQ4_Kx8(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx8,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return matmul2DQuantizedRhsQ8_Kx4Prefix(
-        pc,
-        vector.matmul_quant.matmul2DQ4_Kx8Q8_Kx4RhsInto,
-        vector.matmul_quant.matmul2DQ4_Kx8RhsInto,
-        allocator,
-        out,
-        a,
-        rhs,
-        m,
-        n,
-        k,
-        q4_k_x4_min_rows,
-        true,
-    );
-}
-
-pub fn matmul2DQuantizedRhsQ4_Kx2Mmla(
+fn matmulPackedQ4_Kx2Mmla(
     pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
@@ -983,32 +981,6 @@ pub fn matmul2DQuantizedRhsQ4_Kx2Mmla(
     defer allocator.free(tail_blocks);
     const tail_pc = if (prefix_rows == 0) pc else ParallelConfig{};
     vector.matmul_quant.matmul2DQ4_Kx2MmlaRhsInto(tail_pc, cd[prefix_rows * n .. m * n], tail_blocks, rhs, m - prefix_rows, n, k);
-}
-
-pub fn matmul2DQuantizedRhsQ5_Kx8(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_Kx8,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return matmul2DQuantizedRhsQ8_Kx4Prefix(
-        pc,
-        vector.matmul_quant.matmul2DQ5_Kx8Q8_Kx4RhsInto,
-        vector.matmul_quant.matmul2DQ5_Kx8RhsInto,
-        allocator,
-        out,
-        a,
-        rhs,
-        m,
-        n,
-        k,
-        q5_k_x4_prefix_min_rows,
-        false,
-    );
 }
 
 fn matmul2DQuantizedRhsQ8_Kx4Prefix(
@@ -1069,45 +1041,6 @@ fn matmul2DQuantizedRhsQ8_Kx4Prefix(
     // `pc` passes through so it can column-split like a decode-shaped matmul
     // (a parallel split never changes per-element math).
     rows(pc, cd[prefix_rows * n .. m * n], tail_blocks, rhs, m - prefix_rows, n, k);
-}
-
-pub fn matmul2DQuantizedRhsQ5_K(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_K,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, vector.matmul_quant.matmul2DQ5_KRhsInto, allocator, out, a, rhs, m, n, k);
-}
-
-pub fn matmul2DQuantizedRhsQ6_K(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ6_K,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, vector.matmul_quant.matmul2DQ6_KRhsInto, allocator, out, a, rhs, m, n, k);
-}
-
-pub fn matmul2DQuantizedRhsQ6_Kx4(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ6_Kx4,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, vector.matmul_quant.matmul2DQ6_Kx4RhsInto, allocator, out, a, rhs, m, n, k);
 }
 
 /// Prefill row count at/above which the table-decoded formats (iq*/fp4)

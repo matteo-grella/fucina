@@ -335,7 +335,7 @@ zig build gemma4 -Dgpu=metal -Doptimize=ReleaseFast -- models/gemma-4-26B-A4B-it
 # FUCINA_GPU_DEBUG=1 logs per-dispatch wall/gpu/sched times.
 
 # Dense quantized linears (qwen3/gemma Q4_K/Q6_K/Q8_0 prefill projections) DO offload via the
-# dequant-in-kernel gemmQuantNt path (weights.linearSeqQ* -> ExecContext.denseQuantMatmulGpu,
+# dequant-in-kernel gemmQuantNt path (weights.linearSeq -> ExecContext.denseQuantMatmulGpu,
 # per-format FUCINA_GPU_MIN_WORK_DENSE_Q4/Q6/Q8 gates against the packed CPU fallback;
 # stable RHS residency; eager submit with deferred host visibility; ~+24-33% pp on 0.6B-Q4_K).
 # Q5_K, decode (m=1), and training stay on CPU. For diffusion-gemma, --gpu-f16 additionally

@@ -295,69 +295,38 @@ fn matmul2DWithQuantizedKTensorRhs(
     try kernels.matmul2DQuantizedRhs(self.pc(), self.allocator, out, a, @unionInit(backend_mod.AnyQuantizedMatmulRhs, @tagName(Rhs.dtype), &qrhs), m, n, k);
 }
 
-pub fn packMatmulRhsQ8_0x4(self: *ExecContext, rhs: *const tensor.TensorOf(.q8_0)) !backend_mod.QuantizedMatmulRhsQ8_0x4 {
+/// Pack a block-quantized [n, k] weight tensor into the ISA-best packed
+/// matmul RHS container for its dtype (`backend.PackedRhsFor(dt)`); the
+/// Q4_K choice between x8 and x2Mmla stays comptime. The per-format
+/// packers live in the backend's `quant/<fmt>.zig` children.
+pub fn packMatmulRhs(self: *ExecContext, comptime dt: DType, rhs: *const tensor.TensorOf(dt)) !backend_mod.PackedRhsFor(dt) {
+    return packMatmulRhsAs(self, backend_mod.PackedRhsFor(dt), rhs);
+}
+
+/// Container-addressed variant of `packMatmulRhs`: pack into a specific
+/// RHS container type (the explicit-layout escape hatch, e.g. the Q4_K x8
+/// pack on an smmla target).
+pub fn packMatmulRhsAs(self: *ExecContext, comptime Rhs: type, rhs: *const tensor.TensorOf(Rhs.dtype)) !Rhs {
     const view = try rhs.rankView(2);
     if (!rhs.isContiguous()) return tensor.TensorError.UnsupportedView;
     const n = view.dim(0);
     const k = view.dim(1);
-    const blocks_per_row = try backend_mod.quantized_matmul.blockCountForDType(.q8_0, k);
-    return backend_mod.quantized_matmul.q8_0.packMatmulRhsQ8_0x4(self.allocator, rhs.dataConst(), n, k, blocks_per_row);
+    const blocks_per_row = try backend_mod.quantized_matmul.blockCountForDType(Rhs.dtype, k);
+    return backend_mod.quantized_matmul.packRhsAs(Rhs, self.allocator, rhs.dataConst(), n, k, blocks_per_row);
 }
 
-pub fn packMatmulRhsQ6_Kx4(self: *ExecContext, rhs: *const tensor.TensorOf(.q6_k)) !backend_mod.QuantizedMatmulRhsQ6_Kx4 {
-    const view = try rhs.rankView(2);
-    if (!rhs.isContiguous()) return tensor.TensorError.UnsupportedView;
-    const n = view.dim(0);
-    const k = view.dim(1);
-    const blocks_per_row = try backend_mod.quantized_matmul.blockCountForDType(.q6_k, k);
-    return backend_mod.quantized_matmul.q6_k.packMatmulRhsQ6_Kx4(self.allocator, rhs.dataConst(), n, k, blocks_per_row);
-}
-
-pub fn packMatmulRhsQ4_Kx4(self: *ExecContext, rhs: *const tensor.TensorOf(.q4_k)) !backend_mod.QuantizedMatmulRhsQ4_Kx4 {
-    const view = try rhs.rankView(2);
-    if (!rhs.isContiguous()) return tensor.TensorError.UnsupportedView;
-    const n = view.dim(0);
-    const k = view.dim(1);
-    const blocks_per_row = try backend_mod.quantized_matmul.blockCountForDType(.q4_k, k);
-    return backend_mod.quantized_matmul.q4_k.packMatmulRhsQ4_Kx4(self.allocator, rhs.dataConst(), n, k, blocks_per_row);
-}
-
-pub fn packMatmulRhsQ4_Kx8(self: *ExecContext, rhs: *const tensor.TensorOf(.q4_k)) !backend_mod.QuantizedMatmulRhsQ4_Kx8 {
-    const view = try rhs.rankView(2);
-    if (!rhs.isContiguous()) return tensor.TensorError.UnsupportedView;
-    const n = view.dim(0);
-    const k = view.dim(1);
-    const blocks_per_row = try backend_mod.quantized_matmul.blockCountForDType(.q4_k, k);
-    return backend_mod.quantized_matmul.q4_k.packMatmulRhsQ4_Kx8(self.allocator, rhs.dataConst(), n, k, blocks_per_row);
-}
-
-pub fn packMatmulRhsQ4_Kx2Mmla(self: *ExecContext, rhs: *const tensor.TensorOf(.q4_k)) !backend_mod.QuantizedMatmulRhsQ4_Kx2Mmla {
-    const view = try rhs.rankView(2);
-    if (!rhs.isContiguous()) return tensor.TensorError.UnsupportedView;
-    const n = view.dim(0);
-    const k = view.dim(1);
-    const blocks_per_row = try backend_mod.quantized_matmul.blockCountForDType(.q4_k, k);
-    return backend_mod.quantized_matmul.q4_k.packMatmulRhsQ4_Kx2Mmla(self.allocator, rhs.dataConst(), n, k, blocks_per_row);
-}
-
-pub fn packMatmulRhsQ5_Kx8(self: *ExecContext, rhs: *const tensor.TensorOf(.q5_k)) !backend_mod.QuantizedMatmulRhsQ5_Kx8 {
-    const view = try rhs.rankView(2);
-    if (!rhs.isContiguous()) return tensor.TensorError.UnsupportedView;
-    const n = view.dim(0);
-    const k = view.dim(1);
-    const blocks_per_row = try backend_mod.quantized_matmul.blockCountForDType(.q5_k, k);
-    return backend_mod.quantized_matmul.q5_k.packMatmulRhsQ5_Kx8(self.allocator, rhs.dataConst(), n, k, blocks_per_row);
-}
-
-pub fn matmul2DWithPackedQ8_0x4Rhs(self: *ExecContext, a: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4) !Tensor {
+/// f32 activations [m, k] x packed quantized RHS -> f32 [m, n]. `rhs`
+/// points at one of the packed RHS containers (`backend.PackedRhsFor`);
+/// the container type selects the backend kernel at comptime.
+pub fn matmulPacked(self: *ExecContext, a: *const Tensor, rhs: anytype) !Tensor {
     const av = try a.rankView(2);
     const m = av.dim(0);
     const k = av.dim(1);
     if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
     if (self.pin_rowwise_kernels and m > 1) return pinnedRowwise(self, a, struct {
-        rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4,
+        rhs: @TypeOf(rhs),
         fn call(c: @This(), ctx: *ExecContext, row: *const Tensor) anyerror!Tensor {
-            return matmul2DWithPackedQ8_0x4Rhs(ctx, row, c.rhs);
+            return matmulPacked(ctx, row, c.rhs);
         }
     }{ .rhs = rhs });
 
@@ -367,11 +336,39 @@ pub fn matmul2DWithPackedQ8_0x4Rhs(self: *ExecContext, a: *const Tensor, rhs: *c
     var out = try self.emptyRankTyped(.f32, 2, .{ m, rhs.n });
     errdefer out.deinit();
     self.enableNativeTypedMatmulPoolForWork(m, rhs.n, k);
-    try kernels.matmul2DQuantizedRhsQ8_0x4(self.pc(), self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
+    try kernels.matmulPacked(self.pc(), self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
     return out;
 }
 
-pub fn splitSwiGluMatmul2DWithPackedQ8_0x4Rhs(
+/// Fused split-SwiGLU + packed down GEMM: the packed RHS container type
+/// selects the per-format implementation at comptime.
+pub fn splitSwiGluMatmulPacked(self: *ExecContext, gate_up: *const Tensor, rhs: anytype) !Tensor {
+    return switch (comptime kQuantFusedKind(@TypeOf(rhs.*), "splitSwiGluMatmulPacked")) {
+        .q8_0x4 => splitSwiGluMatmulQ8_0x4Impl(self, gate_up, rhs),
+        .q4_kx8 => splitSwiGluMatmulKQuantImpl(self, .q4_kx8, gate_up, rhs),
+        .q5_kx8 => splitSwiGluMatmulKQuantImpl(self, .q5_kx8, gate_up, rhs),
+        .q6_kx4 => splitSwiGluMatmulKQuantImpl(self, .q6_kx4, gate_up, rhs),
+    };
+}
+
+/// The packed containers with fused activation kernels; every other
+/// container type is a compile error at the dispatch site.
+const FusedRhsKind = enum { q8_0x4, q4_kx8, q5_kx8, q6_kx4 };
+
+fn kQuantFusedKind(comptime Rhs: type, comptime op_name: []const u8) FusedRhsKind {
+    return if (Rhs == backend_mod.QuantizedMatmulRhsQ8_0x4)
+        .q8_0x4
+    else if (Rhs == backend_mod.QuantizedMatmulRhsQ4_Kx8)
+        .q4_kx8
+    else if (Rhs == backend_mod.QuantizedMatmulRhsQ5_Kx8)
+        .q5_kx8
+    else if (Rhs == backend_mod.QuantizedMatmulRhsQ6_Kx4)
+        .q6_kx4
+    else
+        @compileError(op_name ++ ": no fused kernel for packed RHS " ++ @typeName(Rhs));
+}
+
+fn splitSwiGluMatmulQ8_0x4Impl(
     self: *ExecContext,
     gate_up: *const Tensor,
     rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4,
@@ -385,7 +382,7 @@ pub fn splitSwiGluMatmul2DWithPackedQ8_0x4Rhs(
     if (self.pin_rowwise_kernels and m > 1) return pinnedRowwise(self, gate_up, struct {
         rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4,
         fn call(c: @This(), ctx: *ExecContext, row: *const Tensor) anyerror!Tensor {
-            return splitSwiGluMatmul2DWithPackedQ8_0x4Rhs(ctx, row, c.rhs);
+            return splitSwiGluMatmulQ8_0x4Impl(ctx, row, c.rhs);
         }
     }{ .rhs = rhs });
 
@@ -404,7 +401,7 @@ pub fn splitSwiGluMatmul2DWithPackedQ8_0x4Rhs(
         var row_out = try self.emptyRankTyped(.f32, 2, .{ 1, rhs.n });
         errdefer row_out.deinit();
         self.enableNativeTypedMatmulPoolForWork(1, rhs.n, k);
-        try kernels.matmul2DQuantizedRhsQ8_0x4(self.pc(), self.allocator, &row_out, &fused, rhs, 1, rhs.n, k);
+        try kernels.matmulPacked(self.pc(), self.allocator, &row_out, &fused, rhs, 1, rhs.n, k);
         return row_out;
     }
 
@@ -532,11 +529,9 @@ fn splitSwiGluMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhs
             .row_group_end = row_groups,
             .x4_blocks = qlhs_x4,
         }, row_groups, scratch);
-        switch (kind) {
-            .q4_kx8 => kernels.matmulPackedQ4_Kx8Q8_Kx4Slice(self.pc(), out_data[0 .. prefix_rows * n], qlhs_x4, rhs, prefix_rows, n, k),
-            .q5_kx8 => kernels.matmulPackedQ5_Kx8Q8_Kx4Slice(self.pc(), out_data[0 .. prefix_rows * n], qlhs_x4, rhs, prefix_rows, n, k),
-            .q6_kx4 => unreachable,
-        }
+        // Only the x4-capable kinds reach this stage (use_x4 is false for
+        // .q6_kx4, so its prefix is always empty).
+        if (comptime kind == .q6_kx4) unreachable else kernels.matmulPackedSlice(self.pc(), out_data[0 .. prefix_rows * n], qlhs_x4, rhs, prefix_rows, n, k);
     }
 
     if (prefix_rows < m) {
@@ -558,25 +553,20 @@ fn splitSwiGluMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhs
             .row_blocks = qlhs_rows,
         }, tail_groups, scratch);
         const tail_out = out_data[prefix_rows * n ..][0 .. tail_rows * n];
-        switch (kind) {
-            .q4_kx8 => kernels.matmulPackedQ4_Kx8RowsSlice(self.pc(), tail_out, qlhs_rows, rhs, tail_rows, n, k),
-            .q5_kx8 => kernels.matmulPackedQ5_Kx8RowsSlice(self.pc(), tail_out, qlhs_rows, rhs, tail_rows, n, k),
-            .q6_kx4 => kernels.matmulPackedQ6_Kx4RowsSlice(self.pc(), tail_out, qlhs_rows, rhs, tail_rows, n, k),
-        }
+        kernels.matmulPackedSlice(self.pc(), tail_out, qlhs_rows, rhs, tail_rows, n, k);
     }
     return out;
 }
 
-pub fn splitSwiGluMatmul2DWithPackedQ4_Kx8Rhs(self: *ExecContext, gate_up: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ4_Kx8) !Tensor {
-    return splitSwiGluMatmulKQuantImpl(self, .q4_kx8, gate_up, rhs);
-}
-
-pub fn splitSwiGluMatmul2DWithPackedQ5_Kx8Rhs(self: *ExecContext, gate_up: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ5_Kx8) !Tensor {
-    return splitSwiGluMatmulKQuantImpl(self, .q5_kx8, gate_up, rhs);
-}
-
-pub fn splitSwiGluMatmul2DWithPackedQ6_Kx4Rhs(self: *ExecContext, gate_up: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ6_Kx4) !Tensor {
-    return splitSwiGluMatmulKQuantImpl(self, .q6_kx4, gate_up, rhs);
+/// Fused rmsNormMul + packed GEMM: the packed RHS container type selects
+/// the per-format implementation at comptime.
+pub fn rmsNormMulMatmulPacked(self: *ExecContext, x: *const Tensor, norm_weights: *const Tensor, eps: f32, rhs: anytype) !Tensor {
+    return switch (comptime kQuantFusedKind(@TypeOf(rhs.*), "rmsNormMulMatmulPacked")) {
+        .q8_0x4 => rmsNormMulMatmulQ8_0x4Impl(self, x, norm_weights, eps, rhs),
+        .q4_kx8 => rmsNormMulMatmulKQuantImpl(self, .q4_kx8, x, norm_weights, eps, rhs),
+        .q5_kx8 => rmsNormMulMatmulKQuantImpl(self, .q5_kx8, x, norm_weights, eps, rhs),
+        .q6_kx4 => rmsNormMulMatmulKQuantImpl(self, .q6_kx4, x, norm_weights, eps, rhs),
+    };
 }
 
 fn rmsNormMulMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhsKind, x: *const Tensor, norm_weights: *const Tensor, eps: f32, rhs: anytype) !Tensor {
@@ -638,11 +628,9 @@ fn rmsNormMulMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhsK
             .row_group_end = row_groups,
             .x4_blocks = qlhs_x4,
         }, row_groups, scratch);
-        switch (kind) {
-            .q4_kx8 => kernels.matmulPackedQ4_Kx8Q8_Kx4Slice(self.pc(), out_data[0 .. prefix_rows * n], qlhs_x4, rhs, prefix_rows, n, k),
-            .q5_kx8 => kernels.matmulPackedQ5_Kx8Q8_Kx4Slice(self.pc(), out_data[0 .. prefix_rows * n], qlhs_x4, rhs, prefix_rows, n, k),
-            .q6_kx4 => unreachable,
-        }
+        // Only the x4-capable kinds reach this stage (use_x4 is false for
+        // .q6_kx4, so its prefix is always empty).
+        if (comptime kind == .q6_kx4) unreachable else kernels.matmulPackedSlice(self.pc(), out_data[0 .. prefix_rows * n], qlhs_x4, rhs, prefix_rows, n, k);
     }
 
     if (prefix_rows < m) {
@@ -667,32 +655,16 @@ fn rmsNormMulMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhsK
             .row_blocks = qlhs_rows,
         }, tail_groups, scratch);
         const tail_out = out_data[prefix_rows * n ..][0 .. tail_rows * n];
-        switch (kind) {
-            .q4_kx8 => kernels.matmulPackedQ4_Kx8RowsSlice(self.pc(), tail_out, qlhs_rows, rhs, tail_rows, n, k),
-            .q5_kx8 => kernels.matmulPackedQ5_Kx8RowsSlice(self.pc(), tail_out, qlhs_rows, rhs, tail_rows, n, k),
-            .q6_kx4 => kernels.matmulPackedQ6_Kx4RowsSlice(self.pc(), tail_out, qlhs_rows, rhs, tail_rows, n, k),
-        }
+        kernels.matmulPackedSlice(self.pc(), tail_out, qlhs_rows, rhs, tail_rows, n, k);
     }
     return out;
-}
-
-pub fn rmsNormMulMatmul2DWithPackedQ4_Kx8Rhs(self: *ExecContext, x: *const Tensor, norm_weights: *const Tensor, eps: f32, rhs: *const backend_mod.QuantizedMatmulRhsQ4_Kx8) !Tensor {
-    return rmsNormMulMatmulKQuantImpl(self, .q4_kx8, x, norm_weights, eps, rhs);
-}
-
-pub fn rmsNormMulMatmul2DWithPackedQ5_Kx8Rhs(self: *ExecContext, x: *const Tensor, norm_weights: *const Tensor, eps: f32, rhs: *const backend_mod.QuantizedMatmulRhsQ5_Kx8) !Tensor {
-    return rmsNormMulMatmulKQuantImpl(self, .q5_kx8, x, norm_weights, eps, rhs);
-}
-
-pub fn rmsNormMulMatmul2DWithPackedQ6_Kx4Rhs(self: *ExecContext, x: *const Tensor, norm_weights: *const Tensor, eps: f32, rhs: *const backend_mod.QuantizedMatmulRhsQ6_Kx4) !Tensor {
-    return rmsNormMulMatmulKQuantImpl(self, .q6_kx4, x, norm_weights, eps, rhs);
 }
 
 /// Fused rmsNormMul + Q8_0x4 LHS quantize + packed GEMM: normalizes the
 /// PRE-norm rows into task-private scratch with the exact kernels the
 /// unfused dispatch uses, then quantizes — matches the unfused pair to f32
 /// roundoff (see rmsNormMulDotPacked), no [m, k] normalized tensor.
-pub fn rmsNormMulMatmul2DWithPackedQ8_0x4Rhs(self: *ExecContext, x: *const Tensor, norm_weights: *const Tensor, eps: f32, rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4) !Tensor {
+fn rmsNormMulMatmulQ8_0x4Impl(self: *ExecContext, x: *const Tensor, norm_weights: *const Tensor, eps: f32, rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4) !Tensor {
     const qm = backend_mod.quantized_matmul;
     const xv = try x.rankView(2);
     const m = xv.dim(0);
@@ -703,7 +675,7 @@ pub fn rmsNormMulMatmul2DWithPackedQ8_0x4Rhs(self: *ExecContext, x: *const Tenso
         eps: f32,
         rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4,
         fn call(c: @This(), ctx: *ExecContext, row: *const Tensor) anyerror!Tensor {
-            return rmsNormMulMatmul2DWithPackedQ8_0x4Rhs(ctx, row, c.norm_weights, c.eps, c.rhs);
+            return rmsNormMulMatmulQ8_0x4Impl(ctx, row, c.norm_weights, c.eps, c.rhs);
         }
     }{ .norm_weights = norm_weights, .eps = eps, .rhs = rhs });
     const wv = try norm_weights.rankView(1);
@@ -757,7 +729,7 @@ pub fn rmsNormMulMatmul2DWithPackedQ8_0x4Rhs(self: *ExecContext, x: *const Tenso
 /// quantization + packed Q8_0x4 GEMM, for separate gate/up projections.
 /// Bit-identical to unary(.gelu_quant) + mul + the packed dot, without
 /// materializing the activation tensors.
-pub fn gegluQuantMatmul2DWithPackedQ8_0x4Rhs(self: *ExecContext, gate: *const Tensor, up: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4) anyerror!Tensor {
+pub fn gegluQuantMatmulPacked(self: *ExecContext, gate: *const Tensor, up: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4) anyerror!Tensor {
     const qm = backend_mod.quantized_matmul;
     const gv = try gate.rankView(2);
     const uv = try up.rankView(2);
@@ -784,7 +756,7 @@ pub fn gegluQuantMatmul2DWithPackedQ8_0x4Rhs(self: *ExecContext, gate: *const Te
         for (0..m) |r| {
             @memcpy(g_row.data(), g_in[r * k ..][0..k]);
             @memcpy(u_row.data(), u_in[r * k ..][0..k]);
-            var row_out = try gegluQuantMatmul2DWithPackedQ8_0x4Rhs(self, &g_row, &u_row, rhs);
+            var row_out = try gegluQuantMatmulPacked(self, &g_row, &u_row, rhs);
             defer row_out.deinit();
             @memcpy(out.data()[r * rhs.n ..][0..rhs.n], row_out.dataConst());
         }
@@ -829,116 +801,6 @@ pub fn gegluQuantMatmul2DWithPackedQ8_0x4Rhs(self: *ExecContext, gate: *const Te
     } else {
         try kernels.matmul2DPackedPaddedQ8_0x4LhsRhs(self.pc(), &out, qlhs, rhs, m, n, k);
     }
-    return out;
-}
-
-pub fn matmul2DWithPackedQ6_Kx4Rhs(self: *ExecContext, a: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ6_Kx4) !Tensor {
-    const av = try a.rankView(2);
-    const m = av.dim(0);
-    const k = av.dim(1);
-    if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
-    if (self.pin_rowwise_kernels and m > 1) return pinnedRowwise(self, a, struct {
-        rhs: *const backend_mod.QuantizedMatmulRhsQ6_Kx4,
-        fn call(c: @This(), ctx: *ExecContext, row: *const Tensor) anyerror!Tensor {
-            return matmul2DWithPackedQ6_Kx4Rhs(ctx, row, c.rhs);
-        }
-    }{ .rhs = rhs });
-
-    var aa = try self.prepareContiguousTyped(.f32, a);
-    defer aa.deinit();
-
-    var out = try self.emptyRankTyped(.f32, 2, .{ m, rhs.n });
-    errdefer out.deinit();
-    self.enableNativeTypedMatmulPoolForWork(m, rhs.n, k);
-    try kernels.matmul2DQuantizedRhsQ6_Kx4(self.pc(), self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
-    return out;
-}
-
-pub fn matmul2DWithPackedQ4_Kx4Rhs(self: *ExecContext, a: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ4_Kx4) !Tensor {
-    const av = try a.rankView(2);
-    const m = av.dim(0);
-    const k = av.dim(1);
-    if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
-    if (self.pin_rowwise_kernels and m > 1) return pinnedRowwise(self, a, struct {
-        rhs: *const backend_mod.QuantizedMatmulRhsQ4_Kx4,
-        fn call(c: @This(), ctx: *ExecContext, row: *const Tensor) anyerror!Tensor {
-            return matmul2DWithPackedQ4_Kx4Rhs(ctx, row, c.rhs);
-        }
-    }{ .rhs = rhs });
-
-    var aa = try self.prepareContiguousTyped(.f32, a);
-    defer aa.deinit();
-
-    var out = try self.emptyRankTyped(.f32, 2, .{ m, rhs.n });
-    errdefer out.deinit();
-    self.enableNativeTypedMatmulPoolForWork(m, rhs.n, k);
-    try kernels.matmul2DQuantizedRhsQ4_Kx4(self.pc(), self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
-    return out;
-}
-
-pub fn matmul2DWithPackedQ4_Kx8Rhs(self: *ExecContext, a: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ4_Kx8) !Tensor {
-    const av = try a.rankView(2);
-    const m = av.dim(0);
-    const k = av.dim(1);
-    if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
-    if (self.pin_rowwise_kernels and m > 1) return pinnedRowwise(self, a, struct {
-        rhs: *const backend_mod.QuantizedMatmulRhsQ4_Kx8,
-        fn call(c: @This(), ctx: *ExecContext, row: *const Tensor) anyerror!Tensor {
-            return matmul2DWithPackedQ4_Kx8Rhs(ctx, row, c.rhs);
-        }
-    }{ .rhs = rhs });
-
-    var aa = try self.prepareContiguousTyped(.f32, a);
-    defer aa.deinit();
-
-    var out = try self.emptyRankTyped(.f32, 2, .{ m, rhs.n });
-    errdefer out.deinit();
-    self.enableNativeTypedMatmulPoolForWork(m, rhs.n, k);
-    try kernels.matmul2DQuantizedRhsQ4_Kx8(self.pc(), self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
-    return out;
-}
-
-pub fn matmul2DWithPackedQ4_Kx2MmlaRhs(self: *ExecContext, a: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ4_Kx2Mmla) !Tensor {
-    const av = try a.rankView(2);
-    const m = av.dim(0);
-    const k = av.dim(1);
-    if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
-    if (self.pin_rowwise_kernels and m > 1) return pinnedRowwise(self, a, struct {
-        rhs: *const backend_mod.QuantizedMatmulRhsQ4_Kx2Mmla,
-        fn call(c: @This(), ctx: *ExecContext, row: *const Tensor) anyerror!Tensor {
-            return matmul2DWithPackedQ4_Kx2MmlaRhs(ctx, row, c.rhs);
-        }
-    }{ .rhs = rhs });
-
-    var aa = try self.prepareContiguousTyped(.f32, a);
-    defer aa.deinit();
-
-    var out = try self.emptyRankTyped(.f32, 2, .{ m, rhs.n });
-    errdefer out.deinit();
-    self.enableNativeTypedMatmulPoolForWork(m, rhs.n, k);
-    try kernels.matmul2DQuantizedRhsQ4_Kx2Mmla(self.pc(), self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
-    return out;
-}
-
-pub fn matmul2DWithPackedQ5_Kx8Rhs(self: *ExecContext, a: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ5_Kx8) !Tensor {
-    const av = try a.rankView(2);
-    const m = av.dim(0);
-    const k = av.dim(1);
-    if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
-    if (self.pin_rowwise_kernels and m > 1) return pinnedRowwise(self, a, struct {
-        rhs: *const backend_mod.QuantizedMatmulRhsQ5_Kx8,
-        fn call(c: @This(), ctx: *ExecContext, row: *const Tensor) anyerror!Tensor {
-            return matmul2DWithPackedQ5_Kx8Rhs(ctx, row, c.rhs);
-        }
-    }{ .rhs = rhs });
-
-    var aa = try self.prepareContiguousTyped(.f32, a);
-    defer aa.deinit();
-
-    var out = try self.emptyRankTyped(.f32, 2, .{ m, rhs.n });
-    errdefer out.deinit();
-    self.enableNativeTypedMatmulPoolForWork(m, rhs.n, k);
-    try kernels.matmul2DQuantizedRhsQ5_Kx8(self.pc(), self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
     return out;
 }
 

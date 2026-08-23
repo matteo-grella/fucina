@@ -76,7 +76,7 @@ test "Q6_Kx4 paired gate/up tile matches two independent tiles" {
 }
 
 test "Q6_K compact-vs-packed cross-layout matmul is bit-identical at decode shapes (m=1,2,3)" {
-    // The E4 decode-route proof (weights.linearSeqQ6_K m<4 gate, the Q5_K
+    // The E4 decode-route proof (weights.linearSeq q6_k m<4 gate, the Q5_K
     // gate's ride-along): the compact GGUF-native kernel family
     // (matmulQ6_KRhsRange over BlockQ6_K, 6.5625 bpw) and the byte-expanded
     // packed family (matmulQ6_Kx4RhsRange over BlockQ6_Kx4) must agree

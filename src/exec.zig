@@ -580,7 +580,7 @@ pub const ExecContext = struct {
     pub const matmul2DWithPackedRhsTyped = exec_matmul.matmul2DWithPackedRhsTyped;
 
     // ----------------------------------------------------------------------
-    // quantized matmul: per-format dense and decode arms (exec/quant_matmul.zig)
+    // quantized matmul: dense, packed and fused arms (exec/quant_matmul.zig)
     // ----------------------------------------------------------------------
     pub const dequantizeTensorTyped = exec_quant_matmul.dequantizeTensorTyped;
     pub const getRowsQuantizedTyped = exec_quant_matmul.getRowsQuantizedTyped;
@@ -588,27 +588,12 @@ pub const ExecContext = struct {
     pub const matmul2DWithQuantizedTensorRhsOptions = exec_quant_matmul.matmul2DWithQuantizedTensorRhsOptions;
     pub const matmul2DWithQuantizedBlocksRhs = exec_quant_matmul.matmul2DWithQuantizedBlocksRhs;
     pub const matmul2DWithQuantizedBlocksRhsOptions = exec_quant_matmul.matmul2DWithQuantizedBlocksRhsOptions;
-    pub const packMatmulRhsQ8_0x4 = exec_quant_matmul.packMatmulRhsQ8_0x4;
-    pub const packMatmulRhsQ6_Kx4 = exec_quant_matmul.packMatmulRhsQ6_Kx4;
-    pub const packMatmulRhsQ4_Kx4 = exec_quant_matmul.packMatmulRhsQ4_Kx4;
-    pub const packMatmulRhsQ4_Kx8 = exec_quant_matmul.packMatmulRhsQ4_Kx8;
-    pub const packMatmulRhsQ4_Kx2Mmla = exec_quant_matmul.packMatmulRhsQ4_Kx2Mmla;
-    pub const packMatmulRhsQ5_Kx8 = exec_quant_matmul.packMatmulRhsQ5_Kx8;
-    pub const matmul2DWithPackedQ8_0x4Rhs = exec_quant_matmul.matmul2DWithPackedQ8_0x4Rhs;
-    pub const rmsNormMulMatmul2DWithPackedQ8_0x4Rhs = exec_quant_matmul.rmsNormMulMatmul2DWithPackedQ8_0x4Rhs;
-    pub const rmsNormMulMatmul2DWithPackedQ4_Kx8Rhs = exec_quant_matmul.rmsNormMulMatmul2DWithPackedQ4_Kx8Rhs;
-    pub const rmsNormMulMatmul2DWithPackedQ5_Kx8Rhs = exec_quant_matmul.rmsNormMulMatmul2DWithPackedQ5_Kx8Rhs;
-    pub const rmsNormMulMatmul2DWithPackedQ6_Kx4Rhs = exec_quant_matmul.rmsNormMulMatmul2DWithPackedQ6_Kx4Rhs;
-    pub const splitSwiGluMatmul2DWithPackedQ8_0x4Rhs = exec_quant_matmul.splitSwiGluMatmul2DWithPackedQ8_0x4Rhs;
-    pub const splitSwiGluMatmul2DWithPackedQ4_Kx8Rhs = exec_quant_matmul.splitSwiGluMatmul2DWithPackedQ4_Kx8Rhs;
-    pub const splitSwiGluMatmul2DWithPackedQ5_Kx8Rhs = exec_quant_matmul.splitSwiGluMatmul2DWithPackedQ5_Kx8Rhs;
-    pub const splitSwiGluMatmul2DWithPackedQ6_Kx4Rhs = exec_quant_matmul.splitSwiGluMatmul2DWithPackedQ6_Kx4Rhs;
-    pub const gegluQuantMatmul2DWithPackedQ8_0x4Rhs = exec_quant_matmul.gegluQuantMatmul2DWithPackedQ8_0x4Rhs;
-    pub const matmul2DWithPackedQ6_Kx4Rhs = exec_quant_matmul.matmul2DWithPackedQ6_Kx4Rhs;
-    pub const matmul2DWithPackedQ4_Kx4Rhs = exec_quant_matmul.matmul2DWithPackedQ4_Kx4Rhs;
-    pub const matmul2DWithPackedQ4_Kx8Rhs = exec_quant_matmul.matmul2DWithPackedQ4_Kx8Rhs;
-    pub const matmul2DWithPackedQ4_Kx2MmlaRhs = exec_quant_matmul.matmul2DWithPackedQ4_Kx2MmlaRhs;
-    pub const matmul2DWithPackedQ5_Kx8Rhs = exec_quant_matmul.matmul2DWithPackedQ5_Kx8Rhs;
+    pub const packMatmulRhs = exec_quant_matmul.packMatmulRhs;
+    pub const packMatmulRhsAs = exec_quant_matmul.packMatmulRhsAs;
+    pub const matmulPacked = exec_quant_matmul.matmulPacked;
+    pub const rmsNormMulMatmulPacked = exec_quant_matmul.rmsNormMulMatmulPacked;
+    pub const splitSwiGluMatmulPacked = exec_quant_matmul.splitSwiGluMatmulPacked;
+    pub const gegluQuantMatmulPacked = exec_quant_matmul.gegluQuantMatmulPacked;
     pub const denseQuantMatmulGpu = exec_quant_matmul.denseQuantMatmulGpu;
     pub const foldedTernaryMatmulGpu = exec_quant_matmul.foldedTernaryMatmulGpu;
     pub const denseQuantMatmulGpuSharedInputBatch = exec_quant_matmul.denseQuantMatmulGpuSharedInputBatch;

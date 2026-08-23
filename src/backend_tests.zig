@@ -281,7 +281,7 @@ test "native q5_k x8 dispatch splits off-multiple m into x4 bulk plus row-kernel
     fillSplitTestValues(lhs_values, random);
 
     for (split_test_ms) |m| {
-        const full = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ5_Kx8, allocator, &rhs, lhs_values, m, .{});
+        const full = try runSplitDispatch(native.kernels.matmulPacked, allocator, &rhs, lhs_values, m, .{});
         defer allocator.free(full);
 
         const all_rows = try rowsRefQ8_K(vector.matmul_quant.matmul2DQ5_Kx8RhsInto, allocator, &rhs, lhs_values, m);
@@ -294,7 +294,7 @@ test "native q5_k x8 dispatch splits off-multiple m into x4 bulk plus row-kernel
         }
 
         const bulk_rows = m - m % 4;
-        const prefix = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ5_Kx8, allocator, &rhs, lhs_values, bulk_rows, .{});
+        const prefix = try runSplitDispatch(native.kernels.matmulPacked, allocator, &rhs, lhs_values, bulk_rows, .{});
         defer allocator.free(prefix);
         try expectBitEqualF32(prefix, full[0 .. bulk_rows * split_test_n]);
 
@@ -308,9 +308,9 @@ test "native q5_k x8 dispatch splits off-multiple m into x4 bulk plus row-kernel
     var pool: thread.Pool = undefined;
     try pool.init(.{ .allocator = allocator, .max_workers = 4 });
     defer pool.deinit();
-    const serial = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ5_Kx8, allocator, &rhs, lhs_values, 129, .{});
+    const serial = try runSplitDispatch(native.kernels.matmulPacked, allocator, &rhs, lhs_values, 129, .{});
     defer allocator.free(serial);
-    const pooled = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ5_Kx8, allocator, &rhs, lhs_values, 129, .{ .pool = &pool });
+    const pooled = try runSplitDispatch(native.kernels.matmulPacked, allocator, &rhs, lhs_values, 129, .{ .pool = &pool });
     defer allocator.free(pooled);
     try expectBitEqualF32(serial, pooled);
 }
@@ -327,11 +327,11 @@ test "native q4_k x8 dispatch runs every off-multiple m through the padded x4 ke
     fillSplitTestValues(lhs_values, random);
 
     for (split_test_ms) |m| {
-        const full = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ4_Kx8, allocator, &rhs, lhs_values, m, .{});
+        const full = try runSplitDispatch(native.kernels.matmulPacked, allocator, &rhs, lhs_values, m, .{});
         defer allocator.free(full);
         const bulk_rows = m - m % 4;
 
-        const prefix = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ4_Kx8, allocator, &rhs, lhs_values, bulk_rows, .{});
+        const prefix = try runSplitDispatch(native.kernels.matmulPacked, allocator, &rhs, lhs_values, bulk_rows, .{});
         defer allocator.free(prefix);
         try expectBitEqualF32(prefix, full[0 .. bulk_rows * split_test_n]);
 
@@ -347,9 +347,9 @@ test "native q4_k x8 dispatch runs every off-multiple m through the padded x4 ke
     var pool: thread.Pool = undefined;
     try pool.init(.{ .allocator = allocator, .max_workers = 4 });
     defer pool.deinit();
-    const serial = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ4_Kx8, allocator, &rhs, lhs_values, 129, .{});
+    const serial = try runSplitDispatch(native.kernels.matmulPacked, allocator, &rhs, lhs_values, 129, .{});
     defer allocator.free(serial);
-    const pooled = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ4_Kx8, allocator, &rhs, lhs_values, 129, .{ .pool = &pool });
+    const pooled = try runSplitDispatch(native.kernels.matmulPacked, allocator, &rhs, lhs_values, 129, .{ .pool = &pool });
     defer allocator.free(pooled);
     try expectBitEqualF32(serial, pooled);
 }
@@ -366,7 +366,7 @@ test "native q8_0 x4 dispatch splits off-multiple m >= 32 into packed bulk plus 
     fillSplitTestValues(lhs_values, random);
 
     for (split_test_ms) |m| {
-        const full = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ8_0x4, allocator, &rhs, lhs_values, m, .{});
+        const full = try runSplitDispatch(native.kernels.matmulPacked, allocator, &rhs, lhs_values, m, .{});
         defer allocator.free(full);
 
         if (m < 12) {
@@ -379,7 +379,7 @@ test "native q8_0 x4 dispatch splits off-multiple m >= 32 into packed bulk plus 
 
         if (m >= 32) {
             const bulk_rows = m - m % 4;
-            const prefix = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ8_0x4, allocator, &rhs, lhs_values, bulk_rows, .{});
+            const prefix = try runSplitDispatch(native.kernels.matmulPacked, allocator, &rhs, lhs_values, bulk_rows, .{});
             defer allocator.free(prefix);
             try expectBitEqualF32(prefix, full[0 .. bulk_rows * split_test_n]);
 
@@ -397,9 +397,9 @@ test "native q8_0 x4 dispatch splits off-multiple m >= 32 into packed bulk plus 
     var pool: thread.Pool = undefined;
     try pool.init(.{ .allocator = allocator, .max_workers = 4 });
     defer pool.deinit();
-    const serial = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ8_0x4, allocator, &rhs, lhs_values, 129, .{});
+    const serial = try runSplitDispatch(native.kernels.matmulPacked, allocator, &rhs, lhs_values, 129, .{});
     defer allocator.free(serial);
-    const pooled = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ8_0x4, allocator, &rhs, lhs_values, 129, .{ .pool = &pool });
+    const pooled = try runSplitDispatch(native.kernels.matmulPacked, allocator, &rhs, lhs_values, 129, .{ .pool = &pool });
     defer allocator.free(pooled);
     try expectBitEqualF32(serial, pooled);
 }

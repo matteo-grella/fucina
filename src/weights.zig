@@ -41,6 +41,7 @@ const ptqtp = @import("ptqtp.zig");
 const parallel = @import("parallel.zig");
 const tuning = @import("tuning.zig");
 
+const weights_mod = @This();
 const gpu_impl = backend_mod.gpu_impl;
 const Tensor = ag_mod.Tensor;
 const PackedRhs = ag_mod.PackedRhs;
@@ -69,19 +70,23 @@ pub const WeightBf16 = Tensor(.{ .dtype = .bf16, .tags = .{ .out, .in } });
 /// serves every packed format — the four public names below are distinct
 /// instantiations, so `LinearWeight`'s union arms stay nominal and every
 /// change to the ownership/residency contract lands in all four at once.
-fn PackedQuantWeight(comptime dtype: DType) type {
+fn PackedQuantWeight(comptime dt: DType) type {
     return struct {
-        value: QuantWeight(dtype),
-        packed_rhs: PackedRhs(dtype),
+        value: QuantWeight(dt),
+        packed_rhs: PackedRhs(dt),
         rhs_lifetime: RhsLifetime = .transient,
 
         const Self = @This();
 
-        pub fn init(ctx: *ExecContext, value: QuantWeight(dtype)) !Self {
+        /// The container's block format; `weights.linearSeq` infers its
+        /// route from this.
+        pub const dtype: DType = dt;
+
+        pub fn init(ctx: *ExecContext, value: QuantWeight(dt)) !Self {
             return initWithRhsLifetime(ctx, value, .transient);
         }
 
-        pub fn initWithRhsLifetime(ctx: *ExecContext, value: QuantWeight(dtype), rhs_lifetime: RhsLifetime) !Self {
+        pub fn initWithRhsLifetime(ctx: *ExecContext, value: QuantWeight(dt), rhs_lifetime: RhsLifetime) !Self {
             var owned = value;
             errdefer owned.deinit();
             var packed_rhs = try owned.packRhs(ctx);
@@ -101,14 +106,14 @@ fn PackedQuantWeight(comptime dtype: DType) type {
         }
 
         pub fn concat(self: *const Self, ctx: *ExecContext, comptime tag: Tag, others: []const *const Self) !Self {
-            var raw_others = try ctx.allocator.alloc(*const QuantWeight(dtype), others.len);
+            var raw_others = try ctx.allocator.alloc(*const QuantWeight(dt), others.len);
             defer ctx.allocator.free(raw_others);
             for (others, 0..) |other, i| raw_others[i] = &other.value;
 
             var value = try self.value.concat(ctx, tag, raw_others);
             var owns_value = true;
             errdefer if (owns_value) value.deinit();
-            const rhs_lifetime: RhsLifetime = if (try makeGpuResidentQuantWeight(dtype, ctx, &value)) .stable_process else .transient;
+            const rhs_lifetime: RhsLifetime = if (try makeGpuResidentQuantWeight(dt, ctx, &value)) .stable_process else .transient;
             return initWithRhsLifetime(ctx, value, rhs_lifetime) catch |err| {
                 owns_value = false;
                 return err;
@@ -883,31 +888,17 @@ pub const LinearWeight = union(enum) {
             .f32, .f64 => .{ .f32 = try loadDenseF32Weight(ctx, info, shape) },
             .f16 => .{ .f16 = try loadDenseF16Weight(ctx, info, shape, options) },
             .bf16 => .{ .bf16 = try loadDenseBf16Weight(ctx, info, shape) },
-            .q1_0 => .{ .q1_0 = try loadQuantizedWeight(.q1_0, ctx, info, shape) },
-            .q2_0 => .{ .q2_0 = try loadQuantizedWeight(.q2_0, ctx, info, shape) },
-            .q4_0 => .{ .q4_0 = try loadQuantizedWeight(.q4_0, ctx, info, shape) },
-            .q4_1 => .{ .q4_1 = try loadQuantizedWeight(.q4_1, ctx, info, shape) },
-            .q5_0 => .{ .q5_0 = try loadQuantizedWeight(.q5_0, ctx, info, shape) },
-            .q5_1 => .{ .q5_1 = try loadQuantizedWeight(.q5_1, ctx, info, shape) },
             .q8_0 => .{ .q8_0 = try loadQ8_0Weight(ctx, info, shape, options) },
-            .q2_k => .{ .q2_k = try loadQuantizedWeight(.q2_k, ctx, info, shape) },
-            .q3_k => .{ .q3_k = try loadQuantizedWeight(.q3_k, ctx, info, shape) },
             .q4_k => .{ .q4_k = try loadQ4_KWeight(ctx, info, shape, options) },
             .q5_k => .{ .q5_k = try loadQ5_KWeight(ctx, info, shape, options) },
             .q6_k => .{ .q6_k = try loadQ6_KWeight(ctx, info, shape, options) },
-            .iq1_s => .{ .iq1_s = try loadQuantizedWeight(.iq1_s, ctx, info, shape) },
-            .iq1_m => .{ .iq1_m = try loadQuantizedWeight(.iq1_m, ctx, info, shape) },
-            .iq2_xxs => .{ .iq2_xxs = try loadQuantizedWeight(.iq2_xxs, ctx, info, shape) },
-            .iq2_xs => .{ .iq2_xs = try loadQuantizedWeight(.iq2_xs, ctx, info, shape) },
-            .iq2_s => .{ .iq2_s = try loadQuantizedWeight(.iq2_s, ctx, info, shape) },
-            .iq3_xxs => .{ .iq3_xxs = try loadQuantizedWeight(.iq3_xxs, ctx, info, shape) },
-            .iq3_s => .{ .iq3_s = try loadQuantizedWeight(.iq3_s, ctx, info, shape) },
-            .iq4_nl => .{ .iq4_nl = try loadQuantizedWeight(.iq4_nl, ctx, info, shape) },
-            .iq4_xs => .{ .iq4_xs = try loadQuantizedWeight(.iq4_xs, ctx, info, shape) },
-            .tq1_0 => .{ .tq1_0 = try loadQuantizedWeight(.tq1_0, ctx, info, shape) },
-            .tq2_0 => .{ .tq2_0 = try loadQuantizedWeight(.tq2_0, ctx, info, shape) },
-            .mxfp4 => .{ .mxfp4 = try loadQuantizedWeight(.mxfp4, ctx, info, shape) },
-            .nvfp4 => .{ .nvfp4 = try loadQuantizedWeight(.nvfp4, ctx, info, shape) },
+            // Every remaining block format loads as a plain `QuantWeight`
+            // arm named exactly like its GGML type.
+            inline .q1_0, .q2_0, .q4_0, .q4_1, .q5_0, .q5_1, .q2_k, .q3_k, .iq1_s, .iq1_m, .iq2_xxs, .iq2_xs, .iq2_s, .iq3_xxs, .iq3_s, .iq4_nl, .iq4_xs, .tq1_0, .tq2_0, .mxfp4, .nvfp4 => |t| @unionInit(
+                LinearWeight,
+                @tagName(t),
+                try loadQuantizedWeight(@field(DType, @tagName(t)), ctx, info, shape),
+            ),
             .tq2_0_fx4 => blk: {
                 const n = shape[0];
                 const k = shape[1];
@@ -936,10 +927,7 @@ pub const LinearWeight = union(enum) {
     pub fn cloneView(self: *const LinearWeight, ctx: *ExecContext) !LinearWeight {
         @setEvalBranchQuota(20_000);
         return switch (self.*) {
-            .q4_k => |*value| .{ .q4_k = try value.cloneView(ctx) },
-            .q5_k => |*value| .{ .q5_k = try value.cloneView(ctx) },
-            .q6_k => |*value| .{ .q6_k = try value.cloneView(ctx) },
-            .q8_0 => |*value| .{ .q8_0 = try value.cloneView(ctx) },
+            inline .q4_k, .q5_k, .q6_k, .q8_0 => |*value, tag| @unionInit(LinearWeight, @tagName(tag), try value.cloneView(ctx)),
             .ptqtp => |*value| blk: {
                 var p1 = try value.p1.withTags(ctx, .{ .out, .in });
                 errdefer p1.deinit();
@@ -971,10 +959,7 @@ pub const LinearWeight = union(enum) {
     pub fn outDim(self: *const LinearWeight) usize {
         @setEvalBranchQuota(20_000);
         return switch (self.*) {
-            .q4_k => |*w| w.value.dim(.out),
-            .q5_k => |*w| w.value.dim(.out),
-            .q6_k => |*w| w.value.dim(.out),
-            .q8_0 => |*w| w.value.dim(.out),
+            inline .q4_k, .q5_k, .q6_k, .q8_0 => |*w| w.value.dim(.out),
             .ptqtp => |*w| w.p1.dim(.out),
             .tq2_0_fx4 => |*w| w.n,
             inline else => |*w| w.dim(.out),
@@ -984,10 +969,7 @@ pub const LinearWeight = union(enum) {
     pub fn inDim(self: *const LinearWeight) usize {
         @setEvalBranchQuota(20_000);
         return switch (self.*) {
-            .q4_k => |*w| w.value.dim(.in),
-            .q5_k => |*w| w.value.dim(.in),
-            .q6_k => |*w| w.value.dim(.in),
-            .q8_0 => |*w| w.value.dim(.in),
+            inline .q4_k, .q5_k, .q6_k, .q8_0 => |*w| w.value.dim(.in),
             .ptqtp => |*w| w.p1.dim(.in),
             .tq2_0_fx4 => |*w| w.k,
             inline else => |*w| w.dim(.in),
@@ -1091,10 +1073,7 @@ pub const LinearWeight = union(enum) {
     pub fn linearSeq(self: *const LinearWeight, ctx: *ExecContext, input: anytype, comptime in_tag: Tag, comptime out_tag: Tag) !Tensor(.{ .seq, out_tag }) {
         @setEvalBranchQuota(20_000);
         return switch (self.*) {
-            .q4_k => |*weight| try linearSeqQ4_K(weight, ctx, input, in_tag, out_tag),
-            .q5_k => |*weight| try linearSeqQ5_K(weight, ctx, input, in_tag, out_tag),
-            .q6_k => |*weight| try linearSeqQ6_K(weight, ctx, input, in_tag, out_tag),
-            .q8_0 => |*weight| try linearSeqQ8_0(weight, ctx, input, in_tag, out_tag),
+            inline .q4_k, .q5_k, .q6_k, .q8_0 => |*weight| try weights_mod.linearSeq(weight, ctx, input, in_tag, out_tag),
             .ptqtp => |*weight| blk: {
                 if (try linearSeqPtqtpFused(weight, ctx, input, out_tag)) |fused| break :blk fused;
                 var p1 = try weight.p1.withTags(ctx, .{ out_tag, in_tag });
@@ -1152,9 +1131,7 @@ pub const LinearWeight = union(enum) {
         if (m < 4) return false;
         return switch (self.*) {
             .q4_k => comptime !backend_mod.supports_q4_k_mmla,
-            .q8_0 => true,
-            .q5_k => true,
-            .q6_k => true,
+            .q8_0, .q5_k, .q6_k => true,
             else => false,
         };
     }
@@ -1181,9 +1158,7 @@ pub const LinearWeight = union(enum) {
                 .q4_k => |*weight| if (comptime !backend_mod.supports_q4_k_mmla) {
                     return x.rmsNormMulDotPacked(ctx, norm_weight, eps, &weight.packed_rhs, in_tag, out_tag);
                 },
-                .q8_0 => |*weight| return x.rmsNormMulDotPacked(ctx, norm_weight, eps, &weight.packed_rhs, in_tag, out_tag),
-                .q5_k => |*weight| return x.rmsNormMulDotPacked(ctx, norm_weight, eps, &weight.packed_rhs, in_tag, out_tag),
-                .q6_k => |*weight| return x.rmsNormMulDotPacked(ctx, norm_weight, eps, &weight.packed_rhs, in_tag, out_tag),
+                inline .q8_0, .q5_k, .q6_k => |*weight| return x.rmsNormMulDotPacked(ctx, norm_weight, eps, &weight.packed_rhs, in_tag, out_tag),
                 else => {},
             };
         }
@@ -1200,36 +1175,14 @@ pub const LinearWeight = union(enum) {
                 defer rows.deinit();
                 break :blk try rows.withTags(ctx, .{ .seq, out_tag });
             },
-            .f16 => |*table| blk: {
-                var rows_f16 = try table.gather(ctx, .out, token_ids, .seq);
-                defer rows_f16.deinit();
-                var rows = try rows_f16.to(ctx, .f32);
+            inline .f16, .bf16 => |*table| blk: {
+                var rows_half = try table.gather(ctx, .out, token_ids, .seq);
+                defer rows_half.deinit();
+                var rows = try rows_half.to(ctx, .f32);
                 defer rows.deinit();
                 break :blk try rows.withTags(ctx, .{ .seq, out_tag });
             },
-            .bf16 => |*table| blk: {
-                var rows_bf16 = try table.gather(ctx, .out, token_ids, .seq);
-                defer rows_bf16.deinit();
-                var rows = try rows_bf16.to(ctx, .f32);
-                defer rows.deinit();
-                break :blk try rows.withTags(ctx, .{ .seq, out_tag });
-            },
-            .q6_k => |*table| blk: {
-                var rows = try table.value.getRows(ctx, .out, token_ids, .seq);
-                defer rows.deinit();
-                break :blk try rows.withTags(ctx, .{ .seq, out_tag });
-            },
-            .q8_0 => |*table| blk: {
-                var rows = try table.value.getRows(ctx, .out, token_ids, .seq);
-                defer rows.deinit();
-                break :blk try rows.withTags(ctx, .{ .seq, out_tag });
-            },
-            .q4_k => |*table| blk: {
-                var rows = try table.value.getRows(ctx, .out, token_ids, .seq);
-                defer rows.deinit();
-                break :blk try rows.withTags(ctx, .{ .seq, out_tag });
-            },
-            .q5_k => |*table| blk: {
+            inline .q4_k, .q5_k, .q6_k, .q8_0 => |*table| blk: {
                 var rows = try table.value.getRows(ctx, .out, token_ids, .seq);
                 defer rows.deinit();
                 break :blk try rows.withTags(ctx, .{ .seq, out_tag });
@@ -1362,11 +1315,15 @@ pub fn loadMoeRhs(
     const rows = try std.math.mul(usize, n_expert, out_dim);
 
     return switch (info.ggml_type) {
-        .q2_k => .{ .q2_k = try copyOrBorrowMoeRhs(backend_mod.QuantizedMatmulRhsQ2_K, dtype_mod.BlockQ2_K, ctx, info, rows, in_dim, borrow) },
-        .q3_k => .{ .q3_k = try copyOrBorrowMoeRhs(backend_mod.QuantizedMatmulRhsQ3_K, dtype_mod.BlockQ3_K, ctx, info, rows, in_dim, borrow) },
-        .q4_k => .{ .q4_k = try copyOrBorrowMoeRhs(backend_mod.QuantizedMatmulRhsQ4_K, dtype_mod.BlockQ4_K, ctx, info, rows, in_dim, borrow) },
-        .q5_k => .{ .q5_k = try copyOrBorrowMoeRhs(backend_mod.QuantizedMatmulRhsQ5_K, dtype_mod.BlockQ5_K, ctx, info, rows, in_dim, borrow) },
-        .q6_k => .{ .q6_k = try copyOrBorrowMoeRhs(backend_mod.QuantizedMatmulRhsQ6_K, dtype_mod.BlockQ6_K, ctx, info, rows, in_dim, borrow) },
+        inline .q2_k, .q3_k, .q4_k, .q5_k, .q6_k => |t| @unionInit(MoeRhs, @tagName(t), try copyOrBorrowMoeRhs(
+            @FieldType(MoeRhs, @tagName(t)),
+            dtype_mod.Storage(@field(DType, @tagName(t))),
+            ctx,
+            info,
+            rows,
+            in_dim,
+            borrow,
+        )),
         // q8_0: what llama.cpp falls back to when an expert dim is not a
         // 256 multiple (deepseek2). Nested rows container, so it gets its
         // own copy-or-borrow.
@@ -1386,11 +1343,7 @@ pub fn loadMoeRhs(
         },
         // IQ*/ternary experts: nested-rows containers, one shared
         // copy-or-borrow (copyOrBorrowMoeRhsRows).
-        .iq2_xxs => .{ .iq2_xxs = try copyOrBorrowMoeRhsRows(.iq2_xxs, ctx, info, rows, in_dim, borrow) },
-        .iq2_s => .{ .iq2_s = try copyOrBorrowMoeRhsRows(.iq2_s, ctx, info, rows, in_dim, borrow) },
-        .iq4_xs => .{ .iq4_xs = try copyOrBorrowMoeRhsRows(.iq4_xs, ctx, info, rows, in_dim, borrow) },
-        .iq3_xxs => .{ .iq3_xxs = try copyOrBorrowMoeRhsRows(.iq3_xxs, ctx, info, rows, in_dim, borrow) },
-        .tq2_0 => .{ .tq2_0 = try copyOrBorrowMoeRhsRows(.tq2_0, ctx, info, rows, in_dim, borrow) },
+        inline .iq2_xxs, .iq2_s, .iq4_xs, .iq3_xxs, .tq2_0 => |t| @unionInit(MoeRhs, @tagName(t), try copyOrBorrowMoeRhsRows(@field(DType, @tagName(t)), ctx, info, rows, in_dim, borrow)),
         // Native pre-folded tied-K=2 PTQTP (docs/PTQTP.md): the on-disk
         // bytes ARE the expert-major one-pass pack, so the resident arm is
         // the folded-only `ptqtp` form — no planes, no load-time fold, and
@@ -2080,146 +2033,76 @@ fn denseQuantGpuTry(
     return try Tensor(.{ .seq, out_tag }).fromTensor(ctx, out);
 }
 
-pub fn linearSeqQ8_0(
-    weight: *const WeightQ8_0,
-    ctx: *ExecContext,
-    input: anytype,
-    comptime in_tag: Tag,
-    comptime out_tag: Tag,
-) !Tensor(.{ .seq, out_tag }) {
-    if (try denseQuantGpuTry(.q8_0, weight, ctx, input, in_tag, out_tag)) |r| return r;
-    return input.dotPacked(ctx, &weight.packed_rhs, in_tag, out_tag);
-}
-
-/// Q4_K decode-route gate, the Q5_K gate's sibling: at decode shapes (m < 4)
-/// the dense Q4_K matmul is a DRAM-bound GEMV, and the byte-expanded packed
-/// layout (BlockQ4_Kx8, 276 B per 256-weight block per column = 8.625 bpw)
-/// streams 1.92x the bytes of the GGUF-native compact blocks already
-/// resident in `weight.value` (144 B = 4.5 bpw). Routing decode through the
-/// compact tensor-RHS path is bitwise-equal to the x8 packed family (same
-/// Q8_K LHS quantization, same order-independent i32 integer stage, same f32
-/// epilogue association — proven by the cross-layout test in q4_k_tests.zig)
-/// and wins where bandwidth is the limit: default ON. Runtime overrides:
-/// FUCINA_Q4K_DECODE_COMPACT=1 forces on, FUCINA_NO_Q4K_DECODE_COMPACT=1
-/// forces off (the A/B and emergency-revert switches). Read once, cached.
-const q4k_decode_compact = tuning.Switch(.{
-    .on = "FUCINA_Q4K_DECODE_COMPACT",
-    .off = "FUCINA_NO_Q4K_DECODE_COMPACT",
-    .default = true,
-});
-
-pub fn linearSeqQ4_K(
-    weight: *const WeightQ4_K,
-    ctx: *ExecContext,
-    input: anytype,
-    comptime in_tag: Tag,
-    comptime out_tag: Tag,
-) !Tensor(.{ .seq, out_tag }) {
-    if (try denseQuantGpuTry(.q4_k, weight, ctx, input, in_tag, out_tag)) |r| return r;
-    // Decode shapes: contract against the resident GGUF-native compact blocks
-    // (`weight.value`) — bitwise-equal outputs, ~1.92x fewer weight bytes
-    // streamed (see the gate comment above). Grad inputs keep the packed
-    // path's explicit GradientQuantizedMatmulUnsupported error.
-    if (input.dim(.seq) < 4 and !input.requiresGrad() and q4k_decode_compact.enabled()) {
-        var tagged = try weight.value.withTags(ctx, .{ out_tag, in_tag });
-        defer tagged.deinit();
-        return input.dot(ctx, &tagged, in_tag);
-    }
-    return input.dotPacked(ctx, &weight.packed_rhs, in_tag, out_tag);
-}
-
-/// Q5_K decode-route gate: at decode shapes (m < 4) the dense Q5_K matmul is a
-/// DRAM-bound GEMV, and the byte-expanded packed layout (BlockQ5_Kx8, 276 B per
-/// 256-weight block per column = 8.625 bpw) streams 1.57x the bytes of the
-/// GGUF-native compact blocks already resident in `weight.value` (176 B =
-/// 5.5 bpw). Routing decode through the compact tensor-RHS path is
-/// bitwise-equal (same Q8_K LHS quantization, same order-independent i32
-/// integer stage, same f32 epilogue association — proven by the cross-layout
-/// test in q5_k_tests.zig) and wins where bandwidth is the limit: default
-/// ON. Runtime overrides: FUCINA_Q5K_DECODE_COMPACT=1 forces on,
-/// FUCINA_NO_Q5K_DECODE_COMPACT=1 forces off (the A/B and emergency-revert
-/// switches, winograd-style). Read once, cached.
 const norm_quant_fused = tuning.Switch(.{
     .on = "FUCINA_NORM_QUANT_FUSED",
     .off = "FUCINA_NO_NORM_QUANT_FUSED",
     .default = true,
 });
 
-const q5k_decode_compact = tuning.Switch(.{
-    .on = "FUCINA_Q5K_DECODE_COMPACT",
-    .off = "FUCINA_NO_Q5K_DECODE_COMPACT",
+/// Decode-route gate shared by the K-quant packed weights: at decode
+/// shapes (m < 4) the dense quantized matmul is a DRAM-bound GEMV, and the
+/// byte-expanded packed layouts stream more weight bytes than the
+/// GGUF-native compact blocks already resident in `weight.value` (per
+/// 256-weight block per column: Q4_K 276 B packed vs 144 B compact, 1.92x;
+/// Q5_K 276 B vs 176 B, 1.57x; Q6_K 274 B vs 210 B, 1.30x). Routing decode
+/// through the compact tensor-RHS path is bitwise-equal to the packed
+/// family (same Q8_K LHS quantization, same order-independent i32 integer
+/// stage, same f32 epilogue association — proven by the cross-layout tests
+/// in q4_k/q5_k/q6_k_tests.zig) and wins where bandwidth is the limit:
+/// default ON. Runtime overrides: FUCINA_DECODE_COMPACT=1 forces on,
+/// FUCINA_NO_DECODE_COMPACT=1 forces off (the A/B and emergency-revert
+/// switches). Read once, cached.
+const decode_compact = tuning.Switch(.{
+    .on = "FUCINA_DECODE_COMPACT",
+    .off = "FUCINA_NO_DECODE_COMPACT",
     .default = true,
 });
 
-/// Programmatic override for the Q5_K decode-route gate (pre-seeds the
+/// Programmatic override for the decode-route gate (pre-seeds the
 /// read-once cache, like `parallel.setMaxThreads`): `true`/`false` force the
 /// compact/packed route, `null` resets to unread so the next query re-reads
-/// the env/arch default. The tests' A/B hook; also usable from a CLI flag.
-pub fn setQ5kDecodeCompact(on: ?bool) void {
-    q5k_decode_compact.set(on);
+/// the env default. The tests' A/B hook; also usable from a CLI flag.
+pub fn setDecodeCompact(on: ?bool) void {
+    decode_compact.set(on);
 }
 
-pub fn linearSeqQ5_K(
-    weight: *const WeightQ5_K,
+/// Formats whose decode-shape GEMV wins by reading the compact GGUF-native
+/// blocks instead of the byte-expanded packed layout (the `decode_compact`
+/// gate's byte ratios). Q8_0's x4 pack carries the same bytes as its
+/// compact blocks, so it goes straight to the packed dot.
+fn hasCompactDecodeRoute(comptime dt: DType) bool {
+    return switch (dt) {
+        .q4_k, .q5_k, .q6_k => true,
+        .q8_0 => false,
+        else => false,
+    };
+}
+
+/// Packed quantized linear forward, one body for every
+/// `PackedQuantWeight` format: the GPU offload try first, then (where the
+/// format has one) the decode-shape compact route, then the packed CPU
+/// dot. Grad inputs keep the packed path's explicit
+/// GradientQuantizedMatmulUnsupported error.
+pub fn linearSeq(
+    weight: anytype,
     ctx: *ExecContext,
     input: anytype,
     comptime in_tag: Tag,
     comptime out_tag: Tag,
 ) !Tensor(.{ .seq, out_tag }) {
-    if (try denseQuantGpuTry(.q5_k, weight, ctx, input, in_tag, out_tag)) |r| return r;
-    // Decode shapes: contract against the resident GGUF-native compact blocks
-    // (`weight.value`) through the public quantized-RHS `dot` (exec's
-    // matmul2DWithQuantizedTensorRhsOptions -> matmulQ5_KRhsTile kernels with
-    // column-split threading) instead of the byte-expanded packed layout —
-    // bitwise-equal outputs, ~1.57x fewer weight bytes streamed (see the gate
-    // comment above). Grad inputs keep the packed path's explicit
-    // GradientQuantizedMatmulUnsupported error.
-    if (input.dim(.seq) < 4 and !input.requiresGrad() and q5k_decode_compact.enabled()) {
-        var tagged = try weight.value.withTags(ctx, .{ out_tag, in_tag });
-        defer tagged.deinit();
-        return input.dot(ctx, &tagged, in_tag);
-    }
-    return input.dotPacked(ctx, &weight.packed_rhs, in_tag, out_tag);
-}
-
-/// Q6_K decode-route gate, the Q5_K gate's ride-along (same bytes-not-kernels
-/// story, smaller expansion): the packed Q6_Kx4 layout is byte-expanded to
-/// 274 B per 256-weight block per column vs the GGUF-native compact blocks'
-/// 210 B (6.5625 bpw) — 1.30x the necessary traffic on the DRAM-bound m < 4
-/// GEMV. Bitwise-equal outputs (same Q8_K LHS quantization, same exact i32
-/// iacc = sum dot*scale — Q6_K has no separate mins path — and the identical
-/// f32 epilogue association acc + float(iacc)*(f16(d_w)*a.d) in ascending
-/// block order; proven by the cross-layout test in q6_k_tests.zig). Default
-/// ON. Runtime overrides: FUCINA_Q6K_DECODE_COMPACT=1 forces on,
-/// FUCINA_NO_Q6K_DECODE_COMPACT=1 forces off. Read once, cached.
-const q6k_decode_compact = tuning.Switch(.{
-    .on = "FUCINA_Q6K_DECODE_COMPACT",
-    .off = "FUCINA_NO_Q6K_DECODE_COMPACT",
-    .default = true,
-});
-
-/// Programmatic override for the Q6_K decode-route gate; same contract as
-/// `setQ5kDecodeCompact` (null resets the read-once cache to unread).
-pub fn setQ6kDecodeCompact(on: ?bool) void {
-    q6k_decode_compact.set(on);
-}
-
-pub fn linearSeqQ6_K(
-    weight: *const WeightQ6_K,
-    ctx: *ExecContext,
-    input: anytype,
-    comptime in_tag: Tag,
-    comptime out_tag: Tag,
-) !Tensor(.{ .seq, out_tag }) {
-    if (try denseQuantGpuTry(.q6_k, weight, ctx, input, in_tag, out_tag)) |r| return r;
-    // Decode shapes: compact GGUF-native blocks instead of the byte-expanded
-    // packed layout — see the Q5_K gate above; identical structure here. The
-    // GPU try stays first so `-Dgpu` builds keep their existing offload
-    // policy (weight-lifetime-aware wraps) ahead of the CPU route choice.
-    if (input.dim(.seq) < 4 and !input.requiresGrad() and q6k_decode_compact.enabled()) {
-        var tagged = try weight.value.withTags(ctx, .{ out_tag, in_tag });
-        defer tagged.deinit();
-        return input.dot(ctx, &tagged, in_tag);
+    const dt = @TypeOf(weight.*).dtype;
+    if (try denseQuantGpuTry(dt, weight, ctx, input, in_tag, out_tag)) |r| return r;
+    // Decode shapes: contract against the resident GGUF-native compact
+    // blocks (`weight.value`) through the public quantized-RHS `dot` —
+    // bitwise-equal outputs, fewer weight bytes streamed (see the
+    // `decode_compact` gate comment). The GPU try stays first so `-Dgpu`
+    // builds keep their offload policy ahead of the CPU route choice.
+    if (comptime hasCompactDecodeRoute(dt)) {
+        if (input.dim(.seq) < 4 and !input.requiresGrad() and decode_compact.enabled()) {
+            var tagged = try weight.value.withTags(ctx, .{ out_tag, in_tag });
+            defer tagged.deinit();
+            return input.dot(ctx, &tagged, in_tag);
+        }
     }
     return input.dotPacked(ctx, &weight.packed_rhs, in_tag, out_tag);
 }
@@ -2229,16 +2112,7 @@ fn restoreGpuResidencyAfterDeclinedFusion(ctx: *ExecContext, parts: []const *Lin
     for (parts) |part| switch (part.*) {
         .f32 => |*value| _ = try makeGpuResidentDenseWeight(.f32, WeightF32, ctx, value),
         .f16 => |*value| _ = try makeGpuResidentDenseWeight(.f16, WeightF16, ctx, value),
-        .q4_k => |*weight| if (!weight.rhs_lifetime.isCacheable() and try makeGpuResidentQuantWeight(.q4_k, ctx, &weight.value)) {
-            weight.rhs_lifetime = .stable_process;
-        },
-        .q5_k => |*weight| if (!weight.rhs_lifetime.isCacheable() and try makeGpuResidentQuantWeight(.q5_k, ctx, &weight.value)) {
-            weight.rhs_lifetime = .stable_process;
-        },
-        .q6_k => |*weight| if (!weight.rhs_lifetime.isCacheable() and try makeGpuResidentQuantWeight(.q6_k, ctx, &weight.value)) {
-            weight.rhs_lifetime = .stable_process;
-        },
-        .q8_0 => |*weight| if (!weight.rhs_lifetime.isCacheable() and try makeGpuResidentQuantWeight(.q8_0, ctx, &weight.value)) {
+        inline .q4_k, .q5_k, .q6_k, .q8_0 => |*weight| if (!weight.rhs_lifetime.isCacheable() and try makeGpuResidentQuantWeight(@TypeOf(weight.*).dtype, ctx, &weight.value)) {
             weight.rhs_lifetime = .stable_process;
         },
         // loadForFusion skipped the fold residency; a declined fx4 part

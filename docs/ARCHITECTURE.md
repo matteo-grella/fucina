@@ -557,7 +557,14 @@ validation, materialization, allocation, and dispatch. Backends own numeric
 kernels. `backend/quant.zig` owns block helpers, dequantization, loaded-block
 row access, the interleaved pack layouts and RHS containers, and the
 portable kernels shared by both backends; backend dispatch consumes
-`AnyQuantizedMatmulRhs` internally. K-quants and the `IQ*`/`TQ*` formats dot
+`AnyQuantizedMatmulRhs` internally. Exec and kernel entries are spelled
+once per operation with the format as a comptime parameter or inferred
+from the container type: `ExecContext.packMatmulRhs(dt, &w)`,
+`matmulPacked(&a, &rhs)`, `rmsNormMulMatmulPacked`,
+`splitSwiGluMatmulPacked`, and `gegluQuantMatmulPacked` on the exec side;
+`kernels.matmulQuantizedRhs` (plain K-quant containers),
+`kernels.matmulPacked` (packed containers), and `kernels.matmulPackedSlice`
+(pre-quantized LHS slices) on the backend side. K-quants and the `IQ*`/`TQ*` formats dot
 against `Q8_K` activation blocks; `IQ4_NL`, `MXFP4`, and `NVFP4` (like the
 legacy formats) use `Q8_0`/`Q8_1` activation blocks. Decode follows GGML
 lookup tables, nonlinear codebooks, and E8M0/UE4M3 FP4 scale rules; every

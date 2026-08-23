@@ -751,17 +751,16 @@ fn batchRawGpu(
     const bpr_dn = out_pe / 32;
     if (gw.guBlockCount() != n_expert * gu_out * bpr_gu) return null;
     if (gw.dn_blocks.len != n_expert * hidden * bpr_dn) return null;
-    const gu_format: backend_mod.gpu_impl.KernelFormatTag = switch (gw.gu) {
-        .q6_k => comptime backend_mod.gpu_impl.kernelTag(.q6_k).?,
-        .q4_k => comptime backend_mod.gpu_impl.kernelTag(.q4_k).?,
+    // One switch resolves the gate_up dtype's kernel tag, raw bytes and
+    // block size together.
+    const gu_format: backend_mod.gpu_impl.KernelFormatTag, const gu_bytes: []const u8, const gu_block_bytes: usize = switch (gw.gu) {
+        inline else => |gu_blocks, tag| .{
+            comptime backend_mod.gpu_impl.kernelTag(@field(dtype_mod.DType, @tagName(tag))).?,
+            std.mem.sliceAsBytes(gu_blocks),
+            @sizeOf(@typeInfo(@TypeOf(gu_blocks)).pointer.child),
+        },
     };
-    const gu_bytes: []const u8 = switch (gw.gu) {
-        inline else => |gu_blocks| std.mem.sliceAsBytes(gu_blocks),
-    };
-    const nb01_gu = bpr_gu * @as(usize, switch (gw.gu) {
-        .q6_k => @sizeOf(dtype_mod.BlockQ6_K),
-        .q4_k => @sizeOf(dtype_mod.BlockQ4_K),
-    });
+    const nb01_gu = bpr_gu * gu_block_bytes;
     const nb01_dn = bpr_dn * @sizeOf(dtype_mod.BlockQ8_0);
 
     var n_tiles: usize = 0;
@@ -989,24 +988,13 @@ fn gemmaMoeRawGuView(
     const bpr = hidden / 256;
     const start = (expert * 2 * out_pe + row_off) * bpr;
     return switch (gw.gu) {
-        .q6_k => |gu_blocks| .{
-            .q6_k = .{
-                .allocator = null, // borrows the model's resident expert copies
-                .blocks = gu_blocks[start..][0 .. out_pe * bpr],
-                .k = hidden,
-                .n = out_pe,
-                .blocks_per_column = bpr,
-            },
-        },
-        .q4_k => |gu_blocks| .{
-            .q4_k = .{
-                .allocator = null, // borrows the model's resident expert copies
-                .blocks = gu_blocks[start..][0 .. out_pe * bpr],
-                .k = hidden,
-                .n = out_pe,
-                .blocks_per_column = bpr,
-            },
-        },
+        inline else => |gu_blocks, tag| @unionInit(GemmaMoeRawGuRhs, @tagName(tag), .{
+            .allocator = null, // borrows the model's resident expert copies
+            .blocks = gu_blocks[start..][0 .. out_pe * bpr],
+            .k = hidden,
+            .n = out_pe,
+            .blocks_per_column = bpr,
+        }),
     };
 }
 

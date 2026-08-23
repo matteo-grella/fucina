@@ -821,7 +821,7 @@ test "q4_k 4-row lane dot SIMD arms match the scalar reference" {
 }
 
 test "Q4_K compact-vs-packed cross-layout matmul is bit-identical at decode shapes (m=1,2,3)" {
-    // The decode-route proof (weights.linearSeqQ4_K m<4 gate): the compact
+    // The decode-route proof (weights.linearSeq q4_k m<4 gate): the compact
     // GGUF-native kernel family (matmulQ4_KRhsRange over BlockQ4_K, 4.5 bpw)
     // and the byte-expanded packed family (matmulQ4_Kx8RhsRange over
     // BlockQ4_Kx8, 8.625 bpw) must agree BITWISE on the same blocks and the

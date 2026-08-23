@@ -80,6 +80,29 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- Per-format plumbing is comptime-parameterized: each packed quantized
+  matmul entry is spelled once, with the format a comptime parameter or
+  inferred from the RHS container type. Rewrites:
+  `ctx.packMatmulRhsQ4_Kx8(&t)` → `ctx.packMatmulRhs(.q4_k, &t)` (the
+  dtype-default container; `ctx.packMatmulRhsAs(Rhs, &t)` forces a
+  specific one); `ctx.matmul2DWithPackedQ8_0x4Rhs(&a, &rhs)` →
+  `ctx.matmulPacked(&a, &rhs)`; `ctx.rmsNormMulMatmul2DWithPacked*Rhs` →
+  `ctx.rmsNormMulMatmulPacked`; `ctx.splitSwiGluMatmul2DWithPacked*Rhs` →
+  `ctx.splitSwiGluMatmulPacked`; `ctx.gegluQuantMatmul2DWithPackedQ8_0x4Rhs`
+  → `ctx.gegluQuantMatmulPacked`; `weights.linearSeqQ6_K(&w, ...)` →
+  `weights.linearSeq(&w, ...)` (one generic over the packed weight
+  containers). One decode-route gate replaces the three per-format
+  gates: `FUCINA_Q4K_DECODE_COMPACT`/`FUCINA_Q5K_DECODE_COMPACT`/
+  `FUCINA_Q6K_DECODE_COMPACT` (and their `FUCINA_NO_*` twins) →
+  `FUCINA_DECODE_COMPACT`/`FUCINA_NO_DECODE_COMPACT`, and
+  `weights.setQ5kDecodeCompact`/`setQ6kDecodeCompact` →
+  `weights.setDecodeCompact`. Kernel-set entries follow the same rule:
+  `kernels.matmul2DQuantizedRhsQ8_0x4`/`...Q4_Kx4`/`...Q4_Kx8`/
+  `...Q4_Kx2Mmla`/`...Q5_Kx8`/`...Q6_Kx4` → `kernels.matmulPacked`,
+  the per-dtype plain K-quant forwards → `kernels.matmulQuantizedRhs`,
+  and the `matmulPacked*Slice` family → `kernels.matmulPackedSlice`.
+  Every collapsed entry calls the identical kernel with identical
+  arguments; numerics are unchanged.
 - Internal layout, no public spelling changes: `src/llm/model_common.zig`
   holds the PTQTP-aware projection loader, the dense-FFN containers, the
   MoE expert-trio loader, the embed/norm/lm-head trio, and the GQA head

@@ -118,25 +118,25 @@ test "pinned rowwise kernels: batched quant ops reproduce the m == 1 numerics bi
             try expectRowwise(&ctx, struct {
                 rhs: *const backend_mod.QuantizedMatmulRhsQ4_Kx8,
                 fn run(s: @This(), c: *ExecContext, in: *const Tensor) !Tensor {
-                    return c.splitSwiGluMatmul2DWithPackedQ4_Kx8Rhs(in, s.rhs);
+                    return c.splitSwiGluMatmulPacked(in, s.rhs);
                 }
             }{ .rhs = &q4_rhs }, x_vals, 2 * k, m, n);
             try expectRowwise(&ctx, struct {
                 rhs: *const backend_mod.QuantizedMatmulRhsQ5_Kx8,
                 fn run(s: @This(), c: *ExecContext, in: *const Tensor) !Tensor {
-                    return c.splitSwiGluMatmul2DWithPackedQ5_Kx8Rhs(in, s.rhs);
+                    return c.splitSwiGluMatmulPacked(in, s.rhs);
                 }
             }{ .rhs = &q5_rhs }, x_vals, 2 * k, m, n);
             try expectRowwise(&ctx, struct {
                 rhs: *const backend_mod.QuantizedMatmulRhsQ6_Kx4,
                 fn run(s: @This(), c: *ExecContext, in: *const Tensor) !Tensor {
-                    return c.splitSwiGluMatmul2DWithPackedQ6_Kx4Rhs(in, s.rhs);
+                    return c.splitSwiGluMatmulPacked(in, s.rhs);
                 }
             }{ .rhs = &q6_rhs }, x_vals, 2 * k, m, n);
             try expectRowwise(&ctx, struct {
                 rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4,
                 fn run(s: @This(), c: *ExecContext, in: *const Tensor) !Tensor {
-                    return c.splitSwiGluMatmul2DWithPackedQ8_0x4Rhs(in, s.rhs);
+                    return c.splitSwiGluMatmulPacked(in, s.rhs);
                 }
             }{ .rhs = &q8_rhs }, x_vals, 2 * k, m, n);
             // Fused rms-norm-mul (gate + wrap) and the plain packed matmuls.
@@ -144,26 +144,26 @@ test "pinned rowwise kernels: batched quant ops reproduce the m == 1 numerics bi
                 rhs: *const backend_mod.QuantizedMatmulRhsQ4_Kx8,
                 w: *const Tensor,
                 fn run(s: @This(), c: *ExecContext, in: *const Tensor) !Tensor {
-                    return c.rmsNormMulMatmul2DWithPackedQ4_Kx8Rhs(in, s.w, 1e-6, s.rhs);
+                    return c.rmsNormMulMatmulPacked(in, s.w, 1e-6, s.rhs);
                 }
             }{ .rhs = &q4_rhs, .w = &norm_w }, x_vals, k, m, n);
             try expectRowwise(&ctx, struct {
                 rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4,
                 w: *const Tensor,
                 fn run(s: @This(), c: *ExecContext, in: *const Tensor) !Tensor {
-                    return c.rmsNormMulMatmul2DWithPackedQ8_0x4Rhs(in, s.w, 1e-6, s.rhs);
+                    return c.rmsNormMulMatmulPacked(in, s.w, 1e-6, s.rhs);
                 }
             }{ .rhs = &q8_rhs, .w = &norm_w }, x_vals, k, m, n);
             try expectRowwise(&ctx, struct {
                 rhs: *const backend_mod.QuantizedMatmulRhsQ4_Kx8,
                 fn run(s: @This(), c: *ExecContext, in: *const Tensor) !Tensor {
-                    return c.matmul2DWithPackedQ4_Kx8Rhs(in, s.rhs);
+                    return c.matmulPacked(in, s.rhs);
                 }
             }{ .rhs = &q4_rhs }, x_vals, k, m, n);
             try expectRowwise(&ctx, struct {
                 rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4,
                 fn run(s: @This(), c: *ExecContext, in: *const Tensor) !Tensor {
-                    return c.matmul2DWithPackedQ8_0x4Rhs(in, s.rhs);
+                    return c.matmulPacked(in, s.rhs);
                 }
             }{ .rhs = &q8_rhs }, x_vals, k, m, n);
         }

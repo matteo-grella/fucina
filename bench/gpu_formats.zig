@@ -336,16 +336,13 @@ fn benchQuant(
 }
 
 fn cpuPackedQuant(comptime dtype: raw.DType, allocator: std.mem.Allocator, out: *Tensor, a: *const Tensor, packed_rhs: anytype, blocks: []const raw.dtype_info.Storage(dtype), m: usize, n: usize, k: usize, config: native.ParallelConfig) !void {
-    switch (dtype) {
-        .q4_k => try native.kernels.matmul2DQuantizedRhsQ4_Kx8(config, allocator, out, a, packed_rhs, m, n, k),
-        .q5_k => if (m < 4) {
+    if (comptime dtype == .q5_k) {
+        if (m < 4) {
             const rhs = qm.QuantizedMatmulRhsQ5_K{ .allocator = null, .blocks = blocks, .k = k, .n = n, .blocks_per_column = k / qm.types.qk_k_block_size };
-            try native.matmul2DQuantizedRhsQ5_K(config, allocator, out, a, &rhs, m, n, k);
-        } else try native.kernels.matmul2DQuantizedRhsQ5_Kx8(config, allocator, out, a, packed_rhs, m, n, k),
-        .q6_k => try native.kernels.matmul2DQuantizedRhsQ6_Kx4(config, allocator, out, a, packed_rhs, m, n, k),
-        .q8_0 => try native.kernels.matmul2DQuantizedRhsQ8_0x4(config, allocator, out, a, packed_rhs, m, n, k),
-        else => unreachable,
+            return native.matmulQuantizedRhs(config, .q5_k, allocator, out, a, &rhs, m, n, k);
+        }
     }
+    try native.kernels.matmulPacked(config, allocator, out, a, packed_rhs, m, n, k);
 }
 
 fn allocOutputs(allocator: std.mem.Allocator, count: usize, m: usize, n: usize) ![]Tensor {

@@ -79,7 +79,7 @@ test "ggml_q5_k x8 packed matmul matches plain q5_k matmul" {
 }
 
 test "Q5_K compact-vs-packed cross-layout matmul is bit-identical at decode shapes (m=1,2,3)" {
-    // The P0 decode-route proof (weights.linearSeqQ5_K m<4 gate): the compact
+    // The P0 decode-route proof (weights.linearSeq q5_k m<4 gate): the compact
     // GGUF-native kernel family (matmulQ5_KRhsRange over BlockQ5_K, 5.5 bpw)
     // and the byte-expanded packed family (matmulQ5_Kx8RhsRange over
     // BlockQ5_Kx8, 8.625 bpw) must agree BITWISE on the same blocks and the

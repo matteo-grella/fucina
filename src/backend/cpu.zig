@@ -107,21 +107,13 @@ pub const kernels = struct {
     pub const quantizeMatmulRhsQ4_0 = cpu.quantizeMatmulRhsQ4_0;
     pub const quantizeMatmulRhsQ8_0 = cpu.quantizeMatmulRhsQ8_0;
     pub const matmul2DQuantizedRhs = cpu.matmul2DQuantizedRhs;
-    pub const matmul2DQuantizedRhsQ8_0x4 = cpu.matmul2DQuantizedRhsQ8_0x4;
+    pub const matmulQuantizedRhs = cpu.matmulQuantizedRhs;
+    pub const matmulPacked = cpu.matmulPacked;
     pub const matmul2DPackedQ8_0x4LhsRhs = cpu.matmul2DPackedQ8_0x4LhsRhs;
-    pub const matmulPackedQ4_Kx8Q8_Kx4Slice = cpu.matmulPackedQ4_Kx8Q8_Kx4Slice;
-    pub const matmulPackedQ4_Kx8RowsSlice = cpu.matmulPackedQ4_Kx8RowsSlice;
-    pub const matmulPackedQ5_Kx8Q8_Kx4Slice = cpu.matmulPackedQ5_Kx8Q8_Kx4Slice;
-    pub const matmulPackedQ5_Kx8RowsSlice = cpu.matmulPackedQ5_Kx8RowsSlice;
-    pub const matmulPackedQ6_Kx4RowsSlice = cpu.matmulPackedQ6_Kx4RowsSlice;
+    pub const matmulPackedSlice = cpu.matmulPackedSlice;
     pub const unaryRowSlice = cpu.unaryRowSlice;
     pub const mulRowSlice = cpu.mulRowSlice;
     pub const matmul2DPackedPaddedQ8_0x4LhsRhs = cpu.matmul2DPackedPaddedQ8_0x4LhsRhs;
-    pub const matmul2DQuantizedRhsQ6_Kx4 = cpu.matmul2DQuantizedRhsQ6_Kx4;
-    pub const matmul2DQuantizedRhsQ4_Kx4 = cpu.matmul2DQuantizedRhsQ4_Kx4;
-    pub const matmul2DQuantizedRhsQ4_Kx8 = cpu.matmul2DQuantizedRhsQ4_Kx8;
-    pub const matmul2DQuantizedRhsQ4_Kx2Mmla = cpu.matmul2DQuantizedRhsQ4_Kx2Mmla;
-    pub const matmul2DQuantizedRhsQ5_Kx8 = cpu.matmul2DQuantizedRhsQ5_Kx8;
     pub const matmulTransAInto = cpu.matmulTransAInto;
     pub const matmulTransA2DIntoUnchecked = cpu.matmulTransA2DIntoUnchecked;
     pub const matmulTransBInto = cpu.matmulTransBInto;
@@ -1522,11 +1514,7 @@ pub fn matmul2DQuantizedRhs(
         .q5_0 => |qrhs| matmul2DQuantizedRhsQ5_0(pc, allocator, out, a, qrhs, m, n, k),
         .q5_1 => |qrhs| matmul2DQuantizedRhsQ5_1(pc, allocator, out, a, qrhs, m, n, k),
         .q8_0 => |qrhs| matmul2DQuantizedRhsQ8_0(pc, allocator, out, a, qrhs, m, n, k),
-        .q2_k => |qrhs| matmul2DQuantizedRhsQ2_K(pc, allocator, out, a, qrhs, m, n, k),
-        .q3_k => |qrhs| matmul2DQuantizedRhsQ3_K(pc, allocator, out, a, qrhs, m, n, k),
-        .q4_k => |qrhs| matmul2DQuantizedRhsQ4_K(pc, allocator, out, a, qrhs, m, n, k),
-        .q5_k => |qrhs| matmul2DQuantizedRhsQ5_K(pc, allocator, out, a, qrhs, m, n, k),
-        .q6_k => |qrhs| matmul2DQuantizedRhsQ6_K(pc, allocator, out, a, qrhs, m, n, k),
+        inline .q2_k, .q3_k, .q4_k, .q5_k, .q6_k => |qrhs, tag| matmulQuantizedRhs(pc, @field(DType, @tagName(tag)), allocator, out, a, qrhs, m, n, k),
         .iq1_s => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq1_s, allocator, out, a, qrhs, m, n, k),
         .iq1_m => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq1_m, allocator, out, a, qrhs, m, n, k),
         .iq2_xxs => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq2_xxs, allocator, out, a, qrhs, m, n, k),
@@ -1729,17 +1717,32 @@ pub fn matmul2DQuantizedRhsQ8_0(
     return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.q8_0.matmulQ8_0RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
-pub fn matmul2DQuantizedRhsQ8_0x4(
+/// Scalar reference of the packed-container GEMM entry: same dispatch
+/// shape as the native `matmulPacked`, one reference kernel per container.
+pub fn matmulPacked(
     pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ8_0x4,
+    rhs: anytype,
     m: usize,
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.q8_0.matmulQ8_0x4RhsRange, allocator, out, a, rhs, m, n, k);
+    const Rhs = @TypeOf(rhs.*);
+    if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ8_0x4)
+        return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.q8_0.matmulQ8_0x4RhsRange, allocator, out, a, rhs, m, n, k);
+    if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ6_Kx4)
+        return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.q6_k.matmulQ6_Kx4RhsRange, allocator, out, a, rhs, m, n, k);
+    if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ4_Kx4)
+        return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.q4_k.matmulQ4_Kx4RhsRange, allocator, out, a, rhs, m, n, k);
+    if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ4_Kx8)
+        return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.q4_k.matmulQ4_Kx8RhsRange, allocator, out, a, rhs, m, n, k);
+    if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ4_Kx2Mmla)
+        return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.q4_k.matmulQ4_Kx2MmlaRhsRange, allocator, out, a, rhs, m, n, k);
+    if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ5_Kx8)
+        return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.q5_k.matmulQ5_Kx8RhsRange, allocator, out, a, rhs, m, n, k);
+    comptime unreachable; // no kernel for this packed RHS container
 }
 
 pub fn matmul2DPackedQ8_0x4LhsRhs(
@@ -1759,34 +1762,32 @@ pub fn matmul2DPackedQ8_0x4LhsRhs(
     quantized_matmul.q8_0.matmulQ8_0x4PackedRhsRange(contiguousData(out, try checkedTensorProduct(m, n)), lhs_blocks, rhs, m, n, 0, m);
 }
 
-pub fn matmulPackedQ4_Kx8Q8_Kx4Slice(pc: ParallelConfig, out: []f32, lhs_blocks: []const quantized_matmul.BlockQ8_Kx4, rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx8, m: usize, n: usize, k: usize) void {
+/// Scalar reference of the pre-quantized-LHS slice entry: same (LHS
+/// block, RHS container) comptime dispatch as the native `matmulPackedSlice`.
+pub fn matmulPackedSlice(pc: ParallelConfig, out: []f32, lhs_blocks: anytype, rhs: anytype, m: usize, n: usize, k: usize) void {
     _ = k;
     _ = pc;
-    quantized_matmul.q4_k.matmulQ4_Kx8Q8_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
-}
-
-pub fn matmulPackedQ4_Kx8RowsSlice(pc: ParallelConfig, out: []f32, lhs_blocks: []const dtype_mod.BlockQ8_K, rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx8, m: usize, n: usize, k: usize) void {
-    _ = k;
-    _ = pc;
-    quantized_matmul.q4_k.matmulQ4_Kx8RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
-}
-
-pub fn matmulPackedQ5_Kx8Q8_Kx4Slice(pc: ParallelConfig, out: []f32, lhs_blocks: []const quantized_matmul.BlockQ8_Kx4, rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_Kx8, m: usize, n: usize, k: usize) void {
-    _ = k;
-    _ = pc;
-    quantized_matmul.q5_k.matmulQ5_Kx8Q8_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
-}
-
-pub fn matmulPackedQ5_Kx8RowsSlice(pc: ParallelConfig, out: []f32, lhs_blocks: []const dtype_mod.BlockQ8_K, rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_Kx8, m: usize, n: usize, k: usize) void {
-    _ = k;
-    _ = pc;
-    quantized_matmul.q5_k.matmulQ5_Kx8RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
-}
-
-pub fn matmulPackedQ6_Kx4RowsSlice(pc: ParallelConfig, out: []f32, lhs_blocks: []const dtype_mod.BlockQ8_K, rhs: *const quantized_matmul.QuantizedMatmulRhsQ6_Kx4, m: usize, n: usize, k: usize) void {
-    _ = k;
-    _ = pc;
-    quantized_matmul.q6_k.matmulQ6_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
+    const Lhs = @typeInfo(@TypeOf(lhs_blocks)).pointer.child;
+    const Rhs = @TypeOf(rhs.*);
+    const x4_lhs = Lhs == quantized_matmul.BlockQ8_Kx4;
+    comptime if (!x4_lhs and Lhs != dtype_mod.BlockQ8_K)
+        @compileError("matmulPackedSlice: unsupported LHS block type " ++ @typeName(Lhs));
+    if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ4_Kx8) {
+        if (comptime x4_lhs)
+            quantized_matmul.q4_k.matmulQ4_Kx8Q8_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m)
+        else
+            quantized_matmul.q4_k.matmulQ4_Kx8RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
+    } else if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ5_Kx8) {
+        if (comptime x4_lhs)
+            quantized_matmul.q5_k.matmulQ5_Kx8Q8_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m)
+        else
+            quantized_matmul.q5_k.matmulQ5_Kx8RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
+    } else if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ6_Kx4) {
+        comptime if (x4_lhs) @compileError("matmulPackedSlice: the Q6_Kx4 pack has no lane-packed LHS kernel");
+        quantized_matmul.q6_k.matmulQ6_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
+    } else {
+        comptime unreachable; // no kernel for this packed RHS container
+    }
 }
 
 pub fn unaryRowSlice(comptime op: ops.UnaryOp, z: []f32, x: []const f32) void {
@@ -1813,134 +1814,27 @@ pub fn matmul2DPackedPaddedQ8_0x4LhsRhs(
     quantized_matmul.q8_0.matmulQ8_0x4PackedPaddedRhsRange(contiguousData(out, try checkedTensorProduct(m, n)), lhs_blocks, rhs, m, n);
 }
 
-pub fn matmul2DQuantizedRhsQ2_K(
+/// Scalar reference of the plain K-quant GEMM entry: same shape as the
+/// native `matmulQuantizedRhs`, one reference row kernel per dtype.
+pub fn matmulQuantizedRhs(
     pc: ParallelConfig,
+    comptime dt: DType,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ2_K,
+    rhs: anytype,
     m: usize,
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.cold.matmulQ2_KRhsRange, allocator, out, a, rhs, m, n, k);
-}
-
-pub fn matmul2DQuantizedRhsQ3_K(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ3_K,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.cold.matmulQ3_KRhsRange, allocator, out, a, rhs, m, n, k);
-}
-
-pub fn matmul2DQuantizedRhsQ4_K(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_K,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.q4_k.matmulQ4_KRhsRange, allocator, out, a, rhs, m, n, k);
-}
-
-pub fn matmul2DQuantizedRhsQ4_Kx4(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx4,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.q4_k.matmulQ4_Kx4RhsRange, allocator, out, a, rhs, m, n, k);
-}
-
-pub fn matmul2DQuantizedRhsQ4_Kx8(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx8,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.q4_k.matmulQ4_Kx8RhsRange, allocator, out, a, rhs, m, n, k);
-}
-
-pub fn matmul2DQuantizedRhsQ4_Kx2Mmla(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx2Mmla,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.q4_k.matmulQ4_Kx2MmlaRhsRange, allocator, out, a, rhs, m, n, k);
-}
-
-pub fn matmul2DQuantizedRhsQ5_Kx8(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_Kx8,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.q5_k.matmulQ5_Kx8RhsRange, allocator, out, a, rhs, m, n, k);
-}
-
-pub fn matmul2DQuantizedRhsQ5_K(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_K,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.q5_k.matmulQ5_KRhsRange, allocator, out, a, rhs, m, n, k);
-}
-
-pub fn matmul2DQuantizedRhsQ6_K(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ6_K,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.q6_k.matmulQ6_KRhsRange, allocator, out, a, rhs, m, n, k);
-}
-
-pub fn matmul2DQuantizedRhsQ6_Kx4(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ6_Kx4,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.q6_k.matmulQ6_Kx4RhsRange, allocator, out, a, rhs, m, n, k);
+    return matmul2DQuantizedRhsQ8_KRows(pc, switch (dt) {
+        .q2_k => quantized_matmul.cold.matmulQ2_KRhsRange,
+        .q3_k => quantized_matmul.cold.matmulQ3_KRhsRange,
+        .q4_k => quantized_matmul.q4_k.matmulQ4_KRhsRange,
+        .q5_k => quantized_matmul.q5_k.matmulQ5_KRhsRange,
+        .q6_k => quantized_matmul.q6_k.matmulQ6_KRhsRange,
+        else => @compileError("matmulQuantizedRhs serves the plain K-quant containers (q2_k..q6_k)"),
+    }, allocator, out, a, rhs, m, n, k);
 }
 
 fn matmul2DQuantizedRhsTableQ8_0(

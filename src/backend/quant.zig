@@ -56,6 +56,54 @@ const Tensor = tensor.Tensor;
 
 pub const supports_q4_k_mmla = common.has_aarch64_i8mm;
 
+/// The dtype -> packed matmul RHS container map for the block-quantized
+/// serving formats. `backend.PackedRhsFor` layers the dense f32 panel on
+/// top of this; the Q4_K arm picks the smmla pack on aarch64+i8mm targets.
+pub fn PackedQuantRhsFor(comptime dt: DType) type {
+    return switch (dt) {
+        .q8_0 => QuantizedMatmulRhsQ8_0x4,
+        .q6_k => QuantizedMatmulRhsQ6_Kx4,
+        .q5_k => QuantizedMatmulRhsQ5_Kx8,
+        .q4_k => if (supports_q4_k_mmla) QuantizedMatmulRhsQ4_Kx2Mmla else QuantizedMatmulRhsQ4_Kx8,
+        else => @compileError("PackedQuantRhsFor: no packed matmul RHS layout for dtype ." ++ @tagName(dt)),
+    };
+}
+
+/// Pack raw [n, k] row blocks into the ISA-best packed RHS container for
+/// their dtype (`PackedQuantRhsFor`). One dispatch replaces the per-format
+/// exec packers; the per-format packers stay in their `quant/<fmt>.zig`
+/// homes.
+pub fn packRhs(
+    comptime dt: DType,
+    allocator: Allocator,
+    blocks: []const dtype_mod.Storage(dt),
+    n: usize,
+    k: usize,
+    blocks_per_row: usize,
+) !PackedQuantRhsFor(dt) {
+    return packRhsAs(PackedQuantRhsFor(dt), allocator, blocks, n, k, blocks_per_row);
+}
+
+/// Container-addressed variant of `packRhs`: pack into a specific RHS
+/// container type. The explicit-layout escape hatch (e.g. the Q4_K x8 pack
+/// on an smmla target); `packRhs` is the dtype-default entry.
+pub fn packRhsAs(
+    comptime Rhs: type,
+    allocator: Allocator,
+    blocks: []const dtype_mod.Storage(Rhs.dtype),
+    n: usize,
+    k: usize,
+    blocks_per_row: usize,
+) !Rhs {
+    if (Rhs == QuantizedMatmulRhsQ8_0x4) return q8_0.packMatmulRhsQ8_0x4(allocator, blocks, n, k, blocks_per_row);
+    if (Rhs == QuantizedMatmulRhsQ6_Kx4) return q6_k.packMatmulRhsQ6_Kx4(allocator, blocks, n, k, blocks_per_row);
+    if (Rhs == QuantizedMatmulRhsQ5_Kx8) return q5_k.packMatmulRhsQ5_Kx8(allocator, blocks, n, k, blocks_per_row);
+    if (Rhs == QuantizedMatmulRhsQ4_Kx4) return q4_k.packMatmulRhsQ4_Kx4(allocator, blocks, n, k, blocks_per_row);
+    if (Rhs == QuantizedMatmulRhsQ4_Kx8) return q4_k.packMatmulRhsQ4_Kx8(allocator, blocks, n, k, blocks_per_row);
+    if (Rhs == QuantizedMatmulRhsQ4_Kx2Mmla) return q4_k.packMatmulRhsQ4_Kx2Mmla(allocator, blocks, n, k, blocks_per_row);
+    comptime unreachable;
+}
+
 // The interleaved block layouts and the RHS container types are the one
 // layer readers outside src/backend address (`backend.zig` forwards them as
 // `backend.X`); the GGML block structs are `dtype.Block*`. Kernels, encoders

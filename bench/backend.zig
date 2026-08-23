@@ -1127,26 +1127,12 @@ fn benchQuantizedGGMLKMatMulTimed(
 
     const ScalarRunner = struct {
         fn run(alloc: std.mem.Allocator, o: *FloatTensor, lhs: *const FloatTensor, rhs: *const QRhs, rows: usize, cols: usize, inner: usize) !void {
-            switch (tensor_dtype) {
-                .q2_k => try scalar.matmul2DQuantizedRhsQ2_K(.{}, alloc, o, lhs, rhs, rows, cols, inner),
-                .q3_k => try scalar.matmul2DQuantizedRhsQ3_K(.{}, alloc, o, lhs, rhs, rows, cols, inner),
-                .q4_k => try scalar.matmul2DQuantizedRhsQ4_K(.{}, alloc, o, lhs, rhs, rows, cols, inner),
-                .q5_k => try scalar.matmul2DQuantizedRhsQ5_K(.{}, alloc, o, lhs, rhs, rows, cols, inner),
-                .q6_k => try scalar.matmul2DQuantizedRhsQ6_K(.{}, alloc, o, lhs, rhs, rows, cols, inner),
-                else => unreachable,
-            }
+            try scalar.matmulQuantizedRhs(.{}, tensor_dtype, alloc, o, lhs, rhs, rows, cols, inner);
         }
     }.run;
     const NativeRunner = struct {
         fn run(alloc: std.mem.Allocator, o: *FloatTensor, lhs: *const FloatTensor, rhs: *const QRhs, rows: usize, cols: usize, inner: usize, config: native.ParallelConfig) !void {
-            switch (tensor_dtype) {
-                .q2_k => try native.matmul2DQuantizedRhsQ2_K(config, alloc, o, lhs, rhs, rows, cols, inner),
-                .q3_k => try native.matmul2DQuantizedRhsQ3_K(config, alloc, o, lhs, rhs, rows, cols, inner),
-                .q4_k => try native.matmul2DQuantizedRhsQ4_K(config, alloc, o, lhs, rhs, rows, cols, inner),
-                .q5_k => try native.matmul2DQuantizedRhsQ5_K(config, alloc, o, lhs, rhs, rows, cols, inner),
-                .q6_k => try native.matmul2DQuantizedRhsQ6_K(config, alloc, o, lhs, rhs, rows, cols, inner),
-                else => unreachable,
-            }
+            try native.matmulQuantizedRhs(config, tensor_dtype, alloc, o, lhs, rhs, rows, cols, inner);
         }
     }.run;
 

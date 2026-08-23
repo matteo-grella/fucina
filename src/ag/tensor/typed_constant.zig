@@ -205,16 +205,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                 /// `packRhsAs` to force a specific container instead.
                 pub fn packRhs(self: *const Self, ctx: *ExecContext) !PackedRhs(tensor_dtype) {
                     comptime if (tag_rank != 2) @compileError("packRhs requires a rank-2 tensor");
-                    return switch (comptime tensor_dtype) {
-                        .q8_0 => ctx.packMatmulRhsQ8_0x4(self.asRawTensor()),
-                        .q6_k => ctx.packMatmulRhsQ6_Kx4(self.asRawTensor()),
-                        .q5_k => ctx.packMatmulRhsQ5_Kx8(self.asRawTensor()),
-                        .q4_k => if (comptime backend_mod.supports_q4_k_mmla)
-                            ctx.packMatmulRhsQ4_Kx2Mmla(self.asRawTensor())
-                        else
-                            ctx.packMatmulRhsQ4_Kx8(self.asRawTensor()),
-                        else => @compileError("packRhs: no packed matmul RHS layout for a ." ++ @tagName(tensor_dtype) ++ " tensor"),
-                    };
+                    return ctx.packMatmulRhs(tensor_dtype, self.asRawTensor());
                 }
 
                 /// Explicit-layout escape hatch over `packRhs`: pack into a specific
@@ -230,12 +221,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                         if (!ag_tensor.isPackedRhsType(Rhs)) @compileError("packRhsAs: " ++ @typeName(Rhs) ++ " is not a packed matmul RHS");
                         if (tensor_dtype != Rhs.dtype) @compileError("packRhsAs(" ++ @typeName(Rhs) ++ ") requires a ." ++ @tagName(Rhs.dtype) ++ " tensor");
                     }
-                    if (Rhs == backend_mod.QuantizedMatmulRhsQ8_0x4) return ctx.packMatmulRhsQ8_0x4(self.asRawTensor());
-                    if (Rhs == backend_mod.QuantizedMatmulRhsQ6_Kx4) return ctx.packMatmulRhsQ6_Kx4(self.asRawTensor());
-                    if (Rhs == backend_mod.QuantizedMatmulRhsQ4_Kx8) return ctx.packMatmulRhsQ4_Kx8(self.asRawTensor());
-                    if (Rhs == backend_mod.QuantizedMatmulRhsQ4_Kx2Mmla) return ctx.packMatmulRhsQ4_Kx2Mmla(self.asRawTensor());
-                    if (Rhs == backend_mod.QuantizedMatmulRhsQ5_Kx8) return ctx.packMatmulRhsQ5_Kx8(self.asRawTensor());
-                    comptime unreachable;
+                    return ctx.packMatmulRhsAs(Rhs, self.asRawTensor());
                 }
 
                 pub fn getRows(
