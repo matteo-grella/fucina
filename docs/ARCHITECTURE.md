@@ -588,8 +588,27 @@ validate both built-in VJPs and custom ops.
 ## LLM Stack
 
 `src/llm.zig` is the root of the separate `fucina_llm` module (wired in
-`build.zig`; it consumes only the `fucina` module). Model families live in
-subdirectories and are exposed as namespaces:
+`build.zig`; it consumes only the `fucina` module).
+
+### Where shared model code lives
+
+Code shared across families has three homes, and the SUBJECT of the code
+decides which. The rule is stated at the top of `src/weights.zig`; in short:
+
+| Home | Band | Subject |
+| --- | --- | --- |
+| `fucina.weights` | core | a weight CONTAINER: building one from GGUF bytes, and multiplying by it (`LinearWeight`, `MoeRhs`, `linearSeq*`, `moe*FfnSeq`) |
+| `llm/model_common.zig` | llm | a GGUF FILE's layout: which tensor names a family's layer trio has, how an embed/head/norm set is read |
+| `llm/host_ops.zig` | llm | raw f32 HOST SLICES, for the host-reference ports that run below the Tensor facade |
+| `llm/lora_trainer.zig` | llm | a LoRA TARGET SELECTION: the per-layer adapter set, its A/B tuple, and the dropout seed stream |
+
+`linearSeq*` is forward compute inside the model-I/O module on purpose:
+`LinearWeight.linearSeq` is a union dispatch into the per-format arms and
+those arms take the container types back, so the container and its multiply
+are one mutually-dependent unit. A helper that fits none of these rows wants
+a new home with a stated subject, not a fifth un-ruled one.
+
+Model families live in subdirectories and are exposed as namespaces:
 
 - `llm.qwen3.{model,train}` — Qwen3 dense/MoE inference + LoRA fine-tuning;
   `forwardStepBatch` is the batch-N lockstep decode entry (one m=N weight

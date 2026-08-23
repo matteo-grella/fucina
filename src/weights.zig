@@ -9,6 +9,24 @@
 //! Home modules are imported directly: `fucina.zig` re-exports this file,
 //! so the facade cannot be imported from here — the production import
 //! graph is cycle-checked (`zig build arch-check`).
+//!
+//! WHAT BELONGS HERE, and what does not. Shared model code in this tree has
+//! three homes, and the subject of the code decides which:
+//!
+//!   * here (`fucina.weights`, core band) — the subject is a WEIGHT
+//!     CONTAINER: how to build one from GGUF bytes, and how to multiply by
+//!     it. `linearSeq*` and `moe*FfnSeq` are forward compute but they are
+//!     not stray: `LinearWeight.linearSeq` is a union dispatch INTO the
+//!     per-format arms and the arms take the container types back, so the
+//!     container and its multiply are one mutually-dependent unit.
+//!   * `llm/model_common.zig` (llm band) — the subject is a GGUF FILE's
+//!     layout: which tensor names a family's layer trio has, how an
+//!     embed/head/norm set is read. Naming conventions, not numerics.
+//!   * `llm/host_ops.zig` (llm band) — the subject is raw f32 HOST SLICES,
+//!     for the host-reference ports that run below the Tensor facade.
+//!
+//! A helper that fits none of these wants a new home with a stated subject,
+//! not a fourth un-ruled one.
 
 const std = @import("std");
 const builtin = @import("builtin");

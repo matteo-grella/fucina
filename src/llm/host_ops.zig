@@ -12,6 +12,11 @@
 //! runner band scans host-side, deepseek2 goes through the core
 //! `topKExperts` kernel — and each family's parity anchors pin its own
 //! order of operations.
+//!
+//! The subject here is raw f32 HOST SLICES, below the Tensor facade.
+//! Numerics whose subject is a weight container belong to `fucina.weights`,
+//! and GGUF naming conventions to `model_common.zig`; that three-way rule
+//! is stated in `src/weights.zig`.
 
 const std = @import("std");
 const fucina = @import("fucina");

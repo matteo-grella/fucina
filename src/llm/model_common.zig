@@ -5,6 +5,11 @@
 //! and functions — every family keeps its own explicit forward loop;
 //! only load-band semantics that are identical across families live
 //! here. Consumers: runner.zig (the qwen3 substrate) and qwen35.
+//!
+//! The subject here is a GGUF FILE's layout: which tensor names a family's
+//! layer trio has, how an embed/head/norm set is read. Numerics over weight
+//! containers belong to `fucina.weights`, numerics over raw host slices to
+//! `host_ops.zig`; that three-way rule is stated in `src/weights.zig`.
 
 const std = @import("std");
 const fucina = @import("fucina");
