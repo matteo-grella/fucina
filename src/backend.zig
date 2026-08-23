@@ -3,7 +3,10 @@
 //! shared kernel vocabulary (ops, quant block/RHS types, packed-RHS
 //! layouts). `native.zig` is the SIMD/BLAS/GPU-seamed implementation,
 //! `cpu.zig` the scalar reference with the same duck-typed surface.
-//! Layer stack: docs/ARCHITECTURE.md.
+//! The scalar reference specifies THIS surface only: the fused op kernels
+//! that live beside their orchestration in `exec/` (attention, row_ops,
+//! fakequant) are backend-independent and carry their own determinism
+//! tests. Layer stack: docs/ARCHITECTURE.md.
 const std = @import("std");
 const build_options = @import("build_options");
 pub const ops = @import("backend/ops.zig");

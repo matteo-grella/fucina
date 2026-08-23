@@ -9,7 +9,7 @@ const Runtime = @import("runtime.zig").Runtime;
 
 const DType = tensor.DType;
 const Tensor = tensor.Tensor;
-const vexpf = @import("../backend/vector/primitives.zig").vexpf;
+const vexpf = backend_mod.vector_impl.vexpf;
 
 pub const GroupedCausalAttentionBackwardResult = struct {
     q: ?tensor.Tensor = null,

@@ -1,3 +1,7 @@
+//! Shared shape/stride plumbing for the exec op files: comptime-rank
+//! dispatch (`dispatchRank`), same-shape/broadcast validation, coordinate
+//! and stride helpers over raw tensors. No kernels live here.
+
 const std = @import("std");
 const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");

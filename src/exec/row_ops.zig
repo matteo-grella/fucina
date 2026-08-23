@@ -5,7 +5,7 @@ const rng = @import("../rng.zig");
 const tensor = @import("../tensor.zig");
 const shape = @import("shape.zig");
 
-const vexpf = @import("../backend/vector/primitives.zig").vexpf;
+const vexpf = backend_mod.vector_impl.vexpf;
 const coordinateForLinear = shape.coordinateForLinear;
 const physicalOffsetExcludingAxis = shape.physicalOffsetExcludingAxis;
 const preSoftmaxValue = shape.preSoftmaxValue;

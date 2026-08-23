@@ -6,7 +6,7 @@ This document describes the current Zig implementation in this tree (`src/`,
 and behavior, not from historical design notes. Structure lives here; the
 command cheat sheet lives in `AGENTS.md`, and per-model recipes live in the
 per-example `examples/<name>/README.md` guides indexed by
-`RUNNING-MODELS.md`. Last reconciled against the tree: 2026-07-17.
+`RUNNING-MODELS.md`. Last reconciled against the tree: 2026-08-23.
 
 ## Status
 
@@ -38,14 +38,14 @@ Top-down; a band may depend only on bands at or below it:
 | apps | `examples/**`, `tools/**`, `bench/**`, `src/bench_raw.zig`, `src/x86dot_check.zig` |
 | llm | `src/llm.zig`, `src/llm/**` (the `fucina_llm` module) |
 | facade | `src/fucina.zig` (the `fucina` module root) |
-| ag + training/serialization | `src/ag.zig`, `src/ag/**`, `src/optim.zig`, `src/es.zig`, `src/ptqtp.zig`, `src/gguf.zig`, `src/lora.zig`, `src/safetensors.zig`, `src/state_dict.zig`, `src/training_checkpoint.zig`, `src/param_registry.zig` |
+| ag + training/serialization | `src/ag.zig`, `src/ag/**`, `src/optim.zig`, `src/es.zig`, `src/ptqtp.zig`, `src/gguf.zig`, `src/lora.zig`, `src/safetensors.zig`, `src/state_dict.zig`, `src/training_checkpoint.zig`, `src/param_registry.zig`, `src/weights.zig`, `src/gguf_meta.zig`, `src/ptqtp_gguf.zig` (model I/O) |
 | tagged | `src/tag_ops.zig` (tag-ops library) |
 | exec | `src/exec.zig`, `src/exec/**` (eager runtime) |
-| backend | `src/backend.zig`, `src/backend/**` (numeric kernels) |
+| backend | `src/backend.zig`, `src/backend/**` (arch-switched numeric kernels; the single-implementation fused kernels live beside their ops in `exec/`) |
 | tags | `src/tags.zig` (comptime tag algebra) |
 | tensor | `src/tensor.zig` (raw tensor) |
-| primitives | `src/thread.zig`, `src/parallel.zig` |
-| core | `src/dtype.zig`, `src/storage.zig`, `src/accelerator.zig`, `src/rng.zig` |
+| primitives | `src/thread.zig`, `src/parallel.zig`, `src/tuning.zig` (route gates over `parallel`'s env readers) |
+| core | `src/dtype.zig`, `src/storage.zig`, `src/accelerator.zig`, `src/rng.zig`, and the std-only leaves `src/fpenv.zig`, `src/caching_allocator.zig`, `src/streamconv.zig` |
 
 ## Public Surface
 
@@ -252,8 +252,9 @@ The intended production dependency direction inside the `fucina` module:
 ```text
 fucina.zig
   -> ag.zig, exec.zig, backend.zig, tag_ops.zig, tensor.zig, storage.zig,
-     dtype.zig, thread.zig, and the training/persistence modules (gguf,
-     optim, es, ptqtp, lora, rng, parallel, param_registry, state_dict,
+     dtype.zig, thread.zig, and the training/persistence + model-I/O
+     modules (gguf, weights, gguf_meta, ptqtp_gguf, optim, es, ptqtp,
+     lora, rng, parallel, tuning, param_registry, state_dict,
      safetensors, training_checkpoint)
 
 ag/tensor.zig
@@ -306,11 +307,8 @@ Enforcement:
   test-aware: `@import`s inside `test` declarations, and inside non-pub
   file-scope decls reachable only from tests, are excluded, so sibling-test
   forwarding stanzas and private test helpers do not count as production
-  edges. Current output:
-
-  ```text
-  production import graph: 135 files, 531 edges, 0 SCCs
-  ```
+  edges. The step prints the current file/edge count and requires
+  `0 SCCs`; the counts grow with the tree, so they are not pinned here.
 
 - The direction bands in the *Layer Stack* table are additionally checked
   during development with a dependency-structure lint whose configuration is

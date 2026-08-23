@@ -21,9 +21,11 @@
 const std = @import("std");
 const parallel = @import("parallel.zig");
 
-/// Numeric route defaults, gathered here so the tree's measured crossovers
-/// are readable in one place. Provenance lives with the consuming route's
-/// comment block (machine, benchmark, date).
+/// Numeric route defaults for the env-overridable crossovers (each backs
+/// a `Threshold` at its consuming route). Fixed measured crossovers with
+/// no env override live as named constants beside their consuming route,
+/// with provenance in that route's comment block (machine, benchmark,
+/// date).
 pub const defaults = struct {
     /// CPU f32 weight-shadow crossover: rows `m >=` this take the BLAS
     /// route over the widened-once shadow (exec/matmul.zig block comment;

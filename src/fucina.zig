@@ -78,6 +78,9 @@ pub const CachingAllocator = @import("caching_allocator.zig").CachingAllocator;
 /// Named parameter registry: the bridge between model structs and the
 /// optimizers/serializers (registration order is the flat layout).
 pub const ParamRegistry = param_registry_mod.ParamRegistry;
+/// One registered parameter as `ParamRegistry.view` returns it: name,
+/// dtype, shape, mutable byte view, and trainability.
+pub const ParamView = param_registry_mod.ParamView;
 /// Torch-style state-dict reading (name -> tensor) over safetensors.
 pub const state_dict = state_dict_mod;
 /// safetensors container: single-file and sharded (`index.json`) reading.
@@ -324,6 +327,8 @@ pub const UnaryOp = exec.UnaryOp;
 pub const RopeMode = exec.RopeMode;
 /// Precomputed cos/sin rope table (`prepareRopeTable*`), consumed by the fused rope kernels.
 pub const RopeTable = exec.RopeTable;
+/// Rope base frequency parameter type for the table builders.
+pub const RopeTheta = exec.RopeTheta;
 
 /// SIMD vocabulary for user-defined elemental ops (`elementalUnary` /
 /// `elementalBinary` vector bodies): the machine vector type, its width,
@@ -345,8 +350,6 @@ pub const simd = struct {
     pub const vecExpAffineSumInPlace = vector_primitives.vecExpAffineSumInPlace;
     pub const weightedAccumRows4F16 = vector_primitives.weightedAccumRows4F16;
 };
-/// Rope base frequency parameter type for the table builders.
-pub const RopeTheta = exec.RopeTheta;
 /// Fake-quantization round trips (FP8-E4M3 / FP4-E2M1 microscaling groups,
 /// Hadamard rotation, f16 round trip) over host slices (§10.10).
 pub const fakequant = exec.fakequant;

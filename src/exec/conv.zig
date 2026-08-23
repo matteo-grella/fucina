@@ -396,7 +396,7 @@ fn reluInPlace(rt: *Runtime, t: *Tensor) void {
     rt.backend.unaryContiguousIntoUnchecked(.relu, t, t, t.len());
 }
 
-fn conv2dDimsFor(h: usize, w: usize, cin: usize, oh: usize, ow: usize, cout: usize, kh: usize, kw: usize, stride: [2]usize, pad: [2]usize, groups: usize) @import("../backend/vector/conv.zig").Conv2dDims {
+fn conv2dDimsFor(h: usize, w: usize, cin: usize, oh: usize, ow: usize, cout: usize, kh: usize, kw: usize, stride: [2]usize, pad: [2]usize, groups: usize) backend_mod.Conv2dDims {
     return .{ .h = h, .w = w, .cin = cin, .oh = oh, .ow = ow, .cout = cout, .kh = kh, .kw = kw, .stride_h = stride[0], .stride_w = stride[1], .pad_h = pad[0], .pad_w = pad[1], .groups = groups };
 }
 

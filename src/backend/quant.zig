@@ -16,10 +16,17 @@
 //!   quant/q4_k.zig   - Q4_K hot kernels (Q4_Kx8 + comptime-gated Q4_Kx2Mmla/smmla)
 //!   quant/q5_k.zig   - Q5_K / Q5_Kx8 hot kernels
 //!   quant/q6_k.zig   - Q6_K / Q6_Kx4 hot kernels
+//!   quant/q8k.zig    - Q8_K/Q8_0 encode/quantize/dequantize helpers + the
+//!                      K-quant *FromBlocks RHS constructors (child-neutral
+//!                      leaf; re-exported here)
+//!   quant/ternary.zig - hot TQ2_0 ternary kernels (sdot/vpdpbusd int8 path)
+//!   quant/mxfp4.zig  - hot MXFP4 fp4-e2m1 matmul kernel (Q8_0 activations)
 //!   quant/cold.zig   - rarely-used generic formats (legacy Q4_0/1, Q5_0/1,
 //!                      Q2_K/Q3_K, IQ*, TQ*, FP4, Table machinery): generic "dot"
 //!                      path only, no packed fast path; exercised by tests, not by
 //!                      the benchmarked Qwen3 weights (Q4_K/Q5_K/Q6_K/Q8_0/f16).
+//!   quant/types.zig  - packed/RHS types + format traits (child-neutral leaf
+//!                      breaking the quant.zig<->children cycle; re-exported here)
 //!   quant/matmul_api.zig - internal narrow matmul surface used by vector
 //!                      dispatchers so they do not import this barrel.
 //!

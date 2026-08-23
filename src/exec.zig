@@ -1,9 +1,15 @@
 //! The eager execution runtime (`ExecContext`): owns validation, output
-//! materialization, buffer-pool allocation, and op dispatch onto the
-//! selected backend's kernels. Everything above (tag ops, autograd) drives
-//! tensors through this facade; backends below own only numeric kernels.
-//! Op implementations live in `exec/`; this file is the facade + registry
-//! (deliberately unsplit). Layer stack: docs/ARCHITECTURE.md.
+//! materialization, buffer-pool allocation, and op dispatch. Two kernel
+//! worlds sit below: the build-selected backend (`backend.zig`) owns the
+//! arch-switched shared kernel families (elementwise, GEMM and quant
+//! dots, conv, pool), while `exec/` keeps the single-implementation fused
+//! op kernels (attention, row_ops' softmax/norm rows, fakequant) beside
+//! their orchestration — those have no scalar/native fork and run
+//! identically under every `-Dbackend`, pinned by their own determinism
+//! tests. Everything above (tag ops, autograd) drives tensors through
+//! this facade. Op implementations live in `exec/`; this file is the
+//! facade + registry (deliberately unsplit). Layer stack:
+//! docs/ARCHITECTURE.md.
 const std = @import("std");
 const backend_mod = @import("backend.zig");
 const backend_ops = backend_mod.ops;
