@@ -1111,7 +1111,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
         /// retrieval + sticky adoption are single-stream logic; main.zig
         /// refuses the flag combination). The constraint cache must hold
         /// at least as many bases as the batch width — every clone's base
-        /// has to survive until the batch ends (main.zig sizes it).
+        /// has to survive until the batch ends (`serving.open` sizes it).
         fn vtGenerateBatch(
             ptr: *anyopaque,
             reqs: []const *const types.GenerateRequest,

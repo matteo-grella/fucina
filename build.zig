@@ -507,7 +507,7 @@ pub fn build(b: *std.Build) void {
     // Kernel/spec leg: the fucina root alone — every exec/backend/optim/ag
     // kernel test lives under it, which is the scalar reference backend's
     // whole specification surface. Routine `-Dbackend=scalar` runs use this;
-    // the full nine-root `test` matrix stays the pre-merge gate.
+    // the full ten-root `test` matrix stays the pre-merge gate.
     const test_fucina_step = b.step("test-fucina", "Run the fucina-root unit tests only (routine -Dbackend=scalar leg)");
     test_fucina_step.dependOn(&run_tests.step);
 

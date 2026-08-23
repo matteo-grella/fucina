@@ -232,8 +232,9 @@ pub fn main(init: std.process.Init) !void {
     var fed: usize = 0;
     while (fed < tokens.items.len) {
         const end = @min(fed + prefill_chunk, tokens.items.len);
+        const fresh = try model.stepBatch(&ctx, &cache, tokens.items[fed..end]);
         if (logits) |*t| t.deinit();
-        logits = try model.stepBatch(&ctx, &cache, tokens.items[fed..end]);
+        logits = fresh;
         fed = end;
     }
     try stdout.print("prefill: {d:.1} ms ({d} tokens, chunk {d})\n", .{ @as(f64, @floatFromInt(std.Io.Clock.awake.now(init.io).nanoseconds - prefill_start)) / 1e6, tokens.items.len, prefill_chunk });
@@ -256,8 +257,9 @@ pub fn main(init: std.process.Init) !void {
         if (eos != null and best == eos.?) break;
         try tokenizer.decodeAppend(allocator, @intCast(best), &reply);
         try tokens.append(allocator, best);
+        const fresh = try model.step(&ctx, &cache, best);
         logits.?.deinit();
-        logits = try model.step(&ctx, &cache, best);
+        logits = fresh;
     }
     const decode_ns = std.Io.Clock.awake.now(init.io).nanoseconds - decode_start;
     try stdout.print("decode: {d} steps, {d:.1} ms, {d:.2} tok/s\n", .{ produced, @as(f64, @floatFromInt(decode_ns)) / 1e6, @as(f64, @floatFromInt(produced)) * 1e9 / @as(f64, @floatFromInt(decode_ns)) });

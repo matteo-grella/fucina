@@ -463,7 +463,7 @@ pub const Model = struct {
     };
 
     /// Process `tokens` at positions [cache.len, cache.len + S) and return
-    /// the LAST position's next-token logits `[vocab]` (caller frees). Only
+    /// the LAST position's next-token logits `[1, vocab]` (the tensor-band return shape; caller deinits). Only
     /// the final row runs the unembed. Padded vocab ids carry -inf. Rows are
     /// computed jointly but causally: row r attends to cache positions
     /// <= cache.len + r only, so batch prefill matches S=1 stepping.

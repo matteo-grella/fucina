@@ -40,7 +40,9 @@ const fucina = struct {
     pub const gguf = @import("gguf.zig");
     pub const ptqtp = @import("ptqtp.zig");
     pub const parallel = @import("parallel.zig");
+    pub const quant = struct {
     pub const BlockTQ2_0 = dtype_mod.BlockTQ2_0;
+    };
     pub const ExecContext = exec_mod.ExecContext;
     pub const MoeRhs = exec_mod.ExecContext.MoeRhs;
     pub const expert_store = exec_mod.expert_store;
@@ -363,7 +365,7 @@ pub const MoeStackStats = struct {
 /// starts at block `e * out * (in/256)` in every plane; entries past
 /// `plane_count` are empty. Caller frees via `deinit`.
 pub const MoeStackPlanes = struct {
-    planes: [3][]fucina.BlockTQ2_0,
+    planes: [3][]fucina.quant.BlockTQ2_0,
     plane_count: usize,
     stats: MoeStackStats,
 
@@ -421,7 +423,7 @@ pub fn quantizeMoeStack(
     };
     errdefer result.deinit(allocator);
     for (0..options.planes) |p| {
-        result.planes[p] = try allocator.alloc(fucina.BlockTQ2_0, n_expert * blocks_per_expert);
+        result.planes[p] = try allocator.alloc(fucina.quant.BlockTQ2_0, n_expert * blocks_per_expert);
     }
 
     const values = try allocator.alloc(f32, out_dim * in_dim);

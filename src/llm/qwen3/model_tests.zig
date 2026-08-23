@@ -29,13 +29,7 @@ const wide_config = qwen3.Config{
     .rope_theta = 10_000,
 };
 
-fn argmaxRow(row: []const f32) usize {
-    var best: usize = 0;
-    for (row, 0..) |x, i| {
-        if (x > row[best]) best = i;
-    }
-    return best;
-}
+const argmaxRow = @import("../test_support.zig").argmaxRow;
 
 /// Ragged prompts, then `steps` lockstep decode steps: every batch logits
 /// row must be BITWISE identical to the same stream decoded alone through

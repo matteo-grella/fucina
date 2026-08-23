@@ -23,7 +23,7 @@ const qwen3_model = @import("../qwen3/model.zig");
 const qwen3_train = @import("../qwen3/train.zig");
 const qwen3_shine = @import("../qwen3/shine.zig");
 const gemma4_mod = @import("../gemma/model.zig");
-const gemma4_train = @import("../gemma/train.zig");
+const gemma_train = @import("../gemma/train.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -610,7 +610,7 @@ const FleetServeQwen3 = FleetServeFor(
 );
 const FleetServeGemma4 = FleetServeFor(
     gemma4_mod.Model,
-    gemma4_train.Trainer(.{ .q = false, .v = false }),
+    gemma_train.Trainer(.{ .q = false, .v = false }),
     spm_tokenizer_mod.Tokenizer,
 );
 

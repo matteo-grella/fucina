@@ -193,7 +193,7 @@ pub const MmProj = struct {
             if (ctx.workPool()) |pool| profile_io = pool.io;
         }
         var profile: VisionProfile = .{};
-        const total_start = profileStart(profile_io);
+        const total_start = clockStart(profile_io);
 
         // Stage grids: 40 -> 8 -> 4 -> 1 positions per side.
         var grid: usize = p;
@@ -205,7 +205,7 @@ pub const MmProj = struct {
         defer if (cur_owned) allocator.free(cur);
 
         for (0..3) |l| {
-            const fold_start = profileStart(profile_io);
+            const fold_start = clockStart(profile_io);
             const s = spatial_folds[l];
             const out_grid = grid / s;
             const in_dim = chan * s * s;
@@ -240,7 +240,7 @@ pub const MmProj = struct {
                 break :blk dst_all;
             };
             defer if (folded_owned) allocator.free(folded);
-            profile.fold_ns[l] = profileElapsed(fold_start, profile_io);
+            profile.fold_ns[l] = clockElapsed(fold_start, profile_io);
 
             const out = try self.stemLinearNormGelu(ctx, folded, rows, in_dim, l, &profile, profile_io);
             if (cur_owned) allocator.free(cur);
@@ -268,11 +268,11 @@ pub const MmProj = struct {
             s3_in_dim = d2 * temporal_patch_size;
         }
 
-        const final_linear_start = profileStart(profile_io);
+        const final_linear_start = clockStart(profile_io);
         const out = try packedLinear(ctx, &self.hmlp_packed[3], s3_in, n_patches, s3_in_dim);
-        profile.final_linear_ns = profileElapsed(final_linear_start, profile_io);
+        profile.final_linear_ns = clockElapsed(final_linear_start, profile_io);
         errdefer allocator.free(out);
-        const final_norm_start = profileStart(profile_io);
+        const final_norm_start = clockStart(profile_io);
         const final_tasks = try allocator.alloc(FinalNormTask, n_patches);
         defer allocator.free(final_tasks);
         for (final_tasks, 0..) |*task, pi| {
@@ -289,12 +289,12 @@ pub const MmProj = struct {
         } else {
             for (final_tasks) |*task| FinalNormTask.run(task);
         }
-        profile.final_norm_ns = profileElapsed(final_norm_start, profile_io);
+        profile.final_norm_ns = clockElapsed(final_norm_start, profile_io);
         if (profile_io != null) {
             std.debug.print(
                 "[mm-profile] vision total_ns={d} s0=fold:{d},linear:{d},norm_gelu:{d} s1=fold:{d},linear:{d},norm_gelu:{d} s2=fold:{d},linear:{d},norm_gelu:{d} final=linear:{d},norm:{d}\n",
                 .{
-                    profileElapsed(total_start, profile_io),
+                    clockElapsed(total_start, profile_io),
                     profile.fold_ns[0],
                     profile.linear_ns[0],
                     profile.norm_gelu_ns[0],
@@ -339,14 +339,14 @@ pub const MmProj = struct {
         const allocator = ctx.allocator;
         const d = self.hmlp_dims[l];
 
-        const linear_start = profileStart(profile_io);
+        const linear_start = clockStart(profile_io);
         const out = try packedLinear(ctx, &self.hmlp_packed[l], rows_in, rows, in_dim);
-        profile.linear_ns[l] = profileElapsed(linear_start, profile_io);
+        profile.linear_ns[l] = clockElapsed(linear_start, profile_io);
         errdefer allocator.free(out);
 
         // Per-row rms-norm + gelu_erf in place, fanned out over the worker
         // team. rmsNormInto completes the row sum before its first store.
-        const norm_start = profileStart(profile_io);
+        const norm_start = clockStart(profile_io);
         const participants = if (ctx.workPool()) |pool| pool.teamSize() else 1;
         const target_tasks = @max(@as(usize, 1), @min(rows, participants * 4));
         const block = std.math.divCeil(usize, rows, target_tasks) catch unreachable;
@@ -369,7 +369,7 @@ pub const MmProj = struct {
         } else {
             for (tasks) |*t| NormGeluTask.run(t);
         }
-        profile.norm_gelu_ns[l] = profileElapsed(norm_start, profile_io);
+        profile.norm_gelu_ns[l] = clockElapsed(norm_start, profile_io);
         return out;
     }
 
@@ -491,11 +491,13 @@ const VisionProfile = struct {
     final_norm_ns: i128 = 0,
 };
 
-fn profileStart(io: ?std.Io) i128 {
+// io-gated clock pair (this profile is armed by passing a real io), a
+// deliberate variant of llm/profile.zig's profile-pointer-gated pair.
+fn clockStart(io: ?std.Io) i128 {
     return if (io) |clock_io| std.Io.Clock.awake.now(clock_io).nanoseconds else 0;
 }
 
-fn profileElapsed(start: i128, io: ?std.Io) i128 {
+fn clockElapsed(start: i128, io: ?std.Io) i128 {
     return if (io) |clock_io| std.Io.Clock.awake.now(clock_io).nanoseconds - start else 0;
 }
 

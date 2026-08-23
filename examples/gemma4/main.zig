@@ -479,18 +479,7 @@ const ChatOptions = struct {
 /// fallbacks below complete that recommendation — min_p disabled (Google's
 /// standardized config uses only top_k + top_p) and penalties disabled ("keep
 /// repetition/presence penalty disabled unless you see looping").
-fn samplingFromGguf(file: *const fucina.gguf.File) llm.sampler.Config {
-    return .{
-        .temperature = if (file.getFloat("general.sampling.temp")) |v| @floatCast(v) else 1.0,
-        .top_k = if (file.getInt("general.sampling.top_k")) |v| @intCast(@max(@as(i64, 0), v)) else 64,
-        .top_p = if (file.getFloat("general.sampling.top_p")) |v| @floatCast(v) else 0.95,
-        .min_p = if (file.getFloat("general.sampling.min_p")) |v| @floatCast(v) else 0.0,
-        .repeat_penalty = if (file.getFloat("general.sampling.penalty_repeat")) |v| @floatCast(v) else 1.0,
-        .freq_penalty = if (file.getFloat("general.sampling.penalty_freq")) |v| @floatCast(v) else 0.0,
-        .presence_penalty = if (file.getFloat("general.sampling.penalty_present")) |v| @floatCast(v) else 0.0,
-        .repeat_last_n = if (file.getInt("general.sampling.penalty_last_n")) |v| @intCast(@max(@as(i64, 0), v)) else 64,
-    };
-}
+const samplingFromGguf = llm.serving.samplingFromGguf;
 
 fn printSampling(stdout: *std.Io.Writer, cfg: llm.sampler.Config, stops: []const []const u8) !void {
     if (cfg.temperature <= 0) {
@@ -667,13 +656,7 @@ fn printBenchStat(stdout: anytype, label: []const u8, vals: []const f64) !void {
     try stdout.print("{s}: {d:.2} ± {d:.2} tok/s  (min {d:.2}, max {d:.2})\n", .{ label, mean, std_dev, min, max });
 }
 
-fn argmaxLast(ctx: *fucina.ExecContext, logits: *const fucina.Tensor(.{ .seq, .vocab })) !usize {
-    var last = try logits.narrow(ctx, .seq, logits.dim(.seq) - 1, 1);
-    defer last.deinit();
-    var index = try last.argmax(ctx, .vocab);
-    defer index.deinit();
-    return @intCast(try index.item());
-}
+const argmaxLast = llm.generate.argmaxLast;
 
 fn printInfo(stdout: anytype, config: Config) !void {
     try stdout.print("gemma4 config:\n", .{});

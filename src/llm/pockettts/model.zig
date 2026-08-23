@@ -85,9 +85,7 @@ fn gelu(x: f32) f32 {
     return @floatCast(0.5 * @as(f64, x) * (1.0 + erf(@as(f64, x) / std.math.sqrt2)));
 }
 
-fn silu(x: f32) f32 {
-    return x / (1.0 + @exp(-x));
-}
+const silu = @import("../host_ops.zig").silu;
 
 fn elu(x: f32) f32 {
     return if (x > 0) x else @exp(x) - 1.0;

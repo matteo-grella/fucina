@@ -6,7 +6,7 @@
 //! transformers) and the HF reference (`modeling/generation_diffusion_gemma.py`).
 //!
 //! The transformer is EXACTLY gemma4 (encoder and decoder share all weights);
-//! this file reuses gemma4.zig's layer loader and attn/ffn blocks. The deltas:
+//! this file reuses the gemma model.zig layer loader and attn/ffn blocks. The deltas:
 //!   - +34 tensors: per-layer `enc_layer_output_scale` (the encoder-pass
 //!     variant of `layer_output_scale`) and the `self_cond_*` GeGLU MLP.
 //!   - Two forward modes over one weight set:

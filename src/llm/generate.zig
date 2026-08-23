@@ -2,7 +2,6 @@
 //! `forwardStep` and the shared `KvCache`): the minimal argmax reference on
 //! the decode path. Richer sampling loops live with the examples and the
 //! serving stack; family modules re-export or wrap this entry.
-const std = @import("std");
 const fucina = @import("fucina");
 const kv_cache = @import("kv_cache.zig");
 
@@ -50,7 +49,7 @@ pub fn greedy(
     return produced;
 }
 
-fn argmaxLast(ctx: *ExecContext, logits: *const fucina.Tensor(.{ .seq, .vocab })) !usize {
+pub fn argmaxLast(ctx: *ExecContext, logits: *const fucina.Tensor(.{ .seq, .vocab })) !usize {
     var last = try logits.narrow(ctx, .seq, logits.dim(.seq) - 1, 1);
     defer last.deinit();
     var index = try last.argmax(ctx, .vocab);

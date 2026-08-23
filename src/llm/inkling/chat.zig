@@ -157,7 +157,6 @@ pub const GenerateResult = struct {
     stopped: bool,
 };
 
-
 /// The generation driver: prefill the prompt, then sample-and-stream one
 /// marker-wrapped reply. Generic over the tokenizer module (BPE here).
 pub fn Engine(comptime TokMod: type) type {
@@ -219,8 +218,12 @@ pub fn Engine(comptime TokMod: type) type {
                 try history.append(a, next);
                 produced += 1;
 
+                // Allocate the next step before freeing the current logits,
+                // so an error here leaves `logits` valid for the
+                // function-scope defer.
+                const fresh = try self.model.step(self.ctx, &cache, &.{next});
                 logits.deinit();
-                logits = try self.model.step(self.ctx, &cache, &.{next});
+                logits = fresh;
             }
             // Flush any bytes held by the incremental UTF-8 decoder.
             try stream.flush(sink);

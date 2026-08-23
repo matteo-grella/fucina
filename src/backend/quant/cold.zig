@@ -1956,18 +1956,7 @@ pub fn matmulQ2_0RhsRefTile(
     }
 }
 
-pub fn matmulQ2_0RhsRefRange(
-    out: []f32,
-    lhs_blocks: []const BlockQ8_0,
-    rhs: *const QuantizedMatmulRhsQ2_0,
-    m: usize,
-    n: usize,
-    row_start: usize,
-    row_end: usize,
-) void {
-    _ = m;
-    matmulQ2_0RhsRefTile(out, lhs_blocks, rhs, n, row_start, row_end, 0, n);
-}
+pub const matmulQ2_0RhsRefRange = common.RangeFromTile(matmulQ2_0RhsRefTile);
 
 fn dotQ1_0Q8_0(w: *const BlockQ1_0, a: []const BlockQ8_0) f32 {
     std.debug.assert(a.len == q1_0_block_size / q8_0_block_size);

@@ -1,8 +1,9 @@
 //! Elementwise vector kernels: the contiguous entry points, the
 //! elementwise/reduction Task structs and their parallel dispatch, and the
 //! typed scalar inner kernels. Shared-core symbols (ParallelConfig,
-//! contiguous-data helpers, elementwiseThreadCount) and the @Vector
-//! primitives come from `common.zig` (`vm`); op definitions from `../ops.zig`.
+//! contiguous-data helpers, elementwiseThreadCount) come from `common.zig`
+//! (`vm`); the @Vector primitives from `primitives.zig`; op definitions
+//! from `../ops.zig`.
 
 const std = @import("std");
 const ops = @import("../ops.zig");

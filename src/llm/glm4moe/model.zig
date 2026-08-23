@@ -109,28 +109,10 @@ pub const Model = struct {
         const nextn = gguf_meta.metaIntOpt(file, "glm4moe", "nextn_predict_layers", .accept_zero) orelse 0;
         const allocator = ctx.allocator;
 
-        var expert_store: ?*fucina.ExpertStore = null;
-        if (options.moe_stream) |stream_options| {
-            // block indices include the nextn layer (blk.46).
-            if (config.num_experts > 0) expert_store = try weights.createExpertStore(allocator, stream_options, config.num_layers + nextn);
-        }
-        errdefer if (expert_store) |store| store.destroy();
-
-        var token_embedding = try LinearWeight.load(ctx, try file.get("token_embd.weight"), config.vocab_size, config.hidden_size);
-        errdefer token_embedding.deinit();
-        var output = try LinearWeight.load(ctx, try file.get("output.weight"), config.vocab_size, config.hidden_size);
-        errdefer output.deinit();
-        const output_norm = try weights.hostVector(allocator, file, "output_norm.weight", config.hidden_size);
-        errdefer allocator.free(output_norm);
-
-        const layers = try allocator.alloc(runner.HostLayer, config.num_layers);
-        errdefer allocator.free(layers);
-        var built: usize = 0;
-        errdefer for (layers[0..built]) |*l| l.deinit(allocator);
-        for (layers, 0..) |*layer, i| {
-            layer.* = try runner.loadHostLayer(ctx, file, config, i, expert_store);
-            built += 1;
-        }
+        // Store layer indices include the nextn layer (blk.46), so the
+        // trunk load sizes the store for trunk + MTP.
+        var trunk = try runner.loadHostTrunk(ctx, file, config, .{ .moe_stream = options.moe_stream, .max_positions = max_positions }, config.num_layers + nextn);
+        errdefer trunk.deinit(allocator);
 
         var mtp: ?MtpHead = null;
         errdefer if (mtp) |*m| m.deinit(allocator);
@@ -149,7 +131,7 @@ pub const Model = struct {
             errdefer allocator.free(sh_norm);
             var sh_head = try LinearWeight.load(ctx, try file.get(try weights.layerName(&name_buf, mtp_i, "nextn.shared_head_head.weight")), config.vocab_size, config.hidden_size);
             errdefer sh_head.deinit();
-            var mtp_layer = try runner.loadHostLayer(ctx, file, config, mtp_i, expert_store);
+            var mtp_layer = try runner.loadHostLayer(ctx, file, config, mtp_i, trunk.expert_store);
             errdefer mtp_layer.deinit(allocator);
             mtp = .{
                 .embed = embed,
@@ -162,29 +144,19 @@ pub const Model = struct {
             };
         }
 
-        if (expert_store) |store| try store.finalize();
-        const weight_mapping = if (config.num_experts > 0 and expert_store == null) file.takeMapping() else null;
-        if (config.num_experts > 0 and expert_store == null and weight_mapping == null) return Error.InvalidWeightShape;
-
-        var rope = try runner.HostRope.init(allocator, config, max_positions);
-        errdefer rope.deinit(allocator);
+        const weight_mapping = try runner.finishHostLoad(config, file, trunk.expert_store);
         const last_hidden = try allocator.alloc(f32, config.hidden_size);
 
         return .{
             .allocator = allocator,
             .config = config,
             .nextn = nextn,
-            .token_embedding = token_embedding,
-            .output = output,
-            .band = .{
-                .layers = layers,
-                .rope = rope,
-                .output_norm = output_norm,
-                .attn_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(config.head_dim))),
-            },
+            .token_embedding = trunk.token_embedding,
+            .output = trunk.output,
+            .band = trunk.band,
             .mtp = mtp,
             .weight_mapping = weight_mapping,
-            .expert_store = expert_store,
+            .expert_store = trunk.expert_store,
             .last_hidden = last_hidden,
         };
     }
@@ -218,23 +190,12 @@ pub const Model = struct {
     pub fn step(self: *Model, ctx: *ExecContext, cache: *Cache, tokens: []const usize) !fucina.Tensor(.{ .seq, .vocab }) {
         const cfg = self.config;
         const allocator = ctx.allocator;
-        if (tokens.len == 0) return Error.InvalidSequenceLength;
-        if (cache.len + tokens.len > cache.capacity or cache.len + tokens.len > self.band.rope.capacity) return Error.KvCacheOverflow;
-
         const S = tokens.len;
-        // Residual stream rows [S, hidden].
+        // Residual stream rows [S, hidden]; the trunk walk leaves the
+        // pre-norm hiddens here for the MTP stream.
         const x = try allocator.alloc(f32, S * cfg.hidden_size);
         defer allocator.free(x);
-        {
-            var emb = try self.token_embedding.getRowsAs(ctx, tokens, .embed);
-            defer emb.deinit();
-            @memcpy(x, try emb.dataConst());
-        }
-
-        for (self.band.layers, 0..) |*layer, layer_i| {
-            try runner.hostLayerForward(ctx, cfg, &self.band, cache, layer, layer_i, x, S, cache.len, null);
-        }
-        cache.len += S;
+        try runner.hostForwardRows(ctx, cfg, &self.band, cache, &self.token_embedding, tokens, x);
 
         // Per-position logits through the shared head. The hiddens handed
         // to the MTP stream are POST-output-norm (matching the reference
@@ -252,23 +213,17 @@ pub const Model = struct {
     }
 
     fn headLogits(self: *Model, ctx: *ExecContext, x: []const f32, S: usize, norm: []const f32, head: *const LinearWeight) !fucina.Tensor(.{ .seq, .vocab }) {
-        const cfg = self.config;
-        var normed_t = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ S, cfg.hidden_size });
-        defer normed_t.deinit();
-        const normed = try normed_t.data();
-        for (0..S) |r| {
-            host_ops.rmsNormInto(normed[r * cfg.hidden_size ..][0..cfg.hidden_size], x[r * cfg.hidden_size ..][0..cfg.hidden_size], norm, cfg.rms_norm_eps);
-        }
-        return head.linearSeq(ctx, &normed_t, .embed, .vocab);
+        return runner.hostProjectRows(ctx, self.config.hidden_size, self.config.rms_norm_eps, x, S, norm, head);
     }
 
     /// One MTP draft step: combine the token embedding with the previous
     /// hidden, run the nextn layer over the MTP stream's cache at position
-    /// `mtp_cache.len`, and return (greedy token, logits row, new hidden).
-    /// `h_prev` is `last_hidden` for the first draft and the returned
-    /// hidden for the chained drafts. The MTP stream's rope position for
-    /// entry i is i (validated empirically against the reference stacks).
-    pub fn mtpDraftStep(self: *Model, ctx: *ExecContext, mtp_cache: *Cache, token: usize, h_prev: []const f32, h_out: []f32) ![]f32 {
+    /// `mtp_cache.len`, write the new hidden into `h_out`, and return the
+    /// draft's logits `[1, vocab]` (caller deinits). `h_prev` is
+    /// `last_hidden` for the first draft and `h_out`'s previous value for
+    /// the chained drafts. The MTP stream's rope position for entry i is i
+    /// (validated empirically against the reference stacks).
+    pub fn mtpDraftStep(self: *Model, ctx: *ExecContext, mtp_cache: *Cache, token: usize, h_prev: []const f32, h_out: []f32) !fucina.Tensor(.{ .seq, .vocab }) {
         const cfg = self.config;
         const allocator = ctx.allocator;
         const mtp = if (self.mtp) |*m| m else return Error.InvalidConfig;
@@ -299,9 +254,7 @@ pub const Model = struct {
         @memcpy(h_out, x);
         if (mtp_debug) std.debug.print(" |h1|max {d:.3}\n", .{maxAbs(x)});
 
-        var logits_t = try self.headLogits(ctx, x, 1, mtp.shared_head_norm, &mtp.shared_head);
-        defer logits_t.deinit();
-        return allocator.dupe(f32, try logits_t.dataConst());
+        return self.headLogits(ctx, x, 1, mtp.shared_head_norm, &mtp.shared_head);
     }
 };
 

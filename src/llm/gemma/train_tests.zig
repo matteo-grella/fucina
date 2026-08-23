@@ -1,4 +1,4 @@
-//! Behavioral tests for the Gemma4 LoRA fine-tuning surface (`gemma4_train.zig`):
+//! Behavioral tests for the Gemma4 LoRA fine-tuning surface (`gemma/train.zig`):
 //! end-to-end loss + backward gradient-evidence smoke over tiny synthetic
 //! dense and MoE models built from random GGUF-shaped weights.
 const std = @import("std");

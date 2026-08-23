@@ -4,15 +4,8 @@
 //! Per-module kernel tests live beside their modules in `src/exec/`.
 
 const std = @import("std");
-const backend_mod = @import("backend.zig");
 const exec = @import("exec.zig");
-const exec_elementwise = @import("exec/elementwise.zig");
-const exec_row_ops = @import("exec/row_ops.zig");
-const exec_moe_chain = @import("exec/moe_chain.zig");
-const dtype_mod = @import("dtype.zig");
-const fpenv = @import("fpenv.zig");
 const parallel = @import("parallel.zig");
-const rng = @import("rng.zig");
 const tensor = @import("tensor.zig");
 
 const Allocator = std.mem.Allocator;

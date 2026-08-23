@@ -1127,8 +1127,10 @@ test "scalar reference backend surface compiles" {
     // On the default native build, Zig's lazy analysis never touches the
     // scalar impl's unreferenced decls, so a native-side signature change
     // not mirrored in cpu.zig would surface only on the (occasional)
-    // scalar leg. Referencing every top-level scalar decl makes that
-    // drift a compile error on EVERY `zig build test`.
+    // scalar leg. Referencing every top-level scalar decl analyzes each
+    // CONCRETE fn on every `zig build test`; generic decls (anytype /
+    // comptime params — currently 14 of cpu.zig's 128 pub fns) are only
+    // analyzed at instantiation, so the scalar leg remains their gate.
     const cpu = @import("backend/cpu.zig");
     comptime {
         for (@typeInfo(cpu).@"struct".decls) |d| {

@@ -175,13 +175,13 @@ pub fn main(init: std.process.Init) !void {
         // consumes (token[i+1], trunk h[i]).
         const n = tokens.items.len;
         while (mtp_fed + 1 < n) : (mtp_fed += 1) {
-            const logits = try model.mtpDraftStep(&ctx, &mtp_cache, tokens.items[mtp_fed + 1], hiddens.items[mtp_fed * hidden ..][0..hidden], h_scratch);
-            defer allocator.free(logits);
+            var logits = try model.mtpDraftStep(&ctx, &mtp_cache, tokens.items[mtp_fed + 1], hiddens.items[mtp_fed * hidden ..][0..hidden], h_scratch);
+            defer logits.deinit();
             // Diagnostic: the MTP head's next-next-token hit rate on KNOWN
             // history — separates a broken MTP forward (near 0%) from a
             // broken draft/verify loop (healthy 30-60% here).
             if (mtp_fed + 2 < n) {
-                const got = argmax(logits);
+                const got = argmax(try logits.dataConst());
                 if (got == tokens.items[mtp_fed + 2]) feed_hits += 1;
                 feed_total += 1;
             }
@@ -194,9 +194,9 @@ pub fn main(init: std.process.Init) !void {
         var n_drafts: usize = 1;
         @memcpy(h_prev, hiddens.items[(n - 1) * hidden ..][0..hidden]);
         while (n_drafts <= mtp_depth) : (n_drafts += 1) {
-            const logits = try model.mtpDraftStep(&ctx, &mtp_cache, drafts_buf[n_drafts - 1], h_prev, h_scratch);
-            defer allocator.free(logits);
-            drafts_buf[n_drafts] = argmax(logits);
+            var logits = try model.mtpDraftStep(&ctx, &mtp_cache, drafts_buf[n_drafts - 1], h_prev, h_scratch);
+            defer logits.deinit();
+            drafts_buf[n_drafts] = argmax(try logits.dataConst());
             @memcpy(h_prev, h_scratch);
         }
         mtp_cache.truncate(mtp_fed); // drop the speculative MTP positions

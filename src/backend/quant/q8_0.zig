@@ -1,7 +1,7 @@
 //! Hot Q8_0 / Q8_0x4 quantized matmul kernels (per-ISA accumulate tiers).
 //! Block/RHS types come from `types.zig`, shared accumulate/dispatch helpers
-//! from `common.zig`, Q8_K LHS quantization from `q8k.zig`; the format
-//! manifest and naming grammar live in `quant.zig`.
+//! from `common.zig`, Q8_0 row quantize/dequantize helpers from `q8k.zig`;
+//! the format manifest and naming grammar live in `quant.zig`.
 
 const std = @import("std");
 const builtin = @import("builtin");

@@ -196,13 +196,7 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn argmaxLast(ctx: *fucina.ExecContext, logits: *const fucina.Tensor(.{ .seq, .vocab })) !usize {
-    var last = try logits.narrow(ctx, .seq, logits.dim(.seq) - 1, 1);
-    defer last.deinit();
-    var index = try last.argmax(ctx, .vocab);
-    defer index.deinit();
-    return @intCast(try index.item());
-}
+const argmaxLast = llm.generate.argmaxLast;
 
 /// Prefill (pp) throughput sweep over prompt lengths + decode (tg) throughput,
 /// best-of-`reps` (warm), via the streaming cache — comparable to `llama-bench`.

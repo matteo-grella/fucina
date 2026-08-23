@@ -423,7 +423,7 @@ test "collect descends tagged unions into the active arm under the same prefix" 
     var w16 = try w32.to(&ctx, .f16);
     defer w16.deinit();
 
-    // Mirrors llm.weights.LinearWeight: one dtype arm live per weight, plus a
+    // Mirrors fucina.weights.LinearWeight: one dtype arm live per weight, plus a
     // non-tensor arm that must be skipped when active.
     const Linear = union(enum) {
         f32: @TypeOf(w32),

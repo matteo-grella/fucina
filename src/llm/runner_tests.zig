@@ -96,7 +96,7 @@ test "runner matches the recorded Qwen3-0.6B forward (Q4_K_M; skips without mode
 // require the recorded greedy chain (exact logit bits on the recording
 // machine class). Weights are deterministic PRNG draws; the GGUF round-trip
 // also pins `fromGguf` and the loaders. The glm fixture additionally runs
-// the hand glm4moe port for bitwise runner-vs-port parity.
+// the glm4moe family module for bitwise cross-path parity.
 
 const glm4moe = @import("glm4moe/model.zig");
 
@@ -308,7 +308,7 @@ fn writeTinyGlm(allocator: std.mem.Allocator) ![]u8 {
     return f.finish();
 }
 
-test "descriptor runner matches the hand glm4moe port bitwise on a synthetic GGUF (gate 3: host_reference vocabulary)" {
+test "runner and the glm4moe family module agree bitwise on a synthetic GGUF (host_reference vocabulary)" {
     try test_support.requireNative();
     // Recorded trace for the same fixture: chain[0] = prefill argmax.
     const golden = Golden{

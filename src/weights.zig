@@ -12,7 +12,6 @@ const fucina = struct {
     const ag_mod = @import("ag.zig");
     const tensor_mod_ = @import("tensor.zig");
     pub const gguf = @import("gguf.zig");
-    pub const es = @import("es.zig");
     pub const ptqtp = @import("ptqtp.zig");
     pub const rng = @import("rng.zig");
     pub const parallel = @import("parallel.zig");
@@ -27,37 +26,41 @@ const fucina = struct {
     pub const GatedOp = exec_mod.GatedOp;
     pub const expert_store = exec_mod.expert_store;
     pub const ExpertStore = exec_mod.expert_store.ExpertStore;
-    pub const supports_q4_k_mmla = backend_mod_.supports_q4_k_mmla;
-    pub const QuantizedMatmulRhsQ2_K = backend_mod_.QuantizedMatmulRhsQ2_K;
-    pub const QuantizedMatmulRhsQ3_K = backend_mod_.QuantizedMatmulRhsQ3_K;
-    pub const QuantizedMatmulRhsQ4_K = backend_mod_.QuantizedMatmulRhsQ4_K;
-    pub const QuantizedMatmulRhsQ5_K = backend_mod_.QuantizedMatmulRhsQ5_K;
-    pub const QuantizedMatmulRhsQ6_K = backend_mod_.QuantizedMatmulRhsQ6_K;
-    pub const BlockQ1_0 = dtype_mod.BlockQ1_0;
-    pub const BlockQ2_0 = dtype_mod.BlockQ2_0;
-    pub const BlockQ4_0 = dtype_mod.BlockQ4_0;
-    pub const BlockQ4_1 = dtype_mod.BlockQ4_1;
-    pub const BlockQ5_0 = dtype_mod.BlockQ5_0;
-    pub const BlockQ5_1 = dtype_mod.BlockQ5_1;
-    pub const BlockQ8_0 = dtype_mod.BlockQ8_0;
-    pub const BlockQ2_K = dtype_mod.BlockQ2_K;
-    pub const BlockQ3_K = dtype_mod.BlockQ3_K;
-    pub const BlockQ4_K = dtype_mod.BlockQ4_K;
-    pub const BlockQ5_K = dtype_mod.BlockQ5_K;
-    pub const BlockQ6_K = dtype_mod.BlockQ6_K;
-    pub const BlockIQ1_S = dtype_mod.BlockIQ1_S;
-    pub const BlockIQ1_M = dtype_mod.BlockIQ1_M;
-    pub const BlockIQ2_XXS = dtype_mod.BlockIQ2_XXS;
-    pub const BlockIQ2_XS = dtype_mod.BlockIQ2_XS;
-    pub const BlockIQ2_S = dtype_mod.BlockIQ2_S;
-    pub const BlockIQ3_XXS = dtype_mod.BlockIQ3_XXS;
-    pub const BlockIQ3_S = dtype_mod.BlockIQ3_S;
-    pub const BlockIQ4_NL = dtype_mod.BlockIQ4_NL;
-    pub const BlockIQ4_XS = dtype_mod.BlockIQ4_XS;
-    pub const BlockMXFP4 = dtype_mod.BlockMXFP4;
-    pub const BlockNVFP4 = dtype_mod.BlockNVFP4;
-    pub const BlockTQ1_0 = dtype_mod.BlockTQ1_0;
-    pub const BlockTQ2_0 = dtype_mod.BlockTQ2_0;
+    /// Mirrors the public `fucina.quant` namespace so this file reads
+    /// like consumer code.
+    pub const quant = struct {
+        pub const supports_q4_k_mmla = backend_mod_.supports_q4_k_mmla;
+        pub const QuantizedMatmulRhsQ2_K = backend_mod_.QuantizedMatmulRhsQ2_K;
+        pub const QuantizedMatmulRhsQ3_K = backend_mod_.QuantizedMatmulRhsQ3_K;
+        pub const QuantizedMatmulRhsQ4_K = backend_mod_.QuantizedMatmulRhsQ4_K;
+        pub const QuantizedMatmulRhsQ5_K = backend_mod_.QuantizedMatmulRhsQ5_K;
+        pub const QuantizedMatmulRhsQ6_K = backend_mod_.QuantizedMatmulRhsQ6_K;
+        pub const BlockQ1_0 = dtype_mod.BlockQ1_0;
+        pub const BlockQ2_0 = dtype_mod.BlockQ2_0;
+        pub const BlockQ4_0 = dtype_mod.BlockQ4_0;
+        pub const BlockQ4_1 = dtype_mod.BlockQ4_1;
+        pub const BlockQ5_0 = dtype_mod.BlockQ5_0;
+        pub const BlockQ5_1 = dtype_mod.BlockQ5_1;
+        pub const BlockQ8_0 = dtype_mod.BlockQ8_0;
+        pub const BlockQ2_K = dtype_mod.BlockQ2_K;
+        pub const BlockQ3_K = dtype_mod.BlockQ3_K;
+        pub const BlockQ4_K = dtype_mod.BlockQ4_K;
+        pub const BlockQ5_K = dtype_mod.BlockQ5_K;
+        pub const BlockQ6_K = dtype_mod.BlockQ6_K;
+        pub const BlockIQ1_S = dtype_mod.BlockIQ1_S;
+        pub const BlockIQ1_M = dtype_mod.BlockIQ1_M;
+        pub const BlockIQ2_XXS = dtype_mod.BlockIQ2_XXS;
+        pub const BlockIQ2_XS = dtype_mod.BlockIQ2_XS;
+        pub const BlockIQ2_S = dtype_mod.BlockIQ2_S;
+        pub const BlockIQ3_XXS = dtype_mod.BlockIQ3_XXS;
+        pub const BlockIQ3_S = dtype_mod.BlockIQ3_S;
+        pub const BlockIQ4_NL = dtype_mod.BlockIQ4_NL;
+        pub const BlockIQ4_XS = dtype_mod.BlockIQ4_XS;
+        pub const BlockMXFP4 = dtype_mod.BlockMXFP4;
+        pub const BlockNVFP4 = dtype_mod.BlockNVFP4;
+        pub const BlockTQ1_0 = dtype_mod.BlockTQ1_0;
+        pub const BlockTQ2_0 = dtype_mod.BlockTQ2_0;
+    };
     pub const internal = struct {
         pub const backend_mod = backend_mod_;
         pub const tensor_mod = tensor_mod_;
@@ -1177,7 +1180,7 @@ pub const LinearWeight = union(enum) {
         // packed path anyway.)
         if (m < 4) return false;
         return switch (self.*) {
-            .q4_k => comptime !fucina.supports_q4_k_mmla,
+            .q4_k => comptime !fucina.quant.supports_q4_k_mmla,
             .q8_0 => true,
             .q5_k => true,
             .q6_k => true,
@@ -1204,7 +1207,7 @@ pub const LinearWeight = union(enum) {
         @setEvalBranchQuota(20_000);
         if (comptime !fucina.internal.gpu.enabled) {
             if (!x.requiresGrad() and x.dim(.seq) >= 4 and norm_quant_fused.enabled()) switch (self.*) {
-                .q4_k => |*weight| if (comptime !fucina.supports_q4_k_mmla) {
+                .q4_k => |*weight| if (comptime !fucina.quant.supports_q4_k_mmla) {
                     return x.rmsNormMulDotPacked(ctx, norm_weight, eps, &weight.packed_rhs, in_tag, out_tag);
                 },
                 .q8_0 => |*weight| return x.rmsNormMulDotPacked(ctx, norm_weight, eps, &weight.packed_rhs, in_tag, out_tag),
@@ -1388,16 +1391,16 @@ pub fn loadMoeRhs(
     const rows = try std.math.mul(usize, n_expert, out_dim);
 
     return switch (info.ggml_type) {
-        .q2_k => .{ .q2_k = try copyOrBorrowMoeRhs(fucina.QuantizedMatmulRhsQ2_K, fucina.BlockQ2_K, ctx, info, rows, in_dim, borrow) },
-        .q3_k => .{ .q3_k = try copyOrBorrowMoeRhs(fucina.QuantizedMatmulRhsQ3_K, fucina.BlockQ3_K, ctx, info, rows, in_dim, borrow) },
-        .q4_k => .{ .q4_k = try copyOrBorrowMoeRhs(fucina.QuantizedMatmulRhsQ4_K, fucina.BlockQ4_K, ctx, info, rows, in_dim, borrow) },
-        .q5_k => .{ .q5_k = try copyOrBorrowMoeRhs(fucina.QuantizedMatmulRhsQ5_K, fucina.BlockQ5_K, ctx, info, rows, in_dim, borrow) },
-        .q6_k => .{ .q6_k = try copyOrBorrowMoeRhs(fucina.QuantizedMatmulRhsQ6_K, fucina.BlockQ6_K, ctx, info, rows, in_dim, borrow) },
+        .q2_k => .{ .q2_k = try copyOrBorrowMoeRhs(fucina.quant.QuantizedMatmulRhsQ2_K, fucina.quant.BlockQ2_K, ctx, info, rows, in_dim, borrow) },
+        .q3_k => .{ .q3_k = try copyOrBorrowMoeRhs(fucina.quant.QuantizedMatmulRhsQ3_K, fucina.quant.BlockQ3_K, ctx, info, rows, in_dim, borrow) },
+        .q4_k => .{ .q4_k = try copyOrBorrowMoeRhs(fucina.quant.QuantizedMatmulRhsQ4_K, fucina.quant.BlockQ4_K, ctx, info, rows, in_dim, borrow) },
+        .q5_k => .{ .q5_k = try copyOrBorrowMoeRhs(fucina.quant.QuantizedMatmulRhsQ5_K, fucina.quant.BlockQ5_K, ctx, info, rows, in_dim, borrow) },
+        .q6_k => .{ .q6_k = try copyOrBorrowMoeRhs(fucina.quant.QuantizedMatmulRhsQ6_K, fucina.quant.BlockQ6_K, ctx, info, rows, in_dim, borrow) },
         // q8_0: what llama.cpp falls back to when an expert dim is not a
         // 256 multiple (deepseek2). Nested rows container, so it gets its
         // own copy-or-borrow.
         .q8_0 => blk: {
-            const src = try blockSlice(fucina.BlockQ8_0, info.data);
+            const src = try blockSlice(fucina.quant.BlockQ8_0, info.data);
             if (rows == 0 or src.len % rows != 0) return Error.InvalidWeightShape;
             const bpc = src.len / rows;
             if (bpc * 32 != in_dim) return Error.InvalidWeightShape;
@@ -1405,7 +1408,7 @@ pub fn loadMoeRhs(
                 break :blk .{ .q8_0 = .{ .rows = .{ .allocator = null, .blocks = src, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
             }
             gguf.prefetch(info.data);
-            const owned = try ctx.allocator.alloc(fucina.BlockQ8_0, src.len);
+            const owned = try ctx.allocator.alloc(fucina.quant.BlockQ8_0, src.len);
             errdefer ctx.allocator.free(owned);
             @memcpy(owned, src);
             break :blk .{ .q8_0 = .{ .rows = .{ .allocator = ctx.allocator, .blocks = owned, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
@@ -1469,20 +1472,20 @@ pub fn loadMoeRhsPtqtp(
     const bpc = try fucina.internal.backend_mod.quantized_matmul.qkBlockCount(expected_in_dim);
     const blocks_per_plane = try std.math.mul(usize, rows, bpc);
 
-    var planes: [3][]const fucina.BlockTQ2_0 = .{ &.{}, &.{}, &.{} };
+    var planes: [3][]const fucina.quant.BlockTQ2_0 = .{ &.{}, &.{}, &.{} };
     var owned_count: usize = 0;
     errdefer for (planes[0..owned_count]) |plane| ctx.allocator.free(@constCast(plane));
     for (plane_infos, 0..) |info, p| {
         if (info.ggml_type != .tq2_0) return Error.UnsupportedWeightType;
         if (info.n_dims != 3) return Error.InvalidWeightShape;
         if (info.dims[0] != expected_in_dim or info.dims[1] != expected_out_dim or info.dims[2] != expected_n_expert) return Error.InvalidWeightShape;
-        const src = try blockSlice(fucina.BlockTQ2_0, info.data);
+        const src = try blockSlice(fucina.quant.BlockTQ2_0, info.data);
         if (src.len != blocks_per_plane) return Error.InvalidWeightShape;
         if (borrow) {
             planes[p] = src;
         } else {
             gguf.prefetch(info.data);
-            const owned = try ctx.allocator.alloc(fucina.BlockTQ2_0, src.len);
+            const owned = try ctx.allocator.alloc(fucina.quant.BlockTQ2_0, src.len);
             @memcpy(owned, src);
             planes[p] = owned;
             owned_count += 1;
@@ -1724,10 +1727,6 @@ pub fn cacheRouteSel(gate: *const fucina.MoeRhs, choice: []const f32, sel: []usi
     };
 }
 
-/// The store-create block shared by the MoE loaders: expand split-GGUF part
-/// paths (single files pass through as one entry) and open the ExpertStore
-/// over them. The caller registers layers (`loadMoeRhsStreamed`) and then
-/// calls `ExpertStore.finalize`.
 /// Router-lookahead tail shared by streamed-MoE decoders: score the normed
 /// hidden rows through `router`, take the un-normalized top-k per row, and
 /// hand the selection to the store as a prefetch hint for `layer_i`.
@@ -1746,6 +1745,10 @@ pub fn pilotHintTopK(ctx: *ExecContext, nrm: *const fucina.Tensor(.{ .seq, .embe
     store.pilotHint(layer_i, sel);
 }
 
+/// The store-create block shared by the MoE loaders: expand split-GGUF part
+/// paths (single files pass through as one entry) and open the ExpertStore
+/// over them. The caller registers layers (`loadMoeRhsStreamed`) and then
+/// calls `ExpertStore.finalize`.
 pub fn createExpertStore(allocator: Allocator, options: MoeStreamOptions, n_layers: usize) !*fucina.ExpertStore {
     const split_paths = try gguf.File.splitPartPaths(allocator, options.gguf_path);
     defer if (split_paths) |paths| {
@@ -2073,11 +2076,11 @@ fn copyOrBorrowMoeRhsRows(
     borrow: bool,
 ) !backend_quant.QuantizedMatmulRhsRowsFor(dtype) {
     const Block = switch (dtype) {
-        .iq2_xxs => fucina.BlockIQ2_XXS,
-        .iq2_s => fucina.BlockIQ2_S,
-        .iq4_xs => fucina.BlockIQ4_XS,
-        .iq3_xxs => fucina.BlockIQ3_XXS,
-        .tq2_0 => fucina.BlockTQ2_0,
+        .iq2_xxs => fucina.quant.BlockIQ2_XXS,
+        .iq2_s => fucina.quant.BlockIQ2_S,
+        .iq4_xs => fucina.quant.BlockIQ4_XS,
+        .iq3_xxs => fucina.quant.BlockIQ3_XXS,
+        .tq2_0 => fucina.quant.BlockTQ2_0,
         else => @compileError("copyOrBorrowMoeRhsRows: no nested-rows expert container for this dtype"),
     };
     const src = try blockSlice(Block, info.data);
@@ -2885,31 +2888,31 @@ fn f16Slice(bytes: []const u8, expected_len: usize) ![]const f16 {
 
 fn BlockStorage(comptime dtype: DType) type {
     return switch (dtype) {
-        .q1_0 => fucina.BlockQ1_0,
-        .q2_0 => fucina.BlockQ2_0,
-        .q4_0 => fucina.BlockQ4_0,
-        .q4_1 => fucina.BlockQ4_1,
-        .q5_0 => fucina.BlockQ5_0,
-        .q5_1 => fucina.BlockQ5_1,
-        .q8_0 => fucina.BlockQ8_0,
-        .q2_k => fucina.BlockQ2_K,
-        .q3_k => fucina.BlockQ3_K,
-        .q4_k => fucina.BlockQ4_K,
-        .q5_k => fucina.BlockQ5_K,
-        .q6_k => fucina.BlockQ6_K,
-        .iq1_s => fucina.BlockIQ1_S,
-        .iq1_m => fucina.BlockIQ1_M,
-        .iq2_xxs => fucina.BlockIQ2_XXS,
-        .iq2_xs => fucina.BlockIQ2_XS,
-        .iq2_s => fucina.BlockIQ2_S,
-        .iq3_xxs => fucina.BlockIQ3_XXS,
-        .iq3_s => fucina.BlockIQ3_S,
-        .iq4_nl => fucina.BlockIQ4_NL,
-        .iq4_xs => fucina.BlockIQ4_XS,
-        .tq1_0 => fucina.BlockTQ1_0,
-        .tq2_0 => fucina.BlockTQ2_0,
-        .mxfp4 => fucina.BlockMXFP4,
-        .nvfp4 => fucina.BlockNVFP4,
+        .q1_0 => fucina.quant.BlockQ1_0,
+        .q2_0 => fucina.quant.BlockQ2_0,
+        .q4_0 => fucina.quant.BlockQ4_0,
+        .q4_1 => fucina.quant.BlockQ4_1,
+        .q5_0 => fucina.quant.BlockQ5_0,
+        .q5_1 => fucina.quant.BlockQ5_1,
+        .q8_0 => fucina.quant.BlockQ8_0,
+        .q2_k => fucina.quant.BlockQ2_K,
+        .q3_k => fucina.quant.BlockQ3_K,
+        .q4_k => fucina.quant.BlockQ4_K,
+        .q5_k => fucina.quant.BlockQ5_K,
+        .q6_k => fucina.quant.BlockQ6_K,
+        .iq1_s => fucina.quant.BlockIQ1_S,
+        .iq1_m => fucina.quant.BlockIQ1_M,
+        .iq2_xxs => fucina.quant.BlockIQ2_XXS,
+        .iq2_xs => fucina.quant.BlockIQ2_XS,
+        .iq2_s => fucina.quant.BlockIQ2_S,
+        .iq3_xxs => fucina.quant.BlockIQ3_XXS,
+        .iq3_s => fucina.quant.BlockIQ3_S,
+        .iq4_nl => fucina.quant.BlockIQ4_NL,
+        .iq4_xs => fucina.quant.BlockIQ4_XS,
+        .tq1_0 => fucina.quant.BlockTQ1_0,
+        .tq2_0 => fucina.quant.BlockTQ2_0,
+        .mxfp4 => fucina.quant.BlockMXFP4,
+        .nvfp4 => fucina.quant.BlockNVFP4,
         else => @compileError("unsupported quantized weight dtype"),
     };
 }

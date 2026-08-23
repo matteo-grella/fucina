@@ -73,9 +73,10 @@ pub const ForwardProfile = struct {
 /// qwen3/qwen3moe vocabulary); `.host_reference` is the auditable host-side
 /// f32 shape (biased QKV, PARTIAL rope with selectable pairing, sigmoid
 /// noaux MoE with router bias + shared experts + leading dense layers —
-/// the GLM-4.5 / DeepSeek-MoE vocabulary, ported verbatim from the hand
-/// glm4moe block so parity holds bitwise). Heavy linears and the fused MoE
-/// mixture run on fucina kernels in both styles.
+/// the GLM-4.5 / DeepSeek-MoE vocabulary; the glm4moe family module
+/// drives these same blocks, so the two call paths pin each other).
+/// Heavy linears and the fused MoE mixture run on fucina kernels in both
+/// styles.
 pub const BlockStyle = enum { fused, host_reference };
 
 pub const RopePairing = enum { half, interleaved };
@@ -670,41 +671,17 @@ pub const Model = struct {
     fn loadHostReference(ctx: *ExecContext, file: *gguf.File, config: Descriptor, options: LoadOptions) !Model {
         const allocator = ctx.allocator;
 
-        var expert_store: ?*fucina.ExpertStore = null;
-        if (options.moe_stream) |stream_options| {
-            if (config.isMoe()) expert_store = try weights.createExpertStore(allocator, stream_options, config.num_layers);
-        }
-        errdefer if (expert_store) |store| store.destroy();
+        var trunk = try loadHostTrunk(ctx, file, config, options, config.num_layers);
+        errdefer trunk.deinit(allocator);
+        const weight_mapping = try finishHostLoad(config, file, trunk.expert_store);
 
-        var token_embedding = try LinearWeight.load(ctx, try file.get("token_embd.weight"), config.vocab_size, config.hidden_size);
-        errdefer token_embedding.deinit();
         var output_norm = try weights.loadVector(ctx, try file.get("output_norm.weight"), config.hidden_size, .embed);
         errdefer output_norm.deinit();
-        var output = try LinearWeight.load(ctx, try file.get("output.weight"), config.vocab_size, config.hidden_size);
-        errdefer output.deinit();
 
         const kv_head_for_head = try allocator.alloc(usize, config.num_attention_heads);
         errdefer allocator.free(kv_head_for_head);
         const heads_per_kv = config.num_attention_heads / config.num_key_value_heads;
         for (kv_head_for_head, 0..) |*kv_head, head_i| kv_head.* = head_i / heads_per_kv;
-
-        const host_layers = try allocator.alloc(HostLayer, config.num_layers);
-        errdefer allocator.free(host_layers);
-        var built: usize = 0;
-        errdefer for (host_layers[0..built]) |*l| l.deinit(allocator);
-        for (host_layers, 0..) |*layer, i| {
-            layer.* = try loadHostLayer(ctx, file, config, i, expert_store);
-            built += 1;
-        }
-
-        if (expert_store) |store| try store.finalize();
-        const weight_mapping = if (config.isMoe() and expert_store == null) file.takeMapping() else null;
-        if (config.isMoe() and expert_store == null and weight_mapping == null) return Error.InvalidWeightShape;
-
-        const host_output_norm = try weights.hostVector(allocator, file, "output_norm.weight", config.hidden_size);
-        errdefer allocator.free(host_output_norm);
-        var rope = try HostRope.init(allocator, config, options.max_positions);
-        errdefer rope.deinit(allocator);
 
         const layers = try allocator.alloc(Layer, 0);
         errdefer allocator.free(layers);
@@ -712,19 +689,14 @@ pub const Model = struct {
         return .{
             .allocator = allocator,
             .config = config,
-            .token_embedding = token_embedding,
+            .token_embedding = trunk.token_embedding,
             .output_norm = output_norm,
-            .output = output,
+            .output = trunk.output,
             .layers = layers,
             .kv_head_for_head = kv_head_for_head,
             .weight_mapping = weight_mapping,
-            .expert_store = expert_store,
-            .host = .{
-                .layers = host_layers,
-                .rope = rope,
-                .output_norm = host_output_norm,
-                .attn_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(config.head_dim))),
-            },
+            .expert_store = trunk.expert_store,
+            .host = trunk.band,
         };
     }
 
@@ -736,39 +708,126 @@ pub const Model = struct {
     /// host_reference forward: process `tokens` at positions
     /// [cache.len, cache.len + S) and return per-position next-token logits
     /// `[S, vocab]`. Positions are computed causally in sequence, so
-    /// per-row numerics match S = 1 steps exactly (the hand glm4moe port's
-    /// `step` contract, whose block this band mirrors verbatim).
+    /// per-row numerics match S = 1 steps exactly (the host-band verify
+    /// contract the glm4moe family's `step` builds on).
     pub fn hostStep(self: *const Model, ctx: *ExecContext, cache: *HostCache, tokens: []const usize) !fucina.Tensor(.{ .seq, .vocab }) {
         const band = if (self.host) |*b| b else return Error.InvalidConfig;
         const cfg = self.config;
         const allocator = ctx.allocator;
-        if (tokens.len == 0) return Error.InvalidSequenceLength;
-        if (cache.len + tokens.len > cache.capacity or cache.len + tokens.len > band.rope.capacity) return Error.KvCacheOverflow;
 
-        const S = tokens.len;
-        const x = try allocator.alloc(f32, S * cfg.hidden_size);
+        const x = try allocator.alloc(f32, tokens.len * cfg.hidden_size);
         defer allocator.free(x);
-        {
-            var emb = try self.token_embedding.getRowsAs(ctx, tokens, .embed);
-            defer emb.deinit();
-            @memcpy(x, try emb.dataConst());
-        }
-
-        for (band.layers, 0..) |*layer, layer_i| {
-            try hostLayerForward(ctx, cfg, band, cache, layer, layer_i, x, S, cache.len, null);
-        }
-        cache.len += S;
-
-        var normed_t = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ S, cfg.hidden_size });
-        defer normed_t.deinit();
-        const normed = try normed_t.data();
-        for (0..S) |r| {
-            host_ops.rmsNormInto(normed[r * cfg.hidden_size ..][0..cfg.hidden_size], x[r * cfg.hidden_size ..][0..cfg.hidden_size], band.output_norm, cfg.rms_norm_eps);
-        }
-        return self.output.linearSeq(ctx, &normed_t, .embed, .vocab);
+        try hostForwardRows(ctx, cfg, band, cache, &self.token_embedding, tokens, x);
+        return hostProjectRows(ctx, cfg.hidden_size, cfg.rms_norm_eps, x, tokens.len, band.output_norm, &self.output);
     }
 
 };
+
+/// The host_reference trunk every host-band loader shares: embed + lm-head
+/// weights, the layer stack, the host output norm, and the rope table —
+/// loaded WITHOUT the store finalize / mapping takeover, so a family can
+/// load extra store-backed layers (the glm4moe MTP head) before calling
+/// `finishHostLoad`. `store_layers` sizes the ExpertStore's layer index
+/// space (trunk layers plus any family extras).
+pub const HostTrunk = struct {
+    token_embedding: LinearWeight,
+    output: LinearWeight,
+    band: HostBand,
+    expert_store: ?*fucina.ExpertStore,
+
+    pub fn deinit(self: *HostTrunk, allocator: Allocator) void {
+        self.band.deinit(allocator);
+        self.output.deinit();
+        self.token_embedding.deinit();
+        if (self.expert_store) |store| store.destroy();
+        self.* = undefined;
+    }
+};
+
+pub fn loadHostTrunk(ctx: *ExecContext, file: *gguf.File, config: Descriptor, options: LoadOptions, store_layers: usize) !HostTrunk {
+    const allocator = ctx.allocator;
+
+    var expert_store: ?*fucina.ExpertStore = null;
+    if (options.moe_stream) |stream_options| {
+        if (config.isMoe()) expert_store = try weights.createExpertStore(allocator, stream_options, store_layers);
+    }
+    errdefer if (expert_store) |store| store.destroy();
+
+    var token_embedding = try LinearWeight.load(ctx, try file.get("token_embd.weight"), config.vocab_size, config.hidden_size);
+    errdefer token_embedding.deinit();
+    var output = try LinearWeight.load(ctx, try file.get("output.weight"), config.vocab_size, config.hidden_size);
+    errdefer output.deinit();
+
+    const host_layers = try allocator.alloc(HostLayer, config.num_layers);
+    errdefer allocator.free(host_layers);
+    var built: usize = 0;
+    errdefer for (host_layers[0..built]) |*l| l.deinit(allocator);
+    for (host_layers, 0..) |*layer, i| {
+        layer.* = try loadHostLayer(ctx, file, config, i, expert_store);
+        built += 1;
+    }
+
+    const host_output_norm = try weights.hostVector(allocator, file, "output_norm.weight", config.hidden_size);
+    errdefer allocator.free(host_output_norm);
+    var rope = try HostRope.init(allocator, config, options.max_positions);
+    errdefer rope.deinit(allocator);
+
+    return .{
+        .token_embedding = token_embedding,
+        .output = output,
+        .band = .{
+            .layers = host_layers,
+            .rope = rope,
+            .output_norm = host_output_norm,
+            .attn_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(config.head_dim))),
+        },
+        .expert_store = expert_store,
+    };
+}
+
+/// Finish a host-band load once every store-backed layer is registered:
+/// finalize the streaming store, or take mmap ownership for the borrowed
+/// resident MoE arms (`takeMapping` is one-shot per file).
+pub fn finishHostLoad(config: Descriptor, file: *gguf.File, expert_store: ?*fucina.ExpertStore) !?gguf.File.MappedRegion {
+    if (expert_store) |store| try store.finalize();
+    const weight_mapping = if (config.isMoe() and expert_store == null) file.takeMapping() else null;
+    if (config.isMoe() and expert_store == null and weight_mapping == null) return Error.InvalidWeightShape;
+    return weight_mapping;
+}
+
+/// The host-band trunk walk: embed `tokens`, run every band layer in place
+/// over the pre-norm residual rows `x` ([S, hidden], caller-allocated),
+/// and advance the cache. Callers that need the pre-norm hiddens (the
+/// glm4moe MTP stream) read `x` afterward; `hostProjectRows` is the
+/// matching head projection.
+pub fn hostForwardRows(ctx: *ExecContext, cfg: Descriptor, band: *const HostBand, cache: *HostCache, token_embedding: *const LinearWeight, tokens: []const usize, x: []f32) !void {
+    if (tokens.len == 0) return Error.InvalidSequenceLength;
+    if (cache.len + tokens.len > cache.capacity or cache.len + tokens.len > band.rope.capacity) return Error.KvCacheOverflow;
+
+    const S = tokens.len;
+    {
+        var emb = try token_embedding.getRowsAs(ctx, tokens, .embed);
+        defer emb.deinit();
+        @memcpy(x, try emb.dataConst());
+    }
+    for (band.layers, 0..) |*layer, layer_i| {
+        try hostLayerForward(ctx, cfg, band, cache, layer, layer_i, x, S, cache.len, null);
+    }
+    cache.len += S;
+}
+
+/// RMS-norm `S` host rows and project them through `head` — the shared
+/// per-position logits tail (the trunk's lm head, and the glm4moe MTP
+/// head's shared_head).
+pub fn hostProjectRows(ctx: *ExecContext, hidden: usize, eps: f32, x: []const f32, S: usize, norm: []const f32, head: *const LinearWeight) !fucina.Tensor(.{ .seq, .vocab }) {
+    var normed_t = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ S, hidden });
+    defer normed_t.deinit();
+    const normed = try normed_t.data();
+    for (0..S) |r| {
+        host_ops.rmsNormInto(normed[r * hidden ..][0..hidden], x[r * hidden ..][0..hidden], norm, eps);
+    }
+    return head.linearSeq(ctx, &normed_t, .embed, .vocab);
+}
 
 /// Dense-FFN weights (exported for train.zig's differentiable forward).
 pub const DenseFfn = struct {

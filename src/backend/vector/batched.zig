@@ -1,8 +1,8 @@
-//! Batched dense GEMM relocated out of vector.zig: the batched NN/TN/NT entry
-//! points, the BatchedTask struct, and the parallel batch dispatch. The inner
-//! per-batch work reuses the dense GEMM range kernels (gemmNNRange/gemmTNRange/
-//! gemmNTRange), aliased here from vector.zig (`vm`) along with the shared-core
-//! ParallelConfig and batchedThreadCount, so the moved bodies compile unchanged.
+//! Batched dense GEMM: the batched NN/TN/NT entry points, the BatchedTask
+//! struct, and the parallel batch dispatch. The inner per-batch work reuses
+//! the dense GEMM range kernels (gemmNNRange/gemmTNRange/gemmNTRange) from
+//! `gemm.zig`; shared-core ParallelConfig and batchedThreadCount come from
+//! `common.zig` (`vm`).
 
 const std = @import("std");
 const parallel = @import("../../parallel.zig");

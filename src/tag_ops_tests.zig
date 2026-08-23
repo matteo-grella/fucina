@@ -6,7 +6,7 @@ const std = @import("std");
 const tensor_mod = @import("tensor.zig");
 const exec_mod = @import("exec.zig");
 const tags_mod = @import("tags.zig");
-const tagged = @import("tag_ops.zig");
+const tag_ops = @import("tag_ops.zig");
 
 const TensorError = tensor_mod.TensorError;
 const ExecContext = exec_mod.ExecContext;
@@ -18,15 +18,15 @@ const dotResultTags = tags_mod.dotResultTags;
 const splitTags = tags_mod.splitTags;
 const mergeTags = tags_mod.mergeTags;
 
-const pointwise = tagged.pointwise;
-const taggedDot = tagged.taggedDot;
-const sumManyTensor = tagged.sumManyTensor;
-const splitAxisView = tagged.splitAxisView;
-const mergeAxesView = tagged.mergeAxesView;
-const flattenTensor = tagged.flattenTensor;
-const permuteTensorTo = tagged.permuteTensorTo;
-const alignTensorTo = tagged.alignTensorTo;
-const broadcastTensorTo = tagged.broadcastTensorTo;
+const pointwise = tag_ops.pointwise;
+const taggedDot = tag_ops.taggedDot;
+const sumManyTensor = tag_ops.sumManyTensor;
+const splitAxisView = tag_ops.splitAxisView;
+const mergeAxesView = tag_ops.mergeAxesView;
+const flattenTensor = tag_ops.flattenTensor;
+const permuteTensorTo = tag_ops.permuteTensorTo;
+const alignTensorTo = tag_ops.alignTensorTo;
+const broadcastTensorTo = tag_ops.broadcastTensorTo;
 
 test "tag library: tag tuples expose comptime rank and axis lookup" {
     comptime {
@@ -381,7 +381,7 @@ test "tag library: dot rejects mismatched contract dimensions" {
 
 // ---- taggedEinsum ----
 
-const taggedEinsum = tagged.taggedEinsum;
+const taggedEinsum = tag_ops.taggedEinsum;
 
 /// Fills a fresh contiguous tensor with small integers (exact in f32 for any
 /// summation order, so the oracle can compare bitwise).

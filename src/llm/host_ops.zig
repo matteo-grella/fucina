@@ -1,7 +1,8 @@
 //! Host-band scalar ops: the ONE definition of the numerics every
 //! host-style port shares — f64-accumulated RMS norm, max-subtracted
 //! softmax, silu, and the SwiGLU-through-`LinearWeight` FFN. Consumers:
-//! the runner's host_reference band, deepseek2, inkling (model + mmproj).
+//! the runner's host_reference band, deepseek2, inkling (model + mmproj),
+//! pockettts.
 //! Families with genuine variants keep them beside their models
 //! (deepseek4's nullable-weight rms norm, inkling's fused gate_up swiglu).
 //!

@@ -1,6 +1,6 @@
-//! Low-level @Vector primitives relocated out of vector.zig. See vector.zig for
-//! the shared core (V* aliases, vector_len*) which this module aliases via `vm`
-//! so the moved bodies compile unchanged.
+//! Low-level @Vector primitives (dot/add/mul cores, transcendental vector
+//! bodies, the f16 row-block attention inner loops). The shared core
+//! (V* aliases, vector_len*) comes from `common.zig` (`vm`).
 
 const std = @import("std");
 const ops = @import("../ops.zig");

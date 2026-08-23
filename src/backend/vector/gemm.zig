@@ -1,8 +1,9 @@
 //! Dense f32/f16/f64/bf16 GEMM: the NN/TN/NT and f16-RHS entry points, their
 //! Task structs and parallel dispatch, and the inner range/cols/row kernels.
 //! Shared-core symbols (ParallelConfig, contiguous-data helpers, thread-count
-//! gates, the V* width aliases) and the @Vector primitives come from
-//! `common.zig` (`vm`); blocked-tile cores from `gemm_blocked.zig`.
+//! gates, the V* width aliases) come from `common.zig` (`vm`); the @Vector
+//! primitives from `primitives.zig`; blocked-tile cores from
+//! `gemm_blocked.zig`.
 //! gemmNNRange/gemmTNRange/gemmNTRange are pub for the batched GEMM module.
 
 const std = @import("std");

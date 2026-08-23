@@ -1,4 +1,4 @@
-//! Behavioral tests for the Gemma 4 inference module (`gemma4.zig`):
+//! Behavioral tests for the Gemma 4 inference module (`gemma/model.zig`):
 //! per-layer SWA/KV geometry derivation, shared-KV reuse mapping, and the
 //! f16-only KV-cache forward-seam guard.
 const std = @import("std");
