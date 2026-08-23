@@ -95,6 +95,9 @@ pub const StandardizeAccumulation = exec_stats.StandardizeAccumulation;
 pub const StandardizeEpsMode = exec_stats.StandardizeEpsMode;
 pub const StandardizeOptions = exec_stats.StandardizeOptions;
 
+pub const AttentionMask = exec_attention.AttentionMask;
+pub const KvView = exec_attention.KvView;
+pub const AttentionOptions = exec_attention.AttentionOptions;
 pub const GroupedCausalAttentionBackwardResult = exec_attention.GroupedCausalAttentionBackwardResult;
 
 /// Masked-mean forward result: the per-lane means plus the per-lane counts of
@@ -548,19 +551,8 @@ pub const ExecContext = struct {
     // ----------------------------------------------------------------------
     // attention: the fused forward/backward kernels (exec/attention.zig)
     // ----------------------------------------------------------------------
-    pub const groupedCausalAttention = exec_attention.groupedCausalAttention;
-    pub const groupedCausalAttentionWindowed = exec_attention.groupedCausalAttentionWindowed;
-    pub const groupedBidirectionalAttention = exec_attention.groupedBidirectionalAttention;
-    pub const groupedBidirectionalAttentionBiased = exec_attention.groupedBidirectionalAttentionBiased;
-    pub const groupedCausalAttentionStatsOut = exec_attention.groupedCausalAttentionStatsOut;
-    pub const groupedCausalAttentionBackward = exec_attention.groupedCausalAttentionBackward;
-    pub const groupedCausalAttentionF16Kv = exec_attention.groupedCausalAttentionF16Kv;
-    pub const groupedBidirectionalAttentionF16Kv = exec_attention.groupedBidirectionalAttentionF16Kv;
-    pub const groupedCausalAttentionF16KvWindowed = exec_attention.groupedCausalAttentionF16KvWindowed;
-    pub const groupedCausalAttentionQ8Kv = exec_attention.groupedCausalAttentionQ8Kv;
-    pub const groupedCausalAttentionQ8KvWindowed = exec_attention.groupedCausalAttentionQ8KvWindowed;
-    pub const groupedCausalAttentionMultiF16Kv = exec_attention.groupedCausalAttentionMultiF16Kv;
-    pub const groupedCausalAttentionMultiQ8Kv = exec_attention.groupedCausalAttentionMultiQ8Kv;
+    pub const groupedAttention = exec_attention.groupedAttention;
+    pub const groupedAttentionBackward = exec_attention.groupedAttentionBackward;
     pub const dot = exec_matmul.dot;
     pub const dotTyped = exec_matmul.dotTyped;
     pub const matmul = exec_matmul.matmul2D;

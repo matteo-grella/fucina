@@ -784,7 +784,7 @@ fn runRawGroupedCausalAttention(q_seq: usize, kv_seq: usize, heads: usize, kv_he
     const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(d)));
 
     for (0..4) |_| {
-        var y = try ctx.groupedCausalAttention(&q, &k, &v, map, scale);
+        var y = try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, map, scale, .{});
         y.deinit();
     }
 
@@ -792,7 +792,7 @@ fn runRawGroupedCausalAttention(q_seq: usize, kv_seq: usize, heads: usize, kv_he
     var checksum: f64 = 0;
     var timer = try Timer.start(benchmark_io);
     for (0..iterations) |_| {
-        var y = try ctx.groupedCausalAttention(&q, &k, &v, map, scale);
+        var y = try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, map, scale, .{});
         checksum += @as(f64, @floatCast(y.dataConst()[0]));
         y.deinit();
     }

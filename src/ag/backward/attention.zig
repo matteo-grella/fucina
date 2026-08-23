@@ -79,7 +79,7 @@ pub const GroupedCausalAttentionBackward = struct {
         const need_q = needs_grad.len > 0 and needs_grad[0];
         const need_k = needs_grad.len > 1 and needs_grad[1];
         const need_v = needs_grad.len > 2 and needs_grad[2];
-        var grads = try ctx.groupedCausalAttentionBackward(
+        var grads = try ctx.groupedAttentionBackward(
             &self.q,
             &self.k,
             &self.v,

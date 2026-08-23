@@ -75,9 +75,9 @@ fn checkTiledAttentionParity(
     defer v.deinit();
 
     var ref = if (kv_f16)
-        try ctx.groupedCausalAttentionF16KvWindowed(&q, &k, &v, kv_head_for_head, scale_value, window)
+        try ctx.groupedAttention(&q, .{ .f16 = .{ .k = &k, .v = &v } }, kv_head_for_head, scale_value, .{ .window = window })
     else
-        try ctx.groupedCausalAttentionWindowed(&q, &k, &v, kv_head_for_head, scale_value, window);
+        try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, kv_head_for_head, scale_value, .{ .window = window });
     defer ref.deinit();
 
     var got = try ctx.emptyRank(2, .{ q_seq, heads * d });
@@ -327,7 +327,7 @@ test "tiled attention NaN logit poisons the query row like the per-query kernels
     var v = try ctx.fromSliceRank(3, .{ S, KVH, D }, &v_vals);
     defer v.deinit();
 
-    var ref = try ctx.groupedCausalAttention(&q, &k, &v, &kv_head_for_head, 0.5);
+    var ref = try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, &kv_head_for_head, 0.5, .{});
     defer ref.deinit();
 
     var got = try ctx.emptyRank(2, .{ S, H * D });
@@ -426,11 +426,11 @@ test "tiled attention: huge usize SWA windows behave as full causal (dispatch cl
         .scores = &scores,
     });
 
-    var unwindowed = try ctx.groupedCausalAttention(&q, &k, &v, &kv_head_for_head, scale_value);
+    var unwindowed = try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, &kv_head_for_head, scale_value, .{});
     defer unwindowed.deinit();
 
     for ([_]usize{ std.math.maxInt(usize), @as(usize, 1) << 40 }) |window| {
-        var got = try ctx.groupedCausalAttentionWindowed(&q, &k, &v, &kv_head_for_head, scale_value, window);
+        var got = try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, &kv_head_for_head, scale_value, .{ .window = window });
         defer got.deinit();
         // Tiled vs per-query: same math, different summation grouping.
         try expectTiledAttentionClose(ref.dataConst(), got.dataConst());
@@ -470,7 +470,7 @@ test "tiled attention pool gate: small jobs stay serial and match the parallel s
         defer k.deinit();
         var v = try ctx.fromSliceRank(3, .{ S, KVH, D }, kv_vals);
         defer v.deinit();
-        var out = try ctx.groupedCausalAttention(&q, &k, &v, &kv_head_for_head, 0.25);
+        var out = try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, &kv_head_for_head, 0.25, .{});
         defer out.deinit();
         try std.testing.expect(!ctx.work_pool_ready);
     }
@@ -542,7 +542,7 @@ test "tiled attention pool gate: small jobs stay serial and match the parallel s
 /// Multi-stream ragged decode attention vs per-stream single calls: the
 /// multi entry runs the SAME per-query kernels per (stream, head unit), so
 /// each stream's rows must be BITWISE identical to its own single-stream
-/// `groupedCausalAttention{F16,Q8}Kv` call — regardless of batch
+/// `.f16`/`.q8` `groupedAttention` call — regardless of batch
 /// composition or the parallel/inline dispatch arm taken.
 fn checkMultiKvAttentionParity(
     ctx: *ExecContext,
@@ -615,22 +615,22 @@ fn checkMultiKvAttentionParity(
     }
 
     var out = if (comptime q8)
-        try ctx.groupedCausalAttentionMultiQ8Kv(&q, ks, vs, lens, kv_heads, kv_head_for_head, scale_value)
+        try ctx.groupedAttention(&q, .{ .multi_q8 = .{ .k = ks, .v = vs, .lens = lens, .kv_heads = kv_heads } }, kv_head_for_head, scale_value, .{})
     else
-        try ctx.groupedCausalAttentionMultiF16Kv(&q, ks, vs, lens, kv_heads, kv_head_for_head, scale_value);
+        try ctx.groupedAttention(&q, .{ .multi_f16 = .{ .k = ks, .v = vs, .lens = lens, .kv_heads = kv_heads } }, kv_head_for_head, scale_value, .{});
     defer out.deinit();
 
     for (lens, 0..) |len_s, s| {
         var q_s = try ctx.fromSliceRank(3, .{ 1, heads, d }, q_vals[s * heads * d ..][0 .. heads * d]);
         defer q_s.deinit();
         var ref = if (comptime q8)
-            try ctx.groupedCausalAttentionQ8Kv(&q_s, ks[s], vs[s], len_s, kv_heads, kv_head_for_head, scale_value)
+            try ctx.groupedAttention(&q_s, .{ .q8 = .{ .k = ks[s], .v = vs[s], .kv_seq = len_s, .kv_heads = kv_heads } }, kv_head_for_head, scale_value, .{})
         else blk: {
             var k_t = try ctx.fromSliceRankTyped(.f16, 3, .{ len_s, kv_heads, d }, k_owned[s]);
             defer k_t.deinit();
             var v_t = try ctx.fromSliceRankTyped(.f16, 3, .{ len_s, kv_heads, d }, v_owned[s]);
             defer v_t.deinit();
-            break :blk try ctx.groupedCausalAttentionF16Kv(&q_s, &k_t, &v_t, kv_head_for_head, scale_value);
+            break :blk try ctx.groupedAttention(&q_s, .{ .f16 = .{ .k = &k_t, .v = &v_t } }, kv_head_for_head, scale_value, .{});
         };
         defer ref.deinit();
         try std.testing.expectEqualSlices(f32, ref.dataConst(), out.dataConst()[s * heads * d ..][0 .. heads * d]);
@@ -678,17 +678,17 @@ test "multi-stream attention rejects bad shapes" {
     // Length-0 stream.
     try std.testing.expectError(
         error.InvalidShape,
-        ctx.groupedCausalAttentionMultiF16Kv(&q, &ks, &ks, &.{ 3, 0 }, 1, &map, 0.25),
+        ctx.groupedAttention(&q, .{ .multi_f16 = .{ .k = &ks, .v = &ks, .lens = &.{ 3, 0 }, .kv_heads = 1 } }, &map, 0.25, .{}),
     );
     // Span shorter than its declared len.
     try std.testing.expectError(
         error.InvalidShape,
-        ctx.groupedCausalAttentionMultiF16Kv(&q, &ks, &ks, &.{ 3, 4 }, 1, &map, 0.25),
+        ctx.groupedAttention(&q, .{ .multi_f16 = .{ .k = &ks, .v = &ks, .lens = &.{ 3, 4 }, .kv_heads = 1 } }, &map, 0.25, .{}),
     );
     // lens count != stream count.
     try std.testing.expectError(
         error.InvalidShape,
-        ctx.groupedCausalAttentionMultiF16Kv(&q, &ks, &ks, &.{3}, 1, &map, 0.25),
+        ctx.groupedAttention(&q, .{ .multi_f16 = .{ .k = &ks, .v = &ks, .lens = &.{3}, .kv_heads = 1 } }, &map, 0.25, .{}),
     );
 }
 
@@ -778,7 +778,7 @@ fn checkBiasedBidirectionalParity(
     var bias = try ctx.fromSliceRank(2, .{ q_seq, kv_seq }, bias_vals);
     defer bias.deinit();
 
-    var got = try ctx.groupedBidirectionalAttentionBiased(&q, &k, &v, kv_head_for_head, scale_value, &bias);
+    var got = try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, kv_head_for_head, scale_value, .{ .mask = .bidirectional, .bias = &bias });
     defer got.deinit();
 
     // Naive f64 reference: full [kv_seq] score row per (head, query),
@@ -817,7 +817,7 @@ fn checkBiasedBidirectionalParity(
     // bidirectional path (same tolerance; the two may take different
     // summation orders through exp).
     if (bias_kind == .constant) {
-        var plain = try ctx.groupedBidirectionalAttention(&q, &k, &v, kv_head_for_head, scale_value);
+        var plain = try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, kv_head_for_head, scale_value, .{ .mask = .bidirectional });
         defer plain.deinit();
         try expectTiledAttentionClose(plain.dataConst(), got.dataConst());
     }
@@ -888,7 +888,7 @@ test "grouped bidirectional biased attention rejects a mis-shaped bias" {
     defer bias.deinit();
     try std.testing.expectError(
         error.InvalidShape,
-        ctx.groupedBidirectionalAttentionBiased(&q, &k, &v, &map, 0.25, &bias),
+        ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, &map, 0.25, .{ .mask = .bidirectional, .bias = &bias }),
     );
 }
 
@@ -919,7 +919,7 @@ fn checkWindowedAttention(
     var v = try ctx.fromSliceRank(3, .{ S, KV, D }, &v_vals);
     defer v.deinit();
 
-    var got = try ctx.groupedCausalAttentionWindowed(&q, &k, &v, kv_head_for_head, scale_value, window);
+    var got = try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, kv_head_for_head, scale_value, .{ .window = window });
     defer got.deinit();
 
     // Scalar reference: query p attends keys [max(0, p-window+1), p] (window 0 = full).
@@ -1001,7 +1001,7 @@ test "grouped causal attention tiled dispatch matches a naive reference at long 
     defer v.deinit();
 
     for ([_]usize{ 0, 13 }) |window| {
-        var got = try ctx.groupedCausalAttentionWindowed(&q, &k, &v, &kv_head_for_head, scale_value, window);
+        var got = try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, &kv_head_for_head, scale_value, .{ .window = window });
         defer got.deinit();
 
         const source_offset = KV - S;
@@ -1089,14 +1089,14 @@ test "grouped bidirectional attention matches a naive full-range reference" {
         var v = try ctx.fromSliceRank(3, .{ case.kv, case.kvh, case.d }, v_vals);
         defer v.deinit();
 
-        var got = try ctx.groupedBidirectionalAttention(&q, &k, &v, head_map, scale_value);
+        var got = try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, head_map, scale_value, .{ .mask = .bidirectional });
         defer got.deinit();
 
         var k16 = try ctx.castTyped(.f32, .f16, &k);
         defer k16.deinit();
         var v16 = try ctx.castTyped(.f32, .f16, &v);
         defer v16.deinit();
-        var got16 = try ctx.groupedBidirectionalAttentionF16Kv(&q, &k16, &v16, head_map, scale_value);
+        var got16 = try ctx.groupedAttention(&q, .{ .f16 = .{ .k = &k16, .v = &v16 } }, head_map, scale_value, .{ .mask = .bidirectional });
         defer got16.deinit();
 
         for (0..case.h) |h| {
@@ -1176,11 +1176,11 @@ test "exec attention stats capture is output-neutral and feeds the backward stat
         var v = try ctx.fromSliceRank(3, .{ kv_seq, kv_heads, d }, v_data);
         defer v.deinit();
 
-        var out_plain = try ctx.groupedCausalAttention(&q, &k, &v, kv_head_for_head, scale);
+        var out_plain = try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, kv_head_for_head, scale, .{});
         defer out_plain.deinit();
         const stats = try allocator.alloc(f32, heads * q_seq * 2);
         defer allocator.free(stats);
-        var out_stats = try ctx.groupedCausalAttentionStatsOut(&q, &k, &v, kv_head_for_head, scale, 0, true, stats);
+        var out_stats = try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, kv_head_for_head, scale, .{ .stats_out = stats });
         defer out_stats.deinit();
         // Capture is write-only: the forward output must be BITWISE identical.
         try std.testing.expectEqualSlices(f32, out_plain.dataConst(), out_stats.dataConst());
@@ -1252,17 +1252,18 @@ test "exec attention stats capture is output-neutral and feeds the backward stat
         const causal = variant[1] == 1;
         const stats = try allocator.alloc(f32, heads * q_seq * 2);
         defer allocator.free(stats);
-        var out = try ctx.groupedCausalAttentionStatsOut(&q, &k, &v, &kv_head_for_head, 0.125, window, causal, stats);
+        const mask: exec_mod.AttentionMask = if (causal) .causal else .bidirectional;
+        var out = try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, &kv_head_for_head, 0.125, .{ .mask = mask, .window = window, .stats_out = stats });
         defer out.deinit();
 
-        var ref = try ctx.groupedCausalAttentionBackward(&q, &k, &v, &gy, &kv_head_for_head, 0.125, window, causal, null, null, true, true, true);
+        var ref = try ctx.groupedAttentionBackward(&q, &k, &v, &gy, &kv_head_for_head, 0.125, window, causal, null, null, true, true, true);
         defer ref.deinit();
         // Stats + output: the autograd-record route (one-pass softmax rebuild
         // AND the gy.O row dot).
-        var got = try ctx.groupedCausalAttentionBackward(&q, &k, &v, &gy, &kv_head_for_head, 0.125, window, causal, stats, &out, true, true, true);
+        var got = try ctx.groupedAttentionBackward(&q, &k, &v, &gy, &kv_head_for_head, 0.125, window, causal, stats, &out, true, true, true);
         defer got.deinit();
         // Stats without output: the in-panel row dot fallback.
-        var got_no_out = try ctx.groupedCausalAttentionBackward(&q, &k, &v, &gy, &kv_head_for_head, 0.125, window, causal, stats, null, true, true, true);
+        var got_no_out = try ctx.groupedAttentionBackward(&q, &k, &v, &gy, &kv_head_for_head, 0.125, window, causal, stats, null, true, true, true);
         defer got_no_out.deinit();
         for ([_][2][]const f32{
             .{ ref.q.?.dataConst(), got.q.?.dataConst() },

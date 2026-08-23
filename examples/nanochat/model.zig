@@ -91,7 +91,7 @@ pub const Config = struct {
 
     /// groupedAttention window for layer i, in Fucina's kernel convention.
     /// Fucina's `.window=W` attends [i-W+1, i] = W keys INCLUDING self
-    /// (exec.zig §groupedCausalAttentionWindowed); the reference left bound
+    /// (exec.zig §groupedAttention, .window); the reference left bound
     /// excludes self (flash_attention.py _sdpa_attention masks
     /// `(row_idx - col_idx) <= window` = window+1 keys), so every arm returns
     /// the reference value + 1. gpt.py _compute_window_sizes maps 'L' (and the

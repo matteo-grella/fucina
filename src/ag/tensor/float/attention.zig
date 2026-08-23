@@ -32,12 +32,13 @@ pub fn Ops(comptime Self: type) type {
 
         /// Grouped (GQA) attention over every KV representation, `q` = `self`
         /// with tags `.{ .seq, .head, .d }`. The KV representation is
-        /// comptime-dispatched from `@TypeOf(k)`:
+        /// comptime-dispatched from `@TypeOf(k)` into the exec entry's
+        /// `KvView`:
         ///
         ///   - `*Tensor(.{ .seq, .kv_head, .d })` (f32)        → f32 kernel
         ///   - f16 Tensor with the same tags                   → f16 kernel (decode KV cache)
         ///   - `[]const BlockQ8_0`                             → q8_0 raw-block cache,
-        ///     layout `[kv_seq, kv_heads, d/32]` (see `ExecContext.groupedCausalAttentionQ8Kv`)
+        ///     layout `[kv_seq, kv_heads, d/32]` (see `ExecContext.groupedAttention`'s `.q8` view)
         ///   - `[]const []const f16`                           → ragged multi-stream decode
         ///   - `[]const []const BlockQ8_0`                     → ragged multi-stream decode (q8_0)
         ///
@@ -62,8 +63,7 @@ pub fn Ops(comptime Self: type) type {
         ///     `lens[s]` cached positions of `k[s]`/`v[s]`; per-stream
         ///     results are bit-identical to N single-stream f16/q8 calls.
         ///
-        /// Gradient matrix (unchanged from the former per-variant entries;
-        /// no longer readable off the name):
+        /// Gradient matrix (not readable off the call site):
         ///
         ///   - f32 KV: full q/k/v backward (windowed re-masks to the window).
         ///   - f16 KV: q-grad only — K/V are cache constants, widened to f32
@@ -98,20 +98,23 @@ pub fn Ops(comptime Self: type) type {
             };
             const mask: AttentionMask = comptime if (@hasField(O, "mask")) opts.mask else .causal;
             comptime {
-                // Field whitelist per KV repr: a misspelled option (`.windw`)
-                // must be a compile error, never silently-full-causal attention.
-                const allowed: []const []const u8 = switch (repr) {
-                    .f32_kv => &.{ "mask", "window", "bias" },
-                    .f16_kv => &.{ "mask", "window" },
-                    .q8_kv => &.{ "window", "kv_seq", "kv_heads" },
-                    .multi_f16_kv, .multi_q8_kv => &.{ "lens", "kv_heads" },
-                };
+                // Every option must be a field of the exec entry's
+                // AttentionOptions or one of the repr-specific shape fields:
+                // a misspelled option (`.windw`) must be a compile error,
+                // never silently-full-causal attention.
                 for (@typeInfo(O).@"struct".fields) |field| {
-                    var known = false;
-                    for (allowed) |name| {
-                        if (std.mem.eql(u8, field.name, name)) known = true;
+                    const shape_field = std.mem.eql(u8, field.name, "kv_seq") or
+                        std.mem.eql(u8, field.name, "kv_heads") or
+                        std.mem.eql(u8, field.name, "lens");
+                    if (!shape_field and !@hasField(exec_mod.AttentionOptions, field.name)) {
+                        @compileError("groupedAttention: unknown option ." ++ field.name ++ " for the ." ++ @tagName(repr) ++ " KV representation");
                     }
-                    if (!known) @compileError("groupedAttention: unknown option ." ++ field.name ++ " for the ." ++ @tagName(repr) ++ " KV representation");
+                }
+                // Repr-dependent constraints, each expressed once; the exec
+                // entry answers the same combinations with
+                // error.UnsupportedAttentionVariant at runtime.
+                if (@hasField(O, "stats_out")) {
+                    @compileError("groupedAttention: softmax stats capture is wired by the autograd record, not an option here");
                 }
                 if (mask == .bidirectional and @hasField(O, "window")) {
                     @compileError("groupedAttention: no bidirectional windowed kernel exists — realize SWA reach by narrowing the K/V views");
@@ -119,16 +122,38 @@ pub fn Ops(comptime Self: type) type {
                 if (@hasField(O, "bias") and mask != .bidirectional) {
                     @compileError("groupedAttention: .bias requires .mask = .bidirectional (the only additive-bias kernel)");
                 }
+                if (@hasField(O, "bias") and repr != .f32_kv) {
+                    @compileError("groupedAttention: .bias requires the .f32_kv KV representation (the only additive-bias kernel)");
+                }
+                if (@hasField(O, "mask") and (repr == .q8_kv or repr == .multi_f16_kv or repr == .multi_q8_kv)) {
+                    @compileError("groupedAttention: the ." ++ @tagName(repr) ++ " KV representation is causal-only");
+                }
+                if (@hasField(O, "window") and (repr == .multi_f16_kv or repr == .multi_q8_kv)) {
+                    @compileError("groupedAttention: the multi-stream KV reprs have no window (each stream attends its full cached length)");
+                }
                 switch (repr) {
-                    .q8_kv => if (!@hasField(O, "kv_seq") or !@hasField(O, "kv_heads")) {
-                        @compileError("groupedAttention: the q8_0-block KV repr requires .kv_seq and .kv_heads (raw blocks carry no shape; layout [kv_seq, kv_heads, d/32])");
+                    .f32_kv, .f16_kv => if (@hasField(O, "kv_seq") or @hasField(O, "kv_heads") or @hasField(O, "lens")) {
+                        @compileError("groupedAttention: ." ++ @tagName(repr) ++ " tensors carry their own shape; .kv_seq/.kv_heads/.lens apply to the raw-block and multi-stream KV reprs only");
                     },
-                    .multi_f16_kv, .multi_q8_kv => if (!@hasField(O, "lens") or !@hasField(O, "kv_heads")) {
-                        @compileError("groupedAttention: the multi-stream KV reprs require .lens and .kv_heads (q's .seq tag is the stream axis)");
+                    .q8_kv => {
+                        if (!@hasField(O, "kv_seq") or !@hasField(O, "kv_heads")) {
+                            @compileError("groupedAttention: the q8_0-block KV repr requires .kv_seq and .kv_heads (raw blocks carry no shape; layout [kv_seq, kv_heads, d/32])");
+                        }
+                        if (@hasField(O, "lens")) {
+                            @compileError("groupedAttention: .lens applies to the multi-stream KV reprs only");
+                        }
                     },
-                    else => {},
+                    .multi_f16_kv, .multi_q8_kv => {
+                        if (!@hasField(O, "lens") or !@hasField(O, "kv_heads")) {
+                            @compileError("groupedAttention: the multi-stream KV reprs require .lens and .kv_heads (q's .seq tag is the stream axis)");
+                        }
+                        if (@hasField(O, "kv_seq")) {
+                            @compileError("groupedAttention: .kv_seq applies to the q8_0-block KV repr only");
+                        }
+                    },
                 }
             }
+            const window: usize = if (comptime @hasField(O, "window")) opts.window else 0;
             switch (comptime repr) {
                 .f32_kv => {
                     if (comptime @hasField(O, "bias")) {
@@ -140,26 +165,17 @@ pub fn Ops(comptime Self: type) type {
                         if (self.requiresGrad() or k.requiresGrad() or v.requiresGrad() or bias_ptr.requiresGrad()) {
                             return error.UnsupportedGradient;
                         }
-                        var value = try ctx.groupedBidirectionalAttentionBiased(self.asRawTensor(), k.asRawTensor(), v.asRawTensor(), kv_head_for_head, scale_value, bias_ptr.asRawTensor());
+                        var value = try ctx.groupedAttention(self.asRawTensor(), .{ .f32 = .{ .k = k.asRawTensor(), .v = v.asRawTensor() } }, kv_head_for_head, scale_value, .{ .mask = .bidirectional, .bias = bias_ptr.asRawTensor() });
                         errdefer value.deinit();
                         return finishNoGrad(.{ .seq, out_tag }, ctx, value);
                     }
-                    const window: usize = if (comptime @hasField(O, "window")) opts.window else 0;
                     const wants_grad = self.requiresGrad() or k.requiresGrad() or v.requiresGrad();
                     // Forward-saved softmax {max, sum_exp} for the VJP's
-                    // one-pass probability rebuild; the stats entry's output
-                    // is bitwise identical to the stats-less ones.
+                    // one-pass probability rebuild; the capture is write-only,
+                    // so the output is bitwise identical either way.
                     const row_stats = try rowStatsAlloc(ctx, wants_grad, kv_head_for_head.len * self.asRawTensor().shape.at(0));
                     defer if (row_stats) |stats| ctx.allocator.free(stats);
-                    var value = try if (row_stats) |stats|
-                        ctx.groupedCausalAttentionStatsOut(self.asRawTensor(), k.asRawTensor(), v.asRawTensor(), kv_head_for_head, scale_value, window, mask == .causal, stats)
-                    else switch (comptime mask) {
-                        .causal => if (comptime @hasField(O, "window"))
-                            ctx.groupedCausalAttentionWindowed(self.asRawTensor(), k.asRawTensor(), v.asRawTensor(), kv_head_for_head, scale_value, opts.window)
-                        else
-                            ctx.groupedCausalAttention(self.asRawTensor(), k.asRawTensor(), v.asRawTensor(), kv_head_for_head, scale_value),
-                        .bidirectional => ctx.groupedBidirectionalAttention(self.asRawTensor(), k.asRawTensor(), v.asRawTensor(), kv_head_for_head, scale_value),
-                    };
+                    var value = try ctx.groupedAttention(self.asRawTensor(), .{ .f32 = .{ .k = k.asRawTensor(), .v = v.asRawTensor() } }, kv_head_for_head, scale_value, .{ .mask = mask, .window = window, .stats_out = row_stats });
                     errdefer value.deinit();
                     return finishOp(.{ .seq, out_tag }, ctx, value, wants_grad, GroupedCausalAttentionBackward, .{
                         ctx.allocator,
@@ -178,41 +194,30 @@ pub fn Ops(comptime Self: type) type {
                     });
                 },
                 .f16_kv => {
-                    const window: usize = if (comptime @hasField(O, "window")) opts.window else 0;
                     if (self.requiresGrad()) {
                         return f16KvAttentionWithGrad(self, ctx, k, v, kv_head_for_head, out_tag, scale_value, window, mask == .causal);
                     }
-                    var value = try switch (comptime mask) {
-                        .causal => if (comptime @hasField(O, "window"))
-                            ctx.groupedCausalAttentionF16KvWindowed(self.asRawTensor(), k.asRawTensor(), v.asRawTensor(), kv_head_for_head, scale_value, opts.window)
-                        else
-                            ctx.groupedCausalAttentionF16Kv(self.asRawTensor(), k.asRawTensor(), v.asRawTensor(), kv_head_for_head, scale_value),
-                        .bidirectional => ctx.groupedBidirectionalAttentionF16Kv(self.asRawTensor(), k.asRawTensor(), v.asRawTensor(), kv_head_for_head, scale_value),
-                    };
+                    var value = try ctx.groupedAttention(self.asRawTensor(), .{ .f16 = .{ .k = k.asRawTensor(), .v = v.asRawTensor() } }, kv_head_for_head, scale_value, .{ .mask = mask, .window = window });
                     errdefer value.deinit();
                     return finishNoGrad(.{ .seq, out_tag }, ctx, value);
                 },
                 .q8_kv => {
                     if (self.requiresGrad()) {
-                        const window: usize = if (comptime @hasField(O, "window")) opts.window else 0;
                         return q8KvAttentionWithGrad(self, ctx, k, v, opts.kv_seq, opts.kv_heads, kv_head_for_head, out_tag, scale_value, window);
                     }
-                    var value = if (comptime @hasField(O, "window"))
-                        try ctx.groupedCausalAttentionQ8KvWindowed(self.asRawTensor(), k, v, opts.kv_seq, opts.kv_heads, kv_head_for_head, scale_value, opts.window)
-                    else
-                        try ctx.groupedCausalAttentionQ8Kv(self.asRawTensor(), k, v, opts.kv_seq, opts.kv_heads, kv_head_for_head, scale_value);
+                    var value = try ctx.groupedAttention(self.asRawTensor(), .{ .q8 = .{ .k = k, .v = v, .kv_seq = opts.kv_seq, .kv_heads = opts.kv_heads } }, kv_head_for_head, scale_value, .{ .window = window });
                     errdefer value.deinit();
                     return finishNoGrad(.{ .seq, out_tag }, ctx, value);
                 },
                 .multi_f16_kv => {
                     if (self.requiresGrad()) return error.UnsupportedGradient;
-                    var value = try ctx.groupedCausalAttentionMultiF16Kv(self.asRawTensor(), k, v, opts.lens, opts.kv_heads, kv_head_for_head, scale_value);
+                    var value = try ctx.groupedAttention(self.asRawTensor(), .{ .multi_f16 = .{ .k = k, .v = v, .lens = opts.lens, .kv_heads = opts.kv_heads } }, kv_head_for_head, scale_value, .{});
                     errdefer value.deinit();
                     return finishNoGrad(.{ .seq, out_tag }, ctx, value);
                 },
                 .multi_q8_kv => {
                     if (self.requiresGrad()) return error.UnsupportedGradient;
-                    var value = try ctx.groupedCausalAttentionMultiQ8Kv(self.asRawTensor(), k, v, opts.lens, opts.kv_heads, kv_head_for_head, scale_value);
+                    var value = try ctx.groupedAttention(self.asRawTensor(), .{ .multi_q8 = .{ .k = k, .v = v, .lens = opts.lens, .kv_heads = opts.kv_heads } }, kv_head_for_head, scale_value, .{});
                     errdefer value.deinit();
                     return finishNoGrad(.{ .seq, out_tag }, ctx, value);
                 },
@@ -246,12 +251,7 @@ pub fn Ops(comptime Self: type) type {
             try ctx.dequantizeQ8_0RowsInto(v32.data(), v_blocks);
             const row_stats = try rowStatsAlloc(ctx, true, kv_head_for_head.len * self.asRawTensor().shape.at(0));
             defer if (row_stats) |stats| ctx.allocator.free(stats);
-            var value = if (row_stats) |stats|
-                try ctx.groupedCausalAttentionStatsOut(self.asRawTensor(), &k32, &v32, kv_head_for_head, scale_value, window, true, stats)
-            else if (window == 0)
-                try ctx.groupedCausalAttention(self.asRawTensor(), &k32, &v32, kv_head_for_head, scale_value)
-            else
-                try ctx.groupedCausalAttentionWindowed(self.asRawTensor(), &k32, &v32, kv_head_for_head, scale_value, window);
+            var value = try ctx.groupedAttention(self.asRawTensor(), .{ .f32 = .{ .k = &k32, .v = &v32 } }, kv_head_for_head, scale_value, .{ .window = window, .stats_out = row_stats });
             errdefer value.deinit();
             return finishOp(.{ .seq, out_tag }, ctx, value, true, GroupedCausalAttentionBackward, .{
                 ctx.allocator,
@@ -292,14 +292,8 @@ pub fn Ops(comptime Self: type) type {
             defer v32.deinit();
             const row_stats = try rowStatsAlloc(ctx, true, kv_head_for_head.len * self.asRawTensor().shape.at(0));
             defer if (row_stats) |stats| ctx.allocator.free(stats);
-            var value = if (row_stats) |stats|
-                try ctx.groupedCausalAttentionStatsOut(self.asRawTensor(), &k32, &v32, kv_head_for_head, scale_value, window, causal, stats)
-            else if (!causal)
-                try ctx.groupedBidirectionalAttention(self.asRawTensor(), &k32, &v32, kv_head_for_head, scale_value)
-            else if (window == 0)
-                try ctx.groupedCausalAttention(self.asRawTensor(), &k32, &v32, kv_head_for_head, scale_value)
-            else
-                try ctx.groupedCausalAttentionWindowed(self.asRawTensor(), &k32, &v32, kv_head_for_head, scale_value, window);
+            const mask: AttentionMask = if (causal) .causal else .bidirectional;
+            var value = try ctx.groupedAttention(self.asRawTensor(), .{ .f32 = .{ .k = &k32, .v = &v32 } }, kv_head_for_head, scale_value, .{ .mask = mask, .window = window, .stats_out = row_stats });
             errdefer value.deinit();
             return finishOp(.{ .seq, out_tag }, ctx, value, true, GroupedCausalAttentionBackward, .{
                 ctx.allocator,

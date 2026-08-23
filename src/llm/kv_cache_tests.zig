@@ -56,7 +56,7 @@ test "cached decode matches full causal attention per position (f16)" {
     defer k_all_f16.deinit();
     var v_all_f16 = try ctx.castTyped(.f32, .f16, v_all.asRawTensor());
     defer v_all_f16.deinit();
-    var full = try ctx.groupedCausalAttentionF16Kv(q_all.asRawTensor(), &k_all_f16, &v_all_f16, &kv_head_for_head, scale);
+    var full = try ctx.groupedAttention(q_all.asRawTensor(), .{ .f16 = .{ .k = &k_all_f16, .v = &v_all_f16 } }, &kv_head_for_head, scale, .{});
     defer full.deinit();
     const full_data = full.dataConst();
 
@@ -87,7 +87,7 @@ test "cached decode matches full causal attention per position (f16)" {
         var v_view = try cache.v[0].narrow(&ctx, .seq, 0, cached_len);
         defer v_view.deinit();
 
-        var step = try ctx.groupedCausalAttentionF16Kv(q_row.asRawTensor(), k_view.asRawTensor(), v_view.asRawTensor(), &kv_head_for_head, scale);
+        var step = try ctx.groupedAttention(q_row.asRawTensor(), .{ .f16 = .{ .k = k_view.asRawTensor(), .v = v_view.asRawTensor() } }, &kv_head_for_head, scale, .{});
         defer step.deinit();
         cache.advance(1);
 
@@ -292,10 +292,7 @@ fn expectQ8AttentionParity(
     cache.advance(S);
 
     // q8_0 kernel on the quantized cache.
-    var got = if (window == 0)
-        try ctx.groupedCausalAttentionQ8Kv(q_all.asRawTensor(), cache.kBlocks(0, S), cache.vBlocks(0, S), S, KV, kv_head_for_head, scale)
-    else
-        try ctx.groupedCausalAttentionQ8KvWindowed(q_all.asRawTensor(), cache.kBlocks(0, S), cache.vBlocks(0, S), S, KV, kv_head_for_head, scale, window);
+    var got = try ctx.groupedAttention(q_all.asRawTensor(), .{ .q8 = .{ .k = cache.kBlocks(0, S), .v = cache.vBlocks(0, S), .kv_seq = S, .kv_heads = KV } }, kv_head_for_head, scale, .{ .window = window });
     defer got.deinit();
 
     // Tight reference: f32 kernel on the dequantized cache.
@@ -309,10 +306,7 @@ fn expectQ8AttentionParity(
     defer k_deq_t.deinit();
     var v_deq_t = try KvInput.fromSlice(ctx, .{ S, KV, D }, v_deq);
     defer v_deq_t.deinit();
-    var want = if (window == 0)
-        try ctx.groupedCausalAttention(q_all.asRawTensor(), k_deq_t.asRawTensor(), v_deq_t.asRawTensor(), kv_head_for_head, scale)
-    else
-        try ctx.groupedCausalAttentionWindowed(q_all.asRawTensor(), k_deq_t.asRawTensor(), v_deq_t.asRawTensor(), kv_head_for_head, scale, window);
+    var want = try ctx.groupedAttention(q_all.asRawTensor(), .{ .f32 = .{ .k = k_deq_t.asRawTensor(), .v = v_deq_t.asRawTensor() } }, kv_head_for_head, scale, .{ .window = window });
     defer want.deinit();
     if (S >= 48) {
         // Tiled kernel (long prefill): still the dequant-scratch path with
@@ -332,10 +326,7 @@ fn expectQ8AttentionParity(
     }
 
     // Lossy sanity bound vs the original f32 K/V.
-    var full = if (window == 0)
-        try ctx.groupedCausalAttention(q_all.asRawTensor(), k_all.asRawTensor(), v_all.asRawTensor(), kv_head_for_head, scale)
-    else
-        try ctx.groupedCausalAttentionWindowed(q_all.asRawTensor(), k_all.asRawTensor(), v_all.asRawTensor(), kv_head_for_head, scale, window);
+    var full = try ctx.groupedAttention(q_all.asRawTensor(), .{ .f32 = .{ .k = k_all.asRawTensor(), .v = v_all.asRawTensor() } }, kv_head_for_head, scale, .{ .window = window });
     defer full.deinit();
     for (full.dataConst(), got.dataConst()) |want_value, got_value| {
         try std.testing.expectApproxEqAbs(want_value, got_value, 5e-2);
@@ -404,7 +395,7 @@ test "cached decode matches full causal attention per position (q8_0)" {
     defer full_cache.deinit();
     try full_cache.appendLayer(&ctx, 0, &k_all, &v_all);
     full_cache.advance(S);
-    var full = try ctx.groupedCausalAttentionQ8Kv(q_all.asRawTensor(), full_cache.kBlocks(0, S), full_cache.vBlocks(0, S), S, KV, &kv_head_for_head, scale);
+    var full = try ctx.groupedAttention(q_all.asRawTensor(), .{ .q8 = .{ .k = full_cache.kBlocks(0, S), .v = full_cache.vBlocks(0, S), .kv_seq = S, .kv_heads = KV } }, &kv_head_for_head, scale, .{});
     defer full.deinit();
     const full_data = full.dataConst();
 
@@ -421,7 +412,7 @@ test "cached decode matches full causal attention per position (q8_0)" {
 
         try cache.appendLayer(&ctx, 0, &k_row, &v_row);
         const cached_len = cache.len + 1;
-        var step = try ctx.groupedCausalAttentionQ8Kv(q_row.asRawTensor(), cache.kBlocks(0, cached_len), cache.vBlocks(0, cached_len), cached_len, KV, &kv_head_for_head, scale);
+        var step = try ctx.groupedAttention(q_row.asRawTensor(), .{ .q8 = .{ .k = cache.kBlocks(0, cached_len), .v = cache.vBlocks(0, cached_len), .kv_seq = cached_len, .kv_heads = KV } }, &kv_head_for_head, scale, .{});
         defer step.deinit();
         cache.advance(1);
 
@@ -499,21 +490,21 @@ fn expectTruncateReappendParity(ctx: *ExecContext, dtype: KvDtype) !void {
             defer k_view.deinit();
             var v_view = try cache.v[0].narrow(ctx, .seq, 0, S);
             defer v_view.deinit();
-            var got = try ctx.groupedCausalAttentionF16Kv(q_all.asRawTensor(), k_view.asRawTensor(), v_view.asRawTensor(), &kv_head_for_head, scale);
+            var got = try ctx.groupedAttention(q_all.asRawTensor(), .{ .f16 = .{ .k = k_view.asRawTensor(), .v = v_view.asRawTensor() } }, &kv_head_for_head, scale, .{});
             defer got.deinit();
 
             var k_ref = try fresh.k[0].narrow(ctx, .seq, 0, S);
             defer k_ref.deinit();
             var v_ref = try fresh.v[0].narrow(ctx, .seq, 0, S);
             defer v_ref.deinit();
-            var want = try ctx.groupedCausalAttentionF16Kv(q_all.asRawTensor(), k_ref.asRawTensor(), v_ref.asRawTensor(), &kv_head_for_head, scale);
+            var want = try ctx.groupedAttention(q_all.asRawTensor(), .{ .f16 = .{ .k = k_ref.asRawTensor(), .v = v_ref.asRawTensor() } }, &kv_head_for_head, scale, .{});
             defer want.deinit();
             try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
         },
         .q8_0 => {
-            var got = try ctx.groupedCausalAttentionQ8Kv(q_all.asRawTensor(), cache.kBlocks(0, S), cache.vBlocks(0, S), S, KV, &kv_head_for_head, scale);
+            var got = try ctx.groupedAttention(q_all.asRawTensor(), .{ .q8 = .{ .k = cache.kBlocks(0, S), .v = cache.vBlocks(0, S), .kv_seq = S, .kv_heads = KV } }, &kv_head_for_head, scale, .{});
             defer got.deinit();
-            var want = try ctx.groupedCausalAttentionQ8Kv(q_all.asRawTensor(), fresh.kBlocks(0, S), fresh.vBlocks(0, S), S, KV, &kv_head_for_head, scale);
+            var want = try ctx.groupedAttention(q_all.asRawTensor(), .{ .q8 = .{ .k = fresh.kBlocks(0, S), .v = fresh.vBlocks(0, S), .kv_seq = S, .kv_heads = KV } }, &kv_head_for_head, scale, .{});
             defer want.deinit();
             try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
         },

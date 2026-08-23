@@ -107,12 +107,12 @@ fn runCase(io: std.Io, allocator_mode: bench_alloc.AllocatorMode, case: Case) !R
     if (case.stats) {
         const values = try counted.allocator().alloc(f32, case.heads * case.q_seq * 2);
         stats = values;
-        stats_out = try ctx.groupedCausalAttentionStatsOut(&base.q, &base.k, &base.v, base.kv_head_for_head, 0.125, 0, true, values);
+        stats_out = try ctx.groupedAttention(&base.q, .{ .f32 = .{ .k = &base.k, .v = &base.v } }, base.kv_head_for_head, 0.125, .{ .stats_out = values });
     }
     const out_arg: ?*const Tensor = if (stats_out) |*value| value else null;
 
     for (0..3) |_| {
-        var grads = try ctx.groupedCausalAttentionBackward(&base.q, &base.k, &base.v, &base.gy, base.kv_head_for_head, 0.125, 0, true, stats, out_arg, true, true, true);
+        var grads = try ctx.groupedAttentionBackward(&base.q, &base.k, &base.v, &base.gy, base.kv_head_for_head, 0.125, 0, true, stats, out_arg, true, true, true);
         std.mem.doNotOptimizeAway(checksum(&grads));
         grads.deinit();
     }
@@ -125,7 +125,7 @@ fn runCase(io: std.Io, allocator_mode: bench_alloc.AllocatorMode, case: Case) !R
     var timer = try Timer.start(io);
     for (times) |*time| {
         timer.reset();
-        var grads = try ctx.groupedCausalAttentionBackward(&base.q, &base.k, &base.v, &base.gy, base.kv_head_for_head, 0.125, 0, true, stats, out_arg, true, true, true);
+        var grads = try ctx.groupedAttentionBackward(&base.q, &base.k, &base.v, &base.gy, base.kv_head_for_head, 0.125, 0, true, stats, out_arg, true, true, true);
         time.* = timer.read();
         checksum_value += checksum(&grads);
         grads.deinit();

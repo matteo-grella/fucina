@@ -80,6 +80,33 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- One exec attention entry with a typed KV view and typed options: the 13
+  `ExecContext.grouped*Attention*` entries are now
+  `ctx.groupedAttention(q, kv: KvView, kv_head_for_head, scale, opts: AttentionOptions)`
+  plus `ctx.groupedAttentionBackward` (the former
+  `groupedCausalAttentionBackward`, arguments unchanged). `exec.KvView`
+  names the cache representation (`.f32`, `.f16`, `.q8`, `.multi_f16`,
+  `.multi_q8`), `exec.AttentionOptions` the variant (`.mask`, `.window`,
+  `.bias`, `.stats_out`); option combinations with no kernel return
+  `error.UnsupportedAttentionVariant`. Rewrites:
+  `ctx.groupedCausalAttention(q, k, v, map, s)` →
+  `ctx.groupedAttention(q, .{ .f32 = .{ .k = k, .v = v } }, map, s, .{})`;
+  `ctx.groupedCausalAttentionWindowed(..., w)` → `.{ .window = w }`;
+  `ctx.groupedBidirectionalAttention(...)` → `.{ .mask = .bidirectional }`;
+  `ctx.groupedBidirectionalAttentionBiased(..., b)` →
+  `.{ .mask = .bidirectional, .bias = b }`;
+  `ctx.groupedCausalAttentionStatsOut(..., w, causal, st)` →
+  `.{ .mask = if (causal) .causal else .bidirectional, .window = w, .stats_out = st }`;
+  `ctx.groupedCausalAttentionF16Kv`/`...F16KvWindowed`/
+  `ctx.groupedBidirectionalAttentionF16Kv` → the `.f16` view with the same
+  options; `ctx.groupedCausalAttentionQ8Kv[Windowed](q, kb, vb, n, h, map, s[, w])`
+  → `ctx.groupedAttention(q, .{ .q8 = .{ .k = kb, .v = vb, .kv_seq = n, .kv_heads = h } }, map, s, .{ .window = w })`;
+  `ctx.groupedCausalAttentionMulti{F16,Q8}Kv(q, ks, vs, lens, h, map, s)`
+  → `ctx.groupedAttention(q, .{ .multi_f16 = .{ .k = ks, .v = vs, .lens = lens, .kv_heads = h } }, map, s, .{})`
+  (`.multi_q8` for the q8_0 caches). Every view selects the identical
+  kernel path with identical arguments; numerics and the GPU attention
+  gates are unchanged. The `Tensor.groupedAttention` facade (signature,
+  options, comptime diagnostics) is unchanged.
 - Per-format plumbing is comptime-parameterized: each packed quantized
   matmul entry is spelled once, with the format a comptime parameter or
   inferred from the RHS container type. Rewrites:

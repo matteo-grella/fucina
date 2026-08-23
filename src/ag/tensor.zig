@@ -494,7 +494,7 @@ pub fn normParamTagCheck(comptime Obj: type, comptime op_name: []const u8, compt
         @compileError(op_name ++ ": ." ++ param_name ++ " tag ." ++ @tagName(Obj.axis_tags[0]) ++ " does not match the normalized axis ." ++ @tagName(tag));
 }
 
-pub const AttentionMask = enum { causal, bidirectional };
+pub const AttentionMask = exec_mod.AttentionMask;
 
 pub const AttentionKvRepr = enum { f32_kv, f16_kv, q8_kv, multi_f16_kv, multi_q8_kv };
 

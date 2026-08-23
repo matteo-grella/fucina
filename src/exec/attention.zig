@@ -63,7 +63,7 @@ fn KvLane(comptime KvElem: type) type {
 
 /// Head dims the per-query q8_0 attention kernels support: the per-task
 /// dequant scratch row is this many f32s on the stack (Gemma's widest global
-/// head is 512). Validated at the `groupedCausalAttentionQ8Kv*` entries.
+/// head is 512). Validated at the q8_0 arms of `groupedAttention`.
 pub const attention_q8_max_d: usize = 512;
 
 /// Resolve the K or V row that starts at element offset `elem_base` for the
@@ -1615,97 +1615,126 @@ fn attnBwdStatsEnabled() bool {
     return attn_bwd_stats.enabled();
 }
 
-pub fn groupedCausalAttention(
-    self: *ExecContext,
-    q: *const Tensor,
-    k: *const Tensor,
-    v: *const Tensor,
-    kv_head_for_head: []const usize,
-    scale_value: f32,
-) !Tensor {
-    return groupedCausalAttentionImpl(self, f32, q, k, v, kv_head_for_head, scale_value, 0, true, null, null);
-}
+/// Mask mode of `groupedAttention`: causal (each query attends its prefix)
+/// or bidirectional (every query attends every key: the block-diffusion
+/// canvas and OmniVoice encoder attention).
+pub const AttentionMask = enum { causal, bidirectional };
 
-/// As `groupedCausalAttention` with a sliding-window `window` (0 = full
-/// causal; else a query at absolute position `p` attends only keys in
-/// `[max(0, p-window+1), p]`). Used by Gemma's local SWA layers.
-pub fn groupedCausalAttentionWindowed(
-    self: *ExecContext,
-    q: *const Tensor,
-    k: *const Tensor,
-    v: *const Tensor,
-    kv_head_for_head: []const usize,
-    scale_value: f32,
-    window: usize,
-) !Tensor {
-    return groupedCausalAttentionImpl(self, f32, q, k, v, kv_head_for_head, scale_value, window, true, null, null);
-}
+/// K/V operand of `groupedAttention`: one variant per cache representation
+/// the attention kernels accept.
+pub const KvView = union(enum) {
+    /// f32 K/V tensors, `[kv_seq, kv_heads, d]` (training graphs, f32 caches).
+    f32: struct { k: *const Tensor, v: *const Tensor },
+    /// f16 K/V tensors with the same layout (the decode KV cache): half the
+    /// bandwidth, widened to f32 in the kernel. Q and the output stay f32.
+    f16: struct { k: *const tensor.TensorOf(.f16), v: *const tensor.TensorOf(.f16) },
+    /// q8_0 block cache (~quarter the f32 bandwidth and half f16's):
+    /// `kv_seq * kv_heads * d/32` BlockQ8_0 laid out `[kv_seq, kv_heads, d/32]`,
+    /// so each (position, kv_head) row segment is `d/32` consecutive blocks.
+    /// Raw blocks carry no shape, so the view names `kv_seq` and `kv_heads`.
+    /// Kernels dequantize each row into per-task L1 scratch as they stream;
+    /// traffic from the cache stays the quantized 34 bytes/block. Requires
+    /// `d % 32 == 0` and `d <= attention_q8_max_d`. Causal only.
+    q8: struct { k: []const BlockQ8_0, v: []const BlockQ8_0, kv_seq: usize, kv_heads: usize },
+    /// Ragged multi-stream decode over per-stream f16 caches (the batch-N
+    /// decode shape): `q` is `[n_streams, heads, d]`, exactly one query per
+    /// stream, and query row `s` attends ALL `lens[s]` cached positions of
+    /// stream `s`. `k[s]`/`v[s]` hold at least `lens[s]` leading
+    /// `[kv_heads, d]` rows of that stream's cache layer. Dispatch schedules
+    /// flattened (stream, head-unit) items weighted by stream length over
+    /// the SAME per-query kernels m=1 decode uses, so each stream's output
+    /// is bit-identical to its own single-stream `.f16` call. Causal only,
+    /// full reach.
+    multi_f16: struct { k: []const []const f16, v: []const []const f16, lens: []const usize, kv_heads: usize },
+    /// As `.multi_f16` for q8_0 caches: `k[s]`/`v[s]` hold
+    /// `lens[s] * kv_heads * d/32` leading BlockQ8_0 laid out
+    /// `[len, kv_heads, d/32]` (the `kBlocks`/`vBlocks` shape). Requires
+    /// `d % 32 == 0` and `d <= attention_q8_max_d`.
+    multi_q8: struct { k: []const []const BlockQ8_0, v: []const []const BlockQ8_0, lens: []const usize, kv_heads: usize },
+};
 
-/// Bidirectional (non-causal) grouped attention: every query row attends
-/// EVERY key row. The block-diffusion canvas attention — canvas queries
-/// attend the cached prefix plus the whole canvas; an SWA reach limit is
-/// realized by narrowing the K/V views, not by a window here, so no
-/// window parameter exists. Same GQA mapping/shapes as
-/// `groupedCausalAttention` (the shared validation keeps
-/// `q_seq <= kv_seq`, which every prefix+canvas layout satisfies).
-pub fn groupedBidirectionalAttention(
-    self: *ExecContext,
-    q: *const Tensor,
-    k: *const Tensor,
-    v: *const Tensor,
-    kv_head_for_head: []const usize,
-    scale_value: f32,
-) !Tensor {
-    return groupedCausalAttentionImpl(self, f32, q, k, v, kv_head_for_head, scale_value, 0, false, null, null);
-}
+/// Options of `groupedAttention`. Combinations with no kernel return
+/// `error.UnsupportedAttentionVariant` at runtime; the `Tensor.groupedAttention`
+/// facade rejects them at comptime.
+pub const AttentionOptions = struct {
+    mask: AttentionMask = .causal,
+    /// Sliding-window attention: 0 = full reach; else a query at absolute
+    /// position `p` attends only keys in `[max(0, p-window+1), p]` (Gemma's
+    /// local SWA layers). Causal only: a bidirectional reach limit is
+    /// realized by narrowing the K/V views instead.
+    window: usize = 0,
+    /// Additive f32 bias of shape `[q_seq, kv_seq]` added to the SCALED
+    /// scores before the softmax: score(query s, key kv) =
+    /// dot(q_s, k_kv) * scale_value + bias[s][kv] (OmniVoice's uncond CFG
+    /// +1.0/0.0 row, ggml_soft_max_ext mask semantics). An additive soft
+    /// bias, NOT -inf masking: a -inf bias value poisons its query row on
+    /// the tiled kernel like a NaN logit does. `.bidirectional` + `.f32`
+    /// KV only.
+    bias: ?*const Tensor = null,
+    /// Per-(head, query) softmax {max, sum_exp} capture, interleaved f32
+    /// pairs of length heads * q_seq * 2. Each kernel records the
+    /// normalizer IT used, and the output is BITWISE identical with or
+    /// without capture (write-only). The stats feed
+    /// `groupedAttentionBackward`, which then rebuilds this forward's
+    /// probabilities in one pass instead of three. `.f32` KV only.
+    stats_out: ?[]f32 = null,
+};
 
-/// As `groupedBidirectionalAttention` with an additive f32 `bias` of shape
-/// `[q_seq, kv_seq]` added to the SCALED scores before the softmax:
-/// score(query s, key kv) = dot(q_s, k_kv) * scale_value + bias[s][kv]
-/// (OmniVoice's uncond CFG +1.0/0.0 row — ggml_soft_max_ext mask semantics).
-/// This is an additive soft bias, NOT -inf masking: a -inf bias value would
-/// poison its query row on the tiled kernel like a NaN logit does.
-pub fn groupedBidirectionalAttentionBiased(
+/// Grouped-query (GQA) attention over every KV representation: `q` is
+/// `[q_seq, heads, d]` f32, `kv_head_for_head[h]` maps each query head to
+/// its KV head, and the result is `[q_seq, heads * d]` f32. `kv` selects
+/// the cache representation (see `KvView`), `opts` the mask/window/bias/
+/// stats variant (see `AttentionOptions`). Requires `q_seq <= kv_seq`
+/// (validated, like the shapes and the head map). Kernel selection is by
+/// shape: long prefill runs the query-tiled online-softmax kernel (same
+/// math as the per-query kernels, different summation grouping, ~1e-6
+/// relative), decode and short prefill stay on the bit-identical per-query
+/// kernels. On GPU builds the f32/f16 arms offload behind the provider's
+/// attention gate; every other variant stays on CPU.
+///
+/// Option combinations with no kernel return
+/// `error.UnsupportedAttentionVariant`: `.bidirectional` with a window,
+/// `.bias` with `.causal` or a non-`.f32` view, `.stats_out` on a
+/// non-`.f32` view, `.bidirectional` on the `.q8` or multi-stream views,
+/// and a window on the multi-stream views.
+pub fn groupedAttention(
     self: *ExecContext,
     q: *const Tensor,
-    k: *const Tensor,
-    v: *const Tensor,
+    kv: KvView,
     kv_head_for_head: []const usize,
     scale_value: f32,
-    bias: *const Tensor,
+    opts: AttentionOptions,
 ) !Tensor {
-    return groupedCausalAttentionImpl(self, f32, q, k, v, kv_head_for_head, scale_value, 0, false, bias, null);
-}
-
-/// As the f32 grouped attention forwards (`causal`/`window` select the
-/// causal, windowed, or bidirectional variant) additionally recording the
-/// per-(head, query) softmax {max, sum_exp} statistics into `stats`
-/// (interleaved f32 pairs, length heads * q_seq * 2). The output is
-/// BITWISE identical to the stats-less entries — capture is write-only.
-/// The stats feed `groupedCausalAttentionBackward`, which then rebuilds
-/// this forward's probabilities in one pass instead of three.
-pub fn groupedCausalAttentionStatsOut(
-    self: *ExecContext,
-    q: *const Tensor,
-    k: *const Tensor,
-    v: *const Tensor,
-    kv_head_for_head: []const usize,
-    scale_value: f32,
-    window: usize,
-    causal: bool,
-    stats: []f32,
-) !Tensor {
-    return groupedCausalAttentionImpl(self, f32, q, k, v, kv_head_for_head, scale_value, window, causal, null, stats);
+    if (opts.mask == .bidirectional and opts.window != 0) return error.UnsupportedAttentionVariant;
+    if (opts.bias != null and (opts.mask == .causal or kv != .f32)) return error.UnsupportedAttentionVariant;
+    if (opts.stats_out != null and kv != .f32) return error.UnsupportedAttentionVariant;
+    switch (kv) {
+        .f32 => |view| return groupedCausalAttentionImpl(self, f32, q, view.k, view.v, kv_head_for_head, scale_value, opts.window, opts.mask == .causal, opts.bias, opts.stats_out),
+        .f16 => |view| return groupedCausalAttentionImpl(self, f16, q, view.k, view.v, kv_head_for_head, scale_value, opts.window, opts.mask == .causal, null, null),
+        .q8 => |view| {
+            if (opts.mask != .causal) return error.UnsupportedAttentionVariant;
+            return groupedCausalAttentionQ8KvImpl(self, q, view.k, view.v, view.kv_seq, view.kv_heads, kv_head_for_head, scale_value, opts.window);
+        },
+        .multi_f16 => |view| {
+            if (opts.mask != .causal or opts.window != 0) return error.UnsupportedAttentionVariant;
+            return groupedCausalAttentionMultiImpl(self, f16, q, view.k, view.v, view.lens, view.kv_heads, kv_head_for_head, scale_value);
+        },
+        .multi_q8 => |view| {
+            if (opts.mask != .causal or opts.window != 0) return error.UnsupportedAttentionVariant;
+            return groupedCausalAttentionMultiImpl(self, BlockQ8_0, q, view.k, view.v, view.lens, view.kv_heads, kv_head_for_head, scale_value);
+        },
+    }
 }
 
 /// `stats` (optional): the forward's saved per-(head, query) {max, sum_exp}
-/// pairs from `groupedCausalAttentionStatsOut` — length heads * q_seq * 2.
-/// The tiled route rebuilds the forward's probabilities from them in one
-/// pass instead of the max/sum recompute (gated by FUCINA_NO_ATTN_BWD_STATS);
-/// the small-shape per-kv-head route always recomputes. `out` (the forward
-/// output) is accepted for the autograd record's convenience but unused —
-/// the tiled route's row dot comes from its own cache-resident panels.
-pub fn groupedCausalAttentionBackward(
+/// pairs from `groupedAttention`'s `.stats_out` capture — length
+/// heads * q_seq * 2. The tiled route rebuilds the forward's probabilities
+/// from them in one pass instead of the max/sum recompute (gated by
+/// FUCINA_NO_ATTN_BWD_STATS); the small-shape per-kv-head route always
+/// recomputes. `out` (the forward output) is accepted for the autograd
+/// record's convenience but unused: the tiled route's row dot comes from
+/// its own cache-resident panels.
+pub fn groupedAttentionBackward(
     self: *ExecContext,
     q: *const Tensor,
     k: *const Tensor,
@@ -1981,84 +2010,8 @@ pub fn groupedCausalAttentionBackward(
     return result;
 }
 
-/// Same as `groupedCausalAttention` but the cached K/V are f16 (decode KV
-/// cache): half the bandwidth, widened to f32 in the kernel. Q and the
-/// output stay f32.
-pub fn groupedCausalAttentionF16Kv(
-    self: *ExecContext,
-    q: *const Tensor,
-    k: *const tensor.TensorOf(.f16),
-    v: *const tensor.TensorOf(.f16),
-    kv_head_for_head: []const usize,
-    scale_value: f32,
-) !Tensor {
-    return groupedCausalAttentionImpl(self, f16, q, k, v, kv_head_for_head, scale_value, 0, true, null, null);
-}
-
-/// f16-KV bidirectional attention (see `groupedBidirectionalAttention`):
-/// the block-diffusion canvas pass over a prefix+canvas f16 KV cache.
-pub fn groupedBidirectionalAttentionF16Kv(
-    self: *ExecContext,
-    q: *const Tensor,
-    k: *const tensor.TensorOf(.f16),
-    v: *const tensor.TensorOf(.f16),
-    kv_head_for_head: []const usize,
-    scale_value: f32,
-) !Tensor {
-    return groupedCausalAttentionImpl(self, f16, q, k, v, kv_head_for_head, scale_value, 0, false, null, null);
-}
-
-/// f16-KV decode attention with a sliding `window` (see
-/// `groupedCausalAttentionWindowed`).
-pub fn groupedCausalAttentionF16KvWindowed(
-    self: *ExecContext,
-    q: *const Tensor,
-    k: *const tensor.TensorOf(.f16),
-    v: *const tensor.TensorOf(.f16),
-    kv_head_for_head: []const usize,
-    scale_value: f32,
-    window: usize,
-) !Tensor {
-    return groupedCausalAttentionImpl(self, f16, q, k, v, kv_head_for_head, scale_value, window, true, null, null);
-}
-
-/// Same as `groupedCausalAttention` but the cached K/V are q8_0 blocks
-/// (the quantized decode KV cache, ~quarter the f32 bandwidth and half
-/// f16's): `k_blocks`/`v_blocks` hold `kv_seq * kv_heads * d/32`
-/// BlockQ8_0 laid out `[kv_seq, kv_heads, d/32]`, so each (position,
-/// kv_head) row segment is `d/32` consecutive blocks. Kernels dequantize
-/// each row into per-task L1 scratch as they stream — traffic from the
-/// cache stays the quantized 34 bytes/block. Q and the output stay f32.
-/// Requires `d % 32 == 0` and `d <= attention_q8_max_d`.
-pub fn groupedCausalAttentionQ8Kv(
-    self: *ExecContext,
-    q: *const Tensor,
-    k_blocks: []const BlockQ8_0,
-    v_blocks: []const BlockQ8_0,
-    kv_seq: usize,
-    kv_heads: usize,
-    kv_head_for_head: []const usize,
-    scale_value: f32,
-) !Tensor {
-    return groupedCausalAttentionQ8KvImpl(self, q, k_blocks, v_blocks, kv_seq, kv_heads, kv_head_for_head, scale_value, 0);
-}
-
-/// q8_0-KV attention with a sliding `window` (see
-/// `groupedCausalAttentionWindowed`).
-pub fn groupedCausalAttentionQ8KvWindowed(
-    self: *ExecContext,
-    q: *const Tensor,
-    k_blocks: []const BlockQ8_0,
-    v_blocks: []const BlockQ8_0,
-    kv_seq: usize,
-    kv_heads: usize,
-    kv_head_for_head: []const usize,
-    scale_value: f32,
-    window: usize,
-) !Tensor {
-    return groupedCausalAttentionQ8KvImpl(self, q, k_blocks, v_blocks, kv_seq, kv_heads, kv_head_for_head, scale_value, window);
-}
-
+/// The `.q8` KvView arm of `groupedAttention`: shape validation for the
+/// raw-block cache, then the shared kernel dispatch.
 fn groupedCausalAttentionQ8KvImpl(
     self: *ExecContext,
     q: *const Tensor,
@@ -2094,7 +2047,7 @@ fn groupedCausalAttentionQ8KvImpl(
 }
 
 /// One (stream × head-unit) work range of the ragged multi-stream decode
-/// attention (`groupedCausalAttentionMulti*Kv`): query row `s` of `q_data`
+/// attention (the multi-stream `KvView` arms): query row `s` of `q_data`
 /// attends the leading `lens[s]` cached rows of stream `s`'s K/V slices.
 /// Work items are stream-major (`stream_i * n_units + unit_i`); each item
 /// runs ONE head unit of ONE stream through the per-query decode kernels,
@@ -2185,45 +2138,9 @@ fn kvRowElems(comptime KvElem: type, kv_heads: usize, d: usize) usize {
     return if (KvElem == BlockQ8_0) kv_heads * (d / q8_0_block_size) else kv_heads * d;
 }
 
-/// Ragged multi-stream decode attention over per-stream f16 KV caches
-/// (the batch-N decode shape): query row `s` of `q` — exactly one query
-/// per stream, `[n_streams, heads, d]` — attends ALL `lens[s]` cached
-/// positions of stream `s`. `ks[s]`/`vs[s]` hold at least `lens[s]`
-/// leading `[kv_heads, d]` rows of that stream's cache layer. Dispatch
-/// schedules flattened (stream, head-unit) items weighted by stream
-/// length over the SAME per-query kernels m=1 decode uses, so each
-/// stream's output is bit-identical to its own single-stream
-/// `groupedCausalAttentionF16Kv` call.
-pub fn groupedCausalAttentionMultiF16Kv(
-    self: *ExecContext,
-    q: *const Tensor,
-    ks: []const []const f16,
-    vs: []const []const f16,
-    lens: []const usize,
-    kv_heads: usize,
-    kv_head_for_head: []const usize,
-    scale_value: f32,
-) !Tensor {
-    return groupedCausalAttentionMultiImpl(self, f16, q, ks, vs, lens, kv_heads, kv_head_for_head, scale_value);
-}
-
-/// As `groupedCausalAttentionMultiF16Kv` for q8_0 caches: `ks[s]`/`vs[s]`
-/// hold `lens[s] * kv_heads * d/32` leading BlockQ8_0 laid out
-/// `[len, kv_heads, d/32]` (the `kBlocks`/`vBlocks` shape). Requires
-/// `d % 32 == 0` and `d <= attention_q8_max_d`.
-pub fn groupedCausalAttentionMultiQ8Kv(
-    self: *ExecContext,
-    q: *const Tensor,
-    ks: []const []const BlockQ8_0,
-    vs: []const []const BlockQ8_0,
-    lens: []const usize,
-    kv_heads: usize,
-    kv_head_for_head: []const usize,
-    scale_value: f32,
-) !Tensor {
-    return groupedCausalAttentionMultiImpl(self, BlockQ8_0, q, ks, vs, lens, kv_heads, kv_head_for_head, scale_value);
-}
-
+/// The multi-stream KvView arms of `groupedAttention`: ragged-shape
+/// validation, then length-weighted (stream, head-unit) dispatch over the
+/// per-query decode kernels.
 fn groupedCausalAttentionMultiImpl(
     self: *ExecContext,
     comptime KvElem: type,
