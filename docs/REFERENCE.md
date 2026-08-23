@@ -11165,7 +11165,7 @@ family-agnostic helpers stay flat:
 | `llm.qwen3` | `model`, `train`, `generate`, `ptqtp`, `shine`, `shine_train` — Qwen3 dense + MoE, LoRA fine-tuning, SHINE adapters | `llm/qwen3/` |
 | `llm.kimi3` | `model` — Kimi-K3 (Kimi-Linear lineage: KDA + gated-MLA-NoPE hybrid, latent MoE, attention residuals, SiTU) | `llm/kimi3/` |
 | `llm.qwen35` | `model`, `chat` — Qwen3.5 Gated-DeltaNet hybrid | `llm/qwen35/` |
-| `llm.gemma` | `model`, `train`, `moe`, `moe_route`, `moe_route_tensor` | `llm/gemma/` |
+| `llm.gemma` | `model`, `train`, `moe` | `llm/gemma/` |
 | `llm.diffusion_gemma` | `model` — block text-diffusion on the gemma4 backbone | `llm/diffusion_gemma/` |
 | `llm.parakeet` | `loader`, `frontend`, `subsampling`, `encoder`, `weights`, `decoder`, `tokenizer`, `streaming`, `transcription` — NeMo FastConformer/RNN-T ASR | `llm/parakeet/` |
 | `llm.speculative` | `core`, `sam_index`, `recycling`, `cascade`, `constrained` | `llm/speculative/` |
@@ -13543,7 +13543,7 @@ LoRA mode's exact-identity start.
 The `fucina_llm` module root (`src/llm.zig`) exposes each model family as a
 namespace — `llm.qwen3.{model,train}`, `llm.kimi3.model`,
 `llm.qwen35.{model,chat}`,
-`llm.gemma.{model,train,moe,moe_route,moe_route_tensor}`,
+`llm.gemma.{model,train,moe}`,
 `llm.diffusion_gemma.model`, `llm.deepseek2.model`, `llm.glm4moe.model`,
 `llm.deepseek4.model`, `llm.inkling.{model,mmproj,chat}`, `llm.parakeet.*`,
 `llm.speculative.*` — while the
@@ -14110,8 +14110,7 @@ defer step.deinit();
 // requires model assets to run
 ```
 
-**MoE expert kernels** (`moe.zig`, `moe_route.zig`, `moe_route_tensor.zig`,
-survey depth). The expert FFN has two weight representations: per-expert
+**MoE expert kernels** (`moe.zig` over `exec/moe_gu.zig`, survey depth). The expert FFN has two weight representations: per-expert
 **packed** RHS (`MoeFfn.gate/up/down`, the tested Q6_K/Q8_0 packed kernels —
 peak CPU throughput) and **raw** GGUF-layout blocks
 (`RawExpertWeights{ gu: .q6_k|.q4_k, dn_blocks, device_owned, borrowed }`,
@@ -14122,12 +14121,11 @@ seconds and ~24 GB saved at load), on Q4_K-transcoded experts, under
 (decode | batch) x (packed | raw) matrix: `decodePackedTensor` /
 `batchPackedTensor` / `decodeRawTensor` / `batchRawTensor` (tagged-tensor
 wrappers) over `decodePacked` / `batchPacked` / `decodeRaw` / `batchRaw`.
-Batch entries consume the shared counting-sort route plan re-exported by
-`moe_route` (`Plan`, `BuildResult`, `build`) with the gemma-specific
-expert-major scatter (`moe_route.scatterInto`, deliberately serial to keep
-each token's summation order fixed against parity oracles);
-`moe_route_tensor.scatterGrouped` / `recordBatch` are the tensor-level
-scatter and profile hooks.
+The kernel bodies live in the exec band (`exec/moe_gu.zig`, reached
+through the `ExecContext.moeGu*` facade); batch entries consume the shared
+counting-sort route plan (`exec/moe_chain.zig`) with an expert-major
+scatter that stays deliberately serial to keep each token's summation
+order fixed against the parity oracles.
 
 **LoRA fine-tuning** (`train.zig`, pointer depth — §11).
 `llm.gemma.train.Trainer(targets)` mirrors the qwen3 trainer over the
