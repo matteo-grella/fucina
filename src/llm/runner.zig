@@ -47,6 +47,12 @@ pub const Error = weights.Error || error{
     /// all the same dtype (all from this model's `initKvCache`).
     MismatchedKvCaches,
     KvCacheOverflow,
+    /// The entry does not match the model's block style: a fused entry
+    /// (`forwardStep*`, `forwardLastLogits*`, `initKvCache`) on a
+    /// `.host_reference` model, or `hostStep`/`initHostCache` on a
+    /// `.fused` model. Without this guard a host model's fused entries
+    /// would silently run zero layers and return embedding-only logits.
+    WrongBlockStyle,
 };
 
 pub const ForwardProfile = struct {
@@ -362,6 +368,7 @@ pub const Model = struct {
     }
 
     fn forwardLastLogitsImpl(self: *const Model, ctx: *ExecContext, io: ?std.Io, token_ids: []const usize, profile: ?*ForwardProfile) !fucina.Tensor(.{ .seq, .vocab }) {
+        if (self.host != null) return Error.WrongBlockStyle;
         if (token_ids.len == 0) return Error.InvalidSequenceLength;
 
         var rope_table = try ctx.prepareRopeTableRange(.{ .len = token_ids.len }, self.config.head_dim, self.config.rope_theta, false);
@@ -396,6 +403,7 @@ pub const Model = struct {
     /// duck-typed construction seam generic embedders (chat.Conversation)
     /// use; gemma4's per-layer-geometry counterpart is initPerLayer-backed.
     pub fn initKvCache(self: *const Model, ctx: *ExecContext, capacity: usize) !KvCache {
+        if (self.host != null) return Error.WrongBlockStyle;
         return KvCache.init(ctx, self.config.num_layers, self.config.num_key_value_heads, self.config.head_dim, capacity);
     }
 
@@ -474,6 +482,7 @@ pub const Model = struct {
         last_only: bool,
         subq_state: ?*subq_mod.State,
     ) !fucina.Tensor(.{ .seq, .vocab }) {
+        if (self.host != null) return Error.WrongBlockStyle;
         if (token_ids.len == 0) return Error.InvalidSequenceLength;
         if (kv.len != pos0) return Error.InvalidSequenceLength;
         if (kv.len + token_ids.len > kv.capacity) return kv_cache.Error.KvCacheOverflow;
@@ -538,6 +547,7 @@ pub const Model = struct {
         caches: []const *KvCache,
         token_ids: []const usize,
     ) !fucina.Tensor(.{ .seq, .vocab }) {
+        if (self.host != null) return Error.WrongBlockStyle;
         const n = token_ids.len;
         if (n == 0 or caches.len != n) return Error.InvalidSequenceLength;
         const dtype = caches[0].dtype;
@@ -605,6 +615,7 @@ pub const Model = struct {
         token_ids: []const usize,
         span_lens: []const usize,
     ) !fucina.Tensor(.{ .seq, .vocab }) {
+        if (self.host != null) return Error.WrongBlockStyle;
         const n = caches.len;
         if (n == 0 or span_lens.len != n) return Error.InvalidSequenceLength;
         var total: usize = 0;
@@ -688,7 +699,7 @@ pub const Model = struct {
     }
 
     pub fn initHostCache(self: *const Model, capacity: usize) !HostCache {
-        if (self.host == null) return Error.InvalidConfig;
+        if (self.host == null) return Error.WrongBlockStyle;
         return HostCache.init(self.allocator, self.config.num_layers, self.config.num_key_value_heads, self.config.head_dim, capacity);
     }
 
@@ -698,7 +709,7 @@ pub const Model = struct {
     /// per-row numerics match S = 1 steps exactly (the host-band verify
     /// contract the glm4moe family's `step` builds on).
     pub fn hostStep(self: *const Model, ctx: *ExecContext, cache: *HostCache, tokens: []const usize) !fucina.Tensor(.{ .seq, .vocab }) {
-        const band = if (self.host) |*b| b else return Error.InvalidConfig;
+        const band = if (self.host) |*b| b else return Error.WrongBlockStyle;
         const cfg = self.config;
         const allocator = ctx.allocator;
 
