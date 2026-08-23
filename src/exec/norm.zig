@@ -6,6 +6,8 @@
 //! kernel reads the rope table's pub `sinValues()`/`cosValues()`. Home of
 //! `LayerNormAffineBackwardResult` (re-exported by `exec.zig`).
 
+const backend_mod = @import("../backend.zig");
+const kernels = backend_mod.kernels;
 const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
 
@@ -813,7 +815,7 @@ pub fn groupNormAxisRank(
     var out = try ctx.emptyRank(2, .{ rows, cols });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(rows * cols, parallel.vector_elementwise_len_threshold);
-    ctx.backend.groupNormInto(&out, xx.tensor(), weight_slice, bias_slice, rows, cols, groups, eps);
+    kernels.groupNormInto(ctx.pc(), &out, xx.tensor(), weight_slice, bias_slice, rows, cols, groups, eps);
     return out;
 }
 
@@ -882,7 +884,8 @@ pub fn groupNormBackwardAxisRank(
     if (!need_input and !need_weight and !need_bias) return result;
 
     ctx.enableNativeVectorPoolForWork(rows * cols, parallel.vector_elementwise_len_threshold);
-    ctx.backend.groupNormBackwardInto(
+    kernels.groupNormBackwardInto(
+        ctx.pc(),
         if (result.input) |*t| t else null,
         if (result.weight) |*t| t else null,
         if (result.bias) |*t| t else null,

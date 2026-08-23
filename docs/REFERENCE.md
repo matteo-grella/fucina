@@ -94,7 +94,7 @@ API-level companion. Every Zig snippet is machine-verified against the tree
   - [8.6 The `fucina.internal` escape hatch (`src/fucina.zig`)](#86-the-fucinainternal-escape-hatch-srcfucinazig)
 - [9. Backends: CPU SIMD, BLAS, threading, and GPU offload](#9-backends-cpu-simd-blas-threading-and-gpu-offload)
   - [9.1 Build-time selection and the facade constants (`src/backend.zig`, `build.zig`)](#91-build-time-selection-and-the-facade-constants-srcbackendzig-buildzig)
-  - [9.2 The `Backend` struct and the kernel contract (`src/backend.zig`)](#92-the-backend-struct-and-the-kernel-contract-srcbackendzig)
+  - [9.2 The kernel interface and the kernel contract (`src/backend/interface.zig`, `src/backend.zig`)](#92-the-kernel-interface-and-the-kernel-contract-srcbackendinterfacezig-srcbackendzig)
   - [9.3 The scalar backend and the parity contract (`src/backend/cpu.zig`, `src/backend/parity_test.zig`)](#93-the-scalar-backend-and-the-parity-contract-srcbackendcpuzig-srcbackendparity_testzig)
   - [9.4 Native backend: portable `@Vector` kernels (`src/backend/vector/`)](#94-native-backend-portable-vector-kernels-srcbackendvector)
   - [9.5 GEMM: dispatch precedence, BLAS, and the blocked packed kernel (`src/backend/native.zig`, `vector/gemm.zig`, `vector/gemm_blocked.zig`)](#95-gemm-dispatch-precedence-blas-and-the-blocked-packed-kernel-srcbackendnativezig-vectorgemmzig-vectorgemm_blockedzig)
@@ -5043,7 +5043,7 @@ and receive `*ExecContext` explicitly.
 pub const ExecContext = struct {
     thread_safe_allocator: thread.ThreadSafeAllocator,
     allocator: Allocator,            // fat pointer into thread_safe_allocator
-    backend: Backend,
+    parallel_pool: std.atomic.Value(?*thread.Pool), // the published worker team (pc() snapshots it)
     buffers: BufferPool,
     tuning: tuning.Overrides,
     work_pool: thread.Pool,          // + work_pool_ready, work_pool_mutex
@@ -5065,7 +5065,7 @@ Fields (internal but observable, reached as `ctx.<field>`):
 |---|---|---|
 | `thread_safe_allocator` | `thread.ThreadSafeAllocator` | at `init` (wraps the caller's allocator in a mutex) |
 | `allocator` | `std.mem.Allocator` | at `init` (fat pointer into `thread_safe_allocator`) |
-| `backend` | `Backend` | at `init` (see §9) |
+| `parallel_pool` | `std.atomic.Value(?*thread.Pool)` | at `init` (null); published by `tryWorkPool` (§6.6, §9.2) |
 | `buffers` | `BufferPool` | at `init` (§6.5) |
 | `work_pool` | `thread.Pool` | lazily, on first `tryWorkPool` (§6.6) |
 | `dot_backward_worker` | `thread.OneShotWorker` | lazily, on first `dotBackwardWorker` (§6.6) |
@@ -5094,7 +5094,7 @@ test "context lifecycle" {
 
 `init` cannot fail (it allocates nothing). `deinit` tears down in order:
 MoE scratch, then the one-shot worker and the worker team (if they were ever
-created; `backend.setWorkPool(null)` first), then any exec scopes still open
+created; `parallel_pool` is reset to null first), then any exec scopes still open
 (defensive release), then the buffer pool. `BufferPool.deinit` asserts that
 no pooled buffer is still outstanding — a tensor leaked past context teardown
 fails this assertion in safety builds rather than silently leaking. After
@@ -5116,6 +5116,7 @@ pub fn adoptScopeNodeAssumeCapacity(self: *ExecContext, node: *anyopaque,
     destroy_node: ScopeNodeDestroy) void
 pub fn tryWorkPool(self: *ExecContext) !*thread.Pool
 pub fn workPool(self: *ExecContext) ?*thread.Pool
+pub fn pc(self: *const ExecContext) backend.ParallelConfig
 pub fn dotBackwardWorker(self: *ExecContext) ?*thread.OneShotWorker
 pub fn pinRowwiseKernels(self: *ExecContext, on: bool) void
 pub fn setTuning(self: *ExecContext, overrides: tuning.Overrides) void
@@ -5563,14 +5564,20 @@ Behavior users should know:
 CPU kernels parallelize over a persistent fork-join team owned by the
 context. Everything is lazy: `tryWorkPool` creates the
 `thread.Pool` on first request (with `cpuThreadCount(vector_max_threads) - 1`
-workers, so the dispatching thread itself is participant 0) and hands it to
-the backend via `setWorkPool`; the pool in turn spawns its worker threads
-only on the first parallel dispatch. A context that only ever runs
-small/serial ops never starts a thread.
+workers, so the dispatching thread itself is participant 0) and publishes
+it in `parallel_pool` (an atomic store with release ordering); the pool in
+turn spawns its worker threads only on the first parallel dispatch. A
+context that only ever runs small/serial ops never starts a thread. Every
+pool-taking kernel call reads the published team through `pc()`, a
+`ParallelConfig{ .pool = ... }` snapshot taken per call (acquire load), so
+a kernel dispatched from another thread (dot-backward's `OneShotWorker`)
+while a lazy `tryWorkPool` retry publishes the pool also sees `Pool.init`'s
+writes.
 
 ```zig
 pub fn tryWorkPool(self: *ExecContext) !*thread.Pool   // creates on first call
 pub fn workPool(self: *ExecContext) ?*thread.Pool      // tryWorkPool catch null
+pub fn pc(self: *const ExecContext) backend.ParallelConfig // { .pool = parallel_pool.load(.acquire) }
 pub fn dotBackwardWorker(self: *ExecContext) ?*thread.OneShotWorker
 ```
 
@@ -7460,14 +7467,17 @@ const active = switch (build_options.backend_kind) {
     .scalar, .cpu => scalar_impl,   // src/backend/cpu.zig
     .native => native_impl,         // src/backend/native.zig
 };
+
+pub const ParallelConfig = active.ParallelConfig;
+pub const kernels = active.kernels;   // the selected kernel set (§9.2)
 ```
 
 Selection is a comptime `switch` over `build_options.backend_kind`
 (`-Dbackend=native|scalar`).
-The inactive implementation is never dispatched to — every `Backend` method
-forwards to `active.<fn>` and the other module's code paths are dead — and the
-switches are exhaustive, so adding a backend variant forces edits at every
-dispatch site rather than silently falling through. The same pattern selects
+The inactive implementation is never dispatched to — `backend.kernels` is
+the active module's `kernels` namespace and the other module's code paths
+are dead — and the switches are exhaustive, so adding a backend variant
+forces edits at every dispatch site rather than silently falling through. The same pattern selects
 the GPU provider (`src/backend/gpu.zig`): a comptime switch over
 `build_options.gpu_kind` resolves `gpu_impl` to `metal.zig` or `cuda.zig`, and
 the unselected provider is parsed but never semantically analyzed, so it costs
@@ -7490,7 +7500,6 @@ The facade (`src/fucina.zig`) re-exports the backend's build facts as comptime
 constants:
 
 ```zig
-pub const Backend = backend.Backend;                    // the kernel dispatch struct
 pub const BackendKind = backend.Kind;                   // enum { scalar, native }
 pub const active_backend_kind = backend.active_kind;
 pub const native_blas_kind = backend.native_blas_kind;  // the -Dblas enum value
@@ -7528,29 +7537,55 @@ test "backend build facts" {
 }
 ```
 
-### 9.2 The `Backend` struct and the kernel contract (`src/backend.zig`)
+### 9.2 The kernel interface and the kernel contract (`src/backend/interface.zig`, `src/backend.zig`)
 
 ```zig
-pub const Backend = struct {
-    pub const kind = active_kind;
-    parallel_pool: std.atomic.Value(?*thread.Pool) = .init(null),
+// src/backend/interface.zig
+pub const names = [_][]const u8{ "addInto", "addContiguousIntoUnchecked", ... }; // 99 kernels
+pub const generic_names = [_][]const u8{ ... };    // 12: take a comptime dtype or op
+pub const pool_free_names = [_][]const u8{ ... };  // 18: take no `pc`
+pub fn conform(comptime Impl: type) void;          // the single comptime check
 
-    pub fn init() Backend { return .{}; }
-    pub fn setWorkPool(self: *Backend, pool: ?*thread.Pool) void;
-    // ~100 kernel entry points, all forwarding to the active implementation
-};
+// src/backend/cpu.zig and src/backend/native.zig
+pub const kernels = struct { ... };                // exactly the names above
+
+// src/backend.zig
+pub const kernels = active.kernels;
+comptime {
+    interface.conform(scalar_impl.kernels);
+    interface.conform(native_impl.kernels);
+}
 ```
 
-`Backend` is a thin dispatch value embedded in `ExecContext` (one per
-context, the `backend` field). Its only state is `parallel_pool`, an atomic pointer to the
-worker team. The atomicity is load-bearing: kernels may dispatch from other
-threads (e.g. dot-backward's `OneShotWorker`) while a lazy `tryWorkPool` retry
-publishes the pool; the store is `release` and the load `acquire` so a racing
-first observer also sees `Pool.init`'s writes. Every `...WithConfig` kernel
-receives the pool via a `ParallelConfig{ .pool = ... }` snapshot taken per
-call.
+The two implementations meet at one interface, declared once by name in
+`interface.zig`. It is a comptime-checked namespace rather than a struct of
+function pointers because many kernels are generic over a `comptime` dtype
+or op. `conform` verifies, for every name: the implementation declares it;
+a non-generic entry has the native entry's parameter types and return
+payload (fallible kernels return `!T` with an inferred error set, and two
+inferred sets are distinct types by construction, so the payload is what is
+compared); a generic entry has the same parameter count; the `pc` rule below
+holds; and the implementation declares nothing beyond the set.
 
-Method naming encodes the checking tier — with one caveat:
+The signature rule: a kernel that needs the worker pool takes
+`pc: ParallelConfig` as its FIRST parameter; a kernel that does not use the
+pool does not take it (`pool_free_names`). Both implementations follow the
+same rule for every name, so an exec caller is backend-agnostic; the scalar
+reference accepts `pc` wherever the native kernel threads on it and ignores
+it. `ParallelConfig` is `struct { pool: ?*thread.Pool = null }`; `.{}` runs
+the kernel serially.
+
+The worker team lives on `ExecContext` (`parallel_pool`, an atomic pointer
+published by `tryWorkPool`); every call site reads it through `ctx.pc()`, a
+per-call snapshot with acquire ordering (§6.6):
+
+```zig
+const kernels = backend_mod.kernels;           // file-level, in each exec/ module
+kernels.sumInto(ctx.pc(), &out, &x);           // pool-taking
+kernels.matmulInto(&out, &a, &b);              // pool-free
+```
+
+Kernel naming encodes the checking tier — with one caveat:
 
 - `...Into(out, ...) !void` — validates shapes itself (`rankView`, dim
   checks) and returns `TensorError.ShapeMismatch` on disagreement. This
@@ -7560,29 +7595,30 @@ Method naming encodes the checking tier — with one caveat:
   `conv1dInto`, `col2im1dInto`, `snakeInto`, `groupNormInto`,
   `causalDepthwiseConv1dInto`, …) are `...Into`-named but plain `void` and
   **unchecked** — the exec layer validates geometry before calling them.
-- `...IntoUnchecked` / `...SliceUnchecked` — `void`; the caller (exec) has
+- `...IntoUnchecked` and the slice kernels (`addScaledSlice`,
+  `unaryRowSlice`, `preluChannelsInto`, ...) — `void`; the caller (exec) has
   already validated shape and contiguity. Passing wrong geometry is illegal
   (out-of-bounds slice panics in safe builds, UB in ReleaseFast).
 - `...Typed` variants take a comptime `DType` and typed tensors
   (`TensorOf(dtype)`), with output dtype derived by
   `dtype_mod.outputDType(...)`.
 
-The full method inventory, grouped (every name is a `Backend` method; the
-`WithConfig` suffix appears only on the implementation-module twins):
+The full kernel inventory, grouped (every name is an entry of
+`interface.names`; entries marked with an asterisk take no `pc`):
 
-| Family | Methods |
+| Family | Kernels |
 |---|---|
-| elementwise | `addInto`, `addContiguousIntoUnchecked`, `subInto`, `subContiguousIntoUnchecked`, `mulInto`, `mulContiguousIntoUnchecked`, `divContiguousIntoUnchecked`, `maximumContiguousIntoUnchecked`, `minimumContiguousIntoUnchecked`, `elementwiseContiguousIntoTyped`, `scaleInto`, `unaryContiguousIntoUnchecked`, `leakyReluContiguousIntoUnchecked`, `clampContiguousIntoUnchecked`, `gatedContiguousIntoUnchecked` |
-| row/slice helpers | `addScaledSliceUnchecked`, `addRowVectorSliceUnchecked`, `addRowVectorUnarySliceUnchecked`, `unaryRowSliceUnchecked`, `mulRowSliceUnchecked`, `preluChannelsIntoUnchecked`, `preluChannelsBackwardInputIntoUnchecked`, `preluChannelsBackwardAlphaIntoUnchecked`, `channelAffineIntoUnchecked` |
-| reductions | `sumInto`, `sumSlice`, `prodInto`, `prodSlice`, `sumSliceTyped`, `dotInto`, `dotIntoTyped` |
+| elementwise | `addInto`*, `addContiguousIntoUnchecked`, `subInto`*, `subContiguousIntoUnchecked`, `mulInto`*, `mulContiguousIntoUnchecked`, `divContiguousIntoUnchecked`, `maximumContiguousIntoUnchecked`, `minimumContiguousIntoUnchecked`, `elementwiseContiguousIntoTyped`, `scaleInto`, `unaryContiguousIntoUnchecked`, `leakyReluContiguousIntoUnchecked`, `clampContiguousIntoUnchecked`, `gatedContiguousIntoUnchecked` |
+| row/slice helpers | `addScaledSlice`*, `addRowVectorSlice`*, `addRowVectorUnarySlice`*, `unaryRowSlice`*, `mulRowSlice`*, `preluChannelsInto`, `preluChannelsBackwardInputInto`, `preluChannelsBackwardAlphaInto`, `channelAffineInto` |
+| reductions | `sumInto`, `sumSlice`*, `prodInto`, `prodSlice`*, `sumSliceTyped`, `dotInto`, `dotIntoTyped` |
 | 1-D conv | `causalDepthwiseConv1dInto` (+`BackwardInputInto`, `BackwardKernelInto`), `causalConv1dInto` (+`BackwardInputInto`, `BackwardWeightInto`), `groupedCausalConv1dInto` (+`BackwardInputInto`, `BackwardWeightInto`), `conv1dInto` (+`BackwardInputInto`, `BackwardWeightInto`), `col2im1dInto`, `col2im1dBackwardInto` |
 | 2-D conv / image | `conv2dInto`, `conv2dBackwardInputInto`, `conv2dBackwardWeightInto`, `im2colInto`, `col2imInto`, `pool2dInto`, `avgPool2dBackwardInto`, `maxPool2dBackwardInto`, `upsample2xNearestInto` |
 | Winograd transforms | `winogradF2WeightTransformInto`, `winogradF2InputTransformInto`, `winogradF2OutputTransformInto`, `winogradF4WeightTransformInto`, `winogradF4InputTransformInto`, `winogradF4OutputTransformInto` |
 | norm / activation kernels | `groupNormInto`, `groupNormBackwardInto`, `snakeInto`, `snakeBackwardInputInto`, `snakeBackwardParamsInto` |
-| dense GEMM | `matmulInto`, `matmul2DIntoUnchecked`, `matmul2DAccIntoUnchecked`, `matmul2DIntoUncheckedTyped`, `matmulTransAInto`, `matmulTransA2DIntoUnchecked`, `matmulTransBInto`, `matmulTransB2DIntoUnchecked`, `matmulTransB2DIntoUncheckedF16Operands`, `matmulTransB2DIntoUncheckedBf16Rhs` |
+| dense GEMM | `matmulInto`*, `matmul2DIntoUnchecked`, `matmul2DAccIntoUnchecked`, `matmul2DIntoUncheckedTyped`, `matmulTransAInto`*, `matmulTransA2DIntoUnchecked`, `matmulTransBInto`*, `matmulTransB2DIntoUnchecked`, `matmulTransB2DIntoUncheckedF16Operands`, `matmulTransB2DIntoUncheckedBf16Rhs` |
 | batched GEMM | `matmulBatched2DIntoUnchecked`, `matmulBatchedTransA2DIntoUnchecked`, `matmulBatchedTransB2DIntoUnchecked` |
-| packed dense RHS | `packDenseMatmulRhsTyped`, `matmul2DIntoUncheckedPackedDenseRhs`, `packMatmulRhsTyped`, `matmul2DIntoUncheckedPackedRhsTyped` |
-| quantized RHS | `quantizeMatmulRhsBlockwiseI8`, `quantizeMatmulRhsQ4_0`, `quantizeMatmulRhsQ8_0`, `supportsQuantizedMatmulRhs`, `matmul2DQuantizedRhs`, `matmul2DQuantizedRhsQ8_0x4`, `matmul2DQuantizedRhsQ6_Kx4`, `matmul2DQuantizedRhsQ4_Kx4`, `matmul2DQuantizedRhsQ4_Kx8`, `matmul2DQuantizedRhsQ4_Kx2Mmla`, `matmul2DQuantizedRhsQ5_Kx8`, `matmul2DPackedQ8_0x4LhsRhs`, `matmul2DPackedPaddedQ8_0x4LhsRhs`, `matmulPackedQ4_Kx8Q8_Kx4Slice`, `matmulPackedQ4_Kx8RowsSlice`, `matmulPackedQ5_Kx8Q8_Kx4Slice`, `matmulPackedQ5_Kx8RowsSlice`, `matmulPackedQ6_Kx4RowsSlice` |
+| packed dense RHS | `packDenseMatmulRhsTyped`*, `matmul2DIntoUncheckedPackedDenseRhs`, `packMatmulRhsTyped`*, `matmul2DIntoUncheckedPackedRhsTyped` |
+| quantized RHS | `quantizeMatmulRhsBlockwiseI8`*, `quantizeMatmulRhsQ4_0`*, `quantizeMatmulRhsQ8_0`*, `matmul2DQuantizedRhs`, `matmul2DQuantizedRhsQ8_0x4`, `matmul2DQuantizedRhsQ6_Kx4`, `matmul2DQuantizedRhsQ4_Kx4`, `matmul2DQuantizedRhsQ4_Kx8`, `matmul2DQuantizedRhsQ4_Kx2Mmla`, `matmul2DQuantizedRhsQ5_Kx8`, `matmul2DPackedQ8_0x4LhsRhs`, `matmul2DPackedPaddedQ8_0x4LhsRhs`, `matmulPackedQ4_Kx8Q8_Kx4Slice`, `matmulPackedQ4_Kx8RowsSlice`, `matmulPackedQ5_Kx8Q8_Kx4Slice`, `matmulPackedQ5_Kx8RowsSlice`, `matmulPackedQ6_Kx4RowsSlice` |
 
 Geometry structs re-exported through `backend.zig` (and used in the
 signatures above): `Conv2dDims` (channel-last `[H,W,Cin] → [OH,OW,Cout]`;
@@ -7629,8 +7665,9 @@ is the exact tanh-approximation form.
 ### 9.3 The scalar backend and the parity contract (`src/backend/cpu.zig`, `src/backend/parity_test.zig`)
 
 The scalar backend is the numeric reference: plain serial loops, no SIMD, no
-BLAS, no GPU. It exposes the same `ParallelConfig`-taking signatures as the
-native backend but ignores the config (every kernel is serial). Where a
+BLAS, no GPU. Its `kernels` namespace has the same signatures as the native
+one (`interface.conform` checks it) and ignores `pc` (every kernel is
+serial). Where a
 kernel is *routing shared by both backends* rather than divergent numerics —
 `im2col`, the Winograd weight/input/output transforms, the conv2d backward
 loops, the pool2d backward scatters — the scalar backend reuses the shared
@@ -7654,9 +7691,9 @@ cross-backend parity suite. What it guarantees:
 - The batched GEMM triple (`matmulBatched2DIntoUnchecked`,
   `...TransA...`, `...TransB...`) agrees over batch counts `{1, 2, 5, 8}`,
   including broadcast RHS (`stride_b = 0`) and shared LHS (`stride_a = 0`).
-- `pool2dIntoWithConfig` (max/avg/sum, odd channel counts to exercise SIMD
-  remainders), `upsample2xNearestIntoWithConfig`, `preluChannels*`, and
-  `channelAffineIntoWithConfig` (with and without shift) agree within `1e-6`.
+- `pool2dInto` (max/avg/sum, odd channel counts to exercise SIMD
+  remainders), `upsample2xNearestInto`, `preluChannels*`, and
+  `channelAffineInto` (with and without shift) agree within `1e-6`.
 
 The suite pins the semantics the native backend must preserve while its
 kernels are rewritten for speed; anything not covered by shared routing or a
@@ -7734,8 +7771,8 @@ split as the built-in SIMD kernels. Ops without vector decls are
 untouched.
 
 Elementwise entry points operate on `f32` tensors by default; the `*Typed`
-twins (`elementwiseContiguousIntoTypedWithConfig`, `sumSliceTypedWithConfig`,
-`dotIntoTypedWithConfig`, `matmul2DIntoUncheckedTypedWithConfig`) accept
+twins (`elementwiseContiguousIntoTyped`, `sumSliceTyped`, `dotIntoTyped`,
+`matmul2DIntoUncheckedTyped`) accept
 `.f16`, `.bf16`, and `.f64` with the compute/output dtype policy from §8
 (f16/bf16 accumulate sums and dots in f32).
 
@@ -7889,7 +7926,7 @@ direct grouped kernel; 1×1 stride-1 pad-0 convs lower to a plain NT matmul.
 The quantized *kernels* belong to §10; this section covers what the backend
 tier owns: dispatch, scratch, and ISA selection.
 
-`matmul2DQuantizedRhsWithConfig` switches over `AnyQuantizedMatmulRhs` (one
+`matmul2DQuantizedRhs` switches over `AnyQuantizedMatmulRhs` (one
 arm per GGML format) and, per call, quantizes the f32 activation rows into
 the format's activation blocks — `Q8_0`/`Q8_1` for legacy and
 `IQ4_NL`/`MXFP4`/`NVFP4` formats, `Q8_K` for K-quants and the `IQ*`/`TQ*`
@@ -7979,10 +8016,11 @@ This subsection covers the backend seam.
 **The cross-thread handshake.** The pool is created lazily:
 `tryWorkPool` (under `work_pool_mutex`) initializes one `thread.Pool`
 per `ExecContext` with `cpuThreadCount(vector_max_threads) - 1` workers and
-publishes it with `Backend.setWorkPool(&pool)` — the atomic
-release-store/acquire-load pair from §9.2, because a kernel dispatched on
-another thread may race the publication. `ExecContext.deinit` unpublishes
-(`setWorkPool(null)`) before destroying the pool. Exec ops call
+publishes it in `ExecContext.parallel_pool` — the atomic
+release-store/acquire-load pair from §6.6 and §9.2, because a kernel
+dispatched on another thread may race the publication; every kernel call
+reads it through `ctx.pc()`. `ExecContext.deinit` unpublishes (stores
+`null`) before destroying the pool. Exec ops call
 `enableNative*PoolForWork(work, threshold)` helpers so the team is only
 instantiated once an op is actually big enough to split. `thread.zig` also
 provides `Mutex`/`Condition` (thin `std.Io` wrappers), `WaitGroup`,

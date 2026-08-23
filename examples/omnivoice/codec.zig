@@ -642,6 +642,9 @@ pub fn ggmlConv1d(
 /// allowed-raw zone: this file already speaks the raw ggml layouts).
 const F16View = fucina.internal.tensor_mod.TensorOf(.f16);
 const F32View = fucina.internal.RawTensor;
+/// The backend kernel set; the GEMM below runs pool-less (`.{}`) because
+/// the threads spawned here already split the work.
+const kernels = fucina.internal.backend_mod.kernels;
 
 /// Whole-call im2col scratch ceiling, split across threads (the decoder's
 /// measured 32 MiB sweet spot, dac.zig).
@@ -658,7 +661,6 @@ const ConvGemmTask = struct {
     dilation: usize,
     out: []f32,
     chunk_rows: usize,
-    backend: *const fucina.Backend,
     /// This thread's `[chunk_rows, n_col]` f16 im2col scratch (+ its view).
     col: []f16,
     col_view: F16View,
@@ -707,7 +709,7 @@ fn runConvGemmTask(task: *const ConvGemmTask) void {
                 // row addresses exactly the [rows, out_ch] destination.
                 var out_view = task.out_view;
                 out_view.offset += row0 * w.out_ch;
-                task.backend.matmulTransB2DIntoUncheckedF16Operands(&out_view, &task.col_view, &task.w_view, rows, w.out_ch, n_col);
+                kernels.matmulTransB2DIntoUncheckedF16Operands(.{}, &out_view, &task.col_view, &task.w_view, rows, w.out_ch, n_col);
                 if (task.bias) |b| {
                     for (0..rows) |r| {
                         const out_row = task.out[(row0 + r) * w.out_ch ..][0..w.out_ch];
@@ -720,7 +722,7 @@ fn runConvGemmTask(task: *const ConvGemmTask) void {
                 var w_view = task.w_view;
                 w_view.offset += g * oc_per_group * n_col;
                 var stage_view = task.stage_view;
-                task.backend.matmulTransB2DIntoUncheckedF16Operands(&stage_view, &task.col_view, &w_view, rows, oc_per_group, n_col);
+                kernels.matmulTransB2DIntoUncheckedF16Operands(.{}, &stage_view, &task.col_view, &w_view, rows, oc_per_group, n_col);
                 for (0..rows) |r| {
                     const src = task.stage[r * oc_per_group ..][0..oc_per_group];
                     const out_row = task.out[(row0 + r) * w.out_ch + g * oc_per_group ..][0..oc_per_group];
@@ -739,7 +741,7 @@ fn runConvGemmTask(task: *const ConvGemmTask) void {
 /// chunks; per (chunk, group), build the f16 im2col matrix and run ONE
 /// f16-operands TransB GEMM (f32 accumulation — the same arithmetic class as
 /// the wide `vecDotF16Ggml` arm). Threads split the output frames, so each
-/// GEMM call runs its single-threaded range (the pool-less `Backend`).
+/// GEMM call runs its single-threaded range (a pool-less `ParallelConfig`).
 fn ggmlConv1dGemmInto(
     allocator: Allocator,
     out: []f32,
@@ -768,10 +770,6 @@ fn ggmlConv1dGemmInto(
     defer allocator.free(col);
     const stage = try allocator.alloc(f32, if (w.groups > 1) want_threads * chunk_rows * oc_per_group else 0);
     defer allocator.free(stage);
-
-    // Pool-less backend: each spawned thread below runs its own
-    // single-threaded GEMM range.
-    var conv_backend = fucina.Backend.init();
 
     var w_view = try F16View.fromBorrowedSlice(allocator, &.{ w.out_ch, n_col }, w.data);
     defer w_view.deinit();
@@ -805,7 +803,6 @@ fn ggmlConv1dGemmInto(
             .dilation = dilation,
             .out = out,
             .chunk_rows = chunk_rows,
-            .backend = &conv_backend,
             .col = col_slice,
             .col_view = col_view,
             .w_view = w_view,

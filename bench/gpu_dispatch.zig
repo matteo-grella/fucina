@@ -215,7 +215,7 @@ fn benchShape(allocator: std.mem.Allocator, out: anytype, shape: Shape, iters: u
     if (gpu.shouldUseGpuForRhs(&b_tensor, m, n, k)) {
         var routed = try Tensor.zeros(allocator, &.{ m, n });
         defer routed.deinit();
-        native.matmul2DIntoUnchecked(&routed, &a_tensor, &b_tensor, m, n, k);
+        native.kernels.matmul2DIntoUnchecked(.{}, &routed, &a_tensor, &b_tensor, m, n, k);
         if (routed.buffer.pending() == null) return error.EligibleResidentOpDidNotRouteToGpu;
         _ = routed.dataConst();
     }

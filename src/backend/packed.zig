@@ -147,6 +147,7 @@ pub fn matmul2DIntoUncheckedPackedRhsTypedWithConfig(
     n: usize,
     k: usize,
     config: anytype,
+    /// The backend's f32 GEMM, `pc`-first (`config` is forwarded to it).
     comptime matmul_f32: anytype,
 ) !void {
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
@@ -169,7 +170,7 @@ pub fn matmul2DIntoUncheckedPackedRhsTypedWithConfig(
             defer c32.deinit();
 
             widenF16ToF32(a32.data(), a16[0 .. m * k]);
-            matmul_f32(&c32, &a32, &rhs.rhs, m, n, k, config);
+            matmul_f32(config, &c32, &a32, &rhs.rhs, m, n, k);
             narrowF32ToF16(c16[0 .. m * n], c32.dataConst());
         },
         .bf16_rhs_f32 => {
@@ -189,7 +190,7 @@ pub fn matmul2DIntoUncheckedPackedRhsTypedWithConfig(
             defer c32.deinit();
 
             widenBf16ToF32(a32.data(), a_bits[0 .. m * k]);
-            matmul_f32(&c32, &a32, &rhs.rhs, m, n, k, config);
+            matmul_f32(config, &c32, &a32, &rhs.rhs, m, n, k);
             narrowF32ToBf16(c_bits[0 .. m * n], c32.dataConst());
         },
     }

@@ -82,6 +82,18 @@ this point; earlier history is `git log`.
   shape, a same-band SCC anchored on a directory root (`exec.zig` <->
   `exec/*.zig`), and reports it in its summary line; every other SCC
   stays an error.
+- `fucina.Backend` is gone: the kernel dispatch struct carried no state
+  beyond the worker-pool pointer, which now lives on `ExecContext`
+  (`parallel_pool`, read through `ctx.pc()`). `fucina.BackendKind` and
+  `fucina.active_backend_kind` are unchanged; rewrite `fucina.Backend.kind`
+  -> `fucina.active_backend_kind`, and a direct kernel call
+  `backend.X(args)` -> `fucina.internal.backend_mod.kernels.X(.{}, args)`.
+  Internally the kernel set is `backend.kernels`, named once in
+  `backend/interface.zig` (`names`, `generic_names`, `pool_free_names`)
+  and checked on both providers at comptime by `interface.conform`; every
+  kernel signature takes `pc: ParallelConfig` first when it uses the pool
+  and drops the `WithConfig` suffix (`scaleIntoWithConfig(out, a, s,
+  config)` -> `scaleInto(pc, out, a, s)`); the config-less twins are gone.
 
 ### Deprecated
 

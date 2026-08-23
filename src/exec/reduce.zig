@@ -7,6 +7,8 @@
 
 const std = @import("std");
 const build_options = @import("build_options");
+const backend_mod = @import("../backend.zig");
+const kernels = backend_mod.kernels;
 const parallel = @import("../parallel.zig");
 const dtype_mod = @import("../dtype.zig");
 const tensor = @import("../tensor.zig");
@@ -55,7 +57,7 @@ pub fn sum(ctx: *ExecContext, x: *const Tensor) !Tensor {
     var out = try ctx.scalar(0);
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(xx.tensor().len(), parallel.vector_elementwise_len_threshold);
-    try ctx.backend.sumInto(&out, xx.tensor());
+    try kernels.sumInto(ctx.pc(), &out, xx.tensor());
     return out;
 }
 
@@ -75,7 +77,7 @@ pub fn sumTyped(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.Tenso
 
     _ = compute_dtype;
     ctx.enableNativeVectorPoolForWork(xx.tensor().len(), parallel.vector_elementwise_len_threshold);
-    var out = try ctx.scalarTyped(output_dtype, ctx.backend.sumSliceTyped(dtype, xx.tensor().dataConst()));
+    var out = try ctx.scalarTyped(output_dtype, kernels.sumSliceTyped(ctx.pc(), dtype, xx.tensor().dataConst()));
     errdefer out.deinit();
     return out;
 }
@@ -115,7 +117,7 @@ pub fn sumAxisRankTyped(
 
     if (rank == 1) {
         ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
-        output[0] = ctx.backend.sumSliceTyped(dtype, input);
+        output[0] = kernels.sumSliceTyped(ctx.pc(), dtype, input);
         return out;
     }
 
@@ -123,7 +125,7 @@ pub fn sumAxisRankTyped(
         const axis_dim = source.shape[axis];
         for (0..output.len) |row| {
             const base = row * axis_dim;
-            output[row] = ctx.backend.sumSliceTyped(dtype, input[base..][0..axis_dim]);
+            output[row] = kernels.sumSliceTyped(ctx.pc(), dtype, input[base..][0..axis_dim]);
         }
         return out;
     }
@@ -223,7 +225,7 @@ fn sumAxisRankF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, com
 
     if (rank == 1) {
         ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
-        try ctx.backend.sumInto(&out, xp);
+        try kernels.sumInto(ctx.pc(), &out, xp);
         return out;
     }
 
@@ -231,7 +233,7 @@ fn sumAxisRankF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, com
         const axis_dim = source.shape[axis];
         for (0..output.len) |row| {
             const base = row * axis_dim;
-            output[row] = ctx.backend.sumSlice(input[base..][0..axis_dim]);
+            output[row] = kernels.sumSlice(input[base..][0..axis_dim]);
         }
         return out;
     }
@@ -735,7 +737,7 @@ pub fn prodAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, c
 
     if (rank == 1) {
         ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
-        try ctx.backend.prodInto(&out, xp);
+        try kernels.prodInto(ctx.pc(), &out, xp);
         return out;
     }
 
@@ -743,7 +745,7 @@ pub fn prodAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, c
         const axis_dim = source.shape[axis];
         for (0..output.len) |row| {
             const base = row * axis_dim;
-            output[row] = ctx.backend.prodSlice(input[base..][0..axis_dim]);
+            output[row] = kernels.prodSlice(input[base..][0..axis_dim]);
         }
         return out;
     }
@@ -984,7 +986,7 @@ fn maskedReduceAxisRank(
             const row = input[outer_i * axis_dim ..][0..axis_dim];
             const row_flags = flags[outer_i * axis_dim ..][0..axis_dim];
             selectRow(mask_dtype, row, row_flags, row_scratch);
-            output[outer_i] = ctx.backend.sumSlice(row_scratch);
+            output[outer_i] = kernels.sumSlice(row_scratch);
             if (need_counts) count_data[outer_i] = @floatFromInt(countRow(mask_dtype, row_flags));
         }
     } else {

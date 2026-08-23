@@ -1,5 +1,6 @@
 const std = @import("std");
 const backend_mod = @import("../backend.zig");
+const kernels = backend_mod.kernels;
 const tensor = @import("../tensor.zig");
 
 const parallel = @import("../parallel.zig");
@@ -569,7 +570,7 @@ pub fn gatedRank(ctx: *ExecContext, comptime rank: usize, comptime op: GatedOp, 
     var out = try ctx.emptyRank(rank, shape);
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(ap.len(), parallel.vector_elementwise_len_threshold);
-    ctx.backend.gatedContiguousIntoUnchecked(op, &out, ap, bp, ap.len());
+    kernels.gatedContiguousIntoUnchecked(ctx.pc(), op, &out, ap, bp, ap.len());
     return out;
 }
 
@@ -838,7 +839,7 @@ pub fn takeDiv(ctx: *ExecContext, target: *Tensor, other: *const Tensor) !Tensor
 pub fn takeScale(ctx: *ExecContext, target: *Tensor, scalar_value: f32) !Tensor {
     if (target.canTakeInPlace()) {
         ctx.enableNativeVectorPoolForWork(target.len(), parallel.vector_elementwise_len_threshold);
-        try ctx.backend.scaleInto(target, target, scalar_value);
+        try kernels.scaleInto(ctx.pc(), target, target, scalar_value);
         return takeTensor(target);
     }
 
@@ -850,7 +851,7 @@ pub fn takeScale(ctx: *ExecContext, target: *Tensor, scalar_value: f32) !Tensor 
 fn takeUnary(ctx: *ExecContext, comptime op: UnaryOp, target: *Tensor) !Tensor {
     if (target.canTakeInPlace()) {
         ctx.enableNativeVectorPoolForWork(target.len(), parallel.vector_elementwise_len_threshold);
-        ctx.backend.unaryContiguousIntoUnchecked(op, target, target, target.len());
+        kernels.unaryContiguousIntoUnchecked(ctx.pc(), op, target, target, target.len());
         return takeTensor(target);
     }
 
@@ -875,7 +876,7 @@ pub fn scale(ctx: *ExecContext, x: *const Tensor, scalar_value: f32) !Tensor {
     var out = try ctx.empty(xp.shape.slice());
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
-    try ctx.backend.scaleInto(&out, xp, scalar_value);
+    try kernels.scaleInto(ctx.pc(), &out, xp, scalar_value);
     return out;
 }
 
@@ -1085,7 +1086,7 @@ pub fn addScaledInPlace(ctx: *ExecContext, target: *Tensor, source: *const Tenso
     var ss = try ctx.prepareContiguous(source);
     defer ss.deinit();
     ctx.enableNativeVectorPoolForWork(target.len(), parallel.vector_elementwise_len_threshold);
-    ctx.backend.addScaledSliceUnchecked(target.data(), ss.tensor().dataConst(), scalar_value);
+    kernels.addScaledSlice(target.data(), ss.tensor().dataConst(), scalar_value);
 }
 
 pub fn addAxisVectorInPlaceRank(ctx: *ExecContext, comptime rank: usize, target: *Tensor, row_vector: []const f32, comptime axis: usize) !void {
@@ -1105,9 +1106,9 @@ pub fn addAxisVectorUnaryInPlaceRank(ctx: *ExecContext, comptime rank: usize, co
     const rows = productBeforeAxis(rank, view.shape, axis);
     ctx.enableNativeVectorPoolForWork(target.len(), parallel.vector_elementwise_len_threshold);
     if (comptime op) |actual_op| {
-        ctx.backend.addRowVectorUnarySliceUnchecked(actual_op, target.data(), row_vector, rows, axis_dim);
+        kernels.addRowVectorUnarySlice(actual_op, target.data(), row_vector, rows, axis_dim);
     } else {
-        ctx.backend.addRowVectorSliceUnchecked(target.data(), row_vector, rows, axis_dim);
+        kernels.addRowVectorSlice(target.data(), row_vector, rows, axis_dim);
     }
 }
 
@@ -1137,7 +1138,7 @@ pub fn preluChannels(ctx: *ExecContext, x: *const Tensor, alpha: *const Tensor) 
     var out = try ctx.empty(xx.tensor().shape.slice());
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(x.len(), parallel.vector_elementwise_len_threshold);
-    ctx.backend.preluChannelsIntoUnchecked(out.data(), xx.tensor().dataConst(), aa.tensor().dataConst(), rc.rows, rc.cols);
+    kernels.preluChannelsInto(ctx.pc(), out.data(), xx.tensor().dataConst(), aa.tensor().dataConst(), rc.rows, rc.cols);
     return out;
 }
 
@@ -1156,7 +1157,7 @@ pub fn preluChannelsBackwardInput(ctx: *ExecContext, gy: *const Tensor, x: *cons
     var out = try ctx.empty(xx.tensor().shape.slice());
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(x.len(), parallel.vector_elementwise_len_threshold);
-    ctx.backend.preluChannelsBackwardInputIntoUnchecked(out.data(), gg.tensor().dataConst(), xx.tensor().dataConst(), aa.tensor().dataConst(), rc.rows, rc.cols);
+    kernels.preluChannelsBackwardInputInto(ctx.pc(), out.data(), gg.tensor().dataConst(), xx.tensor().dataConst(), aa.tensor().dataConst(), rc.rows, rc.cols);
     return out;
 }
 
@@ -1171,7 +1172,7 @@ pub fn preluChannelsBackwardAlpha(ctx: *ExecContext, gy: *const Tensor, x: *cons
 
     var out = try ctx.emptyRank(1, .{rc.cols});
     errdefer out.deinit();
-    ctx.backend.preluChannelsBackwardAlphaIntoUnchecked(out.data(), gg.tensor().dataConst(), xx.tensor().dataConst(), rc.rows, rc.cols);
+    kernels.preluChannelsBackwardAlphaInto(ctx.pc(), out.data(), gg.tensor().dataConst(), xx.tensor().dataConst(), rc.rows, rc.cols);
     return out;
 }
 
@@ -1197,7 +1198,7 @@ pub fn channelAffine(ctx: *ExecContext, x: *const Tensor, scale_vec: *const Tens
     var out = try ctx.empty(xx.tensor().shape.slice());
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(x.len(), parallel.vector_elementwise_len_threshold);
-    ctx.backend.channelAffineIntoUnchecked(out.data(), xx.tensor().dataConst(), ss.tensor().dataConst(), if (tt) |*p| p.tensor().dataConst() else null, rc.rows, rc.cols);
+    kernels.channelAffineInto(ctx.pc(), out.data(), xx.tensor().dataConst(), ss.tensor().dataConst(), if (tt) |*p| p.tensor().dataConst() else null, rc.rows, rc.cols);
     return out;
 }
 
@@ -1258,7 +1259,7 @@ pub fn unary(ctx: *ExecContext, comptime op: UnaryOp, x: *const Tensor) !Tensor 
     var out = try ctx.empty(xp.shape.slice());
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
-    ctx.backend.unaryContiguousIntoUnchecked(op, &out, xp, xp.len());
+    kernels.unaryContiguousIntoUnchecked(ctx.pc(), op, &out, xp, xp.len());
     return out;
 }
 
@@ -1274,7 +1275,7 @@ pub fn leakyRelu(ctx: *ExecContext, x: *const Tensor, negative_slope: f32) !Tens
     var out = try ctx.empty(xp.shape.slice());
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
-    ctx.backend.leakyReluContiguousIntoUnchecked(&out, xp, xp.len(), negative_slope);
+    kernels.leakyReluContiguousIntoUnchecked(ctx.pc(), &out, xp, xp.len(), negative_slope);
     return out;
 }
 
@@ -1353,7 +1354,7 @@ pub fn snakeRows(ctx: *ExecContext, x: *const Tensor, alpha: *const Tensor, inv_
     var out = try ctx.emptyRank(2, .{ rows, cols });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(xx.tensor().len(), parallel.vector_elementwise_len_threshold);
-    ctx.backend.snakeInto(&out, xx.tensor(), aa.tensor().dataConst(), bb.tensor().dataConst(), rows, cols);
+    kernels.snakeInto(ctx.pc(), &out, xx.tensor(), aa.tensor().dataConst(), bb.tensor().dataConst(), rows, cols);
     return out;
 }
 
@@ -1381,7 +1382,7 @@ pub fn snakeRowsBackwardInput(ctx: *ExecContext, x: *const Tensor, gy: *const Te
     var out = try ctx.emptyRank(2, .{ rows, cols });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(xx.tensor().len(), parallel.vector_elementwise_len_threshold);
-    ctx.backend.snakeBackwardInputInto(&out, xx.tensor(), gg.tensor(), aa.tensor().dataConst(), bb.tensor().dataConst(), rows, cols);
+    kernels.snakeBackwardInputInto(ctx.pc(), &out, xx.tensor(), gg.tensor(), aa.tensor().dataConst(), bb.tensor().dataConst(), rows, cols);
     return out;
 }
 
@@ -1427,7 +1428,7 @@ pub fn snakeRowsBackwardParams(ctx: *ExecContext, x: *const Tensor, gy: *const T
     var ginv_b = try ctx.emptyRank(1, .{cols});
     errdefer ginv_b.deinit();
     ctx.enableNativeVectorPoolForWork(xx.tensor().len(), parallel.vector_elementwise_len_threshold);
-    ctx.backend.snakeBackwardParamsInto(&galpha, &ginv_b, xx.tensor(), gg.tensor(), aa.tensor().dataConst(), bb.tensor().dataConst(), rows, cols);
+    kernels.snakeBackwardParamsInto(ctx.pc(), &galpha, &ginv_b, xx.tensor(), gg.tensor(), aa.tensor().dataConst(), bb.tensor().dataConst(), rows, cols);
     return .{ .alpha = galpha, .inv_b = ginv_b };
 }
 
@@ -1441,7 +1442,7 @@ pub fn clamp(ctx: *ExecContext, x: *const Tensor, min_value: f32, max_value: f32
     var out = try ctx.empty(xp.shape.slice());
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
-    ctx.backend.clampContiguousIntoUnchecked(&out, xp, xp.len(), min_value, max_value);
+    kernels.clampContiguousIntoUnchecked(ctx.pc(), &out, xp, xp.len(), min_value, max_value);
     return out;
 }
 
@@ -1641,7 +1642,7 @@ fn elementwiseRankTyped(
     var out = try ctx.emptyRankTyped(output_dtype, rank, shape);
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(out.len(), parallel.vector_elementwise_len_threshold);
-    ctx.backend.elementwiseContiguousIntoTyped(dtype, op, &out, aa.tensor(), bb.tensor(), out.len());
+    kernels.elementwiseContiguousIntoTyped(ctx.pc(), dtype, op, &out, aa.tensor(), bb.tensor(), out.len());
     return out;
 }
 
@@ -1875,12 +1876,12 @@ fn backendElementwiseContiguousUnchecked(
 ) void {
     ctx.enableNativeVectorPoolForWork(len, parallel.vector_elementwise_len_threshold);
     return switch (op) {
-        .add => ctx.backend.addContiguousIntoUnchecked(out, a, b, len),
-        .sub => ctx.backend.subContiguousIntoUnchecked(out, a, b, len),
-        .mul => ctx.backend.mulContiguousIntoUnchecked(out, a, b, len),
-        .div => ctx.backend.divContiguousIntoUnchecked(out, a, b, len),
-        .max => ctx.backend.maximumContiguousIntoUnchecked(out, a, b, len),
-        .min => ctx.backend.minimumContiguousIntoUnchecked(out, a, b, len),
+        .add => kernels.addContiguousIntoUnchecked(ctx.pc(), out, a, b, len),
+        .sub => kernels.subContiguousIntoUnchecked(ctx.pc(), out, a, b, len),
+        .mul => kernels.mulContiguousIntoUnchecked(ctx.pc(), out, a, b, len),
+        .div => kernels.divContiguousIntoUnchecked(ctx.pc(), out, a, b, len),
+        .max => kernels.maximumContiguousIntoUnchecked(ctx.pc(), out, a, b, len),
+        .min => kernels.minimumContiguousIntoUnchecked(ctx.pc(), out, a, b, len),
     };
 }
 

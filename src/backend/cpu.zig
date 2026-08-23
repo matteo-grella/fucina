@@ -1,3 +1,11 @@
+//! Scalar reference backend: plain serial loops, no SIMD, no BLAS, no GPU.
+//! The `kernels` namespace below is the kernel set `backend/interface.zig`
+//! names, with the same signatures as `native.zig`: pool-taking kernels take
+//! `pc: ParallelConfig` first and ignore it (every kernel here runs
+//! serially). Routing shared by both backends (im2col, the Winograd
+//! transforms, the conv2d/pool2d backward loops) reuses the `vector/`
+//! implementation serially; everything with a SIMD counterpart is an
+//! independent scalar loop. `parity_test.zig` holds the two in agreement.
 const std = @import("std");
 const ops = @import("ops.zig");
 const packed_matmul = @import("packed.zig");
@@ -10,34 +18,143 @@ const vector_conv = @import("vector/conv.zig");
 const vector_pool = @import("vector/pool.zig");
 const vector_winograd = @import("vector/winograd.zig");
 
+const cpu = @This();
 const DType = dtype_mod.DType;
 const Tensor = tensor.Tensor;
 pub const Conv2dDims = vector_conv.Conv2dDims;
 pub const Conv1dDims = vector_conv.Conv1dDims;
 pub const PoolKind = vector_pool.PoolKind;
 pub const Pool2dDims = vector_pool.Pool2dDims;
+pub const WinogradF2Dims = vector_winograd.F2Dims;
+/// The same type the native backend takes (`vector/common.zig`), so the
+/// two kernel sets share one signature.
+pub const ParallelConfig = vector_common.ParallelConfig;
+
+/// The kernel set this backend provides, by interface name.
+pub const kernels = struct {
+    pub const addInto = cpu.addInto;
+    pub const addContiguousIntoUnchecked = cpu.addContiguousIntoUnchecked;
+    pub const divContiguousIntoUnchecked = cpu.divContiguousIntoUnchecked;
+    pub const maximumContiguousIntoUnchecked = cpu.maximumContiguousIntoUnchecked;
+    pub const minimumContiguousIntoUnchecked = cpu.minimumContiguousIntoUnchecked;
+    pub const subInto = cpu.subInto;
+    pub const subContiguousIntoUnchecked = cpu.subContiguousIntoUnchecked;
+    pub const mulInto = cpu.mulInto;
+    pub const mulContiguousIntoUnchecked = cpu.mulContiguousIntoUnchecked;
+    pub const elementwiseContiguousIntoTyped = cpu.elementwiseContiguousIntoTyped;
+    pub const scaleInto = cpu.scaleInto;
+    pub const addScaledSlice = cpu.addScaledSlice;
+    pub const addRowVectorSlice = cpu.addRowVectorSlice;
+    pub const addRowVectorUnarySlice = cpu.addRowVectorUnarySlice;
+    pub const causalDepthwiseConv1dInto = cpu.causalDepthwiseConv1dInto;
+    pub const causalDepthwiseConv1dBackwardInputInto = cpu.causalDepthwiseConv1dBackwardInputInto;
+    pub const causalDepthwiseConv1dBackwardKernelInto = cpu.causalDepthwiseConv1dBackwardKernelInto;
+    pub const causalConv1dInto = cpu.causalConv1dInto;
+    pub const conv2dInto = cpu.conv2dInto;
+    pub const conv2dBackwardInputInto = cpu.conv2dBackwardInputInto;
+    pub const conv2dBackwardWeightInto = cpu.conv2dBackwardWeightInto;
+    pub const im2colInto = cpu.im2colInto;
+    pub const col2imInto = cpu.col2imInto;
+    pub const winogradF2WeightTransformInto = cpu.winogradF2WeightTransformInto;
+    pub const winogradF2InputTransformInto = cpu.winogradF2InputTransformInto;
+    pub const winogradF2OutputTransformInto = cpu.winogradF2OutputTransformInto;
+    pub const winogradF4WeightTransformInto = cpu.winogradF4WeightTransformInto;
+    pub const winogradF4InputTransformInto = cpu.winogradF4InputTransformInto;
+    pub const winogradF4OutputTransformInto = cpu.winogradF4OutputTransformInto;
+    pub const pool2dInto = cpu.pool2dInto;
+    pub const avgPool2dBackwardInto = cpu.avgPool2dBackwardInto;
+    pub const maxPool2dBackwardInto = cpu.maxPool2dBackwardInto;
+    pub const upsample2xNearestInto = cpu.upsample2xNearestInto;
+    pub const preluChannelsInto = cpu.preluChannelsInto;
+    pub const preluChannelsBackwardInputInto = cpu.preluChannelsBackwardInputInto;
+    pub const preluChannelsBackwardAlphaInto = cpu.preluChannelsBackwardAlphaInto;
+    pub const channelAffineInto = cpu.channelAffineInto;
+    pub const conv1dInto = cpu.conv1dInto;
+    pub const conv1dBackwardInputInto = cpu.conv1dBackwardInputInto;
+    pub const conv1dBackwardWeightInto = cpu.conv1dBackwardWeightInto;
+    pub const col2im1dInto = cpu.col2im1dInto;
+    pub const col2im1dBackwardInto = cpu.col2im1dBackwardInto;
+    pub const snakeInto = cpu.snakeInto;
+    pub const snakeBackwardInputInto = cpu.snakeBackwardInputInto;
+    pub const snakeBackwardParamsInto = cpu.snakeBackwardParamsInto;
+    pub const groupNormInto = cpu.groupNormInto;
+    pub const groupNormBackwardInto = cpu.groupNormBackwardInto;
+    pub const causalConv1dBackwardInputInto = cpu.causalConv1dBackwardInputInto;
+    pub const causalConv1dBackwardWeightInto = cpu.causalConv1dBackwardWeightInto;
+    pub const groupedCausalConv1dInto = cpu.groupedCausalConv1dInto;
+    pub const groupedCausalConv1dBackwardInputInto = cpu.groupedCausalConv1dBackwardInputInto;
+    pub const groupedCausalConv1dBackwardWeightInto = cpu.groupedCausalConv1dBackwardWeightInto;
+    pub const unaryContiguousIntoUnchecked = cpu.unaryContiguousIntoUnchecked;
+    pub const leakyReluContiguousIntoUnchecked = cpu.leakyReluContiguousIntoUnchecked;
+    pub const clampContiguousIntoUnchecked = cpu.clampContiguousIntoUnchecked;
+    pub const gatedContiguousIntoUnchecked = cpu.gatedContiguousIntoUnchecked;
+    pub const sumInto = cpu.sumInto;
+    pub const sumSlice = cpu.sumSlice;
+    pub const prodInto = cpu.prodInto;
+    pub const prodSlice = cpu.prodSlice;
+    pub const sumSliceTyped = cpu.sumSliceTyped;
+    pub const dotInto = cpu.dotInto;
+    pub const dotIntoTyped = cpu.dotIntoTyped;
+    pub const matmulInto = cpu.matmulInto;
+    pub const matmul2DIntoUnchecked = cpu.matmul2DIntoUnchecked;
+    pub const matmul2DAccIntoUnchecked = cpu.matmul2DAccIntoUnchecked;
+    pub const matmul2DIntoUncheckedTyped = cpu.matmul2DIntoUncheckedTyped;
+    pub const packMatmulRhsTyped = cpu.packMatmulRhsTyped;
+    pub const packDenseMatmulRhsTyped = cpu.packDenseMatmulRhsTyped;
+    pub const matmul2DIntoUncheckedPackedDenseRhs = cpu.matmul2DIntoUncheckedPackedDenseRhs;
+    pub const matmul2DIntoUncheckedPackedRhsTyped = cpu.matmul2DIntoUncheckedPackedRhsTyped;
+    pub const quantizeMatmulRhsBlockwiseI8 = cpu.quantizeMatmulRhsBlockwiseI8;
+    pub const quantizeMatmulRhsQ4_0 = cpu.quantizeMatmulRhsQ4_0;
+    pub const quantizeMatmulRhsQ8_0 = cpu.quantizeMatmulRhsQ8_0;
+    pub const matmul2DQuantizedRhs = cpu.matmul2DQuantizedRhs;
+    pub const matmul2DQuantizedRhsQ8_0x4 = cpu.matmul2DQuantizedRhsQ8_0x4;
+    pub const matmul2DPackedQ8_0x4LhsRhs = cpu.matmul2DPackedQ8_0x4LhsRhs;
+    pub const matmulPackedQ4_Kx8Q8_Kx4Slice = cpu.matmulPackedQ4_Kx8Q8_Kx4Slice;
+    pub const matmulPackedQ4_Kx8RowsSlice = cpu.matmulPackedQ4_Kx8RowsSlice;
+    pub const matmulPackedQ5_Kx8Q8_Kx4Slice = cpu.matmulPackedQ5_Kx8Q8_Kx4Slice;
+    pub const matmulPackedQ5_Kx8RowsSlice = cpu.matmulPackedQ5_Kx8RowsSlice;
+    pub const matmulPackedQ6_Kx4RowsSlice = cpu.matmulPackedQ6_Kx4RowsSlice;
+    pub const unaryRowSlice = cpu.unaryRowSlice;
+    pub const mulRowSlice = cpu.mulRowSlice;
+    pub const matmul2DPackedPaddedQ8_0x4LhsRhs = cpu.matmul2DPackedPaddedQ8_0x4LhsRhs;
+    pub const matmul2DQuantizedRhsQ6_Kx4 = cpu.matmul2DQuantizedRhsQ6_Kx4;
+    pub const matmul2DQuantizedRhsQ4_Kx4 = cpu.matmul2DQuantizedRhsQ4_Kx4;
+    pub const matmul2DQuantizedRhsQ4_Kx8 = cpu.matmul2DQuantizedRhsQ4_Kx8;
+    pub const matmul2DQuantizedRhsQ4_Kx2Mmla = cpu.matmul2DQuantizedRhsQ4_Kx2Mmla;
+    pub const matmul2DQuantizedRhsQ5_Kx8 = cpu.matmul2DQuantizedRhsQ5_Kx8;
+    pub const matmulTransAInto = cpu.matmulTransAInto;
+    pub const matmulTransA2DIntoUnchecked = cpu.matmulTransA2DIntoUnchecked;
+    pub const matmulTransBInto = cpu.matmulTransBInto;
+    pub const matmulTransB2DIntoUnchecked = cpu.matmulTransB2DIntoUnchecked;
+    pub const matmulTransB2DIntoUncheckedF16Operands = cpu.matmulTransB2DIntoUncheckedF16Operands;
+    pub const matmulTransB2DIntoUncheckedBf16Rhs = cpu.matmulTransB2DIntoUncheckedBf16Rhs;
+    pub const matmulBatched2DIntoUnchecked = cpu.matmulBatched2DIntoUnchecked;
+    pub const matmulBatchedTransA2DIntoUnchecked = cpu.matmulBatchedTransA2DIntoUnchecked;
+    pub const matmulBatchedTransB2DIntoUnchecked = cpu.matmulBatchedTransB2DIntoUnchecked;
+};
+
 // The conv2d backward gather cores are scalar loops (no SIMD divergence), so
-// the scalar reference reuses the native config-less serial cores — trivially
-// in parity. (Wrappers only to absorb the `config` argument the dispatch
-// passes; the serial cores take none.)
-pub fn conv2dBackwardInputIntoWithConfig(out: *Tensor, gy: *const Tensor, weight: *const Tensor, d: Conv2dDims, config: ParallelConfig) void {
-    _ = config;
+// the scalar reference reuses the native config-less serial cores, trivially
+// in parity. (Wrappers only to absorb the `pc` argument the dispatch passes;
+// the serial cores take none.)
+pub fn conv2dBackwardInputInto(pc: ParallelConfig, out: *Tensor, gy: *const Tensor, weight: *const Tensor, d: Conv2dDims) void {
+    _ = pc;
     vector_conv.conv2dBackwardInputInto(out, gy, weight, d);
 }
-pub fn conv2dBackwardWeightIntoWithConfig(out: *Tensor, input: *const Tensor, gy: *const Tensor, d: Conv2dDims, config: ParallelConfig) void {
-    _ = config;
+pub fn conv2dBackwardWeightInto(pc: ParallelConfig, out: *Tensor, input: *const Tensor, gy: *const Tensor, d: Conv2dDims) void {
+    _ = pc;
     vector_conv.conv2dBackwardWeightInto(out, input, gy, d);
 }
 // im2col/col2im and the pool backwards are pure data movement (col2im's row
 // adds are elementwise — no reassociation, so the vector core is bit-equal to
 // a scalar loop) — the scalar reference reuses them serially (same rationale
 // as the conv2d backwards above).
-pub fn im2colIntoWithConfig(col: *Tensor, input: *const Tensor, d: Conv2dDims, config: ParallelConfig) void {
-    _ = config;
+pub fn im2colInto(pc: ParallelConfig, col: *Tensor, input: *const Tensor, d: Conv2dDims) void {
+    _ = pc;
     vector_conv.im2colIntoWithConfig(col, input, d, .{});
 }
-pub fn col2imIntoWithConfig(out: *Tensor, col: *const Tensor, d: Conv2dDims, config: ParallelConfig) void {
-    _ = config;
+pub fn col2imInto(pc: ParallelConfig, out: *Tensor, col: *const Tensor, d: Conv2dDims) void {
+    _ = pc;
     vector_conv.col2imIntoWithConfig(out, col, d, .{});
 }
 // The Winograd F(2×2,3×3)/F(4×4,3×3) transforms are an exec-level ROUTE
@@ -45,41 +162,40 @@ pub fn col2imIntoWithConfig(out: *Tensor, col: *const Tensor, d: Conv2dDims, con
 // serially so the two backends compute identical values on Winograd-routed
 // convs; the GEMMs between the transforms still go through this backend's
 // own scalar matmul.
-pub const WinogradF2Dims = vector_winograd.F2Dims;
-pub fn winogradF2WeightTransformIntoWithConfig(u: *const [16][]f32, w: []const f32, cout: usize, cin: usize, config: ParallelConfig) void {
-    _ = config;
+pub fn winogradF2WeightTransformInto(pc: ParallelConfig, u: *const [16][]f32, w: []const f32, cout: usize, cin: usize) void {
+    _ = pc;
     vector_winograd.f2WeightTransformIntoWithConfig(u, w, cout, cin, .{});
 }
-pub fn winogradF2InputTransformIntoWithConfig(v: *const [16][]f32, x: []const f32, d: WinogradF2Dims, config: ParallelConfig) void {
-    _ = config;
+pub fn winogradF2InputTransformInto(pc: ParallelConfig, v: *const [16][]f32, x: []const f32, d: WinogradF2Dims) void {
+    _ = pc;
     vector_winograd.f2InputTransformIntoWithConfig(v, x, d, .{});
 }
-pub fn winogradF2OutputTransformIntoWithConfig(y: []f32, m: *const [16][]const f32, bias: ?[]const f32, fuse_relu: bool, d: WinogradF2Dims, config: ParallelConfig) void {
-    _ = config;
+pub fn winogradF2OutputTransformInto(pc: ParallelConfig, y: []f32, m: *const [16][]const f32, bias: ?[]const f32, fuse_relu: bool, d: WinogradF2Dims) void {
+    _ = pc;
     vector_winograd.f2OutputTransformIntoWithConfig(y, m, bias, fuse_relu, d, .{});
 }
-pub fn winogradF4WeightTransformIntoWithConfig(u: *const [36][]f32, w: []const f32, cout: usize, cin: usize, config: ParallelConfig) void {
-    _ = config;
+pub fn winogradF4WeightTransformInto(pc: ParallelConfig, u: *const [36][]f32, w: []const f32, cout: usize, cin: usize) void {
+    _ = pc;
     vector_winograd.f4WeightTransformIntoWithConfig(u, w, cout, cin, .{});
 }
-pub fn winogradF4InputTransformIntoWithConfig(v: *const [36][]f32, x: []const f32, d: WinogradF2Dims, config: ParallelConfig) void {
-    _ = config;
+pub fn winogradF4InputTransformInto(pc: ParallelConfig, v: *const [36][]f32, x: []const f32, d: WinogradF2Dims) void {
+    _ = pc;
     vector_winograd.f4InputTransformIntoWithConfig(v, x, d, .{});
 }
-pub fn winogradF4OutputTransformIntoWithConfig(y: []f32, m: *const [36][]const f32, bias: ?[]const f32, fuse_relu: bool, d: WinogradF2Dims, config: ParallelConfig) void {
-    _ = config;
+pub fn winogradF4OutputTransformInto(pc: ParallelConfig, y: []f32, m: *const [36][]const f32, bias: ?[]const f32, fuse_relu: bool, d: WinogradF2Dims) void {
+    _ = pc;
     vector_winograd.f4OutputTransformIntoWithConfig(y, m, bias, fuse_relu, d, .{});
 }
-pub fn avgPool2dBackwardIntoWithConfig(out: *Tensor, gy: *const Tensor, d: Pool2dDims, config: ParallelConfig) void {
-    _ = config;
+pub fn avgPool2dBackwardInto(pc: ParallelConfig, out: *Tensor, gy: *const Tensor, d: Pool2dDims) void {
+    _ = pc;
     vector_pool.avgPool2dBackwardIntoWithConfig(out, gy, d, .{});
 }
-pub fn maxPool2dBackwardIntoWithConfig(out: *Tensor, input: *const Tensor, gy: *const Tensor, d: Pool2dDims, config: ParallelConfig) void {
-    _ = config;
+pub fn maxPool2dBackwardInto(pc: ParallelConfig, out: *Tensor, input: *const Tensor, gy: *const Tensor, d: Pool2dDims) void {
+    _ = pc;
     vector_pool.maxPool2dBackwardIntoWithConfig(out, input, gy, d, .{});
 }
-pub fn preluChannelsBackwardInputIntoWithConfig(gx: []f32, gy: []const f32, x: []const f32, alpha: []const f32, rows: usize, cols: usize, config: ParallelConfig) void {
-    _ = config;
+pub fn preluChannelsBackwardInputInto(pc: ParallelConfig, gx: []f32, gy: []const f32, x: []const f32, alpha: []const f32, rows: usize, cols: usize) void {
+    _ = pc;
     for (0..rows) |r| {
         for (0..cols) |c| {
             const i = r * cols + c;
@@ -87,8 +203,8 @@ pub fn preluChannelsBackwardInputIntoWithConfig(gx: []f32, gy: []const f32, x: [
         }
     }
 }
-pub fn preluChannelsBackwardAlphaIntoWithConfig(galpha: []f32, gy: []const f32, x: []const f32, rows: usize, cols: usize, config: ParallelConfig) void {
-    _ = config;
+pub fn preluChannelsBackwardAlphaInto(pc: ParallelConfig, galpha: []f32, gy: []const f32, x: []const f32, rows: usize, cols: usize) void {
+    _ = pc;
     @memset(galpha, 0);
     for (0..rows) |r| {
         for (0..cols) |c| {
@@ -100,8 +216,8 @@ pub fn preluChannelsBackwardAlphaIntoWithConfig(galpha: []f32, gy: []const f32, 
 
 /// Scalar reference pool2d (independent of the native vector kernel — see
 /// `Pool2dDims` in vector/pool.zig for the layout and border semantics).
-pub fn pool2dIntoWithConfig(comptime kind: PoolKind, out: *Tensor, input: *const Tensor, d: Pool2dDims, config: ParallelConfig) void {
-    _ = config;
+pub fn pool2dInto(pc: ParallelConfig, comptime kind: PoolKind, out: *Tensor, input: *const Tensor, d: Pool2dDims) void {
+    _ = pc;
     const o = out.data();
     const in = input.dataConst();
     for (0..d.oh) |oh| {
@@ -131,8 +247,8 @@ pub fn pool2dIntoWithConfig(comptime kind: PoolKind, out: *Tensor, input: *const
 }
 
 /// Scalar reference 2× nearest-neighbour upsample.
-pub fn upsample2xNearestIntoWithConfig(out: *Tensor, input: *const Tensor, h: usize, w: usize, c: usize, config: ParallelConfig) void {
-    _ = config;
+pub fn upsample2xNearestInto(pc: ParallelConfig, out: *Tensor, input: *const Tensor, h: usize, w: usize, c: usize) void {
+    _ = pc;
     const o = out.data();
     const in = input.dataConst();
     for (0..2 * h) |oy| {
@@ -145,8 +261,8 @@ pub fn upsample2xNearestIntoWithConfig(out: *Tensor, input: *const Tensor, h: us
 }
 
 /// Scalar reference per-channel PReLU.
-pub fn preluChannelsIntoWithConfig(z: []f32, x: []const f32, alpha: []const f32, rows: usize, cols: usize, config: ParallelConfig) void {
-    _ = config;
+pub fn preluChannelsInto(pc: ParallelConfig, z: []f32, x: []const f32, alpha: []const f32, rows: usize, cols: usize) void {
+    _ = pc;
     for (0..rows) |r| {
         for (0..cols) |c| {
             const i = r * cols + c;
@@ -157,8 +273,8 @@ pub fn preluChannelsIntoWithConfig(z: []f32, x: []const f32, alpha: []const f32,
 
 /// Scalar reference per-channel affine (frozen-stats BatchNorm); a null
 /// `shift` degrades to the per-channel scale (the affine's own input-VJP).
-pub fn channelAffineIntoWithConfig(z: []f32, x: []const f32, scale: []const f32, shift: ?[]const f32, rows: usize, cols: usize, config: ParallelConfig) void {
-    _ = config;
+pub fn channelAffineInto(pc: ParallelConfig, z: []f32, x: []const f32, scale: []const f32, shift: ?[]const f32, rows: usize, cols: usize) void {
+    _ = pc;
     for (0..rows) |r| {
         for (0..cols) |c| {
             const i = r * cols + c;
@@ -177,53 +293,44 @@ fn checkedQuantizedProduct(a: usize, b: usize) !usize {
     return std.math.mul(usize, a, b) catch quantized_matmul.QuantizedFormatError.InvalidQuantizedLength;
 }
 
-/// The SAME type the native backend takes (`vector/common.zig`), not a
-/// structural copy: `backend.zig` dispatches the two interchangeably, and
-/// the surface cross-check there compares parameter types by identity.
-pub const ParallelConfig = vector_common.ParallelConfig;
-
 pub fn addInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
     try tensor.requireSameShape(a, b);
     try tensor.requireSameShape(out, a);
-    addContiguousIntoUnchecked(out, a, b, a.len());
+    addContiguousIntoUnchecked(.{}, out, a, b, a.len());
 }
 
-pub fn addContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
-    addContiguousIntoUncheckedWithConfig(out, a, b, len, .{});
-}
-
-pub fn divContiguousIntoUncheckedWithConfig(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize, config: ParallelConfig) void {
-    _ = config;
+pub fn divContiguousIntoUnchecked(pc: ParallelConfig, out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
+    _ = pc;
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
     for (z, x, y) |*dst, xv, yv| dst.* = xv / yv;
 }
 
-pub fn maximumContiguousIntoUncheckedWithConfig(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize, config: ParallelConfig) void {
-    _ = config;
+pub fn maximumContiguousIntoUnchecked(pc: ParallelConfig, out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
+    _ = pc;
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
     for (z, x, y) |*dst, xv, yv| dst.* = if (xv != xv or yv != yv) std.math.nan(f32) else @max(xv, yv);
 }
 
-pub fn minimumContiguousIntoUncheckedWithConfig(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize, config: ParallelConfig) void {
-    _ = config;
+pub fn minimumContiguousIntoUnchecked(pc: ParallelConfig, out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
+    _ = pc;
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
     for (z, x, y) |*dst, xv, yv| dst.* = if (xv != xv or yv != yv) std.math.nan(f32) else @min(xv, yv);
 }
 
-pub fn addContiguousIntoUncheckedWithConfig(
+pub fn addContiguousIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
     len: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
@@ -233,21 +340,17 @@ pub fn addContiguousIntoUncheckedWithConfig(
 pub fn subInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
     try tensor.requireSameShape(a, b);
     try tensor.requireSameShape(out, a);
-    subContiguousIntoUnchecked(out, a, b, a.len());
+    subContiguousIntoUnchecked(.{}, out, a, b, a.len());
 }
 
-pub fn subContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
-    subContiguousIntoUncheckedWithConfig(out, a, b, len, .{});
-}
-
-pub fn subContiguousIntoUncheckedWithConfig(
+pub fn subContiguousIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
     len: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
@@ -257,49 +360,41 @@ pub fn subContiguousIntoUncheckedWithConfig(
 pub fn mulInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
     try tensor.requireSameShape(a, b);
     try tensor.requireSameShape(out, a);
-    mulContiguousIntoUnchecked(out, a, b, a.len());
+    mulContiguousIntoUnchecked(.{}, out, a, b, a.len());
 }
 
-pub fn mulContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
-    mulContiguousIntoUncheckedWithConfig(out, a, b, len, .{});
-}
-
-pub fn mulContiguousIntoUncheckedWithConfig(
+pub fn mulContiguousIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
     len: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
     for (z, x, y) |*dst, xv, yv| dst.* = xv * yv;
 }
 
-pub fn elementwiseContiguousIntoTypedWithConfig(
+pub fn elementwiseContiguousIntoTyped(
+    pc: ParallelConfig,
     comptime dtype: DType,
     comptime op: ops.ElementwiseOp,
     out: *tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)),
     a: *const tensor.TensorOf(dtype),
     b: *const tensor.TensorOf(dtype),
     len: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     const x = contiguousDataConstOf(dtype, a, len);
     const y = contiguousDataConstOf(dtype, b, len);
     const z = contiguousDataOf(dtype_mod.outputDType(.pointwise, dtype), out, len);
-    elementwiseContiguousIntoTyped(dtype, op, z, x, y);
+    elementwiseSlicesTyped(dtype, op, z, x, y);
 }
 
-pub fn scaleInto(out: *Tensor, a: *const Tensor, scalar_value: f32) !void {
-    return scaleIntoWithConfig(out, a, scalar_value, .{});
-}
-
-pub fn scaleIntoWithConfig(out: *Tensor, a: *const Tensor, scalar_value: f32, config: ParallelConfig) !void {
-    _ = config;
+pub fn scaleInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor, scalar_value: f32) !void {
+    _ = pc;
     try tensor.requireSameShape(out, a);
     const x = a.dataConst();
     const z = out.data();
@@ -328,7 +423,8 @@ pub fn addRowVectorUnarySlice(comptime op: ops.UnaryOp, z: []f32, row_vector: []
     }
 }
 
-pub fn causalDepthwiseConv1dIntoWithConfig(
+pub fn causalDepthwiseConv1dInto(
+    pc: ParallelConfig,
     out: *Tensor,
     input: *const Tensor,
     kernel: *const Tensor,
@@ -337,13 +433,13 @@ pub fn causalDepthwiseConv1dIntoWithConfig(
     channels: usize,
     taps: usize,
     dilation: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     causalDepthwiseConv1dRange(out.data(), input.dataConst(), kernel.dataConst(), state, seq, channels, taps, dilation, 0, channels);
 }
 
-pub fn causalDepthwiseConv1dBackwardInputIntoWithConfig(
+pub fn causalDepthwiseConv1dBackwardInputInto(
+    pc: ParallelConfig,
     out: *Tensor,
     gy: *const Tensor,
     kernel: *const Tensor,
@@ -351,13 +447,13 @@ pub fn causalDepthwiseConv1dBackwardInputIntoWithConfig(
     channels: usize,
     taps: usize,
     dilation: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     causalDepthwiseConv1dBackwardInputRange(out.data(), gy.dataConst(), kernel.dataConst(), seq, channels, taps, dilation, 0, channels);
 }
 
-pub fn causalDepthwiseConv1dBackwardKernelIntoWithConfig(
+pub fn causalDepthwiseConv1dBackwardKernelInto(
+    pc: ParallelConfig,
     out: *Tensor,
     input: *const Tensor,
     gy: *const Tensor,
@@ -366,13 +462,13 @@ pub fn causalDepthwiseConv1dBackwardKernelIntoWithConfig(
     channels: usize,
     taps: usize,
     dilation: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     causalDepthwiseConv1dBackwardKernelRange(out.data(), input.dataConst(), gy.dataConst(), state, seq, channels, taps, dilation, 0, channels);
 }
 
-pub fn causalConv1dIntoWithConfig(
+pub fn causalConv1dInto(
+    pc: ParallelConfig,
     out: *Tensor,
     input: *const Tensor,
     weight: *const Tensor,
@@ -382,24 +478,23 @@ pub fn causalConv1dIntoWithConfig(
     out_channels: usize,
     taps: usize,
     dilation: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     groupedCausalConv1dRange(out.data(), input.dataConst(), weight.dataConst(), state, in_channels, out_channels, taps, dilation, 1, 0, seq);
 }
 
 /// Scalar reference conv2d (independent of the native vector kernel — see
 /// `Conv2dDims` in vector/conv.zig for the layout). Channel-last [H,W,Cin] ->
 /// [OH,OW,Cout] with stride, explicit zero pad, grouped/depthwise.
-pub fn conv2dIntoWithConfig(
+pub fn conv2dInto(
+    pc: ParallelConfig,
     out: *Tensor,
     input: *const Tensor,
     weight: *const Tensor,
     bias: ?[]const f32,
     d: Conv2dDims,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     const o = out.data();
     const in = input.dataConst();
     const w = weight.dataConst();
@@ -434,14 +529,14 @@ pub fn conv2dIntoWithConfig(
 /// Scalar reference conv1d (independent of the native vector kernel — see
 /// `Conv1dDims` in vector/conv.zig for the layout): general non-causal 1-D
 /// convolution with symmetric zero pad, stride, dilation, and groups.
-pub fn conv1dIntoWithConfig(
+pub fn conv1dInto(
+    pc: ParallelConfig,
     out: *Tensor,
     input: *const Tensor,
     weight: *const Tensor,
     d: Conv1dDims,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     const o = out.data();
     const in = input.dataConst();
     const w = weight.dataConst();
@@ -472,7 +567,8 @@ pub fn conv1dIntoWithConfig(
 /// index `oc*taps + k`, `out` is `[out_len, out_channels]` channel-fast rows;
 /// rows past `(t_in-1)*stride + taps - 2*pad` are the ConvTranspose
 /// output_padding and are zeroed.
-pub fn col2im1dIntoWithConfig(
+pub fn col2im1dInto(
+    pc: ParallelConfig,
     out: *Tensor,
     col: *const Tensor,
     t_in: usize,
@@ -481,9 +577,8 @@ pub fn col2im1dIntoWithConfig(
     taps: usize,
     stride: usize,
     pad: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     const o = out.data();
     const c = col.dataConst();
     const t_conv = (t_in - 1) * stride + taps - 2 * pad;
@@ -512,14 +607,14 @@ pub fn col2im1dIntoWithConfig(
 /// comment): `gx[ti,ic] = Σ_k gy[n/stride, oc]·w[k, ic%ipg, oc]` over the
 /// group's out channels, with `n = ti + pad - k*dilation` valid when
 /// non-negative, divisible by stride, and `n/stride < out_len`.
-pub fn conv1dBackwardInputIntoWithConfig(
+pub fn conv1dBackwardInputInto(
+    pc: ParallelConfig,
     out: *Tensor,
     gy: *const Tensor,
     weight: *const Tensor,
     d: Conv1dDims,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     const o = out.data();
     const g = gy.dataConst();
     const w = weight.dataConst();
@@ -550,14 +645,14 @@ pub fn conv1dBackwardInputIntoWithConfig(
 /// Scalar reference conv1d backward-weight (see the vector kernel's doc
 /// comment): `gw[k, li, oc] = Σ_t gy[t,oc]·x[t*stride + k*dilation - pad,
 /// g(oc)*ipg + li]`, skipping out-of-range padded input rows.
-pub fn conv1dBackwardWeightIntoWithConfig(
+pub fn conv1dBackwardWeightInto(
+    pc: ParallelConfig,
     out: *Tensor,
     input: *const Tensor,
     gy: *const Tensor,
     d: Conv1dDims,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     const o = out.data();
     const in = input.dataConst();
     const g = gy.dataConst();
@@ -584,7 +679,8 @@ pub fn conv1dBackwardWeightIntoWithConfig(
 /// Scalar reference col2im1d backward (see the vector kernel's doc comment):
 /// `gcol[ti, oc*taps + k] = gy[ti*stride + k - pad, oc]` when the row index
 /// lands in `[0, t_conv)`, else 0.
-pub fn col2im1dBackwardIntoWithConfig(
+pub fn col2im1dBackwardInto(
+    pc: ParallelConfig,
     out: *Tensor,
     gy: *const Tensor,
     t_in: usize,
@@ -593,9 +689,8 @@ pub fn col2im1dBackwardIntoWithConfig(
     taps: usize,
     stride: usize,
     pad: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     const o = out.data();
     const g = gy.dataConst();
     const t_conv = (t_in - 1) * stride + taps - 2 * pad;
@@ -616,7 +711,8 @@ pub fn col2im1dBackwardIntoWithConfig(
     }
 }
 
-pub fn causalConv1dBackwardInputIntoWithConfig(
+pub fn causalConv1dBackwardInputInto(
+    pc: ParallelConfig,
     out: *Tensor,
     gy: *const Tensor,
     weight: *const Tensor,
@@ -625,13 +721,13 @@ pub fn causalConv1dBackwardInputIntoWithConfig(
     out_channels: usize,
     taps: usize,
     dilation: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     groupedCausalConv1dBackwardInputRange(out.data(), gy.dataConst(), weight.dataConst(), seq, in_channels, out_channels, taps, dilation, 1, 0, seq);
 }
 
-pub fn causalConv1dBackwardWeightIntoWithConfig(
+pub fn causalConv1dBackwardWeightInto(
+    pc: ParallelConfig,
     out: *Tensor,
     input: *const Tensor,
     gy: *const Tensor,
@@ -641,13 +737,13 @@ pub fn causalConv1dBackwardWeightIntoWithConfig(
     out_channels: usize,
     taps: usize,
     dilation: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     groupedCausalConv1dBackwardWeightRange(out.data(), input.dataConst(), gy.dataConst(), state, seq, in_channels, out_channels, taps, dilation, 1, 0, taps * in_channels);
 }
 
-pub fn groupedCausalConv1dIntoWithConfig(
+pub fn groupedCausalConv1dInto(
+    pc: ParallelConfig,
     out: *Tensor,
     input: *const Tensor,
     weight: *const Tensor,
@@ -658,13 +754,13 @@ pub fn groupedCausalConv1dIntoWithConfig(
     taps: usize,
     dilation: usize,
     groups: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     groupedCausalConv1dRange(out.data(), input.dataConst(), weight.dataConst(), state, in_channels, out_channels, taps, dilation, groups, 0, seq);
 }
 
-pub fn groupedCausalConv1dBackwardInputIntoWithConfig(
+pub fn groupedCausalConv1dBackwardInputInto(
+    pc: ParallelConfig,
     out: *Tensor,
     gy: *const Tensor,
     weight: *const Tensor,
@@ -674,13 +770,13 @@ pub fn groupedCausalConv1dBackwardInputIntoWithConfig(
     taps: usize,
     dilation: usize,
     groups: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     groupedCausalConv1dBackwardInputRange(out.data(), gy.dataConst(), weight.dataConst(), seq, in_channels, out_channels, taps, dilation, groups, 0, seq);
 }
 
-pub fn groupedCausalConv1dBackwardWeightIntoWithConfig(
+pub fn groupedCausalConv1dBackwardWeightInto(
+    pc: ParallelConfig,
     out: *Tensor,
     input: *const Tensor,
     gy: *const Tensor,
@@ -691,30 +787,20 @@ pub fn groupedCausalConv1dBackwardWeightIntoWithConfig(
     taps: usize,
     dilation: usize,
     groups: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     const in_per_group = in_channels / groups;
     groupedCausalConv1dBackwardWeightRange(out.data(), input.dataConst(), gy.dataConst(), state, seq, in_channels, out_channels, taps, dilation, groups, 0, taps * in_per_group);
 }
 
 pub fn unaryContiguousIntoUnchecked(
+    pc: ParallelConfig,
     comptime op: ops.UnaryOp,
     out: *Tensor,
     a: *const Tensor,
     len: usize,
 ) void {
-    unaryContiguousIntoUncheckedWithConfig(op, out, a, len, .{});
-}
-
-pub fn unaryContiguousIntoUncheckedWithConfig(
-    comptime op: ops.UnaryOp,
-    out: *Tensor,
-    a: *const Tensor,
-    len: usize,
-    config: ParallelConfig,
-) void {
-    _ = config;
+    _ = pc;
     const x = contiguousDataConst(a, len);
     const z = contiguousData(out, len);
     for (z, x) |*dst, value| dst.* = ops.unaryScalar(op, value);
@@ -723,16 +809,16 @@ pub fn unaryContiguousIntoUncheckedWithConfig(
 /// Scalar reference snake activation (see the vector kernel's doc comment):
 /// `y[t,c] = x[t,c] + inv_b[c] * sin(alpha[c]*x[t,c])^2` over contiguous
 /// `[rows, cols]` rows; `inv_b` is precomputed by the caller.
-pub fn snakeIntoWithConfig(
+pub fn snakeInto(
+    pc: ParallelConfig,
     out: *Tensor,
     x: *const Tensor,
     alpha: []const f32,
     inv_b: []const f32,
     rows: usize,
     cols: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     const input = contiguousDataConst(x, rows * cols);
     const output = contiguousData(out, rows * cols);
     for (0..rows) |r| {
@@ -749,7 +835,8 @@ pub fn snakeIntoWithConfig(
 /// and biased variance over all rows × (cols/groups) elements, then
 /// `y = (x - mean) * (1/sqrt(var + eps))` in f32 (eps inside the sqrt),
 /// with the optional per-channel affine applied after normalization.
-pub fn groupNormIntoWithConfig(
+pub fn groupNormInto(
+    pc: ParallelConfig,
     out: *Tensor,
     x: *const Tensor,
     weight: ?[]const f32,
@@ -758,9 +845,8 @@ pub fn groupNormIntoWithConfig(
     cols: usize,
     groups: usize,
     eps: f32,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     const input = contiguousDataConst(x, rows * cols);
     const output = contiguousData(out, rows * cols);
     const cols_per_group = cols / groups;
@@ -796,7 +882,8 @@ pub fn groupNormIntoWithConfig(
 
 /// Scalar reference snake backward-input (see the vector kernel's doc
 /// comment): `gx = gy * (1 + inv_b[c]*alpha[c]*sin(2*alpha[c]*x))`.
-pub fn snakeBackwardInputIntoWithConfig(
+pub fn snakeBackwardInputInto(
+    pc: ParallelConfig,
     out: *Tensor,
     x: *const Tensor,
     gy: *const Tensor,
@@ -804,9 +891,8 @@ pub fn snakeBackwardInputIntoWithConfig(
     inv_b: []const f32,
     rows: usize,
     cols: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     const input = contiguousDataConst(x, rows * cols);
     const grad = contiguousDataConst(gy, rows * cols);
     const output = contiguousData(out, rows * cols);
@@ -823,7 +909,8 @@ pub fn snakeBackwardInputIntoWithConfig(
 /// comment): fills both per-channel gradients in one pass —
 /// `galpha[c] = Σ_t gy·inv_b[c]·x·sin(2·alpha[c]·x)` and
 /// `ginv_b[c] = Σ_t gy·sin(alpha[c]·x)^2` (f32 row-order accumulation).
-pub fn snakeBackwardParamsIntoWithConfig(
+pub fn snakeBackwardParamsInto(
+    pc: ParallelConfig,
     galpha: *Tensor,
     ginv_b: *Tensor,
     x: *const Tensor,
@@ -832,9 +919,8 @@ pub fn snakeBackwardParamsIntoWithConfig(
     inv_b: []const f32,
     rows: usize,
     cols: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     const ga = contiguousData(galpha, cols);
     const gib = contiguousData(ginv_b, cols);
     const input = contiguousDataConst(x, rows * cols);
@@ -858,7 +944,8 @@ pub fn snakeBackwardParamsIntoWithConfig(
 /// Scalar reference GroupNorm backward (see the vector kernel's doc comment):
 /// recomputes the per-group f64 two-pass statistics like the forward, then
 /// fills any of gx (f64 group means of ĝ and ĝ·x̂, f32 apply), gw, gb.
-pub fn groupNormBackwardIntoWithConfig(
+pub fn groupNormBackwardInto(
+    pc: ParallelConfig,
     gx: ?*Tensor,
     gw: ?*Tensor,
     gb: ?*Tensor,
@@ -869,9 +956,8 @@ pub fn groupNormBackwardIntoWithConfig(
     cols: usize,
     groups: usize,
     eps: f32,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     const input = contiguousDataConst(x, rows * cols);
     const grad = contiguousDataConst(gy, rows * cols);
     const gx_data: ?[]f32 = if (gx) |t| contiguousData(t, rows * cols) else null;
@@ -939,82 +1025,49 @@ pub fn groupNormBackwardIntoWithConfig(
 }
 
 pub fn leakyReluContiguousIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     len: usize,
     negative_slope: f32,
 ) void {
-    leakyReluContiguousIntoUncheckedWithConfig(out, a, len, negative_slope, .{});
-}
-
-pub fn leakyReluContiguousIntoUncheckedWithConfig(
-    out: *Tensor,
-    a: *const Tensor,
-    len: usize,
-    negative_slope: f32,
-    config: ParallelConfig,
-) void {
-    _ = config;
+    _ = pc;
     const x = contiguousDataConst(a, len);
     const z = contiguousData(out, len);
     for (z, x) |*dst, value| dst.* = if (value >= 0) value else value * negative_slope;
 }
 
 pub fn clampContiguousIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     len: usize,
     min_value: f32,
     max_value: f32,
 ) void {
-    clampContiguousIntoUncheckedWithConfig(out, a, len, min_value, max_value, .{});
-}
-
-pub fn clampContiguousIntoUncheckedWithConfig(
-    out: *Tensor,
-    a: *const Tensor,
-    len: usize,
-    min_value: f32,
-    max_value: f32,
-    config: ParallelConfig,
-) void {
-    _ = config;
+    _ = pc;
     const x = contiguousDataConst(a, len);
     const z = contiguousData(out, len);
     for (z, x) |*dst, value| dst.* = @min(@max(value, min_value), max_value);
 }
 
 pub fn gatedContiguousIntoUnchecked(
+    pc: ParallelConfig,
     comptime op: ops.GatedOp,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
     len: usize,
 ) void {
-    gatedContiguousIntoUncheckedWithConfig(op, out, a, b, len, .{});
-}
-
-pub fn gatedContiguousIntoUncheckedWithConfig(
-    comptime op: ops.GatedOp,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    len: usize,
-    config: ParallelConfig,
-) void {
-    _ = config;
+    _ = pc;
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
     for (z, x, y) |*dst, left, gate| dst.* = ops.gatedPairScalar(op, gate, left);
 }
 
-pub fn sumInto(out: *Tensor, a: *const Tensor) !void {
-    return sumIntoWithConfig(out, a, .{});
-}
-
-pub fn sumIntoWithConfig(out: *Tensor, a: *const Tensor, config: ParallelConfig) !void {
-    _ = config;
+pub fn sumInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor) !void {
+    _ = pc;
     if (!out.isScalar()) return tensor.TensorError.ShapeMismatch;
     out.data()[0] = sumSlice(a.dataConst());
 }
@@ -1025,12 +1078,8 @@ pub fn sumSlice(values: []const f32) f32 {
     return s;
 }
 
-pub fn prodInto(out: *Tensor, a: *const Tensor) !void {
-    return prodIntoWithConfig(out, a, .{});
-}
-
-pub fn prodIntoWithConfig(out: *Tensor, a: *const Tensor, config: ParallelConfig) !void {
-    _ = config;
+pub fn prodInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor) !void {
+    _ = pc;
     if (!out.isScalar()) return tensor.TensorError.ShapeMismatch;
     out.data()[0] = prodSlice(a.dataConst());
 }
@@ -1041,12 +1090,12 @@ pub fn prodSlice(values: []const f32) f32 {
     return p;
 }
 
-pub fn sumSliceTypedWithConfig(
+pub fn sumSliceTyped(
+    pc: ParallelConfig,
     comptime dtype: DType,
     values: []const dtype_mod.Scalar(dtype),
-    config: ParallelConfig,
 ) dtype_mod.Scalar(dtype_mod.outputDType(.reduction, dtype)) {
-    _ = config;
+    _ = pc;
     const compute_dtype = comptime dtype_mod.computeDType(.reduction, dtype);
     const output_dtype = comptime dtype_mod.outputDType(.reduction, dtype);
     var acc: dtype_mod.Scalar(compute_dtype) = 0;
@@ -1056,12 +1105,8 @@ pub fn sumSliceTypedWithConfig(
     return dtype_mod.castFloat(compute_dtype, output_dtype, acc);
 }
 
-pub fn dotInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
-    return dotIntoWithConfig(out, a, b, .{});
-}
-
-pub fn dotIntoWithConfig(out: *Tensor, a: *const Tensor, b: *const Tensor, config: ParallelConfig) !void {
-    _ = config;
+pub fn dotInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
+    _ = pc;
     try tensor.requireSameShape(a, b);
     if (!out.isScalar()) return tensor.TensorError.ShapeMismatch;
     var s: f32 = 0;
@@ -1069,14 +1114,14 @@ pub fn dotIntoWithConfig(out: *Tensor, a: *const Tensor, b: *const Tensor, confi
     out.data()[0] = s;
 }
 
-pub fn dotIntoTypedWithConfig(
+pub fn dotIntoTyped(
+    pc: ParallelConfig,
     comptime dtype: DType,
     out: *tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)),
     a: *const tensor.TensorOf(dtype),
     b: *const tensor.TensorOf(dtype),
-    config: ParallelConfig,
 ) !void {
-    _ = config;
+    _ = pc;
     try tensor.requireSameShapeOf(dtype, a, b);
     if (!out.isScalar()) return tensor.TensorError.ShapeMismatch;
     out.data()[0] = dotSliceTyped(dtype, a.dataConst(), b.dataConst());
@@ -1300,23 +1345,19 @@ pub fn matmulInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
     if (k != bv.dim(0)) return tensor.TensorError.ShapeMismatch;
     if (ov.dim(0) != m or ov.dim(1) != n) return tensor.TensorError.ShapeMismatch;
 
-    matmul2DIntoUnchecked(out, a, b, m, n, k);
+    matmul2DIntoUnchecked(.{}, out, a, b, m, n, k);
 }
 
-pub fn matmul2DIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, m: usize, n: usize, k: usize) void {
-    matmul2DIntoUncheckedWithConfig(out, a, b, m, n, k, .{});
-}
-
-pub fn matmul2DIntoUncheckedWithConfig(
+pub fn matmul2DIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     const ad = contiguousDataConst(a, m * k);
     const bd = contiguousDataConst(b, k * n);
     const cd = contiguousData(out, m * n);
@@ -1333,16 +1374,16 @@ pub fn matmul2DIntoUncheckedWithConfig(
 }
 
 /// C += A·B, the accumulate twin of the plain matmul above.
-pub fn matmul2DAccIntoUncheckedWithConfig(
+pub fn matmul2DAccIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     const ad = contiguousDataConst(a, m * k);
     const bd = contiguousDataConst(b, k * n);
     const cd = contiguousData(out, m * n);
@@ -1358,7 +1399,8 @@ pub fn matmul2DAccIntoUncheckedWithConfig(
     }
 }
 
-pub fn matmul2DIntoUncheckedTypedWithConfig(
+pub fn matmul2DIntoUncheckedTyped(
+    pc: ParallelConfig,
     comptime dtype: DType,
     out: *tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)),
     a: *const tensor.TensorOf(dtype),
@@ -1366,9 +1408,8 @@ pub fn matmul2DIntoUncheckedTypedWithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     matmul2DIntoTyped(
         dtype,
         contiguousDataOf(dtype_mod.outputDType(.matmul, dtype), out, m * n),
@@ -1396,16 +1437,16 @@ pub fn packDenseMatmulRhsTyped(
     return packed_matmul.packDenseRhs(allocator, dtype, rhs);
 }
 
-pub fn matmul2DIntoUncheckedPackedDenseRhsWithConfig(
+pub fn matmul2DIntoUncheckedPackedDenseRhs(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     rhs: *const packed_matmul.PackedDenseRhs,
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    _ = config;
+    _ = pc;
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
     packed_matmul.matmulDenseScalar(
         contiguousData(out, m * n),
@@ -1415,7 +1456,8 @@ pub fn matmul2DIntoUncheckedPackedDenseRhsWithConfig(
     );
 }
 
-pub fn matmul2DIntoUncheckedPackedRhsTypedWithConfig(
+pub fn matmul2DIntoUncheckedPackedRhsTyped(
+    pc: ParallelConfig,
     comptime dtype: DType,
     allocator: std.mem.Allocator,
     out: *tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)),
@@ -1424,7 +1466,6 @@ pub fn matmul2DIntoUncheckedPackedRhsTypedWithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
     return packed_matmul.matmul2DIntoUncheckedPackedRhsTypedWithConfig(
         allocator,
@@ -1435,8 +1476,8 @@ pub fn matmul2DIntoUncheckedPackedRhsTypedWithConfig(
         m,
         n,
         k,
-        config,
-        matmul2DIntoUncheckedWithConfig,
+        pc,
+        matmul2DIntoUnchecked,
     );
 }
 
@@ -1462,7 +1503,8 @@ pub fn quantizeMatmulRhsQ8_0(
     return quantized_matmul.quantizeMatmulRhsQ8_0(allocator, rhs);
 }
 
-pub fn matmul2DQuantizedRhsWithConfig(
+pub fn matmul2DQuantizedRhs(
+    pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
@@ -1470,39 +1512,39 @@ pub fn matmul2DQuantizedRhsWithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
     return switch (rhs) {
-        .fucina_w8a8_rhs => |qrhs| matmul2DQuantizedRhsI8WithConfig(allocator, out, a, qrhs, m, n, k, config),
-        .ggml_q1_0 => |qrhs| matmul2DQuantizedRhsQ1_0WithConfig(allocator, out, a, qrhs, m, n, k, config),
-        .ggml_q2_0 => |qrhs| matmul2DQuantizedRhsQ2_0WithConfig(allocator, out, a, qrhs, m, n, k, config),
-        .ggml_q4_0 => |qrhs| matmul2DQuantizedRhsQ4_0WithConfig(allocator, out, a, qrhs, m, n, k, config),
-        .ggml_q4_1 => |qrhs| matmul2DQuantizedRhsQ4_1WithConfig(allocator, out, a, qrhs, m, n, k, config),
-        .ggml_q5_0 => |qrhs| matmul2DQuantizedRhsQ5_0WithConfig(allocator, out, a, qrhs, m, n, k, config),
-        .ggml_q5_1 => |qrhs| matmul2DQuantizedRhsQ5_1WithConfig(allocator, out, a, qrhs, m, n, k, config),
-        .ggml_q8_0 => |qrhs| matmul2DQuantizedRhsQ8_0WithConfig(allocator, out, a, qrhs, m, n, k, config),
-        .ggml_q2_k => |qrhs| matmul2DQuantizedRhsQ2_KWithConfig(allocator, out, a, qrhs, m, n, k, config),
-        .ggml_q3_k => |qrhs| matmul2DQuantizedRhsQ3_KWithConfig(allocator, out, a, qrhs, m, n, k, config),
-        .ggml_q4_k => |qrhs| matmul2DQuantizedRhsQ4_KWithConfig(allocator, out, a, qrhs, m, n, k, config),
-        .ggml_q5_k => |qrhs| matmul2DQuantizedRhsQ5_KWithConfig(allocator, out, a, qrhs, m, n, k, config),
-        .ggml_q6_k => |qrhs| matmul2DQuantizedRhsQ6_KWithConfig(allocator, out, a, qrhs, m, n, k, config),
-        .ggml_iq1_s => |qrhs| matmul2DQuantizedRhsTableQ8_KWithConfig(.iq1_s, allocator, out, a, qrhs, m, n, k, config),
-        .ggml_iq1_m => |qrhs| matmul2DQuantizedRhsTableQ8_KWithConfig(.iq1_m, allocator, out, a, qrhs, m, n, k, config),
-        .ggml_iq2_xxs => |qrhs| matmul2DQuantizedRhsTableQ8_KWithConfig(.iq2_xxs, allocator, out, a, qrhs, m, n, k, config),
-        .ggml_iq2_xs => |qrhs| matmul2DQuantizedRhsTableQ8_KWithConfig(.iq2_xs, allocator, out, a, qrhs, m, n, k, config),
-        .ggml_iq2_s => |qrhs| matmul2DQuantizedRhsTableQ8_KWithConfig(.iq2_s, allocator, out, a, qrhs, m, n, k, config),
-        .ggml_iq3_xxs => |qrhs| matmul2DQuantizedRhsTableQ8_KWithConfig(.iq3_xxs, allocator, out, a, qrhs, m, n, k, config),
-        .ggml_iq3_s => |qrhs| matmul2DQuantizedRhsTableQ8_KWithConfig(.iq3_s, allocator, out, a, qrhs, m, n, k, config),
-        .ggml_iq4_nl => |qrhs| matmul2DQuantizedRhsTableQ8_0WithConfig(.iq4_nl, allocator, out, a, qrhs, m, n, k, config),
-        .ggml_iq4_xs => |qrhs| matmul2DQuantizedRhsTableQ8_KWithConfig(.iq4_xs, allocator, out, a, qrhs, m, n, k, config),
-        .ggml_tq1_0 => |qrhs| matmul2DQuantizedRhsTableQ8_KWithConfig(.tq1_0, allocator, out, a, qrhs, m, n, k, config),
-        .ggml_tq2_0 => |qrhs| matmul2DQuantizedRhsTableQ8_KWithConfig(.tq2_0, allocator, out, a, qrhs, m, n, k, config),
-        .ggml_mxfp4 => |qrhs| matmul2DQuantizedRhsTableQ8_0WithConfig(.mxfp4, allocator, out, a, qrhs, m, n, k, config),
-        .ggml_nvfp4 => |qrhs| matmul2DQuantizedRhsTableQ8_0WithConfig(.nvfp4, allocator, out, a, qrhs, m, n, k, config),
+        .fucina_w8a8_rhs => |qrhs| matmul2DQuantizedRhsI8(pc, allocator, out, a, qrhs, m, n, k),
+        .ggml_q1_0 => |qrhs| matmul2DQuantizedRhsQ1_0(pc, allocator, out, a, qrhs, m, n, k),
+        .ggml_q2_0 => |qrhs| matmul2DQuantizedRhsQ2_0(pc, allocator, out, a, qrhs, m, n, k),
+        .ggml_q4_0 => |qrhs| matmul2DQuantizedRhsQ4_0(pc, allocator, out, a, qrhs, m, n, k),
+        .ggml_q4_1 => |qrhs| matmul2DQuantizedRhsQ4_1(pc, allocator, out, a, qrhs, m, n, k),
+        .ggml_q5_0 => |qrhs| matmul2DQuantizedRhsQ5_0(pc, allocator, out, a, qrhs, m, n, k),
+        .ggml_q5_1 => |qrhs| matmul2DQuantizedRhsQ5_1(pc, allocator, out, a, qrhs, m, n, k),
+        .ggml_q8_0 => |qrhs| matmul2DQuantizedRhsQ8_0(pc, allocator, out, a, qrhs, m, n, k),
+        .ggml_q2_k => |qrhs| matmul2DQuantizedRhsQ2_K(pc, allocator, out, a, qrhs, m, n, k),
+        .ggml_q3_k => |qrhs| matmul2DQuantizedRhsQ3_K(pc, allocator, out, a, qrhs, m, n, k),
+        .ggml_q4_k => |qrhs| matmul2DQuantizedRhsQ4_K(pc, allocator, out, a, qrhs, m, n, k),
+        .ggml_q5_k => |qrhs| matmul2DQuantizedRhsQ5_K(pc, allocator, out, a, qrhs, m, n, k),
+        .ggml_q6_k => |qrhs| matmul2DQuantizedRhsQ6_K(pc, allocator, out, a, qrhs, m, n, k),
+        .ggml_iq1_s => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq1_s, allocator, out, a, qrhs, m, n, k),
+        .ggml_iq1_m => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq1_m, allocator, out, a, qrhs, m, n, k),
+        .ggml_iq2_xxs => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq2_xxs, allocator, out, a, qrhs, m, n, k),
+        .ggml_iq2_xs => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq2_xs, allocator, out, a, qrhs, m, n, k),
+        .ggml_iq2_s => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq2_s, allocator, out, a, qrhs, m, n, k),
+        .ggml_iq3_xxs => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq3_xxs, allocator, out, a, qrhs, m, n, k),
+        .ggml_iq3_s => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq3_s, allocator, out, a, qrhs, m, n, k),
+        .ggml_iq4_nl => |qrhs| matmul2DQuantizedRhsTableQ8_0(pc, .iq4_nl, allocator, out, a, qrhs, m, n, k),
+        .ggml_iq4_xs => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq4_xs, allocator, out, a, qrhs, m, n, k),
+        .ggml_tq1_0 => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .tq1_0, allocator, out, a, qrhs, m, n, k),
+        .ggml_tq2_0 => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .tq2_0, allocator, out, a, qrhs, m, n, k),
+        .ggml_mxfp4 => |qrhs| matmul2DQuantizedRhsTableQ8_0(pc, .mxfp4, allocator, out, a, qrhs, m, n, k),
+        .ggml_nvfp4 => |qrhs| matmul2DQuantizedRhsTableQ8_0(pc, .nvfp4, allocator, out, a, qrhs, m, n, k),
     };
 }
 
-pub fn matmul2DQuantizedRhsI8WithConfig(
+pub fn matmul2DQuantizedRhsI8(
+    pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
@@ -1510,9 +1552,8 @@ pub fn matmul2DQuantizedRhsI8WithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    _ = config; // scalar backend runs the int8 kernel serially
+    _ = pc; // scalar backend runs the int8 kernel serially
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
 
     const a_len = try checkedTensorProduct(m, k);
@@ -1529,7 +1570,8 @@ pub fn matmul2DQuantizedRhsI8WithConfig(
     quantized_matmul.matmulI8BlockwiseRange(cd, qa, a_scales, rhs.qw.dataConst(), rhs.scales.dataConst(), m, n, k, rhs.group_size, rhs.num_groups, 0, m);
 }
 
-fn matmul2DQuantizedRhsQ8_0RowsWithConfig(
+fn matmul2DQuantizedRhsQ8_0Rows(
+    pc: ParallelConfig,
     comptime range: anytype,
     allocator: std.mem.Allocator,
     out: *Tensor,
@@ -1538,9 +1580,8 @@ fn matmul2DQuantizedRhsQ8_0RowsWithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    _ = config;
+    _ = pc;
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
 
     const cd = (try out.dataChecked())[0 .. m * n];
@@ -1557,7 +1598,8 @@ fn matmul2DQuantizedRhsQ8_0RowsWithConfig(
     range(cd, qlhs_blocks, rhs, m, n, 0, m);
 }
 
-fn matmul2DQuantizedRhsQ8_1RowsWithConfig(
+fn matmul2DQuantizedRhsQ8_1Rows(
+    pc: ParallelConfig,
     comptime range: anytype,
     allocator: std.mem.Allocator,
     out: *Tensor,
@@ -1566,9 +1608,8 @@ fn matmul2DQuantizedRhsQ8_1RowsWithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    _ = config;
+    _ = pc;
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
 
     const cd = (try out.dataChecked())[0 .. m * n];
@@ -1577,7 +1618,8 @@ fn matmul2DQuantizedRhsQ8_1RowsWithConfig(
     range(cd, qlhs.blocks, rhs, m, n, 0, m);
 }
 
-fn matmul2DQuantizedRhsQ8_KRowsWithConfig(
+fn matmul2DQuantizedRhsQ8_KRows(
+    pc: ParallelConfig,
     comptime range: anytype,
     allocator: std.mem.Allocator,
     out: *Tensor,
@@ -1586,9 +1628,8 @@ fn matmul2DQuantizedRhsQ8_KRowsWithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    _ = config;
+    _ = pc;
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
 
     const cd = (try out.dataChecked())[0 .. m * n];
@@ -1597,7 +1638,8 @@ fn matmul2DQuantizedRhsQ8_KRowsWithConfig(
     range(cd, qlhs, rhs, m, n, 0, m);
 }
 
-pub fn matmul2DQuantizedRhsQ4_0WithConfig(
+pub fn matmul2DQuantizedRhsQ4_0(
+    pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
@@ -1605,12 +1647,12 @@ pub fn matmul2DQuantizedRhsQ4_0WithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    return matmul2DQuantizedRhsQ8_0RowsWithConfig(quantized_matmul.matmulQ4_0RhsRange, allocator, out, a, rhs, m, n, k, config);
+    return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.matmulQ4_0RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
-pub fn matmul2DQuantizedRhsQ1_0WithConfig(
+pub fn matmul2DQuantizedRhsQ1_0(
+    pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
@@ -1618,12 +1660,12 @@ pub fn matmul2DQuantizedRhsQ1_0WithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    return matmul2DQuantizedRhsQ8_0RowsWithConfig(quantized_matmul.matmulQ1_0RhsRange, allocator, out, a, rhs, m, n, k, config);
+    return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.matmulQ1_0RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
-pub fn matmul2DQuantizedRhsQ2_0WithConfig(
+pub fn matmul2DQuantizedRhsQ2_0(
+    pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
@@ -1631,12 +1673,12 @@ pub fn matmul2DQuantizedRhsQ2_0WithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    return matmul2DQuantizedRhsQ8_0RowsWithConfig(quantized_matmul.matmulQ2_0RhsRefRange, allocator, out, a, rhs, m, n, k, config);
+    return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.matmulQ2_0RhsRefRange, allocator, out, a, rhs, m, n, k);
 }
 
-pub fn matmul2DQuantizedRhsQ4_1WithConfig(
+pub fn matmul2DQuantizedRhsQ4_1(
+    pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
@@ -1644,12 +1686,12 @@ pub fn matmul2DQuantizedRhsQ4_1WithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    return matmul2DQuantizedRhsQ8_1RowsWithConfig(quantized_matmul.matmulQ4_1RhsRange, allocator, out, a, rhs, m, n, k, config);
+    return matmul2DQuantizedRhsQ8_1Rows(pc, quantized_matmul.matmulQ4_1RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
-pub fn matmul2DQuantizedRhsQ5_0WithConfig(
+pub fn matmul2DQuantizedRhsQ5_0(
+    pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
@@ -1657,12 +1699,12 @@ pub fn matmul2DQuantizedRhsQ5_0WithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    return matmul2DQuantizedRhsQ8_0RowsWithConfig(quantized_matmul.matmulQ5_0RhsRange, allocator, out, a, rhs, m, n, k, config);
+    return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.matmulQ5_0RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
-pub fn matmul2DQuantizedRhsQ5_1WithConfig(
+pub fn matmul2DQuantizedRhsQ5_1(
+    pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
@@ -1670,12 +1712,12 @@ pub fn matmul2DQuantizedRhsQ5_1WithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    return matmul2DQuantizedRhsQ8_1RowsWithConfig(quantized_matmul.matmulQ5_1RhsRange, allocator, out, a, rhs, m, n, k, config);
+    return matmul2DQuantizedRhsQ8_1Rows(pc, quantized_matmul.matmulQ5_1RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
-pub fn matmul2DQuantizedRhsQ8_0WithConfig(
+pub fn matmul2DQuantizedRhsQ8_0(
+    pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
@@ -1683,12 +1725,12 @@ pub fn matmul2DQuantizedRhsQ8_0WithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    return matmul2DQuantizedRhsQ8_0RowsWithConfig(quantized_matmul.matmulQ8_0RhsRange, allocator, out, a, rhs, m, n, k, config);
+    return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.matmulQ8_0RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
-pub fn matmul2DQuantizedRhsQ8_0x4WithConfig(
+pub fn matmul2DQuantizedRhsQ8_0x4(
+    pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
@@ -1696,21 +1738,20 @@ pub fn matmul2DQuantizedRhsQ8_0x4WithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    return matmul2DQuantizedRhsQ8_0RowsWithConfig(quantized_matmul.matmulQ8_0x4RhsRange, allocator, out, a, rhs, m, n, k, config);
+    return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.matmulQ8_0x4RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
-pub fn matmul2DPackedQ8_0x4LhsRhsWithConfig(
+pub fn matmul2DPackedQ8_0x4LhsRhs(
+    pc: ParallelConfig,
     out: *Tensor,
     lhs_blocks: []const quantized_matmul.BlockQ8_0x4,
     rhs: *const quantized_matmul.QuantizedMatmulRhsQ8_0x4,
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    _ = config;
+    _ = pc;
     if (m % 4 != 0) return tensor.TensorError.InvalidShape;
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
     const blocks_per_row = try quantized_matmul.q8_0BlockCount(k);
@@ -1718,33 +1759,33 @@ pub fn matmul2DPackedQ8_0x4LhsRhsWithConfig(
     quantized_matmul.matmulQ8_0x4PackedRhsRange(contiguousData(out, try checkedTensorProduct(m, n)), lhs_blocks, rhs, m, n, 0, m);
 }
 
-pub fn matmulPackedQ4_Kx8Q8_Kx4SliceWithConfig(out: []f32, lhs_blocks: []const quantized_matmul.BlockQ8_Kx4, rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx8, m: usize, n: usize, k: usize, config: ParallelConfig) void {
+pub fn matmulPackedQ4_Kx8Q8_Kx4Slice(pc: ParallelConfig, out: []f32, lhs_blocks: []const quantized_matmul.BlockQ8_Kx4, rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx8, m: usize, n: usize, k: usize) void {
     _ = k;
-    _ = config;
+    _ = pc;
     quantized_matmul.matmulQ4_Kx8Q8_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
-pub fn matmulPackedQ4_Kx8RowsSliceWithConfig(out: []f32, lhs_blocks: []const quantized_matmul.BlockQ8_K, rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx8, m: usize, n: usize, k: usize, config: ParallelConfig) void {
+pub fn matmulPackedQ4_Kx8RowsSlice(pc: ParallelConfig, out: []f32, lhs_blocks: []const quantized_matmul.BlockQ8_K, rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx8, m: usize, n: usize, k: usize) void {
     _ = k;
-    _ = config;
+    _ = pc;
     quantized_matmul.matmulQ4_Kx8RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
-pub fn matmulPackedQ5_Kx8Q8_Kx4SliceWithConfig(out: []f32, lhs_blocks: []const quantized_matmul.BlockQ8_Kx4, rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_Kx8, m: usize, n: usize, k: usize, config: ParallelConfig) void {
+pub fn matmulPackedQ5_Kx8Q8_Kx4Slice(pc: ParallelConfig, out: []f32, lhs_blocks: []const quantized_matmul.BlockQ8_Kx4, rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_Kx8, m: usize, n: usize, k: usize) void {
     _ = k;
-    _ = config;
+    _ = pc;
     quantized_matmul.matmulQ5_Kx8Q8_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
-pub fn matmulPackedQ5_Kx8RowsSliceWithConfig(out: []f32, lhs_blocks: []const quantized_matmul.BlockQ8_K, rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_Kx8, m: usize, n: usize, k: usize, config: ParallelConfig) void {
+pub fn matmulPackedQ5_Kx8RowsSlice(pc: ParallelConfig, out: []f32, lhs_blocks: []const quantized_matmul.BlockQ8_K, rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_Kx8, m: usize, n: usize, k: usize) void {
     _ = k;
-    _ = config;
+    _ = pc;
     quantized_matmul.matmulQ5_Kx8RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
-pub fn matmulPackedQ6_Kx4RowsSliceWithConfig(out: []f32, lhs_blocks: []const quantized_matmul.BlockQ8_K, rhs: *const quantized_matmul.QuantizedMatmulRhsQ6_Kx4, m: usize, n: usize, k: usize, config: ParallelConfig) void {
+pub fn matmulPackedQ6_Kx4RowsSlice(pc: ParallelConfig, out: []f32, lhs_blocks: []const quantized_matmul.BlockQ8_K, rhs: *const quantized_matmul.QuantizedMatmulRhsQ6_Kx4, m: usize, n: usize, k: usize) void {
     _ = k;
-    _ = config;
+    _ = pc;
     quantized_matmul.matmulQ6_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
@@ -1756,23 +1797,24 @@ pub fn mulRowSlice(z: []f32, x: []const f32, y: []const f32) void {
     for (z, x, y) |*dst, a, b| dst.* = a * b;
 }
 
-pub fn matmul2DPackedPaddedQ8_0x4LhsRhsWithConfig(
+pub fn matmul2DPackedPaddedQ8_0x4LhsRhs(
+    pc: ParallelConfig,
     out: *Tensor,
     lhs_blocks: []const quantized_matmul.BlockQ8_0x4,
     rhs: *const quantized_matmul.QuantizedMatmulRhsQ8_0x4,
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    _ = config;
+    _ = pc;
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
     const blocks_per_row = try quantized_matmul.q8_0BlockCount(k);
     if (lhs_blocks.len != try checkedQuantizedProduct((m + 3) / 4, blocks_per_row)) return quantized_matmul.QuantizedFormatError.InvalidQuantizedLength;
     quantized_matmul.matmulQ8_0x4PackedPaddedRhsRange(contiguousData(out, try checkedTensorProduct(m, n)), lhs_blocks, rhs, m, n);
 }
 
-pub fn matmul2DQuantizedRhsQ2_KWithConfig(
+pub fn matmul2DQuantizedRhsQ2_K(
+    pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
@@ -1780,12 +1822,12 @@ pub fn matmul2DQuantizedRhsQ2_KWithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRowsWithConfig(quantized_matmul.matmulQ2_KRhsRange, allocator, out, a, rhs, m, n, k, config);
+    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.matmulQ2_KRhsRange, allocator, out, a, rhs, m, n, k);
 }
 
-pub fn matmul2DQuantizedRhsQ3_KWithConfig(
+pub fn matmul2DQuantizedRhsQ3_K(
+    pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
@@ -1793,12 +1835,12 @@ pub fn matmul2DQuantizedRhsQ3_KWithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRowsWithConfig(quantized_matmul.matmulQ3_KRhsRange, allocator, out, a, rhs, m, n, k, config);
+    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.matmulQ3_KRhsRange, allocator, out, a, rhs, m, n, k);
 }
 
-pub fn matmul2DQuantizedRhsQ4_KWithConfig(
+pub fn matmul2DQuantizedRhsQ4_K(
+    pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
@@ -1806,12 +1848,12 @@ pub fn matmul2DQuantizedRhsQ4_KWithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRowsWithConfig(quantized_matmul.matmulQ4_KRhsRange, allocator, out, a, rhs, m, n, k, config);
+    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.matmulQ4_KRhsRange, allocator, out, a, rhs, m, n, k);
 }
 
-pub fn matmul2DQuantizedRhsQ4_Kx4WithConfig(
+pub fn matmul2DQuantizedRhsQ4_Kx4(
+    pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
@@ -1819,12 +1861,12 @@ pub fn matmul2DQuantizedRhsQ4_Kx4WithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRowsWithConfig(quantized_matmul.matmulQ4_Kx4RhsRange, allocator, out, a, rhs, m, n, k, config);
+    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.matmulQ4_Kx4RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
-pub fn matmul2DQuantizedRhsQ4_Kx8WithConfig(
+pub fn matmul2DQuantizedRhsQ4_Kx8(
+    pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
@@ -1832,12 +1874,12 @@ pub fn matmul2DQuantizedRhsQ4_Kx8WithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRowsWithConfig(quantized_matmul.matmulQ4_Kx8RhsRange, allocator, out, a, rhs, m, n, k, config);
+    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.matmulQ4_Kx8RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
-pub fn matmul2DQuantizedRhsQ4_Kx2MmlaWithConfig(
+pub fn matmul2DQuantizedRhsQ4_Kx2Mmla(
+    pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
@@ -1845,12 +1887,12 @@ pub fn matmul2DQuantizedRhsQ4_Kx2MmlaWithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRowsWithConfig(quantized_matmul.matmulQ4_Kx2MmlaRhsRange, allocator, out, a, rhs, m, n, k, config);
+    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.matmulQ4_Kx2MmlaRhsRange, allocator, out, a, rhs, m, n, k);
 }
 
-pub fn matmul2DQuantizedRhsQ5_Kx8WithConfig(
+pub fn matmul2DQuantizedRhsQ5_Kx8(
+    pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
@@ -1858,12 +1900,12 @@ pub fn matmul2DQuantizedRhsQ5_Kx8WithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRowsWithConfig(quantized_matmul.matmulQ5_Kx8RhsRange, allocator, out, a, rhs, m, n, k, config);
+    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.matmulQ5_Kx8RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
-pub fn matmul2DQuantizedRhsQ5_KWithConfig(
+pub fn matmul2DQuantizedRhsQ5_K(
+    pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
@@ -1871,12 +1913,12 @@ pub fn matmul2DQuantizedRhsQ5_KWithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRowsWithConfig(quantized_matmul.matmulQ5_KRhsRange, allocator, out, a, rhs, m, n, k, config);
+    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.matmulQ5_KRhsRange, allocator, out, a, rhs, m, n, k);
 }
 
-pub fn matmul2DQuantizedRhsQ6_KWithConfig(
+pub fn matmul2DQuantizedRhsQ6_K(
+    pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
@@ -1884,12 +1926,12 @@ pub fn matmul2DQuantizedRhsQ6_KWithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRowsWithConfig(quantized_matmul.matmulQ6_KRhsRange, allocator, out, a, rhs, m, n, k, config);
+    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.matmulQ6_KRhsRange, allocator, out, a, rhs, m, n, k);
 }
 
-pub fn matmul2DQuantizedRhsQ6_Kx4WithConfig(
+pub fn matmul2DQuantizedRhsQ6_Kx4(
+    pc: ParallelConfig,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
@@ -1897,12 +1939,12 @@ pub fn matmul2DQuantizedRhsQ6_Kx4WithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRowsWithConfig(quantized_matmul.matmulQ6_Kx4RhsRange, allocator, out, a, rhs, m, n, k, config);
+    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.matmulQ6_Kx4RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
-fn matmul2DQuantizedRhsTableQ8_0WithConfig(
+fn matmul2DQuantizedRhsTableQ8_0(
+    pc: ParallelConfig,
     comptime rhs_dtype: DType,
     allocator: std.mem.Allocator,
     out: *Tensor,
@@ -1911,9 +1953,8 @@ fn matmul2DQuantizedRhsTableQ8_0WithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    _ = config;
+    _ = pc;
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
 
     const cd = (try out.dataChecked())[0 .. m * n];
@@ -1922,7 +1963,8 @@ fn matmul2DQuantizedRhsTableQ8_0WithConfig(
     quantized_matmul.matmulTableQ8_0RhsRange(rhs_dtype, cd, qlhs.blocks, rhs, m, n, 0, m);
 }
 
-fn matmul2DQuantizedRhsTableQ8_KWithConfig(
+fn matmul2DQuantizedRhsTableQ8_K(
+    pc: ParallelConfig,
     comptime rhs_dtype: DType,
     allocator: std.mem.Allocator,
     out: *Tensor,
@@ -1931,9 +1973,8 @@ fn matmul2DQuantizedRhsTableQ8_KWithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) !void {
-    _ = config;
+    _ = pc;
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
 
     const cd = (try out.dataChecked())[0 .. m * n];
@@ -1952,23 +1993,19 @@ pub fn matmulTransAInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void 
     if (k != bv.dim(0)) return tensor.TensorError.ShapeMismatch;
     if (ov.dim(0) != m or ov.dim(1) != n) return tensor.TensorError.ShapeMismatch;
 
-    matmulTransA2DIntoUnchecked(out, a, b, m, n, k);
+    matmulTransA2DIntoUnchecked(.{}, out, a, b, m, n, k);
 }
 
-pub fn matmulTransA2DIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, m: usize, n: usize, k: usize) void {
-    matmulTransA2DIntoUncheckedWithConfig(out, a, b, m, n, k, .{});
-}
-
-pub fn matmulTransA2DIntoUncheckedWithConfig(
+pub fn matmulTransA2DIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     const ad = contiguousDataConst(a, k * m);
     const bd = contiguousDataConst(b, k * n);
     const cd = contiguousData(out, m * n);
@@ -1994,23 +2031,19 @@ pub fn matmulTransBInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void 
     if (k != bv.dim(1)) return tensor.TensorError.ShapeMismatch;
     if (ov.dim(0) != m or ov.dim(1) != n) return tensor.TensorError.ShapeMismatch;
 
-    matmulTransB2DIntoUnchecked(out, a, b, m, n, k);
+    matmulTransB2DIntoUnchecked(.{}, out, a, b, m, n, k);
 }
 
-pub fn matmulTransB2DIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, m: usize, n: usize, k: usize) void {
-    matmulTransB2DIntoUncheckedWithConfig(out, a, b, m, n, k, .{});
-}
-
-pub fn matmulTransB2DIntoUncheckedWithConfig(
+pub fn matmulTransB2DIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     const ad = contiguousDataConst(a, m * k);
     const bd = contiguousDataConst(b, n * k);
     const cd = contiguousData(out, m * n);
@@ -2026,16 +2059,16 @@ pub fn matmulTransB2DIntoUncheckedWithConfig(
     }
 }
 
-pub fn matmulTransB2DIntoUncheckedF16OperandsWithConfig(
+pub fn matmulTransB2DIntoUncheckedF16Operands(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const tensor.TensorOf(.f16),
     b: *const tensor.TensorOf(.f16),
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     const ad = contiguousDataConstOf(.f16, a, m * k);
     const bd = contiguousDataConstOf(.f16, b, n * k);
     const cd = contiguousData(out, m * n);
@@ -2051,16 +2084,16 @@ pub fn matmulTransB2DIntoUncheckedF16OperandsWithConfig(
     }
 }
 
-pub fn matmulTransB2DIntoUncheckedBf16RhsWithConfig(
+pub fn matmulTransB2DIntoUncheckedBf16Rhs(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     b: *const tensor.TensorOf(.bf16),
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
+    _ = pc;
     const ad = contiguousDataConst(a, m * k);
     const bd = contiguousDataConstOf(.bf16, b, n * k);
     const cd = contiguousData(out, m * n);
@@ -2081,6 +2114,7 @@ pub fn matmulTransB2DIntoUncheckedBf16RhsWithConfig(
 // CPU backend always loops; the SIMD backend may dispatch to a single
 // Accelerate call when available.
 pub fn matmulBatched2DIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
@@ -2092,23 +2126,7 @@ pub fn matmulBatched2DIntoUnchecked(
     stride_b: usize,
     stride_c: usize,
 ) void {
-    matmulBatched2DIntoUncheckedWithConfig(out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c, .{});
-}
-
-pub fn matmulBatched2DIntoUncheckedWithConfig(
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    m: usize,
-    n: usize,
-    k: usize,
-    batch_count: usize,
-    stride_a: usize,
-    stride_b: usize,
-    stride_c: usize,
-    config: ParallelConfig,
-) void {
-    _ = config;
+    _ = pc;
     @constCast(a.buffer).waitReady();
     @constCast(b.buffer).waitReady();
     out.buffer.waitMutable();
@@ -2131,6 +2149,7 @@ pub fn matmulBatched2DIntoUncheckedWithConfig(
 }
 
 pub fn matmulBatchedTransA2DIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
@@ -2142,23 +2161,7 @@ pub fn matmulBatchedTransA2DIntoUnchecked(
     stride_b: usize,
     stride_c: usize,
 ) void {
-    matmulBatchedTransA2DIntoUncheckedWithConfig(out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c, .{});
-}
-
-pub fn matmulBatchedTransA2DIntoUncheckedWithConfig(
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    m: usize,
-    n: usize,
-    k: usize,
-    batch_count: usize,
-    stride_a: usize,
-    stride_b: usize,
-    stride_c: usize,
-    config: ParallelConfig,
-) void {
-    _ = config;
+    _ = pc;
     @constCast(a.buffer).waitReady();
     @constCast(b.buffer).waitReady();
     out.buffer.waitMutable();
@@ -2181,6 +2184,7 @@ pub fn matmulBatchedTransA2DIntoUncheckedWithConfig(
 }
 
 pub fn matmulBatchedTransB2DIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
@@ -2192,23 +2196,7 @@ pub fn matmulBatchedTransB2DIntoUnchecked(
     stride_b: usize,
     stride_c: usize,
 ) void {
-    matmulBatchedTransB2DIntoUncheckedWithConfig(out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c, .{});
-}
-
-pub fn matmulBatchedTransB2DIntoUncheckedWithConfig(
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    m: usize,
-    n: usize,
-    k: usize,
-    batch_count: usize,
-    stride_a: usize,
-    stride_b: usize,
-    stride_c: usize,
-    config: ParallelConfig,
-) void {
-    _ = config;
+    _ = pc;
     @constCast(a.buffer).waitReady();
     @constCast(b.buffer).waitReady();
     out.buffer.waitMutable();
@@ -2250,7 +2238,7 @@ fn contiguousDataOf(comptime dtype: DType, x: *tensor.TensorOf(dtype), len: usiz
     return x.buffer.data[x.offset .. x.offset + len];
 }
 
-fn elementwiseContiguousIntoTyped(
+fn elementwiseSlicesTyped(
     comptime dtype: DType,
     comptime op: ops.ElementwiseOp,
     out: []dtype_mod.Scalar(dtype_mod.outputDType(.pointwise, dtype)),

@@ -189,7 +189,7 @@ pub fn main(init: std.process.Init) !void {
                     // preceding deferred completion and include this call's
                     // host-visibility fence in end-to-end dispatch latency.
                     c.buffer.waitReady();
-                    native.matmul2DIntoUncheckedWithConfig(c, a, b, m, n, k, c2);
+                    native.kernels.matmul2DIntoUnchecked(c2, c, a, b, m, n, k);
                     c.buffer.waitReady();
                 }
             }.go;

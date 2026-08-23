@@ -408,7 +408,8 @@ fn linearSeqFx4(
     if (comptime backend_mod.active_kind == .native and backend_mod.native_uses_blas) {
         var out_blas = try Tensor(.{ .seq, out_tag }).empty(ctx, .{ m, n });
         errdefer out_blas.deinit();
-        if (try backend_mod.native_impl.matmulFoldedx4BlasWithConfig(
+        if (try backend_mod.native_impl.matmulFoldedx4Blas(
+            .{ .pool = ctx.workPool() },
             allocator,
             try out_blas.data(),
             x,
@@ -417,7 +418,6 @@ fn linearSeqFx4(
             m,
             n,
             k,
-            .{ .pool = ctx.workPool() },
         )) return out_blas;
         out_blas.deinit();
     }

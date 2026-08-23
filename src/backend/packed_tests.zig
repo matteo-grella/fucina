@@ -91,7 +91,7 @@ test "packed single-row f16 matmul writes output without f32 temp fallback" {
     defer out.deinit();
 
     const Fallback = struct {
-        fn run(_: *Tensor, _: *const Tensor, _: *const Tensor, _: usize, _: usize, _: usize, _: anytype) void {
+        fn run(_: anytype, _: *Tensor, _: *const Tensor, _: *const Tensor, _: usize, _: usize, _: usize) void {
             unreachable;
         }
     }.run;
@@ -123,7 +123,7 @@ test "packed single-row bf16 matmul writes output without f32 temp fallback" {
     defer out.deinit();
 
     const Fallback = struct {
-        fn run(_: *Tensor, _: *const Tensor, _: *const Tensor, _: usize, _: usize, _: usize, _: anytype) void {
+        fn run(_: anytype, _: *Tensor, _: *const Tensor, _: *const Tensor, _: usize, _: usize, _: usize) void {
             unreachable;
         }
     }.run;

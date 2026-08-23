@@ -89,7 +89,7 @@ pub fn main(init: std.process.Init) !void {
         var weight = try Tensor.zeros(allocator, &.{ shape.n, shape.k });
         defer weight.deinit();
         fill(weight.data(), shape.k +% shape.n);
-        var packed_rhs = try native.packDenseMatmulRhsTyped(.f32, allocator, &weight);
+        var packed_rhs = try native.kernels.packDenseMatmulRhsTyped(.f32, allocator, &weight);
         defer packed_rhs.deinit();
 
         for (rows) |m| {
@@ -142,13 +142,13 @@ fn fill(values: []f32, salt: usize) void {
 
 fn runGeneric(out: *Tensor, lhs: *const Tensor, rhs: *const Tensor, m: usize, n: usize, k: usize, cfg: native.ParallelConfig) void {
     out.buffer.waitReady();
-    native.matmulTransB2DIntoUncheckedWithConfig(out, lhs, rhs, m, n, k, cfg);
+    native.kernels.matmulTransB2DIntoUnchecked(cfg, out, lhs, rhs, m, n, k);
     out.buffer.waitReady();
 }
 
 fn runPacked(out: *Tensor, lhs: *const Tensor, rhs: *const raw_backend.PackedDenseRhs, m: usize, n: usize, k: usize, cfg: native.ParallelConfig) void {
     out.buffer.waitReady();
-    native.matmul2DIntoUncheckedPackedDenseRhsWithConfig(out, lhs, rhs, m, n, k, cfg) catch @panic("packed GEMM shape failure");
+    native.kernels.matmul2DIntoUncheckedPackedDenseRhs(cfg, out, lhs, rhs, m, n, k) catch @panic("packed GEMM shape failure");
     out.buffer.waitReady();
 }
 

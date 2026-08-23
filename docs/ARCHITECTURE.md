@@ -41,7 +41,7 @@ Top-down; a band may depend only on bands at or below it:
 | ag + training/serialization | `src/ag.zig`, `src/ag/**`, `src/optim.zig`, `src/optim/**`, `src/es.zig`, `src/ptqtp.zig`, `src/gguf.zig`, `src/lora.zig`, `src/safetensors.zig`, `src/state_dict.zig`, `src/training_checkpoint.zig`, `src/param_registry.zig`, `src/weights.zig`, `src/weights/**`, `src/gguf_meta.zig`, `src/ptqtp_gguf.zig` (model I/O) |
 | tagged | `src/tag_ops.zig` (tag-ops library) |
 | exec | `src/exec.zig`, `src/exec/**` (eager runtime) |
-| backend | `src/backend.zig`, `src/backend/**` (arch-switched numeric kernels; the single-implementation fused kernels live beside their ops in `exec/`) |
+| backend | `src/backend.zig`, `src/backend/**` (build-selected numeric kernels behind the `backend/interface.zig` kernel set; the single-implementation fused kernels live beside their ops in `exec/`) |
 | tags | `src/tags.zig` (comptime tag algebra) |
 | tensor | `src/tensor.zig` (raw tensor) |
 | primitives | `src/thread.zig`, `src/parallel.zig`, `src/tuning.zig` (route gates over `parallel`'s env readers) |
@@ -59,7 +59,7 @@ Top-down; a band may depend only on bands at or below it:
   round-trips.
 - `DType` and the GGML block types (`BlockQ4_K`, `BlockIQ2_XS`, ...) from
   `src/dtype.zig`, plus the quantized RHS container types from the backend.
-- `Backend`, `BackendKind`, and the backend build/runtime constants
+- `BackendKind` and the backend build/runtime constants
   (`active_backend_kind`, `native_uses_blas`, ...).
 - Autograd framework pillars: `checkpoint`/`checkpointWithContext`,
   `noGrad`/`isGradEnabled`/`NoGradScope`, `customVjp`, and
@@ -142,8 +142,8 @@ Core value types and substrate:
 Execution runtime:
 
 - `src/exec.zig`: `ExecContext`, the public runtime boundary. One struct
-  declares the substrate state (thread-safe allocator, backend instance,
-  `BufferPool`, worker team, exec-scope stack, MoE decode scratch) and
+  declares the substrate state (thread-safe allocator, published worker
+  team, `BufferPool`, exec-scope stack, MoE decode scratch) and
   carries every op as an alias line (`pub const add = exec_elementwise.add;`)
   grouped by domain; the struct body is the registry, the bodies live under
   `src/exec/`.
@@ -175,12 +175,16 @@ Execution runtime:
 
 Backends:
 
-- `src/backend.zig`: build-selected backend facade; also owns the
-  cross-thread GPU/pool handshake (`parallel_pool` is a
-  `std.atomic.Value` with release/acquire ordering).
+- `src/backend.zig`: build-selected backend facade; `backend.kernels` is
+  the selected provider's kernel set and the shared kernel vocabulary
+  (ops, block and RHS types) is re-exported from here.
+- `src/backend/interface.zig`: the kernel set by name (`names`,
+  `generic_names`, `pool_free_names`) and `conform`, the comptime check
+  that both providers export exactly that set with matching signatures.
 - `src/backend/cpu.zig` (scalar reference) and `src/backend/native.zig`
-  (Zig `@Vector` kernels plus optional CBLAS for GEMM);
-  `src/backend/parity_test.zig` keeps them in agreement.
+  (Zig `@Vector` kernels plus optional CBLAS for GEMM), each exporting
+  `pub const kernels`; `src/backend/parity_test.zig` keeps them in
+  agreement numerically.
 - `src/backend/vector/`: portable SIMD kernels (`primitives.zig`, `gemm.zig`,
   `gemm_blocked.zig` — the BLIS-style blocked packed f32 GEMM for the no-BLAS
   path, `matmul_quant.zig`, `elementwise.zig`, `conv.zig`, `pool.zig` —
@@ -387,7 +391,8 @@ is the canonical in-tree name for allowed-raw zones.
 `src/exec.zig`, owns:
 
 - a thread-safe allocator wrapper,
-- the active backend instance,
+- the published worker team (`parallel_pool`, an atomic pointer that
+  `pc()` snapshots into the `ParallelConfig` every kernel call receives),
 - a reusable `BufferPool` (`src/exec/buffer_pool.zig`),
 - a lazily initialized `thread.Pool` (spin-then-park hot worker team),
 - the exec-scope stack (`openExecScope`/`closeExecScope`: implicit ownership
@@ -444,6 +449,21 @@ the default, `scalar` the reference).
 Dispatch is compiled away; adding a variant forces edits through exhaustive
 switches.
 
+The two providers meet at one interface, `src/backend/interface.zig`: a
+comptime-checked namespace, not a struct of function pointers, because many
+kernels are generic over a `comptime` dtype or op. It lists every kernel by
+name (`names`), the generic subset (`generic_names`) and the subset that
+takes no pool (`pool_free_names`); `cpu.zig` and `native.zig` each export
+`pub const kernels = struct { ... }` with exactly that set, and
+`backend.zig` runs `interface.conform` on both at comptime (name, parameter
+types, return payload, parameter count for generics, and the `pc` rule).
+`backend.kernels` is the selected set. The signature rule: a kernel that
+needs the worker pool takes `pc: ParallelConfig` as its first parameter;
+one that does not use the pool does not take it; the scalar reference
+accepts `pc` wherever the native kernel threads on it and ignores it. Exec
+calls `kernels.X(ctx.pc(), ...)`, where `ExecContext.pc()` snapshots the
+published worker team.
+
 The native backend uses portable Zig `@Vector` kernels for elementwise ops,
 reductions, dot, and fallback GEMM; optional CBLAS for large GEMM
 (`-Dblas=none|accelerate|openblas|mkl|blis|nvpl|blas`; Accelerate is the macOS
@@ -482,7 +502,7 @@ The allocation contract, precisely scoped:
 - Output buffers are always supplied by `ExecContext`; no backend allocates
   tensor outputs. The vector/quant compute leaves (`backend/vector/*`,
   the dot kernels in `backend/quant/*`) are allocation-free.
-- The quantized-RHS dispatch tier (`matmul2DQuantizedRhsWithConfig` in
+- The quantized-RHS dispatch tier (`matmul2DQuantizedRhs` in
   `native.zig`/`cpu.zig`) deliberately takes an allocator for per-call LHS
   quantization scratch (f32 activations → Q8_0/Q8_1/Q8_K blocks); the Q8_0
   arm has a 512-block stack fast path (`q8_0_lhs_stack_blocks`). RHS pack

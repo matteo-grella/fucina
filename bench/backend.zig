@@ -543,11 +543,11 @@ fn benchElementwise(allocator: std.mem.Allocator, w: anytype, name: []const u8, 
 
     const NativeRunner = struct {
         fn run(o: *Tensor, lhs: *const Tensor, rhs: *const Tensor, len: usize, config: native.ParallelConfig) void {
-            native.addContiguousIntoUncheckedWithConfig(o, lhs, rhs, len, config);
+            native.kernels.addContiguousIntoUnchecked(config, o, lhs, rhs, len);
         }
     }.run;
 
-    const scalar_ns = try medianTimer(scalar.addInto, .{ &out, &a, &b });
+    const scalar_ns = try medianTimer(scalar.kernels.addInto, .{ &out, &a, &b });
     const native_ns = try medianTimer(NativeRunner, .{ &out, &a, &b, n, native_config });
     try fmtRow(w, name, scalar_ns, native_ns);
 }
@@ -573,21 +573,21 @@ fn benchReduction(allocator: std.mem.Allocator, w: anytype, name: []const u8, n:
     if (std.mem.startsWith(u8, name, "sum")) {
         const NativeRunner = struct {
             fn run(o: *Tensor, lhs: *const Tensor, config: native.ParallelConfig) !void {
-                try native.sumIntoWithConfig(o, lhs, config);
+                try native.kernels.sumInto(config, o, lhs);
             }
         }.run;
 
-        const scalar_ns = try medianTimer(scalar.sumInto, .{ &out, &a });
+        const scalar_ns = try medianTimer(scalar.kernels.sumInto, .{ scalar.ParallelConfig{}, &out, &a });
         const native_ns = try medianTimer(NativeRunner, .{ &out, &a, native_config });
         try fmtRow(w, name, scalar_ns, native_ns);
     } else {
         const NativeRunner = struct {
             fn run(o: *Tensor, lhs: *const Tensor, rhs: *const Tensor, config: native.ParallelConfig) !void {
-                try native.dotIntoWithConfig(o, lhs, rhs, config);
+                try native.kernels.dotInto(config, o, lhs, rhs);
             }
         }.run;
 
-        const scalar_ns = try medianTimer(scalar.dotInto, .{ &out, &a, &b });
+        const scalar_ns = try medianTimer(scalar.kernels.dotInto, .{ scalar.ParallelConfig{}, &out, &a, &b });
         const native_ns = try medianTimer(NativeRunner, .{ &out, &a, &b, native_config });
         try fmtRow(w, name, scalar_ns, native_ns);
     }
@@ -612,12 +612,12 @@ fn benchTypedElementwise(comptime tensor_dtype: DType, allocator: std.mem.Alloca
 
     const ScalarRunner = struct {
         fn run(o: *OutputTensor, lhs: *const TypedTensor, rhs: *const TypedTensor, len: usize) void {
-            scalar.elementwiseContiguousIntoTypedWithConfig(tensor_dtype, .add, o, lhs, rhs, len, .{});
+            scalar.kernels.elementwiseContiguousIntoTyped(.{}, tensor_dtype, .add, o, lhs, rhs, len);
         }
     }.run;
     const NativeRunner = struct {
         fn run(o: *OutputTensor, lhs: *const TypedTensor, rhs: *const TypedTensor, len: usize) void {
-            native.elementwiseContiguousIntoTypedWithConfig(tensor_dtype, .add, o, lhs, rhs, len, .{});
+            native.kernels.elementwiseContiguousIntoTyped(.{}, tensor_dtype, .add, o, lhs, rhs, len);
         }
     }.run;
 
@@ -650,12 +650,12 @@ fn benchTypedDot(comptime tensor_dtype: DType, allocator: std.mem.Allocator, w: 
 
     const ScalarRunner = struct {
         fn run(o: *OutputTensor, lhs: *const TypedTensor, rhs: *const TypedTensor) !void {
-            try scalar.dotIntoTypedWithConfig(tensor_dtype, o, lhs, rhs, .{});
+            try scalar.kernels.dotIntoTyped(.{}, tensor_dtype, o, lhs, rhs);
         }
     }.run;
     const NativeRunner = struct {
         fn run(o: *OutputTensor, lhs: *const TypedTensor, rhs: *const TypedTensor, config: native.ParallelConfig) !void {
-            try native.dotIntoTypedWithConfig(tensor_dtype, o, lhs, rhs, config);
+            try native.kernels.dotIntoTyped(config, tensor_dtype, o, lhs, rhs);
         }
     }.run;
 
@@ -697,11 +697,11 @@ fn benchMatMulTimed(
 
     const NativeRunner = struct {
         fn run(o: *Tensor, lhs: *const Tensor, rhs: *const Tensor, rows: usize, cols: usize, inner: usize, config: native.ParallelConfig) void {
-            native.matmul2DIntoUncheckedWithConfig(o, lhs, rhs, rows, cols, inner, config);
+            native.kernels.matmul2DIntoUnchecked(config, o, lhs, rhs, rows, cols, inner);
         }
     }.run;
 
-    const scalar_ns = try medianTimerN(scalar.matmulInto, .{ &out, &a, &b }, n_iters, n_warmup);
+    const scalar_ns = try medianTimerN(scalar.kernels.matmulInto, .{ &out, &a, &b }, n_iters, n_warmup);
     const native_ns = try medianTimerN(NativeRunner, .{ &out, &a, &b, m, n, k, native_config }, n_iters, n_warmup);
     try fmtRow(w, name, scalar_ns, native_ns);
 }
@@ -744,12 +744,12 @@ fn benchTypedMatMulTimed(
 
     const ScalarRunner = struct {
         fn run(o: *OutputTensor, lhs: *const TypedTensor, rhs: *const TypedTensor, rows: usize, cols: usize, inner: usize) void {
-            scalar.matmul2DIntoUncheckedTypedWithConfig(tensor_dtype, o, lhs, rhs, rows, cols, inner, .{});
+            scalar.kernels.matmul2DIntoUncheckedTyped(.{}, tensor_dtype, o, lhs, rhs, rows, cols, inner);
         }
     }.run;
     const NativeRunner = struct {
         fn run(o: *OutputTensor, lhs: *const TypedTensor, rhs: *const TypedTensor, rows: usize, cols: usize, inner: usize, config: native.ParallelConfig) void {
-            native.matmul2DIntoUncheckedTypedWithConfig(tensor_dtype, o, lhs, rhs, rows, cols, inner, config);
+            native.kernels.matmul2DIntoUncheckedTyped(config, tensor_dtype, o, lhs, rhs, rows, cols, inner);
         }
     }.run;
 
@@ -786,7 +786,7 @@ fn benchPackedMatMulTimed(
     var out = try OutputTensor.zeros(allocator, &.{ m, n });
     defer out.deinit();
 
-    var packed_rhs = try native.packMatmulRhsTyped(tensor_dtype, allocator, &b);
+    var packed_rhs = try native.kernels.packMatmulRhsTyped(tensor_dtype, allocator, &b);
     defer packed_rhs.deinit();
 
     var pool: raw_backend.ThreadPool = undefined;
@@ -796,12 +796,12 @@ fn benchPackedMatMulTimed(
 
     const ScalarRunner = struct {
         fn run(alloc: std.mem.Allocator, o: *OutputTensor, lhs: *const TypedTensor, rhs: *const PackedRhs, rows: usize, cols: usize, inner: usize) !void {
-            try scalar.matmul2DIntoUncheckedPackedRhsTypedWithConfig(tensor_dtype, alloc, o, lhs, rhs, rows, cols, inner, .{});
+            try scalar.kernels.matmul2DIntoUncheckedPackedRhsTyped(.{}, tensor_dtype, alloc, o, lhs, rhs, rows, cols, inner);
         }
     }.run;
     const NativeRunner = struct {
         fn run(alloc: std.mem.Allocator, o: *OutputTensor, lhs: *const TypedTensor, rhs: *const PackedRhs, rows: usize, cols: usize, inner: usize, config: native.ParallelConfig) !void {
-            try native.matmul2DIntoUncheckedPackedRhsTypedWithConfig(tensor_dtype, alloc, o, lhs, rhs, rows, cols, inner, config);
+            try native.kernels.matmul2DIntoUncheckedPackedRhsTyped(config, tensor_dtype, alloc, o, lhs, rhs, rows, cols, inner);
         }
     }.run;
 
@@ -844,12 +844,12 @@ fn benchBf16RhsTransBMatMulTimed(
 
     const ScalarRunner = struct {
         fn run(o: *Tensor, lhs: *const Tensor, rhs: *const Bf16Tensor, rows: usize, cols: usize, inner: usize) void {
-            scalar.matmulTransB2DIntoUncheckedBf16RhsWithConfig(o, lhs, rhs, rows, cols, inner, .{});
+            scalar.kernels.matmulTransB2DIntoUncheckedBf16Rhs(.{}, o, lhs, rhs, rows, cols, inner);
         }
     }.run;
     const NativeRunner = struct {
         fn run(o: *Tensor, lhs: *const Tensor, rhs: *const Bf16Tensor, rows: usize, cols: usize, inner: usize, config: native.ParallelConfig) void {
-            native.matmulTransB2DIntoUncheckedBf16RhsWithConfig(o, lhs, rhs, rows, cols, inner, config);
+            native.kernels.matmulTransB2DIntoUncheckedBf16Rhs(config, o, lhs, rhs, rows, cols, inner);
         }
     }.run;
 
@@ -892,12 +892,12 @@ fn benchF16OperandsTransBMatMulTimed(
 
     const ScalarRunner = struct {
         fn run(o: *Tensor, lhs: *const F16Tensor, rhs: *const F16Tensor, rows: usize, cols: usize, inner: usize) void {
-            scalar.matmulTransB2DIntoUncheckedF16OperandsWithConfig(o, lhs, rhs, rows, cols, inner, .{});
+            scalar.kernels.matmulTransB2DIntoUncheckedF16Operands(.{}, o, lhs, rhs, rows, cols, inner);
         }
     }.run;
     const NativeRunner = struct {
         fn run(o: *Tensor, lhs: *const F16Tensor, rhs: *const F16Tensor, rows: usize, cols: usize, inner: usize, config: native.ParallelConfig) void {
-            native.matmulTransB2DIntoUncheckedF16OperandsWithConfig(o, lhs, rhs, rows, cols, inner, config);
+            native.kernels.matmulTransB2DIntoUncheckedF16Operands(config, o, lhs, rhs, rows, cols, inner);
         }
     }.run;
 
@@ -943,7 +943,7 @@ fn benchQuantizedI8MatMulTimed(
     var out = try FloatTensor.zeros(allocator, &.{ m, n });
     defer out.deinit();
 
-    var qrhs = try native.quantizeMatmulRhsBlockwiseI8(allocator, &b, 32);
+    var qrhs = try native.kernels.quantizeMatmulRhsBlockwiseI8(allocator, &b, 32);
     defer qrhs.deinit();
 
     var pool: raw_backend.ThreadPool = undefined;
@@ -953,12 +953,12 @@ fn benchQuantizedI8MatMulTimed(
 
     const ScalarRunner = struct {
         fn run(alloc: std.mem.Allocator, o: *FloatTensor, lhs: *const FloatTensor, rhs: *const QRhs, rows: usize, cols: usize, inner: usize) !void {
-            try scalar.matmul2DQuantizedRhsI8WithConfig(alloc, o, lhs, rhs, rows, cols, inner, .{});
+            try scalar.matmul2DQuantizedRhsI8(.{}, alloc, o, lhs, rhs, rows, cols, inner);
         }
     }.run;
     const NativeRunner = struct {
         fn run(alloc: std.mem.Allocator, o: *FloatTensor, lhs: *const FloatTensor, rhs: *const QRhs, rows: usize, cols: usize, inner: usize, config: native.ParallelConfig) !void {
-            try native.matmul2DQuantizedRhsI8WithConfig(alloc, o, lhs, rhs, rows, cols, inner, config);
+            try native.matmul2DQuantizedRhsI8(config, alloc, o, lhs, rhs, rows, cols, inner);
         }
     }.run;
 
@@ -1006,7 +1006,7 @@ fn benchQuantizedGGMLMatMulTimed(
             const blocks = try makeQ1_0Blocks(allocator, k, n);
             break :blk QRhs{ .rows = .{ .allocator = allocator, .blocks = blocks, .rows = n, .cols = k, .blocks_per_row = try raw_backend.quantized_matmul.q1_0BlockCount(k) }, .k = k, .n = n };
         },
-        .ggml_q4_0 => try native.quantizeMatmulRhsQ4_0(allocator, &b),
+        .ggml_q4_0 => try native.kernels.quantizeMatmulRhsQ4_0(allocator, &b),
         .ggml_q4_1 => blk: {
             const blocks = try makeQ4_1Blocks(allocator, k, n);
             break :blk QRhs{ .rows = .{ .allocator = allocator, .blocks = blocks, .rows = n, .cols = k, .blocks_per_row = try raw_backend.quantized_matmul.q4_1BlockCount(k) }, .k = k, .n = n };
@@ -1019,7 +1019,7 @@ fn benchQuantizedGGMLMatMulTimed(
             const blocks = try makeQ5_1Blocks(allocator, k, n);
             break :blk QRhs{ .rows = .{ .allocator = allocator, .blocks = blocks, .rows = n, .cols = k, .blocks_per_row = try raw_backend.quantized_matmul.q5_1BlockCount(k) }, .k = k, .n = n };
         },
-        .ggml_q8_0 => try native.quantizeMatmulRhsQ8_0(allocator, &b),
+        .ggml_q8_0 => try native.kernels.quantizeMatmulRhsQ8_0(allocator, &b),
         else => unreachable,
     };
     defer qrhs.deinit();
@@ -1032,12 +1032,12 @@ fn benchQuantizedGGMLMatMulTimed(
     const ScalarRunner = struct {
         fn run(alloc: std.mem.Allocator, o: *FloatTensor, lhs: *const FloatTensor, rhs: *const QRhs, rows: usize, cols: usize, inner: usize) !void {
             switch (format) {
-                .ggml_q1_0 => try scalar.matmul2DQuantizedRhsQ1_0WithConfig(alloc, o, lhs, rhs, rows, cols, inner, .{}),
-                .ggml_q4_0 => try scalar.matmul2DQuantizedRhsQ4_0WithConfig(alloc, o, lhs, rhs, rows, cols, inner, .{}),
-                .ggml_q4_1 => try scalar.matmul2DQuantizedRhsQ4_1WithConfig(alloc, o, lhs, rhs, rows, cols, inner, .{}),
-                .ggml_q5_0 => try scalar.matmul2DQuantizedRhsQ5_0WithConfig(alloc, o, lhs, rhs, rows, cols, inner, .{}),
-                .ggml_q5_1 => try scalar.matmul2DQuantizedRhsQ5_1WithConfig(alloc, o, lhs, rhs, rows, cols, inner, .{}),
-                .ggml_q8_0 => try scalar.matmul2DQuantizedRhsQ8_0WithConfig(alloc, o, lhs, rhs, rows, cols, inner, .{}),
+                .ggml_q1_0 => try scalar.matmul2DQuantizedRhsQ1_0(.{}, alloc, o, lhs, rhs, rows, cols, inner),
+                .ggml_q4_0 => try scalar.matmul2DQuantizedRhsQ4_0(.{}, alloc, o, lhs, rhs, rows, cols, inner),
+                .ggml_q4_1 => try scalar.matmul2DQuantizedRhsQ4_1(.{}, alloc, o, lhs, rhs, rows, cols, inner),
+                .ggml_q5_0 => try scalar.matmul2DQuantizedRhsQ5_0(.{}, alloc, o, lhs, rhs, rows, cols, inner),
+                .ggml_q5_1 => try scalar.matmul2DQuantizedRhsQ5_1(.{}, alloc, o, lhs, rhs, rows, cols, inner),
+                .ggml_q8_0 => try scalar.matmul2DQuantizedRhsQ8_0(.{}, alloc, o, lhs, rhs, rows, cols, inner),
                 else => unreachable,
             }
         }
@@ -1045,12 +1045,12 @@ fn benchQuantizedGGMLMatMulTimed(
     const NativeRunner = struct {
         fn run(alloc: std.mem.Allocator, o: *FloatTensor, lhs: *const FloatTensor, rhs: *const QRhs, rows: usize, cols: usize, inner: usize, config: native.ParallelConfig) !void {
             switch (format) {
-                .ggml_q1_0 => try native.matmul2DQuantizedRhsQ1_0WithConfig(alloc, o, lhs, rhs, rows, cols, inner, config),
-                .ggml_q4_0 => try native.matmul2DQuantizedRhsQ4_0WithConfig(alloc, o, lhs, rhs, rows, cols, inner, config),
-                .ggml_q4_1 => try native.matmul2DQuantizedRhsQ4_1WithConfig(alloc, o, lhs, rhs, rows, cols, inner, config),
-                .ggml_q5_0 => try native.matmul2DQuantizedRhsQ5_0WithConfig(alloc, o, lhs, rhs, rows, cols, inner, config),
-                .ggml_q5_1 => try native.matmul2DQuantizedRhsQ5_1WithConfig(alloc, o, lhs, rhs, rows, cols, inner, config),
-                .ggml_q8_0 => try native.matmul2DQuantizedRhsQ8_0WithConfig(alloc, o, lhs, rhs, rows, cols, inner, config),
+                .ggml_q1_0 => try native.matmul2DQuantizedRhsQ1_0(config, alloc, o, lhs, rhs, rows, cols, inner),
+                .ggml_q4_0 => try native.matmul2DQuantizedRhsQ4_0(config, alloc, o, lhs, rhs, rows, cols, inner),
+                .ggml_q4_1 => try native.matmul2DQuantizedRhsQ4_1(config, alloc, o, lhs, rhs, rows, cols, inner),
+                .ggml_q5_0 => try native.matmul2DQuantizedRhsQ5_0(config, alloc, o, lhs, rhs, rows, cols, inner),
+                .ggml_q5_1 => try native.matmul2DQuantizedRhsQ5_1(config, alloc, o, lhs, rhs, rows, cols, inner),
+                .ggml_q8_0 => try native.matmul2DQuantizedRhsQ8_0(config, alloc, o, lhs, rhs, rows, cols, inner),
                 else => unreachable,
             }
         }
@@ -1128,11 +1128,11 @@ fn benchQuantizedGGMLKMatMulTimed(
     const ScalarRunner = struct {
         fn run(alloc: std.mem.Allocator, o: *FloatTensor, lhs: *const FloatTensor, rhs: *const QRhs, rows: usize, cols: usize, inner: usize) !void {
             switch (format) {
-                .ggml_q2_k => try scalar.matmul2DQuantizedRhsQ2_KWithConfig(alloc, o, lhs, rhs, rows, cols, inner, .{}),
-                .ggml_q3_k => try scalar.matmul2DQuantizedRhsQ3_KWithConfig(alloc, o, lhs, rhs, rows, cols, inner, .{}),
-                .ggml_q4_k => try scalar.matmul2DQuantizedRhsQ4_KWithConfig(alloc, o, lhs, rhs, rows, cols, inner, .{}),
-                .ggml_q5_k => try scalar.matmul2DQuantizedRhsQ5_KWithConfig(alloc, o, lhs, rhs, rows, cols, inner, .{}),
-                .ggml_q6_k => try scalar.matmul2DQuantizedRhsQ6_KWithConfig(alloc, o, lhs, rhs, rows, cols, inner, .{}),
+                .ggml_q2_k => try scalar.matmul2DQuantizedRhsQ2_K(.{}, alloc, o, lhs, rhs, rows, cols, inner),
+                .ggml_q3_k => try scalar.matmul2DQuantizedRhsQ3_K(.{}, alloc, o, lhs, rhs, rows, cols, inner),
+                .ggml_q4_k => try scalar.matmul2DQuantizedRhsQ4_K(.{}, alloc, o, lhs, rhs, rows, cols, inner),
+                .ggml_q5_k => try scalar.matmul2DQuantizedRhsQ5_K(.{}, alloc, o, lhs, rhs, rows, cols, inner),
+                .ggml_q6_k => try scalar.matmul2DQuantizedRhsQ6_K(.{}, alloc, o, lhs, rhs, rows, cols, inner),
                 else => unreachable,
             }
         }
@@ -1140,11 +1140,11 @@ fn benchQuantizedGGMLKMatMulTimed(
     const NativeRunner = struct {
         fn run(alloc: std.mem.Allocator, o: *FloatTensor, lhs: *const FloatTensor, rhs: *const QRhs, rows: usize, cols: usize, inner: usize, config: native.ParallelConfig) !void {
             switch (format) {
-                .ggml_q2_k => try native.matmul2DQuantizedRhsQ2_KWithConfig(alloc, o, lhs, rhs, rows, cols, inner, config),
-                .ggml_q3_k => try native.matmul2DQuantizedRhsQ3_KWithConfig(alloc, o, lhs, rhs, rows, cols, inner, config),
-                .ggml_q4_k => try native.matmul2DQuantizedRhsQ4_KWithConfig(alloc, o, lhs, rhs, rows, cols, inner, config),
-                .ggml_q5_k => try native.matmul2DQuantizedRhsQ5_KWithConfig(alloc, o, lhs, rhs, rows, cols, inner, config),
-                .ggml_q6_k => try native.matmul2DQuantizedRhsQ6_KWithConfig(alloc, o, lhs, rhs, rows, cols, inner, config),
+                .ggml_q2_k => try native.matmul2DQuantizedRhsQ2_K(config, alloc, o, lhs, rhs, rows, cols, inner),
+                .ggml_q3_k => try native.matmul2DQuantizedRhsQ3_K(config, alloc, o, lhs, rhs, rows, cols, inner),
+                .ggml_q4_k => try native.matmul2DQuantizedRhsQ4_K(config, alloc, o, lhs, rhs, rows, cols, inner),
+                .ggml_q5_k => try native.matmul2DQuantizedRhsQ5_K(config, alloc, o, lhs, rhs, rows, cols, inner),
+                .ggml_q6_k => try native.matmul2DQuantizedRhsQ6_K(config, alloc, o, lhs, rhs, rows, cols, inner),
                 else => unreachable,
             }
         }
@@ -1195,12 +1195,12 @@ fn benchQuantizedLoadedMatMulTimed(
 
     const ScalarRunner = struct {
         fn run(alloc: std.mem.Allocator, o: *FloatTensor, lhs: *const FloatTensor, rhs: *const QRhs, rows: usize, cols: usize, inner: usize) !void {
-            try scalar.matmul2DQuantizedRhsWithConfig(alloc, o, lhs, anyLoadedRhs(tensor_dtype, rhs), rows, cols, inner, .{});
+            try scalar.kernels.matmul2DQuantizedRhs(.{}, alloc, o, lhs, anyLoadedRhs(tensor_dtype, rhs), rows, cols, inner);
         }
     }.run;
     const NativeRunner = struct {
         fn run(alloc: std.mem.Allocator, o: *FloatTensor, lhs: *const FloatTensor, rhs: *const QRhs, rows: usize, cols: usize, inner: usize, config: native.ParallelConfig) !void {
-            try native.matmul2DQuantizedRhsWithConfig(alloc, o, lhs, anyLoadedRhs(tensor_dtype, rhs), rows, cols, inner, config);
+            try native.kernels.matmul2DQuantizedRhs(config, alloc, o, lhs, anyLoadedRhs(tensor_dtype, rhs), rows, cols, inner);
         }
     }.run;
 
@@ -1426,14 +1426,14 @@ fn benchTypedAttentionLoop(
     const ScalarRunner = struct {
         fn run(outs: []OutputTensor, lhs: []TypedTensor, rhs: []TypedTensor, rows: usize, cols: usize, inner: usize) void {
             for (0..outs.len) |i| {
-                scalar.matmul2DIntoUncheckedTypedWithConfig(tensor_dtype, &outs[i], &lhs[i], &rhs[i], rows, cols, inner, .{});
+                scalar.kernels.matmul2DIntoUncheckedTyped(.{}, tensor_dtype, &outs[i], &lhs[i], &rhs[i], rows, cols, inner);
             }
         }
     }.run;
     const NativeRunner = struct {
         fn run(outs: []OutputTensor, lhs: []TypedTensor, rhs: []TypedTensor, rows: usize, cols: usize, inner: usize) void {
             for (0..outs.len) |i| {
-                native.matmul2DIntoUncheckedTypedWithConfig(tensor_dtype, &outs[i], &lhs[i], &rhs[i], rows, cols, inner, .{});
+                native.kernels.matmul2DIntoUncheckedTyped(.{}, tensor_dtype, &outs[i], &lhs[i], &rhs[i], rows, cols, inner);
             }
         }
     }.run;
@@ -1463,11 +1463,11 @@ fn benchMatMulTransA(allocator: std.mem.Allocator, w: anytype, name: []const u8,
 
     const NativeRunner = struct {
         fn run(o: *Tensor, lhs: *const Tensor, rhs: *const Tensor, rows: usize, cols: usize, inner: usize, config: native.ParallelConfig) void {
-            native.matmulTransA2DIntoUncheckedWithConfig(o, lhs, rhs, rows, cols, inner, config);
+            native.kernels.matmulTransA2DIntoUnchecked(config, o, lhs, rhs, rows, cols, inner);
         }
     }.run;
 
-    const scalar_ns = try medianTimer(scalar.matmulTransAInto, .{ &out, &a, &b });
+    const scalar_ns = try medianTimer(scalar.kernels.matmulTransAInto, .{ &out, &a, &b });
     const native_ns = try medianTimer(NativeRunner, .{ &out, &a, &b, m, n, k, native_config });
     try fmtRow(w, name, scalar_ns, native_ns);
 }
@@ -1492,11 +1492,11 @@ fn benchMatMulTransB(allocator: std.mem.Allocator, w: anytype, name: []const u8,
 
     const NativeRunner = struct {
         fn run(o: *Tensor, lhs: *const Tensor, rhs: *const Tensor, rows: usize, cols: usize, inner: usize, config: native.ParallelConfig) void {
-            native.matmulTransB2DIntoUncheckedWithConfig(o, lhs, rhs, rows, cols, inner, config);
+            native.kernels.matmulTransB2DIntoUnchecked(config, o, lhs, rhs, rows, cols, inner);
         }
     }.run;
 
-    const scalar_ns = try medianTimer(scalar.matmulTransBInto, .{ &out, &a, &b });
+    const scalar_ns = try medianTimer(scalar.kernels.matmulTransBInto, .{ &out, &a, &b });
     const native_ns = try medianTimer(NativeRunner, .{ &out, &a, &b, m, n, k, native_config });
     try fmtRow(w, name, scalar_ns, native_ns);
 }
@@ -1521,11 +1521,11 @@ fn benchBatched(allocator: std.mem.Allocator, w: anytype, name: []const u8, batc
 
     const NativeRunner = struct {
         fn run(o: *Tensor, lhs: *const Tensor, rhs: *const Tensor, rows: usize, cols: usize, inner: usize, batches: usize, config: native.ParallelConfig) void {
-            native.matmulBatched2DIntoUncheckedWithConfig(o, lhs, rhs, rows, cols, inner, batches, rows * inner, inner * cols, rows * cols, config);
+            native.kernels.matmulBatched2DIntoUnchecked(config, o, lhs, rhs, rows, cols, inner, batches, rows * inner, inner * cols, rows * cols);
         }
     }.run;
 
-    const scalar_ns = try medianTimer(scalar.matmulBatched2DIntoUnchecked, .{ &out, &a, &b, m, n, k, batch, m * k, k * n, m * n });
+    const scalar_ns = try medianTimer(scalar.kernels.matmulBatched2DIntoUnchecked, .{ scalar.ParallelConfig{}, &out, &a, &b, m, n, k, batch, m * k, k * n, m * n });
     const native_ns = try medianTimer(NativeRunner, .{ &out, &a, &b, m, n, k, batch, native_config });
     try fmtRow(w, name, scalar_ns, native_ns);
 }

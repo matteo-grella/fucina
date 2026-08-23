@@ -1,5 +1,6 @@
 const std = @import("std");
 const backend_mod = @import("../backend.zig");
+const kernels = backend_mod.kernels;
 const backend_ops = backend_mod.ops;
 const rng = @import("../rng.zig");
 const tensor = @import("../tensor.zig");
@@ -39,7 +40,6 @@ pub const FusedLhsFormat = enum { q8_kx4, q8_k_rows, q8_0x4 };
 /// stay bit-identical while the m*k activation tensor is never materialized.
 pub fn FusedActQuantTask(comptime act: FusedActKind, comptime format: FusedLhsFormat) type {
     return struct {
-        backend: *const backend_mod.Backend,
         // split_swiglu: `gate` holds fused gate_up rows of width 2*cols (gate
         // first half, up second). geglu_quant: `gate`/`up` hold separate rows
         // of width cols; gated = up * geluQuant(gate). rms_norm_mul: `gate`
@@ -81,8 +81,8 @@ pub fn FusedActQuantTask(comptime act: FusedActKind, comptime format: FusedLhsFo
                     }),
                     .geglu_quant => for (0..rows_in_group) |r| {
                         const dst = task.scratch[r * cols ..][0..cols];
-                        task.backend.unaryRowSliceUnchecked(.gelu_quant, dst, task.gate[(row0 + r) * cols ..][0..cols]);
-                        task.backend.mulRowSliceUnchecked(dst, dst, task.up[(row0 + r) * cols ..][0..cols]);
+                        kernels.unaryRowSlice(.gelu_quant, dst, task.gate[(row0 + r) * cols ..][0..cols]);
+                        kernels.mulRowSlice(dst, dst, task.up[(row0 + r) * cols ..][0..cols]);
                     },
                     .rms_norm_mul => if (task.rows_kernel) rmsNormMulRows(.{
                         .input = task.gate[row0 * cols ..],

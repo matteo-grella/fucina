@@ -1,7 +1,7 @@
-//! Behavioral tests for the backend dispatch facade (`backend.zig`):
-//! scalar elementwise ops, the unary/clamp/gated contiguous kernels, the
-//! basic dense matmul path, kernel dispatch with an attached work pool, and
-//! the native quantized-matmul bulk/remainder row split for off-multiple m.
+//! Behavioral tests for the selected kernel set (`backend.kernels`):
+//! elementwise ops, the unary/clamp/gated contiguous kernels, the basic
+//! dense matmul path, kernel dispatch with an attached work pool, and the
+//! native quantized-matmul bulk/remainder row split for off-multiple m.
 const std = @import("std");
 const backend_mod = @import("backend.zig");
 const native = @import("backend/native.zig");
@@ -10,12 +10,11 @@ const thread = @import("thread.zig");
 const vector = @import("backend/vector.zig");
 pub const ops = @import("backend/ops.zig");
 
-const Backend = backend_mod.Backend;
+const kernels = backend_mod.kernels;
 const Tensor = backend_mod.Tensor;
 
 test "backend executes scalar ops" {
     const allocator = std.testing.allocator;
-    var backend = Backend.init();
 
     var a = try Tensor.fromSlice(allocator, &.{3}, &.{ 1, 2, 3 });
     defer a.deinit();
@@ -24,14 +23,13 @@ test "backend executes scalar ops" {
 
     var c = try Tensor.zeros(allocator, &.{3});
     defer c.deinit();
-    try backend.addInto(&c, &a, &b);
+    try kernels.addInto(&c, &a, &b);
 
     try std.testing.expectEqualSlices(f32, &.{ 5, 7, 9 }, c.dataConst());
 }
 
 test "backend executes unary clamp and gated contiguous kernels" {
     const allocator = std.testing.allocator;
-    var backend = Backend.init();
 
     var x = try Tensor.fromSlice(allocator, &.{4}, &.{ -2, -0.5, 0.5, 2 });
     defer x.deinit();
@@ -40,7 +38,7 @@ test "backend executes unary clamp and gated contiguous kernels" {
 
     var unary = try Tensor.zeros(allocator, &.{4});
     defer unary.deinit();
-    backend.unaryContiguousIntoUnchecked(.silu, &unary, &x, x.len());
+    kernels.unaryContiguousIntoUnchecked(.{}, .silu, &unary, &x, x.len());
 
     for (x.dataConst(), unary.dataConst()) |value, actual| {
         const expected = value * ops.sigmoidScalar(value);
@@ -49,24 +47,24 @@ test "backend executes unary clamp and gated contiguous kernels" {
 
     var fast_tanh = try Tensor.zeros(allocator, &.{4});
     defer fast_tanh.deinit();
-    backend.unaryContiguousIntoUnchecked(.fast_tanh, &fast_tanh, &x, x.len());
+    kernels.unaryContiguousIntoUnchecked(.{}, .fast_tanh, &fast_tanh, &x, x.len());
     for (x.dataConst(), fast_tanh.dataConst()) |value, actual| {
         try std.testing.expectApproxEqAbs(ops.fastTanhScalar(value), actual, 1e-6);
     }
 
     var clamped = try Tensor.zeros(allocator, &.{4});
     defer clamped.deinit();
-    backend.clampContiguousIntoUnchecked(&clamped, &x, x.len(), -1, 1);
+    kernels.clampContiguousIntoUnchecked(.{}, &clamped, &x, x.len(), -1, 1);
     try std.testing.expectEqualSlices(f32, &.{ -1, -0.5, 0.5, 1 }, clamped.dataConst());
 
     var leaky = try Tensor.zeros(allocator, &.{4});
     defer leaky.deinit();
-    backend.leakyReluContiguousIntoUnchecked(&leaky, &x, x.len(), 0.1);
+    kernels.leakyReluContiguousIntoUnchecked(.{}, &leaky, &x, x.len(), 0.1);
     try std.testing.expectEqualSlices(f32, &.{ -0.2, -0.05, 0.5, 2 }, leaky.dataConst());
 
     var gated = try Tensor.zeros(allocator, &.{4});
     defer gated.deinit();
-    backend.gatedContiguousIntoUnchecked(.swiglu, &gated, &x, &gate, x.len());
+    kernels.gatedContiguousIntoUnchecked(.{}, .swiglu, &gated, &x, &gate, x.len());
     for (x.dataConst(), gate.dataConst(), gated.dataConst()) |left, gate_value, actual| {
         const expected = left * gate_value * ops.sigmoidScalar(gate_value);
         try std.testing.expectApproxEqAbs(expected, actual, 1e-6);
@@ -75,13 +73,11 @@ test "backend executes unary clamp and gated contiguous kernels" {
 
 test "backend kernels dispatch through an attached work pool" {
     const allocator = std.testing.allocator;
-    var backend = Backend.init();
 
     var pool: thread.Pool = undefined;
     try pool.init(.{ .allocator = allocator, .max_workers = 4 });
     defer pool.deinit();
-    backend.setWorkPool(&pool);
-    defer backend.setWorkPool(null);
+    const pc: backend_mod.ParallelConfig = .{ .pool = &pool };
 
     const n = 4096;
     var a = try Tensor.zeros(allocator, &.{n});
@@ -95,7 +91,7 @@ test "backend kernels dispatch through an attached work pool" {
 
     var c = try Tensor.zeros(allocator, &.{n});
     defer c.deinit();
-    backend.addContiguousIntoUnchecked(&c, &a, &b, n);
+    kernels.addContiguousIntoUnchecked(pc, &c, &a, &b, n);
 
     for (c.dataConst(), 0..) |actual, i| {
         try std.testing.expectEqual(@as(f32, @floatFromInt(3 * i)), actual);
@@ -104,7 +100,6 @@ test "backend kernels dispatch through an attached work pool" {
 
 test "backend matmul" {
     const allocator = std.testing.allocator;
-    var backend = Backend.init();
 
     var a = try Tensor.fromSlice(allocator, &.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer a.deinit();
@@ -113,7 +108,7 @@ test "backend matmul" {
 
     var c = try Tensor.zeros(allocator, &.{ 2, 2 });
     defer c.deinit();
-    try backend.matmulInto(&c, &a, &b);
+    try kernels.matmulInto(&c, &a, &b);
 
     try std.testing.expectEqualSlices(f32, &.{ 58, 64, 139, 154 }, c.dataConst());
 }
@@ -175,7 +170,7 @@ fn runSplitDispatch(
     defer lhs.deinit();
     var out = try Tensor.zeros(allocator, &.{ m, split_test_n });
     defer out.deinit();
-    try dispatchFn(allocator, &out, &lhs, rhs, m, split_test_n, split_test_k, config);
+    try dispatchFn(config, allocator, &out, &lhs, rhs, m, split_test_n, split_test_k);
     return allocator.dupe(f32, out.dataConst());
 }
 
@@ -285,7 +280,7 @@ test "native q5_k x8 dispatch splits off-multiple m into x4 bulk plus row-kernel
     fillSplitTestValues(lhs_values, random);
 
     for (split_test_ms) |m| {
-        const full = try runSplitDispatch(native.matmul2DQuantizedRhsQ5_Kx8WithConfig, allocator, &rhs, lhs_values, m, .{});
+        const full = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ5_Kx8, allocator, &rhs, lhs_values, m, .{});
         defer allocator.free(full);
 
         const all_rows = try rowsRefQ8_K(vector.matmul2DQ5_Kx8RhsIntoWithConfig, allocator, &rhs, lhs_values, m);
@@ -298,7 +293,7 @@ test "native q5_k x8 dispatch splits off-multiple m into x4 bulk plus row-kernel
         }
 
         const bulk_rows = m - m % 4;
-        const prefix = try runSplitDispatch(native.matmul2DQuantizedRhsQ5_Kx8WithConfig, allocator, &rhs, lhs_values, bulk_rows, .{});
+        const prefix = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ5_Kx8, allocator, &rhs, lhs_values, bulk_rows, .{});
         defer allocator.free(prefix);
         try expectBitEqualF32(prefix, full[0 .. bulk_rows * split_test_n]);
 
@@ -312,9 +307,9 @@ test "native q5_k x8 dispatch splits off-multiple m into x4 bulk plus row-kernel
     var pool: thread.Pool = undefined;
     try pool.init(.{ .allocator = allocator, .max_workers = 4 });
     defer pool.deinit();
-    const serial = try runSplitDispatch(native.matmul2DQuantizedRhsQ5_Kx8WithConfig, allocator, &rhs, lhs_values, 129, .{});
+    const serial = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ5_Kx8, allocator, &rhs, lhs_values, 129, .{});
     defer allocator.free(serial);
-    const pooled = try runSplitDispatch(native.matmul2DQuantizedRhsQ5_Kx8WithConfig, allocator, &rhs, lhs_values, 129, .{ .pool = &pool });
+    const pooled = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ5_Kx8, allocator, &rhs, lhs_values, 129, .{ .pool = &pool });
     defer allocator.free(pooled);
     try expectBitEqualF32(serial, pooled);
 }
@@ -331,11 +326,11 @@ test "native q4_k x8 dispatch runs every off-multiple m through the padded x4 ke
     fillSplitTestValues(lhs_values, random);
 
     for (split_test_ms) |m| {
-        const full = try runSplitDispatch(native.matmul2DQuantizedRhsQ4_Kx8WithConfig, allocator, &rhs, lhs_values, m, .{});
+        const full = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ4_Kx8, allocator, &rhs, lhs_values, m, .{});
         defer allocator.free(full);
         const bulk_rows = m - m % 4;
 
-        const prefix = try runSplitDispatch(native.matmul2DQuantizedRhsQ4_Kx8WithConfig, allocator, &rhs, lhs_values, bulk_rows, .{});
+        const prefix = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ4_Kx8, allocator, &rhs, lhs_values, bulk_rows, .{});
         defer allocator.free(prefix);
         try expectBitEqualF32(prefix, full[0 .. bulk_rows * split_test_n]);
 
@@ -351,9 +346,9 @@ test "native q4_k x8 dispatch runs every off-multiple m through the padded x4 ke
     var pool: thread.Pool = undefined;
     try pool.init(.{ .allocator = allocator, .max_workers = 4 });
     defer pool.deinit();
-    const serial = try runSplitDispatch(native.matmul2DQuantizedRhsQ4_Kx8WithConfig, allocator, &rhs, lhs_values, 129, .{});
+    const serial = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ4_Kx8, allocator, &rhs, lhs_values, 129, .{});
     defer allocator.free(serial);
-    const pooled = try runSplitDispatch(native.matmul2DQuantizedRhsQ4_Kx8WithConfig, allocator, &rhs, lhs_values, 129, .{ .pool = &pool });
+    const pooled = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ4_Kx8, allocator, &rhs, lhs_values, 129, .{ .pool = &pool });
     defer allocator.free(pooled);
     try expectBitEqualF32(serial, pooled);
 }
@@ -370,7 +365,7 @@ test "native q8_0 x4 dispatch splits off-multiple m >= 32 into packed bulk plus 
     fillSplitTestValues(lhs_values, random);
 
     for (split_test_ms) |m| {
-        const full = try runSplitDispatch(native.matmul2DQuantizedRhsQ8_0x4WithConfig, allocator, &rhs, lhs_values, m, .{});
+        const full = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ8_0x4, allocator, &rhs, lhs_values, m, .{});
         defer allocator.free(full);
 
         if (m < 12) {
@@ -383,7 +378,7 @@ test "native q8_0 x4 dispatch splits off-multiple m >= 32 into packed bulk plus 
 
         if (m >= 32) {
             const bulk_rows = m - m % 4;
-            const prefix = try runSplitDispatch(native.matmul2DQuantizedRhsQ8_0x4WithConfig, allocator, &rhs, lhs_values, bulk_rows, .{});
+            const prefix = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ8_0x4, allocator, &rhs, lhs_values, bulk_rows, .{});
             defer allocator.free(prefix);
             try expectBitEqualF32(prefix, full[0 .. bulk_rows * split_test_n]);
 
@@ -401,9 +396,9 @@ test "native q8_0 x4 dispatch splits off-multiple m >= 32 into packed bulk plus 
     var pool: thread.Pool = undefined;
     try pool.init(.{ .allocator = allocator, .max_workers = 4 });
     defer pool.deinit();
-    const serial = try runSplitDispatch(native.matmul2DQuantizedRhsQ8_0x4WithConfig, allocator, &rhs, lhs_values, 129, .{});
+    const serial = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ8_0x4, allocator, &rhs, lhs_values, 129, .{});
     defer allocator.free(serial);
-    const pooled = try runSplitDispatch(native.matmul2DQuantizedRhsQ8_0x4WithConfig, allocator, &rhs, lhs_values, 129, .{ .pool = &pool });
+    const pooled = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ8_0x4, allocator, &rhs, lhs_values, 129, .{ .pool = &pool });
     defer allocator.free(pooled);
     try expectBitEqualF32(serial, pooled);
 }

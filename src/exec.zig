@@ -1,5 +1,5 @@
 //! `ExecContext`: the eager execution runtime. One struct carries the
-//! substrate state (allocator, backend, buffer pool, worker team, exec-scope
+//! substrate state (allocator, worker team, buffer pool, exec-scope
 //! stack, MoE decode scratch) and every op as a method. Bodies live in
 //! `exec/`: `exec/runtime.zig` holds the lifecycle, scope, pool, and tensor
 //! allocation primitives; `exec/<domain>.zig` holds the ops, each taking
@@ -36,14 +36,13 @@ const exec_conv = @import("exec/conv.zig");
 const exec_pool = @import("exec/pool.zig");
 
 const Allocator = std.mem.Allocator;
-const Backend = backend_mod.Backend;
 const Tensor = tensor.Tensor;
 
 pub const MoeBatchProfile = exec_moe.MoeBatchProfile;
 pub const delta_attention = @import("exec/delta_attention.zig");
 pub const expert_store = @import("exec/expert_store.zig");
 
-pub const parallel_dot_backward_branches = Backend.kind == .native and backend_mod.native_uses_blas;
+pub const parallel_dot_backward_branches = backend_mod.active_kind == .native and backend_mod.native_uses_blas;
 pub const RhsLifetime = exec_quant_matmul.RhsLifetime;
 
 pub const LayoutClass = enum {
@@ -121,7 +120,12 @@ pub const BufferPool = exec_buffer_pool.BufferPool;
 pub const ExecContext = struct {
     thread_safe_allocator: thread.ThreadSafeAllocator,
     allocator: Allocator,
-    backend: Backend,
+    /// The worker team as published to kernel dispatch (`pc` snapshots it).
+    /// Atomic: kernels may dispatch on other threads (dot-backward's
+    /// `OneShotWorker`) while a lazy `tryWorkPool` retry publishes the pool;
+    /// release/acquire so a racing first observer also sees `Pool.init`'s
+    /// writes.
+    parallel_pool: std.atomic.Value(?*thread.Pool) = .init(null),
     buffers: BufferPool,
     /// Per-context tuning overrides (`setTuning`); every field
     /// null = follow the process-wide gates (see src/tuning.zig).
@@ -201,6 +205,7 @@ pub const ExecContext = struct {
     pub const adoptScopeNodeAssumeCapacity = exec_runtime.adoptScopeNodeAssumeCapacity;
     pub const tryWorkPool = exec_runtime.tryWorkPool;
     pub const workPool = exec_runtime.workPool;
+    pub const pc = exec_runtime.pc;
     pub const dotBackwardWorker = exec_runtime.dotBackwardWorker;
     pub const dispatchRange = exec_runtime.dispatchRange;
     pub const dispatchRangeCapped = exec_runtime.dispatchRangeCapped;

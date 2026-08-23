@@ -136,13 +136,13 @@ pub fn main(init: std.process.Init) !void {
                 for (self.a16, self.a32s) |*dst, src| dst.* = @floatCast(src);
                 var a16_t = TensorF16.fromSlice(std.heap.smp_allocator, &.{ self.m, self.k }, self.a16) catch unreachable;
                 defer a16_t.deinit();
-                native.matmulTransB2DIntoUncheckedF16OperandsWithConfig(self.c, &a16_t, self.b_f16, self.m, self.n, self.k, self.cfg);
+                native.kernels.matmulTransB2DIntoUncheckedF16Operands(self.cfg, self.c, &a16_t, self.b_f16, self.m, self.n, self.k);
             }
             fn runBf16(self: *const @This()) void {
-                native.matmulTransB2DIntoUncheckedBf16RhsWithConfig(self.c, self.a_f32, self.b_bf16, self.m, self.n, self.k, self.cfg);
+                native.kernels.matmulTransB2DIntoUncheckedBf16Rhs(self.cfg, self.c, self.a_f32, self.b_bf16, self.m, self.n, self.k);
             }
             fn runF32(self: *const @This()) void {
-                native.matmulTransB2DIntoUncheckedWithConfig(self.c, self.a_f32, self.b_f32, self.m, self.n, self.k, self.cfg);
+                native.kernels.matmulTransB2DIntoUnchecked(self.cfg, self.c, self.a_f32, self.b_f32, self.m, self.n, self.k);
             }
         };
         const ctx = Ctx{

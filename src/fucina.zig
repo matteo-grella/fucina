@@ -199,8 +199,6 @@ pub const AxisRange = tensor.AxisRange;
 pub const PreparedConvWeights = exec.ExecContext.PreparedConvWeights;
 // Backend identity + capability constants (species 4 of the membership
 // rule); the selected provider is fixed at build time.
-/// The selected kernel provider (comptime; see `active_backend_kind`).
-pub const Backend = backend.Backend;
 /// Provider identity: `.native` (SIMD/BLAS/GPU seams) or `.scalar` (reference).
 pub const BackendKind = backend.Kind;
 /// Which provider this build compiled in (`-Dbackend`).

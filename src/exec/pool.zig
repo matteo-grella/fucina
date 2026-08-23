@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const backend_mod = @import("../backend.zig");
+const kernels = backend_mod.kernels;
 const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
 
@@ -51,7 +52,7 @@ pub fn pool2d(ctx: *ExecContext, comptime kind: PoolKind, input: *const Tensor, 
     var out = try ctx.emptyRank(3, .{ d.oh, d.ow, d.c });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(d.oh * d.ow * d.c * d.kh * d.kw, parallel.vector_elementwise_len_threshold);
-    ctx.backend.pool2dInto(kind, &out, ii.tensor(), d);
+    kernels.pool2dInto(ctx.pc(), kind, &out, ii.tensor(), d);
     return out;
 }
 
@@ -78,7 +79,7 @@ pub fn avgPool2dBackward(ctx: *ExecContext, gy: *const Tensor, in_h: usize, in_w
     defer gg.deinit();
     var out = try ctx.emptyRank(3, .{ in_h, in_w, d.c });
     errdefer out.deinit();
-    ctx.backend.avgPool2dBackwardInto(&out, gg.tensor(), d);
+    kernels.avgPool2dBackwardInto(ctx.pc(), &out, gg.tensor(), d);
     return out;
 }
 
@@ -97,7 +98,7 @@ pub fn maxPool2dBackward(ctx: *ExecContext, input: *const Tensor, gy: *const Ten
     defer gg.deinit();
     var out = try ctx.emptyRank(3, .{ d.h, d.w, d.c });
     errdefer out.deinit();
-    ctx.backend.maxPool2dBackwardInto(&out, ii.tensor(), gg.tensor(), d);
+    kernels.maxPool2dBackwardInto(ctx.pc(), &out, ii.tensor(), gg.tensor(), d);
     return out;
 }
 
@@ -114,7 +115,7 @@ pub fn upsample2xNearest(ctx: *ExecContext, input: *const Tensor) !Tensor {
     var out = try ctx.emptyRank(3, .{ 2 * h, 2 * w, c });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(4 * h * w * c, parallel.vector_elementwise_len_threshold);
-    ctx.backend.upsample2xNearestInto(&out, ii.tensor(), h, w, c);
+    kernels.upsample2xNearestInto(ctx.pc(), &out, ii.tensor(), h, w, c);
     return out;
 }
 

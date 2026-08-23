@@ -19,7 +19,6 @@ const exec_buffer_pool = @import("buffer_pool.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
 
 const Allocator = std.mem.Allocator;
-const Backend = backend_mod.Backend;
 const DType = tensor.DType;
 const Tensor = tensor.Tensor;
 
@@ -43,7 +42,7 @@ pub const ExecScope = struct {
 pub fn init(self: *ExecContext, allocator: Allocator) void {
     self.thread_safe_allocator = .{ .child_allocator = allocator };
     self.allocator = self.thread_safe_allocator.allocator();
-    self.backend = Backend.init();
+    self.parallel_pool = .init(null);
     self.buffers = BufferPool.init(self.allocator);
     self.work_pool = undefined;
     self.work_pool_ready = false;
@@ -104,7 +103,7 @@ pub fn deinit(self: *ExecContext) void {
         self.dot_backward_worker.deinit();
     }
     if (self.work_pool_ready) {
-        self.backend.setWorkPool(null);
+        setWorkPool(self, null);
         self.work_pool.deinit();
     }
     releaseScopeTo(self, 0); // defensive: scopes left open at teardown
@@ -179,13 +178,26 @@ pub fn tryWorkPool(self: *ExecContext) !*thread.Pool {
             .max_workers = worker_threads,
         });
         self.work_pool_ready = true;
-        self.backend.setWorkPool(&self.work_pool);
+        setWorkPool(self, &self.work_pool);
     }
     return &self.work_pool;
 }
 
 pub fn workPool(self: *ExecContext) ?*thread.Pool {
     return self.tryWorkPool() catch null;
+}
+
+/// Publish (or retract) the worker team for kernel dispatch. Release
+/// ordering pairs with the acquire load in `pc`, so a racing first observer
+/// on another thread also sees `Pool.init`'s writes.
+fn setWorkPool(self: *ExecContext, pool: ?*thread.Pool) void {
+    self.parallel_pool.store(pool, .release);
+}
+
+/// The `ParallelConfig` every pool-taking kernel call receives: a snapshot
+/// of the published worker team (`null` runs the kernel serially).
+pub fn pc(self: *const ExecContext) backend_mod.ParallelConfig {
+    return .{ .pool = self.parallel_pool.load(.acquire) };
 }
 
 /// One row/lane-range pool dispatch for the domain modules'
@@ -561,18 +573,18 @@ pub fn prepareContiguousTyped(
 // ------------------------------------------------------------------
 
 pub fn enableNativeVectorPoolForWork(self: *ExecContext, work: usize, threshold: usize) void {
-    if (comptime Backend.kind != .native) return;
+    if (comptime backend_mod.active_kind != .native) return;
     if (work >= threshold) _ = self.tryWorkPool() catch null;
 }
 
 pub fn enableNativeMatmulPoolForWork(self: *ExecContext, m: usize, n: usize, k: usize) void {
-    if (comptime Backend.kind != .native or backend_mod.native_uses_blas) return;
+    if (comptime backend_mod.active_kind != .native or backend_mod.native_uses_blas) return;
     const work = parallel.saturatedMul3(m, n, k);
     self.enableNativeVectorPoolForWork(work, parallel.vector_matmul_work_threshold);
 }
 
 pub fn enableNativeTypedMatmulPoolForWork(self: *ExecContext, m: usize, n: usize, k: usize) void {
-    if (comptime Backend.kind != .native) return;
+    if (comptime backend_mod.active_kind != .native) return;
     const work = parallel.saturatedMul3(m, n, k);
     self.enableNativeVectorPoolForWork(work, parallel.vector_matmul_work_threshold);
 }

@@ -182,7 +182,7 @@ test "conv2d winograd route matches the direct kernel (3x3 s1, pad 0/1, odd shap
         defer wr.deinit();
         var expected = try RawTensor.zeros(allocator, &[_]usize{ oh, ow, cout });
         defer expected.deinit();
-        backend_mod.scalar_impl.conv2dIntoWithConfig(&expected, &xr, &wr, bd, .{
+        backend_mod.scalar_impl.kernels.conv2dInto(.{}, &expected, &xr, &wr, bd, .{
             .h = h,
             .w = w,
             .cin = cin,
@@ -196,7 +196,7 @@ test "conv2d winograd route matches the direct kernel (3x3 s1, pad 0/1, odd shap
             .pad_h = p,
             .pad_w = p,
             .groups = 1,
-        }, .{});
+        });
 
         // Winograd reassociates the 3x3 reduction: ~1e-6 relative vs direct.
         const yd = try y.dataConst();

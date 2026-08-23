@@ -7,8 +7,11 @@ const Allocator = std.mem.Allocator;
 // The native backend is the production Zig backend. It uses portable Zig
 // vector kernels for non-GEMM work and optional platform BLAS for GEMM.
 const Impl = struct {
-    const cpu = @import("cpu.zig");
-    const native = @import("native.zig");
+    const cpu_impl = @import("cpu.zig");
+    const native_impl = @import("native.zig");
+    const cpu = cpu_impl.kernels;
+    const native = native_impl.kernels;
+    const ParallelConfig = native_impl.ParallelConfig;
 
     const elementwise_tolerance: f32 = 1e-6;
     const matmul_tolerance_scale: f32 = 1e-5;
@@ -79,7 +82,7 @@ const Impl = struct {
         }
     }
 
-    const ReduceFn = fn (out: *Tensor, a: *const Tensor) anyerror!void;
+    const ReduceFn = fn (pc: ParallelConfig, out: *Tensor, a: *const Tensor) anyerror!void;
 
     fn checkReduce(
         allocator: Allocator,
@@ -99,11 +102,11 @@ const Impl = struct {
 
             var cpu_out = try Tensor.zeros(allocator, &.{1});
             defer cpu_out.deinit();
-            try cpu_fn(&cpu_out, &a);
+            try cpu_fn(.{}, &cpu_out, &a);
 
             var native_out = try Tensor.zeros(allocator, &.{1});
             defer native_out.deinit();
-            try native_fn(&native_out, &a);
+            try native_fn(.{}, &native_out, &a);
 
             // Scaled tolerance because both backends accumulate n values; the
             // SIMD pairwise/parallel summation diverges from a serial loop.
@@ -163,11 +166,11 @@ const Impl = struct {
     }
 
     fn scaleCpu(out: *Tensor, a: *const Tensor, _: *const Tensor) anyerror!void {
-        try cpu.scaleInto(out, a, 2.5);
+        try cpu.scaleInto(.{}, out, a, 2.5);
     }
 
     fn scaleNative(out: *Tensor, a: *const Tensor, _: *const Tensor) anyerror!void {
-        try native.scaleInto(out, a, 2.5);
+        try native.scaleInto(.{}, out, a, 2.5);
     }
 
     test "parity: addInto" {
@@ -215,11 +218,11 @@ const Impl = struct {
 
             var cpu_out = try Tensor.zeros(std.testing.allocator, &.{1});
             defer cpu_out.deinit();
-            try cpu.dotInto(&cpu_out, &a, &b);
+            try cpu.dotInto(.{}, &cpu_out, &a, &b);
 
             var native_out = try Tensor.zeros(std.testing.allocator, &.{1});
             defer native_out.deinit();
-            try native.dotInto(&native_out, &a, &b);
+            try native.dotInto(.{}, &native_out, &a, &b);
 
             const tol = 1e-6 * @as(f32, @floatFromInt(n));
             try expectClose(cpu_out.dataConst(), native_out.dataConst(), tol);
@@ -256,8 +259,8 @@ const Impl = struct {
         try native.mulInto(&native_vec, &a, &b);
         try expectClose(cpu_vec.dataConst(), native_vec.dataConst(), elementwise_tolerance);
 
-        try cpu.scaleInto(&cpu_vec, &a, -0.75);
-        try native.scaleInto(&native_vec, &a, -0.75);
+        try cpu.scaleInto(.{}, &cpu_vec, &a, -0.75);
+        try native.scaleInto(.{}, &native_vec, &a, -0.75);
         try expectClose(cpu_vec.dataConst(), native_vec.dataConst(), elementwise_tolerance);
 
         var cpu_scalar = try Tensor.zeros(std.testing.allocator, &.{1});
@@ -265,12 +268,12 @@ const Impl = struct {
         var native_scalar = try Tensor.zeros(std.testing.allocator, &.{1});
         defer native_scalar.deinit();
 
-        try cpu.sumInto(&cpu_scalar, &a);
-        try native.sumInto(&native_scalar, &a);
+        try cpu.sumInto(.{}, &cpu_scalar, &a);
+        try native.sumInto(.{}, &native_scalar, &a);
         try expectClose(cpu_scalar.dataConst(), native_scalar.dataConst(), 1e-6 * @as(f32, @floatFromInt(n)));
 
-        try cpu.dotInto(&cpu_scalar, &a, &b);
-        try native.dotInto(&native_scalar, &a, &b);
+        try cpu.dotInto(.{}, &cpu_scalar, &a, &b);
+        try native.dotInto(.{}, &native_scalar, &a, &b);
         try expectClose(cpu_scalar.dataConst(), native_scalar.dataConst(), 1e-6 * @as(f32, @floatFromInt(n)));
     }
 
@@ -298,6 +301,7 @@ const Impl = struct {
     }
 
     const BatchedFn = fn (
+        pc: ParallelConfig,
         out: *Tensor,
         a: *const Tensor,
         b: *const Tensor,
@@ -374,11 +378,11 @@ const Impl = struct {
 
                     var cpu_out = try Tensor.zeros(allocator, &.{ batch, m, n });
                     defer cpu_out.deinit();
-                    cpu_fn(&cpu_out, &a, &b, m, n, k, batch, a_per_batch, stride_b, m * n);
+                    cpu_fn(.{}, &cpu_out, &a, &b, m, n, k, batch, a_per_batch, stride_b, m * n);
 
                     var native_out = try Tensor.zeros(allocator, &.{ batch, m, n });
                     defer native_out.deinit();
-                    native_fn(&native_out, &a, &b, m, n, k, batch, a_per_batch, stride_b, m * n);
+                    native_fn(.{}, &native_out, &a, &b, m, n, k, batch, a_per_batch, stride_b, m * n);
 
                     const tol = matmul_tolerance_scale * @as(f32, @floatFromInt(k));
                     try std.testing.expectEqual(cpu_out.dataConst().len, out_buf_len);
@@ -470,11 +474,11 @@ const Impl = struct {
 
         var cpu_out = try Tensor.zeros(allocator, &.{ batch, m, n });
         defer cpu_out.deinit();
-        cpu_fn(&cpu_out, &a, &b, m, n, k, batch, 0, b_stride, m * n);
+        cpu_fn(.{}, &cpu_out, &a, &b, m, n, k, batch, 0, b_stride, m * n);
 
         var native_out = try Tensor.zeros(allocator, &.{ batch, m, n });
         defer native_out.deinit();
-        native_fn(&native_out, &a, &b, m, n, k, batch, 0, b_stride, m * n);
+        native_fn(.{}, &native_out, &a, &b, m, n, k, batch, 0, b_stride, m * n);
 
         const tol = matmul_tolerance_scale * @as(f32, @floatFromInt(k));
         try expectClose(cpu_out.dataConst(), native_out.dataConst(), tol);
@@ -502,7 +506,7 @@ const Impl = struct {
         try checkBatchedSharedA(std.testing.allocator, prng.random(), cpu.matmulBatchedTransB2DIntoUnchecked, native.matmulBatchedTransB2DIntoUnchecked, .nt);
     }
 
-    fn checkPool2dParity(comptime kind: cpu.PoolKind, allocator: Allocator, rng: std.Random) !void {
+    fn checkPool2dParity(comptime kind: cpu_impl.PoolKind, allocator: Allocator, rng: std.Random) !void {
         // h, w, c, k, s, p — odd channel counts exercise the SIMD remainder loop.
         const geoms = [_][6]usize{
             .{ 6, 6, 3, 2, 2, 0 },
@@ -526,13 +530,13 @@ const Impl = struct {
             var input = try Tensor.fromSlice(allocator, &[_]usize{ h, w, c }, in_data);
             defer input.deinit();
 
-            const d: cpu.Pool2dDims = .{ .h = h, .w = w, .c = c, .oh = oh, .ow = ow, .kh = k, .kw = k, .stride_h = s, .stride_w = s, .pad_h = p, .pad_w = p };
+            const d: cpu_impl.Pool2dDims = .{ .h = h, .w = w, .c = c, .oh = oh, .ow = ow, .kh = k, .kw = k, .stride_h = s, .stride_w = s, .pad_h = p, .pad_w = p };
             var cpu_out = try Tensor.zeros(allocator, &[_]usize{ oh, ow, c });
             defer cpu_out.deinit();
-            cpu.pool2dIntoWithConfig(kind, &cpu_out, &input, d, .{});
+            cpu.pool2dInto(.{}, kind, &cpu_out, &input, d);
             var native_out = try Tensor.zeros(allocator, &[_]usize{ oh, ow, c });
             defer native_out.deinit();
-            native.pool2dIntoWithConfig(kind, &native_out, &input, d, .{});
+            native.pool2dInto(.{}, kind, &native_out, &input, d);
             try expectClose(cpu_out.dataConst(), native_out.dataConst(), elementwise_tolerance);
         }
     }
@@ -558,10 +562,10 @@ const Impl = struct {
             defer input.deinit();
             var cpu_out = try Tensor.zeros(allocator, &[_]usize{ 2 * h, 2 * w, c });
             defer cpu_out.deinit();
-            cpu.upsample2xNearestIntoWithConfig(&cpu_out, &input, h, w, c, .{});
+            cpu.upsample2xNearestInto(.{}, &cpu_out, &input, h, w, c);
             var native_out = try Tensor.zeros(allocator, &[_]usize{ 2 * h, 2 * w, c });
             defer native_out.deinit();
-            native.upsample2xNearestIntoWithConfig(&native_out, &input, h, w, c, .{});
+            native.upsample2xNearestInto(.{}, &native_out, &input, h, w, c);
             try expectClose(cpu_out.dataConst(), native_out.dataConst(), elementwise_tolerance);
         }
 
@@ -582,24 +586,24 @@ const Impl = struct {
             const zn = try allocator.alloc(f32, rows * c);
             defer allocator.free(zn);
 
-            cpu.preluChannelsIntoWithConfig(zc, x, alpha, rows, c, .{});
-            native.preluChannelsIntoWithConfig(zn, x, alpha, rows, c, .{});
+            cpu.preluChannelsInto(.{}, zc, x, alpha, rows, c);
+            native.preluChannelsInto(.{}, zn, x, alpha, rows, c);
             try expectClose(zc, zn, elementwise_tolerance);
 
-            cpu.channelAffineIntoWithConfig(zc, x, alpha, shift, rows, c, .{});
-            native.channelAffineIntoWithConfig(zn, x, alpha, shift, rows, c, .{});
+            cpu.channelAffineInto(.{}, zc, x, alpha, shift, rows, c);
+            native.channelAffineInto(.{}, zn, x, alpha, shift, rows, c);
             try expectClose(zc, zn, elementwise_tolerance);
 
-            cpu.channelAffineIntoWithConfig(zc, x, alpha, null, rows, c, .{});
-            native.channelAffineIntoWithConfig(zn, x, alpha, null, rows, c, .{});
+            cpu.channelAffineInto(.{}, zc, x, alpha, null, rows, c);
+            native.channelAffineInto(.{}, zn, x, alpha, null, rows, c);
             try expectClose(zc, zn, elementwise_tolerance);
 
-            cpu.preluChannelsBackwardInputIntoWithConfig(zc, x, x, alpha, rows, c, .{});
-            native.preluChannelsBackwardInputIntoWithConfig(zn, x, x, alpha, rows, c, .{});
+            cpu.preluChannelsBackwardInputInto(.{}, zc, x, x, alpha, rows, c);
+            native.preluChannelsBackwardInputInto(.{}, zn, x, x, alpha, rows, c);
             try expectClose(zc, zn, elementwise_tolerance);
 
-            cpu.preluChannelsBackwardAlphaIntoWithConfig(zc[0..c], x, x, rows, c, .{});
-            native.preluChannelsBackwardAlphaIntoWithConfig(zn[0..c], x, x, rows, c, .{});
+            cpu.preluChannelsBackwardAlphaInto(.{}, zc[0..c], x, x, rows, c);
+            native.preluChannelsBackwardAlphaInto(.{}, zn[0..c], x, x, rows, c);
             try expectClose(zc[0..c], zn[0..c], elementwise_tolerance);
         }
     }

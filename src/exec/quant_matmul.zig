@@ -1,5 +1,6 @@
 const std = @import("std");
 const backend_mod = @import("../backend.zig");
+const kernels = backend_mod.kernels;
 const dtype_mod = @import("../dtype.zig");
 const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
@@ -271,7 +272,7 @@ fn matmul2DWithQuantizedRowsTensorRhs(
         .k = k,
         .n = n,
     };
-    try self.backend.matmul2DQuantizedRhs(self.allocator, out, a, @unionInit(backend_mod.AnyQuantizedMatmulRhs, union_field, &qrhs), m, n, k);
+    try kernels.matmul2DQuantizedRhs(self.pc(), self.allocator, out, a, @unionInit(backend_mod.AnyQuantizedMatmulRhs, union_field, &qrhs), m, n, k);
 }
 
 fn matmul2DWithQuantizedKTensorRhs(
@@ -293,7 +294,7 @@ fn matmul2DWithQuantizedKTensorRhs(
         Rhs{ .allocator = null, .blocks = blocks, .k = k, .n = n, .blocks_per_column = blocks_per_row }
     else
         Rhs{ .allocator = self.allocator, .blocks = @constCast(blocks), .k = k, .n = n, .blocks_per_column = blocks_per_row };
-    try self.backend.matmul2DQuantizedRhs(self.allocator, out, a, @unionInit(backend_mod.AnyQuantizedMatmulRhs, union_field, &qrhs), m, n, k);
+    try kernels.matmul2DQuantizedRhs(self.pc(), self.allocator, out, a, @unionInit(backend_mod.AnyQuantizedMatmulRhs, union_field, &qrhs), m, n, k);
 }
 
 pub fn packMatmulRhsQ8_0x4(self: *ExecContext, rhs: *const tensor.TensorOf(.q8_0)) !backend_mod.QuantizedMatmulRhsQ8_0x4 {
@@ -368,7 +369,7 @@ pub fn matmul2DWithPackedQ8_0x4Rhs(self: *ExecContext, a: *const Tensor, rhs: *c
     var out = try self.emptyRankTyped(.f32, 2, .{ m, rhs.n });
     errdefer out.deinit();
     self.enableNativeTypedMatmulPoolForWork(m, rhs.n, k);
-    try self.backend.matmul2DQuantizedRhsQ8_0x4(self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
+    try kernels.matmul2DQuantizedRhsQ8_0x4(self.pc(), self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
     return out;
 }
 
@@ -405,7 +406,7 @@ pub fn splitSwiGluMatmul2DWithPackedQ8_0x4Rhs(
         var row_out = try self.emptyRankTyped(.f32, 2, .{ 1, rhs.n });
         errdefer row_out.deinit();
         self.enableNativeTypedMatmulPoolForWork(1, rhs.n, k);
-        try self.backend.matmul2DQuantizedRhsQ8_0x4(self.allocator, &row_out, &fused, rhs, 1, rhs.n, k);
+        try kernels.matmul2DQuantizedRhsQ8_0x4(self.pc(), self.allocator, &row_out, &fused, rhs, 1, rhs.n, k);
         return row_out;
     }
 
@@ -448,9 +449,9 @@ pub fn splitSwiGluMatmul2DWithPackedQ8_0x4Rhs(
     );
     self.enableNativeTypedMatmulPoolForWork(m, rhs.n, k);
     if (m % 4 == 0) {
-        try self.backend.matmul2DPackedQ8_0x4LhsRhs(&out, qlhs_blocks, rhs, m, rhs.n, k);
+        try kernels.matmul2DPackedQ8_0x4LhsRhs(self.pc(), &out, qlhs_blocks, rhs, m, rhs.n, k);
     } else {
-        try self.backend.matmul2DPackedPaddedQ8_0x4LhsRhs(&out, qlhs_blocks, rhs, m, rhs.n, k);
+        try kernels.matmul2DPackedPaddedQ8_0x4LhsRhs(self.pc(), &out, qlhs_blocks, rhs, m, rhs.n, k);
     }
     return out;
 }
@@ -523,7 +524,6 @@ fn splitSwiGluMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhs
         const qlhs_x4 = qlhs_x4_lease.items;
         const TaskT = FusedActQuantTask(.split_swiglu, .q8_kx4);
         fusedActQuantDispatch(self, TaskT, .{
-            .backend = &self.backend,
             .gate = input,
             .up = &.{},
             .scratch = &.{},
@@ -535,8 +535,8 @@ fn splitSwiGluMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhs
             .x4_blocks = qlhs_x4,
         }, row_groups, scratch);
         switch (kind) {
-            .q4_kx8 => self.backend.matmulPackedQ4_Kx8Q8_Kx4Slice(out_data[0 .. prefix_rows * n], qlhs_x4, rhs, prefix_rows, n, k),
-            .q5_kx8 => self.backend.matmulPackedQ5_Kx8Q8_Kx4Slice(out_data[0 .. prefix_rows * n], qlhs_x4, rhs, prefix_rows, n, k),
+            .q4_kx8 => kernels.matmulPackedQ4_Kx8Q8_Kx4Slice(self.pc(), out_data[0 .. prefix_rows * n], qlhs_x4, rhs, prefix_rows, n, k),
+            .q5_kx8 => kernels.matmulPackedQ5_Kx8Q8_Kx4Slice(self.pc(), out_data[0 .. prefix_rows * n], qlhs_x4, rhs, prefix_rows, n, k),
             .q6_kx4 => unreachable,
         }
     }
@@ -549,7 +549,6 @@ fn splitSwiGluMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhs
         const qlhs_rows = qlhs_rows_lease.items;
         const TaskT = FusedActQuantTask(.split_swiglu, .q8_k_rows);
         fusedActQuantDispatch(self, TaskT, .{
-            .backend = &self.backend,
             .gate = input[prefix_rows * axis_dim ..],
             .up = &.{},
             .scratch = &.{},
@@ -562,9 +561,9 @@ fn splitSwiGluMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhs
         }, tail_groups, scratch);
         const tail_out = out_data[prefix_rows * n ..][0 .. tail_rows * n];
         switch (kind) {
-            .q4_kx8 => self.backend.matmulPackedQ4_Kx8RowsSlice(tail_out, qlhs_rows, rhs, tail_rows, n, k),
-            .q5_kx8 => self.backend.matmulPackedQ5_Kx8RowsSlice(tail_out, qlhs_rows, rhs, tail_rows, n, k),
-            .q6_kx4 => self.backend.matmulPackedQ6_Kx4RowsSlice(tail_out, qlhs_rows, rhs, tail_rows, n, k),
+            .q4_kx8 => kernels.matmulPackedQ4_Kx8RowsSlice(self.pc(), tail_out, qlhs_rows, rhs, tail_rows, n, k),
+            .q5_kx8 => kernels.matmulPackedQ5_Kx8RowsSlice(self.pc(), tail_out, qlhs_rows, rhs, tail_rows, n, k),
+            .q6_kx4 => kernels.matmulPackedQ6_Kx4RowsSlice(self.pc(), tail_out, qlhs_rows, rhs, tail_rows, n, k),
         }
     }
     return out;
@@ -628,7 +627,6 @@ fn rmsNormMulMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhsK
         const qlhs_x4 = qlhs_x4_lease.items;
         const TaskT = FusedActQuantTask(.rms_norm_mul, .q8_kx4);
         fusedActQuantDispatch(self, TaskT, .{
-            .backend = &self.backend,
             .gate = input,
             .up = weights,
             .scratch = &.{},
@@ -643,8 +641,8 @@ fn rmsNormMulMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhsK
             .x4_blocks = qlhs_x4,
         }, row_groups, scratch);
         switch (kind) {
-            .q4_kx8 => self.backend.matmulPackedQ4_Kx8Q8_Kx4Slice(out_data[0 .. prefix_rows * n], qlhs_x4, rhs, prefix_rows, n, k),
-            .q5_kx8 => self.backend.matmulPackedQ5_Kx8Q8_Kx4Slice(out_data[0 .. prefix_rows * n], qlhs_x4, rhs, prefix_rows, n, k),
+            .q4_kx8 => kernels.matmulPackedQ4_Kx8Q8_Kx4Slice(self.pc(), out_data[0 .. prefix_rows * n], qlhs_x4, rhs, prefix_rows, n, k),
+            .q5_kx8 => kernels.matmulPackedQ5_Kx8Q8_Kx4Slice(self.pc(), out_data[0 .. prefix_rows * n], qlhs_x4, rhs, prefix_rows, n, k),
             .q6_kx4 => unreachable,
         }
     }
@@ -657,7 +655,6 @@ fn rmsNormMulMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhsK
         const qlhs_rows = qlhs_rows_lease.items;
         const TaskT = FusedActQuantTask(.rms_norm_mul, .q8_k_rows);
         fusedActQuantDispatch(self, TaskT, .{
-            .backend = &self.backend,
             .gate = input[prefix_rows * k ..],
             .up = weights,
             .scratch = &.{},
@@ -673,9 +670,9 @@ fn rmsNormMulMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhsK
         }, tail_groups, scratch);
         const tail_out = out_data[prefix_rows * n ..][0 .. tail_rows * n];
         switch (kind) {
-            .q4_kx8 => self.backend.matmulPackedQ4_Kx8RowsSlice(tail_out, qlhs_rows, rhs, tail_rows, n, k),
-            .q5_kx8 => self.backend.matmulPackedQ5_Kx8RowsSlice(tail_out, qlhs_rows, rhs, tail_rows, n, k),
-            .q6_kx4 => self.backend.matmulPackedQ6_Kx4RowsSlice(tail_out, qlhs_rows, rhs, tail_rows, n, k),
+            .q4_kx8 => kernels.matmulPackedQ4_Kx8RowsSlice(self.pc(), tail_out, qlhs_rows, rhs, tail_rows, n, k),
+            .q5_kx8 => kernels.matmulPackedQ5_Kx8RowsSlice(self.pc(), tail_out, qlhs_rows, rhs, tail_rows, n, k),
+            .q6_kx4 => kernels.matmulPackedQ6_Kx4RowsSlice(self.pc(), tail_out, qlhs_rows, rhs, tail_rows, n, k),
         }
     }
     return out;
@@ -735,7 +732,6 @@ pub fn rmsNormMulMatmul2DWithPackedQ8_0x4Rhs(self: *ExecContext, x: *const Tenso
 
     const TaskT = FusedActQuantTask(.rms_norm_mul, .q8_0x4);
     fusedActQuantDispatch(self, TaskT, .{
-        .backend = &self.backend,
         .gate = xx.tensor().dataConst(),
         .up = ww.tensor().dataConst(),
         .scratch = &.{},
@@ -752,9 +748,9 @@ pub fn rmsNormMulMatmul2DWithPackedQ8_0x4Rhs(self: *ExecContext, x: *const Tenso
 
     self.enableNativeTypedMatmulPoolForWork(m, n, k);
     if (m % 4 == 0) {
-        try self.backend.matmul2DPackedQ8_0x4LhsRhs(&out, qlhs, rhs, m, n, k);
+        try kernels.matmul2DPackedQ8_0x4LhsRhs(self.pc(), &out, qlhs, rhs, m, n, k);
     } else {
-        try self.backend.matmul2DPackedPaddedQ8_0x4LhsRhs(&out, qlhs, rhs, m, n, k);
+        try kernels.matmul2DPackedPaddedQ8_0x4LhsRhs(self.pc(), &out, qlhs, rhs, m, n, k);
     }
     return out;
 }
@@ -818,7 +814,6 @@ pub fn gegluQuantMatmul2DWithPackedQ8_0x4Rhs(self: *ExecContext, gate: *const Te
 
     const TaskT = FusedActQuantTask(.geglu_quant, .q8_0x4);
     fusedActQuantDispatch(self, TaskT, .{
-        .backend = &self.backend,
         .gate = gg.tensor().dataConst(),
         .up = uu.tensor().dataConst(),
         .scratch = &.{},
@@ -832,9 +827,9 @@ pub fn gegluQuantMatmul2DWithPackedQ8_0x4Rhs(self: *ExecContext, gate: *const Te
 
     self.enableNativeTypedMatmulPoolForWork(m, n, k);
     if (m % 4 == 0) {
-        try self.backend.matmul2DPackedQ8_0x4LhsRhs(&out, qlhs, rhs, m, n, k);
+        try kernels.matmul2DPackedQ8_0x4LhsRhs(self.pc(), &out, qlhs, rhs, m, n, k);
     } else {
-        try self.backend.matmul2DPackedPaddedQ8_0x4LhsRhs(&out, qlhs, rhs, m, n, k);
+        try kernels.matmul2DPackedPaddedQ8_0x4LhsRhs(self.pc(), &out, qlhs, rhs, m, n, k);
     }
     return out;
 }
@@ -857,7 +852,7 @@ pub fn matmul2DWithPackedQ6_Kx4Rhs(self: *ExecContext, a: *const Tensor, rhs: *c
     var out = try self.emptyRankTyped(.f32, 2, .{ m, rhs.n });
     errdefer out.deinit();
     self.enableNativeTypedMatmulPoolForWork(m, rhs.n, k);
-    try self.backend.matmul2DQuantizedRhsQ6_Kx4(self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
+    try kernels.matmul2DQuantizedRhsQ6_Kx4(self.pc(), self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
     return out;
 }
 
@@ -879,7 +874,7 @@ pub fn matmul2DWithPackedQ4_Kx4Rhs(self: *ExecContext, a: *const Tensor, rhs: *c
     var out = try self.emptyRankTyped(.f32, 2, .{ m, rhs.n });
     errdefer out.deinit();
     self.enableNativeTypedMatmulPoolForWork(m, rhs.n, k);
-    try self.backend.matmul2DQuantizedRhsQ4_Kx4(self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
+    try kernels.matmul2DQuantizedRhsQ4_Kx4(self.pc(), self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
     return out;
 }
 
@@ -901,7 +896,7 @@ pub fn matmul2DWithPackedQ4_Kx8Rhs(self: *ExecContext, a: *const Tensor, rhs: *c
     var out = try self.emptyRankTyped(.f32, 2, .{ m, rhs.n });
     errdefer out.deinit();
     self.enableNativeTypedMatmulPoolForWork(m, rhs.n, k);
-    try self.backend.matmul2DQuantizedRhsQ4_Kx8(self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
+    try kernels.matmul2DQuantizedRhsQ4_Kx8(self.pc(), self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
     return out;
 }
 
@@ -923,7 +918,7 @@ pub fn matmul2DWithPackedQ4_Kx2MmlaRhs(self: *ExecContext, a: *const Tensor, rhs
     var out = try self.emptyRankTyped(.f32, 2, .{ m, rhs.n });
     errdefer out.deinit();
     self.enableNativeTypedMatmulPoolForWork(m, rhs.n, k);
-    try self.backend.matmul2DQuantizedRhsQ4_Kx2Mmla(self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
+    try kernels.matmul2DQuantizedRhsQ4_Kx2Mmla(self.pc(), self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
     return out;
 }
 
@@ -945,7 +940,7 @@ pub fn matmul2DWithPackedQ5_Kx8Rhs(self: *ExecContext, a: *const Tensor, rhs: *c
     var out = try self.emptyRankTyped(.f32, 2, .{ m, rhs.n });
     errdefer out.deinit();
     self.enableNativeTypedMatmulPoolForWork(m, rhs.n, k);
-    try self.backend.matmul2DQuantizedRhsQ5_Kx8(self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
+    try kernels.matmul2DQuantizedRhsQ5_Kx8(self.pc(), self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
     return out;
 }
 

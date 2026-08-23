@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const backend_mod = @import("../backend.zig");
+const kernels = backend_mod.kernels;
 const parallel = @import("../parallel.zig");
 const tuning = @import("../tuning.zig");
 const tensor = @import("../tensor.zig");
@@ -57,7 +58,7 @@ pub fn causalDepthwiseConv1dAxisRank(
     var out = try ctx.emptyRank(rank, source.shape);
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(parallel.saturatedMul3(seq, channels, taps), parallel.vector_elementwise_len_threshold);
-    ctx.backend.causalDepthwiseConv1dInto(&out, ii.tensor(), kk.tensor(), state, seq, channels, taps, dilation);
+    kernels.causalDepthwiseConv1dInto(ctx.pc(), &out, ii.tensor(), kk.tensor(), state, seq, channels, taps, dilation);
     return out;
 }
 
@@ -93,7 +94,7 @@ pub fn causalDepthwiseConv1dBackwardInputAxisRank(
     var out = try ctx.emptyRank(rank, grad_view.shape);
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(parallel.saturatedMul3(seq, channels, taps), parallel.vector_elementwise_len_threshold);
-    ctx.backend.causalDepthwiseConv1dBackwardInputInto(&out, gg.tensor(), kk.tensor(), seq, channels, taps, dilation);
+    kernels.causalDepthwiseConv1dBackwardInputInto(ctx.pc(), &out, gg.tensor(), kk.tensor(), seq, channels, taps, dilation);
     return out;
 }
 
@@ -131,7 +132,7 @@ pub fn causalDepthwiseConv1dBackwardKernelAxisRank(
     var out = try ctx.emptyRank(2, .{ channels, taps });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(parallel.saturatedMul3(seq, channels, taps), parallel.vector_elementwise_len_threshold);
-    ctx.backend.causalDepthwiseConv1dBackwardKernelInto(&out, ii.tensor(), gg.tensor(), state, seq, channels, taps, dilation);
+    kernels.causalDepthwiseConv1dBackwardKernelInto(ctx.pc(), &out, ii.tensor(), gg.tensor(), state, seq, channels, taps, dilation);
     return out;
 }
 
@@ -173,7 +174,7 @@ pub fn causalConv1dAxisRank(
     var out = try ctx.emptyRank(rank, .{ seq, out_channels });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(causalConvWork(seq, in_channels, out_channels, taps), parallel.vector_elementwise_len_threshold);
-    ctx.backend.causalConv1dInto(&out, ii.tensor(), ww.tensor(), state, seq, in_channels, out_channels, taps, dilation);
+    kernels.causalConv1dInto(ctx.pc(), &out, ii.tensor(), ww.tensor(), state, seq, in_channels, out_channels, taps, dilation);
     return out;
 }
 
@@ -386,7 +387,7 @@ pub fn conv2dPreparedExt(
         var col = try ctx.emptyRank(2, .{ npos, ksz });
         errdefer col.deinit();
         ctx.enableNativeVectorPoolForWork(npos * ksz, parallel.vector_elementwise_len_threshold);
-        ctx.backend.im2colInto(&col, ii.tensor(), .{
+        kernels.im2colInto(ctx.pc(), &col, ii.tensor(), .{
             .h = h,
             .w = wd,
             .cin = cin,
@@ -419,7 +420,7 @@ pub fn conv2dPreparedExt(
     // Enable the worker pool so conv2d threads over output rows when the conv
     // is large (e.g. an ASR subsampling stem). Bit-identical to the serial path.
     ctx.enableNativeVectorPoolForWork(oh * ow * cout * kh * kw * cin_pg, parallel.vector_elementwise_len_threshold);
-    ctx.backend.conv2dInto(&out, ii.tensor(), ww.tensor(), bias_slice, .{
+    kernels.conv2dInto(ctx.pc(), &out, ii.tensor(), ww.tensor(), bias_slice, .{
         .h = h,
         .w = wd,
         .cin = cin,
@@ -440,7 +441,7 @@ pub fn conv2dPreparedExt(
 
 fn reluInPlace(ctx: *ExecContext, t: *Tensor) void {
     ctx.enableNativeVectorPoolForWork(t.len(), parallel.vector_elementwise_len_threshold);
-    ctx.backend.unaryContiguousIntoUnchecked(.relu, t, t, t.len());
+    kernels.unaryContiguousIntoUnchecked(ctx.pc(), .relu, t, t, t.len());
 }
 
 fn conv2dDimsFor(h: usize, w: usize, cin: usize, oh: usize, ow: usize, cout: usize, kh: usize, kw: usize, stride: [2]usize, pad: [2]usize, groups: usize) backend_mod.Conv2dDims {
@@ -581,8 +582,8 @@ fn winogradWeightPlanes(ctx: *ExecContext, comptime kind: WinoKind, weight: *con
     for (0..planes) |e| u_s[e] = u_t[e].data();
     ctx.enableNativeVectorPoolForWork(planes * cout * cin, parallel.vector_elementwise_len_threshold);
     switch (kind) {
-        .f2 => ctx.backend.winogradF2WeightTransformInto(&u_s, weight.dataConst(), cout, cin),
-        .f4 => ctx.backend.winogradF4WeightTransformInto(&u_s, weight.dataConst(), cout, cin),
+        .f2 => kernels.winogradF2WeightTransformInto(ctx.pc(), &u_s, weight.dataConst(), cout, cin),
+        .f4 => kernels.winogradF4WeightTransformInto(ctx.pc(), &u_s, weight.dataConst(), cout, cin),
     }
     return u_t;
 }
@@ -627,13 +628,13 @@ fn winogradConv(ctx: *ExecContext, comptime kind: WinoKind, input: *const Tensor
         var u_s: [planes][]f32 = undefined;
         for (0..planes) |e| u_s[e] = u_t[e].data();
         switch (kind) {
-            .f2 => ctx.backend.winogradF2WeightTransformInto(&u_s, weight.dataConst(), d.cout, d.cin),
-            .f4 => ctx.backend.winogradF4WeightTransformInto(&u_s, weight.dataConst(), d.cout, d.cin),
+            .f2 => kernels.winogradF2WeightTransformInto(ctx.pc(), &u_s, weight.dataConst(), d.cout, d.cin),
+            .f4 => kernels.winogradF4WeightTransformInto(ctx.pc(), &u_s, weight.dataConst(), d.cout, d.cin),
         }
     }
     switch (kind) {
-        .f2 => ctx.backend.winogradF2InputTransformInto(&v_s, input.dataConst(), d),
-        .f4 => ctx.backend.winogradF4InputTransformInto(&v_s, input.dataConst(), d),
+        .f2 => kernels.winogradF2InputTransformInto(ctx.pc(), &v_s, input.dataConst(), d),
+        .f4 => kernels.winogradF4InputTransformInto(ctx.pc(), &v_s, input.dataConst(), d),
     }
 
     const u_src: *const [planes]Tensor = u_prepared orelse &u_t;
@@ -655,8 +656,8 @@ fn winogradConv(ctx: *ExecContext, comptime kind: WinoKind, input: *const Tensor
     for (0..planes) |e| m_s[e] = m_t[e].dataConst();
     ctx.enableNativeVectorPoolForWork(planes * tiles * d.cout, parallel.vector_elementwise_len_threshold);
     switch (kind) {
-        .f2 => ctx.backend.winogradF2OutputTransformInto(out.data(), &m_s, bias, fused_relu, d),
-        .f4 => ctx.backend.winogradF4OutputTransformInto(out.data(), &m_s, bias, fused_relu, d),
+        .f2 => kernels.winogradF2OutputTransformInto(ctx.pc(), out.data(), &m_s, bias, fused_relu, d),
+        .f4 => kernels.winogradF4OutputTransformInto(ctx.pc(), out.data(), &m_s, bias, fused_relu, d),
     }
     for (m_t[0..m_n]) |*t| t.deinit();
     m_n = 0;
@@ -711,7 +712,7 @@ pub fn conv2dBackwardInput(ctx: *ExecContext, gy: *const Tensor, weight: *const 
         var out = try ctx.emptyRank(3, .{ in_h, in_w, cin });
         errdefer out.deinit();
         ctx.enableNativeVectorPoolForWork(parallel.saturatedMul3(in_h * in_w, cin, (kh / stride[0] + 1) * (kw / stride[1] + 1)), parallel.vector_elementwise_len_threshold);
-        ctx.backend.col2imInto(&out, &gcol, conv2dDimsFor(in_h, in_w, cin, oh, ow, cout, kh, kw, stride, pad, groups));
+        kernels.col2imInto(ctx.pc(), &out, &gcol, conv2dDimsFor(in_h, in_w, cin, oh, ow, cout, kh, kw, stride, pad, groups));
         return out;
     }
 
@@ -720,7 +721,7 @@ pub fn conv2dBackwardInput(ctx: *ExecContext, gy: *const Tensor, weight: *const 
     // Same work estimate as the kernel's own thread gate, so the pool is
     // available whenever the kernel would split.
     ctx.enableNativeVectorPoolForWork(std.math.mul(usize, parallel.saturatedMul3(oh * ow, cout, cin_pg), kh * kw) catch std.math.maxInt(usize), parallel.vector_elementwise_len_threshold);
-    ctx.backend.conv2dBackwardInputInto(&out, gg.tensor(), ww.tensor(), conv2dDimsFor(in_h, in_w, cin, oh, ow, cout, kh, kw, stride, pad, groups));
+    kernels.conv2dBackwardInputInto(ctx.pc(), &out, gg.tensor(), ww.tensor(), conv2dDimsFor(in_h, in_w, cin, oh, ow, cout, kh, kw, stride, pad, groups));
     return out;
 }
 
@@ -768,7 +769,7 @@ pub fn conv2dBackwardWeight(ctx: *ExecContext, input: *const Tensor, gy: *const 
         var col = try ctx.emptyRank(2, .{ npos, ksz });
         defer col.deinit();
         ctx.enableNativeVectorPoolForWork(npos * ksz, parallel.vector_elementwise_len_threshold);
-        ctx.backend.im2colInto(&col, ii.tensor(), conv2dDimsFor(h, w, cin, oh, ow, cout, kh, kw, stride, pad, groups));
+        kernels.im2colInto(ctx.pc(), &col, ii.tensor(), conv2dDimsFor(h, w, cin, oh, ow, cout, kh, kw, stride, pad, groups));
         var gw_2d = try exec_matmul.matmul2DDispatch(ctx, .trans_a, &gy_2d, &col);
         errdefer gw_2d.deinit();
         var gw_4d = try gw_2d.viewWithStrides(&.{ cout, kh, kw, cin }, &.{ ksz, kw * cin, cin, 1 });
@@ -782,7 +783,7 @@ pub fn conv2dBackwardWeight(ctx: *ExecContext, input: *const Tensor, gy: *const 
     // Same work estimate as the kernel's own thread gate, so the pool is
     // available whenever the kernel would split.
     ctx.enableNativeVectorPoolForWork(std.math.mul(usize, parallel.saturatedMul3(oh * ow, cout, cin_pg), kh * kw) catch std.math.maxInt(usize), parallel.vector_elementwise_len_threshold);
-    ctx.backend.conv2dBackwardWeightInto(&out, ii.tensor(), gg.tensor(), conv2dDimsFor(h, w, cin, oh, ow, cout, kh, kw, stride, pad, groups));
+    kernels.conv2dBackwardWeightInto(ctx.pc(), &out, ii.tensor(), gg.tensor(), conv2dDimsFor(h, w, cin, oh, ow, cout, kh, kw, stride, pad, groups));
     return out;
 }
 
@@ -812,7 +813,7 @@ pub fn unfold(ctx: *ExecContext, input: *const Tensor, kernel: [2]usize, stride:
     var col = try ctx.emptyRank(2, .{ npos, ksz });
     errdefer col.deinit();
     ctx.enableNativeVectorPoolForWork(npos * ksz, parallel.vector_elementwise_len_threshold);
-    ctx.backend.im2colInto(&col, ii.tensor(), conv2dDimsFor(h, w, cin, oh, ow, 1, kh, kw, stride, pad, 1));
+    kernels.im2colInto(ctx.pc(), &col, ii.tensor(), conv2dDimsFor(h, w, cin, oh, ow, 1, kh, kw, stride, pad, 1));
     return col;
 }
 
@@ -842,7 +843,7 @@ pub fn fold(ctx: *ExecContext, col: *const Tensor, output_size: [2]usize, kernel
     var out = try ctx.emptyRank(3, .{ h, w, cin });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(parallel.saturatedMul3(h * w, cin, (kh / stride[0] + 1) * (kw / stride[1] + 1)), parallel.vector_elementwise_len_threshold);
-    ctx.backend.col2imInto(&out, cc.tensor(), conv2dDimsFor(h, w, cin, oh, ow, 1, kh, kw, stride, pad, 1));
+    kernels.col2imInto(ctx.pc(), &out, cc.tensor(), conv2dDimsFor(h, w, cin, oh, ow, 1, kh, kw, stride, pad, 1));
     return out;
 }
 
@@ -896,7 +897,7 @@ pub fn conv1dAxisRank(
     var out = try ctx.emptyRank(rank, .{ out_len, out_channels });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(causalConvWork(out_len, in_channels / groups, out_channels, taps), parallel.vector_elementwise_len_threshold);
-    ctx.backend.conv1dInto(&out, ii.tensor(), ww.tensor(), .{
+    kernels.conv1dInto(ctx.pc(), &out, ii.tensor(), ww.tensor(), .{
         .seq = seq,
         .out_len = out_len,
         .in_channels = in_channels,
@@ -945,7 +946,7 @@ pub fn col2im1dAxisRank(
     var out = try ctx.emptyRank(2, .{ out_len, out_channels });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(parallel.saturatedMul3(out_len, out_channels, taps / stride + 1), parallel.vector_elementwise_len_threshold);
-    ctx.backend.col2im1dInto(&out, cc.tensor(), t_in, out_len, out_channels, taps, stride, pad);
+    kernels.col2im1dInto(ctx.pc(), &out, cc.tensor(), t_in, out_len, out_channels, taps, stride, pad);
     return out;
 }
 
@@ -1045,7 +1046,7 @@ pub fn conv1dBackwardInputAxisRank(
     var out = try ctx.emptyRank(rank, .{ seq, in_channels });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(causalConvWork(out_len, in_channels / groups, out_channels, taps), parallel.vector_elementwise_len_threshold);
-    ctx.backend.conv1dBackwardInputInto(&out, gg.tensor(), ww.tensor(), .{
+    kernels.conv1dBackwardInputInto(ctx.pc(), &out, gg.tensor(), ww.tensor(), .{
         .seq = seq,
         .out_len = out_len,
         .in_channels = in_channels,
@@ -1104,7 +1105,7 @@ pub fn conv1dBackwardWeightAxisRank(
     var out = try ctx.emptyRank(3, .{ taps, in_channels / groups, out_channels });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(causalConvWork(out_len, in_channels / groups, out_channels, taps), parallel.vector_elementwise_len_threshold);
-    ctx.backend.conv1dBackwardWeightInto(&out, ii.tensor(), gg.tensor(), .{
+    kernels.conv1dBackwardWeightInto(ctx.pc(), &out, ii.tensor(), gg.tensor(), .{
         .seq = seq,
         .out_len = out_len,
         .in_channels = in_channels,
@@ -1149,7 +1150,7 @@ pub fn col2im1dBackwardAxisRank(
     var out = try ctx.emptyRank(2, .{ t_in, try std.math.mul(usize, taps, out_channels) });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(parallel.saturatedMul3(t_in, out_channels, taps), parallel.vector_elementwise_len_threshold);
-    ctx.backend.col2im1dBackwardInto(&out, gg.tensor(), t_in, grad_view.shape[0], out_channels, taps, stride, pad);
+    kernels.col2im1dBackwardInto(ctx.pc(), &out, gg.tensor(), t_in, grad_view.shape[0], out_channels, taps, stride, pad);
     return out;
 }
 
@@ -1186,7 +1187,7 @@ pub fn causalConv1dBackwardInputAxisRank(
     var out = try ctx.emptyRank(rank, .{ seq, in_channels });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(causalConvWork(seq, in_channels, out_channels, taps), parallel.vector_elementwise_len_threshold);
-    ctx.backend.causalConv1dBackwardInputInto(&out, gg.tensor(), ww.tensor(), seq, in_channels, out_channels, taps, dilation);
+    kernels.causalConv1dBackwardInputInto(ctx.pc(), &out, gg.tensor(), ww.tensor(), seq, in_channels, out_channels, taps, dilation);
     return out;
 }
 
@@ -1224,7 +1225,7 @@ pub fn causalConv1dBackwardWeightAxisRank(
     var out = try ctx.emptyRank(3, .{ taps, in_channels, out_channels });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(causalConvWork(seq, in_channels, out_channels, taps), parallel.vector_elementwise_len_threshold);
-    ctx.backend.causalConv1dBackwardWeightInto(&out, ii.tensor(), gg.tensor(), state, seq, in_channels, out_channels, taps, dilation);
+    kernels.causalConv1dBackwardWeightInto(ctx.pc(), &out, ii.tensor(), gg.tensor(), state, seq, in_channels, out_channels, taps, dilation);
     return out;
 }
 
@@ -1266,7 +1267,7 @@ pub fn groupedCausalConv1dAxisRank(
     var out = try ctx.emptyRank(rank, .{ seq, out_channels });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(causalConvWork(seq, in_per_group, out_channels, taps), parallel.vector_elementwise_len_threshold);
-    ctx.backend.groupedCausalConv1dInto(&out, ii.tensor(), ww.tensor(), state, seq, in_channels, out_channels, taps, dilation, groups);
+    kernels.groupedCausalConv1dInto(ctx.pc(), &out, ii.tensor(), ww.tensor(), state, seq, in_channels, out_channels, taps, dilation, groups);
     return out;
 }
 
@@ -1305,7 +1306,7 @@ pub fn groupedCausalConv1dBackwardInputAxisRank(
     var out = try ctx.emptyRank(rank, .{ seq, in_channels });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(causalConvWork(seq, in_per_group, out_channels, taps), parallel.vector_elementwise_len_threshold);
-    ctx.backend.groupedCausalConv1dBackwardInputInto(&out, gg.tensor(), ww.tensor(), seq, in_channels, out_channels, taps, dilation, groups);
+    kernels.groupedCausalConv1dBackwardInputInto(ctx.pc(), &out, gg.tensor(), ww.tensor(), seq, in_channels, out_channels, taps, dilation, groups);
     return out;
 }
 
@@ -1344,6 +1345,6 @@ pub fn groupedCausalConv1dBackwardWeightAxisRank(
     var out = try ctx.emptyRank(3, .{ taps, in_per_group, out_channels });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(causalConvWork(seq, in_per_group, out_channels, taps), parallel.vector_elementwise_len_threshold);
-    ctx.backend.groupedCausalConv1dBackwardWeightInto(&out, ii.tensor(), gg.tensor(), state, seq, in_channels, out_channels, taps, dilation, groups);
+    kernels.groupedCausalConv1dBackwardWeightInto(ctx.pc(), &out, ii.tensor(), gg.tensor(), state, seq, in_channels, out_channels, taps, dilation, groups);
     return out;
 }
