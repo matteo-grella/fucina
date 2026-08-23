@@ -1,8 +1,10 @@
 //! Production import-graph checker for Fucina.
 //!
 //! Sentrux scans the whole repository, including sibling test files. This tool
-//! enforces the stricter production invariant: non-test `src/**/*.zig` local
-//! imports must have no nontrivial strongly-connected components.
+//! enforces the stricter PRODUCTION invariants over the non-test
+//! `src/**/*.zig` import graph, in-tree so `zig build arch-check` is the gate:
+//! no nontrivial strongly-connected components, no band inversions, and no
+//! unforwarded sibling test files.
 //!
 //! Test awareness inside production files: an `@import` is counted only when
 //! it is reachable from production code. Skipped are (a) imports inside `test`
@@ -14,7 +16,13 @@
 //! edges; references made through strings (`@field`) are not seen. Files that
 //! fail to parse conservatively count every `@import`.
 //!
-//! Second invariant — test-file forwarding: every `src/**/*_tests.zig` /
+//! Second invariant — direction. Every production file belongs to exactly one
+//! band of docs/ARCHITECTURE.md's Layer Stack (`band_table` below), and every
+//! production import must point at a band at or below the importer's. A file
+//! in no band is an error too: a new `src/` root cannot silently inherit
+//! whatever band its neighbours happen to have.
+//!
+//! Third invariant — test-file forwarding: every `src/**/*_tests.zig` /
 //! `*_test.zig` file must have an incoming `@import` from some non-test src
 //! file (the `test { _ = @import("x_tests.zig"); }` forwarding stanza).
 //! Zig's lazy analysis means an unforwarded test file is silently absent
@@ -29,7 +37,114 @@ const Allocator = std.mem.Allocator;
 const Error = error{
     ImportCycleDetected,
     TestFileNotForwarded,
+    BandInversionDetected,
+    FileOutsideBandTable,
 };
+
+/// The Layer Stack of docs/ARCHITECTURE.md, top-down. A band may depend only
+/// on bands at or below it, so a production import is legal exactly when the
+/// target's ordinal is >= the importer's. Declaration order IS the contract:
+/// do not reorder without changing the documented stack.
+const Band = enum {
+    apps,
+    llm,
+    facade,
+    ag, // ag + training/serialization + model I/O
+    tagged,
+    exec,
+    backend,
+    tags,
+    tensor,
+    primitives,
+    core,
+
+    fn label(self: Band) []const u8 {
+        return switch (self) {
+            .apps => "apps",
+            .llm => "llm",
+            .facade => "facade",
+            .ag => "ag + training/serialization",
+            .tagged => "tagged",
+            .exec => "exec",
+            .backend => "backend",
+            .tags => "tags",
+            .tensor => "tensor",
+            .primitives => "primitives",
+            .core => "core",
+        };
+    }
+};
+
+/// Band membership. An entry ending in `/` claims a directory subtree;
+/// anything else is an exact path. Longest match wins, so `src/ag.zig` and
+/// `src/ag/` can both appear. Every production file must match exactly one
+/// band — a new `src/` root that nobody added here fails the check rather
+/// than silently acquiring whatever band its neighbours have.
+const band_table = [_]struct { path: []const u8, band: Band }{
+    .{ .path = "src/bench_raw.zig", .band = .apps },
+    .{ .path = "src/x86dot_check.zig", .band = .apps },
+
+    .{ .path = "src/llm.zig", .band = .llm },
+    .{ .path = "src/llm/", .band = .llm },
+
+    .{ .path = "src/fucina.zig", .band = .facade },
+
+    .{ .path = "src/ag.zig", .band = .ag },
+    .{ .path = "src/ag/", .band = .ag },
+    .{ .path = "src/optim.zig", .band = .ag },
+    .{ .path = "src/optim/", .band = .ag },
+    .{ .path = "src/es.zig", .band = .ag },
+    .{ .path = "src/ptqtp.zig", .band = .ag },
+    .{ .path = "src/gguf.zig", .band = .ag },
+    .{ .path = "src/gguf_meta.zig", .band = .ag },
+    .{ .path = "src/ptqtp_gguf.zig", .band = .ag },
+    .{ .path = "src/lora.zig", .band = .ag },
+    .{ .path = "src/safetensors.zig", .band = .ag },
+    .{ .path = "src/state_dict.zig", .band = .ag },
+    .{ .path = "src/training_checkpoint.zig", .band = .ag },
+    .{ .path = "src/param_registry.zig", .band = .ag },
+    .{ .path = "src/weights.zig", .band = .ag },
+    .{ .path = "src/weights/", .band = .ag },
+
+    .{ .path = "src/tag_ops.zig", .band = .tagged },
+
+    .{ .path = "src/exec.zig", .band = .exec },
+    .{ .path = "src/exec/", .band = .exec },
+
+    .{ .path = "src/backend.zig", .band = .backend },
+    .{ .path = "src/backend/", .band = .backend },
+
+    .{ .path = "src/tags.zig", .band = .tags },
+    .{ .path = "src/tensor.zig", .band = .tensor },
+
+    .{ .path = "src/thread.zig", .band = .primitives },
+    .{ .path = "src/parallel.zig", .band = .primitives },
+    .{ .path = "src/tuning.zig", .band = .primitives },
+
+    .{ .path = "src/dtype.zig", .band = .core },
+    .{ .path = "src/storage.zig", .band = .core },
+    .{ .path = "src/accelerator.zig", .band = .core },
+    .{ .path = "src/rng.zig", .band = .core },
+    .{ .path = "src/fpenv.zig", .band = .core },
+    .{ .path = "src/caching_allocator.zig", .band = .core },
+    .{ .path = "src/streamconv.zig", .band = .core },
+};
+
+fn bandOf(path: []const u8) ?Band {
+    var best: ?Band = null;
+    var best_len: usize = 0;
+    for (band_table) |entry| {
+        const matches = if (entry.path[entry.path.len - 1] == '/')
+            std.mem.startsWith(u8, path, entry.path)
+        else
+            std.mem.eql(u8, path, entry.path);
+        if (matches and entry.path.len > best_len) {
+            best = entry.band;
+            best_len = entry.path.len;
+        }
+    }
+    return best;
+}
 
 const FileInfo = struct {
     path: []const u8,
@@ -180,13 +295,39 @@ pub fn main(init: std.process.Init) !void {
     }
     std.mem.sort([]const u8, unforwarded.items, {}, stringLessThan);
 
+    var unbanded: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer unbanded.deinit(allocator);
+    var inversions: std.ArrayListUnmanaged(Inversion) = .empty;
+    defer inversions.deinit(allocator);
+    try checkBands(allocator, &graph, &unbanded, &inversions);
+
     const edge_count = countEdges(&graph);
-    if (tarjan.cycles.items.len == 0 and unforwarded.items.len == 0) {
+    if (tarjan.cycles.items.len == 0 and unforwarded.items.len == 0 and
+        unbanded.items.len == 0 and inversions.items.len == 0)
+    {
         try stdout.print(
-            "production import graph: {d} files, {d} edges, 0 SCCs; {d} test files, all forwarded\n",
+            "production import graph: {d} files, {d} edges, 0 SCCs, 0 band inversions; {d} test files, all forwarded\n",
             .{ graph.files.items.len, edge_count, test_files.forwarded_by_path.count() },
         );
         return;
+    }
+
+    if (unbanded.items.len != 0) {
+        std.debug.print(
+            "{d} production file(s) in no band of the Layer Stack (docs/ARCHITECTURE.md):\n",
+            .{unbanded.items.len},
+        );
+        for (unbanded.items) |path| {
+            std.debug.print("  {s} (add it to band_table in this tool and to the Layer Stack table)\n", .{path});
+        }
+    }
+    if (inversions.items.len != 0) {
+        std.debug.print("{d} band inversion(s) — a band may depend only on bands at or below it:\n", .{inversions.items.len});
+        for (inversions.items) |inv| {
+            std.debug.print("  {s} [{s}] imports {s} [{s}]\n", .{
+                inv.from, inv.from_band.label(), inv.to, inv.to_band.label(),
+            });
+        }
     }
 
     if (tarjan.cycles.items.len != 0) {
@@ -211,7 +352,48 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     if (tarjan.cycles.items.len != 0) return Error.ImportCycleDetected;
+    if (unbanded.items.len != 0) return Error.FileOutsideBandTable;
+    if (inversions.items.len != 0) return Error.BandInversionDetected;
     return Error.TestFileNotForwarded;
+}
+
+const Inversion = struct {
+    from: []const u8,
+    from_band: Band,
+    to: []const u8,
+    to_band: Band,
+};
+
+/// Second production invariant: direction. Every file belongs to exactly one
+/// band of the Layer Stack, and every production import points at a band at
+/// or below the importer's. This is the contract docs/ARCHITECTURE.md states;
+/// before it lived here it was checked only by an out-of-tree lint.
+fn checkBands(
+    allocator: Allocator,
+    graph: *const Graph,
+    unbanded: *std.ArrayListUnmanaged([]const u8),
+    inversions: *std.ArrayListUnmanaged(Inversion),
+) !void {
+    for (graph.files.items) |file| {
+        if (bandOf(file.path) == null) try unbanded.append(allocator, file.path);
+    }
+    if (unbanded.items.len != 0) {
+        std.mem.sort([]const u8, unbanded.items, {}, stringLessThan);
+        return; // band ranks are meaningless until every file has one
+    }
+    for (graph.files.items) |file| {
+        const from = bandOf(file.path).?;
+        for (file.edges.items) |target| {
+            const to_path = graph.files.items[target].path;
+            const to = bandOf(to_path).?;
+            if (@intFromEnum(to) < @intFromEnum(from)) try inversions.append(allocator, .{
+                .from = file.path,
+                .from_band = from,
+                .to = to_path,
+                .to_band = to,
+            });
+        }
+    }
 }
 
 fn collectFiles(allocator: Allocator, io: std.Io, graph: *Graph, test_files: *TestFiles) !void {

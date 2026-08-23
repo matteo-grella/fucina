@@ -22,7 +22,7 @@ repo map, house rules, and the doc index.
 zig build test                 # unit tests — TEN roots: src/fucina.zig, src/llm.zig, examples/{lmserve,nam,parakeet,omnivoice,locate_anything,facedetect,voiceagent,nanochat}/main.zig; every root also has a solo step (test-fucina, test-llm, test-lmserve, test-nam, test-parakeet, test-omnivoice, test-locate-anything, test-facedetect, test-voiceagent, test-nanochat)
 zig build test-fucina -Dbackend=scalar  # THE scalar leg: fucina root only (the kernel/spec surface). The scalar backend verifies kernels/math; real-model golden forwards are native-only by design, so the full ten-root matrix is a native gate
 zig build test -Dblas=none        # native backend via pure Zig vector kernels (no CBLAS)
-zig build arch-check           # production-only src import graph (AST-based, test-aware): enforces 0 SCCs
+zig build arch-check           # production-only src import graph (AST-based, test-aware): 0 SCCs, 0 band inversions (the ARCHITECTURE.md Layer Stack, encoded as band_table in the tool), every sibling test file forwarded
 zig build doc-check            # doc rot gate: every doc named in AGENTS.md's doc index must exist, and README's zig-fetch pin must match build.zig.zon's version (tools/check_doc_links.zig)
 zig build snippet-check        # REFERENCE.md snippet gate: every runnable ```zig snippet (named test block) extracted and run against the real fucina/fucina_llm modules (tools/gen_snippet_tests.zig)
 zig build x86dot-check         # cross-ISA int8/Q4_K/Q8_0/TQ2_0 dot parity checker (follows -Dtarget) + compile-only AVX2/VNNI/smmla bit-rot legs (src/x86dot_check.zig)

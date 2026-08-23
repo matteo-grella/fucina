@@ -285,8 +285,11 @@ exec/runtime.zig (leaf substrate)
      storage.zig, tensor.zig, thread.zig
 
 backend.zig
-  -> backend/{ops,packed,quant,cpu,native,metal,vector}.zig, dtype.zig,
+  -> backend/{ops,packed,quant,cpu,native,gpu,vector}.zig, dtype.zig,
      tensor.zig, thread.zig
+
+backend/gpu.zig (comptime -Dgpu selector, a leaf so native.zig can reach it)
+  -> backend/{gpu_provider,metal,cuda}.zig
 
 tags.zig -> tensor.zig
 tensor.zig -> storage.zig, dtype.zig
@@ -302,22 +305,25 @@ modules are separate, apps-band roots).
 Enforcement:
 
 - `zig build arch-check` runs `tools/check_import_graph.zig` over the
-  production (non-test) `src/**/*.zig` import graph and requires zero
-  nontrivial strongly-connected components. The checker is AST-based and
-  test-aware: `@import`s inside `test` declarations, and inside non-pub
-  file-scope decls reachable only from tests, are excluded, so sibling-test
-  forwarding stanzas and private test helpers do not count as production
-  edges. The step prints the current file/edge count and requires
-  `0 SCCs`; the counts grow with the tree, so they are not pinned here.
+  production (non-test) `src/**/*.zig` import graph and enforces three
+  invariants: zero nontrivial strongly-connected components, zero band
+  inversions, and every sibling test file forwarded from a production file.
+  The checker is AST-based and test-aware: `@import`s inside `test`
+  declarations, and inside non-pub file-scope decls reachable only from
+  tests, are excluded, so sibling-test forwarding stanzas and private test
+  helpers do not count as production edges. The step prints the current
+  file/edge count; the counts grow with the tree, so they are not pinned
+  here.
 
-- The direction bands in the *Layer Stack* table are additionally checked
-  during development with a dependency-structure lint whose configuration is
-  not part of this tree. The contract it enforces is the table above:
-  production layer inversions are bugs, full stop. (The sibling
-  `<name>_tests.zig` files intentionally form benign 2-cycles with their
-  sources through the forwarding-stanza pattern — see *Build And
-  Verification* — which is why any cycle check over this tree must be
-  test-aware, as `arch-check` is.)
+- The direction bands are the *Layer Stack* table, encoded as `band_table`
+  in that same tool: every production file belongs to exactly one band, and
+  every production import must point at a band at or below the importer's.
+  A file in no band fails the check, so a new `src/` root cannot silently
+  acquire whatever band its neighbours have; a production layer inversion is
+  a failed build, not a review catch. (The sibling `<name>_tests.zig` files
+  intentionally form benign 2-cycles with their sources through the
+  forwarding-stanza pattern — see *Build And Verification* — which is why
+  any cycle check over this tree must be test-aware, as `arch-check` is.)
 
 ## Tensor And Storage Model
 

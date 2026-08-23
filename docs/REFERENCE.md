@@ -233,10 +233,11 @@ fixed per-op-family policy (§8.3).
 
 ### 1.3 Layer stack
 
-Top-down; a band depends only on bands at or below it. Acyclicity of the
-production import graph is machine-enforced by `zig build arch-check` (§2);
-the band *direction* is checked by a development-side dependency-structure
-lint whose configuration is not part of this tree (see
+Top-down; a band depends only on bands at or below it. Both halves are
+machine-enforced by `zig build arch-check` (§2): acyclicity of the production
+import graph, and band *direction* against this same table, encoded as
+`band_table` in `tools/check_import_graph.zig`. A production file in no band
+fails the check too, so this table and that one cannot drift apart (see
 [ARCHITECTURE.md](ARCHITECTURE.md)):
 
 | Band | Contents | Reference |
