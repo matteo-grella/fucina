@@ -48,9 +48,11 @@ point; earlier history is `git log`.
   MoE expert-trio loader, the embed/norm/lm-head trio, and the GQA head
   map the runner and qwen35 previously each carried; `weights/moe_stream.zig`
   holds `MoeStreamOptions` and the `--moe-*` argv band; `exec/moe_gu.zig`'s
-  packed and raw batch bodies share one chain-wiring skeleton; the three
-  core model-I/O files import their home modules directly instead of a
-  shadow `fucina` struct. Recorded goldens and llama.cpp parity gates are
+  packed and raw batch bodies share one chain-wiring skeleton; `optim.zig`
+  is a facade over `optim/{common,frame,moment_pair,muon,apollo,sgd,schedule,set}.zig`
+  (every `fucina.optim.*` spelling and every checkpoint byte unchanged);
+  the three core model-I/O files import their home modules directly
+  instead of a shadow `fucina` struct. Recorded goldens and llama.cpp parity gates are
   unchanged.
 - `parallel.row_kernel_len_threshold` and `parallel.attention_work_threshold`
   name the halved pool gates the fused row kernels and attention paths

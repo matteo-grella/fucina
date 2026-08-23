@@ -38,7 +38,7 @@ Top-down; a band may depend only on bands at or below it:
 | apps | `examples/**`, `tools/**`, `bench/**`, `src/bench_raw.zig`, `src/x86dot_check.zig` |
 | llm | `src/llm.zig`, `src/llm/**` (the `fucina_llm` module) |
 | facade | `src/fucina.zig` (the `fucina` module root) |
-| ag + training/serialization | `src/ag.zig`, `src/ag/**`, `src/optim.zig`, `src/es.zig`, `src/ptqtp.zig`, `src/gguf.zig`, `src/lora.zig`, `src/safetensors.zig`, `src/state_dict.zig`, `src/training_checkpoint.zig`, `src/param_registry.zig`, `src/weights.zig`, `src/gguf_meta.zig`, `src/ptqtp_gguf.zig` (model I/O) |
+| ag + training/serialization | `src/ag.zig`, `src/ag/**`, `src/optim.zig`, `src/optim/**`, `src/es.zig`, `src/ptqtp.zig`, `src/gguf.zig`, `src/lora.zig`, `src/safetensors.zig`, `src/state_dict.zig`, `src/training_checkpoint.zig`, `src/param_registry.zig`, `src/weights.zig`, `src/weights/**`, `src/gguf_meta.zig`, `src/ptqtp_gguf.zig` (model I/O) |
 | tagged | `src/tag_ops.zig` (tag-ops library) |
 | exec | `src/exec.zig`, `src/exec/**` (eager runtime) |
 | backend | `src/backend.zig`, `src/backend/**` (arch-switched numeric kernels; the single-implementation fused kernels live beside their ops in `exec/`) |
@@ -669,7 +669,7 @@ Generic helpers stay flat in `src/llm/`:
   gemma4). `examples/lmserve` is the CLI front end; adapters for families
   outside `Conversation` stay example-local there.
 
-- `src/optim.zig`: SGD/AdamW/Muon/APOLLO, grad clipping, LR schedules,
+- `src/optim.zig` (facade) + `src/optim/`: SGD/AdamW/Muon/APOLLO, grad clipping, LR schedules,
   `OptimizerSet` param groups; positional `FZT1` tensor snapshots plus named,
   dtype-aware safetensors state dicts with name-matched optimizer state.
   Golden-parity-tested against torch references.
