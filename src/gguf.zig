@@ -1,3 +1,10 @@
+//! GGUF container I/O, public as `fucina.gguf`: `File` parses/mmaps a GGUF
+//! (metadata, tensor directory, split files, madvise prefetch/release),
+//! `Writer` emits one (the export/transcode path), and the codec layer
+//! (`encodeF32`/`decodeF32`, `tensorByteLen`, `GgmlType` <-> `DType`
+//! mapping) round-trips tensor payloads. `RowTable` is the mmap-backed
+//! row-lookup view quantized embedding tables serve from.
+
 const std = @import("std");
 
 const dtype_mod = @import("dtype.zig");

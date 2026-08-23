@@ -30,29 +30,20 @@
 //! (breaking per-plane dequantizability) to save K-1 preads per miss.
 
 const std = @import("std");
-// The facade surface this file consumes, bound to the home modules
-// directly: `fucina.zig` re-exports this file as `fucina.ptqtp_gguf`, so
-// the facade cannot be imported from here — the production import graph
-// is cycle-checked (`zig build arch-check`).
-const fucina = struct {
-    const dtype_mod = @import("dtype.zig");
-    const exec_mod = @import("exec.zig");
-    pub const gguf = @import("gguf.zig");
-    pub const ptqtp = @import("ptqtp.zig");
-    pub const parallel = @import("parallel.zig");
-    pub const quant = struct {
-    pub const BlockTQ2_0 = dtype_mod.BlockTQ2_0;
-    };
-    pub const ExecContext = exec_mod.ExecContext;
-    pub const MoeRhs = exec_mod.ExecContext.MoeRhs;
-    pub const expert_store = exec_mod.expert_store;
-};
+// Home modules are imported directly: `fucina.zig` re-exports this file
+// as `fucina.ptqtp_gguf`, so the facade cannot be imported from here —
+// the production import graph is cycle-checked (`zig build arch-check`).
+const dtype_mod = @import("dtype.zig");
+const exec_mod = @import("exec.zig");
+const gguf = @import("gguf.zig");
+const ptqtp = @import("ptqtp.zig");
+const parallel = @import("parallel.zig");
 const weights = @import("weights.zig");
 
 const Allocator = std.mem.Allocator;
-const ExecContext = fucina.ExecContext;
-const gguf = fucina.gguf;
-const ptqtp = fucina.ptqtp;
+const ExecContext = exec_mod.ExecContext;
+const MoeRhs = exec_mod.ExecContext.MoeRhs;
+const expert_store = exec_mod.expert_store;
 const LinearWeight = weights.LinearWeight;
 
 pub const Error = error{
@@ -91,7 +82,7 @@ const max_name_len = 160;
 /// Applied to BOTH the resident and streamed MoE loaders so the two tiers
 /// keep serving the same numbers.
 fn moeFoldDisabled() bool {
-    return fucina.parallel.envFlag("FUCINA_PTQTP_NO_FOLD");
+    return parallel.envFlag("FUCINA_PTQTP_NO_FOLD");
 }
 
 /// `<base>.ptqtpK` — one byte-valid TQ2_0 tensor per plane.
@@ -259,7 +250,7 @@ fn addPlanes(writer: *gguf.Writer, entry: *const SaveEntry, base_info: ?*const g
     if (weight.p3) |*plane| planes[2] = plane;
 
     // The ptqtp arm's contract dim is 256-aligned, blocks are row-major.
-    const blocks_per_row = in_dim / fucina.ptqtp.block_len;
+    const blocks_per_row = in_dim / ptqtp.block_len;
     var name_buf: [max_name_len]u8 = undefined;
     var written: usize = 0;
     for (planes, 0..) |maybe_plane, plane_i| {
@@ -313,7 +304,7 @@ pub fn maybeLoadMoeRhs(
     out_dim: usize,
     n_expert: usize,
     borrow: bool,
-) !?fucina.MoeRhs {
+) !?MoeRhs {
     const set = (try moePlaneInfos(file, base_name)) orelse return null;
     const tied = (file.getInt(tie_key) orelse 0) == 1 and !moeFoldDisabled();
     return try weights.loadMoeRhsPtqtp(ctx, set.infos[0..set.count], in_dim, out_dim, n_expert, borrow, tied);
@@ -328,7 +319,7 @@ pub fn maybeStreamedMoeProjSpec(
     in_dim: usize,
     out_dim: usize,
     n_expert: usize,
-) !?fucina.expert_store.ProjSpec {
+) !?expert_store.ProjSpec {
     const set = (try moePlaneInfos(file, base_name)) orelse return null;
     const tied = (file.getInt(tie_key) orelse 0) == 1 and !moeFoldDisabled();
     return try weights.streamedProjSpecPtqtp(file, set.infos[0..set.count], in_dim, out_dim, n_expert, tied);
@@ -337,14 +328,14 @@ pub fn maybeStreamedMoeProjSpec(
 /// Decoration-aware MoE expert-stack load: the PTQTP plane set when the
 /// file carries one for `name`, `weights.loadMoeRhs` on the base tensor
 /// otherwise. The one entry model loaders call for resident expert stacks.
-pub fn loadMoeRhsAuto(ctx: *ExecContext, file: *const gguf.File, name: []const u8, in_dim: usize, out_dim: usize, n_expert: usize, borrow: bool) !fucina.MoeRhs {
+pub fn loadMoeRhsAuto(ctx: *ExecContext, file: *const gguf.File, name: []const u8, in_dim: usize, out_dim: usize, n_expert: usize, borrow: bool) !MoeRhs {
     if (try maybeLoadMoeRhs(ctx, file, name, in_dim, out_dim, n_expert, borrow)) |rhs| return rhs;
     return weights.loadMoeRhs(ctx, try file.get(name), in_dim, out_dim, n_expert, borrow);
 }
 
 /// Streamed counterpart of `loadMoeRhsAuto`: an ExpertStore ProjSpec,
 /// pair-detecting PTQTP plane sets the same way.
-pub fn streamedProjSpecAuto(file: *const gguf.File, name: []const u8, in_dim: usize, out_dim: usize, n_expert: usize) !fucina.expert_store.ProjSpec {
+pub fn streamedProjSpecAuto(file: *const gguf.File, name: []const u8, in_dim: usize, out_dim: usize, n_expert: usize) !expert_store.ProjSpec {
     if (try maybeStreamedMoeProjSpec(file, name, in_dim, out_dim, n_expert)) |spec| return spec;
     return weights.streamedProjSpec(file, try file.get(name), in_dim, out_dim, n_expert);
 }
@@ -365,7 +356,7 @@ pub const MoeStackStats = struct {
 /// starts at block `e * out * (in/256)` in every plane; entries past
 /// `plane_count` are empty. Caller frees via `deinit`.
 pub const MoeStackPlanes = struct {
-    planes: [3][]fucina.quant.BlockTQ2_0,
+    planes: [3][]dtype_mod.BlockTQ2_0,
     plane_count: usize,
     stats: MoeStackStats,
 
@@ -423,7 +414,7 @@ pub fn quantizeMoeStack(
     };
     errdefer result.deinit(allocator);
     for (0..options.planes) |p| {
-        result.planes[p] = try allocator.alloc(fucina.quant.BlockTQ2_0, n_expert * blocks_per_expert);
+        result.planes[p] = try allocator.alloc(dtype_mod.BlockTQ2_0, n_expert * blocks_per_expert);
     }
 
     const values = try allocator.alloc(f32, out_dim * in_dim);

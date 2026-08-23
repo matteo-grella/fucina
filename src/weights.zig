@@ -1,88 +1,42 @@
+//! Model weight I/O and the fused linear/MoE weight containers: GGUF-backed
+//! dense and quantized weights (packed-RHS `LinearWeight`, PTQTP plane
+//! weights, `LookupWeight`), MoE expert-stack loading (resident, mmap-
+//! borrowed, or disk-streamed through `ExpertStore`), the fused forward
+//! helpers the LLM families share (`moeSwiGluFfnSeq`, `linearSeq*`), GGUF
+//! host-side vector/matrix readers, and PTQTP decoration. Public as
+//! `fucina.weights`.
+//!
+//! Home modules are imported directly: `fucina.zig` re-exports this file,
+//! so the facade cannot be imported from here — the production import
+//! graph is cycle-checked (`zig build arch-check`).
+
 const std = @import("std");
 const builtin = @import("builtin");
-// The facade surface this file consumes, bound to the home modules
-// directly: `fucina.zig` re-exports this file as `fucina.weights`, so the
-// facade cannot be imported from here — the production import graph is
-// cycle-checked (`zig build arch-check`). The spelling matches the facade
-// so the body reads identically to its former llm-tier home.
-const fucina = struct {
-    const dtype_mod = @import("dtype.zig");
-    const backend_mod_ = @import("backend.zig");
-    const exec_mod = @import("exec.zig");
-    const ag_mod = @import("ag.zig");
-    const tensor_mod_ = @import("tensor.zig");
-    pub const gguf = @import("gguf.zig");
-    pub const ptqtp = @import("ptqtp.zig");
-    pub const rng = @import("rng.zig");
-    pub const parallel = @import("parallel.zig");
-    pub const tuning = @import("tuning.zig");
-    pub const Tensor = ag_mod.Tensor;
-    pub const PackedRhs = ag_mod.PackedRhs;
-    pub const DType = dtype_mod.DType;
-    pub const ExecContext = exec_mod.ExecContext;
-    pub const RhsLifetime = exec_mod.RhsLifetime;
-    pub const MoeRhs = exec_mod.ExecContext.MoeRhs;
-    pub const MoeBatchProfile = exec_mod.MoeBatchProfile;
-    pub const GatedOp = exec_mod.GatedOp;
-    pub const expert_store = exec_mod.expert_store;
-    pub const ExpertStore = exec_mod.expert_store.ExpertStore;
-    /// Mirrors the public `fucina.quant` namespace so this file reads
-    /// like consumer code.
-    pub const quant = struct {
-        pub const supports_q4_k_mmla = backend_mod_.supports_q4_k_mmla;
-        pub const QuantizedMatmulRhsQ2_K = backend_mod_.QuantizedMatmulRhsQ2_K;
-        pub const QuantizedMatmulRhsQ3_K = backend_mod_.QuantizedMatmulRhsQ3_K;
-        pub const QuantizedMatmulRhsQ4_K = backend_mod_.QuantizedMatmulRhsQ4_K;
-        pub const QuantizedMatmulRhsQ5_K = backend_mod_.QuantizedMatmulRhsQ5_K;
-        pub const QuantizedMatmulRhsQ6_K = backend_mod_.QuantizedMatmulRhsQ6_K;
-        pub const BlockQ1_0 = dtype_mod.BlockQ1_0;
-        pub const BlockQ2_0 = dtype_mod.BlockQ2_0;
-        pub const BlockQ4_0 = dtype_mod.BlockQ4_0;
-        pub const BlockQ4_1 = dtype_mod.BlockQ4_1;
-        pub const BlockQ5_0 = dtype_mod.BlockQ5_0;
-        pub const BlockQ5_1 = dtype_mod.BlockQ5_1;
-        pub const BlockQ8_0 = dtype_mod.BlockQ8_0;
-        pub const BlockQ2_K = dtype_mod.BlockQ2_K;
-        pub const BlockQ3_K = dtype_mod.BlockQ3_K;
-        pub const BlockQ4_K = dtype_mod.BlockQ4_K;
-        pub const BlockQ5_K = dtype_mod.BlockQ5_K;
-        pub const BlockQ6_K = dtype_mod.BlockQ6_K;
-        pub const BlockIQ1_S = dtype_mod.BlockIQ1_S;
-        pub const BlockIQ1_M = dtype_mod.BlockIQ1_M;
-        pub const BlockIQ2_XXS = dtype_mod.BlockIQ2_XXS;
-        pub const BlockIQ2_XS = dtype_mod.BlockIQ2_XS;
-        pub const BlockIQ2_S = dtype_mod.BlockIQ2_S;
-        pub const BlockIQ3_XXS = dtype_mod.BlockIQ3_XXS;
-        pub const BlockIQ3_S = dtype_mod.BlockIQ3_S;
-        pub const BlockIQ4_NL = dtype_mod.BlockIQ4_NL;
-        pub const BlockIQ4_XS = dtype_mod.BlockIQ4_XS;
-        pub const BlockMXFP4 = dtype_mod.BlockMXFP4;
-        pub const BlockNVFP4 = dtype_mod.BlockNVFP4;
-        pub const BlockTQ1_0 = dtype_mod.BlockTQ1_0;
-        pub const BlockTQ2_0 = dtype_mod.BlockTQ2_0;
-    };
-    pub const internal = struct {
-        pub const backend_mod = backend_mod_;
-        pub const tensor_mod = tensor_mod_;
-        pub const native_impl = backend_mod_.native_impl;
-        pub const RawTensor = tensor_mod_.Tensor;
-        pub const gpu = struct {
-            pub const enabled = backend_mod_.gpu_impl.enabled;
-            pub const has_quant_gemm = backend_mod_.gpu_impl.has_quant_gemm;
-            pub const has_q5_k_quant = backend_mod_.gpu_impl.has_q5_k_quant;
-            pub const has_tq2_0_quant = backend_mod_.gpu_impl.has_tq2_0_quant;
-            pub const allocResidentBytes = backend_mod_.gpu_impl.allocResidentBytes;
-            pub const freeResidentBytes = backend_mod_.gpu_impl.freeResidentBytes;
-        };
-    };
-};
 
-const DType = fucina.DType;
-const ExecContext = fucina.ExecContext;
+const dtype_mod = @import("dtype.zig");
+const backend_mod = @import("backend.zig");
+const exec_mod = @import("exec.zig");
+const ag_mod = @import("ag.zig");
+const tensor_mod = @import("tensor.zig");
+const gguf = @import("gguf.zig");
+const ptqtp = @import("ptqtp.zig");
+const rng = @import("rng.zig");
+const parallel = @import("parallel.zig");
+const tuning = @import("tuning.zig");
+
+const gpu_impl = backend_mod.gpu_impl;
+const Tensor = ag_mod.Tensor;
+const PackedRhs = ag_mod.PackedRhs;
+const DType = dtype_mod.DType;
+const ExecContext = exec_mod.ExecContext;
+const RhsLifetime = exec_mod.RhsLifetime;
+const MoeRhs = exec_mod.ExecContext.MoeRhs;
+const MoeBatchProfile = exec_mod.MoeBatchProfile;
+const GatedOp = exec_mod.GatedOp;
+const expert_store = exec_mod.expert_store;
+const ExpertStore = exec_mod.expert_store.ExpertStore;
 const Tag = @TypeOf(.tag);
-const gguf = fucina.gguf;
 const Allocator = std.mem.Allocator;
-const RhsLifetime = fucina.RhsLifetime;
 
 pub const Error = error{
     InvalidWeightShape,
@@ -90,9 +44,9 @@ pub const Error = error{
     GradUnsupported,
 };
 
-pub const WeightF32 = fucina.Tensor(.{ .out, .in });
-pub const WeightF16 = fucina.Tensor(.{ .dtype = .f16, .tags = .{ .out, .in } });
-pub const WeightBf16 = fucina.Tensor(.{ .dtype = .bf16, .tags = .{ .out, .in } });
+pub const WeightF32 = Tensor(.{ .out, .in });
+pub const WeightF16 = Tensor(.{ .dtype = .f16, .tags = .{ .out, .in } });
+pub const WeightBf16 = Tensor(.{ .dtype = .bf16, .tags = .{ .out, .in } });
 /// Packed quantized linear weight: the raw block tensor plus its
 /// column-interleaved packed RHS, built once at init. One comptime body
 /// serves every packed format — the four public names below are distinct
@@ -101,7 +55,7 @@ pub const WeightBf16 = fucina.Tensor(.{ .dtype = .bf16, .tags = .{ .out, .in } }
 fn PackedQuantWeight(comptime dtype: DType) type {
     return struct {
         value: QuantWeight(dtype),
-        packed_rhs: fucina.PackedRhs(dtype),
+        packed_rhs: PackedRhs(dtype),
         rhs_lifetime: RhsLifetime = .transient,
 
         const Self = @This();
@@ -164,10 +118,10 @@ pub const ResidentByteRegistry = struct {
     }
 
     pub fn deinit(self: *ResidentByteRegistry) void {
-        if (comptime fucina.internal.gpu.enabled) {
+        if (comptime gpu_impl.enabled) {
             var it = self.map.iterator();
             while (it.next()) |e| {
-                fucina.internal.gpu.freeResidentBytes(e.value_ptr.*);
+                gpu_impl.freeResidentBytes(e.value_ptr.*);
             }
         }
         self.map.deinit(self.allocator);
@@ -175,11 +129,11 @@ pub const ResidentByteRegistry = struct {
     }
 
     pub fn bytes(self: *ResidentByteRegistry, src: []const u8) []const u8 {
-        if (comptime !fucina.internal.gpu.enabled) return src;
+        if (comptime !gpu_impl.enabled) return src;
         const key = @intFromPtr(src.ptr);
         if (self.map.get(key)) |dev| return dev;
         self.map.ensureUnusedCapacity(self.allocator, 1) catch return src;
-        const dev = fucina.internal.gpu.allocResidentBytes(src.len) orelse return src;
+        const dev = gpu_impl.allocResidentBytes(src.len) orelse return src;
         @memcpy(dev, src);
         self.map.putAssumeCapacityNoClobber(key, dev);
         return dev;
@@ -187,10 +141,10 @@ pub const ResidentByteRegistry = struct {
 };
 
 pub fn QuantWeight(comptime dtype: DType) type {
-    return fucina.Tensor(.{ .dtype = dtype, .tags = .{ .out, .in } });
+    return Tensor(.{ .dtype = dtype, .tags = .{ .out, .in } });
 }
 
-const backend_quant = fucina.internal.backend_mod.quantized_matmul;
+const backend_quant = backend_mod.quantized_matmul;
 
 /// Fused multi-plane ternary linear for PTQTP-decorated weights: quantize
 /// the activation rows to Q8_K ONCE, then run every plane inside a SINGLE
@@ -211,7 +165,7 @@ fn linearSeqPtqtpFused(
     ctx: *ExecContext,
     input: anytype,
     comptime out_tag: Tag,
-) !?fucina.Tensor(.{ .seq, out_tag }) {
+) !?Tensor(.{ .seq, out_tag }) {
     if (input.requiresGrad()) return null;
     const x = input.asRawTensor().dataConstChecked() catch return null;
 
@@ -228,13 +182,13 @@ fn linearSeqPtqtpFused(
     // — the same accepted numerics stance as the q4_k/q6_k/q8_0 dense
     // offload. The seam's gates decide; any refusal falls through to the
     // CPU path wholesale.
-    if (comptime fucina.internal.gpu.enabled and fucina.internal.gpu.has_tq2_0_quant) {
+    if (comptime gpu_impl.enabled and gpu_impl.has_tq2_0_quant) {
         // Folded resident form: ONE dispatch, async return, no plane sum.
-        if (comptime fucina.internal.backend_mod.gpu_impl.has_tq2_0_folded_quant) {
+        if (comptime gpu_impl.has_tq2_0_folded_quant) {
             if (m >= 32 and weight.gpu_fold != null) {
                 const nb01 = blocks_per_row * @sizeOf(backend_quant.BlockTQ2_0Folded);
                 if (try ctx.foldedTernaryMatmulGpu(weight.gpu_fold.?, .stable_process, nb01, input.asRawTensor(), m, n, k)) |out_raw| {
-                    return try fucina.Tensor(.{ .seq, out_tag }).fromTensor(ctx, out_raw);
+                    return try Tensor(.{ .seq, out_tag }).fromTensor(ctx, out_raw);
                 }
             }
         }
@@ -242,7 +196,7 @@ fn linearSeqPtqtpFused(
             const nb01 = blocks_per_row * @sizeOf(backend_quant.BlockTQ2_0);
             const raw_input = input.asRawTensor();
             const dev_planes = [3]?[]const u8{ weight.gpu_planes[0], weight.gpu_planes[1], weight.gpu_planes[2] };
-            var first: ?fucina.internal.RawTensor = null;
+            var first: ?tensor_mod.Tensor = null;
             errdefer if (first) |*t| t.deinit();
             for (dev_planes) |maybe_dev| {
                 const dev = maybe_dev orelse continue;
@@ -261,7 +215,7 @@ fn linearSeqPtqtpFused(
             }
             if (first) |t| {
                 first = null;
-                return try fucina.Tensor(.{ .seq, out_tag }).fromTensor(ctx, t);
+                return try Tensor(.{ .seq, out_tag }).fromTensor(ctx, t);
             }
         }
     }
@@ -296,7 +250,7 @@ fn linearSeqPtqtpFused(
     }
     // The kernels tile straight into the result tensor; only the multi-plane
     // accumulate keeps a scratch.
-    var out_t = try fucina.Tensor(.{ .seq, out_tag }).empty(ctx, .{ m, n });
+    var out_t = try Tensor(.{ .seq, out_tag }).empty(ctx, .{ m, n });
     errdefer out_t.deinit();
     const out = try out_t.data();
     const tmp = try allocator.alloc(f32, if (plane_count > 1 and !px4_ready) m * n else 0);
@@ -361,12 +315,12 @@ fn linearSeqPtqtpFused(
     // (36.4 vs 14.4 fps; 1.7B chat 43 vs 30 tok/s). A profile's "main
     // thread waits in the barrier" is not evidence of waste: the team
     // finishes the columns faster than one core runs them.
-    if (work >= fucina.parallel.vector_matmul_work_threshold) {
+    if (work >= parallel.vector_matmul_work_threshold) {
         if (ctx.workPool()) |pool| {
-            const cpu_count = fucina.parallel.cpuThreadCount(fucina.parallel.vector_max_threads);
-            const task_count = @max(@as(usize, 1), @min(cpu_count, n / fucina.parallel.vector_column_chunk));
+            const cpu_count = parallel.cpuThreadCount(parallel.vector_max_threads);
+            const task_count = @max(@as(usize, 1), @min(cpu_count, n / parallel.vector_column_chunk));
             if (task_count > 1) {
-                var tasks: [fucina.parallel.vector_max_threads]Task = undefined;
+                var tasks: [parallel.vector_max_threads]Task = undefined;
                 for (0..task_count) |ti| {
                     tasks[ti] = base;
                     if (px4_ready) {
@@ -406,9 +360,9 @@ fn linearSeqFx4(
     ctx: *ExecContext,
     input: anytype,
     comptime out_tag: Tag,
-) !fucina.Tensor(.{ .seq, out_tag }) {
+) !Tensor(.{ .seq, out_tag }) {
     if (input.requiresGrad()) return Error.UnsupportedWeightType;
-    if (input.dim(.seq) == 0) return try fucina.Tensor(.{ .seq, out_tag }).empty(ctx, .{ 0, weight.n });
+    if (input.dim(.seq) == 0) return try Tensor(.{ .seq, out_tag }).empty(ctx, .{ 0, weight.n });
     const x = try input.asRawTensor().dataConstChecked();
 
     const n = weight.n;
@@ -417,12 +371,12 @@ fn linearSeqFx4(
     if (n == 0 or k == 0 or m * k != x.len) return Error.InvalidWeightShape;
     const blocks_per_row = k / 256;
 
-    if (comptime fucina.internal.gpu.enabled and fucina.internal.gpu.has_tq2_0_quant) {
-        if (comptime fucina.internal.backend_mod.gpu_impl.has_tq2_0_folded_quant) {
+    if (comptime gpu_impl.enabled and gpu_impl.has_tq2_0_quant) {
+        if (comptime gpu_impl.has_tq2_0_folded_quant) {
             if (m >= 32 and weight.gpu_fold != null) {
                 const nb01 = blocks_per_row * @sizeOf(backend_quant.BlockTQ2_0Folded);
                 if (try ctx.foldedTernaryMatmulGpu(weight.gpu_fold.?, .stable_process, nb01, input.asRawTensor(), m, n, k)) |out_raw| {
-                    return try fucina.Tensor(.{ .seq, out_tag }).fromTensor(ctx, out_raw);
+                    return try Tensor(.{ .seq, out_tag }).fromTensor(ctx, out_raw);
                 }
             }
         }
@@ -433,10 +387,10 @@ fn linearSeqFx4(
     // Prefill arm: dequantized weight panels through BLAS/AMX (the
     // backend's gate decides; decode and short bursts stay on the
     // mul-free ternary tile below).
-    if (comptime fucina.internal.backend_mod.active_kind == .native and fucina.internal.backend_mod.native_uses_blas) {
-        var out_blas = try fucina.Tensor(.{ .seq, out_tag }).empty(ctx, .{ m, n });
+    if (comptime backend_mod.active_kind == .native and backend_mod.native_uses_blas) {
+        var out_blas = try Tensor(.{ .seq, out_tag }).empty(ctx, .{ m, n });
         errdefer out_blas.deinit();
-        if (try fucina.internal.native_impl.matmulFoldedx4BlasWithConfig(
+        if (try backend_mod.native_impl.matmulFoldedx4BlasWithConfig(
             allocator,
             try out_blas.data(),
             x,
@@ -455,7 +409,7 @@ fn linearSeqFx4(
     for (0..m) |r| {
         try backend_quant.quantizeRowQ8_KInto(lhs[r * blocks_per_row ..][0..blocks_per_row], x[r * k ..][0..k]);
     }
-    var out_t = try fucina.Tensor(.{ .seq, out_tag }).empty(ctx, .{ m, n });
+    var out_t = try Tensor(.{ .seq, out_tag }).empty(ctx, .{ m, n });
     errdefer out_t.deinit();
     const out = try out_t.data();
 
@@ -478,12 +432,12 @@ fn linearSeqFx4(
     // the tied .ptqtp pfold path (results are bitwise for any partition).
     const work = m * n * k * 2;
     var tasks_run = false;
-    if (work >= fucina.parallel.vector_matmul_work_threshold) {
+    if (work >= parallel.vector_matmul_work_threshold) {
         if (ctx.workPool()) |pool| {
-            const cpu_count = fucina.parallel.cpuThreadCount(fucina.parallel.vector_max_threads);
-            const task_count = @max(@as(usize, 1), @min(cpu_count, n / fucina.parallel.vector_column_chunk));
+            const cpu_count = parallel.cpuThreadCount(parallel.vector_max_threads);
+            const task_count = @max(@as(usize, 1), @min(cpu_count, n / parallel.vector_column_chunk));
             if (task_count > 1) {
-                var tasks: [fucina.parallel.vector_max_threads]Task = undefined;
+                var tasks: [parallel.vector_max_threads]Task = undefined;
                 for (0..task_count) |ti| {
                     tasks[ti] = base;
                     // 4-column group units: the pack has no finer addressing.
@@ -519,7 +473,7 @@ pub const WeightPtqtp = struct {
     /// unreadable plane storage, or allocation failure at build time).
     px4: [3]?[]backend_quant.BlockTQ2_0x4 = .{ null, null, null },
     px4_allocator: ?Allocator = null,
-    /// GPU-resident copies of the plane blocks (`fucina.internal.gpu`
+    /// GPU-resident copies of the plane blocks (`gpu_impl`
     /// residency): stable device-shared bytes the Metal ternary
     /// dequant-in-kernel prefill dispatches against with zero per-call wrap
     /// cost. All-or-nothing like `px4`; null slots = CPU-only.
@@ -534,7 +488,7 @@ pub const WeightPtqtp = struct {
     /// `pfold` — the 4-bit pack folding both planes into one 9-level code,
     /// ONE dot pass (matmulTQ2_0FoldedX4RhsTile). K=3's 27 levels exceed a
     /// nibble, so tied K=3 serves through the multi-pass x4 path. Persisted
-    /// by the GGUF sidecars (`fucina.ptqtp.tie` — ptqtp_gguf.zig), so loaded
+    /// by the GGUF sidecars (`ptqtp.tie` — ptqtp_gguf.zig), so loaded
     /// tied K=2 decorations rebuild the fold and serve one-pass.
     tied: bool = false,
     pfold: ?[]backend_quant.BlockTQ2_0Foldedx4 = null,
@@ -550,11 +504,11 @@ pub const WeightPtqtp = struct {
     }
 
     fn buildGpuResidency(self: *WeightPtqtp) void {
-        const gpu = fucina.internal.gpu;
+        const gpu = gpu_impl;
         if (comptime !(gpu.enabled and gpu.has_quant_gemm and gpu.has_tq2_0_quant)) return;
         // Tied K=2 prefers the single folded resident buffer; falls through
         // to per-plane residency on any failure.
-        if (comptime fucina.internal.backend_mod.gpu_impl.has_tq2_0_folded_quant) {
+        if (comptime gpu_impl.has_tq2_0_folded_quant) {
             if (self.tied and self.p2 != null and self.p3 == null) fold: {
                 const n = self.p1.dim(.out);
                 const k = self.p1.dim(.in);
@@ -595,7 +549,7 @@ pub const WeightPtqtp = struct {
     }
 
     fn freeGpuResidency(self: *WeightPtqtp) void {
-        const gpu = fucina.internal.gpu;
+        const gpu = gpu_impl;
         if (comptime !gpu.enabled) return;
         if (self.gpu_fold) |dev| gpu.freeResidentBytes(dev);
         self.gpu_fold = null;
@@ -698,9 +652,9 @@ pub const WeightPtqtpFx4 = struct {
     }
 
     pub fn buildGpuResidency(self: *WeightPtqtpFx4, allocator: Allocator) void {
-        const gpu = fucina.internal.gpu;
+        const gpu = gpu_impl;
         if (comptime !(gpu.enabled and gpu.has_quant_gemm and gpu.has_tq2_0_quant)) return;
-        if (comptime !fucina.internal.backend_mod.gpu_impl.has_tq2_0_folded_quant) return;
+        if (comptime !gpu_impl.has_tq2_0_folded_quant) return;
         if (self.gpu_fold != null) return;
         const rows = backend_quant.packMatmulRhsTQ2_0FoldedRowsFromX4(allocator, self.pack, self.n, self.k / 256) catch return;
         defer allocator.free(rows);
@@ -733,7 +687,7 @@ pub const WeightPtqtpFx4 = struct {
     }
 
     pub fn deinit(self: *WeightPtqtpFx4) void {
-        const gpu = fucina.internal.gpu;
+        const gpu = gpu_impl;
         if (comptime gpu.enabled) {
             if (self.gpu_fold) |dev| gpu.freeResidentBytes(dev);
             self.gpu_fold = null;
@@ -774,7 +728,7 @@ pub const QuantByteStack = struct {
 
     pub fn deinit(self: *QuantByteStack, allocator: Allocator) void {
         if (self.device_owned) {
-            if (comptime fucina.internal.gpu.enabled) fucina.internal.gpu.freeResidentBytes(self.data);
+            if (comptime gpu_impl.enabled) gpu_impl.freeResidentBytes(self.data);
         } else {
             allocator.free(self.data);
         }
@@ -793,7 +747,7 @@ pub const QuantByteStack = struct {
 fn dtypeHasDenseQuantGpuKernel(comptime dtype: DType) bool {
     return switch (comptime dtype) {
         .q4_k, .q6_k, .q8_0 => true,
-        .q5_k => fucina.internal.gpu.has_q5_k_quant,
+        .q5_k => gpu_impl.has_q5_k_quant,
         else => false,
     };
 }
@@ -823,8 +777,8 @@ pub fn makeQuantByteStack(
     _ = try std.math.mul(usize, first.out, parts.len);
     var device_owned = false;
     const data: []u8 = blk: {
-        if (options.prefer_device and comptime fucina.internal.gpu.enabled and dtypeHasDenseQuantGpuKernel(dtype)) {
-            if (fucina.internal.gpu.allocResidentBytes(total_len)) |dev| {
+        if (options.prefer_device and comptime gpu_impl.enabled and dtypeHasDenseQuantGpuKernel(dtype)) {
+            if (gpu_impl.allocResidentBytes(total_len)) |dev| {
                 device_owned = true;
                 break :blk dev;
             }
@@ -1065,7 +1019,7 @@ pub const LinearWeight = union(enum) {
             // Both PTQTP forms are already the decoration — re-decorating
             // would double-quantize.
             .ptqtp, .tq2_0_fx4 => false,
-            else => self.inDim() % fucina.ptqtp.block_len == 0,
+            else => self.inDim() % ptqtp.block_len == 0,
         };
     }
 
@@ -1077,7 +1031,7 @@ pub const LinearWeight = union(enum) {
     /// planes and the original storage is dropped (the "purge"): the weight
     /// becomes ~2 x 2.0625 bits. Returns the solver diagnostics. Requires
     /// `ptqtpEligible`; `Error.UnsupportedWeightType` otherwise.
-    pub fn toPtqtp(self: *LinearWeight, ctx: *ExecContext, options: fucina.ptqtp.Options) !fucina.ptqtp.MatrixStats {
+    pub fn toPtqtp(self: *LinearWeight, ctx: *ExecContext, options: ptqtp.Options) !ptqtp.MatrixStats {
         if (!self.ptqtpEligible()) return Error.UnsupportedWeightType;
         const rows = self.outDim();
         const cols = self.inDim();
@@ -1098,7 +1052,7 @@ pub const LinearWeight = union(enum) {
             @memcpy(values[row0 * cols ..][0 .. chunk * cols], src);
         }
 
-        var pair = try fucina.ptqtp.quantizeMatrix(ctx, values, rows, cols, options);
+        var pair = try ptqtp.quantizeMatrix(ctx, values, rows, cols, options);
         defer pair.deinit(ctx.allocator);
         var p1 = try QuantWeight(.tq2_0).fromBlocks(ctx, .{ rows, cols }, pair.plane1);
         errdefer p1.deinit();
@@ -1117,7 +1071,7 @@ pub const LinearWeight = union(enum) {
         return stats;
     }
 
-    pub fn linearSeq(self: *const LinearWeight, ctx: *ExecContext, input: anytype, comptime in_tag: Tag, comptime out_tag: Tag) !fucina.Tensor(.{ .seq, out_tag }) {
+    pub fn linearSeq(self: *const LinearWeight, ctx: *ExecContext, input: anytype, comptime in_tag: Tag, comptime out_tag: Tag) !Tensor(.{ .seq, out_tag }) {
         @setEvalBranchQuota(20_000);
         return switch (self.*) {
             .q4_k => |*weight| try linearSeqQ4_K(weight, ctx, input, in_tag, out_tag),
@@ -1170,7 +1124,7 @@ pub const LinearWeight = union(enum) {
     }
 
     pub fn supportsNormedFusion(self: *const LinearWeight, m: usize) bool {
-        if (comptime fucina.internal.gpu.enabled) return false;
+        if (comptime gpu_impl.enabled) return false;
         if (!norm_quant_fused.enabled()) return false;
         // Prefill-only: at decode shapes (m < 4) the fused route pays pooled
         // scratch acquisitions plus a padded 4-row-group quantize for one
@@ -1180,7 +1134,7 @@ pub const LinearWeight = union(enum) {
         // packed path anyway.)
         if (m < 4) return false;
         return switch (self.*) {
-            .q4_k => comptime !fucina.quant.supports_q4_k_mmla,
+            .q4_k => comptime !backend_mod.supports_q4_k_mmla,
             .q8_0 => true,
             .q5_k => true,
             .q6_k => true,
@@ -1203,11 +1157,11 @@ pub const LinearWeight = union(enum) {
         eps: f32,
         comptime in_tag: Tag,
         comptime out_tag: Tag,
-    ) !fucina.Tensor(.{ .seq, out_tag }) {
+    ) !Tensor(.{ .seq, out_tag }) {
         @setEvalBranchQuota(20_000);
-        if (comptime !fucina.internal.gpu.enabled) {
+        if (comptime !gpu_impl.enabled) {
             if (!x.requiresGrad() and x.dim(.seq) >= 4 and norm_quant_fused.enabled()) switch (self.*) {
-                .q4_k => |*weight| if (comptime !fucina.quant.supports_q4_k_mmla) {
+                .q4_k => |*weight| if (comptime !backend_mod.supports_q4_k_mmla) {
                     return x.rmsNormMulDotPacked(ctx, norm_weight, eps, &weight.packed_rhs, in_tag, out_tag);
                 },
                 .q8_0 => |*weight| return x.rmsNormMulDotPacked(ctx, norm_weight, eps, &weight.packed_rhs, in_tag, out_tag),
@@ -1221,7 +1175,7 @@ pub const LinearWeight = union(enum) {
         return self.linearSeq(ctx, &normed, in_tag, out_tag);
     }
 
-    pub fn getRowsAs(self: *const LinearWeight, ctx: *ExecContext, token_ids: []const usize, comptime out_tag: Tag) !fucina.Tensor(.{ .seq, out_tag }) {
+    pub fn getRowsAs(self: *const LinearWeight, ctx: *ExecContext, token_ids: []const usize, comptime out_tag: Tag) !Tensor(.{ .seq, out_tag }) {
         @setEvalBranchQuota(20_000);
         return switch (self.*) {
             .f32 => |*table| blk: {
@@ -1278,7 +1232,7 @@ pub const LinearWeight = union(enum) {
                 break :blk try acc.withTags(ctx, .{ .seq, out_tag });
             },
             .tq2_0_fx4 => |*table| blk: {
-                var out_t = try fucina.Tensor(.{ .seq, out_tag }).empty(ctx, .{ token_ids.len, table.k });
+                var out_t = try Tensor(.{ .seq, out_tag }).empty(ctx, .{ token_ids.len, table.k });
                 errdefer out_t.deinit();
                 const dst = try out_t.data();
                 for (token_ids, 0..) |row, i| table.decodeRow(row, dst[i * table.k ..][0..table.k]);
@@ -1317,7 +1271,7 @@ pub const LookupWeight = union(enum) {
     /// and the dtype decodes per row; copy otherwise. CPU builds only: GPU
     /// builds keep the resident load path and its device placement policy.
     pub fn load(ctx: *ExecContext, file: *const gguf.File, info: *const gguf.TensorInfo, expected_rows: usize, expected_cols: usize) !LookupWeight {
-        if (comptime !fucina.internal.gpu.enabled) {
+        if (comptime !gpu_impl.enabled) {
             if (file.is_mmap and !file.isSplit()) {
                 const shape = try requireMatrixShape(info, expected_rows, expected_cols);
                 if (gguf.RowTable.init(ctx.allocator, info)) |table| {
@@ -1347,12 +1301,12 @@ pub const LookupWeight = union(enum) {
     /// straight into the result tensor — the same shape the resident
     /// quantized gather has (`getRowsTensorInto` decodes into its output),
     /// so neither arm pays a scratch pass.
-    pub fn getRowsAs(self: *const LookupWeight, ctx: *ExecContext, token_ids: []const usize, comptime out_tag: Tag) !fucina.Tensor(.{ .seq, out_tag }) {
+    pub fn getRowsAs(self: *const LookupWeight, ctx: *ExecContext, token_ids: []const usize, comptime out_tag: Tag) !Tensor(.{ .seq, out_tag }) {
         switch (self.*) {
             .resident => |*w| return w.getRowsAs(ctx, token_ids, out_tag),
             .mapped => |*m| {
                 const width = m.table.width;
-                var out = try fucina.Tensor(.{ .seq, out_tag }).empty(ctx, .{ token_ids.len, width });
+                var out = try Tensor(.{ .seq, out_tag }).empty(ctx, .{ token_ids.len, width });
                 errdefer out.deinit();
                 const out_data = try out.data();
                 for (token_ids, 0..) |id, i| {
@@ -1382,7 +1336,7 @@ pub fn loadMoeRhs(
     expected_out_dim: usize,
     expected_n_expert: usize,
     borrow: bool,
-) !fucina.MoeRhs {
+) !MoeRhs {
     if (info.n_dims != 3) return Error.InvalidWeightShape;
     const in_dim = info.dims[0];
     const out_dim = info.dims[1];
@@ -1391,16 +1345,16 @@ pub fn loadMoeRhs(
     const rows = try std.math.mul(usize, n_expert, out_dim);
 
     return switch (info.ggml_type) {
-        .q2_k => .{ .q2_k = try copyOrBorrowMoeRhs(fucina.quant.QuantizedMatmulRhsQ2_K, fucina.quant.BlockQ2_K, ctx, info, rows, in_dim, borrow) },
-        .q3_k => .{ .q3_k = try copyOrBorrowMoeRhs(fucina.quant.QuantizedMatmulRhsQ3_K, fucina.quant.BlockQ3_K, ctx, info, rows, in_dim, borrow) },
-        .q4_k => .{ .q4_k = try copyOrBorrowMoeRhs(fucina.quant.QuantizedMatmulRhsQ4_K, fucina.quant.BlockQ4_K, ctx, info, rows, in_dim, borrow) },
-        .q5_k => .{ .q5_k = try copyOrBorrowMoeRhs(fucina.quant.QuantizedMatmulRhsQ5_K, fucina.quant.BlockQ5_K, ctx, info, rows, in_dim, borrow) },
-        .q6_k => .{ .q6_k = try copyOrBorrowMoeRhs(fucina.quant.QuantizedMatmulRhsQ6_K, fucina.quant.BlockQ6_K, ctx, info, rows, in_dim, borrow) },
+        .q2_k => .{ .q2_k = try copyOrBorrowMoeRhs(backend_mod.QuantizedMatmulRhsQ2_K, dtype_mod.BlockQ2_K, ctx, info, rows, in_dim, borrow) },
+        .q3_k => .{ .q3_k = try copyOrBorrowMoeRhs(backend_mod.QuantizedMatmulRhsQ3_K, dtype_mod.BlockQ3_K, ctx, info, rows, in_dim, borrow) },
+        .q4_k => .{ .q4_k = try copyOrBorrowMoeRhs(backend_mod.QuantizedMatmulRhsQ4_K, dtype_mod.BlockQ4_K, ctx, info, rows, in_dim, borrow) },
+        .q5_k => .{ .q5_k = try copyOrBorrowMoeRhs(backend_mod.QuantizedMatmulRhsQ5_K, dtype_mod.BlockQ5_K, ctx, info, rows, in_dim, borrow) },
+        .q6_k => .{ .q6_k = try copyOrBorrowMoeRhs(backend_mod.QuantizedMatmulRhsQ6_K, dtype_mod.BlockQ6_K, ctx, info, rows, in_dim, borrow) },
         // q8_0: what llama.cpp falls back to when an expert dim is not a
         // 256 multiple (deepseek2). Nested rows container, so it gets its
         // own copy-or-borrow.
         .q8_0 => blk: {
-            const src = try blockSlice(fucina.quant.BlockQ8_0, info.data);
+            const src = try blockSlice(dtype_mod.BlockQ8_0, info.data);
             if (rows == 0 or src.len % rows != 0) return Error.InvalidWeightShape;
             const bpc = src.len / rows;
             if (bpc * 32 != in_dim) return Error.InvalidWeightShape;
@@ -1408,7 +1362,7 @@ pub fn loadMoeRhs(
                 break :blk .{ .q8_0 = .{ .rows = .{ .allocator = null, .blocks = src, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
             }
             gguf.prefetch(info.data);
-            const owned = try ctx.allocator.alloc(fucina.quant.BlockQ8_0, src.len);
+            const owned = try ctx.allocator.alloc(dtype_mod.BlockQ8_0, src.len);
             errdefer ctx.allocator.free(owned);
             @memcpy(owned, src);
             break :blk .{ .q8_0 = .{ .rows = .{ .allocator = ctx.allocator, .blocks = owned, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
@@ -1466,26 +1420,26 @@ pub fn loadMoeRhsPtqtp(
     expected_n_expert: usize,
     borrow: bool,
     tied: bool,
-) !fucina.MoeRhs {
+) !MoeRhs {
     if (plane_infos.len == 0 or plane_infos.len > 3) return Error.InvalidWeightShape;
     const rows = try std.math.mul(usize, expected_n_expert, expected_out_dim);
-    const bpc = try fucina.internal.backend_mod.quantized_matmul.qkBlockCount(expected_in_dim);
+    const bpc = try backend_mod.quantized_matmul.qkBlockCount(expected_in_dim);
     const blocks_per_plane = try std.math.mul(usize, rows, bpc);
 
-    var planes: [3][]const fucina.quant.BlockTQ2_0 = .{ &.{}, &.{}, &.{} };
+    var planes: [3][]const dtype_mod.BlockTQ2_0 = .{ &.{}, &.{}, &.{} };
     var owned_count: usize = 0;
     errdefer for (planes[0..owned_count]) |plane| ctx.allocator.free(@constCast(plane));
     for (plane_infos, 0..) |info, p| {
         if (info.ggml_type != .tq2_0) return Error.UnsupportedWeightType;
         if (info.n_dims != 3) return Error.InvalidWeightShape;
         if (info.dims[0] != expected_in_dim or info.dims[1] != expected_out_dim or info.dims[2] != expected_n_expert) return Error.InvalidWeightShape;
-        const src = try blockSlice(fucina.quant.BlockTQ2_0, info.data);
+        const src = try blockSlice(dtype_mod.BlockTQ2_0, info.data);
         if (src.len != blocks_per_plane) return Error.InvalidWeightShape;
         if (borrow) {
             planes[p] = src;
         } else {
             gguf.prefetch(info.data);
-            const owned = try ctx.allocator.alloc(fucina.quant.BlockTQ2_0, src.len);
+            const owned = try ctx.allocator.alloc(dtype_mod.BlockTQ2_0, src.len);
             @memcpy(owned, src);
             planes[p] = owned;
             owned_count += 1;
@@ -1720,7 +1674,7 @@ pub const MoeStreamCli = struct {
 /// Cache-aware expert selection when `gate` streams from an ExpertStore
 /// that opted into cache routing (`MoeStreamOptions.cache_route`); false =
 /// the caller keeps its plain top-k.
-pub fn cacheRouteSel(gate: *const fucina.MoeRhs, choice: []const f32, sel: []usize) bool {
+pub fn cacheRouteSel(gate: *const MoeRhs, choice: []const f32, sel: []usize) bool {
     return switch (gate.*) {
         .streamed => |*sw| sw.store.cacheRouteTopK(sw.layer, choice, sel),
         else => false,
@@ -1732,7 +1686,7 @@ pub fn cacheRouteSel(gate: *const fucina.MoeRhs, choice: []const f32, sel: []usi
 /// hand the selection to the store as a prefetch hint for `layer_i`.
 /// Callers own the family-specific part (finding the next layer's MoE arm
 /// and building `nrm` with that layer's FFN norm).
-pub fn pilotHintTopK(ctx: *ExecContext, nrm: *const fucina.Tensor(.{ .seq, .embed }), router: *const LinearWeight, top_k: usize, store: *fucina.ExpertStore, layer_i: usize) !void {
+pub fn pilotHintTopK(ctx: *ExecContext, nrm: *const Tensor(.{ .seq, .embed }), router: *const LinearWeight, top_k: usize, store: *ExpertStore, layer_i: usize) !void {
     var logits = try router.linearSeq(ctx, nrm, .embed, .expert);
     defer logits.deinit();
     const allocator = ctx.allocator;
@@ -1749,7 +1703,7 @@ pub fn pilotHintTopK(ctx: *ExecContext, nrm: *const fucina.Tensor(.{ .seq, .embe
 /// paths (single files pass through as one entry) and open the ExpertStore
 /// over them. The caller registers layers (`loadMoeRhsStreamed`) and then
 /// calls `ExpertStore.finalize`.
-pub fn createExpertStore(allocator: Allocator, options: MoeStreamOptions, n_layers: usize) !*fucina.ExpertStore {
+pub fn createExpertStore(allocator: Allocator, options: MoeStreamOptions, n_layers: usize) !*ExpertStore {
     const split_paths = try gguf.File.splitPartPaths(allocator, options.gguf_path);
     defer if (split_paths) |paths| {
         for (paths) |part| allocator.free(part);
@@ -1765,7 +1719,7 @@ pub fn createExpertStore(allocator: Allocator, options: MoeStreamOptions, n_laye
     if (options.mirror_weights) |ws| {
         if (ws.len != options.mirror_paths.len) return error.MirrorWeightsMismatch;
     }
-    const store = try fucina.ExpertStore.create(allocator, store_paths, n_layers, .{
+    const store = try ExpertStore.create(allocator, store_paths, n_layers, .{
         .cache_bytes = options.cache_bytes,
         .cache_slots_per_layer = options.cache_slots_per_layer,
         .readahead = options.readahead,
@@ -1804,7 +1758,7 @@ pub fn createExpertStore(allocator: Allocator, options: MoeStreamOptions, n_laye
 /// Exit-time streamed-tier report shared by the MoE runners: print the
 /// stats line(s) and persist the usage histogram (the learning cache)
 /// unless `learn` is false. Failures lose only the report/learning.
-pub fn reportAndSaveMoeStream(store: *fucina.ExpertStore, learn: bool, writer: anytype) void {
+pub fn reportAndSaveMoeStream(store: *ExpertStore, learn: bool, writer: anytype) void {
     if (learn) store.saveUsage() catch {};
     const s = store.stats;
     writer.print(
@@ -1857,13 +1811,13 @@ pub fn reportAndSaveMoeStream(store: *fucina.ExpertStore, learn: bool, writer: a
 /// borrowing them. Nothing of the expert stacks is read here — only the
 /// geometry is validated, exactly as `loadMoeRhs` would.
 pub const StreamedMoeFfnRhs = struct {
-    gate: fucina.MoeRhs,
-    up: fucina.MoeRhs,
-    down: fucina.MoeRhs,
+    gate: MoeRhs,
+    up: MoeRhs,
+    down: MoeRhs,
 };
 
 pub fn loadMoeRhsStreamed(
-    store: *fucina.ExpertStore,
+    store: *ExpertStore,
     file: *const gguf.File,
     layer_i: usize,
     gate_info: *const gguf.TensorInfo,
@@ -1885,9 +1839,9 @@ pub fn loadMoeRhsStreamed(
 /// `streamedProjSpecPtqtp` — the specs may mix plain and PTQTP
 /// projections) and hand out the streamed arms.
 pub fn registerStreamedMoeLayer(
-    store: *fucina.ExpertStore,
+    store: *ExpertStore,
     layer_i: usize,
-    specs: [3]fucina.expert_store.ProjSpec,
+    specs: [3]expert_store.ProjSpec,
     expected_n_expert: usize,
 ) !StreamedMoeFfnRhs {
     try store.addLayer(layer_i, specs, expected_n_expert);
@@ -1904,10 +1858,10 @@ pub fn streamedProjSpec(
     expected_in_dim: usize,
     expected_out_dim: usize,
     expected_n_expert: usize,
-) !fucina.expert_store.ProjSpec {
+) !expert_store.ProjSpec {
     if (info.n_dims != 3) return Error.InvalidWeightShape;
     if (info.dims[0] != expected_in_dim or info.dims[1] != expected_out_dim or info.dims[2] != expected_n_expert) return Error.InvalidWeightShape;
-    const quant: fucina.expert_store.StreamedQuant = switch (info.ggml_type) {
+    const quant: expert_store.StreamedQuant = switch (info.ggml_type) {
         .q4_k => .q4_k,
         .q5_k => .q5_k,
         .q6_k => .q6_k,
@@ -1946,7 +1900,7 @@ pub fn streamedProjSpecPtqtp(
     expected_out_dim: usize,
     expected_n_expert: usize,
     tied: bool,
-) !fucina.expert_store.ProjSpec {
+) !expert_store.ProjSpec {
     if (plane_infos.len == 0 or plane_infos.len > 3) return Error.InvalidWeightShape;
     var offsets: [3]u64 = .{ 0, 0, 0 };
     for (plane_infos, 0..) |info, p| {
@@ -1976,17 +1930,17 @@ pub fn streamedProjSpecPtqtp(
 /// kernels and decode/prefill split underneath.
 pub fn moeSwiGluFfnSeq(
     ctx: *ExecContext,
-    input: *const fucina.Tensor(.{ .seq, .embed }),
-    gate: *const fucina.MoeRhs,
-    up: *const fucina.MoeRhs,
-    down: *const fucina.MoeRhs,
+    input: *const Tensor(.{ .seq, .embed }),
+    gate: *const MoeRhs,
+    up: *const MoeRhs,
+    down: *const MoeRhs,
     selected: []const usize,
     routing_weights: []const f32,
     top_k: usize,
     out_pe: usize,
     io: ?std.Io,
-    profile: ?*fucina.MoeBatchProfile,
-) !fucina.Tensor(.{ .seq, .embed }) {
+    profile: ?*MoeBatchProfile,
+) !Tensor(.{ .seq, .embed }) {
     return moeGatedFfnSeq(ctx, input, gate, up, down, selected, routing_weights, top_k, out_pe, .swiglu, io, profile);
 }
 
@@ -1994,18 +1948,18 @@ pub fn moeSwiGluFfnSeq(
 /// (deepseek4 routes through the clamped SwiGLU).
 pub fn moeGatedFfnSeq(
     ctx: *ExecContext,
-    input: *const fucina.Tensor(.{ .seq, .embed }),
-    gate: *const fucina.MoeRhs,
-    up: *const fucina.MoeRhs,
-    down: *const fucina.MoeRhs,
+    input: *const Tensor(.{ .seq, .embed }),
+    gate: *const MoeRhs,
+    up: *const MoeRhs,
+    down: *const MoeRhs,
     selected: []const usize,
     routing_weights: []const f32,
     top_k: usize,
     out_pe: usize,
-    act: fucina.GatedOp,
+    act: GatedOp,
     io: ?std.Io,
-    profile: ?*fucina.MoeBatchProfile,
-) !fucina.Tensor(.{ .seq, .embed }) {
+    profile: ?*MoeBatchProfile,
+) !Tensor(.{ .seq, .embed }) {
     if (input.requiresGrad()) return Error.GradUnsupported;
     const raw_input = input.asRawTensor();
     var raw = if (input.dim(.seq) == 1)
@@ -2036,7 +1990,7 @@ pub fn moeGatedFfnSeq(
             profile,
         );
     errdefer raw.deinit();
-    return fucina.Tensor(.{ .seq, .embed }).fromTensor(ctx, raw);
+    return Tensor(.{ .seq, .embed }).fromTensor(ctx, raw);
 }
 
 /// Copy a stacked-expert tensor's raw K-quant blocks into a compact matmul RHS.
@@ -2076,11 +2030,11 @@ fn copyOrBorrowMoeRhsRows(
     borrow: bool,
 ) !backend_quant.QuantizedMatmulRhsRowsFor(dtype) {
     const Block = switch (dtype) {
-        .iq2_xxs => fucina.quant.BlockIQ2_XXS,
-        .iq2_s => fucina.quant.BlockIQ2_S,
-        .iq4_xs => fucina.quant.BlockIQ4_XS,
-        .iq3_xxs => fucina.quant.BlockIQ3_XXS,
-        .tq2_0 => fucina.quant.BlockTQ2_0,
+        .iq2_xxs => dtype_mod.BlockIQ2_XXS,
+        .iq2_s => dtype_mod.BlockIQ2_S,
+        .iq4_xs => dtype_mod.BlockIQ4_XS,
+        .iq3_xxs => dtype_mod.BlockIQ3_XXS,
+        .tq2_0 => dtype_mod.BlockTQ2_0,
         else => @compileError("copyOrBorrowMoeRhsRows: no nested-rows expert container for this dtype"),
     };
     const src = try blockSlice(Block, info.data);
@@ -2125,10 +2079,10 @@ pub fn hostMatrix(allocator: Allocator, file: *const gguf.File, tensor_name: []c
     return out;
 }
 
-pub fn loadVector(ctx: *ExecContext, info: *const gguf.TensorInfo, expected_len: usize, comptime tag: Tag) !fucina.Tensor(.{tag}) {
+pub fn loadVector(ctx: *ExecContext, info: *const gguf.TensorInfo, expected_len: usize, comptime tag: Tag) !Tensor(.{tag}) {
     if (info.n_dims != 1 or info.dims[0] != expected_len) return Error.InvalidWeightShape;
 
-    var v = try fucina.Tensor(.{tag}).empty(ctx, .{expected_len});
+    var v = try Tensor(.{tag}).empty(ctx, .{expected_len});
     errdefer v.deinit();
     try fillF32(try v.data(), info);
     return v;
@@ -2149,9 +2103,9 @@ pub fn linearSeqBorrowedF16(
     shape: [2]usize,
     comptime in_tag: Tag,
     comptime out_tag: Tag,
-) !fucina.Tensor(.{ .seq, out_tag }) {
+) !Tensor(.{ .seq, out_tag }) {
     const values = try f16Slice(bytes, try std.math.mul(usize, shape[0], shape[1]));
-    var rhs = try fucina.Tensor(.{ .dtype = .f16, .tags = .{ out_tag, in_tag } }).fromBorrowedConstSlice(ctx, shape, values);
+    var rhs = try Tensor(.{ .dtype = .f16, .tags = .{ out_tag, in_tag } }).fromBorrowedConstSlice(ctx, shape, values);
     defer rhs.deinit();
     return input.dot(ctx, &rhs, in_tag);
 }
@@ -2256,7 +2210,7 @@ pub fn linearSeqBorrowedQuantized(
     options: BorrowedQuantLinearOptions,
     comptime in_tag: Tag,
     comptime out_tag: Tag,
-) !fucina.Tensor(.{ .seq, out_tag }) {
+) !Tensor(.{ .seq, out_tag }) {
     comptime switch (dtype) {
         .q8_0, .q4_k, .q5_k, .q6_k => {},
         else => @compileError("borrowed quantized linear supports q8_0/q4_k/q5_k/q6_k"),
@@ -2270,7 +2224,7 @@ pub fn linearSeqBorrowedQuantized(
         .rhs_lifetime = options.rhs_lifetime,
     });
     errdefer value.deinit();
-    return try fucina.Tensor(.{ .seq, out_tag }).fromTensor(ctx, value);
+    return try Tensor(.{ .seq, out_tag }).fromTensor(ctx, value);
 }
 
 /// Try the dense quantized GPU matmul: `out = in · dequant(W)ᵀ` over the raw
@@ -2285,9 +2239,9 @@ fn denseQuantGpuTry(
     input: anytype,
     comptime in_tag: Tag,
     comptime out_tag: Tag,
-) !?fucina.Tensor(.{ .seq, out_tag }) {
-    if (comptime !fucina.internal.gpu.enabled) return null;
-    if (comptime dtype == .q5_k and !fucina.internal.gpu.has_q5_k_quant) return null;
+) !?Tensor(.{ .seq, out_tag }) {
+    if (comptime !gpu_impl.enabled) return null;
+    if (comptime dtype == .q5_k and !gpu_impl.has_q5_k_quant) return null;
     if (input.requiresGrad()) return null;
     const m = input.dim(.seq);
     const k = input.dim(in_tag);
@@ -2299,7 +2253,7 @@ fn denseQuantGpuTry(
     const nb01 = std.math.divExact(usize, wbytes.len, n) catch return null;
     var out = (try ctx.denseQuantMatmulGpu(dtype, wbytes, weight.rhs_lifetime, nb01, input.asRawTensor(), m, n, k)) orelse return null;
     errdefer out.deinit();
-    return try fucina.Tensor(.{ .seq, out_tag }).fromTensor(ctx, out);
+    return try Tensor(.{ .seq, out_tag }).fromTensor(ctx, out);
 }
 
 pub fn linearSeqQ8_0(
@@ -2308,7 +2262,7 @@ pub fn linearSeqQ8_0(
     input: anytype,
     comptime in_tag: Tag,
     comptime out_tag: Tag,
-) !fucina.Tensor(.{ .seq, out_tag }) {
+) !Tensor(.{ .seq, out_tag }) {
     if (try denseQuantGpuTry(.q8_0, weight, ctx, input, in_tag, out_tag)) |r| return r;
     return input.dotPacked(ctx, &weight.packed_rhs, in_tag, out_tag);
 }
@@ -2324,7 +2278,7 @@ pub fn linearSeqQ8_0(
 /// and wins where bandwidth is the limit: default ON. Runtime overrides:
 /// FUCINA_Q4K_DECODE_COMPACT=1 forces on, FUCINA_NO_Q4K_DECODE_COMPACT=1
 /// forces off (the A/B and emergency-revert switches). Read once, cached.
-const q4k_decode_compact = fucina.tuning.Switch(.{
+const q4k_decode_compact = tuning.Switch(.{
     .on = "FUCINA_Q4K_DECODE_COMPACT",
     .off = "FUCINA_NO_Q4K_DECODE_COMPACT",
     .default = true,
@@ -2336,7 +2290,7 @@ pub fn linearSeqQ4_K(
     input: anytype,
     comptime in_tag: Tag,
     comptime out_tag: Tag,
-) !fucina.Tensor(.{ .seq, out_tag }) {
+) !Tensor(.{ .seq, out_tag }) {
     if (try denseQuantGpuTry(.q4_k, weight, ctx, input, in_tag, out_tag)) |r| return r;
     // Decode shapes: contract against the resident GGUF-native compact blocks
     // (`weight.value`) — bitwise-equal outputs, ~1.92x fewer weight bytes
@@ -2361,13 +2315,13 @@ pub fn linearSeqQ4_K(
 /// ON. Runtime overrides: FUCINA_Q5K_DECODE_COMPACT=1 forces on,
 /// FUCINA_NO_Q5K_DECODE_COMPACT=1 forces off (the A/B and emergency-revert
 /// switches, winograd-style). Read once, cached.
-const norm_quant_fused = fucina.tuning.Switch(.{
+const norm_quant_fused = tuning.Switch(.{
     .on = "FUCINA_NORM_QUANT_FUSED",
     .off = "FUCINA_NO_NORM_QUANT_FUSED",
     .default = true,
 });
 
-const q5k_decode_compact = fucina.tuning.Switch(.{
+const q5k_decode_compact = tuning.Switch(.{
     .on = "FUCINA_Q5K_DECODE_COMPACT",
     .off = "FUCINA_NO_Q5K_DECODE_COMPACT",
     .default = true,
@@ -2387,7 +2341,7 @@ pub fn linearSeqQ5_K(
     input: anytype,
     comptime in_tag: Tag,
     comptime out_tag: Tag,
-) !fucina.Tensor(.{ .seq, out_tag }) {
+) !Tensor(.{ .seq, out_tag }) {
     if (try denseQuantGpuTry(.q5_k, weight, ctx, input, in_tag, out_tag)) |r| return r;
     // Decode shapes: contract against the resident GGUF-native compact blocks
     // (`weight.value`) through the public quantized-RHS `dot` (exec's
@@ -2414,7 +2368,7 @@ pub fn linearSeqQ5_K(
 /// block order; proven by the cross-layout test in q6_k_tests.zig). Default
 /// ON. Runtime overrides: FUCINA_Q6K_DECODE_COMPACT=1 forces on,
 /// FUCINA_NO_Q6K_DECODE_COMPACT=1 forces off. Read once, cached.
-const q6k_decode_compact = fucina.tuning.Switch(.{
+const q6k_decode_compact = tuning.Switch(.{
     .on = "FUCINA_Q6K_DECODE_COMPACT",
     .off = "FUCINA_NO_Q6K_DECODE_COMPACT",
     .default = true,
@@ -2432,7 +2386,7 @@ pub fn linearSeqQ6_K(
     input: anytype,
     comptime in_tag: Tag,
     comptime out_tag: Tag,
-) !fucina.Tensor(.{ .seq, out_tag }) {
+) !Tensor(.{ .seq, out_tag }) {
     if (try denseQuantGpuTry(.q6_k, weight, ctx, input, in_tag, out_tag)) |r| return r;
     // Decode shapes: compact GGUF-native blocks instead of the byte-expanded
     // packed layout — see the Q5_K gate above; identical structure here. The
@@ -2447,7 +2401,7 @@ pub fn linearSeqQ6_K(
 }
 
 fn restoreGpuResidencyAfterDeclinedFusion(ctx: *ExecContext, parts: []const *LinearWeight) !void {
-    if (comptime !fucina.internal.gpu.enabled) return;
+    if (comptime !gpu_impl.enabled) return;
     for (parts) |part| switch (part.*) {
         .f32 => |*value| _ = try makeGpuResidentDenseWeight(.f32, WeightF32, ctx, value),
         .f16 => |*value| _ = try makeGpuResidentDenseWeight(.f16, WeightF16, ctx, value),
@@ -2599,7 +2553,7 @@ pub const PtqtpReport = struct {
 pub fn decoratePtqtpInto(
     weight: *LinearWeight,
     ctx: *ExecContext,
-    options: fucina.ptqtp.Options,
+    options: ptqtp.Options,
     report: *PtqtpReport,
 ) !void {
     if (!weight.ptqtpEligible()) {
@@ -2639,9 +2593,9 @@ fn loadDenseF16Weight(ctx: *ExecContext, info: *const gguf.TensorInfo, shape: [2
     // f16 GEMM offload uses it with zero per-call transfer (registry hit;
     // this path never adopt-copies) while the bytes stay CPU-readable and
     // in-place-trainable. Fallback: plain heap storage.
-    if (comptime fucina.internal.gpu.enabled) {
+    if (comptime gpu_impl.enabled) {
         if (options.gpu_resident) {
-            if (fucina.internal.gpu.allocResidentBytes(info.data.len)) |dev| {
+            if (gpu_impl.allocResidentBytes(info.data.len)) |dev| {
                 @memcpy(dev, info.data);
                 return gpuResidentDenseTensor(.f16, WeightF16, ctx, shape, dev);
             }
@@ -2726,17 +2680,17 @@ fn LoadedQuantWeight(comptime dtype: DType) type {
 /// `freeResidentBytes`, which also evicts the shim's cached wrap for that base
 /// address. Takes ownership of `dev` — freed here on error.
 fn gpuResidentQuantTensor(comptime dtype: DType, ctx: *ExecContext, shape: [2]usize, dev: []u8) !QuantWeight(dtype) {
-    const Raw = fucina.internal.tensor_mod.TensorOf(dtype);
+    const Raw = tensor_mod.TensorOf(dtype);
     const DevBuffer = std.meta.Child(@FieldType(Raw, "buffer"));
     const hook = struct {
         fn releaseDeviceBytes(_: *anyopaque, buffer: *DevBuffer) void {
             const bytes = std.mem.sliceAsBytes(buffer.data);
             buffer.destroyHeader();
-            fucina.internal.gpu.freeResidentBytes(bytes);
+            gpu_impl.freeResidentBytes(bytes);
         }
     };
     var dev_owned: ?[]u8 = dev;
-    errdefer if (dev_owned) |bytes| fucina.internal.gpu.freeResidentBytes(bytes);
+    errdefer if (dev_owned) |bytes| gpu_impl.freeResidentBytes(bytes);
     const dev_blocks = try blockSliceMut(BlockStorage(dtype), dev);
     const buffer = try DevBuffer.fromBorrowedSliceWithRelease(ctx.allocator, dev_blocks, hook.releaseDeviceBytes);
     dev_owned = null; // from here the buffer's release hook frees the device bytes
@@ -2756,17 +2710,17 @@ fn gpuResidentQuantTensor(comptime dtype: DType, ctx: *ExecContext, shape: [2]us
 /// the dense f32/f16 GEMM paths never adopt-copy, so there is no stale
 /// snapshot to fence.
 fn gpuResidentDenseTensor(comptime dtype: DType, comptime Facade: type, ctx: *ExecContext, shape: [2]usize, dev: []u8) !Facade {
-    const Raw = fucina.internal.tensor_mod.TensorOf(dtype);
+    const Raw = tensor_mod.TensorOf(dtype);
     const DevBuffer = std.meta.Child(@FieldType(Raw, "buffer"));
     const hook = struct {
         fn releaseDeviceBytes(_: *anyopaque, buffer: *DevBuffer) void {
             const bytes = std.mem.sliceAsBytes(buffer.data);
             buffer.destroyHeader();
-            fucina.internal.gpu.freeResidentBytes(bytes);
+            gpu_impl.freeResidentBytes(bytes);
         }
     };
     var dev_owned: ?[]u8 = dev;
-    errdefer if (dev_owned) |bytes| fucina.internal.gpu.freeResidentBytes(bytes);
+    errdefer if (dev_owned) |bytes| gpu_impl.freeResidentBytes(bytes);
     const Elem = std.meta.Child(@FieldType(DevBuffer, "data"));
     if (dev.len % @sizeOf(Elem) != 0) return Error.InvalidWeightShape;
     const elems: []Elem = @alignCast(std.mem.bytesAsSlice(Elem, dev));
@@ -2783,17 +2737,17 @@ fn gpuResidentDenseTensor(comptime dtype: DType, comptime Facade: type, ctx: *Ex
 fn loadGpuResidentQuantizedWeight(comptime dtype: DType, ctx: *ExecContext, info: *const gguf.TensorInfo, shape: [2]usize, options: LinearWeight.LoadOptions) !LoadedQuantWeight(dtype) {
     const Elem = BlockStorage(dtype);
     const blocks = try blockSlice(Elem, info.data);
-    if (comptime fucina.internal.gpu.enabled) {
+    if (comptime gpu_impl.enabled) {
         if (options.gpu_resident) {
             switch (comptime dtype) {
                 .q4_k, .q6_k, .q8_0 => {
-                    if (fucina.internal.gpu.allocResidentBytes(info.data.len)) |dev| {
+                    if (gpu_impl.allocResidentBytes(info.data.len)) |dev| {
                         @memcpy(dev, info.data);
                         return .{ .value = try gpuResidentQuantTensor(dtype, ctx, shape, dev), .rhs_lifetime = .stable_process };
                     }
                 },
-                .q5_k => if (comptime fucina.internal.gpu.has_q5_k_quant) {
-                    if (fucina.internal.gpu.allocResidentBytes(info.data.len)) |dev| {
+                .q5_k => if (comptime gpu_impl.has_q5_k_quant) {
+                    if (gpu_impl.allocResidentBytes(info.data.len)) |dev| {
                         @memcpy(dev, info.data);
                         return .{ .value = try gpuResidentQuantTensor(dtype, ctx, shape, dev), .rhs_lifetime = .stable_process };
                     }
@@ -2811,10 +2765,10 @@ fn loadGpuResidentQuantizedWeight(comptime dtype: DType, ctx: *ExecContext, info
 /// residency on purpose). No-op (false) when the GPU is off or the budget
 /// is exhausted.
 fn makeGpuResidentDenseWeight(comptime dtype: DType, comptime Facade: type, ctx: *ExecContext, value: *Facade) !bool {
-    if (comptime !fucina.internal.gpu.enabled) return false;
+    if (comptime !gpu_impl.enabled) return false;
     const elems = try value.dataConst();
     const bytes = std.mem.sliceAsBytes(elems);
-    const dev = fucina.internal.gpu.allocResidentBytes(bytes.len) orelse return false;
+    const dev = gpu_impl.allocResidentBytes(bytes.len) orelse return false;
     @memcpy(dev, bytes);
     const raw_shape = value.asRawTensor().shape.slice();
     const shape = [2]usize{ raw_shape[0], raw_shape[1] };
@@ -2828,15 +2782,15 @@ fn makeGpuResidentDenseWeight(comptime dtype: DType, comptime Facade: type, ctx:
 }
 
 fn makeGpuResidentQuantWeight(comptime dtype: DType, ctx: *ExecContext, value: *QuantWeight(dtype)) !bool {
-    if (comptime !fucina.internal.gpu.enabled) return false;
+    if (comptime !gpu_impl.enabled) return false;
     switch (comptime dtype) {
         .q4_k, .q6_k, .q8_0 => {},
-        .q5_k => if (!fucina.internal.gpu.has_q5_k_quant) return false,
+        .q5_k => if (!gpu_impl.has_q5_k_quant) return false,
         else => return false,
     }
     const blocks = try value.dataConst();
     const bytes = std.mem.sliceAsBytes(blocks);
-    const dev = fucina.internal.gpu.allocResidentBytes(bytes.len) orelse return false;
+    const dev = gpu_impl.allocResidentBytes(bytes.len) orelse return false;
     @memcpy(dev, bytes);
     var resident = try gpuResidentQuantTensor(dtype, ctx, value.shape(), dev);
     errdefer resident.deinit();
@@ -2888,31 +2842,31 @@ fn f16Slice(bytes: []const u8, expected_len: usize) ![]const f16 {
 
 fn BlockStorage(comptime dtype: DType) type {
     return switch (dtype) {
-        .q1_0 => fucina.quant.BlockQ1_0,
-        .q2_0 => fucina.quant.BlockQ2_0,
-        .q4_0 => fucina.quant.BlockQ4_0,
-        .q4_1 => fucina.quant.BlockQ4_1,
-        .q5_0 => fucina.quant.BlockQ5_0,
-        .q5_1 => fucina.quant.BlockQ5_1,
-        .q8_0 => fucina.quant.BlockQ8_0,
-        .q2_k => fucina.quant.BlockQ2_K,
-        .q3_k => fucina.quant.BlockQ3_K,
-        .q4_k => fucina.quant.BlockQ4_K,
-        .q5_k => fucina.quant.BlockQ5_K,
-        .q6_k => fucina.quant.BlockQ6_K,
-        .iq1_s => fucina.quant.BlockIQ1_S,
-        .iq1_m => fucina.quant.BlockIQ1_M,
-        .iq2_xxs => fucina.quant.BlockIQ2_XXS,
-        .iq2_xs => fucina.quant.BlockIQ2_XS,
-        .iq2_s => fucina.quant.BlockIQ2_S,
-        .iq3_xxs => fucina.quant.BlockIQ3_XXS,
-        .iq3_s => fucina.quant.BlockIQ3_S,
-        .iq4_nl => fucina.quant.BlockIQ4_NL,
-        .iq4_xs => fucina.quant.BlockIQ4_XS,
-        .tq1_0 => fucina.quant.BlockTQ1_0,
-        .tq2_0 => fucina.quant.BlockTQ2_0,
-        .mxfp4 => fucina.quant.BlockMXFP4,
-        .nvfp4 => fucina.quant.BlockNVFP4,
+        .q1_0 => dtype_mod.BlockQ1_0,
+        .q2_0 => dtype_mod.BlockQ2_0,
+        .q4_0 => dtype_mod.BlockQ4_0,
+        .q4_1 => dtype_mod.BlockQ4_1,
+        .q5_0 => dtype_mod.BlockQ5_0,
+        .q5_1 => dtype_mod.BlockQ5_1,
+        .q8_0 => dtype_mod.BlockQ8_0,
+        .q2_k => dtype_mod.BlockQ2_K,
+        .q3_k => dtype_mod.BlockQ3_K,
+        .q4_k => dtype_mod.BlockQ4_K,
+        .q5_k => dtype_mod.BlockQ5_K,
+        .q6_k => dtype_mod.BlockQ6_K,
+        .iq1_s => dtype_mod.BlockIQ1_S,
+        .iq1_m => dtype_mod.BlockIQ1_M,
+        .iq2_xxs => dtype_mod.BlockIQ2_XXS,
+        .iq2_xs => dtype_mod.BlockIQ2_XS,
+        .iq2_s => dtype_mod.BlockIQ2_S,
+        .iq3_xxs => dtype_mod.BlockIQ3_XXS,
+        .iq3_s => dtype_mod.BlockIQ3_S,
+        .iq4_nl => dtype_mod.BlockIQ4_NL,
+        .iq4_xs => dtype_mod.BlockIQ4_XS,
+        .tq1_0 => dtype_mod.BlockTQ1_0,
+        .tq2_0 => dtype_mod.BlockTQ2_0,
+        .mxfp4 => dtype_mod.BlockMXFP4,
+        .nvfp4 => dtype_mod.BlockNVFP4,
         else => @compileError("unsupported quantized weight dtype"),
     };
 }
@@ -2968,7 +2922,7 @@ test "getRowsAs: bf16 embedding rows match the f32-widened table bitwise" {
     // Arbitrary bf16-exact values, not just integers: gather + widen is exact
     // for ANY bf16 bit pattern, so snap to bf16 first and widen the snapped
     // values for the reference.
-    fucina.rng.uniformFill(0xB16, &t_vals, -2, 2);
+    rng.uniformFill(0xB16, &t_vals, -2, 2);
     for (&t_vals) |*v| v.* = bf16ToF32(testBf16Bits(v.*));
 
     var pair = try testBf16AndF32Pair(&ctx, &t_vals, vocab, hidden);
