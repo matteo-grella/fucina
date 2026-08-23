@@ -29,6 +29,7 @@ const std = @import("std");
 const accelerator = @import("../accelerator.zig");
 const build_options = @import("build_options");
 const storage = @import("../storage.zig");
+const gpu_provider = @import("gpu_provider.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
 
@@ -53,7 +54,7 @@ pub const has_tq2_0_quant = true;
 /// Folded tie-fitted PTQTP pair GEMM (fucina_mul_mm_tq2_0_folded_f32).
 pub const has_tq2_0_folded_quant = true;
 
-pub const Orient = enum(c_int) { nn = 0, tn = 1, nt = 2 };
+pub const Orient = gpu_provider.Orient;
 
 const CommandTiming = extern struct {
     gpu_ns: u64,
@@ -1293,12 +1294,7 @@ pub const QFormat = enum(c_int) {
 
 /// One 32-row output tile of one expert group. Must mirror FucinaQMMTile in
 /// shim.m / fucina_qmm_tile in the kernel.
-pub const QMMTile = extern struct {
-    expert: i32,
-    base_row: i32,
-    m: i32,
-    tile_m: i32,
-};
+pub const QMMTile = gpu_provider.QMMTile;
 
 const MetalQuantWork = struct {
     work: accelerator.Work,
@@ -1412,7 +1408,7 @@ pub fn gemmQuantNtAsync(
 /// ES device arm (see cuda.zig): not needed on unified memory — the CPU
 /// kernels already mutate shared pages the GPU reads zero-copy — so the
 /// stubs report "not handled" and callers keep their CPU path.
-pub const EsDType = enum(usize) { f16 = 0, f32 = 1 };
+pub const EsDType = gpu_provider.EsDType;
 
 pub fn esPerturb(dt: EsDType, bytes: []u8, stream_seed: u64, scaled: f32, n: usize) bool {
     _ = dt;
@@ -1514,10 +1510,7 @@ pub fn freeResidentBytes(bytes: []const u8) void {
 /// concurrent/async GPU runtime should replace this whole staging contract.
 pub var qmoe_lock: thread.Mutex = .{};
 
-pub const QMoeStage = struct {
-    in: [*]f32,
-    out: [*]f32,
-};
+pub const QMoeStage = gpu_provider.QMoeStage;
 
 /// Acquire the staging panels (grow-only shared MTLBuffers): `in` for the
 /// activation rows the CPU gathers, `out` for the GEMM results. Pointers stay
@@ -1758,6 +1751,25 @@ pub fn setMinWorkQMoeForTest(v: u64) void {
     state.min_work_qmoe = v;
 }
 
+/// True when this provider is compiled in AND holds a live device context.
+/// The GPU test suites gate on this rather than on `deviceName`, which can
+/// also be null for a live context with no reportable name.
+pub fn deviceAvailableForTest() bool {
+    if (comptime !enabled) return false;
+    return context() != null;
+}
+
+/// The grouped-MoE tile-occupancy gate, as a save/restore pair for tests.
+pub fn qmoeMinFillForTest() u64 {
+    ensureConfig();
+    return state.qmoe_min_fill_pct;
+}
+
+pub fn setQmoeMinFillForTest(v: u64) void {
+    ensureConfig();
+    state.qmoe_min_fill_pct = v;
+}
+
 /// Quantized decode-GEMV gate — exec's m <= 8 arm in `denseQuantMatmulGpu`
 /// (`src/exec/quant_matmul.zig`). The Metal provider keeps decode on CPU by
 /// design — always false; the CUDA provider opts in via FUCINA_GPU_DECODE=1.
@@ -1818,67 +1830,10 @@ pub fn attnPrefillF16(
 // Tests (compiled and run only on -Dgpu=metal builds)
 // ---------------------------------------------------------------------------
 
-fn cpuReference(orient: Orient, a: []const f32, b: []const f32, c: []f32, m: usize, n: usize, k: usize) void {
-    for (0..m) |i| {
-        for (0..n) |j| {
-            var acc: f64 = 0;
-            for (0..k) |p| {
-                const av: f64 = switch (orient) {
-                    .nn, .nt => a[i * k + p],
-                    .tn => a[p * m + i],
-                };
-                const bv: f64 = switch (orient) {
-                    .nn, .tn => b[p * n + j],
-                    .nt => b[j * k + p],
-                };
-                acc += av * bv;
-            }
-            c[i * n + j] = @floatCast(acc);
-        }
-    }
-}
-
-test "metal gemm f32 parity vs reference (all orientations, edge tiles)" {
-    if (comptime !enabled) return error.SkipZigTest;
-    const allocator = std.testing.allocator;
-    if (context() == null) return error.SkipZigTest;
-
-    var prng = std.Random.DefaultPrng.init(3);
-    const random = prng.random();
-
-    const Case = struct { m: usize, n: usize, k: usize };
-    const cases = [_]Case{
-        .{ .m = 64, .n = 64, .k = 64 }, // fully aligned
-        .{ .m = 33, .n = 47, .k = 17 }, // every edge path
-        .{ .m = 128, .n = 96, .k = 33 }, // K tail only
-        .{ .m = 65, .n = 64, .k = 48 }, // M edge only
-    };
-    for (cases) |case| {
-        const m = case.m;
-        const n = case.n;
-        const k = case.k;
-        const a = try allocator.alloc(f32, m * k);
-        defer allocator.free(a);
-        const b = try allocator.alloc(f32, k * n);
-        defer allocator.free(b);
-        const c = try allocator.alloc(f32, m * n);
-        defer allocator.free(c);
-        const expected = try allocator.alloc(f32, m * n);
-        defer allocator.free(expected);
-
-        for ([_]Orient{ .nn, .tn, .nt }) |orient| {
-            for (a) |*x| x.* = random.floatNorm(f32);
-            for (b) |*x| x.* = random.floatNorm(f32);
-            @memset(c, std.math.nan(f32));
-            try std.testing.expect(gemmF32(orient, a, b, c, m, n, k));
-            cpuReference(orient, a, b, expected, m, n, k);
-            for (c, expected) |got, want| {
-                const tol = @max(2e-5 * @max(@abs(want), @abs(got)), 2e-5);
-                try std.testing.expect(@abs(got - want) <= tol);
-            }
-        }
-    }
-}
+const gpu_test_util = @import("gpu_test_util.zig");
+const cpuReference = gpu_test_util.cpuReference;
+const buildQuantWeights = gpu_test_util.buildQuantWeights;
+const expectQuantGemmRows = gpu_test_util.expectQuantGemmRows;
 
 test "metal attention forward parity vs scalar reference (causal, window, offset, stats)" {
     if (comptime !enabled) return error.SkipZigTest;
@@ -2031,115 +1986,6 @@ test "metal attention forward f16-KV parity vs scalar reference" {
     }
 }
 
-test "metal gemm f16 NT parity vs f64 reference (f16-rounded output)" {
-    if (comptime !enabled) return error.SkipZigTest;
-    const allocator = std.testing.allocator;
-    if (context() == null) return error.SkipZigTest;
-
-    var prng = std.Random.DefaultPrng.init(9);
-    const random = prng.random();
-
-    const Case = struct { m: usize, n: usize, k: usize };
-    const cases = [_]Case{
-        .{ .m = 64, .n = 64, .k = 64 },
-        .{ .m = 33, .n = 47, .k = 17 },
-        .{ .m = 65, .n = 96, .k = 33 },
-    };
-    for (cases) |case| {
-        const m = case.m;
-        const n = case.n;
-        const k = case.k;
-        const a = try allocator.alloc(f16, m * k);
-        defer allocator.free(a);
-        const b = try allocator.alloc(f16, n * k);
-        defer allocator.free(b);
-        for (a) |*x| x.* = @floatCast(random.floatNorm(f32));
-        for (b) |*x| x.* = @floatCast(random.floatNorm(f32));
-
-        f16_lock.lock();
-        defer f16_lock.unlock();
-        // transient test buffer: must not enter the wrap cache
-        const staging = gemmF16Nt(a, b, m, n, k, false) orelse return error.TestUnexpectedResult;
-        for (0..m) |i| {
-            for (0..n) |j| {
-                var acc: f64 = 0;
-                for (0..k) |p| acc += @as(f64, a[i * k + p]) * @as(f64, b[j * k + p]);
-                const got: f32 = staging[i * n + j];
-                const want: f32 = @floatCast(acc);
-                // f32 accumulate, f16-rounded store: tolerance = one f16 ulp
-                // of the result magnitude plus accumulation slack.
-                const tol = @max(2e-3 * @max(@abs(want), @abs(got)), 2e-3);
-                try std.testing.expect(@abs(got - want) <= tol);
-            }
-        }
-    }
-}
-
-/// Quantize random rows into `blocks` ([n rows] x [k/block] blocks) and return
-/// the dequantized f32 matrix the GPU kernel effectively sees (the kernel's
-/// extra f32->f16 rounding is covered by the test tolerances).
-fn buildQuantWeights(
-    comptime fmt: QFormat,
-    allocator: std.mem.Allocator,
-    random: std.Random,
-    blocks: anytype,
-    n: usize,
-    k: usize,
-) ![]f32 {
-    const qm = @import("quant.zig");
-    const dt = comptime switch (fmt) {
-        .q8_0 => .q8_0,
-        .q6_k => .q6_k,
-        .q4_k => .q4_k,
-        .tq2_0 => .tq2_0,
-        .tq2_0_folded => unreachable, // no DType; dedicated parity test below
-    };
-    const bpr = blocks.len / n;
-    const wref = try allocator.alloc(f32, n * k);
-    errdefer allocator.free(wref);
-    const row_src = try allocator.alloc(f32, k);
-    defer allocator.free(row_src);
-    for (0..n) |r| {
-        for (row_src) |*x| x.* = random.floatNorm(f32);
-        try qm.quantizeRowForDType(dt, blocks[r * bpr ..][0..bpr], row_src);
-        try qm.dequantizeRowForDType(dt, wref[r * k ..][0..k], blocks[r * bpr ..][0..bpr]);
-    }
-    return wref;
-}
-
-fn expectQuantGemmRows(
-    a: []const f32,
-    wref: []const f32,
-    c: []const f32,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    for (0..m) |i| {
-        for (0..n) |j| {
-            // reference over f16-rounded operands — the GPU stores both the
-            // dequantized weights and the f32 activations as half in
-            // threadgroup memory and accumulates in f32
-            var acc: f64 = 0;
-            for (0..k) |p| {
-                const av: f16 = @floatCast(a[i * k + p]);
-                const wv: f16 = @floatCast(wref[j * k + p]);
-                acc += @as(f64, av) * @as(f64, wv);
-            }
-            const got: f32 = c[i * n + j];
-            const want: f32 = @floatCast(acc);
-            const tol = @max(5e-3 * @max(@abs(want), @abs(got)), 5e-3);
-            if (@abs(got - want) > tol) {
-                std.debug.print(
-                    "quant gemm mismatch m={d} n={d} k={d} at ({d},{d}): got={e} want={e}\n",
-                    .{ m, n, k, i, j, got, want },
-                );
-                return error.TestUnexpectedResult;
-            }
-        }
-    }
-}
-
 test "metal quant gemm q6_K/q4_K/q8_0 parity vs dequantized reference" {
     if (comptime !enabled) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -2251,86 +2097,6 @@ test "metal quant gemm tq2_0_folded parity vs dequantized reference" {
     try expectQuantGemmRows(a, wref, c, m, n, k);
 }
 
-test "metal quant gemm grouped expert tiles parity" {
-    if (comptime !enabled) return error.SkipZigTest;
-    const allocator = std.testing.allocator;
-    if (context() == null) return error.SkipZigTest;
-
-    const dtype_mod = @import("../dtype.zig");
-    var prng = std.Random.DefaultPrng.init(23);
-    const random = prng.random();
-
-    inline for (.{ QFormat.q6_k, QFormat.q4_k, QFormat.q8_0, QFormat.tq2_0 }) |fmt| {
-        const Block = switch (fmt) {
-            .q6_k => dtype_mod.BlockQ6_K,
-            .q4_k => dtype_mod.BlockQ4_K,
-            .q8_0 => dtype_mod.BlockQ8_0,
-            .tq2_0 => dtype_mod.BlockTQ2_0,
-            .tq2_0_folded => unreachable, // covered by its dedicated parity test
-        };
-        const k = 2 * comptime fmt.kMultiple();
-        const n = 64;
-        const bpr = k / comptime fmt.kMultiple();
-        const n_expert = 4;
-        // tile edges: 1 row, sub-tile, exactly one tile + 1, multi-tile
-        const ms = [n_expert]usize{ 1, 7, 33, 40 };
-
-        const blocks = try allocator.alloc(Block, n_expert * n * bpr);
-        defer allocator.free(blocks);
-        const wref = try buildQuantWeights(fmt, allocator, random, blocks, n_expert * n, k);
-        defer allocator.free(wref);
-
-        var total_rows: usize = 0;
-        var tiles_buf: [16]QMMTile = undefined;
-        var n_tiles: usize = 0;
-        var bases: [n_expert]usize = undefined;
-        for (ms, 0..) |m_e, e| {
-            bases[e] = total_rows;
-            var t: usize = 0;
-            while (t * 32 < m_e) : (t += 1) {
-                tiles_buf[n_tiles] = .{
-                    .expert = @intCast(e),
-                    .base_row = @intCast(total_rows),
-                    .m = @intCast(m_e),
-                    .tile_m = @intCast(t),
-                };
-                n_tiles += 1;
-            }
-            total_rows += m_e;
-        }
-
-        const a = try allocator.alloc(f32, total_rows * k);
-        defer allocator.free(a);
-        for (a) |*x| x.* = random.floatNorm(f32);
-
-        qmoe_lock.lock();
-        defer qmoe_lock.unlock();
-        const stage = qmoeStage(total_rows * k * @sizeOf(f32), total_rows * n * @sizeOf(f32)) orelse
-            return error.TestUnexpectedResult;
-        @memcpy(stage.in[0 .. total_rows * k], a);
-        try std.testing.expect(gemmQGroupedNt(
-            fmt,
-            std.mem.sliceAsBytes(blocks),
-            false, // transient test buffer: must not enter the wrap cache
-            bpr * @sizeOf(Block),
-            n * bpr * @sizeOf(Block),
-            n,
-            k,
-            tiles_buf[0..n_tiles],
-        ));
-        for (ms, 0..) |m_e, e| {
-            try expectQuantGemmRows(
-                a[bases[e] * k ..][0 .. m_e * k],
-                wref[e * n * k ..][0 .. n * k],
-                stage.out[bases[e] * n ..][0 .. m_e * n],
-                m_e,
-                n,
-                k,
-            );
-        }
-    }
-}
-
 test "metal eager async dense quant Q4_K/Q6_K/Q8_0 uses direct tensor storage" {
     if (comptime !enabled) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -2395,62 +2161,6 @@ test "metal eager async dense quant Q4_K/Q6_K/Q8_0 uses direct tensor storage" {
     }
 }
 
-test "qmoe fill gate arithmetic" {
-    if (comptime !enabled) return error.SkipZigTest;
-    ensureConfig();
-    const saved = state.qmoe_min_fill_pct;
-    defer state.qmoe_min_fill_pct = saved;
-
-    state.qmoe_min_fill_pct = 50;
-    // 2048 rows over 128 tiles = exactly 50% of the 32-row slots
-    try std.testing.expect(qmoeFillAcceptable(2048, 128));
-    try std.testing.expect(!qmoeFillAcceptable(2047, 128));
-    // full tiles always pass
-    try std.testing.expect(qmoeFillAcceptable(4096, 128));
-    // empty tile table never dispatches
-    try std.testing.expect(!qmoeFillAcceptable(0, 0));
-
-    state.qmoe_min_fill_pct = 0; // occupancy-blind escape hatch
-    try std.testing.expect(qmoeFillAcceptable(1, 128));
-
-    state.qmoe_min_fill_pct = 101; // >100 = grouped GPU path never engages
-    try std.testing.expect(!qmoeFillAcceptable(4096, 128));
-}
-
-test "metal gemm f32 batched matches per-matrix calls" {
-    if (comptime !enabled) return error.SkipZigTest;
-    const allocator = std.testing.allocator;
-    if (context() == null) return error.SkipZigTest;
-
-    var prng = std.Random.DefaultPrng.init(5);
-    const random = prng.random();
-    const m = 48;
-    const n = 40;
-    const k = 32;
-    const batch = 3;
-
-    const a = try allocator.alloc(f32, batch * m * k);
-    defer allocator.free(a);
-    const b = try allocator.alloc(f32, batch * k * n);
-    defer allocator.free(b);
-    const c = try allocator.alloc(f32, batch * m * n);
-    defer allocator.free(c);
-    const expected = try allocator.alloc(f32, batch * m * n);
-    defer allocator.free(expected);
-    for (a) |*x| x.* = random.floatNorm(f32);
-    for (b) |*x| x.* = random.floatNorm(f32);
-    @memset(c, 0);
-
-    try std.testing.expect(gemmBatchedF32(.nn, a, b, c, m, n, k, batch, m * k, k * n, m * n));
-    for (0..batch) |bi| {
-        cpuReference(.nn, a[bi * m * k ..][0 .. m * k], b[bi * k * n ..][0 .. k * n], expected[bi * m * n ..][0 .. m * n], m, n, k);
-    }
-    for (c, expected) |got, want| {
-        const tol = @max(2e-5 * @max(@abs(want), @abs(got)), 2e-5);
-        try std.testing.expect(@abs(got - want) <= tol);
-    }
-}
-
 test "metal eager async gemm chains on the queue and synchronizes on host read" {
     if (!enabled) return error.SkipZigTest;
     if (context() == null) return error.SkipZigTest;
@@ -2501,74 +2211,6 @@ test "metal eager async gemm chains on the queue and synchronizes on host read" 
             try std.testing.expectApproxEqAbs(@as(f32, @floatCast(sum)), got[row * k + col], 3e-4);
         }
     }
-}
-
-test "metal eager async input mutation waits for the device reader" {
-    if (!enabled) return error.SkipZigTest;
-    if (context() == null) return error.SkipZigTest;
-    const allocator = std.testing.allocator;
-    const m = 33;
-    const n = 35;
-    const k = 31;
-    const av = try allocator.alloc(f32, m * k);
-    defer allocator.free(av);
-    const bv = try allocator.alloc(f32, k * n);
-    defer allocator.free(bv);
-    const expected = try allocator.alloc(f32, m * n);
-    defer allocator.free(expected);
-    for (av, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 11)) * 0.03125 - 0.125;
-    for (bv, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 7)) * 0.015625 - 0.0625;
-    cpuReference(.nn, av, bv, expected, m, n, k);
-
-    var a = try Tensor.fromSlice(allocator, &.{ m, k }, av);
-    defer a.deinit();
-    var b = try Tensor.fromSlice(allocator, &.{ k, n }, bv);
-    defer b.deinit();
-    var out = try Tensor.zeros(allocator, &.{ m, n });
-    defer out.deinit();
-    try std.testing.expect(gemmF32Async(.nn, &a, &b, &out, m, n, k));
-    try std.testing.expect(a.buffer.pending_use.load(.acquire) != null);
-    a.data()[0] += 100; // mutable host boundary must wait for the old value's reader
-    try std.testing.expect(a.buffer.pending_use.load(.acquire) == null);
-    for (out.dataConst(), expected) |got, want| try std.testing.expectApproxEqAbs(want, got, 2e-4);
-}
-
-test "metal eager async f16 NT writes f32 directly and fences input mutation" {
-    if (!enabled) return error.SkipZigTest;
-    if (context() == null) return error.SkipZigTest;
-    const allocator = std.testing.allocator;
-    const m = 33;
-    const n = 47;
-    const k = 17;
-    const av = try allocator.alloc(f16, m * k);
-    defer allocator.free(av);
-    const bv = try allocator.alloc(f16, n * k);
-    defer allocator.free(bv);
-    const expected = try allocator.alloc(f32, m * n);
-    defer allocator.free(expected);
-    for (av, 0..) |*v, i| v.* = @floatCast(@as(f32, @floatFromInt(i % 17)) * 0.03125 - 0.25);
-    for (bv, 0..) |*v, i| v.* = @floatCast(@as(f32, @floatFromInt(i % 13)) * 0.015625 - 0.125);
-    for (0..m) |row| {
-        for (0..n) |col| {
-            var sum: f32 = 0;
-            for (0..k) |p| sum += @as(f32, av[row * k + p]) * @as(f32, bv[col * k + p]);
-            expected[row * n + col] = sum;
-        }
-    }
-
-    var a = try TensorF16.fromSlice(allocator, &.{ m, k }, av);
-    defer a.deinit();
-    var b = try TensorF16.fromSlice(allocator, &.{ n, k }, bv);
-    defer b.deinit();
-    var out = try Tensor.zeros(allocator, &.{ m, n });
-    defer out.deinit();
-    try std.testing.expect(gemmF16NtAsync(&a, &b, &out, m, n, k));
-    try std.testing.expect(out.buffer.pending() != null);
-    try std.testing.expect(a.buffer.pending_use.load(.acquire) != null);
-    a.data()[0] += 10;
-    try std.testing.expect(a.buffer.pending_use.load(.acquire) == null);
-    for (out.dataConst(), expected) |got, want| try std.testing.expectApproxEqAbs(want, got, 4e-4);
-    try std.testing.expect(out.buffer.pending() == null);
 }
 
 test "metal eager async bf16 NT matches the CPU bf16 reference" {
