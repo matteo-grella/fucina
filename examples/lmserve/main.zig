@@ -10,20 +10,25 @@
 //! (qwen3 / qwen3moe / qwen35 / gemma4 / diffusion-gemma / inkling /
 //! deepseek4); nanochat checkpoints load via `--nanochat <dir>`. Run with
 //! `zig build lmserve -- <model.gguf> [flags]`.
+//!
+//! Thin front end: the transport (HTTP server, scheduler, wire dialects)
+//! and the generic engine (`GgufChatBackend`, `serving.open`) live in
+//! `llm.serving`; this main parses flags, hosts the adapters for the
+//! families that cannot ride `Conversation` (`backend_*.zig` here), and
+//! falls back to `serving.openFromFile` for the rest.
 
 const std = @import("std");
 const fucina = @import("fucina");
 const llm = @import("fucina_llm");
 
 const types = @import("fucina_llm").serving;
-const backend_mod = @import("backend.zig");
 const backend_nanochat = @import("backend_nanochat.zig");
 const backend_diffusion = @import("backend_diffusion.zig");
 const backend_inkling = @import("backend_inkling.zig");
 const backend_qwen35 = @import("backend_qwen35.zig");
 const backend_deepseek4 = @import("backend_deepseek4.zig");
-const scheduler_mod = @import("scheduler.zig");
-const http_mod = @import("http.zig");
+const scheduler_mod = types.scheduler;
+const http_mod = types.http;
 
 const usage_text =
     \\fucina lmserve — OpenAI- and Anthropic-compatible LM server
@@ -126,11 +131,6 @@ const usage_text =
 ;
 
 pub const Args = struct {
-    /// Install SIGINT/SIGTERM handlers. False when the server is HOSTED
-    /// inside another program: those handlers belong to the host, and
-    /// clobbering them leaves Ctrl-C stopping the server while the host keeps
-    /// running (and, for a TUI host, the terminal in raw mode).
-    own_signals: bool = true,
     model_path: ?[]const u8 = null,
     nanochat_dir: ?[]const u8 = null,
     host: []const u8 = "127.0.0.1",
@@ -328,15 +328,11 @@ pub fn main(init: std.process.Init) !void {
     return serveBlocking(init.io, allocator, stderr, args);
 }
 
-/// Everything `main` does once the flags are parsed: open the GGUF, pick the
-/// backend from `general.architecture`, and run the server until it stops.
-///
-/// Split out so the server can be hosted INSIDE another process — the voice
-/// agent runs it on a thread rather than shelling out to this binary, which
-/// keeps one process and one binary while still getting the architecture
-/// dispatch that an in-process `Conversation` (bound to one model type at
-/// compile time) cannot offer.
-pub fn serveBlocking(
+/// Everything `main` does once the flags are parsed: open the GGUF, pick
+/// the backend from `general.architecture` (the example-local adapters
+/// here; `serving.openFromFile` for the `Conversation`-hosted families),
+/// and run the server until it stops.
+fn serveBlocking(
     io: std.Io,
     allocator: std.mem.Allocator,
     stderr: *std.Io.Writer,
@@ -384,10 +380,27 @@ pub fn serveBlocking(
     const model_id = try allocator.dupe(u8, std.fs.path.stem(std.fs.path.basename(model_path)));
     defer allocator.free(model_id);
 
-    if (std.mem.eql(u8, arch, "qwen3") or std.mem.eql(u8, arch, "qwen3moe")) {
-        try serveQwen3(io, allocator, stderr, &ctx, &file, model_id, args);
-    } else if (std.mem.eql(u8, arch, "gemma4")) {
-        try serveGemma4(io, allocator, stderr, &ctx, &file, model_id, args);
+    if (std.mem.eql(u8, arch, "qwen3") or std.mem.eql(u8, arch, "qwen3moe") or std.mem.eql(u8, arch, "gemma4")) {
+        // The Conversation-hosted families are served by the library engine.
+        var opened = try types.openFromFile(&ctx, io, allocator, &file, model_id, .{
+            .context_len = args.ctx_len,
+            .spec = args.spec,
+            .batch = args.batch,
+            .experts_borrow = args.experts_borrow,
+            .kv_slots = args.kv_slots,
+            .kv_slots_force = args.kv_slots_force,
+            .kv_cache_dir = args.kv_cache_dir,
+            .kv_disk_slots = args.kv_disk_slots,
+            .cartridge_path = args.cartridge_path,
+            .fleet_dir = args.fleet_dir,
+            .shine_fleet_dir = args.shine_fleet_dir,
+            .rag_docs = args.rag_docs,
+            .rag_chunks = args.rag_chunks,
+            .rag_adaptive = args.rag_adaptive,
+            .rag_margin = args.rag_margin,
+        }, stderr);
+        defer opened.deinit();
+        try serveWith(io, allocator, opened.backend, args);
     } else if (std.mem.eql(u8, arch, "diffusion-gemma")) {
         try serveDiffusion(io, allocator, stderr, &ctx, &file, model_id, args);
     } else if (std.mem.eql(u8, arch, "inkling")) {
@@ -489,7 +502,7 @@ fn serveQwen35(
     const template = llm.chat.Template.detect(file.getString("tokenizer.chat_template")) orelse
         llm.chat.Template{ .format = .chatml };
     // Bonsai GGUFs carry their recommended sampling (`general.sampling.*`).
-    const default_sampling = samplingFromGguf(file);
+    const default_sampling = types.samplingFromGguf(file);
 
     const config = try llm.qwen35.model.Config.fromGguf(file);
 
@@ -550,7 +563,7 @@ fn serveDeepseek4(
     // GGUF-stamped sampling; the ds4 0731 export stamps temp 1.0 / top_p
     // 0.95, which samplingFromGguf's fallbacks match — only its gemma-shaped
     // top_k=64 fallback differs (deepseek4 recommends no top-k truncation).
-    var default_sampling = samplingFromGguf(file);
+    var default_sampling = types.samplingFromGguf(file);
     if (file.getInt("general.sampling.top_k") == null) default_sampling.top_k = 0;
 
     // Streamed experts (`--moe-stream` + companions): the local copy must
@@ -588,583 +601,6 @@ fn serveDeepseek4(
     try serveWith(io, allocator, adapter.backend(), args);
 }
 
-/// --fleet serving state: the fleet's manifest + cosine index plus a
-/// no-adapter trainer whose `embedLastHidden` implements the fleet's
-/// retrieval-embedding contract (`cartridge_fleet.embed_suffix`) for
-/// incoming queries. One comptime instantiation per (model, trainer,
-/// tokenizer) family; everything is borrowed by the backend's
-/// `FleetOptions`, so this must outlive the server loop.
-fn FleetServeFor(comptime ModelT: type, comptime TrainerT: type, comptime TokT: type) type {
-    return struct {
-    const FleetServe = @This();
-    allocator: std.mem.Allocator,
-    ctx: *fucina.ExecContext,
-    tokenizer: *const TokT,
-    fleet: llm.cartridge_fleet.Fleet,
-    index: llm.cartridge_fleet.EmbedIndex,
-    trainer: TrainerT,
-
-    fn init(
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        stderr: *std.Io.Writer,
-        ctx: *fucina.ExecContext,
-        model: *const ModelT,
-        tokenizer: *const TokT,
-        dir: []const u8,
-    ) !FleetServe {
-        var fleet = llm.cartridge_fleet.Fleet.open(allocator, io, dir, 0, .{ .budget = 1 }) catch |err| {
-            try stderr.print("--fleet {s}: cannot open the fleet manifest ({t})\n", .{ dir, err });
-            return err;
-        };
-        errdefer fleet.deinit();
-        if (fleet.manifest.docs.items.len == 0) {
-            try stderr.print("--fleet {s}: the manifest lists no documents\n", .{dir});
-            return error.EmptyFleet;
-        }
-        if (fleet.manifest.embed_dim != model.config.hidden_size) {
-            try stderr.print(
-                "--fleet {s}: no retrieval index for this model (index dim {d}, model hidden {d}) — rebuild with `zig build cartridge-fleet -- --resume --rounds 0 --docs ...`\n",
-                .{ dir, fleet.manifest.embed_dim, model.config.hidden_size },
-            );
-            return error.MissingIndex;
-        }
-        const index_path = try fleet.indexPath();
-        defer allocator.free(index_path);
-        var mapped = try llm.cartridge_fleet.mmapFile(io, index_path);
-        defer mapped.deinit();
-        var index = try llm.cartridge_fleet.EmbedIndex.initFromBytes(allocator, mapped.bytes);
-        errdefer index.deinit();
-
-        // The query embedder runs through the family's no-adapter trainer.
-        var trainer = TrainerT.init(ctx, model, .{ .rank = 1, .alpha = 1 }, 0) catch |err| {
-            try stderr.writeAll("--fleet: this GGUF cannot host the query-embedding trainer (dense qwen3, or gemma4 with --experts=borrow)\n");
-            return err;
-        };
-        errdefer trainer.deinit();
-
-        // Probe doc 0's cartridge against the model's KV geometry so a
-        // foreign fleet fails at startup, not mid-request.
-        {
-            const cart_path = try std.fs.path.join(allocator, &.{ dir, fleet.manifest.docs.items[0].cart_file });
-            defer allocator.free(cart_path);
-            var cart_mapped = try llm.cartridge_fleet.mmapFile(io, cart_path);
-            defer cart_mapped.deinit();
-            var cart = try llm.cartridge.Cartridge.initFromStateDict(ctx, allocator, cart_mapped.bytes);
-            defer cart.deinit();
-            var probe = try model.initKvCache(ctx, cart.p + 1);
-            defer probe.deinit();
-            cart.writeToCache(ctx, &probe) catch |err| {
-                try stderr.print("--fleet {s}: its cartridges do not fit this model's KV geometry\n", .{dir});
-                return err;
-            };
-        }
-
-        return .{
-            .allocator = allocator,
-            .ctx = ctx,
-            .tokenizer = tokenizer,
-            .fleet = fleet,
-            .index = index,
-            .trainer = trainer,
-        };
-    }
-
-    fn deinit(self: *FleetServe) void {
-        self.trainer.deinit();
-        self.index.deinit();
-        self.fleet.deinit();
-    }
-
-    /// `backend.FleetOptions.embedFn`: the exact recipe the index was built
-    /// with — text ids ++ separately tokenized `embed_suffix` ids, then the
-    /// final-norm last hidden state (worker thread only, like generation).
-    fn embed(ptr: *anyopaque, text: []const u8, out: []f32) anyerror!void {
-        const self: *FleetServe = @ptrCast(@alignCast(ptr));
-        const a = self.allocator;
-        const text_ids = try self.tokenizer.encode(a, text);
-        defer a.free(text_ids);
-        const suffix_ids = try self.tokenizer.encode(a, llm.cartridge_fleet.embed_suffix);
-        defer a.free(suffix_ids);
-        const full = try a.alloc(usize, text_ids.len + suffix_ids.len);
-        defer a.free(full);
-        for (full[0..text_ids.len], text_ids) |*dst, id| dst.* = id;
-        for (full[text_ids.len..], suffix_ids) |*dst, id| dst.* = id;
-        try self.trainer.embedLastHidden(self.ctx, full, out);
-    }
-    };
-}
-
-const FleetServeQwen3 = FleetServeFor(
-    llm.qwen3.model.Model,
-    llm.qwen3.train.Trainer(.{ .q = false, .v = false }),
-    llm.tokenizer.Tokenizer,
-);
-const FleetServeGemma4 = FleetServeFor(
-    llm.gemma.gemma4.Model,
-    llm.gemma.gemma4_train.Trainer(.{ .q = false, .v = false }),
-    llm.spm_tokenizer.Tokenizer,
-);
-
-/// SHINE adapter fleet serving state (REFERENCE §13.12): the manifest's doc
-/// names and adapter files, the retrieval index (the cartridge fleets'
-/// EmbedIndex, same `embed_suffix` contract), the query-embedding trainer,
-/// a small adapter LRU, and the AdaptedModel box the backend decodes
-/// through. `apply` runs on the single inference worker only.
-const ShineFleetServe = struct {
-    const Trainer = llm.qwen3.train.Trainer(.{ .q = false, .v = false });
-    const max_resident = 4;
-    const Entry = struct { doc: usize, set: *llm.qwen3.shine.LoraSet, last: u64 };
-    const ManifestDoc = struct { name: []const u8, adapter_file: []const u8 };
-    const ManifestJson = struct { embed_chunk: usize = 256, docs: []ManifestDoc };
-
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    ctx: *fucina.ExecContext,
-    tokenizer: *const llm.tokenizer.Tokenizer,
-    dir: []const u8,
-    manifest: std.json.Parsed(ManifestJson),
-    index: llm.cartridge_fleet.EmbedIndex,
-    trainer: Trainer,
-    box: llm.qwen3.shine.AdaptedModel,
-    resident: std.ArrayList(Entry) = .empty,
-    clock: u64 = 0,
-
-    fn init(
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        stderr: *std.Io.Writer,
-        ctx: *fucina.ExecContext,
-        model: *const llm.qwen3.model.Model,
-        tokenizer: *const llm.tokenizer.Tokenizer,
-        dir: []const u8,
-    ) !ShineFleetServe {
-        const manifest_path = try std.fs.path.join(allocator, &.{ dir, "shine-fleet.json" });
-        defer allocator.free(manifest_path);
-        const manifest_bytes = std.Io.Dir.cwd().readFileAlloc(io, manifest_path, allocator, .limited(1 << 20)) catch |err| {
-            try stderr.print("--shine-fleet {s}: cannot read shine-fleet.json ({t})\n", .{ dir, err });
-            return err;
-        };
-        defer allocator.free(manifest_bytes);
-        // alloc_always: the parsed strings must not borrow manifest_bytes,
-        // which is freed when init returns.
-        var manifest = std.json.parseFromSlice(ManifestJson, allocator, manifest_bytes, .{ .allocate = .alloc_always }) catch |err| {
-            try stderr.print("--shine-fleet {s}: malformed shine-fleet.json ({t})\n", .{ dir, err });
-            return err;
-        };
-        errdefer manifest.deinit();
-        if (manifest.value.docs.len == 0) {
-            try stderr.print("--shine-fleet {s}: the manifest lists no documents\n", .{dir});
-            return error.EmptyFleet;
-        }
-
-        const index_path = try std.fs.path.join(allocator, &.{ dir, "index.safetensors" });
-        defer allocator.free(index_path);
-        var mapped = llm.cartridge_fleet.mmapFile(io, index_path) catch |err| {
-            try stderr.print("--shine-fleet {s}: cannot open index.safetensors ({t})\n", .{ dir, err });
-            return err;
-        };
-        defer mapped.deinit();
-        var index = try llm.cartridge_fleet.EmbedIndex.initFromBytes(allocator, mapped.bytes);
-        errdefer index.deinit();
-        if (index.dim != model.config.hidden_size) {
-            try stderr.print("--shine-fleet {s}: index dim {d} does not match model hidden {d} — rebuild the fleet against this base\n", .{ dir, index.dim, model.config.hidden_size });
-            return error.MissingIndex;
-        }
-
-        var trainer = Trainer.init(ctx, model, .{ .rank = 1, .alpha = 1 }, 0) catch |err| {
-            try stderr.writeAll("--shine-fleet: this GGUF cannot host the query-embedding trainer (dense qwen3 required)\n");
-            return err;
-        };
-        errdefer trainer.deinit();
-
-        return .{
-            .allocator = allocator,
-            .io = io,
-            .ctx = ctx,
-            .tokenizer = tokenizer,
-            .dir = dir,
-            .manifest = manifest,
-            .index = index,
-            .trainer = trainer,
-            .box = llm.qwen3.shine.AdaptedModel.init(model),
-        };
-    }
-
-    fn deinit(self: *ShineFleetServe) void {
-        self.box.adapter = null;
-        for (self.resident.items) |entry| {
-            entry.set.deinit();
-            self.allocator.destroy(entry.set);
-        }
-        self.resident.deinit(self.allocator);
-        self.trainer.deinit();
-        self.index.deinit();
-        self.manifest.deinit();
-    }
-
-    /// `backend.ShineFleetOptions.embedFn`: the exact recipe the index was
-    /// built with — text ids ++ `embed_suffix` ids, final-norm last hidden
-    /// state through the PLAIN base (the trainer holds the base model, not
-    /// the box, so retrieval is adapter-independent).
-    fn embed(ptr: *anyopaque, text: []const u8, out: []f32) anyerror!void {
-        const self: *ShineFleetServe = @ptrCast(@alignCast(ptr));
-        const a = self.allocator;
-        const text_ids = try self.tokenizer.encode(a, text);
-        defer a.free(text_ids);
-        const suffix_ids = try self.tokenizer.encode(a, llm.cartridge_fleet.embed_suffix);
-        defer a.free(suffix_ids);
-        const full = try a.alloc(usize, text_ids.len + suffix_ids.len);
-        defer a.free(full);
-        for (full[0..text_ids.len], text_ids) |*dst, id| dst.* = id;
-        for (full[text_ids.len..], suffix_ids) |*dst, id| dst.* = id;
-        try self.trainer.embedLastHidden(self.ctx, full, out);
-    }
-
-    /// `backend.ShineFleetOptions.applyFn`: point the box at `doc`'s
-    /// adapter, loading it through the LRU on a miss.
-    fn apply(ptr: *anyopaque, doc: ?usize) anyerror!void {
-        const self: *ShineFleetServe = @ptrCast(@alignCast(ptr));
-        const target = doc orelse {
-            self.box.adapter = null;
-            return;
-        };
-        if (target >= self.manifest.value.docs.len) return error.InvalidSelection;
-        self.clock += 1;
-        for (self.resident.items) |*entry| {
-            if (entry.doc == target) {
-                entry.last = self.clock;
-                self.box.adapter = entry.set;
-                return;
-            }
-        }
-        // Miss: evict the LRU entry first (the box is re-pointed on every
-        // request, so no live pointer survives an eviction).
-        self.box.adapter = null;
-        if (self.resident.items.len >= max_resident) {
-            var lru_i: usize = 0;
-            for (self.resident.items, 0..) |entry, i| {
-                if (entry.last < self.resident.items[lru_i].last) lru_i = i;
-            }
-            const victim = self.resident.swapRemove(lru_i);
-            victim.set.deinit();
-            self.allocator.destroy(victim.set);
-        }
-        const path = try std.fs.path.join(self.allocator, &.{ self.dir, self.manifest.value.docs[target].adapter_file });
-        defer self.allocator.free(path);
-        const set = try self.allocator.create(llm.qwen3.shine.LoraSet);
-        errdefer self.allocator.destroy(set);
-        set.* = try llm.qwen3.shine.loadLoraGguf(self.ctx, self.io, path, self.box.config);
-        errdefer set.deinit();
-        try self.resident.append(self.allocator, .{ .doc = target, .set = set, .last = self.clock });
-        self.box.adapter = set;
-    }
-};
-
-/// The qwen3 arm behind `--shine-fleet`: the same chat backend, decoding
-/// through the AdaptedModel box with per-request adapter selection.
-fn serveQwen3ShineFleet(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    stderr: *std.Io.Writer,
-    ctx: *fucina.ExecContext,
-    file: *fucina.gguf.File,
-    model_id: []const u8,
-    args: Args,
-) !void {
-    const config = try llm.qwen3.model.Config.fromGguf(file);
-    if (config.isMoe()) {
-        try stderr.writeAll("--shine-fleet needs a dense qwen3 base (SHINE adapts the dense linears)\n");
-        return error.ShineFleetUnsupported;
-    }
-    var model = try llm.qwen3.model.Model.loadGgufFromFile(ctx, file, config);
-    defer model.deinit();
-    var tokenizer = llm.tokenizer.Tokenizer.initFromGguf(allocator, file, .{}) catch {
-        try stderr.writeAll("this GGUF has no usable tokenizer metadata\n");
-        return error.TokenizerUnavailable;
-    };
-    defer tokenizer.deinit();
-    const template = llm.chat.Template.detect(file.getString("tokenizer.chat_template")) orelse {
-        try stderr.writeAll("this GGUF has no recognizable chat template\n");
-        return error.NoChatTemplate;
-    };
-    file.deinit();
-
-    var fs = try ShineFleetServe.init(io, allocator, stderr, ctx, &model, &tokenizer, args.shine_fleet_dir.?);
-    defer fs.deinit();
-    try stderr.print("shine fleet: {d} documents, {d} retrieval chunks, top-1 adapter per request\n", .{
-        fs.manifest.value.docs.len,
-        fs.index.len(),
-    });
-    try stderr.flush();
-
-    const kv_slots = try backend_mod.kvRamGuardSlots(llm.qwen3.shine.AdaptedModel, ctx, &fs.box, args.ctx_len, try slotsForBatch(stderr, args), args.kv_slots_force, stderr);
-
-    var adapter = backend_mod.GgufChatBackend(llm.qwen3.shine.AdaptedModel, llm.tokenizer).init(
-        allocator,
-        ctx,
-        &fs.box,
-        &tokenizer,
-        template,
-        .{
-            .model_id = model_id,
-            .context_len = args.ctx_len,
-            .think_markers = .{ .open = "<think>", .close = "</think>" },
-            .supports_think = true,
-            .tool_style = .hermes,
-            .default_sampling = .{ .temperature = 0.7, .top_k = 20, .top_p = 0.8 },
-            .speculation = args.spec,
-            .constraint_cache_len = @max(8, args.batch),
-            .kv_slots = kv_slots,
-            .shine_fleet = .{
-                .index = &fs.index,
-                .embed_ctx = &fs,
-                .embedFn = ShineFleetServe.embed,
-                .apply_ctx = &fs,
-                .applyFn = ShineFleetServe.apply,
-                .rag_chunks = args.rag_chunks,
-            },
-        },
-    );
-    defer adapter.deinit();
-    try serveWith(io, allocator, adapter.backend(), args);
-}
-
-fn serveQwen3(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    stderr: *std.Io.Writer,
-    ctx: *fucina.ExecContext,
-    file: *fucina.gguf.File,
-    model_id: []const u8,
-    args: Args,
-) !void {
-    if (args.shine_fleet_dir != null) return serveQwen3ShineFleet(io, allocator, stderr, ctx, file, model_id, args);
-    var model = try llm.qwen3.model.Model.loadGgufFromFile(ctx, file, try llm.qwen3.model.Config.fromGguf(file));
-    defer model.deinit();
-    var tokenizer = llm.tokenizer.Tokenizer.initFromGguf(allocator, file, .{}) catch {
-        try stderr.writeAll("this GGUF has no usable tokenizer metadata\n");
-        return error.TokenizerUnavailable;
-    };
-    defer tokenizer.deinit();
-    const template = llm.chat.Template.detect(file.getString("tokenizer.chat_template")) orelse {
-        try stderr.writeAll("this GGUF has no recognizable chat template\n");
-        return error.NoChatTemplate;
-    };
-    file.deinit();
-
-    var cart: ?llm.cartridge.Cartridge = null;
-    defer if (cart) |*c| c.deinit();
-    if (args.cartridge_path) |path| cart = try loadCartridge(io, allocator, stderr, ctx, &model, path);
-
-    var fleet_serve: ?FleetServeQwen3 = null;
-    defer if (fleet_serve) |*fs| fs.deinit();
-    if (args.fleet_dir) |dir| {
-        fleet_serve = try FleetServeQwen3.init(io, allocator, stderr, ctx, &model, &tokenizer, dir);
-        try stderr.print("fleet: {d} documents, {d} retrieval chunks, {d} docs composed per request\n", .{
-            fleet_serve.?.fleet.manifest.docs.items.len,
-            fleet_serve.?.index.len(),
-            args.rag_docs,
-        });
-        try stderr.flush();
-    }
-
-    const kv_slots = try backend_mod.kvRamGuardSlots(llm.qwen3.model.Model, ctx, &model, args.ctx_len, try slotsForBatch(stderr, args), args.kv_slots_force, stderr);
-
-    var adapter = backend_mod.GgufChatBackend(llm.qwen3.model.Model, llm.tokenizer).init(
-        allocator,
-        ctx,
-        &model,
-        &tokenizer,
-        template,
-        .{
-            .model_id = model_id,
-            .context_len = args.ctx_len,
-            .think_markers = .{ .open = "<think>", .close = "</think>" },
-            .supports_think = true,
-            .tool_style = .hermes,
-            // Qwen3's recommended no-think chat settings (the server default;
-            // per-request reasoning switches nothing here — clients override).
-            .default_sampling = .{ .temperature = 0.7, .top_k = 20, .top_p = 0.8 },
-            .speculation = args.spec,
-            .constraint_cache_len = @max(8, args.batch),
-            .kv_slots = kv_slots,
-            .kv_disk = kvDiskOptions(io, args),
-            .cartridge = if (cart) |*c| c else null,
-            .fleet = if (fleet_serve) |*fs| .{
-                .io = io,
-                .dir = args.fleet_dir.?,
-                .manifest = &fs.fleet.manifest,
-                .index = &fs.index,
-                .embed_ctx = fs,
-                .embedFn = FleetServeQwen3.embed,
-                .rag_docs = args.rag_docs,
-                .rag_chunks = args.rag_chunks,
-                .adaptive = args.rag_adaptive,
-                .switch_margin = args.rag_margin,
-            } else null,
-        },
-    );
-    defer adapter.deinit();
-    try serveWith(io, allocator, adapter.backend(), args);
-}
-
-fn serveGemma4(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    stderr: *std.Io.Writer,
-    ctx: *fucina.ExecContext,
-    file: *fucina.gguf.File,
-    model_id: []const u8,
-    args: Args,
-) !void {
-    if (args.shine_fleet_dir != null) {
-        try stderr.writeAll("--shine-fleet is a dense-qwen3 backend feature\n");
-        return error.ShineFleetUnsupported;
-    }
-    var config = try llm.gemma.gemma4.Config.fromGguf(file);
-    config.borrow_experts = args.experts_borrow;
-    var tokenizer = llm.spm_tokenizer.Tokenizer.initFromGguf(allocator, file, .{}) catch {
-        try stderr.writeAll("this GGUF has no usable SPM tokenizer metadata\n");
-        return error.TokenizerUnavailable;
-    };
-    defer tokenizer.deinit();
-    const template = llm.chat.Template.detect(file.getString("tokenizer.chat_template")) orelse
-        llm.chat.Template{ .format = .gemma4 };
-    const default_sampling = samplingFromGguf(file);
-
-    var model = try llm.gemma.gemma4.Model.loadGgufFromFile(ctx, file, config);
-    defer model.deinit();
-    file.deinit();
-
-    var cart: ?llm.cartridge.Cartridge = null;
-    defer if (cart) |*c| c.deinit();
-    if (args.cartridge_path) |path| cart = try loadCartridge(io, allocator, stderr, ctx, &model, path);
-
-    var fleet_serve: ?FleetServeGemma4 = null;
-    defer if (fleet_serve) |*fs| fs.deinit();
-    if (args.fleet_dir) |dir| {
-        if (config.num_experts > 0 and !config.borrow_experts) {
-            // The query embedder forwards through the trainer, whose MoE
-            // arm consumes raw expert blocks.
-            try stderr.writeAll("--fleet on a gemma4 MoE GGUF needs --experts=borrow (the query embedder forwards through raw expert blocks)\n");
-            return error.FleetUnsupported;
-        }
-        fleet_serve = try FleetServeGemma4.init(io, allocator, stderr, ctx, &model, &tokenizer, dir);
-        try stderr.print("fleet: {d} documents, {d} retrieval chunks, {d} docs composed per request\n", .{
-            fleet_serve.?.fleet.manifest.docs.items.len,
-            fleet_serve.?.index.len(),
-            args.rag_docs,
-        });
-        try stderr.flush();
-    }
-
-    // Turn-end ids beyond <turn|>: the GGUF's own EOS and a stray SPM <eos>
-    // (id 1) — the gemma4 chat harness registers the same pair.
-    var extra_stops_buf: [2]u32 = undefined;
-    var extra_n: usize = 0;
-    if (tokenizer.eosId()) |e| {
-        extra_stops_buf[extra_n] = e;
-        extra_n += 1;
-    }
-    extra_stops_buf[extra_n] = 1;
-    extra_n += 1;
-
-    const kv_slots = try backend_mod.kvRamGuardSlots(llm.gemma.gemma4.Model, ctx, &model, args.ctx_len, try slotsForBatch(stderr, args), args.kv_slots_force, stderr);
-
-    var adapter = backend_mod.GgufChatBackend(llm.gemma.gemma4.Model, llm.spm_tokenizer).init(
-        allocator,
-        ctx,
-        &model,
-        &tokenizer,
-        template,
-        .{
-            .model_id = model_id,
-            .context_len = args.ctx_len,
-            .extra_stop_ids = extra_stops_buf[0..extra_n],
-            .default_sampling = default_sampling,
-            .constraint_cache_len = @max(8, args.batch),
-            .kv_slots = kv_slots,
-            .kv_disk = kvDiskOptions(io, args),
-            .cartridge = if (cart) |*c| c else null,
-            .fleet = if (fleet_serve) |*fs| .{
-                .io = io,
-                .dir = args.fleet_dir.?,
-                .manifest = &fs.fleet.manifest,
-                .index = &fs.index,
-                .embed_ctx = fs,
-                .embedFn = FleetServeGemma4.embed,
-                .rag_docs = args.rag_docs,
-                .rag_chunks = args.rag_chunks,
-                .adaptive = args.rag_adaptive,
-                .switch_margin = args.rag_margin,
-            } else null,
-        },
-    );
-    defer adapter.deinit();
-    try serveWith(io, allocator, adapter.backend(), args);
-}
-
-/// Load a trained cartridge (docs/CARTRIDGES.md) and probe it against the
-/// model's KV geometry, so a mismatched file fails at startup instead of
-/// mid-request.
-fn loadCartridge(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    stderr: *std.Io.Writer,
-    ctx: *fucina.ExecContext,
-    model: anytype,
-    path: []const u8,
-) !llm.cartridge.Cartridge {
-    const bytes = blk: {
-        var dir = std.Io.Dir.cwd();
-        break :blk try dir.readFileAlloc(io, path, allocator, .limited(1024 * 1024 * 1024));
-    };
-    defer allocator.free(bytes);
-    var cart = try llm.cartridge.Cartridge.initFromStateDict(ctx, allocator, bytes);
-    errdefer cart.deinit();
-    var probe = try model.initKvCache(ctx, cart.p + 1);
-    defer probe.deinit();
-    cart.writeToCache(ctx, &probe) catch |err| {
-        try stderr.print("cartridge {s} does not fit this model's KV geometry\n", .{path});
-        return err;
-    };
-    return cart;
-}
-
-/// The gguf-chat backends' evict-to-disk tier config from the CLI flags
-/// (`--kv-cache-dir` armed it; the directory exists — main created it).
-fn kvDiskOptions(io: std.Io, args: Args) ?backend_mod.KvDiskOptions {
-    const dir = args.kv_cache_dir orelse return null;
-    return .{ .io = io, .dir = dir, .max_files = @max(args.kv_disk_slots, 1) };
-}
-
-/// Gemma's GGUF-recommended sampling (`general.sampling.*`), as the gemma4
-/// chat harness reads it.
-fn samplingFromGguf(file: *const fucina.gguf.File) llm.sampler.Config {
-    return .{
-        .temperature = if (file.getFloat("general.sampling.temp")) |v| @floatCast(v) else 1.0,
-        .top_k = if (file.getInt("general.sampling.top_k")) |v| @intCast(@max(@as(i64, 0), v)) else 64,
-        .top_p = if (file.getFloat("general.sampling.top_p")) |v| @floatCast(v) else 0.95,
-        .min_p = if (file.getFloat("general.sampling.min_p")) |v| @floatCast(v) else 0.0,
-        .repeat_penalty = if (file.getFloat("general.sampling.penalty_repeat")) |v| @floatCast(v) else 1.0,
-        .freq_penalty = if (file.getFloat("general.sampling.penalty_freq")) |v| @floatCast(v) else 0.0,
-        .presence_penalty = if (file.getFloat("general.sampling.penalty_present")) |v| @floatCast(v) else 0.0,
-        .repeat_last_n = if (file.getInt("general.sampling.penalty_last_n")) |v| @intCast(@max(@as(i64, 0), v)) else 64,
-    };
-}
-
-/// `--batch` needs one resident KV slot per lockstep stream; raise the
-/// requested pool to the batch width (the RAM guard then prices the total).
-fn slotsForBatch(stderr: *std.Io.Writer, args: Args) !usize {
-    if (args.batch > args.kv_slots) {
-        try stderr.print("--batch {d}: raising --kv-slots {d} -> {d} (one resident slot per lockstep stream)\n", .{ args.batch, args.kv_slots, args.batch });
-        try stderr.flush();
-        return args.batch;
-    }
-    return args.kv_slots;
-}
-
 fn serveWith(io: std.Io, allocator: std.mem.Allocator, backend: types.Backend, args: Args) !void {
     if (args.batch > 1 and !backend.supportsBatch()) {
         std.log.warn("this backend has no batched decode; serving --batch 1 (batching needs qwen3/qwen3moe/gemma4)", .{});
@@ -1191,7 +627,7 @@ fn serveWith(io: std.Io, allocator: std.mem.Allocator, backend: types.Backend, a
 
     try server.bind();
     g_listener_fd.store(@intCast(server.listenerHandle()), .release);
-    if (args.own_signals) installSignalHandlers();
+    installSignalHandlers();
 
     // A signal handler alone cannot end the accept loop: the Io layer
     // retries accept() on EINTR, and macOS does not wake a pending accept
@@ -1220,18 +656,13 @@ fn shutdownKicker(io: std.Io, port: u16) void {
 // Every sibling .zig file in this directory is listed: a file referenced
 // only from main()'s serve paths contributes ZERO tests to the test binary
 // (Zig's lazy analysis — silently green), so presence in the directory must
-// imply presence here.
+// imply presence here. The llm.serving band's tests live in the llm root
+// (`zig build test-llm`): Zig collects tests from the root MODULE only, so
+// a reference from this root cannot run them.
 test {
-    _ = @import("backend.zig");
     _ = @import("backend_nanochat.zig");
     _ = @import("backend_diffusion.zig");
     _ = @import("backend_inkling.zig");
     _ = @import("backend_qwen35.zig");
     _ = @import("backend_deepseek4.zig");
-    _ = @import("scheduler.zig");
-    _ = @import("openai.zig");
-    _ = @import("anthropic.zig");
-    _ = @import("emitter.zig");
-    _ = @import("http.zig");
-    _ = @import("toolcall.zig");
 }

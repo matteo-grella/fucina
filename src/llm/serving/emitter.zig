@@ -14,7 +14,7 @@
 //! is a normal response" rule.
 
 const std = @import("std");
-const types = @import("fucina_llm").serving;
+const types = @import("contract.zig");
 const openai = @import("openai.zig");
 const anthropic = @import("anthropic.zig");
 const toolcall = @import("toolcall.zig");

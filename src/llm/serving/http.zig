@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const posix = std.posix;
-const types = @import("fucina_llm").serving;
+const types = @import("contract.zig");
 const openai = @import("openai.zig");
 const anthropic = @import("anthropic.zig");
 const emitter_mod = @import("emitter.zig");

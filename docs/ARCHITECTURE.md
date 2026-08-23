@@ -649,8 +649,20 @@ Generic helpers stay flat in `src/llm/`:
   the lossless one-draw contract). `sendBatch` runs lockstep batch-N decode
   over N sibling conversations sharing one model via `Model.forwardStepBatch`
   (speculation excluded; ownership contract in `REFERENCE.md`).
-
-## Training And Persistence
+- `serving.zig` + `serving/`: the serving band. `serving/contract.zig` is
+  the model-agnostic contract (`GenerateRequest`/`GenerateResult`, `Caps`,
+  the per-family `Backend` vtable); `serving/http.zig` (accept loop, SSE
+  stream pipe, Host guard; needs libc on Linux for the `std.c.recv`
+  hang-up probe), `serving/scheduler.zig` (bounded FIFO + single inference
+  worker), `serving/emitter.zig` (per-dialect delta framing),
+  `serving/openai.zig` + `serving/anthropic.zig` (wire dialects), and
+  `serving/toolcall.zig` (hermes tool calling) are the transport;
+  `serving/gguf_chat.zig` is the generic `GgufChatBackend` engine
+  (constraint cache, KV reuse slots + disk tier, RAM guard) for any
+  `Conversation`-hosted family; `serving/open.zig` is the load-and-serve
+  entry (`serving.open`: GGUF in, ready `Backend` out for qwen3, qwen3moe,
+  gemma4). `examples/lmserve` is the CLI front end; adapters for families
+  outside `Conversation` stay example-local there.
 
 - `src/optim.zig`: SGD/AdamW/Muon/APOLLO, grad clipping, LR schedules,
   `OptimizerSet` param groups; positional `FZT1` tensor snapshots plus named,

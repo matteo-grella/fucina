@@ -18,6 +18,29 @@ point; earlier history is `git log`.
   research features under model families (SHINE, cartridges, Engram), and
   every model family's internal layout.
 
+## Unreleased
+
+### Added
+
+- `llm.serving` transport and engine, promoted from `examples/lmserve`:
+  `serving.http` (server, SSE stream pipe, Host guard), `serving.scheduler`
+  (bounded FIFO + single inference worker), `serving.emitter`, the
+  `serving.openai`/`serving.anthropic` wire dialects, `serving.toolcall`
+  (hermes tool calling), and `serving.gguf_chat` (the generic
+  `GgufChatBackend` engine: constraint cache, KV reuse slots + disk tier,
+  KV RAM guard). A package consumer now gets a working server, not only
+  the `Backend` vtable.
+- `llm.serving.open` / `llm.serving.openFromFile`: load a GGUF and return
+  a ready `serving.Backend` for the `Conversation`-hosted families (qwen3,
+  qwen3moe, gemma4) with the full engine option surface
+  (`serving.OpenOptions`); architectures whose adapters stay with
+  `examples/lmserve` (nanochat, diffusion-gemma, inkling, qwen35,
+  deepseek4) return `error.UnsupportedArchitecture`. lmserve is now a thin
+  CLI front end over the band, and the voice agent hosts the engine
+  through `llm.serving` (the `lmserve` build module is removed; in-process
+  `--chat` covers the `serving.open` families, `--chat-url` covers the
+  rest).
+
 ## 0.2.0 — 2026-08-22
 
 ### Added

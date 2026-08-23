@@ -39,8 +39,8 @@
 //! no `param` field, so offending fields are named in the message.
 
 const std = @import("std");
-const llm = @import("fucina_llm");
-const types = @import("fucina_llm").serving;
+const chat = @import("../chat.zig");
+const types = @import("contract.zig");
 const openai = @import("openai.zig");
 const toolcall = @import("toolcall.zig");
 
@@ -215,7 +215,7 @@ const Parser = struct {
 
     /// Flush accumulated tool-result sections as one user turn (Qwen3's
     /// template shape: consecutive results share the turn).
-    fn flushToolResponses(self: *Parser, messages: *std.ArrayList(llm.chat.Message), fold: *std.ArrayList(u8)) Error!void {
+    fn flushToolResponses(self: *Parser, messages: *std.ArrayList(chat.Message), fold: *std.ArrayList(u8)) Error!void {
         if (fold.items.len == 0) return;
         try messages.append(self.arena, .{ .role = .user, .content = try fold.toOwnedSlice(self.arena) });
     }
@@ -227,7 +227,7 @@ const Parser = struct {
     /// `tool_result` accumulates into `fold` — results answer the previous
     /// assistant turn, so they flush as their own user turn before this
     /// message's text.
-    fn appendTurn(self: *Parser, messages: *std.ArrayList(llm.chat.Message), fold: *std.ArrayList(u8), role: llm.chat.Message.Role, content: Value) Error!void {
+    fn appendTurn(self: *Parser, messages: *std.ArrayList(chat.Message), fold: *std.ArrayList(u8), role: chat.Message.Role, content: Value) Error!void {
         const hermes = self.info.tool_style == .hermes;
         const parts = switch (content) {
             .string => |s| {
@@ -410,7 +410,7 @@ const Parser = struct {
         }
 
         // system -> leading system message.
-        var messages: std.ArrayList(llm.chat.Message) = .empty;
+        var messages: std.ArrayList(chat.Message) = .empty;
         if (self.optField(obj, "system")) |sys| {
             const text = try self.systemText(sys);
             if (text.len > 0) try messages.append(self.arena, .{ .role = .system, .content = text });
@@ -448,7 +448,7 @@ const Parser = struct {
                 });
                 continue;
             }
-            const role: llm.chat.Message.Role = if (std.mem.eql(u8, role_s, "user"))
+            const role: chat.Message.Role = if (std.mem.eql(u8, role_s, "user"))
                 .user
             else if (std.mem.eql(u8, role_s, "assistant"))
                 .assistant
@@ -590,7 +590,7 @@ test "anthropic parse: happy path — system blocks, content blocks, thinking, s
     const outcome = parse(arena, body, info);
     const p = outcome.ok;
     try std.testing.expectEqual(@as(usize, 4), p.gen.messages.len);
-    try std.testing.expectEqual(llm.chat.Message.Role.system, p.gen.messages[0].role);
+    try std.testing.expectEqual(chat.Message.Role.system, p.gen.messages[0].role);
     try std.testing.expectEqualStrings("be terse", p.gen.messages[0].content);
     try std.testing.expectEqualStrings("hi there", p.gen.messages[1].content);
     // The prior-turn thinking block is dropped; the text remains.
@@ -662,7 +662,7 @@ test "anthropic parse: mid-conversation system message folds into a user turn" {
     ;
     const p = parse(arena, body, info).ok;
     try std.testing.expectEqual(@as(usize, 2), p.gen.messages.len);
-    try std.testing.expectEqual(llm.chat.Message.Role.user, p.gen.messages[1].role);
+    try std.testing.expectEqual(chat.Message.Role.user, p.gen.messages[1].role);
     try std.testing.expectEqualStrings("<system-reminder>\nterse mode\n</system-reminder>", p.gen.messages[1].content);
 }
 
@@ -696,7 +696,7 @@ test "anthropic parse: hermes tools render, tool history folds" {
         "Checking.\n<tool_call>\n{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}\n</tool_call>",
         p.gen.messages[2].content,
     );
-    try std.testing.expectEqual(llm.chat.Message.Role.user, p.gen.messages[3].role);
+    try std.testing.expectEqual(chat.Message.Role.user, p.gen.messages[3].role);
     try std.testing.expectEqualStrings("<tool_response>\n22C\n</tool_response>", p.gen.messages[3].content);
     try std.testing.expectEqualStrings("and tomorrow?", p.gen.messages[4].content);
 

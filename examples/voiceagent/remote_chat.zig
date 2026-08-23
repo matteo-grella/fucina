@@ -1,19 +1,21 @@
 //! OpenAI-compatible chat backend for the voice agent.
 //!
 //! The in-process path binds one architecture at compile time (`llm.qwen3`),
-//! which is why a Gemma or Qwen3.5 GGUF cannot be handed to `--chat` even
-//! though fucina can run both. Rather than grow a second architecture dispatch
-//! here, this speaks `/v1/chat/completions` to something that already has one:
-//! `fucina-lmserve` picks its backend from the GGUF's `general.architecture`,
-//! and any other OpenAI-compatible server (llama.cpp, vLLM, a hosted provider)
-//! works the same way.
+//! which is why a Gemma GGUF cannot be handed to `--chat` even though fucina
+//! can run it. Rather than grow a second architecture dispatch here, this
+//! speaks `/v1/chat/completions` to something that already has one:
+//! `llm.serving.open` picks the backend from the GGUF's
+//! `general.architecture` (qwen3, qwen3moe, gemma4), and any other
+//! OpenAI-compatible server (`fucina-lmserve`, llama.cpp, vLLM, a hosted
+//! provider) works the same way through `--chat-url`.
 //!
 //! The seam is deliberately the same as the local path: deltas are written to
 //! a `std.Io.Writer` as they arrive, so the sentence splitter, the synced
 //! reveal and barge-in behave identically whoever generated the tokens.
 
 const std = @import("std");
-const Serve = @import("lmserve");
+const fucina = @import("fucina");
+const serving = @import("fucina_llm").serving;
 
 pub const Role = enum { system, user, assistant };
 
@@ -273,14 +275,16 @@ pub const Client = struct {
     }
 };
 
-/// The lmserve chat server, hosted INSIDE this process on a thread.
+/// The `llm.serving` chat server, hosted INSIDE this process on a thread.
 ///
 /// Not a child process: one binary, one process, no external executable to
-/// find, and nothing to leave orphaned if the agent dies. What it buys over an
-/// in-process `llm.chat.Conversation` is the architecture dispatch —
-/// `serveBlocking` picks its backend from the GGUF's `general.architecture`,
-/// so Gemma, Qwen3.5 and the rest work — and a generation that can be
-/// abandoned mid-flight, which is what speculative turns are built on.
+/// find, and nothing to leave orphaned if the agent dies. What it buys over
+/// an in-process `llm.chat.Conversation` is the architecture dispatch
+/// (`serving.open` picks the backend from the GGUF's
+/// `general.architecture`: qwen3, qwen3moe, gemma4) and a generation that
+/// can be abandoned mid-flight, which is what speculative turns are built
+/// on. Families outside `serving.open`'s coverage are served externally
+/// (`--chat-url` against `fucina-lmserve` or any OpenAI-compatible server).
 ///
 /// The loopback socket is the seam. It costs microseconds and buys a hard
 /// boundary: the server owns its own ExecContext, KV slots and worker team,
@@ -295,7 +299,9 @@ pub const Hosted = struct {
     const Job = struct {
         io: std.Io,
         allocator: std.mem.Allocator,
-        args: Serve.Args,
+        model_path: []const u8,
+        port: u16,
+        ctx_len: usize,
     };
 
     /// The server's own logs would fight the TUI for the terminal.
@@ -312,7 +318,40 @@ pub const Hosted = struct {
 
     fn threadMain(job: *Job) void {
         var sink: std.Io.Writer = .{ .vtable = &.{ .drain = Discard.drain }, .buffer = &Discard.buf };
-        Serve.serveBlocking(job.io, job.allocator, &sink, job.args) catch {};
+        serveJob(job, &sink) catch {};
+    }
+
+    /// lmserve's serve loop without signal handling: Ctrl-C belongs to the
+    /// agent (a handler here would clobber the TUI's and leave the terminal
+    /// in raw mode), and the server runs until the process exits, so no
+    /// shutdown path is wired.
+    fn serveJob(job: *Job, sink: *std.Io.Writer) !void {
+        var ctx: fucina.ExecContext = undefined;
+        ctx.init(job.allocator);
+        defer ctx.deinit();
+        var opened = try serving.open(&ctx, job.io, job.allocator, job.model_path, .{
+            .context_len = job.ctx_len,
+            // Two resident KV slots are what make re-sending the whole
+            // history every turn cheap: the agent's conversation (and a
+            // speculative probe beside it) stays warm across requests
+            // instead of re-prefilling.
+            .kv_slots = 2,
+        }, sink);
+        defer opened.deinit();
+        var sched = serving.scheduler.Scheduler.init(job.allocator, job.io, opened.backend, 16, 1);
+        try sched.start();
+        defer sched.stop();
+        var shutdown = std.atomic.Value(bool).init(false);
+        var server = serving.http.Server{
+            .allocator = job.allocator,
+            .io = job.io,
+            .opts = .{ .host = "127.0.0.1", .port = job.port },
+            .backend = opened.backend,
+            .sched = &sched,
+            .shutdown = &shutdown,
+        };
+        try server.bind();
+        try server.run();
     }
 
     pub fn start(
@@ -327,21 +366,9 @@ pub const Hosted = struct {
         job.* = .{
             .io = io,
             .allocator = allocator,
-            .args = .{
-                .model_path = model_path,
-                .host = "127.0.0.1",
-                .port = port,
-                .ctx_len = ctx_len,
-                // One resident KV slot is what makes re-sending the whole
-                // history every turn cheap — the agent's conversation stays
-                // warm across requests instead of re-prefilling.
-                .kv_slots = 2,
-                // Ctrl-C belongs to the agent. lmserve's handler only sets a
-                // shutdown flag and closes the listener — installing it here
-                // would clobber the TUI's, so Ctrl-C would stop the server and
-                // leave the agent running with the terminal in raw mode.
-                .own_signals = false,
-            },
+            .model_path = model_path,
+            .port = port,
+            .ctx_len = ctx_len,
         };
         var thread = try std.Thread.spawn(.{}, threadMain, .{job});
         thread.detach(); // it runs until the process does

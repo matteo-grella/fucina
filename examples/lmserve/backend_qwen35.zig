@@ -17,7 +17,7 @@ const std = @import("std");
 const fucina = @import("fucina");
 const llm = @import("fucina_llm");
 const types = @import("fucina_llm").serving;
-const backend_mod = @import("backend.zig");
+const backend_mod = @import("fucina_llm").serving.gguf_chat;
 
 const Allocator = std.mem.Allocator;
 const qwen35_chat = llm.qwen35.chat;

@@ -114,9 +114,12 @@ pub const sampler = @import("llm/sampler.zig");
 pub const logit_processor = @import("llm/logit_processor.zig");
 pub const llguidance = @import("llm/llguidance.zig");
 pub const chat = @import("llm/chat.zig");
-/// The serving contract: `GenerateRequest`/`GenerateResult`, capability
-/// flags, and the per-model-family `Backend` vtable a server consumes
-/// (`examples/lmserve` is the in-tree server built on it).
+/// The serving band: the contract (`GenerateRequest`/`GenerateResult`,
+/// capability flags, the per-model-family `Backend` vtable) plus the
+/// transport (HTTP server, scheduler, OpenAI/Anthropic dialects), the
+/// generic GGUF chat engine, and the `serving.open` load-and-serve entry
+/// (`examples/lmserve` is the CLI front end built on it). Files in
+/// `llm/serving/`.
 pub const serving = @import("llm/serving.zig");
 /// The descriptor runner: one family-independent decoder driven by a
 /// runtime `Descriptor` (Level 0 of the universal checkpoint runner);
@@ -184,6 +187,13 @@ test {
     _ = logit_processor;
     _ = llguidance;
     _ = chat;
+    _ = serving.gguf_chat;
+    _ = serving.scheduler;
+    _ = serving.openai;
+    _ = serving.anthropic;
+    _ = serving.emitter;
+    _ = serving.http;
+    _ = serving.toolcall;
     _ = data;
     _ = subq;
 }

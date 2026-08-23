@@ -25,7 +25,7 @@ const std = @import("std");
 const fucina = @import("fucina");
 const llm = @import("fucina_llm");
 const types = @import("fucina_llm").serving;
-const backend_mod = @import("backend.zig");
+const backend_mod = @import("fucina_llm").serving.gguf_chat;
 
 const Allocator = std.mem.Allocator;
 const ds4 = llm.deepseek4.model;
@@ -286,7 +286,7 @@ pub const Deepseek4Backend = struct {
 fn stopHitInTail(items: []const u8, prev_len: usize, needles: []const []const u8) ?usize {
     var max_len: usize = 0;
     for (needles) |n| max_len = @max(max_len, n.len);
-    const window = items[prev_len -| (max_len -| 1) ..];
+    const window = items[prev_len -| (max_len -| 1)..];
     for (needles, 0..) |n, i| {
         if (n.len > 0 and std.mem.indexOf(u8, window, n) != null) return i;
     }

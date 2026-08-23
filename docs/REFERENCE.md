@@ -146,6 +146,7 @@ API-level companion. Every Zig snippet is machine-verified against the tree
   - [13.10 Cartridges (`src/llm/cartridge.zig`)](#1310-cartridges-srcllmcartridgezig)
   - [13.11 Engram (`src/llm/engram.zig`)](#1311-engram-srcllmengramzig)
   - [13.12 SHINE (`src/llm/qwen3/shine.zig`)](#1312-shine-srcllmqwen3shinezig)
+  - [13.13 Serving (`src/llm/serving/`)](#1313-serving-srcllmserving)
 - [14. Model families and example applications](#14-model-families-and-example-applications)
   - [14.1 Conventions shared by every family](#141-conventions-shared-by-every-family)
   - [14.2 Qwen3 — dense and MoE (`src/llm/qwen3/model.zig`)](#142-qwen3--dense-and-moe-srcllmqwen3modelzig)
@@ -11192,7 +11193,7 @@ family-agnostic helpers stay flat:
 | `llm.cartridge` | trained KV-prefix corpus compression (Cartridges, arXiv 2506.06266) | §13.10 |
 | `llm.cartridge_fleet` | per-document cartridge fleets: manifest, RAM/disk budget manager, cosine chunk index (Cartridges at Scale, arXiv 2606.04557) | §13.10 |
 | `llm.engram` | conditional n-gram memory: hashed-lookup embedding tables grafted onto a frozen model (Engram, arXiv 2601.07372) | §13.11 |
-| `llm.serving` | the serving contract: `GenerateRequest`/`GenerateResult`, `Caps`, and the per-family `Backend` vtable a server consumes (`examples/lmserve` is the in-tree server; a new family integrates by writing one adapter, a new server by consuming this module) | `src/llm/serving.zig` |
+| `llm.serving` | the serving band: the contract (`GenerateRequest`/`GenerateResult`, `Caps`, the per-family `Backend` vtable), the HTTP transport (`serving.http`/`scheduler`/`emitter` + the OpenAI/Anthropic dialects and hermes tool calling), the generic `GgufChatBackend` engine, and the `serving.open` load-and-serve entry (`examples/lmserve` is the CLI front end) | §13.13 |
 | `llm.runner` | the descriptor runner (experimental): one family-independent decoder driven by a runtime `Descriptor` with two block styles (fused qwen3-shape, host_reference GLM/DeepSeek-MoE shape); `Descriptor.fromGguf` reads both metadata shapes; three bitwise parity gates in `runner_tests.zig` (real 0.6B, synthetic MoE, synthetic glm4moe) | `docs/RUNNER.md` |
 
 The family namespaces are covered in §14 (kimi3 in §14.7,
@@ -13538,6 +13539,105 @@ prefix has near-uniform key logits and near-zero value content (the
 `sqrt(scale)` discipline) — prefix-tuning's trainable regime, not the
 LoRA mode's exact-identity start.
 
+### 13.13 Serving (`src/llm/serving/`)
+
+`llm.serving` is the complete serving stack: the model-agnostic contract,
+the HTTP transport, the generic GGUF chat engine, and a load-and-serve
+entry. `src/llm/serving.zig` is the band index (contract names re-exported
+flat, sub-modules namespaced); `examples/lmserve` (§14.8) is the CLI front
+end built on it, and the voice agent hosts the same engine in-process.
+
+**Contract** (`serving/contract.zig`, re-exported flat). `GenerateRequest`
+carries the normalized message history (`llm.chat.Message`), the fully
+resolved `sampler.Config`, a bounded `max_tokens`, client stop strings, an
+optional `ConstraintSpec` (JSON schema / regex / Lark), and the `think`
+toggle. `GenerateResult` reports `prompt_tokens`, `completion_tokens`,
+`cached_tokens` (KV rows reused from the cross-request cache), the fired
+`stop_sequence` index, and `finish` (`.stop`/`.length`). `Caps` declares
+what a backend can honor (the OpenAI layer rejects with 400 instead of
+silently dropping fields); `Info` adds the model id, context budget,
+`ThinkMarkers`, `ToolStyle` (`.hermes` is the Qwen3 convention), and the
+default sampling. `RequestError` names the errors the dialect layers map
+to specific HTTP statuses. The `Backend` vtable has `validate` (cheap,
+connection thread), `generate` (worker thread, streams reply bytes to a
+`*std.Io.Writer` sink), and optional `generate_batch` (lockstep decode;
+null when the family has no batch forward).
+
+**Transport.** `serving.http.Server` is the front end: accept loop,
+per-connection threads (capped), socket deadlines, routing
+(`POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages`,
+`GET /v1/models`, `GET /health`), SSE plumbing through the cross-thread
+`StreamPipe` (a stalled client stalls only its own connection thread,
+never generation), the Host-header DNS-rebinding guard, and opt-in CORS.
+It reads its work from `serving.scheduler.Scheduler`: a bounded FIFO in
+front of one sequential inference worker (the engine's intended shape:
+one `ExecContext`, single-threaded by contract), with lockstep batch
+grouping when the scheduler is built with a batch width above 1.
+`serving.emitter` frames deltas per wire dialect and routes
+reasoning-block text away from the content channel; `serving.openai` and
+`serving.anthropic` parse the three dialects into one normalized shape;
+`serving.toolcall` renders hermes `<tool_call>` prompts and scans replies
+for calls. On Linux, a binary that references `serving.http` links libc
+(the `std.c.recv` client-hang-up probe); macOS links it implicitly.
+
+**Engine** (`serving.gguf_chat`). `GgufChatBackend(Model, TokMod)` adapts
+any family served through `llm.chat.Conversation` (one comptime
+instantiation per model/tokenizer pair): resident KV reuse slots with
+token-LCP adoption and cross-slot prefix share, the `kv_persist` disk
+tier (§13.4), the llguidance `ConstraintCache` (init once per distinct
+grammar, clone per request), cartridge / cartridge-fleet / SHINE-fleet
+serving hooks (§13.10, §13.12), and batch decode over
+`Model.forwardStepBatch`. `kvRamVerdict`/`kvRamGuardSlots` implement the
+startup RAM guard: slot caches commit lazily, so an overcommitted pool
+would otherwise fail mid-serving as page-cache eviction, not at startup.
+
+**Load-and-serve** (`serving/open.zig`).
+`serving.open(ctx, io, allocator, gguf_path, options, stderr)` sniffs
+`general.architecture` and returns a ready `Opened` (`.backend` plus one
+`deinit` that owns model, tokenizer, and engine state). Families served:
+qwen3, qwen3moe, gemma4 (the `Conversation`-hosted set). nanochat,
+diffusion-gemma, inkling, qwen35/qwen35moe and deepseek4 return
+`error.UnsupportedArchitecture`: their adapters live with
+`examples/lmserve`, whose main dispatches to them itself and falls back
+to `open` for the rest. `OpenOptions` carries the engine surface
+(`context_len`, `spec`, `batch`, `experts_borrow`, `kv_slots` +
+`kv_slots_force`, `kv_cache_dir` + `kv_disk_slots`, `cartridge_path`,
+`fleet_dir`/`shine_fleet_dir` + the `rag_*` knobs); excluded combinations
+return `error.InvalidOptions`. `serving.openFromFile` is the same entry
+over an already-loaded `fucina.gguf.File` (it takes ownership of the file
+on every path); `serving.samplingFromGguf` reads the GGUF-recommended
+`general.sampling.*` block. `stderr` is the diagnostic sink for guard
+arithmetic and load errors; a host may pass a discarding writer. A
+minimal host:
+
+```zig
+var opened = try serving.open(&ctx, io, allocator, "model.gguf", .{
+    .context_len = 8192,
+    .kv_slots = 2,
+}, stderr);
+defer opened.deinit();
+
+var sched = serving.scheduler.Scheduler.init(allocator, io, opened.backend, 16, 1);
+try sched.start();
+defer sched.stop();
+
+var shutdown = std.atomic.Value(bool).init(false);
+var server = serving.http.Server{
+    .allocator = allocator,
+    .io = io,
+    .opts = .{ .host = "127.0.0.1", .port = 8080 },
+    .backend = opened.backend,
+    .sched = &sched,
+    .shutdown = &shutdown,
+};
+try server.bind();
+try server.run();
+```
+
+The band's unit tests ride the llm test root (`zig build test-llm`): Zig
+collects tests from the root module only, and none of them reach the
+libc probe, so the llm root stays libc-free.
+
 ## 14. Model families and example applications
 
 The `fucina_llm` module root (`src/llm.zig`) exposes each model family as a
@@ -14477,7 +14577,8 @@ against the fp32 Python reference under a tiered parity ladder.
 `zig build nanochat -- tok-train|base-train|sft|eval-bpb|chat ...`.
 
 **lmserve** (`examples/lmserve/`, [README](../examples/lmserve/README.md);
-[LMSERVER.md](LMSERVER.md) is the full design doc) is an OpenAI- and
+[LMSERVER.md](LMSERVER.md) is the full design doc) is the CLI front end of
+the `llm.serving` band (§13.13): an OpenAI- and
 Anthropic-compatible HTTP server over the in-tree language models: Chat
 Completions (`POST /v1/chat/completions`), the stateless Responses API
 (`POST /v1/responses`), and the Anthropic Messages API
@@ -14498,8 +14599,10 @@ queued requests together with per-stream failure isolation (§13.8),
 `--spec` adds lossless self-draft speculative decoding (composes with
 reuse and stop sequences, §13.9), and `--cartridge`/`--fleet` mount
 trained KV-prefix cartridges (§13.10). The GGUF's `general.architecture`
-picks the backend (qwen3 / qwen3moe / qwen35 / gemma4 / diffusion-gemma /
-inkling); `--nanochat <dir>` serves a nanochat checkpoint.
+picks the backend: qwen3/qwen3moe/gemma4 load through `serving.open`
+(§13.13); qwen35, diffusion-gemma, inkling and deepseek4 ride the
+example-local adapters (`backend_*.zig`); `--nanochat <dir>` serves a
+nanochat checkpoint.
 `zig build lmserve -- <model.gguf> [--host H] [--port N] [flags]`.
 
 **facedetect** (`examples/facedetect/`,
