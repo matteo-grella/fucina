@@ -23,10 +23,10 @@ const std = @import("std");
 const fucina = @import("fucina");
 const weights = @import("fucina").weights;
 const kv_cache = @import("kv_cache.zig");
+const model_common = @import("model_common.zig");
 const subq_mod = @import("subq.zig");
 const host_ops = @import("host_ops.zig");
 const gguf_meta = @import("fucina").gguf_meta;
-const ptqtp_gguf = @import("fucina").ptqtp_gguf;
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
@@ -300,26 +300,15 @@ pub const Model = struct {
         }
         errdefer if (expert_store) |store| store.destroy();
 
-        var token_embedding = try LinearWeight.load(ctx, try file.get("token_embd.weight"), config.vocab_size, config.hidden_size);
-        errdefer token_embedding.deinit();
+        var head = try model_common.loadEmbedHead(ctx, file, config.vocab_size, config.hidden_size);
+        errdefer {
+            head.output.deinit();
+            head.output_norm.deinit();
+            head.token_embedding.deinit();
+        }
 
-        var output_norm = try weights.loadVector(ctx, try file.get("output_norm.weight"), config.hidden_size, .embed);
-        errdefer output_norm.deinit();
-
-        var output = blk: {
-            // Persisted PTQTP head planes win over the base tensor; a
-            // decorated head on a tied-embedding model has planes and no
-            // base, while the embedding keeps its source precision.
-            if (try ptqtp_gguf.maybeLoadPlanes(ctx, file, "output.weight", config.vocab_size, config.hidden_size)) |planes| break :blk planes;
-            if (file.maybeGet("output.weight")) |info| break :blk try LinearWeight.load(ctx, info, config.vocab_size, config.hidden_size);
-            break :blk try token_embedding.cloneView(ctx);
-        };
-        errdefer output.deinit();
-
-        const kv_head_for_head = try allocator.alloc(usize, config.num_attention_heads);
+        const kv_head_for_head = try model_common.kvHeadMap(allocator, config.num_attention_heads, config.num_key_value_heads);
         errdefer allocator.free(kv_head_for_head);
-        const heads_per_kv = config.num_attention_heads / config.num_key_value_heads;
-        for (kv_head_for_head, 0..) |*kv_head, head_i| kv_head.* = head_i / heads_per_kv;
 
         const layers = try allocator.alloc(Layer, config.num_layers);
         errdefer allocator.free(layers);
@@ -338,9 +327,9 @@ pub const Model = struct {
         return .{
             .allocator = allocator,
             .config = config,
-            .token_embedding = token_embedding,
-            .output_norm = output_norm,
-            .output = output,
+            .token_embedding = head.token_embedding,
+            .output_norm = head.output_norm,
+            .output = head.output,
             .layers = layers,
             .kv_head_for_head = kv_head_for_head,
             .weight_mapping = weight_mapping,
@@ -678,10 +667,8 @@ pub const Model = struct {
         var output_norm = try weights.loadVector(ctx, try file.get("output_norm.weight"), config.hidden_size, .embed);
         errdefer output_norm.deinit();
 
-        const kv_head_for_head = try allocator.alloc(usize, config.num_attention_heads);
+        const kv_head_for_head = try model_common.kvHeadMap(allocator, config.num_attention_heads, config.num_key_value_heads);
         errdefer allocator.free(kv_head_for_head);
-        const heads_per_kv = config.num_attention_heads / config.num_key_value_heads;
-        for (kv_head_for_head, 0..) |*kv_head, head_i| kv_head.* = head_i / heads_per_kv;
 
         const layers = try allocator.alloc(Layer, 0);
         errdefer allocator.free(layers);
@@ -829,17 +816,10 @@ pub fn hostProjectRows(ctx: *ExecContext, hidden: usize, eps: f32, x: []const f3
     return head.linearSeq(ctx, &normed_t, .embed, .vocab);
 }
 
-/// Dense-FFN weights (exported for train.zig's differentiable forward).
-pub const DenseFfn = struct {
-    input_proj: FfnInputProjection,
-    down_proj: LinearWeight,
-
-    fn deinit(self: *DenseFfn) void {
-        self.down_proj.deinit();
-        self.input_proj.deinit();
-        self.* = undefined;
-    }
-};
+/// Dense-FFN weights (model_common containers; re-exported for train.zig's
+/// differentiable forward).
+pub const DenseFfn = model_common.DenseFfn;
+const FfnInputProjection = model_common.FfnInputProjection;
 
 const MoeFfn = struct {
     router: LinearWeight,
@@ -869,39 +849,8 @@ const Ffn = union(enum) {
     }
 };
 
-/// Load one projection linear by GGUF name: persisted PTQTP planes when the
-/// file carries them (ptqtp_gguf pair-detection; a no-op metadata lookup on
-/// undecorated files), else the base tensor. Skip-layer tensors inside a
-/// decorated file take the base branch — plane presence is per tensor.
-fn loadProjection(ctx: *ExecContext, file: *const gguf.File, name: []const u8, rows: usize, cols: usize, for_fusion: bool) !LinearWeight {
-    if (try ptqtp_gguf.maybeLoadPlanes(ctx, file, name, rows, cols)) |planes| return planes;
-    const info = try file.get(name);
-    return if (for_fusion)
-        LinearWeight.loadForFusion(ctx, info, rows, cols)
-    else
-        LinearWeight.load(ctx, info, rows, cols);
-}
-
-/// MoE expert-stack counterpart of `loadProjection`: persisted PTQTP plane
-/// stacks (`<name>.ptqtpK` siblings) when the file carries them, else the
-/// base stacked tensor.
-const loadMoeProjection = ptqtp_gguf.loadMoeRhsAuto;
-const moeProjSpec = ptqtp_gguf.streamedProjSpecAuto;
-
-/// Streamed counterpart: an ExpertStore ProjSpec, pair-detecting PTQTP
-/// plane sets the same way.
-
-fn loadDenseFfn(ctx: *ExecContext, file: *const gguf.File, config: Descriptor, layer_i: usize) !DenseFfn {
-    var name_buf: [96]u8 = undefined;
-
-    var input_proj = try FfnInputProjection.load(ctx, file, config, layer_i);
-    errdefer input_proj.deinit();
-
-    var down_proj = try loadProjection(ctx, file, try weights.layerName(&name_buf, layer_i, "ffn_down.weight"), config.hidden_size, config.intermediate_size, false);
-    errdefer down_proj.deinit();
-
-    return .{ .input_proj = input_proj, .down_proj = down_proj };
-}
+/// Shared PTQTP-aware projection loader (model_common.zig).
+const loadProjection = model_common.loadProjection;
 
 fn loadMoeFfn(ctx: *ExecContext, file: *const gguf.File, config: Descriptor, layer_i: usize, store: ?*fucina.ExpertStore) !MoeFfn {
     var name_buf: [96]u8 = undefined;
@@ -909,34 +858,8 @@ fn loadMoeFfn(ctx: *ExecContext, file: *const gguf.File, config: Descriptor, lay
     var router = try LinearWeight.load(ctx, try file.get(try weights.layerName(&name_buf, layer_i, "ffn_gate_inp.weight")), config.num_experts, config.hidden_size);
     errdefer router.deinit();
 
-    // Streamed: register geometry only — the expert stacks stay on disk and
-    // never become resident. addLayer touches only this layer's state, so
-    // the parallel layer loader may call it concurrently for distinct layers.
-    if (store) |s| {
-        const trio = try weights.registerStreamedMoeLayer(s, layer_i, .{
-            try moeProjSpec(file, try weights.layerName(&name_buf, layer_i, "ffn_gate_exps.weight"), config.hidden_size, config.moe_intermediate_size, config.num_experts),
-            try moeProjSpec(file, try weights.layerName(&name_buf, layer_i, "ffn_up_exps.weight"), config.hidden_size, config.moe_intermediate_size, config.num_experts),
-            // down transposes the FFN: (out_pe -> hidden).
-            try moeProjSpec(file, try weights.layerName(&name_buf, layer_i, "ffn_down_exps.weight"), config.moe_intermediate_size, config.hidden_size, config.num_experts),
-        }, config.num_experts);
-        return .{ .router = router, .gate = trio.gate, .up = trio.up, .down = trio.down };
-    }
-
-    // Expert blocks need no repack, so when the GGUF is mmap'd they are
-    // borrowed straight from the mapping (the Model takes ownership of it in
-    // loadGgufFromFile) instead of copying the multi-GB stacks. Split GGUFs
-    // cannot hand over their multiple mappings (takeMapping declines), so
-    // their experts are copied — stream them instead for the big models.
-    const borrow = file.is_mmap and !file.isSplit();
-
-    var gate = try loadMoeProjection(ctx, file, try weights.layerName(&name_buf, layer_i, "ffn_gate_exps.weight"), config.hidden_size, config.moe_intermediate_size, config.num_experts, borrow);
-    errdefer gate.deinit();
-    var up = try loadMoeProjection(ctx, file, try weights.layerName(&name_buf, layer_i, "ffn_up_exps.weight"), config.hidden_size, config.moe_intermediate_size, config.num_experts, borrow);
-    errdefer up.deinit();
-    var down = try loadMoeProjection(ctx, file, try weights.layerName(&name_buf, layer_i, "ffn_down_exps.weight"), config.moe_intermediate_size, config.hidden_size, config.num_experts, borrow);
-    errdefer down.deinit();
-
-    return .{ .router = router, .gate = gate, .up = up, .down = down };
+    const trio = try model_common.loadMoeTrio(ctx, file, store, layer_i, config.hidden_size, config.moe_intermediate_size, config.num_experts);
+    return .{ .router = router, .gate = trio.gate, .up = trio.up, .down = trio.down };
 }
 
 /// One transformer layer's weights. Exported: train.zig runs its
@@ -975,7 +898,7 @@ pub const Layer = struct {
         var ffn: Ffn = if (config.isMoe())
             .{ .moe = try loadMoeFfn(ctx, file, config, layer_i, store) }
         else
-            .{ .dense = try loadDenseFfn(ctx, file, config, layer_i) };
+            .{ .dense = try DenseFfn.load(ctx, file, config.hidden_size, config.intermediate_size, layer_i, "") };
         errdefer ffn.deinit();
 
         return .{
@@ -1174,91 +1097,12 @@ pub fn splitQkv(ctx: *ExecContext, qkv: *const fucina.Tensor(.{ .seq, .qkv }), c
     return .{ .q = q, .k = k, .v = v };
 }
 
-const SeparateFfnInputProjection = struct {
-    gate_proj: LinearWeight,
-    up_proj: LinearWeight,
+pub const GateUpProjection = model_common.GateUpProjection;
 
-    fn deinit(self: *SeparateFfnInputProjection) void {
-        self.up_proj.deinit();
-        self.gate_proj.deinit();
-        self.* = undefined;
-    }
-};
-
-pub const GateUpProjection = struct {
-    gate: fucina.Tensor(.{ .seq, .ffn }),
-    up: fucina.Tensor(.{ .seq, .ffn }),
-
-    pub fn deinit(self: *GateUpProjection) void {
-        self.up.deinit();
-        self.gate.deinit();
-        self.* = undefined;
-    }
-};
-
-const FfnInputProjection = union(enum) {
-    separate: SeparateFfnInputProjection,
-    fused: LinearWeight,
-
-    fn load(ctx: *ExecContext, file: *const gguf.File, config: Descriptor, layer_i: usize) !FfnInputProjection {
-        var name_buf: [96]u8 = undefined;
-
-        var gate_proj = try loadProjection(ctx, file, try weights.layerName(&name_buf, layer_i, "ffn_gate.weight"), config.intermediate_size, config.hidden_size, true);
-        errdefer gate_proj.deinit();
-
-        var up_proj = try loadProjection(ctx, file, try weights.layerName(&name_buf, layer_i, "ffn_up.weight"), config.intermediate_size, config.hidden_size, true);
-        errdefer up_proj.deinit();
-
-        var fuse_parts = [_]*LinearWeight{ &gate_proj, &up_proj };
-        if (try weights.fuseLinear(ctx, &fuse_parts)) |fused| {
-            return .{ .fused = fused };
-        }
-
-        return .{ .separate = .{
-            .gate_proj = gate_proj,
-            .up_proj = up_proj,
-        } };
-    }
-
-    fn deinit(self: *FfnInputProjection) void {
-        switch (self.*) {
-            .separate => |*separate| separate.deinit(),
-            .fused => |*weight| weight.deinit(),
-        }
-        self.* = undefined;
-    }
-
-    fn project(self: *const FfnInputProjection, ctx: *ExecContext, input: *const fucina.Tensor(.{ .seq, .embed }), config: Descriptor) !GateUpProjection {
-        return switch (self.*) {
-            .separate => |*separate| blk: {
-                var gate = try separate.gate_proj.linearSeq(ctx, input, .embed, .ffn);
-                errdefer gate.deinit();
-                var up = try separate.up_proj.linearSeq(ctx, input, .embed, .ffn);
-                errdefer up.deinit();
-                break :blk .{ .gate = gate, .up = up };
-            },
-            .fused => |*weight| blk: {
-                var gate_up = try weight.linearSeq(ctx, input, .embed, .gate_up);
-                defer gate_up.deinit();
-                break :blk try splitGateUp(ctx, &gate_up, config);
-            },
-        };
-    }
-};
-
-/// Fused gate/up counterpart of `splitQkv` (also shared with train.zig).
+/// Fused gate/up counterpart of `splitQkv` (also shared with train.zig);
+/// the width-parameterized split lives in model_common.
 pub fn splitGateUp(ctx: *ExecContext, gate_up: *const fucina.Tensor(.{ .seq, .gate_up }), config: Descriptor) !GateUpProjection {
-    var gate_view = try gate_up.narrow(ctx, .gate_up, 0, config.intermediate_size);
-    defer gate_view.deinit();
-    var gate = try gate_view.withTags(ctx, .{ .seq, .ffn });
-    errdefer gate.deinit();
-
-    var up_view = try gate_up.narrow(ctx, .gate_up, config.intermediate_size, config.intermediate_size);
-    defer up_view.deinit();
-    var up = try up_view.withTags(ctx, .{ .seq, .ffn });
-    errdefer up.deinit();
-
-    return .{ .gate = gate, .up = up };
+    return model_common.splitGateUp(ctx, gate_up, config.intermediate_size);
 }
 
 fn attentionBlock(
@@ -1649,7 +1493,7 @@ fn denseFfn(
     const gate_up_start = profileStart(profile, io);
     var gated = switch (dense.input_proj) {
         .separate => blk: {
-            var gate_up = try dense.input_proj.project(ctx, ffn_in, config);
+            var gate_up = try dense.input_proj.project(ctx, ffn_in, config.intermediate_size);
             defer gate_up.deinit();
             if (profile) |p| p.gate_up_ns += profileElapsed(gate_up_start, io);
 

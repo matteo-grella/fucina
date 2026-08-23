@@ -24,9 +24,9 @@
 const std = @import("std");
 const fucina = @import("fucina");
 const weights = @import("fucina").weights;
+const model_common = @import("../model_common.zig");
 const kv_cache = @import("../kv_cache.zig");
 const gguf_meta = @import("fucina").gguf_meta;
-const ptqtp_gguf = @import("fucina").ptqtp_gguf;
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
@@ -272,70 +272,11 @@ fn readSections(file: *const gguf.File, arch: []const u8) [4]i32 {
     return out;
 }
 
-const SeparateFfnInputProjection = struct {
-    gate: LinearWeight,
-    up: LinearWeight,
-
-    fn deinit(self: *SeparateFfnInputProjection) void {
-        self.up.deinit();
-        self.gate.deinit();
-        self.* = undefined;
-    }
-};
-
-const FfnInputProjection = union(enum) {
-    separate: SeparateFfnInputProjection,
-    fused: LinearWeight,
-
-    fn load(ctx: *ExecContext, file: *const gguf.File, hidden: usize, width: usize, il: usize, comptime suffix: []const u8) !FfnInputProjection {
-        var nb: [96]u8 = undefined;
-        var gate = try LinearWeight.loadForFusion(ctx, try file.get(try weights.layerName(&nb, il, "ffn_gate" ++ suffix ++ ".weight")), width, hidden);
-        errdefer gate.deinit();
-        var up = try LinearWeight.loadForFusion(ctx, try file.get(try weights.layerName(&nb, il, "ffn_up" ++ suffix ++ ".weight")), width, hidden);
-        errdefer up.deinit();
-
-        var fuse_parts = [_]*LinearWeight{ &gate, &up };
-        if (try weights.fuseLinear(ctx, &fuse_parts)) |fused| return .{ .fused = fused };
-
-        return .{ .separate = .{ .gate = gate, .up = up } };
-    }
-
-    fn deinit(self: *FfnInputProjection) void {
-        switch (self.*) {
-            .separate => |*separate| separate.deinit(),
-            .fused => |*weight| weight.deinit(),
-        }
-        self.* = undefined;
-    }
-};
-
-/// SiLU gate/up/down dense FFN. Gate+up weights are fused when they share a
-/// dtype/layout, so prefill can issue one wider GEMM and run split-SwiGLU.
-/// Also serves the MoE shared expert (`suffix = "_shexp"`, its own width).
-const DenseFfn = struct {
-    input_proj: FfnInputProjection,
-    down: LinearWeight,
-
-    fn load(ctx: *ExecContext, file: *const gguf.File, hidden: usize, width: usize, il: usize, comptime suffix: []const u8) !DenseFfn {
-        var nb: [96]u8 = undefined;
-        var input_proj = try FfnInputProjection.load(ctx, file, hidden, width, il, suffix);
-        errdefer input_proj.deinit();
-        var down = try LinearWeight.load(ctx, try file.get(try weights.layerName(&nb, il, "ffn_down" ++ suffix ++ ".weight")), hidden, width);
-        errdefer down.deinit();
-        return .{ .input_proj = input_proj, .down = down };
-    }
-
-    fn deinit(self: *DenseFfn) void {
-        self.down.deinit();
-        self.input_proj.deinit();
-        self.* = undefined;
-    }
-};
-
-/// MoE expert-stack projection: persisted PTQTP plane siblings win over the
-/// plain GGUF tensor when present (same contract as the qwen3 loader).
-const loadMoeProjection = ptqtp_gguf.loadMoeRhsAuto;
-const moeProjSpec = ptqtp_gguf.streamedProjSpecAuto;
+/// Shared dense-FFN containers (model_common.zig): PTQTP-aware projection
+/// loads, gate/up fusion; the MoE shared expert rides the same containers
+/// (`suffix = "_shexp"`, its own width).
+const FfnInputProjection = model_common.FfnInputProjection;
+const DenseFfn = model_common.DenseFfn;
 
 
 /// Routed MoE FFN (qwen35moe): softmax router over `num_experts` with
@@ -358,29 +299,8 @@ const MoeFfn = struct {
         var shexp = try DenseFfn.load(ctx, file, cfg.hidden_size, cfg.moe_shared_intermediate_size, il, "_shexp");
         errdefer shexp.deinit();
 
-        // Streamed: register geometry only — the expert stacks stay on disk
-        // and are fetched on demand through the store's cache tiers.
-        if (store) |s| {
-            const trio = try weights.registerStreamedMoeLayer(s, il, .{
-                try moeProjSpec(file, try weights.layerName(&nb, il, "ffn_gate_exps.weight"), cfg.hidden_size, cfg.moe_intermediate_size, cfg.num_experts),
-                try moeProjSpec(file, try weights.layerName(&nb, il, "ffn_up_exps.weight"), cfg.hidden_size, cfg.moe_intermediate_size, cfg.num_experts),
-                try moeProjSpec(file, try weights.layerName(&nb, il, "ffn_down_exps.weight"), cfg.moe_intermediate_size, cfg.hidden_size, cfg.num_experts),
-            }, cfg.num_experts);
-            return .{ .router = router, .gate = trio.gate, .up = trio.up, .down = trio.down, .shexp_gate = shexp_gate, .shexp = shexp };
-        }
-
-        // Resident: borrow the expert stacks straight from the mmap when
-        // possible (the Model takes ownership of the mapping in
-        // loadGgufFromFileOptions); split GGUFs cannot hand over their
-        // multiple mappings, so their experts are copied — stream those.
-        const borrow = file.is_mmap and !file.isSplit();
-        var gate = try loadMoeProjection(ctx, file, try weights.layerName(&nb, il, "ffn_gate_exps.weight"), cfg.hidden_size, cfg.moe_intermediate_size, cfg.num_experts, borrow);
-        errdefer gate.deinit();
-        var up = try loadMoeProjection(ctx, file, try weights.layerName(&nb, il, "ffn_up_exps.weight"), cfg.hidden_size, cfg.moe_intermediate_size, cfg.num_experts, borrow);
-        errdefer up.deinit();
-        var down = try loadMoeProjection(ctx, file, try weights.layerName(&nb, il, "ffn_down_exps.weight"), cfg.moe_intermediate_size, cfg.hidden_size, cfg.num_experts, borrow);
-        errdefer down.deinit();
-        return .{ .router = router, .gate = gate, .up = up, .down = down, .shexp_gate = shexp_gate, .shexp = shexp };
+        const trio = try model_common.loadMoeTrio(ctx, file, store, il, cfg.hidden_size, cfg.moe_intermediate_size, cfg.num_experts);
+        return .{ .router = router, .gate = trio.gate, .up = trio.up, .down = trio.down, .shexp_gate = shexp_gate, .shexp = shexp };
     }
 
     fn deinit(self: *MoeFfn) void {
@@ -777,27 +697,21 @@ pub const Model = struct {
         }
         errdefer if (expert_store) |store| store.destroy();
 
-        var token_embedding = try LinearWeight.load(ctx, try file.get("token_embd.weight"), config.vocab_size, config.hidden_size);
-        errdefer token_embedding.deinit();
+        var head = try model_common.loadEmbedHead(ctx, file, config.vocab_size, config.hidden_size);
+        errdefer {
+            head.output.deinit();
+            head.output_norm.deinit();
+            head.token_embedding.deinit();
+        }
 
-        var output_norm = try weights.loadVector(ctx, try file.get("output_norm.weight"), config.hidden_size, .embed);
-        errdefer output_norm.deinit();
-
-        var output = if (file.maybeGet("output.weight")) |info|
-            try LinearWeight.load(ctx, info, config.vocab_size, config.hidden_size)
-        else
-            try token_embedding.cloneView(ctx); // tied embeddings
-        errdefer output.deinit();
-
-        const kv_head_for_head = try allocator.alloc(usize, config.num_attention_heads);
+        const kv_head_for_head = try model_common.kvHeadMap(allocator, config.num_attention_heads, config.num_key_value_heads);
         errdefer allocator.free(kv_head_for_head);
-        const heads_per_kv = config.num_attention_heads / config.num_key_value_heads;
-        for (kv_head_for_head, 0..) |*kv_head, head_i| kv_head.* = head_i / heads_per_kv;
 
         // Trunk only: the trailing MTP/NextN blocks are not loaded.
         const layers = try allocator.alloc(Layer, config.numMainLayers());
         errdefer allocator.free(layers);
         try loadLayers(ctx, file, config, layers, expert_store);
+        errdefer for (layers) |*layer| layer.deinit();
 
         if (expert_store) |store| try store.finalize();
 
@@ -810,9 +724,9 @@ pub const Model = struct {
         return .{
             .allocator = allocator,
             .config = config,
-            .token_embedding = token_embedding,
-            .output_norm = output_norm,
-            .output = output,
+            .token_embedding = head.token_embedding,
+            .output_norm = head.output_norm,
+            .output = head.output,
             .layers = layers,
             .kv_head_for_head = kv_head_for_head,
             .weight_mapping = weight_mapping,
@@ -2000,6 +1914,35 @@ fn updateConvState(state: []f32, qkv: []const f32, seq: usize, conv_dim: usize, 
 }
 
 /// FFN sublayer: `input + DenseSiLU(post_attention_norm(input))`.
+/// The fused-down fast-path body incl. the residual add (`ffnForward`'s
+/// K-quant arms): generic gate_up dispatch (bit-identical to the direct
+/// per-dtype call), packed split-SwiGLU down.
+fn ffnFusedDown(
+    ctx: *ExecContext,
+    gate_up_weight: *const LinearWeight,
+    rhs: anytype,
+    input: *const fucina.Tensor(.{ .seq, .embed }),
+    ffn_in: *const fucina.Tensor(.{ .seq, .embed }),
+    io: ?std.Io,
+    profile: ?*ForwardProfile,
+) !fucina.Tensor(.{ .seq, .embed }) {
+    const gate_up_start = profileStart(profile, io);
+    var gate_up = try gate_up_weight.linearSeq(ctx, ffn_in, .embed, .gate_up);
+    defer gate_up.deinit();
+    profileAdd(profile, io, gate_up_start, .ffn_gate_up);
+
+    const down_start = profileStart(profile, io);
+    var contribution = try gate_up.splitSwiGluDotPacked(ctx, rhs, .gate_up, .embed);
+    defer contribution.deinit();
+    profileAdd(profile, io, down_start, .ffn_down);
+
+    const residual_start = profileStart(profile, io);
+    var result = try input.add(ctx, &contribution);
+    errdefer result.deinit();
+    profileAdd(profile, io, residual_start, .ffn_residual);
+    return result;
+}
+
 fn ffnForward(
     ctx: *ExecContext,
     cfg: Config,
@@ -2030,31 +1973,19 @@ fn ffnForward(
     };
 
     const ffn_rows = ffn_in.dim(.seq);
-    if (ffn_rows >= 12) {
-        switch (dense.input_proj) {
-            .fused => |*fused_weight| switch (fused_weight.*) {
-                .q8_0 => |*gate_up_weight| switch (dense.down) {
-                    .q8_0 => |*down_weight| {
-                        const gate_up_start = profileStart(profile, io);
-                        var gate_up = try weights.linearSeqQ8_0(gate_up_weight, ctx, &ffn_in, .embed, .gate_up);
-                        defer gate_up.deinit();
-                        profileAdd(profile, io, gate_up_start, .ffn_gate_up);
-
-                        const down_start = profileStart(profile, io);
-                        var contribution = try gate_up.splitSwiGluDotPacked(ctx, &down_weight.packed_rhs, .gate_up, .embed);
-                        defer contribution.deinit();
-                        profileAdd(profile, io, down_start, .ffn_down);
-
-                        const residual_start = profileStart(profile, io);
-                        var result = try input.add(ctx, &contribution);
-                        errdefer result.deinit();
-                        profileAdd(profile, io, residual_start, .ffn_residual);
-                        return result;
-                    },
-                    else => {},
-                },
-                else => {},
+    // Multi-token fused fast path (the qwen3 runner's shape, all K-quant
+    // downs): one gate_up GEMM, then split-SwiGLU + LHS quantization + the
+    // packed down GEMM in a single pass — the gated m*ffn tensor is never
+    // materialized. Q4_K is x8-packed only; MMLA targets fall through.
+    if (ffn_rows >= 12 and dense.input_proj == .fused) {
+        const gate_up_weight = &dense.input_proj.fused;
+        switch (dense.down_proj) {
+            .q4_k => |*down| if (comptime !fucina.quant.supports_q4_k_mmla) {
+                return ffnFusedDown(ctx, gate_up_weight, &down.packed_rhs, input, &ffn_in, io, profile);
             },
+            .q5_k => |*down| return ffnFusedDown(ctx, gate_up_weight, &down.packed_rhs, input, &ffn_in, io, profile),
+            .q6_k => |*down| return ffnFusedDown(ctx, gate_up_weight, &down.packed_rhs, input, &ffn_in, io, profile),
+            .q8_0 => |*down| return ffnFusedDown(ctx, gate_up_weight, &down.packed_rhs, input, &ffn_in, io, profile),
             else => {},
         }
     }
@@ -2062,12 +1993,12 @@ fn ffnForward(
     var gated = switch (dense.input_proj) {
         .separate => |*separate| blk: {
             const gate_start = profileStart(profile, io);
-            var gate = try separate.gate.linearSeq(ctx, &ffn_in, .embed, .ffn);
+            var gate = try separate.gate_proj.linearSeq(ctx, &ffn_in, .embed, .ffn);
             defer gate.deinit();
             profileAdd(profile, io, gate_start, .ffn_gate);
 
             const up_start = profileStart(profile, io);
-            var up = try separate.up.linearSeq(ctx, &ffn_in, .embed, .ffn);
+            var up = try separate.up_proj.linearSeq(ctx, &ffn_in, .embed, .ffn);
             defer up.deinit();
             profileAdd(profile, io, up_start, .ffn_up);
 
@@ -2091,7 +2022,7 @@ fn ffnForward(
     defer gated.deinit();
 
     const down_start = profileStart(profile, io);
-    var contribution = try dense.down.linearSeq(ctx, &gated, .ffn, .embed);
+    var contribution = try dense.down_proj.linearSeq(ctx, &gated, .ffn, .embed);
     defer contribution.deinit();
     profileAdd(profile, io, down_start, .ffn_down);
 
@@ -2140,9 +2071,9 @@ fn moeContribution(
     const shexp_start = profileStart(profile, io);
     var gated = switch (moe.shexp.input_proj) {
         .separate => |*sep| blk: {
-            var gate = try sep.gate.linearSeq(ctx, ffn_in, .embed, .ffn);
+            var gate = try sep.gate_proj.linearSeq(ctx, ffn_in, .embed, .ffn);
             defer gate.deinit();
-            var up = try sep.up.linearSeq(ctx, ffn_in, .embed, .ffn);
+            var up = try sep.up_proj.linearSeq(ctx, ffn_in, .embed, .ffn);
             defer up.deinit();
             break :blk try up.swiglu(ctx, &gate);
         },
@@ -2153,7 +2084,7 @@ fn moeContribution(
         },
     };
     defer gated.deinit();
-    var shexp_out = try moe.shexp.down.linearSeq(ctx, &gated, .ffn, .embed);
+    var shexp_out = try moe.shexp.down_proj.linearSeq(ctx, &gated, .ffn, .embed);
     defer shexp_out.deinit();
 
     var gate_logit = try ffn_in.dot(ctx, &moe.shexp_gate, .embed); // [.seq]
