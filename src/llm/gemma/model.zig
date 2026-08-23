@@ -486,6 +486,24 @@ pub const Layer = struct {
     }
 };
 
+/// Final-logit softcapping tail shared by every logits exit: the fused
+/// cap == 30 kernel when it applies, else the generic scale/tanh/scale.
+/// Consumes `*logits`; a zero cap returns it unchanged.
+fn applyFinalSoftcap(ctx: *ExecContext, sc: f32, logits: *fucina.Tensor(.{ .seq, .vocab })) !fucina.Tensor(.{ .seq, .vocab }) {
+    if (sc == 0) return logits.*;
+    if (sc == 30.0) {
+        const out = try logits.softcap30(ctx);
+        logits.deinit();
+        return out;
+    }
+    var down = try logits.scale(ctx, 1.0 / sc);
+    logits.deinit();
+    defer down.deinit();
+    var t = try down.tanh(ctx);
+    defer t.deinit();
+    return t.scale(ctx, sc);
+}
+
 pub const Model = struct {
     allocator: Allocator,
     config: Config,
@@ -712,21 +730,7 @@ pub const Model = struct {
         x.deinit();
 
         var logits = try self.output.linearSeq(ctx, &final_norm, .embed, .vocab);
-        if (cfg.final_logit_softcapping != 0) {
-            const sc = cfg.final_logit_softcapping;
-            if (sc == 30.0) {
-                const out = try logits.softcap30(ctx);
-                logits.deinit();
-                return out;
-            }
-            var down = try logits.scale(ctx, 1.0 / sc);
-            logits.deinit();
-            defer down.deinit();
-            var t = try down.tanh(ctx);
-            defer t.deinit();
-            return t.scale(ctx, sc);
-        }
-        return logits;
+        return applyFinalSoftcap(ctx, cfg.final_logit_softcapping, &logits);
     }
 
     /// Lockstep batched decode: one new token per stream — `forwardStepBatchSpans`
@@ -819,25 +823,9 @@ pub const Model = struct {
         defer head_in.deinit();
 
         var logits = try self.output.linearSeq(ctx, &head_in, .embed, .vocab);
-        if (cfg.final_logit_softcapping != 0) {
-            const sc = cfg.final_logit_softcapping;
-            if (sc == 30.0) {
-                const out = try logits.softcap30(ctx);
-                logits.deinit();
-                if (profile) |p| p.final_ns += profileElapsed(final_start, io);
-                return out;
-            }
-            var down = try logits.scale(ctx, 1.0 / sc);
-            logits.deinit();
-            defer down.deinit();
-            var t = try down.tanh(ctx);
-            defer t.deinit();
-            const out = try t.scale(ctx, sc);
-            if (profile) |p| p.final_ns += profileElapsed(final_start, io);
-            return out;
-        }
+        const out = try applyFinalSoftcap(ctx, cfg.final_logit_softcapping, &logits);
         if (profile) |p| p.final_ns += profileElapsed(final_start, io);
-        return logits;
+        return out;
     }
 
     pub fn generate(
