@@ -11,36 +11,15 @@
 
 const std = @import("std");
 const test_support = @import("test_support.zig");
-const builtin = @import("builtin");
 const fucina = @import("fucina");
 const runner = @import("runner.zig");
 
 const gguf = fucina.gguf;
 const ExecContext = fucina.ExecContext;
 
-/// Exact-bit assertions hold on the recording machine class only; other
-/// ISAs and BLAS providers reassociate differently at the ulp level. The
-/// argmax chains are asserted everywhere.
-const strict_bits = builtin.cpu.arch == .aarch64;
-
-fn argmaxRow(row: []const f32) usize {
-    var best: usize = 0;
-    for (row, 0..) |x, i| {
-        if (x > row[best]) best = i;
-    }
-    return best;
-}
-
-/// FNV-1a 64 over the raw f32 bytes: the exact-bit fingerprint the strict
-/// gates compare against the recorded goldens.
-fn fnvHash(values: []const f32) u64 {
-    var h: u64 = 0xcbf29ce484222325;
-    for (std.mem.sliceAsBytes(values)) |b| {
-        h ^= b;
-        h *%= 0x100000001b3;
-    }
-    return h;
-}
+const strict_bits = test_support.strict_bits;
+const argmaxRow = test_support.argmaxRow;
+const fnvHash = test_support.fnvHash;
 
 /// Recorded forward trace: `chain[0]` is the greedy argmax after prefill,
 /// `chain[1..]` the argmaxes of the following decode steps; `prefill_hash`

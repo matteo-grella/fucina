@@ -157,7 +157,6 @@ pub const GenerateResult = struct {
     stopped: bool,
 };
 
-const Logits = fucina.Tensor(.{ .seq, .vocab });
 
 /// The generation driver: prefill the prompt, then sample-and-stream one
 /// marker-wrapped reply. Generic over the tokenizer module (BPE here).

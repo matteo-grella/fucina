@@ -49,3 +49,28 @@ pub fn readFileOrSkip(allocator: std.mem.Allocator, io: std.Io, path: []const u8
         else => err,
     };
 }
+
+/// Exact-bit assertions hold on the recording machine class only (aarch64
+/// native, Accelerate BLAS); other ISAs and BLAS providers reassociate at
+/// the ulp level. Recorded-golden tests assert argmax chains everywhere
+/// and gate their FNV hash checks on this.
+pub const strict_bits = builtin.cpu.arch == .aarch64;
+
+pub fn argmaxRow(row: []const f32) usize {
+    var best: usize = 0;
+    for (row, 0..) |x, i| {
+        if (x > row[best]) best = i;
+    }
+    return best;
+}
+
+/// FNV-1a 64 over the raw f32 bytes: the exact-bit fingerprint the strict
+/// recorded-golden gates compare.
+pub fn fnvHash(values: []const f32) u64 {
+    var h: u64 = 0xcbf29ce484222325;
+    for (std.mem.sliceAsBytes(values)) |b| {
+        h ^= b;
+        h *%= 0x100000001b3;
+    }
+    return h;
+}
