@@ -12,7 +12,7 @@ gave us the weights: a GGUF file, memory-mapped, its tensors resident in
 their source precision. This chapter turns them into a machine that talks.
 
 Everything is grounded in a real model: **Qwen3-0.6B**, implemented in
-`src/llm/qwen3/model.zig` (~1,800 lines). Around it sits the `fucina_llm`
+`src/llm/runner.zig` (~2,400 lines; `src/llm/qwen3/model.zig` is the family's alias surface over it — `Config` IS `runner.Descriptor`, `Model` IS `runner.Model`). Around it sits the `fucina_llm`
 module, which — in the words of `docs/REFERENCE.md` §13 — "contains
 everything a transformer inference/fine-tuning runner needs that is not a
 tensor op: GGUF-to-weight binding, KV caching, tokenizers, sampling, SFT data
@@ -27,7 +27,7 @@ second read. Every claim is pinned to a file and line you can open.
 ## 12.1 The whole machine in nine numbers
 
 Strip away the mythology and a transformer's architecture is a struct of
-integers. Here is Qwen3-0.6B, verbatim (*from `src/llm/qwen3/model.zig:71`*):
+integers. Here is Qwen3-0.6B, verbatim (*from `src/llm/runner.zig`*):
 
 ```zig
 pub fn qwen3_0_6b() Config {
@@ -59,18 +59,18 @@ Read it as a bill of materials:
   distinct key/value heads. That asymmetry *is* grouped-query attention
   (§12.3.5), and every projection size derives from these three numbers:
   the query projection is 16 × 128 = 2048 wide, the key/value projections
-  8 × 128 = 1024 — pinned by a unit test at `model.zig:1816-1821`.
+  8 × 128 = 1024 — pinned by a unit test at `runner.zig`.
 - **`intermediate_size = 3072`** — the feed-forward block's inner width;
   **`rms_norm_eps`** and **`rope_theta`** are numerical constants you will
   meet in §12.3.2 and §12.3.4.
 
 In practice nobody types these numbers: `Config.fromGguf`
-(`model.zig:89-118`) reads them from the GGUF's own metadata under the
+(`runner.zig`) reads them from the GGUF's own metadata under the
 `general.architecture` prefix (`qwen3.block_count`, …), so any Qwen3-family
 size — 0.6B through 8B, plus the MoE variants — loads without hardcoding.
 The helpers live in `src/gguf_meta.zig`, with one design point worth
 noticing: qwen3's loader treats a present-but-zero key as missing
-(`.reject_zero`, `model.zig:139-143`), because every qwen3 config integer
+(`.reject_zero`, `runner.zig`), because every qwen3 config integer
 is structurally positive — a zero can only be a broken file.
 
 The data flow we are about to build, end to end:
@@ -352,7 +352,7 @@ pub fn push(self: *StreamDecoder, allocator: Allocator, id: u32, writer: *std.Io
 
 Now the model. Here is the heart of `forwardStep` — the function that does
 *all* the transformer work, whether you hand it a 500-token prompt or one
-token (*from `src/llm/qwen3/model.zig:512-543`, profiling and MoE prefetch
+token (*from `src/llm/runner.zig`, profiling and MoE prefetch
 trimmed*):
 
 ```zig
@@ -406,7 +406,7 @@ load time", `docs/REFERENCE.md` §13.2).
 A small elegance hides at load: many models *tie* the output projection to
 the embedding table (one matrix maps ids to vectors on the way in and
 vectors to scores on the way out). The loader expresses the fallback chain
-as one labeled block (*from `src/llm/qwen3/model.zig:214-221`, comment
+as one labeled block (*from `src/llm/runner.zig`, comment
 trimmed*):
 
 ```zig
@@ -445,13 +445,13 @@ undo or re-scale the normalization per channel.
 Qwen3 adds its signature stabilizer: **per-head q/k normalization**. After
 the QKV projection, each head's 128-dimensional query and key get their own
 RMSNorm with learned length-128 weights (`q_norm`/`k_norm`, loaded at
-`model.zig:872-876`). You will see it fused into the RoPE call below.
+`runner.zig`). You will see it fused into the RoPE call below.
 
 ### 12.3.3 QKV projections and heads
 
 Attention starts with three matmuls: the normalized stream is projected to
 queries (2048 wide), keys and values (1024 wide each). Then `split` reshapes
-the flat projections into heads (*from `src/llm/qwen3/model.zig:1192-1197`*):
+the flat projections into heads (*from `src/llm/runner.zig`*):
 
 ```zig
 var q3 = try qkv_linear.q.split(ctx, .q, .{ .head, .d }, .{ config.num_attention_heads, config.head_dim });
@@ -469,14 +469,14 @@ different head axes, and a later contraction against the wrong one is a
 compile error.
 
 One performance decision is visible in the types. `AttentionProjection`
-(`model.zig:964-990`) is a `union(enum) { separate, fused }`: at load time,
+(`runner.zig`) is a `union(enum) { separate, fused }`: at load time,
 `weights.fuseLinear` tries to concatenate the q, k, and v matrices into one
 `[2048+1024+1024, 1024]` matrix so three matmuls become one wider GEMM (one
 pass over the activations). The fusion *declines gracefully* — it returns
 `!?LinearWeight`, and `null` means "mixed formats: parts untouched, use
 them individually" (`docs/REFERENCE.md` §13.2); the forward switches on the
 union. The FFN's gate/up pair gets the same treatment
-(`model.zig:1108-1130`).
+(`runner.zig`).
 
 > **Zig note** — This is the recurring Fucina pattern for "optimization
 > that may not apply": encode both outcomes in a tagged union, decide once
@@ -562,11 +562,11 @@ test "rotated dot product depends only on the position difference" {
 
 In the model, the rotation factors for the step's absolute positions are
 precomputed once per forward into a `RopeTable` (`ctx.prepareRopeTable`,
-`model.zig:509`) — and the `positions` array is the *only* thing that
+`runner.zig`) — and the `positions` array is the *only* thing that
 distinguishes building a prefill step from a decode step
-(`model.zig:505-507`: prefill fills `pos0..pos0+len`, decode passes the one
+(`runner.zig`: prefill fills `pos0..pos0+len`, decode passes the one
 current position). The rotation is fused with §12.3.2's per-head q/k norm
-into a single kernel call (*from `src/llm/qwen3/model.zig:1201-1204`*):
+into a single kernel call (*from `src/llm/runner.zig`*):
 
 ```zig
 var q_rope = try q3.rmsNormMulRopeHalfPrepared(ctx, .seq, .d, &layer.q_norm, config.rms_norm_eps, rope_table);
@@ -593,7 +593,7 @@ Attention itself: every query attends every (allowed) key, scores become
 softmax weights, weights blend the values. The one Qwen3 twist is the
 head-count asymmetry — 16 query heads, 8 KV heads — and the entire mapping
 that implements it is three lines at load time (*from
-`src/llm/qwen3/model.zig:224-227`*):
+`src/llm/runner.zig`*):
 
 ```zig
 const kv_head_for_head = try allocator.alloc(usize, config.num_attention_heads);
@@ -613,7 +613,7 @@ head).
 
 The kernel is one call, `groupedAttention` (`docs/REFERENCE.md` §4.13),
 with the model-side wrapper supplying the standard scale (*from
-`src/llm/qwen3/model.zig:1804-1815`*):
+`src/llm/runner.zig`*):
 
 ```zig
 fn causalAttention(
@@ -653,7 +653,7 @@ output must be exactly `v` — attention reduced to its base case
 there when you port your own attention.
 
 After attention, one more matmul (`o_proj`) maps the concatenated head
-outputs back to the 1024-wide stream (`model.zig:1240`).
+outputs back to the 1024-wide stream (`runner.zig`).
 
 ### 12.3.6 The SwiGLU feed-forward block
 
@@ -669,7 +669,7 @@ gated nonlinearity, one projection back down. `silu(z) = z · sigmoid(z)` is
 a smooth ReLU relative; the gating means one pathway (`gate`) decides *how
 much* of the other pathway's signal (`up`) passes, per channel — empirically
 stronger than a plain nonlinearity at equal parameter count. In code, the
-separate-weights arm reads (*from `src/llm/qwen3/model.zig:1517-1526`,
+separate-weights arm reads (*from `src/llm/runner.zig`,
 trimmed*):
 
 ```zig
@@ -680,20 +680,20 @@ const out = try gate_up.up.swiglu(ctx, &gate_up.gate);
 
 and the fused arm computes both projections in one `[6144, 1024]` GEMM,
 then splits and gates in a single pass (`splitGated(ctx, .swiglu, ...)`,
-`model.zig:1534`). Same math, two execution strategies — and for the hot
-quantized formats a third, `denseFfnFusedDown` (`model.zig:1547-1564`),
+`runner.zig`). Same math, two execution strategies — and for the hot
+quantized formats a third, `denseFfnFusedDown` (`runner.zig`),
 never materializes the gated 3072-wide tensor at all: SwiGLU, activation
 quantization, and the packed down-GEMM run as one fused kernel once the
-batch is big enough (`seq >= 12`, `model.zig:1503`).
+batch is big enough (`seq >= 12`, `runner.zig`).
 
 ### 12.3.7 The residual stream, the final norm, and the logits
 
 Look back at the two block functions and find their last lines:
 
 ```zig
-const out = try residual_input.add(ctx, &attn_out);   // model.zig:1251
+const out = try residual_input.add(ctx, &attn_out);   // runner.zig
 ...
-const out = try input.add(ctx, &contribution);        // model.zig:1486
+const out = try input.add(ctx, &contribution);        // runner.zig
 ```
 
 Neither block *transforms* the stream — each computes a contribution and
@@ -718,7 +718,7 @@ position — that difference is its entire reason to exist.
 ## 12.4 The KV cache: remembering instead of recomputing
 
 Generation is a loop: predict a token, append it, run the model again. Run
-`forwardLastLogits` (the cacheless entry, `model.zig:271`) on the growing
+`forwardLastLogits` (the cacheless entry, `runner.zig`) on the growing
 sequence each time and you recompute *everything* about the prefix — every
 projection, every attention pass, every FFN — for every token you emit,
 and almost all of that work is byte-identical to the previous iteration's.
@@ -753,7 +753,7 @@ The storage layout is chosen so that reading the cache costs nothing
 
 Here it is in action inside the attention block — append the new rows, then
 attend over a zero-copy view of everything (*from
-`src/llm/qwen3/model.zig:1214-1235`, q8_0 arm trimmed*):
+`src/llm/runner.zig`, q8_0 arm trimmed*):
 
 ```zig
 var attn = if (cache) |kv| blk: {
@@ -776,14 +776,14 @@ Three contracts make this correct, and each is enforced:
 
 1. **`appendLayer` does not advance `len`.** All 28 layers append at the
    same base offset; `kv.advance(token_ids.len)` runs *once*, after the
-   layer loop (`model.zig:530`; doc comment at `kv_cache.zig:250-253`).
+   layer loop (`runner.zig`; doc comment at `kv_cache.zig:250-253`).
    Get this wrong in a model port and every layer after the first writes
    to the wrong rows.
 2. **`forwardStep` demands `kv.len == pos0`** (else
    `Error.InvalidSequenceLength`) and enough capacity (else
-   `KvCacheOverflow`) — `model.zig:501-503`. The cache's length *is* the
+   `KvCacheOverflow`) — `runner.zig`. The cache's length *is* the
    model's notion of "where we are".
-3. **Cached equals uncached.** The doc comment at `model.zig:441-446`
+3. **Cached equals uncached.** The doc comment at `runner.zig`
    states the oracle: "With a fresh cache and `pos0 == 0` this is prefill
    and yields the same last-token logits as `forwardLastLogits`." The
    runner's `--verify-cache N` flag checks exactly this, decode step by
@@ -863,7 +863,7 @@ about to see:
   numbers*, and a reminder that these are dated, machine-specific
   measurements, not laws.
 - **Batch decode** shares the stream: `forwardStepBatch`
-  (`model.zig:563-615`) decodes one token for each of N independent
+  (`runner.zig`) decodes one token for each of N independent
   conversations in a single m = N pass — "weights are read once for all
   streams, the batch-decode bandwidth win — while RoPE positions, KV
   appends, and attention are per-stream" (its doc comment). Step cost
@@ -871,10 +871,10 @@ about to see:
 - **Speculative decoding** ([Chapter 13](13-inference-tricks.md)) turns
   decode back into prefill: draft several tokens cheaply, then *verify*
   them in one prefill-shaped pass. Its verify entry is
-  `forwardStepAllLogits` (`model.zig:481`) — `forwardStep`, except it
+  `forwardStepAllLogits` (`runner.zig`) — `forwardStep`, except it
   returns logits for **every** appended position, paying "~one step's
   weight traffic instead of `token_ids.len` sequential steps"
-  (`model.zig:473-475`).
+  (`runner.zig`).
 
 One honesty note, straight from the doc comments, because it is easy to
 over-claim: the batched paths are **not** unconditionally bit-identical to
@@ -882,10 +882,10 @@ their sequential equivalents. Per-row numerics match per-token `forwardStep`
 bit-for-bit only *below* the m-dependent kernel thresholds — "quantized-weight
 x4-packed kernels at seq >= 4, fused FFN at seq >= 12, tiled attention at
 seq >= 48"; beyond them "rows can differ by reassociation drift (~1e-6
-rel)" (`model.zig:477-480`). For `forwardStepBatch` the measurement is
+rel)" (`runner.zig`). For `forwardStepBatch` the measurement is
 pinned in the same terms: "0.6B Q4_K/Q8_0 batch == sequential
 token-for-token at n <= 3, ~1e-6 reassociation drift at n >= 4"
-(`model.zig:560-561`). Floating-point addition is not associative; a kernel
+(`runner.zig`). Floating-point addition is not associative; a kernel
 that sums in a different order produces a different last bit, and the
 repo's answer is to *document the threshold* and test both sides of it.
 
@@ -902,7 +902,7 @@ repo's answer is to *document the threshold* and test both sides of it.
 The forward pass ends with 151,936 raw scores; something must pick one
 token. The simplest picker is greedy — take the argmax — and the minimal
 autoregressive loop around it is worth reading in full (*from
-`src/llm/qwen3/model.zig:704-718`*):
+`src/llm/runner.zig`*):
 
 ```zig
 const limit = @min(options.max_new_tokens, out_tokens.len);
@@ -1162,7 +1162,7 @@ one of them plugs into machinery you have already seen.
 Everything so far was the *dense* Qwen3. The same file also implements the
 MoE variants — Qwen3-30B-A3B and 235B-A22B — and the difference is exactly
 one component: the FFN. Structurally, it is a two-armed union
-(*from `src/llm/qwen3/model.zig:762-773`*):
+(*from `src/llm/runner.zig`*):
 
 ```zig
 const Ffn = union(enum) {
@@ -1184,7 +1184,7 @@ memory instead — which is why Chapter 11's shard-streaming quantizer and
 Chapter 13's expert streaming exist.
 
 The routing is small enough to read whole. First the model side (*from
-`src/llm/qwen3/model.zig:1650-1674`, trimmed*):
+`src/llm/runner.zig`, trimmed*):
 
 ```zig
 var logits = try moe.router.linearSeq(ctx, ffn_in, .embed, .expert);
@@ -1242,7 +1242,7 @@ rescaled to sum to 1). MoE routing has a fearsome reputation; the
 inference-side arithmetic is thirty lines.
 
 The prefill/decode split from §12.5 reappears with an MoE twist, documented
-at `model.zig:1632-1636`: decode (seq == 1) uses "the fused expert-parallel
+at `runner.zig`: decode (seq == 1) uses "the fused expert-parallel
 GEMV" while prefill "groups tokens by expert and runs one m>1 GEMM per
 expert (weights read once, reused across the batch) — far less weight
 traffic than per-token." Same wall, same medicine: amortize the bytes.
@@ -1251,19 +1251,19 @@ Two operational notes close the loop with neighbouring chapters. Expert
 stacks are the bulk of a MoE model's bytes, so when the GGUF is
 memory-mapped they are *borrowed* straight from the mapping instead of
 copied — the model takes ownership and unmaps it last in `deinit`
-(`model.zig:236-241, 264-267`). And for models bigger than your RAM,
+(`runner.zig, 264-267`). And for models bigger than your RAM,
 `MoeStreamOptions` (`src/weights.zig:1069-1100`, re-exported at
-`model.zig:153`) keeps experts on disk, read on
+`runner.zig`) keeps experts on disk, read on
 demand through a tiered cache — "the explicit trade that lets a
 bigger-than-RAM model run at all" (`weights.zig:1073-1074`); that story (LRU
 tiers, learned pinning, router lookahead, the measured tokens-per-second on
 a 142 GB model in 64 GB of RAM) belongs to
 [Chapter 13](13-inference-tricks.md). One taste of the knob-space:
-`applyExpertTopP` (`model.zig:1713-1763`) drops low-weight experts per
+`applyExpertTopP` (`runner.zig`) drops low-weight experts per
 token; its doc comment records "measured on the 30B MoE: p = 0.7 cut
 streamed disk traffic 55% for modest quality cost" and is explicit that
 this is *quality-traded* — `p >= 1` is the bit-identical baseline, pinned
-by a unit test at `model.zig:1765-1791`.
+by a unit test at `runner.zig`.
 
 ## 12.9 Run it
 

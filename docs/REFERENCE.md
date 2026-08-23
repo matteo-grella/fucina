@@ -292,7 +292,7 @@ construction, ownership, tagged contraction, backward — is unpacked in
 ### 1.5 Stability
 
 Fucina is a production-oriented core, not a finished 1.0 product: the
-package manifest and 0.x tags (`v0.1.0`) exist so consumers can pin a
+package manifest and 0.x tags (`v0.3.0`) exist so consumers can pin a
 version (§2.5), but a 0.x tag is a pin, not a semver stability contract —
 the public API may change between tags (see
 *Current Production Gaps* in [ARCHITECTURE.md](ARCHITECTURE.md)). This
@@ -595,12 +595,12 @@ itself is centralized in six helpers applied per executable:
 ### 2.5 Consuming Fucina from another project
 
 Fucina is an ordinary Zig package: `build.zig.zon` names it `.fucina`, the
-repository is tagged (`v0.1.0`), and both library modules are exported by
+repository is tagged (`v0.3.0`), and both library modules are exported by
 `build.zig` (`b.addModule`), so the standard path is the package manager.
 From the consumer project:
 
 ```sh
-zig fetch --save git+https://github.com/matteo-grella/fucina#v0.1.0
+zig fetch --save git+https://github.com/matteo-grella/fucina#v0.3.0
 ```
 
 ```zig
@@ -808,6 +808,7 @@ can run different shadow policy).
 | `OMNIVOICE_TOKENIZER_GGUF=<path>` | Points the real-codec-GGUF load test at a tokenizer GGUF. | skipped |
 | `NANOCHAT_PARITY=1` | Enables the nanochat parity suites under `zig build test` (need locally captured reference goldens); unset, they `error.SkipZigTest`. | skipped |
 | `FUCINA_TEST_VERBOSE` | Any value re-enables the facedetect/nanochat per-case test-progress prints on stderr (`examples/{facedetect,nanochat}/testlog.zig`); failure-path prints stay on regardless. | silent |
+| `FUCINA_TEST_REQUIRE_MODELS` | Any value turns a missing model/fixture in a model-gated test into a FAILURE instead of a skip (`src/llm/test_support.zig`) — the rig-run guard against silent skips. Needs libc for the env read; libc-free builds treat it as unset. | skip |
 
 ### 2.7 Test organization (`src/`, `examples/`)
 
@@ -11194,7 +11195,7 @@ family-agnostic helpers stay flat:
 | `llm.cartridge_fleet` | per-document cartridge fleets: manifest, RAM/disk budget manager, cosine chunk index (Cartridges at Scale, arXiv 2606.04557) | §13.10 |
 | `llm.engram` | conditional n-gram memory: hashed-lookup embedding tables grafted onto a frozen model (Engram, arXiv 2601.07372) | §13.11 |
 | `llm.serving` | the serving band: the contract (`GenerateRequest`/`GenerateResult`, `Caps`, the per-family `Backend` vtable), the HTTP transport (`serving.http`/`scheduler`/`emitter` + the OpenAI/Anthropic dialects and hermes tool calling), the generic `GgufChatBackend` engine, and the `serving.open` load-and-serve entry (`examples/lmserve` is the CLI front end) | §13.13 |
-| `llm.runner` | the descriptor runner (experimental): one family-independent decoder driven by a runtime `Descriptor` with two block styles (fused qwen3-shape, host_reference GLM/DeepSeek-MoE shape); `Descriptor.fromGguf` reads both metadata shapes; three bitwise parity gates in `runner_tests.zig` (real 0.6B, synthetic MoE, synthetic glm4moe) | `docs/RUNNER.md` |
+| `llm.runner` | the descriptor runner (experimental tier): one family-independent decoder driven by a runtime `Descriptor` with two block styles (fused qwen3-shape, host_reference GLM/DeepSeek-MoE shape); the qwen3 family and the glm4moe trunk run on it; recorded-golden gates in `runner_tests.zig` (real 0.6B chains + logit fingerprints, synthetic MoE and glm fixtures) | `docs/RUNNER.md` |
 
 The family namespaces are covered in §14 (kimi3 in §14.7,
 deepseek2/glm4moe/deepseek4/inkling by their module doc comments); this
@@ -11206,8 +11207,7 @@ section documents the shared stack they are built from.
 usable linear weights. It lives in the CORE module (`fucina.weights`, with
 `fucina.ptqtp_gguf` beside it): nothing in it is language-model-specific —
 vision encoders and audio models load through the same band (the
-locate-anything ViT does). `llm.weights`/`llm.ptqtp_gguf` remain as
-aliases. Its error set is
+locate-anything ViT does). Its error set is
 `Error = error{ InvalidWeightShape, UnsupportedWeightType, GradUnsupported }`.
 
 #### 13.2.1 `LinearWeight`

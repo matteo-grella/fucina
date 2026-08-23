@@ -105,15 +105,25 @@ comptime {
     );
 }
 // Graph-control free functions (species 2 of the membership rule).
+/// N-ary einsum over a comptime spec string (the fold of the binary `einsum` method).
 pub const einsumMany = ag.einsumMany;
+/// Gradient checkpointing: recompute this scope on backward instead of storing activations.
 pub const checkpoint = ag.checkpoint;
+/// `checkpoint` with a caller-supplied context pointer threaded to the recompute closure.
 pub const checkpointWithContext = ag.checkpointWithContext;
+/// Run a scope with gradient recording off (inference inside a training step).
 pub const noGrad = ag.noGrad;
+/// Whether gradient recording is currently on for this thread.
 pub const isGradEnabled = ag.isGradEnabled;
+/// RAII form of `noGrad`: recording off until `deinit`.
 pub const NoGradScope = ag.NoGradScope;
+/// Register a custom backward (VJP) for a user op.
 pub const customVjp = ag.customVjp;
+/// Finite-difference gradient checker for custom ops and model code.
 pub const gradcheck = ag.gradcheck;
+/// Tolerances and probe configuration for `gradcheck`.
 pub const GradcheckOptions = ag.GradcheckOptions;
+/// Per-parameter outcome of a `gradcheck` run.
 pub const GradcheckResult = ag.GradcheckResult;
 /// Element dtype enum (f32/f16/bf16/int/bool + every quantized block
 /// format); the block-format registry lives in `quant`/`dtype`.
@@ -121,6 +131,7 @@ pub const DType = dtype.DType;
 /// bf16 <-> f32 scalar converters (bf16 tensors store raw u16 bits): the
 /// bridge for consumers of bf16 state dicts and 16-bit params.
 pub const bf16ToF32 = dtype.bf16ToF32;
+/// f32 -> bf16 scalar converter (round-to-nearest-even; bf16 tensors store raw u16 bits).
 pub const f32ToBf16 = dtype.f32ToBf16;
 /// Quantized-format vocabulary: the GGML block structs, the packed
 /// quantized-matmul RHS container types, block sizes, and the quant
@@ -172,14 +183,18 @@ pub const quant = struct {
 
 /// Deprecated: use `quant.supports_q4_k_mmla`. Removal per docs/DEVELOPMENT.md §6.
 pub const supports_q4_k_mmla = quant.supports_q4_k_mmla;
+/// Pre-packed dense matmul RHS (weights repacked once at load for the packed GEMM arms).
 pub const PackedRhs = ag.PackedRhs;
+/// Layout tag carried by `PackedRhs` (which packed GEMM arm the bytes are shaped for).
 pub const PackedRhsLayout = backend.PackedRhsLayout;
+/// Half-open index range for tensor `slice` calls.
 pub const SliceRange = ag.SliceRange;
 /// A contiguous run of ABSOLUTE indices along one axis, `[origin, origin+len)`
 /// — Fortran's array lower bound as a value. Tensor axes here are 0-origin, so
 /// this is how a positional axis's origin travels alongside its length instead
 /// of being materialized into an arithmetic array (see `prepareRopeTableRange`).
 pub const AxisRange = tensor.AxisRange;
+/// Conv weights pre-transformed at load for the streaming conv kernels.
 pub const PreparedConvWeights = exec.ExecContext.PreparedConvWeights;
 /// Deprecated: use `quant.BlockQ1_0`. Removal per docs/DEVELOPMENT.md §6.
 pub const BlockQ1_0 = quant.BlockQ1_0;
@@ -261,31 +276,53 @@ pub const BlockMXFP4 = quant.BlockMXFP4;
 pub const BlockNVFP4 = quant.BlockNVFP4;
 // Backend identity + capability constants (species 4 of the membership
 // rule); the selected provider is fixed at build time.
+/// The selected kernel provider (comptime; see `active_backend_kind`).
 pub const Backend = backend.Backend;
+/// Provider identity: `.native` (SIMD/BLAS/GPU seams) or `.scalar` (reference).
 pub const BackendKind = backend.Kind;
+/// Which provider this build compiled in (`-Dbackend`).
 pub const active_backend_kind = backend.active_kind;
+/// The native build's BLAS provider (`-Dblas`), `.none` when pure Zig kernels.
 pub const native_blas_kind = backend.native_blas_kind;
+/// True when a CBLAS provider is linked into the native backend.
 pub const native_uses_blas = backend.native_uses_blas;
+/// True when the linked BLAS is Apple Accelerate.
 pub const native_uses_accelerate = backend.native_uses_accelerate;
+/// Thread count requested from an explicit BLAS provider (0 = provider default).
 pub const native_blas_threads = backend.native_blas_threads;
 /// The eager execution runtime: owns allocation (buffer pool), validation,
 /// and kernel dispatch. One per thread of model execution; every Tensor op
 /// takes it explicitly.
 pub const ExecContext = exec.ExecContext;
+/// Caller promise about an RHS pointer's lifetime (gates the stable-RHS caches).
 pub const RhsLifetime = exec.RhsLifetime;
+/// A MoE expert stack's RHS: resident (borrowed or owned) or streamed through an `ExpertStore`.
 pub const MoeRhs = exec.ExecContext.MoeRhs;
+/// Per-phase timing counters for the batched MoE paths.
 pub const MoeBatchProfile = exec.MoeBatchProfile;
+/// Gated-activation selector for the fused gate/up FFN kernels (silu/gelu variants).
 pub const GatedOp = exec.GatedOp;
+/// Disk-backed MoE expert streaming: the store, its cache tiers, and the ProjSpec plumbing.
 pub const expert_store = exec.expert_store;
+/// The streaming MoE expert store (LRU RAM cache over disk-resident expert blocks).
 pub const ExpertStore = exec.expert_store.ExpertStore;
+/// Options for the router top-k kernel (normalization of the selected weights).
 pub const RouterTopKOptions = exec.RouterTopKOptions;
+/// Options for `standardize` (eps mode, accumulation dtype).
 pub const StandardizeOptions = exec.StandardizeOptions;
+/// Accumulation precision selector for `standardize`.
 pub const StandardizeAccumulation = exec.StandardizeAccumulation;
+/// Where eps enters the standardize denominator (inside or outside the sqrt).
 pub const StandardizeEpsMode = exec.StandardizeEpsMode;
+/// Loss reduction selector (none/mean/sum).
 pub const Reduction = exec.Reduction;
+/// Options for the cross-entropy ops (ignore index, reduction, label smoothing).
 pub const CrossEntropyOptions = exec.CrossEntropyOptions;
+/// Elementwise unary op selector shared by the `unary` kernels.
 pub const UnaryOp = exec.UnaryOp;
+/// RoPE pairing/application mode selector.
 pub const RopeMode = exec.RopeMode;
+/// Precomputed cos/sin rope table (`prepareRopeTable*`), consumed by the fused rope kernels.
 pub const RopeTable = exec.RopeTable;
 
 /// SIMD vocabulary for user-defined elemental ops (`elementalUnary` /
@@ -308,6 +345,7 @@ pub const simd = struct {
     pub const vecExpAffineSumInPlace = vector_primitives.vecExpAffineSumInPlace;
     pub const weightedAccumRows4F16 = vector_primitives.weightedAccumRows4F16;
 };
+/// Rope base frequency parameter type for the table builders.
 pub const RopeTheta = exec.RopeTheta;
 /// Fake-quantization round trips (FP8-E4M3 / FP4-E2M1 microscaling groups,
 /// Hadamard rotation, f16 round trip) over host slices (§10.10).

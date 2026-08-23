@@ -374,14 +374,6 @@ fn FloatTensor(comptime tags_spec: anytype) type {
         pub const allAll = reduce_ops.allAll;
         pub const sum = reduce_ops.sum;
         pub const mean = reduce_ops.mean;
-        /// Deprecated: use `sum` (same signature). Removal per docs/DEVELOPMENT.md §6.
-        pub const sumExt = reduce_ops.sum;
-        /// Deprecated: use `mean` (same signature). Removal per docs/DEVELOPMENT.md §6.
-        pub const meanExt = reduce_ops.mean;
-        /// Deprecated: use `max` (same signature). Removal per docs/DEVELOPMENT.md §6.
-        pub const maxExt = stats_ops.max;
-        /// Deprecated: use `min` (same signature). Removal per docs/DEVELOPMENT.md §6.
-        pub const minExt = stats_ops.min;
         pub const cumsum = reduce_ops.cumsum;
         pub const segmentSum = reduce_ops.segmentSum;
         pub const linearRecurrence = reduce_ops.linearRecurrence;
@@ -469,12 +461,6 @@ fn FloatTensor(comptime tags_spec: anytype) type {
         pub const crossEntropy = loss_ops.crossEntropy;
         pub const linearCrossEntropy = loss_ops.linearCrossEntropy;
         pub const linearDistill = loss_ops.linearDistill;
-        /// Deprecated: use `crossEntropy` (same signature). Removal per docs/DEVELOPMENT.md §6.
-        pub const crossEntropyExt = loss_ops.crossEntropy;
-        /// Deprecated: use `linearCrossEntropy` (same signature). Removal per docs/DEVELOPMENT.md §6.
-        pub const linearCrossEntropyExt = loss_ops.linearCrossEntropy;
-        /// Deprecated: use `linearDistill` (same signature). Removal per docs/DEVELOPMENT.md §6.
-        pub const linearDistillExt = loss_ops.linearDistill;
         pub const mseLoss = loss_ops.mseLoss;
         pub const huberLoss = loss_ops.huberLoss;
         pub const bceLoss = loss_ops.bceLoss;

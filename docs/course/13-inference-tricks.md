@@ -402,8 +402,8 @@ For context (explicitly *not* a controlled A/B): llama.cpp's `llama-lookup` repo
 
 The chat layer is the turnkey wiring — `chat.Options{ .speculation = true, .spec_options = .{...}, .io = io }` — the `Conversation` owns the cascade and decoder, wires the template's stop id into `spec_options.stop_token`, and a `TurnGate` keeps the conversation SAM byte-exact across trimmed turns by filtering `observe`/`observeTopK` so the index never learns tokens the turn trim discards (`docs/SPECULATIVE.md` §9). Setting `.io` enables the live cost rescale; without it the gate runs on the static table. The same layer enforces the composition rules as loud init errors rather than silent misbehaviour (`docs/REFERENCE.md` §13.8.2):
 
-- `stop_sequences` + `speculation` → `error.StopSequencesWithSpeculation`: the token completing a text stop sequence could be accepted mid-verify-batch, breaking the one-RNG-draw-per-committed-token contract.
-- Warm starts and cross-request KV reuse + speculation → `error.SpeculationWithWarmStart` / `error.SpeculationWithReuse`: "the SpeculationIndex mirrors committed history append-only and can neither adopt nor rewind."
+- `stop_sequences` compose with speculation: the accept gate scans the reply tail before taking a token, and the sequence-completing token is neither streamed nor counted (the turn trim discards it), preserving the one-RNG-draw-per-committed-token contract.
+- Cross-request KV reuse + speculation → `error.SpeculationWithReuse`: "the SpeculationIndex mirrors committed history append-only and can neither adopt nor rewind."
 - Lockstep batching + speculation → `error.SpeculationWithBatch` (§13.2).
 - qwen35 → structurally out of scope (§13.1): the recurrent cache cannot rewind.
 
@@ -543,7 +543,7 @@ pub fn sendTokensReuse(self: *Self, ids: []const u32, writer: *std.Io.Writer) !u
 
 `initWarm` adopts a previous cache plus the token shadow describing its positions; `sendTokensReuse` reconciles by LCP, truncates, prefills the tail, and reports the reused span as `reused_prefix`; `takeCache` releases the cache back to the pool afterwards. Warm-reuse == fresh-stateless equivalence is proven in `chat_tests.zig`.
 
-*The server policy*, `examples/lmserve/backend.zig` — and the entire matching policy is fourteen lines (backend.zig:182-195):
+*The server policy*, `src/llm/serving/gguf_chat.zig` — and the entire matching policy is fourteen lines (backend.zig:182-195):
 
 ```zig
 fn commonPrefix(tokens: []const usize, ids: []const u32) usize {
@@ -695,7 +695,7 @@ The through-line of this chapter, one last time: `truncate` made the cache rewin
 - `src/llm/speculative/cascade.zig` and `src/llm/speculative/constrained.zig` — source composition with per-source muting; the ~100-line bridge that makes grammars draft.
 - `src/llm/logit_processor.zig` + `src/llm/sampler.zig` — the seam every decode path funnels through.
 - `src/llm/kv_persist.zig` — 295 lines of crash-safe binary file design; read it as a systems exercise.
-- `examples/lmserve/backend.zig` — the slot pool, similarity gate, disk tier, and constraint cache; the server policy in one file.
+- `src/llm/serving/gguf_chat.zig` — the slot pool, similarity gate, disk tier, and constraint cache; the server policy in one file.
 - `src/exec/expert_store.zig` — the tiered store, the pilot thread, the platform shims; the best-commented systems code in the tree.
 - `docs/SPECULATIVE.md`, `docs/CONSTRAINED-DECODING.md`, `docs/LMSERVER.md`, `docs/RUNNING-MODELS.md`, `docs/GPU-OFFLOAD.md` — the design records, adjudications included.
 
@@ -705,7 +705,7 @@ The through-line of this chapter, one last time: `truncate` made the cache rewin
 2. **(Easy)** Extend the course toy decoder (§13.3) with a `stop_token`: when a committed token equals it, the row loop must break immediately — bonus row included. Write a test that proves the streams with and without drafting still match up to and including the stop. You have reproduced the RNG-accounting rule of `core.zig:32-39` in miniature.
 3. **(Medium)** Add a Token-Recycling drafter to the toy: a `vocab × K` table updated with each step's "top-K" (for the toy model, the true successor plus K−1 decoys), drafting by top-1 chain walk. Measure tokens/step against `noDraft` over 1000 tokens. Then make the model non-Markov (`targetNext(prev, cur)`) and watch acceptance change — you are rediscovering why acceptance is a property of (model × token stream).
 4. **(Medium)** Write a `LogitProcessor` that bans a fixed token list, following the `OddMask` shape from `docs/REFERENCE.md` §13.6, and install it via `chat.Options.logit_processor` on a qwen3 chat. Verify: (a) the banned tokens never appear; (b) greedy output with `.speculation = true` and `false` is identical (the §13.6 no-rollback argument in action). Then make your processor expose `forcedTokens` for some state and confirm speculation starts drafting your forced spans.
-5. **(Hard)** Build a two-slot LCP pool over the toy decoder: token shadows, `commonPrefix`, the `lcp * 10 > ids_len` gate, LRU eviction, and a "shadow trimmed to cache.len" reclaim (backend.zig:608-614 explains why). Drive it with three interleaved "conversations" and assert (a) follow-up turns re-prefill only their tails, (b) an unrelated request evicts the LRU slot, not the best-matching one, (c) outputs are identical to a pool-free run. You will have re-derived the heart of `examples/lmserve/backend.zig`.
+5. **(Hard)** Build a two-slot LCP pool over the toy decoder: token shadows, `commonPrefix`, the `lcp * 10 > ids_len` gate, LRU eviction, and a "shadow trimmed to cache.len" reclaim (backend.zig:608-614 explains why). Drive it with three interleaved "conversations" and assert (a) follow-up turns re-prefill only their tails, (b) an unrelated request evicts the LRU slot, not the best-matching one, (c) outputs are identical to a pool-free run. You will have re-derived the heart of `src/llm/serving/gguf_chat.zig`.
 
 ---
 

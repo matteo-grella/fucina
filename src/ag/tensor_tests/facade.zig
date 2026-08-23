@@ -94,7 +94,6 @@ test "tagged autograd exposes Tensor facade operations" {
         "rmsNorm",
         "layerNorm",
         "crossEntropy",
-        "crossEntropyExt",
         "rope",
         "dot",
         "floor",
@@ -235,7 +234,6 @@ fn expectNoFloatMath(comptime non_float_dtype: DType) void {
         "rmsNorm",
         "layerNorm",
         "crossEntropy",
-        "crossEntropyExt",
         "rope",
         "dot",
     };

@@ -650,8 +650,10 @@ Generic helpers stay flat in `src/llm/`:
   generic multi-turn chat over any family exposing `initKvCache` and a
   tokenizer module; `Template` renders ChatML/Llama 3/Gemma 1-3/Gemma 4;
   `Options` includes `extra_stop_ids`, `stop_sequences`, and `speculation`
-  (combining `stop_sequences` with speculation is an init error, preserving
-  the lossless one-draw contract). `sendBatch` runs lockstep batch-N decode
+  (`stop_sequences` compose with speculation: the accept gate scans the
+  committed text and the completing token is trimmed, preserving the
+  lossless one-draw contract; the init errors are
+  `SpeculationWithBatch`/`SpeculationWithReuse`). `sendBatch` runs lockstep batch-N decode
   over N sibling conversations sharing one model via `Model.forwardStepBatch`
   (speculation excluded; ownership contract in `REFERENCE.md`).
 - `serving.zig` + `serving/`: the serving band. `serving/contract.zig` is
@@ -765,7 +767,7 @@ behavioral tests, and `arch-check` ignores the imports inside them.
 ## Current Production Gaps
 
 - No stable external API contract: the package manifest and 0.x tags give
-  consumers a pin (`zig fetch --save git+...#v0.1.0`), not a semver
+  consumers a pin (`zig fetch --save git+...#v0.3.0`), not a semver
   stability promise — the public API may change between tags.
 - The CUDA backend (`-Dgpu=cuda`, Linux) covers f32/f16 GEMM + quantized
   dense/MoE prefill + opt-in decode GEMV; no attention/KV offload and no
@@ -776,9 +778,12 @@ behavioral tests, and `arch-check` ignores the imports inside them.
   rules); don't add one without a concrete design.
 - Quantized encoder coverage stops at K-quants + legacy formats; the cold
   formats (Q2_K/Q3_K/IQ*/TQ*/FP4) are decode/matmul-only.
-- No unified model/session abstraction across LLM families; each family
-  wires its own config/loader/runner (the shared seams are `weights.zig`,
-  `gguf_meta.zig`, `chat.zig`, and `moe_chain`).
+- The descriptor runner (`llm.runner`, docs/RUNNER.md) unifies the qwen3
+  family and the glm4moe trunk, and `serving.open` is the load-and-serve
+  entry for the Conversation families; the OTHER families still wire their
+  own config/loader/decoder (the shared seams are `weights.zig`,
+  `gguf_meta.zig`, `chat.zig`, `host_ops.zig`, and `moe_chain`), and no
+  descriptor covers recurrent/MLA/hyper-connection vocabularies yet.
 - No documented thread-safety contract for users sharing tensor handles
   across threads (the runtime's internal pools are thread-safe; handle
   sharing is not specified).

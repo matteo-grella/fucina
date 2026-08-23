@@ -31,7 +31,7 @@ chain is:
 
 ```
 tensor.deinit()  →  buffer.release()  →  refcount hits 0  →  reclaim()  →  buffer returns to the free-list
-   ag/tensor.zig:102   tensor.zig:177      storage.zig:120     exec/buffer_pool.zig:171
+   ag/tensor.zig:102   tensor.zig:250      storage.zig:123     exec/buffer_pool.zig:171
 ```
 
 `ExecContext` (via its embedded `Runtime`) owns one `BufferPool`
@@ -104,7 +104,7 @@ slot (`src/llm/kv_cache.zig:286-298`).
   values via `cloneView()` at op-execution time (`src/ag/backward/elementwise.zig`: pointwise mul/div
   `:59-60`, relu `:177`; `src/ag/backward/matmul.zig`: `DotBackward` `:140`
   delegating to `EinsumBackward`, cloneViews at `:191/:195`), and `cloneView` bumps the
-  refcount (`src/tensor.zig:258`).
+  refcount (`src/tensor.zig:264`).
   Those input buffers therefore **cannot** return to the pool until the tape
   node is destroyed in/after `backward`.
 
@@ -117,9 +117,9 @@ backward, not something an arena would change.
 ## 3. Views are refcounted aliases (the decisive constraint)
 
 Every view operation retains the source buffer and releases it on `deinit`:
-`cloneView` (`src/tensor.zig:258`), `viewWithStrides(Offset)`
-(`src/tensor.zig:264/:268`), `reshape` (`src/tensor.zig:292`), `broadcastTo`
-(`src/tensor.zig:306`); `narrow` goes through `viewWithStridesOffset`
+`cloneView` (`src/tensor.zig:264`), `viewWithStrides(Offset)`
+(`src/tensor.zig:270/:274`), `reshape` (`src/tensor.zig:298`), `broadcastTo`
+(`src/tensor.zig:312`); `narrow` goes through `viewWithStridesOffset`
 (`src/exec/gather_scatter.zig:80`). A view's lifetime is independent of its parent's.
 
 The most important instance: per-step attention reads the KV cache via a
@@ -141,7 +141,7 @@ substantive axes (in addition to the view/KV constraint in §3):
    pool reclaims a buffer the instant a transient dies; per-block peak live set
    is only ~6–12 tensors (`attnBlock`/`ffnBlock`, `src/llm/gemma/model.zig:976/:1071`),
    and the residual stream is a single carried `x` advanced via `ctx.replace`
-   (which frees the old buffer each layer, `src/exec.zig:398`). An arena frees
+   (which frees the old buffer each layer, `src/exec.zig:397`). An arena frees
    nothing until reset, so a forward balloons to roughly `n_layer ×` the
    activation footprint — strictly worse than the pool, whose steady-state
    retention is bounded by the actual peak transient set
@@ -180,7 +180,7 @@ amortization — and adds intra-pass reuse plus a bounded cap the arena lacks.
 ## 5. The one honest caveat: ergonomics
 
 The genuine cost of the current pattern is **boilerplate** — ~21 `defer .deinit()`
-lines across `attnBlock` + `ffnBlock` (`src/llm/gemma/model.zig:1031/:1126`).
+lines across `attnBlock` + `ffnBlock` (`src/llm/gemma/model.zig:976/:1071`).
 (The hand-written `catch { …deinit(); return e; }` error-path cleanups this
 section originally cited have since been converted to plain `defer`/`errdefer`
 arms.) These manual frees are the real fragility, and they are precisely the

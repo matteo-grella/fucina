@@ -29,13 +29,13 @@ structurally out of scope — see §11.
 Three layers, each independently testable:
 
 ```
-DraftSource (vtable)          src/llm/speculative/core.zig:74
+DraftSource (vtable)          src/llm/speculative/core.zig:86
   ↑ implemented by
 SpeculationIndex (cascade)    src/llm/speculative/cascade.zig:130
   conversation SAM ── frozen reference SAMs ── Token-Recycling matrix
   src/llm/speculative/sam_index.zig:103        src/llm/speculative/recycling.zig:144
   ↓ drafts verified by
-SpeculativeDecoder(Model)     src/llm/speculative/core.zig:476
+SpeculativeDecoder(Model)     src/llm/speculative/core.zig:507
   one batched forwardStepAllLogits + full sampler pipeline per row
   KvCache.truncate drops rejected rows        src/llm/kv_cache.zig:328
 ```
@@ -57,7 +57,7 @@ SpeculativeDecoder(Model)     src/llm/speculative/core.zig:476
 - **New model-side primitives** (the only model code speculation needed):
   `KvCache.truncate` — a len-clamp; per-(position, kv-head) row layout makes
   rewind trivial for both f16 and q8_0, verified bitwise against a fresh
-  cache by the truncate + re-append test (kv_cache_tests.zig:418) — and
+  cache by the truncate + re-append test (kv_cache_tests.zig:523) — and
   `forwardStepAllLogits`.
 
 ## 2. The losslessness contract
@@ -100,7 +100,7 @@ The contract decomposes into proof obligations, each with a test:
 4. **Adversarial sources can't corrupt the stream.** Perfect / garbage /
    alternating sources all produce token-for-token plain output (greedy
    losslessness test); the cache never retains unverified rows, including on
-   error unwind (`errdefer kv.truncate`, speculative/core.zig:616/:656).
+   error unwind (`errdefer kv.truncate`, speculative/core.zig:679/:656).
 5. **Gating is orthogonal.** The gate decides *when* speculation runs, never
    *what* is committed (end-to-end gate test asserts identical streams while
    the gate trips, backs off, and re-probes).
@@ -111,7 +111,7 @@ Measured with the `--spec-bench` probe mode (examples/qwen3/bench.zig): cost of 
 verify-k forward in plain-step equivalents, best-of reps, M1 Max ReleaseFast.
 
 **Dense Qwen3-0.6B-Q4_K_S** (the shipped `default_cost_table`,
-speculative/core.zig:220):
+speculative/core.zig:251):
 
 | draft k | verify cost (plain steps) | conservative break-even acc ≈ cost/k |
 | --- | --- | --- |
@@ -142,7 +142,7 @@ and short low-k drafts whose per-token economics are worse).
 
 ## 4. CostGate — why hybrid static + EWMA
 
-`CostGate` (speculative/core.zig:266) gates on **estimated speedup**, not tokens
+`CostGate` (speculative/core.zig:297) gates on **estimated speedup**, not tokens
 per step:
 
 ```
@@ -165,10 +165,10 @@ hybrid, one sample moves the estimate by at most 20% of its clamped
 deviation — it cannot flip the gate — while a model whose true economics
 differ from the table (a different size/quant/machine) is learned within a
 few verifies, and the table alone applies when no clock is set
-(`verifyCost`, speculative/core.zig:365-375; cost-table/gate tests at
+(`verifyCost`, speculative/core.zig:405; cost-table/gate tests at
 core_tests.zig:586/:602).
 
-Policy constants (all in `Options`, speculative/core.zig:157):
+Policy constants (all in `Options`, speculative/core.zig:179):
 
 - **Hysteresis 1.0 / 1.1**: speculate while est_speedup ≥ `min_speedup`
   (1.0); a re-probe re-enables only at ≥ 1.0 + `probe_margin` (0.10), so a
@@ -278,7 +278,7 @@ mode, §9) exists to audit this parity.
 stream, so a document injected mid-conversation matches existing context
 immediately; `clearReferences` drops all documents (and any pending
 accounting). At the chat level: `Conversation.addSpecReference(tokens)`
-(chat.zig:255, requires `Options.speculation`).
+(chat.zig:521, requires `Options.speculation`).
 
 ## 9. CLI and chat usage
 
@@ -308,8 +308,8 @@ the decoder plus the per-source summary
 (`spec sources: conversation a/d ref0 a/d recycling a/d [muted]`).
 
 Library use: `chat.Options{ .speculation = true, .spec_options = .{...},
-.io = io }` (chat.zig:132) — the `Conversation` owns a `SpeculationIndex` +
-decoder; a `TurnGate` (chat.zig:570) keeps the conversation SAM byte-exact
+.io = io }` (chat.zig:259) — the `Conversation` owns a `SpeculationIndex` +
+decoder; a `TurnGate` (chat.zig:1181) keeps the conversation SAM byte-exact
 across trimmed turns by filtering `observe`/`observeTopK` so the index never
 learns tokens the turn trim discards (stop marker + overshoot). Setting `.io`
 enables the live cost rescale; without it the gate runs on the static table.
@@ -386,7 +386,7 @@ prototyped or paper-audited against the measured verify economics (§3).
   state at an arbitrary earlier position, which the recurrence does not
   support (and checkpoint-per-position would cost more than verification
   saves). The decoder is deliberately duck-typed on the rewindable-`KvCache`
-  contract (speculative/core.zig:473-475); qwen35 does not satisfy it.
+  contract (speculative/core.zig:504-506); qwen35 does not satisfy it.
 
 ## Addendum 2026-07-02 — gemma4 chat composition + loud gate validation
 
@@ -397,11 +397,13 @@ prototyped or paper-audited against the measured verify economics (§3).
   gemma4") is exercised end-to-end from both CLIs.
 - **`CostGate.init` validates its options loudly** instead of accepting degenerate
   configs: `RateWindowTooSmall`, `ProbeStepsZero`, `CostTableEmpty`, `ReprobeAfterZero`
-  (speculative/core.zig:318-321; every-build-mode test at core_tests.zig:878).
-- **Stop handling vs the one-draw contract:** `chat.Options` gained `extra_stop_ids`
-  (verify-safe: token-ID comparison) and `stop_sequences` (text-level); combining
-  `stop_sequences` with `speculation` is an init error (chat.zig:197) because the
-  sequence-completing token could be accepted mid-verify-batch, breaking the
+  (speculative/core.zig:349-352; every-build-mode test at core_tests.zig:878).
+- **Stop handling vs the one-draw contract:** `chat.Options` has `extra_stop_ids`
+  (verify-safe: token-ID comparison) and `stop_sequences` (text-level).
+  `stop_sequences` compose with speculation: the accept gate scans the reply
+  tail before taking a token, and the sequence-completing token is neither
+  streamed nor counted (the turn trim discards it from history/KV,
+  chat.zig:1200-1215), which preserves the
   one-RNG-draw-per-plain-committed-token contract (§2 obligation 1).
-  `SpeculationIndex.truncatePending` (speculative/cascade.zig:403) keeps the
+  `SpeculationIndex.truncatePending` (speculative/cascade.zig:409) keeps the
   per-source acceptance accounting aligned when the `TurnGate` truncates at a stop.

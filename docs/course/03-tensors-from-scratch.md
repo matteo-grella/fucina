@@ -1078,7 +1078,7 @@ the remaining loophole: could exec scopes — which *are* arena-like ownership
 turns the pool's O(1) working set into O(N) live intermediates at cold
 addresses — **2 versus 32 distinct buffers on a 32-op 1 MiB chain**, a
 measurement pinned by the "exec scope holds buffers until close" test in
-`src/ag/tensor_tests.zig` (MEMORY-MODEL.md §5). Scopes are for when holding
+`src/ag/tensor_tests/ (the control.zig scope tests)` (MEMORY-MODEL.md §5). Scopes are for when holding
 everything *is the semantics* (training); deinit-ASAP with no scope stays
 the inference discipline. The document is equally honest about the pattern's
 one real cost — boilerplate, ~21 `defer .deinit()` lines across a

@@ -169,7 +169,7 @@ names".
   text on screen, not as narrator claims.
 - **Caveat that MUST stay with the number**: ≤2-vs-16 is a deterministic
   *buffer count* on a 16-op chain (64×64 f32 intermediates), pinned by the
-  "exec scope holds buffers until close" test in `src/ag/tensor_tests.zig`
+  "exec scope holds buffers until close" test in `src/ag/tensor_tests/control.zig`
   and recorded in docs/MEMORY-MODEL.md (adjudicated 2026-06-10). It is not
   a wall-clock benchmark; do not restyle it as a speedup. The VO's "holding
   buffers arena-style" is the document's own framing — the measurement compares a

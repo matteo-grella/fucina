@@ -109,8 +109,8 @@ attention needs the KV — Engram needs only the tokens.
 | Prime chain | exact values, global seen-set across layers/orders (`engram_tests.zig`) |
 | Reference parity | multipliers/primes/rows EXACT + forward/backward goldens (`engram_golden_tests.zig`) |
 | Graft identity | zero output at step 0, nonzero `value_w` gradient (`engram_tests.zig`) |
-| Dilated depthwise conv | hand values + grouped-conv equivalence incl. gradients (`tensor_tests.zig`) |
-| Integer ops | numpy int64 semantics: wrap, floored mod, xor (`tensor_tests.zig`) |
+| Dilated depthwise conv | hand values + grouped-conv equivalence incl. gradients (`src/ag/tensor_tests/conv.zig` / `integer.zig`) |
+| Integer ops | numpy int64 semantics: wrap, floored mod, xor (`src/ag/tensor_tests/conv.zig` / `integer.zig`) |
 | Persistence | state-dict roundtrip incl. multipliers (`engram_tests.zig`) |
 
 ## Integration patterns

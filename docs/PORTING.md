@@ -10,6 +10,18 @@ first, parity is closed stage by stage behind mechanical gates, and only
 then does performance work begin, with the parity gates frozen as a
 non-regression ratchet.
 
+## 0. First question: does the descriptor runner already cover it?
+
+Before hand-porting a decoder-only LLM, check `docs/RUNNER.md`: an
+architecture whose blocks fit an existing `block_style` (the qwen3-shaped
+fused vocabulary, or the GLM/DeepSeek-MoE host_reference vocabulary) is a
+`Descriptor.fromGguf` arm plus a synthetic parity fixture, not a new
+model file — the qwen3 family and the glm4moe trunk already run this way.
+A family earns a hand port only for vocabulary the descriptor does not
+carry (recurrent blocks, MLA, hyper-connections, rel-bias attention,
+non-LLM decode paradigms); extending the runner's vocabulary is often the
+better investment than the port.
+
 ## 1. Pin the reference kit before writing any code
 
 - **Pin the reference at an exact commit** and build it locally under

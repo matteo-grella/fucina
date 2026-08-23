@@ -892,7 +892,7 @@ exactly that when assets are missing, so `zig build test` is always green on
 a fresh clone (`docs/REFERENCE.md` §2.7).
 
 Fucina layers a simple convention on top (`docs/REFERENCE.md` §2.7): tests
-live in **sibling files** — `exec.zig` has `exec_tests.zig`, 156 such files
+live in **sibling files** — `exec.zig` has `exec_tests.zig`, 182 such files
 across the tree — and the production file pulls its sibling in with a
 forwarding stanza:
 

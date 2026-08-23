@@ -5,7 +5,10 @@ implementation driven by a runtime `Descriptor` instead of per-family
 forward code — Level 0 of the universal checkpoint runner design
 (descriptor + weights → runnable model; the follow-on levels are the
 metadata compiler for more families and the divergence-guided recovery
-loop).
+loop). It is also the production decoder for the qwen3 family:
+`src/llm/qwen3/model.zig` is an alias surface over it (`Config` IS
+`runner.Descriptor`, `Model` IS `runner.Model`), and the glm4moe family's
+trunk runs on its host_reference blocks.
 
 ## What it is
 
@@ -15,14 +18,18 @@ loop).
   any architecture that follows the qwen3-shaped GGUF key layout
   (`<arch>.embedding_length`, `attention.head_count`, `expert_count`, ...)
   and emits the descriptor — dense or MoE — from the file's own
-  `general.architecture` string.
+  `general.architecture` string, plus the glm4moe metadata shape for the
+  host_reference style.
 - **`Model`** — the interpreter: loads weights through the shared model-I/O
   band (`fucina.weights`, `gguf_meta.parallelLoadLayers`, PTQTP sidecars,
-  MoE expert streaming) and runs the same facade ops the hand ports use —
-  fused norm+QKV projection, half-rope QK-norm, grouped causal attention
-  over the shared `KvCache`, dense/MoE FFN with the packed fast paths. It
-  inherits every kernel, threading decision, and the buffer-pool memory
-  discipline; there is nothing between the descriptor walk and the facade.
+  MoE expert streaming) and runs the facade ops directly — fused norm+QKV
+  projection, half-rope QK-norm, grouped causal attention over the shared
+  `KvCache`, dense/MoE FFN with the packed fast paths. It inherits every
+  kernel, threading decision, and the buffer-pool memory discipline; there
+  is nothing between the descriptor walk and the facade. Because the qwen3
+  family serves through it, the `.fused` style also carries the batched
+  decode entries (`forwardStepBatch`, `forwardStepBatchSpans`) and the
+  nullable SubQ research seam.
 
 ## Block styles
 
@@ -35,43 +42,49 @@ structural vocabulary, not family names:
 - **`.host_reference`** — the auditable host-side f32 shape: biased QKV,
   partial rope with selectable pairing, sigmoid noaux MoE with router
   bias, shared experts, and leading dense layers (the GLM-4.5 /
-  DeepSeek-MoE vocabulary, ported verbatim from the hand glm4moe block).
-  Heavy linears and the fused MoE mixture run on fucina kernels in both
-  styles; `hostStep` is this style's forward entry.
+  DeepSeek-MoE vocabulary). Heavy linears and the fused MoE mixture run on
+  fucina kernels in both styles; `hostStep` is this style's forward entry,
+  and `hostLayerForward` carries a nullable `mtp_cache` seam for the
+  glm4moe family's MTP head.
 
-## Parity status
+## Correctness status
 
-`src/llm/runner_tests.zig` pins three parity gates, all **bitwise**:
+`src/llm/runner_tests.zig` pins the runner against **recorded goldens**:
+greedy argmax chains asserted everywhere, plus exact FNV-1a logit-bit
+hashes on the machine class the goldens were recorded on (aarch64 native,
+Accelerate BLAS) — a refactor that changes a single output bit fails
+there.
 
-- **Gate 1 (real weights)**: on real Qwen3-0.6B GGUFs (Q8_0 and Q4_K_M),
-  prefill logits and every decode step's logits along a greedy chain match
-  the hand `llm.qwen3` port, each side running its own KV cache (native
-  backend, skips without `models/`).
+- **Real weights**: on real Qwen3-0.6B GGUFs (Q8_0 and Q4_K_M), the
+  prefill logits fingerprint and a five-step greedy chain match the
+  recorded trace, and the no-cache last-logits entry agrees with the
+  cached prefill (native backend, skips without `models/`).
 - **The small-MoE fixture**: a synthetic qwen3moe GGUF (built in-test via
-  `gguf.Writer`, q8_0 expert stacks, no local models needed) matches the
-  hand port bitwise through prefill and a greedy decode chain — the MoE
-  arm's CI-safe pin.
-- **Gate 3 (second family as data)**: a synthetic glm4moe GGUF loads
-  purely through `Descriptor.fromGguf` — no family code in the test — and
-  matches the hand `llm.glm4moe` port bitwise per position (partial
-  interleaved rope, QKV biases, sigmoid noaux routing + router bias,
-  renormalized scaled weights, one shared expert, one leading dense
-  layer).
+  `gguf.Writer`, q8_0 expert stacks, no local models needed) matches its
+  recorded trace — the MoE arm's model-free pin.
+- **The glm fixture**: a synthetic glm4moe GGUF loads purely through
+  `Descriptor.fromGguf` — no family code in the test — matches its
+  recorded trace, and additionally matches the glm4moe family module
+  bitwise per position (the family drives the same host blocks through
+  its own `step` API, so this pins the two call paths against each
+  other).
 
-The hand ports remain the parity oracles and keep their serving/training
-surfaces (speculative decode, batched steps, SHINE, cartridges, MTP).
+The families' own suites anchor the runner further: the real-model chat,
+SHINE, TTS-talker, and training goldens all execute runner code for the
+qwen3 family, and the deepseek2 recorded-forward anchor pins the sibling
+host-band conventions.
 
 Open: validation against a real GLM-4.5 GGUF (none in the local model
-set), an independent speed measurement for gate 2 (currently satisfied by
-construction — the `.fused` style issues the hand port's exact call
-sequence), and the next vocabulary entries (MLA, KDA-recurrent, sliding
-window).
+set), an independent speed measurement (currently satisfied by
+construction — the `.fused` style issues the same facade call sequence the
+hand port did), and the next vocabulary entries (per-layer attention
+geometry for gemma4, MLA, KDA-recurrent).
 
-## Origin
+## Family status
 
-Extracted from `src/llm/qwen3/model.zig` (its `Config` was already
-runtime-valued and architecture-string generic; the runner drops the
-family-specific entries — speculative decode, batched spans, SubQuant
-glue — and keeps the block machinery). Deliberate consequence: the qwen3
-file can later delegate its core forward to the runner and shrink to the
-descriptor plus its family extras.
+| family | status |
+|---|---|
+| qwen3 / qwen3moe | runs ON the runner (`qwen3/model.zig` aliases it) |
+| glm4moe | trunk runs on the host_reference blocks; the MTP (`nextn`) head and verify API stay family-side |
+| gemma4 | natural next descriptor target (needs per-layer SWA/global geometry, sandwich norms, a second rope table) |
+| qwen35, deepseek2, deepseek4, kimi3, inkling | hand ports (recurrent blocks, MLA, hyper-connections, rel-bias attention — vocabulary the descriptor does not carry yet) |
