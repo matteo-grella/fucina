@@ -159,11 +159,15 @@ Execution runtime:
   `topk.zig`, `stats.zig`, `gather_scatter.zig`, `rope.zig`, `convert.zig`,
   `conv.zig`, `pool.zig`, `shape.zig`. These are not public API; `src/exec.zig` remains
   the runtime boundary.
+- `src/exec/moe_gu.zig`: fused gate|up MoE expert kernels over raw GGUF
+  stack layouts (packed Q6_Kx4/Q8_0x4 arms, raw Q6_K/Q4_K blocks, GPU
+  batch path), reached through the `moeGu*` facade methods; the gemma
+  family's tagged wrappers live in `llm/gemma/moe.zig`.
 - `src/exec/moe_chain.zig`: shared batched-MoE scheduling scaffolding
   (expert-grouped route plan, gather → gate/up → act → down phase-chain
   machinery, chunking helpers, profile timers). Consumed by `exec/moe.zig`
-  and — through the `pub const moe_chain` re-export on `ExecContext` — by the
-  gemma MoE engines at the llm layer, so scheduler fixes land once for every
+  and by the fused gate|up kernels in `moe_gu.zig`, so scheduler fixes
+  land once for every
   family.
 
 Backends:
@@ -588,8 +592,9 @@ subdirectories and are exposed as namespaces:
   pass over N per-stream KV caches).
 - `llm.qwen35.{model,chat}` — Qwen3.5/Qwen3.6 Gated-DeltaNet hybrid plus its
   ChatML chat/generation engine.
-- `llm.gemma.{model,train,moe,moe_route,moe_route_tensor}` — Gemma 4
-  text + MoE; the gemma MoE engines reuse `ExecContext.moe_chain`.
+- `llm.gemma.{model,train,moe}` — Gemma 4 text + MoE; the MoE kernels
+  live in the exec band (`exec/moe_gu.zig`), `gemma.moe` is the tagged
+  family surface over them.
 - `llm.diffusion_gemma.model` — block text-diffusion on the gemma4 backbone.
 - `llm.deepseek2.model` — DeepSeek-V2 family (MLA + MoE).
 - `llm.deepseek4.model` — DeepSeek V4 Flash (CSA/HCA attention + streamed

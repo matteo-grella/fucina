@@ -15,6 +15,7 @@ const thread = @import("thread.zig");
 const exec_attention = @import("exec/attention.zig");
 const exec_moe = @import("exec/moe.zig");
 const exec_moe_chain = @import("exec/moe_chain.zig");
+const exec_moe_gu = @import("exec/moe_gu.zig");
 const exec_matmul = @import("exec/matmul.zig");
 const exec_elementwise = @import("exec/elementwise.zig");
 const exec_quant_matmul = @import("exec/quant_matmul.zig");
@@ -2402,6 +2403,28 @@ pub const ExecContext = struct {
     /// exposed as an ExecContext decl so the gemma MoE engines at the llm
     /// layer reach the exact same types through the `fucina` root.
     pub const moe_chain = exec_moe_chain;
+
+    /// Fused gate|up MoE expert kernels over raw GGUF stack layouts
+    /// (`exec/moe_gu.zig`): the packed Q6_Kx4/Q8_0x4 arms, the raw
+    /// Q6_K/Q4_K block arm, and the GPU batch path. The gemma family's
+    /// tagged wrappers live in `llm/gemma/moe.zig`.
+    pub const moe_gu = exec_moe_gu;
+
+    pub fn moeGuDecodePacked(self: *ExecContext, x: *const Tensor, gate: []const backend_mod.QuantizedMatmulRhsQ6_Kx4, up: []const backend_mod.QuantizedMatmulRhsQ6_Kx4, down: []const backend_mod.QuantizedMatmulRhsQ8_0x4, selected: []const usize, weights: []const f32, out_pe: usize, io: ?std.Io, profile: ?*MoeBatchProfile) !Tensor {
+        return exec_moe_gu.decodePacked(&self.rt, &self.moe_scratch, x, gate, up, down, selected, weights, out_pe, io, profile);
+    }
+
+    pub fn moeGuBatchPacked(self: *ExecContext, x: *const Tensor, gate: []const backend_mod.QuantizedMatmulRhsQ6_Kx4, up: []const backend_mod.QuantizedMatmulRhsQ6_Kx4, down: []const backend_mod.QuantizedMatmulRhsQ8_0x4, selected: []const usize, weights: []const f32, top_k: usize, out_pe: usize, io: ?std.Io, profile: ?*MoeBatchProfile) !Tensor {
+        return exec_moe_gu.batchPacked(&self.rt, x, gate, up, down, selected, weights, top_k, out_pe, io, profile);
+    }
+
+    pub fn moeGuDecodeRaw(self: *ExecContext, x: *const Tensor, gw: exec_moe_gu.RawExpertWeights, n_expert: usize, selected: []const usize, weights: []const f32, out_pe: usize, io: ?std.Io, profile: ?*MoeBatchProfile) !Tensor {
+        return exec_moe_gu.decodeRaw(&self.rt, &self.moe_scratch, x, gw, n_expert, selected, weights, out_pe, io, profile);
+    }
+
+    pub fn moeGuBatchRaw(self: *ExecContext, x: *const Tensor, gw: exec_moe_gu.RawExpertWeights, n_expert: usize, selected: []const usize, weights: []const f32, top_k: usize, out_pe: usize, io: ?std.Io, profile: ?*MoeBatchProfile) !Tensor {
+        return exec_moe_gu.batchRaw(&self.rt, x, gw, n_expert, selected, weights, top_k, out_pe, io, profile);
+    }
 
     pub fn lockMoeDecodeScratch(self: *ExecContext) void {
         exec_moe.lockMoeDecodeScratch(&self.moe_scratch);

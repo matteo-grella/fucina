@@ -40,6 +40,12 @@ point; earlier history is `git log`.
 
 ### Changed
 
+- The gemma-family MoE kernels move to the exec band where they belong
+  (`exec/moe_gu.zig`, `ExecContext.moeGu*` facade): they were the one
+  below-facade kernel body living in `llm/`. `llm.gemma.moe` remains the
+  family surface (tagged wrappers + re-exported raw entries);
+  `llm.gemma.moe_route` / `moe_route_tensor` are gone (their code folded
+  into the kernels; experimental tier).
 - Host-band `step` entries return the tensor-band logits shape
   `fucina.Tensor(.{ .seq, .vocab })` (caller deinits) instead of host
   slices: `glm4moe.model.step` (was `[][]f32` with per-row dupes),
@@ -51,16 +57,6 @@ point; earlier history is `git log`.
   `llm.gemma.train` (files `llm/gemma/{model,train}.zig`) and
   `llm.pockettts.model`. `gemma.gemma4`, `gemma.gemma4_train`, and
   `pockettts.pocket` remain as deprecated aliases for one MINOR release.
-
-### Deprecated
-
-- `llm.gemma.gemma4` / `llm.gemma.gemma4_train` / `llm.pockettts.pocket`
-  — aliases of `gemma.model` / `gemma.train` / `pockettts.model`; removal
-  in the next MINOR release.
-- Build options `-Dbackend=cpu` (alias of `scalar`) and `-Daccelerate`
-  (compatibility alias of `-Dblas`): both predate this changelog and are
-  now on the ledger; removal in the next MINOR release.
-
 - The glm4moe family's trunk now runs on the runner's host_reference
   band: `llm.glm4moe.model` keeps the MTP (`nextn`) head, draft step, and
   the `step` verify API, and drives `runner.hostLayerForward` (which gains
@@ -78,12 +74,20 @@ point; earlier history is `git log`.
   `llm.qwen3.model` is preserved. Bit-exactness of the consolidation is
   pinned by recorded-logits gates in `runner_tests.zig` (real Qwen3-0.6B
   Q8_0/Q4_K_M plus the synthetic fixtures, captured before the merge).
-
 - Qwen3-TTS parity fixtures moved out of the shipped package:
   `src/llm/qwen3tts/goldens/` → `testdata/qwen3tts/` (5.5 MB of binary
   dumps that only in-repo parity tests read; `build.zig.zon` ships all of
   `src/`, so the move halves the fetched package). The tests already skip
   when fixtures are absent; dependency builds are unaffected.
+
+### Deprecated
+
+- `llm.gemma.gemma4` / `llm.gemma.gemma4_train` / `llm.pockettts.pocket`
+  — aliases of `gemma.model` / `gemma.train` / `pockettts.model`; removal
+  in the next MINOR release.
+- Build options `-Dbackend=cpu` (alias of `scalar`) and `-Daccelerate`
+  (compatibility alias of `-Dblas`): both predate this changelog and are
+  now on the ledger; removal in the next MINOR release.
 
 ## 0.2.0 — 2026-08-22
 

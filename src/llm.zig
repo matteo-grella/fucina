@@ -36,8 +36,6 @@ pub const gemma = struct {
     /// Deprecated: use `train`. Removal per docs/DEVELOPMENT.md §6.
     pub const gemma4_train = train;
     pub const moe = @import("llm/gemma/moe.zig");
-    pub const moe_route = @import("llm/gemma/moe_route.zig");
-    pub const moe_route_tensor = @import("llm/gemma/moe_route_tensor.zig");
 };
 /// DiffusionGemma block text-diffusion (gemma4 backbone). Files in `llm/diffusion_gemma/`.
 pub const diffusion_gemma = struct {
@@ -153,8 +151,6 @@ test {
     _ = gemma.model;
     _ = gemma.train;
     _ = gemma.moe;
-    _ = gemma.moe_route;
-    _ = gemma.moe_route_tensor;
     _ = diffusion_gemma.model;
     _ = parakeet.loader;
     _ = parakeet.frontend;
