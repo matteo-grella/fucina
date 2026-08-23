@@ -1,215 +1,166 @@
 //! Elementwise vector kernels: the contiguous entry points, the
 //! elementwise/reduction Task structs and their parallel dispatch, and the
 //! typed scalar inner kernels. Shared-core symbols (ParallelConfig,
-//! contiguous-data helpers, elementwiseThreadCount) come from `common.zig`
-//! (`vm`); the @Vector primitives from `primitives.zig`; op definitions
-//! from `../ops.zig`.
+//! contiguous-data helpers, elementwiseThreadCount) come from `common.zig`;
+//! the @Vector primitives from `primitives.zig`; op definitions from
+//! `../ops.zig`.
 
 const std = @import("std");
 const ops = @import("../ops.zig");
 const dtype_mod = @import("../../dtype.zig");
 const parallel = @import("../../parallel.zig");
 const tensor = @import("../../tensor.zig");
-const vm = @import("common.zig");
+const common = @import("common.zig");
 const primitives = @import("primitives.zig");
 
 const DType = dtype_mod.DType;
 const Tensor = tensor.Tensor;
 
-// Shared-core symbols from the common leaf, aliased so the moved bodies compile
-// unchanged.
-const ParallelConfig = vm.ParallelConfig;
-const elementwiseThreadCount = vm.elementwiseThreadCount;
-const contiguousDataConst = vm.contiguousDataConst;
-const contiguousData = vm.contiguousData;
-const contiguousDataConstOf = vm.contiguousDataConstOf;
-const contiguousDataOf = vm.contiguousDataOf;
-const Vf32 = vm.Vf32;
-const vector_len = vm.vector_len;
-
-// @Vector primitives — imported directly from the primitives sibling (not the
-// vector.zig barrel), so this child no longer participates in the parent cycle.
-const vecAdd = primitives.vecAdd;
-const vecSub = primitives.vecSub;
-const vecMul = primitives.vecMul;
-const vecDiv = primitives.vecDiv;
-const vecMaximum = primitives.vecMaximum;
-const vecMinimum = primitives.vecMinimum;
-const vecScale = primitives.vecScale;
-const vecAddScaled = primitives.vecAddScaled;
-const vecUnary = primitives.vecUnary;
-const vecAddUnary = primitives.vecAddUnary;
-const vecLeakyRelu = primitives.vecLeakyRelu;
-const vecClamp = primitives.vecClamp;
-const vecGated = primitives.vecGated;
-const vecSum = primitives.vecSum;
-const vecProd = primitives.vecProd;
-const vecDot = primitives.vecDot;
-const vecElementwiseF64 = primitives.vecElementwiseF64;
-const vecElementwiseF16 = primitives.vecElementwiseF16;
-const vecElementwiseBf16 = primitives.vecElementwiseBf16;
-const vecSumF64 = primitives.vecSumF64;
-const vecSumF16ToF32 = primitives.vecSumF16ToF32;
-const vecSumBf16ToF32 = primitives.vecSumBf16ToF32;
-const vecDotF64 = primitives.vecDotF64;
-const vecDotF16ToF32 = primitives.vecDotF16ToF32;
-const vecDotBf16ToF32 = primitives.vecDotBf16ToF32;
-const applyElementwiseTyped = primitives.applyElementwiseTyped;
+const ParallelConfig = common.ParallelConfig;
+const elementwiseThreadCount = common.elementwiseThreadCount;
+const contiguousDataConst = common.contiguousDataConst;
+const contiguousData = common.contiguousData;
+const Vf32 = common.Vf32;
+const vector_len = common.vector_len;
 
 // ---------------- Elementwise ----------------
 
 pub fn addInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
     try tensor.requireSameShape(a, b);
     try tensor.requireSameShape(out, a);
-    addContiguousIntoUnchecked(out, a, b, a.len());
+    addContiguousIntoUnchecked(.{}, out, a, b, a.len());
 }
 
-pub fn addContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
-    addContiguousIntoUncheckedWithConfig(out, a, b, len, .{});
-}
-
-pub fn addContiguousIntoUncheckedWithConfig(
+pub fn addContiguousIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
     len: usize,
-    config: ParallelConfig,
 ) void {
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
-    if (maybeParallelBinary(config, runAddTask, z, x, y)) return;
-    vecAdd(z, x, y);
+    if (maybeParallelBinary(pc, runAddTask, z, x, y)) return;
+    primitives.vecAdd(z, x, y);
 }
 
 pub fn subInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
     try tensor.requireSameShape(a, b);
     try tensor.requireSameShape(out, a);
-    subContiguousIntoUnchecked(out, a, b, a.len());
+    subContiguousIntoUnchecked(.{}, out, a, b, a.len());
 }
 
-pub fn subContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
-    subContiguousIntoUncheckedWithConfig(out, a, b, len, .{});
-}
-
-pub fn subContiguousIntoUncheckedWithConfig(
+pub fn subContiguousIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
     len: usize,
-    config: ParallelConfig,
 ) void {
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
-    if (maybeParallelBinary(config, runSubTask, z, x, y)) return;
-    vecSub(z, x, y);
+    if (maybeParallelBinary(pc, runSubTask, z, x, y)) return;
+    primitives.vecSub(z, x, y);
 }
 
 pub fn mulInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
     try tensor.requireSameShape(a, b);
     try tensor.requireSameShape(out, a);
-    mulContiguousIntoUnchecked(out, a, b, a.len());
+    mulContiguousIntoUnchecked(.{}, out, a, b, a.len());
 }
 
-pub fn mulContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
-    mulContiguousIntoUncheckedWithConfig(out, a, b, len, .{});
-}
-
-pub fn mulContiguousIntoUncheckedWithConfig(
+pub fn mulContiguousIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
     len: usize,
-    config: ParallelConfig,
 ) void {
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
-    if (maybeParallelBinary(config, runMulTask, z, x, y)) return;
-    vecMul(z, x, y);
+    if (maybeParallelBinary(pc, runMulTask, z, x, y)) return;
+    primitives.vecMul(z, x, y);
 }
 
-pub fn divContiguousIntoUncheckedWithConfig(
+pub fn divContiguousIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
     len: usize,
-    config: ParallelConfig,
 ) void {
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
-    if (maybeParallelBinary(config, runDivTask, z, x, y)) return;
-    vecDiv(z, x, y);
+    if (maybeParallelBinary(pc, runDivTask, z, x, y)) return;
+    primitives.vecDiv(z, x, y);
 }
 
-pub fn maximumContiguousIntoUncheckedWithConfig(
+pub fn maximumContiguousIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
     len: usize,
-    config: ParallelConfig,
 ) void {
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
-    if (maybeParallelBinary(config, runMaximumTask, z, x, y)) return;
-    vecMaximum(z, x, y);
+    if (maybeParallelBinary(pc, runMaximumTask, z, x, y)) return;
+    primitives.vecMaximum(z, x, y);
 }
 
-pub fn minimumContiguousIntoUncheckedWithConfig(
+pub fn minimumContiguousIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
     len: usize,
-    config: ParallelConfig,
 ) void {
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
-    if (maybeParallelBinary(config, runMinimumTask, z, x, y)) return;
-    vecMinimum(z, x, y);
+    if (maybeParallelBinary(pc, runMinimumTask, z, x, y)) return;
+    primitives.vecMinimum(z, x, y);
 }
 
-pub fn elementwiseContiguousIntoTypedWithConfig(
+pub fn elementwiseContiguousIntoTyped(
+    pc: ParallelConfig,
     comptime dtype: DType,
     comptime op: ops.ElementwiseOp,
     out: *tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)),
     a: *const tensor.TensorOf(dtype),
     b: *const tensor.TensorOf(dtype),
     len: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
-    const x = contiguousDataConstOf(dtype, a, len);
-    const y = contiguousDataConstOf(dtype, b, len);
-    const z = contiguousDataOf(dtype_mod.outputDType(.pointwise, dtype), out, len);
+    _ = pc;
+    const x = common.contiguousDataConstOf(dtype, a, len);
+    const y = common.contiguousDataConstOf(dtype, b, len);
+    const z = common.contiguousDataOf(dtype_mod.outputDType(.pointwise, dtype), out, len);
 
     if (comptime dtype == .f64) {
-        return vecElementwiseF64(op, z, x, y);
+        return primitives.vecElementwiseF64(op, z, x, y);
     } else if (comptime dtype == .f16) {
-        return vecElementwiseF16(op, z, x, y);
+        return primitives.vecElementwiseF16(op, z, x, y);
     } else if (comptime dtype == .bf16) {
-        return vecElementwiseBf16(op, z, x, y);
+        return primitives.vecElementwiseBf16(op, z, x, y);
     }
-    elementwiseContiguousIntoTyped(dtype, op, z, x, y);
+    elementwiseSlicesTyped(dtype, op, z, x, y);
 }
 
-pub fn scaleInto(out: *Tensor, a: *const Tensor, scalar_value: f32) !void {
-    return scaleIntoWithConfig(out, a, scalar_value, .{});
-}
-
-pub fn scaleIntoWithConfig(out: *Tensor, a: *const Tensor, scalar_value: f32, config: ParallelConfig) !void {
+pub fn scaleInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor, scalar_value: f32) !void {
     try tensor.requireSameShape(out, a);
     const x = a.dataConst();
     const z = out.data();
-    if (maybeParallelScale(config, z, x, scalar_value)) return;
-    vecScale(z, x, scalar_value);
+    if (maybeParallelScale(pc, z, x, scalar_value)) return;
+    primitives.vecScale(z, x, scalar_value);
 }
 
 pub fn addScaledSlice(z: []f32, x: []const f32, scalar_value: f32) void {
-    vecAddScaled(z, x, scalar_value);
+    primitives.vecAddScaled(z, x, scalar_value);
 }
 
 pub fn addRowVectorSlice(z: []f32, row_vector: []const f32, rows: usize, cols: usize) void {
@@ -217,7 +168,7 @@ pub fn addRowVectorSlice(z: []f32, row_vector: []const f32, rows: usize, cols: u
     std.debug.assert(row_vector.len == cols);
     for (0..rows) |row_i| {
         const row = z[row_i * cols ..][0..cols];
-        vecAdd(row, row, row_vector);
+        primitives.vecAdd(row, row, row_vector);
     }
 }
 
@@ -226,7 +177,7 @@ pub fn addRowVectorUnarySlice(comptime op: ops.UnaryOp, z: []f32, row_vector: []
     std.debug.assert(row_vector.len == cols);
     for (0..rows) |row_i| {
         const row = z[row_i * cols ..][0..cols];
-        vecAddUnary(op, row, row, row_vector);
+        primitives.vecAddUnary(op, row, row, row_vector);
     }
 }
 
@@ -250,7 +201,7 @@ const RowChanTask = struct {
 };
 
 fn maybeParallelRowChan(
-    config: ParallelConfig,
+    pc: ParallelConfig,
     comptime func: fn (*const RowChanTask) void,
     z: []f32,
     x: []const f32,
@@ -259,7 +210,7 @@ fn maybeParallelRowChan(
     rows: usize,
     cols: usize,
 ) bool {
-    const pool = config.pool orelse return false;
+    const pool = pc.pool orelse return false;
     const thread_count = @min(elementwiseThreadCount(rows * cols), rows);
     if (thread_count <= 1) return false;
 
@@ -284,10 +235,10 @@ fn runPreluChannelsTask(task: *const RowChanTask) void {
 }
 
 /// PReLU with a per-channel slope: `z[r,c] = x > 0 ? x : α[c]·x`.
-pub fn preluChannelsIntoWithConfig(z: []f32, x: []const f32, alpha: []const f32, rows: usize, cols: usize, config: ParallelConfig) void {
+pub fn preluChannelsInto(pc: ParallelConfig, z: []f32, x: []const f32, alpha: []const f32, rows: usize, cols: usize) void {
     std.debug.assert(z.len >= rows * cols and x.len >= rows * cols);
     std.debug.assert(alpha.len == cols);
-    if (maybeParallelRowChan(config, runPreluChannelsTask, z, x, alpha, null, rows, cols)) return;
+    if (maybeParallelRowChan(pc, runPreluChannelsTask, z, x, alpha, null, rows, cols)) return;
     preluChannelsRows(z, x, alpha, cols, 0, rows);
 }
 
@@ -317,10 +268,10 @@ fn runChannelAffineTask(task: *const RowChanTask) void {
 /// Per-channel affine (frozen-stats BatchNorm): `z[r,c] = x·scale[c] + shift[c]`;
 /// a null `shift` degrades to the per-channel scale `z = x·scale[c]` (the
 /// affine's own input-VJP).
-pub fn channelAffineIntoWithConfig(z: []f32, x: []const f32, scale: []const f32, shift: ?[]const f32, rows: usize, cols: usize, config: ParallelConfig) void {
+pub fn channelAffineInto(pc: ParallelConfig, z: []f32, x: []const f32, scale: []const f32, shift: ?[]const f32, rows: usize, cols: usize) void {
     std.debug.assert(z.len >= rows * cols and x.len >= rows * cols);
     std.debug.assert(scale.len == cols and (shift == null or shift.?.len == cols));
-    if (maybeParallelRowChan(config, runChannelAffineTask, z, x, scale, shift, rows, cols)) return;
+    if (maybeParallelRowChan(pc, runChannelAffineTask, z, x, scale, shift, rows, cols)) return;
     channelAffineRows(z, x, scale, shift, cols, 0, rows);
 }
 
@@ -352,10 +303,10 @@ fn channelAffineRows(z: []f32, x: []const f32, scale: []const f32, shift: ?[]con
 
 /// PReLU input-VJP: `gx[r,c] = x > 0 ? gy : α[c]·gy` (subgradient 0 at the
 /// kink follows the forward's `>` test, matching the composed relu VJP).
-pub fn preluChannelsBackwardInputIntoWithConfig(gx: []f32, gy: []const f32, x: []const f32, alpha: []const f32, rows: usize, cols: usize, config: ParallelConfig) void {
+pub fn preluChannelsBackwardInputInto(pc: ParallelConfig, gx: []f32, gy: []const f32, x: []const f32, alpha: []const f32, rows: usize, cols: usize) void {
     std.debug.assert(gx.len >= rows * cols and gy.len >= rows * cols and x.len >= rows * cols);
     std.debug.assert(alpha.len == cols);
-    _ = config;
+    _ = pc;
     const vzero: Vf32 = @splat(0);
     var r: usize = 0;
     while (r < rows) : (r += 1) {
@@ -377,10 +328,10 @@ pub fn preluChannelsBackwardInputIntoWithConfig(gx: []f32, gy: []const f32, x: [
 
 /// PReLU slope-VJP: `gα[c] = Σ_rows gy·min(x, 0)` — serial row accumulation
 /// (deterministic order; the slope vector is small).
-pub fn preluChannelsBackwardAlphaIntoWithConfig(galpha: []f32, gy: []const f32, x: []const f32, rows: usize, cols: usize, config: ParallelConfig) void {
+pub fn preluChannelsBackwardAlphaInto(pc: ParallelConfig, galpha: []f32, gy: []const f32, x: []const f32, rows: usize, cols: usize) void {
     std.debug.assert(galpha.len == cols);
     std.debug.assert(gy.len >= rows * cols and x.len >= rows * cols);
-    _ = config;
+    _ = pc;
     @memset(galpha, 0);
     var r: usize = 0;
     while (r < rows) : (r += 1) {
@@ -393,165 +344,115 @@ pub fn preluChannelsBackwardAlphaIntoWithConfig(galpha: []f32, gy: []const f32, 
 }
 
 pub fn unaryContiguousIntoUnchecked(
+    pc: ParallelConfig,
     comptime op: ops.UnaryOp,
     out: *Tensor,
     a: *const Tensor,
     len: usize,
-) void {
-    unaryContiguousIntoUncheckedWithConfig(op, out, a, len, .{});
-}
-
-pub fn unaryContiguousIntoUncheckedWithConfig(
-    comptime op: ops.UnaryOp,
-    out: *Tensor,
-    a: *const Tensor,
-    len: usize,
-    config: ParallelConfig,
 ) void {
     const x = contiguousDataConst(a, len);
     const z = contiguousData(out, len);
-    if (maybeParallelUnary(config, op, z, x)) return;
-    vecUnary(op, z, x);
+    if (maybeParallelUnary(pc, op, z, x)) return;
+    primitives.vecUnary(op, z, x);
 }
 
 pub fn leakyReluContiguousIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     len: usize,
     negative_slope: f32,
-) void {
-    leakyReluContiguousIntoUncheckedWithConfig(out, a, len, negative_slope, .{});
-}
-
-pub fn leakyReluContiguousIntoUncheckedWithConfig(
-    out: *Tensor,
-    a: *const Tensor,
-    len: usize,
-    negative_slope: f32,
-    config: ParallelConfig,
 ) void {
     const x = contiguousDataConst(a, len);
     const z = contiguousData(out, len);
-    if (maybeParallelLeakyRelu(config, z, x, negative_slope)) return;
-    vecLeakyRelu(z, x, negative_slope);
+    if (maybeParallelLeakyRelu(pc, z, x, negative_slope)) return;
+    primitives.vecLeakyRelu(z, x, negative_slope);
 }
 
 pub fn clampContiguousIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     len: usize,
     min_value: f32,
     max_value: f32,
-) void {
-    clampContiguousIntoUncheckedWithConfig(out, a, len, min_value, max_value, .{});
-}
-
-pub fn clampContiguousIntoUncheckedWithConfig(
-    out: *Tensor,
-    a: *const Tensor,
-    len: usize,
-    min_value: f32,
-    max_value: f32,
-    config: ParallelConfig,
 ) void {
     const x = contiguousDataConst(a, len);
     const z = contiguousData(out, len);
-    if (maybeParallelClamp(config, z, x, min_value, max_value)) return;
-    vecClamp(z, x, min_value, max_value);
+    if (maybeParallelClamp(pc, z, x, min_value, max_value)) return;
+    primitives.vecClamp(z, x, min_value, max_value);
 }
 
 pub fn gatedContiguousIntoUnchecked(
+    pc: ParallelConfig,
     comptime op: ops.GatedOp,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
     len: usize,
-) void {
-    gatedContiguousIntoUncheckedWithConfig(op, out, a, b, len, .{});
-}
-
-pub fn gatedContiguousIntoUncheckedWithConfig(
-    comptime op: ops.GatedOp,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    len: usize,
-    config: ParallelConfig,
 ) void {
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
-    if (maybeParallelGated(config, op, z, x, y)) return;
-    vecGated(op, z, x, y);
+    if (maybeParallelGated(pc, op, z, x, y)) return;
+    primitives.vecGated(op, z, x, y);
 }
 
-pub fn sumInto(out: *Tensor, a: *const Tensor) !void {
-    return sumIntoWithConfig(out, a, .{});
-}
-
-pub fn sumIntoWithConfig(out: *Tensor, a: *const Tensor, config: ParallelConfig) !void {
+pub fn sumInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor) !void {
     if (!out.isScalar()) return tensor.TensorError.ShapeMismatch;
-    out.data()[0] = parallelVecSum(config, a.dataConst()) orelse vecSum(a.dataConst());
+    out.data()[0] = parallelVecSum(pc, a.dataConst()) orelse primitives.vecSum(a.dataConst());
 }
 
 pub fn sumSlice(values: []const f32) f32 {
-    return vecSum(values);
+    return primitives.vecSum(values);
 }
 
-pub fn prodInto(out: *Tensor, a: *const Tensor) !void {
-    return prodIntoWithConfig(out, a, .{});
-}
-
-pub fn prodIntoWithConfig(out: *Tensor, a: *const Tensor, config: ParallelConfig) !void {
+pub fn prodInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor) !void {
     if (!out.isScalar()) return tensor.TensorError.ShapeMismatch;
-    out.data()[0] = parallelVecProd(config, a.dataConst()) orelse vecProd(a.dataConst());
+    out.data()[0] = parallelVecProd(pc, a.dataConst()) orelse primitives.vecProd(a.dataConst());
 }
 
 pub fn prodSlice(values: []const f32) f32 {
-    return vecProd(values);
+    return primitives.vecProd(values);
 }
 
-pub fn sumSliceTypedWithConfig(
+pub fn sumSliceTyped(
+    pc: ParallelConfig,
     comptime dtype: DType,
     values: []const dtype_mod.Scalar(dtype),
-    config: ParallelConfig,
 ) dtype_mod.Scalar(dtype_mod.outputDType(.reduction, dtype)) {
-    _ = config;
+    _ = pc;
     if (comptime dtype == .f64) {
-        return vecSumF64(values);
+        return primitives.vecSumF64(values);
     } else if (comptime dtype == .f16) {
-        return vecSumF16ToF32(values);
+        return primitives.vecSumF16ToF32(values);
     } else if (comptime dtype == .bf16) {
-        return vecSumBf16ToF32(values);
+        return primitives.vecSumBf16ToF32(values);
     }
     return sumSliceTypedScalar(dtype, values);
 }
 
-pub fn dotInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
-    return dotIntoWithConfig(out, a, b, .{});
-}
-
-pub fn dotIntoWithConfig(out: *Tensor, a: *const Tensor, b: *const Tensor, config: ParallelConfig) !void {
+pub fn dotInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
     try tensor.requireSameShape(a, b);
     if (!out.isScalar()) return tensor.TensorError.ShapeMismatch;
-    out.data()[0] = parallelVecDot(config, a.dataConst(), b.dataConst()) orelse vecDot(a.dataConst(), b.dataConst());
+    out.data()[0] = parallelVecDot(pc, a.dataConst(), b.dataConst()) orelse primitives.vecDot(a.dataConst(), b.dataConst());
 }
 
-pub fn dotIntoTypedWithConfig(
+pub fn dotIntoTyped(
+    pc: ParallelConfig,
     comptime dtype: DType,
     out: *tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)),
     a: *const tensor.TensorOf(dtype),
     b: *const tensor.TensorOf(dtype),
-    config: ParallelConfig,
 ) !void {
     try tensor.requireSameShapeOf(dtype, a, b);
     if (!out.isScalar()) return tensor.TensorError.ShapeMismatch;
     out.data()[0] = if (comptime dtype == .f64)
-        parallelVecDotF64(config, a.dataConst(), b.dataConst()) orelse vecDotF64(a.dataConst(), b.dataConst())
+        parallelVecDotF64(pc, a.dataConst(), b.dataConst()) orelse primitives.vecDotF64(a.dataConst(), b.dataConst())
     else if (comptime dtype == .f16)
-        dtype_mod.castFloat(.f32, .f16, parallelVecDotF16ToF32(config, a.dataConst(), b.dataConst()) orelse vecDotF16ToF32(a.dataConst(), b.dataConst()))
+        dtype_mod.castFloat(.f32, .f16, parallelVecDotF16ToF32(pc, a.dataConst(), b.dataConst()) orelse primitives.vecDotF16ToF32(a.dataConst(), b.dataConst()))
     else if (comptime dtype == .bf16)
-        dtype_mod.f32ToBf16(parallelVecDotBf16ToF32(config, a.dataConst(), b.dataConst()) orelse vecDotBf16ToF32(a.dataConst(), b.dataConst()))
+        dtype_mod.f32ToBf16(parallelVecDotBf16ToF32(pc, a.dataConst(), b.dataConst()) orelse primitives.vecDotBf16ToF32(a.dataConst(), b.dataConst()))
     else
         dotSliceTypedScalar(dtype, a.dataConst(), b.dataConst());
 }
@@ -655,13 +556,13 @@ const DotTaskBf16 = struct {
 };
 
 fn maybeParallelBinary(
-    config: ParallelConfig,
+    pc: ParallelConfig,
     comptime func: fn (*const BinaryTask) void,
     z: []f32,
     x: []const f32,
     y: []const f32,
 ) bool {
-    const pool = config.pool orelse return false;
+    const pool = pc.pool orelse return false;
     const thread_count = elementwiseThreadCount(z.len);
     if (thread_count == 1) return false;
 
@@ -675,8 +576,8 @@ fn maybeParallelBinary(
     return true;
 }
 
-fn maybeParallelScale(config: ParallelConfig, z: []f32, x: []const f32, scalar: f32) bool {
-    const pool = config.pool orelse return false;
+fn maybeParallelScale(pc: ParallelConfig, z: []f32, x: []const f32, scalar: f32) bool {
+    const pool = pc.pool orelse return false;
     const thread_count = elementwiseThreadCount(z.len);
     if (thread_count == 1) return false;
 
@@ -690,8 +591,8 @@ fn maybeParallelScale(config: ParallelConfig, z: []f32, x: []const f32, scalar: 
     return true;
 }
 
-fn maybeParallelUnary(config: ParallelConfig, comptime op: ops.UnaryOp, z: []f32, x: []const f32) bool {
-    const pool = config.pool orelse return false;
+fn maybeParallelUnary(pc: ParallelConfig, comptime op: ops.UnaryOp, z: []f32, x: []const f32) bool {
+    const pool = pc.pool orelse return false;
     const thread_count = elementwiseThreadCount(z.len);
     if (thread_count == 1) return false;
 
@@ -705,8 +606,8 @@ fn maybeParallelUnary(config: ParallelConfig, comptime op: ops.UnaryOp, z: []f32
     return true;
 }
 
-fn maybeParallelLeakyRelu(config: ParallelConfig, z: []f32, x: []const f32, negative_slope: f32) bool {
-    const pool = config.pool orelse return false;
+fn maybeParallelLeakyRelu(pc: ParallelConfig, z: []f32, x: []const f32, negative_slope: f32) bool {
+    const pool = pc.pool orelse return false;
     const thread_count = elementwiseThreadCount(z.len);
     if (thread_count == 1) return false;
 
@@ -720,8 +621,8 @@ fn maybeParallelLeakyRelu(config: ParallelConfig, z: []f32, x: []const f32, nega
     return true;
 }
 
-fn maybeParallelClamp(config: ParallelConfig, z: []f32, x: []const f32, min_value: f32, max_value: f32) bool {
-    const pool = config.pool orelse return false;
+fn maybeParallelClamp(pc: ParallelConfig, z: []f32, x: []const f32, min_value: f32, max_value: f32) bool {
+    const pool = pc.pool orelse return false;
     const thread_count = elementwiseThreadCount(z.len);
     if (thread_count == 1) return false;
 
@@ -735,8 +636,8 @@ fn maybeParallelClamp(config: ParallelConfig, z: []f32, x: []const f32, min_valu
     return true;
 }
 
-fn maybeParallelGated(config: ParallelConfig, comptime op: ops.GatedOp, z: []f32, x: []const f32, y: []const f32) bool {
-    const pool = config.pool orelse return false;
+fn maybeParallelGated(pc: ParallelConfig, comptime op: ops.GatedOp, z: []f32, x: []const f32, y: []const f32) bool {
+    const pool = pc.pool orelse return false;
     const thread_count = elementwiseThreadCount(z.len);
     if (thread_count == 1) return false;
 
@@ -750,8 +651,8 @@ fn maybeParallelGated(config: ParallelConfig, comptime op: ops.GatedOp, z: []f32
     return true;
 }
 
-fn parallelVecSum(config: ParallelConfig, x: []const f32) ?f32 {
-    const pool = config.pool orelse return null;
+fn parallelVecSum(pc: ParallelConfig, x: []const f32) ?f32 {
+    const pool = pc.pool orelse return null;
     const thread_count = elementwiseThreadCount(x.len);
     if (thread_count == 1) return null;
 
@@ -769,8 +670,8 @@ fn parallelVecSum(config: ParallelConfig, x: []const f32) ?f32 {
     return total;
 }
 
-fn parallelVecProd(config: ParallelConfig, x: []const f32) ?f32 {
-    const pool = config.pool orelse return null;
+fn parallelVecProd(pc: ParallelConfig, x: []const f32) ?f32 {
+    const pool = pc.pool orelse return null;
     const thread_count = elementwiseThreadCount(x.len);
     if (thread_count == 1) return null;
 
@@ -788,8 +689,8 @@ fn parallelVecProd(config: ParallelConfig, x: []const f32) ?f32 {
     return total;
 }
 
-fn parallelVecDot(config: ParallelConfig, x: []const f32, y: []const f32) ?f32 {
-    const pool = config.pool orelse return null;
+fn parallelVecDot(pc: ParallelConfig, x: []const f32, y: []const f32) ?f32 {
+    const pool = pc.pool orelse return null;
     const thread_count = elementwiseThreadCount(x.len);
     if (thread_count == 1) return null;
 
@@ -807,8 +708,8 @@ fn parallelVecDot(config: ParallelConfig, x: []const f32, y: []const f32) ?f32 {
     return total;
 }
 
-fn parallelVecDotF64(config: ParallelConfig, x: []const f64, y: []const f64) ?f64 {
-    const pool = config.pool orelse return null;
+fn parallelVecDotF64(pc: ParallelConfig, x: []const f64, y: []const f64) ?f64 {
+    const pool = pc.pool orelse return null;
     const thread_count = elementwiseThreadCount(x.len);
     if (thread_count == 1) return null;
 
@@ -826,8 +727,8 @@ fn parallelVecDotF64(config: ParallelConfig, x: []const f64, y: []const f64) ?f6
     return total;
 }
 
-fn parallelVecDotF16ToF32(config: ParallelConfig, x: []const f16, y: []const f16) ?f32 {
-    const pool = config.pool orelse return null;
+fn parallelVecDotF16ToF32(pc: ParallelConfig, x: []const f16, y: []const f16) ?f32 {
+    const pool = pc.pool orelse return null;
     const thread_count = elementwiseThreadCount(x.len);
     if (thread_count == 1) return null;
 
@@ -845,8 +746,8 @@ fn parallelVecDotF16ToF32(config: ParallelConfig, x: []const f16, y: []const f16
     return total;
 }
 
-fn parallelVecDotBf16ToF32(config: ParallelConfig, x: []const u16, y: []const u16) ?f32 {
-    const pool = config.pool orelse return null;
+fn parallelVecDotBf16ToF32(pc: ParallelConfig, x: []const u16, y: []const u16) ?f32 {
+    const pool = pc.pool orelse return null;
     const thread_count = elementwiseThreadCount(x.len);
     if (thread_count == 1) return null;
 
@@ -865,78 +766,78 @@ fn parallelVecDotBf16ToF32(config: ParallelConfig, x: []const u16, y: []const u1
 }
 
 fn runAddTask(task: *const BinaryTask) void {
-    vecAdd(task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]);
+    primitives.vecAdd(task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]);
 }
 
 fn runSubTask(task: *const BinaryTask) void {
-    vecSub(task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]);
+    primitives.vecSub(task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]);
 }
 
 fn runMulTask(task: *const BinaryTask) void {
-    vecMul(task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]);
+    primitives.vecMul(task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]);
 }
 
 fn runDivTask(task: *const BinaryTask) void {
-    vecDiv(task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]);
+    primitives.vecDiv(task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]);
 }
 
 fn runMaximumTask(task: *const BinaryTask) void {
-    vecMaximum(task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]);
+    primitives.vecMaximum(task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]);
 }
 
 fn runMinimumTask(task: *const BinaryTask) void {
-    vecMinimum(task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]);
+    primitives.vecMinimum(task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]);
 }
 
 fn runScaleTask(task: *const ScaleTask) void {
-    vecScale(task.z[task.start..task.end], task.x[task.start..task.end], task.scalar);
+    primitives.vecScale(task.z[task.start..task.end], task.x[task.start..task.end], task.scalar);
 }
 
 fn runUnaryTask(task: *const UnaryTask) void {
     switch (task.op) {
-        inline else => |op| vecUnary(op, task.z[task.start..task.end], task.x[task.start..task.end]),
+        inline else => |op| primitives.vecUnary(op, task.z[task.start..task.end], task.x[task.start..task.end]),
     }
 }
 
 fn runLeakyReluTask(task: *const LeakyReluTask) void {
-    vecLeakyRelu(task.z[task.start..task.end], task.x[task.start..task.end], task.negative_slope);
+    primitives.vecLeakyRelu(task.z[task.start..task.end], task.x[task.start..task.end], task.negative_slope);
 }
 
 fn runClampTask(task: *const ClampTask) void {
-    vecClamp(task.z[task.start..task.end], task.x[task.start..task.end], task.min_value, task.max_value);
+    primitives.vecClamp(task.z[task.start..task.end], task.x[task.start..task.end], task.min_value, task.max_value);
 }
 
 fn runGatedTask(task: *const GatedTask) void {
     switch (task.op) {
-        inline else => |op| vecGated(op, task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]),
+        inline else => |op| primitives.vecGated(op, task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]),
     }
 }
 
 fn runSumTask(task: *const SumTask) void {
-    task.partial.* = vecSum(task.x[task.start..task.end]);
+    task.partial.* = primitives.vecSum(task.x[task.start..task.end]);
 }
 
 fn runProdTask(task: *const ProdTask) void {
-    task.partial.* = vecProd(task.x[task.start..task.end]);
+    task.partial.* = primitives.vecProd(task.x[task.start..task.end]);
 }
 
 fn runDotTask(task: *const DotTask) void {
-    task.partial.* = vecDot(task.x[task.start..task.end], task.y[task.start..task.end]);
+    task.partial.* = primitives.vecDot(task.x[task.start..task.end], task.y[task.start..task.end]);
 }
 
 fn runDotF64Task(task: *const DotTaskF64) void {
-    task.partial.* = vecDotF64(task.x[task.start..task.end], task.y[task.start..task.end]);
+    task.partial.* = primitives.vecDotF64(task.x[task.start..task.end], task.y[task.start..task.end]);
 }
 
 fn runDotF16Task(task: *const DotTaskF16) void {
-    task.partial.* = vecDotF16ToF32(task.x[task.start..task.end], task.y[task.start..task.end]);
+    task.partial.* = primitives.vecDotF16ToF32(task.x[task.start..task.end], task.y[task.start..task.end]);
 }
 
 fn runDotBf16Task(task: *const DotTaskBf16) void {
-    task.partial.* = vecDotBf16ToF32(task.x[task.start..task.end], task.y[task.start..task.end]);
+    task.partial.* = primitives.vecDotBf16ToF32(task.x[task.start..task.end], task.y[task.start..task.end]);
 }
 
-fn elementwiseContiguousIntoTyped(
+fn elementwiseSlicesTyped(
     comptime dtype: DType,
     comptime op: ops.ElementwiseOp,
     out: []dtype_mod.Scalar(dtype_mod.outputDType(.pointwise, dtype)),
@@ -944,12 +845,9 @@ fn elementwiseContiguousIntoTyped(
     b: []const dtype_mod.Scalar(dtype),
 ) void {
     for (out, a, b) |*dst, av, bv| {
-        dst.* = applyElementwiseTyped(dtype, op, av, bv);
+        dst.* = primitives.applyElementwiseTyped(dtype, op, av, bv);
     }
 }
-
-// `applyElementwiseTyped` was relocated to vector/primitives.zig (the leaf) and
-// is aliased back in via `primitives.applyElementwiseTyped` above.
 
 fn sumSliceTypedScalar(
     comptime dtype: DType,
@@ -985,18 +883,18 @@ fn dotSliceTypedScalar(
 /// precomputed by the caller at weight-load time (`1/(alpha + 1e-9)`, the DAC
 /// convention) — the epsilon is deliberately NOT folded into the kernel.
 /// Parallel over row ranges (disjoint writes ⇒ bit-identical to serial).
-pub fn snakeIntoWithConfig(
+pub fn snakeInto(
+    pc: ParallelConfig,
     out: *Tensor,
     x: *const Tensor,
     alpha: []const f32,
     inv_b: []const f32,
     rows: usize,
     cols: usize,
-    config: ParallelConfig,
 ) void {
     const input = contiguousDataConst(x, rows * cols);
     const output = contiguousData(out, rows * cols);
-    if (maybeParallelSnake(config, output, input, alpha, inv_b, rows, cols)) return;
+    if (maybeParallelSnake(pc, output, input, alpha, inv_b, rows, cols)) return;
     snakeRowsRange(output, input, alpha, inv_b, cols, 0, rows);
 }
 
@@ -1015,7 +913,7 @@ fn runSnakeTask(task: *const SnakeTask) void {
 }
 
 fn maybeParallelSnake(
-    config: ParallelConfig,
+    pc: ParallelConfig,
     out: []f32,
     x: []const f32,
     alpha: []const f32,
@@ -1023,7 +921,7 @@ fn maybeParallelSnake(
     rows: usize,
     cols: usize,
 ) bool {
-    const pool = config.pool orelse return false;
+    const pool = pc.pool orelse return false;
     const thread_count = @min(elementwiseThreadCount(out.len), rows);
     if (thread_count <= 1) return false;
 
@@ -1080,7 +978,8 @@ fn snakeRowsRange(
 /// like ggml). Optional per-channel affine `y = y*weight[c] + bias[c]` is
 /// applied after normalization. Parallel over whole groups — each group owns a
 /// disjoint column slice, so the threaded result is bit-identical to serial.
-pub fn groupNormIntoWithConfig(
+pub fn groupNormInto(
+    pc: ParallelConfig,
     out: *Tensor,
     x: *const Tensor,
     weight: ?[]const f32,
@@ -1089,11 +988,10 @@ pub fn groupNormIntoWithConfig(
     cols: usize,
     groups: usize,
     eps: f32,
-    config: ParallelConfig,
 ) void {
     const input = contiguousDataConst(x, rows * cols);
     const output = contiguousData(out, rows * cols);
-    if (maybeParallelGroupNorm(config, output, input, weight, bias, rows, cols, groups, eps)) return;
+    if (maybeParallelGroupNorm(pc, output, input, weight, bias, rows, cols, groups, eps)) return;
     groupNormGroupRange(output, input, weight, bias, rows, cols, groups, eps, 0, groups);
 }
 
@@ -1115,7 +1013,7 @@ fn runGroupNormTask(task: *const GroupNormTask) void {
 }
 
 fn maybeParallelGroupNorm(
-    config: ParallelConfig,
+    pc: ParallelConfig,
     out: []f32,
     x: []const f32,
     weight: ?[]const f32,
@@ -1125,7 +1023,7 @@ fn maybeParallelGroupNorm(
     groups: usize,
     eps: f32,
 ) bool {
-    const pool = config.pool orelse return false;
+    const pool = pc.pool orelse return false;
     const thread_count = @min(elementwiseThreadCount(out.len), groups);
     if (thread_count <= 1) return false;
 
@@ -1210,10 +1108,11 @@ fn groupNormGroupRange(
     }
 }
 
-/// VJP of snakeIntoWithConfig wrt the input:
+/// VJP of snakeInto wrt the input:
 /// `gx[t,c] = gy[t,c] * (1 + inv_b[c]*alpha[c]*sin(2*alpha[c]*x[t,c]))`.
 /// Parallel over row ranges (disjoint writes ⇒ bit-identical to serial).
-pub fn snakeBackwardInputIntoWithConfig(
+pub fn snakeBackwardInputInto(
+    pc: ParallelConfig,
     out: *Tensor,
     x: *const Tensor,
     gy: *const Tensor,
@@ -1221,12 +1120,11 @@ pub fn snakeBackwardInputIntoWithConfig(
     inv_b: []const f32,
     rows: usize,
     cols: usize,
-    config: ParallelConfig,
 ) void {
     const input = contiguousDataConst(x, rows * cols);
     const grad = contiguousDataConst(gy, rows * cols);
     const output = contiguousData(out, rows * cols);
-    if (maybeParallelSnakeBackwardInput(config, output, input, grad, alpha, inv_b, rows, cols)) return;
+    if (maybeParallelSnakeBackwardInput(pc, output, input, grad, alpha, inv_b, rows, cols)) return;
     snakeBackwardInputRowsRange(output, input, grad, alpha, inv_b, cols, 0, rows);
 }
 
@@ -1246,7 +1144,7 @@ fn runSnakeBackwardInputTask(task: *const SnakeBackwardInputTask) void {
 }
 
 fn maybeParallelSnakeBackwardInput(
-    config: ParallelConfig,
+    pc: ParallelConfig,
     out: []f32,
     x: []const f32,
     gy: []const f32,
@@ -1255,7 +1153,7 @@ fn maybeParallelSnakeBackwardInput(
     rows: usize,
     cols: usize,
 ) bool {
-    const pool = config.pool orelse return false;
+    const pool = pc.pool orelse return false;
     const thread_count = @min(elementwiseThreadCount(out.len), rows);
     if (thread_count <= 1) return false;
 
@@ -1308,13 +1206,14 @@ fn snakeBackwardInputRowsRange(
     }
 }
 
-/// VJPs of snakeIntoWithConfig wrt the per-channel parameters, both filled in
+/// VJPs of snakeInto wrt the per-channel parameters, both filled in
 /// one pass (they share the same traversal):
 /// `galpha[c] = Σ_t gy[t,c]*inv_b[c]*x[t,c]*sin(2*alpha[c]*x[t,c])`,
 /// `ginv_b[c] = Σ_t gy[t,c]*sin(alpha[c]*x[t,c])^2`. f32 accumulation, rows
 /// visited in order per channel. Parallel over channel ranges — disjoint
 /// channel writes ⇒ bit-identical to serial.
-pub fn snakeBackwardParamsIntoWithConfig(
+pub fn snakeBackwardParamsInto(
+    pc: ParallelConfig,
     galpha: *Tensor,
     ginv_b: *Tensor,
     x: *const Tensor,
@@ -1323,13 +1222,12 @@ pub fn snakeBackwardParamsIntoWithConfig(
     inv_b: []const f32,
     rows: usize,
     cols: usize,
-    config: ParallelConfig,
 ) void {
     const ga = contiguousData(galpha, cols);
     const gib = contiguousData(ginv_b, cols);
     const input = contiguousDataConst(x, rows * cols);
     const grad = contiguousDataConst(gy, rows * cols);
-    if (maybeParallelSnakeBackwardParams(config, ga, gib, input, grad, alpha, inv_b, rows, cols)) return;
+    if (maybeParallelSnakeBackwardParams(pc, ga, gib, input, grad, alpha, inv_b, rows, cols)) return;
     snakeBackwardParamsColumnRange(ga, gib, input, grad, alpha, inv_b, rows, cols, 0, cols);
 }
 
@@ -1351,7 +1249,7 @@ fn runSnakeBackwardParamsTask(task: *const SnakeBackwardParamsTask) void {
 }
 
 fn maybeParallelSnakeBackwardParams(
-    config: ParallelConfig,
+    pc: ParallelConfig,
     ga: []f32,
     gib: []f32,
     x: []const f32,
@@ -1361,7 +1259,7 @@ fn maybeParallelSnakeBackwardParams(
     rows: usize,
     cols: usize,
 ) bool {
-    const pool = config.pool orelse return false;
+    const pool = pc.pool orelse return false;
     const thread_count = @min(elementwiseThreadCount(x.len), cols);
     if (thread_count <= 1) return false;
 
@@ -1434,7 +1332,7 @@ fn snakeBackwardParamsColumnRange(
     }
 }
 
-/// VJP of groupNormIntoWithConfig. Recomputes the per-group mean and biased
+/// VJP of groupNormInto. Recomputes the per-group mean and biased
 /// variance from `x` with the SAME f64 two-pass accumulation as the forward
 /// (mean/scale applied in f32, eps inside the sqrt), then fills any of:
 ///   gx[t,c] = (1/σ_g)·(ĝ[t,c] − mean_G(ĝ) − x̂[t,c]·mean_G(ĝ·x̂))
@@ -1446,7 +1344,8 @@ fn snakeBackwardParamsColumnRange(
 /// Null outputs are skipped. Parallel over whole groups — each group owns a
 /// disjoint column slice of every output, so threading is bit-identical to
 /// serial.
-pub fn groupNormBackwardIntoWithConfig(
+pub fn groupNormBackwardInto(
+    pc: ParallelConfig,
     gx: ?*Tensor,
     gw: ?*Tensor,
     gb: ?*Tensor,
@@ -1457,14 +1356,13 @@ pub fn groupNormBackwardIntoWithConfig(
     cols: usize,
     groups: usize,
     eps: f32,
-    config: ParallelConfig,
 ) void {
     const input = contiguousDataConst(x, rows * cols);
     const grad = contiguousDataConst(gy, rows * cols);
     const gx_data: ?[]f32 = if (gx) |t| contiguousData(t, rows * cols) else null;
     const gw_data: ?[]f32 = if (gw) |t| contiguousData(t, cols) else null;
     const gb_data: ?[]f32 = if (gb) |t| contiguousData(t, cols) else null;
-    if (maybeParallelGroupNormBackward(config, gx_data, gw_data, gb_data, input, grad, weight, rows, cols, groups, eps)) return;
+    if (maybeParallelGroupNormBackward(pc, gx_data, gw_data, gb_data, input, grad, weight, rows, cols, groups, eps)) return;
     groupNormBackwardGroupRange(gx_data, gw_data, gb_data, input, grad, weight, rows, cols, groups, eps, 0, groups);
 }
 
@@ -1488,7 +1386,7 @@ fn runGroupNormBackwardTask(task: *const GroupNormBackwardTask) void {
 }
 
 fn maybeParallelGroupNormBackward(
-    config: ParallelConfig,
+    pc: ParallelConfig,
     gx: ?[]f32,
     gw: ?[]f32,
     gb: ?[]f32,
@@ -1500,7 +1398,7 @@ fn maybeParallelGroupNormBackward(
     groups: usize,
     eps: f32,
 ) bool {
-    const pool = config.pool orelse return false;
+    const pool = pc.pool orelse return false;
     const thread_count = @min(elementwiseThreadCount(x.len), groups);
     if (thread_count <= 1) return false;
 

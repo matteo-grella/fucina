@@ -11,59 +11,16 @@ const dtype_mod = @import("../../dtype.zig");
 const tensor = @import("../../tensor.zig");
 const tables = @import("../quant_tables.zig");
 const qm = @import("../quant.zig");
+const q8k = @import("q8k.zig");
+const types = @import("types.zig");
 const common = @import("common.zig");
 const cold = @import("cold.zig");
 
 const DType = dtype_mod.DType;
 const Tensor = tensor.Tensor;
 
-// Shared symbols (non-pub aliases in cold.zig) re-aliased here from their
-// import-based origins so the moved bodies compile unchanged.
-const BlockIQ1_M = qm.BlockIQ1_M;
-const BlockIQ1_S = qm.BlockIQ1_S;
-const BlockIQ2_S = qm.BlockIQ2_S;
-const BlockIQ2_XS = qm.BlockIQ2_XS;
-const BlockIQ2_XXS = qm.BlockIQ2_XXS;
-const BlockIQ3_S = qm.BlockIQ3_S;
-const BlockIQ3_XXS = qm.BlockIQ3_XXS;
-const BlockIQ4_NL = qm.BlockIQ4_NL;
-const BlockIQ4_XS = qm.BlockIQ4_XS;
-const BlockMXFP4 = qm.BlockMXFP4;
-const BlockNVFP4 = qm.BlockNVFP4;
-const BlockQ4_0 = qm.BlockQ4_0;
-const BlockQ8_0 = qm.BlockQ8_0;
-const BlockQ8_1 = qm.BlockQ8_1;
-const BlockQ8_K = qm.BlockQ8_K;
-const BlockTQ1_0 = qm.BlockTQ1_0;
-const BlockTQ2_0 = qm.BlockTQ2_0;
-const QuantizedFormatError = qm.QuantizedFormatError;
-const QuantizedMatmulRhsRowsFor = qm.QuantizedMatmulRhsRowsFor;
-const dequantizeBlockQ8_KInto = qm.dequantizeBlockQ8_KInto;
-const dequantizeRowForDType = qm.dequantizeRowForDType;
-const dequantizeRowQ8_0Into = qm.dequantizeRowQ8_0Into;
-const dotDense = common.dotDense;
-const f16BitsToF32 = common.f16BitsToF32;
-const f32ToF16Bits = common.f32ToF16Bits;
-const fillQ8KPattern = qm.fillQ8KPattern;
-const nvfp4_block_size = qm.nvfp4_block_size;
-const q4_0_block_size = qm.q4_0_block_size;
-const q8_0_block_size = qm.q8_0_block_size;
-const q8_1_block_size = qm.q8_1_block_size;
-const qk_k_block_size = qm.qk_k_block_size;
-
-// Pub decls of cold.zig referenced bare by the moved tests/helpers.
-const matmulTableQ8_0RhsRange = cold.matmulTableQ8_0RhsRange;
-const matmulTableQ8_KRhsRange = cold.matmulTableQ8_KRhsRange;
-const quantizeRowQ4_0Into = cold.quantizeRowQ4_0Into;
-const dequantizeRowQ4_0Into = cold.dequantizeRowQ4_0Into;
-const q4_0BlockCount = cold.q4_0BlockCount;
-const quantizeRowsQ4_0 = cold.quantizeRowsQ4_0;
-const dequantizeRowsQ4_0Into = cold.dequantizeRowsQ4_0Into;
-const getRowsQ4_0Into = cold.getRowsQ4_0Into;
-const quantizeRowQ8_1Into = cold.quantizeRowQ8_1Into;
-
-fn fillQ8_0Pattern(block: *BlockQ8_0) void {
-    block.d = f32ToF16Bits(1);
+fn fillQ8_0Pattern(block: *types.BlockQ8_0) void {
+    block.d = common.f32ToF16Bits(1);
     for (&block.qs, 0..) |*q, i| q.* = @intCast(@as(i32, @intCast(i % 17)) - 8);
 }
 
@@ -72,20 +29,20 @@ fn writeU16Bytes(dst: *[2]u8, value: u16) void {
     dst[1] = @intCast(value >> 8);
 }
 
-fn writeIQ1MScale(scales: *[qk_k_block_size / 32]u8, scale_bits: u16) void {
+fn writeIQ1MScale(scales: *[types.qk_k_block_size / 32]u8, scale_bits: u16) void {
     writeU16Bytes(scales[0..2], (scale_bits & 0x000f) << 12);
     writeU16Bytes(scales[2..4], (scale_bits & 0x00f0) << 8);
     writeU16Bytes(scales[4..6], (scale_bits & 0x0f00) << 4);
     writeU16Bytes(scales[6..8], scale_bits & 0xf000);
 }
 
-fn fillIQ2_XXSPattern(block: *BlockIQ2_XXS) void {
-    block.d = f32ToF16Bits(1);
+fn fillIQ2_XXSPattern(block: *types.BlockIQ2_XXS) void {
+    block.d = common.f32ToF16Bits(1);
     for (&block.qs, 0..) |*q, i| q.* = @intCast((i * 17) & 0xffff);
 }
 
-fn fillIQ2_XSPattern(block: *BlockIQ2_XS) void {
-    block.d = f32ToF16Bits(1);
+fn fillIQ2_XSPattern(block: *types.BlockIQ2_XS) void {
+    block.d = common.f32ToF16Bits(1);
     for (&block.qs, 0..) |*q, i| {
         const grid: u16 = @intCast((i * 37) & 0x1ff);
         const signs: u16 = @intCast((i * 11) & 0x7f);
@@ -94,72 +51,72 @@ fn fillIQ2_XSPattern(block: *BlockIQ2_XS) void {
     for (&block.scales, 0..) |*scale, i| scale.* = @intCast((i & 0x0f) | (((i + 3) & 0x0f) << 4));
 }
 
-fn fillIQ2_SPattern(block: *BlockIQ2_S) void {
-    block.d = f32ToF16Bits(1);
+fn fillIQ2_SPattern(block: *types.BlockIQ2_S) void {
+    block.d = common.f32ToF16Bits(1);
     for (&block.qs, 0..) |*q, i| q.* = @intCast((i * 19) & 0xff);
     for (&block.qh, 0..) |*q, i| q.* = @intCast((i * 23) & 0xff);
     for (&block.scales, 0..) |*scale, i| scale.* = @intCast((i & 0x0f) | (((i + 5) & 0x0f) << 4));
 }
 
-fn fillIQ3_XXSPattern(block: *BlockIQ3_XXS) void {
-    block.d = f32ToF16Bits(1);
+fn fillIQ3_XXSPattern(block: *types.BlockIQ3_XXS) void {
+    block.d = common.f32ToF16Bits(1);
     for (&block.qs, 0..) |*q, i| q.* = @intCast((i * 29) & 0xff);
 }
 
-fn fillIQ3_SPattern(block: *BlockIQ3_S) void {
-    block.d = f32ToF16Bits(1);
+fn fillIQ3_SPattern(block: *types.BlockIQ3_S) void {
+    block.d = common.f32ToF16Bits(1);
     for (&block.qs, 0..) |*q, i| q.* = @intCast((i * 31) & 0xff);
     for (&block.qh, 0..) |*q, i| q.* = @intCast((i * 7) & 0xff);
     for (&block.signs, 0..) |*q, i| q.* = @intCast((i * 13) & 0xff);
     for (&block.scales, 0..) |*scale, i| scale.* = @intCast((i & 0x0f) | (((i + 1) & 0x0f) << 4));
 }
 
-fn fillIQ1_SPattern(block: *BlockIQ1_S) void {
-    block.d = f32ToF16Bits(1);
+fn fillIQ1_SPattern(block: *types.BlockIQ1_S) void {
+    block.d = common.f32ToF16Bits(1);
     for (&block.qs, 0..) |*q, i| q.* = @intCast((i * 43) & 0xff);
     for (&block.qh, 0..) |*q, i| q.* = @intCast((i * 73) & 0xffff);
 }
 
-fn fillIQ1_MPattern(block: *BlockIQ1_M) void {
+fn fillIQ1_MPattern(block: *types.BlockIQ1_M) void {
     for (&block.qs, 0..) |*q, i| q.* = @intCast((i * 47) & 0xff);
     for (&block.qh, 0..) |*q, i| q.* = @intCast((i * 53) & 0xff);
     @memset(&block.scales, 0);
-    writeIQ1MScale(&block.scales, f32ToF16Bits(1));
+    writeIQ1MScale(&block.scales, common.f32ToF16Bits(1));
     block.scales[0] |= 1;
     block.scales[2] |= 1;
     block.scales[4] |= 1;
     block.scales[6] |= 1;
 }
 
-fn fillIQ4_NLPattern(block: *BlockIQ4_NL) void {
-    block.d = f32ToF16Bits(1);
+fn fillIQ4_NLPattern(block: *types.BlockIQ4_NL) void {
+    block.d = common.f32ToF16Bits(1);
     for (&block.qs, 0..) |*q, i| q.* = @intCast((i & 0x0f) | (((i + 7) & 0x0f) << 4));
 }
 
-fn fillIQ4_XSPattern(block: *BlockIQ4_XS) void {
-    block.d = f32ToF16Bits(1);
+fn fillIQ4_XSPattern(block: *types.BlockIQ4_XS) void {
+    block.d = common.f32ToF16Bits(1);
     block.scales_h = 0;
     for (&block.scales_l, 0..) |*scale, i| scale.* = @intCast(((1 + i) & 0x0f) | (((2 + i) & 0x0f) << 4));
     for (&block.qs, 0..) |*q, i| q.* = @intCast((i & 0x0f) | (((i + 5) & 0x0f) << 4));
 }
 
-fn fillTQ1_0Pattern(block: *BlockTQ1_0) void {
-    block.d = f32ToF16Bits(1);
+fn fillTQ1_0Pattern(block: *types.BlockTQ1_0) void {
+    block.d = common.f32ToF16Bits(1);
     for (&block.qs, 0..) |*q, i| q.* = @intCast((i * 5) % 243);
     for (&block.qh, 0..) |*q, i| q.* = @intCast((i * 7) % 243);
 }
 
-fn fillTQ2_0Pattern(block: *BlockTQ2_0) void {
-    block.d = f32ToF16Bits(1);
+fn fillTQ2_0Pattern(block: *types.BlockTQ2_0) void {
+    block.d = common.f32ToF16Bits(1);
     for (&block.qs, 0..) |*q, i| q.* = @intCast((i & 0x03) | (((i + 1) & 0x03) << 2) | (((i + 2) & 0x03) << 4) | (((i + 3) & 0x03) << 6));
 }
 
-fn fillMXFP4Pattern(block: *BlockMXFP4) void {
+fn fillMXFP4Pattern(block: *types.BlockMXFP4) void {
     block.e = 128;
     for (&block.qs, 0..) |*q, i| q.* = @intCast((i & 0x0f) | (((i + 5) & 0x0f) << 4));
 }
 
-fn fillNVFP4Pattern(block: *BlockNVFP4) void {
+fn fillNVFP4Pattern(block: *types.BlockNVFP4) void {
     @memset(&block.d, 0x38);
     for (&block.qs, 0..) |*q, i| q.* = @intCast((i & 0x0f) | (((i + 3) & 0x0f) << 4));
 }
@@ -171,138 +128,138 @@ fn expectTableDotMatchesDense(expected: f32, actual: f32) !void {
 
 fn expectQ8_0TableMatmulMatchesDense(comptime rhs_dtype: DType, block: dtype_mod.Storage(rhs_dtype)) !void {
     const block_size = dtype_mod.blockSize(rhs_dtype);
-    const lhs_block_count = block_size / q8_0_block_size;
-    var lhs_blocks = [_]BlockQ8_0{undefined} ** (nvfp4_block_size / q8_0_block_size);
+    const lhs_block_count = block_size / types.q8_0_block_size;
+    var lhs_blocks = [_]types.BlockQ8_0{undefined} ** (types.nvfp4_block_size / types.q8_0_block_size);
     for (lhs_blocks[0..lhs_block_count]) |*lhs| fillQ8_0Pattern(lhs);
 
-    var dense_w: [nvfp4_block_size]f32 = undefined;
-    try dequantizeRowForDType(rhs_dtype, dense_w[0..block_size], &.{block});
-    var dense_a: [nvfp4_block_size]f32 = undefined;
-    try dequantizeRowQ8_0Into(dense_a[0..block_size], lhs_blocks[0..lhs_block_count]);
+    var dense_w: [types.nvfp4_block_size]f32 = undefined;
+    try qm.dequantizeRowForDType(rhs_dtype, dense_w[0..block_size], &.{block});
+    var dense_a: [types.nvfp4_block_size]f32 = undefined;
+    try q8k.dequantizeRowQ8_0Into(dense_a[0..block_size], lhs_blocks[0..lhs_block_count]);
 
     var rhs_blocks = [_]dtype_mod.Storage(rhs_dtype){ block, block };
-    const rhs = QuantizedMatmulRhsRowsFor(rhs_dtype){
+    const rhs = types.QuantizedMatmulRhsRowsFor(rhs_dtype){
         .rows = .{ .allocator = std.testing.allocator, .blocks = &rhs_blocks, .rows = 2, .cols = block_size, .blocks_per_row = 1 },
         .k = block_size,
         .n = 2,
     };
     var out: [2]f32 = undefined;
-    matmulTableQ8_0RhsRange(rhs_dtype, &out, lhs_blocks[0..lhs_block_count], &rhs, 1, 2, 0, 1);
-    const expected = dotDense(dense_w[0..block_size], dense_a[0..block_size]);
+    cold.matmulTableQ8_0RhsRange(rhs_dtype, &out, lhs_blocks[0..lhs_block_count], &rhs, 1, 2, 0, 1);
+    const expected = common.dotDense(dense_w[0..block_size], dense_a[0..block_size]);
     try expectTableDotMatchesDense(expected, out[0]);
     try std.testing.expectEqual(out[0], out[1]);
 }
 
 fn expectQ8_KTableMatmulMatchesDense(comptime rhs_dtype: DType, block: dtype_mod.Storage(rhs_dtype)) !void {
-    var lhs: BlockQ8_K = undefined;
-    fillQ8KPattern(&lhs);
+    var lhs: types.BlockQ8_K = undefined;
+    q8k.fillQ8KPattern(&lhs);
 
-    var dense_w: [qk_k_block_size]f32 = undefined;
-    try dequantizeRowForDType(rhs_dtype, &dense_w, &.{block});
-    var dense_a: [qk_k_block_size]f32 = undefined;
-    dequantizeBlockQ8_KInto(&dense_a, &lhs);
+    var dense_w: [types.qk_k_block_size]f32 = undefined;
+    try qm.dequantizeRowForDType(rhs_dtype, &dense_w, &.{block});
+    var dense_a: [types.qk_k_block_size]f32 = undefined;
+    q8k.dequantizeBlockQ8_KInto(&dense_a, &lhs);
 
     var rhs_blocks = [_]dtype_mod.Storage(rhs_dtype){ block, block };
-    const rhs = QuantizedMatmulRhsRowsFor(rhs_dtype){
-        .rows = .{ .allocator = std.testing.allocator, .blocks = &rhs_blocks, .rows = 2, .cols = qk_k_block_size, .blocks_per_row = 1 },
-        .k = qk_k_block_size,
+    const rhs = types.QuantizedMatmulRhsRowsFor(rhs_dtype){
+        .rows = .{ .allocator = std.testing.allocator, .blocks = &rhs_blocks, .rows = 2, .cols = types.qk_k_block_size, .blocks_per_row = 1 },
+        .k = types.qk_k_block_size,
         .n = 2,
     };
     var out: [2]f32 = undefined;
-    matmulTableQ8_KRhsRange(rhs_dtype, &out, &.{lhs}, &rhs, 1, 2, 0, 1);
-    const expected = dotDense(&dense_w, &dense_a);
+    cold.matmulTableQ8_KRhsRange(rhs_dtype, &out, &.{lhs}, &rhs, 1, 2, 0, 1);
+    const expected = common.dotDense(&dense_w, &dense_a);
     try expectTableDotMatchesDense(expected, out[0]);
     try std.testing.expectEqual(out[0], out[1]);
 }
 
 test "GGML Q8_0-activation IQ/FP4 table dot matmul consumes loaded blocks" {
-    var iq4: BlockIQ4_NL = undefined;
+    var iq4: types.BlockIQ4_NL = undefined;
     fillIQ4_NLPattern(&iq4);
     try expectQ8_0TableMatmulMatchesDense(.iq4_nl, iq4);
 
-    var mxfp4: BlockMXFP4 = undefined;
+    var mxfp4: types.BlockMXFP4 = undefined;
     fillMXFP4Pattern(&mxfp4);
     try expectQ8_0TableMatmulMatchesDense(.mxfp4, mxfp4);
 
-    var nvfp4: BlockNVFP4 = undefined;
+    var nvfp4: types.BlockNVFP4 = undefined;
     fillNVFP4Pattern(&nvfp4);
     try expectQ8_0TableMatmulMatchesDense(.nvfp4, nvfp4);
 }
 
 test "GGML Q8_K-activation IQ/TQ table dot matmul consumes loaded blocks" {
-    var iq1_s: BlockIQ1_S = undefined;
+    var iq1_s: types.BlockIQ1_S = undefined;
     fillIQ1_SPattern(&iq1_s);
     try expectQ8_KTableMatmulMatchesDense(.iq1_s, iq1_s);
 
-    var iq1_m: BlockIQ1_M = undefined;
+    var iq1_m: types.BlockIQ1_M = undefined;
     fillIQ1_MPattern(&iq1_m);
     try expectQ8_KTableMatmulMatchesDense(.iq1_m, iq1_m);
 
-    var iq2_xxs: BlockIQ2_XXS = undefined;
+    var iq2_xxs: types.BlockIQ2_XXS = undefined;
     fillIQ2_XXSPattern(&iq2_xxs);
     try expectQ8_KTableMatmulMatchesDense(.iq2_xxs, iq2_xxs);
 
-    var iq2_xs: BlockIQ2_XS = undefined;
+    var iq2_xs: types.BlockIQ2_XS = undefined;
     fillIQ2_XSPattern(&iq2_xs);
     try expectQ8_KTableMatmulMatchesDense(.iq2_xs, iq2_xs);
 
-    var iq2_s: BlockIQ2_S = undefined;
+    var iq2_s: types.BlockIQ2_S = undefined;
     fillIQ2_SPattern(&iq2_s);
     try expectQ8_KTableMatmulMatchesDense(.iq2_s, iq2_s);
 
-    var iq3_xxs: BlockIQ3_XXS = undefined;
+    var iq3_xxs: types.BlockIQ3_XXS = undefined;
     fillIQ3_XXSPattern(&iq3_xxs);
     try expectQ8_KTableMatmulMatchesDense(.iq3_xxs, iq3_xxs);
 
-    var iq3_s: BlockIQ3_S = undefined;
+    var iq3_s: types.BlockIQ3_S = undefined;
     fillIQ3_SPattern(&iq3_s);
     try expectQ8_KTableMatmulMatchesDense(.iq3_s, iq3_s);
 
-    var iq4_xs: BlockIQ4_XS = undefined;
+    var iq4_xs: types.BlockIQ4_XS = undefined;
     fillIQ4_XSPattern(&iq4_xs);
     try expectQ8_KTableMatmulMatchesDense(.iq4_xs, iq4_xs);
 
-    var tq1: BlockTQ1_0 = undefined;
+    var tq1: types.BlockTQ1_0 = undefined;
     fillTQ1_0Pattern(&tq1);
     try expectQ8_KTableMatmulMatchesDense(.tq1_0, tq1);
 
-    var tq2: BlockTQ2_0 = undefined;
+    var tq2: types.BlockTQ2_0 = undefined;
     fillTQ2_0Pattern(&tq2);
     try expectQ8_KTableMatmulMatchesDense(.tq2_0, tq2);
 }
 
 test "ggml_q4_0 quantize and dequantize match GGML block semantics" {
-    var src: [q4_0_block_size]f32 = undefined;
-    var expected_qs: [q4_0_block_size / 2]u8 = undefined;
+    var src: [types.q4_0_block_size]f32 = undefined;
+    var expected_qs: [types.q4_0_block_size / 2]u8 = undefined;
     for (&expected_qs, 0..) |*q, j| {
         src[j] = @floatFromInt(@as(i32, @intCast(j)) - 8);
-        src[q4_0_block_size / 2 + j] = @floatFromInt(@as(i32, @intCast(j)) - 8);
+        src[types.q4_0_block_size / 2 + j] = @floatFromInt(@as(i32, @intCast(j)) - 8);
         const nibble: u8 = @intCast(j);
         q.* = nibble | (nibble << 4);
     }
 
-    var blocks: [1]BlockQ4_0 = undefined;
-    try quantizeRowQ4_0Into(&blocks, &src);
+    var blocks: [1]types.BlockQ4_0 = undefined;
+    try cold.quantizeRowQ4_0Into(&blocks, &src);
 
-    try std.testing.expectEqual(@as(usize, 18), @sizeOf(BlockQ4_0));
-    try std.testing.expectEqual(f32ToF16Bits(1.0), blocks[0].d);
+    try std.testing.expectEqual(@as(usize, 18), @sizeOf(types.BlockQ4_0));
+    try std.testing.expectEqual(common.f32ToF16Bits(1.0), blocks[0].d);
     try std.testing.expectEqualSlices(u8, &expected_qs, &blocks[0].qs);
 
-    var dequantized: [q4_0_block_size]f32 = undefined;
-    try dequantizeRowQ4_0Into(&dequantized, &blocks);
+    var dequantized: [types.q4_0_block_size]f32 = undefined;
+    try cold.dequantizeRowQ4_0Into(&dequantized, &blocks);
     try std.testing.expectEqualSlices(f32, &src, &dequantized);
 }
 
 test "ggml_q4_0 rejects partial GGML blocks" {
-    var src = [_]f32{0} ** (q4_0_block_size - 1);
-    var blocks: [1]BlockQ4_0 = undefined;
+    var src = [_]f32{0} ** (types.q4_0_block_size - 1);
+    var blocks: [1]types.BlockQ4_0 = undefined;
 
-    try std.testing.expectError(QuantizedFormatError.InvalidQuantizedLength, quantizeRowQ4_0Into(&blocks, &src));
-    try std.testing.expectError(QuantizedFormatError.InvalidQuantizedLength, q4_0BlockCount(src.len));
+    try std.testing.expectError(types.QuantizedFormatError.InvalidQuantizedLength, cold.quantizeRowQ4_0Into(&blocks, &src));
+    try std.testing.expectError(types.QuantizedFormatError.InvalidQuantizedLength, cold.q4_0BlockCount(src.len));
 }
 
 test "ggml_q8_1 activation quantization rounds ties away from zero" {
-    var src = [_]f32{0} ** q8_1_block_size;
+    var src = [_]f32{0} ** types.q8_1_block_size;
     src[0] = 127;
     src[1] = 0.5;
     src[2] = 1.5;
@@ -311,10 +268,10 @@ test "ggml_q8_1 activation quantization rounds ties away from zero" {
     src[5] = -1.5;
     src[6] = -2.5;
 
-    var blocks: [1]BlockQ8_1 = undefined;
-    try quantizeRowQ8_1Into(&blocks, &src);
+    var blocks: [1]types.BlockQ8_1 = undefined;
+    try cold.quantizeRowQ8_1Into(&blocks, &src);
 
-    try std.testing.expectEqual(f32ToF16Bits(1.0), blocks[0].ds[0]);
+    try std.testing.expectEqual(common.f32ToF16Bits(1.0), blocks[0].ds[0]);
     try std.testing.expectEqual(@as(i8, 1), blocks[0].qs[1]);
     try std.testing.expectEqual(@as(i8, 2), blocks[0].qs[2]);
     try std.testing.expectEqual(@as(i8, 3), blocks[0].qs[3]);
@@ -326,34 +283,34 @@ test "ggml_q8_1 activation quantization rounds ties away from zero" {
 test "ggml_q4_0 quantized rows dequantize and gather rows" {
     const allocator = std.testing.allocator;
 
-    var values: [3 * q4_0_block_size]f32 = undefined;
+    var values: [3 * types.q4_0_block_size]f32 = undefined;
     for (&values, 0..) |*v, i| {
-        const col = i % q4_0_block_size;
-        const row = i / q4_0_block_size;
+        const col = i % types.q4_0_block_size;
+        const row = i / types.q4_0_block_size;
         const value: i32 = @as(i32, @intCast((col + row) % 16)) - 8;
         v.* = @floatFromInt(value);
     }
 
-    var dense = try Tensor.fromSlice(allocator, &.{ 3, q4_0_block_size }, &values);
+    var dense = try Tensor.fromSlice(allocator, &.{ 3, types.q4_0_block_size }, &values);
     defer dense.deinit();
 
-    var qrows = try quantizeRowsQ4_0(allocator, &dense);
+    var qrows = try cold.quantizeRowsQ4_0(allocator, &dense);
     defer qrows.deinit();
 
-    var dequantized = try Tensor.zeros(allocator, &.{ 3, q4_0_block_size });
+    var dequantized = try Tensor.zeros(allocator, &.{ 3, types.q4_0_block_size });
     defer dequantized.deinit();
-    try dequantizeRowsQ4_0Into(&dequantized, &qrows);
+    try cold.dequantizeRowsQ4_0Into(&dequantized, &qrows);
     try std.testing.expectEqualSlices(f32, &values, dequantized.dataConst());
 
-    var gathered = try Tensor.zeros(allocator, &.{ 2, q4_0_block_size });
+    var gathered = try Tensor.zeros(allocator, &.{ 2, types.q4_0_block_size });
     defer gathered.deinit();
-    try getRowsQ4_0Into(&gathered, &qrows, &.{ 2, 0 });
-    try std.testing.expectEqualSlices(f32, values[2 * q4_0_block_size ..][0..q4_0_block_size], gathered.dataConst()[0..q4_0_block_size]);
-    try std.testing.expectEqualSlices(f32, values[0..q4_0_block_size], gathered.dataConst()[q4_0_block_size..][0..q4_0_block_size]);
+    try cold.getRowsQ4_0Into(&gathered, &qrows, &.{ 2, 0 });
+    try std.testing.expectEqualSlices(f32, values[2 * types.q4_0_block_size ..][0..types.q4_0_block_size], gathered.dataConst()[0..types.q4_0_block_size]);
+    try std.testing.expectEqualSlices(f32, values[0..types.q4_0_block_size], gathered.dataConst()[types.q4_0_block_size..][0..types.q4_0_block_size]);
 
-    var invalid_index_out = try Tensor.zeros(allocator, &.{ 1, q4_0_block_size });
+    var invalid_index_out = try Tensor.zeros(allocator, &.{ 1, types.q4_0_block_size });
     defer invalid_index_out.deinit();
-    try std.testing.expectError(tensor.TensorError.IndexOutOfBounds, getRowsQ4_0Into(&invalid_index_out, &qrows, &.{3}));
+    try std.testing.expectError(tensor.TensorError.IndexOutOfBounds, cold.getRowsQ4_0Into(&invalid_index_out, &qrows, &.{3}));
 }
 
 // ---------------------------------------------------------------------------
@@ -404,7 +361,7 @@ fn expectDequantMatchesGolden(comptime rhs_dtype: DType, comptime golden: Dequan
     var blocks: [block_count]Block = undefined;
     @memcpy(std.mem.sliceAsBytes(blocks[0..]), golden.bytes);
     var out: [golden.expected_bits.len]f32 = undefined;
-    try dequantizeRowForDType(rhs_dtype, &out, &blocks);
+    try qm.dequantizeRowForDType(rhs_dtype, &out, &blocks);
 
     var out_bits: [golden.expected_bits.len]u32 = undefined;
     for (out, &out_bits) |value, *bits| bits.* = @bitCast(value);

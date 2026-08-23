@@ -79,14 +79,14 @@ test "gemma moe raw cpu + gpu arms match the x4 path (-Dgpu=metal)" {
         defer allocator.free(row_gu);
         for (0..n_expert * gu_out) |r| {
             for (row_gu) |*x| x.* = random.floatNorm(f32) * 0.25;
-            try qm.quantizeRowQ6_KInto(gu_blocks[r * bpr_gu ..][0..bpr_gu], row_gu);
-            try qm.quantizeRowQ4_KInto(gu4_blocks[r * bpr_gu ..][0..bpr_gu], row_gu);
+            try qm.q6_k.quantizeRowQ6_KInto(gu_blocks[r * bpr_gu ..][0..bpr_gu], row_gu);
+            try qm.q4_k.quantizeRowQ4_KInto(gu4_blocks[r * bpr_gu ..][0..bpr_gu], row_gu);
         }
         const row_dn = try allocator.alloc(f32, out_pe);
         defer allocator.free(row_dn);
         for (0..n_expert * hidden) |r| {
             for (row_dn) |*x| x.* = random.floatNorm(f32) * 0.25;
-            try qm.quantizeRowQ8_0Into(dn_blocks[r * bpr_dn ..][0..bpr_dn], row_dn);
+            try qm.q8k.quantizeRowQ8_0Into(dn_blocks[r * bpr_dn ..][0..bpr_dn], row_dn);
         }
     }
     const gw = RawExpertWeights{ .gu = .{ .q6_k = gu_blocks }, .dn_blocks = dn_blocks, .device_owned = false };
@@ -108,12 +108,12 @@ test "gemma moe raw cpu + gpu arms match the x4 path (-Dgpu=metal)" {
     };
     for (0..n_expert) |e| {
         const eg = gu_blocks[e * gu_out * bpr_gu ..][0 .. gu_out * bpr_gu];
-        gate[e] = try qm.packMatmulRhsQ6_Kx4(allocator, eg[0 .. out_pe * bpr_gu], out_pe, hidden, bpr_gu);
+        gate[e] = try qm.q6_k.packMatmulRhsQ6_Kx4(allocator, eg[0 .. out_pe * bpr_gu], out_pe, hidden, bpr_gu);
         errdefer gate[e].deinit();
-        up[e] = try qm.packMatmulRhsQ6_Kx4(allocator, eg[out_pe * bpr_gu ..], out_pe, hidden, bpr_gu);
+        up[e] = try qm.q6_k.packMatmulRhsQ6_Kx4(allocator, eg[out_pe * bpr_gu ..], out_pe, hidden, bpr_gu);
         errdefer up[e].deinit();
         const ed = dn_blocks[e * hidden * bpr_dn ..][0 .. hidden * bpr_dn];
-        down[e] = try qm.packMatmulRhsQ8_0x4(allocator, ed, hidden, out_pe, bpr_dn);
+        down[e] = try qm.q8_0.packMatmulRhsQ8_0x4(allocator, ed, hidden, out_pe, bpr_dn);
         built += 1;
     }
 

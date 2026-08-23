@@ -9,7 +9,7 @@ const ExecContext = @import("../exec.zig").ExecContext;
 
 const DType = tensor.DType;
 const Tensor = tensor.Tensor;
-const vexpf = backend_mod.vector_impl.vexpf;
+const vexpf = backend_mod.vector_impl.primitives.vexpf;
 
 pub const GroupedCausalAttentionBackwardResult = struct {
     q: ?tensor.Tensor = null,
@@ -82,7 +82,7 @@ inline fn kvRowSelect(
     scratch: []f32,
 ) struct { []const KvLane(KvElem), usize } {
     if (comptime KvElem == BlockQ8_0) {
-        backend_mod.quantized_matmul.dequantizeRowQ8_0Into(
+        backend_mod.quantized_matmul.q8k.dequantizeRowQ8_0Into(
             scratch[0..d],
             data[elem_base / q8_0_block_size ..][0 .. d / q8_0_block_size],
         ) catch unreachable;
@@ -292,11 +292,11 @@ pub fn groupedCausalAttentionHeads(comptime KvElem: type, task: GroupedCausalAtt
 
             var q_scales: [if (KvElem == BlockQ8_0) attention_q8_max_d / q8_0_block_size else 0]f32 = undefined;
             if (comptime KvElem == BlockQ8_0) {
-                backend_mod.quantized_matmul.quantizeRowQ8_0Into(
+                backend_mod.quantized_matmul.q8k.quantizeRowQ8_0Into(
                     q_q8[0 .. task.d / q8_0_block_size],
                     task.q_data[q_base..][0..task.d],
                 ) catch unreachable;
-                backend_mod.quantized_matmul.q8RowScalesInto(q_scales[0 .. task.d / q8_0_block_size], q_q8[0 .. task.d / q8_0_block_size]);
+                backend_mod.quantized_matmul.q8_0.q8RowScalesInto(q_scales[0 .. task.d / q8_0_block_size], q_q8[0 .. task.d / q8_0_block_size]);
             }
             var max_score = -std.math.inf(f32);
             if (comptime KvElem == BlockQ8_0) score: {
@@ -312,7 +312,7 @@ pub fn groupedCausalAttentionHeads(comptime KvElem: type, task: GroupedCausalAtt
                 while (source_i + 2 <= active) : (source_i += 2) {
                     const k0 = task.k_data[source_i * row_stride + head_off ..][0..bpr];
                     const k1 = task.k_data[(source_i + 1) * row_stride + head_off ..][0..bpr];
-                    const dots = qm.vecDotQ8_0Q8_0x2(qb, qs, k0, k1);
+                    const dots = qm.q8_0.vecDotQ8_0Q8_0x2(qb, qs, k0, k1);
                     inline for (0..2) |i| {
                         var score = dots[i] * task.scale_value;
                         if (bias_row) |row| score += row[source_i + i];
@@ -322,7 +322,7 @@ pub fn groupedCausalAttentionHeads(comptime KvElem: type, task: GroupedCausalAtt
                 }
                 if (source_i < active) {
                     const k0 = task.k_data[source_i * row_stride + head_off ..][0..bpr];
-                    var score = qm.vecDotQ8_0Q8_0(qb, k0) * task.scale_value;
+                    var score = qm.q8_0.vecDotQ8_0Q8_0(qb, k0) * task.scale_value;
                     if (bias_row) |row| score += row[source_i];
                     task.scores[source_i] = score;
                     max_score = @max(max_score, score);
@@ -375,17 +375,17 @@ pub fn groupedCausalAttentionHeads(comptime KvElem: type, task: GroupedCausalAtt
                 const head_off = kv_head_i * kv_head_stride / q8_0_block_size;
                 var source_i = lo;
                 if (active - lo >= 2) {
-                    qm.weightedQ8_0Row2(false, out_row, task.v_data[lo * row_stride + head_off ..][0..bpr], task.scores[lo] * inv_sum, task.v_data[(lo + 1) * row_stride + head_off ..][0..bpr], task.scores[lo + 1] * inv_sum);
+                    qm.q8_0.weightedQ8_0Row2(false, out_row, task.v_data[lo * row_stride + head_off ..][0..bpr], task.scores[lo] * inv_sum, task.v_data[(lo + 1) * row_stride + head_off ..][0..bpr], task.scores[lo + 1] * inv_sum);
                     source_i = lo + 2;
                 } else {
-                    qm.weightedQ8_0Row(false, out_row, task.v_data[lo * row_stride + head_off ..][0..bpr], task.scores[lo] * inv_sum);
+                    qm.q8_0.weightedQ8_0Row(false, out_row, task.v_data[lo * row_stride + head_off ..][0..bpr], task.scores[lo] * inv_sum);
                     source_i = lo + 1;
                 }
                 while (source_i + 2 <= active) : (source_i += 2) {
-                    qm.weightedQ8_0Row2(true, out_row, task.v_data[source_i * row_stride + head_off ..][0..bpr], task.scores[source_i] * inv_sum, task.v_data[(source_i + 1) * row_stride + head_off ..][0..bpr], task.scores[source_i + 1] * inv_sum);
+                    qm.q8_0.weightedQ8_0Row2(true, out_row, task.v_data[source_i * row_stride + head_off ..][0..bpr], task.scores[source_i] * inv_sum, task.v_data[(source_i + 1) * row_stride + head_off ..][0..bpr], task.scores[source_i + 1] * inv_sum);
                 }
                 if (source_i < active) {
-                    qm.weightedQ8_0Row(true, out_row, task.v_data[source_i * row_stride + head_off ..][0..bpr], task.scores[source_i] * inv_sum);
+                    qm.q8_0.weightedQ8_0Row(true, out_row, task.v_data[source_i * row_stride + head_off ..][0..bpr], task.scores[source_i] * inv_sum);
                 }
             } else {
                 {
@@ -456,10 +456,10 @@ pub fn groupedCausalAttentionHeadPairs(comptime KvElem: type, task: GroupedCausa
             var q_scales: [if (KvElem == BlockQ8_0) 2 * q8_blocks else 0]f32 = undefined;
             if (comptime KvElem == BlockQ8_0) {
                 const qm = backend_mod.quantized_matmul;
-                qm.quantizeRowQ8_0Into(q_q8[0 .. task.d / q8_0_block_size], task.q_data[q_base0..][0..task.d]) catch unreachable;
-                qm.quantizeRowQ8_0Into(q_q8[q8_blocks..][0 .. task.d / q8_0_block_size], task.q_data[q_base1..][0..task.d]) catch unreachable;
-                qm.q8RowScalesInto(q_scales[0 .. task.d / q8_0_block_size], q_q8[0 .. task.d / q8_0_block_size]);
-                qm.q8RowScalesInto(q_scales[q8_blocks..][0 .. task.d / q8_0_block_size], q_q8[q8_blocks..][0 .. task.d / q8_0_block_size]);
+                qm.q8k.quantizeRowQ8_0Into(q_q8[0 .. task.d / q8_0_block_size], task.q_data[q_base0..][0..task.d]) catch unreachable;
+                qm.q8k.quantizeRowQ8_0Into(q_q8[q8_blocks..][0 .. task.d / q8_0_block_size], task.q_data[q_base1..][0..task.d]) catch unreachable;
+                qm.q8_0.q8RowScalesInto(q_scales[0 .. task.d / q8_0_block_size], q_q8[0 .. task.d / q8_0_block_size]);
+                qm.q8_0.q8RowScalesInto(q_scales[q8_blocks..][0 .. task.d / q8_0_block_size], q_q8[q8_blocks..][0 .. task.d / q8_0_block_size]);
             }
             var max_score0 = -std.math.inf(f32);
             var max_score1 = -std.math.inf(f32);
@@ -478,7 +478,7 @@ pub fn groupedCausalAttentionHeadPairs(comptime KvElem: type, task: GroupedCausa
                 while (source_i + 2 <= active) : (source_i += 2) {
                     const k0 = task.k_data[source_i * row_stride + head_off ..][0..bpr];
                     const k1 = task.k_data[(source_i + 1) * row_stride + head_off ..][0..bpr];
-                    const dots = qm.vecDotQ8_0Q8_0Pairx2(qb0, qb1, qs0, qs1, k0, k1);
+                    const dots = qm.q8_0.vecDotQ8_0Q8_0Pairx2(qb0, qb1, qs0, qs1, k0, k1);
                     inline for (0..2) |i| {
                         var score0 = dots[2 * i] * task.scale_value;
                         var score1 = dots[2 * i + 1] * task.scale_value;
@@ -494,7 +494,7 @@ pub fn groupedCausalAttentionHeadPairs(comptime KvElem: type, task: GroupedCausa
                 }
                 if (source_i < active) {
                     const k0 = task.k_data[source_i * row_stride + head_off ..][0..bpr];
-                    const dots = qm.vecDotQ8_0Q8_0Pair(qb0, qb1, k0);
+                    const dots = qm.q8_0.vecDotQ8_0Q8_0Pair(qb0, qb1, k0);
                     var score0 = dots[0] * task.scale_value;
                     var score1 = dots[1] * task.scale_value;
                     if (bias_row) |row| {
@@ -576,17 +576,17 @@ pub fn groupedCausalAttentionHeadPairs(comptime KvElem: type, task: GroupedCausa
                 const head_off = kv_head_i * kv_head_stride / q8_0_block_size;
                 var source_i = lo;
                 if (active - lo >= 2) {
-                    qm.weightedQ8_0RowPair2(false, out_row0, out_row1, task.v_data[lo * row_stride + head_off ..][0..bpr], scores0[lo] * inv_sum0, scores1[lo] * inv_sum1, task.v_data[(lo + 1) * row_stride + head_off ..][0..bpr], scores0[lo + 1] * inv_sum0, scores1[lo + 1] * inv_sum1);
+                    qm.q8_0.weightedQ8_0RowPair2(false, out_row0, out_row1, task.v_data[lo * row_stride + head_off ..][0..bpr], scores0[lo] * inv_sum0, scores1[lo] * inv_sum1, task.v_data[(lo + 1) * row_stride + head_off ..][0..bpr], scores0[lo + 1] * inv_sum0, scores1[lo + 1] * inv_sum1);
                     source_i = lo + 2;
                 } else {
-                    qm.weightedQ8_0RowPair(false, out_row0, out_row1, task.v_data[lo * row_stride + head_off ..][0..bpr], scores0[lo] * inv_sum0, scores1[lo] * inv_sum1);
+                    qm.q8_0.weightedQ8_0RowPair(false, out_row0, out_row1, task.v_data[lo * row_stride + head_off ..][0..bpr], scores0[lo] * inv_sum0, scores1[lo] * inv_sum1);
                     source_i = lo + 1;
                 }
                 while (source_i + 2 <= active) : (source_i += 2) {
-                    qm.weightedQ8_0RowPair2(true, out_row0, out_row1, task.v_data[source_i * row_stride + head_off ..][0..bpr], scores0[source_i] * inv_sum0, scores1[source_i] * inv_sum1, task.v_data[(source_i + 1) * row_stride + head_off ..][0..bpr], scores0[source_i + 1] * inv_sum0, scores1[source_i + 1] * inv_sum1);
+                    qm.q8_0.weightedQ8_0RowPair2(true, out_row0, out_row1, task.v_data[source_i * row_stride + head_off ..][0..bpr], scores0[source_i] * inv_sum0, scores1[source_i] * inv_sum1, task.v_data[(source_i + 1) * row_stride + head_off ..][0..bpr], scores0[source_i + 1] * inv_sum0, scores1[source_i + 1] * inv_sum1);
                 }
                 if (source_i < active) {
-                    qm.weightedQ8_0RowPair(true, out_row0, out_row1, task.v_data[source_i * row_stride + head_off ..][0..bpr], scores0[source_i] * inv_sum0, scores1[source_i] * inv_sum1);
+                    qm.q8_0.weightedQ8_0RowPair(true, out_row0, out_row1, task.v_data[source_i * row_stride + head_off ..][0..bpr], scores0[source_i] * inv_sum0, scores1[source_i] * inv_sum1);
                 }
             } else {
                 {

@@ -24,7 +24,7 @@ pub fn f16BitsFromF32(x: f32) u16 {
 // the q5_k kernel-test fixtures, offset by `seed` so gate/up/down differ.
 pub fn buildTestMoeRhsQ5K(allocator: Allocator, rows: usize, k_dim: usize, seed: usize) !exec.ExecContext.MoeRhs {
     const qm = backend_mod.quantized_matmul;
-    const bpc = k_dim / qm.qk_k_block_size;
+    const bpc = k_dim / qm.types.qk_k_block_size;
     const blocks = try allocator.alloc(qm.BlockQ5_K, rows * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, block_i| {
@@ -35,5 +35,5 @@ pub fn buildTestMoeRhsQ5K(allocator: Allocator, rows: usize, k_dim: usize, seed:
         for (&b.qh, 0..) |*q, i| q.* = @intCast((i * 13 + bi * 11) % 256);
         for (&b.qs, 0..) |*q, i| q.* = @intCast((i * 31 + bi * 5) % 256);
     }
-    return .{ .q5_k = try qm.quantizedMatmulRhsQ5_KFromBlocks(allocator, k_dim, rows, blocks) };
+    return .{ .q5_k = try qm.q8k.quantizedMatmulRhsQ5_KFromBlocks(allocator, k_dim, rows, blocks) };
 }

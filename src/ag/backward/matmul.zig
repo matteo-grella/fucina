@@ -573,7 +573,7 @@ pub fn TernarySteDotBackward(comptime left_tags: anytype) type {
                 defer right_f32.deinit();
                 const rows = right_f32.data();
                 for (0..n) |row| {
-                    try backend_quant.dequantizeRowTQ2_0Into(rows[row * k ..][0..k], self.rhs.columnBlocks(row));
+                    try backend_quant.cold.dequantizeRowTQ2_0Into(rows[row * k ..][0..k], self.rhs.columnBlocks(row));
                 }
                 var dx = try ctx.matmul2D(&gy2d, &right_f32);
                 errdefer dx.deinit();

@@ -20,12 +20,9 @@
 const std = @import("std");
 const parallel = @import("../../parallel.zig");
 const tensor = @import("../../tensor.zig");
-const vm = @import("common.zig");
+const common = @import("common.zig");
 
 const Tensor = tensor.Tensor;
-const ParallelConfig = vm.ParallelConfig;
-const Vf32 = vm.Vf32;
-const vector_len = vm.vector_len;
 
 pub const PoolKind = enum { avg, max, sum };
 
@@ -59,18 +56,18 @@ fn runPool2dTask(task: *const Pool2dTask) void {
     }
 }
 
-pub fn pool2dIntoWithConfig(
+pub fn pool2dInto(
+    pc: common.ParallelConfig,
     comptime kind: PoolKind,
     out: *Tensor,
     input: *const Tensor,
     d: Pool2dDims,
-    config: ParallelConfig,
 ) void {
     const o = out.data();
     const in = input.dataConst();
-    if (config.pool) |pool| {
+    if (pc.pool) |pool| {
         const work = d.oh * d.ow * d.c * d.kh * d.kw;
-        const tc = vm.generalConvThreadCount(d.oh, work);
+        const tc = common.generalConvThreadCount(d.oh, work);
         if (tc > 1) {
             var tasks: [parallel.vector_max_threads]Pool2dTask = undefined;
             for (0..tc) |ti| {
@@ -128,10 +125,10 @@ fn pool2dRangeRows(comptime kind: PoolKind, out: []f32, in: []const f32, d: Pool
 inline fn accumulateChannels(comptime kind: PoolKind, acc: []f32, x: []const f32) void {
     const n = acc.len;
     var i: usize = 0;
-    while (i + vector_len <= n) : (i += vector_len) {
-        const va: Vf32 = acc[i..][0..vector_len].*;
-        const vx: Vf32 = x[i..][0..vector_len].*;
-        acc[i..][0..vector_len].* = switch (kind) {
+    while (i + common.vector_len <= n) : (i += common.vector_len) {
+        const va: common.Vf32 = acc[i..][0..common.vector_len].*;
+        const vx: common.Vf32 = x[i..][0..common.vector_len].*;
+        acc[i..][0..common.vector_len].* = switch (kind) {
             .max => @max(va, vx),
             .avg, .sum => va + vx,
         };
@@ -146,11 +143,11 @@ inline fn accumulateChannels(comptime kind: PoolKind, acc: []f32, x: []const f32
 
 inline fn scaleChannels(acc: []f32, s: f32) void {
     const n = acc.len;
-    const vs: Vf32 = @splat(s);
+    const vs: common.Vf32 = @splat(s);
     var i: usize = 0;
-    while (i + vector_len <= n) : (i += vector_len) {
-        const va: Vf32 = acc[i..][0..vector_len].*;
-        acc[i..][0..vector_len].* = va * vs;
+    while (i + common.vector_len <= n) : (i += common.vector_len) {
+        const va: common.Vf32 = acc[i..][0..common.vector_len].*;
+        acc[i..][0..common.vector_len].* = va * vs;
     }
     while (i < n) : (i += 1) acc[i] *= s;
 }
@@ -158,8 +155,8 @@ inline fn scaleChannels(acc: []f32, s: f32) void {
 /// avg-pool VJP: scatter `gy[oh,ow,c] / valid_count(oh,ow)` back over the
 /// window's valid taps. `out` is `[H,W,C]`, zeroed here. Serial
 /// (correctness-first; each input cell may receive from overlapping windows).
-pub fn avgPool2dBackwardIntoWithConfig(out: *Tensor, gy: *const Tensor, d: Pool2dDims, config: ParallelConfig) void {
-    _ = config;
+pub fn avgPool2dBackwardInto(pc: common.ParallelConfig, out: *Tensor, gy: *const Tensor, d: Pool2dDims) void {
+    _ = pc;
     const gx = out.data();
     const g = gy.dataConst();
     @memset(gx, 0);
@@ -206,8 +203,8 @@ pub fn avgPool2dBackwardIntoWithConfig(out: *Tensor, gy: *const Tensor, d: Pool2
 /// occurrence in `(kh,kw)` scan order winning ties (recomputed from the saved
 /// forward input — no index tensor is stored). `out` is `[H,W,C]`, zeroed
 /// here. Serial (correctness-first).
-pub fn maxPool2dBackwardIntoWithConfig(out: *Tensor, input: *const Tensor, gy: *const Tensor, d: Pool2dDims, config: ParallelConfig) void {
-    _ = config;
+pub fn maxPool2dBackwardInto(pc: common.ParallelConfig, out: *Tensor, input: *const Tensor, gy: *const Tensor, d: Pool2dDims) void {
+    _ = pc;
     const gx = out.data();
     const in = input.dataConst();
     const g = gy.dataConst();
@@ -263,11 +260,11 @@ fn runUpsample2xTask(task: *const Upsample2xTask) void {
 /// (`i,j ∈ {0,1}`). One duplicated output row is built by widening each
 /// channel block, then the sibling row is a single row `@memcpy`. Parallel
 /// over input rows (disjoint output ranges — bit-identical to serial).
-pub fn upsample2xNearestIntoWithConfig(out: *Tensor, input: *const Tensor, h: usize, w: usize, c: usize, config: ParallelConfig) void {
+pub fn upsample2xNearestInto(pc: common.ParallelConfig, out: *Tensor, input: *const Tensor, h: usize, w: usize, c: usize) void {
     const o = out.data();
     const in = input.dataConst();
-    if (config.pool) |pool| {
-        const tc = vm.generalConvThreadCount(h, 4 * h * w * c);
+    if (pc.pool) |pool| {
+        const tc = common.generalConvThreadCount(h, 4 * h * w * c);
         if (tc > 1) {
             var tasks: [parallel.vector_max_threads]Upsample2xTask = undefined;
             for (0..tc) |ti| {

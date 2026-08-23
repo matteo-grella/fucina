@@ -84,7 +84,7 @@ pub fn main(init: std.process.Init) !void {
 
         var rhs_row = try qm.quantizeMatmulRhsQ8_0(allocator, &rhs_dense);
         defer rhs_row.deinit();
-        var rhs_x4 = try qm.packMatmulRhsQ8_0x4(allocator, rhs_row.rows.blocks, n, k, bpr);
+        var rhs_x4 = try qm.q8_0.packMatmulRhsQ8_0x4(allocator, rhs_row.rows.blocks, n, k, bpr);
         defer rhs_x4.deinit();
 
         for (ms) |m| {
@@ -96,12 +96,12 @@ pub fn main(init: std.process.Init) !void {
 
             const qlhs = try allocator.alloc(BlockQ8_0, m * bpr);
             defer allocator.free(qlhs);
-            for (0..m) |r| try qm.quantizeRowQ8_0Into(qlhs[r * bpr ..][0..bpr], lhs_vals[r * k ..][0..k]);
+            for (0..m) |r| try qm.q8k.quantizeRowQ8_0Into(qlhs[r * bpr ..][0..bpr], lhs_vals[r * k ..][0..k]);
 
             const row_groups = (m + 3) / 4;
             const qlhs_x4 = try allocator.alloc(BlockQ8_0x4, row_groups * bpr);
             defer allocator.free(qlhs_x4);
-            try qm.quantizeRowsQ8_0x4PaddedInto(qlhs_x4, &lhs_dense);
+            try qm.q8_0.quantizeRowsQ8_0x4PaddedInto(qlhs_x4, &lhs_dense);
 
             const out_row = try allocator.alloc(f32, m * n);
             defer allocator.free(out_row);
@@ -113,15 +113,15 @@ pub fn main(init: std.process.Init) !void {
             var sink: f64 = 0;
             var w: usize = 0;
             while (w < warmup) : (w += 1) {
-                qm.matmulQ8_0RhsTile(out_row, qlhs, &rhs_row, n, 0, m, 0, n);
-                qm.matmulQ8_0x4RhsTile(out_x4, qlhs, &rhs_x4, n, 0, m, 0, n);
-                qm.matmulQ8_0x4PackedPaddedRhsRange(out_x4p, qlhs_x4, &rhs_x4, m, n);
+                qm.q8_0.matmulQ8_0RhsTile(out_row, qlhs, &rhs_row, n, 0, m, 0, n);
+                qm.q8_0.matmulQ8_0x4RhsTile(out_x4, qlhs, &rhs_x4, n, 0, m, 0, n);
+                qm.q8_0.matmulQ8_0x4PackedPaddedRhsRange(out_x4p, qlhs_x4, &rhs_x4, m, n);
             }
 
             var t = try Timer.start(io);
             var it: usize = 0;
             while (it < iters) : (it += 1) {
-                qm.matmulQ8_0RhsTile(out_row, qlhs, &rhs_row, n, 0, m, 0, n);
+                qm.q8_0.matmulQ8_0RhsTile(out_row, qlhs, &rhs_row, n, 0, m, 0, n);
                 sink += out_row[it % out_row.len];
             }
             const row_ns = t.read();
@@ -129,7 +129,7 @@ pub fn main(init: std.process.Init) !void {
             t.reset();
             it = 0;
             while (it < iters) : (it += 1) {
-                qm.matmulQ8_0x4RhsTile(out_x4, qlhs, &rhs_x4, n, 0, m, 0, n);
+                qm.q8_0.matmulQ8_0x4RhsTile(out_x4, qlhs, &rhs_x4, n, 0, m, 0, n);
                 sink += out_x4[it % out_x4.len];
             }
             const x4_ns = t.read();
@@ -137,7 +137,7 @@ pub fn main(init: std.process.Init) !void {
             t.reset();
             it = 0;
             while (it < iters) : (it += 1) {
-                qm.matmulQ8_0x4PackedPaddedRhsRange(out_x4p, qlhs_x4, &rhs_x4, m, n);
+                qm.q8_0.matmulQ8_0x4PackedPaddedRhsRange(out_x4p, qlhs_x4, &rhs_x4, m, n);
                 sink += out_x4p[it % out_x4p.len];
             }
             const x4p_ns = t.read();

@@ -707,7 +707,7 @@ test "MoE tie stamp: tied K=2 stacks load with the folded expert pack and fold t
                 .n = out_dim,
             };
         }
-        try bq.packMatmulRhsTQ2_0Foldedx4Into(want[e * fg ..][0..fg], &views[0], &views[1]);
+        try bq.ternary.packMatmulRhsTQ2_0Foldedx4Into(want[e * fg ..][0..fg], &views[0], &views[1]);
     }
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&want), std.mem.sliceAsBytes(loaded.ptqtp.folded));
 
@@ -817,7 +817,7 @@ test "native folded MoE (tq2_0_fx4): loadMoeRhs serves the pack bit-identical to
         const pb = t_out * bpc;
         var v0 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(pair.plane1[e * pb ..][0..pb]), .rows = t_out, .cols = t_in, .blocks_per_row = bpc }, .k = t_in, .n = t_out };
         var v1 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(pair.plane2[e * pb ..][0..pb]), .rows = t_out, .cols = t_in, .blocks_per_row = bpc }, .k = t_in, .n = t_out };
-        try bq.packMatmulRhsTQ2_0Foldedx4Into(pack[e * fg ..][0..fg], &v0, &v1);
+        try bq.ternary.packMatmulRhsTQ2_0Foldedx4Into(pack[e * fg ..][0..fg], &v0, &v1);
     }
     var fx4 = blk: {
         var w = gguf.Writer.init(allocator);
@@ -894,7 +894,7 @@ test "dense fx4 arm: serve and fusion bitwise vs tied sibling planes; relayout a
         packs[i] = try allocator.alloc(bq.BlockTQ2_0Foldedx4, (pn / 4) * bpr);
         var v0 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(pairs[i].plane1), .rows = pn, .cols = t_k, .blocks_per_row = bpr }, .k = t_k, .n = pn };
         var v1 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(pairs[i].plane2), .rows = pn, .cols = t_k, .blocks_per_row = bpr }, .k = t_k, .n = pn };
-        try bq.packMatmulRhsTQ2_0Foldedx4Into(packs[i], &v0, &v1);
+        try bq.ternary.packMatmulRhsTQ2_0Foldedx4Into(packs[i], &v0, &v1);
         packs_built += 1;
     }
 
@@ -902,9 +902,9 @@ test "dense fx4 arm: serve and fusion bitwise vs tied sibling planes; relayout a
     {
         var v0 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(pairs[0].plane1), .rows = parts_n[0], .cols = t_k, .blocks_per_row = 1 }, .k = t_k, .n = parts_n[0] };
         var v1 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(pairs[0].plane2), .rows = parts_n[0], .cols = t_k, .blocks_per_row = 1 }, .k = t_k, .n = parts_n[0] };
-        const from_planes = try bq.packMatmulRhsTQ2_0FoldedRows(allocator, &v0, &v1);
+        const from_planes = try bq.ternary.packMatmulRhsTQ2_0FoldedRows(allocator, &v0, &v1);
         defer allocator.free(from_planes);
-        const from_x4 = try bq.packMatmulRhsTQ2_0FoldedRowsFromX4(allocator, packs[0], parts_n[0], 1);
+        const from_x4 = try bq.ternary.packMatmulRhsTQ2_0FoldedRowsFromX4(allocator, packs[0], parts_n[0], 1);
         defer allocator.free(from_x4);
         try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(from_planes), std.mem.sliceAsBytes(from_x4));
     }

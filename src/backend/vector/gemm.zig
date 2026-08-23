@@ -1,7 +1,7 @@
 //! Dense f32/f16/f64/bf16 GEMM: the NN/TN/NT and f16-RHS entry points, their
 //! Task structs and parallel dispatch, and the inner range/cols/row kernels.
 //! Shared-core symbols (ParallelConfig, contiguous-data helpers, thread-count
-//! gates, the V* width aliases) come from `common.zig` (`vm`); the @Vector
+//! gates, the V* width aliases) come from `common.zig`; the @Vector
 //! primitives from `primitives.zig`; blocked-tile cores from
 //! `gemm_blocked.zig`.
 //! gemmNNRange/gemmTNRange/gemmNTRange are pub for the batched GEMM module.
@@ -13,37 +13,20 @@ const gemm_blocked = @import("gemm_blocked.zig");
 const parallel = @import("../../parallel.zig");
 const tensor = @import("../../tensor.zig");
 const thread = @import("../../thread.zig");
-const vm = @import("common.zig");
+const common = @import("common.zig");
 const primitives = @import("primitives.zig");
 
 const DType = dtype_mod.DType;
 const Tensor = tensor.Tensor;
 
-// Shared-core symbols from the common leaf, aliased so the moved bodies compile
-// unchanged.
-const ParallelConfig = vm.ParallelConfig;
-const matmulThreadCount = vm.matmulThreadCount;
-const columnThreadCount = vm.columnThreadCount;
-const contiguousDataConst = vm.contiguousDataConst;
-const contiguousData = vm.contiguousData;
-const contiguousDataConstOf = vm.contiguousDataConstOf;
-const contiguousDataOf = vm.contiguousDataOf;
-
-const vector_len = vm.vector_len;
-const vector_len_f64 = vm.vector_len_f64;
-const vector_len_f16 = vm.vector_len_f16;
-const Vf32 = vm.Vf32;
-const Vf64 = vm.Vf64;
-const Vf16 = vm.Vf16;
-const Vf16ForF32 = vm.Vf16ForF32;
-
-// @Vector primitives — imported directly from the primitives sibling.
-const vecDot = primitives.vecDot;
-const vecDotF16ToF32 = primitives.vecDotF16ToF32;
-const bf16VecToF32 = primitives.bf16VecToF32;
-const bf16VecToF32Wide = primitives.bf16VecToF32Wide;
+const ParallelConfig = common.ParallelConfig;
+const vector_len = common.vector_len;
+const vector_len_f16 = common.vector_len_f16;
+const Vf32 = common.Vf32;
+const Vf16 = common.Vf16;
+const Vf16ForF32 = common.Vf16ForF32;
 const f32VecToBf16 = primitives.f32VecToBf16;
-const Vf32Wide = vm.Vf32ForF16;
+const Vf32Wide = common.Vf32ForF16;
 
 // f16-RHS GEMM accumulator policy. On aarch64 NEON the f16 x f16 @mulAdd arms
 // are native fmla.8h (double the f32 lane throughput), so half-precision
@@ -87,7 +70,7 @@ pub fn matmulInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
     const n = bv.dim(1);
     if (k != bv.dim(0)) return tensor.TensorError.ShapeMismatch;
     if (ov.dim(0) != m or ov.dim(1) != n) return tensor.TensorError.ShapeMismatch;
-    matmul2DIntoUnchecked(out, a, b, m, n, k);
+    matmul2DIntoUnchecked(.{}, out, a, b, m, n, k);
 }
 
 // C[i, j] = sum_p A[i, p] * B[p, j]. The natural inner order (i, j, p) reads
@@ -95,59 +78,56 @@ pub fn matmulInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
 // A[i, p] as a scalar, multiply by a contiguous slice of B's row p starting at
 // j, and accumulate into C's row i starting at j. Now the inner loop is two
 // contiguous reads and one contiguous write — vectorizes cleanly.
-pub fn matmul2DIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, m: usize, n: usize, k: usize) void {
-    matmul2DIntoUncheckedWithConfig(out, a, b, m, n, k, .{});
-}
-
-pub fn matmul2DIntoUncheckedWithConfig(
+pub fn matmul2DIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) void {
-    const ad = contiguousDataConst(a, m * k);
-    const bd = contiguousDataConst(b, k * n);
-    const cd = contiguousData(out, m * n);
+    const ad = common.contiguousDataConst(a, m * k);
+    const bd = common.contiguousDataConst(b, k * n);
+    const cd = common.contiguousData(out, m * n);
     if (gemm_blocked.shouldUseBlocked(m, n, k)) {
-        return gemm_blocked.gemmBlocked(.nn, cd, ad, bd, m, n, k, config);
+        return gemm_blocked.gemmBlocked(pc, .nn, cd, ad, bd, m, n, k);
     }
-    gemmNNRowPathWithConfig(cd, ad, bd, m, n, k, config);
+    gemmNNRowPath(pc, cd, ad, bd, m, n, k);
 }
 
 // The pre-blocking register-tiled row-kernel path, bypassing the blocked
 // dispatch above. Public so the GEMM bench can baseline it directly.
-pub fn gemmNNRowPathWithConfig(cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize, config: ParallelConfig) void {
-    if (maybeParallelNN(.store, config, cd, ad, bd, m, n, k)) return;
+pub fn gemmNNRowPath(pc: ParallelConfig, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize) void {
+    if (maybeParallelNN(pc, .store, cd, ad, bd, m, n, k)) return;
     gemmNNRangeMode(.store, cd, ad, bd, m, n, k, 0, m);
 }
 
-/// C += A·B. The accumulate twin of `matmul2DIntoUncheckedWithConfig`: the
+/// C += A·B. The accumulate twin of `matmul2DIntoUnchecked`: the
 /// row/column parallel splits keep every output element owned by one task, so
 /// the read-modify-write store needs no synchronization; the blocked path
 /// seeds its first k-panel in accumulate mode instead of store mode.
-pub fn matmul2DAccIntoUncheckedWithConfig(
+pub fn matmul2DAccIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) void {
-    const ad = contiguousDataConst(a, m * k);
-    const bd = contiguousDataConst(b, k * n);
-    const cd = contiguousData(out, m * n);
+    const ad = common.contiguousDataConst(a, m * k);
+    const bd = common.contiguousDataConst(b, k * n);
+    const cd = common.contiguousData(out, m * n);
     if (gemm_blocked.shouldUseBlocked(m, n, k)) {
-        return gemm_blocked.gemmBlockedAcc(.nn, cd, ad, bd, m, n, k, config);
+        return gemm_blocked.gemmBlockedAcc(pc, .nn, cd, ad, bd, m, n, k);
     }
-    if (maybeParallelNN(.accumulate, config, cd, ad, bd, m, n, k)) return;
+    if (maybeParallelNN(pc, .accumulate, cd, ad, bd, m, n, k)) return;
     gemmNNRangeMode(.accumulate, cd, ad, bd, m, n, k, 0, m);
 }
 
-pub fn matmul2DIntoUncheckedTypedWithConfig(
+pub fn matmul2DIntoUncheckedTyped(
+    pc: ParallelConfig,
     comptime dtype: DType,
     out: *tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)),
     a: *const tensor.TensorOf(dtype),
@@ -155,19 +135,18 @@ pub fn matmul2DIntoUncheckedTypedWithConfig(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) void {
-    const ad = contiguousDataConstOf(dtype, a, m * k);
-    const bd = contiguousDataConstOf(dtype, b, k * n);
-    const cd = contiguousDataOf(dtype_mod.outputDType(.matmul, dtype), out, m * n);
+    const ad = common.contiguousDataConstOf(dtype, a, m * k);
+    const bd = common.contiguousDataConstOf(dtype, b, k * n);
+    const cd = common.contiguousDataOf(dtype_mod.outputDType(.matmul, dtype), out, m * n);
     if (comptime dtype == .f64) {
-        if (maybeParallelNNF64(config, cd, ad, bd, m, n, k)) return;
+        if (maybeParallelNNF64(pc, cd, ad, bd, m, n, k)) return;
         return gemmNNRangeF64(cd, ad, bd, m, n, k, 0, m);
     } else if (comptime dtype == .f16) {
-        if (maybeParallelNNF16(config, cd, ad, bd, m, n, k)) return;
+        if (maybeParallelNNF16(pc, cd, ad, bd, m, n, k)) return;
         return gemmNNRangeF16(cd, ad, bd, m, n, k, 0, m);
     } else if (comptime dtype == .bf16) {
-        if (maybeParallelNNBf16(config, cd, ad, bd, m, n, k)) return;
+        if (maybeParallelNNBf16(pc, cd, ad, bd, m, n, k)) return;
         return gemmNNRangeBf16(cd, ad, bd, m, n, k, 0, m);
     }
     matmul2DIntoTypedScalar(dtype, cd, ad, bd, m, n, k);
@@ -182,37 +161,33 @@ pub fn matmulTransAInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void 
     const n = bv.dim(1);
     if (k != bv.dim(0)) return tensor.TensorError.ShapeMismatch;
     if (ov.dim(0) != m or ov.dim(1) != n) return tensor.TensorError.ShapeMismatch;
-    matmulTransA2DIntoUnchecked(out, a, b, m, n, k);
+    matmulTransA2DIntoUnchecked(.{}, out, a, b, m, n, k);
 }
 
 // C[i, j] = sum_p A[p, i] * B[p, j], with A logically [k, m]. Reorder to
 // (p, i, j): for each p and i, broadcast A[p, i] and FMA into C's row i with
 // B's row p. Same contiguous-stream pattern as matmul2D, vectorizes in j.
-pub fn matmulTransA2DIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, m: usize, n: usize, k: usize) void {
-    matmulTransA2DIntoUncheckedWithConfig(out, a, b, m, n, k, .{});
-}
-
-pub fn matmulTransA2DIntoUncheckedWithConfig(
+pub fn matmulTransA2DIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) void {
-    const ad = contiguousDataConst(a, k * m);
-    const bd = contiguousDataConst(b, k * n);
-    const cd = contiguousData(out, m * n);
+    const ad = common.contiguousDataConst(a, k * m);
+    const bd = common.contiguousDataConst(b, k * n);
+    const cd = common.contiguousData(out, m * n);
     if (gemm_blocked.shouldUseBlocked(m, n, k)) {
-        return gemm_blocked.gemmBlocked(.tn, cd, ad, bd, m, n, k, config);
+        return gemm_blocked.gemmBlocked(pc, .tn, cd, ad, bd, m, n, k);
     }
-    gemmTNRowPathWithConfig(cd, ad, bd, m, n, k, config);
+    gemmTNRowPath(pc, cd, ad, bd, m, n, k);
 }
 
-// See gemmNNRowPathWithConfig.
-pub fn gemmTNRowPathWithConfig(cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize, config: ParallelConfig) void {
-    if (maybeParallelTN(config, cd, ad, bd, m, n, k)) return;
+// See gemmNNRowPath.
+pub fn gemmTNRowPath(pc: ParallelConfig, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize) void {
+    if (maybeParallelTN(pc, cd, ad, bd, m, n, k)) return;
     gemmTNRange(cd, ad, bd, m, n, k, 0, m);
 }
 
@@ -225,54 +200,50 @@ pub fn matmulTransBInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void 
     const n = bv.dim(0);
     if (k != bv.dim(1)) return tensor.TensorError.ShapeMismatch;
     if (ov.dim(0) != m or ov.dim(1) != n) return tensor.TensorError.ShapeMismatch;
-    matmulTransB2DIntoUnchecked(out, a, b, m, n, k);
+    matmulTransB2DIntoUnchecked(.{}, out, a, b, m, n, k);
 }
 
 // C[i, j] = sum_p A[i, p] * B[j, p], with B logically [n, k]. Both A's row i
 // and B's row j are contiguous in p — this is a textbook dot-product per
 // output element. The straightforward (i, j, p) ordering is already optimal
 // since each inner reduction can SIMD-accumulate two contiguous streams.
-pub fn matmulTransB2DIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, m: usize, n: usize, k: usize) void {
-    matmulTransB2DIntoUncheckedWithConfig(out, a, b, m, n, k, .{});
-}
-
-pub fn matmulTransB2DIntoUncheckedWithConfig(
+pub fn matmulTransB2DIntoUnchecked(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) void {
-    const ad = contiguousDataConst(a, m * k);
-    const bd = contiguousDataConst(b, n * k);
-    const cd = contiguousData(out, m * n);
+    const ad = common.contiguousDataConst(a, m * k);
+    const bd = common.contiguousDataConst(b, n * k);
+    const cd = common.contiguousData(out, m * n);
     if (gemm_blocked.shouldUseBlocked(m, n, k)) {
-        return gemm_blocked.gemmBlocked(.nt, cd, ad, bd, m, n, k, config);
+        return gemm_blocked.gemmBlocked(pc, .nt, cd, ad, bd, m, n, k);
     }
-    gemmNTRowPathWithConfig(cd, ad, bd, m, n, k, config);
+    gemmNTRowPath(pc, cd, ad, bd, m, n, k);
 }
 
-// See gemmNNRowPathWithConfig.
-pub fn gemmNTRowPathWithConfig(cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize, config: ParallelConfig) void {
-    if (maybeParallelNT(config, cd, ad, bd, m, n, k)) return;
+// See gemmNNRowPath.
+pub fn gemmNTRowPath(pc: ParallelConfig, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize) void {
+    if (maybeParallelNT(pc, cd, ad, bd, m, n, k)) return;
     gemmNTRange(cd, ad, bd, m, n, k, 0, m);
 }
 
-pub fn matmulTransB2DIntoUncheckedF16OperandsWithConfig(
+pub fn matmulTransB2DIntoUncheckedF16Operands(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const tensor.TensorOf(.f16),
     b: *const tensor.TensorOf(.f16),
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) void {
-    const ad = contiguousDataConstOf(.f16, a, m * k);
-    const bd = contiguousDataConstOf(.f16, b, n * k);
-    const cd = contiguousData(out, m * n);
-    if (maybeParallelNTF16Rhs(config, cd, ad, bd, m, n, k)) return;
+    const ad = common.contiguousDataConstOf(.f16, a, m * k);
+    const bd = common.contiguousDataConstOf(.f16, b, n * k);
+    const cd = common.contiguousData(out, m * n);
+    if (maybeParallelNTF16Rhs(pc, cd, ad, bd, m, n, k)) return;
     gemmNTF16RhsRange(cd, ad, bd, m, n, k, 0, m);
 }
 
@@ -281,19 +252,19 @@ pub fn matmulTransB2DIntoUncheckedF16OperandsWithConfig(
 // accumulates in half precision), the bf16 weights are widened to f32
 // in-register (u16 << 16 bit shift, exact) and everything accumulates in f32 —
 // no f32 materialization of the weight matrix, no LHS precision loss.
-pub fn matmulTransB2DIntoUncheckedBf16RhsWithConfig(
+pub fn matmulTransB2DIntoUncheckedBf16Rhs(
+    pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
     b: *const tensor.TensorOf(.bf16),
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) void {
-    const ad = contiguousDataConst(a, m * k);
-    const bd = contiguousDataConstOf(.bf16, b, n * k);
-    const cd = contiguousData(out, m * n);
-    if (maybeParallelNTBf16Rhs(config, cd, ad, bd, m, n, k)) return;
+    const ad = common.contiguousDataConst(a, m * k);
+    const bd = common.contiguousDataConstOf(.bf16, b, n * k);
+    const cd = common.contiguousData(out, m * n);
+    if (maybeParallelNTBf16Rhs(pc, cd, ad, bd, m, n, k)) return;
     gemmNTBf16RhsRange(cd, ad, bd, m, n, k, 0, m);
 }
 
@@ -409,107 +380,107 @@ const ColTaskF16 = struct {
     col_end: usize,
 };
 
-fn maybeParallelNN(comptime mode: StoreMode, config: ParallelConfig, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize) bool {
-    const pool = config.pool orelse return false;
+fn maybeParallelNN(pc: ParallelConfig, comptime mode: StoreMode, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize) bool {
+    const pool = pc.pool orelse return false;
     if (m < parallel.vector_column_min_m) {
-        const thread_count = columnThreadCount(m, n, k);
+        const thread_count = common.columnThreadCount(m, n, k);
         if (thread_count != 1) {
             runParallelCols(pool, runGemmNNColTaskMode(mode), cd, ad, bd, m, n, k, thread_count);
             return true;
         }
     }
-    const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
+    const thread_count = common.matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
     if (thread_count == 1) return false;
     runParallelRows(pool, runGemmNNTaskMode(mode), cd, ad, bd, m, n, k, thread_count);
     return true;
 }
 
-fn maybeParallelNNF64(config: ParallelConfig, cd: []f64, ad: []const f64, bd: []const f64, m: usize, n: usize, k: usize) bool {
-    const pool = config.pool orelse return false;
-    const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
+fn maybeParallelNNF64(pc: ParallelConfig, cd: []f64, ad: []const f64, bd: []const f64, m: usize, n: usize, k: usize) bool {
+    const pool = pc.pool orelse return false;
+    const thread_count = common.matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
     if (thread_count == 1) return false;
     runParallelRowsF64(pool, cd, ad, bd, m, n, k, thread_count);
     return true;
 }
 
-fn maybeParallelNNF16(config: ParallelConfig, cd: []f16, ad: []const f16, bd: []const f16, m: usize, n: usize, k: usize) bool {
-    const pool = config.pool orelse return false;
+fn maybeParallelNNF16(pc: ParallelConfig, cd: []f16, ad: []const f16, bd: []const f16, m: usize, n: usize, k: usize) bool {
+    const pool = pc.pool orelse return false;
     if (m < parallel.vector_column_min_m) {
-        const thread_count = columnThreadCount(m, n, k);
+        const thread_count = common.columnThreadCount(m, n, k);
         if (thread_count != 1) {
             runParallelColsF16(pool, cd, ad, bd, m, n, k, thread_count);
             return true;
         }
     }
-    const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
+    const thread_count = common.matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
     if (thread_count == 1) return false;
     runParallelRowsF16(pool, cd, ad, bd, m, n, k, thread_count);
     return true;
 }
 
-fn maybeParallelNNBf16(config: ParallelConfig, cd: []u16, ad: []const u16, bd: []const u16, m: usize, n: usize, k: usize) bool {
-    const pool = config.pool orelse return false;
-    const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
+fn maybeParallelNNBf16(pc: ParallelConfig, cd: []u16, ad: []const u16, bd: []const u16, m: usize, n: usize, k: usize) bool {
+    const pool = pc.pool orelse return false;
+    const thread_count = common.matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
     if (thread_count == 1) return false;
     runParallelRowsBf16(pool, cd, ad, bd, m, n, k, thread_count);
     return true;
 }
 
-fn maybeParallelTN(config: ParallelConfig, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize) bool {
-    const pool = config.pool orelse return false;
+fn maybeParallelTN(pc: ParallelConfig, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize) bool {
+    const pool = pc.pool orelse return false;
     if (m < parallel.vector_column_min_m) {
-        const thread_count = columnThreadCount(m, n, k);
+        const thread_count = common.columnThreadCount(m, n, k);
         if (thread_count != 1) {
             runParallelCols(pool, runGemmTNColTask, cd, ad, bd, m, n, k, thread_count);
             return true;
         }
     }
-    const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
+    const thread_count = common.matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
     if (thread_count == 1) return false;
     runParallelRows(pool, runGemmTNTask, cd, ad, bd, m, n, k, thread_count);
     return true;
 }
 
-fn maybeParallelNT(config: ParallelConfig, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize) bool {
-    const pool = config.pool orelse return false;
+fn maybeParallelNT(pc: ParallelConfig, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize) bool {
+    const pool = pc.pool orelse return false;
     if (m < parallel.vector_column_min_m) {
-        const thread_count = columnThreadCount(m, n, k);
+        const thread_count = common.columnThreadCount(m, n, k);
         if (thread_count != 1) {
             runParallelCols(pool, runGemmNTColTask, cd, ad, bd, m, n, k, thread_count);
             return true;
         }
     }
-    const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
+    const thread_count = common.matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
     if (thread_count == 1) return false;
     runParallelRows(pool, runGemmNTTask, cd, ad, bd, m, n, k, thread_count);
     return true;
 }
 
-fn maybeParallelNTF16Rhs(config: ParallelConfig, cd: []f32, ad: []const f16, bd: []const f16, m: usize, n: usize, k: usize) bool {
-    const pool = config.pool orelse return false;
+fn maybeParallelNTF16Rhs(pc: ParallelConfig, cd: []f32, ad: []const f16, bd: []const f16, m: usize, n: usize, k: usize) bool {
+    const pool = pc.pool orelse return false;
     if (m < parallel.vector_column_min_m) {
-        const thread_count = columnThreadCount(m, n, k);
+        const thread_count = common.columnThreadCount(m, n, k);
         if (thread_count != 1) {
             runParallelColsF16Rhs(pool, cd, ad, bd, m, n, k, thread_count);
             return true;
         }
     }
-    const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
+    const thread_count = common.matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
     if (thread_count == 1) return false;
     runParallelRowsF16Rhs(pool, cd, ad, bd, m, n, k, thread_count);
     return true;
 }
 
-fn maybeParallelNTBf16Rhs(config: ParallelConfig, cd: []f32, ad: []const f32, bd: []const u16, m: usize, n: usize, k: usize) bool {
-    const pool = config.pool orelse return false;
+fn maybeParallelNTBf16Rhs(pc: ParallelConfig, cd: []f32, ad: []const f32, bd: []const u16, m: usize, n: usize, k: usize) bool {
+    const pool = pc.pool orelse return false;
     if (m < parallel.vector_column_min_m) {
-        const thread_count = columnThreadCount(m, n, k);
+        const thread_count = common.columnThreadCount(m, n, k);
         if (thread_count != 1) {
             runParallelColsBf16Rhs(pool, cd, ad, bd, m, n, k, thread_count);
             return true;
         }
     }
-    const thread_count = matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
+    const thread_count = common.matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
     if (thread_count == 1) return false;
     runParallelRowsBf16Rhs(pool, cd, ad, bd, m, n, k, thread_count);
     return true;
@@ -920,7 +891,7 @@ pub fn gemmNTRange(cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usi
             dot4(cd[i * n + j .. i * n + j + 4], a_row, bd, j, k);
         }
         while (j < n) : (j += 1) {
-            cd[i * n + j] = vecDot(a_row, bd[j * k .. (j + 1) * k]);
+            cd[i * n + j] = primitives.vecDot(a_row, bd[j * k .. (j + 1) * k]);
         }
     }
 }
@@ -998,7 +969,7 @@ fn gemmNTCols(cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k
     }
     while (j < col_end) : (j += 1) {
         for (0..m) |i| {
-            cd[i * n + j] = vecDot(ad[i * k .. (i + 1) * k], bd[j * k .. (j + 1) * k]);
+            cd[i * n + j] = primitives.vecDot(ad[i * k .. (i + 1) * k], bd[j * k .. (j + 1) * k]);
         }
     }
 }
@@ -1414,10 +1385,10 @@ inline fn gemmNTBf16RhsSmallRowsCols(comptime rows: usize, cd: []f32, ad: []cons
 
         var p: usize = 0;
         while (p + vector_len <= k) : (p += vector_len) {
-            const b0 = bf16VecToF32(bd[(j + 0) * k + p ..][0..vector_len].*);
-            const b1 = bf16VecToF32(bd[(j + 1) * k + p ..][0..vector_len].*);
-            const b2 = bf16VecToF32(bd[(j + 2) * k + p ..][0..vector_len].*);
-            const b3 = bf16VecToF32(bd[(j + 3) * k + p ..][0..vector_len].*);
+            const b0 = primitives.bf16VecToF32(bd[(j + 0) * k + p ..][0..vector_len].*);
+            const b1 = primitives.bf16VecToF32(bd[(j + 1) * k + p ..][0..vector_len].*);
+            const b2 = primitives.bf16VecToF32(bd[(j + 2) * k + p ..][0..vector_len].*);
+            const b3 = primitives.bf16VecToF32(bd[(j + 3) * k + p ..][0..vector_len].*);
             inline for (0..rows) |r| {
                 const av: Vf32 = ad[r * k + p ..][0..vector_len].*;
                 acc[r][0] = @mulAdd(Vf32, av, b0, acc[r][0]);
@@ -1457,7 +1428,7 @@ inline fn gemmNTBf16RhsSmallRowsCols(comptime rows: usize, cd: []f32, ad: []cons
 
         var p: usize = 0;
         while (p + vector_len <= k) : (p += vector_len) {
-            const bv = bf16VecToF32(bd[j * k + p ..][0..vector_len].*);
+            const bv = primitives.bf16VecToF32(bd[j * k + p ..][0..vector_len].*);
             inline for (0..rows) |r| {
                 const av: Vf32 = ad[r * k + p ..][0..vector_len].*;
                 acc[r] = @mulAdd(Vf32, av, bv, acc[r]);
@@ -1869,7 +1840,7 @@ inline fn dot4F16RhsWide(out: []f32, a: []const f16, b: []const f16, b_row: usiz
 
 inline fn vecDotF16HalfAccumToF32(x: []const f16, y: []const f16) f32 {
     if (comptime !f16_accum_native) {
-        return vecDotF16ToF32(x, y);
+        return primitives.vecDotF16ToF32(x, y);
     }
     var i: usize = 0;
     var acc0: Vf16 = @splat(0);
@@ -1916,10 +1887,10 @@ inline fn dot4Bf16Rhs(out: []f32, a: []const f32, b: []const u16, b_row: usize, 
     var p: usize = 0;
     while (p + vector_len_f16 <= k) : (p += vector_len_f16) {
         const av: Vf32Wide = a[p..][0..vector_len_f16].*;
-        acc0 = @mulAdd(Vf32Wide, av, bf16VecToF32Wide(b[(b_row + 0) * k + p ..][0..vector_len_f16].*), acc0);
-        acc1 = @mulAdd(Vf32Wide, av, bf16VecToF32Wide(b[(b_row + 1) * k + p ..][0..vector_len_f16].*), acc1);
-        acc2 = @mulAdd(Vf32Wide, av, bf16VecToF32Wide(b[(b_row + 2) * k + p ..][0..vector_len_f16].*), acc2);
-        acc3 = @mulAdd(Vf32Wide, av, bf16VecToF32Wide(b[(b_row + 3) * k + p ..][0..vector_len_f16].*), acc3);
+        acc0 = @mulAdd(Vf32Wide, av, primitives.bf16VecToF32Wide(b[(b_row + 0) * k + p ..][0..vector_len_f16].*), acc0);
+        acc1 = @mulAdd(Vf32Wide, av, primitives.bf16VecToF32Wide(b[(b_row + 1) * k + p ..][0..vector_len_f16].*), acc1);
+        acc2 = @mulAdd(Vf32Wide, av, primitives.bf16VecToF32Wide(b[(b_row + 2) * k + p ..][0..vector_len_f16].*), acc2);
+        acc3 = @mulAdd(Vf32Wide, av, primitives.bf16VecToF32Wide(b[(b_row + 3) * k + p ..][0..vector_len_f16].*), acc3);
     }
 
     var s0 = @reduce(.Add, acc0);
@@ -1948,13 +1919,13 @@ inline fn vecDotBf16RhsToF32(x: []const f32, y: []const u16) f32 {
 
     while (i + 4 * vector_len_f16 <= x.len) : (i += 4 * vector_len_f16) {
         const x0: Vf32Wide = x[i..][0..vector_len_f16].*;
-        const y0 = bf16VecToF32Wide(y[i..][0..vector_len_f16].*);
+        const y0 = primitives.bf16VecToF32Wide(y[i..][0..vector_len_f16].*);
         const x1: Vf32Wide = x[i + vector_len_f16 ..][0..vector_len_f16].*;
-        const y1 = bf16VecToF32Wide(y[i + vector_len_f16 ..][0..vector_len_f16].*);
+        const y1 = primitives.bf16VecToF32Wide(y[i + vector_len_f16 ..][0..vector_len_f16].*);
         const x2: Vf32Wide = x[i + 2 * vector_len_f16 ..][0..vector_len_f16].*;
-        const y2 = bf16VecToF32Wide(y[i + 2 * vector_len_f16 ..][0..vector_len_f16].*);
+        const y2 = primitives.bf16VecToF32Wide(y[i + 2 * vector_len_f16 ..][0..vector_len_f16].*);
         const x3: Vf32Wide = x[i + 3 * vector_len_f16 ..][0..vector_len_f16].*;
-        const y3 = bf16VecToF32Wide(y[i + 3 * vector_len_f16 ..][0..vector_len_f16].*);
+        const y3 = primitives.bf16VecToF32Wide(y[i + 3 * vector_len_f16 ..][0..vector_len_f16].*);
         acc0 = @mulAdd(Vf32Wide, x0, y0, acc0);
         acc1 = @mulAdd(Vf32Wide, x1, y1, acc1);
         acc2 = @mulAdd(Vf32Wide, x2, y2, acc2);
@@ -1962,7 +1933,7 @@ inline fn vecDotBf16RhsToF32(x: []const f32, y: []const u16) f32 {
     }
     while (i + vector_len_f16 <= x.len) : (i += vector_len_f16) {
         const xv: Vf32Wide = x[i..][0..vector_len_f16].*;
-        const yv = bf16VecToF32Wide(y[i..][0..vector_len_f16].*);
+        const yv = primitives.bf16VecToF32Wide(y[i..][0..vector_len_f16].*);
         acc0 = @mulAdd(Vf32Wide, xv, yv, acc0);
     }
 
@@ -1973,17 +1944,16 @@ inline fn vecDotBf16RhsToF32(x: []const f32, y: []const u16) f32 {
     return sum;
 }
 
-
 fn gemmNNRangeF64(cd: []f64, ad: []const f64, bd: []const f64, m: usize, n: usize, k: usize, row_start: usize, row_end: usize) void {
     _ = m;
     for (row_start..row_end) |i| {
         var j: usize = 0;
-        while (j + vector_len_f64 <= n) : (j += vector_len_f64) {
-            var acc: Vf64 = @splat(0);
+        while (j + common.vector_len_f64 <= n) : (j += common.vector_len_f64) {
+            var acc: common.Vf64 = @splat(0);
             for (0..k) |p| {
-                acc += @as(Vf64, @splat(ad[i * k + p])) * @as(Vf64, bd[p * n + j ..][0..vector_len_f64].*);
+                acc += @as(common.Vf64, @splat(ad[i * k + p])) * @as(common.Vf64, bd[p * n + j ..][0..common.vector_len_f64].*);
             }
-            cd[i * n + j ..][0..vector_len_f64].* = acc;
+            cd[i * n + j ..][0..common.vector_len_f64].* = acc;
         }
         while (j < n) : (j += 1) {
             var acc: f64 = 0;
@@ -2332,8 +2302,8 @@ inline fn gemmNNRows12Bf16(cd: []u16, ad: []const u16, bd: []const u16, row: usi
         }
 
         for (0..k) |p| {
-            const b0 = bf16VecToF32(bd[p * n + j ..][0..vector_len].*);
-            const b1 = bf16VecToF32(bd[p * n + j + vector_len ..][0..vector_len].*);
+            const b0 = primitives.bf16VecToF32(bd[p * n + j ..][0..vector_len].*);
+            const b1 = primitives.bf16VecToF32(bd[p * n + j + vector_len ..][0..vector_len].*);
             inline for (0..12) |r| {
                 const a: Vf32 = @splat(dtype_mod.bf16ToF32(ad[(row + r) * k + p]));
                 acc[r][0] += a * b0;
@@ -2352,7 +2322,7 @@ inline fn gemmNNRows12Bf16(cd: []u16, ad: []const u16, bd: []const u16, row: usi
             acc[r] = @splat(0);
         }
         for (0..k) |p| {
-            const b = bf16VecToF32(bd[p * n + j ..][0..vector_len].*);
+            const b = primitives.bf16VecToF32(bd[p * n + j ..][0..vector_len].*);
             inline for (0..12) |r| {
                 acc[r] += @as(Vf32, @splat(dtype_mod.bf16ToF32(ad[(row + r) * k + p]))) * b;
             }
@@ -2385,8 +2355,8 @@ inline fn gemmNNRows8Bf16(cd: []u16, ad: []const u16, bd: []const u16, row: usiz
         }
 
         for (0..k) |p| {
-            const b0 = bf16VecToF32(bd[p * n + j ..][0..vector_len].*);
-            const b1 = bf16VecToF32(bd[p * n + j + vector_len ..][0..vector_len].*);
+            const b0 = primitives.bf16VecToF32(bd[p * n + j ..][0..vector_len].*);
+            const b1 = primitives.bf16VecToF32(bd[p * n + j + vector_len ..][0..vector_len].*);
             inline for (0..8) |r| {
                 const a: Vf32 = @splat(dtype_mod.bf16ToF32(ad[(row + r) * k + p]));
                 acc[r][0] += a * b0;
@@ -2405,7 +2375,7 @@ inline fn gemmNNRows8Bf16(cd: []u16, ad: []const u16, bd: []const u16, row: usiz
             acc[r] = @splat(0);
         }
         for (0..k) |p| {
-            const b = bf16VecToF32(bd[p * n + j ..][0..vector_len].*);
+            const b = primitives.bf16VecToF32(bd[p * n + j ..][0..vector_len].*);
             inline for (0..8) |r| {
                 acc[r] += @as(Vf32, @splat(dtype_mod.bf16ToF32(ad[(row + r) * k + p]))) * b;
             }
@@ -2441,8 +2411,8 @@ inline fn gemmNNRows4Bf16(cd: []u16, ad: []const u16, bd: []const u16, row: usiz
         var acc31: Vf32 = @splat(0);
 
         for (0..k) |p| {
-            const b0 = bf16VecToF32(bd[p * n + j ..][0..vector_len].*);
-            const b1 = bf16VecToF32(bd[p * n + j + vector_len ..][0..vector_len].*);
+            const b0 = primitives.bf16VecToF32(bd[p * n + j ..][0..vector_len].*);
+            const b1 = primitives.bf16VecToF32(bd[p * n + j + vector_len ..][0..vector_len].*);
             const a0: Vf32 = @splat(dtype_mod.bf16ToF32(ad[(row + 0) * k + p]));
             const a1: Vf32 = @splat(dtype_mod.bf16ToF32(ad[(row + 1) * k + p]));
             const a2: Vf32 = @splat(dtype_mod.bf16ToF32(ad[(row + 2) * k + p]));
@@ -2472,7 +2442,7 @@ inline fn gemmNNRows4Bf16(cd: []u16, ad: []const u16, bd: []const u16, row: usiz
         var acc2: Vf32 = @splat(0);
         var acc3: Vf32 = @splat(0);
         for (0..k) |p| {
-            const b0 = bf16VecToF32(bd[p * n + j ..][0..vector_len].*);
+            const b0 = primitives.bf16VecToF32(bd[p * n + j ..][0..vector_len].*);
             acc0 += @as(Vf32, @splat(dtype_mod.bf16ToF32(ad[(row + 0) * k + p]))) * b0;
             acc1 += @as(Vf32, @splat(dtype_mod.bf16ToF32(ad[(row + 1) * k + p]))) * b0;
             acc2 += @as(Vf32, @splat(dtype_mod.bf16ToF32(ad[(row + 2) * k + p]))) * b0;
@@ -2508,7 +2478,7 @@ inline fn gemmNNRowBf16(cd: []u16, ad: []const u16, bd: []const u16, row: usize,
         var acc: Vf32 = @splat(0);
         for (0..k) |p| {
             const a32 = dtype_mod.bf16ToF32(ad[row * k + p]);
-            const b32 = bf16VecToF32(bd[p * n + j ..][0..vector_len].*);
+            const b32 = primitives.bf16VecToF32(bd[p * n + j ..][0..vector_len].*);
             acc += @as(Vf32, @splat(a32)) * b32;
         }
         cd[row * n + j ..][0..vector_len].* = f32VecToBf16(acc);
@@ -2521,7 +2491,6 @@ inline fn gemmNNRowBf16(cd: []u16, ad: []const u16, bd: []const u16, row: usize,
         cd[row * n + j] = dtype_mod.f32ToBf16(acc);
     }
 }
-
 
 fn matmul2DIntoTypedScalar(
     comptime dtype: DType,

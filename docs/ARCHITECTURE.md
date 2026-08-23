@@ -185,16 +185,22 @@ Backends:
   (Zig `@Vector` kernels plus optional CBLAS for GEMM), each exporting
   `pub const kernels`; `src/backend/parity_test.zig` keeps them in
   agreement numerically.
-- `src/backend/vector/`: portable SIMD kernels (`primitives.zig`, `gemm.zig`,
-  `gemm_blocked.zig` — the BLIS-style blocked packed f32 GEMM for the no-BLAS
-  path, `matmul_quant.zig`, `elementwise.zig`, `conv.zig`, `pool.zig` —
-  channel-last pool2d/upsample2x, `winograd.zig` — F(2×2,3×3) conv transforms
-  for the no-BLAS conv route, `batched.zig`).
+- `src/backend/vector.zig` + `src/backend/vector/`: portable SIMD kernels,
+  addressed by child module (`vector.gemm.matmul2DIntoUnchecked`):
+  `primitives.zig`, `gemm.zig`, `gemm_blocked.zig` — the BLIS-style blocked
+  packed f32 GEMM for the no-BLAS path, `gemm_packed.zig`, `matmul_quant.zig`,
+  `elementwise.zig`, `conv.zig`, `pool.zig` — channel-last pool2d/upsample2x,
+  `winograd.zig` — F(2×2,3×3) conv transforms for the no-BLAS conv route,
+  `batched.zig`; `common.zig` holds `ParallelConfig`, the vector-width aliases
+  and the thread-count gates. Every pool-taking kernel takes `pc` first.
 - `src/backend/quant.zig` + `src/backend/quant/`: GGML-compatible block
-  helpers, dequantization, quantized-RHS containers and dot kernels
-  (`q4_k.zig`, `q5_k.zig`, `q6_k.zig`, `q8_0.zig`, `q8k.zig`, `cold.zig` for
-  the rare formats, `types.zig`, `matmul_api.zig`), and the f32 → quantized
-  row encoders (`quantizeRowForDType` in `quant.zig`; byte-exact ggml parity).
+  helpers, dequantization, quantized-RHS containers and dot kernels, addressed
+  by child module (`quant.q4_k.matmulQ4_Kx8RhsTile`): `q4_k.zig`, `q5_k.zig`,
+  `q6_k.zig`, `q8_0.zig`, `q8k.zig`, `ternary.zig`, `mxfp4.zig`, `cold.zig`
+  for the rare formats, `types.zig` (the block and RHS types; `quant.zig`
+  forwards these outward), `common.zig` (the shared SIMD primitives). The
+  f32 → quantized row encoders live in the format modules behind
+  `quantizeRowForDType` in `quant.zig` (byte-exact ggml parity).
 - `src/backend/packed.zig` (dense packed-RHS helpers for `f16`/`bf16`
   matmul), `src/backend/ops.zig` (shared op enums),
   `src/backend/quant_tables.zig` (GGML lookup tables).

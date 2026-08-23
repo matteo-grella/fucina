@@ -106,8 +106,8 @@ const Fixture = struct {
     fn init(self: *Fixture, allocator: std.mem.Allocator, cache_slots: usize) !void {
         const gate_rows = n_expert * out_pe;
         const down_rows = n_expert * hidden;
-        const bpc_in = hidden / qm.qk_k_block_size;
-        const bpc_g = out_pe / qm.qk_k_block_size;
+        const bpc_in = hidden / qm.types.qk_k_block_size;
+        const bpc_g = out_pe / qm.types.qk_k_block_size;
 
         self.allocator = allocator;
         self.gate_blocks = try allocator.alloc(qm.BlockQ5_K, gate_rows * bpc_in);
@@ -129,9 +129,9 @@ const Fixture = struct {
             try writer.interface.flush();
         }
 
-        self.resident_gate = .{ .q5_k = try qm.quantizedMatmulRhsQ5_KFromBlocks(allocator, hidden, gate_rows, self.gate_blocks) };
-        self.resident_up = .{ .q5_k = try qm.quantizedMatmulRhsQ5_KFromBlocks(allocator, hidden, gate_rows, self.up_blocks) };
-        self.resident_down = .{ .q6_k = try qm.quantizedMatmulRhsQ6_KFromBlocks(allocator, out_pe, down_rows, self.down_blocks) };
+        self.resident_gate = .{ .q5_k = try qm.q8k.quantizedMatmulRhsQ5_KFromBlocks(allocator, hidden, gate_rows, self.gate_blocks) };
+        self.resident_up = .{ .q5_k = try qm.q8k.quantizedMatmulRhsQ5_KFromBlocks(allocator, hidden, gate_rows, self.up_blocks) };
+        self.resident_down = .{ .q6_k = try qm.q8k.quantizedMatmulRhsQ6_KFromBlocks(allocator, out_pe, down_rows, self.down_blocks) };
 
         const gate_bytes = self.gate_blocks.len * @sizeOf(qm.BlockQ5_K);
         const up_bytes = self.up_blocks.len * @sizeOf(qm.BlockQ5_K);
@@ -396,7 +396,7 @@ test "q8_0 experts with non-256-aligned dims: streamed decode is bit-exact vs re
 
     // gate/up: q5_k stacks [experts * ffn rows, hidden].
     const gu_rows = ds_experts * ds_ffn;
-    const gate_blocks = try allocator.alloc(qm.BlockQ5_K, gu_rows * (ds_hidden / qm.qk_k_block_size));
+    const gate_blocks = try allocator.alloc(qm.BlockQ5_K, gu_rows * (ds_hidden / qm.types.qk_k_block_size));
     defer allocator.free(gate_blocks);
     const up_blocks = try allocator.alloc(qm.BlockQ5_K, gate_blocks.len);
     defer allocator.free(up_blocks);
@@ -423,7 +423,7 @@ test "q8_0 experts with non-256-aligned dims: streamed decode is bit-exact vs re
         var row: [ds_ffn]f32 = undefined;
         for (0..down_rows) |r| {
             for (&row, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(r * 31 + i)) * 0.11) * 1.7;
-            try qm.quantizeRowQ8_0Into(down_blocks[r * down_bpc ..][0..down_bpc], &row);
+            try qm.q8k.quantizeRowQ8_0Into(down_blocks[r * down_bpc ..][0..down_bpc], &row);
         }
     }
 
@@ -446,9 +446,9 @@ test "q8_0 experts with non-256-aligned dims: streamed decode is bit-exact vs re
         std.Io.Dir.cwd().deleteFile(std.testing.io, sidecar) catch {};
     }
 
-    var resident_gate: MoeRhs = .{ .q5_k = try qm.quantizedMatmulRhsQ5_KFromBlocks(allocator, ds_hidden, gu_rows, gate_blocks) };
+    var resident_gate: MoeRhs = .{ .q5_k = try qm.q8k.quantizedMatmulRhsQ5_KFromBlocks(allocator, ds_hidden, gu_rows, gate_blocks) };
     defer resident_gate.deinit();
-    var resident_up: MoeRhs = .{ .q5_k = try qm.quantizedMatmulRhsQ5_KFromBlocks(allocator, ds_hidden, gu_rows, up_blocks) };
+    var resident_up: MoeRhs = .{ .q5_k = try qm.q8k.quantizedMatmulRhsQ5_KFromBlocks(allocator, ds_hidden, gu_rows, up_blocks) };
     defer resident_up.deinit();
     var resident_down: MoeRhs = .{ .q8_0 = .{
         .rows = .{ .allocator = null, .blocks = down_blocks, .rows = down_rows, .cols = ds_ffn, .blocks_per_row = down_bpc },
@@ -508,9 +508,9 @@ test "tq2_0 ternary experts: streamed decode and batch are bit-exact vs resident
     const t_experts: usize = 4;
 
     const gu_rows = t_experts * t_ffn;
-    const gu_bpc = t_hidden / qm.qk_k_block_size;
+    const gu_bpc = t_hidden / qm.types.qk_k_block_size;
     const down_rows = t_experts * t_hidden;
-    const down_bpc = t_ffn / qm.qk_k_block_size;
+    const down_bpc = t_ffn / qm.types.qk_k_block_size;
     const gate_blocks = try allocator.alloc(qm.BlockTQ2_0, gu_rows * gu_bpc);
     defer allocator.free(gate_blocks);
     const up_blocks = try allocator.alloc(qm.BlockTQ2_0, gate_blocks.len);
@@ -521,14 +521,14 @@ test "tq2_0 ternary experts: streamed decode and batch are bit-exact vs resident
         var row: [t_hidden]f32 = undefined;
         for (0..gu_rows) |r| {
             for (&row, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(r * 13 + i)) * 0.23) * 0.9;
-            try qm.quantizeRowTQ2_0Into(gate_blocks[r * gu_bpc ..][0..gu_bpc], &row);
+            try qm.ternary.quantizeRowTQ2_0Into(gate_blocks[r * gu_bpc ..][0..gu_bpc], &row);
             for (&row, 0..) |*v, i| v.* = @cos(@as(f32, @floatFromInt(r * 7 + i)) * 0.31) * 1.1;
-            try qm.quantizeRowTQ2_0Into(up_blocks[r * gu_bpc ..][0..gu_bpc], &row);
+            try qm.ternary.quantizeRowTQ2_0Into(up_blocks[r * gu_bpc ..][0..gu_bpc], &row);
         }
         var drow: [t_ffn]f32 = undefined;
         for (0..down_rows) |r| {
             for (&drow, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(r * 31 + i)) * 0.11) * 0.8;
-            try qm.quantizeRowTQ2_0Into(down_blocks[r * down_bpc ..][0..down_bpc], &drow);
+            try qm.ternary.quantizeRowTQ2_0Into(down_blocks[r * down_bpc ..][0..down_bpc], &drow);
         }
     }
 
@@ -633,7 +633,7 @@ fn ptqtpPlaneSumDot(
     out: []f32,
     tmp: []f32,
 ) void {
-    const bpc = k / qm.qk_k_block_size;
+    const bpc = k / qm.types.qk_k_block_size;
     for (planes, 0..) |plane, p| {
         const blocks = plane[e * out_dim * bpc ..][0 .. out_dim * bpc];
         const view = backend_mod.QuantizedMatmulRhsTQ2_0{
@@ -642,7 +642,7 @@ fn ptqtpPlaneSumDot(
             .n = out_dim,
         };
         const dst = if (p == 0) out else tmp[0..out_dim];
-        qm.matmulTQ2_0RhsTile(dst, qx, &view, out_dim, 0, 1, 0, out_dim);
+        qm.ternary.matmulTQ2_0RhsTile(dst, qx, &view, out_dim, 0, 1, 0, out_dim);
         if (p != 0) {
             for (out, tmp[0..out_dim]) |*o, s| o.* += s;
         }
@@ -677,7 +677,7 @@ fn ptqtpExpertDownReference(
     for (bufs.g_buf, bufs.gate_buf, bufs.up_buf) |*g, gate_v, up_v| {
         g.* = backend_mod.ops.gatedPairScalar(.swiglu, gate_v, up_v);
     }
-    try qm.quantizeRowQ8_KInto(bufs.qg, bufs.g_buf);
+    try qm.q8k.quantizeRowQ8_KInto(bufs.qg, bufs.g_buf);
     ptqtpPlaneSumDot(down_planes, bufs.qg, e, ffn_dim, hidden_dim, down_out, bufs.tmp);
 }
 
@@ -700,9 +700,9 @@ test "ptqtp multi-plane experts: fused MoE sums planes like the dense path; stre
     const t_ffn: usize = 512;
     const t_experts: usize = 2;
     const gu_rows = t_experts * t_ffn;
-    const gu_bpc = t_hidden / qm.qk_k_block_size;
+    const gu_bpc = t_hidden / qm.types.qk_k_block_size;
     const down_rows = t_experts * t_hidden;
-    const down_bpc = t_ffn / qm.qk_k_block_size;
+    const down_bpc = t_ffn / qm.types.qk_k_block_size;
 
     // Quantize synthetic expert stacks with the real PTQTP solver (rows are
     // independent groups, so one whole-stack solve equals per-expert
@@ -792,8 +792,8 @@ test "ptqtp multi-plane experts: fused MoE sums planes like the dense path; stre
 
     // (b) scratch for the reference pipeline.
     const bufs = PtqtpRefBufs{
-        .qx = try allocator.alloc(qm.BlockQ8_K, t_hidden / qm.qk_k_block_size),
-        .qg = try allocator.alloc(qm.BlockQ8_K, t_ffn / qm.qk_k_block_size),
+        .qx = try allocator.alloc(qm.BlockQ8_K, t_hidden / qm.types.qk_k_block_size),
+        .qg = try allocator.alloc(qm.BlockQ8_K, t_ffn / qm.types.qk_k_block_size),
         .gate_buf = try allocator.alloc(f32, t_ffn),
         .up_buf = try allocator.alloc(f32, t_ffn),
         .g_buf = try allocator.alloc(f32, t_ffn),
@@ -827,7 +827,7 @@ test "ptqtp multi-plane experts: fused MoE sums planes like the dense path; stre
         // (b): per-plane K=1 sums, then the decode op's exact assembly
         // (down row scaled by its routing weight, expert rows added in
         // routed order onto a zeroed accumulator).
-        try qm.quantizeRowQ8_KInto(bufs.qx, x_vals);
+        try qm.q8k.quantizeRowQ8_KInto(bufs.qx, x_vals);
         @memset(ref, 0);
         for (pair, routing) |e, w| {
             try ptqtpExpertDownReference(&bufs, &gate_planes, &up_planes, &down_planes, e, t_hidden, t_ffn, dbuf);
@@ -862,7 +862,7 @@ test "ptqtp multi-plane experts: fused MoE sums planes like the dense path; stre
     // pair assigns w*row, later pairs add w*row, in per-token k order).
     const want_b_data = want_b.dataConst();
     for (0..m) |t| {
-        try qm.quantizeRowQ8_KInto(bufs.qx, xb_vals[t * t_hidden ..][0..t_hidden]);
+        try qm.q8k.quantizeRowQ8_KInto(bufs.qx, xb_vals[t * t_hidden ..][0..t_hidden]);
         for (0..top_k) |j| {
             const e = selected[t * top_k + j];
             const w = routing[t * top_k + j];
@@ -890,9 +890,9 @@ fn foldedExpertDot(
     out_dim: usize,
     out: []f32,
 ) void {
-    const bpc = k / qm.qk_k_block_size;
+    const bpc = k / qm.types.qk_k_block_size;
     const fg = (out_dim / 4) * bpc;
-    qm.matmulTQ2_0FoldedX4RhsRange(out, qx, folded[e * fg ..][0..fg], bpc, out_dim, 0, 1);
+    qm.ternary.matmulTQ2_0FoldedX4RhsRange(out, qx, folded[e * fg ..][0..fg], bpc, out_dim, 0, 1);
 }
 
 fn foldedExpertDownReference(
@@ -910,7 +910,7 @@ fn foldedExpertDownReference(
     for (bufs.g_buf, bufs.gate_buf, bufs.up_buf) |*g, gate_v, up_v| {
         g.* = backend_mod.ops.gatedPairScalar(.swiglu, gate_v, up_v);
     }
-    try qm.quantizeRowQ8_KInto(bufs.qg, bufs.g_buf);
+    try qm.q8k.quantizeRowQ8_KInto(bufs.qg, bufs.g_buf);
     foldedExpertDot(down_folded, bufs.qg, e, ffn_dim, hidden_dim, down_out);
 }
 
@@ -924,7 +924,7 @@ fn foldExpertStack(
     k: usize,
     out_dim: usize,
 ) ![]qm.BlockTQ2_0Foldedx4 {
-    const bpc = k / qm.qk_k_block_size;
+    const bpc = k / qm.types.qk_k_block_size;
     const expert_blocks = out_dim * bpc;
     const fg = (out_dim / 4) * bpc;
     const folded = try allocator.alloc(qm.BlockTQ2_0Foldedx4, n_experts * fg);
@@ -944,7 +944,7 @@ fn foldExpertStack(
                 .n = out_dim,
             };
         }
-        try qm.packMatmulRhsTQ2_0Foldedx4Into(folded[e * fg ..][0..fg], &views[0], &views[1]);
+        try qm.ternary.packMatmulRhsTQ2_0Foldedx4Into(folded[e * fg ..][0..fg], &views[0], &views[1]);
     }
     return folded;
 }
@@ -969,9 +969,9 @@ test "tie-folded ptqtp experts: resident fold serves the one-pass kernel; stream
     const t_ffn: usize = 512;
     const t_experts: usize = 2;
     const gu_rows = t_experts * t_ffn;
-    const gu_bpc = t_hidden / qm.qk_k_block_size;
+    const gu_bpc = t_hidden / qm.types.qk_k_block_size;
     const down_rows = t_experts * t_hidden;
-    const down_bpc = t_ffn / qm.qk_k_block_size;
+    const down_bpc = t_ffn / qm.types.qk_k_block_size;
 
     const gate_w = try allocator.alloc(f32, gu_rows * t_hidden);
     defer allocator.free(gate_w);
@@ -1061,8 +1061,8 @@ test "tie-folded ptqtp experts: resident fold serves the one-pass kernel; stream
     var streamed_down: MoeRhs = .{ .streamed = store.streamedRhs(0, .down) };
 
     const bufs = PtqtpRefBufs{
-        .qx = try allocator.alloc(qm.BlockQ8_K, t_hidden / qm.qk_k_block_size),
-        .qg = try allocator.alloc(qm.BlockQ8_K, t_ffn / qm.qk_k_block_size),
+        .qx = try allocator.alloc(qm.BlockQ8_K, t_hidden / qm.types.qk_k_block_size),
+        .qg = try allocator.alloc(qm.BlockQ8_K, t_ffn / qm.types.qk_k_block_size),
         .gate_buf = try allocator.alloc(f32, t_ffn),
         .up_buf = try allocator.alloc(f32, t_ffn),
         .g_buf = try allocator.alloc(f32, t_ffn),
@@ -1094,7 +1094,7 @@ test "tie-folded ptqtp experts: resident fold serves the one-pass kernel; stream
         for (want.dataConst()) |v| try std.testing.expect(!std.math.isNan(v));
 
         // (a) the folded-kernel reference, assembled exactly like the op.
-        try qm.quantizeRowQ8_KInto(bufs.qx, x_vals);
+        try qm.q8k.quantizeRowQ8_KInto(bufs.qx, x_vals);
         @memset(ref, 0);
         for (pair, routing) |e, w| {
             try foldedExpertDownReference(&bufs, gate_folded, up_folded, down_folded, e, t_hidden, t_ffn, dbuf);
@@ -1123,7 +1123,7 @@ test "tie-folded ptqtp experts: resident fold serves the one-pass kernel; stream
     defer want_b.deinit();
     const want_b_data = want_b.dataConst();
     for (0..m) |t| {
-        try qm.quantizeRowQ8_KInto(bufs.qx, xb_vals[t * t_hidden ..][0..t_hidden]);
+        try qm.q8k.quantizeRowQ8_KInto(bufs.qx, xb_vals[t * t_hidden ..][0..t_hidden]);
         for (0..top_k) |j| {
             const e = selected[t * top_k + j];
             const w = routing[t * top_k + j];
@@ -1158,9 +1158,9 @@ test "q2_k, iq2_xxs, and iq3_xxs experts: streamed decode and batch are bit-exac
     const t_experts: usize = 4;
 
     const gu_rows = t_experts * t_ffn;
-    const gu_bpc = t_hidden / qm.qk_k_block_size;
+    const gu_bpc = t_hidden / qm.types.qk_k_block_size;
     const down_rows = t_experts * t_hidden;
-    const down_bpc = t_ffn / qm.qk_k_block_size;
+    const down_bpc = t_ffn / qm.types.qk_k_block_size;
     const gate_blocks = try allocator.alloc(qm.BlockIQ2_XXS, gu_rows * gu_bpc);
     defer allocator.free(gate_blocks);
     const up_blocks = try allocator.alloc(qm.BlockIQ3_XXS, gu_rows * gu_bpc);
@@ -1894,9 +1894,9 @@ test "l2 tier: fold-mode flip drops coverage instead of corrupting folded slabs;
     const t_ffn: usize = 512;
     const t_experts: usize = 2;
     const gu_rows = t_experts * t_ffn;
-    const gu_bpc = t_hidden / qm.qk_k_block_size;
+    const gu_bpc = t_hidden / qm.types.qk_k_block_size;
     const down_rows = t_experts * t_hidden;
-    const down_bpc = t_ffn / qm.qk_k_block_size;
+    const down_bpc = t_ffn / qm.types.qk_k_block_size;
 
     const gate_w = try allocator.alloc(f32, gu_rows * t_hidden);
     defer allocator.free(gate_w);
@@ -2050,9 +2050,9 @@ test "native folded (tq2_0_fx4) experts: streamed pack serves the one-pass kerne
     const t_ffn: usize = 512;
     const t_experts: usize = 2;
     const gu_rows = t_experts * t_ffn;
-    const gu_bpc = t_hidden / qm.qk_k_block_size;
+    const gu_bpc = t_hidden / qm.types.qk_k_block_size;
     const down_rows = t_experts * t_hidden;
-    const down_bpc = t_ffn / qm.qk_k_block_size;
+    const down_bpc = t_ffn / qm.types.qk_k_block_size;
 
     const gate_w = try allocator.alloc(f32, gu_rows * t_hidden);
     defer allocator.free(gate_w);
@@ -2194,9 +2194,9 @@ test "slab-native fx4 records: one-pread misses serve bit-exact; geometry mismat
     const t_ffn: usize = 512;
     const t_experts: usize = 2;
     const gu_rows = t_experts * t_ffn;
-    const gu_bpc = t_hidden / qm.qk_k_block_size;
+    const gu_bpc = t_hidden / qm.types.qk_k_block_size;
     const down_rows = t_experts * t_hidden;
-    const down_bpc = t_ffn / qm.qk_k_block_size;
+    const down_bpc = t_ffn / qm.types.qk_k_block_size;
 
     const gate_w = try allocator.alloc(f32, gu_rows * t_hidden);
     defer allocator.free(gate_w);

@@ -483,13 +483,13 @@ test "conv2d backward GEMM routes match the direct gather kernels" {
             .groups = case.groups,
         };
 
-        // Reference: the config-less direct gather cores on the raw tensors.
+        // Reference: the direct gather cores on the raw tensors, run serially.
         var gx_ref = try ctx.emptyRank(3, .{ case.h, case.w, case.cin });
         defer gx_ref.deinit();
-        vector_conv.conv2dBackwardInputInto(&gx_ref, &gy, &weight, d);
+        vector_conv.conv2dBackwardInputInto(.{}, &gx_ref, &gy, &weight, d);
         var gw_ref = try ctx.emptyRank(4, .{ case.cout, case.k, case.k, cin_pg });
         defer gw_ref.deinit();
-        vector_conv.conv2dBackwardWeightInto(&gw_ref, &input, &gy, d);
+        vector_conv.conv2dBackwardWeightInto(.{}, &gw_ref, &input, &gy, d);
 
         var gx = try ctx.conv2dBackwardInput(&gy, &weight, case.h, case.w, .{ case.stride, case.stride }, .{ case.pad, case.pad }, case.groups);
         defer gx.deinit();

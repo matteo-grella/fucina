@@ -308,7 +308,7 @@ pub const StreamedQuant = enum {
                 if (in_dim == 0 or in_dim % 32 != 0) return Error.InvalidExpertGeometry;
                 return in_dim / 32;
             },
-            else => return qm.qkBlockCount(in_dim) catch Error.InvalidExpertGeometry,
+            else => return qm.q8k.qkBlockCount(in_dim) catch Error.InvalidExpertGeometry,
         }
     }
 };
@@ -2047,7 +2047,7 @@ pub const ExpertStore = struct {
         }
         const fg = (g.out_dim / 4) * g.blocks_per_column;
         const out = @as([*]qm.BlockTQ2_0Foldedx4, @ptrCast(@alignCast(section.ptr)))[0..fg];
-        qm.packMatmulRhsTQ2_0Foldedx4Into(out, &views[0], &views[1]) catch return Error.InvalidExpertGeometry;
+        qm.ternary.packMatmulRhsTQ2_0Foldedx4Into(out, &views[0], &views[1]) catch return Error.InvalidExpertGeometry;
     }
 
     fn expertBytes(ls: *const LayerState) u64 {

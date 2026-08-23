@@ -42,11 +42,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const parallel = @import("../../parallel.zig");
 const thread = @import("../../thread.zig");
-const vm = @import("common.zig");
-
-const ParallelConfig = vm.ParallelConfig;
-const vector_len = vm.vector_len;
-const Vf32 = vm.Vf32;
+const common = @import("common.zig");
 
 // ---------------- Microkernel shape ----------------
 //
@@ -57,7 +53,7 @@ const Vf32 = vm.Vf32;
 //     nr = 2 * vector_len -> 12 accumulators + 2 B vectors + 1 broadcast = 15.
 pub const mr: usize = if (builtin.cpu.arch.isAARCH64()) 8 else 6;
 pub const nr_vecs: usize = if (builtin.cpu.arch.isAARCH64()) 3 else 2;
-pub const nr: usize = nr_vecs * vector_len;
+pub const nr: usize = nr_vecs * common.vector_len;
 
 pub const Orientation = enum { nn, tn, nt };
 
@@ -128,6 +124,7 @@ pub fn shouldUseBlocked(m: usize, n: usize, k: usize) bool {
 // ---------------- Entry points ----------------
 
 pub fn gemmBlocked(
+    pc: common.ParallelConfig,
     comptime orient: Orientation,
     cd: []f32,
     ad: []const f32,
@@ -135,14 +132,14 @@ pub fn gemmBlocked(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) void {
-    gemmBlockedImpl(orient, false, cd, ad, bd, m, n, k, config, .{});
+    gemmBlockedImpl(pc, orient, false, cd, ad, bd, m, n, k, .{});
 }
 
 /// C += A·B: the first k-panel joins the existing output in accumulate mode
 /// instead of overwriting it; every later panel already accumulated.
 pub fn gemmBlockedAcc(
+    pc: common.ParallelConfig,
     comptime orient: Orientation,
     cd: []f32,
     ad: []const f32,
@@ -150,12 +147,12 @@ pub fn gemmBlockedAcc(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) void {
-    gemmBlockedImpl(orient, true, cd, ad, bd, m, n, k, config, .{});
+    gemmBlockedImpl(pc, orient, true, cd, ad, bd, m, n, k, .{});
 }
 
 pub fn gemmBlockedWithParams(
+    pc: common.ParallelConfig,
     comptime orient: Orientation,
     cd: []f32,
     ad: []const f32,
@@ -163,13 +160,13 @@ pub fn gemmBlockedWithParams(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
     params: BlockParams,
 ) void {
-    gemmBlockedImpl(orient, false, cd, ad, bd, m, n, k, config, params);
+    gemmBlockedImpl(pc, orient, false, cd, ad, bd, m, n, k, params);
 }
 
 fn gemmBlockedImpl(
+    config: common.ParallelConfig,
     comptime orient: Orientation,
     init_accumulate: bool,
     cd: []f32,
@@ -178,7 +175,6 @@ fn gemmBlockedImpl(
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
     params: BlockParams,
 ) void {
     // Unconditional (not std.debug.assert): out-of-bounds BlockParams would
@@ -222,7 +218,7 @@ fn gemmBlockedImpl(
         var pc: usize = 0;
         while (pc < k) : (pc += params.kc) {
             const kc_eff = @min(params.kc, k - pc);
-            packBParallel(orient, bd, n, k, pc, kc_eff, jc, nc_eff, num_nr_panels, threads, config);
+            packBParallel(config, orient, bd, n, k, pc, kc_eff, jc, nc_eff, num_nr_panels, threads);
 
             const b_panel_len = kc_eff * num_nr_panels * nr;
             var tasks: [parallel.vector_max_threads]BlockedTask = undefined;
@@ -341,30 +337,30 @@ fn microKernel(
     b_panel: []const f32,
     kc: usize,
 ) void {
-    var acc: [mr][nr_vecs]Vf32 = undefined;
+    var acc: [mr][nr_vecs]common.Vf32 = undefined;
     inline for (0..mr) |r| {
         inline for (0..nr_vecs) |v| acc[r][v] = @splat(0);
     }
 
     var p: usize = 0;
     while (p < kc) : (p += 1) {
-        var b: [nr_vecs]Vf32 = undefined;
+        var b: [nr_vecs]common.Vf32 = undefined;
         inline for (0..nr_vecs) |v| {
-            b[v] = b_panel[p * nr + v * vector_len ..][0..vector_len].*;
+            b[v] = b_panel[p * nr + v * common.vector_len ..][0..common.vector_len].*;
         }
         inline for (0..mr) |r| {
-            const a: Vf32 = @splat(a_panel[p * mr + r]);
+            const a: common.Vf32 = @splat(a_panel[p * mr + r]);
             inline for (0..nr_vecs) |v| {
-                acc[r][v] = @mulAdd(Vf32, a, b[v], acc[r][v]);
+                acc[r][v] = @mulAdd(common.Vf32, a, b[v], acc[r][v]);
             }
         }
     }
 
     inline for (0..mr) |r| {
         inline for (0..nr_vecs) |v| {
-            const dst = c[r * ldc + v * vector_len ..][0..vector_len];
+            const dst = c[r * ldc + v * common.vector_len ..][0..common.vector_len];
             if (accumulate) {
-                dst.* = @as(Vf32, dst.*) + acc[r][v];
+                dst.* = @as(common.Vf32, dst.*) + acc[r][v];
             } else {
                 dst.* = acc[r][v];
             }
@@ -385,7 +381,7 @@ fn microKernelEdge(
     b_panel: []const f32,
     kc: usize,
 ) void {
-    var tile: [mr * nr]f32 align(@alignOf(Vf32)) = undefined;
+    var tile: [mr * nr]f32 align(@alignOf(common.Vf32)) = undefined;
     microKernel(false, &tile, nr, a_panel, b_panel, kc);
     for (0..mr_eff) |r| {
         const src = tile[r * nr ..][0..nr];
@@ -427,6 +423,7 @@ fn packBTaskRunner(comptime orient: Orientation) fn (*const PackBTask) void {
 }
 
 fn packBParallel(
+    config: common.ParallelConfig,
     comptime orient: Orientation,
     bd: []const f32,
     n: usize,
@@ -437,7 +434,6 @@ fn packBParallel(
     nc_eff: usize,
     num_nr_panels: usize,
     threads: usize,
-    config: ParallelConfig,
 ) void {
     if (comptime !builtin.cpu.arch.isAARCH64()) {
         const pool = config.pool;

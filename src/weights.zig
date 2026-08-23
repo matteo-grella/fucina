@@ -38,7 +38,6 @@ const ag_mod = @import("ag.zig");
 const tensor_mod = @import("tensor.zig");
 const gguf = @import("gguf.zig");
 const ptqtp = @import("ptqtp.zig");
-const rng = @import("rng.zig");
 const parallel = @import("parallel.zig");
 const tuning = @import("tuning.zig");
 
@@ -254,7 +253,7 @@ fn linearSeqPtqtpFused(
             const blocks = p.asRawTensor().dataConstChecked() catch return null;
             // Borrow is sound: the matmul path never mutates RHS blocks
             // (same stance as the exec-tier tensor-RHS wrapper).
-            rhs[plane_count] = backend_quant.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(blocks)) catch return null;
+            rhs[plane_count] = backend_quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(blocks)) catch return null;
             if (px4_ready) px4s[plane_count] = weight.px4[slot].?;
             plane_count += 1;
         }
@@ -264,7 +263,7 @@ fn linearSeqPtqtpFused(
     const lhs = try allocator.alloc(backend_quant.BlockQ8_K, m * blocks_per_row);
     defer allocator.free(lhs);
     for (0..m) |r| {
-        try backend_quant.quantizeRowQ8_KInto(lhs[r * blocks_per_row ..][0..blocks_per_row], x[r * k ..][0..k]);
+        try backend_quant.q8k.quantizeRowQ8_KInto(lhs[r * blocks_per_row ..][0..blocks_per_row], x[r * k ..][0..k]);
     }
     // The kernels tile straight into the result tensor; only the multi-plane
     // accumulate keeps a scratch.
@@ -289,19 +288,19 @@ fn linearSeqPtqtpFused(
 
         fn run(task: *const @This()) void {
             if (task.pfold.len != 0) {
-                backend_quant.matmulTQ2_0FoldedX4RhsTile(task.out, task.lhs, task.pfold, task.bpr, task.n, 0, task.m, task.c0, task.c1);
+                backend_quant.ternary.matmulTQ2_0FoldedX4RhsTile(task.out, task.lhs, task.pfold, task.bpr, task.n, 0, task.m, task.c0, task.c1);
                 return;
             }
             if (task.px4.len != 0) {
-                backend_quant.matmulTQ2_0X4RhsTile(task.out, task.lhs, task.px4[0], task.bpr, task.n, 0, task.m, task.c0, task.c1);
+                backend_quant.ternary.matmulTQ2_0X4RhsTile(task.out, task.lhs, task.px4[0], task.bpr, task.n, 0, task.m, task.c0, task.c1);
                 for (task.px4[1..]) |pack| {
-                    backend_quant.matmulTQ2_0X4RhsTileAcc(task.out, task.lhs, pack, task.bpr, task.n, 0, task.m, task.c0, task.c1);
+                    backend_quant.ternary.matmulTQ2_0X4RhsTileAcc(task.out, task.lhs, pack, task.bpr, task.n, 0, task.m, task.c0, task.c1);
                 }
                 return;
             }
-            backend_quant.matmulTQ2_0RhsTile(task.out, task.lhs, &task.rhs[0], task.n, 0, task.m, task.c0, task.c1);
+            backend_quant.ternary.matmulTQ2_0RhsTile(task.out, task.lhs, &task.rhs[0], task.n, 0, task.m, task.c0, task.c1);
             for (task.rhs[1..]) |*plane_rhs| {
-                backend_quant.matmulTQ2_0RhsTile(task.tmp, task.lhs, plane_rhs, task.n, 0, task.m, task.c0, task.c1);
+                backend_quant.ternary.matmulTQ2_0RhsTile(task.tmp, task.lhs, plane_rhs, task.n, 0, task.m, task.c0, task.c1);
                 for (0..task.m) |r| {
                     const orow = task.out[r * task.n ..][0..task.n];
                     const srow = task.tmp[r * task.n ..][0..task.n];
@@ -425,7 +424,7 @@ fn linearSeqFx4(
     const lhs = try allocator.alloc(backend_quant.BlockQ8_K, m * blocks_per_row);
     defer allocator.free(lhs);
     for (0..m) |r| {
-        try backend_quant.quantizeRowQ8_KInto(lhs[r * blocks_per_row ..][0..blocks_per_row], x[r * k ..][0..k]);
+        try backend_quant.q8k.quantizeRowQ8_KInto(lhs[r * blocks_per_row ..][0..blocks_per_row], x[r * k ..][0..k]);
     }
     var out_t = try Tensor(.{ .seq, out_tag }).empty(ctx, .{ m, n });
     errdefer out_t.deinit();
@@ -442,7 +441,7 @@ fn linearSeqFx4(
         c1: usize,
 
         fn run(task: *const @This()) void {
-            backend_quant.matmulTQ2_0FoldedX4RhsTile(task.out, task.lhs, task.pack, task.bpr, task.n, 0, task.m, task.c0, task.c1);
+            backend_quant.ternary.matmulTQ2_0FoldedX4RhsTile(task.out, task.lhs, task.pack, task.bpr, task.n, 0, task.m, task.c0, task.c1);
         }
     };
     const base = Task{ .out = out, .lhs = lhs, .pack = weight.pack, .bpr = blocks_per_row, .m = m, .n = n, .c0 = 0, .c1 = n };
@@ -532,10 +531,10 @@ pub const WeightPtqtp = struct {
                 const k = self.p1.dim(.in);
                 const b1 = self.p1.asRawTensor().dataConstChecked() catch break :fold;
                 const b2 = self.p2.?.asRawTensor().dataConstChecked() catch break :fold;
-                const r1 = backend_quant.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(b1)) catch break :fold;
-                const r2 = backend_quant.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(b2)) catch break :fold;
+                const r1 = backend_quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(b1)) catch break :fold;
+                const r2 = backend_quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(b2)) catch break :fold;
                 const px4_alloc = self.px4_allocator orelse break :fold;
-                const rows = backend_quant.packMatmulRhsTQ2_0FoldedRows(px4_alloc, &r1, &r2) catch break :fold;
+                const rows = backend_quant.ternary.packMatmulRhsTQ2_0FoldedRows(px4_alloc, &r1, &r2) catch break :fold;
                 defer px4_alloc.free(rows);
                 const bytes = std.mem.sliceAsBytes(rows);
                 const dev = gpu.allocResidentBytes(bytes.len) orelse break :fold;
@@ -590,8 +589,8 @@ pub const WeightPtqtp = struct {
             const plane = maybe_plane orelse continue;
             const ok = blk: {
                 const blocks = plane.asRawTensor().dataConstChecked() catch break :blk false;
-                const rhs = backend_quant.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(blocks)) catch break :blk false;
-                self.px4[i] = backend_quant.packMatmulRhsTQ2_0x4(allocator, &rhs) catch break :blk false;
+                const rhs = backend_quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(blocks)) catch break :blk false;
+                self.px4[i] = backend_quant.ternary.packMatmulRhsTQ2_0x4(allocator, &rhs) catch break :blk false;
                 break :blk true;
             };
             if (!ok) {
@@ -606,9 +605,9 @@ pub const WeightPtqtp = struct {
         if (self.tied and self.p2 != null and self.p3 == null) fold: {
             const b1 = self.p1.asRawTensor().dataConstChecked() catch break :fold;
             const b2 = self.p2.?.asRawTensor().dataConstChecked() catch break :fold;
-            const r1 = backend_quant.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(b1)) catch break :fold;
-            const r2 = backend_quant.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(b2)) catch break :fold;
-            self.pfold = backend_quant.packMatmulRhsTQ2_0Foldedx4(allocator, &r1, &r2) catch null;
+            const r1 = backend_quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(b1)) catch break :fold;
+            const r2 = backend_quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(b2)) catch break :fold;
+            self.pfold = backend_quant.ternary.packMatmulRhsTQ2_0Foldedx4(allocator, &r1, &r2) catch null;
         }
     }
 
@@ -674,7 +673,7 @@ pub const WeightPtqtpFx4 = struct {
         if (comptime !(gpu.enabled and gpu.has_quant_gemm and gpu.has_tq2_0_quant)) return;
         if (comptime !gpu_impl.has_tq2_0_folded_quant) return;
         if (self.gpu_fold != null) return;
-        const rows = backend_quant.packMatmulRhsTQ2_0FoldedRowsFromX4(allocator, self.pack, self.n, self.k / 256) catch return;
+        const rows = backend_quant.ternary.packMatmulRhsTQ2_0FoldedRowsFromX4(allocator, self.pack, self.n, self.k / 256) catch return;
         defer allocator.free(rows);
         const bytes = std.mem.sliceAsBytes(rows);
         const dev = gpu.allocResidentBytes(bytes.len) orelse return;
@@ -1441,7 +1440,7 @@ pub fn loadMoeRhsPtqtp(
 ) !MoeRhs {
     if (plane_infos.len == 0 or plane_infos.len > 3) return Error.InvalidWeightShape;
     const rows = try std.math.mul(usize, expected_n_expert, expected_out_dim);
-    const bpc = try backend_mod.quantized_matmul.qkBlockCount(expected_in_dim);
+    const bpc = try backend_mod.quantized_matmul.q8k.qkBlockCount(expected_in_dim);
     const blocks_per_plane = try std.math.mul(usize, rows, bpc);
 
     var planes: [3][]const dtype_mod.BlockTQ2_0 = .{ &.{}, &.{}, &.{} };
@@ -1481,9 +1480,9 @@ pub fn loadMoeRhsPtqtp(
             var views: [2]backend_quant.QuantizedMatmulRhsTQ2_0 = undefined;
             for (0..2) |p| {
                 const blocks = planes[p][e * expert_blocks ..][0..expert_blocks];
-                views[p] = try backend_quant.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(expected_in_dim, expected_out_dim, @constCast(blocks));
+                views[p] = try backend_quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(expected_in_dim, expected_out_dim, @constCast(blocks));
             }
-            try backend_quant.packMatmulRhsTQ2_0Foldedx4Into(buf[e * fg ..][0..fg], &views[0], &views[1]);
+            try backend_quant.ternary.packMatmulRhsTQ2_0Foldedx4Into(buf[e * fg ..][0..fg], &views[0], &views[1]);
         }
         folded = buf;
         folded_allocator = ctx.allocator;
@@ -1877,7 +1876,7 @@ fn copyOrBorrowMoeRhsRows(
     const src = try blockSlice(Block, info.data);
     if (rows == 0 or src.len % rows != 0) return Error.InvalidWeightShape;
     const bpc = src.len / rows;
-    if (try backend_quant.qkBlockCount(in_dim) != bpc) return Error.InvalidWeightShape;
+    if (try backend_quant.q8k.qkBlockCount(in_dim) != bpc) return Error.InvalidWeightShape;
     if (borrow) {
         return .{ .rows = .{ .allocator = null, .blocks = @constCast(src), .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows };
     }
@@ -1979,7 +1978,7 @@ pub fn packGroupedQ8_0Rhs(
     }
     const all = std.mem.bytesAsSlice(qm.BlockQ8_0, weight_bytes);
     for (0..n_groups) |g| {
-        packs[g] = try qm.packMatmulRhsQ8_0x4(allocator, @alignCast(all[g * rank * bpr ..][0 .. rank * bpr]), rank, group_dim, bpr);
+        packs[g] = try qm.q8_0.packMatmulRhsQ8_0x4(allocator, @alignCast(all[g * rank * bpr ..][0 .. rank * bpr]), rank, group_dim, bpr);
         built += 1;
     }
     return packs;
@@ -2003,7 +2002,7 @@ pub fn groupedQ8_0GemvFusedInto(
     const lhs = try allocator.alloc(qm.BlockQ8_0, n_groups * bpr);
     defer allocator.free(lhs);
     for (0..n_groups) |g| {
-        try qm.quantizeRowQ8_0Into(lhs[g * bpr ..][0..bpr], x[g * group_dim ..][0..group_dim]);
+        try qm.q8k.quantizeRowQ8_0Into(lhs[g * bpr ..][0..bpr], x[g * group_dim ..][0..group_dim]);
     }
 
     const Task = struct {
@@ -2013,7 +2012,7 @@ pub fn groupedQ8_0GemvFusedInto(
         n: usize,
 
         fn run(task: *const @This()) void {
-            qm.matmulQ8_0x4RhsTile(task.out, task.lhs, task.rhs, task.n, 0, 1, 0, task.n);
+            qm.q8_0.matmulQ8_0x4RhsTile(task.out, task.lhs, task.rhs, task.n, 0, 1, 0, task.n);
         }
     };
     var tasks: [8]Task = undefined;
@@ -2481,7 +2480,7 @@ pub fn fillF32(out: []f32, info: *const gguf.TensorInfo) !void {
             if (info.data.len != out.len * @sizeOf(u16)) return Error.InvalidWeightShape;
             for (out, 0..) |*dst, i| {
                 const bits = std.mem.readInt(u16, info.data[i * 2 ..][0..2], .little);
-                dst.* = bf16ToF32(bits);
+                dst.* = dtype_mod.bf16ToF32(bits);
             }
         },
         .f64 => {
@@ -2706,68 +2705,6 @@ fn BlockStorage(comptime dtype: DType) type {
     };
 }
 
-fn bf16ToF32(bits: u16) f32 {
-    return @bitCast(@as(u32, bits) << 16);
-}
-
-// ---------------------------------------------------------------------------
-// Tests — resident bf16 weights.
-//
-// Exactness note: every test below uses small-integer values. Those are
-// exactly representable in bf16 (8-bit mantissa), bf16 -> f32 widening is
-// always exact (u16 << 16), and the per-element products / partial sums are
-// small integers that f32 represents exactly under ANY accumulation order —
-// so the bf16 path must match the f32 reference BITWISE on every backend
-// (native/scalar, BLAS or not), no tolerance needed.
-//
-// Most named tests live in the sibling `weights_tests.zig`; the test below
-// stays here because it references the non-`pub` `bf16ToF32` helper.
-// ---------------------------------------------------------------------------
-
 test {
     _ = @import("weights_tests.zig");
-}
-
-/// f32 -> bf16 bit truncation; exact (== round-to-nearest) for the
-/// small-integer test values used here.
-fn testBf16Bits(value: f32) u16 {
-    return @truncate(@as(u32, @bitCast(value)) >> 16);
-}
-
-/// Build the same logical weight twice: the resident-bf16 arm and the
-/// f32-widened reference arm (what `load` produced before bf16 residency).
-fn testBf16AndF32Pair(ctx: *ExecContext, values: []const f32, out_dim: usize, in_dim: usize) ![2]LinearWeight {
-    var w32 = try WeightF32.fromSlice(ctx, .{ out_dim, in_dim }, values);
-    defer w32.deinit();
-    var w_bf16 = try w32.to(ctx, .bf16);
-    errdefer w_bf16.deinit();
-    const w_ref = try WeightF32.fromSlice(ctx, .{ out_dim, in_dim }, values);
-    return .{ .{ .bf16 = w_bf16 }, .{ .f32 = w_ref } };
-}
-
-test "getRowsAs: bf16 embedding rows match the f32-widened table bitwise" {
-    const allocator = std.testing.allocator;
-    var ctx: ExecContext = undefined;
-    ctx.init(allocator);
-    defer ctx.deinit();
-
-    const vocab = 8;
-    const hidden = 16;
-    var t_vals: [vocab * hidden]f32 = undefined;
-    // Arbitrary bf16-exact values, not just integers: gather + widen is exact
-    // for ANY bf16 bit pattern, so snap to bf16 first and widen the snapped
-    // values for the reference.
-    rng.uniformFill(0xB16, &t_vals, -2, 2);
-    for (&t_vals) |*v| v.* = bf16ToF32(testBf16Bits(v.*));
-
-    var pair = try testBf16AndF32Pair(&ctx, &t_vals, vocab, hidden);
-    defer pair[0].deinit();
-    defer pair[1].deinit();
-
-    const ids = [_]usize{ 3, 0, 7, 3 };
-    var rows_bf16 = try pair[0].getRowsAs(&ctx, &ids, .embed);
-    defer rows_bf16.deinit();
-    var rows_ref = try pair[1].getRowsAs(&ctx, &ids, .embed);
-    defer rows_ref.deinit();
-    try std.testing.expectEqualSlices(f32, try rows_ref.dataConst(), try rows_bf16.dataConst());
 }

@@ -841,7 +841,7 @@ fn quantizeTensorStreamNative(
     const bpr = cols / 256;
     var v0 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(pair.plane1), .rows = rows, .cols = cols, .blocks_per_row = bpr }, .k = cols, .n = rows };
     var v1 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(pair.plane2), .rows = rows, .cols = cols, .blocks_per_row = bpr }, .k = cols, .n = rows };
-    const pack = try bq.packMatmulRhsTQ2_0Foldedx4(allocator, &v0, &v1);
+    const pack = try bq.ternary.packMatmulRhsTQ2_0Foldedx4(allocator, &v0, &v1);
     defer allocator.free(pack);
     const pack_bytes = std.mem.sliceAsBytes(pack);
     try streamer.writeTensorData(pack_bytes);
@@ -896,7 +896,7 @@ fn quantizeExpertStackStreamNative(
         defer pair.deinit(ctx.allocator);
         var v0 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(pair.plane1), .rows = out_dim, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = out_dim };
         var v1 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(pair.plane2), .rows = out_dim, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = out_dim };
-        try bq.packMatmulRhsTQ2_0Foldedx4Into(pack[e * fg ..][0..fg], &v0, &v1);
+        try bq.ternary.packMatmulRhsTQ2_0Foldedx4Into(pack[e * fg ..][0..fg], &v0, &v1);
         rel_sum += pair.stats.rel_frob_err;
         rel_max = @max(rel_max, pair.stats.rel_frob_err);
         unconverged += pair.stats.unconverged_groups;

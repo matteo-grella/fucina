@@ -42,7 +42,7 @@ fn makeRhsQ5(allocator: std.mem.Allocator, k: usize, n: usize) !qm.QuantizedMatm
         for (&b.qh, 0..) |*q, i| q.* = @intCast((i * 13 + bi * 11) % 256);
         for (&b.qs, 0..) |*q, i| q.* = @intCast((i * 31 + bi * 5) % 256);
     }
-    return qm.quantizedMatmulRhsQ5_KFromBlocks(allocator, k, n, blocks);
+    return qm.q8k.quantizedMatmulRhsQ5_KFromBlocks(allocator, k, n, blocks);
 }
 
 fn makeRhsQ6(allocator: std.mem.Allocator, k: usize, n: usize) !qm.QuantizedMatmulRhsQ6_K {
@@ -55,7 +55,7 @@ fn makeRhsQ6(allocator: std.mem.Allocator, k: usize, n: usize) !qm.QuantizedMatm
         for (&b.ql, 0..) |*q, i| q.* = @intCast((i * 31 + bi * 5) % 256);
         for (&b.qh, 0..) |*q, i| q.* = @intCast((i * 13 + bi * 11) % 256);
     }
-    return qm.quantizedMatmulRhsQ6_KFromBlocks(allocator, k, n, blocks);
+    return qm.q8k.quantizedMatmulRhsQ6_KFromBlocks(allocator, k, n, blocks);
 }
 
 fn checksum(out: []const f32) f64 {
@@ -90,9 +90,9 @@ fn runVariant(
             var dense = try Tensor.fromSlice(allocator, &.{ m, k }, lhs_vals);
             defer dense.deinit();
 
-            const qlhs = try qm.quantizeRowsQ8_K(allocator, &dense);
+            const qlhs = try qm.q8k.quantizeRowsQ8_K(allocator, &dense);
             defer allocator.free(qlhs);
-            const qlhs_x4 = try qm.packRowsQ8_Kx4(allocator, qlhs, m, k, bpc);
+            const qlhs_x4 = try qm.q8k.packRowsQ8_Kx4(allocator, qlhs, m, k, bpc);
             defer allocator.free(qlhs_x4);
 
             const out_row = try allocator.alloc(f32, m * n);
@@ -169,6 +169,6 @@ pub fn main(init: std.process.Init) !void {
     });
     try out.print("{s}\n", .{"-" ** 92});
 
-    try runVariant(out, allocator, "Q5_K", iters, warmup, qm.QuantizedMatmulRhsQ5_K, makeRhsQ5, qm.matmulQ5_KRhsCompactColOuter, qm.matmulQ5_KCompactQ8_Kx4ColOuter);
-    try runVariant(out, allocator, "Q6_K", iters, warmup, qm.QuantizedMatmulRhsQ6_K, makeRhsQ6, qm.matmulQ6_KRhsCompactColOuter, qm.matmulQ6_KCompactQ8_Kx4ColOuter);
+    try runVariant(out, allocator, "Q5_K", iters, warmup, qm.QuantizedMatmulRhsQ5_K, makeRhsQ5, qm.q5_k.matmulQ5_KRhsCompactColOuter, qm.q5_k.matmulQ5_KCompactQ8_Kx4ColOuter);
+    try runVariant(out, allocator, "Q6_K", iters, warmup, qm.QuantizedMatmulRhsQ6_K, makeRhsQ6, qm.q6_k.matmulQ6_KRhsCompactColOuter, qm.q6_k.matmulQ6_KCompactQ8_Kx4ColOuter);
 }

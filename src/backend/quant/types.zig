@@ -1,8 +1,7 @@
-//! Quant matmul TYPE + format-trait layer relocated out of quant.zig so the
-//! quant kernel children import their packed/RHS types + format traits from this
-//! child-neutral module instead of the parent barrel — breaking the
-//! quant.zig<->children import cycle. quant.zig re-exports all of these so
-//! `quant.<sym>` callers are unchanged.
+//! Quantized matmul types: the GGML block layouts, the packed and RHS types,
+//! the format enum with its traits, and the block-size constants. A leaf of
+//! the quant group: every kernel child imports it, and `quant.zig` forwards
+//! the block and RHS types to readers outside the backend.
 
 const std = @import("std");
 const dtype_mod = @import("../../dtype.zig");

@@ -1,8 +1,7 @@
-//! Q8_K / Q8_0 encode-quantize-dequantize helpers + the K-quant `*FromBlocks`
-//! RHS constructors. They live in this child-neutral leaf rather than the
-//! quant.zig parent barrel so the quant kernel children can import them
-//! without a quant.zig<->children import cycle. quant.zig re-exports these
-//! so `quant.<sym>` callers are unchanged.
+//! Q8_K / Q8_0 encode-quantize-dequantize helpers, the Q8_Kx4 and Q8_Kx2Mmla
+//! LHS packers, the K-quant `*FromBlocks` RHS constructors and the ggml
+//! reference scale-search helpers. A leaf of the quant group that every
+//! kernel child imports.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -13,42 +12,13 @@ const types = @import("types.zig");
 const Allocator = std.mem.Allocator;
 const Tensor = tensor.Tensor;
 
-const has_aarch64_i8mm = common.has_aarch64_i8mm;
-const quantizeToI8 = common.quantizeToI8;
-const roundNearestEven = common.roundNearestEven;
-const roundNearestEvenVec4ToI32 = common.roundNearestEvenVec4ToI32;
-const roundHalfAwayFromZeroVec4ToI32 = common.roundHalfAwayFromZeroVec4ToI32;
-const f32ToF16Bits = common.f32ToF16Bits;
-const f16BitsToF32 = common.f16BitsToF32;
-const f16x4BitsToF32 = common.f16x4BitsToF32;
-const i8DotI32 = common.i8DotI32;
-const QKV4i32 = common.QKV4i32;
 const QKV4f32 = common.QKV4f32;
 
 const qk_k_block_size = types.qk_k_block_size;
-const q8_0_block_size = types.q8_0_block_size;
-const k_scale_size = types.k_scale_size;
-const BlockQ8_0 = types.BlockQ8_0;
-const BlockQ8_K = types.BlockQ8_K;
-const BlockQ8_Kx4 = types.BlockQ8_Kx4;
-const BlockQ8_Kx2Mmla = types.BlockQ8_Kx2Mmla;
-const BlockQ2_K = types.BlockQ2_K;
-const BlockQ3_K = types.BlockQ3_K;
-const BlockQ4_K = types.BlockQ4_K;
-const BlockQ5_K = types.BlockQ5_K;
-const BlockQ6_K = types.BlockQ6_K;
-const QuantizedFormatError = types.QuantizedFormatError;
-const QuantizedRowsQ8_0 = types.QuantizedRowsQ8_0;
-const QuantizedMatmulRhsQ2_K = types.QuantizedMatmulRhsQ2_K;
-const QuantizedMatmulRhsQ3_K = types.QuantizedMatmulRhsQ3_K;
-const QuantizedMatmulRhsQ4_K = types.QuantizedMatmulRhsQ4_K;
-const QuantizedMatmulRhsQ5_K = types.QuantizedMatmulRhsQ5_K;
-const QuantizedMatmulRhsQ6_K = types.QuantizedMatmulRhsQ6_K;
-const checkedProduct = types.checkedProduct;
 
-pub fn quantizeRowQ8_0Into(dst: []BlockQ8_0, src: []const f32) !void {
+pub fn quantizeRowQ8_0Into(dst: []types.BlockQ8_0, src: []const f32) !void {
     const block_count = try q8_0BlockCount(src.len);
-    if (dst.len != block_count) return QuantizedFormatError.InvalidQuantizedLength;
+    if (dst.len != block_count) return types.QuantizedFormatError.InvalidQuantizedLength;
 
     if (comptime builtin.cpu.arch == .aarch64) {
         return quantizeRowQ8_0IntoAarch64(dst, src);
@@ -56,21 +26,21 @@ pub fn quantizeRowQ8_0Into(dst: []BlockQ8_0, src: []const f32) !void {
 
     var block_index: usize = 0;
     while (block_index < block_count) : (block_index += 1) {
-        const row = src[block_index * q8_0_block_size ..][0..q8_0_block_size];
+        const row = src[block_index * types.q8_0_block_size ..][0..types.q8_0_block_size];
         var amax: f32 = 0;
         for (row) |v| amax = @max(amax, @abs(v));
 
         const d = amax / 127.0;
         const inv_d: f32 = if (d == 0) 0 else 1.0 / d;
 
-        dst[block_index].d = f32ToF16Bits(d);
-        for (&dst[block_index].qs, row) |*q, v| q.* = quantizeToI8(v * inv_d);
+        dst[block_index].d = common.f32ToF16Bits(d);
+        for (&dst[block_index].qs, row) |*q, v| q.* = common.quantizeToI8(v * inv_d);
     }
 }
-fn quantizeRowQ8_0IntoAarch64(dst: []BlockQ8_0, src: []const f32) void {
+fn quantizeRowQ8_0IntoAarch64(dst: []types.BlockQ8_0, src: []const f32) void {
     var block_index: usize = 0;
     while (block_index < dst.len) : (block_index += 1) {
-        const row = src[block_index * q8_0_block_size ..][0..q8_0_block_size];
+        const row = src[block_index * types.q8_0_block_size ..][0..types.q8_0_block_size];
 
         var amaxv: QKV4f32 = @splat(0);
         inline for (0..8) |j| {
@@ -82,18 +52,18 @@ fn quantizeRowQ8_0IntoAarch64(dst: []BlockQ8_0, src: []const f32) void {
         const d = amax / 127.0;
         const inv_d: f32 = if (d == 0) 0 else 1.0 / d;
 
-        dst[block_index].d = f32ToF16Bits(d);
+        dst[block_index].d = common.f32ToF16Bits(d);
         inline for (0..8) |j| {
             const v: QKV4f32 = row[j * 4 ..][0..4].*;
             const scaled = v * @as(QKV4f32, @splat(inv_d));
             const clamped = @max(@as(QKV4f32, @splat(-127.0)), @min(@as(QKV4f32, @splat(127.0)), scaled));
-            const q = roundHalfAwayFromZeroVec4ToI32(clamped);
+            const q = common.roundHalfAwayFromZeroVec4ToI32(clamped);
             inline for (0..4) |lane| dst[block_index].qs[j * 4 + lane] = @intCast(q[lane]);
         }
     }
 }
-pub fn dequantizeRowQ8_0Into(dst: []f32, src: []const BlockQ8_0) !void {
-    if (dst.len != try checkedProduct(src.len, q8_0_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
+pub fn dequantizeRowQ8_0Into(dst: []f32, src: []const types.BlockQ8_0) !void {
+    if (dst.len != try types.checkedProduct(src.len, types.q8_0_block_size)) return types.QuantizedFormatError.InvalidQuantizedLength;
 
     // Explicit 8-lane vectors: the q8_0 KV-cache attention path dequantizes
     // every K/V row it streams through this function, and the scalar
@@ -102,23 +72,23 @@ pub fn dequantizeRowQ8_0Into(dst: []f32, src: []const BlockQ8_0) !void {
     // bit-for-bit (each element is one exact i8->f32 convert and one f32
     // multiply in both forms).
     for (src, 0..) |block, block_index| {
-        const d = f16BitsToF32(block.d);
+        const d = common.f16BitsToF32(block.d);
         const dv: @Vector(8, f32) = @splat(d);
-        const out = dst[block_index * q8_0_block_size ..][0..q8_0_block_size];
-        inline for (0..q8_0_block_size / 8) |j| {
+        const out = dst[block_index * types.q8_0_block_size ..][0..types.q8_0_block_size];
+        inline for (0..types.q8_0_block_size / 8) |j| {
             const q: @Vector(8, i8) = block.qs[j * 8 ..][0..8].*;
             const w: @Vector(8, f32) = @floatFromInt(q);
             out[j * 8 ..][0..8].* = w * dv;
         }
     }
 }
-pub fn quantizeRowsQ8_0(allocator: Allocator, src: *const Tensor) !QuantizedRowsQ8_0 {
+pub fn quantizeRowsQ8_0(allocator: Allocator, src: *const Tensor) !types.QuantizedRowsQ8_0 {
     const view = try src.rankView(2);
     const rows = view.dim(0);
     const cols = view.dim(1);
     const blocks_per_row = try q8_0BlockCount(cols);
 
-    const blocks = try allocator.alloc(BlockQ8_0, try checkedProduct(rows, blocks_per_row));
+    const blocks = try allocator.alloc(types.BlockQ8_0, try types.checkedProduct(rows, blocks_per_row));
     errdefer allocator.free(blocks);
 
     try quantizeRowsQ8_0Into(blocks, src);
@@ -131,12 +101,12 @@ pub fn quantizeRowsQ8_0(allocator: Allocator, src: *const Tensor) !QuantizedRows
         .blocks_per_row = blocks_per_row,
     };
 }
-pub fn quantizeRowsQ8_0Into(blocks: []BlockQ8_0, src: *const Tensor) !void {
+pub fn quantizeRowsQ8_0Into(blocks: []types.BlockQ8_0, src: *const Tensor) !void {
     const view = try src.rankView(2);
     const rows = view.dim(0);
     const cols = view.dim(1);
     const blocks_per_row = try q8_0BlockCount(cols);
-    if (blocks.len != try checkedProduct(rows, blocks_per_row)) return QuantizedFormatError.InvalidQuantizedLength;
+    if (blocks.len != try types.checkedProduct(rows, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
 
     const data = try src.dataConstChecked();
     var row: usize = 0;
@@ -147,7 +117,7 @@ pub fn quantizeRowsQ8_0Into(blocks: []BlockQ8_0, src: *const Tensor) !void {
         );
     }
 }
-pub fn dequantizeRowsQ8_0Into(dst: *Tensor, src: *const QuantizedRowsQ8_0) !void {
+pub fn dequantizeRowsQ8_0Into(dst: *Tensor, src: *const types.QuantizedRowsQ8_0) !void {
     const view = try dst.rankView(2);
     if (view.dim(0) != src.rows or view.dim(1) != src.cols) return tensor.TensorError.ShapeMismatch;
 
@@ -157,7 +127,7 @@ pub fn dequantizeRowsQ8_0Into(dst: *Tensor, src: *const QuantizedRowsQ8_0) !void
         try dequantizeRowQ8_0Into(out[row * src.cols ..][0..src.cols], src.rowBlocks(row));
     }
 }
-pub fn getRowsQ8_0Into(dst: *Tensor, table: *const QuantizedRowsQ8_0, indices: []const usize) !void {
+pub fn getRowsQ8_0Into(dst: *Tensor, table: *const types.QuantizedRowsQ8_0, indices: []const usize) !void {
     if (indices.len == 0) return tensor.TensorError.InvalidShape;
     const view = try dst.rankView(2);
     if (view.dim(0) != indices.len or view.dim(1) != table.cols) return tensor.TensorError.ShapeMismatch;
@@ -169,26 +139,26 @@ pub fn getRowsQ8_0Into(dst: *Tensor, table: *const QuantizedRowsQ8_0, indices: [
     }
 }
 pub fn q8_0BlockCount(len: usize) !usize {
-    if (len % q8_0_block_size != 0) return QuantizedFormatError.InvalidQuantizedLength;
-    return len / q8_0_block_size;
+    if (len % types.q8_0_block_size != 0) return types.QuantizedFormatError.InvalidQuantizedLength;
+    return len / types.q8_0_block_size;
 }
 pub fn qkBlockCount(len: usize) !usize {
-    if (len % qk_k_block_size != 0) return QuantizedFormatError.InvalidQuantizedLength;
+    if (len % qk_k_block_size != 0) return types.QuantizedFormatError.InvalidQuantizedLength;
     return len / qk_k_block_size;
 }
 pub fn blockCountExact(comptime block_size: usize, len: usize) !usize {
-    if (len % block_size != 0) return QuantizedFormatError.InvalidQuantizedLength;
+    if (len % block_size != 0) return types.QuantizedFormatError.InvalidQuantizedLength;
     return len / block_size;
 }
 pub fn quantizedMatmulRhsQ2_KFromBlocks(
     allocator: Allocator,
     k: usize,
     n: usize,
-    blocks: []const BlockQ2_K,
-) !QuantizedMatmulRhsQ2_K {
+    blocks: []const types.BlockQ2_K,
+) !types.QuantizedMatmulRhsQ2_K {
     const blocks_per_column = try qkBlockCount(k);
-    if (blocks.len != try checkedProduct(n, blocks_per_column)) return QuantizedFormatError.InvalidQuantizedLength;
-    const owned = try allocator.dupe(BlockQ2_K, blocks);
+    if (blocks.len != try types.checkedProduct(n, blocks_per_column)) return types.QuantizedFormatError.InvalidQuantizedLength;
+    const owned = try allocator.dupe(types.BlockQ2_K, blocks);
     return .{
         .allocator = allocator,
         .blocks = owned,
@@ -201,11 +171,11 @@ pub fn quantizedMatmulRhsQ3_KFromBlocks(
     allocator: Allocator,
     k: usize,
     n: usize,
-    blocks: []const BlockQ3_K,
-) !QuantizedMatmulRhsQ3_K {
+    blocks: []const types.BlockQ3_K,
+) !types.QuantizedMatmulRhsQ3_K {
     const blocks_per_column = try qkBlockCount(k);
-    if (blocks.len != try checkedProduct(n, blocks_per_column)) return QuantizedFormatError.InvalidQuantizedLength;
-    const owned = try allocator.dupe(BlockQ3_K, blocks);
+    if (blocks.len != try types.checkedProduct(n, blocks_per_column)) return types.QuantizedFormatError.InvalidQuantizedLength;
+    const owned = try allocator.dupe(types.BlockQ3_K, blocks);
     return .{
         .allocator = allocator,
         .blocks = owned,
@@ -218,11 +188,11 @@ pub fn quantizedMatmulRhsQ4_KFromBlocks(
     allocator: Allocator,
     k: usize,
     n: usize,
-    blocks: []const BlockQ4_K,
-) !QuantizedMatmulRhsQ4_K {
+    blocks: []const types.BlockQ4_K,
+) !types.QuantizedMatmulRhsQ4_K {
     const blocks_per_column = try qkBlockCount(k);
-    if (blocks.len != try checkedProduct(n, blocks_per_column)) return QuantizedFormatError.InvalidQuantizedLength;
-    const owned = try allocator.dupe(BlockQ4_K, blocks);
+    if (blocks.len != try types.checkedProduct(n, blocks_per_column)) return types.QuantizedFormatError.InvalidQuantizedLength;
+    const owned = try allocator.dupe(types.BlockQ4_K, blocks);
     return .{
         .allocator = allocator,
         .blocks = owned,
@@ -235,11 +205,11 @@ pub fn quantizedMatmulRhsQ5_KFromBlocks(
     allocator: Allocator,
     k: usize,
     n: usize,
-    blocks: []const BlockQ5_K,
-) !QuantizedMatmulRhsQ5_K {
+    blocks: []const types.BlockQ5_K,
+) !types.QuantizedMatmulRhsQ5_K {
     const blocks_per_column = try qkBlockCount(k);
-    if (blocks.len != try checkedProduct(n, blocks_per_column)) return QuantizedFormatError.InvalidQuantizedLength;
-    const owned = try allocator.dupe(BlockQ5_K, blocks);
+    if (blocks.len != try types.checkedProduct(n, blocks_per_column)) return types.QuantizedFormatError.InvalidQuantizedLength;
+    const owned = try allocator.dupe(types.BlockQ5_K, blocks);
     return .{
         .allocator = allocator,
         .blocks = owned,
@@ -252,11 +222,11 @@ pub fn quantizedMatmulRhsQ6_KFromBlocks(
     allocator: Allocator,
     k: usize,
     n: usize,
-    blocks: []const BlockQ6_K,
-) !QuantizedMatmulRhsQ6_K {
+    blocks: []const types.BlockQ6_K,
+) !types.QuantizedMatmulRhsQ6_K {
     const blocks_per_column = try qkBlockCount(k);
-    if (blocks.len != try checkedProduct(n, blocks_per_column)) return QuantizedFormatError.InvalidQuantizedLength;
-    const owned = try allocator.dupe(BlockQ6_K, blocks);
+    if (blocks.len != try types.checkedProduct(n, blocks_per_column)) return types.QuantizedFormatError.InvalidQuantizedLength;
+    const owned = try allocator.dupe(types.BlockQ6_K, blocks);
     return .{
         .allocator = allocator,
         .blocks = owned,
@@ -265,9 +235,9 @@ pub fn quantizedMatmulRhsQ6_KFromBlocks(
         .blocks_per_column = blocks_per_column,
     };
 }
-pub fn quantizeRowQ8_KInto(dst: []BlockQ8_K, src: []const f32) !void {
+pub fn quantizeRowQ8_KInto(dst: []types.BlockQ8_K, src: []const f32) !void {
     const block_count = try qkBlockCount(src.len);
-    if (dst.len != block_count) return QuantizedFormatError.InvalidQuantizedLength;
+    if (dst.len != block_count) return types.QuantizedFormatError.InvalidQuantizedLength;
     if (comptime builtin.cpu.arch == .aarch64) {
         return quantizeRowQ8_KIntoAarch64(dst, src);
     }
@@ -299,7 +269,7 @@ pub fn quantizeRowQ8_KInto(dst: []BlockQ8_K, src: []const f32) !void {
 
         const inv_scale = -127.0 / max_value;
         for (&dst[block_index].qs, row) |*q, v| {
-            const quantized = roundNearestEven(inv_scale * v);
+            const quantized = common.roundNearestEven(inv_scale * v);
             q.* = @intFromFloat(@min(127.0, quantized));
         }
 
@@ -311,7 +281,7 @@ pub fn quantizeRowQ8_KInto(dst: []BlockQ8_K, src: []const f32) !void {
         dst[block_index].d = 1.0 / inv_scale;
     }
 }
-fn quantizeRowQ8_KIntoAarch64(dst: []BlockQ8_K, src: []const f32) void {
+fn quantizeRowQ8_KIntoAarch64(dst: []types.BlockQ8_K, src: []const f32) void {
     var block_index: usize = 0;
     while (block_index < dst.len) : (block_index += 1) {
         const row = src[block_index * qk_k_block_size ..][0..qk_k_block_size];
@@ -344,7 +314,7 @@ fn quantizeRowQ8_KIntoAarch64(dst: []BlockQ8_K, src: []const f32) void {
         vec_index = 0;
         while (vec_index < qk_k_block_size / 4) : (vec_index += 1) {
             const v: QKV4f32 = row[vec_index * 4 ..][0..4].*;
-            const q = @min(roundNearestEvenVec4ToI32(v * @as(QKV4f32, @splat(inv_scale))), @as(QKV4i32, @splat(127)));
+            const q = @min(common.roundNearestEvenVec4ToI32(v * @as(QKV4f32, @splat(inv_scale))), @as(common.QKV4i32, @splat(127)));
             inline for (0..4) |lane| block.qs[vec_index * 4 + lane] = @intCast(q[lane]);
             bsums[vec_index / 4] += @reduce(.Add, q);
         }
@@ -353,14 +323,14 @@ fn quantizeRowQ8_KIntoAarch64(dst: []BlockQ8_K, src: []const f32) void {
         block.d = 1.0 / inv_scale;
     }
 }
-pub fn quantizeRowsQ8_K(allocator: Allocator, src: *const Tensor) ![]BlockQ8_K {
+pub fn quantizeRowsQ8_K(allocator: Allocator, src: *const Tensor) ![]types.BlockQ8_K {
     const view = try src.rankView(2);
     const rows = view.dim(0);
     const cols = view.dim(1);
     const blocks_per_row = try qkBlockCount(cols);
     const data = try src.dataConstChecked();
 
-    const blocks = try allocator.alloc(BlockQ8_K, try checkedProduct(rows, blocks_per_row));
+    const blocks = try allocator.alloc(types.BlockQ8_K, try types.checkedProduct(rows, blocks_per_row));
     errdefer allocator.free(blocks);
 
     var row: usize = 0;
@@ -372,13 +342,13 @@ pub fn quantizeRowsQ8_K(allocator: Allocator, src: *const Tensor) ![]BlockQ8_K {
     }
     return blocks;
 }
-pub fn quantizeRowsQ8_Kx4Into(blocks: []BlockQ8_Kx4, src: *const Tensor) !void {
+pub fn quantizeRowsQ8_Kx4Into(blocks: []types.BlockQ8_Kx4, src: *const Tensor) !void {
     return quantizeRowsQ8_Kx4IntoImpl(blocks, src, false);
 }
-pub fn quantizeRowsQ8_Kx4PaddedInto(blocks: []BlockQ8_Kx4, src: *const Tensor) !void {
+pub fn quantizeRowsQ8_Kx4PaddedInto(blocks: []types.BlockQ8_Kx4, src: *const Tensor) !void {
     return quantizeRowsQ8_Kx4IntoImpl(blocks, src, true);
 }
-pub fn quantizeRowsQ8_Kx4IntoImpl(blocks: []BlockQ8_Kx4, src: *const Tensor, comptime pad_rows: bool) !void {
+pub fn quantizeRowsQ8_Kx4IntoImpl(blocks: []types.BlockQ8_Kx4, src: *const Tensor, comptime pad_rows: bool) !void {
     const view = try src.rankView(2);
     const rows = view.dim(0);
     const cols = view.dim(1);
@@ -386,7 +356,7 @@ pub fn quantizeRowsQ8_Kx4IntoImpl(blocks: []BlockQ8_Kx4, src: *const Tensor, com
 
     const blocks_per_row = try qkBlockCount(cols);
     const row_groups = if (pad_rows) (rows + 3) / 4 else rows / 4;
-    if (blocks.len != try checkedProduct(row_groups, blocks_per_row)) return QuantizedFormatError.InvalidQuantizedLength;
+    if (blocks.len != try types.checkedProduct(row_groups, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
 
     const data = try src.dataConstChecked();
     for (0..row_groups) |row_group| {
@@ -399,7 +369,7 @@ pub fn quantizeRowsQ8_Kx4IntoImpl(blocks: []BlockQ8_Kx4, src: *const Tensor, com
         );
     }
 }
-pub fn quantizeRowGroupQ8_Kx4Into(blocks: []BlockQ8_Kx4, data: []const f32, rows_in_group: usize, cols: usize) void {
+pub fn quantizeRowGroupQ8_Kx4Into(blocks: []types.BlockQ8_Kx4, data: []const f32, rows_in_group: usize, cols: usize) void {
     const blocks_per_row = blocks.len;
     {
         for (0..blocks_per_row) |block_index| {
@@ -434,7 +404,7 @@ pub fn quantizeRowGroupQ8_Kx4Into(blocks: []BlockQ8_Kx4, data: []const f32, rows
                         vec_index = 0;
                         while (vec_index < qk_k_block_size / 4) : (vec_index += 1) {
                             const v: QKV4f32 = source[vec_index * 4 ..][0..4].*;
-                            const q = @min(roundNearestEvenVec4ToI32(v * @as(QKV4f32, @splat(inv_scale))), @as(QKV4i32, @splat(127)));
+                            const q = @min(common.roundNearestEvenVec4ToI32(v * @as(QKV4f32, @splat(inv_scale))), @as(common.QKV4i32, @splat(127)));
                             inline for (0..4) |lane| {
                                 dst.qs[vec_index * 16 + row_lane * 4 + lane] = @intCast(q[lane]);
                             }
@@ -451,7 +421,7 @@ pub fn quantizeRowGroupQ8_Kx4Into(blocks: []BlockQ8_Kx4, data: []const f32, rows
         }
     }
 }
-pub fn zeroQ8Kx4Lane(block: *BlockQ8_Kx4, comptime row_lane: usize) void {
+pub fn zeroQ8Kx4Lane(block: *types.BlockQ8_Kx4, comptime row_lane: usize) void {
     block.d[row_lane] = 0;
     var feature_group: usize = 0;
     while (feature_group < qk_k_block_size / 4) : (feature_group += 1) {
@@ -464,14 +434,14 @@ pub fn zeroQ8Kx4Lane(block: *BlockQ8_Kx4, comptime row_lane: usize) void {
         block.bsums[(subblock / 4) * 16 + row_lane * 4 + subblock % 4] = 0;
     }
 }
-pub fn quantizeRowsQ8_Kx2MmlaInto(blocks: []BlockQ8_Kx2Mmla, src: *const Tensor) !void {
+pub fn quantizeRowsQ8_Kx2MmlaInto(blocks: []types.BlockQ8_Kx2Mmla, src: *const Tensor) !void {
     const view = try src.rankView(2);
     const rows = view.dim(0);
     const cols = view.dim(1);
     if (rows % 2 != 0) return tensor.TensorError.InvalidShape;
 
     const blocks_per_row = try qkBlockCount(cols);
-    if (blocks.len != try checkedProduct(rows / 2, blocks_per_row)) return QuantizedFormatError.InvalidQuantizedLength;
+    if (blocks.len != try types.checkedProduct(rows / 2, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
 
     const data = try src.dataConstChecked();
     for (0..rows / 2) |row_group| {
@@ -507,7 +477,7 @@ pub fn quantizeRowsQ8_Kx2MmlaInto(blocks: []BlockQ8_Kx2Mmla, src: *const Tensor)
                     vec_index = 0;
                     while (vec_index < qk_k_block_size / 4) : (vec_index += 1) {
                         const v: QKV4f32 = source[vec_index * 4 ..][0..4].*;
-                        const q = @min(roundNearestEvenVec4ToI32(v * @as(QKV4f32, @splat(inv_scale))), @as(QKV4i32, @splat(127)));
+                        const q = @min(common.roundNearestEvenVec4ToI32(v * @as(QKV4f32, @splat(inv_scale))), @as(common.QKV4i32, @splat(127)));
                         inline for (0..4) |lane| {
                             row_qs[row_lane][vec_index * 4 + lane] = @intCast(q[lane]);
                         }
@@ -538,22 +508,22 @@ pub fn quantizeRowsQ8_Kx2MmlaInto(blocks: []BlockQ8_Kx2Mmla, src: *const Tensor)
 }
 pub fn packRowsQ8_Kx4(
     allocator: Allocator,
-    blocks: []const BlockQ8_K,
+    blocks: []const types.BlockQ8_K,
     rows: usize,
     cols: usize,
     blocks_per_row: usize,
-) ![]BlockQ8_Kx4 {
+) ![]types.BlockQ8_Kx4 {
     if (rows % 4 != 0) return tensor.TensorError.InvalidShape;
     if (blocks_per_row != try qkBlockCount(cols)) return tensor.TensorError.InvalidShape;
-    if (blocks.len != try checkedProduct(rows, blocks_per_row)) return QuantizedFormatError.InvalidQuantizedLength;
+    if (blocks.len != try types.checkedProduct(rows, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
 
     const row_groups = rows / 4;
-    const packed_blocks = try allocator.alloc(BlockQ8_Kx4, try checkedProduct(row_groups, blocks_per_row));
+    const packed_blocks = try allocator.alloc(types.BlockQ8_Kx4, try types.checkedProduct(row_groups, blocks_per_row));
     errdefer allocator.free(packed_blocks);
 
     for (0..row_groups) |group| {
         for (0..blocks_per_row) |block_index| {
-            const src = [_]*const BlockQ8_K{
+            const src = [_]*const types.BlockQ8_K{
                 &blocks[(group * 4 + 0) * blocks_per_row + block_index],
                 &blocks[(group * 4 + 1) * blocks_per_row + block_index],
                 &blocks[(group * 4 + 2) * blocks_per_row + block_index],
@@ -581,8 +551,8 @@ pub fn packRowsQ8_Kx4(
     return packed_blocks;
 }
 pub fn packRowsQ8_Kx4PaddedInto(
-    dst: []BlockQ8_Kx4,
-    blocks: []const BlockQ8_K,
+    dst: []types.BlockQ8_Kx4,
+    blocks: []const types.BlockQ8_K,
     m: usize,
     blocks_per_row: usize,
 ) void {
@@ -611,14 +581,14 @@ pub fn packRowsQ8_Kx4PaddedInto(
     }
 }
 pub fn q4Kx8D(bits: [8]u16, comptime group: usize) QKV4f32 {
-    return f16x4BitsToF32(.{
+    return common.f16x4BitsToF32(.{
         bits[group * 4 + 0],
         bits[group * 4 + 1],
         bits[group * 4 + 2],
         bits[group * 4 + 3],
     });
 }
-pub fn q4Kx8Scales(values: *const [8 * 8]u8, comptime subblock: usize, comptime group: usize) QKV4i32 {
+pub fn q4Kx8Scales(values: *const [8 * 8]u8, comptime subblock: usize, comptime group: usize) common.QKV4i32 {
     const offset = subblock * 8 + group * 4;
     return .{
         values[offset + 0],
@@ -627,14 +597,14 @@ pub fn q4Kx8Scales(values: *const [8 * 8]u8, comptime subblock: usize, comptime 
         values[offset + 3],
     };
 }
-pub fn dequantizeBlockQ8_KInto(dst: *[qk_k_block_size]f32, src: *const BlockQ8_K) void {
+pub fn dequantizeBlockQ8_KInto(dst: *[qk_k_block_size]f32, src: *const types.BlockQ8_K) void {
     for (dst, src.qs) |*out, q| out.* = src.d * @as(f32, @floatFromInt(q));
 }
 const ScaleMinK4 = struct {
     scale: u8,
     min: u8,
 };
-pub fn getScaleMinK4(q: *const [k_scale_size]u8, index: usize) ScaleMinK4 {
+pub fn getScaleMinK4(q: *const [types.k_scale_size]u8, index: usize) ScaleMinK4 {
     if (index < 4) {
         return .{
             .scale = q[index] & 63,
@@ -646,7 +616,22 @@ pub fn getScaleMinK4(q: *const [k_scale_size]u8, index: usize) ScaleMinK4 {
         .min = (q[index + 4] >> 4) | ((q[index] >> 6) << 4),
     };
 }
+// ---------------------------------------------------------------------------
+// f32 -> K-quant reference encoders: shared iterative scale-search helpers,
+// ported operation-for-operation (f32 arithmetic, same rounding) from ggml's
+// ggml-quants.c so the encoded bytes match quantize_row_{q4,q5,q6}_K_ref
+// bit-for-bit (verified against embedded goldens in encode_golden_test.zig).
+//
+// Finite-input contract (same as ggml): inputs must be free of NaN/inf. A
+// sub-block whose value spread underflows f32 (so nmax/(max-min) overflows to
+// inf) feeds a non-finite value into nearestInt; ggml's own assert in
+// nearest_int rejects that too, and we mirror it with a debug assert.
+// ---------------------------------------------------------------------------
+
+/// ggml GROUP_MAX_EPS: sub-blocks with amax below this encode as all-zero.
 pub const group_max_eps: f32 = 1e-15;
+/// ggml nearest_int: round-to-nearest-even via the 1.5*2^23 magic constant.
+/// Valid for |fval| <= 4194303 (ggml asserts the same bound).
 pub fn nearestInt(fval: f32) i32 {
     std.debug.assert(@abs(fval) <= 4194303.0);
     const val: f32 = fval + 12582912.0;
@@ -662,6 +647,10 @@ fn qxQuantWeight(rmse_type: i32, v: f32, qw: ?[]const f32, i: usize) f32 {
         else => @sqrt(@abs(v)),
     };
 }
+/// ggml make_qx_quants: symmetric scale search over +/-9 tenth-steps around
+/// -nmax/max (the sign rides on the scale). `L` receives nmax-biased levels in
+/// [0, 2*nmax-1]. The Q6_K encoder uses rmse_type = 1 with qw = null; the full
+/// reference behavior (rmse_type 0/negative/2/3/default, explicit qw) is kept.
 pub fn makeQxQuants(nmax: i32, x: []const f32, L: []i8, rmse_type_in: i32, qw: ?[]const f32) f32 {
     std.debug.assert(L.len == x.len);
     var max: f32 = 0;
@@ -731,6 +720,11 @@ pub fn makeQxQuants(nmax: i32, x: []const f32, L: []i8, rmse_type_in: i32, qw: ?
     }
     return scale;
 }
+/// ggml make_qkx2_quants: asymmetric (scale, min) grid search used by the
+/// Q4_K/Q5_K encoders. `iscale` candidates sweep (rmin + rdelta*is + nmax) /
+/// (max - min) for is in [0, nstep]; a weighted least-squares (scale, min) fit
+/// is accepted when it lowers the weighted error (MAD when use_mad). `L`
+/// receives levels in [0, nmax]; `Laux` is caller-supplied scratch.
 pub fn makeQkx2Quants(
     nmax: i32,
     x: []const f32,
@@ -816,7 +810,7 @@ pub fn makeQkx2Quants(
     the_min.* = -min;
     return scale;
 }
-pub fn fillQ8KPattern(block: *BlockQ8_K) void {
+pub fn fillQ8KPattern(block: *types.BlockQ8_K) void {
     block.d = 1;
     for (&block.qs, 0..) |*q, i| q.* = @intCast(@as(i32, @intCast(i % 17)) - 8);
     for (&block.bsums, 0..) |*sum, group| {

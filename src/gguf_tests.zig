@@ -235,7 +235,7 @@ test "GGUF writer round-trips metadata and tensors through the parser" {
     var decoded: [64]f32 = undefined;
     var block_copy: [2]dtype_mod.BlockQ8_0 = undefined;
     @memcpy(std.mem.sliceAsBytes(&block_copy), w_q8.data);
-    try quant.dequantizeRowQ8_0Into(&decoded, &block_copy);
+    try quant.q8k.dequantizeRowQ8_0Into(&decoded, &block_copy);
     for (q8_values, decoded) |expected, got| {
         try std.testing.expectApproxEqAbs(expected, got, 0.13); // half a q8_0 step at amax 31.5
     }

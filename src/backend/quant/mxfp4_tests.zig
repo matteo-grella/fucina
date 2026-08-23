@@ -5,19 +5,14 @@
 //! f64 dense reference within tolerance.
 
 const std = @import("std");
-const types_mod = @import("types.zig");
+const types = @import("types.zig");
 const common = @import("common.zig");
 const cold = @import("cold.zig");
 const mxfp4 = @import("mxfp4.zig");
 const tables = @import("../quant_tables.zig");
 
-const BlockMXFP4 = types_mod.BlockMXFP4;
-const BlockQ8_0 = types_mod.BlockQ8_0;
-const QuantizedMatmulRhsMXFP4 = types_mod.QuantizedMatmulRhsMXFP4;
-const QKV4f32 = common.QKV4f32;
-
-fn refCell(lhs_row: []const BlockQ8_0, col: []const BlockMXFP4) f32 {
-    var acc: QKV4f32 = @splat(0);
+fn refCell(lhs_row: []const types.BlockQ8_0, col: []const types.BlockMXFP4) f32 {
+    var acc: common.QKV4f32 = @splat(0);
     for (lhs_row, col) |*a, *w| {
         var iacc: [4]i32 = .{ 0, 0, 0, 0 };
         for (0..4) |l| {
@@ -28,14 +23,14 @@ fn refCell(lhs_row: []const BlockQ8_0, col: []const BlockMXFP4) f32 {
                 iacc[l] += lo * @as(i32, a.qs[j]) + hi * @as(i32, a.qs[16 + j]);
             }
         }
-        const scale: QKV4f32 = @splat(common.e8m0ToF32Half(w.e) * common.f16BitsToF32(a.d));
-        acc += @as(QKV4f32, @floatFromInt(@as(common.QKV4i32, iacc))) * scale;
+        const scale: common.QKV4f32 = @splat(common.e8m0ToF32Half(w.e) * common.f16BitsToF32(a.d));
+        acc += @as(common.QKV4f32, @floatFromInt(@as(common.QKV4i32, iacc))) * scale;
     }
     return @reduce(.Add, acc);
 }
 
-fn randomBlocks(random: std.Random, allocator: std.mem.Allocator, n: usize, bpc: usize) ![]BlockMXFP4 {
-    const blocks = try allocator.alloc(BlockMXFP4, n * bpc);
+fn randomBlocks(random: std.Random, allocator: std.mem.Allocator, n: usize, bpc: usize) ![]types.BlockMXFP4 {
+    const blocks = try allocator.alloc(types.BlockMXFP4, n * bpc);
     for (blocks, 0..) |*b, i| {
         // Scale exponents span the useful range plus the subnormal edge
         // (e < 2) so the halved-scale fold is exercised where it bends.
@@ -45,8 +40,8 @@ fn randomBlocks(random: std.Random, allocator: std.mem.Allocator, n: usize, bpc:
     return blocks;
 }
 
-fn randomLhs(random: std.Random, allocator: std.mem.Allocator, m: usize, bpc: usize) ![]BlockQ8_0 {
-    const blocks = try allocator.alloc(BlockQ8_0, m * bpc);
+fn randomLhs(random: std.Random, allocator: std.mem.Allocator, m: usize, bpc: usize) ![]types.BlockQ8_0 {
+    const blocks = try allocator.alloc(types.BlockQ8_0, m * bpc);
     for (blocks) |*b| {
         b.d = common.f32ToF16Bits(0.001 + random.float(f32) * 0.05);
         // Quantizer domain: our Q8_0 encoder bounds codes to [-127, 127];
@@ -74,7 +69,7 @@ test "mxfp4 tile matches scalar lane re-derivation bitwise" {
         const lhs_blocks = try randomLhs(random, allocator, m, bpc);
         defer allocator.free(lhs_blocks);
 
-        const rhs = QuantizedMatmulRhsMXFP4{
+        const rhs = types.QuantizedMatmulRhsMXFP4{
             .rows = .{ .allocator = null, .blocks = rhs_blocks, .rows = n, .cols = k, .blocks_per_row = bpc },
             .k = k,
             .n = n,
@@ -108,7 +103,7 @@ test "mxfp4 tile matches cold dequantizer through f64 dense reference" {
     const lhs_blocks = try randomLhs(random, allocator, m, bpc);
     defer allocator.free(lhs_blocks);
 
-    const rhs = QuantizedMatmulRhsMXFP4{
+    const rhs = types.QuantizedMatmulRhsMXFP4{
         .rows = .{ .allocator = null, .blocks = rhs_blocks, .rows = n, .cols = k, .blocks_per_row = bpc },
         .k = k,
         .n = n,

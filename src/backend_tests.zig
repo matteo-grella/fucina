@@ -185,11 +185,11 @@ fn rowsRefQ8_K(
 ) ![]f32 {
     var lhs = try Tensor.fromSlice(allocator, &.{ m, split_test_k }, lhs_values[0 .. m * split_test_k]);
     defer lhs.deinit();
-    const qlhs = try quant.quantizeRowsQ8_K(allocator, &lhs);
+    const qlhs = try quant.q8k.quantizeRowsQ8_K(allocator, &lhs);
     defer allocator.free(qlhs);
     const out = try allocator.alloc(f32, m * split_test_n);
     errdefer allocator.free(out);
-    rowsKernel(out, qlhs, rhs, m, split_test_n, split_test_k, vector.ParallelConfig{});
+    rowsKernel(.{}, out, qlhs, rhs, m, split_test_n, split_test_k);
     return out;
 }
 
@@ -201,13 +201,13 @@ fn rowsRefQ8_0(
 ) ![]f32 {
     var lhs = try Tensor.fromSlice(allocator, &.{ m, split_test_k }, lhs_values[0 .. m * split_test_k]);
     defer lhs.deinit();
-    const blocks_per_row = try quant.q8_0BlockCount(split_test_k);
+    const blocks_per_row = try quant.q8k.q8_0BlockCount(split_test_k);
     const qlhs = try allocator.alloc(quant.BlockQ8_0, m * blocks_per_row);
     defer allocator.free(qlhs);
-    try quant.quantizeRowsQ8_0Into(qlhs, &lhs);
+    try quant.q8k.quantizeRowsQ8_0Into(qlhs, &lhs);
     const out = try allocator.alloc(f32, m * split_test_n);
     errdefer allocator.free(out);
-    vector.matmul2DQ8_0x4RhsIntoWithConfig(out, qlhs, rhs, m, split_test_n, split_test_k, .{});
+    vector.matmul_quant.matmul2DQ8_0x4RhsInto(.{}, out, qlhs, rhs, m, split_test_n, split_test_k);
     return out;
 }
 
@@ -224,10 +224,10 @@ fn paddedTailRefQ4_Kx8(
     const blocks_per_row = try quant.blockCountForDType(.q8_k, split_test_k);
     const qlhs = try allocator.alloc(quant.BlockQ8_Kx4, ((tail_rows + 3) / 4) * blocks_per_row);
     defer allocator.free(qlhs);
-    try quant.quantizeRowsQ8_Kx4PaddedInto(qlhs, &lhs);
+    try quant.q8k.quantizeRowsQ8_Kx4PaddedInto(qlhs, &lhs);
     const out = try allocator.alloc(f32, tail_rows * split_test_n);
     errdefer allocator.free(out);
-    vector.matmul2DQ4_Kx8Q8_Kx4RhsIntoWithConfig(out, qlhs, rhs, tail_rows, split_test_n, split_test_k, .{});
+    vector.matmul_quant.matmul2DQ4_Kx8Q8_Kx4RhsInto(.{}, out, qlhs, rhs, tail_rows, split_test_n, split_test_k);
     return out;
 }
 
@@ -238,9 +238,9 @@ fn buildSplitRhsQ4_Kx8(allocator: std.mem.Allocator, random: std.Random) !quant.
     var values: [256]f32 = undefined;
     for (blocks) |*block| {
         fillSplitTestValues(&values, random);
-        quant.quantizeBlockQ4_KInto(block, &values);
+        quant.q4_k.quantizeBlockQ4_KInto(block, &values);
     }
-    return quant.packMatmulRhsQ4_Kx8(allocator, blocks, split_test_n, split_test_k, blocks_per_row);
+    return quant.q4_k.packMatmulRhsQ4_Kx8(allocator, blocks, split_test_n, split_test_k, blocks_per_row);
 }
 
 fn buildSplitRhsQ5_Kx8(allocator: std.mem.Allocator, random: std.Random) !quant.QuantizedMatmulRhsQ5_Kx8 {
@@ -250,13 +250,13 @@ fn buildSplitRhsQ5_Kx8(allocator: std.mem.Allocator, random: std.Random) !quant.
     var values: [256]f32 = undefined;
     for (blocks) |*block| {
         fillSplitTestValues(&values, random);
-        quant.quantizeBlockQ5_KInto(block, &values);
+        quant.q5_k.quantizeBlockQ5_KInto(block, &values);
     }
-    return quant.packMatmulRhsQ5_Kx8(allocator, blocks, split_test_n, split_test_k, blocks_per_row);
+    return quant.q5_k.packMatmulRhsQ5_Kx8(allocator, blocks, split_test_n, split_test_k, blocks_per_row);
 }
 
 fn buildSplitRhsQ8_0x4(allocator: std.mem.Allocator, random: std.Random) !quant.QuantizedMatmulRhsQ8_0x4 {
-    const blocks_per_row = try quant.q8_0BlockCount(split_test_k);
+    const blocks_per_row = try quant.q8k.q8_0BlockCount(split_test_k);
     const values = try allocator.alloc(f32, split_test_n * split_test_k);
     defer allocator.free(values);
     fillSplitTestValues(values, random);
@@ -264,8 +264,8 @@ fn buildSplitRhsQ8_0x4(allocator: std.mem.Allocator, random: std.Random) !quant.
     defer weights.deinit();
     const blocks = try allocator.alloc(quant.BlockQ8_0, split_test_n * blocks_per_row);
     defer allocator.free(blocks);
-    try quant.quantizeRowsQ8_0Into(blocks, &weights);
-    return quant.packMatmulRhsQ8_0x4(allocator, blocks, split_test_n, split_test_k, blocks_per_row);
+    try quant.q8k.quantizeRowsQ8_0Into(blocks, &weights);
+    return quant.q8_0.packMatmulRhsQ8_0x4(allocator, blocks, split_test_n, split_test_k, blocks_per_row);
 }
 
 test "native q5_k x8 dispatch splits off-multiple m into x4 bulk plus row-kernel tail" {
@@ -283,7 +283,7 @@ test "native q5_k x8 dispatch splits off-multiple m into x4 bulk plus row-kernel
         const full = try runSplitDispatch(native.kernels.matmul2DQuantizedRhsQ5_Kx8, allocator, &rhs, lhs_values, m, .{});
         defer allocator.free(full);
 
-        const all_rows = try rowsRefQ8_K(vector.matmul2DQ5_Kx8RhsIntoWithConfig, allocator, &rhs, lhs_values, m);
+        const all_rows = try rowsRefQ8_K(vector.matmul_quant.matmul2DQ5_Kx8RhsInto, allocator, &rhs, lhs_values, m);
         defer allocator.free(all_rows);
 
         if (m < 128) {
@@ -297,7 +297,7 @@ test "native q5_k x8 dispatch splits off-multiple m into x4 bulk plus row-kernel
         defer allocator.free(prefix);
         try expectBitEqualF32(prefix, full[0 .. bulk_rows * split_test_n]);
 
-        const tail_ref = try rowsRefQ8_K(vector.matmul2DQ5_Kx8RhsIntoWithConfig, allocator, &rhs, lhs_values[bulk_rows * split_test_k ..], m - bulk_rows);
+        const tail_ref = try rowsRefQ8_K(vector.matmul_quant.matmul2DQ5_Kx8RhsInto, allocator, &rhs, lhs_values[bulk_rows * split_test_k ..], m - bulk_rows);
         defer allocator.free(tail_ref);
         try expectBitEqualF32(tail_ref, full[bulk_rows * split_test_n .. m * split_test_n]);
 
@@ -338,7 +338,7 @@ test "native q4_k x8 dispatch runs every off-multiple m through the padded x4 ke
         defer allocator.free(tail_ref);
         try expectBitEqualF32(tail_ref, full[bulk_rows * split_test_n .. m * split_test_n]);
 
-        const all_rows = try rowsRefQ8_K(vector.matmul2DQ4_Kx8RhsIntoWithConfig, allocator, &rhs, lhs_values, m);
+        const all_rows = try rowsRefQ8_K(vector.matmul_quant.matmul2DQ4_Kx8RhsInto, allocator, &rhs, lhs_values, m);
         defer allocator.free(all_rows);
         try expectSplitApprox(all_rows, full);
     }

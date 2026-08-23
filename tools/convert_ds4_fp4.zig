@@ -125,7 +125,7 @@ fn selftest() !void {
     recodeGroupMxfp4(packed_bytes[0..16], scales[0], &blocks[0]);
     recodeGroupMxfp4(packed_bytes[16..32], scales[1], &blocks[1]);
     var via_ggml: [64]f32 = undefined;
-    try fucina.internal.backend_mod.quantized_matmul.dequantizeRowMXFP4Into(&via_ggml, &blocks);
+    try fucina.internal.backend_mod.quantized_matmul.cold.dequantizeRowMXFP4Into(&via_ggml, &blocks);
     if (!std.mem.eql(u8, std.mem.sliceAsBytes(&fresh), std.mem.sliceAsBytes(&via_ggml))) return error.SelftestFailed;
 }
 
@@ -970,7 +970,7 @@ fn repackNative(
                 // sound (same note as exec/moe.zig tq2_0View).
                 var v0 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(p0_blocks[e * plane_blocks ..][0..plane_blocks]), .rows = out_dim, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = out_dim };
                 var v1 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(p1_blocks[e * plane_blocks ..][0..plane_blocks]), .rows = out_dim, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = out_dim };
-                try bq.packMatmulRhsTQ2_0Foldedx4Into(pack_buf[e * fg ..][0..fg], &v0, &v1);
+                try bq.ternary.packMatmulRhsTQ2_0Foldedx4Into(pack_buf[e * fg ..][0..fg], &v0, &v1);
             }
             try streamer.writeTensorData(std.mem.sliceAsBytes(pack_buf[0 .. n_expert * fg]));
             gguf.release(info.data);

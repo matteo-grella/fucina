@@ -971,7 +971,8 @@ pub const q5_1_golden: [num_vectors][192]u8 = .{
 const std = @import("std");
 const qm = @import("../quant.zig");
 
-const qk_k_block_size = qm.qk_k_block_size;
+const types = @import("types.zig");
+const qk_k_block_size = types.qk_k_block_size;
 
 fn inputVector(index: usize) [qk_k_block_size]f32 {
     var out: [qk_k_block_size]f32 = undefined;
@@ -1012,15 +1013,15 @@ test "f32 -> Q4_K/Q5_K/Q6_K encoders match ggml reference bytes" {
         const x = inputVector(v);
 
         var q4k: [1]qm.BlockQ4_K = undefined;
-        try qm.quantizeRowQ4_KInto(&q4k, &x);
+        try qm.q4_k.quantizeRowQ4_KInto(&q4k, &x);
         try std.testing.expectEqualSlices(u8, &q4_k_golden[v], std.mem.asBytes(&q4k[0]));
 
         var q5k: [1]qm.BlockQ5_K = undefined;
-        try qm.quantizeRowQ5_KInto(&q5k, &x);
+        try qm.q5_k.quantizeRowQ5_KInto(&q5k, &x);
         try std.testing.expectEqualSlices(u8, &q5_k_golden[v], std.mem.asBytes(&q5k[0]));
 
         var q6k: [1]qm.BlockQ6_K = undefined;
-        try qm.quantizeRowQ6_KInto(&q6k, &x);
+        try qm.q6_k.quantizeRowQ6_KInto(&q6k, &x);
         try std.testing.expectEqualSlices(u8, &q6_k_golden[v], std.mem.asBytes(&q6k[0]));
     }
 }
@@ -1030,15 +1031,15 @@ test "f32 -> Q4_1/Q5_0/Q5_1 encoders match ggml reference bytes" {
         const x = inputVector(v);
 
         var q41: [8]qm.BlockQ4_1 = undefined;
-        try qm.quantizeRowQ4_1Into(&q41, &x);
+        try qm.cold.quantizeRowQ4_1Into(&q41, &x);
         try std.testing.expectEqualSlices(u8, &q4_1_golden[v], std.mem.sliceAsBytes(q41[0..]));
 
         var q50: [8]qm.BlockQ5_0 = undefined;
-        try qm.quantizeRowQ5_0Into(&q50, &x);
+        try qm.cold.quantizeRowQ5_0Into(&q50, &x);
         try std.testing.expectEqualSlices(u8, &q5_0_golden[v], std.mem.sliceAsBytes(q50[0..]));
 
         var q51: [8]qm.BlockQ5_1 = undefined;
-        try qm.quantizeRowQ5_1Into(&q51, &x);
+        try qm.cold.quantizeRowQ5_1Into(&q51, &x);
         try std.testing.expectEqualSlices(u8, &q5_1_golden[v], std.mem.sliceAsBytes(q51[0..]));
     }
 }
@@ -1072,7 +1073,7 @@ test "quantizeRowForDType dispatch routes to the per-format encoders" {
 
     // Already-existing encoders stay reachable through the same entry.
     var q80_direct: [8]qm.BlockQ8_0 = undefined;
-    try qm.quantizeRowQ8_0Into(&q80_direct, &x);
+    try qm.q8k.quantizeRowQ8_0Into(&q80_direct, &x);
     var q80_dispatch: [8]qm.BlockQ8_0 = undefined;
     try qm.quantizeRowForDType(.q8_0, &q80_dispatch, &x);
     try std.testing.expectEqualSlices(
@@ -1086,18 +1087,18 @@ test "encoders validate the supplied block count" {
     const x = inputVector(0);
     var too_few_q4k: [0]qm.BlockQ4_K = undefined;
     try std.testing.expectError(
-        qm.QuantizedFormatError.InvalidQuantizedLength,
-        qm.quantizeRowQ4_KInto(&too_few_q4k, &x),
+        qm.types.QuantizedFormatError.InvalidQuantizedLength,
+        qm.q4_k.quantizeRowQ4_KInto(&too_few_q4k, &x),
     );
     var too_many_q6k: [3]qm.BlockQ6_K = undefined;
     try std.testing.expectError(
-        qm.QuantizedFormatError.InvalidQuantizedLength,
-        qm.quantizeRowQ6_KInto(&too_many_q6k, &x),
+        qm.types.QuantizedFormatError.InvalidQuantizedLength,
+        qm.q6_k.quantizeRowQ6_KInto(&too_many_q6k, &x),
     );
     var blocks_q5_0: [4]qm.BlockQ5_0 = undefined;
     try std.testing.expectError(
-        qm.QuantizedFormatError.InvalidQuantizedLength,
-        qm.quantizeRowQ5_0Into(&blocks_q5_0, x[0..96]),
+        qm.types.QuantizedFormatError.InvalidQuantizedLength,
+        qm.cold.quantizeRowQ5_0Into(&blocks_q5_0, x[0..96]),
     );
 }
 
@@ -1109,32 +1110,32 @@ test "K-quant and legacy encode round-trip RMSE on fresh random rows" {
     // Per-format bounds: ~1.5x the quantization-noise RMSE expected for
     // uniform [-1, 1] data (step/sqrt(12) with the per-sub-block step).
     var q4k: [4]qm.BlockQ4_K = undefined;
-    try qm.quantizeRowQ4_KInto(&q4k, &x);
+    try qm.q4_k.quantizeRowQ4_KInto(&q4k, &x);
     try qm.dequantizeRowForDType(.q4_k, &dec, &q4k);
     try std.testing.expect(rmse(&x, &dec) < 0.055);
 
     var q5k: [4]qm.BlockQ5_K = undefined;
-    try qm.quantizeRowQ5_KInto(&q5k, &x);
+    try qm.q5_k.quantizeRowQ5_KInto(&q5k, &x);
     try qm.dequantizeRowForDType(.q5_k, &dec, &q5k);
     try std.testing.expect(rmse(&x, &dec) < 0.030);
 
     var q6k: [4]qm.BlockQ6_K = undefined;
-    try qm.quantizeRowQ6_KInto(&q6k, &x);
+    try qm.q6_k.quantizeRowQ6_KInto(&q6k, &x);
     try qm.dequantizeRowForDType(.q6_k, &dec, &q6k);
     try std.testing.expect(rmse(&x, &dec) < 0.016);
 
     var q41: [32]qm.BlockQ4_1 = undefined;
-    try qm.quantizeRowQ4_1Into(&q41, &x);
+    try qm.cold.quantizeRowQ4_1Into(&q41, &x);
     try qm.dequantizeRowForDType(.q4_1, &dec, &q41);
     try std.testing.expect(rmse(&x, &dec) < 0.060);
 
     var q50: [32]qm.BlockQ5_0 = undefined;
-    try qm.quantizeRowQ5_0Into(&q50, &x);
+    try qm.cold.quantizeRowQ5_0Into(&q50, &x);
     try qm.dequantizeRowForDType(.q5_0, &dec, &q50);
     try std.testing.expect(rmse(&x, &dec) < 0.035);
 
     var q51: [32]qm.BlockQ5_1 = undefined;
-    try qm.quantizeRowQ5_1Into(&q51, &x);
+    try qm.cold.quantizeRowQ5_1Into(&q51, &x);
     try qm.dequantizeRowForDType(.q5_1, &dec, &q51);
     try std.testing.expect(rmse(&x, &dec) < 0.030);
 }
@@ -1149,21 +1150,21 @@ test "freshly encoded K-quant blocks feed the existing matmul kernels" {
     fillUniform(&a, 0x5EED);
 
     var q8: [1]qm.BlockQ8_K = undefined;
-    try qm.quantizeRowQ8_KInto(&q8, &a);
+    try qm.q8k.quantizeRowQ8_KInto(&q8, &a);
     var dense_a: [qk_k_block_size]f32 = undefined;
-    qm.dequantizeBlockQ8_KInto(&dense_a, &q8[0]);
+    qm.q8k.dequantizeBlockQ8_KInto(&dense_a, &q8[0]);
 
     // Q4_K
     {
         var blocks: [n]qm.BlockQ4_K = undefined;
-        for (&blocks, &w) |*block, *row| try qm.quantizeRowQ4_KInto(block[0..1], row);
-        var qrhs = try qm.quantizedMatmulRhsQ4_KFromBlocks(allocator, qk_k_block_size, n, &blocks);
+        for (&blocks, &w) |*block, *row| try qm.q4_k.quantizeRowQ4_KInto(block[0..1], row);
+        var qrhs = try qm.q8k.quantizedMatmulRhsQ4_KFromBlocks(allocator, qk_k_block_size, n, &blocks);
         defer qrhs.deinit();
         var out: [n]f32 = undefined;
-        qm.matmulQ4_KRhsRange(&out, &q8, &qrhs, 1, n, 0, 1);
+        qm.q4_k.matmulQ4_KRhsRange(&out, &q8, &qrhs, 1, n, 0, 1);
         for (blocks, out) |block, got| {
             var dense_w: [qk_k_block_size]f32 = undefined;
-            qm.dequantizeBlockQ4_KInto(&dense_w, &block);
+            qm.q4_k.dequantizeBlockQ4_KInto(&dense_w, &block);
             var expected: f32 = 0;
             for (dense_w, dense_a) |wv, av| expected += wv * av;
             try std.testing.expectApproxEqAbs(expected, got, 5e-3);
@@ -1173,14 +1174,14 @@ test "freshly encoded K-quant blocks feed the existing matmul kernels" {
     // Q5_K
     {
         var blocks: [n]qm.BlockQ5_K = undefined;
-        for (&blocks, &w) |*block, *row| try qm.quantizeRowQ5_KInto(block[0..1], row);
-        var qrhs = try qm.quantizedMatmulRhsQ5_KFromBlocks(allocator, qk_k_block_size, n, &blocks);
+        for (&blocks, &w) |*block, *row| try qm.q5_k.quantizeRowQ5_KInto(block[0..1], row);
+        var qrhs = try qm.q8k.quantizedMatmulRhsQ5_KFromBlocks(allocator, qk_k_block_size, n, &blocks);
         defer qrhs.deinit();
         var out: [n]f32 = undefined;
-        qm.matmulQ5_KRhsRange(&out, &q8, &qrhs, 1, n, 0, 1);
+        qm.q5_k.matmulQ5_KRhsRange(&out, &q8, &qrhs, 1, n, 0, 1);
         for (blocks, out) |block, got| {
             var dense_w: [qk_k_block_size]f32 = undefined;
-            qm.dequantizeBlockQ5_KInto(&dense_w, &block);
+            qm.q5_k.dequantizeBlockQ5_KInto(&dense_w, &block);
             var expected: f32 = 0;
             for (dense_w, dense_a) |wv, av| expected += wv * av;
             try std.testing.expectApproxEqAbs(expected, got, 5e-3);
@@ -1190,14 +1191,14 @@ test "freshly encoded K-quant blocks feed the existing matmul kernels" {
     // Q6_K
     {
         var blocks: [n]qm.BlockQ6_K = undefined;
-        for (&blocks, &w) |*block, *row| try qm.quantizeRowQ6_KInto(block[0..1], row);
-        var qrhs = try qm.quantizedMatmulRhsQ6_KFromBlocks(allocator, qk_k_block_size, n, &blocks);
+        for (&blocks, &w) |*block, *row| try qm.q6_k.quantizeRowQ6_KInto(block[0..1], row);
+        var qrhs = try qm.q8k.quantizedMatmulRhsQ6_KFromBlocks(allocator, qk_k_block_size, n, &blocks);
         defer qrhs.deinit();
         var out: [n]f32 = undefined;
-        qm.matmulQ6_KRhsRange(&out, &q8, &qrhs, 1, n, 0, 1);
+        qm.q6_k.matmulQ6_KRhsRange(&out, &q8, &qrhs, 1, n, 0, 1);
         for (blocks, out) |block, got| {
             var dense_w: [qk_k_block_size]f32 = undefined;
-            qm.dequantizeBlockQ6_KInto(&dense_w, &block);
+            qm.q6_k.dequantizeBlockQ6_KInto(&dense_w, &block);
             var expected: f32 = 0;
             for (dense_w, dense_a) |wv, av| expected += wv * av;
             try std.testing.expectApproxEqAbs(expected, got, 5e-3);
@@ -1213,74 +1214,74 @@ test "encoder edge cases: all-zero and constant rows" {
         var dec: [qk_k_block_size]f32 = undefined;
 
         var q4k: [1]qm.BlockQ4_K = undefined;
-        try qm.quantizeRowQ4_KInto(&q4k, &zeros);
+        try qm.q4_k.quantizeRowQ4_KInto(&q4k, &zeros);
         try std.testing.expectEqual([2]u16{ 0, 0 }, q4k[0].dm);
         try qm.dequantizeRowForDType(.q4_k, &dec, &q4k);
         for (dec) |v| try std.testing.expectEqual(@as(f32, 0), v);
 
         var q5k: [1]qm.BlockQ5_K = undefined;
-        try qm.quantizeRowQ5_KInto(&q5k, &zeros);
+        try qm.q5_k.quantizeRowQ5_KInto(&q5k, &zeros);
         try std.testing.expectEqual([2]u16{ 0, 0 }, q5k[0].dm);
         try qm.dequantizeRowForDType(.q5_k, &dec, &q5k);
         for (dec) |v| try std.testing.expectEqual(@as(f32, 0), v);
 
         // Q6_K hits the GROUP_MAX_EPS path: the whole block is zeroed.
         var q6k: [1]qm.BlockQ6_K = undefined;
-        try qm.quantizeRowQ6_KInto(&q6k, &zeros);
+        try qm.q6_k.quantizeRowQ6_KInto(&q6k, &zeros);
         for (std.mem.asBytes(&q6k[0])) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
         try qm.dequantizeRowForDType(.q6_k, &dec, &q6k);
         for (dec) |v| try std.testing.expectEqual(@as(f32, 0), v);
 
         var q41: [8]qm.BlockQ4_1 = undefined;
-        try qm.quantizeRowQ4_1Into(&q41, &zeros);
+        try qm.cold.quantizeRowQ4_1Into(&q41, &zeros);
         try qm.dequantizeRowForDType(.q4_1, &dec, &q41);
         for (dec) |v| try std.testing.expectEqual(@as(f32, 0), v);
 
         var q50: [8]qm.BlockQ5_0 = undefined;
-        try qm.quantizeRowQ5_0Into(&q50, &zeros);
+        try qm.cold.quantizeRowQ5_0Into(&q50, &zeros);
         try qm.dequantizeRowForDType(.q5_0, &dec, &q50);
         for (dec) |v| try std.testing.expectEqual(@as(f32, 0), v);
 
         var q51: [8]qm.BlockQ5_1 = undefined;
-        try qm.quantizeRowQ5_1Into(&q51, &zeros);
+        try qm.cold.quantizeRowQ5_1Into(&q51, &zeros);
         try qm.dequantizeRowForDType(.q5_1, &dec, &q51);
         for (dec) |v| try std.testing.expectEqual(@as(f32, 0), v);
     }
 
     // Constant row: round-trips to the constant within fp16-scale error.
     // (NaN/inf inputs are out of contract — the encoders, like ggml's, assume
-    // finite input; see the contract note in quant.zig.)
+    // finite input; see the contract note in q8k.zig.)
     {
         const constant = [_]f32{0.75} ** qk_k_block_size;
         var dec: [qk_k_block_size]f32 = undefined;
 
         var q4k: [1]qm.BlockQ4_K = undefined;
-        try qm.quantizeRowQ4_KInto(&q4k, &constant);
+        try qm.q4_k.quantizeRowQ4_KInto(&q4k, &constant);
         try qm.dequantizeRowForDType(.q4_k, &dec, &q4k);
         for (dec) |v| try std.testing.expectApproxEqAbs(@as(f32, 0.75), v, 5e-3);
 
         var q5k: [1]qm.BlockQ5_K = undefined;
-        try qm.quantizeRowQ5_KInto(&q5k, &constant);
+        try qm.q5_k.quantizeRowQ5_KInto(&q5k, &constant);
         try qm.dequantizeRowForDType(.q5_k, &dec, &q5k);
         for (dec) |v| try std.testing.expectApproxEqAbs(@as(f32, 0.75), v, 5e-3);
 
         var q6k: [1]qm.BlockQ6_K = undefined;
-        try qm.quantizeRowQ6_KInto(&q6k, &constant);
+        try qm.q6_k.quantizeRowQ6_KInto(&q6k, &constant);
         try qm.dequantizeRowForDType(.q6_k, &dec, &q6k);
         for (dec) |v| try std.testing.expectApproxEqAbs(@as(f32, 0.75), v, 5e-3);
 
         var q41: [8]qm.BlockQ4_1 = undefined;
-        try qm.quantizeRowQ4_1Into(&q41, &constant);
+        try qm.cold.quantizeRowQ4_1Into(&q41, &constant);
         try qm.dequantizeRowForDType(.q4_1, &dec, &q41);
         for (dec) |v| try std.testing.expectApproxEqAbs(@as(f32, 0.75), v, 5e-4);
 
         var q50: [8]qm.BlockQ5_0 = undefined;
-        try qm.quantizeRowQ5_0Into(&q50, &constant);
+        try qm.cold.quantizeRowQ5_0Into(&q50, &constant);
         try qm.dequantizeRowForDType(.q5_0, &dec, &q50);
         for (dec) |v| try std.testing.expectApproxEqAbs(@as(f32, 0.75), v, 5e-4);
 
         var q51: [8]qm.BlockQ5_1 = undefined;
-        try qm.quantizeRowQ5_1Into(&q51, &constant);
+        try qm.cold.quantizeRowQ5_1Into(&q51, &constant);
         try qm.dequantizeRowForDType(.q5_1, &dec, &q51);
         for (dec) |v| try std.testing.expectApproxEqAbs(@as(f32, 0.75), v, 5e-4);
     }
@@ -1306,8 +1307,8 @@ test "legacy encoders: degenerate-but-finite blocks are defined (no @intFromFloa
     inline for (.{ subnormal, huge }) |x| {
         var q40_a: [1]qm.BlockQ4_0 = undefined;
         var q40_b: [1]qm.BlockQ4_0 = undefined;
-        try qm.quantizeRowQ4_0Into(&q40_a, &x);
-        try qm.quantizeRowQ4_0Into(&q40_b, &x);
+        try qm.cold.quantizeRowQ4_0Into(&q40_a, &x);
+        try qm.cold.quantizeRowQ4_0Into(&q40_b, &x);
         try std.testing.expectEqualSlices(
             u8,
             std.mem.sliceAsBytes(q40_a[0..]),
@@ -1316,8 +1317,8 @@ test "legacy encoders: degenerate-but-finite blocks are defined (no @intFromFloa
 
         var q41_a: [1]qm.BlockQ4_1 = undefined;
         var q41_b: [1]qm.BlockQ4_1 = undefined;
-        try qm.quantizeRowQ4_1Into(&q41_a, &x);
-        try qm.quantizeRowQ4_1Into(&q41_b, &x);
+        try qm.cold.quantizeRowQ4_1Into(&q41_a, &x);
+        try qm.cold.quantizeRowQ4_1Into(&q41_b, &x);
         try std.testing.expectEqualSlices(
             u8,
             std.mem.sliceAsBytes(q41_a[0..]),
@@ -1326,8 +1327,8 @@ test "legacy encoders: degenerate-but-finite blocks are defined (no @intFromFloa
 
         var q50_a: [1]qm.BlockQ5_0 = undefined;
         var q50_b: [1]qm.BlockQ5_0 = undefined;
-        try qm.quantizeRowQ5_0Into(&q50_a, &x);
-        try qm.quantizeRowQ5_0Into(&q50_b, &x);
+        try qm.cold.quantizeRowQ5_0Into(&q50_a, &x);
+        try qm.cold.quantizeRowQ5_0Into(&q50_b, &x);
         try std.testing.expectEqualSlices(
             u8,
             std.mem.sliceAsBytes(q50_a[0..]),
@@ -1336,8 +1337,8 @@ test "legacy encoders: degenerate-but-finite blocks are defined (no @intFromFloa
 
         var q51_a: [1]qm.BlockQ5_1 = undefined;
         var q51_b: [1]qm.BlockQ5_1 = undefined;
-        try qm.quantizeRowQ5_1Into(&q51_a, &x);
-        try qm.quantizeRowQ5_1Into(&q51_b, &x);
+        try qm.cold.quantizeRowQ5_1Into(&q51_a, &x);
+        try qm.cold.quantizeRowQ5_1Into(&q51_b, &x);
         try std.testing.expectEqualSlices(
             u8,
             std.mem.sliceAsBytes(q51_a[0..]),

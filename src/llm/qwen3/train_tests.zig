@@ -96,8 +96,8 @@ fn toServingQuant(ctx: *ExecContext, w: *weights.LinearWeight, comptime format: 
     const blocks = try ctx.allocator.alloc(Block, values.len / block_len);
     defer ctx.allocator.free(blocks);
     switch (format) {
-        .q8_0 => try quant_encode.quantizeRowQ8_0Into(blocks, values),
-        .q4_k => try quant_encode.quantizeRowQ4_KInto(blocks, values),
+        .q8_0 => try quant_encode.q8k.quantizeRowQ8_0Into(blocks, values),
+        .q4_k => try quant_encode.q4_k.quantizeRowQ4_KInto(blocks, values),
     }
     const info = fucina.gguf.TensorInfo{
         .name = "synthetic",

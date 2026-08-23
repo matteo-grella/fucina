@@ -78,7 +78,7 @@ pub fn main(init: std.process.Init) !void {
     defer out.flush() catch {};
     try out.print("packed dense GEMM  workers={d} (+caller) vector_len={d} blas={s} order={s}\n", .{
         workers,
-        native.vector_len,
+        raw_backend.vector_impl.vector_len,
         @tagName(raw_backend.native_blas_kind),
         if (packed_first) "packed-first" else "generic-first",
     });

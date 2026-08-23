@@ -12,9 +12,6 @@ const parallel = @import("../../parallel.zig");
 const thread = @import("../../thread.zig");
 const common = @import("common.zig");
 
-const ParallelConfig = common.ParallelConfig;
-const Vf32 = common.Vf32;
-const vector_len = common.vector_len;
 const output_tile = 4;
 const max_input_tile = if (builtin.cpu.arch == .aarch64) 6 else 3;
 const tasks_per_participant = 3;
@@ -31,14 +28,14 @@ const Task = struct {
     col_end: usize,
 };
 
-pub fn gemmPackedNtIntoWithConfig(
+pub fn gemmPackedNtInto(
+    pc: common.ParallelConfig,
     out: []f32,
     lhs: []const f32,
     rhs: []const f32,
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) void {
     if (m == 0 or n == 0) return;
     if (k == 0) {
@@ -46,7 +43,7 @@ pub fn gemmPackedNtIntoWithConfig(
         return;
     }
 
-    const pool = config.pool orelse {
+    const pool = pc.pool orelse {
         gemmPackedNtCols(out, lhs, rhs, m, n, k, 0, n);
         return;
     };
@@ -157,20 +154,20 @@ inline fn microTileX2(
     row: usize,
     col: usize,
 ) void {
-    var acc: [rows][2]Vf32 = undefined;
+    var acc: [rows][2]common.Vf32 = undefined;
     inline for (0..rows) |r| {
         acc[r][0] = @splat(0);
         acc[r][1] = @splat(0);
     }
 
     var p: usize = 0;
-    while (p + vector_len <= k) : (p += vector_len) {
-        const b0: Vf32 = rhs[col * k + p ..][0..vector_len].*;
-        const b1: Vf32 = rhs[(col + 1) * k + p ..][0..vector_len].*;
+    while (p + common.vector_len <= k) : (p += common.vector_len) {
+        const b0: common.Vf32 = rhs[col * k + p ..][0..common.vector_len].*;
+        const b1: common.Vf32 = rhs[(col + 1) * k + p ..][0..common.vector_len].*;
         inline for (0..rows) |r| {
-            const a: Vf32 = lhs[(row + r) * k + p ..][0..vector_len].*;
-            acc[r][0] = @mulAdd(Vf32, a, b0, acc[r][0]);
-            acc[r][1] = @mulAdd(Vf32, a, b1, acc[r][1]);
+            const a: common.Vf32 = lhs[(row + r) * k + p ..][0..common.vector_len].*;
+            acc[r][0] = @mulAdd(common.Vf32, a, b0, acc[r][0]);
+            acc[r][1] = @mulAdd(common.Vf32, a, b1, acc[r][1]);
         }
     }
 
@@ -248,18 +245,18 @@ inline fn microTile(
 ) void {
     var col = col_start;
     while (col + output_tile <= col_end) : (col += output_tile) {
-        var acc: [rows][output_tile]Vf32 = undefined;
+        var acc: [rows][output_tile]common.Vf32 = undefined;
         inline for (0..rows) |r| {
             inline for (0..output_tile) |c| acc[r][c] = @splat(0);
         }
 
         var p: usize = 0;
-        while (p + vector_len <= k) : (p += vector_len) {
-            var av: [rows]Vf32 = undefined;
-            inline for (0..rows) |r| av[r] = lhs[(row + r) * k + p ..][0..vector_len].*;
+        while (p + common.vector_len <= k) : (p += common.vector_len) {
+            var av: [rows]common.Vf32 = undefined;
+            inline for (0..rows) |r| av[r] = lhs[(row + r) * k + p ..][0..common.vector_len].*;
             inline for (0..output_tile) |c| {
-                const bv: Vf32 = rhs[(col + c) * k + p ..][0..vector_len].*;
-                inline for (0..rows) |r| acc[r][c] = @mulAdd(Vf32, av[r], bv, acc[r][c]);
+                const bv: common.Vf32 = rhs[(col + c) * k + p ..][0..common.vector_len].*;
+                inline for (0..rows) |r| acc[r][c] = @mulAdd(common.Vf32, av[r], bv, acc[r][c]);
             }
         }
 
@@ -279,14 +276,14 @@ inline fn microTile(
     }
 
     while (col < col_end) : (col += 1) {
-        var acc: [rows]Vf32 = undefined;
+        var acc: [rows]common.Vf32 = undefined;
         inline for (0..rows) |r| acc[r] = @splat(0);
         var p: usize = 0;
-        while (p + vector_len <= k) : (p += vector_len) {
-            const bv: Vf32 = rhs[col * k + p ..][0..vector_len].*;
+        while (p + common.vector_len <= k) : (p += common.vector_len) {
+            const bv: common.Vf32 = rhs[col * k + p ..][0..common.vector_len].*;
             inline for (0..rows) |r| {
-                const av: Vf32 = lhs[(row + r) * k + p ..][0..vector_len].*;
-                acc[r] = @mulAdd(Vf32, av, bv, acc[r]);
+                const av: common.Vf32 = lhs[(row + r) * k + p ..][0..common.vector_len].*;
+                acc[r] = @mulAdd(common.Vf32, av, bv, acc[r]);
             }
         }
         var sums: [rows]f32 = undefined;
@@ -303,14 +300,14 @@ test "packed dense microkernel tails agree with scalar" {
     const testing = std.testing;
     const m = 7;
     const n = 9;
-    const k = vector_len + 3;
+    const k = common.vector_len + 3;
     var lhs: [m * k]f32 = undefined;
     var rhs: [n * k]f32 = undefined;
     for (&lhs, 0..) |*x, i| x.* = @as(f32, @floatFromInt(@as(isize, @intCast(i % 13)) - 6)) / 7;
     for (&rhs, 0..) |*x, i| x.* = @as(f32, @floatFromInt(@as(isize, @intCast(i % 11)) - 5)) / 9;
     var got: [m * n]f32 = undefined;
     var want: [m * n]f32 = undefined;
-    gemmPackedNtIntoWithConfig(&got, &lhs, &rhs, m, n, k, .{});
+    gemmPackedNtInto(.{}, &got, &lhs, &rhs, m, n, k);
     for (0..m) |i| for (0..n) |j| {
         var sum: f32 = 0;
         for (0..k) |p| sum += lhs[i * k + p] * rhs[j * k + p];

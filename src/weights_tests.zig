@@ -5,6 +5,8 @@
 const std = @import("std");
 const fucina = @import("fucina.zig");
 const weights = @import("weights.zig");
+const dtype_mod = @import("dtype.zig");
+const rng = @import("rng.zig");
 
 const ExecContext = fucina.ExecContext;
 const gguf = fucina.gguf;
@@ -298,6 +300,17 @@ test "linearSeqQ6_K: compact decode route (m < 4) matches the packed path bitwis
         try std.testing.expectEqualSlices(f32, try y_packed.dataConst(), try y_compact.dataConst());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Resident bf16 weights.
+//
+// Exactness note: the tests below use small-integer values. Those are
+// exactly representable in bf16 (8-bit mantissa), bf16 -> f32 widening is
+// always exact (u16 << 16), and the per-element products / partial sums are
+// small integers that f32 represents exactly under ANY accumulation order,
+// so the bf16 path must match the f32 reference BITWISE on every backend
+// (native/scalar, BLAS or not), no tolerance needed.
+// ---------------------------------------------------------------------------
 
 /// f32 -> bf16 bit truncation; exact (== round-to-nearest) for the
 /// small-integer test values used here.
@@ -638,11 +651,11 @@ test "tie-fitted ptqtp serves the folded one-pass semantics" {
     const qlhs = try allocator.alloc(fucina.internal.backend_mod.quantized_matmul.BlockQ8_K, seq_len * bpr);
     defer allocator.free(qlhs);
     for (0..seq_len) |r| {
-        try fucina.internal.backend_mod.quantized_matmul.quantizeRowQ8_KInto(qlhs[r * bpr ..][0..bpr], x_vals[r * in_dim ..][0..in_dim]);
+        try fucina.internal.backend_mod.quantized_matmul.q8k.quantizeRowQ8_KInto(qlhs[r * bpr ..][0..bpr], x_vals[r * in_dim ..][0..in_dim]);
     }
     const want = try allocator.alloc(f32, seq_len * out_dim);
     defer allocator.free(want);
-    fucina.internal.backend_mod.quantized_matmul.matmulTQ2_0FoldedX4RhsRange(want, qlhs, weight.ptqtp.pfold.?, bpr, out_dim, 0, seq_len);
+    fucina.internal.backend_mod.quantized_matmul.ternary.matmulTQ2_0FoldedX4RhsRange(want, qlhs, weight.ptqtp.pfold.?, bpr, out_dim, 0, seq_len);
     try std.testing.expectEqualSlices(f32, want, try y.dataConst());
 }
 
@@ -799,3 +812,29 @@ test "LookupWeight: mapped rows match the resident getRowsAs bitwise" {
     }
 }
 
+test "getRowsAs: bf16 embedding rows match the f32-widened table bitwise" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const vocab = 8;
+    const hidden = 16;
+    var t_vals: [vocab * hidden]f32 = undefined;
+    // Arbitrary bf16-exact values, not just integers: gather + widen is exact
+    // for ANY bf16 bit pattern, so snap to bf16 first and widen the snapped
+    // values for the reference.
+    rng.uniformFill(0xB16, &t_vals, -2, 2);
+    for (&t_vals) |*v| v.* = dtype_mod.bf16ToF32(testBf16Bits(v.*));
+
+    var pair = try testBf16AndF32Pair(&ctx, &t_vals, vocab, hidden);
+    defer pair[0].deinit();
+    defer pair[1].deinit();
+
+    const ids = [_]usize{ 3, 0, 7, 3 };
+    var rows_bf16 = try pair[0].getRowsAs(&ctx, &ids, .embed);
+    defer rows_bf16.deinit();
+    var rows_ref = try pair[1].getRowsAs(&ctx, &ids, .embed);
+    defer rows_ref.deinit();
+    try std.testing.expectEqualSlices(f32, try rows_ref.dataConst(), try rows_bf16.dataConst());
+}

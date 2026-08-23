@@ -12,6 +12,7 @@ const Impl = struct {
     const cpu = cpu_impl.kernels;
     const native = native_impl.kernels;
     const ParallelConfig = native_impl.ParallelConfig;
+    const pool = @import("vector/pool.zig");
 
     const elementwise_tolerance: f32 = 1e-6;
     const matmul_tolerance_scale: f32 = 1e-5;
@@ -506,7 +507,7 @@ const Impl = struct {
         try checkBatchedSharedA(std.testing.allocator, prng.random(), cpu.matmulBatchedTransB2DIntoUnchecked, native.matmulBatchedTransB2DIntoUnchecked, .nt);
     }
 
-    fn checkPool2dParity(comptime kind: cpu_impl.PoolKind, allocator: Allocator, rng: std.Random) !void {
+    fn checkPool2dParity(comptime kind: pool.PoolKind, allocator: Allocator, rng: std.Random) !void {
         // h, w, c, k, s, p — odd channel counts exercise the SIMD remainder loop.
         const geoms = [_][6]usize{
             .{ 6, 6, 3, 2, 2, 0 },
@@ -530,7 +531,7 @@ const Impl = struct {
             var input = try Tensor.fromSlice(allocator, &[_]usize{ h, w, c }, in_data);
             defer input.deinit();
 
-            const d: cpu_impl.Pool2dDims = .{ .h = h, .w = w, .c = c, .oh = oh, .ow = ow, .kh = k, .kw = k, .stride_h = s, .stride_w = s, .pad_h = p, .pad_w = p };
+            const d: pool.Pool2dDims = .{ .h = h, .w = w, .c = c, .oh = oh, .ow = ow, .kh = k, .kw = k, .stride_h = s, .stride_w = s, .pad_h = p, .pad_w = p };
             var cpu_out = try Tensor.zeros(allocator, &[_]usize{ oh, ow, c });
             defer cpu_out.deinit();
             cpu.pool2dInto(.{}, kind, &cpu_out, &input, d);

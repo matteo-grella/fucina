@@ -87,7 +87,7 @@ var ternary_d: f32 = 1.0 / @sqrt(@as(f32, hidden) * 2.0 / 3.0);
 /// IS the inference weight: nothing is duplicated (allocator = null, so a
 /// deinit would free nothing).
 fn borrowRhs(blocks: []BlockTQ2_0, k: usize, n: usize) !Rhs {
-    return quant.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, blocks);
+    return quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, blocks);
 }
 
 /// Uniform random trits packed straight into TQ2_0 blocks: draw t in
@@ -101,7 +101,7 @@ fn randomTrits(allocator: Allocator, seed: u64, len: usize) ![]BlockTQ2_0 {
 
     const blocks = try allocator.alloc(BlockTQ2_0, len / block_len);
     errdefer allocator.free(blocks);
-    try quant.quantizeRowTQ2_0ScaledInto(blocks, vals, ternary_d);
+    try quant.ternary.quantizeRowTQ2_0ScaledInto(blocks, vals, ternary_d);
     return blocks;
 }
 
@@ -258,7 +258,7 @@ fn tanhRowsBias(act: []f32, lin: []const f32, bias: []const f32) void {
 
 fn quantizeActRows(dst: []BlockQ8_K, act: []const f32) !void {
     for (0..n_points) |i| {
-        try quant.quantizeRowQ8_KInto(
+        try quant.q8k.quantizeRowQ8_KInto(
             dst[i * blocks_per_row ..][0..blocks_per_row],
             act[i * hidden ..][0..hidden],
         );
@@ -284,11 +284,11 @@ fn evalNet(net: NetView, xs: *const [n_points * 2]f32, labels: *const [n_points]
     tanhRowsBias(s.act, s.lin, net.b1);
     // L2 ternary [hidden -> hidden].
     try quantizeActRows(s.aq, s.act);
-    quant.matmulTQ2_0RhsRange(s.lin, s.aq, net.l2, n_points, hidden, 0, n_points);
+    quant.ternary.matmulTQ2_0RhsRange(s.lin, s.aq, net.l2, n_points, hidden, 0, n_points);
     tanhRowsBias(s.act, s.lin, net.b2);
     // L3 ternary head [hidden -> n_classes].
     try quantizeActRows(s.aq, s.act);
-    quant.matmulTQ2_0RhsRange(s.logits, s.aq, net.l3, n_points, n_classes, 0, n_points);
+    quant.ternary.matmulTQ2_0RhsRange(s.logits, s.aq, net.l3, n_points, n_classes, 0, n_points);
 
     var ce: f64 = 0;
     var correct: usize = 0;

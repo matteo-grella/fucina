@@ -10,10 +10,6 @@ const tensor = @import("../../tensor.zig");
 
 const Tensor = tensor.Tensor;
 
-const matmul2DIntoUncheckedTypedWithConfig = gemm.matmul2DIntoUncheckedTypedWithConfig;
-const matmulTransB2DIntoUncheckedBf16RhsWithConfig = gemm.matmulTransB2DIntoUncheckedBf16RhsWithConfig;
-const matmulTransB2DIntoUncheckedF16OperandsWithConfig = gemm.matmulTransB2DIntoUncheckedF16OperandsWithConfig;
-
 test "f32 accumulate GEMM equals store GEMM plus addend, bit-exact, including k=0" {
     const allocator = std.testing.allocator;
     // m spans the 8/4/1 row tiles, n has a vector tail on every ISA width.
@@ -37,8 +33,8 @@ test "f32 accumulate GEMM equals store GEMM plus addend, bit-exact, including k=
     var product = try Tensor.zeros(allocator, &.{ m, n });
     defer product.deinit();
 
-    gemm.matmul2DAccIntoUncheckedWithConfig(&acc_out, &a, &b, m, n, k, .{});
-    gemm.matmul2DIntoUncheckedWithConfig(&product, &a, &b, m, n, k, .{});
+    gemm.matmul2DAccIntoUnchecked(.{}, &acc_out, &a, &b, m, n, k);
+    gemm.matmul2DIntoUnchecked(.{}, &product, &a, &b, m, n, k);
 
     for (0..m * n) |idx| {
         try std.testing.expectEqual(seed_data[idx] + product.dataConst()[idx], acc_out.dataConst()[idx]);
@@ -48,7 +44,7 @@ test "f32 accumulate GEMM equals store GEMM plus addend, bit-exact, including k=
     // zeroes it).
     var untouched = try Tensor.fromSlice(allocator, &.{ m, n }, &seed_data);
     defer untouched.deinit();
-    gemm.matmul2DAccIntoUncheckedWithConfig(&untouched, &a, &b, m, n, 0, .{});
+    gemm.matmul2DAccIntoUnchecked(.{}, &untouched, &a, &b, m, n, 0);
     for (0..m * n) |idx| {
         try std.testing.expectEqual(seed_data[idx], untouched.dataConst()[idx]);
     }
@@ -78,7 +74,7 @@ test "f16 matmul vector kernel covers row tiles and tails" {
     var out = try tensor.TensorOf(.f16).zeros(allocator, &.{ m, n });
     defer out.deinit();
 
-    matmul2DIntoUncheckedTypedWithConfig(.f16, &out, &a, &b, m, n, k, .{});
+    gemm.matmul2DIntoUncheckedTyped(.{}, .f16, &out, &a, &b, m, n, k);
 
     for (0..m) |i| {
         for (0..n) |j| {
@@ -115,7 +111,7 @@ test "bf16 matmul vector kernel covers row tiles and tails" {
     var out = try tensor.TensorOf(.bf16).zeros(allocator, &.{ m, n });
     defer out.deinit();
 
-    matmul2DIntoUncheckedTypedWithConfig(.bf16, &out, &a, &b, m, n, k, .{});
+    gemm.matmul2DIntoUncheckedTyped(.{}, .bf16, &out, &a, &b, m, n, k);
 
     for (0..m) |i| {
         for (0..n) |j| {
@@ -156,7 +152,7 @@ test "f16 x f16 RHS TransB kernel covers row tiles, column tails, and odd k" {
     var out = try Tensor.zeros(allocator, &.{ m, n });
     defer out.deinit();
 
-    matmulTransB2DIntoUncheckedF16OperandsWithConfig(&out, &a, &b, m, n, k, .{});
+    gemm.matmulTransB2DIntoUncheckedF16Operands(.{}, &out, &a, &b, m, n, k);
 
     // aarch64 accumulates in f16 (native fmla) — per-step rounding error up
     // to ~1e-1 abs at these magnitudes; the widened arms accumulate in f32
@@ -199,7 +195,7 @@ test "f32 x bf16 RHS TransB kernel covers row tiles, column tails, and odd k" {
     var out = try Tensor.zeros(allocator, &.{ m, n });
     defer out.deinit();
 
-    matmulTransB2DIntoUncheckedBf16RhsWithConfig(&out, &a, &b, m, n, k, .{});
+    gemm.matmulTransB2DIntoUncheckedBf16Rhs(.{}, &out, &a, &b, m, n, k);
 
     for (0..m) |i| {
         for (0..n) |j| {

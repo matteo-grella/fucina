@@ -74,7 +74,7 @@ test "packed blocks are byte-identical to the scaled TQ2_0 encoder" {
     defer pair.deinit(ctx.allocator);
 
     var reference: [1]BlockTQ2_0 = undefined;
-    try quant.quantizeRowTQ2_0ScaledInto(&reference, &w, 0.5);
+    try quant.ternary.quantizeRowTQ2_0ScaledInto(&reference, &w, 0.5);
 
     try std.testing.expectEqual(reference[0].d, pair.plane1[0].d);
     try std.testing.expect(std.mem.eql(u8, &reference[0].qs, &pair.plane1[0].qs));
@@ -99,10 +99,10 @@ test "dual planes beat one plane beat blind absmean on gaussian weights" {
     // Blind b1.58: one absmean scale for the whole matrix, round-clip.
     const absmean_blocks = try std.testing.allocator.alloc(BlockTQ2_0, n * k / ptqtp.block_len);
     defer std.testing.allocator.free(absmean_blocks);
-    const d = quant.ternaryAbsmeanScale(&w);
+    const d = quant.ternary.ternaryAbsmeanScale(&w);
     const blocks_per_row = k / ptqtp.block_len;
     for (0..n) |r| {
-        try quant.quantizeRowTQ2_0ScaledInto(
+        try quant.ternary.quantizeRowTQ2_0ScaledInto(
             absmean_blocks[r * blocks_per_row ..][0..blocks_per_row],
             w[r * k ..][0..k],
             d,
@@ -157,8 +157,8 @@ test "borrowed RHS views multiply like the reconstruction" {
     var y_plane = [_]f32{0} ** (m * n);
     var rhs0 = try pair.rhs(0);
     var rhs1 = try pair.rhs(1);
-    quant.matmulTQ2_0F32RhsRange(&y, &x, &rhs0, m, n, 0, m);
-    quant.matmulTQ2_0F32RhsRange(&y_plane, &x, &rhs1, m, n, 0, m);
+    quant.ternary.matmulTQ2_0F32RhsRange(&y, &x, &rhs0, m, n, 0, m);
+    quant.ternary.matmulTQ2_0F32RhsRange(&y_plane, &x, &rhs1, m, n, 0, m);
     for (&y, y_plane) |*acc, v| acc.* += v;
 
     var rec: [n * k]f32 = undefined;
@@ -364,7 +364,7 @@ test "triple planes beat dual planes on gaussian weights, roughly threefold" {
     var x: [k]f32 = undefined;
     fillGaussian(&prng, &x, 1.0);
     var y = [_]f32{0} ** n;
-    quant.matmulTQ2_0F32RhsRange(&y, &x, &rhs2, 1, n, 0, 1);
+    quant.ternary.matmulTQ2_0F32RhsRange(&y, &x, &rhs2, 1, n, 0, 1);
     var rec1: [n * k]f32 = undefined;
     @memset(&rec1, 0);
     var only3 = ptqtp.PlanePair{

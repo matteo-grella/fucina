@@ -101,7 +101,7 @@ pub fn main(init: std.process.Init) !void {
 
     try out.print("f32 GEMM bench  workers={d} (+main)  vector_len={d}  mr x nr = {d}x{d}  blas={s}\n", .{
         workers,
-        native.vector_len,
+        raw_backend.vector_impl.vector_len,
         blocked.mr,
         blocked.nr,
         @tagName(raw_backend.native_blas_kind),
@@ -271,7 +271,7 @@ fn runSweep(allocator: std.mem.Allocator, out: anytype, cfg: native.ParallelConf
             for (ncs) |nc| {
                 const Run = struct {
                     fn go(c: []f32, a: []const f32, b: []const f32, c2: native.ParallelConfig, params: blocked.BlockParams) void {
-                        blocked.gemmBlockedWithParams(.nn, c, a, b, 2048, 2048, 2048, c2, params);
+                        blocked.gemmBlockedWithParams(c2, .nn, c, a, b, 2048, 2048, 2048, params);
                     }
                 }.go;
                 const params: blocked.BlockParams = .{ .kc = kc, .mc = mc, .nc = nc };
@@ -307,7 +307,7 @@ fn runSweepOmni(allocator: std.mem.Allocator, out: anytype, cfg: native.Parallel
             for (ncs) |nc| {
                 const Run = struct {
                     fn go(c: []f32, a: []const f32, b: []const f32, c2: native.ParallelConfig, params: blocked.BlockParams) void {
-                        blocked.gemmBlockedWithParams(.nt, c, a, b, 253, 3072, 1024, c2, params);
+                        blocked.gemmBlockedWithParams(c2, .nt, c, a, b, 253, 3072, 1024, params);
                     }
                 }.go;
                 const params: blocked.BlockParams = .{ .kc = kc, .mc = mc, .nc = nc };
@@ -343,14 +343,14 @@ fn runOmniParams(allocator: std.mem.Allocator, out: anytype, cfg: native.Paralle
                 inline else => |orient| {
                     const Run = struct {
                         fn go(c: []f32, a: []const f32, b: []const f32, m: usize, n: usize, k: usize, c2: native.ParallelConfig, p: blocked.BlockParams) void {
-                            blocked.gemmBlockedWithParams(orient, c, a, b, m, n, k, c2, p);
+                            blocked.gemmBlockedWithParams(c2, orient, c, a, b, m, n, k, p);
                         }
                     }.go;
                     ns = try median(Run, .{ data.c, data.a, data.b, s.m, s.n, s.k, cfg, params }, iters);
                 },
             }
             try out.print("{d}x{d}x{d} {s} kc={d:<3} mc={d:<3} nc={d:<4} | {d:>8.1} GF/s\n", .{
-                s.m, s.n, s.k, @tagName(s.orient), params.kc, params.mc, params.nc,
+                s.m,                                 s.n, s.k, @tagName(s.orient), params.kc, params.mc, params.nc,
                 flops / @as(f64, @floatFromInt(ns)),
             });
             try out.flush();
@@ -363,13 +363,13 @@ fn orientRunners(comptime orient: blocked.Orientation) type {
     return struct {
         fn rowk(c: []f32, a: []const f32, b: []const f32, m: usize, n: usize, k: usize, c2: native.ParallelConfig) void {
             switch (orient) {
-                .nn => vector.gemmNNRowPathWithConfig(c, a, b, m, n, k, c2),
-                .tn => vector.gemmTNRowPathWithConfig(c, a, b, m, n, k, c2),
-                .nt => vector.gemmNTRowPathWithConfig(c, a, b, m, n, k, c2),
+                .nn => vector.gemm.gemmNNRowPath(c2, c, a, b, m, n, k),
+                .tn => vector.gemm.gemmTNRowPath(c2, c, a, b, m, n, k),
+                .nt => vector.gemm.gemmNTRowPath(c2, c, a, b, m, n, k),
             }
         }
         fn blkd(c: []f32, a: []const f32, b: []const f32, m: usize, n: usize, k: usize, c2: native.ParallelConfig) void {
-            blocked.gemmBlocked(orient, c, a, b, m, n, k, c2);
+            blocked.gemmBlocked(c2, orient, c, a, b, m, n, k);
         }
     };
 }

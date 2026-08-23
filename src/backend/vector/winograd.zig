@@ -21,10 +21,9 @@
 
 const std = @import("std");
 const parallel = @import("../../parallel.zig");
-const vm = @import("common.zig");
+const common = @import("common.zig");
 
-const ParallelConfig = vm.ParallelConfig;
-const vector_len = vm.vector_len;
+const vector_len = common.vector_len;
 
 /// Geometry shared by the transforms. `pad_h/pad_w` ∈ {0, 1}; `tiles_y/x`
 /// cover ceil(oh/2) × ceil(ow/2) output tiles.
@@ -58,9 +57,9 @@ fn runWeightTask(task: *const WeightTask) void {
 
 /// U = G·g·Gᵀ per (oc, channel): `w[(oc·3+ky)·3+kx)·cin + ic]` →
 /// `u[e][oc·cin + ic]`, e = 4·i + j. Parallel over output channels.
-pub fn f2WeightTransformIntoWithConfig(u: *const [16][]f32, w: []const f32, cout: usize, cin: usize, config: ParallelConfig) void {
-    if (config.pool) |pool| {
-        const tc = vm.generalConvThreadCount(cout, 16 * cout * cin);
+pub fn f2WeightTransformInto(pc: common.ParallelConfig, u: *const [16][]f32, w: []const f32, cout: usize, cin: usize) void {
+    if (pc.pool) |pool| {
+        const tc = common.generalConvThreadCount(cout, 16 * cout * cin);
         if (tc > 1) {
             var tasks: [parallel.vector_max_threads]WeightTask = undefined;
             for (0..tc) |ti| {
@@ -134,10 +133,10 @@ fn runInputTask(task: *const InputTask) void {
 /// V = Bᵀ·d·B per 4×4 input tile (top-left at `(2ty − pad, 2tx − pad)`,
 /// out-of-range taps read as zero): `v[e][(ty·tiles_x+tx)·cin + ic]`.
 /// Parallel over tile rows.
-pub fn f2InputTransformIntoWithConfig(v: *const [16][]f32, x: []const f32, d: F2Dims, config: ParallelConfig) void {
-    if (config.pool) |pool| {
+pub fn f2InputTransformInto(pc: common.ParallelConfig, v: *const [16][]f32, x: []const f32, d: F2Dims) void {
+    if (pc.pool) |pool| {
         const work = 16 * d.tiles_y * d.tiles_x * d.cin;
-        const tc = vm.generalConvThreadCount(d.tiles_y, work);
+        const tc = common.generalConvThreadCount(d.tiles_y, work);
         if (tc > 1) {
             var tasks: [parallel.vector_max_threads]InputTask = undefined;
             for (0..tc) |ti| {
@@ -234,10 +233,10 @@ fn runOutputTask(task: *const OutputTask) void {
 /// caller would apply, evaluated on identical values) per tile; writes only
 /// the valid output positions (`2ty+r < oh`, `2tx+s < ow`). Parallel over
 /// tile rows (disjoint `y` rows).
-pub fn f2OutputTransformIntoWithConfig(y: []f32, m: *const [16][]const f32, bias: ?[]const f32, fuse_relu: bool, d: F2Dims, config: ParallelConfig) void {
-    if (config.pool) |pool| {
+pub fn f2OutputTransformInto(pc: common.ParallelConfig, y: []f32, m: *const [16][]const f32, bias: ?[]const f32, fuse_relu: bool, d: F2Dims) void {
+    if (pc.pool) |pool| {
         const work = 16 * d.tiles_y * d.tiles_x * d.cout;
-        const tc = vm.generalConvThreadCount(d.tiles_y, work);
+        const tc = common.generalConvThreadCount(d.tiles_y, work);
         if (tc > 1) {
             var tasks: [parallel.vector_max_threads]OutputTask = undefined;
             for (0..tc) |ti| {
@@ -333,9 +332,9 @@ fn runF4WeightTask(task: *const F4WeightTask) void {
     f4WeightTransformRange(task.u, task.w, task.cin, task.oc_start, task.oc_end);
 }
 
-pub fn f4WeightTransformIntoWithConfig(u: *const [36][]f32, w: []const f32, cout: usize, cin: usize, config: ParallelConfig) void {
-    if (config.pool) |pool| {
-        const tc = vm.generalConvThreadCount(cout, 36 * cout * cin);
+pub fn f4WeightTransformInto(pc: common.ParallelConfig, u: *const [36][]f32, w: []const f32, cout: usize, cin: usize) void {
+    if (pc.pool) |pool| {
+        const tc = common.generalConvThreadCount(cout, 36 * cout * cin);
         if (tc > 1) {
             var tasks: [parallel.vector_max_threads]F4WeightTask = undefined;
             for (0..tc) |ti| {
@@ -416,10 +415,10 @@ fn runF4InputTask(task: *const F4InputTask) void {
     f4InputTransformRange(task.v, task.x, task.d, task.ty_start, task.ty_end);
 }
 
-pub fn f4InputTransformIntoWithConfig(v: *const [36][]f32, x: []const f32, d: F2Dims, config: ParallelConfig) void {
-    if (config.pool) |pool| {
+pub fn f4InputTransformInto(pc: common.ParallelConfig, v: *const [36][]f32, x: []const f32, d: F2Dims) void {
+    if (pc.pool) |pool| {
         const work = 36 * d.tiles_y * d.tiles_x * d.cin;
-        const tc = vm.generalConvThreadCount(d.tiles_y, work);
+        const tc = common.generalConvThreadCount(d.tiles_y, work);
         if (tc > 1) {
             var tasks: [parallel.vector_max_threads]F4InputTask = undefined;
             for (0..tc) |ti| {
@@ -526,10 +525,10 @@ fn runF4OutputTask(task: *const F4OutputTask) void {
     }
 }
 
-pub fn f4OutputTransformIntoWithConfig(y: []f32, m: *const [36][]const f32, bias: ?[]const f32, fuse_relu: bool, d: F2Dims, config: ParallelConfig) void {
-    if (config.pool) |pool| {
+pub fn f4OutputTransformInto(pc: common.ParallelConfig, y: []f32, m: *const [36][]const f32, bias: ?[]const f32, fuse_relu: bool, d: F2Dims) void {
+    if (pc.pool) |pool| {
         const work = 36 * d.tiles_y * d.tiles_x * d.cout;
-        const tc = vm.generalConvThreadCount(d.tiles_y, work);
+        const tc = common.generalConvThreadCount(d.tiles_y, work);
         if (tc > 1) {
             var tasks: [parallel.vector_max_threads]F4OutputTask = undefined;
             for (0..tc) |ti| {

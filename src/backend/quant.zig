@@ -1,34 +1,27 @@
-//! Quantized matmul: shared core, dispatch, and the re-export manifest.
+//! Quantized matmul: the block and RHS type vocabulary, the W8A8 (i8
+//! blockwise) quantizers and kernel, the per-dtype row dispatch switches,
+//! and the child modules that own each GGML format's kernels.
 //!
-//! Module layout (kernels are split into per-type files and re-exported here, so
-//! external callers keep using `backend.quantized_matmul.X` unchanged):
-//!   quant.zig        - this file: shared Block/type decls, the generic
-//!                      QuantizedRowsFor / QuantizedMatmulRhsRowsFor factories,
-//!                      the QuantizedMatmulFormat enum + traits, the shared
-//!                      K-quant accessors and the Q8_K activation quantizers,
-//!                      the central dispatch switches, and the manifest
-//!                      re-exporting the moved kernels.
-//!   quant/common.zig - leaf module of generic SIMD/arch primitives: the
-//!                      @Vector aliases, sdot/smmla asm wrappers, f16
-//!                      conversions, nibble extractors, round/quantize helpers,
-//!                      i8 dot, shared row/col-block consts, has_aarch64_i8mm.
-//!   quant/q8_0.zig   - Q8_0 / Q8_0x4 hot kernels
-//!   quant/q4_k.zig   - Q4_K hot kernels (Q4_Kx8 + comptime-gated Q4_Kx2Mmla/smmla)
-//!   quant/q5_k.zig   - Q5_K / Q5_Kx8 hot kernels
-//!   quant/q6_k.zig   - Q6_K / Q6_Kx4 hot kernels
-//!   quant/q8k.zig    - Q8_K/Q8_0 encode/quantize/dequantize helpers + the
-//!                      K-quant *FromBlocks RHS constructors (child-neutral
-//!                      leaf; re-exported here)
-//!   quant/ternary.zig - hot TQ2_0 ternary kernels (sdot/vpdpbusd int8 path)
-//!   quant/mxfp4.zig  - hot MXFP4 fp4-e2m1 matmul kernel (Q8_0 activations)
-//!   quant/cold.zig   - rarely-used generic formats (legacy Q4_0/1, Q5_0/1,
-//!                      Q2_K/Q3_K, IQ*, TQ*, FP4, Table machinery): generic "dot"
-//!                      path only, no packed fast path; exercised by tests, not by
-//!                      the benchmarked Qwen3 weights (Q4_K/Q5_K/Q6_K/Q8_0/f16).
-//!   quant/types.zig  - packed/RHS types + format traits (child-neutral leaf
-//!                      breaking the quant.zig<->children cycle; re-exported here)
-//!   quant/matmul_api.zig - internal narrow matmul surface used by vector
-//!                      dispatchers so they do not import this barrel.
+//! Child modules, each addressed as `quant.<child>.<fn>`:
+//!   types    - packed block layouts, RHS types, format traits and block sizes.
+//!   common   - SIMD and ISA primitives: vector aliases, sdot/smmla/vpdpbusd
+//!              wrappers, f16 conversions, nibble extractors, rounding and
+//!              quantize helpers, the i8 dot and the shared row/column block
+//!              widths.
+//!   q8k      - Q8_K/Q8_0 row encoders and decoders, the Q8_Kx4/x2Mmla LHS
+//!              packers, the K-quant `*FromBlocks` RHS constructors and the
+//!              ggml reference scale-search helpers.
+//!   q8_0     - Q8_0 and Q8_0x4 kernels and the Q8_0x4 RHS packer.
+//!   q4_k     - Q4_K kernels: row-outer tile, x4/x8 column packs and the
+//!              comptime-gated Q4_Kx2Mmla smmla path, plus the Q4_K encoder.
+//!   q5_k     - Q5_K and Q5_Kx8 kernels plus the Q5_K encoder.
+//!   q6_k     - Q6_K and Q6_Kx4 kernels plus the Q6_K encoder.
+//!   ternary  - TQ2_0 int8 and f32 kernels, the x4 and folded packs, the
+//!              ternary encoders and the Q2_0 fast path.
+//!   mxfp4    - the MXFP4 fp4-e2m1 kernel over Q8_0 activations.
+//!   cold     - the rarely-served formats (Q4_0/1, Q5_0/1, Q8_1, Q2_K/Q3_K,
+//!              IQ*, TQ1_0, NVFP4, the table-decoded machinery): generic dot
+//!              path only, exercised by tests rather than the served models.
 //!
 //! Kernel naming grammar (matmul<Weight><Apack>...Rhs{Tile,Range}):
 //!   <Weight>    weight/RHS quant - Q8_0, Q4_K, Q5_K, Q6_K (cold: Q4_0, Q2_K, ...)
@@ -43,73 +36,29 @@
 //!   accumulate* inner per-block microkernel: *Aarch64 = NEON sdot/smmla,
 //!               *Scalar = portable fallback, *Dual = two row-groups for sdot ILP
 const std = @import("std");
-const builtin = @import("builtin");
 const dtype_mod = @import("../dtype.zig");
 const tensor = @import("../tensor.zig");
-const cold = @import("quant/cold.zig");
-const q8_0 = @import("quant/q8_0.zig");
-const q4_k = @import("quant/q4_k.zig");
-const q5_k = @import("quant/q5_k.zig");
-const q6_k = @import("quant/q6_k.zig");
-const ternary = @import("quant/ternary.zig");
-const mxfp4 = @import("quant/mxfp4.zig");
-const common = @import("quant/common.zig");
-const matmul_api = @import("quant/matmul_api.zig");
+
+pub const types = @import("quant/types.zig");
+pub const common = @import("quant/common.zig");
+pub const q8k = @import("quant/q8k.zig");
+pub const q8_0 = @import("quant/q8_0.zig");
+pub const q4_k = @import("quant/q4_k.zig");
+pub const q5_k = @import("quant/q5_k.zig");
+pub const q6_k = @import("quant/q6_k.zig");
+pub const ternary = @import("quant/ternary.zig");
+pub const mxfp4 = @import("quant/mxfp4.zig");
+pub const cold = @import("quant/cold.zig");
 
 const Allocator = std.mem.Allocator;
 const DType = dtype_mod.DType;
 const Tensor = tensor.Tensor;
-const has_aarch64_i8mm = common.has_aarch64_i8mm;
-const quantizeToI8 = common.quantizeToI8;
-const roundNearestEven = common.roundNearestEven;
-const roundNearestEvenVec4ToI32 = common.roundNearestEvenVec4ToI32;
-const f32ToF16Bits = common.f32ToF16Bits;
-const f16BitsToF32 = common.f16BitsToF32;
-const f16x4BitsToF32 = common.f16x4BitsToF32;
-const QKV4i32 = common.QKV4i32;
-const QKV4f32 = common.QKV4f32;
-pub const supports_q4_k_mmla = has_aarch64_i8mm;
 
-// The quant matmul TYPE + format-trait layer lives in quant/types.zig so the
-// per-type kernel files can import it without a quant.zig<->children import
-// cycle; re-exported here.
-const types = @import("quant/types.zig");
+pub const supports_q4_k_mmla = common.has_aarch64_i8mm;
 
-const q8k = @import("quant/q8k.zig");
-pub const blockCountExact = q8k.blockCountExact;
-pub const dequantizeBlockQ8_KInto = q8k.dequantizeBlockQ8_KInto;
-pub const dequantizeRowQ8_0Into = q8k.dequantizeRowQ8_0Into;
-pub const dequantizeRowsQ8_0Into = q8k.dequantizeRowsQ8_0Into;
-pub const fillQ8KPattern = q8k.fillQ8KPattern;
-pub const getRowsQ8_0Into = q8k.getRowsQ8_0Into;
-pub const getScaleMinK4 = q8k.getScaleMinK4;
-pub const group_max_eps = q8k.group_max_eps;
-pub const makeQkx2Quants = q8k.makeQkx2Quants;
-pub const makeQxQuants = q8k.makeQxQuants;
-pub const nearestInt = q8k.nearestInt;
-pub const packRowsQ8_Kx4 = q8k.packRowsQ8_Kx4;
-pub const packRowsQ8_Kx4PaddedInto = q8k.packRowsQ8_Kx4PaddedInto;
-pub const q4Kx8D = q8k.q4Kx8D;
-pub const q4Kx8Scales = q8k.q4Kx8Scales;
-pub const q8_0BlockCount = q8k.q8_0BlockCount;
-pub const qkBlockCount = q8k.qkBlockCount;
-pub const quantizeRowGroupQ8_Kx4Into = q8k.quantizeRowGroupQ8_Kx4Into;
-pub const quantizeRowQ8_0Into = q8k.quantizeRowQ8_0Into;
-pub const quantizeRowQ8_KInto = q8k.quantizeRowQ8_KInto;
-pub const quantizeRowsQ8_0 = q8k.quantizeRowsQ8_0;
-pub const quantizeRowsQ8_0Into = q8k.quantizeRowsQ8_0Into;
-pub const quantizeRowsQ8_K = q8k.quantizeRowsQ8_K;
-pub const quantizeRowsQ8_Kx2MmlaInto = q8k.quantizeRowsQ8_Kx2MmlaInto;
-pub const quantizeRowsQ8_Kx4Into = q8k.quantizeRowsQ8_Kx4Into;
-pub const quantizeRowsQ8_Kx4IntoImpl = q8k.quantizeRowsQ8_Kx4IntoImpl;
-pub const quantizeRowsQ8_Kx4PaddedInto = q8k.quantizeRowsQ8_Kx4PaddedInto;
-pub const quantizedMatmulRhsQ2_KFromBlocks = q8k.quantizedMatmulRhsQ2_KFromBlocks;
-pub const quantizedMatmulRhsQ3_KFromBlocks = q8k.quantizedMatmulRhsQ3_KFromBlocks;
-pub const quantizedMatmulRhsQ4_KFromBlocks = q8k.quantizedMatmulRhsQ4_KFromBlocks;
-pub const quantizedMatmulRhsQ5_KFromBlocks = q8k.quantizedMatmulRhsQ5_KFromBlocks;
-pub const quantizedMatmulRhsQ6_KFromBlocks = q8k.quantizedMatmulRhsQ6_KFromBlocks;
-pub const zeroQ8Kx4Lane = q8k.zeroQ8Kx4Lane;
-
+// The block and RHS types are the one layer readers outside src/backend
+// address (`backend.zig` forwards them as `backend.X`). Kernels, encoders and
+// block-size constants are addressed by child module.
 pub const AnyQuantizedMatmulRhs = types.AnyQuantizedMatmulRhs;
 pub const BlockIQ1_M = types.BlockIQ1_M;
 pub const BlockIQ1_S = types.BlockIQ1_S;
@@ -151,9 +100,7 @@ pub const BlockTQ2_0Foldedx4 = types.BlockTQ2_0Foldedx4;
 pub const BlockTQ2_0Folded = types.BlockTQ2_0Folded;
 pub const PackedRhsFor = types.PackedRhsFor;
 pub const PackedRhsLayout = types.PackedRhsLayout;
-pub const QuantizedFormatError = types.QuantizedFormatError;
 pub const QuantizedMatmulFormat = types.QuantizedMatmulFormat;
-pub const QuantizedMatmulKernel = types.QuantizedMatmulKernel;
 pub const QuantizedMatmulRhs = types.QuantizedMatmulRhs;
 pub const QuantizedMatmulRhsI8 = types.QuantizedMatmulRhsI8;
 pub const QuantizedMatmulRhsIQ1_M = types.QuantizedMatmulRhsIQ1_M;
@@ -188,32 +135,100 @@ pub const QuantizedMatmulRhsQ8_0x4 = types.QuantizedMatmulRhsQ8_0x4;
 pub const QuantizedMatmulRhsRowsFor = types.QuantizedMatmulRhsRowsFor;
 pub const QuantizedMatmulRhsTQ1_0 = types.QuantizedMatmulRhsTQ1_0;
 pub const QuantizedMatmulRhsTQ2_0 = types.QuantizedMatmulRhsTQ2_0;
-pub const QuantizedMatmulTraits = types.QuantizedMatmulTraits;
 pub const QuantizedRowsFor = types.QuantizedRowsFor;
 pub const QuantizedRowsQ4_0 = types.QuantizedRowsQ4_0;
 pub const QuantizedRowsQ8_0 = types.QuantizedRowsQ8_0;
 pub const QuantizedRowsQ8_1 = types.QuantizedRowsQ8_1;
-pub const QuantizedScaleLayout = types.QuantizedScaleLayout;
-pub const QuantizedStorageLayout = types.QuantizedStorageLayout;
-pub const default_i8_group_size = types.default_i8_group_size;
-pub const formatForDType = types.formatForDType;
-pub const iq4_nl_block_size = types.iq4_nl_block_size;
-pub const k_scale_size = types.k_scale_size;
-pub const matmulTraits = types.matmulTraits;
-pub const matmulTraitsRuntime = types.matmulTraitsRuntime;
-pub const mxfp4_block_size = types.mxfp4_block_size;
-pub const nvfp4_block_size = types.nvfp4_block_size;
-pub const nvfp4_subblock_size = types.nvfp4_subblock_size;
-pub const q1_0_block_size = types.q1_0_block_size;
-pub const q2_0_block_size = types.q2_0_block_size;
-pub const q4_0_block_size = types.q4_0_block_size;
-pub const q4_1_block_size = types.q4_1_block_size;
-pub const q5_0_block_size = types.q5_0_block_size;
-pub const q5_1_block_size = types.q5_1_block_size;
-pub const q8_0_block_size = types.q8_0_block_size;
-pub const q8_1_block_size = types.q8_1_block_size;
-pub const qk_k_block_size = types.qk_k_block_size;
-pub const supportsMatmul = types.supportsMatmul;
+
+// Output columns computed together per activation chunk: one qa load feeds all
+// i8_col_block columns, and the independent accumulators give the CPU ILP to
+// hide multiply latency. Portable: lets LLVM vectorize / emit int8 dot ops.
+const i8_col_block: usize = 4;
+
+// Core int8 block-wise GEMM over the tile rows [r0, r1) x columns [c0, c1):
+//   out[i, j] = a_scale[i] * sum_g ( w_scale[j, g] * sum_{p in group g} qa[i,p] * qw[j,p] )
+// The inner per-group sum is i32 (a group of <= group_size int8 products fits
+// easily), scaled into f32 once per group. Row/column wrappers below select the
+// tile so the parallel dispatch can split whichever dimension is larger.
+pub fn matmulI8BlockwiseTile(
+    out: []f32,
+    qa: []const i8,
+    a_scales: []const f32,
+    qw: []const i8,
+    w_scales: []const f32,
+    n: usize,
+    k: usize,
+    group_size: usize,
+    num_groups: usize,
+    r0: usize,
+    r1: usize,
+    c0: usize,
+    c1: usize,
+) void {
+    var i = r0;
+    while (i < r1) : (i += 1) {
+        const qa_row = qa[i * k ..][0..k];
+        const a_scale = a_scales[i];
+
+        var j = c0;
+        while (j + i8_col_block <= c1) : (j += i8_col_block) {
+            var facc = [_]f32{0} ** i8_col_block;
+
+            var g: usize = 0;
+            while (g < num_groups) : (g += 1) {
+                const p0 = g * group_size;
+                const p1 = @min(p0 + group_size, k);
+
+                // Scalar i8->i32 multiply-accumulate reductions, one per blocked
+                // column, sharing the qa load. Written as plain scalar reductions
+                // so LLVM can lower them to the target's int8 dot instruction when
+                // available, and to ordinary widening SIMD otherwise.
+                var iacc = [_]i32{0} ** i8_col_block;
+                var p = p0;
+                while (p < p1) : (p += 1) {
+                    const a_val: i32 = qa_row[p];
+                    inline for (0..i8_col_block) |c| iacc[c] += a_val * @as(i32, qw[(j + c) * k + p]);
+                }
+                inline for (0..i8_col_block) |c| facc[c] += @as(f32, @floatFromInt(iacc[c])) * w_scales[(j + c) * num_groups + g];
+            }
+            inline for (0..i8_col_block) |c| out[i * n + j + c] = facc[c] * a_scale;
+        }
+
+        // Tail columns (fewer than i8_col_block left).
+        while (j < c1) : (j += 1) {
+            const qw_col = qw[j * k ..][0..k];
+            const col_scales = w_scales[j * num_groups ..][0..num_groups];
+            var acc: f32 = 0;
+            var g: usize = 0;
+            while (g < num_groups) : (g += 1) {
+                const p0 = g * group_size;
+                const p1 = @min(p0 + group_size, k);
+                acc += @as(f32, @floatFromInt(common.i8DotI32(qa_row[p0..p1], qw_col[p0..p1]))) * col_scales[g];
+            }
+            out[i * n + j] = acc * a_scale;
+        }
+    }
+}
+
+// Computes rows [row_start, row_end), all columns. Used by the serial cpu path
+// and by the row-split parallel dispatch (large m).
+pub fn matmulI8BlockwiseRange(
+    out: []f32,
+    qa: []const i8,
+    a_scales: []const f32,
+    qw: []const i8,
+    w_scales: []const f32,
+    m: usize,
+    n: usize,
+    k: usize,
+    group_size: usize,
+    num_groups: usize,
+    row_start: usize,
+    row_end: usize,
+) void {
+    _ = m;
+    matmulI8BlockwiseTile(out, qa, a_scales, qw, w_scales, n, k, group_size, num_groups, row_start, row_end, 0, n);
+}
 
 // Quantize an f32 RHS [k, n] to the i8 block-wise format. Symmetric per-(column,
 // group) scales: scale = amax(group) / 127, q = round(w / scale) clamped to
@@ -259,7 +274,7 @@ pub fn quantizeRhsBlockwiseI8(
 
             const inv: f32 = if (scale == 0) 0 else 1.0 / scale;
             p = p0;
-            while (p < p1) : (p += 1) qwd[traits.storageIndex(j, p, k)] = quantizeToI8(src[p * n + j] * inv);
+            while (p < p1) : (p += 1) qwd[traits.storageIndex(j, p, k)] = common.quantizeToI8(src[p * n + j] * inv);
         }
     }
 
@@ -279,7 +294,7 @@ pub fn quantizeActivationsPerRowI8(qa: []i8, a_scales: []f32, a: []const f32, m:
 
         const inv: f32 = if (scale == 0) 0 else 1.0 / scale;
         const qrow = qa[i * k ..][0..k];
-        for (qrow, row) |*q, v| q.* = quantizeToI8(v * inv);
+        for (qrow, row) |*q, v| q.* = common.quantizeToI8(v * inv);
     }
 }
 
@@ -287,7 +302,7 @@ pub fn quantizeMatmulRhsQ8_0(allocator: Allocator, rhs: *const Tensor) !Quantize
     const view = try rhs.rankView(2);
     const k = view.dim(0);
     const n = view.dim(1);
-    const blocks_per_column = try q8_0BlockCount(k);
+    const blocks_per_column = try q8k.q8_0BlockCount(k);
     const data = try rhs.dataConstChecked();
 
     const blocks = try allocator.alloc(BlockQ8_0, try types.checkedProduct(n, blocks_per_column));
@@ -299,7 +314,7 @@ pub fn quantizeMatmulRhsQ8_0(allocator: Allocator, rhs: *const Tensor) !Quantize
     while (col < n) : (col += 1) {
         var p: usize = 0;
         while (p < k) : (p += 1) scratch[p] = data[p * n + col];
-        try quantizeRowQ8_0Into(
+        try q8k.quantizeRowQ8_0Into(
             blocks[col * blocks_per_column ..][0..blocks_per_column],
             scratch,
         );
@@ -373,7 +388,7 @@ pub fn blockCountForDType(comptime tensor_dtype: DType, len: usize) !usize {
         .q4_1 => cold.q4_1BlockCount(len),
         .q5_0 => cold.q5_0BlockCount(len),
         .q5_1 => cold.q5_1BlockCount(len),
-        .q8_0 => q8_0BlockCount(len),
+        .q8_0 => q8k.q8_0BlockCount(len),
         .q8_1 => cold.q8_1BlockCount(len),
         .q2_k,
         .q3_k,
@@ -391,10 +406,10 @@ pub fn blockCountForDType(comptime tensor_dtype: DType, len: usize) !usize {
         .iq4_xs,
         .tq1_0,
         .tq2_0,
-        => qkBlockCount(len),
-        .iq4_nl => blockCountExact(iq4_nl_block_size, len),
-        .mxfp4 => blockCountExact(mxfp4_block_size, len),
-        .nvfp4 => blockCountExact(nvfp4_block_size, len),
+        => q8k.qkBlockCount(len),
+        .iq4_nl => q8k.blockCountExact(types.iq4_nl_block_size, len),
+        .mxfp4 => q8k.blockCountExact(types.mxfp4_block_size, len),
+        .nvfp4 => q8k.blockCountExact(types.nvfp4_block_size, len),
         else => @compileError("dtype is not block-quantized"),
     };
 }
@@ -411,7 +426,7 @@ pub fn dequantizeRowForDType(
         .q4_1 => try cold.dequantizeRowQ4_1Into(dst, blocks),
         .q5_0 => try cold.dequantizeRowQ5_0Into(dst, blocks),
         .q5_1 => try cold.dequantizeRowQ5_1Into(dst, blocks),
-        .q8_0 => try dequantizeRowQ8_0Into(dst, blocks),
+        .q8_0 => try q8k.dequantizeRowQ8_0Into(dst, blocks),
         .q8_1 => try cold.dequantizeRowQ8_1Into(dst, blocks),
         .q2_k => try dequantizeKRowInto(tensor_dtype, dst, blocks),
         .q3_k => try dequantizeKRowInto(tensor_dtype, dst, blocks),
@@ -452,12 +467,12 @@ pub fn quantizeRowForDType(
         .q4_1 => try cold.quantizeRowQ4_1Into(dst, src),
         .q5_0 => try cold.quantizeRowQ5_0Into(dst, src),
         .q5_1 => try cold.quantizeRowQ5_1Into(dst, src),
-        .q8_0 => try quantizeRowQ8_0Into(dst, src),
+        .q8_0 => try q8k.quantizeRowQ8_0Into(dst, src),
         .q8_1 => try cold.quantizeRowQ8_1Into(dst, src),
         .q4_k => try q4_k.quantizeRowQ4_KInto(dst, src),
         .q5_k => try q5_k.quantizeRowQ5_KInto(dst, src),
         .q6_k => try q6_k.quantizeRowQ6_KInto(dst, src),
-        .q8_k => try quantizeRowQ8_KInto(dst, src),
+        .q8_k => try q8k.quantizeRowQ8_KInto(dst, src),
         .tq2_0 => try ternary.quantizeRowTQ2_0Into(dst, src),
         else => @compileError("dtype has no f32 -> quantized row encoder"),
     }
@@ -468,9 +483,9 @@ fn dequantizeKRowInto(
     dst: []f32,
     blocks: []const dtype_mod.Storage(tensor_dtype),
 ) !void {
-    if (dst.len != try types.checkedProduct(blocks.len, qk_k_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
+    if (dst.len != try types.checkedProduct(blocks.len, types.qk_k_block_size)) return types.QuantizedFormatError.InvalidQuantizedLength;
 
-    var dense_block: [qk_k_block_size]f32 = undefined;
+    var dense_block: [types.qk_k_block_size]f32 = undefined;
     for (blocks, 0..) |*block, block_index| {
         switch (tensor_dtype) {
             .q2_k => cold.dequantizeBlockQ2_KInto(&dense_block, block),
@@ -478,214 +493,12 @@ fn dequantizeKRowInto(
             .q4_k => q4_k.dequantizeBlockQ4_KInto(&dense_block, block),
             .q5_k => q5_k.dequantizeBlockQ5_KInto(&dense_block, block),
             .q6_k => q6_k.dequantizeBlockQ6_KInto(&dense_block, block),
-            .q8_k => dequantizeBlockQ8_KInto(&dense_block, block),
+            .q8_k => q8k.dequantizeBlockQ8_KInto(&dense_block, block),
             else => unreachable,
         }
-        @memcpy(dst[block_index * qk_k_block_size ..][0..qk_k_block_size], &dense_block);
+        @memcpy(dst[block_index * types.qk_k_block_size ..][0..types.qk_k_block_size], &dense_block);
     }
 }
-
-// W8A8 matmul lives in quant/matmul_api.zig so vector dispatchers do not import
-// this compatibility barrel. Re-export it here for existing `quant.<sym>` callers.
-pub const matmulI8BlockwiseTile = matmul_api.matmulI8BlockwiseTile;
-pub const matmulI8BlockwiseRange = matmul_api.matmulI8BlockwiseRange;
-
-// ---------------------------------------------------------------------------
-// f32 -> K-quant reference encoders: shared iterative scale-search helpers,
-// ported operation-for-operation (f32 arithmetic, same rounding) from ggml's
-// ggml-quants.c so the encoded bytes match quantize_row_{q4,q5,q6}_K_ref
-// bit-for-bit (verified against embedded goldens in quant/encode_golden_test.zig).
-//
-// Finite-input contract (same as ggml): inputs must be free of NaN/inf. A
-// sub-block whose value spread underflows f32 (so nmax/(max-min) overflows to
-// inf) feeds a non-finite value into nearestInt; ggml's own assert in
-// nearest_int rejects that too, and we mirror it with a debug assert.
-// ---------------------------------------------------------------------------
-
-/// ggml GROUP_MAX_EPS: sub-blocks with amax below this encode as all-zero.
-/// ggml nearest_int: round-to-nearest-even via the 1.5*2^23 magic constant.
-/// Valid for |fval| <= 4194303 (ggml asserts the same bound).
-/// ggml make_qx_quants: symmetric scale search over +/-9 tenth-steps around
-/// -nmax/max (the sign rides on the scale). `L` receives nmax-biased levels in
-/// [0, 2*nmax-1]. The Q6_K encoder uses rmse_type = 1 with qw = null; the full
-/// reference behavior (rmse_type 0/negative/2/3/default, explicit qw) is kept.
-/// ggml make_qkx2_quants: asymmetric (scale, min) grid search used by the
-/// Q4_K/Q5_K encoders. `iscale` candidates sweep (rmin + rdelta*is + nmax) /
-/// (max - min) for is in [0, nstep]; a weighted least-squares (scale, min) fit
-/// is accepted when it lowers the weighted error (MAD when use_mad). `L`
-/// receives levels in [0, nmax]; `Laux` is caller-supplied scratch.
-
-// ---------------------------------------------------------------------------
-// Cold-format manifest: public functions moved to quant/cold.zig are re-exported
-// here so external callers (quantized_matmul.<fn>) keep working unchanged.
-// ---------------------------------------------------------------------------
-pub const dequantizeBlockQ2_KInto = cold.dequantizeBlockQ2_KInto;
-pub const dequantizeBlockQ3_KInto = cold.dequantizeBlockQ3_KInto;
-pub const dequantizeRowIQ1_MInto = cold.dequantizeRowIQ1_MInto;
-pub const dequantizeRowIQ1_SInto = cold.dequantizeRowIQ1_SInto;
-pub const dequantizeRowIQ2_SInto = cold.dequantizeRowIQ2_SInto;
-pub const dequantizeRowIQ2_XSInto = cold.dequantizeRowIQ2_XSInto;
-pub const dequantizeRowIQ2_XXSInto = cold.dequantizeRowIQ2_XXSInto;
-pub const dequantizeRowIQ3_SInto = cold.dequantizeRowIQ3_SInto;
-pub const dequantizeRowIQ3_XXSInto = cold.dequantizeRowIQ3_XXSInto;
-pub const dequantizeRowIQ4_NLInto = cold.dequantizeRowIQ4_NLInto;
-pub const dequantizeRowIQ4_XSInto = cold.dequantizeRowIQ4_XSInto;
-pub const dequantizeRowMXFP4Into = cold.dequantizeRowMXFP4Into;
-pub const dequantizeRowNVFP4Into = cold.dequantizeRowNVFP4Into;
-pub const dequantizeRowQ1_0Into = cold.dequantizeRowQ1_0Into;
-pub const dequantizeRowQ4_0Into = cold.dequantizeRowQ4_0Into;
-pub const vecDotQ4_0F32 = cold.vecDotQ4_0F32;
-pub const weightedQ4_0Row = cold.weightedQ4_0Row;
-pub const dequantizeRowQ4_1Into = cold.dequantizeRowQ4_1Into;
-pub const dequantizeRowQ5_0Into = cold.dequantizeRowQ5_0Into;
-pub const dequantizeRowQ5_1Into = cold.dequantizeRowQ5_1Into;
-pub const dequantizeRowQ8_1Into = cold.dequantizeRowQ8_1Into;
-pub const dequantizeRowTQ1_0Into = cold.dequantizeRowTQ1_0Into;
-pub const dequantizeRowTQ2_0Into = cold.dequantizeRowTQ2_0Into;
-pub const dequantizeRowsQ4_0Into = cold.dequantizeRowsQ4_0Into;
-pub const getRowsQ4_0Into = cold.getRowsQ4_0Into;
-pub const matmulQ1_0RhsRange = cold.matmulQ1_0RhsRange;
-pub const matmulQ1_0RhsTile = cold.matmulQ1_0RhsTile;
-pub const matmulQ2_KRhsRange = cold.matmulQ2_KRhsRange;
-pub const matmulQ2_KRhsTile = cold.matmulQ2_KRhsTile;
-pub const matmulQ3_KRhsRange = cold.matmulQ3_KRhsRange;
-pub const matmulQ3_KRhsTile = cold.matmulQ3_KRhsTile;
-pub const matmulQ4_0RhsRange = cold.matmulQ4_0RhsRange;
-pub const matmulQ4_0RhsTile = cold.matmulQ4_0RhsTile;
-pub const matmulQ4_1RhsRange = cold.matmulQ4_1RhsRange;
-pub const matmulQ4_1RhsTile = cold.matmulQ4_1RhsTile;
-pub const matmulQ5_0RhsRange = cold.matmulQ5_0RhsRange;
-pub const matmulQ5_0RhsTile = cold.matmulQ5_0RhsTile;
-pub const matmulQ5_1RhsRange = cold.matmulQ5_1RhsRange;
-pub const matmulQ5_1RhsTile = cold.matmulQ5_1RhsTile;
-pub const matmulTableQ8_0RhsRange = cold.matmulTableQ8_0RhsRange;
-pub const matmulTableQ8_0RhsTile = cold.matmulTableQ8_0RhsTile;
-pub const matmulTableQ8_KRhsRange = cold.matmulTableQ8_KRhsRange;
-pub const matmulTableQ8_KRhsTile = cold.matmulTableQ8_KRhsTile;
-pub const q1_0BlockCount = cold.q1_0BlockCount;
-pub const q2_0BlockCount = cold.q2_0BlockCount;
-pub const dequantizeRowQ2_0Into = cold.dequantizeRowQ2_0Into;
-pub const quantizeRowQ2_0Into = cold.quantizeRowQ2_0Into;
-pub const q4_0BlockCount = cold.q4_0BlockCount;
-pub const q4_1BlockCount = cold.q4_1BlockCount;
-pub const q5_0BlockCount = cold.q5_0BlockCount;
-pub const q5_1BlockCount = cold.q5_1BlockCount;
-pub const q8_1BlockCount = cold.q8_1BlockCount;
-pub const quantizeMatmulRhsQ4_0 = cold.quantizeMatmulRhsQ4_0;
-pub const quantizeRowQ4_0Into = cold.quantizeRowQ4_0Into;
-pub const quantizeRowQ4_1Into = cold.quantizeRowQ4_1Into;
-pub const quantizeRowQ5_0Into = cold.quantizeRowQ5_0Into;
-pub const quantizeRowQ5_1Into = cold.quantizeRowQ5_1Into;
-pub const quantizeRowQ8_1Into = cold.quantizeRowQ8_1Into;
-pub const quantizeRowsQ4_0 = cold.quantizeRowsQ4_0;
-pub const quantizeRowsQ8_1 = cold.quantizeRowsQ8_1;
-
-// ---------------------------------------------------------------------------
-// Hot per-type manifest: public functions moved to quant/<type>.zig are
-// re-exported here so external callers (quantized_matmul.<fn>) keep working
-// unchanged.
-// ---------------------------------------------------------------------------
-pub const matmulQ8_0RhsRange = q8_0.matmulQ8_0RhsRange;
-pub const matmulQ8_0RhsTile = q8_0.matmulQ8_0RhsTile;
-pub const vecDotQ8_0Q8_0 = q8_0.vecDotQ8_0Q8_0;
-pub const vecDotQ8_0Q8_0Pair = q8_0.vecDotQ8_0Q8_0Pair;
-pub const vecDotQ8_0Q8_0x2 = q8_0.vecDotQ8_0Q8_0x2;
-pub const vecDotQ8_0Q8_0Pairx2 = q8_0.vecDotQ8_0Q8_0Pairx2;
-pub const q8RowScalesInto = q8_0.q8RowScalesInto;
-pub const weightedQ8_0Row = q8_0.weightedQ8_0Row;
-pub const weightedQ8_0RowPair = q8_0.weightedQ8_0RowPair;
-pub const weightedQ8_0Row2 = q8_0.weightedQ8_0Row2;
-pub const weightedQ8_0RowPair2 = q8_0.weightedQ8_0RowPair2;
-pub const matmulQ8_0x4PackedPaddedRhsRange = q8_0.matmulQ8_0x4PackedPaddedRhsRange;
-pub const matmulQ8_0x4PackedPaddedRhsTile = q8_0.matmulQ8_0x4PackedPaddedRhsTile;
-pub const matmulQ8_0x4PackedRhsRange = q8_0.matmulQ8_0x4PackedRhsRange;
-pub const matmulQ8_0x4PackedRhsTile = q8_0.matmulQ8_0x4PackedRhsTile;
-pub const matmulQ8_0x4RhsRange = q8_0.matmulQ8_0x4RhsRange;
-pub const matmulQ8_0x4RhsTile = q8_0.matmulQ8_0x4RhsTile;
-pub const packMatmulRhsQ8_0x4 = q8_0.packMatmulRhsQ8_0x4;
-pub const splitSwiGluRowInto = q8_0.splitSwiGluRowInto;
-pub const quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto = q8_0.quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto;
-pub const quantizeSplitSwiGluRowsQ8_0x4PaddedInto = q8_0.quantizeSplitSwiGluRowsQ8_0x4PaddedInto;
-pub const quantizeRowsQ8_0x4GroupsInto = q8_0.quantizeRowsQ8_0x4GroupsInto;
-pub const quantizeRowsQ8_0x4Into = q8_0.quantizeRowsQ8_0x4Into;
-pub const quantizeRowsQ8_0x4PaddedInto = q8_0.quantizeRowsQ8_0x4PaddedInto;
-
-pub const dequantizeBlockQ4_KInto = q4_k.dequantizeBlockQ4_KInto;
-pub const quantizeBlockQ4_KInto = q4_k.quantizeBlockQ4_KInto;
-pub const quantizeRowQ4_KInto = q4_k.quantizeRowQ4_KInto;
-pub const matmulQ4_KRhsRange = q4_k.matmulQ4_KRhsRange;
-pub const matmulQ4_KRhsTile = q4_k.matmulQ4_KRhsTile;
-pub const matmulQ4_KRhsCompactColOuter = q4_k.matmulQ4_KRhsCompactColOuter;
-pub const matmulQ4_KCompactQ8_Kx4ColOuter = q4_k.matmulQ4_KCompactQ8_Kx4ColOuter;
-pub const matmulQ4_Kx2MmlaQ8_Kx2MmlaRhsRange = q4_k.matmulQ4_Kx2MmlaQ8_Kx2MmlaRhsRange;
-pub const matmulQ4_Kx2MmlaQ8_Kx2MmlaRhsTile = q4_k.matmulQ4_Kx2MmlaQ8_Kx2MmlaRhsTile;
-pub const matmulQ4_Kx2MmlaRhsRange = q4_k.matmulQ4_Kx2MmlaRhsRange;
-pub const matmulQ4_Kx2MmlaRhsTile = q4_k.matmulQ4_Kx2MmlaRhsTile;
-pub const matmulQ4_Kx4RhsRange = q4_k.matmulQ4_Kx4RhsRange;
-pub const matmulQ4_Kx4RhsTile = q4_k.matmulQ4_Kx4RhsTile;
-pub const matmulQ4_Kx8Q8_Kx4RhsRange = q4_k.matmulQ4_Kx8Q8_Kx4RhsRange;
-pub const matmulQ4_Kx8Q8_Kx4RhsTile = q4_k.matmulQ4_Kx8Q8_Kx4RhsTile;
-pub const matmulQ4_Kx8RhsRange = q4_k.matmulQ4_Kx8RhsRange;
-pub const matmulQ4_Kx8RhsTile = q4_k.matmulQ4_Kx8RhsTile;
-pub const packMatmulRhsQ4_Kx2Mmla = q4_k.packMatmulRhsQ4_Kx2Mmla;
-pub const packMatmulRhsQ4_Kx4 = q4_k.packMatmulRhsQ4_Kx4;
-pub const packMatmulRhsQ4_Kx8 = q4_k.packMatmulRhsQ4_Kx8;
-
-pub const dequantizeBlockQ5_KInto = q5_k.dequantizeBlockQ5_KInto;
-pub const quantizeBlockQ5_KInto = q5_k.quantizeBlockQ5_KInto;
-pub const quantizeRowQ5_KInto = q5_k.quantizeRowQ5_KInto;
-pub const matmulQ5_KRhsRange = q5_k.matmulQ5_KRhsRange;
-pub const matmulQ5_KRhsTile = q5_k.matmulQ5_KRhsTile;
-pub const matmulQ5_KRhsCompactColOuter = q5_k.matmulQ5_KRhsCompactColOuter;
-pub const matmulQ5_KCompactQ8_Kx4ColOuter = q5_k.matmulQ5_KCompactQ8_Kx4ColOuter;
-pub const matmulQ5_Kx8Q8_Kx4RhsRange = q5_k.matmulQ5_Kx8Q8_Kx4RhsRange;
-pub const matmulQ5_Kx8Q8_Kx4RhsTile = q5_k.matmulQ5_Kx8Q8_Kx4RhsTile;
-pub const matmulQ5_Kx8RhsRange = q5_k.matmulQ5_Kx8RhsRange;
-pub const matmulQ5_Kx8RhsTile = q5_k.matmulQ5_Kx8RhsTile;
-pub const packMatmulRhsQ5_Kx8 = q5_k.packMatmulRhsQ5_Kx8;
-
-pub const dequantizeBlockQ6_KInto = q6_k.dequantizeBlockQ6_KInto;
-pub const quantizeBlockQ6_KInto = q6_k.quantizeBlockQ6_KInto;
-pub const quantizeRowQ6_KInto = q6_k.quantizeRowQ6_KInto;
-pub const matmulQ6_KRhsRange = q6_k.matmulQ6_KRhsRange;
-pub const matmulQ6_KRhsTile = q6_k.matmulQ6_KRhsTile;
-pub const matmulQ6_KRhsCompactColOuter = q6_k.matmulQ6_KRhsCompactColOuter;
-pub const matmulQ6_KCompactQ8_Kx4ColOuter = q6_k.matmulQ6_KCompactQ8_Kx4ColOuter;
-pub const matmulQ6_Kx4RhsRange = q6_k.matmulQ6_Kx4RhsRange;
-pub const matmulQ6_Kx4RhsPairTile = q6_k.matmulQ6_Kx4RhsPairTile;
-pub const matmulQ6_Kx4RhsTile = q6_k.matmulQ6_Kx4RhsTile;
-pub const packMatmulRhsQ6_Kx4 = q6_k.packMatmulRhsQ6_Kx4;
-
-pub const quantizeRowTQ2_0Into = ternary.quantizeRowTQ2_0Into;
-pub const quantizeRowTQ2_0ScaledInto = ternary.quantizeRowTQ2_0ScaledInto;
-pub const ternaryAbsmeanScale = ternary.ternaryAbsmeanScale;
-pub const quantizedMatmulRhsTQ2_0FromBlocks = ternary.quantizedMatmulRhsTQ2_0FromBlocks;
-pub const quantizedMatmulRhsTQ2_0FromBorrowedBlocks = ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks;
-pub const quantizedMatmulRhsTQ2_0FromF32 = ternary.quantizedMatmulRhsTQ2_0FromF32;
-pub const quantizedMatmulRhsTQ2_0FromF32Absmean = ternary.quantizedMatmulRhsTQ2_0FromF32Absmean;
-pub const matmulTQ2_0RhsRange = ternary.matmulTQ2_0RhsRange;
-pub const matmulTQ2_0RhsTile = ternary.matmulTQ2_0RhsTile;
-pub const packMatmulRhsTQ2_0x4 = ternary.packMatmulRhsTQ2_0x4;
-pub const matmulTQ2_0X4RhsRange = ternary.matmulTQ2_0X4RhsRange;
-pub const matmulTQ2_0X4RhsTile = ternary.matmulTQ2_0X4RhsTile;
-pub const matmulTQ2_0X4RhsTileAcc = ternary.matmulTQ2_0X4RhsTileAcc;
-pub const packMatmulRhsTQ2_0Foldedx4 = ternary.packMatmulRhsTQ2_0Foldedx4;
-pub const packMatmulRhsTQ2_0Foldedx4Into = ternary.packMatmulRhsTQ2_0Foldedx4Into;
-pub const packMatmulRhsTQ2_0FoldedRows = ternary.packMatmulRhsTQ2_0FoldedRows;
-pub const packMatmulRhsTQ2_0FoldedRowsFromX4 = ternary.packMatmulRhsTQ2_0FoldedRowsFromX4;
-pub const matmulTQ2_0FoldedX4RhsTile = ternary.matmulTQ2_0FoldedX4RhsTile;
-pub const dequantizeFoldedx4ColumnInto = ternary.dequantizeFoldedx4ColumnInto;
-pub const matmulTQ2_0FoldedX4RhsRange = ternary.matmulTQ2_0FoldedX4RhsRange;
-pub const matmulQ2_0RhsRange = ternary.matmulQ2_0RhsRange;
-pub const matmulQ2_0RhsTile = ternary.matmulQ2_0RhsTile;
-pub const matmulQ2_0RhsRefRange = cold.matmulQ2_0RhsRefRange;
-pub const matmulQ2_0RhsRefTile = cold.matmulQ2_0RhsRefTile;
-pub const dotQ2_0RowQ8_0 = cold.dotQ2_0RowQ8_0;
-pub const dequantizeRowQ2_0FastInto = ternary.dequantizeRowQ2_0FastInto;
-pub const matmulTQ2_0F32RhsRange = ternary.matmulTQ2_0F32RhsRange;
-pub const matmulTQ2_0F32RhsTile = ternary.matmulTQ2_0F32RhsTile;
-pub const dotTQ2_0F32 = ternary.dotTQ2_0F32;
-pub const matmulMXFP4RhsTile = mxfp4.matmulMXFP4RhsTile;
 
 test {
     _ = @import("quant_tests.zig");

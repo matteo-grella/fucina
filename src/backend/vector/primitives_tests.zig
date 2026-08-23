@@ -4,22 +4,20 @@
 const std = @import("std");
 const primitives = @import("primitives.zig");
 
-const vexpf = primitives.vexpf;
-
-test "vexpf matches scalar exp over a dense sweep and handles extremes" {
+test "primitives.vexpf matches scalar exp over a dense sweep and handles extremes" {
     // Exact special cases.
-    try std.testing.expectEqual(@as(f32, 1), vexpf(1, @splat(0))[0]);
-    try std.testing.expectEqual(@as(f32, 0), vexpf(1, @splat(-std.math.inf(f32)))[0]);
-    try std.testing.expectEqual(@as(f32, 0), vexpf(1, @splat(-200))[0]);
-    try std.testing.expectEqual(std.math.inf(f32), vexpf(1, @splat(200))[0]);
-    try std.testing.expectEqual(std.math.inf(f32), vexpf(1, @splat(std.math.inf(f32)))[0]);
+    try std.testing.expectEqual(@as(f32, 1), primitives.vexpf(1, @splat(0))[0]);
+    try std.testing.expectEqual(@as(f32, 0), primitives.vexpf(1, @splat(-std.math.inf(f32)))[0]);
+    try std.testing.expectEqual(@as(f32, 0), primitives.vexpf(1, @splat(-200))[0]);
+    try std.testing.expectEqual(std.math.inf(f32), primitives.vexpf(1, @splat(200))[0]);
+    try std.testing.expectEqual(std.math.inf(f32), primitives.vexpf(1, @splat(std.math.inf(f32)))[0]);
 
     // NaN propagates (like @exp); it must not flush to exp(clamp(NaN)) = 0.
     const nan = std.math.nan(f32);
-    try std.testing.expect(std.math.isNan(vexpf(1, @splat(nan))[0]));
+    try std.testing.expect(std.math.isNan(primitives.vexpf(1, @splat(nan))[0]));
     {
         const mixed: @Vector(8, f32) = .{ 0, -1, nan, 1, -200, nan, 200, 0.5 };
-        const got = vexpf(8, mixed);
+        const got = primitives.vexpf(8, mixed);
         inline for (0..8) |lane| {
             if (std.math.isNan(mixed[lane])) {
                 try std.testing.expect(std.math.isNan(got[lane]));
@@ -49,12 +47,12 @@ test "vexpf matches scalar exp over a dense sweep and handles extremes" {
             const point = @min(i + lane, point_count - 1);
             x[lane] = @floatCast(lo + step * @as(f64, @floatFromInt(point)));
         }
-        const got = vexpf(W, x);
+        const got = primitives.vexpf(W, x);
         inline for (0..W) |lane| {
             const want = @exp(x[lane]);
             const err = @abs(got[lane] - want);
             if (err > 1e-42 and err > 2e-6 * @abs(want)) {
-                std.debug.print("vexpf({d}) = {d}, want {d}\n", .{ x[lane], got[lane], want });
+                std.debug.print("primitives.vexpf({d}) = {d}, want {d}\n", .{ x[lane], got[lane], want });
                 return error.TestUnexpectedResult;
             }
         }

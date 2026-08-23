@@ -7706,7 +7706,10 @@ The native backend's non-GEMM work is pure Zig `@Vector` code, portable
 across NEON, AVX2/AVX-512, and WASM SIMD. The vector width is chosen at
 comptime by `std.simd.suggestVectorLength(f32) orelse 4` — 4 lanes on NEON,
 8 on AVX2, 16 on AVX-512 — with separate widths for f16 and f64
-(`vector_len_f16`, `vector_len_f64`). Module map:
+(`vector_len_f16`, `vector_len_f64`). `vector.zig` exposes the modules by
+name (`vector.gemm.matmul2DIntoUnchecked`) plus `ParallelConfig`, `Vf32`
+and `vector_len`; every pool-taking kernel takes `pc: ParallelConfig`
+first. Module map:
 
 | Module | Contents |
 |---|---|
@@ -8301,8 +8304,10 @@ kernels over dynamically quantized activations. The stack has three tiers:
 2. **kernel tier** (`src/backend/quant.zig` and `src/backend/quant/*.zig`) —
    encoders, decoders, activation quantizers, dot/matmul kernels, packed RHS
    layouts, and the format-trait table. Reachable in-tree as
-   `fucina.internal.backend_mod.quantized_matmul`; application code normally
-   never calls it directly.
+   `fucina.internal.backend_mod.quantized_matmul`, which forwards the block
+   and RHS types and exposes the format modules by name
+   (`quantized_matmul.q4_k.X`, `.q8k.X`, `.cold.X`); application code
+   normally never calls it directly.
 3. **facade tier** (`src/ag/tensor.zig`, `src/exec/quant_matmul.zig`) —
    `fucina.Tensor(.{ .dtype = .q4_k, ... })` constant tensors, `dot` with a
    quantized RHS, `getRows`, `to(.f32)`, `packRhs`/`dotPacked`, and the
@@ -8737,8 +8742,8 @@ family (all ggml-parity):
   `quantizeRowsQ8_0`): per-32 symmetric absmax — `d = amax/127` stored as
   f16, `q = round(x/d)` clamped to i8. Consumed by q1_0/q2_0/q4_0/q5_0/q8_0 and
   the table formats iq4_nl/mxfp4/nvfp4.
-- **Q8_1** (`quantizeRowQ8_1Into`, `quantizeRowsQ8_1` — defined in
-  `src/backend/quant/cold.zig`, re-exported through `quant.zig`): Q8_0 plus
+- **Q8_1** (`quantizeRowQ8_1Into`, `quantizeRowsQ8_1`, defined in
+  `src/backend/quant/cold.zig`): Q8_0 plus
   the per-block activation sum (`s = d·Σq` as f16) that the offset formats
   q4_1/q5_1 need to fold their block minimum into the dot.
 - **Q8_K** (`quantizeRowQ8_KInto`, `quantizeRowsQ8_K`): per-256 with an f32

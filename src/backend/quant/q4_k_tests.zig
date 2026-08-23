@@ -6,43 +6,15 @@ const std = @import("std");
 const builtin = @import("builtin");
 const tensor = @import("../../tensor.zig");
 const qm = @import("../quant.zig");
+const q8k = @import("q8k.zig");
+const types = @import("types.zig");
 const common = @import("common.zig");
 const q4_k = @import("q4_k.zig");
 
 const Allocator = std.mem.Allocator;
 const Tensor = tensor.Tensor;
 
-// Shared symbols defined in quant.zig / common.zig, aliased here so the moved
-// test bodies compile unchanged.
-const BlockQ4_K = qm.BlockQ4_K;
-const BlockQ8_K = qm.BlockQ8_K;
-const BlockQ8_Kx2Mmla = qm.BlockQ8_Kx2Mmla;
-const BlockQ8_Kx4 = qm.BlockQ8_Kx4;
-const dequantizeBlockQ8_KInto = qm.dequantizeBlockQ8_KInto;
-const dotDense = common.dotDense;
-const f16BitsToF32 = common.f16BitsToF32;
 const f32ToF16Bits = common.f32ToF16Bits;
-const getScaleMinK4 = qm.getScaleMinK4;
-const qk_k_block_size = qm.qk_k_block_size;
-const quantizeRowsQ8_K = qm.quantizeRowsQ8_K;
-const quantizeRowsQ8_Kx2MmlaInto = qm.quantizeRowsQ8_Kx2MmlaInto;
-const quantizeRowsQ8_Kx4PaddedInto = qm.quantizeRowsQ8_Kx4PaddedInto;
-const quantizedMatmulRhsQ4_KFromBlocks = qm.quantizedMatmulRhsQ4_KFromBlocks;
-
-// Public symbols of q4_k.zig used by the moved tests.
-const dequantizeBlockQ4_KInto = q4_k.dequantizeBlockQ4_KInto;
-const matmulQ4_KRhsRange = q4_k.matmulQ4_KRhsRange;
-const matmulQ4_KRhsTile = q4_k.matmulQ4_KRhsTile;
-const matmulQ4_KRhsCompactColOuter = q4_k.matmulQ4_KRhsCompactColOuter;
-const matmulQ4_KCompactQ8_Kx4ColOuter = q4_k.matmulQ4_KCompactQ8_Kx4ColOuter;
-const matmulQ4_Kx4RhsRange = q4_k.matmulQ4_Kx4RhsRange;
-const matmulQ4_Kx8RhsRange = q4_k.matmulQ4_Kx8RhsRange;
-const matmulQ4_Kx8Q8_Kx4RhsRange = q4_k.matmulQ4_Kx8Q8_Kx4RhsRange;
-const matmulQ4_Kx2MmlaRhsRange = q4_k.matmulQ4_Kx2MmlaRhsRange;
-const matmulQ4_Kx2MmlaQ8_Kx2MmlaRhsRange = q4_k.matmulQ4_Kx2MmlaQ8_Kx2MmlaRhsRange;
-const packMatmulRhsQ4_Kx4 = q4_k.packMatmulRhsQ4_Kx4;
-const packMatmulRhsQ4_Kx8 = q4_k.packMatmulRhsQ4_Kx8;
-const packMatmulRhsQ4_Kx2Mmla = q4_k.packMatmulRhsQ4_Kx2Mmla;
 
 // Scalar reference replica of dotQ4_KQ8_K: same nibble extraction, same i32
 // integer accumulation (deferred scale*acc / min*bsum reduction), same f32
@@ -50,14 +22,14 @@ const packMatmulRhsQ4_Kx2Mmla = q4_k.packMatmulRhsQ4_Kx2Mmla;
 // (the integer dot is exact on all paths; Zig never contracts the identical
 // f32 ops). Used by the randomized parity test and mirrored in
 // src/x86dot_check.zig for the cross-ISA attestation runs.
-fn refDotQ4_KQ8_K(w: *const BlockQ4_K, a: *const BlockQ8_K) f32 {
-    const d = f16BitsToF32(w.dm[0]) * a.d;
-    const dmin = f16BitsToF32(w.dm[1]) * a.d;
+fn refDotQ4_KQ8_K(w: *const types.BlockQ4_K, a: *const types.BlockQ8_K) f32 {
+    const d = common.f16BitsToF32(w.dm[0]) * a.d;
+    const dmin = common.f16BitsToF32(w.dm[1]) * a.d;
     var iscale: i32 = 0;
     var imin: i32 = 0;
     var subblock: usize = 0;
     while (subblock < 8) : (subblock += 1) {
-        const scale_min = getScaleMinK4(&w.scales, subblock);
+        const scale_min = q8k.getScaleMinK4(&w.scales, subblock);
         var acc: i32 = 0;
         var i: usize = 0;
         while (i < 32) : (i += 1) {
@@ -72,7 +44,7 @@ fn refDotQ4_KQ8_K(w: *const BlockQ4_K, a: *const BlockQ8_K) f32 {
     return d * @as(f32, @floatFromInt(iscale)) - dmin * @as(f32, @floatFromInt(imin));
 }
 
-fn fillRandomBlockQ4_K(block: *BlockQ4_K, random: std.Random) void {
+fn fillRandomBlockQ4_K(block: *types.BlockQ4_K, random: std.Random) void {
     // Any byte pattern is a valid Q4_K payload (nibbles/scales are unsigned
     // bitfields); keep d/dmin finite & small so f32 compares stay meaningful.
     block.dm = .{ f32ToF16Bits(0.25 + random.float(f32)), f32ToF16Bits(random.float(f32) * 0.5) };
@@ -80,7 +52,7 @@ fn fillRandomBlockQ4_K(block: *BlockQ4_K, random: std.Random) void {
     for (&block.qs) |*q| q.* = random.int(u8);
 }
 
-fn fillRandomBlockQ8_K(block: *BlockQ8_K, random: std.Random, extreme: bool) void {
+fn fillRandomBlockQ8_K(block: *types.BlockQ8_K, random: std.Random, extreme: bool) void {
     // BlockQ8_K activations come from quantizeRowQ8_KInto, whose -127/max
     // scale construction bounds qs to [-127,127] (never -128); that is the
     // exactness domain of the AVX2 sign-trick path and is reproduced here.
@@ -111,22 +83,22 @@ test "ggml_q4_k x4 packed matmul matches plain q4_k matmul" {
     const random = prng.random();
 
     const blocks_per_row = 2;
-    const k = blocks_per_row * qk_k_block_size;
+    const k = blocks_per_row * types.qk_k_block_size;
 
-    var lhs_blocks: [4 * blocks_per_row]BlockQ8_K = undefined;
+    var lhs_blocks: [4 * blocks_per_row]types.BlockQ8_K = undefined;
     for (&lhs_blocks) |*b| fillRandomBlockQ8_K(b, random, false);
-    var rhs_blocks: [4 * blocks_per_row]BlockQ4_K = undefined;
+    var rhs_blocks: [4 * blocks_per_row]types.BlockQ4_K = undefined;
     for (&rhs_blocks) |*b| fillRandomBlockQ4_K(b, random);
 
-    var rhs_plain = try quantizedMatmulRhsQ4_KFromBlocks(allocator, k, 4, &rhs_blocks);
+    var rhs_plain = try q8k.quantizedMatmulRhsQ4_KFromBlocks(allocator, k, 4, &rhs_blocks);
     defer rhs_plain.deinit();
-    var rhs_packed = try packMatmulRhsQ4_Kx4(allocator, &rhs_blocks, 4, k, blocks_per_row);
+    var rhs_packed = try q4_k.packMatmulRhsQ4_Kx4(allocator, &rhs_blocks, 4, k, blocks_per_row);
     defer rhs_packed.deinit();
 
     var expected: [16]f32 = undefined;
     var actual: [16]f32 = undefined;
-    matmulQ4_KRhsRange(&expected, &lhs_blocks, &rhs_plain, 4, 4, 0, 4);
-    matmulQ4_Kx4RhsRange(&actual, &lhs_blocks, &rhs_packed, 4, 4, 0, 4);
+    q4_k.matmulQ4_KRhsRange(&expected, &lhs_blocks, &rhs_plain, 4, 4, 0, 4);
+    q4_k.matmulQ4_Kx4RhsRange(&actual, &lhs_blocks, &rhs_packed, 4, 4, 0, 4);
 
     for (expected, actual) |ref, got| try expectPackedApprox(ref, got);
 }
@@ -137,22 +109,22 @@ test "ggml_q4_k x8 packed matmul matches plain q4_k matmul" {
     const random = prng.random();
 
     const blocks_per_row = 2;
-    const k = blocks_per_row * qk_k_block_size;
+    const k = blocks_per_row * types.qk_k_block_size;
 
-    var lhs_blocks: [4 * blocks_per_row]BlockQ8_K = undefined;
+    var lhs_blocks: [4 * blocks_per_row]types.BlockQ8_K = undefined;
     for (&lhs_blocks) |*b| fillRandomBlockQ8_K(b, random, false);
-    var rhs_blocks: [8 * blocks_per_row]BlockQ4_K = undefined;
+    var rhs_blocks: [8 * blocks_per_row]types.BlockQ4_K = undefined;
     for (&rhs_blocks) |*b| fillRandomBlockQ4_K(b, random);
 
-    var rhs_plain = try quantizedMatmulRhsQ4_KFromBlocks(allocator, k, 8, &rhs_blocks);
+    var rhs_plain = try q8k.quantizedMatmulRhsQ4_KFromBlocks(allocator, k, 8, &rhs_blocks);
     defer rhs_plain.deinit();
-    var rhs_packed = try packMatmulRhsQ4_Kx8(allocator, &rhs_blocks, 8, k, blocks_per_row);
+    var rhs_packed = try q4_k.packMatmulRhsQ4_Kx8(allocator, &rhs_blocks, 8, k, blocks_per_row);
     defer rhs_packed.deinit();
 
     var expected: [32]f32 = undefined;
     var actual: [32]f32 = undefined;
-    matmulQ4_KRhsRange(&expected, &lhs_blocks, &rhs_plain, 4, 8, 0, 4);
-    matmulQ4_Kx8RhsRange(&actual, &lhs_blocks, &rhs_packed, 4, 8, 0, 4);
+    q4_k.matmulQ4_KRhsRange(&expected, &lhs_blocks, &rhs_plain, 4, 8, 0, 4);
+    q4_k.matmulQ4_Kx8RhsRange(&actual, &lhs_blocks, &rhs_packed, 4, 8, 0, 4);
 
     for (expected, actual) |ref, got| try expectPackedApprox(ref, got);
 }
@@ -163,7 +135,7 @@ test "ggml_q4_k x8 padded q8_k x4 lhs matches row lhs matmul" {
     const random = prng.random();
 
     const blocks_per_row = 2;
-    const k = blocks_per_row * qk_k_block_size;
+    const k = blocks_per_row * types.qk_k_block_size;
 
     var lhs_values: [3 * k]f32 = undefined;
     for (&lhs_values, 0..) |*value, i| {
@@ -173,21 +145,21 @@ test "ggml_q4_k x8 padded q8_k x4 lhs matches row lhs matmul" {
     var lhs = try Tensor.fromSlice(allocator, &.{ 3, k }, &lhs_values);
     defer lhs.deinit();
 
-    const lhs_rows = try quantizeRowsQ8_K(allocator, &lhs);
+    const lhs_rows = try q8k.quantizeRowsQ8_K(allocator, &lhs);
     defer allocator.free(lhs_rows);
 
-    var lhs_x4: [blocks_per_row]BlockQ8_Kx4 = undefined;
-    try quantizeRowsQ8_Kx4PaddedInto(&lhs_x4, &lhs);
+    var lhs_x4: [blocks_per_row]types.BlockQ8_Kx4 = undefined;
+    try q8k.quantizeRowsQ8_Kx4PaddedInto(&lhs_x4, &lhs);
 
-    var rhs_blocks: [8 * blocks_per_row]BlockQ4_K = undefined;
+    var rhs_blocks: [8 * blocks_per_row]types.BlockQ4_K = undefined;
     for (&rhs_blocks) |*b| fillRandomBlockQ4_K(b, random);
-    var rhs_packed = try packMatmulRhsQ4_Kx8(allocator, &rhs_blocks, 8, k, blocks_per_row);
+    var rhs_packed = try q4_k.packMatmulRhsQ4_Kx8(allocator, &rhs_blocks, 8, k, blocks_per_row);
     defer rhs_packed.deinit();
 
     var expected: [3 * 8]f32 = undefined;
     var actual: [3 * 8]f32 = undefined;
-    matmulQ4_Kx8RhsRange(&expected, lhs_rows, &rhs_packed, 3, 8, 0, 3);
-    matmulQ4_Kx8Q8_Kx4RhsRange(&actual, &lhs_x4, &rhs_packed, 3, 8, 0, 3);
+    q4_k.matmulQ4_Kx8RhsRange(&expected, lhs_rows, &rhs_packed, 3, 8, 0, 3);
+    q4_k.matmulQ4_Kx8Q8_Kx4RhsRange(&actual, &lhs_x4, &rhs_packed, 3, 8, 0, 3);
 
     for (expected, actual) |ref, got| try expectPackedApprox(ref, got);
 }
@@ -198,7 +170,7 @@ test "ggml_q4_k x2 mmla packed matmul matches plain q4_k matmul" {
     const random = prng.random();
 
     const blocks_per_row = 2;
-    const k = blocks_per_row * qk_k_block_size;
+    const k = blocks_per_row * types.qk_k_block_size;
 
     var lhs_values: [2 * k]f32 = undefined;
     for (&lhs_values, 0..) |*value, i| {
@@ -208,25 +180,25 @@ test "ggml_q4_k x2 mmla packed matmul matches plain q4_k matmul" {
     var lhs = try Tensor.fromSlice(allocator, &.{ 2, k }, &lhs_values);
     defer lhs.deinit();
 
-    const lhs_blocks = try quantizeRowsQ8_K(allocator, &lhs);
+    const lhs_blocks = try q8k.quantizeRowsQ8_K(allocator, &lhs);
     defer allocator.free(lhs_blocks);
 
-    var rhs_blocks: [2 * blocks_per_row]BlockQ4_K = undefined;
+    var rhs_blocks: [2 * blocks_per_row]types.BlockQ4_K = undefined;
     for (&rhs_blocks) |*b| fillRandomBlockQ4_K(b, random);
-    var rhs_plain = try quantizedMatmulRhsQ4_KFromBlocks(allocator, k, 2, &rhs_blocks);
+    var rhs_plain = try q8k.quantizedMatmulRhsQ4_KFromBlocks(allocator, k, 2, &rhs_blocks);
     defer rhs_plain.deinit();
-    var rhs_packed = try packMatmulRhsQ4_Kx2Mmla(allocator, &rhs_blocks, 2, k, blocks_per_row);
+    var rhs_packed = try q4_k.packMatmulRhsQ4_Kx2Mmla(allocator, &rhs_blocks, 2, k, blocks_per_row);
     defer rhs_packed.deinit();
 
     var expected: [4]f32 = undefined;
     var actual_rows: [4]f32 = undefined;
     var actual_x2: [4]f32 = undefined;
-    matmulQ4_KRhsRange(&expected, lhs_blocks, &rhs_plain, 2, 2, 0, 2);
-    matmulQ4_Kx2MmlaRhsRange(&actual_rows, lhs_blocks, &rhs_packed, 2, 2, 0, 2);
+    q4_k.matmulQ4_KRhsRange(&expected, lhs_blocks, &rhs_plain, 2, 2, 0, 2);
+    q4_k.matmulQ4_Kx2MmlaRhsRange(&actual_rows, lhs_blocks, &rhs_packed, 2, 2, 0, 2);
 
-    var lhs_x2: [blocks_per_row]BlockQ8_Kx2Mmla = undefined;
-    try quantizeRowsQ8_Kx2MmlaInto(&lhs_x2, &lhs);
-    matmulQ4_Kx2MmlaQ8_Kx2MmlaRhsRange(&actual_x2, &lhs_x2, &rhs_packed, 2, 2, 0, 2);
+    var lhs_x2: [blocks_per_row]types.BlockQ8_Kx2Mmla = undefined;
+    try q8k.quantizeRowsQ8_Kx2MmlaInto(&lhs_x2, &lhs);
+    q4_k.matmulQ4_Kx2MmlaQ8_Kx2MmlaRhsRange(&actual_x2, &lhs_x2, &rhs_packed, 2, 2, 0, 2);
 
     for (expected, actual_rows) |ref, got| try expectPackedApprox(ref, got);
     for (expected, actual_x2) |ref, got| try expectPackedApprox(ref, got);
@@ -243,18 +215,18 @@ test "ggml_q4_k randomized blocks: row-outer matmul matches scalar reference" {
     const m = 3;
     const n = 5;
     const blocks_per_row = 2;
-    const k = blocks_per_row * qk_k_block_size;
+    const k = blocks_per_row * types.qk_k_block_size;
 
-    var lhs_blocks: [m * blocks_per_row]BlockQ8_K = undefined;
+    var lhs_blocks: [m * blocks_per_row]types.BlockQ8_K = undefined;
     for (&lhs_blocks) |*b| fillRandomBlockQ8_K(b, random, false);
-    var rhs_blocks: [n * blocks_per_row]BlockQ4_K = undefined;
+    var rhs_blocks: [n * blocks_per_row]types.BlockQ4_K = undefined;
     for (&rhs_blocks) |*b| fillRandomBlockQ4_K(b, random);
 
-    var rhs = try quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, &rhs_blocks);
+    var rhs = try q8k.quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, &rhs_blocks);
     defer rhs.deinit();
 
     var out: [m * n]f32 = undefined;
-    matmulQ4_KRhsRange(&out, &lhs_blocks, &rhs, m, n, 0, m);
+    q4_k.matmulQ4_KRhsRange(&out, &lhs_blocks, &rhs, m, n, 0, m);
 
     for (0..m) |i| {
         for (0..n) |j| {
@@ -272,8 +244,8 @@ test "Q4_K column-outer matmul matches row-outer tile" {
     const k = 512;
     const n = 8;
     const m = 17;
-    const bpc = k / qk_k_block_size;
-    const blocks = try allocator.alloc(BlockQ4_K, n * bpc);
+    const bpc = k / types.qk_k_block_size;
+    const blocks = try allocator.alloc(types.BlockQ4_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {
         b.dm[0] = f32ToF16Bits(0.05 + 0.001 * @as(f32, @floatFromInt(bi % 7)));
@@ -281,7 +253,7 @@ test "Q4_K column-outer matmul matches row-outer tile" {
         for (&b.scales, 0..) |*s, i| s.* = @intCast((i * 7 + bi * 3) % 256);
         for (&b.qs, 0..) |*q, i| q.* = @intCast((i * 31 + bi * 5) % 256);
     }
-    var rhs = try quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, blocks);
+    var rhs = try q8k.quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, blocks);
     defer rhs.deinit();
 
     const lhs_vals = try allocator.alloc(f32, m * k);
@@ -289,15 +261,15 @@ test "Q4_K column-outer matmul matches row-outer tile" {
     for (lhs_vals, 0..) |*v, i| v.* = @floatFromInt(@as(i32, @intCast((i * 17) % 251)) - 125);
     var dense = try Tensor.fromSlice(allocator, &.{ m, k }, lhs_vals);
     defer dense.deinit();
-    const qlhs = try quantizeRowsQ8_K(allocator, &dense);
+    const qlhs = try q8k.quantizeRowsQ8_K(allocator, &dense);
     defer allocator.free(qlhs);
 
     const out_tile = try allocator.alloc(f32, m * n);
     defer allocator.free(out_tile);
     const out_col = try allocator.alloc(f32, m * n);
     defer allocator.free(out_col);
-    matmulQ4_KRhsTile(out_tile, qlhs, &rhs, n, 0, m, 0, n);
-    matmulQ4_KRhsCompactColOuter(out_col, qlhs, &rhs, n, 0, m, 0, n);
+    q4_k.matmulQ4_KRhsTile(out_tile, qlhs, &rhs, n, 0, m, 0, n);
+    q4_k.matmulQ4_KRhsCompactColOuter(out_col, qlhs, &rhs, n, 0, m, 0, n);
     for (out_tile, out_col) |t, c| try std.testing.expect(@abs(t - c) <= 1e-3 * @max(@as(f32, 1), @abs(t)));
 }
 
@@ -309,8 +281,8 @@ test "Q4_K lane-packed Q8_Kx4 col-outer is bit-identical on the same activations
     const k = 512;
     const n = 9; // non-multiple of any col tile, exercises the column loop tail
     const m = 16; // multiple of 4 so packRowsQ8_Kx4 applies (no padding here)
-    const bpc = k / qk_k_block_size;
-    const blocks = try allocator.alloc(BlockQ4_K, n * bpc);
+    const bpc = k / types.qk_k_block_size;
+    const blocks = try allocator.alloc(types.BlockQ4_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {
         b.dm[0] = f32ToF16Bits(0.05 + 0.001 * @as(f32, @floatFromInt(bi % 7)));
@@ -318,7 +290,7 @@ test "Q4_K lane-packed Q8_Kx4 col-outer is bit-identical on the same activations
         for (&b.scales, 0..) |*s, i| s.* = @intCast((i * 7 + bi * 3) % 256);
         for (&b.qs, 0..) |*q, i| q.* = @intCast((i * 31 + bi * 5) % 256);
     }
-    var rhs = try quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, blocks);
+    var rhs = try q8k.quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, blocks);
     defer rhs.deinit();
 
     const lhs_vals = try allocator.alloc(f32, m * k);
@@ -327,17 +299,17 @@ test "Q4_K lane-packed Q8_Kx4 col-outer is bit-identical on the same activations
     var dense = try Tensor.fromSlice(allocator, &.{ m, k }, lhs_vals);
     defer dense.deinit();
 
-    const qlhs = try quantizeRowsQ8_K(allocator, &dense);
+    const qlhs = try q8k.quantizeRowsQ8_K(allocator, &dense);
     defer allocator.free(qlhs);
-    const qlhs_x4 = try qm.packRowsQ8_Kx4(allocator, qlhs, m, k, bpc);
+    const qlhs_x4 = try qm.q8k.packRowsQ8_Kx4(allocator, qlhs, m, k, bpc);
     defer allocator.free(qlhs_x4);
 
     const out_col = try allocator.alloc(f32, m * n);
     defer allocator.free(out_col);
     const out_x4 = try allocator.alloc(f32, m * n);
     defer allocator.free(out_x4);
-    matmulQ4_KRhsCompactColOuter(out_col, qlhs, &rhs, n, 0, m, 0, n);
-    matmulQ4_KCompactQ8_Kx4ColOuter(out_x4, qlhs_x4, &rhs, n, m, 0, n);
+    q4_k.matmulQ4_KRhsCompactColOuter(out_col, qlhs, &rhs, n, 0, m, 0, n);
+    q4_k.matmulQ4_KCompactQ8_Kx4ColOuter(out_x4, qlhs_x4, &rhs, n, m, 0, n);
     for (out_col, out_x4) |c, x| try std.testing.expectEqual(c, x);
 }
 
@@ -348,8 +320,8 @@ test "Q4_K lane-packed Q8_Kx4 col-outer matches row-outer tile with padded tail"
     const k = 512;
     const n = 8;
     const m = 17;
-    const bpc = k / qk_k_block_size;
-    const blocks = try allocator.alloc(BlockQ4_K, n * bpc);
+    const bpc = k / types.qk_k_block_size;
+    const blocks = try allocator.alloc(types.BlockQ4_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {
         b.dm[0] = f32ToF16Bits(0.05 + 0.001 * @as(f32, @floatFromInt(bi % 7)));
@@ -357,7 +329,7 @@ test "Q4_K lane-packed Q8_Kx4 col-outer matches row-outer tile with padded tail"
         for (&b.scales, 0..) |*s, i| s.* = @intCast((i * 7 + bi * 3) % 256);
         for (&b.qs, 0..) |*q, i| q.* = @intCast((i * 31 + bi * 5) % 256);
     }
-    var rhs = try quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, blocks);
+    var rhs = try q8k.quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, blocks);
     defer rhs.deinit();
 
     const lhs_vals = try allocator.alloc(f32, m * k);
@@ -366,19 +338,19 @@ test "Q4_K lane-packed Q8_Kx4 col-outer matches row-outer tile with padded tail"
     var dense = try Tensor.fromSlice(allocator, &.{ m, k }, lhs_vals);
     defer dense.deinit();
 
-    const qlhs = try quantizeRowsQ8_K(allocator, &dense);
+    const qlhs = try q8k.quantizeRowsQ8_K(allocator, &dense);
     defer allocator.free(qlhs);
     const row_groups = (m + 3) / 4;
-    const qlhs_x4 = try allocator.alloc(BlockQ8_Kx4, row_groups * bpc);
+    const qlhs_x4 = try allocator.alloc(types.BlockQ8_Kx4, row_groups * bpc);
     defer allocator.free(qlhs_x4);
-    try quantizeRowsQ8_Kx4PaddedInto(qlhs_x4, &dense);
+    try q8k.quantizeRowsQ8_Kx4PaddedInto(qlhs_x4, &dense);
 
     const out_tile = try allocator.alloc(f32, m * n);
     defer allocator.free(out_tile);
     const out_x4 = try allocator.alloc(f32, m * n);
     defer allocator.free(out_x4);
-    matmulQ4_KRhsTile(out_tile, qlhs, &rhs, n, 0, m, 0, n);
-    matmulQ4_KCompactQ8_Kx4ColOuter(out_x4, qlhs_x4, &rhs, n, m, 0, n);
+    q4_k.matmulQ4_KRhsTile(out_tile, qlhs, &rhs, n, 0, m, 0, n);
+    q4_k.matmulQ4_KCompactQ8_Kx4ColOuter(out_x4, qlhs_x4, &rhs, n, m, 0, n);
     for (out_tile, out_x4) |t, c| try std.testing.expect(@abs(t - c) <= 1e-3 * @max(@as(f32, 1), @abs(t)));
 }
 
@@ -392,8 +364,8 @@ test "Q4_K col-outer kernels: split column ranges are bit-identical to full rang
     const n = 512; // two 256-column phase chunks
     const split = 256;
     const m = 5;
-    const bpc = k / qk_k_block_size;
-    const blocks = try allocator.alloc(BlockQ4_K, n * bpc);
+    const bpc = k / types.qk_k_block_size;
+    const blocks = try allocator.alloc(types.BlockQ4_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {
         b.dm[0] = f32ToF16Bits(0.05 + 0.001 * @as(f32, @floatFromInt(bi % 7)));
@@ -401,7 +373,7 @@ test "Q4_K col-outer kernels: split column ranges are bit-identical to full rang
         for (&b.scales, 0..) |*s, i| s.* = @intCast((i * 7 + bi * 3) % 256);
         for (&b.qs, 0..) |*q, i| q.* = @intCast((i * 31 + bi * 5) % 256);
     }
-    var rhs = try quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, blocks);
+    var rhs = try q8k.quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, blocks);
     defer rhs.deinit();
 
     const lhs_vals = try allocator.alloc(f32, m * k);
@@ -409,7 +381,7 @@ test "Q4_K col-outer kernels: split column ranges are bit-identical to full rang
     for (lhs_vals, 0..) |*v, i| v.* = @floatFromInt(@as(i32, @intCast((i * 17) % 251)) - 125);
     var dense = try Tensor.fromSlice(allocator, &.{ m, k }, lhs_vals);
     defer dense.deinit();
-    const qlhs = try quantizeRowsQ8_K(allocator, &dense);
+    const qlhs = try q8k.quantizeRowsQ8_K(allocator, &dense);
     defer allocator.free(qlhs);
 
     const out_full = try allocator.alloc(f32, m * n);
@@ -419,26 +391,26 @@ test "Q4_K col-outer kernels: split column ranges are bit-identical to full rang
 
     // Row-outer tile: the m < 4 arm of moeExpertTileDotRange.
     for ([_]usize{ 1, 3 }) |mt| {
-        matmulQ4_KRhsTile(out_full, qlhs, &rhs, n, 0, mt, 0, n);
-        matmulQ4_KRhsTile(out_split, qlhs, &rhs, n, 0, mt, 0, split);
-        matmulQ4_KRhsTile(out_split, qlhs, &rhs, n, 0, mt, split, n);
+        q4_k.matmulQ4_KRhsTile(out_full, qlhs, &rhs, n, 0, mt, 0, n);
+        q4_k.matmulQ4_KRhsTile(out_split, qlhs, &rhs, n, 0, mt, 0, split);
+        q4_k.matmulQ4_KRhsTile(out_split, qlhs, &rhs, n, 0, mt, split, n);
         try std.testing.expectEqualSlices(f32, out_full[0 .. mt * n], out_split[0 .. mt * n]);
     }
 
     // Per-row column-outer: the m >= 4 arm.
-    matmulQ4_KRhsCompactColOuter(out_full, qlhs, &rhs, n, 0, m, 0, n);
-    matmulQ4_KRhsCompactColOuter(out_split, qlhs, &rhs, n, 0, m, 0, split);
-    matmulQ4_KRhsCompactColOuter(out_split, qlhs, &rhs, n, 0, m, split, n);
+    q4_k.matmulQ4_KRhsCompactColOuter(out_full, qlhs, &rhs, n, 0, m, 0, n);
+    q4_k.matmulQ4_KRhsCompactColOuter(out_split, qlhs, &rhs, n, 0, m, 0, split);
+    q4_k.matmulQ4_KRhsCompactColOuter(out_split, qlhs, &rhs, n, 0, m, split, n);
     try std.testing.expectEqualSlices(f32, out_full, out_split);
 
     // Lane-packed Q8_Kx4 column-outer: the phased-prefill arm (padded m=5 tail).
     const row_groups = (m + 3) / 4;
-    const qlhs_x4 = try allocator.alloc(BlockQ8_Kx4, row_groups * bpc);
+    const qlhs_x4 = try allocator.alloc(types.BlockQ8_Kx4, row_groups * bpc);
     defer allocator.free(qlhs_x4);
-    try quantizeRowsQ8_Kx4PaddedInto(qlhs_x4, &dense);
-    matmulQ4_KCompactQ8_Kx4ColOuter(out_full, qlhs_x4, &rhs, n, m, 0, n);
-    matmulQ4_KCompactQ8_Kx4ColOuter(out_split, qlhs_x4, &rhs, n, m, 0, split);
-    matmulQ4_KCompactQ8_Kx4ColOuter(out_split, qlhs_x4, &rhs, n, m, split, n);
+    try q8k.quantizeRowsQ8_Kx4PaddedInto(qlhs_x4, &dense);
+    q4_k.matmulQ4_KCompactQ8_Kx4ColOuter(out_full, qlhs_x4, &rhs, n, m, 0, n);
+    q4_k.matmulQ4_KCompactQ8_Kx4ColOuter(out_split, qlhs_x4, &rhs, n, m, 0, split);
+    q4_k.matmulQ4_KCompactQ8_Kx4ColOuter(out_split, qlhs_x4, &rhs, n, m, split, n);
     try std.testing.expectEqualSlices(f32, out_full, out_split);
 }
 
@@ -450,8 +422,6 @@ test "Q4_K col-outer kernels: split column ranges are bit-identical to full rang
 // tests execute the arms' portable primitive twins (validating the layout
 // walks and the f32 expression shape); on x86 hosts the same tests execute
 // the real vpdpbusd / vpmaddubsw instructions.
-
-const QKV4f32 = common.QKV4f32;
 
 fn fillRandomBlockQ4_Kx4(block: *qm.BlockQ4_Kx4, random: std.Random, max_nibbles: bool) void {
     for (&block.d) |*d| d.* = f32ToF16Bits(0.25 + random.float(f32));
@@ -498,13 +468,13 @@ fn fillRandomBlockQ8_Kx4(block: *qm.BlockQ8_Kx4, random: std.Random, extreme: bo
     }
 }
 
-fn randomVec4(random: std.Random) QKV4f32 {
+fn randomVec4(random: std.Random) common.QKV4f32 {
     var vals: [4]f32 = undefined;
     for (&vals) |*v| v.* = (random.float(f32) - 0.5) * 64.0;
     return vals;
 }
 
-fn expectVec4BitEqual(expected: QKV4f32, got: QKV4f32) !void {
+fn expectVec4BitEqual(expected: common.QKV4f32, got: common.QKV4f32) !void {
     const e: [4]f32 = expected;
     const g: [4]f32 = got;
     for (e, g) |ev, gv| {
@@ -512,22 +482,22 @@ fn expectVec4BitEqual(expected: QKV4f32, got: QKV4f32) !void {
     }
 }
 
-fn expectAcc2BitEqual(expected: [2]QKV4f32, got: [2]QKV4f32) !void {
+fn expectAcc2BitEqual(expected: [2]common.QKV4f32, got: [2]common.QKV4f32) !void {
     inline for (0..2) |half| try expectVec4BitEqual(expected[half], got[half]);
 }
 
-fn expectAcc42BitEqual(expected: [4][2]QKV4f32, got: [4][2]QKV4f32) !void {
+fn expectAcc42BitEqual(expected: [4][2]common.QKV4f32, got: [4][2]common.QKV4f32) !void {
     inline for (0..4) |row| try expectAcc2BitEqual(expected[row], got[row]);
 }
 
-fn checkQ4_Kx4Arms(lhs: *const BlockQ8_K, rhs: *const qm.BlockQ4_Kx4, acc: QKV4f32) !void {
+fn checkQ4_Kx4Arms(lhs: *const types.BlockQ8_K, rhs: *const qm.BlockQ4_Kx4, acc: common.QKV4f32) !void {
     const ref = q4_k.accumulateQ4_Kx4Scalar(lhs, rhs, acc);
     try expectVec4BitEqual(ref, q4_k.accumulateQ4_Kx4Vnni(lhs, rhs, acc));
     try expectVec4BitEqual(ref, q4_k.accumulateQ4_Kx4Avx2(lhs, rhs, acc));
     try expectVec4BitEqual(ref, q4_k.accumulateQ4_Kx4Widen(lhs, rhs, acc));
 }
 
-fn checkQ4_Kx8Arms(lhs: *const BlockQ8_K, rhs: *const qm.BlockQ4_Kx8, acc: [2]QKV4f32) !void {
+fn checkQ4_Kx8Arms(lhs: *const types.BlockQ8_K, rhs: *const qm.BlockQ4_Kx8, acc: [2]common.QKV4f32) !void {
     var ref = acc;
     q4_k.accumulateQ4_Kx8Scalar(lhs, rhs, &ref);
     var got = acc;
@@ -541,7 +511,7 @@ fn checkQ4_Kx8Arms(lhs: *const BlockQ8_K, rhs: *const qm.BlockQ4_Kx8, acc: [2]QK
     try expectAcc2BitEqual(ref, got);
 }
 
-fn checkQ4_Kx8Q8_Kx4Arms(lhs: *const qm.BlockQ8_Kx4, rhs: *const qm.BlockQ4_Kx8, acc: [4][2]QKV4f32) !void {
+fn checkQ4_Kx8Q8_Kx4Arms(lhs: *const qm.BlockQ8_Kx4, rhs: *const qm.BlockQ4_Kx8, acc: [4][2]common.QKV4f32) !void {
     var ref = acc;
     q4_k.accumulateQ4_Kx8Q8_Kx4Scalar(lhs, rhs, &ref);
     var got = acc;
@@ -559,7 +529,7 @@ test "ggml_q4_kx4 SIMD arms match the scalar arm bit-exactly" {
     var prng = std.Random.DefaultPrng.init(0x3c6ef372fe94f82b);
     const random = prng.random();
 
-    var lhs: BlockQ8_K = undefined;
+    var lhs: types.BlockQ8_K = undefined;
     var rhs: qm.BlockQ4_Kx4 = undefined;
     var iter: usize = 0;
     while (iter < 200) : (iter += 1) {
@@ -586,7 +556,7 @@ test "ggml_q4_kx8 plain-lhs SIMD arms match the scalar arm bit-exactly" {
     var prng = std.Random.DefaultPrng.init(0x9e3779b97f4a7c15);
     const random = prng.random();
 
-    var lhs: BlockQ8_K = undefined;
+    var lhs: types.BlockQ8_K = undefined;
     var rhs: qm.BlockQ4_Kx8 = undefined;
     var iter: usize = 0;
     while (iter < 200) : (iter += 1) {
@@ -611,7 +581,7 @@ test "ggml_q4_kx8 q8_kx4-lhs SIMD arms match the scalar arm bit-exactly" {
     var prng = std.Random.DefaultPrng.init(0xc2b2ae3d27d4eb4f);
     const random = prng.random();
 
-    const zero_acc: [4][2]QKV4f32 = .{
+    const zero_acc: [4][2]common.QKV4f32 = .{
         .{ @splat(0), @splat(0) },
         .{ @splat(0), @splat(0) },
         .{ @splat(0), @splat(0) },
@@ -651,27 +621,27 @@ test "ggml_q4_k packed matmul entry points match the scalar-arm references bit-e
     const random = prng.random();
 
     const blocks_per_row = 2;
-    const k = blocks_per_row * qk_k_block_size;
+    const k = blocks_per_row * types.qk_k_block_size;
 
     // x4 pack: m=6 covers the 4-row block and the single-row tail.
     {
         const m = 6;
         const n = 8;
-        var lhs_blocks: [m * blocks_per_row]BlockQ8_K = undefined;
+        var lhs_blocks: [m * blocks_per_row]types.BlockQ8_K = undefined;
         for (&lhs_blocks) |*b| fillRandomBlockQ8_K(b, random, false);
-        var rhs_cols: [n * blocks_per_row]BlockQ4_K = undefined;
+        var rhs_cols: [n * blocks_per_row]types.BlockQ4_K = undefined;
         for (&rhs_cols) |*b| fillRandomBlockQ4_K(b, random);
-        var rhs = try packMatmulRhsQ4_Kx4(allocator, &rhs_cols, n, k, blocks_per_row);
+        var rhs = try q4_k.packMatmulRhsQ4_Kx4(allocator, &rhs_cols, n, k, blocks_per_row);
         defer rhs.deinit();
 
         var got: [m * n]f32 = undefined;
-        matmulQ4_Kx4RhsRange(&got, &lhs_blocks, &rhs, m, n, 0, m);
+        q4_k.matmulQ4_Kx4RhsRange(&got, &lhs_blocks, &rhs, m, n, 0, m);
 
         for (0..m) |i| {
             var j: usize = 0;
             while (j < n) : (j += 4) {
                 const rhs_group = rhs.groupBlocks(j / 4);
-                var acc: QKV4f32 = @splat(0);
+                var acc: common.QKV4f32 = @splat(0);
                 for (0..blocks_per_row) |bi| {
                     acc = q4_k.accumulateQ4_Kx4Scalar(&lhs_blocks[i * blocks_per_row + bi], &rhs_group[bi], acc);
                 }
@@ -691,24 +661,24 @@ test "ggml_q4_k packed matmul entry points match the scalar-arm references bit-e
     {
         const m = 30;
         const n = 16;
-        const lhs_blocks = try allocator.alloc(BlockQ8_K, m * blocks_per_row);
+        const lhs_blocks = try allocator.alloc(types.BlockQ8_K, m * blocks_per_row);
         defer allocator.free(lhs_blocks);
         for (lhs_blocks) |*b| fillRandomBlockQ8_K(b, random, false);
-        const rhs_cols = try allocator.alloc(BlockQ4_K, n * blocks_per_row);
+        const rhs_cols = try allocator.alloc(types.BlockQ4_K, n * blocks_per_row);
         defer allocator.free(rhs_cols);
         for (rhs_cols) |*b| fillRandomBlockQ4_K(b, random);
-        var rhs = try packMatmulRhsQ4_Kx8(allocator, rhs_cols, n, k, blocks_per_row);
+        var rhs = try q4_k.packMatmulRhsQ4_Kx8(allocator, rhs_cols, n, k, blocks_per_row);
         defer rhs.deinit();
 
         const got = try allocator.alloc(f32, m * n);
         defer allocator.free(got);
-        matmulQ4_Kx8RhsRange(got, lhs_blocks, &rhs, m, n, 0, m);
+        q4_k.matmulQ4_Kx8RhsRange(got, lhs_blocks, &rhs, m, n, 0, m);
 
         for (0..m) |i| {
             var j: usize = 0;
             while (j < n) : (j += 8) {
                 const rhs_group = rhs.groupBlocks(j / 8);
-                var acc: [2]QKV4f32 = .{ @splat(0), @splat(0) };
+                var acc: [2]common.QKV4f32 = .{ @splat(0), @splat(0) };
                 for (0..blocks_per_row) |bi| {
                     q4_k.accumulateQ4_Kx8Scalar(&lhs_blocks[i * blocks_per_row + bi], &rhs_group[bi], &acc);
                 }
@@ -738,23 +708,23 @@ test "ggml_q4_k packed matmul entry points match the scalar-arm references bit-e
         var lhs = try Tensor.fromSlice(allocator, &.{ m, k }, &lhs_values);
         defer lhs.deinit();
         var lhs_x4: [2 * blocks_per_row]qm.BlockQ8_Kx4 = undefined;
-        try quantizeRowsQ8_Kx4PaddedInto(&lhs_x4, &lhs);
+        try q8k.quantizeRowsQ8_Kx4PaddedInto(&lhs_x4, &lhs);
 
-        const rhs_cols = try allocator.alloc(BlockQ4_K, n * blocks_per_row);
+        const rhs_cols = try allocator.alloc(types.BlockQ4_K, n * blocks_per_row);
         defer allocator.free(rhs_cols);
         for (rhs_cols) |*b| fillRandomBlockQ4_K(b, random);
-        var rhs = try packMatmulRhsQ4_Kx8(allocator, rhs_cols, n, k, blocks_per_row);
+        var rhs = try q4_k.packMatmulRhsQ4_Kx8(allocator, rhs_cols, n, k, blocks_per_row);
         defer rhs.deinit();
 
         var got: [m * n]f32 = undefined;
-        matmulQ4_Kx8Q8_Kx4RhsRange(&got, &lhs_x4, &rhs, m, n, 0, m);
+        q4_k.matmulQ4_Kx8Q8_Kx4RhsRange(&got, &lhs_x4, &rhs, m, n, 0, m);
 
         var row_group: usize = 0;
         while (row_group < 2) : (row_group += 1) {
             var j: usize = 0;
             while (j < n) : (j += 8) {
                 const rhs_group = rhs.groupBlocks(j / 8);
-                var acc: [4][2]QKV4f32 = .{
+                var acc: [4][2]common.QKV4f32 = .{
                     .{ @splat(0), @splat(0) },
                     .{ @splat(0), @splat(0) },
                     .{ @splat(0), @splat(0) },
@@ -789,7 +759,7 @@ test "ggml_q4_k packed matmul entry points match the scalar-arm references bit-e
 // the arms' portable primitive twins, x86 ReleaseFast/Safe executes the real
 // vpdpbusd / vpmaddubsw instructions.
 
-const lane_dot_tiers = [_]q4_k.Q4DotTier{ .vnni, .avx2, .widen };
+const lane_dot_tiers = [_]common.X86DotTier{ .vnni, .avx2, .widen };
 
 test "q4_k 4-row lane dot SIMD arms match the scalar reference" {
     var prng = std.Random.DefaultPrng.init(0x9d3c5b17e2a4f086);
@@ -807,9 +777,9 @@ test "q4_k 4-row lane dot SIMD arms match the scalar reference" {
         }
         const wv: [2]common.QKV16i8 = .{ wa[0], wa[1] };
         inline for (0..8) |subblock| {
-            const ref: [4]i32 = q4_k.dot4RowsSubblockQ8_Kx4Scalar(&a, subblock, wv);
+            const ref: [4]i32 = common.dot4RowsSubblockQ8_Kx4Scalar(&a, subblock, wv);
             inline for (lane_dot_tiers) |tier| {
-                try std.testing.expectEqual(ref, @as([4]i32, q4_k.dot4RowsSubblockQ8_Kx4Simd(tier, &a, subblock, wv)));
+                try std.testing.expectEqual(ref, @as([4]i32, common.dot4RowsSubblockQ8_Kx4Simd(tier, &a, subblock, wv)));
             }
         }
     }
@@ -840,9 +810,9 @@ test "q4_k 4-row lane dot SIMD arms match the scalar reference" {
         for (edge_w) |wval| {
             const wv: [2]common.QKV16i8 = .{ @splat(wval), @splat(wval) };
             inline for (0..8) |subblock| {
-                const ref: [4]i32 = q4_k.dot4RowsSubblockQ8_Kx4Scalar(&a, subblock, wv);
+                const ref: [4]i32 = common.dot4RowsSubblockQ8_Kx4Scalar(&a, subblock, wv);
                 inline for (lane_dot_tiers) |tier| {
-                    try std.testing.expectEqual(ref, @as([4]i32, q4_k.dot4RowsSubblockQ8_Kx4Simd(tier, &a, subblock, wv)));
+                    try std.testing.expectEqual(ref, @as([4]i32, common.dot4RowsSubblockQ8_Kx4Simd(tier, &a, subblock, wv)));
                 }
             }
         }
@@ -862,16 +832,16 @@ test "Q4_K compact-vs-packed cross-layout matmul is bit-identical at decode shap
     const allocator = std.testing.allocator;
     const k = 512;
     const n = 16; // x8-multiple (packed-layout requirement); two column groups
-    const bpc = k / qk_k_block_size;
+    const bpc = k / types.qk_k_block_size;
 
     var prng = std.Random.DefaultPrng.init(0x4a52c90de13fb864);
     const random = prng.random();
 
-    const blocks = try allocator.alloc(BlockQ4_K, n * bpc);
+    const blocks = try allocator.alloc(types.BlockQ4_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks) |*b| fillRandomBlockQ4_K(b, random);
 
-    var rhs_plain = try quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, blocks);
+    var rhs_plain = try q8k.quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, blocks);
     defer rhs_plain.deinit();
     var rhs_packed = try q4_k.packMatmulRhsQ4_Kx8(allocator, blocks, n, k, bpc);
     defer rhs_packed.deinit();
@@ -882,15 +852,15 @@ test "Q4_K compact-vs-packed cross-layout matmul is bit-identical at decode shap
         for (lhs_vals) |*v| v.* = (random.float(f32) - 0.5) * 8.0;
         var dense = try Tensor.fromSlice(allocator, &.{ m, k }, lhs_vals);
         defer dense.deinit();
-        const qlhs = try qm.quantizeRowsQ8_K(allocator, &dense);
+        const qlhs = try qm.q8k.quantizeRowsQ8_K(allocator, &dense);
         defer allocator.free(qlhs);
 
         const out_compact = try allocator.alloc(f32, m * n);
         defer allocator.free(out_compact);
         const out_packed = try allocator.alloc(f32, m * n);
         defer allocator.free(out_packed);
-        matmulQ4_KRhsRange(out_compact, qlhs, &rhs_plain, m, n, 0, m);
-        matmulQ4_Kx8RhsRange(out_packed, qlhs, &rhs_packed, m, n, 0, m);
+        q4_k.matmulQ4_KRhsRange(out_compact, qlhs, &rhs_plain, m, n, 0, m);
+        q4_k.matmulQ4_Kx8RhsRange(out_packed, qlhs, &rhs_packed, m, n, 0, m);
         try std.testing.expectEqualSlices(f32, out_packed, out_compact);
     }
 }

@@ -94,6 +94,13 @@ this point; earlier history is `git log`.
   kernel signature takes `pc: ParallelConfig` first when it uses the pool
   and drops the `WithConfig` suffix (`scaleIntoWithConfig(out, a, s,
   config)` -> `scaleInto(pc, out, a, s)`); the config-less twins are gone.
+- Internal layout, no public spelling changes: the `backend/quant/` and
+  `backend/vector/` children are addressed by module (`quant.q4_k.X`,
+  `vector.gemm.X`) instead of through re-export manifests in `quant.zig`
+  and `vector.zig`; `quant/matmul_api.zig` is removed; the vector leaves
+  take `pc: ParallelConfig` first with no `WithConfig` suffix, so
+  `native.kernels` is a list of aliases; the Q8_Kx4 lane-dot helpers q4_k
+  and q5_k each carried live once in `quant/common.zig`.
 
 ### Deprecated
 

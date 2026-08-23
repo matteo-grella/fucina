@@ -9,14 +9,6 @@ const thread = @import("../../thread.zig");
 
 const Tensor = tensor.Tensor;
 
-const causalConv1dIntoWithConfig = conv.causalConv1dIntoWithConfig;
-const causalConv1dBackwardInputIntoWithConfig = conv.causalConv1dBackwardInputIntoWithConfig;
-const causalConv1dBackwardWeightIntoWithConfig = conv.causalConv1dBackwardWeightIntoWithConfig;
-const groupedCausalConv1dIntoWithConfig = conv.groupedCausalConv1dIntoWithConfig;
-const groupedCausalConv1dBackwardInputIntoWithConfig = conv.groupedCausalConv1dBackwardInputIntoWithConfig;
-const groupedCausalConv1dBackwardWeightIntoWithConfig = conv.groupedCausalConv1dBackwardWeightIntoWithConfig;
-const causalDepthwiseConv1dIntoWithConfig = conv.causalDepthwiseConv1dIntoWithConfig;
-
 test "general causal conv vector kernel: channel mixing, dilation, state, vector tails" {
     const allocator = std.testing.allocator;
 
@@ -37,7 +29,7 @@ test "general causal conv vector kernel: channel mixing, dilation, state, vector
     var out = try Tensor.zeros(allocator, &.{ 3, 2 });
     defer out.deinit();
 
-    causalConv1dIntoWithConfig(&out, &input, &weight, null, 3, 2, 2, 2, 1, .{});
+    conv.causalConv1dInto(.{}, &out, &input, &weight, null, 3, 2, 2, 2, 1);
     try std.testing.expectEqualSlices(f32, &.{
         31,  42,
         372, 504,
@@ -46,7 +38,7 @@ test "general causal conv vector kernel: channel mixing, dilation, state, vector
 
     // Same conv with one state row [5, 7] feeding the t=0 oldest tap.
     const state = [_]f32{ 5, 7 };
-    causalConv1dIntoWithConfig(&out, &input, &weight, &state, 3, 2, 2, 2, 1, .{});
+    conv.causalConv1dInto(.{}, &out, &input, &weight, &state, 3, 2, 2, 2, 1);
     try std.testing.expectEqualSlices(f32, &.{
         291, 422,
         372, 504,
@@ -61,11 +53,11 @@ test "general causal conv vector kernel: channel mixing, dilation, state, vector
     var dilated_out = try Tensor.zeros(allocator, &.{ 4, 1 });
     defer dilated_out.deinit();
 
-    causalConv1dIntoWithConfig(&dilated_out, &dilated_input, &dilated_weight, null, 4, 1, 1, 2, 2, .{});
+    conv.causalConv1dInto(.{}, &dilated_out, &dilated_input, &dilated_weight, null, 4, 1, 1, 2, 2);
     try std.testing.expectEqualSlices(f32, &.{ 1, 2, 13, 24 }, dilated_out.dataConst());
 
     const dilated_state = [_]f32{ 100, 200 };
-    causalConv1dIntoWithConfig(&dilated_out, &dilated_input, &dilated_weight, &dilated_state, 4, 1, 1, 2, 2, .{});
+    conv.causalConv1dInto(.{}, &dilated_out, &dilated_input, &dilated_weight, &dilated_state, 4, 1, 1, 2, 2);
     try std.testing.expectEqualSlices(f32, &.{ 1001, 2002, 13, 24 }, dilated_out.dataConst());
 
     // out=5 exercises both the SIMD body and the scalar tail of axpyRow.
@@ -73,7 +65,7 @@ test "general causal conv vector kernel: channel mixing, dilation, state, vector
     defer wide_weight.deinit();
     var wide_out = try Tensor.zeros(allocator, &.{ 4, 5 });
     defer wide_out.deinit();
-    causalConv1dIntoWithConfig(&wide_out, &dilated_input, &wide_weight, null, 4, 1, 5, 1, 1, .{});
+    conv.causalConv1dInto(.{}, &wide_out, &dilated_input, &wide_weight, null, 4, 1, 5, 1, 1);
     try std.testing.expectEqualSlices(f32, &.{
         1, 2, 3,  4,  5,
         2, 4, 6,  8,  10,
@@ -110,7 +102,7 @@ test "general causal conv vector backward kernels match hand-computed gradients"
 
     var gx = try Tensor.zeros(allocator, &.{ 3, 2 });
     defer gx.deinit();
-    causalConv1dBackwardInputIntoWithConfig(&gx, &gy, &weight, 3, 2, 2, 2, 1, .{});
+    conv.causalConv1dBackwardInputInto(.{}, &gx, &gy, &weight, 3, 2, 2, 2, 1);
     try std.testing.expectEqualSlices(f32, &.{
         33, 77,
         33, 77,
@@ -119,7 +111,7 @@ test "general causal conv vector backward kernels match hand-computed gradients"
 
     var gw = try Tensor.zeros(allocator, &.{ 2, 2, 2 });
     defer gw.deinit();
-    causalConv1dBackwardWeightIntoWithConfig(&gw, &input, &gy, &state, 3, 2, 2, 2, 1, .{});
+    conv.causalConv1dBackwardWeightInto(.{}, &gw, &input, &gy, &state, 3, 2, 2, 2, 1);
     try std.testing.expectEqualSlices(f32, &.{
         8,  8,
         37, 37,
@@ -166,7 +158,7 @@ test "general causal conv vector kernels match a naive reference at SIMD-body wi
 
     var out = try Tensor.zeros(allocator, &.{ seq, out_ch });
     defer out.deinit();
-    causalConv1dIntoWithConfig(&out, &input, &weight, &state_data, seq, in_ch, out_ch, taps, dilation, .{});
+    conv.causalConv1dInto(.{}, &out, &input, &weight, &state_data, seq, in_ch, out_ch, taps, dilation);
     for (0..seq) |t| {
         for (0..out_ch) |o| {
             var acc: f64 = 0;
@@ -179,7 +171,7 @@ test "general causal conv vector kernels match a naive reference at SIMD-body wi
 
     var gx = try Tensor.zeros(allocator, &.{ seq, in_ch });
     defer gx.deinit();
-    causalConv1dBackwardInputIntoWithConfig(&gx, &gy, &weight, seq, in_ch, out_ch, taps, dilation, .{});
+    conv.causalConv1dBackwardInputInto(.{}, &gx, &gy, &weight, seq, in_ch, out_ch, taps, dilation);
     for (0..seq) |p| {
         for (0..in_ch) |i| {
             var acc: f64 = 0;
@@ -194,7 +186,7 @@ test "general causal conv vector kernels match a naive reference at SIMD-body wi
 
     var gw = try Tensor.zeros(allocator, &.{ taps, in_ch, out_ch });
     defer gw.deinit();
-    causalConv1dBackwardWeightIntoWithConfig(&gw, &input, &gy, &state_data, seq, in_ch, out_ch, taps, dilation, .{});
+    conv.causalConv1dBackwardWeightInto(.{}, &gw, &input, &gy, &state_data, seq, in_ch, out_ch, taps, dilation);
     for (0..taps) |k| {
         for (0..in_ch) |i| {
             for (0..out_ch) |o| {
@@ -244,7 +236,7 @@ test "grouped general causal conv vector kernels match a naive reference at SIMD
 
     var out = try Tensor.zeros(allocator, &.{ seq, out_ch });
     defer out.deinit();
-    groupedCausalConv1dIntoWithConfig(&out, &input, &weight, &state_data, seq, in_ch, out_ch, taps, dilation, groups, .{});
+    conv.groupedCausalConv1dInto(.{}, &out, &input, &weight, &state_data, seq, in_ch, out_ch, taps, dilation, groups);
     for (0..seq) |t| {
         for (0..out_ch) |o| {
             const group = o / out_per_group;
@@ -259,7 +251,7 @@ test "grouped general causal conv vector kernels match a naive reference at SIMD
 
     var gx = try Tensor.zeros(allocator, &.{ seq, in_ch });
     defer gx.deinit();
-    groupedCausalConv1dBackwardInputIntoWithConfig(&gx, &gy, &weight, seq, in_ch, out_ch, taps, dilation, groups, .{});
+    conv.groupedCausalConv1dBackwardInputInto(.{}, &gx, &gy, &weight, seq, in_ch, out_ch, taps, dilation, groups);
     for (0..seq) |p| {
         for (0..in_ch) |i| {
             const group = i / in_per_group;
@@ -279,7 +271,7 @@ test "grouped general causal conv vector kernels match a naive reference at SIMD
 
     var gw = try Tensor.zeros(allocator, &.{ taps, in_per_group, out_ch });
     defer gw.deinit();
-    groupedCausalConv1dBackwardWeightIntoWithConfig(&gw, &input, &gy, &state_data, seq, in_ch, out_ch, taps, dilation, groups, .{});
+    conv.groupedCausalConv1dBackwardWeightInto(.{}, &gw, &input, &gy, &state_data, seq, in_ch, out_ch, taps, dilation, groups);
     for (0..taps) |k| {
         for (0..in_per_group) |local_i| {
             for (0..out_ch) |o| {
@@ -322,7 +314,7 @@ test "grouped 1x1 general causal conv fast path matches a naive reference" {
 
     var out = try Tensor.zeros(allocator, &.{ seq, out_ch });
     defer out.deinit();
-    groupedCausalConv1dIntoWithConfig(&out, &input, &weight, &unused_state, seq, in_ch, out_ch, taps, dilation, groups, .{});
+    conv.groupedCausalConv1dInto(.{}, &out, &input, &weight, &unused_state, seq, in_ch, out_ch, taps, dilation, groups);
     for (0..seq) |t| {
         for (0..out_ch) |o| {
             const group = o / out_per_group;
@@ -337,7 +329,7 @@ test "grouped 1x1 general causal conv fast path matches a naive reference" {
 
     var gx = try Tensor.zeros(allocator, &.{ seq, in_ch });
     defer gx.deinit();
-    groupedCausalConv1dBackwardInputIntoWithConfig(&gx, &gy, &weight, seq, in_ch, out_ch, taps, dilation, groups, .{});
+    conv.groupedCausalConv1dBackwardInputInto(.{}, &gx, &gy, &weight, seq, in_ch, out_ch, taps, dilation, groups);
     for (0..seq) |p| {
         for (0..in_ch) |i| {
             const group = i / in_per_group;
@@ -353,7 +345,7 @@ test "grouped 1x1 general causal conv fast path matches a naive reference" {
 
     var gw = try Tensor.zeros(allocator, &.{ taps, in_per_group, out_ch });
     defer gw.deinit();
-    groupedCausalConv1dBackwardWeightIntoWithConfig(&gw, &input, &gy, &unused_state, seq, in_ch, out_ch, taps, dilation, groups, .{});
+    conv.groupedCausalConv1dBackwardWeightInto(.{}, &gw, &input, &gy, &unused_state, seq, in_ch, out_ch, taps, dilation, groups);
     for (0..in_per_group) |local_i| {
         for (0..out_ch) |o| {
             const group = o / out_per_group;
@@ -383,7 +375,7 @@ test "causal depthwise conv vector kernel handles channel tails" {
     var out = try Tensor.zeros(allocator, &.{ 2, 5 });
     defer out.deinit();
 
-    causalDepthwiseConv1dIntoWithConfig(&out, &input, &kernel, null, 2, 5, 2, 1, .{});
+    conv.causalDepthwiseConv1dInto(.{}, &out, &input, &kernel, null, 2, 5, 2, 1);
 
     try std.testing.expectEqualSlices(f32, &.{
         2, 20, 200, 2000, 20000,
@@ -394,13 +386,6 @@ test "causal depthwise conv vector kernel handles channel tails" {
 // ===========================================================================
 // conv1d (general non-causal) + col2im1d — vs hand-rolled naive references.
 // ===========================================================================
-
-const conv1dIntoWithConfig = conv.conv1dIntoWithConfig;
-const conv1dBackwardInputIntoWithConfig = conv.conv1dBackwardInputIntoWithConfig;
-const conv1dBackwardWeightIntoWithConfig = conv.conv1dBackwardWeightIntoWithConfig;
-const col2im1dIntoWithConfig = conv.col2im1dIntoWithConfig;
-const col2im1dBackwardIntoWithConfig = conv.col2im1dBackwardIntoWithConfig;
-const Conv1dDims = conv.Conv1dDims;
 
 /// Deterministic pseudo-random fill (splitmix-style) in [-2, 2).
 fn fillPseudoRandom(values: []f32, seed: u64) void {
@@ -416,7 +401,7 @@ fn fillPseudoRandom(values: []f32, seed: u64) void {
     }
 }
 
-fn naiveConv1d(out: []f32, input: []const f32, weight: []const f32, d: Conv1dDims) void {
+fn naiveConv1d(out: []f32, input: []const f32, weight: []const f32, d: conv.Conv1dDims) void {
     const in_per_group = d.in_channels / d.groups;
     const out_per_group = d.out_channels / d.groups;
     for (0..d.out_len) |t| {
@@ -476,7 +461,7 @@ test "conv1d vector kernel matches naive reference across stride/pad/dilation/gr
     };
 
     for (cases, 0..) |case, case_i| {
-        const d: Conv1dDims = .{
+        const d: conv.Conv1dDims = .{
             .seq = case.seq,
             .out_len = conv1dOutLen(case.seq, case.taps, case.stride, case.pad, case.dilation),
             .in_channels = case.in,
@@ -498,7 +483,7 @@ test "conv1d vector kernel matches naive reference across stride/pad/dilation/gr
 
         var out = try Tensor.zeros(allocator, &.{ d.out_len, d.out_channels });
         defer out.deinit();
-        conv1dIntoWithConfig(&out, &input, &weight, d, .{});
+        conv.conv1dInto(.{}, &out, &input, &weight, d);
 
         const want = try allocator.alloc(f32, d.out_len * d.out_channels);
         defer allocator.free(want);
@@ -522,17 +507,23 @@ test "conv1d vector kernel hand-computed case (k=3, s=1, p=1)" {
     var out = try Tensor.zeros(allocator, &.{ 4, 1 });
     defer out.deinit();
 
-    conv1dIntoWithConfig(&out, &input, &weight, .{
-        .seq = 4,
-        .out_len = 4,
-        .in_channels = 1,
-        .out_channels = 1,
-        .taps = 3,
-        .stride = 1,
-        .pad = 1,
-        .dilation = 1,
-        .groups = 1,
-    }, .{});
+    conv.conv1dInto(
+        .{},
+        &out,
+        &input,
+        &weight,
+        .{
+            .seq = 4,
+            .out_len = 4,
+            .in_channels = 1,
+            .out_channels = 1,
+            .taps = 3,
+            .stride = 1,
+            .pad = 1,
+            .dilation = 1,
+            .groups = 1,
+        },
+    );
     try std.testing.expectEqualSlices(f32, &.{ 8, 14, 20, 11 }, out.dataConst());
 }
 
@@ -591,7 +582,7 @@ test "col2im1d vector kernel matches naive scatter for the 5 DAC decoder combos"
         // Poison the output to prove every element (incl. the output_pad rows)
         // is written.
         @memset(out.data(), std.math.nan(f32));
-        col2im1dIntoWithConfig(&out, &col, t_in, out_len, out_channels, taps, stride, pad, .{});
+        conv.col2im1dInto(.{}, &out, &col, t_in, out_len, out_channels, taps, stride, pad);
 
         const want = try allocator.alloc(f32, out_len * out_channels);
         defer allocator.free(want);
@@ -618,13 +609,13 @@ test "col2im1d vector kernel hand-computed gather (s=2, k=2)" {
     // pad=0: T_out = (2-1)*2 + 2 = 4; out[t] = col[t/2, t%2] scattered disjointly.
     var out = try Tensor.zeros(allocator, &.{ 4, 1 });
     defer out.deinit();
-    col2im1dIntoWithConfig(&out, &col, 2, 4, 1, 2, 2, 0, .{});
+    conv.col2im1dInto(.{}, &out, &col, 2, 4, 1, 2, 2, 0);
     try std.testing.expectEqualSlices(f32, &.{ 10, 20, 30, 40 }, out.dataConst());
 
     // pad=1 crops one frame on each side: T_out = 2, out = [c01, c10].
     var cropped = try Tensor.zeros(allocator, &.{ 2, 1 });
     defer cropped.deinit();
-    col2im1dIntoWithConfig(&cropped, &col, 2, 2, 1, 2, 2, 1, .{});
+    conv.col2im1dInto(.{}, &cropped, &col, 2, 2, 1, 2, 2, 1);
     try std.testing.expectEqualSlices(f32, &.{ 20, 30 }, cropped.dataConst());
 }
 
@@ -636,7 +627,7 @@ fn naiveConv1dBackward(
     input: []const f32,
     weight: []const f32,
     gy: []const f32,
-    d: Conv1dDims,
+    d: conv.Conv1dDims,
 ) void {
     @memset(gx, 0);
     @memset(gw, 0);
@@ -690,7 +681,7 @@ test "conv1d backward vector kernels match the naive adjoint across stride/pad/d
     };
 
     for (cases, 0..) |case, case_i| {
-        const d: Conv1dDims = .{
+        const d: conv.Conv1dDims = .{
             .seq = case.seq,
             .out_len = conv1dOutLen(case.seq, case.taps, case.stride, case.pad, case.dilation),
             .in_channels = case.in,
@@ -716,12 +707,12 @@ test "conv1d backward vector kernels match the naive adjoint across stride/pad/d
         var gx = try Tensor.zeros(allocator, &.{ d.seq, d.in_channels });
         defer gx.deinit();
         @memset(gx.data(), std.math.nan(f32));
-        conv1dBackwardInputIntoWithConfig(&gx, &gy, &weight, d, .{});
+        conv.conv1dBackwardInputInto(.{}, &gx, &gy, &weight, d);
 
         var gw = try Tensor.zeros(allocator, &.{ d.taps, in_per_group, d.out_channels });
         defer gw.deinit();
         @memset(gw.data(), std.math.nan(f32));
-        conv1dBackwardWeightIntoWithConfig(&gw, &input, &gy, d, .{});
+        conv.conv1dBackwardWeightInto(.{}, &gw, &input, &gy, d);
 
         const want_gx = try allocator.alloc(f32, d.seq * d.in_channels);
         defer allocator.free(want_gx);
@@ -749,7 +740,7 @@ test "conv1d backward vector kernels hand-computed case (k=3, s=1, p=1, gy=1)" {
     defer weight.deinit();
     var gy = try Tensor.fromSlice(allocator, &.{ 4, 1 }, &.{ 1, 1, 1, 1 });
     defer gy.deinit();
-    const d: Conv1dDims = .{
+    const d: conv.Conv1dDims = .{
         .seq = 4,
         .out_len = 4,
         .in_channels = 1,
@@ -763,12 +754,12 @@ test "conv1d backward vector kernels hand-computed case (k=3, s=1, p=1, gy=1)" {
 
     var gx = try Tensor.zeros(allocator, &.{ 4, 1 });
     defer gx.deinit();
-    conv1dBackwardInputIntoWithConfig(&gx, &gy, &weight, d, .{});
+    conv.conv1dBackwardInputInto(.{}, &gx, &gy, &weight, d);
     try std.testing.expectEqualSlices(f32, &.{ 3, 6, 6, 5 }, gx.dataConst());
 
     var gw = try Tensor.zeros(allocator, &.{ 3, 1, 1 });
     defer gw.deinit();
-    conv1dBackwardWeightIntoWithConfig(&gw, &input, &gy, d, .{});
+    conv.conv1dBackwardWeightInto(.{}, &gw, &input, &gy, d);
     try std.testing.expectEqualSlices(f32, &.{ 6, 10, 9 }, gw.dataConst());
 }
 
@@ -827,7 +818,7 @@ test "col2im1d backward vector kernel matches the naive adjoint for the 5 DAC de
         defer gcol.deinit();
         // Poison to prove every cell (incl. cropped/out-of-range taps) is written.
         @memset(gcol.data(), std.math.nan(f32));
-        col2im1dBackwardIntoWithConfig(&gcol, &gy, t_in, gy_len, out_channels, taps, stride, pad, .{});
+        conv.col2im1dBackwardInto(.{}, &gcol, &gy, t_in, gy_len, out_channels, taps, stride, pad);
 
         const want = try allocator.alloc(f32, t_in * taps * out_channels);
         defer allocator.free(want);
@@ -845,7 +836,7 @@ test "col2im1d backward vector kernel hand-computed gather transpose (s=2, k=2)"
     defer gy.deinit();
     var gcol = try Tensor.zeros(allocator, &.{ 2, 2 });
     defer gcol.deinit();
-    col2im1dBackwardIntoWithConfig(&gcol, &gy, 2, 4, 1, 2, 2, 0, .{});
+    conv.col2im1dBackwardInto(.{}, &gcol, &gy, 2, 4, 1, 2, 2, 0);
     try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, gcol.dataConst());
 
     // pad=1, output_pad=1 (t_conv=2, gy has 3 rows): the cropped taps and the
@@ -854,7 +845,7 @@ test "col2im1d backward vector kernel hand-computed gather transpose (s=2, k=2)"
     defer gy_pad.deinit();
     var gcol_pad = try Tensor.zeros(allocator, &.{ 2, 2 });
     defer gcol_pad.deinit();
-    col2im1dBackwardIntoWithConfig(&gcol_pad, &gy_pad, 2, 3, 1, 2, 2, 1, .{});
+    conv.col2im1dBackwardInto(.{}, &gcol_pad, &gy_pad, 2, 3, 1, 2, 2, 1);
     try std.testing.expectEqualSlices(f32, &.{ 0, 5, 6, 0 }, gcol_pad.dataConst());
 }
 
@@ -871,15 +862,13 @@ test "col2im1d vector kernel overlapping taps accumulate (s=1, k=3)" {
     defer col.deinit();
     var out = try Tensor.zeros(allocator, &.{ 5, 1 });
     defer out.deinit();
-    col2im1dIntoWithConfig(&out, &col, 3, 5, 1, 3, 1, 0, .{});
+    conv.col2im1dInto(.{}, &out, &col, 3, 5, 1, 3, 1, 0);
     try std.testing.expectEqualSlices(f32, &.{ 1, 2 + 8, 4 + 16 + 64, 32 + 128, 256 }, out.dataConst());
 }
 
 // ---------------------------------------------------------------------------
 // conv2d col2im + parallel backward splits
 // ---------------------------------------------------------------------------
-
-const Conv2dDims = conv.Conv2dDims;
 
 /// Naive adjoint of the 2-D im2col gather: scatter every col entry back onto
 /// the input position its forward tap read (out-of-range taps read padding
@@ -888,7 +877,7 @@ const Conv2dDims = conv.Conv2dDims;
 /// pad_h (one ky per oy), so descending oy/ox delivers each element's
 /// contributions in ascending (ky, kx) order — exactly the gather kernel's
 /// accumulation order, keeping the comparison free of reassociation noise.
-fn naiveCol2imScatter(out: []f32, col: []const f32, d: Conv2dDims) void {
+fn naiveCol2imScatter(out: []f32, col: []const f32, d: conv.Conv2dDims) void {
     @memset(out, 0);
     const ksz = d.kh * d.kw * d.cin;
     var oy = d.oh;
@@ -930,7 +919,7 @@ test "conv2d col2im matches the naive im2col adjoint" {
         const h: usize = 9;
         const w: usize = 8;
         const cin: usize = 3; // exercises the addRow scalar tail
-        const d: Conv2dDims = .{
+        const d: conv.Conv2dDims = .{
             .h = h,
             .w = w,
             .cin = cin,
@@ -955,7 +944,7 @@ test "conv2d col2im matches the naive im2col adjoint" {
         defer out.deinit();
         // Poison the output to prove every element is written.
         @memset(out.data(), std.math.nan(f32));
-        conv.col2imIntoWithConfig(&out, &col, d, .{});
+        conv.col2imInto(.{}, &out, &col, d);
 
         const want = try allocator.alloc(f32, h * w * cin);
         defer allocator.free(want);
@@ -991,7 +980,7 @@ test "conv2d backward kernels + col2im: pooled split is bit-identical to serial"
 
     for ([_]usize{ 1, 2 }) |groups| {
         const cin_pg = cin / groups;
-        const d: Conv2dDims = .{
+        const d: conv.Conv2dDims = .{
             .h = h,
             .w = w,
             .cin = cin,
@@ -1015,16 +1004,16 @@ test "conv2d backward kernels + col2im: pooled split is bit-identical to serial"
         defer gx_serial.deinit();
         var gx_pooled = try Tensor.zeros(allocator, &.{ h, w, cin });
         defer gx_pooled.deinit();
-        conv.conv2dBackwardInputIntoWithConfig(&gx_serial, &gy, &weight, d, .{});
-        conv.conv2dBackwardInputIntoWithConfig(&gx_pooled, &gy, &weight, d, .{ .pool = &pool });
+        conv.conv2dBackwardInputInto(.{}, &gx_serial, &gy, &weight, d);
+        conv.conv2dBackwardInputInto(.{ .pool = &pool }, &gx_pooled, &gy, &weight, d);
         try std.testing.expectEqualSlices(f32, gx_serial.dataConst(), gx_pooled.dataConst());
 
         var gw_serial = try Tensor.zeros(allocator, &.{ cout, 3, 3, cin_pg });
         defer gw_serial.deinit();
         var gw_pooled = try Tensor.zeros(allocator, &.{ cout, 3, 3, cin_pg });
         defer gw_pooled.deinit();
-        conv.conv2dBackwardWeightIntoWithConfig(&gw_serial, &input, &gy, d, .{});
-        conv.conv2dBackwardWeightIntoWithConfig(&gw_pooled, &input, &gy, d, .{ .pool = &pool });
+        conv.conv2dBackwardWeightInto(.{}, &gw_serial, &input, &gy, d);
+        conv.conv2dBackwardWeightInto(.{ .pool = &pool }, &gw_pooled, &input, &gy, d);
         try std.testing.expectEqualSlices(f32, gw_serial.dataConst(), gw_pooled.dataConst());
 
         if (groups == 1) {
@@ -1036,8 +1025,8 @@ test "conv2d backward kernels + col2im: pooled split is bit-identical to serial"
             defer c2i_serial.deinit();
             var c2i_pooled = try Tensor.zeros(allocator, &.{ h, w, cin });
             defer c2i_pooled.deinit();
-            conv.col2imIntoWithConfig(&c2i_serial, &col, d, .{});
-            conv.col2imIntoWithConfig(&c2i_pooled, &col, d, .{ .pool = &pool });
+            conv.col2imInto(.{}, &c2i_serial, &col, d);
+            conv.col2imInto(.{ .pool = &pool }, &c2i_pooled, &col, d);
             try std.testing.expectEqualSlices(f32, c2i_serial.dataConst(), c2i_pooled.dataConst());
         }
     }

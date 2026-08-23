@@ -94,7 +94,7 @@ const BlockQ4_K = quant.BlockQ4_K;
 const BlockQ8_K = quant.BlockQ8_K;
 const BlockQ8_0 = quant.BlockQ8_0;
 const BlockTQ2_0 = quant.BlockTQ2_0;
-const qk_k_block_size = quant.qk_k_block_size;
+const qk_k_block_size = quant.types.qk_k_block_size;
 
 var failures: usize = 0;
 var fnv: u64 = 0xcbf29ce484222325;
@@ -240,7 +240,7 @@ fn refDotQ4_KQ8_K(w: *const BlockQ4_K, a: *const BlockQ8_K) f32 {
     var imin: i32 = 0;
     var subblock: usize = 0;
     while (subblock < 8) : (subblock += 1) {
-        const scale_min = quant.getScaleMinK4(&w.scales, subblock);
+        const scale_min = quant.q8k.getScaleMinK4(&w.scales, subblock);
         var acc: i32 = 0;
         var i: usize = 0;
         while (i < 32) : (i += 1) {
@@ -474,11 +474,11 @@ fn checkQ4K(allocator: std.mem.Allocator) !void {
     for (&rhs_blocks[0].scales) |*s| s.* = 0xff;
     for (&rhs_blocks[0].qs) |*q| q.* = 0xff;
 
-    var rhs = try quant.quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, &rhs_blocks);
+    var rhs = try quant.q8k.quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, &rhs_blocks);
     defer rhs.deinit();
 
     var out: [m * n]f32 = undefined;
-    quant.matmulQ4_KRhsRange(&out, &lhs_blocks, &rhs, m, n, 0, m);
+    quant.q4_k.matmulQ4_KRhsRange(&out, &lhs_blocks, &rhs, m, n, 0, m);
 
     // matmulQ4_KRhsTile has no aarch64 specialization: the per-(i,j) f32
     // accumulation order matches the replica on EVERY target → bit-exact.
@@ -525,7 +525,7 @@ fn checkQ8_0(allocator: std.mem.Allocator) !void {
     defer rhs.deinit();
 
     var out: [m * n]f32 = undefined;
-    quant.matmulQ8_0RhsTile(&out, &lhs_blocks, &rhs, n, 0, m, 0, n);
+    quant.q8_0.matmulQ8_0RhsTile(&out, &lhs_blocks, &rhs, n, 0, m, 0, n);
 
     for (0..m) |i| {
         for (0..n) |j| {
@@ -565,14 +565,14 @@ fn checkTQ2_0(allocator: std.mem.Allocator) !void {
 
     // Both encoders: ggml per-block-absmax rows and the BitNet b1.58
     // per-tensor absmean round-clip (uniform d across every block).
-    var rhs = try quant.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, weights);
+    var rhs = try quant.ternary.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, weights);
     defer rhs.deinit();
-    var rhs_absmean = try quant.quantizedMatmulRhsTQ2_0FromF32Absmean(allocator, k, n, weights);
+    var rhs_absmean = try quant.ternary.quantizedMatmulRhsTQ2_0FromF32Absmean(allocator, k, n, weights);
     defer rhs_absmean.deinit();
 
     var a = try tensor_mod.Tensor.fromSlice(allocator, &.{ m, k }, acts);
     defer a.deinit();
-    const qlhs = try quant.quantizeRowsQ8_K(allocator, &a);
+    const qlhs = try quant.q8k.quantizeRowsQ8_K(allocator, &a);
     defer allocator.free(qlhs);
 
     var got: [m * n]f32 = undefined;
@@ -581,12 +581,12 @@ fn checkTQ2_0(allocator: std.mem.Allocator) !void {
     // Hot int8 kernel (sdot / vpdpbusd / maddubs / portable twins) vs the
     // cold ggml-parity table path: every arm accumulates the exact block
     // integer and folds f32 in the same block-major order → bit-exact.
-    quant.matmulTQ2_0RhsRange(&got, qlhs, &rhs, m, n, 0, m);
-    quant.matmulTableQ8_KRhsRange(.tq2_0, &want, qlhs, &rhs, m, n, 0, m);
+    quant.ternary.matmulTQ2_0RhsRange(&got, qlhs, &rhs, m, n, 0, m);
+    quant.cold.matmulTableQ8_KRhsRange(.tq2_0, &want, qlhs, &rhs, m, n, 0, m);
     for (0..m * n) |i| checkF32Exact("tq2_0 matmul", want[i], got[i]);
 
-    quant.matmulTQ2_0RhsRange(&got, qlhs, &rhs_absmean, m, n, 0, m);
-    quant.matmulTableQ8_KRhsRange(.tq2_0, &want, qlhs, &rhs_absmean, m, n, 0, m);
+    quant.ternary.matmulTQ2_0RhsRange(&got, qlhs, &rhs_absmean, m, n, 0, m);
+    quant.cold.matmulTableQ8_KRhsRange(.tq2_0, &want, qlhs, &rhs_absmean, m, n, 0, m);
     for (0..m * n) |i| checkF32Exact("tq2_0 absmean matmul", want[i], got[i]);
 
     // Mul-free f32 path ((x XOR s) AND m, fixed 4-lane fold) vs the
@@ -594,8 +594,8 @@ fn checkTQ2_0(allocator: std.mem.Allocator) !void {
     for (0..m) |r| {
         const xrow = acts[r * k ..][0..k];
         for (0..n) |c| {
-            checkF32Exact("tq2_0 f32 dot", refDotTQ2_0F32(rhs.columnBlocks(c), xrow), quant.dotTQ2_0F32(rhs.columnBlocks(c), xrow));
-            checkF32Exact("tq2_0 f32 dot absmean", refDotTQ2_0F32(rhs_absmean.columnBlocks(c), xrow), quant.dotTQ2_0F32(rhs_absmean.columnBlocks(c), xrow));
+            checkF32Exact("tq2_0 f32 dot", refDotTQ2_0F32(rhs.columnBlocks(c), xrow), quant.ternary.dotTQ2_0F32(rhs.columnBlocks(c), xrow));
+            checkF32Exact("tq2_0 f32 dot absmean", refDotTQ2_0F32(rhs_absmean.columnBlocks(c), xrow), quant.ternary.dotTQ2_0F32(rhs_absmean.columnBlocks(c), xrow));
         }
     }
     std.debug.print("tq2_0 matmul: done (checksum so far {x:0>16})\n", .{fnv});
@@ -617,14 +617,14 @@ fn checkTQ2_0X4(allocator: std.mem.Allocator) !void {
     defer allocator.free(acts);
     fillUniformF32(random, acts, 3.0);
 
-    var rhs = try quant.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, weights);
+    var rhs = try quant.ternary.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, weights);
     defer rhs.deinit();
-    const packed_groups = try quant.packMatmulRhsTQ2_0x4(allocator, &rhs);
+    const packed_groups = try quant.ternary.packMatmulRhsTQ2_0x4(allocator, &rhs);
     defer allocator.free(packed_groups);
 
     var a = try tensor_mod.Tensor.fromSlice(allocator, &.{ m, k }, acts);
     defer a.deinit();
-    const qlhs = try quant.quantizeRowsQ8_K(allocator, &a);
+    const qlhs = try quant.q8k.quantizeRowsQ8_K(allocator, &a);
     defer allocator.free(qlhs);
 
     var got: [m * n]f32 = undefined;
@@ -635,16 +635,16 @@ fn checkTQ2_0X4(allocator: std.mem.Allocator) !void {
     // block integers in every lane arrangement, identical per-column f32
     // sequence → bit-exact on every ISA, and bit-exact to the cold table
     // path transitively (checked directly too).
-    quant.matmulTQ2_0X4RhsRange(&got, qlhs, packed_groups, blocks_per_row, n, 0, m);
-    quant.matmulTQ2_0RhsRange(&want, qlhs, &rhs, m, n, 0, m);
+    quant.ternary.matmulTQ2_0X4RhsRange(&got, qlhs, packed_groups, blocks_per_row, n, 0, m);
+    quant.ternary.matmulTQ2_0RhsRange(&want, qlhs, &rhs, m, n, 0, m);
     for (0..m * n) |i| checkF32Exact("tq2_0x4 vs row", want[i], got[i]);
-    quant.matmulTableQ8_KRhsRange(.tq2_0, &want, qlhs, &rhs, m, n, 0, m);
+    quant.cold.matmulTableQ8_KRhsRange(.tq2_0, &want, qlhs, &rhs, m, n, 0, m);
     for (0..m * n) |i| checkF32Exact("tq2_0x4 vs cold", want[i], got[i]);
 
     // The accumulating twin equals materialize-then-add exactly.
     var acc: [m * n]f32 = undefined;
-    quant.matmulTQ2_0X4RhsRange(&acc, qlhs, packed_groups, blocks_per_row, n, 0, m);
-    quant.matmulTQ2_0X4RhsTileAcc(&acc, qlhs, packed_groups, blocks_per_row, n, 0, m, 0, n);
+    quant.ternary.matmulTQ2_0X4RhsRange(&acc, qlhs, packed_groups, blocks_per_row, n, 0, m);
+    quant.ternary.matmulTQ2_0X4RhsTileAcc(&acc, qlhs, packed_groups, blocks_per_row, n, 0, m, 0, n);
     for (0..m * n) |i| checkF32Exact("tq2_0x4 acc", want[i] + want[i], acc[i]);
 
     std.debug.print("tq2_0x4 matmul: done (checksum so far {x:0>16})\n", .{fnv});
@@ -669,20 +669,20 @@ fn checkTQ2_0Folded(allocator: std.mem.Allocator) !void {
     defer allocator.free(acts);
     fillUniformF32(random, acts, 3.0);
 
-    var rhs1 = try quant.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w1);
+    var rhs1 = try quant.ternary.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w1);
     defer rhs1.deinit();
-    var rhs2 = try quant.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w2);
+    var rhs2 = try quant.ternary.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w2);
     defer rhs2.deinit();
-    const folded = try quant.packMatmulRhsTQ2_0Foldedx4(allocator, &rhs1, &rhs2);
+    const folded = try quant.ternary.packMatmulRhsTQ2_0Foldedx4(allocator, &rhs1, &rhs2);
     defer allocator.free(folded);
 
     var a = try tensor_mod.Tensor.fromSlice(allocator, &.{ m, k }, acts);
     defer a.deinit();
-    const qlhs = try quant.quantizeRowsQ8_K(allocator, &a);
+    const qlhs = try quant.q8k.quantizeRowsQ8_K(allocator, &a);
     defer allocator.free(qlhs);
 
     var got: [m * n]f32 = undefined;
-    quant.matmulTQ2_0FoldedX4RhsRange(&got, qlhs, folded, blocks_per_row, n, 0, m);
+    quant.ternary.matmulTQ2_0FoldedX4RhsRange(&got, qlhs, folded, blocks_per_row, n, 0, m);
 
     // Order-matched scalar reference of the folded semantics: per column,
     // per block, sums += s * a.d * (sum((3*u1+u2)*a) - 4*sum(a)). Bit-exact

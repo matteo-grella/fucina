@@ -13,7 +13,7 @@ const thread = @import("../../thread.zig");
 const testing = std.testing;
 
 const Tensor = tensor.Tensor;
-const qk_k = qm.qk_k_block_size;
+const qk_k = qm.types.qk_k_block_size;
 
 // Shapes pinned to the dispatch gates (common.zig matmulThreadCount /
 // i8ColumnThreadCount): the row split needs m >= vector_column_min_m and
@@ -54,7 +54,7 @@ fn expectPooledTQ2_0F32MatchesSerial(m: usize, n: usize, k: usize, seed: u64) !v
     defer allocator.free(lhs);
     fillUniform(&prng, lhs, 2.0);
 
-    var rhs = try qm.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w);
+    var rhs = try qm.ternary.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w);
     defer rhs.deinit();
 
     const serial = try allocator.alloc(f32, m * n);
@@ -63,12 +63,12 @@ fn expectPooledTQ2_0F32MatchesSerial(m: usize, n: usize, k: usize, seed: u64) !v
     defer allocator.free(pooled);
     @memset(pooled, std.math.nan(f32));
 
-    qm.matmulTQ2_0F32RhsRange(serial, lhs, &rhs, m, n, 0, m);
+    qm.ternary.matmulTQ2_0F32RhsRange(serial, lhs, &rhs, m, n, 0, m);
 
     var pool: thread.Pool = undefined;
     try pool.init(.{ .allocator = allocator, .max_workers = 3 });
     defer pool.deinit();
-    matmul_quant.matmul2DTQ2_0F32RhsIntoWithConfig(pooled, lhs, &rhs, m, n, k, .{ .pool = &pool });
+    matmul_quant.matmul2DTQ2_0F32RhsInto(.{ .pool = &pool }, pooled, lhs, &rhs, m, n, k);
 
     try testing.expectEqualSlices(f32, serial, pooled);
 }
@@ -83,12 +83,12 @@ fn expectPooledTQ2_0Int8MatchesSerial(m: usize, n: usize, k: usize, seed: u64) !
     defer allocator.free(lhs);
     fillUniform(&prng, lhs, 2.0);
 
-    var rhs = try qm.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w);
+    var rhs = try qm.ternary.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w);
     defer rhs.deinit();
 
     var a = try Tensor.fromSlice(allocator, &.{ m, k }, lhs);
     defer a.deinit();
-    const qlhs = try qm.quantizeRowsQ8_K(allocator, &a);
+    const qlhs = try qm.q8k.quantizeRowsQ8_K(allocator, &a);
     defer allocator.free(qlhs);
 
     const serial = try allocator.alloc(f32, m * n);
@@ -97,12 +97,12 @@ fn expectPooledTQ2_0Int8MatchesSerial(m: usize, n: usize, k: usize, seed: u64) !
     defer allocator.free(pooled);
     @memset(pooled, std.math.nan(f32));
 
-    qm.matmulTQ2_0RhsRange(serial, qlhs, &rhs, m, n, 0, m);
+    qm.ternary.matmulTQ2_0RhsRange(serial, qlhs, &rhs, m, n, 0, m);
 
     var pool: thread.Pool = undefined;
     try pool.init(.{ .allocator = allocator, .max_workers = 3 });
     defer pool.deinit();
-    matmul_quant.matmul2DTQ2_0RhsIntoWithConfig(pooled, qlhs, &rhs, m, n, k, .{ .pool = &pool });
+    matmul_quant.matmul2DTQ2_0RhsInto(.{ .pool = &pool }, pooled, qlhs, &rhs, m, n, k);
 
     try testing.expectEqualSlices(f32, serial, pooled);
 }
@@ -169,7 +169,7 @@ fn expectPooledMatchesSerial(
     var pool: thread.Pool = undefined;
     try pool.init(.{ .allocator = allocator, .max_workers = 3 });
     defer pool.deinit();
-    entryFn(pooled, lhs_blocks, rhs, m, n, k, .{ .pool = &pool });
+    entryFn(.{ .pool = &pool }, pooled, lhs_blocks, rhs, m, n, k);
 
     if (std.mem.eql(u8, std.mem.sliceAsBytes(serial), std.mem.sliceAsBytes(pooled))) return;
     for (serial, pooled) |s, p| {
@@ -189,11 +189,11 @@ test "pooled dispatch matches serial: plain-block formats" {
         fillUniform(&prng, acts, 1.0);
         var a = try Tensor.fromSlice(allocator, &.{ m, k }, acts);
         defer a.deinit();
-        const lhs_q8k = try qm.quantizeRowsQ8_K(allocator, &a);
+        const lhs_q8k = try qm.q8k.quantizeRowsQ8_K(allocator, &a);
         defer allocator.free(lhs_q8k);
         const lhs_q80 = try allocator.alloc(qm.BlockQ8_0, m * (k / 32));
         defer allocator.free(lhs_q80);
-        try qm.quantizeRowsQ8_0Into(lhs_q80, &a);
+        try qm.q8k.quantizeRowsQ8_0Into(lhs_q80, &a);
 
         const w = try allocator.alloc(f32, n * k);
         defer allocator.free(w);
@@ -201,9 +201,9 @@ test "pooled dispatch matches serial: plain-block formats" {
 
         // Encoder-backed K-quants against the Q8_K activations.
         inline for (.{
-            .{ .q4_k, qm.QuantizedMatmulRhsQ4_K, qm.BlockQ4_K, matmul_quant.matmul2DQ4_KRhsIntoWithConfig, qm.matmulQ4_KRhsRange },
-            .{ .q5_k, qm.QuantizedMatmulRhsQ5_K, qm.BlockQ5_K, matmul_quant.matmul2DQ5_KRhsIntoWithConfig, qm.matmulQ5_KRhsRange },
-            .{ .q6_k, qm.QuantizedMatmulRhsQ6_K, qm.BlockQ6_K, matmul_quant.matmul2DQ6_KRhsIntoWithConfig, qm.matmulQ6_KRhsRange },
+            .{ .q4_k, qm.QuantizedMatmulRhsQ4_K, qm.BlockQ4_K, matmul_quant.matmul2DQ4_KRhsInto, qm.q4_k.matmulQ4_KRhsRange },
+            .{ .q5_k, qm.QuantizedMatmulRhsQ5_K, qm.BlockQ5_K, matmul_quant.matmul2DQ5_KRhsInto, qm.q5_k.matmulQ5_KRhsRange },
+            .{ .q6_k, qm.QuantizedMatmulRhsQ6_K, qm.BlockQ6_K, matmul_quant.matmul2DQ6_KRhsInto, qm.q6_k.matmulQ6_KRhsRange },
         }) |spec| {
             const rblocks = try allocator.alloc(spec[2], n * (k / qk_k));
             defer allocator.free(rblocks);
@@ -220,14 +220,14 @@ test "pooled dispatch matches serial: plain-block formats" {
             defer allocator.free(rblocks);
             for (rblocks) |*bl| bl.dm = .{ f16Bits(0.01), f16Bits(0.002) };
             const rhs: qm.QuantizedMatmulRhsQ2_K = .{ .allocator = null, .blocks = rblocks, .k = k, .n = n, .blocks_per_column = k / qk_k };
-            try expectPooledMatchesSerial(matmul_quant.matmul2DQ2_KRhsIntoWithConfig, qm.matmulQ2_KRhsRange, lhs_q8k, &rhs, m, n, k);
+            try expectPooledMatchesSerial(matmul_quant.matmul2DQ2_KRhsInto, qm.cold.matmulQ2_KRhsRange, lhs_q8k, &rhs, m, n, k);
         }
         {
             const rblocks = try randomBlocks(qm.BlockQ3_K, allocator, &prng, n * (k / qk_k));
             defer allocator.free(rblocks);
             for (rblocks) |*bl| bl.d = f16Bits(0.01);
             const rhs: qm.QuantizedMatmulRhsQ3_K = .{ .allocator = null, .blocks = rblocks, .k = k, .n = n, .blocks_per_column = k / qk_k };
-            try expectPooledMatchesSerial(matmul_quant.matmul2DQ3_KRhsIntoWithConfig, qm.matmulQ3_KRhsRange, lhs_q8k, &rhs, m, n, k);
+            try expectPooledMatchesSerial(matmul_quant.matmul2DQ3_KRhsInto, qm.cold.matmulQ3_KRhsRange, lhs_q8k, &rhs, m, n, k);
         }
 
         // Q8_0/Q4_0 against the Q8_0 activations (rows containers).
@@ -242,7 +242,7 @@ test "pooled dispatch matches serial: plain-block formats" {
                 .cols = k,
                 .blocks_per_row = k / 32,
             }, .k = k, .n = n };
-            try expectPooledMatchesSerial(matmul_quant.matmul2DQ8_0RhsIntoWithConfig, qm.matmulQ8_0RhsRange, lhs_q80, &rhs, m, n, k);
+            try expectPooledMatchesSerial(matmul_quant.matmul2DQ8_0RhsInto, qm.q8_0.matmulQ8_0RhsRange, lhs_q80, &rhs, m, n, k);
         }
         {
             var rhs: qm.QuantizedMatmulRhsQ4_0 = .{ .rows = .{
@@ -254,7 +254,7 @@ test "pooled dispatch matches serial: plain-block formats" {
             }, .k = k, .n = n };
             defer rhs.deinit();
             try qm.quantizeRowForDType(.q4_0, rhs.rows.blocks, w);
-            try expectPooledMatchesSerial(matmul_quant.matmul2DQ4_0RhsIntoWithConfig, qm.matmulQ4_0RhsRange, lhs_q80, &rhs, m, n, k);
+            try expectPooledMatchesSerial(matmul_quant.matmul2DQ4_0RhsInto, qm.cold.matmulQ4_0RhsRange, lhs_q80, &rhs, m, n, k);
         }
     }
 }
@@ -266,12 +266,12 @@ test "pooled dispatch matches serial: interleaved-pack formats" {
         // {plain dtype, PlainBlock, lhs kind (q8k/q80), packFn, entry, range, shapes}
         // Shapes cover the column arm (m = 1), the row arm at the work
         // threshold (m = 32), and — for the x8/cap-3 tiles — m = 128.
-        .{ .q8_0, qm.BlockQ8_0, false, qm.packMatmulRhsQ8_0x4, matmul_quant.matmul2DQ8_0x4RhsIntoWithConfig, qm.matmulQ8_0x4RhsRange, .{ .{ row_m, row_n, row_k }, .{ col_m, col_n, col_k } } },
-        .{ .q4_k, qm.BlockQ4_K, true, qm.packMatmulRhsQ4_Kx4, matmul_quant.matmul2DQ4_Kx4RhsIntoWithConfig, qm.matmulQ4_Kx4RhsRange, .{ .{ row_m, row_n, row_k }, .{ col_m, col_n, col_k } } },
-        .{ .q4_k, qm.BlockQ4_K, true, qm.packMatmulRhsQ4_Kx8, matmul_quant.matmul2DQ4_Kx8RhsIntoWithConfig, qm.matmulQ4_Kx8RhsRange, .{ .{ row_m, row_n, row_k }, .{ col_m, col_n, col_k }, .{ 128, 128, qk_k } } },
-        .{ .q4_k, qm.BlockQ4_K, true, qm.packMatmulRhsQ4_Kx2Mmla, matmul_quant.matmul2DQ4_Kx2MmlaRhsIntoWithConfig, qm.matmulQ4_Kx2MmlaRhsRange, .{ .{ row_m, row_n, row_k }, .{ col_m, col_n, col_k }, .{ 128, 128, qk_k } } },
-        .{ .q5_k, qm.BlockQ5_K, true, qm.packMatmulRhsQ5_Kx8, matmul_quant.matmul2DQ5_Kx8RhsIntoWithConfig, qm.matmulQ5_Kx8RhsRange, .{ .{ row_m, row_n, row_k }, .{ col_m, col_n, col_k }, .{ 128, 128, qk_k } } },
-        .{ .q6_k, qm.BlockQ6_K, true, qm.packMatmulRhsQ6_Kx4, matmul_quant.matmul2DQ6_Kx4RhsIntoWithConfig, qm.matmulQ6_Kx4RhsRange, .{ .{ row_m, row_n, row_k }, .{ col_m, col_n, col_k } } },
+        .{ .q8_0, qm.BlockQ8_0, false, qm.q8_0.packMatmulRhsQ8_0x4, matmul_quant.matmul2DQ8_0x4RhsInto, qm.q8_0.matmulQ8_0x4RhsRange, .{ .{ row_m, row_n, row_k }, .{ col_m, col_n, col_k } } },
+        .{ .q4_k, qm.BlockQ4_K, true, qm.q4_k.packMatmulRhsQ4_Kx4, matmul_quant.matmul2DQ4_Kx4RhsInto, qm.q4_k.matmulQ4_Kx4RhsRange, .{ .{ row_m, row_n, row_k }, .{ col_m, col_n, col_k } } },
+        .{ .q4_k, qm.BlockQ4_K, true, qm.q4_k.packMatmulRhsQ4_Kx8, matmul_quant.matmul2DQ4_Kx8RhsInto, qm.q4_k.matmulQ4_Kx8RhsRange, .{ .{ row_m, row_n, row_k }, .{ col_m, col_n, col_k }, .{ 128, 128, qk_k } } },
+        .{ .q4_k, qm.BlockQ4_K, true, qm.q4_k.packMatmulRhsQ4_Kx2Mmla, matmul_quant.matmul2DQ4_Kx2MmlaRhsInto, qm.q4_k.matmulQ4_Kx2MmlaRhsRange, .{ .{ row_m, row_n, row_k }, .{ col_m, col_n, col_k }, .{ 128, 128, qk_k } } },
+        .{ .q5_k, qm.BlockQ5_K, true, qm.q5_k.packMatmulRhsQ5_Kx8, matmul_quant.matmul2DQ5_Kx8RhsInto, qm.q5_k.matmulQ5_Kx8RhsRange, .{ .{ row_m, row_n, row_k }, .{ col_m, col_n, col_k }, .{ 128, 128, qk_k } } },
+        .{ .q6_k, qm.BlockQ6_K, true, qm.q6_k.packMatmulRhsQ6_Kx4, matmul_quant.matmul2DQ6_Kx4RhsInto, qm.q6_k.matmulQ6_Kx4RhsRange, .{ .{ row_m, row_n, row_k }, .{ col_m, col_n, col_k } } },
     }) |spec| {
         inline for (spec[6]) |shape| {
             const m, const n, const k = shape;
@@ -281,11 +281,11 @@ test "pooled dispatch matches serial: interleaved-pack formats" {
             fillUniform(&prng, acts, 1.0);
             var a = try Tensor.fromSlice(allocator, &.{ m, k }, acts);
             defer a.deinit();
-            const lhs_q8k = try qm.quantizeRowsQ8_K(allocator, &a);
+            const lhs_q8k = try qm.q8k.quantizeRowsQ8_K(allocator, &a);
             defer allocator.free(lhs_q8k);
             const lhs_q80 = try allocator.alloc(qm.BlockQ8_0, m * (k / 32));
             defer allocator.free(lhs_q80);
-            try qm.quantizeRowsQ8_0Into(lhs_q80, &a);
+            try qm.q8k.quantizeRowsQ8_0Into(lhs_q80, &a);
 
             const w = try allocator.alloc(f32, n * k);
             defer allocator.free(w);
@@ -316,10 +316,10 @@ test "pooled dispatch matches serial: lane-packed LHS entries" {
         // {plain dtype, PlainBlock, LhsBlock, lhs quantizer, packFn, entry, range, shapes}
         // (64, 64, 256) forces the ROW arm (n below the column gate);
         // m stays a group multiple, the packed-LHS entries' contract.
-        .{ .q4_k, qm.BlockQ4_K, qm.BlockQ8_Kx4, qm.quantizeRowsQ8_Kx4PaddedInto, qm.packMatmulRhsQ4_Kx8, matmul_quant.matmul2DQ4_Kx8Q8_Kx4RhsIntoWithConfig, qm.matmulQ4_Kx8Q8_Kx4RhsRange, .{ .{ 64, 64, qk_k }, .{ 4, col_n, col_k }, .{ row_m, row_n, row_k } } },
-        .{ .q5_k, qm.BlockQ5_K, qm.BlockQ8_Kx4, qm.quantizeRowsQ8_Kx4PaddedInto, qm.packMatmulRhsQ5_Kx8, matmul_quant.matmul2DQ5_Kx8Q8_Kx4RhsIntoWithConfig, qm.matmulQ5_Kx8Q8_Kx4RhsRange, .{ .{ 64, 64, qk_k }, .{ 4, col_n, col_k }, .{ row_m, row_n, row_k } } },
-        .{ .q4_k, qm.BlockQ4_K, qm.BlockQ8_Kx2Mmla, qm.quantizeRowsQ8_Kx2MmlaInto, qm.packMatmulRhsQ4_Kx2Mmla, matmul_quant.matmul2DQ4_Kx2MmlaQ8_Kx2MmlaRhsIntoWithConfig, qm.matmulQ4_Kx2MmlaQ8_Kx2MmlaRhsRange, .{ .{ 64, 64, qk_k }, .{ 2, col_n, col_k }, .{ 128, 128, qk_k } } },
-        .{ .q8_0, qm.BlockQ8_0, qm.BlockQ8_0x4, qm.quantizeRowsQ8_0x4PaddedInto, qm.packMatmulRhsQ8_0x4, matmul_quant.matmul2DQ8_0x4PackedRhsIntoWithConfig, qm.matmulQ8_0x4PackedRhsRange, .{ .{ row_m, row_n, row_k }, .{ 4, col_n, col_k }, .{ 128, col_n, col_k } } },
+        .{ .q4_k, qm.BlockQ4_K, qm.BlockQ8_Kx4, qm.q8k.quantizeRowsQ8_Kx4PaddedInto, qm.q4_k.packMatmulRhsQ4_Kx8, matmul_quant.matmul2DQ4_Kx8Q8_Kx4RhsInto, qm.q4_k.matmulQ4_Kx8Q8_Kx4RhsRange, .{ .{ 64, 64, qk_k }, .{ 4, col_n, col_k }, .{ row_m, row_n, row_k } } },
+        .{ .q5_k, qm.BlockQ5_K, qm.BlockQ8_Kx4, qm.q8k.quantizeRowsQ8_Kx4PaddedInto, qm.q5_k.packMatmulRhsQ5_Kx8, matmul_quant.matmul2DQ5_Kx8Q8_Kx4RhsInto, qm.q5_k.matmulQ5_Kx8Q8_Kx4RhsRange, .{ .{ 64, 64, qk_k }, .{ 4, col_n, col_k }, .{ row_m, row_n, row_k } } },
+        .{ .q4_k, qm.BlockQ4_K, qm.BlockQ8_Kx2Mmla, qm.q8k.quantizeRowsQ8_Kx2MmlaInto, qm.q4_k.packMatmulRhsQ4_Kx2Mmla, matmul_quant.matmul2DQ4_Kx2MmlaQ8_Kx2MmlaRhsInto, qm.q4_k.matmulQ4_Kx2MmlaQ8_Kx2MmlaRhsRange, .{ .{ 64, 64, qk_k }, .{ 2, col_n, col_k }, .{ 128, 128, qk_k } } },
+        .{ .q8_0, qm.BlockQ8_0, qm.BlockQ8_0x4, qm.q8_0.quantizeRowsQ8_0x4PaddedInto, qm.q8_0.packMatmulRhsQ8_0x4, matmul_quant.matmul2DQ8_0x4PackedRhsInto, qm.q8_0.matmulQ8_0x4PackedRhsRange, .{ .{ row_m, row_n, row_k }, .{ 4, col_n, col_k }, .{ 128, col_n, col_k } } },
     }) |spec| {
         inline for (spec[7]) |shape| {
             const m, const n, const k = shape;

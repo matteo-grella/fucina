@@ -207,17 +207,17 @@ fn applyLayer(out: []f32, in: []const f32, k: usize, n_out: usize, layer: LayerR
             if (t.int8) {
                 const bpr = k / ptqtp.block_len;
                 for (0..n_points) |i| {
-                    try quant.quantizeRowQ8_KInto(s.aq[i * bpr ..][0..bpr], in[i * k ..][0..k]);
+                    try quant.q8k.quantizeRowQ8_KInto(s.aq[i * bpr ..][0..bpr], in[i * k ..][0..k]);
                 }
-                quant.matmulTQ2_0RhsRange(out, s.aq, t.p1, n_points, n_out, 0, n_points);
+                quant.ternary.matmulTQ2_0RhsRange(out, s.aq, t.p1, n_points, n_out, 0, n_points);
                 if (t.p2) |p2| {
-                    quant.matmulTQ2_0RhsRange(s.tmp, s.aq, p2, n_points, n_out, 0, n_points);
+                    quant.ternary.matmulTQ2_0RhsRange(s.tmp, s.aq, p2, n_points, n_out, 0, n_points);
                     for (out[0 .. n_points * n_out], s.tmp[0 .. n_points * n_out]) |*a, b| a.* += b;
                 }
             } else {
-                quant.matmulTQ2_0F32RhsRange(out, in, t.p1, n_points, n_out, 0, n_points);
+                quant.ternary.matmulTQ2_0F32RhsRange(out, in, t.p1, n_points, n_out, 0, n_points);
                 if (t.p2) |p2| {
-                    quant.matmulTQ2_0F32RhsRange(s.tmp, in, p2, n_points, n_out, 0, n_points);
+                    quant.ternary.matmulTQ2_0F32RhsRange(s.tmp, in, p2, n_points, n_out, 0, n_points);
                     for (out[0 .. n_points * n_out], s.tmp[0 .. n_points * n_out]) |*a, b| a.* += b;
                 }
             }
@@ -271,15 +271,15 @@ fn absmeanBlocks(allocator: Allocator, w: []const f32, n: usize, k: usize) ![]Bl
     const bpr = k / ptqtp.block_len;
     const blocks = try allocator.alloc(BlockTQ2_0, n * bpr);
     errdefer allocator.free(blocks);
-    const d = quant.ternaryAbsmeanScale(w);
+    const d = quant.ternary.ternaryAbsmeanScale(w);
     for (0..n) |r| {
-        try quant.quantizeRowTQ2_0ScaledInto(blocks[r * bpr ..][0..bpr], w[r * k ..][0..k], d);
+        try quant.ternary.quantizeRowTQ2_0ScaledInto(blocks[r * bpr ..][0..bpr], w[r * k ..][0..k], d);
     }
     return blocks;
 }
 
 fn borrowRhs(blocks: []BlockTQ2_0, k: usize, n: usize) !Rhs {
-    return quant.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, blocks);
+    return quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, blocks);
 }
 
 pub fn main(init: std.process.Init) !void {

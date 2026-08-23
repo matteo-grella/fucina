@@ -80,21 +80,21 @@ fn runGemmaMoeDecodeTask(task: *const GemmaMoeDecodeTask) void {
     const task_profile = @constCast(task);
 
     const gate_up_start = moeBatchProfileStart(task.profile_enabled, task.io);
-    qm.matmulQ6_Kx4RhsPairTile(task.gate_buf, task.up_buf, task.qx, task.gate, task.up, task.out_pe, 0, 1, 0, task.out_pe);
+    qm.q6_k.matmulQ6_Kx4RhsPairTile(task.gate_buf, task.up_buf, task.qx, task.gate, task.up, task.out_pe, 0, 1, 0, task.out_pe);
     if (task.profile_enabled) task_profile.gate_up_ns += moeBatchProfileElapsed(gate_up_start, task.io);
 
     const geglu_requant_start = moeBatchProfileStart(task.profile_enabled, task.io);
     for (task.g_buf, task.gate_buf, task.up_buf) |*g, gate_v, up_v| {
         g.* = up_v * backend_ops.geluQuantScalar(gate_v);
     }
-    qm.quantizeRowQ8_0Into(task.qg, task.g_buf) catch {
+    qm.q8k.quantizeRowQ8_0Into(task.qg, task.g_buf) catch {
         @memset(task.out, 0);
         return;
     };
     if (task.profile_enabled) task_profile.geglu_requant_ns += moeBatchProfileElapsed(geglu_requant_start, task.io);
 
     const down_start = moeBatchProfileStart(task.profile_enabled, task.io);
-    qm.matmulQ8_0x4RhsTile(task.out, task.qg, task.down, task.hidden, 0, 1, 0, task.hidden);
+    qm.q8_0.matmulQ8_0x4RhsTile(task.out, task.qg, task.down, task.hidden, 0, 1, 0, task.hidden);
     if (task.weight != 1.0) {
         for (task.out) |*o| o.* *= task.weight;
     }
@@ -135,7 +135,7 @@ fn runGemmaMoeDecodeChainTask(task: *GemmaMoeDecodeChainTask, chain: *const thre
     switch (task.kind) {
         .gate_up => {
             const gate_up_start = moeBatchProfileStart(state.profile_enabled, state.io);
-            qm.matmulQ6_Kx4RhsPairTile(state.gate_buf, state.up_buf, state.qx, state.gate, state.up, state.out_pe, 0, 1, task.c0, task.c1);
+            qm.q6_k.matmulQ6_Kx4RhsPairTile(state.gate_buf, state.up_buf, state.qx, state.gate, state.up, state.out_pe, 0, 1, task.c0, task.c1);
             if (state.profile_enabled) task.elapsed_ns += moeBatchProfileElapsed(gate_up_start, state.io);
 
             if (state.remaining_gate_up.fetchSub(1, .acq_rel) == 1) {
@@ -143,7 +143,7 @@ fn runGemmaMoeDecodeChainTask(task: *GemmaMoeDecodeChainTask, chain: *const thre
                 for (state.g_buf, state.gate_buf, state.up_buf) |*g, gate_v, up_v| {
                     g.* = up_v * backend_ops.geluQuantScalar(gate_v);
                 }
-                qm.quantizeRowQ8_0Into(state.qg, state.g_buf) catch unreachable;
+                qm.q8k.quantizeRowQ8_0Into(state.qg, state.g_buf) catch unreachable;
                 if (state.profile_enabled) state.geglu_requant_ns += moeBatchProfileElapsed(geglu_requant_start, state.io);
                 chain.enqueue(state.down_task0);
                 chain.enqueue(state.down_task0 + 1);
@@ -151,7 +151,7 @@ fn runGemmaMoeDecodeChainTask(task: *GemmaMoeDecodeChainTask, chain: *const thre
         },
         .down => {
             const down_start = moeBatchProfileStart(state.profile_enabled, state.io);
-            qm.matmulQ8_0x4RhsTile(state.out, state.qg, state.down, state.hidden, 0, 1, task.c0, task.c1);
+            qm.q8_0.matmulQ8_0x4RhsTile(state.out, state.qg, state.down, state.hidden, 0, 1, task.c0, task.c1);
             if (state.weight != 1.0) {
                 for (state.out[task.c0..task.c1]) |*o| o.* *= state.weight;
             }
@@ -194,13 +194,13 @@ pub fn decodePacked(
         if (down[e].k != out_pe or down[e].n != hidden) return tensor.TensorError.ShapeMismatch;
     }
 
-    const blocks_per_g = try qm.q8_0BlockCount(out_pe);
+    const blocks_per_g = try qm.q8k.q8_0BlockCount(out_pe);
     const chain_task_count = 4 * top_k;
     const chain_initial_count = 2 * top_k;
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
     exec_moe.lockMoeDecodeScratch(ctx);
     defer exec_moe.unlockMoeDecodeScratch(ctx);
-    const sv = try exec_moe.carveMoeDecodeChainScratch(ctx, qm.BlockQ8_0, GemmaMoeDecodeChainState, GemmaMoeDecodeChainTask, try qm.qkBlockCount(hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
+    const sv = try exec_moe.carveMoeDecodeChainScratch(ctx, qm.BlockQ8_0, GemmaMoeDecodeChainState, GemmaMoeDecodeChainTask, try qm.q8k.qkBlockCount(hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
     const gate_buf = sv.gate_buf;
     const up_buf = sv.up_buf;
     const g_buf = sv.g_buf;
@@ -211,7 +211,7 @@ pub fn decodePacked(
 
     const gather_quant_start = moeBatchProfileStart(profile_enabled, io);
     const qx = sv.qx;
-    try qm.quantizeRowQ8_KInto(qx, try x.dataConstChecked());
+    try qm.q8k.quantizeRowQ8_KInto(qx, try x.dataConstChecked());
     if (profile) |p| p.gather_quant_ns += moeBatchProfileElapsed(gather_quant_start, io);
 
     const gate_split = moeDecodeColumnSplit(out_pe, 32);
@@ -678,8 +678,8 @@ pub fn batchPacked(
         if (down[e].k != out_pe or down[e].n != hidden) return tensor.TensorError.ShapeMismatch;
     }
 
-    const bpc_in = try qm.qkBlockCount(hidden);
-    const bpc_g = try qm.q8_0BlockCount(out_pe);
+    const bpc_in = try qm.q8k.qkBlockCount(hidden);
+    const bpc_g = try qm.q8k.q8_0BlockCount(out_pe);
 
     const route_result = try moe_chain.buildMoeRoutePlan(a, selected, n_expert, profile_enabled, io);
     var route = route_result.plan;
@@ -1026,14 +1026,14 @@ fn gemmaMoeRawGuMatmul(
     const qm = backend_mod.quantized_matmul;
     switch (view.*) {
         .q6_k => |*v| if (m >= 4) {
-            qm.matmulQ6_KRhsCompactColOuter(out, qlhs, v, out_dim, 0, m, c0, c1);
+            qm.q6_k.matmulQ6_KRhsCompactColOuter(out, qlhs, v, out_dim, 0, m, c0, c1);
         } else {
-            qm.matmulQ6_KRhsTile(out, qlhs, v, out_dim, 0, m, c0, c1);
+            qm.q6_k.matmulQ6_KRhsTile(out, qlhs, v, out_dim, 0, m, c0, c1);
         },
         .q4_k => |*v| if (m >= 4) {
-            qm.matmulQ4_KRhsCompactColOuter(out, qlhs, v, out_dim, 0, m, c0, c1);
+            qm.q4_k.matmulQ4_KRhsCompactColOuter(out, qlhs, v, out_dim, 0, m, c0, c1);
         } else {
-            qm.matmulQ4_KRhsTile(out, qlhs, v, out_dim, 0, m, c0, c1);
+            qm.q4_k.matmulQ4_KRhsTile(out, qlhs, v, out_dim, 0, m, c0, c1);
         },
     }
 }
@@ -1097,7 +1097,7 @@ fn runGemmaMoeRawDecodeTask(task: *const GemmaMoeRawDecodeTask) void {
     for (task.g_buf, task.gate_buf, task.up_buf) |*g, gate_v, up_v| {
         g.* = up_v * backend_ops.geluQuantScalar(gate_v);
     }
-    qm.quantizeRowQ8_0Into(task.qg, task.g_buf) catch {
+    qm.q8k.quantizeRowQ8_0Into(task.qg, task.g_buf) catch {
         @memset(task.out, 0);
         return;
     };
@@ -1105,7 +1105,7 @@ fn runGemmaMoeRawDecodeTask(task: *const GemmaMoeRawDecodeTask) void {
 
     const down_start = moeBatchProfileStart(task.profile_enabled, task.io);
     const down_view = gemmaMoeRawQ8View(task.gw, e, out_pe, task.hidden);
-    qm.matmulQ8_0RhsTile(task.out, task.qg, &down_view, task.hidden, 0, 1, 0, task.hidden);
+    qm.q8_0.matmulQ8_0RhsTile(task.out, task.qg, &down_view, task.hidden, 0, 1, 0, task.hidden);
     if (task.weight != 1.0) {
         for (task.out) |*o| o.* *= task.weight;
     }
@@ -1158,7 +1158,7 @@ fn runGemmaMoeRawDecodeChainTask(task: *GemmaMoeRawDecodeChainTask, chain: *cons
                 for (state.g_buf, state.gate_buf, state.up_buf) |*g, gate_v, up_v| {
                     g.* = up_v * backend_ops.geluQuantScalar(gate_v);
                 }
-                qm.quantizeRowQ8_0Into(state.qg, state.g_buf) catch unreachable;
+                qm.q8k.quantizeRowQ8_0Into(state.qg, state.g_buf) catch unreachable;
                 if (state.profile_enabled) state.geglu_requant_ns += moeBatchProfileElapsed(geglu_requant_start, state.io);
                 chain.enqueue(state.down_task0);
                 chain.enqueue(state.down_task0 + 1);
@@ -1167,7 +1167,7 @@ fn runGemmaMoeRawDecodeChainTask(task: *GemmaMoeRawDecodeChainTask, chain: *cons
         .down => {
             const down_start = moeBatchProfileStart(state.profile_enabled, state.io);
             const down_view = gemmaMoeRawQ8View(state.gw, e, out_pe, state.hidden);
-            qm.matmulQ8_0RhsTile(state.out, state.qg, &down_view, state.hidden, 0, 1, task.c0, task.c1);
+            qm.q8_0.matmulQ8_0RhsTile(state.out, state.qg, &down_view, state.hidden, 0, 1, task.c0, task.c1);
             if (state.weight != 1.0) {
                 for (state.out[task.c0..task.c1]) |*o| o.* *= state.weight;
             }
@@ -1209,17 +1209,17 @@ pub fn decodeRaw(
     if (gw.dn_blocks.len != n_expert * hidden * (out_pe / 32)) return tensor.TensorError.ShapeMismatch;
     for (selected) |e| if (e >= n_expert) return tensor.TensorError.IndexOutOfBounds;
 
-    const blocks_per_g = try qm.q8_0BlockCount(out_pe);
+    const blocks_per_g = try qm.q8k.q8_0BlockCount(out_pe);
     const chain_task_count = 4 * top_k;
     const chain_initial_count = 2 * top_k;
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
     exec_moe.lockMoeDecodeScratch(ctx);
     defer exec_moe.unlockMoeDecodeScratch(ctx);
-    const sv = try exec_moe.carveMoeDecodeChainScratch(ctx, qm.BlockQ8_0, GemmaMoeRawDecodeChainState, GemmaMoeRawDecodeChainTask, try qm.qkBlockCount(hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
+    const sv = try exec_moe.carveMoeDecodeChainScratch(ctx, qm.BlockQ8_0, GemmaMoeRawDecodeChainState, GemmaMoeRawDecodeChainTask, try qm.q8k.qkBlockCount(hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
     if (profile) |p| p.alloc_ns += moeBatchProfileElapsed(alloc_start, io);
 
     const gather_quant_start = moeBatchProfileStart(profile_enabled, io);
-    try qm.quantizeRowQ8_KInto(sv.qx, try x.dataConstChecked());
+    try qm.q8k.quantizeRowQ8_KInto(sv.qx, try x.dataConstChecked());
     if (profile) |p| p.gather_quant_ns += moeBatchProfileElapsed(gather_quant_start, io);
 
     const gate_split = moeDecodeColumnSplit(out_pe, 32);
@@ -1397,7 +1397,7 @@ fn runGemmaMoeRawQ8MatmulTask(task: *const GemmaMoeRawQ8MatmulTask) void {
     const base = task.row_start;
     const q = task.qlhs[base * task.bpc ..][0 .. m * task.bpc];
     const out = task.out[base * task.out_dim ..][0 .. m * task.out_dim];
-    qm.matmulQ8_0RhsTile(out, q, &task.rhs, task.out_dim, 0, m, task.c0, task.c1);
+    qm.q8_0.matmulQ8_0RhsTile(out, q, &task.rhs, task.out_dim, 0, m, task.c0, task.c1);
     if (task.profile_enabled) task_profile.elapsed_ns += moeBatchProfileElapsed(start, task.io);
 }
 
@@ -1440,8 +1440,8 @@ pub fn batchRaw(
     if (gw.guBlockCount() != n_expert * 2 * out_pe * (hidden / 256)) return tensor.TensorError.ShapeMismatch;
     if (gw.dn_blocks.len != n_expert * hidden * (out_pe / 32)) return tensor.TensorError.ShapeMismatch;
 
-    const bpc_in = try qm.qkBlockCount(hidden);
-    const bpc_g = try qm.q8_0BlockCount(out_pe);
+    const bpc_in = try qm.q8k.qkBlockCount(hidden);
+    const bpc_g = try qm.q8k.q8_0BlockCount(out_pe);
 
     const route_result = try moe_chain.buildMoeRoutePlan(a, selected, n_expert, profile_enabled, io);
     var route = route_result.plan;
@@ -1511,7 +1511,7 @@ fn runGemmaMoeGatherTask(task: *const GemmaMoeGatherTask) void {
     for (0..m) |i| {
         const token = task.order[base + i] / task.top_k;
         const src = task.x_data[token * task.hidden ..][0..task.hidden];
-        qm.quantizeRowQ8_KInto(task.qx[(base + i) * task.bpc_in ..][0..task.bpc_in], src) catch unreachable;
+        qm.q8k.quantizeRowQ8_KInto(task.qx[(base + i) * task.bpc_in ..][0..task.bpc_in], src) catch unreachable;
     }
     if (task.profile_enabled) task_profile.elapsed_ns += moeBatchProfileElapsed(start, task.io);
 }
@@ -1545,7 +1545,7 @@ fn runGemmaMoeQ6MatmulTask(task: *const GemmaMoeQ6MatmulTask) void {
     const base = task.row_start;
     const q = task.qlhs[base * task.bpc ..][0 .. m * task.bpc];
     const out = task.out[base * task.out_dim ..][0 .. m * task.out_dim];
-    qm.matmulQ6_Kx4RhsTile(out, q, task.rhs, task.out_dim, 0, m, task.c0, task.c1);
+    qm.q6_k.matmulQ6_Kx4RhsTile(out, q, task.rhs, task.out_dim, 0, m, task.c0, task.c1);
     if (task.profile_enabled) task_profile.elapsed_ns += moeBatchProfileElapsed(start, task.io);
 }
 
@@ -1583,7 +1583,7 @@ fn runGemmaMoeGegluTask(task: *const GemmaMoeGegluTask) void {
         g.* = up_v * backend_ops.geluQuantScalar(gate_v);
     }
     for (0..m) |i| {
-        qm.quantizeRowQ8_0Into(task.qg[(base + i) * task.bpc_g ..][0..task.bpc_g], g_out[i * out_pe ..][0..out_pe]) catch unreachable;
+        qm.q8k.quantizeRowQ8_0Into(task.qg[(base + i) * task.bpc_g ..][0..task.bpc_g], g_out[i * out_pe ..][0..out_pe]) catch unreachable;
     }
     if (task.profile_enabled) task_profile.elapsed_ns += moeBatchProfileElapsed(start, task.io);
 }
@@ -1617,7 +1617,7 @@ fn runGemmaMoeQ8MatmulTask(task: *const GemmaMoeQ8MatmulTask) void {
     const base = task.row_start;
     const q = task.qlhs[base * task.bpc ..][0 .. m * task.bpc];
     const out = task.out[base * task.out_dim ..][0 .. m * task.out_dim];
-    qm.matmulQ8_0x4RhsTile(out, q, task.rhs, task.out_dim, 0, m, task.c0, task.c1);
+    qm.q8_0.matmulQ8_0x4RhsTile(out, q, task.rhs, task.out_dim, 0, m, task.c0, task.c1);
     if (task.profile_enabled) task_profile.elapsed_ns += moeBatchProfileElapsed(start, task.io);
 }
 

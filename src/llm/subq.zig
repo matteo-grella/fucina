@@ -735,8 +735,8 @@ pub const State = struct {
         var q_q8_buf: [16]BlockQ8_0 = undefined;
         var q_scales_buf: [16]f32 = undefined;
         if (use_q8) {
-            qkern.quantizeRowQ8_0Into(q_q8_buf[0..bpr], query) catch unreachable;
-            qkern.q8RowScalesInto(q_scales_buf[0..bpr], q_q8_buf[0..bpr]);
+            qkern.q8k.quantizeRowQ8_0Into(q_q8_buf[0..bpr], query) catch unreachable;
+            qkern.q8_0.q8RowScalesInto(q_scales_buf[0..bpr], q_q8_buf[0..bpr]);
         }
 
         // Exact part under an online softmax gauge (numer, exact_w, and
@@ -936,8 +936,8 @@ pub const State = struct {
             const end: usize = plan.offsets[c + 1];
             while (row < end) : (row += 1) {
                 if (plan.format == .q8_0) {
-                    qkern.dequantizeRowQ8_0Into(kbuf[0..d], plan.packed_k_q8[row * cal_bpr ..][0..cal_bpr]) catch unreachable;
-                    qkern.dequantizeRowQ8_0Into(vbuf[0..d], plan.packed_v_q8[row * cal_bpr ..][0..cal_bpr]) catch unreachable;
+                    qkern.q8k.dequantizeRowQ8_0Into(kbuf[0..d], plan.packed_k_q8[row * cal_bpr ..][0..cal_bpr]) catch unreachable;
+                    qkern.q8k.dequantizeRowQ8_0Into(vbuf[0..d], plan.packed_v_q8[row * cal_bpr ..][0..cal_bpr]) catch unreachable;
                     const w = @exp(@as(f64, beta * dotF32(query, kbuf[0..d])));
                     accumulateF32(cn, vbuf[0..d], @floatCast(w));
                     w_sum += w;
@@ -1182,8 +1182,8 @@ pub const State = struct {
             const end: usize = plan.offsets[c + 1];
             while (row < end) : (row += 1) {
                 if (plan.format == .q8_0) {
-                    qkern.dequantizeRowQ8_0Into(kbuf[0..d], plan.packed_k_q8[row * cal_bpr ..][0..cal_bpr]) catch unreachable;
-                    qkern.dequantizeRowQ8_0Into(vbuf[0..d], plan.packed_v_q8[row * cal_bpr ..][0..cal_bpr]) catch unreachable;
+                    qkern.q8k.dequantizeRowQ8_0Into(kbuf[0..d], plan.packed_k_q8[row * cal_bpr ..][0..cal_bpr]) catch unreachable;
+                    qkern.q8k.dequantizeRowQ8_0Into(vbuf[0..d], plan.packed_v_q8[row * cal_bpr ..][0..cal_bpr]) catch unreachable;
                     const w = @exp(@as(f64, beta * dotF32(query, kbuf[0..d])));
                     accumulateF32(cn, vbuf[0..d], @floatCast(w));
                     w_sum += w;
@@ -1384,8 +1384,8 @@ pub const State = struct {
         defer allocator.free(packed_v_q8);
         if (fmt == .q8_0) {
             for (0..n) |i| {
-                try qkern.quantizeRowQ8_0Into(packed_k_q8[i * bpr ..][0..bpr], ordered_k[i * d ..][0..d]);
-                try qkern.quantizeRowQ8_0Into(packed_v_q8[i * bpr ..][0..bpr], ordered_v[i * d ..][0..d]);
+                try qkern.q8k.quantizeRowQ8_0Into(packed_k_q8[i * bpr ..][0..bpr], ordered_k[i * d ..][0..d]);
+                try qkern.q8k.quantizeRowQ8_0Into(packed_v_q8[i * bpr ..][0..bpr], ordered_v[i * d ..][0..d]);
             }
         }
         // Cluster moment sums via the segmentSum core op.
@@ -1771,7 +1771,7 @@ fn dot2F32(a0: []const f32, a1: []const f32, b: []const f32) [2]f32 {
     return .{ t0, t1 };
 }
 
-const dotF16 = fucina.internal.backend_mod.vector_impl.dotF32F16;
+const dotF16 = fucina.internal.backend_mod.vector_impl.primitives.dotF32F16;
 
 /// One exact-read batch under the shared online softmax gauge: score all
 /// rows, raise the gauge if the batch's max score exceeds it (rescaling the
@@ -1798,26 +1798,26 @@ fn exactBatchQ8(
     const simd = fucina.internal.backend_mod.vector_impl;
     var i: usize = 0;
     while (i + 2 <= m) : (i += 2) {
-        const pair = qkern.vecDotQ8_0Q8_0x2(q_q8, q_scales, k_blocks[i * bpr ..][0..bpr], k_blocks[(i + 1) * bpr ..][0..bpr]);
+        const pair = qkern.q8_0.vecDotQ8_0Q8_0x2(q_q8, q_scales, k_blocks[i * bpr ..][0..bpr], k_blocks[(i + 1) * bpr ..][0..bpr]);
         scores[i] = pair[0];
         scores[i + 1] = pair[1];
     }
-    if (i < m) scores[i] = qkern.vecDotQ8_0Q8_0(q_q8, k_blocks[i * bpr ..][0..bpr]);
-    const mx = beta * simd.vecMaxReduce(scores);
+    if (i < m) scores[i] = qkern.q8_0.vecDotQ8_0Q8_0(q_q8, k_blocks[i * bpr ..][0..bpr]);
+    const mx = beta * simd.primitives.vecMaxReduce(scores);
     if (mx > gauge.*) {
         if (gauge.* != -std.math.inf(f32)) {
             const rescale: f32 = @exp(gauge.* - mx);
-            simd.vecScale(numer, numer, rescale);
+            simd.primitives.vecScale(numer, numer, rescale);
             exact_w.* *= rescale;
         }
         gauge.* = mx;
     }
-    exact_w.* += simd.vecExpAffineSumInPlace(scores, beta, -gauge.*);
+    exact_w.* += simd.primitives.vecExpAffineSumInPlace(scores, beta, -gauge.*);
     i = 0;
     while (i + 2 <= m) : (i += 2) {
-        qkern.weightedQ8_0Row2(true, numer, v_blocks[i * bpr ..][0..bpr], scores[i], v_blocks[(i + 1) * bpr ..][0..bpr], scores[i + 1]);
+        qkern.q8_0.weightedQ8_0Row2(true, numer, v_blocks[i * bpr ..][0..bpr], scores[i], v_blocks[(i + 1) * bpr ..][0..bpr], scores[i + 1]);
     }
-    if (i < m) qkern.weightedQ8_0Row(true, numer, v_blocks[i * bpr ..][0..bpr], scores[i]);
+    if (i < m) qkern.q8_0.weightedQ8_0Row(true, numer, v_blocks[i * bpr ..][0..bpr], scores[i]);
 }
 
 fn exactBatch(
@@ -1834,18 +1834,18 @@ fn exactBatch(
 ) void {
     if (scores.len == 0) return;
     const simd = fucina.internal.backend_mod.vector_impl;
-    simd.scoreRows4F16(scores, query[0..d], k_rows, stride);
-    const m = beta * simd.vecMaxReduce(scores);
+    simd.primitives.scoreRows4F16(scores, query[0..d], k_rows, stride);
+    const m = beta * simd.primitives.vecMaxReduce(scores);
     if (m > gauge.*) {
         if (gauge.* != -std.math.inf(f32)) {
             const rescale: f32 = @exp(gauge.* - m);
-            simd.vecScale(numer, numer, rescale);
+            simd.primitives.vecScale(numer, numer, rescale);
             exact_w.* *= rescale;
         }
         gauge.* = m;
     }
-    exact_w.* += simd.vecExpAffineSumInPlace(scores, beta, -gauge.*);
-    simd.weightedAccumRows4F16(numer[0..d], scores, v_rows, stride);
+    exact_w.* += simd.primitives.vecExpAffineSumInPlace(scores, beta, -gauge.*);
+    simd.primitives.weightedAccumRows4F16(numer[0..d], scores, v_rows, stride);
 }
 
 fn accumulateF32(acc: []f32, row: []const f32, scale: f32) void {

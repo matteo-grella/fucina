@@ -8,12 +8,6 @@ const tensor = @import("../../tensor.zig");
 
 const Tensor = tensor.Tensor;
 
-const snakeIntoWithConfig = elementwise.snakeIntoWithConfig;
-const snakeBackwardInputIntoWithConfig = elementwise.snakeBackwardInputIntoWithConfig;
-const snakeBackwardParamsIntoWithConfig = elementwise.snakeBackwardParamsIntoWithConfig;
-const groupNormIntoWithConfig = elementwise.groupNormIntoWithConfig;
-const groupNormBackwardIntoWithConfig = elementwise.groupNormBackwardIntoWithConfig;
-
 /// Deterministic pseudo-random fill (splitmix-style) in [-2, 2).
 fn fillPseudoRandom(values: []f32, seed: u64) void {
     var state = seed;
@@ -61,7 +55,7 @@ test "snake vector kernel matches naive reference at SIMD-awkward widths" {
 
         var out = try Tensor.zeros(allocator, &.{ rows, cols });
         defer out.deinit();
-        snakeIntoWithConfig(&out, &x, alpha, inv_b, rows, cols, .{});
+        elementwise.snakeInto(.{}, &out, &x, alpha, inv_b, rows, cols);
 
         const want = try allocator.alloc(f32, rows * cols);
         defer allocator.free(want);
@@ -80,7 +74,7 @@ test "snake vector kernel hand-computed values (alpha=1, inv_b=1)" {
     defer x.deinit();
     var out = try Tensor.zeros(allocator, &.{ 2, 2 });
     defer out.deinit();
-    snakeIntoWithConfig(&out, &x, &.{ 1, 1 }, &.{ 1, 1 }, 2, 2, .{});
+    elementwise.snakeInto(.{}, &out, &x, &.{ 1, 1 }, &.{ 1, 1 }, 2, 2);
 
     // y = x + sin(x)^2
     const inputs = [_]f32{ 0.5, -1.0, 2.0, 0.0 };
@@ -147,7 +141,7 @@ test "groupNorm vector kernel matches naive f64 two-pass reference" {
         // Plain (no affine).
         var out = try Tensor.zeros(allocator, &.{ rows, cols });
         defer out.deinit();
-        groupNormIntoWithConfig(&out, &x, null, null, rows, cols, groups, eps, .{});
+        elementwise.groupNormInto(.{}, &out, &x, null, null, rows, cols, groups, eps);
 
         const want = try allocator.alloc(f32, rows * cols);
         defer allocator.free(want);
@@ -164,7 +158,7 @@ test "groupNorm vector kernel matches naive f64 two-pass reference" {
 
         var out_affine = try Tensor.zeros(allocator, &.{ rows, cols });
         defer out_affine.deinit();
-        groupNormIntoWithConfig(&out_affine, &x, weight, bias, rows, cols, groups, eps, .{});
+        elementwise.groupNormInto(.{}, &out_affine, &x, weight, bias, rows, cols, groups, eps);
         naiveGroupNorm(want, x.dataConst(), weight, bias, rows, cols, groups, eps);
         try std.testing.expectEqualSlices(f32, want, out_affine.dataConst());
     }
@@ -179,7 +173,7 @@ test "groupNorm vector kernel hand-computed G=1 statistics" {
     var out = try Tensor.zeros(allocator, &.{ 2, 2 });
     defer out.deinit();
     const eps: f32 = 1e-5;
-    groupNormIntoWithConfig(&out, &x, null, null, 2, 2, 1, eps, .{});
+    elementwise.groupNormInto(.{}, &out, &x, null, null, 2, 2, 1, eps);
 
     const inv = 1.0 / @sqrt(@as(f32, 1.25) + eps);
     const expected = [_]f32{ -1.5 * inv, -0.5 * inv, 0.5 * inv, 1.5 * inv };
@@ -239,13 +233,13 @@ test "snake backward vector kernels match naive reference at SIMD-awkward widths
 
         var gx = try Tensor.zeros(allocator, &.{ rows, cols });
         defer gx.deinit();
-        snakeBackwardInputIntoWithConfig(&gx, &x, &gy, alpha, inv_b, rows, cols, .{});
+        elementwise.snakeBackwardInputInto(.{}, &gx, &x, &gy, alpha, inv_b, rows, cols);
 
         var ga = try Tensor.zeros(allocator, &.{cols});
         defer ga.deinit();
         var gib = try Tensor.zeros(allocator, &.{cols});
         defer gib.deinit();
-        snakeBackwardParamsIntoWithConfig(&ga, &gib, &x, &gy, alpha, inv_b, rows, cols, .{});
+        elementwise.snakeBackwardParamsInto(.{}, &ga, &gib, &x, &gy, alpha, inv_b, rows, cols);
 
         const want_gx = try allocator.alloc(f32, rows * cols);
         defer allocator.free(want_gx);
@@ -363,7 +357,7 @@ test "groupNorm backward vector kernel matches naive f64 two-pass reference" {
             defer gw.deinit();
             var gb = try Tensor.zeros(allocator, &.{cols});
             defer gb.deinit();
-            groupNormBackwardIntoWithConfig(&gx, &gw, &gb, &x, &gy, w_opt, rows, cols, groups, eps, .{});
+            elementwise.groupNormBackwardInto(.{}, &gx, &gw, &gb, &x, &gy, w_opt, rows, cols, groups, eps);
 
             naiveGroupNormBackward(want_gx, want_gw, want_gb, x.dataConst(), gy.dataConst(), w_opt, rows, cols, groups, eps);
 
@@ -374,7 +368,7 @@ test "groupNorm backward vector kernel matches naive f64 two-pass reference" {
             // Null outputs are skipped without touching the others.
             var gx_only = try Tensor.zeros(allocator, &.{ rows, cols });
             defer gx_only.deinit();
-            groupNormBackwardIntoWithConfig(&gx_only, null, null, &x, &gy, w_opt, rows, cols, groups, eps, .{});
+            elementwise.groupNormBackwardInto(.{}, &gx_only, null, null, &x, &gy, w_opt, rows, cols, groups, eps);
             try std.testing.expectEqualSlices(f32, gx.dataConst(), gx_only.dataConst());
         }
     }

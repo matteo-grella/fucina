@@ -260,7 +260,7 @@ pub fn Ops(comptime Self: type) type {
             defer weight_ready.deinit();
 
             // Per-tensor absmean scale + round-clip encode of the latent weight.
-            var rhs = try backend_mod.quantized_matmul.quantizedMatmulRhsTQ2_0FromF32Absmean(ctx.allocator, k, n, weight_ready.dataConst());
+            var rhs = try backend_mod.quantized_matmul.ternary.quantizedMatmulRhsTQ2_0FromF32Absmean(ctx.allocator, k, n, weight_ready.dataConst());
             var rhs_owned = true;
             errdefer if (rhs_owned) rhs.deinit();
 
@@ -276,7 +276,7 @@ pub fn Ops(comptime Self: type) type {
                 // identical on every target by construction, so the scalar
                 // leg exercises the same numerics (unlike the quant matmuls,
                 // which keep a scalar reference in cpu.zig).
-                backend_mod.vector_impl.matmul2DTQ2_0F32RhsIntoWithConfig(product.data(), left_matrix.dataConst(), &rhs, m, n, k, config);
+                backend_mod.vector_impl.matmul_quant.matmul2DTQ2_0F32RhsInto(config, product.data(), left_matrix.dataConst(), &rhs, m, n, k);
                 if (std.mem.eql(usize, product.shape.slice(), result_shape[0..])) break :forward product;
                 const reshaped = try product.reshape(result_shape[0..]);
                 product.deinit();

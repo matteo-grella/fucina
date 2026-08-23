@@ -157,7 +157,7 @@ pub const PlanePair = struct {
             else => return Error.InvalidShape,
         };
         if (blocks.len == 0) return Error.InvalidShape;
-        return quant.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(self.cols, self.rows, blocks);
+        return quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(self.cols, self.rows, blocks);
     }
 
     /// Dequantized sum of the planes into `dst` (row-major rows x cols) —

@@ -103,14 +103,14 @@ pub const gpu_impl = @import("backend/gpu.zig").impl;
 pub const vector_impl = @import("backend/vector.zig");
 
 /// conv2d geometry (channel-last [H,W,Cin] -> [OH,OW,Cout]); see vector/conv.zig.
-pub const Conv2dDims = vector_impl.Conv2dDims;
+pub const Conv2dDims = vector_impl.conv.Conv2dDims;
 /// conv1d geometry (general non-causal [T,Cin] -> [T_out,Cout]); see vector/conv.zig.
-pub const Conv1dDims = vector_impl.Conv1dDims;
+pub const Conv1dDims = vector_impl.conv.Conv1dDims;
 /// pool2d geometry + kind (channel-last [H,W,C] -> [OH,OW,C]); see vector/pool.zig.
-pub const PoolKind = vector_impl.PoolKind;
-pub const Pool2dDims = vector_impl.Pool2dDims;
+pub const PoolKind = vector_impl.pool.PoolKind;
+pub const Pool2dDims = vector_impl.pool.Pool2dDims;
 /// Winograd F(2×2,3×3) transform geometry; see vector/winograd.zig.
-pub const WinogradF2Dims = vector_impl.WinogradF2Dims;
+pub const WinogradF2Dims = vector_impl.winograd.F2Dims;
 
 pub const Kind = enum {
     scalar,

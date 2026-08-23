@@ -75,7 +75,7 @@ test "pinned rowwise kernels: batched quant ops reproduce the m == 1 numerics bi
     // q4_k / q5_k blocks via the real quantizers; q6_k via the K-quant
     // fixture pattern; q8_0 via row quantization.
     {
-        const bpc = k / qm.qk_k_block_size;
+        const bpc = k / qm.types.qk_k_block_size;
         const q4_blocks = try allocator.alloc(qm.BlockQ4_K, n * bpc);
         defer allocator.free(q4_blocks);
         const q5_blocks = try allocator.alloc(qm.BlockQ5_K, n * bpc);
@@ -83,12 +83,12 @@ test "pinned rowwise kernels: batched quant ops reproduce the m == 1 numerics bi
         var block_vals: [256]f32 = undefined;
         for (q4_blocks, q5_blocks, 0..) |*b4, *b5, bi| {
             for (&block_vals, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(bi * 256 + i)) * 0.07) * 1.5;
-            qm.quantizeBlockQ4_KInto(b4, &block_vals);
-            qm.quantizeBlockQ5_KInto(b5, &block_vals);
+            qm.q4_k.quantizeBlockQ4_KInto(b4, &block_vals);
+            qm.q5_k.quantizeBlockQ5_KInto(b5, &block_vals);
         }
-        var q4_rhs = try qm.packMatmulRhsQ4_Kx8(allocator, q4_blocks, n, k, bpc);
+        var q4_rhs = try qm.q4_k.packMatmulRhsQ4_Kx8(allocator, q4_blocks, n, k, bpc);
         defer q4_rhs.deinit();
-        var q5_rhs = try qm.packMatmulRhsQ5_Kx8(allocator, q5_blocks, n, k, bpc);
+        var q5_rhs = try qm.q5_k.packMatmulRhsQ5_Kx8(allocator, q5_blocks, n, k, bpc);
         defer q5_rhs.deinit();
         const q6_blocks = try allocator.alloc(qm.BlockQ6_K, n * bpc);
         defer allocator.free(q6_blocks);
@@ -98,19 +98,19 @@ test "pinned rowwise kernels: batched quant ops reproduce the m == 1 numerics bi
             for (&b.ql, 0..) |*q, i| q.* = @intCast((i * 19 + block_i * 7) % 256);
             for (&b.qh, 0..) |*q, i| q.* = @intCast((i * 23 + block_i * 3) % 256);
         }
-        var q6_rhs = try qm.packMatmulRhsQ6_Kx4(allocator, q6_blocks, n, k, bpc);
+        var q6_rhs = try qm.q6_k.packMatmulRhsQ6_Kx4(allocator, q6_blocks, n, k, bpc);
         defer q6_rhs.deinit();
-        const q8_bpc = try qm.q8_0BlockCount(k);
+        const q8_bpc = try qm.q8k.q8_0BlockCount(k);
         const q8_blocks = try allocator.alloc(qm.BlockQ8_0, n * q8_bpc);
         defer allocator.free(q8_blocks);
         {
             var row: [512]f32 = undefined;
             for (0..n) |r| {
                 for (&row, 0..) |*v, i| v.* = @cos(@as(f32, @floatFromInt(r * 31 + i)) * 0.11) * 1.2;
-                try qm.quantizeRowQ8_0Into(q8_blocks[r * q8_bpc ..][0..q8_bpc], &row);
+                try qm.q8k.quantizeRowQ8_0Into(q8_blocks[r * q8_bpc ..][0..q8_bpc], &row);
             }
         }
-        var q8_rhs = try qm.packMatmulRhsQ8_0x4(allocator, q8_blocks, n, k, q8_bpc);
+        var q8_rhs = try qm.q8_0.packMatmulRhsQ8_0x4(allocator, q8_blocks, n, k, q8_bpc);
         defer q8_rhs.deinit();
 
         for (ms) |m| {

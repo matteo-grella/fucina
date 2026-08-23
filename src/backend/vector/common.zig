@@ -1,10 +1,8 @@
 //! Shared core for the vector kernel family: the symbols every
-//! `vector/<concern>.zig` section depends on — `ParallelConfig`, the `V*`
+//! `vector/<concern>.zig` module depends on: `ParallelConfig`, the `V*`
 //! vector-width aliases, the thread-count gates, and the contiguous-data
-//! accessors. A true leaf (imports only the runtime primitives, never a sibling
-//! kernel or the `vector.zig` barrel), so the children depend on this directly
-//! instead of importing the parent barrel — breaking the parent<->child cycle.
-//! `vector.zig` re-exports these so `vector.<sym>` is unchanged.
+//! accessors. A leaf: it imports only the runtime primitives, never a sibling
+//! kernel module.
 
 const std = @import("std");
 const dtype_mod = @import("../../dtype.zig");

@@ -47,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
     defer stdout.flush() catch {};
 
     try stdout.print("native vector width: {} f32 (target: {s}); native BLAS: {s} (enabled: {}, threads: {})\n\n", .{
-        native.vector_len,
+        raw_backend.vector_impl.vector_len,
         @tagName(@import("builtin").cpu.arch),
         @tagName(bench_options.native_blas_kind),
         bench_options.native_uses_blas,
@@ -141,7 +141,7 @@ fn f32ToF16Bits(x: f32) u16 {
 }
 
 fn makeQ1_0Blocks(allocator: std.mem.Allocator, k: usize, n: usize) ![]raw_backend.BlockQ1_0 {
-    const blocks_per_column = try raw_backend.quantized_matmul.q1_0BlockCount(k);
+    const blocks_per_column = try raw_backend.quantized_matmul.cold.q1_0BlockCount(k);
     const blocks = try allocator.alloc(raw_backend.BlockQ1_0, n * blocks_per_column);
     for (blocks, 0..) |*block, i| fillQ1_0Block(block, i);
     return blocks;
@@ -153,7 +153,7 @@ fn fillQ1_0Block(block: *raw_backend.BlockQ1_0, seed: usize) void {
 }
 
 fn makeQ4_1Blocks(allocator: std.mem.Allocator, k: usize, n: usize) ![]raw_backend.BlockQ4_1 {
-    const blocks_per_column = try raw_backend.quantized_matmul.q4_1BlockCount(k);
+    const blocks_per_column = try raw_backend.quantized_matmul.cold.q4_1BlockCount(k);
     const blocks = try allocator.alloc(raw_backend.BlockQ4_1, n * blocks_per_column);
     for (blocks, 0..) |*block, i| fillQ4_1Block(block, i);
     return blocks;
@@ -169,7 +169,7 @@ fn fillQ4_1Block(block: *raw_backend.BlockQ4_1, seed: usize) void {
 }
 
 fn makeQ5_0Blocks(allocator: std.mem.Allocator, k: usize, n: usize) ![]raw_backend.BlockQ5_0 {
-    const blocks_per_column = try raw_backend.quantized_matmul.q5_0BlockCount(k);
+    const blocks_per_column = try raw_backend.quantized_matmul.cold.q5_0BlockCount(k);
     const blocks = try allocator.alloc(raw_backend.BlockQ5_0, n * blocks_per_column);
     for (blocks, 0..) |*block, i| fillQ5_0Block(block, i);
     return blocks;
@@ -179,15 +179,15 @@ fn fillQ5_0Block(block: *raw_backend.BlockQ5_0, seed: usize) void {
     block.d = f32ToF16Bits(1.0 / 32.0);
     @memset(&block.qh, 0);
     @memset(&block.qs, 0);
-    for (0..raw_backend.quantized_matmul.q5_0_block_size) |i| {
+    for (0..raw_backend.quantized_matmul.types.q5_0_block_size) |i| {
         setQ5_0Value(block, i, @intCast(@as(i32, @intCast((i + seed) % 33)) - 16));
     }
 }
 
 fn setQ5_0Value(block: *raw_backend.BlockQ5_0, index: usize, value: i8) void {
     const encoded: u8 = @intCast(@as(i16, value) + 16);
-    const byte_index = index % (raw_backend.quantized_matmul.q5_0_block_size / 2);
-    if (index < raw_backend.quantized_matmul.q5_0_block_size / 2) {
+    const byte_index = index % (raw_backend.quantized_matmul.types.q5_0_block_size / 2);
+    if (index < raw_backend.quantized_matmul.types.q5_0_block_size / 2) {
         block.qs[byte_index] = (block.qs[byte_index] & 0xf0) | (encoded & 0x0f);
     } else {
         block.qs[byte_index] = (block.qs[byte_index] & 0x0f) | ((encoded & 0x0f) << 4);
@@ -201,7 +201,7 @@ fn setQ5_0Value(block: *raw_backend.BlockQ5_0, index: usize, value: i8) void {
 }
 
 fn makeQ5_1Blocks(allocator: std.mem.Allocator, k: usize, n: usize) ![]raw_backend.BlockQ5_1 {
-    const blocks_per_column = try raw_backend.quantized_matmul.q5_1BlockCount(k);
+    const blocks_per_column = try raw_backend.quantized_matmul.cold.q5_1BlockCount(k);
     const blocks = try allocator.alloc(raw_backend.BlockQ5_1, n * blocks_per_column);
     for (blocks, 0..) |*block, i| fillQ5_1Block(block, i);
     return blocks;
@@ -211,14 +211,14 @@ fn fillQ5_1Block(block: *raw_backend.BlockQ5_1, seed: usize) void {
     block.dm = .{ f32ToF16Bits(1.0 / 32.0), f32ToF16Bits(0) };
     @memset(&block.qh, 0);
     @memset(&block.qs, 0);
-    for (0..raw_backend.quantized_matmul.q5_1_block_size) |i| {
+    for (0..raw_backend.quantized_matmul.types.q5_1_block_size) |i| {
         setQ5_1Value(block, i, @intCast((i * 7 + seed) % 32));
     }
 }
 
 fn setQ5_1Value(block: *raw_backend.BlockQ5_1, index: usize, value: u8) void {
-    const byte_index = index % (raw_backend.quantized_matmul.q5_1_block_size / 2);
-    if (index < raw_backend.quantized_matmul.q5_1_block_size / 2) {
+    const byte_index = index % (raw_backend.quantized_matmul.types.q5_1_block_size / 2);
+    if (index < raw_backend.quantized_matmul.types.q5_1_block_size / 2) {
         block.qs[byte_index] = (block.qs[byte_index] & 0xf0) | (value & 0x0f);
     } else {
         block.qs[byte_index] = (block.qs[byte_index] & 0x0f) | ((value & 0x0f) << 4);
@@ -244,7 +244,7 @@ fn writeQh(qh: []u8, value: u32) void {
 }
 
 fn makeQ2_KBlocks(allocator: std.mem.Allocator, k: usize, n: usize) ![]raw_backend.BlockQ2_K {
-    const blocks_per_column = try raw_backend.quantized_matmul.qkBlockCount(k);
+    const blocks_per_column = try raw_backend.quantized_matmul.q8k.qkBlockCount(k);
     const blocks = try allocator.alloc(raw_backend.BlockQ2_K, n * blocks_per_column);
     for (blocks, 0..) |*block, i| fillQ2_KBlock(block, i);
     return blocks;
@@ -259,7 +259,7 @@ fn fillQ2_KBlock(block: *raw_backend.BlockQ2_K, seed: usize) void {
 }
 
 fn makeQ3_KBlocks(allocator: std.mem.Allocator, k: usize, n: usize) ![]raw_backend.BlockQ3_K {
-    const blocks_per_column = try raw_backend.quantized_matmul.qkBlockCount(k);
+    const blocks_per_column = try raw_backend.quantized_matmul.q8k.qkBlockCount(k);
     const blocks = try allocator.alloc(raw_backend.BlockQ3_K, n * blocks_per_column);
     for (blocks, 0..) |*block, i| fillQ3_KBlock(block, i);
     return blocks;
@@ -270,10 +270,10 @@ fn fillQ3_KBlock(block: *raw_backend.BlockQ3_K, seed: usize) void {
     @memset(&block.qs, 0);
     @memset(&block.scales, 0);
     block.d = f32ToF16Bits(1.0 / 32.0);
-    for (0..raw_backend.quantized_matmul.qk_k_block_size / 16) |i| {
+    for (0..raw_backend.quantized_matmul.types.qk_k_block_size / 16) |i| {
         setQ3_KScale(block, i, @intCast(@as(i32, @intCast((i + seed) % 5)) + 1));
     }
-    for (0..raw_backend.quantized_matmul.qk_k_block_size) |i| {
+    for (0..raw_backend.quantized_matmul.types.qk_k_block_size) |i| {
         setQ3_KValue(block, i, @intCast(@as(i32, @intCast((i + seed) % 8)) - 4));
     }
 }
@@ -308,7 +308,7 @@ fn setQ3_KValue(block: *raw_backend.BlockQ3_K, index: usize, value: i8) void {
 }
 
 fn makeQ4_KBlocks(allocator: std.mem.Allocator, k: usize, n: usize) ![]raw_backend.BlockQ4_K {
-    const blocks_per_column = try raw_backend.quantized_matmul.qkBlockCount(k);
+    const blocks_per_column = try raw_backend.quantized_matmul.q8k.qkBlockCount(k);
     const blocks = try allocator.alloc(raw_backend.BlockQ4_K, n * blocks_per_column);
     for (blocks, 0..) |*block, i| fillQ4_KBlock(block, i);
     return blocks;
@@ -325,7 +325,7 @@ fn fillQ4_KBlock(block: *raw_backend.BlockQ4_K, seed: usize) void {
 }
 
 fn makeQ5_KBlocks(allocator: std.mem.Allocator, k: usize, n: usize) ![]raw_backend.BlockQ5_K {
-    const blocks_per_column = try raw_backend.quantized_matmul.qkBlockCount(k);
+    const blocks_per_column = try raw_backend.quantized_matmul.q8k.qkBlockCount(k);
     const blocks = try allocator.alloc(raw_backend.BlockQ5_K, n * blocks_per_column);
     for (blocks, 0..) |*block, i| fillQ5_KBlock(block, i);
     return blocks;
@@ -359,7 +359,7 @@ fn setQ5_KValue(block: *raw_backend.BlockQ5_K, subblock: usize, offset: usize, v
 }
 
 fn makeQ6_KBlocks(allocator: std.mem.Allocator, k: usize, n: usize) ![]raw_backend.BlockQ6_K {
-    const blocks_per_column = try raw_backend.quantized_matmul.qkBlockCount(k);
+    const blocks_per_column = try raw_backend.quantized_matmul.q8k.qkBlockCount(k);
     const blocks = try allocator.alloc(raw_backend.BlockQ6_K, n * blocks_per_column);
     for (blocks, 0..) |*block, i| fillQ6_KBlock(block, i);
     return blocks;
@@ -372,7 +372,7 @@ fn fillQ6_KBlock(block: *raw_backend.BlockQ6_K, seed: usize) void {
     for (&block.scales, 0..) |*scale, i| {
         scale.* = @intCast(@as(i32, @intCast((i + seed) % 5)) + 1);
     }
-    for (0..raw_backend.quantized_matmul.qk_k_block_size) |i| {
+    for (0..raw_backend.quantized_matmul.types.qk_k_block_size) |i| {
         const value: i8 = @intCast(@as(i32, @intCast((i + seed) % 33)) - 16);
         setQ6_KValue(block, i, value);
     }
@@ -1004,20 +1004,20 @@ fn benchQuantizedGGMLMatMulTimed(
     var qrhs = switch (format) {
         .ggml_q1_0 => blk: {
             const blocks = try makeQ1_0Blocks(allocator, k, n);
-            break :blk QRhs{ .rows = .{ .allocator = allocator, .blocks = blocks, .rows = n, .cols = k, .blocks_per_row = try raw_backend.quantized_matmul.q1_0BlockCount(k) }, .k = k, .n = n };
+            break :blk QRhs{ .rows = .{ .allocator = allocator, .blocks = blocks, .rows = n, .cols = k, .blocks_per_row = try raw_backend.quantized_matmul.cold.q1_0BlockCount(k) }, .k = k, .n = n };
         },
         .ggml_q4_0 => try native.kernels.quantizeMatmulRhsQ4_0(allocator, &b),
         .ggml_q4_1 => blk: {
             const blocks = try makeQ4_1Blocks(allocator, k, n);
-            break :blk QRhs{ .rows = .{ .allocator = allocator, .blocks = blocks, .rows = n, .cols = k, .blocks_per_row = try raw_backend.quantized_matmul.q4_1BlockCount(k) }, .k = k, .n = n };
+            break :blk QRhs{ .rows = .{ .allocator = allocator, .blocks = blocks, .rows = n, .cols = k, .blocks_per_row = try raw_backend.quantized_matmul.cold.q4_1BlockCount(k) }, .k = k, .n = n };
         },
         .ggml_q5_0 => blk: {
             const blocks = try makeQ5_0Blocks(allocator, k, n);
-            break :blk QRhs{ .rows = .{ .allocator = allocator, .blocks = blocks, .rows = n, .cols = k, .blocks_per_row = try raw_backend.quantized_matmul.q5_0BlockCount(k) }, .k = k, .n = n };
+            break :blk QRhs{ .rows = .{ .allocator = allocator, .blocks = blocks, .rows = n, .cols = k, .blocks_per_row = try raw_backend.quantized_matmul.cold.q5_0BlockCount(k) }, .k = k, .n = n };
         },
         .ggml_q5_1 => blk: {
             const blocks = try makeQ5_1Blocks(allocator, k, n);
-            break :blk QRhs{ .rows = .{ .allocator = allocator, .blocks = blocks, .rows = n, .cols = k, .blocks_per_row = try raw_backend.quantized_matmul.q5_1BlockCount(k) }, .k = k, .n = n };
+            break :blk QRhs{ .rows = .{ .allocator = allocator, .blocks = blocks, .rows = n, .cols = k, .blocks_per_row = try raw_backend.quantized_matmul.cold.q5_1BlockCount(k) }, .k = k, .n = n };
         },
         .ggml_q8_0 => try native.kernels.quantizeMatmulRhsQ8_0(allocator, &b),
         else => unreachable,
@@ -1094,27 +1094,27 @@ fn benchQuantizedGGMLKMatMulTimed(
         .ggml_q2_k => blk: {
             const blocks = try makeQ2_KBlocks(allocator, k, n);
             defer allocator.free(blocks);
-            break :blk try raw_backend.quantized_matmul.quantizedMatmulRhsQ2_KFromBlocks(allocator, k, n, blocks);
+            break :blk try raw_backend.quantized_matmul.q8k.quantizedMatmulRhsQ2_KFromBlocks(allocator, k, n, blocks);
         },
         .ggml_q3_k => blk: {
             const blocks = try makeQ3_KBlocks(allocator, k, n);
             defer allocator.free(blocks);
-            break :blk try raw_backend.quantized_matmul.quantizedMatmulRhsQ3_KFromBlocks(allocator, k, n, blocks);
+            break :blk try raw_backend.quantized_matmul.q8k.quantizedMatmulRhsQ3_KFromBlocks(allocator, k, n, blocks);
         },
         .ggml_q4_k => blk: {
             const blocks = try makeQ4_KBlocks(allocator, k, n);
             defer allocator.free(blocks);
-            break :blk try raw_backend.quantized_matmul.quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, blocks);
+            break :blk try raw_backend.quantized_matmul.q8k.quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, blocks);
         },
         .ggml_q5_k => blk: {
             const blocks = try makeQ5_KBlocks(allocator, k, n);
             defer allocator.free(blocks);
-            break :blk try raw_backend.quantized_matmul.quantizedMatmulRhsQ5_KFromBlocks(allocator, k, n, blocks);
+            break :blk try raw_backend.quantized_matmul.q8k.quantizedMatmulRhsQ5_KFromBlocks(allocator, k, n, blocks);
         },
         .ggml_q6_k => blk: {
             const blocks = try makeQ6_KBlocks(allocator, k, n);
             defer allocator.free(blocks);
-            break :blk try raw_backend.quantized_matmul.quantizedMatmulRhsQ6_KFromBlocks(allocator, k, n, blocks);
+            break :blk try raw_backend.quantized_matmul.q8k.quantizedMatmulRhsQ6_KFromBlocks(allocator, k, n, blocks);
         },
         else => unreachable,
     };

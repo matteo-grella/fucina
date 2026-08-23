@@ -13,17 +13,17 @@ const Tensor = tensor.Tensor;
 
 const QuantizedMatmulRhsI8 = quant.QuantizedMatmulRhsI8;
 const QuantizedMatmulFormat = quant.QuantizedMatmulFormat;
-const QuantizedMatmulKernel = quant.QuantizedMatmulKernel;
-const QuantizedStorageLayout = quant.QuantizedStorageLayout;
-const QuantizedScaleLayout = quant.QuantizedScaleLayout;
-const matmulTraits = quant.matmulTraits;
-const matmulTraitsRuntime = quant.matmulTraitsRuntime;
-const supportsMatmul = quant.supportsMatmul;
-const qk_k_block_size = quant.qk_k_block_size;
+const QuantizedMatmulKernel = quant.types.QuantizedMatmulKernel;
+const QuantizedStorageLayout = quant.types.QuantizedStorageLayout;
+const QuantizedScaleLayout = quant.types.QuantizedScaleLayout;
+const matmulTraits = quant.types.matmulTraits;
+const matmulTraitsRuntime = quant.types.matmulTraitsRuntime;
+const supportsMatmul = quant.types.supportsMatmul;
+const qk_k_block_size = quant.types.qk_k_block_size;
 const BlockQ8_Kx4 = quant.BlockQ8_Kx4;
-const quantizeRowsQ8_K = quant.quantizeRowsQ8_K;
-const packRowsQ8_Kx4 = quant.packRowsQ8_Kx4;
-const quantizeRowsQ8_Kx4Into = quant.quantizeRowsQ8_Kx4Into;
+const quantizeRowsQ8_K = quant.q8k.quantizeRowsQ8_K;
+const packRowsQ8_Kx4 = quant.q8k.packRowsQ8_Kx4;
+const quantizeRowsQ8_Kx4Into = quant.q8k.quantizeRowsQ8_Kx4Into;
 const quantizeRhsBlockwiseI8 = quant.quantizeRhsBlockwiseI8;
 const quantizeActivationsPerRowI8 = quant.quantizeActivationsPerRowI8;
 const matmulI8BlockwiseRange = quant.matmulI8BlockwiseRange;
@@ -214,12 +214,12 @@ test "tq2_0 borrowed-blocks RHS: no copy, matmul parity with the owning construc
 
     var weights: [n * k]f32 = undefined;
     for (&weights, 0..) |*w, i| w.* = @floatFromInt(@as(i32, @intCast(i % 5)) - 2);
-    var owned = try quant.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, &weights);
+    var owned = try quant.ternary.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, &weights);
     defer owned.deinit();
 
     // Borrow the owning container's blocks: same storage, no dupe; deinit
     // frees nothing (allocator = null), so both containers may deinit.
-    var borrowed = try quant.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, owned.rows.blocks);
+    var borrowed = try quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, owned.rows.blocks);
     defer borrowed.deinit();
     try std.testing.expectEqual(owned.rows.blocks.ptr, borrowed.rows.blocks.ptr);
     try std.testing.expectEqual(@as(usize, 1), borrowed.rows.blocks_per_row);
@@ -229,14 +229,14 @@ test "tq2_0 borrowed-blocks RHS: no copy, matmul parity with the owning construc
     for (&lhs, 0..) |*x, i| x.* = @floatFromInt(@as(i32, @intCast(i % 7)) - 3);
     var out_owned: [2 * n]f32 = undefined;
     var out_borrowed: [2 * n]f32 = undefined;
-    quant.matmulTQ2_0F32RhsRange(&out_owned, &lhs, &owned, 2, n, 0, 2);
-    quant.matmulTQ2_0F32RhsRange(&out_borrowed, &lhs, &borrowed, 2, n, 0, 2);
+    quant.ternary.matmulTQ2_0F32RhsRange(&out_owned, &lhs, &owned, 2, n, 0, 2);
+    quant.ternary.matmulTQ2_0F32RhsRange(&out_borrowed, &lhs, &borrowed, 2, n, 0, 2);
     try std.testing.expectEqualSlices(f32, &out_owned, &out_borrowed);
 
     // Length validation still applies to borrowed views.
     try std.testing.expectError(
-        quant.QuantizedFormatError.InvalidQuantizedLength,
-        quant.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n + 1, owned.rows.blocks),
+        quant.types.QuantizedFormatError.InvalidQuantizedLength,
+        quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n + 1, owned.rows.blocks),
     );
 }
 

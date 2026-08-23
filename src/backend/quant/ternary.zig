@@ -24,43 +24,15 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const types_mod = @import("types.zig");
+const types = @import("types.zig");
 const common = @import("common.zig");
 
 const Allocator = std.mem.Allocator;
 
-const BlockTQ2_0 = types_mod.BlockTQ2_0;
-const BlockTQ2_0x4 = types_mod.BlockTQ2_0x4;
-const BlockTQ2_0Foldedx4 = types_mod.BlockTQ2_0Foldedx4;
-const BlockTQ2_0Folded = types_mod.BlockTQ2_0Folded;
-const BlockQ2_0 = types_mod.BlockQ2_0;
-const BlockQ8_0 = types_mod.BlockQ8_0;
-const BlockQ8_K = types_mod.BlockQ8_K;
-const QuantizedFormatError = types_mod.QuantizedFormatError;
-const QuantizedMatmulRhsTQ2_0 = types_mod.QuantizedMatmulRhsTQ2_0;
-const QuantizedMatmulRhsQ2_0 = types_mod.QuantizedMatmulRhsQ2_0;
-const checkedProduct = types_mod.checkedProduct;
-const q2_0_block_size = types_mod.q2_0_block_size;
-const q8_0_block_size = types_mod.q8_0_block_size;
-const qk_k_block_size = types_mod.qk_k_block_size;
+const BlockTQ2_0 = types.BlockTQ2_0;
 
-const QKV4f32 = common.QKV4f32;
 const QKV4i32 = common.QKV4i32;
-const QKV8i32 = common.QKV8i32;
-const QKV16i8 = common.QKV16i8;
-const QKV16u8 = common.QKV16u8;
-const QKV32i8 = common.QKV32i8;
 const QKV32u8 = common.QKV32u8;
-const dpbusdI32x8 = common.dpbusdI32x8;
-const f16BitsToF32 = common.f16BitsToF32;
-const f32ToF16Bits = common.f32ToF16Bits;
-const has_x86_vnni_ymm = common.has_x86_vnni_ymm;
-const maddubsDotGroupsI32x8 = common.maddubsDotGroupsI32x8;
-const roundHalfAwayFromZero = common.roundHalfAwayFromZero;
-const sdotI8x16 = common.sdotI8x16;
-const sdotI8x16Lane = common.sdotI8x16Lane;
-const q4LowNibbleI8 = common.q4LowNibbleI8;
-const q4HighNibbleI8 = common.q4HighNibbleI8;
 
 /// Weight rows processed together per tile step: the four columns share every
 /// activation vector load and the per-block bsum total.
@@ -69,8 +41,8 @@ pub const ternary_col_block: usize = 4;
 // ---------------- encode / decode ----------------
 
 fn tq2_0BlockCount(len: usize) !usize {
-    if (len == 0 or len % qk_k_block_size != 0) return QuantizedFormatError.InvalidQuantizedLength;
-    return len / qk_k_block_size;
+    if (len == 0 or len % types.qk_k_block_size != 0) return types.QuantizedFormatError.InvalidQuantizedLength;
+    return len / types.qk_k_block_size;
 }
 
 /// ggml quantize_row_tq2_0 parity: per-block absmax d (fp16), crumbs store
@@ -78,16 +50,16 @@ fn tq2_0BlockCount(len: usize) !usize {
 /// of byte m (group 0 -> qs[0..32], group 1 -> qs[32..64]).
 pub fn quantizeRowTQ2_0Into(dst: []BlockTQ2_0, src: []const f32) !void {
     const block_count = try tq2_0BlockCount(src.len);
-    if (dst.len != block_count) return QuantizedFormatError.InvalidQuantizedLength;
+    if (dst.len != block_count) return types.QuantizedFormatError.InvalidQuantizedLength;
 
     for (dst, 0..) |*block, block_index| {
-        const x = src[block_index * qk_k_block_size ..][0..qk_k_block_size];
+        const x = src[block_index * types.qk_k_block_size ..][0..types.qk_k_block_size];
         var amax: f32 = 0;
         for (x) |v| amax = @max(amax, @abs(v));
 
         const d = amax;
         const id: f32 = if (d != 0) 1.0 / d else 0.0;
-        block.d = f32ToF16Bits(d);
+        block.d = common.f32ToF16Bits(d);
         encodeCrumbs(block, x, id);
     }
 }
@@ -107,18 +79,18 @@ pub fn ternaryAbsmeanScale(src: []const f32) f32 {
 /// standalone TQ2_0 (dequantize/matmul need no side channel).
 pub fn quantizeRowTQ2_0ScaledInto(dst: []BlockTQ2_0, src: []const f32, d: f32) !void {
     const block_count = try tq2_0BlockCount(src.len);
-    if (dst.len != block_count) return QuantizedFormatError.InvalidQuantizedLength;
-    if (!(d > 0)) return QuantizedFormatError.InvalidQuantizedLength;
+    if (dst.len != block_count) return types.QuantizedFormatError.InvalidQuantizedLength;
+    if (!(d > 0)) return types.QuantizedFormatError.InvalidQuantizedLength;
 
     const id: f32 = 1.0 / d;
     for (dst, 0..) |*block, block_index| {
-        const x = src[block_index * qk_k_block_size ..][0..qk_k_block_size];
-        block.d = f32ToF16Bits(d);
+        const x = src[block_index * types.qk_k_block_size ..][0..types.qk_k_block_size];
+        block.d = common.f32ToF16Bits(d);
         encodeCrumbs(block, x, id);
     }
 }
 
-fn encodeCrumbs(block: *BlockTQ2_0, x: *const [qk_k_block_size]f32, id: f32) void {
+fn encodeCrumbs(block: *BlockTQ2_0, x: *const [types.qk_k_block_size]f32, id: f32) void {
     for (0..2) |group| {
         const base = group * 128;
         for (0..32) |m| {
@@ -133,7 +105,7 @@ fn encodeCrumbs(block: *BlockTQ2_0, x: *const [qk_k_block_size]f32, id: f32) voi
                 // |round(x*id)| <= 1, so the clamp never fires for them, and
                 // the round-CLIP of the explicit-scale variant is realized by
                 // the same clamp.
-                const rounded = roundHalfAwayFromZero(x[base + n * 32 + m] * id);
+                const rounded = common.roundHalfAwayFromZero(x[base + n * 32 + m] * id);
                 const bounded: f32 = if (std.math.isNan(rounded)) 0.0 else @min(1.0, @max(-1.0, rounded));
                 const xi: i32 = @intFromFloat(bounded);
                 q += @as(u8, @intCast((xi + 1) & 3)) << (2 * n);
@@ -148,9 +120,9 @@ pub fn quantizedMatmulRhsTQ2_0FromBlocks(
     k: usize,
     n: usize,
     blocks: []const BlockTQ2_0,
-) !QuantizedMatmulRhsTQ2_0 {
+) !types.QuantizedMatmulRhsTQ2_0 {
     const blocks_per_row = try tq2_0BlockCount(k);
-    if (blocks.len != try checkedProduct(n, blocks_per_row)) return QuantizedFormatError.InvalidQuantizedLength;
+    if (blocks.len != try types.checkedProduct(n, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
     const owned = try allocator.dupe(BlockTQ2_0, blocks);
     return .{
         .rows = .{
@@ -174,9 +146,9 @@ pub fn quantizedMatmulRhsTQ2_0FromBorrowedBlocks(
     k: usize,
     n: usize,
     blocks: []BlockTQ2_0,
-) !QuantizedMatmulRhsTQ2_0 {
+) !types.QuantizedMatmulRhsTQ2_0 {
     const blocks_per_row = try tq2_0BlockCount(k);
-    if (blocks.len != try checkedProduct(n, blocks_per_row)) return QuantizedFormatError.InvalidQuantizedLength;
+    if (blocks.len != try types.checkedProduct(n, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
     return .{
         .rows = .{
             .allocator = null,
@@ -197,7 +169,7 @@ pub fn quantizedMatmulRhsTQ2_0FromF32(
     k: usize,
     n: usize,
     weights: []const f32,
-) !QuantizedMatmulRhsTQ2_0 {
+) !types.QuantizedMatmulRhsTQ2_0 {
     return rhsFromF32(allocator, k, n, weights, null);
 }
 
@@ -208,13 +180,13 @@ pub fn quantizedMatmulRhsTQ2_0FromF32Absmean(
     k: usize,
     n: usize,
     weights: []const f32,
-) !QuantizedMatmulRhsTQ2_0 {
+) !types.QuantizedMatmulRhsTQ2_0 {
     return rhsFromF32(allocator, k, n, weights, ternaryAbsmeanScale(weights));
 }
 
-fn rhsFromF32(allocator: Allocator, k: usize, n: usize, weights: []const f32, scale: ?f32) !QuantizedMatmulRhsTQ2_0 {
+fn rhsFromF32(allocator: Allocator, k: usize, n: usize, weights: []const f32, scale: ?f32) !types.QuantizedMatmulRhsTQ2_0 {
     const blocks_per_row = try tq2_0BlockCount(k);
-    if (weights.len != try checkedProduct(n, k)) return QuantizedFormatError.InvalidQuantizedLength;
+    if (weights.len != try types.checkedProduct(n, k)) return types.QuantizedFormatError.InvalidQuantizedLength;
     const blocks = try allocator.alloc(BlockTQ2_0, n * blocks_per_row);
     errdefer allocator.free(blocks);
     for (0..n) |row| {
@@ -241,9 +213,9 @@ fn rhsFromF32(allocator: Allocator, k: usize, n: usize, weights: []const f32, sc
 
 // ---------------- int8 flagship: block dots ----------------
 
-inline fn crumb16(q: QKV16u8, comptime lane: usize) QKV16i8 {
+inline fn crumb16(q: common.QKV16u8, comptime lane: usize) common.QKV16i8 {
     const shift: @Vector(16, u3) = @splat(2 * lane);
-    return @bitCast((q >> shift) & @as(QKV16u8, @splat(3)));
+    return @bitCast((q >> shift) & @as(common.QKV16u8, @splat(3)));
 }
 
 /// Lane `lane`'s crumbs left IN PLACE at bit position 2*lane — one AND
@@ -252,10 +224,10 @@ inline fn crumb16(q: QKV16u8, comptime lane: usize) QKV16i8 {
 /// `4^lane * dot(crumbs, act)` exactly; the caller divides the BLOCK
 /// accumulator once with an arithmetic shift (exact — every term carries
 /// the same power-of-4 factor). Halves the extraction cost of `crumb16`.
-inline fn crumb16InPlace(q: QKV16u8, comptime lane: usize) QKV16i8 {
+inline fn crumb16InPlace(q: common.QKV16u8, comptime lane: usize) common.QKV16i8 {
     if (lane == 3) return @bitCast(q >> @as(@Vector(16, u3), @splat(6)));
     const mask: u8 = 0x03 << (2 * lane);
-    return @bitCast(q & @as(QKV16u8, @splat(mask)));
+    return @bitCast(q & @as(common.QKV16u8, @splat(mask)));
 }
 
 inline fn crumb32(q: QKV32u8, comptime lane: usize) QKV32u8 {
@@ -263,13 +235,13 @@ inline fn crumb32(q: QKV32u8, comptime lane: usize) QKV32u8 {
     return (q >> shift) & @as(QKV32u8, @splat(3));
 }
 
-inline fn dotGroups32(acc: QKV8i32, codes: QKV32u8, a: QKV32i8) QKV8i32 {
-    if (comptime has_x86_vnni_ymm) return dpbusdI32x8(acc, codes, a);
-    return maddubsDotGroupsI32x8(acc, codes, a);
+inline fn dotGroups32(acc: common.QKV8i32, codes: QKV32u8, a: common.QKV32i8) common.QKV8i32 {
+    if (comptime common.has_x86_vnni_ymm) return common.dpbusdI32x8(acc, codes, a);
+    return common.maddubsDotGroupsI32x8(acc, codes, a);
 }
 
 /// sum over the 16 per-16-element activation sums = sum(a) for the block.
-inline fn blockBsumTotal(a: *const BlockQ8_K) i32 {
+inline fn blockBsumTotal(a: *const types.BlockQ8_K) i32 {
     const sums: @Vector(16, i16) = a.bsums;
     return @reduce(.Add, @as(@Vector(16, i32), sums));
 }
@@ -281,7 +253,7 @@ inline fn blockBsumTotal(a: *const BlockQ8_K) i32 {
 /// their portable twins. Every arm accumulates the exact i32 (max |isum| is
 /// 256*2*127 = 65024), so all arms and widths agree bitwise — the fused
 /// 4-column tile and the width-1 tail take the same body.
-inline fn blockCodeDotW(comptime width: usize, w: [width]*const BlockTQ2_0, a: *const BlockQ8_K) [width]i32 {
+inline fn blockCodeDotW(comptime width: usize, w: [width]*const BlockTQ2_0, a: *const types.BlockQ8_K) [width]i32 {
     if (comptime builtin.cpu.arch == .aarch64) {
         // In-place crumbs (see `crumb16InPlace`): lanes 0 and 3 carry no
         // factor and share an accumulator; lanes 1 and 2 accumulate 4x and
@@ -290,23 +262,23 @@ inline fn blockCodeDotW(comptime width: usize, w: [width]*const BlockTQ2_0, a: *
         var acc1: [width]QKV4i32 = @splat(@splat(0));
         var acc2: [width]QKV4i32 = @splat(@splat(0));
         inline for ([_]usize{ 0, 32 }) |j| {
-            var q0: [width]QKV16u8 = undefined;
-            var q1: [width]QKV16u8 = undefined;
+            var q0: [width]common.QKV16u8 = undefined;
+            var q1: [width]common.QKV16u8 = undefined;
             inline for (0..width) |ci| {
                 q0[ci] = w[ci].qs[j..][0..16].*;
                 q1[ci] = w[ci].qs[j + 16 ..][0..16].*;
             }
             inline for (0..4) |lane| {
-                const a0: QKV16i8 = a.qs[j * 4 + lane * 32 ..][0..16].*;
-                const a1: QKV16i8 = a.qs[j * 4 + lane * 32 + 16 ..][0..16].*;
+                const a0: common.QKV16i8 = a.qs[j * 4 + lane * 32 ..][0..16].*;
+                const a1: common.QKV16i8 = a.qs[j * 4 + lane * 32 + 16 ..][0..16].*;
                 inline for (0..width) |ci| {
                     const dst = switch (lane) {
                         0, 3 => &acc0[ci],
                         1 => &acc1[ci],
                         else => &acc2[ci],
                     };
-                    dst.* = sdotI8x16(dst.*, crumb16InPlace(q0[ci], lane), a0);
-                    dst.* = sdotI8x16(dst.*, crumb16InPlace(q1[ci], lane), a1);
+                    dst.* = common.sdotI8x16(dst.*, crumb16InPlace(q0[ci], lane), a0);
+                    dst.* = common.sdotI8x16(dst.*, crumb16InPlace(q1[ci], lane), a1);
                 }
             }
         }
@@ -319,12 +291,12 @@ inline fn blockCodeDotW(comptime width: usize, w: [width]*const BlockTQ2_0, a: *
         }
         return out;
     }
-    var acc: [width]QKV8i32 = @splat(@splat(0));
+    var acc: [width]common.QKV8i32 = @splat(@splat(0));
     inline for ([_]usize{ 0, 32 }) |j| {
         var g: [width]QKV32u8 = undefined;
         inline for (0..width) |ci| g[ci] = w[ci].qs[j..][0..32].*;
         inline for (0..4) |lane| {
-            const av: QKV32i8 = a.qs[j * 4 + lane * 32 ..][0..32].*;
+            const av: common.QKV32i8 = a.qs[j * 4 + lane * 32 ..][0..32].*;
             inline for (0..width) |ci| {
                 acc[ci] = dotGroups32(acc[ci], crumb32(g[ci], lane), av);
             }
@@ -351,8 +323,8 @@ const bsum_cache_blocks: usize = 256;
 /// only qs, so stale/foreign bsums silently corrupt results.
 pub fn matmulTQ2_0RhsTile(
     out: []f32,
-    lhs_blocks: []const BlockQ8_K,
-    rhs: *const QuantizedMatmulRhsTQ2_0,
+    lhs_blocks: []const types.BlockQ8_K,
+    rhs: *const types.QuantizedMatmulRhsTQ2_0,
     n: usize,
     r0: usize,
     r1: usize,
@@ -382,7 +354,7 @@ pub fn matmulTQ2_0RhsTile(
                 const dots = blockCodeDotW(ternary_col_block, w, a);
                 inline for (0..ternary_col_block) |ci| {
                     const isum = dots[ci] - bsum;
-                    sums[ci] += f16BitsToF32(w[ci].d) * a.d * @as(f32, @floatFromInt(isum));
+                    sums[ci] += common.f16BitsToF32(w[ci].d) * a.d * @as(f32, @floatFromInt(isum));
                 }
             }
             inline for (0..ternary_col_block) |ci| orow[c + ci] = sums[ci];
@@ -394,7 +366,7 @@ pub fn matmulTQ2_0RhsTile(
                 const bsum = if (cached) bsum_cache[bi] else blockBsumTotal(a);
                 const dots = blockCodeDotW(1, .{&wcol[bi]}, a);
                 const isum = dots[0] - bsum;
-                sum += f16BitsToF32(wcol[bi].d) * a.d * @as(f32, @floatFromInt(isum));
+                sum += common.f16BitsToF32(wcol[bi].d) * a.d * @as(f32, @floatFromInt(isum));
             }
             orow[c] = sum;
         }
@@ -409,12 +381,12 @@ pub const matmulTQ2_0RhsRange = common.RangeFromTile(matmulTQ2_0RhsTile);
 /// (group-major, k-blocks contiguous within a group — the Q8_0x4 layout
 /// discipline). Same bytes, no padding: `n % 4 != 0` is an error and odd
 /// tails stay on the unpacked kernels. Caller frees the slice.
-pub fn packMatmulRhsTQ2_0x4(allocator: Allocator, rhs: *const QuantizedMatmulRhsTQ2_0) ![]BlockTQ2_0x4 {
+pub fn packMatmulRhsTQ2_0x4(allocator: Allocator, rhs: *const types.QuantizedMatmulRhsTQ2_0) ![]types.BlockTQ2_0x4 {
     const tensor = @import("../../tensor.zig");
     const n = rhs.n;
     if (n % 4 != 0) return tensor.TensorError.InvalidShape;
     const blocks_per_row = rhs.rows.blocks_per_row;
-    const out = try allocator.alloc(BlockTQ2_0x4, (n / 4) * blocks_per_row);
+    const out = try allocator.alloc(types.BlockTQ2_0x4, (n / 4) * blocks_per_row);
     errdefer allocator.free(out);
     for (0..n / 4) |g| {
         var cols: [4][]const BlockTQ2_0 = undefined;
@@ -448,8 +420,8 @@ pub fn packMatmulRhsTQ2_0x4(allocator: Allocator, rhs: *const QuantizedMatmulRhs
 /// portable by-element twin (bitwise identical, untuned).
 pub fn matmulTQ2_0X4RhsRange(
     out: []f32,
-    lhs_blocks: []const BlockQ8_K,
-    packed_groups: []const BlockTQ2_0x4,
+    lhs_blocks: []const types.BlockQ8_K,
+    packed_groups: []const types.BlockTQ2_0x4,
     blocks_per_row: usize,
     n: usize,
     r0: usize,
@@ -463,8 +435,8 @@ pub fn matmulTQ2_0X4RhsRange(
 /// finer-grained addressing).
 pub fn matmulTQ2_0X4RhsTile(
     out: []f32,
-    lhs_blocks: []const BlockQ8_K,
-    packed_groups: []const BlockTQ2_0x4,
+    lhs_blocks: []const types.BlockQ8_K,
+    packed_groups: []const types.BlockTQ2_0x4,
     blocks_per_row: usize,
     n: usize,
     r0: usize,
@@ -482,8 +454,8 @@ pub fn matmulTQ2_0X4RhsTile(
 /// traffic. Bitwise equal to that two-pass form by construction.
 pub fn matmulTQ2_0X4RhsTileAcc(
     out: []f32,
-    lhs_blocks: []const BlockQ8_K,
-    packed_groups: []const BlockTQ2_0x4,
+    lhs_blocks: []const types.BlockQ8_K,
+    packed_groups: []const types.BlockTQ2_0x4,
     blocks_per_row: usize,
     n: usize,
     r0: usize,
@@ -514,18 +486,18 @@ pub fn matmulTQ2_0X4RhsTileAcc(
 /// portable) accumulates 8 lanes = the same 4 columns at two k-groups,
 /// folded 8->4 once per block (exact i32). Same four-accumulator
 /// independence, mirroring the Q4_Kx8 x86 shape.
-inline fn x4BlockDot(w: *const BlockTQ2_0x4, a: *const BlockQ8_K) QKV4i32 {
+inline fn x4BlockDot(w: *const types.BlockTQ2_0x4, a: *const types.BlockQ8_K) QKV4i32 {
     if (comptime builtin.cpu.arch == .aarch64) {
         var accs: [4]QKV4i32 = @splat(@splat(0));
         inline for ([_]usize{ 0, 128 }) |h| {
-            var wv: [8]QKV16u8 = undefined;
+            var wv: [8]common.QKV16u8 = undefined;
             inline for (0..8) |fg| wv[fg] = w.qs[h + fg * 16 ..][0..16].*;
             inline for (0..4) |lane| {
-                const a0: QKV16i8 = a.qs[h + lane * 32 ..][0..16].*;
-                const a1: QKV16i8 = a.qs[h + lane * 32 + 16 ..][0..16].*;
+                const a0: common.QKV16i8 = a.qs[h + lane * 32 ..][0..16].*;
+                const a1: common.QKV16i8 = a.qs[h + lane * 32 + 16 ..][0..16].*;
                 inline for (0..4) |fg| {
-                    accs[lane] = sdotI8x16Lane(fg, accs[lane], crumb16InPlace(wv[fg], lane), a0);
-                    accs[lane] = sdotI8x16Lane(fg, accs[lane], crumb16InPlace(wv[fg + 4], lane), a1);
+                    accs[lane] = common.sdotI8x16Lane(fg, accs[lane], crumb16InPlace(wv[fg], lane), a0);
+                    accs[lane] = common.sdotI8x16Lane(fg, accs[lane], crumb16InPlace(wv[fg + 4], lane), a1);
                 }
             }
         }
@@ -537,13 +509,13 @@ inline fn x4BlockDot(w: *const BlockTQ2_0x4, a: *const BlockQ8_K) QKV4i32 {
         }
         return (accs[0] + accs[1]) + (accs[2] + accs[3]);
     }
-    var accs: [4]QKV8i32 = @splat(@splat(0));
+    var accs: [4]common.QKV8i32 = @splat(@splat(0));
     inline for ([_]usize{ 0, 128 }) |h| {
         inline for (0..4) |fg2| { // k-group pairs (0,1),(2,3),(4,5),(6,7)
             const wv: QKV32u8 = w.qs[h + fg2 * 32 ..][0..32].*;
             inline for (0..4) |lane| {
                 const pair: @Vector(2, u32) = @bitCast(a.qs[h + lane * 32 + fg2 * 8 ..][0..8].*);
-                const act: QKV32i8 = @bitCast(@shuffle(u32, pair, undefined, [8]i32{ 0, 0, 0, 0, 1, 1, 1, 1 }));
+                const act: common.QKV32i8 = @bitCast(@shuffle(u32, pair, undefined, [8]i32{ 0, 0, 0, 0, 1, 1, 1, 1 }));
                 accs[lane] = dotGroups32(accs[lane], crumb32(wv, lane), act);
             }
         }
@@ -595,10 +567,10 @@ inline fn x4BlockDot(w: *const BlockTQ2_0x4, a: *const BlockQ8_K) QKV4i32 {
 /// coarse plane's is discarded (tie contract). Caller frees the slice.
 pub fn packMatmulRhsTQ2_0Foldedx4(
     allocator: Allocator,
-    plane1: *const QuantizedMatmulRhsTQ2_0,
-    plane2: *const QuantizedMatmulRhsTQ2_0,
-) ![]BlockTQ2_0Foldedx4 {
-    const out = try allocator.alloc(BlockTQ2_0Foldedx4, (plane1.n / 4) * plane1.rows.blocks_per_row);
+    plane1: *const types.QuantizedMatmulRhsTQ2_0,
+    plane2: *const types.QuantizedMatmulRhsTQ2_0,
+) ![]types.BlockTQ2_0Foldedx4 {
+    const out = try allocator.alloc(types.BlockTQ2_0Foldedx4, (plane1.n / 4) * plane1.rows.blocks_per_row);
     errdefer allocator.free(out);
     try packMatmulRhsTQ2_0Foldedx4Into(out, plane1, plane2);
     return out;
@@ -608,9 +580,9 @@ pub fn packMatmulRhsTQ2_0Foldedx4(
 /// and expert-store slab folds, where one big buffer holds every expert's
 /// pack. `dst.len` must be exactly `(n / 4) * blocks_per_row`.
 pub fn packMatmulRhsTQ2_0Foldedx4Into(
-    out: []BlockTQ2_0Foldedx4,
-    plane1: *const QuantizedMatmulRhsTQ2_0,
-    plane2: *const QuantizedMatmulRhsTQ2_0,
+    out: []types.BlockTQ2_0Foldedx4,
+    plane1: *const types.QuantizedMatmulRhsTQ2_0,
+    plane2: *const types.QuantizedMatmulRhsTQ2_0,
 ) !void {
     const tensor = @import("../../tensor.zig");
     const n = plane1.n;
@@ -663,13 +635,13 @@ inline fn foldedCode(b1: *const BlockTQ2_0, b2: *const BlockTQ2_0, e: usize) u8 
 /// re-fold. Caller frees.
 pub fn packMatmulRhsTQ2_0FoldedRowsFromX4(
     allocator: Allocator,
-    pack: []const BlockTQ2_0Foldedx4,
+    pack: []const types.BlockTQ2_0Foldedx4,
     n: usize,
     blocks_per_row: usize,
-) ![]BlockTQ2_0Folded {
+) ![]types.BlockTQ2_0Folded {
     const tensor = @import("../../tensor.zig");
     if (n % 4 != 0 or pack.len != (n / 4) * blocks_per_row) return tensor.TensorError.InvalidShape;
-    const out = try allocator.alloc(BlockTQ2_0Folded, n * blocks_per_row);
+    const out = try allocator.alloc(types.BlockTQ2_0Folded, n * blocks_per_row);
     errdefer allocator.free(out);
     for (0..n / 4) |g| {
         for (0..blocks_per_row) |bi| {
@@ -695,15 +667,15 @@ pub fn packMatmulRhsTQ2_0FoldedRowsFromX4(
 /// contract as the x4 fold. Caller frees.
 pub fn packMatmulRhsTQ2_0FoldedRows(
     allocator: Allocator,
-    plane1: *const QuantizedMatmulRhsTQ2_0,
-    plane2: *const QuantizedMatmulRhsTQ2_0,
-) ![]BlockTQ2_0Folded {
+    plane1: *const types.QuantizedMatmulRhsTQ2_0,
+    plane2: *const types.QuantizedMatmulRhsTQ2_0,
+) ![]types.BlockTQ2_0Folded {
     const tensor = @import("../../tensor.zig");
     const n = plane1.n;
     if (plane2.n != n or plane2.rows.blocks_per_row != plane1.rows.blocks_per_row)
         return tensor.TensorError.InvalidShape;
     const blocks_per_row = plane1.rows.blocks_per_row;
-    const out = try allocator.alloc(BlockTQ2_0Folded, n * blocks_per_row);
+    const out = try allocator.alloc(types.BlockTQ2_0Folded, n * blocks_per_row);
     errdefer allocator.free(out);
     for (0..n) |row| {
         const b1s = plane1.columnBlocks(row);
@@ -726,21 +698,21 @@ pub fn packMatmulRhsTQ2_0FoldedRows(
 /// One folded block-group dot: i32 lanes are the four columns' exact
 /// combined-code sums. Same accumulator discipline as x4BlockDot (four
 /// independent chains — here per dword-group).
-inline fn foldedBlockDot(w: *const BlockTQ2_0Foldedx4, a: *const BlockQ8_K) QKV4i32 {
+inline fn foldedBlockDot(w: *const types.BlockTQ2_0Foldedx4, a: *const types.BlockQ8_K) QKV4i32 {
     if (comptime builtin.cpu.arch == .aarch64) {
         var accs: [4]QKV4i32 = @splat(@splat(0));
         inline for (0..8) |sub| {
-            const a_lo: QKV16i8 = a.qs[sub * 32 ..][0..16].*;
-            const a_hi: QKV16i8 = a.qs[sub * 32 + 16 ..][0..16].*;
+            const a_lo: common.QKV16i8 = a.qs[sub * 32 ..][0..16].*;
+            const a_hi: common.QKV16i8 = a.qs[sub * 32 + 16 ..][0..16].*;
             inline for (0..4) |jg| {
-                const v: QKV16u8 = w.qs[sub * 64 + jg * 16 ..][0..16].*;
-                accs[jg] = sdotI8x16Lane(jg, accs[jg], q4LowNibbleI8(v), a_lo);
-                accs[jg] = sdotI8x16Lane(jg, accs[jg], q4HighNibbleI8(v), a_hi);
+                const v: common.QKV16u8 = w.qs[sub * 64 + jg * 16 ..][0..16].*;
+                accs[jg] = common.sdotI8x16Lane(jg, accs[jg], common.q4LowNibbleI8(v), a_lo);
+                accs[jg] = common.sdotI8x16Lane(jg, accs[jg], common.q4HighNibbleI8(v), a_hi);
             }
         }
         return (accs[0] + accs[1]) + (accs[2] + accs[3]);
     }
-    var accs: [4]QKV8i32 = @splat(@splat(0));
+    var accs: [4]common.QKV8i32 = @splat(@splat(0));
     inline for (0..8) |sub| {
         inline for (0..2) |jg2| {
             const wv: QKV32u8 = w.qs[sub * 64 + jg2 * 32 ..][0..32].*;
@@ -748,8 +720,8 @@ inline fn foldedBlockDot(w: *const BlockTQ2_0Foldedx4, a: *const BlockQ8_K) QKV4
             const hi: QKV32u8 = wv >> @as(QKV32u8, @splat(4));
             const p_lo: @Vector(2, u32) = @bitCast(a.qs[sub * 32 + jg2 * 8 ..][0..8].*);
             const p_hi: @Vector(2, u32) = @bitCast(a.qs[sub * 32 + 16 + jg2 * 8 ..][0..8].*);
-            const act_lo: QKV32i8 = @bitCast(@shuffle(u32, p_lo, undefined, [8]i32{ 0, 0, 0, 0, 1, 1, 1, 1 }));
-            const act_hi: QKV32i8 = @bitCast(@shuffle(u32, p_hi, undefined, [8]i32{ 0, 0, 0, 0, 1, 1, 1, 1 }));
+            const act_lo: common.QKV32i8 = @bitCast(@shuffle(u32, p_lo, undefined, [8]i32{ 0, 0, 0, 0, 1, 1, 1, 1 }));
+            const act_hi: common.QKV32i8 = @bitCast(@shuffle(u32, p_hi, undefined, [8]i32{ 0, 0, 0, 0, 1, 1, 1, 1 }));
             accs[jg2 * 2] = dotGroups32(accs[jg2 * 2], lo, act_lo);
             accs[jg2 * 2 + 1] = dotGroups32(accs[jg2 * 2 + 1], hi, act_hi);
         }
@@ -766,19 +738,19 @@ inline fn foldedBlockDot(w: *const BlockTQ2_0Foldedx4, a: *const BlockQ8_K) QKV4
 /// One folded block's acc-independent contribution: integer dot minus the
 /// bsum offset, times the four column scales and the activation scale —
 /// the exact expression the serial loop added per block.
-inline fn foldedBlockContribution(w: *const BlockTQ2_0Foldedx4, a: *const BlockQ8_K, bsum: i32) @Vector(4, f32) {
+inline fn foldedBlockContribution(w: *const types.BlockTQ2_0Foldedx4, a: *const types.BlockQ8_K, bsum: i32) @Vector(4, f32) {
     const acc = foldedBlockDot(w, a);
     const isum = acc - @as(QKV4i32, @splat(4 * bsum));
     var sv: @Vector(4, f32) = undefined;
-    inline for (0..4) |ci| sv[ci] = f16BitsToF32(w.d[ci]);
+    inline for (0..4) |ci| sv[ci] = common.f16BitsToF32(w.d[ci]);
     return sv * @as(@Vector(4, f32), @splat(a.d)) * @as(@Vector(4, f32), @floatFromInt(isum));
 }
 
 /// Folded tile: rows [r0,r1), columns [c0,c1) on 4-column boundaries.
 pub fn matmulTQ2_0FoldedX4RhsTile(
     out: []f32,
-    lhs_blocks: []const BlockQ8_K,
-    folded: []const BlockTQ2_0Foldedx4,
+    lhs_blocks: []const types.BlockQ8_K,
+    folded: []const types.BlockTQ2_0Foldedx4,
     blocks_per_row: usize,
     n: usize,
     r0: usize,
@@ -820,8 +792,8 @@ pub fn matmulTQ2_0FoldedX4RhsTile(
 
 pub fn matmulTQ2_0FoldedX4RhsRange(
     out: []f32,
-    lhs_blocks: []const BlockQ8_K,
-    folded: []const BlockTQ2_0Foldedx4,
+    lhs_blocks: []const types.BlockQ8_K,
+    folded: []const types.BlockTQ2_0Foldedx4,
     blocks_per_row: usize,
     n: usize,
     r0: usize,
@@ -838,7 +810,7 @@ pub fn matmulTQ2_0FoldedX4RhsRange(
 /// which multiplies exact f32 activations instead of Q8_K-quantized ones.
 pub fn dequantizeFoldedx4ColumnInto(
     dst: []f32,
-    folded: []const BlockTQ2_0Foldedx4,
+    folded: []const types.BlockTQ2_0Foldedx4,
     blocks_per_row: usize,
     col: usize,
     bi0: usize,
@@ -849,7 +821,7 @@ pub fn dequantizeFoldedx4ColumnInto(
     const nb = dst.len / 256;
     for (0..nb) |b| {
         const blk = &folded[group * blocks_per_row + bi0 + b];
-        const scale = f16BitsToF32(blk.d[ci]);
+        const scale = common.f16BitsToF32(blk.d[ci]);
         const out = dst[b * 256 ..][0..256];
         for (0..8) |sub| {
             for (0..4) |jg| {
@@ -867,8 +839,8 @@ pub fn dequantizeFoldedx4ColumnInto(
 fn x4Tile(
     comptime accumulate: bool,
     out: []f32,
-    lhs_blocks: []const BlockQ8_K,
-    packed_groups: []const BlockTQ2_0x4,
+    lhs_blocks: []const types.BlockQ8_K,
+    packed_groups: []const types.BlockTQ2_0x4,
     blocks_per_row: usize,
     n: usize,
     r0: usize,
@@ -896,7 +868,7 @@ fn x4Tile(
                 const acc = x4BlockDot(w, a);
                 const isum = acc - @as(QKV4i32, @splat(bsum));
                 var dv: @Vector(4, f32) = undefined;
-                inline for (0..4) |ci| dv[ci] = f16BitsToF32(w.d[ci]);
+                inline for (0..4) |ci| dv[ci] = common.f16BitsToF32(w.d[ci]);
                 sums += dv * @as(@Vector(4, f32), @splat(a.d)) * @as(@Vector(4, f32), @floatFromInt(isum));
             }
             if (accumulate) {
@@ -927,7 +899,7 @@ fn x4Tile(
 /// Unsigned codes for 16 consecutive elements of one Q2_0 block: bytes
 /// `first_byte..first_byte+4` each replicated 4x (tbl/pshufb), lanes shifted
 /// by {0,2,4,6} and masked to 2 bits.
-inline fn q2_0Codes16(qs: QKV32u8, comptime first_byte: usize) QKV16u8 {
+inline fn q2_0Codes16(qs: QKV32u8, comptime first_byte: usize) common.QKV16u8 {
     const mask = comptime blk: {
         @setEvalBranchQuota(100_000);
         var idx: [16]i32 = undefined;
@@ -940,8 +912,8 @@ inline fn q2_0Codes16(qs: QKV32u8, comptime first_byte: usize) QKV16u8 {
         for (0..16) |lane| sv[lane] = @intCast((lane % 4) * 2);
         break :blk sv;
     };
-    const repl: QKV16u8 = @shuffle(u8, qs, undefined, @as(@Vector(16, i32), mask));
-    return (repl >> shifts) & @as(QKV16u8, @splat(3));
+    const repl: common.QKV16u8 = @shuffle(u8, qs, undefined, @as(@Vector(16, i32), mask));
+    return (repl >> shifts) & @as(common.QKV16u8, @splat(3));
 }
 
 /// 32-lane twin of `q2_0Codes16` (bytes `first_byte..first_byte+8`).
@@ -963,8 +935,8 @@ inline fn q2_0Codes32(qs: QKV32u8, comptime first_byte: usize) QKV32u8 {
 }
 
 /// sum(a) over one Q8_0 sub-block, exact i32.
-inline fn q8_0BlockSum(a: *const BlockQ8_0) i32 {
-    const v: QKV32i8 = a.qs;
+inline fn q8_0BlockSum(a: *const types.BlockQ8_0) i32 {
+    const v: common.QKV32i8 = a.qs;
     return @reduce(.Add, @as(@Vector(32, i32), v));
 }
 
@@ -972,7 +944,7 @@ inline fn q8_0BlockSum(a: *const BlockQ8_0) i32 {
 /// the granule shape the ISA's dot arm wants: two 16-byte vectors on aarch64
 /// (sdot), one 32-byte vector elsewhere (vpdpbusd/maddubs or portable twins).
 const Q2_0Codes = if (builtin.cpu.arch == .aarch64)
-    struct { lo: QKV16i8, hi: QKV16i8 }
+    struct { lo: common.QKV16i8, hi: common.QKV16i8 }
 else
     QKV32u8;
 
@@ -993,17 +965,17 @@ inline fn q2_0UnpackCodes(qs: QKV32u8, comptime k: usize) Q2_0Codes {
 /// (|sum(q*a)| <= 32*3*127 = 12192; maddubs pair sums <= 2*127*3 = 762, no
 /// i16 saturation) — every arm produces the exact integer, so all paths
 /// agree with cold.zig's dotQ2_0RowQ8_0 reference bitwise.
-inline fn q2_0CodeDot(codes: Q2_0Codes, a: *const BlockQ8_0) i32 {
+inline fn q2_0CodeDot(codes: Q2_0Codes, a: *const types.BlockQ8_0) i32 {
     if (comptime builtin.cpu.arch == .aarch64) {
-        const a0: QKV16i8 = a.qs[0..16].*;
-        const a1: QKV16i8 = a.qs[16..32].*;
+        const a0: common.QKV16i8 = a.qs[0..16].*;
+        const a1: common.QKV16i8 = a.qs[16..32].*;
         var acc: QKV4i32 = @splat(0);
-        acc = sdotI8x16(acc, codes.lo, a0);
-        acc = sdotI8x16(acc, codes.hi, a1);
+        acc = common.sdotI8x16(acc, codes.lo, a0);
+        acc = common.sdotI8x16(acc, codes.hi, a1);
         return @reduce(.Add, acc);
     }
-    const av: QKV32i8 = a.qs;
-    var acc: QKV8i32 = @splat(0);
+    const av: common.QKV32i8 = a.qs;
+    var acc: common.QKV8i32 = @splat(0);
     acc = dotGroups32(acc, codes, av);
     return @reduce(.Add, acc);
 }
@@ -1013,13 +985,13 @@ inline fn q2_0CodeDot(codes: Q2_0Codes, a: *const BlockQ8_0) i32 {
 /// so the product rounds identically in any lane order), unpacked with the
 /// same shuffle/shift machinery as the matmul kernels. Feeds the BLAS
 /// prefill panels, where the scalar decoder would dominate the GEMM.
-pub fn dequantizeRowQ2_0FastInto(dst: []f32, src: []const BlockQ2_0) !void {
-    if (dst.len != try checkedProduct(src.len, q2_0_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
+pub fn dequantizeRowQ2_0FastInto(dst: []f32, src: []const types.BlockQ2_0) !void {
+    if (dst.len != try types.checkedProduct(src.len, types.q2_0_block_size)) return types.QuantizedFormatError.InvalidQuantizedLength;
     for (src, 0..) |*block, block_index| {
-        const d: @Vector(32, f32) = @splat(f16BitsToF32(block.d));
+        const d: @Vector(32, f32) = @splat(common.f16BitsToF32(block.d));
         const qs: QKV32u8 = block.qs;
-        const out = dst[block_index * q2_0_block_size ..][0..q2_0_block_size];
-        inline for (0..q2_0_block_size / 32) |k| {
+        const out = dst[block_index * types.q2_0_block_size ..][0..types.q2_0_block_size];
+        inline for (0..types.q2_0_block_size / 32) |k| {
             const codes: @Vector(32, i32) = @intCast(q2_0Codes32(qs, k * 8));
             const w: @Vector(32, f32) = @floatFromInt(codes - @as(@Vector(32, i32), @splat(1)));
             out[k * 32 ..][0..32].* = w * d;
@@ -1055,8 +1027,8 @@ inline fn q2_0MicroTile(
     comptime rw: usize,
     comptime cw: usize,
     out: []f32,
-    lhs_blocks: []const BlockQ8_0,
-    rhs: *const QuantizedMatmulRhsQ2_0,
+    lhs_blocks: []const types.BlockQ8_0,
+    rhs: *const types.QuantizedMatmulRhsQ2_0,
     n: usize,
     r: usize,
     c: usize,
@@ -1064,20 +1036,20 @@ inline fn q2_0MicroTile(
     d1s: *const [q2_0_row_block_max][q2_0_bsum_cache_subs]f32,
     cached: bool,
 ) void {
-    const sub_per_block = q2_0_block_size / q8_0_block_size; // 4
+    const sub_per_block = types.q2_0_block_size / types.q8_0_block_size; // 4
     const blocks_per_row = rhs.rows.blocks_per_row;
     const sub_blocks_per_row = blocks_per_row * sub_per_block;
 
-    var wcols: [cw][]const BlockQ2_0 = undefined;
+    var wcols: [cw][]const types.BlockQ2_0 = undefined;
     inline for (0..cw) |ci| wcols[ci] = rhs.columnBlocks(c + ci);
-    var arows: [rw][]const BlockQ8_0 = undefined;
+    var arows: [rw][]const types.BlockQ8_0 = undefined;
     inline for (0..rw) |r2| arows[r2] = lhs_blocks[(r + r2) * sub_blocks_per_row ..][0..sub_blocks_per_row];
 
     var sums4: [rw][cw]@Vector(4, f32) = @splat(@splat(@splat(0)));
     var bi: usize = 0;
     while (bi < blocks_per_row) : (bi += 1) {
         var d0: [cw]f32 = undefined;
-        inline for (0..cw) |ci| d0[ci] = f16BitsToF32(wcols[ci][bi].d);
+        inline for (0..cw) |ci| d0[ci] = common.f16BitsToF32(wcols[ci][bi].d);
         // Integer phase: exact per-sub-block dots into lane k.
         var isum4: [rw][cw]@Vector(4, i32) = undefined;
         inline for (0..sub_per_block) |k| {
@@ -1100,7 +1072,7 @@ inline fn q2_0MicroTile(
                 inline for (0..sub_per_block) |k| {
                     const a = &arows[r2][bi * sub_per_block + k];
                     b4[k] = q8_0BlockSum(a);
-                    d14[k] = f16BitsToF32(a.d);
+                    d14[k] = common.f16BitsToF32(a.d);
                 }
             }
             inline for (0..cw) |ci| {
@@ -1126,15 +1098,15 @@ inline fn q2_0MicroTile(
 /// dotQ2_0RowQ8_0 / matmulQ2_0RhsRefRange reference.
 pub fn matmulQ2_0RhsTile(
     out: []f32,
-    lhs_blocks: []const BlockQ8_0,
-    rhs: *const QuantizedMatmulRhsQ2_0,
+    lhs_blocks: []const types.BlockQ8_0,
+    rhs: *const types.QuantizedMatmulRhsQ2_0,
     n: usize,
     r0: usize,
     r1: usize,
     c0: usize,
     c1: usize,
 ) void {
-    const sub_per_block = q2_0_block_size / q8_0_block_size; // 4
+    const sub_per_block = types.q2_0_block_size / types.q8_0_block_size; // 4
     const blocks_per_row = rhs.rows.blocks_per_row;
     const sub_blocks_per_row = blocks_per_row * sub_per_block;
     const cached = sub_blocks_per_row <= q2_0_bsum_cache_subs;
@@ -1149,7 +1121,7 @@ pub fn matmulQ2_0RhsTile(
                     const arow = lhs_blocks[(r + r2) * sub_blocks_per_row ..][0..sub_blocks_per_row];
                     for (arow, 0..) |*a, si| {
                         bsum_cache[r2][si] = q8_0BlockSum(a);
-                        d1_cache[r2][si] = f16BitsToF32(a.d);
+                        d1_cache[r2][si] = common.f16BitsToF32(a.d);
                     }
                 }
             }
@@ -1177,11 +1149,11 @@ pub const matmulQ2_0RhsRange = common.RangeFromTile(matmulQ2_0RhsTile);
 /// the encoders, rejected by es.addTernaryParam — reads as +1 here vs +2 on
 /// the int8 code-dot path (garbage in, differently-shaped garbage out).
 pub fn dotTQ2_0F32(wblocks: []const BlockTQ2_0, x: []const f32) f32 {
-    std.debug.assert(x.len == wblocks.len * qk_k_block_size);
+    std.debug.assert(x.len == wblocks.len * types.qk_k_block_size);
     var total: f32 = 0;
     for (wblocks, 0..) |*w, block_index| {
-        const xb = x[block_index * qk_k_block_size ..][0..qk_k_block_size];
-        var acc: QKV4f32 = @splat(0);
+        const xb = x[block_index * types.qk_k_block_size ..][0..types.qk_k_block_size];
+        var acc: common.QKV4f32 = @splat(0);
         inline for ([_]usize{ 0, 32 }) |j| {
             inline for (0..4) |lane| {
                 var m: usize = 0;
@@ -1191,14 +1163,14 @@ pub fn dotTQ2_0F32(wblocks: []const BlockTQ2_0, x: []const f32) f32 {
                     const q: @Vector(4, u32) = (qb >> shift) & @as(@Vector(4, u8), @splat(3));
                     const sgn = @select(u32, q == @as(@Vector(4, u32), @splat(0)), @as(@Vector(4, u32), @splat(0x8000_0000)), @as(@Vector(4, u32), @splat(0)));
                     const msk = @select(u32, q == @as(@Vector(4, u32), @splat(1)), @as(@Vector(4, u32), @splat(0)), @as(@Vector(4, u32), @splat(0xFFFF_FFFF)));
-                    const xv: QKV4f32 = xb[j * 4 + lane * 32 + m ..][0..4].*;
+                    const xv: common.QKV4f32 = xb[j * 4 + lane * 32 + m ..][0..4].*;
                     const bits: @Vector(4, u32) = @bitCast(xv);
-                    acc += @as(QKV4f32, @bitCast((bits ^ sgn) & msk));
+                    acc += @as(common.QKV4f32, @bitCast((bits ^ sgn) & msk));
                 }
             }
         }
         const lane_sum = (acc[0] + acc[1]) + (acc[2] + acc[3]);
-        total += f16BitsToF32(w.d) * lane_sum;
+        total += common.f16BitsToF32(w.d) * lane_sum;
     }
     return total;
 }
@@ -1207,7 +1179,7 @@ pub fn dotTQ2_0F32(wblocks: []const BlockTQ2_0, x: []const f32) f32 {
 pub fn matmulTQ2_0F32RhsTile(
     out: []f32,
     lhs: []const f32,
-    rhs: *const QuantizedMatmulRhsTQ2_0,
+    rhs: *const types.QuantizedMatmulRhsTQ2_0,
     n: usize,
     r0: usize,
     r1: usize,

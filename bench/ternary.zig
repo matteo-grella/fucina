@@ -157,11 +157,11 @@ pub fn main(init: std.process.Init) !void {
         defer allocator.free(w_vals);
         fillWeights(w_vals);
 
-        var rhs = try qm.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w_vals);
+        var rhs = try qm.ternary.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w_vals);
         defer rhs.deinit();
 
         var pack_timer = try Timer.start(io);
-        const packed_x4 = try qm.packMatmulRhsTQ2_0x4(allocator, &rhs);
+        const packed_x4 = try qm.ternary.packMatmulRhsTQ2_0x4(allocator, &rhs);
         defer allocator.free(packed_x4);
         try out.print("{s}: x4 pack {d:.1} ms (load-time, same bytes)\n", .{ shape.name, @as(f64, @floatFromInt(pack_timer.read())) / 1e6 });
 
@@ -170,19 +170,19 @@ pub fn main(init: std.process.Init) !void {
         const w2_vals = try allocator.alloc(f32, n * k);
         defer allocator.free(w2_vals);
         for (w2_vals, w_vals) |*v, s| v.* = s * 0.31 + 0.017;
-        var rhs2 = try qm.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w2_vals);
+        var rhs2 = try qm.ternary.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w2_vals);
         defer rhs2.deinit();
-        const packed_x4b = try qm.packMatmulRhsTQ2_0x4(allocator, &rhs2);
+        const packed_x4b = try qm.ternary.packMatmulRhsTQ2_0x4(allocator, &rhs2);
         defer allocator.free(packed_x4b);
-        const folded_pack = try qm.packMatmulRhsTQ2_0Foldedx4(allocator, &rhs, &rhs2);
+        const folded_pack = try qm.ternary.packMatmulRhsTQ2_0Foldedx4(allocator, &rhs, &rhs2);
         defer allocator.free(folded_pack);
 
         const q4_blocks = try allocator.alloc(BlockQ4_K, n * bpr);
         defer allocator.free(q4_blocks);
         for (0..n) |row| {
-            try qm.quantizeRowQ4_KInto(q4_blocks[row * bpr ..][0..bpr], w_vals[row * k ..][0..k]);
+            try qm.q4_k.quantizeRowQ4_KInto(q4_blocks[row * bpr ..][0..bpr], w_vals[row * k ..][0..k]);
         }
-        var rhs_q4 = try qm.quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, q4_blocks);
+        var rhs_q4 = try qm.q8k.quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, q4_blocks);
         defer rhs_q4.deinit();
 
         // Dense NN comparator operand: B laid out [k, n].
@@ -198,7 +198,7 @@ pub fn main(init: std.process.Init) !void {
             for (lhs_vals, 0..) |*v, idx| v.* = @floatFromInt(@as(i32, @intCast((idx * 17) % 251)) - 125);
             var dense = try Tensor.fromSlice(allocator, &.{ m, k }, lhs_vals);
             defer dense.deinit();
-            const qlhs = try qm.quantizeRowsQ8_K(allocator, &dense);
+            const qlhs = try qm.q8k.quantizeRowsQ8_K(allocator, &dense);
             defer allocator.free(qlhs);
 
             var b_dense = try Tensor.fromSlice(allocator, &.{ k, n }, b_vals);
@@ -226,7 +226,7 @@ pub fn main(init: std.process.Init) !void {
             const ColdCtx = struct { out: []f32, qlhs: []const BlockQ8_K, rhs: *const qm.QuantizedMatmulRhsTQ2_0, m: usize, n: usize };
             const cold = try measure(iters, @max(iters / 20, 2), ColdCtx{ .out = out_cold, .qlhs = qlhs, .rhs = &rhs, .m = m, .n = n }, struct {
                 fn run(c: ColdCtx) void {
-                    qm.matmulTableQ8_KRhsRange(.tq2_0, c.out, c.qlhs, c.rhs, c.m, c.n, 0, c.m);
+                    qm.cold.matmulTableQ8_KRhsRange(.tq2_0, c.out, c.qlhs, c.rhs, c.m, c.n, 0, c.m);
                 }
             }.run);
 
@@ -238,13 +238,13 @@ pub fn main(init: std.process.Init) !void {
                 ColdCtx{ .out = out_hot, .qlhs = qlhs, .rhs = &rhs, .m = m, .n = n },
                 struct {
                     fn run(c: ColdCtx) void {
-                        qm.matmulTQ2_0RhsRange(c.out, c.qlhs, c.rhs, c.m, c.n, 0, c.m);
+                        qm.ternary.matmulTQ2_0RhsRange(c.out, c.qlhs, c.rhs, c.m, c.n, 0, c.m);
                     }
                 }.run,
                 X4Ctx{ .out = out_x4, .qlhs = qlhs, .packed_x4 = packed_x4, .bpr = bpr, .m = m, .n = n },
                 struct {
                     fn run(c: X4Ctx) void {
-                        qm.matmulTQ2_0X4RhsRange(c.out, c.qlhs, c.packed_x4, c.bpr, c.n, 0, c.m);
+                        qm.ternary.matmulTQ2_0X4RhsRange(c.out, c.qlhs, c.packed_x4, c.bpr, c.n, 0, c.m);
                     }
                 }.run,
             );
@@ -254,14 +254,14 @@ pub fn main(init: std.process.Init) !void {
             const F32Ctx = struct { out: []f32, lhs: []const f32, rhs: *const qm.QuantizedMatmulRhsTQ2_0, m: usize, n: usize };
             const f32act = try measure(iters, @max(iters / 20, 2), F32Ctx{ .out = out_f32act, .lhs = lhs_vals, .rhs = &rhs, .m = m, .n = n }, struct {
                 fn run(c: F32Ctx) void {
-                    qm.matmulTQ2_0F32RhsRange(c.out, c.lhs, c.rhs, c.m, c.n, 0, c.m);
+                    qm.ternary.matmulTQ2_0F32RhsRange(c.out, c.lhs, c.rhs, c.m, c.n, 0, c.m);
                 }
             }.run);
 
             const Q4Ctx = struct { out: []f32, qlhs: []const BlockQ8_K, rhs: *const qm.QuantizedMatmulRhsQ4_K, m: usize, n: usize };
             const q4 = try measure(iters, @max(iters / 20, 2), Q4Ctx{ .out = out_q4, .qlhs = qlhs, .rhs = &rhs_q4, .m = m, .n = n }, struct {
                 fn run(c: Q4Ctx) void {
-                    qm.matmulQ4_KRhsTile(c.out, c.qlhs, c.rhs, c.n, 0, c.m, 0, c.n);
+                    qm.q4_k.matmulQ4_KRhsTile(c.out, c.qlhs, c.rhs, c.n, 0, c.m, 0, c.n);
                 }
             }.run);
 
@@ -299,14 +299,14 @@ pub fn main(init: std.process.Init) !void {
                 FoldPacks{ .out = out_x4, .qlhs = qlhs, .a = packed_x4, .b = packed_x4b, .folded = folded_pack, .bpr = bpr, .m = m, .n = n },
                 struct {
                     fn run(c: FoldPacks) void {
-                        qm.matmulTQ2_0X4RhsTile(c.out, c.qlhs, c.a, c.bpr, c.n, 0, c.m, 0, c.n);
-                        qm.matmulTQ2_0X4RhsTileAcc(c.out, c.qlhs, c.b, c.bpr, c.n, 0, c.m, 0, c.n);
+                        qm.ternary.matmulTQ2_0X4RhsTile(c.out, c.qlhs, c.a, c.bpr, c.n, 0, c.m, 0, c.n);
+                        qm.ternary.matmulTQ2_0X4RhsTileAcc(c.out, c.qlhs, c.b, c.bpr, c.n, 0, c.m, 0, c.n);
                     }
                 }.run,
                 FoldPacks{ .out = out_x4, .qlhs = qlhs, .a = packed_x4, .b = packed_x4b, .folded = folded_pack, .bpr = bpr, .m = m, .n = n },
                 struct {
                     fn run(c: FoldPacks) void {
-                        qm.matmulTQ2_0FoldedX4RhsRange(c.out, c.qlhs, c.folded, c.bpr, c.n, 0, c.m);
+                        qm.ternary.matmulTQ2_0FoldedX4RhsRange(c.out, c.qlhs, c.folded, c.bpr, c.n, 0, c.m);
                     }
                 }.run,
             );
@@ -357,8 +357,8 @@ fn teamScaling(allocator: std.mem.Allocator, out: *std.Io.Writer) !void {
     fillWeights(w_vals);
     const q4_blocks = try allocator.alloc(qm.BlockQ4_K, n * bpr);
     defer allocator.free(q4_blocks);
-    for (0..n) |row| try qm.quantizeRowQ4_KInto(q4_blocks[row * bpr ..][0..bpr], w_vals[row * k ..][0..k]);
-    var rhs_t = try qm.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w_vals);
+    for (0..n) |row| try qm.q4_k.quantizeRowQ4_KInto(q4_blocks[row * bpr ..][0..bpr], w_vals[row * k ..][0..k]);
+    var rhs_t = try qm.ternary.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w_vals);
     defer rhs_t.deinit();
 
     const x_vals = try allocator.alloc(f32, k);
@@ -366,7 +366,7 @@ fn teamScaling(allocator: std.mem.Allocator, out: *std.Io.Writer) !void {
     for (x_vals, 0..) |*v, ii| v.* = @floatFromInt(@as(i32, @intCast((ii * 7) % 173)) - 86);
     const qlhs = try allocator.alloc(BlockQ8_K, bpr);
     defer allocator.free(qlhs);
-    try qm.quantizeRowQ8_KInto(qlhs, x_vals);
+    try qm.q8k.quantizeRowQ8_KInto(qlhs, x_vals);
 
     const q4_bytes = n * bpr * @sizeOf(qm.BlockQ4_K);
     const t_bytes = n * bpr * @sizeOf(BlockTQ2_0);
@@ -384,8 +384,8 @@ fn teamScaling(allocator: std.mem.Allocator, out: *std.Io.Writer) !void {
         fn run(w: *@This()) void {
             for (0..w.reps) |_| {
                 switch (w.kind) {
-                    .q4 => qm.matmulQ4_KRhsTile(w.out, w.qlhs, &w.q4_rhs, w.q4_rhs.n, 0, 1, w.c0, w.c1),
-                    .tq2 => qm.matmulTQ2_0RhsTile(w.out, w.qlhs, w.t_rhs, w.t_rhs.n, 0, 1, w.c0, w.c1),
+                    .q4 => qm.q4_k.matmulQ4_KRhsTile(w.out, w.qlhs, &w.q4_rhs, w.q4_rhs.n, 0, 1, w.c0, w.c1),
+                    .tq2 => qm.ternary.matmulTQ2_0RhsTile(w.out, w.qlhs, w.t_rhs, w.t_rhs.n, 0, 1, w.c0, w.c1),
                 }
             }
         }
@@ -419,7 +419,7 @@ fn teamScaling(allocator: std.mem.Allocator, out: *std.Io.Writer) !void {
                     if (std.mem.eql(u8, mode, "indep")) {
                         q4_copies[ti] = try allocator.dupe(qm.BlockQ4_K, q4_blocks);
                         my_q4 = q4_copies[ti];
-                        t_copies[ti] = try qm.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w_vals);
+                        t_copies[ti] = try qm.ternary.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, w_vals);
                         my_t = &t_copies[ti].?;
                     } else {
                         q4_copies[ti] = &.{};
@@ -428,7 +428,7 @@ fn teamScaling(allocator: std.mem.Allocator, out: *std.Io.Writer) !void {
                     const c1 = if (std.mem.eql(u8, mode, "colsplit")) (ti + 1) * n / tc else n;
                     workers[ti] = .{
                         .kind = kind,
-                        .q4_rhs = try qm.quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, my_q4),
+                        .q4_rhs = try qm.q8k.quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, my_q4),
                         .t_rhs = my_t,
                         .qlhs = qlhs,
                         .out = outs[ti],

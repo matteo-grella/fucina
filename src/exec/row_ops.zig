@@ -6,7 +6,7 @@ const rng = @import("../rng.zig");
 const tensor = @import("../tensor.zig");
 const shape = @import("shape.zig");
 
-const vexpf = backend_mod.vector_impl.vexpf;
+const vexpf = backend_mod.vector_impl.primitives.vexpf;
 const coordinateForLinear = shape.coordinateForLinear;
 const physicalOffsetExcludingAxis = shape.physicalOffsetExcludingAxis;
 const preSoftmaxValue = shape.preSoftmaxValue;
@@ -106,14 +106,14 @@ pub fn FusedActQuantTask(comptime act: FusedActKind, comptime format: FusedLhsFo
                     },
                 }
                 switch (format) {
-                    .q8_kx4 => backend_mod.quantized_matmul.quantizeRowGroupQ8_Kx4Into(
+                    .q8_kx4 => backend_mod.quantized_matmul.q8k.quantizeRowGroupQ8_Kx4Into(
                         task.x4_blocks[row_group * task.blocks_per_row ..][0..task.blocks_per_row],
                         group_scratch,
                         rows_in_group,
                         cols,
                     ),
                     .q8_k_rows => for (0..rows_in_group) |r| {
-                        backend_mod.quantized_matmul.quantizeRowQ8_KInto(
+                        backend_mod.quantized_matmul.q8k.quantizeRowQ8_KInto(
                             task.row_blocks[(row0 + r) * task.blocks_per_row ..][0..task.blocks_per_row],
                             task.scratch[r * cols ..][0..cols],
                         ) catch unreachable;
@@ -122,7 +122,7 @@ pub fn FusedActQuantTask(comptime act: FusedActKind, comptime format: FusedLhsFo
                         // The plain group packer reads all 4 lanes; zero rows
                         // quantize to d=0/qs=0, matching padded-lane semantics.
                         if (rows_in_group < 4) @memset(task.scratch[rows_in_group * cols .. 4 * cols], 0);
-                        backend_mod.quantized_matmul.quantizeRowsQ8_0x4GroupsInto(
+                        backend_mod.quantized_matmul.q8_0.quantizeRowsQ8_0x4GroupsInto(
                             task.q8_0x4_blocks[row_group * task.blocks_per_row ..][0..task.blocks_per_row],
                             task.scratch[0 .. 4 * cols],
                             cols,
@@ -621,7 +621,7 @@ pub fn runSplitGluTask(task: *const SplitGluTask) void {
 }
 
 pub fn runSplitSwiGluQuantQ8_0x4Task(task: *const SplitSwiGluQuantQ8_0x4Task) void {
-    backend_mod.quantized_matmul.quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto(
+    backend_mod.quantized_matmul.q8_0.quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto(
         task.blocks,
         task.input,
         task.rows,

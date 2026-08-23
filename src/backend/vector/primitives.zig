@@ -1,31 +1,23 @@
 //! Low-level @Vector primitives (dot/add/mul cores, transcendental vector
 //! bodies, the f16 row-block attention inner loops). The shared core
-//! (V* aliases, vector_len*) comes from `common.zig` (`vm`).
+//! (V* aliases, vector_len*) comes from `common.zig`.
 
 const std = @import("std");
 const ops = @import("../ops.zig");
 const dtype_mod = @import("../../dtype.zig");
-const vm = @import("common.zig");
+const common = @import("common.zig");
 
 const DType = dtype_mod.DType;
 
-// Shared core symbols defined in vector.zig, aliased here so the moved bodies
-// compile unchanged.
-const vector_len = vm.vector_len;
-const vector_len_f64 = vm.vector_len_f64;
-const vector_len_f16 = vm.vector_len_f16;
-const Vf32 = vm.Vf32;
-const Vf64 = vm.Vf64;
-const Vf16 = vm.Vf16;
-const Vf32ForF16 = vm.Vf32ForF16;
-const Vf16ForF32 = vm.Vf16ForF32;
-const Vu16ForF16 = vm.Vu16ForF16;
-const Vu32ForF16 = vm.Vu32ForF16;
-const Vu16ForF32 = vm.Vu16ForF32;
-const Vu32ForF32 = vm.Vu32ForF32;
-/// Elementwise typed scalar op. Relocated here from elementwise.zig so this leaf
-/// module (and the vector children that depend on it) no longer reach back up to
-/// the vector.zig barrel — keeps `primitives` a true leaf of the import graph.
+const vector_len = common.vector_len;
+const vector_len_f64 = common.vector_len_f64;
+const vector_len_f16 = common.vector_len_f16;
+const Vf32 = common.Vf32;
+const Vf64 = common.Vf64;
+const Vf16ForF32 = common.Vf16ForF32;
+
+/// One typed elementwise op over a scalar pair: cast to the compute dtype,
+/// apply `op`, cast to the output dtype.
 pub fn applyElementwiseTyped(
     comptime dtype: DType,
     comptime op: ops.ElementwiseOp,
@@ -692,13 +684,13 @@ pub inline fn applyElementwiseVecF64(comptime op: ops.ElementwiseOp, a: Vf64, b:
     };
 }
 
-pub inline fn applyElementwiseVecF16(comptime op: ops.ElementwiseOp, a: Vf16, b: Vf16) Vf16 {
+pub inline fn applyElementwiseVecF16(comptime op: ops.ElementwiseOp, a: common.Vf16, b: common.Vf16) common.Vf16 {
     return switch (op) {
         .add => a + b,
         .sub => a - b,
         .mul => a * b,
         .div => a / b,
-        .max, .min => applyMaxMinVec(Vf16, op, a, b),
+        .max, .min => applyMaxMinVec(common.Vf16, op, a, b),
     };
 }
 
@@ -832,10 +824,10 @@ pub inline fn vecDotF16ToF32(x: []const f16, y: []const f16) f32 {
 
 pub inline fn vecSumBf16ToF32(x: []const u16) f32 {
     var i: usize = 0;
-    var acc0: Vf32ForF16 = @splat(0);
-    var acc1: Vf32ForF16 = @splat(0);
-    var acc2: Vf32ForF16 = @splat(0);
-    var acc3: Vf32ForF16 = @splat(0);
+    var acc0: common.Vf32ForF16 = @splat(0);
+    var acc1: common.Vf32ForF16 = @splat(0);
+    var acc2: common.Vf32ForF16 = @splat(0);
+    var acc3: common.Vf32ForF16 = @splat(0);
 
     while (i + 4 * vector_len_f16 <= x.len) : (i += 4 * vector_len_f16) {
         acc0 += bf16VecToF32Wide(x[i..][0..vector_len_f16].*);
@@ -854,10 +846,10 @@ pub inline fn vecSumBf16ToF32(x: []const u16) f32 {
 
 pub inline fn vecDotBf16ToF32(x: []const u16, y: []const u16) f32 {
     var i: usize = 0;
-    var acc0: Vf32ForF16 = @splat(0);
-    var acc1: Vf32ForF16 = @splat(0);
-    var acc2: Vf32ForF16 = @splat(0);
-    var acc3: Vf32ForF16 = @splat(0);
+    var acc0: common.Vf32ForF16 = @splat(0);
+    var acc1: common.Vf32ForF16 = @splat(0);
+    var acc2: common.Vf32ForF16 = @splat(0);
+    var acc3: common.Vf32ForF16 = @splat(0);
 
     while (i + 4 * vector_len_f16 <= x.len) : (i += 4 * vector_len_f16) {
         acc0 += bf16VecToF32Wide(x[i..][0..vector_len_f16].*) * bf16VecToF32Wide(y[i..][0..vector_len_f16].*);
@@ -874,21 +866,21 @@ pub inline fn vecDotBf16ToF32(x: []const u16, y: []const u16) f32 {
     return s;
 }
 
-pub inline fn bf16VecToF32(bits: Vu16ForF32) Vf32 {
-    const widened: Vu32ForF32 = @as(Vu32ForF32, @intCast(bits)) << @as(Vu32ForF32, @splat(16));
+pub inline fn bf16VecToF32(bits: common.Vu16ForF32) Vf32 {
+    const widened: common.Vu32ForF32 = @as(common.Vu32ForF32, @intCast(bits)) << @as(common.Vu32ForF32, @splat(16));
     return @bitCast(widened);
 }
 
-pub inline fn bf16VecToF32Wide(bits: Vu16ForF16) Vf32ForF16 {
-    const widened: Vu32ForF16 = @as(Vu32ForF16, @intCast(bits)) << @as(Vu32ForF16, @splat(16));
+pub inline fn bf16VecToF32Wide(bits: common.Vu16ForF16) common.Vf32ForF16 {
+    const widened: common.Vu32ForF16 = @as(common.Vu32ForF16, @intCast(bits)) << @as(common.Vu32ForF16, @splat(16));
     return @bitCast(widened);
 }
 
-pub inline fn f32VecToBf16(values: Vf32) Vu16ForF32 {
-    const bits: Vu32ForF32 = @bitCast(values);
-    const lsb = (bits >> @as(Vu32ForF32, @splat(16))) & @as(Vu32ForF32, @splat(1));
-    const rounded = bits + @as(Vu32ForF32, @splat(0x7fff)) + lsb;
-    return @truncate(rounded >> @as(Vu32ForF32, @splat(16)));
+pub inline fn f32VecToBf16(values: Vf32) common.Vu16ForF32 {
+    const bits: common.Vu32ForF32 = @bitCast(values);
+    const lsb = (bits >> @as(common.Vu32ForF32, @splat(16))) & @as(common.Vu32ForF32, @splat(1));
+    const rounded = bits + @as(common.Vu32ForF32, @splat(0x7fff)) + lsb;
+    return @truncate(rounded >> @as(common.Vu32ForF32, @splat(16)));
 }
 
 test {

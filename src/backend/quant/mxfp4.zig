@@ -15,32 +15,11 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const types_mod = @import("types.zig");
+const types = @import("types.zig");
 const common = @import("common.zig");
 const tables = @import("../quant_tables.zig");
 
-const BlockMXFP4 = types_mod.BlockMXFP4;
-const BlockQ8_0 = types_mod.BlockQ8_0;
-const QuantizedMatmulRhsMXFP4 = types_mod.QuantizedMatmulRhsMXFP4;
-const mxfp4_block_size = types_mod.mxfp4_block_size;
-
-const QKV16u8 = common.QKV16u8;
-const QKV16i8 = common.QKV16i8;
-const QKV32u8 = common.QKV32u8;
-const QKV32i8 = common.QKV32i8;
-const QKV8i32 = common.QKV8i32;
-const QKV4i32 = common.QKV4i32;
-const QKV4f32 = common.QKV4f32;
-const f16BitsToF32 = common.f16BitsToF32;
-const sdotI8x16 = common.sdotI8x16;
-const tblI8x16 = common.tblI8x16;
-const pshufbI8x32 = common.pshufbI8x32;
-const psignI8x32 = common.psignI8x32;
-const dpbusdI32x8 = common.dpbusdI32x8;
-const maddubsDotGroupsI32x8 = common.maddubsDotGroupsI32x8;
-const addHalvesI32x8 = common.addHalvesI32x8;
-
-const kvalues: QKV16i8 = tables.kvalues_mxfp4;
+const kvalues: common.QKV16i8 = tables.kvalues_mxfp4;
 
 // x86 ymm path: the 16-entry signed table duplicated across both vpshufb
 // lanes, plus its magnitudes for vpdpbusd's unsigned side (sign transfers
@@ -50,7 +29,7 @@ const kvalues: QKV16i8 = tables.kvalues_mxfp4;
 // quantizer guarantees (it never emits -128); same proven-domain contract
 // as the q8_0 sign-trick kernel.
 const has_x86_fast = common.has_x86_vnni_ymm or common.has_x86_avx2;
-const kvalues_x2: QKV32i8 = blk: {
+const kvalues_x2: common.QKV32i8 = blk: {
     var v: [32]i8 = undefined;
     for (0..16) |i| {
         v[i] = tables.kvalues_mxfp4[i];
@@ -58,7 +37,7 @@ const kvalues_x2: QKV32i8 = blk: {
     }
     break :blk v;
 };
-const kmag_x2: QKV32i8 = blk: {
+const kmag_x2: common.QKV32i8 = blk: {
     var v: [32]i8 = undefined;
     for (0..32) |i| v[i] = if (kvalues_x2[i] < 0) -kvalues_x2[i] else kvalues_x2[i];
     break :blk v;
@@ -70,13 +49,13 @@ const e8m0_half_lut: [256]f32 = blk: {
     break :blk lut;
 };
 
-const DecodedMXFP4 = struct { lo: QKV16i8, hi: QKV16i8 };
+const DecodedMXFP4 = struct { lo: common.QKV16i8, hi: common.QKV16i8 };
 
 inline fn decodeBlock(qs: *const [16]u8) DecodedMXFP4 {
-    const packed_v: QKV16u8 = @bitCast(qs.*);
-    const lo_idx = packed_v & @as(QKV16u8, @splat(0x0f));
-    const hi_idx = packed_v >> @as(QKV16u8, @splat(4));
-    return .{ .lo = tblI8x16(kvalues, lo_idx), .hi = tblI8x16(kvalues, hi_idx) };
+    const packed_v: common.QKV16u8 = @bitCast(qs.*);
+    const lo_idx = packed_v & @as(common.QKV16u8, @splat(0x0f));
+    const hi_idx = packed_v >> @as(common.QKV16u8, @splat(4));
+    return .{ .lo = common.tblI8x16(kvalues, lo_idx), .hi = common.tblI8x16(kvalues, hi_idx) };
 }
 
 /// Integer block dot as FOUR lane sums, arch-split but integer-exact and
@@ -84,38 +63,38 @@ inline fn decodeBlock(qs: *const [16]u8) DecodedMXFP4 {
 /// hi-group l; the x86 ymm path reproduces the same four sums by folding
 /// dpbusd's eight 4-byte-group lanes halfwise (lane l + lane l+4). The
 /// float tail below is therefore BITWISE identical across architectures.
-inline fn blockDotI32(w: *const BlockMXFP4, a_lo: QKV16i8, a_hi: QKV16i8) QKV4i32 {
+inline fn blockDotI32(w: *const types.BlockMXFP4, a_lo: common.QKV16i8, a_hi: common.QKV16i8) common.QKV4i32 {
     if (comptime has_x86_fast) {
-        const packed_v: QKV16u8 = @bitCast(w.qs);
-        const lo_idx = packed_v & @as(QKV16u8, @splat(0x0f));
-        const hi_idx = packed_v >> @as(QKV16u8, @splat(4));
-        const idx: QKV32u8 = std.simd.join(lo_idx, hi_idx);
-        const a32: QKV32i8 = std.simd.join(a_lo, a_hi);
-        const svec = pshufbI8x32(kvalues_x2, idx);
-        const mag: QKV32u8 = @bitCast(pshufbI8x32(kmag_x2, idx));
+        const packed_v: common.QKV16u8 = @bitCast(w.qs);
+        const lo_idx = packed_v & @as(common.QKV16u8, @splat(0x0f));
+        const hi_idx = packed_v >> @as(common.QKV16u8, @splat(4));
+        const idx: common.QKV32u8 = std.simd.join(lo_idx, hi_idx);
+        const a32: common.QKV32i8 = std.simd.join(a_lo, a_hi);
+        const svec = common.pshufbI8x32(kvalues_x2, idx);
+        const mag: common.QKV32u8 = @bitCast(common.pshufbI8x32(kmag_x2, idx));
         // vpsignb zeroes where the code is 0 — magnitude 0 there anyway.
-        const adj = psignI8x32(a32, svec);
-        var acc8: QKV8i32 = @splat(0);
+        const adj = common.psignI8x32(a32, svec);
+        var acc8: common.QKV8i32 = @splat(0);
         acc8 = if (comptime common.has_x86_vnni_ymm)
-            dpbusdI32x8(acc8, mag, adj)
+            common.dpbusdI32x8(acc8, mag, adj)
         else
-            maddubsDotGroupsI32x8(acc8, mag, adj);
-        return addHalvesI32x8(acc8);
+            common.maddubsDotGroupsI32x8(acc8, mag, adj);
+        return common.addHalvesI32x8(acc8);
     }
     const d = decodeBlock(&w.qs);
-    var iacc: QKV4i32 = @splat(0);
-    iacc = sdotI8x16(iacc, d.lo, a_lo);
-    iacc = sdotI8x16(iacc, d.hi, a_hi);
+    var iacc: common.QKV4i32 = @splat(0);
+    iacc = common.sdotI8x16(iacc, d.lo, a_lo);
+    iacc = common.sdotI8x16(iacc, d.hi, a_hi);
     return iacc;
 }
 
-inline fn blockContribution(w: *const BlockMXFP4, a_d: f32, a_lo: QKV16i8, a_hi: QKV16i8) QKV4f32 {
+inline fn blockContribution(w: *const types.BlockMXFP4, a_d: f32, a_lo: common.QKV16i8, a_hi: common.QKV16i8) common.QKV4f32 {
     const iacc = blockDotI32(w, a_lo, a_hi);
-    const scale: QKV4f32 = @splat(e8m0_half_lut[w.e] * a_d);
-    return @as(QKV4f32, @floatFromInt(iacc)) * scale;
+    const scale: common.QKV4f32 = @splat(e8m0_half_lut[w.e] * a_d);
+    return @as(common.QKV4f32, @floatFromInt(iacc)) * scale;
 }
 
-inline fn accumulateBlock(acc: QKV4f32, w: *const BlockMXFP4, a_d: f32, a_lo: QKV16i8, a_hi: QKV16i8) QKV4f32 {
+inline fn accumulateBlock(acc: common.QKV4f32, w: *const types.BlockMXFP4, a_d: f32, a_lo: common.QKV16i8, a_hi: common.QKV16i8) common.QKV4f32 {
     return acc + blockContribution(w, a_d, a_lo, a_hi);
 }
 
@@ -126,8 +105,8 @@ const col_block = 4;
 /// activation block load) with a single-column tail.
 pub fn matmulMXFP4RhsTile(
     out: []f32,
-    lhs_blocks: []const BlockQ8_0,
-    rhs: *const QuantizedMatmulRhsMXFP4,
+    lhs_blocks: []const types.BlockQ8_0,
+    rhs: *const types.QuantizedMatmulRhsMXFP4,
     n: usize,
     r0: usize,
     r1: usize,
@@ -141,9 +120,9 @@ pub fn matmulMXFP4RhsTile(
         var j = c0;
 
         while (j + col_block <= c1) : (j += col_block) {
-            var acc: [col_block]QKV4f32 = undefined;
+            var acc: [col_block]common.QKV4f32 = undefined;
             inline for (0..col_block) |c| acc[c] = @splat(0);
-            var cols: [col_block][]const BlockMXFP4 = undefined;
+            var cols: [col_block][]const types.BlockMXFP4 = undefined;
             inline for (0..col_block) |c| cols[c] = rhs.rows.blocks[(j + c) * bpc ..][0..bpc];
 
             // Block pairs per column: independent contributions pipeline the
@@ -153,12 +132,12 @@ pub fn matmulMXFP4RhsTile(
             while (b + 2 <= bpc) : (b += 2) {
                 const a0 = &lhs_row[b];
                 const a1 = &lhs_row[b + 1];
-                const a0_d = f16BitsToF32(a0.d);
-                const a1_d = f16BitsToF32(a1.d);
-                const a0_lo: QKV16i8 = @bitCast(a0.qs[0..16].*);
-                const a0_hi: QKV16i8 = @bitCast(a0.qs[16..32].*);
-                const a1_lo: QKV16i8 = @bitCast(a1.qs[0..16].*);
-                const a1_hi: QKV16i8 = @bitCast(a1.qs[16..32].*);
+                const a0_d = common.f16BitsToF32(a0.d);
+                const a1_d = common.f16BitsToF32(a1.d);
+                const a0_lo: common.QKV16i8 = @bitCast(a0.qs[0..16].*);
+                const a0_hi: common.QKV16i8 = @bitCast(a0.qs[16..32].*);
+                const a1_lo: common.QKV16i8 = @bitCast(a1.qs[0..16].*);
+                const a1_hi: common.QKV16i8 = @bitCast(a1.qs[16..32].*);
                 inline for (0..col_block) |c| {
                     const t0 = blockContribution(&cols[c][b], a0_d, a0_lo, a0_hi);
                     const t1 = blockContribution(&cols[c][b + 1], a1_d, a1_lo, a1_hi);
@@ -168,9 +147,9 @@ pub fn matmulMXFP4RhsTile(
             }
             if (b < bpc) {
                 const a = &lhs_row[b];
-                const a_d = f16BitsToF32(a.d);
-                const a_lo: QKV16i8 = @bitCast(a.qs[0..16].*);
-                const a_hi: QKV16i8 = @bitCast(a.qs[16..32].*);
+                const a_d = common.f16BitsToF32(a.d);
+                const a_lo: common.QKV16i8 = @bitCast(a.qs[0..16].*);
+                const a_hi: common.QKV16i8 = @bitCast(a.qs[16..32].*);
                 inline for (0..col_block) |c| {
                     acc[c] = accumulateBlock(acc[c], &cols[c][b], a_d, a_lo, a_hi);
                 }
@@ -180,10 +159,10 @@ pub fn matmulMXFP4RhsTile(
 
         while (j < c1) : (j += 1) {
             const col = rhs.columnBlocks(j);
-            var acc: QKV4f32 = @splat(0);
+            var acc: common.QKV4f32 = @splat(0);
             for (0..bpc) |b| {
                 const a = &lhs_row[b];
-                acc = accumulateBlock(acc, &col[b], f16BitsToF32(a.d), @bitCast(a.qs[0..16].*), @bitCast(a.qs[16..32].*));
+                acc = accumulateBlock(acc, &col[b], common.f16BitsToF32(a.d), @bitCast(a.qs[0..16].*), @bitCast(a.qs[16..32].*));
             }
             out[i * n + j] = @reduce(.Add, acc);
         }

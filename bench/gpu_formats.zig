@@ -190,11 +190,11 @@ fn benchF16(
     const queued = try allocOutputs(allocator, queue_depth, m, n);
     defer freeOutputs(allocator, queued);
 
-    vector.matmulTransB2DIntoUncheckedF16OperandsWithConfig(&cpu_out, &a, &b_cpu, m, n, k, config);
+    vector.gemm.matmulTransB2DIntoUncheckedF16Operands(config, &cpu_out, &a, &b_cpu, m, n, k);
     if (!gpu.gemmF16NtAsync(&a, &b_gpu, &gpu_out, m, n, k)) return error.GpuDispatchFailed;
     _ = gpu_out.dataConst();
     for (0..3) |_| {
-        vector.matmulTransB2DIntoUncheckedF16OperandsWithConfig(&cpu_out, &a, &b_cpu, m, n, k, config);
+        vector.gemm.matmulTransB2DIntoUncheckedF16Operands(config, &cpu_out, &a, &b_cpu, m, n, k);
         if (!gpu.gemmF16NtAsync(&a, &b_gpu, &gpu_out, m, n, k)) return error.GpuDispatchFailed;
         _ = gpu_out.dataConst();
     }
@@ -209,7 +209,7 @@ fn benchF16(
     for (0..count) |rep| {
         if (rep % 2 == 0) {
             timer.reset();
-            vector.matmulTransB2DIntoUncheckedF16OperandsWithConfig(&cpu_out, &a, &b_cpu, m, n, k, config);
+            vector.gemm.matmulTransB2DIntoUncheckedF16Operands(config, &cpu_out, &a, &b_cpu, m, n, k);
             cpu_times[rep] = timer.read();
             timer.reset();
             if (!gpu.gemmF16NtAsync(&a, &b_gpu, &gpu_out, m, n, k)) return error.GpuDispatchFailed;
@@ -221,7 +221,7 @@ fn benchF16(
             _ = gpu_out.dataConst();
             gpu_times[rep] = timer.read();
             timer.reset();
-            vector.matmulTransB2DIntoUncheckedF16OperandsWithConfig(&cpu_out, &a, &b_cpu, m, n, k, config);
+            vector.gemm.matmulTransB2DIntoUncheckedF16Operands(config, &cpu_out, &a, &b_cpu, m, n, k);
             cpu_times[rep] = timer.read();
         }
         timer.reset();
@@ -267,10 +267,10 @@ fn benchQuant(
     }
     @memcpy(blocks, cpu_blocks);
     var packed_rhs = switch (dtype) {
-        .q4_k => try qm.packMatmulRhsQ4_Kx8(allocator, cpu_blocks, n, k, blocks_per_row),
-        .q5_k => try qm.packMatmulRhsQ5_Kx8(allocator, cpu_blocks, n, k, blocks_per_row),
-        .q6_k => try qm.packMatmulRhsQ6_Kx4(allocator, cpu_blocks, n, k, blocks_per_row),
-        .q8_0 => try qm.packMatmulRhsQ8_0x4(allocator, cpu_blocks, n, k, blocks_per_row),
+        .q4_k => try qm.q4_k.packMatmulRhsQ4_Kx8(allocator, cpu_blocks, n, k, blocks_per_row),
+        .q5_k => try qm.q5_k.packMatmulRhsQ5_Kx8(allocator, cpu_blocks, n, k, blocks_per_row),
+        .q6_k => try qm.q6_k.packMatmulRhsQ6_Kx4(allocator, cpu_blocks, n, k, blocks_per_row),
+        .q8_0 => try qm.q8_0.packMatmulRhsQ8_0x4(allocator, cpu_blocks, n, k, blocks_per_row),
         else => unreachable,
     };
     defer packed_rhs.deinit();
@@ -345,7 +345,7 @@ fn cpuPackedQuant(comptime dtype: raw.DType, allocator: std.mem.Allocator, out: 
     switch (dtype) {
         .q4_k => try native.kernels.matmul2DQuantizedRhsQ4_Kx8(config, allocator, out, a, packed_rhs, m, n, k),
         .q5_k => if (m < 4) {
-            const rhs = qm.QuantizedMatmulRhsQ5_K{ .allocator = null, .blocks = blocks, .k = k, .n = n, .blocks_per_column = k / qm.qk_k_block_size };
+            const rhs = qm.QuantizedMatmulRhsQ5_K{ .allocator = null, .blocks = blocks, .k = k, .n = n, .blocks_per_column = k / qm.types.qk_k_block_size };
             try native.matmul2DQuantizedRhsQ5_K(config, allocator, out, a, &rhs, m, n, k);
         } else try native.kernels.matmul2DQuantizedRhsQ5_Kx8(config, allocator, out, a, packed_rhs, m, n, k),
         .q6_k => try native.kernels.matmul2DQuantizedRhsQ6_Kx4(config, allocator, out, a, packed_rhs, m, n, k),

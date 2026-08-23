@@ -303,7 +303,7 @@ pub fn packMatmulRhsQ8_0x4(self: *ExecContext, rhs: *const tensor.TensorOf(.q8_0
     const n = view.dim(0);
     const k = view.dim(1);
     const blocks_per_row = try backend_mod.quantized_matmul.blockCountForDType(.q8_0, k);
-    return backend_mod.quantized_matmul.packMatmulRhsQ8_0x4(self.allocator, rhs.dataConst(), n, k, blocks_per_row);
+    return backend_mod.quantized_matmul.q8_0.packMatmulRhsQ8_0x4(self.allocator, rhs.dataConst(), n, k, blocks_per_row);
 }
 
 pub fn packMatmulRhsQ6_Kx4(self: *ExecContext, rhs: *const tensor.TensorOf(.q6_k)) !backend_mod.QuantizedMatmulRhsQ6_Kx4 {
@@ -312,7 +312,7 @@ pub fn packMatmulRhsQ6_Kx4(self: *ExecContext, rhs: *const tensor.TensorOf(.q6_k
     const n = view.dim(0);
     const k = view.dim(1);
     const blocks_per_row = try backend_mod.quantized_matmul.blockCountForDType(.q6_k, k);
-    return backend_mod.quantized_matmul.packMatmulRhsQ6_Kx4(self.allocator, rhs.dataConst(), n, k, blocks_per_row);
+    return backend_mod.quantized_matmul.q6_k.packMatmulRhsQ6_Kx4(self.allocator, rhs.dataConst(), n, k, blocks_per_row);
 }
 
 pub fn packMatmulRhsQ4_Kx4(self: *ExecContext, rhs: *const tensor.TensorOf(.q4_k)) !backend_mod.QuantizedMatmulRhsQ4_Kx4 {
@@ -321,7 +321,7 @@ pub fn packMatmulRhsQ4_Kx4(self: *ExecContext, rhs: *const tensor.TensorOf(.q4_k
     const n = view.dim(0);
     const k = view.dim(1);
     const blocks_per_row = try backend_mod.quantized_matmul.blockCountForDType(.q4_k, k);
-    return backend_mod.quantized_matmul.packMatmulRhsQ4_Kx4(self.allocator, rhs.dataConst(), n, k, blocks_per_row);
+    return backend_mod.quantized_matmul.q4_k.packMatmulRhsQ4_Kx4(self.allocator, rhs.dataConst(), n, k, blocks_per_row);
 }
 
 pub fn packMatmulRhsQ4_Kx8(self: *ExecContext, rhs: *const tensor.TensorOf(.q4_k)) !backend_mod.QuantizedMatmulRhsQ4_Kx8 {
@@ -330,7 +330,7 @@ pub fn packMatmulRhsQ4_Kx8(self: *ExecContext, rhs: *const tensor.TensorOf(.q4_k
     const n = view.dim(0);
     const k = view.dim(1);
     const blocks_per_row = try backend_mod.quantized_matmul.blockCountForDType(.q4_k, k);
-    return backend_mod.quantized_matmul.packMatmulRhsQ4_Kx8(self.allocator, rhs.dataConst(), n, k, blocks_per_row);
+    return backend_mod.quantized_matmul.q4_k.packMatmulRhsQ4_Kx8(self.allocator, rhs.dataConst(), n, k, blocks_per_row);
 }
 
 pub fn packMatmulRhsQ4_Kx2Mmla(self: *ExecContext, rhs: *const tensor.TensorOf(.q4_k)) !backend_mod.QuantizedMatmulRhsQ4_Kx2Mmla {
@@ -339,7 +339,7 @@ pub fn packMatmulRhsQ4_Kx2Mmla(self: *ExecContext, rhs: *const tensor.TensorOf(.
     const n = view.dim(0);
     const k = view.dim(1);
     const blocks_per_row = try backend_mod.quantized_matmul.blockCountForDType(.q4_k, k);
-    return backend_mod.quantized_matmul.packMatmulRhsQ4_Kx2Mmla(self.allocator, rhs.dataConst(), n, k, blocks_per_row);
+    return backend_mod.quantized_matmul.q4_k.packMatmulRhsQ4_Kx2Mmla(self.allocator, rhs.dataConst(), n, k, blocks_per_row);
 }
 
 pub fn packMatmulRhsQ5_Kx8(self: *ExecContext, rhs: *const tensor.TensorOf(.q5_k)) !backend_mod.QuantizedMatmulRhsQ5_Kx8 {
@@ -348,7 +348,7 @@ pub fn packMatmulRhsQ5_Kx8(self: *ExecContext, rhs: *const tensor.TensorOf(.q5_k
     const n = view.dim(0);
     const k = view.dim(1);
     const blocks_per_row = try backend_mod.quantized_matmul.blockCountForDType(.q5_k, k);
-    return backend_mod.quantized_matmul.packMatmulRhsQ5_Kx8(self.allocator, rhs.dataConst(), n, k, blocks_per_row);
+    return backend_mod.quantized_matmul.q5_k.packMatmulRhsQ5_Kx8(self.allocator, rhs.dataConst(), n, k, blocks_per_row);
 }
 
 pub fn matmul2DWithPackedQ8_0x4Rhs(self: *ExecContext, a: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4) !Tensor {
@@ -402,7 +402,7 @@ pub fn splitSwiGluMatmul2DWithPackedQ8_0x4Rhs(
     if (m == 1) {
         var fused = try self.emptyRankTyped(.f32, 2, .{ 1, k });
         defer fused.deinit();
-        backend_mod.quantized_matmul.splitSwiGluRowInto(fused.data(), gg.tensor().dataConst(), k);
+        backend_mod.quantized_matmul.q8_0.splitSwiGluRowInto(fused.data(), gg.tensor().dataConst(), k);
         var row_out = try self.emptyRankTyped(.f32, 2, .{ 1, rhs.n });
         errdefer row_out.deinit();
         self.enableNativeTypedMatmulPoolForWork(1, rhs.n, k);
@@ -413,7 +413,7 @@ pub fn splitSwiGluMatmul2DWithPackedQ8_0x4Rhs(
     var out = try self.emptyRankTyped(.f32, 2, .{ m, rhs.n });
     errdefer out.deinit();
 
-    const blocks_per_row = try backend_mod.quantized_matmul.q8_0BlockCount(k);
+    const blocks_per_row = try backend_mod.quantized_matmul.q8k.q8_0BlockCount(k);
     const block_count = ((m + 3) / 4) * blocks_per_row;
     var stack_blocks: [512]backend_mod.quantized_matmul.BlockQ8_0x4 = undefined;
     var qlhs_lease: ?exec_buffer_pool.ScratchLease(backend_mod.quantized_matmul.BlockQ8_0x4) = null;
@@ -438,7 +438,7 @@ pub fn splitSwiGluMatmul2DWithPackedQ8_0x4Rhs(
     };
     const pooled = m * k >= parallel.vector_elementwise_len_threshold / 8 and
         self.dispatchRange(SplitSwiGluQuantQ8_0x4Task, "row_group_start", "row_group_end", base, row_groups, runSplitSwiGluQuantQ8_0x4Task);
-    if (!pooled) backend_mod.quantized_matmul.quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto(
+    if (!pooled) backend_mod.quantized_matmul.q8_0.quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto(
         qlhs_blocks,
         input,
         m,
@@ -489,7 +489,7 @@ fn splitSwiGluMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhs
     if (axis_dim % 2 != 0) return tensor.TensorError.InvalidShape;
     const k = axis_dim / 2;
     if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
-    const blocks_per_row = try qm.qkBlockCount(k);
+    const blocks_per_row = try qm.q8k.qkBlockCount(k);
     const n = rhs.n;
 
     var gg = try self.prepareContiguousTyped(.f32, gate_up);
@@ -589,7 +589,7 @@ fn rmsNormMulMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhsK
     if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
     const wv = try norm_weights.rankView(1);
     if (wv.dim(0) != k) return tensor.TensorError.ShapeMismatch;
-    const blocks_per_row = try qm.qkBlockCount(k);
+    const blocks_per_row = try qm.q8k.qkBlockCount(k);
     const n = rhs.n;
 
     var xx = try self.prepareContiguousTyped(.f32, x);
@@ -710,7 +710,7 @@ pub fn rmsNormMulMatmul2DWithPackedQ8_0x4Rhs(self: *ExecContext, x: *const Tenso
     }{ .norm_weights = norm_weights, .eps = eps, .rhs = rhs });
     const wv = try norm_weights.rankView(1);
     if (wv.dim(0) != k) return tensor.TensorError.ShapeMismatch;
-    const blocks_per_row = try qm.q8_0BlockCount(k);
+    const blocks_per_row = try qm.q8k.q8_0BlockCount(k);
     const n = rhs.n;
 
     var xx = try self.prepareContiguousTyped(.f32, x);
@@ -792,7 +792,7 @@ pub fn gegluQuantMatmul2DWithPackedQ8_0x4Rhs(self: *ExecContext, gate: *const Te
         }
         return out;
     }
-    const blocks_per_row = try qm.q8_0BlockCount(k);
+    const blocks_per_row = try qm.q8k.q8_0BlockCount(k);
     const n = rhs.n;
 
     var gg = try self.prepareContiguousTyped(.f32, gate);

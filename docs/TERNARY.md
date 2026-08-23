@@ -79,7 +79,7 @@ attestation table has the dated rows).
 
 Tiles process 4 weight rows per activation pass (`blockCodeDot4`: shared
 activation vectors and bsum total), with the standard row/column parallel
-split (`vector.matmul2DTQ2_0RhsIntoWithConfig`); `native.zig` routes
+split (`vector.matmul_quant.matmul2DTQ2_0RhsInto`); `native.zig` routes
 `.ggml_tq2_0` matmuls here (scalar backend intentionally keeps the cold
 reference path). Constraint: the contract dim k must be a multiple of 256.
 

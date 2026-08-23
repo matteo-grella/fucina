@@ -165,14 +165,14 @@ fn buildTinyMoe(ctx: *ExecContext, cfg: gemma4.Config, seed: u64) !gemma4.MoeFfn
         defer allocator.free(row_gu);
         for (0..n_expert * 2 * n_ff) |r| {
             rng.uniformFill(rng.at(seed, 100 + r), row_gu, -0.08, 0.08);
-            try qm.quantizeRowQ6_KInto(gu_blocks[r * bpr_gu ..][0..bpr_gu], row_gu);
+            try qm.q6_k.quantizeRowQ6_KInto(gu_blocks[r * bpr_gu ..][0..bpr_gu], row_gu);
         }
 
         const row_dn = try allocator.alloc(f32, n_ff);
         defer allocator.free(row_dn);
         for (0..n_expert * hidden) |r| {
             rng.uniformFill(rng.at(seed, 1000 + r), row_dn, -0.08, 0.08);
-            try qm.quantizeRowQ8_0Into(dn_blocks[r * bpr_dn ..][0..bpr_dn], row_dn);
+            try qm.q8k.quantizeRowQ8_0Into(dn_blocks[r * bpr_dn ..][0..bpr_dn], row_dn);
         }
     }
 

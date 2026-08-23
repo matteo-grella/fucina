@@ -21,11 +21,11 @@ const vector_winograd = @import("vector/winograd.zig");
 const cpu = @This();
 const DType = dtype_mod.DType;
 const Tensor = tensor.Tensor;
-pub const Conv2dDims = vector_conv.Conv2dDims;
-pub const Conv1dDims = vector_conv.Conv1dDims;
-pub const PoolKind = vector_pool.PoolKind;
-pub const Pool2dDims = vector_pool.Pool2dDims;
-pub const WinogradF2Dims = vector_winograd.F2Dims;
+const Conv2dDims = vector_conv.Conv2dDims;
+const Conv1dDims = vector_conv.Conv1dDims;
+const PoolKind = vector_pool.PoolKind;
+const Pool2dDims = vector_pool.Pool2dDims;
+const WinogradF2Dims = vector_winograd.F2Dims;
 /// The same type the native backend takes (`vector/common.zig`), so the
 /// two kernel sets share one signature.
 pub const ParallelConfig = vector_common.ParallelConfig;
@@ -134,16 +134,16 @@ pub const kernels = struct {
 };
 
 // The conv2d backward gather cores are scalar loops (no SIMD divergence), so
-// the scalar reference reuses the native config-less serial cores, trivially
-// in parity. (Wrappers only to absorb the `pc` argument the dispatch passes;
-// the serial cores take none.)
+// the scalar reference runs the same `vector/` cores serially, trivially in
+// parity. The wrappers ignore `pc` and pass an empty config: this backend
+// never threads.
 pub fn conv2dBackwardInputInto(pc: ParallelConfig, out: *Tensor, gy: *const Tensor, weight: *const Tensor, d: Conv2dDims) void {
     _ = pc;
-    vector_conv.conv2dBackwardInputInto(out, gy, weight, d);
+    vector_conv.conv2dBackwardInputInto(.{}, out, gy, weight, d);
 }
 pub fn conv2dBackwardWeightInto(pc: ParallelConfig, out: *Tensor, input: *const Tensor, gy: *const Tensor, d: Conv2dDims) void {
     _ = pc;
-    vector_conv.conv2dBackwardWeightInto(out, input, gy, d);
+    vector_conv.conv2dBackwardWeightInto(.{}, out, input, gy, d);
 }
 // im2col/col2im and the pool backwards are pure data movement (col2im's row
 // adds are elementwise — no reassociation, so the vector core is bit-equal to
@@ -151,11 +151,11 @@ pub fn conv2dBackwardWeightInto(pc: ParallelConfig, out: *Tensor, input: *const 
 // as the conv2d backwards above).
 pub fn im2colInto(pc: ParallelConfig, col: *Tensor, input: *const Tensor, d: Conv2dDims) void {
     _ = pc;
-    vector_conv.im2colIntoWithConfig(col, input, d, .{});
+    vector_conv.im2colInto(.{}, col, input, d);
 }
 pub fn col2imInto(pc: ParallelConfig, out: *Tensor, col: *const Tensor, d: Conv2dDims) void {
     _ = pc;
-    vector_conv.col2imIntoWithConfig(out, col, d, .{});
+    vector_conv.col2imInto(.{}, out, col, d);
 }
 // The Winograd F(2×2,3×3)/F(4×4,3×3) transforms are an exec-level ROUTE
 // shared by both backends (like im2col): the scalar reference reuses them
@@ -164,35 +164,35 @@ pub fn col2imInto(pc: ParallelConfig, out: *Tensor, col: *const Tensor, d: Conv2
 // own scalar matmul.
 pub fn winogradF2WeightTransformInto(pc: ParallelConfig, u: *const [16][]f32, w: []const f32, cout: usize, cin: usize) void {
     _ = pc;
-    vector_winograd.f2WeightTransformIntoWithConfig(u, w, cout, cin, .{});
+    vector_winograd.f2WeightTransformInto(.{}, u, w, cout, cin);
 }
 pub fn winogradF2InputTransformInto(pc: ParallelConfig, v: *const [16][]f32, x: []const f32, d: WinogradF2Dims) void {
     _ = pc;
-    vector_winograd.f2InputTransformIntoWithConfig(v, x, d, .{});
+    vector_winograd.f2InputTransformInto(.{}, v, x, d);
 }
 pub fn winogradF2OutputTransformInto(pc: ParallelConfig, y: []f32, m: *const [16][]const f32, bias: ?[]const f32, fuse_relu: bool, d: WinogradF2Dims) void {
     _ = pc;
-    vector_winograd.f2OutputTransformIntoWithConfig(y, m, bias, fuse_relu, d, .{});
+    vector_winograd.f2OutputTransformInto(.{}, y, m, bias, fuse_relu, d);
 }
 pub fn winogradF4WeightTransformInto(pc: ParallelConfig, u: *const [36][]f32, w: []const f32, cout: usize, cin: usize) void {
     _ = pc;
-    vector_winograd.f4WeightTransformIntoWithConfig(u, w, cout, cin, .{});
+    vector_winograd.f4WeightTransformInto(.{}, u, w, cout, cin);
 }
 pub fn winogradF4InputTransformInto(pc: ParallelConfig, v: *const [36][]f32, x: []const f32, d: WinogradF2Dims) void {
     _ = pc;
-    vector_winograd.f4InputTransformIntoWithConfig(v, x, d, .{});
+    vector_winograd.f4InputTransformInto(.{}, v, x, d);
 }
 pub fn winogradF4OutputTransformInto(pc: ParallelConfig, y: []f32, m: *const [36][]const f32, bias: ?[]const f32, fuse_relu: bool, d: WinogradF2Dims) void {
     _ = pc;
-    vector_winograd.f4OutputTransformIntoWithConfig(y, m, bias, fuse_relu, d, .{});
+    vector_winograd.f4OutputTransformInto(.{}, y, m, bias, fuse_relu, d);
 }
 pub fn avgPool2dBackwardInto(pc: ParallelConfig, out: *Tensor, gy: *const Tensor, d: Pool2dDims) void {
     _ = pc;
-    vector_pool.avgPool2dBackwardIntoWithConfig(out, gy, d, .{});
+    vector_pool.avgPool2dBackwardInto(.{}, out, gy, d);
 }
 pub fn maxPool2dBackwardInto(pc: ParallelConfig, out: *Tensor, input: *const Tensor, gy: *const Tensor, d: Pool2dDims) void {
     _ = pc;
-    vector_pool.maxPool2dBackwardIntoWithConfig(out, input, gy, d, .{});
+    vector_pool.maxPool2dBackwardInto(.{}, out, input, gy, d);
 }
 pub fn preluChannelsBackwardInputInto(pc: ParallelConfig, gx: []f32, gy: []const f32, x: []const f32, alpha: []const f32, rows: usize, cols: usize) void {
     _ = pc;
@@ -290,7 +290,7 @@ fn checkedTensorProduct(a: usize, b: usize) !usize {
 }
 
 fn checkedQuantizedProduct(a: usize, b: usize) !usize {
-    return std.math.mul(usize, a, b) catch quantized_matmul.QuantizedFormatError.InvalidQuantizedLength;
+    return std.math.mul(usize, a, b) catch quantized_matmul.types.QuantizedFormatError.InvalidQuantizedLength;
 }
 
 pub fn addInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
@@ -1493,7 +1493,7 @@ pub fn quantizeMatmulRhsQ4_0(
     allocator: std.mem.Allocator,
     rhs: *const Tensor,
 ) !quantized_matmul.QuantizedMatmulRhsQ4_0 {
-    return quantized_matmul.quantizeMatmulRhsQ4_0(allocator, rhs);
+    return quantized_matmul.cold.quantizeMatmulRhsQ4_0(allocator, rhs);
 }
 
 pub fn quantizeMatmulRhsQ8_0(
@@ -1585,7 +1585,7 @@ fn matmul2DQuantizedRhsQ8_0Rows(
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
 
     const cd = (try out.dataChecked())[0 .. m * n];
-    const blocks_per_row = try quantized_matmul.q8_0BlockCount(k);
+    const blocks_per_row = try quantized_matmul.q8k.q8_0BlockCount(k);
     const block_count = m * blocks_per_row;
     var stack_blocks: [q8_0_lhs_stack_blocks]quantized_matmul.BlockQ8_0 = undefined;
     const qlhs_blocks = if (block_count <= stack_blocks.len)
@@ -1594,7 +1594,7 @@ fn matmul2DQuantizedRhsQ8_0Rows(
         try allocator.alloc(quantized_matmul.BlockQ8_0, block_count);
     defer if (block_count > stack_blocks.len) allocator.free(qlhs_blocks);
 
-    try quantized_matmul.quantizeRowsQ8_0Into(qlhs_blocks, a);
+    try quantized_matmul.q8k.quantizeRowsQ8_0Into(qlhs_blocks, a);
     range(cd, qlhs_blocks, rhs, m, n, 0, m);
 }
 
@@ -1613,7 +1613,7 @@ fn matmul2DQuantizedRhsQ8_1Rows(
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
 
     const cd = (try out.dataChecked())[0 .. m * n];
-    var qlhs = try quantized_matmul.quantizeRowsQ8_1(allocator, a);
+    var qlhs = try quantized_matmul.cold.quantizeRowsQ8_1(allocator, a);
     defer qlhs.deinit();
     range(cd, qlhs.blocks, rhs, m, n, 0, m);
 }
@@ -1633,7 +1633,7 @@ fn matmul2DQuantizedRhsQ8_KRows(
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
 
     const cd = (try out.dataChecked())[0 .. m * n];
-    const qlhs = try quantized_matmul.quantizeRowsQ8_K(allocator, a);
+    const qlhs = try quantized_matmul.q8k.quantizeRowsQ8_K(allocator, a);
     defer allocator.free(qlhs);
     range(cd, qlhs, rhs, m, n, 0, m);
 }
@@ -1648,7 +1648,7 @@ pub fn matmul2DQuantizedRhsQ4_0(
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.matmulQ4_0RhsRange, allocator, out, a, rhs, m, n, k);
+    return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.cold.matmulQ4_0RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
 pub fn matmul2DQuantizedRhsQ1_0(
@@ -1661,7 +1661,7 @@ pub fn matmul2DQuantizedRhsQ1_0(
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.matmulQ1_0RhsRange, allocator, out, a, rhs, m, n, k);
+    return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.cold.matmulQ1_0RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
 pub fn matmul2DQuantizedRhsQ2_0(
@@ -1674,7 +1674,7 @@ pub fn matmul2DQuantizedRhsQ2_0(
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.matmulQ2_0RhsRefRange, allocator, out, a, rhs, m, n, k);
+    return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.cold.matmulQ2_0RhsRefRange, allocator, out, a, rhs, m, n, k);
 }
 
 pub fn matmul2DQuantizedRhsQ4_1(
@@ -1687,7 +1687,7 @@ pub fn matmul2DQuantizedRhsQ4_1(
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_1Rows(pc, quantized_matmul.matmulQ4_1RhsRange, allocator, out, a, rhs, m, n, k);
+    return matmul2DQuantizedRhsQ8_1Rows(pc, quantized_matmul.cold.matmulQ4_1RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
 pub fn matmul2DQuantizedRhsQ5_0(
@@ -1700,7 +1700,7 @@ pub fn matmul2DQuantizedRhsQ5_0(
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.matmulQ5_0RhsRange, allocator, out, a, rhs, m, n, k);
+    return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.cold.matmulQ5_0RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
 pub fn matmul2DQuantizedRhsQ5_1(
@@ -1713,7 +1713,7 @@ pub fn matmul2DQuantizedRhsQ5_1(
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_1Rows(pc, quantized_matmul.matmulQ5_1RhsRange, allocator, out, a, rhs, m, n, k);
+    return matmul2DQuantizedRhsQ8_1Rows(pc, quantized_matmul.cold.matmulQ5_1RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
 pub fn matmul2DQuantizedRhsQ8_0(
@@ -1726,7 +1726,7 @@ pub fn matmul2DQuantizedRhsQ8_0(
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.matmulQ8_0RhsRange, allocator, out, a, rhs, m, n, k);
+    return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.q8_0.matmulQ8_0RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
 pub fn matmul2DQuantizedRhsQ8_0x4(
@@ -1739,7 +1739,7 @@ pub fn matmul2DQuantizedRhsQ8_0x4(
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.matmulQ8_0x4RhsRange, allocator, out, a, rhs, m, n, k);
+    return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.q8_0.matmulQ8_0x4RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
 pub fn matmul2DPackedQ8_0x4LhsRhs(
@@ -1754,39 +1754,39 @@ pub fn matmul2DPackedQ8_0x4LhsRhs(
     _ = pc;
     if (m % 4 != 0) return tensor.TensorError.InvalidShape;
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
-    const blocks_per_row = try quantized_matmul.q8_0BlockCount(k);
-    if (lhs_blocks.len != try checkedQuantizedProduct(m / 4, blocks_per_row)) return quantized_matmul.QuantizedFormatError.InvalidQuantizedLength;
-    quantized_matmul.matmulQ8_0x4PackedRhsRange(contiguousData(out, try checkedTensorProduct(m, n)), lhs_blocks, rhs, m, n, 0, m);
+    const blocks_per_row = try quantized_matmul.q8k.q8_0BlockCount(k);
+    if (lhs_blocks.len != try checkedQuantizedProduct(m / 4, blocks_per_row)) return quantized_matmul.types.QuantizedFormatError.InvalidQuantizedLength;
+    quantized_matmul.q8_0.matmulQ8_0x4PackedRhsRange(contiguousData(out, try checkedTensorProduct(m, n)), lhs_blocks, rhs, m, n, 0, m);
 }
 
 pub fn matmulPackedQ4_Kx8Q8_Kx4Slice(pc: ParallelConfig, out: []f32, lhs_blocks: []const quantized_matmul.BlockQ8_Kx4, rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx8, m: usize, n: usize, k: usize) void {
     _ = k;
     _ = pc;
-    quantized_matmul.matmulQ4_Kx8Q8_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
+    quantized_matmul.q4_k.matmulQ4_Kx8Q8_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
 pub fn matmulPackedQ4_Kx8RowsSlice(pc: ParallelConfig, out: []f32, lhs_blocks: []const quantized_matmul.BlockQ8_K, rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_Kx8, m: usize, n: usize, k: usize) void {
     _ = k;
     _ = pc;
-    quantized_matmul.matmulQ4_Kx8RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
+    quantized_matmul.q4_k.matmulQ4_Kx8RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
 pub fn matmulPackedQ5_Kx8Q8_Kx4Slice(pc: ParallelConfig, out: []f32, lhs_blocks: []const quantized_matmul.BlockQ8_Kx4, rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_Kx8, m: usize, n: usize, k: usize) void {
     _ = k;
     _ = pc;
-    quantized_matmul.matmulQ5_Kx8Q8_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
+    quantized_matmul.q5_k.matmulQ5_Kx8Q8_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
 pub fn matmulPackedQ5_Kx8RowsSlice(pc: ParallelConfig, out: []f32, lhs_blocks: []const quantized_matmul.BlockQ8_K, rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_Kx8, m: usize, n: usize, k: usize) void {
     _ = k;
     _ = pc;
-    quantized_matmul.matmulQ5_Kx8RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
+    quantized_matmul.q5_k.matmulQ5_Kx8RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
 pub fn matmulPackedQ6_Kx4RowsSlice(pc: ParallelConfig, out: []f32, lhs_blocks: []const quantized_matmul.BlockQ8_K, rhs: *const quantized_matmul.QuantizedMatmulRhsQ6_Kx4, m: usize, n: usize, k: usize) void {
     _ = k;
     _ = pc;
-    quantized_matmul.matmulQ6_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
+    quantized_matmul.q6_k.matmulQ6_Kx4RhsRange(out, lhs_blocks, rhs, m, n, 0, m);
 }
 
 pub fn unaryRowSlice(comptime op: ops.UnaryOp, z: []f32, x: []const f32) void {
@@ -1808,9 +1808,9 @@ pub fn matmul2DPackedPaddedQ8_0x4LhsRhs(
 ) !void {
     _ = pc;
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
-    const blocks_per_row = try quantized_matmul.q8_0BlockCount(k);
-    if (lhs_blocks.len != try checkedQuantizedProduct((m + 3) / 4, blocks_per_row)) return quantized_matmul.QuantizedFormatError.InvalidQuantizedLength;
-    quantized_matmul.matmulQ8_0x4PackedPaddedRhsRange(contiguousData(out, try checkedTensorProduct(m, n)), lhs_blocks, rhs, m, n);
+    const blocks_per_row = try quantized_matmul.q8k.q8_0BlockCount(k);
+    if (lhs_blocks.len != try checkedQuantizedProduct((m + 3) / 4, blocks_per_row)) return quantized_matmul.types.QuantizedFormatError.InvalidQuantizedLength;
+    quantized_matmul.q8_0.matmulQ8_0x4PackedPaddedRhsRange(contiguousData(out, try checkedTensorProduct(m, n)), lhs_blocks, rhs, m, n);
 }
 
 pub fn matmul2DQuantizedRhsQ2_K(
@@ -1823,7 +1823,7 @@ pub fn matmul2DQuantizedRhsQ2_K(
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.matmulQ2_KRhsRange, allocator, out, a, rhs, m, n, k);
+    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.cold.matmulQ2_KRhsRange, allocator, out, a, rhs, m, n, k);
 }
 
 pub fn matmul2DQuantizedRhsQ3_K(
@@ -1836,7 +1836,7 @@ pub fn matmul2DQuantizedRhsQ3_K(
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.matmulQ3_KRhsRange, allocator, out, a, rhs, m, n, k);
+    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.cold.matmulQ3_KRhsRange, allocator, out, a, rhs, m, n, k);
 }
 
 pub fn matmul2DQuantizedRhsQ4_K(
@@ -1849,7 +1849,7 @@ pub fn matmul2DQuantizedRhsQ4_K(
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.matmulQ4_KRhsRange, allocator, out, a, rhs, m, n, k);
+    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.q4_k.matmulQ4_KRhsRange, allocator, out, a, rhs, m, n, k);
 }
 
 pub fn matmul2DQuantizedRhsQ4_Kx4(
@@ -1862,7 +1862,7 @@ pub fn matmul2DQuantizedRhsQ4_Kx4(
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.matmulQ4_Kx4RhsRange, allocator, out, a, rhs, m, n, k);
+    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.q4_k.matmulQ4_Kx4RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
 pub fn matmul2DQuantizedRhsQ4_Kx8(
@@ -1875,7 +1875,7 @@ pub fn matmul2DQuantizedRhsQ4_Kx8(
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.matmulQ4_Kx8RhsRange, allocator, out, a, rhs, m, n, k);
+    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.q4_k.matmulQ4_Kx8RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
 pub fn matmul2DQuantizedRhsQ4_Kx2Mmla(
@@ -1888,7 +1888,7 @@ pub fn matmul2DQuantizedRhsQ4_Kx2Mmla(
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.matmulQ4_Kx2MmlaRhsRange, allocator, out, a, rhs, m, n, k);
+    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.q4_k.matmulQ4_Kx2MmlaRhsRange, allocator, out, a, rhs, m, n, k);
 }
 
 pub fn matmul2DQuantizedRhsQ5_Kx8(
@@ -1901,7 +1901,7 @@ pub fn matmul2DQuantizedRhsQ5_Kx8(
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.matmulQ5_Kx8RhsRange, allocator, out, a, rhs, m, n, k);
+    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.q5_k.matmulQ5_Kx8RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
 pub fn matmul2DQuantizedRhsQ5_K(
@@ -1914,7 +1914,7 @@ pub fn matmul2DQuantizedRhsQ5_K(
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.matmulQ5_KRhsRange, allocator, out, a, rhs, m, n, k);
+    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.q5_k.matmulQ5_KRhsRange, allocator, out, a, rhs, m, n, k);
 }
 
 pub fn matmul2DQuantizedRhsQ6_K(
@@ -1927,7 +1927,7 @@ pub fn matmul2DQuantizedRhsQ6_K(
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.matmulQ6_KRhsRange, allocator, out, a, rhs, m, n, k);
+    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.q6_k.matmulQ6_KRhsRange, allocator, out, a, rhs, m, n, k);
 }
 
 pub fn matmul2DQuantizedRhsQ6_Kx4(
@@ -1940,7 +1940,7 @@ pub fn matmul2DQuantizedRhsQ6_Kx4(
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.matmulQ6_Kx4RhsRange, allocator, out, a, rhs, m, n, k);
+    return matmul2DQuantizedRhsQ8_KRows(pc, quantized_matmul.q6_k.matmulQ6_Kx4RhsRange, allocator, out, a, rhs, m, n, k);
 }
 
 fn matmul2DQuantizedRhsTableQ8_0(
@@ -1958,9 +1958,9 @@ fn matmul2DQuantizedRhsTableQ8_0(
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
 
     const cd = (try out.dataChecked())[0 .. m * n];
-    var qlhs = try quantized_matmul.quantizeRowsQ8_0(allocator, a);
+    var qlhs = try quantized_matmul.q8k.quantizeRowsQ8_0(allocator, a);
     defer qlhs.deinit();
-    quantized_matmul.matmulTableQ8_0RhsRange(rhs_dtype, cd, qlhs.blocks, rhs, m, n, 0, m);
+    quantized_matmul.cold.matmulTableQ8_0RhsRange(rhs_dtype, cd, qlhs.blocks, rhs, m, n, 0, m);
 }
 
 fn matmul2DQuantizedRhsTableQ8_K(
@@ -1978,9 +1978,9 @@ fn matmul2DQuantizedRhsTableQ8_K(
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
 
     const cd = (try out.dataChecked())[0 .. m * n];
-    const qlhs = try quantized_matmul.quantizeRowsQ8_K(allocator, a);
+    const qlhs = try quantized_matmul.q8k.quantizeRowsQ8_K(allocator, a);
     defer allocator.free(qlhs);
-    quantized_matmul.matmulTableQ8_KRhsRange(rhs_dtype, cd, qlhs, rhs, m, n, 0, m);
+    quantized_matmul.cold.matmulTableQ8_KRhsRange(rhs_dtype, cd, qlhs, rhs, m, n, 0, m);
 }
 
 pub fn matmulTransAInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {

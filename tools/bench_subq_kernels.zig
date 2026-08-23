@@ -44,7 +44,7 @@ fn scoreRows4F16Comptime(comptime dim: usize, scores: []f32, query: *const [dim]
         scores[i + 2] = @reduce(.Add, a2 + b2);
         scores[i + 3] = @reduce(.Add, a3 + b3);
     }
-    while (i < scores.len) : (i += 1) scores[i] = simd.dotF32F16(query, rows[i * dim ..][0..dim]);
+    while (i < scores.len) : (i += 1) scores[i] = simd.primitives.dotF32F16(query, rows[i * dim ..][0..dim]);
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -111,18 +111,18 @@ pub fn main(init: std.process.Init) !void {
                     }
                 }
                 const sc = scores[0..64];
-                simd.scoreRows4F16(sc, &query, rows[off * d ..], d);
-                const m = 0.088 * simd.vecMaxReduce(sc);
+                simd.primitives.scoreRows4F16(sc, &query, rows[off * d ..], d);
+                const m = 0.088 * simd.primitives.vecMaxReduce(sc);
                 if (m > gauge) {
                     if (gauge != -std.math.inf(f32)) {
                         const rescale: f32 = @exp(gauge - m);
-                        simd.vecScale(numer, numer, rescale);
+                        simd.primitives.vecScale(numer, numer, rescale);
                         exact_w *= rescale;
                     }
                     gauge = m;
                 }
-                exact_w += simd.vecExpAffineSumInPlace(sc, 0.088, -gauge);
-                simd.weightedAccumRows4F16(numer, sc, vrows[off * d ..], d);
+                exact_w += simd.primitives.vecExpAffineSumInPlace(sc, 0.088, -gauge);
+                simd.primitives.weightedAccumRows4F16(numer, sc, vrows[off * d ..], d);
             }
             checksum += exact_w;
         }
@@ -141,9 +141,9 @@ pub fn main(init: std.process.Init) !void {
         const t0 = std.Io.Clock.awake.now(io).nanoseconds;
         for (0..reps) |_| {
             switch (which) {
-                0 => simd.scoreRows4F16(scores, &query, rows, d),
+                0 => simd.primitives.scoreRows4F16(scores, &query, rows, d),
                 1 => scoreRows4F16Comptime(d, scores, &query, rows),
-                2 => simd.weightedAccumRows4F16(numer, scores, rows, d),
+                2 => simd.primitives.weightedAccumRows4F16(numer, scores, rows, d),
                 else => unreachable,
             }
             checksum += scores[rows_n - 1] + numer[0];

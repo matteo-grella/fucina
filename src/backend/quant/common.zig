@@ -4,9 +4,11 @@
 //! the AArch64 sdot/smmla helpers, the rounding/quantize primitives, the nibble
 //! helpers, the shared row/column blocking consts, and the i8mm feature flag.
 //! Imported by quant.zig and the per-type kernel files (q8_0/q4_k/q5_k/q6_k/cold);
-//! it does NOT import them (keeps it dependency-free of the quant group).
+//! it imports none of them. `types.zig` supplies the block layouts the shared
+//! Q8_Kx4 lane dots read.
 const std = @import("std");
 const builtin = @import("builtin");
+const types = @import("types.zig");
 
 // SMMLA is a separate AArch64 feature from SDOT; Apple M1-class CPUs have
 // FEAT_DotProd but not FEAT_I8MM, so the MMLA path must stay gated.
@@ -634,6 +636,145 @@ pub fn RangeFromTile(comptime tile: anytype) blk: {
             tile(out, lhs, rhs, n, row_start, row_end, 0, n);
         }
     }.range;
+}
+
+// ---------------------------------------------------------------------------
+// Q8_Kx4 lane dots shared by the K-quant column-outer kernels (q4_k, q5_k):
+// the per-ISA tier selector, the grouped u8·i8 dot-accumulate step, and the
+// four-row sub-block dot over pre-unpacked weights.
+// ---------------------------------------------------------------------------
+
+/// x86 and portable arms of the grouped u8·i8 dots: `vnni` = vpdpbusd,
+/// `avx2` = vpmaddubsw+vpmaddwd, `widen` = the universal @Vector form.
+pub const X86DotTier = enum { vnni, avx2, widen };
+
+/// One grouped weight·activation dot-accumulate step; `w` holds unsigned
+/// weight codes, `a` is unrestricted i8. Exactness per tier:
+///   vnni : vpdpbusd, exact i32 for all u8·i8 inputs, no saturation.
+///   avx2 : vpmaddubsw+vpmaddwd; saturation-free while pair sums stay below
+///          2^15 (w <= 15 gives 3840, w <= 31 gives 7936).
+///   widen: weight codes below 128 fit i8 (@bitCast is value-preserving) and
+///          i8·i8 products are exact in the widening dot on every target.
+pub inline fn dotGroupsI32x8(comptime tier: X86DotTier, acc: QKV8i32, w: QKV32u8, a: QKV32i8) QKV8i32 {
+    return switch (tier) {
+        .vnni => dpbusdI32x8(acc, w, a),
+        .avx2 => maddubsDotGroupsI32x8(acc, w, a),
+        .widen => dotI8GroupsWidenI32x8(acc, @bitCast(w), a),
+    };
+}
+
+/// i8 dot of one 32-wide sub-block: two 16-lane halves of unpacked weight
+/// codes against two halves of Q8_K activations.
+pub fn dotUnpackedI8x32(w0: QKV16i8, w1: QKV16i8, a0: QKV16i8, a1: QKV16i8) i32 {
+    if (comptime builtin.cpu.arch == .aarch64) {
+        var acc: QKV4i32 = @splat(0);
+        acc = sdotI8x16(acc, w0, a0);
+        acc = sdotI8x16(acc, w1, a1);
+        return @reduce(.Add, acc);
+    }
+    // non-aarch64: VNNI lowers each to vpdpbusd (via the +128 bias), AVX2 takes
+    // the sign-trick vpmaddubsw path (w is a Q4_K or Q5_K code, a comes from
+    // BlockQ8_K, i.e. quantizeRowQ8_KInto's -127/max scale construction, so
+    // a is in [-127,127]: inside the sign-trick exactness domain; see
+    // dotI8x16Portable).
+    return dotI8x16Portable(w0, a0) + dotI8x16Portable(w1, a1);
+}
+
+/// Per-row activation sum of one K-quant sub-block (= two Q8_K 16-groups,
+/// `2*subblock` and `2*subblock+1`) for all four rows of a `BlockQ8_Kx4`,
+/// lane = row. Mirrors the `bsums[(g/4)*16 + row*4 + g%4]` interleave that
+/// `quantizeRowsQ8_Kx4*Into` writes.
+pub inline fn bsumPairQ8_Kx4(a: *const types.BlockQ8_Kx4, comptime subblock: usize) QKV4i32 {
+    const g0 = subblock * 2;
+    const g1 = subblock * 2 + 1;
+    var v: QKV4i32 = undefined;
+    inline for (0..4) |row| {
+        v[row] = @as(i32, a.bsums[(g0 / 4) * 16 + row * 4 + (g0 % 4)]) +
+            @as(i32, a.bsums[(g1 / 4) * 16 + row * 4 + (g1 % 4)]);
+    }
+    return v;
+}
+
+/// Four rows' i8 dot of one 32-wide sub-block against pre-unpacked weights
+/// `wv` (`wv[0]` = feature-groups 0..3, `wv[1]` = 4..7), returning the four row
+/// dots in the four lanes of one i32x4 (lane = row). On aarch64 each
+/// `sdot ...4b[g]` reuses the single unpacked weight register across all four
+/// rows, so the whole sub-block is 8 `sdot`s and zero horizontal reductions.
+/// Integer dots are order-independent, so this equals the per-row
+/// `dotUnpackedI8x32` path exactly.
+pub inline fn dot4RowsSubblockQ8_Kx4(a: *const types.BlockQ8_Kx4, comptime subblock: usize, wv: [2]QKV16i8) QKV4i32 {
+    if (comptime builtin.cpu.arch == .aarch64) {
+        var dot: QKV4i32 = @splat(0);
+        inline for (0..4) |g| {
+            const ag: QKV16i8 = @bitCast(a.qs[subblock * 128 + g * 16 ..][0..16].*);
+            dot = sdotI8x16Lane(g, dot, ag, wv[0]);
+        }
+        inline for (0..4) |g| {
+            const ag: QKV16i8 = @bitCast(a.qs[subblock * 128 + (g + 4) * 16 ..][0..16].*);
+            dot = sdotI8x16Lane(g, dot, ag, wv[1]);
+        }
+        return dot;
+    }
+    if (comptime has_x86_vnni_ymm) return dot4RowsSubblockQ8_Kx4Simd(.vnni, a, subblock, wv);
+    if (comptime has_x86_avx2) return dot4RowsSubblockQ8_Kx4Simd(.avx2, a, subblock, wv);
+    return dot4RowsSubblockQ8_Kx4Simd(.widen, a, subblock, wv);
+}
+
+// vpermd-class (cross-lane): broadcast dword 2c to the low 128-bit lane and
+// dword 2c+1 to the high lane of a 4-dword source, aligning one pre-unpacked
+// 16-byte weight half against the [fg | fg+1] activation halves of a 32-byte
+// Q8_Kx4 load.
+inline fn broadcastPairGroupsI32x4(comptime c: comptime_int, v: QKV4i32) QKV8i32 {
+    return @shuffle(i32, v, undefined, [8]i32{ 2 * c, 2 * c, 2 * c, 2 * c, 2 * c + 1, 2 * c + 1, 2 * c + 1, 2 * c + 1 });
+}
+
+/// x86/portable ymm arms of `dot4RowsSubblockQ8_Kx4`: each 32-byte Q8_Kx4
+/// activation load already holds [fg: 4 rows x 4 features | fg+1: ...]
+/// dword-per-row, so broadcasting the matching weight dword pair
+/// (`broadcastPairGroupsI32x4`) turns the 32-feature x 4-row sub-block dot
+/// into four grouped-dot ops + one half-fold, with no per-row rebuild.
+/// OPERAND SHAPE: `wv` holds UNSIGNED weight codes (Q4_K nibbles in [0,15],
+/// Q5_K values in [0,31]), natively vpdpbusd's u8 side, dotted directly (no
+/// bias, no correction, no sign trick); activations are unrestricted i8.
+/// SATURATION (avx2 tier): vpmaddubsw pair sums stay below 2^15 for both
+/// code ranges (2*31*128 = 7936). NO OVERFLOW: |sum8 lane| <= 4*4*31*128 <
+/// 2^17. Integer sums are order-independent, so the result is bit-identical
+/// to `dot4RowsSubblockQ8_Kx4Scalar` (q4_k_tests.zig, q5_k_tests.zig).
+pub fn dot4RowsSubblockQ8_Kx4Simd(comptime tier: X86DotTier, a: *const types.BlockQ8_Kx4, comptime subblock: usize, wv: [2]QKV16i8) QKV4i32 {
+    var sum8: QKV8i32 = @splat(0);
+    inline for (0..4) |c| {
+        const act: QKV32i8 = @bitCast(a.qs[subblock * 128 + c * 32 ..][0..32].*);
+        const wb: QKV32u8 = @bitCast(broadcastPairGroupsI32x4(c % 2, @as(QKV4i32, @bitCast(wv[c / 2]))));
+        sum8 = dotGroupsI32x8(tier, sum8, wb, act);
+    }
+    return addHalvesI32x8(sum8);
+}
+
+/// The bit-exactness reference for `dot4RowsSubblockQ8_Kx4Simd`: the plain
+/// per-row rebuild over the interleaved Q8_Kx4 layout (row r's 4 features for
+/// feature-group g live at qs[subblock*128 + g*16 + r*4 ..][0..4]).
+pub fn dot4RowsSubblockQ8_Kx4Scalar(a: *const types.BlockQ8_Kx4, comptime subblock: usize, wv: [2]QKV16i8) QKV4i32 {
+    var dot: QKV4i32 = @splat(0);
+    inline for (0..4) |row| {
+        var acc: i32 = 0;
+        inline for (0..8) |g| {
+            inline for (0..4) |t| {
+                acc += @as(i32, wv[g / 4][(g % 4) * 4 + t]) * @as(i32, a.qs[subblock * 128 + g * 16 + row * 4 + t]);
+            }
+        }
+        dot[row] = acc;
+    }
+    return dot;
+}
+
+/// Split the eight i32 group sums of a ymm accumulator into the two 4-column
+/// halves of an x8 chunk layout (cols 0..3 / cols 4..7).
+pub inline fn lowHalfI32x8(v: QKV8i32) QKV4i32 {
+    return @shuffle(i32, v, undefined, [4]i32{ 0, 1, 2, 3 });
+}
+
+pub inline fn highHalfI32x8(v: QKV8i32) QKV4i32 {
+    return @shuffle(i32, v, undefined, [4]i32{ 4, 5, 6, 7 });
 }
 
 test {

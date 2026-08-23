@@ -1,77 +1,46 @@
 //! Hot Q5_K / Q5_Kx8 quantized matmul kernels (per-ISA accumulate tiers).
 //! Block/RHS types come from `types.zig`, shared accumulate/dispatch helpers
-//! from `common.zig`, Q8_K LHS quantization from `q8k.zig`; the format
-//! manifest and naming grammar live in `quant.zig`.
+//! from `common.zig`, Q8_K LHS quantization from `q8k.zig`; the naming
+//! grammar is in `quant.zig`.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const tensor = @import("../../tensor.zig");
-const q8k_mod = @import("q8k.zig");
-const types_mod = @import("types.zig");
+const q8k = @import("q8k.zig");
+const types = @import("types.zig");
 const common = @import("common.zig");
 
 const Allocator = std.mem.Allocator;
 const Tensor = tensor.Tensor;
 
-// Shared symbols defined in quant.zig, aliased here so the moved bodies compile unchanged.
-const BlockQ5_K = types_mod.BlockQ5_K;
-const BlockQ5_Kx8 = types_mod.BlockQ5_Kx8;
-const BlockQ8_K = types_mod.BlockQ8_K;
-const BlockQ8_Kx4 = types_mod.BlockQ8_Kx4;
-const QKV16i16 = common.QKV16i16;
+const BlockQ5_Kx8 = types.BlockQ5_Kx8;
+const BlockQ8_K = types.BlockQ8_K;
 const QKV16i8 = common.QKV16i8;
 const QKV16u8 = common.QKV16u8;
-const QKV32i8 = common.QKV32i8;
-const QKV32u8 = common.QKV32u8;
 const QKV4f32 = common.QKV4f32;
 const QKV4i32 = common.QKV4i32;
 const QKV8i32 = common.QKV8i32;
-const QuantizedFormatError = types_mod.QuantizedFormatError;
-const addHalvesI32x8 = common.addHalvesI32x8;
-const QuantizedMatmulRhsQ5_K = types_mod.QuantizedMatmulRhsQ5_K;
-const QuantizedMatmulRhsQ5_Kx8 = types_mod.QuantizedMatmulRhsQ5_Kx8;
-const checkedProduct = types_mod.checkedProduct;
-const dequantizeBlockQ8_KInto = q8k_mod.dequantizeBlockQ8_KInto;
-const dotDense = common.dotDense;
-const dotI8GroupsWidenI32x8 = common.dotI8GroupsWidenI32x8;
-const dpbusdI32x8 = common.dpbusdI32x8;
-const f16BitsToF32 = common.f16BitsToF32;
-const f32ToF16Bits = common.f32ToF16Bits;
-const fillQ8KPattern = q8k_mod.fillQ8KPattern;
-const getScaleMinK4 = q8k_mod.getScaleMinK4;
-const has_x86_avx2 = common.has_x86_avx2;
-const has_x86_vnni_ymm = common.has_x86_vnni_ymm;
-const maddubsDotGroupsI32x8 = common.maddubsDotGroupsI32x8;
-const makeQkx2Quants = q8k_mod.makeQkx2Quants;
-const nearestInt = q8k_mod.nearestInt;
-const packRowsQ8_Kx4 = q8k_mod.packRowsQ8_Kx4;
-const q4Kx8D = q8k_mod.q4Kx8D;
-const q4Kx8Scales = q8k_mod.q4Kx8Scales;
-const q4_kx8_row_block = common.q4_kx8_row_block;
-const qkBlockCount = q8k_mod.qkBlockCount;
-const qk_col_block = common.qk_col_block;
-const qk_k_block_size = types_mod.qk_k_block_size;
-const quantizedMatmulRhsQ5_KFromBlocks = q8k_mod.quantizedMatmulRhsQ5_KFromBlocks;
-const sdotI8x16Lane = common.sdotI8x16Lane;
+const q4Kx8D = q8k.q4Kx8D;
+const q4Kx8Scales = q8k.q4Kx8Scales;
 
 pub fn packMatmulRhsQ5_Kx8(
     allocator: Allocator,
-    blocks: []const BlockQ5_K,
+    blocks: []const types.BlockQ5_K,
     n: usize,
     k: usize,
     blocks_per_row: usize,
-) !QuantizedMatmulRhsQ5_Kx8 {
+) !types.QuantizedMatmulRhsQ5_Kx8 {
     if (n % 8 != 0) return tensor.TensorError.InvalidShape;
-    if (blocks_per_row != try qkBlockCount(k)) return tensor.TensorError.InvalidShape;
-    if (blocks.len != try checkedProduct(n, blocks_per_row)) return QuantizedFormatError.InvalidQuantizedLength;
+    if (blocks_per_row != try q8k.qkBlockCount(k)) return tensor.TensorError.InvalidShape;
+    if (blocks.len != try types.checkedProduct(n, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
 
     const group_count = n / 8;
-    const packed_blocks = try allocator.alloc(BlockQ5_Kx8, try checkedProduct(group_count, blocks_per_row));
+    const packed_blocks = try allocator.alloc(BlockQ5_Kx8, try types.checkedProduct(group_count, blocks_per_row));
     errdefer allocator.free(packed_blocks);
 
     for (0..group_count) |group_i| {
         for (0..blocks_per_row) |block_i| {
-            const cols = [_]*const BlockQ5_K{
+            const cols = [_]*const types.BlockQ5_K{
                 &blocks[(8 * group_i + 0) * blocks_per_row + block_i],
                 &blocks[(8 * group_i + 1) * blocks_per_row + block_i],
                 &blocks[(8 * group_i + 2) * blocks_per_row + block_i],
@@ -90,7 +59,7 @@ pub fn packMatmulRhsQ5_Kx8(
 
             for (0..8) |subblock| {
                 inline for (0..8) |col| {
-                    const scale_min = getScaleMinK4(&cols[col].scales, subblock);
+                    const scale_min = q8k.getScaleMinK4(&cols[col].scales, subblock);
                     dst.scales[subblock * 8 + col] = scale_min.scale;
                     dst.mins[subblock * 8 + col] = scale_min.min;
                 }
@@ -123,7 +92,7 @@ pub fn packMatmulRhsQ5_Kx8(
 pub fn matmulQ5_Kx8RhsTile(
     out: []f32,
     lhs_blocks: []const BlockQ8_K,
-    rhs: *const QuantizedMatmulRhsQ5_Kx8,
+    rhs: *const types.QuantizedMatmulRhsQ5_Kx8,
     n: usize,
     r0: usize,
     r1: usize,
@@ -135,12 +104,12 @@ pub fn matmulQ5_Kx8RhsTile(
 
     const blocks_per_row = rhs.blocks_per_group;
     var i = r0;
-    while (i + q4_kx8_row_block <= r1) : (i += q4_kx8_row_block) {
+    while (i + common.q4_kx8_row_block <= r1) : (i += common.q4_kx8_row_block) {
         var j = c0;
         while (j < c1) : (j += 8) {
             const rhs_group = rhs.groupBlocks(j / 8);
-            var acc: [q4_kx8_row_block][2]QKV4f32 = undefined;
-            inline for (0..q4_kx8_row_block) |r| {
+            var acc: [common.q4_kx8_row_block][2]QKV4f32 = undefined;
+            inline for (0..common.q4_kx8_row_block) |r| {
                 acc[r][0] = @splat(0);
                 acc[r][1] = @splat(0);
             }
@@ -151,7 +120,7 @@ pub fn matmulQ5_Kx8RhsTile(
                 accumulateQ5_Kx8Rows(lhs_blocks, i, blocks_per_row, block_index, rhs_block, &acc);
             }
 
-            inline for (0..q4_kx8_row_block) |r| {
+            inline for (0..common.q4_kx8_row_block) |r| {
                 out[(i + r) * n + j + 0] = acc[r][0][0];
                 out[(i + r) * n + j + 1] = acc[r][0][1];
                 out[(i + r) * n + j + 2] = acc[r][0][2];
@@ -198,7 +167,7 @@ fn matmulQ5_Kx8RhsTailRows(
     comptime row_block: usize,
     out: []f32,
     lhs_blocks: []const BlockQ8_K,
-    rhs: *const QuantizedMatmulRhsQ5_Kx8,
+    rhs: *const types.QuantizedMatmulRhsQ5_Kx8,
     n: usize,
     row_start: usize,
     c0: usize,
@@ -240,8 +209,8 @@ pub const matmulQ5_Kx8RhsRange = common.RangeFromTile(matmulQ5_Kx8RhsTile);
 
 pub fn matmulQ5_Kx8Q8_Kx4RhsTile(
     out: []f32,
-    lhs_blocks: []const BlockQ8_Kx4,
-    rhs: *const QuantizedMatmulRhsQ5_Kx8,
+    lhs_blocks: []const types.BlockQ8_Kx4,
+    rhs: *const types.QuantizedMatmulRhsQ5_Kx8,
     n: usize,
     r0: usize,
     r1: usize,
@@ -290,7 +259,7 @@ pub const matmulQ5_Kx8Q8_Kx4RhsRange = common.RangeFromTile(matmulQ5_Kx8Q8_Kx4Rh
 pub fn matmulQ5_KRhsTile(
     out: []f32,
     lhs_blocks: []const BlockQ8_K,
-    rhs: *const QuantizedMatmulRhsQ5_K,
+    rhs: *const types.QuantizedMatmulRhsQ5_K,
     n: usize,
     r0: usize,
     r1: usize,
@@ -303,17 +272,17 @@ pub fn matmulQ5_KRhsTile(
         const lhs_row = lhs_blocks[i * blocks_per_row ..][0..blocks_per_row];
         var j = c0;
 
-        while (j + qk_col_block <= c1) : (j += qk_col_block) {
-            var acc = [_]f32{0} ** qk_col_block;
+        while (j + common.qk_col_block <= c1) : (j += common.qk_col_block) {
+            var acc = [_]f32{0} ** common.qk_col_block;
             var block_index: usize = 0;
             while (block_index < blocks_per_row) : (block_index += 1) {
                 const lhs_block = &lhs_row[block_index];
-                inline for (0..qk_col_block) |c| {
+                inline for (0..common.qk_col_block) |c| {
                     const rhs_block = &rhs.blocks[(j + c) * blocks_per_row + block_index];
                     acc[c] += dotQ5_KQ8_K(rhs_block, lhs_block);
                 }
             }
-            inline for (0..qk_col_block) |c| out[i * n + j + c] = acc[c];
+            inline for (0..common.qk_col_block) |c| out[i * n + j + c] = acc[c];
         }
 
         while (j < c1) : (j += 1) {
@@ -335,7 +304,7 @@ const moe_row_tile = 4;
 /// Unpack one Q5_K sub-block (32 weights) to two i8 lanes for sdot. Same
 /// extraction as `dotQ5_KSubblockI32`, but emitted once so it can be reused
 /// across a batch of LHS rows.
-fn unpackQ5_KSubblock(w: *const BlockQ5_K, comptime subblock: usize) [2]QKV16i8 {
+fn unpackQ5_KSubblock(w: *const types.BlockQ5_K, comptime subblock: usize) [2]QKV16i8 {
     const q_offset = (subblock / 2) * 32;
     const high_mask: u8 = @as(u8, 1) << @intCast(subblock);
     const q0: QKV16u8 = @bitCast(w.qs[q_offset..][0..16].*);
@@ -349,20 +318,6 @@ fn unpackQ5_KSubblock(w: *const BlockQ5_K, comptime subblock: usize) [2]QKV16i8 
     return .{ @bitCast(qs0), @bitCast(qs1) };
 }
 
-fn dotUnpackedI8x32(w0: QKV16i8, w1: QKV16i8, a0: QKV16i8, a1: QKV16i8) i32 {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        var acc: QKV4i32 = @splat(0);
-        acc = common.sdotI8x16(acc, w0, a0);
-        acc = common.sdotI8x16(acc, w1, a1);
-        return @reduce(.Add, acc);
-    }
-    // non-aarch64: VNNI lowers each to vpdpbusd (via the +128 bias), AVX2 takes
-    // the sign-trick vpmaddubsw path (w ∈ [0,31] here; a comes from BlockQ8_K,
-    // i.e. quantizeRowQ8_KInto's -127/max scale construction, so a ∈ [-127,127]
-    // — inside the sign-trick exactness domain; see common.zig).
-    return common.dotI8x16Portable(w0, a0) + common.dotI8x16Portable(w1, a1);
-}
-
 /// Column-outer Q5_K matmul for the m>1 (batched MoE prefill) case: unpack each
 /// weight block's 5-bit values ONCE, then sdot them against a tile of LHS rows —
 /// amortizing the unpack over the batch instead of re-unpacking per row like the
@@ -371,7 +326,7 @@ fn dotUnpackedI8x32(w0: QKV16i8, w1: QKV16i8, a0: QKV16i8, a1: QKV16i8) i32 {
 pub fn matmulQ5_KRhsCompactColOuter(
     out: []f32,
     lhs_blocks: []const BlockQ8_K,
-    rhs: *const QuantizedMatmulRhsQ5_K,
+    rhs: *const types.QuantizedMatmulRhsQ5_K,
     n: usize,
     r0: usize,
     r1: usize,
@@ -393,20 +348,20 @@ pub fn matmulQ5_KRhsCompactColOuter(
                 var imin = [_]i32{0} ** moe_row_tile;
                 inline for (0..8) |subblock| {
                     const wv = unpackQ5_KSubblock(w, subblock);
-                    const sm = getScaleMinK4(&w.scales, subblock);
+                    const sm = q8k.getScaleMinK4(&w.scales, subblock);
                     var r: usize = 0;
                     while (r < tn) : (r += 1) {
                         const a = &lhs_blocks[(row0 + r) * bpc + bi];
                         const a0: QKV16i8 = @bitCast(a.qs[subblock * 32 ..][0..16].*);
                         const a1: QKV16i8 = @bitCast(a.qs[subblock * 32 + 16 ..][0..16].*);
-                        const acc = dotUnpackedI8x32(wv[0], wv[1], a0, a1);
+                        const acc = common.dotUnpackedI8x32(wv[0], wv[1], a0, a1);
                         const bsum = @as(i32, a.bsums[subblock * 2]) + @as(i32, a.bsums[subblock * 2 + 1]);
                         iscale[r] += @as(i32, sm.scale) * acc;
                         imin[r] += @as(i32, sm.min) * bsum;
                     }
                 }
-                const d = f16BitsToF32(w.dm[0]);
-                const dmin = f16BitsToF32(w.dm[1]);
+                const d = common.f16BitsToF32(w.dm[0]);
+                const dmin = common.f16BitsToF32(w.dm[1]);
                 var r: usize = 0;
                 while (r < tn) : (r += 1) {
                     const ad = lhs_blocks[(row0 + r) * bpc + bi].d;
@@ -417,93 +372,6 @@ pub fn matmulQ5_KRhsCompactColOuter(
             while (r < tn) : (r += 1) out[(row0 + r) * n + j] = acc_f32[r];
         }
     }
-}
-
-/// Per-row activation sum of one Q5_K sub-block (= two Q8_K 16-groups, `2*subblock`
-/// and `2*subblock+1`) for all four rows of a `BlockQ8_Kx4`, lane = row. Mirrors the
-/// `bsums[(g/4)*16 + row*4 + g%4]` interleave that `quantizeRowsQ8_Kx4*Into` writes.
-inline fn bsumPairQ8_Kx4(a: *const BlockQ8_Kx4, comptime subblock: usize) QKV4i32 {
-    const g0 = subblock * 2;
-    const g1 = subblock * 2 + 1;
-    var v: QKV4i32 = undefined;
-    inline for (0..4) |row| {
-        v[row] = @as(i32, a.bsums[(g0 / 4) * 16 + row * 4 + (g0 % 4)]) +
-            @as(i32, a.bsums[(g1 / 4) * 16 + row * 4 + (g1 % 4)]);
-    }
-    return v;
-}
-
-/// Four rows' i8 dot of one 32-wide Q5_K sub-block against pre-unpacked weights
-/// `wv` (`wv[0]` = feature-groups 0..3, `wv[1]` = 4..7), returning the four row dots
-/// in the four lanes of one i32x4 (lane = row). On aarch64 each `sdot …4b[g]` reuses
-/// the single unpacked weight register across all four rows, so the whole sub-block
-/// is 8 `sdot`s and **zero** horizontal reductions. Integer dots are
-/// order-independent, so this equals the per-row `dotUnpackedI8x32` path exactly.
-inline fn dot4RowsSubblockQ8_Kx4(a: *const BlockQ8_Kx4, comptime subblock: usize, wv: [2]QKV16i8) QKV4i32 {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        var dot: QKV4i32 = @splat(0);
-        inline for (0..4) |g| {
-            const ag: QKV16i8 = @bitCast(a.qs[subblock * 128 + g * 16 ..][0..16].*);
-            dot = sdotI8x16Lane(g, dot, ag, wv[0]);
-        }
-        inline for (0..4) |g| {
-            const ag: QKV16i8 = @bitCast(a.qs[subblock * 128 + (g + 4) * 16 ..][0..16].*);
-            dot = sdotI8x16Lane(g, dot, ag, wv[1]);
-        }
-        return dot;
-    }
-    if (comptime has_x86_vnni_ymm) return dot4RowsSubblockQ8_Kx4Simd(.vnni, a, subblock, wv);
-    if (comptime has_x86_avx2) return dot4RowsSubblockQ8_Kx4Simd(.avx2, a, subblock, wv);
-    return dot4RowsSubblockQ8_Kx4Simd(.widen, a, subblock, wv);
-}
-
-// vpermd-class (cross-lane): broadcast dword 2c to the low 128-bit lane and
-// dword 2c+1 to the high lane of a 4-dword source — aligns one pre-unpacked
-// 16-byte weight half against the [fg | fg+1] activation halves of a 32-byte
-// Q8_Kx4 load (the 4-dword-source analog of `broadcastGroupI32x8`).
-inline fn broadcastPairGroupsI32x4(comptime c: comptime_int, v: QKV4i32) QKV8i32 {
-    return @shuffle(i32, v, undefined, [8]i32{ 2 * c, 2 * c, 2 * c, 2 * c, 2 * c + 1, 2 * c + 1, 2 * c + 1, 2 * c + 1 });
-}
-
-/// x86/portable ymm arms of `dot4RowsSubblockQ8_Kx4` (the MoE-prefill 4-row
-/// lane dot): each 32-byte Q8_Kx4 activation load already holds [fg: 4
-/// rows × 4 features | fg+1: …] dword-per-row, so broadcasting the
-/// matching weight dword pair (`broadcastPairGroupsI32x4`) turns the
-/// 32-feature × 4-row sub-block dot into four grouped-dot ops + one
-/// half-fold — no per-row rebuild. OPERAND SHAPE: `wv` holds UNSIGNED 5-bit
-/// values [0,31] (nibble + qh bit, see `unpackQ5_KSubblock`) — natively
-/// vpdpbusd's u8 side, dotted directly (no bias, no correction, no sign
-/// trick); activations are unrestricted i8. SATURATION (avx2 tier): w ≤ 31 →
-/// vpmaddubsw pair sums ≤ 2·31·128 = 7936 < 2^15. NO OVERFLOW: |sum8 lane| ≤
-/// 4·4·31·128 < 2^17. Integer sums are order-independent → bit-identical to
-/// `dot4RowsSubblockQ8_Kx4Scalar` (q5_k_tests.zig). pub for the sibling
-/// exact-parity tests.
-pub fn dot4RowsSubblockQ8_Kx4Simd(comptime tier: X86DotTier, a: *const BlockQ8_Kx4, comptime subblock: usize, wv: [2]QKV16i8) QKV4i32 {
-    var sum8: QKV8i32 = @splat(0);
-    inline for (0..4) |c| {
-        const act: QKV32i8 = @bitCast(a.qs[subblock * 128 + c * 32 ..][0..32].*);
-        const wb: QKV32u8 = @bitCast(broadcastPairGroupsI32x4(c % 2, @as(QKV4i32, @bitCast(wv[c / 2]))));
-        sum8 = dotQ5GroupsI32x8(tier, sum8, wb, act);
-    }
-    return addHalvesI32x8(sum8);
-}
-
-// pub: the bit-exactness reference for dot4RowsSubblockQ8_Kx4Simd
-// (q5_k_tests.zig) — the plain per-row rebuild over the interleaved Q8_Kx4
-// layout (row r's 4 features for feature-group g live at
-// qs[subblock*128 + g*16 + r*4 ..][0..4]).
-pub fn dot4RowsSubblockQ8_Kx4Scalar(a: *const BlockQ8_Kx4, comptime subblock: usize, wv: [2]QKV16i8) QKV4i32 {
-    var dot: QKV4i32 = @splat(0);
-    inline for (0..4) |row| {
-        var acc: i32 = 0;
-        inline for (0..8) |g| {
-            inline for (0..4) |t| {
-                acc += @as(i32, wv[g / 4][(g % 4) * 4 + t]) * @as(i32, a.qs[subblock * 128 + g * 16 + row * 4 + t]);
-            }
-        }
-        dot[row] = acc;
-    }
-    return dot;
 }
 
 /// Column-outer Q5_K matmul over **4-row-interleaved Q8_Kx4** activations. Like
@@ -517,8 +385,8 @@ pub fn dot4RowsSubblockQ8_Kx4Scalar(a: *const BlockQ8_Kx4, comptime subblock: us
 /// tile (same integer reduction, same cross-block f32 accumulation order).
 pub fn matmulQ5_KCompactQ8_Kx4ColOuter(
     out: []f32,
-    lhs_blocks: []const BlockQ8_Kx4,
-    rhs: *const QuantizedMatmulRhsQ5_K,
+    lhs_blocks: []const types.BlockQ8_Kx4,
+    rhs: *const types.QuantizedMatmulRhsQ5_K,
     n: usize,
     m: usize,
     c0: usize,
@@ -542,13 +410,13 @@ pub fn matmulQ5_KCompactQ8_Kx4ColOuter(
                 var imin: QKV4i32 = @splat(0);
                 inline for (0..8) |subblock| {
                     const wv = unpackQ5_KSubblock(w, subblock);
-                    const sm = getScaleMinK4(&w.scales, subblock);
-                    const dot = dot4RowsSubblockQ8_Kx4(a, subblock, wv);
+                    const sm = q8k.getScaleMinK4(&w.scales, subblock);
+                    const dot = common.dot4RowsSubblockQ8_Kx4(a, subblock, wv);
                     iscale += @as(QKV4i32, @splat(@as(i32, sm.scale))) * dot;
-                    imin += @as(QKV4i32, @splat(@as(i32, sm.min))) * bsumPairQ8_Kx4(a, subblock);
+                    imin += @as(QKV4i32, @splat(@as(i32, sm.min))) * common.bsumPairQ8_Kx4(a, subblock);
                 }
-                const d = f16BitsToF32(w.dm[0]);
-                const dmin = f16BitsToF32(w.dm[1]);
+                const d = common.f16BitsToF32(w.dm[0]);
+                const dmin = common.f16BitsToF32(w.dm[1]);
                 const ad: QKV4f32 = a.d;
                 acc_f32 += (@as(QKV4f32, @splat(d)) * ad) * @as(QKV4f32, @floatFromInt(iscale)) -
                     (@as(QKV4f32, @splat(dmin)) * ad) * @as(QKV4f32, @floatFromInt(imin));
@@ -564,10 +432,10 @@ fn accumulateQ5_Kx8(lhs: *const BlockQ8_K, rhs: *const BlockQ5_Kx8, acc: *[2]QKV
     if (comptime builtin.cpu.arch == .aarch64) {
         return accumulateQ5_Kx8Aarch64(lhs, rhs, acc);
     }
-    if (comptime has_x86_vnni_ymm) {
+    if (comptime common.has_x86_vnni_ymm) {
         return accumulateQ5_Kx8Vnni(lhs, rhs, acc);
     }
-    if (comptime has_x86_avx2) {
+    if (comptime common.has_x86_avx2) {
         return accumulateQ5_Kx8Avx2(lhs, rhs, acc);
     }
     return accumulateQ5_Kx8Widen(lhs, rhs, acc);
@@ -579,22 +447,22 @@ fn accumulateQ5_Kx8Rows(
     blocks_per_row: usize,
     block_index: usize,
     rhs: *const BlockQ5_Kx8,
-    acc: *[q4_kx8_row_block][2]QKV4f32,
+    acc: *[common.q4_kx8_row_block][2]QKV4f32,
 ) void {
-    inline for (0..q4_kx8_row_block) |r| {
+    inline for (0..common.q4_kx8_row_block) |r| {
         const lhs = &lhs_blocks[(row_start + r) * blocks_per_row + block_index];
         accumulateQ5_Kx8(lhs, rhs, &acc[r]);
     }
 }
 
-fn accumulateQ5_Kx8Q8_Kx4(lhs: *const BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc: *[4][2]QKV4f32) void {
+fn accumulateQ5_Kx8Q8_Kx4(lhs: *const types.BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc: *[4][2]QKV4f32) void {
     if (comptime builtin.cpu.arch == .aarch64) {
         return accumulateQ5_Kx8Q8_Kx4Sdot(lhs, rhs, acc);
     }
-    if (comptime has_x86_vnni_ymm) {
+    if (comptime common.has_x86_vnni_ymm) {
         return accumulateQ5_Kx8Q8_Kx4Vnni(lhs, rhs, acc);
     }
-    if (comptime has_x86_avx2) {
+    if (comptime common.has_x86_avx2) {
         return accumulateQ5_Kx8Q8_Kx4Avx2(lhs, rhs, acc);
     }
     return accumulateQ5_Kx8Q8_Kx4Widen(lhs, rhs, acc);
@@ -602,7 +470,7 @@ fn accumulateQ5_Kx8Q8_Kx4(lhs: *const BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc:
 
 // pub: exercised directly by q5_k_tests.zig (bit-exact vs the scalar reference
 // on every host — integer sums are order-independent, epilogue is identical).
-pub fn accumulateQ5_Kx8Q8_Kx4Sdot(lhs: *const BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc: *[4][2]QKV4f32) void {
+pub fn accumulateQ5_Kx8Q8_Kx4Sdot(lhs: *const types.BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc: *[4][2]QKV4f32) void {
     const rhs_d0 = q4Kx8D(rhs.d, 0);
     const rhs_d1 = q4Kx8D(rhs.d, 1);
     const rhs_dmin0 = q4Kx8D(rhs.dmin, 0);
@@ -634,8 +502,8 @@ pub fn accumulateQ5_Kx8Q8_Kx4Sdot(lhs: *const BlockQ8_Kx4, rhs: *const BlockQ5_K
             const rhs1: QKV16i8 = @bitCast(rhs.qs[rhs_offset + 16 ..][0..16].*);
             const q8_vec: QKV16i8 = @bitCast(lhs.qs[subblock * 128 + feature_group * 16 ..][0..16].*);
             inline for (0..4) |row| {
-                dot0[row] = sdotI8x16Lane(row, dot0[row], rhs0, q8_vec);
-                dot1[row] = sdotI8x16Lane(row, dot1[row], rhs1, q8_vec);
+                dot0[row] = common.sdotI8x16Lane(row, dot0[row], rhs0, q8_vec);
+                dot1[row] = common.sdotI8x16Lane(row, dot1[row], rhs1, q8_vec);
             }
         }
 
@@ -686,8 +554,8 @@ fn accumulateQ5_Kx8Aarch64(lhs: *const BlockQ8_K, rhs: *const BlockQ5_Kx8, acc: 
                 const rhs_offset = subblock * 256 + (half * 4 + feature_group) * 32;
                 const rhs_vec0: QKV16i8 = @bitCast(rhs.qs[rhs_offset..][0..16].*);
                 const rhs_vec1: QKV16i8 = @bitCast(rhs.qs[rhs_offset + 16 ..][0..16].*);
-                dot0 = sdotI8x16Lane(feature_group, dot0, rhs_vec0, lhs_vec);
-                dot1 = sdotI8x16Lane(feature_group, dot1, rhs_vec1, lhs_vec);
+                dot0 = common.sdotI8x16Lane(feature_group, dot0, rhs_vec0, lhs_vec);
+                dot1 = common.sdotI8x16Lane(feature_group, dot1, rhs_vec1, lhs_vec);
             }
         }
 
@@ -753,31 +621,12 @@ pub fn accumulateQ5_Kx8Scalar(lhs: *const BlockQ8_K, rhs: *const BlockQ5_Kx8, ac
 // signed i8 — natively vpdpbusd's u8·i8 shape, so the VNNI arm dots them
 // DIRECTLY (no bias, no correction, no sign trick). Every arm computes the
 // SAME i32 subblock sums as the scalar arm (exactness bounds per tier at
-// dotQ5GroupsI32x8) and applies the f16 scales with the scalar arm's exact
+// common.dotGroupsI32x8) and applies the f16 scales with the scalar arm's exact
 // f32 association, so results are bit-for-bit equal to the scalar reference —
 // asserted by q5_k_tests.zig. The arms are written over the comptime-gated
 // primitives in common.zig (vpdpbusd / vpmaddubsw / portable widening), so
 // each also compiles and runs on any target via the portable twins (that is
 // how the aarch64 dev machine exercises them).
-
-// pub: q5_k_tests.zig iterates the tiers when asserting the exact-parity
-// suites of the tier-parameterized arms below.
-pub const X86DotTier = enum { vnni, avx2, widen };
-
-// One grouped u8(0..31)·i8 dot-accumulate step, tier-selected:
-//   vnni : vpdpbusd directly — exact i32 for all inputs, no saturation.
-//   avx2 : vpmaddubsw+vpmaddwd — saturation-free here: pair sums are bounded
-//          by 2·31·128 = 7936 < 2^15 (weights ≤ 31 by the 5-bit format).
-//   widen: universal @Vector form (no arch gate) — q5 values ≤ 31 fit i8, so
-//          the signed widening grouped dot is exact; the production floor for
-//          every ISA that is neither aarch64 nor gated x86.
-inline fn dotQ5GroupsI32x8(comptime tier: X86DotTier, acc: QKV8i32, w: QKV32u8, a: QKV32i8) QKV8i32 {
-    return switch (tier) {
-        .vnni => dpbusdI32x8(acc, w, a),
-        .avx2 => maddubsDotGroupsI32x8(acc, w, a),
-        .widen => dotI8GroupsWidenI32x8(acc, @bitCast(w), a),
-    };
-}
 
 // vpermd/vpbroadcastd-class: broadcast dword `g` (one 4-byte feature group) to
 // all 8 dword lanes — aligns one LHS feature group against the 8 packed RHS
@@ -786,18 +635,7 @@ inline fn broadcastGroupI32x8(comptime g: comptime_int, v: QKV8i32) QKV8i32 {
     return @shuffle(i32, v, undefined, [8]i32{ g, g, g, g, g, g, g, g });
 }
 
-// Split the 8-lane grouped accumulator into its column halves: RHS bytes
-// 0..16 of each chunk are columns 0..3 (dot0, low half), bytes 16..32 are
-// columns 4..7 (dot1, high half).
-inline fn lowHalfI32x8(v: QKV8i32) QKV4i32 {
-    return @shuffle(i32, v, undefined, [4]i32{ 0, 1, 2, 3 });
-}
-
-inline fn highHalfI32x8(v: QKV8i32) QKV4i32 {
-    return @shuffle(i32, v, undefined, [4]i32{ 4, 5, 6, 7 });
-}
-
-fn accumulateQ5_Kx8Tier(comptime tier: X86DotTier, lhs: *const BlockQ8_K, rhs: *const BlockQ5_Kx8, acc: *[2]QKV4f32) void {
+fn accumulateQ5_Kx8Tier(comptime tier: common.X86DotTier, lhs: *const BlockQ8_K, rhs: *const BlockQ5_Kx8, acc: *[2]QKV4f32) void {
     const d0 = q4Kx8D(rhs.d, 0) * @as(QKV4f32, @splat(lhs.d));
     const d1 = q4Kx8D(rhs.d, 1) * @as(QKV4f32, @splat(lhs.d));
     const dmin0 = q4Kx8D(rhs.dmin, 0) * @as(QKV4f32, @splat(lhs.d));
@@ -815,12 +653,12 @@ fn accumulateQ5_Kx8Tier(comptime tier: X86DotTier, lhs: *const BlockQ8_K, rhs: *
         var sum_o: QKV8i32 = @splat(0);
         const lhs_groups: QKV8i32 = @bitCast(lhs.qs[subblock * 32 ..][0..32].*);
         inline for (0..4) |pair| {
-            const w_e: QKV32u8 = @bitCast(rhs.qs[subblock * 256 + (pair * 2) * 32 ..][0..32].*);
-            const w_o: QKV32u8 = @bitCast(rhs.qs[subblock * 256 + (pair * 2 + 1) * 32 ..][0..32].*);
-            const b_e: QKV32i8 = @bitCast(broadcastGroupI32x8(pair * 2, lhs_groups));
-            const b_o: QKV32i8 = @bitCast(broadcastGroupI32x8(pair * 2 + 1, lhs_groups));
-            sum_e = dotQ5GroupsI32x8(tier, sum_e, w_e, b_e);
-            sum_o = dotQ5GroupsI32x8(tier, sum_o, w_o, b_o);
+            const w_e: common.QKV32u8 = @bitCast(rhs.qs[subblock * 256 + (pair * 2) * 32 ..][0..32].*);
+            const w_o: common.QKV32u8 = @bitCast(rhs.qs[subblock * 256 + (pair * 2 + 1) * 32 ..][0..32].*);
+            const b_e: common.QKV32i8 = @bitCast(broadcastGroupI32x8(pair * 2, lhs_groups));
+            const b_o: common.QKV32i8 = @bitCast(broadcastGroupI32x8(pair * 2 + 1, lhs_groups));
+            sum_e = common.dotGroupsI32x8(tier, sum_e, w_e, b_e);
+            sum_o = common.dotGroupsI32x8(tier, sum_o, w_o, b_o);
         }
         const sum = sum_e + sum_o;
 
@@ -829,8 +667,8 @@ fn accumulateQ5_Kx8Tier(comptime tier: X86DotTier, lhs: *const BlockQ8_K, rhs: *
         const mins0 = q4Kx8Scales(&rhs.mins, subblock, 0);
         const mins1 = q4Kx8Scales(&rhs.mins, subblock, 1);
         const bsum: QKV4i32 = @splat(@as(i32, lhs.bsums[subblock * 2]) + @as(i32, lhs.bsums[subblock * 2 + 1]));
-        iscale0 += lowHalfI32x8(sum) * scales0;
-        iscale1 += highHalfI32x8(sum) * scales1;
+        iscale0 += common.lowHalfI32x8(sum) * scales0;
+        iscale1 += common.highHalfI32x8(sum) * scales1;
         imin0 += bsum * mins0;
         imin1 += bsum * mins1;
     }
@@ -851,7 +689,7 @@ pub fn accumulateQ5_Kx8Widen(lhs: *const BlockQ8_K, rhs: *const BlockQ5_Kx8, acc
     accumulateQ5_Kx8Tier(.widen, lhs, rhs, acc);
 }
 
-fn accumulateQ5_Kx8Q8_Kx4Tier(comptime tier: X86DotTier, lhs: *const BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc: *[4][2]QKV4f32) void {
+fn accumulateQ5_Kx8Q8_Kx4Tier(comptime tier: common.X86DotTier, lhs: *const types.BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc: *[4][2]QKV4f32) void {
     const rhs_d0 = q4Kx8D(rhs.d, 0);
     const rhs_d1 = q4Kx8D(rhs.d, 1);
     const rhs_dmin0 = q4Kx8D(rhs.dmin, 0);
@@ -881,11 +719,11 @@ fn accumulateQ5_Kx8Q8_Kx4Tier(comptime tier: X86DotTier, lhs: *const BlockQ8_Kx4
         var sums_o: [4]QKV8i32 = .{ @splat(0), @splat(0), @splat(0), @splat(0) };
         inline for (0..4) |pair| {
             const lhs_groups: QKV8i32 = @bitCast(lhs.qs[subblock * 128 + pair * 32 ..][0..32].*);
-            const w_e: QKV32u8 = @bitCast(rhs.qs[subblock * 256 + (pair * 2) * 32 ..][0..32].*);
-            const w_o: QKV32u8 = @bitCast(rhs.qs[subblock * 256 + (pair * 2 + 1) * 32 ..][0..32].*);
+            const w_e: common.QKV32u8 = @bitCast(rhs.qs[subblock * 256 + (pair * 2) * 32 ..][0..32].*);
+            const w_o: common.QKV32u8 = @bitCast(rhs.qs[subblock * 256 + (pair * 2 + 1) * 32 ..][0..32].*);
             inline for (0..4) |row| {
-                sums_e[row] = dotQ5GroupsI32x8(tier, sums_e[row], w_e, @bitCast(broadcastGroupI32x8(row, lhs_groups)));
-                sums_o[row] = dotQ5GroupsI32x8(tier, sums_o[row], w_o, @bitCast(broadcastGroupI32x8(4 + row, lhs_groups)));
+                sums_e[row] = common.dotGroupsI32x8(tier, sums_e[row], w_e, @bitCast(broadcastGroupI32x8(row, lhs_groups)));
+                sums_o[row] = common.dotGroupsI32x8(tier, sums_o[row], w_o, @bitCast(broadcastGroupI32x8(4 + row, lhs_groups)));
             }
         }
 
@@ -901,8 +739,8 @@ fn accumulateQ5_Kx8Q8_Kx4Tier(comptime tier: X86DotTier, lhs: *const BlockQ8_Kx4
                 @as(i32, lhs.bsums[(bsum0 / 4) * 16 + row * 4 + bsum0 % 4]) +
                     @as(i32, lhs.bsums[((bsum0 + 1) / 4) * 16 + row * 4 + (bsum0 + 1) % 4]),
             );
-            iscale0[row] += lowHalfI32x8(sum) * scales0;
-            iscale1[row] += highHalfI32x8(sum) * scales1;
+            iscale0[row] += common.lowHalfI32x8(sum) * scales0;
+            iscale1[row] += common.highHalfI32x8(sum) * scales1;
             imin0[row] += bsum * mins0;
             imin1[row] += bsum * mins1;
         }
@@ -916,22 +754,22 @@ fn accumulateQ5_Kx8Q8_Kx4Tier(comptime tier: X86DotTier, lhs: *const BlockQ8_Kx4
     }
 }
 
-pub fn accumulateQ5_Kx8Q8_Kx4Vnni(lhs: *const BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc: *[4][2]QKV4f32) void {
+pub fn accumulateQ5_Kx8Q8_Kx4Vnni(lhs: *const types.BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc: *[4][2]QKV4f32) void {
     accumulateQ5_Kx8Q8_Kx4Tier(.vnni, lhs, rhs, acc);
 }
 
-pub fn accumulateQ5_Kx8Q8_Kx4Avx2(lhs: *const BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc: *[4][2]QKV4f32) void {
+pub fn accumulateQ5_Kx8Q8_Kx4Avx2(lhs: *const types.BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc: *[4][2]QKV4f32) void {
     accumulateQ5_Kx8Q8_Kx4Tier(.avx2, lhs, rhs, acc);
 }
 
-pub fn accumulateQ5_Kx8Q8_Kx4Widen(lhs: *const BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc: *[4][2]QKV4f32) void {
+pub fn accumulateQ5_Kx8Q8_Kx4Widen(lhs: *const types.BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc: *[4][2]QKV4f32) void {
     accumulateQ5_Kx8Q8_Kx4Tier(.widen, lhs, rhs, acc);
 }
 
 // pub: the bit-exactness reference for the Q8_Kx4 SIMD arms (q5_k_tests.zig).
 // Plain integer loops over the interleaved layouts; identical i32 sums and
 // identical f32 epilogue association as the production arms.
-pub fn accumulateQ5_Kx8Q8_Kx4Scalar(lhs: *const BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc: *[4][2]QKV4f32) void {
+pub fn accumulateQ5_Kx8Q8_Kx4Scalar(lhs: *const types.BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc: *[4][2]QKV4f32) void {
     const rhs_d0 = q4Kx8D(rhs.d, 0);
     const rhs_d1 = q4Kx8D(rhs.d, 1);
     const rhs_dmin0 = q4Kx8D(rhs.dmin, 0);
@@ -995,17 +833,17 @@ pub fn accumulateQ5_Kx8Q8_Kx4Scalar(lhs: *const BlockQ8_Kx4, rhs: *const BlockQ5
     }
 }
 
-fn dotQ5_KQ8_K(w: *const BlockQ5_K, a: *const BlockQ8_K) f32 {
+fn dotQ5_KQ8_K(w: *const types.BlockQ5_K, a: *const BlockQ8_K) f32 {
     if (comptime builtin.cpu.arch == .aarch64) {
-        const d = f16BitsToF32(w.dm[0]) * a.d;
-        const dmin = f16BitsToF32(w.dm[1]) * a.d;
+        const d = common.f16BitsToF32(w.dm[0]) * a.d;
+        const dmin = common.f16BitsToF32(w.dm[1]) * a.d;
         // d/dmin are constant for this block, so accumulate scale*acc and min*bsum in
         // i32 across the 8 subblocks and apply f32 once at the end — fewer (and more
         // accurate) float ops than a per-subblock f32 multiply-add chain.
         var iscale: i32 = 0;
         var imin: i32 = 0;
         inline for (0..8) |subblock| {
-            const scale_min = getScaleMinK4(&w.scales, subblock);
+            const scale_min = q8k.getScaleMinK4(&w.scales, subblock);
             const acc = dotQ5_KSubblockI32(w, a, subblock);
             const bsum = @as(i32, a.bsums[subblock * 2]) + @as(i32, a.bsums[subblock * 2 + 1]);
             iscale += @as(i32, scale_min.scale) * acc;
@@ -1013,8 +851,8 @@ fn dotQ5_KQ8_K(w: *const BlockQ5_K, a: *const BlockQ8_K) f32 {
         }
         return d * @as(f32, @floatFromInt(iscale)) - dmin * @as(f32, @floatFromInt(imin));
     }
-    if (comptime has_x86_vnni_ymm) return dotQ5_KQ8_KSimd(.vnni, w, a);
-    if (comptime has_x86_avx2) return dotQ5_KQ8_KSimd(.avx2, w, a);
+    if (comptime common.has_x86_vnni_ymm) return dotQ5_KQ8_KSimd(.vnni, w, a);
+    if (comptime common.has_x86_avx2) return dotQ5_KQ8_KSimd(.avx2, w, a);
     return dotQ5_KQ8_KSimd(.widen, w, a);
 }
 
@@ -1032,37 +870,37 @@ fn dotQ5_KQ8_K(w: *const BlockQ5_K, a: *const BlockQ8_K) f32 {
 /// Identical i32 totals (order-independent integer adds) and identical f32
 /// epilogue as the scalar reference → bit-exact (q5_k_tests.zig). pub for
 /// the sibling exact-parity tests.
-pub fn dotQ5_KQ8_KSimd(comptime tier: X86DotTier, w: *const BlockQ5_K, a: *const BlockQ8_K) f32 {
+pub fn dotQ5_KQ8_KSimd(comptime tier: common.X86DotTier, w: *const types.BlockQ5_K, a: *const BlockQ8_K) f32 {
     @setEvalBranchQuota(10000);
     var iacc8: QKV8i32 = @splat(0);
     var imin: i32 = 0;
     inline for (0..8) |subblock| {
-        const q32: QKV32u8 = @bitCast(w.qs[(subblock / 2) * 32 ..][0..32].*);
-        const h32: QKV32u8 = @bitCast(w.qh[0..32].*);
+        const q32: common.QKV32u8 = @bitCast(w.qs[(subblock / 2) * 32 ..][0..32].*);
+        const h32: common.QKV32u8 = @bitCast(w.qh[0..32].*);
         const high_mask: u8 = @as(u8, 1) << @intCast(subblock);
-        const low = if (subblock % 2 == 0) q32 & @as(QKV32u8, @splat(0x0f)) else q32 >> @as(QKV32u8, @splat(4));
-        const qs = low + @select(u8, (h32 & @as(QKV32u8, @splat(high_mask))) != @as(QKV32u8, @splat(0)), @as(QKV32u8, @splat(16)), @as(QKV32u8, @splat(0)));
-        const act: QKV32i8 = @bitCast(a.qs[subblock * 32 ..][0..32].*);
-        const sm = getScaleMinK4(&w.scales, subblock);
-        const sum = dotQ5GroupsI32x8(tier, @splat(0), qs, act);
+        const low = if (subblock % 2 == 0) q32 & @as(common.QKV32u8, @splat(0x0f)) else q32 >> @as(common.QKV32u8, @splat(4));
+        const qs = low + @select(u8, (h32 & @as(common.QKV32u8, @splat(high_mask))) != @as(common.QKV32u8, @splat(0)), @as(common.QKV32u8, @splat(16)), @as(common.QKV32u8, @splat(0)));
+        const act: common.QKV32i8 = @bitCast(a.qs[subblock * 32 ..][0..32].*);
+        const sm = q8k.getScaleMinK4(&w.scales, subblock);
+        const sum = common.dotGroupsI32x8(tier, @splat(0), qs, act);
         iacc8 += sum * @as(QKV8i32, @splat(@as(i32, sm.scale)));
         imin += @as(i32, sm.min) * (@as(i32, a.bsums[subblock * 2]) + @as(i32, a.bsums[subblock * 2 + 1]));
     }
     const iscale = @reduce(.Add, iacc8);
-    const d = f16BitsToF32(w.dm[0]) * a.d;
-    const dmin = f16BitsToF32(w.dm[1]) * a.d;
+    const d = common.f16BitsToF32(w.dm[0]) * a.d;
+    const dmin = common.f16BitsToF32(w.dm[1]) * a.d;
     return d * @as(f32, @floatFromInt(iscale)) - dmin * @as(f32, @floatFromInt(imin));
 }
 
 // pub: the plain-scalar bit-exactness reference for dotQ5_KQ8_KSimd AND the
 // aarch64 row-dot arm (q5_k_tests.zig): same integer totals
 // (order-independent adds), same f32 epilogue expression.
-pub fn dotQ5_KQ8_KScalar(w: *const BlockQ5_K, a: *const BlockQ8_K) f32 {
+pub fn dotQ5_KQ8_KScalar(w: *const types.BlockQ5_K, a: *const BlockQ8_K) f32 {
     var iscale: i32 = 0;
     var imin: i32 = 0;
     var subblock: usize = 0;
     while (subblock < 8) : (subblock += 1) {
-        const sm = getScaleMinK4(&w.scales, subblock);
+        const sm = q8k.getScaleMinK4(&w.scales, subblock);
         var dot: i32 = 0;
         var i: usize = 0;
         while (i < 32) : (i += 1) {
@@ -1072,12 +910,12 @@ pub fn dotQ5_KQ8_KScalar(w: *const BlockQ5_K, a: *const BlockQ8_K) f32 {
         iscale += @as(i32, sm.scale) * dot;
         imin += @as(i32, sm.min) * bsum;
     }
-    const d = f16BitsToF32(w.dm[0]) * a.d;
-    const dmin = f16BitsToF32(w.dm[1]) * a.d;
+    const d = common.f16BitsToF32(w.dm[0]) * a.d;
+    const dmin = common.f16BitsToF32(w.dm[1]) * a.d;
     return d * @as(f32, @floatFromInt(iscale)) - dmin * @as(f32, @floatFromInt(imin));
 }
 
-fn dotQ5_KSubblockI32(w: *const BlockQ5_K, a: *const BlockQ8_K, comptime subblock: usize) i32 {
+fn dotQ5_KSubblockI32(w: *const types.BlockQ5_K, a: *const BlockQ8_K, comptime subblock: usize) i32 {
     const q_offset = (subblock / 2) * 32;
     const a_offset = subblock * 32;
     const high_mask: u8 = @as(u8, 1) << @intCast(subblock);
@@ -1118,12 +956,12 @@ fn dotQ5_KSubblockI32(w: *const BlockQ5_K, a: *const BlockQ8_K, comptime subbloc
     return @reduce(.Add, w0 * a0) + @reduce(.Add, w1 * a1);
 }
 
-pub fn dequantizeBlockQ5_KInto(dst: *[qk_k_block_size]f32, src: *const BlockQ5_K) void {
-    const d = f16BitsToF32(src.dm[0]);
-    const dmin = f16BitsToF32(src.dm[1]);
+pub fn dequantizeBlockQ5_KInto(dst: *[types.qk_k_block_size]f32, src: *const types.BlockQ5_K) void {
+    const d = common.f16BitsToF32(src.dm[0]);
+    const dmin = common.f16BitsToF32(src.dm[1]);
     var subblock: usize = 0;
     while (subblock < 8) : (subblock += 1) {
-        const scale_min = getScaleMinK4(&src.scales, subblock);
+        const scale_min = q8k.getScaleMinK4(&src.scales, subblock);
         var i: usize = 0;
         while (i < 32) : (i += 1) {
             const q: f32 = @floatFromInt(q5KValue(src, subblock, i));
@@ -1135,9 +973,9 @@ pub fn dequantizeBlockQ5_KInto(dst: *[qk_k_block_size]f32, src: *const BlockQ5_K
 
 /// f32 -> Q5_K encoder for one 256-element block; faithful port of ggml's
 /// quantize_row_q5_K_ref (byte-exact, see quant/encode_golden_test.zig).
-/// Assumes finite input (no NaN/inf) — see the encoder contract in quant.zig.
-pub fn quantizeBlockQ5_KInto(dst: *BlockQ5_K, src: *const [qk_k_block_size]f32) void {
-    var L: [qk_k_block_size]u8 = undefined;
+/// Assumes finite input (no NaN/inf); see the encoder contract in q8k.zig.
+pub fn quantizeBlockQ5_KInto(dst: *types.BlockQ5_K, src: *const [types.qk_k_block_size]f32) void {
+    var L: [types.qk_k_block_size]u8 = undefined;
     var Laux: [32]u8 = undefined;
     var weights: [32]f32 = undefined;
     var mins: [8]f32 = undefined;
@@ -1152,7 +990,7 @@ pub fn quantizeBlockQ5_KInto(dst: *BlockQ5_K, src: *const [qk_k_block_size]f32) 
         for (xs) |v| sum_x2 += v * v;
         const av_x = @sqrt(sum_x2 / 32);
         for (&weights, xs) |*w, v| w.* = av_x + @abs(v);
-        scales[j] = makeQkx2Quants(31, xs, &weights, L[32 * j ..][0..32], &mins[j], &Laux, -0.5, 0.1, 15, false);
+        scales[j] = q8k.makeQkx2Quants(31, xs, &weights, L[32 * j ..][0..32], &mins[j], &Laux, -0.5, 0.1, 15, false);
         if (scales[j] > max_scale) max_scale = scales[j];
         if (mins[j] > max_min) max_min = mins[j];
     }
@@ -1162,8 +1000,8 @@ pub fn quantizeBlockQ5_KInto(dst: *BlockQ5_K, src: *const [qk_k_block_size]f32) 
     j = 0;
     while (j < 8) : (j += 1) {
         // ggml truncates the rounded int to uint8_t before the 63 clamp.
-        var ls: u8 = @truncate(@as(u32, @bitCast(nearestInt(inv_scale * scales[j]))));
-        var lm: u8 = @truncate(@as(u32, @bitCast(nearestInt(inv_min * mins[j]))));
+        var ls: u8 = @truncate(@as(u32, @bitCast(q8k.nearestInt(inv_scale * scales[j]))));
+        var lm: u8 = @truncate(@as(u32, @bitCast(q8k.nearestInt(inv_min * mins[j]))));
         ls = @min(63, ls);
         lm = @min(63, lm);
         if (j < 4) {
@@ -1175,16 +1013,16 @@ pub fn quantizeBlockQ5_KInto(dst: *BlockQ5_K, src: *const [qk_k_block_size]f32) 
             dst.scales[j] |= (lm >> 4) << 6;
         }
     }
-    dst.dm = .{ f32ToF16Bits(max_scale / 63.0), f32ToF16Bits(max_min / 63.0) };
+    dst.dm = .{ common.f32ToF16Bits(max_scale / 63.0), common.f32ToF16Bits(max_min / 63.0) };
 
     j = 0;
     while (j < 8) : (j += 1) {
-        const sm = getScaleMinK4(&dst.scales, j);
-        const d = f16BitsToF32(dst.dm[0]) * @as(f32, @floatFromInt(sm.scale));
+        const sm = q8k.getScaleMinK4(&dst.scales, j);
+        const d = common.f16BitsToF32(dst.dm[0]) * @as(f32, @floatFromInt(sm.scale));
         if (d == 0) continue; // keeps the makeQkx2Quants levels, like ggml
-        const dm = f16BitsToF32(dst.dm[1]) * @as(f32, @floatFromInt(sm.min));
+        const dm = common.f16BitsToF32(dst.dm[1]) * @as(f32, @floatFromInt(sm.min));
         for (src[32 * j ..][0..32], L[32 * j ..][0..32]) |v, *l_out| {
-            const l = nearestInt((v + dm) / d);
+            const l = q8k.nearestInt((v + dm) / d);
             l_out.* = @intCast(@max(0, @min(31, l)));
         }
     }
@@ -1192,7 +1030,7 @@ pub fn quantizeBlockQ5_KInto(dst: *BlockQ5_K, src: *const [qk_k_block_size]f32) 
     @memset(&dst.qh, 0);
     var qs_offset: usize = 0;
     var n: usize = 0;
-    while (n < qk_k_block_size) : (n += 64) {
+    while (n < types.qk_k_block_size) : (n += 64) {
         const shift: u3 = @intCast((n / 64) * 2);
         const m1 = @as(u8, 1) << shift;
         const m2 = @as(u8, 2) << shift;
@@ -1215,22 +1053,22 @@ pub fn quantizeBlockQ5_KInto(dst: *BlockQ5_K, src: *const [qk_k_block_size]f32) 
 }
 
 /// f32 -> Q5_K row encoder (caller supplies the output blocks).
-pub fn quantizeRowQ5_KInto(dst: []BlockQ5_K, src: []const f32) !void {
-    const block_count = try qkBlockCount(src.len);
-    if (dst.len != block_count) return QuantizedFormatError.InvalidQuantizedLength;
+pub fn quantizeRowQ5_KInto(dst: []types.BlockQ5_K, src: []const f32) !void {
+    const block_count = try q8k.qkBlockCount(src.len);
+    if (dst.len != block_count) return types.QuantizedFormatError.InvalidQuantizedLength;
     for (dst, 0..) |*block, block_index| {
-        quantizeBlockQ5_KInto(block, src[block_index * qk_k_block_size ..][0..qk_k_block_size]);
+        quantizeBlockQ5_KInto(block, src[block_index * types.qk_k_block_size ..][0..types.qk_k_block_size]);
     }
 }
 
-fn q5KValue(w: *const BlockQ5_K, subblock: usize, offset: usize) u8 {
+fn q5KValue(w: *const types.BlockQ5_K, subblock: usize, offset: usize) u8 {
     const byte = w.qs[(subblock / 2) * 32 + offset];
     const low = if (subblock % 2 == 0) byte & 0x0f else byte >> 4;
     const high_mask: u8 = @as(u8, 1) << @intCast(subblock);
     return low + if ((w.qh[offset] & high_mask) != 0) @as(u8, 16) else @as(u8, 0);
 }
 
-fn setQ5KValue(block: *BlockQ5_K, subblock: usize, offset: usize, value: u8) void {
+fn setQ5KValue(block: *types.BlockQ5_K, subblock: usize, offset: usize, value: u8) void {
     const byte_index = (subblock / 2) * 32 + offset;
     if (subblock % 2 == 0) {
         block.qs[byte_index] = (block.qs[byte_index] & 0xf0) | (value & 0x0f);
@@ -1245,8 +1083,8 @@ fn setQ5KValue(block: *BlockQ5_K, subblock: usize, offset: usize, value: u8) voi
     }
 }
 
-fn fillQ5KPattern(block: *BlockQ5_K) void {
-    block.dm = .{ f32ToF16Bits(1), f32ToF16Bits(0) };
+fn fillQ5KPattern(block: *types.BlockQ5_K) void {
+    block.dm = .{ common.f32ToF16Bits(1), common.f32ToF16Bits(0) };
     block.scales = .{ 1, 2, 3, 4, 0, 0, 0, 0, 1, 2, 3, 4 };
     @memset(&block.qh, 0);
     @memset(&block.qs, 0);
@@ -1260,20 +1098,20 @@ fn fillQ5KPattern(block: *BlockQ5_K) void {
 test "ggml_q5_k dot and matmul consume loaded blocks" {
     const allocator = std.testing.allocator;
 
-    var q5: BlockQ5_K = undefined;
+    var q5: types.BlockQ5_K = undefined;
     fillQ5KPattern(&q5);
     var q8: BlockQ8_K = undefined;
-    fillQ8KPattern(&q8);
+    q8k.fillQ8KPattern(&q8);
 
-    var dense_w: [qk_k_block_size]f32 = undefined;
+    var dense_w: [types.qk_k_block_size]f32 = undefined;
     dequantizeBlockQ5_KInto(&dense_w, &q5);
-    var dense_a: [qk_k_block_size]f32 = undefined;
-    dequantizeBlockQ8_KInto(&dense_a, &q8);
+    var dense_a: [types.qk_k_block_size]f32 = undefined;
+    q8k.dequantizeBlockQ8_KInto(&dense_a, &q8);
 
-    try std.testing.expectEqual(dotDense(&dense_w, &dense_a), dotQ5_KQ8_K(&q5, &q8));
+    try std.testing.expectEqual(common.dotDense(&dense_w, &dense_a), dotQ5_KQ8_K(&q5, &q8));
 
-    var rhs_blocks = [_]BlockQ5_K{ q5, q5 };
-    var qrhs = try quantizedMatmulRhsQ5_KFromBlocks(allocator, qk_k_block_size, 2, &rhs_blocks);
+    var rhs_blocks = [_]types.BlockQ5_K{ q5, q5 };
+    var qrhs = try q8k.quantizedMatmulRhsQ5_KFromBlocks(allocator, types.qk_k_block_size, 2, &rhs_blocks);
     defer qrhs.deinit();
     var out: [2]f32 = undefined;
     matmulQ5_KRhsRange(&out, &.{q8}, &qrhs, 1, 2, 0, 1);

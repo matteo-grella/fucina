@@ -4,18 +4,10 @@
 //! zeroing path, and the dispatch-gate thresholds.
 const std = @import("std");
 const gemm_blocked = @import("gemm_blocked.zig");
-const vm = @import("../vector.zig");
+const common = @import("common.zig");
 const thread = @import("../../thread.zig");
 
-const ParallelConfig = vm.ParallelConfig;
-
-const Orientation = gemm_blocked.Orientation;
-const BlockParams = gemm_blocked.BlockParams;
-const gemmBlockedWithParams = gemm_blocked.gemmBlockedWithParams;
-const shouldUseBlocked = gemm_blocked.shouldUseBlocked;
-const blocked_min_m = gemm_blocked.blocked_min_m;
-const blocked_min_n = gemm_blocked.blocked_min_n;
-const blocked_min_k = gemm_blocked.blocked_min_k;
+const ParallelConfig = common.ParallelConfig;
 
 const testing = std.testing;
 
@@ -29,7 +21,7 @@ fn fillPattern(values: []f32, seed: usize) void {
 // Naive f64-accumulated reference; `orient` follows the same source layouts
 // as the kernel (nn: A[m,k] B[k,n]; tn: A[k,m] B[k,n]; nt: A[m,k] B[n,k]).
 fn naiveGemm(
-    comptime orient: Orientation,
+    comptime orient: gemm_blocked.Orientation,
     cd: []f32,
     ad: []const f32,
     bd: []const f32,
@@ -57,13 +49,13 @@ fn naiveGemm(
 }
 
 fn expectBlockedMatchesNaive(
-    comptime orient: Orientation,
+    pc: ParallelConfig,
+    comptime orient: gemm_blocked.Orientation,
     allocator: std.mem.Allocator,
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
-    params: BlockParams,
+    params: gemm_blocked.BlockParams,
     tolerance: f32,
 ) !void {
     const a_len = m * k;
@@ -81,7 +73,7 @@ fn expectBlockedMatchesNaive(
     fillPattern(bd, n + 5 * k);
     @memset(got, std.math.nan(f32));
 
-    gemmBlockedWithParams(orient, got, ad, bd, m, n, k, config, params);
+    gemm_blocked.gemmBlockedWithParams(pc, orient, got, ad, bd, m, n, k, params);
     naiveGemm(orient, want, ad, bd, m, n, k);
 
     for (want, got) |w, g| {
@@ -98,13 +90,13 @@ test "blocked gemm matches naive reference across every tail combination" {
     const ks = [_]usize{ 1, 63, 64, 65 };
     // Tiny blocking factors so the jc/pc/ic loops and the accumulate path all
     // run even at test sizes (k=65 -> three pc blocks, n=37 -> two jc blocks).
-    const tiny: BlockParams = .{ .kc = 32, .mc = 16, .nc = 24 };
+    const tiny: gemm_blocked.BlockParams = .{ .kc = 32, .mc = 16, .nc = 24 };
 
-    inline for (.{ Orientation.nn, Orientation.tn, Orientation.nt }) |orient| {
+    inline for (.{ gemm_blocked.Orientation.nn, gemm_blocked.Orientation.tn, gemm_blocked.Orientation.nt }) |orient| {
         for (ms) |m| {
             for (ns) |n| {
                 for (ks) |k| {
-                    try expectBlockedMatchesNaive(orient, allocator, m, n, k, .{}, tiny, 1e-4);
+                    try expectBlockedMatchesNaive(.{}, orient, allocator, m, n, k, tiny, 1e-4);
                 }
             }
         }
@@ -115,7 +107,7 @@ test "blocked gemm matches naive reference at kc boundaries with default params"
     const allocator = testing.allocator;
     const ks = [_]usize{ 255, 256, 257, 511, 512, 513 };
     for (ks) |k| {
-        try expectBlockedMatchesNaive(.nn, allocator, 9, 13, k, .{}, .{}, 1e-3);
+        try expectBlockedMatchesNaive(.{}, .nn, allocator, 9, 13, k, .{}, 1e-3);
     }
 }
 
@@ -136,13 +128,13 @@ test "blocked gemm parallel result matches serial result exactly" {
     fillPattern(ad, 1);
     fillPattern(bd, 2);
 
-    const tiny: BlockParams = .{ .kc = 32, .mc = 16, .nc = 24 };
-    gemmBlockedWithParams(.nn, serial, ad, bd, m, n, k, .{}, tiny);
+    const tiny: gemm_blocked.BlockParams = .{ .kc = 32, .mc = 16, .nc = 24 };
+    gemm_blocked.gemmBlockedWithParams(.{}, .nn, serial, ad, bd, m, n, k, tiny);
 
     var pool: thread.Pool = undefined;
     try pool.init(.{ .allocator = allocator, .max_workers = 3 });
     defer pool.deinit();
-    gemmBlockedWithParams(.nn, pooled, ad, bd, m, n, k, .{ .pool = &pool }, tiny);
+    gemm_blocked.gemmBlockedWithParams(.{ .pool = &pool }, .nn, pooled, ad, bd, m, n, k, tiny);
 
     // Disjoint ic ownership means the split cannot change the arithmetic.
     try testing.expectEqualSlices(f32, serial, pooled);
@@ -168,7 +160,7 @@ test "blocked gemm large random shape stays within f64-reference tolerance" {
     for (ad) |*v| v.* = rng.float(f32) * 2 - 1;
     for (bd) |*v| v.* = rng.float(f32) * 2 - 1;
 
-    gemmBlockedWithParams(.nn, got, ad, bd, m, n, k, .{}, .{ .kc = 128, .mc = 64, .nc = 96 });
+    gemm_blocked.gemmBlockedWithParams(.{}, .nn, got, ad, bd, m, n, k, .{ .kc = 128, .mc = 64, .nc = 96 });
     naiveGemm(.nn, want, ad, bd, m, n, k);
 
     // k = 300 values in [-1, 1): partial sums stay O(sqrt(k)); sequential
@@ -208,10 +200,10 @@ test "blocked gemm transposed orientations match the plain orientation bitwise" 
     const nt = try allocator.alloc(f32, m * n);
     defer allocator.free(nt);
 
-    const tiny: BlockParams = .{ .kc = 32, .mc = 16, .nc = 24 };
-    gemmBlockedWithParams(.nn, nn, ad, bd, m, n, k, .{}, tiny);
-    gemmBlockedWithParams(.tn, tn, at, bd, m, n, k, .{}, tiny);
-    gemmBlockedWithParams(.nt, nt, ad, bt, m, n, k, .{}, tiny);
+    const tiny: gemm_blocked.BlockParams = .{ .kc = 32, .mc = 16, .nc = 24 };
+    gemm_blocked.gemmBlockedWithParams(.{}, .nn, nn, ad, bd, m, n, k, tiny);
+    gemm_blocked.gemmBlockedWithParams(.{}, .tn, tn, at, bd, m, n, k, tiny);
+    gemm_blocked.gemmBlockedWithParams(.{}, .nt, nt, ad, bt, m, n, k, tiny);
 
     // Packing absorbs the transposes without changing the arithmetic order.
     try testing.expectEqualSlices(f32, nn, tn);
@@ -220,17 +212,17 @@ test "blocked gemm transposed orientations match the plain orientation bitwise" 
 
 test "blocked gemm handles k == 0 by zeroing the output" {
     var cd = [_]f32{ 1, 2, 3, 4, 5, 6 };
-    gemmBlockedWithParams(.nn, &cd, &.{}, &.{}, 2, 3, 0, .{}, .{});
+    gemm_blocked.gemmBlockedWithParams(.{}, .nn, &cd, &.{}, &.{}, 2, 3, 0, .{});
     try testing.expectEqualSlices(f32, &.{ 0, 0, 0, 0, 0, 0 }, &cd);
 }
 
 test "blocked dispatch gate respects the work threshold and minimum dims" {
     // 768 x 512 x 512 == blocked_work_threshold exactly.
-    try testing.expect(shouldUseBlocked(768, 512, 512));
-    try testing.expect(!shouldUseBlocked(767, 512, 512));
-    try testing.expect(!shouldUseBlocked(768, 512, 511));
-    try testing.expect(!shouldUseBlocked(blocked_min_m - 1, 1 << 13, 1 << 13));
-    try testing.expect(!shouldUseBlocked(1 << 13, blocked_min_n - 1, 1 << 13));
-    try testing.expect(!shouldUseBlocked(1 << 13, 1 << 13, blocked_min_k - 1));
-    try testing.expect(shouldUseBlocked(blocked_min_m, 1 << 13, 1 << 13));
+    try testing.expect(gemm_blocked.shouldUseBlocked(768, 512, 512));
+    try testing.expect(!gemm_blocked.shouldUseBlocked(767, 512, 512));
+    try testing.expect(!gemm_blocked.shouldUseBlocked(768, 512, 511));
+    try testing.expect(!gemm_blocked.shouldUseBlocked(gemm_blocked.blocked_min_m - 1, 1 << 13, 1 << 13));
+    try testing.expect(!gemm_blocked.shouldUseBlocked(1 << 13, gemm_blocked.blocked_min_n - 1, 1 << 13));
+    try testing.expect(!gemm_blocked.shouldUseBlocked(1 << 13, 1 << 13, gemm_blocked.blocked_min_k - 1));
+    try testing.expect(gemm_blocked.shouldUseBlocked(gemm_blocked.blocked_min_m, 1 << 13, 1 << 13));
 }

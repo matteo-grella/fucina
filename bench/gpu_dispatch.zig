@@ -73,7 +73,7 @@ fn cpuGemm(c: []f32, a: []const f32, b: []const f32, m: usize, n: usize, k: usiz
     } else if (dynamic_cblas) |sgemm| {
         sgemm(101, 111, 111, @intCast(m), @intCast(n), @intCast(k), 1, a.ptr, @intCast(k), b.ptr, @intCast(n), 0, c.ptr, @intCast(n));
     } else {
-        blocked.gemmBlocked(.nn, c, a, b, m, n, k, .{});
+        blocked.gemmBlocked(.{}, .nn, c, a, b, m, n, k);
     }
 }
 
