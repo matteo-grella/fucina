@@ -81,15 +81,15 @@ pub fn build(b: *std.Build) void {
         "Build and link the vendored llguidance constrained-decoding engine (vendor/llguidance, Rust — requires cargo >= 1.87 on PATH) so `llm.llguidance` grammar/JSON-schema token masking works. Default false: the build stays pure Zig and `llm.llguidance.Constraint.init` returns error.LlguidanceNotEnabled.",
     ) orelse false;
 
-    const options = b.addOptions();
-    options.addOption(BackendKind, "backend_kind", backend_kind);
-    options.addOption(BlasKind, "blas_kind", blas_kind);
-    options.addOption(bool, "use_blas", blas_kind != .none);
-    options.addOption(u32, "blas_threads", blas_threads);
-    options.addOption(usize, "max_threads", max_threads);
-    options.addOption(bool, "use_gpu", gpu_kind != .none);
-    options.addOption(GpuKind, "gpu_kind", gpu_kind);
-    options.addOption(bool, "vector_scan", vector_scan);
+    const option_values = OptionValues{
+        .backend_kind = backend_kind,
+        .blas_kind = blas_kind,
+        .blas_threads = blas_threads,
+        .max_threads = max_threads,
+        .gpu_kind = gpu_kind,
+        .vector_scan = vector_scan,
+    };
+    const options = option_values.addTo(b);
 
     const module = b.addModule("fucina", .{
         .root_source_file = b.path("src/fucina.zig"),
@@ -376,15 +376,15 @@ pub fn build(b: *std.Build) void {
     const cuda_check_step = b.step("cuda-check", "Compile-only -Dgpu=cuda legs (x86_64-linux-gnu fucina + llm roots and NVRTC PTX generator, not run): catches CUDA-provider bit-rot on GPU-less machines");
     {
         const cuda_target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu });
-        const cuda_options = b.addOptions();
-        cuda_options.addOption(BackendKind, "backend_kind", backend_kind);
-        cuda_options.addOption(BlasKind, "blas_kind", .none);
-        cuda_options.addOption(bool, "use_blas", false);
-        cuda_options.addOption(u32, "blas_threads", 0);
-        cuda_options.addOption(usize, "max_threads", max_threads);
-        cuda_options.addOption(bool, "vector_scan", vector_scan);
-        cuda_options.addOption(bool, "use_gpu", true);
-        cuda_options.addOption(GpuKind, "gpu_kind", .cuda);
+        // The cuda leg reuses the SAME option-value set with only the
+        // provider fields overridden, so a new build option added to
+        // OptionValues can never silently leave this leg checking a stale
+        // configuration.
+        var cuda_values = option_values;
+        cuda_values.blas_kind = .none;
+        cuda_values.blas_threads = 0;
+        cuda_values.gpu_kind = .cuda;
+        const cuda_options = cuda_values.addTo(b);
 
         // Leg 1: the fucina root — backend/exec/provider code + provider tests.
         const cuda_fucina_module = b.createModule(.{
@@ -563,6 +563,31 @@ pub fn build(b: *std.Build) void {
 
     _ = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-nanochat", .desc = "Run the nanochat-root unit tests only", .root = "examples/nanochat/main.zig", .llm = true });
 }
+
+/// Every value behind the `build_options` module, in one struct: the main
+/// build and the cuda-check leg both construct their `addOptions` through
+/// `addTo`, so the option list exists exactly once.
+const OptionValues = struct {
+    backend_kind: BackendKind,
+    blas_kind: BlasKind,
+    blas_threads: u32,
+    max_threads: usize,
+    gpu_kind: GpuKind,
+    vector_scan: bool,
+
+    fn addTo(v: OptionValues, b: *std.Build) *std.Build.Step.Options {
+        const options = b.addOptions();
+        options.addOption(BackendKind, "backend_kind", v.backend_kind);
+        options.addOption(BlasKind, "blas_kind", v.blas_kind);
+        options.addOption(bool, "use_blas", v.blas_kind != .none);
+        options.addOption(u32, "blas_threads", v.blas_threads);
+        options.addOption(usize, "max_threads", v.max_threads);
+        options.addOption(bool, "use_gpu", v.gpu_kind != .none);
+        options.addOption(GpuKind, "gpu_kind", v.gpu_kind);
+        options.addOption(bool, "vector_scan", v.vector_scan);
+        return options;
+    }
+};
 
 const LlguidanceDep = struct {
     build_step: *std.Build.Step,
@@ -786,16 +811,13 @@ fn addLibrarySearchPath(b: *std.Build, module: *std.Build.Module, prefix: []cons
     // warnings for the missing Homebrew prefixes on Linux) as a step
     // failure, so a speculative search path breaks `-Dblas=openblas` exe
     // builds on Linux outright.
-    const lib_dir = bPath(prefix, "lib");
+    const lib_dir = b.pathJoin(&.{ prefix, "lib" });
     std.Io.Dir.accessAbsolute(b.graph.io, lib_dir, .{}) catch return;
     const lib_path = std.Build.LazyPath{ .cwd_relative = lib_dir };
     module.addLibraryPath(lib_path);
     module.addRPath(lib_path);
 }
 
-fn bPath(prefix: []const u8, suffix: []const u8) []const u8 {
-    return std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ prefix, suffix }) catch @panic("failed to allocate build path");
-}
 
 const ToolCtx = struct {
     target: std.Build.ResolvedTarget,
