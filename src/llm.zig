@@ -105,6 +105,10 @@ pub const inkling = struct {
 pub const cartridge = @import("llm/cartridge.zig");
 pub const cartridge_fleet = @import("llm/cartridge_fleet.zig");
 pub const engram = @import("llm/engram.zig");
+/// The family-independent half of a LoRA trainer: target selection, the
+/// per-layer adapter set, its A/B tuple, and the dropout seed stream. The
+/// qwen3 and gemma trainers instantiate it and add their own forward.
+pub const lora_trainer = @import("llm/lora_trainer.zig");
 pub const kv_cache = @import("llm/kv_cache.zig");
 /// Greedy generation driver over any tensor-band model (duck-typed on
 /// `forwardStep` + `KvCache`); family modules re-export or wrap it.
@@ -179,6 +183,7 @@ test {
     _ = cartridge;
     _ = cartridge_fleet;
     _ = engram;
+    _ = lora_trainer;
     _ = kv_cache;
     _ = kv_persist;
     _ = tokenizer;

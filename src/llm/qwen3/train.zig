@@ -26,6 +26,7 @@ const std = @import("std");
 const fucina = @import("fucina");
 const qwen3 = @import("model.zig");
 const cartridge_mod = @import("../cartridge.zig");
+const lora_trainer = @import("../lora_trainer.zig");
 const engram_mod = @import("../engram.zig");
 const weights = @import("fucina").weights;
 
@@ -59,19 +60,14 @@ pub const Error = error{
 };
 
 /// Which frozen projections receive a trainable LoRA adapter.
-pub const Targets = struct {
-    q: bool = true,
-    k: bool = false,
-    v: bool = true,
-    o: bool = false,
-    gate: bool = false,
-    up: bool = false,
-    down: bool = false,
-};
+/// Which frozen projections receive a trainable LoRA adapter.
+pub const Targets = lora_trainer.Targets;
 
 /// Masked label sentinel for `loss`: positions whose label equals this value
 /// contribute zero loss and zero gradient (`CrossEntropyOptions.ignore_index`).
-pub const ignore_index: usize = std.math.maxInt(usize);
+/// Masked label sentinel for `loss`: positions whose label equals this value
+/// contribute zero loss and zero gradient (`CrossEntropyOptions.ignore_index`).
+pub const ignore_index = lora_trainer.ignore_index;
 
 /// The per-block layer type of `qwen3.Model` (alias of the exported
 /// `qwen3.Layer`; tests build synthetic layers through it).
@@ -155,8 +151,8 @@ pub const EngramOptions = struct {
 
 /// The seven adaptable projections, in fixed order. Index doubles as the
 /// dropout-seed slot and the `Targets` field name.
-const n_targets = 7;
-const target_names = [n_targets][]const u8{ "q", "k", "v", "o", "gate", "up", "down" };
+const n_targets = lora_trainer.n_targets;
+const target_names = lora_trainer.target_names;
 
 /// Everything one layer's forward needs besides the differentiable inputs.
 /// Stored BY VALUE in checkpoint backward nodes: pointers/slices reference
@@ -421,23 +417,25 @@ pub fn Trainer(comptime targets: Targets) type {
 
         const Self = @This();
 
-        fn enabled(comptime t: usize) bool {
-            return @field(targets, target_names[t]);
-        }
+        /// The family-independent adapter machinery for this target set
+        /// (`llm/lora_trainer.zig`); qwen3 supplies only the projection
+        /// shapes and the forward.
+        const adapter_set = lora_trainer.AdapterSet(targets, dropout_domain);
 
-        fn TargetAdapter(comptime t: usize) type {
-            return switch (t) {
-                0 => lora.Adapter(.embed, .q),
-                1 => lora.Adapter(.embed, .k),
-                2 => lora.Adapter(.embed, .v),
-                3 => lora.Adapter(.attn, .embed),
-                4, 5 => lora.Adapter(.embed, .ffn),
-                6 => lora.Adapter(.ffn, .embed),
-                else => unreachable,
-            };
-        }
+        const enabled = adapter_set.enabled;
+
+        const TargetAdapter = adapter_set.TargetAdapter;
 
         /// {in_dim, out_dim} of target `t`'s frozen projection.
+        /// Every target's `[in, out]` shape, in `target_names` order — the
+        /// form `adapter_set.initLayerAdapters` takes. qwen3's geometry is
+        /// layer-independent, so one array serves every layer.
+        fn targetDimsAll(cfg: qwen3.Config) lora_trainer.TargetDims {
+            var dims: lora_trainer.TargetDims = undefined;
+            inline for (0..n_targets) |t| dims[t] = targetDims(cfg, t);
+            return dims;
+        }
+
         fn targetDims(cfg: qwen3.Config, comptime t: usize) [2]usize {
             const q_dim = cfg.num_attention_heads * cfg.head_dim;
             return switch (t) {
@@ -450,51 +448,18 @@ pub fn Trainer(comptime targets: Targets) type {
             };
         }
 
-        pub const n_enabled = blk: {
-            var n: usize = 0;
-            for (0..n_targets) |t| {
-                if (enabled(t)) n += 1;
-            }
-            break :blk n;
-        };
+        pub const n_enabled = adapter_set.n_enabled;
 
         /// Position of target `t`'s A tensor within the A/B tuple (B is +1).
-        fn abIndex(comptime t: usize) usize {
-            comptime {
-                var j: usize = 0;
-                for (0..t) |i| {
-                    if (enabled(i)) j += 2;
-                }
-                return j;
-            }
-        }
+        const abIndex = adapter_set.abIndex;
 
-        pub const LayerAdapters = struct {
-            q: if (targets.q) TargetAdapter(0) else void,
-            k: if (targets.k) TargetAdapter(1) else void,
-            v: if (targets.v) TargetAdapter(2) else void,
-            o: if (targets.o) TargetAdapter(3) else void,
-            gate: if (targets.gate) TargetAdapter(4) else void,
-            up: if (targets.up) TargetAdapter(5) else void,
-            down: if (targets.down) TargetAdapter(6) else void,
-        };
+        pub const LayerAdapters = adapter_set.LayerAdapters;
 
-        const ab_ptr_types = blk: {
-            var types: [2 * n_enabled]type = undefined;
-            var j: usize = 0;
-            for (0..n_targets) |t| {
-                if (enabled(t)) {
-                    types[j] = *const TargetAdapter(t).ATensor;
-                    types[j + 1] = *const TargetAdapter(t).BTensor;
-                    j += 2;
-                }
-            }
-            break :blk types;
-        };
+        const ab_ptr_types = adapter_set.ab_ptr_types;
 
         /// The enabled adapters' A/B pointers, in target order — the shared
         /// currency of the plain and checkpointed layer paths.
-        const AbTuple = std.meta.Tuple(&ab_ptr_types);
+        const AbTuple = adapter_set.AbTuple;
 
         const InputsTuple = std.meta.Tuple(&([_]type{*const Hidden} ++ ab_ptr_types));
 
@@ -508,7 +473,7 @@ pub fn Trainer(comptime targets: Targets) type {
             var built_layers: usize = 0;
             errdefer for (adapters[0..built_layers]) |*ads| deinitLayerAdaptersPartial(ads, n_enabled);
             for (adapters, 0..) |*ads, layer_i| {
-                try initLayerAdapters(ctx, ads, model.config, config, seed, layer_i);
+                try adapter_set.initLayerAdapters(ctx, ads, targetDimsAll(model.config), config, seed, layer_i);
                 built_layers += 1;
             }
 
@@ -578,41 +543,9 @@ pub fn Trainer(comptime targets: Targets) type {
             self.* = undefined;
         }
 
-        fn initLayerAdapters(
-            ctx: *ExecContext,
-            ads: *LayerAdapters,
-            model_config: qwen3.Config,
-            config: lora.Config,
-            seed: u64,
-            layer_i: usize,
-        ) !void {
-            var built: usize = 0;
-            errdefer deinitLayerAdaptersPartial(ads, built);
-            inline for (0..n_targets) |t| {
-                if (comptime enabled(t)) {
-                    const dims = targetDims(model_config, t);
-                    @field(ads.*, target_names[t]) = try TargetAdapter(t).init(
-                        ctx,
-                        dims[0],
-                        dims[1],
-                        config,
-                        rng.at(seed, layer_i * n_targets + t),
-                    );
-                    built += 1;
-                }
-            }
-        }
-
         /// Deinit the first `built` enabled adapters (full teardown at
         /// `built == n_enabled`); the partial form serves init error paths.
-        fn deinitLayerAdaptersPartial(ads: *LayerAdapters, built: usize) void {
-            inline for (0..n_targets) |t| {
-                if (comptime enabled(t)) {
-                    const ordinal = comptime abIndex(t) / 2;
-                    if (ordinal < built) @field(ads.*, target_names[t]).deinit();
-                }
-            }
-        }
+        const deinitLayerAdaptersPartial = adapter_set.deinitLayerAdaptersPartial;
 
         /// Register every adapter A/B on `opt` (anything with `addParamNamed`)
         /// under the "layers.<i>.<target>" names. The trainer must outlive the
@@ -659,13 +592,7 @@ pub fn Trainer(comptime targets: Targets) type {
         /// counts); `.sum` + `loss_scale = 1.0/total_valid` (valid = labels
         /// != `ignore_index` across the window) is the exact token-weighted
         /// mean. See docs/TRAINING.md §4 "Gradient accumulation".
-        pub const LossOptions = struct {
-            /// CE reduction over the non-ignored positions.
-            reduction: enum { mean, sum } = .mean,
-            /// Multiplies the returned loss (and thus the gradients) via the
-            /// differentiable `scale` op when != 1.
-            loss_scale: f32 = 1,
-        };
+        pub const LossOptions = lora_trainer.LossOptions;
 
         /// `loss` with explicit reduction/scale (same exec-scope requirement,
         /// scope-owned result, and one step-counter advance per call).
@@ -1264,25 +1191,10 @@ pub fn Trainer(comptime targets: Targets) type {
         const dropout_domain: u64 = 0x64726f70_64726f70;
 
         fn layerSeeds(self: *const Self, step: ?u64, layer_i: usize) [n_targets]?u64 {
-            var seeds: [n_targets]?u64 = [1]?u64{null} ** n_targets;
-            const s = step orelse return seeds;
-            const base = (s * @as(u64, self.model.config.num_layers) + layer_i) * n_targets;
-            for (&seeds, 0..) |*seed, t| seed.* = rng.at(self.seed ^ dropout_domain, base + t);
-            return seeds;
+            return adapter_set.layerSeeds(self.seed, self.model.config.num_layers, step, layer_i);
         }
 
-        fn abTuple(ads: *const LayerAdapters) AbTuple {
-            var abs: AbTuple = undefined;
-            comptime var j: usize = 0;
-            inline for (0..n_targets) |t| {
-                if (comptime enabled(t)) {
-                    abs[j] = &@field(ads.*, target_names[t]).a;
-                    abs[j + 1] = &@field(ads.*, target_names[t]).b;
-                    j += 2;
-                }
-            }
-            return abs;
-        }
+        const abTuple = adapter_set.abTuple;
 
         fn checkpointInputs(x: *const Hidden, ads: *const LayerAdapters) InputsTuple {
             var inputs: InputsTuple = undefined;
