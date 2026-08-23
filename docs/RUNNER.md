@@ -45,7 +45,9 @@ structural vocabulary, not family names:
   DeepSeek-MoE vocabulary). Heavy linears and the fused MoE mixture run on
   fucina kernels in both styles; `hostStep` is this style's forward entry,
   and `hostLayerForward` carries a nullable `mtp_cache` seam for the
-  glm4moe family's MTP head.
+  glm4moe family's MTP head. The two styles guard each other's entries:
+  a fused entry on a host model (or `hostStep` on a fused one) returns
+  `Error.WrongBlockStyle` instead of computing something wrong.
 
 ## Correctness status
 

@@ -7559,7 +7559,7 @@ The full method inventory, grouped (every name is a `Backend` method; the
 
 | Family | Methods |
 |---|---|
-| elementwise | `addInto`, `addContiguousIntoUnchecked`, `subInto`, `subContiguousIntoUnchecked`, `mulInto`, `mulContiguousIntoUnchecked`, `maximumContiguousIntoUnchecked`, `minimumContiguousIntoUnchecked`, `elementwiseContiguousIntoTyped`, `scaleInto`, `unaryContiguousIntoUnchecked`, `leakyReluContiguousIntoUnchecked`, `clampContiguousIntoUnchecked`, `gatedContiguousIntoUnchecked` |
+| elementwise | `addInto`, `addContiguousIntoUnchecked`, `subInto`, `subContiguousIntoUnchecked`, `mulInto`, `mulContiguousIntoUnchecked`, `divContiguousIntoUnchecked`, `maximumContiguousIntoUnchecked`, `minimumContiguousIntoUnchecked`, `elementwiseContiguousIntoTyped`, `scaleInto`, `unaryContiguousIntoUnchecked`, `leakyReluContiguousIntoUnchecked`, `clampContiguousIntoUnchecked`, `gatedContiguousIntoUnchecked` |
 | row/slice helpers | `addScaledSliceUnchecked`, `addRowVectorSliceUnchecked`, `addRowVectorUnarySliceUnchecked`, `unaryRowSliceUnchecked`, `mulRowSliceUnchecked`, `preluChannelsIntoUnchecked`, `preluChannelsBackwardInputIntoUnchecked`, `preluChannelsBackwardAlphaIntoUnchecked`, `channelAffineIntoUnchecked` |
 | reductions | `sumInto`, `sumSlice`, `prodInto`, `prodSlice`, `sumSliceTyped`, `dotInto`, `dotIntoTyped` |
 | 1-D conv | `causalDepthwiseConv1dInto` (+`BackwardInputInto`, `BackwardKernelInto`), `causalConv1dInto` (+`BackwardInputInto`, `BackwardWeightInto`), `groupedCausalConv1dInto` (+`BackwardInputInto`, `BackwardWeightInto`), `conv1dInto` (+`BackwardInputInto`, `BackwardWeightInto`), `col2im1dInto`, `col2im1dBackwardInto` |
@@ -7682,7 +7682,9 @@ splits is decided by the thread-count gates in `common.zig`
 |---|---|---|
 | `vector_max_threads` | `-Dmax-threads` (default 8) | comptime team ceiling and stack-array bound |
 | `vector_elementwise_len_threshold` | 256 Ki elements | below this, elementwise/conv kernels stay serial |
+| `row_kernel_len_threshold` | `vector_elementwise_len_threshold / 2` | pool gate of the fused row kernels (softmax/norm/loss rows, quantized row passes); the halving is policy in one place |
 | `vector_matmul_work_threshold` | 1 Mi (m·n·k) | row-split GEMM gate |
+| `attention_work_threshold` | `vector_matmul_work_threshold / 2` | pool gate of the attention kernels (same one-place ratio policy) |
 | `vector_batched_work_threshold` | 2 Mi | batched GEMM gate |
 | `vector_column_min_m` / `vector_column_min_n` | 32 / 128 | column splits are chosen for decode-shaped GEMMs with `m <` the m constant **and** `n ≥` the n constant; at `m ≥ 32` splitting is by rows |
 | `vector_column_chunk` | 64 | columns per task in column splits |
@@ -9229,6 +9231,12 @@ its normalization arms, and its determinism contract are
 
 ### 11.2 Optimizers (`src/optim.zig`)
 
+`src/optim.zig` is the facade (every `fucina.optim.*` name below); the
+bodies live in `src/optim/` — `common` (the shared substrate: `Param`,
+state-buffer dtypes, the deterministic norm reduction, clipping), `frame`
+(checkpoint frames, §11.5), `moment_pair` (Adam/AdamW), `muon`, `apollo`,
+`sgd`, `schedule` (§11.4), and `set` (§11.3).
+
 Each optimizer is a faithful port of a reference implementation, pinned by
 golden parity tests against the actual references (PyTorch 2.12, Keller
 Jordan's muon.py, apollo_torch — `src/optim_tests.zig`):
@@ -9748,7 +9756,7 @@ pub const ParamRegistry = struct {
     pub fn saveStateDict(self: *const ParamRegistry, writer: *std.Io.Writer) !void
     pub fn loadStateDict(self: *ParamRegistry, reader: *std.Io.Reader, options: state_dict.LoadOptions) !void
 };
-pub const ParamView = struct { name, dtype, shape, bytes: []u8, trainable: bool };
+pub const ParamView = struct { name, dtype, shape, bytes: []u8, trainable: bool }; // also `fucina.ParamView`
 ```
 
 - `addParam` registers one tensor under an explicit name. Variables
@@ -13807,7 +13815,10 @@ test "qwen3 reference config" {
 ```
 
 `pub const Error = weights.Error || error{ InvalidConfig,
-InvalidSequenceLength, MismatchedKvCaches }`. Public surface on `Model`:
+InvalidSequenceLength, MismatchedKvCaches, KvCacheOverflow, WrongBlockStyle }`
+(`WrongBlockStyle`: a fused entry — `forwardStep*`, `forwardLastLogits*`,
+`initKvCache` — called on a `.host_reference` model, or `hostStep`/
+`initHostCache` on a `.fused` one). Public surface on `Model`:
 `loadGguf`, `loadGgufOptions`, `loadGgufFromFile`, `loadGgufFromFileOptions`
 (opt-in MoE expert disk streaming, `LoadOptions.moe_stream`), `deinit`,
 `forwardLastLogits`, `forwardLastLogitsProfiled`, `initKvCache`,
@@ -13817,7 +13828,11 @@ plus `ForwardProfile`, `MoeStreamOptions`, `LoadOptions`, `Layer`,
 `DenseFfn`, `QkvProjection`/`splitQkv`, `GateUpProjection`/`splitGateUp`
 (the block-structure seam train.zig shares — the trainer's differentiable
 forward reads the same layer structs and splits fused projections through
-the same functions), and `applyExpertTopP` at module level. Greedy
+the same functions; `DenseFfn`/`GateUpProjection` are re-exports of
+`src/llm/model_common.zig`, the load band the runner and qwen35 share:
+PTQTP-aware projections, the dense-FFN containers, the MoE expert trio,
+the embed/norm/lm-head trio, and the GQA head map), and `applyExpertTopP`
+at module level. Greedy
 generation and PTQTP decoration/persistence live in sibling modules:
 `llm.qwen3.generate` (`greedy`, `Options`) and `llm.qwen3.ptqtp`
 (`decorate`, `DecorateOptions`, `save`, §10.9).
