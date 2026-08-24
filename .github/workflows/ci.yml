@@ -103,42 +103,21 @@ jobs:
               b.step("run", "Run the smoke program").dependOn(&run.step);
           }
           BUILD
-          cat > src/main.zig <<'MAIN'
-          const std = @import("std");
-          const fucina = @import("fucina");
-          const models = @import("fucina_models");
+          # Single source: the consumer program IS examples/smoke/main.zig
+          # (compile-gated in-tree by `zig build smoke`), so the two can never
+          # drift apart. Only the fucina_models probe is appended here — the
+          # smoke example does not import the models module.
+          cp "$GITHUB_WORKSPACE/examples/smoke/main.zig" src/main.zig
+          cat >> src/main.zig <<'MAIN'
 
-          // Force semantic analysis of a fucina_models decl so the module
-          // really compiles.
+          // Package-consumer probe: force semantic analysis of a
+          // fucina_models decl so the second exported module really
+          // compiles as a dependency.
           comptime {
-              _ = models.text.speculative;
-          }
-
-          pub fn main(init: std.process.Init) !void {
-              const alloc = init.arena.allocator();
-              var ctx: fucina.ExecContext = undefined;
-              ctx.init(alloc);
-              defer ctx.deinit();
-
-              var x = try fucina.Tensor(.{ .batch, .in }).variable(&ctx, try ctx.fromSlice(&.{ 1, 2 }, &.{ 2, 3 }));
-              defer x.deinit();
-              var w = try fucina.Tensor(.{ .in, .out }).variable(&ctx, try ctx.fromSlice(&.{ 2, 1 }, &.{ 4, 5 }));
-              defer w.deinit();
-
-              var y = try x.dot(&ctx, &w, .in);
-              defer y.deinit();
-              var loss = try y.sumAll(&ctx);
-              defer loss.deinit();
-              try loss.backward(&ctx);
-              var gx = (try x.grad(&ctx)).?;
-              defer gx.deinit();
-
-              var out_buffer: [128]u8 = undefined;
-              var writer = std.Io.File.stdout().writer(init.io, &out_buffer);
-              try writer.interface.print("loss={d} dx0={d}\n", .{ try loss.item(), (try gx.dataConst())[0] });
-              try writer.interface.flush();
+              _ = @import("fucina_models").text.speculative;
           }
           MAIN
           zig fetch --save "$RUNNER_TEMP/fucina-pkg.tar.gz"
           zig build run -Doptimize=ReleaseFast | tee run-out.txt
-          grep -q "loss=23 dx0=4" run-out.txt
+          grep -q "loss=23" run-out.txt
+          grep -q "grad_x=\[4, 5\]" run-out.txt
