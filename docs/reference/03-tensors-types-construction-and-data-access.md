@@ -26,10 +26,11 @@ const fucina = @import("fucina");
 ## 3.1 The `Tensor(spec)` type constructor (`src/ag/tensor.zig`, `src/tags.zig`)
 
 ```zig
-pub fn Tensor(comptime tags_spec: anytype) type
+pub fn Tensor(comptime spec: anytype) type
 ```
 
-`spec` takes one of five forms, all normalized by `src/tags.zig`:
+`spec` takes one of five forms, all normalized by `src/tags.zig` before
+the branch is instantiated:
 
 | Spec form | Example | Meaning |
 |---|---|---|
@@ -447,7 +448,7 @@ pool mid-forward (see [MEMORY-MODEL.md](../MEMORY-MODEL.md) and [§6](06-the-exe
   fence, not permission to share a handle across threads ([§9.9](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#99-gpu-offload-srcbackendgpuzig-metalzig-cudazig)).
 
 ```zig
-pub fn detach(self: *const Self, ctx: *ExecContext) !Self       // f32 + typed-float branches
+pub fn detach(self: *const Self, ctx: *ExecContext) !Self       // every scalar-dtype branch (a no-grad view)
 pub fn materialize(self: *const Self, ctx: *ExecContext) !Self  // all branches
 pub fn contiguous(self: *const Self, ctx: *ExecContext) !Self   // f32 branch only
 pub fn isContiguous(self: *const Self) bool                     // all branches
