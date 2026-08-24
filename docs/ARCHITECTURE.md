@@ -239,7 +239,9 @@ Autograd:
   dtype; differentiable on f32), `autograd.zig` (leaves, gradients,
   backward; f32 and the 16-bit leaves), the f32-only per-domain mixins in
   `src/ag/tensor/float/` (elementwise, matmul, reduce, shape, ...), and
-  `typed_constant.zig` (typed constructors and the non-f32 math);
+  the typed-branch mixins in `src/ag/tensor/typed/` (`creation.zig`,
+  `math.zig` over the stored dtype, `int.zig`, and the f16/bf16
+  `widened.zig` family);
   `src/ag/tensor/plumbing.zig`: shared result-finishing and dispatch
   helpers. The `src/ag/tensor/` files never import the facade back — they
   receive it as a comptime parameter (`Self.ag_root` / `Mod(ag_tensor)`),
@@ -283,8 +285,8 @@ fucina.zig
      safetensors, training_checkpoint)
 
 ag/tensor.zig
-  -> ag/tensor/ (common/views/autograd mixins, float/ method mixins,
-     typed_constant.zig, plumbing.zig),
+  -> ag/tensor/ (common/views/autograd mixins, float/ and typed/ method
+     mixins, plumbing.zig),
      ag/{core,backward,control}.zig, tags.zig, tag_ops.zig, exec.zig,
      backend.zig, tensor.zig, dtype.zig
 

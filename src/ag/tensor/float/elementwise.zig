@@ -52,8 +52,7 @@ pub fn Ops(comptime Self: type) type {
         const finishNoGrad = plumbing.finishNoGrad;
         const TensorObject = plumbing.TensorObject;
         const tensorObjectPtrFrom = plumbing.tensorObjectPtrFrom;
-        const typed_constant = @import("../typed_constant.zig").Mod(ag_tensor);
-        const typedFinishOp = typed_constant.typedFinishOp;
+        const typedFinishOp = plumbing.typedFinishOp;
 
         /// In-place: add the `[axis_dim]` `bias` to every row of `self` along the
         /// last axis `axis_tag`, mutating `self`.

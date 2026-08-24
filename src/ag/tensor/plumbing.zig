@@ -237,6 +237,61 @@ pub fn Mod(comptime ag_tensor: type) type {
             }
         }
 
+        /// Typed forward ops are no-grad: a grad-requiring operand would silently
+        /// drop its graph, so it is rejected instead (`to(.f32)` is the trained
+        /// path; the differentiable typed entries are `to` and the mixed-RHS
+        /// `dot`/`einsum`).
+        pub fn typedRequireNoGrad(operand: anytype) !void {
+            if (operand.requiresGrad()) return error.UnsupportedGradient;
+        }
+
+        /// Scope payload for a grad-carrying 16-bit result: the exec-scope slot
+        /// holds f32 values only, so the typed value travels inside the type-erased
+        /// node payload with a destructor that frees value + graph node together.
+        pub fn TypedScopePayload(comptime tensor_dtype: DType) type {
+            return struct {
+                allocator: std.mem.Allocator,
+                value: tensor_mod.TensorOf(tensor_dtype),
+                state: *GradState,
+
+                fn destroy(ptr: *anyopaque) void {
+                    const payload: *@This() = @ptrCast(@alignCast(ptr));
+                    payload.value.deinit();
+                    payload.state.deinit();
+                    payload.allocator.destroy(payload);
+                }
+            };
+        }
+
+        /// `finishOp` for a differentiable op whose RESULT is 16-bit (today: the
+        /// f32 -> f16/bf16 cast). Same contract as `finishOp`: consumes `value` on
+        /// success; under an active exec scope the result is a scope-owned borrow.
+        pub fn typedFinishOp(
+            comptime tensor_dtype: DType,
+            comptime result_tags: anytype,
+            ctx: *ExecContext,
+            value: tensor_mod.TensorOf(tensor_dtype),
+            wants_grad: bool,
+            comptime BackwardType: type,
+            create_args: anytype,
+        ) !Tensor(.{ .dtype = tensor_dtype, .tags = result_tags }) {
+            const OutT = Tensor(.{ .dtype = tensor_dtype, .tags = result_tags });
+            if (!wants_grad or !control.isGradEnabled()) {
+                return OutT.fromTensor(ctx, value);
+            }
+            if (ctx.execScopeActive()) {
+                try ctx.reserveScopeSlot();
+                const payload = try ctx.allocator.create(TypedScopePayload(tensor_dtype));
+                errdefer ctx.allocator.destroy(payload);
+                const state = try core.createNode(BackwardType, create_args);
+                payload.* = .{ .allocator = ctx.allocator, .value = value, .state = state };
+                ctx.adoptScopeNodeAssumeCapacity(payload, TypedScopePayload(tensor_dtype).destroy);
+                return .{ .value = value, .grad_state = state, .scope_owned = true };
+            }
+            const state = try core.createNode(BackwardType, create_args);
+            return .{ .value = value, .grad_state = state };
+        }
+
         /// Shared no-grad tail: wrap as a constant and, when an exec scope is open,
         /// hand ownership to the scope. Same value-ownership contract as `fromTensor`.
         pub fn finishNoGrad(comptime result_tags: anytype, ctx: *ExecContext, value: RawTensor) !Tensor(result_tags) {

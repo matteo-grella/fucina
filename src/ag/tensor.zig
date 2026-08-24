@@ -42,7 +42,6 @@ const ag_file = @This();
 
 const plumbing = @import("tensor/plumbing.zig").Mod(ag_file);
 pub const einsumMany = plumbing.einsumMany;
-const typed_constant = @import("tensor/typed_constant.zig").Mod(ag_file);
 
 /// Input counts covered by the stack fast path for `concat`/`stack` metadata
 /// temporaries (input pointers, backward parents/sizes); larger input counts
@@ -491,17 +490,17 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
         pub const repeatAxis = views.repeatAxis;
 
         // ---- creation ----
-        const base = typed_constant.TypedConstantBase(Self, tags, tensor_dtype);
-        pub const constant = base.constant;
-        pub const fromTensor = base.fromTensor;
-        pub const fromSlice = base.fromSlice;
-        pub const fromBorrowedConstSlice = base.fromBorrowedConstSlice;
-        pub const empty = base.empty;
-        pub const zeros = base.zeros;
-        pub const ones = base.ones;
-        pub const emptyLike = base.emptyLike;
-        pub const zerosLike = base.zerosLike;
-        pub const onesLike = base.onesLike;
+        const creation_ops = @import("tensor/typed/creation.zig").Ops(Self);
+        pub const constant = creation_ops.constant;
+        pub const fromTensor = creation_ops.fromTensor;
+        pub const fromSlice = creation_ops.fromSlice;
+        pub const fromBorrowedConstSlice = creation_ops.fromBorrowedConstSlice;
+        pub const empty = creation_ops.empty;
+        pub const zeros = creation_ops.zeros;
+        pub const ones = creation_ops.ones;
+        pub const emptyLike = creation_ops.emptyLike;
+        pub const zerosLike = creation_ops.zerosLike;
+        pub const onesLike = creation_ops.onesLike;
 
         /// Snapshot this rank-2 f16/bf16 `[out, contract]` weight as f32
         /// output-row panels for a FloatTensor `dotPacked`. Widening happens
@@ -516,78 +515,80 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
             return ctx.packDenseMatmulRhs(tensor_dtype, self.asRawTensor());
         }
 
-        // ---- native typed math (every typed float dtype) ----
-        pub const to = typed_constant.typedConstantTo;
-        pub const add = typed_constant.typedConstantAdd;
-        pub const sub = typed_constant.typedConstantSub;
-        pub const mul = typed_constant.typedConstantMul;
-        pub const div = typed_constant.typedConstantDiv;
-        pub const sum = typed_constant.typedConstantSum;
-        pub const mean = typed_constant.typedConstantMean;
-        pub const sumAll = typed_constant.typedConstantSumAll;
-        pub const dot = typed_constant.typedConstantDot;
-        pub const scale = typed_constant.typedConstantScale;
-        pub const divScalar = typed_constant.typedConstantDivScalar;
+        // ---- math over the stored dtype (every typed float dtype) ----
+        const math_ops = @import("tensor/typed/math.zig").Ops(Self);
+        pub const to = math_ops.to;
+        pub const add = math_ops.add;
+        pub const sub = math_ops.sub;
+        pub const mul = math_ops.mul;
+        pub const div = math_ops.div;
+        pub const sum = math_ops.sum;
+        pub const mean = math_ops.mean;
+        pub const sumAll = math_ops.sumAll;
+        pub const dot = math_ops.dot;
+        pub const scale = math_ops.scale;
+        pub const divScalar = math_ops.divScalar;
 
         // ---- widened forward math (f16/bf16 only: f32 compute, one final round) ----
-        pub const unary = typed_constant.typedConstantUnary;
-        pub const relu = typed_constant.TypedUnaryMethod(.relu).call;
-        pub const exp = typed_constant.TypedUnaryMethod(.exp).call;
-        pub const sqrt = typed_constant.TypedUnaryMethod(.sqrt).call;
-        pub const rsqrt = typed_constant.TypedUnaryMethod(.rsqrt).call;
-        pub const sigmoid = typed_constant.TypedUnaryMethod(.sigmoid).call;
-        pub const silu = typed_constant.TypedUnaryMethod(.silu).call;
-        pub const log = typed_constant.TypedUnaryMethod(.log).call;
-        pub const log1p = typed_constant.TypedUnaryMethod(.log1p).call;
-        pub const neg = typed_constant.TypedUnaryMethod(.neg).call;
-        pub const abs = typed_constant.TypedUnaryMethod(.abs).call;
-        pub const sin = typed_constant.TypedUnaryMethod(.sin).call;
-        pub const cos = typed_constant.TypedUnaryMethod(.cos).call;
-        pub const tanh = typed_constant.TypedUnaryMethod(.tanh).call;
-        pub const fastTanh = typed_constant.TypedUnaryMethod(.fast_tanh).call;
-        pub const softcap30 = typed_constant.TypedUnaryMethod(.softcap_30).call;
-        pub const softcap15 = typed_constant.TypedUnaryMethod(.softcap_15).call;
-        pub const gelu = typed_constant.TypedUnaryMethod(.gelu).call;
-        pub const quickGelu = typed_constant.TypedUnaryMethod(.quick_gelu).call;
-        pub const elu = typed_constant.TypedUnaryMethod(.elu).call;
-        pub const geluErf = typed_constant.TypedUnaryMethod(.gelu_erf).call;
-        pub const erf = typed_constant.TypedUnaryMethod(.erf).call;
-        pub const floor = typed_constant.TypedUnaryMethod(.floor).call;
-        pub const ceil = typed_constant.TypedUnaryMethod(.ceil).call;
-        pub const round = typed_constant.TypedUnaryMethod(.round).call;
-        pub const sign = typed_constant.TypedUnaryMethod(.sign).call;
-        pub const reciprocal = typed_constant.TypedUnaryMethod(.reciprocal).call;
-        pub const leakyRelu = typed_constant.typedConstantLeakyRelu;
-        pub const clamp = typed_constant.typedConstantClamp;
-        pub const addScalar = typed_constant.typedConstantAddScalar;
-        pub const subScalar = typed_constant.typedConstantSubScalar;
-        pub const powScalar = typed_constant.typedConstantPowScalar;
-        pub const maximum = typed_constant.typedConstantMaximum;
-        pub const minimum = typed_constant.typedConstantMinimum;
-        pub const gated = typed_constant.typedConstantGated;
-        pub const glu = typed_constant.typedConstantGlu;
-        pub const swiglu = typed_constant.typedConstantSwiglu;
-        pub const geglu = typed_constant.typedConstantGeglu;
-        pub const softmax = typed_constant.typedConstantSoftmax;
-        pub const logSoftmax = typed_constant.typedConstantLogSoftmax;
-        pub const rmsNorm = typed_constant.typedConstantRmsNorm;
-        pub const rmsNormMul = typed_constant.typedConstantRmsNormMul;
-        pub const layerNorm = typed_constant.typedConstantLayerNorm;
-        pub const cumsum = typed_constant.typedConstantCumsum;
-        pub const cumprod = typed_constant.typedConstantCumprod;
-        pub const where = typed_constant.typedConstantWhere;
-        pub const maskedFill = typed_constant.typedConstantMaskedFill;
-        pub const compare = typed_constant.typedConstantCompare;
-        pub const pad = typed_constant.typedConstantPad;
-        pub const einsum = typed_constant.typedConstantEinsum;
+        const widened_ops = @import("tensor/typed/widened.zig").Ops(Self);
+        pub const unary = widened_ops.unary;
+        pub const relu = widened_ops.relu;
+        pub const exp = widened_ops.exp;
+        pub const sqrt = widened_ops.sqrt;
+        pub const rsqrt = widened_ops.rsqrt;
+        pub const sigmoid = widened_ops.sigmoid;
+        pub const silu = widened_ops.silu;
+        pub const log = widened_ops.log;
+        pub const log1p = widened_ops.log1p;
+        pub const neg = widened_ops.neg;
+        pub const abs = widened_ops.abs;
+        pub const sin = widened_ops.sin;
+        pub const cos = widened_ops.cos;
+        pub const tanh = widened_ops.tanh;
+        pub const fastTanh = widened_ops.fastTanh;
+        pub const softcap30 = widened_ops.softcap30;
+        pub const softcap15 = widened_ops.softcap15;
+        pub const gelu = widened_ops.gelu;
+        pub const quickGelu = widened_ops.quickGelu;
+        pub const elu = widened_ops.elu;
+        pub const geluErf = widened_ops.geluErf;
+        pub const erf = widened_ops.erf;
+        pub const floor = widened_ops.floor;
+        pub const ceil = widened_ops.ceil;
+        pub const round = widened_ops.round;
+        pub const sign = widened_ops.sign;
+        pub const reciprocal = widened_ops.reciprocal;
+        pub const leakyRelu = widened_ops.leakyRelu;
+        pub const clamp = widened_ops.clamp;
+        pub const addScalar = widened_ops.addScalar;
+        pub const subScalar = widened_ops.subScalar;
+        pub const powScalar = widened_ops.powScalar;
+        pub const maximum = widened_ops.maximum;
+        pub const minimum = widened_ops.minimum;
+        pub const gated = widened_ops.gated;
+        pub const glu = widened_ops.glu;
+        pub const swiglu = widened_ops.swiglu;
+        pub const geglu = widened_ops.geglu;
+        pub const softmax = widened_ops.softmax;
+        pub const logSoftmax = widened_ops.logSoftmax;
+        pub const rmsNorm = widened_ops.rmsNorm;
+        pub const rmsNormMul = widened_ops.rmsNormMul;
+        pub const layerNorm = widened_ops.layerNorm;
+        pub const cumsum = widened_ops.cumsum;
+        pub const cumprod = widened_ops.cumprod;
+        pub const where = widened_ops.where;
+        pub const maskedFill = widened_ops.maskedFill;
+        pub const compare = widened_ops.compare;
+        pub const pad = widened_ops.pad;
+        pub const einsum = widened_ops.einsum;
 
         // ---- widened reductions (f16/bf16 only; f32 result per the dtype policy) ----
-        pub const max = typed_constant.typedConstantMax;
-        pub const min = typed_constant.typedConstantMin;
-        pub const argmax = typed_constant.typedConstantArgmax;
-        pub const prod = typed_constant.typedConstantProd;
-        pub const variance = typed_constant.typedConstantVariance;
-        pub const logsumexp = typed_constant.typedConstantLogsumexp;
+        pub const max = widened_ops.max;
+        pub const min = widened_ops.min;
+        pub const argmax = widened_ops.argmax;
+        pub const prod = widened_ops.prod;
+        pub const variance = widened_ops.variance;
+        pub const logsumexp = widened_ops.logsumexp;
     };
 }
 
@@ -655,49 +656,50 @@ fn TypedScalarTensor(comptime tags: anytype, comptime tensor_dtype: DType) type 
         pub const repeatAxis = views.repeatAxis;
 
         // ---- creation ----
-        const base = typed_constant.TypedConstantBase(Self, tags, tensor_dtype);
-        pub const constant = base.constant;
-        pub const fromTensor = base.fromTensor;
-        pub const fromSlice = base.fromSlice;
-        pub const fromBorrowedConstSlice = base.fromBorrowedConstSlice;
-        pub const empty = base.empty;
-        pub const zeros = base.zeros;
-        pub const ones = base.ones;
-        pub const emptyLike = base.emptyLike;
-        pub const zerosLike = base.zerosLike;
-        pub const onesLike = base.onesLike;
-        pub const randint = base.randint;
-        pub const randperm = base.randperm;
-        pub const bandMask = base.bandMask;
+        const creation_ops = @import("tensor/typed/creation.zig").Ops(Self);
+        pub const constant = creation_ops.constant;
+        pub const fromTensor = creation_ops.fromTensor;
+        pub const fromSlice = creation_ops.fromSlice;
+        pub const fromBorrowedConstSlice = creation_ops.fromBorrowedConstSlice;
+        pub const empty = creation_ops.empty;
+        pub const zeros = creation_ops.zeros;
+        pub const ones = creation_ops.ones;
+        pub const emptyLike = creation_ops.emptyLike;
+        pub const zerosLike = creation_ops.zerosLike;
+        pub const onesLike = creation_ops.onesLike;
+        pub const randint = creation_ops.randint;
+        pub const randperm = creation_ops.randperm;
+        pub const bandMask = creation_ops.bandMask;
 
         // ---- integer forward math (docs/reference/04-tensor-operations.md): wrapping
         // two's-complement pointwise, explicit division/remainder, bitwise
         // combinators, i64-returning reductions, and scalar casts. On
         // `.bool` the arithmetic entries are compile errors; only `to` and
         // the counting `sum`/`sumAll` apply. ----
-        pub const to = typed_constant.typedConstantTo;
-        pub const add = typed_constant.typedConstantAdd;
-        pub const sub = typed_constant.typedConstantSub;
-        pub const mul = typed_constant.typedConstantMul;
-        pub const maximum = typed_constant.typedConstantMaximum;
-        pub const minimum = typed_constant.typedConstantMinimum;
-        pub const divTrunc = typed_constant.typedConstantDivTrunc;
-        pub const divFloor = typed_constant.typedConstantDivFloor;
-        pub const rem = typed_constant.typedConstantRem;
-        pub const mod = typed_constant.typedConstantMod;
-        pub const bitAnd = typed_constant.typedConstantBitAnd;
-        pub const bitOr = typed_constant.typedConstantBitOr;
-        pub const bitXor = typed_constant.typedConstantBitXor;
-        pub const sum = typed_constant.typedConstantSum;
-        pub const sumAll = typed_constant.typedConstantSumAll;
+        const math_ops = @import("tensor/typed/math.zig").Ops(Self);
+        pub const to = math_ops.to;
+        pub const add = math_ops.add;
+        pub const sub = math_ops.sub;
+        pub const mul = math_ops.mul;
+        pub const maximum = math_ops.maximum;
+        pub const minimum = math_ops.minimum;
+        pub const sum = math_ops.sum;
+        pub const sumAll = math_ops.sumAll;
+        pub const compare = math_ops.compare;
+        const int_ops = @import("tensor/typed/int.zig").Ops(Self);
+        pub const divTrunc = int_ops.divTrunc;
+        pub const divFloor = int_ops.divFloor;
+        pub const rem = int_ops.rem;
+        pub const mod = int_ops.mod;
+        pub const bitAnd = int_ops.bitAnd;
+        pub const bitOr = int_ops.bitOr;
+        pub const bitXor = int_ops.bitXor;
 
-        // ---- masks: integer `compare` is exact at any magnitude; the logical
-        // combinators live on the `.bool` branch. ----
-        pub const compare = typed_constant.typedConstantCompare;
-        pub const logicalAnd = typed_constant.typedConstantLogicalAnd;
-        pub const logicalOr = typed_constant.typedConstantLogicalOr;
-        pub const logicalXor = typed_constant.typedConstantLogicalXor;
-        pub const logicalNot = typed_constant.typedConstantLogicalNot;
+        // ---- masks: the logical combinators live on the `.bool` branch ----
+        pub const logicalAnd = int_ops.logicalAnd;
+        pub const logicalOr = int_ops.logicalOr;
+        pub const logicalXor = int_ops.logicalXor;
+        pub const logicalNot = int_ops.logicalNot;
     };
 }
 
