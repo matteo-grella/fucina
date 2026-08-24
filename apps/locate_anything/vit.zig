@@ -407,7 +407,6 @@ pub fn buildRope2dTable(allocator: Allocator, gh: usize, gw: usize, head_dim: us
     return .{
         .allocator = allocator,
         .positions = positions,
-        .theta_base = theta,
         .feature_dim = head_dim,
         .pair_count = pair_count,
         .values = values,
