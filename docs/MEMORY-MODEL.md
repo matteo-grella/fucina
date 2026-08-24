@@ -266,3 +266,24 @@ inference frame helper is unchanged.
   at startup: it surfaces under load, as page-cache eviction of the mmap'd
   weights. lmserve's startup KV RAM guard exists to front-load that
   arithmetic (docs/LMSERVER.md).
+
+## 7. The five ownership modes, in one place
+
+Every `Tensor` a caller holds is in exactly one of these modes. They are
+individually documented at their seams; this is the one-table view, because
+which `deinit` is a real release and which is a no-op depends on the mode,
+not on the type:
+
+| Mode | How a value enters it | What `deinit` does |
+| --- | --- | --- |
+| Caller-owned | `variable`/`constant`/`fromSlice`-style constructors, fetched gradients (`grad`/`gradView`), facade op results with NO exec scope open | releases the reference |
+| Scope-owned | any facade op result while an exec scope is open (the scope adopts value + autograd payload; the caller's handle is a borrow) | safe no-op; the scope frees at close |
+| Prepared | `PreparedTensorOf` (`prepareContiguous`): `union` of borrowed input vs owned copy | releases only the owned arm |
+| Taken | `take*` ops consume their target in place when `canTakeInPlace()` holds and return the same storage as a new value | releases the (single) reference |
+| Leased | `BufferPool.acquire`/`acquireScratch` handles (`release()`, not `deinit`) | n/a; `release` returns to the pool |
+
+The mode is dynamic state (`ctx.scope_depth`), not type state, by design:
+the same forward function must run caller-owned in inference and
+scope-owned in training (section 2). The cost of that design is exactly
+this table; when in doubt, `defer x.deinit()` is always correct — a
+scope-owned release is a safe no-op.

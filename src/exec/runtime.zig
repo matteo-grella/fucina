@@ -40,22 +40,22 @@ pub const ExecScope = struct {
 };
 
 pub fn init(self: *ExecContext, allocator: Allocator) void {
-    self.thread_safe_allocator = .{ .child_allocator = allocator };
+    // Every defaulted field takes its declared default from the struct
+    // literal, so the initial state has ONE source (the field decls in
+    // exec.zig); only the computed members are set here. `allocator` and
+    // `buffers` are assigned after the copy because the allocator interface
+    // must capture THIS context's `thread_safe_allocator` field, not the
+    // literal's temporary.
+    self.* = .{
+        .thread_safe_allocator = .{ .child_allocator = allocator },
+        .allocator = undefined,
+        .buffers = undefined,
+        .work_pool = undefined,
+        .dot_backward_worker = undefined,
+        .fp_env_at_init = fpenv.get(),
+    };
     self.allocator = self.thread_safe_allocator.allocator();
-    self.parallel_pool = .init(null);
     self.buffers = BufferPool.init(self.allocator);
-    self.work_pool = undefined;
-    self.work_pool_ready = false;
-    self.work_pool_mutex = .{};
-    self.dot_backward_worker = undefined;
-    self.dot_backward_worker_ready = false;
-    self.dot_backward_worker_mutex = .{};
-    self.scope_entries = .empty;
-    self.scope_depth = 0;
-    self.pin_rowwise_kernels = false;
-    self.tuning = .{};
-    self.fp_env_at_init = fpenv.get();
-    self.moe_scratch = .{};
 }
 
 /// `error.FloatEnvironmentChanged` when the calling thread's rounding or

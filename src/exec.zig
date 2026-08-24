@@ -119,6 +119,13 @@ const tailBroadcastInfo = exec_elementwise.tailBroadcastInfo;
 /// field below can name it.
 pub const BufferPool = exec_buffer_pool.BufferPool;
 
+/// The eager execution runtime. PINNED after `init`: `allocator` embeds a
+/// pointer to this context's own `thread_safe_allocator` field, so an
+/// initialized context must never be copied or moved — keep it in a stable
+/// stack frame or heap-allocate it, and hand out `*ExecContext` (every op
+/// already takes the pointer). Field defaults below are the initial state;
+/// `init` sets only what a fresh context must compute (see
+/// exec/runtime.zig).
 pub const ExecContext = struct {
     thread_safe_allocator: thread.ThreadSafeAllocator,
     allocator: Allocator,
