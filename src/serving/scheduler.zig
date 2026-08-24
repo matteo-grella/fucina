@@ -6,7 +6,7 @@
 //! contract (docs/reference/09-backends-cpu-simd-blas-threading-and-gpu-offload.md, Threading).
 
 const std = @import("std");
-const types = @import("contract.zig");
+const types = @import("fucina_models").text.serving;
 
 fn lock(m: *std.Io.Mutex) void {
     std.Io.Threaded.mutexLock(m);

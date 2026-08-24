@@ -5,8 +5,9 @@
 //! `GenerateResult`. Everything model-family-specific (template, tokenizer,
 //! cache type, generation paradigm) stays behind the `Backend` vtable, so a
 //! new family integrates by writing one adapter and a new server by
-//! consuming this band (the in-tree HTTP front end sits in `http.zig`,
-//! consumed by `apps/lmserve`). Every name here is re-exported flat on
+//! consuming this band (the in-tree HTTP front end sits in the
+//! `fucina_serving` module, `src/serving/http.zig`, consumed by
+//! `apps/lmserve`). Every name here is re-exported flat on
 //! `models.text.serving` (`../serving.zig`, the band index).
 
 const std = @import("std");

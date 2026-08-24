@@ -16,6 +16,7 @@
 const std = @import("std");
 const fucina = @import("fucina");
 const serving = @import("fucina_models").text.serving;
+const transport = @import("fucina_serving");
 
 pub const Role = enum { system, user, assistant };
 
@@ -275,7 +276,7 @@ pub const Client = struct {
     }
 };
 
-/// The `models.text.serving` chat server, hosted INSIDE this process on a thread.
+/// The `fucina_serving` chat server, hosted INSIDE this process on a thread.
 ///
 /// Not a child process: one binary, one process, no external executable to
 /// find, and nothing to leave orphaned if the agent dies. What it buys over
@@ -338,11 +339,11 @@ pub const Hosted = struct {
             .kv_slots = 2,
         }, sink);
         defer opened.deinit();
-        var sched = serving.scheduler.Scheduler.init(job.allocator, job.io, opened.backend, 16, 1);
+        var sched = transport.scheduler.Scheduler.init(job.allocator, job.io, opened.backend, 16, 1);
         try sched.start();
         defer sched.stop();
         var shutdown = std.atomic.Value(bool).init(false);
-        var server = serving.http.Server{
+        var server = transport.http.Server{
             .allocator = job.allocator,
             .io = job.io,
             .opts = .{ .host = "127.0.0.1", .port = job.port },

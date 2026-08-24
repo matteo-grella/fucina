@@ -39,8 +39,8 @@
 //! no `param` field, so offending fields are named in the message.
 
 const std = @import("std");
-const chat = @import("../chat.zig");
-const types = @import("contract.zig");
+const chat = @import("fucina_models").text.chat;
+const types = @import("fucina_models").text.serving;
 const openai = @import("openai.zig");
 const toolcall = @import("toolcall.zig");
 

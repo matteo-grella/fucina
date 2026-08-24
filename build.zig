@@ -133,6 +133,16 @@ pub fn build(b: *std.Build) void {
     models_module.addImport("fucina", module);
     models_module.addOptions("models_build_options", models_options);
 
+    // The transport band: HTTP server, scheduler, wire dialects. Model-free,
+    // written against the serving contract in fucina_models.text.serving.
+    const serving_module = b.addModule("fucina_serving", .{
+        .root_source_file = b.path("src/serving.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    serving_module.addImport("fucina", module);
+    serving_module.addImport("fucina_models", models_module);
+
     // Cross-target reuse: a module cannot @import above its root source
     // file's directory, so example/app code shared across folders is exposed as
     // named modules, created ONCE from the SAME fucina/fucina_models modules
@@ -187,9 +197,10 @@ pub fn build(b: *std.Build) void {
     _ = addTarget(b, tool_ctx, .{ .step = "deepseek4", .desc = "Run DeepSeek V4 Flash GGUF inference (CSA/HCA + streamed experts)", .exe = "fucina-deepseek4", .root = "apps/deepseek4/main.zig", .models = true });
     const voiceagent = addTarget(b, tool_ctx, .{ .step = "voiceagent", .desc = "Native cascade voice agent TUI: mic -> parakeet EOU STT -> qwen3 chat -> qwen3-tts -> speakers", .exe = "fucina-voiceagent", .root = "apps/voiceagent/main.zig", .models = true });
     voiceagent.exe.root_module.addImport("nam_audio", nam_audio_module);
+    voiceagent.exe.root_module.addImport("fucina_serving", serving_module);
     configureAudioShim(voiceagent.exe);
     configureLlguidance(voiceagent.exe, llguidance_dep);
-    // The agent hosts the models.text.serving chat server in-process, on a thread;
+    // The agent hosts the fucina_serving chat server in-process, on a thread;
     // the band's http layer needs libc on Linux (std.c.recv hang-up probe).
     voiceagent.exe.root_module.link_libc = true;
     _ = addTarget(b, tool_ctx, .{ .step = "pockettts", .desc = "Pocket TTS v2 from GGUF (kyutai port): continuous-latent flow-matching TTS, streaming Mimi decode", .exe = "fucina-pockettts", .root = "examples/pockettts/main.zig", .models = true });
@@ -211,6 +222,7 @@ pub fn build(b: *std.Build) void {
     configureLlguidance(gemma4.exe, llguidance_dep);
     const lmserve = addTarget(b, tool_ctx, .{ .step = "lmserve", .desc = "OpenAI-compatible language-model HTTP server (chat completions + responses; SSE streaming; JSON-schema constrained output with -Dllguidance=true) over qwen3/gemma4/diffusion-gemma GGUFs + nanochat checkpoints", .exe = "fucina-lmserve", .root = "apps/lmserve/main.zig", .models = true });
     lmserve.exe.root_module.addImport("nanochat", nanochat_module);
+    lmserve.exe.root_module.addImport("fucina_serving", serving_module);
     configureLlguidance(lmserve.exe, llguidance_dep);
     // Uses std.c.shutdown/recv (signal-driven accept unblock, MSG_PEEK
     // hang-up probe): libc links implicitly on macOS but must be declared
@@ -523,12 +535,16 @@ pub fn build(b: *std.Build) void {
     const test_models_step = b.step("test-models", "Run the models-root unit tests only");
     test_models_step.dependOn(&run_models_tests.step);
 
-    // The models.text.serving band's tests ride test-models (Zig collects tests from
-    // the root module only). That forces no libc on the models root: the band's
-    // tests never reach http's std.c hang-up probe, which lazy analysis
-    // leaves out of the test binary.
+    // The transport band's tests ride test-serving (src/serving.zig is its own
+    // test root; Zig collects tests from the root module only). No libc on that
+    // root: the tests never reach http's std.c hang-up probe, which lazy
+    // analysis leaves out of the test binary.
+    const serving_tests = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-serving", .desc = "Run the serving-root unit tests only (fucina_serving transport band)", .root = "src/serving.zig", .models = true });
+    configureLlguidance(serving_tests, llguidance_dep);
+
     const lmserve_tests = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-lmserve", .desc = "Run the lmserve-root unit tests only", .root = "apps/lmserve/main.zig", .models = true });
     lmserve_tests.root_module.addImport("nanochat", nanochat_module);
+    lmserve_tests.root_module.addImport("fucina_serving", serving_module);
     configureLlguidance(lmserve_tests, llguidance_dep);
     lmserve_tests.root_module.link_libc = true;
 
@@ -552,6 +568,7 @@ pub fn build(b: *std.Build) void {
     // instead of the full matrix.
     const voiceagent_tests = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-voiceagent", .desc = "Run the voiceagent-root unit tests only (GTCRN-AEC parity + duplex gates)", .root = "apps/voiceagent/main.zig", .models = true });
     voiceagent_tests.root_module.addImport("nam_audio", nam_audio_module);
+    voiceagent_tests.root_module.addImport("fucina_serving", serving_module);
     configureAudioShim(voiceagent_tests);
 
     _ = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-nanochat", .desc = "Run the nanochat-root unit tests only", .root = "apps/nanochat/main.zig", .models = true });
