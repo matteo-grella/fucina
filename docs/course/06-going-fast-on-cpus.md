@@ -100,8 +100,8 @@ One field. The backend owns numeric kernels and *nothing else*: no allocator, no
 
 Below this struct sit roughly ninety kernel entry points. Their **naming encodes the checking tier**, with one caveat you must internalize:
 
-- `...Into(out, ...) !void` — validates shapes itself and returns `TensorError.ShapeMismatch` on disagreement. This holds for the elementwise and reduction families (`addInto`, `sumInto`, …) and for `dot`; the dense `gemm` is unchecked by contract (exec validates the shapes before calling it).
-- **Caveat:** the conv/pool/norm families (`conv2dInto`, `pool2dInto`, `groupNormInto`, `im2colInto`, `snakeInto`, …) are `...Into`-*named* but plain `void` and **unchecked** — the exec layer validates their geometry before calling them. The naming convention is a strong hint, not a guarantee; `docs/reference/09-backends-cpu-simd-blas-threading-and-gpu-offload.md` lists exactly which families check.
+- `...Into(out, ...) !void`: validates shapes itself and returns `TensorError.ShapeMismatch` on disagreement. This holds for the elementwise and reduction families (`addInto`, `sumInto`, …) and for `dot`; the dense `gemm` is unchecked by contract (exec validates the shapes before calling it).
+- **Caveat:** the conv/pool/norm families (`conv2dInto`, `pool2dInto`, `groupNormInto`, `im2colInto`, `snakeInto`, …) are `...Into`-*named* but plain `void` and **unchecked**; the exec layer validates their geometry before calling them. The naming convention is a strong hint, not a guarantee; `docs/reference/09-backends-cpu-simd-blas-threading-and-gpu-offload.md` lists exactly which families check.
 - `...IntoUnchecked` / `...SliceUnchecked` — `void`; the caller has already validated shape and contiguity. Passing wrong geometry is illegal: an out-of-bounds slice panic in safe builds, **undefined behavior in ReleaseFast**.
 
 That last clause is the deal the whole architecture rests on. Kernels get to be small, branch-free, and fast *because* they check nothing — and they get to check nothing because exactly one layer above them (`ExecContext`, Chapter 5) checks everything, once. Validation is not sprinkled defensively through the stack; it has an address.
@@ -117,7 +117,7 @@ If you have read [Chapter 10](10-the-guitar-amp.md)'s preview in the course inde
 
 ## 6.4 The scalar backend is the specification
 
-Before admiring any SIMD, meet the code that keeps it honest. This is the native backend's matmul referee — the scalar backend's entire dense GEMM (`src/backend/cpu.zig`, `gemm`), one triple loop for every orientation and operand dtype the request can name:
+Before admiring any SIMD, meet the code that keeps it honest. This is the native backend's matmul referee, the scalar backend's entire dense GEMM (`src/backend/cpu.zig`, `gemm`), one triple loop for every orientation and operand dtype the request can name:
 
 ```zig
 pub fn gemm(
@@ -156,7 +156,7 @@ pub fn gemm(
 }
 ```
 
-Three loops, in the order the mathematical definition suggests; the orientation only changes which index each operand reads, and the request's dtypes only change the casts. Note the signature: it is *identical* to the native backend's — it even accepts the `ParallelConfig`, then ignores it (`_ = pc;`), because every scalar kernel is serial. Interchangeable signatures are the point: the two backends are drop-in replacements for each other, differing only in how fast they get the same answer.
+Three loops, in the order the mathematical definition suggests; the orientation only changes which index each operand reads, and the request's dtypes only change the casts. Note the signature: it is *identical* to the native backend's; it even accepts the `ParallelConfig`, then ignores it (`_ = pc;`), because every scalar kernel is serial. Interchangeable signatures are the point: the two backends are drop-in replacements for each other, differing only in how fast they get the same answer.
 
 The judgment happens in `src/backend/parity_test.zig`, and its design carries three lessons.
 

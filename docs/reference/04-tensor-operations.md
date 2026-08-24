@@ -1287,7 +1287,7 @@ at comptime (a closed set; anything else is a compile error):
   ```
 
   `.theta` computes `pos / base^(2i/d)` in f32; `factors` (length
-  `feature_dim/2`) divides each pair's frequency — ggml's `rope_ext`
+  `feature_dim/2`) divides each pair's frequency: ggml's `rope_ext`
   `freq_factors` (Llama-3 long-context, Gemma global layers); `null` is
   plain RoPE. `.inv_freq_f64` takes per-pair inverse frequencies the core
   cannot rebuild and accumulates each angle in f64 before the f32 cast;
@@ -1340,7 +1340,7 @@ decode step. Both position sources feed one arithmetic body, so a run
 expressed as a range and the same run expressed as an array produce
 **bitwise identical** tables (pinned in `src/exec/rope_tests.zig` across several
 origins, both `inverse` arms, and the `factors` arm). The
-`.explicit = []const i32` source stays for the genuinely ragged case — a
+`.explicit = []const i32` source stays for the genuinely ragged case, a
 multi-stream batch whose positions are several runs, not one.
 
 **Band masks already carry an origin.** An offset causal mask needs no new
