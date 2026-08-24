@@ -242,7 +242,7 @@ fn runEncoderE2e(allocator: std.mem.Allocator, base_path: []const u8) !void {
         const golden_greedy = try readIds(allocator, turn ++ "_greedy_ids.i32.bin");
         defer allocator.free(golden_greedy);
 
-        var kv = try model.initKvCache(&ctx, 256);
+        var kv = try model.initCache(&ctx, 256);
         defer kv.deinit();
         var logits = try shine.forwardStep(&model, &adapter, &ctx, &kv, prompt, 0);
         defer logits.deinit();
@@ -254,7 +254,7 @@ fn runEncoderE2e(allocator: std.mem.Allocator, base_path: []const u8) !void {
         try std.testing.expect(logit_drift.max_abs < 0.5);
 
         var out_tokens: [16]usize = undefined;
-        var greedy_kv = try model.initKvCache(&ctx, 256);
+        var greedy_kv = try model.initCache(&ctx, 256);
         defer greedy_kv.deinit();
         const produced = try shine.greedy(&model, &adapter, &ctx, &greedy_kv, prompt, &out_tokens, .{
             .max_new_tokens = golden_greedy.len,

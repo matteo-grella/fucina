@@ -29,6 +29,7 @@
 const std = @import("std");
 const fucina = @import("fucina");
 const weights = @import("fucina").weights;
+const decoder = @import("../decoder.zig");
 const kv_cache = @import("../kv_cache.zig");
 const qwen3 = @import("model.zig");
 const cartridge_mod = @import("../cartridge.zig");
@@ -517,7 +518,7 @@ fn loraLayerForward(
     var attn = if (kv) |cache| blk: {
         if (cache.dtype != .f16) return Error.UnsupportedKvDtype;
         try cache.appendLayer(ctx, layer_i, &k_rope, &v3);
-        const cached_len = cache.len + k_rope.dim(.seq);
+        const cached_len = cache.len() + k_rope.dim(.seq);
         var k_view = try cache.k[layer_i].narrow(ctx, .seq, 0, cached_len);
         defer k_view.deinit();
         var v_view = try cache.v[layer_i].narrow(ctx, .seq, 0, cached_len);
@@ -896,8 +897,8 @@ fn forwardStepImpl(
     last_only: bool,
 ) !fucina.Tensor(.{ .seq, .vocab }) {
     if (token_ids.len == 0) return qwen3.Error.InvalidSequenceLength;
-    if (kv.len != pos0) return qwen3.Error.InvalidSequenceLength;
-    if (kv.len + token_ids.len > kv.capacity) return kv_cache.Error.KvCacheOverflow;
+    if (kv.len() != pos0) return qwen3.Error.InvalidSequenceLength;
+    if (kv.len() + token_ids.len > kv.capacity) return kv_cache.Error.KvCacheOverflow;
     const base = model.config;
 
     var rope_table = try ctx.prepareRopeTableRange(.{ .origin = @intCast(pos0), .len = token_ids.len }, base.head_dim, base.rope_theta, false);
@@ -929,7 +930,7 @@ const loraForwardStepAllLogits = forwardStepAllLogits;
 
 /// The frozen base plus a SWAPPABLE adapter behind the duck-typed model
 /// surface `chat.Conversation` consumes (`config.vocab_size`,
-/// `initKvCache`, `forwardStep`) — the serving seam for adapter fleets:
+/// `initCache`, `forwardStep`) — the serving seam for adapter fleets:
 /// one box serves every request, and the single inference worker points
 /// `adapter` at the request's selection before decoding (lmserve's
 /// scheduler owns the backend from exactly one thread, so a plain field
@@ -937,6 +938,12 @@ const loraForwardStepAllLogits = forwardStepAllLogits;
 /// `forwardStepBatch`: batch mode is per-slot-heterogeneous and a single
 /// box holds one adapter at a time.
 pub const AdaptedModel = struct {
+    /// Decoder-contract decode state (`llm.decoder`): the shared KV cache.
+    pub const Cache = KvCache;
+    /// Decoder-contract capabilities: rewind rides the shared cache;
+    /// deliberately NO batch entry (see above).
+    pub const caps: decoder.Caps = .{ .rewind = true, .batch = false };
+
     base: *const qwen3.Model,
     adapter: ?*const LoraSet = null,
     config: qwen3.Config,
@@ -945,8 +952,8 @@ pub const AdaptedModel = struct {
         return .{ .base = base, .config = base.config };
     }
 
-    pub fn initKvCache(self: *const AdaptedModel, ctx: *ExecContext, capacity: usize) !KvCache {
-        return self.base.initKvCache(ctx, capacity);
+    pub fn initCache(self: *const AdaptedModel, ctx: *ExecContext, capacity: usize) !KvCache {
+        return self.base.initCache(ctx, capacity);
     }
 
     pub fn forwardStep(
@@ -1008,7 +1015,7 @@ pub fn greedy(
         if (produced == limit) break;
         // Allocate the next step before freeing the current logits, so an
         // error here leaves `logits` valid for the function-scope defer.
-        const fresh = try forwardStep(model, lora, ctx, kv, &.{next}, kv.len);
+        const fresh = try forwardStep(model, lora, ctx, kv, &.{next}, kv.len());
         logits.deinit();
         logits = fresh;
     }

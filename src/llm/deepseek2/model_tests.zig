@@ -27,7 +27,7 @@ test "deepseek2 matches the recorded DeepSeek-V2-Lite forward (Q8_0; skips witho
     var model = try deepseek2.Model.loadGgufFromFile(&ctx, &file);
     defer model.deinit();
 
-    var cache = try model.initCache(16);
+    var cache = try model.initCache(&ctx, 16);
     defer cache.deinit();
 
     // BOS + a short prompt; recorded 2026-08-23 (aarch64 native, Accelerate).

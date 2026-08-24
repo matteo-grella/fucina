@@ -146,7 +146,7 @@ pub fn main(init: std.process.Init) !void {
         try stdout.flush();
     }
     for (mode_start..2) |mode| {
-        var kv = try model.initKvCache(&ctx, prefill + decode + 8);
+        var kv = try model.initCache(&ctx, prefill + decode + 8);
         defer kv.deinit();
         var sq = try llm.research.subq.State.init(
             allocator,

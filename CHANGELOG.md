@@ -23,11 +23,44 @@ this point; earlier history is `git log`.
 
 ### Added
 
+- `llm.decoder`: the autoregressive text-decoder contract — `Caps`
+  (`rewind`, `batch`) plus the comptime `assertDecoder(Model)` the generic
+  layers (`llm.chat.Conversation`, `llm.speculative.SpeculativeDecoder`,
+  `llm.serving.gguf_chat.GgufChatBackend`, `llm.generate`) now assert. A
+  conforming model exposes `Cache` (`len()`/`reset()`/`deinit()`, plus
+  `truncate` iff `caps.rewind`), `caps`, `initCache(self, ctx, capacity)`,
+  `forwardStep(self, ctx, cache, tokens, pos0)` returning the LAST row's
+  logits as a caller-owned `[1, vocab]` tensor, `forwardStepAllLogits`
+  iff `caps.rewind`, and `forwardStepBatch` iff `caps.batch`. Conforming:
+  qwen3/qwen3moe, gemma4, SHINE's `AdaptedModel`, qwen35, deepseek2,
+  deepseek4, glm4moe, inkling; kimi3 (research tier) stays outside.
+- `llm.registry`: the architecture registry — one comptime table from a
+  GGUF's `general.architecture` to the family module (`Family` decls in
+  each family's `model.zig`: `Model`, the tokenizer module `Tok` +
+  `Tokenizer`, `load(ctx, file, options)`, `tokenizer(allocator, file)`,
+  `template_fallback`); `registry.familyFor(arch)` is the comptime
+  lookup and `serving.open` dispatches over the table.
+- `llm.speculative.mtp.MtpDraftSource(Model)`: native MTP (`nextn`)
+  drafting behind the `DraftSource` vtable, so the shared decoder's
+  verify loop drives glm4moe self-speculation (`examples/glm4moe --mtp`
+  now decodes through `SpeculativeDecoder` instead of a hand-rolled
+  draft/verify/commit/rewind loop). deepseek4's MTP sidecar keeps its own
+  loop: its `Session` rewinds by snapshot/restore, not `truncate`.
+- Family serving adapters in the library: `llm.qwen35.serving`,
+  `llm.inkling.serving`, `llm.deepseek4.serving` (moved from
+  `examples/lmserve/backend_{qwen35,inkling,deepseek4}.zig`, which are
+  deleted); `serving.openFromFile` now serves the qwen35, qwen35moe,
+  inkling, and deepseek4 architectures. `llm.serving.OpenOptions` gains
+  `moe_stream` (the deepseek4 streamed-experts levers) and
+  `llm.serving.Opened` gains `expert_store` (the host's exit-time report
+  seam); both types now live in `serving/contract.zig` with
+  `samplingFromGguf` (the `llm.serving.*` re-export paths are unchanged).
+
 - `fucina.ParamView`: the per-entry view `ParamRegistry.view` returns
   (name, dtype, shape, mutable byte view, trainability) is now nameable
   at the root; it was returned but unexported.
 - `llm.runner.Error.WrongBlockStyle`: the fused entries (`forwardStep*`,
-  `forwardLastLogits*`, `initKvCache`) reject a `.host_reference` model
+  `forwardLastLogits*`, `initCache`) reject a `.host_reference` model
   instead of silently running zero layers and returning embedding-only
   logits; `hostStep`/`initHostCache` answer it (was `InvalidConfig`) on a
   `.fused` model.
@@ -79,6 +112,40 @@ this point; earlier history is `git log`.
   (`fucina.internal.backend_mod.BlockQ4_K` → `fucina.quant.BlockQ4_K`).
 
 ### Changed
+
+- `Model.initKvCache` is `Model.initCache` on every family (runner/qwen3,
+  gemma4, diffusion_gemma, SHINE's `AdaptedModel`), and every family's
+  cache constructor takes `(self, ctx, capacity)` (deepseek2, glm4moe,
+  and inkling gain the `ctx` parameter and ignore it; deepseek4's
+  `initCache` now builds the decoder-contract `Session`, with the raw
+  layer-state constructor renamed `initRawCache`).
+- Cache length is the method `len()` on every cache type; the state field
+  is `count` (`llm.kv_cache.KvCache`, `llm.runner.HostCache`,
+  `deepseek2.Cache`, `deepseek4.Cache`, `inkling.Cache`; qwen35's `Cache`
+  already had the method). Rewrite `cache.len` reads to `cache.len()`
+  and direct field writes to `cache.count`. `HostCache`, `deepseek4.Cache`
+  and `inkling.Cache` gain `reset()`; `deepseek4.Session` gains `len()`,
+  `reset()`, and a parameterless `deinit()` (was `deinit(model)`).
+- The family decode entries speak the contract: deepseek2 gains
+  `forwardStep` (chunked `stepBatch` prefill keeping the last logits;
+  `step`/`stepBatch` remain the hot paths), deepseek4 gains a
+  `forwardStep` method over `Session` returning a caller-owned tensor
+  (the session-owned `step`/`stepBatch*` slices remain for the MTP
+  runner), glm4moe gains `forwardStepAllLogits` (its `step` IS the
+  all-row forward) and `forwardStep` (last row), and inkling gains
+  `forwardStep` (its `step` already returns the last row).
+- `llm.generate` is the one reference generation loop over the contract
+  (`generate`/`generateOutcome` with a `Sampler`, stop ids, and a
+  `TokenSink`; `greedy` keeps the slice-filling argmax convenience).
+  `llm.qwen3.generate` is deleted — rewrite `llm.qwen3.generate.greedy` to
+  `llm.generate.greedy` (same arguments). The qwen35 and inkling chat
+  engines decode through the shared loop, and their `StreamDecoder` now
+  comes from the engine's `TokMod` parameter.
+- `serving/open.zig` dispatches through `llm.registry` (one `inline for`
+  in place of the arch string ladder) and the per-family engine boxes are
+  one generic box parameterized by family serving traits; registered
+  families without a serving adapter (deepseek2, glm4moe) return
+  `error.UnsupportedArchitecture`.
 
 - One tuning table replaces the per-gate switches: `fucina.tuning.Table`
   holds every FUCINA_* route gate and numeric crossover as a typed field,

@@ -233,7 +233,7 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print("prompt tokens: {d}\n", .{tokens.items.len});
 
     var session = try Session.init(&model, 8192);
-    defer session.deinit(&model);
+    defer session.deinit();
     if (index_probe) try session.enableIndexProbe(&model);
 
     var mtp: ?llm.deepseek4.model.Mtp = if (mtp_path) |mp| try llm.deepseek4.model.Mtp.loadGguf(&ctx, init.io, mp, model.config) else null;
@@ -296,7 +296,7 @@ pub fn main(init: std.process.Init) !void {
             const saved_rows = state.n_rows;
             var seed: []const f32 = frontier;
             while (n_drafts <= mtp_depth) : (n_drafts += 1) {
-                const dl = try llm.deepseek4.model.mtpDraftStep(&model, m, &ctx, &state, draft_buf[n_drafts - 1], seed, session.cache.len + n_drafts - 1);
+                const dl = try llm.deepseek4.model.mtpDraftStep(&model, m, &ctx, &state, draft_buf[n_drafts - 1], seed, session.cache.len() + n_drafts - 1);
                 defer allocator.free(dl);
                 draft_buf[n_drafts] = argmax(dl);
                 seed = state.streams;
@@ -636,7 +636,7 @@ fn runNll(
     for (tokens, ids32[0..n]) |*t, id| t.* = @intCast(id);
 
     var session = try Session.init(model, n + 8);
-    defer session.deinit(model);
+    defer session.deinit();
 
     var total: f64 = 0;
     var count: usize = 0;
@@ -731,7 +731,7 @@ fn runVectors(
         try renderChat(allocator, tokenizer, vec.prompt, &tokens);
 
         var session = try Session.init(model, tokens.items.len + vec.steps.len + 8);
-        defer session.deinit(model);
+        defer session.deinit();
 
         // Session-owned logits: valid until the next step, never freed.
         var logits: []f32 = &.{};
@@ -862,7 +862,7 @@ fn runGolden(
     if (ids32.len < g.frontier) return error.GoldenPromptTooShort;
 
     var session = try Session.init(model, g.frontier + 8);
-    defer session.deinit(model);
+    defer session.deinit();
     // Session-owned logits: valid until the next step, never freed.
     var logits: []f32 = &.{};
     var fed: usize = 0;

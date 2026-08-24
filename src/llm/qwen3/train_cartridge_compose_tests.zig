@@ -206,11 +206,11 @@ test "served composition in a KvCache matches the trainer's composed eval" {
     );
     defer cache.deinit();
     try cartridge.writeComposedToCache(&ctx, &.{ &split.a, &split.b }, &cache);
-    try std.testing.expectEqual(@as(usize, prefix_len), cache.len);
+    try std.testing.expectEqual(@as(usize, prefix_len), cache.len());
 
-    var served = try model.forwardStepAllLogits(&ctx, &cache, suffix, cache.len);
+    var served = try model.forwardStepAllLogits(&ctx, &cache, suffix, cache.len());
     defer served.deinit();
-    try std.testing.expectEqual(@as(usize, prefix_len + suffix.len), cache.len);
+    try std.testing.expectEqual(@as(usize, prefix_len + suffix.len), cache.len());
 
     // f16 cache dtype + f16-KV kernels: approximate but tight (the same
     // envelope as the single-cartridge serving test).

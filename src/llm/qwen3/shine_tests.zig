@@ -179,12 +179,12 @@ test "zero adapter forwardStep matches the base model bitwise" {
 
     const prompt = [_]usize{ 3, 11, 7, 29, 2 };
 
-    var kv_base = try model.initKvCache(&ctx, 16);
+    var kv_base = try model.initCache(&ctx, 16);
     defer kv_base.deinit();
     var base_logits = try model.forwardStep(&ctx, &kv_base, &prompt, 0);
     defer base_logits.deinit();
 
-    var kv_lora = try model.initKvCache(&ctx, 16);
+    var kv_lora = try model.initCache(&ctx, 16);
     defer kv_lora.deinit();
     var lora_logits = try shine.forwardStep(&model, &zero, &ctx, &kv_lora, &prompt, 0);
     defer lora_logits.deinit();
@@ -194,9 +194,9 @@ test "zero adapter forwardStep matches the base model bitwise" {
     try std.testing.expectEqualSlices(f32, try base_logits.dataConst(), try lora_logits.dataConst());
 
     // And one decode step on top of the shared cache state agrees too.
-    var base_step = try model.forwardStep(&ctx, &kv_base, &.{4}, kv_base.len);
+    var base_step = try model.forwardStep(&ctx, &kv_base, &.{4}, kv_base.len());
     defer base_step.deinit();
-    var lora_step = try shine.forwardStep(&model, &zero, &ctx, &kv_lora, &.{4}, kv_lora.len);
+    var lora_step = try shine.forwardStep(&model, &zero, &ctx, &kv_lora, &.{4}, kv_lora.len());
     defer lora_step.deinit();
     try std.testing.expectEqualSlices(f32, try base_step.dataConst(), try lora_step.dataConst());
 }

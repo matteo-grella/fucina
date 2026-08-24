@@ -1,91 +1,47 @@
 //! Load-and-serve entry for the serving band: `open` (and `openFromFile`)
-//! sniff a GGUF's `general.architecture` and return a ready `Backend` for
-//! the families the shared `llm.chat.Conversation` hosts (qwen3, qwen3moe,
-//! gemma4), with the full engine option surface (KV slot pool + disk tier,
-//! speculative decode, cartridges, cartridge fleets).
-//! Architectures whose adapters cannot ride `Conversation` (nanochat,
-//! diffusion-gemma, inkling, qwen35/qwen35moe, deepseek4) return
-//! `error.UnsupportedArchitecture`: those adapters live with the CLI front
-//! end (`examples/lmserve/backend_*.zig`), which dispatches to them itself
-//! and falls back to `open` for the rest.
+//! sniff a GGUF's `general.architecture`, resolve the family through the
+//! architecture registry (`llm.registry`), and return a ready `Backend`.
+//! The `Conversation`-hosted families (qwen3, qwen3moe, gemma4) share one
+//! generic engine box with the full option surface (KV slot pool + disk
+//! tier, speculative decode, cartridges, cartridge fleets); the
+//! engine-hosted families dispatch to their family serving adapters
+//! (`qwen35.serving`, `inkling.serving`, `deepseek4.serving`). Registered
+//! families without a serving adapter (deepseek2, glm4moe) and unknown
+//! architectures return `error.UnsupportedArchitecture`; nanochat
+//! checkpoints and diffusion-gemma stay with the CLI front end
+//! (`examples/lmserve`).
 
 const std = @import("std");
 const fucina = @import("fucina");
 const contract = @import("contract.zig");
 const gguf_chat = @import("gguf_chat.zig");
 const chat = @import("../chat.zig");
+const registry = @import("../registry.zig");
 const sampler = @import("../sampler.zig");
-const tokenizer_mod = @import("../tokenizer.zig");
-const spm_tokenizer_mod = @import("../spm_tokenizer.zig");
 const cartridge_mod = @import("../cartridge.zig");
 const cartridge_fleet = @import("../cartridge_fleet.zig");
 const qwen3_model = @import("../qwen3/model.zig");
 const qwen3_train = @import("../qwen3/train.zig");
 const gemma4_mod = @import("../gemma/model.zig");
 const gemma_train = @import("../gemma/train.zig");
+const qwen35_serving = @import("../qwen35/serving.zig");
+const inkling_serving = @import("../inkling/serving.zig");
+const deepseek4_serving = @import("../deepseek4/serving.zig");
+const qwen35_model = @import("../qwen35/model.zig");
+const inkling_model = @import("../inkling/model.zig");
+const deepseek4_model = @import("../deepseek4/model.zig");
 
 const Allocator = std.mem.Allocator;
 
-/// Engine options for `open`/`openFromFile`: the CLI-independent form of
-/// lmserve's flags. Exclusions the engine cannot host are rejected with
-/// `error.InvalidOptions`: `fleet_dir` excludes `cartridge_path`,
-/// `kv_cache_dir` and `batch > 1`. SHINE adapter fleets are served by
-/// `llm.qwen3.shine_serving`, which shares this options surface.
-pub const OpenOptions = struct {
-    /// Per-request context budget in tokens (prompt + reply).
-    context_len: usize = 4096,
-    /// Speculative decoding for solo generations (qwen3/qwen3moe).
-    spec: bool = false,
-    /// Lockstep batch width the host intends to drive (sizes the constraint
-    /// cache and raises the KV slot pool to one slot per stream).
-    batch: usize = 1,
-    /// Zero-copy MoE expert load (gemma4).
-    experts_borrow: bool = false,
-    /// Resident cross-request KV reuse slots (each a full `context_len`
-    /// cache; the RAM guard prices the total at load).
-    kv_slots: usize = 1,
-    /// Keep the requested `kv_slots` even when the RAM guard would clamp.
-    kv_slots_force: bool = false,
-    /// Evict-to-disk KV tier directory (must exist; null = off).
-    kv_cache_dir: ?[]const u8 = null,
-    /// Max sidecar files under `kv_cache_dir`.
-    kv_disk_slots: usize = 8,
-    /// Trained KV-prefix cartridge (safetensors path; docs/CARTRIDGES.md).
-    cartridge_path: ?[]const u8 = null,
-    /// Per-document cartridge fleet directory (qwen3 dense, gemma4).
-    fleet_dir: ?[]const u8 = null,
-    /// Fleet: documents composed per request.
-    rag_docs: usize = 2,
-    /// Fleet: cosine top-N chunks scanned per selection.
-    rag_chunks: usize = 8,
-    /// Fleet: decisive-margin knowledge-base switching for continuing
-    /// conversations (default fully sticky).
-    rag_adaptive: bool = false,
-    /// Fleet: the adaptive switch margin (cosine units).
-    rag_margin: f32 = 0.05,
-};
-
-/// A loaded serving engine: the model, tokenizer, optional cartridge/fleet
-/// state, and the adapter behind `backend`, heap-owned behind one handle.
-/// `backend` stays valid until `deinit`.
-pub const Opened = struct {
-    ptr: *anyopaque,
-    destroyFn: *const fn (ptr: *anyopaque) void,
-    backend: contract.Backend,
-
-    pub fn deinit(self: *Opened) void {
-        self.destroyFn(self.ptr);
-        self.* = undefined;
-    }
-};
+pub const OpenOptions = contract.OpenOptions;
+pub const Opened = contract.Opened;
+pub const samplingFromGguf = contract.samplingFromGguf;
 
 /// Open `gguf_path` and return a ready `Backend` for its
 /// `general.architecture`. Families served: qwen3, qwen3moe, gemma4 (the
-/// `Conversation`-hosted set). nanochat, diffusion-gemma, inkling,
-/// qwen35/qwen35moe and deepseek4 return `error.UnsupportedArchitecture`:
-/// their adapters live with `examples/lmserve`. `stderr` is the diagnostic
-/// sink (load-time guard arithmetic and error detail); a host may pass a
-/// discarding writer.
+/// `Conversation`-hosted set) and qwen35, qwen35moe, inkling, deepseek4
+/// (engine-hosted). `stderr` is the diagnostic sink (load-time guard
+/// arithmetic and error detail); a host may pass a discarding writer.
 pub fn open(
     ctx: *fucina.ExecContext,
     io: std.Io,
@@ -124,44 +80,21 @@ pub fn openFromFile(
         file.deinit();
         return error.UnknownArchitecture;
     };
-    if (std.mem.eql(u8, arch, "qwen3") or std.mem.eql(u8, arch, "qwen3moe")) {
-        return openQwen3(ctx, io, allocator, file, model_id, options, stderr);
-    }
-    if (std.mem.eql(u8, arch, "gemma4")) {
-        return openGemma4(ctx, io, allocator, file, model_id, options, stderr);
+    inline for (registry.families) |entry| {
+        if (std.mem.eql(u8, arch, entry.arch)) {
+            return openFamily(entry.Family, ctx, io, allocator, file, model_id, options, stderr);
+        }
     }
     file.deinit();
     return error.UnsupportedArchitecture;
 }
 
-const Qwen3Adapter = gguf_chat.GgufChatBackend(qwen3_model.Model, tokenizer_mod);
-const Gemma4Adapter = gguf_chat.GgufChatBackend(gemma4_mod.Model, spm_tokenizer_mod);
-
-/// The qwen3/qwen3moe engine box (heap-pinned: the adapter and the fleet
-/// options hold pointers into it).
-const Qwen3Box = struct {
-    allocator: Allocator,
-    model_id: []u8,
-    model: qwen3_model.Model,
-    tokenizer: tokenizer_mod.Tokenizer,
-    cart: ?cartridge_mod.Cartridge,
-    fleet_serve: ?FleetServeQwen3,
-    adapter: Qwen3Adapter,
-
-    fn destroy(ptr: *anyopaque) void {
-        const box: *Qwen3Box = @ptrCast(@alignCast(ptr));
-        const a = box.allocator;
-        box.adapter.deinit();
-        if (box.fleet_serve) |*fs| fs.deinit();
-        if (box.cart) |*c| c.deinit();
-        box.tokenizer.deinit();
-        box.model.deinit();
-        a.free(box.model_id);
-        a.destroy(box);
-    }
-};
-
-fn openQwen3(
+/// Comptime dispatch on the resolved family: the `Conversation`-hosted set
+/// takes the generic chat box with its serving traits; the engine-hosted
+/// set forwards to the family serving adapters; registered families
+/// without an adapter reject.
+fn openFamily(
+    comptime Family: type,
     ctx: *fucina.ExecContext,
     io: std.Io,
     allocator: Allocator,
@@ -170,10 +103,121 @@ fn openQwen3(
     options: OpenOptions,
     stderr: *std.Io.Writer,
 ) !Opened {
+    if (comptime Family == qwen3_model.Family) {
+        return openChat(Family, qwen3_traits, ctx, io, allocator, file, model_id, options, stderr);
+    }
+    if (comptime Family == gemma4_mod.Family) {
+        return openChat(Family, gemma4_traits, ctx, io, allocator, file, model_id, options, stderr);
+    }
+    // Engine-hosted families: no Conversation, so no cartridges, fleets or
+    // KV reuse tiers; reject those options loudly (the caps philosophy).
+    if (comptime Family == qwen35_model.Family or Family == inkling_model.Family or Family == deepseek4_model.Family) {
+        if (options.cartridge_path != null or options.fleet_dir != null or options.kv_cache_dir != null) {
+            try stderr.writeAll("--cartridge/--fleet/--kv-cache-dir need the Conversation-hosted families (qwen3/qwen3moe/gemma4)\n");
+            file.deinit();
+            return error.InvalidOptions;
+        }
+        if (comptime Family == qwen35_model.Family)
+            return qwen35_serving.openFromFile(ctx, io, allocator, file, model_id, options, stderr);
+        if (comptime Family == inkling_model.Family)
+            return inkling_serving.openFromFile(ctx, io, allocator, file, model_id, options, stderr);
+        return deepseek4_serving.openFromFile(ctx, io, allocator, file, model_id, options, stderr);
+    }
+    // Registered for the comptime lookup, no serving adapter (deepseek2,
+    // glm4moe).
+    file.deinit();
+    return error.UnsupportedArchitecture;
+}
+
+/// The per-family serving policy of the `Conversation`-hosted set: what
+/// `GgufChatOptions` and the box's construction vary on.
+const ChatTraits = struct {
+    /// The reply's reasoning-block delimiters, when the family has one the
+    /// server can toggle.
+    think_markers: ?contract.ThinkMarkers = null,
+    supports_think: bool = false,
+    tool_style: contract.ToolStyle = .none,
+    /// Default sampling: a fixed config, or the GGUF's own
+    /// `general.sampling.*` metadata.
+    sampling: union(enum) { fixed: sampler.Config, from_gguf },
+    /// Wire `OpenOptions.spec` through (the qwen3 self-draft cascade).
+    allow_spec: bool = false,
+    /// Register the gemma4 turn-end extras (GGUF EOS + stray SPM `<eos>`).
+    gemma_extra_stops: bool = false,
+    /// The `--fleet` query-embedding trainer (null = no fleet serving).
+    Trainer: ?type = null,
+    /// Fleet precondition: MoE GGUFs need `--experts=borrow` (the query
+    /// embedder forwards through raw expert blocks).
+    fleet_needs_borrow: bool = false,
+};
+
+const qwen3_traits = ChatTraits{
+    .think_markers = .{ .open = "<think>", .close = "</think>" },
+    .supports_think = true,
+    .tool_style = .hermes,
+    // Qwen3's recommended no-think chat settings (the server default;
+    // per-request reasoning switches nothing here — clients override).
+    .sampling = .{ .fixed = .{ .temperature = 0.7, .top_k = 20, .top_p = 0.8 } },
+    .allow_spec = true,
+    .Trainer = qwen3_train.Trainer(.{ .q = false, .v = false }),
+};
+
+const gemma4_traits = ChatTraits{
+    .sampling = .from_gguf,
+    .gemma_extra_stops = true,
+    .Trainer = gemma_train.Trainer(.{ .q = false, .v = false }),
+    .fleet_needs_borrow = true,
+};
+
+/// The generic engine box of the `Conversation`-hosted families
+/// (heap-pinned: the adapter and the fleet options hold pointers into it;
+/// `extra_stops_buf` backs the adapter's borrowed `extra_stop_ids`).
+fn ChatBox(comptime Family: type, comptime traits: ChatTraits) type {
+    return struct {
+        const Self = @This();
+        const Adapter = gguf_chat.GgufChatBackend(Family.Model, Family.Tok);
+        const FleetServe = if (traits.Trainer) |T| FleetServeFor(Family.Model, T, Family.Tokenizer) else void;
+
+        allocator: Allocator,
+        model_id: []u8,
+        model: Family.Model,
+        tokenizer: Family.Tokenizer,
+        cart: ?cartridge_mod.Cartridge,
+        fleet_serve: ?FleetServe,
+        extra_stops_buf: [2]u32,
+        extra_n: usize,
+        adapter: Adapter,
+
+        fn destroy(ptr: *anyopaque) void {
+            const box: *Self = @ptrCast(@alignCast(ptr));
+            const a = box.allocator;
+            box.adapter.deinit();
+            if (box.fleet_serve) |*fs| fs.deinit();
+            if (box.cart) |*c| c.deinit();
+            box.tokenizer.deinit();
+            box.model.deinit();
+            a.free(box.model_id);
+            a.destroy(box);
+        }
+    };
+}
+
+fn openChat(
+    comptime Family: type,
+    comptime traits: ChatTraits,
+    ctx: *fucina.ExecContext,
+    io: std.Io,
+    allocator: Allocator,
+    file: *fucina.gguf.File,
+    model_id: []const u8,
+    options: OpenOptions,
+    stderr: *std.Io.Writer,
+) !Opened {
+    const Box = ChatBox(Family, traits);
     var file_alive = true;
     errdefer if (file_alive) file.deinit();
 
-    const box = try allocator.create(Qwen3Box);
+    const box = try allocator.create(Box);
     errdefer allocator.destroy(box);
     box.allocator = allocator;
     box.cart = null;
@@ -181,134 +225,22 @@ fn openQwen3(
     box.model_id = try allocator.dupe(u8, model_id);
     errdefer allocator.free(box.model_id);
 
-    box.model = try qwen3_model.Model.loadGgufFromFile(ctx, file, try qwen3_model.Config.fromGguf(file));
-    errdefer box.model.deinit();
-    box.tokenizer = tokenizer_mod.Tokenizer.initFromGguf(allocator, file, .{}) catch {
+    box.tokenizer = Family.tokenizer(allocator, file) catch {
         try stderr.writeAll("this GGUF has no usable tokenizer metadata\n");
         return error.TokenizerUnavailable;
     };
     errdefer box.tokenizer.deinit();
-    const template = chat.Template.detect(file.getString("tokenizer.chat_template")) orelse {
+    const template = chat.Template.detect(file.getString("tokenizer.chat_template")) orelse blk: {
+        if (Family.template_fallback) |format| break :blk chat.Template{ .format = format };
         try stderr.writeAll("this GGUF has no recognizable chat template\n");
         return error.NoChatTemplate;
     };
-    file.deinit();
-    file_alive = false;
-
-    if (options.cartridge_path) |path| box.cart = try loadCartridge(io, allocator, stderr, ctx, &box.model, path);
-    errdefer if (box.cart) |*c| c.deinit();
-
-    if (options.fleet_dir) |dir| {
-        box.fleet_serve = try FleetServeQwen3.init(io, allocator, stderr, ctx, &box.model, &box.tokenizer, dir);
-    }
-    errdefer if (box.fleet_serve) |*fs| fs.deinit();
-    if (box.fleet_serve) |*fs| {
-        try stderr.print("fleet: {d} documents, {d} retrieval chunks, {d} docs composed per request\n", .{
-            fs.fleet.manifest.docs.items.len,
-            fs.index.len(),
-            options.rag_docs,
-        });
-        try stderr.flush();
-    }
-
-    const kv_slots = try gguf_chat.kvRamGuardSlots(qwen3_model.Model, ctx, &box.model, options.context_len, try slotsForBatch(stderr, options), options.kv_slots_force, stderr);
-
-    box.adapter = Qwen3Adapter.init(
-        allocator,
-        ctx,
-        &box.model,
-        &box.tokenizer,
-        template,
-        .{
-            .model_id = box.model_id,
-            .context_len = options.context_len,
-            .think_markers = .{ .open = "<think>", .close = "</think>" },
-            .supports_think = true,
-            .tool_style = .hermes,
-            // Qwen3's recommended no-think chat settings (the server default;
-            // per-request reasoning switches nothing here — clients override).
-            .default_sampling = .{ .temperature = 0.7, .top_k = 20, .top_p = 0.8 },
-            .speculation = options.spec,
-            .constraint_cache_len = @max(8, options.batch),
-            .kv_slots = kv_slots,
-            .kv_disk = kvDiskOptions(io, options),
-            .cartridge = if (box.cart) |*c| c else null,
-            .fleet = if (box.fleet_serve) |*fs| .{
-                .io = io,
-                .dir = options.fleet_dir.?,
-                .manifest = &fs.fleet.manifest,
-                .index = &fs.index,
-                .embed_ctx = fs,
-                .embedFn = FleetServeQwen3.embed,
-                .rag_docs = options.rag_docs,
-                .rag_chunks = options.rag_chunks,
-                .adaptive = options.rag_adaptive,
-                .switch_margin = options.rag_margin,
-            } else null,
-        },
-    );
-    return .{ .ptr = box, .destroyFn = Qwen3Box.destroy, .backend = box.adapter.backend() };
-}
-
-/// The gemma4 engine box (heap-pinned like `Qwen3Box`; `extra_stops_buf`
-/// backs the adapter's borrowed `extra_stop_ids`).
-const Gemma4Box = struct {
-    allocator: Allocator,
-    model_id: []u8,
-    model: gemma4_mod.Model,
-    tokenizer: spm_tokenizer_mod.Tokenizer,
-    cart: ?cartridge_mod.Cartridge,
-    fleet_serve: ?FleetServeGemma4,
-    extra_stops_buf: [2]u32,
-    extra_n: usize,
-    adapter: Gemma4Adapter,
-
-    fn destroy(ptr: *anyopaque) void {
-        const box: *Gemma4Box = @ptrCast(@alignCast(ptr));
-        const a = box.allocator;
-        box.adapter.deinit();
-        if (box.fleet_serve) |*fs| fs.deinit();
-        if (box.cart) |*c| c.deinit();
-        box.tokenizer.deinit();
-        box.model.deinit();
-        a.free(box.model_id);
-        a.destroy(box);
-    }
-};
-
-fn openGemma4(
-    ctx: *fucina.ExecContext,
-    io: std.Io,
-    allocator: Allocator,
-    file: *fucina.gguf.File,
-    model_id: []const u8,
-    options: OpenOptions,
-    stderr: *std.Io.Writer,
-) !Opened {
-    var file_alive = true;
-    errdefer if (file_alive) file.deinit();
-
-    var config = try gemma4_mod.Config.fromGguf(file);
-    config.borrow_experts = options.experts_borrow;
-
-    const box = try allocator.create(Gemma4Box);
-    errdefer allocator.destroy(box);
-    box.allocator = allocator;
-    box.cart = null;
-    box.fleet_serve = null;
-    box.model_id = try allocator.dupe(u8, model_id);
-    errdefer allocator.free(box.model_id);
-
-    box.tokenizer = spm_tokenizer_mod.Tokenizer.initFromGguf(allocator, file, .{}) catch {
-        try stderr.writeAll("this GGUF has no usable SPM tokenizer metadata\n");
-        return error.TokenizerUnavailable;
+    const default_sampling = switch (traits.sampling) {
+        .fixed => |config| config,
+        .from_gguf => samplingFromGguf(file),
     };
-    errdefer box.tokenizer.deinit();
-    const template = chat.Template.detect(file.getString("tokenizer.chat_template")) orelse
-        chat.Template{ .format = .gemma4 };
-    const default_sampling = samplingFromGguf(file);
 
-    box.model = try gemma4_mod.Model.loadGgufFromFile(ctx, file, config);
+    box.model = try Family.load(ctx, file, .{ .experts_borrow = options.experts_borrow });
     errdefer box.model.deinit();
     file.deinit();
     file_alive = false;
@@ -317,13 +249,16 @@ fn openGemma4(
     errdefer if (box.cart) |*c| c.deinit();
 
     if (options.fleet_dir) |dir| {
-        if (config.num_experts > 0 and !config.borrow_experts) {
-            // The query embedder forwards through the trainer, whose MoE
-            // arm consumes raw expert blocks.
-            try stderr.writeAll("--fleet on a gemma4 MoE GGUF needs --experts=borrow (the query embedder forwards through raw expert blocks)\n");
-            return error.FleetUnsupported;
+        if (comptime traits.Trainer == null) return error.FleetUnsupported;
+        if (comptime traits.fleet_needs_borrow) {
+            if (box.model.config.num_experts > 0 and !box.model.config.borrow_experts) {
+                // The query embedder forwards through the trainer, whose
+                // MoE arm consumes raw expert blocks.
+                try stderr.writeAll("--fleet on a gemma4 MoE GGUF needs --experts=borrow (the query embedder forwards through raw expert blocks)\n");
+                return error.FleetUnsupported;
+            }
         }
-        box.fleet_serve = try FleetServeGemma4.init(io, allocator, stderr, ctx, &box.model, &box.tokenizer, dir);
+        box.fleet_serve = try Box.FleetServe.init(io, allocator, stderr, ctx, &box.model, &box.tokenizer, dir);
     }
     errdefer if (box.fleet_serve) |*fs| fs.deinit();
     if (box.fleet_serve) |*fs| {
@@ -335,19 +270,22 @@ fn openGemma4(
         try stderr.flush();
     }
 
-    // Turn-end ids beyond <turn|>: the GGUF's own EOS and a stray SPM <eos>
-    // (id 1) — the gemma4 chat harness registers the same pair.
+    // Turn-end ids beyond the template stop marker (gemma4: the GGUF's own
+    // EOS and a stray SPM <eos>, id 1 — the gemma4 chat harness registers
+    // the same pair).
     box.extra_n = 0;
-    if (box.tokenizer.eosId()) |e| {
-        box.extra_stops_buf[box.extra_n] = e;
+    if (traits.gemma_extra_stops) {
+        if (box.tokenizer.eosId()) |e| {
+            box.extra_stops_buf[box.extra_n] = e;
+            box.extra_n += 1;
+        }
+        box.extra_stops_buf[box.extra_n] = 1;
         box.extra_n += 1;
     }
-    box.extra_stops_buf[box.extra_n] = 1;
-    box.extra_n += 1;
 
-    const kv_slots = try gguf_chat.kvRamGuardSlots(gemma4_mod.Model, ctx, &box.model, options.context_len, try slotsForBatch(stderr, options), options.kv_slots_force, stderr);
+    const kv_slots = try gguf_chat.kvRamGuardSlots(Family.Model, ctx, &box.model, options.context_len, try slotsForBatch(stderr, options), options.kv_slots_force, stderr);
 
-    box.adapter = Gemma4Adapter.init(
+    box.adapter = Box.Adapter.init(
         allocator,
         ctx,
         &box.model,
@@ -357,7 +295,11 @@ fn openGemma4(
             .model_id = box.model_id,
             .context_len = options.context_len,
             .extra_stop_ids = box.extra_stops_buf[0..box.extra_n],
+            .think_markers = traits.think_markers,
+            .supports_think = traits.supports_think,
+            .tool_style = traits.tool_style,
             .default_sampling = default_sampling,
+            .speculation = traits.allow_spec and options.spec,
             .constraint_cache_len = @max(8, options.batch),
             .kv_slots = kv_slots,
             .kv_disk = kvDiskOptions(io, options),
@@ -368,7 +310,7 @@ fn openGemma4(
                 .manifest = &fs.fleet.manifest,
                 .index = &fs.index,
                 .embed_ctx = fs,
-                .embedFn = FleetServeGemma4.embed,
+                .embedFn = Box.FleetServe.embed,
                 .rag_docs = options.rag_docs,
                 .rag_chunks = options.rag_chunks,
                 .adaptive = options.rag_adaptive,
@@ -376,7 +318,7 @@ fn openGemma4(
             } else null,
         },
     );
-    return .{ .ptr = box, .destroyFn = Gemma4Box.destroy, .backend = box.adapter.backend() };
+    return .{ .ptr = box, .destroyFn = Box.destroy, .backend = box.adapter.backend() };
 }
 
 /// --fleet serving state: the fleet's manifest + cosine index plus a
@@ -443,7 +385,7 @@ fn FleetServeFor(comptime ModelT: type, comptime TrainerT: type, comptime TokT: 
                 defer cart_mapped.deinit();
                 var cart = try cartridge_mod.Cartridge.initFromStateDict(ctx, allocator, cart_mapped.bytes);
                 defer cart.deinit();
-                var probe = try model.initKvCache(ctx, cart.p + 1);
+                var probe = try model.initCache(ctx, cart.p + 1);
                 defer probe.deinit();
                 cart.writeToCache(ctx, &probe) catch |err| {
                     try stderr.print("--fleet {s}: its cartridges do not fit this model's KV geometry\n", .{dir});
@@ -487,17 +429,6 @@ fn FleetServeFor(comptime ModelT: type, comptime TrainerT: type, comptime TokT: 
     };
 }
 
-const FleetServeQwen3 = FleetServeFor(
-    qwen3_model.Model,
-    qwen3_train.Trainer(.{ .q = false, .v = false }),
-    tokenizer_mod.Tokenizer,
-);
-const FleetServeGemma4 = FleetServeFor(
-    gemma4_mod.Model,
-    gemma_train.Trainer(.{ .q = false, .v = false }),
-    spm_tokenizer_mod.Tokenizer,
-);
-
 /// Load a trained cartridge (docs/CARTRIDGES.md) and probe it against the
 /// model's KV geometry, so a mismatched file fails at load instead of
 /// mid-request.
@@ -516,7 +447,7 @@ fn loadCartridge(
     defer allocator.free(bytes);
     var cart = try cartridge_mod.Cartridge.initFromStateDict(ctx, allocator, bytes);
     errdefer cart.deinit();
-    var probe = try model.initKvCache(ctx, cart.p + 1);
+    var probe = try model.initCache(ctx, cart.p + 1);
     defer probe.deinit();
     cart.writeToCache(ctx, &probe) catch |err| {
         try stderr.print("cartridge {s} does not fit this model's KV geometry\n", .{path});
@@ -530,21 +461,6 @@ fn loadCartridge(
 fn kvDiskOptions(io: std.Io, options: OpenOptions) ?gguf_chat.KvDiskOptions {
     const dir = options.kv_cache_dir orelse return null;
     return .{ .io = io, .dir = dir, .max_files = @max(options.kv_disk_slots, 1) };
-}
-
-/// GGUF-recommended sampling (`general.sampling.*`), as the gemma4 chat
-/// harness reads it.
-pub fn samplingFromGguf(file: *const fucina.gguf.File) sampler.Config {
-    return .{
-        .temperature = if (file.getFloat("general.sampling.temp")) |v| @floatCast(v) else 1.0,
-        .top_k = if (file.getInt("general.sampling.top_k")) |v| @intCast(@max(@as(i64, 0), v)) else 64,
-        .top_p = if (file.getFloat("general.sampling.top_p")) |v| @floatCast(v) else 0.95,
-        .min_p = if (file.getFloat("general.sampling.min_p")) |v| @floatCast(v) else 0.0,
-        .repeat_penalty = if (file.getFloat("general.sampling.penalty_repeat")) |v| @floatCast(v) else 1.0,
-        .freq_penalty = if (file.getFloat("general.sampling.penalty_freq")) |v| @floatCast(v) else 0.0,
-        .presence_penalty = if (file.getFloat("general.sampling.penalty_present")) |v| @floatCast(v) else 0.0,
-        .repeat_last_n = if (file.getInt("general.sampling.penalty_last_n")) |v| @intCast(@max(@as(i64, 0), v)) else 64,
-    };
 }
 
 /// A lockstep batch needs one resident KV slot per stream; raise the

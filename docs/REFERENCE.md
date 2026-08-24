@@ -11264,16 +11264,16 @@ family-agnostic helpers stay flat:
 
 | Namespace | Contents | Files |
 |---|---|---|
-| `llm.qwen3` | `model`, `train`, `generate`, `ptqtp`, `shine_serving` — Qwen3 dense + MoE, LoRA fine-tuning, SHINE adapter-fleet serving | `llm/qwen3/` |
-| `llm.qwen35` | `model`, `chat` — Qwen3.5 Gated-DeltaNet hybrid | `llm/qwen35/` |
+| `llm.qwen3` | `model`, `train`, `ptqtp`, `shine_serving` — Qwen3 dense + MoE, LoRA fine-tuning, SHINE adapter-fleet serving | `llm/qwen3/` |
+| `llm.qwen35` | `model`, `chat`, `serving` — Qwen3.5 Gated-DeltaNet hybrid | `llm/qwen35/` |
 | `llm.gemma` | `model`, `train`, `moe` | `llm/gemma/` |
 | `llm.diffusion_gemma` | `model` — block text-diffusion on the gemma4 backbone | `llm/diffusion_gemma/` |
 | `llm.parakeet` | `loader`, `frontend`, `subsampling`, `encoder`, `weights`, `decoder`, `tokenizer`, `streaming`, `transcription` — NeMo FastConformer/RNN-T ASR | `llm/parakeet/` |
-| `llm.speculative` | `core`, `sam_index`, `recycling`, `cascade`, `constrained` | `llm/speculative/` |
+| `llm.speculative` | `core`, `mtp`, `sam_index`, `recycling`, `cascade`, `constrained` | `llm/speculative/` |
 | `llm.deepseek2` | `model` — DeepSeek-V2 MLA + fine-grained MoE with shared experts | `llm/deepseek2/` |
 | `llm.glm4moe` | `model` — GLM-4.5 MoE with native MTP (`nextn`) self-speculation | `llm/glm4moe/` |
-| `llm.deepseek4` | `model` — DeepSeek V4 Flash (hyper-connections, compressed-KV MQA, streamed experts, MTP) | `llm/deepseek4/` |
-| `llm.inkling` | `model`, `mmproj`, `chat` — Inkling (hybrid SWA/global rel-bias attention, shortconv sites, sink-shared MoE; hMLP vision + dMel audio towers) | `llm/inkling/` |
+| `llm.deepseek4` | `model`, `serving` — DeepSeek V4 Flash (hyper-connections, compressed-KV MQA, streamed experts, MTP) | `llm/deepseek4/` |
+| `llm.inkling` | `model`, `mmproj`, `chat`, `serving` — Inkling (hybrid SWA/global rel-bias attention, shortconv sites, sink-shared MoE; hMLP vision + dMel audio towers) | `llm/inkling/` |
 | `llm.research` | the research tier under one namespace: `subq` (decode-path attention evaluator; installs through `runner.AttentionOverride`), `engram` (conditional n-gram memory; grafts through the qwen3 trainer's `residual_hook`), `shine`/`shine_train` (context-to-LoRA adapters; served by `llm.qwen3.shine_serving`), `kimi3.model` (Kimi-K3: KDA + gated-MLA-NoPE hybrid, latent MoE, attention residuals, SiTU) | `llm/subq.zig`, `llm/engram.zig`, `llm/qwen3/shine*.zig`, `llm/kimi3/` |
 
 | Flat helper | Purpose | Section |
@@ -11281,6 +11281,9 @@ family-agnostic helpers stay flat:
 | `fucina.weights` | GGUF tensor → typed linear weight binding | §13.2 |
 | `fucina.ptqtp_gguf` | PTQTP plane persistence — `<name>.ptqtp0/1/2` writer + pair-detecting loader | §13.2 |
 | `fucina.gguf_meta` | metadata readers + parallel layer loader | §13.3 |
+| `llm.decoder` | the autoregressive decoder contract: `Caps` + comptime `assertDecoder(Model)`; the generic layers are written against it | §13.8, §14.1 |
+| `llm.registry` | the architecture registry: GGUF `general.architecture` to family module; `serving.open` dispatches over it, `familyFor` is the comptime lookup | §13.13 |
+| `llm.generate` | the reference generation loop over the decoder contract (`generate`/`generateOutcome`, `TokenSink`, `greedy`) | §14.1 |
 | `llm.kv_cache` | per-layer K/V store for autoregressive decode | §13.4 |
 | `llm.kv_persist` | crash-safe append-only KV-cache sidecar: conversations reopen warm | §13.4 |
 | `llm.tokenizer` | byte-level BPE (GPT-2/Qwen) | §13.5 |
@@ -11808,37 +11811,40 @@ Decode-loop API:
 pub fn appendLayer(self: *KvCache, ctx: *ExecContext, layer_i: usize,
                    k_rows: *const KvInput, v_rows: *const KvInput) !void
 pub fn advance(self: *KvCache, m: usize) void
-pub fn reset(self: *KvCache) void                // len = 0, buffers retained
+pub fn len(self: *const KvCache) usize           // cached positions (the `count` field)
+pub fn reset(self: *KvCache) void                // count = 0, buffers retained
 pub fn truncate(self: *KvCache, keep_len: usize) void
 pub fn copyRows(self: *KvCache, src: *const KvCache, start: usize, end: usize) !void
-pub fn kSlice(self, layer_i: usize, len: usize) ![]const f16   // f16 mode
-pub fn vSlice(self, layer_i: usize, len: usize) ![]const f16
-pub fn kBlocks(self, layer_i: usize, len: usize) []const fucina.quant.BlockQ8_0  // q8_0 mode
-pub fn vBlocks(self, layer_i: usize, len: usize) []const fucina.quant.BlockQ8_0
+pub fn kSlice(self, layer_i: usize, n: usize) ![]const f16   // f16 mode
+pub fn vSlice(self, layer_i: usize, n: usize) ![]const f16
+pub fn kBlocks(self, layer_i: usize, n: usize) []const fucina.quant.BlockQ8_0  // q8_0 mode
+pub fn vBlocks(self, layer_i: usize, n: usize) []const fucina.quant.BlockQ8_0
 pub fn byteSize(self) usize
 ```
 
 - `appendLayer` converts the new tokens' f32 K/V rows to the cache dtype and
-  writes them at offset `len`, in one pass with no temporaries. Shape
+  writes them at offset `len()`, in one pass with no temporaries. Shape
   mismatches against the layer's geometry are `Error.KvCacheShapeMismatch`;
   exceeding `capacity` is `Error.KvCacheOverflow`. It does **not** advance
-  `len` — every layer appends at the same base offset; call `advance(m)` once
-  per step after all layers have been written.
+  the count — every layer appends at the same base offset; call `advance(m)`
+  once per step after all layers have been written.
+- `len()` is the decoder contract's cached-position count (`llm.decoder`);
+  the state itself is the `count` field.
 - `truncate(keep_len)` rewinds to the first `keep_len` positions (a value at
-  or above `len` is a no-op). Decrementing `len` suffices for both storage
-  modes: buffers are pre-allocated at `capacity`, every position occupies
-  whole per-(position, kv_head) rows, and every reader and `appendLayer`
-  address rows strictly from `len` — the next append overwrites the abandoned
-  rows. This is the speculative decoder's rewind primitive (§13.9): rejected
+  or above `len()` is a no-op). Decrementing the count suffices for both
+  storage modes: buffers are pre-allocated at `capacity`, every position
+  occupies whole per-(position, kv_head) rows, and every reader and
+  `appendLayer` address rows strictly from the count — the next append
+  overwrites the abandoned rows. This is the speculative decoder's rewind primitive (§13.9): rejected
   draft positions are dropped with one integer store.
 - `copyRows(src, start, end)` copies rows `[start, end)` of a
   same-geometry cache into this one at the SAME positions and advances
-  `len` to `end` — the cross-slot prefix-share primitive (lmserve's slot
+  the count to `end` — the cross-slot prefix-share primitive (lmserve's slot
   pool): a new conversation adopts another slot's common prompt prefix by
   memcpy instead of re-prefilling it. Positions are preserved, so the
   copied rows are exactly the rows a prefill of the same tokens would
-  have produced; both storage dtypes copy. Requires `self.len == start`
-  (rows append in order) and `end <= src.len`; a dtype or per-layer
+  have produced; both storage dtypes copy. Requires `self.len() == start`
+  (rows append in order) and `end <= src.len()`; a dtype or per-layer
   geometry mismatch is `Error.KvCacheShapeMismatch`.
 
 ```zig
@@ -11856,13 +11862,13 @@ test "kv cache: append, advance, truncate rewind" {
     defer k.deinit();
     var v = try llm.kv_cache.KvInput.fromSlice(&ctx, .{ 3, 2, 4 }, &([_]f32{0.25} ** 24));
     defer v.deinit();
-    try cache.appendLayer(&ctx, 0, &k, &v); // writes at offset len, does not advance
+    try cache.appendLayer(&ctx, 0, &k, &v); // writes at offset len(), does not advance
     cache.advance(3); // once per step, after all layers
-    try std.testing.expectEqual(@as(usize, 3), cache.len);
-    try std.testing.expectEqual(@as(usize, 3 * 2 * 4), (try cache.kSlice(0, cache.len)).len);
+    try std.testing.expectEqual(@as(usize, 3), cache.len());
+    try std.testing.expectEqual(@as(usize, 3 * 2 * 4), (try cache.kSlice(0, cache.len())).len);
 
     cache.truncate(1); // speculative rewind: drop rejected positions
-    try std.testing.expectEqual(@as(usize, 1), cache.len);
+    try std.testing.expectEqual(@as(usize, 1), cache.len());
 }
 ```
 
@@ -11882,12 +11888,12 @@ files. `reset(io, allocator, path, kv, prefix_rows)` arms a fresh sidecar
 for the cache's geometry. `appendRange(io, allocator, path, kv, tokens,
 prefix_rows)` writes the positions the file does not hold yet — record
 data first, the header's record count last, so a torn append is invisible;
-`prefix_rows + tokens.len != kv.len` is `Error.KvPersistTokenMismatch`,
+`prefix_rows + tokens.len != kv.len()` is `Error.KvPersistTokenMismatch`,
 and a stored prefix shape that disagrees is treated as foreign (reset).
 `load(io, allocator, path, kv)` resumes into an empty cache: it applies up
 to the stored count (stopping early at a torn tail — the prefix stays
 usable; a tear INSIDE a token-less prefix is not resumable), sets
-`kv.len`, and returns the caller-owned `Loaded{ tokens, prefix_rows }`, or
+`kv.len()`, and returns the caller-owned `Loaded{ tokens, prefix_rows }`, or
 null when nothing usable exists (absent file, foreign geometry, or a
 history beyond capacity). `chat.Conversation.enablePersistence` (§13.8.2)
 is the turnkey consumer and resumes `kv_prefix_rows` from the file.
@@ -12560,22 +12566,20 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type
 ```
 
 Comptime-generic multi-turn chat over a model family and a tokenizer module.
-The duck-typed contract:
+The contract:
 
-- `Model` exposes `config.vocab_size`,
-  `initKvCache(ctx, capacity) !KvCache` (over the shared §13.4 cache), and the
-  decode entries with the qwen3/gemma4 signatures:
+- `Model` satisfies the decoder contract (`llm.decoder.assertDecoder`,
+  §14.1) with `caps.rewind` over the shared §13.4 `KvCache`:
+  `initCache(ctx, capacity) !KvCache` and the decode entries
   `forwardStep(ctx, kv, token_ids, pos0) !Tensor(.{ .seq, .vocab })`
-  (last-token logits) and `forwardStepAllLogits` (same signature, all-row
-  logits). The latter is a hard compile-time requirement even with
-  speculation permanently off — `send` unconditionally references the
-  speculative path, so a `Model` without it fails to instantiate; it is
-  only *executed* when speculation is enabled. `sendBatch`
-  additionally requires
+  (last-row logits) and `forwardStepAllLogits` (same signature, all-row
+  logits — executed only when speculation is enabled, required by
+  `caps.rewind` regardless). Beyond the contract, `Conversation` requires
+  `config.vocab_size` and the cache `capacity` field. `sendBatch` runs
+  only when `caps.batch` declares
   `forwardStepBatch(ctx, caches: []const *KvCache, token_ids: []const usize)`;
-  the requirement is comptime-gated, so families without it
-  still instantiate the type and get `error.BatchDecodeUnsupported` at
-  runtime.
+  the gate is comptime, so families without it still instantiate the type
+  and get `error.BatchDecodeUnsupported` at runtime.
 - `Tok` is the tokenizer **module** (`llm.tokenizer` or `llm.spm_tokenizer`):
   it must provide a `Tokenizer` type with
   `tokenId`/`eosId`/`encodeRaw`/`decodeAppend` and a `StreamDecoder`.
@@ -12622,7 +12626,7 @@ Semantics:
 
 - `init` resolves the stop id as `tokenizer.tokenId(template.stopMarker())
   orelse tokenizer.eosId()`, builds the KV cache via the model's own
-  `initKvCache`, and — with `speculation` on — heap-allocates the speculative
+  `initCache`, and — with `speculation` on — heap-allocates the speculative
   state (a `SpeculationIndex` cascade plus a `SpeculativeDecoder(Model)`,
   §13.9), wiring the stop id into `spec_options.stop_token` and aligning the
   cascade's `accounting_min_draft` with the decoder's `min_draft`.
@@ -12671,7 +12675,7 @@ Semantics:
   history, another client) by reusing less; on a fresh conversation the
   entry degenerates to `sendRendered` exactly. After the request,
   `takeCache` releases the cache to the caller (snapshot the shadow from
-  `history.items[0..cache.len]` BEFORE taking — the bound trims the one
+  `history.items[0..cache.len()]` BEFORE taking — the bound trims the one
   committed-but-unforwarded token an aborted turn can leave); deinit skips a
   taken cache. `sendTokensReuse` is the same entry over pre-encoded ids —
   for a server that already tokenized the render to score candidate slots
@@ -12886,9 +12890,9 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
     // fields: source, options, stats, gate, io: ?std.Io = null, on_verify_row
     pub fn init(allocator, source: DraftSource, options: Options) !Self
     pub fn deinit(self: *Self) void
-    pub fn step(self, ctx, model: *const Model, kv: *KvCache,
+    pub fn step(self, ctx, model: decoder.ModelPtr(Model), kv: *Model.Cache,
                 sampler: *Sampler, history: *std.ArrayList(usize), sink: TokenSink) !usize
-    pub fn bootstrapStep(self, ctx, kv: *const KvCache, sampler: *Sampler,
+    pub fn bootstrapStep(self, ctx, kv: *const Model.Cache, sampler: *Sampler,
                          history: *std.ArrayList(usize), sink: TokenSink, logits: *Logits) !usize
 }
 ```
@@ -12899,7 +12903,7 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
   `error.RateWindowTooSmall` / `error.ProbeStepsZero` / `error.CostTableEmpty`
   / `error.ReprobeAfterZero`.
 - `step` runs one decode iteration under the invariant
-  `history.items.len == kv.len + 1` (every committed token in `history`, the
+  `history.items.len == kv.len() + 1` (every committed token in `history`, the
   last one not yet forwarded into the cache); a violated invariant is
   `error.InvalidDecodeState` at runtime. `history` must be allocated with
   `ctx.allocator` — the decoder appends committed tokens to it. Each committed
@@ -12910,16 +12914,18 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
 - `bootstrapStep` commits ONE token from caller-computed logits — the
   prefill bootstrap. The caller prefills the whole pending span in one
   batch (the byte-identity contract's caller leg), leaving the cache
-  flush with history (`history.len == kv.len`, else
+  flush with history (`history.len == kv.len()`, else
   `error.InvalidDecodeState`) and the span's last-row logits in hand; the
   entry samples them through the exact plain-step machinery (sampler,
   history, sink, observe hook, stats) and restores the `step` invariant.
   The chat layer's speculative turn opens with it, so plain and
   speculative turns build their caches from call-for-call identical
   forwards.
-- `Model` is duck-typed: `forwardStep` + `forwardStepAllLogits` over the
-  shared `KvCache` (qwen3 and gemma4 today; qwen35's recurrent cache cannot
-  rewind and is out of scope).
+- `Model` satisfies the decoder contract (`llm.decoder.assertDecoder`) with
+  `caps.rewind`: `forwardStep` + `forwardStepAllLogits` + a truncating
+  cache (qwen3, gemma4, SHINE's `AdaptedModel`, glm4moe through
+  `speculative.mtp.MtpDraftSource`; qwen35's recurrent cache cannot rewind
+  and is out of scope).
 
 #### 13.9.2 Suffix-automaton index (`speculative/sam_index.zig`)
 
@@ -13086,7 +13092,7 @@ fn snippetDecoderLoop(
     var decoder = try Decoder.init(ctx.allocator, index.asDraftSource(), .{ .max_draft = 16 });
     defer decoder.deinit();
     var sampler = llm.sampler.Sampler.init(.{});
-    // Invariant: history.len == kv.len + 1 (last committed token not yet forwarded).
+    // Invariant: history.len == kv.len() + 1 (last committed token not yet forwarded).
     while (history.items.len < 128) {
         _ = try decoder.step(ctx, model, kv, &sampler, history, sink);
     }
@@ -13179,6 +13185,25 @@ test "constrained source: forced spans preempt, invalid drafts truncate" {
     try std.testing.expectEqual(@as(usize, 1), buf[0]);
 }
 ```
+
+#### 13.9.7 Native-MTP drafting (`speculative/mtp.zig`)
+
+`MtpDraftSource(Model)` puts a family's native MTP (`nextn`) head behind
+the `DraftSource` vtable, so the shared decoder's verify loop drives it
+instead of a hand-rolled draft/verify/commit/rewind loop. Generic over a
+glm4moe-shaped model: `mtpDraftStep(self, ctx, mtp_cache, token, h_prev,
+h_out)`, `initMtpCache(self, capacity)`, and a model-owned `step_hiddens`
+row buffer; requires `Model.caps.rewind`. `init(ctx, model, capacity,
+depth)` builds the MTP stream's own cache; `observePrefill()` seeds the
+prompt's trunk hiddens after the caller's prefill forward; `suggest`
+catches the MTP stream up on committed positions (position `i` consumes
+`(token[i+1], hidden[i])`), chains `depth` argmax drafts from the
+frontier, and rewinds the speculative MTP positions; `observe` appends the
+verify rows the decoder's truncate keeps. A draft-round error lands in the
+`err` field (the round proposes nothing; the decoder takes a plain step).
+`examples/glm4moe --mtp` decodes through it. deepseek4's MTP sidecar stays
+on its own loop: its `Session` rewinds by snapshot/restore, not
+`truncate`.
 
 ### 13.10 Cartridges (`src/llm/cartridge.zig`)
 
@@ -13704,17 +13729,23 @@ would otherwise fail mid-serving as page-cache eviction, not at startup.
 
 **Load-and-serve** (`serving/open.zig`).
 `serving.open(ctx, io, allocator, gguf_path, options, stderr)` sniffs
-`general.architecture` and returns a ready `Opened` (`.backend` plus one
-`deinit` that owns model, tokenizer, and engine state). Families served:
-qwen3, qwen3moe, gemma4 (the `Conversation`-hosted set). nanochat,
-diffusion-gemma, inkling, qwen35/qwen35moe and deepseek4 return
-`error.UnsupportedArchitecture`: their adapters live with
-`examples/lmserve`, whose main dispatches to them itself and falls back
-to `open` for the rest. `OpenOptions` carries the engine surface
-(`context_len`, `spec`, `batch`, `experts_borrow`, `kv_slots` +
-`kv_slots_force`, `kv_cache_dir` + `kv_disk_slots`, `cartridge_path`,
-`fleet_dir` + the `rag_*` knobs); excluded combinations
-return `error.InvalidOptions`. SHINE adapter fleets are served by
+`general.architecture`, resolves the family through the architecture
+registry (`llm.registry`), and returns a ready `Opened` (`.backend` plus
+one `deinit` that owns model, tokenizer, and engine state; the optional
+`expert_store` field surfaces a streamed-MoE store for the host's
+exit-time report). Families served: qwen3, qwen3moe, gemma4 (the
+`Conversation`-hosted set, one generic engine box) and qwen35,
+qwen35moe, inkling, deepseek4 (the engine-hosted set, dispatched to
+`llm.qwen35.serving`, `llm.inkling.serving`, `llm.deepseek4.serving`).
+nanochat and diffusion-gemma stay with `examples/lmserve`; registered
+families without a serving adapter (deepseek2, glm4moe) and unknown
+architectures return `error.UnsupportedArchitecture`. `OpenOptions`
+(defined in `serving/contract.zig`) carries the engine surface
+(`context_len`, `spec`, `batch`, `experts_borrow`, `moe_stream`,
+`kv_slots` + `kv_slots_force`, `kv_cache_dir` + `kv_disk_slots`,
+`cartridge_path`, `fleet_dir` + the `rag_*` knobs); excluded
+combinations return `error.InvalidOptions`, and the engine-hosted
+families reject the cartridge/fleet/KV-disk options the same way. SHINE adapter fleets are served by
 `llm.qwen3.shine_serving.open`/`openFromFile` (§13.12), which mirror
 these entries with the fleet directory as an explicit argument and share
 `OpenOptions`. `serving.openFromFile` is the same entry
@@ -13843,40 +13874,54 @@ work-gates inside the shared kernels (§9); the two model-level GPU knobs are
 gemma-MoE's raw expert representation (14.4) and diffusion_gemma's
 `convertDenseWeightsToF16` (14.5).
 
-**Forward/decode surface.** The autoregressive families share one contract:
+**Forward/decode surface.** The autoregressive families share the decoder
+contract (`llm.decoder`, checked at comptime by `assertDecoder(Model)`;
+each family declares its `caps`):
 
 - `forwardLastLogits(ctx, token_ids)` — cacheless whole-sequence forward;
   returns the last position's `[1, vocab]` logits (caller deinits). Empty
   input is `Error.InvalidSequenceLength`.
-- `initKvCache(ctx, capacity)` / qwen35's `initCache` — build the streaming
-  cache sized for `capacity` positions. This is the duck-typed construction
-  seam the generic `llm.chat.Conversation` embedder uses (§13).
-- `forwardStep(ctx, kv, token_ids, pos0)` — process `token_ids` at absolute
-  positions `pos0..pos0+len`, append their K/V, advance the cache by `len`,
-  return the last row's logits. **Contract:** `kv.len == pos0` or
-  `Error.InvalidSequenceLength`; `kv.len + len <= kv.capacity` or
-  `kv_cache.Error.KvCacheOverflow`. Prefill is one call on a fresh cache with
-  `pos0 == 0` (last-token logits equal `forwardLastLogits`); decode is a
-  one-token call at `pos0 == kv.len`.
-- `forwardStepAllLogits` (qwen3, gemma4) — same KV semantics, but returns
-  `[len, vocab]` logits for **every** appended position: the
-  speculative-decoding verify entry (§13 — one batched pass scores all
-  draft positions for ~one step's weight traffic).
-- `forwardStepBatch` (qwen3, gemma4) — lockstep multi-stream decode, 14.2.
-- Greedy generation loop (argmax; resets `kv` first, returns the count
-  written): gemma4 keeps it as `Model.generate(ctx, kv, prompt_tokens,
-  out_tokens, GenerateOptions{ .max_new_tokens, .stop_token = null })`;
-  qwen3 hosts it beside the model as `llm.qwen3.generate.greedy(model, ctx,
-  kv, prompt_tokens, out_tokens, Options)` (qwen35 has neither).
-  diffusion_gemma's block-diffusion `generate` has its own options and
-  returns a `GenerateResult` (14.5). Sampled decoding is composed by the
-  callers from `llm.sampler` (§13).
+- `initCache(ctx, capacity)` — build the family's `Cache` sized for
+  `capacity` positions (the shared §13.4 `KvCache` for the attention
+  families; recurrent families carry their own state struct with the same
+  `len()`/`reset()`/`deinit()` methods). Families whose construction
+  ignores `ctx` still take it, so the spelling is uniform. This is the
+  construction seam the generic layers use (§13).
+- `forwardStep(ctx, cache, token_ids, pos0)` — process `token_ids` at
+  absolute positions `pos0..pos0+len`, advance the cache by `len`, return
+  the LAST row's logits as a caller-owned `[1, vocab]` tensor.
+  **Contract:** `cache.len() == pos0` (families whose cache tracks position
+  internally assert it in debug builds); overflow is
+  `kv_cache.Error.KvCacheOverflow` or the family's equivalent. Prefill is
+  one call on a fresh cache with `pos0 == 0` (last-token logits equal
+  `forwardLastLogits`); decode is a one-token call at
+  `pos0 == cache.len()`.
+- `forwardStepAllLogits` (iff `caps.rewind`: qwen3, gemma4, glm4moe,
+  SHINE's `AdaptedModel`) — same KV semantics, but returns `[len, vocab]`
+  logits for **every** appended position: the speculative-decoding verify
+  entry (§13 — one batched pass scores all draft positions for ~one step's
+  weight traffic).
+- `forwardStepBatch` (iff `caps.batch`: qwen3, gemma4) — lockstep
+  multi-stream decode, 14.2.
+- Generation loop: `llm.generate` is the one reference loop over the
+  contract (`generate`/`generateOutcome` with a `Sampler`, stop ids, and a
+  `TokenSink`; `greedy` is the slice-filling argmax convenience that
+  resets the cache first and writes the fired stop token). gemma4 keeps
+  `Model.generate(ctx, kv, prompt_tokens, out_tokens,
+  GenerateOptions{ .max_new_tokens, .stop_token = null })` as a wrapper
+  over it; the qwen35 and inkling chat engines call it with their own
+  prompt rendering and token sinks. diffusion_gemma's block-diffusion
+  `generate` has its own options and returns a `GenerateResult` (14.5).
+  Sampled decoding rides `llm.sampler` (§13) everywhere.
 - `forward*Profiled` variants take `io: std.Io` and a family-specific
   `ForwardProfile` accumulator (per-block wall-clock buckets; the `--profile`
   runner flag).
 
-All forward entries take `*const Model` and mutate only the `ExecContext`,
-the cache, and (profiled) the profile struct; a loaded model is read-only.
+Forward entries take `*const Model` and mutate only the `ExecContext`,
+the cache, and (profiled) the profile struct; a loaded model is read-only
+(glm4moe and deepseek4 take `*Model`: their forwards refresh model-held
+MTP scratch, and the generic layers accept either spelling through
+`decoder.ModelPtr`).
 `ExecContext` is single-threaded (§6), so concurrent streams over one model
 need one context and one cache per thread. Returned logits are caller-owned
 constants (`deinit` them); no exec scope is required for inference.
@@ -13924,11 +13969,13 @@ test "qwen3 reference config" {
 `pub const Error = weights.Error || error{ InvalidConfig,
 InvalidSequenceLength, MismatchedKvCaches, KvCacheOverflow, WrongBlockStyle }`
 (`WrongBlockStyle`: a fused entry — `forwardStep*`, `forwardLastLogits*`,
-`initKvCache` — called on a `.host_reference` model, or `hostStep`/
+`initCache` — called on a `.host_reference` model, or `hostStep`/
 `initHostCache` on a `.fused` one). Public surface on `Model`:
-`loadGguf`, `loadGgufOptions`, `loadGgufFromFile`, `loadGgufFromFileOptions`
+`Cache` (= the shared `KvCache`), `caps` (`.{ .rewind = true, .batch =
+true }`), `loadGguf`, `loadGgufOptions`, `loadGgufFromFile`,
+`loadGgufFromFileOptions`
 (opt-in MoE expert disk streaming, `LoadOptions.moe_stream`), `deinit`,
-`forwardLastLogits`, `forwardLastLogitsProfiled`, `initKvCache`,
+`forwardLastLogits`, `forwardLastLogitsProfiled`, `initCache`,
 `forwardStep`, `forwardStepProfiled`, `forwardStepAllLogits`,
 `forwardStepBatch`, `forwardStepBatchSpans`;
 plus `ForwardProfile`, `MoeStreamOptions`, `LoadOptions`, `Layer`,
@@ -13940,8 +13987,8 @@ the same functions; `DenseFfn`/`GateUpProjection` are re-exports of
 PTQTP-aware projections, the dense-FFN containers, the MoE expert trio,
 the embed/norm/lm-head trio, and the GQA head map), and `applyExpertTopP`
 at module level. Greedy
-generation and PTQTP decoration/persistence live in sibling modules:
-`llm.qwen3.generate` (`greedy`, `Options`) and `llm.qwen3.ptqtp`
+generation is the shared `llm.generate` loop (§13); PTQTP
+decoration/persistence lives in the sibling module `llm.qwen3.ptqtp`
 (`decorate`, `DecorateOptions`, `save`, §10.9).
 
 Load specifics: when the GGUF is mmap'd, MoE expert stacks
@@ -13957,7 +14004,7 @@ mixture through `weights.moeSwiGluFfnSeq`: decode (seq 1) uses a fused
 expert-parallel GEMV, prefill groups tokens by expert so each expert's
 weights are read once per batch.
 
-`initKvCache` builds a uniform-geometry f16 `KvCache`
+`initCache` builds a uniform-geometry f16 `KvCache`
 (`KvCache.init(ctx, num_layers, num_key_value_heads, head_dim, capacity)`).
 Qwen3 is the **only** family whose attention also accepts a q8_0 cache
 (construct it with `kv_cache.KvCache.initWithDtype(..., .q8_0)`, §13; the
@@ -13973,18 +14020,18 @@ const config = try llm.qwen3.model.Config.fromGguf(&file);
 var model = try llm.qwen3.model.Model.loadGgufFromFile(&ctx, &file, config);
 defer model.deinit();
 
-var kv = try model.initKvCache(&ctx, 512);
+var kv = try model.initCache(&ctx, 512);
 defer kv.deinit();
 var prefill = try model.forwardStep(&ctx, &kv, &.{ 151644, 872, 198 }, 0); // [1, vocab]
 defer prefill.deinit();
-var step = try model.forwardStep(&ctx, &kv, &.{9707}, kv.len); // one decode step
+var step = try model.forwardStep(&ctx, &kv, &.{9707}, kv.len()); // one decode step
 defer step.deinit();
 // requires model assets to run
 ```
 
 **Lockstep batch decode.** `forwardStepBatch(ctx, caches, token_ids)` decodes
 one new token per stream, each stream backed by its own sibling cache from
-this model's `initKvCache` (same dtype, distinct pointers, layer count
+this model's `initCache` (same dtype, distinct pointers, layer count
 matching the model — violations return `Error.MismatchedKvCaches`; a full
 cache returns `KvCacheOverflow`). Row `s` of the returned
 `[n_streams, vocab]` logits is stream `s`'s next-token distribution and every
@@ -13999,9 +14046,9 @@ differ by ~1e-6 reassociation drift. The same thresholds bound
 `forwardStepAllLogits` against per-token steps.
 
 ```zig
-var kv_a = try model.initKvCache(ctx, 256);
+var kv_a = try model.initCache(ctx, 256);
 defer kv_a.deinit();
-var kv_b = try model.initKvCache(ctx, 256);
+var kv_b = try model.initCache(ctx, 256);
 defer kv_b.deinit();
 var a = try model.forwardStep(ctx, &kv_a, &.{ 151644, 872 }, 0);
 a.deinit();
@@ -14226,9 +14273,10 @@ speculative decoding on this family. Chat lives in `llm.qwen35.chat`
 template with the Qwen3.6 generation-prompt think prefill (`<think>\n`
 opener when thinking is on; the ChatML empty think block when off), and
 `Engine(TokMod).generate` runs one sampled reply per call on a fresh
-`Cache` (the recurrent state cannot be truncated to a token prefix, so
-there is no cross-request KV reuse). `lmserve` serves the family through
-it (`backend_qwen35.zig` — reasoning channel, JSON-schema/regex/Lark
+`Cache` through the shared `llm.generate` loop (the recurrent state
+cannot be truncated to a token prefix, so there is no cross-request KV
+reuse). `lmserve` serves the family through it (`llm.qwen35.serving`,
+via `serving.open` — reasoning channel, JSON-schema/regex/Lark
 constrained output; [LMSERVER.md](LMSERVER.md)); Ternary-Bonsai-27B
 ([README](../examples/qwen35/README.md)) is the flagship checkpoint. The
 CLI is a loader/parity harness:
@@ -14294,8 +14342,10 @@ test "gemma4 shared-KV geometry" {
 `pub const Error = weights.Error || error{ InvalidConfig,
 InvalidSequenceLength, MismatchedKvCaches, MissingMetadata, PleUnsupported,
 UnsupportedExpertType,
-UnsupportedKvCacheDtype }`. Model surface: `loadGguf`, `loadGgufFromFile`,
-`deinit`, `initKvCache` (per-layer geometry:
+UnsupportedKvCacheDtype }`. Model surface: `Cache` (= the shared
+`KvCache`), `caps` (`.{ .rewind = true, .batch = true }`), `loadGguf`,
+`loadGgufFromFile`,
+`deinit`, `initCache` (per-layer geometry:
 `KvCache.initPerLayer(ctx, geom.kv_heads, geom.head_dim, capacity)`),
 `forwardLastLogits`, `forwardLastLogitsProfiled`, `forwardStep`,
 `forwardStepProfiled`, `forwardStepAllLogits` (speculative verify entry —
@@ -14324,11 +14374,11 @@ config.borrow_experts = true; // zero-copy experts from the mmap (--experts=borr
 var model = try llm.gemma.model.Model.loadGgufFromFile(&ctx, &file, config);
 defer model.deinit();
 
-var kv = try model.initKvCache(&ctx, 512); // per-layer geometry
+var kv = try model.initCache(&ctx, 512); // per-layer geometry
 defer kv.deinit();
 var prefill = try model.forwardStep(&ctx, &kv, &.{ 2, 651, 235 }, 0);
 defer prefill.deinit();
-var step = try model.forwardStep(&ctx, &kv, &.{651}, kv.len);
+var step = try model.forwardStep(&ctx, &kv, &.{651}, kv.len());
 defer step.deinit();
 // requires model assets to run
 ```
@@ -14402,8 +14452,8 @@ block-autoregressively. Two forward modes share one weight set:
   `enc_layer_output_scale`. Same `pos0`/capacity contract as `forwardStep`.
 - `canvasForward(ctx, kv, canvas_ids, sc) ![seq, vocab]` — one
   **bidirectional** denoiser pass over the canvas at absolute positions
-  `[kv.len, kv.len + C)`. Canvas K/V are written into the cache's scratch
-  region past `kv.len` WITHOUT advancing it (the next step overwrites), so
+  `[kv.len(), kv.len() + C)`. Canvas K/V are written into the cache's scratch
+  region past `kv.len()` WITHOUT advancing it (the next step overwrites), so
   the cache is read-only from the caller's perspective; logits are returned
   for every row (softcapped). `sc` is the previous step's self-conditioning
   signal (null on the first step); passing one on a GGUF without the
@@ -14422,7 +14472,7 @@ otherwise — and rejects PLE configs. `pub const Error = gemma4.Error ||
 error{ MissingCanvasLength, MissingLayerScale, CanvasLengthMismatch,
 KvCapacityTooSmall, SelfConditioningUnavailable }`.
 
-Model surface: `loadGguf`, `loadGgufFromFile`, `deinit`, `initKvCache`
+Model surface: `loadGguf`, `loadGgufFromFile`, `deinit`, `initCache`
 (per-layer geometry; capacity must cover prefix + one canvas),
 `convertDenseWeightsToF16` (dequantize attention q/k/v/o, the shared dense
 FFN, the self-conditioning MLP and the lm head to resident f16 so the
@@ -14461,7 +14511,7 @@ var model = try dg.Model.loadGgufFromFile(&ctx, &file, config);
 defer model.deinit();
 
 const prompt: []const usize = &.{ 2, 651, 235 };
-var kv = try model.initKvCache(&ctx, prompt.len + 2 * config.canvas_length);
+var kv = try model.initCache(&ctx, prompt.len + 2 * config.canvas_length);
 defer kv.deinit();
 var out: [512]usize = undefined;
 const result = try dg.generate(&model, &ctx, &kv, prompt, &out, .{
@@ -14720,10 +14770,11 @@ queued requests together with per-stream failure isolation (§13.8),
 `--spec` adds lossless self-draft speculative decoding (composes with
 reuse and stop sequences, §13.9), and `--cartridge`/`--fleet` mount
 trained KV-prefix cartridges (§13.10). The GGUF's `general.architecture`
-picks the backend: qwen3/qwen3moe/gemma4 load through `serving.open`
-(§13.13); qwen35, diffusion-gemma, inkling and deepseek4 ride the
-example-local adapters (`backend_*.zig`); `--nanochat <dir>` serves a
-nanochat checkpoint.
+picks the backend through the registry-driven `serving.open` (§13.13):
+qwen3/qwen3moe/gemma4/qwen35/qwen35moe/inkling/deepseek4 load in the
+library; diffusion-gemma rides the example-local adapter
+(`backend_diffusion.zig`); `--nanochat <dir>` serves a nanochat
+checkpoint.
 `zig build lmserve -- <model.gguf> [--host H] [--port N] [flags]`.
 
 **facedetect** (`examples/facedetect/`,

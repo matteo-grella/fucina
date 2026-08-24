@@ -108,8 +108,8 @@ pub fn main(init: std.process.Init) !void {
     var tokenizer = try llm.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
     defer tokenizer.deinit();
     try stdout.print("loaded {s}: {d} layers, hidden {d}, vocab {d} ({d:.2} s)\n", .{
-        args[1],                     model.config.num_layers,
-        model.config.hidden_size,    tokenizer.vocabSize(),
+        args[1],                         model.config.num_layers,
+        model.config.hidden_size,        tokenizer.vocabSize(),
         seconds(nowNs(io) - load_start),
     });
     try stdout.flush();
@@ -166,14 +166,12 @@ pub fn main(init: std.process.Init) !void {
                 "{d:.1}M weights -> {d:.1} MiB packed ({d:.2} planes/weight), " ++
                 "rms rel err {d:.4} (worst {d:.4}), unconverged groups {d}/{d}\n",
             .{
-                report.decorated,                report.skipped,
-                report.skipped_layers,
-                seconds(nowNs(io) - q_start),
-                @as(f64, @floatFromInt(report.elements)) / 1e6,
-                plane_mib,
-                @as(f64, @floatFromInt(report.plane_weights)) / @as(f64, @floatFromInt(@max(report.elements, 1))),
-                report.rmsRelErr(),              report.worst_rel_err,
-                report.unconverged_groups,       report.group_count,
+                report.decorated,                                                                                  report.skipped,
+                report.skipped_layers,                                                                             seconds(nowNs(io) - q_start),
+                @as(f64, @floatFromInt(report.elements)) / 1e6,                                                    plane_mib,
+                @as(f64, @floatFromInt(report.plane_weights)) / @as(f64, @floatFromInt(@max(report.elements, 1))), report.rmsRelErr(),
+                report.worst_rel_err,                                                                              report.unconverged_groups,
+                report.group_count,
             },
         );
         try stdout.flush();
@@ -207,7 +205,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(prompt_ids);
     for (prompt_ids, prompt_ids32) |*d, s| d.* = s;
 
-    var kv = try model.initKvCache(&ctx, prompt_ids.len + max_new);
+    var kv = try model.initCache(&ctx, prompt_ids.len + max_new);
     defer kv.deinit();
 
     const prefill_start = nowNs(io);
@@ -224,7 +222,7 @@ pub fn main(init: std.process.Init) !void {
     var produced: usize = 1;
     while (produced < max_new) : (produced += 1) {
         if (tokenizer.eosId()) |eos| if (last_id == eos) break;
-        var fresh = try model.forwardStep(&ctx, &kv, &.{last_id}, kv.len);
+        var fresh = try model.forwardStep(&ctx, &kv, &.{last_id}, kv.len());
         last_id = try argmaxId(&ctx, &fresh);
         fresh.deinit();
         try out_ids.append(allocator, @intCast(last_id));
@@ -248,7 +246,7 @@ const NllResult = struct { nll: f64, count: usize };
 /// prefixes, computed from full-position logits in 128-token chunks (one KV
 /// pass over the sequence — prefill speed, deployed forward path).
 fn nllOverTokens(ctx: *ExecContext, model: *llm.qwen3.model.Model, tokens: []const usize) !NllResult {
-    var kv = try model.initKvCache(ctx, tokens.len);
+    var kv = try model.initCache(ctx, tokens.len);
     defer kv.deinit();
     const chunk_len: usize = 128;
     var total: f64 = 0;

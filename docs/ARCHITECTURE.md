@@ -683,30 +683,57 @@ those arms take the container types back, so the container and its multiply
 are one mutually-dependent unit. A helper that fits none of these rows wants
 a new home with a stated subject, not a fifth un-ruled one.
 
+### The decoder contract and the architecture registry
+
+Every autoregressive text family speaks one comptime-checked surface,
+declared in `llm/decoder.zig` and asserted by `assertDecoder(Model)` at the
+top of the generic layers (`chat.Conversation`,
+`speculative.SpeculativeDecoder`, `serving.gguf_chat.GgufChatBackend`,
+`llm.generate`): a `Cache` type (`len()`/`reset()`/`deinit()`, plus
+`truncate` iff `caps.rewind`), a `caps: decoder.Caps` value (`rewind`,
+`batch`), `initCache(self, ctx, capacity)`, and
+`forwardStep(self, ctx, cache, tokens, pos0)` returning the LAST row's
+logits as a caller-owned `[1, vocab]` tensor (`forwardStepAllLogits`
+returns every row iff `caps.rewind`; `forwardStepBatch` decodes N streams
+in lockstep iff `caps.batch`). Conforming: qwen3/qwen3moe, gemma4, SHINE's
+`AdaptedModel`, qwen35, deepseek2, deepseek4, glm4moe, inkling; kimi3
+(research tier, cache-less whole-sequence forward) stays outside.
+
+`llm/registry.zig` is the architecture registry: one comptime table from a
+GGUF's `general.architecture` string to the family module (`Family` decls
+in each family's `model.zig`: `Model`, the tokenizer module, `load`,
+`tokenizer`, `template_fallback`). `serving.open` dispatches over it with
+one `inline for`; `registry.familyFor` is the comptime lookup.
+`llm/generate.zig` is the reference generation loop over the contract
+(prefill, sample, emit through a `TokenSink` until a stop id, the budget,
+or capacity); the qwen35 and inkling chat engines and
+`gemma.Model.generate` call it.
+
 Model families live in subdirectories and are exposed as namespaces:
 
 - `llm.qwen3.{model,train}` — Qwen3 dense/MoE inference + LoRA fine-tuning;
   `forwardStepBatch` is the batch-N lockstep decode entry (one m=N weight
   pass over N per-stream KV caches).
-- `llm.qwen35.{model,chat}` — Qwen3.5/Qwen3.6 Gated-DeltaNet hybrid plus its
-  ChatML chat/generation engine.
+- `llm.qwen35.{model,chat,serving}` — Qwen3.5/Qwen3.6 Gated-DeltaNet hybrid
+  plus its ChatML chat/generation engine and serving adapter.
 - `llm.gemma.{model,train,moe}` — Gemma 4 text + MoE; the MoE kernels
   live in the exec band (`exec/moe_gu.zig`), `gemma.moe` is the tagged
   family surface over them.
 - `llm.diffusion_gemma.model` — block text-diffusion on the gemma4 backbone.
 - `llm.deepseek2.model` — DeepSeek-V2 family (MLA + MoE).
-- `llm.deepseek4.model` — DeepSeek V4 Flash (CSA/HCA attention + streamed
-  experts via `expert_store`).
+- `llm.deepseek4.{model,serving}` — DeepSeek V4 Flash (CSA/HCA attention +
+  streamed experts via `expert_store`) and its serving adapter.
 - `llm.glm4moe.model` — GLM-4.5 family, with native multi-token-prediction
   speculative decode.
-- `llm.inkling.{model,mmproj,chat}` — Inkling hybrid SWA/global decoder with
-  banded relative-position bias, plus the image/audio mmproj towers and chat
-  glue.
+- `llm.inkling.{model,mmproj,chat,serving}` — Inkling hybrid SWA/global
+  decoder with banded relative-position bias, plus the image/audio mmproj
+  towers, chat glue, and serving adapter.
 - `llm.parakeet.*` — NeMo FastConformer ASR (frontend → subsampling →
   encoder → CTC/TDT decoder → transcription/streaming).
-- `llm.speculative.{core,sam_index,recycling,cascade,constrained}` — lossless
-  draft-model-free speculative decoding (see `SPECULATIVE.md`), including
-  grammar-constrained drafting.
+- `llm.speculative.{core,mtp,sam_index,recycling,cascade,constrained}` —
+  lossless draft-model-free speculative decoding (see `SPECULATIVE.md`),
+  including grammar-constrained drafting and native-MTP drafting behind
+  the `DraftSource` vtable (`mtp.MtpDraftSource`, glm4moe).
 - `llm.research.*` — the research tier, one namespace so the facade states
   it: `subq` (decode-path attention evaluator, installed through the
   runner's `AttentionOverride` seam; `SUBQUADRATIC-ATTENTION.md`), `engram`
@@ -753,8 +780,8 @@ Generic helpers stay flat in `src/llm/`:
   checkpoint contract; the tokenizer parameter is duck-typed so BPE and SPM
   both fit.
 - `chat.zig`: `Conversation(comptime Model, comptime Tok)` — genuinely
-  generic multi-turn chat over any family exposing `initKvCache` and a
-  tokenizer module; `Template` renders ChatML/Llama 3/Gemma 1-3/Gemma 4;
+  generic multi-turn chat over any decoder-contract family with
+  `caps.rewind` over the shared `KvCache`, paired with a tokenizer module; `Template` renders ChatML/Llama 3/Gemma 1-3/Gemma 4;
   `Options` includes `extra_stop_ids`, `stop_sequences`, and `speculation`
   (`stop_sequences` compose with speculation: the accept gate scans the
   committed text and the completing token is trimmed, preserving the
@@ -773,9 +800,13 @@ Generic helpers stay flat in `src/llm/`:
   `serving/gguf_chat.zig` is the generic `GgufChatBackend` engine
   (constraint cache, KV reuse slots + disk tier, RAM guard) for any
   `Conversation`-hosted family; `serving/open.zig` is the load-and-serve
-  entry (`serving.open`: GGUF in, ready `Backend` out for qwen3, qwen3moe,
-  gemma4). `examples/lmserve` is the CLI front end; adapters for families
-  outside `Conversation` stay example-local there.
+  entry (`serving.open`: GGUF in, ready `Backend` out), dispatched through
+  the architecture registry: the `Conversation`-hosted set (qwen3,
+  qwen3moe, gemma4) shares one generic engine box, and the engine-hosted
+  set (qwen35, qwen35moe, inkling, deepseek4) routes to the family serving
+  adapters (`qwen35/serving.zig`, `inkling/serving.zig`,
+  `deepseek4/serving.zig`). `examples/lmserve` is the CLI front end and
+  keeps only the two non-registry backends (diffusion-gemma, nanochat).
 
 - `src/optim.zig` (facade) + `src/optim/`: SGD/AdamW/Muon/APOLLO, grad clipping, LR schedules,
   `OptimizerSet` param groups; positional `FZT1` tensor snapshots plus named,

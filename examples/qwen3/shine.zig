@@ -334,7 +334,7 @@ fn answer(
     defer allocator.free(prompt_ids);
     for (prompt_ids, prompt_ids32) |*d, s| d.* = s;
 
-    var kv = try model.initKvCache(ctx, prompt_ids.len + max_new_tokens + 1);
+    var kv = try model.initCache(ctx, prompt_ids.len + max_new_tokens + 1);
     defer kv.deinit();
 
     const decode_start = util.nowNs(io);

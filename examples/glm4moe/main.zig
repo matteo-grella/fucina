@@ -116,17 +116,30 @@ pub fn main(init: std.process.Init) !void {
     for (ids32) |id| try tokens.append(allocator, id);
     try stdout.print("prompt tokens: {d}\n", .{tokens.items.len});
 
-    var cache = try model.initCache(capacity);
+    var cache = try model.initCache(&ctx, capacity);
     defer cache.deinit();
-    var mtp_cache = try model.initMtpCache(capacity);
-    defer mtp_cache.deinit();
 
-    const hidden = model.config.hidden_size;
+    const Model = llm.glm4moe.model.Model;
     const vocab = model.config.vocab_size;
-    // Trunk hiddens for every committed position (the MTP stream input).
-    var hiddens: std.ArrayList(f32) = .empty;
-    defer hiddens.deinit(allocator);
-    var mtp_fed: usize = 0;
+    // MTP self-speculation rides the shared verify loop: the family's
+    // nextn head drafts through `MtpDraftSource` and
+    // `SpeculativeDecoder` verifies/commits/rewinds.
+    var draft_src: ?llm.speculative.mtp.MtpDraftSource(Model) = null;
+    defer if (draft_src) |*d| d.deinit();
+    var spec: ?llm.speculative.core.SpeculativeDecoder(Model) = null;
+    defer if (spec) |*d| d.deinit();
+    if (mtp_depth > 0) {
+        draft_src = try llm.speculative.mtp.MtpDraftSource(Model).init(&ctx, &model, capacity, mtp_depth);
+        spec = try llm.speculative.core.SpeculativeDecoder(Model).init(allocator, draft_src.?.source(), .{
+            .max_draft = mtp_depth,
+            .min_draft = 1,
+            .stop_token = if (eos) |e| @as(usize, e) else null,
+            // This runner always speculates at full depth (the cost gate
+            // and the acceptance-adaptive budget stay out of the way).
+            .min_speedup = 0,
+            .adapt_budget = false,
+        });
+    }
 
     // Prefill (one batched step) and the first greedy token.
     const prefill_start = std.Io.Clock.awake.now(init.io).nanoseconds;
@@ -134,113 +147,87 @@ pub fn main(init: std.process.Init) !void {
     {
         var rows = try model.step(&ctx, &cache, tokens.items);
         defer rows.deinit();
-        try hiddens.appendSlice(allocator, model.step_hiddens);
         const flat = try rows.dataConst();
         next_token = argmax(flat[(tokens.items.len - 1) * vocab ..][0..vocab]);
     }
+    if (draft_src) |*d| try d.observePrefill();
     try stdout.print("prefill: {d:.1} ms ({d} tokens, one batched step)\n", .{ @as(f64, @floatFromInt(std.Io.Clock.awake.now(init.io).nanoseconds - prefill_start)) / 1e6, tokens.items.len });
 
     var reply: std.ArrayList(u8) = .empty;
     defer reply.deinit(allocator);
     var produced: usize = 0;
     var forwards: usize = 0;
-    var drafted: usize = 0;
-    var draft_accepted: usize = 0;
-    var feed_hits: usize = 0;
-    var feed_total: usize = 0;
-    const h_scratch = try allocator.alloc(f32, hidden);
-    defer allocator.free(h_scratch);
-    const h_prev = try allocator.alloc(f32, hidden);
-    defer allocator.free(h_prev);
 
     const decode_start = std.Io.Clock.awake.now(init.io).nanoseconds;
-    decode: while (produced < gen_count) {
-        if (eos != null and next_token == eos.?) break;
-
-        if (mtp_depth == 0) {
+    if (mtp_depth == 0) {
+        decode: while (produced < gen_count) {
+            if (eos != null and next_token == eos.?) break :decode;
             try tokenizer.decodeAppend(allocator, @intCast(next_token), &reply);
             try tokens.append(allocator, next_token);
             produced += 1;
             var one = [_]usize{next_token};
             var rows = try model.step(&ctx, &cache, &one);
             defer rows.deinit();
-            try hiddens.appendSlice(allocator, model.step_hiddens);
             forwards += 1;
             next_token = argmax((try rows.dataConst())[0..vocab]);
-            continue;
         }
-
-        // ---- MTP round ----
-        // Catch the MTP stream up on committed positions: position i
-        // consumes (token[i+1], trunk h[i]).
-        const n = tokens.items.len;
-        while (mtp_fed + 1 < n) : (mtp_fed += 1) {
-            var logits = try model.mtpDraftStep(&ctx, &mtp_cache, tokens.items[mtp_fed + 1], hiddens.items[mtp_fed * hidden ..][0..hidden], h_scratch);
-            defer logits.deinit();
-            // Diagnostic: the MTP head's next-next-token hit rate on KNOWN
-            // history — separates a broken MTP forward (near 0%) from a
-            // broken draft/verify loop (healthy 30-60% here).
-            if (mtp_fed + 2 < n) {
-                const got = argmax(try logits.dataConst());
-                if (got == tokens.items[mtp_fed + 2]) feed_hits += 1;
-                feed_total += 1;
-            }
-        }
-
-        // Draft chain from the frontier: (next_token, h[n-1]) then the MTP
-        // layer's own hidden recurrence.
-        var drafts_buf: [17]usize = undefined;
-        drafts_buf[0] = next_token;
-        var n_drafts: usize = 1;
-        @memcpy(h_prev, hiddens.items[(n - 1) * hidden ..][0..hidden]);
-        while (n_drafts <= mtp_depth) : (n_drafts += 1) {
-            var logits = try model.mtpDraftStep(&ctx, &mtp_cache, drafts_buf[n_drafts - 1], h_prev, h_scratch);
-            defer logits.deinit();
-            drafts_buf[n_drafts] = argmax(try logits.dataConst());
-            @memcpy(h_prev, h_scratch);
-        }
-        mtp_cache.truncate(mtp_fed); // drop the speculative MTP positions
-        const drafts = drafts_buf[0..n_drafts];
-        drafted += n_drafts - 1;
-
-        // One batched trunk verify over the whole draft, kernel-pinned so
-        // its logits are bit-identical to sequential decode at any depth
-        // (the lossless contract; see ExecContext.pinRowwiseKernels).
-        ctx.pinRowwiseKernels(true);
-        var rows = blk: {
-            defer ctx.pinRowwiseKernels(false);
-            break :blk try model.step(&ctx, &cache, drafts);
-        };
-        defer rows.deinit();
-        const flat = try rows.dataConst();
-        forwards += 1;
-        var accepted: usize = 1;
-        while (accepted < n_drafts) : (accepted += 1) {
-            if (argmax(flat[(accepted - 1) * vocab ..][0..vocab]) != drafts[accepted]) break;
-        }
-        draft_accepted += accepted - 1;
-
-        // Commit the accepted prefix (+ trunk hiddens), rewind the rest.
-        for (drafts[0..accepted]) |t| {
-            if (produced == gen_count) break :decode;
-            try tokenizer.decodeAppend(allocator, @intCast(t), &reply);
-            try tokens.append(allocator, t);
+    } else {
+        // Decoder invariant: history holds every committed token and its
+        // LAST element is not yet forwarded. Commit the prefill's first
+        // greedy token by hand, then let the verify loop drive.
+        var stopped = eos != null and next_token == eos.?;
+        if (!stopped) {
+            try tokenizer.decodeAppend(allocator, @intCast(next_token), &reply);
+            try tokens.append(allocator, next_token);
             produced += 1;
-            if (eos != null and t == eos.?) break :decode;
         }
-        try hiddens.appendSlice(allocator, model.step_hiddens[0 .. accepted * hidden]);
-        cache.truncate(tokens.items.len);
-        next_token = argmax(flat[(accepted - 1) * vocab ..][0..vocab]);
+        var sampler = llm.sampler.Sampler.init(.{}); // greedy
+        var emit = ReplyEmit{ .allocator = allocator, .tokenizer = &tokenizer, .reply = &reply, .eos = eos };
+        const sink = llm.speculative.core.TokenSink{ .ptr = &emit, .func = ReplyEmit.emit };
+        while (!stopped and produced < gen_count) {
+            // Never draft past the remaining budget (the committed count
+            // per step is at most max_draft + 1; a zero budget falls back
+            // to a plain step).
+            spec.?.options.max_draft = @min(mtp_depth, gen_count - produced -| 1);
+            const committed = try spec.?.step(&ctx, &model, &cache, &sampler, &tokens, sink);
+            produced += committed - @intFromBool(emit.saw_eos);
+            stopped = emit.saw_eos;
+        }
+        // A committed stop token stays in history for the decoder; drop it
+        // from the printout (the plain path never appends it).
+        if (emit.saw_eos) _ = tokens.pop();
+        forwards = spec.?.stats.spec_steps + spec.?.stats.fallback_steps + spec.?.stats.disabled_steps;
     }
     const decode_ns = std.Io.Clock.awake.now(init.io).nanoseconds - decode_start;
     try stdout.print("decode: {d} tokens in {d} forwards, {d:.1} ms, {d:.2} tok/s ({d:.2} tok/forward)\n", .{ produced, forwards, @as(f64, @floatFromInt(decode_ns)) / 1e6, @as(f64, @floatFromInt(produced)) * 1e9 / @as(f64, @floatFromInt(decode_ns)), @as(f64, @floatFromInt(produced)) / @as(f64, @floatFromInt(@max(forwards, 1))) });
-    if (mtp_depth > 0 and drafted > 0) {
-        try stdout.print("mtp: {d}/{d} drafts accepted ({d:.1}%), feed hit {d}/{d}\n", .{ draft_accepted, drafted, @as(f64, @floatFromInt(draft_accepted)) * 100.0 / @as(f64, @floatFromInt(drafted)), feed_hits, feed_total });
+    if (spec) |*d| {
+        if (d.stats.drafted > 0) {
+            try stdout.print("mtp: {d}/{d} drafts accepted ({d:.1}%)\n", .{ d.stats.accepted, d.stats.drafted, @as(f64, @floatFromInt(d.stats.accepted)) * 100.0 / @as(f64, @floatFromInt(d.stats.drafted)) });
+        }
     }
     try stdout.print("generated ids:", .{});
     for (tokens.items[tokens.items.len - produced ..]) |t| try stdout.print(" {d}", .{t});
     try stdout.print("\nprompt: {s}\ntext:  {s}\n", .{ prompt_text, reply.items });
 }
+
+/// The decoder's token sink: decode committed tokens into the reply
+/// buffer; a committed stop token is recorded, not decoded.
+const ReplyEmit = struct {
+    allocator: std.mem.Allocator,
+    tokenizer: *const llm.tokenizer.Tokenizer,
+    reply: *std.ArrayList(u8),
+    eos: ?u32,
+    saw_eos: bool = false,
+
+    fn emit(ptr: *anyopaque, token: usize) anyerror!void {
+        const self: *ReplyEmit = @ptrCast(@alignCast(ptr));
+        if (self.eos) |e| if (token == e) {
+            self.saw_eos = true;
+            return;
+        };
+        try self.tokenizer.decodeAppend(self.allocator, @intCast(token), self.reply);
+    }
+};
 
 fn argmax(logits: []const f32) usize {
     var best: usize = 0;

@@ -81,7 +81,7 @@ test "cached decode matches full causal attention per position (f16)" {
         defer v_row.deinit();
 
         try cache.appendLayer(&ctx, 0, &k_row, &v_row);
-        const cached_len = cache.len + 1;
+        const cached_len = cache.len() + 1;
         var k_view = try cache.k[0].narrow(&ctx, .seq, 0, cached_len);
         defer k_view.deinit();
         var v_view = try cache.v[0].narrow(&ctx, .seq, 0, cached_len);
@@ -93,7 +93,7 @@ test "cached decode matches full causal attention per position (f16)" {
 
         try std.testing.expectEqualSlices(f32, full_data[pos * H * D ..][0 .. H * D], step.dataConst());
     }
-    try std.testing.expectEqual(@as(usize, S), cache.len);
+    try std.testing.expectEqual(@as(usize, S), cache.len());
 }
 
 test "appendLayer rejects overflow and shape mismatch" {
@@ -155,7 +155,7 @@ test "KvCache per-layer head_dim sizes each layer independently" {
     try cache.appendLayer(&ctx, 0, &row0, &row0);
     try cache.appendLayer(&ctx, 1, &row1, &row1);
     cache.advance(1);
-    try std.testing.expectEqual(@as(usize, 1), cache.len);
+    try std.testing.expectEqual(@as(usize, 1), cache.len());
 
     var k0 = try cache.k[0].narrow(&ctx, .seq, 0, 1);
     defer k0.deinit();
@@ -411,14 +411,14 @@ test "cached decode matches full causal attention per position (q8_0)" {
         defer v_row.deinit();
 
         try cache.appendLayer(&ctx, 0, &k_row, &v_row);
-        const cached_len = cache.len + 1;
+        const cached_len = cache.len() + 1;
         var step = try ctx.groupedAttention(q_row.asRawTensor(), .{ .q8 = .{ .k = cache.kBlocks(0, cached_len), .v = cache.vBlocks(0, cached_len), .kv_seq = cached_len, .kv_heads = KV } }, &kv_head_for_head, scale, .{});
         defer step.deinit();
         cache.advance(1);
 
         try std.testing.expectEqualSlices(f32, full_data[pos * H * D ..][0 .. H * D], step.dataConst());
     }
-    try std.testing.expectEqual(@as(usize, S), cache.len);
+    try std.testing.expectEqual(@as(usize, S), cache.len());
 }
 
 /// Shared truncate contract check: append a 3-position prefix + 2 rejected
@@ -470,11 +470,11 @@ fn expectTruncateReappendParity(ctx: *ExecContext, dtype: KvDtype) !void {
     cache.advance(3);
     try cache.appendLayer(ctx, 0, &bad, &bad);
     cache.advance(2);
-    try std.testing.expectEqual(@as(usize, S), cache.len);
+    try std.testing.expectEqual(@as(usize, S), cache.len());
     cache.truncate(3);
-    try std.testing.expectEqual(@as(usize, 3), cache.len);
+    try std.testing.expectEqual(@as(usize, 3), cache.len());
     cache.truncate(S + 10); // clamp: never grows
-    try std.testing.expectEqual(@as(usize, 3), cache.len);
+    try std.testing.expectEqual(@as(usize, 3), cache.len());
     try cache.appendLayer(ctx, 0, &k_tail, &v_tail);
     cache.advance(2);
 
@@ -579,13 +579,13 @@ test "copyRows shares a row range across caches at the same positions" {
                 }
             },
         }
-        src.len = 5;
+        src.count = 5;
 
         // Prefix-offset share: dst already holds 2 rows (a preloaded
         // prefix); rows [2, 5) copy across at the same positions.
-        dst.len = 2;
+        dst.count = 2;
         try dst.copyRows(&src, 2, 5);
-        try std.testing.expectEqual(@as(usize, 5), dst.len);
+        try std.testing.expectEqual(@as(usize, 5), dst.len());
         switch (dtype) {
             .f16 => for (0..layers) |li| {
                 const elems = kv * d;
@@ -612,7 +612,7 @@ test "copyRows shares a row range across caches at the same positions" {
         // Geometry mismatch is rejected.
         var narrow = try KvCache.initWithDtype(&ctx, layers, kv, d, 3, dtype);
         defer narrow.deinit();
-        narrow.len = 0;
+        narrow.count = 0;
         try std.testing.expectError(Error.KvCacheShapeMismatch, narrow.copyRows(&src, 0, 5));
     }
 }

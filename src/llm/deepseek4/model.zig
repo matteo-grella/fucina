@@ -28,6 +28,10 @@ const fucina = @import("fucina");
 const weights = @import("fucina").weights;
 const gguf_meta = @import("fucina").gguf_meta;
 const ptqtp_gguf = @import("fucina").ptqtp_gguf;
+const decoder = @import("../decoder.zig");
+const chat = @import("../chat.zig");
+const model_common = @import("../model_common.zig");
+const tokenizer_mod = @import("../tokenizer.zig");
 const moe_router = @import("../moe_router.zig");
 
 const Allocator = std.mem.Allocator;
@@ -374,10 +378,15 @@ const LayerCache = struct {
     index_state_score: []f32 = &.{},
 };
 
+/// File-scope name for the raw layer-state cache: `Model.Cache` is the
+/// decoder-contract `Session`, so Model-scope code names this type
+/// `RawCache`.
+const RawCache = Cache;
+
 pub const Cache = struct {
     allocator: Allocator,
     layers: []LayerCache,
-    len: usize = 0,
+    count: usize = 0,
     capacity: usize,
 
     /// Deep copy of everything a few decode steps mutate — the raw rings,
@@ -420,7 +429,7 @@ pub const Cache = struct {
         const n = self.layers.len;
         var snap = Snapshot{
             .allocator = a,
-            .len = self.len,
+            .len = self.count,
             .n_raw = try a.alloc(usize, n),
             .raw = try a.alloc([]f32, n),
             .comp_len = try a.alloc(usize, n),
@@ -444,7 +453,7 @@ pub const Cache = struct {
     }
 
     pub fn restore(self: *Cache, snap: *const Snapshot) void {
-        self.len = snap.len;
+        self.count = snap.len;
         for (self.layers, 0..) |*lc, i| {
             lc.n_raw = snap.n_raw[i];
             @memcpy(lc.raw, snap.raw[i]);
@@ -454,6 +463,29 @@ pub const Cache = struct {
             @memcpy(lc.attn_state_score, snap.attn_state_score[i]);
             @memcpy(lc.index_state_kv, snap.index_state_kv[i]);
             @memcpy(lc.index_state_score, snap.index_state_score[i]);
+        }
+    }
+
+    /// The number of cached positions (the decoder contract's `len()`).
+    pub fn len(self: *const Cache) usize {
+        return self.count;
+    }
+
+    /// Reset to a fresh, empty state: drop the cached positions, empty the
+    /// compressed streams, and re-arm the compressor windows exactly as
+    /// `Model.initRawCache` leaves them (kv 0, score -inf). Buffers are
+    /// retained.
+    pub fn reset(self: *Cache) void {
+        self.count = 0;
+        for (self.layers) |*lc| {
+            lc.n_raw = 0;
+            @memset(lc.raw, 0);
+            lc.comp.clearRetainingCapacity();
+            lc.index_comp.clearRetainingCapacity();
+            @memset(lc.attn_state_kv, 0);
+            @memset(lc.attn_state_score, -std.math.inf(f32));
+            @memset(lc.index_state_kv, 0);
+            @memset(lc.index_state_score, -std.math.inf(f32));
         }
     }
 
@@ -473,6 +505,15 @@ pub const Cache = struct {
 };
 
 pub const Model = struct {
+    /// Decoder-contract decode state (`llm.decoder`): a full `Session`
+    /// (raw/compressed KV state plus step scratch); the file-level `Cache`
+    /// is the layer-state half a Session owns.
+    pub const Cache = Session;
+    /// Decoder-contract capabilities: the compressor windows roll forward
+    /// destructively (`Snapshot`/`restore` is the family's own rewind
+    /// mechanism, not `truncate`), and there is no lockstep batch entry.
+    pub const caps: decoder.Caps = .{ .rewind = false, .batch = false };
+
     allocator: Allocator,
     config: Config,
     token_embedding: LinearWeight,
@@ -596,7 +637,9 @@ pub const Model = struct {
         self.* = undefined;
     }
 
-    pub fn initCache(self: *const Model, capacity: usize) !Cache {
+    /// The raw layer-state cache (the KV half of a `Session`); the
+    /// decoder-contract `initCache` below builds the full Session.
+    pub fn initRawCache(self: *const Model, capacity: usize) !RawCache {
         const cfg = self.config;
         const allocator = self.allocator;
         const layers = try allocator.alloc(LayerCache, cfg.num_layers);
@@ -631,6 +674,37 @@ pub const Model = struct {
             built += 1;
         }
         return .{ .allocator = allocator, .layers = layers, .capacity = capacity };
+    }
+
+    /// Decoder-contract cache construction; `ctx` is unused (host-side
+    /// allocation) and taken for the uniform spelling.
+    pub fn initCache(self: *const Model, ctx: *ExecContext, capacity: usize) !Session {
+        _ = ctx;
+        return Session.init(self, capacity);
+    }
+
+    /// Prefill slice width of `forwardStep` (the serving adapter's chunk):
+    /// batches expert fetches per layer per chunk without letting
+    /// per-chunk scratch grow unbounded.
+    const forward_step_chunk: usize = 128;
+
+    /// Decoder-contract entry (`llm.decoder`): process `tokens` at
+    /// positions `pos0 ..` and return the LAST position's logits
+    /// `[1, vocab]` as a caller-owned tensor (copied out of the
+    /// session-owned scratch row). Built from the family's existing
+    /// entries: `forward_step_chunk`-token slices of `stepBatch` (which
+    /// routes a single token through `step`, the hot decode path).
+    pub fn forwardStep(self: *Model, ctx: *ExecContext, session: *Session, tokens: []const usize, pos0: usize) !fucina.Tensor(.{ .seq, .vocab }) {
+        std.debug.assert(pos0 == session.len());
+        std.debug.assert(tokens.len > 0);
+        var logits: []f32 = &.{};
+        var fed: usize = 0;
+        while (fed < tokens.len) {
+            const end = @min(fed + forward_step_chunk, tokens.len);
+            logits = try stepBatch(self, ctx, session, tokens[fed..end]);
+            fed = end;
+        }
+        return fucina.Tensor(.{ .seq, .vocab }).fromSlice(ctx, .{ 1, self.config.vocab_size }, logits);
     }
 };
 
@@ -1339,26 +1413,38 @@ fn compressorAdvance(
 }
 
 pub const Session = struct {
-    cache: Cache,
+    cache: RawCache,
     scratch: StepScratch,
+    /// Allocator backing `scratch` (kept so `deinit` needs no model).
+    allocator: Allocator,
     /// Selection-overlap probe (null = off). Enable only with
     /// `Model.index_share_every` == 0 — the probe measures the exact path.
     probe: ?IndexProbe = null,
 
     pub fn init(model: *const Model, capacity: usize) !Session {
-        var cache = try model.initCache(capacity);
+        var cache = try model.initRawCache(capacity);
         errdefer cache.deinit();
         const scratch = try StepScratch.init(model.allocator, model.config);
-        return .{ .cache = cache, .scratch = scratch };
+        return .{ .cache = cache, .scratch = scratch, .allocator = model.allocator };
     }
 
     pub fn enableIndexProbe(self: *Session, model: *const Model) !void {
         self.probe = try IndexProbe.init(model.allocator, model.config);
     }
 
-    pub fn deinit(self: *Session, model: *const Model) void {
+    /// The number of cached positions (the decoder contract's `len()`).
+    pub fn len(self: *const Session) usize {
+        return self.cache.len();
+    }
+
+    /// Reset to a fresh, empty session (the decoder contract's `reset()`).
+    pub fn reset(self: *Session) void {
+        self.cache.reset();
+    }
+
+    pub fn deinit(self: *Session) void {
         if (self.probe) |*p| p.deinit();
-        self.scratch.deinit(model.allocator);
+        self.scratch.deinit(self.allocator);
         self.cache.deinit();
         self.* = undefined;
     }
@@ -1372,8 +1458,8 @@ pub const Session = struct {
 pub fn step(self: *Model, ctx: *ExecContext, session: *Session, token: usize) ![]f32 {
     const cfg = self.config;
     const cache = &session.cache;
-    if (cache.len >= cache.capacity) return Error.KvCacheOverflow;
-    const pos = cache.len;
+    if (cache.len() >= cache.capacity) return Error.KvCacheOverflow;
+    const pos = cache.len();
     const streams = session.scratch.streams;
     var tables = try StepRope.init(&self.rope, ctx, pos, 1);
     defer tables.deinit();
@@ -1412,7 +1498,7 @@ pub fn step(self: *Model, ctx: *ExecContext, session: *Session, token: usize) ![
         }
     }
     if (session.probe) |*p| p.stepDone();
-    cache.len += 1;
+    cache.count += 1;
     const t_head = profNowNs();
     const out = try outputLogitsWithInto(self, ctx, streams, &self.output_hc, self.output_norm, session.scratch.logits);
     self.prof.head_ns +%= profNowNs() -% t_head;
@@ -1502,8 +1588,8 @@ pub fn stepBatchExtra(self: *Model, ctx: *ExecContext, session: *Session, tokens
     const S = tokens.len;
     if (S == 0) return Error.KvCacheOverflow;
     if (S == 1 and out_logits_rows == null and out_streams == null) return step(self, ctx, session, tokens[0]);
-    if (cache.len + S > cache.capacity) return Error.KvCacheOverflow;
-    const pos0 = cache.len;
+    if (cache.len() + S > cache.capacity) return Error.KvCacheOverflow;
+    const pos0 = cache.len();
     const hc_dim = cfg.n_hc * cfg.hidden_size;
     var tables = try StepRope.init(&self.rope, ctx, pos0, S);
     defer tables.deinit();
@@ -1555,7 +1641,7 @@ pub fn stepBatchExtra(self: *Model, ctx: *ExecContext, session: *Session, tokens
             try hcPostBatch(ctx, cfg, splits[0..ffn_s], try block_out.dataConst(), tail, ffn_s);
         }
     }
-    cache.len += S;
+    cache.count += S;
 
     if (out_streams) |dst| switch (dst) {
         .all => |s| @memcpy(s[0 .. S * hc_dim], streams_all[0 .. S * hc_dim]),
@@ -2376,6 +2462,30 @@ fn moeBlockBatch(self: *Model, ctx: *ExecContext, layer: *const Layer, sub_in: [
     // Pooled tensor out: caller defer-deinits after consuming the view.
     return total;
 }
+
+/// File-scope name for the model so `Family.Model` can alias it.
+const ModelT = Model;
+
+/// Registry surface (`llm.registry`): what `serving.open` needs to load
+/// and serve this family (`deepseek4.serving` renders the chat at the
+/// token level; no chat template).
+pub const Family = struct {
+    pub const Model = ModelT;
+    /// The tokenizer MODULE (byte-level BPE) and its `Tokenizer` type.
+    pub const Tok = tokenizer_mod;
+    pub const Tokenizer = tokenizer_mod.Tokenizer;
+
+    pub fn load(ctx: *ExecContext, file: *gguf.File, options: model_common.FamilyLoadOptions) !ModelT {
+        const load_options: ModelT.LoadOptions = if (options.moe_stream) |m| .{ .moe_stream = m } else .{};
+        return ModelT.loadGgufFromFileOptions(ctx, file, load_options);
+    }
+
+    pub fn tokenizer(allocator: Allocator, file: *const gguf.File) !Tokenizer {
+        return Tokenizer.initFromGguf(allocator, file, .{});
+    }
+
+    pub const template_fallback: ?chat.Format = null;
+};
 
 test {
     // The grid numerics themselves are pinned bit-for-bit against the

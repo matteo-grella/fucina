@@ -39,7 +39,7 @@ fn goldenForward(ctx: *ExecContext, model: *runner.Model, prompt: []const usize,
         try std.testing.expectEqual(golden.chain[0], argmaxRow(try last.dataConst()));
     }
 
-    var kv = try model.initKvCache(ctx, 32);
+    var kv = try model.initCache(ctx, 32);
     defer kv.deinit();
     var logits = try model.forwardStep(ctx, &kv, prompt, 0);
     if (strict_bits) try std.testing.expectEqual(golden.prefill_hash, fnvHash(try logits.dataConst()));
@@ -345,7 +345,7 @@ test "runner and the glm4moe family module agree bitwise on a synthetic GGUF (ho
 
     var cache_generic = try generic.initHostCache(16);
     defer cache_generic.deinit();
-    var cache_hand = try hand.initCache(16);
+    var cache_hand = try hand.initCache(&ctx, 16);
     defer cache_hand.deinit();
 
     // Prefill + greedy chain: every per-position logits row bitwise.

@@ -29,7 +29,10 @@ trunk runs on its host_reference blocks.
   is nothing between the descriptor walk and the facade. Because the qwen3
   family serves through it, the `.fused` style also carries the batched
   decode entries (`forwardStepBatch`, `forwardStepBatchSpans`) and the
-  nullable SubQ research seam.
+  nullable SubQ research seam. `runner.Model` conforms to the decoder
+  contract (`llm.decoder`: `Cache` = the shared `KvCache`, `caps` =
+  rewind + batch, `initCache`, `forwardStep`), so every generic layer
+  (chat, speculative, serving, generate) hosts it.
 
 ## Block styles
 

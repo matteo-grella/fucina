@@ -1,10 +1,12 @@
 //! Serving band index. The contract (`Backend` vtable, `GenerateRequest`/
 //! `GenerateResult`, `Caps`) lives in `serving/contract.zig` and is
 //! re-exported flat here; the transport and engine sub-modules follow the
-//! `llm.zig` family-namespace pattern. `open`/`openFromFile` load a GGUF and
-//! return a ready `Backend` for the `Conversation`-hosted families (qwen3,
-//! qwen3moe, gemma4); `examples/lmserve` is the CLI front end and keeps the
-//! adapters for the families that cannot ride `Conversation`.
+//! `llm.zig` family-namespace pattern. `open`/`openFromFile` load a GGUF
+//! and return a ready `Backend` for every registry-served family: the
+//! `Conversation`-hosted set (qwen3, qwen3moe, gemma4) through the generic
+//! engine box, and the engine-hosted set (qwen35, qwen35moe, inkling,
+//! deepseek4) through the family serving adapters. `examples/lmserve` is
+//! the CLI front end.
 
 const contract = @import("serving/contract.zig");
 

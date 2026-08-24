@@ -294,7 +294,7 @@ test "sendRenderedReuse: warm slot reuses the prefix, matches a fresh stateless 
     try std.testing.expectEqual(@as(usize, 0), convo1.reused_prefix);
 
     // The server epilogue: token shadow + cache leave the conversation.
-    const shadow = try allocator.dupe(usize, convo1.history.items[0..convo1.cache.len]);
+    const shadow = try allocator.dupe(usize, convo1.history.items[0..convo1.cache.len()]);
     defer allocator.free(shadow);
     const slot_cache = convo1.takeCache();
 
@@ -394,7 +394,7 @@ test "sendRenderedReuse: identical resend and divergent edits reconcile; specula
     try std.testing.expectEqualStrings(reply1.written(), reply2.written());
 
     // A divergent render (edited history): reuse stops at the divergence.
-    const pre_edit = try allocator.dupe(usize, convo.history.items[0..convo.cache.len]);
+    const pre_edit = try allocator.dupe(usize, convo.history.items[0..convo.cache.len()]);
     defer allocator.free(pre_edit);
     var buf_edit: std.ArrayList(u8) = .empty;
     defer buf_edit.deinit(allocator);
@@ -428,9 +428,9 @@ test "sendRenderedReuse: identical resend and divergent edits reconcile; specula
     var spec_aw = std.Io.Writer.Allocating.init(allocator);
     defer spec_aw.deinit();
     _ = try spec_convo.sendRenderedReuse(buf.items, &spec_aw.writer);
-    try std.testing.expectEqual(spec_convo.history.items.len, spec_convo.cache.len);
+    try std.testing.expectEqual(spec_convo.history.items.len, spec_convo.cache.len());
 
-    const orphan = try model.initKvCache(&ctx, 64);
+    const orphan = try model.initCache(&ctx, 64);
     var warm_spec = try Conversation.initWarm(&ctx, &model, &tok, tmpl, .{
         .capacity = 64,
         .speculation = true,
@@ -499,7 +499,7 @@ fn expectSpecEquivalentConversation(sampler_cfg: sampler_mod.Config) !void {
             .produced = produced,
         };
         // Post-turn cache/history relationship is consistent for the NEXT turn.
-        try std.testing.expect(convo.cache.len <= convo.history.items.len);
+        try std.testing.expect(convo.cache.len() <= convo.history.items.len);
         if (which == 1) {
             const stats = convo.specStats().?;
             try std.testing.expect(stats.steps > 0);
@@ -899,15 +899,15 @@ test "spec turn: writer failure mid-turn leaves the conversation consistent; the
     var fw = std.Io.Writer.fixed(&small);
     try std.testing.expectError(error.WriteFailed, convo.send("ab a", &fw));
     // The unconditional turn trim ran: history/KV in sync for the next turn.
-    try std.testing.expect(convo.history.items.len >= convo.cache.len);
-    try std.testing.expect(convo.history.items.len - convo.cache.len <= 1);
+    try std.testing.expect(convo.history.items.len >= convo.cache.len());
+    try std.testing.expect(convo.history.items.len - convo.cache.len() <= 1);
 
     // Resend works and the state stays consistent.
     var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
     _ = try convo.send("ab a", &aw.writer);
-    try std.testing.expect(convo.history.items.len >= convo.cache.len);
-    try std.testing.expect(convo.history.items.len - convo.cache.len <= 1);
+    try std.testing.expect(convo.history.items.len >= convo.cache.len());
+    try std.testing.expect(convo.history.items.len - convo.cache.len() <= 1);
 }
 
 test "speculation config: accounting_min_draft aligned; stop sequences rejected" {
@@ -1007,7 +1007,7 @@ test "extra stop ids and text stop sequences end the turn before streaming" {
         const produced = try convo.send("ab a", &aw.writer);
         try std.testing.expect(produced < ref_produced);
         try std.testing.expectEqual(@as(usize, 0), aw.written().len);
-        try std.testing.expectEqual(convo.history.items.len, convo.cache.len);
+        try std.testing.expectEqual(convo.history.items.len, convo.cache.len());
     }
 }
 
@@ -1086,8 +1086,8 @@ fn expectBatchEquivalentConversations(base_sampler_cfg: sampler_mod.Config) !voi
 
         for (0..n) |i| {
             // Post-turn, every committed token is forwarded: the next turn
-            // prefills from exactly `cache.len` (the plain-send invariant).
-            try std.testing.expectEqual(convos[i].history.items.len, convos[i].cache.len);
+            // prefills from exactly `cache.len()` (the plain-send invariant).
+            try std.testing.expectEqual(convos[i].history.items.len, convos[i].cache.len());
             var per_stream: [turns.len]usize = undefined;
             for (0..turns.len) |ti| per_stream[ti] = produced[ti][i];
             results[which][i] = .{
@@ -1197,14 +1197,14 @@ test "sendBatch abort leaves every stream consistent and resendable" {
 
     // The abort trim restored history == cache for BOTH streams — the
     // healthy sibling's committed-but-unforwarded token was dropped.
-    try std.testing.expectEqual(healthy.history.items.len, healthy.cache.len);
-    try std.testing.expectEqual(cramped.history.items.len, cramped.cache.len);
+    try std.testing.expectEqual(healthy.history.items.len, healthy.cache.len());
+    try std.testing.expectEqual(cramped.history.items.len, cramped.cache.len());
 
     // The healthy conversation remains usable: a plain send completes and
     // keeps the post-turn invariant.
     const n = try healthy.send("us it", &aw_healthy.writer);
     try std.testing.expect(n <= 8);
-    try std.testing.expectEqual(healthy.history.items.len, healthy.cache.len);
+    try std.testing.expectEqual(healthy.history.items.len, healthy.cache.len());
 }
 
 test "sendBatch abort trims a preloaded-prefix stream to its token-backed length" {
@@ -1224,7 +1224,7 @@ test "sendBatch abort trims a preloaded-prefix stream to its token-backed length
 
     // A conversation serving a preloaded KV prefix (the cartridge seam):
     // history[i] describes cache row kv_prefix_rows + i, so the abort trim
-    // must target cache.len - kv_prefix_rows, not cache.len.
+    // must target cache.len() - kv_prefix_rows, not cache.len().
     var trainer = try qwen3_train.Trainer(.{ .q = false, .v = false }).init(&ctx, &model, .{ .rank = 1, .alpha = 1 }, 7);
     defer trainer.deinit();
     const prefix_tokens = [_]usize{ 1, 3, 5, 7, 9 };
@@ -1257,14 +1257,14 @@ test "sendBatch abort trims a preloaded-prefix stream to its token-backed length
     // The abort trim restored the prefix-aware invariant: every history
     // token is cache-backed BEHIND the prefix, no committed-but-unforwarded
     // token survives.
-    try std.testing.expectEqual(prefixed.history.items.len, prefixed.cache.len - prefixed.kv_prefix_rows);
-    try std.testing.expectEqual(cramped.history.items.len, cramped.cache.len);
+    try std.testing.expectEqual(prefixed.history.items.len, prefixed.cache.len() - prefixed.kv_prefix_rows);
+    try std.testing.expectEqual(cramped.history.items.len, cramped.cache.len());
 
     // The prefixed conversation remains usable: a plain send completes and
     // keeps the prefix-aware post-turn invariant.
     const n = try prefixed.send("us it", &aw_prefixed.writer);
     try std.testing.expect(n <= 8);
-    try std.testing.expectEqual(prefixed.history.items.len, prefixed.cache.len - prefixed.kv_prefix_rows);
+    try std.testing.expectEqual(prefixed.history.items.len, prefixed.cache.len() - prefixed.kv_prefix_rows);
 }
 
 test "conversation serves a preloaded KV prefix and reuses past it" {
@@ -1305,7 +1305,7 @@ test "conversation serves a preloaded KV prefix and reuses past it" {
     try std.testing.expectError(error.InvalidPrefix, convo.notePrefixRows(3));
     try cart.writeToCache(&ctx, &convo.cache);
     try convo.notePrefixRows(cart.p);
-    try std.testing.expectEqual(cart.p, convo.cache.len);
+    try std.testing.expectEqual(cart.p, convo.cache.len());
 
     // Request 1 (stateless render): nothing reusable; prefill lands at
     // positions p.. behind the prefix.
@@ -1314,12 +1314,12 @@ test "conversation serves a preloaded KV prefix and reuses past it" {
     defer sink1.deinit();
     _ = try convo.sendTokensReuse(&ids1, &sink1.writer);
     try std.testing.expectEqual(@as(usize, 0), convo.reused_prefix);
-    try std.testing.expect(convo.cache.len > cart.p);
+    try std.testing.expect(convo.cache.len() > cart.p);
     try std.testing.expectEqual(cart.p, convo.kv_prefix_rows);
 
     // Request 2: committed history + a new turn — every committed token
     // reuses its KV row, and the rewind never cuts into the prefix.
-    const committed = convo.cache.len - cart.p;
+    const committed = convo.cache.len() - cart.p;
     var ids2: std.ArrayList(u32) = .empty;
     defer ids2.deinit(allocator);
     for (convo.history.items[0..committed]) |t| try ids2.append(allocator, @intCast(t));
@@ -1331,7 +1331,7 @@ test "conversation serves a preloaded KV prefix and reuses past it" {
 
     // Pool cycle (the lmserve slot seam): release with a token-only
     // shadow, adopt with prefix_rows, replay the history — all reused.
-    const shadow_len = convo.cache.len - cart.p;
+    const shadow_len = convo.cache.len() - cart.p;
     var shadow: std.ArrayList(usize) = .empty;
     defer shadow.deinit(allocator);
     try shadow.appendSlice(allocator, convo.history.items[0..shadow_len]);
@@ -1344,7 +1344,7 @@ test "conversation serves a preloaded KV prefix and reuses past it" {
         .prefix_rows = cart.p,
     });
     defer convo2.deinit();
-    try std.testing.expectEqual(cart.p + shadow_len, convo2.cache.len);
+    try std.testing.expectEqual(cart.p + shadow_len, convo2.cache.len());
     try std.testing.expectEqual(cart.p, convo2.kv_prefix_rows);
 
     var ids3: std.ArrayList(u32) = .empty;
@@ -1458,7 +1458,7 @@ test "2-request, 3-stream: sendBatchTokensReuse == sequential sendTokensReuse" {
         for (0..n) |i| {
             // Post-turn, every committed token is forwarded (the plain-send
             // invariant).
-            try std.testing.expectEqual(convos[i].history.items.len, convos[i].cache.len);
+            try std.testing.expectEqual(convos[i].history.items.len, convos[i].cache.len());
             results[which][i] = .{
                 .history = try allocator.dupe(usize, convos[i].history.items),
                 .text = try allocator.dupe(u8, aws[i].written()),
@@ -1539,7 +1539,7 @@ test "sendBatchTokensReuse isolates a failing stream and leaves it resendable" {
     try std.testing.expect(aw2.written().len > 0);
 
     // Every stream — the failed one included — is internally consistent...
-    for (0..n) |i| try std.testing.expectEqual(convos[i].history.items.len, convos[i].cache.len);
+    for (0..n) |i| try std.testing.expectEqual(convos[i].history.items.len, convos[i].cache.len());
     // ...and the failed stream accepts a follow-up request.
     var aw_retry = std.Io.Writer.Allocating.init(allocator);
     defer aw_retry.deinit();

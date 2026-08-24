@@ -24,6 +24,9 @@
 const std = @import("std");
 const fucina = @import("fucina");
 const weights = @import("fucina").weights;
+const decoder = @import("../decoder.zig");
+const chat = @import("../chat.zig");
+const tokenizer_mod = @import("../tokenizer.zig");
 const model_common = @import("../model_common.zig");
 const moe_router = @import("../moe_router.zig");
 const kv_cache = @import("../kv_cache.zig");
@@ -654,6 +657,14 @@ pub const LoadOptions = struct {
 };
 
 pub const Model = struct {
+    /// Decoder-contract decode state (`llm.decoder`): the family's
+    /// streaming cache (attention KV plus per-linear-layer conv/SSM
+    /// state).
+    pub const Cache = StreamingCache;
+    /// Decoder-contract capabilities: the recurrent conv/SSM state cannot
+    /// rewind to a token prefix, and there is no lockstep batch entry.
+    pub const caps: decoder.Caps = .{ .rewind = false, .batch = false };
+
     allocator: Allocator,
     config: Config,
     token_embedding: LinearWeight,
@@ -808,8 +819,8 @@ pub const Model = struct {
 
     /// Initialize the streaming cache for this model (attention KV cache +
     /// per-linear-layer recurrent state). Capacity is the max sequence length.
-    pub fn initCache(self: *const Model, ctx: *ExecContext, capacity: usize) !Cache {
-        return Cache.init(self, ctx, capacity);
+    pub fn initCache(self: *const Model, ctx: *ExecContext, capacity: usize) !StreamingCache {
+        return StreamingCache.init(self, ctx, capacity);
     }
 
     /// Process `token_ids` at absolute positions `pos0 .. pos0+len`, updating the
@@ -817,14 +828,14 @@ pub const Model = struct {
     /// token's logits. Prefill = one call with `pos0 == 0`; each subsequent
     /// single-token call is a decode step. Equivalent to `forwardLastLogits` for
     /// the same prefix, but O(1)-state per linear layer instead of recomputing.
-    pub fn forwardStep(self: *const Model, ctx: *ExecContext, cache: *Cache, token_ids: []const usize, pos0: usize) !fucina.Tensor(.{ .seq, .vocab }) {
+    pub fn forwardStep(self: *const Model, ctx: *ExecContext, cache: *StreamingCache, token_ids: []const usize, pos0: usize) !fucina.Tensor(.{ .seq, .vocab }) {
         return self.forwardStepImpl(ctx, cache, token_ids, pos0, .chunked, null, null);
     }
 
     pub fn forwardStepWithScanMode(
         self: *const Model,
         ctx: *ExecContext,
-        cache: *Cache,
+        cache: *StreamingCache,
         token_ids: []const usize,
         pos0: usize,
         scan_mode: LinearScanMode,
@@ -835,7 +846,7 @@ pub const Model = struct {
     pub fn forwardStepProfiled(
         self: *const Model,
         ctx: *ExecContext,
-        cache: *Cache,
+        cache: *StreamingCache,
         token_ids: []const usize,
         pos0: usize,
         io: std.Io,
@@ -847,7 +858,7 @@ pub const Model = struct {
     pub fn forwardStepProfiledWithScanMode(
         self: *const Model,
         ctx: *ExecContext,
-        cache: *Cache,
+        cache: *StreamingCache,
         token_ids: []const usize,
         pos0: usize,
         scan_mode: LinearScanMode,
@@ -860,7 +871,7 @@ pub const Model = struct {
     fn forwardStepImpl(
         self: *const Model,
         ctx: *ExecContext,
-        cache: *Cache,
+        cache: *StreamingCache,
         token_ids: []const usize,
         pos0: usize,
         scan_mode: LinearScanMode,
@@ -871,8 +882,8 @@ pub const Model = struct {
         if (profile) |p| p.tokens += token_ids.len;
         if (token_ids.len == 0) return Error.InvalidSequenceLength;
         try cache.kv.requireF16();
-        if (cache.kv.len != pos0) return Error.InvalidSequenceLength;
-        if (cache.kv.len + token_ids.len > cache.kv.capacity) return kv_cache.Error.KvCacheOverflow;
+        if (cache.kv.len() != pos0) return Error.InvalidSequenceLength;
+        if (cache.kv.len() + token_ids.len > cache.kv.capacity) return kv_cache.Error.KvCacheOverflow;
         const cfg = self.config;
 
         const prep_start = profileStart(profile, io);
@@ -928,6 +939,9 @@ pub const Model = struct {
     }
 };
 
+/// File-scope name for the cache so `Model.Cache` can alias it.
+const StreamingCache = Cache;
+
 /// Streaming-decode cache: the attention KV cache plus, per DeltaNet-linear
 /// layer, the conv window (`[(d_conv-1)·conv_dim]`) and the recurrent state
 /// (`[H·Sd·Sd]`). State for the 6 attention layers in `conv`/`ssm` is unused.
@@ -969,7 +983,7 @@ pub const Cache = struct {
     }
 
     pub fn len(self: *const Cache) usize {
-        return self.kv.len;
+        return self.kv.len();
     }
 
     fn convSlice(self: *Cache, il: usize) []f32 {
@@ -1124,7 +1138,7 @@ fn attnForward(
     const sdpa_start = profileStart(profile, io);
     var attn = if (kv) |cache| blk: {
         try cache.appendLayer(ctx, layer_i, &k_rope, &v3);
-        const cached_len = cache.len + k_rope.dim(.seq);
+        const cached_len = cache.len() + k_rope.dim(.seq);
         var k_view = try cache.k[layer_i].narrow(ctx, .seq, 0, cached_len);
         defer k_view.deinit();
         var v_view = try cache.v[layer_i].narrow(ctx, .seq, 0, cached_len);
@@ -2265,6 +2279,31 @@ test "partialRope rotates first n_rot dims and passes the rest through" {
         for (0..n_rot) |j| try std.testing.expectApproxEqAbs(rd[s * n_rot + j], od[s * d + j], 1e-5);
     }
 }
+
+/// File-scope name for the model so `Family.Model` can alias it.
+const ModelT = Model;
+
+/// Registry surface (`llm.registry`): what `serving.open` needs to load
+/// and serve this family (qwen35 and qwen35moe share it).
+pub const Family = struct {
+    pub const Model = ModelT;
+    /// The tokenizer MODULE (byte-level BPE) and its `Tokenizer` type.
+    pub const Tok = tokenizer_mod;
+    pub const Tokenizer = tokenizer_mod.Tokenizer;
+
+    pub fn load(ctx: *ExecContext, file: *gguf.File, options: model_common.FamilyLoadOptions) !ModelT {
+        const config = try Config.fromGguf(file);
+        const load_options: LoadOptions = if (options.moe_stream) |m| .{ .moe_stream = m } else .{};
+        return ModelT.loadGgufFromFileOptions(ctx, file, config, load_options);
+    }
+
+    pub fn tokenizer(allocator: Allocator, file: *const gguf.File) !Tokenizer {
+        return Tokenizer.initFromGguf(allocator, file, .{});
+    }
+
+    /// Qwen3.5/Qwen3.6 GGUFs without an embedded template render as ChatML.
+    pub const template_fallback: ?chat.Format = .chatml;
+};
 
 test {
     _ = @import("model_tests.zig");

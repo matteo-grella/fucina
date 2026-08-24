@@ -1107,33 +1107,36 @@ Prefill once; then sample → stop-check → stream → commit to history →
 forward one token. §12.2's `StreamDecoder` handles the UTF-8 tails, §12.4's
 cache makes each iteration cheap, §12.6's sampler picks the tokens. A turn
 whose prefix exceeds remaining capacity is `error.ContextFull`
-(`chat.zig:587`); the whole conversation must fit `Options.capacity`.
+(`chat.zig:604`); the whole conversation must fit `Options.capacity`.
 
 ### The comptime contract
 
-`Conversation` never names qwen3. Its expectations are *duck-typed*, spelled
-out in the doc comment (`chat.zig:296-301`): `Model` must expose
-`config.vocab_size`, `initKvCache`, and the `forwardStep` /
-`forwardStepAllLogits` decode entries; `Tok` must provide a `Tokenizer` and
-a `StreamDecoder`. Zig checks these at instantiation, and the two batch-ish
-entries make a beautifully instructive contrast:
+`Conversation` never names qwen3. Its expectations are the decoder
+contract (`llm.decoder`, asserted by `assertDecoder(Model)` at the top of
+the type function; doc comment at `chat.zig:294-301`): a `Cache` type, a
+`caps` value, `initCache`, and the `forwardStep` /
+`forwardStepAllLogits` decode entries; `Tok` must provide a `Tokenizer`
+and a `StreamDecoder`. Zig checks these at instantiation, and the two
+batch-ish entries make a beautifully instructive contrast:
 
 - **`forwardStepAllLogits` is a hard compile-time requirement — even with
-  speculation permanently off.** `docs/REFERENCE.md` §13.8.2: "`send`
-  unconditionally references the speculative path, so a `Model` without it
-  fails to instantiate; it is only *executed* when speculation is enabled."
-  Comptime duck typing checks everything a generic function *mentions*, not
-  just what a given run calls — the compiler compiles the whole `send`,
-  speculative branch included, the moment you instantiate the type.
-- **`forwardStepBatch` is comptime-*gated*, so it is optional.** The code
-  asks before touching it (*from `src/llm/chat.zig:797-804`, comment
+  speculation permanently off.** `docs/REFERENCE.md` §13.8.2: `send`
+  unconditionally references the speculative path, so `Conversation`
+  requires `caps.rewind` (which in turn requires the verify entry); it is
+  only *executed* when speculation is enabled. Comptime checking covers
+  everything a generic function *mentions*, not just what a given run
+  calls — the compiler compiles the whole `send`, speculative branch
+  included, the moment you instantiate the type.
+- **`forwardStepBatch` is comptime-*gated*, so it is optional.** The
+  family declares the capability (`caps.batch`) and the code asks before
+  touching the entry (*from `src/llm/chat.zig:817-826`, comment
   included*):
 
 ```zig
-// Comptime-gated so model families without a batch entry (e.g.
-// gemma4 today) still compile the Conversation type; they get a
-// runtime error here instead.
-if (comptime @hasDecl(Model, "forwardStepBatch")) {
+// Comptime-gated so model families without a batch entry still
+// compile the Conversation type; they get a runtime error here
+// instead.
+if (comptime Model.caps.batch) {
     return sendBatchImpl(convos, users, writers, produced);
 } else {
     return error.BatchDecodeUnsupported;
@@ -1142,12 +1145,12 @@ if (comptime @hasDecl(Model, "forwardStepBatch")) {
 
 > **Zig note** — This pair is the whole comptime-interface design space in
 > eight lines. Mention a declaration unconditionally and it becomes a hard
-> requirement of your generic type; wrap it in
-> `if (comptime @hasDecl(...))` and it becomes an optional capability with
-> a graceful runtime fallback — the `else` branch is not even analysed for
-> a model without the method. No interface files, no trait declarations:
-> the contract *is* the usage, which is exactly why the repo documents it
-> in prose so carefully.
+> requirement of your generic type; branch on a comptime capability flag
+> and it becomes optional with a graceful runtime fallback — the `else`
+> branch is not even analysed for a model whose `caps.batch` is false. No
+> interface files, no trait declarations: the contract *is* the usage,
+> which is why the repo states it once, in `llm/decoder.zig`, and asserts
+> it everywhere.
 
 Beyond `send`, the same type carries the seams
 [Chapter 13](13-inference-tricks.md) builds the server story on:

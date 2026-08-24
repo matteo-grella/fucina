@@ -27,6 +27,10 @@
 //!       states cannot rewind (would need state snapshots).
 const std = @import("std");
 const fucina = @import("fucina");
+const decoder = @import("../decoder.zig");
+const chat = @import("../chat.zig");
+const model_common = @import("../model_common.zig");
+const tokenizer_mod = @import("../tokenizer.zig");
 const weights = @import("fucina").weights;
 const gguf_meta = @import("fucina").gguf_meta;
 const host_ops = @import("../host_ops.zig");
@@ -285,6 +289,9 @@ const Layer = struct {
     }
 };
 
+/// File-scope name for the cache so `Model.Cache` can alias it.
+const HostCache = Cache;
+
 /// Host cache: per layer post-norm K and V `[capacity, kv_heads_i, head_dim]`
 /// plus the four rolling short-conv input states `[K-1, width]` (sites:
 /// k-proj, v-proj, attention output, FFN output). No truncate: the conv
@@ -295,7 +302,7 @@ pub const Cache = struct {
     v: [][]f32,
     /// conv_state[layer * 4 + site], time-major rows of the last K-1 inputs.
     conv_state: [][]f32,
-    len: usize = 0,
+    count: usize = 0,
     capacity: usize,
 
     pub const Site = enum(usize) { k = 0, v = 1, attn = 2, mlp = 3 };
@@ -355,12 +362,32 @@ pub const Cache = struct {
         self.* = undefined;
     }
 
+    /// The number of cached positions (the decoder contract's `len()`).
+    pub fn len(self: *const Cache) usize {
+        return self.count;
+    }
+
+    /// Reset to an empty sequence: drop the cached positions and zero the
+    /// rolling conv states (the init state; buffers are retained).
+    pub fn reset(self: *Cache) void {
+        self.count = 0;
+        for (self.conv_state) |slot| @memset(slot, 0);
+    }
+
     fn state(self: *Cache, layer_i: usize, site: Site) []f32 {
         return self.conv_state[layer_i * 4 + @intFromEnum(site)];
     }
 };
 
 pub const Model = struct {
+    /// Decoder-contract decode state (`llm.decoder`): the host K/V +
+    /// shortconv-state cache.
+    pub const Cache = HostCache;
+    /// Decoder-contract capabilities: the shortconv states only roll
+    /// forward (no rewind; deviation D3) and there is no lockstep batch
+    /// entry.
+    pub const caps: decoder.Caps = .{ .rewind = false, .batch = false };
+
     allocator: Allocator,
     config: Config,
     token_embedding: LinearWeight,
@@ -450,8 +477,11 @@ pub const Model = struct {
         self.* = undefined;
     }
 
-    pub fn initCache(self: *const Model, capacity: usize) !Cache {
-        return Cache.init(self.allocator, &self.config, capacity);
+    /// Decoder-contract cache construction; `ctx` is unused (host-side
+    /// allocation) and taken for the uniform spelling.
+    pub fn initCache(self: *const Model, ctx: *ExecContext, capacity: usize) !HostCache {
+        _ = ctx;
+        return HostCache.init(self.allocator, &self.config, capacity);
     }
 
     /// One input row: a text token id, or a pre-computed embedding row
@@ -462,12 +492,12 @@ pub const Model = struct {
         embd: []const f32,
     };
 
-    /// Process `tokens` at positions [cache.len, cache.len + S) and return
+    /// Process `tokens` at positions [cache.len(), cache.len() + S) and return
     /// the LAST position's next-token logits `[1, vocab]` (the tensor-band return shape; caller deinits). Only
     /// the final row runs the unembed. Padded vocab ids carry -inf. Rows are
     /// computed jointly but causally: row r attends to cache positions
-    /// <= cache.len + r only, so batch prefill matches S=1 stepping.
-    pub fn step(self: *const Model, ctx: *ExecContext, cache: *Cache, tokens: []const usize) !fucina.Tensor(.{ .seq, .vocab }) {
+    /// <= cache.len() + r only, so batch prefill matches S=1 stepping.
+    pub fn step(self: *const Model, ctx: *ExecContext, cache: *HostCache, tokens: []const usize) !fucina.Tensor(.{ .seq, .vocab }) {
         const allocator = ctx.allocator;
         const rows = try allocator.alloc(Row, tokens.len);
         defer allocator.free(rows);
@@ -475,12 +505,20 @@ pub const Model = struct {
         return self.stepMixed(ctx, cache, rows);
     }
 
+    /// Decoder-contract entry (`llm.decoder`): `step` already returns the
+    /// LAST position's logits `[1, vocab]`; this spelling adds the
+    /// contract's `pos0`.
+    pub fn forwardStep(self: *const Model, ctx: *ExecContext, cache: *HostCache, tokens: []const usize, pos0: usize) !fucina.Tensor(.{ .seq, .vocab }) {
+        std.debug.assert(pos0 == cache.len());
+        return self.step(ctx, cache, tokens);
+    }
+
     /// `step` over mixed token/embedding rows (multimodal prompts).
-    pub fn stepMixed(self: *const Model, ctx: *ExecContext, cache: *Cache, items: []const Row) !fucina.Tensor(.{ .seq, .vocab }) {
+    pub fn stepMixed(self: *const Model, ctx: *ExecContext, cache: *HostCache, items: []const Row) !fucina.Tensor(.{ .seq, .vocab }) {
         const cfg = &self.config;
         const allocator = ctx.allocator;
         if (items.len == 0) return Error.InvalidSequenceLength;
-        if (cache.len + items.len > cache.capacity) return Error.KvCacheOverflow;
+        if (cache.len() + items.len > cache.capacity) return Error.KvCacheOverflow;
 
         const S = items.len;
         const H = cfg.hidden_size;
@@ -516,9 +554,9 @@ pub const Model = struct {
         }
 
         for (self.layers, 0..) |*layer, layer_i| {
-            try self.layerForward(ctx, cache, layer, layer_i, x, S, cache.len);
+            try self.layerForward(ctx, cache, layer, layer_i, x, S, cache.len());
         }
-        cache.len += S;
+        cache.count += S;
 
         // Final norm, muP logit scale, unembed — last row only.
         var normed_t = try fucina.Tensor(.{ .seq, .embed }).empty(ctx, .{ 1, H });
@@ -536,7 +574,7 @@ pub const Model = struct {
     }
 
     /// One layer over `x` rows in place.
-    fn layerForward(self: *const Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer, layer_i: usize, x: []f32, S: usize, pos0: usize) !void {
+    fn layerForward(self: *const Model, ctx: *ExecContext, cache: *HostCache, layer: *const Layer, layer_i: usize, x: []f32, S: usize, pos0: usize) !void {
         const cfg = &self.config;
         const allocator = ctx.allocator;
         const H = cfg.hidden_size;
@@ -1202,6 +1240,30 @@ const Self = @This();
 pub const testing = struct {
     pub const sconvInPlace = Self.sconvInPlace;
     pub const logsigmoid = Self.logsigmoid;
+};
+
+/// File-scope name for the model so `Family.Model` can alias it.
+const ModelT = Model;
+
+/// Registry surface (`llm.registry`): what `serving.open` needs to load
+/// and serve this family (`inkling.chat` renders the token wire format;
+/// no chat template).
+pub const Family = struct {
+    pub const Model = ModelT;
+    /// The tokenizer MODULE (byte-level BPE) and its `Tokenizer` type.
+    pub const Tok = tokenizer_mod;
+    pub const Tokenizer = tokenizer_mod.Tokenizer;
+
+    pub fn load(ctx: *ExecContext, file: *gguf.File, options: model_common.FamilyLoadOptions) !ModelT {
+        _ = options;
+        return ModelT.loadGgufFromFile(ctx, file);
+    }
+
+    pub fn tokenizer(allocator: Allocator, file: *const gguf.File) !Tokenizer {
+        return Tokenizer.initFromGguf(allocator, file, .{});
+    }
+
+    pub const template_fallback: ?chat.Format = null;
 };
 
 test {

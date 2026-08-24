@@ -113,7 +113,7 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, mode, "judge")) {
         const stream = try loadTokensAll(init.io, allocator, stream_path.?, config.vocab_size);
         defer allocator.free(stream);
-        var kv = try model.initKvCache(&ctx, prefill + stream.len + 8);
+        var kv = try model.initCache(&ctx, prefill + stream.len + 8);
         defer kv.deinit();
         var logits = try model.forwardStep(&ctx, &kv, prompt, 0);
         var pos: usize = prefill;
@@ -149,7 +149,7 @@ pub fn main(init: std.process.Init) !void {
     streams[1] = try allocator.alloc(usize, gen);
 
     for (0..2) |arm| {
-        var kv = try model.initKvCache(&ctx, prefill + gen + 8);
+        var kv = try model.initCache(&ctx, prefill + gen + 8);
         defer kv.deinit();
         var sq = try llm.research.subq.State.init(
             allocator,

@@ -5,7 +5,7 @@
 //! `tokenizer.chat_template` metadata. `Conversation(Model, Tok)` is
 //! comptime-generic over the model family and its tokenizer module (qwen3's
 //! byte-BPE, gemma4's SPM, ...): KV-cache geometry comes from the model's own
-//! `initKvCache`. One KV cache persists across turns (each turn only prefills
+//! `initCache`. One KV cache persists across turns (each turn only prefills
 //! the new tokens) and the reply streams to any `*std.Io.Writer` sink
 //! (stdout, an SSE response, an in-memory buffer, …). Stateless servers get
 //! the same economy across REQUESTS via the reuse seam — `initWarm` /
@@ -15,7 +15,7 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const kv_cache = @import("kv_cache.zig");
+const decoder = @import("decoder.zig");
 const kv_persist = @import("kv_persist.zig");
 const sampler_mod = @import("sampler.zig");
 const speculative = @import("speculative/core.zig");
@@ -24,7 +24,6 @@ const spec_constrained = @import("speculative/constrained.zig");
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
-const KvCache = kv_cache.KvCache;
 const Sampler = sampler_mod.Sampler;
 
 pub const Format = enum { chatml, llama3, gemma, gemma4 };
@@ -292,22 +291,25 @@ pub const Options = struct {
     io: ?std.Io = null,
 };
 
-/// Duck-typed requirements: `Model` exposes `config.vocab_size`,
-/// `initKvCache(ctx, capacity)` over the shared `KvCache`, and the
-/// `forwardStep`/`forwardStepAllLogits` decode entries (the qwen3/gemma4
-/// signatures — see `speculative.SpeculativeDecoder`). `Tok` is the tokenizer
-/// MODULE (`tokenizer.zig`, `spm_tokenizer.zig`, ...): it provides `Tokenizer`
+/// `Model` satisfies the decoder contract (`decoder.assertDecoder`) with
+/// `caps.rewind` over the shared `KvCache` (the reuse seam, KV persistence
+/// and speculation all rewind through `truncate`). Beyond the contract,
+/// `Conversation` requires `config.vocab_size` and the cache `capacity`
+/// field. `Tok` is the tokenizer MODULE (`tokenizer.zig`,
+/// `spm_tokenizer.zig`, ...): it provides `Tokenizer`
 /// (`tokenId`/`eosId`/`encodeRaw`/`decodeAppend`) and its `StreamDecoder`.
 pub fn Conversation(comptime Model: type, comptime Tok: type) type {
+    decoder.assertDecoder(Model);
     return struct {
         const Self = @This();
+        const Cache = Model.Cache;
 
         ctx: *ExecContext,
         model: *const Model,
         tokenizer: *const Tok.Tokenizer,
         template: Template,
         allocator: Allocator,
-        cache: KvCache,
+        cache: Cache,
         stream: Tok.StreamDecoder,
         sampler: Sampler,
         history: std.ArrayList(usize),
@@ -385,10 +387,10 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         /// the release side; `sendRenderedReuse` is the entry that exploits
         /// it). `cache` ownership transfers on the call, error paths
         /// included. `tokens` — the committed tokens whose KV rows the cache
-        /// holds, normally `history.items[0..cache.len]` of the previous
+        /// holds, normally `history.items[0..cache.len()]` of the previous
         /// conversation — is borrowed and copied; the cache is clamped to it.
         pub const WarmState = struct {
-            cache: KvCache,
+            cache: Cache,
             tokens: []const usize,
             /// Leading preloaded-prefix rows of `cache` that `tokens` does
             /// NOT describe (a served cartridge): the cache is clamped to
@@ -409,7 +411,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         }
 
         fn initWith(ctx: *ExecContext, model: *const Model, tokenizer: *const Tok.Tokenizer, template: Template, options: Options, warm_opt: ?WarmState) !Self {
-            var cache = if (warm_opt) |w| w.cache else try model.initKvCache(ctx, options.capacity);
+            var cache = if (warm_opt) |w| w.cache else try model.initCache(ctx, options.capacity);
             errdefer cache.deinit();
             const stop_id: ?u32 = tokenizer.tokenId(template.stopMarker()) orelse tokenizer.eosId();
             var history: std.ArrayList(usize) = .empty;
@@ -485,7 +487,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         /// persistence: sidecars record the prefix shape (FUXKV002) and
         /// resume with it.
         pub fn notePrefixRows(self: *Self, rows: usize) !void {
-            if (self.cache.len != rows or self.history.items.len != 0) return error.InvalidPrefix;
+            if (self.cache.len() != rows or self.history.items.len != 0) return error.InvalidPrefix;
             if (self.spec != null) return error.InvalidPrefix;
             self.kv_prefix_rows = rows;
         }
@@ -506,11 +508,11 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         /// Cross-request KV reuse, the release side: transfer the cache —
         /// with every position this conversation accumulated — to the
         /// caller; deinit will skip it. Snapshot the matching token shadow
-        /// from `history.items[0..cache.len]` BEFORE taking (history stays
+        /// from `history.items[0..cache.len()]` BEFORE taking (history stays
         /// readable until deinit; after an aborted turn it can sit one
         /// committed-but-unforwarded token past the cache, which the
-        /// `cache.len` bound trims). No sends after taking.
-        pub fn takeCache(self: *Self) KvCache {
+        /// `cache.len()` bound trims). No sends after taking.
+        pub fn takeCache(self: *Self) Cache {
             std.debug.assert(!self.cache_taken);
             self.cache_taken = true;
             return self.cache;
@@ -529,7 +531,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         /// positions after every subsequent turn. Returns the number of
         /// resumed positions (0 = fresh start). Call once, before any send.
         pub fn enablePersistence(self: *Self, io: std.Io, path: []const u8) !usize {
-            std.debug.assert(self.persist == null and self.cache.len == 0 and self.history.items.len == 0);
+            std.debug.assert(self.persist == null and self.cache.len() == 0 and self.history.items.len == 0);
             var resumed_count: usize = 0;
             if (try kv_persist.load(io, self.allocator, path, &self.cache)) |resumed| {
                 defer self.allocator.free(resumed.tokens);
@@ -563,7 +565,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 self.allocator,
                 st.path,
                 &self.cache,
-                self.history.items[0 .. self.cache.len - self.kv_prefix_rows],
+                self.history.items[0 .. self.cache.len() - self.kv_prefix_rows],
                 self.kv_prefix_rows,
             );
         }
@@ -599,7 +601,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
 
             const prefix32 = try self.tokenizer.encodeRaw(a, text);
             defer a.free(prefix32);
-            if (self.cache.len + prefix32.len > self.cache.capacity) return error.ContextFull;
+            if (self.cache.len() + prefix32.len > self.cache.capacity) return error.ContextFull;
 
             const prefix = try a.alloc(usize, prefix32.len);
             errdefer a.free(prefix);
@@ -615,7 +617,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         /// everything past it is rewound (`cache.truncate` + history
         /// shrink) — and commit the remainder to history. Returns the
         /// caller-owned un-prefilled suffix. The common prefix is capped at
-        /// `cache.len` (only cached positions are reusable; spec-less sends
+        /// `cache.len()` (only cached positions are reusable; spec-less sends
         /// keep history == cache, but an adopted shadow was already trimmed
         /// so this is belt and braces) and at `ids.len - 1`: the last
         /// prompt token is always re-forwarded, because logits are not part
@@ -640,7 +642,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             // describes cache row kv_prefix_rows + i, and the rewind below
             // may never cut into the prefix.
             var lcp: usize = 0;
-            const lcp_cap = @min(@min(self.cache.len - self.kv_prefix_rows, self.history.items.len), ids.len - 1);
+            const lcp_cap = @min(@min(self.cache.len() - self.kv_prefix_rows, self.history.items.len), ids.len - 1);
             while (lcp < lcp_cap and self.history.items[lcp] == ids[lcp]) : (lcp += 1) {}
 
             const suffix = try a.alloc(usize, ids.len - lcp);
@@ -725,9 +727,9 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 // reuse turns end FLUSH instead — the same catch-up forward
                 // the plain loop issues — so the slot shadow describes
                 // every committed token and spec == plain state.
-                if (self.history.items.len == self.cache.len - self.kv_prefix_rows + 1) {
+                if (self.history.items.len == self.cache.len() - self.kv_prefix_rows + 1) {
                     var single = [_]usize{self.history.items[self.history.items.len - 1]};
-                    var lg = try self.model.forwardStep(self.ctx, &self.cache, &single, self.cache.len);
+                    var lg = try self.model.forwardStep(self.ctx, &self.cache, &single, self.cache.len());
                     lg.deinit();
                 }
                 return produced;
@@ -742,7 +744,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             const a = self.allocator;
 
             // Prefill this turn's tokens at the current cache position.
-            var logits = try self.model.forwardStep(self.ctx, &self.cache, prefix, self.cache.len);
+            var logits = try self.model.forwardStep(self.ctx, &self.cache, prefix, self.cache.len());
             defer logits.deinit();
 
             // Accumulated decoded reply, only when text stop sequences are in play.
@@ -751,7 +753,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
 
             self.stream.reset();
             var produced: usize = 0;
-            while (produced < self.max_response_tokens and self.cache.len < self.cache.capacity) {
+            while (produced < self.max_response_tokens and self.cache.len() < self.cache.capacity) {
                 const next = try self.sampler.next(self.ctx, &logits, self.history.items);
                 if (self.isStopToken(next)) break;
                 if (self.stop_sequences.len > 0) {
@@ -768,7 +770,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 try self.history.append(a, next);
                 produced += 1;
                 var single = [_]usize{next};
-                const fresh = try self.model.forwardStep(self.ctx, &self.cache, &single, self.cache.len);
+                const fresh = try self.model.forwardStep(self.ctx, &self.cache, &single, self.cache.len());
                 logits.deinit();
                 logits = fresh;
             }
@@ -817,7 +819,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             // Comptime-gated so model families without a batch entry still
             // compile the Conversation type; they get a runtime error here
             // instead.
-            if (comptime @hasDecl(Model, "forwardStepBatch")) {
+            if (comptime Model.caps.batch) {
                 return sendBatchImpl(convos, users, writers, produced);
             } else {
                 return error.BatchDecodeUnsupported;
@@ -894,7 +896,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 const convo = s.convo;
                 const prefix = try convo.beginTurnTokens(user);
                 defer a.free(prefix);
-                var logits = try convo.model.forwardStep(ctx, &convo.cache, prefix, convo.cache.len);
+                var logits = try convo.model.forwardStep(ctx, &convo.cache, prefix, convo.cache.len());
                 defer logits.deinit();
                 convo.stream.reset();
                 try sampleStep(s, ctx, &logits);
@@ -920,7 +922,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         /// instead of a silent history/KV desync.
         fn trimBatchToCaches(streams: []BatchStream) void {
             for (streams) |*s| {
-                s.convo.history.shrinkRetainingCapacity(s.convo.cache.len - s.convo.kv_prefix_rows);
+                s.convo.history.shrinkRetainingCapacity(s.convo.cache.len() - s.convo.kv_prefix_rows);
             }
         }
 
@@ -939,7 +941,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             const a = first.allocator;
             const n = streams.len;
 
-            const caches = try a.alloc(*KvCache, n);
+            const caches = try a.alloc(*Cache, n);
             defer a.free(caches);
             const tokens = try a.alloc(usize, n);
             defer a.free(tokens);
@@ -1001,7 +1003,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 produced.len != convos.len or errs.len != convos.len)
                 return error.BatchLengthMismatch;
             try validateBatch(convos, .reuse);
-            if (comptime @hasDecl(Model, "forwardStepBatch")) {
+            if (comptime Model.caps.batch) {
                 return sendBatchReuseImpl(convos, ids_list, writers, produced, errs);
             } else {
                 return error.BatchDecodeUnsupported;
@@ -1038,7 +1040,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                         break :blk false;
                     };
                     defer a.free(suffix);
-                    var logits = convo.model.forwardStep(ctx, &convo.cache, suffix, convo.cache.len) catch |err| {
+                    var logits = convo.model.forwardStep(ctx, &convo.cache, suffix, convo.cache.len()) catch |err| {
                         s.err = err;
                         break :blk false;
                     };
@@ -1079,7 +1081,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
         fn sampleStep(s: *BatchStream, ctx: *ExecContext, logits: *fucina.Tensor(.{ .seq, .vocab })) !void {
             const convo = s.convo;
             const a = convo.allocator;
-            if (s.produced >= convo.max_response_tokens or convo.cache.len >= convo.cache.capacity) {
+            if (s.produced >= convo.max_response_tokens or convo.cache.len() >= convo.cache.capacity) {
                 s.finished = true;
                 return;
             }
@@ -1105,7 +1107,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             s.last = next;
         }
 
-        /// Speculative turn. The decoder invariant is `history.len == cache.len + 1`
+        /// Speculative turn. The decoder invariant is `history.len == cache.len() + 1`
         /// (last committed token not yet forwarded), so the prefill covers
         /// everything committed-but-uncached EXCEPT the last prefix token; the
         /// first decoder step forwards it. A verify batch can overshoot the stop
@@ -1141,7 +1143,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             // (speculative/core.zig).
             const sink = speculative.TokenSink{ .ptr = &gate, .func = TurnGate.emit };
             {
-                var pre = try self.model.forwardStep(self.ctx, &self.cache, self.history.items[self.cache.len..], self.cache.len);
+                var pre = try self.model.forwardStep(self.ctx, &self.cache, self.history.items[self.cache.len()..], self.cache.len());
                 defer pre.deinit();
                 _ = try st.decoder.bootstrapStep(self.ctx, &self.cache, &self.sampler, &self.history, sink, &pre);
             }
@@ -1156,7 +1158,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 self.cache.truncate(keep);
             }
 
-            while (!gate.sink_acc.done and gate.sink_acc.n < self.max_response_tokens and self.cache.len < self.cache.capacity) {
+            while (!gate.sink_acc.done and gate.sink_acc.n < self.max_response_tokens and self.cache.len() < self.cache.capacity) {
                 _ = try st.decoder.step(self.ctx, self.model, &self.cache, &self.sampler, &self.history, sink);
             }
 
@@ -1320,7 +1322,7 @@ const Accept = struct {
 fn stopHitInTail(items: []const u8, prev_len: usize, needles: []const []const u8) ?usize {
     var max_len: usize = 0;
     for (needles) |n| max_len = @max(max_len, n.len);
-    const window = items[prev_len -| (max_len -| 1) ..];
+    const window = items[prev_len -| (max_len -| 1)..];
     for (needles, 0..) |n, i| {
         if (n.len > 0 and std.mem.indexOf(u8, window, n) != null) return i;
     }

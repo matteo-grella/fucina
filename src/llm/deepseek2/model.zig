@@ -18,6 +18,10 @@ const std = @import("std");
 const fucina = @import("fucina");
 const weights = @import("fucina").weights;
 const gguf_meta = @import("fucina").gguf_meta;
+const decoder = @import("../decoder.zig");
+const chat = @import("../chat.zig");
+const model_common = @import("../model_common.zig");
+const tokenizer_mod = @import("../tokenizer.zig");
 const host_ops = @import("../host_ops.zig");
 const moe_router = @import("../moe_router.zig");
 
@@ -307,7 +311,7 @@ pub const Cache = struct {
     /// only when the model loaded the indexer (LoadOptions.dsa).
     idx: [][]f32 = &.{},
     idx_width: usize = 0,
-    len: usize = 0,
+    count: usize = 0,
     capacity: usize,
     /// Cross-layer index-share state for the CURRENT step (the ds4
     /// IndexCache pattern, position-space): the nearest Full layer's
@@ -380,8 +384,13 @@ pub const Cache = struct {
         self.* = undefined;
     }
 
+    /// The number of cached positions (the decoder contract's `len()`).
+    pub fn len(self: *const Cache) usize {
+        return self.count;
+    }
+
     pub fn reset(self: *Cache) void {
-        self.len = 0;
+        self.count = 0;
     }
 
     fn shareReset(self: *Cache) void {
@@ -390,6 +399,9 @@ pub const Cache = struct {
         self.share_valid = false;
     }
 };
+
+/// File-scope name for the cache so `Model.Cache` can alias it.
+const MlaCache = Cache;
 
 /// Decode-time selection-overlap probe (the IndexCache calibration
 /// instrument, ds4's design over raw positions): records every DSA layer's
@@ -493,6 +505,13 @@ pub const DsaProbe = struct {
 };
 
 pub const Model = struct {
+    /// Decoder-contract decode state (`llm.decoder`): the MLA cache.
+    pub const Cache = MlaCache;
+    /// Decoder-contract capabilities: the MLA cache has no rewind (DSA
+    /// share state and probe bookkeeping only roll forward) and there is
+    /// no lockstep batch entry.
+    pub const caps: decoder.Caps = .{ .rewind = false, .batch = false };
+
     allocator: Allocator,
     config: Config,
     token_embedding: LinearWeight,
@@ -622,13 +641,16 @@ pub const Model = struct {
         self.* = undefined;
     }
 
-    pub fn initCache(self: *const Model, capacity: usize) !Cache {
+    /// Decoder-contract cache construction; `ctx` is unused (host-side
+    /// allocation) and taken for the uniform spelling.
+    pub fn initCache(self: *const Model, ctx: *ExecContext, capacity: usize) !MlaCache {
+        _ = ctx;
         return self.initCacheMode(capacity, .latent);
     }
 
-    pub fn initCacheMode(self: *const Model, capacity: usize, mode: Cache.Mode) !Cache {
+    pub fn initCacheMode(self: *const Model, capacity: usize, mode: MlaCache.Mode) !MlaCache {
         const idx_width = if (self.dsa_enabled and mode == .latent) self.config.indexer_key_dim else 0;
-        return Cache.init(self.allocator, self.config, capacity, mode, idx_width);
+        return MlaCache.init(self.allocator, self.config, capacity, mode, idx_width);
     }
 
     /// True when the DSA indexer tensors were loaded (LoadOptions.dsa).
@@ -687,14 +709,14 @@ pub const Model = struct {
         for (0..n_rows * heads) |h| @memcpy(buf[h * dim ..][0..rd], pe[h * rd ..][0..rd]);
     }
 
-    /// One decode step: process `token` at position `cache.len`, append its
+    /// One decode step: process `token` at position `cache.len()`, append its
     /// K/V, return the next-token logits `[1, vocab]` (the tensor-band
     /// return shape; caller deinits).
-    pub fn step(self: *const Model, ctx: *ExecContext, cache: *Cache, token: usize) !fucina.Tensor(.{ .seq, .vocab }) {
+    pub fn step(self: *const Model, ctx: *ExecContext, cache: *MlaCache, token: usize) !fucina.Tensor(.{ .seq, .vocab }) {
         const cfg = self.config;
         const allocator = ctx.allocator;
-        if (cache.len >= cache.capacity) return Error.KvCacheOverflow;
-        const pos = cache.len;
+        if (cache.len() >= cache.capacity) return Error.KvCacheOverflow;
+        const pos = cache.len();
         cache.shareReset();
         var rope_table = try self.rope.table(ctx, pos, 1);
         defer rope_table.deinit();
@@ -946,7 +968,7 @@ pub const Model = struct {
             }
         }
         if (cache.probe) |*p| p.stepDone();
-        cache.len += 1;
+        cache.count += 1;
 
         rmsNormInto(h_norm, x, self.output_norm, cfg.rms_norm_eps);
         var final_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, cfg.hidden_size }, h_norm);
@@ -964,15 +986,15 @@ pub const Model = struct {
     /// reassociate vs S=1 (~1e-6 rel) past the m-dependent kernel
     /// thresholds — the qwen3 forwardStepAllLogits convention. `.latent`
     /// cache mode only (the production path).
-    pub fn stepBatch(self: *const Model, ctx: *ExecContext, cache: *Cache, tokens: []const usize) !fucina.Tensor(.{ .seq, .vocab }) {
+    pub fn stepBatch(self: *const Model, ctx: *ExecContext, cache: *MlaCache, tokens: []const usize) !fucina.Tensor(.{ .seq, .vocab }) {
         const cfg = self.config;
         const allocator = ctx.allocator;
         const S = tokens.len;
         if (S == 0) return Error.InvalidSequenceLength;
         if (S == 1) return self.step(ctx, cache, tokens[0]);
         if (cache.mode != .latent) return Error.InvalidConfig;
-        if (cache.len + S > cache.capacity) return Error.KvCacheOverflow;
-        const pos0 = cache.len;
+        if (cache.len() + S > cache.capacity) return Error.KvCacheOverflow;
+        const pos0 = cache.len();
         cache.shareReset();
         var rope_table = try self.rope.table(ctx, pos0, S);
         defer rope_table.deinit();
@@ -1194,12 +1216,40 @@ pub const Model = struct {
             }
         }
         if (cache.probe) |*p| p.stepDone();
-        cache.len += S;
+        cache.count += S;
 
         rmsNormInto(hn[0..hidden], xs[(S - 1) * hidden ..][0..hidden], self.output_norm, cfg.rms_norm_eps);
         var final_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ 1, hidden }, hn[0..hidden]);
         defer final_t.deinit();
         return self.output.linearSeq(ctx, &final_t, .embed, .vocab);
+    }
+
+    /// Prefill slice width of `forwardStep` (the example runner's default
+    /// `--prefill-chunk`): bounds per-chunk scratch while keeping the
+    /// union-routed expert fetches batched.
+    const forward_step_chunk: usize = 64;
+
+    /// Decoder-contract entry (`llm.decoder`): process `tokens` at
+    /// positions `pos0 ..` and return the LAST position's logits
+    /// `[1, vocab]` (caller-owned). Built from the family's existing
+    /// entries: `forward_step_chunk`-token slices of `stepBatch` (which
+    /// routes a single token through `step`, the hot decode path), keeping
+    /// only the final slice's logits. `.latent` cache mode only for
+    /// multi-token calls (the `stepBatch` contract).
+    pub fn forwardStep(self: *const Model, ctx: *ExecContext, cache: *MlaCache, tokens: []const usize, pos0: usize) !fucina.Tensor(.{ .seq, .vocab }) {
+        std.debug.assert(pos0 == cache.len());
+        if (tokens.len == 0) return Error.InvalidSequenceLength;
+        var fed: usize = 0;
+        var logits: ?fucina.Tensor(.{ .seq, .vocab }) = null;
+        errdefer if (logits) |*t| t.deinit();
+        while (fed < tokens.len) {
+            const end = @min(fed + forward_step_chunk, tokens.len);
+            const fresh = try self.stepBatch(ctx, cache, tokens[fed..end]);
+            if (logits) |*t| t.deinit();
+            logits = fresh;
+            fed = end;
+        }
+        return logits.?;
     }
 
     /// Batched routed mixture: per-row V2/V3 routing (same math as
@@ -1524,7 +1574,7 @@ fn layerNormInto(dst: []f32, src: []const f32, w: []const f32, b: []const f32, e
 /// `rope(LayerNorm(idx_k(h)))` with the rotation on the LEADING
 /// qk_rope_dim dims (the reference indexer's [pe | nope] head layout),
 /// through the same yarn table and pairing as the main attention.
-fn dsaAppendKey(self: *const Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer, layer_i: usize, h_t: anytype, pos: usize, rope_table: anytype) !void {
+fn dsaAppendKey(self: *const Model, ctx: *ExecContext, cache: *MlaCache, layer: *const Layer, layer_i: usize, h_t: anytype, pos: usize, rope_table: anytype) !void {
     const cfg = self.config;
     var kt = try layer.idx_k.?.linearSeq(ctx, h_t, .embed, .k);
     defer kt.deinit();
@@ -1540,7 +1590,7 @@ fn dsaAppendKey(self: *const Model, ctx: *ExecContext, cache: *Cache, layer: *co
 /// ascending. The reference's positive global scales (heads^-0.5, the
 /// softmax scale) cannot change the ranking and are omitted; `w` keeps its
 /// sign. Returned slice is caller-owned.
-fn dsaSelect(self: *const Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer, layer_i: usize, idx_q_t: anytype, h_t: anytype, t_len: usize, rope_table: anytype) ![]usize {
+fn dsaSelect(self: *const Model, ctx: *ExecContext, cache: *MlaCache, layer: *const Layer, layer_i: usize, idx_q_t: anytype, h_t: anytype, t_len: usize, rope_table: anytype) ![]usize {
     const cfg = self.config;
     const allocator = ctx.allocator;
     const heads = cfg.indexer_heads;
@@ -1561,7 +1611,7 @@ fn dsaSelect(self: *const Model, ctx: *ExecContext, cache: *Cache, layer: *const
 /// Scoring/selection core shared by decode and batched prefill: takes ONE
 /// token's already-roped indexer q heads and its raw head weights, scores
 /// the cached keys, returns the top-k positions ascending (caller-owned).
-fn dsaScoreSelect(self: *const Model, ctx: *ExecContext, cache: *Cache, layer_i: usize, q_buf: []const f32, head_w: []const f32, t_len: usize) ![]usize {
+fn dsaScoreSelect(self: *const Model, ctx: *ExecContext, cache: *MlaCache, layer_i: usize, q_buf: []const f32, head_w: []const f32, t_len: usize) ![]usize {
     const cfg = self.config;
     const allocator = ctx.allocator;
     const heads = cfg.indexer_heads;
@@ -1805,6 +1855,29 @@ const hostVectorInfo = weights.hostVectorInfo;
 const rmsNormInto = host_ops.rmsNormInto;
 const softmaxInPlace = host_ops.softmaxInPlace;
 const silu = host_ops.silu;
+
+/// File-scope name for the model so `Family.Model` can alias it.
+const ModelT = Model;
+
+/// Registry surface (`llm.registry`): family metadata for the comptime
+/// lookup. `serving.open` does not serve this family (no serving adapter).
+pub const Family = struct {
+    pub const Model = ModelT;
+    /// The tokenizer MODULE (byte-level BPE) and its `Tokenizer` type.
+    pub const Tok = tokenizer_mod;
+    pub const Tokenizer = tokenizer_mod.Tokenizer;
+
+    pub fn load(ctx: *ExecContext, file: *gguf.File, options: model_common.FamilyLoadOptions) !ModelT {
+        _ = options;
+        return ModelT.loadGgufFromFile(ctx, file);
+    }
+
+    pub fn tokenizer(allocator: Allocator, file: *const gguf.File) !Tokenizer {
+        return Tokenizer.initFromGguf(allocator, file, .{});
+    }
+
+    pub const template_fallback: ?chat.Format = null;
+};
 
 test {
     _ = @import("model_tests.zig");

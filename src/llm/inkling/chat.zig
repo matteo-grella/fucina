@@ -25,12 +25,8 @@ const std = @import("std");
 const fucina = @import("fucina");
 const model_mod = @import("model.zig");
 const chat = @import("../chat.zig");
+const generate_mod = @import("../generate.zig");
 const sampler_mod = @import("../sampler.zig");
-
-fn isExtraStop(id: u32, extra: []const u32) bool {
-    for (extra) |e| if (e == id) return true;
-    return false;
-}
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
@@ -158,7 +154,8 @@ pub const GenerateResult = struct {
 };
 
 /// The generation driver: prefill the prompt, then sample-and-stream one
-/// marker-wrapped reply. Generic over the tokenizer module (BPE here).
+/// marker-wrapped reply through the shared contract loop (`llm.generate`).
+/// Generic over the tokenizer module (BPE here).
 pub fn Engine(comptime TokMod: type) type {
     return struct {
         const Self = @This();
@@ -186,69 +183,64 @@ pub fn Engine(comptime TokMod: type) type {
         /// open/close splitter can route reasoning vs content.
         pub fn generate(self: *Self, prompt: []const usize, opts: GenerateOptions, sink: *std.Io.Writer) !GenerateResult {
             const a = self.ctx.allocator;
-            var cache = try self.model.initCache(prompt.len + opts.max_tokens + 1);
+            const capacity = prompt.len + opts.max_tokens + 1;
+            var cache = try self.model.initCache(self.ctx, capacity);
             defer cache.deinit();
 
-            var history: std.ArrayList(usize) = .empty;
-            defer history.deinit(a);
-            try history.appendSlice(a, prompt);
-
-            var sampler = sampler_mod.Sampler.init(opts.sampling);
-            sampler.processor = opts.processor;
-
-            var stream = @import("../tokenizer.zig").StreamDecoder.init(self.tokenizer);
+            var stream = TokMod.StreamDecoder.init(self.tokenizer);
             defer stream.deinit(a);
+            var emitter = MarkerEmit{ .allocator = a, .markers = &self.markers, .stream = &stream, .writer = sink };
 
-            // Prefill.
-            var logits = try self.model.step(self.ctx, &cache, prompt);
-            defer logits.deinit();
+            // End-of-generation ids: `end_sampling` plus the caller's extras.
+            const stops = try a.alloc(u32, 1 + opts.extra_stop_ids.len);
+            defer a.free(stops);
+            stops[0] = self.markers.end_sampling;
+            @memcpy(stops[1..], opts.extra_stop_ids);
 
-            var produced: usize = 0;
-            var stopped = false;
-            while (produced < opts.max_tokens) {
-                const next = try sampler.next(self.ctx, &logits, history.items);
-                const id: u32 = @intCast(next);
+            const outcome = try generate_mod.generateOutcome(model_mod.Model, self.model, self.ctx, &cache, prompt, .{
+                .sampling = opts.sampling,
+                .processor = opts.processor,
+                .max_tokens = opts.max_tokens,
+                .capacity = capacity,
+                .stop_ids = stops,
+            }, emitter.sink());
 
-                if (id == self.markers.end_sampling or isExtraStop(id, opts.extra_stop_ids)) {
-                    stopped = true;
-                    break;
-                }
-                try self.emitToken(&stream, id, sink, a);
-                try sink.flush(); // the sink's drain is its per-token flush point
-                try history.append(a, next);
-                produced += 1;
-
-                // Allocate the next step before freeing the current logits,
-                // so an error here leaves `logits` valid for the
-                // function-scope defer.
-                const fresh = try self.model.step(self.ctx, &cache, &.{next});
-                logits.deinit();
-                logits = fresh;
-            }
             // Flush any bytes held by the incremental UTF-8 decoder.
             try stream.flush(sink);
             try sink.flush();
 
-            return .{ .prompt_tokens = prompt.len, .completion_tokens = produced, .stopped = stopped };
+            return .{ .prompt_tokens = prompt.len, .completion_tokens = outcome.produced, .stopped = outcome.stopped };
         }
 
-        /// One token to the marker-wrapped stream: the two routing markers
-        /// pass through literally, other structural markers are dropped,
-        /// everything else is decoded to text.
-        fn emitToken(self: *Self, stream: *@import("../tokenizer.zig").StreamDecoder, id: u32, sink: *std.Io.Writer, a: Allocator) !void {
-            if (id == self.markers.content_thinking) {
-                try sink.writeAll(tok_content_thinking);
-                return;
+        /// The engine's token filter/sink: the two routing markers pass
+        /// through literally, other structural markers are dropped,
+        /// everything else decodes to text; the writer flushes per token
+        /// (its drain point).
+        const MarkerEmit = struct {
+            allocator: Allocator,
+            markers: *const Markers,
+            stream: *TokMod.StreamDecoder,
+            writer: *std.Io.Writer,
+
+            fn emit(ptr: *anyopaque, token: usize) anyerror!void {
+                const self: *MarkerEmit = @ptrCast(@alignCast(ptr));
+                const id: u32 = @intCast(token);
+                if (id == self.markers.content_thinking) {
+                    try self.writer.writeAll(tok_content_thinking);
+                } else if (id == self.markers.content_text) {
+                    try self.writer.writeAll(tok_content_text);
+                } else if (id == self.markers.end_message or id == self.markers.message_model) {
+                    // Structural: strip.
+                } else {
+                    try self.stream.push(self.allocator, id, self.writer);
+                }
+                try self.writer.flush();
             }
-            if (id == self.markers.content_text) {
-                try sink.writeAll(tok_content_text);
-                return;
+
+            fn sink(self: *MarkerEmit) generate_mod.TokenSink {
+                return .{ .ptr = self, .emitFn = emit };
             }
-            if (id == self.markers.end_message or id == self.markers.message_model) {
-                return; // structural: strip
-            }
-            try stream.push(a, id, sink);
-        }
+        };
     };
 }
 

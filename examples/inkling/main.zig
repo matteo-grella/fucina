@@ -324,7 +324,7 @@ pub fn main(init: std.process.Init) !void {
         }
         try stdout.print("mm rows: {d} text + {d} media + {d} text\n", .{ ids_before.len, n_media_tokens, ids_after.len });
 
-        var cache = try model.initCache(items.len + gen_count + 1);
+        var cache = try model.initCache(&ctx, items.len + gen_count + 1);
         defer cache.deinit();
         var last = try model.stepMixed(&ctx, &cache, items);
         defer last.deinit();
@@ -360,7 +360,7 @@ pub fn main(init: std.process.Init) !void {
         var best_pp: f64 = 0;
         var best_tg: f64 = 0;
         for (0..bench_reps) |_| {
-            var bcache = try model.initCache(tokens.len + n_gen + 1);
+            var bcache = try model.initCache(&ctx, tokens.len + n_gen + 1);
             defer bcache.deinit();
             const t0 = nowNs(init.io);
             var last = try model.step(&ctx, &bcache, tokens);
@@ -384,7 +384,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    var cache = try model.initCache(tokens.len + gen_count + 1);
+    var cache = try model.initCache(&ctx, tokens.len + gen_count + 1);
     defer cache.deinit();
 
     // Prefill: one batch step, or --step1 token-at-a-time (decode parity).

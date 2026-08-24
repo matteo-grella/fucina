@@ -108,7 +108,7 @@ pub const DiffusionBackend = struct {
 
         const c_len = self.model.config.canvas_length;
         const blocks = (req.max_tokens + c_len - 1) / c_len;
-        var kv = try self.model.initKvCache(self.ctx, prompt.len + (blocks + 1) * c_len);
+        var kv = try self.model.initCache(self.ctx, prompt.len + (blocks + 1) * c_len);
         defer kv.deinit();
 
         const out = try a.alloc(usize, req.max_tokens);

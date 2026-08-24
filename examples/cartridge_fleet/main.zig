@@ -1387,14 +1387,14 @@ fn generateIds(
     max_new: usize,
     stop_id: ?usize,
 ) ![]usize {
-    if (cache.len + prompt_ids.len + max_new > cache.capacity) return error.PromptTooLong;
+    if (cache.len() + prompt_ids.len + max_new > cache.capacity) return error.PromptTooLong;
     var sampler = llm.sampler.Sampler.init(.{});
 
     const out = try allocator.alloc(usize, max_new);
     errdefer allocator.free(out);
     var produced: usize = 0;
 
-    var logits = try model.forwardStep(ctx, cache, prompt_ids, cache.len);
+    var logits = try model.forwardStep(ctx, cache, prompt_ids, cache.len());
     while (produced < max_new) {
         const next = try sampler.next(ctx, &logits, out[0..produced]);
         logits.deinit();
@@ -1402,7 +1402,7 @@ fn generateIds(
         out[produced] = next;
         produced += 1;
         if (produced == max_new) return allocator.realloc(out, produced);
-        logits = try model.forwardStep(ctx, cache, out[produced - 1 ..][0..1], cache.len);
+        logits = try model.forwardStep(ctx, cache, out[produced - 1 ..][0..1], cache.len());
     }
     if (produced < max_new) logits.deinit();
     return allocator.realloc(out, produced);

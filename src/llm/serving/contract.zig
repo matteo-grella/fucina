@@ -10,6 +10,7 @@
 //! `llm.serving` (`../serving.zig`, the band index).
 
 const std = @import("std");
+const fucina = @import("fucina");
 const chat = @import("../chat.zig");
 const sampler = @import("../sampler.zig");
 
@@ -185,3 +186,79 @@ pub const Backend = struct {
         return self.vtable.generate_batch.?(self.ptr, reqs, sinks, results, errs);
     }
 };
+
+/// Engine options for `serving.open`/`openFromFile`: the CLI-independent
+/// form of lmserve's flags. Exclusions an engine cannot host are rejected
+/// with `error.InvalidOptions`: `fleet_dir` excludes `cartridge_path`,
+/// `kv_cache_dir` and `batch > 1`; the engine-hosted families (qwen35,
+/// inkling, deepseek4) reject cartridges, fleets and the KV disk tier.
+/// SHINE adapter fleets are served by `llm.qwen3.shine_serving`, which
+/// shares this options surface.
+pub const OpenOptions = struct {
+    /// Per-request context budget in tokens (prompt + reply).
+    context_len: usize = 4096,
+    /// Speculative decoding for solo generations (qwen3/qwen3moe).
+    spec: bool = false,
+    /// Lockstep batch width the host intends to drive (sizes the constraint
+    /// cache and raises the KV slot pool to one slot per stream).
+    batch: usize = 1,
+    /// Zero-copy MoE expert load (gemma4).
+    experts_borrow: bool = false,
+    /// Disk-streaming tier for MoE expert weights (deepseek4). Borrowed:
+    /// the options' buffers must outlive the open call.
+    moe_stream: ?fucina.weights.MoeStreamOptions = null,
+    /// Resident cross-request KV reuse slots (each a full `context_len`
+    /// cache; the RAM guard prices the total at load).
+    kv_slots: usize = 1,
+    /// Keep the requested `kv_slots` even when the RAM guard would clamp.
+    kv_slots_force: bool = false,
+    /// Evict-to-disk KV tier directory (must exist; null = off).
+    kv_cache_dir: ?[]const u8 = null,
+    /// Max sidecar files under `kv_cache_dir`.
+    kv_disk_slots: usize = 8,
+    /// Trained KV-prefix cartridge (safetensors path; docs/CARTRIDGES.md).
+    cartridge_path: ?[]const u8 = null,
+    /// Per-document cartridge fleet directory (qwen3 dense, gemma4).
+    fleet_dir: ?[]const u8 = null,
+    /// Fleet: documents composed per request.
+    rag_docs: usize = 2,
+    /// Fleet: cosine top-N chunks scanned per selection.
+    rag_chunks: usize = 8,
+    /// Fleet: decisive-margin knowledge-base switching for continuing
+    /// conversations (default fully sticky).
+    rag_adaptive: bool = false,
+    /// Fleet: the adaptive switch margin (cosine units).
+    rag_margin: f32 = 0.05,
+};
+
+/// A loaded serving engine: the model, tokenizer, optional cartridge/fleet
+/// state, and the adapter behind `backend`, heap-owned behind one handle.
+/// `backend` stays valid until `deinit`.
+pub const Opened = struct {
+    ptr: *anyopaque,
+    destroyFn: *const fn (ptr: *anyopaque) void,
+    backend: Backend,
+    /// The model's streamed-expert store when one is armed (`moe_stream`):
+    /// the host reads its exit-time report before `deinit`.
+    expert_store: ?*fucina.ExpertStore = null,
+
+    pub fn deinit(self: *Opened) void {
+        self.destroyFn(self.ptr);
+        self.* = undefined;
+    }
+};
+
+/// GGUF-recommended sampling (`general.sampling.*`), as the gemma4 chat
+/// harness reads it.
+pub fn samplingFromGguf(file: *const fucina.gguf.File) sampler.Config {
+    return .{
+        .temperature = if (file.getFloat("general.sampling.temp")) |v| @floatCast(v) else 1.0,
+        .top_k = if (file.getInt("general.sampling.top_k")) |v| @intCast(@max(@as(i64, 0), v)) else 64,
+        .top_p = if (file.getFloat("general.sampling.top_p")) |v| @floatCast(v) else 0.95,
+        .min_p = if (file.getFloat("general.sampling.min_p")) |v| @floatCast(v) else 0.0,
+        .repeat_penalty = if (file.getFloat("general.sampling.penalty_repeat")) |v| @floatCast(v) else 1.0,
+        .freq_penalty = if (file.getFloat("general.sampling.penalty_freq")) |v| @floatCast(v) else 0.0,
+        .presence_penalty = if (file.getFloat("general.sampling.penalty_present")) |v| @floatCast(v) else 0.0,
+        .repeat_last_n = if (file.getInt("general.sampling.penalty_last_n")) |v| @intCast(@max(@as(i64, 0), v)) else 64,
+    };
+}

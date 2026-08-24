@@ -17,10 +17,12 @@ that grows at ~110 B/token. One batched forward verifies the draft;
 the committed stream is provably the same one plain decoding would produce,
 for greedy *and* sampled decoding. A cost-aware gate makes the whole feature
 **never-a-loss**: tasks it can't accelerate run at 0.98–0.99x (probe
-overhead), tasks it can run at 1.1–2.3x. Scope: `qwen3` and `gemma4` (any
-model with the duck-typed `forwardStep`/`forwardStepAllLogits`/`KvCache`
-contract). `qwen35` (Qwen3.5's hybrid Gated-DeltaNet architecture) is
-structurally out of scope — see §11.
+overhead), tasks it can run at 1.1–2.3x. Scope: any decoder-contract
+family with `caps.rewind` (`llm.decoder.assertDecoder`: `forwardStep` +
+`forwardStepAllLogits` + a truncating cache) — `qwen3`, `gemma4`, SHINE's
+`AdaptedModel`, and `glm4moe` through its native-MTP draft source
+(`speculative/mtp.zig`). `qwen35` (Qwen3.5's hybrid Gated-DeltaNet
+architecture) is structurally out of scope — see §11.
 
 ---
 
@@ -29,7 +31,7 @@ structurally out of scope — see §11.
 Three layers, each independently testable:
 
 ```
-DraftSource (vtable)          src/llm/speculative/core.zig:86
+DraftSource (vtable)          src/llm/speculative/core.zig:85
   ↑ implemented by
 SpeculationIndex (cascade)    src/llm/speculative/cascade.zig:130
   conversation SAM ── frozen reference SAMs ── Token-Recycling matrix
@@ -37,7 +39,7 @@ SpeculationIndex (cascade)    src/llm/speculative/cascade.zig:130
   ↓ drafts verified by
 SpeculativeDecoder(Model)     src/llm/speculative/core.zig:507
   one batched forwardStepAllLogits + full sampler pipeline per row
-  KvCache.truncate drops rejected rows        src/llm/kv_cache.zig:328
+  KvCache.truncate drops rejected rows        src/llm/kv_cache.zig:334
 ```
 
 - **`DraftSource`** is a three-method vtable: `suggest(context, buf)`
@@ -46,9 +48,10 @@ SpeculativeDecoder(Model)     src/llm/speculative/core.zig:507
   the verification logits (skipped — including the top-K compute — when the
   source doesn't want it). Externally injectable: the decoder works with any
   deterministic proposer.
-- **`SpeculativeDecoder(Model)`** runs the decode loop step: ask the source
-  for a draft, run **one** batched forward over `[carried token, draft...]`
-  via `forwardStepAllLogits` (runner.zig:452, gemma/model.zig:639 — same as
+- **`SpeculativeDecoder(Model)`** runs the decode loop step over any
+  decoder-contract family with `caps.rewind` (`llm.decoder`): ask the
+  source for a draft, run **one** batched forward over
+  `[carried token, draft...]` via `forwardStepAllLogits` (same as
   `forwardStep` but no `last_query_only` narrowing, returns `[k, vocab]`),
   sample every row with the full pipeline, commit the longest prefix the
   target model itself would have produced, truncate the KV cache back to the
@@ -100,7 +103,7 @@ The contract decomposes into proof obligations, each with a test:
 4. **Adversarial sources can't corrupt the stream.** Perfect / garbage /
    alternating sources all produce token-for-token plain output (greedy
    losslessness test); the cache never retains unverified rows, including on
-   error unwind (`errdefer kv.truncate`, speculative/core.zig:679/:656).
+   error unwind (`errdefer kv.truncate`, speculative/core.zig:723/:683).
 5. **Gating is orthogonal.** The gate decides *when* speculation runs, never
    *what* is committed (end-to-end gate test asserts identical streams while
    the gate trips, backs off, and re-probes).
@@ -111,7 +114,7 @@ Measured with the `--spec-bench` probe mode (examples/qwen3/bench.zig): cost of 
 verify-k forward in plain-step equivalents, best-of reps, M1 Max ReleaseFast.
 
 **Dense Qwen3-0.6B-Q4_K_S** (the shipped `default_cost_table`,
-speculative/core.zig:251):
+speculative/core.zig:250):
 
 | draft k | verify cost (plain steps) | conservative break-even acc ≈ cost/k |
 | --- | --- | --- |
@@ -142,7 +145,7 @@ and short low-k drafts whose per-token economics are worse).
 
 ## 4. CostGate — why hybrid static + EWMA
 
-`CostGate` (speculative/core.zig:297) gates on **estimated speedup**, not tokens
+`CostGate` (speculative/core.zig:296) gates on **estimated speedup**, not tokens
 per step:
 
 ```
@@ -165,10 +168,10 @@ hybrid, one sample moves the estimate by at most 20% of its clamped
 deviation — it cannot flip the gate — while a model whose true economics
 differ from the table (a different size/quant/machine) is learned within a
 few verifies, and the table alone applies when no clock is set
-(`verifyCost`, speculative/core.zig:405; cost-table/gate tests at
+(`verifyCost`, speculative/core.zig:404; cost-table/gate tests at
 core_tests.zig:586/:602).
 
-Policy constants (all in `Options`, speculative/core.zig:179):
+Policy constants (all in `Options`, speculative/core.zig:178):
 
 - **Hysteresis 1.0 / 1.1**: speculate while est_speedup ≥ `min_speedup`
   (1.0); a re-probe re-enables only at ≥ 1.0 + `probe_margin` (0.10), so a

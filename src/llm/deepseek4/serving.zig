@@ -1,4 +1,4 @@
-//! DeepSeek V4 Flash backend adapter behind the lmserve `Backend` vtable.
+//! DeepSeek V4 Flash serving adapter behind the serving `Backend` vtable.
 //! Like qwen35 it does NOT ride the generic `GgufChatBackend`/`Conversation`:
 //! the family runs on its own `Session` (CSA/HCA caches + step scratch), so
 //! the KV-slot reuse tiers do not apply — each request prefills a fresh
@@ -23,27 +23,29 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
-const types = @import("fucina_llm").serving;
-const backend_mod = @import("fucina_llm").serving.gguf_chat;
+const contract = @import("../serving/contract.zig");
+const gguf_chat = @import("../serving/gguf_chat.zig");
+const llguidance = @import("../llguidance.zig");
+const sampler_mod = @import("../sampler.zig");
+const tokenizer_mod = @import("../tokenizer.zig");
+const ds4 = @import("model.zig");
 
 const Allocator = std.mem.Allocator;
-const ds4 = llm.deepseek4.model;
 
 /// Prefill chunk size (the runner's default): batches expert fetches per
 /// layer without letting per-chunk scratch grow unbounded.
 const prefill_chunk: usize = 128;
 
-pub const Deepseek4Backend = struct {
+pub const Backend = struct {
     allocator: Allocator,
     ctx: *fucina.ExecContext,
     model: *ds4.Model,
-    tokenizer: *llm.tokenizer.Tokenizer,
-    stream: llm.tokenizer.StreamDecoder,
-    constraints: backend_mod.ConstraintCache,
+    tokenizer: *tokenizer_mod.Tokenizer,
+    stream: tokenizer_mod.StreamDecoder,
+    constraints: gguf_chat.ConstraintCache,
     model_id: []const u8,
     context_len: usize,
-    default_sampling: llm.sampler.Config,
+    default_sampling: sampler_mod.Config,
     /// Structural chat-token ids, resolved once at init (absence means this
     /// is not a deepseek4 chat GGUF; fail at startup, not per request).
     bos_id: u32,
@@ -56,18 +58,18 @@ pub const Deepseek4Backend = struct {
         allocator: Allocator,
         ctx: *fucina.ExecContext,
         model: *ds4.Model,
-        tokenizer: *llm.tokenizer.Tokenizer,
+        tokenizer: *tokenizer_mod.Tokenizer,
         model_id: []const u8,
         context_len: usize,
-        default_sampling: llm.sampler.Config,
-    ) !Deepseek4Backend {
+        default_sampling: sampler_mod.Config,
+    ) !Backend {
         return .{
             .allocator = allocator,
             .ctx = ctx,
             .model = model,
             .tokenizer = tokenizer,
-            .stream = llm.tokenizer.StreamDecoder.init(tokenizer),
-            .constraints = backend_mod.ConstraintCache.init(allocator, 8),
+            .stream = tokenizer_mod.StreamDecoder.init(tokenizer),
+            .constraints = gguf_chat.ConstraintCache.init(allocator, 8),
             .model_id = model_id,
             .context_len = context_len,
             .default_sampling = default_sampling,
@@ -79,7 +81,7 @@ pub const Deepseek4Backend = struct {
         };
     }
 
-    pub fn deinit(self: *Deepseek4Backend) void {
+    pub fn deinit(self: *Backend) void {
         self.stream.deinit(self.allocator);
         self.constraints.deinit();
     }
@@ -87,7 +89,7 @@ pub const Deepseek4Backend = struct {
     /// Render + tokenize the request into a prompt id list (token-level, no
     /// string template): structural markers by id, content by plain BPE.
     /// Caller owns the returned slice.
-    fn buildPrompt(self: *const Deepseek4Backend, a: Allocator, req: *const types.GenerateRequest) ![]usize {
+    fn buildPrompt(self: *const Backend, a: Allocator, req: *const contract.GenerateRequest) ![]usize {
         const messages = req.messages;
         if (messages.len == 0) return error.EmptyMessages;
         if (messages[messages.len - 1].role == .assistant) return error.TrailingAssistantMessage;
@@ -133,7 +135,7 @@ pub const Deepseek4Backend = struct {
     /// Plain-BPE encode `text` (no BOS/EOS policy, no special-token
     /// resolution) and append its ids to `out`.
     fn appendText(
-        self: *const Deepseek4Backend,
+        self: *const Backend,
         a: Allocator,
         out: *std.ArrayList(usize),
         scratch: *std.ArrayList(u32),
@@ -144,16 +146,16 @@ pub const Deepseek4Backend = struct {
         for (scratch.items) |id| try out.append(a, id);
     }
 
-    fn vtValidate(ptr: *anyopaque, req: *const types.GenerateRequest) anyerror!void {
-        const self: *Deepseek4Backend = @ptrCast(@alignCast(ptr));
-        if (req.constraint != null and !llm.llguidance.enabled) return error.LlguidanceNotEnabled;
+    fn vtValidate(ptr: *anyopaque, req: *const contract.GenerateRequest) anyerror!void {
+        const self: *Backend = @ptrCast(@alignCast(ptr));
+        if (req.constraint != null and !llguidance.enabled) return error.LlguidanceNotEnabled;
         const ids = try self.buildPrompt(self.allocator, req);
         defer self.allocator.free(ids);
         if (ids.len >= self.context_len) return error.PromptTooLong;
     }
 
-    fn vtGenerate(ptr: *anyopaque, req: *const types.GenerateRequest, sink: *std.Io.Writer) anyerror!types.GenerateResult {
-        const self: *Deepseek4Backend = @ptrCast(@alignCast(ptr));
+    fn vtGenerate(ptr: *anyopaque, req: *const contract.GenerateRequest, sink: *std.Io.Writer) anyerror!contract.GenerateResult {
+        const self: *Backend = @ptrCast(@alignCast(ptr));
         const a = self.allocator;
 
         const ids = try self.buildPrompt(a, req);
@@ -161,9 +163,9 @@ pub const Deepseek4Backend = struct {
 
         // Grammar: clone the cached base per request (the base must outlive
         // the clone; the cache guarantees it).
-        var clone: ?llm.llguidance.Constraint = null;
+        var clone: ?llguidance.Constraint = null;
         defer if (clone) |*c| c.deinit();
-        var processor: ?llm.sampler.LogitProcessor = null;
+        var processor: ?sampler_mod.LogitProcessor = null;
         if (req.constraint) |spec| {
             const base = try self.constraints.acquire(self.tokenizer, spec, .{
                 .eos_token = self.eos_id,
@@ -175,7 +177,7 @@ pub const Deepseek4Backend = struct {
 
         // Fresh per-request session sized to the server's context budget.
         var session = try ds4.Session.init(self.model, self.context_len);
-        defer session.deinit(self.model);
+        defer session.deinit();
 
         // Chunked prefill. Logits are SESSION-OWNED (valid until the next
         // step on this session) — never freed here.
@@ -194,16 +196,16 @@ pub const Deepseek4Backend = struct {
     /// final row on entry and always points at owned-or-empty memory, so
     /// the caller's defer stays safe on every error path.
     fn decodeLoop(
-        self: *Deepseek4Backend,
-        req: *const types.GenerateRequest,
+        self: *Backend,
+        req: *const contract.GenerateRequest,
         sink: *std.Io.Writer,
         session: *ds4.Session,
         logits: *[]f32,
-        processor: ?llm.sampler.LogitProcessor,
+        processor: ?sampler_mod.LogitProcessor,
         ids: []const usize,
-    ) anyerror!types.GenerateResult {
+    ) anyerror!contract.GenerateResult {
         const a = self.allocator;
-        var sampler = llm.sampler.Sampler.init(req.sampling);
+        var sampler = sampler_mod.Sampler.init(req.sampling);
         sampler.processor = processor;
         // Whole-conversation token history (the repetition-penalty window).
         var history: std.ArrayList(usize) = .empty;
@@ -216,7 +218,7 @@ pub const Deepseek4Backend = struct {
         self.stream.reset();
         var produced: usize = 0;
         var fired_stop: ?usize = null;
-        var finish: types.FinishReason = .length;
+        var finish: contract.FinishReason = .length;
         while (produced < req.max_tokens) {
             const next = blk: {
                 var lt = try fucina.Tensor(.{ .seq, .vocab }).fromBorrowedSlice(self.ctx, .{ 1, self.model.config.vocab_size }, logits.*);
@@ -244,7 +246,7 @@ pub const Deepseek4Backend = struct {
             // Budget or capacity exhausted: break BEFORE the next forward —
             // its logits would never be sampled, and one deepseek4 forward
             // is real work (streamed experts).
-            if (produced >= req.max_tokens or session.cache.len >= session.cache.capacity) break;
+            if (produced >= req.max_tokens or session.cache.len() >= session.cache.capacity) break;
             logits.* = try ds4.step(self.model, self.ctx, session, next);
         }
         try self.stream.flush(sink);
@@ -259,7 +261,7 @@ pub const Deepseek4Backend = struct {
         };
     }
 
-    pub fn backend(self: *Deepseek4Backend) types.Backend {
+    pub fn backend(self: *Backend) contract.Backend {
         return .{
             .ptr = self,
             .vtable = &.{ .validate = vtValidate, .generate = vtGenerate },
@@ -267,7 +269,7 @@ pub const Deepseek4Backend = struct {
                 .model_id = self.model_id,
                 .context_len = self.context_len,
                 .caps = .{
-                    .grammar = llm.llguidance.enabled,
+                    .grammar = llguidance.enabled,
                     .think = false,
                     .stop_sequences = true,
                 },
@@ -299,4 +301,76 @@ test stopHitInTail {
     // Needle completed by the newly appended byte, straddling prev_len.
     try std.testing.expectEqual(@as(?usize, 0), stopHitInTail("xxEND", 4, &needles));
     try std.testing.expectEqual(@as(?usize, 1), stopHitInTail("a\n\n", 1, &needles));
+}
+
+/// The served engine box (heap-pinned; `serving.open` dispatches here for
+/// the deepseek4 arch). Takes ownership of `file` on every path.
+const Box = struct {
+    allocator: Allocator,
+    model_id: []u8,
+    model: ds4.Model,
+    tokenizer: tokenizer_mod.Tokenizer,
+    adapter: Backend,
+
+    fn destroy(ptr: *anyopaque) void {
+        const box: *Box = @ptrCast(@alignCast(ptr));
+        const a = box.allocator;
+        box.adapter.deinit();
+        box.tokenizer.deinit();
+        box.model.deinit();
+        a.free(box.model_id);
+        a.destroy(box);
+    }
+};
+
+pub fn openFromFile(
+    ctx: *fucina.ExecContext,
+    io: std.Io,
+    allocator: Allocator,
+    file: *fucina.gguf.File,
+    model_id: []const u8,
+    options: contract.OpenOptions,
+    stderr: *std.Io.Writer,
+) !contract.Opened {
+    _ = io;
+    var file_alive = true;
+    errdefer if (file_alive) file.deinit();
+
+    const box = try allocator.create(Box);
+    errdefer allocator.destroy(box);
+    box.allocator = allocator;
+    box.model_id = try allocator.dupe(u8, model_id);
+    errdefer allocator.free(box.model_id);
+
+    box.tokenizer = tokenizer_mod.Tokenizer.initFromGguf(allocator, file, .{}) catch {
+        try stderr.writeAll("this GGUF has no usable tokenizer metadata\n");
+        return error.TokenizerUnavailable;
+    };
+    errdefer box.tokenizer.deinit();
+    // GGUF-stamped sampling; the ds4 0731 export stamps temp 1.0 / top_p
+    // 0.95, which samplingFromGguf's fallbacks match — only its gemma-shaped
+    // top_k=64 fallback differs (deepseek4 recommends no top-k truncation).
+    var default_sampling = contract.samplingFromGguf(file);
+    if (file.getInt("general.sampling.top_k") == null) default_sampling.top_k = 0;
+
+    box.model = try ds4.Family.load(ctx, file, .{ .moe_stream = options.moe_stream });
+    errdefer box.model.deinit();
+    file.deinit();
+    file_alive = false;
+
+    box.adapter = try Backend.init(
+        allocator,
+        ctx,
+        &box.model,
+        &box.tokenizer,
+        box.model_id,
+        options.context_len,
+        default_sampling,
+    );
+    return .{
+        .ptr = box,
+        .destroyFn = Box.destroy,
+        .backend = box.adapter.backend(),
+        .expert_store = box.model.expert_store,
+    };
 }

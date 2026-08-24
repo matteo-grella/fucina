@@ -409,7 +409,7 @@ pub const Cartridge = struct {
     /// cartridge was trained at. The decode loop then treats the prefix like
     /// any cached p-token prompt.
     pub fn writeToCache(self: *const Cartridge, ctx: *ExecContext, cache: *kv_cache.KvCache) !void {
-        if (cache.len != 0) return Error.InvalidCartridge;
+        if (cache.len() != 0) return Error.InvalidCartridge;
         return self.appendToCache(ctx, cache);
     }
 
@@ -521,7 +521,7 @@ fn composedCat(
 /// so independently trained cartridges of ANY family compose at serve time.
 pub fn writeComposedToCache(ctx: *ExecContext, parts: []const *const Cartridge, cache: *kv_cache.KvCache) !void {
     try validateComposition(parts);
-    if (cache.len != 0) return Error.InvalidCartridge;
+    if (cache.len() != 0) return Error.InvalidCartridge;
     for (parts) |part| try part.appendToCache(ctx, cache);
 }
 

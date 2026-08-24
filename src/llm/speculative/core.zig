@@ -59,12 +59,11 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const kv_cache = @import("../kv_cache.zig");
+const decoder_mod = @import("../decoder.zig");
 const sampler_mod = @import("../sampler.zig");
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
-const KvCache = kv_cache.KvCache;
 const Sampler = sampler_mod.Sampler;
 const Logits = fucina.Tensor(.{ .seq, .vocab });
 
@@ -501,12 +500,17 @@ pub const VerifyRowHook = struct {
     func: *const fn (ptr: *anyopaque, abs_pos: usize, batch_index: usize, row: []const f32) anyerror!void,
 };
 
-/// `Model` is duck-typed: it must expose `forwardStep` and
-/// `forwardStepAllLogits` with the qwen3/gemma4 signatures over the shared
-/// `KvCache`. (qwen35's recurrent cache cannot rewind — out of scope.)
+/// `Model` satisfies the decoder contract (`decoder.assertDecoder`) with
+/// `caps.rewind`: verification needs `forwardStepAllLogits` and the
+/// truncate-based rewind of rejected draft positions. (qwen35's recurrent
+/// cache cannot rewind; that family stays outside this decoder.)
 pub fn SpeculativeDecoder(comptime Model: type) type {
+    decoder_mod.assertDecoder(Model);
+    if (!Model.caps.rewind) @compileError(@typeName(Model) ++ ": SpeculativeDecoder requires caps.rewind (verify + truncate)");
     return struct {
         const Self = @This();
+        const Cache = Model.Cache;
+        const ModelPtr = decoder_mod.ModelPtr(Model);
 
         allocator: Allocator,
         source: DraftSource,
@@ -561,7 +565,7 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
         /// One decode iteration. Invariant (the standard decode-loop shape):
         /// `history` holds every committed token (prompt + generated) and its
         /// LAST element is the token just committed but not yet in `kv`, i.e.
-        /// `history.items.len == kv.len + 1`. `history` must be allocated with
+        /// `history.items.len == kv.len() + 1`. `history` must be allocated with
         /// `ctx.allocator` (the decoder appends committed tokens to it).
         /// Emits each committed token through `sink`, updates `stats`, feeds
         /// `observe`/`observeTopK`. Returns the number of tokens committed
@@ -569,8 +573,8 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
         pub fn step(
             self: *Self,
             ctx: *ExecContext,
-            model: *const Model,
-            kv: *KvCache,
+            model: ModelPtr,
+            kv: *Cache,
             sampler: *Sampler,
             history: *std.ArrayList(usize),
             sink: TokenSink,
@@ -579,10 +583,10 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
             // assert): an empty or kv-desynced history would index out of
             // bounds / corrupt the cache in ReleaseFast (e.g. an empty
             // prompt reaching plainStep's `items[len - 1]`).
-            if (history.items.len == 0 or history.items.len != kv.len + 1) {
+            if (history.items.len == 0 or history.items.len != kv.len() + 1) {
                 return error.InvalidDecodeState;
             }
-            std.debug.assert(kv.len + 1 <= kv.capacity);
+            std.debug.assert(kv.len() + 1 <= kv.capacity);
             self.stats.steps += 1;
 
             if (!self.gateAllows()) {
@@ -594,7 +598,7 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
 
             // 1 + draft rows must fit in the cache; the gate's acceptance-
             // adaptive budget keeps low-acceptance phases on cheap verifies.
-            const room = kv.capacity - kv.len - 1;
+            const room = kv.capacity - kv.len() - 1;
             var max_draft = @min(self.options.max_draft, room);
             if (self.options.adapt_budget) {
                 max_draft = @min(max_draft, self.gate.budgetCap(self.options.max_draft, self.options.min_draft));
@@ -619,22 +623,22 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
         /// Commit ONE token from caller-computed logits — the prefill
         /// bootstrap. The byte-identity contract's caller leg (module doc)
         /// prefills the whole pending span in one batch, which leaves the
-        /// cache FLUSH with history (`history.len == kv.len`) and the
+        /// cache FLUSH with history (`history.len == kv.len()`) and the
         /// span's last-row logits in hand; this entry samples those logits
         /// through the exact plain-step machinery — sampler, history,
         /// sink, observe hook, stats.committed — and restores the `step`
-        /// invariant `history.len == kv.len + 1`. `logits` may be mutated
+        /// invariant `history.len == kv.len() + 1`. `logits` may be mutated
         /// in place (penalties); the caller still owns and deinits it.
         pub fn bootstrapStep(
             self: *Self,
             ctx: *ExecContext,
-            kv: *const KvCache,
+            kv: *const Cache,
             sampler: *Sampler,
             history: *std.ArrayList(usize),
             sink: TokenSink,
             logits: *Logits,
         ) !usize {
-            if (history.items.len == 0 or history.items.len != kv.len) {
+            if (history.items.len == 0 or history.items.len != kv.len()) {
                 return error.InvalidDecodeState;
             }
             if (self.on_verify_row) |hook| {
@@ -665,20 +669,20 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
         fn plainStep(
             self: *Self,
             ctx: *ExecContext,
-            model: *const Model,
-            kv: *KvCache,
+            model: ModelPtr,
+            kv: *Cache,
             sampler: *Sampler,
             history: *std.ArrayList(usize),
             sink: TokenSink,
         ) !usize {
             const last = history.items[history.items.len - 1];
-            // Restore `history.len == kv.len + 1` on EVERY error path: the
+            // Restore `history.len == kv.len() + 1` on EVERY error path: the
             // forward advances kv before its own fallible tail ops, and
             // append/emit can fail after it. history.items.len is read at
             // unwind time; truncate clamps.
             errdefer kv.truncate(history.items.len - 1);
             const t0 = self.nowNs();
-            var logits = try model.forwardStep(ctx, kv, &.{last}, kv.len);
+            var logits = try model.forwardStep(ctx, kv, &.{last}, kv.len());
             defer logits.deinit();
             if (t0) |start| self.gate.notePlainNs(@intCast(self.nowNs().? - start));
             if (self.on_verify_row) |hook| {
@@ -696,8 +700,8 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
         fn verifyStep(
             self: *Self,
             ctx: *ExecContext,
-            model: *const Model,
-            kv: *KvCache,
+            model: ModelPtr,
+            kv: *Cache,
             sampler: *Sampler,
             history: *std.ArrayList(usize),
             sink: TokenSink,
@@ -706,12 +710,12 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
             self.stats.spec_steps += 1;
             self.stats.drafted += draft_len;
 
-            const pos0 = kv.len;
+            const pos0 = kv.len();
             const start_len = history.items.len; // committed length at iteration start
             self.verify_buf[0] = history.items[start_len - 1];
             const verify = self.verify_buf[0 .. 1 + draft_len];
 
-            // Restore `history.len == kv.len + 1` on EVERY error path: the
+            // Restore `history.len == kv.len() + 1` on EVERY error path: the
             // forward advances kv (to pos0 + 1 + draft_len) before its own
             // fallible tail ops, and the row loop appends to history as it
             // commits. history.items.len is read at unwind time; truncate

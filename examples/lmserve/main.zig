@@ -7,15 +7,16 @@
 //! one sequential inference worker.
 //!
 //! The model family is dispatched from the GGUF's `general.architecture`
-//! (qwen3 / qwen3moe / qwen35 / gemma4 / diffusion-gemma / inkling /
-//! deepseek4); nanochat checkpoints load via `--nanochat <dir>`. Run with
-//! `zig build lmserve -- <model.gguf> [flags]`.
+//! (qwen3 / qwen3moe / qwen35 / qwen35moe / gemma4 / diffusion-gemma /
+//! inkling / deepseek4); nanochat checkpoints load via `--nanochat <dir>`.
+//! Run with `zig build lmserve -- <model.gguf> [flags]`.
 //!
-//! Thin front end: the transport (HTTP server, scheduler, wire dialects)
-//! and the generic engine (`GgufChatBackend`, `serving.open`) live in
-//! `llm.serving`; this main parses flags, hosts the adapters for the
-//! families that cannot ride `Conversation` (`backend_*.zig` here), and
-//! falls back to `serving.openFromFile` for the rest.
+//! Thin front end: the transport (HTTP server, scheduler, wire dialects),
+//! the generic engine (`GgufChatBackend`), and every GGUF family adapter
+//! live in `llm.serving` behind `serving.openFromFile` (dispatched through
+//! the architecture registry); this main parses flags and keeps only the
+//! two non-registry backends — diffusion-gemma (not an autoregressive
+//! decoder) and nanochat (a checkpoint format, not GGUF).
 
 const std = @import("std");
 const fucina = @import("fucina");
@@ -24,9 +25,6 @@ const llm = @import("fucina_llm");
 const types = @import("fucina_llm").serving;
 const backend_nanochat = @import("backend_nanochat.zig");
 const backend_diffusion = @import("backend_diffusion.zig");
-const backend_inkling = @import("backend_inkling.zig");
-const backend_qwen35 = @import("backend_qwen35.zig");
-const backend_deepseek4 = @import("backend_deepseek4.zig");
 const scheduler_mod = types.scheduler;
 const http_mod = types.http;
 
@@ -380,44 +378,59 @@ fn serveBlocking(
     const model_id = try allocator.dupe(u8, std.fs.path.stem(std.fs.path.basename(model_path)));
     defer allocator.free(model_id);
 
-    if (std.mem.eql(u8, arch, "qwen3") or std.mem.eql(u8, arch, "qwen3moe") or std.mem.eql(u8, arch, "gemma4")) {
-        // The Conversation-hosted families are served by the library engine;
-        // a SHINE adapter fleet routes to its qwen3-family entry.
-        const open_options = types.OpenOptions{
-            .context_len = args.ctx_len,
-            .spec = args.spec,
-            .batch = args.batch,
-            .experts_borrow = args.experts_borrow,
-            .kv_slots = args.kv_slots,
-            .kv_slots_force = args.kv_slots_force,
-            .kv_cache_dir = args.kv_cache_dir,
-            .kv_disk_slots = args.kv_disk_slots,
-            .cartridge_path = args.cartridge_path,
-            .fleet_dir = args.fleet_dir,
-            .rag_docs = args.rag_docs,
-            .rag_chunks = args.rag_chunks,
-            .rag_adaptive = args.rag_adaptive,
-            .rag_margin = args.rag_margin,
-        };
-        var opened = if (args.shine_fleet_dir) |dir|
-            try llm.qwen3.shine_serving.openFromFile(&ctx, io, allocator, &file, model_id, dir, open_options, stderr)
-        else
-            try types.openFromFile(&ctx, io, allocator, &file, model_id, open_options, stderr);
-        defer opened.deinit();
-        try serveWith(io, allocator, opened.backend, args);
-    } else if (std.mem.eql(u8, arch, "diffusion-gemma")) {
+    if (std.mem.eql(u8, arch, "diffusion-gemma")) {
         try serveDiffusion(io, allocator, stderr, &ctx, &file, model_id, args);
-    } else if (std.mem.eql(u8, arch, "inkling")) {
-        try serveInkling(io, allocator, stderr, &ctx, &file, model_id, args);
-    } else if (std.mem.eql(u8, arch, "qwen35") or std.mem.eql(u8, arch, "qwen35moe")) {
-        try serveQwen35(io, allocator, stderr, &ctx, &file, model_id, args);
-    } else if (std.mem.eql(u8, arch, "deepseek4")) {
-        try serveDeepseek4(io, allocator, stderr, &ctx, &file, model_id, args);
-    } else {
-        try stderr.print("unsupported architecture for serving: {s} (supported: qwen3, qwen3moe, qwen35, qwen35moe, gemma4, diffusion-gemma, inkling, deepseek4)\n", .{arch});
-        file.deinit();
-        return error.UnsupportedArchitecture;
+        return;
     }
+
+    // Every GGUF family adapter lives in the library: the registry-driven
+    // `serving.openFromFile` dispatches on the architecture; a SHINE
+    // adapter fleet routes to its qwen3-family entry.
+    // Streamed experts (`--moe-stream` + companions, deepseek4): the local
+    // copy must outlive the open call — MoeStreamOptions borrows its
+    // buffers.
+    var moe_cli = args.moe_cli;
+    var moe_stream = try moe_cli.options(model_path);
+    if (moe_stream) |*m| {
+        m.pilot = args.moe_pilot;
+        if (args.moe_pin_mb) |mb| m.pin_bytes = mb << 20;
+        if (args.moe_no_learn) m.auto_pin = false;
+        if (args.moe_cache_slots) |n| m.cache_slots_per_layer = n;
+    }
+    const open_options = types.OpenOptions{
+        .context_len = args.ctx_len,
+        .spec = args.spec,
+        .batch = args.batch,
+        .experts_borrow = args.experts_borrow,
+        .moe_stream = moe_stream,
+        .kv_slots = args.kv_slots,
+        .kv_slots_force = args.kv_slots_force,
+        .kv_cache_dir = args.kv_cache_dir,
+        .kv_disk_slots = args.kv_disk_slots,
+        .cartridge_path = args.cartridge_path,
+        .fleet_dir = args.fleet_dir,
+        .rag_docs = args.rag_docs,
+        .rag_chunks = args.rag_chunks,
+        .rag_adaptive = args.rag_adaptive,
+        .rag_margin = args.rag_margin,
+    };
+    var opened = if (args.shine_fleet_dir) |dir|
+        try llm.qwen3.shine_serving.openFromFile(&ctx, io, allocator, &file, model_id, dir, open_options, stderr)
+    else
+        types.openFromFile(&ctx, io, allocator, &file, model_id, open_options, stderr) catch |err| {
+            if (err == error.UnsupportedArchitecture) {
+                try stderr.print("unsupported architecture for serving: {s} (supported: qwen3, qwen3moe, qwen35, qwen35moe, gemma4, diffusion-gemma, inkling, deepseek4)\n", .{arch});
+            }
+            return err;
+        };
+    defer opened.deinit();
+    // LIFO: the streamed-tier report + usage save runs BEFORE deinit
+    // destroys the store.
+    defer if (opened.expert_store) |store| {
+        llm.moe_stream_cli.reportAndSaveMoeStream(store, !args.moe_no_learn, stderr);
+        stderr.flush() catch {};
+    };
+    try serveWith(io, allocator, opened.backend, args);
 }
 
 fn serveDiffusion(
@@ -454,154 +467,6 @@ fn serveDiffusion(
         .model_id = model_id,
         .context_len = args.ctx_len,
     };
-    try serveWith(io, allocator, adapter.backend(), args);
-}
-
-fn serveInkling(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    stderr: *std.Io.Writer,
-    ctx: *fucina.ExecContext,
-    file: *fucina.gguf.File,
-    model_id: []const u8,
-    args: Args,
-) !void {
-    if (args.cartridge_path != null or args.fleet_dir != null or args.shine_fleet_dir != null) {
-        try stderr.writeAll("--cartridge/--fleet are supported by the GGUF chat backends only (qwen3/gemma4; --fleet is qwen3)\n");
-        return error.CartridgeUnsupported;
-    }
-    var tokenizer = llm.tokenizer.Tokenizer.initFromGguf(allocator, file, .{}) catch {
-        try stderr.writeAll("this GGUF has no usable tokenizer metadata\n");
-        return error.TokenizerUnavailable;
-    };
-    defer tokenizer.deinit();
-
-    var model = try llm.inkling.model.Model.loadGgufFromFile(ctx, file);
-    defer model.deinit();
-    file.deinit();
-
-    var adapter = try backend_inkling.InklingBackend.init(allocator, ctx, &model, &tokenizer, model_id, args.ctx_len);
-    defer adapter.deinit();
-    try serveWith(io, allocator, adapter.backend(), args);
-}
-
-fn serveQwen35(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    stderr: *std.Io.Writer,
-    ctx: *fucina.ExecContext,
-    file: *fucina.gguf.File,
-    model_id: []const u8,
-    args: Args,
-) !void {
-    if (args.cartridge_path != null or args.fleet_dir != null or args.shine_fleet_dir != null) {
-        try stderr.writeAll("--cartridge/--fleet are supported by the GGUF chat backends only (qwen3/gemma4; --fleet is qwen3)\n");
-        return error.CartridgeUnsupported;
-    }
-    var tokenizer = llm.tokenizer.Tokenizer.initFromGguf(allocator, file, .{}) catch {
-        try stderr.writeAll("this GGUF has no usable tokenizer metadata\n");
-        return error.TokenizerUnavailable;
-    };
-    defer tokenizer.deinit();
-    const template = llm.chat.Template.detect(file.getString("tokenizer.chat_template")) orelse
-        llm.chat.Template{ .format = .chatml };
-    // Bonsai GGUFs carry their recommended sampling (`general.sampling.*`).
-    const default_sampling = types.samplingFromGguf(file);
-
-    const config = try llm.qwen35.model.Config.fromGguf(file);
-
-    // Streamed experts (`--moe-stream` + companions, qwen35moe): the local
-    // copy must outlive the load — MoeStreamOptions borrows its buffers.
-    var moe_cli = args.moe_cli;
-    var moe_stream = try moe_cli.options(args.model_path.?);
-    if (moe_stream) |*m| {
-        m.pilot = args.moe_pilot;
-        if (args.moe_pin_mb) |mb| m.pin_bytes = mb << 20;
-        if (args.moe_no_learn) m.auto_pin = false;
-        if (args.moe_cache_slots) |n| m.cache_slots_per_layer = n;
-    }
-    const load_options: llm.qwen35.model.LoadOptions =
-        if (moe_stream) |m| .{ .moe_stream = m } else .{};
-    var model = try llm.qwen35.model.Model.loadGgufFromFileOptions(ctx, file, config, load_options);
-    defer model.deinit();
-    // LIFO: the streamed-tier report + usage save runs BEFORE model.deinit
-    // destroys the store.
-    defer if (model.expert_store) |store| {
-        llm.moe_stream_cli.reportAndSaveMoeStream(store, !args.moe_no_learn, stderr);
-        stderr.flush() catch {};
-    };
-    file.deinit();
-
-    var adapter = try backend_qwen35.Qwen35Backend.init(
-        allocator,
-        ctx,
-        &model,
-        &tokenizer,
-        template,
-        model_id,
-        args.ctx_len,
-        default_sampling,
-    );
-    defer adapter.deinit();
-    try serveWith(io, allocator, adapter.backend(), args);
-}
-
-fn serveDeepseek4(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    stderr: *std.Io.Writer,
-    ctx: *fucina.ExecContext,
-    file: *fucina.gguf.File,
-    model_id: []const u8,
-    args: Args,
-) !void {
-    if (args.cartridge_path != null or args.fleet_dir != null or args.shine_fleet_dir != null) {
-        try stderr.writeAll("--cartridge/--fleet are supported by the GGUF chat backends only (qwen3/gemma4; --fleet is qwen3)\n");
-        return error.CartridgeUnsupported;
-    }
-    var tokenizer = llm.tokenizer.Tokenizer.initFromGguf(allocator, file, .{}) catch {
-        try stderr.writeAll("this GGUF has no usable tokenizer metadata\n");
-        return error.TokenizerUnavailable;
-    };
-    defer tokenizer.deinit();
-    // GGUF-stamped sampling; the ds4 0731 export stamps temp 1.0 / top_p
-    // 0.95, which samplingFromGguf's fallbacks match — only its gemma-shaped
-    // top_k=64 fallback differs (deepseek4 recommends no top-k truncation).
-    var default_sampling = types.samplingFromGguf(file);
-    if (file.getInt("general.sampling.top_k") == null) default_sampling.top_k = 0;
-
-    // Streamed experts (`--moe-stream` + companions): the local copy must
-    // outlive the load — MoeStreamOptions borrows its buffers.
-    var moe_cli = args.moe_cli;
-    var moe_stream = try moe_cli.options(args.model_path.?);
-    if (moe_stream) |*m| {
-        m.pilot = args.moe_pilot;
-        if (args.moe_pin_mb) |mb| m.pin_bytes = mb << 20;
-        if (args.moe_no_learn) m.auto_pin = false;
-        if (args.moe_cache_slots) |n| m.cache_slots_per_layer = n;
-    }
-    const load_options: llm.deepseek4.model.Model.LoadOptions =
-        if (moe_stream) |m| .{ .moe_stream = m } else .{};
-    var model = try llm.deepseek4.model.Model.loadGgufFromFileOptions(ctx, file, load_options);
-    defer model.deinit();
-    // LIFO: the streamed-tier report + usage save runs BEFORE model.deinit
-    // destroys the store.
-    defer if (model.expert_store) |store| {
-        llm.moe_stream_cli.reportAndSaveMoeStream(store, !args.moe_no_learn, stderr);
-        stderr.flush() catch {};
-    };
-    file.deinit();
-
-    var adapter = try backend_deepseek4.Deepseek4Backend.init(
-        allocator,
-        ctx,
-        &model,
-        &tokenizer,
-        model_id,
-        args.ctx_len,
-        default_sampling,
-    );
-    defer adapter.deinit();
     try serveWith(io, allocator, adapter.backend(), args);
 }
 
@@ -666,7 +531,4 @@ fn shutdownKicker(io: std.Io, port: u16) void {
 test {
     _ = @import("backend_nanochat.zig");
     _ = @import("backend_diffusion.zig");
-    _ = @import("backend_inkling.zig");
-    _ = @import("backend_qwen35.zig");
-    _ = @import("backend_deepseek4.zig");
 }

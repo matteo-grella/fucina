@@ -394,7 +394,7 @@ fn runGenerate(
 ) !void {
     const out = try allocator.alloc(usize, n);
     defer allocator.free(out);
-    var kv = try model.initKvCache(ctx, tokens.len + n);
+    var kv = try model.initCache(ctx, tokens.len + n);
     defer kv.deinit();
 
     // Default the stop token to EOS when we have a tokenizer and none was given.
@@ -577,7 +577,7 @@ fn runBench(
     reps: usize,
     profile_enabled: bool,
 ) !void {
-    var kv = try model.initKvCache(ctx, tokens.len + gen);
+    var kv = try model.initCache(ctx, tokens.len + gen);
     defer kv.deinit();
 
     const pps = try allocator.alloc(f64, reps);
@@ -605,12 +605,12 @@ fn runBench(
 
         const tg_start = nowNs(io);
         var steps: usize = 0;
-        while (steps < gen and kv.len < kv.capacity) : (steps += 1) {
+        while (steps < gen and kv.len() < kv.capacity) : (steps += 1) {
             const next = try argmaxLast(ctx, &logits);
             const fresh = if (profile_this)
-                try model.forwardStepProfiled(ctx, io, &kv, &.{next}, kv.len, &decode_profile)
+                try model.forwardStepProfiled(ctx, io, &kv, &.{next}, kv.len(), &decode_profile)
             else
-                try model.forwardStep(ctx, &kv, &.{next}, kv.len);
+                try model.forwardStep(ctx, &kv, &.{next}, kv.len());
             logits.deinit();
             logits = fresh;
         }

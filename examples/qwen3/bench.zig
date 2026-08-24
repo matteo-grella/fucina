@@ -54,9 +54,9 @@ pub fn benchOnePass(
     while (produced < max_new) : (produced += 1) {
         if (stop_token) |stop| if (out[produced - 1] == stop) break;
         const fresh = if (profile_decode)
-            try model.forwardStepProfiled(ctx, io, cache, out[produced - 1 ..][0..1], cache.len, decode_profile.?)
+            try model.forwardStepProfiled(ctx, io, cache, out[produced - 1 ..][0..1], cache.len(), decode_profile.?)
         else
-            try model.forwardStep(ctx, cache, out[produced - 1 ..][0..1], cache.len);
+            try model.forwardStep(ctx, cache, out[produced - 1 ..][0..1], cache.len());
         logits.deinit();
         logits = fresh;
         out[produced] = try sampler.next(ctx, &logits, history[0..hist_len]);
@@ -161,7 +161,7 @@ pub fn runSpecBench(
     // Prefill once; every measurement runs at this depth and rewinds to it.
     var prefill = try model.forwardStep(ctx, &cache, tokens, 0);
     prefill.deinit();
-    const base = cache.len;
+    const base = cache.len();
 
     // Continuation token values don't affect the cost; cycle the prompt.
     var cont: [max_k]usize = undefined;
@@ -173,10 +173,10 @@ pub fn runSpecBench(
 
     // Warmup both paths (prime buffers/threads), then measure.
     {
-        var warm = try model.forwardStepAllLogits(ctx, &cache, cont[0..max_k], cache.len);
+        var warm = try model.forwardStepAllLogits(ctx, &cache, cont[0..max_k], cache.len());
         warm.deinit();
         cache.truncate(base);
-        var warm2 = try model.forwardStep(ctx, &cache, cont[0..1], cache.len);
+        var warm2 = try model.forwardStep(ctx, &cache, cont[0..1], cache.len());
         warm2.deinit();
         cache.truncate(base);
     }
@@ -186,7 +186,7 @@ pub fn runSpecBench(
         var single_best: i96 = std.math.maxInt(i96);
         for (0..reps) |_| {
             const t0 = nowNs(io);
-            var logits = try model.forwardStepAllLogits(ctx, &cache, cont[0..k], cache.len);
+            var logits = try model.forwardStepAllLogits(ctx, &cache, cont[0..k], cache.len());
             logits.deinit();
             const dt = nowNs(io) - t0;
             cache.truncate(base);
@@ -195,7 +195,7 @@ pub fn runSpecBench(
         for (0..reps) |_| {
             const t0 = nowNs(io);
             for (0..k) |i| {
-                var logits = try model.forwardStep(ctx, &cache, cont[i..][0..1], cache.len);
+                var logits = try model.forwardStep(ctx, &cache, cont[i..][0..1], cache.len());
                 logits.deinit();
             }
             const dt = nowNs(io) - t0;

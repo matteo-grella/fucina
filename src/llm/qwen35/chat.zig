@@ -20,8 +20,8 @@ const std = @import("std");
 const fucina = @import("fucina");
 const model_mod = @import("model.zig");
 const chat = @import("../chat.zig");
+const generate_mod = @import("../generate.zig");
 const sampler_mod = @import("../sampler.zig");
-const tokenizer_mod = @import("../tokenizer.zig");
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
@@ -54,11 +54,6 @@ pub fn renderPrompt(
     return buf.toOwnedSlice(allocator);
 }
 
-fn isExtraStop(id: u32, extra: []const u32) bool {
-    for (extra) |e| if (e == id) return true;
-    return false;
-}
-
 pub const GenerateOptions = struct {
     sampling: sampler_mod.Config = .{},
     processor: ?sampler_mod.LogitProcessor = null,
@@ -77,8 +72,8 @@ pub const GenerateResult = struct {
 };
 
 /// The generation driver: prefill the rendered prompt, then sample-and-
-/// stream one reply. Generic over the tokenizer module (byte-level BPE for
-/// this family).
+/// stream one reply through the shared contract loop (`llm.generate`).
+/// Generic over the tokenizer module (byte-level BPE for this family).
 pub fn Engine(comptime TokMod: type) type {
     return struct {
         const Self = @This();
@@ -105,46 +100,48 @@ pub fn Engine(comptime TokMod: type) type {
             var cache = try self.model.initCache(self.ctx, capacity);
             defer cache.deinit();
 
-            var history: std.ArrayList(usize) = .empty;
-            defer history.deinit(a);
-            try history.appendSlice(a, prompt);
-
-            var sampler = sampler_mod.Sampler.init(opts.sampling);
-            sampler.processor = opts.processor;
-
-            var stream = tokenizer_mod.StreamDecoder.init(self.tokenizer);
+            var stream = TokMod.StreamDecoder.init(self.tokenizer);
             defer stream.deinit(a);
+            var emitter = StreamEmit{ .allocator = a, .stream = &stream, .writer = sink };
 
-            var logits = try self.model.forwardStep(self.ctx, &cache, prompt, 0);
-            var logits_live = true;
-            defer if (logits_live) logits.deinit();
+            // Turn-end ids: `<|im_end|>` plus the caller's extras.
+            const stops = try a.alloc(u32, 1 + opts.extra_stop_ids.len);
+            defer a.free(stops);
+            stops[0] = self.stop_id;
+            @memcpy(stops[1..], opts.extra_stop_ids);
 
-            var produced: usize = 0;
-            var stopped = false;
-            while (produced < opts.max_tokens and cache.len() < capacity) {
-                const next = try sampler.next(self.ctx, &logits, history.items);
-                const id: u32 = @intCast(next);
-                if (id == self.stop_id or isExtraStop(id, opts.extra_stop_ids)) {
-                    stopped = true;
-                    break;
-                }
-                try stream.push(a, id, sink);
-                try sink.flush(); // the sink's drain is its per-token flush point
-                try history.append(a, next);
-                produced += 1;
+            const outcome = try generate_mod.generateOutcome(model_mod.Model, self.model, self.ctx, &cache, prompt, .{
+                .sampling = opts.sampling,
+                .processor = opts.processor,
+                .max_tokens = opts.max_tokens,
+                .capacity = capacity,
+                .stop_ids = stops,
+            }, emitter.sink());
 
-                if (cache.len() >= capacity) break;
-                logits.deinit();
-                logits_live = false;
-                logits = try self.model.forwardStep(self.ctx, &cache, &.{next}, cache.len());
-                logits_live = true;
-            }
             // Flush any bytes held by the incremental UTF-8 decoder.
             try stream.flush(sink);
             try sink.flush();
 
-            return .{ .prompt_tokens = prompt.len, .completion_tokens = produced, .stopped = stopped };
+            return .{ .prompt_tokens = prompt.len, .completion_tokens = outcome.produced, .stopped = outcome.stopped };
         }
+
+        /// The engine's token sink: decode through the incremental stream
+        /// decoder and flush the writer per token (its drain point).
+        const StreamEmit = struct {
+            allocator: std.mem.Allocator,
+            stream: *TokMod.StreamDecoder,
+            writer: *std.Io.Writer,
+
+            fn emit(ptr: *anyopaque, token: usize) anyerror!void {
+                const self: *StreamEmit = @ptrCast(@alignCast(ptr));
+                try self.stream.push(self.allocator, @intCast(token), self.writer);
+                try self.writer.flush();
+            }
+
+            fn sink(self: *StreamEmit) generate_mod.TokenSink {
+                return .{ .ptr = self, .emitFn = emit };
+            }
+        };
     };
 }
 

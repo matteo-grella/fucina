@@ -89,12 +89,12 @@ fn checkBatchDecodeParity(dtype: kv_cache.KvDtype) !void {
 
         for (0..n) |i| {
             var single = [_]usize{tokens[i]};
-            var seq_logits = try model.forwardStep(&ctx, &seq_caches[i], &single, seq_caches[i].len);
+            var seq_logits = try model.forwardStep(&ctx, &seq_caches[i], &single, seq_caches[i].len());
             defer seq_logits.deinit();
             const seq_row = try seq_logits.dataConst();
             const batch_row = batch_rows[i * cfg.vocab_size ..][0..cfg.vocab_size];
             try std.testing.expectEqualSlices(f32, seq_row, batch_row);
-            try std.testing.expectEqual(seq_caches[i].len, batch_caches[i].len);
+            try std.testing.expectEqual(seq_caches[i].len(), batch_caches[i].len());
             tokens[i] = argmaxRow(seq_row);
         }
     }

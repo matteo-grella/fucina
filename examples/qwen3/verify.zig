@@ -95,7 +95,7 @@ pub fn runVerifyBatch(
         defer prefill_logits.deinit();
         committed[0] = argmaxSlice(try prefill_logits.dataConst());
         for (0..max_steps) |i| {
-            var logits = try model.forwardStep(ctx, &cache, committed[i .. i + 1], cache.len);
+            var logits = try model.forwardStep(ctx, &cache, committed[i .. i + 1], cache.len());
             defer logits.deinit();
             const row = try logits.dataConst();
             @memcpy(ref[i * vocab ..][0..vocab], row);
@@ -190,7 +190,7 @@ pub fn runVerifyBatch(
         cache.truncate(pos0 + 1);
         var ok = true;
         for (1..max_steps) |i| {
-            var logits = try model.forwardStep(ctx, &cache, committed[i .. i + 1], cache.len);
+            var logits = try model.forwardStep(ctx, &cache, committed[i .. i + 1], cache.len());
             defer logits.deinit();
             const got = try logits.dataConst();
             const want = ref[i * vocab ..][0..vocab];
@@ -264,7 +264,7 @@ pub fn runVerifyCache(
 
         // Allocate-then-swap so an error never leaves a deinit'd tensor live
         // under the function-scope defers.
-        const fresh_cache = try model.forwardStep(ctx, &cache, seq[seq_len - 1 ..][0..1], cache.len);
+        const fresh_cache = try model.forwardStep(ctx, &cache, seq[seq_len - 1 ..][0..1], cache.len());
         cache_logits.deinit();
         cache_logits = fresh_cache;
         const fresh_ref = try model.forwardLastLogits(ctx, seq[0..seq_len]);

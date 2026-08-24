@@ -21,6 +21,10 @@
 const std = @import("std");
 const fucina = @import("fucina");
 const weights = @import("fucina").weights;
+const decoder = @import("../decoder.zig");
+const chat = @import("../chat.zig");
+const model_common = @import("../model_common.zig");
+const spm_tokenizer_mod = @import("../spm_tokenizer.zig");
 const kv_cache = @import("../kv_cache.zig");
 const generate_mod = @import("../generate.zig");
 const gguf_meta = @import("fucina").gguf_meta;
@@ -505,6 +509,13 @@ fn applyFinalSoftcap(ctx: *ExecContext, sc: f32, logits: *fucina.Tensor(.{ .seq,
 }
 
 pub const Model = struct {
+    /// Decoder-contract decode state (`llm.decoder`): the shared KV cache
+    /// with per-layer geometry (see `initCache`).
+    pub const Cache = KvCache;
+    /// Decoder-contract capabilities: the cache rewinds and lockstep batch
+    /// decode exists.
+    pub const caps: decoder.Caps = .{ .rewind = true, .batch = true };
+
     allocator: Allocator,
     config: Config,
     geom: LayerGeometry,
@@ -607,20 +618,20 @@ pub const Model = struct {
         self.* = undefined;
     }
 
-    pub fn initKvCache(self: *const Model, ctx: *ExecContext, capacity: usize) !KvCache {
+    pub fn initCache(self: *const Model, ctx: *ExecContext, capacity: usize) !KvCache {
         return KvCache.initPerLayer(ctx, self.geom.kv_heads, self.geom.head_dim, capacity);
     }
 
     pub fn forwardLastLogits(self: *const Model, ctx: *ExecContext, token_ids: []const usize) !fucina.Tensor(.{ .seq, .vocab }) {
         if (token_ids.len == 0) return Error.InvalidSequenceLength;
-        var kv = try self.initKvCache(ctx, token_ids.len);
+        var kv = try self.initCache(ctx, token_ids.len);
         defer kv.deinit();
         return self.forwardStep(ctx, &kv, token_ids, 0);
     }
 
     pub fn forwardLastLogitsProfiled(self: *const Model, ctx: *ExecContext, io: std.Io, token_ids: []const usize, profile: *ForwardProfile) !fucina.Tensor(.{ .seq, .vocab }) {
         if (token_ids.len == 0) return Error.InvalidSequenceLength;
-        var kv = try self.initKvCache(ctx, token_ids.len);
+        var kv = try self.initCache(ctx, token_ids.len);
         defer kv.deinit();
         return self.forwardStepProfiled(ctx, io, &kv, token_ids, 0, profile);
     }
@@ -691,7 +702,7 @@ pub const Model = struct {
         for (caches, span_lens, 0..) |kv, span, i| {
             try kv.requireF16();
             if (kv.head_dim.len != self.layers.len) return Error.MismatchedKvCaches;
-            if (kv.len + span > kv.capacity) return kv_cache.Error.KvCacheOverflow;
+            if (kv.len() + span > kv.capacity) return kv_cache.Error.KvCacheOverflow;
             for (caches[0..i]) |prev| if (prev == kv) return Error.MismatchedKvCaches;
         }
 
@@ -703,7 +714,7 @@ pub const Model = struct {
             var at: usize = 0;
             for (caches, span_lens) |kv, span| {
                 for (0..span) |j| {
-                    positions[at] = @intCast(kv.len + j);
+                    positions[at] = @intCast(kv.len() + j);
                     at += 1;
                 }
             }
@@ -759,8 +770,8 @@ pub const Model = struct {
     ) !fucina.Tensor(.{ .seq, .vocab }) {
         if (token_ids.len == 0) return Error.InvalidSequenceLength;
         try kv.requireF16();
-        if (kv.len != pos0) return Error.InvalidSequenceLength;
-        if (kv.len + token_ids.len > kv.capacity) return kv_cache.Error.KvCacheOverflow;
+        if (kv.len() != pos0) return Error.InvalidSequenceLength;
+        if (kv.len() + token_ids.len > kv.capacity) return kv_cache.Error.KvCacheOverflow;
 
         const cfg = self.config;
         const allocator = ctx.allocator;
@@ -846,8 +857,6 @@ pub const GenerateOptions = generate_mod.Options;
 // Forward blocks
 // ---------------------------------------------------------------------------
 
-
-
 /// The ragged-batch twin of `attnBlock` (see `forwardStepBatchSpans`):
 /// norms/projections/rope run over the packed rows; K/V append and
 /// attention run per stream against that stream's cache (per-layer window,
@@ -922,7 +931,7 @@ fn attnBlockBatchSpans(
             try kv.appendLayer(ctx, il, &k_rows, &v_rows);
         }
         const ref = geom.kv_ref[il];
-        const cached_len = kv.len + span;
+        const cached_len = kv.len() + span;
         var k_view = try kv.k[ref].narrow(ctx, .seq, 0, cached_len);
         defer k_view.deinit();
         var v_view = try kv.v[ref].narrow(ctx, .seq, 0, cached_len);
@@ -1019,7 +1028,7 @@ pub fn attnBlock(
     }
 
     const ref = geom.kv_ref[il];
-    const cached_len = kv.len + m;
+    const cached_len = kv.len() + m;
     var k_view = try kv.k[ref].narrow(ctx, .seq, 0, cached_len);
     defer k_view.deinit();
     var v_view = try kv.v[ref].narrow(ctx, .seq, 0, cached_len);
@@ -1772,6 +1781,31 @@ pub fn loadLayers(ctx: *ExecContext, file: *const gguf.File, config: Config, geo
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// File-scope name for the model so `Family.Model` can alias it.
+const ModelT = Model;
+
+/// Registry surface (`llm.registry`): what `serving.open` needs to load
+/// and serve this family.
+pub const Family = struct {
+    pub const Model = ModelT;
+    /// The tokenizer MODULE (SPM) and its `Tokenizer` type.
+    pub const Tok = spm_tokenizer_mod;
+    pub const Tokenizer = spm_tokenizer_mod.Tokenizer;
+
+    pub fn load(ctx: *ExecContext, file: *gguf.File, options: model_common.FamilyLoadOptions) !ModelT {
+        var config = try Config.fromGguf(file);
+        config.borrow_experts = options.experts_borrow;
+        return ModelT.loadGgufFromFile(ctx, file, config);
+    }
+
+    pub fn tokenizer(allocator: Allocator, file: *const gguf.File) !Tokenizer {
+        return Tokenizer.initFromGguf(allocator, file, .{});
+    }
+
+    /// gemma4 GGUFs without an embedded template render as `.gemma4`.
+    pub const template_fallback: ?chat.Format = .gemma4;
+};
 
 test {
     _ = @import("model_tests.zig");

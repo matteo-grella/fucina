@@ -1,5 +1,5 @@
-//! Inkling backend adapter: the hybrid rel-bias + MoE decoder behind the
-//! lmserve `Backend` vtable. Like nanochat, it does NOT ride the generic
+//! Inkling serving adapter: the hybrid rel-bias + MoE decoder behind the
+//! serving `Backend` vtable. Like nanochat, it does NOT ride the generic
 //! `GgufChatBackend`/`Conversation` — Inkling has its own KV+conv-state
 //! cache and a typed-content-block chat protocol (the wire format) rather
 //! than a text template — so this drives the `llm.inkling.chat.Engine`
@@ -10,24 +10,27 @@
 //! constraints when built with `-Dllguidance=true` (the sampler's
 //! `LogitProcessor` seam; a constraint forces reasoning off so the grammar
 //! governs the reply from token 0, primed with a `<|content_text|>` block).
-//! No client stop-sequences and no cross-request KV reuse in v1.
+//! No client stop-sequences and no cross-request KV reuse.
 
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
-const types = @import("fucina_llm").serving;
-const backend_mod = @import("fucina_llm").serving.gguf_chat;
+const contract = @import("../serving/contract.zig");
+const gguf_chat = @import("../serving/gguf_chat.zig");
+const llguidance = @import("../llguidance.zig");
+const sampler_mod = @import("../sampler.zig");
+const tokenizer_mod = @import("../tokenizer.zig");
+const model_mod = @import("model.zig");
+const inkling_chat = @import("chat.zig");
 
 const Allocator = std.mem.Allocator;
-const inkling_chat = llm.inkling.chat;
 
-pub const InklingBackend = struct {
+pub const Backend = struct {
     allocator: Allocator,
     ctx: *fucina.ExecContext,
-    model: *llm.inkling.model.Model,
-    tokenizer: *llm.tokenizer.Tokenizer,
-    engine: inkling_chat.Engine(llm.tokenizer),
-    constraints: backend_mod.ConstraintCache,
+    model: *model_mod.Model,
+    tokenizer: *tokenizer_mod.Tokenizer,
+    engine: inkling_chat.Engine(tokenizer_mod),
+    constraints: gguf_chat.ConstraintCache,
     model_id: []const u8,
     context_len: usize,
     /// The turn-end id (`<|content_model_end_sampling|>` == the GGUF EOS).
@@ -36,30 +39,30 @@ pub const InklingBackend = struct {
     pub fn init(
         allocator: Allocator,
         ctx: *fucina.ExecContext,
-        model: *llm.inkling.model.Model,
-        tokenizer: *llm.tokenizer.Tokenizer,
+        model: *model_mod.Model,
+        tokenizer: *tokenizer_mod.Tokenizer,
         model_id: []const u8,
         context_len: usize,
-    ) !InklingBackend {
-        const engine = try inkling_chat.Engine(llm.tokenizer).init(ctx, model, tokenizer);
+    ) !Backend {
+        const engine = try inkling_chat.Engine(tokenizer_mod).init(ctx, model, tokenizer);
         return .{
             .allocator = allocator,
             .ctx = ctx,
             .model = model,
             .tokenizer = tokenizer,
             .engine = engine,
-            .constraints = backend_mod.ConstraintCache.init(allocator, 8),
+            .constraints = gguf_chat.ConstraintCache.init(allocator, 8),
             .model_id = model_id,
             .context_len = context_len,
             .stop_id = engine.markers.end_sampling,
         };
     }
 
-    pub fn deinit(self: *InklingBackend) void {
+    pub fn deinit(self: *Backend) void {
         self.constraints.deinit();
     }
 
-    pub fn backend(self: *InklingBackend) types.Backend {
+    pub fn backend(self: *Backend) contract.Backend {
         return .{
             .ptr = self,
             .vtable = &.{ .validate = vtValidate, .generate = vtGenerate },
@@ -67,7 +70,7 @@ pub const InklingBackend = struct {
                 .model_id = self.model_id,
                 .context_len = self.context_len,
                 .caps = .{
-                    .grammar = llm.llguidance.enabled,
+                    .grammar = llguidance.enabled,
                     .think = true,
                     .stop_sequences = false,
                 },
@@ -83,7 +86,7 @@ pub const InklingBackend = struct {
     }
 
     /// Render + tokenize the request into a prompt id list. Caller owns it.
-    fn buildPrompt(self: *InklingBackend, a: Allocator, req: *const types.GenerateRequest) ![]usize {
+    fn buildPrompt(self: *Backend, a: Allocator, req: *const contract.GenerateRequest) ![]usize {
         // A constraint forces reasoning off (the OpenAI layer already sets
         // req.think=false in that case); think_off primes a content_text
         // block so generation is pure constrained content.
@@ -98,16 +101,16 @@ pub const InklingBackend = struct {
         return ids;
     }
 
-    fn vtValidate(ptr: *anyopaque, req: *const types.GenerateRequest) anyerror!void {
-        const self: *InklingBackend = @ptrCast(@alignCast(ptr));
-        if (req.constraint != null and !llm.llguidance.enabled) return error.LlguidanceNotEnabled;
+    fn vtValidate(ptr: *anyopaque, req: *const contract.GenerateRequest) anyerror!void {
+        const self: *Backend = @ptrCast(@alignCast(ptr));
+        if (req.constraint != null and !llguidance.enabled) return error.LlguidanceNotEnabled;
         const ids = try self.buildPrompt(self.allocator, req);
         defer self.allocator.free(ids);
         if (ids.len >= self.context_len) return error.PromptTooLong;
     }
 
-    fn vtGenerate(ptr: *anyopaque, req: *const types.GenerateRequest, sink: *std.Io.Writer) anyerror!types.GenerateResult {
-        const self: *InklingBackend = @ptrCast(@alignCast(ptr));
+    fn vtGenerate(ptr: *anyopaque, req: *const contract.GenerateRequest, sink: *std.Io.Writer) anyerror!contract.GenerateResult {
+        const self: *Backend = @ptrCast(@alignCast(ptr));
         const a = self.allocator;
 
         const ids = try self.buildPrompt(a, req);
@@ -116,9 +119,9 @@ pub const InklingBackend = struct {
         // Grammar: clone the cached base per request. The mask forces the
         // turn-end id once the grammar completes, so normal stop handling
         // ends the reply.
-        var clone: ?llm.llguidance.Constraint = null;
+        var clone: ?llguidance.Constraint = null;
         defer if (clone) |*c| c.deinit();
-        var processor: ?llm.sampler.LogitProcessor = null;
+        var processor: ?sampler_mod.LogitProcessor = null;
         if (req.constraint) |spec| {
             const base = try self.constraints.acquire(self.tokenizer, spec, .{
                 .eos_token = self.stop_id,
@@ -143,3 +146,57 @@ pub const InklingBackend = struct {
         };
     }
 };
+
+/// The served engine box (heap-pinned; `serving.open` dispatches here for
+/// the inkling arch). Takes ownership of `file` on every path.
+const Box = struct {
+    allocator: Allocator,
+    model_id: []u8,
+    model: model_mod.Model,
+    tokenizer: tokenizer_mod.Tokenizer,
+    adapter: Backend,
+
+    fn destroy(ptr: *anyopaque) void {
+        const box: *Box = @ptrCast(@alignCast(ptr));
+        const a = box.allocator;
+        box.adapter.deinit();
+        box.tokenizer.deinit();
+        box.model.deinit();
+        a.free(box.model_id);
+        a.destroy(box);
+    }
+};
+
+pub fn openFromFile(
+    ctx: *fucina.ExecContext,
+    io: std.Io,
+    allocator: Allocator,
+    file: *fucina.gguf.File,
+    model_id: []const u8,
+    options: contract.OpenOptions,
+    stderr: *std.Io.Writer,
+) !contract.Opened {
+    _ = io;
+    var file_alive = true;
+    errdefer if (file_alive) file.deinit();
+
+    const box = try allocator.create(Box);
+    errdefer allocator.destroy(box);
+    box.allocator = allocator;
+    box.model_id = try allocator.dupe(u8, model_id);
+    errdefer allocator.free(box.model_id);
+
+    box.tokenizer = tokenizer_mod.Tokenizer.initFromGguf(allocator, file, .{}) catch {
+        try stderr.writeAll("this GGUF has no usable tokenizer metadata\n");
+        return error.TokenizerUnavailable;
+    };
+    errdefer box.tokenizer.deinit();
+
+    box.model = try model_mod.Family.load(ctx, file, .{});
+    errdefer box.model.deinit();
+    file.deinit();
+    file_alive = false;
+
+    box.adapter = try Backend.init(allocator, ctx, &box.model, &box.tokenizer, box.model_id, options.context_len);
+    return .{ .ptr = box, .destroyFn = Box.destroy, .backend = box.adapter.backend() };
+}

@@ -264,7 +264,7 @@ fn plainRun(
     }
     for (0..max_new) |_| {
         const last = out.items[out.items.len - 1];
-        var logits = try model.forwardStep(ctx, &kv, &.{last}, kv.len);
+        var logits = try model.forwardStep(ctx, &kv, &.{last}, kv.len());
         defer logits.deinit();
         const next = try sampler.next(ctx, &logits, out.items);
         try out.append(ctx.allocator, next);

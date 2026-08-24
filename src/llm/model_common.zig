@@ -224,3 +224,16 @@ pub fn kvHeadMap(allocator: Allocator, n_heads: usize, n_kv_heads: usize) ![]usi
     for (map, 0..) |*kv_head, head_i| kv_head.* = head_i / heads_per_kv;
     return map;
 }
+
+/// Options for `Family.load` (the `llm.registry` surface): the
+/// family-independent load levers `serving.open` forwards. Families
+/// ignore the levers they do not support.
+pub const FamilyLoadOptions = struct {
+    /// Zero-copy MoE expert load (gemma4).
+    experts_borrow: bool = false,
+    /// Disk-streaming tier for MoE experts (deepseek4; qwen35moe via its
+    /// own runner CLI).
+    moe_stream: ?weights.MoeStreamOptions = null,
+    /// Rope-table capacity for host-band families (glm4moe).
+    max_positions: usize = 4096,
+};

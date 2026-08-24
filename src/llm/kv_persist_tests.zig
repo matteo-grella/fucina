@@ -40,16 +40,16 @@ fn fillPositions(ctx: *ExecContext, kv: *KvCache, base: usize, count: usize) !vo
 }
 
 fn expectCachesEqual(a: *const KvCache, b: *const KvCache) !void {
-    try std.testing.expectEqual(a.len, b.len);
+    try std.testing.expectEqual(a.len(), b.len());
     for (0..n_layers) |i| {
         switch (a.dtype) {
             .f16 => {
-                try std.testing.expectEqualSlices(f16, try a.kSlice(i, a.len), try b.kSlice(i, b.len));
-                try std.testing.expectEqualSlices(f16, try a.vSlice(i, a.len), try b.vSlice(i, b.len));
+                try std.testing.expectEqualSlices(f16, try a.kSlice(i, a.len()), try b.kSlice(i, b.len()));
+                try std.testing.expectEqualSlices(f16, try a.vSlice(i, a.len()), try b.vSlice(i, b.len()));
             },
             .q8_0 => {
-                try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(a.kBlocks(i, a.len)), std.mem.sliceAsBytes(b.kBlocks(i, b.len)));
-                try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(a.vBlocks(i, a.len)), std.mem.sliceAsBytes(b.vBlocks(i, b.len)));
+                try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(a.kBlocks(i, a.len())), std.mem.sliceAsBytes(b.kBlocks(i, b.len())));
+                try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(a.vBlocks(i, a.len())), std.mem.sliceAsBytes(b.vBlocks(i, b.len())));
             },
         }
     }
@@ -134,7 +134,7 @@ test "kv persistence rejects foreign geometry and recovers the prefix of a torn 
     defer allocator.free(resumed.tokens);
     try std.testing.expectEqual(@as(usize, 3), resumed.tokens.len);
     try std.testing.expectEqualSlices(usize, tokens[0..3], resumed.tokens);
-    try std.testing.expectEqual(@as(usize, 3), kv2.len);
+    try std.testing.expectEqual(@as(usize, 3), kv2.len());
     for (0..n_layers) |i| {
         try std.testing.expectEqualSlices(f16, try kv.kSlice(i, 3), try kv2.kSlice(i, 3));
         try std.testing.expectEqualSlices(f16, try kv.vSlice(i, 3), try kv2.vSlice(i, 3));

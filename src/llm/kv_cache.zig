@@ -54,7 +54,7 @@ pub const KvCache = struct {
     // [capacity, kv_heads, head_dim/32]. Empty in f16 mode.
     k_q8: [][]fucina.quant.BlockQ8_0,
     v_q8: [][]fucina.quant.BlockQ8_0,
-    len: usize,
+    count: usize,
     capacity: usize,
     // Per-layer KV-head count and head_dim. Most models share one value across
     // layers, but Gemma 4 interleaves local-SWA layers (kv_heads 8, head_dim 256)
@@ -128,7 +128,7 @@ pub const KvCache = struct {
             .v = &.{},
             .k_q8 = &.{},
             .v_q8 = &.{},
-            .len = 0,
+            .count = 0,
             .capacity = capacity,
             .kv_heads = kv_heads,
             .head_dim = head_dim,
@@ -214,8 +214,14 @@ pub const KvCache = struct {
         }
     }
 
+    /// The number of cached positions. The decoder contract's `Cache.len()`
+    /// method; the state itself lives in `count`.
+    pub fn len(self: *const KvCache) usize {
+        return self.count;
+    }
+
     pub fn reset(self: *KvCache) void {
-        self.len = 0;
+        self.count = 0;
     }
 
     /// Total bytes of K+V storage across layers, from the actual allocations
@@ -233,28 +239,28 @@ pub const KvCache = struct {
         return total;
     }
 
-    /// q8_0 mode: layer `layer_i`'s cached K blocks for the first `len`
-    /// positions, laid out [len, kv_heads, head_dim/32] — the shape
+    /// q8_0 mode: layer `layer_i`'s cached K blocks for the first `n`
+    /// positions, laid out [n, kv_heads, head_dim/32] — the shape
     /// `groupedAttention`'s q8_0-block KV arm consumes.
-    pub fn kBlocks(self: *const KvCache, layer_i: usize, len: usize) []const fucina.quant.BlockQ8_0 {
-        return self.k_q8[layer_i][0 .. len * self.layerRowBlocks(layer_i)];
+    pub fn kBlocks(self: *const KvCache, layer_i: usize, n: usize) []const fucina.quant.BlockQ8_0 {
+        return self.k_q8[layer_i][0 .. n * self.layerRowBlocks(layer_i)];
     }
 
     /// q8_0 mode: as `kBlocks`, for V.
-    pub fn vBlocks(self: *const KvCache, layer_i: usize, len: usize) []const fucina.quant.BlockQ8_0 {
-        return self.v_q8[layer_i][0 .. len * self.layerRowBlocks(layer_i)];
+    pub fn vBlocks(self: *const KvCache, layer_i: usize, n: usize) []const fucina.quant.BlockQ8_0 {
+        return self.v_q8[layer_i][0 .. n * self.layerRowBlocks(layer_i)];
     }
 
-    /// f16 mode: layer `layer_i`'s cached K rows for the first `len`
-    /// positions as a raw `[len, kv_heads, head_dim]` f16 slice — the
+    /// f16 mode: layer `layer_i`'s cached K rows for the first `n`
+    /// positions as a raw `[n, kv_heads, head_dim]` f16 slice — the
     /// per-stream span `groupedAttention`'s multi-stream KV arm consumes.
-    pub fn kSlice(self: *const KvCache, layer_i: usize, len: usize) ![]const f16 {
-        return (try self.k[layer_i].dataConst())[0 .. len * self.layerRowElems(layer_i)];
+    pub fn kSlice(self: *const KvCache, layer_i: usize, n: usize) ![]const f16 {
+        return (try self.k[layer_i].dataConst())[0 .. n * self.layerRowElems(layer_i)];
     }
 
     /// f16 mode: as `kSlice`, for V.
-    pub fn vSlice(self: *const KvCache, layer_i: usize, len: usize) ![]const f16 {
-        return (try self.v[layer_i].dataConst())[0 .. len * self.layerRowElems(layer_i)];
+    pub fn vSlice(self: *const KvCache, layer_i: usize, n: usize) ![]const f16 {
+        return (try self.v[layer_i].dataConst())[0 .. n * self.layerRowElems(layer_i)];
     }
 
     fn layerRowElems(self: *const KvCache, layer_i: usize) usize {
@@ -281,12 +287,12 @@ pub const KvCache = struct {
         const kv_heads = self.kv_heads[layer_i];
         if (k_rows.dim(.kv_head) != kv_heads or k_rows.dim(.d) != head_dim) return Error.KvCacheShapeMismatch;
         if (v_rows.dim(.seq) != m or v_rows.dim(.kv_head) != kv_heads or v_rows.dim(.d) != head_dim) return Error.KvCacheShapeMismatch;
-        if (self.len + m > self.capacity) return Error.KvCacheOverflow;
+        if (self.count + m > self.capacity) return Error.KvCacheOverflow;
 
         switch (self.dtype) {
             .f16 => {
                 const row = kv_heads * head_dim;
-                const start = self.len * row;
+                const start = self.count * row;
                 const span = m * row;
                 // Cast straight into the cache slot: one pass, no temporaries. K is
                 // contiguous; V is a split view of the fused QKV row, walked as
@@ -303,7 +309,7 @@ pub const KvCache = struct {
                 // a multiple of 32 (checked at init), so block boundaries
                 // align with (position, kv_head) row segments.
                 const row_blocks = kv_heads * (head_dim / q8_0_block_size);
-                const start = self.len * row_blocks;
+                const start = self.count * row_blocks;
                 const span = m * row_blocks;
                 try ctx.quantizeF32RowsToQ8_0Into(k_rows.asRawTensor(), self.k_q8[layer_i][start..][0..span]);
                 try ctx.quantizeF32RowsToQ8_0Into(v_rows.asRawTensor(), self.v_q8[layer_i][start..][0..span]);
@@ -312,37 +318,37 @@ pub const KvCache = struct {
     }
 
     pub fn advance(self: *KvCache, m: usize) void {
-        self.len += m;
+        self.count += m;
     }
 
     /// Rewind the cache to its first `keep_len` positions (clamp: a `keep_len`
-    /// at or above `len` is a no-op). Decrementing `len` is sufficient for BOTH
+    /// at or above `len()` is a no-op). Decrementing `count` is sufficient for BOTH
     /// storage modes: the buffers are pre-allocated at `capacity` and never
     /// shrink, each position occupies whole per-(position, kv_head) rows — f16
     /// rows of `head_dim` halves; q8_0 rows of `head_dim/32` BlockQ8_0 (init
     /// enforces `head_dim % 32 == 0`, so no block ever straddles positions) —
     /// and every reader (`k`/`v` narrows, `kBlocks`/`vBlocks`) as well as
-    /// `appendLayer` (which writes at offset `len`) addresses rows strictly
-    /// from `len`: the next append simply overwrites the abandoned rows.
+    /// `appendLayer` (which writes at offset `count`) addresses rows strictly
+    /// from `count`: the next append simply overwrites the abandoned rows.
     /// Speculative decoding uses this to drop rejected draft positions.
     pub fn truncate(self: *KvCache, keep_len: usize) void {
-        if (keep_len < self.len) self.len = keep_len;
+        if (keep_len < self.count) self.count = keep_len;
     }
 
     /// Copy rows [start, end) of `src` — same model geometry — into this
-    /// cache at the SAME positions and advance `len` to `end`: the
+    /// cache at the SAME positions and advance `count` to `end`: the
     /// cross-slot prefix-share primitive (lmserve slot pool). A new
     /// conversation adopts another slot's common prompt prefix by memcpy
     /// instead of re-prefilling it; positions are preserved, so the copied
     /// rows are exactly the rows a prefill of the same tokens would have
-    /// produced. Requires `self.len == start` (rows append in order) and
-    /// `end <= src.len`.
+    /// produced. Requires `self.len() == start` (rows append in order) and
+    /// `end <= src.len()`.
     pub fn copyRows(self: *KvCache, src: *const KvCache, start: usize, end: usize) !void {
         if (self.dtype != src.dtype or
             self.kv_heads.len != src.kv_heads.len or
             end > self.capacity) return Error.KvCacheShapeMismatch;
-        std.debug.assert(self.len == start);
-        std.debug.assert(end <= src.len);
+        std.debug.assert(self.count == start);
+        std.debug.assert(end <= src.count);
         if (end <= start) return;
         for (0..self.kv_heads.len) |layer_i| {
             if (self.kv_heads[layer_i] != src.kv_heads[layer_i] or
@@ -368,7 +374,7 @@ pub const KvCache = struct {
                 },
             }
         }
-        self.len = end;
+        self.count = end;
     }
 };
 

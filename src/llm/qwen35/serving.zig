@@ -1,5 +1,5 @@
-//! Qwen3.5/Bonsai backend adapter: the hybrid Gated-DeltaNet family behind
-//! the lmserve `Backend` vtable. Like inkling, it does NOT ride the generic
+//! Qwen3.5/Bonsai serving adapter: the hybrid Gated-DeltaNet family behind
+//! the serving `Backend` vtable. Like inkling, it does NOT ride the generic
 //! `GgufChatBackend`/`Conversation`: the family's cache carries recurrent
 //! conv/state matrices that cannot be truncated back to a token prefix, so
 //! the KV-slot reuse tiers do not apply — each request runs on a fresh
@@ -11,58 +11,62 @@
 //! grammar constraints when built with `-Dllguidance=true` (the sampler's
 //! `LogitProcessor` seam; a constraint forces reasoning off so the grammar
 //! governs the reply from token 0, behind the prefilled empty think block).
-//! No client stop-sequences and no cross-request KV reuse in v1.
+//! No client stop-sequences and no cross-request KV reuse.
 
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
-const types = @import("fucina_llm").serving;
-const backend_mod = @import("fucina_llm").serving.gguf_chat;
+const contract = @import("../serving/contract.zig");
+const gguf_chat = @import("../serving/gguf_chat.zig");
+const chat = @import("../chat.zig");
+const llguidance = @import("../llguidance.zig");
+const sampler_mod = @import("../sampler.zig");
+const tokenizer_mod = @import("../tokenizer.zig");
+const model_mod = @import("model.zig");
+const qwen35_chat = @import("chat.zig");
 
 const Allocator = std.mem.Allocator;
-const qwen35_chat = llm.qwen35.chat;
 
-pub const Qwen35Backend = struct {
+pub const Backend = struct {
     allocator: Allocator,
     ctx: *fucina.ExecContext,
-    model: *const llm.qwen35.model.Model,
-    tokenizer: *llm.tokenizer.Tokenizer,
-    template: llm.chat.Template,
-    engine: qwen35_chat.Engine(llm.tokenizer),
-    constraints: backend_mod.ConstraintCache,
+    model: *const model_mod.Model,
+    tokenizer: *tokenizer_mod.Tokenizer,
+    template: chat.Template,
+    engine: qwen35_chat.Engine(tokenizer_mod),
+    constraints: gguf_chat.ConstraintCache,
     model_id: []const u8,
     context_len: usize,
-    default_sampling: llm.sampler.Config,
+    default_sampling: sampler_mod.Config,
 
     pub fn init(
         allocator: Allocator,
         ctx: *fucina.ExecContext,
-        model: *const llm.qwen35.model.Model,
-        tokenizer: *llm.tokenizer.Tokenizer,
-        template: llm.chat.Template,
+        model: *const model_mod.Model,
+        tokenizer: *tokenizer_mod.Tokenizer,
+        template: chat.Template,
         model_id: []const u8,
         context_len: usize,
-        default_sampling: llm.sampler.Config,
-    ) !Qwen35Backend {
+        default_sampling: sampler_mod.Config,
+    ) !Backend {
         return .{
             .allocator = allocator,
             .ctx = ctx,
             .model = model,
             .tokenizer = tokenizer,
             .template = template,
-            .engine = try qwen35_chat.Engine(llm.tokenizer).init(ctx, model, tokenizer),
-            .constraints = backend_mod.ConstraintCache.init(allocator, 8),
+            .engine = try qwen35_chat.Engine(tokenizer_mod).init(ctx, model, tokenizer),
+            .constraints = gguf_chat.ConstraintCache.init(allocator, 8),
             .model_id = model_id,
             .context_len = context_len,
             .default_sampling = default_sampling,
         };
     }
 
-    pub fn deinit(self: *Qwen35Backend) void {
+    pub fn deinit(self: *Backend) void {
         self.constraints.deinit();
     }
 
-    pub fn backend(self: *Qwen35Backend) types.Backend {
+    pub fn backend(self: *Backend) contract.Backend {
         return .{
             .ptr = self,
             .vtable = &.{ .validate = vtValidate, .generate = vtGenerate },
@@ -70,7 +74,7 @@ pub const Qwen35Backend = struct {
                 .model_id = self.model_id,
                 .context_len = self.context_len,
                 .caps = .{
-                    .grammar = llm.llguidance.enabled,
+                    .grammar = llguidance.enabled,
                     .think = true,
                     .stop_sequences = false,
                 },
@@ -84,7 +88,7 @@ pub const Qwen35Backend = struct {
     }
 
     /// Render + tokenize the request into a prompt id list. Caller owns it.
-    fn buildPrompt(self: *Qwen35Backend, a: Allocator, req: *const types.GenerateRequest) ![]usize {
+    fn buildPrompt(self: *Backend, a: Allocator, req: *const contract.GenerateRequest) ![]usize {
         // The OpenAI layer forces think off under a constraint, so the
         // grammar governs from token 0 behind the empty think block.
         const rendered = try qwen35_chat.renderPrompt(a, self.template, req.messages, .{
@@ -99,16 +103,16 @@ pub const Qwen35Backend = struct {
         return ids;
     }
 
-    fn vtValidate(ptr: *anyopaque, req: *const types.GenerateRequest) anyerror!void {
-        const self: *Qwen35Backend = @ptrCast(@alignCast(ptr));
-        if (req.constraint != null and !llm.llguidance.enabled) return error.LlguidanceNotEnabled;
+    fn vtValidate(ptr: *anyopaque, req: *const contract.GenerateRequest) anyerror!void {
+        const self: *Backend = @ptrCast(@alignCast(ptr));
+        if (req.constraint != null and !llguidance.enabled) return error.LlguidanceNotEnabled;
         const ids = try self.buildPrompt(self.allocator, req);
         defer self.allocator.free(ids);
         if (ids.len >= self.context_len) return error.PromptTooLong;
     }
 
-    fn vtGenerate(ptr: *anyopaque, req: *const types.GenerateRequest, sink: *std.Io.Writer) anyerror!types.GenerateResult {
-        const self: *Qwen35Backend = @ptrCast(@alignCast(ptr));
+    fn vtGenerate(ptr: *anyopaque, req: *const contract.GenerateRequest, sink: *std.Io.Writer) anyerror!contract.GenerateResult {
+        const self: *Backend = @ptrCast(@alignCast(ptr));
         const a = self.allocator;
 
         const ids = try self.buildPrompt(a, req);
@@ -117,9 +121,9 @@ pub const Qwen35Backend = struct {
         // Grammar: clone the cached base per request. The mask forces the
         // turn-end id once the grammar completes, so normal stop handling
         // ends the reply.
-        var clone: ?llm.llguidance.Constraint = null;
+        var clone: ?llguidance.Constraint = null;
         defer if (clone) |*c| c.deinit();
-        var processor: ?llm.sampler.LogitProcessor = null;
+        var processor: ?sampler_mod.LogitProcessor = null;
         if (req.constraint) |spec| {
             const base = try self.constraints.acquire(self.tokenizer, spec, .{
                 .eos_token = self.engine.stop_id,
@@ -152,3 +156,75 @@ pub const Qwen35Backend = struct {
         };
     }
 };
+
+/// The served engine box (heap-pinned; `serving.open` dispatches here for
+/// the qwen35/qwen35moe archs). Takes ownership of `file` on every path.
+const Box = struct {
+    allocator: Allocator,
+    model_id: []u8,
+    model: model_mod.Model,
+    tokenizer: tokenizer_mod.Tokenizer,
+    adapter: Backend,
+
+    fn destroy(ptr: *anyopaque) void {
+        const box: *Box = @ptrCast(@alignCast(ptr));
+        const a = box.allocator;
+        box.adapter.deinit();
+        box.tokenizer.deinit();
+        box.model.deinit();
+        a.free(box.model_id);
+        a.destroy(box);
+    }
+};
+
+pub fn openFromFile(
+    ctx: *fucina.ExecContext,
+    io: std.Io,
+    allocator: Allocator,
+    file: *fucina.gguf.File,
+    model_id: []const u8,
+    options: contract.OpenOptions,
+    stderr: *std.Io.Writer,
+) !contract.Opened {
+    _ = io;
+    var file_alive = true;
+    errdefer if (file_alive) file.deinit();
+
+    const box = try allocator.create(Box);
+    errdefer allocator.destroy(box);
+    box.allocator = allocator;
+    box.model_id = try allocator.dupe(u8, model_id);
+    errdefer allocator.free(box.model_id);
+
+    box.tokenizer = tokenizer_mod.Tokenizer.initFromGguf(allocator, file, .{}) catch {
+        try stderr.writeAll("this GGUF has no usable tokenizer metadata\n");
+        return error.TokenizerUnavailable;
+    };
+    errdefer box.tokenizer.deinit();
+    const template = chat.Template.detect(file.getString("tokenizer.chat_template")) orelse
+        chat.Template{ .format = model_mod.Family.template_fallback.? };
+    // Bonsai GGUFs carry their recommended sampling (`general.sampling.*`).
+    const default_sampling = contract.samplingFromGguf(file);
+
+    box.model = try model_mod.Family.load(ctx, file, .{ .moe_stream = options.moe_stream });
+    errdefer box.model.deinit();
+    file.deinit();
+    file_alive = false;
+
+    box.adapter = try Backend.init(
+        allocator,
+        ctx,
+        &box.model,
+        &box.tokenizer,
+        template,
+        box.model_id,
+        options.context_len,
+        default_sampling,
+    );
+    return .{
+        .ptr = box,
+        .destroyFn = Box.destroy,
+        .backend = box.adapter.backend(),
+        .expert_store = box.model.expert_store,
+    };
+}

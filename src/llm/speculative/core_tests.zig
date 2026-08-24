@@ -304,7 +304,7 @@ fn plainRun(
     }
     for (0..max_new) |_| {
         const last = out.items[out.items.len - 1];
-        var logits = try model.forwardStep(ctx, &kv, &.{last}, kv.len);
+        var logits = try model.forwardStep(ctx, &kv, &.{last}, kv.len());
         defer logits.deinit();
         if (rows) |store| try RowStore.capture(store, out.items.len, 0, try logits.dataConst());
         const next = try sampler.next(ctx, &logits, out.items);
@@ -372,7 +372,7 @@ test "forwardStepAllLogits matches per-token forwardStep bitwise (tiny model)" {
     defer all.deinit();
     try std.testing.expectEqual(tokens.len, all.dim(.seq));
     try std.testing.expectEqual(cfg.vocab_size, all.dim(.vocab));
-    try std.testing.expectEqual(tokens.len, kv_a.len); // kv advance == forwardStep
+    try std.testing.expectEqual(tokens.len, kv_a.len()); // kv advance == forwardStep
 
     // ...must equal feeding the tokens one at a time: bitwise on BLAS-free
     // builds (kernels are row-wise independent below the m-thresholds), tight
@@ -701,7 +701,7 @@ test "stop-aware verify: accepted mid-batch stop ends the row loop — stream AN
         pre.deinit();
         for (0..max_new) |_| {
             const last = plain.items[plain.items.len - 1];
-            var logits = try model.forwardStep(&ctx, &kv, &.{last}, kv.len);
+            var logits = try model.forwardStep(&ctx, &kv, &.{last}, kv.len());
             defer logits.deinit();
             const next = try plain_sampler.next(&ctx, &logits, plain.items);
             plain_draws += 1;
@@ -730,7 +730,7 @@ test "stop-aware verify: accepted mid-batch stop ends the row loop — stream AN
         while (std.mem.indexOfScalarPos(usize, got.items, test_prompt.len, stop) == null) {
             _ = try decoder.step(&ctx, &model, &kv, &spec_sampler, &got, NullSink.sink());
         }
-        try std.testing.expectEqual(got.items.len, kv.len + 1);
+        try std.testing.expectEqual(got.items.len, kv.len() + 1);
     }
 
     // Committed stream identical to plain — including NO overshoot past the
@@ -746,7 +746,7 @@ test "stop-aware verify: accepted mid-batch stop ends the row loop — stream AN
     try std.testing.expect(std.meta.eql(plain_sampler.prng, spec_sampler.prng));
 }
 
-test "mid-step sink failures keep history.len == kv.len + 1; the resumed stream matches plain" {
+test "mid-step sink failures keep history.len == kv.len() + 1; the resumed stream matches plain" {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
     const allocator = gpa.allocator();
@@ -790,7 +790,7 @@ test "mid-step sink failures keep history.len == kv.len + 1; the resumed stream 
         var failing = FailingSink{ .fail_at = case.fail_at };
         try std.testing.expectError(error.SinkFailed, decoder.step(&ctx, &model, &kv, &sampler, &history, failing.sink()));
         // The decode-state invariant survived the unwind...
-        try std.testing.expectEqual(history.items.len, kv.len + 1);
+        try std.testing.expectEqual(history.items.len, kv.len() + 1);
         // ...and everything committed so far is a prefix of the plain stream.
         try std.testing.expect(history.items.len <= plain.items.len);
         try std.testing.expectEqualSlices(usize, plain.items[0..history.items.len], history.items);
@@ -826,7 +826,7 @@ test "step rejects empty or kv-desynced history at runtime" {
 
     // Empty history (e.g. an empty prompt): hard error, not ReleaseFast UB.
     try std.testing.expectError(error.InvalidDecodeState, decoder.step(&ctx, &model, &kv, &sampler, &history, NullSink.sink()));
-    // Desynced history (history.len != kv.len + 1): same error.
+    // Desynced history (history.len != kv.len() + 1): same error.
     try history.appendSlice(allocator, &.{ 1, 2 });
     try std.testing.expectError(error.InvalidDecodeState, decoder.step(&ctx, &model, &kv, &sampler, &history, NullSink.sink()));
     try std.testing.expectEqual(@as(usize, 0), decoder.stats.steps);

@@ -22,6 +22,7 @@
 const std = @import("std");
 const fucina = @import("fucina");
 const weights = @import("fucina").weights;
+const decoder = @import("decoder.zig");
 const kv_cache = @import("kv_cache.zig");
 const model_common = @import("model_common.zig");
 const moe_router = @import("moe_router.zig");
@@ -44,11 +45,11 @@ pub const Error = weights.Error || error{
     InvalidConfig,
     InvalidSequenceLength,
     /// Batched entries require distinct sibling caches: one per stream,
-    /// all the same dtype (all from this model's `initKvCache`).
+    /// all the same dtype (all from this model's `initCache`).
     MismatchedKvCaches,
     KvCacheOverflow,
     /// The entry does not match the model's block style: a fused entry
-    /// (`forwardStep*`, `forwardLastLogits*`, `initKvCache`) on a
+    /// (`forwardStep*`, `forwardLastLogits*`, `initCache`) on a
     /// `.host_reference` model, or `hostStep`/`initHostCache` on a
     /// `.fused` model. Without this guard a host model's fused entries
     /// would silently run zero layers and return embedding-only logits.
@@ -273,6 +274,12 @@ pub const AttentionOverride = struct {
 };
 
 pub const Model = struct {
+    /// Decoder-contract decode state (`llm.decoder`): the shared KV cache.
+    pub const Cache = KvCache;
+    /// Decoder-contract capabilities: the cache rewinds (speculative
+    /// verify, cross-request reuse) and lockstep batch decode exists.
+    pub const caps: decoder.Caps = .{ .rewind = true, .batch = true };
+
     allocator: Allocator,
     config: Descriptor,
     token_embedding: LinearWeight,
@@ -424,14 +431,14 @@ pub const Model = struct {
     /// A KV cache with this model's (uniform) attention geometry — the
     /// duck-typed construction seam generic embedders (chat.Conversation)
     /// use; gemma4's per-layer-geometry counterpart is initPerLayer-backed.
-    pub fn initKvCache(self: *const Model, ctx: *ExecContext, capacity: usize) !KvCache {
+    pub fn initCache(self: *const Model, ctx: *ExecContext, capacity: usize) !KvCache {
         if (self.host != null) return Error.WrongBlockStyle;
         return KvCache.init(ctx, self.config.num_layers, self.config.num_key_value_heads, self.config.head_dim, capacity);
     }
 
     /// Process `token_ids` at absolute positions `pos0 .. pos0 + len`, appending
     /// their post-RoPE K/V into `kv`, and return the last token's logits.
-    /// Attention runs the new queries against the whole cache (`kv.len + len`
+    /// Attention runs the new queries against the whole cache (`kv.len() + len`
     /// positions). With a fresh cache and `pos0 == 0` this is prefill and yields
     /// the same last-token logits as `forwardLastLogits`; with one token it is a
     /// single decode step.
@@ -491,8 +498,8 @@ pub const Model = struct {
     ) !fucina.Tensor(.{ .seq, .vocab }) {
         if (self.host != null) return Error.WrongBlockStyle;
         if (token_ids.len == 0) return Error.InvalidSequenceLength;
-        if (kv.len != pos0) return Error.InvalidSequenceLength;
-        if (kv.len + token_ids.len > kv.capacity) return kv_cache.Error.KvCacheOverflow;
+        if (kv.len() != pos0) return Error.InvalidSequenceLength;
+        if (kv.len() + token_ids.len > kv.capacity) return kv_cache.Error.KvCacheOverflow;
 
         var rope_table = try ctx.prepareRopeTableRange(.{ .origin = @intCast(pos0), .len = token_ids.len }, self.config.head_dim, self.config.rope_theta, false);
         defer rope_table.deinit();
@@ -535,7 +542,7 @@ pub const Model = struct {
 
     /// Batched multi-sequence decode: one NEW token per stream, each stream
     /// backed by its own `KvCache` (distinct sibling caches from this
-    /// model's `initKvCache`, all the same dtype). Row `s` of the returned
+    /// model's `initCache`, all the same dtype). Row `s` of the returned
     /// `[n_streams, vocab]` logits is stream `s`'s next-token distribution,
     /// and each cache advances by one. The dense trunk (QKV/O-proj, FFN or
     /// MoE mixture, lm_head) runs as ONE m=n pass — weights are read once
@@ -563,14 +570,14 @@ pub const Model = struct {
             // A cache built for another model's layer stack would index its
             // per-layer slices out of bounds inside the layer loop.
             if (kv.head_dim.len != self.layers.len) return Error.MismatchedKvCaches;
-            if (kv.len + 1 > kv.capacity) return kv_cache.Error.KvCacheOverflow;
+            if (kv.len() + 1 > kv.capacity) return kv_cache.Error.KvCacheOverflow;
             for (caches[0..i]) |prev| if (prev == kv) return Error.MismatchedKvCaches;
         }
 
         const a = ctx.allocator;
         const positions = try a.alloc(i32, n);
         defer a.free(positions);
-        for (positions, caches) |*position, kv| position.* = @intCast(kv.len);
+        for (positions, caches) |*position, kv| position.* = @intCast(kv.len());
 
         var rope_table = try ctx.prepareRopeTable(positions, self.config.head_dim, self.config.rope_theta, false);
         defer rope_table.deinit();
@@ -580,7 +587,7 @@ pub const Model = struct {
         // they advance once, below, after the layer loop).
         var spans = try BatchKvSpans.init(a, dtype, n);
         defer spans.deinit(a);
-        for (spans.lens, caches) |*len, kv| len.* = kv.len + 1;
+        for (spans.lens, caches) |*len, kv| len.* = kv.len() + 1;
 
         var x = try self.token_embedding.getRowsAs(ctx, token_ids, .embed);
         // Released manually once final_norm is built; the flag keeps the
@@ -635,7 +642,7 @@ pub const Model = struct {
         for (caches, span_lens, 0..) |kv, span, i| {
             if (kv.dtype != dtype) return Error.MismatchedKvCaches;
             if (kv.head_dim.len != self.layers.len) return Error.MismatchedKvCaches;
-            if (kv.len + span > kv.capacity) return kv_cache.Error.KvCacheOverflow;
+            if (kv.len() + span > kv.capacity) return kv_cache.Error.KvCacheOverflow;
             for (caches[0..i]) |prev| if (prev == kv) return Error.MismatchedKvCaches;
         }
 
@@ -646,7 +653,7 @@ pub const Model = struct {
             var at: usize = 0;
             for (caches, span_lens) |kv, span| {
                 for (0..span) |j| {
-                    positions[at] = @intCast(kv.len + j);
+                    positions[at] = @intCast(kv.len() + j);
                     at += 1;
                 }
             }
@@ -711,7 +718,7 @@ pub const Model = struct {
     }
 
     /// host_reference forward: process `tokens` at positions
-    /// [cache.len, cache.len + S) and return per-position next-token logits
+    /// [cache.len(), cache.len() + S) and return per-position next-token logits
     /// `[S, vocab]`. Positions are computed causally in sequence, so
     /// per-row numerics match S = 1 steps exactly (the host-band verify
     /// contract the glm4moe family's `step` builds on).
@@ -806,7 +813,7 @@ pub fn finishHostLoad(config: Descriptor, file: *gguf.File, expert_store: ?*fuci
 /// matching head projection.
 pub fn hostForwardRows(ctx: *ExecContext, cfg: Descriptor, band: *const HostBand, cache: *HostCache, token_embedding: *const LinearWeight, tokens: []const usize, x: []f32) !void {
     if (tokens.len == 0) return Error.InvalidSequenceLength;
-    if (cache.len + tokens.len > cache.capacity or cache.len + tokens.len > band.rope.capacity) return Error.KvCacheOverflow;
+    if (cache.len() + tokens.len > cache.capacity or cache.len() + tokens.len > band.rope.capacity) return Error.KvCacheOverflow;
 
     const S = tokens.len;
     {
@@ -815,9 +822,9 @@ pub fn hostForwardRows(ctx: *ExecContext, cfg: Descriptor, band: *const HostBand
         @memcpy(x, try emb.dataConst());
     }
     for (band.layers, 0..) |*layer, layer_i| {
-        try hostLayerForward(ctx, cfg, band, cache, layer, layer_i, x, S, cache.len, null);
+        try hostLayerForward(ctx, cfg, band, cache, layer, layer_i, x, S, cache.len(), null);
     }
-    cache.len += S;
+    cache.count += S;
 }
 
 /// RMS-norm `S` host rows and project them through `head` — the shared
@@ -1167,7 +1174,7 @@ fn attentionBlock(
     const q_attention = if (q_last) |*value| value else &q_rope;
     var attn = if (cache) |kv| blk: {
         try kv.appendLayer(ctx, layer_i, &k_rope, &v3);
-        const cached_len = kv.len + k_rope.dim(.seq);
+        const cached_len = kv.len() + k_rope.dim(.seq);
         if (override) |ov| {
             if (try ov.call(ov.ctx, ctx, config, layer_i, q_attention, kv, cached_len)) |hooked| break :blk hooked;
         }
@@ -1356,7 +1363,7 @@ fn attentionBlockBatchSpans(
         var v_rows = try v3.narrow(ctx, .seq, start, span);
         defer v_rows.deinit();
         try kv.appendLayer(ctx, layer_i, &k_rows, &v_rows);
-        const cached_len = kv.len + span;
+        const cached_len = kv.len() + span;
 
         var q_seg = try q_rope.narrow(ctx, .seq, start, span);
         defer q_seg.deinit();
@@ -1842,7 +1849,7 @@ pub const HostCache = struct {
     allocator: Allocator,
     k: [][]f32,
     v: [][]f32,
-    len: usize = 0,
+    count: usize = 0,
     capacity: usize,
 
     pub fn init(allocator: Allocator, n_layers: usize, kv_heads: usize, head_dim: usize, capacity: usize) !HostCache {
@@ -1875,8 +1882,18 @@ pub const HostCache = struct {
         self.* = undefined;
     }
 
+    /// The number of cached positions (the decoder contract's `len()`).
+    pub fn len(self: *const HostCache) usize {
+        return self.count;
+    }
+
+    /// Drop all cached positions; buffers are retained for reuse.
+    pub fn reset(self: *HostCache) void {
+        self.count = 0;
+    }
+
     pub fn truncate(self: *HostCache, keep: usize) void {
-        if (keep < self.len) self.len = keep;
+        if (keep < self.count) self.count = keep;
     }
 };
 
@@ -2119,7 +2136,7 @@ pub fn hostLayerForward(ctx: *ExecContext, cfg: Descriptor, band: *const HostBan
             }
         }
     }
-    if (mtp_cache) |mc| mc.len = pos0 + S;
+    if (mtp_cache) |mc| mc.count = pos0 + S;
 
     var o_t = try layer.o_proj.linearSeq(ctx, &attn_t, .embed, .attn);
     defer o_t.deinit();

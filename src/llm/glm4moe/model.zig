@@ -16,6 +16,10 @@ const std = @import("std");
 const fucina = @import("fucina");
 const weights = @import("fucina").weights;
 const gguf_meta = @import("fucina").gguf_meta;
+const decoder = @import("../decoder.zig");
+const chat = @import("../chat.zig");
+const model_common = @import("../model_common.zig");
+const tokenizer_mod = @import("../tokenizer.zig");
 const runner = @import("../runner.zig");
 const host_ops = @import("../host_ops.zig");
 
@@ -69,6 +73,13 @@ pub const MtpHead = struct {
 };
 
 pub const Model = struct {
+    /// Decoder-contract decode state (`llm.decoder`): the runner's host
+    /// K/V cache.
+    pub const Cache = runner.HostCache;
+    /// Decoder-contract capabilities: `truncate` is the MTP speculative
+    /// rewind; there is no lockstep batch entry.
+    pub const caps: decoder.Caps = .{ .rewind = true, .batch = false };
+
     allocator: Allocator,
     config: Config,
     /// MTP (`nextn`) layer count from the GGUF metadata; `config.num_layers`
@@ -173,21 +184,24 @@ pub const Model = struct {
         self.* = undefined;
     }
 
-    pub fn initCache(self: *const Model, capacity: usize) !Cache {
-        return Cache.init(self.allocator, self.config.num_layers, self.config.num_key_value_heads, self.config.head_dim, capacity);
+    /// Decoder-contract cache construction; `ctx` is unused (host-side
+    /// allocation) and taken for the uniform spelling.
+    pub fn initCache(self: *const Model, ctx: *ExecContext, capacity: usize) !runner.HostCache {
+        _ = ctx;
+        return runner.HostCache.init(self.allocator, self.config.num_layers, self.config.num_key_value_heads, self.config.head_dim, capacity);
     }
 
-    pub fn initMtpCache(self: *const Model, capacity: usize) !Cache {
-        return Cache.init(self.allocator, 1, self.config.num_key_value_heads, self.config.head_dim, capacity);
+    pub fn initMtpCache(self: *const Model, capacity: usize) !runner.HostCache {
+        return runner.HostCache.init(self.allocator, 1, self.config.num_key_value_heads, self.config.head_dim, capacity);
     }
 
-    /// Process `tokens` at positions [cache.len, cache.len + S) and return
+    /// Process `tokens` at positions [cache.len(), cache.len() + S) and return
     /// per-position next-token logits `[S, vocab]` (the tensor-band return
     /// shape; caller deinits). Positions are computed causally in sequence,
     /// so per-row numerics match S=1 steps exactly — the MTP verify
     /// contract. Also refreshes `last_hidden` (pre-norm trunk state of the
     /// last row).
-    pub fn step(self: *Model, ctx: *ExecContext, cache: *Cache, tokens: []const usize) !fucina.Tensor(.{ .seq, .vocab }) {
+    pub fn step(self: *Model, ctx: *ExecContext, cache: *runner.HostCache, tokens: []const usize) !fucina.Tensor(.{ .seq, .vocab }) {
         const cfg = self.config;
         const allocator = ctx.allocator;
         const S = tokens.len;
@@ -212,22 +226,42 @@ pub const Model = struct {
         return self.headLogits(ctx, x, S, self.band.output_norm, &self.output);
     }
 
+    /// Decoder-contract verify entry (`llm.decoder`): `step` IS the
+    /// all-logits forward; this spelling adds the contract's `pos0`.
+    pub fn forwardStepAllLogits(self: *Model, ctx: *ExecContext, cache: *runner.HostCache, tokens: []const usize, pos0: usize) !fucina.Tensor(.{ .seq, .vocab }) {
+        std.debug.assert(pos0 == cache.len());
+        return self.step(ctx, cache, tokens);
+    }
+
+    /// Decoder-contract entry: `step`, narrowed to the LAST position's
+    /// logits `[1, vocab]` (a caller-owned copy for multi-token calls;
+    /// the single-token row passes through untouched).
+    pub fn forwardStep(self: *Model, ctx: *ExecContext, cache: *runner.HostCache, tokens: []const usize, pos0: usize) !fucina.Tensor(.{ .seq, .vocab }) {
+        std.debug.assert(pos0 == cache.len());
+        var rows = try self.step(ctx, cache, tokens);
+        if (tokens.len == 1) return rows;
+        defer rows.deinit();
+        const vocab = self.config.vocab_size;
+        const flat = try rows.dataConst();
+        return fucina.Tensor(.{ .seq, .vocab }).fromSlice(ctx, .{ 1, vocab }, flat[(tokens.len - 1) * vocab ..][0..vocab]);
+    }
+
     fn headLogits(self: *Model, ctx: *ExecContext, x: []const f32, S: usize, norm: []const f32, head: *const LinearWeight) !fucina.Tensor(.{ .seq, .vocab }) {
         return runner.hostProjectRows(ctx, self.config.hidden_size, self.config.rms_norm_eps, x, S, norm, head);
     }
 
     /// One MTP draft step: combine the token embedding with the previous
     /// hidden, run the nextn layer over the MTP stream's cache at position
-    /// `mtp_cache.len`, write the new hidden into `h_out`, and return the
+    /// `mtp_cache.len()`, write the new hidden into `h_out`, and return the
     /// draft's logits `[1, vocab]` (caller deinits). `h_prev` is
     /// `last_hidden` for the first draft and `h_out`'s previous value for
     /// the chained drafts. The MTP stream's rope position for entry i is i
     /// (validated empirically against the reference stacks).
-    pub fn mtpDraftStep(self: *Model, ctx: *ExecContext, mtp_cache: *Cache, token: usize, h_prev: []const f32, h_out: []f32) !fucina.Tensor(.{ .seq, .vocab }) {
+    pub fn mtpDraftStep(self: *Model, ctx: *ExecContext, mtp_cache: *runner.HostCache, token: usize, h_prev: []const f32, h_out: []f32) !fucina.Tensor(.{ .seq, .vocab }) {
         const cfg = self.config;
         const allocator = ctx.allocator;
         const mtp = if (self.mtp) |*m| m else return Error.InvalidConfig;
-        if (mtp_cache.len >= mtp_cache.capacity or mtp_cache.len >= self.band.rope.capacity) return Error.KvCacheOverflow;
+        if (mtp_cache.len() >= mtp_cache.capacity or mtp_cache.len() >= self.band.rope.capacity) return Error.KvCacheOverflow;
 
         const x = try allocator.alloc(f32, cfg.hidden_size);
         defer allocator.free(x);
@@ -250,12 +284,34 @@ pub const Model = struct {
         if (mtp_debug) {
             std.debug.print("mtp dbg: |h_prev|max {d:.3} |x=eh_proj|max {d:.3}", .{ maxAbs(h_prev), maxAbs(x) });
         }
-        try runner.hostLayerForward(ctx, cfg, &self.band, null, &mtp.layer, 0, x, 1, mtp_cache.len, mtp_cache);
+        try runner.hostLayerForward(ctx, cfg, &self.band, null, &mtp.layer, 0, x, 1, mtp_cache.len(), mtp_cache);
         @memcpy(h_out, x);
         if (mtp_debug) std.debug.print(" |h1|max {d:.3}\n", .{maxAbs(x)});
 
         return self.headLogits(ctx, x, 1, mtp.shared_head_norm, &mtp.shared_head);
     }
+};
+
+/// File-scope name for the model so `Family.Model` can alias it.
+const ModelT = Model;
+
+/// Registry surface (`llm.registry`): family metadata for the comptime
+/// lookup. `serving.open` does not serve this family (no serving adapter).
+pub const Family = struct {
+    pub const Model = ModelT;
+    /// The tokenizer MODULE (byte-level BPE) and its `Tokenizer` type.
+    pub const Tok = tokenizer_mod;
+    pub const Tokenizer = tokenizer_mod.Tokenizer;
+
+    pub fn load(ctx: *ExecContext, file: *gguf.File, options: model_common.FamilyLoadOptions) !ModelT {
+        return ModelT.loadGgufFromFileOptions(ctx, file, options.max_positions, .{ .moe_stream = options.moe_stream });
+    }
+
+    pub fn tokenizer(allocator: Allocator, file: *const gguf.File) !Tokenizer {
+        return Tokenizer.initFromGguf(allocator, file, .{});
+    }
+
+    pub const template_fallback: ?chat.Format = null;
 };
 
 test {

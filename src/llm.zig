@@ -9,7 +9,6 @@ pub const qwen3 = struct {
     pub const model = @import("llm/qwen3/model.zig");
     pub const train = @import("llm/qwen3/train.zig");
     pub const ptqtp = @import("llm/qwen3/ptqtp.zig");
-    pub const generate = @import("llm/qwen3/generate.zig");
     /// SHINE adapter-fleet serving (`serving.open`'s counterpart for the
     /// research adapters in `research.shine`).
     pub const shine_serving = @import("llm/qwen3/shine_serving.zig");
@@ -19,6 +18,8 @@ pub const qwen3 = struct {
 pub const qwen35 = struct {
     pub const model = @import("llm/qwen35/model.zig");
     pub const chat = @import("llm/qwen35/chat.zig");
+    /// The family's serving adapter (`serving.open` dispatches here).
+    pub const serving = @import("llm/qwen35/serving.zig");
 };
 /// Gemma 4 (text) + MoE + LoRA fine-tuning. Files in `llm/gemma/`.
 pub const gemma = struct {
@@ -66,6 +67,8 @@ pub const parakeet = struct {
 /// Lossless draft-model-free speculative decoding. Files in `llm/speculative/`.
 pub const speculative = struct {
     pub const core = @import("llm/speculative/core.zig");
+    /// Native-MTP drafting behind the `DraftSource` vtable (glm4moe).
+    pub const mtp = @import("llm/speculative/mtp.zig");
     pub const sam_index = @import("llm/speculative/sam_index.zig");
     pub const recycling = @import("llm/speculative/recycling.zig");
     pub const cascade = @import("llm/speculative/cascade.zig");
@@ -83,6 +86,8 @@ pub const glm4moe = struct {
 /// MTP). Files in `llm/deepseek4/`.
 pub const deepseek4 = struct {
     pub const model = @import("llm/deepseek4/model.zig");
+    /// The family's serving adapter (`serving.open` dispatches here).
+    pub const serving = @import("llm/deepseek4/serving.zig");
 };
 /// Qwen3-TTS 12.5 Hz two-stack TTS (talker + MTP code predictor + codec).
 /// Files in `llm/qwen3tts/`.
@@ -104,6 +109,8 @@ pub const inkling = struct {
     pub const model = @import("llm/inkling/model.zig");
     pub const mmproj = @import("llm/inkling/mmproj.zig");
     pub const chat = @import("llm/inkling/chat.zig");
+    /// The family's serving adapter (`serving.open` dispatches here).
+    pub const serving = @import("llm/inkling/serving.zig");
 };
 
 // === Generic / shared helpers (stay flat) ===
@@ -125,9 +132,17 @@ pub const moe_stream_cli = @import("llm/moe_stream_cli.zig");
 pub const trainer_state = @import("llm/trainer_state.zig");
 /// Cache-aware expert routing policy shared by the streamed-MoE decoders.
 pub const moe_router = @import("llm/moe_router.zig");
+/// The autoregressive text-decoder contract (`Caps`, `assertDecoder`): the
+/// comptime surface the generic layers (chat, speculative, serving,
+/// generate) are written against.
+pub const decoder = @import("llm/decoder.zig");
+/// The architecture registry: GGUF `general.architecture` to family
+/// module (`Family` decls in each family's `model.zig`); `serving.open`
+/// dispatches over it.
+pub const registry = @import("llm/registry.zig");
 pub const kv_cache = @import("llm/kv_cache.zig");
-/// Greedy generation driver over any tensor-band model (duck-typed on
-/// `forwardStep` + `KvCache`); family modules re-export or wrap it.
+/// The reference generation loop over the decoder contract; the family
+/// chat engines and `gemma.Model.generate` call it.
 pub const generate = @import("llm/generate.zig");
 pub const kv_persist = @import("llm/kv_persist.zig");
 pub const tokenizer = @import("llm/tokenizer.zig");
@@ -156,17 +171,22 @@ pub const data = @import("llm/data.zig");
 pub const unicode_categories = @import("llm/unicode_categories.zig");
 
 test {
+    _ = decoder;
+    _ = generate;
+    _ = registry;
     _ = runner;
     _ = research.kimi3.model;
     _ = qwen3.model;
     _ = qwen3.train;
     _ = qwen3.ptqtp;
-    _ = qwen3.generate;
     _ = qwen3.shine_serving;
     _ = research.shine;
     _ = research.shine_train;
     _ = qwen35.model;
     _ = qwen35.chat;
+    _ = qwen35.serving;
+    _ = inkling.serving;
+    _ = deepseek4.serving;
     _ = gemma.model;
     _ = gemma.train;
     _ = gemma.moe;

@@ -17,8 +17,8 @@
 //!       canvasForward — bidirectional denoiser pass over the canvas_length
 //!                      canvas at absolute positions [P, P+C): canvas K/V are
 //!                      written into the cache's scratch region [P, P+C)
-//!                      WITHOUT advancing kv.len (appendLayer writes at
-//!                      kv.len; the next step overwrites), every canvas query
+//!                      WITHOUT advancing kv.len() (appendLayer writes at
+//!                      kv.len(); the next step overwrites), every canvas query
 //!                      attends keys [lo, P+C) with lo = (P+1)-|window on SWA
 //!                      layers (llama.cpp: "last (n_swa-1) prompt positions +
 //!                      all canvas") else 0 — one contiguous range, so the
@@ -252,8 +252,8 @@ pub const Model = struct {
     }
 
     /// KV capacity must cover prefix + one canvas: the canvas pass writes its
-    /// K/V into [kv.len, kv.len + canvas_length) without advancing.
-    pub fn initKvCache(self: *const Model, ctx: *ExecContext, capacity: usize) !KvCache {
+    /// K/V into [kv.len(), kv.len() + canvas_length) without advancing.
+    pub fn initCache(self: *const Model, ctx: *ExecContext, capacity: usize) !KvCache {
         return KvCache.initPerLayer(ctx, self.geom.kv_heads, self.geom.head_dim, capacity);
     }
 
@@ -296,8 +296,8 @@ pub const Model = struct {
     ) !void {
         if (token_ids.len == 0) return Error.InvalidSequenceLength;
         try kv.requireF16();
-        if (kv.len != pos0) return Error.InvalidSequenceLength;
-        if (kv.len + token_ids.len > kv.capacity) return kv_cache.Error.KvCacheOverflow;
+        if (kv.len() != pos0) return Error.InvalidSequenceLength;
+        if (kv.len() + token_ids.len > kv.capacity) return kv_cache.Error.KvCacheOverflow;
 
         const cfg = self.config.base;
 
@@ -322,9 +322,9 @@ pub const Model = struct {
     }
 
     /// One bidirectional denoiser pass over the canvas at absolute positions
-    /// [kv.len, kv.len + C). Returns `[C, vocab]` logits (softcapped). The KV
+    /// [kv.len(), kv.len() + C). Returns `[C, vocab]` logits (softcapped). The KV
     /// cache is read-only from the caller's perspective: canvas K/V occupy
-    /// the scratch region past kv.len and kv.len is unchanged on return.
+    /// the scratch region past kv.len() and kv.len() is unchanged on return.
     /// `sc` carries the previous step's self-conditioning signal (null on the
     /// first step — the zero-SC embedding path still rms-normalizes).
     pub fn canvasForward(
@@ -338,10 +338,10 @@ pub const Model = struct {
         const c_len = canvas_ids.len;
         if (c_len == 0) return Error.InvalidSequenceLength;
         try kv.requireF16();
-        if (kv.len + c_len > kv.capacity) return kv_cache.Error.KvCacheOverflow;
+        if (kv.len() + c_len > kv.capacity) return kv_cache.Error.KvCacheOverflow;
         if (sc != null and self.sc == null) return Error.SelfConditioningUnavailable;
 
-        const prefix_len = kv.len;
+        const prefix_len = kv.len();
 
         const rope_positions: fucina.AxisRange = .{ .origin = @intCast(prefix_len), .len = c_len };
 
@@ -449,7 +449,7 @@ pub const Model = struct {
     }
 
     /// gemma4.attnBlock with the canvas-pass deltas: K/V appended into the
-    /// scratch region (kv.len unchanged), keys narrowed to [lo, P+C) with the
+    /// scratch region (kv.len() unchanged), keys narrowed to [lo, P+C) with the
     /// SWA prompt-reach lower bound, bidirectional attention, no
     /// last-query-only fast path (every row's logits are needed).
     fn canvasAttnBlock(
@@ -504,13 +504,13 @@ pub const Model = struct {
             var v_norm = try v3.rmsNorm(ctx, .d, cfg.rms_norm_eps);
             defer v_norm.deinit();
 
-            // Writes rows [kv.len, kv.len + m); kv.len is NOT advanced — the
+            // Writes rows [kv.len(), kv.len() + m); kv.len() is NOT advanced — the
             // canvas scratch region is overwritten by the next denoise step.
             try kv.appendLayer(ctx, il, &k_rope, &v_norm);
         }
 
         const ref = geom.kv_ref[il];
-        const prefix_len = kv.len;
+        const prefix_len = kv.len();
         const cached_len = prefix_len + m;
         // SWA canvas reach: the last (window-1) prompt positions + the whole
         // canvas (llama.cpp: allow = k_is_canvas or k >= P - n_swa + 1).
@@ -853,7 +853,7 @@ pub const DenoiseResult = struct {
 /// Denoise one canvas in place: `canvas` (length C) holds the working token
 /// ids and finishes as the OUTPUT canvas = the last step's per-position
 /// argmax (the reference's output rule). The KV cache must hold exactly the
-/// encoded prefix; it is left unchanged (kv.len identical on return).
+/// encoded prefix; it is left unchanged (kv.len() identical on return).
 pub fn denoiseCanvas(
     model: *const Model,
     ctx: *ExecContext,
@@ -866,7 +866,7 @@ pub fn denoiseCanvas(
     const vocab = model.config.base.vocab_size;
     const eb = options.eb;
     if (c_len == 0) return Error.InvalidSequenceLength;
-    if (kv.len + c_len > kv.capacity) return Error.KvCapacityTooSmall;
+    if (kv.len() + c_len > kv.capacity) return Error.KvCapacityTooSmall;
 
     var counter: u64 = 0;
     const seed = options.seed;
@@ -1008,7 +1008,7 @@ pub fn generate(
     var blocks: usize = 0;
     var block_seed = options.denoise.seed;
     while (produced < limit) {
-        if (kv.len + c_len > kv.capacity) return Error.KvCapacityTooSmall;
+        if (kv.len() + c_len > kv.capacity) return Error.KvCapacityTooSmall;
         var denoise_options = options.denoise;
         denoise_options.seed = block_seed;
         block_seed +%= 1; // llama.cpp visual server: per-block seed = seed + block index
@@ -1045,7 +1045,7 @@ pub fn generate(
 
         // Commit the full canvas to the prefix (the reference appends the
         // whole denoised block when continuing).
-        try model.encodeStep(ctx, kv, canvas, kv.len);
+        try model.encodeStep(ctx, kv, canvas, kv.len());
     }
     return .{ .produced = produced, .steps = steps_total, .blocks = blocks };
 }

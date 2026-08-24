@@ -7,7 +7,8 @@ streaming in all three dialects. Point any OpenAI client — or any Anthropic
 client, Claude Code included — at `http://host:port`.
 
 The GGUF's `general.architecture` picks the backend: `qwen3`, `qwen3moe`,
-`qwen35` (Qwen3.5 / Ternary-Bonsai), `gemma4`, `diffusion-gemma`, `inkling`;
+`qwen35`/`qwen35moe` (Qwen3.5 / Qwen3.6 / Ternary-Bonsai), `gemma4`,
+`diffusion-gemma`, `inkling`, `deepseek4` (DeepSeek V4 Flash);
 `--nanochat <dir>` serves a nanochat checkpoint (`model.safetensors` +
 `tokenizer.bin`). This README is the getting-started face;
 **[`docs/LMSERVER.md`](../../docs/LMSERVER.md) is the full design doc** —

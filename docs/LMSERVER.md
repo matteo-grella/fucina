@@ -328,13 +328,20 @@ argmax inside an unbounded grammar field can loop (docs, §7 caveat).
 
 ## Per-model backends
 
+The GGUF-served set comes from the architecture registry
+(`llm.registry`): `serving.openFromFile` dispatches on
+`general.architecture` and builds the family backend inside the library.
+The CLI keeps only the two non-registry backends (diffusion-gemma,
+nanochat).
+
 | Backend | Path | Grammar | Reasoning | Stop strings | Streams |
 |---|---|---|---|---|---|
 | qwen3 / qwen3moe | generic `Conversation` adapter (`serving.gguf_chat`, via `serving.open`) | ✓ | ✓ (`<think>` routing) | ✓ | per token |
 | gemma4 | same adapter (SPM tokenizer, `<turn|>` + extra stop ids, GGUF `general.sampling.*` defaults) | ✓ | — | ✓ | per token |
 | diffusion-gemma | `backend_diffusion.zig` over `dg.generate` | — | — | — (EOG-trimmed blocks) | per committed block |
-| inkling | `backend_inkling.zig` over `llm.inkling.chat.Engine` (wire-format renderer, sampler) | ✓ | ✓ (`<\|content_thinking\|>` → `<\|content_text\|>` routing) | — | per token (no cross-request KV reuse) |
-| qwen35 (Qwen3.5 / Ternary-Bonsai) | `backend_qwen35.zig` over `llm.qwen35.chat.Engine` (ChatML + Qwen3.6 think prefill, sampler) | ✓ | ✓ (`<think>` routing; the prompt-prefilled opener is injected into the stream) | — | per token (no cross-request KV reuse) |
+| inkling | `llm.inkling.serving` over `llm.inkling.chat.Engine` (wire-format renderer, sampler; via `serving.open`) | ✓ | ✓ (`<\|content_thinking\|>` → `<\|content_text\|>` routing) | — | per token (no cross-request KV reuse) |
+| qwen35 / qwen35moe (Qwen3.5 / Qwen3.6 / Ternary-Bonsai) | `llm.qwen35.serving` over `llm.qwen35.chat.Engine` (ChatML + Qwen3.6 think prefill, sampler; via `serving.open`) | ✓ | ✓ (`<think>` routing; the prompt-prefilled opener is injected into the stream) | — | per token (no cross-request KV reuse) |
+| deepseek4 (DeepSeek V4 Flash) | `llm.deepseek4.serving` (token-level chat renderer, chunked session prefill + step decode; via `serving.open`) | ✓ | — | ✓ | per token (no cross-request KV reuse) |
 | nanochat | `backend_nanochat.zig` over its own Engine (`--nanochat` dir) | — | — | — | per token (no system role: 400) |
 
 Absent sampling fields default to the model's recommended settings (qwen3

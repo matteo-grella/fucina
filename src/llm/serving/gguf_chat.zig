@@ -9,10 +9,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 const fucina = @import("fucina");
 const types = @import("contract.zig");
+const decoder = @import("../decoder.zig");
 const chat = @import("../chat.zig");
 const sampler = @import("../sampler.zig");
 const llguidance = @import("../llguidance.zig");
-const kv_cache = @import("../kv_cache.zig");
 const kv_persist = @import("../kv_persist.zig");
 const cartridge_mod = @import("../cartridge.zig");
 const cartridge_fleet = @import("../cartridge_fleet.zig");
@@ -264,10 +264,11 @@ fn shouldSwitchSelection(cur_best: f32, outside_best: ?f32, margin: f32) bool {
 /// about to be destroyed by an unrelated request spill to `llm.kv_persist`
 /// sidecars and are restored when a later request matches them best.
 pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
+    decoder.assertDecoder(ModelT);
     return struct {
         const Self = @This();
         const Conversation = chat.Conversation(ModelT, TokMod);
-        const KvCache = kv_cache.KvCache;
+        const KvCache = ModelT.Cache;
 
         /// One resident reuse slot: a KV cache plus the token shadow
         /// describing exactly the positions it holds (WORKER THREAD ONLY,
@@ -547,7 +548,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
             }
             if (donor_lcp < min_share_lcp) return 0;
             const donor = &self.slots.items[donor_i.?];
-            const shared = @min(donor_lcp, donor.cache.len - donor.prefix_rows);
+            const shared = @min(donor_lcp, donor.cache.len() - donor.prefix_rows);
             if (shared < min_share_lcp) return 0;
             cache.copyRows(&donor.cache, prefix_rows, prefix_rows + shared) catch return 0;
             return shared;
@@ -659,7 +660,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                     // kv_persist.load requires an empty cache.
                     cache.truncate(0);
                 } else {
-                    cache = try self.model.initKvCache(self.ctx, self.opts.context_len);
+                    cache = try self.model.initCache(self.ctx, self.opts.context_len);
                 }
                 self.disk.items[di].last_used = self.clock;
                 const path = self.disk.items[di].path;
@@ -709,7 +710,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                         return self.warmFromShare(cache, ids, shared, h.prefix_rows, convo_opts);
                     }
                     // Same prefix: reconcile-overwrite on the victim's rows.
-                    cache.len = h.cache.len;
+                    cache.count = h.cache.count;
                     return Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
                         .cache = cache,
                         .tokens = h.tokens.items,
@@ -744,7 +745,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
             // when one holds this request's opening. The errdefer ends
             // BEFORE the ownership-transfer calls (initWarm/warmFromShare
             // own the cache on their own failure paths).
-            var cache = try self.model.initKvCache(self.ctx, self.opts.context_len);
+            var cache = try self.model.initCache(self.ctx, self.opts.context_len);
             var prefix_rows: usize = 0;
             var shared: usize = 0;
             {
@@ -770,7 +771,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
         /// the conversation's cache and its committed-token shadow back
         /// into the pool. History can sit one un-forwarded token past the
         /// cache after an aborted turn, so the shadow is trimmed to
-        /// `cache.len` — a slot always describes exactly the positions its
+        /// `cache.len()` — a slot always describes exactly the positions its
         /// cache holds. `acquireConversation` removed at most one slot, so
         /// the append keeps the pool within `kv_slots`.
         fn reclaimSlot(self: *Self, convo: *Conversation, selection: []const usize, opener: []const u8) void {
@@ -799,7 +800,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 // The shadow describes only token-backed rows: cache rows
                 // [0, kv_prefix_rows) are the preloaded prefix (shared
                 // cartridge, or this request's fleet selection).
-                tokens.appendSlice(a, convo.history.items[0 .. convo.cache.len - convo.kv_prefix_rows]) catch break :blk false;
+                tokens.appendSlice(a, convo.history.items[0 .. convo.cache.len() - convo.kv_prefix_rows]) catch break :blk false;
                 sel = a.dupe(usize, selection) catch break :blk false;
                 op = a.dupe(u8, opener) catch break :blk false;
                 self.slots.ensureUnusedCapacity(a, 1) catch break :blk false;
@@ -914,7 +915,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
         const vtable: types.Backend.VTable = .{
             .validate = vtValidate,
             .generate = vtGenerate,
-            .generate_batch = if (@hasDecl(ModelT, "forwardStepBatch")) vtGenerateBatch else null,
+            .generate_batch = if (ModelT.caps.batch) vtGenerateBatch else null,
         };
 
         pub fn backend(self: *Self) types.Backend {
@@ -1090,7 +1091,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
             defer self.reclaimSlot(&convo, selection, opener);
 
             const produced = try convo.sendTokensReuse(ids, sink);
-            const finish: types.FinishReason = if (produced >= req.max_tokens or convo.cache.len >= convo.cache.capacity)
+            const finish: types.FinishReason = if (produced >= req.max_tokens or convo.cache.len() >= convo.cache.capacity)
                 .length
             else
                 .stop;
@@ -1242,7 +1243,7 @@ pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
                 }
                 const convo = &convos[i].?;
                 const req = reqs[i];
-                const finish: types.FinishReason = if (produced[j] >= req.max_tokens or convo.cache.len >= convo.cache.capacity)
+                const finish: types.FinishReason = if (produced[j] >= req.max_tokens or convo.cache.len() >= convo.cache.capacity)
                     .length
                 else
                     .stop;
@@ -1306,7 +1307,7 @@ pub fn kvRamGuardSlots(
     force: bool,
     out: anytype,
 ) !usize {
-    var probe = try model.initKvCache(ctx, context_len);
+    var probe = try model.initCache(ctx, context_len);
     const per_slot = probe.byteSize();
     probe.deinit();
 

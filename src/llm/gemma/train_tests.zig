@@ -669,7 +669,7 @@ test "gemma4 forwardStepBatchSpans matches per-stream forwardStepAllLogits" {
         defer kv.deinit();
         var prefill = try model.forwardStep(&ctx, &kv, prompts[si], 0);
         prefill.deinit();
-        var logits = try model.forwardStepAllLogits(&ctx, &kv, spans_tokens[si], kv.len);
+        var logits = try model.forwardStepAllLogits(&ctx, &kv, spans_tokens[si], kv.len());
         defer logits.deinit();
         want[si] = try allocator.dupe(f32, try logits.dataConst());
         try std.testing.expectEqual(@as(usize, spans_tokens[si].len * vocab), want[si].len);
@@ -689,8 +689,8 @@ test "gemma4 forwardStepBatchSpans matches per-stream forwardStepAllLogits" {
     defer got.deinit();
     const got_rows = try got.dataConst();
     try std.testing.expectEqual(@as(usize, 5 * vocab), got_rows.len);
-    try std.testing.expectEqual(kv0.len, prompts[0].len + 2);
-    try std.testing.expectEqual(kv1.len, prompts[1].len + 3);
+    try std.testing.expectEqual(kv0.len(), prompts[0].len + 2);
+    try std.testing.expectEqual(kv1.len(), prompts[1].len + 3);
 
     var at: usize = 0;
     inline for (0..2) |si| {
@@ -806,8 +806,8 @@ test "gemma4 two-part composition matches the real prefill (SWA cuts the compose
     var cache = try kv_cache_mod.KvCache.initPerLayer(&ctx, geom.kv_heads, geom.head_dim, 32);
     defer cache.deinit();
     try cartridge.writeComposedToCache(&ctx, &.{ &cart_a, &cart_b }, &cache);
-    try std.testing.expectEqual(@as(usize, prefix_len), cache.len);
-    var served = try model.forwardStepAllLogits(&ctx, &cache, suffix, cache.len);
+    try std.testing.expectEqual(@as(usize, prefix_len), cache.len());
+    var served = try model.forwardStepAllLogits(&ctx, &cache, suffix, cache.len());
     defer served.deinit();
     for (try served.dataConst(), student_data) |g, w| {
         try std.testing.expect(@abs(g - w) <= 5e-2 + 5e-3 * @abs(w));

@@ -224,11 +224,11 @@ test "served cartridge in a KvCache matches the trainer's cartridge eval" {
     );
     defer cache.deinit();
     try cart.writeToCache(&ctx, &cache);
-    try std.testing.expectEqual(@as(usize, prefix_len), cache.len);
+    try std.testing.expectEqual(@as(usize, prefix_len), cache.len());
 
-    var served = try model.forwardStepAllLogits(&ctx, &cache, suffix, cache.len);
+    var served = try model.forwardStepAllLogits(&ctx, &cache, suffix, cache.len());
     defer served.deinit();
-    try std.testing.expectEqual(@as(usize, prefix_len + suffix.len), cache.len);
+    try std.testing.expectEqual(@as(usize, prefix_len + suffix.len), cache.len());
 
     // The inference path stores the prefix in the cache dtype (f16) and runs
     // the f16-KV attention kernels, so parity is approximate — but tight.
@@ -722,8 +722,8 @@ test "forwardStepBatchSpans matches per-stream forwards (ragged batch)" {
     @memcpy(span_tokens[3..5], span_b);
     var batch = try model.forwardStepBatchSpans(&ctx, &.{ &cache_a, &cache_b }, &span_tokens, &.{ 3, 2 });
     defer batch.deinit();
-    try std.testing.expectEqual(prompt_a.len + span_a.len, cache_a.len);
-    try std.testing.expectEqual(prompt_b.len + span_b.len, cache_b.len);
+    try std.testing.expectEqual(prompt_a.len + span_a.len, cache_a.len());
+    try std.testing.expectEqual(prompt_b.len + span_b.len, cache_b.len());
 
     // Reference: each stream alone through the standard span forward.
     var ref_cache_a = try kv_cache.KvCache.init(&ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, 32);
@@ -736,9 +736,9 @@ test "forwardStepBatchSpans matches per-stream forwards (ragged batch)" {
         var lb = try model.forwardStep(&ctx, &ref_cache_b, prompt_b, 0);
         lb.deinit();
     }
-    var ref_a = try model.forwardStepAllLogits(&ctx, &ref_cache_a, span_a, ref_cache_a.len);
+    var ref_a = try model.forwardStepAllLogits(&ctx, &ref_cache_a, span_a, ref_cache_a.len());
     defer ref_a.deinit();
-    var ref_b = try model.forwardStepAllLogits(&ctx, &ref_cache_b, span_b, ref_cache_b.len);
+    var ref_b = try model.forwardStepAllLogits(&ctx, &ref_cache_b, span_b, ref_cache_b.len());
     defer ref_b.deinit();
 
     const vocab = cfg.vocab_size;

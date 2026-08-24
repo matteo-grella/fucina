@@ -269,7 +269,7 @@ fn runEval(
     const canvas = try parseTokenList(canvas_arg, &canvas_buf);
     if (canvas.len != model.config.canvas_length) return error.CanvasLengthMismatch;
 
-    var kv = try model.initKvCache(ctx, prompt.len + canvas.len);
+    var kv = try model.initCache(ctx, prompt.len + canvas.len);
     defer kv.deinit();
 
     const encode_start = nowNs(io);
@@ -572,7 +572,7 @@ fn runTurn(
 ) !void {
     const c_len = model.config.canvas_length;
     const blocks = (max_new + c_len - 1) / c_len;
-    var kv = try model.initKvCache(ctx, prompt.len + (blocks + 1) * c_len);
+    var kv = try model.initCache(ctx, prompt.len + (blocks + 1) * c_len);
     defer kv.deinit();
 
     const out = try allocator.alloc(usize, max_new);

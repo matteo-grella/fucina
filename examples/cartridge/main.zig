@@ -928,9 +928,7 @@ fn synthesizeGroup(
         blk: {
             for (0..n) |i| caches[i].reset();
             break :blk try generateIdsSpecBatch(ctx, arena, model, caches[0..n], b_prompts, opts.max_a, stop_id, null);
-        }
-    else
-        try generateIdsBatch(ctx, arena, model, caches[0..n], b_prompts, opts.max_a, stop_id, b_cfgs);
+        } else try generateIdsBatch(ctx, arena, model, caches[0..n], b_prompts, opts.max_a, stop_id, b_cfgs);
 
     // Assemble the per-conversation elements (owned by `allocator`).
     var built: usize = 0;
@@ -1159,7 +1157,7 @@ fn generateIdsSpecBatch(
             owned_built += 1;
             indexes[i] = &owned[i];
         }
-        if (caches[i].len + prompts[i].len + max_new + max_draft + 1 > caches[i].capacity) return error.PromptTooLong;
+        if (caches[i].len() + prompts[i].len + max_new + max_draft + 1 > caches[i].capacity) return error.PromptTooLong;
         lens[i] = 0;
         drafted_counts[i] = 0;
         accepted_counts[i] = 0;
@@ -1167,7 +1165,7 @@ fn generateIdsSpecBatch(
         indexes[i].observe(prompts[i]);
         try histories[i].appendSlice(allocator, prompts[i]);
 
-        var logits = try model.forwardStep(ctx, &caches[i], prompts[i], caches[i].len);
+        var logits = try model.forwardStep(ctx, &caches[i], prompts[i], caches[i].len());
         defer logits.deinit();
         var first_am = try logits.argmax(ctx, .vocab);
         defer first_am.deinit();
@@ -1230,7 +1228,7 @@ fn generateIdsSpecBatch(
             const i = active[j];
             const span = span_lens[j];
             const drafts = span_tokens[row_at + 1 .. row_at + span];
-            const len_before = caches[i].len - span; // the forward advanced by span
+            const len_before = caches[i].len() - span; // the forward advanced by span
             const committed_start = histories[i].items.len;
 
             var accepted: usize = 0;
@@ -1273,7 +1271,6 @@ fn generateIdsSpecBatch(
     for (outs, lens) |*buf, len| buf.* = try allocator.realloc(buf.*, len);
     return outs;
 }
-
 
 /// Batched lockstep generation: per-stream prefill, then ONE
 /// `forwardStepBatch` weight pass per token across every still-active
@@ -1375,14 +1372,14 @@ fn generateIds(
     stop_id: ?usize,
     sampler_cfg: llm.sampler.Config,
 ) ![]usize {
-    if (cache.len + prompt_ids.len + max_new > cache.capacity) return error.PromptTooLong;
+    if (cache.len() + prompt_ids.len + max_new > cache.capacity) return error.PromptTooLong;
     var sampler = llm.sampler.Sampler.init(sampler_cfg);
 
     const out = try allocator.alloc(usize, max_new);
     errdefer allocator.free(out);
     var produced: usize = 0;
 
-    var logits = try model.forwardStep(ctx, cache, prompt_ids, cache.len);
+    var logits = try model.forwardStep(ctx, cache, prompt_ids, cache.len());
     while (produced < max_new) {
         const next = try sampler.next(ctx, &logits, out[0..produced]);
         logits.deinit();
@@ -1390,7 +1387,7 @@ fn generateIds(
         out[produced] = next;
         produced += 1;
         if (produced == max_new) return allocator.realloc(out, produced);
-        logits = try model.forwardStep(ctx, cache, out[produced - 1 ..][0..1], cache.len);
+        logits = try model.forwardStep(ctx, cache, out[produced - 1 ..][0..1], cache.len());
     }
     if (produced < max_new) logits.deinit();
     return allocator.realloc(out, produced);
