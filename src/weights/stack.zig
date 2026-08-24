@@ -11,7 +11,7 @@ const backend_mod = @import("../backend.zig");
 const common = @import("common.zig");
 const gpu = @import("gpu.zig");
 
-const gpu_impl = backend_mod.gpu_impl;
+const offload = backend_mod.offload;
 const DType = dtype_mod.DType;
 const Error = common.Error;
 const Allocator = std.mem.Allocator;
@@ -47,7 +47,7 @@ pub const QuantByteStack = struct {
 
     pub fn deinit(self: *QuantByteStack, allocator: Allocator) void {
         if (self.device_owned) {
-            if (comptime gpu_impl.enabled) gpu_impl.freeResidentBytes(self.data);
+            if (comptime offload.enabled) offload.freeResidentBytes(self.data);
         } else {
             allocator.free(self.data);
         }
@@ -88,8 +88,8 @@ pub fn makeQuantByteStack(
     _ = try std.math.mul(usize, first.out, parts.len);
     var device_owned = false;
     const data: []u8 = blk: {
-        if (options.prefer_device and comptime gpu_impl.enabled and gpu.dtypeHasDenseQuantGpuKernel(dtype)) {
-            if (gpu_impl.allocResidentBytes(total_len)) |dev| {
+        if (options.prefer_device and comptime offload.enabled and gpu.dtypeHasDenseQuantGpuKernel(dtype)) {
+            if (offload.allocResidentBytes(total_len)) |dev| {
                 device_owned = true;
                 break :blk dev;
             }

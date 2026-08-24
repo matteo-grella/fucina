@@ -39,7 +39,16 @@ the GPU provider (`src/backend/gpu.zig`): a comptime switch over
 the unselected provider is parsed but never semantically analyzed, so it costs
 nothing and needs none of its target's libraries (`cuda.zig` is fully inert on
 macOS builds and vice versa). A `comptime` guard in `gpu.zig` verifies
-`build_options.use_gpu == (gpu_kind != .none)`.
+`build_options.use_gpu == (gpu_kind != .none)`. The provider is named in
+one place outside the backend's own kernels: `src/backend/offload.zig`, the
+accelerator seam. It carries the capability queries
+(`enabled`, `supportsQuant(fmt)`), the resident storage
+(`allocResidentBytes`/`freeResidentBytes`), the trace hooks, and the offload
+entries with their decisions built in (`quantGemmAccepts`/`gemmQuant`,
+`attnPrefillF16`/`attentionFwd`, `qmoeAccepts`/`QMoeSession`, the ES flat
+kernels). Exec, weights, es and the facade call the seam; on `-Dgpu=none`
+every entry folds to its refusal at comptime, so no band above the backend
+carries a GPU branch of its own.
 
 Build options that shape the backend (see [§2](02-toolchain-build-and-project-wiring.md) for the full option list):
 
@@ -645,22 +654,23 @@ by the ObjC shim (`src/backend/metal/shim.m`): the MLX "steel" f32/f16 GEMM
   old direct-slice `gemmF16Nt` remains blocking only for low-level parity
   tests/bench callers.
 - **Dense quantized prefill** (Q4_K/Q6_K/Q8_0/TQ2_0): exec's
-  `denseQuantMatmulGpu` seam (`src/exec/quant_matmul.zig`) offloads
+  `tryMatmulQuantRhs` (`src/exec/quant_matmul.zig`) asks
+  `offload.quantGemmAccepts` and runs `offload.gemmQuant`; the seam offloads
   `m ≥ 32` stable-weight matmuls behind the compact/raw or packed-CPU
   per-format gate when
   `k % KernelFormatTag.kMultiple() == 0` (32 for q8_0, 256 for
-  q4_k/q6_k/tq2_0; the tag comes from the provider's `kernelTag(dtype)`) and
-  `n % 4 == 0`. `gemmQuantNtAsync` binds input/output tensor storage
+  q4_k/q6_k/tq2_0; the seam maps `offload.QuantFormat` to the provider's
+  tag) and `n % 4 == 0`. `gemmQuantNtAsync` binds input/output tensor storage
   directly and copies its ≤4 KiB tile table into command-owned bytes (up to
   8192 rows); shared-input batches encode multiple weight matrices without
   replicating input rows. Transient RHS or longer prompts retain the blocking
   chunk fallback.
 - **PTQTP ternary prefill** (`src/weights.zig`): with resident plane
   bytes and `m ≥ 32`, each TQ2_0 trit-plane runs as one dequant-in-kernel
-  dispatch through the same `denseQuantMatmulGpu` seam and the K plane
+  dispatch through the same `tryMatmulQuantRhs` entry and the K plane
   outputs sum on the CPU (K = 1 returns the async tensor directly). A
   tie-fitted K = 2 pair whose folded pack is resident takes
-  `foldedTernaryMatmulGpu` instead — ONE `fucina_mul_mm_tq2_0_folded_f32`
+  `tryMatmulTernaryFolded` instead — ONE `fucina_mul_mm_tq2_0_folded_f32`
   dispatch, async return, no plane sum — behind the provider capability
   `has_tq2_0_folded_quant`. Both arms share the ternary work gate
   (`FUCINA_GPU_MIN_WORK_DENSE_TQ2`, [§2.6](02-toolchain-build-and-project-wiring.md#26-runtime-environment-variables)); any refusal falls through to
@@ -792,15 +802,15 @@ backend-owned details deliberately kept off the public root, under
 
 ```zig
 pub const gpu = struct {
-    pub const enabled = backend.gpu_impl.enabled;             // comptime: -Dgpu build?
-    pub const has_quant_gemm = backend.gpu_impl.has_quant_gemm; // dequant-in-kernel GEMM?
-    pub const has_q5_k_quant = backend.gpu_impl.has_q5_k_quant; // CUDA Q5_K capability?
-    pub const has_tq2_0_quant = backend.gpu_impl.has_tq2_0_quant; // ternary TQ2_0 kernel (Metal)
-    pub const allocResidentBytes = backend.gpu_impl.allocResidentBytes;
-    pub const freeResidentBytes = backend.gpu_impl.freeResidentBytes;
-    pub const traceEnabled = backend.gpu_impl.traceEnabled;
-    pub const traceReset = backend.gpu_impl.traceReset;
-    pub const traceDump = backend.gpu_impl.traceDump;
+    pub const enabled = backend.offload.enabled;             // comptime: -Dgpu build?
+    pub const has_quant_gemm = backend.offload.has_quant_gemm; // dequant-in-kernel GEMM?
+    pub const has_q5_k_quant = backend.offload.supportsQuant(.q5_k); // CUDA Q5_K capability?
+    pub const has_tq2_0_quant = backend.offload.supportsQuant(.tq2_0); // ternary TQ2_0 kernel (Metal)
+    pub const allocResidentBytes = backend.offload.allocResidentBytes;
+    pub const freeResidentBytes = backend.offload.freeResidentBytes;
+    pub const traceEnabled = backend.offload.traceEnabled;
+    pub const traceReset = backend.offload.traceReset;
+    pub const traceDump = backend.offload.traceDump;
 };
 ```
 

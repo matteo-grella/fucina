@@ -95,6 +95,10 @@ const interface = @import("backend/interface.zig");
 // checked against backend/gpu_provider.zig's interface, so dispatch through
 // `gpu_impl` stays provider-neutral.
 pub const gpu_impl = @import("backend/gpu.zig").impl;
+// The accelerator seam every band above the backend uses instead of the
+// provider: capability queries, resident storage, and the offload entries
+// (quantized GEMM, attention, grouped MoE, the ES flat kernels).
+pub const offload = @import("backend/offload.zig");
 // Pure-Zig portable SIMD kernel library backing the native backend
 // (single implementation, backend-independent). Exported wholesale for the
 // microbenches that compare its row-kernel and blocked paths directly; the

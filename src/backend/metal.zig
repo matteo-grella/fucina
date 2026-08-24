@@ -1698,7 +1698,7 @@ pub fn setQmoeMinFillForTest(v: u64) void {
     state.qmoe_min_fill_pct = v;
 }
 
-/// Quantized decode-GEMV gate — exec's m <= 8 arm in `denseQuantMatmulGpu`
+/// Quantized decode-GEMV gate — the decode arm of `offload.quantGemmAccepts`
 /// (`src/exec/quant_matmul.zig`). The Metal provider keeps decode on CPU by
 /// design — always false; the CUDA provider opts in via FUCINA_GPU_DECODE=1.
 pub fn shouldUseGpuQuantDecode(format: KernelFormatTag, m: usize, n: usize, k: usize) bool {

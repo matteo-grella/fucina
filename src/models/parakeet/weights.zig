@@ -204,7 +204,7 @@ pub const ParakeetWeights = struct {
         if (pv.shape[0] < 32) return null;
         const batched = (try self.getLinearPosBatchQ6(layer_count)) orelse return null;
         if (pv.shape[1] != batched.in) return weights.Error.InvalidWeightShape;
-        var raw_out = (try self.ctx.denseQuantMatmulGpuSharedInputBatch(
+        var raw_out = (try self.ctx.tryMatmulQuantRhsSharedInput(
             .q6_k,
             batched.data,
             .stable_process,

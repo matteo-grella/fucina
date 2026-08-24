@@ -2489,7 +2489,7 @@ pub fn setQmoeMinFillForTest(v: u64) void {
     state.qmoe_min_fill_pct = v;
 }
 
-/// Quantized decode-GEMV gate — exec's m <= 8 arm in `denseQuantMatmulGpu`
+/// Quantized decode-GEMV gate — the decode arm of `offload.quantGemmAccepts`
 /// (`src/exec/quant_matmul.zig`): FUCINA_GPU_DECODE=1 opts in, default off
 /// pending a sampled-token parity-oracle pass; Q5_K additionally clears its
 /// own work floor.

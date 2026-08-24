@@ -183,6 +183,12 @@ Backends:
 - `src/backend/interface.zig`: the kernel set by name (`names`,
   `generic_names`, `pool_free_names`) and `conform`, the comptime check
   that both providers export exactly that set with matching signatures.
+- `src/backend/offload.zig`: the accelerator seam, the one module above
+  the providers that names `gpu_impl`. Capability queries, resident
+  storage, tracing, and the offload entries with their decisions built in
+  (quantized GEMM, attention, grouped MoE, the ES flat kernels); every band
+  above the backend calls it and carries no GPU branch of its own, and on
+  `-Dgpu=none` each entry folds to its refusal at comptime.
 - `src/backend/cpu.zig` (scalar reference) and `src/backend/native.zig`
   (Zig `@Vector` kernels plus optional CBLAS for GEMM), each exporting
   `pub const kernels`; `src/backend/parity_test.zig` keeps them in

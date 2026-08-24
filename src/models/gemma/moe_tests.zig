@@ -38,8 +38,8 @@ fn expectGemmaMoeClose(cd: []const f32, gd: []const f32, rel: f32, floor_frac: f
 }
 
 test "gemma moe raw cpu + gpu arms match the x4 path (-Dgpu=metal)" {
-    if (comptime !backend_mod.gpu_impl.enabled) return error.SkipZigTest;
-    const gpu = backend_mod.gpu_impl;
+    if (comptime !backend_mod.offload.enabled) return error.SkipZigTest;
+    const gpu = backend_mod.offload;
     if (gpu.deviceName() == null) return error.SkipZigTest;
 
     const qm = backend_mod.quantized_matmul;

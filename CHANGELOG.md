@@ -299,6 +299,22 @@ this point; earlier history is `git log`.
   narrows to the matmul output dtype). On the facade `matmul` and `einsum`
   are served to the f16/bf16 branch by the shared matmul mixin;
   `src/ag/tensor/typed/widened.zig` is gone.
+- The accelerator is a provider behind one seam, `backend.offload`
+  (`src/backend/offload.zig`), instead of `if (gpu_impl.enabled)` arms in
+  exec, weights, es and the facade. The seam owns the capability queries
+  (`enabled`, `has_quant_gemm`, `supportsQuant(QuantFormat)`,
+  `supportsQuantDType`), resident storage, tracing, and the offload
+  entries with their decisions built in: `quantGemmAccepts`/`gemmQuant`,
+  `quantGemmSharedInputAccepts`/`gemmQuantSharedInput`, `attnPrefillF16`,
+  `attentionFwd(KvElem, ...)`, `qmoeAccepts`/`QMoeSession`
+  (`begin`/`gemmGrouped`/`end`), and the ES `flatPerturb`/
+  `flatWeightedUpdate`/`flatAnchorDecay`. `ExecContext` renames its
+  optional offload entries to say what they are: `tryMatmulQuantRhs` (was
+  `denseQuantMatmulGpu`), `tryMatmulTernaryFolded` (was
+  `foldedTernaryMatmulGpu`), `tryMatmulQuantRhsSharedInput` (was
+  `denseQuantMatmulGpuSharedInputBatch`); `null` means the caller's CPU
+  path runs. `fucina.internal.gpu` reads the same seam; the provider
+  contract (`gpu_provider.zig`) and the provider files are unchanged.
 - `Tensor(spec)`: one set of shared method mixins behind the four branches.
   Views and data movement (`materialize`, `contiguous`, `detach`,
   `withTags`, `viewWithStrides`, `alignTo`, `permuteTo`, `transpose`,

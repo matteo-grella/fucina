@@ -5,6 +5,7 @@
 //! `*ExecContext`; `exec.zig`'s struct body carries the public aliases.
 const std = @import("std");
 const backend_mod = @import("../backend.zig");
+const offload = backend_mod.offload;
 const dtype_mod = @import("../dtype.zig");
 const tensor = @import("../tensor.zig");
 const parallel = @import("../parallel.zig");
@@ -2286,38 +2287,8 @@ pub fn groupedCausalAttentionTiledRun(
     // blocking offload of the whole fused op — no residency involved, Q/K/V
     // stream per call, and a false return falls through to the CPU tiled
     // kernel below. f16-KV common case only; biased/oversized variants stay CPU.
-    if (comptime backend_mod.gpu_impl.enabled and KvElem == f16) attn_gpu: {
-        const gpu = backend_mod.gpu_impl;
-        // This seam's own eligibility caps, distinct from the provider's
-        // shouldUseGpuAttn sizing: heads is bounded by the stack head-map
-        // buffer below, and d by what the vendored kernels were validated
-        // for. Raising gpu_attn_max_heads must resize map_buf with it.
-        const gpu_attn_max_heads = 64;
-        const gpu_attn_max_head_dim = 256;
-        if (base.bias != null or base.d > gpu_attn_max_head_dim or base.heads > gpu_attn_max_heads) break :attn_gpu;
-        if (!gpu.shouldUseGpuAttn(base.q_seq, base.kv_seq, base.heads, base.d)) break :attn_gpu;
-        var map_buf: [gpu_attn_max_heads]i32 = undefined;
-        for (0..base.heads) |h| {
-            // The pair path (head_group == 2) maps two adjacent q heads onto
-            // one kv head implicitly; the general path carries the explicit map.
-            map_buf[h] = if (head_group == 2) @intCast(h / 2) else @intCast(base.kv_head_for_head[h]);
-        }
-        if (gpu.attnPrefillF16(
-            base.q_data,
-            base.k_data,
-            base.v_data,
-            base.out_data,
-            map_buf[0..base.heads],
-            base.q_seq,
-            base.kv_seq,
-            base.heads,
-            base.kv_heads,
-            base.d,
-            base.source_offset,
-            base.scale_value,
-            base.window,
-            base.causal,
-        )) return;
+    if (comptime KvElem == f16) {
+        if (offload.attnPrefillF16(base.q_data, base.k_data, base.v_data, base.out_data, base.kv_head_for_head, head_group, base.q_seq, base.kv_seq, base.heads, base.kv_heads, base.d, base.source_offset, base.scale_value, base.window, base.causal, base.bias != null)) return;
     }
 
     const head_units = if (head_group == 2) base.kv_heads else base.heads;
@@ -2436,27 +2407,7 @@ fn groupedCausalAttentionImpl(
     // kernel; bias rows, exotic head maps, quantized caches, and any
     // provider decline stay on the CPU tiers. Same contract,
     // summation-order tolerance class.
-    if (comptime backend_mod.gpu_impl.enabled and (KvElem == f32 or KvElem == f16)) {
-        const gpu = backend_mod.gpu_impl;
-        if (comptime gpu.has_attention_fwd) attn_gpu: {
-            if (bias_data != null) break :attn_gpu;
-            if (kv_heads == 0 or heads % kv_heads != 0) break :attn_gpu;
-            const heads_per_kv = heads / kv_heads;
-            for (kv_head_for_head, 0..) |kv_head_i, head_i| {
-                if (kv_head_i != head_i / heads_per_kv) break :attn_gpu;
-            }
-            if (!gpu.shouldUseGpuAttentionFwd(q_seq, kv_seq, heads, d)) break :attn_gpu;
-            // Same clamp as the tiled path: any window >= kv_seq is full
-            // causal, and providers narrow the window to their kernels'
-            // integer width.
-            const win = @min(window, kv_seq);
-            const dispatched = if (comptime KvElem == f32)
-                gpu.attentionFwdF32(q_data, k_data, v_data, out.data(), stats, q_seq, kv_seq, heads, kv_heads, d, win, causal, heads_per_kv, scale_value)
-            else
-                gpu.attentionFwdF16Kv(q_data, k_data, v_data, out.data(), stats, q_seq, kv_seq, heads, kv_heads, d, win, causal, heads_per_kv, scale_value);
-            if (dispatched) return out;
-        }
-    }
+    if (offload.attentionFwd(KvElem, q_data, k_data, v_data, out.data(), stats, kv_head_for_head, q_seq, kv_seq, heads, kv_heads, d, window, causal, scale_value, bias_data != null)) return out;
 
     try groupedCausalAttentionDispatch(self, KvElem, q_data, k_data, v_data, out.data(), kv_head_for_head, q_seq, kv_seq, heads, d, kv_heads, scale_value, window, causal, bias_data, stats);
     return out;

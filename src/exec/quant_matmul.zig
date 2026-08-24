@@ -5,6 +5,7 @@
 //! module: every op receives an explicit `*ExecContext`.
 const std = @import("std");
 const backend_mod = @import("../backend.zig");
+const offload = backend_mod.offload;
 const kernels = backend_mod.kernels;
 const dtype_mod = @import("../dtype.zig");
 const parallel = @import("../parallel.zig");
@@ -150,7 +151,7 @@ pub fn matmul2DWithQuantizedTensorRhs(
     const blocks_per_row = try backend_mod.quantized_matmul.blockCountForDType(rhs_dtype, k);
 
     if (options.allow_gpu) {
-        if (try denseQuantMatmulGpuForBlocks(self, rhs_dtype, std.mem.sliceAsBytes(blocks), options.rhs_lifetime, n, aa.tensor(), m, k)) |gpu_out| {
+        if (try tryQuantGemmForBlocks(self, rhs_dtype, std.mem.sliceAsBytes(blocks), options.rhs_lifetime, n, aa.tensor(), m, k)) |gpu_out| {
             return gpu_out;
         }
     }
@@ -221,7 +222,7 @@ pub fn matmul2DWithQuantizedBlocksRhs(
     defer aa.deinit();
 
     if (options.allow_gpu) {
-        if (try denseQuantMatmulGpuForBlocks(self, rhs_dtype, std.mem.sliceAsBytes(blocks), options.rhs_lifetime, n, aa.tensor(), m, k)) |out| {
+        if (try tryQuantGemmForBlocks(self, rhs_dtype, std.mem.sliceAsBytes(blocks), options.rhs_lifetime, n, aa.tensor(), m, k)) |out| {
             return out;
         }
     }
@@ -860,7 +861,11 @@ pub fn gegluQuantMatmulPacked(self: *ExecContext, gate: *const Tensor, up: *cons
 /// the CPU packed path, never-a-loss. dtype must be q4_k/q6_k/q8_0 (the
 /// formats the Metal kernel dequantizes). The whole body is comptime-elided
 /// on non-gpu builds.
-pub fn denseQuantMatmulGpu(
+/// Try the accelerator for `input[m,k] · rhs[n,k]ᵀ` with a quantized-bytes
+/// RHS (`nb01` bytes per RHS row). `null` when it declines: the caller runs
+/// its CPU path. The gates assume the caller's CPU fallback is the packed
+/// panel kernel set.
+pub fn tryMatmulQuantRhs(
     self: *ExecContext,
     comptime dtype: DType,
     rhs_bytes: []const u8,
@@ -871,107 +876,13 @@ pub fn denseQuantMatmulGpu(
     n: usize,
     k: usize,
 ) !?Tensor {
-    return denseQuantMatmulGpuImpl(self, dtype, rhs_bytes, rhs_lifetime, nb01, input, m, n, k, true);
+    const fmt = comptime offload.QuantFormat.fromDType(dtype) orelse @compileError("tryMatmulQuantRhs supports q4_k/q5_k/q6_k/q8_0/tq2_0 only");
+    return tryQuantGemm(self, fmt, rhs_bytes, rhs_lifetime, nb01, input, m, n, k, .panels);
 }
 
-fn denseQuantMatmulGpuImpl(
-    self: *ExecContext,
-    comptime dtype: DType,
-    rhs_bytes: []const u8,
-    rhs_lifetime: RhsLifetime,
-    nb01: usize,
-    input: *const Tensor,
-    m: usize,
-    n: usize,
-    k: usize,
-    cpu_fallback_packed: bool,
-) !?Tensor {
-    if (comptime backend_mod.gpu_impl.enabled) {
-        const gpu = backend_mod.gpu_impl;
-        comptime switch (dtype) {
-            .q4_k, .q5_k, .q6_k, .q8_0, .tq2_0 => {},
-            else => @compileError("denseQuantMatmulGpu supports q4_k/q5_k/q6_k/q8_0/tq2_0 only"),
-        };
-        // No kernel tag for this dtype on the selected provider: stay on CPU.
-        const tag = comptime gpu.kernelTag(dtype);
-        if (comptime tag == null) return null;
-        const fmt = comptime tag.?;
-        const work = quantMatmulWork(m, n, k);
-        // Prefill arm: m >= 32 behind the relevant CPU-competitor gate. Stable
-        // weights first try the direct-storage async entry (Metal admits up to
-        // 8192 rows per command-data tile table; CUDA grows its slot table).
-        // Transient/longer fallbacks retain balanced <=2048-row blocking
-        // chunks, so prompts never silently lose the whole quant offload.
-        // Decode arm (m <= 8, provider opt-in): bytes-bound GEMV — the work
-        // gate never passes at decode shapes, so the provider's own decode
-        // gate decides instead.
-        const prefill_arm = m >= 32 and if (cpu_fallback_packed)
-            gpu.shouldUseGpuDenseQuantPacked(fmt, work)
-        else
-            gpu.shouldUseGpuDenseQuant(fmt, work);
-        const decode_arm = m <= 8 and gpu.shouldUseGpuQuantDecode(fmt, m, n, k);
-        if ((prefill_arm or decode_arm) and k % fmt.kMultiple() == 0 and n % 4 == 0 and
-            input.isContiguous())
-        {
-            var out = try self.empty(.f32, .{ m, n });
-            errdefer out.deinit();
-            // Stable GGUF/model weights admit true eager-async dispatch:
-            // providers bind tensor storage directly and attach completion to
-            // `out`. Transient byte slices retain the blocking path because an
-            // asynchronous command cannot outlive an unowned RHS borrow.
-            if (rhs_lifetime.isCacheable() and gpu.gemmQuantNtAsync(
-                fmt,
-                rhs_bytes,
-                true,
-                nb01,
-                0,
-                input,
-                &out,
-                1,
-                m,
-                n,
-                k,
-            )) return out;
-
-            const in_data = input.dataConst();
-            const in_elems = std.math.mul(usize, m, k) catch return null;
-            if (in_data.len == in_elems) {
-                const max_rows_per_dispatch = 2048;
-                const n_chunks = (m + max_rows_per_dispatch - 1) / max_rows_per_dispatch;
-                const rows_per = (m + n_chunks - 1) / n_chunks;
-                var ok = true;
-                var row0: usize = 0;
-                while (row0 < m) : (row0 += rows_per) {
-                    const rows = @min(rows_per, m - row0);
-                    if (!gpu.gemmQuantNt(
-                        fmt,
-                        rhs_bytes,
-                        rhs_lifetime.isCacheable(),
-                        nb01,
-                        in_data[row0 * k .. (row0 + rows) * k],
-                        out.data()[row0 * n .. (row0 + rows) * n],
-                        rows,
-                        n,
-                        k,
-                    )) {
-                        ok = false;
-                        break;
-                    }
-                }
-                if (ok) return out;
-            }
-            out.deinit();
-        }
-    }
-    return null;
-}
-
-/// GPU dispatch for the folded tie-fitted PTQTP pack (BlockTQ2_0Folded row
-/// bytes, docs/PTQTP.md): the provider's dedicated folded format, one
-/// command per linear instead of one per plane. Mirrors the dense-quant
-/// prefill arm (stable-RHS async first, balanced blocking chunks as the
-/// fallback); null = CPU path. Pruned on providers without the kernel.
-pub fn foldedTernaryMatmulGpu(
+/// `tryMatmulQuantRhs` for the folded ternary layout (`weights/ptqtp.zig`):
+/// one dispatch over the folded planes, prefill shapes only.
+pub fn tryMatmulTernaryFolded(
     self: *ExecContext,
     rhs_bytes: []const u8,
     rhs_lifetime: RhsLifetime,
@@ -981,63 +892,33 @@ pub fn foldedTernaryMatmulGpu(
     n: usize,
     k: usize,
 ) !?Tensor {
-    if (comptime backend_mod.gpu_impl.enabled) {
-        const gpu = backend_mod.gpu_impl;
-        if (comptime !gpu.has_tq2_0_folded_quant) return null;
-        const fmt: gpu.KernelFormatTag = .tq2_0_folded;
-        const work = quantMatmulWork(m, n, k);
-        const prefill_arm = m >= 32 and gpu.shouldUseGpuDenseQuantPacked(fmt, work);
-        if (prefill_arm and k % fmt.kMultiple() == 0 and n % 4 == 0 and input.isContiguous()) {
-            var out = try self.empty(.f32, .{ m, n });
-            errdefer out.deinit();
-            if (rhs_lifetime.isCacheable() and gpu.gemmQuantNtAsync(
-                fmt,
-                rhs_bytes,
-                true,
-                nb01,
-                0,
-                input,
-                &out,
-                1,
-                m,
-                n,
-                k,
-            )) return out;
+    return tryQuantGemm(self, .tq2_0_folded, rhs_bytes, rhs_lifetime, nb01, input, m, n, k, .panels);
+}
 
-            const in_data = input.dataConst();
-            const in_elems = std.math.mul(usize, m, k) catch return null;
-            if (in_data.len == in_elems) {
-                const max_rows_per_dispatch = 2048;
-                const n_chunks = (m + max_rows_per_dispatch - 1) / max_rows_per_dispatch;
-                const rows_per = (m + n_chunks - 1) / n_chunks;
-                var ok = true;
-                var row0: usize = 0;
-                while (row0 < m) : (row0 += rows_per) {
-                    const rows = @min(rows_per, m - row0);
-                    if (!gpu.gemmQuantNt(
-                        fmt,
-                        rhs_bytes,
-                        rhs_lifetime.isCacheable(),
-                        nb01,
-                        in_data[row0 * k .. (row0 + rows) * k],
-                        out.data()[row0 * n .. (row0 + rows) * n],
-                        rows,
-                        n,
-                        k,
-                    )) {
-                        ok = false;
-                        break;
-                    }
-                }
-                if (ok) return out;
-            }
-            out.deinit();
-        }
-    }
+fn tryQuantGemm(
+    self: *ExecContext,
+    comptime fmt: offload.QuantFormat,
+    rhs_bytes: []const u8,
+    rhs_lifetime: RhsLifetime,
+    nb01: usize,
+    input: *const Tensor,
+    m: usize,
+    n: usize,
+    k: usize,
+    comptime arm: offload.QuantGemmArm,
+) !?Tensor {
+    if (!offload.quantGemmAccepts(fmt, m, n, k, input.isContiguous(), arm)) return null;
+    var out = try self.empty(.f32, .{ m, n });
+    errdefer out.deinit();
+    if (offload.gemmQuant(fmt, rhs_bytes, rhs_lifetime.isCacheable(), nb01, input, &out, m, n, k)) return out;
+    out.deinit();
     return null;
 }
 
-pub fn denseQuantMatmulGpuSharedInputBatch(
+/// Try the accelerator for `batch_count` GEMMs that share one `input[m,k]`
+/// against `batch_count` quantized RHS slabs (`nb02` bytes apart); the
+/// result is `[batch_count * m, n]`. `null` when it declines.
+pub fn tryMatmulQuantRhsSharedInput(
     self: *ExecContext,
     comptime dtype: DType,
     rhs_bytes: []const u8,
@@ -1050,54 +931,19 @@ pub fn denseQuantMatmulGpuSharedInputBatch(
     n: usize,
     k: usize,
 ) !?Tensor {
-    if (comptime backend_mod.gpu_impl.enabled) {
-        const gpu = backend_mod.gpu_impl;
-        comptime switch (dtype) {
-            .q4_k, .q5_k, .q6_k, .q8_0, .tq2_0 => {},
-            else => @compileError("denseQuantMatmulGpuSharedInputBatch supports q4_k/q5_k/q6_k/q8_0/tq2_0 only"),
-        };
-        // No kernel tag for this dtype on the selected provider: stay on CPU.
-        const tag = comptime gpu.kernelTag(dtype);
-        if (comptime tag == null) return null;
-        const fmt = comptime tag.?;
-        if (batch_count == 0) return null;
-        const per_work = quantMatmulWork(m, n, k);
-        const work = std.math.mul(u64, per_work, @as(u64, @intCast(batch_count))) catch std.math.maxInt(u64);
-        const rows_total = std.math.mul(usize, batch_count, m) catch return null;
-        if (m >= 32 and k % fmt.kMultiple() == 0 and n % 4 == 0 and
-            input.isContiguous() and
-            gpu.shouldUseGpuDenseQuant(fmt, work))
-        {
-            var out = try self.empty(.f32, .{ rows_total, n });
-            errdefer out.deinit();
-            if (rhs_lifetime.isCacheable() and gpu.gemmQuantNtAsync(
-                fmt,
-                rhs_bytes,
-                true,
-                nb01,
-                nb02,
-                input,
-                &out,
-                batch_count,
-                m,
-                n,
-                k,
-            )) return out;
-
-            const in_data = input.dataConst();
-            const in_elems = std.math.mul(usize, m, k) catch return null;
-            if (m <= 2048 and in_data.len == in_elems) {
-                if (gpu.gemmQuantNtSharedABatch(fmt, rhs_bytes, rhs_lifetime.isCacheable(), nb01, nb02, in_data, out.data(), batch_count, m, n, k)) {
-                    return out;
-                }
-            }
-            out.deinit();
-        }
-    }
+    const fmt = comptime offload.QuantFormat.fromDType(dtype) orelse @compileError("tryMatmulQuantRhsSharedInput supports q4_k/q5_k/q6_k/q8_0/tq2_0 only");
+    if (!offload.quantGemmSharedInputAccepts(fmt, batch_count, m, n, k, input.isContiguous())) return null;
+    const rows_total = std.math.mul(usize, batch_count, m) catch return null;
+    var out = try self.empty(.f32, .{ rows_total, n });
+    errdefer out.deinit();
+    if (offload.gemmQuantSharedInput(fmt, rhs_bytes, rhs_lifetime.isCacheable(), nb01, nb02, input, &out, batch_count, m, n, k)) return out;
+    out.deinit();
     return null;
 }
 
-fn denseQuantMatmulGpuForBlocks(
+/// The blocks-RHS entries' offload attempt (the CPU fallback is the
+/// block kernels, which the gates account for).
+fn tryQuantGemmForBlocks(
     self: *ExecContext,
     comptime dtype: DType,
     rhs_bytes: []const u8,
@@ -1108,13 +954,10 @@ fn denseQuantMatmulGpuForBlocks(
     k: usize,
 ) !?Tensor {
     if (n == 0) return null;
-    if (comptime dtype == .q5_k and !backend_mod.gpu_impl.has_q5_k_quant) return null;
-    switch (dtype) {
-        .q4_k, .q5_k, .q6_k, .q8_0 => {},
-        else => return null,
-    }
+    if (comptime (dtype != .q4_k and dtype != .q5_k and dtype != .q6_k and dtype != .q8_0)) return null;
+    const fmt = comptime offload.QuantFormat.fromDType(dtype).?;
     const nb01 = std.math.divExact(usize, rhs_bytes.len, n) catch return null;
-    return denseQuantMatmulGpuImpl(self, dtype, rhs_bytes, rhs_lifetime, nb01, input, m, n, k, false);
+    return tryQuantGemm(self, fmt, rhs_bytes, rhs_lifetime, nb01, input, m, n, k, .blocks);
 }
 
 fn quantMatmulWork(m: usize, n: usize, k: usize) u64 {

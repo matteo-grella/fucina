@@ -17,7 +17,7 @@ const common = @import("common.zig");
 const gpu = @import("gpu.zig");
 const host = @import("host.zig");
 
-const gpu_impl = backend_mod.gpu_impl;
+const offload = backend_mod.offload;
 const Tensor = ag_mod.Tensor;
 const PackedRhs = ag_mod.PackedRhs;
 const DType = dtype_mod.DType;
@@ -108,8 +108,8 @@ fn denseQuantGpuTry(
     comptime in_tag: Tag,
     comptime out_tag: Tag,
 ) !?Tensor(.{ .seq, out_tag }) {
-    if (comptime !gpu_impl.enabled) return null;
-    if (comptime dtype == .q5_k and !gpu_impl.has_q5_k_quant) return null;
+    if (comptime !offload.enabled) return null;
+    if (comptime dtype == .q5_k and !offload.supportsQuant(.q5_k)) return null;
     if (input.requiresGrad()) return null;
     const m = input.dim(.seq);
     const k = input.dim(in_tag);
@@ -119,7 +119,7 @@ fn denseQuantGpuTry(
     if (!wraw.isContiguous()) return null;
     const wbytes = std.mem.sliceAsBytes(wraw.dataConst());
     const nb01 = std.math.divExact(usize, wbytes.len, n) catch return null;
-    var out = (try ctx.denseQuantMatmulGpu(dtype, wbytes, weight.rhs_lifetime, nb01, input.asRawTensor(), m, n, k)) orelse return null;
+    var out = (try ctx.tryMatmulQuantRhs(dtype, wbytes, weight.rhs_lifetime, nb01, input.asRawTensor(), m, n, k)) orelse return null;
     errdefer out.deinit();
     return try Tensor(.{ .seq, out_tag }).fromTensor(ctx, out);
 }
@@ -189,9 +189,9 @@ pub fn loadDenseF16Weight(ctx: *ExecContext, info: *const gguf.TensorInfo, shape
     // f16 GEMM offload uses it with zero per-call transfer (registry hit;
     // this path never adopt-copies) while the bytes stay CPU-readable and
     // in-place-trainable. Fallback: plain heap storage.
-    if (comptime gpu_impl.enabled) {
+    if (comptime offload.enabled) {
         if (options.gpu_resident) {
-            if (gpu_impl.allocResidentBytes(info.data.len)) |dev| {
+            if (offload.allocResidentBytes(info.data.len)) |dev| {
                 @memcpy(dev, info.data);
                 return gpu.gpuResidentDenseTensor(.f16, WeightF16, ctx, shape, dev);
             }
@@ -240,17 +240,17 @@ fn LoadedQuantWeight(comptime dtype: DType) type {
 fn loadGpuResidentQuantizedWeight(comptime dtype: DType, ctx: *ExecContext, info: *const gguf.TensorInfo, shape: [2]usize, options: LoadOptions) !LoadedQuantWeight(dtype) {
     const Elem = BlockStorage(dtype);
     const blocks = try blockSlice(Elem, info.data);
-    if (comptime gpu_impl.enabled) {
+    if (comptime offload.enabled) {
         if (options.gpu_resident) {
             switch (comptime dtype) {
                 .q4_k, .q6_k, .q8_0 => {
-                    if (gpu_impl.allocResidentBytes(info.data.len)) |dev| {
+                    if (offload.allocResidentBytes(info.data.len)) |dev| {
                         @memcpy(dev, info.data);
                         return .{ .value = try gpu.gpuResidentQuantTensor(dtype, ctx, shape, dev), .rhs_lifetime = .stable_process };
                     }
                 },
-                .q5_k => if (comptime gpu_impl.has_q5_k_quant) {
-                    if (gpu_impl.allocResidentBytes(info.data.len)) |dev| {
+                .q5_k => if (comptime offload.supportsQuant(.q5_k)) {
+                    if (offload.allocResidentBytes(info.data.len)) |dev| {
                         @memcpy(dev, info.data);
                         return .{ .value = try gpu.gpuResidentQuantTensor(dtype, ctx, shape, dev), .rhs_lifetime = .stable_process };
                     }

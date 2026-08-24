@@ -14,7 +14,7 @@ const parallel = @import("../parallel.zig");
 
 const common = @import("common.zig");
 
-const gpu_impl = backend_mod.gpu_impl;
+const offload = backend_mod.offload;
 const Tensor = ag_mod.Tensor;
 const ExecContext = exec_mod.ExecContext;
 const Error = common.Error;
@@ -59,12 +59,12 @@ pub fn linearSeqPtqtpFused(
     // — the same accepted numerics stance as the q4_k/q6_k/q8_0 dense
     // offload. The seam's gates decide; any refusal falls through to the
     // CPU path wholesale.
-    if (comptime gpu_impl.enabled and gpu_impl.has_tq2_0_quant) {
+    if (comptime offload.enabled and offload.supportsQuant(.tq2_0)) {
         // Folded resident form: ONE dispatch, async return, no plane sum.
-        if (comptime gpu_impl.has_tq2_0_folded_quant) {
+        if (comptime offload.supportsQuant(.tq2_0_folded)) {
             if (m >= 32 and weight.gpu_fold != null) {
                 const nb01 = blocks_per_row * @sizeOf(backend_quant.BlockTQ2_0Folded);
-                if (try ctx.foldedTernaryMatmulGpu(weight.gpu_fold.?, .stable_process, nb01, input.asRawTensor(), m, n, k)) |out_raw| {
+                if (try ctx.tryMatmulTernaryFolded(weight.gpu_fold.?, .stable_process, nb01, input.asRawTensor(), m, n, k)) |out_raw| {
                     return try Tensor(.{ .seq, out_tag }).fromTensor(ctx, out_raw);
                 }
             }
@@ -77,7 +77,7 @@ pub fn linearSeqPtqtpFused(
             errdefer if (first) |*t| t.deinit();
             for (dev_planes) |maybe_dev| {
                 const dev = maybe_dev orelse continue;
-                var plane_out = (try ctx.denseQuantMatmulGpu(.tq2_0, dev, .stable_process, nb01, raw_input, m, n, k)) orelse {
+                var plane_out = (try ctx.tryMatmulQuantRhs(.tq2_0, dev, .stable_process, nb01, raw_input, m, n, k)) orelse {
                     if (first) |*t| t.deinit();
                     first = null;
                     break :gpu_blk; // gates refused: CPU path, all planes
@@ -248,11 +248,11 @@ pub fn linearSeqFx4(
     if (n == 0 or k == 0 or m * k != x.len) return Error.InvalidWeightShape;
     const blocks_per_row = k / 256;
 
-    if (comptime gpu_impl.enabled and gpu_impl.has_tq2_0_quant) {
-        if (comptime gpu_impl.has_tq2_0_folded_quant) {
+    if (comptime offload.enabled and offload.supportsQuant(.tq2_0)) {
+        if (comptime offload.supportsQuant(.tq2_0_folded)) {
             if (m >= 32 and weight.gpu_fold != null) {
                 const nb01 = blocks_per_row * @sizeOf(backend_quant.BlockTQ2_0Folded);
-                if (try ctx.foldedTernaryMatmulGpu(weight.gpu_fold.?, .stable_process, nb01, input.asRawTensor(), m, n, k)) |out_raw| {
+                if (try ctx.tryMatmulTernaryFolded(weight.gpu_fold.?, .stable_process, nb01, input.asRawTensor(), m, n, k)) |out_raw| {
                     return try Tensor(.{ .seq, out_tag }).fromTensor(ctx, out_raw);
                 }
             }
@@ -350,7 +350,7 @@ pub const WeightPtqtp = struct {
     /// unreadable plane storage, or allocation failure at build time).
     px4: [3]?[]backend_quant.BlockTQ2_0x4 = .{ null, null, null },
     px4_allocator: ?Allocator = null,
-    /// GPU-resident copies of the plane blocks (`gpu_impl`
+    /// GPU-resident copies of the plane blocks (`backend.offload`
     /// residency): stable device-shared bytes the Metal ternary
     /// dequant-in-kernel prefill dispatches against with zero per-call wrap
     /// cost. All-or-nothing like `px4`; null slots = CPU-only.
@@ -381,11 +381,11 @@ pub const WeightPtqtp = struct {
     }
 
     fn buildGpuResidency(self: *WeightPtqtp) void {
-        const gpu = gpu_impl;
-        if (comptime !(gpu.enabled and gpu.has_quant_gemm and gpu.has_tq2_0_quant)) return;
+        const gpu = offload;
+        if (comptime !(gpu.enabled and gpu.has_quant_gemm and offload.supportsQuant(.tq2_0))) return;
         // Tied K=2 prefers the single folded resident buffer; falls through
         // to per-plane residency on any failure.
-        if (comptime gpu_impl.has_tq2_0_folded_quant) {
+        if (comptime offload.supportsQuant(.tq2_0_folded)) {
             if (self.tied and self.p2 != null and self.p3 == null) fold: {
                 const n = self.p1.dim(.out);
                 const k = self.p1.dim(.in);
@@ -426,7 +426,7 @@ pub const WeightPtqtp = struct {
     }
 
     fn freeGpuResidency(self: *WeightPtqtp) void {
-        const gpu = gpu_impl;
+        const gpu = offload;
         if (comptime !gpu.enabled) return;
         if (self.gpu_fold) |dev| gpu.freeResidentBytes(dev);
         self.gpu_fold = null;
@@ -529,9 +529,9 @@ pub const WeightPtqtpFx4 = struct {
     }
 
     pub fn buildGpuResidency(self: *WeightPtqtpFx4, allocator: Allocator) void {
-        const gpu = gpu_impl;
-        if (comptime !(gpu.enabled and gpu.has_quant_gemm and gpu.has_tq2_0_quant)) return;
-        if (comptime !gpu_impl.has_tq2_0_folded_quant) return;
+        const gpu = offload;
+        if (comptime !(gpu.enabled and gpu.has_quant_gemm and offload.supportsQuant(.tq2_0))) return;
+        if (comptime !offload.supportsQuant(.tq2_0_folded)) return;
         if (self.gpu_fold != null) return;
         const rows = backend_quant.ternary.packMatmulRhsTQ2_0FoldedRowsFromX4(allocator, self.pack, self.n, self.k / 256) catch return;
         defer allocator.free(rows);
@@ -564,7 +564,7 @@ pub const WeightPtqtpFx4 = struct {
     }
 
     pub fn deinit(self: *WeightPtqtpFx4) void {
-        const gpu = gpu_impl;
+        const gpu = offload;
         if (comptime gpu.enabled) {
             if (self.gpu_fold) |dev| gpu.freeResidentBytes(dev);
             self.gpu_fold = null;

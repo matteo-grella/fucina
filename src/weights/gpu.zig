@@ -13,7 +13,7 @@ const tensor_mod = @import("../tensor.zig");
 
 const common = @import("common.zig");
 
-const gpu_impl = backend_mod.gpu_impl;
+const offload = backend_mod.offload;
 const DType = dtype_mod.DType;
 const ExecContext = exec_mod.ExecContext;
 const Error = common.Error;
@@ -34,10 +34,10 @@ pub const ResidentByteRegistry = struct {
     }
 
     pub fn deinit(self: *ResidentByteRegistry) void {
-        if (comptime gpu_impl.enabled) {
+        if (comptime offload.enabled) {
             var it = self.map.iterator();
             while (it.next()) |e| {
-                gpu_impl.freeResidentBytes(e.value_ptr.*);
+                offload.freeResidentBytes(e.value_ptr.*);
             }
         }
         self.map.deinit(self.allocator);
@@ -45,11 +45,11 @@ pub const ResidentByteRegistry = struct {
     }
 
     pub fn bytes(self: *ResidentByteRegistry, src: []const u8) []const u8 {
-        if (comptime !gpu_impl.enabled) return src;
+        if (comptime !offload.enabled) return src;
         const key = @intFromPtr(src.ptr);
         if (self.map.get(key)) |dev| return dev;
         self.map.ensureUnusedCapacity(self.allocator, 1) catch return src;
-        const dev = gpu_impl.allocResidentBytes(src.len) orelse return src;
+        const dev = offload.allocResidentBytes(src.len) orelse return src;
         @memcpy(dev, src);
         self.map.putAssumeCapacityNoClobber(key, dev);
         return dev;
@@ -59,7 +59,7 @@ pub const ResidentByteRegistry = struct {
 pub fn dtypeHasDenseQuantGpuKernel(comptime dtype: DType) bool {
     return switch (comptime dtype) {
         .q4_k, .q6_k, .q8_0 => true,
-        .q5_k => gpu_impl.has_q5_k_quant,
+        .q5_k => offload.supportsQuant(.q5_k),
         else => false,
     };
 }
@@ -76,11 +76,11 @@ pub fn gpuResidentQuantTensor(comptime dtype: DType, ctx: *ExecContext, shape: [
         fn releaseDeviceBytes(_: *anyopaque, buffer: *DevBuffer) void {
             const bytes = std.mem.sliceAsBytes(buffer.data);
             buffer.destroyHeader();
-            gpu_impl.freeResidentBytes(bytes);
+            offload.freeResidentBytes(bytes);
         }
     };
     var dev_owned: ?[]u8 = dev;
-    errdefer if (dev_owned) |bytes| gpu_impl.freeResidentBytes(bytes);
+    errdefer if (dev_owned) |bytes| offload.freeResidentBytes(bytes);
     const dev_blocks = try blockSliceMut(BlockStorage(dtype), dev);
     const buffer = try DevBuffer.fromBorrowedSliceWithRelease(ctx.allocator, dev_blocks, hook.releaseDeviceBytes);
     dev_owned = null; // from here the buffer's release hook frees the device bytes
@@ -106,11 +106,11 @@ pub fn gpuResidentDenseTensor(comptime dtype: DType, comptime Facade: type, ctx:
         fn releaseDeviceBytes(_: *anyopaque, buffer: *DevBuffer) void {
             const bytes = std.mem.sliceAsBytes(buffer.data);
             buffer.destroyHeader();
-            gpu_impl.freeResidentBytes(bytes);
+            offload.freeResidentBytes(bytes);
         }
     };
     var dev_owned: ?[]u8 = dev;
-    errdefer if (dev_owned) |bytes| gpu_impl.freeResidentBytes(bytes);
+    errdefer if (dev_owned) |bytes| offload.freeResidentBytes(bytes);
     const Elem = std.meta.Child(@FieldType(DevBuffer, "data"));
     if (dev.len % @sizeOf(Elem) != 0) return Error.InvalidWeightShape;
     const elems: []Elem = @alignCast(std.mem.bytesAsSlice(Elem, dev));
@@ -130,10 +130,10 @@ pub fn gpuResidentDenseTensor(comptime dtype: DType, comptime Facade: type, ctx:
 /// residency on purpose). No-op (false) when the GPU is off or the budget
 /// is exhausted.
 pub fn makeGpuResidentDenseWeight(comptime dtype: DType, comptime Facade: type, ctx: *ExecContext, value: *Facade) !bool {
-    if (comptime !gpu_impl.enabled) return false;
+    if (comptime !offload.enabled) return false;
     const elems = try value.dataConst();
     const bytes = std.mem.sliceAsBytes(elems);
-    const dev = gpu_impl.allocResidentBytes(bytes.len) orelse return false;
+    const dev = offload.allocResidentBytes(bytes.len) orelse return false;
     @memcpy(dev, bytes);
     const raw_shape = value.asRawTensor().shape.slice();
     const shape = [2]usize{ raw_shape[0], raw_shape[1] };
@@ -147,15 +147,15 @@ pub fn makeGpuResidentDenseWeight(comptime dtype: DType, comptime Facade: type, 
 }
 
 pub fn makeGpuResidentQuantWeight(comptime dtype: DType, ctx: *ExecContext, value: *QuantWeight(dtype)) !bool {
-    if (comptime !gpu_impl.enabled) return false;
+    if (comptime !offload.enabled) return false;
     switch (comptime dtype) {
         .q4_k, .q6_k, .q8_0 => {},
-        .q5_k => if (!gpu_impl.has_q5_k_quant) return false,
+        .q5_k => if (!offload.supportsQuant(.q5_k)) return false,
         else => return false,
     }
     const blocks = try value.dataConst();
     const bytes = std.mem.sliceAsBytes(blocks);
-    const dev = gpu_impl.allocResidentBytes(bytes.len) orelse return false;
+    const dev = offload.allocResidentBytes(bytes.len) orelse return false;
     @memcpy(dev, bytes);
     var resident = try gpuResidentQuantTensor(dtype, ctx, value.shape(), dev);
     errdefer resident.deinit();

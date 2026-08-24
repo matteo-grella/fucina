@@ -18,7 +18,7 @@ const common = @import("common.zig");
 const dense = @import("dense.zig");
 const ptqtp_w = @import("ptqtp.zig");
 
-const gpu_impl = backend_mod.gpu_impl;
+const offload = backend_mod.offload;
 const Tensor = ag_mod.Tensor;
 const DType = dtype_mod.DType;
 const ExecContext = exec_mod.ExecContext;
@@ -325,7 +325,7 @@ pub const LinearWeight = union(enum) {
     }
 
     pub fn supportsNormedFusion(self: *const LinearWeight, m: usize) bool {
-        if (comptime gpu_impl.enabled) return false;
+        if (comptime offload.enabled) return false;
         if (!tuning.get().norm_quant_fused) return false;
         // Prefill-only: at decode shapes (m < 4) the fused route pays pooled
         // scratch acquisitions plus a padded 4-row-group quantize for one
@@ -358,7 +358,7 @@ pub const LinearWeight = union(enum) {
         comptime out_tag: Tag,
     ) !Tensor(.{ .seq, out_tag }) {
         @setEvalBranchQuota(20_000);
-        if (comptime !gpu_impl.enabled) {
+        if (comptime !offload.enabled) {
             if (!x.requiresGrad() and x.dim(.seq) >= 4 and tuning.get().norm_quant_fused) switch (self.*) {
                 .q4_k => |*weight| if (comptime !backend_mod.supports_q4_k_mmla) {
                     return x.rmsNormMulDotPacked(ctx, norm_weight, eps, &weight.packed_rhs, in_tag, out_tag);
@@ -446,7 +446,7 @@ pub const LookupWeight = union(enum) {
     /// and the dtype decodes per row; copy otherwise. CPU builds only: GPU
     /// builds keep the resident load path and its device placement policy.
     pub fn load(ctx: *ExecContext, file: *const gguf.File, info: *const gguf.TensorInfo, expected_rows: usize, expected_cols: usize) !LookupWeight {
-        if (comptime !gpu_impl.enabled) {
+        if (comptime !offload.enabled) {
             if (file.is_mmap and !file.isSplit()) {
                 const shape = try requireMatrixShape(info, expected_rows, expected_cols);
                 if (gguf.RowTable.init(ctx.allocator, info)) |table| {

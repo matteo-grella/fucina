@@ -297,28 +297,28 @@ pub const internal = struct {
         /// True on GPU builds (`-Dgpu=metal` or `-Dgpu=cuda`): GPU GEMM
         /// offload is compiled in. Per-arm capability varies by provider —
         /// see `has_quant_gemm`.
-        pub const enabled = backend.gpu_impl.enabled;
+        pub const enabled = backend.offload.enabled;
         /// True when the provider implements dequant-in-kernel quantized GEMM
         /// (dense + grouped MoE). Loaders that reshape CPU representations
         /// for the GPU quant path key on this, not on `enabled` — a provider
         /// can be enabled while its quantized arms are still CPU-only.
-        pub const has_quant_gemm = backend.gpu_impl.has_quant_gemm;
+        pub const has_quant_gemm = backend.offload.has_quant_gemm;
         /// True when this provider additionally implements Q5_K dense/grouped
         /// quantized kernels (CUDA only at present).
-        pub const has_q5_k_quant = backend.gpu_impl.has_q5_k_quant;
-        pub const has_tq2_0_quant = backend.gpu_impl.has_tq2_0_quant;
+        pub const has_q5_k_quant = backend.offload.supportsQuant(.q5_k);
+        pub const has_tq2_0_quant = backend.offload.supportsQuant(.tq2_0);
         /// Device-owned bytes for GPU-build loaders; see the provider's
         /// `allocResidentBytes` (backend/metal.zig, backend/cuda.zig). Null
         /// when unavailable.
-        pub const allocResidentBytes = backend.gpu_impl.allocResidentBytes;
+        pub const allocResidentBytes = backend.offload.allocResidentBytes;
         /// Release bytes returned by `allocResidentBytes`.
-        pub const freeResidentBytes = backend.gpu_impl.freeResidentBytes;
+        pub const freeResidentBytes = backend.offload.freeResidentBytes;
         /// Opt-in GPU dispatch tracing (`FUCINA_GPU_TRACE=1`). `traceReset` and
         /// `traceDump` are no-ops when tracing is off, so callers can invoke them
         /// unconditionally; `traceEnabled` is the query.
-        pub const traceEnabled = backend.gpu_impl.traceEnabled;
-        pub const traceReset = backend.gpu_impl.traceReset;
-        pub const traceDump = backend.gpu_impl.traceDump;
+        pub const traceEnabled = backend.offload.traceEnabled;
+        pub const traceReset = backend.offload.traceReset;
+        pub const traceDump = backend.offload.traceDump;
     };
     /// Canonical INTERNAL name for the raw, no-grad f32 tensor type. In-tree
     /// code that genuinely needs the raw type — runtime/backend internals,

@@ -16,7 +16,7 @@ const gpu = @import("gpu.zig");
 const linear = @import("linear.zig");
 const ptqtp_w = @import("ptqtp.zig");
 
-const gpu_impl = backend_mod.gpu_impl;
+const offload = backend_mod.offload;
 const ExecContext = exec_mod.ExecContext;
 const Error = common.Error;
 const QuantWeight = common.QuantWeight;
@@ -28,7 +28,7 @@ const WeightPtqtp = ptqtp_w.WeightPtqtp;
 const WeightPtqtpFx4 = ptqtp_w.WeightPtqtpFx4;
 
 fn restoreGpuResidencyAfterDeclinedFusion(ctx: *ExecContext, parts: []const *LinearWeight) !void {
-    if (comptime !gpu_impl.enabled) return;
+    if (comptime !offload.enabled) return;
     for (parts) |part| switch (part.*) {
         .f32 => |*value| _ = try gpu.makeGpuResidentDenseWeight(.f32, WeightF32, ctx, value),
         .f16 => |*value| _ = try gpu.makeGpuResidentDenseWeight(.f16, WeightF16, ctx, value),

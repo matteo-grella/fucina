@@ -55,7 +55,7 @@ pub fn rewardStats(rewards: []const f32) Stats {
 
 /// The GPU provider's ES dtype tag for a comptime DType (f16/f32 only —
 /// bf16 has no device arm and stays on the CPU kernels).
-fn esGpuDType(comptime dt: DType) ?backend_mod.gpu_impl.FlatDType {
+fn esGpuDType(comptime dt: DType) ?backend_mod.offload.FlatDType {
     return switch (dt) {
         .f16 => .f16,
         .f32 => .f32,
@@ -82,9 +82,9 @@ pub fn perturbSlot(
     // kernels, no managed-page migration back to the CPU). The stream cache
     // is a CPU-path feature — when it is active the CPU path runs so the
     // cache fills truthfully.
-    if (comptime backend_mod.gpu_impl.enabled) {
+    if (comptime backend_mod.offload.enabled) {
         if (comptime esGpuDType(dt)) |gpu_dt| {
-            if (cache == null and backend_mod.gpu_impl.flatPerturb(gpu_dt, std.mem.sliceAsBytes(data), stream_seed, scaled, data.len)) {
+            if (cache == null and backend_mod.offload.flatPerturb(gpu_dt, std.mem.sliceAsBytes(data), stream_seed, scaled, data.len)) {
                 return;
             }
         }
@@ -165,9 +165,9 @@ pub fn updateSlot(
     scale: f32,
     cache: ?UpdateCacheView,
 ) void {
-    if (comptime backend_mod.gpu_impl.enabled) {
+    if (comptime backend_mod.offload.enabled) {
         if (comptime esGpuDType(dt)) |gpu_dt| {
-            if (cache == null and backend_mod.gpu_impl.flatWeightedUpdate(gpu_dt, std.mem.sliceAsBytes(data), stream_seeds, coeffs, scale, data.len)) {
+            if (cache == null and backend_mod.offload.flatWeightedUpdate(gpu_dt, std.mem.sliceAsBytes(data), stream_seeds, coeffs, scale, data.len)) {
                 return;
             }
         }
@@ -233,9 +233,9 @@ pub fn anchorSlot(
     decay_step: f32,
     decay: AnchorDecay,
 ) void {
-    if (comptime backend_mod.gpu_impl.enabled) {
+    if (comptime backend_mod.offload.enabled) {
         if (comptime esGpuDType(dt)) |gpu_dt| {
-            if (backend_mod.gpu_impl.flatAnchorDecay(gpu_dt, std.mem.sliceAsBytes(data), std.mem.sliceAsBytes(anchor), decay_step, decay == .l1, data.len)) {
+            if (backend_mod.offload.flatAnchorDecay(gpu_dt, std.mem.sliceAsBytes(data), std.mem.sliceAsBytes(anchor), decay_step, decay == .l1, data.len)) {
                 return;
             }
         }

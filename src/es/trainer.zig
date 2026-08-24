@@ -244,11 +244,11 @@ pub const Trainer = struct {
         for (self.slots.items) |*slot| total += slot.bytes.len;
         if (self.anchor == null) {
             self.anchor = blk: {
-                if (comptime backend_mod.gpu_impl.enabled) {
+                if (comptime backend_mod.offload.enabled) {
                     // A ternary-only (zero-length) slab needs no device
                     // residency.
                     if (total > 0) {
-                        if (backend_mod.gpu_impl.allocResidentBytes(total)) |dev| {
+                        if (backend_mod.offload.allocResidentBytes(total)) |dev| {
                             self.anchor_resident = true;
                             break :blk dev;
                         }
@@ -436,9 +436,9 @@ pub const Trainer = struct {
     }
 
     fn freeAnchor(self: *Self, slab: []u8) void {
-        if (comptime backend_mod.gpu_impl.enabled) {
+        if (comptime backend_mod.offload.enabled) {
             if (self.anchor_resident) {
-                backend_mod.gpu_impl.freeResidentBytes(slab);
+                backend_mod.offload.freeResidentBytes(slab);
                 self.anchor_resident = false;
                 return;
             }

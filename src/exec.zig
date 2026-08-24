@@ -491,9 +491,9 @@ pub const ExecContext = struct {
     pub const rmsNormMulMatmulPacked = exec_quant_matmul.rmsNormMulMatmulPacked;
     pub const splitSwiGluMatmulPacked = exec_quant_matmul.splitSwiGluMatmulPacked;
     pub const gegluQuantMatmulPacked = exec_quant_matmul.gegluQuantMatmulPacked;
-    pub const denseQuantMatmulGpu = exec_quant_matmul.denseQuantMatmulGpu;
-    pub const foldedTernaryMatmulGpu = exec_quant_matmul.foldedTernaryMatmulGpu;
-    pub const denseQuantMatmulGpuSharedInputBatch = exec_quant_matmul.denseQuantMatmulGpuSharedInputBatch;
+    pub const tryMatmulQuantRhs = exec_quant_matmul.tryMatmulQuantRhs;
+    pub const tryMatmulTernaryFolded = exec_quant_matmul.tryMatmulTernaryFolded;
+    pub const tryMatmulQuantRhsSharedInput = exec_quant_matmul.tryMatmulQuantRhsSharedInput;
 
     // ----------------------------------------------------------------------
     // MoE: routing scratch, expert chains, fused gate|up kernels (exec/moe.zig, exec/moe_chain.zig, exec/moe_gu.zig)

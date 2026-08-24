@@ -9,6 +9,7 @@
 const std = @import("std");
 
 const backend_mod = @import("../backend.zig");
+const offload = backend_mod.offload;
 const backend_ops = backend_mod.ops;
 const dtype_mod = backend_mod.dtype_info;
 const tensor = @import("../tensor.zig");
@@ -733,7 +734,6 @@ fn batchRawGpu(
     profile: ?*MoeBatchProfile,
     total_start: i128,
 ) !?Tensor {
-    const gpu = backend_mod.gpu_impl;
     const a = ctx.allocator;
     const count = route.count;
     const offset = route.offset;
@@ -753,9 +753,9 @@ fn batchRawGpu(
     if (gw.dn_blocks.len != n_expert * hidden * bpr_dn) return null;
     // One switch resolves the gate_up dtype's kernel tag, raw bytes and
     // block size together.
-    const gu_format: backend_mod.gpu_impl.KernelFormatTag, const gu_bytes: []const u8, const gu_block_bytes: usize = switch (gw.gu) {
+    const gu_format: offload.QuantFormat, const gu_bytes: []const u8, const gu_block_bytes: usize = switch (gw.gu) {
         inline else => |gu_blocks, tag| .{
-            comptime backend_mod.gpu_impl.kernelTag(@field(dtype_mod.DType, @tagName(tag))).?,
+            comptime offload.QuantFormat.fromDType(@field(dtype_mod.DType, @tagName(tag))).?,
             std.mem.sliceAsBytes(gu_blocks),
             @sizeOf(@typeInfo(@TypeOf(gu_blocks)).pointer.child),
         },
@@ -774,11 +774,10 @@ fn batchRawGpu(
     // Measured on gemma-4-26B Q6_K prefill: occupancy 15-30% (pp32-pp64)
     // loses 0.4-0.7x vs the raw CPU path, ~50% (pp128) is breakeven-to-loss,
     // 62-80% (pp256) wins ~2x.
-    if (!gpu.qmoeFillAcceptable(n_pairs, n_tiles)) return null;
 
     // total m·n·k across both grouped GEMMs of this layer
     const work = @as(u64, n_pairs) * @as(u64, hidden) * @as(u64, gu_out + out_pe);
-    if (!gpu.shouldUseGpuQMoe(work)) return null;
+    if (!offload.qmoeAccepts(n_pairs, n_tiles, work)) return null;
 
     // Accumulated locally and merged only on success: a mid-sequence GPU
     // refusal falls back to the CPU path, which records its own full
@@ -787,7 +786,7 @@ fn batchRawGpu(
     var expert_wall_ns: i128 = 0;
 
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
-    const tiles = try a.alloc(gpu.QMMTile, n_tiles);
+    const tiles = try a.alloc(offload.QMMTile, n_tiles);
     defer a.free(tiles);
     const gather_tasks = try a.alloc(GuGpuGatherTask, n_expert);
     defer a.free(gather_tasks);
@@ -815,12 +814,12 @@ fn batchRawGpu(
     // the whole gather/dispatch/geglu/dispatch/scatter sequence. The in
     // panel holds the gathered rows (hidden wide) and is then reused for
     // the gated rows (out_pe wide) — size for whichever is larger.
-    gpu.qmoe_lock.lock();
-    defer gpu.qmoe_lock.unlock();
-    const stage = gpu.qmoeStage(
+    var session = offload.QMoeSession.begin(
         n_pairs * @max(hidden, out_pe) * @sizeOf(f32),
         n_pairs * @max(gu_out, hidden) * @sizeOf(f32),
     ) orelse return null;
+    defer session.end();
+    const stage = session.stage;
 
     const pool = ctx.workPool();
 
@@ -853,7 +852,7 @@ fn batchRawGpu(
     const cacheable = gw.device_owned;
 
     phase_start = moeBatchProfileStart(profile_enabled, io);
-    if (!gpu.gemmQGroupedNt(
+    if (!session.gemmGrouped(
         gu_format,
         gu_bytes,
         cacheable, // only shim-owned storage may enter the wrap cache
@@ -893,7 +892,7 @@ fn batchRawGpu(
     }
 
     phase_start = moeBatchProfileStart(profile_enabled, io);
-    if (!gpu.gemmQGroupedNt(
+    if (!session.gemmGrouped(
         .q8_0,
         std.mem.sliceAsBytes(gw.dn_blocks),
         cacheable,
@@ -1438,7 +1437,7 @@ pub fn batchRaw(
         p.count_sort_ns += route_result.count_sort_ns;
     }
 
-    if (comptime backend_mod.gpu_impl.enabled) {
+    {
         if (try batchRawGpu(
             ctx,
             x_data,
