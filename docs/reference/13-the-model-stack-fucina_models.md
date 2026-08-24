@@ -51,7 +51,7 @@ family-agnostic helpers stay flat:
 | `models.text.cartridge` | trained KV-prefix corpus compression (Cartridges, arXiv 2506.06266) | [§13.10](13-the-model-stack-fucina_models.md#1310-cartridges-srcmodelstextcartridgezig) |
 | `models.text.cartridge_fleet` | per-document cartridge fleets: manifest, RAM/disk budget manager, cosine chunk index (Cartridges at Scale, arXiv 2606.04557) | [§13.10](13-the-model-stack-fucina_models.md#1310-cartridges-srcmodelstextcartridgezig) |
 | `models.research.engram` | conditional n-gram memory: hashed-lookup embedding tables grafted onto a frozen model (Engram, arXiv 2601.07372) | [§13.11](13-the-model-stack-fucina_models.md#1311-engram-srcmodelsresearchengramzig) |
-| `models.text.serving` | the serving band: the contract (`GenerateRequest`/`GenerateResult`, `Caps`, the per-family `Backend` vtable), the HTTP transport (`serving.http`/`scheduler`/`emitter` + the OpenAI/Anthropic dialects and hermes tool calling), the generic `GgufChatBackend` engine, and the `serving.open` load-and-serve entry (`examples/lmserve` is the CLI front end) | [§13.13](13-the-model-stack-fucina_models.md#1313-serving-srcmodelstextserving) |
+| `models.text.serving` | the serving band: the contract (`GenerateRequest`/`GenerateResult`, `Caps`, the per-family `Backend` vtable), the HTTP transport (`serving.http`/`scheduler`/`emitter` + the OpenAI/Anthropic dialects and hermes tool calling), the generic `GgufChatBackend` engine, and the `serving.open` load-and-serve entry (`apps/lmserve` is the CLI front end) | [§13.13](13-the-model-stack-fucina_models.md#1313-serving-srcmodelstextserving) |
 | `models.qwen3.runner` | the descriptor runner (experimental tier): one family-independent decoder driven by a runtime `Descriptor` with two block styles (fused qwen3-shape, host_reference GLM/DeepSeek-MoE shape); the qwen3 family and the glm4moe trunk run on it; recorded-golden gates in `runner_tests.zig` (real 0.6B chains + logit fingerprints, synthetic MoE and glm fixtures) | `docs/RUNNER.md` |
 
 The family namespaces are covered in [§14](14-model-families-and-example-applications.md) (kimi3 in [§14.7](14-model-families-and-example-applications.md#147-kimi-k3--kdamla-hybrid-architecture-parity-srcmodelsresearchkimi3modelzig),
@@ -1266,7 +1266,7 @@ test "chat template: detect from GGUF metadata, render a turn" {
 `renderMessages` is `renderTurn`'s stateless twin: it renders a FULL message
 history for a fresh conversation, ending with the assistant-turn opener — the
 shape a messages-array API server receives on every request (the lmserve
-example, `examples/lmserve/`).
+example, `apps/lmserve/`).
 
 ```zig
 pub const Message = struct {
@@ -1955,7 +1955,7 @@ catches the MTP stream up on committed positions (position `i` consumes
 frontier, and rewinds the speculative MTP positions; `observe` appends the
 verify rows the decoder's truncate keeps. A draft-round error lands in the
 `err` field (the round proposes nothing; the decoder takes a plain step).
-`examples/glm4moe --mtp` decodes through it. deepseek4's MTP sidecar stays
+`zig build run -- <gguf> --mtp` (fucina-run) decodes through it. deepseek4's MTP sidecar stays
 on its own loop: its `Session` rewinds by snapshot/restore, not
 `truncate`.
 
@@ -2049,7 +2049,7 @@ SINGLE cartridge on a no-adapter trainer checkpoints — its rows ride as
 block inputs and the recompute is pinned bitwise (loss + row gradients)
 by a trainer test. The
 `cartridge` example (`zig build cartridge`,
-[README](../../examples/cartridge/README.md)) runs the whole flow on a real
+[README](../../apps/cartridge/README.md)) runs the whole flow on a real
 GGUF: `--equiv` (a zero-training corpus-init cartridge must match the real
 prefill — bitwise at tiled-attention shapes on Qwen3-0.6B-f16), self-study
 training (paper Sec 4, k = 1, fully in-process), and `--load`/`--ask`
@@ -2103,7 +2103,7 @@ anisotropic and mis-rank documents without it), hand-rolled cosine top-k
 in `topDocs`, persisted as `index.safetensors`. Artifact retrieval goes
 through `mmapFile` (read-only page-backed mappings, no whole-file heap
 copy). The `cartridge-fleet` example (`zig build cartridge-fleet`,
-[README](../../examples/cartridge_fleet/README.md)) drives
+[README](../../apps/cartridge_fleet/README.md)) drives
 mixed-visibility joint self-study (each round targets one resident
 document; with probability `--p-iso` its cartridge trains alone, otherwise
 distractor cartridges from other residents co-load in shuffled order — the
@@ -2349,7 +2349,7 @@ pick, f16/q8_0 the speed picks.
 `zig build qwen3 -- <base.gguf> --shine <shine.gguf> --shine-context
 TEXT|@FILE --chat "..."|--repl` is the direct serving surface (greedy,
 no-think, matching the reference harness; see
-[`examples/qwen3/README.md`](../../examples/qwen3/README.md)). Constraints:
+[`apps/qwen3/README.md`](../../apps/qwen3/README.md)). Constraints:
 dense Qwen3 backbones only, the base must match the checkpoint's
 (`Config.validate` cross-checks dims), decode is f16-KV, and the released
 run was trained on contexts up to ~1.1k tokens.
@@ -2366,7 +2366,7 @@ duck-typed model surface `chat.Conversation` consumes, swapped per
 request by the single inference worker. Zero context tokens, zero prefix
 rows; lmserve's slot reuse stays keyed by selection, so only
 same-adapter KV is ever adopted or prefix-shared
-([`examples/lmserve/README.md`](../../examples/lmserve/README.md)). The
+([`apps/lmserve/README.md`](../../apps/lmserve/README.md)). The
 library entry behind the flag is `models.qwen3.shine_serving.open` /
 `openFromFile` ([§13.13](13-the-model-stack-fucina_models.md#1313-serving-srcmodelstextserving)), `serving.open`'s counterpart with the fleet
 directory as an explicit argument.
@@ -2434,7 +2434,7 @@ LoRA mode's exact-identity start.
 `models.text.serving` is the complete serving stack: the model-agnostic contract,
 the HTTP transport, the generic GGUF chat engine, and a load-and-serve
 entry. `src/models/text/serving.zig` is the band index (contract names re-exported
-flat, sub-modules namespaced); `examples/lmserve` ([§14.8](14-model-families-and-example-applications.md#148-example-applications)) is the CLI front
+flat, sub-modules namespaced); `apps/lmserve` ([§14.8](14-model-families-and-example-applications.md#148-example-applications)) is the CLI front
 end built on it, and the voice agent hosts the same engine in-process.
 
 **Contract** (`serving/contract.zig`, re-exported flat). `GenerateRequest`
@@ -2491,7 +2491,7 @@ exit-time report). Families served: qwen3, qwen3moe, gemma4 (the
 `Conversation`-hosted set, one generic engine box) and qwen35,
 qwen35moe, inkling, deepseek4 (the engine-hosted set, dispatched to
 `models.qwen35.serving`, `models.inkling.serving`, `models.deepseek4.serving`).
-nanochat and diffusion-gemma stay with `examples/lmserve`; registered
+nanochat and diffusion-gemma stay with `apps/lmserve`; registered
 families without a serving adapter (deepseek2, glm4moe) and unknown
 architectures return `error.UnsupportedArchitecture`. `OpenOptions`
 (defined in `serving/contract.zig`) carries the engine surface

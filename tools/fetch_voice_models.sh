@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fetch every weight examples/voiceagent needs, into the layout its README
+# Fetch every weight apps/voiceagent needs, into the layout its README
 # uses. The agent is a four-stage cascade, so this is the one example where
 # collecting the models by hand is genuinely fiddly: five artifacts from four
 # sources, one of which needs a local conversion.

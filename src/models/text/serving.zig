@@ -5,7 +5,7 @@
 //! and return a ready `Backend` for every registry-served family: the
 //! `Conversation`-hosted set (qwen3, qwen3moe, gemma4) through the generic
 //! engine box, and the engine-hosted set (qwen35, qwen35moe, inkling,
-//! deepseek4) through the family serving adapters. `examples/lmserve` is
+//! deepseek4) through the family serving adapters. `apps/lmserve` is
 //! the CLI front end.
 
 const contract = @import("serving/contract.zig");

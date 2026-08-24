@@ -7,7 +7,7 @@ reference for the whole library: the public API surface, its exact semantics
 need to understand to extend it. The structural overview lives in
 [ARCHITECTURE.md](../ARCHITECTURE.md); command cheat sheets live in `AGENTS.md`;
 per-model getting-started recipes live in the per-example
-`examples/<name>/README.md`, with the shared weights table and runtime knobs
+`examples/<name>/README.md` and `apps/<name>/README.md`, with the shared weights table and runtime knobs
 in [RUNNING-MODELS.md](../RUNNING-MODELS.md).
 
 Every runnable Zig snippet in this document is machine-verified against the tree:
@@ -29,7 +29,7 @@ The build exposes two library modules ([§2](02-toolchain-build-and-project-wiri
   DiffusionGemma, DeepSeek V2/V3, GLM-4.5, DeepSeek V4 Flash, Kimi-K3,
   Inkling, Parakeet ASR).
 
-Applications (`examples/`, `tools/`, `bench/`) sit above both.
+Applications (`examples/`, `apps/`, `tools/`, `bench/`) sit above both.
 
 ## 1.2 Mental model
 
@@ -82,7 +82,7 @@ fails the check too, so this table and that one cannot drift apart (see
 
 | Band | Contents | Reference |
 | --- | --- | --- |
-| apps | `examples/`, `tools/`, `bench/` | [§14](14-model-families-and-example-applications.md) |
+| apps | `examples/`, `apps/`, `tools/`, `bench/` | [§14](14-model-families-and-example-applications.md) |
 | models | `fucina_models` module | [§13](13-the-model-stack-fucina_models.md), [§14](14-model-families-and-example-applications.md) |
 | facade | `src/fucina.zig` public root | [§1](01-introduction-and-mental-model.md)–[§5](05-automatic-differentiation.md) |
 | autograd + training | `src/ag/`, optim/es/lora/persistence | [§5](05-automatic-differentiation.md), [§11](11-training-optimizers-evolution-strategies-lora-and-checkpoints.md), [§12](12-model-io-gguf-and-safetensors.md) |

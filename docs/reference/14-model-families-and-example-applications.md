@@ -14,7 +14,10 @@ generic helpers (`fucina.weights`, `models.text.kv_cache`, `models.text.kv_persi
 `models.text.cartridge_fleet`,
 `models.text.unicode_categories`) stay flat and are covered in [§13](13-the-model-stack-fucina_models.md). This section
 documents the per-family model
-APIs, their runner CLIs, and the example applications under `examples/`.
+APIs, their runner CLIs, and the standalone programs under `examples/`
+(single-file teaching code) and `apps/` (product- and port-shaped
+applications). `zig build run` (`apps/run/`) is the registry runner: one
+binary that serves every architecture registered in `models.registry`.
 Weight containers (`LinearWeight` and its quant arms), `KvCache`, tokenizers,
 sampling, chat orchestration, and speculative decoding are [§13](13-the-model-stack-fucina_models.md) material;
 GGUF parsing is [§12](12-model-io-gguf-and-safetensors.md); LoRA/optimizer/ES mechanics are [§11](11-training-optimizers-evolution-strategies-lora-and-checkpoints.md).
@@ -282,12 +285,12 @@ drives the draft-model-free SAM + Token-Recycling cascade from
 from. Output is lossless (greedy streams verified identical with and without
 `--spec`).
 
-**Runner** (`examples/qwen3/`; `main.zig` owns load + dispatch over the
+**Runner** (`apps/qwen3/`; `main.zig` owns load + dispatch over the
 mode modules `options`/`bench`/`generate`/`verify`/`chat.zig`). The full
 CLI surface (chat/REPL, sampling flags, GPU offload, speculative decode,
 lockstep multi-stream bench, the q8_0 cache flag, the tokenizer/logit
 parity oracles, constrained decoding) is documented in the
-[README](../../examples/qwen3/README.md); copy-paste commands are in
+[README](../../apps/qwen3/README.md); copy-paste commands are in
 [RUNNING-MODELS.md](../RUNNING-MODELS.md).
 
 ### 14.2.1 LoRA fine-tuning (`src/models/qwen3/train.zig`)
@@ -369,7 +372,7 @@ opt.zeroGrad();
 The end-to-end loop — fine-tune (`zig build finetune`), merge adapters into
 dense weights (`zig build export-gguf -- --adapters ... --alpha ...`),
 re-quantize, serve — is scripted in
-[examples/finetune/README.md](../../examples/finetune/README.md); the
+[apps/finetune/README.md](../../apps/finetune/README.md); the
 gradient-free twin is `zig build es-finetune` ([§11](11-training-optimizers-evolution-strategies-lora-and-checkpoints.md), TRAINING.md [§13](13-the-model-stack-fucina_models.md)).
 
 ## 14.3 Qwen3.5 — Gated-DeltaNet hybrid (`src/models/qwen35/model.zig`)
@@ -695,10 +698,10 @@ _ = out[0..result.produced];
 ```
 
 No training entry and no speculative decoding (there is no autoregressive
-draft/verify seam). Runner: `examples/diffusion_gemma/main.zig` (on a TTY
+draft/verify seam). Runner: `apps/diffusion_gemma/main.zig` (on a TTY
 the reply denoises live inline; `--no-visual` disables). Commands, sampler
 knobs, and the `--gpu-f16` arm are in the
-[README](../../examples/diffusion_gemma/README.md).
+[README](../../apps/diffusion_gemma/README.md).
 
 ## 14.6 Parakeet ASR (`src/models/parakeet/`)
 
@@ -853,10 +856,10 @@ defer alloc.free(text);
   `error.UnknownLang` if a prompt-conditioned model cannot resolve `lang`.
 
 No training entry, no speculative decoding (not autoregressive text).
-Runner: `examples/parakeet/main.zig`. Commands and flags (offline/stream
+Runner: `apps/parakeet/main.zig`. Commands and flags (offline/stream
 transcription, `--manifest` batches, `--mic` capture, `--decoder tdt|ctc`,
 `--lang`, `--threads`) are in the
-[README](../../examples/parakeet/README.md).
+[README](../../apps/parakeet/README.md).
 
 
 ## 14.7 Kimi-K3 — KDA/MLA hybrid, architecture parity (`src/models/research/kimi3/model.zig`)
@@ -891,10 +894,10 @@ reference activations.
 Beyond the family runners, standalone applications exercise the library end
 to end: the HTTP server (lmserve), the from-scratch GPT pipeline
 (nanochat), the CNN/vision ports (facedetect, locate_anything), the audio
-ports (omnivoice, nam, and the other voice examples), and the training and
+ports (omnivoice, nam, and the other voice apps), and the training and
 quantization demos (spirals and the finetune/ES/cartridge/engram/PTQTP
-family). Each lives in `examples/<name>/` with its own README owning its
-CLI, flags, parity harnesses, and measured numbers;
+family). Each lives in `examples/<name>/` or `apps/<name>/` with its own
+README owning its CLI, flags, parity harnesses, and measured numbers;
 [RUNNING-MODELS.md](../RUNNING-MODELS.md) is the index that maps every
 build step to its README and to verified weight downloads. The library
 surfaces they exercise are the [§13](13-the-model-stack-fucina_models.md) machinery
@@ -909,9 +912,9 @@ and the quantization surfaces of [§10](10-quantization.md).
 
 ## 14.9 Example → features → run command
 
-The per-example map — what each example demonstrates and the command that
-runs it — lives in [RUNNING-MODELS.md](../RUNNING-MODELS.md) (weights are
-never bundled; its download table lists the source and license notes for
-every model row). Each example's README (`examples/<name>/README.md`)
-documents its full flag set, and `AGENTS.md` carries the one-line command
-list.
+The per-target map (what each example and app demonstrates and the
+command that runs it) lives in [RUNNING-MODELS.md](../RUNNING-MODELS.md)
+(weights are never bundled; its download table lists the source and
+license notes for every model row). Each target's README
+(`examples/<name>/README.md`, `apps/<name>/README.md`) documents its full
+flag set, and `AGENTS.md` carries the one-line command list.

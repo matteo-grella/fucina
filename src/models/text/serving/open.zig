@@ -9,7 +9,7 @@
 //! families without a serving adapter (deepseek2, glm4moe) and unknown
 //! architectures return `error.UnsupportedArchitecture`; nanochat
 //! checkpoints and diffusion-gemma stay with the CLI front end
-//! (`examples/lmserve`).
+//! (`apps/lmserve`).
 
 const std = @import("std");
 const fucina = @import("fucina");

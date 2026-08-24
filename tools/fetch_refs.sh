@@ -24,19 +24,19 @@
 # rather than a patch applied to it.
 #
 # nanochat (+ rustbpe, its tokenizer trainer) is the reference for
-# examples/nanochat. It stays stock too: the parity dumps come from
-# examples/nanochat/tools/nanochat_dump.py and nanochat_export.py, out-of-tree
+# apps/nanochat. It stays stock too: the parity dumps come from
+# apps/nanochat/tools/nanochat_dump.py and nanochat_export.py, out-of-tree
 # harnesses run with the stock pinned checkout on PYTHONPATH (invocation lines
-# in their headers; regen recipe in examples/nanochat/goldens/README.md).
+# in their headers; regen recipe in apps/nanochat/goldens/README.md).
 #
 # ds4 is the architecture reference and validation oracle for the deepseek4
-# port. It stays stock — no patches: examples/deepseek4/main.zig consumes its
+# port. It stays stock — no patches: apps/deepseek4/main.zig consumes its
 # SHIPPED fixtures in place (--vectors refs/ds4/tests/test-vectors/official,
 # --golden refs/ds4/tests/test-vectors/local-golden.vec). Do NOT run its
 # CPU build path (`make cpu`) on macOS — it can kernel-panic the VM system.
 #
 # llama.cpp-inkling is the parity oracle for the Inkling port
-# (src/llm/inkling, examples/inkling/main.zig): llama.cpp PR #25731 ("Add TML
+# (src/models/inkling, apps/run/main.zig): llama.cpp PR #25731 ("Add TML
 # Inkling architecture", draft) pinned at its 2026-07 head on the
 # contributor's fork — a moving target per docs/PORTING.md §1, so the diff
 # is archived out-of-tree with the port record. Oracle build (CPU-only,
@@ -58,24 +58,24 @@
 # pinned for the record, never built or benchmarked.
 #
 # cartridges (HazyResearch) is the semantics reference for the Cartridges
-# port (src/llm/cartridge.zig, examples/cartridge/main.zig, docs/CARTRIDGES.md):
+# port (src/models/text/cartridge.zig, apps/cartridge/main.zig, docs/CARTRIDGES.md):
 # the distillation loss (train.py), the five seed-prompt meta-texts
 # (data resources), the token chunker, and the KV-init recipe were audited
 # against it. It stays stock and is never run: numerical parity comes from
 # tools/gen_cartridge_goldens.py, an INDEPENDENT PyTorch implementation of
 # the mechanism (torch 2.12) whose output is committed as
-# src/llm/cartridge_golden_tests.zig.
+# src/models/text/cartridge_golden_tests.zig.
 #
 # engram (deepseek-ai, Apache-2.0) is the semantics reference for the Engram
-# port (src/llm/engram.zig, docs/ENGRAM.md): engram_demo_v1.py defines the
+# port (src/models/research/engram.zig, docs/ENGRAM.md): engram_demo_v1.py defines the
 # tokenizer-compression table, layer-seeded odd multipliers, the
 # multiply-XOR n-gram hash with per-head prime table sizes, and the
 # gated multi-head-embedding + causal short-conv module. It stays stock
 # and is never run: numerical parity comes from tools/gen_engram_goldens.py,
 # an INDEPENDENT PyTorch implementation of the demo semantics (torch 2.12)
-# whose output is committed as src/llm/engram_golden_tests.zig.
+# whose output is committed as src/models/research/engram_golden_tests.zig.
 # qwentts.cpp + qwentts-cpp-python (andimarafioti) are the parity oracles for
-# the Qwen3-TTS port (src/llm/qwen3tts, examples/qwen3tts): the C++ side pins
+# the Qwen3-TTS port (src/models/qwen3tts, examples/qwen3tts): the C++ side pins
 # the codec decoder's stage decomposition (pre-conv, transformer, RVQ,
 # upsample) and the python side drives it to emit the reference activations.
 # Both stay stock — the committed fixtures under testdata/qwen3tts/ were
@@ -87,7 +87,7 @@
 # Pinned for the record, never built or benchmarked.
 #
 # pocket-tts (kyutai-labs) is the semantics reference for the Pocket TTS port
-# (src/llm/pockettts, examples/pockettts): the flow-LM, the LSD head, and the
+# (src/models/pockettts, examples/pockettts): the flow-LM, the LSD head, and the
 # Mimi decoder wiring. pocket-tts-candle (babybirdprd) is the second opinion
 # used to disambiguate tensor layouts where the reference is implicit. Both
 # stay stock and are never run in the loop: numerical parity comes from
@@ -96,9 +96,9 @@
 # tools/pocket/pocket_to_gguf.py converts the released weights.
 #
 # LocalVQE (localai-org, Apache-2.0 code AND weights) is the reference for the
-# GTCRN-AEC echo canceller in examples/voiceagent/aec.zig: ggml/gtcrn/gtcrn.cpp
+# GTCRN-AEC echo canceller in apps/voiceagent/aec.zig: ggml/gtcrn/gtcrn.cpp
 # is the scalar implementation the port follows and ggml/tests/gtcrn/ ships the
-# per-stage .npy fixtures committed under examples/voiceagent/goldens/. Stock, never patched.
+# per-stage .npy fixtures committed under apps/voiceagent/goldens/. Stock, never patched.
 
 set -eu
 cd "$(dirname "$0")/.."

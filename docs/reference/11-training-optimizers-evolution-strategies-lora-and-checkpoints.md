@@ -9,7 +9,7 @@ parameter collection and safetensors state dicts), and
 `fucina.training_checkpoint` (the resumable checkpoint directory layout).
 The contract document is [TRAINING.md](../TRAINING.md); everything below is
 exercised end-to-end by `zig build spirals`, `zig build es-spirals`,
-`zig build finetune`, and `zig build es-finetune` (`examples/`). Autograd
+`zig build finetune`, and `zig build es-finetune` (`examples/`, `apps/`). Autograd
 semantics are [§5](05-automatic-differentiation.md); the exec-scope memory model the training loop leans on is
 [§6](06-the-execution-runtime-execcontext-and-the-memory-model.md). Snippets in this section assume
 `const std = @import("std"); const fucina = @import("fucina"); const optim = fucina.optim;`.

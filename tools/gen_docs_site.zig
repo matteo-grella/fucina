@@ -2,7 +2,8 @@
 //!
 //! Feeds the MkDocs build behind `.github/workflows/pages.yml`. The repo
 //! markdown (README.md, docs/, docs/reference/, docs/course/,
-//! examples/*/README.md) is the single source of truth; this tool writes a
+//! examples/*/README.md, apps/*/README.md) is the single source of truth;
+//! this tool writes a
 //! transformed copy into the gitignored staging directory that `mkdocs.yml`
 //! uses as `docs_dir`:
 //!
@@ -19,8 +20,8 @@
 //! - The mkdocs nav is generated too: the tool appends it to the committed
 //!   `mkdocs.yml` (which must not define `nav:`) and writes the result to
 //!   `<repo root>/.mkdocs-gen.yml`, which the Pages workflow builds with
-//!   `mkdocs build -f .mkdocs-gen.yml`. Course chapters and examples are
-//!   enumerated from disk; guides carry their own sidebar placement in an
+//!   `mkdocs build -f .mkdocs-gen.yml`. Course chapters, examples, and apps
+//!   are enumerated from disk; guides carry their own sidebar placement in an
 //!   invisible HTML comment (same convention as the snippet markers):
 //!
 //!       <!-- docs-nav: group="Run & serve" title="Running models" weight=10 -->
@@ -85,6 +86,7 @@ const Ctx = struct {
     guides: std.ArrayList(GuidePlacement) = .empty,
     course_entries: std.ArrayList(NavEntry) = .empty,
     example_names: std.ArrayList([]const u8) = .empty,
+    app_names: std.ArrayList([]const u8) = .empty,
 
     // staged-tree records for the verify pass
     staged_pages: std.StringHashMapUnmanaged(void) = .empty,
@@ -153,6 +155,7 @@ pub fn main(init: std.process.Init) !void {
     try stagePage(&ctx, "README.md", "index.md");
     try stageCourse(&ctx);
     try stageExamples(&ctx);
+    try stageApps(&ctx);
     try copyAsset(&ctx, "site/docs-extra.css", "assets/extra.css");
     try verify(&ctx);
     try writeGeneratedConfig(&ctx);
@@ -309,6 +312,11 @@ fn mapRepoToStaged(ctx: *Ctx, repo_path: []const u8) !?[]const u8 {
         const name = repo_path["examples/".len .. repo_path.len - "/README.md".len];
         if (std.mem.indexOfScalar(u8, name, '/') == null)
             return try std.fmt.allocPrint(a, "examples/{s}.md", .{name});
+    }
+    if (std.mem.startsWith(u8, repo_path, "apps/") and std.mem.endsWith(u8, repo_path, "/README.md")) {
+        const name = repo_path["apps/".len .. repo_path.len - "/README.md".len];
+        if (std.mem.indexOfScalar(u8, name, '/') == null)
+            return try std.fmt.allocPrint(a, "apps/{s}.md", .{name});
     }
     return null;
 }
@@ -799,26 +807,7 @@ fn courseNavTitle(ctx: *Ctx, file_name: []const u8, h1: []const u8) ![]const u8 
 }
 
 fn stageExamples(ctx: *Ctx) !void {
-    const a = ctx.allocator;
-    var names: std.ArrayList([]const u8) = .empty;
-    {
-        const examples_path = try ctx.repoPath("examples");
-        var dir = try std.Io.Dir.cwd().openDir(ctx.io, examples_path, .{ .iterate = true });
-        defer dir.close(ctx.io);
-        var walker = try dir.walk(a);
-        defer walker.deinit();
-        while (try walker.next(ctx.io)) |entry| {
-            if (entry.kind != .file) continue;
-            // Exactly examples/<name>/README.md.
-            const slash = std.mem.indexOfScalar(u8, entry.path, '/') orelse continue;
-            if (!std.mem.eql(u8, entry.path[slash + 1 ..], "README.md")) continue;
-            try names.append(a, try a.dupe(u8, entry.path[0..slash]));
-        }
-    }
-    sortStrings(names.items);
-
-    var index_body: std.ArrayList(u8) = .empty;
-    try index_body.appendSlice(a,
+    const blurb =
         \\# Examples {: #examples }
         \\
         \\Every example is a standalone program under
@@ -827,19 +816,59 @@ fn stageExamples(ctx: *Ctx) !void {
         \\example's README, verbatim.
         \\
         \\
-    );
+    ;
+    try stageReadmeDir(ctx, "examples", blurb, &ctx.example_names);
+}
+
+fn stageApps(ctx: *Ctx) !void {
+    const blurb =
+        \\# Apps {: #apps }
+        \\
+        \\Every app is a standalone program under
+        \\[`apps/`](https://github.com/matteo-grella/fucina/tree/main/apps)
+        \\in the repository, built by `zig build`; each page below is that
+        \\app's README, verbatim.
+        \\
+        \\
+    ;
+    try stageReadmeDir(ctx, "apps", blurb, &ctx.app_names);
+}
+
+/// Stage every `<root>/<name>/README.md` as `<root>/<name>.md` plus a
+/// `<root>/index.md` listing, collecting the names for the generated nav.
+fn stageReadmeDir(ctx: *Ctx, comptime root: []const u8, blurb: []const u8, names_out: *std.ArrayList([]const u8)) !void {
+    const a = ctx.allocator;
+    var names: std.ArrayList([]const u8) = .empty;
+    {
+        const root_path = try ctx.repoPath(root);
+        var dir = try std.Io.Dir.cwd().openDir(ctx.io, root_path, .{ .iterate = true });
+        defer dir.close(ctx.io);
+        var walker = try dir.walk(a);
+        defer walker.deinit();
+        while (try walker.next(ctx.io)) |entry| {
+            if (entry.kind != .file) continue;
+            // Exactly <root>/<name>/README.md.
+            const slash = std.mem.indexOfScalar(u8, entry.path, '/') orelse continue;
+            if (!std.mem.eql(u8, entry.path[slash + 1 ..], "README.md")) continue;
+            try names.append(a, try a.dupe(u8, entry.path[0..slash]));
+        }
+    }
+    sortStrings(names.items);
+
+    var index_body: std.ArrayList(u8) = .empty;
+    try index_body.appendSlice(a, blurb);
     for (names.items) |name| {
-        const src = try std.fmt.allocPrint(a, "examples/{s}/README.md", .{name});
-        const staged = try std.fmt.allocPrint(a, "examples/{s}.md", .{name});
+        const src = try std.fmt.allocPrint(a, root ++ "/{s}/README.md", .{name});
+        const staged = try std.fmt.allocPrint(a, root ++ "/{s}.md", .{name});
         try stagePage(ctx, src, staged);
-        try ctx.example_names.append(a, name);
+        try names_out.append(a, name);
 
         const entry = try std.fmt.allocPrint(a, "- [{s}]({s}.md)\n", .{ try firstHeadingText(ctx, src), name });
         try index_body.appendSlice(a, entry);
-        try ctx.recordLink("examples/index.md", staged, "");
+        try ctx.recordLink(root ++ "/index.md", staged, "");
     }
-    try ctx.writeStaged("examples/index.md", index_body.items);
-    try ctx.recordSlug("examples/index.md", "examples");
+    try ctx.writeStaged(root ++ "/index.md", index_body.items);
+    try ctx.recordSlug(root ++ "/index.md", root);
 }
 
 fn copyAsset(ctx: *Ctx, src_rel: []const u8, staged_rel: []const u8) !void {
@@ -921,6 +950,12 @@ fn writeGeneratedConfig(ctx: *Ctx) !void {
     try out.appendSlice(a, "  - Examples:\n      - examples/index.md\n");
     for (ctx.example_names.items) |name| {
         const entry = try std.fmt.allocPrint(a, "      - {s}: examples/{s}.md\n", .{ try yamlString(a, name), name });
+        try out.appendSlice(a, entry);
+    }
+
+    try out.appendSlice(a, "  - Apps:\n      - apps/index.md\n");
+    for (ctx.app_names.items) |name| {
+        const entry = try std.fmt.allocPrint(a, "      - {s}: apps/{s}.md\n", .{ try yamlString(a, name), name });
         try out.appendSlice(a, entry);
     }
 

@@ -51,52 +51,54 @@ Notes:
 - **f16 Qwen3.** Some commands reference `Qwen3-0.6B-f16.gguf`; if your source only
   ships bf16, transcode one locally:
   `zig build export-gguf -Doptimize=ReleaseFast -- --from-gguf <src>.gguf --out models/Qwen3-0.6B-f16.gguf --dtype f16`.
-- **Voice agent.** `examples/voiceagent` is a four-stage cascade and needs five
+- **Voice agent.** `apps/voiceagent` is a four-stage cascade and needs five
   artifacts from four sources, one of which is a local conversion rather than a
   download. `tools/fetch_voice_models.sh [fast|quality|both]` collects the lot
   and prints the command to run; see
-  [examples/voiceagent/README.md](../examples/voiceagent/README.md).
+  [apps/voiceagent/README.md](../apps/voiceagent/README.md).
 
 ---
 
-## The examples
+## The runners
 
-Every build step below has its own getting-started README next to its entry
-file — `examples/<folder>/README.md` — and that is where the copy-paste
-commands, weight pointers, per-runner flags, and parity/bench harnesses now
-live. The table maps each step to its README. To get a first feel for the
-engine, run the smallest chat model as a REPL:
+Every build step below has its own getting-started README next to its
+entry file (`examples/<folder>/README.md` for the single-file teaching
+examples, `apps/<folder>/README.md` for the product- and port-shaped apps),
+and that is where the copy-paste commands, weight pointers, per-runner
+flags, and parity/bench harnesses live. The table maps each step to its
+README. `zig build run` is the registry runner: one binary that serves
+every registered architecture (arch auto-detected from the GGUF), and the
+only runner for the deepseek2, glm4moe, and inkling families. To get a
+first feel for the engine, run the smallest chat model as a REPL:
 
 ```sh
 # Multi-turn interactive REPL (empty line or Ctrl-D quits); the full qwen3
-# command set is in examples/qwen3/README.md
+# command set is in apps/qwen3/README.md
 zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --repl
 ```
 
 | Build step | What it is | Getting started |
 | --- | --- | --- |
-| `zig build qwen3` | Qwen3 dense (0.6B/1.7B/…) + MoE 30B-A3B: chat/REPL, speculative decoding, benchmarks, parity tooling | [examples/qwen3/README.md](../examples/qwen3/README.md) |
-| `zig build deepseek2` | DeepSeek V2/V3 MLA family (V2-Lite, Moonlight-16B-A3B) | [examples/deepseek2/README.md](../examples/deepseek2/README.md) |
-| `zig build glm4moe` | GLM-4.5 family with native `--mtp` multi-token-prediction drafting | [examples/glm4moe/README.md](../examples/glm4moe/README.md) |
-| `zig build deepseek4` | DeepSeek V4 Flash 284B-A13B (streamed experts, MTP sidecar) | [examples/deepseek4/README.md](../examples/deepseek4/README.md) |
+| `zig build qwen3` | Qwen3 dense (0.6B/1.7B/…) + MoE 30B-A3B: chat/REPL, speculative decoding, benchmarks, parity tooling | [apps/qwen3/README.md](../apps/qwen3/README.md) |
+| `zig build run` | fucina-run, the registry runner: any registered arch, incl. DeepSeek V2/V3 MLA (`--mla`/`--dsa` dials), GLM-4.5 (`--mtp` drafting), and Inkling (multimodal, wire-format chat) | [apps/run/README.md](../apps/run/README.md) |
+| `zig build deepseek4` | DeepSeek V4 Flash 284B-A13B (streamed experts, MTP sidecar) | [apps/deepseek4/README.md](../apps/deepseek4/README.md) |
 | `zig build gemma4` | Gemma 4 26B-A4B MoE chat/REPL | [examples/gemma4/README.md](../examples/gemma4/README.md) |
-| `zig build diffusion-gemma` | DiffusionGemma 26B-A4B block text-diffusion (live inline denoising) | [examples/diffusion_gemma/README.md](../examples/diffusion_gemma/README.md) |
+| `zig build diffusion-gemma` | DiffusionGemma 26B-A4B block text-diffusion (live inline denoising) | [apps/diffusion_gemma/README.md](../apps/diffusion_gemma/README.md) |
 | `zig build qwen35` | Qwen3.5/3.6 Gated-DeltaNet hybrid (dense + qwen35moe streamed MoE) + Ternary-Bonsai-27B loader/parity harness | [examples/qwen35/README.md](../examples/qwen35/README.md) |
-| `zig build inkling` | Inkling 975B-A41B hybrid attention + MoE, text + image/audio towers | [examples/inkling/README.md](../examples/inkling/README.md) |
-| `zig build lmserve` | OpenAI- and Anthropic-compatible HTTP server over the family backends | [examples/lmserve/README.md](../examples/lmserve/README.md) |
-| `zig build omnivoice` | OmniVoice MaskGIT TTS: voice cloning/design, codec round-trip | [examples/omnivoice/README.md](../examples/omnivoice/README.md) |
-| `zig build parakeet` | Parakeet ASR (NeMo FastConformer): transcribe/stream/mic | [examples/parakeet/README.md](../examples/parakeet/README.md) |
-| `zig build voiceagent` | Full-duplex voice agent: mic → STT → chat → TTS → speakers, echo-cancelled barge-in | [examples/voiceagent/README.md](../examples/voiceagent/README.md) |
+| `zig build lmserve` | OpenAI- and Anthropic-compatible HTTP server over the family backends | [apps/lmserve/README.md](../apps/lmserve/README.md) |
+| `zig build omnivoice` | OmniVoice MaskGIT TTS: voice cloning/design, codec round-trip | [apps/omnivoice/README.md](../apps/omnivoice/README.md) |
+| `zig build parakeet` | Parakeet ASR (NeMo FastConformer): transcribe/stream/mic | [apps/parakeet/README.md](../apps/parakeet/README.md) |
+| `zig build voiceagent` | Full-duplex voice agent: mic → STT → chat → TTS → speakers, echo-cancelled barge-in | [apps/voiceagent/README.md](../apps/voiceagent/README.md) |
 | `zig build qwen3tts` | Qwen3-TTS CustomVoice: text → 24 kHz WAV, streamed codec decode | [examples/qwen3tts/README.md](../examples/qwen3tts/README.md) |
 | `zig build pockettts` | Pocket TTS v2 (kyutai): flow-matching TTS, no codec stage | [examples/pockettts/README.md](../examples/pockettts/README.md) |
-| `zig build locate-anything` | LocateAnything-3B open-vocabulary detection | [examples/locate_anything/README.md](../examples/locate_anything/README.md) |
-| `zig build facedetect` | Face detection/recognition (buffalo_l): detect/embed/verify/analyze | [examples/facedetect/README.md](../examples/facedetect/README.md) |
-| `zig build nam` | Neural Amp Modeler: `.nam` profiles, live amp sim, training | [examples/nam/README.md](../examples/nam/README.md) |
-| `zig build nanochat` | nanochat port: tok-train/base-train/sft/eval-bpb/chat | [examples/nanochat/README.md](../examples/nanochat/README.md) |
-| `zig build finetune` | LoRA fine-tune a Qwen3 GGUF on CPU; merge/serve via `export-gguf` | [examples/finetune/README.md](../examples/finetune/README.md) |
-| `zig build es-finetune` | Gradient-free (evolution strategies) fine-tune, LoRA or full-parameter | [examples/es_finetune/README.md](../examples/es_finetune/README.md) |
-| `zig build cartridge` | Train a corpus into a reusable KV prefix (self-study distillation) | [examples/cartridge/README.md](../examples/cartridge/README.md) |
-| `zig build cartridge-fleet` | One cartridge per document + cosine cartridge-RAG serving | [examples/cartridge_fleet/README.md](../examples/cartridge_fleet/README.md) |
+| `zig build locate-anything` | LocateAnything-3B open-vocabulary detection | [apps/locate_anything/README.md](../apps/locate_anything/README.md) |
+| `zig build facedetect` | Face detection/recognition (buffalo_l): detect/embed/verify/analyze | [apps/facedetect/README.md](../apps/facedetect/README.md) |
+| `zig build nam` | Neural Amp Modeler: `.nam` profiles, live amp sim, training | [apps/nam/README.md](../apps/nam/README.md) |
+| `zig build nanochat` | nanochat port: tok-train/base-train/sft/eval-bpb/chat | [apps/nanochat/README.md](../apps/nanochat/README.md) |
+| `zig build finetune` | LoRA fine-tune a Qwen3 GGUF on CPU; merge/serve via `export-gguf` | [apps/finetune/README.md](../apps/finetune/README.md) |
+| `zig build es-finetune` | Gradient-free (evolution strategies) fine-tune, LoRA or full-parameter | [apps/es_finetune/README.md](../apps/es_finetune/README.md) |
+| `zig build cartridge` | Train a corpus into a reusable KV prefix (self-study distillation) | [apps/cartridge/README.md](../apps/cartridge/README.md) |
+| `zig build cartridge-fleet` | One cartridge per document + cosine cartridge-RAG serving | [apps/cartridge_fleet/README.md](../apps/cartridge_fleet/README.md) |
 | `zig build engram` | Conditional n-gram memory grafted onto a frozen Qwen3 GGUF | [examples/engram/README.md](../examples/engram/README.md) |
 | `zig build spirals` | Two-spirals MLP training demo (SGD/AdamW/Muon/APOLLO); no downloads | [examples/spirals/README.md](../examples/spirals/README.md) |
 | `zig build es-spirals` | Two-spirals from scratch with evolution strategies | [examples/es_spirals/README.md](../examples/es_spirals/README.md) |
@@ -109,7 +111,7 @@ zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --repl
 
 ## Shared machinery
 
-Cross-runner machinery documented once. The per-example READMEs link back
+Cross-runner machinery documented once. The per-target READMEs link back
 here instead of repeating it.
 
 ### Streaming MoE experts from disk (out-of-core: models bigger than RAM)
@@ -185,17 +187,16 @@ Knobs:
   (`--moe-route-j=J` default 2, `--moe-route-m=M` default 12). Cuts
   demand misses on miss-bound streaming. **QUALITY-AFFECTING** — routing
   deviates from exact top-k, so it is strictly opt-in; the exit stats
-  report the swapped-slot fraction (deepseek2 / glm4moe / deepseek4
-  runners; qwen3moe's fused router path does not take it yet).
+  report the swapped-slot fraction (fucina-run's deepseek2 / glm4moe legs
+  and the deepseek4 app; qwen3moe's fused router path does not take it yet).
 - `--kv-save[=PATH]` — crash-safe KV persistence for `--chat`/`--repl`:
   conversations reopen warm across process restarts with zero re-prefill
   (essential below 1 tok/s). Default sidecar `<gguf>.kvcache`.
 
 The DeepSeek-family runners and the qwen35 runner (qwen35moe) share this
 streamed-expert machinery; all of them accept `--moe-stream`/`--moe-cache-mb`
-([examples/deepseek2/README.md](../examples/deepseek2/README.md),
-[examples/glm4moe/README.md](../examples/glm4moe/README.md),
-[examples/deepseek4/README.md](../examples/deepseek4/README.md),
+([apps/run/README.md](../apps/run/README.md) for deepseek2 and glm4moe,
+[apps/deepseek4/README.md](../apps/deepseek4/README.md),
 [examples/qwen35/README.md](../examples/qwen35/README.md)). DeepSeek
 V4 Flash's 164.6 GB Q4K release decodes on a 64 GB machine with
 `--moe-stream` (measured 1.5–3.6 tok/s warm at a 20 GB expert budget).
@@ -235,11 +236,11 @@ drafter:
   on a 64 GB machine. The verify runs kernel-pinned (batched quant
   matmuls reproduce single-token numerics bitwise); depth caps at 8, set
   by the non-quant kernel thresholds, and bare `--mtp` is depth 2.
-  ([examples/glm4moe/README.md](../examples/glm4moe/README.md))
+  (`zig build run`; [apps/run/README.md](../apps/run/README.md))
 - DeepSeek V4 Flash: `--mtp=<sidecar.gguf>` — the 3.8 GB sidecar GGUF
   drafts, the trunk verifies in one batched step — lossless, measured
   84.6% draft acceptance / 1.60 tokens per trunk forward at depth 1.
-  ([examples/deepseek4/README.md](../examples/deepseek4/README.md))
+  ([apps/deepseek4/README.md](../apps/deepseek4/README.md))
 
 ### Constrained decoding (`-Dllguidance=true`)
 

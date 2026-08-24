@@ -15,37 +15,35 @@ guide for contributors and coding agents: toolchain, commands, repo map, house r
 ## Build, test, run, bench
 
 ```sh
-zig build test                 # unit tests, every test root: src/fucina.zig, src/models.zig, and the test-carrying examples; each root also has a solo step (test-fucina, test-models, test-<example>)
+zig build test                 # unit tests, every test root: src/fucina.zig, src/models.zig, and the test-carrying apps; each root also has a solo step (test-fucina, test-models, test-<app>)
 zig build test-fucina -Dbackend=scalar  # THE scalar leg: fucina root only (the kernel/spec surface). The scalar backend verifies kernels/math; real-model golden forwards are native-only by design, so the full test matrix is a native gate
 zig build test -Dblas=none        # native backend via pure Zig vector kernels (no CBLAS)
-zig build arch-check           # production-only import graph over src/ + examples/ + bench/ + tools/ (AST-based, test-aware): 0 forbidden SCCs (the root-anchored exec.zig <-> exec/*.zig SCC is permitted and counted), 0 band inversions (the ARCHITECTURE.md Layer Stack, encoded as band_table in the tool), every sibling test file forwarded
+zig build arch-check           # production-only import graph over src/ + examples/ + apps/ + bench/ + tools/ (AST-based, test-aware): 0 forbidden SCCs (the root-anchored exec.zig <-> exec/*.zig SCC is permitted and counted), 0 band inversions (the ARCHITECTURE.md Layer Stack, encoded as band_table in the tool), every sibling test file forwarded
 zig build doc-check            # doc rot gate: docs/README.md (the index) matches the docs-nav set; intra-doc links, anchors, and src:line citations resolve; README's zig-fetch pin matches build.zig.zon (tools/check_doc_links.zig)
 zig build snippet-check        # reference snippet gate: every runnable ```zig snippet (named test block) in docs/reference/ extracted and run against the real fucina/fucina_models modules (tools/gen_snippet_tests.zig)
 zig build x86dot-check         # cross-ISA int8/Q4_K/Q8_0/TQ2_0 dot parity checker (follows -Dtarget) + compile-only AVX2/VNNI/smmla bit-rot legs (src/x86dot_check.zig)
 zig build bench-check          # compile every bench executable and the subq research tools without running them
 zig build cuda-check           # compile-only -Dgpu=cuda legs (x86_64-linux-gnu fucina/models roots + NVRTC PTX generator, not run): CUDA-provider bit-rot gate for GPU-less machines
-zig build smoke                # smoke example (examples/smoke/main.zig; `run` kept as an alias)
-zig build qwen3 -- <args>      # Qwen3 GGUF inference (examples/qwen3/main.zig; --spec/--spec-ref = lossless speculative decode, --tokenize = tokenizer-parity oracle)
+zig build smoke                # smoke example (examples/smoke/main.zig)
+zig build run -- <gguf> [args]   # fucina-run, the registry runner: any registered GGUF arch (qwen3/qwen3moe/gemma4/qwen35/qwen35moe/inkling/deepseek2/deepseek4/glm4moe): completion/chat/REPL, sampling, NLL, parity dumps, --moe-* streaming, glm4moe --mtp, inkling multimodal (apps/run/main.zig)
+zig build qwen3 -- <args>      # Qwen3 GGUF inference (apps/qwen3/main.zig; --spec/--spec-ref = lossless speculative decode, --tokenize = tokenizer-parity oracle)
 zig build gemma4 -- <args>     # Gemma 4 GGUF inference / logit-parity harness; --chat/--repl/--spec (examples/gemma4/main.zig)
 zig build qwen35 -- <args>     # Qwen3.5 (qwen35 hybrid Gated-DeltaNet) GGUF — loader/parity harness (examples/qwen35/main.zig; see examples/qwen35/README.md)
-zig build deepseek2 -- <args>  # DeepSeek-V2 family (MLA + fine-grained MoE) GGUF inference (examples/deepseek2/main.zig)
-zig build glm4moe -- <args>    # GLM-4.5 family GGUF inference; --mtp = native multi-token-prediction speculative decode (examples/glm4moe/main.zig)
-zig build deepseek4 -- <args>  # DeepSeek V4 Flash GGUF inference (hyper-connections, compressed KV, streamed experts, MTP; examples/deepseek4/main.zig)
-zig build inkling -- <args>    # Inkling GGUF inference / parity harness (hybrid rel-bias attention, shortconv sites, sink-shared MoE; examples/inkling/main.zig)
-zig build lmserve -- <args>    # OpenAI-compatible LM server (chat completions + stateless responses, SSE, JSON-schema constrained output w/ -Dllguidance=true) over qwen3/qwen35/gemma4/diffusion-gemma/inkling/deepseek4 GGUFs + nanochat checkpoints (examples/lmserve/main.zig; see docs/LMSERVER.md)
-zig build parakeet -- <args>   # Parakeet ASR (NeMo FastConformer): WAV → text; --stream/--manifest/--mic (needs -Dparakeet-mic), --compare parity harness (examples/parakeet/main.zig)
-zig build omnivoice -- <args>  # OmniVoice MaskGIT TTS: voice cloning/design/auto, codec encode/decode, parity oracles (examples/omnivoice/main.zig)
-zig build facedetect -- <args> # buffalo_l face pipeline (face-detect.cpp port): info/detect/embed/verify/analyze + bench paired CPU harness (examples/facedetect/main.zig)
-zig build nanochat -- <args>   # nanochat port (karpathy/nanochat): tok-train / base-train / sft / eval-bpb / chat — full CPU pipeline, GPT pretraining + SFT + chat w/ calculator tool (examples/nanochat/main.zig)
-zig build diffusion-gemma -- <args>  # DiffusionGemma block text-diffusion: --eval parity harness vs llama.cpp PR 24423, --chat EB decoding (examples/diffusion_gemma/main.zig)
-zig build locate-anything -- <args>  # LocateAnything-3B open-vocabulary detection: detect/info CLI + exit-code parity gates vs reference dumps (examples/locate_anything/main.zig)
+zig build deepseek4 -- <args>  # DeepSeek V4 Flash GGUF inference (hyper-connections, compressed KV, streamed experts, MTP; apps/deepseek4/main.zig)
+zig build lmserve -- <args>    # OpenAI-compatible LM server (chat completions + stateless responses, SSE, JSON-schema constrained output w/ -Dllguidance=true) over qwen3/qwen35/gemma4/diffusion-gemma/inkling/deepseek4 GGUFs + nanochat checkpoints (apps/lmserve/main.zig; see docs/LMSERVER.md)
+zig build parakeet -- <args>   # Parakeet ASR (NeMo FastConformer): WAV → text; --stream/--manifest/--mic (needs -Dparakeet-mic), --compare parity harness (apps/parakeet/main.zig)
+zig build omnivoice -- <args>  # OmniVoice MaskGIT TTS: voice cloning/design/auto, codec encode/decode, parity oracles (apps/omnivoice/main.zig)
+zig build facedetect -- <args> # buffalo_l face pipeline (face-detect.cpp port): info/detect/embed/verify/analyze + bench paired CPU harness (apps/facedetect/main.zig)
+zig build nanochat -- <args>   # nanochat port (karpathy/nanochat): tok-train / base-train / sft / eval-bpb / chat — full CPU pipeline, GPT pretraining + SFT + chat w/ calculator tool (apps/nanochat/main.zig)
+zig build diffusion-gemma -- <args>  # DiffusionGemma block text-diffusion: --eval parity harness vs llama.cpp PR 24423, --chat EB decoding (apps/diffusion_gemma/main.zig)
+zig build locate-anything -- <args>  # LocateAnything-3B open-vocabulary detection: detect/info CLI + exit-code parity gates vs reference dumps (apps/locate_anything/main.zig)
 zig build spirals              # two-spirals training demo: SGD/AdamW/Muon/APOLLO + checkpoints (examples/spirals/main.zig)
-zig build nam -- <args>        # Neural Amp Modeler: .nam profile import/run/train/export, GGUF interchange, live amp sim (examples/nam/main.zig)
-zig build finetune -- <args>   # LoRA fine-tune a Qwen3 GGUF on CPU (examples/finetune/main.zig)
-zig build cartridge -- <args>  # Cartridges (arXiv 2506.06266): train a corpus into a reusable KV prefix by in-process self-study distillation + serve it (examples/cartridge/main.zig; see docs/CARTRIDGES.md)
-zig build cartridge-fleet -- <args>  # per-document cartridge fleets: joint training, budget manager, cosine cartridge-RAG (examples/cartridge_fleet/main.zig)
+zig build nam -- <args>        # Neural Amp Modeler: .nam profile import/run/train/export, GGUF interchange, live amp sim (apps/nam/main.zig)
+zig build finetune -- <args>   # LoRA fine-tune a Qwen3 GGUF on CPU (apps/finetune/main.zig)
+zig build cartridge -- <args>  # Cartridges (arXiv 2506.06266): train a corpus into a reusable KV prefix by in-process self-study distillation + serve it (apps/cartridge/main.zig; see docs/CARTRIDGES.md)
+zig build cartridge-fleet -- <args>  # per-document cartridge fleets: joint training, budget manager, cosine cartridge-RAG (apps/cartridge_fleet/main.zig)
 zig build engram -- <args>     # conditional n-gram memory graft trained on a frozen Qwen3 GGUF (examples/engram/main.zig; see docs/ENGRAM.md)
-zig build es-finetune -- <args>  # gradient-free ES fine-tune of a Qwen3 GGUF (examples/es_finetune/main.zig; --mode lora|full, --reward rule|nll|acc)
+zig build es-finetune -- <args>  # gradient-free ES fine-tune of a Qwen3 GGUF (apps/es_finetune/main.zig; --mode lora|full, --reward rule|nll|acc)
 zig build es-spirals           # two-spirals MLP trained FROM SCRATCH by ES (examples/es_spirals/main.zig; self-verifying, member-parallel replicas)
 zig build es-ternary-spirals   # two-spirals MLP with PACKED TERNARY (TQ2_0) hidden/output layers trained by ternary-native ES — training state IS the int8 inference model (examples/es_ternary_spirals/main.zig; see docs/TERNARY.md)
 zig build ptqtp-spirals        # float-train a two-spirals MLP, then post-training-quantize it to DUAL TRIT-PLANES (PTQTP, arXiv:2509.16989: packed TQ2_0 plane pairs; self-verifying — examples/ptqtp_spirals/main.zig, docs/PTQTP.md)
@@ -75,7 +73,7 @@ zig build bench-einsum         # einsum vs hand-written dot/permute contraction 
 zig build bench-backward-diamond  # serial vs manual-parallel independent GEMM VJPs
 ```
 
-`zig build --help` lists every step; runner CLIs live in `docs/RUNNING-MODELS.md` and the per-example `examples/<name>/README.md`.
+`zig build --help` lists every step; runner CLIs live in `docs/RUNNING-MODELS.md` and the per-target `examples/<name>/README.md` / `apps/<name>/README.md`.
 
 Build options (consumed at comptime via `build_options`; the full table with defaults and constraints is the reference's toolchain chapter, `docs/reference/02-toolchain-build-and-project-wiring.md`):
 
@@ -126,12 +124,14 @@ Build options (consumed at comptime via `build_options`; the full table with def
 | `src/models.zig`, `src/models/` | model band: families, text runtime, research tier | reference ch 13-14; `docs/ARCHITECTURE.md` |
 | `src/models/text/speculative/` | speculative-decoding subsystem (SAM/recycling/MTP/constrained cascade) | `docs/SPECULATIVE.md` |
 | `tools/export_gguf.zig` | GGUF re-emit/transcode, LoRA merge, shard-streaming PTQTP quantizer | `docs/PTQTP.md`; reference ch 12 |
-| `examples/` | one directory per example rooted at `main.zig`; each README owns its CLI | `docs/RUNNING-MODELS.md` |
-| `examples/omnivoice/` | OmniVoice MaskGIT TTS port (voice clone/design; byte-exact parity) | `examples/omnivoice/README.md` |
-| `examples/locate_anything/` | LocateAnything-3B open-vocabulary detection VLM port | `examples/locate_anything/README.md` |
-| `examples/facedetect/` | buffalo_l face pipeline port (detect/recognize/analyze) | `examples/facedetect/README.md` |
-| `examples/nanochat/` | nanochat port: BPE training, pretraining, SFT, eval, chat on CPU | `examples/nanochat/README.md` |
-| `examples/nam/` | Neural Amp Modeler port: `.nam` engines, training, live audio/MIDI | `examples/nam/README.md` |
+| `examples/` | teaching code: one `main.zig` per directory (a README is fine), no test files, no C shims, no vendored assets; it exists to be read and copied | `docs/RUNNING-MODELS.md` |
+| `apps/` | product- and port-shaped programs: multi-file, own tests, shims, goldens, or a real CLI surface; one directory per app rooted at `main.zig`, each README owns its CLI | `docs/RUNNING-MODELS.md` |
+| `apps/run/` | fucina-run, the registry GGUF runner (`zig build run -- <gguf>`) | `docs/RUNNING-MODELS.md` |
+| `apps/omnivoice/` | OmniVoice MaskGIT TTS port (voice clone/design; byte-exact parity) | `apps/omnivoice/README.md` |
+| `apps/locate_anything/` | LocateAnything-3B open-vocabulary detection VLM port | `apps/locate_anything/README.md` |
+| `apps/facedetect/` | buffalo_l face pipeline port (detect/recognize/analyze) | `apps/facedetect/README.md` |
+| `apps/nanochat/` | nanochat port: BPE training, pretraining, SFT, eval, chat on CPU | `apps/nanochat/README.md` |
+| `apps/nam/` | Neural Amp Modeler port: `.nam` engines, training, live audio/MIDI | `apps/nam/README.md` |
 | `bench/`, `src/bench_raw.zig` | microbenchmarks + their internal raw-surface module | `docs/BENCHMARK.md` |
 | `refs/` (untracked) | reference-repo clones + parity goldens (`tools/fetch_refs.sh`) | `docs/PORTING.md`; `docs/BENCHMARK.md` |
 

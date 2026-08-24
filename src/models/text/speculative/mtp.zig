@@ -1,7 +1,7 @@
 //! Native MTP (multi-token-prediction) drafting behind the `DraftSource`
 //! vtable: the family's `nextn`-style MTP head proposes the draft and the
 //! shared `SpeculativeDecoder` verify loop drives commit/rewind, replacing
-//! hand-rolled draft/verify/commit loops (examples/glm4moe). The adapter is
+//! hand-rolled draft/verify/commit loops (the retired glm4moe runner; fucina-run drives this path). The adapter is
 //! generic over a glm4moe-shaped model: `mtpDraftStep(self, ctx, mtp_cache,
 //! token, h_prev, h_out)`, an `initMtpCache(self, capacity)` constructor
 //! for the MTP stream's own cache, and a model-owned `step_hiddens` row

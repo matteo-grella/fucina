@@ -81,7 +81,7 @@ better investment than the port.
 
 - **Pipeline-ordered stages, one parity gate each**, exposed as exit-code
   `--compare <stage> <dump>` modes in the port's own CLI (see
-  `examples/parakeet/main.zig` and `examples/omnivoice/main.zig`). Intermediates
+  `apps/parakeet/main.zig` and `apps/omnivoice/main.zig`). Intermediates
   are numeric checkpoints whose only job is to localize the first
   divergent stage; the final gate is exact match of the discrete output.
   A stage is done when its gate passes, tests are green on both backends

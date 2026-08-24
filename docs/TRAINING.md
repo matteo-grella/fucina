@@ -96,7 +96,7 @@ const logits = try forwardLogits(&ctx, &model, &x);   // zero ceremony inside
 - Back the context with `fucina.CachingAllocator` for training loops: the
   per-step tensor churn then recycles warm blocks through power-of-two
   freelists instead of paying the general-purpose allocator's mmap/madvise
-  and first-touch page faults every step (`examples/finetune` wires it).
+  and first-touch page faults every step (`apps/finetune` wires it).
   Cached memory holds at
   the high-water mark of live large blocks until `deinit`.
 - Adoption is wired into the op tails themselves (`finishOp` in
@@ -507,8 +507,8 @@ parameters are the adapters' A/B. MoE configs are rejected
   runs store the dropout step counter, seed, LoRA config, and LR in
   `trainer_state.json`.
 
-**The walkthrough** (`examples/finetune/main.zig`; getting-started README with
-the copy-paste commands: `examples/finetune/README.md`):
+**The walkthrough** (`apps/finetune/main.zig`; getting-started README with
+the copy-paste commands: `apps/finetune/README.md`):
 
 ```sh
 zig build finetune -Doptimize=ReleaseFast -- --steps 30
@@ -609,7 +609,7 @@ parity AND in llama-bench as "Q4_K - Small".
 ```sh
 # 1. fine-tune: checkpoint directory with adapters.safetensors + optimizer.fucina
 #    (download the f16 GGUF first — see RUNNING-MODELS.md "Getting the
-#    weights"; copy-paste form of this loop: examples/finetune/README.md)
+#    weights"; copy-paste form of this loop: apps/finetune/README.md)
 zig build finetune -Doptimize=ReleaseFast -- \
     --model models/Qwen3-0.6B-f16.gguf --steps 30 --save /tmp/qwen3-lora
 # 2. merge the adapters into the dense f32/f16 base (--alpha = training-time alpha; finetune default 16)
@@ -669,7 +669,7 @@ Every OTHER typed forward op (the [§4.19](reference/04-tensor-operations.md#419
 rejects a grad-requiring operand with `error.UnsupportedGradient` — a graph
 is never silently dropped. In a trained path, widen with `to(.f32)` first.
 
-Worked example: `examples/nanochat` trains its transformer matrices in bf16
+Worked example: `apps/nanochat` trains its transformer matrices in bf16
 via `ModelOf(.bf16)` — the matrices are 16-bit leaves consumed as `dot`
 RHS, embeddings stay f32 (they train through `gather`), the AdamW-routed
 params ride the optimizer masters above, and its custom Muon steps
@@ -961,7 +961,7 @@ Neither normalization shrinks the step near a sharp optimum (both rescale to
 a fixed spread every iteration), so the practical brakes remain: bounded
 saturating rewards, conservative sigma, and eval-selected checkpoints.
 
-**LLM fine-tuning.** `zig build es-finetune` (examples/es_finetune/main.zig) is
+**LLM fine-tuning.** `zig build es-finetune` (apps/es_finetune/main.zig) is
 the finetune example's gradient-free twin — same dataset plumbing, same trainer
 forward, same checkpoint layout, so runs compare apples-to-apples.
 `--mode lora` perturbs only the q/v adapters; `--mode full` perturbs every

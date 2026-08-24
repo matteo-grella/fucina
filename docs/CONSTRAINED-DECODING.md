@@ -75,7 +75,7 @@ hook lives. Every decode path already funnels through
 - `chat.Conversation.sendBatch` (lockstep multi-stream `sampleStep`),
 - the speculative decoder's plain step *and* every verify row
   (`speculative/core.zig`),
-- every hand-rolled runner loop (`examples/qwen3/generate.zig`
+- every hand-rolled runner loop (`apps/qwen3/generate.zig`
   completion/bench, multi-stream arms).
 
 Hooking the sampler therefore means: **implement once, constrained
@@ -351,7 +351,7 @@ Consumers:
 | Combinator policy (forced preemption, invalid-prefix truncation, pending accounting, top-k mirroring) | `src/models/text/speculative/constrained_tests.zig` |
 | Constrained plain == speculative (greedy + sampled), forced spans drafted AND accepted, per-turn reset, batch == sequential per-stream constraints, shared-processor guard | `src/models/text/chat_tests.zig` |
 | Doc snippets (incl. the flag-gated llguidance snippet) | `zig build snippet-check` (authoring contract: [DEVELOPMENT.md §7.2](DEVELOPMENT.md#72-doc-snippets-are-tests-too)) |
-| E2E schema/regex conformance, `--spec` byte-parity + acceptance, `--streams` cross-check | qwen3 runner on Qwen3-0.6B-Q8_0 (2026-07-11; grammar commands in `RUNNING-MODELS.md` §"Constrained decoding", the `--spec`/`--streams` commands in `examples/qwen3/README.md`) |
+| E2E schema/regex conformance, `--spec` byte-parity + acceptance, `--streams` cross-check | qwen3 runner on Qwen3-0.6B-Q8_0 (2026-07-11; grammar commands in `RUNNING-MODELS.md` §"Constrained decoding", the `--spec`/`--streams` commands in `apps/qwen3/README.md`) |
 | Linux staticlib link + full gated suite (x86-64 glibc) | CI llguidance leg (`ci.yml`, ubuntu; [DEVELOPMENT.md §7.3](DEVELOPMENT.md#73-continuous-integration-githubworkflowsciyml)) — first proven natively on the dev rig, 2026-07-11 |
 
 Reference documentation: [§13.6](reference/13-the-model-stack-fucina_models.md#136-sampling-srcmodelstextsamplerzig) (seam + engine), [§13.9.6](reference/13-the-model-stack-fucina_models.md#1396-grammar-constrained-drafting-speculativeconstrainedzig)

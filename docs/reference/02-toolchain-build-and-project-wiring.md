@@ -208,8 +208,8 @@ itself is centralized in six helpers applied per executable:
   error strings with `catch_unwind`, and glibc does not export
   `_Unwind_*`; macOS's libSystem ships an unwinder).
 - `configureNamAudio` / `configureOmnivoiceAudio` / `configureParakeetAudio`
-  — the vendored miniaudio C shims (`examples/nam/audio_shim.c`, plus
-  `midi_shim.c` for NAM and `examples/omnivoice/play_shim.c` for playback),
+  — the vendored miniaudio C shims (`apps/nam/audio_shim.c`, plus
+  `midi_shim.c` for NAM and `apps/omnivoice/play_shim.c` for playback),
   with CoreAudio/CoreMIDI frameworks on macOS; elsewhere miniaudio `dlopen`s
   its backend through libc.
 

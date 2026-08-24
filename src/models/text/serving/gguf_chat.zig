@@ -3,7 +3,7 @@
 //! the grammar constraint cache, the KV reuse slot pool with its
 //! evict-to-disk tier, and the KV RAM guard. Family-specific adapters that
 //! cannot ride `Conversation` live with the CLI front end
-//! (`examples/lmserve/backend_*.zig`).
+//! (`apps/lmserve/backend_*.zig`).
 
 const std = @import("std");
 const builtin = @import("builtin");

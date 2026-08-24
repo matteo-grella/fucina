@@ -10,7 +10,7 @@
 //! deepseek arm): BOS, leading system messages as plain text, then
 //! `<｜User｜>` / `<｜Assistant｜>` turns. Every assistant turn opens behind a
 //! closed think block (the `</think>` token — thinking disabled, matching
-//! the parity-validated examples/deepseek4 runner) and past assistant turns
+//! the parity-validated apps/deepseek4 runner) and past assistant turns
 //! close with the EOS token (`<｜end▁of▁sentence｜>`), so re-rendered history
 //! reproduces exactly the token stream a served conversation generated.
 //! Message content is encoded WITHOUT special-token resolution, so client

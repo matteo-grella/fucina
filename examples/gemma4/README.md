@@ -62,7 +62,7 @@ zig build gemma4 -Doptimize=ReleaseFast -- models/gemma-4-26B-A4B-it-UD-Q6_K.ggu
 
 Sampling flags mirror the qwen3 runner (`--temp --top-k --top-p --min-p
 --repeat-penalty --repeat-last-n --freq-penalty --presence-penalty --seed
---greedy`) — see [`../qwen3/README.md`](../qwen3/README.md). Constrained
+--greedy`) — see [`apps/qwen3/README.md`](../../apps/qwen3/README.md). Constrained
 decoding mirrors qwen3 too (`--json-schema/--lark/--regex` on
 `--chat`/`--repl`, `-Dllguidance=true` builds); usage guidance is in
 [`../../docs/RUNNING-MODELS.md`](../../docs/RUNNING-MODELS.md).

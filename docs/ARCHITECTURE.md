@@ -2,11 +2,12 @@
 # Fucina Zig Architecture
 
 This document describes the current Zig implementation in this tree (`src/`,
-`examples/`, `bench/`, `tools/`). It is derived from the actual source layout
-and behavior, not from historical design notes. Structure lives here; the
-command cheat sheet lives in `AGENTS.md`, and per-model recipes live in the
-per-example `examples/<name>/README.md` guides indexed by
-`RUNNING-MODELS.md`. Last reconciled against the tree: 2026-08-23.
+`examples/`, `apps/`, `bench/`, `tools/`). It is derived from the actual
+source layout and behavior, not from historical design notes. Structure lives
+here; the command cheat sheet lives in `AGENTS.md`, and per-model recipes live
+in the per-target `examples/<name>/README.md` and `apps/<name>/README.md`
+guides indexed by `RUNNING-MODELS.md`. Last reconciled against the tree:
+2026-08-24.
 
 ## Status
 
@@ -17,8 +18,8 @@ dtypes, `f16`/`bf16`/`f32`/`f64`, and the GGML block-quantized formats (see
 exposed from `src/fucina.zig`. Model families (Qwen3 dense + MoE, Qwen3.5,
 Gemma 4, DiffusionGemma, DeepSeek V2 + V4 Flash, GLM-4.5, Inkling, Parakeet
 ASR, plus the OmniVoice TTS, LocateAnything VLM, and NAM ports in
-`examples/`) run from GGUF weights through the sibling `fucina_models` module
-(`src/models.zig`) and the example runners. Execution is CPU-first with optional
+`apps/`) run from GGUF weights through the sibling `fucina_models` module
+(`src/models.zig`) and the runners in `examples/` and `apps/`. Execution is CPU-first with optional
 Metal/CUDA callable-accelerator offload (`-Dgpu=metal|cuda`,
 `src/backend/{metal,cuda}.zig`).
 
@@ -35,7 +36,7 @@ Top-down; a band may depend only on bands at or below it:
 
 | Band | Contents |
 | --- | --- |
-| apps | `examples/**`, `tools/**`, `bench/**`, `src/bench_raw.zig`, `src/x86dot_check.zig` |
+| apps | `examples/**`, `apps/**`, `tools/**`, `bench/**`, `src/bench_raw.zig`, `src/x86dot_check.zig` |
 | models | `src/models.zig`, `src/models/**` (the `fucina_models` module) |
 | facade | `src/fucina.zig` (the `fucina` module root) |
 | ag + training/serialization | `src/ag.zig`, `src/ag/**`, `src/optim.zig`, `src/optim/**`, `src/es.zig`, `src/ptqtp.zig`, `src/gguf.zig`, `src/lora.zig`, `src/safetensors.zig`, `src/state_dict.zig`, `src/training_checkpoint.zig`, `src/param_registry.zig`, `src/weights.zig`, `src/weights/**`, `src/gguf_meta.zig`, `src/ptqtp_gguf.zig` (model I/O) |
@@ -251,9 +252,13 @@ Training and persistence (see *Training And Persistence*): `src/optim.zig`,
 
 LLM stack (see *LLM Stack*): `src/models.zig` + `src/models/`.
 
-Apps: `examples/` (one directory per example rooted at `main.zig`: `smoke/`, `qwen3/`,
-`qwen35/`, `gemma4/`, `diffusion_gemma/`, `parakeet/`, `spirals/`, `finetune/`,
-`es_finetune/`, `es_spirals/`, `nam/`, `omnivoice/`, and more), `tools/`
+Apps band: `examples/` (single-file teaching programs, one `main.zig` per
+directory: `smoke/`, `spirals/`, `es_spirals/`, `gemma4/`, `qwen35/`,
+`engram/`, and more), `apps/` (product- and port-shaped programs with their
+own tests, shims, and goldens: `run/` (the registry runner), `qwen3/`,
+`deepseek4/`, `diffusion_gemma/`, `lmserve/`, `parakeet/`, `omnivoice/`,
+`nam/`, `voiceagent/`, `facedetect/`, `locate_anything/`, `nanochat/`,
+`finetune/`, `es_finetune/`, `cartridge/`, `cartridge_fleet/`), `tools/`
 (`export_gguf.zig`, `check_import_graph.zig`, `check_doc_links.zig`, plus the
 benchmark/parity helper scripts), `bench/` (microbenchmarks plus the shared
 `alloc.zig`/`timer.zig` helpers).
@@ -320,8 +325,8 @@ modules are separate, apps-band roots).
 Enforcement:
 
 - `zig build arch-check` runs `tools/check_import_graph.zig` over the
-  production (non-test) import graph of `src/`, `examples/`, `bench/`, and
-  `tools/`, and enforces three invariants: no forbidden
+  production (non-test) import graph of `src/`, `examples/`, `apps/`,
+  `bench/`, and `tools/`, and enforces three invariants: no forbidden
   strongly-connected components, zero band inversions, and every sibling
   test file forwarded from a production file. An SCC is permitted only
   when every member is in the same band and one member is the directory
@@ -329,9 +334,9 @@ Enforcement:
   `src/exec/*.zig`, the struct-body-in-the-root shape `std.zig` and
   `std/array_list.zig` share). Children cycling without their root, or
   any cycle that crosses a band, fail the build. The apps-band roots are
-  scanned because several `examples/` entries are complete model ports
-  rather than snippets, and an unforwarded test file there is just as
-  silently dead as one in `src/`. A file whose name ends in `_tests.zig`
+  scanned because the `apps/` entries are complete model ports rather than
+  snippets, and an unforwarded test file there is just as silently dead as
+  one in `src/`. A file whose name ends in `_tests.zig`
   but which declares `pub fn main` is an executable root, not a suite
   (`tools/gen_snippet_tests.zig` generates tests), and is exempt from the
   forwarding rule.
@@ -806,7 +811,7 @@ Generic helpers stay flat in `src/models/`:
   qwen3moe, gemma4) shares one generic engine box, and the engine-hosted
   set (qwen35, qwen35moe, inkling, deepseek4) routes to the family serving
   adapters (`qwen35/serving.zig`, `inkling/serving.zig`,
-  `deepseek4/serving.zig`). `examples/lmserve` is the CLI front end and
+  `deepseek4/serving.zig`). `apps/lmserve` is the CLI front end and
   keeps only the two non-registry backends (diffusion-gemma, nanochat).
 
 - `src/optim.zig` (facade) + `src/optim/`: SGD/AdamW/Muon/APOLLO, grad clipping, LR schedules,
@@ -855,7 +860,7 @@ the verification-relevant steps are:
 
 - `zig build test` (+ `-Dbackend=scalar`, `-Dblas=none`, optimize variants):
   drives every test root — `src/fucina.zig`, `src/models.zig`, and the
-  `examples/{lmserve,nam,parakeet,omnivoice,locate_anything,facedetect,voiceagent,nanochat}/main.zig`
+  `apps/{lmserve,nam,parakeet,omnivoice,locate_anything,facedetect,voiceagent,nanochat}/main.zig`
   roots (`zig build test-fucina` runs the fucina root alone, the routine
   `-Dbackend=scalar` leg). Parity suites needing local model/reference assets
   are env-gated (e.g. `OMNIVOICE_PARITY`) and skip by default.
@@ -866,12 +871,13 @@ the verification-relevant steps are:
   (x86_64_v3 AVX2, alderlake AVX-VNNI, znver4 AVX512-VNNI, neoverse_v1
   smmla) to catch bit-rot of arms no local substrate can execute.
 - `zig build doc-check`: fails when `AGENTS.md`'s doc index names a `.md`
-  (root-level, `docs/<name>.md`, or `examples/<name>/README.md`) that does
-  not exist, and existence-checks the `examples/<name>/README.md` references
-  in `RUNNING-MODELS.md` the same way (`tools/check_doc_links.zig`).
-- The model runners (`qwen3`, `qwen35`, `gemma4`, `deepseek2`, `deepseek4`,
-  `glm4moe`, `inkling`, `diffusion-gemma`, `parakeet`, `omnivoice`,
-  `locate-anything`, `facedetect`, `nam`, `finetune`, `export-gguf`) double as
+  (root-level, `docs/<name>.md`, `examples/<name>/README.md`, or
+  `apps/<name>/README.md`) that does not exist, and existence-checks the
+  `examples/<name>/README.md` and `apps/<name>/README.md` references in
+  `RUNNING-MODELS.md` the same way (`tools/check_doc_links.zig`).
+- The model runners (`run`, `qwen3`, `qwen35`, `gemma4`, `deepseek4`,
+  `diffusion-gemma`, `parakeet`, `omnivoice`, `locate-anything`,
+  `facedetect`, `nam`, `finetune`, `export-gguf`) double as
   parity/oracle harnesses; `bench*` steps are the perf protocol vehicles
   (`BENCHMARK.md`).
 

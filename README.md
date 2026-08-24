@@ -170,13 +170,16 @@ kernels.
 With the tensor core in place, Fucina grows and gets tested through real
 applications, so the runtime and the things built on it develop side by
 side. Every family below is ordinary consumer code of the same public
-`fucina`/`fucina_models` surface wired in Getting started, so `examples/`
-doubles as a corpus of real usage: open any `main.zig` and read how the
-library is actually driven. And every family is validated against its
+`fucina`/`fucina_models` surface wired in Getting started, split across
+two homes: `examples/` holds single-file teaching programs meant to be
+read and copied, and `apps/` holds the product- and port-shaped programs
+(multi-file, own tests, shims, goldens, real CLI surfaces). Both double
+as a corpus of real usage: open any `main.zig` and read how the library
+is actually driven. And every family is validated against its
 reference implementation, a discipline that is the core of the project:
 token-ID-exact tokenizers vs `llama-tokenize`, logit-parity oracles vs
 llama.cpp, byte-exact quantization encoders vs ggml, byte-identical GGUF
-re-emit. Each family's folder under `examples/` carries its own README
+re-emit. Each family's folder carries its own README
 with copy-paste commands; [docs/RUNNING-MODELS.md](docs/RUNNING-MODELS.md)
 is the index — verified weight downloads and licenses, plus the machinery
 shared across runners (expert streaming, GPU offload, global knobs).
@@ -213,15 +216,15 @@ are documented in
 
 | Family | What it is |
 | --- | --- |
-| **[Qwen3](examples/qwen3/README.md)** dense (0.6B–8B) + MoE (30B-A3B, 235B-A22B) | chat / REPL / raw generation, lossless speculative decoding, batch-N multi-conversation decode, JSON-schema/grammar constrained output |
-| **[DeepSeek V2/V3](examples/deepseek2/README.md)** (MLA) | multi-head latent attention with the compressed KV cache as the default; covers V2-Lite, Moonlight-16B-A3B, and GLM-5.2 (`glm-dsa`) checkpoints |
-| **[GLM-4.5](examples/glm4moe/README.md)** family (MoE) | V3-style trunk plus the model's own `nextn` layer for lossless multi-token-prediction drafting |
-| **[DeepSeek V4 Flash](examples/deepseek4/README.md)** 284B-A13B | hyper-connections trunk with native MTP speculative decoding; the 164.6 GB Q4K release decodes on a 64 GB machine |
+| **[Qwen3](apps/qwen3/README.md)** dense (0.6B–8B) + MoE (30B-A3B, 235B-A22B) | chat / REPL / raw generation, lossless speculative decoding, batch-N multi-conversation decode, JSON-schema/grammar constrained output |
+| **DeepSeek V2/V3** (MLA, via [`zig build run`](docs/RUNNING-MODELS.md)) | multi-head latent attention with the compressed KV cache as the default; covers V2-Lite, Moonlight-16B-A3B, and GLM-5.2 (`glm-dsa`) checkpoints |
+| **GLM-4.5** family (MoE, via [`zig build run`](docs/RUNNING-MODELS.md)) | V3-style trunk plus the model's own `nextn` layer for lossless multi-token-prediction drafting |
+| **[DeepSeek V4 Flash](apps/deepseek4/README.md)** 284B-A13B | hyper-connections trunk with native MTP speculative decoding; the 164.6 GB Q4K release decodes on a 64 GB machine |
 | **[Gemma 4](examples/gemma4/README.md)** 26B-A4B (MoE) | chat / REPL / speculative decoding, JSON-schema/grammar constrained output |
 | **[Qwen3.5](examples/qwen35/README.md)** 0.8B | hybrid Gated-DeltaNet architecture (conv + delta scan + gated attention) |
-| **[DiffusionGemma](examples/diffusion_gemma/README.md)** 26B-A4B | block text-diffusion decoding on the Gemma backbone |
-| **[Inkling](examples/inkling/README.md)** 975B-A41B (MoE) | hybrid local/global-attention multimodal decoder: text chat plus image and audio input towers |
-| **[nanochat](examples/nanochat/README.md)** | karpathy/nanochat ported whole: BPE tokenizer training, GPT pretraining, SFT, bits-per-byte eval, and chat — trained from scratch on CPU |
+| **[DiffusionGemma](apps/diffusion_gemma/README.md)** 26B-A4B | block text-diffusion decoding on the Gemma backbone |
+| **Inkling** 975B-A41B (MoE, via [`zig build run`](docs/RUNNING-MODELS.md)) | hybrid local/global-attention multimodal decoder: text chat plus image and audio input towers |
+| **[nanochat](apps/nanochat/README.md)** | karpathy/nanochat ported whole: BPE tokenizer training, GPT pretraining, SFT, bits-per-byte eval, and chat — trained from scratch on CPU |
 
 MoE models bigger than RAM are first-class: `--moe-stream` keeps only the
 dense weights resident and pages routed experts from disk through a
@@ -232,15 +235,15 @@ pinned-set + LRU tier, bit-identical to the resident path — that is how the
 
 | Family | What it is |
 | --- | --- |
-| **[Parakeet](examples/parakeet/README.md)** (NVIDIA NeMo FastConformer) | speech-to-text: offline, streaming, and live microphone |
-| **[OmniVoice](examples/omnivoice/README.md)** | MaskGIT text-to-speech with voice cloning (Higgs Audio v2 codec included) |
-| **[LocateAnything-3B](examples/locate_anything/README.md)** | NVIDIA's open-vocabulary detection VLM: text-prompted labeled boxes, byte-compatible with the reference CLI |
-| **[facedetect](examples/facedetect/README.md)** (insightface buffalo_l) | face detection, recognition, gender/age, anti-spoofing, and dense landmarks |
-| **[Neural Amp Modeler](examples/nam/README.md)** | `.nam` guitar-amp profiles: run, train, export, live amp simulation |
+| **[Parakeet](apps/parakeet/README.md)** (NVIDIA NeMo FastConformer) | speech-to-text: offline, streaming, and live microphone |
+| **[OmniVoice](apps/omnivoice/README.md)** | MaskGIT text-to-speech with voice cloning (Higgs Audio v2 codec included) |
+| **[LocateAnything-3B](apps/locate_anything/README.md)** | NVIDIA's open-vocabulary detection VLM: text-prompted labeled boxes, byte-compatible with the reference CLI |
+| **[facedetect](apps/facedetect/README.md)** (insightface buffalo_l) | face detection, recognition, gender/age, anti-spoofing, and dense landmarks |
+| **[Neural Amp Modeler](apps/nam/README.md)** | `.nam` guitar-amp profiles: run, train, export, live amp simulation |
 
 These applications will eventually graduate into their own repositories.
 The known debt of the in-tree phase is that generic operations accumulate
-inside the examples — resamplers, spectrograms, reference-parity image
+inside the apps — resamplers, spectrograms, reference-parity image
 resizing — and graduation starts with an audit of which of those are
 really tensor ops that belong in the core. Research experiments that lack
 a reference oracle live on `research/*` branches rather than `main` —

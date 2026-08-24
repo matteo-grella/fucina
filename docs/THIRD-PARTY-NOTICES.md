@@ -23,9 +23,9 @@ LICENSE files, and repository pages (last checked 2026-07-07).
 | CUDA quantized-GEMM/GEMV kernels — dequant bit-logic + block structs translated from the vendored Metal kernel above (compute core is Fucina-authored FFMA tiling) | `src/backend/cuda/kernels.cu` (+ generated `kernels.ptx`) | same ggml lineage as `ggml_mul_mm.metal` | MIT, Copyright (c) 2023-2026 The ggml authors |
 | Apple MLX "steel" GEMM Metal kernel (f32/f16) | `src/backend/metal/mlx_gemm.metal` | [ml-explore/mlx](https://github.com/ml-explore/mlx) (`backend/metal/kernels/steel/gemm`) | MIT, Copyright © 2023-2024 Apple Inc. |
 | ggml IQ/TQ/FP4 dequantization lookup tables (numeric codebooks) | `src/backend/quant_tables.zig` | [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) (`ggml/src/ggml-common.h`) | MIT, Copyright (c) 2023-2026 The ggml authors |
-| miniaudio v0.11.25 (single-header audio I/O) | `examples/nam/third_party/miniaudio.h` | [mackron/miniaudio](https://github.com/mackron/miniaudio) | Dual: public domain (Unlicense) **or** MIT No Attribution, at your option — Copyright 2026 David Reid; full texts in the vendored header |
+| miniaudio v0.11.25 (single-header audio I/O) | `apps/nam/third_party/miniaudio.h` | [mackron/miniaudio](https://github.com/mackron/miniaudio) | Dual: public domain (Unlicense) **or** MIT No Attribution, at your option — Copyright 2026 David Reid; full texts in the vendored header |
 | llguidance v1.7.6 — `parser` + `toktrie` crates (constrained-decoding engine: grammar compiler, Earley parser, token-mask computation; Rust, compiled and linked only under `-Dllguidance=true`) | `vendor/llguidance/` (crate sources byte-verbatim; the two `Cargo.toml` manifest deviations and the pinned upstream commit are documented in `vendor/llguidance/README.md`; crates.io dependencies are fetched at build time, pinned by the committed `Cargo.lock`, not redistributed here) | [guidance-ai/llguidance](https://github.com/guidance-ai/llguidance) | MIT, Copyright (c) Microsoft Corporation |
-| font8x8 glyph table (128 ASCII 8×8 bitmaps, Marcel Sondaar's IBM-style ROM font) | `examples/locate_anything/visualize.zig` | [dhepper/font8x8](https://github.com/dhepper/font8x8), via locate-anything.cpp | Public domain |
+| font8x8 glyph table (128 ASCII 8×8 bitmaps, Marcel Sondaar's IBM-style ROM font) | `apps/locate_anything/visualize.zig` | [dhepper/font8x8](https://github.com/dhepper/font8x8), via locate-anything.cpp | Public domain |
 
 ## Ported code
 
@@ -80,12 +80,12 @@ From other projects:
 | Component | Files | Upstream | License |
 | --- | --- | --- | --- |
 | Parakeet ASR engine (port) | `src/models/parakeet/` | [mudler/parakeet.cpp](https://github.com/mudler/parakeet.cpp) by Ettore Di Giacinto | MIT |
-| LocateAnything detection engine (port: preprocessing, MoonViT/Qwen2 graph structure, MTP box-decode heuristics, prompt/box token schema, GGUF schema) | `examples/locate_anything/` | [mudler/locate-anything.cpp](https://github.com/mudler/locate-anything.cpp) by Ettore Di Giacinto and Richard Palethorpe; the underlying LocateAnything-3B model is [NVIDIA's](https://huggingface.co/nvidia/LocateAnything-3B) (weights not in this repo, subject to their model license) | MIT |
-| face-detect.cpp face pipeline (port: SCRFD/ArcFace/GenderAge/MiniFASNet/landmark graph structure and BN-fold conventions, cv2-exact letterbox + umeyama align constants, anchor decode + NMS semantics, GGUF schema incl. the embedded anti-spoof/landmark node lists, CLI JSON formats) | `examples/facedetect/` | [mudler/face-detect.cpp](https://github.com/mudler/face-detect.cpp) by Ettore Di Giacinto; the underlying buffalo_l / landmark models are [insightface's](https://github.com/deepinsight/insightface) (weights not in this repo, subject to insightface's non-commercial model license; GGUF conversions from [mudler/face-detect-gguf](https://huggingface.co/mudler/face-detect-gguf)) | MIT |
-| Pillow BICUBIC resampler (port, via locate-anything.cpp's `pil_resize.cpp`) | `examples/locate_anything/preproc.zig` | [python-pillow/Pillow](https://github.com/python-pillow/Pillow) `libImaging/Resample.c` | MIT-CMU |
-| OmniVoice TTS engine (port, incl. Higgs Audio v2 codec chain, torchaudio-parity resampler, pydub-parity postproc, Philox RNG alignment) | `examples/omnivoice/` | [ServeurpersoCom/omnivoice.cpp](https://github.com/ServeurpersoCom/omnivoice.cpp) | MIT |
-| Neural Amp Modeler runtime (port) | `examples/nam/` | [sdatkinson/NeuralAmpModelerCore](https://github.com/sdatkinson/NeuralAmpModelerCore) | MIT |
-| NAM trainer recipe + loudness asset | `examples/nam/`, `examples/nam/resources/` | [sdatkinson/neural-amp-modeler](https://github.com/sdatkinson/neural-amp-modeler) | MIT |
+| LocateAnything detection engine (port: preprocessing, MoonViT/Qwen2 graph structure, MTP box-decode heuristics, prompt/box token schema, GGUF schema) | `apps/locate_anything/` | [mudler/locate-anything.cpp](https://github.com/mudler/locate-anything.cpp) by Ettore Di Giacinto and Richard Palethorpe; the underlying LocateAnything-3B model is [NVIDIA's](https://huggingface.co/nvidia/LocateAnything-3B) (weights not in this repo, subject to their model license) | MIT |
+| face-detect.cpp face pipeline (port: SCRFD/ArcFace/GenderAge/MiniFASNet/landmark graph structure and BN-fold conventions, cv2-exact letterbox + umeyama align constants, anchor decode + NMS semantics, GGUF schema incl. the embedded anti-spoof/landmark node lists, CLI JSON formats) | `apps/facedetect/` | [mudler/face-detect.cpp](https://github.com/mudler/face-detect.cpp) by Ettore Di Giacinto; the underlying buffalo_l / landmark models are [insightface's](https://github.com/deepinsight/insightface) (weights not in this repo, subject to insightface's non-commercial model license; GGUF conversions from [mudler/face-detect-gguf](https://huggingface.co/mudler/face-detect-gguf)) | MIT |
+| Pillow BICUBIC resampler (port, via locate-anything.cpp's `pil_resize.cpp`) | `apps/locate_anything/preproc.zig` | [python-pillow/Pillow](https://github.com/python-pillow/Pillow) `libImaging/Resample.c` | MIT-CMU |
+| OmniVoice TTS engine (port, incl. Higgs Audio v2 codec chain, torchaudio-parity resampler, pydub-parity postproc, Philox RNG alignment) | `apps/omnivoice/` | [ServeurpersoCom/omnivoice.cpp](https://github.com/ServeurpersoCom/omnivoice.cpp) | MIT |
+| Neural Amp Modeler runtime (port) | `apps/nam/` | [sdatkinson/NeuralAmpModelerCore](https://github.com/sdatkinson/NeuralAmpModelerCore) | MIT |
+| NAM trainer recipe + loudness asset | `apps/nam/`, `apps/nam/resources/` | [sdatkinson/neural-amp-modeler](https://github.com/sdatkinson/neural-amp-modeler) | MIT |
 | Byte-level BPE tokenizer core | `src/models/text/tokenizer.zig` | ZINC — Zig INferenCe engine | MIT, Copyright (c) 2025 ZINC Contributors |
 | `erff` (used by `gelu_erf`) | `src/backend/ops.zig` | [musl libc](https://musl.libc.org) `src/math/erff.c` | MIT (FDLIBM lineage, Copyright (C) 1993 Sun Microsystems, Inc.) |
 | Muon optimizer | `src/optim.zig` | [KellerJordan/Muon](https://github.com/KellerJordan/Muon); RMS-matching scale per Moonlight (arXiv:2502.16982) | MIT |
@@ -162,7 +162,7 @@ ggml authors, with the Q2_0 additions authored by Prism ML):
 From **LocalVQE** ([localai-org/LocalVQE](https://github.com/localai-org/LocalVQE),
 Apache-2.0):
 
-- **GTCRN-AEC acoustic echo canceller** (`examples/voiceagent/aec.zig`): a
+- **GTCRN-AEC acoustic echo canceller** (`apps/voiceagent/aec.zig`): a
   1:1 Zig port of the scalar reference `ggml/gtcrn/gtcrn.cpp` — ERB sub-band
   analysis, SFE, the grouped-conv encoder, the grouped dual-path RNN, the
   grouped-deconv decoder, and the complex-ratio mask, operation for
@@ -229,17 +229,17 @@ grouped-MoE path does not use the split.
 
 ## Test fixtures
 
-- `examples/nam/testdata/*.nam` — four tiny format-parity fixtures from the
+- `apps/nam/testdata/*.nam` — four tiny format-parity fixtures from the
   NeuralAmpModelerCore ecosystem (MIT; provenance in
-  `examples/nam/testdata/README.md`).
-- `examples/nam/resources/loudness_input.wav` — the standardized loudness
+  `apps/nam/testdata/README.md`).
+- `apps/nam/resources/loudness_input.wav` — the standardized loudness
   measurement signal required by the `.nam` metadata contract (MIT; see
-  `examples/nam/resources/README.md`).
+  `apps/nam/resources/README.md`).
 - Quantization golden vectors in tests — byte outputs of running ggml's
   encoders over documented inputs (generated 2026-06-11).
-- `examples/voiceagent/goldens/*.npy` — the per-stage GTCRN-AEC fixtures published by
+- `apps/voiceagent/goldens/*.npy` — the per-stage GTCRN-AEC fixtures published by
   LocalVQE (Apache-2.0) under `ggml/tests/gtcrn/`, copied in unmodified;
-  provenance and refresh recipe in `examples/voiceagent/goldens/README.md`.
+  provenance and refresh recipe in `apps/voiceagent/goldens/README.md`.
 - `testdata/qwen3tts/**` — reference activations produced by running the
   pinned qwentts.cpp checkout through its python bindings (MIT); the dumps
   are program output, not upstream source. Recipe in
@@ -273,7 +273,7 @@ The English pack this port converts ships only two, both permissive:
 **marius** (`voice-donations/Selfie.wav`, CC0). Anyone extending the
 conversion to the other voices should re-check, since pulling in an NC voice
 would attach a non-commercial restriction to the resulting GGUF, and the
-GTCRN-AEC canceller weights used by `examples/voiceagent` (LocalVQE,
+GTCRN-AEC canceller weights used by `apps/voiceagent` (LocalVQE,
 Apache-2.0; trained on the Microsoft DNS Challenge corpus, CC-BY-4.0, and
 fine-tuned on the AEC Challenge). See `RUNNING-MODELS.md` for the per-model
 notes.

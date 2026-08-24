@@ -2,9 +2,9 @@
 #
 # Do NOT add a nav here: `zig run tools/gen_docs_site.zig -- . .docs-site`
 # stages the repo markdown (README.md, docs/, docs/course/,
-# examples/*/README.md) into .docs-site with links resolved against the
+# examples/*/README.md, apps/*/README.md) into .docs-site with links resolved against the
 # staged tree AND generates the nav (reference chapters, guides, course,
-# examples are all enumerated from disk; a guide's sidebar title/group
+# examples and apps are all enumerated from disk; a guide's sidebar title/group
 # come from its own `<!-- docs-nav: ... -->` comment, see the tool's doc
 # comment), appending it to this file as .mkdocs-gen.yml. The site builds
 # from THAT file; the repo markdown stays the single source of truth.

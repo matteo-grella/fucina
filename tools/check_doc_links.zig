@@ -3,7 +3,8 @@
 //!
 //! 1. `docs/README.md` is THE doc index. Every doc it names (backtick tokens
 //!    and markdown-link targets shaped like root `*.md`, `docs/<name>.md`,
-//!    `docs/reference/<name>.md`, or `examples/<name>/README.md`) must exist,
+//!    `docs/reference/<name>.md`, `examples/<name>/README.md`, or
+//!    `apps/<name>/README.md`) must exist,
 //!    and the set of top-level `docs/*.md` it lists must be exactly the docs
 //!    carrying a `<!-- docs-nav: ... -->` header (the sidebar set of
 //!    tools/gen_docs_site.zig), so the index and the site nav cannot drift
@@ -21,8 +22,9 @@
 //!    to rot on release.
 //!
 //! `docs/RUNNING-MODELS.md` is additionally scanned for
-//! `examples/<name>/README.md` references (backtick-quoted, markdown-link
-//! targets, or bare paths), which are existence-checked the same way.
+//! `examples/<name>/README.md` and `apps/<name>/README.md` references
+//! (backtick-quoted, markdown-link targets, or bare paths), which are
+//! existence-checked the same way.
 
 const std = @import("std");
 
@@ -57,20 +59,23 @@ pub fn main(init: std.process.Init) !void {
         try checkSrcCitations(&checker, file);
     }
 
-    // docs/RUNNING-MODELS.md routes to the per-example READMEs; scan the whole
-    // file for `examples/<name>/README.md` references and check those too.
+    // docs/RUNNING-MODELS.md routes to the per-example and per-app READMEs;
+    // scan the whole file for `examples/<name>/README.md` and
+    // `apps/<name>/README.md` references and check those too.
     const running = try std.Io.Dir.cwd().readFileAlloc(io, "docs/RUNNING-MODELS.md", allocator, .limited(4 * 1024 * 1024));
-    var pos: usize = 0;
-    while (std.mem.indexOfPos(u8, running, pos, "examples/")) |start| {
-        var end = start;
-        while (end < running.len and isPathChar(running[end])) end += 1;
-        pos = end;
-        if (start > 0 and isNameChar(running[start - 1])) continue; // tail of a longer word
-        var token = running[start..end];
-        // Trim sentence punctuation glued to a bare-prose path.
-        while (token.len > 0 and token[token.len - 1] == '.') token = token[0 .. token.len - 1];
-        if (!isExampleReadme(token)) continue;
-        try checker.checkExists("docs/RUNNING-MODELS.md", token);
+    for ([_][]const u8{ "examples/", "apps/" }) |prefix| {
+        var pos: usize = 0;
+        while (std.mem.indexOfPos(u8, running, pos, prefix)) |start| {
+            var end = start;
+            while (end < running.len and isPathChar(running[end])) end += 1;
+            pos = end;
+            if (start > 0 and isNameChar(running[start - 1])) continue; // tail of a longer word
+            var token = running[start..end];
+            // Trim sentence punctuation glued to a bare-prose path.
+            while (token.len > 0 and token[token.len - 1] == '.') token = token[0 .. token.len - 1];
+            if (!isTargetReadme(token)) continue;
+            try checker.checkExists("docs/RUNNING-MODELS.md", token);
+        }
     }
 
     if (checker.problems != 0) {
@@ -201,7 +206,8 @@ fn checkDocIndex(checker: *Checker) !void {
 }
 
 /// Record `token` when it is doc-shaped: root `*.md`, `docs/<name>.md`,
-/// `docs/reference/<name>.md`, or `examples/<name>/README.md`.
+/// `docs/reference/<name>.md`, `examples/<name>/README.md`, or
+/// `apps/<name>/README.md`.
 fn collectDocToken(a: std.mem.Allocator, listed: *std.StringHashMapUnmanaged(void), token: []const u8) !void {
     if (!std.mem.endsWith(u8, token, ".md")) return;
     if (std.mem.indexOfScalar(u8, token, ' ') != null) return;
@@ -211,7 +217,7 @@ fn collectDocToken(a: std.mem.Allocator, listed: *std.StringHashMapUnmanaged(voi
         const is_docs = std.mem.eql(u8, head, "docs") and std.mem.indexOfScalar(u8, rest, '/') == null;
         const is_reference = std.mem.startsWith(u8, token, "docs/reference/") and
             std.mem.indexOfScalar(u8, token["docs/reference/".len..], '/') == null;
-        if (!is_docs and !is_reference and !isExampleReadme(token)) return;
+        if (!is_docs and !is_reference and !isTargetReadme(token)) return;
     }
     try listed.put(a, try a.dupe(u8, token), {});
 }
@@ -493,13 +499,16 @@ fn isExternal(target: []const u8) bool {
         std.mem.startsWith(u8, target, "mailto:");
 }
 
-/// True when `token` names a per-example README: `examples/<name>/README.md`.
-fn isExampleReadme(token: []const u8) bool {
-    const prefix = "examples/";
+/// True when `token` names a per-example or per-app README:
+/// `examples/<name>/README.md` or `apps/<name>/README.md`.
+fn isTargetReadme(token: []const u8) bool {
     const suffix = "/README.md";
-    return token.len > prefix.len + suffix.len and
-        std.mem.startsWith(u8, token, prefix) and
-        std.mem.endsWith(u8, token, suffix);
+    inline for ([_][]const u8{ "examples/", "apps/" }) |prefix| {
+        if (token.len > prefix.len + suffix.len and
+            std.mem.startsWith(u8, token, prefix) and
+            std.mem.endsWith(u8, token, suffix)) return true;
+    }
+    return false;
 }
 
 fn isPathChar(c: u8) bool {

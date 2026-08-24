@@ -23,15 +23,15 @@ listed here.
 
 ### 1.1 Layering is a one-way street
 
-A band may depend only on bands at or below it: apps (`examples/`, `tools/`,
-`bench/`) → models (`src/models/`) → facade (`src/fucina.zig`) → autograd/training
+A band may depend only on bands at or below it: apps (`examples/`, `apps/`,
+`tools/`, `bench/`) → models (`src/models/`) → facade (`src/fucina.zig`) → autograd/training
 (`src/ag/`, optim/es/lora/persistence) → tagged ops (`src/tag_ops.zig`) →
 exec runtime (`src/exec/`) → backends (`src/backend/`) → tensor/storage/dtype.
 `fucina_models` files import the `fucina` *module* (public surface plus
 `fucina.internal`), never individual `src/*.zig` files.
 
 *Enforced by:* `zig build arch-check` — the production import graph of `src/`,
-`examples/`, `bench/`, and `tools/` must have zero strongly-connected
+`examples/`, `apps/`, `bench/`, and `tools/` must have zero strongly-connected
 components AND zero band inversions (AST-based, test-aware). Band direction is checked against the layer table in
 [ARCHITECTURE.md](ARCHITECTURE.md), encoded as `band_table` in
 `tools/check_import_graph.zig`: production layer inversions are a failed
@@ -46,7 +46,7 @@ directly; family-specific logic inside `src/exec/` (see §1.8).
 No global graph object, no fusion pass, no lazy evaluation, no planner. Every
 op validates, allocates through `ExecContext`, and runs a kernel immediately.
 This is a deliberate design stance, not debt. An app-level compiled replay is
-fine *inside an example* (`examples/facedetect/graph.zig` is the precedent);
+fine *inside an example* (`apps/facedetect/graph.zig` is the precedent);
 a core IR is not. Don't add one without a concrete design.
 
 ### 1.3 One public tensor, comptime tags, sealed raw layer
@@ -109,13 +109,17 @@ or build on the machine that runs it.
 
 Reusable engines other `src/models` consumers should import go in
 `src/models/<family>/`; single-purpose parity ports and their DSP/IO plumbing
-stay example-local in `examples/<name>/`; generic helpers stay flat in
+stay app-local in `apps/<name>/`; generic helpers stay flat in
 `src/models/`; family-specific kernel orchestration lives in the family over
 the `fucina.internal` seam, never inside the generic exec runtime; shared
 cross-family scheduling lives once in exec and is re-exported
 (`exec/moe_chain.zig` is the pattern). New core tensor ops belong in the
 exec/backend bands — but a good port usually needs none: nanochat is
-entirely example-local over the public facade.
+entirely app-local over the public facade. The apps band itself has two
+homes: `examples/<name>/` is teaching code (one `main.zig`, a README is
+fine, no test files, no C shims, no vendored assets; it exists to be read
+and copied); `apps/<name>/` is everything with product or port shape
+(multi-file, own tests, shims, goldens, or a real CLI surface).
 
 ### 1.9 Determinism is a contract
 
@@ -182,13 +186,13 @@ designing.
 | Hybrid/recurrent blocks | `src/models/qwen35/` | Gated-DeltaNet over the same loader conventions |
 | MLA / MTP / streamed-expert giants | `src/models/deepseek4/` | compressed KV, hyper-connections, out-of-core experts |
 | Non-autoregressive decoder | `src/models/diffusion_gemma/` | two forward modes over one weight set |
-| Pure-CNN vision port | `examples/facedetect/` | load-once models, BN-fold at load, byte-identical JSON goldens |
-| VLM port | `examples/locate_anything/` | ViT tower + LM, custom RopeTable, MTP box decode |
+| Pure-CNN vision port | `apps/facedetect/` | load-once models, BN-fold at load, byte-identical JSON goldens |
+| VLM port | `apps/locate_anything/` | ViT tower + LM, custom RopeTable, MTP box decode |
 | ASR / encoder stack | `src/models/parakeet/` | the reusable-family precedent |
-| TTS / codec port | `examples/omnivoice/` | codec parity, RNG parity, chunked streaming |
-| Streaming DSP / effects | `examples/nam/` | streaming engines, format interchange, live IO |
-| Training pipeline | `examples/nanochat/`, `examples/spirals/main.zig`, `examples/finetune/main.zig` | full pretrain→SFT→chat; minimal optimizer demo; LoRA on a real GGUF |
-| HTTP/API frontend | `examples/lmserve/main.zig` | OpenAI-compatible mapping tables, SSE, backend matrix |
+| TTS / codec port | `apps/omnivoice/` | codec parity, RNG parity, chunked streaming |
+| Streaming DSP / effects | `apps/nam/` | streaming engines, format interchange, live IO |
+| Training pipeline | `apps/nanochat/`, `examples/spirals/main.zig`, `apps/finetune/main.zig` | full pretrain→SFT→chat; minimal optimizer demo; LoRA on a real GGUF |
+| HTTP/API frontend | `apps/lmserve/main.zig` | OpenAI-compatible mapping tables, SSE, backend matrix |
 
 ## 4. The delivery loop
 
@@ -270,7 +274,7 @@ production file — and note the trap that a new `src/ag/` submodule must be
 referenced from `ag.zig`'s test block or its sibling tests silently never
 run. Always-passing tests must not print to stderr (route success-path
 diagnostics through the root's `testlog` gate, e.g.
-`examples/facedetect/testlog.zig`); asset-dependent suites skip cleanly
+`apps/facedetect/testlog.zig`); asset-dependent suites skip cleanly
 (`error.FileNotFound` → `error.SkipZigTest`, env-gated parity suites) so the
 default `zig build test` is green with no assets.
 

@@ -1,0 +1,282 @@
+# lmserve — OpenAI- and Anthropic-compatible LM server
+
+One process serves one model behind `POST /v1/chat/completions`, the
+stateless `POST /v1/responses`, and the Anthropic Messages API
+`POST /v1/messages` (plus `GET /v1/models`, `GET /health`), with SSE
+streaming in all three dialects. Point any OpenAI client — or any Anthropic
+client, Claude Code included — at `http://host:port`.
+
+The GGUF's `general.architecture` picks the backend: `qwen3`, `qwen3moe`,
+`qwen35`/`qwen35moe` (Qwen3.5 / Qwen3.6 / Ternary-Bonsai), `gemma4`,
+`diffusion-gemma`, `inkling`, `deepseek4` (DeepSeek V4 Flash);
+`--nanochat <dir>` serves a nanochat checkpoint (`model.safetensors` +
+`tokenizer.bin`). This README is the getting-started face;
+**[`docs/LMSERVER.md`](../../docs/LMSERVER.md) is the full design doc** —
+exact API mapping tables (what is honored, rejected, ignored per dialect),
+streaming contracts, scheduler design, and the KV-reuse machinery.
+
+## Getting a model
+
+Weights are not part of this repository. Any GGUF of a supported family
+works — the full download matrix per family is in
+[`docs/RUNNING-MODELS.md`](../../docs/RUNNING-MODELS.md#getting-the-weights).
+The two used below:
+
+```sh
+mkdir -p models
+hf download Qwen/Qwen3-0.6B-GGUF Qwen3-0.6B-Q8_0.gguf --local-dir models
+hf download unsloth/gemma-4-26B-A4B-it-GGUF gemma-4-26B-A4B-it-UD-Q6_K.gguf --local-dir models
+```
+
+**Gemma license.** Gemma-family weights (Gemma 4, DiffusionGemma) are
+distributed under Google's Gemma Terms of Use. The `google/…` originals on
+Hugging Face are gated behind accepting those terms; the unsloth GGUF
+conversions were not gated at the time of writing, but the terms still apply
+to the weights either way.
+
+The other backends:
+
+- Qwen3 MoE 30B-A3B, Qwen3.5-0.8B, and DiffusionGemma: rows with
+  `hf download` commands in the same
+  [matrix](../../docs/RUNNING-MODELS.md#getting-the-weights).
+- Ternary-Bonsai-27B (qwen35 architecture, Apache-2.0):
+  `hf download prism-ml/Ternary-Bonsai-27B-gguf Ternary-Bonsai-27B-Q2_0.gguf --local-dir models`
+  — serving notes in [`examples/qwen35/README.md`](../../examples/qwen35/README.md).
+- Inkling: no practically sized GGUF exists — public releases run to
+  hundreds of GB (unsloth/inkling-GGUF UD-IQ1_S: 270 GB). The backend is exercised via
+  the parity harness in [`apps/run/README.md`](../run/README.md).
+- nanochat: nothing to download — `--nanochat` serves a checkpoint dir
+  (`model.safetensors` + `tokenizer.bin`) trained with the pipeline in
+  [`../nanochat/README.md`](../nanochat/README.md).
+
+## Running
+
+```sh
+# Serve Qwen3 with JSON-schema/regex/Lark constrained output enabled
+zig build lmserve -Dllguidance=true -Doptimize=ReleaseFast -- \
+  models/Qwen3-0.6B-Q8_0.gguf --port 8080
+
+# Gemma 4 MoE (zero-copy expert load) / nanochat checkpoint dir
+zig build lmserve -Doptimize=ReleaseFast -- models/gemma-4-26B-A4B-it-UD-Q6_K.gguf --experts=borrow
+zig build lmserve -Doptimize=ReleaseFast -- --nanochat runs/sft
+```
+
+## Talking to it
+
+Any OpenAI client works; with curl (SSE streaming: add `"stream": true`):
+
+```sh
+curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "messages": [{"role":"user","content":"Hi!"}]}'
+```
+
+Constrained output (JSON-schema shown; regex and Lark grammars too — needs
+the `-Dllguidance=true` build):
+
+```sh
+curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "messages": [{"role":"user","content":"Give me facts about Paris."}],
+  "response_format": {"type":"json_schema","json_schema":{"name":"city","schema":{
+    "type":"object","properties":{"city":{"type":"string","maxLength":30},
+    "population":{"type":"integer","maximum":99999999}},
+    "required":["city","population"],"additionalProperties":false}}}}'
+```
+
+The stateless Responses dialect takes `input` (a string or typed message
+items) plus `instructions`:
+
+```sh
+curl -s http://127.0.0.1:8080/v1/responses -H 'Content-Type: application/json' -d '{
+  "input": "Hi!", "instructions": "Answer in one sentence."}'
+```
+
+Reasoning, per request (`reasoning.effort` in the responses dialect;
+rejected when the model has no toggleable reasoning channel):
+
+```sh
+curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "messages": [{"role":"user","content":"What is 17*23?"}], "reasoning_effort": "low"}'
+```
+
+```sh
+curl -s http://127.0.0.1:8080/v1/models   # the served model id
+curl -s http://127.0.0.1:8080/health
+```
+
+The request's `model` field is accepted and ignored — one process serves one
+model; `GET /v1/models` reports its id.
+
+## Anthropic Messages API
+
+`POST /v1/messages` speaks the Anthropic wire shape — request translation
+into the same engine path, Messages response/SSE framing
+(`message_start` → `content_block_*` → `message_delta` → `message_stop`),
+and the Anthropic error envelope. `x-api-key` carries the `--api-key`
+value (`Authorization: Bearer` works too):
+
+```sh
+curl -s http://127.0.0.1:8080/v1/messages -H 'Content-Type: application/json' -d '{
+  "model": "any", "max_tokens": 128,
+  "system": "Answer in one sentence.",
+  "messages": [{"role":"user","content":"Hi!"}]}'
+```
+
+`thinking: {"type":"enabled"}` (or `"adaptive"`) turns the model's
+reasoning channel on where one exists — qwen3 `<think>` text streams as
+`thinking` content blocks. `temperature`/`top_p`/`top_k` map to the
+sampler; `output_config.format` with a JSON schema maps to the same
+constrained decoding as the OpenAI dialects (`-Dllguidance=true` builds).
+On qwen3-family models `tools` work end-to-end (see Tool calling below);
+on families without a tool convention, declarations are accepted and
+dropped so tool-sending clients still work as plain chat (forced tool
+calls are rejected there). `stop_sequences` are honored and attributed
+(`stop_reason` `stop_sequence` + the fired sequence). A DNS-rebinding
+guard rejects foreign Host headers on loopback binds; `--allow-host`
+extends the set (and arms the check on non-loopback binds). CORS is off
+by default (no `access-control-*` headers), so browser pages on other
+origins cannot read responses; `--cors-origin O` opts in for origin `O`
+(`*` for any). Non-browser clients are unaffected.
+
+**Claude Code** runs against it directly:
+
+```sh
+ANTHROPIC_BASE_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=local \
+  claude -p "Say hello"
+```
+
+Size `--ctx` for Claude Code's prompt: ~4k tokens of system prompt, plus
+~12k of tool schemas once the model takes tools — `--ctx 32768` fits
+comfortably on qwen3 models.
+
+## Tool calling
+
+On qwen3-family models (qwen3/qwen3moe/qwen35 — tool-trained, Hermes-style
+`<tool_call>` template) function calling works across all three dialects:
+declarations render into the prompt, the reply stream is scanned for
+calls, and completed calls come back in each dialect's native shape —
+chat `tool_calls` (`finish_reason: "tool_calls"`), Responses
+`function_call` items, Anthropic `tool_use` blocks
+(`stop_reason: "tool_use"`). The client executes the tool and sends the
+result back (`role: "tool"` / `function_call_output` / `tool_result`);
+the server never runs anything.
+
+```sh
+curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "messages": [{"role":"user","content":"What is the weather in Paris? Use the tool."}],
+  "tools": [{"type":"function","function":{"name":"get_weather",
+    "description":"Current weather for a city",
+    "parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}]}'
+```
+
+The reply carries `tool_calls`; append it plus a
+`{"role":"tool","tool_call_id":…,"content":"22C, sunny"}` message and ask
+again for the final answer. With Claude Code pointed at the server, its
+own tools (Bash, Read, …) light up the same way — the model requests, the
+CLI executes under its normal permission gating.
+
+`tool_choice` forms that *guarantee* a call — `"required"`, a named
+function, Anthropic `any`/`tool` — are honored by constrained decoding on
+`-Dllguidance=true` builds: the reply is grammar-forced into exactly one
+hermes call, with arguments enforced against the schema when it is the
+wire contract (`strict: true` on the OpenAI dialects; `input_schema`
+always on the Anthropic one). Without llguidance they are rejected with a
+501.
+
+```sh
+curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "messages": [{"role":"user","content":"What is the weather in Tokyo?"}],
+  "tool_choice": "required",
+  "tools": [{"type":"function","function":{"name":"get_weather","strict":true,
+    "parameters":{"type":"object","properties":{"city":{"type":"string"}},
+    "required":["city"],"additionalProperties":false}}}]}'
+```
+
+## Flags
+
+`--help` lists them all:
+
+| flag | meaning |
+| --- | --- |
+| `--host H` | bind address (default 127.0.0.1) |
+| `--port N` | port (default 8080) |
+| `--ctx N` | per-request context budget in tokens (default 4096) |
+| `--api-key K` | require `Authorization: Bearer K` (or `x-api-key: K`) |
+| `--cors-origin O` | allow browser pages from origin `O` (`*` for any) to call the server; default: no CORS headers |
+| `--queue N` | max queued requests before 429 (default 16) |
+| `--conns N` | max concurrent connections (default 32) |
+| `--batch N` | lockstep-decode up to N queued requests together (default 1; qwen3/qwen3moe/gemma4, excludes `--fleet`; raises `--kv-slots` to N) |
+| `--experts=borrow` | zero-copy MoE expert load (gemma4/diffusion-gemma) |
+| `--nanochat DIR` | serve a nanochat checkpoint dir |
+| `--kv-slots N` | resident KV-reuse slots (default 1); each holds a full `--ctx` cache, so extra slots cost real memory but keep interleaved conversations warm |
+| `--kv-cache-dir D` | spill evicted slots to sidecar files under `D` and restore them on prefix match (GGUF chat backends) |
+| `--kv-disk-slots M` | max sidecar files under `--kv-cache-dir` (default 8) |
+| `--cartridge F` | preload a trained KV-prefix cartridge into every conversation (see below) |
+| `--fleet DIR` | serve a per-document cartridge fleet (see below) |
+| `--shine-fleet DIR` | serve a per-document SHINE adapter fleet (see below) |
+| `--rag-docs` `--rag-chunks` `--rag-adaptive` `--rag-margin` | fleet retrieval knobs (see below) |
+
+## Queue and reasoning semantics
+
+Requests are accepted concurrently and generated by one inference worker
+(the queue bounds admission — overflow gets 429). By default the worker is
+strictly sequential; `--batch N` lets it decode up to N already-queued
+requests together in lockstep (one m=N weight pass per step; per-stream
+failures — a dropped client, a bad grammar — finish that stream while the
+rest keep decoding). An idle server keeps single-request latency: batching
+never waits for requests. Reply bytes flow through a per-request pipe and
+the connection thread writes the socket, so a stalled client buffers
+server-side without slowing generation, the queue, or its batch. Reasoning is off by
+default; clients enable it per request via `reasoning_effort` (chat),
+`reasoning.effort` (responses) — `"none"`/`"minimal"` disable,
+`"low"`/`"medium"`/`"high"`/`"xhigh"`/`"default"` enable (rejected when the
+model has no toggleable reasoning channel) — or `thinking` (anthropic
+messages, a no-op without a reasoning channel). qwen3 routes `<think>` text
+to `reasoning_content` / a `thinking` content block.
+
+## Cartridge serving
+
+The qwen3/gemma4 backends serve trained KV-prefix cartridges — corpus
+knowledge with zero prompt tokens
+([`docs/CARTRIDGES.md`](../../docs/CARTRIDGES.md)):
+
+- `--cartridge F` preloads one cartridge (safetensors from `zig build
+  cartridge`, see [`../cartridge/README.md`](../cartridge/README.md)) into
+  every conversation; composes with the slot pool and the `--kv-cache-dir`
+  disk tier.
+- `--fleet DIR` serves a per-document fleet (from `zig build cartridge-fleet`,
+  see [`../cartridge_fleet/README.md`](../cartridge_fleet/README.md)): each
+  request's last user message picks `--rag-docs` cartridges via the fleet's
+  cosine index (`--rag-chunks` chunks scanned) and they compose as the
+  conversation's prefix. Selection is sticky per conversation;
+  `--rag-adaptive` lets follow-up turns switch knowledge base when an outside
+  document decisively out-scores the selection (margin `--rag-margin`,
+  default 0.05). gemma4 MoE GGUFs need `--experts=borrow`; excludes
+  `--cartridge` and `--kv-cache-dir`.
+
+- `--shine-fleet DIR` serves a per-document SHINE adapter fleet (from
+  `zig build qwen3 -- <base> --shine <shine.gguf> --shine-docs DOCS
+  --shine-fleet-build DIR`;
+  [§13.12](../../docs/reference/13-the-model-stack-fucina_models.md#1312-shine-srcmodelsqwen3shinezig)): each request's user
+  messages pick ONE document via the same cosine index (`--rag-chunks`
+  scanned) and that document's saved adapter decodes the reply. The
+  knowledge rides in the adapter weights: zero context tokens, zero
+  prefix rows, no extra KV. Selection is sticky per conversation, and
+  slots stay keyed by selection so only same-adapter KV is ever adopted
+  or prefix-shared. Dense qwen3 bases only; excludes `--fleet`,
+  `--cartridge`, `--kv-cache-dir`, and `--batch`.
+
+All three flags expect artifacts built against the same model being
+served — KV/index geometry is probed at startup, so a mismatched file
+fails there, not mid-request. Size `--ctx` to include the prefix (fleet:
+`rag_docs × p` rows on top of the conversation; SHINE adapters add no
+rows). Training recipes:
+[`docs/CARTRIDGES.md`](../../docs/CARTRIDGES.md); full serving semantics:
+[`docs/LMSERVER.md`](../../docs/LMSERVER.md).
+
+## Shared knobs
+
+Build discipline (`-Doptimize=ReleaseFast`, `-Dcpu` when cross-compiling),
+GPU offload, thread/BLAS settings, and `-Dllguidance` constrained-decoding
+usage are shared across runners — see
+[`../../docs/RUNNING-MODELS.md`](../../docs/RUNNING-MODELS.md). This server
+does not take `--moe-stream`; its MoE knob is `--experts=borrow` above.

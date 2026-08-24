@@ -1,7 +1,7 @@
 <!-- docs-nav: group="Run & serve" title="LM server" weight=11 -->
 # LMSERVER — the OpenAI- and Anthropic-compatible language-model server example
 
-`zig build lmserve` (`examples/lmserve/main.zig` + `examples/lmserve/`) exposes the
+`zig build lmserve` (`apps/lmserve/main.zig` + `apps/lmserve/`) exposes the
 in-tree language models behind the two OpenAI wire dialects plus the
 Anthropic Messages API. The server itself is library surface: the transport
 and the generic engine live in `models.text.serving` (`src/models/text/serving/`,

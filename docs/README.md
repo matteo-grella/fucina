@@ -18,7 +18,7 @@ course lives in [course/](course/README.md); every guide below carries a
 
 | Group | Guide | Contents |
 | --- | --- | --- |
-| Run & serve | [RUNNING-MODELS.md](RUNNING-MODELS.md) | model and example index: verified weight downloads with license notes, the build-step-to-README map, shared runner machinery (MoE streaming, MTP drafting, constrained decoding, GPU offload, global knobs) |
+| Run & serve | [RUNNING-MODELS.md](RUNNING-MODELS.md) | model and runner index: verified weight downloads with license notes, the build-step-to-README map over `examples/` and `apps/`, shared runner machinery (MoE streaming, MTP drafting, constrained decoding, GPU offload, global knobs) |
 | Run & serve | [LMSERVER.md](LMSERVER.md) | the lmserve server: OpenAI and Anthropic API mapping tables, the accept-concurrently/generate-sequentially architecture, streaming contracts, the per-model backend matrix |
 | Run & serve | [SPECULATIVE.md](SPECULATIVE.md) | design record: lossless draft-model-free speculative decoding, the losslessness proof obligations, verify economics, bench results with caveats |
 | Run & serve | [CONSTRAINED-DECODING.md](CONSTRAINED-DECODING.md) | design record: grammar/JSON-schema constrained decoding over the `LogitProcessor` seam and the vendored llguidance engine, speculation composition |
@@ -46,6 +46,7 @@ course lives in [course/](course/README.md); every guide below carries a
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | the contribution bar: human-owned PRs, the two regression tracks, reporting requirements |
 | [CHANGELOG.md](../CHANGELOG.md) | versioned public-API changes with one-line rewrites; stability tiers |
 
-Per-example getting-started guides live next to each entry point as
-examples/&lt;name&gt;/README.md; [RUNNING-MODELS.md](RUNNING-MODELS.md)
-maps every build step to its README.
+Per-target getting-started guides live next to each entry point as
+examples/&lt;name&gt;/README.md (single-file teaching examples) and
+apps/&lt;name&gt;/README.md (product- and port-shaped apps);
+[RUNNING-MODELS.md](RUNNING-MODELS.md) maps every build step to its README.

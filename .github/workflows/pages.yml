@@ -15,6 +15,7 @@ on:
       - 'docs/**'
       - 'README.md'
       - 'examples/**/README.md'
+      - 'apps/**/README.md'
       - 'mkdocs.yml'
       - 'tools/gen_docs_site.zig'
       - '.github/workflows/pages.yml'

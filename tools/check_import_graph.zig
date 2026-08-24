@@ -2,7 +2,7 @@
 //!
 //! Sentrux scans the whole repository, including sibling test files. This tool
 //! enforces the stricter PRODUCTION invariants over the non-test import
-//! graph of `src/`, `examples/`, `bench/`, and `tools/`, in-tree so
+//! graph of `src/`, `examples/`, `apps/`, `bench/`, and `tools/`, in-tree so
 //! `zig build arch-check` is the gate: no forbidden strongly-connected
 //! components, no band inversions, and no unforwarded sibling test files.
 //!
@@ -95,6 +95,7 @@ const band_table = [_]struct { path: []const u8, band: Band }{
     .{ .path = "src/bench_raw.zig", .band = .apps },
     .{ .path = "src/x86dot_check.zig", .band = .apps },
     .{ .path = "examples/", .band = .apps },
+    .{ .path = "apps/", .band = .apps },
     .{ .path = "bench/", .band = .apps },
     .{ .path = "tools/", .band = .apps },
 
@@ -448,7 +449,7 @@ fn checkBands(
 /// scanned too, because an example is not exempt from having no import
 /// cycles and no silently-dead test file — several of them are complete
 /// model ports, not snippets.
-const scan_roots = [_][]const u8{ "src", "examples", "bench", "tools" };
+const scan_roots = [_][]const u8{ "src", "examples", "apps", "bench", "tools" };
 
 fn collectFiles(allocator: Allocator, io: std.Io, graph: *Graph, test_files: *TestFiles) !void {
     for (scan_roots) |root| {

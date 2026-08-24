@@ -6,7 +6,7 @@ protocol, and results against each family's reference implementation on the
 same machine, same weights, same thread count, CPU-only on both sides —
 llama.cpp for the LLM runners (the bulk of this file), parakeet.cpp for
 ASR, omnivoice.cpp for TTS. The NAM example is parity-oriented
-(NeuralAmpModelerCore); its record lives in `examples/nam/README.md`.
+(NeuralAmpModelerCore); its record lives in `apps/nam/README.md`.
 **The record is one snapshot, taken as of 2026-07-04** (llama.cpp build
 30af6e2 throughout; every reference is pinned to its exact commit in
 `tools/fetch_refs.sh`).
@@ -777,7 +777,7 @@ and synthesis runs **2.3–4.6x faster** than omnivoice.cpp's CPU backend at
 equal dtypes (32x on BF16, where ggml's CPU BF16 matmul path is
 pathological — use Fucina's BF16, not the reference's, if you want that
 dtype). Setup, per-dtype guidance, and the determinism contract:
-`examples/omnivoice/README.md`.
+`apps/omnivoice/README.md`.
 
 ### LocateAnything-3B detection vs locate-anything.cpp (M1 Max, 2026-07-07)
 

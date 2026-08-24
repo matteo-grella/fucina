@@ -18,7 +18,7 @@ header).
 `--target` accuracy (default 0.90) on the training set — chance is 0.50.
 
 The same trainer fine-tunes a real LLM gradient-free:
-[`../es_finetune`](../es_finetune/README.md).
+[`apps/es_finetune`](../../apps/es_finetune/README.md).
 
 ```sh
 zig build es-spirals -Doptimize=ReleaseFast

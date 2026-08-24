@@ -3,7 +3,7 @@
 //! fleet directory as an explicit argument and return the same `Opened`
 //! handle, decoding through the `qwen3/shine.zig` AdaptedModel box with
 //! per-request adapter selection (see docs/reference/13-the-model-stack-fucina_models.md). The generic engine
-//! (`serving/open.zig`) carries no SHINE branch; `examples/lmserve` routes
+//! (`serving/open.zig`) carries no SHINE branch; `apps/lmserve` routes
 //! its `--shine-fleet` flag here. Public as `models.qwen3.shine_serving`.
 
 const std = @import("std");

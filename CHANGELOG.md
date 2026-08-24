@@ -23,6 +23,27 @@ this point; earlier history is `git log`.
 
 ### Added
 
+- `apps/`: the example tree splits into two homes. `examples/<name>/` is
+  teaching code (one `main.zig`, no test files, no C shims, no vendored
+  assets); `apps/<name>/` is everything with product or port shape
+  (multi-file, own tests, shims, goldens, or a real CLI surface). Under
+  `apps/`: omnivoice, nam, nanochat, voiceagent, facedetect,
+  locate_anything, qwen3, parakeet, cartridge, cartridge_fleet, lmserve,
+  finetune, es_finetune, deepseek4, diffusion_gemma. Build-step names,
+  executables, and test-root steps (`test-nam`, `test-omnivoice`, ...) are
+  unchanged; only the paths moved.
+- `apps/run` (fucina-run): one GGUF runner over `models.registry`; arch
+  auto-detected, decoder-contract completion/chat/REPL/NLL/bench plus a
+  generic parity surface (`--tokenize`, `--logits-out`, `--compare-logits`,
+  `--step1`), the shared `--moe-*` levers, the deepseek2 MLA/DSA dials,
+  glm4moe `--mtp` (the library `MtpDraftSource` + `SpeculativeDecoder`
+  loop), and the inkling multimodal tower and wire-format chat. It replaces
+  the deepseek2, glm4moe, and inkling single-file runners; rewrites:
+  `zig build deepseek2 -- ...` -> `zig build run -- ...`,
+  `zig build glm4moe -- ... [--mtp]` -> `zig build run -- ... [--mtp]`,
+  `zig build inkling -- ...` -> `zig build run -- ...` (same flags). The
+  `run` step previously aliased `smoke`; `zig build smoke` remains and
+  `zig build run` is now the runner.
 - `models.decoder`: the autoregressive text-decoder contract — `Caps`
   (`rewind`, `batch`) plus the comptime `assertDecoder(Model)` the generic
   layers (`models.text.chat.Conversation`, `models.text.speculative.SpeculativeDecoder`,
@@ -42,13 +63,13 @@ this point; earlier history is `git log`.
   lookup and `serving.open` dispatches over the table.
 - `models.text.speculative.mtp.MtpDraftSource(Model)`: native MTP (`nextn`)
   drafting behind the `DraftSource` vtable, so the shared decoder's
-  verify loop drives glm4moe self-speculation (`examples/glm4moe --mtp`
-  now decodes through `SpeculativeDecoder` instead of a hand-rolled
+  verify loop drives glm4moe self-speculation (`zig build run -- <gguf> --mtp`
+  decodes through `SpeculativeDecoder` instead of a hand-rolled
   draft/verify/commit/rewind loop). deepseek4's MTP sidecar keeps its own
   loop: its `Session` rewinds by snapshot/restore, not `truncate`.
 - Family serving adapters in the library: `models.qwen35.serving`,
   `models.inkling.serving`, `models.deepseek4.serving` (moved from
-  `examples/lmserve/backend_{qwen35,inkling,deepseek4}.zig`, which are
+  `apps/lmserve/backend_{qwen35,inkling,deepseek4}.zig`, which are
   deleted); `serving.openFromFile` now serves the qwen35, qwen35moe,
   inkling, and deepseek4 architectures. `models.text.serving.OpenOptions` gains
   `moe_stream` (the deepseek4 streamed-experts levers) and
@@ -458,7 +479,7 @@ monomorphization is preserved everywhere. Rewrite table, grouped by rule:
 
 ### Added
 
-- `llm.serving` transport and engine, promoted from `examples/lmserve`:
+- `llm.serving` transport and engine, promoted from `apps/lmserve`:
   `serving.http` (server, SSE stream pipe, Host guard), `serving.scheduler`
   (bounded FIFO + single inference worker), `serving.emitter`, the
   `serving.openai`/`serving.anthropic` wire dialects, `serving.toolcall`
@@ -470,7 +491,7 @@ monomorphization is preserved everywhere. Rewrite table, grouped by rule:
   a ready `serving.Backend` for the `Conversation`-hosted families (qwen3,
   qwen3moe, gemma4) with the full engine option surface
   (`serving.OpenOptions`); architectures whose adapters stay with
-  `examples/lmserve` (nanochat, diffusion-gemma, inkling, qwen35,
+  `apps/lmserve` (nanochat, diffusion-gemma, inkling, qwen35,
   qwen35moe, deepseek4) return `error.UnsupportedArchitecture`. lmserve is now a thin
   CLI front end over the band, and the voice agent hosts the engine
   through `llm.serving` (the `lmserve` build module is removed; in-process
@@ -587,7 +608,7 @@ monomorphization is preserved everywhere. Rewrite table, grouped by rule:
   route).
 - `llm.serving`: the model-agnostic serving contract (`GenerateRequest`,
   `GenerateResult`, `Caps`, the per-family `Backend` vtable), promoted from
-  `examples/lmserve` so an out-of-tree server consumes it without vendoring
+  `apps/lmserve` so an out-of-tree server consumes it without vendoring
   the example.
 - `llm.runner` (experimental): the descriptor runner — one
   family-independent decoder driven by a runtime `Descriptor`, with two
@@ -627,7 +648,7 @@ monomorphization is preserved everywhere. Rewrite table, grouped by rule:
   per-domain method mixins (`ag/tensor/float/`) plus the typed-constant
   and plumbing bands — public API unchanged.
 - Root golden fixtures moved beside their consumers
-  (`examples/voiceagent/goldens/`, `src/llm/qwen3tts/goldens/`).
+  (`apps/voiceagent/goldens/`, `src/llm/qwen3tts/goldens/`).
 
 ### Deprecated
 

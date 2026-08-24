@@ -152,7 +152,7 @@ pub const text = struct {
     /// capability flags, the per-model-family `Backend` vtable) plus the
     /// transport (HTTP server, scheduler, OpenAI/Anthropic dialects), the
     /// generic GGUF chat engine, and the `text.serving.open` load-and-serve
-    /// entry (`examples/lmserve` is the CLI front end built on it). Files in
+    /// entry (`apps/lmserve` is the CLI front end built on it). Files in
     /// `models/text/serving/`.
     pub const serving = @import("models/text/serving.zig");
 };
