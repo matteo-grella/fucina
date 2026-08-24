@@ -24,6 +24,7 @@
 const std = @import("std");
 const fucina = @import("fucina");
 const contract = @import("../text/serving/contract.zig");
+const adapter_common = @import("../text/serving/adapter_common.zig");
 const gguf_chat = @import("../text/serving/gguf_chat.zig");
 const llguidance = @import("../text/llguidance.zig");
 const sampler_mod = @import("../text/sampler.zig");
@@ -31,6 +32,10 @@ const tokenizer_mod = @import("../text/tokenizer.zig");
 const ds4 = @import("model.zig");
 
 const Allocator = std.mem.Allocator;
+
+/// Engine-hosted (no `Conversation`): `serving.openFromFile` rejects the
+/// cartridge/fleet/KV-tier options for this family.
+pub const conversation_hosted = false;
 
 /// Prefill chunk size (the runner's default): batches expert fetches per
 /// layer without letting per-chunk scratch grow unbounded.
@@ -303,23 +308,33 @@ test stopHitInTail {
     try std.testing.expectEqual(@as(?usize, 1), stopHitInTail("a\n\n", 1, &needles));
 }
 
-/// The served engine box (heap-pinned; `serving.open` dispatches here for
-/// the deepseek4 arch). Takes ownership of `file` on every path.
-const Box = struct {
-    allocator: Allocator,
-    model_id: []u8,
-    model: ds4.Model,
-    tokenizer: tokenizer_mod.Tokenizer,
-    adapter: Backend,
+/// `serving.open` wiring for the deepseek4 arch: the shared engine box
+/// (`adapter_common.openFromFile`) with this family's policies. No chat
+/// template (the adapter renders the chat at the token level).
+const Wiring = struct {
+    pub const Adapter = Backend;
+    pub const Extra = void;
+    pub const template: adapter_common.TemplatePolicy = .none;
+    pub const sampling: adapter_common.SamplingPolicy = .{ .from_gguf_with = &samplingFixup };
+    pub const reports_expert_store = true;
 
-    fn destroy(ptr: *anyopaque) void {
-        const box: *Box = @ptrCast(@alignCast(ptr));
-        const a = box.allocator;
-        box.adapter.deinit();
-        box.tokenizer.deinit();
-        box.model.deinit();
-        a.free(box.model_id);
-        a.destroy(box);
+    /// GGUF-stamped sampling; the ds4 0731 export stamps temp 1.0 / top_p
+    /// 0.95, which samplingFromGguf's fallbacks match — only its gemma-shaped
+    /// top_k=64 fallback differs (deepseek4 recommends no top-k truncation).
+    fn samplingFixup(file: *const fucina.gguf.File, cfg: *sampler_mod.Config) void {
+        if (file.getInt("general.sampling.top_k") == null) cfg.top_k = 0;
+    }
+
+    pub fn initAdapter(built: adapter_common.Built(ds4.Family, Wiring)) !Backend {
+        return Backend.init(
+            built.allocator,
+            built.ctx,
+            built.model,
+            built.tokenizer,
+            built.model_id,
+            built.options.context_len,
+            built.default_sampling,
+        );
     }
 };
 
@@ -332,45 +347,5 @@ pub fn openFromFile(
     options: contract.OpenOptions,
     stderr: *std.Io.Writer,
 ) !contract.Opened {
-    _ = io;
-    var file_alive = true;
-    errdefer if (file_alive) file.deinit();
-
-    const box = try allocator.create(Box);
-    errdefer allocator.destroy(box);
-    box.allocator = allocator;
-    box.model_id = try allocator.dupe(u8, model_id);
-    errdefer allocator.free(box.model_id);
-
-    box.tokenizer = tokenizer_mod.Tokenizer.initFromGguf(allocator, file, .{}) catch {
-        try stderr.writeAll("this GGUF has no usable tokenizer metadata\n");
-        return error.TokenizerUnavailable;
-    };
-    errdefer box.tokenizer.deinit();
-    // GGUF-stamped sampling; the ds4 0731 export stamps temp 1.0 / top_p
-    // 0.95, which samplingFromGguf's fallbacks match — only its gemma-shaped
-    // top_k=64 fallback differs (deepseek4 recommends no top-k truncation).
-    var default_sampling = contract.samplingFromGguf(file);
-    if (file.getInt("general.sampling.top_k") == null) default_sampling.top_k = 0;
-
-    box.model = try ds4.Family.load(ctx, file, .{ .moe_stream = options.moe_stream });
-    errdefer box.model.deinit();
-    file.deinit();
-    file_alive = false;
-
-    box.adapter = try Backend.init(
-        allocator,
-        ctx,
-        &box.model,
-        &box.tokenizer,
-        box.model_id,
-        options.context_len,
-        default_sampling,
-    );
-    return .{
-        .ptr = box,
-        .destroyFn = Box.destroy,
-        .backend = box.adapter.backend(),
-        .expert_store = box.model.expert_store,
-    };
+    return adapter_common.openFromFile(ds4.Family, Wiring, ctx, io, allocator, file, model_id, options, stderr);
 }

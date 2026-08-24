@@ -807,11 +807,12 @@ Generic helpers stay flat in `src/models/`:
   (constraint cache, KV reuse slots + disk tier, RAM guard) for any
   `Conversation`-hosted family; `serving/open.zig` is the load-and-serve
   entry (`serving.open`: GGUF in, ready `Backend` out), dispatched through
-  the architecture registry: the `Conversation`-hosted set (qwen3,
-  qwen3moe, gemma4) shares one generic engine box, and the engine-hosted
-  set (qwen35, qwen35moe, inkling, deepseek4) routes to the family serving
-  adapters (`qwen35/serving.zig`, `inkling/serving.zig`,
-  `deepseek4/serving.zig`). `apps/lmserve` is the CLI front end and
+  the architecture registry: each served row's `Entry.Serving` names the
+  family's `serving.zig` wiring, with the `Conversation`-hosted set (qwen3,
+  qwen3moe, gemma4) sharing one generic engine box and the engine-hosted
+  set (qwen35, qwen35moe, inkling, deepseek4) driving its own engine
+  adapter over the shared skeleton
+  (`serving/adapter_common.zig`). `apps/lmserve` is the CLI front end and
   keeps only the two non-registry backends (diffusion-gemma, nanochat).
 
 - `src/optim.zig` (facade) + `src/optim/`: SGD/AdamW/Muon/APOLLO, grad clipping, LR schedules,

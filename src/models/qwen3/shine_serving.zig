@@ -9,8 +9,8 @@
 const std = @import("std");
 const fucina = @import("fucina");
 const serving_open = @import("../text/serving/open.zig");
+const adapter_common = @import("../text/serving/adapter_common.zig");
 const gguf_chat = @import("../text/serving/gguf_chat.zig");
-const chat = @import("../text/chat.zig");
 const tokenizer_mod = @import("../text/tokenizer.zig");
 const cartridge_fleet = @import("../text/cartridge_fleet.zig");
 const qwen3_model = @import("model.zig");
@@ -76,26 +76,62 @@ pub fn openFromFile(
 
 const ShineAdapter = gguf_chat.GgufChatBackend(qwen3_shine.AdaptedModel, tokenizer_mod);
 
-/// The qwen3 dense engine box behind the SHINE fleet: the same chat
-/// backend, decoding through the AdaptedModel box with per-request adapter
+/// `openFromFile` wiring for the SHINE fleet: the shared engine box
+/// (`adapter_common.openFromFile`) with the fleet state as the box extra,
+/// decoding through the AdaptedModel box with per-request adapter
 /// selection.
-const ShineBox = struct {
-    allocator: Allocator,
-    model_id: []u8,
-    model: qwen3_model.Model,
-    tokenizer: tokenizer_mod.Tokenizer,
-    fs: ShineFleetServe,
-    adapter: ShineAdapter,
+const Wiring = struct {
+    /// The front door's fleet directory, stashed for `initExtra` (the
+    /// shared open signature carries no fleet leg; the open path runs on
+    /// one thread).
+    var stash: struct { fleet_dir: []const u8 } = undefined;
 
-    fn destroy(ptr: *anyopaque) void {
-        const box: *ShineBox = @ptrCast(@alignCast(ptr));
-        const a = box.allocator;
-        box.adapter.deinit();
-        box.fs.deinit();
-        box.tokenizer.deinit();
-        box.model.deinit();
-        a.free(box.model_id);
-        a.destroy(box);
+    pub const Adapter = ShineAdapter;
+    pub const Extra = ShineFleetServe;
+    pub const template: adapter_common.TemplatePolicy = .detect_required;
+    pub const sampling: adapter_common.SamplingPolicy = .{ .fixed = .{ .temperature = 0.7, .top_k = 20, .top_p = 0.8 } };
+    pub const reports_expert_store = false;
+
+    pub fn initExtra(built: adapter_common.Built(qwen3_model.Family, Wiring)) !ShineFleetServe {
+        var fs = try ShineFleetServe.init(built.io, built.allocator, built.stderr, built.ctx, built.model, built.tokenizer, stash.fleet_dir);
+        errdefer fs.deinit();
+        try built.stderr.print("shine fleet: {d} documents, {d} retrieval chunks, top-1 adapter per request\n", .{
+            fs.manifest.value.docs.len,
+            fs.index.len(),
+        });
+        try built.stderr.flush();
+        return fs;
+    }
+
+    pub fn initAdapter(built: adapter_common.Built(qwen3_model.Family, Wiring)) !ShineAdapter {
+        const fs = built.extra;
+        const kv_slots = try gguf_chat.kvRamGuardSlots(qwen3_shine.AdaptedModel, built.ctx, &fs.box, built.options.context_len, try serving_open.slotsForBatch(built.stderr, built.options), built.options.kv_slots_force, built.stderr);
+        return ShineAdapter.init(
+            built.allocator,
+            built.ctx,
+            &fs.box,
+            built.tokenizer,
+            built.template.?,
+            .{
+                .model_id = built.model_id,
+                .context_len = built.options.context_len,
+                .think_markers = .{ .open = "<think>", .close = "</think>" },
+                .supports_think = true,
+                .tool_style = .hermes,
+                .default_sampling = built.default_sampling,
+                .speculation = built.options.spec,
+                .constraint_cache_len = @max(8, built.options.batch),
+                .kv_slots = kv_slots,
+                .shine_fleet = .{
+                    .index = &fs.index,
+                    .embed_ctx = fs,
+                    .embedFn = ShineFleetServe.embed,
+                    .apply_ctx = fs,
+                    .applyFn = ShineFleetServe.apply,
+                    .rag_chunks = built.options.rag_chunks,
+                },
+            },
+        );
     }
 };
 
@@ -109,72 +145,18 @@ fn openQwen3ShineFleet(
     options: OpenOptions,
     stderr: *std.Io.Writer,
 ) !Opened {
-    var file_alive = true;
-    errdefer if (file_alive) file.deinit();
-
-    const config = try qwen3_model.Config.fromGguf(file);
-    if (config.isMoe()) {
-        try stderr.writeAll("--shine-fleet needs a dense qwen3 base (SHINE adapts the dense linears)\n");
-        return error.ShineFleetUnsupported;
+    // Dense-base precondition, checked before the shared skeleton loads
+    // the weights.
+    {
+        errdefer file.deinit();
+        const config = try qwen3_model.Config.fromGguf(file);
+        if (config.isMoe()) {
+            try stderr.writeAll("--shine-fleet needs a dense qwen3 base (SHINE adapts the dense linears)\n");
+            return error.ShineFleetUnsupported;
+        }
     }
-
-    const box = try allocator.create(ShineBox);
-    errdefer allocator.destroy(box);
-    box.allocator = allocator;
-    box.model_id = try allocator.dupe(u8, model_id);
-    errdefer allocator.free(box.model_id);
-
-    box.model = try qwen3_model.Model.loadGgufFromFile(ctx, file, config);
-    errdefer box.model.deinit();
-    box.tokenizer = tokenizer_mod.Tokenizer.initFromGguf(allocator, file, .{}) catch {
-        try stderr.writeAll("this GGUF has no usable tokenizer metadata\n");
-        return error.TokenizerUnavailable;
-    };
-    errdefer box.tokenizer.deinit();
-    const template = chat.Template.detect(file.getString("tokenizer.chat_template")) orelse {
-        try stderr.writeAll("this GGUF has no recognizable chat template\n");
-        return error.NoChatTemplate;
-    };
-    file.deinit();
-    file_alive = false;
-
-    box.fs = try ShineFleetServe.init(io, allocator, stderr, ctx, &box.model, &box.tokenizer, fleet_dir);
-    errdefer box.fs.deinit();
-    try stderr.print("shine fleet: {d} documents, {d} retrieval chunks, top-1 adapter per request\n", .{
-        box.fs.manifest.value.docs.len,
-        box.fs.index.len(),
-    });
-    try stderr.flush();
-
-    const kv_slots = try gguf_chat.kvRamGuardSlots(qwen3_shine.AdaptedModel, ctx, &box.fs.box, options.context_len, try serving_open.slotsForBatch(stderr, options), options.kv_slots_force, stderr);
-
-    box.adapter = ShineAdapter.init(
-        allocator,
-        ctx,
-        &box.fs.box,
-        &box.tokenizer,
-        template,
-        .{
-            .model_id = box.model_id,
-            .context_len = options.context_len,
-            .think_markers = .{ .open = "<think>", .close = "</think>" },
-            .supports_think = true,
-            .tool_style = .hermes,
-            .default_sampling = .{ .temperature = 0.7, .top_k = 20, .top_p = 0.8 },
-            .speculation = options.spec,
-            .constraint_cache_len = @max(8, options.batch),
-            .kv_slots = kv_slots,
-            .shine_fleet = .{
-                .index = &box.fs.index,
-                .embed_ctx = &box.fs,
-                .embedFn = ShineFleetServe.embed,
-                .apply_ctx = &box.fs,
-                .applyFn = ShineFleetServe.apply,
-                .rag_chunks = options.rag_chunks,
-            },
-        },
-    );
-    return .{ .ptr = box, .destroyFn = ShineBox.destroy, .backend = box.adapter.backend() };
+    Wiring.stash = .{ .fleet_dir = fleet_dir };
+    return adapter_common.openFromFile(qwen3_model.Family, Wiring, ctx, io, allocator, file, model_id, options, stderr);
 }
 
 /// SHINE adapter fleet serving state (see docs/reference/13-the-model-stack-fucina_models.md): the manifest's doc
@@ -262,7 +244,8 @@ const ShineFleetServe = struct {
         };
     }
 
-    fn deinit(self: *ShineFleetServe) void {
+    /// Called by the shared engine box's destroy (`adapter_common`).
+    pub fn deinit(self: *ShineFleetServe) void {
         self.box.adapter = null;
         for (self.resident.items) |entry| {
             entry.set.deinit();

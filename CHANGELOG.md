@@ -13,9 +13,10 @@ this point; earlier history is `git log`.
   `gguf_meta`, `safetensors`, `optim`, `lora`, `parallel`, `tuning`,
   `models.text.serving` (the contract: request/result types and the `Backend`
   vtable), `models.text.chat`, `models.text.tokenizer`, `models.text.kv_cache`.
-- **Experimental** (changelog entry only): `es`, `ptqtp`, `models.qwen3.runner`, the `models.text.serving` transport/engine
-  band (`http`, `scheduler`, `emitter`, wire dialects, `gguf_chat`,
-  `open`), `models.text.speculative`, the `models.research` namespace (SubQ, Engram,
+- **Experimental** (changelog entry only): `es`, `ptqtp`, `models.qwen3.runner`, `models.registry`, the `models.text.serving` transport/engine
+  band (`http`, `scheduler`, `emitter`, wire dialects, `wire_json`,
+  `gguf_chat`, `open`, `adapter_common`, `fleet_serve`),
+  `models.text.speculative`, the `models.research` namespace (SubQ, Engram,
   SHINE, kimi3), cartridges, and
   every model family's internal layout.
 
@@ -305,10 +306,30 @@ monomorphization is preserved everywhere. Rewrite table, grouped by rule:
   engines decode through the shared loop, and their `StreamDecoder` now
   comes from the engine's `TokMod` parameter.
 - `serving/open.zig` dispatches through `models.registry` (one `inline for`
-  in place of the arch string ladder) and the per-family engine boxes are
-  one generic box parameterized by family serving traits; registered
-  families without a serving adapter (deepseek2, glm4moe) return
-  `error.UnsupportedArchitecture`.
+  in place of the arch string ladder): `registry.Entry` gains `Serving`,
+  the row's serving wiring (the family's `serving.zig`: `openFromFile`
+  plus a `conversation_hosted` flag; `models.qwen3.serving` and
+  `models.gemma.serving` are new, wired over the generic engine box).
+  Rows without a wiring return `error.UnsupportedArchitecture`, stated
+  per row: deepseek2 (the MLA cache has no rewind, so no `Conversation`,
+  and no recognized chat template) and glm4moe (mutable-model
+  `forwardStep` against the engine's const model pointer, and no
+  recognized template).
+- The family serving adapters (qwen35, inkling, deepseek4, the SHINE
+  fleet) share one skeleton: `serving/adapter_common.zig` builds the
+  heap-pinned engine box (tokenizer, template policy, sampling policy,
+  `Family.load`, file handoff) from a per-family comptime `Wiring`, and
+  `serving/fleet_serve.zig` holds the `--fleet` state and the cartridge
+  loader; the `Conversation`-hosted `openChat` path lives beside them.
+  qwen35's template fallback is now the checked detect-or-fallback policy
+  in place of an unchecked `.?` (structural; cannot fire on a qwen35
+  GGUF, whose family always carries the ChatML fallback).
+- The OpenAI and Anthropic wire parsers share `wire_json.Head(ErrorInfo)`:
+  parser state, the typed `opt*` field accessors, `ToolSet`, and the
+  forced-tool_choice plumbing live once in `serving/wire_json.zig`, and
+  each dialect `Parser` forwards to its head one line per method
+  (`forceNamed` bakes in the dialect's noun). Wire behavior is unchanged;
+  the intentionally divergent pieces stay in the dialect files.
 
 - One tuning table replaces the per-gate switches: `fucina.tuning.Table`
   holds every FUCINA_* route gate and numeric crossover as a typed field,

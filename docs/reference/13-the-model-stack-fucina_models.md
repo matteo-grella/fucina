@@ -2489,8 +2489,8 @@ one `deinit` that owns model, tokenizer, and engine state; the optional
 `expert_store` field surfaces a streamed-MoE store for the host's
 exit-time report). Families served: qwen3, qwen3moe, gemma4 (the
 `Conversation`-hosted set, one generic engine box) and qwen35,
-qwen35moe, inkling, deepseek4 (the engine-hosted set, dispatched to
-`models.qwen35.serving`, `models.inkling.serving`, `models.deepseek4.serving`).
+qwen35moe, inkling, deepseek4 (the engine-hosted set); each registry
+row's `Entry.Serving` names the family's serving wiring (its `serving.zig`).
 nanochat and diffusion-gemma stay with `apps/lmserve`; registered
 families without a serving adapter (deepseek2, glm4moe) and unknown
 architectures return `error.UnsupportedArchitecture`. `OpenOptions`
