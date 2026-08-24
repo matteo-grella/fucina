@@ -332,6 +332,30 @@ pub fn ropeWithTable(
     const rotary_dim = table.feature_dim;
     if (rotary_dim == 0 or rotary_dim > feature_dim or rotary_dim % 2 != 0) return tensor.TensorError.InvalidShape;
     if (table.positions.len != source.shape[position_axis]) return tensor.TensorError.InvalidDataLength;
+    // One body, instantiated per span: the full-span loop carries no
+    // pass-through copy and no offset arithmetic.
+    if (rotary_dim == feature_dim) return applyRope(ctx, rank, x, position_axis, feature_axis, table, mode, .full);
+    return applyRope(ctx, rank, x, position_axis, feature_axis, table, mode, .partial);
+}
+
+const RotarySpan = enum { full, partial };
+
+fn applyRope(
+    ctx: *ExecContext,
+    comptime rank: usize,
+    x: *const Tensor,
+    comptime position_axis: usize,
+    comptime feature_axis: usize,
+    table: *const RopeTable,
+    comptime mode: RopeMode,
+    comptime span: RotarySpan,
+) !Tensor {
+    const source = try x.rankView(rank);
+    const feature_dim = source.shape[feature_axis];
+    const rotary_dim = switch (span) {
+        .full => feature_dim,
+        .partial => table.feature_dim,
+    };
 
     var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
@@ -342,7 +366,7 @@ pub fn ropeWithTable(
     const output = out.data();
     // Partial span: the pass-through features are copied, the rotated ones
     // overwritten below.
-    if (rotary_dim != feature_dim) @memcpy(output, input);
+    if (span == .partial) @memcpy(output, input);
 
     const strides = contiguousStridesArray(rank, source.shape);
     const feature_stride = strides[feature_axis];
@@ -352,9 +376,12 @@ pub fn ropeWithTable(
     const cos_values = table.cosValues();
     // Tail alignment: the rotary span sits at the END of the feature axis
     // (the leading `feature_dim - rotary_dim` features pass through).
-    const rotary_offset: usize = switch (mode) {
-        .interleaved_tail => feature_dim - rotary_dim,
-        .interleaved, .half => 0,
+    const rotary_offset: usize = switch (span) {
+        .full => 0,
+        .partial => switch (mode) {
+            .interleaved_tail => feature_dim - rotary_dim,
+            .interleaved, .half => 0,
+        },
     };
 
     for (0..total_vectors) |vector_i| {
